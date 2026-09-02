@@ -106,6 +106,9 @@ func TestCheckpointRefsAndSearchFlagsAfterQuery(t *testing.T) {
 	if err := ctxCmd([]string{"search", "실증", "--session", "hk-probe"}, &out); err != nil {
 		t.Fatal(err)
 	}
+	if err := ctxCmd([]string{"search", "--session", "hk-probe", "실증"}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
 	if !bytes.Contains(out.Bytes(), []byte(`"refs":{"prs":["26"]}`)) {
 		t.Fatalf("search did not print refs: %s", out.String())
 	}
