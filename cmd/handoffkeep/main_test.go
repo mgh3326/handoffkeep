@@ -86,7 +86,7 @@ func TestCheckpointRefsAndSearchFlagsAfterQuery(t *testing.T) {
 				t.Fatalf("query=%s", r.URL.RawQuery)
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"results": []store.SearchResult{{
-				Scope: "ctx", Session: "hk-probe", Refs: map[string][]string{"prs": []string{"26"}},
+				Scope: "ctx", Session: "hk-probe", Refs: store.Refs{"prs": []string{"26"}},
 			}}})
 		default:
 			t.Fatalf("path=%s", r.URL.Path)
@@ -98,7 +98,7 @@ func TestCheckpointRefsAndSearchFlagsAfterQuery(t *testing.T) {
 	if err := ctxCmd([]string{"checkpoint", "--session", "hk-probe", "--title", "test", "--body", "body", "--ref", "prs=26", "--ref", "prs=27", "--ref", "jobs=hk-v0"}, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
-	want := map[string][]string{"prs": []string{"26", "27"}, "jobs": []string{"hk-v0"}}
+	want := store.Refs{"prs": []string{"26", "27"}, "jobs": []string{"hk-v0"}}
 	if !reflect.DeepEqual(checkpoint.Refs, want) {
 		t.Fatalf("refs=%#v", checkpoint.Refs)
 	}

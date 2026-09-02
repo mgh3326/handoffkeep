@@ -88,8 +88,8 @@ type refFlags []string
 func (r *refFlags) String() string         { return strings.Join(*r, ",") }
 func (r *refFlags) Set(value string) error { *r = append(*r, value); return nil }
 
-func checkpointRefs(values []string) (map[string][]string, error) {
-	refs := map[string][]string{}
+func checkpointRefs(values []string) (store.Refs, error) {
+	refs := store.Refs{}
 	for _, value := range values {
 		key, ref, ok := strings.Cut(value, "=")
 		if !ok || key == "" || ref == "" {

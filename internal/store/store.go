@@ -28,15 +28,42 @@ var memoryTypes = map[string]bool{"user": true, "feedback": true, "project": tru
 var documentKinds = map[string]bool{"brief": true, "report": true, "answer": true, "handoff": true, "note": true, "other": true}
 
 type Store struct{ pool *pgxpool.Pool }
+
+// Refs stores repeatable named references. Its decoder accepts legacy scalar
+// values so checkpoints written by the pre-array API remain readable.
+type Refs map[string][]string
+
+func (r *Refs) UnmarshalJSON(data []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	out := Refs{}
+	for key, value := range raw {
+		var many []string
+		if err := json.Unmarshal(value, &many); err == nil {
+			out[key] = many
+			continue
+		}
+		var one string
+		if err := json.Unmarshal(value, &one); err != nil {
+			return err
+		}
+		out[key] = []string{one}
+	}
+	*r = out
+	return nil
+}
+
 type Checkpoint struct {
-	ID        int64               `json:"id"`
-	Session   string              `json:"session"`
-	Kind      string              `json:"kind"`
-	Title     string              `json:"title"`
-	Body      string              `json:"body"`
-	Refs      map[string][]string `json:"refs"`
-	CreatedBy string              `json:"created_by"`
-	CreatedAt time.Time           `json:"created_at"`
+	ID        int64     `json:"id"`
+	Session   string    `json:"session"`
+	Kind      string    `json:"kind"`
+	Title     string    `json:"title"`
+	Body      string    `json:"body"`
+	Refs      Refs      `json:"refs"`
+	CreatedBy string    `json:"created_by"`
+	CreatedAt time.Time `json:"created_at"`
 }
 type Memory struct {
 	Agent       string    `json:"agent"`
@@ -60,14 +87,14 @@ type Document struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 type SearchResult struct {
-	Scope     string              `json:"scope"`
-	Key       string              `json:"key"`
-	Session   string              `json:"session"`
-	Kind      string              `json:"kind"`
-	Title     string              `json:"title"`
-	Snippet   string              `json:"snippet"`
-	Refs      map[string][]string `json:"refs,omitempty"`
-	CreatedAt time.Time           `json:"created_at"`
+	Scope     string    `json:"scope"`
+	Key       string    `json:"key"`
+	Session   string    `json:"session"`
+	Kind      string    `json:"kind"`
+	Title     string    `json:"title"`
+	Snippet   string    `json:"snippet"`
+	Refs      Refs      `json:"refs,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 func Open(ctx context.Context, url string) (*Store, error) {
