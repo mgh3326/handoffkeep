@@ -35,9 +35,10 @@ and `memory_list`.
 
 ## Operations
 
-Set `HANDOFFKEEP_DB_URL` and `HANDOFFKEEP_AUTH_FILE`; the latter contains lines
-such as `HANDOFFKEEP_TOKEN_mac-personal=...`. Run the bootstrap SQL once, then
-install `deploy/systemd/handoffkeep.service`. Normal serving is loopback-only;
+Set `HANDOFFKEEP_DB_URL`, `HANDOFFKEEP_AUTH_FILE`, and optionally
+`HANDOFFKEEP_LISTEN_TAILNET`; the auth file contains lines such as
+`HANDOFFKEEP_TOKEN_mac-personal=...`. Run the bootstrap SQL once, then install
+`deploy/systemd/handoffkeep.service`. Normal serving is loopback-only;
 `--listen-tailnet` only accepts a `100.64.0.0/10` address. Wildcard and public
 binds are rejected.
 
