@@ -82,6 +82,47 @@ func mustClient(c *remote.Client) error {
 	return nil
 }
 func printJSON(w io.Writer, v any) error { return json.NewEncoder(w).Encode(v) }
+
+type refFlags []string
+
+func (r *refFlags) String() string         { return strings.Join(*r, ",") }
+func (r *refFlags) Set(value string) error { *r = append(*r, value); return nil }
+
+func checkpointRefs(values []string) (map[string][]string, error) {
+	refs := map[string][]string{}
+	for _, value := range values {
+		key, ref, ok := strings.Cut(value, "=")
+		if !ok || key == "" || ref == "" {
+			return nil, errors.New("--ref must be k=v")
+		}
+		refs[key] = append(refs[key], ref)
+	}
+	return refs, nil
+}
+
+// searchArgs permits the query before or after flags. The standard flag package
+// stops parsing at a positional argument, so normalize its known value flags.
+func searchArgs(args []string) ([]string, []string, error) {
+	valueFlags := map[string]bool{"--url": true, "--token": true, "--session": true, "--limit": true, "--kind": true, "--scope": true}
+	flags, positional := []string{}, []string{}
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if strings.HasPrefix(arg, "-") {
+			flags = append(flags, arg)
+			if valueFlags[arg] {
+				i++
+				if i >= len(args) {
+					return nil, nil, fmt.Errorf("%s requires a value", arg)
+				}
+				flags = append(flags, args[i])
+			}
+		} else {
+			positional = append(positional, arg)
+		}
+	}
+	return flags, positional, nil
+}
+
 func ctxCmd(args []string, out io.Writer) error {
 	if len(args) == 0 {
 		return errors.New("usage: ctx checkpoint|recent|search")
@@ -96,7 +137,18 @@ func ctxCmd(args []string, out io.Writer) error {
 	body := fs.String("body", "", "body")
 	file := fs.String("file", "", "body file")
 	scope := fs.String("scope", "all", "scope")
-	if e := fs.Parse(args[1:]); e != nil {
+	var refs refFlags
+	fs.Var(&refs, "ref", "checkpoint reference k=v (repeatable)")
+	parseArgs := args[1:]
+	var searchQuery []string
+	if args[0] == "search" {
+		var e error
+		parseArgs, searchQuery, e = searchArgs(parseArgs)
+		if e != nil {
+			return e
+		}
+	}
+	if e := fs.Parse(parseArgs); e != nil {
 		return e
 	}
 	if e := mustClient(c); e != nil {
@@ -116,7 +168,11 @@ func ctxCmd(args []string, out io.Writer) error {
 			}
 			*body = string(b)
 		}
-		v, e := c.Checkpoint(ctx, "", store.Checkpoint{Session: *session, Kind: *kind, Title: *title, Body: *body})
+		checkpointRefs, e := checkpointRefs(refs)
+		if e != nil {
+			return e
+		}
+		v, e := c.Checkpoint(ctx, "", store.Checkpoint{Session: *session, Kind: *kind, Title: *title, Body: *body, Refs: checkpointRefs})
 		if e != nil {
 			return e
 		}
@@ -128,10 +184,10 @@ func ctxCmd(args []string, out io.Writer) error {
 		}
 		return printJSON(out, v)
 	case "search":
-		if fs.NArg() != 1 {
+		if len(searchQuery) != 1 {
 			return errors.New("ctx search requires query")
 		}
-		v, e := c.Search(ctx, fs.Arg(0), *scope, *session, *limit)
+		v, e := c.Search(ctx, searchQuery[0], *scope, *session, *limit)
 		if e != nil {
 			return e
 		}
@@ -226,7 +282,6 @@ func parseMem(agent, fallback, raw string) (store.Memory, error) {
 	if len(parts) != 3 {
 		return m, errors.New("invalid memory frontmatter")
 	}
-	m.Content = parts[2]
 	for _, l := range strings.Split(parts[1], "\n") {
 		k, v, ok := strings.Cut(l, ":")
 		if !ok {
@@ -249,7 +304,10 @@ func writeMem(dir string, items []store.Memory) error {
 	}
 	names := []string{}
 	for _, x := range items {
-		raw := fmt.Sprintf("---\nname: %s\ndescription: %s\nmetadata:\n  type: %s\n---\n%s", x.Name, x.Description, x.Type, x.Content)
+		raw := x.Content
+		if !strings.HasPrefix(raw, "---\n") {
+			raw = fmt.Sprintf("---\nname: %s\ndescription: %s\nmetadata:\n  type: %s\n---\n%s", x.Name, x.Description, x.Type, x.Content)
+		}
 		if e := os.WriteFile(filepath.Join(dir, x.Name+".md"), []byte(raw), 0600); e != nil {
 			return e
 		}

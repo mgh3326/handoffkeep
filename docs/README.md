@@ -10,7 +10,9 @@ a CLI and MCP (stdio and authenticated streamable HTTP).
 export HANDOFFKEEP_URL=http://127.0.0.1:8800
 export HANDOFFKEEP_TOKEN='operator-provided-token'
 handoffkeep ctx checkpoint --session demo --kind checkpoint --title 'started' --body 'next: verify deployment'
+handoffkeep ctx checkpoint --session demo --title 'PR saved' --body 'review next' --ref prs=26 --ref jobs=hk-v0
 handoffkeep ctx recent --session demo
+handoffkeep ctx search 'review' --session demo
 handoffkeep memory push --agent codex --dir ./memory --apply
 ```
 

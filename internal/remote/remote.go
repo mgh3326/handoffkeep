@@ -86,12 +86,25 @@ func (c Client) GetMemory(ctx context.Context, agent, name string) (store.Memory
 	}
 	return out, e == nil, e
 }
-func (c Client) ListMemory(ctx context.Context, agent string, _ bool) ([]store.Memory, error) {
+func (c Client) ListMemory(ctx context.Context, agent string, content bool) ([]store.Memory, error) {
 	var out struct {
 		Memory []store.Memory `json:"memory"`
 	}
 	e := c.call(ctx, "GET", "/v1/memory/"+esc(agent), nil, &out)
-	return out.Memory, e
+	if e != nil || !content {
+		return out.Memory, e
+	}
+	for i := range out.Memory {
+		item, found, err := c.GetMemory(ctx, agent, out.Memory[i].Name)
+		if err != nil {
+			return nil, err
+		}
+		if !found {
+			return nil, errors.New("memory disappeared during pull")
+		}
+		out.Memory[i] = item
+	}
+	return out.Memory, nil
 }
 func (c Client) PutDocument(ctx context.Context, _ string, x store.Document) (store.Document, bool, error) {
 	var out struct {

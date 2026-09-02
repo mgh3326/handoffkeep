@@ -29,14 +29,14 @@ var documentKinds = map[string]bool{"brief": true, "report": true, "answer": tru
 
 type Store struct{ pool *pgxpool.Pool }
 type Checkpoint struct {
-	ID        int64             `json:"id"`
-	Session   string            `json:"session"`
-	Kind      string            `json:"kind"`
-	Title     string            `json:"title"`
-	Body      string            `json:"body"`
-	Refs      map[string]string `json:"refs"`
-	CreatedBy string            `json:"created_by"`
-	CreatedAt time.Time         `json:"created_at"`
+	ID        int64               `json:"id"`
+	Session   string              `json:"session"`
+	Kind      string              `json:"kind"`
+	Title     string              `json:"title"`
+	Body      string              `json:"body"`
+	Refs      map[string][]string `json:"refs"`
+	CreatedBy string              `json:"created_by"`
+	CreatedAt time.Time           `json:"created_at"`
 }
 type Memory struct {
 	Agent       string    `json:"agent"`
@@ -60,13 +60,14 @@ type Document struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 type SearchResult struct {
-	Scope     string    `json:"scope"`
-	Key       string    `json:"key"`
-	Session   string    `json:"session"`
-	Kind      string    `json:"kind"`
-	Title     string    `json:"title"`
-	Snippet   string    `json:"snippet"`
-	CreatedAt time.Time `json:"created_at"`
+	Scope     string              `json:"scope"`
+	Key       string              `json:"key"`
+	Session   string              `json:"session"`
+	Kind      string              `json:"kind"`
+	Title     string              `json:"title"`
+	Snippet   string              `json:"snippet"`
+	Refs      map[string][]string `json:"refs,omitempty"`
+	CreatedAt time.Time           `json:"created_at"`
 }
 
 func Open(ctx context.Context, url string) (*Store, error) {
@@ -317,15 +318,15 @@ func (s *Store) Search(ctx context.Context, q, scope, session string, limit int)
 	}
 	parts := []string{}
 	if scope == "all" || scope == "ctx" {
-		parts = append(parts, `SELECT 'ctx' scope,'' key,session,kind,title,ts_headline('simple',body,plainto_tsquery('simple',$2),'MaxWords=24,MinWords=8') snippet,created_at FROM checkpoints WHERE ($1='' OR session=$1) AND (to_tsvector('simple',title || ' ' || body) @@ plainto_tsquery('simple',$2) OR title || ' ' || body ILIKE '%' || $2 || '%')`)
+		parts = append(parts, `SELECT 'ctx' scope,'' key,session,kind,title,ts_headline('simple',body,plainto_tsquery('simple',$2),'MaxWords=24,MinWords=8') snippet,refs,created_at FROM checkpoints WHERE ($1='' OR session=$1) AND (to_tsvector('simple',title || ' ' || body) @@ plainto_tsquery('simple',$2) OR title || ' ' || body ILIKE '%' || $2 || '%')`)
 	}
 	if scope == "all" || scope == "memory" {
-		parts = append(parts, `SELECT 'memory' scope,'' key,agent session,memory_type kind,name title,ts_headline('simple',content,plainto_tsquery('simple',$2),'MaxWords=24,MinWords=8') snippet,updated_at created_at FROM memory WHERE ($1='' OR agent=$1) AND (to_tsvector('simple',name || ' ' || description || ' ' || content) @@ plainto_tsquery('simple',$2) OR name || ' ' || description || ' ' || content ILIKE '%' || $2 || '%')`)
+		parts = append(parts, `SELECT 'memory' scope,'' key,agent session,memory_type kind,name title,ts_headline('simple',content,plainto_tsquery('simple',$2),'MaxWords=24,MinWords=8') snippet,'{}'::jsonb refs,updated_at created_at FROM memory WHERE ($1='' OR agent=$1) AND (to_tsvector('simple',name || ' ' || description || ' ' || content) @@ plainto_tsquery('simple',$2) OR name || ' ' || description || ' ' || content ILIKE '%' || $2 || '%')`)
 	}
 	if scope == "all" || scope == "docs" {
-		parts = append(parts, `SELECT 'docs' scope,key,session,kind,key title,ts_headline('simple',body,plainto_tsquery('simple',$2),'MaxWords=24,MinWords=8') snippet,created_at FROM documents WHERE ($1='' OR session=$1) AND (to_tsvector('simple',key || ' ' || body) @@ plainto_tsquery('simple',$2) OR key || ' ' || body ILIKE '%' || $2 || '%')`)
+		parts = append(parts, `SELECT 'docs' scope,key,session,kind,key title,ts_headline('simple',body,plainto_tsquery('simple',$2),'MaxWords=24,MinWords=8') snippet,'{}'::jsonb refs,created_at FROM documents WHERE ($1='' OR session=$1) AND (to_tsvector('simple',key || ' ' || body) @@ plainto_tsquery('simple',$2) OR key || ' ' || body ILIKE '%' || $2 || '%')`)
 	}
-	rows, e := s.pool.Query(ctx, `SELECT scope,key,session,kind,title,snippet,created_at FROM (`+strings.Join(parts, " UNION ALL ")+") r ORDER BY created_at DESC LIMIT $3", session, q, limit)
+	rows, e := s.pool.Query(ctx, `SELECT scope,key,session,kind,title,snippet,refs,created_at FROM (`+strings.Join(parts, " UNION ALL ")+") r ORDER BY created_at DESC LIMIT $3", session, q, limit)
 	if e != nil {
 		return nil, fmt.Errorf("search: %w", e)
 	}
@@ -333,7 +334,11 @@ func (s *Store) Search(ctx context.Context, q, scope, session string, limit int)
 	out := []SearchResult{}
 	for rows.Next() {
 		var x SearchResult
-		if e = rows.Scan(&x.Scope, &x.Key, &x.Session, &x.Kind, &x.Title, &x.Snippet, &x.CreatedAt); e != nil {
+		var refs []byte
+		if e = rows.Scan(&x.Scope, &x.Key, &x.Session, &x.Kind, &x.Title, &x.Snippet, &refs, &x.CreatedAt); e != nil {
+			return nil, e
+		}
+		if e = json.Unmarshal(refs, &x.Refs); e != nil {
 			return nil, e
 		}
 		out = append(out, x)

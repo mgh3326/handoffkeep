@@ -58,11 +58,11 @@ func New(service Backend, client string) *gmcp.Server {
 		return result(map[string]any{"checkpoints": v})
 	})
 	gmcp.AddTool(s, &gmcp.Tool{Name: "put_checkpoint", Description: "Store a session checkpoint."}, func(ctx context.Context, _ *gmcp.CallToolRequest, x struct {
-		Session string            `json:"session"`
-		Kind    string            `json:"kind"`
-		Title   string            `json:"title"`
-		Body    string            `json:"body"`
-		Refs    map[string]string `json:"refs,omitempty"`
+		Session string              `json:"session"`
+		Kind    string              `json:"kind"`
+		Title   string              `json:"title"`
+		Body    string              `json:"body"`
+		Refs    map[string][]string `json:"refs,omitempty"`
 	}) (*gmcp.CallToolResult, any, error) {
 		v, e := service.Checkpoint(ctx, client, store.Checkpoint{Session: x.Session, Kind: x.Kind, Title: x.Title, Body: x.Body, Refs: x.Refs})
 		if e != nil {
