@@ -11,3 +11,10 @@ func TestRejectsSecretsWithoutValue(t *testing.T) {
 		}
 	}
 }
+
+func TestRejectReturnsOnlyPatternName(t *testing.T) {
+	err := Reject("Bearer abcdefghijklmnopqrstuvwxyz")
+	if err == nil || err.Error() != "secret_like_content:bearer_token" {
+		t.Fatalf("err=%v", err)
+	}
+}
