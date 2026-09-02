@@ -1,0 +1,18 @@
+[Unit]
+Description=handoffkeep MCP and context API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+EnvironmentFile=/root/at-secrets/.env.handoffkeep
+# HANDOFFKEEP_LISTEN_TAILNET is optional and supplied by the protected env file.
+ExecStart=/usr/local/bin/handoffkeep serve --listen 127.0.0.1:8800 --listen-tailnet ${HANDOFFKEEP_LISTEN_TAILNET}
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
