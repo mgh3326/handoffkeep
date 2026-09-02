@@ -1,0 +1,17 @@
+[Unit]
+Description=handoffkeep MCP and context API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+EnvironmentFile=/root/at-secrets/.env.handoffkeep
+ExecStart=/usr/local/bin/handoffkeep serve --listen 127.0.0.1:8800 --listen-tailnet 100.122.100.56:8800
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
