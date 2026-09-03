@@ -5,16 +5,21 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
 
+	"github.com/mgh3326/handoffkeep/internal/attachments"
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
-type Service struct{ Store *store.Store }
+type Service struct {
+	Store       *store.Store
+	Attachments *attachments.Manager
+}
 
 func (s Service) Checkpoint(ctx context.Context, client string, x store.Checkpoint) (store.Checkpoint, error) {
 	x.CreatedBy = client
@@ -45,6 +50,36 @@ func (s Service) ListDocuments(ctx context.Context, prefix, kind, session string
 }
 func (s Service) Search(ctx context.Context, q, scope, session string, limit int) ([]store.SearchResult, error) {
 	return s.Store.Search(ctx, q, scope, session, limit)
+}
+func (s Service) PutAttachment(ctx context.Context, client, name, mime, ref string, body []byte) (store.Attachment, bool, error) {
+	if s.Attachments == nil {
+		return store.Attachment{}, false, attachments.ErrDisabled
+	}
+	return s.Attachments.Put(ctx, client, name, mime, ref, body)
+}
+func (s Service) GetAttachment(ctx context.Context, sha string) (store.Attachment, io.ReadCloser, error) {
+	if s.Attachments == nil {
+		return store.Attachment{}, nil, attachments.ErrDisabled
+	}
+	return s.Attachments.Get(ctx, sha)
+}
+func (s Service) AttachmentURL(ctx context.Context, sha string) (string, error) {
+	if s.Attachments == nil {
+		return "", attachments.ErrDisabled
+	}
+	return s.Attachments.Presign(ctx, sha)
+}
+func (s Service) ListAttachments(ctx context.Context, ref string, limit int) ([]store.Attachment, error) {
+	if s.Attachments == nil {
+		return nil, attachments.ErrDisabled
+	}
+	return s.Attachments.List(ctx, ref, limit)
+}
+func (s Service) AttachmentUsage(ctx context.Context) (store.AttachmentUsage, error) {
+	if s.Attachments == nil {
+		return store.AttachmentUsage{}, attachments.ErrDisabled
+	}
+	return s.Attachments.Usage(ctx)
 }
 
 type Tokens map[string]string
@@ -102,6 +137,11 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("/v1/documents/{key...}", s.document)
 	m.HandleFunc("GET /v1/memory/{agent}", s.memoryList)
 	m.HandleFunc("/v1/memory/{agent}/{name}", s.memory)
+	m.HandleFunc("PUT /v1/attachments", s.attachmentPut)
+	m.HandleFunc("GET /v1/attachments", s.attachments)
+	m.HandleFunc("GET /v1/attachments/{sha}", s.attachment)
+	m.HandleFunc("GET /v1/usage", s.usage)
+	m.HandleFunc("GET /metrics", s.metrics)
 	return m
 }
 func (s Server) auth(w http.ResponseWriter, r *http.Request) (string, bool) {
@@ -117,6 +157,26 @@ func jsonOut(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 func appErr(w http.ResponseWriter, e error) {
+	switch {
+	case errors.Is(e, attachments.ErrDisabled):
+		jsonOut(w, 503, map[string]string{"error": "attachments_disabled"})
+		return
+	case errors.Is(e, attachments.ErrTooLarge):
+		jsonOut(w, 413, map[string]string{"error": "attachment_too_large"})
+		return
+	case errors.Is(e, attachments.ErrMIME), errors.Is(e, attachments.ErrExtension):
+		jsonOut(w, 400, map[string]string{"error": e.Error()})
+		return
+	case errors.Is(e, store.ErrAttachmentStorageCap):
+		jsonOut(w, 507, map[string]string{"error": "attachment_storage_cap"})
+		return
+	case errors.Is(e, store.ErrAttachmentPutCap):
+		jsonOut(w, 429, map[string]string{"error": "attachment_put_cap"})
+		return
+	case errors.Is(e, attachments.ErrR2):
+		jsonOut(w, 502, map[string]string{"error": "attachment_r2_unavailable"})
+		return
+	}
 	if p, ok := strings.CutPrefix(e.Error(), "secret_like_content:"); ok {
 		jsonOut(w, 400, map[string]string{"error": "secret_like_content", "pattern": p})
 		return
@@ -297,4 +357,104 @@ func defaultString(x, d string) string {
 		return d
 	}
 	return x
+}
+func (s Server) attachmentPut(w http.ResponseWriter, r *http.Request) {
+	client, ok := s.auth(w, r)
+	if !ok {
+		return
+	}
+	defer r.Body.Close()
+	if s.Service.Attachments == nil || !s.Service.Attachments.Enabled {
+		appErr(w, attachments.ErrDisabled)
+		return
+	}
+	max := s.Service.Attachments.Config.MaxBytes
+	b, e := io.ReadAll(http.MaxBytesReader(w, r.Body, max))
+	if e != nil {
+		appErr(w, attachments.ErrTooLarge)
+		return
+	}
+	x, new, e := s.Service.PutAttachment(r.Context(), client, r.Header.Get("X-HK-Name"), r.Header.Get("Content-Type"), r.Header.Get("X-HK-Ref"), b)
+	if e != nil {
+		appErr(w, e)
+		return
+	}
+	jsonOut(w, 201, map[string]any{"attachment": x, "created": new, "url": "/v1/attachments/" + x.SHA256})
+}
+func (s Server) attachments(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.auth(w, r); !ok {
+		return
+	}
+	xs, e := s.Service.ListAttachments(r.Context(), r.URL.Query().Get("ref"), 100)
+	if e != nil {
+		appErr(w, e)
+		return
+	}
+	jsonOut(w, 200, map[string]any{"attachments": xs})
+}
+func (s Server) attachment(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.auth(w, r); !ok {
+		return
+	}
+	sha := r.PathValue("sha")
+	if r.URL.Query().Get("presign") == "1" {
+		u, e := s.Service.AttachmentURL(r.Context(), sha)
+		if e != nil {
+			appErr(w, e)
+			return
+		}
+		http.Redirect(w, r, u, http.StatusFound)
+		return
+	}
+	x, body, e := s.Service.GetAttachment(r.Context(), sha)
+	if e != nil {
+		if e.Error() == "attachment_not_found" {
+			jsonOut(w, 404, map[string]string{"error": "not_found"})
+		} else {
+			appErr(w, e)
+		}
+		return
+	}
+	defer body.Close()
+	w.Header().Set("Content-Type", x.MIME)
+	w.Header().Set("Content-Disposition", `attachment; filename="`+strings.ReplaceAll(x.OriginalName, "\"", "")+`"`)
+	_, _ = io.Copy(w, body)
+}
+func (s Server) usage(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.auth(w, r); !ok {
+		return
+	}
+	if s.Service.Attachments == nil || !s.Service.Attachments.Enabled {
+		jsonOut(w, 200, map[string]any{"attachments": "disabled"})
+		return
+	}
+	u, e := s.Service.AttachmentUsage(r.Context())
+	if e != nil {
+		appErr(w, e)
+		return
+	}
+	jsonOut(w, 200, map[string]any{"attachments": "enabled", "usage": u, "cap_bytes": s.Service.Attachments.Config.StorageCap, "cap_ratio": float64(u.TotalBytes) / float64(s.Service.Attachments.Config.StorageCap)})
+}
+func (s Server) metrics(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.auth(w, r); !ok {
+		return
+	}
+	if s.Service.Attachments == nil || !s.Service.Attachments.Enabled {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+		_, _ = w.Write([]byte("handoffkeep_attach_enabled 0\n"))
+		return
+	}
+	u, e := s.Service.AttachmentUsage(r.Context())
+	if e != nil {
+		appErr(w, e)
+		return
+	}
+	c := s.Service.Attachments.Config
+	objects, e := s.Service.Store.AttachmentObjectCount(r.Context())
+	if e != nil {
+		appErr(w, e)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+	fmt.Fprintf(w, "handoffkeep_attach_bytes_total %d\nhandoffkeep_attach_objects %d\nhandoffkeep_attach_puts_month %d\nhandoffkeep_attach_gets_month %d\nhandoffkeep_attach_cap_bytes %d\nhandoffkeep_attach_cap_ratio %.8f\n", u.TotalBytes, objects, u.Puts, u.Gets, c.StorageCap, float64(u.TotalBytes)/float64(c.StorageCap))
 }

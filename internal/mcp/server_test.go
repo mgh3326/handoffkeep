@@ -41,6 +41,15 @@ func (*spyBackend) ListDocuments(context.Context, string, string, string, int) (
 func (*spyBackend) Search(context.Context, string, string, string, int) ([]store.SearchResult, error) {
 	return nil, errors.New("unexpected")
 }
+func (*spyBackend) PutAttachment(context.Context, string, string, string, string, []byte) (store.Attachment, bool, error) {
+	return store.Attachment{}, false, errors.New("unexpected")
+}
+func (*spyBackend) ListAttachments(context.Context, string, int) ([]store.Attachment, error) {
+	return nil, errors.New("unexpected")
+}
+func (*spyBackend) AttachmentURL(context.Context, string) (string, error) {
+	return "", errors.New("unexpected")
+}
 
 func TestPutCheckpointUsesBackendCore(t *testing.T) {
 	backend := &spyBackend{}
@@ -62,6 +71,50 @@ func TestPutCheckpointUsesBackendCore(t *testing.T) {
 	}
 	if backend.checkpoints != 1 {
 		t.Fatalf("checkpoint core calls=%d", backend.checkpoints)
+	}
+}
+
+func TestPathUploadIsRegisteredOnlyForStdioTransport(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		server *gmcp.Server
+		want   bool
+	}{
+		{"http", New(&spyBackend{}, "stdio"), false},
+		{"stdio", NewStdio(&spyBackend{}, "any-token-name"), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, b := gmcp.NewInMemoryTransports()
+			ss, e := tc.server.Connect(t.Context(), a, nil)
+			if e != nil {
+				t.Fatal(e)
+			}
+			defer ss.Close()
+			client := gmcp.NewClient(&gmcp.Implementation{Name: "test", Version: "v0"}, nil)
+			cs, e := client.Connect(t.Context(), b, nil)
+			if e != nil {
+				t.Fatal(e)
+			}
+			defer cs.Close()
+			tools, e := cs.ListTools(t.Context(), nil)
+			if e != nil {
+				t.Fatal(e)
+			}
+			found := false
+			for _, tool := range tools.Tools {
+				if tool.Name == "attachment_put_from_path" {
+					found = true
+				}
+			}
+			if found != tc.want {
+				t.Fatalf("registered=%v want=%v", found, tc.want)
+			}
+			if !tc.want {
+				if _, e = cs.CallTool(t.Context(), &gmcp.CallToolParams{Name: "attachment_put_from_path", Arguments: map[string]any{"path": "/nope", "mime": "text/plain"}}); e == nil {
+					t.Fatal("HTTP-mode unknown tool call succeeded")
+				}
+			}
+		})
 	}
 }
 

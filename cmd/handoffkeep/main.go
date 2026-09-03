@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/mgh3326/handoffkeep/internal/api"
+	"github.com/mgh3326/handoffkeep/internal/attachments"
 	hkmcp "github.com/mgh3326/handoffkeep/internal/mcp"
 	"github.com/mgh3326/handoffkeep/internal/remote"
 	"github.com/mgh3326/handoffkeep/internal/store"
@@ -30,7 +31,7 @@ func main() {
 }
 func run(args []string, out, errout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: handoffkeep serve|mcp|ctx|memory|doc")
+		return errors.New("usage: handoffkeep serve|mcp|ctx|memory|doc|attach|r2usage")
 	}
 	switch args[0] {
 	case "serve":
@@ -43,8 +44,12 @@ func run(args []string, out, errout io.Writer) error {
 		return memoryCmd(args[1:], out)
 	case "doc":
 		return docCmd(args[1:], out)
+	case "attach":
+		return attachCmd(args[1:], out)
+	case "r2usage":
+		return r2UsageCmd(args[1:], out)
 	default:
-		return errors.New("usage: handoffkeep serve|mcp|ctx|memory|doc")
+		return errors.New("usage: handoffkeep serve|mcp|ctx|memory|doc|attach|r2usage")
 	}
 }
 
@@ -442,6 +447,249 @@ func importKind(key string) (string, string) {
 	return "note", job
 }
 
+func attachCmd(args []string, out io.Writer) error {
+	if len(args) == 0 {
+		return errors.New("usage: attach put|get|list|usage")
+	}
+	fs := flag.NewFlagSet("attach "+args[0], flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	c := remoteClient(fs)
+	checkpoint := fs.String("checkpoint", "", "checkpoint id")
+	doc := fs.String("doc", "", "document key")
+	memory := fs.String("memory", "", "memory agent/name")
+	name := fs.String("name", "", "original filename")
+	output := fs.String("o", "", "output path")
+	// Permit the documented `attach get SHA -o file` form as well as flags first.
+	valueFlags := map[string]bool{"--url": true, "--token": true, "--checkpoint": true, "--doc": true, "--memory": true, "--name": true, "-o": true}
+	flags, positional := []string{}, []string{}
+	for i := 1; i < len(args); i++ {
+		a := args[i]
+		if strings.HasPrefix(a, "-") {
+			flags = append(flags, a)
+			if valueFlags[a] {
+				i++
+				if i >= len(args) {
+					return fmt.Errorf("%s requires a value", a)
+				}
+				flags = append(flags, args[i])
+			}
+		} else {
+			positional = append(positional, a)
+		}
+	}
+	if e := fs.Parse(append(flags, positional...)); e != nil {
+		return e
+	}
+	if e := mustClient(c); e != nil {
+		return e
+	}
+	ctx := context.Background()
+	ref := ""
+	n := 0
+	if *checkpoint != "" {
+		ref = "checkpoint:" + *checkpoint
+		n++
+	}
+	if *doc != "" {
+		ref = "document:" + *doc
+		n++
+	}
+	if *memory != "" {
+		ref = "memory:" + *memory
+		n++
+	}
+	if n > 1 {
+		return errors.New("only one attachment reference may be specified")
+	}
+	switch args[0] {
+	case "put":
+		if fs.NArg() != 1 {
+			return errors.New("attach put requires a file")
+		}
+		p := fs.Arg(0)
+		b, e := os.ReadFile(p)
+		if e != nil {
+			return e
+		}
+		if *name == "" {
+			*name = filepath.Base(p)
+		}
+		contentType := attachmentMIME(*name)
+		if contentType == "" {
+			contentType = http.DetectContentType(b)
+		}
+		x, created, e := c.PutAttachment(ctx, "", *name, contentType, ref, b)
+		if e != nil {
+			return e
+		}
+		return printJSON(out, map[string]any{"sha256": x.SHA256, "size_bytes": x.SizeBytes, "url": "/v1/attachments/" + x.SHA256, "created": created})
+	case "get":
+		if fs.NArg() != 1 {
+			return errors.New("attach get requires sha")
+		}
+		x, r, e := c.GetAttachment(ctx, fs.Arg(0))
+		if e != nil {
+			return e
+		}
+		defer r.Close()
+		if *output == "" {
+			_, e = io.Copy(out, r)
+			return e
+		}
+		f, e := os.OpenFile(*output, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+		if e != nil {
+			return e
+		}
+		defer f.Close()
+		_, e = io.Copy(f, r)
+		if e == nil {
+			return printJSON(out, map[string]any{"sha256": x.SHA256, "output": *output})
+		}
+		return e
+	case "list":
+		xs, e := c.ListAttachments(ctx, ref, 100)
+		if e != nil {
+			return e
+		}
+		return printJSON(out, map[string]any{"attachments": xs})
+	case "usage":
+		u, e := c.AttachmentUsage(ctx)
+		if e != nil {
+			return e
+		}
+		return printJSON(out, u)
+	default:
+		return errors.New("usage: attach put|get|list|usage")
+	}
+}
+
+func attachmentMIME(name string) string {
+	return map[string]string{".json": "application/json", ".md": "text/markdown", ".csv": "text/csv", ".ndjson": "application/x-ndjson", ".log": "text/x-log", ".txt": "text/plain", ".html": "text/html", ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".pdf": "application/pdf"}[strings.ToLower(filepath.Ext(name))]
+}
+
+// r2usage intentionally does no object-store access. It is safe to run where
+// credentials are absent and reports a skipped result in that case.
+func r2UsageCmd(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("r2usage", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	alert := fs.Bool("alert", false, "send threshold alert")
+	if e := fs.Parse(args); e != nil {
+		return e
+	}
+	token, account := os.Getenv("CF_API_TOKEN"), os.Getenv("CF_ACCOUNT_ID")
+	if token == "" || account == "" {
+		return printJSON(out, map[string]any{"skipped": true, "reason": "CF_API_TOKEN and CF_ACCOUNT_ID are required"})
+	}
+	query := `query($account:String!,$month:Time!){viewer{accounts(filter:{accountTag:$account}){r2StorageAdaptiveGroups(limit:1,orderBy:[datetime_DESC]){sum{payloadSize objectCount}} r2OperationsAdaptiveGroups(limit:100,filter:{datetime_geq:$month}){dimensions{actionType} sum{requests}}}}}`
+	month := time.Now().UTC().Format("2006-01") + "-01"
+	payload, _ := json.Marshal(map[string]any{"query": query, "variables": map[string]any{"account": account, "month": month}})
+	req, e := http.NewRequest(http.MethodPost, "https://api.cloudflare.com/client/v4/graphql", strings.NewReader(string(payload)))
+	if e != nil {
+		return e
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, e := http.DefaultClient.Do(req)
+	if e != nil {
+		return e
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("Cloudflare GraphQL returned %s", resp.Status)
+	}
+	var result struct {
+		Data struct {
+			Viewer struct {
+				Accounts []struct {
+					Storage []struct {
+						Sum struct{ PayloadSize, ObjectCount int64 } `json:"sum"`
+					} `json:"r2StorageAdaptiveGroups"`
+					Operations []struct {
+						Dimensions struct {
+							ActionType string `json:"actionType"`
+						} `json:"dimensions"`
+						Sum struct {
+							Requests int64 `json:"requests"`
+						} `json:"sum"`
+					} `json:"r2OperationsAdaptiveGroups"`
+				} `json:"accounts"`
+			} `json:"viewer"`
+		} `json:"data"`
+		Errors []any `json:"errors"`
+	}
+	if e = json.NewDecoder(resp.Body).Decode(&result); e != nil {
+		return e
+	}
+	if len(result.Errors) > 0 {
+		return fmt.Errorf("Cloudflare GraphQL returned errors")
+	}
+	var bytesTotal, objects, classA, classB int64
+	if len(result.Data.Viewer.Accounts) > 0 {
+		a := result.Data.Viewer.Accounts[0]
+		if len(a.Storage) > 0 {
+			bytesTotal = a.Storage[0].Sum.PayloadSize
+			objects = a.Storage[0].Sum.ObjectCount
+		}
+		for _, op := range a.Operations {
+			if strings.Contains(strings.ToLower(op.Dimensions.ActionType), "class a") {
+				classA += op.Sum.Requests
+			} else if strings.Contains(strings.ToLower(op.Dimensions.ActionType), "class b") {
+				classB += op.Sum.Requests
+			}
+		}
+	}
+	alertReason := r2AlertReason(bytesTotal, classA, classB)
+	output := map[string]any{"storage_bytes": bytesTotal, "object_count": objects, "class_a_month": classA, "class_b_month": classB, "storage_ratio": float64(bytesTotal) / float64(10<<30), "alert": alertReason != "", "alert_reason": alertReason}
+	// Compare the independent Cloudflare total with the local immutable-object
+	// ledger when this CLI has normal handoffkeep HTTP credentials configured.
+	if localURL, localToken := config(); localURL != "" && localToken != "" {
+		if local, err := (remote.Client{URL: localURL, Token: localToken}).AttachmentUsage(context.Background()); err == nil {
+			output["local_bytes_total"] = local.TotalBytes
+			base := bytesTotal
+			if base == 0 {
+				base = local.TotalBytes
+			}
+			diff := bytesTotal - local.TotalBytes
+			if diff < 0 {
+				diff = -diff
+			}
+			if base > 0 && diff*10 > base {
+				alertReason = "R2 storage differs from local attachment ledger by more than 10%"
+				output["alert"] = true
+				output["alert_reason"] = alertReason
+			}
+		}
+	}
+	if *alert && alertReason != "" {
+		line := "handoffkeep r2usage alert: " + alertReason
+		if hook := os.Getenv("HK_ALERT_DISCORD_WEBHOOK"); hook != "" {
+			b, _ := json.Marshal(map[string]string{"content": line})
+			_, _ = http.Post(hook, "application/json", strings.NewReader(string(b)))
+		} else {
+			fmt.Fprintln(out, line)
+		}
+	}
+	return printJSON(out, output)
+}
+
+func r2AlertReason(bytesTotal, classA, classB int64) string {
+	const storageFree = int64(10 << 30)
+	for _, x := range []struct {
+		value, cap int64
+		label      string
+	}{
+		{bytesTotal, storageFree, "R2 storage"}, {classA, 1000000, "R2 Class A operations"}, {classB, 10000000, "R2 Class B operations"},
+	} {
+		if x.value*100 >= 90*x.cap {
+			return x.label + " are at least 90% of free tier"
+		}
+		if x.value*100 >= 70*x.cap {
+			return x.label + " are at least 70% of free tier"
+		}
+	}
+	return ""
+}
+
 func validListen(addr string, tailnet bool) error {
 	host, _, e := net.SplitHostPort(addr)
 	if e != nil {
@@ -492,7 +740,11 @@ func serve(args []string, errout io.Writer) error {
 	if e != nil {
 		return e
 	}
-	svc := api.Service{Store: st}
+	am, e := attachments.NewFromEnv(st)
+	if e != nil {
+		return e
+	}
+	svc := api.Service{Store: st, Attachments: am}
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", hkmcp.HTTPHandler(svc, tokens))
 	mux.Handle("/", api.Server{Service: svc, Tokens: tokens}.Handler())
@@ -511,5 +763,5 @@ func runMCP() error {
 	if u == "" || t == "" {
 		return errors.New("mcp requires HANDOFFKEEP_URL and HANDOFFKEEP_TOKEN")
 	}
-	return hkmcp.New(remote.Client{URL: u, Token: t}, "stdio").Run(context.Background(), &mcp.StdioTransport{})
+	return hkmcp.NewStdio(remote.Client{URL: u, Token: t}, "stdio").Run(context.Background(), &mcp.StdioTransport{})
 }

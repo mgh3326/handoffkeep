@@ -1,0 +1,8 @@
+[Unit]
+Description=handoffkeep Cloudflare R2 usage check
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/root/at-secrets/.env.handoffkeep
+ExecStart=/usr/local/bin/handoffkeep r2usage --alert
