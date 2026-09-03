@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/mgh3326/handoffkeep/internal/store"
@@ -24,6 +25,33 @@ func TestListenValidation(t *testing.T) {
 	}
 	if err := validListen("100.122.100.56:8800", true); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestR2AlertThresholdBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		value       int64
+		which, want string
+	}{
+		{"a699", 699000, "a", ""}, {"a700", 700000, "a", "70%"}, {"a899", 899000, "a", "70%"}, {"a900", 900000, "a", "90%"},
+		{"b699", 6990000, "b", ""}, {"b700", 7000000, "b", "70%"}, {"b899", 8990000, "b", "70%"}, {"b900", 9000000, "b", "90%"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, b := int64(0), int64(0)
+			if tc.which == "a" {
+				a = tc.value
+			} else {
+				b = tc.value
+			}
+			got := r2AlertReason(0, a, b)
+			if tc.want == "" && got != "" {
+				t.Fatalf("got %q", got)
+			}
+			if tc.want != "" && !strings.Contains(got, tc.want) {
+				t.Fatalf("got %q want %s", got, tc.want)
+			}
+		})
 	}
 }
 

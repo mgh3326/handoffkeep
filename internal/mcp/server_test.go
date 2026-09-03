@@ -74,6 +74,50 @@ func TestPutCheckpointUsesBackendCore(t *testing.T) {
 	}
 }
 
+func TestPathUploadIsRegisteredOnlyForStdioTransport(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		server *gmcp.Server
+		want   bool
+	}{
+		{"http", New(&spyBackend{}, "stdio"), false},
+		{"stdio", NewStdio(&spyBackend{}, "any-token-name"), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, b := gmcp.NewInMemoryTransports()
+			ss, e := tc.server.Connect(t.Context(), a, nil)
+			if e != nil {
+				t.Fatal(e)
+			}
+			defer ss.Close()
+			client := gmcp.NewClient(&gmcp.Implementation{Name: "test", Version: "v0"}, nil)
+			cs, e := client.Connect(t.Context(), b, nil)
+			if e != nil {
+				t.Fatal(e)
+			}
+			defer cs.Close()
+			tools, e := cs.ListTools(t.Context(), nil)
+			if e != nil {
+				t.Fatal(e)
+			}
+			found := false
+			for _, tool := range tools.Tools {
+				if tool.Name == "attachment_put_from_path" {
+					found = true
+				}
+			}
+			if found != tc.want {
+				t.Fatalf("registered=%v want=%v", found, tc.want)
+			}
+			if !tc.want {
+				if _, e = cs.CallTool(t.Context(), &gmcp.CallToolParams{Name: "attachment_put_from_path", Arguments: map[string]any{"path": "/nope", "mime": "text/plain"}}); e == nil {
+					t.Fatal("HTTP-mode unknown tool call succeeded")
+				}
+			}
+		})
+	}
+}
+
 // This is the same tool server used by stdio; in-memory transports make the
 // round trip deterministic while PostgreSQL integration is opt-in for local runs.
 func TestToolRoundTrip(t *testing.T) {

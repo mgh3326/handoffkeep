@@ -7,7 +7,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"mime"
 	"net"
 	"net/http"
 	"os"
@@ -515,7 +514,7 @@ func attachCmd(args []string, out io.Writer) error {
 		if *name == "" {
 			*name = filepath.Base(p)
 		}
-		contentType := mime.TypeByExtension(strings.ToLower(filepath.Ext(*name)))
+		contentType := attachmentMIME(*name)
 		if contentType == "" {
 			contentType = http.DetectContentType(b)
 		}
@@ -562,6 +561,10 @@ func attachCmd(args []string, out io.Writer) error {
 	default:
 		return errors.New("usage: attach put|get|list|usage")
 	}
+}
+
+func attachmentMIME(name string) string {
+	return map[string]string{".json": "application/json", ".md": "text/markdown", ".csv": "text/csv", ".ndjson": "application/x-ndjson", ".log": "text/x-log", ".txt": "text/plain", ".html": "text/html", ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".pdf": "application/pdf"}[strings.ToLower(filepath.Ext(name))]
 }
 
 // r2usage intentionally does no object-store access. It is safe to run where
@@ -635,19 +638,7 @@ func r2UsageCmd(args []string, out io.Writer) error {
 			}
 		}
 	}
-	alertReason := ""
-	if bytesTotal*100 >= 70*(10<<30) {
-		alertReason = "R2 storage is at least 70% of free tier"
-	}
-	if bytesTotal*100 >= 90*(10<<30) {
-		alertReason = "R2 storage is at least 90% of free tier"
-	}
-	if classA*100 >= 7*1000000 && alertReason == "" {
-		alertReason = "R2 Class A operations are at least 70% of free tier"
-	}
-	if classB*100 >= 7*10000000 && alertReason == "" {
-		alertReason = "R2 Class B operations are at least 70% of free tier"
-	}
+	alertReason := r2AlertReason(bytesTotal, classA, classB)
 	output := map[string]any{"storage_bytes": bytesTotal, "object_count": objects, "class_a_month": classA, "class_b_month": classB, "storage_ratio": float64(bytesTotal) / float64(10<<30), "alert": alertReason != "", "alert_reason": alertReason}
 	// Compare the independent Cloudflare total with the local immutable-object
 	// ledger when this CLI has normal handoffkeep HTTP credentials configured.
@@ -679,6 +670,24 @@ func r2UsageCmd(args []string, out io.Writer) error {
 		}
 	}
 	return printJSON(out, output)
+}
+
+func r2AlertReason(bytesTotal, classA, classB int64) string {
+	const storageFree = int64(10 << 30)
+	for _, x := range []struct {
+		value, cap int64
+		label      string
+	}{
+		{bytesTotal, storageFree, "R2 storage"}, {classA, 1000000, "R2 Class A operations"}, {classB, 10000000, "R2 Class B operations"},
+	} {
+		if x.value*100 >= 90*x.cap {
+			return x.label + " are at least 90% of free tier"
+		}
+		if x.value*100 >= 70*x.cap {
+			return x.label + " are at least 70% of free tier"
+		}
+	}
+	return ""
 }
 
 func validListen(addr string, tailnet bool) error {
@@ -754,5 +763,5 @@ func runMCP() error {
 	if u == "" || t == "" {
 		return errors.New("mcp requires HANDOFFKEEP_URL and HANDOFFKEEP_TOKEN")
 	}
-	return hkmcp.New(remote.Client{URL: u, Token: t}, "stdio").Run(context.Background(), &mcp.StdioTransport{})
+	return hkmcp.NewStdio(remote.Client{URL: u, Token: t}, "stdio").Run(context.Background(), &mcp.StdioTransport{})
 }

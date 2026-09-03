@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,12 +14,13 @@ import (
 )
 
 type fakeObjects struct {
-	puts    int
-	fail    bool
-	objects map[string][]byte
+	puts, stats int
+	fail        bool
+	objects     map[string][]byte
 }
 
 func (f *fakeObjects) Stat(_ context.Context, k string) error {
+	f.stats++
 	if _, ok := f.objects[k]; ok {
 		return nil
 	}
@@ -45,12 +47,16 @@ func (f *fakeObjects) Presign(context.Context, string, time.Duration) (string, e
 }
 
 type fakeDB struct {
-	rows   map[string]store.Attachment
-	puts   int
-	capErr error
+	rows    map[string]store.Attachment
+	puts    int
+	capErr  error
+	hideGet bool
 }
 
 func (f *fakeDB) GetAttachment(_ context.Context, sha string) (store.Attachment, bool, error) {
+	if f.hideGet {
+		return store.Attachment{}, false, nil
+	}
 	x, ok := f.rows[sha]
 	return x, ok, nil
 }
@@ -115,6 +121,32 @@ func TestContentGuards(t *testing.T) {
 	}
 }
 
+func TestDefaultAllowlistAcceptsAllDeclaredTypesAndRejectsDisguises(t *testing.T) {
+	allow := map[string]bool{}
+	for _, x := range strings.Split("image/png,image/jpeg,image/gif,text/html,text/plain,text/markdown,application/json,application/pdf,text/csv,application/x-ndjson,text/x-log", ",") {
+		allow[x] = true
+	}
+	m := &Manager{Store: &fakeDB{rows: map[string]store.Attachment{}}, Objects: &fakeObjects{objects: map[string][]byte{}}, Enabled: true, Config: Config{MaxBytes: 1000, StorageCap: 10000, PutCap: 100, GetCap: 100, Allow: allow}}
+	png := []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a}
+	for _, x := range []struct {
+		name, mime string
+		body       []byte
+	}{
+		{"x.png", "image/png", png}, {"x.jpg", "image/jpeg", []byte{0xff, 0xd8, 0xff, 0xe0, 0, 0, 0, 0, "J"[0], "F"[0], "I"[0], "F"[0]}}, {"x.gif", "image/gif", []byte("GIF89a")},
+		{"x.html", "text/html", []byte("<html>ok</html>")}, {"x.txt", "text/plain", []byte("plain")}, {"x.md", "text/markdown", []byte("# heading")}, {"x.json", "application/json", []byte(`{"ok":true}`)}, {"x.pdf", "application/pdf", []byte("%PDF-1.4")}, {"x.csv", "text/csv", []byte("a,b\n1,2")}, {"x.ndjson", "application/x-ndjson", []byte("{\"a\":1}\n")}, {"x.log", "text/x-log", []byte("INFO ready")},
+	} {
+		if _, created, err := m.Put(t.Context(), "node", x.name, x.mime, "", x.body); err != nil || !created {
+			t.Fatalf("%s: created=%v err=%v", x.mime, created, err)
+		}
+	}
+	if _, _, err := m.Put(t.Context(), "node", "fake.png", "image/png", "", []byte("not an image")); !errors.Is(err, ErrMIME) {
+		t.Fatalf("png disguise=%v", err)
+	}
+	if _, _, err := m.Put(t.Context(), "node", "fake.json", "application/json", "", png); !errors.Is(err, ErrMIME) {
+		t.Fatalf("json disguise=%v", err)
+	}
+}
+
 func TestParseRef(t *testing.T) {
 	for _, ref := range []string{"checkpoint:12", "document:jobs/a.md", "memory:agent/name", ""} {
 		if _, _, err := ParseRef(ref); err != nil {
@@ -137,6 +169,36 @@ func TestDedupeSkipsSecondObjectPut(t *testing.T) {
 	}
 	if obj.puts != 1 || db.puts != 2 {
 		t.Fatalf("puts object=%d db=%d", obj.puts, db.puts)
+	}
+}
+func TestDedupeDBHitSkipsObjectLookup(t *testing.T) {
+	db := &fakeDB{rows: map[string]store.Attachment{}}
+	obj := &fakeObjects{objects: map[string][]byte{}}
+	m := &Manager{Store: db, Objects: obj, Enabled: true, Config: Config{MaxBytes: 100, StorageCap: 100, PutCap: 10, GetCap: 10, Allow: map[string]bool{"text/plain": true}}}
+	if _, _, e := m.Put(t.Context(), "node", "note.txt", "text/plain", "", []byte("same")); e != nil {
+		t.Fatal(e)
+	}
+	obj.stats = 0
+	if _, _, e := m.Put(t.Context(), "node", "note.txt", "text/plain", "", []byte("same")); e != nil {
+		t.Fatal(e)
+	}
+	if obj.stats != 0 {
+		t.Fatalf("DB dedupe still consulted object store: stats=%d", obj.stats)
+	}
+}
+func TestDedupeObjectHitSkipsSecondObjectPut(t *testing.T) {
+	db := &fakeDB{rows: map[string]store.Attachment{}}
+	obj := &fakeObjects{objects: map[string][]byte{}}
+	m := &Manager{Store: db, Objects: obj, Enabled: true, Config: Config{MaxBytes: 100, StorageCap: 100, PutCap: 10, GetCap: 10, Allow: map[string]bool{"text/plain": true}}}
+	if _, _, e := m.Put(t.Context(), "node", "note.txt", "text/plain", "", []byte("same")); e != nil {
+		t.Fatal(e)
+	}
+	db.hideGet = true
+	if _, _, e := m.Put(t.Context(), "node", "other.txt", "text/plain", "", []byte("same")); e != nil {
+		t.Fatal(e)
+	}
+	if obj.puts != 1 {
+		t.Fatalf("object-exists dedupe failed: puts=%d", obj.puts)
 	}
 }
 func TestObjectFailureWritesNoMetadata(t *testing.T) {
