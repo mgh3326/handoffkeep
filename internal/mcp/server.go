@@ -4,7 +4,10 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 
 	"github.com/mgh3326/handoffkeep/internal/api"
 	"github.com/mgh3326/handoffkeep/internal/store"
@@ -21,6 +24,9 @@ type Backend interface {
 	GetDocument(context.Context, string) (store.Document, bool, error)
 	ListDocuments(context.Context, string, string, string, int) ([]store.Document, error)
 	Search(context.Context, string, string, string, int) ([]store.SearchResult, error)
+	PutAttachment(context.Context, string, string, string, string, []byte) (store.Attachment, bool, error)
+	ListAttachments(context.Context, string, int) ([]store.Attachment, error)
+	AttachmentURL(context.Context, string) (string, error)
 }
 
 func New(service Backend, client string) *gmcp.Server {
@@ -135,6 +141,47 @@ func New(service Backend, client string) *gmcp.Server {
 			return nil, nil, e
 		}
 		return result(map[string]any{"memory": v})
+	})
+	gmcp.AddTool(s, &gmcp.Tool{Name: "attachment_list", Description: "List immutable attachment metadata, optionally by reference."}, func(ctx context.Context, _ *gmcp.CallToolRequest, x struct {
+		Ref   string `json:"ref,omitempty"`
+		Limit int    `json:"limit,omitempty"`
+	}) (*gmcp.CallToolResult, any, error) {
+		v, e := service.ListAttachments(ctx, x.Ref, x.Limit)
+		if e != nil {
+			return nil, nil, e
+		}
+		return result(map[string]any{"attachments": v})
+	})
+	gmcp.AddTool(s, &gmcp.Tool{Name: "attachment_get_url", Description: "Create a ten-minute private presigned attachment URL."}, func(ctx context.Context, _ *gmcp.CallToolRequest, x struct {
+		SHA256 string `json:"sha256"`
+	}) (*gmcp.CallToolResult, any, error) {
+		v, e := service.AttachmentURL(ctx, x.SHA256)
+		if e != nil {
+			return nil, nil, e
+		}
+		return result(map[string]any{"url": v, "expires_in_seconds": 600})
+	})
+	gmcp.AddTool(s, &gmcp.Tool{Name: "attachment_put_from_path", Description: "stdio only: upload a local file as a private attachment."}, func(ctx context.Context, _ *gmcp.CallToolRequest, x struct {
+		Path string `json:"path"`
+		Name string `json:"name,omitempty"`
+		MIME string `json:"mime"`
+		Ref  string `json:"ref,omitempty"`
+	}) (*gmcp.CallToolResult, any, error) {
+		if client != "stdio" {
+			return nil, nil, fmt.Errorf("attachment_put_from_path is available only over stdio")
+		}
+		b, e := os.ReadFile(x.Path)
+		if e != nil {
+			return nil, nil, e
+		}
+		if x.Name == "" {
+			x.Name = filepath.Base(x.Path)
+		}
+		v, created, e := service.PutAttachment(ctx, client, x.Name, x.MIME, x.Ref, b)
+		if e != nil {
+			return nil, nil, e
+		}
+		return result(map[string]any{"attachment": v, "created": created})
 	})
 	return s
 }

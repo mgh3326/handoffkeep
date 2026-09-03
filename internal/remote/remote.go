@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -137,4 +138,92 @@ func (c Client) Search(ctx context.Context, q, scope, session string, limit int)
 	p := url.Values{"q": {q}, "scope": {scope}, "session": {session}, "limit": {fmt.Sprint(limit)}}
 	e := c.call(ctx, "GET", "/v1/search?"+p.Encode(), nil, &out)
 	return out.Results, e
+}
+func (c Client) PutAttachment(ctx context.Context, _ string, name, mime, ref string, body []byte) (store.Attachment, bool, error) {
+	r, e := http.NewRequestWithContext(ctx, "PUT", strings.TrimRight(c.URL, "/")+"/v1/attachments", bytes.NewReader(body))
+	if e != nil {
+		return store.Attachment{}, false, e
+	}
+	r.Header.Set("Authorization", "Bearer "+c.Token)
+	r.Header.Set("X-HK-Name", name)
+	r.Header.Set("Content-Type", mime)
+	r.Header.Set("X-HK-Ref", ref)
+	h := c.HTTP
+	if h == nil {
+		h = http.DefaultClient
+	}
+	resp, e := h.Do(r)
+	if e != nil {
+		return store.Attachment{}, false, e
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		var x struct {
+			Error string `json:"error"`
+		}
+		_ = json.NewDecoder(resp.Body).Decode(&x)
+		return store.Attachment{}, false, errors.New(x.Error)
+	}
+	var x struct {
+		Attachment store.Attachment `json:"attachment"`
+		Created    bool             `json:"created"`
+	}
+	e = json.NewDecoder(resp.Body).Decode(&x)
+	return x.Attachment, x.Created, e
+}
+func (c Client) ListAttachments(ctx context.Context, ref string, limit int) ([]store.Attachment, error) {
+	var x struct {
+		Attachments []store.Attachment `json:"attachments"`
+	}
+	e := c.call(ctx, "GET", "/v1/attachments?"+url.Values{"ref": {ref}, "limit": {fmt.Sprint(limit)}}.Encode(), nil, &x)
+	return x.Attachments, e
+}
+func (c Client) AttachmentURL(ctx context.Context, sha string) (string, error) {
+	r, e := http.NewRequestWithContext(ctx, "GET", strings.TrimRight(c.URL, "/")+"/v1/attachments/"+esc(sha)+"?presign=1", nil)
+	if e != nil {
+		return "", e
+	}
+	r.Header.Set("Authorization", "Bearer "+c.Token)
+	h := c.HTTP
+	if h == nil {
+		h = &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	}
+	resp, e := h.Do(r)
+	if e != nil {
+		return "", e
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusFound {
+		return "", errors.New("attachment_url_failed")
+	}
+	return resp.Header.Get("Location"), nil
+}
+func (c Client) GetAttachment(ctx context.Context, sha string) (store.Attachment, io.ReadCloser, error) {
+	r, e := http.NewRequestWithContext(ctx, "GET", strings.TrimRight(c.URL, "/")+"/v1/attachments/"+esc(sha), nil)
+	if e != nil {
+		return store.Attachment{}, nil, e
+	}
+	r.Header.Set("Authorization", "Bearer "+c.Token)
+	h := c.HTTP
+	if h == nil {
+		h = http.DefaultClient
+	}
+	resp, e := h.Do(r)
+	if e != nil {
+		return store.Attachment{}, nil, e
+	}
+	if resp.StatusCode != 200 {
+		defer resp.Body.Close()
+		var x struct{ Error string }
+		_ = json.NewDecoder(resp.Body).Decode(&x)
+		return store.Attachment{}, nil, errors.New(x.Error)
+	}
+	return store.Attachment{SHA256: sha, MIME: resp.Header.Get("Content-Type")}, resp.Body, nil
+}
+func (c Client) AttachmentUsage(ctx context.Context) (store.AttachmentUsage, error) {
+	var x struct {
+		Usage store.AttachmentUsage `json:"usage"`
+	}
+	e := c.call(ctx, "GET", "/v1/usage", nil, &x)
+	return x.Usage, e
 }

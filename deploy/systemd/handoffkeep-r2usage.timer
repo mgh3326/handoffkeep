@@ -1,0 +1,9 @@
+[Unit]
+Description=Daily handoffkeep R2 usage check
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+
+[Install]
+WantedBy=timers.target

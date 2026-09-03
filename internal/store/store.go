@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -86,6 +87,26 @@ type Document struct {
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
+
+// Attachment is immutable binary metadata. Object bytes are kept in R2; PostgreSQL
+// holds only the content address, provenance, and references.
+type Attachment struct {
+	SHA256       string    `json:"sha256"`
+	SizeBytes    int64     `json:"size_bytes"`
+	MIME         string    `json:"mime"`
+	OriginalName string    `json:"original_name"`
+	CreatedBy    string    `json:"created_by"`
+	CreatedAt    time.Time `json:"created_at"`
+	RefKind      string    `json:"ref_kind,omitempty"`
+	RefID        string    `json:"ref_id,omitempty"`
+}
+type AttachmentUsage struct {
+	Month      string `json:"month"`
+	Puts       int64  `json:"puts_month"`
+	Gets       int64  `json:"gets_month"`
+	BytesAdded int64  `json:"bytes_added_month"`
+	TotalBytes int64  `json:"bytes_total"`
+}
 type SearchResult struct {
 	Scope     string    `json:"scope"`
 	Key       string    `json:"key"`
@@ -124,7 +145,12 @@ func (s *Store) migrate(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS checkpoints (id BIGSERIAL PRIMARY KEY, session TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('checkpoint','handoff','decision','open_question','next_action')), title TEXT NOT NULL, body TEXT NOT NULL, refs JSONB NOT NULL DEFAULT '{}'::jsonb, created_by TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL)`,
 		`CREATE INDEX IF NOT EXISTS checkpoints_session_created ON checkpoints(session, created_at DESC, id DESC)`, `CREATE INDEX IF NOT EXISTS checkpoints_fts ON checkpoints USING GIN (to_tsvector('simple', title || ' ' || body))`, `CREATE INDEX IF NOT EXISTS checkpoints_trgm ON checkpoints USING GIN ((title || ' ' || body) gin_trgm_ops)`,
 		`CREATE TABLE IF NOT EXISTS memory (agent TEXT NOT NULL, name TEXT NOT NULL, description TEXT NOT NULL, memory_type TEXT NOT NULL CHECK(memory_type IN ('user','feedback','project','reference')), content TEXT NOT NULL, updated_by TEXT NOT NULL, updated_at TIMESTAMPTZ NOT NULL, UNIQUE(agent,name))`, `CREATE INDEX IF NOT EXISTS memory_agent_updated ON memory(agent, updated_at DESC, name DESC)`, `CREATE INDEX IF NOT EXISTS memory_fts ON memory USING GIN (to_tsvector('simple', name || ' ' || description || ' ' || content))`, `CREATE INDEX IF NOT EXISTS memory_trgm ON memory USING GIN ((name || ' ' || description || ' ' || content) gin_trgm_ops)`,
-		`CREATE TABLE IF NOT EXISTS documents (id BIGSERIAL PRIMARY KEY, key TEXT UNIQUE NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('brief','report','answer','handoff','note','other')), session TEXT NOT NULL DEFAULT '', job TEXT NOT NULL DEFAULT '', body TEXT NOT NULL, sha256 TEXT NOT NULL, created_by TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL)`, `CREATE INDEX IF NOT EXISTS documents_prefix ON documents(key)`, `CREATE INDEX IF NOT EXISTS documents_fts ON documents USING GIN (to_tsvector('simple', key || ' ' || body))`, `CREATE INDEX IF NOT EXISTS documents_trgm ON documents USING GIN ((key || ' ' || body) gin_trgm_ops)`, `INSERT INTO schema_version(version) VALUES (2) ON CONFLICT DO NOTHING`}
+		`CREATE TABLE IF NOT EXISTS documents (id BIGSERIAL PRIMARY KEY, key TEXT UNIQUE NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('brief','report','answer','handoff','note','other')), session TEXT NOT NULL DEFAULT '', job TEXT NOT NULL DEFAULT '', body TEXT NOT NULL, sha256 TEXT NOT NULL, created_by TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL)`, `CREATE INDEX IF NOT EXISTS documents_prefix ON documents(key)`, `CREATE INDEX IF NOT EXISTS documents_fts ON documents USING GIN (to_tsvector('simple', key || ' ' || body))`, `CREATE INDEX IF NOT EXISTS documents_trgm ON documents USING GIN ((key || ' ' || body) gin_trgm_ops)`, `INSERT INTO schema_version(version) VALUES (2) ON CONFLICT DO NOTHING`,
+		`CREATE TABLE IF NOT EXISTS attachments (sha256 TEXT PRIMARY KEY CHECK(sha256 ~ '^[0-9a-f]{64}$'), size_bytes BIGINT NOT NULL CHECK(size_bytes >= 0), mime TEXT NOT NULL, original_name TEXT NOT NULL, created_by TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS attachment_refs (sha256 TEXT NOT NULL REFERENCES attachments(sha256), ref_kind TEXT NOT NULL CHECK(ref_kind IN ('checkpoint','document','memory','none')), ref_id TEXT NOT NULL DEFAULT '', PRIMARY KEY(sha256,ref_kind,ref_id))`,
+		`CREATE INDEX IF NOT EXISTS attachment_refs_target ON attachment_refs(ref_kind,ref_id)`,
+		`CREATE TABLE IF NOT EXISTS attachment_usage (month TEXT PRIMARY KEY CHECK(month ~ '^[0-9]{4}-[0-9]{2}$'), puts BIGINT NOT NULL DEFAULT 0, gets BIGINT NOT NULL DEFAULT 0, bytes_added BIGINT NOT NULL DEFAULT 0)`,
+		`INSERT INTO schema_version(version) VALUES (3) ON CONFLICT DO NOTHING`}
 	for _, q := range stmts {
 		if _, err := s.pool.Exec(ctx, q); err != nil {
 			if q == `CREATE EXTENSION IF NOT EXISTS pg_trgm` {
@@ -332,6 +358,201 @@ func (s *Store) ListDocuments(ctx context.Context, prefix, kind, session string,
 		out = append(out, x)
 	}
 	return out, rows.Err()
+}
+
+func validAttachmentRef(kind, id string) bool {
+	if kind == "none" {
+		return id == ""
+	}
+	if kind == "checkpoint" {
+		_, e := strconv.ParseInt(id, 10, 64)
+		return e == nil && id != ""
+	}
+	if kind == "document" {
+		return validDocKey(id)
+	}
+	if kind == "memory" {
+		a, n, ok := strings.Cut(id, "/")
+		return ok && validName(a) && validName(n)
+	}
+	return false
+}
+func monthNow() string { return time.Now().UTC().Format("2006-01") }
+func (s *Store) GetAttachment(ctx context.Context, sha string) (Attachment, bool, error) {
+	if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(sha) {
+		return Attachment{}, false, errors.New("invalid attachment sha")
+	}
+	var x Attachment
+	e := s.pool.QueryRow(ctx, `SELECT sha256,size_bytes,mime,original_name,created_by,created_at FROM attachments WHERE sha256=$1`, sha).Scan(&x.SHA256, &x.SizeBytes, &x.MIME, &x.OriginalName, &x.CreatedBy, &x.CreatedAt)
+	if e != nil {
+		if strings.Contains(e.Error(), "no rows") {
+			return x, false, nil
+		}
+		return x, false, e
+	}
+	return x, true, nil
+}
+
+// PutAttachment records an immutable object and its reference after R2 PUT has
+// succeeded. It serializes quota accounting with a locked monthly usage row.
+func (s *Store) PutAttachment(ctx context.Context, x Attachment, storageCap, putCap int64) (Attachment, bool, error) {
+	if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(x.SHA256) || x.SizeBytes < 0 || x.MIME == "" || !validText(x.OriginalName, 512) || !validName(x.CreatedBy) || !validAttachmentRef(x.RefKind, x.RefID) {
+		return x, false, errors.New("invalid attachment")
+	}
+	if x.RefKind == "" {
+		x.RefKind = "none"
+	}
+	tx, e := s.pool.Begin(ctx)
+	if e != nil {
+		return x, false, e
+	}
+	defer tx.Rollback(ctx)
+	month := monthNow()
+	if _, e = tx.Exec(ctx, `INSERT INTO attachment_usage(month) VALUES($1) ON CONFLICT DO NOTHING`, month); e != nil {
+		return x, false, e
+	}
+	var puts, total int64
+	if e = tx.QueryRow(ctx, `SELECT puts FROM attachment_usage WHERE month=$1 FOR UPDATE`, month).Scan(&puts); e != nil {
+		return x, false, e
+	}
+	if e = tx.QueryRow(ctx, `SELECT COALESCE(SUM(size_bytes),0) FROM attachments`).Scan(&total); e != nil {
+		return x, false, e
+	}
+	var present bool
+	e = tx.QueryRow(ctx, `SELECT true FROM attachments WHERE sha256=$1`, x.SHA256).Scan(&present)
+	if e != nil && !strings.Contains(e.Error(), "no rows") {
+		return x, false, e
+	}
+	if !present {
+		if total+x.SizeBytes > storageCap {
+			return x, false, ErrAttachmentStorageCap
+		}
+		if puts+1 > putCap {
+			return x, false, ErrAttachmentPutCap
+		}
+		x.CreatedAt = time.Now().UTC()
+		if _, e = tx.Exec(ctx, `INSERT INTO attachments(sha256,size_bytes,mime,original_name,created_by,created_at) VALUES($1,$2,$3,$4,$5,$6)`, x.SHA256, x.SizeBytes, x.MIME, x.OriginalName, x.CreatedBy, x.CreatedAt); e != nil {
+			return x, false, e
+		}
+		if _, e = tx.Exec(ctx, `UPDATE attachment_usage SET puts=puts+1,bytes_added=bytes_added+$2 WHERE month=$1`, month, x.SizeBytes); e != nil {
+			return x, false, e
+		}
+	} else {
+		if e = tx.QueryRow(ctx, `SELECT size_bytes,mime,original_name,created_by,created_at FROM attachments WHERE sha256=$1`, x.SHA256).Scan(&x.SizeBytes, &x.MIME, &x.OriginalName, &x.CreatedBy, &x.CreatedAt); e != nil {
+			return x, false, e
+		}
+	}
+	if _, e = tx.Exec(ctx, `INSERT INTO attachment_refs(sha256,ref_kind,ref_id) VALUES($1,$2,$3) ON CONFLICT DO NOTHING`, x.SHA256, x.RefKind, x.RefID); e != nil {
+		return x, false, e
+	}
+	return x, !present, tx.Commit(ctx)
+}
+
+// CheckAttachmentCapacity is the preflight fuse before an R2 PUT. PutAttachment
+// repeats these checks in its transaction to make accounting authoritative.
+func (s *Store) CheckAttachmentCapacity(ctx context.Context, size, storageCap, putCap int64) error {
+	tx, e := s.pool.Begin(ctx)
+	if e != nil {
+		return e
+	}
+	defer tx.Rollback(ctx)
+	m := monthNow()
+	if _, e = tx.Exec(ctx, `INSERT INTO attachment_usage(month) VALUES($1) ON CONFLICT DO NOTHING`, m); e != nil {
+		return e
+	}
+	var puts, total int64
+	if e = tx.QueryRow(ctx, `SELECT puts FROM attachment_usage WHERE month=$1 FOR UPDATE`, m).Scan(&puts); e != nil {
+		return e
+	}
+	if e = tx.QueryRow(ctx, `SELECT COALESCE(SUM(size_bytes),0) FROM attachments`).Scan(&total); e != nil {
+		return e
+	}
+	if total+size > storageCap {
+		return ErrAttachmentStorageCap
+	}
+	if puts+1 > putCap {
+		return ErrAttachmentPutCap
+	}
+	return tx.Commit(ctx)
+}
+
+var ErrAttachmentStorageCap = errors.New("attachment_storage_cap")
+var ErrAttachmentPutCap = errors.New("attachment_put_cap")
+
+func (s *Store) RecordAttachmentGet(ctx context.Context, sha string, getCap int64) error {
+	tx, e := s.pool.Begin(ctx)
+	if e != nil {
+		return e
+	}
+	defer tx.Rollback(ctx)
+	var exists bool
+	if e = tx.QueryRow(ctx, `SELECT true FROM attachments WHERE sha256=$1`, sha).Scan(&exists); e != nil {
+		return e
+	}
+	m := monthNow()
+	if _, e = tx.Exec(ctx, `INSERT INTO attachment_usage(month) VALUES($1) ON CONFLICT DO NOTHING`, m); e != nil {
+		return e
+	}
+	var gets int64
+	if e = tx.QueryRow(ctx, `SELECT gets FROM attachment_usage WHERE month=$1 FOR UPDATE`, m).Scan(&gets); e != nil {
+		return e
+	}
+	// Reads deliberately remain available above the free-tier cap. The value is
+	// still exposed so operators can see that the fuse threshold was crossed.
+	_ = getCap
+	if _, e = tx.Exec(ctx, `UPDATE attachment_usage SET gets=gets+1 WHERE month=$1`, m); e != nil {
+		return e
+	}
+	return tx.Commit(ctx)
+}
+func (s *Store) ListAttachments(ctx context.Context, refKind, refID string, limit int) ([]Attachment, error) {
+	if refKind != "" && !validAttachmentRef(refKind, refID) {
+		return nil, errors.New("invalid attachment ref")
+	}
+	if limit < 1 {
+		limit = 100
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	q := `SELECT a.sha256,a.size_bytes,a.mime,a.original_name,a.created_by,a.created_at,r.ref_kind,r.ref_id FROM attachments a JOIN attachment_refs r ON r.sha256=a.sha256`
+	args := []any{limit}
+	if refKind != "" {
+		q += ` WHERE r.ref_kind=$1 AND r.ref_id=$2 ORDER BY a.created_at DESC LIMIT $3`
+		args = []any{refKind, refID, limit}
+	} else {
+		q += ` ORDER BY a.created_at DESC LIMIT $1`
+	}
+	rows, e := s.pool.Query(ctx, q, args...)
+	if e != nil {
+		return nil, e
+	}
+	defer rows.Close()
+	out := []Attachment{}
+	for rows.Next() {
+		var x Attachment
+		if e = rows.Scan(&x.SHA256, &x.SizeBytes, &x.MIME, &x.OriginalName, &x.CreatedBy, &x.CreatedAt, &x.RefKind, &x.RefID); e != nil {
+			return nil, e
+		}
+		out = append(out, x)
+	}
+	return out, rows.Err()
+}
+func (s *Store) AttachmentUsage(ctx context.Context) (AttachmentUsage, error) {
+	x := AttachmentUsage{Month: monthNow()}
+	e := s.pool.QueryRow(ctx, `SELECT puts,gets,bytes_added FROM attachment_usage WHERE month=$1`, x.Month).Scan(&x.Puts, &x.Gets, &x.BytesAdded)
+	if e != nil && strings.Contains(e.Error(), "no rows") {
+		e = nil
+	}
+	if e != nil {
+		return x, e
+	}
+	e = s.pool.QueryRow(ctx, `SELECT COALESCE(SUM(size_bytes),0) FROM attachments`).Scan(&x.TotalBytes)
+	return x, e
+}
+func (s *Store) AttachmentObjectCount(ctx context.Context) (int64, error) {
+	var n int64
+	return n, s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM attachments`).Scan(&n)
 }
 func (s *Store) Search(ctx context.Context, q, scope, session string, limit int) ([]SearchResult, error) {
 	if strings.TrimSpace(q) == "" || len(q) > 512 || !validText(session, 128) || (scope != "all" && scope != "ctx" && scope != "docs" && scope != "memory") {

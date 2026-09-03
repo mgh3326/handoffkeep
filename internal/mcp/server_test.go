@@ -41,6 +41,15 @@ func (*spyBackend) ListDocuments(context.Context, string, string, string, int) (
 func (*spyBackend) Search(context.Context, string, string, string, int) ([]store.SearchResult, error) {
 	return nil, errors.New("unexpected")
 }
+func (*spyBackend) PutAttachment(context.Context, string, string, string, string, []byte) (store.Attachment, bool, error) {
+	return store.Attachment{}, false, errors.New("unexpected")
+}
+func (*spyBackend) ListAttachments(context.Context, string, int) ([]store.Attachment, error) {
+	return nil, errors.New("unexpected")
+}
+func (*spyBackend) AttachmentURL(context.Context, string) (string, error) {
+	return "", errors.New("unexpected")
+}
 
 func TestPutCheckpointUsesBackendCore(t *testing.T) {
 	backend := &spyBackend{}
