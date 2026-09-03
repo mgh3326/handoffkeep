@@ -139,6 +139,17 @@ func Open(ctx context.Context, url string) (*Store, error) {
 }
 func (s *Store) Close() { s.pool.Close() }
 func (s *Store) migrate(ctx context.Context) error {
+	// Multiple test binaries (and multiple service replicas at deployment) may
+	// open the same database concurrently. Serialize additive DDL so PostgreSQL
+	// catalog creation cannot race before IF NOT EXISTS observes the first row.
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(824180045)`); err != nil {
+		return err
+	}
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY)`, `INSERT INTO schema_version(version) VALUES (1) ON CONFLICT DO NOTHING`,
 		`CREATE EXTENSION IF NOT EXISTS pg_trgm`,
@@ -152,14 +163,14 @@ func (s *Store) migrate(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS attachment_usage (month TEXT PRIMARY KEY CHECK(month ~ '^[0-9]{4}-[0-9]{2}$'), puts BIGINT NOT NULL DEFAULT 0, gets BIGINT NOT NULL DEFAULT 0, bytes_added BIGINT NOT NULL DEFAULT 0)`,
 		`INSERT INTO schema_version(version) VALUES (3) ON CONFLICT DO NOTHING`}
 	for _, q := range stmts {
-		if _, err := s.pool.Exec(ctx, q); err != nil {
+		if _, err := tx.Exec(ctx, q); err != nil {
 			if q == `CREATE EXTENSION IF NOT EXISTS pg_trgm` {
 				return ErrTrigramUnavailable
 			}
 			return err
 		}
 	}
-	return nil
+	return tx.Commit(ctx)
 }
 func validName(x string) bool        { return nameRE.MatchString(x) }
 func validText(x string, n int) bool { return len(x) <= n && !strings.ContainsRune(x, 0) }
