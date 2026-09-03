@@ -181,8 +181,14 @@ func isText(m string) bool {
 	return strings.HasPrefix(m, "text/") || m == "application/json" || m == "application/x-ndjson"
 }
 func isImage(m string) bool { return strings.HasPrefix(m, "image/") }
-func unsafeForTextSniff(m string) bool {
-	return m == "application/octet-stream" || isImage(m) || m == "application/pdf" || strings.HasPrefix(m, "application/x-")
+func textSniffAllowed(m string) bool {
+	return m == "text/plain" || m == "text/html" || m == "application/json" || m == "application/x-ndjson"
+}
+func hasNULPrefix(body []byte) bool {
+	if len(body) > 8<<10 {
+		body = body[:8<<10]
+	}
+	return bytes.IndexByte(body, 0) >= 0
 }
 func validate(c Config, name, declared string, body []byte) (string, error) {
 	if int64(len(body)) > c.MaxBytes {
@@ -206,10 +212,10 @@ func validate(c Config, name, declared string, body []byte) (string, error) {
 		return "", ErrMIME
 	}
 	// Go's sniffer intentionally labels most UTF-8 formats as text/plain. For
-	// allowlisted text subtypes the declared type is authoritative, but never if
-	// bytes identify as binary, image, PDF, or an executable-ish application type.
+	// allowlisted text subtypes the declared type is authoritative, but only when
+	// the sniff itself is a known textual type and its first 8 KiB has no NUL.
 	if isText(declared) {
-		if unsafeForTextSniff(sniff) {
+		if !textSniffAllowed(sniff) || hasNULPrefix(body) {
 			return "", ErrMIME
 		}
 	} else if isImage(declared) || declared == "application/pdf" {

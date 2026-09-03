@@ -43,4 +43,6 @@ jobs:
         with: {go-version: stable}
       - run: GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -o handoffkeep-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/handoffkeep
       - uses: actions/upload-artifact@v4
-        with: {name: handoffkeep-${{ matrix.goos }}-${{ matrix.goarch }}, path: handoffkeep-*}
+        with:
+          name: handoffkeep-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: handoffkeep-*

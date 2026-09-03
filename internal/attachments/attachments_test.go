@@ -147,6 +147,30 @@ func TestDefaultAllowlistAcceptsAllDeclaredTypesAndRejectsDisguises(t *testing.T
 	}
 }
 
+func TestTextDeclarationsRejectBinarySniffsAndNUL(t *testing.T) {
+	allow := map[string]bool{}
+	for _, x := range strings.Split("image/png,image/jpeg,image/gif,text/html,text/plain,text/markdown,application/json,application/pdf,text/csv,application/x-ndjson,text/x-log", ",") {
+		allow[x] = true
+	}
+	m := &Manager{Store: &fakeDB{rows: map[string]store.Attachment{}}, Objects: &fakeObjects{objects: map[string][]byte{}}, Enabled: true, Config: Config{MaxBytes: 1000, StorageCap: 10000, PutCap: 100, GetCap: 100, Allow: allow}}
+	binaries := []struct {
+		name string
+		body []byte
+	}{
+		{"zip", []byte("PK\x03\x04\x14\x00")}, {"wasm", []byte("\x00asm\x01\x00\x00\x00")}, {"ogg", []byte("OggS\x00\x02")}, {"postscript", []byte("%!PS-Adobe-3.0")}, {"wave", []byte("RIFF\x24\x00\x00\x00WAVEfmt ")}, {"mpeg", []byte("ID3\x04\x00\x00")}, {"mp4", []byte("\x00\x00\x00\x18ftypmp42")}, {"avi", []byte("RIFF\x24\x00\x00\x00AVI ")}, {"ttf", []byte("\x00\x01\x00\x00\x00\x10")}, {"woff", []byte("wOFF\x00\x01\x00\x00")},
+	}
+	for _, binary := range binaries {
+		for _, declared := range []struct{ name, mime string }{{"x.txt", "text/plain"}, {"x.md", "text/markdown"}, {"x.json", "application/json"}} {
+			if _, _, err := m.Put(t.Context(), "node", binary.name+declared.name, declared.mime, "", binary.body); !errors.Is(err, ErrMIME) {
+				t.Fatalf("%s as %s: %v", binary.name, declared.mime, err)
+			}
+		}
+	}
+	if _, _, err := m.Put(t.Context(), "node", "nul.txt", "text/plain", "", []byte("safe\x00binary")); !errors.Is(err, ErrMIME) {
+		t.Fatalf("NUL text=%v", err)
+	}
+}
+
 func TestParseRef(t *testing.T) {
 	for _, ref := range []string{"checkpoint:12", "document:jobs/a.md", "memory:agent/name", ""} {
 		if _, _, err := ParseRef(ref); err != nil {
