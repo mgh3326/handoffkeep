@@ -1,6 +1,68 @@
 # handoffkeep
 A durable home for coding-agent handoffs, working memory, and documents across sessions and machines.
 
+## Tasks
+
+`tasks` is the durable, Postgres-backed work queue for captains. A task belongs
+to a lane; `parent_lane` lets a parent captain list pending decisions from its
+child lanes. Creation starts in `backlog`. Claiming and `next` are atomic, so
+only one session can claim an item. Every state change, including a claim, is
+recorded in `task_events`.
+
+```bash
+handoffkeep tasks add --lane captain --title "add queue endpoint" --kind implement --priority 10
+handoffkeep tasks list --lane captain --state backlog
+handoffkeep tasks next --lane captain --by captain-session  # exits 3 when empty
+handoffkeep tasks transition 42 --to in_progress --note "started"
+handoffkeep tasks transition 42 --to needs_decision --question "Which interface should own this?"
+handoffkeep tasks list --parent-lane captain --state needs_decision
+handoffkeep tasks show 42
+```
+
+`add` accepts `--parent-lane`, `--pr`, `--head-sha`, `--report-path`, and
+`--job-id` as durable references. `transition` accepts the same reference flags.
+`needs_decision` always requires `--question`.
+
+```mermaid
+stateDiagram-v2
+    [*] --> backlog
+    backlog --> claimed: claim / next
+    backlog --> hold
+    backlog --> dropped
+    claimed --> in_progress
+    claimed --> hold
+    claimed --> needs_decision
+    claimed --> dropped
+    in_progress --> verifying
+    in_progress --> join
+    in_progress --> hold
+    in_progress --> needs_decision
+    in_progress --> dropped
+    verifying --> in_progress: fix needed
+    verifying --> merged
+    verifying --> hold
+    verifying --> needs_decision
+    verifying --> dropped
+    join --> in_progress
+    join --> merged
+    join --> needs_decision
+    join --> dropped
+    hold --> backlog
+    hold --> needs_decision
+    hold --> dropped
+    needs_decision --> backlog
+    needs_decision --> claimed
+    needs_decision --> hold
+    needs_decision --> dropped
+    state merged
+    state dropped
+```
+
+The HTTP API uses the usual bearer token: `POST /v1/tasks`, `GET /v1/tasks`,
+`GET /v1/tasks/{id}`, `POST /v1/tasks/{id}/claim`, and
+`POST /v1/tasks/{id}/transition`. `POST /v1/tasks/next` supports the CLI's
+atomic `next` operation. Invalid state changes and competing claims return 409.
+
 ## Attachments (R2)
 
 Attachments are immutable, content-addressed private R2 objects. Configure all

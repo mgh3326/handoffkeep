@@ -227,3 +227,44 @@ func (c Client) AttachmentUsage(ctx context.Context) (store.AttachmentUsage, err
 	e := c.call(ctx, "GET", "/v1/usage", nil, &x)
 	return x.Usage, e
 }
+
+func (c Client) CreateTask(ctx context.Context, x store.Task) (store.Task, error) {
+	var out store.Task
+	err := c.call(ctx, "POST", "/v1/tasks", x, &out)
+	return out, err
+}
+func (c Client) ClaimTask(ctx context.Context, id int64, claimedBy string) (store.Task, error) {
+	var out store.Task
+	err := c.call(ctx, "POST", fmt.Sprintf("/v1/tasks/%d/claim", id), map[string]string{"claimed_by": claimedBy}, &out)
+	return out, err
+}
+func (c Client) NextTask(ctx context.Context, lane, claimedBy string) (store.Task, error) {
+	var out store.Task
+	err := c.call(ctx, "POST", "/v1/tasks/next", map[string]string{"lane": lane, "claimed_by": claimedBy}, &out)
+	return out, err
+}
+func (c Client) TransitionTask(ctx context.Context, id int64, to, note string, refs *store.TaskRefs) (store.Task, error) {
+	var out store.Task
+	err := c.call(ctx, "POST", fmt.Sprintf("/v1/tasks/%d/transition", id), struct {
+		To   string          `json:"to"`
+		Note string          `json:"note"`
+		Refs *store.TaskRefs `json:"refs,omitempty"`
+	}{to, note, refs}, &out)
+	return out, err
+}
+func (c Client) ListTasks(ctx context.Context, lane, state, parentLane string, limit int) ([]store.Task, error) {
+	var out struct {
+		Tasks []store.Task `json:"tasks"`
+	}
+	q := url.Values{"lane": {lane}, "state": {state}, "parent_lane": {parentLane}, "limit": {fmt.Sprint(limit)}}
+	err := c.call(ctx, "GET", "/v1/tasks?"+q.Encode(), nil, &out)
+	return out.Tasks, err
+}
+func (c Client) GetTask(ctx context.Context, id int64) (store.Task, bool, error) {
+	var out store.Task
+	err := c.call(ctx, "GET", fmt.Sprintf("/v1/tasks/%d", id), nil, &out)
+	if err != nil && err.Error() == "not_found" {
+		return out, false, nil
+	}
+	return out, err == nil, err
+}
