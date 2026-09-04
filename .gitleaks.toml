@@ -1,0 +1,6 @@
+# 테스트 픽스처 전용 가짜 키(2026-09-04): 이 단위 테스트 파일의
+# 합성 credential-shaped 입력만 허용한다. 실제 소스와 다른 경로는 검사한다.
+[allowlist]
+paths = [
+  '''internal/guard/guard_test\.go''',
+]
