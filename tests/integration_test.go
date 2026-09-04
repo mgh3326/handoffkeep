@@ -33,7 +33,7 @@ func TestPostgresMigrationAndCoreRoundTrip(t *testing.T) {
 	if err != nil || len(items) == 0 {
 		t.Fatalf("recent=%v err=%v", items, err)
 	}
-	if _, err := svc.Checkpoint(t.Context(), "test-client", store.Checkpoint{Session: "hk-test", Kind: "checkpoint", Title: "bad", Body: "sk-abcdefghijk"}); err == nil {
+	if _, err := svc.Checkpoint(t.Context(), "test-client", store.Checkpoint{Session: "hk-test", Kind: "checkpoint", Title: "bad", Body: "sk-abcdefghijklmnopqrstuvwxyz"}); err == nil {
 		t.Fatal("secret guard accepted content")
 	}
 }

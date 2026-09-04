@@ -116,7 +116,8 @@ func TestContentGuards(t *testing.T) {
 	if _, err := validate(c, "x.txt", "image/png", []byte("plain text")); !errors.Is(err, ErrMIME) {
 		t.Fatalf("mime guard=%v", err)
 	}
-	if _, err := validate(c, "x.txt", "text/plain", []byte("sk-abcdefghijk")); err == nil || guard.Match("sk-abcdefghijk") == "" {
+	secret := "sk-" + strings.Repeat("a", 48)
+	if _, err := validate(c, "x.txt", "text/plain", []byte(secret)); err == nil || guard.Match(secret) == "" {
 		t.Fatalf("secret guard=%v", err)
 	}
 }
