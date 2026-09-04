@@ -45,13 +45,13 @@ stateDiagram-v2
     verifying --> dropped
     join --> in_progress
     join --> merged
-    join --> hold
     join --> needs_decision
     join --> dropped
     hold --> backlog
     hold --> needs_decision
     hold --> dropped
     needs_decision --> backlog
+    needs_decision --> claimed
     needs_decision --> hold
     needs_decision --> dropped
     state merged

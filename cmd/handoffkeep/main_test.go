@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -139,5 +140,24 @@ func TestCheckpointRefsAndSearchFlagsAfterQuery(t *testing.T) {
 	}
 	if !bytes.Contains(out.Bytes(), []byte(`"refs":{"prs":["26"]}`)) {
 		t.Fatalf("search did not print refs: %s", out.String())
+	}
+}
+
+func TestTasksNextEmptyUsesExitCodeThree(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/tasks/next" {
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "queue_empty"})
+	}))
+	defer server.Close()
+	t.Setenv("HANDOFFKEEP_URL", server.URL)
+	t.Setenv("HANDOFFKEEP_TOKEN", "test-token")
+	err := run([]string{"tasks", "next", "--lane", "empty-lane", "--by", "captain"}, &bytes.Buffer{}, &bytes.Buffer{})
+	var exit exitCodeError
+	if !errors.As(err, &exit) || exit.code != 3 {
+		t.Fatalf("error=%v", err)
 	}
 }

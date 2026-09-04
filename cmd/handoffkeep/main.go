@@ -218,7 +218,7 @@ func tasksCmd(args []string, out io.Writer) error {
 		}
 		x, err := c.NextTask(ctx, *lane, *by)
 		if err != nil {
-			if err.Error() == "task_not_found" {
+			if err.Error() == "queue_empty" {
 				return exitCodeError{code: 3, err: errors.New("no backlog task")}
 			}
 			return err

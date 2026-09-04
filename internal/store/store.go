@@ -34,6 +34,9 @@ var taskStates = map[string]bool{"backlog": true, "claimed": true, "in_progress"
 var (
 	ErrTaskConflict = errors.New("task_conflict")
 	ErrTaskNotFound = errors.New("task_not_found")
+	// ErrQueueEmpty is deliberately distinct from a missing task.  It lets
+	// queue consumers treat an empty lane as an expected terminal condition.
+	ErrQueueEmpty = errors.New("queue_empty")
 )
 
 // TaskRefs holds the durable links that let a captain resume work without
@@ -52,6 +55,7 @@ type TaskEvent struct {
 	To     string    `json:"to"`
 	By     string    `json:"by"`
 	Note   string    `json:"note,omitempty"`
+	Refs   *TaskRefs `json:"refs,omitempty"`
 	At     time.Time `json:"at"`
 }
 
@@ -210,7 +214,13 @@ func (s *Store) migrate(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS tasks_parent_lane_state_priority ON tasks(parent_lane, state, priority DESC, created_at ASC, id ASC)`,
 		`CREATE TABLE IF NOT EXISTS task_events (id BIGSERIAL PRIMARY KEY, task_id BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE, "from" TEXT NOT NULL, "to" TEXT NOT NULL, "by" TEXT NOT NULL, note TEXT NOT NULL DEFAULT '', at TIMESTAMPTZ NOT NULL)`,
 		`CREATE INDEX IF NOT EXISTS task_events_task_at ON task_events(task_id, at ASC, id ASC)`,
-		`INSERT INTO schema_version(version) VALUES (4) ON CONFLICT DO NOTHING`}
+		`INSERT INTO schema_version(version) VALUES (4) ON CONFLICT DO NOTHING`,
+		// Version 5 is additive: historic events retain NULL refs while all new
+		// events record the complete refs snapshot for their transition.
+		`ALTER TABLE task_events ADD COLUMN IF NOT EXISTS refs JSONB`,
+		`CREATE OR REPLACE FUNCTION handoffkeep_task_events_append_only() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'task_events is append-only'; RETURN NULL; END; $$`,
+		`DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'task_events_append_only' AND tgrelid = 'task_events'::regclass) THEN CREATE TRIGGER task_events_append_only BEFORE UPDATE OR DELETE OR TRUNCATE ON task_events FOR EACH STATEMENT EXECUTE FUNCTION handoffkeep_task_events_append_only(); END IF; END $$`,
+		`INSERT INTO schema_version(version) VALUES (5) ON CONFLICT DO NOTHING`}
 	for _, q := range stmts {
 		if _, err := tx.Exec(ctx, q); err != nil {
 			if q == `CREATE EXTENSION IF NOT EXISTS pg_trgm` {
@@ -231,6 +241,28 @@ func validTaskRefs(x TaskRefs) bool {
 		}
 	}
 	return true
+}
+
+func rejectTaskRefs(x TaskRefs) error {
+	return guard.Reject(strings.Join([]string{x.PR, x.HeadSHA, x.ReportPath, x.JobID}, "\n"))
+}
+
+// mergeTaskRefs applies only fields provided by a transition. Empty fields are
+// omitted by every supported client and therefore preserve the prior value.
+func mergeTaskRefs(old, patch TaskRefs) TaskRefs {
+	if patch.PR != "" {
+		old.PR = patch.PR
+	}
+	if patch.HeadSHA != "" {
+		old.HeadSHA = patch.HeadSHA
+	}
+	if patch.ReportPath != "" {
+		old.ReportPath = patch.ReportPath
+	}
+	if patch.JobID != "" {
+		old.JobID = patch.JobID
+	}
+	return old
 }
 
 func validTask(x Task) bool {
@@ -254,6 +286,9 @@ func (s *Store) CreateTask(ctx context.Context, x Task) (Task, error) {
 	if err := guard.Reject(x.Title); err != nil {
 		return x, err
 	}
+	if err := rejectTaskRefs(x.Refs); err != nil {
+		return x, err
+	}
 	refs, err := json.Marshal(x.Refs)
 	if err != nil {
 		return x, errors.New("invalid task refs")
@@ -265,16 +300,20 @@ func (s *Store) CreateTask(ctx context.Context, x Task) (Task, error) {
 	return x, err
 }
 
+// TaskTransitions is the single authoritative task state graph. README.md is
+// checked against this table by TestTaskTransitionDocumentation.
+var TaskTransitions = map[string]map[string]bool{
+	"backlog":        {"claimed": true, "hold": true, "dropped": true},
+	"claimed":        {"in_progress": true, "hold": true, "needs_decision": true, "dropped": true},
+	"in_progress":    {"verifying": true, "join": true, "hold": true, "needs_decision": true, "dropped": true},
+	"verifying":      {"in_progress": true, "merged": true, "hold": true, "needs_decision": true, "dropped": true},
+	"join":           {"in_progress": true, "merged": true, "needs_decision": true, "dropped": true},
+	"hold":           {"backlog": true, "needs_decision": true, "dropped": true},
+	"needs_decision": {"backlog": true, "claimed": true, "hold": true, "dropped": true},
+}
+
 func taskTransitionAllowed(from, to string) bool {
-	return map[string]map[string]bool{
-		"backlog":        {"claimed": true, "hold": true, "dropped": true},
-		"claimed":        {"in_progress": true, "hold": true, "needs_decision": true, "dropped": true},
-		"in_progress":    {"verifying": true, "join": true, "hold": true, "needs_decision": true, "dropped": true},
-		"verifying":      {"in_progress": true, "merged": true, "hold": true, "needs_decision": true, "dropped": true},
-		"join":           {"in_progress": true, "merged": true, "hold": true, "needs_decision": true, "dropped": true},
-		"hold":           {"backlog": true, "needs_decision": true, "dropped": true},
-		"needs_decision": {"backlog": true, "hold": true, "dropped": true},
-	}[from][to]
+	return TaskTransitions[from][to]
 }
 
 func (s *Store) claimTaskTx(ctx context.Context, tx pgx.Tx, id int64, by string) (Task, error) {
@@ -288,7 +327,11 @@ func (s *Store) claimTaskTx(ctx context.Context, tx pgx.Tx, id int64, by string)
 		}
 		return Task{}, err
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO task_events(task_id,"from","to","by",note,at) VALUES($1,'backlog','claimed',$2,'',$3)`, id, by, x.UpdatedAt); err != nil {
+	refs, err := json.Marshal(x.Refs)
+	if err != nil {
+		return Task{}, err
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO task_events(task_id,"from","to","by",note,refs,at) VALUES($1,'backlog','claimed',$2,'',$3::jsonb,$4)`, id, by, string(refs), x.UpdatedAt); err != nil {
 		return Task{}, err
 	}
 	return x, nil
@@ -320,7 +363,7 @@ func (s *Store) NextTask(ctx context.Context, lane, by string) (Task, error) {
 	var id int64
 	err = tx.QueryRow(ctx, `SELECT id FROM tasks WHERE lane=$1 AND state='backlog' ORDER BY priority DESC,created_at ASC,id ASC FOR UPDATE SKIP LOCKED LIMIT 1`, lane).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return Task{}, ErrTaskNotFound
+		return Task{}, ErrQueueEmpty
 	}
 	if err != nil {
 		return Task{}, err
@@ -335,6 +378,14 @@ func (s *Store) NextTask(ctx context.Context, lane, by string) (Task, error) {
 func (s *Store) TransitionTask(ctx context.Context, id int64, to, by, note string, refs *TaskRefs) (Task, error) {
 	if !taskStates[to] || !validText(by, 128) || by == "" || !validText(note, MaxBytes) || (refs != nil && !validTaskRefs(*refs)) {
 		return Task{}, errors.New("invalid task transition")
+	}
+	if err := guard.Reject(note); err != nil {
+		return Task{}, err
+	}
+	if refs != nil {
+		if err := rejectTaskRefs(*refs); err != nil {
+			return Task{}, err
+		}
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -356,7 +407,7 @@ func (s *Store) TransitionTask(ctx context.Context, id int64, to, by, note strin
 		return Task{}, errors.New("needs_decision requires question")
 	}
 	if refs != nil {
-		x.Refs = *refs
+		x.Refs = mergeTaskRefs(x.Refs, *refs)
 	}
 	encoded, err := json.Marshal(x.Refs)
 	if err != nil {
@@ -366,7 +417,7 @@ func (s *Store) TransitionTask(ctx context.Context, id int64, to, by, note strin
 	if err = scanTask(tx.QueryRow(ctx, `UPDATE tasks SET state=$2,refs=$3::jsonb,updated_at=$4 WHERE id=$1 RETURNING `+taskColumns, id, to, string(encoded), x.UpdatedAt), &x); err != nil {
 		return Task{}, err
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO task_events(task_id,"from","to","by",note,at) VALUES($1,$2,$3,$4,$5,$6)`, id, from, to, by, note, x.UpdatedAt); err != nil {
+	if _, err = tx.Exec(ctx, `INSERT INTO task_events(task_id,"from","to","by",note,refs,at) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7)`, id, from, to, by, note, string(encoded), x.UpdatedAt); err != nil {
 		return Task{}, err
 	}
 	return x, tx.Commit(ctx)
@@ -421,15 +472,22 @@ func (s *Store) GetTask(ctx context.Context, id int64) (Task, bool, error) {
 		}
 		return Task{}, false, err
 	}
-	rows, err := s.pool.Query(ctx, `SELECT id,task_id,"from","to","by",note,at FROM task_events WHERE task_id=$1 ORDER BY at,id`, id)
+	rows, err := s.pool.Query(ctx, `SELECT id,task_id,"from","to","by",note,refs,at FROM task_events WHERE task_id=$1 ORDER BY at,id`, id)
 	if err != nil {
 		return Task{}, false, err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var e TaskEvent
-		if err := rows.Scan(&e.ID, &e.TaskID, &e.From, &e.To, &e.By, &e.Note, &e.At); err != nil {
+		var refs []byte
+		if err := rows.Scan(&e.ID, &e.TaskID, &e.From, &e.To, &e.By, &e.Note, &refs, &e.At); err != nil {
 			return Task{}, false, err
+		}
+		if len(refs) != 0 {
+			e.Refs = &TaskRefs{}
+			if err := json.Unmarshal(refs, e.Refs); err != nil {
+				return Task{}, false, err
+			}
 		}
 		x.Events = append(x.Events, e)
 	}

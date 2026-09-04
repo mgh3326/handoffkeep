@@ -207,6 +207,9 @@ func appErr(w http.ResponseWriter, e error) {
 	case errors.Is(e, store.ErrTaskNotFound):
 		jsonOut(w, http.StatusNotFound, map[string]string{"error": "not_found"})
 		return
+	case errors.Is(e, store.ErrQueueEmpty):
+		jsonOut(w, http.StatusNotFound, map[string]string{"error": "queue_empty"})
+		return
 	}
 	if p, ok := strings.CutPrefix(e.Error(), "secret_like_content:"); ok {
 		jsonOut(w, 400, map[string]string{"error": "secret_like_content", "pattern": p})

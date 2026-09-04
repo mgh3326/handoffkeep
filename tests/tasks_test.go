@@ -1,15 +1,18 @@
 package tests
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/mgh3326/handoffkeep/internal/api"
 	"github.com/mgh3326/handoffkeep/internal/remote"
 	"github.com/mgh3326/handoffkeep/internal/store"
@@ -125,7 +128,128 @@ func TestTaskNextClaimsPriorityThenCreationOrder(t *testing.T) {
 			t.Fatalf("got=%+v err=%v want=%d", got, err, want)
 		}
 	}
-	if _, err := s.NextTask(t.Context(), lane, "captain-a"); !errors.Is(err, store.ErrTaskNotFound) {
+	if _, err := s.NextTask(t.Context(), lane, "captain-a"); !errors.Is(err, store.ErrQueueEmpty) {
 		t.Fatalf("empty next err=%v", err)
+	}
+}
+
+func TestTaskNextEmptyIsExplicitQueueEmptyAndCLIExitThree(t *testing.T) {
+	s := taskTestStore(t)
+	h := taskHTTP(s)
+	defer h.Close()
+	lane := taskLane(t)
+	resp := request(t, h.Client(), http.MethodPost, h.URL+"/v1/tasks/next", "node-token", map[string]string{"lane": lane, "claimed_by": "captain"})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+	var body map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil || body["error"] != "queue_empty" {
+		t.Fatalf("body=%v err=%v", body, err)
+	}
+	client := remote.Client{URL: h.URL, Token: "node-token", HTTP: h.Client()}
+	if _, err := client.NextTask(t.Context(), lane, "captain"); err == nil || err.Error() != "queue_empty" {
+		t.Fatalf("remote error=%v", err)
+	}
+}
+
+func TestTaskTransitionGraphAndRefsSnapshots(t *testing.T) {
+	s := taskTestStore(t)
+	// join -> hold is forbidden; needs_decision -> claimed is the canonical
+	// decision-resume path (backlog remains an allowed alternative).
+	join := newTask(t, s, taskLane(t), "joined", 0)
+	if _, err := s.ClaimTask(t.Context(), join.ID, "captain"); err != nil {
+		t.Fatal(err)
+	}
+	for _, to := range []string{"in_progress", "join"} {
+		if _, err := s.TransitionTask(t.Context(), join.ID, to, "node", "", nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.TransitionTask(t.Context(), join.ID, "hold", "node", "", nil); !errors.Is(err, store.ErrTaskConflict) {
+		t.Fatalf("join->hold error=%v", err)
+	}
+	decision := newTask(t, s, taskLane(t), "decision", 0)
+	if _, err := s.ClaimTask(t.Context(), decision.ID, "captain"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.TransitionTask(t.Context(), decision.ID, "needs_decision", "node", "choose", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.TransitionTask(t.Context(), decision.ID, "claimed", "node", "resolved", nil); err != nil {
+		t.Fatalf("needs_decision->claimed: %v", err)
+	}
+
+	refs := store.TaskRefs{PR: "4", HeadSHA: "abc123", ReportPath: "report.md", JobID: "job-4"}
+	task, err := s.CreateTask(t.Context(), store.Task{Lane: taskLane(t), Title: "preserve refs", Kind: "implement", Refs: refs, CreatedBy: "node"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.ClaimTask(t.Context(), task.ID, "captain"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.TransitionTask(t.Context(), task.ID, "in_progress", "node", "started", &store.TaskRefs{PR: "5"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := store.TaskRefs{PR: "5", HeadSHA: "abc123", ReportPath: "report.md", JobID: "job-4"}
+	if !reflect.DeepEqual(got.Refs, want) {
+		t.Fatalf("refs=%+v want=%+v", got.Refs, want)
+	}
+	shown, found, err := s.GetTask(t.Context(), task.ID)
+	if err != nil || !found || len(shown.Events) != 2 || shown.Events[1].Refs == nil || !reflect.DeepEqual(*shown.Events[1].Refs, want) {
+		t.Fatalf("show=%+v found=%v err=%v", shown, found, err)
+	}
+}
+
+func TestTaskRejectsSecretNoteQuestionAndRefsWithoutStorage(t *testing.T) {
+	s := taskTestStore(t)
+	h := taskHTTP(s)
+	defer h.Close()
+	secret := "sk-abcdefghijklmnopqrstuvwxyz"
+	task := newTask(t, s, taskLane(t), "secret test", 0)
+	if _, err := s.ClaimTask(t.Context(), task.ID, "captain"); err != nil {
+		t.Fatal(err)
+	}
+	for _, body := range []map[string]any{
+		{"to": "in_progress", "note": secret},
+		{"to": "in_progress", "refs": map[string]string{"pr": secret}},
+		{"to": "needs_decision", "note": secret},
+	} {
+		resp := request(t, h.Client(), http.MethodPost, h.URL+"/v1/tasks/"+fmt.Sprint(task.ID)+"/transition", "node-token", body)
+		if resp.StatusCode != http.StatusBadRequest {
+			resp.Body.Close()
+			t.Fatalf("body=%v status=%d", body, resp.StatusCode)
+		}
+		resp.Body.Close()
+	}
+	got, found, err := s.GetTask(t.Context(), task.ID)
+	if err != nil || !found || got.State != "claimed" || len(got.Events) != 1 {
+		t.Fatalf("task=%+v found=%v err=%v", got, found, err)
+	}
+}
+
+func TestTaskEventsDatabaseAppendOnly(t *testing.T) {
+	s := taskTestStore(t)
+	task := newTask(t, s, taskLane(t), "append only", 0)
+	if _, err := s.ClaimTask(t.Context(), task.ID, "captain"); err != nil {
+		t.Fatal(err)
+	}
+	got, found, err := s.GetTask(t.Context(), task.ID)
+	if err != nil || !found || len(got.Events) != 1 {
+		t.Fatalf("task=%+v found=%v err=%v", got, found, err)
+	}
+	db, err := pgx.Connect(t.Context(), os.Getenv("HANDOFFKEEP_TEST_DB_URL"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close(t.Context())
+	for _, sql := range []string{
+		"UPDATE task_events SET note='mutated' WHERE id=$1",
+		"DELETE FROM task_events WHERE id=$1",
+	} {
+		if _, err := db.Exec(t.Context(), sql, got.Events[0].ID); err == nil {
+			t.Fatalf("append-only mutation succeeded: %s", sql)
+		}
 	}
 }
