@@ -30,10 +30,12 @@ var memoryTypes = map[string]bool{"user": true, "feedback": true, "project": tru
 var documentKinds = map[string]bool{"brief": true, "report": true, "answer": true, "handoff": true, "note": true, "other": true}
 var taskKinds = map[string]bool{"implement": true, "verify": true, "fix": true, "decide": true, "ops": true}
 var taskStates = map[string]bool{"backlog": true, "claimed": true, "in_progress": true, "verifying": true, "join": true, "hold": true, "needs_decision": true, "merged": true, "dropped": true}
+var relayEventKinds = map[string]bool{"job.completed": true, "job.escalate": true, "job.joined": true}
 
 var (
-	ErrTaskConflict = errors.New("task_conflict")
-	ErrTaskNotFound = errors.New("task_not_found")
+	ErrTaskConflict       = errors.New("task_conflict")
+	ErrTaskNotFound       = errors.New("task_not_found")
+	ErrRelayEventNotFound = errors.New("relay_event_not_found")
 	// ErrQueueEmpty is deliberately distinct from a missing task.  It lets
 	// queue consumers treat an empty lane as an expected terminal condition.
 	ErrQueueEmpty = errors.New("queue_empty")
@@ -73,6 +75,29 @@ type Task struct {
 	CreatedAt  time.Time   `json:"created_at"`
 	UpdatedAt  time.Time   `json:"updated_at"`
 	Events     []TaskEvent `json:"events,omitempty"`
+}
+
+// RelayEvent is a durable report from a worker to its owning lane.  Delivery
+// state belongs here rather than in the relay hub so it survives restarts.
+type RelayEvent struct {
+	ID             int64      `json:"id"`
+	Kind           string     `json:"kind"`
+	JobID          string     `json:"job_id"`
+	Epoch          int        `json:"epoch"`
+	OwnerLane      string     `json:"owner_lane"`
+	Machine        string     `json:"machine"`
+	PaneID         string     `json:"pane_id"`
+	ReportPath     string     `json:"report_path"`
+	ReportLastLine string     `json:"report_last_line"`
+	Question       string     `json:"question"`
+	PR             string     `json:"pr"`
+	Head           string     `json:"head"`
+	Reason         string     `json:"reason"`
+	EventTime      *time.Time `json:"event_time"`
+	ReceivedAt     time.Time  `json:"received_at"`
+	DeliveredAt    *time.Time `json:"delivered_at"`
+	DeliveredTo    string     `json:"delivered_to"`
+	Attempts       int        `json:"attempts"`
 }
 
 type Store struct{ pool *pgxpool.Pool }
@@ -221,6 +246,11 @@ func (s *Store) migrate(ctx context.Context) error {
 		`CREATE OR REPLACE FUNCTION handoffkeep_task_events_append_only() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'task_events is append-only'; RETURN NULL; END; $$`,
 		`DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'task_events_append_only' AND tgrelid = 'task_events'::regclass) THEN CREATE TRIGGER task_events_append_only BEFORE UPDATE OR DELETE OR TRUNCATE ON task_events FOR EACH STATEMENT EXECUTE FUNCTION handoffkeep_task_events_append_only(); END IF; END $$`,
 		`INSERT INTO schema_version(version) VALUES (5) ON CONFLICT DO NOTHING`}
+	stmts = append(stmts,
+		`CREATE TABLE IF NOT EXISTS relay_events (id BIGSERIAL PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('job.completed','job.escalate','job.joined')), job_id TEXT NOT NULL, epoch INTEGER NOT NULL DEFAULT 0, owner_lane TEXT NOT NULL, machine TEXT NOT NULL DEFAULT '', pane_id TEXT NOT NULL DEFAULT '', report_path TEXT NOT NULL DEFAULT '', report_last_line TEXT NOT NULL DEFAULT '', question TEXT NOT NULL DEFAULT '', pr TEXT NOT NULL DEFAULT '', head TEXT NOT NULL DEFAULT '', reason TEXT NOT NULL DEFAULT '', event_time TIMESTAMPTZ, received_at TIMESTAMPTZ NOT NULL, delivered_at TIMESTAMPTZ, delivered_to TEXT NOT NULL DEFAULT '', attempts INTEGER NOT NULL DEFAULT 0)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS relay_events_idempotency ON relay_events(kind, job_id, epoch, report_path, reason)`,
+		`CREATE INDEX IF NOT EXISTS relay_events_undelivered ON relay_events(owner_lane, id ASC) WHERE delivered_at IS NULL`,
+		`INSERT INTO schema_version(version) VALUES (6) ON CONFLICT DO NOTHING`)
 	for _, q := range stmts {
 		if _, err := tx.Exec(ctx, q); err != nil {
 			if q == `CREATE EXTENSION IF NOT EXISTS pg_trgm` {
@@ -492,6 +522,121 @@ func (s *Store) GetTask(ctx context.Context, id int64) (Task, bool, error) {
 		x.Events = append(x.Events, e)
 	}
 	return x, true, rows.Err()
+}
+
+const relayEventColumns = `id,kind,job_id,epoch,owner_lane,machine,pane_id,report_path,report_last_line,question,pr,head,reason,event_time,received_at,delivered_at,delivered_to,attempts`
+
+func scanRelayEvent(row interface{ Scan(...any) error }, x *RelayEvent) error {
+	return row.Scan(
+		&x.ID, &x.Kind, &x.JobID, &x.Epoch, &x.OwnerLane, &x.Machine,
+		&x.PaneID, &x.ReportPath, &x.ReportLastLine, &x.Question, &x.PR,
+		&x.Head, &x.Reason, &x.EventTime, &x.ReceivedAt, &x.DeliveredAt,
+		&x.DeliveredTo, &x.Attempts,
+	)
+}
+
+func scanRelayEventCreated(row interface{ Scan(...any) error }, x *RelayEvent, created *bool) error {
+	return row.Scan(
+		&x.ID, &x.Kind, &x.JobID, &x.Epoch, &x.OwnerLane, &x.Machine,
+		&x.PaneID, &x.ReportPath, &x.ReportLastLine, &x.Question, &x.PR,
+		&x.Head, &x.Reason, &x.EventTime, &x.ReceivedAt, &x.DeliveredAt,
+		&x.DeliveredTo, &x.Attempts, created,
+	)
+}
+
+func validRelayEvent(x RelayEvent) bool {
+	if !relayEventKinds[x.Kind] || x.JobID == "" || x.OwnerLane == "" {
+		return false
+	}
+	for _, v := range []string{x.Kind, x.JobID, x.OwnerLane, x.Machine, x.PaneID, x.ReportPath, x.ReportLastLine, x.Question, x.PR, x.Head, x.Reason} {
+		if !validText(v, MaxBytes) {
+			return false
+		}
+	}
+	return true
+}
+
+// AppendRelayEvent inserts a durable relay event. Its conflict update is part
+// of the same statement so concurrent duplicate submissions share one row.
+func (s *Store) AppendRelayEvent(ctx context.Context, x RelayEvent) (RelayEvent, bool, error) {
+	if !validRelayEvent(x) {
+		return x, false, errors.New("invalid relay event")
+	}
+	if err := guard.Reject(x.Question); err != nil {
+		return x, false, err
+	}
+	if err := guard.Reject(x.Reason); err != nil {
+		return x, false, err
+	}
+	// These fields are server-owned. Zero-value strings also normalize omitted
+	// request fields to the non-NULL defaults required by the idempotency key.
+	x.ID, x.ReceivedAt, x.DeliveredAt, x.DeliveredTo, x.Attempts = 0, time.Time{}, nil, "", 0
+	var created bool
+	err := scanRelayEventCreated(s.pool.QueryRow(ctx, `INSERT INTO relay_events(kind,job_id,epoch,owner_lane,machine,pane_id,report_path,report_last_line,question,pr,head,reason,event_time,received_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,now()) ON CONFLICT (kind,job_id,epoch,report_path,reason) DO UPDATE SET attempts=relay_events.attempts+1 RETURNING `+relayEventColumns+`,(xmax=0) AS created`, x.Kind, x.JobID, x.Epoch, x.OwnerLane, x.Machine, x.PaneID, x.ReportPath, x.ReportLastLine, x.Question, x.PR, x.Head, x.Reason, x.EventTime), &x, &created)
+	if err != nil {
+		return x, false, err
+	}
+	return x, created, nil
+}
+
+// MarkRelayEventDelivered records the first successful delivery. Subsequent
+// calls are intentionally idempotent and return the original delivery time.
+func (s *Store) MarkRelayEventDelivered(ctx context.Context, id int64, machine, pane string) (RelayEvent, error) {
+	if id < 1 || !validText(machine, MaxBytes) || !validText(pane, MaxBytes) {
+		return RelayEvent{}, errors.New("invalid relay event delivery")
+	}
+	var x RelayEvent
+	err := scanRelayEvent(s.pool.QueryRow(ctx, `UPDATE relay_events SET delivered_at=now(),delivered_to=$2 WHERE id=$1 AND delivered_at IS NULL RETURNING `+relayEventColumns, id, machine+"/"+pane), &x)
+	if err == nil {
+		return x, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return RelayEvent{}, err
+	}
+	if err = scanRelayEvent(s.pool.QueryRow(ctx, `SELECT `+relayEventColumns+` FROM relay_events WHERE id=$1`, id), &x); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return RelayEvent{}, ErrRelayEventNotFound
+		}
+		return RelayEvent{}, err
+	}
+	return x, nil
+}
+
+// ListRelayEvents returns relay records in durable insertion order.
+func (s *Store) ListRelayEvents(ctx context.Context, lane string, undelivered bool, limit int) ([]RelayEvent, error) {
+	if !validText(lane, MaxBytes) {
+		return nil, errors.New("invalid relay event query")
+	}
+	if limit <= 0 {
+		limit = 200
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	q, args := `SELECT `+relayEventColumns+` FROM relay_events WHERE 1=1`, []any{}
+	if lane != "" {
+		args = append(args, lane)
+		q += fmt.Sprintf(" AND owner_lane=$%d", len(args))
+	}
+	if undelivered {
+		q += " AND delivered_at IS NULL"
+	}
+	args = append(args, limit)
+	q += fmt.Sprintf(" ORDER BY id ASC LIMIT $%d", len(args))
+	rows, err := s.pool.Query(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []RelayEvent{}
+	for rows.Next() {
+		var x RelayEvent
+		if err := scanRelayEvent(rows, &x); err != nil {
+			return nil, err
+		}
+		out = append(out, x)
+	}
+	return out, rows.Err()
 }
 func (s *Store) CreateCheckpoint(ctx context.Context, x Checkpoint) (Checkpoint, error) {
 	if !validName(x.Session) || !kinds[x.Kind] || x.Title == "" || !validText(x.Title, MaxBytes) || !validText(x.Body, MaxBytes) || !validName(x.CreatedBy) {

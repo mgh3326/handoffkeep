@@ -63,6 +63,21 @@ The HTTP API uses the usual bearer token: `POST /v1/tasks`, `GET /v1/tasks`,
 `POST /v1/tasks/{id}/transition`. `POST /v1/tasks/next` supports the CLI's
 atomic `next` operation. Invalid state changes and competing claims return 409.
 
+## Relay events
+
+Relay events persist worker completion, escalation, and join reports before a
+hub delivers them to an owner lane. Clients use `POST /v1/relay/events` to
+append an event, `POST /v1/relay/events/{id}/delivered` with
+`{"machine":"host-a","pane":"w1:p1"}` to record delivery, and
+`GET /v1/relay/events?undelivered=1&lane=lane-a` to find work still awaiting
+delivery. Omitting `lane` lists every lane; `undelivered=1` (or `true`) is for
+recovery workers that must only retry events without a recorded delivery.
+
+The idempotency key is `(kind, job_id, epoch, report_path, reason)`. A first
+append returns 201; a duplicate returns 200 with the same event ID. `attempts`
+starts at zero and increases once for every duplicate receipt, so it measures
+duplicate receive attempts rather than successful deliveries.
+
 ## Attachments (R2)
 
 Attachments are immutable, content-addressed private R2 objects. Configure all

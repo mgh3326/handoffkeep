@@ -100,6 +100,15 @@ func (s Service) ListTasks(ctx context.Context, lane, state, parentLane string, 
 func (s Service) GetTask(ctx context.Context, id int64) (store.Task, bool, error) {
 	return s.Store.GetTask(ctx, id)
 }
+func (s Service) AppendRelayEvent(ctx context.Context, x store.RelayEvent) (store.RelayEvent, bool, error) {
+	return s.Store.AppendRelayEvent(ctx, x)
+}
+func (s Service) MarkRelayEventDelivered(ctx context.Context, id int64, machine, pane string) (store.RelayEvent, error) {
+	return s.Store.MarkRelayEventDelivered(ctx, id, machine, pane)
+}
+func (s Service) ListRelayEvents(ctx context.Context, lane string, undelivered bool, limit int) ([]store.RelayEvent, error) {
+	return s.Store.ListRelayEvents(ctx, lane, undelivered, limit)
+}
 
 type Tokens map[string]string
 
@@ -167,6 +176,9 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("GET /v1/tasks/{id}", s.task)
 	m.HandleFunc("POST /v1/tasks/{id}/claim", s.taskClaim)
 	m.HandleFunc("POST /v1/tasks/{id}/transition", s.taskTransition)
+	m.HandleFunc("POST /v1/relay/events", s.relayEventsCreate)
+	m.HandleFunc("POST /v1/relay/events/{id}/delivered", s.relayEventDelivered)
+	m.HandleFunc("GET /v1/relay/events", s.relayEventsList)
 	return m
 }
 func (s Server) auth(w http.ResponseWriter, r *http.Request) (string, bool) {
@@ -205,6 +217,9 @@ func appErr(w http.ResponseWriter, e error) {
 		jsonOut(w, http.StatusConflict, map[string]string{"error": "task_conflict"})
 		return
 	case errors.Is(e, store.ErrTaskNotFound):
+		jsonOut(w, http.StatusNotFound, map[string]string{"error": "not_found"})
+		return
+	case errors.Is(e, store.ErrRelayEventNotFound):
 		jsonOut(w, http.StatusNotFound, map[string]string{"error": "not_found"})
 		return
 	case errors.Is(e, store.ErrQueueEmpty):
@@ -355,6 +370,91 @@ func (s Server) taskTransition(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOut(w, http.StatusOK, x)
+}
+
+func relayEventID(r *http.Request) (int64, error) {
+	return strconv.ParseInt(r.PathValue("id"), 10, 64)
+}
+
+func (s Server) relayEventsCreate(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.auth(w, r); !ok {
+		return
+	}
+	defer r.Body.Close()
+	var x store.RelayEvent
+	if err := decode(r, &x, store.MaxBytes); err != nil {
+		appErr(w, err)
+		return
+	}
+	x, created, err := s.Service.AppendRelayEvent(r.Context(), x)
+	if err != nil {
+		appErr(w, err)
+		return
+	}
+	status := http.StatusOK
+	if created {
+		status = http.StatusCreated
+	}
+	jsonOut(w, status, x)
+}
+
+type relayEventDeliveryInput struct {
+	Machine string `json:"machine"`
+	Pane    string `json:"pane"`
+}
+
+func (s Server) relayEventDelivered(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.auth(w, r); !ok {
+		return
+	}
+	id, err := relayEventID(r)
+	if err != nil || id < 1 {
+		appErr(w, errors.New("relay event id"))
+		return
+	}
+	defer r.Body.Close()
+	var input relayEventDeliveryInput
+	if err := decode(r, &input, store.MaxBytes); err != nil {
+		appErr(w, err)
+		return
+	}
+	x, err := s.Service.MarkRelayEventDelivered(r.Context(), id, input.Machine, input.Pane)
+	if err != nil {
+		appErr(w, err)
+		return
+	}
+	jsonOut(w, http.StatusOK, x)
+}
+
+func relayEventsLimit(r *http.Request) (int, error) {
+	v := r.URL.Query().Get("limit")
+	if v == "" {
+		return 0, nil
+	}
+	limit, err := strconv.Atoi(v)
+	if err != nil {
+		return 0, errors.New("limit")
+	}
+	return limit, nil
+}
+
+func (s Server) relayEventsList(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.auth(w, r); !ok {
+		return
+	}
+	limit, err := relayEventsLimit(r)
+	if err != nil {
+		appErr(w, err)
+		return
+	}
+	undeliveredValue := r.URL.Query().Get("undelivered")
+	undelivered := undeliveredValue == "1" || undeliveredValue == "true"
+	xs, err := s.Service.ListRelayEvents(r.Context(), r.URL.Query().Get("lane"), undelivered, limit)
+	if err != nil {
+		appErr(w, err)
+		return
+	}
+	jsonOut(w, http.StatusOK, map[string]any{"events": xs})
 }
 func decode(r *http.Request, v any, max int) error {
 	de := json.NewDecoder(io.LimitReader(r.Body, int64(max+4096)))
