@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mgh3326/handoffkeep/internal/guard"
 )
@@ -27,6 +28,48 @@ var nameRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
 var kinds = map[string]bool{"checkpoint": true, "handoff": true, "decision": true, "open_question": true, "next_action": true}
 var memoryTypes = map[string]bool{"user": true, "feedback": true, "project": true, "reference": true}
 var documentKinds = map[string]bool{"brief": true, "report": true, "answer": true, "handoff": true, "note": true, "other": true}
+var taskKinds = map[string]bool{"implement": true, "verify": true, "fix": true, "decide": true, "ops": true}
+var taskStates = map[string]bool{"backlog": true, "claimed": true, "in_progress": true, "verifying": true, "join": true, "hold": true, "needs_decision": true, "merged": true, "dropped": true}
+
+var (
+	ErrTaskConflict = errors.New("task_conflict")
+	ErrTaskNotFound = errors.New("task_not_found")
+)
+
+// TaskRefs holds the durable links that let a captain resume work without
+// embedding credentials or implementation details in the queue itself.
+type TaskRefs struct {
+	PR         string `json:"pr,omitempty"`
+	HeadSHA    string `json:"head_sha,omitempty"`
+	ReportPath string `json:"report_path,omitempty"`
+	JobID      string `json:"job_id,omitempty"`
+}
+
+type TaskEvent struct {
+	ID     int64     `json:"id"`
+	TaskID int64     `json:"task_id"`
+	From   string    `json:"from"`
+	To     string    `json:"to"`
+	By     string    `json:"by"`
+	Note   string    `json:"note,omitempty"`
+	At     time.Time `json:"at"`
+}
+
+type Task struct {
+	ID         int64       `json:"id"`
+	Lane       string      `json:"lane"`
+	ParentLane string      `json:"parent_lane,omitempty"`
+	Title      string      `json:"title"`
+	Kind       string      `json:"kind"`
+	State      string      `json:"state"`
+	Priority   int         `json:"priority"`
+	Refs       TaskRefs    `json:"refs"`
+	ClaimedBy  string      `json:"claimed_by,omitempty"`
+	CreatedBy  string      `json:"created_by"`
+	CreatedAt  time.Time   `json:"created_at"`
+	UpdatedAt  time.Time   `json:"updated_at"`
+	Events     []TaskEvent `json:"events,omitempty"`
+}
 
 type Store struct{ pool *pgxpool.Pool }
 
@@ -161,7 +204,13 @@ func (s *Store) migrate(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS attachment_refs (sha256 TEXT NOT NULL REFERENCES attachments(sha256), ref_kind TEXT NOT NULL CHECK(ref_kind IN ('checkpoint','document','memory','none')), ref_id TEXT NOT NULL DEFAULT '', PRIMARY KEY(sha256,ref_kind,ref_id))`,
 		`CREATE INDEX IF NOT EXISTS attachment_refs_target ON attachment_refs(ref_kind,ref_id)`,
 		`CREATE TABLE IF NOT EXISTS attachment_usage (month TEXT PRIMARY KEY CHECK(month ~ '^[0-9]{4}-[0-9]{2}$'), puts BIGINT NOT NULL DEFAULT 0, gets BIGINT NOT NULL DEFAULT 0, bytes_added BIGINT NOT NULL DEFAULT 0)`,
-		`INSERT INTO schema_version(version) VALUES (3) ON CONFLICT DO NOTHING`}
+		`INSERT INTO schema_version(version) VALUES (3) ON CONFLICT DO NOTHING`,
+		`CREATE TABLE IF NOT EXISTS tasks (id BIGSERIAL PRIMARY KEY, lane TEXT NOT NULL, parent_lane TEXT NOT NULL DEFAULT '', title TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('implement','verify','fix','decide','ops')), state TEXT NOT NULL CHECK(state IN ('backlog','claimed','in_progress','verifying','join','hold','needs_decision','merged','dropped')), priority INTEGER NOT NULL DEFAULT 0, refs JSONB NOT NULL DEFAULT '{}'::jsonb, claimed_by TEXT NOT NULL DEFAULT '', created_by TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL)`,
+		`CREATE INDEX IF NOT EXISTS tasks_lane_state_priority ON tasks(lane, state, priority DESC, created_at ASC, id ASC)`,
+		`CREATE INDEX IF NOT EXISTS tasks_parent_lane_state_priority ON tasks(parent_lane, state, priority DESC, created_at ASC, id ASC)`,
+		`CREATE TABLE IF NOT EXISTS task_events (id BIGSERIAL PRIMARY KEY, task_id BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE, "from" TEXT NOT NULL, "to" TEXT NOT NULL, "by" TEXT NOT NULL, note TEXT NOT NULL DEFAULT '', at TIMESTAMPTZ NOT NULL)`,
+		`CREATE INDEX IF NOT EXISTS task_events_task_at ON task_events(task_id, at ASC, id ASC)`,
+		`INSERT INTO schema_version(version) VALUES (4) ON CONFLICT DO NOTHING`}
 	for _, q := range stmts {
 		if _, err := tx.Exec(ctx, q); err != nil {
 			if q == `CREATE EXTENSION IF NOT EXISTS pg_trgm` {
@@ -174,6 +223,218 @@ func (s *Store) migrate(ctx context.Context) error {
 }
 func validName(x string) bool        { return nameRE.MatchString(x) }
 func validText(x string, n int) bool { return len(x) <= n && !strings.ContainsRune(x, 0) }
+
+func validTaskRefs(x TaskRefs) bool {
+	for _, v := range []string{x.PR, x.HeadSHA, x.ReportPath, x.JobID} {
+		if !validText(v, 4096) {
+			return false
+		}
+	}
+	return true
+}
+
+func validTask(x Task) bool {
+	return validName(x.Lane) && (x.ParentLane == "" || validName(x.ParentLane)) && x.Title != "" && validText(x.Title, MaxBytes) && taskKinds[x.Kind] && x.CreatedBy != "" && validText(x.CreatedBy, 128) && validTaskRefs(x.Refs)
+}
+
+func scanTask(row interface{ Scan(...any) error }, x *Task) error {
+	var refs []byte
+	if err := row.Scan(&x.ID, &x.Lane, &x.ParentLane, &x.Title, &x.Kind, &x.State, &x.Priority, &refs, &x.ClaimedBy, &x.CreatedBy, &x.CreatedAt, &x.UpdatedAt); err != nil {
+		return err
+	}
+	return json.Unmarshal(refs, &x.Refs)
+}
+
+const taskColumns = `id,lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at`
+
+func (s *Store) CreateTask(ctx context.Context, x Task) (Task, error) {
+	if !validTask(x) {
+		return x, errors.New("invalid task")
+	}
+	if err := guard.Reject(x.Title); err != nil {
+		return x, err
+	}
+	refs, err := json.Marshal(x.Refs)
+	if err != nil {
+		return x, errors.New("invalid task refs")
+	}
+	x.State, x.ClaimedBy = "backlog", ""
+	x.CreatedAt = time.Now().UTC()
+	x.UpdatedAt = x.CreatedAt
+	err = scanTask(s.pool.QueryRow(ctx, `INSERT INTO tasks(lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11) RETURNING `+taskColumns, x.Lane, x.ParentLane, x.Title, x.Kind, x.State, x.Priority, string(refs), x.ClaimedBy, x.CreatedBy, x.CreatedAt, x.UpdatedAt), &x)
+	return x, err
+}
+
+func taskTransitionAllowed(from, to string) bool {
+	return map[string]map[string]bool{
+		"backlog":        {"claimed": true, "hold": true, "dropped": true},
+		"claimed":        {"in_progress": true, "hold": true, "needs_decision": true, "dropped": true},
+		"in_progress":    {"verifying": true, "join": true, "hold": true, "needs_decision": true, "dropped": true},
+		"verifying":      {"in_progress": true, "merged": true, "hold": true, "needs_decision": true, "dropped": true},
+		"join":           {"in_progress": true, "merged": true, "hold": true, "needs_decision": true, "dropped": true},
+		"hold":           {"backlog": true, "needs_decision": true, "dropped": true},
+		"needs_decision": {"backlog": true, "hold": true, "dropped": true},
+	}[from][to]
+}
+
+func (s *Store) claimTaskTx(ctx context.Context, tx pgx.Tx, id int64, by string) (Task, error) {
+	if !validText(by, 128) || by == "" {
+		return Task{}, errors.New("invalid task claimant")
+	}
+	var x Task
+	if err := scanTask(tx.QueryRow(ctx, `UPDATE tasks SET state='claimed', claimed_by=$2, updated_at=$3 WHERE id=$1 AND state='backlog' RETURNING `+taskColumns, id, by, time.Now().UTC()), &x); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Task{}, ErrTaskConflict
+		}
+		return Task{}, err
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO task_events(task_id,"from","to","by",note,at) VALUES($1,'backlog','claimed',$2,'',$3)`, id, by, x.UpdatedAt); err != nil {
+		return Task{}, err
+	}
+	return x, nil
+}
+
+func (s *Store) ClaimTask(ctx context.Context, id int64, by string) (Task, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Task{}, err
+	}
+	defer tx.Rollback(ctx)
+	x, err := s.claimTaskTx(ctx, tx, id, by)
+	if err != nil {
+		return Task{}, err
+	}
+	return x, tx.Commit(ctx)
+}
+
+// NextTask claims the oldest highest-priority runnable task in one transaction.
+func (s *Store) NextTask(ctx context.Context, lane, by string) (Task, error) {
+	if !validName(lane) {
+		return Task{}, errors.New("invalid task lane")
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Task{}, err
+	}
+	defer tx.Rollback(ctx)
+	var id int64
+	err = tx.QueryRow(ctx, `SELECT id FROM tasks WHERE lane=$1 AND state='backlog' ORDER BY priority DESC,created_at ASC,id ASC FOR UPDATE SKIP LOCKED LIMIT 1`, lane).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Task{}, ErrTaskNotFound
+	}
+	if err != nil {
+		return Task{}, err
+	}
+	x, err := s.claimTaskTx(ctx, tx, id, by)
+	if err != nil {
+		return Task{}, err
+	}
+	return x, tx.Commit(ctx)
+}
+
+func (s *Store) TransitionTask(ctx context.Context, id int64, to, by, note string, refs *TaskRefs) (Task, error) {
+	if !taskStates[to] || !validText(by, 128) || by == "" || !validText(note, MaxBytes) || (refs != nil && !validTaskRefs(*refs)) {
+		return Task{}, errors.New("invalid task transition")
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Task{}, err
+	}
+	defer tx.Rollback(ctx)
+	var x Task
+	if err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, id), &x); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Task{}, ErrTaskNotFound
+		}
+		return Task{}, err
+	}
+	from := x.State
+	if !taskTransitionAllowed(from, to) {
+		return Task{}, ErrTaskConflict
+	}
+	if to == "needs_decision" && strings.TrimSpace(note) == "" {
+		return Task{}, errors.New("needs_decision requires question")
+	}
+	if refs != nil {
+		x.Refs = *refs
+	}
+	encoded, err := json.Marshal(x.Refs)
+	if err != nil {
+		return Task{}, err
+	}
+	x.UpdatedAt = time.Now().UTC()
+	if err = scanTask(tx.QueryRow(ctx, `UPDATE tasks SET state=$2,refs=$3::jsonb,updated_at=$4 WHERE id=$1 RETURNING `+taskColumns, id, to, string(encoded), x.UpdatedAt), &x); err != nil {
+		return Task{}, err
+	}
+	if _, err = tx.Exec(ctx, `INSERT INTO task_events(task_id,"from","to","by",note,at) VALUES($1,$2,$3,$4,$5,$6)`, id, from, to, by, note, x.UpdatedAt); err != nil {
+		return Task{}, err
+	}
+	return x, tx.Commit(ctx)
+}
+
+func (s *Store) ListTasks(ctx context.Context, lane, state, parentLane string, limit int) ([]Task, error) {
+	if (lane != "" && !validName(lane)) || (parentLane != "" && !validName(parentLane)) || (state != "" && !taskStates[state]) {
+		return nil, errors.New("invalid task query")
+	}
+	if limit < 1 {
+		limit = 20
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	q, args := `SELECT `+taskColumns+` FROM tasks WHERE 1=1`, []any{}
+	if lane != "" {
+		args = append(args, lane)
+		q += fmt.Sprintf(" AND lane=$%d", len(args))
+	}
+	if parentLane != "" {
+		args = append(args, parentLane)
+		q += fmt.Sprintf(" AND parent_lane=$%d", len(args))
+	}
+	if state != "" {
+		args = append(args, state)
+		q += fmt.Sprintf(" AND state=$%d", len(args))
+	}
+	args = append(args, limit)
+	q += fmt.Sprintf(" ORDER BY priority DESC,created_at ASC,id ASC LIMIT $%d", len(args))
+	rows, err := s.pool.Query(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Task{}
+	for rows.Next() {
+		var x Task
+		if err := scanTask(rows, &x); err != nil {
+			return nil, err
+		}
+		out = append(out, x)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) GetTask(ctx context.Context, id int64) (Task, bool, error) {
+	var x Task
+	if err := scanTask(s.pool.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1`, id), &x); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Task{}, false, nil
+		}
+		return Task{}, false, err
+	}
+	rows, err := s.pool.Query(ctx, `SELECT id,task_id,"from","to","by",note,at FROM task_events WHERE task_id=$1 ORDER BY at,id`, id)
+	if err != nil {
+		return Task{}, false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var e TaskEvent
+		if err := rows.Scan(&e.ID, &e.TaskID, &e.From, &e.To, &e.By, &e.Note, &e.At); err != nil {
+			return Task{}, false, err
+		}
+		x.Events = append(x.Events, e)
+	}
+	return x, true, rows.Err()
+}
 func (s *Store) CreateCheckpoint(ctx context.Context, x Checkpoint) (Checkpoint, error) {
 	if !validName(x.Session) || !kinds[x.Kind] || x.Title == "" || !validText(x.Title, MaxBytes) || !validText(x.Body, MaxBytes) || !validName(x.CreatedBy) {
 		return x, errors.New("invalid checkpoint")

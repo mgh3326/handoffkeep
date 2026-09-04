@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,12 +27,16 @@ import (
 func main() {
 	if err := run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
 		fmt.Fprintln(os.Stderr, "handoffkeep:", err)
+		var exit exitCodeError
+		if errors.As(err, &exit) {
+			os.Exit(exit.code)
+		}
 		os.Exit(1)
 	}
 }
 func run(args []string, out, errout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: handoffkeep serve|mcp|ctx|memory|doc|attach|r2usage")
+		return errors.New("usage: handoffkeep serve|mcp|ctx|memory|doc|attach|r2usage|tasks")
 	}
 	switch args[0] {
 	case "serve":
@@ -48,8 +53,10 @@ func run(args []string, out, errout io.Writer) error {
 		return attachCmd(args[1:], out)
 	case "r2usage":
 		return r2UsageCmd(args[1:], out)
+	case "tasks":
+		return tasksCmd(args[1:], out)
 	default:
-		return errors.New("usage: handoffkeep serve|mcp|ctx|memory|doc|attach|r2usage")
+		return errors.New("usage: handoffkeep serve|mcp|ctx|memory|doc|attach|r2usage|tasks")
 	}
 }
 
@@ -104,6 +111,165 @@ func checkpointRefs(values []string) (store.Refs, error) {
 	}
 	return refs, nil
 }
+
+func taskRefs(pr, headSHA, reportPath, jobID string) (*store.TaskRefs, bool) {
+	x := &store.TaskRefs{PR: pr, HeadSHA: headSHA, ReportPath: reportPath, JobID: jobID}
+	return x, pr != "" || headSHA != "" || reportPath != "" || jobID != ""
+}
+
+func normalizeTaskArgs(args []string) ([]string, error) {
+	valueFlags := map[string]bool{"--url": true, "--token": true, "--lane": true, "--parent-lane": true, "--state": true, "--title": true, "--kind": true, "--priority": true, "--by": true, "--to": true, "--note": true, "--question": true, "--limit": true, "--pr": true, "--head-sha": true, "--report-path": true, "--job-id": true}
+	flags, positional := []string{}, []string{}
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if strings.HasPrefix(arg, "-") {
+			flags = append(flags, arg)
+			if valueFlags[arg] {
+				i++
+				if i >= len(args) {
+					return nil, fmt.Errorf("%s requires a value", arg)
+				}
+				flags = append(flags, args[i])
+			}
+		} else {
+			positional = append(positional, arg)
+		}
+	}
+	return append(flags, positional...), nil
+}
+
+func tasksCmd(args []string, out io.Writer) error {
+	if len(args) == 0 {
+		return errors.New("usage: tasks add|list|claim|next|transition|show")
+	}
+	fs := flag.NewFlagSet("tasks "+args[0], flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	c := remoteClient(fs)
+	lane := fs.String("lane", "", "task lane")
+	parentLane := fs.String("parent-lane", "", "parent lane")
+	state := fs.String("state", "", "task state")
+	title := fs.String("title", "", "task title")
+	kind := fs.String("kind", "implement", "task kind")
+	priority := fs.Int("priority", 0, "higher is first")
+	by := fs.String("by", "", "session label")
+	to := fs.String("to", "", "target state")
+	note := fs.String("note", "", "transition note")
+	question := fs.String("question", "", "question required for needs_decision")
+	limit := fs.Int("limit", 20, "maximum results")
+	pr := fs.String("pr", "", "pull request reference")
+	headSHA := fs.String("head-sha", "", "head revision reference")
+	reportPath := fs.String("report-path", "", "report path reference")
+	jobID := fs.String("job-id", "", "job reference")
+	parseArgs, err := normalizeTaskArgs(args[1:])
+	if err != nil {
+		return err
+	}
+	if err := fs.Parse(parseArgs); err != nil {
+		return err
+	}
+	if err := mustClient(c); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	parseID := func() (int64, error) {
+		if fs.NArg() != 1 {
+			return 0, errors.New("task command requires id")
+		}
+		id, err := strconv.ParseInt(fs.Arg(0), 10, 64)
+		if err != nil || id < 1 {
+			return 0, errors.New("task id must be positive")
+		}
+		return id, nil
+	}
+	switch args[0] {
+	case "add":
+		if fs.NArg() != 0 {
+			return errors.New("tasks add takes flags only")
+		}
+		refs, _ := taskRefs(*pr, *headSHA, *reportPath, *jobID)
+		x, err := c.CreateTask(ctx, store.Task{Lane: *lane, ParentLane: *parentLane, Title: *title, Kind: *kind, Priority: *priority, Refs: *refs})
+		if err != nil {
+			return err
+		}
+		return printJSON(out, x)
+	case "list":
+		if fs.NArg() != 0 {
+			return errors.New("tasks list takes flags only")
+		}
+		xs, err := c.ListTasks(ctx, *lane, *state, *parentLane, *limit)
+		if err != nil {
+			return err
+		}
+		return printJSON(out, map[string]any{"tasks": xs})
+	case "claim":
+		id, err := parseID()
+		if err != nil {
+			return err
+		}
+		x, err := c.ClaimTask(ctx, id, *by)
+		if err != nil {
+			return err
+		}
+		return printJSON(out, x)
+	case "next":
+		if fs.NArg() != 0 {
+			return errors.New("tasks next takes flags only")
+		}
+		x, err := c.NextTask(ctx, *lane, *by)
+		if err != nil {
+			if err.Error() == "task_not_found" {
+				return exitCodeError{code: 3, err: errors.New("no backlog task")}
+			}
+			return err
+		}
+		return printJSON(out, x)
+	case "transition":
+		id, err := parseID()
+		if err != nil {
+			return err
+		}
+		if *to == "needs_decision" {
+			if strings.TrimSpace(*question) == "" {
+				return errors.New("tasks transition --to needs_decision requires --question")
+			}
+			if *note == "" {
+				*note = *question
+			}
+		}
+		refs, hasRefs := taskRefs(*pr, *headSHA, *reportPath, *jobID)
+		if !hasRefs {
+			refs = nil
+		}
+		x, err := c.TransitionTask(ctx, id, *to, *note, refs)
+		if err != nil {
+			return err
+		}
+		return printJSON(out, x)
+	case "show":
+		id, err := parseID()
+		if err != nil {
+			return err
+		}
+		x, found, err := c.GetTask(ctx, id)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return errors.New("not_found")
+		}
+		return printJSON(out, x)
+	default:
+		return errors.New("usage: tasks add|list|claim|next|transition|show")
+	}
+}
+
+type exitCodeError struct {
+	code int
+	err  error
+}
+
+func (e exitCodeError) Error() string { return e.err.Error() }
 
 // searchArgs permits the query before or after flags. The standard flag package
 // stops parsing at a positional argument, so normalize its known value flags.

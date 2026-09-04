@@ -81,6 +81,25 @@ func (s Service) AttachmentUsage(ctx context.Context) (store.AttachmentUsage, er
 	}
 	return s.Attachments.Usage(ctx)
 }
+func (s Service) CreateTask(ctx context.Context, client string, x store.Task) (store.Task, error) {
+	x.CreatedBy = client
+	return s.Store.CreateTask(ctx, x)
+}
+func (s Service) ClaimTask(ctx context.Context, id int64, by string) (store.Task, error) {
+	return s.Store.ClaimTask(ctx, id, by)
+}
+func (s Service) NextTask(ctx context.Context, lane, by string) (store.Task, error) {
+	return s.Store.NextTask(ctx, lane, by)
+}
+func (s Service) TransitionTask(ctx context.Context, id int64, to, client, note string, refs *store.TaskRefs) (store.Task, error) {
+	return s.Store.TransitionTask(ctx, id, to, client, note, refs)
+}
+func (s Service) ListTasks(ctx context.Context, lane, state, parentLane string, limit int) ([]store.Task, error) {
+	return s.Store.ListTasks(ctx, lane, state, parentLane, limit)
+}
+func (s Service) GetTask(ctx context.Context, id int64) (store.Task, bool, error) {
+	return s.Store.GetTask(ctx, id)
+}
 
 type Tokens map[string]string
 
@@ -142,6 +161,12 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("GET /v1/attachments/{sha}", s.attachment)
 	m.HandleFunc("GET /v1/usage", s.usage)
 	m.HandleFunc("GET /metrics", s.metrics)
+	m.HandleFunc("POST /v1/tasks", s.tasksCreate)
+	m.HandleFunc("GET /v1/tasks", s.tasksList)
+	m.HandleFunc("POST /v1/tasks/next", s.tasksNext)
+	m.HandleFunc("GET /v1/tasks/{id}", s.task)
+	m.HandleFunc("POST /v1/tasks/{id}/claim", s.taskClaim)
+	m.HandleFunc("POST /v1/tasks/{id}/transition", s.taskTransition)
 	return m
 }
 func (s Server) auth(w http.ResponseWriter, r *http.Request) (string, bool) {
@@ -176,12 +201,157 @@ func appErr(w http.ResponseWriter, e error) {
 	case errors.Is(e, attachments.ErrR2):
 		jsonOut(w, 502, map[string]string{"error": "attachment_r2_unavailable"})
 		return
+	case errors.Is(e, store.ErrTaskConflict):
+		jsonOut(w, http.StatusConflict, map[string]string{"error": "task_conflict"})
+		return
+	case errors.Is(e, store.ErrTaskNotFound):
+		jsonOut(w, http.StatusNotFound, map[string]string{"error": "not_found"})
+		return
 	}
 	if p, ok := strings.CutPrefix(e.Error(), "secret_like_content:"); ok {
 		jsonOut(w, 400, map[string]string{"error": "secret_like_content", "pattern": p})
 		return
 	}
 	jsonOut(w, 400, map[string]string{"error": "invalid_context"})
+}
+
+func taskID(r *http.Request) (int64, error) {
+	return strconv.ParseInt(r.PathValue("id"), 10, 64)
+}
+
+func (s Server) tasksCreate(w http.ResponseWriter, r *http.Request) {
+	client, ok := s.auth(w, r)
+	if !ok {
+		return
+	}
+	defer r.Body.Close()
+	var x store.Task
+	if err := decode(r, &x, store.MaxBytes); err != nil {
+		appErr(w, err)
+		return
+	}
+	x, err := s.Service.CreateTask(r.Context(), client, x)
+	if err != nil {
+		appErr(w, err)
+		return
+	}
+	jsonOut(w, http.StatusCreated, x)
+}
+
+func (s Server) tasksList(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.auth(w, r); !ok {
+		return
+	}
+	limit, err := queryLimit(r, 20, 1000)
+	if err != nil {
+		appErr(w, err)
+		return
+	}
+	xs, err := s.Service.ListTasks(r.Context(), r.URL.Query().Get("lane"), r.URL.Query().Get("state"), r.URL.Query().Get("parent_lane"), limit)
+	if err != nil {
+		appErr(w, err)
+		return
+	}
+	jsonOut(w, http.StatusOK, map[string]any{"tasks": xs})
+}
+
+func (s Server) task(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.auth(w, r); !ok {
+		return
+	}
+	id, err := taskID(r)
+	if err != nil || id < 1 {
+		appErr(w, errors.New("task id"))
+		return
+	}
+	x, found, err := s.Service.GetTask(r.Context(), id)
+	if err != nil {
+		appErr(w, err)
+		return
+	}
+	if !found {
+		jsonOut(w, http.StatusNotFound, map[string]string{"error": "not_found"})
+		return
+	}
+	jsonOut(w, http.StatusOK, x)
+}
+
+type taskClaimInput struct {
+	ClaimedBy string `json:"claimed_by"`
+}
+
+func (s Server) taskClaim(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.auth(w, r); !ok {
+		return
+	}
+	id, err := taskID(r)
+	if err != nil || id < 1 {
+		appErr(w, errors.New("task id"))
+		return
+	}
+	defer r.Body.Close()
+	var input taskClaimInput
+	if err := decode(r, &input, 4096); err != nil {
+		appErr(w, err)
+		return
+	}
+	x, err := s.Service.ClaimTask(r.Context(), id, input.ClaimedBy)
+	if err != nil {
+		appErr(w, err)
+		return
+	}
+	jsonOut(w, http.StatusOK, x)
+}
+
+func (s Server) tasksNext(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.auth(w, r); !ok {
+		return
+	}
+	defer r.Body.Close()
+	var input struct {
+		Lane      string `json:"lane"`
+		ClaimedBy string `json:"claimed_by"`
+	}
+	if err := decode(r, &input, 4096); err != nil {
+		appErr(w, err)
+		return
+	}
+	x, err := s.Service.NextTask(r.Context(), input.Lane, input.ClaimedBy)
+	if err != nil {
+		appErr(w, err)
+		return
+	}
+	jsonOut(w, http.StatusOK, x)
+}
+
+type taskTransitionInput struct {
+	To   string          `json:"to"`
+	Note string          `json:"note"`
+	Refs *store.TaskRefs `json:"refs,omitempty"`
+}
+
+func (s Server) taskTransition(w http.ResponseWriter, r *http.Request) {
+	client, ok := s.auth(w, r)
+	if !ok {
+		return
+	}
+	id, err := taskID(r)
+	if err != nil || id < 1 {
+		appErr(w, errors.New("task id"))
+		return
+	}
+	defer r.Body.Close()
+	var input taskTransitionInput
+	if err := decode(r, &input, store.MaxBytes); err != nil {
+		appErr(w, err)
+		return
+	}
+	x, err := s.Service.TransitionTask(r.Context(), id, input.To, client, input.Note, input.Refs)
+	if err != nil {
+		appErr(w, err)
+		return
+	}
+	jsonOut(w, http.StatusOK, x)
 }
 func decode(r *http.Request, v any, max int) error {
 	de := json.NewDecoder(io.LimitReader(r.Body, int64(max+4096)))
