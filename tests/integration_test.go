@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/mgh3326/handoffkeep/internal/api"
@@ -33,7 +34,7 @@ func TestPostgresMigrationAndCoreRoundTrip(t *testing.T) {
 	if err != nil || len(items) == 0 {
 		t.Fatalf("recent=%v err=%v", items, err)
 	}
-	if _, err := svc.Checkpoint(t.Context(), "test-client", store.Checkpoint{Session: "hk-test", Kind: "checkpoint", Title: "bad", Body: "sk-abcdefghijklmnopqrstuvwxyz"}); err == nil {
+	if _, err := svc.Checkpoint(t.Context(), "test-client", store.Checkpoint{Session: "hk-test", Kind: "checkpoint", Title: "bad", Body: "sk-" + strings.Repeat("a", 26)}); err == nil {
 		t.Fatal("secret guard accepted content")
 	}
 }
