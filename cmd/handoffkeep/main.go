@@ -18,9 +18,11 @@ import (
 
 	"github.com/mgh3326/handoffkeep/internal/api"
 	"github.com/mgh3326/handoffkeep/internal/attachments"
+	"github.com/mgh3326/handoffkeep/internal/cfaccess"
 	hkmcp "github.com/mgh3326/handoffkeep/internal/mcp"
 	"github.com/mgh3326/handoffkeep/internal/remote"
 	"github.com/mgh3326/handoffkeep/internal/store"
+	"github.com/mgh3326/handoffkeep/internal/ui"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -911,9 +913,13 @@ func serve(args []string, errout io.Writer) error {
 		return e
 	}
 	svc := api.Service{Store: st, Attachments: am}
+	uiHandler, e := uiFromEnv(st)
+	if e != nil {
+		return e
+	}
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", hkmcp.HTTPHandler(svc, tokens))
-	mux.Handle("/", api.Server{Service: svc, Tokens: tokens}.Handler())
+	mux.Handle("/", api.Server{Service: svc, Tokens: tokens, UI: uiHandler}.Handler())
 	servers := []*http.Server{{Addr: *listen, Handler: mux}}
 	if *tail != "" {
 		servers = append(servers, &http.Server{Addr: *tail, Handler: mux})
@@ -923,6 +929,27 @@ func serve(args []string, errout io.Writer) error {
 		go func(s *http.Server) { errs <- s.ListenAndServe() }(s)
 	}
 	return <-errs
+}
+
+// uiFromEnv intentionally treats incomplete Cloudflare Access configuration as
+// disabled. The API remains available, but api.Server does not register /ui.
+func uiFromEnv(st *store.Store) (http.Handler, error) {
+	team := strings.TrimSpace(os.Getenv("HANDOFFKEEP_UI_CF_TEAM_DOMAIN"))
+	aud := strings.TrimSpace(os.Getenv("HANDOFFKEEP_UI_CF_AUD"))
+	emails := strings.TrimSpace(os.Getenv("HANDOFFKEEP_UI_ALLOWED_EMAILS"))
+	if team == "" || aud == "" || emails == "" {
+		return nil, nil
+	}
+	access, err := cfaccess.New(cfaccess.Config{TeamDomain: team, AUD: aud, AllowedEmails: strings.Split(emails, ",")})
+	if err != nil {
+		return nil, err
+	}
+	return ui.New(ui.Config{
+		Store:    st,
+		Access:   access,
+		HubURL:   strings.TrimSpace(os.Getenv("HANDOFFKEEP_HUB_URL")),
+		HubToken: strings.TrimSpace(os.Getenv("HANDOFFKEEP_HUB_TOKEN")),
+	})
 }
 func runMCP() error {
 	u, t := config()
