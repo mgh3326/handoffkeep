@@ -92,6 +92,10 @@ func (f *uiJWTFixture) hsToken(t *testing.T) string {
 }
 
 func newUITestServer(t *testing.T, s *store.Store, fixture *uiJWTFixture, hubURL, hubToken string, poll time.Duration) *httptest.Server {
+	return newUITestServerWithClient(t, s, fixture, hubURL, hubToken, poll, nil)
+}
+
+func newUITestServerWithClient(t *testing.T, s *store.Store, fixture *uiJWTFixture, hubURL, hubToken string, poll time.Duration, hubClient *http.Client) *httptest.Server {
 	t.Helper()
 	access, err := cfaccess.New(cfaccess.Config{
 		TeamDomain:    "example.cloudflareaccess.com",
@@ -104,7 +108,7 @@ func newUITestServer(t *testing.T, s *store.Store, fixture *uiJWTFixture, hubURL
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler, err := ui.New(ui.Config{Store: s, Access: access, HubURL: hubURL, HubToken: hubToken, PollInterval: poll})
+	handler, err := ui.New(ui.Config{Store: s, Access: access, HubURL: hubURL, HubToken: hubToken, HubHTTPClient: hubClient, PollInterval: poll})
 	if err != nil {
 		t.Fatal(err)
 	}

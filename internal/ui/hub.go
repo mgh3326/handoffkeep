@@ -1,8 +1,10 @@
 package ui
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -18,6 +20,10 @@ type hubProxy struct {
 	mu       sync.Mutex
 	snapshot *hubSnapshot
 }
+
+type hubStatusError int
+
+func (e hubStatusError) Error() string { return fmt.Sprintf("hub status %d", e) }
 
 type hubSnapshot struct {
 	view        hubView
@@ -155,6 +161,46 @@ func (p *hubProxy) getJSON(parent context.Context, endpoint string, target any) 
 		return response.StatusCode, err
 	}
 	return response.StatusCode, nil
+}
+
+// emitLaneEvent uses the producer-less hub ingress endpoint. It deliberately
+// returns only a duplicate flag and sanitized status error: callers never need
+// the hub token or a remote response body in a browser response.
+func (p *hubProxy) emitLaneEvent(parent context.Context, lane, eventID, text string) (bool, error) {
+	if !p.configured() {
+		return false, errors.New("hub is not configured")
+	}
+	payload, err := json.Marshal(struct {
+		Kind    string `json:"kind"`
+		Lane    string `json:"lane"`
+		EventID string `json:"event_id"`
+		Text    string `json:"text"`
+		Label   string `json:"label"`
+	}{Kind: "lane.event", Lane: lane, EventID: eventID, Text: text, Label: "operator-web"})
+	if err != nil {
+		return false, err
+	}
+	ctx, cancel := context.WithTimeout(parent, 3*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.url+"/v1/relay/events", bytes.NewReader(payload))
+	if err != nil {
+		return false, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+p.token)
+	response, err := p.client.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer response.Body.Close()
+	switch response.StatusCode {
+	case http.StatusCreated:
+		return false, nil
+	case http.StatusConflict:
+		return true, nil
+	default:
+		return false, hubStatusError(response.StatusCode)
+	}
 }
 
 type hubNode struct {

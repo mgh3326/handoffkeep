@@ -87,9 +87,17 @@ func New(config Config) (*Verifier, error) {
 // Authenticate verifies the assertion in r. It intentionally returns no
 // diagnostic detail so callers can always produce a uniform 401 response.
 func (v *Verifier) Authenticate(r *http.Request) bool {
+	_, ok := v.AuthenticatedEmail(r)
+	return ok
+}
+
+// AuthenticatedEmail verifies the assertion and returns its trimmed email
+// address. UI write routes use the address as audited operator attribution;
+// callers must not use it without checking the boolean result.
+func (v *Verifier) AuthenticatedEmail(r *http.Request) (string, bool) {
 	raw := strings.TrimSpace(r.Header.Get(assertionHeader))
 	if raw == "" {
-		return false
+		return "", false
 	}
 	claims := jwt.MapClaims{}
 	_, err := jwt.ParseWithClaims(raw, claims, func(token *jwt.Token) (any, error) {
@@ -100,14 +108,15 @@ func (v *Verifier) Authenticate(r *http.Request) bool {
 		return v.keyFor(r.Context(), kid)
 	}, jwt.WithValidMethods([]string{"RS256"}), jwt.WithAudience(v.aud), jwt.WithIssuer(v.issuer), jwt.WithExpirationRequired())
 	if err != nil {
-		return false
+		return "", false
 	}
 	email, ok := claims["email"].(string)
 	if !ok {
-		return false
+		return "", false
 	}
-	_, ok = v.allowed[asciiLower(strings.TrimSpace(email))]
-	return ok
+	email = strings.TrimSpace(email)
+	_, ok = v.allowed[asciiLower(email)]
+	return email, ok
 }
 
 func (v *Verifier) keyFor(ctx context.Context, kid string) (*rsa.PublicKey, error) {
