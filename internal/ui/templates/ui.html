@@ -23,10 +23,12 @@
   <nav aria-label="Fleet console pages">
     <a href="/ui/timeline">Timeline</a><a href="/ui/queue">Queue</a><a href="/ui/decisions">Decisions</a><a href="/ui/fleet">Fleet</a>
   </nav>
+  <main>
   {{if eq .Page "timeline"}}{{template "timeline_content" .Body}}{{end}}
   {{if eq .Page "queue"}}{{template "queue_content" .Body}}{{end}}
   {{if eq .Page "decisions"}}{{template "decisions_content" .Body}}{{end}}
   {{if eq .Page "fleet"}}{{template "fleet_content" .Body}}{{end}}
+  </main>
   <script>
     if (window.EventSource && window.htmx) {
       const uiEvents = new EventSource('/ui/events');
