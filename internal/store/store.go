@@ -30,7 +30,9 @@ var memoryTypes = map[string]bool{"user": true, "feedback": true, "project": tru
 var documentKinds = map[string]bool{"brief": true, "report": true, "answer": true, "handoff": true, "note": true, "other": true}
 var taskKinds = map[string]bool{"implement": true, "verify": true, "fix": true, "decide": true, "ops": true}
 var taskStates = map[string]bool{"backlog": true, "claimed": true, "in_progress": true, "verifying": true, "join": true, "hold": true, "needs_decision": true, "merged": true, "dropped": true}
-var relayEventKinds = map[string]bool{"job.completed": true, "job.escalate": true, "job.joined": true}
+var relayEventKinds = map[string]bool{"job.completed": true, "job.escalate": true, "job.joined": true, "lane.event": true}
+
+const RelayLaneEventMaxBytes = 2048
 
 var (
 	ErrTaskConflict       = errors.New("task_conflict")
@@ -93,6 +95,8 @@ type RelayEvent struct {
 	PR             string     `json:"pr"`
 	Head           string     `json:"head"`
 	Reason         string     `json:"reason"`
+	EventID        string     `json:"event_id"`
+	Text           string     `json:"text"`
 	EventTime      *time.Time `json:"event_time"`
 	ReceivedAt     time.Time  `json:"received_at"`
 	DeliveredAt    *time.Time `json:"delivered_at"`
@@ -257,6 +261,32 @@ func (s *Store) migrate(ctx context.Context) error {
 				return ErrTrigramUnavailable
 			}
 			return err
+		}
+	}
+	var v7Applied bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_version WHERE version=7)`).Scan(&v7Applied); err != nil {
+		return err
+	}
+	if !v7Applied {
+		// Version 7 extends relay_events without changing historic job.* rows.
+		// This is deliberately schema-version gated: dropping a constraint or
+		// rebuilding an index takes an ACCESS EXCLUSIVE lock, so repeating it
+		// at every process start would block relay writers without a migration.
+		v7 := []string{
+			`ALTER TABLE relay_events ADD COLUMN IF NOT EXISTS event_id TEXT NOT NULL DEFAULT ''`,
+			`ALTER TABLE relay_events ADD COLUMN IF NOT EXISTS text TEXT NOT NULL DEFAULT ''`,
+			`ALTER TABLE relay_events DROP CONSTRAINT IF EXISTS relay_events_kind_check`,
+			`ALTER TABLE relay_events ADD CONSTRAINT relay_events_kind_check CHECK(kind IN ('job.completed','job.escalate','job.joined','lane.event'))`,
+			`DROP INDEX IF EXISTS relay_events_idempotency`,
+			`CREATE UNIQUE INDEX relay_events_idempotency ON relay_events(kind, job_id, epoch, report_path, reason) WHERE kind IN ('job.completed','job.escalate','job.joined')`,
+			`CREATE UNIQUE INDEX relay_events_lane_event_idempotency ON relay_events(owner_lane, event_id) WHERE kind='lane.event'`,
+			`CREATE INDEX relay_events_undelivered_kind_id ON relay_events(kind, id ASC) WHERE delivered_at IS NULL`,
+			`INSERT INTO schema_version(version) VALUES (7)`,
+		}
+		for _, q := range v7 {
+			if _, err := tx.Exec(ctx, q); err != nil {
+				return err
+			}
 		}
 	}
 	return tx.Commit(ctx)
@@ -524,13 +554,13 @@ func (s *Store) GetTask(ctx context.Context, id int64) (Task, bool, error) {
 	return x, true, rows.Err()
 }
 
-const relayEventColumns = `id,kind,job_id,epoch,owner_lane,machine,pane_id,report_path,report_last_line,question,pr,head,reason,event_time,received_at,delivered_at,delivered_to,attempts`
+const relayEventColumns = `id,kind,job_id,epoch,owner_lane,machine,pane_id,report_path,report_last_line,question,pr,head,reason,event_id,text,event_time,received_at,delivered_at,delivered_to,attempts`
 
 func scanRelayEvent(row interface{ Scan(...any) error }, x *RelayEvent) error {
 	return row.Scan(
 		&x.ID, &x.Kind, &x.JobID, &x.Epoch, &x.OwnerLane, &x.Machine,
 		&x.PaneID, &x.ReportPath, &x.ReportLastLine, &x.Question, &x.PR,
-		&x.Head, &x.Reason, &x.EventTime, &x.ReceivedAt, &x.DeliveredAt,
+		&x.Head, &x.Reason, &x.EventID, &x.Text, &x.EventTime, &x.ReceivedAt, &x.DeliveredAt,
 		&x.DeliveredTo, &x.Attempts,
 	)
 }
@@ -539,17 +569,38 @@ func scanRelayEventCreated(row interface{ Scan(...any) error }, x *RelayEvent, c
 	return row.Scan(
 		&x.ID, &x.Kind, &x.JobID, &x.Epoch, &x.OwnerLane, &x.Machine,
 		&x.PaneID, &x.ReportPath, &x.ReportLastLine, &x.Question, &x.PR,
-		&x.Head, &x.Reason, &x.EventTime, &x.ReceivedAt, &x.DeliveredAt,
+		&x.Head, &x.Reason, &x.EventID, &x.Text, &x.EventTime, &x.ReceivedAt, &x.DeliveredAt,
 		&x.DeliveredTo, &x.Attempts, created,
 	)
 }
 
 func validRelayEvent(x RelayEvent) bool {
-	if !relayEventKinds[x.Kind] || x.JobID == "" || x.OwnerLane == "" {
+	if !relayEventKinds[x.Kind] || x.OwnerLane == "" || !validText(x.OwnerLane, MaxBytes) {
 		return false
 	}
-	for _, v := range []string{x.Kind, x.JobID, x.OwnerLane, x.Machine, x.PaneID, x.ReportPath, x.ReportLastLine, x.Question, x.PR, x.Head, x.Reason} {
+	// Validate every request-owned text column for every kind before the
+	// lane.event-specific contract below. Otherwise an authenticated sender
+	// could use ignored job-shaped fields as an unbounded storage bypass.
+	for _, v := range []string{x.Kind, x.JobID, x.OwnerLane, x.Machine, x.PaneID, x.ReportPath, x.ReportLastLine, x.Question, x.PR, x.Head, x.Reason, x.EventID, x.Text} {
 		if !validText(v, MaxBytes) {
+			return false
+		}
+	}
+	if x.Kind == "lane.event" {
+		return x.EventID != "" && validText(x.EventID, MaxBytes) && validLaneEventText(x.Text)
+	}
+	if x.JobID == "" || x.EventID != "" || x.Text != "" {
+		return false
+	}
+	return true
+}
+
+func validLaneEventText(value string) bool {
+	if len(value) == 0 || len(value) > RelayLaneEventMaxBytes {
+		return false
+	}
+	for _, r := range value {
+		if r <= 0x1f || (r >= 0x7f && r <= 0x9f) {
 			return false
 		}
 	}
@@ -572,7 +623,13 @@ func (s *Store) AppendRelayEvent(ctx context.Context, x RelayEvent) (RelayEvent,
 	// request fields to the non-NULL defaults required by the idempotency key.
 	x.ID, x.ReceivedAt, x.DeliveredAt, x.DeliveredTo, x.Attempts = 0, time.Time{}, nil, "", 0
 	var created bool
-	err := scanRelayEventCreated(s.pool.QueryRow(ctx, `INSERT INTO relay_events(kind,job_id,epoch,owner_lane,machine,pane_id,report_path,report_last_line,question,pr,head,reason,event_time,received_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,now()) ON CONFLICT (kind,job_id,epoch,report_path,reason) DO UPDATE SET attempts=relay_events.attempts+1 RETURNING `+relayEventColumns+`,(xmax=0) AS created`, x.Kind, x.JobID, x.Epoch, x.OwnerLane, x.Machine, x.PaneID, x.ReportPath, x.ReportLastLine, x.Question, x.PR, x.Head, x.Reason, x.EventTime), &x, &created)
+	query := `INSERT INTO relay_events(kind,job_id,epoch,owner_lane,machine,pane_id,report_path,report_last_line,question,pr,head,reason,event_id,text,event_time,received_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,now())`
+	if x.Kind == "lane.event" {
+		query += ` ON CONFLICT (owner_lane,event_id) WHERE kind='lane.event' DO UPDATE SET attempts=relay_events.attempts+1`
+	} else {
+		query += ` ON CONFLICT (kind,job_id,epoch,report_path,reason) WHERE kind IN ('job.completed','job.escalate','job.joined') DO UPDATE SET attempts=relay_events.attempts+1`
+	}
+	err := scanRelayEventCreated(s.pool.QueryRow(ctx, query+` RETURNING `+relayEventColumns+`,(xmax=0) AS created`, x.Kind, x.JobID, x.Epoch, x.OwnerLane, x.Machine, x.PaneID, x.ReportPath, x.ReportLastLine, x.Question, x.PR, x.Head, x.Reason, x.EventID, x.Text, x.EventTime), &x, &created)
 	if err != nil {
 		return x, false, err
 	}
@@ -604,7 +661,13 @@ func (s *Store) MarkRelayEventDelivered(ctx context.Context, id int64, machine, 
 
 // ListRelayEvents returns relay records in durable insertion order.
 func (s *Store) ListRelayEvents(ctx context.Context, lane string, undelivered bool, limit int) ([]RelayEvent, error) {
-	if !validText(lane, MaxBytes) {
+	return s.ListRelayEventsPage(ctx, lane, "", undelivered, 0, limit)
+}
+
+// ListRelayEventsPage is the additive cursor form of ListRelayEvents. afterID
+// is exclusive so a caller can safely advance using the last row it observed.
+func (s *Store) ListRelayEventsPage(ctx context.Context, lane, kind string, undelivered bool, afterID int64, limit int) ([]RelayEvent, error) {
+	if !validText(lane, MaxBytes) || (kind != "" && !relayEventKinds[kind]) || afterID < 0 {
 		return nil, errors.New("invalid relay event query")
 	}
 	if limit <= 0 {
@@ -618,8 +681,16 @@ func (s *Store) ListRelayEvents(ctx context.Context, lane string, undelivered bo
 		args = append(args, lane)
 		q += fmt.Sprintf(" AND owner_lane=$%d", len(args))
 	}
+	if kind != "" {
+		args = append(args, kind)
+		q += fmt.Sprintf(" AND kind=$%d", len(args))
+	}
 	if undelivered {
 		q += " AND delivered_at IS NULL"
+	}
+	if afterID > 0 {
+		args = append(args, afterID)
+		q += fmt.Sprintf(" AND id>$%d", len(args))
 	}
 	args = append(args, limit)
 	q += fmt.Sprintf(" ORDER BY id ASC LIMIT $%d", len(args))

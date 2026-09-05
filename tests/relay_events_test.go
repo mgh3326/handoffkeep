@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -26,6 +27,15 @@ func relayPayload(lane, job string) map[string]any {
 		"pr":               "",
 		"head":             "",
 		"reason":           "",
+	}
+}
+
+func laneEventPayload(lane, eventID, text string) map[string]any {
+	return map[string]any{
+		"kind":       "lane.event",
+		"owner_lane": lane,
+		"event_id":   eventID,
+		"text":       text,
 	}
 }
 
@@ -54,6 +64,102 @@ func TestRelayEventsIdempotent(t *testing.T) {
 	got, err := s.ListRelayEvents(t.Context(), lane, false, 0)
 	if err != nil || len(got) != 1 {
 		t.Fatalf("events=%+v err=%v", got, err)
+	}
+}
+
+func TestLaneEventsIdempotentAndDelivered(t *testing.T) {
+	s := taskTestStore(t)
+	h := taskHTTP(s)
+	defer h.Close()
+	lane := taskLane(t)
+	firstStatus, first := postRelayEvent(t, h.URL, "node-token", laneEventPayload(lane, "producer-1", "first payload"))
+	secondStatus, second := postRelayEvent(t, h.URL, "node-token", laneEventPayload(lane, "producer-1", "changed payload"))
+	if firstStatus != http.StatusCreated || secondStatus != http.StatusOK || first.ID != second.ID || second.Attempts != 1 || second.Text != "first payload" {
+		t.Fatalf("first=(%d,%+v) second=(%d,%+v)", firstStatus, first, secondStatus, second)
+	}
+	path := fmt.Sprintf("%s/v1/relay/events/%d/delivered", h.URL, first.ID)
+	resp := request(t, h.Client(), http.MethodPost, path, "node-token", map[string]string{"machine": "host-a", "pane": "w1:p1"})
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		t.Fatalf("delivery status=%d", resp.StatusCode)
+	}
+	resp.Body.Close()
+	_, afterDelivery := postRelayEvent(t, h.URL, "node-token", laneEventPayload(lane, "producer-1", "third payload"))
+	if afterDelivery.DeliveredAt == nil || afterDelivery.Text != "first payload" || afterDelivery.Attempts != 2 {
+		t.Fatalf("duplicate changed durable delivery or payload: %+v", afterDelivery)
+	}
+	listed, err := s.ListRelayEvents(t.Context(), lane, true, 0)
+	if err != nil || len(listed) != 0 {
+		t.Fatalf("undelivered=%+v err=%v", listed, err)
+	}
+}
+
+func TestLaneEventsRequireLaneAndEventID(t *testing.T) {
+	s := taskTestStore(t)
+	h := taskHTTP(s)
+	defer h.Close()
+	lane := taskLane(t)
+	for _, body := range []map[string]any{
+		laneEventPayload("", "producer-1", "payload"),
+		laneEventPayload(lane, "", "payload"),
+		laneEventPayload(lane, "producer-2", "bad\ntext"),
+	} {
+		resp := request(t, h.Client(), http.MethodPost, h.URL+"/v1/relay/events", "node-token", body)
+		if resp.StatusCode != http.StatusBadRequest {
+			resp.Body.Close()
+			t.Fatalf("body=%+v status=%d", body, resp.StatusCode)
+		}
+		resp.Body.Close()
+	}
+	if got, err := s.ListRelayEvents(t.Context(), lane, false, 0); err != nil || len(got) != 0 {
+		t.Fatalf("invalid lane-event created rows=%+v err=%v", got, err)
+	}
+	job := relayPayload(lane, "lane-event-job-field-"+lane)
+	job["event_id"] = "not-allowed"
+	resp := request(t, h.Client(), http.MethodPost, h.URL+"/v1/relay/events", "node-token", job)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("job event-id status=%d", resp.StatusCode)
+	}
+	oversize := laneEventPayload(lane, "producer-oversize", "payload")
+	oversize["report_path"] = strings.Repeat("x", store.MaxBytes+1)
+	resp = request(t, h.Client(), http.MethodPost, h.URL+"/v1/relay/events", "node-token", oversize)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("lane extra field size status=%d", resp.StatusCode)
+	}
+}
+
+func TestRelayEventsListKindAndAfterID(t *testing.T) {
+	s := taskTestStore(t)
+	h := taskHTTP(s)
+	defer h.Close()
+	lane := taskLane(t)
+	_, job := postRelayEvent(t, h.URL, "node-token", relayPayload(lane, "relay-page-job-"+lane))
+	_, first := postRelayEvent(t, h.URL, "node-token", laneEventPayload(lane, "producer-page-1", "first"))
+	_, second := postRelayEvent(t, h.URL, "node-token", laneEventPayload(lane, "producer-page-2", "second"))
+	path := fmt.Sprintf("%s/v1/relay/events?undelivered=1&kind=lane.event&after_id=%d&limit=10", h.URL, first.ID)
+	resp := request(t, h.Client(), http.MethodGet, path, "node-token", nil)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("page status=%d", resp.StatusCode)
+	}
+	var listed struct {
+		Events []store.RelayEvent `json:"events"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&listed); err != nil {
+		t.Fatal(err)
+	}
+	if len(listed.Events) != 1 || listed.Events[0].ID != second.ID || listed.Events[0].Kind != "lane.event" || first.ID <= job.ID {
+		t.Fatalf("kind/cursor events=%+v job=%+v first=%+v second=%+v", listed.Events, job, first, second)
+	}
+	for _, query := range []string{"kind=unknown", "after_id=-1"} {
+		invalid := request(t, h.Client(), http.MethodGet, h.URL+"/v1/relay/events?"+query, "node-token", nil)
+		if invalid.StatusCode != http.StatusBadRequest {
+			invalid.Body.Close()
+			t.Fatalf("query=%q status=%d", query, invalid.StatusCode)
+		}
+		invalid.Body.Close()
 	}
 }
 

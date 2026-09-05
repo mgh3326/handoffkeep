@@ -106,8 +106,8 @@ func (s Service) AppendRelayEvent(ctx context.Context, x store.RelayEvent) (stor
 func (s Service) MarkRelayEventDelivered(ctx context.Context, id int64, machine, pane string) (store.RelayEvent, error) {
 	return s.Store.MarkRelayEventDelivered(ctx, id, machine, pane)
 }
-func (s Service) ListRelayEvents(ctx context.Context, lane string, undelivered bool, limit int) ([]store.RelayEvent, error) {
-	return s.Store.ListRelayEvents(ctx, lane, undelivered, limit)
+func (s Service) ListRelayEvents(ctx context.Context, lane, kind string, undelivered bool, afterID int64, limit int) ([]store.RelayEvent, error) {
+	return s.Store.ListRelayEventsPage(ctx, lane, kind, undelivered, afterID, limit)
 }
 
 type Tokens map[string]string
@@ -438,6 +438,18 @@ func relayEventsLimit(r *http.Request) (int, error) {
 	return limit, nil
 }
 
+func relayEventsAfterID(r *http.Request) (int64, error) {
+	v := r.URL.Query().Get("after_id")
+	if v == "" {
+		return 0, nil
+	}
+	afterID, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || afterID < 0 {
+		return 0, errors.New("after_id")
+	}
+	return afterID, nil
+}
+
 func (s Server) relayEventsList(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.auth(w, r); !ok {
 		return
@@ -447,9 +459,14 @@ func (s Server) relayEventsList(w http.ResponseWriter, r *http.Request) {
 		appErr(w, err)
 		return
 	}
+	afterID, err := relayEventsAfterID(r)
+	if err != nil {
+		appErr(w, err)
+		return
+	}
 	undeliveredValue := r.URL.Query().Get("undelivered")
 	undelivered := undeliveredValue == "1" || undeliveredValue == "true"
-	xs, err := s.Service.ListRelayEvents(r.Context(), r.URL.Query().Get("lane"), undelivered, limit)
+	xs, err := s.Service.ListRelayEvents(r.Context(), r.URL.Query().Get("lane"), r.URL.Query().Get("kind"), undelivered, afterID, limit)
 	if err != nil {
 		appErr(w, err)
 		return

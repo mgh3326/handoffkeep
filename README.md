@@ -71,12 +71,26 @@ append an event, `POST /v1/relay/events/{id}/delivered` with
 `{"machine":"host-a","pane":"w1:p1"}` to record delivery, and
 `GET /v1/relay/events?undelivered=1&lane=lane-a` to find work still awaiting
 delivery. Omitting `lane` lists every lane; `undelivered=1` (or `true`) is for
-recovery workers that must only retry events without a recorded delivery.
+recovery workers that must only retry events without a recorded delivery. The
+additive `kind` parameter selects one supported kind, and `after_id` is an
+exclusive durable-ID cursor; use the last returned ID as the next `after_id` to
+advance through a recovery backlog without repeating an earlier page.
 
-The idempotency key is `(kind, job_id, epoch, report_path, reason)`. A first
-append returns 201; a duplicate returns 200 with the same event ID. `attempts`
-starts at zero and increases once for every duplicate receipt, so it measures
-duplicate receive attempts rather than successful deliveries.
+For `job.completed`, `job.escalate`, and `job.joined`, the idempotency key is
+`(kind, job_id, epoch, report_path, reason)`. A first append returns 201; a
+duplicate returns 200 with the same event ID. `attempts` starts at zero and
+increases once for every duplicate receipt, so it measures duplicate receive
+attempts rather than successful deliveries.
+
+`lane.event` is a directly addressed, durable lane notification. Its required
+fields are `kind: "lane.event"`, `owner_lane`, `event_id`, and `text`; its
+idempotency key is `(owner_lane, event_id)`. `owner_lane` is the destination
+lane, not a parent-routing hint. `text` must be nonempty, at most 2048 bytes,
+and contain no NUL or C0/C1 control characters (including tab, CR, and LF).
+Job event kinds reject a nonempty `event_id` or `text`; this makes the two
+idempotency families unambiguous. As with job events, duplicate lane-event
+posts return the first writer's original row, increment `attempts`, and never
+change `delivered_at`.
 
 ## Attachments (R2)
 
