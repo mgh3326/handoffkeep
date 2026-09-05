@@ -21,20 +21,22 @@
 <body>
   <h1>Fleet console</h1>
   <nav aria-label="Fleet console pages">
-    <a href="/ui/timeline">Timeline</a><a href="/ui/queue">Queue</a><a href="/ui/decisions">Decisions</a><a href="/ui/fleet">Fleet</a>
+    <a href="/ui/timeline">Timeline</a><a href="/ui/queue">Queue</a><a href="/ui/decisions">Decisions</a><a href="/ui/compose">Compose</a><a href="/ui/fleet">Fleet</a>
   </nav>
   <main>
   {{if eq .Page "timeline"}}{{template "timeline_content" .Body}}{{end}}
   {{if eq .Page "queue"}}{{template "queue_content" .Body}}{{end}}
   {{if eq .Page "decisions"}}{{template "decisions_content" .Body}}{{end}}
+  {{if eq .Page "compose"}}{{template "compose_content" .Body}}{{end}}
   {{if eq .Page "fleet"}}{{template "fleet_content" .Body}}{{end}}
+  {{if eq .Page "document"}}{{template "document_content" .Body}}{{end}}
   </main>
   <script>
     if (window.EventSource && window.htmx) {
       const uiEvents = new EventSource('/ui/events');
       uiEvents.addEventListener('delta', function () {
         const content = document.getElementById('ui-content');
-        if (content) htmx.ajax('GET', '/ui/fragments/' + content.dataset.uiFragment + window.location.search, {target: '#ui-content', swap: 'outerHTML'});
+        if (content && content.dataset.uiFragment) htmx.ajax('GET', '/ui/fragments/' + content.dataset.uiFragment + window.location.search, {target: '#ui-content', swap: 'outerHTML'});
       });
     }
   </script>
@@ -57,7 +59,8 @@
     <div class="timeline-meta"><strong>{{.OwnerLane}}</strong><span class="badge">{{.Kind}}</span><span>#{{.ID}}</span><time>{{formatTime .ReceivedAt}}</time>
       {{if .DeliveredAt}}<span class="delivered" title="{{.DeliveredTo}}">✓ delivered</span>{{else}}<span class="undelivered">미배달</span>{{end}}
     </div>
-    <pre>{{message .}}</pre>
+    <pre>{{range message .}}{{if .DocKey}}<a href="/ui/doc/{{.DocKey}}">doc:{{.DocKey}}</a>{{else}}{{.Text}}{{end}}{{end}}</pre>
+    {{with ingressLabel .}}<span class="badge">sender {{.}}</span>{{end}}
     <div class="refs">
       {{with githubLink .PR}}{{if .Valid}}<a href="{{.Value}}">PR</a>{{else if .Value}}<span>PR {{.Value}}</span>{{end}}{{end}}
       {{if .Head}}<span>head {{shortHead .Head}}</span>{{end}}
@@ -102,16 +105,62 @@
 {{define "decisions_content"}}
 <section id="ui-content" data-ui-fragment="decisions">
   <h2>Decision inbox</h2>
+  {{if .Notice}}<p class="badge">{{.Notice}}</p>{{end}}
+  {{if not .CanWrite}}<p class="muted">{{.WriteReason}}</p>{{end}}
+  {{if .HasApproval}}<section><h3>Awaiting your approval</h3>
+  {{range .ApprovalTasks}}{{template "task_decision" (decisionFormData "task" .Task.ID .Question .Options .Task $.CSRF $.CanWrite)}}{{else}}<p class="muted">No awaiting approvals.</p>{{end}}
+  </section>{{end}}
   <section><h3>Tasks needing decisions</h3>
-  {{range .Tasks}}<article class="decision decision-card"><strong>#{{.Task.ID}} {{.Task.Title}}</strong> · {{.Task.Lane}}<pre>{{.Question}}</pre></article>{{else}}<p class="muted">No unresolved task decisions.</p>{{end}}
+  {{range .Tasks}}{{template "task_decision" (decisionFormData "task" .Task.ID .Question .Options .Task $.CSRF $.CanWrite)}}{{else}}<p class="muted">No unresolved task decisions.</p>{{end}}
   </section>
   <section><h3>Open job escalations</h3>
-  {{range .Escalations}}<article class="decision"><strong>{{.OwnerLane}}</strong> · job {{.JobID}}<pre>{{message .}}</pre></article>{{else}}<p class="muted">No open job escalations.</p>{{end}}
+  {{range .Escalations}}{{template "event_decision" (eventFormData "escalation" . $.CSRF $.CanWrite)}}{{else}}<p class="muted">No open job escalations.</p>{{end}}
   </section>
   <section><h3>Open lane decisions</h3>
-  {{range .LaneEvents}}<article class="decision"><strong>{{.OwnerLane}}</strong><pre>{{.Text}}</pre></article>{{else}}<p class="muted">No open lane decisions.</p>{{end}}
+  {{range .LaneEvents}}{{template "event_decision" (eventFormData "lane" . $.CSRF $.CanWrite)}}{{else}}<p class="muted">No open lane decisions.</p>{{end}}
   </section>
+  <details><summary>signals</summary>{{range .Signals}}<article class="decision"><strong>{{.OwnerLane}}</strong> · job {{.JobID}}<pre>{{range message .}}{{if .DocKey}}<a href="/ui/doc/{{.DocKey}}">doc:{{.DocKey}}</a>{{else}}{{.Text}}{{end}}{{end}}</pre></article>{{else}}<p class="muted">No signals.</p>{{end}}</details>
 </section>
+{{end}}
+
+{{define "task_decision"}}
+<article class="decision decision-card"><strong>#{{.Task.ID}} {{.Task.Title}}</strong> · {{.Task.Lane}}<pre>{{.Question}}</pre>
+  <div class="refs">{{with githubLink .Task.Refs.PR}}{{if .Valid}}<a href="{{.Value}}">PR</a>{{else if .Value}}<span>PR {{.Value}}</span>{{end}}{{end}}{{if .Task.Refs.HeadSHA}}<span>head {{shortHead .Task.Refs.HeadSHA}}</span>{{end}}{{if .Task.Refs.ReportPath}}<a href="/ui/doc/{{.Task.Refs.ReportPath}}">report</a>{{end}}{{if .Task.Refs.JobID}}<span>job {{.Task.Refs.JobID}}</span>{{end}}</div>
+  {{template "decision_form" .}}
+</article>
+{{end}}
+
+{{define "event_decision"}}
+<article class="decision"><strong>{{.Event.OwnerLane}}</strong> · {{if eq .Type "escalation"}}job {{.Event.JobID}}{{else}}#{{.Event.ID}}{{end}}<pre>{{range message .Event}}{{if .DocKey}}<a href="/ui/doc/{{.DocKey}}">doc:{{.DocKey}}</a>{{else}}{{.Text}}{{end}}{{end}}</pre>{{with ingressLabel .Event}}<span class="badge">sender {{.}}</span>{{end}}
+  {{template "decision_form" .}}
+</article>
+{{end}}
+
+{{define "decision_form"}}
+<form method="post" action="/ui/decisions/answer" hx-post="/ui/decisions/answer" hx-target="#ui-content" hx-swap="outerHTML">
+  <input type="hidden" name="type" value="{{.Type}}"><input type="hidden" name="id" value="{{.ID}}"><input type="hidden" name="csrf" value="{{.CSRF}}">
+  <fieldset {{if not .CanWrite}}disabled{{end}}><legend>Answer</legend>
+    {{if .Options}}{{range .Options}}<button type="submit" name="answer" value="{{.}}">{{.}}</button>{{end}}{{else}}<label>Answer <input name="answer" required></label><button type="submit">Send answer</button>{{end}}
+    <label>Note <input name="note"></label>
+  </fieldset>
+</form>
+{{end}}
+
+{{define "compose_content"}}
+<section id="ui-content" data-ui-fragment="compose">
+  <h2>Compose lane event</h2>{{if .Notice}}<p class="badge">{{.Notice}}</p>{{end}}{{if .WriteReason}}<p class="muted">{{.WriteReason}}</p>{{end}}
+  <form method="post" action="/ui/compose" hx-post="/ui/compose" hx-target="#ui-content" hx-swap="outerHTML" data-compose data-operator-email="{{.Email}}">
+    <input type="hidden" name="csrf" value="{{.CSRF}}"><fieldset {{if not .CanCompose}}disabled{{end}}><label>Destination <select name="lane">{{range .Lanes}}<option value="{{.}}">{{.}}</option>{{end}}</select></label><label>Message <input name="text" required data-compose-text></label><output data-compose-count></output><button type="submit">Send</button></fieldset>
+  </form>
+  <p class="muted">Delivered status is shown by Timeline's ✓ marker.</p>
+</section>
+<script>
+  (function () { const form = document.querySelector('[data-compose]'); if (!form || !window.TextEncoder) return; const input = form.querySelector('[data-compose-text]'); const count = form.querySelector('[data-compose-count]'); const update = function () { const bytes = new TextEncoder().encode('[event] ' + input.value + ' (from operator(web) ' + form.dataset.operatorEmail + ')').length; count.textContent = bytes + '/2048 bytes'; input.setCustomValidity(bytes > 2048 ? 'Message is too long.' : ''); }; input.addEventListener('input', update); update(); }());
+</script>
+{{end}}
+
+{{define "document_content"}}
+<section id="ui-content"><h2>{{.Key}}</h2><pre>{{.Body}}</pre></section>
 {{end}}
 
 {{define "fleet_content"}}

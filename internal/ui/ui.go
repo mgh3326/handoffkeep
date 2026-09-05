@@ -1,7 +1,8 @@
-// Package ui serves the read-only fleet console.
+// Package ui serves the Cloudflare Access-authenticated fleet console.
 package ui
 
 import (
+	"crypto/rand"
 	"embed"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"io/fs"
 	"net/http"
 	"net/url"
+	"os"
 	"path"
 	"sort"
 	"strconv"
@@ -36,7 +38,7 @@ type Config struct {
 	PollInterval  time.Duration
 }
 
-// Handler is a read-only, Cloudflare Access-authenticated UI handler.
+// Handler is a Cloudflare Access-authenticated UI handler.
 type Handler struct {
 	store        *store.Store
 	access       *cfaccess.Verifier
@@ -44,6 +46,10 @@ type Handler struct {
 	hub          *hubProxy
 	pollInterval time.Duration
 	static       fs.FS
+	csrfKey      []byte
+	lanes        []string
+	laneSet      map[string]bool
+	admiralLanes map[string]bool
 }
 
 // New builds the optional fleet console.
@@ -52,10 +58,13 @@ func New(config Config) (*Handler, error) {
 		return nil, errors.New("UI requires store and Cloudflare Access verifier")
 	}
 	tmpl, err := template.New("ui").Funcs(template.FuncMap{
-		"formatTime": formatTime,
-		"shortHead":  shortHead,
-		"githubLink": githubLink,
-		"message":    eventMessage,
+		"formatTime":       formatTime,
+		"shortHead":        shortHead,
+		"githubLink":       githubLink,
+		"message":          messageParts,
+		"ingressLabel":     ingressLabel,
+		"decisionFormData": decisionFormData,
+		"eventFormData":    eventFormData,
 	}).ParseFS(assets, "templates/*.html")
 	if err != nil {
 		return nil, err
@@ -68,6 +77,19 @@ func New(config Config) (*Handler, error) {
 	if poll <= 0 {
 		poll = 10 * time.Second
 	}
+	csrfKey := make([]byte, 32)
+	if _, err := rand.Read(csrfKey); err != nil {
+		return nil, fmt.Errorf("generate UI CSRF key: %w", err)
+	}
+	lanes := splitList(os.Getenv("HANDOFFKEEP_UI_LANES"))
+	laneSet := make(map[string]bool, len(lanes))
+	for _, lane := range lanes {
+		laneSet[lane] = true
+	}
+	admiralLanes := make(map[string]bool)
+	for _, lane := range splitList(os.Getenv("HANDOFFKEEP_UI_ADMIRAL_LANES")) {
+		admiralLanes[lane] = true
+	}
 	return &Handler{
 		store:        config.Store,
 		access:       config.Access,
@@ -75,14 +97,36 @@ func New(config Config) (*Handler, error) {
 		hub:          newHubProxy(config.HubURL, config.HubToken, config.HubHTTPClient),
 		pollInterval: poll,
 		static:       static,
+		csrfKey:      csrfKey,
+		lanes:        lanes,
+		laneSet:      laneSet,
+		admiralLanes: admiralLanes,
 	}, nil
 }
 
 // ServeHTTP keeps the UI authentication and method boundary separate from the
-// existing bearer-token API. No UI request can reach a write method.
+// existing bearer-token API. Only the explicit UI write routes can reach a
+// mutating operation.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if !h.access.Authenticate(r) {
+	email, authenticated := h.access.AuthenticatedEmail(r)
+	if !authenticated {
+		if r.Method == http.MethodPost {
+			h.audit("-", writeAction(r.URL.Path), "-", "-", "unauthorized")
+		}
 		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	if r.Method == http.MethodPost {
+		switch r.URL.Path {
+		case "/ui/decisions/answer":
+			h.answerDecision(w, r, email)
+		case "/ui/compose":
+			h.composePost(w, r, email)
+		default:
+			h.audit(email, writeAction(r.URL.Path), "-", "-", "invalid")
+			w.Header().Set("Allow", http.MethodGet)
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
 		return
 	}
 	if r.Method != http.MethodGet {
@@ -98,17 +142,19 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "/ui/queue":
 		h.queue(w, r, false)
 	case "/ui/decisions":
-		h.decisions(w, r, false)
+		h.decisions(w, r, false, email, r.URL.Query().Get("result"))
+	case "/ui/compose":
+		h.compose(w, r, false, email, r.URL.Query().Get("result"))
 	case "/ui/fleet":
 		h.fleet(w, r, false)
 	case "/ui/events":
 		h.events(w, r)
 	default:
-		h.serveSubroute(w, r)
+		h.serveSubroute(w, r, email)
 	}
 }
 
-func (h *Handler) serveSubroute(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) serveSubroute(w http.ResponseWriter, r *http.Request, email string) {
 	if name, ok := strings.CutPrefix(r.URL.Path, "/ui/fragments/task/"); ok {
 		h.taskEvents(w, r, name)
 		return
@@ -120,12 +166,18 @@ func (h *Handler) serveSubroute(w http.ResponseWriter, r *http.Request) {
 		case "queue":
 			h.queue(w, r, true)
 		case "decisions":
-			h.decisions(w, r, true)
+			h.decisions(w, r, true, email, r.URL.Query().Get("result"))
 		case "fleet":
 			h.fleet(w, r, true)
+		case "compose":
+			h.compose(w, r, true, email, r.URL.Query().Get("result"))
 		default:
 			http.NotFound(w, r)
 		}
+		return
+	}
+	if key, ok := strings.CutPrefix(r.URL.Path, "/ui/doc/"); ok {
+		h.document(w, r, key)
 		return
 	}
 	if file, ok := strings.CutPrefix(r.URL.Path, "/ui/static/"); ok {
@@ -304,8 +356,8 @@ func (h *Handler) taskEvents(w http.ResponseWriter, r *http.Request, rawID strin
 	h.render(w, "task_events", task)
 }
 
-func (h *Handler) decisions(w http.ResponseWriter, r *http.Request, fragment bool) {
-	data, err := h.decisionData(r)
+func (h *Handler) decisions(w http.ResponseWriter, r *http.Request, fragment bool, email, notice string) {
+	data, err := h.decisionData(r, h.csrfForForm(w, r, email), notice)
 	if err != nil {
 		http.Error(w, "fleet console unavailable", http.StatusInternalServerError)
 		return
@@ -318,12 +370,58 @@ func (h *Handler) decisions(w http.ResponseWriter, r *http.Request, fragment boo
 }
 
 type decisionData struct {
-	Tasks       []store.TaskDecision
-	Escalations []store.RelayEvent
-	LaneEvents  []store.RelayEvent
+	ApprovalTasks []taskDecisionView
+	Tasks         []taskDecisionView
+	Escalations   []store.RelayEvent
+	Signals       []store.RelayEvent
+	LaneEvents    []store.RelayEvent
+	CSRF          string
+	CanWrite      bool
+	WriteReason   string
+	Notice        string
+	HasApproval   bool
 }
 
-func (h *Handler) decisionData(r *http.Request) (decisionData, error) {
+type taskDecisionView struct {
+	Task     store.Task
+	Question string
+	Options  []string
+}
+
+type decisionForm struct {
+	Type     string
+	ID       int64
+	Question string
+	Options  []string
+	Task     store.Task
+	CSRF     string
+	CanWrite bool
+}
+
+func decisionFormData(kind string, id int64, question string, options []string, task store.Task, csrf string, canWrite bool) decisionForm {
+	return decisionForm{Type: kind, ID: id, Question: question, Options: options, Task: task, CSRF: csrf, CanWrite: canWrite}
+}
+
+type eventForm struct {
+	Type     string
+	ID       int64
+	Event    store.RelayEvent
+	Options  []string
+	CSRF     string
+	CanWrite bool
+}
+
+func eventFormData(kind string, event store.RelayEvent, csrf string, canWrite bool) eventForm {
+	question := event.Text
+	if kind == "escalation" {
+		question = escalationText(event)
+	} else {
+		question = strings.TrimSpace(strings.TrimPrefix(question, "[decision-needed]"))
+	}
+	return eventForm{Type: kind, ID: event.ID, Event: event, Options: decisionOptions(question), CSRF: csrf, CanWrite: canWrite}
+}
+
+func (h *Handler) decisionData(r *http.Request, csrf, notice string) (decisionData, error) {
 	tasks, err := h.store.ListOpenTaskDecisions(r.Context(), 1000)
 	if err != nil {
 		return decisionData{}, err
@@ -336,7 +434,27 @@ func (h *Handler) decisionData(r *http.Request) (decisionData, error) {
 	if err != nil {
 		return decisionData{}, err
 	}
-	return decisionData{Tasks: tasks, Escalations: escalations, LaneEvents: laneEvents}, nil
+	data := decisionData{CSRF: csrf, CanWrite: h.hub.configured(), Notice: notice, HasApproval: len(h.admiralLanes) > 0}
+	if !data.CanWrite {
+		data.WriteReason = "Hub is not configured."
+	}
+	for _, decision := range tasks {
+		view := taskDecisionView{Task: decision.Task, Question: decision.Question, Options: decisionOptions(decision.Question)}
+		if h.admiralLanes[decision.Task.Lane] {
+			data.ApprovalTasks = append(data.ApprovalTasks, view)
+		} else {
+			data.Tasks = append(data.Tasks, view)
+		}
+	}
+	for _, escalation := range escalations {
+		if isSignalEscalation(escalation) {
+			data.Signals = append(data.Signals, escalation)
+		} else {
+			data.Escalations = append(data.Escalations, escalation)
+		}
+	}
+	data.LaneEvents = laneEvents
+	return data, nil
 }
 
 func (h *Handler) fleet(w http.ResponseWriter, r *http.Request, fragment bool) {
@@ -401,6 +519,19 @@ type pageData struct {
 	Body  any
 }
 
+func splitList(raw string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, value := range strings.Split(raw, ",") {
+		value = strings.TrimSpace(value)
+		if value != "" && !seen[value] {
+			seen[value] = true
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
 type link struct {
 	Value string
 	Valid bool
@@ -418,6 +549,17 @@ func eventMessage(event store.RelayEvent) string {
 		return event.Question
 	}
 	return event.ReportLastLine
+}
+
+func ingressLabel(event store.RelayEvent) string {
+	if event.Kind != "lane.event" {
+		return ""
+	}
+	label, ok := strings.CutPrefix(event.Reason, "http_ingress:")
+	if !ok {
+		return ""
+	}
+	return label
 }
 
 func shortHead(value string) string {

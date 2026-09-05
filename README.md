@@ -3,10 +3,11 @@ A durable home for coding-agent handoffs, working memory, and documents across s
 
 ## Fleet console (/ui)
 
-The optional, read-only fleet console renders relay timelines, task queues,
-unresolved decisions, session checkpoints, and hub status. It is mounted only
-when the Cloudflare Access configuration is complete, uses a separate Access
-assertion from the API bearer token, and has no write routes. See
+The optional fleet console renders relay timelines, task queues, unresolved
+decisions, session checkpoints, and hub status. Authenticated operators can
+also answer decision items and compose lane events through its two guarded UI
+write routes. It is mounted only when the Cloudflare Access configuration is
+complete and uses a separate Access assertion from the API bearer token. See
 [docs/ui.md](docs/ui.md) for configuration, security boundaries, hub behavior,
 and the SSE contract.
 
