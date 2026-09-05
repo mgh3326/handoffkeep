@@ -255,25 +255,38 @@ func (s *Store) migrate(ctx context.Context) error {
 		`CREATE UNIQUE INDEX IF NOT EXISTS relay_events_idempotency ON relay_events(kind, job_id, epoch, report_path, reason)`,
 		`CREATE INDEX IF NOT EXISTS relay_events_undelivered ON relay_events(owner_lane, id ASC) WHERE delivered_at IS NULL`,
 		`INSERT INTO schema_version(version) VALUES (6) ON CONFLICT DO NOTHING`)
-	// Version 7 extends relay_events without changing historic job.* rows. The
-	// old unique index is split into two partial indexes: job records retain
-	// their byte-for-byte five-column key, while lane.event is independently
-	// idempotent by its direct destination and producer event ID.
-	stmts = append(stmts,
-		`ALTER TABLE relay_events ADD COLUMN IF NOT EXISTS event_id TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE relay_events ADD COLUMN IF NOT EXISTS text TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE relay_events DROP CONSTRAINT IF EXISTS relay_events_kind_check`,
-		`ALTER TABLE relay_events ADD CONSTRAINT relay_events_kind_check CHECK(kind IN ('job.completed','job.escalate','job.joined','lane.event'))`,
-		`DROP INDEX IF EXISTS relay_events_idempotency`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS relay_events_idempotency ON relay_events(kind, job_id, epoch, report_path, reason) WHERE kind IN ('job.completed','job.escalate','job.joined')`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS relay_events_lane_event_idempotency ON relay_events(owner_lane, event_id) WHERE kind='lane.event'`,
-		`INSERT INTO schema_version(version) VALUES (7) ON CONFLICT DO NOTHING`)
 	for _, q := range stmts {
 		if _, err := tx.Exec(ctx, q); err != nil {
 			if q == `CREATE EXTENSION IF NOT EXISTS pg_trgm` {
 				return ErrTrigramUnavailable
 			}
 			return err
+		}
+	}
+	var v7Applied bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_version WHERE version=7)`).Scan(&v7Applied); err != nil {
+		return err
+	}
+	if !v7Applied {
+		// Version 7 extends relay_events without changing historic job.* rows.
+		// This is deliberately schema-version gated: dropping a constraint or
+		// rebuilding an index takes an ACCESS EXCLUSIVE lock, so repeating it
+		// at every process start would block relay writers without a migration.
+		v7 := []string{
+			`ALTER TABLE relay_events ADD COLUMN IF NOT EXISTS event_id TEXT NOT NULL DEFAULT ''`,
+			`ALTER TABLE relay_events ADD COLUMN IF NOT EXISTS text TEXT NOT NULL DEFAULT ''`,
+			`ALTER TABLE relay_events DROP CONSTRAINT IF EXISTS relay_events_kind_check`,
+			`ALTER TABLE relay_events ADD CONSTRAINT relay_events_kind_check CHECK(kind IN ('job.completed','job.escalate','job.joined','lane.event'))`,
+			`DROP INDEX IF EXISTS relay_events_idempotency`,
+			`CREATE UNIQUE INDEX relay_events_idempotency ON relay_events(kind, job_id, epoch, report_path, reason) WHERE kind IN ('job.completed','job.escalate','job.joined')`,
+			`CREATE UNIQUE INDEX relay_events_lane_event_idempotency ON relay_events(owner_lane, event_id) WHERE kind='lane.event'`,
+			`CREATE INDEX relay_events_undelivered_kind_id ON relay_events(kind, id ASC) WHERE delivered_at IS NULL`,
+			`INSERT INTO schema_version(version) VALUES (7)`,
+		}
+		for _, q := range v7 {
+			if _, err := tx.Exec(ctx, q); err != nil {
+				return err
+			}
 		}
 	}
 	return tx.Commit(ctx)
@@ -565,16 +578,19 @@ func validRelayEvent(x RelayEvent) bool {
 	if !relayEventKinds[x.Kind] || x.OwnerLane == "" || !validText(x.OwnerLane, MaxBytes) {
 		return false
 	}
+	// Validate every request-owned text column for every kind before the
+	// lane.event-specific contract below. Otherwise an authenticated sender
+	// could use ignored job-shaped fields as an unbounded storage bypass.
+	for _, v := range []string{x.Kind, x.JobID, x.OwnerLane, x.Machine, x.PaneID, x.ReportPath, x.ReportLastLine, x.Question, x.PR, x.Head, x.Reason, x.EventID, x.Text} {
+		if !validText(v, MaxBytes) {
+			return false
+		}
+	}
 	if x.Kind == "lane.event" {
 		return x.EventID != "" && validText(x.EventID, MaxBytes) && validLaneEventText(x.Text)
 	}
 	if x.JobID == "" || x.EventID != "" || x.Text != "" {
 		return false
-	}
-	for _, v := range []string{x.Kind, x.JobID, x.OwnerLane, x.Machine, x.PaneID, x.ReportPath, x.ReportLastLine, x.Question, x.PR, x.Head, x.Reason} {
-		if !validText(v, MaxBytes) {
-			return false
-		}
 	}
 	return true
 }
@@ -645,7 +661,13 @@ func (s *Store) MarkRelayEventDelivered(ctx context.Context, id int64, machine, 
 
 // ListRelayEvents returns relay records in durable insertion order.
 func (s *Store) ListRelayEvents(ctx context.Context, lane string, undelivered bool, limit int) ([]RelayEvent, error) {
-	if !validText(lane, MaxBytes) {
+	return s.ListRelayEventsPage(ctx, lane, "", undelivered, 0, limit)
+}
+
+// ListRelayEventsPage is the additive cursor form of ListRelayEvents. afterID
+// is exclusive so a caller can safely advance using the last row it observed.
+func (s *Store) ListRelayEventsPage(ctx context.Context, lane, kind string, undelivered bool, afterID int64, limit int) ([]RelayEvent, error) {
+	if !validText(lane, MaxBytes) || (kind != "" && !relayEventKinds[kind]) || afterID < 0 {
 		return nil, errors.New("invalid relay event query")
 	}
 	if limit <= 0 {
@@ -659,8 +681,16 @@ func (s *Store) ListRelayEvents(ctx context.Context, lane string, undelivered bo
 		args = append(args, lane)
 		q += fmt.Sprintf(" AND owner_lane=$%d", len(args))
 	}
+	if kind != "" {
+		args = append(args, kind)
+		q += fmt.Sprintf(" AND kind=$%d", len(args))
+	}
 	if undelivered {
 		q += " AND delivered_at IS NULL"
+	}
+	if afterID > 0 {
+		args = append(args, afterID)
+		q += fmt.Sprintf(" AND id>$%d", len(args))
 	}
 	args = append(args, limit)
 	q += fmt.Sprintf(" ORDER BY id ASC LIMIT $%d", len(args))

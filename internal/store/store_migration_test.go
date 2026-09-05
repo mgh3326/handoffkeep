@@ -54,6 +54,23 @@ func TestRelayEventsV6ToV7Upgrade(t *testing.T) {
 	if err = s.migrate(ctx); err != nil {
 		t.Fatal(err)
 	}
+	var version int
+	if err = pool.QueryRow(ctx, `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != 7 {
+		t.Fatalf("schema version=%d err=%v", version, err)
+	}
+	var constraintOID uint32
+	if err = pool.QueryRow(ctx, `SELECT oid FROM pg_constraint WHERE conrelid='relay_events'::regclass AND conname='relay_events_kind_check'`).Scan(&constraintOID); err != nil {
+		t.Fatal(err)
+	}
+	// A second open must see schema version 7 and skip the lock-heavy v7 DDL.
+	// The constraint OID would change if it were dropped and re-added again.
+	if err = s.migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var repeatedConstraintOID uint32
+	if err = pool.QueryRow(ctx, `SELECT oid FROM pg_constraint WHERE conrelid='relay_events'::regclass AND conname='relay_events_kind_check'`).Scan(&repeatedConstraintOID); err != nil || repeatedConstraintOID != constraintOID {
+		t.Fatalf("v7 repeated constraint oid=%d want=%d err=%v", repeatedConstraintOID, constraintOID, err)
+	}
 	var count int
 	if err = pool.QueryRow(ctx, `SELECT count(*) FROM relay_events WHERE kind='job.completed' AND job_id='old-job'`).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("historic rows=%d err=%v", count, err)

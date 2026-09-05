@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -119,6 +120,46 @@ func TestLaneEventsRequireLaneAndEventID(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("job event-id status=%d", resp.StatusCode)
+	}
+	oversize := laneEventPayload(lane, "producer-oversize", "payload")
+	oversize["report_path"] = strings.Repeat("x", store.MaxBytes+1)
+	resp = request(t, h.Client(), http.MethodPost, h.URL+"/v1/relay/events", "node-token", oversize)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("lane extra field size status=%d", resp.StatusCode)
+	}
+}
+
+func TestRelayEventsListKindAndAfterID(t *testing.T) {
+	s := taskTestStore(t)
+	h := taskHTTP(s)
+	defer h.Close()
+	lane := taskLane(t)
+	_, job := postRelayEvent(t, h.URL, "node-token", relayPayload(lane, "relay-page-job-"+lane))
+	_, first := postRelayEvent(t, h.URL, "node-token", laneEventPayload(lane, "producer-page-1", "first"))
+	_, second := postRelayEvent(t, h.URL, "node-token", laneEventPayload(lane, "producer-page-2", "second"))
+	path := fmt.Sprintf("%s/v1/relay/events?undelivered=1&kind=lane.event&after_id=%d&limit=10", h.URL, first.ID)
+	resp := request(t, h.Client(), http.MethodGet, path, "node-token", nil)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("page status=%d", resp.StatusCode)
+	}
+	var listed struct {
+		Events []store.RelayEvent `json:"events"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&listed); err != nil {
+		t.Fatal(err)
+	}
+	if len(listed.Events) != 1 || listed.Events[0].ID != second.ID || listed.Events[0].Kind != "lane.event" || first.ID <= job.ID {
+		t.Fatalf("kind/cursor events=%+v job=%+v first=%+v second=%+v", listed.Events, job, first, second)
+	}
+	for _, query := range []string{"kind=unknown", "after_id=-1"} {
+		invalid := request(t, h.Client(), http.MethodGet, h.URL+"/v1/relay/events?"+query, "node-token", nil)
+		if invalid.StatusCode != http.StatusBadRequest {
+			invalid.Body.Close()
+			t.Fatalf("query=%q status=%d", query, invalid.StatusCode)
+		}
+		invalid.Body.Close()
 	}
 }
 

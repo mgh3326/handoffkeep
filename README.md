@@ -71,7 +71,10 @@ append an event, `POST /v1/relay/events/{id}/delivered` with
 `{"machine":"host-a","pane":"w1:p1"}` to record delivery, and
 `GET /v1/relay/events?undelivered=1&lane=lane-a` to find work still awaiting
 delivery. Omitting `lane` lists every lane; `undelivered=1` (or `true`) is for
-recovery workers that must only retry events without a recorded delivery.
+recovery workers that must only retry events without a recorded delivery. The
+additive `kind` parameter selects one supported kind, and `after_id` is an
+exclusive durable-ID cursor; use the last returned ID as the next `after_id` to
+advance through a recovery backlog without repeating an earlier page.
 
 For `job.completed`, `job.escalate`, and `job.joined`, the idempotency key is
 `(kind, job_id, epoch, report_path, reason)`. A first append returns 201; a
