@@ -41,7 +41,7 @@
 {{end}}
 
 {{define "timeline_content"}}
-<main id="ui-content" data-ui-fragment="timeline">
+<section id="ui-content" data-ui-fragment="timeline">
   <h2>Timeline</h2>
   <form method="get" action="/ui/timeline">
     <label>Lane <input name="lane" value="{{.Lane}}"></label>
@@ -67,11 +67,11 @@
     <h2>Latest session checkpoints</h2>
     {{range .Checkpoints}}<article class="session"><strong>{{.Session}}</strong> · {{.Title}} · <time>{{formatTime .CreatedAt}}</time></article>{{else}}<p class="muted">No checkpoints.</p>{{end}}
   </section>
-</main>
+</section>
 {{end}}
 
 {{define "queue_content"}}
-<main id="ui-content" data-ui-fragment="queue">
+<section id="ui-content" data-ui-fragment="queue">
   <h2>Queue board</h2>
   <table class="queue">
     <thead><tr><th>Lane</th>{{range .States}}<th>{{.}}</th>{{end}}</tr></thead>
@@ -88,7 +88,7 @@
       </details>
     {{end}}</td>{{end}}</tr>{{else}}<tr><td colspan="10" class="muted">No tasks.</td></tr>{{end}}</tbody>
   </table>
-</main>
+</section>
 {{end}}
 
 {{define "task_events"}}
@@ -98,7 +98,7 @@
 {{end}}
 
 {{define "decisions_content"}}
-<main id="ui-content" data-ui-fragment="decisions">
+<section id="ui-content" data-ui-fragment="decisions">
   <h2>Decision inbox</h2>
   <section><h3>Tasks needing decisions</h3>
   {{range .Tasks}}<article class="decision decision-card"><strong>#{{.Task.ID}} {{.Task.Title}}</strong> · {{.Task.Lane}}<pre>{{.Question}}</pre></article>{{else}}<p class="muted">No unresolved task decisions.</p>{{end}}
@@ -109,11 +109,11 @@
   <section><h3>Open lane decisions</h3>
   {{range .LaneEvents}}<article class="decision"><strong>{{.OwnerLane}}</strong><pre>{{.Text}}</pre></article>{{else}}<p class="muted">No open lane decisions.</p>{{end}}
   </section>
-</main>
+</section>
 {{end}}
 
 {{define "fleet_content"}}
-<main id="ui-content" data-ui-fragment="fleet">
+<section id="ui-content" data-ui-fragment="fleet">
   <h2>Fleet status</h2>
   {{if eq .Hub.Status "unconfigured"}}<p>hub 미설정</p>{{end}}
   {{if eq .Hub.Status "unavailable"}}<p>hub 도달 불가</p>{{end}}
@@ -128,5 +128,5 @@
   {{if .Hub.JobsUnsupported}}<p>jobs API 미지원</p>{{end}}{{if .Hub.JobsUnavailable}}<p class="muted">jobs API 도달 불가</p>{{end}}
   {{if .Hub.Jobs}}<section><h3>Active hub jobs</h3>{{range .Hub.Jobs}}<article class="card">{{.Machine}} · {{.JobID}} · {{.OwnerLane}} · {{.Pane}} · {{.Tier}} · {{.StartedAt}}</article>{{end}}</section>{{end}}
   <section><h3>Active queue work</h3>{{range .ActiveLanes}}<article class="card"><strong>{{.Lane}}</strong>{{range .Tasks}}<div>#{{.ID}} {{.Title}} · {{.ClaimedBy}} · {{.State}}</div>{{end}}</article>{{else}}<p class="muted">No claimed or in-progress tasks.</p>{{end}}</section>
-</main>
+</section>
 {{end}}
