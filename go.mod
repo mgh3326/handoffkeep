@@ -3,6 +3,7 @@ module github.com/mgh3326/handoffkeep
 go 1.27.0
 
 require (
+	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/minio/minio-go/v7 v7.0.99
 	github.com/modelcontextprotocol/go-sdk v1.7.0

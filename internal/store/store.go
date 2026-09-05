@@ -709,6 +709,187 @@ func (s *Store) ListRelayEventsPage(ctx context.Context, lane, kind string, unde
 	}
 	return out, rows.Err()
 }
+
+// ListRelayEventsTimeline returns newest relay events first. beforeID is an
+// exclusive descending cursor; dates are supplied as UTC bounds by the UI.
+func (s *Store) ListRelayEventsTimeline(ctx context.Context, lane, kind string, since, until *time.Time, beforeID int64, limit int) ([]RelayEvent, error) {
+	if !validText(lane, MaxBytes) || (kind != "" && !relayEventKinds[kind]) || beforeID < 0 {
+		return nil, errors.New("invalid relay timeline query")
+	}
+	if limit < 1 {
+		limit = 200
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	q, args := `SELECT `+relayEventColumns+` FROM relay_events WHERE 1=1`, []any{}
+	if lane != "" {
+		args = append(args, lane)
+		q += fmt.Sprintf(" AND owner_lane=$%d", len(args))
+	}
+	if kind != "" {
+		args = append(args, kind)
+		q += fmt.Sprintf(" AND kind=$%d", len(args))
+	}
+	if since != nil {
+		args = append(args, *since)
+		q += fmt.Sprintf(" AND received_at >= $%d", len(args))
+	}
+	if until != nil {
+		args = append(args, *until)
+		q += fmt.Sprintf(" AND received_at < $%d", len(args))
+	}
+	if beforeID > 0 {
+		args = append(args, beforeID)
+		q += fmt.Sprintf(" AND id < $%d", len(args))
+	}
+	args = append(args, limit)
+	q += fmt.Sprintf(" ORDER BY id DESC LIMIT $%d", len(args))
+	rows, err := s.pool.Query(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []RelayEvent{}
+	for rows.Next() {
+		var x RelayEvent
+		if err := scanRelayEvent(rows, &x); err != nil {
+			return nil, err
+		}
+		out = append(out, x)
+	}
+	return out, rows.Err()
+}
+
+// EventWatermarks returns the two durable IDs used by the UI's SSE poller.
+func (s *Store) EventWatermarks(ctx context.Context) (relayMaxID, taskEventMaxID int64, err error) {
+	err = s.pool.QueryRow(ctx, `SELECT COALESCE((SELECT MAX(id) FROM relay_events),0),COALESCE((SELECT MAX(id) FROM task_events),0)`).Scan(&relayMaxID, &taskEventMaxID)
+	return relayMaxID, taskEventMaxID, err
+}
+
+// LatestCheckpointsBySession returns one newest checkpoint for every session.
+func (s *Store) LatestCheckpointsBySession(ctx context.Context, limit int) ([]Checkpoint, error) {
+	if limit < 1 {
+		limit = 100
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	rows, err := s.pool.Query(ctx, `SELECT id,session,kind,title,body,refs,created_by,created_at FROM (
+		SELECT DISTINCT ON (session) id,session,kind,title,body,refs,created_by,created_at
+		FROM checkpoints ORDER BY session,created_at DESC,id DESC
+	) latest ORDER BY created_at DESC,id DESC LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Checkpoint{}
+	for rows.Next() {
+		var x Checkpoint
+		var refs []byte
+		if err := rows.Scan(&x.ID, &x.Session, &x.Kind, &x.Title, &x.Body, &refs, &x.CreatedBy, &x.CreatedAt); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(refs, &x.Refs); err != nil {
+			return nil, err
+		}
+		out = append(out, x)
+	}
+	return out, rows.Err()
+}
+
+// TaskDecision is an unresolved task together with the original question
+// recorded on its latest transition into needs_decision.
+type TaskDecision struct {
+	Task     Task
+	Question string
+}
+
+// ListOpenTaskDecisions implements the decision inbox task definition.
+func (s *Store) ListOpenTaskDecisions(ctx context.Context, limit int) ([]TaskDecision, error) {
+	if limit < 1 {
+		limit = 1000
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	rows, err := s.pool.Query(ctx, `SELECT t.id,t.lane,t.parent_lane,t.title,t.kind,t.state,t.priority,t.refs,t.claimed_by,t.created_by,t.created_at,t.updated_at,
+		COALESCE((SELECT note FROM task_events WHERE task_id=t.id AND "to"='needs_decision' ORDER BY at DESC,id DESC LIMIT 1),'')
+		FROM tasks t WHERE t.state='needs_decision' ORDER BY t.updated_at DESC,t.id DESC LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []TaskDecision{}
+	for rows.Next() {
+		var x TaskDecision
+		var refs []byte
+		if err := rows.Scan(&x.Task.ID, &x.Task.Lane, &x.Task.ParentLane, &x.Task.Title, &x.Task.Kind, &x.Task.State, &x.Task.Priority, &refs, &x.Task.ClaimedBy, &x.Task.CreatedBy, &x.Task.CreatedAt, &x.Task.UpdatedAt, &x.Question); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(refs, &x.Task.Refs); err != nil {
+			return nil, err
+		}
+		out = append(out, x)
+	}
+	return out, rows.Err()
+}
+
+// ListOpenEscalations implements the decision inbox job escalation definition.
+func (s *Store) ListOpenEscalations(ctx context.Context, limit int) ([]RelayEvent, error) {
+	if limit < 1 {
+		limit = 1000
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	rows, err := s.pool.Query(ctx, `SELECT `+relayEventColumns+` FROM relay_events e
+		WHERE e.kind='job.escalate' AND NOT EXISTS (
+			SELECT 1 FROM relay_events resolved WHERE resolved.job_id=e.job_id
+			AND resolved.kind IN ('job.joined','job.completed') AND resolved.id>e.id
+		) ORDER BY e.id DESC LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []RelayEvent{}
+	for rows.Next() {
+		var x RelayEvent
+		if err := scanRelayEvent(rows, &x); err != nil {
+			return nil, err
+		}
+		out = append(out, x)
+	}
+	return out, rows.Err()
+}
+
+// ListOpenLaneDecisions implements the decision inbox lane.event definition.
+func (s *Store) ListOpenLaneDecisions(ctx context.Context, limit int) ([]RelayEvent, error) {
+	if limit < 1 {
+		limit = 1000
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	rows, err := s.pool.Query(ctx, `SELECT `+relayEventColumns+` FROM relay_events e
+		WHERE e.kind='lane.event' AND e.text LIKE '[decision-needed]%' AND NOT EXISTS (
+			SELECT 1 FROM relay_events resolved WHERE resolved.kind='lane.event' AND resolved.owner_lane=e.owner_lane
+			AND resolved.text LIKE '[decision-answered]%' AND resolved.id>e.id
+		) ORDER BY e.id DESC LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []RelayEvent{}
+	for rows.Next() {
+		var x RelayEvent
+		if err := scanRelayEvent(rows, &x); err != nil {
+			return nil, err
+		}
+		out = append(out, x)
+	}
+	return out, rows.Err()
+}
 func (s *Store) CreateCheckpoint(ctx context.Context, x Checkpoint) (Checkpoint, error) {
 	if !validName(x.Session) || !kinds[x.Kind] || x.Title == "" || !validText(x.Title, MaxBytes) || !validText(x.Body, MaxBytes) || !validName(x.CreatedBy) {
 		return x, errors.New("invalid checkpoint")

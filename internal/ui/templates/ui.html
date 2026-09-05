@@ -1,0 +1,132 @@
+{{define "page"}}
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{.Title}} · Fleet console</title>
+  <script src="/ui/static/htmx.min.js"></script>
+  <style>
+    :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+    body { margin: 0 auto; max-width: 1500px; padding: 1.25rem; }
+    nav { display: flex; flex-wrap: wrap; gap: .75rem; margin-bottom: 1.25rem; }
+    a { color: #1967d2; } .muted { opacity: .72; } .badge { border: 1px solid currentColor; border-radius: .25rem; padding: .1rem .35rem; font-size: .8em; }
+    .timeline-event, .card, .decision, .session, .hub-node { border: 1px solid #8a8a8a; border-radius: .4rem; padding: .7rem; margin: .6rem 0; }
+    .timeline-meta, .refs, .hub-values { display: flex; flex-wrap: wrap; gap: .55rem; font-size: .9em; }
+    .undelivered { color: #a65b00; } .delivered { color: #18743c; } .decision-card { border-left: .4rem solid #b13600; }
+    .queue { border-collapse: collapse; width: 100%; } .queue th, .queue td { border: 1px solid #8a8a8a; padding: .45rem; vertical-align: top; min-width: 10rem; }
+    .queue th { text-align: left; } .threshold-alert { color: #b00020; font-weight: 700; } pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+  </style>
+</head>
+<body>
+  <h1>Fleet console</h1>
+  <nav aria-label="Fleet console pages">
+    <a href="/ui/timeline">Timeline</a><a href="/ui/queue">Queue</a><a href="/ui/decisions">Decisions</a><a href="/ui/fleet">Fleet</a>
+  </nav>
+  {{if eq .Page "timeline"}}{{template "timeline_content" .Body}}{{end}}
+  {{if eq .Page "queue"}}{{template "queue_content" .Body}}{{end}}
+  {{if eq .Page "decisions"}}{{template "decisions_content" .Body}}{{end}}
+  {{if eq .Page "fleet"}}{{template "fleet_content" .Body}}{{end}}
+  <script>
+    if (window.EventSource && window.htmx) {
+      const uiEvents = new EventSource('/ui/events');
+      uiEvents.addEventListener('delta', function () {
+        const content = document.getElementById('ui-content');
+        if (content) htmx.ajax('GET', '/ui/fragments/' + content.dataset.uiFragment + window.location.search, {target: '#ui-content', swap: 'outerHTML'});
+      });
+    }
+  </script>
+</body>
+</html>
+{{end}}
+
+{{define "timeline_content"}}
+<main id="ui-content" data-ui-fragment="timeline">
+  <h2>Timeline</h2>
+  <form method="get" action="/ui/timeline">
+    <label>Lane <input name="lane" value="{{.Lane}}"></label>
+    <label>Kind <input name="kind" value="{{.Kind}}"></label>
+    <label>Since <input type="date" name="since" value="{{.Since}}"></label>
+    <label>Until <input type="date" name="until" value="{{.Until}}"></label>
+    <button type="submit">Filter</button>
+  </form>
+  {{range .Events}}
+  <article class="timeline-event">
+    <div class="timeline-meta"><strong>{{.OwnerLane}}</strong><span class="badge">{{.Kind}}</span><span>#{{.ID}}</span><time>{{formatTime .ReceivedAt}}</time>
+      {{if .DeliveredAt}}<span class="delivered" title="{{.DeliveredTo}}">✓ delivered</span>{{else}}<span class="undelivered">미배달</span>{{end}}
+    </div>
+    <pre>{{message .}}</pre>
+    <div class="refs">
+      {{with githubLink .PR}}{{if .Valid}}<a href="{{.Value}}">PR</a>{{else if .Value}}<span>PR {{.Value}}</span>{{end}}{{end}}
+      {{if .Head}}<span>head {{shortHead .Head}}</span>{{end}}
+    </div>
+  </article>
+  {{else}}<p class="muted">No relay events.</p>{{end}}
+  {{if .MoreURL}}<p><a href="{{.MoreURL}}">더보기</a></p>{{end}}
+  <section>
+    <h2>Latest session checkpoints</h2>
+    {{range .Checkpoints}}<article class="session"><strong>{{.Session}}</strong> · {{.Title}} · <time>{{formatTime .CreatedAt}}</time></article>{{else}}<p class="muted">No checkpoints.</p>{{end}}
+  </section>
+</main>
+{{end}}
+
+{{define "queue_content"}}
+<main id="ui-content" data-ui-fragment="queue">
+  <h2>Queue board</h2>
+  <table class="queue">
+    <thead><tr><th>Lane</th>{{range .States}}<th>{{.}}</th>{{end}}</tr></thead>
+    <tbody>{{range .Lanes}}<tr><th>{{.Name}}</th>{{range .Cells}}<td>{{range .Tasks}}
+      <details class="card {{if eq .State "needs_decision"}}decision-card{{end}}" hx-get="/ui/fragments/task/{{.ID}}" hx-trigger="toggle[open] once" hx-target="this" hx-swap="beforeend">
+        <summary>#{{.ID}} {{.Title}} {{if eq .State "needs_decision"}}<span class="badge">needs decision</span>{{end}}</summary>
+        <div>kind {{.Kind}} · priority {{.Priority}} · claimed by {{.ClaimedBy}} · {{formatTime .UpdatedAt}}</div>
+        <div class="refs">
+          {{with githubLink .Refs.PR}}{{if .Valid}}<a href="{{.Value}}">PR</a>{{else if .Value}}<span>PR {{.Value}}</span>{{end}}{{end}}
+          {{if .Refs.HeadSHA}}<span>head {{shortHead .Refs.HeadSHA}}</span>{{end}}
+          {{if .Refs.ReportPath}}<span>report {{.Refs.ReportPath}}</span>{{end}}
+          {{if .Refs.JobID}}<span>job {{.Refs.JobID}}</span>{{end}}
+        </div>
+      </details>
+    {{end}}</td>{{end}}</tr>{{else}}<tr><td colspan="10" class="muted">No tasks.</td></tr>{{end}}</tbody>
+  </table>
+</main>
+{{end}}
+
+{{define "task_events"}}
+<ol>
+{{range .Events}}<li><strong>{{.From}} → {{.To}}</strong> by {{.By}} at <time>{{formatTime .At}}</time><pre>{{.Note}}</pre></li>{{else}}<li class="muted">No task events.</li>{{end}}
+</ol>
+{{end}}
+
+{{define "decisions_content"}}
+<main id="ui-content" data-ui-fragment="decisions">
+  <h2>Decision inbox</h2>
+  <section><h3>Tasks needing decisions</h3>
+  {{range .Tasks}}<article class="decision decision-card"><strong>#{{.Task.ID}} {{.Task.Title}}</strong> · {{.Task.Lane}}<pre>{{.Question}}</pre></article>{{else}}<p class="muted">No unresolved task decisions.</p>{{end}}
+  </section>
+  <section><h3>Open job escalations</h3>
+  {{range .Escalations}}<article class="decision"><strong>{{.OwnerLane}}</strong> · job {{.JobID}}<pre>{{message .}}</pre></article>{{else}}<p class="muted">No open job escalations.</p>{{end}}
+  </section>
+  <section><h3>Open lane decisions</h3>
+  {{range .LaneEvents}}<article class="decision"><strong>{{.OwnerLane}}</strong><pre>{{.Text}}</pre></article>{{else}}<p class="muted">No open lane decisions.</p>{{end}}
+  </section>
+</main>
+{{end}}
+
+{{define "fleet_content"}}
+<main id="ui-content" data-ui-fragment="fleet">
+  <h2>Fleet status</h2>
+  {{if eq .Hub.Status "unconfigured"}}<p>hub 미설정</p>{{end}}
+  {{if eq .Hub.Status "unavailable"}}<p>hub 도달 불가</p>{{end}}
+  {{if eq .Hub.Status "stale"}}<p class="threshold-alert">stale ({{formatTime .Hub.CollectedAt}})</p>{{end}}
+  {{range .Hub.Nodes}}
+  <article class="hub-node">
+    <h3>{{.MachineID}} · {{.State}}</h3>
+    <div class="hub-values"><span class="{{if .AcceptingAlert}}threshold-alert{{end}}">accepting {{.Accepting}}</span>{{if .AcceptingOverride}}<span>override {{.AcceptingOverride}}</span>{{end}}{{if .NotAcceptingReason}}<span>reason {{.NotAcceptingReason}}</span>{{end}}<span>last ping {{.LastPing}}</span><span>version {{.Version}}</span></div>
+    <div class="hub-values"><span class="{{if .FreePctAlert}}threshold-alert{{end}}">free_pct {{.FreePct}}</span><span>compressed_mb {{.CompressedMB}}</span><span class="{{if .SwapUsedAlert}}threshold-alert{{end}}">swap_used_mb {{.SwapUsedMB}}</span></div>
+  </article>
+  {{end}}
+  {{if .Hub.JobsUnsupported}}<p>jobs API 미지원</p>{{end}}{{if .Hub.JobsUnavailable}}<p class="muted">jobs API 도달 불가</p>{{end}}
+  {{if .Hub.Jobs}}<section><h3>Active hub jobs</h3>{{range .Hub.Jobs}}<article class="card">{{.Machine}} · {{.JobID}} · {{.OwnerLane}} · {{.Pane}} · {{.Tier}} · {{.StartedAt}}</article>{{end}}</section>{{end}}
+  <section><h3>Active queue work</h3>{{range .ActiveLanes}}<article class="card"><strong>{{.Lane}}</strong>{{range .Tasks}}<div>#{{.ID}} {{.Title}} · {{.ClaimedBy}} · {{.State}}</div>{{end}}</article>{{else}}<p class="muted">No claimed or in-progress tasks.</p>{{end}}</section>
+</main>
+{{end}}

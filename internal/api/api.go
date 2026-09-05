@@ -154,6 +154,10 @@ func (t Tokens) Client(r *http.Request) (string, bool) {
 type Server struct {
 	Service Service
 	Tokens  Tokens
+	// UI is independently authenticated by Cloudflare Access. A nil UI leaves
+	// the route unregistered so deployments without complete Access settings
+	// fail closed with the standard ServeMux 404.
+	UI http.Handler
 }
 
 func (s Server) Handler() http.Handler {
@@ -179,6 +183,10 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("POST /v1/relay/events", s.relayEventsCreate)
 	m.HandleFunc("POST /v1/relay/events/{id}/delivered", s.relayEventDelivered)
 	m.HandleFunc("GET /v1/relay/events", s.relayEventsList)
+	if s.UI != nil {
+		m.Handle("/ui", s.UI)
+		m.Handle("/ui/", s.UI)
+	}
 	return m
 }
 func (s Server) auth(w http.ResponseWriter, r *http.Request) (string, bool) {

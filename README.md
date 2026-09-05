@@ -1,6 +1,15 @@
 # handoffkeep
 A durable home for coding-agent handoffs, working memory, and documents across sessions and machines.
 
+## Fleet console (/ui)
+
+The optional, read-only fleet console renders relay timelines, task queues,
+unresolved decisions, session checkpoints, and hub status. It is mounted only
+when the Cloudflare Access configuration is complete, uses a separate Access
+assertion from the API bearer token, and has no write routes. See
+[docs/ui.md](docs/ui.md) for configuration, security boundaries, hub behavior,
+and the SSE contract.
+
 ## Tasks
 
 `tasks` is the durable, Postgres-backed work queue for captains. A task belongs
@@ -10,12 +19,12 @@ only one session can claim an item. Every state change, including a claim, is
 recorded in `task_events`.
 
 ```bash
-handoffkeep tasks add --lane captain --title "add queue endpoint" --kind implement --priority 10
-handoffkeep tasks list --lane captain --state backlog
-handoffkeep tasks next --lane captain --by captain-session  # exits 3 when empty
+handoffkeep tasks add --lane lane-a --title "add queue endpoint" --kind implement --priority 10
+handoffkeep tasks list --lane lane-a --state backlog
+handoffkeep tasks next --lane lane-a --by session-a  # exits 3 when empty
 handoffkeep tasks transition 42 --to in_progress --note "started"
 handoffkeep tasks transition 42 --to needs_decision --question "Which interface should own this?"
-handoffkeep tasks list --parent-lane captain --state needs_decision
+handoffkeep tasks list --parent-lane lane-a --state needs_decision
 handoffkeep tasks show 42
 ```
 
