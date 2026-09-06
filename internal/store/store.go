@@ -524,6 +524,49 @@ func (s *Store) ListTasks(ctx context.Context, lane, state, parentLane string, l
 	return out, rows.Err()
 }
 
+// GlanceTasks returns the counts and active task slice needed by the compact UI
+// API. Counts span every lane; active tasks have the API's stable newest-first
+// ordering rather than the queue's priority ordering.
+func (s *Store) GlanceTasks(ctx context.Context) (map[string]int, []Task, error) {
+	counts := map[string]int{}
+	rows, err := s.pool.Query(ctx, `SELECT state,COUNT(*) FROM tasks GROUP BY state`)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var state string
+		var count int
+		if err := rows.Scan(&state, &count); err != nil {
+			return nil, nil, err
+		}
+		counts[state] = count
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+
+	rows, err = s.pool.Query(ctx, `SELECT `+taskColumns+` FROM tasks
+		WHERE state IN ('claimed','in_progress','verifying','join')
+		ORDER BY updated_at DESC,id DESC LIMIT 20`)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	active := []Task{}
+	for rows.Next() {
+		var task Task
+		if err := scanTask(rows, &task); err != nil {
+			return nil, nil, err
+		}
+		active = append(active, task)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+	return counts, active, nil
+}
+
 func (s *Store) GetTask(ctx context.Context, id int64) (Task, bool, error) {
 	var x Task
 	if err := scanTask(s.pool.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1`, id), &x); err != nil {

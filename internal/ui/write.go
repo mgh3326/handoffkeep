@@ -130,6 +130,9 @@ func writeAction(path string) string {
 	case "/ui/compose":
 		return "compose"
 	default:
+		if strings.HasPrefix(path, "/ui/api/nodes/") && strings.HasSuffix(path, "/accepting") {
+			return "accepting"
+		}
 		return "invalid"
 	}
 }

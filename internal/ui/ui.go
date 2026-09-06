@@ -108,7 +108,7 @@ func New(config Config) (*Handler, error) {
 // existing bearer-token API. Only the explicit UI write routes can reach a
 // mutating operation.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	email, authenticated := h.access.AuthenticatedEmail(r)
+	identity, authenticated := h.access.AuthenticatedIdentity(r)
 	if !authenticated {
 		if r.Method == http.MethodPost {
 			h.audit("-", writeAction(r.URL.Path), "-", "-", "unauthorized")
@@ -116,6 +116,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
+	if identity.ServiceName != "" && !strings.HasPrefix(r.URL.Path, "/ui/api/") {
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+	if strings.HasPrefix(r.URL.Path, "/ui/api/") {
+		h.serveAPI(w, r, identity)
+		return
+	}
+	email := identity.Email
 	if r.Method == http.MethodPost {
 		switch r.URL.Path {
 		case "/ui/decisions/answer":
