@@ -129,6 +129,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/ui/decisions/answer":
 			h.answerDecision(w, r, email)
+		case "/ui/decisions/answer-batch":
+			h.answerDecisionBatch(w, r, email)
 		case "/ui/compose":
 			h.composePost(w, r, email)
 		default:
@@ -174,6 +176,8 @@ func (h *Handler) serveSubroute(w http.ResponseWriter, r *http.Request, email st
 			h.timeline(w, r, true)
 		case "queue":
 			h.queue(w, r, true)
+		case "queue-backlog":
+			h.queueBacklog(w, r)
 		case "decisions":
 			h.decisions(w, r, true, email, r.URL.Query().Get("result"))
 		case "fleet":
@@ -305,8 +309,10 @@ func (h *Handler) queue(w http.ResponseWriter, r *http.Request, fragment bool) {
 }
 
 type queueCell struct {
-	State string
-	Tasks []store.Task
+	Lane         string
+	State        string
+	Tasks        []store.Task
+	BacklogCount int
 }
 
 type queueLane struct {
@@ -315,8 +321,15 @@ type queueLane struct {
 }
 
 type queueData struct {
-	States []string
-	Lanes  []queueLane
+	States        []string
+	Lanes         []queueLane
+	OperatorOnly  bool
+	OpenDecisions []queueOpenDecision
+}
+
+type queueOpenDecision struct {
+	Lane string
+	Text string
 }
 
 func (h *Handler) queueData(r *http.Request) (queueData, error) {
@@ -324,6 +337,7 @@ func (h *Handler) queueData(r *http.Request) (queueData, error) {
 	if err != nil {
 		return queueData{}, err
 	}
+	operatorOnly := r.URL.Query().Get("view") != "all"
 	byLane := map[string]map[string][]store.Task{}
 	for _, task := range tasks {
 		if byLane[task.Lane] == nil {
@@ -336,15 +350,54 @@ func (h *Handler) queueData(r *http.Request) (queueData, error) {
 		lanes = append(lanes, lane)
 	}
 	sort.Strings(lanes)
-	data := queueData{States: taskStates}
+	data := queueData{States: taskStates, OperatorOnly: operatorOnly}
 	for _, lane := range lanes {
 		row := queueLane{Name: lane}
 		for _, state := range taskStates {
-			row.Cells = append(row.Cells, queueCell{State: state, Tasks: byLane[lane][state]})
+			cell := queueCell{Lane: lane, State: state, Tasks: byLane[lane][state], BacklogCount: len(byLane[lane]["backlog"])}
+			if operatorOnly {
+				cell.Tasks = nil
+				if state != "backlog" {
+					for _, task := range byLane[lane][state] {
+						if task.State == "needs_decision" || (task.Kind == "decide" && task.State != "merged" && task.State != "dropped") || (state == "in_progress" && len(byLane[lane]["needs_decision"]) > 0) {
+							cell.Tasks = append(cell.Tasks, task)
+						}
+					}
+				}
+			}
+			row.Cells = append(row.Cells, cell)
 		}
 		data.Lanes = append(data.Lanes, row)
 	}
+	if operatorOnly {
+		escalations, err := h.store.ListOpenEscalations(r.Context(), 1000)
+		if err != nil {
+			return queueData{}, err
+		}
+		for _, event := range escalations {
+			if !isSignalEscalation(event) {
+				data.OpenDecisions = append(data.OpenDecisions, queueOpenDecision{Lane: event.OwnerLane, Text: escalationText(event)})
+			}
+		}
+		laneDecisions, err := h.store.ListOpenLaneDecisions(r.Context(), 1000)
+		if err != nil {
+			return queueData{}, err
+		}
+		for _, event := range laneDecisions {
+			data.OpenDecisions = append(data.OpenDecisions, queueOpenDecision{Lane: event.OwnerLane, Text: strings.TrimSpace(strings.TrimPrefix(event.Text, "[decision-needed]"))})
+		}
+	}
 	return data, nil
+}
+
+func (h *Handler) queueBacklog(w http.ResponseWriter, r *http.Request) {
+	lane := strings.TrimSpace(r.URL.Query().Get("lane"))
+	tasks, err := h.store.ListTasks(r.Context(), lane, "backlog", "", 1000)
+	if err != nil {
+		http.Error(w, "invalid queue lane", http.StatusBadRequest)
+		return
+	}
+	h.render(w, "queue_backlog", tasks)
 }
 
 func (h *Handler) taskEvents(w http.ResponseWriter, r *http.Request, rawID string) {
@@ -381,20 +434,37 @@ func (h *Handler) decisions(w http.ResponseWriter, r *http.Request, fragment boo
 type decisionData struct {
 	ApprovalTasks []taskDecisionView
 	Tasks         []taskDecisionView
-	Escalations   []store.RelayEvent
+	Escalations   []eventDecisionView
 	Signals       []store.RelayEvent
-	LaneEvents    []store.RelayEvent
+	LaneEvents    []eventDecisionView
 	CSRF          string
 	CanWrite      bool
 	WriteReason   string
 	Notice        string
 	HasApproval   bool
+	Results       []decisionBatchResult
 }
 
 type taskDecisionView struct {
-	Task     store.Task
-	Question string
-	Options  []string
+	Type       string
+	ID         int64
+	Task       store.Task
+	Question   string
+	Options    []string
+	Structured *store.DecisionOptions
+	Index      int
+	CanWrite   bool
+}
+
+type eventDecisionView struct {
+	Type       string
+	ID         int64
+	Event      store.RelayEvent
+	Question   string
+	Options    []string
+	Structured *store.DecisionOptions
+	Index      int
+	CanWrite   bool
 }
 
 type decisionForm struct {
@@ -447,8 +517,13 @@ func (h *Handler) decisionData(r *http.Request, csrf, notice string) (decisionDa
 	if !data.CanWrite {
 		data.WriteReason = "Hub is not configured."
 	}
+	index := 0
 	for _, decision := range tasks {
-		view := taskDecisionView{Task: decision.Task, Question: decision.Question, Options: decisionOptions(decision.Question)}
+		if index >= 50 {
+			break
+		}
+		view := taskDecisionView{Type: "task", ID: decision.Task.ID, Task: decision.Task, Question: decision.Question, Options: decisionOptions(decision.Question), Structured: decision.Task.Refs.DecisionOptions, Index: index, CanWrite: data.CanWrite}
+		index++
 		if h.admiralLanes[decision.Task.Lane] {
 			data.ApprovalTasks = append(data.ApprovalTasks, view)
 		} else {
@@ -459,11 +534,38 @@ func (h *Handler) decisionData(r *http.Request, csrf, notice string) (decisionDa
 		if isSignalEscalation(escalation) {
 			data.Signals = append(data.Signals, escalation)
 		} else {
-			data.Escalations = append(data.Escalations, escalation)
+			if index >= 50 {
+				continue
+			}
+			view := eventDecisionViewFor("escalation", escalation, index)
+			view.CanWrite = data.CanWrite
+			data.Escalations = append(data.Escalations, view)
+			index++
 		}
 	}
-	data.LaneEvents = laneEvents
+	for _, event := range laneEvents {
+		if index >= 50 {
+			break
+		}
+		view := eventDecisionViewFor("lane", event, index)
+		view.CanWrite = data.CanWrite
+		data.LaneEvents = append(data.LaneEvents, view)
+		index++
+	}
 	return data, nil
+}
+
+func eventDecisionViewFor(kind string, event store.RelayEvent, index int) eventDecisionView {
+	question := escalationText(event)
+	optionQuestion := question
+	if kind == "lane" {
+		optionQuestion = strings.TrimSpace(strings.TrimPrefix(optionQuestion, "[decision-needed]"))
+	}
+	view := eventDecisionView{Type: kind, ID: event.ID, Event: event, Question: question, Options: decisionOptions(optionQuestion), Index: index}
+	if body, options, ok := store.ParseDecisionOptions(question); ok {
+		view.Question, view.Structured, view.Options = body, &options, nil
+	}
+	return view
 }
 
 func (h *Handler) fleet(w http.ResponseWriter, r *http.Request, fragment bool) {

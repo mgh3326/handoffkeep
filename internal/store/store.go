@@ -46,10 +46,172 @@ var (
 // TaskRefs holds the durable links that let a captain resume work without
 // embedding credentials or implementation details in the queue itself.
 type TaskRefs struct {
-	PR         string `json:"pr,omitempty"`
-	HeadSHA    string `json:"head_sha,omitempty"`
-	ReportPath string `json:"report_path,omitempty"`
-	JobID      string `json:"job_id,omitempty"`
+	PR              string           `json:"pr,omitempty"`
+	HeadSHA         string           `json:"head_sha,omitempty"`
+	ReportPath      string           `json:"report_path,omitempty"`
+	JobID           string           `json:"job_id,omitempty"`
+	DecisionOptions *DecisionOptions `json:"decision_options,omitempty"`
+}
+
+// DecisionOption is one bounded, operator-visible answer for a decision.
+// Keys are deliberately compact so the same representation can be carried in
+// a lane event without consuming much of its 2048-byte limit.
+type DecisionOption struct {
+	Key         string `json:"key"`
+	Label       string `json:"label"`
+	Recommended bool   `json:"recommended,omitempty"`
+}
+
+// DecisionOptions describes the choices attached to a decision. AllowFree is
+// true unless an API payload explicitly supplies false; command producers set
+// it explicitly so their intent is unambiguous.
+type DecisionOptions struct {
+	Options   []DecisionOption `json:"options"`
+	AllowFree bool             `json:"allow_free"`
+}
+
+// UnmarshalJSON preserves the wire default for older producers which omit
+// allow_free while retaining an explicit false from newer ones.
+func (x *DecisionOptions) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Options   []DecisionOption `json:"options"`
+		AllowFree *bool            `json:"allow_free"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	x.Options = raw.Options
+	x.AllowFree = true
+	if raw.AllowFree != nil {
+		x.AllowFree = *raw.AllowFree
+	}
+	return nil
+}
+
+// FormatDecisionOptions returns the closed, one-line lane-event syntax. Its
+// callers first validate the value; this formatter never truncates data.
+func FormatDecisionOptions(x DecisionOptions) string {
+	parts := make([]string, 0, len(x.Options)+2)
+	recommended := ""
+	for _, option := range x.Options {
+		parts = append(parts, option.Key+"|"+option.Label)
+		if option.Recommended {
+			recommended = option.Key
+		}
+	}
+	if recommended != "" {
+		parts = append(parts, "rec="+recommended)
+	}
+	if !x.AllowFree {
+		parts = append(parts, "free=0")
+	}
+	return "[options] " + strings.Join(parts, ";")
+}
+
+// ParseDecisionOptions accepts only a complete option grammar on the final
+// line. Invalid input is intentionally returned untouched: callers must never
+// render a partially understood choice set as authoritative.
+func ParseDecisionOptions(text string) (body string, options DecisionOptions, ok bool) {
+	lineStart := strings.LastIndexByte(text, '\n')
+	last := text
+	if lineStart >= 0 {
+		last = text[lineStart+1:]
+	}
+	if !strings.HasPrefix(last, "[options] ") {
+		return text, DecisionOptions{}, false
+	}
+	raw := strings.TrimPrefix(last, "[options] ")
+	if raw == "" {
+		return text, DecisionOptions{}, false
+	}
+	parts := strings.Split(raw, ";")
+	parsed := DecisionOptions{AllowFree: true}
+	seen := map[string]bool{}
+	stage := 0 // 0=options, 1=rec, 2=free
+	for _, part := range parts {
+		if part == "" {
+			return text, DecisionOptions{}, false
+		}
+		switch {
+		case strings.HasPrefix(part, "rec="):
+			if stage != 0 || len(part) != len("rec=")+1 {
+				return text, DecisionOptions{}, false
+			}
+			key := strings.TrimPrefix(part, "rec=")
+			if !validDecisionOptionKey(key) || !seen[key] {
+				return text, DecisionOptions{}, false
+			}
+			for index := range parsed.Options {
+				parsed.Options[index].Recommended = parsed.Options[index].Key == key
+			}
+			stage = 1
+		case part == "free=0":
+			if stage == 2 {
+				return text, DecisionOptions{}, false
+			}
+			parsed.AllowFree = false
+			stage = 2
+		default:
+			if stage != 0 {
+				return text, DecisionOptions{}, false
+			}
+			key, label, found := strings.Cut(part, "|")
+			if !found || strings.Contains(label, "|") || !validDecisionOptionKey(key) || seen[key] || !validDecisionOptionLabel(label) || len(parsed.Options) == 6 {
+				return text, DecisionOptions{}, false
+			}
+			seen[key] = true
+			parsed.Options = append(parsed.Options, DecisionOption{Key: key, Label: label})
+		}
+	}
+	if !validDecisionOptions(parsed) {
+		return text, DecisionOptions{}, false
+	}
+	if lineStart < 0 {
+		return "", parsed, true
+	}
+	return text[:lineStart], parsed, true
+}
+
+func validDecisionOptionKey(key string) bool {
+	return len(key) == 1 && key[0] >= 'A' && key[0] <= 'F'
+}
+
+func validDecisionOptionLabel(label string) bool {
+	if label != strings.TrimSpace(label) || len(label) == 0 || len(label) > 120 || strings.ContainsAny(label, "|;\n\r") {
+		return false
+	}
+	for _, r := range label {
+		if r == 0 || r < 0x20 || (r >= 0x7f && r <= 0x9f) {
+			return false
+		}
+	}
+	return true
+}
+
+func validDecisionOptions(x DecisionOptions) bool {
+	if len(x.Options) < 1 || len(x.Options) > 6 {
+		return false
+	}
+	seen := map[string]bool{}
+	recommended := 0
+	for _, option := range x.Options {
+		if !validDecisionOptionKey(option.Key) || seen[option.Key] || !validDecisionOptionLabel(option.Label) {
+			return false
+		}
+		seen[option.Key] = true
+		if option.Recommended {
+			recommended++
+		}
+	}
+	return recommended <= 1
+}
+
+// ValidateDecisionOptions is exported for local producers such as the CLI.
+func ValidateDecisionOptions(x DecisionOptions) error {
+	if !validDecisionOptions(x) {
+		return errors.New("invalid decision options")
+	}
+	return nil
 }
 
 type TaskEvent struct {
@@ -300,11 +462,20 @@ func validTaskRefs(x TaskRefs) bool {
 			return false
 		}
 	}
+	if x.DecisionOptions != nil && !validDecisionOptions(*x.DecisionOptions) {
+		return false
+	}
 	return true
 }
 
 func rejectTaskRefs(x TaskRefs) error {
-	return guard.Reject(strings.Join([]string{x.PR, x.HeadSHA, x.ReportPath, x.JobID}, "\n"))
+	values := []string{x.PR, x.HeadSHA, x.ReportPath, x.JobID}
+	if x.DecisionOptions != nil {
+		for _, option := range x.DecisionOptions.Options {
+			values = append(values, option.Label)
+		}
+	}
+	return guard.Reject(strings.Join(values, "\n"))
 }
 
 // mergeTaskRefs applies only fields provided by a transition. Empty fields are
@@ -321,6 +492,9 @@ func mergeTaskRefs(old, patch TaskRefs) TaskRefs {
 	}
 	if patch.JobID != "" {
 		old.JobID = patch.JobID
+	}
+	if patch.DecisionOptions != nil {
+		old.DecisionOptions = patch.DecisionOptions
 	}
 	return old
 }
@@ -468,6 +642,12 @@ func (s *Store) TransitionTask(ctx context.Context, id int64, to, by, note strin
 	}
 	if refs != nil {
 		x.Refs = mergeTaskRefs(x.Refs, *refs)
+	}
+	if to == "needs_decision" && x.Refs.DecisionOptions != nil {
+		finalText := note + "\n" + FormatDecisionOptions(*x.Refs.DecisionOptions)
+		if len([]byte(finalText)) > RelayLaneEventMaxBytes {
+			return Task{}, errors.New("decision question and options exceed 2048 bytes")
+		}
 	}
 	encoded, err := json.Marshal(x.Refs)
 	if err != nil {
@@ -890,6 +1070,10 @@ func (s *Store) ListOpenEscalations(ctx context.Context, limit int) ([]RelayEven
 		WHERE e.kind='job.escalate' AND NOT EXISTS (
 			SELECT 1 FROM relay_events resolved WHERE resolved.job_id=e.job_id
 			AND resolved.kind IN ('job.joined','job.completed') AND resolved.id>e.id
+		) AND NOT EXISTS (
+			SELECT 1 FROM relay_events resolved WHERE resolved.kind='lane.event'
+			AND resolved.owner_lane=e.owner_lane AND resolved.id>e.id
+			AND resolved.event_id LIKE '%decision-escalation-' || e.id::text || '-%'
 		) ORDER BY e.id DESC LIMIT $1`, limit)
 	if err != nil {
 		return nil, err

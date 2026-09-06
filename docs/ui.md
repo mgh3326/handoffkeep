@@ -36,7 +36,8 @@ minute; no usable cached key or failed retrieval is an unauthenticated request.
 
 ## Security boundary
 
-`/ui` accepts `GET` plus only `POST /ui/decisions/answer` and `POST /ui/compose`.
+`/ui` accepts `GET` plus only `POST /ui/decisions/answer`,
+`POST /ui/decisions/answer-batch`, and `POST /ui/compose`.
 All other non-GET UI methods receive `405 Allow: GET`. It does not read API
 bearer tokens. Conversely, `/v1/*` and `/metrics` do not read Cloudflare Access
 assertions. This prevents either credential type from substituting for the
@@ -73,7 +74,11 @@ starts with `https://github.com/`; other values are rendered as text.
   1. A task is shown when `state='needs_decision'`; its question is the `note`
      from that task's latest `task_events` row with `to='needs_decision'`.
   2. A `job.escalate` relay event is shown when no later-ID event with the same
-     `job_id` has kind `job.joined` or `job.completed`.
+     `job_id` has kind `job.joined` or `job.completed`, and no later
+     `lane.event` from the same `owner_lane` has an `event_id` matching
+     `%decision-escalation-<escalation id>-%`. This event-ID condition closes
+     web and CLI escalation answers without allowing an unrelated task answer
+     with the same numeric ID to close the escalation.
   3. A `lane.event` whose `text` begins `[decision-needed]` is shown when no
      later-ID `lane.event` from the same `owner_lane` has text beginning
      `[decision-answered]`.
@@ -174,3 +179,53 @@ oldest entries from `tasks.active` and marking `truncated`.
 then relays it to the hub with the server-side credential. Hub status and up to
 64 KiB of its body are forwarded without exposing hub configuration; an
 unconfigured or unreachable hub returns `502 {"error":"hub_unavailable"}`.
+
+## P4 decision options, batch answers, and resolve
+
+Structured choices are stored additively in `tasks.refs.decision_options`; no
+schema migration is required. Each key is `A` through `F`, labels are trimmed
+to 1--120 bytes, and at most one choice is recommended. The closed lane-event
+syntax is a final line such as:
+
+```text
+[options] A|노드 로컬 저장;B|중앙 저장 선행;rec=A;free=0
+```
+
+Options use `;`, key and label use `|`, and `rec=<key>` is optional immediately
+before optional final `free=0`. Omitting `free=0` permits direct answers. The
+parser recognizes options only when the final line fully matches; malformed
+tokens, duplicate keys, unknown recommendations, too many options, or an
+options line elsewhere stay ordinary body text. The question and serialized
+options together must fit the 2048-byte event limit.
+
+The Decisions page renders structured choices as radios. A recommendation is
+default-selected and marked `권고`; when permitted, a direct-answer radio and
+input are available and a nonempty direct answer wins. Legacy `options:` lines
+retain button rendering, and plain questions retain the free-text path.
+
+All cards share `POST /ui/decisions/answer-batch`. Cards provide
+`items.<n>.type`, `items.<n>.id`, `items.<n>.select`,
+`items.<n>.answer`, `items.<n>.custom`, and `items.<n>.note`. `only=<n>` takes
+priority; otherwise `mode=recommended` sends every open structured item with a
+recommendation, then `mode=selected` sends checked cards. The maximum is 50
+items. Empty selection sends nothing and reports `선택된 항목이 없습니다.`
+
+Each batch item independently follows normal validation, hub emission, then
+task transition, in card order. After authentication and form checks the HTTP
+response is 200; rows expose `data-item-status` values: 200 for
+`전송됨(event_id=...)`, 409 for `이미 답변됨`, 502 for a lane-send failure,
+and 400 or 500 for other errors. Processed items each emit exactly one
+`action=decision-batch` audit entry without answer text, hub credentials, or
+CSRF values.
+
+Use `handoffkeep decisions resolve <task|escalation|lane> <id> --by <lane>
+--answer <answer>` to close an answer made outside the console. It records a
+`cli-decision-<type>-<id>-<8 hex>` lane event and transitions a task to
+`claimed`. `--no-inject` marks that new event delivered as `resolve/<lane>`;
+without it, normal node injection sees the event as undelivered.
+
+Queue defaults to **운영자 필요만**: nonterminal `decide` and `needs_decision`
+cards plus a linked summary of non-signal open escalations and lane decisions.
+Backlog cells display only `backlog (N)` and load their cards with authenticated
+read-only `GET /ui/fragments/queue-backlog?lane=<lane>`. Use
+`/ui/queue?view=all` for the complete board.

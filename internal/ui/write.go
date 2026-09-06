@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -25,6 +26,7 @@ import (
 const csrfCookie = "hk_ui_csrf"
 
 var docKeyRE = regexp.MustCompile(`^[A-Za-z0-9._\-/]{1,512}$`)
+var decisionBatchFieldRE = regexp.MustCompile(`^items\.([0-9]+)\.(type|id|select|answer|custom|note)$`)
 
 type writeOutcome struct {
 	action  string
@@ -127,6 +129,8 @@ func writeAction(path string) string {
 	switch path {
 	case "/ui/decisions/answer":
 		return "decision"
+	case "/ui/decisions/answer-batch":
+		return "decision-batch"
 	case "/ui/compose":
 		return "compose"
 	default:
@@ -270,6 +274,311 @@ func (h *Handler) answerDecision(w http.ResponseWriter, r *http.Request, email s
 	}
 	outcome.result = "ok"
 	h.decisionResult(w, r, email, "전송됨(event_id="+eventID+")", http.StatusOK)
+}
+
+type decisionBatchItem struct {
+	Index    int
+	Type     string
+	ID       int64
+	Selected bool
+	Answer   string
+	Custom   string
+	Note     string
+}
+
+type decisionBatchResult struct {
+	Status  int
+	Message string
+}
+
+type decisionTarget struct {
+	Lane       string
+	Structured *store.DecisionOptions
+}
+
+type batchSendOutcome struct {
+	decisionBatchResult
+	Target  string
+	EventID string
+	Result  string
+}
+
+func parseDecisionBatchItems(values url.Values) ([]decisionBatchItem, error) {
+	byIndex := map[int]*decisionBatchItem{}
+	for key, fieldValues := range values {
+		match := decisionBatchFieldRE.FindStringSubmatch(key)
+		if match == nil {
+			continue
+		}
+		if len(fieldValues) != 1 {
+			return nil, errors.New("invalid decision item")
+		}
+		index, err := strconv.Atoi(match[1])
+		if err != nil || index < 0 {
+			return nil, errors.New("invalid decision item")
+		}
+		item := byIndex[index]
+		if item == nil {
+			item = &decisionBatchItem{Index: index}
+			byIndex[index] = item
+		}
+		switch match[2] {
+		case "type":
+			item.Type = strings.TrimSpace(fieldValues[0])
+		case "id":
+			item.ID, err = strconv.ParseInt(strings.TrimSpace(fieldValues[0]), 10, 64)
+			if err != nil {
+				return nil, errors.New("invalid decision item")
+			}
+		case "select":
+			item.Selected = fieldValues[0] != ""
+		case "answer":
+			item.Answer = strings.TrimSpace(fieldValues[0])
+		case "custom":
+			item.Custom = strings.TrimSpace(fieldValues[0])
+		case "note":
+			item.Note = strings.TrimSpace(fieldValues[0])
+		}
+	}
+	if len(byIndex) > 50 {
+		return nil, errors.New("a maximum of 50 decision items is allowed")
+	}
+	indexes := make([]int, 0, len(byIndex))
+	for index := range byIndex {
+		indexes = append(indexes, index)
+	}
+	sort.Ints(indexes)
+	items := make([]decisionBatchItem, 0, len(indexes))
+	for _, index := range indexes {
+		item := *byIndex[index]
+		if item.ID < 1 || (item.Type != "task" && item.Type != "escalation" && item.Type != "lane") {
+			return nil, errors.New("invalid decision item")
+		}
+		items = append(items, item)
+	}
+	return items, nil
+}
+
+func (h *Handler) answerDecisionBatch(w http.ResponseWriter, r *http.Request, email string) {
+	if !sameOrigin(r) {
+		h.audit(email, "decision-batch", "-", "-", "origin_reject")
+		http.Error(w, "origin rejected", http.StatusForbidden)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		h.audit(email, "decision-batch", "-", "-", "invalid")
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	if !h.validCSRF(r, email) {
+		h.audit(email, "decision-batch", "-", "-", "csrf_reject")
+		http.Error(w, "CSRF rejected", http.StatusForbidden)
+		return
+	}
+	if !h.hub.configured() {
+		h.audit(email, "decision-batch", "-", "-", "hub_unconfigured")
+		http.Error(w, "Hub is not configured.", http.StatusBadRequest)
+		return
+	}
+	items, err := parseDecisionBatchItems(r.Form)
+	if err != nil {
+		h.audit(email, "decision-batch", "-", "-", "invalid")
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	mode := r.Form.Get("mode")
+	only := r.Form["only"]
+	if len(only) > 1 || (mode != "" && mode != "selected" && mode != "recommended") {
+		h.audit(email, "decision-batch", "-", "-", "invalid")
+		http.Error(w, "invalid decision selection", http.StatusBadRequest)
+		return
+	}
+	chosen := []decisionBatchItem{}
+	if len(only) == 1 {
+		index, parseErr := strconv.Atoi(only[0])
+		if parseErr != nil || index < 0 {
+			h.audit(email, "decision-batch", "-", "-", "invalid")
+			http.Error(w, "invalid decision selection", http.StatusBadRequest)
+			return
+		}
+		for _, item := range items {
+			if item.Index == index {
+				chosen = append(chosen, item)
+				break
+			}
+		}
+		if len(chosen) == 0 {
+			h.audit(email, "decision-batch", "-", "-", "invalid")
+			http.Error(w, "invalid decision selection", http.StatusBadRequest)
+			return
+		}
+	} else if mode == "recommended" {
+		chosen = items
+	} else {
+		for _, item := range items {
+			if item.Selected {
+				chosen = append(chosen, item)
+			}
+		}
+	}
+
+	results := []decisionBatchResult{}
+	for _, item := range chosen {
+		outcome, processed := h.sendBatchDecision(r, email, item, mode == "recommended")
+		if !processed {
+			continue
+		}
+		results = append(results, outcome.decisionBatchResult)
+		h.audit(email, "decision-batch", outcome.Target, outcome.EventID, outcome.Result)
+	}
+	if len(results) == 0 {
+		h.renderDecisionBatch(w, r, email, "선택된 항목이 없습니다.", nil)
+		return
+	}
+	h.renderDecisionBatch(w, r, email, "", results)
+}
+
+func (h *Handler) renderDecisionBatch(w http.ResponseWriter, r *http.Request, email, notice string, results []decisionBatchResult) {
+	data, err := h.decisionData(r, h.csrfForForm(w, r, email), notice)
+	if err != nil {
+		http.Error(w, "fleet console unavailable", http.StatusInternalServerError)
+		return
+	}
+	data.Results = results
+	h.render(w, "page", pageData{Title: "Decisions", Page: "decisions", Body: data})
+}
+
+func (h *Handler) openBatchDecision(r *http.Request, kind string, id int64) (decisionTarget, int, string) {
+	if kind == "task" {
+		task, found, err := h.store.GetTask(r.Context(), id)
+		if err != nil {
+			return decisionTarget{}, http.StatusInternalServerError, "Fleet console unavailable."
+		}
+		if !found || task.State != "needs_decision" {
+			return decisionTarget{}, http.StatusConflict, "이미 답변됨"
+		}
+		return decisionTarget{Lane: task.Lane, Structured: task.Refs.DecisionOptions}, 0, ""
+	}
+	event, found, err := h.openDecisionEvent(r, kind, id)
+	if err != nil {
+		return decisionTarget{}, http.StatusInternalServerError, "Fleet console unavailable."
+	}
+	if !found {
+		return decisionTarget{}, http.StatusConflict, "이미 답변됨"
+	}
+	view := eventDecisionViewFor(kind, event, 0)
+	return decisionTarget{Lane: event.OwnerLane, Structured: view.Structured}, 0, ""
+}
+
+func recommendedDecisionAnswer(options *store.DecisionOptions) (string, bool) {
+	if options == nil {
+		return "", false
+	}
+	for _, option := range options.Options {
+		if option.Recommended {
+			return option.Key + ": " + option.Label, true
+		}
+	}
+	return "", false
+}
+
+func structuredDecisionAnswer(options *store.DecisionOptions, answer, custom string) (string, error) {
+	if custom != "" {
+		if options != nil && !options.AllowFree {
+			return "", errors.New("직접 답변은 허용되지 않습니다.")
+		}
+		return custom, nil
+	}
+	if options == nil {
+		return answer, nil
+	}
+	for _, option := range options.Options {
+		if answer == option.Key+": "+option.Label {
+			return answer, nil
+		}
+	}
+	return "", errors.New("Invalid decision response.")
+}
+
+func (h *Handler) sendBatchDecision(r *http.Request, email string, item decisionBatchItem, recommended bool) (batchSendOutcome, bool) {
+	outcome := batchSendOutcome{Target: "-", EventID: "-", Result: "invalid"}
+	target, status, message := h.openBatchDecision(r, item.Type, item.ID)
+	if status != 0 {
+		outcome.Status, outcome.Message, outcome.Result = status, message, "already_answered"
+		return outcome, true
+	}
+	outcome.Target = target.Lane + "#" + strconv.FormatInt(item.ID, 10)
+	answer := ""
+	if recommended {
+		var ok bool
+		answer, ok = recommendedDecisionAnswer(target.Structured)
+		if !ok {
+			return outcome, false
+		}
+	} else {
+		var err error
+		answer, err = structuredDecisionAnswer(target.Structured, item.Answer, item.Custom)
+		if err != nil || !validWriteText(answer) || (item.Note != "" && !validWriteText(item.Note)) {
+			outcome.Status, outcome.Message, outcome.Result = http.StatusBadRequest, "Invalid decision response.", "invalid"
+			if err != nil && strings.Contains(err.Error(), "직접 답변") {
+				outcome.Message = err.Error()
+			}
+			return outcome, true
+		}
+	}
+	if !validWriteText(answer) || (item.Note != "" && !validWriteText(item.Note)) {
+		outcome.Status, outcome.Message, outcome.Result = http.StatusBadRequest, "Invalid decision response.", "invalid"
+		return outcome, true
+	}
+	eventID, err := randomEventID("web-decision-" + item.Type + "-" + strconv.FormatInt(item.ID, 10) + "-")
+	if err != nil {
+		outcome.Status, outcome.Message, outcome.Result = http.StatusInternalServerError, "Unable to create event ID.", "event_id_error"
+		return outcome, true
+	}
+	outcome.EventID = eventID
+	return h.emitBatchDecision(r, email, item, target, answer, eventID, outcome)
+}
+
+func (h *Handler) emitBatchDecision(r *http.Request, email string, item decisionBatchItem, target decisionTarget, answer, eventID string, outcome batchSendOutcome) (batchSendOutcome, bool) {
+	prefix := "[decision]"
+	if item.Type == "lane" {
+		prefix = "[decision-answered]"
+	}
+	text := fmt.Sprintf("%s #%d: %s (from operator(web) %s)", prefix, item.ID, answer, email)
+	if item.Note != "" {
+		text += " — " + item.Note
+	}
+	if len([]byte(text)) > store.RelayLaneEventMaxBytes {
+		outcome.Status, outcome.Message, outcome.Result = http.StatusBadRequest, "Decision response is too long.", "invalid"
+		return outcome, true
+	}
+	duplicate, err := h.hub.emitLaneEvent(r.Context(), target.Lane, eventID, text)
+	if err != nil {
+		outcome.Status, outcome.Message, outcome.Result = http.StatusBadGateway, "레인 전송 실패: "+hubReason(err), "hub_error"
+		return outcome, true
+	}
+	if item.Type == "task" {
+		note := answer
+		if item.Note != "" {
+			note += " — " + item.Note
+		}
+		note += " — via web by " + email
+		if _, err := h.store.TransitionTask(r.Context(), item.ID, "claimed", "operator:"+email, note, nil); err != nil {
+			if errors.Is(err, store.ErrTaskConflict) {
+				outcome.Status, outcome.Message, outcome.Result = http.StatusConflict, "이미 답변됨", "task_conflict"
+				return outcome, true
+			}
+			outcome.Status, outcome.Message, outcome.Result = http.StatusInternalServerError, "레인 전송됨(event_id="+eventID+") · 수동 전이 필요: "+safeTaskReason(err), "task_error"
+			return outcome, true
+		}
+	}
+	if duplicate {
+		outcome.Status, outcome.Message, outcome.Result = http.StatusOK, "이미 전송됨", "duplicate"
+		return outcome, true
+	}
+	outcome.Status, outcome.Message, outcome.Result = http.StatusOK, "전송됨(event_id="+eventID+")", "ok"
+	return outcome, true
 }
 
 func (h *Handler) openDecisionEvent(r *http.Request, kind string, id int64) (store.RelayEvent, bool, error) {
