@@ -23,23 +23,32 @@ const assertionHeader = "Cf-Access-Jwt-Assertion"
 // network dependency. Issuer and CertsURL are test-only overrides; production
 // environment wiring leaves both unset and derives them from TeamDomain.
 type Config struct {
-	TeamDomain    string
-	AUD           string
-	AllowedEmails []string
-	Issuer        string
-	CertsURL      string
-	HTTPClient    *http.Client
-	CacheTTL      time.Duration
+	TeamDomain          string
+	AUD                 string
+	AllowedEmails       []string
+	AllowedServiceNames []string
+	Issuer              string
+	CertsURL            string
+	HTTPClient          *http.Client
+	CacheTTL            time.Duration
+}
+
+// Identity is the allowlisted principal carried by an Access assertion. Exactly
+// one field is populated: email identities take precedence over service names.
+type Identity struct {
+	Email       string
+	ServiceName string
 }
 
 // Verifier owns the short-lived JWKS cache used by one UI handler.
 type Verifier struct {
-	issuer  string
-	aud     string
-	certs   string
-	client  *http.Client
-	ttl     time.Duration
-	allowed map[string]struct{}
+	issuer         string
+	aud            string
+	certs          string
+	client         *http.Client
+	ttl            time.Duration
+	allowed        map[string]struct{}
+	allowedService map[string]struct{}
 
 	mu                    sync.Mutex
 	keys                  map[string]*rsa.PublicKey
@@ -65,6 +74,13 @@ func New(config Config) (*Verifier, error) {
 	if len(allowed) == 0 {
 		return nil, errors.New("Cloudflare Access email allowlist is empty")
 	}
+	allowedService := make(map[string]struct{}, len(config.AllowedServiceNames))
+	for _, name := range config.AllowedServiceNames {
+		name = asciiLower(strings.TrimSpace(name))
+		if name != "" {
+			allowedService[name] = struct{}{}
+		}
+	}
 	issuer := strings.TrimSpace(config.Issuer)
 	if issuer == "" {
 		issuer = "https://" + team
@@ -81,7 +97,7 @@ func New(config Config) (*Verifier, error) {
 	if ttl <= 0 {
 		ttl = 10 * time.Minute
 	}
-	return &Verifier{issuer: issuer, aud: aud, certs: certs, client: client, ttl: ttl, allowed: allowed}, nil
+	return &Verifier{issuer: issuer, aud: aud, certs: certs, client: client, ttl: ttl, allowed: allowed, allowedService: allowedService}, nil
 }
 
 // Authenticate verifies the assertion in r. It intentionally returns no
@@ -95,9 +111,20 @@ func (v *Verifier) Authenticate(r *http.Request) bool {
 // address. UI write routes use the address as audited operator attribution;
 // callers must not use it without checking the boolean result.
 func (v *Verifier) AuthenticatedEmail(r *http.Request) (string, bool) {
+	identity, ok := v.AuthenticatedIdentity(r)
+	if !ok || identity.Email == "" {
+		return "", false
+	}
+	return identity.Email, true
+}
+
+// AuthenticatedIdentity verifies the assertion using the same JWT path as the
+// email-only accessor, then selects an allowlisted email or service identity.
+// Email identities deliberately win when both claims are present.
+func (v *Verifier) AuthenticatedIdentity(r *http.Request) (Identity, bool) {
 	raw := strings.TrimSpace(r.Header.Get(assertionHeader))
 	if raw == "" {
-		return "", false
+		return Identity{}, false
 	}
 	claims := jwt.MapClaims{}
 	_, err := jwt.ParseWithClaims(raw, claims, func(token *jwt.Token) (any, error) {
@@ -108,15 +135,21 @@ func (v *Verifier) AuthenticatedEmail(r *http.Request) (string, bool) {
 		return v.keyFor(r.Context(), kid)
 	}, jwt.WithValidMethods([]string{"RS256"}), jwt.WithAudience(v.aud), jwt.WithIssuer(v.issuer), jwt.WithExpirationRequired())
 	if err != nil {
-		return "", false
+		return Identity{}, false
 	}
-	email, ok := claims["email"].(string)
-	if !ok {
-		return "", false
+	if email, ok := claims["email"].(string); ok {
+		email = strings.TrimSpace(email)
+		if _, allowed := v.allowed[asciiLower(email)]; allowed {
+			return Identity{Email: email}, true
+		}
 	}
-	email = strings.TrimSpace(email)
-	_, ok = v.allowed[asciiLower(email)]
-	return email, ok
+	if serviceName, ok := claims["common_name"].(string); ok {
+		serviceName = strings.TrimSpace(serviceName)
+		if _, allowed := v.allowedService[asciiLower(serviceName)]; allowed {
+			return Identity{ServiceName: serviceName}, true
+		}
+	}
+	return Identity{}, false
 }
 
 func (v *Verifier) keyFor(ctx context.Context, kid string) (*rsa.PublicKey, error) {

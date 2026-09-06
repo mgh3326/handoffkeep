@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"mime"
 	"net/http"
 	"strings"
 	"sync"
@@ -117,28 +119,35 @@ func (p *hubProxy) nodes(parent context.Context) ([]hubNode, error) {
 }
 
 func (p *hubProxy) jobs(parent context.Context) ([]hubJob, int, error) {
-	ctx, cancel := context.WithTimeout(parent, 3*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.url+"/v1/jobs", nil)
-	if err != nil {
-		return nil, 0, err
-	}
-	req.Header.Set("Authorization", "Bearer "+p.token)
-	response, err := p.client.Do(req)
-	if err != nil {
-		return nil, 0, err
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		return nil, response.StatusCode, fmt.Errorf("hub jobs status %d", response.StatusCode)
-	}
 	var wrapped struct {
 		Jobs []hubJob `json:"jobs"`
 	}
-	if err := json.NewDecoder(response.Body).Decode(&wrapped); err != nil {
-		return nil, response.StatusCode, err
+	status, err := p.getJSON(parent, "/v1/jobs", &wrapped)
+	return wrapped.Jobs, status, err
+}
+
+func (p *hubProxy) rawNodes(parent context.Context) ([]map[string]json.RawMessage, int, error) {
+	var wrapped struct {
+		Nodes []map[string]json.RawMessage `json:"nodes"`
 	}
-	return wrapped.Jobs, response.StatusCode, nil
+	status, err := p.getJSON(parent, "/v1/nodes", &wrapped)
+	return wrapped.Nodes, status, err
+}
+
+func (p *hubProxy) rawLanes(parent context.Context) ([]json.RawMessage, int, error) {
+	var wrapped struct {
+		Lanes []json.RawMessage `json:"lanes"`
+	}
+	status, err := p.getJSON(parent, "/v1/lanes", &wrapped)
+	return wrapped.Lanes, status, err
+}
+
+func (p *hubProxy) rawJobs(parent context.Context) ([]json.RawMessage, int, error) {
+	var wrapped struct {
+		Jobs []json.RawMessage `json:"jobs"`
+	}
+	status, err := p.getJSON(parent, "/v1/jobs", &wrapped)
+	return wrapped.Jobs, status, err
 }
 
 func (p *hubProxy) getJSON(parent context.Context, endpoint string, target any) (int, error) {
@@ -201,6 +210,45 @@ func (p *hubProxy) emitLaneEvent(parent context.Context, lane, eventID, text str
 	default:
 		return false, hubStatusError(response.StatusCode)
 	}
+}
+
+// setAccepting relays the bounded operator command with server-side hub
+// credentials. Its caller decides how the opaque hub response is exposed.
+func (p *hubProxy) setAccepting(parent context.Context, machine string, accepting bool, reason string) (int, []byte, string, error) {
+	if !p.configured() {
+		return 0, nil, "", errors.New("hub is not configured")
+	}
+	payload, err := json.Marshal(struct {
+		Accepting bool   `json:"accepting"`
+		Reason    string `json:"reason"`
+	}{Accepting: accepting, Reason: reason})
+	if err != nil {
+		return 0, nil, "", err
+	}
+	ctx, cancel := context.WithTimeout(parent, 3*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.url+"/v1/nodes/"+machine+"/accepting", bytes.NewReader(payload))
+	if err != nil {
+		return 0, nil, "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+p.token)
+	response, err := p.client.Do(req)
+	if err != nil {
+		return 0, nil, "", err
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(response.Body, 64*1024))
+	if err != nil {
+		return 0, nil, "", err
+	}
+	mediaType, _, err := mime.ParseMediaType(response.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/json" {
+		mediaType = "text/plain; charset=utf-8"
+	} else {
+		mediaType = "application/json"
+	}
+	return response.StatusCode, body, mediaType, nil
 }
 
 type hubNode struct {

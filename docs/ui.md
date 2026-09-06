@@ -16,6 +16,7 @@ and returns the normal 404 response.
 | `HANDOFFKEEP_UI_CF_TEAM_DOMAIN` | Cloudflare Access team domain | `example.cloudflareaccess.com` |
 | `HANDOFFKEEP_UI_CF_AUD` | Access application audience tag | `example-ui-audience` |
 | `HANDOFFKEEP_UI_ALLOWED_EMAILS` | Comma-separated UI email allowlist | `admin@example.com` |
+| `HANDOFFKEEP_UI_ALLOWED_SERVICE_NAMES` | Comma-separated Access service-token `common_name` allowlist for `/ui/api/*` | `glance-reader` |
 | `HANDOFFKEEP_HUB_URL` | Optional hub origin for fleet status | `http://127.0.0.1:9000` |
 | `HANDOFFKEEP_HUB_TOKEN` | Optional server-side hub credential | set outside source control |
 | `HANDOFFKEEP_UI_LANES` | Comma-separated compose destination lanes | `lane-a,lane-b` |
@@ -45,6 +46,15 @@ The absent-route 404 is fail-closed: an incomplete Access configuration cannot
 accidentally expose a console without origin-side verification. Hub credentials
 remain in the server process; browser responses, templates, static assets, and
 SSE messages contain only the fetched operational fields, never the hub token.
+
+Email identities may use every console route. An allowlisted service identity
+may use only `/ui/api/*`; every HTML, fragment, document, static, SSE, and
+operator-write route returns `403`. An empty
+`HANDOFFKEEP_UI_ALLOWED_SERVICE_NAMES` allowlist creates no service identity
+path, while the email allowlist behavior remains unchanged. Service POSTs have
+no browser cookie or CSRF requirement, but must use `Content-Type:
+application/json`; email API POSTs retain the same-host Origin/Referer and
+email-bound `hk_ui_csrf` validation used by the operator forms.
 
 All database content is passed to Go's `html/template` without typed HTML,
 JavaScript, or URL wrappers. A task PR is linked only when its stored value
@@ -147,3 +157,20 @@ leading `/` and `..`. Event text tokens of the form `doc:<key>` (where key uses
 `[A-Za-z0-9._\-/]`) link to that viewer without typed HTML. For events written
 by hub HTTP ingress, a `reason` beginning `http_ingress:` renders the trailing
 producer label as a sender badge; other `reason` values remain hidden.
+
+## P3 glance API
+
+`GET /ui/api/glance` is a `no-store` JSON snapshot for service clients. It
+contains the UTC generation time, sanitized hub health, raw hub `nodes`,
+`lanes`, and `jobs` data (with only per-node `active_jobs` added), seven task
+state totals, unresolved decisions, the newest 20 active tasks, and fixed
+console paths. Hub setup, transport, decoding, and non-200 failures retain a
+200 response with empty hub arrays and only `unconfigured`, `unreachable`, or
+`status_<code>` as the health error. The body is capped at 256 KiB by dropping
+oldest entries from `tasks.active` and marking `truncated`.
+
+`POST /ui/api/nodes/{machine}/accepting` accepts JSON `{ "accepting": bool,
+"reason": string }`, validates a lowercase machine name and a 120-byte reason,
+then relays it to the hub with the server-side credential. Hub status and up to
+64 KiB of its body are forwarded without exposing hub configuration; an
+unconfigured or unreachable hub returns `502 {"error":"hub_unavailable"}`.

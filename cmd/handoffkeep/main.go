@@ -940,7 +940,12 @@ func uiFromEnv(st *store.Store) (http.Handler, error) {
 	if team == "" || aud == "" || emails == "" {
 		return nil, nil
 	}
-	access, err := cfaccess.New(cfaccess.Config{TeamDomain: team, AUD: aud, AllowedEmails: strings.Split(emails, ",")})
+	access, err := cfaccess.New(cfaccess.Config{
+		TeamDomain:          team,
+		AUD:                 aud,
+		AllowedEmails:       strings.Split(emails, ","),
+		AllowedServiceNames: strings.Split(strings.TrimSpace(os.Getenv("HANDOFFKEEP_UI_ALLOWED_SERVICE_NAMES")), ","),
+	})
 	if err != nil {
 		return nil, err
 	}
