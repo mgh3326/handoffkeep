@@ -114,6 +114,7 @@
   <h2>Decision inbox</h2>
   {{if .Notice}}<p class="badge">{{.Notice}}</p>{{end}}
   {{if not .CanWrite}}<p class="muted">{{.WriteReason}}</p>{{end}}
+  {{if .RenderNotice}}<p class="badge" data-render-notice>{{.RenderNotice}}</p>{{end}}
   {{if .Results}}<section><h3>Answer results</h3><ul>{{range .Results}}<li data-item-status="{{.Status}}">{{.Message}}</li>{{end}}</ul></section>{{end}}
   <form method="post" action="/ui/decisions/answer-batch">
   <input type="hidden" name="csrf" value="{{.CSRF}}">

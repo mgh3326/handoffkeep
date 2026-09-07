@@ -443,6 +443,9 @@ type decisionData struct {
 	Notice        string
 	HasApproval   bool
 	Results       []decisionBatchResult
+	Rendered      int
+	Retrieved     int
+	RenderNotice  string
 }
 
 type taskDecisionView struct {
@@ -500,6 +503,13 @@ func eventFormData(kind string, event store.RelayEvent, csrf string, canWrite bo
 	return eventForm{Type: kind, ID: event.ID, Event: event, Options: decisionOptions(question), CSRF: csrf, CanWrite: canWrite}
 }
 
+// decisionData caps how many answerable cards the page renders. Every card
+// contributes several successful controls to one page-wide form, and the form
+// parser rejects a request outright past its parameter limit -- which locked
+// the console at 2500 cards, before any of our own limits were consulted.
+// Rendering no more cards than one request can parse keeps that unreachable.
+// Signals are not answerable and carry no form fields, so they are neither
+// capped nor counted in the notice.
 func (h *Handler) decisionData(r *http.Request, csrf, notice string) (decisionData, error) {
 	tasks, err := h.store.ListOpenTaskDecisions(r.Context(), 1000)
 	if err != nil {
@@ -517,8 +527,23 @@ func (h *Handler) decisionData(r *http.Request, csrf, notice string) (decisionDa
 	if !data.CanWrite {
 		data.WriteReason = "Hub is not configured."
 	}
+	// Each list is already capped at 1000 by its query, so this sum is what the
+	// console retrieved, not a claim about how many decisions exist.
+	retrieved := len(tasks) + len(laneEvents)
+	for _, escalation := range escalations {
+		if !isSignalEscalation(escalation) {
+			retrieved++
+		}
+	}
+	// A full source slice may have more rows behind its SQL limit even when the
+	// combined render budget did not discard a retrieved card. Tell the operator
+	// about that boundary without pretending we know the true backlog total.
+	retrievalMayBeTruncated := len(tasks) == decisionBatchParseLimit || len(escalations) == decisionBatchParseLimit || len(laneEvents) == decisionBatchParseLimit
 	index := 0
 	for _, decision := range tasks {
+		if index >= decisionBatchParseLimit {
+			break
+		}
 		view := taskDecisionView{Type: "task", ID: decision.Task.ID, Task: decision.Task, Question: decision.Question, Options: decisionOptions(decision.Question), Structured: decision.Task.Refs.DecisionOptions, Index: index, CanWrite: data.CanWrite}
 		index++
 		if h.admiralLanes[decision.Task.Lane] {
@@ -530,18 +555,30 @@ func (h *Handler) decisionData(r *http.Request, csrf, notice string) (decisionDa
 	for _, escalation := range escalations {
 		if isSignalEscalation(escalation) {
 			data.Signals = append(data.Signals, escalation)
-		} else {
-			view := eventDecisionViewFor("escalation", escalation, index)
-			view.CanWrite = data.CanWrite
-			data.Escalations = append(data.Escalations, view)
-			index++
+			continue
 		}
+		if index >= decisionBatchParseLimit {
+			continue
+		}
+		view := eventDecisionViewFor("escalation", escalation, index)
+		view.CanWrite = data.CanWrite
+		data.Escalations = append(data.Escalations, view)
+		index++
 	}
 	for _, event := range laneEvents {
+		if index >= decisionBatchParseLimit {
+			break
+		}
 		view := eventDecisionViewFor("lane", event, index)
 		view.CanWrite = data.CanWrite
 		data.LaneEvents = append(data.LaneEvents, view)
 		index++
+	}
+	data.Rendered, data.Retrieved = index, retrieved
+	if retrieved > index {
+		data.RenderNotice = fmt.Sprintf("현재 조회된 %d건 중 %d건 표시 — 표시된 항목을 처리하면 나머지가 이어서 표시됩니다.", retrieved, index)
+	} else if retrievalMayBeTruncated {
+		data.RenderNotice = fmt.Sprintf("현재 조회된 %d건 중 %d건 표시 — 각 목록은 최대 %d건까지만 조회되므로 추가 항목이 있을 수 있습니다.", retrieved, index, decisionBatchParseLimit)
 	}
 	return data, nil
 }

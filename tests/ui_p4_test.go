@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"reflect"
 	"regexp"
 	"sort"
@@ -17,8 +18,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/mgh3326/handoffkeep/internal/store"
+	"golang.org/x/net/html"
 )
+
+// The batch parser's unexported product constant is intentionally asserted at
+// its public behavior boundary here: UI rendering must cap at the same 1000
+// cards accepted by one default-toolchain form request.
+const p4DecisionBatchRenderLimit = 1000
 
 func p4Options(recommended, allowFree bool) map[string]any {
 	return map[string]any{"options": []map[string]any{{"key": "A", "label": "노드 로컬 저장", "recommended": recommended}, {"key": "B", "label": "중앙 저장 선행"}}, "allow_free": allowFree}
@@ -105,16 +113,104 @@ func p4Item(values url.Values, index int, kind string, id int64, answer string) 
 	values.Set(prefix+"answer", answer)
 }
 
-var renderedDecisionHiddenFieldRE = regexp.MustCompile(`name="items\.([0-9]+)\.(type|id)" value="([^"]*)"`)
+type renderedDecisionControl struct {
+	name      string
+	value     string
+	kind      string
+	checked   bool
+	disabled  bool
+	submitter bool
+}
 
-func submitRenderedDecisionForm(t *testing.T, h *httptest.Server, assertion string, cookie *http.Cookie, body string, extraFields url.Values) (*http.Response, int) {
-	t.Helper()
-	values := url.Values{}
-	for key, fieldValues := range extraFields {
-		values[key] = append([]string(nil), fieldValues...)
+func p4HTMLAttribute(node *html.Node, name string) (string, bool) {
+	for _, attribute := range node.Attr {
+		if strings.EqualFold(attribute.Key, name) {
+			return attribute.Val, true
+		}
 	}
+	return "", false
+}
+
+func p4DecisionFormControls(t *testing.T, body string) []renderedDecisionControl {
+	t.Helper()
+	root, err := html.Parse(strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var form *html.Node
+	var findForm func(*html.Node)
+	findForm = func(node *html.Node) {
+		if form != nil {
+			return
+		}
+		if node.Type == html.ElementNode && node.Data == "form" {
+			if action, ok := p4HTMLAttribute(node, "action"); ok && action == "/ui/decisions/answer-batch" {
+				form = node
+				return
+			}
+		}
+		for child := node.FirstChild; child != nil; child = child.NextSibling {
+			findForm(child)
+		}
+	}
+	findForm(root)
+	if form == nil {
+		t.Fatalf("rendered decision form absent from body: %q", body)
+	}
+	controls := []renderedDecisionControl{}
+	var walk func(*html.Node, bool)
+	walk = func(node *html.Node, fieldsetDisabled bool) {
+		if node.Type != html.ElementNode {
+			for child := node.FirstChild; child != nil; child = child.NextSibling {
+				walk(child, fieldsetDisabled)
+			}
+			return
+		}
+		disabled := fieldsetDisabled
+		if _, ok := p4HTMLAttribute(node, "disabled"); ok {
+			disabled = true
+		}
+		if node.Data == "input" || node.Data == "button" {
+			name, named := p4HTMLAttribute(node, "name")
+			if named && name != "" {
+				kind := "submit"
+				if node.Data == "input" {
+					kind, _ = p4HTMLAttribute(node, "type")
+					kind = strings.ToLower(kind)
+					if kind == "" {
+						kind = "text"
+					}
+				}
+				value, hasValue := p4HTMLAttribute(node, "value")
+				if !hasValue && (kind == "checkbox" || kind == "radio") {
+					value = "on"
+				}
+				_, checked := p4HTMLAttribute(node, "checked")
+				controls = append(controls, renderedDecisionControl{
+					name: name, value: value, kind: kind, checked: checked, disabled: disabled,
+					submitter: node.Data == "button" || kind == "submit" || kind == "image",
+				})
+			}
+		}
+		childDisabled := disabled
+		for child := node.FirstChild; child != nil; child = child.NextSibling {
+			walk(child, childDisabled)
+		}
+	}
+	for child := form.FirstChild; child != nil; child = child.NextSibling {
+		walk(child, false)
+	}
+	return controls
+}
+
+func p4RenderedDecisionIndexes(t *testing.T, controls []renderedDecisionControl) []int {
+	t.Helper()
 	seen := map[int]map[string]bool{}
-	for _, match := range renderedDecisionHiddenFieldRE.FindAllStringSubmatch(body, -1) {
+	for _, control := range controls {
+		match := regexp.MustCompile(`^items\.([0-9]+)\.(type|id)$`).FindStringSubmatch(control.name)
+		if match == nil || control.disabled {
+			continue
+		}
 		index, err := strconv.Atoi(match[1])
 		if err != nil {
 			t.Fatal(err)
@@ -126,17 +222,75 @@ func submitRenderedDecisionForm(t *testing.T, h *httptest.Server, assertion stri
 			t.Fatalf("duplicate rendered decision field items.%d.%s", index, match[2])
 		}
 		seen[index][match[2]] = true
-		values.Set("items."+match[1]+"."+match[2], match[3])
 	}
 	if len(seen) == 0 {
-		t.Fatalf("rendered decision form contained no item hidden fields: %q", body)
+		t.Fatal("rendered decision form contained no enabled item hidden fields")
 	}
+	indexes := make([]int, 0, len(seen))
 	for index, fields := range seen {
 		if !fields["type"] || !fields["id"] {
 			t.Fatalf("rendered decision form omitted hidden fields for items.%d: %+v", index, fields)
 		}
+		indexes = append(indexes, index)
 	}
-	return uiPostForm(t, h.Client(), h.URL+"/ui/decisions/answer-batch", assertion, cookie, values, h.URL, false), len(seen)
+	sort.Ints(indexes)
+	return indexes
+}
+
+// p4SerializedDecisionForm mirrors browser successful-controls serialization
+// over the rendered decision form. extraFields models user edits and exactly
+// one clicked submitter; disabled controls and unselected radios/checkboxes
+// remain absent.
+func p4SerializedDecisionForm(t *testing.T, body string, extraFields url.Values) (url.Values, []int) {
+	t.Helper()
+	controls := p4DecisionFormControls(t, body)
+	indexes := p4RenderedDecisionIndexes(t, controls)
+	values := url.Values{}
+	byName := map[string][]renderedDecisionControl{}
+	for _, control := range controls {
+		if control.disabled {
+			continue
+		}
+		byName[control.name] = append(byName[control.name], control)
+		if control.submitter || ((control.kind == "checkbox" || control.kind == "radio") && !control.checked) {
+			continue
+		}
+		values.Add(control.name, control.value)
+	}
+	for name, fieldValues := range extraFields {
+		candidates := byName[name]
+		if len(candidates) == 0 {
+			t.Fatalf("extra field %q is not an enabled rendered control", name)
+		}
+		isSubmitter := name == "only" || name == "mode"
+		values.Del(name)
+		for _, fieldValue := range fieldValues {
+			matched := false
+			for _, candidate := range candidates {
+				if isSubmitter {
+					matched = candidate.submitter && candidate.value == fieldValue
+				} else if candidate.kind == "checkbox" || candidate.kind == "radio" {
+					matched = candidate.value == fieldValue
+				} else {
+					matched = !candidate.submitter
+				}
+				if matched {
+					break
+				}
+			}
+			if !matched {
+				t.Fatalf("extra field %s=%q is not a successful rendered control", name, fieldValue)
+			}
+			values.Add(name, fieldValue)
+		}
+	}
+	return values, indexes
+}
+
+func submitRenderedDecisionForm(t *testing.T, h *httptest.Server, assertion string, cookie *http.Cookie, body string, extraFields url.Values) (*http.Response, int) {
+	t.Helper()
+	values, indexes := p4SerializedDecisionForm(t, body, extraFields)
+	return uiPostForm(t, h.Client(), h.URL+"/ui/decisions/answer-batch", assertion, cookie, values, h.URL, false), len(indexes)
 }
 
 func p4RecommendedDecisionTasks(t *testing.T, h *httptest.Server, lane, prefix string, count int) []int64 {
@@ -146,6 +300,138 @@ func p4RecommendedDecisionTasks(t *testing.T, h *httptest.Server, lane, prefix s
 		tasks = append(tasks, p4DecisionTask(t, h, lane, prefix+" "+strconv.Itoa(index), p4Options(true, false)))
 	}
 	return tasks
+}
+
+func p4StructuredDecisionOptions() store.DecisionOptions {
+	return store.DecisionOptions{Options: []store.DecisionOption{
+		{Key: "A", Label: "노드 로컬 저장", Recommended: true},
+		{Key: "B", Label: "중앙 저장 선행"},
+	}, AllowFree: true}
+}
+
+func p4StructuredDecisionQuestion() string {
+	options := p4StructuredDecisionOptions()
+	return "어떤 저장소를 선택할까요?\n" + store.FormatDecisionOptions(options)
+}
+
+// p4StructuredDecisionTasks avoids API setup cost in the maximum-backlog
+// cases while preserving the same task and structured-option state the UI
+// renders. Cleanup removes every still-open card and terminalizes already
+// answered work. It also moves just these test rows behind ordinary work:
+// ListTasks applies its 1000-row limit before a caller can ignore terminal
+// states, so otherwise a heavy test would hide later tests' own task rows.
+func p4StructuredDecisionTasks(t *testing.T, _ *store.Store, lane, prefix string, count int) []int64 {
+	t.Helper()
+	options := p4StructuredDecisionOptions()
+	refs, err := json.Marshal(store.TaskRefs{JobID: "job-p4", DecisionOptions: &options})
+	if err != nil {
+		t.Fatal(err)
+	}
+	titles := make([]string, 0, count)
+	for index := 0; index < count; index++ {
+		titles = append(titles, prefix+" "+strconv.Itoa(index))
+	}
+	db, err := pgx.Connect(t.Context(), os.Getenv("HANDOFFKEEP_TEST_DB_URL"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close(context.Background())
+	tx, err := db.Begin(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(context.Background())
+	now := time.Now().UTC()
+	rows, err := tx.Query(t.Context(), `INSERT INTO tasks(lane,title,kind,state,refs,claimed_by,created_by,created_at,updated_at)
+		SELECT $1,title,'implement','needs_decision',$2::jsonb,'worker-a','worker-a',$3,$3
+		FROM unnest($4::text[]) AS title RETURNING id`, lane, string(refs), now, titles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tasks := make([]int64, 0, count)
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			t.Fatal(err)
+		}
+		tasks = append(tasks, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		t.Fatal(err)
+	}
+	rows.Close()
+	if _, err := tx.Exec(t.Context(), `INSERT INTO task_events(task_id,"from","to","by",note,refs,at)
+		SELECT id,'claimed','needs_decision','worker-a',$1,$2::jsonb,$3 FROM tasks WHERE id = ANY($4)`, "어떤 저장소를 선택할까요?", string(refs), now, tasks); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		db, err := pgx.Connect(context.Background(), os.Getenv("HANDOFFKEEP_TEST_DB_URL"))
+		if err != nil {
+			t.Logf("decision task cleanup connection: %v", err)
+			return
+		}
+		defer db.Close(context.Background())
+		if _, err := db.Exec(context.Background(), `UPDATE tasks SET state='dropped', priority=-2147483648 WHERE id = ANY($1)`, tasks); err != nil {
+			t.Logf("decision task cleanup: %v", err)
+		}
+	})
+	return tasks
+}
+
+type p4OpenDecisionCounts struct {
+	Tasks       int
+	Escalations int
+	Lanes       int
+}
+
+func (counts p4OpenDecisionCounts) total() int {
+	return counts.Tasks + counts.Escalations + counts.Lanes
+}
+
+type p4OwnedDecisionCounter struct {
+	db            *pgx.Conn
+	taskIDs       []int64
+	escalationIDs []int64
+	laneIDs       []int64
+}
+
+func newP4OwnedDecisionCounter(t *testing.T, taskIDs, escalationIDs, laneIDs []int64) p4OwnedDecisionCounter {
+	t.Helper()
+	db, err := pgx.Connect(t.Context(), os.Getenv("HANDOFFKEEP_TEST_DB_URL"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close(context.Background()) })
+	return p4OwnedDecisionCounter{db: db, taskIDs: taskIDs, escalationIDs: escalationIDs, laneIDs: laneIDs}
+}
+
+func (counter p4OwnedDecisionCounter) counts(t *testing.T) p4OpenDecisionCounts {
+	t.Helper()
+	counts := p4OpenDecisionCounts{}
+	err := counter.db.QueryRow(t.Context(), `SELECT
+		(SELECT COUNT(*) FROM tasks WHERE id = ANY($1) AND state='needs_decision'),
+		(SELECT COUNT(*) FROM relay_events e WHERE e.id = ANY($2) AND e.kind='job.escalate' AND NOT EXISTS (
+			SELECT 1 FROM relay_events resolved WHERE resolved.job_id=e.job_id
+			AND resolved.kind IN ('job.joined','job.completed') AND resolved.id>e.id
+		) AND NOT EXISTS (
+			SELECT 1 FROM relay_events resolved WHERE resolved.kind='lane.event'
+			AND resolved.owner_lane=e.owner_lane AND resolved.id>e.id
+			AND resolved.event_id LIKE '%decision-escalation-' || e.id::text || '-%'
+		)),
+		(SELECT COUNT(*) FROM relay_events e WHERE e.id = ANY($3) AND e.kind='lane.event'
+		AND e.text LIKE '[decision-needed]%' AND NOT EXISTS (
+			SELECT 1 FROM relay_events resolved WHERE resolved.kind='lane.event'
+			AND resolved.owner_lane=e.owner_lane AND resolved.text LIKE '[decision-answered]%' AND resolved.id>e.id
+		))`, counter.taskIDs, counter.escalationIDs, counter.laneIDs).Scan(&counts.Tasks, &counts.Escalations, &counts.Lanes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return counts
 }
 
 func p4TasksByRenderedIndex(t *testing.T, body string, tasks []int64) []int64 {
@@ -939,10 +1225,13 @@ func TestUIP4QueueOperatorViewIncludesNonterminalDecide(t *testing.T) {
 
 // p4LaneDecisions seeds open lane decisions directly, which is the cheapest way
 // to render a form larger than the parse limit.
-func p4LaneDecisions(t *testing.T, s *store.Store, lane string, count int) {
+func p4LaneDecisions(t *testing.T, s *store.Store, lane string, count int) []int64 {
 	t.Helper()
+	ids := make([]int64, 0, count)
 	for index := 0; index < count; index++ {
-		seedRelay(t, s, lane, "lane.event", "", "[decision-needed] HT lane "+strconv.Itoa(index), "", "")
+		text := "[decision-needed] HT lane " + strconv.Itoa(index)
+		event := seedRelay(t, s, lane, "lane.event", "", text, "", "")
+		ids = append(ids, event.ID)
 	}
 	// The package shares one database. Left open, these rows would render on
 	// every later test's decision page and slow the suite to a timeout. A
@@ -957,15 +1246,22 @@ func p4LaneDecisions(t *testing.T, s *store.Store, lane string, count int) {
 			t.Logf("lane decision cleanup: %v", err)
 		}
 	})
+	return ids
 }
 
 // p4Escalations seeds open escalations under one job id so a single completed
 // event closes the whole batch on cleanup.
-func p4Escalations(t *testing.T, s *store.Store, lane string, count int) {
+func p4Escalations(t *testing.T, s *store.Store, lane string, count int, question ...string) []int64 {
 	t.Helper()
 	jobID := "ht-esc-" + lane
+	ids := make([]int64, 0, count)
 	for index := 0; index < count; index++ {
-		seedRelay(t, s, lane, "job.escalate", jobID, "", "HT escalation "+strconv.Itoa(index), "")
+		text := "HT escalation " + strconv.Itoa(index)
+		if len(question) > 0 {
+			text += "\n" + question[0]
+		}
+		event := seedRelay(t, s, lane, "job.escalate", jobID, "", text, "")
+		ids = append(ids, event.ID)
 	}
 	t.Cleanup(func() {
 		if _, _, err := s.AppendRelayEvent(context.Background(), store.RelayEvent{
@@ -975,11 +1271,12 @@ func p4Escalations(t *testing.T, s *store.Store, lane string, count int) {
 			t.Logf("escalation cleanup: %v", err)
 		}
 	})
+	return ids
 }
 
-// HT1: a submission larger than the parse limit is truncated and reported, not
-// rejected. Round 3 measured a 400 here, which locked the console shut with no
-// in-console way back below the threshold.
+// HT1 is now an HTTP-defense test. The render contract intentionally prevents
+// UI-generated forms from exceeding 1000 cards, but a direct oversized POST
+// must still truncate rather than lock the operator out.
 func TestUIP4OversizedFormTruncatesInsteadOfLocking(t *testing.T) {
 	s := uiStore(t)
 	fixture := newUIJWTFixture(t)
@@ -987,88 +1284,227 @@ func TestUIP4OversizedFormTruncatesInsteadOfLocking(t *testing.T) {
 	h := newUITestServer(t, s, fixture, hub.server.URL, "hub-test-token", 0)
 	defer h.Close()
 	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
-	lane := uiLane(t, "lane-a")
-	target := p4DecisionTask(t, h, lane, "HT1 target", p4Options(true, false))
-	p4LaneDecisions(t, s, uiLane(t, "lane-b"), 1000)
-
 	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions", assertion)
-	body := responseText(t, uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions", assertion, ""))
-	index := p4Index(t, body, "task", target)
-	if index >= 1000 {
-		t.Skipf("HT1 target rendered outside the parse window at index %d", index)
+	values := url.Values{"csrf": {csrf}, "mode": {"selected"}}
+	for index := 0; index < p4DecisionBatchRenderLimit+1; index++ {
+		p4Item(values, index, "task", int64(index+1), "A: 노드 로컬 저장")
 	}
-	extra := url.Values{"csrf": {csrf}, "only": {strconv.Itoa(index)}}
-	extra.Set("items."+strconv.Itoa(index)+".answer", "A: 노드 로컬 저장")
-	response, rendered := submitRenderedDecisionForm(t, h, assertion, cookie, body, extra)
+	response := uiPostForm(t, h.Client(), h.URL+"/ui/decisions/answer-batch", assertion, cookie, values, h.URL, false)
 	responseBody := responseText(t, response)
-	updated, found, err := s.GetTask(t.Context(), target)
-	if rendered <= 1000 || response.StatusCode != http.StatusOK {
-		t.Fatalf("HT1 rendered=%d status=%d body=%q", rendered, response.StatusCode, responseBody)
-	}
-	if !strings.Contains(responseBody, "절단됨 1000/"+strconv.Itoa(rendered)) {
-		t.Fatalf("HT1 truncation notice absent for rendered=%d: %q", rendered, responseBody)
-	}
-	if strings.Count(responseBody, `data-item-status="200"`) != 1 || len(hub.requests()) != 1 || err != nil || !found || updated.State != "claimed" {
-		t.Fatalf("HT1 results=%d hub=%d task=%+v found=%t err=%v", strings.Count(responseBody, `data-item-status="200"`), len(hub.requests()), updated, found, err)
+	if response.StatusCode != http.StatusOK || !strings.Contains(responseBody, "절단됨 1000/1001") || len(hub.requests()) != 0 {
+		t.Fatalf("HT1 direct oversized POST status=%d hub=%d body=%q", response.StatusCode, len(hub.requests()), responseBody)
 	}
 }
 
-// HT2: the three ListOpen* queries cap at 1000 each, so up to 3000 cards can
-// render in one form. Both single and multi submission must still advance.
-func TestUIP4ThreeThousandRenderedFormStillAdvances(t *testing.T) {
+func p4RequireFullSuccessfulControls(t *testing.T, values url.Values, indexes []int) {
+	t.Helper()
+	for _, index := range indexes {
+		for _, suffix := range []string{"type", "id", "select", "answer", "custom", "note"} {
+			key := "items." + strconv.Itoa(index) + "." + suffix
+			if got := values[key]; len(got) != 1 {
+				t.Fatalf("successful control %s values=%q", key, got)
+			}
+		}
+		for _, suffix := range []string{"custom", "note"} {
+			key := "items." + strconv.Itoa(index) + "." + suffix
+			if values.Get(key) != "" {
+				t.Fatalf("empty successful control %s=%q", key, values.Get(key))
+			}
+		}
+	}
+}
+
+func p4VisibleOwnedIndexes(t *testing.T, body, kind string, ids []int64) []int {
+	t.Helper()
+	wanted := make(map[int64]bool, len(ids))
+	for _, id := range ids {
+		wanted[id] = true
+	}
+	values, indexes := p4SerializedDecisionForm(t, body, nil)
+	visible := make([]int, 0)
+	for _, index := range indexes {
+		prefix := "items." + strconv.Itoa(index) + "."
+		if values.Get(prefix+"type") != kind {
+			continue
+		}
+		id, err := strconv.ParseInt(values.Get(prefix+"id"), 10, 64)
+		if err != nil {
+			t.Fatalf("rendered %s item %d id=%q: %v", kind, index, values.Get(prefix+"id"), err)
+		}
+		if wanted[id] {
+			visible = append(visible, index)
+		}
+	}
+	return visible
+}
+
+// AC3: inspect the actual rendered DOM, including empty text controls and the
+// clicked submitter. This fails if the helper regresses to hidden fields only.
+func TestUIP4RenderedDecisionFormSuccessfulControls(t *testing.T) {
 	s := uiStore(t)
 	fixture := newUIJWTFixture(t)
 	hub := newFakeIngressHub(t)
 	h := newUITestServer(t, s, fixture, hub.server.URL, "hub-test-token", 0)
 	defer h.Close()
 	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
-	p4LaneDecisions(t, s, uiLane(t, "lane-b"), 1000)
-	p4Escalations(t, s, uiLane(t, "lane-c"), 1000)
-	p4DecisionTask(t, h, uiLane(t, "lane-a"), "HT2 task", p4Options(true, false))
-
+	task := p4StructuredDecisionTasks(t, s, uiLane(t, "lane-a"), "AC3", 1)[0]
 	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions", assertion)
 	body := responseText(t, uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions", assertion, ""))
-	extra := url.Values{"csrf": {csrf}, "only": {"0"}}
-	extra.Set("items.0.answer", "A: 노드 로컬 저장")
-	response, rendered := submitRenderedDecisionForm(t, h, assertion, cookie, body, extra)
+	index := p4Index(t, body, "task", task)
+	values, indexes := p4SerializedDecisionForm(t, body, url.Values{
+		"csrf": {csrf},
+		"only": {strconv.Itoa(index)},
+		"items." + strconv.Itoa(index) + ".select": {"1"},
+	})
+	if len(indexes) == 0 || values.Get("csrf") != csrf || values.Get("only") != strconv.Itoa(index) || values.Get("mode") != "" {
+		t.Fatalf("AC3 submitter/fixed controls indexes=%v csrf=%q only=%q mode=%q", indexes, values.Get("csrf"), values.Get("only"), values.Get("mode"))
+	}
+	p4RequireFullSuccessfulControls(t, values, []int{index})
+	response := uiPostForm(t, h.Client(), h.URL+"/ui/decisions/answer-batch", assertion, cookie, values, h.URL, false)
 	responseBody := responseText(t, response)
-	if rendered <= 1000 || response.StatusCode != http.StatusOK {
-		t.Fatalf("HT2 rendered=%d status=%d body=%q", rendered, response.StatusCode, responseBody)
+	updated, found, err := s.GetTask(t.Context(), task)
+	if response.StatusCode != http.StatusOK || strings.Count(responseBody, `data-item-status="200"`) != 1 || len(hub.requests()) != 1 || err != nil || !found || updated.State != "claimed" {
+		t.Fatalf("AC3 status=%d results=%d hub=%d task=%+v found=%t err=%v body=%q", response.StatusCode, strings.Count(responseBody, `data-item-status="200"`), len(hub.requests()), updated, found, err, responseBody)
 	}
-	if !strings.Contains(responseBody, "절단됨 1000/"+strconv.Itoa(rendered)) {
-		t.Fatalf("HT2 truncation notice absent for rendered=%d: %q", rendered, responseBody)
-	}
-	selected := url.Values{"csrf": {csrf}, "mode": {"selected"}}
-	for index := 0; index < 3; index++ {
-		selected.Set("items."+strconv.Itoa(index)+".select", "1")
-	}
-	multi, _ := submitRenderedDecisionForm(t, h, assertion, cookie, body, selected)
-	multiBody := responseText(t, multi)
-	if multi.StatusCode != http.StatusOK || strings.Count(multiBody, `data-item-status=`) == 0 {
-		t.Fatalf("HT2 multi status=%d body=%q", multi.StatusCode, multiBody)
+	if values.Get("items."+strconv.Itoa(index)+".answer") != "A: 노드 로컬 저장" || values.Get("items."+strconv.Itoa(index)+".select") != "1" {
+		t.Fatalf("AC3 checked controls answer=%q select=%q", values.Get("items."+strconv.Itoa(index)+".answer"), values.Get("items."+strconv.Itoa(index)+".select"))
 	}
 }
 
-// HT4: an only= pointing past the truncation window is not an invalid
-// selection. Returning 400 there would be the same lock in a new place.
-func TestUIP4OnlyBeyondTruncationWindowIsReported(t *testing.T) {
+// AC4: maximum rendered cards use the real template's successful controls,
+// not a hand-counted per-card estimate. Each normal submit mode stays beneath
+// Go's default URL parameter cap and reaches the real handler.
+func TestUIP4RenderedDecisionFormParameterBudget(t *testing.T) {
 	s := uiStore(t)
 	fixture := newUIJWTFixture(t)
 	hub := newFakeIngressHub(t)
 	h := newUITestServer(t, s, fixture, hub.server.URL, "hub-test-token", 0)
 	defer h.Close()
 	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
-	p4LaneDecisions(t, s, uiLane(t, "lane-b"), 1001)
+	p4StructuredDecisionTasks(t, s, uiLane(t, "lane-a"), "AC4", p4DecisionBatchRenderLimit)
+	p4Escalations(t, s, uiLane(t, "lane-e"), p4DecisionBatchRenderLimit, p4StructuredDecisionQuestion())
 	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions", assertion)
 	body := responseText(t, uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions", assertion, ""))
-	extra := url.Values{"csrf": {csrf}, "only": {"1000"}}
-	response, rendered := submitRenderedDecisionForm(t, h, assertion, cookie, body, extra)
-	responseBody := responseText(t, response)
-	if rendered <= 1000 || response.StatusCode != http.StatusOK {
-		t.Fatalf("HT4 rendered=%d status=%d body=%q", rendered, response.StatusCode, responseBody)
+	controls := p4DecisionFormControls(t, body)
+	indexes := p4RenderedDecisionIndexes(t, controls)
+	if len(indexes) != p4DecisionBatchRenderLimit {
+		t.Fatalf("AC4 rendered cards=%d want=%d", len(indexes), p4DecisionBatchRenderLimit)
 	}
-	if !strings.Contains(responseBody, "절단됨 1000/"+strconv.Itoa(rendered)) || !strings.Contains(responseBody, "처리 범위 밖") || len(hub.requests()) != 0 {
-		t.Fatalf("HT4 notice/hub wrong hub=%d body=%q", len(hub.requests()), responseBody)
+	for _, test := range []struct {
+		name  string
+		field string
+		value string
+	}{
+		{"only", "only", strconv.Itoa(indexes[len(indexes)-1])},
+		{"selected", "mode", "selected"},
+		{"recommended", "mode", "recommended"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			extra := url.Values{"csrf": {csrf}, test.field: {test.value}}
+			for _, index := range indexes {
+				extra.Set("items."+strconv.Itoa(index)+".select", "1")
+			}
+			values, gotIndexes := p4SerializedDecisionForm(t, body, extra)
+			if !reflect.DeepEqual(gotIndexes, indexes) {
+				t.Fatalf("AC4 rendered indexes=%v want=%v", gotIndexes, indexes)
+			}
+			p4RequireFullSuccessfulControls(t, values, gotIndexes)
+			parameterCount := 0
+			for _, fieldValues := range values {
+				parameterCount += len(fieldValues)
+			}
+			if parameterCount >= 10000 {
+				t.Fatalf("AC4 %s successful parameters=%d, exceeds default parser budget", test.name, parameterCount)
+			}
+			response := uiPostForm(t, h.Client(), h.URL+"/ui/decisions/answer-batch", assertion, cookie, values, h.URL, false)
+			responseBody := responseText(t, response)
+			if response.StatusCode != http.StatusOK {
+				t.Fatalf("AC4 %s parameters=%d status=%d body=%q", test.name, parameterCount, response.StatusCode, responseBody)
+			}
+			t.Logf("AC4 %s: rendered=%d successful parameters=%d handler=200", test.name, len(gotIndexes), parameterCount)
+		})
+	}
+}
+
+// AC1/AC2: 1000 cards remain a complete render; 1001 cards retain the same
+// cap and say only what the three capped retrieval queries establish. Signals
+// are informational and must not consume the form-card budget.
+func TestUIP4DecisionRenderLimitAndNotice(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		cards      int
+		wantNotice bool
+	}{
+		{"1000", 1000, false},
+		{"1001", 1001, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			s := uiStore(t)
+			fixture := newUIJWTFixture(t)
+			hub := newFakeIngressHub(t)
+			h := newUITestServer(t, s, fixture, hub.server.URL, "hub-test-token", 0)
+			defer h.Close()
+			assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
+			laneCards := test.cards
+			var taskIDs []int64
+			if !test.wantNotice {
+				laneCards--
+				taskIDs = p4StructuredDecisionTasks(t, s, uiLane(t, "lane-t"), "AC1", 1)
+			}
+			laneIDs := p4LaneDecisions(t, s, uiLane(t, "lane-a"), laneCards)
+			if !test.wantNotice {
+				jobID := uiLane(t, "signal")
+				seedRelay(t, s, uiLane(t, "lane-s"), "job.escalate", jobID, "", "PING", "")
+				t.Cleanup(func() {
+					if _, _, err := s.AppendRelayEvent(context.Background(), store.RelayEvent{Kind: "job.completed", JobID: jobID, OwnerLane: "lane-a", ReportPath: "cleanup.md", Reason: "cleanup"}); err != nil {
+						t.Logf("signal cleanup: %v", err)
+					}
+				})
+			}
+			body := responseText(t, uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions", assertion, ""))
+			_, indexes := p4SerializedDecisionForm(t, body, nil)
+			if len(indexes) != p4DecisionBatchRenderLimit {
+				t.Fatalf("AC1 backlog=%d rendered=%d want=%d", test.cards, len(indexes), p4DecisionBatchRenderLimit)
+			}
+			hasNotice := strings.Contains(body, "data-render-notice")
+			if hasNotice && (!strings.Contains(body, "현재 조회된") || !strings.Contains(body, "표시") || strings.Contains(body, "전체")) {
+				t.Fatalf("AC2 backlog=%d dishonest render notice: %q", test.cards, body)
+			}
+			if test.wantNotice && !hasNotice {
+				t.Fatalf("AC2 backlog=%d omitted source-limit notice: %q", test.cards, body)
+			}
+			if !test.wantNotice {
+				ownedVisible := len(p4VisibleOwnedIndexes(t, body, "task", taskIDs)) + len(p4VisibleOwnedIndexes(t, body, "lane", laneIDs))
+				if ownedVisible == p4DecisionBatchRenderLimit && hasNotice {
+					t.Fatalf("AC2 exact 1000-card owned render unexpectedly showed a notice: %q", body)
+				}
+			}
+			if !test.wantNotice && !strings.Contains(body, "PING") {
+				t.Fatalf("AC1 signal was not rendered separately: %q", body)
+			}
+		})
+	}
+}
+
+// HT4 remains an HTTP-defense test after the UI cap: a manually constructed
+// request can name an item past the parser window and must receive the
+// truncation/range notice instead of a new 400 lock.
+func TestUIP4OnlyBeyondDirectTruncationWindowIsReported(t *testing.T) {
+	s := uiStore(t)
+	fixture := newUIJWTFixture(t)
+	hub := newFakeIngressHub(t)
+	h := newUITestServer(t, s, fixture, hub.server.URL, "hub-test-token", 0)
+	defer h.Close()
+	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
+	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions", assertion)
+	values := url.Values{"csrf": {csrf}, "only": {strconv.Itoa(p4DecisionBatchRenderLimit)}}
+	for index := 0; index < p4DecisionBatchRenderLimit+1; index++ {
+		p4Item(values, index, "task", int64(index+1), "A: 노드 로컬 저장")
+	}
+	response := uiPostForm(t, h.Client(), h.URL+"/ui/decisions/answer-batch", assertion, cookie, values, h.URL, false)
+	responseBody := responseText(t, response)
+	if response.StatusCode != http.StatusOK || !strings.Contains(responseBody, "절단됨 1000/1001") || !strings.Contains(responseBody, "처리 범위 밖") || len(hub.requests()) != 0 {
+		t.Fatalf("HT4 direct status=%d hub=%d body=%q", response.StatusCode, len(hub.requests()), responseBody)
 	}
 }
 
@@ -1098,71 +1534,87 @@ func TestUIP4RecommendedKeepsRemainderNoticeWithoutResults(t *testing.T) {
 	}
 }
 
-// HT3: truncation (1000) and the process limit (50) stack. Each submission must
-// still advance. Task decisions render before lane decisions, so the cheap lane
-// rows guarantee truncation while the tasks sit inside the parsed window.
-func TestUIP4TruncatedFormAdvancesEachSubmission(t *testing.T) {
+// AC5: start with the reachable 3000-card mixed backlog. The repeated
+// submissions assert against the owned records still open in storage, not the
+// re-rendered-card count (which legitimately remains 1000 for many rounds).
+func TestUIP4MixedThreeThousandBacklogConverges(t *testing.T) {
 	s := uiStore(t)
 	fixture := newUIJWTFixture(t)
 	hub := newFakeIngressHub(t)
 	h := newUITestServer(t, s, fixture, hub.server.URL, "hub-test-token", 0)
 	defer h.Close()
 	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
-	p4LaneDecisions(t, s, uiLane(t, "lane-b"), 1001)
-	lane := uiLane(t, "lane-a")
-	tasks := p4RecommendedDecisionTasks(t, h, lane, "HT3 task", 60)
+	tasks := p4StructuredDecisionTasks(t, s, uiLane(t, "lane-a"), "AC5 task", 1000)
+	escalations := p4Escalations(t, s, uiLane(t, "lane-e"), 1000, p4StructuredDecisionQuestion())
+	lanes := []int64{}
+	for group := 0; group < 20; group++ {
+		lanes = append(lanes, p4LaneDecisions(t, s, uiLane(t, "lane-l"), 50)...)
+	}
+	hub.mu.Lock()
+	hub.persist = func(request ingressRequest) {
+		if _, _, err := s.AppendRelayEvent(context.Background(), store.RelayEvent{Kind: request.Kind, OwnerLane: request.Lane, EventID: request.EventID, Text: request.Text, Reason: "http_ingress:" + request.Label}); err != nil {
+			t.Errorf("persist mixed decision event: %v", err)
+		}
+	}
+	hub.mu.Unlock()
 	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions", assertion)
-
-	claimed := func() int {
+	counter := newP4OwnedDecisionCounter(t, tasks, escalations, lanes)
+	counts := counter.counts(t)
+	if counts != (p4OpenDecisionCounts{Tasks: 1000, Escalations: 1000, Lanes: 1000}) {
+		t.Fatalf("AC5 initial open decisions=%+v", counts)
+	}
+	body := responseText(t, uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions", assertion, ""))
+	_, indexes := p4SerializedDecisionForm(t, body, nil)
+	if len(indexes) != p4DecisionBatchRenderLimit || !strings.Contains(body, `data-render-notice>현재 조회된 3000건 중 1000건 표시`) {
+		t.Fatalf("AC5 initial render=%d notice=%t", len(indexes), strings.Contains(body, `data-render-notice>현재 조회된 3000건 중 1000건 표시`))
+	}
+	submitAndRequireProgress := func(label string, form string, fields url.Values) string {
 		t.Helper()
-		count := 0
-		for _, id := range tasks {
-			updated, found, err := s.GetTask(t.Context(), id)
-			if err != nil || !found {
-				t.Fatalf("HT3 task=%d found=%t err=%v", id, found, err)
-			}
-			if updated.State == "claimed" {
-				count++
-			}
-		}
-		return count
-	}
-
-	previous := 0
-	for pass := 0; pass < 2; pass++ {
-		body := responseText(t, uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions", assertion, ""))
-		extra := url.Values{"csrf": {csrf}, "mode": {"selected"}}
-		for _, id := range tasks {
-			updated, found, err := s.GetTask(t.Context(), id)
-			if err != nil || !found {
-				t.Fatal(err)
-			}
-			if updated.State != "needs_decision" {
-				continue
-			}
-			index := p4Index(t, body, "task", id)
-			extra.Set("items."+strconv.Itoa(index)+".select", "1")
-			extra.Set("items."+strconv.Itoa(index)+".answer", "A: 노드 로컬 저장")
-		}
-		response, rendered := submitRenderedDecisionForm(t, h, assertion, cookie, body, extra)
+		before := counter.counts(t)
+		response, rendered := submitRenderedDecisionForm(t, h, assertion, cookie, form, fields)
 		responseBody := responseText(t, response)
-		if rendered <= 1000 || response.StatusCode != http.StatusOK {
-			t.Fatalf("HT3 pass=%d rendered=%d status=%d", pass, rendered, response.StatusCode)
+		after := counter.counts(t)
+		if rendered > p4DecisionBatchRenderLimit || response.StatusCode != http.StatusOK || after.total() >= before.total() {
+			t.Fatalf("AC5 %s rendered=%d status=%d open before=%+v after=%+v body=%q", label, rendered, response.StatusCode, before, after, responseBody)
 		}
-		if !strings.Contains(responseBody, "절단됨 1000/") {
-			t.Fatalf("HT3 pass=%d truncation notice absent", pass)
-		}
-		ok := strings.Count(responseBody, `data-item-status="200"`)
-		if ok == 0 {
-			t.Fatalf("HT3 pass=%d made no progress: %q", pass, responseBody)
-		}
-		now := claimed()
-		if now <= previous {
-			t.Fatalf("HT3 pass=%d claimed=%d did not advance from %d", pass, now, previous)
-		}
-		previous = now
+		return responseBody
 	}
-	if previous != len(tasks) {
-		t.Fatalf("HT3 did not converge: claimed=%d want=%d", previous, len(tasks))
+	onlyIndex := p4Index(t, body, "task", tasks[len(tasks)-1])
+	body = submitAndRequireProgress("only", body, url.Values{"csrf": {csrf}, "only": {strconv.Itoa(onlyIndex)}})
+	selectedIndex := p4Index(t, body, "task", tasks[len(tasks)-2])
+	body = submitAndRequireProgress("selected", body, url.Values{"csrf": {csrf}, "mode": {"selected"}, "items." + strconv.Itoa(selectedIndex) + ".select": {"1"}})
+	body = submitAndRequireProgress("recommended", body, url.Values{"csrf": {csrf}, "mode": {"recommended"}})
+	for pass := 0; counts.total() > 0 && pass < 70; pass++ {
+		counts = counter.counts(t)
+		if counts.total() == 0 {
+			break
+		}
+		fields := url.Values{"csrf": {csrf}, "mode": {"recommended"}}
+		if counts.Tasks == 0 && counts.Escalations > 0 {
+			fields.Set("mode", "selected")
+			visible := p4VisibleOwnedIndexes(t, body, "escalation", escalations)
+			if len(visible) == 0 {
+				t.Fatalf("AC5 no owned escalation was visible while %+v remained", counts)
+			}
+			for _, index := range visible {
+				fields.Set("items."+strconv.Itoa(index)+".select", "1")
+			}
+		}
+		if counts.Tasks == 0 && counts.Escalations == 0 && counts.Lanes > 0 {
+			fields.Set("mode", "selected")
+			visible := p4VisibleOwnedIndexes(t, body, "lane", lanes)
+			if len(visible) == 0 {
+				t.Fatalf("AC5 no owned lane decision was visible while %+v remained", counts)
+			}
+			for _, index := range visible {
+				fields.Set("items."+strconv.Itoa(index)+".select", "1")
+				fields.Set("items."+strconv.Itoa(index)+".custom", "continue")
+			}
+		}
+		body = submitAndRequireProgress("drain-"+strconv.Itoa(pass), body, fields)
+		counts = counter.counts(t)
+	}
+	if counts != (p4OpenDecisionCounts{}) {
+		t.Fatalf("AC5 mixed backlog did not converge: remaining=%+v", counts)
 	}
 }
