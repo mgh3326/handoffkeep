@@ -25,6 +25,12 @@ import (
 
 const csrfCookie = "hk_ui_csrf"
 
+// decisionBatchParseLimit bounds how many submitted items one request parses.
+// decisionBatchProcessLimit bounds how many of them one request acts on.
+// Both truncate rather than reject so every submission makes progress.
+const decisionBatchParseLimit = 1000
+const decisionBatchProcessLimit = 50
+
 var docKeyRE = regexp.MustCompile(`^[A-Za-z0-9._\-/]{1,512}$`)
 var decisionBatchFieldRE = regexp.MustCompile(`^items\.([0-9]+)\.(type|id|select|answer|custom|note)$`)
 
@@ -304,7 +310,10 @@ type batchSendOutcome struct {
 	Result  string
 }
 
-func parseDecisionBatchItems(values url.Values) ([]decisionBatchItem, error) {
+// parseDecisionBatchItems returns the parsed items and the number of items the
+// submission actually carried.  The two differ when a submission exceeds
+// decisionBatchParseLimit and the tail is truncated.
+func parseDecisionBatchItems(values url.Values) ([]decisionBatchItem, int, error) {
 	byIndex := map[int]*decisionBatchItem{}
 	for key, fieldValues := range values {
 		match := decisionBatchFieldRE.FindStringSubmatch(key)
@@ -312,11 +321,11 @@ func parseDecisionBatchItems(values url.Values) ([]decisionBatchItem, error) {
 			continue
 		}
 		if len(fieldValues) != 1 {
-			return nil, errors.New("invalid decision item")
+			return nil, 0, errors.New("invalid decision item")
 		}
 		index, err := strconv.Atoi(match[1])
 		if err != nil || index < 0 {
-			return nil, errors.New("invalid decision item")
+			return nil, 0, errors.New("invalid decision item")
 		}
 		item := byIndex[index]
 		if item == nil {
@@ -329,7 +338,7 @@ func parseDecisionBatchItems(values url.Values) ([]decisionBatchItem, error) {
 		case "id":
 			item.ID, err = strconv.ParseInt(strings.TrimSpace(fieldValues[0]), 10, 64)
 			if err != nil {
-				return nil, errors.New("invalid decision item")
+				return nil, 0, errors.New("invalid decision item")
 			}
 		case "select":
 			item.Selected = fieldValues[0] != ""
@@ -341,23 +350,29 @@ func parseDecisionBatchItems(values url.Values) ([]decisionBatchItem, error) {
 			item.Note = strings.TrimSpace(fieldValues[0])
 		}
 	}
-	if len(byIndex) > 1000 {
-		return nil, errors.New("a maximum of 1000 decision items is allowed")
-	}
 	indexes := make([]int, 0, len(byIndex))
 	for index := range byIndex {
 		indexes = append(indexes, index)
 	}
 	sort.Ints(indexes)
+	// The console renders every open decision inside one form, so a submission
+	// can carry more items than a single request should parse.  Truncating in
+	// ascending index order keeps the page usable: the operator answers the
+	// cards at the front and resubmits for the rest.  Rejecting instead locks
+	// the console shut exactly when the decision backlog is largest.
+	submitted := len(indexes)
+	if len(indexes) > decisionBatchParseLimit {
+		indexes = indexes[:decisionBatchParseLimit]
+	}
 	items := make([]decisionBatchItem, 0, len(indexes))
 	for _, index := range indexes {
 		item := *byIndex[index]
 		if item.ID < 1 || (item.Type != "task" && item.Type != "escalation" && item.Type != "lane") {
-			return nil, errors.New("invalid decision item")
+			return nil, 0, errors.New("invalid decision item")
 		}
 		items = append(items, item)
 	}
-	return items, nil
+	return items, submitted, nil
 }
 
 func (h *Handler) answerDecisionBatch(w http.ResponseWriter, r *http.Request, email string) {
@@ -381,7 +396,7 @@ func (h *Handler) answerDecisionBatch(w http.ResponseWriter, r *http.Request, em
 		http.Error(w, "Hub is not configured.", http.StatusBadRequest)
 		return
 	}
-	items, err := parseDecisionBatchItems(r.Form)
+	items, submitted, err := parseDecisionBatchItems(r.Form)
 	if err != nil {
 		h.audit(email, "decision-batch", "-", "-", "invalid")
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -394,6 +409,13 @@ func (h *Handler) answerDecisionBatch(w http.ResponseWriter, r *http.Request, em
 		h.audit(email, "decision-batch", "-", "-", "invalid")
 		http.Error(w, "invalid decision selection", http.StatusBadRequest)
 		return
+	}
+	// A truncated submission is reported, never rejected: the operator must be
+	// able to see what this request covered and resubmit for the remainder.
+	notices := []string{}
+	truncated := submitted - len(items)
+	if truncated > 0 {
+		notices = append(notices, fmt.Sprintf("절단됨 %d/%d — 이번 제출은 앞 %d건만 대상입니다. 다시 제출하면 이어서 처리됩니다.", len(items), submitted, len(items)))
 	}
 	chosen := []decisionBatchItem{}
 	if len(only) == 1 {
@@ -410,6 +432,13 @@ func (h *Handler) answerDecisionBatch(w http.ResponseWriter, r *http.Request, em
 			}
 		}
 		if len(chosen) == 0 {
+			// Outside a truncated request's range is not an invalid selection:
+			// the card exists, this submission simply did not reach it.
+			if truncated > 0 {
+				h.audit(email, "decision-batch", "-", "-", "truncated")
+				h.renderDecisionBatch(w, r, email, strings.Join(append(notices, "선택한 항목은 이번 제출의 처리 범위 밖이라 처리되지 않았습니다."), " "), nil)
+				return
+			}
 			h.audit(email, "decision-batch", "-", "-", "invalid")
 			http.Error(w, "invalid decision selection", http.StatusBadRequest)
 			return
@@ -424,9 +453,9 @@ func (h *Handler) answerDecisionBatch(w http.ResponseWriter, r *http.Request, em
 		}
 	}
 	remaining := 0
-	if len(chosen) > 50 {
-		remaining = len(chosen) - 50
-		chosen = chosen[:50]
+	if len(chosen) > decisionBatchProcessLimit {
+		remaining = len(chosen) - decisionBatchProcessLimit
+		chosen = chosen[:decisionBatchProcessLimit]
 	}
 
 	results := []decisionBatchResult{}
@@ -438,15 +467,17 @@ func (h *Handler) answerDecisionBatch(w http.ResponseWriter, r *http.Request, em
 		results = append(results, outcome.decisionBatchResult)
 		h.audit(email, "decision-batch", outcome.Target, outcome.EventID, outcome.Result)
 	}
+	if remaining > 0 {
+		notices = append(notices, fmt.Sprintf("%d건이 남았습니다. 다시 제출하면 이어서 처리됩니다.", remaining))
+	}
 	if len(results) == 0 {
-		h.renderDecisionBatch(w, r, email, "선택된 항목이 없습니다.", nil)
+		// Dropping the remainder here would repeat "nothing selected" forever
+		// while work is still outstanding.
+		notices = append(notices, "선택된 항목이 없습니다.")
+		h.renderDecisionBatch(w, r, email, strings.Join(notices, " "), nil)
 		return
 	}
-	notice := ""
-	if remaining > 0 {
-		notice = fmt.Sprintf("%d건이 남았습니다. 다시 제출하면 이어서 처리됩니다.", remaining)
-	}
-	h.renderDecisionBatch(w, r, email, notice, results)
+	h.renderDecisionBatch(w, r, email, strings.Join(notices, " "), results)
 }
 
 func (h *Handler) renderDecisionBatch(w http.ResponseWriter, r *http.Request, email, notice string, results []decisionBatchResult) {

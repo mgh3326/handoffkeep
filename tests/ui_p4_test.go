@@ -2,6 +2,7 @@ package tests
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -507,11 +508,14 @@ func TestUIP4BatchSelectionBoundsAndHubFailure(t *testing.T) {
 	for index := 0; index < 1001; index++ {
 		p4Item(tooMany, index, "task", int64(index+1), "A: answer")
 	}
+	// Over the parse limit the request is truncated and reported, not rejected.
+	// Rejecting locked the console shut once the backlog passed the limit, with
+	// no in-console way back under it.
 	response = uiPostForm(t, h.Client(), h.URL+"/ui/decisions/answer-batch", assertion, cookie, tooMany, h.URL, false)
-	if response.StatusCode != http.StatusBadRequest || len(hub.requests()) != 0 {
-		t.Fatalf("over-limit status=%d hub=%d body=%q", response.StatusCode, len(hub.requests()), responseText(t, response))
+	overBody := responseText(t, response)
+	if response.StatusCode != http.StatusOK || !strings.Contains(overBody, "절단됨 1000/1001") || len(hub.requests()) != 0 {
+		t.Fatalf("over-limit status=%d hub=%d body=%q", response.StatusCode, len(hub.requests()), overBody)
 	}
-	response.Body.Close()
 
 	task := p4DecisionTask(t, h, uiLane(t, "lane-a"), "hub failure task", p4Options(true, true))
 	hub.mu.Lock()
@@ -930,5 +934,235 @@ func TestUIP4QueueOperatorViewIncludesNonterminalDecide(t *testing.T) {
 		if strings.Contains(body, task.Title) {
 			t.Fatalf("SHOULD-3 operator queue rendered terminal/backlog decide task %q: %q", task.Title, body)
 		}
+	}
+}
+
+// p4LaneDecisions seeds open lane decisions directly, which is the cheapest way
+// to render a form larger than the parse limit.
+func p4LaneDecisions(t *testing.T, s *store.Store, lane string, count int) {
+	t.Helper()
+	for index := 0; index < count; index++ {
+		seedRelay(t, s, lane, "lane.event", "", "[decision-needed] HT lane "+strconv.Itoa(index), "", "")
+	}
+	// The package shares one database. Left open, these rows would render on
+	// every later test's decision page and slow the suite to a timeout. A
+	// single answered event on this lane closes all of them, which is the same
+	// rule the console itself uses. t.Context is already cancelled by the time
+	// cleanup runs, so this uses its own context.
+	t.Cleanup(func() {
+		if _, _, err := s.AppendRelayEvent(context.Background(), store.RelayEvent{
+			Kind: "lane.event", JobID: "ht-cleanup", OwnerLane: lane,
+			Text: "[decision-answered] HT cleanup", EventID: "ht-cleanup-" + lane,
+		}); err != nil {
+			t.Logf("lane decision cleanup: %v", err)
+		}
+	})
+}
+
+// p4Escalations seeds open escalations under one job id so a single completed
+// event closes the whole batch on cleanup.
+func p4Escalations(t *testing.T, s *store.Store, lane string, count int) {
+	t.Helper()
+	jobID := "ht-esc-" + lane
+	for index := 0; index < count; index++ {
+		seedRelay(t, s, lane, "job.escalate", jobID, "", "HT escalation "+strconv.Itoa(index), "")
+	}
+	t.Cleanup(func() {
+		if _, _, err := s.AppendRelayEvent(context.Background(), store.RelayEvent{
+			Kind: "job.completed", JobID: jobID, OwnerLane: lane,
+			ReportPath: "ht-cleanup.md", Reason: "ht-cleanup",
+		}); err != nil {
+			t.Logf("escalation cleanup: %v", err)
+		}
+	})
+}
+
+// HT1: a submission larger than the parse limit is truncated and reported, not
+// rejected. Round 3 measured a 400 here, which locked the console shut with no
+// in-console way back below the threshold.
+func TestUIP4OversizedFormTruncatesInsteadOfLocking(t *testing.T) {
+	s := uiStore(t)
+	fixture := newUIJWTFixture(t)
+	hub := newFakeIngressHub(t)
+	h := newUITestServer(t, s, fixture, hub.server.URL, "hub-test-token", 0)
+	defer h.Close()
+	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
+	lane := uiLane(t, "lane-a")
+	target := p4DecisionTask(t, h, lane, "HT1 target", p4Options(true, false))
+	p4LaneDecisions(t, s, uiLane(t, "lane-b"), 1000)
+
+	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions", assertion)
+	body := responseText(t, uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions", assertion, ""))
+	index := p4Index(t, body, "task", target)
+	if index >= 1000 {
+		t.Skipf("HT1 target rendered outside the parse window at index %d", index)
+	}
+	extra := url.Values{"csrf": {csrf}, "only": {strconv.Itoa(index)}}
+	extra.Set("items."+strconv.Itoa(index)+".answer", "A: 노드 로컬 저장")
+	response, rendered := submitRenderedDecisionForm(t, h, assertion, cookie, body, extra)
+	responseBody := responseText(t, response)
+	updated, found, err := s.GetTask(t.Context(), target)
+	if rendered <= 1000 || response.StatusCode != http.StatusOK {
+		t.Fatalf("HT1 rendered=%d status=%d body=%q", rendered, response.StatusCode, responseBody)
+	}
+	if !strings.Contains(responseBody, "절단됨 1000/"+strconv.Itoa(rendered)) {
+		t.Fatalf("HT1 truncation notice absent for rendered=%d: %q", rendered, responseBody)
+	}
+	if strings.Count(responseBody, `data-item-status="200"`) != 1 || len(hub.requests()) != 1 || err != nil || !found || updated.State != "claimed" {
+		t.Fatalf("HT1 results=%d hub=%d task=%+v found=%t err=%v", strings.Count(responseBody, `data-item-status="200"`), len(hub.requests()), updated, found, err)
+	}
+}
+
+// HT2: the three ListOpen* queries cap at 1000 each, so up to 3000 cards can
+// render in one form. Both single and multi submission must still advance.
+func TestUIP4ThreeThousandRenderedFormStillAdvances(t *testing.T) {
+	s := uiStore(t)
+	fixture := newUIJWTFixture(t)
+	hub := newFakeIngressHub(t)
+	h := newUITestServer(t, s, fixture, hub.server.URL, "hub-test-token", 0)
+	defer h.Close()
+	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
+	p4LaneDecisions(t, s, uiLane(t, "lane-b"), 1000)
+	p4Escalations(t, s, uiLane(t, "lane-c"), 1000)
+	p4DecisionTask(t, h, uiLane(t, "lane-a"), "HT2 task", p4Options(true, false))
+
+	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions", assertion)
+	body := responseText(t, uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions", assertion, ""))
+	extra := url.Values{"csrf": {csrf}, "only": {"0"}}
+	extra.Set("items.0.answer", "A: 노드 로컬 저장")
+	response, rendered := submitRenderedDecisionForm(t, h, assertion, cookie, body, extra)
+	responseBody := responseText(t, response)
+	if rendered <= 1000 || response.StatusCode != http.StatusOK {
+		t.Fatalf("HT2 rendered=%d status=%d body=%q", rendered, response.StatusCode, responseBody)
+	}
+	if !strings.Contains(responseBody, "절단됨 1000/"+strconv.Itoa(rendered)) {
+		t.Fatalf("HT2 truncation notice absent for rendered=%d: %q", rendered, responseBody)
+	}
+	selected := url.Values{"csrf": {csrf}, "mode": {"selected"}}
+	for index := 0; index < 3; index++ {
+		selected.Set("items."+strconv.Itoa(index)+".select", "1")
+	}
+	multi, _ := submitRenderedDecisionForm(t, h, assertion, cookie, body, selected)
+	multiBody := responseText(t, multi)
+	if multi.StatusCode != http.StatusOK || strings.Count(multiBody, `data-item-status=`) == 0 {
+		t.Fatalf("HT2 multi status=%d body=%q", multi.StatusCode, multiBody)
+	}
+}
+
+// HT4: an only= pointing past the truncation window is not an invalid
+// selection. Returning 400 there would be the same lock in a new place.
+func TestUIP4OnlyBeyondTruncationWindowIsReported(t *testing.T) {
+	s := uiStore(t)
+	fixture := newUIJWTFixture(t)
+	hub := newFakeIngressHub(t)
+	h := newUITestServer(t, s, fixture, hub.server.URL, "hub-test-token", 0)
+	defer h.Close()
+	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
+	p4LaneDecisions(t, s, uiLane(t, "lane-b"), 1001)
+	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions", assertion)
+	body := responseText(t, uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions", assertion, ""))
+	extra := url.Values{"csrf": {csrf}, "only": {"1000"}}
+	response, rendered := submitRenderedDecisionForm(t, h, assertion, cookie, body, extra)
+	responseBody := responseText(t, response)
+	if rendered <= 1000 || response.StatusCode != http.StatusOK {
+		t.Fatalf("HT4 rendered=%d status=%d body=%q", rendered, response.StatusCode, responseBody)
+	}
+	if !strings.Contains(responseBody, "절단됨 1000/"+strconv.Itoa(rendered)) || !strings.Contains(responseBody, "처리 범위 밖") || len(hub.requests()) != 0 {
+		t.Fatalf("HT4 notice/hub wrong hub=%d body=%q", len(hub.requests()), responseBody)
+	}
+}
+
+// HT5: recommended mode used to drop the remainder notice whenever the first
+// batch produced no result rows, repeating "nothing selected" forever.
+func TestUIP4RecommendedKeepsRemainderNoticeWithoutResults(t *testing.T) {
+	s := uiStore(t)
+	fixture := newUIJWTFixture(t)
+	hub := newFakeIngressHub(t)
+	h := newUITestServer(t, s, fixture, hub.server.URL, "hub-test-token", 0)
+	defer h.Close()
+	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
+	lane := uiLane(t, "lane-a")
+	for index := 0; index < 51; index++ {
+		claimAndTransition(t, s, createUITask(t, s, lane, "HT5 legacy "+strconv.Itoa(index)), "needs_decision", "Pick\noptions: 승인 | 반려")
+	}
+	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions", assertion)
+	body := responseText(t, uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions", assertion, ""))
+	extra := url.Values{"csrf": {csrf}, "mode": {"recommended"}}
+	response, _ := submitRenderedDecisionForm(t, h, assertion, cookie, body, extra)
+	responseBody := responseText(t, response)
+	if response.StatusCode != http.StatusOK || len(hub.requests()) != 0 {
+		t.Fatalf("HT5 status=%d hub=%d", response.StatusCode, len(hub.requests()))
+	}
+	if !strings.Contains(responseBody, "건이 남았습니다") {
+		t.Fatalf("HT5 remainder notice dropped: %q", responseBody)
+	}
+}
+
+// HT3: truncation (1000) and the process limit (50) stack. Each submission must
+// still advance. Task decisions render before lane decisions, so the cheap lane
+// rows guarantee truncation while the tasks sit inside the parsed window.
+func TestUIP4TruncatedFormAdvancesEachSubmission(t *testing.T) {
+	s := uiStore(t)
+	fixture := newUIJWTFixture(t)
+	hub := newFakeIngressHub(t)
+	h := newUITestServer(t, s, fixture, hub.server.URL, "hub-test-token", 0)
+	defer h.Close()
+	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
+	p4LaneDecisions(t, s, uiLane(t, "lane-b"), 1001)
+	lane := uiLane(t, "lane-a")
+	tasks := p4RecommendedDecisionTasks(t, h, lane, "HT3 task", 60)
+	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions", assertion)
+
+	claimed := func() int {
+		t.Helper()
+		count := 0
+		for _, id := range tasks {
+			updated, found, err := s.GetTask(t.Context(), id)
+			if err != nil || !found {
+				t.Fatalf("HT3 task=%d found=%t err=%v", id, found, err)
+			}
+			if updated.State == "claimed" {
+				count++
+			}
+		}
+		return count
+	}
+
+	previous := 0
+	for pass := 0; pass < 2; pass++ {
+		body := responseText(t, uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions", assertion, ""))
+		extra := url.Values{"csrf": {csrf}, "mode": {"selected"}}
+		for _, id := range tasks {
+			updated, found, err := s.GetTask(t.Context(), id)
+			if err != nil || !found {
+				t.Fatal(err)
+			}
+			if updated.State != "needs_decision" {
+				continue
+			}
+			index := p4Index(t, body, "task", id)
+			extra.Set("items."+strconv.Itoa(index)+".select", "1")
+			extra.Set("items."+strconv.Itoa(index)+".answer", "A: 노드 로컬 저장")
+		}
+		response, rendered := submitRenderedDecisionForm(t, h, assertion, cookie, body, extra)
+		responseBody := responseText(t, response)
+		if rendered <= 1000 || response.StatusCode != http.StatusOK {
+			t.Fatalf("HT3 pass=%d rendered=%d status=%d", pass, rendered, response.StatusCode)
+		}
+		if !strings.Contains(responseBody, "절단됨 1000/") {
+			t.Fatalf("HT3 pass=%d truncation notice absent", pass)
+		}
+		ok := strings.Count(responseBody, `data-item-status="200"`)
+		if ok == 0 {
+			t.Fatalf("HT3 pass=%d made no progress: %q", pass, responseBody)
+		}
+		now := claimed()
+		if now <= previous {
+			t.Fatalf("HT3 pass=%d claimed=%d did not advance from %d", pass, now, previous)
+		}
+		previous = now
+	}
+	if previous != len(tasks) {
+		t.Fatalf("HT3 did not converge: claimed=%d want=%d", previous, len(tasks))
 	}
 }
