@@ -67,6 +67,19 @@ func p4DecisionTask(t *testing.T, h *httptest.Server, lane, title string, option
 	return id
 }
 
+func p4LegacyDecisionTask(t *testing.T, h *httptest.Server, lane, title string) int64 {
+	t.Helper()
+	id := p4Task(t, h, lane, title, "implement")
+	if status, body := p4PostJSON(t, h, "/v1/tasks/"+strconv.FormatInt(id, 10)+"/claim", map[string]any{"claimed_by": "worker-a"}); status != http.StatusOK {
+		t.Fatalf("claim status=%d body=%q", status, body)
+	}
+	input := map[string]any{"to": "needs_decision", "note": "배포를 진행할까요?\noptions: 승인 | 반려", "refs": map[string]any{"job_id": "job-p4"}}
+	if status, body := p4PostJSON(t, h, "/v1/tasks/"+strconv.FormatInt(id, 10)+"/transition", input); status != http.StatusOK {
+		t.Fatalf("legacy decision transition status=%d body=%q", status, body)
+	}
+	return id
+}
+
 func p4Index(t *testing.T, body, kind string, id int64) int {
 	t.Helper()
 	pattern := regexp.MustCompile(`items\.([0-9]+)\.type" value="` + regexp.QuoteMeta(kind) + `"><input type="hidden" name="items\.[0-9]+\.id" value="` + strconv.FormatInt(id, 10) + `"`)
@@ -512,4 +525,107 @@ func TestUIP4BatchSecurityAndConsoleEscalationClosure(t *testing.T) {
 	if strings.Contains(body, escalationText) {
 		t.Fatalf("console answered escalation remained in inbox: %q", body)
 	}
+}
+
+func TestUIP4LegacyDecisionControlsAndAnswer(t *testing.T) {
+	s := uiStore(t)
+	fixture := newUIJWTFixture(t)
+	hub := newFakeIngressHub(t)
+	h := newUITestServer(t, s, fixture, hub.server.URL, "hub-test-token", 0)
+	defer h.Close()
+	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
+	lane := uiLane(t, "lane-a")
+	legacy := p4LegacyDecisionTask(t, h, lane, "FT1 legacy options")
+
+	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions", assertion)
+	body := responseText(t, uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions", assertion, ""))
+	index := p4Index(t, body, "task", legacy)
+	start := strings.Index(body, "#"+strconv.FormatInt(legacy, 10))
+	end := strings.Index(body[start:], "</article>")
+	if start < 0 || end < 0 {
+		t.Fatalf("legacy card absent: %q", body)
+	}
+	card := body[start : start+end]
+	for _, answer := range []string{"승인", "반려"} {
+		if strings.Count(card, `name="items.`+strconv.Itoa(index)+`.answer" value="`+answer+`"`) != 1 {
+			t.Fatalf("legacy answer %q missing from card: %q", answer, card)
+		}
+	}
+	if !strings.Contains(card, `name="items.`+strconv.Itoa(index)+`.select"`) || !strings.Contains(card, `name="items.`+strconv.Itoa(index)+`.note"`) || !strings.Contains(card, `name="only" value="`+strconv.Itoa(index)+`"`) || strings.Contains(card, `items.`+strconv.Itoa(index)+`.custom`) {
+		t.Fatalf("legacy controls do not follow batch contract: %q", card)
+	}
+	if regexp.MustCompile(`<[^>]+\sname="answer"`).MatchString(body) {
+		t.Fatalf("legacy controls retained an unnamespaced answer element: %q", body)
+	}
+
+	values := url.Values{"csrf": {csrf}, "only": {strconv.Itoa(index)}}
+	p4Item(values, index, "task", legacy, "승인")
+	response := uiPostForm(t, h.Client(), h.URL+"/ui/decisions/answer-batch", assertion, cookie, values, h.URL, false)
+	responseBody := responseText(t, response)
+	if response.StatusCode != http.StatusOK || !strings.Contains(responseBody, `data-item-status="200"`) {
+		t.Fatalf("legacy answer status=%d body=%q", response.StatusCode, responseBody)
+	}
+	requests := hub.requests()
+	if len(requests) != 1 || requests[0].Text != "[decision] #"+strconv.FormatInt(legacy, 10)+": 승인 (from operator(web) admin@example.com)" {
+		t.Fatalf("legacy hub requests=%+v", requests)
+	}
+	updated, found, err := s.GetTask(t.Context(), legacy)
+	if err != nil || !found || updated.State != "claimed" {
+		t.Fatalf("legacy task=%+v found=%t err=%v", updated, found, err)
+	}
+}
+
+func TestUIP4LegacyDecisionOnlyAndWhitelist(t *testing.T) {
+	t.Run("only", func(t *testing.T) {
+		s := uiStore(t)
+		fixture := newUIJWTFixture(t)
+		hub := newFakeIngressHub(t)
+		h := newUITestServer(t, s, fixture, hub.server.URL, "hub-test-token", 0)
+		defer h.Close()
+		assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
+		lane := uiLane(t, "lane-a")
+		legacy := p4LegacyDecisionTask(t, h, lane, "FT3 legacy only")
+		other := p4DecisionTask(t, h, lane, "FT3 other decision", p4Options(true, true))
+		cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions", assertion)
+		body := responseText(t, uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions", assertion, ""))
+		index := p4Index(t, body, "task", legacy)
+		values := url.Values{"csrf": {csrf}, "only": {strconv.Itoa(index)}}
+		p4Item(values, index, "task", legacy, "승인")
+		response := uiPostForm(t, h.Client(), h.URL+"/ui/decisions/answer-batch", assertion, cookie, values, h.URL, false)
+		if response.StatusCode != http.StatusOK || !strings.Contains(responseText(t, response), `data-item-status="200"`) {
+			t.Fatalf("legacy only status=%d", response.StatusCode)
+		}
+		updated, found, err := s.GetTask(t.Context(), other)
+		if err != nil || !found || updated.State != "needs_decision" {
+			t.Fatalf("only submission changed other task=%+v found=%t err=%v", updated, found, err)
+		}
+		requests := hub.requests()
+		if len(requests) != 1 || strings.Contains(requests[0].Text, "#"+strconv.FormatInt(other, 10)+":") {
+			t.Fatalf("only submission sent another decision: %+v", requests)
+		}
+	})
+
+	t.Run("whitelist", func(t *testing.T) {
+		s := uiStore(t)
+		fixture := newUIJWTFixture(t)
+		hub := newFakeIngressHub(t)
+		h := newUITestServer(t, s, fixture, hub.server.URL, "hub-test-token", 0)
+		defer h.Close()
+		assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
+		legacy := p4LegacyDecisionTask(t, h, uiLane(t, "lane-a"), "FT4 legacy whitelist")
+		cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions", assertion)
+		body := responseText(t, uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions", assertion, ""))
+		index := p4Index(t, body, "task", legacy)
+		values := url.Values{"csrf": {csrf}, "only": {strconv.Itoa(index)}}
+		p4Item(values, index, "task", legacy, "마음대로")
+		response := uiPostForm(t, h.Client(), h.URL+"/ui/decisions/answer-batch", assertion, cookie, values, h.URL, false)
+		responseBody := responseText(t, response)
+		if response.StatusCode != http.StatusOK || !strings.Contains(responseBody, `data-item-status="400"`) || len(hub.requests()) != 0 {
+			t.Fatalf("whitelist status=%d body=%q hub=%d", response.StatusCode, responseBody, len(hub.requests()))
+		}
+		updated, found, err := s.GetTask(t.Context(), legacy)
+		if err != nil || !found || updated.State != "needs_decision" {
+			t.Fatalf("whitelist changed task=%+v found=%t err=%v", updated, found, err)
+		}
+	})
 }

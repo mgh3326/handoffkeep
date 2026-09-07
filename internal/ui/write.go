@@ -292,8 +292,9 @@ type decisionBatchResult struct {
 }
 
 type decisionTarget struct {
-	Lane       string
-	Structured *store.DecisionOptions
+	Lane          string
+	Structured    *store.DecisionOptions
+	LegacyOptions []string
 }
 
 type batchSendOutcome struct {
@@ -458,7 +459,20 @@ func (h *Handler) openBatchDecision(r *http.Request, kind string, id int64) (dec
 		if !found || task.State != "needs_decision" {
 			return decisionTarget{}, http.StatusConflict, "이미 답변됨"
 		}
-		return decisionTarget{Lane: task.Lane, Structured: task.Refs.DecisionOptions}, 0, ""
+		target := decisionTarget{Lane: task.Lane, Structured: task.Refs.DecisionOptions}
+		if target.Structured == nil {
+			decisions, err := h.store.ListOpenTaskDecisions(r.Context(), 1000)
+			if err != nil {
+				return decisionTarget{}, http.StatusInternalServerError, "Fleet console unavailable."
+			}
+			for _, decision := range decisions {
+				if decision.Task.ID == id {
+					target.LegacyOptions = decisionOptions(decision.Question)
+					break
+				}
+			}
+		}
+		return target, 0, ""
 	}
 	event, found, err := h.openDecisionEvent(r, kind, id)
 	if err != nil {
@@ -468,7 +482,7 @@ func (h *Handler) openBatchDecision(r *http.Request, kind string, id int64) (dec
 		return decisionTarget{}, http.StatusConflict, "이미 답변됨"
 	}
 	view := eventDecisionViewFor(kind, event, 0)
-	return decisionTarget{Lane: event.OwnerLane, Structured: view.Structured}, 0, ""
+	return decisionTarget{Lane: event.OwnerLane, Structured: view.Structured, LegacyOptions: view.Options}, 0, ""
 }
 
 func recommendedDecisionAnswer(options *store.DecisionOptions) (string, bool) {
@@ -501,6 +515,24 @@ func structuredDecisionAnswer(options *store.DecisionOptions, answer, custom str
 	return "", errors.New("Invalid decision response.")
 }
 
+func decisionAnswer(target decisionTarget, answer, custom string) (string, error) {
+	if target.Structured != nil {
+		return structuredDecisionAnswer(target.Structured, answer, custom)
+	}
+	if len(target.LegacyOptions) == 0 {
+		return structuredDecisionAnswer(nil, answer, custom)
+	}
+	if custom != "" {
+		return "", errors.New("Invalid decision response.")
+	}
+	for _, option := range target.LegacyOptions {
+		if answer == option {
+			return answer, nil
+		}
+	}
+	return "", errors.New("Invalid decision response.")
+}
+
 func (h *Handler) sendBatchDecision(r *http.Request, email string, item decisionBatchItem, recommended bool) (batchSendOutcome, bool) {
 	outcome := batchSendOutcome{Target: "-", EventID: "-", Result: "invalid"}
 	target, status, message := h.openBatchDecision(r, item.Type, item.ID)
@@ -518,7 +550,7 @@ func (h *Handler) sendBatchDecision(r *http.Request, email string, item decision
 		}
 	} else {
 		var err error
-		answer, err = structuredDecisionAnswer(target.Structured, item.Answer, item.Custom)
+		answer, err = decisionAnswer(target, item.Answer, item.Custom)
 		if err != nil || !validWriteText(answer) || (item.Note != "" && !validWriteText(item.Note)) {
 			outcome.Status, outcome.Message, outcome.Result = http.StatusBadRequest, "Invalid decision response.", "invalid"
 			if err != nil && strings.Contains(err.Error(), "직접 답변") {

@@ -157,8 +157,9 @@
       {{if .Structured.AllowFree}}<label><input type="radio" name="items.{{.Index}}.answer" value=""> 직접 답변 <input name="items.{{.Index}}.custom"></label>{{end}}
       <button type="submit" name="only" value="{{.Index}}">이 항목만 답변</button>
     {{else if .Options}}
-      {{range .Options}}<button type="submit" name="answer" value="{{.}}">{{.}}</button>{{end}}
-    {{else}}<label>Answer <input name="items.{{.Index}}.custom"></label><input type="hidden" name="answer" required>
+      {{range .Options}}<label><input type="radio" name="items.{{$.Index}}.answer" value="{{.}}"> {{.}}</label>{{end}}
+      <button type="submit" name="only" value="{{.Index}}">이 항목만 답변</button>
+    {{else}}<label>Answer <input name="items.{{.Index}}.custom"></label>
       <button type="submit" name="only" value="{{.Index}}">이 항목만 답변</button>
     {{end}}
     <label>Note <input name="items.{{.Index}}.note"></label>
