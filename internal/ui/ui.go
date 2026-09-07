@@ -359,7 +359,7 @@ func (h *Handler) queueData(r *http.Request) (queueData, error) {
 				cell.Tasks = nil
 				if state != "backlog" {
 					for _, task := range byLane[lane][state] {
-						if task.State == "needs_decision" || (task.Kind == "decide" && task.State != "merged" && task.State != "dropped") || (state == "in_progress" && len(byLane[lane]["needs_decision"]) > 0) {
+						if task.State == "needs_decision" || (task.Kind == "decide" && task.State != "merged" && task.State != "dropped") {
 							cell.Tasks = append(cell.Tasks, task)
 						}
 					}
@@ -519,9 +519,6 @@ func (h *Handler) decisionData(r *http.Request, csrf, notice string) (decisionDa
 	}
 	index := 0
 	for _, decision := range tasks {
-		if index >= 50 {
-			break
-		}
 		view := taskDecisionView{Type: "task", ID: decision.Task.ID, Task: decision.Task, Question: decision.Question, Options: decisionOptions(decision.Question), Structured: decision.Task.Refs.DecisionOptions, Index: index, CanWrite: data.CanWrite}
 		index++
 		if h.admiralLanes[decision.Task.Lane] {
@@ -534,9 +531,6 @@ func (h *Handler) decisionData(r *http.Request, csrf, notice string) (decisionDa
 		if isSignalEscalation(escalation) {
 			data.Signals = append(data.Signals, escalation)
 		} else {
-			if index >= 50 {
-				continue
-			}
 			view := eventDecisionViewFor("escalation", escalation, index)
 			view.CanWrite = data.CanWrite
 			data.Escalations = append(data.Escalations, view)
@@ -544,9 +538,6 @@ func (h *Handler) decisionData(r *http.Request, csrf, notice string) (decisionDa
 		}
 	}
 	for _, event := range laneEvents {
-		if index >= 50 {
-			break
-		}
 		view := eventDecisionViewFor("lane", event, index)
 		view.CanWrite = data.CanWrite
 		data.LaneEvents = append(data.LaneEvents, view)

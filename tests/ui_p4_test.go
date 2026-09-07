@@ -629,3 +629,45 @@ func TestUIP4LegacyDecisionOnlyAndWhitelist(t *testing.T) {
 		}
 	})
 }
+
+func TestUIP4DecisionInboxDoesNotHideEventKindsAfterFiftyTasks(t *testing.T) {
+	s := uiStore(t)
+	fixture := newUIJWTFixture(t)
+	h := newUITestServer(t, s, fixture, "", "", 0)
+	defer h.Close()
+	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
+	lane := uiLane(t, "lane-a")
+	for index := 0; index < 51; index++ {
+		task := createUITask(t, s, lane, "FT5 task decision "+strconv.Itoa(index))
+		claimAndTransition(t, s, task, "needs_decision", "FT5 task question")
+	}
+	escalationQuestion := "FT5 escalation remains visible"
+	seedRelay(t, s, lane, "job.escalate", uiLane(t, "ft5-escalation"), "", escalationQuestion, "")
+	laneText := "[decision-needed] FT5 lane decision remains visible"
+	seedRelay(t, s, lane, "lane.event", "", laneText, "", "")
+
+	response := uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions", assertion, "")
+	body := responseText(t, response)
+	if response.StatusCode != http.StatusOK || !strings.Contains(body, escalationQuestion) || !strings.Contains(body, "FT5 lane decision remains visible") {
+		t.Fatalf("decision kinds hidden after fifty tasks status=%d body=%q", response.StatusCode, body)
+	}
+}
+
+func TestUIP4QueueOperatorViewExcludesInProgressImplement(t *testing.T) {
+	s := uiStore(t)
+	fixture := newUIJWTFixture(t)
+	h := newUITestServer(t, s, fixture, "", "", 0)
+	defer h.Close()
+	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
+	lane := uiLane(t, "lane-a")
+	implement := createUITask(t, s, lane, "FT6 in-progress implement")
+	claimAndTransition(t, s, implement, "in_progress", "working")
+	decision := createUITask(t, s, lane, "FT6 needs decision")
+	claimAndTransition(t, s, decision, "needs_decision", "choose")
+
+	response := uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/queue", assertion, "")
+	body := responseText(t, response)
+	if response.StatusCode != http.StatusOK || strings.Contains(body, implement.Title) || !strings.Contains(body, decision.Title) {
+		t.Fatalf("operator queue status=%d body=%q", response.StatusCode, body)
+	}
+}
