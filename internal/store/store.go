@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -35,9 +36,10 @@ var relayEventKinds = map[string]bool{"job.completed": true, "job.escalate": tru
 const RelayLaneEventMaxBytes = 2048
 
 var (
-	ErrTaskConflict       = errors.New("task_conflict")
-	ErrTaskNotFound       = errors.New("task_not_found")
-	ErrRelayEventNotFound = errors.New("relay_event_not_found")
+	ErrTaskConflict         = errors.New("task_conflict")
+	ErrTaskNotFound         = errors.New("task_not_found")
+	ErrRelayEventNotFound   = errors.New("relay_event_not_found")
+	ErrDeviationRefRequired = errors.New("deviation_ref_required")
 	// ErrQueueEmpty is deliberately distinct from a missing task.  It lets
 	// queue consumers treat an empty lane as an expected terminal condition.
 	ErrQueueEmpty = errors.New("queue_empty")
@@ -326,6 +328,53 @@ type Document struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
+type BenchScore struct {
+	ModelID        string    `json:"model_id"`
+	Effort         string    `json:"effort"`
+	Harness        string    `json:"harness"`
+	Source         string    `json:"source"`
+	Metric         string    `json:"metric"`
+	Score          *float64  `json:"score"`
+	Rank           *int      `json:"rank"`
+	CapturedAt     time.Time `json:"captured_at"`
+	TimePerTaskMin *float64  `json:"time_per_task_min"`
+	CostPerTaskUSD *float64  `json:"cost_per_task_usd"`
+	Provenance     string    `json:"provenance"`
+	UpdatedBy      string    `json:"updated_by"`
+	UpdatedAt      time.Time `json:"updated_at"`
+}
+
+type BenchRep struct {
+	ID            int64     `json:"id"`
+	OriginID      int64     `json:"origin_id"`
+	Profile       string    `json:"profile"`
+	ModelID       *string   `json:"model_id"`
+	TaskRef       *string   `json:"task_ref"`
+	Tier          *string   `json:"tier"`
+	Role          *string   `json:"role"`
+	Rounds        *int      `json:"rounds"`
+	BlockersFound *int      `json:"blockers_found"`
+	Completed     *int      `json:"completed"`
+	InputTokens   *int64    `json:"input_tokens"`
+	OutputTokens  *int64    `json:"output_tokens"`
+	Notes         *string   `json:"notes"`
+	RecordedAt    time.Time `json:"recorded_at"`
+	Effort        *string   `json:"effort"`
+	Grade         *string   `json:"grade"`
+	TableGrade    *string   `json:"table_grade"`
+	CreatedBy     string    `json:"created_by"`
+	CreatedAt     time.Time `json:"created_at"`
+}
+
+type BenchGrade struct {
+	Profile         string    `json:"profile"`
+	Grade           string    `json:"grade"`
+	BoundaryVersion string    `json:"boundary_version"`
+	DeviationRef    string    `json:"deviation_ref"`
+	DecidedAt       time.Time `json:"decided_at"`
+	DecidedBy       string    `json:"decided_by"`
+}
+
 // Attachment is immutable binary metadata. Object bytes are kept in R2; PostgreSQL
 // holds only the content address, provenance, and references.
 type Attachment struct {
@@ -451,10 +500,249 @@ func (s *Store) migrate(ctx context.Context) error {
 			}
 		}
 	}
+	var v9Applied bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_version WHERE version=9)`).Scan(&v9Applied); err != nil {
+		return err
+	}
+	if !v9Applied {
+		v9 := []string{
+			`CREATE TABLE IF NOT EXISTS bench_scores (model_id TEXT NOT NULL, effort TEXT NOT NULL DEFAULT '', harness TEXT NOT NULL DEFAULT '', source TEXT NOT NULL, metric TEXT NOT NULL, score DOUBLE PRECISION, rank INTEGER, captured_at TIMESTAMPTZ NOT NULL, time_per_task_min DOUBLE PRECISION, cost_per_task_usd DOUBLE PRECISION, provenance TEXT NOT NULL DEFAULT '', updated_by TEXT NOT NULL, updated_at TIMESTAMPTZ NOT NULL, UNIQUE(model_id, effort, harness, source, metric))`,
+			`CREATE INDEX IF NOT EXISTS bench_scores_model_source ON bench_scores(model_id, source)`,
+			`CREATE INDEX IF NOT EXISTS bench_scores_source_metric ON bench_scores(source, metric, model_id, effort, harness)`,
+			`CREATE TABLE IF NOT EXISTS bench_reps (id BIGSERIAL PRIMARY KEY, origin_id BIGINT NOT NULL CHECK(origin_id >= 1), profile TEXT NOT NULL, model_id TEXT, task_ref TEXT, tier TEXT, role TEXT, rounds INTEGER, blockers_found INTEGER, completed INTEGER, input_tokens BIGINT, output_tokens BIGINT, notes TEXT, recorded_at TIMESTAMPTZ NOT NULL, effort TEXT, grade TEXT, table_grade TEXT, created_by TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL, UNIQUE(created_by, origin_id))`,
+			`CREATE INDEX IF NOT EXISTS bench_reps_profile_id ON bench_reps(profile, id DESC)`,
+			`CREATE INDEX IF NOT EXISTS bench_reps_grade_effort_id ON bench_reps(grade, effort, id DESC)`,
+			`CREATE TABLE IF NOT EXISTS bench_grades (profile TEXT PRIMARY KEY, grade TEXT NOT NULL CHECK(grade IN ('S+','S','A+','A','B','C')), boundary_version TEXT NOT NULL DEFAULT '', deviation_ref TEXT NOT NULL, decided_at TIMESTAMPTZ NOT NULL, decided_by TEXT NOT NULL)`,
+			`CREATE INDEX IF NOT EXISTS bench_grades_profile ON bench_grades(profile)`,
+			`INSERT INTO schema_version(version) VALUES (9)`,
+		}
+		for _, q := range v9 {
+			if _, err := tx.Exec(ctx, q); err != nil {
+				return err
+			}
+		}
+	}
 	return tx.Commit(ctx)
 }
 func validName(x string) bool        { return nameRE.MatchString(x) }
 func validText(x string, n int) bool { return len(x) <= n && !strings.ContainsRune(x, 0) }
+
+const benchBatchMax = 1000
+
+var benchGradeValues = map[string]bool{"S+": true, "S": true, "A+": true, "A": true, "B": true, "C": true}
+
+func validBenchRequiredText(x string) bool {
+	return x != "" && len(x) <= 200 && validText(x, 200)
+}
+
+func validBenchText(x string) bool {
+	return validText(x, MaxBytes)
+}
+
+func validBenchClient(x string) bool {
+	return x != "" && validText(x, 128)
+}
+
+func validBenchScore(x BenchScore) bool {
+	if !validBenchRequiredText(x.ModelID) || !validBenchRequiredText(x.Source) || !validBenchRequiredText(x.Metric) ||
+		!validBenchText(x.Effort) || !validBenchText(x.Harness) || !validBenchText(x.Provenance) || !validBenchClient(x.UpdatedBy) || x.CapturedAt.IsZero() {
+		return false
+	}
+	if x.Score != nil && (math.IsNaN(*x.Score) || math.IsInf(*x.Score, 0) || *x.Score < 0 || *x.Score > 100) {
+		return false
+	}
+	if x.Rank != nil && *x.Rank < 1 {
+		return false
+	}
+	for _, value := range []*float64{x.TimePerTaskMin, x.CostPerTaskUSD} {
+		if value != nil && (math.IsNaN(*value) || math.IsInf(*value, 0) || *value < 0) {
+			return false
+		}
+	}
+	return true
+}
+
+func validBenchRep(x BenchRep) bool {
+	if x.OriginID < 1 || !validBenchText(x.Profile) || x.RecordedAt.IsZero() || !validBenchClient(x.CreatedBy) {
+		return false
+	}
+	for _, value := range []*string{x.ModelID, x.TaskRef, x.Tier, x.Role, x.Notes, x.Effort, x.Grade, x.TableGrade} {
+		if value != nil && !validBenchText(*value) {
+			return false
+		}
+	}
+	return true
+}
+
+func validBenchGrade(x BenchGrade) bool {
+	return validBenchRequiredText(x.Profile) && benchGradeValues[x.Grade] && validBenchText(x.BoundaryVersion) && validBenchText(x.DeviationRef) && validBenchClient(x.DecidedBy)
+}
+
+func (s *Store) UpsertBenchScores(ctx context.Context, xs []BenchScore) (int, error) {
+	if len(xs) < 1 || len(xs) > benchBatchMax {
+		return 0, errors.New("invalid bench scores")
+	}
+	for _, x := range xs {
+		if !validBenchScore(x) {
+			return 0, errors.New("invalid bench score")
+		}
+		if err := guard.Reject(x.Provenance); err != nil {
+			return 0, err
+		}
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback(ctx)
+	now := time.Now().UTC()
+	for _, x := range xs {
+		_, err = tx.Exec(ctx, `INSERT INTO bench_scores(model_id,effort,harness,source,metric,score,rank,captured_at,time_per_task_min,cost_per_task_usd,provenance,updated_by,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) ON CONFLICT (model_id,effort,harness,source,metric) DO UPDATE SET score=EXCLUDED.score,rank=EXCLUDED.rank,captured_at=EXCLUDED.captured_at,time_per_task_min=EXCLUDED.time_per_task_min,cost_per_task_usd=EXCLUDED.cost_per_task_usd,provenance=EXCLUDED.provenance,updated_by=EXCLUDED.updated_by,updated_at=EXCLUDED.updated_at`, x.ModelID, x.Effort, x.Harness, x.Source, x.Metric, x.Score, x.Rank, x.CapturedAt, x.TimePerTaskMin, x.CostPerTaskUSD, x.Provenance, x.UpdatedBy, now)
+		if err != nil {
+			return 0, err
+		}
+	}
+	return len(xs), tx.Commit(ctx)
+}
+
+func (s *Store) ListBenchScores(ctx context.Context, modelID, source string, limit int) ([]BenchScore, error) {
+	if !validBenchText(modelID) || !validBenchText(source) {
+		return nil, errors.New("invalid bench score query")
+	}
+	if limit < 1 {
+		limit = benchBatchMax
+	}
+	if limit > 5000 {
+		limit = 5000
+	}
+	rows, err := s.pool.Query(ctx, `SELECT model_id,effort,harness,source,metric,score,rank,captured_at,time_per_task_min,cost_per_task_usd,provenance,updated_by,updated_at FROM bench_scores WHERE ($1='' OR model_id=$1) AND ($2='' OR source=$2) ORDER BY source,metric,model_id,effort,harness LIMIT $3`, modelID, source, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []BenchScore{}
+	for rows.Next() {
+		var x BenchScore
+		if err := rows.Scan(&x.ModelID, &x.Effort, &x.Harness, &x.Source, &x.Metric, &x.Score, &x.Rank, &x.CapturedAt, &x.TimePerTaskMin, &x.CostPerTaskUSD, &x.Provenance, &x.UpdatedBy, &x.UpdatedAt); err != nil {
+			return nil, err
+		}
+		x.CapturedAt = x.CapturedAt.UTC()
+		x.UpdatedAt = x.UpdatedAt.UTC()
+		out = append(out, x)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) UpsertBenchReps(ctx context.Context, xs []BenchRep) (int, error) {
+	if len(xs) < 1 || len(xs) > benchBatchMax {
+		return 0, errors.New("invalid bench reps")
+	}
+	for _, x := range xs {
+		if !validBenchRep(x) {
+			return 0, errors.New("invalid bench rep")
+		}
+		for _, value := range []*string{x.TaskRef, x.Notes} {
+			if value != nil {
+				if err := guard.Reject(*value); err != nil {
+					return 0, err
+				}
+			}
+		}
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback(ctx)
+	now := time.Now().UTC()
+	for _, x := range xs {
+		err = tx.QueryRow(ctx, `INSERT INTO bench_reps(origin_id,profile,model_id,task_ref,tier,role,rounds,blockers_found,completed,input_tokens,output_tokens,notes,recorded_at,effort,grade,table_grade,created_by,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) ON CONFLICT (created_by,origin_id) DO UPDATE SET profile=EXCLUDED.profile,model_id=EXCLUDED.model_id,task_ref=EXCLUDED.task_ref,tier=EXCLUDED.tier,role=EXCLUDED.role,rounds=EXCLUDED.rounds,blockers_found=EXCLUDED.blockers_found,completed=EXCLUDED.completed,input_tokens=EXCLUDED.input_tokens,output_tokens=EXCLUDED.output_tokens,notes=EXCLUDED.notes,recorded_at=EXCLUDED.recorded_at,effort=EXCLUDED.effort,grade=EXCLUDED.grade,table_grade=EXCLUDED.table_grade RETURNING id`, x.OriginID, x.Profile, x.ModelID, x.TaskRef, x.Tier, x.Role, x.Rounds, x.BlockersFound, x.Completed, x.InputTokens, x.OutputTokens, x.Notes, x.RecordedAt, x.Effort, x.Grade, x.TableGrade, x.CreatedBy, now).Scan(&x.ID)
+		if err != nil {
+			return 0, err
+		}
+	}
+	return len(xs), tx.Commit(ctx)
+}
+
+func (s *Store) ListBenchReps(ctx context.Context, profile, grade, effort string, limit int) ([]BenchRep, error) {
+	if !validBenchText(profile) || !validBenchText(grade) || !validBenchText(effort) {
+		return nil, errors.New("invalid bench rep query")
+	}
+	if limit < 1 {
+		limit = benchBatchMax
+	}
+	if limit > 5000 {
+		limit = 5000
+	}
+	rows, err := s.pool.Query(ctx, `SELECT id,origin_id,profile,model_id,task_ref,tier,role,rounds,blockers_found,completed,input_tokens,output_tokens,notes,recorded_at,effort,grade,table_grade,created_by,created_at FROM bench_reps WHERE ($1='' OR profile=$1) AND ($2='' OR grade=$2) AND ($3='' OR effort=$3) ORDER BY id DESC LIMIT $4`, profile, grade, effort, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []BenchRep{}
+	for rows.Next() {
+		var x BenchRep
+		if err := rows.Scan(&x.ID, &x.OriginID, &x.Profile, &x.ModelID, &x.TaskRef, &x.Tier, &x.Role, &x.Rounds, &x.BlockersFound, &x.Completed, &x.InputTokens, &x.OutputTokens, &x.Notes, &x.RecordedAt, &x.Effort, &x.Grade, &x.TableGrade, &x.CreatedBy, &x.CreatedAt); err != nil {
+			return nil, err
+		}
+		x.RecordedAt = x.RecordedAt.UTC()
+		x.CreatedAt = x.CreatedAt.UTC()
+		out = append(out, x)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) UpsertBenchGrades(ctx context.Context, xs []BenchGrade) (int, error) {
+	if len(xs) < 1 || len(xs) > benchBatchMax {
+		return 0, errors.New("invalid bench grades")
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback(ctx)
+	now := time.Now().UTC()
+	for _, x := range xs {
+		if strings.TrimSpace(x.DeviationRef) == "" {
+			return 0, ErrDeviationRefRequired
+		}
+		if !validBenchGrade(x) {
+			return 0, errors.New("invalid bench grade")
+		}
+		if err := guard.Reject(x.BoundaryVersion); err != nil {
+			return 0, err
+		}
+		if err := guard.Reject(x.DeviationRef); err != nil {
+			return 0, err
+		}
+		if x.DecidedAt.IsZero() {
+			x.DecidedAt = now
+		}
+		_, err = tx.Exec(ctx, `INSERT INTO bench_grades(profile,grade,boundary_version,deviation_ref,decided_at,decided_by) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT (profile) DO UPDATE SET grade=EXCLUDED.grade,boundary_version=EXCLUDED.boundary_version,deviation_ref=EXCLUDED.deviation_ref,decided_at=EXCLUDED.decided_at,decided_by=EXCLUDED.decided_by`, x.Profile, x.Grade, x.BoundaryVersion, x.DeviationRef, x.DecidedAt, x.DecidedBy)
+		if err != nil {
+			return 0, err
+		}
+	}
+	return len(xs), tx.Commit(ctx)
+}
+
+func (s *Store) ListBenchGrades(ctx context.Context) ([]BenchGrade, error) {
+	rows, err := s.pool.Query(ctx, `SELECT profile,grade,boundary_version,deviation_ref,decided_at,decided_by FROM bench_grades ORDER BY profile`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []BenchGrade{}
+	for rows.Next() {
+		var x BenchGrade
+		if err := rows.Scan(&x.Profile, &x.Grade, &x.BoundaryVersion, &x.DeviationRef, &x.DecidedAt, &x.DecidedBy); err != nil {
+			return nil, err
+		}
+		x.DecidedAt = x.DecidedAt.UTC()
+		out = append(out, x)
+	}
+	return out, rows.Err()
+}
 
 func validTaskRefs(x TaskRefs) bool {
 	for _, v := range []string{x.PR, x.HeadSHA, x.ReportPath, x.JobID} {
