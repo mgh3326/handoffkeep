@@ -40,16 +40,16 @@ type Config struct {
 
 // Handler is a Cloudflare Access-authenticated UI handler.
 type Handler struct {
-	store        *store.Store
-	access       *cfaccess.Verifier
-	templates    *template.Template
-	hub          *hubProxy
-	pollInterval time.Duration
-	static       fs.FS
-	csrfKey      []byte
-	lanes        []string
-	laneSet      map[string]bool
-	admiralLanes map[string]bool
+	store         *store.Store
+	access        *cfaccess.Verifier
+	templates     *template.Template
+	hub           *hubProxy
+	pollInterval  time.Duration
+	static        fs.FS
+	csrfKey       []byte
+	lanes         []string
+	laneSet       map[string]bool
+	directorLanes map[string]bool
 }
 
 // New builds the optional fleet console.
@@ -86,21 +86,23 @@ func New(config Config) (*Handler, error) {
 	for _, lane := range lanes {
 		laneSet[lane] = true
 	}
-	admiralLanes := make(map[string]bool)
-	for _, lane := range splitList(os.Getenv("HANDOFFKEEP_UI_ADMIRAL_LANES")) {
-		admiralLanes[lane] = true
+	directorLanes := make(map[string]bool)
+	for _, envName := range []string{"HANDOFFKEEP_UI_ADMIRAL_LANES", "HANDOFFKEEP_UI_DIRECTOR_LANES"} {
+		for _, lane := range splitList(os.Getenv(envName)) {
+			directorLanes[lane] = true
+		}
 	}
 	return &Handler{
-		store:        config.Store,
-		access:       config.Access,
-		templates:    tmpl,
-		hub:          newHubProxy(config.HubURL, config.HubToken, config.HubHTTPClient),
-		pollInterval: poll,
-		static:       static,
-		csrfKey:      csrfKey,
-		lanes:        lanes,
-		laneSet:      laneSet,
-		admiralLanes: admiralLanes,
+		store:         config.Store,
+		access:        config.Access,
+		templates:     tmpl,
+		hub:           newHubProxy(config.HubURL, config.HubToken, config.HubHTTPClient),
+		pollInterval:  poll,
+		static:        static,
+		csrfKey:       csrfKey,
+		lanes:         lanes,
+		laneSet:       laneSet,
+		directorLanes: directorLanes,
 	}, nil
 }
 
@@ -523,7 +525,7 @@ func (h *Handler) decisionData(r *http.Request, csrf, notice string) (decisionDa
 	if err != nil {
 		return decisionData{}, err
 	}
-	data := decisionData{CSRF: csrf, CanWrite: h.hub.configured(), Notice: notice, HasApproval: len(h.admiralLanes) > 0}
+	data := decisionData{CSRF: csrf, CanWrite: h.hub.configured(), Notice: notice, HasApproval: len(h.directorLanes) > 0}
 	if !data.CanWrite {
 		data.WriteReason = "Hub is not configured."
 	}
@@ -546,7 +548,7 @@ func (h *Handler) decisionData(r *http.Request, csrf, notice string) (decisionDa
 		}
 		view := taskDecisionView{Type: "task", ID: decision.Task.ID, Task: decision.Task, Question: decision.Question, Options: decisionOptions(decision.Question), Structured: decision.Task.Refs.DecisionOptions, Index: index, CanWrite: data.CanWrite}
 		index++
-		if h.admiralLanes[decision.Task.Lane] {
+		if h.directorLanes[decision.Task.Lane] {
 			data.ApprovalTasks = append(data.ApprovalTasks, view)
 		} else {
 			data.Tasks = append(data.Tasks, view)

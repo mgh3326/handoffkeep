@@ -621,3 +621,70 @@ func TestUIDocIngressBadgeAndApproval(t *testing.T) {
 		t.Fatalf("GET/method guard wrote rows: before=%+v after=%+v", before, after)
 	}
 }
+
+func TestUIApprovalLaneEnvironmentCompatibility(t *testing.T) {
+	cases := []struct {
+		name          string
+		directorLanes string
+		legacyLanes   string
+		approvalLanes []string
+		generalLanes  []string
+		hasApproval   bool
+	}{
+		{name: "canonical only", directorLanes: "lane-a", approvalLanes: []string{"lane-a"}, generalLanes: []string{"lane-b"}, hasApproval: true},
+		{name: "legacy only", legacyLanes: "lane-a", approvalLanes: []string{"lane-a"}, generalLanes: []string{"lane-b"}, hasApproval: true},
+		{name: "union", directorLanes: "lane-a", legacyLanes: "lane-b", approvalLanes: []string{"lane-a", "lane-b"}, hasApproval: true},
+		{name: "empty", generalLanes: []string{"lane-a", "lane-b"}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("HANDOFFKEEP_UI_LANES", "lane-a,lane-b")
+			t.Setenv("HANDOFFKEEP_UI_DIRECTOR_LANES", tc.directorLanes)
+			t.Setenv("HANDOFFKEEP_UI_ADMIRAL_LANES", tc.legacyLanes)
+			s := uiStore(t)
+			fixture := newUIJWTFixture(t)
+			hub := newFakeIngressHub(t)
+			h := newUITestServer(t, s, fixture, hub.server.URL, "hub-test-token", 0)
+			defer h.Close()
+			assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
+
+			titles := map[string]string{}
+			for _, lane := range []string{"lane-a", "lane-b"} {
+				title := tc.name + " " + lane
+				task := createUITask(t, s, lane, title)
+				claimAndTransition(t, s, task, "needs_decision", "choose")
+				titles[lane] = title
+			}
+
+			body := responseText(t, uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions", assertion, ""))
+			approvalStart := strings.Index(body, "<h3>Awaiting your approval</h3>")
+			if got := approvalStart >= 0; got != tc.hasApproval {
+				t.Fatalf("HasApproval rendered=%t, want %t; body=%q", got, tc.hasApproval, body)
+			}
+			approvalSection := ""
+			if approvalStart >= 0 {
+				approvalEnd := strings.Index(body[approvalStart:], "<h3>Tasks needing decisions</h3>")
+				if approvalEnd < 0 {
+					t.Fatalf("approval section has no ordinary-task boundary: %q", body)
+				}
+				approvalSection = body[approvalStart : approvalStart+approvalEnd]
+			}
+			generalStart := strings.Index(body, "<h3>Tasks needing decisions</h3>")
+			if generalStart < 0 {
+				t.Fatalf("ordinary-task section missing: %q", body)
+			}
+			generalSection := body[generalStart:]
+			for _, lane := range tc.approvalLanes {
+				if !strings.Contains(approvalSection, titles[lane]) {
+					t.Fatalf("lane %s task was not pinned in approval section: %q", lane, approvalSection)
+				}
+			}
+			for _, lane := range tc.generalLanes {
+				if !strings.Contains(generalSection, titles[lane]) {
+					t.Fatalf("lane %s task was not in ordinary section: %q", lane, generalSection)
+				}
+			}
+		})
+	}
+}

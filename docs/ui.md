@@ -20,7 +20,8 @@ and returns the normal 404 response.
 | `HANDOFFKEEP_HUB_URL` | Optional hub origin for fleet status | `http://127.0.0.1:9000` |
 | `HANDOFFKEEP_HUB_TOKEN` | Optional server-side hub credential | set outside source control |
 | `HANDOFFKEEP_UI_LANES` | Comma-separated compose destination lanes | `lane-a,lane-b` |
-| `HANDOFFKEEP_UI_ADMIRAL_LANES` | Comma-separated lanes whose task decisions are pinned for approval | `lane-a` |
+| `HANDOFFKEEP_UI_DIRECTOR_LANES` | Comma-separated lanes whose task decisions are pinned for approval | `lane-a` |
+| `HANDOFFKEEP_UI_ADMIRAL_LANES` | Legacy alias — 병기 수용, 제거는 별도 태스크. Comma-separated lanes whose task decisions are pinned for approval | `lane-b` |
 
 Create a Cloudflare Access application for the UI origin, set its team domain
 and audience tag in the first two settings, and add an Access policy that
@@ -113,7 +114,9 @@ adjacent `htmx.LICENSE` is the htmx 0BSD license. No external CDN is used.
 The decisions page presents forms for unresolved tasks, open job escalations,
 and open `[decision-needed]` lane events. A question line beginning `options:`
 is split on `|` into up to eight radio choices with an `only=<n>` submit button;
-otherwise the operator enters free text. Tasks in `HANDOFFKEEP_UI_ADMIRAL_LANES` appear first under
+otherwise the operator enters free text. Tasks in `HANDOFFKEEP_UI_DIRECTOR_LANES`
+(with the legacy alias `HANDOFFKEEP_UI_ADMIRAL_LANES` accepted alongside it)
+appear first under
 **Awaiting your approval**, with their task references, and are not repeated in
 the ordinary task section. Job events that are operational signals are retained
 under the folded `signals` section rather than treated as questions.
