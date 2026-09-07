@@ -3,12 +3,15 @@ package api
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -19,6 +22,126 @@ import (
 type Service struct {
 	Store       *store.Store
 	Attachments *attachments.Manager
+}
+
+var decisionResolverRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
+
+// DecisionResolveInput records an answer made outside the web console and
+// closes the matching open decision. It is shared by the HTTP route and the
+// authenticated remote client payload.
+type DecisionResolveInput struct {
+	Type     string `json:"type"`
+	ID       int64  `json:"id"`
+	By       string `json:"by"`
+	Answer   string `json:"answer"`
+	Note     string `json:"note,omitempty"`
+	NoInject bool   `json:"no_inject,omitempty"`
+}
+
+func validDecisionResolveText(value string, required bool) bool {
+	if required && strings.TrimSpace(value) == "" {
+		return false
+	}
+	if value == "" {
+		return true
+	}
+	if len(value) > store.RelayLaneEventMaxBytes {
+		return false
+	}
+	for _, r := range value {
+		if r <= 0x1f || (r >= 0x7f && r <= 0x9f) {
+			return false
+		}
+	}
+	return true
+}
+
+func decisionEventID(prefix string) (string, error) {
+	b := make([]byte, 4)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return prefix + hex.EncodeToString(b), nil
+}
+
+// ResolveDecision writes a lane event before transitioning a task, preserving
+// the same durable ordering as the web decision-answer route.
+func (s Service) ResolveDecision(ctx context.Context, input DecisionResolveInput) (store.RelayEvent, error) {
+	if (input.Type != "task" && input.Type != "escalation" && input.Type != "lane") || input.ID < 1 || !decisionResolverRE.MatchString(input.By) || !validDecisionResolveText(input.Answer, true) || !validDecisionResolveText(input.Note, false) {
+		return store.RelayEvent{}, errors.New("invalid decision resolve")
+	}
+
+	lane := ""
+	if input.Type == "task" {
+		task, found, err := s.Store.GetTask(ctx, input.ID)
+		if err != nil {
+			return store.RelayEvent{}, err
+		}
+		if !found {
+			return store.RelayEvent{}, store.ErrTaskNotFound
+		}
+		if task.State != "needs_decision" {
+			return store.RelayEvent{}, store.ErrTaskConflict
+		}
+		lane = task.Lane
+	} else {
+		var events []store.RelayEvent
+		var err error
+		if input.Type == "escalation" {
+			events, err = s.Store.ListOpenEscalations(ctx, 1000)
+		} else {
+			events, err = s.Store.ListOpenLaneDecisions(ctx, 1000)
+		}
+		if err != nil {
+			return store.RelayEvent{}, err
+		}
+		for _, event := range events {
+			if event.ID == input.ID {
+				lane = event.OwnerLane
+				break
+			}
+		}
+		if lane == "" {
+			return store.RelayEvent{}, store.ErrTaskConflict
+		}
+	}
+
+	prefix := "[decision]"
+	if input.Type == "lane" {
+		prefix = "[decision-answered]"
+	}
+	text := fmt.Sprintf("%s #%d: %s (from %s)", prefix, input.ID, input.Answer, input.By)
+	if input.Note != "" {
+		text += " — " + input.Note
+	}
+	if len([]byte(text)) > store.RelayLaneEventMaxBytes || !validDecisionResolveText(text, true) {
+		return store.RelayEvent{}, errors.New("decision response is too long")
+	}
+	eventID, err := decisionEventID(fmt.Sprintf("cli-decision-%s-%d-", input.Type, input.ID))
+	if err != nil {
+		return store.RelayEvent{}, err
+	}
+	event, _, err := s.Store.AppendRelayEvent(ctx, store.RelayEvent{Kind: "lane.event", OwnerLane: lane, EventID: eventID, Text: text})
+	if err != nil {
+		return store.RelayEvent{}, err
+	}
+	if input.NoInject {
+		event, err = s.Store.MarkRelayEventDelivered(ctx, event.ID, "resolve", input.By)
+		if err != nil {
+			return store.RelayEvent{}, err
+		}
+	}
+	if input.Type == "task" {
+		note := input.Answer
+		if input.Note != "" {
+			note += " — " + input.Note
+		}
+		note += " — resolved by " + input.By
+		if _, err := s.Store.TransitionTask(ctx, input.ID, "claimed", input.By, note, nil); err != nil {
+			return store.RelayEvent{}, err
+		}
+	}
+	return event, nil
 }
 
 func (s Service) Checkpoint(ctx context.Context, client string, x store.Checkpoint) (store.Checkpoint, error) {
@@ -207,6 +330,7 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("GET /v1/tasks/{id}", s.task)
 	m.HandleFunc("POST /v1/tasks/{id}/claim", s.taskClaim)
 	m.HandleFunc("POST /v1/tasks/{id}/transition", s.taskTransition)
+	m.HandleFunc("POST /v1/decisions/resolve", s.decisionResolve)
 	m.HandleFunc("POST /v1/relay/events", s.relayEventsCreate)
 	m.HandleFunc("POST /v1/relay/events/{id}/delivered", s.relayEventDelivered)
 	m.HandleFunc("GET /v1/relay/events", s.relayEventsList)
@@ -414,6 +538,24 @@ func (s Server) taskTransition(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOut(w, http.StatusOK, x)
+}
+
+func (s Server) decisionResolve(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.auth(w, r); !ok {
+		return
+	}
+	defer r.Body.Close()
+	var input DecisionResolveInput
+	if err := decode(r, &input, store.MaxBytes); err != nil {
+		appErr(w, err)
+		return
+	}
+	event, err := s.Service.ResolveDecision(r.Context(), input)
+	if err != nil {
+		appErr(w, err)
+		return
+	}
+	jsonOut(w, http.StatusOK, map[string]any{"event": event})
 }
 
 func relayEventID(r *http.Request) (int64, error) {

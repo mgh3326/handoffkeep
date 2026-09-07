@@ -584,8 +584,8 @@ func TestUIDocIngressBadgeAndApproval(t *testing.T) {
 	response = uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions", assertion, "")
 	body = responseText(t, response)
 	for _, option := range append(append(approvalOptions, escalationOptions...), laneOptions...) {
-		if strings.Count(body, `name="answer" value="`+option+`"`) != 1 {
-			t.Fatalf("option %q was not one button: %q", option, body)
+		if strings.Count(body, `.answer" value="`+option+`"`) != 1 {
+			t.Fatalf("option %q was not one control: %q", option, body)
 		}
 	}
 	generalStart := strings.Index(body, generalTitle)
@@ -593,7 +593,7 @@ func TestUIDocIngressBadgeAndApproval(t *testing.T) {
 	if generalStart >= 0 {
 		generalEnd = strings.Index(body[generalStart:], "</article>")
 	}
-	if !strings.Contains(body, "Awaiting your approval") || strings.Count(body, approvalTitle) != 1 || generalStart < 0 || generalEnd < 0 || !strings.Contains(body[generalStart:generalStart+generalEnd], `name="answer" required`) || !strings.Contains(body, "sender operator-web") {
+	if !strings.Contains(body, "Awaiting your approval") || strings.Count(body, approvalTitle) != 1 || generalStart < 0 || generalEnd < 0 || !strings.Contains(body[generalStart:generalStart+generalEnd], `.custom"`) || !strings.Contains(body, "sender operator-web") {
 		t.Fatalf("approval/options body=%q", body)
 	}
 	t.Setenv("HANDOFFKEEP_UI_ADMIRAL_LANES", "")

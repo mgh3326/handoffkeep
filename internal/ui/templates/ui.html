@@ -78,9 +78,12 @@
 {{define "queue_content"}}
 <section id="ui-content" data-ui-fragment="queue">
   <h2>Queue board</h2>
+  {{if .OperatorOnly}}<p><strong>운영자 필요만</strong> · <a href="/ui/queue?view=all">전체 보기</a></p>
+  {{if .OpenDecisions}}<section><h3>Open decisions</h3>{{range .OpenDecisions}}<article class="card"><strong>{{.Lane}}</strong> · {{.Text}} · <a href="/ui/decisions">Decisions</a></article>{{end}}</section>{{end}}
+  {{else}}<p><a href="/ui/queue">운영자 필요만</a> · <strong>전체 보기</strong></p>{{end}}
   <table class="queue">
     <thead><tr><th>Lane</th>{{range .States}}<th>{{.}}</th>{{end}}</tr></thead>
-    <tbody>{{range .Lanes}}<tr><th>{{.Name}}</th>{{range .Cells}}<td>{{range .Tasks}}
+    <tbody>{{range .Lanes}}<tr><th>{{.Name}}</th>{{range .Cells}}<td>{{if and $.OperatorOnly (eq .State "backlog")}}<button hx-get="/ui/fragments/queue-backlog?lane={{.Lane}}" hx-target="next .queue-backlog" hx-swap="innerHTML">backlog ({{.BacklogCount}})</button><div class="queue-backlog"></div>{{else}}{{range .Tasks}}
       <details class="card {{if eq .State "needs_decision"}}decision-card{{end}}" hx-get="/ui/fragments/task/{{.ID}}" hx-trigger="toggle[open] once" hx-target="this" hx-swap="beforeend">
         <summary>#{{.ID}} {{.Title}} {{if eq .State "needs_decision"}}<span class="badge">needs decision</span>{{end}}</summary>
         <div>kind {{.Kind}} · priority {{.Priority}} · claimed by {{.ClaimedBy}} · {{formatTime .UpdatedAt}}</div>
@@ -91,9 +94,13 @@
           {{if .Refs.JobID}}<span>job {{.Refs.JobID}}</span>{{end}}
         </div>
       </details>
-    {{end}}</td>{{end}}</tr>{{else}}<tr><td colspan="10" class="muted">No tasks.</td></tr>{{end}}</tbody>
+    {{end}}{{end}}</td>{{end}}</tr>{{else}}<tr><td colspan="10" class="muted">No tasks.</td></tr>{{end}}</tbody>
   </table>
 </section>
+{{end}}
+
+{{define "queue_backlog"}}
+{{range .}}<details class="card" hx-get="/ui/fragments/task/{{.ID}}" hx-trigger="toggle[open] once" hx-target="this" hx-swap="beforeend"><summary>#{{.ID}} {{.Title}}</summary><div>kind {{.Kind}} · priority {{.Priority}} · claimed by {{.ClaimedBy}} · {{formatTime .UpdatedAt}}</div></details>{{else}}<p class="muted">No backlog tasks.</p>{{end}}
 {{end}}
 
 {{define "task_events"}}
@@ -107,43 +114,57 @@
   <h2>Decision inbox</h2>
   {{if .Notice}}<p class="badge">{{.Notice}}</p>{{end}}
   {{if not .CanWrite}}<p class="muted">{{.WriteReason}}</p>{{end}}
+  {{if .RenderNotice}}<p class="badge" data-render-notice>{{.RenderNotice}}</p>{{end}}
+  {{if .Results}}<section><h3>Answer results</h3><ul>{{range .Results}}<li data-item-status="{{.Status}}">{{.Message}}</li>{{end}}</ul></section>{{end}}
+  <form method="post" action="/ui/decisions/answer-batch">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <p><button name="mode" value="selected" {{if not .CanWrite}}disabled{{end}}>선택한 항목 답변</button> <button name="mode" value="recommended" {{if not .CanWrite}}disabled{{end}}>권고안 전부 답변</button></p>
   {{if .HasApproval}}<section><h3>Awaiting your approval</h3>
-  {{range .ApprovalTasks}}{{template "task_decision" (decisionFormData "task" .Task.ID .Question .Options .Task $.CSRF $.CanWrite)}}{{else}}<p class="muted">No awaiting approvals.</p>{{end}}
+  {{range .ApprovalTasks}}{{template "task_decision" .}}{{else}}<p class="muted">No awaiting approvals.</p>{{end}}
   </section>{{end}}
   <section><h3>Tasks needing decisions</h3>
-  {{range .Tasks}}{{template "task_decision" (decisionFormData "task" .Task.ID .Question .Options .Task $.CSRF $.CanWrite)}}{{else}}<p class="muted">No unresolved task decisions.</p>{{end}}
+  {{range .Tasks}}{{template "task_decision" .}}{{else}}<p class="muted">No unresolved task decisions.</p>{{end}}
   </section>
   <section><h3>Open job escalations</h3>
-  {{range .Escalations}}{{template "event_decision" (eventFormData "escalation" . $.CSRF $.CanWrite)}}{{else}}<p class="muted">No open job escalations.</p>{{end}}
+  {{range .Escalations}}{{template "event_decision" .}}{{else}}<p class="muted">No open job escalations.</p>{{end}}
   </section>
   <section><h3>Open lane decisions</h3>
-  {{range .LaneEvents}}{{template "event_decision" (eventFormData "lane" . $.CSRF $.CanWrite)}}{{else}}<p class="muted">No open lane decisions.</p>{{end}}
+  {{range .LaneEvents}}{{template "event_decision" .}}{{else}}<p class="muted">No open lane decisions.</p>{{end}}
   </section>
   <details><summary>signals</summary>{{range .Signals}}<article class="decision"><strong>{{.OwnerLane}}</strong> · job {{.JobID}}<pre>{{range message .}}{{if .DocKey}}<a href="/ui/doc/{{.DocKey}}">doc:{{.DocKey}}</a>{{else}}{{.Text}}{{end}}{{end}}</pre></article>{{else}}<p class="muted">No signals.</p>{{end}}</details>
+  </form>
 </section>
 {{end}}
 
 {{define "task_decision"}}
 <article class="decision decision-card"><strong>#{{.Task.ID}} {{.Task.Title}}</strong> · {{.Task.Lane}}<pre>{{.Question}}</pre>
   <div class="refs">{{with githubLink .Task.Refs.PR}}{{if .Valid}}<a href="{{.Value}}">PR</a>{{else if .Value}}<span>PR {{.Value}}</span>{{end}}{{end}}{{if .Task.Refs.HeadSHA}}<span>head {{shortHead .Task.Refs.HeadSHA}}</span>{{end}}{{if .Task.Refs.ReportPath}}<a href="/ui/doc/{{.Task.Refs.ReportPath}}">report</a>{{end}}{{if .Task.Refs.JobID}}<span>job {{.Task.Refs.JobID}}</span>{{end}}</div>
-  {{template "decision_form" .}}
+  {{template "decision_controls" .}}
 </article>
 {{end}}
 
 {{define "event_decision"}}
-<article class="decision"><strong>{{.Event.OwnerLane}}</strong> · {{if eq .Type "escalation"}}job {{.Event.JobID}}{{else}}#{{.Event.ID}}{{end}}<pre>{{range message .Event}}{{if .DocKey}}<a href="/ui/doc/{{.DocKey}}">doc:{{.DocKey}}</a>{{else}}{{.Text}}{{end}}{{end}}</pre>{{with ingressLabel .Event}}<span class="badge">sender {{.}}</span>{{end}}
-  {{template "decision_form" .}}
+<article class="decision"><strong>{{.Event.OwnerLane}}</strong> · {{if eq .Type "escalation"}}job {{.Event.JobID}}{{else}}#{{.Event.ID}}{{end}}<pre>{{.Question}}</pre>{{with ingressLabel .Event}}<span class="badge">sender {{.}}</span>{{end}}
+  {{template "decision_controls" .}}
 </article>
 {{end}}
 
-{{define "decision_form"}}
-<form method="post" action="/ui/decisions/answer" hx-post="/ui/decisions/answer" hx-target="#ui-content" hx-swap="outerHTML">
-  <input type="hidden" name="type" value="{{.Type}}"><input type="hidden" name="id" value="{{.ID}}"><input type="hidden" name="csrf" value="{{.CSRF}}">
+{{define "decision_controls"}}
+  <input type="hidden" name="items.{{.Index}}.type" value="{{.Type}}"><input type="hidden" name="items.{{.Index}}.id" value="{{.ID}}">
   <fieldset {{if not .CanWrite}}disabled{{end}}><legend>Answer</legend>
-    {{if .Options}}{{range .Options}}<button type="submit" name="answer" value="{{.}}">{{.}}</button>{{end}}{{else}}<label>Answer <input name="answer" required></label><button type="submit">Send answer</button>{{end}}
-    <label>Note <input name="note"></label>
+    <label><input type="checkbox" name="items.{{.Index}}.select" value="1"> Select</label>
+    {{if .Structured}}
+      {{range .Structured.Options}}<label><input type="radio" name="items.{{$.Index}}.answer" value="{{.Key}}: {{.Label}}" {{if .Recommended}}checked{{end}}> {{.Key}}. {{.Label}} {{if .Recommended}}<span class="badge">권고</span>{{end}}</label>{{end}}
+      {{if .Structured.AllowFree}}<label><input type="radio" name="items.{{.Index}}.answer" value=""> 직접 답변 <input name="items.{{.Index}}.custom"></label>{{end}}
+      <button type="submit" name="only" value="{{.Index}}">이 항목만 답변</button>
+    {{else if .Options}}
+      {{range .Options}}<label><input type="radio" name="items.{{$.Index}}.answer" value="{{.}}"> {{.}}</label>{{end}}
+      <button type="submit" name="only" value="{{.Index}}">이 항목만 답변</button>
+    {{else}}<label>Answer <input name="items.{{.Index}}.custom"></label>
+      <button type="submit" name="only" value="{{.Index}}">이 항목만 답변</button>
+    {{end}}
+    <label>Note <input name="items.{{.Index}}.note"></label>
   </fieldset>
-</form>
 {{end}}
 
 {{define "compose_content"}}

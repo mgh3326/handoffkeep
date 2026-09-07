@@ -38,7 +38,7 @@ func main() {
 }
 func run(args []string, out, errout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: handoffkeep serve|mcp|ctx|memory|doc|attach|r2usage|tasks")
+		return errors.New("usage: handoffkeep serve|mcp|ctx|memory|doc|attach|r2usage|tasks|decisions")
 	}
 	switch args[0] {
 	case "serve":
@@ -57,8 +57,10 @@ func run(args []string, out, errout io.Writer) error {
 		return r2UsageCmd(args[1:], out)
 	case "tasks":
 		return tasksCmd(args[1:], out)
+	case "decisions":
+		return decisionsCmd(args[1:], out)
 	default:
-		return errors.New("usage: handoffkeep serve|mcp|ctx|memory|doc|attach|r2usage|tasks")
+		return errors.New("usage: handoffkeep serve|mcp|ctx|memory|doc|attach|r2usage|tasks|decisions")
 	}
 }
 
@@ -120,7 +122,7 @@ func taskRefs(pr, headSHA, reportPath, jobID string) (*store.TaskRefs, bool) {
 }
 
 func normalizeTaskArgs(args []string) ([]string, error) {
-	valueFlags := map[string]bool{"--url": true, "--token": true, "--lane": true, "--parent-lane": true, "--state": true, "--title": true, "--kind": true, "--priority": true, "--by": true, "--to": true, "--note": true, "--question": true, "--limit": true, "--pr": true, "--head-sha": true, "--report-path": true, "--job-id": true}
+	valueFlags := map[string]bool{"--url": true, "--token": true, "--lane": true, "--parent-lane": true, "--state": true, "--title": true, "--kind": true, "--priority": true, "--by": true, "--to": true, "--note": true, "--question": true, "--limit": true, "--pr": true, "--head-sha": true, "--report-path": true, "--job-id": true, "--option": true, "--recommended": true}
 	flags, positional := []string{}, []string{}
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -162,6 +164,10 @@ func tasksCmd(args []string, out io.Writer) error {
 	headSHA := fs.String("head-sha", "", "head revision reference")
 	reportPath := fs.String("report-path", "", "report path reference")
 	jobID := fs.String("job-id", "", "job reference")
+	var optionValues refFlags
+	fs.Var(&optionValues, "option", "decision option A|label (repeatable)")
+	recommended := fs.String("recommended", "", "recommended decision option key")
+	noFreeAnswer := fs.Bool("no-free-answer", false, "disallow a free-form answer")
 	parseArgs, err := normalizeTaskArgs(args[1:])
 	if err != nil {
 		return err
@@ -231,6 +237,10 @@ func tasksCmd(args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
+		usingOptions := len(optionValues) > 0 || *recommended != "" || *noFreeAnswer
+		if usingOptions && *to != "needs_decision" {
+			return errors.New("decision option flags require --to needs_decision")
+		}
 		if *to == "needs_decision" {
 			if strings.TrimSpace(*question) == "" {
 				return errors.New("tasks transition --to needs_decision requires --question")
@@ -240,6 +250,17 @@ func tasksCmd(args []string, out io.Writer) error {
 			}
 		}
 		refs, hasRefs := taskRefs(*pr, *headSHA, *reportPath, *jobID)
+		if usingOptions {
+			options, err := parseTaskDecisionOptions(optionValues, *recommended, *noFreeAnswer)
+			if err != nil {
+				return err
+			}
+			if len([]byte(*note+"\n"+store.FormatDecisionOptions(options))) > store.RelayLaneEventMaxBytes {
+				return errors.New("decision question and options exceed 2048 bytes")
+			}
+			refs.DecisionOptions = &options
+			hasRefs = true
+		}
 		if !hasRefs {
 			refs = nil
 		}
@@ -264,6 +285,102 @@ func tasksCmd(args []string, out io.Writer) error {
 	default:
 		return errors.New("usage: tasks add|list|claim|next|transition|show")
 	}
+}
+
+func parseTaskDecisionOptions(values []string, recommended string, noFreeAnswer bool) (store.DecisionOptions, error) {
+	if len(values) == 0 {
+		if recommended != "" {
+			return store.DecisionOptions{}, errors.New("--recommended requires at least one --option")
+		}
+		if noFreeAnswer {
+			return store.DecisionOptions{}, errors.New("--no-free-answer requires at least one --option")
+		}
+		return store.DecisionOptions{}, errors.New("decision options are required")
+	}
+	if len(values) > 6 {
+		return store.DecisionOptions{}, errors.New("at most six --option values are allowed")
+	}
+	options := store.DecisionOptions{AllowFree: !noFreeAnswer}
+	seen := map[string]bool{}
+	for _, value := range values {
+		key, label, found := strings.Cut(value, "|")
+		key, label = strings.TrimSpace(key), strings.TrimSpace(label)
+		if !found || strings.Contains(label, "|") || seen[key] {
+			return store.DecisionOptions{}, errors.New("--option must be a unique A|label value")
+		}
+		seen[key] = true
+		options.Options = append(options.Options, store.DecisionOption{Key: key, Label: label})
+	}
+	if recommended != "" {
+		if len(recommended) != 1 || recommended[0] < 'A' || recommended[0] > 'F' || !seen[recommended] {
+			return store.DecisionOptions{}, errors.New("--recommended must name a supplied option key")
+		}
+		for index := range options.Options {
+			options.Options[index].Recommended = options.Options[index].Key == recommended
+		}
+	}
+	if err := store.ValidateDecisionOptions(options); err != nil {
+		return store.DecisionOptions{}, err
+	}
+	return options, nil
+}
+
+func normalizeDecisionArgs(args []string) ([]string, error) {
+	valueFlags := map[string]bool{"--url": true, "--token": true, "--by": true, "--answer": true, "--note": true}
+	flags, positional := []string{}, []string{}
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if strings.HasPrefix(arg, "-") {
+			flags = append(flags, arg)
+			if valueFlags[arg] {
+				i++
+				if i >= len(args) {
+					return nil, fmt.Errorf("%s requires a value", arg)
+				}
+				flags = append(flags, args[i])
+			}
+		} else {
+			positional = append(positional, arg)
+		}
+	}
+	return append(flags, positional...), nil
+}
+
+func decisionsCmd(args []string, out io.Writer) error {
+	if len(args) == 0 || args[0] != "resolve" {
+		return errors.New("usage: decisions resolve <task|escalation|lane> <id> --by <lane> --answer <answer> [--note <note>] [--no-inject]")
+	}
+	fs := flag.NewFlagSet("decisions resolve", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	c := remoteClient(fs)
+	by := fs.String("by", "", "answering lane")
+	answer := fs.String("answer", "", "decision answer")
+	note := fs.String("note", "", "optional decision note")
+	noInject := fs.Bool("no-inject", false, "mark the event delivered without injection")
+	parseArgs, err := normalizeDecisionArgs(args[1:])
+	if err != nil {
+		return err
+	}
+	if err := fs.Parse(parseArgs); err != nil {
+		return err
+	}
+	if fs.NArg() != 2 {
+		return errors.New("decisions resolve requires a type and id")
+	}
+	id, err := strconv.ParseInt(fs.Arg(1), 10, 64)
+	if err != nil || id < 1 {
+		return errors.New("decision id must be positive")
+	}
+	if err := mustClient(c); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	event, err := c.ResolveDecision(ctx, fs.Arg(0), id, *by, *answer, *note, *noInject)
+	if err != nil {
+		return err
+	}
+	return printJSON(out, event)
 }
 
 type exitCodeError struct {

@@ -268,3 +268,19 @@ func (c Client) GetTask(ctx context.Context, id int64) (store.Task, bool, error)
 	}
 	return out, err == nil, err
 }
+
+// ResolveDecision closes an already-handled decision through the bearer API.
+func (c Client) ResolveDecision(ctx context.Context, kind string, id int64, by, answer, note string, noInject bool) (store.RelayEvent, error) {
+	var out struct {
+		Event store.RelayEvent `json:"event"`
+	}
+	err := c.call(ctx, "POST", "/v1/decisions/resolve", struct {
+		Type     string `json:"type"`
+		ID       int64  `json:"id"`
+		By       string `json:"by"`
+		Answer   string `json:"answer"`
+		Note     string `json:"note,omitempty"`
+		NoInject bool   `json:"no_inject,omitempty"`
+	}{kind, id, by, answer, note, noInject}, &out)
+	return out.Event, err
+}
