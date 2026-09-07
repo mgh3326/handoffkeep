@@ -341,8 +341,8 @@ func parseDecisionBatchItems(values url.Values) ([]decisionBatchItem, error) {
 			item.Note = strings.TrimSpace(fieldValues[0])
 		}
 	}
-	if len(byIndex) > 50 {
-		return nil, errors.New("a maximum of 50 decision items is allowed")
+	if len(byIndex) > 1000 {
+		return nil, errors.New("a maximum of 1000 decision items is allowed")
 	}
 	indexes := make([]int, 0, len(byIndex))
 	for index := range byIndex {
@@ -423,6 +423,11 @@ func (h *Handler) answerDecisionBatch(w http.ResponseWriter, r *http.Request, em
 			}
 		}
 	}
+	remaining := 0
+	if len(chosen) > 50 {
+		remaining = len(chosen) - 50
+		chosen = chosen[:50]
+	}
 
 	results := []decisionBatchResult{}
 	for _, item := range chosen {
@@ -437,7 +442,11 @@ func (h *Handler) answerDecisionBatch(w http.ResponseWriter, r *http.Request, em
 		h.renderDecisionBatch(w, r, email, "선택된 항목이 없습니다.", nil)
 		return
 	}
-	h.renderDecisionBatch(w, r, email, "", results)
+	notice := ""
+	if remaining > 0 {
+		notice = fmt.Sprintf("%d건이 남았습니다. 다시 제출하면 이어서 처리됩니다.", remaining)
+	}
+	h.renderDecisionBatch(w, r, email, notice, results)
 }
 
 func (h *Handler) renderDecisionBatch(w http.ResponseWriter, r *http.Request, email, notice string, results []decisionBatchResult) {

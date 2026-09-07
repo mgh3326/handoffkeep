@@ -10,10 +10,13 @@ import (
 	"net/url"
 	"reflect"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
 func p4Options(recommended, allowFree bool) map[string]any {
@@ -99,6 +102,89 @@ func p4Item(values url.Values, index int, kind string, id int64, answer string) 
 	values.Set(prefix+"type", kind)
 	values.Set(prefix+"id", strconv.FormatInt(id, 10))
 	values.Set(prefix+"answer", answer)
+}
+
+var renderedDecisionHiddenFieldRE = regexp.MustCompile(`name="items\.([0-9]+)\.(type|id)" value="([^"]*)"`)
+
+func submitRenderedDecisionForm(t *testing.T, h *httptest.Server, assertion string, cookie *http.Cookie, body string, extraFields url.Values) (*http.Response, int) {
+	t.Helper()
+	values := url.Values{}
+	for key, fieldValues := range extraFields {
+		values[key] = append([]string(nil), fieldValues...)
+	}
+	seen := map[int]map[string]bool{}
+	for _, match := range renderedDecisionHiddenFieldRE.FindAllStringSubmatch(body, -1) {
+		index, err := strconv.Atoi(match[1])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if seen[index] == nil {
+			seen[index] = map[string]bool{}
+		}
+		if seen[index][match[2]] {
+			t.Fatalf("duplicate rendered decision field items.%d.%s", index, match[2])
+		}
+		seen[index][match[2]] = true
+		values.Set("items."+match[1]+"."+match[2], match[3])
+	}
+	if len(seen) == 0 {
+		t.Fatalf("rendered decision form contained no item hidden fields: %q", body)
+	}
+	for index, fields := range seen {
+		if !fields["type"] || !fields["id"] {
+			t.Fatalf("rendered decision form omitted hidden fields for items.%d: %+v", index, fields)
+		}
+	}
+	return uiPostForm(t, h.Client(), h.URL+"/ui/decisions/answer-batch", assertion, cookie, values, h.URL, false), len(seen)
+}
+
+func p4RecommendedDecisionTasks(t *testing.T, h *httptest.Server, lane, prefix string, count int) []int64 {
+	t.Helper()
+	tasks := make([]int64, 0, count)
+	for index := 0; index < count; index++ {
+		tasks = append(tasks, p4DecisionTask(t, h, lane, prefix+" "+strconv.Itoa(index), p4Options(true, false)))
+	}
+	return tasks
+}
+
+func p4TasksByRenderedIndex(t *testing.T, body string, tasks []int64) []int64 {
+	t.Helper()
+	ordered := append([]int64(nil), tasks...)
+	sort.Slice(ordered, func(left, right int) bool {
+		return p4Index(t, body, "task", ordered[left]) < p4Index(t, body, "task", ordered[right])
+	})
+	return ordered
+}
+
+func p4DecideTask(t *testing.T, s *store.Store, lane, title, state string) store.Task {
+	t.Helper()
+	task, err := s.CreateTask(t.Context(), store.Task{Lane: lane, Title: title, Kind: "decide", CreatedBy: "node"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state == "backlog" {
+		return task
+	}
+	task, err = s.ClaimTask(t.Context(), task.ID, "worker-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state == "claimed" {
+		return task
+	}
+	if state == "merged" {
+		for _, next := range []string{"in_progress", "verifying"} {
+			task, err = s.TransitionTask(t.Context(), task.ID, next, "node", "p4 decide state", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	task, err = s.TransitionTask(t.Context(), task.ID, state, "node", "p4 decide state", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return task
 }
 
 func TestUIP4StructuredDecisionRendering(t *testing.T) {
@@ -418,7 +504,7 @@ func TestUIP4BatchSelectionBoundsAndHubFailure(t *testing.T) {
 		t.Fatalf("empty selection status=%d body=%q hub=%d", response.StatusCode, body, len(hub.requests()))
 	}
 	tooMany := url.Values{"csrf": {csrf}, "mode": {"selected"}}
-	for index := 0; index < 51; index++ {
+	for index := 0; index < 1001; index++ {
 		p4Item(tooMany, index, "task", int64(index+1), "A: answer")
 	}
 	response = uiPostForm(t, h.Client(), h.URL+"/ui/decisions/answer-batch", assertion, cookie, tooMany, h.URL, false)
@@ -672,5 +758,177 @@ func TestUIP4QueueOperatorViewExcludesInProgressImplement(t *testing.T) {
 	body := responseText(t, response)
 	if response.StatusCode != http.StatusOK || strings.Contains(body, implement.Title) || !strings.Contains(body, decision.Title) {
 		t.Fatalf("operator queue status=%d body=%q", response.StatusCode, body)
+	}
+}
+
+func TestUIP4RenderedDecisionFormOnlyOverFifty(t *testing.T) {
+	s := uiStore(t)
+	fixture := newUIJWTFixture(t)
+	hub := newFakeIngressHub(t)
+	h := newUITestServer(t, s, fixture, hub.server.URL, "hub-test-token", 0)
+	defer h.Close()
+	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
+	tasks := p4RecommendedDecisionTasks(t, h, uiLane(t, "lane-a"), "GT1 rendered form", 56)
+	target := tasks[len(tasks)-1]
+	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions", assertion)
+	body := responseText(t, uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions", assertion, ""))
+	index := p4Index(t, body, "task", target)
+	extra := url.Values{"csrf": {csrf}, "only": {strconv.Itoa(index)}}
+	extra.Set("items."+strconv.Itoa(index)+".answer", "A: 노드 로컬 저장")
+	response, rendered := submitRenderedDecisionForm(t, h, assertion, cookie, body, extra)
+	responseBody := responseText(t, response)
+	if rendered < len(tasks) || response.StatusCode != http.StatusOK || strings.Count(responseBody, `data-item-status="200"`) != 1 || len(hub.requests()) != 1 {
+		t.Fatalf("GT1 rendered=%d status=%d results=%d hub=%d body=%q", rendered, response.StatusCode, strings.Count(responseBody, `data-item-status="200"`), len(hub.requests()), responseBody)
+	}
+	for _, id := range tasks {
+		updated, found, err := s.GetTask(t.Context(), id)
+		want := "needs_decision"
+		if id == target {
+			want = "claimed"
+		}
+		if err != nil || !found || updated.State != want {
+			t.Fatalf("GT1 task=%d state=%q want=%q found=%t err=%v", id, updated.State, want, found, err)
+		}
+	}
+}
+
+func TestUIP4RenderedDecisionFormOnlyThreshold(t *testing.T) {
+	for _, count := range []int{50, 51} {
+		t.Run(strconv.Itoa(count), func(t *testing.T) {
+			s := uiStore(t)
+			fixture := newUIJWTFixture(t)
+			hub := newFakeIngressHub(t)
+			h := newUITestServer(t, s, fixture, hub.server.URL, "hub-test-token", 0)
+			defer h.Close()
+			assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
+			tasks := p4RecommendedDecisionTasks(t, h, uiLane(t, "lane-a"), "GT2 rendered form", count)
+			target := tasks[len(tasks)-1]
+			cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions", assertion)
+			body := responseText(t, uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions", assertion, ""))
+			index := p4Index(t, body, "task", target)
+			extra := url.Values{"csrf": {csrf}, "only": {strconv.Itoa(index)}}
+			extra.Set("items."+strconv.Itoa(index)+".answer", "A: 노드 로컬 저장")
+			response, rendered := submitRenderedDecisionForm(t, h, assertion, cookie, body, extra)
+			responseBody := responseText(t, response)
+			updated, found, err := s.GetTask(t.Context(), target)
+			if rendered < count || response.StatusCode != http.StatusOK || strings.Count(responseBody, `data-item-status="200"`) != 1 || len(hub.requests()) != 1 || err != nil || !found || updated.State != "claimed" {
+				t.Fatalf("GT2 count=%d rendered=%d status=%d results=%d hub=%d task=%+v found=%t err=%v body=%q", count, rendered, response.StatusCode, strings.Count(responseBody, `data-item-status="200"`), len(hub.requests()), updated, found, err, responseBody)
+			}
+		})
+	}
+}
+
+func TestUIP4SelectedDecisionBatchAdvancesOverFifty(t *testing.T) {
+	s := uiStore(t)
+	fixture := newUIJWTFixture(t)
+	hub := newFakeIngressHub(t)
+	h := newUITestServer(t, s, fixture, hub.server.URL, "hub-test-token", 0)
+	defer h.Close()
+	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
+	tasks := p4RecommendedDecisionTasks(t, h, uiLane(t, "lane-a"), "GT3 selected", 51)
+	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions", assertion)
+	body := responseText(t, uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions", assertion, ""))
+	ordered := p4TasksByRenderedIndex(t, body, tasks)
+	extra := url.Values{"csrf": {csrf}, "mode": {"selected"}}
+	for _, id := range tasks {
+		index := p4Index(t, body, "task", id)
+		extra.Set("items."+strconv.Itoa(index)+".select", "1")
+		extra.Set("items."+strconv.Itoa(index)+".answer", "A: 노드 로컬 저장")
+	}
+	response, rendered := submitRenderedDecisionForm(t, h, assertion, cookie, body, extra)
+	responseBody := responseText(t, response)
+	if rendered < len(tasks) || response.StatusCode != http.StatusOK || strings.Count(responseBody, `data-item-status="200"`) != 50 || !strings.Contains(responseBody, "1건이 남았습니다. 다시 제출하면 이어서 처리됩니다.") || len(hub.requests()) != 50 {
+		t.Fatalf("GT3 first submit rendered=%d status=%d results=%d hub=%d body=%q", rendered, response.StatusCode, strings.Count(responseBody, `data-item-status="200"`), len(hub.requests()), responseBody)
+	}
+	for position, id := range ordered {
+		updated, found, err := s.GetTask(t.Context(), id)
+		want := "needs_decision"
+		if position < 50 {
+			want = "claimed"
+		}
+		if err != nil || !found || updated.State != want {
+			t.Fatalf("GT3 first submit task=%d position=%d state=%q want=%q found=%t err=%v", id, position, updated.State, want, found, err)
+		}
+	}
+
+	remaining := ordered[50]
+	extra = url.Values{"csrf": {csrf}, "mode": {"selected"}}
+	remainingIndex := p4Index(t, responseBody, "task", remaining)
+	extra.Set("items."+strconv.Itoa(remainingIndex)+".select", "1")
+	extra.Set("items."+strconv.Itoa(remainingIndex)+".answer", "A: 노드 로컬 저장")
+	response, _ = submitRenderedDecisionForm(t, h, assertion, cookie, responseBody, extra)
+	responseBody = responseText(t, response)
+	updated, found, err := s.GetTask(t.Context(), remaining)
+	if response.StatusCode != http.StatusOK || strings.Count(responseBody, `data-item-status="200"`) != 1 || len(hub.requests()) != 51 || err != nil || !found || updated.State != "claimed" {
+		t.Fatalf("GT3 retry status=%d results=%d hub=%d task=%+v found=%t err=%v body=%q", response.StatusCode, strings.Count(responseBody, `data-item-status="200"`), len(hub.requests()), updated, found, err, responseBody)
+	}
+}
+
+func TestUIP4RecommendedDecisionBatchAdvancesOverFifty(t *testing.T) {
+	s := uiStore(t)
+	fixture := newUIJWTFixture(t)
+	hub := newFakeIngressHub(t)
+	h := newUITestServer(t, s, fixture, hub.server.URL, "hub-test-token", 0)
+	defer h.Close()
+	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
+	tasks := p4RecommendedDecisionTasks(t, h, uiLane(t, "lane-a"), "GT4 recommended", 51)
+	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions", assertion)
+	body := responseText(t, uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions", assertion, ""))
+	response, rendered := submitRenderedDecisionForm(t, h, assertion, cookie, body, url.Values{"csrf": {csrf}, "mode": {"recommended"}})
+	responseBody := responseText(t, response)
+	if rendered < len(tasks) || response.StatusCode != http.StatusOK || strings.Count(responseBody, `data-item-status="200"`) != 50 || !regexp.MustCompile(`[1-9][0-9]*건이 남았습니다\. 다시 제출하면 이어서 처리됩니다\.`).MatchString(responseBody) || len(hub.requests()) != 50 {
+		t.Fatalf("GT4 first submit rendered=%d status=%d results=%d hub=%d body=%q", rendered, response.StatusCode, strings.Count(responseBody, `data-item-status="200"`), len(hub.requests()), responseBody)
+	}
+	for attempt := 0; attempt < 10; attempt++ {
+		allClaimed := true
+		for _, id := range tasks {
+			updated, found, err := s.GetTask(t.Context(), id)
+			if err != nil || !found {
+				t.Fatalf("GT4 task=%d found=%t err=%v", id, found, err)
+			}
+			if updated.State != "claimed" {
+				allClaimed = false
+				break
+			}
+		}
+		if allClaimed {
+			break
+		}
+		response, _ = submitRenderedDecisionForm(t, h, assertion, cookie, responseBody, url.Values{"csrf": {csrf}, "mode": {"recommended"}})
+		responseBody = responseText(t, response)
+		if response.StatusCode != http.StatusOK || strings.Count(responseBody, `data-item-status="200"`) == 0 {
+			t.Fatalf("GT4 retry status=%d results=%d body=%q", response.StatusCode, strings.Count(responseBody, `data-item-status="200"`), responseBody)
+		}
+	}
+	for _, id := range tasks {
+		updated, found, err := s.GetTask(t.Context(), id)
+		if err != nil || !found || updated.State != "claimed" {
+			t.Fatalf("GT4 task=%d state=%q found=%t err=%v", id, updated.State, found, err)
+		}
+	}
+}
+
+func TestUIP4QueueOperatorViewIncludesNonterminalDecide(t *testing.T) {
+	s := uiStore(t)
+	fixture := newUIJWTFixture(t)
+	h := newUITestServer(t, s, fixture, "", "", 0)
+	defer h.Close()
+	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
+	lane := uiLane(t, "lane-a")
+	inProgress := p4DecideTask(t, s, lane, "SHOULD-3 in-progress decide", "in_progress")
+	claimed := p4DecideTask(t, s, lane, "SHOULD-3 claimed decide", "claimed")
+	merged := p4DecideTask(t, s, lane, "SHOULD-3 merged decide", "merged")
+	dropped := p4DecideTask(t, s, lane, "SHOULD-3 dropped decide", "dropped")
+	backlog := p4DecideTask(t, s, lane, "SHOULD-3 backlog decide", "backlog")
+
+	response := uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/queue", assertion, "")
+	body := responseText(t, response)
+	if response.StatusCode != http.StatusOK || !strings.Contains(body, inProgress.Title) || !strings.Contains(body, claimed.Title) {
+		t.Fatalf("SHOULD-3 operator queue omitted nonterminal decide task: %q", body)
+	}
+	for _, task := range []store.Task{merged, dropped, backlog} {
+		if strings.Contains(body, task.Title) {
+			t.Fatalf("SHOULD-3 operator queue rendered terminal/backlog decide task %q: %q", task.Title, body)
+		}
 	}
 }
