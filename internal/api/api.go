@@ -109,6 +109,33 @@ func (s Service) MarkRelayEventDelivered(ctx context.Context, id int64, machine,
 func (s Service) ListRelayEvents(ctx context.Context, lane, kind string, undelivered bool, afterID int64, limit int) ([]store.RelayEvent, error) {
 	return s.Store.ListRelayEventsPage(ctx, lane, kind, undelivered, afterID, limit)
 }
+func (s Service) ListBenchScores(ctx context.Context, modelID, source string, limit int) ([]store.BenchScore, error) {
+	return s.Store.ListBenchScores(ctx, modelID, source, limit)
+}
+func (s Service) UpsertBenchScores(ctx context.Context, client string, xs []store.BenchScore) (int, error) {
+	for i := range xs {
+		xs[i].UpdatedBy = client
+	}
+	return s.Store.UpsertBenchScores(ctx, xs)
+}
+func (s Service) ListBenchReps(ctx context.Context, profile, grade, effort string, limit int) ([]store.BenchRep, error) {
+	return s.Store.ListBenchReps(ctx, profile, grade, effort, limit)
+}
+func (s Service) UpsertBenchReps(ctx context.Context, client string, xs []store.BenchRep) (int, error) {
+	for i := range xs {
+		xs[i].CreatedBy = client
+	}
+	return s.Store.UpsertBenchReps(ctx, xs)
+}
+func (s Service) ListBenchGrades(ctx context.Context) ([]store.BenchGrade, error) {
+	return s.Store.ListBenchGrades(ctx)
+}
+func (s Service) UpsertBenchGrades(ctx context.Context, client string, xs []store.BenchGrade) (int, error) {
+	for i := range xs {
+		xs[i].DecidedBy = client
+	}
+	return s.Store.UpsertBenchGrades(ctx, xs)
+}
 
 type Tokens map[string]string
 
@@ -183,10 +210,19 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("POST /v1/relay/events", s.relayEventsCreate)
 	m.HandleFunc("POST /v1/relay/events/{id}/delivered", s.relayEventDelivered)
 	m.HandleFunc("GET /v1/relay/events", s.relayEventsList)
+	m.HandleFunc("GET /v1/bench/scores", s.benchScoresList)
+	m.HandleFunc("PUT /v1/bench/scores", s.benchScoresPut)
+	m.HandleFunc("GET /v1/bench/reps", s.benchRepsList)
+	m.HandleFunc("PUT /v1/bench/reps", s.benchRepsPut)
+	m.HandleFunc("GET /v1/bench/grades", s.benchGradesList)
+	m.HandleFunc("PUT /v1/bench/grades", s.benchGradesPut)
 	if s.UI != nil {
 		m.Handle("/ui", s.UI)
 		m.Handle("/ui/", s.UI)
 	}
+	m.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		jsonOut(w, http.StatusNotFound, map[string]string{"error": "not_found"})
+	})
 	return m
 }
 func (s Server) auth(w http.ResponseWriter, r *http.Request) (string, bool) {
@@ -229,6 +265,9 @@ func appErr(w http.ResponseWriter, e error) {
 		return
 	case errors.Is(e, store.ErrRelayEventNotFound):
 		jsonOut(w, http.StatusNotFound, map[string]string{"error": "not_found"})
+		return
+	case errors.Is(e, store.ErrDeviationRefRequired):
+		jsonOut(w, http.StatusBadRequest, map[string]string{"error": "deviation_ref_required"})
 		return
 	case errors.Is(e, store.ErrQueueEmpty):
 		jsonOut(w, http.StatusNotFound, map[string]string{"error": "queue_empty"})
@@ -481,6 +520,137 @@ func (s Server) relayEventsList(w http.ResponseWriter, r *http.Request) {
 	}
 	jsonOut(w, http.StatusOK, map[string]any{"events": xs})
 }
+
+const benchRequestMaxBytes = 8 << 20
+
+type benchScoresInput struct {
+	Scores []store.BenchScore `json:"scores"`
+}
+
+type benchRepsInput struct {
+	Reps []store.BenchRep `json:"reps"`
+}
+
+type benchGradesInput struct {
+	Grades []store.BenchGrade `json:"grades"`
+}
+
+func benchBatchValid(n int) bool {
+	return n >= 1 && n <= 1000
+}
+
+func (s Server) benchScoresList(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.auth(w, r); !ok {
+		return
+	}
+	limit, err := queryLimit(r, 1000, 5000)
+	if err != nil {
+		appErr(w, err)
+		return
+	}
+	xs, err := s.Service.ListBenchScores(r.Context(), r.URL.Query().Get("model_id"), r.URL.Query().Get("source"), limit)
+	if err != nil {
+		appErr(w, err)
+		return
+	}
+	jsonOut(w, http.StatusOK, map[string]any{"scores": xs})
+}
+
+func (s Server) benchScoresPut(w http.ResponseWriter, r *http.Request) {
+	client, ok := s.auth(w, r)
+	if !ok {
+		return
+	}
+	defer r.Body.Close()
+	var input benchScoresInput
+	if err := decode(r, &input, benchRequestMaxBytes); err != nil || !benchBatchValid(len(input.Scores)) {
+		if err == nil {
+			err = errors.New("invalid bench scores")
+		}
+		appErr(w, err)
+		return
+	}
+	n, err := s.Service.UpsertBenchScores(r.Context(), client, input.Scores)
+	if err != nil {
+		appErr(w, err)
+		return
+	}
+	jsonOut(w, http.StatusOK, map[string]int{"upserted": n})
+}
+
+func (s Server) benchRepsList(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.auth(w, r); !ok {
+		return
+	}
+	limit, err := queryLimit(r, 1000, 5000)
+	if err != nil {
+		appErr(w, err)
+		return
+	}
+	xs, err := s.Service.ListBenchReps(r.Context(), r.URL.Query().Get("profile"), r.URL.Query().Get("grade"), r.URL.Query().Get("effort"), limit)
+	if err != nil {
+		appErr(w, err)
+		return
+	}
+	jsonOut(w, http.StatusOK, map[string]any{"reps": xs})
+}
+
+func (s Server) benchRepsPut(w http.ResponseWriter, r *http.Request) {
+	client, ok := s.auth(w, r)
+	if !ok {
+		return
+	}
+	defer r.Body.Close()
+	var input benchRepsInput
+	if err := decode(r, &input, benchRequestMaxBytes); err != nil || !benchBatchValid(len(input.Reps)) {
+		if err == nil {
+			err = errors.New("invalid bench reps")
+		}
+		appErr(w, err)
+		return
+	}
+	n, err := s.Service.UpsertBenchReps(r.Context(), client, input.Reps)
+	if err != nil {
+		appErr(w, err)
+		return
+	}
+	jsonOut(w, http.StatusOK, map[string]int{"upserted": n})
+}
+
+func (s Server) benchGradesList(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.auth(w, r); !ok {
+		return
+	}
+	xs, err := s.Service.ListBenchGrades(r.Context())
+	if err != nil {
+		appErr(w, err)
+		return
+	}
+	jsonOut(w, http.StatusOK, map[string]any{"grades": xs})
+}
+
+func (s Server) benchGradesPut(w http.ResponseWriter, r *http.Request) {
+	client, ok := s.auth(w, r)
+	if !ok {
+		return
+	}
+	defer r.Body.Close()
+	var input benchGradesInput
+	if err := decode(r, &input, benchRequestMaxBytes); err != nil || !benchBatchValid(len(input.Grades)) {
+		if err == nil {
+			err = errors.New("invalid bench grades")
+		}
+		appErr(w, err)
+		return
+	}
+	n, err := s.Service.UpsertBenchGrades(r.Context(), client, input.Grades)
+	if err != nil {
+		appErr(w, err)
+		return
+	}
+	jsonOut(w, http.StatusOK, map[string]int{"upserted": n})
+}
+
 func decode(r *http.Request, v any, max int) error {
 	de := json.NewDecoder(io.LimitReader(r.Body, int64(max+4096)))
 	de.DisallowUnknownFields()
