@@ -112,8 +112,8 @@ adjacent `htmx.LICENSE` is the htmx 0BSD license. No external CDN is used.
 
 The decisions page presents forms for unresolved tasks, open job escalations,
 and open `[decision-needed]` lane events. A question line beginning `options:`
-is split on `|` into up to eight answer buttons; otherwise the operator enters
-free text. Tasks in `HANDOFFKEEP_UI_ADMIRAL_LANES` appear first under
+is split on `|` into up to eight radio choices with an `only=<n>` submit button;
+otherwise the operator enters free text. Tasks in `HANDOFFKEEP_UI_ADMIRAL_LANES` appear first under
 **Awaiting your approval**, with their task references, and are not repeated in
 the ordinary task section. Job events that are operational signals are retained
 under the folded `signals` section rather than treated as questions.
@@ -201,7 +201,8 @@ options together must fit the 2048-byte event limit.
 The Decisions page renders structured choices as radios. A recommendation is
 default-selected and marked `권고`; when permitted, a direct-answer radio and
 input are available and a nonempty direct answer wins. Legacy `options:` lines
-retain button rendering, and plain questions retain the free-text path.
+also use the batch radio plus `only=<n>` convention, accepting only their parsed
+options and exposing no direct-answer field; plain questions retain the free-text path.
 
 All cards share `POST /ui/decisions/answer-batch`. Cards provide
 `items.<n>.type`, `items.<n>.id`, `items.<n>.select`,

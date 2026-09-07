@@ -388,8 +388,16 @@ func TestUITimelineQueueAndEscaping(t *testing.T) {
 	claimAndTransition(t, s, decision, "needs_decision", "choose a path")
 	response = uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/queue", assertion, "")
 	body = responseText(t, response)
+	if !strings.Contains(body, "decision-card") || !strings.Contains(body, "needs decision") {
+		t.Fatal("default queue view did not render decision emphasis")
+	}
+	if strings.Contains(body, "in progress title") {
+		t.Fatal("default queue view rendered a non-decide in_progress card")
+	}
+	response = uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/queue?view=all", assertion, "")
+	body = responseText(t, response)
 	if !strings.Contains(body, "in progress title") || !strings.Contains(body, "decision-card") || !strings.Contains(body, "needs decision") {
-		t.Fatal("queue board did not render state cells and decision emphasis")
+		t.Fatal("full queue board did not render state cells and decision emphasis")
 	}
 	response = uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/fragments/task/"+strconv.FormatInt(active.ID, 10), assertion, "")
 	body = responseText(t, response)
