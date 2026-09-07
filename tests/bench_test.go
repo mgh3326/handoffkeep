@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -262,6 +263,19 @@ func TestBenchCanonicalAPI(t *testing.T) {
 		t.Fatalf("score ordering/list status=%d rows=%v", resp.StatusCode, scoreList.Scores)
 	}
 	resp.Body.Close()
+	wantScore := map[string]any{
+		"score":             13.4,
+		"rank":              float64(18),
+		"captured_at":       "2026-07-31T00:00:00Z",
+		"time_per_task_min": 13.4,
+		"cost_per_task_usd": 3.8,
+		"provenance":        "operator-approved manual import 2026-09-07",
+	}
+	for key, want := range wantScore {
+		if got := scoreList.Scores[0][key]; got != want {
+			t.Fatalf("score %s=%v want=%v", key, got, want)
+		}
+	}
 	for _, query := range []string{"?model_id=kimi-k3", "?source=AA-model", "?limit=1"} {
 		resp = benchRequest(t, h.Client(), http.MethodGet, h.URL+"/v1/bench/scores"+query, "test-token", nil)
 		var got struct {
@@ -340,6 +354,16 @@ func TestBenchCanonicalAPI(t *testing.T) {
 		if resp.StatusCode != want {
 			resp.Body.Close()
 			t.Fatalf("score batch size=%d status=%d want=%d", n, resp.StatusCode, want)
+		}
+		if n == 1000 {
+			respBody := benchJSON(t, resp)
+			if respBody["upserted"] != float64(1000) {
+				t.Fatalf("score batch upserted=%v want=1000", respBody["upserted"])
+			}
+			if got := benchCount(t, p, `SELECT count(*) FROM bench_scores WHERE model_id LIKE 'bench-limit-%'`); got != 1000 {
+				t.Fatalf("score batch db count=%d want=1000", got)
+			}
+			continue
 		}
 		resp.Body.Close()
 	}
@@ -496,4 +520,29 @@ func TestBenchCanonicalAPI(t *testing.T) {
 		}
 	}
 
+}
+
+// TestBenchRouteMethodAndUnknownPath guards against a "/" catch-all handler,
+// which in Go's ServeMux matches every request and silently degrades a
+// method-mismatched request on an existing route from 405 (with an Allow
+// header) to 404. Unknown paths must keep the router's standard 404.
+func TestBenchRouteMethodAndUnknownPath(t *testing.T) {
+	s := benchStore(t)
+	h := benchServer(s)
+	defer h.Close()
+
+	resp := benchRequest(t, h.Client(), http.MethodPost, h.URL+"/v1/bench/scores", "test-token", []byte(benchScoresFixture))
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("POST /v1/bench/scores status=%d want=%d", resp.StatusCode, http.StatusMethodNotAllowed)
+	}
+	if allow := resp.Header.Get("Allow"); !strings.Contains(allow, "PUT") {
+		t.Fatalf("POST /v1/bench/scores Allow=%q want to contain PUT", allow)
+	}
+
+	resp2 := benchRequest(t, h.Client(), http.MethodGet, h.URL+"/v1/definitely-unknown", "test-token", nil)
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusNotFound {
+		t.Fatalf("GET /v1/definitely-unknown status=%d want=%d", resp2.StatusCode, http.StatusNotFound)
+	}
 }

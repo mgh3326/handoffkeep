@@ -220,9 +220,6 @@ func (s Server) Handler() http.Handler {
 		m.Handle("/ui", s.UI)
 		m.Handle("/ui/", s.UI)
 	}
-	m.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		jsonOut(w, http.StatusNotFound, map[string]string{"error": "not_found"})
-	})
 	return m
 }
 func (s Server) auth(w http.ResponseWriter, r *http.Request) (string, bool) {
