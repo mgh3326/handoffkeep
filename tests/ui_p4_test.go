@@ -589,8 +589,11 @@ func TestUIP4LegacyDecisionOnlyAndWhitelist(t *testing.T) {
 		cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions", assertion)
 		body := responseText(t, uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions", assertion, ""))
 		index := p4Index(t, body, "task", legacy)
+		otherIndex := p4Index(t, body, "task", other)
 		values := url.Values{"csrf": {csrf}, "only": {strconv.Itoa(index)}}
 		p4Item(values, index, "task", legacy, "승인")
+		p4Item(values, otherIndex, "task", other, "A: 노드 로컬 저장")
+		values.Set("items."+strconv.Itoa(otherIndex)+".select", "1")
 		response := uiPostForm(t, h.Client(), h.URL+"/ui/decisions/answer-batch", assertion, cookie, values, h.URL, false)
 		if response.StatusCode != http.StatusOK || !strings.Contains(responseText(t, response), `data-item-status="200"`) {
 			t.Fatalf("legacy only status=%d", response.StatusCode)
