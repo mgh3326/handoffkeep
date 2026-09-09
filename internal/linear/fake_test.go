@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -49,6 +50,44 @@ func linearFixture(t *testing.T, name string) []byte {
 		t.Fatalf("read Linear fixture %s: %v", name, err)
 	}
 	return raw
+}
+
+func searchFixtureContainsMarker(t *testing.T, name, marker string) bool {
+	t.Helper()
+	var response struct {
+		Data struct {
+			Issues struct {
+				Nodes []struct {
+					Description string `json:"description"`
+				} `json:"nodes"`
+			} `json:"issues"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(linearFixture(t, name), &response); err != nil {
+		t.Errorf("decode Linear search fixture %s: %v", name, err)
+		return false
+	}
+	if len(response.Data.Issues.Nodes) != 1 {
+		t.Errorf("Linear search fixture %s has %d issues, want 1", name, len(response.Data.Issues.Nodes))
+		return false
+	}
+	return marker != "" && strings.Contains(response.Data.Issues.Nodes[0].Description, marker)
+}
+
+func issueFixtureHasID(t *testing.T, name, issueID string) bool {
+	t.Helper()
+	var response struct {
+		Data struct {
+			Issue *struct {
+				ID string `json:"id"`
+			} `json:"issue"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(linearFixture(t, name), &response); err != nil {
+		t.Errorf("decode Linear issue fixture %s: %v", name, err)
+		return false
+	}
+	return issueID != "" && response.Data.Issue != nil && response.Data.Issue.ID == issueID
 }
 
 func (fake *fakeLinear) failure(operation string) string {
@@ -159,7 +198,8 @@ func (fake *fakeLinear) handle(w http.ResponseWriter, r *http.Request) {
 	switch request.OperationName {
 	case "HKIssueSearch":
 		fixture = "issue_search_empty.json"
-		if issueExists {
+		marker, _ := request.Variables["marker"].(string)
+		if issueExists && searchFixtureContainsMarker(fake.t, "issue_search_found.json", marker) {
 			fixture = "issue_search_found.json"
 		}
 	case "HKTeamLookup":
@@ -191,6 +231,10 @@ func (fake *fakeLinear) handle(w http.ResponseWriter, r *http.Request) {
 			default:
 				fake.t.Errorf("unknown issue state %q", state)
 			}
+		}
+		issueID, _ := request.Variables["id"].(string)
+		if fixture != "" && !issueFixtureHasID(fake.t, fixture, issueID) {
+			fixture = "issue_get_missing.json"
 		}
 	case "HKIssueArchive":
 		fixture = "issue_archive.json"
