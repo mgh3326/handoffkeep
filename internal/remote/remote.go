@@ -260,6 +260,20 @@ func (c Client) ListTasks(ctx context.Context, lane, state, parentLane string, l
 	err := c.call(ctx, "GET", "/v1/tasks?"+q.Encode(), nil, &out)
 	return out.Tasks, err
 }
+func (c Client) ListTasksPage(ctx context.Context, lane, state, parentLane string, afterID int64, limit int) ([]store.Task, error) {
+	var out struct {
+		Tasks []store.Task `json:"tasks"`
+	}
+	q := url.Values{
+		"lane":        {lane},
+		"state":       {state},
+		"parent_lane": {parentLane},
+		"after_id":    {fmt.Sprint(afterID)},
+		"limit":       {fmt.Sprint(limit)},
+	}
+	err := c.call(ctx, "GET", "/v1/tasks?"+q.Encode(), nil, &out)
+	return out.Tasks, err
+}
 func (c Client) GetTask(ctx context.Context, id int64) (store.Task, bool, error) {
 	var out store.Task
 	err := c.call(ctx, "GET", fmt.Sprintf("/v1/tasks/%d", id), nil, &out)
@@ -267,6 +281,12 @@ func (c Client) GetTask(ctx context.Context, id int64) (store.Task, bool, error)
 		return out, false, nil
 	}
 	return out, err == nil, err
+}
+
+func (c Client) LinearOutboxStatus(ctx context.Context) (store.LinearOutboxStatus, error) {
+	var out store.LinearOutboxStatus
+	err := c.call(ctx, "GET", "/v1/linear/status", nil, &out)
+	return out, err
 }
 
 // ResolveDecision closes an already-handled decision through the bearer API.

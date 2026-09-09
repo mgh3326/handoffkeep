@@ -1,0 +1,1 @@
+{"errors":[{"message":"Authentication required","path":["issueCreate"],"extensions":{"code":"AUTHENTICATION_ERROR"}}],"data":null}

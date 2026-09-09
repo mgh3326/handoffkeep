@@ -9,6 +9,8 @@ User=root
 EnvironmentFile=/root/at-secrets/.env.handoffkeep
 # HANDOFFKEEP_LISTEN_TAILNET is optional and supplied by the protected env file.
 ExecStart=/usr/local/bin/handoffkeep serve --listen 127.0.0.1:8800 --listen-tailnet ${HANDOFFKEEP_LISTEN_TAILNET}
+# systemd's default KillSignal=SIGTERM matches the process signal handler.
+TimeoutStopSec=30
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true

@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -10,15 +12,20 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/mgh3326/handoffkeep/internal/api"
 	"github.com/mgh3326/handoffkeep/internal/attachments"
 	"github.com/mgh3326/handoffkeep/internal/cfaccess"
+	"github.com/mgh3326/handoffkeep/internal/linear"
 	hkmcp "github.com/mgh3326/handoffkeep/internal/mcp"
 	"github.com/mgh3326/handoffkeep/internal/remote"
 	"github.com/mgh3326/handoffkeep/internal/store"
@@ -38,7 +45,7 @@ func main() {
 }
 func run(args []string, out, errout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: handoffkeep serve|mcp|ctx|memory|doc|attach|r2usage|tasks|decisions")
+		return errors.New("usage: handoffkeep serve|mcp|ctx|memory|doc|attach|r2usage|tasks|decisions|linear")
 	}
 	switch args[0] {
 	case "serve":
@@ -59,8 +66,82 @@ func run(args []string, out, errout io.Writer) error {
 		return tasksCmd(args[1:], out)
 	case "decisions":
 		return decisionsCmd(args[1:], out)
+	case "linear":
+		return linearCmd(args[1:], out)
 	default:
-		return errors.New("usage: handoffkeep serve|mcp|ctx|memory|doc|attach|r2usage|tasks|decisions")
+		return errors.New("usage: handoffkeep serve|mcp|ctx|memory|doc|attach|r2usage|tasks|decisions|linear")
+	}
+}
+
+func linearCmd(args []string, out io.Writer) error {
+	if len(args) == 0 || args[0] != "reconcile" {
+		return errors.New("usage: handoffkeep linear reconcile [--dry-run]")
+	}
+	fs := flag.NewFlagSet("linear reconcile", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	hkClient := remoteClient(fs)
+	dryRun := fs.Bool("dry-run", false, "print drift without writing the handoffkeep report")
+	apiURL := fs.String("linear-api-url", strings.TrimSpace(os.Getenv("HK_LINEAR_API_URL")), "Linear GraphQL URL (defaults to the official endpoint)")
+	teamID := fs.String("linear-team-id", strings.TrimSpace(os.Getenv("HK_LINEAR_TEAM_ID")), "Linear team ID")
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	if err := mustClient(hkClient); err != nil {
+		return err
+	}
+	linearClient, err := linear.NewClient(linear.Config{
+		APIURL: *apiURL,
+		APIKey: strings.TrimSpace(os.Getenv("HK_LINEAR_API_KEY")),
+		TeamID: *teamID,
+	})
+	if err != nil {
+		return err
+	}
+	reconciler := &linear.Reconciler{
+		Client: linearClient,
+		ListTasks: func(ctx context.Context) ([]store.Task, error) {
+			return listAllReconcileTasks(ctx, func(ctx context.Context, afterID int64, limit int) ([]store.Task, error) {
+				return hkClient.ListTasksPage(ctx, "", "", "", afterID, limit)
+			})
+		},
+		OutboxStatus: hkClient.LinearOutboxStatus,
+		WriteDocument: func(ctx context.Context, document store.Document) (store.Document, bool, error) {
+			return hkClient.PutDocument(ctx, "", document)
+		},
+		DryRun: *dryRun,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), linear.ReconcilePassBudget)
+	defer cancel()
+	report, err := reconciler.RunOnce(ctx)
+	if err != nil {
+		return err
+	}
+	report.Body = ""
+	return printJSON(out, report)
+}
+
+const reconcileTaskPageSize = 1000
+
+func listAllReconcileTasks(ctx context.Context, fetch func(context.Context, int64, int) ([]store.Task, error)) ([]store.Task, error) {
+	var tasks []store.Task
+	var afterID int64
+	for {
+		page, err := fetch(ctx, afterID, reconcileTaskPageSize)
+		if err != nil {
+			return nil, err
+		}
+		previousID := afterID
+		for _, task := range page {
+			if task.ID <= previousID {
+				return nil, fmt.Errorf("task cursor did not advance after %d", previousID)
+			}
+			previousID = task.ID
+		}
+		tasks = append(tasks, page...)
+		if len(page) < reconcileTaskPageSize {
+			return tasks, nil
+		}
+		afterID = previousID
 	}
 }
 
@@ -116,13 +197,13 @@ func checkpointRefs(values []string) (store.Refs, error) {
 	return refs, nil
 }
 
-func taskRefs(pr, headSHA, reportPath, jobID string) (*store.TaskRefs, bool) {
-	x := &store.TaskRefs{PR: pr, HeadSHA: headSHA, ReportPath: reportPath, JobID: jobID}
-	return x, pr != "" || headSHA != "" || reportPath != "" || jobID != ""
+func taskRefs(pr, headSHA, reportPath, jobID string, linear *store.TaskLinear) (*store.TaskRefs, bool) {
+	x := &store.TaskRefs{PR: pr, HeadSHA: headSHA, ReportPath: reportPath, JobID: jobID, Linear: linear}
+	return x, pr != "" || headSHA != "" || reportPath != "" || jobID != "" || linear != nil
 }
 
 func normalizeTaskArgs(args []string) ([]string, error) {
-	valueFlags := map[string]bool{"--url": true, "--token": true, "--lane": true, "--parent-lane": true, "--state": true, "--title": true, "--kind": true, "--priority": true, "--by": true, "--to": true, "--note": true, "--question": true, "--limit": true, "--pr": true, "--head-sha": true, "--report-path": true, "--job-id": true, "--option": true, "--recommended": true}
+	valueFlags := map[string]bool{"--url": true, "--token": true, "--lane": true, "--parent-lane": true, "--state": true, "--title": true, "--kind": true, "--priority": true, "--by": true, "--to": true, "--note": true, "--question": true, "--limit": true, "--pr": true, "--head-sha": true, "--report-path": true, "--job-id": true, "--option": true, "--recommended": true, "--tier": true, "--grade": true, "--brief-key": true, "--label": true, "--linear-report-key": true, "--linear-verify-key": true, "--linear-decision-key": true, "--deploy-sha": true}
 	flags, positional := []string{}, []string{}
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -164,6 +245,16 @@ func tasksCmd(args []string, out io.Writer) error {
 	headSHA := fs.String("head-sha", "", "head revision reference")
 	reportPath := fs.String("report-path", "", "report path reference")
 	jobID := fs.String("job-id", "", "job reference")
+	linearSync := fs.Bool("linear-sync", false, "mirror this builder task when the serving instance also enables Linear sync")
+	tier := fs.String("tier", "", "Linear task tier metadata (T0..T3)")
+	grade := fs.String("grade", "", "Linear task grade metadata (S+..C)")
+	briefKey := fs.String("brief-key", "", "handoffkeep brief document key for the Linear issue")
+	linearReportKey := fs.String("linear-report-key", "", "handoffkeep report document key for a terminal Linear comment")
+	linearVerifyKey := fs.String("linear-verify-key", "", "independent verification report key for a terminal Linear comment")
+	linearDecisionKey := fs.String("linear-decision-key", "", "decision document key for a terminal Linear comment")
+	deploySHA := fs.String("deploy-sha", "", "deployed revision for a terminal Linear comment")
+	var linearLabels refFlags
+	fs.Var(&linearLabels, "label", "existing Linear label name (repeatable; labels are never created)")
 	var optionValues refFlags
 	fs.Var(&optionValues, "option", "decision option A|label (repeatable)")
 	recommended := fs.String("recommended", "", "recommended decision option key")
@@ -174,6 +265,27 @@ func tasksCmd(args []string, out io.Writer) error {
 	}
 	if err := fs.Parse(parseArgs); err != nil {
 		return err
+	}
+	linearFlagsUsed := false
+	fs.Visit(func(item *flag.Flag) {
+		switch item.Name {
+		case "linear-sync", "tier", "grade", "brief-key", "label", "linear-report-key", "linear-verify-key", "linear-decision-key", "deploy-sha":
+			linearFlagsUsed = true
+		}
+	})
+	var linearRefs *store.TaskLinear
+	if linearFlagsUsed {
+		linearRefs = &store.TaskLinear{
+			Sync:      *linearSync,
+			Tier:      *tier,
+			Grade:     *grade,
+			Brief:     *briefKey,
+			Labels:    append([]string{}, linearLabels...),
+			Report:    *linearReportKey,
+			Verify:    *linearVerifyKey,
+			Decision:  *linearDecisionKey,
+			DeploySHA: *deploySHA,
+		}
 	}
 	if err := mustClient(c); err != nil {
 		return err
@@ -195,7 +307,7 @@ func tasksCmd(args []string, out io.Writer) error {
 		if fs.NArg() != 0 {
 			return errors.New("tasks add takes flags only")
 		}
-		refs, _ := taskRefs(*pr, *headSHA, *reportPath, *jobID)
+		refs, _ := taskRefs(*pr, *headSHA, *reportPath, *jobID, linearRefs)
 		x, err := c.CreateTask(ctx, store.Task{Lane: *lane, ParentLane: *parentLane, Title: *title, Kind: *kind, Priority: *priority, Refs: *refs})
 		if err != nil {
 			return err
@@ -249,7 +361,7 @@ func tasksCmd(args []string, out io.Writer) error {
 				*note = *question
 			}
 		}
-		refs, hasRefs := taskRefs(*pr, *headSHA, *reportPath, *jobID)
+		refs, hasRefs := taskRefs(*pr, *headSHA, *reportPath, *jobID, linearRefs)
 		if usingOptions {
 			options, err := parseTaskDecisionOptions(optionValues, *recommended, *noFreeAnswer)
 			if err != nil {
@@ -613,7 +725,16 @@ func docCmd(args []string, out io.Writer) error {
 	}
 	fs := flag.NewFlagSet("doc "+args[0], flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	c := remoteClient(fs)
+	var c *remote.Client
+	if args[0] == "import" && hasFlag(args[1:], "manifest-out") {
+		// Candidate generation is intentionally local-only. Avoid even loading
+		// handoffkeep credentials when no service call can be made.
+		c = &remote.Client{}
+		fs.StringVar(&c.URL, "url", "", "handoffkeep HTTP URL")
+		fs.StringVar(&c.Token, "token", "", "handoffkeep bearer token")
+	} else {
+		c = remoteClient(fs)
+	}
 	key := fs.String("key", "", "key")
 	kind := fs.String("kind", "", "kind")
 	session := fs.String("session", "", "session")
@@ -622,14 +743,22 @@ func docCmd(args []string, out io.Writer) error {
 	prefix := fs.String("prefix", "", "prefix")
 	dir := fs.String("dir", "", "directory")
 	glob := fs.String("glob", "**/*.md", "glob")
+	manifest := fs.String("manifest", "", "JSON import manifest")
+	manifestOut := fs.String("manifest-out", "", "write a candidate JSON manifest without importing")
 	apply := fs.Bool("apply", false, "apply changes")
 	if e := fs.Parse(args[1:]); e != nil {
 		return e
 	}
+	ctx := context.Background()
+	if args[0] == "import" && *manifestOut != "" {
+		if *manifest != "" || *apply {
+			return errors.New("--manifest-out cannot be combined with --manifest or --apply")
+		}
+		return writeImportManifest(*dir, *glob, *manifestOut, out)
+	}
 	if e := mustClient(c); e != nil {
 		return e
 	}
-	ctx := context.Background()
 	switch args[0] {
 	case "put":
 		if *kind == "" {
@@ -663,11 +792,224 @@ func docCmd(args []string, out io.Writer) error {
 		}
 		return printJSON(out, v)
 	case "import":
+		if *manifest != "" {
+			if *dir != "" {
+				return errors.New("--manifest cannot be combined with --dir")
+			}
+			return importDocsManifest(ctx, c, *manifest, *apply, out)
+		}
 		return importDocs(ctx, c, *dir, *glob, *apply, out)
 	default:
 		return errors.New("usage: doc put|get|list|import")
 	}
 }
+
+func hasFlag(args []string, name string) bool {
+	want := "--" + name
+	for _, arg := range args {
+		if arg == want || strings.HasPrefix(arg, want+"=") {
+			return true
+		}
+	}
+	return false
+}
+
+type docImportManifestEntry struct {
+	Key    string `json:"key"`
+	Path   string `json:"path"`
+	SHA256 string `json:"sha256"`
+	Kind   string `json:"kind"`
+}
+
+type docImportManifestItemResult struct {
+	Key     string `json:"key"`
+	Status  string `json:"status"`
+	Pattern string `json:"pattern,omitempty"`
+	Error   string `json:"error,omitempty"`
+}
+
+type docImportManifestResult struct {
+	DryRun bool                          `json:"dry_run"`
+	Items  []docImportManifestItemResult `json:"items"`
+}
+
+type docImportManifestSkipped struct {
+	Path   string `json:"path"`
+	Reason string `json:"reason"`
+}
+
+var (
+	robManifestName = regexp.MustCompile(`^ROB-(\d+)`)
+	robManifestKey  = regexp.MustCompile(`^linear/ROB-\d+$`)
+	manifestSHA256  = regexp.MustCompile(`^[0-9a-fA-F]{64}$`)
+)
+
+func sha256Hex(body []byte) string {
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:])
+}
+
+func writeImportManifest(dir, glob, destination string, out io.Writer) error {
+	if dir == "" || destination == "" {
+		return errors.New("doc import --manifest-out requires --dir and an output file")
+	}
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		return err
+	}
+	entries := []docImportManifestEntry{}
+	skipped := []docImportManifestSkipped{}
+	byKey := map[string]string{}
+	err = filepath.WalkDir(absDir, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() || !strings.HasSuffix(d.Name(), ".md") {
+			return nil
+		}
+		relative, err := filepath.Rel(absDir, path)
+		if err != nil {
+			return err
+		}
+		relative = filepath.ToSlash(relative)
+		if glob != "**/*.md" {
+			matched, matchErr := filepath.Match(glob, relative)
+			if matchErr != nil {
+				return matchErr
+			}
+			if !matched {
+				return nil
+			}
+		}
+		match := robManifestName.FindStringSubmatch(d.Name())
+		if len(match) != 2 {
+			skipped = append(skipped, docImportManifestSkipped{Path: relative, Reason: "basename does not match ^ROB-(\\d+)"})
+			return nil
+		}
+		key := "linear/ROB-" + match[1]
+		if previous, exists := byKey[key]; exists {
+			return fmt.Errorf("duplicate generated manifest key %q: %q and %q", key, previous, path)
+		}
+		body, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		byKey[key] = path
+		entries = append(entries, docImportManifestEntry{Key: key, Path: path, SHA256: sha256Hex(body), Kind: "note"})
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Key < entries[j].Key })
+	sort.Slice(skipped, func(i, j int) bool { return skipped[i].Path < skipped[j].Path })
+	raw, err := json.MarshalIndent(entries, "", "  ")
+	if err != nil {
+		return err
+	}
+	raw = append(raw, '\n')
+	if err := os.WriteFile(destination, raw, 0600); err != nil {
+		return err
+	}
+	return printJSON(out, map[string]any{
+		"dry_run": true, "manifest_out": destination, "matched": len(entries), "skipped": skipped,
+	})
+}
+
+func readImportManifest(path string) ([]docImportManifestEntry, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	decoder := json.NewDecoder(file)
+	decoder.DisallowUnknownFields()
+	var entries []docImportManifestEntry
+	if err := decoder.Decode(&entries); err != nil {
+		return nil, err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return nil, errors.New("manifest contains trailing JSON values")
+		}
+		return nil, err
+	}
+	byKey := map[string]string{}
+	for _, entry := range entries {
+		if !robManifestKey.MatchString(entry.Key) || !filepath.IsAbs(entry.Path) || !manifestSHA256.MatchString(entry.SHA256) || entry.Kind != "note" {
+			return nil, fmt.Errorf("invalid manifest entry for key %q", entry.Key)
+		}
+		if previous, exists := byKey[entry.Key]; exists {
+			return nil, fmt.Errorf("duplicate manifest key %q: %q and %q", entry.Key, previous, entry.Path)
+		}
+		byKey[entry.Key] = entry.Path
+	}
+	return entries, nil
+}
+
+func importDocsManifest(ctx context.Context, c *remote.Client, path string, apply bool, out io.Writer) error {
+	entries, err := readImportManifest(path)
+	if err != nil {
+		return err
+	}
+	result := docImportManifestResult{DryRun: !apply, Items: make([]docImportManifestItemResult, 0, len(entries))}
+	for _, entry := range entries {
+		item := docImportManifestItemResult{Key: entry.Key}
+		body, err := os.ReadFile(entry.Path)
+		if err != nil {
+			return err
+		}
+		actualSHA := sha256Hex(body)
+		if !strings.EqualFold(actualSHA, entry.SHA256) {
+			item.Status = "sha_mismatch"
+			item.Error = fmt.Sprintf("expected %s, got %s", strings.ToLower(entry.SHA256), actualSHA)
+			result.Items = append(result.Items, item)
+			continue
+		}
+		existing, found, err := c.GetDocument(ctx, entry.Key)
+		if err != nil {
+			return err
+		}
+		if found {
+			existingSHA := existing.SHA256
+			if existingSHA == "" {
+				existingSHA = sha256Hex([]byte(existing.Body))
+			}
+			if !strings.EqualFold(existingSHA, actualSHA) || existing.Kind != entry.Kind {
+				item.Status = "conflict"
+				item.Error = "existing document body or kind differs"
+			} else {
+				item.Status = "unchanged"
+			}
+			result.Items = append(result.Items, item)
+			continue
+		}
+		if !apply {
+			item.Status = "created"
+			result.Items = append(result.Items, item)
+			continue
+		}
+		_, changed, err := c.PutDocument(ctx, "", store.Document{Key: entry.Key, Kind: entry.Kind, Body: string(body)})
+		if err != nil {
+			if pattern, rejected := strings.CutPrefix(err.Error(), "secret_like_content:"); rejected {
+				item.Status = "rejected"
+				item.Pattern = pattern
+				result.Items = append(result.Items, item)
+				continue
+			}
+			return err
+		}
+		if changed {
+			item.Status = "created"
+		} else {
+			item.Status = "unchanged"
+		}
+		result.Items = append(result.Items, item)
+	}
+	return printJSON(out, result)
+}
+
 func importDocs(ctx context.Context, c *remote.Client, dir, glob string, apply bool, out io.Writer) error {
 	if dir == "" {
 		return errors.New("doc import requires --dir")
@@ -995,11 +1337,171 @@ func validListen(addr string, tailnet bool) error {
 	}
 	return nil
 }
+
+const (
+	httpDrainBudget  = 10 * time.Second
+	workerStopBudget = 5 * time.Second
+)
+
+type serverBinding struct {
+	server   *http.Server
+	listener net.Listener
+}
+
+type backgroundWorker interface {
+	Run(context.Context)
+}
+
+type storeCloser interface {
+	Close()
+}
+
+type serveOptions struct {
+	bindings         []serverBinding
+	workers          []backgroundWorker
+	store            storeCloser
+	httpDrainBudget  time.Duration
+	workerStopBudget time.Duration
+}
+
+func configureLinearWorkers(enabled bool, st *store.Store, apiURL, teamID string, apiKey func() string) ([]backgroundWorker, error) {
+	if !enabled {
+		return nil, nil
+	}
+	key := ""
+	if apiKey != nil {
+		key = apiKey()
+	}
+	linearClient, err := linear.NewClient(linear.Config{APIURL: apiURL, APIKey: key, TeamID: teamID})
+	if err != nil {
+		return nil, err
+	}
+	st.EnableLinearSync()
+	return []backgroundWorker{
+		&linear.Drain{Store: st, Client: linearClient},
+		&linear.Reconciler{
+			Client: linearClient,
+			ListTasks: func(ctx context.Context) ([]store.Task, error) {
+				return listAllReconcileTasks(ctx, func(ctx context.Context, afterID int64, limit int) ([]store.Task, error) {
+					return st.ListTasksPage(ctx, "", "", "", afterID, limit)
+				})
+			},
+			OutboxStatus: st.GetLinearOutboxStatus,
+			WriteDocument: func(ctx context.Context, document store.Document) (store.Document, bool, error) {
+				document.CreatedBy = "linear-reconcile"
+				return st.PutDocument(ctx, document)
+			},
+		},
+	}, nil
+}
+
+// runServer owns the serving lifecycle. HTTP listeners stop accepting new
+// connections first, active requests receive their drain budget, background
+// workers are canceled only after that drain, and the store closes last.
+func runServer(ctx context.Context, opts serveOptions) error {
+	if len(opts.bindings) == 0 {
+		return errors.New("at least one server binding is required")
+	}
+	if opts.httpDrainBudget <= 0 {
+		opts.httpDrainBudget = httpDrainBudget
+	}
+	if opts.workerStopBudget <= 0 {
+		opts.workerStopBudget = workerStopBudget
+	}
+
+	signalCtx, stopSignals := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
+	defer stopSignals()
+	workerCtx, cancelWorkers := context.WithCancel(context.WithoutCancel(ctx))
+	defer cancelWorkers()
+
+	var workerWG sync.WaitGroup
+	for _, worker := range opts.workers {
+		if worker == nil {
+			continue
+		}
+		workerWG.Add(1)
+		go func() {
+			defer workerWG.Done()
+			worker.Run(workerCtx)
+		}()
+	}
+
+	serveErrs := make(chan error, len(opts.bindings))
+	for _, binding := range opts.bindings {
+		if binding.server == nil || binding.listener == nil {
+			cancelWorkers()
+			return errors.New("server and listener are required")
+		}
+		go func(binding serverBinding) {
+			err := binding.server.Serve(binding.listener)
+			if errors.Is(err, http.ErrServerClosed) {
+				err = nil
+			}
+			serveErrs <- err
+		}(binding)
+	}
+
+	var triggerErr error
+	select {
+	case <-signalCtx.Done():
+	case triggerErr = <-serveErrs:
+	}
+
+	drainCtx, cancelDrain := context.WithTimeout(context.Background(), opts.httpDrainBudget)
+	var drainWG sync.WaitGroup
+	drainErrs := make(chan error, len(opts.bindings))
+	for _, binding := range opts.bindings {
+		drainWG.Add(1)
+		go func(server *http.Server) {
+			defer drainWG.Done()
+			if err := server.Shutdown(drainCtx); err != nil {
+				drainErrs <- err
+			}
+		}(binding.server)
+	}
+	drainWG.Wait()
+	cancelDrain()
+	close(drainErrs)
+	var lifecycleErr error
+	for err := range drainErrs {
+		lifecycleErr = errors.Join(lifecycleErr, err)
+	}
+	if lifecycleErr != nil {
+		// Shutdown already closed listeners. Close also cancels request contexts
+		// so a handler honoring its context cannot outlive the bounded drain.
+		for _, binding := range opts.bindings {
+			_ = binding.server.Close()
+		}
+	}
+
+	cancelWorkers()
+	workersDone := make(chan struct{})
+	go func() {
+		workerWG.Wait()
+		close(workersDone)
+	}()
+	workerCtxTimeout, cancelWorkerWait := context.WithTimeout(context.Background(), opts.workerStopBudget)
+	select {
+	case <-workersDone:
+	case <-workerCtxTimeout.Done():
+		lifecycleErr = errors.Join(lifecycleErr, errors.New("background workers did not stop within budget"))
+	}
+	cancelWorkerWait()
+
+	if opts.store != nil {
+		opts.store.Close()
+	}
+	return errors.Join(triggerErr, lifecycleErr)
+}
+
 func serve(args []string, errout io.Writer) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.SetOutput(errout)
 	listen := fs.String("listen", "127.0.0.1:8800", "loopback address")
 	tail := fs.String("listen-tailnet", "", "optional tailnet address")
+	linearSync := fs.Bool("linear-sync", false, "enable hk-to-Linear outbox drain and reconciliation (default off)")
+	linearAPIURL := fs.String("linear-api-url", strings.TrimSpace(os.Getenv("HK_LINEAR_API_URL")), "Linear GraphQL URL")
+	linearTeamID := fs.String("linear-team-id", strings.TrimSpace(os.Getenv("HK_LINEAR_TEAM_ID")), "Linear team ID")
 	if e := fs.Parse(args); e != nil {
 		return e
 	}
@@ -1020,7 +1522,12 @@ func serve(args []string, errout io.Writer) error {
 	if e != nil {
 		return e
 	}
-	defer st.Close()
+	closeStore := true
+	defer func() {
+		if closeStore {
+			st.Close()
+		}
+	}()
 	tokens, e := api.LoadTokens(auth)
 	if e != nil {
 		return e
@@ -1030,6 +1537,12 @@ func serve(args []string, errout io.Writer) error {
 		return e
 	}
 	svc := api.Service{Store: st, Attachments: am}
+	workers, e := configureLinearWorkers(*linearSync, st, *linearAPIURL, *linearTeamID, func() string {
+		return strings.TrimSpace(os.Getenv("HK_LINEAR_API_KEY"))
+	})
+	if e != nil {
+		return e
+	}
 	uiHandler, e := uiFromEnv(st)
 	if e != nil {
 		return e
@@ -1037,15 +1550,26 @@ func serve(args []string, errout io.Writer) error {
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", hkmcp.HTTPHandler(svc, tokens))
 	mux.Handle("/", api.Server{Service: svc, Tokens: tokens, UI: uiHandler}.Handler())
-	servers := []*http.Server{{Addr: *listen, Handler: mux}}
+	addresses := []string{*listen}
 	if *tail != "" {
-		servers = append(servers, &http.Server{Addr: *tail, Handler: mux})
+		addresses = append(addresses, *tail)
 	}
-	errs := make(chan error, len(servers))
-	for _, s := range servers {
-		go func(s *http.Server) { errs <- s.ListenAndServe() }(s)
+	bindings := make([]serverBinding, 0, len(addresses))
+	for _, address := range addresses {
+		listener, err := net.Listen("tcp", address)
+		if err != nil {
+			for _, binding := range bindings {
+				_ = binding.listener.Close()
+			}
+			return err
+		}
+		bindings = append(bindings, serverBinding{
+			server:   &http.Server{Addr: address, Handler: mux},
+			listener: listener,
+		})
 	}
-	return <-errs
+	closeStore = false
+	return runServer(ctx, serveOptions{bindings: bindings, workers: workers, store: st})
 }
 
 // uiFromEnv intentionally treats incomplete Cloudflare Access configuration as
