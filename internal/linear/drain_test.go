@@ -322,21 +322,23 @@ func TestLinearDrainAdvisoryLockSingleOwnerAndRelease(t *testing.T) {
 }
 
 func TestLinearFailureClassificationAndMissingLabels(t *testing.T) {
-	t.Run("permanent", func(t *testing.T) {
-		st, _ := isolatedLinearStore(t)
-		st.EnableLinearSync()
-		fake := newFakeLinear(t)
-		fake.alwaysFailure["HKIssueSearch"] = "401"
-		task := createDrainTask(t, st, store.TaskRefs{Linear: &store.TaskLinear{Sync: true}})
-		stop := startTestDrain(t, st, fake.client(t), 5*time.Millisecond)
-		rows := waitOutbox(t, st, task.ID, func(rows []store.LinearOutbox) bool {
-			return len(rows) == 1 && rows[0].State == "failed"
+	for _, mode := range []string{"401", "403", "auth", "forbidden"} {
+		t.Run("permanent_"+mode, func(t *testing.T) {
+			st, _ := isolatedLinearStore(t)
+			st.EnableLinearSync()
+			fake := newFakeLinear(t)
+			fake.alwaysFailure["HKIssueSearch"] = mode
+			task := createDrainTask(t, st, store.TaskRefs{Linear: &store.TaskLinear{Sync: true}})
+			stop := startTestDrain(t, st, fake.client(t), 5*time.Millisecond)
+			rows := waitOutbox(t, st, task.ID, func(rows []store.LinearOutbox) bool {
+				return len(rows) == 1 && rows[0].State == "failed"
+			})
+			stop()
+			if rows[0].Attempts != 1 || rows[0].LastError == "" {
+				t.Fatalf("permanent mode=%s row=%+v", mode, rows[0])
+			}
 		})
-		stop()
-		if rows[0].Attempts != 1 || rows[0].LastError == "" {
-			t.Fatalf("permanent row=%+v", rows[0])
-		}
-	})
+	}
 	t.Run("transient", func(t *testing.T) {
 		st, _ := isolatedLinearStore(t)
 		st.EnableLinearSync()
