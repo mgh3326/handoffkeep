@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -12,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -695,7 +698,16 @@ func docCmd(args []string, out io.Writer) error {
 	}
 	fs := flag.NewFlagSet("doc "+args[0], flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	c := remoteClient(fs)
+	var c *remote.Client
+	if args[0] == "import" && hasFlag(args[1:], "manifest-out") {
+		// Candidate generation is intentionally local-only. Avoid even loading
+		// handoffkeep credentials when no service call can be made.
+		c = &remote.Client{}
+		fs.StringVar(&c.URL, "url", "", "handoffkeep HTTP URL")
+		fs.StringVar(&c.Token, "token", "", "handoffkeep bearer token")
+	} else {
+		c = remoteClient(fs)
+	}
 	key := fs.String("key", "", "key")
 	kind := fs.String("kind", "", "kind")
 	session := fs.String("session", "", "session")
@@ -704,14 +716,22 @@ func docCmd(args []string, out io.Writer) error {
 	prefix := fs.String("prefix", "", "prefix")
 	dir := fs.String("dir", "", "directory")
 	glob := fs.String("glob", "**/*.md", "glob")
+	manifest := fs.String("manifest", "", "JSON import manifest")
+	manifestOut := fs.String("manifest-out", "", "write a candidate JSON manifest without importing")
 	apply := fs.Bool("apply", false, "apply changes")
 	if e := fs.Parse(args[1:]); e != nil {
 		return e
 	}
+	ctx := context.Background()
+	if args[0] == "import" && *manifestOut != "" {
+		if *manifest != "" || *apply {
+			return errors.New("--manifest-out cannot be combined with --manifest or --apply")
+		}
+		return writeImportManifest(*dir, *glob, *manifestOut, out)
+	}
 	if e := mustClient(c); e != nil {
 		return e
 	}
-	ctx := context.Background()
 	switch args[0] {
 	case "put":
 		if *kind == "" {
@@ -745,11 +765,224 @@ func docCmd(args []string, out io.Writer) error {
 		}
 		return printJSON(out, v)
 	case "import":
+		if *manifest != "" {
+			if *dir != "" {
+				return errors.New("--manifest cannot be combined with --dir")
+			}
+			return importDocsManifest(ctx, c, *manifest, *apply, out)
+		}
 		return importDocs(ctx, c, *dir, *glob, *apply, out)
 	default:
 		return errors.New("usage: doc put|get|list|import")
 	}
 }
+
+func hasFlag(args []string, name string) bool {
+	want := "--" + name
+	for _, arg := range args {
+		if arg == want || strings.HasPrefix(arg, want+"=") {
+			return true
+		}
+	}
+	return false
+}
+
+type docImportManifestEntry struct {
+	Key    string `json:"key"`
+	Path   string `json:"path"`
+	SHA256 string `json:"sha256"`
+	Kind   string `json:"kind"`
+}
+
+type docImportManifestItemResult struct {
+	Key     string `json:"key"`
+	Status  string `json:"status"`
+	Pattern string `json:"pattern,omitempty"`
+	Error   string `json:"error,omitempty"`
+}
+
+type docImportManifestResult struct {
+	DryRun bool                          `json:"dry_run"`
+	Items  []docImportManifestItemResult `json:"items"`
+}
+
+type docImportManifestSkipped struct {
+	Path   string `json:"path"`
+	Reason string `json:"reason"`
+}
+
+var (
+	robManifestName = regexp.MustCompile(`^ROB-(\d+)`)
+	robManifestKey  = regexp.MustCompile(`^linear/ROB-\d+$`)
+	manifestSHA256  = regexp.MustCompile(`^[0-9a-fA-F]{64}$`)
+)
+
+func sha256Hex(body []byte) string {
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:])
+}
+
+func writeImportManifest(dir, glob, destination string, out io.Writer) error {
+	if dir == "" || destination == "" {
+		return errors.New("doc import --manifest-out requires --dir and an output file")
+	}
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		return err
+	}
+	entries := []docImportManifestEntry{}
+	skipped := []docImportManifestSkipped{}
+	byKey := map[string]string{}
+	err = filepath.WalkDir(absDir, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() || !strings.HasSuffix(d.Name(), ".md") {
+			return nil
+		}
+		relative, err := filepath.Rel(absDir, path)
+		if err != nil {
+			return err
+		}
+		relative = filepath.ToSlash(relative)
+		if glob != "**/*.md" {
+			matched, matchErr := filepath.Match(glob, relative)
+			if matchErr != nil {
+				return matchErr
+			}
+			if !matched {
+				return nil
+			}
+		}
+		match := robManifestName.FindStringSubmatch(d.Name())
+		if len(match) != 2 {
+			skipped = append(skipped, docImportManifestSkipped{Path: relative, Reason: "basename does not match ^ROB-(\\d+)"})
+			return nil
+		}
+		key := "linear/ROB-" + match[1]
+		if previous, exists := byKey[key]; exists {
+			return fmt.Errorf("duplicate generated manifest key %q: %q and %q", key, previous, path)
+		}
+		body, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		byKey[key] = path
+		entries = append(entries, docImportManifestEntry{Key: key, Path: path, SHA256: sha256Hex(body), Kind: "note"})
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Key < entries[j].Key })
+	sort.Slice(skipped, func(i, j int) bool { return skipped[i].Path < skipped[j].Path })
+	raw, err := json.MarshalIndent(entries, "", "  ")
+	if err != nil {
+		return err
+	}
+	raw = append(raw, '\n')
+	if err := os.WriteFile(destination, raw, 0600); err != nil {
+		return err
+	}
+	return printJSON(out, map[string]any{
+		"dry_run": true, "manifest_out": destination, "matched": len(entries), "skipped": skipped,
+	})
+}
+
+func readImportManifest(path string) ([]docImportManifestEntry, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	decoder := json.NewDecoder(file)
+	decoder.DisallowUnknownFields()
+	var entries []docImportManifestEntry
+	if err := decoder.Decode(&entries); err != nil {
+		return nil, err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return nil, errors.New("manifest contains trailing JSON values")
+		}
+		return nil, err
+	}
+	byKey := map[string]string{}
+	for _, entry := range entries {
+		if !robManifestKey.MatchString(entry.Key) || !filepath.IsAbs(entry.Path) || !manifestSHA256.MatchString(entry.SHA256) || entry.Kind != "note" {
+			return nil, fmt.Errorf("invalid manifest entry for key %q", entry.Key)
+		}
+		if previous, exists := byKey[entry.Key]; exists {
+			return nil, fmt.Errorf("duplicate manifest key %q: %q and %q", entry.Key, previous, entry.Path)
+		}
+		byKey[entry.Key] = entry.Path
+	}
+	return entries, nil
+}
+
+func importDocsManifest(ctx context.Context, c *remote.Client, path string, apply bool, out io.Writer) error {
+	entries, err := readImportManifest(path)
+	if err != nil {
+		return err
+	}
+	result := docImportManifestResult{DryRun: !apply, Items: make([]docImportManifestItemResult, 0, len(entries))}
+	for _, entry := range entries {
+		item := docImportManifestItemResult{Key: entry.Key}
+		body, err := os.ReadFile(entry.Path)
+		if err != nil {
+			return err
+		}
+		actualSHA := sha256Hex(body)
+		if !strings.EqualFold(actualSHA, entry.SHA256) {
+			item.Status = "sha_mismatch"
+			item.Error = fmt.Sprintf("expected %s, got %s", strings.ToLower(entry.SHA256), actualSHA)
+			result.Items = append(result.Items, item)
+			continue
+		}
+		existing, found, err := c.GetDocument(ctx, entry.Key)
+		if err != nil {
+			return err
+		}
+		if found {
+			existingSHA := existing.SHA256
+			if existingSHA == "" {
+				existingSHA = sha256Hex([]byte(existing.Body))
+			}
+			if !strings.EqualFold(existingSHA, actualSHA) || existing.Kind != entry.Kind {
+				item.Status = "conflict"
+				item.Error = "existing document body or kind differs"
+			} else {
+				item.Status = "unchanged"
+			}
+			result.Items = append(result.Items, item)
+			continue
+		}
+		if !apply {
+			item.Status = "created"
+			result.Items = append(result.Items, item)
+			continue
+		}
+		_, changed, err := c.PutDocument(ctx, "", store.Document{Key: entry.Key, Kind: entry.Kind, Body: string(body)})
+		if err != nil {
+			if pattern, rejected := strings.CutPrefix(err.Error(), "secret_like_content:"); rejected {
+				item.Status = "rejected"
+				item.Pattern = pattern
+				result.Items = append(result.Items, item)
+				continue
+			}
+			return err
+		}
+		if changed {
+			item.Status = "created"
+		} else {
+			item.Status = "unchanged"
+		}
+		result.Items = append(result.Items, item)
+	}
+	return printJSON(out, result)
+}
+
 func importDocs(ctx context.Context, c *remote.Client, dir, glob string, apply bool, out io.Writer) error {
 	if dir == "" {
 		return errors.New("doc import requires --dir")

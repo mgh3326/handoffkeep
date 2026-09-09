@@ -6,19 +6,26 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/mgh3326/handoffkeep/internal/api"
+	linearconnector "github.com/mgh3326/handoffkeep/internal/linear"
+	"github.com/mgh3326/handoffkeep/internal/remote"
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
 func TestLinearSyncDefaultsOff(t *testing.T) {
 	st := shutdownTestStore(t)
+	baseline := runtime.NumGoroutine()
 	keyRead := false
 	workers, err := configureLinearWorkers(false, st, "", "", func() string {
 		keyRead = true
@@ -26,6 +33,9 @@ func TestLinearSyncDefaultsOff(t *testing.T) {
 	})
 	if err != nil || len(workers) != 0 || keyRead || st.LinearSyncEnabled() {
 		t.Fatalf("workers=%d key_read=%t enabled=%t err=%v", len(workers), keyRead, st.LinearSyncEnabled(), err)
+	}
+	if got := runtime.NumGoroutine(); got != baseline {
+		t.Fatalf("disabled connector started a goroutine: baseline=%d got=%d", baseline, got)
 	}
 	task, err := st.CreateTask(t.Context(), store.Task{
 		Lane:      "linear-off",
@@ -175,7 +185,97 @@ func TestTaskLinearCLIFlagsAreExplicitMetadata(t *testing.T) {
 	if received.Refs.Linear == nil || !received.Refs.Linear.Sync || received.Refs.Linear.Tier != "T3" || received.Refs.Linear.Grade != "S+" || len(received.Refs.Linear.Labels) != 2 {
 		t.Fatalf("linear refs=%+v", received.Refs.Linear)
 	}
-	if _, err := context.WithCancel(t.Context()); err != nil {
+}
+
+func TestTasksTransitionSucceedsWhileLinearUnavailableAndStatusReportsBacklog(t *testing.T) {
+	st := shutdownTestStore(t)
+	st.EnableLinearSync()
+	hkServer := httptest.NewServer(api.Server{
+		Service: api.Service{Store: st},
+		Tokens:  api.Tokens{"fixture-client": "fixture-token"},
+	}.Handler())
+	defer hkServer.Close()
+	t.Setenv("HANDOFFKEEP_URL", hkServer.URL)
+	t.Setenv("HANDOFFKEEP_TOKEN", "fixture-token")
+
+	var addOutput bytes.Buffer
+	if err := tasksCmd([]string{
+		"add", "--lane", "linear-unavailable", "--title", "transition remains available",
+		"--linear-sync", "--tier", "T3", "--grade", "S+",
+	}, &addOutput); err != nil {
+		t.Fatalf("tasks add returned an error: %v", err)
+	}
+	var task store.Task
+	if err := json.Unmarshal(addOutput.Bytes(), &task); err != nil {
 		t.Fatal(err)
+	}
+	if err := tasksCmd([]string{"claim", fmt.Sprint(task.ID), "--by", "builder"}, &bytes.Buffer{}); err != nil {
+		t.Fatalf("tasks claim returned an error: %v", err)
+	}
+	var transitionOutput bytes.Buffer
+	if err := tasksCmd([]string{
+		"transition", fmt.Sprint(task.ID), "--to", "in_progress", "--note", "local transition",
+	}, &transitionOutput); err != nil {
+		t.Fatalf("tasks transition returned an error: %v", err)
+	}
+	var transitioned store.Task
+	if err := json.Unmarshal(transitionOutput.Bytes(), &transitioned); err != nil {
+		t.Fatal(err)
+	}
+	if transitioned.State != "in_progress" {
+		t.Fatalf("state=%q", transitioned.State)
+	}
+
+	unavailable := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	endpoint := unavailable.URL
+	unavailable.Close()
+	linearClient, err := linearconnector.NewClient(linearconnector.Config{
+		APIURL: endpoint,
+		APIKey: "fixture-key",
+		TeamID: "team-1",
+		HTTP:   &http.Client{Timeout: 50 * time.Millisecond},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		(&linearconnector.Drain{
+			Store: st, Client: linearClient, PollInterval: 5 * time.Millisecond,
+			Jitter: func(time.Duration) time.Duration { return 250 * time.Millisecond },
+		}).Run(ctx)
+	}()
+	defer func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Error("Linear drain did not stop")
+		}
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	var rows []store.LinearOutbox
+	for time.Now().Before(deadline) {
+		rows, err = st.ListLinearOutbox(t.Context(), task.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(rows) == 3 && rows[0].Attempts == 1 && rows[0].State == "pending" && rows[0].LastError != "" {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if len(rows) != 3 || rows[0].Attempts != 1 || rows[0].State != "pending" || rows[0].LastError == "" {
+		t.Fatalf("outbox did not retain visible failure: %+v", rows)
+	}
+	status, err := (remote.Client{URL: hkServer.URL, Token: "fixture-token"}).LinearOutboxStatus(t.Context())
+	if err != nil {
+		t.Fatalf("diagnostic status returned an error: %v", err)
+	}
+	if status.Pending < 3 || status.LastError == "" {
+		t.Fatalf("status=%+v", status)
 	}
 }

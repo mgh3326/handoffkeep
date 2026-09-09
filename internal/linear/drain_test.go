@@ -199,6 +199,53 @@ func TestLinearTerminalAmbiguousRestartsSuppressDuplicates(t *testing.T) {
 	}
 }
 
+func TestLinearTerminalPartialFailureDoesNotDuplicateOtherOperation(t *testing.T) {
+	for _, scenario := range []struct {
+		name      string
+		operation string
+		failedRow int
+	}{
+		{name: "comment_response_lost", operation: "HKCommentCreate", failedRow: 0},
+		{name: "archive_response_lost", operation: "HKIssueArchive", failedRow: 1},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			st, scopedURL := isolatedLinearStore(t)
+			fake := newFakeLinear(t)
+			fake.issueExists = true
+			fake.failures[scenario.operation] = []string{"drop"}
+			task := seedOutbox(t, scopedURL,
+				struct {
+					op      string
+					payload string
+				}{store.LinearOpTerminalComment, `{"comment":"Terminal summary"}`},
+				struct {
+					op      string
+					payload string
+				}{store.LinearOpTerminalArchive, `{}`},
+			)
+
+			stopFirst := startTestDrain(t, st, fake.client(t), 300*time.Millisecond)
+			waitOutbox(t, st, task.ID, func(rows []store.LinearOutbox) bool {
+				return len(rows) == 2 && rows[scenario.failedRow].State == "pending" && rows[scenario.failedRow].Attempts == 1
+			})
+			stopFirst()
+			stopSecond := startTestDrain(t, st, fake.client(t), 5*time.Millisecond)
+			rows := waitOutbox(t, st, task.ID, func(rows []store.LinearOutbox) bool {
+				return len(rows) == 2 &&
+					(rows[0].State == "sent" || rows[0].State == "skipped") &&
+					(rows[1].State == "sent" || rows[1].State == "skipped")
+			})
+			stopSecond()
+			if fake.count("HKCommentCreate") != 1 || fake.effect("HKCommentCreate") != 1 {
+				t.Fatalf("comment calls=%d effects=%d rows=%+v", fake.count("HKCommentCreate"), fake.effect("HKCommentCreate"), rows)
+			}
+			if fake.count("HKIssueArchive") != 1 || fake.effect("HKIssueArchive") != 1 {
+				t.Fatalf("archive calls=%d effects=%d rows=%+v", fake.count("HKIssueArchive"), fake.effect("HKIssueArchive"), rows)
+			}
+		})
+	}
+}
+
 func TestLinearIssueStateRestartIsIdempotent(t *testing.T) {
 	st, scopedURL := isolatedLinearStore(t)
 	fake := newFakeLinear(t)
