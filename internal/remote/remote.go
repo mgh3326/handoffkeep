@@ -269,6 +269,12 @@ func (c Client) GetTask(ctx context.Context, id int64) (store.Task, bool, error)
 	return out, err == nil, err
 }
 
+func (c Client) LinearOutboxStatus(ctx context.Context) (store.LinearOutboxStatus, error) {
+	var out store.LinearOutboxStatus
+	err := c.call(ctx, "GET", "/v1/linear/status", nil, &out)
+	return out, err
+}
+
 // ResolveDecision closes an already-handled decision through the bearer API.
 func (c Client) ResolveDecision(ctx context.Context, kind string, id int64, by, answer, note string, noInject bool) (store.RelayEvent, error) {
 	var out struct {

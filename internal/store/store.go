@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -53,6 +54,19 @@ type TaskRefs struct {
 	ReportPath      string           `json:"report_path,omitempty"`
 	JobID           string           `json:"job_id,omitempty"`
 	DecisionOptions *DecisionOptions `json:"decision_options,omitempty"`
+	Linear          *TaskLinear      `json:"linear,omitempty"`
+}
+
+type TaskLinear struct {
+	Sync      bool     `json:"sync"`
+	Tier      string   `json:"tier,omitempty"`
+	Grade     string   `json:"grade,omitempty"`
+	Brief     string   `json:"brief,omitempty"`
+	Labels    []string `json:"labels,omitempty"`
+	Report    string   `json:"report,omitempty"`
+	Verify    string   `json:"verify,omitempty"`
+	Decision  string   `json:"decision,omitempty"`
+	DeploySHA string   `json:"deploy_sha,omitempty"`
 }
 
 // DecisionOption is one bounded, operator-visible answer for a decision.
@@ -268,7 +282,10 @@ type RelayEvent struct {
 	Attempts       int        `json:"attempts"`
 }
 
-type Store struct{ pool *pgxpool.Pool }
+type Store struct {
+	pool       *pgxpool.Pool
+	linearSync atomic.Bool
+}
 
 // Refs stores repeatable named references. Its decoder accepts legacy scalar
 // values so checkpoints written by the pre-array API remain readable.
@@ -417,7 +434,7 @@ func Open(ctx context.Context, url string) (*Store, error) {
 		p.Close()
 		return nil, err
 	}
-	s := &Store{p}
+	s := &Store{pool: p}
 	if err = s.migrate(ctx); err != nil {
 		p.Close()
 		return nil, err
@@ -520,6 +537,17 @@ func (s *Store) migrate(ctx context.Context) error {
 			if _, err := tx.Exec(ctx, q); err != nil {
 				return err
 			}
+		}
+	}
+	v10 := []string{
+		`CREATE TABLE IF NOT EXISTS linear_issues (task_id BIGINT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE, issue_id TEXT NOT NULL, identifier TEXT NOT NULL DEFAULT '', created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS linear_outbox (id BIGSERIAL PRIMARY KEY, task_id BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE, seq INTEGER NOT NULL, op TEXT NOT NULL CHECK(op IN ('issue_create','issue_state','terminal_comment','terminal_archive')), payload JSONB NOT NULL, state TEXT NOT NULL CHECK(state IN ('pending','sent','failed','skipped')) DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at TIMESTAMPTZ NOT NULL, last_error TEXT NOT NULL DEFAULT '', remote_id TEXT NOT NULL DEFAULT '', created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL, UNIQUE(task_id,seq))`,
+		`CREATE INDEX IF NOT EXISTS linear_outbox_pending ON linear_outbox(next_attempt_at,task_id,seq) WHERE state='pending'`,
+		`INSERT INTO schema_version(version) VALUES (10) ON CONFLICT DO NOTHING`,
+	}
+	for _, q := range v10 {
+		if _, err := tx.Exec(ctx, q); err != nil {
+			return err
 		}
 	}
 	return tx.Commit(ctx)
@@ -753,6 +781,35 @@ func validTaskRefs(x TaskRefs) bool {
 	if x.DecisionOptions != nil && !validDecisionOptions(*x.DecisionOptions) {
 		return false
 	}
+	if x.Linear != nil && !validTaskLinear(*x.Linear) {
+		return false
+	}
+	return true
+}
+
+func validTaskLinear(x TaskLinear) bool {
+	if x.Tier != "" && x.Tier != "T0" && x.Tier != "T1" && x.Tier != "T2" && x.Tier != "T3" {
+		return false
+	}
+	if x.Grade != "" && x.Grade != "S+" && x.Grade != "S" && x.Grade != "A+" && x.Grade != "A" && x.Grade != "B" && x.Grade != "C" {
+		return false
+	}
+	for _, value := range []string{x.Brief, x.Report, x.Verify, x.Decision} {
+		if value != "" && !validDocKey(value) {
+			return false
+		}
+	}
+	if x.DeploySHA != "" && !regexp.MustCompile(`^[0-9a-fA-F]{7,64}$`).MatchString(x.DeploySHA) {
+		return false
+	}
+	if len(x.Labels) > 64 {
+		return false
+	}
+	for _, label := range x.Labels {
+		if strings.TrimSpace(label) == "" || !validText(label, 128) {
+			return false
+		}
+	}
 	return true
 }
 
@@ -762,6 +819,10 @@ func rejectTaskRefs(x TaskRefs) error {
 		for _, option := range x.DecisionOptions.Options {
 			values = append(values, option.Label)
 		}
+	}
+	if x.Linear != nil {
+		values = append(values, x.Linear.Tier, x.Linear.Grade, x.Linear.Brief, x.Linear.Report, x.Linear.Verify, x.Linear.Decision, x.Linear.DeploySHA)
+		values = append(values, x.Linear.Labels...)
 	}
 	return guard.Reject(strings.Join(values, "\n"))
 }
@@ -783,6 +844,9 @@ func mergeTaskRefs(old, patch TaskRefs) TaskRefs {
 	}
 	if patch.DecisionOptions != nil {
 		old.DecisionOptions = patch.DecisionOptions
+	}
+	if patch.Linear != nil {
+		old.Linear = patch.Linear
 	}
 	return old
 }
@@ -818,8 +882,20 @@ func (s *Store) CreateTask(ctx context.Context, x Task) (Task, error) {
 	x.State, x.ClaimedBy = "backlog", ""
 	x.CreatedAt = time.Now().UTC()
 	x.UpdatedAt = x.CreatedAt
-	err = scanTask(s.pool.QueryRow(ctx, `INSERT INTO tasks(lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11) RETURNING `+taskColumns, x.Lane, x.ParentLane, x.Title, x.Kind, x.State, x.Priority, string(refs), x.ClaimedBy, x.CreatedBy, x.CreatedAt, x.UpdatedAt), &x)
-	return x, err
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return x, err
+	}
+	defer tx.Rollback(ctx)
+	if err = scanTask(tx.QueryRow(ctx, `INSERT INTO tasks(lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11) RETURNING `+taskColumns, x.Lane, x.ParentLane, x.Title, x.Kind, x.State, x.Priority, string(refs), x.ClaimedBy, x.CreatedBy, x.CreatedAt, x.UpdatedAt), &x); err != nil {
+		return x, err
+	}
+	if s.LinearSyncEnabled() && x.Refs.Linear != nil && x.Refs.Linear.Sync {
+		if err = enqueueLinearTaskCreate(ctx, tx, x); err != nil {
+			return x, err
+		}
+	}
+	return x, tx.Commit(ctx)
 }
 
 // TaskTransitions is the single authoritative task state graph. README.md is
@@ -855,6 +931,11 @@ func (s *Store) claimTaskTx(ctx context.Context, tx pgx.Tx, id int64, by string)
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO task_events(task_id,"from","to","by",note,refs,at) VALUES($1,'backlog','claimed',$2,'',$3::jsonb,$4)`, id, by, string(refs), x.UpdatedAt); err != nil {
 		return Task{}, err
+	}
+	if s.LinearSyncEnabled() && x.Refs.Linear != nil && x.Refs.Linear.Sync {
+		if err := enqueueLinearTaskTransition(ctx, tx, x, ""); err != nil {
+			return Task{}, err
+		}
 	}
 	return x, nil
 }
@@ -947,6 +1028,11 @@ func (s *Store) TransitionTask(ctx context.Context, id int64, to, by, note strin
 	}
 	if _, err = tx.Exec(ctx, `INSERT INTO task_events(task_id,"from","to","by",note,refs,at) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7)`, id, from, to, by, note, string(encoded), x.UpdatedAt); err != nil {
 		return Task{}, err
+	}
+	if s.LinearSyncEnabled() && x.Refs.Linear != nil && x.Refs.Linear.Sync {
+		if err = enqueueLinearTaskTransition(ctx, tx, x, note); err != nil {
+			return Task{}, err
+		}
 	}
 	return x, tx.Commit(ctx)
 }
