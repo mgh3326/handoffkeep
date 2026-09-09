@@ -135,6 +135,17 @@ func waitOutbox(t *testing.T, st *store.Store, taskID int64, predicate func([]st
 	return nil
 }
 
+func TestLinearMarkersHaveExactBoundaries(t *testing.T) {
+	if strings.Contains(markerForTask(10), markerForTask(1)) {
+		t.Fatalf("task marker %q aliases %q", markerForTask(10), markerForTask(1))
+	}
+	first := markerForOutbox(store.LinearOutbox{TaskID: 1, Seq: 1})
+	tenth := markerForOutbox(store.LinearOutbox{TaskID: 1, Seq: 10})
+	if strings.Contains(tenth, first) {
+		t.Fatalf("outbox marker %q aliases %q", tenth, first)
+	}
+}
+
 func TestLinearIssueCreateAmbiguousRestartAdoptsMarker(t *testing.T) {
 	st, _ := isolatedLinearStore(t)
 	st.EnableLinearSync()

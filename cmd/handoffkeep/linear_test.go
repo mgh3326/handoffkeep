@@ -99,6 +99,9 @@ func TestLinearReconcileCLIWritesIdempotentReport(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/tasks":
+			if r.URL.Query().Get("after_id") != "0" || r.URL.Query().Get("limit") != "1000" {
+				t.Errorf("task page query=%q", r.URL.RawQuery)
+			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"tasks": []store.Task{task}})
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/linear/status":
 			_ = json.NewEncoder(w).Encode(store.LinearOutboxStatus{})
@@ -156,6 +159,37 @@ func TestLinearReconcileCLIWritesIdempotentReport(t *testing.T) {
 	defer mu.Unlock()
 	if linearCounts["HKIssueSearch"] != 3 {
 		t.Fatalf("Linear reads=%v", linearCounts)
+	}
+}
+
+func TestLinearReconcilePaginatesAllTasks(t *testing.T) {
+	var cursors []int64
+	tasks, err := listAllReconcileTasks(t.Context(), func(_ context.Context, afterID int64, limit int) ([]store.Task, error) {
+		cursors = append(cursors, afterID)
+		if limit != 1000 {
+			t.Fatalf("page limit=%d", limit)
+		}
+		switch afterID {
+		case 0:
+			page := make([]store.Task, 1000)
+			for index := range page {
+				page[index].ID = int64(index + 1)
+			}
+			return page, nil
+		case 1000:
+			return []store.Task{{ID: 1001}}, nil
+		default:
+			return nil, fmt.Errorf("unexpected cursor %d", afterID)
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 1001 || tasks[0].ID != 1 || tasks[len(tasks)-1].ID != 1001 {
+		t.Fatalf("tasks=%d first=%d last=%d", len(tasks), tasks[0].ID, tasks[len(tasks)-1].ID)
+	}
+	if len(cursors) != 2 || cursors[0] != 0 || cursors[1] != 1000 {
+		t.Fatalf("cursors=%v", cursors)
 	}
 }
 

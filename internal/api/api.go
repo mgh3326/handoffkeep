@@ -220,6 +220,9 @@ func (s Service) TransitionTask(ctx context.Context, id int64, to, client, note 
 func (s Service) ListTasks(ctx context.Context, lane, state, parentLane string, limit int) ([]store.Task, error) {
 	return s.Store.ListTasks(ctx, lane, state, parentLane, limit)
 }
+func (s Service) ListTasksPage(ctx context.Context, lane, state, parentLane string, afterID int64, limit int) ([]store.Task, error) {
+	return s.Store.ListTasksPage(ctx, lane, state, parentLane, afterID, limit)
+}
 func (s Service) GetTask(ctx context.Context, id int64) (store.Task, bool, error) {
 	return s.Store.GetTask(ctx, id)
 }
@@ -449,7 +452,18 @@ func (s Server) tasksList(w http.ResponseWriter, r *http.Request) {
 		appErr(w, err)
 		return
 	}
-	xs, err := s.Service.ListTasks(r.Context(), r.URL.Query().Get("lane"), r.URL.Query().Get("state"), r.URL.Query().Get("parent_lane"), limit)
+	lane, state, parentLane := r.URL.Query().Get("lane"), r.URL.Query().Get("state"), r.URL.Query().Get("parent_lane")
+	var xs []store.Task
+	if r.URL.Query().Has("after_id") {
+		afterID, parseErr := queryAfterID(r)
+		if parseErr != nil {
+			appErr(w, parseErr)
+			return
+		}
+		xs, err = s.Service.ListTasksPage(r.Context(), lane, state, parentLane, afterID, limit)
+	} else {
+		xs, err = s.Service.ListTasks(r.Context(), lane, state, parentLane, limit)
+	}
 	if err != nil {
 		appErr(w, err)
 		return
@@ -640,7 +654,7 @@ func relayEventsLimit(r *http.Request) (int, error) {
 	return limit, nil
 }
 
-func relayEventsAfterID(r *http.Request) (int64, error) {
+func queryAfterID(r *http.Request) (int64, error) {
 	v := r.URL.Query().Get("after_id")
 	if v == "" {
 		return 0, nil
@@ -661,7 +675,7 @@ func (s Server) relayEventsList(w http.ResponseWriter, r *http.Request) {
 		appErr(w, err)
 		return
 	}
-	afterID, err := relayEventsAfterID(r)
+	afterID, err := queryAfterID(r)
 	if err != nil {
 		appErr(w, err)
 		return

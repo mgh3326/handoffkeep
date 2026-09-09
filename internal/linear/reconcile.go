@@ -11,7 +11,10 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
-const ReconcileInterval = 30 * time.Minute
+const (
+	ReconcileInterval   = 30 * time.Minute
+	ReconcilePassBudget = 5 * time.Minute
+)
 
 type Drift struct {
 	TaskID   int64  `json:"task_id"`
@@ -35,6 +38,7 @@ type Reconciler struct {
 	OutboxStatus  func(context.Context) (store.LinearOutboxStatus, error)
 	WriteDocument func(context.Context, store.Document) (store.Document, bool, error)
 	Interval      time.Duration
+	PassBudget    time.Duration
 	Now           func() time.Time
 	DryRun        bool
 	Logger        *log.Logger
@@ -122,6 +126,13 @@ func (reconciler *Reconciler) RunOnce(ctx context.Context) (ReconcileReport, err
 	if reconciler.Client == nil || reconciler.ListTasks == nil {
 		return ReconcileReport{}, fmt.Errorf("Linear reconciler requires a client and task source")
 	}
+	passBudget := reconciler.PassBudget
+	if passBudget <= 0 {
+		passBudget = ReconcilePassBudget
+	}
+	passCtx, cancel := context.WithTimeout(ctx, passBudget)
+	defer cancel()
+	ctx = passCtx
 	now := time.Now().UTC()
 	if reconciler.Now != nil {
 		now = reconciler.Now().UTC()
@@ -139,6 +150,9 @@ func (reconciler *Reconciler) RunOnce(ctx context.Context) (ReconcileReport, err
 		}
 		issue, found, lookupErr := reconciler.Client.SearchIssue(ctx, markerForTask(task.ID))
 		if lookupErr != nil {
+			if ctx.Err() != nil {
+				return report, ctx.Err()
+			}
 			report.Drifts = append(report.Drifts, Drift{TaskID: task.ID, Field: "lookup_error", Actual: lookupErr.Error()})
 			continue
 		}
@@ -188,15 +202,10 @@ func (reconciler *Reconciler) Run(ctx context.Context) {
 			reconciler.logf("linear reconcile error: %v", err)
 		}
 	}
-	run()
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
 	for {
-		select {
-		case <-ctx.Done():
+		run()
+		if !waitFor(ctx, interval) {
 			return
-		case <-ticker.C:
-			run()
 		}
 	}
 }

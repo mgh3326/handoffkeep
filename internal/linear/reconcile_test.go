@@ -2,6 +2,9 @@ package linear
 
 import (
 	"context"
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -94,5 +97,33 @@ func TestLinearReconcileWorkerUsesInjectableThirtyMinuteInterval(t *testing.T) {
 	}
 	if fake.count("HKIssueSearch") < 2 {
 		t.Fatalf("reconcile calls=%d", fake.count("HKIssueSearch"))
+	}
+}
+
+func TestLinearReconcilePassBudgetBoundsSlowLookup(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(250 * time.Millisecond)
+		_, _ = w.Write(linearFixture(t, "issue_search_empty.json"))
+	}))
+	defer server.Close()
+	client, err := NewClient(Config{APIURL: server.URL, APIKey: "fixture-key", TeamID: "team-1", HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reconciler := &Reconciler{
+		Client: client,
+		ListTasks: func(context.Context) ([]store.Task, error) {
+			return []store.Task{{ID: 1, Refs: store.TaskRefs{Linear: &store.TaskLinear{Sync: true}}}}, nil
+		},
+		DryRun:     true,
+		PassBudget: 25 * time.Millisecond,
+	}
+	started := time.Now()
+	_, err = reconciler.RunOnce(t.Context())
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("RunOnce error=%v", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("RunOnce exceeded bounded pass time: %s", elapsed)
 	}
 }

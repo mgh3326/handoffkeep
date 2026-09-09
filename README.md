@@ -97,7 +97,8 @@ state. A residual duplicate window remains when Linear accepted a request but
 the response was lost and its newly written marker is not yet visible to the
 next search because of indexing delay. Terminal tasks receive a marker-bearing
 comment and are archived; the connector has no delete operation. Use
-`handoffkeep linear reconcile [--dry-run]` for read-only drift inspection and
+`handoffkeep linear reconcile --dry-run` for read-only drift inspection. Without
+`--dry-run`, the command writes the generated handoffkeep drift report. Use
 `GET /v1/linear/status` to see pending/failed outbox work and its latest error.
 
 ## Relay events

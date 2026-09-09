@@ -157,7 +157,7 @@ func enqueueLinearTaskCreate(ctx context.Context, tx pgx.Tx, task Task) error {
 		"Lane: " + task.Lane,
 		"Tier: " + recorded(metadata.Tier, ""),
 		"Grade: " + recorded(metadata.Grade, ""),
-		fmt.Sprintf("hk-task:%d", task.ID),
+		fmt.Sprintf("[hk-task:%d]", task.ID),
 	}, "\n")
 	return enqueueLinearOutboxTx(ctx, tx, task.ID, LinearOpIssueCreate, LinearOutboxPayload{
 		Title:       task.Title,

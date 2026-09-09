@@ -221,3 +221,59 @@ func TestLinearCreateAndTerminalPayloads(t *testing.T) {
 		}
 	}
 }
+
+func TestLinearTransitionMergesNestedRefs(t *testing.T) {
+	st := linearTestStore(t)
+	st.EnableLinearSync()
+	original := &TaskLinear{
+		Sync: true, Tier: "T3", Grade: "S+", Brief: "brief/connector",
+		Labels: []string{"connector"}, Report: "report/original",
+		Verify: "report/verify", Decision: "decision/connector", DeploySHA: "abcdef0123456789",
+	}
+	task := linearTask(t, st, TaskRefs{Linear: original})
+	if _, err := st.ClaimTask(t.Context(), task.ID, "builder"); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := st.TransitionTask(t.Context(), task.ID, "in_progress", "builder", "partial metadata", &TaskRefs{
+		Linear: &TaskLinear{Report: "report/updated"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := updated.Refs.Linear
+	if got == nil || !got.Sync || got.Tier != original.Tier || got.Grade != original.Grade || got.Brief != original.Brief ||
+		!reflect.DeepEqual(got.Labels, original.Labels) || got.Report != "report/updated" || got.Verify != original.Verify ||
+		got.Decision != original.Decision || got.DeploySHA != original.DeploySHA {
+		t.Fatalf("merged Linear refs=%+v", got)
+	}
+}
+
+func TestListTasksPageUsesStableIDCursor(t *testing.T) {
+	st := linearTestStore(t)
+	lane := fmt.Sprintf("linear-page-%d", time.Now().UnixNano())
+	created := make([]Task, 3)
+	for index := range created {
+		task, err := st.CreateTask(t.Context(), Task{
+			Lane: lane, Title: fmt.Sprintf("page task %d", index), Kind: "implement",
+			Priority: 3 - index, CreatedBy: "linear-page-test",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		created[index] = task
+	}
+	first, err := st.ListTasksPage(t.Context(), lane, "", "", 0, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first) != 2 || first[0].ID != created[0].ID || first[1].ID != created[1].ID {
+		t.Fatalf("first page=%+v", first)
+	}
+	second, err := st.ListTasksPage(t.Context(), lane, "", "", first[1].ID, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second) != 1 || second[0].ID != created[2].ID {
+		t.Fatalf("second page=%+v", second)
+	}
+}

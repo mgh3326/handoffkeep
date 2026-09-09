@@ -1,1 +1,1 @@
-{"data":{"issueUpdate":{"success":true,"issue":{"id":"issue-1","identifier":"ENG-101","title":"Mirror connector contract","description":"Purpose: Mirror connector contract\nhk-task:1","archivedAt":null,"state":{"id":"state-progress","name":"In Progress"},"labels":{"nodes":[]}}}}}
+{"data":{"issueUpdate":{"success":true,"issue":{"id":"issue-1","identifier":"ENG-101","title":"Mirror connector contract","description":"Purpose: Mirror connector contract\n[hk-task:1]","archivedAt":null,"state":{"id":"state-progress","name":"In Progress"},"labels":{"nodes":[]}}}}}

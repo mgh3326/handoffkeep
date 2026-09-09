@@ -153,6 +153,12 @@ func (fake *manifestDocumentFake) counts() (gets, puts int) {
 	return fake.gets, fake.puts
 }
 
+func (fake *manifestDocumentFake) setRejectOn(value string) {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	fake.rejectOn = value
+}
+
 func runManifestImport(t *testing.T, fake *manifestDocumentFake, manifest string) docImportManifestResult {
 	t.Helper()
 	var output bytes.Buffer
@@ -244,7 +250,7 @@ func TestDocImportManifestSafetyAndIdempotency(t *testing.T) {
 	writeManifestTestJSON(t, rejectedManifest, []docImportManifestEntry{{
 		Key: "linear/ROB-34", Path: rejectedPath, SHA256: sha256Hex([]byte("synthetic reject marker")), Kind: "note",
 	}})
-	fake.rejectOn = "synthetic reject marker"
+	fake.setRejectOn("synthetic reject marker")
 	rejected := runManifestImport(t, fake, rejectedManifest)
 	if len(rejected.Items) != 1 || rejected.Items[0].Status != "rejected" || rejected.Items[0].Pattern == "" {
 		t.Fatalf("rejected=%+v", rejected)

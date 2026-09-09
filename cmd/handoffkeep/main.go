@@ -100,7 +100,9 @@ func linearCmd(args []string, out io.Writer) error {
 	reconciler := &linear.Reconciler{
 		Client: linearClient,
 		ListTasks: func(ctx context.Context) ([]store.Task, error) {
-			return hkClient.ListTasks(ctx, "", "", "", 1000)
+			return listAllReconcileTasks(ctx, func(ctx context.Context, afterID int64, limit int) ([]store.Task, error) {
+				return hkClient.ListTasksPage(ctx, "", "", "", afterID, limit)
+			})
 		},
 		OutboxStatus: hkClient.LinearOutboxStatus,
 		WriteDocument: func(ctx context.Context, document store.Document) (store.Document, bool, error) {
@@ -108,7 +110,7 @@ func linearCmd(args []string, out io.Writer) error {
 		},
 		DryRun: *dryRun,
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), linear.ReconcilePassBudget)
 	defer cancel()
 	report, err := reconciler.RunOnce(ctx)
 	if err != nil {
@@ -116,6 +118,31 @@ func linearCmd(args []string, out io.Writer) error {
 	}
 	report.Body = ""
 	return printJSON(out, report)
+}
+
+const reconcileTaskPageSize = 1000
+
+func listAllReconcileTasks(ctx context.Context, fetch func(context.Context, int64, int) ([]store.Task, error)) ([]store.Task, error) {
+	var tasks []store.Task
+	var afterID int64
+	for {
+		page, err := fetch(ctx, afterID, reconcileTaskPageSize)
+		if err != nil {
+			return nil, err
+		}
+		previousID := afterID
+		for _, task := range page {
+			if task.ID <= previousID {
+				return nil, fmt.Errorf("task cursor did not advance after %d", previousID)
+			}
+			previousID = task.ID
+		}
+		tasks = append(tasks, page...)
+		if len(page) < reconcileTaskPageSize {
+			return tasks, nil
+		}
+		afterID = previousID
+	}
 }
 
 func config() (string, string) {
@@ -1355,7 +1382,9 @@ func configureLinearWorkers(enabled bool, st *store.Store, apiURL, teamID string
 		&linear.Reconciler{
 			Client: linearClient,
 			ListTasks: func(ctx context.Context) ([]store.Task, error) {
-				return st.ListTasks(ctx, "", "", "", 1000)
+				return listAllReconcileTasks(ctx, func(ctx context.Context, afterID int64, limit int) ([]store.Task, error) {
+					return st.ListTasksPage(ctx, "", "", "", afterID, limit)
+				})
 			},
 			OutboxStatus: st.GetLinearOutboxStatus,
 			WriteDocument: func(ctx context.Context, document store.Document) (store.Document, bool, error) {

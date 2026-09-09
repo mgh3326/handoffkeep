@@ -846,7 +846,42 @@ func mergeTaskRefs(old, patch TaskRefs) TaskRefs {
 		old.DecisionOptions = patch.DecisionOptions
 	}
 	if patch.Linear != nil {
-		old.Linear = patch.Linear
+		merged := TaskLinear{}
+		if old.Linear != nil {
+			merged = *old.Linear
+			merged.Labels = append([]string(nil), old.Linear.Labels...)
+		}
+		// TaskLinear is also used as a partial transition patch. The connector
+		// can be opted in here, while an omitted/default false value must not
+		// silently disable an already opted-in task.
+		if patch.Linear.Sync {
+			merged.Sync = true
+		}
+		if patch.Linear.Tier != "" {
+			merged.Tier = patch.Linear.Tier
+		}
+		if patch.Linear.Grade != "" {
+			merged.Grade = patch.Linear.Grade
+		}
+		if patch.Linear.Brief != "" {
+			merged.Brief = patch.Linear.Brief
+		}
+		if len(patch.Linear.Labels) > 0 {
+			merged.Labels = append([]string(nil), patch.Linear.Labels...)
+		}
+		if patch.Linear.Report != "" {
+			merged.Report = patch.Linear.Report
+		}
+		if patch.Linear.Verify != "" {
+			merged.Verify = patch.Linear.Verify
+		}
+		if patch.Linear.Decision != "" {
+			merged.Decision = patch.Linear.Decision
+		}
+		if patch.Linear.DeploySHA != "" {
+			merged.DeploySHA = patch.Linear.DeploySHA
+		}
+		old.Linear = &merged
 	}
 	return old
 }
@@ -1062,6 +1097,50 @@ func (s *Store) ListTasks(ctx context.Context, lane, state, parentLane string, l
 	}
 	args = append(args, limit)
 	q += fmt.Sprintf(" ORDER BY priority DESC,created_at ASC,id ASC LIMIT $%d", len(args))
+	rows, err := s.pool.Query(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Task{}
+	for rows.Next() {
+		var x Task
+		if err := scanTask(rows, &x); err != nil {
+			return nil, err
+		}
+		out = append(out, x)
+	}
+	return out, rows.Err()
+}
+
+// ListTasksPage returns a stable ID-ordered page for callers that must visit
+// the complete task set. afterID is exclusive; ListTasks retains its queue
+// priority ordering for existing callers.
+func (s *Store) ListTasksPage(ctx context.Context, lane, state, parentLane string, afterID int64, limit int) ([]Task, error) {
+	if (lane != "" && !validName(lane)) || (parentLane != "" && !validName(parentLane)) || (state != "" && !taskStates[state]) || afterID < 0 {
+		return nil, errors.New("invalid task query")
+	}
+	if limit < 1 {
+		limit = 20
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	q, args := `SELECT `+taskColumns+` FROM tasks WHERE id>$1`, []any{afterID}
+	if lane != "" {
+		args = append(args, lane)
+		q += fmt.Sprintf(" AND lane=$%d", len(args))
+	}
+	if parentLane != "" {
+		args = append(args, parentLane)
+		q += fmt.Sprintf(" AND parent_lane=$%d", len(args))
+	}
+	if state != "" {
+		args = append(args, state)
+		q += fmt.Sprintf(" AND state=$%d", len(args))
+	}
+	args = append(args, limit)
+	q += fmt.Sprintf(" ORDER BY id ASC LIMIT $%d", len(args))
 	rows, err := s.pool.Query(ctx, q, args...)
 	if err != nil {
 		return nil, err

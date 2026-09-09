@@ -177,10 +177,10 @@ func labelIDs(metadata TeamMetadata, requested []string) (ids, missing []string)
 	return ids, missing
 }
 
-func markerForTask(taskID int64) string { return fmt.Sprintf("hk-task:%d", taskID) }
+func markerForTask(taskID int64) string { return fmt.Sprintf("[hk-task:%d]", taskID) }
 
 func markerForOutbox(item store.LinearOutbox) string {
-	return fmt.Sprintf("hk-task:%d seq:%d", item.TaskID, item.Seq)
+	return fmt.Sprintf("[hk-task:%d seq:%d]", item.TaskID, item.Seq)
 }
 
 func (drain *Drain) issueForTask(ctx context.Context, taskID int64) (store.LinearIssue, error) {
