@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -1356,6 +1357,45 @@ type storeCloser interface {
 	Close()
 }
 
+// chatRetentionWorker is the always-on retention job for operator chat. Every
+// run deletes at most store.ChatPruneMaxDelete expired terminal-state rows
+// per table so a single execution can never empty a table; non-terminal rows
+// are never deleted regardless of age.
+type chatRetentionWorker struct {
+	store    *store.Store
+	interval time.Duration
+}
+
+const chatRetentionInterval = 24 * time.Hour
+
+func (w chatRetentionWorker) Run(ctx context.Context) {
+	if w.store == nil {
+		return
+	}
+	interval := w.interval
+	if interval <= 0 {
+		interval = chatRetentionInterval
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		deleted, err := w.store.PruneChat(ctx, store.ChatPruneMaxDelete)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			log.Printf("chat retention prune error: %v", err)
+		} else if deleted > 0 {
+			log.Printf("chat retention pruned %d rows", deleted)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
 type serveOptions struct {
 	bindings         []serverBinding
 	workers          []backgroundWorker
@@ -1543,6 +1583,7 @@ func serve(args []string, errout io.Writer) error {
 	if e != nil {
 		return e
 	}
+	workers = append(workers, chatRetentionWorker{store: st})
 	uiHandler, e := uiFromEnv(st)
 	if e != nil {
 		return e

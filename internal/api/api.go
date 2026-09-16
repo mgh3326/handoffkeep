@@ -347,6 +347,14 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("PUT /v1/bench/reps", s.benchRepsPut)
 	m.HandleFunc("GET /v1/bench/grades", s.benchGradesList)
 	m.HandleFunc("PUT /v1/bench/grades", s.benchGradesPut)
+	m.HandleFunc("PUT /v1/chat/questions/{id}", s.chatQuestionPut)
+	m.HandleFunc("POST /v1/chat/questions", s.chatQuestionPost)
+	m.HandleFunc("POST /v1/chat/questions/{id}/transition", s.chatQuestionTransition)
+	m.HandleFunc("GET /v1/chat/questions", s.chatQuestionsList)
+	m.HandleFunc("POST /v1/chat/messages", s.chatMessageCreate)
+	m.HandleFunc("GET /v1/chat/messages", s.chatMessagesList)
+	m.HandleFunc("POST /v1/chat/messages/{id}/delivered", s.chatMessageDelivered)
+	m.HandleFunc("POST /v1/chat/messages/{id}/failed", s.chatMessageFailed)
 	if s.UI != nil {
 		m.Handle("/ui", s.UI)
 		m.Handle("/ui/", s.UI)
@@ -411,6 +419,15 @@ func appErr(w http.ResponseWriter, e error) {
 		return
 	case errors.Is(e, store.ErrQueueEmpty):
 		jsonOut(w, http.StatusNotFound, map[string]string{"error": "queue_empty"})
+		return
+	case errors.Is(e, store.ErrChatQuestionNotFound), errors.Is(e, store.ErrChatMessageNotFound):
+		jsonOut(w, http.StatusNotFound, map[string]string{"error": "not_found"})
+		return
+	case errors.Is(e, store.ErrChatQuestionConflict):
+		jsonOut(w, http.StatusConflict, map[string]string{"error": "chat_question_conflict"})
+		return
+	case errors.Is(e, store.ErrChatMessageConflict):
+		jsonOut(w, http.StatusConflict, map[string]string{"error": "chat_message_conflict"})
 		return
 	}
 	if p, ok := strings.CutPrefix(e.Error(), "secret_like_content:"); ok {
