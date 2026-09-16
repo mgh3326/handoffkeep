@@ -550,6 +550,20 @@ func (s *Store) migrate(ctx context.Context) error {
 			return err
 		}
 	}
+	v11 := []string{
+		`CREATE TABLE IF NOT EXISTS chat_questions (id TEXT PRIMARY KEY CHECK(id ~ '^Q-[0-9]{8}-[0-9]{2,}$'), lane TEXT NOT NULL, body TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('pending','resolved','withdrawn')), created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL, resolved_at TIMESTAMPTZ)`,
+		`CREATE INDEX IF NOT EXISTS chat_questions_state_created ON chat_questions(state, created_at ASC, id ASC)`,
+		`CREATE INDEX IF NOT EXISTS chat_questions_created ON chat_questions(created_at ASC, id ASC)`,
+		`CREATE TABLE IF NOT EXISTS chat_messages (id BIGSERIAL PRIMARY KEY, author TEXT NOT NULL CHECK(author IN ('operator','desk')), body TEXT NOT NULL, relay_state TEXT NOT NULL CHECK(relay_state IN ('stored','delivered','failed')), created_at TIMESTAMPTZ NOT NULL, delivered_at TIMESTAMPTZ)`,
+		`CREATE INDEX IF NOT EXISTS chat_messages_created ON chat_messages(created_at ASC, id ASC)`,
+		`CREATE INDEX IF NOT EXISTS chat_messages_undelivered ON chat_messages(id ASC) WHERE delivered_at IS NULL`,
+		`INSERT INTO schema_version(version) VALUES (11) ON CONFLICT DO NOTHING`,
+	}
+	for _, q := range v11 {
+		if _, err := tx.Exec(ctx, q); err != nil {
+			return err
+		}
+	}
 	return tx.Commit(ctx)
 }
 func validName(x string) bool        { return nameRE.MatchString(x) }

@@ -130,6 +130,23 @@ idempotency families unambiguous. As with job events, duplicate lane-event
 posts return the first writer's original row, increment `attempts`, and never
 change `delivered_at`.
 
+## Operator chat
+
+Desk sessions post durable questions and the operator answers them in a
+browser. This service owns only the persistence layer; the chat screen lives
+elsewhere. `PUT /v1/chat/questions/{id}` (or `POST /v1/chat/questions` with
+the id in the body) upserts by the producer's
+`Q-YYYYMMDD-NN` id — a repeat id updates the row instead of adding one. A
+question is `pending` until `POST /v1/chat/questions/{id}/transition` moves it
+to `resolved` (which stamps `resolved_at`) or `withdrawn`.
+`GET /v1/chat/questions?lane=&state=&after_id=&limit=` pages by id cursor.
+`POST /v1/chat/messages` stores an `operator` (or `desk`) message with
+`relay_state='stored'`; `POST /v1/chat/messages/{id}/delivered` records
+successful relay and stamps `delivered_at`, while `/{id}/failed` marks a relay
+failure. `GET /v1/chat/messages?author=&undelivered=1&after_id=&limit=` pages
+in insertion order. A built-in daily retention job deletes chat rows older
+than one year, bounded to at most 1000 rows per table per run.
+
 ## Attachments (R2)
 
 Attachments are immutable, content-addressed private R2 objects. Configure all
