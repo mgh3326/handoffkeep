@@ -332,60 +332,132 @@ func TestChatCheckConstraintsRejectInvalidRows(t *testing.T) {
 	}
 }
 
-func TestChatRetentionDeletesOnlyExpiredRows(t *testing.T) {
-	s := taskTestStore(t)
-	p := chatPool(t)
+func clearExpiredChatRows(t *testing.T, p *pgxpool.Pool) {
+	t.Helper()
 	for _, table := range []string{"chat_questions", "chat_messages"} {
 		if _, err := p.Exec(t.Context(), `DELETE FROM `+table+` WHERE created_at < now() - interval '1 year'`); err != nil {
 			t.Fatal(err)
 		}
 	}
-	prefix := fmt.Sprintf("prune-%d-", time.Now().UnixNano())
+}
+
+func insertChatQuestion(t *testing.T, p *pgxpool.Pool, id, state, age string) {
+	t.Helper()
+	if _, err := p.Exec(t.Context(), `INSERT INTO chat_questions(id,lane,body,state,created_at,updated_at) VALUES($1,'lane-a','retention',$2,now()-$3::interval,now())`, id, state, age); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func insertChatMessage(t *testing.T, p *pgxpool.Pool, body, relayState, age string) int64 {
+	t.Helper()
+	var id int64
+	if err := p.QueryRow(t.Context(), `INSERT INTO chat_messages(author,body,relay_state,created_at,delivered_at) VALUES('operator',$1,$2,now()-$3::interval,CASE WHEN $2='delivered' THEN now()-$3::interval END) RETURNING id`, body, relayState, age).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+func chatRowCount(t *testing.T, p *pgxpool.Pool, query string, arg any, want int) {
+	t.Helper()
+	var n int
+	if err := p.QueryRow(t.Context(), query, arg).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != want {
+		t.Fatalf("%s arg=%v rows=%d want %d", query, arg, n, want)
+	}
+}
+
+func TestChatRetentionPreservesExpiredNonTerminalRows(t *testing.T) {
+	s := taskTestStore(t)
+	p := chatPool(t)
+	clearExpiredChatRows(t, p)
 	nano := time.Now().UnixNano()
-	oldID, newID := fmt.Sprintf("Q-20260101-%d", nano), fmt.Sprintf("Q-20260101-%d", nano+1)
-	if _, err := p.Exec(t.Context(), `INSERT INTO chat_questions(id,lane,body,state,created_at,updated_at) VALUES($1,'lane-a','expired','pending',now() - interval '1 year 1 day',now())`, oldID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := p.Exec(t.Context(), `INSERT INTO chat_questions(id,lane,body,state,created_at,updated_at) VALUES($1,'lane-a','fresh','pending',now() - interval '11 months',now())`, newID); err != nil {
-		t.Fatal(err)
-	}
-	var expiredMsg, freshMsg int64
-	if err := p.QueryRow(t.Context(), `INSERT INTO chat_messages(author,body,relay_state,created_at) VALUES('operator',$1,'stored',now() - interval '1 year 1 day') RETURNING id`, prefix+"old").Scan(&expiredMsg); err != nil {
-		t.Fatal(err)
-	}
-	if err := p.QueryRow(t.Context(), `INSERT INTO chat_messages(author,body,relay_state,created_at) VALUES('operator',$1,'stored',now() - interval '11 months') RETURNING id`, prefix+"new").Scan(&freshMsg); err != nil {
-		t.Fatal(err)
-	}
+	pendingID := fmt.Sprintf("Q-20260101-%d", nano)
+	insertChatQuestion(t, p, pendingID, "pending", "1 year 1 day")
+	prefix := fmt.Sprintf("keep-%d-", nano)
+	storedID := insertChatMessage(t, p, prefix+"stored", "stored", "1 year 1 day")
+	failedID := insertChatMessage(t, p, prefix+"failed", "failed", "1 year 1 day")
 	deleted, err := s.PruneChat(t.Context(), store.ChatPruneMaxDelete)
-	if err != nil || deleted != 2 {
+	if err != nil || deleted != 0 {
+		t.Fatalf("deleted=%d err=%v — non-terminal rows must never be pruned", deleted, err)
+	}
+	chatRowCount(t, p, `SELECT count(*) FROM chat_questions WHERE id=$1`, pendingID, 1)
+	chatRowCount(t, p, `SELECT count(*) FROM chat_messages WHERE id=$1`, storedID, 1)
+	chatRowCount(t, p, `SELECT count(*) FROM chat_messages WHERE id=$1`, failedID, 1)
+}
+
+func TestChatRetentionDeletesExpiredTerminalRows(t *testing.T) {
+	s := taskTestStore(t)
+	p := chatPool(t)
+	clearExpiredChatRows(t, p)
+	nano := time.Now().UnixNano()
+	resolvedID := fmt.Sprintf("Q-20260101-%d", nano)
+	withdrawnID := fmt.Sprintf("Q-20260101-%d", nano+1)
+	insertChatQuestion(t, p, resolvedID, "resolved", "1 year 1 day")
+	insertChatQuestion(t, p, withdrawnID, "withdrawn", "1 year 1 day")
+	prefix := fmt.Sprintf("gone-%d-", nano)
+	deliveredID := insertChatMessage(t, p, prefix+"delivered", "delivered", "1 year 1 day")
+	deleted, err := s.PruneChat(t.Context(), store.ChatPruneMaxDelete)
+	if err != nil || deleted != 3 {
 		t.Fatalf("deleted=%d err=%v", deleted, err)
 	}
-	var n int
-	if err := p.QueryRow(t.Context(), `SELECT count(*) FROM chat_questions WHERE id=$1`, oldID).Scan(&n); err != nil || n != 0 {
-		t.Fatalf("expired question rows=%d err=%v", n, err)
+	chatRowCount(t, p, `SELECT count(*) FROM chat_questions WHERE id=$1`, resolvedID, 0)
+	chatRowCount(t, p, `SELECT count(*) FROM chat_questions WHERE id=$1`, withdrawnID, 0)
+	chatRowCount(t, p, `SELECT count(*) FROM chat_messages WHERE id=$1`, deliveredID, 0)
+}
+
+func TestChatRetentionKeepsFreshRowsAnyState(t *testing.T) {
+	s := taskTestStore(t)
+	p := chatPool(t)
+	clearExpiredChatRows(t, p)
+	nano := time.Now().UnixNano()
+	for i, state := range []string{"pending", "resolved", "withdrawn"} {
+		insertChatQuestion(t, p, fmt.Sprintf("Q-20260101-%d", nano+int64(i)), state, "11 months")
 	}
-	if err := p.QueryRow(t.Context(), `SELECT count(*) FROM chat_questions WHERE id=$1`, newID).Scan(&n); err != nil || n != 1 {
-		t.Fatalf("fresh question rows=%d err=%v", n, err)
+	prefix := fmt.Sprintf("fresh-%d-", nano)
+	messageIDs := map[string]int64{}
+	for _, state := range []string{"stored", "delivered", "failed"} {
+		messageIDs[state] = insertChatMessage(t, p, prefix+state, state, "11 months")
 	}
-	if err := p.QueryRow(t.Context(), `SELECT count(*) FROM chat_messages WHERE id=$1`, expiredMsg).Scan(&n); err != nil || n != 0 {
-		t.Fatalf("expired message rows=%d err=%v", n, err)
+	deleted, err := s.PruneChat(t.Context(), store.ChatPruneMaxDelete)
+	if err != nil || deleted != 0 {
+		t.Fatalf("deleted=%d err=%v — fresh rows must survive regardless of state", deleted, err)
 	}
-	if err := p.QueryRow(t.Context(), `SELECT count(*) FROM chat_messages WHERE id=$1`, freshMsg).Scan(&n); err != nil || n != 1 {
-		t.Fatalf("fresh message rows=%d err=%v", n, err)
+	for i := range 3 {
+		chatRowCount(t, p, `SELECT count(*) FROM chat_questions WHERE id=$1`, fmt.Sprintf("Q-20260101-%d", nano+int64(i)), 1)
 	}
+	for _, id := range messageIDs {
+		chatRowCount(t, p, `SELECT count(*) FROM chat_messages WHERE id=$1`, id, 1)
+	}
+}
+
+func TestChatRetentionLeavesExistingTablesAlone(t *testing.T) {
+	s := taskTestStore(t)
+	p := chatPool(t)
+	nano := time.Now().UnixNano()
+	var docID int64
+	if err := p.QueryRow(t.Context(), `INSERT INTO documents(key,kind,body,sha256,created_by,created_at,updated_at) VALUES($1,'note','old doc','x','test',now()-interval '2 years',now()) RETURNING id`, fmt.Sprintf("retention-doc-%d", nano)).Scan(&docID); err != nil {
+		t.Fatal(err)
+	}
+	var relayID int64
+	if err := p.QueryRow(t.Context(), `INSERT INTO relay_events(kind,job_id,epoch,owner_lane,received_at) VALUES('job.escalate',$1,0,'lane-a',now()-interval '2 years') RETURNING id`, fmt.Sprintf("retention-job-%d", nano)).Scan(&relayID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PruneChat(t.Context(), store.ChatPruneMaxDelete); err != nil {
+		t.Fatal(err)
+	}
+	chatRowCount(t, p, `SELECT count(*) FROM documents WHERE id=$1`, docID, 1)
+	chatRowCount(t, p, `SELECT count(*) FROM relay_events WHERE id=$1`, relayID, 1)
 }
 
 func TestChatRetentionHonorsDeleteCap(t *testing.T) {
 	s := taskTestStore(t)
 	p := chatPool(t)
-	if _, err := p.Exec(t.Context(), `DELETE FROM chat_messages WHERE created_at < now() - interval '1 year'`); err != nil {
-		t.Fatal(err)
-	}
+	clearExpiredChatRows(t, p)
 	prefix := fmt.Sprintf("prunecap-%d-", time.Now().UnixNano())
 	for i := range 10 {
-		if _, err := p.Exec(t.Context(), `INSERT INTO chat_messages(author,body,relay_state,created_at) VALUES('operator',$1,'stored',now() - interval '1 year 1 day')`, fmt.Sprintf("%s%d", prefix, i)); err != nil {
-			t.Fatal(err)
-		}
+		insertChatMessage(t, p, fmt.Sprintf("%s%d", prefix, i), "delivered", "1 year 1 day")
 	}
 	deleted, err := s.PruneChat(t.Context(), 4)
 	if err != nil || deleted != 4 {

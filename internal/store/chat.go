@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"sort"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -17,7 +18,37 @@ const ChatPruneMaxDelete = 1000
 
 var chatQuestionIDRE = regexp.MustCompile(`^Q-[0-9]{8}-[0-9]{2,}$`)
 var chatQuestionStates = map[string]bool{"pending": true, "resolved": true, "withdrawn": true}
+var chatMessageRelayStates = map[string]bool{"stored": true, "delivered": true, "failed": true}
 var chatAuthors = map[string]bool{"operator": true, "desk": true}
+
+// Terminal states are the only rows the retention job may delete once they
+// pass the one-year mark. A pending question is still waiting for an operator
+// answer, and a stored or failed message is an operator directive the fleet
+// has not received — live operations data preserved regardless of age. A
+// state added to the vocabulary above defaults to preserved unless listed
+// here, so a new state can never silently fall into the delete path.
+var chatQuestionTerminalStates = map[string]bool{"resolved": true, "withdrawn": true}
+var chatMessageTerminalRelayStates = map[string]bool{"delivered": true}
+
+// chatPruneTables binds each chat table to the state column the retention job
+// filters on. PruneChat deletes only rows whose state is in the terminal set,
+// referenced here so the state vocabulary stays single-sourced.
+var chatPruneTables = []struct {
+	table, stateColumn string
+	terminal           map[string]bool
+}{
+	{"chat_messages", "relay_state", chatMessageTerminalRelayStates},
+	{"chat_questions", "state", chatQuestionTerminalStates},
+}
+
+func sortedStateKeys(states map[string]bool) []string {
+	out := make([]string, 0, len(states))
+	for s := range states {
+		out = append(out, s)
+	}
+	sort.Strings(out)
+	return out
+}
 
 var (
 	ErrChatQuestionNotFound = errors.New("chat_question_not_found")
@@ -274,9 +305,12 @@ func (s *Store) ListChatMessages(ctx context.Context, author string, undelivered
 	return out, rows.Err()
 }
 
-// PruneChat deletes chat rows older than one year. Each table's delete is
-// bounded by limit so one run can never empty a table at once; remaining
-// expired rows are removed by subsequent runs.
+// PruneChat deletes terminal-state chat rows older than one year — resolved
+// and withdrawn questions, delivered messages. Non-terminal rows (pending
+// questions, stored or failed messages) are live operations data and are
+// preserved regardless of age. Each table's delete is bounded by limit so one
+// run can never empty a table at once; remaining expired rows are removed by
+// subsequent runs.
 func (s *Store) PruneChat(ctx context.Context, limit int) (int64, error) {
 	if limit < 1 || limit > ChatPruneMaxDelete {
 		limit = ChatPruneMaxDelete
@@ -287,8 +321,8 @@ func (s *Store) PruneChat(ctx context.Context, limit int) (int64, error) {
 	}
 	defer tx.Rollback(ctx)
 	var total int64
-	for _, table := range []string{"chat_messages", "chat_questions"} {
-		tag, err := tx.Exec(ctx, `DELETE FROM `+table+` WHERE id IN (SELECT id FROM `+table+` WHERE created_at < now() - interval '1 year' ORDER BY created_at ASC, id ASC LIMIT $1)`, limit)
+	for _, t := range chatPruneTables {
+		tag, err := tx.Exec(ctx, `DELETE FROM `+t.table+` WHERE id IN (SELECT id FROM `+t.table+` WHERE created_at < now() - interval '1 year' AND `+t.stateColumn+` = ANY($1) ORDER BY created_at ASC, id ASC LIMIT $2)`, sortedStateKeys(t.terminal), limit)
 		if err != nil {
 			return 0, err
 		}

@@ -1358,8 +1358,9 @@ type storeCloser interface {
 }
 
 // chatRetentionWorker is the always-on retention job for operator chat. Every
-// run deletes at most store.ChatPruneMaxDelete expired rows per table so a
-// single execution can never empty a table.
+// run deletes at most store.ChatPruneMaxDelete expired terminal-state rows
+// per table so a single execution can never empty a table; non-terminal rows
+// are never deleted regardless of age.
 type chatRetentionWorker struct {
 	store    *store.Store
 	interval time.Duration

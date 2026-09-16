@@ -144,8 +144,10 @@ to `resolved` (which stamps `resolved_at`) or `withdrawn`.
 `relay_state='stored'`; `POST /v1/chat/messages/{id}/delivered` records
 successful relay and stamps `delivered_at`, while `/{id}/failed` marks a relay
 failure. `GET /v1/chat/messages?author=&undelivered=1&after_id=&limit=` pages
-in insertion order. A built-in daily retention job deletes chat rows older
-than one year, bounded to at most 1000 rows per table per run.
+in insertion order. A built-in daily retention job deletes terminal-state
+chat rows older than one year (`resolved`/`withdrawn` questions, `delivered`
+messages) — `pending` questions and `stored`/`failed` messages are preserved
+regardless of age — bounded to at most 1000 rows per table per run.
 
 ## Attachments (R2)
 
