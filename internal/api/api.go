@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"runtime/debug"
 	"strconv"
 	"strings"
 
@@ -318,7 +319,7 @@ type Server struct {
 
 func (s Server) Handler() http.Handler {
 	m := http.NewServeMux()
-	m.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { jsonOut(w, 200, map[string]string{"status": "ok"}) })
+	m.HandleFunc("GET /healthz", healthz)
 	m.HandleFunc("/v1/checkpoints", s.checkpoints)
 	m.HandleFunc("GET /v1/search", s.search)
 	m.HandleFunc("GET /v1/documents", s.documents)
@@ -360,6 +361,31 @@ func (s Server) Handler() http.Handler {
 		m.Handle("/ui/", s.UI)
 	}
 	return m
+}
+
+// readBuildInfo is a variable so tests can stamp a VCS-tagged build info.
+var readBuildInfo = debug.ReadBuildInfo
+
+// healthz is the unauthenticated liveness probe. Beyond "status":"ok" it
+// reports the binary's embedded VCS stamp so a deploy can verify which commit
+// is serving without shelling out to `strings` on the binary. The vcs_* keys
+// are absent when the binary was built without VCS stamping (e.g. from a
+// source export or with -buildvcs=false).
+func healthz(w http.ResponseWriter, r *http.Request) {
+	out := map[string]string{"status": "ok"}
+	if info, ok := readBuildInfo(); ok {
+		for _, setting := range info.Settings {
+			switch setting.Key {
+			case "vcs.revision":
+				out["vcs_revision"] = setting.Value
+			case "vcs.time":
+				out["vcs_time"] = setting.Value
+			case "vcs.modified":
+				out["vcs_modified"] = setting.Value
+			}
+		}
+	}
+	jsonOut(w, 200, out)
 }
 
 func (s Server) linearStatus(w http.ResponseWriter, r *http.Request) {
