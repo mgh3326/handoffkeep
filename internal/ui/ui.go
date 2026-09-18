@@ -396,8 +396,8 @@ func (h *Handler) queueData(r *http.Request) (queueData, error) {
 			return queueData{}, err
 		}
 		for _, event := range escalations {
-			if !isSignalEscalation(event) {
-				data.OpenDecisions = append(data.OpenDecisions, queueOpenDecision{Lane: event.OwnerLane, Text: escalationText(event)})
+			if isDecisionEscalation(event) {
+				data.OpenDecisions = append(data.OpenDecisions, queueOpenDecision{Lane: event.OwnerLane, Text: decisionEscalationQuestion(event)})
 			}
 		}
 		laneDecisions, err := h.store.ListOpenLaneDecisions(r.Context(), 1000)
@@ -405,7 +405,7 @@ func (h *Handler) queueData(r *http.Request) (queueData, error) {
 			return queueData{}, err
 		}
 		for _, event := range laneDecisions {
-			data.OpenDecisions = append(data.OpenDecisions, queueOpenDecision{Lane: event.OwnerLane, Text: strings.TrimSpace(strings.TrimPrefix(event.Text, "[decision-needed]"))})
+			data.OpenDecisions = append(data.OpenDecisions, queueOpenDecision{Lane: event.OwnerLane, Text: strings.TrimSpace(strings.TrimPrefix(event.Text, decisionNeededMarker))})
 		}
 	}
 	return data, nil
@@ -517,9 +517,9 @@ type eventForm struct {
 func eventFormData(kind string, event store.RelayEvent, csrf string, canWrite bool) eventForm {
 	question := event.Text
 	if kind == "escalation" {
-		question = escalationText(event)
+		question = decisionEscalationQuestion(event)
 	} else {
-		question = strings.TrimSpace(strings.TrimPrefix(question, "[decision-needed]"))
+		question = strings.TrimSpace(strings.TrimPrefix(question, decisionNeededMarker))
 	}
 	return eventForm{Type: kind, ID: event.ID, Event: event, Options: decisionOptions(question), CSRF: csrf, CanWrite: canWrite}
 }
@@ -552,7 +552,7 @@ func (h *Handler) decisionData(r *http.Request, csrf, notice string) (decisionDa
 	// console retrieved, not a claim about how many decisions exist.
 	retrieved := len(tasks) + len(laneEvents)
 	for _, escalation := range escalations {
-		if !isSignalEscalation(escalation) {
+		if isDecisionEscalation(escalation) {
 			retrieved++
 		}
 	}
@@ -574,7 +574,7 @@ func (h *Handler) decisionData(r *http.Request, csrf, notice string) (decisionDa
 		}
 	}
 	for _, escalation := range escalations {
-		if isSignalEscalation(escalation) {
+		if !isDecisionEscalation(escalation) {
 			data.Signals = append(data.Signals, escalation)
 			continue
 		}
@@ -608,7 +608,10 @@ func eventDecisionViewFor(kind string, event store.RelayEvent, index int) eventD
 	question := escalationText(event)
 	optionQuestion := question
 	if kind == "lane" {
-		optionQuestion = strings.TrimSpace(strings.TrimPrefix(optionQuestion, "[decision-needed]"))
+		optionQuestion = strings.TrimSpace(strings.TrimPrefix(optionQuestion, decisionNeededMarker))
+	} else {
+		question = decisionEscalationQuestion(event)
+		optionQuestion = question
 	}
 	view := eventDecisionView{Type: kind, ID: event.ID, Event: event, Question: question, Options: decisionOptions(optionQuestion), Index: index}
 	if body, options, ok := store.ParseDecisionOptions(question); ok {

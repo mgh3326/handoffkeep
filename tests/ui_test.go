@@ -437,7 +437,7 @@ func TestUIDecisionInbox(t *testing.T) {
 	if _, err := s.TransitionTask(t.Context(), closedTask.ID, "claimed", "test-node", "resolved", nil); err != nil {
 		t.Fatal(err)
 	}
-	openEscalation := seedRelay(t, s, lane, "job.escalate", "open-escalation-"+strconv.FormatInt(time.Now().UnixNano(), 10), "", "open escalation", "")
+	openEscalation := seedRelay(t, s, lane, "job.escalate", "open-escalation-"+strconv.FormatInt(time.Now().UnixNano(), 10), "", "[decision-needed] open escalation", "")
 	closedJob := "closed-escalation-" + strconv.FormatInt(time.Now().UnixNano(), 10)
 	seedRelay(t, s, lane, "job.escalate", closedJob, "", "closed escalation", "")
 	seedRelay(t, s, lane, "job.joined", closedJob, "", "", "")

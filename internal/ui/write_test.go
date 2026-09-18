@@ -6,37 +6,57 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
-func TestIsSignalEscalation(t *testing.T) {
+func TestIsDecisionEscalation(t *testing.T) {
 	tests := []struct {
 		name string
 		text string
 		want bool
 	}{
-		{"ping", " PING ok", true},
-		{"lane ok", "LANE-OK: done", true},
-		{"lane fail", "lane-fail, retry", true},
-		{"ready", "READY", true},
-		{"bounce", "BOUNCE now", true},
-		{"merged cleanup", "MERGED-CLEANUP", true},
-		{"fleet ok", "FLEET-OK.", true},
-		{"fleet fail", "FLEET-FAIL!", true},
-		{"lost relay", "LOST-RELAY", true},
-		{"report", "REPORT: complete", true},
-		{"word boundary", "READYFOO", false},
-		{"ignored", "ordinary question (ignore)", true},
-		{"escalation", "ESC choose a path", false},
-		{"decision", "[decision-needed] choose", false},
-		{"question", "Which option should we use?", false},
+		{"decision", "[decision-needed] choose", true},
+		{"leading space decision", "   [decision-needed] choose", true},
+		{"leading newline decision", "\n\t[decision-needed] choose", true},
+		{"marker only", "[decision-needed]", true},
+		{"ordinary old status", "worker-a status ok", false},
+		{"ready", "READY", false},
+		{"ignored", "ordinary question (ignore)", false},
+		{"plain question", "Which option should we use?", false},
+		{"mid marker", "status [decision-needed] mid", false},
+		{"esc prefix marker", "ESC: pick [decision-needed]", false},
+		{"case differs", "[Decision-Needed] choose", false},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if got := isSignalEscalation(store.RelayEvent{Question: test.text}); got != test.want {
-				t.Fatalf("isSignalEscalation(%q)=%t, want %t", test.text, got, test.want)
+			if got := isDecisionEscalation(store.RelayEvent{Question: test.text}); got != test.want {
+				t.Fatalf("isDecisionEscalation(%q)=%t, want %t", test.text, got, test.want)
 			}
 		})
 	}
-	if !isSignalEscalation(store.RelayEvent{Text: "PING fallback"}) || !isSignalEscalation(store.RelayEvent{ReportLastLine: "REPORT fallback"}) {
+	// The effective-message fallback precedence Question > Text >
+	// ReportLastLine is preserved for the marker check.
+	if !isDecisionEscalation(store.RelayEvent{Text: "  [decision-needed] via text"}) || !isDecisionEscalation(store.RelayEvent{ReportLastLine: "[decision-needed] via last line"}) {
 		t.Fatal("classification did not use text and report fallbacks")
+	}
+	if isDecisionEscalation(store.RelayEvent{Question: "plain", Text: "[decision-needed] hidden", ReportLastLine: "[decision-needed] hidden"}) {
+		t.Fatal("classification skipped the question field's precedence")
+	}
+}
+
+func TestDecisionEscalationQuestion(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		text string
+		want string
+	}{
+		{"decision", "[decision-needed] choose", "choose"},
+		{"leading space", "   [decision-needed]   choose  ", "choose"},
+		{"unmarked passthrough", "plain question", "plain question"},
+		{"mid marker preserved", "a [decision-needed] b", "a [decision-needed] b"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := decisionEscalationQuestion(store.RelayEvent{Question: test.text}); got != test.want {
+				t.Fatalf("decisionEscalationQuestion(%q)=%q, want %q", test.text, got, test.want)
+			}
+		})
 	}
 }
 
@@ -55,7 +75,7 @@ func TestEventDecisionOptions(t *testing.T) {
 		kind  string
 		event store.RelayEvent
 	}{
-		{"escalation", store.RelayEvent{ID: 1, Question: "Choose\noptions: yes | no"}},
+		{"escalation", store.RelayEvent{ID: 1, Question: "[decision-needed] Choose\noptions: yes | no"}},
 		{"lane", store.RelayEvent{ID: 2, Text: "[decision-needed] options: yes | no"}},
 	} {
 		form := eventFormData(test.kind, test.event, "csrf", true)

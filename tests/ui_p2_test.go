@@ -310,7 +310,7 @@ func TestUIWriteDecisionRoutes(t *testing.T) {
 	}
 
 	// Escalations route to their owner lane and do not transition unrelated tasks.
-	escalation := seedRelay(t, s, "lane-b", "job.escalate", "p2-open-escalation", "", "Need a decision", "")
+	escalation := seedRelay(t, s, "lane-b", "job.escalate", "p2-open-escalation", "", "[decision-needed] Need a decision", "")
 	before := uiRowCounts(t)
 	cookie, csrf = uiCSRF(t, h.Client(), h.URL+"/ui/decisions", assertion)
 	response = uiPostForm(t, h.Client(), h.URL+"/ui/decisions/answer", assertion, cookie, decisionFields("escalation", escalation.ID, "continue", csrf), h.URL, true)
@@ -558,7 +558,7 @@ func TestUIDocIngressBadgeAndApproval(t *testing.T) {
 	claimAndTransition(t, s, approval, "needs_decision", "Approve?\noptions: "+strings.Join(approvalOptions, " | "))
 	general := createUITask(t, s, "lane-b", generalTitle)
 	claimAndTransition(t, s, general, "needs_decision", "Free text")
-	seedRelay(t, s, "lane-a", "job.escalate", uiLane(t, "options-job"), "", "Choose\noptions: "+strings.Join(escalationOptions, " | "), "")
+	seedRelay(t, s, "lane-a", "job.escalate", uiLane(t, "options-job"), "", "[decision-needed] Choose\noptions: "+strings.Join(escalationOptions, " | "), "")
 	seedRelay(t, s, "lane-a", "lane.event", "", "[decision-needed] options: "+strings.Join(laneOptions, " | "), "", "")
 
 	response := uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/timeline", assertion, "")

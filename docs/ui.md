@@ -74,12 +74,21 @@ starts with `https://github.com/`; other values are rendered as text.
 - `/ui/decisions` shows only unresolved items. The definitions are exact:
   1. A task is shown when `state='needs_decision'`; its question is the `note`
      from that task's latest `task_events` row with `to='needs_decision'`.
-  2. A `job.escalate` relay event is shown when no later-ID event with the same
-     `job_id` has kind `job.joined` or `job.completed`, and no later
+  2. A `job.escalate` relay event is *open* when no later-ID event with the
+     same `job_id` has kind `job.joined` or `job.completed`, and no later
      `lane.event` from the same `owner_lane` has an `event_id` matching
      `%decision-escalation-<escalation id>-%`. This event-ID condition closes
      web and CLI escalation answers without allowing an unrelated task answer
-     with the same numeric ID to close the escalation.
+     with the same numeric ID to close the escalation. An open escalation is
+     *answerable* only when its effective question — `question`, else `text`,
+     else `report_last_line` — begins with `[decision-needed]` after leading
+     whitespace. Every other open escalation is an operational signal and is
+     retained under the folded `signals` section with no answer controls and
+     no contribution to the answerable-card budget; signal retention is a
+     display classification, not resolution — a signal still closes only
+     through the two open-condition mechanisms above. The marker is stripped
+     for the answer form's question display only; durable event text is never
+     rewritten.
   3. A `lane.event` whose `text` begins `[decision-needed]` is shown when no
      later-ID `lane.event` from the same `owner_lane` has text beginning
      `[decision-answered]`.
@@ -122,15 +131,18 @@ adjacent `htmx.LICENSE` is the htmx 0BSD license. No external CDN is used.
 
 ## P2 operator write path
 
-The decisions page presents forms for unresolved tasks, open job escalations,
-and open `[decision-needed]` lane events. A question line beginning `options:`
+The decisions page presents forms for unresolved tasks, open
+`[decision-needed]` job escalations, and open `[decision-needed]` lane
+events. A question line beginning `options:`
 is split on `|` into up to eight radio choices with an `only=<n>` submit button;
 otherwise the operator enters free text. Tasks in `HANDOFFKEEP_UI_DIRECTOR_LANES`
 (with the legacy alias `HANDOFFKEEP_UI_ADMIRAL_LANES` accepted alongside it)
 appear first under
 **Awaiting your approval**, with their task references, and are not repeated in
-the ordinary task section. Job events that are operational signals are retained
-under the folded `signals` section rather than treated as questions.
+the ordinary task section. Open job escalations without a leading
+`[decision-needed]` marker are operational signals: they are retained under
+the folded `signals` section rather than treated as questions, and direct
+answer writes against them are rejected like unknown or closed decisions.
 
 `GET /ui/compose` provides a destination dropdown from
 `HANDOFFKEEP_UI_LANES`. If that setting is empty, or if either hub setting is

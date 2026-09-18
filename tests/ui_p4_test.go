@@ -525,7 +525,7 @@ func TestUIP4BatchAnswersAndAudit(t *testing.T) {
 	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
 	lane := uiLane(t, "lane-a")
 	task := p4DecisionTask(t, h, lane, "일괄 답변 태스크", p4Options(true, true))
-	escalation := seedRelay(t, s, lane, "job.escalate", uiLane(t, "batch-escalation"), "", "ESC worker-a(T16 §2,#75): held영속 Q1\n[options] A|노드 로컬 저장;B|중앙 저장 선행;rec=A", "")
+	escalation := seedRelay(t, s, lane, "job.escalate", uiLane(t, "batch-escalation"), "", "[decision-needed] ESC worker-a(T16 §2,#75): held영속 Q1\n[options] A|노드 로컬 저장;B|중앙 저장 선행;rec=A", "")
 	laneEvent := seedRelay(t, s, lane, "lane.event", "", "[decision-needed] lane answer", "", "")
 	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions", assertion)
 	body := responseText(t, uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions", assertion, ""))
@@ -889,7 +889,7 @@ func TestUIP4BatchSecurityAndConsoleEscalationClosure(t *testing.T) {
 		}
 	}
 	hub.mu.Unlock()
-	escalationText := "P4 console escalation closure"
+	escalationText := "[decision-needed] P4 console escalation closure"
 	escalation := seedRelay(t, s, uiLane(t, "lane-a"), "job.escalate", uiLane(t, "console-close"), "", escalationText, "")
 	cookie, csrf = uiCSRF(t, h.Client(), h.URL+"/ui/decisions", assertion)
 	response = uiPostForm(t, h.Client(), h.URL+"/ui/decisions/answer", assertion, cookie, decisionFields("escalation", escalation.ID, "continue", csrf), h.URL, true)
@@ -1021,7 +1021,7 @@ func TestUIP4DecisionInboxDoesNotHideEventKindsAfterFiftyTasks(t *testing.T) {
 		claimAndTransition(t, s, task, "needs_decision", "FT5 task question")
 	}
 	escalationQuestion := "FT5 escalation remains visible"
-	seedRelay(t, s, lane, "job.escalate", uiLane(t, "ft5-escalation"), "", escalationQuestion, "")
+	seedRelay(t, s, lane, "job.escalate", uiLane(t, "ft5-escalation"), "", "[decision-needed] "+escalationQuestion, "")
 	laneText := "[decision-needed] FT5 lane decision remains visible"
 	seedRelay(t, s, lane, "lane.event", "", laneText, "", "")
 
@@ -1249,14 +1249,14 @@ func p4LaneDecisions(t *testing.T, s *store.Store, lane string, count int) []int
 	return ids
 }
 
-// p4Escalations seeds open escalations under one job id so a single completed
-// event closes the whole batch on cleanup.
+// p4Escalations seeds open [decision-needed] escalations under one job id so
+// a single completed event closes the whole batch on cleanup.
 func p4Escalations(t *testing.T, s *store.Store, lane string, count int, question ...string) []int64 {
 	t.Helper()
 	jobID := "ht-esc-" + lane
 	ids := make([]int64, 0, count)
 	for index := 0; index < count; index++ {
-		text := "HT escalation " + strconv.Itoa(index)
+		text := "[decision-needed] HT escalation " + strconv.Itoa(index)
 		if len(question) > 0 {
 			text += "\n" + question[0]
 		}
@@ -1617,4 +1617,69 @@ func TestUIP4MixedThreeThousandBacklogConverges(t *testing.T) {
 	if counts != (p4OpenDecisionCounts{}) {
 		t.Fatalf("AC5 mixed backlog did not converge: remaining=%+v", counts)
 	}
+}
+
+// Task-444 regression: an open job.escalate is answerable only when its
+// effective question begins with [decision-needed]. The observed production
+// backlog of 156 stale unmarked escalations must render zero answer controls
+// and stay under the folded signals section, while one marked escalation and
+// one open lane decision keep their answer forms.
+func TestUIP4StaleEscalationsFoldIntoSignals(t *testing.T) {
+	s := uiStore(t)
+	fixture := newUIJWTFixture(t)
+	h := newUITestServer(t, s, fixture, "", "", 0)
+	defer h.Close()
+	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
+	lane := uiLane(t, "lane-a")
+	staleJob := uiLane(t, "stale-escalations")
+	staleIDs := make([]int64, 0, 156)
+	for index := 0; index < 156; index++ {
+		event := seedRelay(t, s, lane, "job.escalate", staleJob, "", "stale signal "+strconv.Itoa(index), "")
+		staleIDs = append(staleIDs, event.ID)
+	}
+	markedJob := uiLane(t, "marked-escalation")
+	marked := seedRelay(t, s, lane, "job.escalate", markedJob, "", "  [decision-needed] pick a deploy window", "")
+	laneEvent := seedRelay(t, s, lane, "lane.event", "", "[decision-needed] lane decision stays", "", "")
+	t.Cleanup(func() {
+		for _, jobID := range []string{staleJob, markedJob} {
+			if _, _, err := s.AppendRelayEvent(context.Background(), store.RelayEvent{Kind: "job.completed", JobID: jobID, OwnerLane: lane, ReportPath: "cleanup.md", Reason: "cleanup"}); err != nil {
+				t.Logf("stale escalation cleanup: %v", err)
+			}
+		}
+		if _, _, err := s.AppendRelayEvent(context.Background(), store.RelayEvent{Kind: "lane.event", OwnerLane: lane, EventID: "stale-cleanup-" + lane, Text: "[decision-answered] cleanup"}); err != nil {
+			t.Logf("stale lane cleanup: %v", err)
+		}
+	})
+	body := responseText(t, uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions", assertion, ""))
+	if got := len(p4VisibleOwnedIndexes(t, body, "escalation", staleIDs)); got != 0 {
+		t.Fatalf("unmarked escalations rendered %d answer controls", got)
+	}
+	if got := p4VisibleOwnedIndexes(t, body, "escalation", []int64{marked.ID}); len(got) != 1 {
+		t.Fatalf("marked escalation is not answerable: %v", got)
+	}
+	if got := p4VisibleOwnedIndexes(t, body, "lane", []int64{laneEvent.ID}); len(got) != 1 {
+		t.Fatalf("lane decision is not answerable: %v", got)
+	}
+	signalsAt := strings.Index(body, "<summary>signals</summary>")
+	if signalsAt < 0 {
+		t.Fatalf("signals fold missing: %q", body)
+	}
+	fold := body[signalsAt:]
+	if got := strings.Count(fold, "stale signal "); got != 156 {
+		t.Fatalf("signals fold holds %d/156 stale escalations", got)
+	}
+	if strings.Contains(fold, `name="items.`) {
+		t.Fatalf("signals fold carries answer controls: %q", fold[:600])
+	}
+	if !strings.Contains(body, "pick a deploy window") || strings.Contains(body, "[decision-needed] pick a deploy window") {
+		t.Fatalf("answer form did not strip the marker for display: %q", body)
+	}
+	// A direct write against an unmarked escalation is rejected the same way
+	// an unknown or closed decision is: it is not an answerable item.
+	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions", assertion)
+	response := uiPostForm(t, h.Client(), h.URL+"/ui/decisions/answer", assertion, cookie, decisionFields("escalation", staleIDs[0], "continue", csrf), h.URL, true)
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("unmarked escalation answer status=%d body=%q", response.StatusCode, responseText(t, response))
+	}
+	response.Body.Close()
 }

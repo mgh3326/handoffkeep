@@ -18,7 +18,6 @@ import (
 	"strings"
 	"time"
 	"unicode"
-	"unicode/utf8"
 
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
@@ -666,6 +665,9 @@ func (h *Handler) openDecisionEvent(r *http.Request, kind string, id int64) (sto
 	}
 	for _, event := range events {
 		if event.ID == id {
+			if kind == "escalation" && !isDecisionEscalation(event) {
+				return store.RelayEvent{}, false, nil
+			}
 			return event, true, nil
 		}
 	}
@@ -837,30 +839,25 @@ func escalationText(event store.RelayEvent) string {
 	return event.ReportLastLine
 }
 
-// isSignalEscalation is deliberately pure so the signal vocabulary has a
-// table-driven test independent of database or HTTP setup.
-func isSignalEscalation(event store.RelayEvent) bool {
-	text := escalationText(event)
-	if strings.Contains(strings.ToLower(text), "(ignore)") {
-		return true
-	}
-	trimmed := strings.TrimLeftFunc(text, unicode.IsSpace)
-	upper := strings.ToUpper(trimmed)
-	for _, signal := range []string{"PING", "LANE-OK", "LANE-FAIL", "READY", "BOUNCE", "MERGED-CLEANUP", "FLEET-OK", "FLEET-FAIL", "LOST-RELAY", "REPORT"} {
-		if !strings.HasPrefix(upper, signal) {
-			continue
-		}
-		if len(upper) == len(signal) {
-			return true
-		}
-		next, _ := utf8DecodeRuneInString(upper[len(signal):])
-		return !unicode.IsLetter(next) && !unicode.IsNumber(next)
-	}
-	return false
+// decisionNeededMarker is the exact prefix that makes an escalation or lane
+// event a decision request. Lane-event SQL matches it at position zero; an
+// escalation's effective question may carry leading whitespace first.
+const decisionNeededMarker = "[decision-needed]"
+
+// isDecisionEscalation is deliberately pure so the marker contract has a
+// table-driven test independent of database or HTTP setup. The contract is
+// positive rather than a signal vocabulary: an open job.escalate is
+// answerable only when its effective question begins with [decision-needed]
+// after leading whitespace. Everything else is an operational signal.
+func isDecisionEscalation(event store.RelayEvent) bool {
+	return strings.HasPrefix(strings.TrimLeftFunc(escalationText(event), unicode.IsSpace), decisionNeededMarker)
 }
 
-// kept as a variable so the boundary operation is easy to read and test.
-var utf8DecodeRuneInString = func(value string) (rune, int) { return utf8.DecodeRuneInString(value) }
+// decisionEscalationQuestion strips the marker for answer-form display only;
+// the durable event keeps its original text.
+func decisionEscalationQuestion(event store.RelayEvent) string {
+	return strings.TrimSpace(strings.TrimPrefix(strings.TrimLeftFunc(escalationText(event), unicode.IsSpace), decisionNeededMarker))
+}
 
 type messagePart struct {
 	Text   string
