@@ -185,20 +185,7 @@
 {{end}}
 
 {{define "fleet_content"}}
-<section id="ui-content" data-ui-fragment="fleet">
-  <h2>Fleet status</h2>
-  {{if eq .Hub.Status "unconfigured"}}<p>hub 미설정</p>{{end}}
-  {{if eq .Hub.Status "unavailable"}}<p>hub 도달 불가</p>{{end}}
-  {{if eq .Hub.Status "stale"}}<p class="threshold-alert">stale ({{formatTime .Hub.CollectedAt}})</p>{{end}}
-  {{range .Hub.Nodes}}
-  <article class="hub-node">
-    <h3>{{.MachineID}} · {{.State}}</h3>
-    <div class="hub-values"><span class="{{if .AcceptingAlert}}threshold-alert{{end}}">accepting {{.Accepting}}</span>{{if .AcceptingOverride}}<span>override {{.AcceptingOverride}}</span>{{end}}{{if .NotAcceptingReason}}<span>reason {{.NotAcceptingReason}}</span>{{end}}<span>last ping {{.LastPing}}</span><span>version {{.Version}}</span></div>
-    <div class="hub-values"><span class="{{if .FreePctAlert}}threshold-alert{{end}}">free_pct {{.FreePct}}</span><span>compressed_mb {{.CompressedMB}}</span><span class="{{if .SwapUsedAlert}}threshold-alert{{end}}">swap_used_mb {{.SwapUsedMB}}</span></div>
-  </article>
-  {{end}}
-  {{if .Hub.JobsUnsupported}}<p>jobs API 미지원</p>{{end}}{{if .Hub.JobsUnavailable}}<p class="muted">jobs API 도달 불가</p>{{end}}
-  {{if .Hub.Jobs}}<section><h3>Active hub jobs</h3>{{range .Hub.Jobs}}<article class="card">{{.Machine}} · {{.JobID}} · {{.OwnerLane}} · {{.Pane}} · {{.Tier}} · {{.StartedAt}}</article>{{end}}</section>{{end}}
-  <section><h3>Active queue work</h3>{{range .ActiveLanes}}<article class="card"><strong>{{.Lane}}</strong>{{range .Tasks}}<div>#{{.ID}} {{.Title}} · {{.ClaimedBy}} · {{.State}}</div>{{end}}</article>{{else}}<p class="muted">No claimed or in-progress tasks.</p>{{end}}</section>
+<section id="ui-content">
+  <div id="fleet-root"></div>
 </section>
 {{end}}

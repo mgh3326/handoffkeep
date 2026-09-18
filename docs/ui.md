@@ -87,11 +87,22 @@ starts with `https://github.com/`; other values are rendered as text.
   The P2 lane-answer route emits a later event beginning exactly
   `[decision-answered]`; that prefix and same-owner-lane relationship close the
   item. Other messages do not close it.
-- `/ui/fleet` fetches `/v1/nodes` and, when available, `/v1/jobs` through the
-  server-side hub proxy. Both calls have a three-second bound. Missing hub
-  configuration affects only this panel. A failed nodes fetch retains the last
-  successful snapshot and marks it stale; without one the page says the hub is
-  unavailable. A 404 or 405 from `/v1/jobs` means the jobs API is unsupported.
+- `/ui/fleet` is a React session table mounted in the existing fleet slot. The
+  browser calls only `GET /ui/api/fleet` every ten seconds. Other `/ui` pages
+  remain htmx. The React page and every `/ui/api/*` response send
+  `Content-Security-Policy` (`default-src 'self'; connect-src 'self'; …`); htmx
+  pages keep their inline script and do not receive that header.
+- `GET /ui/api/fleet` is a `no-store` JSON projection of hub `/v1/nodes`
+  `session_snapshot`. Each node carries `machine_id`, `state`, `last_ping`,
+  sessions (`pane_id`, `workspace_id`, `label`, `status`, `interactive_ready`),
+  `snapshot_status`, `truncated`, original hub `received_at`, and `stale`. The
+  envelope has `fetched_at` (last **successful** hub read) and
+  `upstream` (`ok|timeout|auth_failed|http_error|unconfigured`). Session `model`
+  is always `미수집`. Empty `sessions` with `snapshot_status=ok` is not
+  collection failure. Hub credentials and the hub URL never appear in the
+  response. Shared polling means at most one upstream `/v1/nodes` read per ten
+  seconds (single-flight + cache); the three-second hub timeout and last-success
+  snapshot are retained. This route does not call jobs, relay, or lane.event.
 
 ## Live refresh and vendored assets
 
