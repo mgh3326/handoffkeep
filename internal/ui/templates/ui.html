@@ -25,7 +25,6 @@
   </nav>
   <main>
   {{if eq .Page "timeline"}}{{template "timeline_content" .Body}}{{end}}
-  {{if eq .Page "queue"}}{{template "queue_content" .Body}}{{end}}
   {{if eq .Page "decisions"}}{{template "decisions_content" .Body}}{{end}}
   {{if eq .Page "compose"}}{{template "compose_content" .Body}}{{end}}
   {{if eq .Page "fleet"}}{{template "fleet_content" .Body}}{{end}}
@@ -73,40 +72,6 @@
     {{range .Checkpoints}}<article class="session"><strong>{{.Session}}</strong> · {{.Title}} · <time>{{formatTime .CreatedAt}}</time></article>{{else}}<p class="muted">No checkpoints.</p>{{end}}
   </section>
 </section>
-{{end}}
-
-{{define "queue_content"}}
-<section id="ui-content" data-ui-fragment="queue">
-  <h2>Queue board</h2>
-  {{if .OperatorOnly}}<p><strong>운영자 필요만</strong> · <a href="/ui/queue?view=all">전체 보기</a></p>
-  {{if .OpenDecisions}}<section><h3>Open decisions</h3>{{range .OpenDecisions}}<article class="card"><strong>{{.Lane}}</strong> · {{.Text}} · <a href="/ui/decisions">Decisions</a></article>{{end}}</section>{{end}}
-  {{else}}<p><a href="/ui/queue">운영자 필요만</a> · <strong>전체 보기</strong></p>{{end}}
-  <table class="queue">
-    <thead><tr><th>Lane</th>{{range .States}}<th>{{.}}</th>{{end}}</tr></thead>
-    <tbody>{{range .Lanes}}<tr><th>{{.Name}}</th>{{range .Cells}}<td>{{if and $.OperatorOnly (eq .State "backlog")}}<button hx-get="/ui/fragments/queue-backlog?lane={{.Lane}}" hx-target="next .queue-backlog" hx-swap="innerHTML">backlog ({{.BacklogCount}})</button><div class="queue-backlog"></div>{{else}}{{range .Tasks}}
-      <details class="card {{if eq .State "needs_decision"}}decision-card{{end}}" hx-get="/ui/fragments/task/{{.ID}}" hx-trigger="toggle[open] once" hx-target="this" hx-swap="beforeend">
-        <summary>#{{.ID}} {{.Title}} {{if eq .State "needs_decision"}}<span class="badge">needs decision</span>{{end}}</summary>
-        <div>kind {{.Kind}} · priority {{.Priority}} · claimed by {{.ClaimedBy}} · {{formatTime .UpdatedAt}}</div>
-        <div class="refs">
-          {{with githubLink .Refs.PR}}{{if .Valid}}<a href="{{.Value}}">PR</a>{{else if .Value}}<span>PR {{.Value}}</span>{{end}}{{end}}
-          {{if .Refs.HeadSHA}}<span>head {{shortHead .Refs.HeadSHA}}</span>{{end}}
-          {{if .Refs.ReportPath}}<span>report {{.Refs.ReportPath}}</span>{{end}}
-          {{if .Refs.JobID}}<span>job {{.Refs.JobID}}</span>{{end}}
-        </div>
-      </details>
-    {{end}}{{end}}</td>{{end}}</tr>{{else}}<tr><td colspan="10" class="muted">No tasks.</td></tr>{{end}}</tbody>
-  </table>
-</section>
-{{end}}
-
-{{define "queue_backlog"}}
-{{range .}}<details class="card" hx-get="/ui/fragments/task/{{.ID}}" hx-trigger="toggle[open] once" hx-target="this" hx-swap="beforeend"><summary>#{{.ID}} {{.Title}}</summary><div>kind {{.Kind}} · priority {{.Priority}} · claimed by {{.ClaimedBy}} · {{formatTime .UpdatedAt}}</div></details>{{else}}<p class="muted">No backlog tasks.</p>{{end}}
-{{end}}
-
-{{define "task_events"}}
-<ol>
-{{range .Events}}<li><strong>{{.From}} → {{.To}}</strong> by {{.By}} at <time>{{formatTime .At}}</time><pre>{{.Note}}</pre></li>{{else}}<li class="muted">No task events.</li>{{end}}
-</ol>
 {{end}}
 
 {{define "decisions_content"}}

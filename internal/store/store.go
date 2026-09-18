@@ -734,6 +734,37 @@ func (s *Store) ListBenchReps(ctx context.Context, profile, grade, effort string
 	return out, rows.Err()
 }
 
+// ListBenchRepsByTaskRef returns the reps recorded against one exact task_ref
+// (for example "hk:task/42"). The match is exact equality: a task detail view
+// must never borrow telemetry from a different or partially matching ref.
+func (s *Store) ListBenchRepsByTaskRef(ctx context.Context, taskRef string, limit int) ([]BenchRep, error) {
+	if taskRef == "" || !validBenchText(taskRef) {
+		return nil, errors.New("invalid bench rep query")
+	}
+	if limit < 1 {
+		limit = benchBatchMax
+	}
+	if limit > 5000 {
+		limit = 5000
+	}
+	rows, err := s.pool.Query(ctx, `SELECT id,origin_id,profile,model_id,task_ref,tier,role,rounds,blockers_found,completed,input_tokens,output_tokens,notes,recorded_at,effort,grade,table_grade,created_by,created_at FROM bench_reps WHERE task_ref=$1 ORDER BY id ASC LIMIT $2`, taskRef, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []BenchRep{}
+	for rows.Next() {
+		var x BenchRep
+		if err := rows.Scan(&x.ID, &x.OriginID, &x.Profile, &x.ModelID, &x.TaskRef, &x.Tier, &x.Role, &x.Rounds, &x.BlockersFound, &x.Completed, &x.InputTokens, &x.OutputTokens, &x.Notes, &x.RecordedAt, &x.Effort, &x.Grade, &x.TableGrade, &x.CreatedBy, &x.CreatedAt); err != nil {
+			return nil, err
+		}
+		x.RecordedAt = x.RecordedAt.UTC()
+		x.CreatedAt = x.CreatedAt.UTC()
+		out = append(out, x)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) UpsertBenchGrades(ctx context.Context, xs []BenchGrade) (int, error) {
 	if len(xs) < 1 || len(xs) > benchBatchMax {
 		return 0, errors.New("invalid bench grades")

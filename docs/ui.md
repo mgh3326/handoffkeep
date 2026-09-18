@@ -69,8 +69,28 @@ starts with `https://github.com/`; other values are rendered as text.
   bounds apply to `received_at` in UTC (`since` inclusive, `until` inclusive
   through the end of that UTC day). Pages contain at most 200 events; the store
   hard-caps any timeline query at 1000.
-- `/ui/queue` is a lane-by-state task board. Expanding a card fetches its
-  append-only task transition history.
+- `/ui/queue` mounts the React queue board in the existing queue slot. Cards
+  group by canonical state and order deterministically by priority then id.
+  Client-side filters (lane, kind, state toggles, title/id search, 운영자
+  필요만) never drop server data; the board polls the same-origin BFF every
+  fifteen seconds with non-overlapping refreshes and keeps the last good data
+  on failure. Selecting a card fetches its detail.
+- `GET /ui/api/board/tasks` is a `no-store` JSON list with `lane`, `state`,
+  `parent_lane`, exclusive `after_id`, and `limit` (default 200, max 500)
+  parameters in stable id order. `truncated` and `next_after_id` continue the
+  page; the client owns grouping and ordering.
+- `GET /ui/api/board/tasks/<id>` returns the task with refs, the append-only
+  transition history, per-state dwell segments, the joined Linear identifier
+  when present, and participant segments aggregated from `bench_reps` with an
+  exact `task_ref=hk:task/<id>` match. Empty telemetry is `not_collected`;
+  when matching reps exceed the 500-rep bound, `truncated` marks the segment
+  totals as partial rather than complete.
+- `GET /ui/api/policy/active` resolves the exact `policy/active` pointer to
+  its manifest document key, validates the manifest as a single JSON document
+  (a second value or trailing content is `invalid_manifest`), and lists
+  manifest items with `/ui/doc/<key>` links and `exists` flags. Statuses are
+  `not_configured`, `invalid_pointer`, `manifest_missing`,
+  `invalid_manifest`, or `ok`; beyond 200 items `truncated` is set.
 - `/ui/decisions` shows only unresolved items. The definitions are exact:
   1. A task is shown when `state='needs_decision'`; its question is the `note`
      from that task's latest `task_events` row with `to='needs_decision'`.
@@ -97,8 +117,9 @@ starts with `https://github.com/`; other values are rendered as text.
   `[decision-answered]`; that prefix and same-owner-lane relationship close the
   item. Other messages do not close it.
 - `/ui/fleet` is a React session table mounted in the existing fleet slot. The
-  browser calls only `GET /ui/api/fleet` every ten seconds. Other `/ui` pages
-  remain htmx. The React page and every `/ui/api/*` response send
+  browser calls only `GET /ui/api/fleet` every ten seconds. `/ui/queue` is the
+  other React page; timeline and decisions remain htmx. React pages and every
+  `/ui/api/*` response send
   `Content-Security-Policy` (`default-src 'self'; connect-src 'self'; …`); htmx
   pages keep their inline script and do not receive that header.
 - `GET /ui/api/fleet` is a `no-store` JSON projection of hub `/v1/nodes`
@@ -251,8 +272,8 @@ Use `handoffkeep decisions resolve <task|escalation|lane> <id> --by <lane>
 `claimed`. `--no-inject` marks that new event delivered as `resolve/<lane>`;
 without it, normal node injection sees the event as undelivered.
 
-Queue defaults to **운영자 필요만**: nonterminal `decide` and `needs_decision`
-cards plus a linked summary of non-signal open escalations and lane decisions.
-Backlog cells display only `backlog (N)` and load their cards with authenticated
-read-only `GET /ui/fragments/queue-backlog?lane=<lane>`. Use
-`/ui/queue?view=all` for the complete board.
+The board's **운영자 필요만** preset mirrors the retired htmx operator view as a
+client-side filter only: the backlog column collapses to a count and other
+columns show nonterminal `decide` and `needs_decision` work. It narrows the
+rendered cards, never the API response — `GET /ui/api/board/tasks` always
+returns the complete task set for the requested lane.

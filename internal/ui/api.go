@@ -62,6 +62,12 @@ func (h *Handler) serveAPI(w http.ResponseWriter, r *http.Request, identity cfac
 		h.fleetAPI(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/ui/api/glance":
 		h.glance(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/ui/api/board/tasks":
+		h.boardTasks(w, r)
+	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/ui/api/board/tasks/"):
+		h.boardTaskDetail(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/ui/api/policy/active":
+		h.policyActive(w, r)
 	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/ui/api/nodes/"):
 		h.setAccepting(w, r, identity)
 	default:
