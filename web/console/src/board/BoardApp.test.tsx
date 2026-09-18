@@ -172,6 +172,49 @@ describe("BoardApp", () => {
     await screen.findByText("보드를 불러오지 못했습니다.");
   });
 
+  it("never overlaps refreshes: the next poll waits for the in-flight load", async () => {
+    vi.useFakeTimers();
+    let calls = 0;
+    const resolvers: Array<() => void> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = urlOf(input);
+        if (url.startsWith("/ui/api/board/tasks")) {
+          calls += 1;
+          return new Promise<Response>((resolve) => {
+            resolvers.push(() => resolve(new Response(JSON.stringify(boardPayload([task({ id: 1, title: "pending" })])), { status: 200 })));
+          });
+        }
+        return Promise.resolve(new Response(JSON.stringify(EMPTY_POLICY), { status: 200 }));
+      }),
+    );
+    render(<BoardApp />);
+    expect(calls).toBe(1);
+    // Well past POLL_MS with the first load still in flight: no second request.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(45_000);
+    });
+    expect(calls).toBe(1);
+    // Settling the load schedules the next refresh; only then does it fire.
+    await act(async () => {
+      resolvers[0]();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(15_000);
+    });
+    expect(calls).toBe(2);
+  });
+
+  it("shows an explicit error when the policy fetch fails", async () => {
+    stubBoard([task({ id: 1, title: "present" })], { "/ui/api/policy/active": new Error("policy down") });
+    render(<BoardApp />);
+    await screen.findByText(/present/);
+    await screen.findByText("정책 정보를 불러오지 못했습니다.");
+    expect(screen.queryByText("불러오는 중")).toBeNull();
+  });
+
   it("keeps the last good board when a refresh fails", async () => {
     vi.useFakeTimers();
     let fail = false;

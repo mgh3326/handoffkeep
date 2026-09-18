@@ -83,35 +83,42 @@ export function BoardApp() {
   const [boardError, setBoardError] = useState(false);
   const [firstLoad, setFirstLoad] = useState(true);
   const [policy, setPolicy] = useState<PolicyResponse | null>(null);
+  const [policyError, setPolicyError] = useState(false);
   const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS);
   const [selectedId, setSelectedId] = useState<number | null>(null);
 
+  // The next refresh is scheduled only after the in-flight load settles, so
+  // polls can never overlap. The sequence guard keeps a stale response from
+  // overwriting newer state if ordering ever changes.
   useEffect(() => {
     let cancelled = false;
+    let timer = 0;
+    let seq = 0;
     const load = async () => {
+      const mine = ++seq;
       try {
         const next = await fetchBoardTasks();
-        if (!cancelled) {
+        if (!cancelled && mine === seq) {
           setBoard(next);
           setBoardError(false);
         }
       } catch {
-        if (!cancelled) {
+        if (!cancelled && mine === seq) {
           setBoardError(true);
         }
       } finally {
         if (!cancelled) {
           setFirstLoad(false);
+          timer = window.setTimeout(() => {
+            void load();
+          }, POLL_MS);
         }
       }
     };
     void load();
-    const timer = window.setInterval(() => {
-      void load();
-    }, POLL_MS);
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
+      window.clearTimeout(timer);
     };
   }, []);
 
@@ -123,7 +130,11 @@ export function BoardApp() {
           setPolicy(next);
         }
       })
-      .catch(() => undefined);
+      .catch(() => {
+        if (!cancelled) {
+          setPolicyError(true);
+        }
+      });
     return () => {
       cancelled = true;
     };
@@ -246,7 +257,7 @@ export function BoardApp() {
       </div>
       {board.tasks.length === 0 ? <p className="muted">표시할 태스크가 없습니다.</p> : null}
       {selectedId !== null ? <TaskDetail id={selectedId} onClose={() => setSelectedId(null)} /> : null}
-      <PolicyPanel policy={policy} />
+      <PolicyPanel policy={policy} error={policyError} />
     </section>
   );
 }

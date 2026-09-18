@@ -743,7 +743,7 @@ func TestUIP4QueueOperatorView(t *testing.T) {
 	_ = decision
 	response := uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/queue", assertion, "")
 	body := responseText(t, response)
-	for _, title := range []string{"hidden implement backlog", "hidden fix backlog", "hidden ops backlog", "shown needs decision"} {
+	for _, title := range []string{"hidden implement backlog", "hidden fix backlog", "hidden ops backlog", "shown decide backlog", "shown needs decision"} {
 		if strings.Contains(body, title) {
 			t.Fatalf("board mount page rendered task data %q", title)
 		}

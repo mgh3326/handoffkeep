@@ -2,6 +2,7 @@ package ui
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"regexp"
 	"sort"
@@ -161,11 +162,14 @@ type participantSegment struct {
 // boardParticipants is the exact task_ref telemetry projection. Coverage is
 // an explicit state, never a guessed attribution: no reps means
 // "not_collected", and an unrecorded model or role stays null rather than
-// being inferred from task events, job names, or the last writer.
+// being inferred from task events, job names, or the last writer. When the
+// rep query hits its bound, truncated is set and the segment totals are
+// explicitly partial — they never masquerade as a complete sum.
 type boardParticipants struct {
-	TaskRef  string               `json:"task_ref"`
-	Coverage string               `json:"coverage"`
-	Segments []participantSegment `json:"segments"`
+	TaskRef   string               `json:"task_ref"`
+	Coverage  string               `json:"coverage"`
+	Truncated bool                 `json:"truncated,omitempty"`
+	Segments  []participantSegment `json:"segments"`
 }
 
 type boardDetailResponse struct {
@@ -312,12 +316,19 @@ func (h *Handler) boardTaskDetail(w http.ResponseWriter, r *http.Request) {
 	if found {
 		response.Linear = &boardLinear{IssueID: issue.IssueID, Identifier: issue.Identifier}
 	}
-	reps, err := h.store.ListBenchRepsByTaskRef(r.Context(), taskRef(id), boardDetailRepsLimit)
+	// One extra row distinguishes "reps are complete" from "the bound was
+	// hit". Beyond the bound the totals are partial and must say so.
+	reps, err := h.store.ListBenchRepsByTaskRef(r.Context(), taskRef(id), boardDetailRepsLimit+1)
 	if err != nil {
 		http.Error(w, "fleet console unavailable", http.StatusInternalServerError)
 		return
 	}
+	truncated := len(reps) > boardDetailRepsLimit
+	if truncated {
+		reps = reps[:boardDetailRepsLimit]
+	}
 	response.Participants = projectParticipants(id, reps)
+	response.Participants.Truncated = truncated
 	writeBoardJSON(w, response)
 }
 
@@ -382,7 +393,8 @@ func (h *Handler) policyActive(w http.ResponseWriter, r *http.Request) {
 	}
 	var parsed policyManifest
 	decoder := json.NewDecoder(strings.NewReader(manifest.Body))
-	if err := decoder.Decode(&parsed); err != nil {
+	var trailing any
+	if err := decoder.Decode(&parsed); err != nil || decoder.Decode(&trailing) != io.EOF {
 		response.Status = "invalid_manifest"
 		writeBoardJSON(w, response)
 		return

@@ -91,10 +91,13 @@ function Participants({ detail }: { detail: BoardDetail }) {
     <section className="detail-participants">
       <h4>
         참가자 <span className="muted">{participants.task_ref}</span> <span className="badge">{participants.coverage}</span>
+        {participants.truncated ? <span className="badge board-warning">일부만 집계</span> : null}
       </h4>
       {participants.coverage === "not_collected" ? (
         <p className="muted">수집된 bench rep이 없습니다.</p>
       ) : (
+        <>
+          {participants.truncated ? <p className="muted">집계 한계를 초과 — 아래 합계는 처음 수집분만 반영합니다.</p> : null}
         <table className="detail-table">
           <thead>
             <tr>
@@ -114,6 +117,7 @@ function Participants({ detail }: { detail: BoardDetail }) {
             ))}
           </tbody>
         </table>
+        </>
       )}
     </section>
   );

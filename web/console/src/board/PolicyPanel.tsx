@@ -18,12 +18,16 @@ function PolicyStatus({ status }: { status: PolicyResponse["status"] }) {
 // Policy canon resolves only the exact pointer and manifest keys. Prefix
 // listing or search would imply a coverage this panel deliberately does not
 // claim.
-export function PolicyPanel({ policy }: { policy: PolicyResponse | null }) {
+export function PolicyPanel({ policy, error = false }: { policy: PolicyResponse | null; error?: boolean }) {
   return (
     <section className="policy-panel">
       <h2>Policy canon</h2>
       {policy === null ? (
-        <p className="muted">불러오는 중</p>
+        error ? (
+          <p className="board-warning">정책 정보를 불러오지 못했습니다.</p>
+        ) : (
+          <p className="muted">불러오는 중</p>
+        )
       ) : (
         <>
           <p className="policy-meta">

@@ -99,6 +99,22 @@ describe("TaskDetail", () => {
     expect(screen.getByText("not_collected")).toBeTruthy();
   });
 
+  it("marks truncated participant totals as partial, not complete", async () => {
+    stubDetail(
+      detail({
+        participants: {
+          task_ref: "hk:task/42",
+          coverage: "collected",
+          truncated: true,
+          segments: [{ role: "impl", model_id: "model-a", reps: 500, rounds: null, blockers_found: null, completed: null, input_tokens: null, output_tokens: null }],
+        },
+      }),
+    );
+    render(<TaskDetail id={42} onClose={() => undefined} />);
+    await screen.findByText("일부만 집계");
+    expect(screen.getByText(/집계 한계를 초과/)).toBeTruthy();
+  });
+
   it("shows the error state and closes", async () => {
     vi.stubGlobal(
       "fetch",

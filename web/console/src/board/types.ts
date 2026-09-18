@@ -58,6 +58,7 @@ export type ParticipantSegment = {
 export type BoardParticipants = {
   task_ref: string;
   coverage: "collected" | "not_collected";
+  truncated?: boolean;
   segments: ParticipantSegment[];
 };
 

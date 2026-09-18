@@ -267,9 +267,10 @@ func TestUIBoardTaskDetail(t *testing.T) {
 			Identifier string `json:"identifier"`
 		} `json:"linear"`
 		Participants struct {
-			TaskRef  string `json:"task_ref"`
-			Coverage string `json:"coverage"`
-			Segments []struct {
+			TaskRef   string `json:"task_ref"`
+			Coverage  string `json:"coverage"`
+			Truncated bool   `json:"truncated"`
+			Segments  []struct {
 				Role        *string `json:"role"`
 				ModelID     *string `json:"model_id"`
 				Reps        int     `json:"reps"`
@@ -319,7 +320,7 @@ func TestUIBoardTaskDetail(t *testing.T) {
 		t.Fatalf("detail2 status=%d", status)
 	}
 	p := got.Participants
-	if p.Coverage != "collected" || len(p.Segments) != 3 {
+	if p.Coverage != "collected" || p.Truncated || len(p.Segments) != 3 {
 		t.Fatalf("segments=%+v", p.Segments)
 	}
 	totalReps := 0
@@ -369,6 +370,68 @@ func TestUIBoardTaskDetail(t *testing.T) {
 		t.Fatalf("missing task status=%d", response.StatusCode)
 	}
 	response.Body.Close()
+}
+
+// More reps than the detail bound must surface as explicitly partial: the
+// segment totals cover the first 500 rows only, and truncated says so instead
+// of letting a capped sum masquerade as complete telemetry.
+func TestUIBoardTaskDetailRepsTruncated(t *testing.T) {
+	s := uiStore(t)
+	fixture := newUIJWTFixture(t)
+	h := newUITestServer(t, s, fixture, "", "", 0)
+	defer h.Close()
+	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
+	lane := uiLane(t, "board-trunc")
+
+	task := createUITask(t, s, lane, "truncated telemetry")
+	taskRef := "hk:task/" + strconv.FormatInt(task.ID, 10)
+	role, model := "impl", "model-a"
+	input := int64(10)
+	// created_by+origin_id is the dedup key; a per-task creator keeps the 501
+	// rows unique regardless of what earlier tests seeded.
+	reps := make([]store.BenchRep, 0, 501)
+	for i := 0; i < 501; i++ {
+		reps = append(reps, store.BenchRep{
+			OriginID:    int64(i + 1),
+			Profile:     "board-test",
+			TaskRef:     &taskRef,
+			Role:        &role,
+			ModelID:     &model,
+			InputTokens: &input,
+			RecordedAt:  time.Now().UTC(),
+			CreatedBy:   fmt.Sprintf("board-trunc-%d", task.ID),
+		})
+	}
+	if _, err := s.UpsertBenchReps(t.Context(), reps); err != nil {
+		t.Fatal(err)
+	}
+
+	var got struct {
+		Participants struct {
+			TaskRef   string `json:"task_ref"`
+			Coverage  string `json:"coverage"`
+			Truncated bool   `json:"truncated"`
+			Segments  []struct {
+				Reps        int    `json:"reps"`
+				InputTokens *int64 `json:"input_tokens"`
+			} `json:"segments"`
+		} `json:"participants"`
+	}
+	url := h.URL + "/ui/api/board/tasks/" + strconv.FormatInt(task.ID, 10)
+	if status := boardJSON(t, h.Client(), url, assertion, &got); status != http.StatusOK {
+		t.Fatalf("detail status=%d", status)
+	}
+	p := got.Participants
+	if p.Coverage != "collected" || !p.Truncated {
+		t.Fatalf("501 reps must report collected+truncated: %+v", p)
+	}
+	total := 0
+	for _, segment := range p.Segments {
+		total += segment.Reps
+	}
+	if total != 500 {
+		t.Fatalf("partial totals must cover exactly the 500-rep bound, got %d: %+v", total, p.Segments)
+	}
 }
 
 func TestUIBoardPolicyActive(t *testing.T) {
@@ -438,10 +501,21 @@ func TestUIBoardPolicyActive(t *testing.T) {
 		t.Fatalf("bad item key=%+v", got)
 	}
 
+	// The manifest must be one complete JSON document: a second value or any
+	// trailing non-whitespace content is invalid, not silently ignored.
+	seedPolicyDoc(t, s, manifest, `{"release":"r1","items":[]} {"extra":1}`)
+	if got := get(); got.Status != "invalid_manifest" {
+		t.Fatalf("trailing json manifest=%+v", got)
+	}
+	seedPolicyDoc(t, s, manifest, `{"release":"r1","items":[]} junk`)
+	if got := get(); got.Status != "invalid_manifest" {
+		t.Fatalf("trailing junk manifest=%+v", got)
+	}
+
 	itemA := boardPolicyKey(t, "a")
 	itemB := boardPolicyKey(t, "b")
 	seedPolicyDoc(t, s, itemA, "doc A body")
-	seedPolicyDoc(t, s, manifest, fmt.Sprintf(`{"release":"2026-09-19","items":[{"key":%q,"title":"Doc A"},{"key":%q}]}`, itemA, itemB))
+	seedPolicyDoc(t, s, manifest, fmt.Sprintf(`{"release":"2026-09-19","items":[{"key":%q,"title":"Doc A"},{"key":%q}]}`+"\n  \n", itemA, itemB))
 	got := get()
 	if got.Status != "ok" || got.Release != "2026-09-19" || len(got.Items) != 2 {
 		t.Fatalf("ok policy=%+v", got)
