@@ -58,6 +58,8 @@ type glanceResponse struct {
 // email or service identity. Service principals have no browser cookie path.
 func (h *Handler) serveAPI(w http.ResponseWriter, r *http.Request, identity cfaccess.Identity) {
 	switch {
+	case r.Method == http.MethodGet && r.URL.Path == "/ui/api/fleet":
+		h.fleetAPI(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/ui/api/glance":
 		h.glance(w, r)
 	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/ui/api/nodes/"):

@@ -463,13 +463,17 @@ func TestUIFleetProxyAndTokenBoundary(t *testing.T) {
 	s := uiStore(t)
 	fixture := newUIJWTFixture(t)
 	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
-	active := createUITask(t, s, uiLane(t, "lane-a"), "fleet active task")
-	claimAndTransition(t, s, active, "in_progress", "started")
 
 	unconfigured := newUITestServer(t, s, fixture, "", "", 0)
 	response := uiRequest(t, unconfigured.Client(), http.MethodGet, unconfigured.URL+"/ui/fleet", assertion, "")
-	if response.StatusCode != http.StatusOK || !strings.Contains(responseText(t, response), "hub 미설정") {
+	page := responseText(t, response)
+	if response.StatusCode != http.StatusOK || !strings.Contains(page, `id="fleet-root"`) {
 		t.Fatal("unconfigured hub did not leave fleet page available")
+	}
+	apiResp := uiRequest(t, unconfigured.Client(), http.MethodGet, unconfigured.URL+"/ui/api/fleet", assertion, "")
+	apiBody := responseText(t, apiResp)
+	if apiResp.StatusCode != http.StatusOK || !strings.Contains(apiBody, `"upstream":"unconfigured"`) {
+		t.Fatalf("unconfigured fleet API=%q", apiBody)
 	}
 	for _, endpoint := range []string{"/ui/timeline", "/ui/queue", "/ui/decisions"} {
 		response := uiRequest(t, unconfigured.Client(), http.MethodGet, unconfigured.URL+endpoint, assertion, "")
@@ -482,24 +486,16 @@ func TestUIFleetProxyAndTokenBoundary(t *testing.T) {
 
 	mode := "normal"
 	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/v1/nodes":
-			if mode == "fail" {
-				w.WriteHeader(http.StatusInternalServerError)
-				return
-			}
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(w, `{"nodes":[{"machine_id":"host-a","state":"connected","accepting":true,"accepting_effective":true,"last_ping_ms":1234,"memory":{"free_pct":41.2,"compressed_mb":900,"swap_used_mb":120},"remote_meta":{"version":"v1"}}]}`)
-		case "/v1/jobs":
-			if mode == "unsupported" {
-				w.WriteHeader(http.StatusNotFound)
-				return
-			}
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(w, `{"jobs":[{"machine":"host-a","job_id":"job-a","owner_lane":"lane-a","pane":"p1","tier":"T1","started_at":"now"}]}`)
-		default:
+		if r.URL.Path != "/v1/nodes" {
 			w.WriteHeader(http.StatusNotFound)
+			return
 		}
+		if mode == "fail" {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"nodes":[{"machine_id":"host-a","state":"connected","accepting":true,"accepting_effective":true,"last_ping_ms":1234,"session_snapshot":{"sessions":[{"pane_id":"pane-1","workspace_id":"ws-1","label":"worker-a","status":"idle","revision":1,"state_change_seq":1}],"snapshot_status":"ok","truncated":false,"received_at":"2026-01-02T03:04:05Z","stale":false}}]}`)
 	}))
 	defer hub.Close()
 	hubValue := "hub-test-value"
@@ -507,8 +503,8 @@ func TestUIFleetProxyAndTokenBoundary(t *testing.T) {
 	defer h.Close()
 	response = uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/fleet", assertion, "")
 	body := responseText(t, response)
-	if response.StatusCode != http.StatusOK || !strings.Contains(body, "host-a") || !strings.Contains(body, "1234") || !strings.Contains(body, "v1") || !strings.Contains(body, "41.2") || !strings.Contains(body, "900") || !strings.Contains(body, "120") || !strings.Contains(body, "job-a") || !strings.Contains(body, "fleet active task") {
-		t.Fatalf("normal hub rendering failed: %q", body)
+	if response.StatusCode != http.StatusOK || !strings.Contains(body, `id="fleet-root"`) || !strings.Contains(body, "/ui/static/console/fleet.js") {
+		t.Fatalf("normal fleet page failed: %q", body)
 	}
 	if strings.Contains(body, hubValue) {
 		t.Fatal("hub credential was rendered")
@@ -518,27 +514,32 @@ func TestUIFleetProxyAndTokenBoundary(t *testing.T) {
 			t.Fatalf("hub credential leaked in header %s", key)
 		}
 	}
+	apiResp = uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/api/fleet", assertion, "")
+	apiBody = responseText(t, apiResp)
+	if apiResp.StatusCode != http.StatusOK || !strings.Contains(apiBody, `"machine_id":"host-a"`) || !strings.Contains(apiBody, `"pane_id":"pane-1"`) || strings.Contains(apiBody, hubValue) {
+		t.Fatalf("normal fleet API failed: %q", apiBody)
+	}
 	response = uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/static/htmx.min.js", assertion, "")
 	if strings.Contains(responseText(t, response), hubValue) {
 		t.Fatal("hub credential leaked in static content")
 	}
-	mode = "unsupported"
-	response = uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/fleet", assertion, "")
-	if response.StatusCode != http.StatusOK || !strings.Contains(responseText(t, response), "jobs API 미지원") {
-		t.Fatal("404 jobs endpoint was not marked unsupported")
-	}
 	mode = "fail"
-	response = uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/fleet", assertion, "")
-	body = responseText(t, response)
-	if response.StatusCode != http.StatusOK || !strings.Contains(body, "stale (") || !strings.Contains(body, "host-a") {
-		t.Fatal("hub failure did not retain a stale snapshot")
+	apiResp = uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/api/fleet", assertion, "")
+	apiBody = responseText(t, apiResp)
+	if apiResp.StatusCode != http.StatusOK || !strings.Contains(apiBody, `"machine_id":"host-a"`) || !strings.Contains(apiBody, `"upstream":"ok"`) {
+		t.Fatalf("cache window did not keep the last success snapshot: %q", apiBody)
 	}
 
 	freshFailure := newUITestServer(t, s, fixture, hub.URL, hubValue, 0)
 	defer freshFailure.Close()
-	response = uiRequest(t, freshFailure.Client(), http.MethodGet, freshFailure.URL+"/ui/fleet", assertion, "")
-	if response.StatusCode != http.StatusOK || !strings.Contains(responseText(t, response), "hub 도달 불가") {
-		t.Fatal("initial hub failure did not stay available with unavailable state")
+	apiResp = uiRequest(t, freshFailure.Client(), http.MethodGet, freshFailure.URL+"/ui/api/fleet", assertion, "")
+	apiBody = responseText(t, apiResp)
+	if apiResp.StatusCode != http.StatusOK || !strings.Contains(apiBody, `"upstream":"http_error"`) || strings.Contains(apiBody, `"state":"down"`) {
+		t.Fatalf("initial hub failure was not available without marking nodes down: %q", apiBody)
+	}
+	pageResp := uiRequest(t, freshFailure.Client(), http.MethodGet, freshFailure.URL+"/ui/fleet", assertion, "")
+	if pageResp.StatusCode != http.StatusOK || !strings.Contains(responseText(t, pageResp), `id="fleet-root"`) {
+		t.Fatal("initial hub failure hid the fleet page")
 	}
 }
 
@@ -547,26 +548,27 @@ func TestUIFleetThresholdsAndNullableMemory(t *testing.T) {
 	fixture := newUIJWTFixture(t)
 	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
 	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/v1/jobs" {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"nodes":[{"machine_id":"host-a","state":"connected","accepting":true,"accepting_effective":false,"accepting_override":"maintenance","alert_class":"","memory":{"free_pct":29.9,"compressed_mb":900,"swap_used_mb":1537}},{"machine_id":"host-b","state":"connected","accepting":true,"accepting_effective":true,"memory":{"free_pct":31,"compressed_mb":900,"swap_used_mb":1536}},{"machine_id":"host-c","state":"connected","accepting":true,"accepting_effective":true,"memory":null},{"machine_id":"host-d","state":"connected","accepting":true,"accepting_effective":true,"memory":{"free_pct":null,"compressed_mb":null,"swap_used_mb":null}}]}`)
+		_, _ = io.WriteString(w, `{"nodes":[{"machine_id":"host-a","state":"connected","accepting":true,"accepting_effective":false,"accepting_override":"maintenance","session_snapshot":{"sessions":[],"snapshot_status":"ok","truncated":false,"received_at":"2026-01-02T03:04:05Z","stale":false}},{"machine_id":"host-b","state":"connected","session_snapshot":{"sessions":[],"snapshot_status":"ok","truncated":false,"received_at":"2026-01-02T03:04:05Z","stale":false}},{"machine_id":"host-c","state":"connected","memory":null,"session_snapshot":{"sessions":[],"snapshot_status":"unavailable","truncated":false,"received_at":"2026-01-02T03:04:05Z","stale":false}},{"machine_id":"host-d","state":"connected","memory":{"free_pct":null},"session_snapshot":{"sessions":[{"pane_id":"pane-1","workspace_id":"ws-1","label":"worker-a","status":"idle","revision":1,"state_change_seq":1}],"snapshot_status":"ok","truncated":false,"received_at":"2026-01-02T03:04:05Z","stale":false}}]}`)
 	}))
 	defer hub.Close()
 	h := newUITestServer(t, s, fixture, hub.URL, "hub-test-value", 0)
 	defer h.Close()
-	response := uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/fleet", assertion, "")
+	response := uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/api/fleet", assertion, "")
 	body := responseText(t, response)
-	if response.StatusCode != http.StatusOK || !strings.Contains(body, "free_pct 29.9") || !strings.Contains(body, "swap_used_mb 1537") || !strings.Contains(body, "reason maintenance") {
-		t.Fatal("threshold input values did not render")
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("fleet API status=%d body=%q", response.StatusCode, body)
 	}
-	if strings.Count(body, `class="threshold-alert"`) != 3 { // free_pct, swap_used_mb, accepting_effective=false
-		t.Fatalf("threshold alerts=%d body=%q", strings.Count(body, `class="threshold-alert"`), body)
+	for _, id := range []string{"host-a", "host-b", "host-c", "host-d"} {
+		if !strings.Contains(body, `"machine_id":"`+id+`"`) {
+			t.Fatalf("missing %s in %q", id, body)
+		}
 	}
-	if !strings.Contains(body, "free_pct 31") || !strings.Contains(body, "swap_used_mb 1536") || strings.Count(body, "미측정") < 6 {
-		t.Fatal("non-alert boundaries or nullable memory handling failed")
+	if !strings.Contains(body, `"snapshot_status":"ok"`) || !strings.Contains(body, `"snapshot_status":"unavailable"`) {
+		t.Fatal("empty-list and collection-failure statuses were not preserved together")
+	}
+	if strings.Contains(body, `"state":"down"`) {
+		t.Fatal("nullable memory nodes were marked down")
 	}
 }
 

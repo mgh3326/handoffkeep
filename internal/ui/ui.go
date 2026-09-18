@@ -22,7 +22,7 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
-//go:embed templates/*.html static/*
+//go:embed templates/*.html static
 var assets embed.FS
 
 var taskStates = []string{"backlog", "claimed", "in_progress", "verifying", "join", "hold", "needs_decision", "merged", "dropped"}
@@ -36,6 +36,7 @@ type Config struct {
 	HubToken      string
 	HubHTTPClient *http.Client
 	PollInterval  time.Duration
+	HubCacheTTL   time.Duration
 }
 
 // Handler is a Cloudflare Access-authenticated UI handler.
@@ -92,11 +93,17 @@ func New(config Config) (*Handler, error) {
 			directorLanes[lane] = true
 		}
 	}
+	hub := newHubProxy(config.HubURL, config.HubToken, config.HubHTTPClient)
+	if config.HubCacheTTL > 0 {
+		hub.cacheTTL = config.HubCacheTTL
+	} else {
+		hub.cacheTTL = 10 * time.Second
+	}
 	return &Handler{
 		store:         config.Store,
 		access:        config.Access,
 		templates:     tmpl,
-		hub:           newHubProxy(config.HubURL, config.HubToken, config.HubHTTPClient),
+		hub:           hub,
 		pollInterval:  poll,
 		static:        static,
 		csrfKey:       csrfKey,
@@ -110,6 +117,9 @@ func New(config Config) (*Handler, error) {
 // existing bearer-token API. Only the explicit UI write routes can reach a
 // mutating operation.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/ui/fleet" || strings.HasPrefix(r.URL.Path, "/ui/api/") {
+		setConsoleCSP(w)
+	}
 	identity, authenticated := h.access.AuthenticatedIdentity(r)
 	if !authenticated {
 		if r.Method == http.MethodPost {
@@ -203,19 +213,28 @@ func (h *Handler) serveSubroute(w http.ResponseWriter, r *http.Request, email st
 }
 
 func (h *Handler) staticFile(w http.ResponseWriter, r *http.Request, file string) {
-	if file != "htmx.min.js" && file != "htmx.LICENSE" {
+	clean := path.Clean(file)
+	switch {
+	case clean == "htmx.min.js" || clean == "htmx.LICENSE":
+	case strings.HasPrefix(clean, "console/") && !strings.HasSuffix(clean, ".map"):
+	default:
 		http.NotFound(w, r)
 		return
 	}
-	b, err := fs.ReadFile(h.static, path.Clean(file))
+	b, err := fs.ReadFile(h.static, clean)
 	if err != nil {
 		http.NotFound(w, r)
 		return
 	}
-	if file == "htmx.min.js" {
+	switch {
+	case strings.HasSuffix(clean, ".js"):
 		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
-	} else {
+	case strings.HasSuffix(clean, ".css"):
+		w.Header().Set("Content-Type", "text/css; charset=utf-8")
+	case clean == "htmx.LICENSE":
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	default:
+		w.Header().Set("Content-Type", "application/octet-stream")
 	}
 	w.Header().Set("Cache-Control", "public, max-age=86400")
 	_, _ = w.Write(b)
@@ -599,49 +618,11 @@ func eventDecisionViewFor(kind string, event store.RelayEvent, index int) eventD
 }
 
 func (h *Handler) fleet(w http.ResponseWriter, r *http.Request, fragment bool) {
-	data, err := h.fleetData(r)
-	if err != nil {
-		http.Error(w, "fleet console unavailable", http.StatusInternalServerError)
-		return
-	}
 	if fragment {
-		h.render(w, "fleet_content", data)
+		h.render(w, "fleet_content", nil)
 		return
 	}
-	h.render(w, "page", pageData{Title: "Fleet", Page: "fleet", Body: data})
-}
-
-type activeLane struct {
-	Lane  string
-	Tasks []store.Task
-}
-
-type fleetData struct {
-	Hub         hubView
-	ActiveLanes []activeLane
-}
-
-func (h *Handler) fleetData(r *http.Request) (fleetData, error) {
-	tasks, err := h.store.ListTasks(r.Context(), "", "", "", 1000)
-	if err != nil {
-		return fleetData{}, err
-	}
-	byLane := map[string][]store.Task{}
-	for _, task := range tasks {
-		if task.State == "claimed" || task.State == "in_progress" {
-			byLane[task.Lane] = append(byLane[task.Lane], task)
-		}
-	}
-	lanes := make([]string, 0, len(byLane))
-	for lane := range byLane {
-		lanes = append(lanes, lane)
-	}
-	sort.Strings(lanes)
-	active := make([]activeLane, 0, len(lanes))
-	for _, lane := range lanes {
-		active = append(active, activeLane{Lane: lane, Tasks: byLane[lane]})
-	}
-	return fleetData{Hub: h.hub.current(r.Context()), ActiveLanes: active}, nil
+	h.render(w, "fleet_page", nil)
 }
 
 func (h *Handler) render(w http.ResponseWriter, name string, data any) {

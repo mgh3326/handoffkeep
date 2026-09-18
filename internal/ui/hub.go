@@ -15,12 +15,20 @@ import (
 )
 
 type hubProxy struct {
-	url    string
-	token  string
-	client *http.Client
+	url      string
+	token    string
+	client   *http.Client
+	cacheTTL time.Duration
 
 	mu       sync.Mutex
 	snapshot *hubSnapshot
+
+	fleetMu     sync.Mutex
+	fleetCached fleetResponse
+	fleetAt     time.Time
+	fleetReady  bool
+	fleetWait   chan struct{}
+	lastSuccess *fleetResponse
 }
 
 type hubStatusError int
@@ -252,15 +260,37 @@ func (p *hubProxy) setAccepting(parent context.Context, machine string, acceptin
 }
 
 type hubNode struct {
-	MachineID          string          `json:"machine_id"`
-	State              string          `json:"state"`
-	Accepting          bool            `json:"accepting"`
-	AcceptingEffective bool            `json:"accepting_effective"`
-	AcceptingOverride  string          `json:"accepting_override"`
-	AlertClass         string          `json:"alert_class"`
-	LastPingMS         *int64          `json:"last_ping_ms"`
-	Memory             *hubMemory      `json:"memory"`
-	RemoteMeta         json.RawMessage `json:"remote_meta"`
+	MachineID          string              `json:"machine_id"`
+	State              string              `json:"state"`
+	Accepting          bool                `json:"accepting"`
+	AcceptingEffective bool                `json:"accepting_effective"`
+	AcceptingOverride  string              `json:"accepting_override"`
+	AlertClass         string              `json:"alert_class"`
+	LastPingMS         *int64              `json:"last_ping_ms"`
+	Memory             *hubMemory          `json:"memory"`
+	RemoteMeta         json.RawMessage     `json:"remote_meta"`
+	SessionSnapshot    *hubSessionSnapshot `json:"session_snapshot"`
+}
+
+// hubSessionSnapshot mirrors the hub /v1/nodes nested projection. Field names
+// and types match panewire HubSessionSnapshot; values are supplied by tests as
+// synthetic fixtures.
+type hubSessionSnapshot struct {
+	Sessions       []hubSession `json:"sessions"`
+	SnapshotStatus string       `json:"snapshot_status"`
+	Truncated      bool         `json:"truncated"`
+	ReceivedAt     string       `json:"received_at"`
+	Stale          bool         `json:"stale"`
+}
+
+type hubSession struct {
+	PaneID           string `json:"pane_id"`
+	WorkspaceID      string `json:"workspace_id"`
+	Label            string `json:"label"`
+	Status           string `json:"status"`
+	InteractiveReady *bool  `json:"interactive_ready,omitempty"`
+	Revision         int64  `json:"revision"`
+	StateChangeSeq   int64  `json:"state_change_seq"`
 }
 
 type hubMemory struct {
