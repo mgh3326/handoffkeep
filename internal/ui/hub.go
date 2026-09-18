@@ -27,6 +27,10 @@ type hubProxy struct {
 	fleetCached fleetResponse
 	fleetAt     time.Time
 	fleetReady  bool
+	failCached  fleetResponse
+	failAt      time.Time
+	failReady   bool
+	lastResult  fleetResponse
 	fleetWait   chan struct{}
 	lastSuccess *fleetResponse
 }

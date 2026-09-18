@@ -218,7 +218,7 @@ func TestFleetAPIHealthySessions(t *testing.T) {
 		t.Fatalf("nodes=%v", nodes)
 	}
 	node := nodes[0]
-	if node["machine_id"] != "node-a" || node["state"] != "connected" || node["snapshot_status"] != "ok" || node["truncated"] != false || node["stale"] != false {
+	if node["machine_id"] != "node-a" || node["state"] != "connected" || node["snapshot_status"] != "ok" || node["display_state"] != "sessions" || node["truncated"] != false || node["stale"] != false {
 		t.Fatalf("node=%v", node)
 	}
 	if node["last_ping"] != float64(1234) || node["received_at"] != "2026-01-02T03:04:05Z" {
@@ -249,7 +249,7 @@ func TestFleetAPIEmptySessionsNotUnavailable(t *testing.T) {
 	_, _, body, got := getFleetAPI(t, server, assertion)
 	node := fleetNodes(t, got)[0]
 	sessions, _ := node["sessions"].([]any)
-	if node["snapshot_status"] != "ok" || len(sessions) != 0 {
+	if node["snapshot_status"] != "ok" || node["display_state"] != "empty" || len(sessions) != 0 {
 		t.Fatalf("empty list collapsed: %v body=%q", node, body)
 	}
 	if node["snapshot_status"] == "unavailable" {
@@ -267,7 +267,7 @@ func TestFleetAPISnapshotUnavailable(t *testing.T) {
 	server, assertion := newFleetUI(t, upstream.URL, fleetTestSecret, 0)
 	_, _, _, got := getFleetAPI(t, server, assertion)
 	node := fleetNodes(t, got)[0]
-	if node["snapshot_status"] != "unavailable" {
+	if node["snapshot_status"] != "unavailable" || node["display_state"] != "unavailable" {
 		t.Fatalf("collection failure not preserved: %v", node)
 	}
 	if node["state"] != "connected" {
@@ -504,6 +504,124 @@ func TestFleetAPISharedPolling(t *testing.T) {
 	hits, paths := hub.snapshot()
 	if hits != 1 {
 		t.Fatalf("cached replay made extra upstream GETs: hits=%d paths=%v", hits, paths)
+	}
+}
+
+func TestFleetAPIFailureCacheDoesNotDelayRecovery(t *testing.T) {
+	hub := newFleetHub(t, func(w http.ResponseWriter, r *http.Request) {
+		writeFleetNodes(w, []map[string]any{
+			fleetNode("node-a", "connected", nil, sessionSnapshot("ok", false, false, "2026-01-02T03:04:05Z", []map[string]any{
+				syntheticSession("pane-1", "worker-a", "idle", nil),
+			})),
+		})
+	})
+	upstream := startFleetHub(t, hub)
+	server, assertion := newFleetUI(t, upstream.URL, fleetTestSecret, 3*time.Second)
+	_, _, _, first := getFleetAPI(t, server, assertion)
+	fetchedAt := first["fetched_at"]
+	if first["upstream"] != "ok" {
+		t.Fatalf("first=%v", first)
+	}
+	time.Sleep(3100 * time.Millisecond)
+	hub.setServe(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	})
+	_, _, _, failed := getFleetAPI(t, server, assertion)
+	if failed["upstream"] != "http_error" || failed["fetched_at"] != fetchedAt {
+		t.Fatalf("failure=%v", failed)
+	}
+	hub.setServe(func(w http.ResponseWriter, r *http.Request) {
+		writeFleetNodes(w, []map[string]any{
+			fleetNode("node-a", "connected", nil, sessionSnapshot("ok", false, false, "2026-01-02T03:04:05Z", []map[string]any{
+				syntheticSession("pane-2", "worker-b", "idle", nil),
+			})),
+		})
+	})
+	time.Sleep(2100 * time.Millisecond)
+	_, _, body, recovered := getFleetAPI(t, server, assertion)
+	if recovered["upstream"] != "ok" {
+		t.Fatalf("recovery delayed: %v body=%q", recovered, body)
+	}
+	session := fleetNodes(t, recovered)[0]["sessions"].([]any)[0].(map[string]any)
+	if session["pane_id"] != "pane-2" || session["label"] != "worker-b" {
+		t.Fatalf("recovery kept the pre-failure session: %v", session)
+	}
+}
+
+func TestFleetAPIDisplayState(t *testing.T) {
+	cases := []struct {
+		name           string
+		node           map[string]any
+		display        string
+		snapshotStatus string
+	}{
+		{
+			name:           "sessions",
+			node:           fleetNode("node-a", "connected", nil, sessionSnapshot("ok", false, false, "2026-01-02T03:04:05Z", []map[string]any{syntheticSession("pane-1", "worker-a", "idle", nil)})),
+			display:        "sessions",
+			snapshotStatus: "ok",
+		},
+		{
+			name:           "empty",
+			node:           fleetNode("node-a", "connected", nil, sessionSnapshot("ok", false, false, "2026-01-02T03:04:05Z", []map[string]any{})),
+			display:        "empty",
+			snapshotStatus: "ok",
+		},
+		{
+			name:           "unavailable",
+			node:           fleetNode("node-a", "connected", nil, sessionSnapshot("unavailable", false, false, "2026-01-02T03:04:05Z", []map[string]any{})),
+			display:        "unavailable",
+			snapshotStatus: "unavailable",
+		},
+		{
+			name:           "unknown",
+			node:           fleetNode("node-a", "connected", nil, sessionSnapshot("future_status", false, false, "2026-01-02T03:04:05Z", []map[string]any{})),
+			display:        "unknown",
+			snapshotStatus: "future_status",
+		},
+		{
+			name: "missing-absent",
+			node: map[string]any{
+				"machine_id":          "node-a",
+				"state":               "connected",
+				"accepting":           true,
+				"accepting_effective": true,
+			},
+			display:        "missing",
+			snapshotStatus: "unavailable",
+		},
+		{
+			name: "missing-null",
+			node: map[string]any{
+				"machine_id":          "node-a",
+				"state":               "connected",
+				"accepting":           true,
+				"accepting_effective": true,
+				"session_snapshot":    nil,
+			},
+			display:        "missing",
+			snapshotStatus: "unavailable",
+		},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			hub := newFleetHub(t, func(w http.ResponseWriter, r *http.Request) {
+				writeFleetNodes(w, []map[string]any{test.node})
+			})
+			upstream := startFleetHub(t, hub)
+			server, assertion := newFleetUI(t, upstream.URL, fleetTestSecret, 0)
+			_, _, _, got := getFleetAPI(t, server, assertion)
+			node := fleetNodes(t, got)[0]
+			if node["display_state"] != test.display || node["snapshot_status"] != test.snapshotStatus {
+				t.Fatalf("display_state=%v snapshot_status=%v want %s/%s node=%v", node["display_state"], node["snapshot_status"], test.display, test.snapshotStatus, node)
+			}
+			if test.display == "unknown" && node["snapshot_status"] != "future_status" {
+				t.Fatalf("unknown status was rewritten: %v", node)
+			}
+			if test.display == "empty" && node["snapshot_status"] == "unavailable" {
+				t.Fatalf("empty list marked unavailable: %v", node)
+			}
+		})
 	}
 }
 

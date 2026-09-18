@@ -146,6 +146,31 @@ func TestFleetRuntimeCDNZero(t *testing.T) {
 	}
 }
 
+func TestFleetBundleUsesDisplayState(t *testing.T) {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("caller path unavailable")
+	}
+	src, err := os.ReadFile(filepath.Join(filepath.Dir(file), "..", "web", "console", "src", "FleetApp.tsx"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(src)
+	if !strings.Contains(source, "display_state") {
+		t.Fatal("source does not read display_state")
+	}
+	if strings.Contains(source, "snapshot_status ===") || strings.Contains(source, "snapshot_status==") {
+		t.Fatal("source classifies snapshot_status itself")
+	}
+	js := readConsoleArtifacts(t)["fleet.js"]
+	if !strings.Contains(js, "display_state") {
+		t.Fatal("bundle does not contain display_state")
+	}
+	if strings.Contains(js, "snapshot_status===") || strings.Contains(js, "snapshot_status==") {
+		t.Fatal("bundle classifies snapshot_status itself")
+	}
+}
+
 func TestFleetBundleHasNoLocalPaths(t *testing.T) {
 	artifacts := readConsoleArtifacts(t)
 	for name, body := range artifacts {

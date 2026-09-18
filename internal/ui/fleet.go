@@ -15,6 +15,7 @@ import (
 const ConsoleCSP = "default-src 'self'; connect-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
 
 const fleetModelUncollected = "미수집"
+const fleetFailCacheTTL = 2 * time.Second
 
 func setConsoleCSP(w http.ResponseWriter) {
 	w.Header().Set("Content-Security-Policy", ConsoleCSP)
@@ -32,6 +33,7 @@ type fleetNode struct {
 	LastPing       *int64         `json:"last_ping"`
 	Sessions       []fleetSession `json:"sessions"`
 	SnapshotStatus string         `json:"snapshot_status"`
+	DisplayState   string         `json:"display_state"`
 	Truncated      bool           `json:"truncated"`
 	ReceivedAt     string         `json:"received_at"`
 	Stale          bool           `json:"stale"`
@@ -75,12 +77,17 @@ func (p *hubProxy) fleet(ctx context.Context) fleetResponse {
 		p.fleetMu.Unlock()
 		return view
 	}
+	if p.failReady && time.Since(p.failAt) < fleetFailCacheTTL {
+		view := cloneFleet(p.failCached)
+		p.fleetMu.Unlock()
+		return view
+	}
 	if p.fleetWait != nil {
 		wait := p.fleetWait
 		p.fleetMu.Unlock()
 		<-wait
 		p.fleetMu.Lock()
-		view := cloneFleet(p.fleetCached)
+		view := cloneFleet(p.lastResult)
 		p.fleetMu.Unlock()
 		return view
 	}
@@ -91,9 +98,17 @@ func (p *hubProxy) fleet(ctx context.Context) fleetResponse {
 	view := p.loadFleet()
 
 	p.fleetMu.Lock()
-	p.fleetCached = cloneFleet(view)
-	p.fleetAt = time.Now()
-	p.fleetReady = true
+	p.lastResult = cloneFleet(view)
+	if view.Upstream == "ok" {
+		p.fleetCached = cloneFleet(view)
+		p.fleetAt = time.Now()
+		p.fleetReady = true
+		p.failReady = false
+	} else {
+		p.failCached = cloneFleet(view)
+		p.failAt = time.Now()
+		p.failReady = true
+	}
 	p.fleetWait = nil
 	close(wait)
 	p.fleetMu.Unlock()
@@ -146,6 +161,7 @@ func projectFleetNode(node hubNode) fleetNode {
 		LastPing:       node.LastPingMS,
 		Sessions:       []fleetSession{},
 		SnapshotStatus: "unavailable",
+		DisplayState:   "missing",
 	}
 	if node.SessionSnapshot == nil {
 		return view
@@ -153,14 +169,26 @@ func projectFleetNode(node hubNode) fleetNode {
 	snap := node.SessionSnapshot
 	// Empty sessions with snapshot_status=ok stay ok; they are not unavailable.
 	view.SnapshotStatus = snap.SnapshotStatus
-	if view.SnapshotStatus == "" {
-		view.SnapshotStatus = "unavailable"
-	}
 	view.Truncated = snap.Truncated
 	view.ReceivedAt = snap.ReceivedAt
 	view.Stale = snap.Stale
 	view.Sessions = projectFleetSessions(snap.Sessions)
+	view.DisplayState = classifyDisplayState(snap.SnapshotStatus, len(view.Sessions))
 	return view
+}
+
+func classifyDisplayState(status string, n int) string {
+	switch status {
+	case "ok":
+		if n == 0 {
+			return "empty"
+		}
+		return "sessions"
+	case "unavailable":
+		return "unavailable"
+	default:
+		return "unknown"
+	}
 }
 
 func projectFleetSessions(sessions []hubSession) []fleetSession {

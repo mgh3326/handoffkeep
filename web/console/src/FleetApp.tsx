@@ -15,6 +15,7 @@ type FleetNode = {
   last_ping: number | null;
   sessions: FleetSession[];
   snapshot_status: string;
+  display_state: "sessions" | "empty" | "unavailable" | "unknown" | "missing";
   truncated: boolean;
   received_at: string;
   stale: boolean;
@@ -29,12 +30,26 @@ type FleetResponse = {
 const FLEET_API = "/ui/api/fleet";
 const POLL_MS = 10_000;
 
+function collectionBadge(node: FleetNode): string | null {
+  switch (node.display_state) {
+    case "unavailable":
+      return "수집 실패";
+    case "empty":
+      return "빈 목록";
+    case "unknown":
+      return `알 수 없는 수집 상태: ${node.snapshot_status}`;
+    case "missing":
+      return "스냅샷 없음";
+    default:
+      return null;
+  }
+}
+
 function nodeBadges(node: FleetNode): string[] {
   const badges: string[] = [];
-  if (node.snapshot_status === "unavailable") {
-    badges.push("수집 실패");
-  } else if (node.sessions.length === 0) {
-    badges.push("빈 목록");
+  const collection = collectionBadge(node);
+  if (collection) {
+    badges.push(collection);
   }
   if (node.stale || node.state === "stale") {
     badges.push("stale");
@@ -120,7 +135,8 @@ export function FleetApp() {
           ) : (
             data.nodes.flatMap((node) => {
               const badges = nodeBadges(node);
-              if (node.sessions.length === 0) {
+              if (node.display_state !== "sessions") {
+                const collection = collectionBadge(node) ?? "세션 없음";
                 return [
                   <tr key={node.machine_id}>
                     <td className="fleet-machine">{node.machine_id}</td>
@@ -133,7 +149,7 @@ export function FleetApp() {
                       <span className="muted"> {node.state}</span>
                     </td>
                     <td colSpan={4} className="muted">
-                      {node.snapshot_status === "unavailable" ? "수집 실패" : "세션 없음"}
+                      {collection}
                     </td>
                     <td>
                       <time>{node.received_at}</time>
