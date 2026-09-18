@@ -388,21 +388,21 @@ func TestUITimelineQueueAndEscaping(t *testing.T) {
 	claimAndTransition(t, s, decision, "needs_decision", "choose a path")
 	response = uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/queue", assertion, "")
 	body = responseText(t, response)
-	if !strings.Contains(body, "decision-card") || !strings.Contains(body, "needs decision") {
-		t.Fatal("default queue view did not render decision emphasis")
+	if response.StatusCode != http.StatusOK || !strings.Contains(body, `id="board-root"`) || !strings.Contains(body, "/ui/static/console/board.js") {
+		t.Fatal("queue page did not mount the React board")
 	}
-	if strings.Contains(body, "in progress title") {
-		t.Fatal("default queue view rendered a non-decide in_progress card")
+	if strings.Contains(body, "in progress title") || strings.Contains(body, "decision title") {
+		t.Fatal("queue page leaked server data into the mount HTML")
 	}
-	response = uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/queue?view=all", assertion, "")
+	response = uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/api/board/tasks?lane="+queueLane, assertion, "")
 	body = responseText(t, response)
-	if !strings.Contains(body, "in progress title") || !strings.Contains(body, "decision-card") || !strings.Contains(body, "needs decision") {
-		t.Fatal("full queue board did not render state cells and decision emphasis")
+	if response.StatusCode != http.StatusOK || !strings.Contains(body, "in progress title") || !strings.Contains(body, "decision title") {
+		t.Fatal("board tasks API did not return the seeded queue tasks")
 	}
-	response = uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/fragments/task/"+strconv.FormatInt(active.ID, 10), assertion, "")
+	response = uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/api/board/tasks/"+strconv.FormatInt(active.ID, 10), assertion, "")
 	body = responseText(t, response)
-	if response.StatusCode != http.StatusOK || !strings.Contains(body, "backlog → claimed") || !strings.Contains(body, "claimed → in_progress") || !strings.Contains(body, "started work") {
-		t.Fatal("task event fragment did not render ordered history")
+	if response.StatusCode != http.StatusOK || !strings.Contains(body, `"from":"backlog","to":"claimed"`) || !strings.Contains(body, `"from":"claimed","to":"in_progress"`) || !strings.Contains(body, "started work") {
+		t.Fatal("task detail API did not render ordered history")
 	}
 }
 

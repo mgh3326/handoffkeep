@@ -13,7 +13,6 @@ import (
 	"net/url"
 	"os"
 	"path"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -117,7 +116,7 @@ func New(config Config) (*Handler, error) {
 // existing bearer-token API. Only the explicit UI write routes can reach a
 // mutating operation.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path == "/ui/fleet" || strings.HasPrefix(r.URL.Path, "/ui/api/") {
+	if r.URL.Path == "/ui/fleet" || r.URL.Path == "/ui/queue" || strings.HasPrefix(r.URL.Path, "/ui/api/") {
 		setConsoleCSP(w)
 	}
 	identity, authenticated := h.access.AuthenticatedIdentity(r)
@@ -163,7 +162,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "/ui/timeline":
 		h.timeline(w, r, false)
 	case "/ui/queue":
-		h.queue(w, r, false)
+		h.board(w, r)
 	case "/ui/decisions":
 		h.decisions(w, r, false, email, r.URL.Query().Get("result"))
 	case "/ui/compose":
@@ -178,18 +177,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) serveSubroute(w http.ResponseWriter, r *http.Request, email string) {
-	if name, ok := strings.CutPrefix(r.URL.Path, "/ui/fragments/task/"); ok {
-		h.taskEvents(w, r, name)
-		return
-	}
 	if name, ok := strings.CutPrefix(r.URL.Path, "/ui/fragments/"); ok {
 		switch name {
 		case "timeline":
 			h.timeline(w, r, true)
-		case "queue":
-			h.queue(w, r, true)
-		case "queue-backlog":
-			h.queueBacklog(w, r)
 		case "decisions":
 			h.decisions(w, r, true, email, r.URL.Query().Get("result"))
 		case "fleet":
@@ -316,127 +307,11 @@ func (h *Handler) timelineData(r *http.Request) (timelineData, error) {
 	return data, err
 }
 
-func (h *Handler) queue(w http.ResponseWriter, r *http.Request, fragment bool) {
-	data, err := h.queueData(r)
-	if err != nil {
-		http.Error(w, "fleet console unavailable", http.StatusInternalServerError)
-		return
-	}
-	if fragment {
-		h.render(w, "queue_content", data)
-		return
-	}
-	h.render(w, "page", pageData{Title: "Queue", Page: "queue", Body: data})
-}
-
-type queueCell struct {
-	Lane         string
-	State        string
-	Tasks        []store.Task
-	BacklogCount int
-}
-
-type queueLane struct {
-	Name  string
-	Cells []queueCell
-}
-
-type queueData struct {
-	States        []string
-	Lanes         []queueLane
-	OperatorOnly  bool
-	OpenDecisions []queueOpenDecision
-}
-
-type queueOpenDecision struct {
-	Lane string
-	Text string
-}
-
-func (h *Handler) queueData(r *http.Request) (queueData, error) {
-	tasks, err := h.store.ListTasks(r.Context(), "", "", "", 1000)
-	if err != nil {
-		return queueData{}, err
-	}
-	operatorOnly := r.URL.Query().Get("view") != "all"
-	byLane := map[string]map[string][]store.Task{}
-	for _, task := range tasks {
-		if byLane[task.Lane] == nil {
-			byLane[task.Lane] = map[string][]store.Task{}
-		}
-		byLane[task.Lane][task.State] = append(byLane[task.Lane][task.State], task)
-	}
-	lanes := make([]string, 0, len(byLane))
-	for lane := range byLane {
-		lanes = append(lanes, lane)
-	}
-	sort.Strings(lanes)
-	data := queueData{States: taskStates, OperatorOnly: operatorOnly}
-	for _, lane := range lanes {
-		row := queueLane{Name: lane}
-		for _, state := range taskStates {
-			cell := queueCell{Lane: lane, State: state, Tasks: byLane[lane][state], BacklogCount: len(byLane[lane]["backlog"])}
-			if operatorOnly {
-				cell.Tasks = nil
-				if state != "backlog" {
-					for _, task := range byLane[lane][state] {
-						if task.State == "needs_decision" || (task.Kind == "decide" && task.State != "merged" && task.State != "dropped") {
-							cell.Tasks = append(cell.Tasks, task)
-						}
-					}
-				}
-			}
-			row.Cells = append(row.Cells, cell)
-		}
-		data.Lanes = append(data.Lanes, row)
-	}
-	if operatorOnly {
-		escalations, err := h.store.ListOpenEscalations(r.Context(), 1000)
-		if err != nil {
-			return queueData{}, err
-		}
-		for _, event := range escalations {
-			if isDecisionEscalation(event) {
-				data.OpenDecisions = append(data.OpenDecisions, queueOpenDecision{Lane: event.OwnerLane, Text: decisionEscalationQuestion(event)})
-			}
-		}
-		laneDecisions, err := h.store.ListOpenLaneDecisions(r.Context(), 1000)
-		if err != nil {
-			return queueData{}, err
-		}
-		for _, event := range laneDecisions {
-			data.OpenDecisions = append(data.OpenDecisions, queueOpenDecision{Lane: event.OwnerLane, Text: strings.TrimSpace(strings.TrimPrefix(event.Text, decisionNeededMarker))})
-		}
-	}
-	return data, nil
-}
-
-func (h *Handler) queueBacklog(w http.ResponseWriter, r *http.Request) {
-	lane := strings.TrimSpace(r.URL.Query().Get("lane"))
-	tasks, err := h.store.ListTasks(r.Context(), lane, "backlog", "", 1000)
-	if err != nil {
-		http.Error(w, "invalid queue lane", http.StatusBadRequest)
-		return
-	}
-	h.render(w, "queue_backlog", tasks)
-}
-
-func (h *Handler) taskEvents(w http.ResponseWriter, r *http.Request, rawID string) {
-	id, err := strconv.ParseInt(rawID, 10, 64)
-	if err != nil || id < 1 {
-		http.NotFound(w, r)
-		return
-	}
-	task, found, err := h.store.GetTask(r.Context(), id)
-	if err != nil {
-		http.Error(w, "fleet console unavailable", http.StatusInternalServerError)
-		return
-	}
-	if !found {
-		http.NotFound(w, r)
-		return
-	}
-	h.render(w, "task_events", task)
+// board serves the React queue board page on the same /ui/queue URL the htmx
+// table used to occupy. All task data reaches the browser through the
+// /ui/api/board/* BFF routes; this page is only the mount point.
+func (h *Handler) board(w http.ResponseWriter, r *http.Request) {
+	h.render(w, "board_page", nil)
 }
 
 func (h *Handler) decisions(w http.ResponseWriter, r *http.Request, fragment bool, email, notice string) {

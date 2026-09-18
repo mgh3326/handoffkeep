@@ -725,6 +725,10 @@ func p4HasRelay(events any, id int64) bool {
 	return false
 }
 
+// The React board replaced the htmx operator view. Server-side, /ui/queue is
+// only a mount point and /ui/api/board/tasks must return the complete task
+// set — the operator-only narrowing is a client filter covered by the bundle
+// tests, never a server projection that could lose data.
 func TestUIP4QueueOperatorView(t *testing.T) {
 	s := uiStore(t)
 	fixture := newUIJWTFixture(t)
@@ -739,22 +743,26 @@ func TestUIP4QueueOperatorView(t *testing.T) {
 	_ = decision
 	response := uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/queue", assertion, "")
 	body := responseText(t, response)
-	for _, title := range []string{"hidden implement backlog", "hidden fix backlog", "hidden ops backlog"} {
+	for _, title := range []string{"hidden implement backlog", "hidden fix backlog", "hidden ops backlog", "shown needs decision"} {
 		if strings.Contains(body, title) {
-			t.Fatalf("operator view rendered %q", title)
+			t.Fatalf("board mount page rendered task data %q", title)
 		}
 	}
-	if !strings.Contains(body, "shown needs decision") || !strings.Contains(body, "backlog (") {
-		t.Fatalf("operator queue missing decision/count: %q", body)
-	}
-	response = uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/queue?view=all", assertion, "")
-	if body = responseText(t, response); !strings.Contains(body, "hidden implement backlog") || !strings.Contains(body, "hidden fix backlog") || !strings.Contains(body, "hidden ops backlog") {
-		t.Fatalf("all view omitted backlog: %q", body)
+	if !strings.Contains(body, `id="board-root"`) {
+		t.Fatalf("queue page did not mount the board: %q", body)
 	}
 	before := uiRowCounts(t)
-	response = uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/fragments/queue-backlog?lane="+lane, assertion, "")
-	if body = responseText(t, response); response.StatusCode != http.StatusOK || !strings.Contains(body, "hidden implement backlog") || uiRowCounts(t) != before {
-		t.Fatalf("backlog fragment status=%d body=%q before=%+v after=%+v", response.StatusCode, body, before, uiRowCounts(t))
+	response = uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/api/board/tasks?lane="+lane, assertion, "")
+	if body = responseText(t, response); response.StatusCode != http.StatusOK {
+		t.Fatalf("board tasks status=%d body=%q", response.StatusCode, body)
+	}
+	for _, title := range []string{"hidden implement backlog", "hidden fix backlog", "hidden ops backlog", "shown decide backlog", "shown needs decision"} {
+		if !strings.Contains(body, title) {
+			t.Fatalf("board API lost task %q: %q", title, body)
+		}
+	}
+	if uiRowCounts(t) != before {
+		t.Fatalf("read-only board API changed rows: before=%+v after=%+v", before, uiRowCounts(t))
 	}
 }
 
@@ -1044,10 +1052,13 @@ func TestUIP4QueueOperatorViewExcludesInProgressImplement(t *testing.T) {
 	decision := createUITask(t, s, lane, "FT6 needs decision")
 	claimAndTransition(t, s, decision, "needs_decision", "choose")
 
-	response := uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/queue", assertion, "")
+	response := uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/api/board/tasks?lane="+lane, assertion, "")
 	body := responseText(t, response)
-	if response.StatusCode != http.StatusOK || strings.Contains(body, implement.Title) || !strings.Contains(body, decision.Title) {
-		t.Fatalf("operator queue status=%d body=%q", response.StatusCode, body)
+	if response.StatusCode != http.StatusOK || !strings.Contains(body, implement.Title) || !strings.Contains(body, decision.Title) {
+		t.Fatalf("board API status=%d body=%q", response.StatusCode, body)
+	}
+	if !strings.Contains(body, `"state":"in_progress"`) || !strings.Contains(body, `"state":"needs_decision"`) {
+		t.Fatalf("board API dropped canonical states: %q", body)
 	}
 }
 
@@ -1211,14 +1222,14 @@ func TestUIP4QueueOperatorViewIncludesNonterminalDecide(t *testing.T) {
 	dropped := p4DecideTask(t, s, lane, "SHOULD-3 dropped decide", "dropped")
 	backlog := p4DecideTask(t, s, lane, "SHOULD-3 backlog decide", "backlog")
 
-	response := uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/queue", assertion, "")
+	response := uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/api/board/tasks?lane="+lane, assertion, "")
 	body := responseText(t, response)
 	if response.StatusCode != http.StatusOK || !strings.Contains(body, inProgress.Title) || !strings.Contains(body, claimed.Title) {
-		t.Fatalf("SHOULD-3 operator queue omitted nonterminal decide task: %q", body)
+		t.Fatalf("SHOULD-3 board API omitted nonterminal decide task: %q", body)
 	}
 	for _, task := range []store.Task{merged, dropped, backlog} {
-		if strings.Contains(body, task.Title) {
-			t.Fatalf("SHOULD-3 operator queue rendered terminal/backlog decide task %q: %q", task.Title, body)
+		if !strings.Contains(body, task.Title) {
+			t.Fatalf("SHOULD-3 board API lost terminal/backlog decide task %q: %q", task.Title, body)
 		}
 	}
 }
