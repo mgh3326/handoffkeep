@@ -1,0 +1,95 @@
+{
+  "at": "2026-09-19T08:26:38.158Z",
+  "dataset": {
+    "key": "sample200",
+    "size": 200,
+    "completeness": "partial"
+  },
+  "viewport": {
+    "innerWidth": 1440,
+    "innerHeight": 900,
+    "devicePixelRatio": 1,
+    "scrollWidth": 1440,
+    "clientWidth": 1440,
+    "bodyHorizontalScroll": 0
+  },
+  "rendered": {
+    "listRows": 15,
+    "groupHeaders": 6,
+    "populatedColumns": 0,
+    "perColumn": {},
+    "cards": 0
+  },
+  "controls": {
+    "search": {
+      "present": true,
+      "inViewport": true,
+      "rect": {
+        "top": 94,
+        "left": 12,
+        "width": 192,
+        "height": 22
+      }
+    },
+    "layoutToggle": {
+      "present": true,
+      "inViewport": true,
+      "rect": {
+        "top": 94,
+        "left": 211,
+        "width": 96,
+        "height": 22
+      }
+    },
+    "groupToggle": {
+      "present": true,
+      "inViewport": true,
+      "rect": {
+        "top": 94,
+        "left": 315,
+        "width": 137,
+        "height": 22
+      }
+    },
+    "viewBar": {
+      "present": true,
+      "inViewport": true,
+      "rect": {
+        "top": 32,
+        "left": 0,
+        "width": 1440,
+        "height": 55
+      }
+    },
+    "drawer": {
+      "present": true,
+      "inViewport": true,
+      "rect": {
+        "top": 0,
+        "left": 960,
+        "width": 480,
+        "height": 900
+      }
+    },
+    "drawerClose": {
+      "present": true,
+      "inViewport": true,
+      "rect": {
+        "top": 13,
+        "left": 1364,
+        "width": 60,
+        "height": 22
+      }
+    },
+    "measurePanel": {
+      "present": true,
+      "inViewport": true,
+      "rect": {
+        "top": 511,
+        "left": 0,
+        "width": 1440,
+        "height": 29
+      }
+    }
+  }
+}
