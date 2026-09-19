@@ -47,7 +47,12 @@ streams at the snapshot but do not prove event contents.
 explicit string `"unknown"` when the binary has no VCS stamp; a revision is
 never invented. `scope` echoes the normalized `{lane, state, parent_lane,
 limit}` actually applied; empty strings mark unset filters. `limit` defaults
-to 1000 with a hard maximum of 10,000. `truncated` is exactly
+to 1000 with a hard maximum of 10,000. `handoffkeep tasks export` omits the
+`limit` query parameter when `--limit` is absent so the server default
+(1000) applies; an explicitly passed `--limit` outside `1..10000` fails
+client-side with `invalid_export_query` without contacting the route, while
+the HTTP route itself still returns 400 `invalid_export_query` for an
+out-of-range `limit`. `truncated` is exactly
 `counts.total > limit`; `complete` is its inverse, so a complete export always
 returns every counted row (`rows_returned == counts.total`) and
 `counts.total == limit` is still complete.

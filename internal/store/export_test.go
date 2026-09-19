@@ -161,6 +161,97 @@ func TestExportTasksSingleSnapshot(t *testing.T) {
 	}
 }
 
+// TestExportTasksSnapshotFixedBeforeCounts blocks the export transaction
+// immediately after its snapshot-establishing query — before the
+// total-count, by_state, by_lane, watermark, and row reads — and commits a
+// claim plus a create from other pool connections in that gap. Every field
+// of the finished export must then equal the pre-commit snapshot exactly: a
+// count read outside the transaction (or any read at a weaker isolation)
+// would observe the post-commit values and fail these assertions. This is
+// the deterministic C3/T2 proof.
+func TestExportTasksSnapshotFixedBeforeCounts(t *testing.T) {
+	s := testExportStore(t)
+	lane := exportLane(t)
+	task := exportTask(t, s, lane, "pre-snapshot row")
+	var baseTaskEventMax, baseRelayEventMax int64
+	if err := s.pool.QueryRow(t.Context(), `SELECT COALESCE((SELECT MAX(id) FROM task_events),0),COALESCE((SELECT MAX(id) FROM relay_events),0)`).Scan(&baseTaskEventMax, &baseRelayEventMax); err != nil {
+		t.Fatal(err)
+	}
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	exportSnapshotSeam = func(ctx context.Context) {
+		close(entered)
+		<-release
+	}
+	defer func() { exportSnapshotSeam = nil }()
+
+	type exportResult struct {
+		out TaskExport
+		err error
+	}
+	done := make(chan exportResult, 1)
+	go func() {
+		out, err := s.ExportTasks(t.Context(), lane, "", "", 100)
+		done <- exportResult{out, err}
+	}()
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("export snapshot seam not reached")
+	}
+	// These commits land after the export's repeatable-read snapshot was
+	// fixed but before its first count read: the claim updates the row and
+	// inserts a task_event atomically, the create adds a second row.
+	if _, err := s.ClaimTask(t.Context(), task.ID, "captain"); err != nil {
+		t.Fatal(err)
+	}
+	extra := exportTask(t, s, lane, "post-snapshot create")
+	shown, found, err := s.GetTask(t.Context(), task.ID)
+	if err != nil || !found || len(shown.Events) != 1 {
+		t.Fatalf("shown=%+v found=%v err=%v", shown, found, err)
+	}
+	claimEventID := shown.Events[0].ID
+	close(release)
+	var res exportResult
+	select {
+	case res = <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("export did not finish")
+	}
+	if res.err != nil {
+		t.Fatal(res.err)
+	}
+	out := res.out
+
+	// The whole envelope is the pre-commit snapshot: one backlog row, the
+	// claim and the create invisible to counts, rows, and watermarks alike.
+	if out.Counts.Total != 1 {
+		t.Fatalf("counts.total=%d want pre-commit 1", out.Counts.Total)
+	}
+	if out.Counts.ByState["backlog"] != 1 || out.Counts.ByState["claimed"] != 0 {
+		t.Fatalf("by_state=%+v want backlog=1 claimed=0", out.Counts.ByState)
+	}
+	if out.Counts.ByLane[lane] != 1 || len(out.Counts.ByLane) != 1 {
+		t.Fatalf("by_lane=%+v want {%s:1}", out.Counts.ByLane, lane)
+	}
+	if len(out.Tasks) != 1 || out.Tasks[0].ID != task.ID || out.Tasks[0].State != "backlog" {
+		t.Fatalf("tasks=%+v want one pre-commit backlog row id=%d", out.Tasks, task.ID)
+	}
+	if out.Tasks[0].ID == extra.ID {
+		t.Fatalf("post-commit task %d present in tasks", extra.ID)
+	}
+	if out.Watermark.TaskEventMaxID != baseTaskEventMax || out.Watermark.TaskEventMaxID >= claimEventID {
+		t.Fatalf("task_event_max_id=%d want pre-commit %d (< claim event %d)", out.Watermark.TaskEventMaxID, baseTaskEventMax, claimEventID)
+	}
+	if out.Watermark.RelayEventMaxID != baseRelayEventMax {
+		t.Fatalf("relay_event_max_id=%d want %d", out.Watermark.RelayEventMaxID, baseRelayEventMax)
+	}
+	if !out.Complete || out.Truncated || out.RowsReturned != 1 {
+		t.Fatalf("complete=%v truncated=%v rows_returned=%d", out.Complete, out.Truncated, out.RowsReturned)
+	}
+}
+
 // TestExportTasksReadOnly proves the export writes nothing and that the
 // transaction options it uses refuse writes.
 func TestExportTasksReadOnly(t *testing.T) {

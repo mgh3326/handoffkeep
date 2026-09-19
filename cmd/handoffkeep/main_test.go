@@ -232,6 +232,44 @@ func TestTasksExportPrintsDocumentVerbatim(t *testing.T) {
 	}
 }
 
+// TestTasksExportRejectsInvalidLimit proves an explicitly passed --limit
+// outside 1..ExportLimitMax fails client-side with invalid_export_query and
+// never reaches the route, while an in-range --limit is sent through.
+func TestTasksExportRejectsInvalidLimit(t *testing.T) {
+	var queries []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/tasks/export" {
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		queries = append(queries, r.URL.RawQuery)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"snapshot_id":"1:2:","tasks":[]}` + "\n"))
+	}))
+	defer server.Close()
+	t.Setenv("HANDOFFKEEP_URL", server.URL)
+	t.Setenv("HANDOFFKEEP_TOKEN", "test-token")
+
+	for _, value := range []string{"0", "-5", "10001"} {
+		if err := tasksCmd([]string{"export", "--limit", value}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "invalid_export_query") {
+			t.Fatalf("--limit %s error=%v", value, err)
+		}
+	}
+	if len(queries) != 0 {
+		t.Fatalf("invalid limits reached the route: %v", queries)
+	}
+
+	var out bytes.Buffer
+	if err := tasksCmd([]string{"export", "--limit", "7"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(queries) != 1 {
+		t.Fatalf("queries=%v", queries)
+	}
+	if values, err := url.ParseQuery(queries[0]); err != nil || values.Get("limit") != "7" {
+		t.Fatalf("query=%q err=%v", queries[0], err)
+	}
+}
+
 func TestTasksExportErrorSurfacesCode(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

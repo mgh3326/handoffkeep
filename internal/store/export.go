@@ -32,6 +32,13 @@ var exportTxOptions = pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pg
 // unreachable from any network surface.
 var exportSeam func(ctx context.Context)
 
+// exportSnapshotSeam is a test-only barrier invoked inside the export
+// transaction immediately after the snapshot-establishing query and before
+// the total-count read, so tests can commit concurrent changes in that gap.
+// Production code leaves it nil; it is unexported and unreachable from any
+// network surface.
+var exportSnapshotSeam func(ctx context.Context)
+
 // validTaskQuery is the shared filter validation used by task list reads and
 // the snapshot export.
 func validTaskQuery(lane, state, parentLane string) bool {
@@ -148,6 +155,10 @@ func (s *Store) ExportTasks(ctx context.Context, lane, state, parentLane string,
 		return TaskExport{}, err
 	}
 	out.DBTime = out.DBTime.UTC()
+
+	if exportSnapshotSeam != nil {
+		exportSnapshotSeam(ctx)
+	}
 
 	where, args := taskFilter(lane, state, parentLane)
 	if err = tx.QueryRow(ctx, `SELECT COUNT(*) FROM tasks WHERE 1=1`+where, args...).Scan(&out.Counts.Total); err != nil {
