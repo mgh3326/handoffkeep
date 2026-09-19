@@ -1,0 +1,38 @@
+{
+  "env": {
+    "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/153.0.0.0 Safari/537.36",
+    "devicePixelRatio": 1,
+    "innerWidth": 1440,
+    "innerHeight": 900,
+    "datasetSize": 5000,
+    "at": "2026-09-19T08:26:42.583Z",
+    "frameDriven": true
+  },
+  "runs": [
+    32.4,
+    34.7,
+    34.5,
+    35.8,
+    31.6,
+    30.4,
+    34.6,
+    31.7,
+    32.8,
+    33.5,
+    35.1,
+    35.3,
+    34.3,
+    32.9,
+    30,
+    34.5,
+    34.6,
+    33,
+    36.6,
+    31.4
+  ],
+  "p50": 33.5,
+  "p95": 35.8,
+  "max": 36.6,
+  "targetP95Ms": 200,
+  "pass": true
+}
