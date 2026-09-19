@@ -1,26 +1,56 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { applyView, boardColumns, EMPTY_FILTERS, groupByArea, statusLine } from "./adapter";
+import { applyView, boardColumns, countByView, EMPTY_FILTERS, groupByArea } from "./adapter";
 import { flattenGrouped } from "./ListView";
 import { buildDatasets } from "./fixtures";
 import { DetailDrawer } from "./DetailDrawer";
 import { ListView } from "./ListView";
 import { BoardView } from "./BoardView";
 import { Toolbar } from "./Toolbar";
+import { ViewRail } from "./ViewRail";
 import { MeasurePanel } from "./MeasurePanel";
 import { loadPresentation, savePresentation, type SavedView } from "./storage";
 import { runDiag } from "./diag";
 import { runPerf } from "./perf";
 import type { Dataset, ProtoState, ProtoView } from "./types";
 
-const VIEW_LABELS: { view: ProtoView; label: string }[] = [
-  { view: "operator", label: "Operator" },
-  { view: "active", label: "Active" },
-  { view: "backlog", label: "Backlog" },
-  { view: "all", label: "All" },
-];
-
 export function defaultLayout(view: ProtoView): "list" | "board" {
   return view === "active" ? "board" : "list";
+}
+
+function parseView(value: string | null): ProtoView | null {
+  return value === "operator" || value === "active" || value === "backlog" || value === "all" ? value : null;
+}
+
+function applyNavParams(state: ProtoState, params: URLSearchParams): ProtoState {
+  const next = { ...state };
+  const v = parseView(params.get("view"));
+  if (v) {
+    next.view = v;
+    next.layout = defaultLayout(v);
+  }
+  const l = params.get("layout");
+  if (l === "list" || l === "board") {
+    next.layout = l;
+  }
+  const g = params.get("group");
+  if (g === "area" || g === "none") {
+    next.grouping = g;
+  }
+  return next;
+}
+
+/** The nav-relevant part of state — only view/layout/grouping enter browser
+ * history, so Back steps through screens, never through filter keystrokes. */
+function navKey(state: ProtoState): string {
+  return `${state.view}|${state.layout}|${state.grouping}`;
+}
+
+function navParams(state: ProtoState): string {
+  const params = new URLSearchParams(window.location.search);
+  params.set("view", state.view);
+  params.set("layout", state.layout);
+  params.set("group", state.grouping);
+  return `?${params.toString()}`;
 }
 
 type AppProps = {
@@ -40,33 +70,25 @@ export function QueueProtoApp({ datasets, initialSet, storage, diag = false, per
   const perfMode = perf || params.get("perf") === "1";
 
   const loaded = useMemo(() => loadPresentation(storage), [storage]);
-  const [state, setState] = useState<ProtoState>(() => {
-    const s = { ...loaded.state };
-    const pView = params.get("view");
-    if (pView === "operator" || pView === "active" || pView === "backlog" || pView === "all") {
-      s.view = pView;
-      s.layout = defaultLayout(pView);
-    }
-    const pLayout = params.get("layout");
-    if (pLayout === "list" || pLayout === "board") {
-      s.layout = pLayout;
-    }
-    if (params.get("group") === "area") {
-      s.grouping = "area";
-    }
-    return s;
-  });
+  const [state, setState] = useState<ProtoState>(() => ({
+    ...applyNavParams(loaded.state, params),
+    // Narrow viewports (incl. 200% zoom) start with the rail collapsed; the
+    // header toggle always stays reachable.
+    sidebarCollapsed: typeof window !== "undefined" ? window.innerWidth < 900 : false,
+  }));
   const [views] = useState<Record<string, SavedView>>(loaded.views);
   const [openId, setOpenId] = useState<number | null>(null);
   const mainRef = useRef<HTMLDivElement>(null);
   const openerRef = useRef<HTMLElement | null>(null);
   const diagRef = useRef<HTMLPreElement>(null);
   const perfRef = useRef<HTMLPreElement>(null);
+  const navRef = useRef(navKey(state));
 
   const visible = useMemo(() => applyView(dataset.tasks, state), [dataset.tasks, state]);
+  const viewCounts = useMemo(() => countByView(dataset.tasks, state.filters), [dataset.tasks, state.filters]);
   const groups = useMemo(
-    () => (state.grouping === "area" ? groupByArea(visible, dataset.enrichment) : null),
-    [state.grouping, visible, dataset.enrichment],
+    () => (state.grouping === "area" ? groupByArea(visible, dataset.enrichment, dataset.generatedAt) : null),
+    [state.grouping, visible, dataset.enrichment, dataset.generatedAt],
   );
   const columns = useMemo(
     () => (state.layout === "board" ? boardColumns(visible, state.view, state.hiddenColumns) : []),
@@ -91,6 +113,37 @@ export function QueueProtoApp({ datasets, initialSet, storage, diag = false, per
   useEffect(() => {
     savePresentation(state, views, storage);
   }, [state, views, storage]);
+
+  // Browser history: a nav-level change (view/layout/grouping) pushes one
+  // entry; Back restores it via popstate. Filter edits never push entries.
+  // The entry URL is normalized on mount so every history entry carries the
+  // full nav params.
+  useEffect(() => {
+    window.history.replaceState(null, "", navParams(state));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    const key = navKey(state);
+    if (key !== navRef.current) {
+      navRef.current = key;
+      window.history.pushState(null, "", navParams(state));
+    }
+  }, [state]);
+
+  useEffect(() => {
+    const onPop = () => {
+      const p = new URLSearchParams(window.location.search);
+      setState((s) => {
+        const next = applyNavParams(s, p);
+        next.grouping = p.get("group") === "area" ? "area" : "none";
+        navRef.current = navKey(next);
+        return next;
+      });
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
 
   // inert background + focus return to the originating row/card on close.
   useEffect(() => {
@@ -134,6 +187,10 @@ export function QueueProtoApp({ datasets, initialSet, storage, diag = false, per
     }));
   }, []);
 
+  const toggleRail = useCallback(() => {
+    setState((s) => ({ ...s, sidebarCollapsed: !s.sidebarCollapsed }));
+  }, []);
+
   const showAll = useCallback(() => {
     setState((s) => ({ ...s, view: "all", filters: EMPTY_FILTERS }));
   }, []);
@@ -170,56 +227,55 @@ export function QueueProtoApp({ datasets, initialSet, storage, diag = false, per
   }, [perfMode, dataset]);
 
   return (
-    <div className="qp-root">
+    <div className={`qp-root${state.sidebarCollapsed ? " rail-collapsed" : ""}`}>
       <div id="qp-main" ref={mainRef}>
-        <header className="qp-head">
-          <span className="qp-ws">queue</span>
-          <span className="qp-synth-badge">SYNTHETIC FIXTURE — not the production backlog</span>
-          <nav className="qp-nav muted">timeline · decisions · fleet (prototype — links inert)</nav>
-        </header>
-        <div className="qp-viewbar" id="qp-viewbar">
-          {VIEW_LABELS.map(({ view, label }) => (
-            <button key={view} type="button" className={state.view === view ? "on" : ""} aria-pressed={state.view === view} onClick={() => setView(view)}>
-              {label}
+        <ViewRail dataset={dataset} view={state.view} counts={viewCounts} views={views} onSelectView={setView} onApplyView={applyNamedView} />
+        <div className="qp-body">
+          <header className="qp-head">
+            <button
+              type="button"
+              id="qp-rail-toggle"
+              aria-expanded={!state.sidebarCollapsed}
+              aria-controls="qp-rail"
+              onClick={toggleRail}
+            >
+              ☰ views
             </button>
-          ))}
-          <span className="qp-status muted" data-testid="status-line">
-            {statusLine(dataset)}
-          </span>
+            <span className="qp-ws">queue</span>
+            <span className="qp-synth-badge">SYNTHETIC FIXTURE — not the production backlog</span>
+            <nav className="qp-nav muted">timeline · decisions · fleet (prototype — links inert)</nav>
+          </header>
+          {loaded.versionMismatch ? (
+            <p className="qp-reset-notice" role="alert">
+              saved view reset — version mismatch
+            </p>
+          ) : null}
+          <Toolbar state={state} lanes={lanes} kinds={kinds} visibleCount={visible.length} onChange={setState} />
+          <div className="qp-content">
+            {visible.length === 0 ? (
+              <div className="qp-empty">
+                <p>No tasks match the current view and filters.</p>
+                <button type="button" onClick={showAll}>
+                  Show All view
+                </button>
+              </div>
+            ) : state.layout === "list" ? (
+              <ListView
+                dataset={dataset}
+                visible={visible}
+                grouping={state.grouping}
+                collapsedGroups={state.collapsedGroups}
+                density={state.density}
+                selectedId={openId}
+                onOpen={open}
+                onToggleGroup={toggleGroup}
+              />
+            ) : (
+              <BoardView dataset={dataset} columns={columns} density={state.density} selectedId={openId} onOpen={open} />
+            )}
+          </div>
+          <MeasurePanel />
         </div>
-        {loaded.versionMismatch ? (
-          <p className="qp-reset-notice" role="alert">
-            saved view reset — version mismatch
-          </p>
-        ) : null}
-        <Toolbar state={state} lanes={lanes} kinds={kinds} views={views} onChange={setState} onApplyView={applyNamedView} />
-        <p className="qp-count muted">
-          {visible.length} unique tasks · {state.view} · {state.layout}
-        </p>
-        <div className="qp-content">
-          {visible.length === 0 ? (
-            <div className="qp-empty">
-              <p>No tasks match the current view and filters.</p>
-              <button type="button" onClick={showAll}>
-                Show All view
-              </button>
-            </div>
-          ) : state.layout === "list" ? (
-            <ListView
-              dataset={dataset}
-              visible={visible}
-              grouping={state.grouping}
-              collapsedGroups={state.collapsedGroups}
-              density={state.density}
-              selectedId={openId}
-              onOpen={open}
-              onToggleGroup={toggleGroup}
-            />
-          ) : (
-            <BoardView dataset={dataset} columns={columns} density={state.density} selectedId={openId} onOpen={open} />
-          )}
-        </div>
-        <MeasurePanel />
       </div>
       {openTask ? <DetailDrawer dataset={dataset} task={openTask} orderedIds={orderedIds} onClose={close} onNav={setOpenId} /> : null}
       {diagMode ? <pre id="diag" ref={diagRef} /> : null}

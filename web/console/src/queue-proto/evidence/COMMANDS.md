@@ -14,10 +14,11 @@ npx vite preview --config vite.proto.config.ts --port 5199 --strictPort &
 ```
 
 The page is `http://localhost:5199/queue-proto.html`.
-URL params: `?set=sample200|edge|perf5000` (default sample200; perf defaults
-to perf5000), `?view=operator|active|backlog|all`, `?layout=list|board`,
-`?group=area`, `?diag=1` (renders measured facts into `<pre id="diag">`),
-`?perf=1` (auto-runs warmup + 20 filter-to-paint timings into `<pre id="perf">`).
+URL params: `?set=sample200|edge|stale63|perf5000` (default sample200; perf
+defaults to perf5000), `?view=operator|active|backlog|all`,
+`?layout=list|board`, `?group=area|none`, `?diag=1` (renders measured facts
+into `<pre id="diag">`), `?perf=1` (auto-runs warmup + 20 filter-to-paint
+timings into `<pre id="perf">`).
 
 ## Automated capture (screenshots + diag JSON + perf JSON)
 
@@ -28,7 +29,26 @@ node src/queue-proto/evidence/capture.mjs
 `capture.mjs` spawns Chrome `--headless=new --remote-debugging-port=9333`
 with a scratch profile and drives it over CDP: `Emulation.setDeviceMetricsOverride`
 for exact viewports, `Page.captureScreenshot` for PNGs, `Runtime.evaluate`
-to extract `#diag` / `#perf` JSON. Local only — no production session.
+to extract `#diag` / `#perf` JSON. Each scenario clears `localStorage` first
+so persisted presentation state never leaks between captures, and each diag
+read is preceded by a `resize` dispatch so `<pre id="diag">` reflects
+steady-state layout rather than first-commit measurements. Local only — no
+production session.
+
+## Automated geometry assertions (K5.1)
+
+```bash
+node src/queue-proto/evidence/assert-geometry.mjs --full \
+  src/queue-proto/evidence/diag-iter1-grouped-1440x900.json
+node src/queue-proto/evidence/assert-geometry.mjs \
+  src/queue-proto/evidence/diag-390x844.json \
+  src/queue-proto/evidence/diag-zoom200.json
+```
+
+`--full` checks the 1440×900 density contract (rail 224–240px, margins ≤24px,
+main ≥1152px, title+toolbar ≤112px, ≥16 data rows in first viewport, row
+36–40px, text ≥14px, zero horizontal scroll). Without `--full` each file gets
+the narrow/zoom subset (zero horizontal scroll + core controls reachable).
 
 ## Manual equivalents
 
@@ -50,8 +70,13 @@ the supported evidence route; it waits for the elements to populate.)
 
 ## Results (latest capture)
 
-- `list-1440x900.png` / `diag-1440x900.json` — 46 rendered list rows (≥12),
-  scrollWidth=clientWidth=1440.
+- `iter1-grouped-1440x900.png` / `diag-iter1-grouped-1440x900.json` — the
+  K5.1 surface: `?set=stale63&view=all&layout=list&group=area`. Rail 232px,
+  margins 12px/12px, main 1208px, chrome 84px, 20 data rows in first
+  viewport, 38px rows, 14px text, zero horizontal scroll — all asserted by
+  `assert-geometry.mjs --full`.
+- `list-1440x900.png` / `diag-1440x900.json` — grouped backlog (area→bundle
+  is the default); scrollWidth=clientWidth=1440.
 - `board-active-1440x900.png` / `diag-board-1440x900.json` — 4 populated
   columns (claimed 10, in_progress 12, verifying 5, needs_decision 8), never
   all nine.
@@ -60,10 +85,17 @@ the supported evidence route; it waits for the elements to populate.)
 - `drawer-1440x900.png` / `diag-drawer-1440x900.json` — shared drawer open,
   `#qp-main` inert, close control in viewport.
 - `list-390x844.png` / `diag-390x844.json` — scrollWidth=clientWidth=390,
-  zero body horizontal scroll.
+  zero body horizontal scroll; rail overlay + toggle keeps core controls
+  reachable.
 - `drawer-390x844.png` / `diag-drawer-390x844.json` — full-screen drawer,
   `inert` on background.
 - `diag-zoom200.json` — `--force-device-scale-factor=2` equivalent via CDP
   deviceScaleFactor=2: essential controls in viewport.
 - `perf-5000.json` / `perf-5000.png` — 20 raw filter-to-paint observations
   on the 5000-task set, frameDriven=true, p95 < 200ms.
+
+## Operator trial
+
+`TRIAL.md` holds the reproducible I1–I5 script protocol (twice each,
+alternating baseline/iter1 order) against the sanitized `stale63` fixture.
+The later operator gate stays pending until an operator actually runs it.

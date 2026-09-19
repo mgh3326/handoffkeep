@@ -358,10 +358,134 @@ export function buildPerf5000(seed = 7): Dataset {
   };
 }
 
+/**
+ * Deterministic staleness fixture: 63 non-terminal tasks reproducing the
+ * measured queue age profile — <24h:6, 1–3d:14, 3–7d:17, ≥7d:24 across
+ * created_at age, plus 2 tasks whose timestamps are absent (age rendered as
+ * "unknown", never as 0). The ≥7d bucket is exactly the stale set (24 items).
+ * Also carries the trial anchors: exactly one urgent task (priority ≥ 90),
+ * one blocked task with explicit blocker evidence, and one task with a
+ * multi-claimant ownership history.
+ */
+export const STALE63_BUCKETS = { under24h: 6, days1to3: 14, days3to7: 17, days7plus: 24, unknownAge: 2 } as const;
+
+export function buildStale63(): Dataset {
+  const rand = mulberry32(63);
+  const p2 = (n: number) => String(n).padStart(2, "0");
+  /** ISO timestamp `hours` before GENERATED_AT, rendered in +09:00. */
+  const kstBefore = (hours: number): string => {
+    const kst = new Date(Date.parse(GENERATED_AT) - hours * 3_600_000 + 9 * 3_600_000);
+    return `${kst.getUTCFullYear()}-${p2(kst.getUTCMonth() + 1)}-${p2(kst.getUTCDate())}T${p2(kst.getUTCHours())}:00:00+09:00`;
+  };
+  // hours-before-now per bucket, chosen so every value lands strictly inside
+  // its declared bucket (in whole days): A 0d, B 1–2d, C 3–5d, D 8–14d.
+  const bucketHours = (bucket: number, i: number): number => {
+    if (bucket === 0) {
+      return 3 + i; // 3–8h → 0d
+    }
+    if (bucket === 1) {
+      return 30 + (i % 40); // 30–69h → 1–2d
+    }
+    if (bucket === 2) {
+      return 76 + (i % 60); // 76–135h → 3–5d
+    }
+    return 200 + (i % 150); // 200–349h → 8–14d
+  };
+  const states = ["backlog", "backlog", "hold", "claimed", "in_progress", "needs_decision", "verifying"] as const;
+  const tasks: ProtoTask[] = [];
+  const enrichment: Record<number, Enrichment> = {};
+  let seq = 0;
+  const buckets = [STALE63_BUCKETS.under24h, STALE63_BUCKETS.days1to3, STALE63_BUCKETS.days3to7, STALE63_BUCKETS.days7plus];
+  for (let bucket = 0; bucket < buckets.length; bucket++) {
+    for (let i = 0; i < buckets[bucket]; i++) {
+      const id = 6101 + seq;
+      seq += 1;
+      const hours = bucketHours(bucket, i);
+      const created = kstBefore(hours);
+      const task = baseTask(id, rand);
+      task.id = id;
+      task.created_at = created;
+      task.state_entered_at = kstBefore(Math.max(1, hours - 4));
+      task.state = states[seq % states.length];
+      task.lane = seq % 4 === 0 ? "synth-lane-research" : "synth-lane-ops";
+      task.kind = ["fix", "implement", "verify", "research"][seq % 4];
+      task.priority = 10 + (seq % 75); // 10–84 — strictly below the urgent bar
+      task.title = `stale63 synthetic task ${id} — ${pick(rand, EN_FRAGS)}`;
+      task.due_at = null;
+      task.blocker = null;
+      task.events = [
+        { id: id * 10 + 1, from: "backlog", to: task.state, by: "synth-claim-1", at: task.state_entered_at },
+      ];
+      if (task.state === "needs_decision") {
+        task.decision = { question: `합성 결정 질문 #${id}`, evidence: `synth/reports/task-${id}.md` };
+      }
+      tasks.push(task);
+      const area = seq % 3 === 0 ? "synth-area-beta" : "synth-area-alpha";
+      enrichment[id] = {
+        area,
+        bundle: area === "synth-area-alpha" ? "synth-bundle-ledger" : "synth-bundle-signals",
+        standalone: false,
+        labels: [],
+        relations: [],
+      };
+    }
+  }
+
+  // Trial anchors — deterministic, exactly one valid answer each.
+  const urgent = tasks.find((t) => t.id === 6130)!; // 3–7d bucket: urgent, not stale
+  urgent.priority = 95;
+  urgent.title = "stale63 anchor: urgent candidate (p95)";
+  const blocked = tasks.find((t) => t.id === 6150)!; // ≥7d bucket: stale + blocked
+  blocked.state = "hold";
+  blocked.blocker = "synth blocker: awaiting external review verdict";
+  blocked.title = "stale63 anchor: blocked task with evidence";
+  blocked.events = [
+    { id: 615001, from: "backlog", to: "hold", by: "synth-claim-1", note: "synthetic block", at: blocked.state_entered_at ?? blocked.created_at },
+  ];
+  const handoff = tasks.find((t) => t.id === 6140)!; // ≥7d bucket start: ownership flow
+  handoff.state = "in_progress";
+  handoff.claimant = "synth-claim-3";
+  handoff.title = "stale63 anchor: ownership handoff chain";
+  const handoffAt = handoff.state_entered_at ?? handoff.created_at;
+  handoff.events = [
+    { id: 614001, from: "backlog", to: "claimed", by: "synth-claim-1", note: "synthetic claim", at: handoffAt },
+    { id: 614002, from: "claimed", to: "in_progress", by: "synth-claim-2", note: "synthetic handoff", at: handoffAt },
+    { id: 614003, from: "in_progress", to: "in_progress", by: "synth-claim-3", note: "synthetic re-claim", at: handoffAt },
+  ];
+
+  // 6162/6163: the remainder of the 63 — non-terminal tasks with absent
+  // timestamps, so their age renders "unknown" rather than a fake number.
+  for (const id of [6162, 6163]) {
+    const task = baseTask(id, rand);
+    task.id = id;
+    task.title = `stale63 anchor: age unmeasurable (no timestamp) ${id}`;
+    task.state = "backlog";
+    task.created_at = "";
+    task.state_entered_at = null;
+    task.due_at = null;
+    task.blocker = null;
+    task.claimant = null;
+    task.events = [];
+    tasks.push(task);
+    enrichment[id] = { area: "synth-area-alpha", bundle: "synth-bundle-ledger", standalone: false, labels: [], relations: [] };
+  }
+
+  return {
+    key: "stale63",
+    label: "synthetic 63-task staleness profile (6/14/17/24)",
+    generatedAt: GENERATED_AT,
+    completeness: "complete",
+    completenessNote: "self-contained synthetic set — deterministic, not the production backlog",
+    tasks,
+    enrichment,
+  };
+}
+
 export function buildDatasets(): Record<string, Dataset> {
   return {
     sample200: buildSample200(),
     edge: buildEdge(),
+    stale63: buildStale63(),
     perf5000: buildPerf5000(),
   };
 }

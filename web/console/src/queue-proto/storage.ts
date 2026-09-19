@@ -13,11 +13,12 @@ export type SavedView = Pick<ProtoState, "view" | "layout" | "grouping" | "densi
 export const DEFAULT_STATE: ProtoState = {
   view: "backlog",
   layout: "list",
-  grouping: "none",
+  grouping: "area",
   density: "compact",
   filters: EMPTY_FILTERS,
   hiddenColumns: [],
   collapsedGroups: [],
+  sidebarCollapsed: false,
 };
 
 // ≥3 named local views shipped with the prototype.

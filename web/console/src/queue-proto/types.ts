@@ -84,4 +84,7 @@ export type ProtoState = {
   filters: FilterState;
   hiddenColumns: string[];
   collapsedGroups: string[];
+  /** chrome state only — never part of a saved view. */
+  sidebarCollapsed: boolean;
 };
+

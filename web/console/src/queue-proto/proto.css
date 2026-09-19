@@ -13,29 +13,113 @@ body {
   opacity: 0.72;
 }
 .qp-root {
-  display: flex;
-  flex-direction: column;
   height: 100vh;
 }
 #qp-main {
   display: flex;
-  flex-direction: column;
-  flex: 1;
+  flex-direction: row;
+  height: 100%;
   min-height: 0;
   overflow: hidden;
 }
 #qp-main[inert] {
   user-select: none;
 }
+.qp-body {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* left rail — semantic view navigator (links, not tabs) */
+.qp-rail {
+  flex: 0 0 232px;
+  width: 232px;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid #8a8a8a;
+  background: rgba(127, 127, 127, 0.06);
+  min-height: 0;
+}
+.rail-collapsed .qp-rail {
+  display: none;
+}
+.qp-rail-nav {
+  padding: 0.5rem 0.5rem 0;
+}
+.qp-rail-h {
+  margin: 0 0 0.3rem;
+  padding: 0 0.5rem;
+  font-size: 0.72em;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  opacity: 0.65;
+}
+.qp-rail-link {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0.32rem 0.5rem;
+  border: none;
+  border-left: 3px solid transparent;
+  border-radius: 0.25rem;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+}
+.qp-rail-link:hover {
+  background: rgba(127, 127, 127, 0.12);
+}
+.qp-rail-link.on {
+  border-left-color: #1967d2;
+  background: rgba(25, 103, 210, 0.12);
+  font-weight: 600;
+}
+.qp-rail-link:focus-visible {
+  outline: 2px solid #1967d2;
+  outline-offset: 1px;
+}
+.qp-nav-count {
+  font-variant-numeric: tabular-nums;
+  font-size: 0.85em;
+  opacity: 0.75;
+}
+.qp-rail-foot {
+  margin-top: auto;
+  padding: 0.6rem 0.75rem;
+  border-top: 1px solid rgba(127, 127, 127, 0.35);
+  font-size: 0.78em;
+}
+.qp-rail-foot p {
+  margin: 0.25rem 0;
+}
 
 /* workspace header — thin, no decorative title */
 .qp-head {
   display: flex;
-  align-items: baseline;
-  gap: 0.75rem;
+  align-items: center;
+  gap: 0.6rem;
   flex-wrap: wrap;
-  padding: 0.4rem 0.75rem;
+  padding: 0.25rem 0.75rem;
   border-bottom: 1px solid #8a8a8a;
+}
+#qp-rail-toggle {
+  border: 1px solid #8a8a8a;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: 0.85em;
+  padding: 0.1rem 0.5rem;
+  border-radius: 0.3rem;
+  cursor: pointer;
 }
 .qp-ws {
   font-weight: 650;
@@ -53,37 +137,6 @@ body {
   margin-left: auto;
   font-size: 0.85em;
 }
-
-/* view bar */
-.qp-viewbar {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  flex-wrap: wrap;
-  padding: 0.35rem 0.75rem;
-  border-bottom: 1px solid #8a8a8a;
-}
-.qp-viewbar > button,
-.qp-seg > button {
-  border: 1px solid #8a8a8a;
-  background: none;
-  color: inherit;
-  font: inherit;
-  padding: 0.15rem 0.6rem;
-  border-radius: 0.3rem;
-  cursor: pointer;
-}
-.qp-viewbar > button.on,
-.qp-seg > button.on,
-#qp-group-toggle.on {
-  background: #1967d2;
-  border-color: #1967d2;
-  color: #fff;
-}
-.qp-status {
-  font-size: 0.82em;
-  margin-left: 0.5rem;
-}
 .qp-reset-notice {
   margin: 0.3rem 0.75rem;
   padding: 0.3rem 0.6rem;
@@ -98,7 +151,7 @@ body {
   align-items: center;
   gap: 0.45rem;
   flex-wrap: wrap;
-  padding: 0.35rem 0.75rem;
+  padding: 0.3rem 0.75rem;
   border-bottom: 1px solid #8a8a8a;
   font-size: 0.9em;
 }
@@ -127,6 +180,21 @@ body {
 .qp-seg {
   display: inline-flex;
   gap: 0.15rem;
+}
+.qp-seg > button {
+  border: 1px solid #8a8a8a;
+  background: none;
+  color: inherit;
+  font: inherit;
+  padding: 0.15rem 0.6rem;
+  border-radius: 0.3rem;
+  cursor: pointer;
+}
+.qp-seg > button.on,
+#qp-group-toggle.on {
+  background: #1967d2;
+  border-color: #1967d2;
+  color: #fff;
 }
 .qp-more {
   position: relative;
@@ -170,16 +238,35 @@ body {
   font-size: 0.85em;
 }
 .qp-count {
-  margin: 0.2rem 0.75rem;
+  margin-left: auto;
   font-size: 0.85em;
+  white-space: nowrap;
 }
 
-/* compact list */
+/* dense list: fixed 38px rows, explicit column header */
 .qp-content {
   flex: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
+}
+.qp-listwrap {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.qp-colhead {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  padding: 0 0.75rem;
+  height: 26px;
+  border-bottom: 1px solid #8a8a8a;
+  font-size: 0.8em;
+  font-weight: 600;
+  opacity: 0.75;
+  white-space: nowrap;
 }
 .qp-list {
   flex: 1;
@@ -196,7 +283,7 @@ body {
   background: none;
   color: inherit;
   font: inherit;
-  font-size: 0.88em;
+  font-size: 14px;
   padding: 0 0.75rem;
   cursor: pointer;
   text-align: left;
@@ -211,7 +298,6 @@ body {
 .qp-card:focus-visible,
 .qp-group:focus-visible,
 .qp-toolbar button:focus-visible,
-.qp-viewbar button:focus-visible,
 .qp-drawer button:focus-visible {
   outline: 2px solid #1967d2;
   outline-offset: 1px;
@@ -220,6 +306,10 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   flex: 0 0 auto;
+}
+.qp-pri {
+  width: 3rem;
+  font-variant-numeric: tabular-nums;
 }
 .qp-id {
   width: 4.5rem;
@@ -233,20 +323,35 @@ body {
 .qp-state {
   width: 7rem;
 }
+.qp-flag {
+  width: 5rem;
+}
 .qp-lane {
   width: 13rem;
 }
-.qp-pri {
-  width: 3rem;
-  text-align: right;
-}
 .qp-age {
-  width: 3.5rem;
+  width: 4.5rem;
   text-align: right;
 }
 .qp-unknown {
   color: #a65b00;
   font-style: italic;
+}
+
+/* stale marker — text + glyph, never color alone */
+.qp-stale {
+  border: 1px solid #a65b00;
+  color: #a65b00;
+  border-radius: 0.25rem;
+  padding: 0 0.3rem;
+  font-size: 0.82em;
+  font-weight: 600;
+}
+.qp-stale-note {
+  border: 1px solid #a65b00;
+  border-radius: 0.3rem;
+  padding: 0.35rem 0.6rem;
+  color: #a65b00;
 }
 
 /* group headers */
@@ -288,6 +393,10 @@ body {
 }
 .qp-sig-urgent {
   color: #b10020;
+  font-weight: 700;
+}
+.qp-sig-stale {
+  color: #a65b00;
   font-weight: 700;
 }
 
@@ -435,7 +544,7 @@ body {
 /* measurement panel */
 .qp-measure {
   border-top: 1px solid #8a8a8a;
-  padding: 0.4rem 0.75rem;
+  padding: 0.25rem 0.75rem;
   font-size: 0.88em;
 }
 .qp-measure-controls {
@@ -483,6 +592,20 @@ body {
   max-height: 40vh;
 }
 
+/* medium widths / high zoom: rail becomes an overlay; toggle stays in the
+   header so core controls never disappear. */
+@media (max-width: 900px) {
+  .qp-rail {
+    position: fixed;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    z-index: 15;
+    background: Canvas;
+    box-shadow: 0.5rem 0 1.5rem rgba(0, 0, 0, 0.18);
+  }
+}
+
 /* narrow viewports: single-column flow, full-screen drawer, zero body
    horizontal scroll. */
 @media (max-width: 640px) {
@@ -501,18 +624,24 @@ body {
   .qp-state {
     width: 5.5rem;
   }
+  .qp-flag {
+    width: 4rem;
+  }
   .qp-id {
     width: 3.8rem;
   }
   .qp-age {
     width: 3rem;
   }
+  .qp-age:last-child {
+    display: none;
+  }
   .qp-drawer {
     inset: 0;
     width: 100%;
     border-left: none;
   }
-  .qp-status {
+  .qp-count {
     flex-basis: 100%;
     margin-left: 0;
   }

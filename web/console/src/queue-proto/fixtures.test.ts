@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { buildEdge, buildPerf5000, buildSample200, EDGE_CASES, PREVIEW_CLAMP, SAMPLE200_DISTRIBUTION } from "./fixtures";
+import { buildEdge, buildPerf5000, buildSample200, buildStale63, EDGE_CASES, PREVIEW_CLAMP, SAMPLE200_DISTRIBUTION } from "./fixtures";
 import { identifierViolations, sanitizeDataset, shapeViolations } from "./sanitize";
 
 describe("synthetic fixtures", () => {
   const sample = buildSample200();
   const edge = buildEdge();
+  const stale63 = buildStale63();
   const perf = buildPerf5000();
 
   it("has the required sizes: 200 / 12 edge cases / 5000", () => {
@@ -46,13 +47,13 @@ describe("synthetic fixtures", () => {
   });
 
   it("keeps every identifier-bearing field inside the declared synthetic namespace", () => {
-    for (const dataset of [sample, edge, perf]) {
+    for (const dataset of [sample, edge, stale63, perf]) {
       expect(identifierViolations(dataset)).toEqual([]);
     }
   });
 
   it("contains no real-identifier shape in any fixture string", () => {
-    for (const dataset of [sample, edge, perf]) {
+    for (const dataset of [sample, edge, stale63, perf]) {
       expect(shapeViolations(dataset)).toEqual([]);
     }
   });
@@ -100,7 +101,7 @@ describe("synthetic fixtures", () => {
   });
 
   it("labels every dataset as synthetic, never the production backlog", () => {
-    for (const dataset of [sample, edge, perf]) {
+    for (const dataset of [sample, edge, stale63, perf]) {
       expect(dataset.completenessNote).toContain("synthetic");
       expect(dataset.completenessNote).toContain("not the production backlog");
     }

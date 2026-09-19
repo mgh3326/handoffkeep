@@ -79,7 +79,7 @@ describe("board columns are bounded", () => {
 
 describe("grouping", () => {
   const visible = applyView(edge.tasks, { view: "all", filters: EMPTY_FILTERS });
-  const groups = groupByArea(visible, edge.enrichment);
+  const groups = groupByArea(visible, edge.enrichment, edge.generatedAt);
 
   it("collapsed unique counts equal the union of expanded member IDs", () => {
     for (const g of groups) {
@@ -142,7 +142,7 @@ describe("count conservation on the 5000-task set", () => {
   it("grouped counts conserve the unique task union", () => {
     const perf = buildPerf5000();
     const visible = applyView(perf.tasks, { view: "all", filters: EMPTY_FILTERS });
-    const groups = groupByArea(visible, perf.enrichment);
+    const groups = groupByArea(visible, perf.enrichment, perf.generatedAt);
     const allIds = new Set<number>();
     let headerTotal = 0;
     for (const g of groups) {
