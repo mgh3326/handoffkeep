@@ -598,7 +598,7 @@ body {
   .qp-rail {
     position: fixed;
     left: 0;
-    top: 0;
+    top: var(--qp-head-h, 0px);
     bottom: 0;
     z-index: 15;
     background: Canvas;

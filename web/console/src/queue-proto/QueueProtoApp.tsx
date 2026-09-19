@@ -78,6 +78,8 @@ export function QueueProtoApp({ datasets, initialSet, storage, diag = false, per
   }));
   const [views] = useState<Record<string, SavedView>>(loaded.views);
   const [openId, setOpenId] = useState<number | null>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const headRef = useRef<HTMLElement>(null);
   const mainRef = useRef<HTMLDivElement>(null);
   const openerRef = useRef<HTMLElement | null>(null);
   const diagRef = useRef<HTMLPreElement>(null);
@@ -166,6 +168,25 @@ export function QueueProtoApp({ datasets, initialSet, storage, diag = false, per
 
   const close = useCallback(() => setOpenId(null), []);
 
+  // At ≤900px the rail is a fixed overlay; pinning its top edge to the
+  // measured header height keeps #qp-rail-toggle — the only close control —
+  // outside the overlay's hit area no matter how tall the header wraps.
+  useLayoutEffect(() => {
+    const root = rootRef.current;
+    const head = headRef.current;
+    if (!root || !head) {
+      return;
+    }
+    const measure = () => root.style.setProperty("--qp-head-h", `${head.getBoundingClientRect().height}px`);
+    measure();
+    if (typeof ResizeObserver === "undefined") {
+      return;
+    }
+    const observer = new ResizeObserver(measure);
+    observer.observe(head);
+    return () => observer.disconnect();
+  }, []);
+
   const setView = useCallback((view: ProtoView) => {
     setState((s) => ({ ...s, view, layout: defaultLayout(view) }));
   }, []);
@@ -227,11 +248,11 @@ export function QueueProtoApp({ datasets, initialSet, storage, diag = false, per
   }, [perfMode, dataset]);
 
   return (
-    <div className={`qp-root${state.sidebarCollapsed ? " rail-collapsed" : ""}`}>
+    <div className={`qp-root${state.sidebarCollapsed ? " rail-collapsed" : ""}`} ref={rootRef}>
       <div id="qp-main" ref={mainRef}>
         <ViewRail dataset={dataset} view={state.view} counts={viewCounts} views={views} onSelectView={setView} onApplyView={applyNamedView} />
         <div className="qp-body">
-          <header className="qp-head">
+          <header className="qp-head" ref={headRef}>
             <button
               type="button"
               id="qp-rail-toggle"

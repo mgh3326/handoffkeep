@@ -50,6 +50,22 @@ main ≥1152px, title+toolbar ≤112px, ≥16 data rows in first viewport, row
 36–40px, text ≥14px, zero horizontal scroll). Without `--full` each file gets
 the narrow/zoom subset (zero horizontal scroll + core controls reachable).
 
+## Real-pointer rail assertion (390×844)
+
+```bash
+node src/queue-proto/evidence/assert-rail-pointer.mjs
+```
+
+Spawns Chrome `--headless=new --remote-debugging-port=9334` and drives the
+rail through `Input.dispatchMouseEvent` — the real hit-test path, not DOM
+`.click()`, which would bypass pointer occlusion. At 390×844 it requires: a
+pointer click on `#qp-rail-toggle` opens the rail; while open,
+`document.elementFromPoint` at the toggle's center still returns the toggle
+(the fixed `.qp-rail` overlay starts at `--qp-head-h`, below the header, so
+it never covers the only close control); the toggle rect does not overlap
+the first `.qp-rail-h` content rect; and a second pointer click closes the
+rail. Exits nonzero on any failure.
+
 ## Manual equivalents
 
 ```bash
