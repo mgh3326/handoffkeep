@@ -45,7 +45,7 @@ export const EXPERIMENT_SCRIPTS = [
   {
     id: "I1",
     title: "find a view",
-    text: "using the view navigator, switch to the Active view and report the shown task count",
+    text: "using the view navigator, switch to the All view and report the shown task count",
   },
   {
     id: "I2",

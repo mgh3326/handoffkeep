@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { beforeEach, describe, expect, it } from "vitest";
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { QueueProtoApp } from "./QueueProtoApp";
+import { EXPERIMENT_SCRIPTS } from "./MeasurePanel";
 import { buildDatasets, buildStale63, GENERATED_AT, STALE63_BUCKETS } from "./fixtures";
 import { ageDays, applyView, EMPTY_FILTERS, isStale, STALE_MIN_AGE_DAYS } from "./adapter";
 import type { ProtoTask } from "./types";
@@ -265,6 +266,22 @@ describe("navigation, persistence and keyboard flow", () => {
     // backlog-scan = backlog + list + area grouping
     expect(screen.getByRole("link", { name: "Backlog" }).getAttribute("aria-current")).toBe("page");
     expect(container.querySelectorAll(".qp-group").length).toBeGreaterThan(0);
+  });
+});
+
+describe("trial harness — in-app scripts match the graded TRIAL.md answers", () => {
+  it("I1 names the All view and the truthful total of 63 in both places", () => {
+    const i1 = EXPERIMENT_SCRIPTS.find((s) => s.id === "I1");
+    expect(i1, "I1 script must exist").toBeTruthy();
+    expect(i1!.text).toContain("All view");
+    expect(i1!.text).not.toMatch(/\bActive\b/);
+    const protoDir = dirname(fileURLToPath(import.meta.url));
+    const trial = readFileSync(resolve(protoDir, "evidence", "TRIAL.md"), "utf8");
+    const i1row = trial.split("\n").find((l) => l.startsWith("| I1 |"));
+    expect(i1row, "TRIAL.md must carry a graded I1 row").toBeTruthy();
+    expect(i1row).toContain("All");
+    expect(i1row).toContain("63 unique tasks");
+    expect(i1row).not.toMatch(/\bActive\b/);
   });
 });
 
