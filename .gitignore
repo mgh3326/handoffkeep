@@ -29,6 +29,7 @@ go.work.sum
 
 # Frontend toolchain
 node_modules/
+web/console/dist-proto/
 
 # Editor/IDE
 # .idea/
