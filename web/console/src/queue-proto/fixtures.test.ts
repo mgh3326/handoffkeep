@@ -1,41 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { buildEdge, buildPerf5000, buildSample200, DENYLIST, EDGE_CASES, PREVIEW_CLAMP, SAMPLE200_DISTRIBUTION } from "./fixtures";
-import type { Dataset } from "./types";
-
-function* fixtureStrings(dataset: Dataset): Generator<string> {
-  yield dataset.key;
-  yield dataset.label;
-  yield dataset.completenessNote;
-  for (const task of dataset.tasks) {
-    yield task.title;
-    yield task.kind;
-    yield task.state;
-    yield task.lane;
-    yield task.claimant ?? "";
-    yield task.created_by;
-    yield task.blocker ?? "";
-    for (const [k, v] of Object.entries(task.refs)) {
-      yield `${k}:${v}`;
-    }
-    for (const e of task.events) {
-      yield `${e.by} ${e.note ?? ""}`;
-    }
-    if (task.decision) {
-      yield task.decision.question;
-      yield task.decision.evidence;
-    }
-  }
-  for (const enr of Object.values(dataset.enrichment)) {
-    yield enr.area ?? "";
-    yield enr.bundle ?? "";
-    for (const l of enr.labels) {
-      yield l;
-    }
-    for (const r of enr.relations) {
-      yield `${r.type} ${r.note}`;
-    }
-  }
-}
+import { buildEdge, buildPerf5000, buildSample200, EDGE_CASES, PREVIEW_CLAMP, SAMPLE200_DISTRIBUTION } from "./fixtures";
+import { identifierViolations, sanitizeDataset, shapeViolations } from "./sanitize";
 
 describe("synthetic fixtures", () => {
   const sample = buildSample200();
@@ -80,14 +45,58 @@ describe("synthetic fixtures", () => {
     }
   });
 
-  it("never contains a denylist identifier in any fixture string", () => {
+  it("keeps every identifier-bearing field inside the declared synthetic namespace", () => {
     for (const dataset of [sample, edge, perf]) {
-      for (const s of fixtureStrings(dataset)) {
-        for (const deny of DENYLIST) {
-          expect(s.toLowerCase(), `fixture string ${JSON.stringify(s)} contains ${deny}`).not.toContain(deny.toLowerCase());
-        }
-      }
+      expect(identifierViolations(dataset)).toEqual([]);
     }
+  });
+
+  it("contains no real-identifier shape in any fixture string", () => {
+    for (const dataset of [sample, edge, perf]) {
+      expect(shapeViolations(dataset)).toEqual([]);
+    }
+  });
+
+  it("rejects a newly introduced real-shape identifier in both layers", () => {
+    // Invented values only — the guard must catch the shape without
+    // anyone having enumerated the value.
+    const badLane = buildEdge();
+    badLane.tasks[0].lane = "qa-lane-east-7";
+    badLane.tasks[0].claimant = "qa-actor-42";
+    expect(
+      identifierViolations(badLane).some((v) => v.includes("lane") && v.includes("qa-lane-east-7")),
+      "non-synth lane must fail the allowlist",
+    ).toBe(true);
+    expect(
+      identifierViolations(badLane).some((v) => v.includes("claimant") && v.includes("qa-actor-42")),
+      "non-synth claimant must fail the allowlist",
+    ).toBe(true);
+    expect(sanitizeDataset(badLane)).not.toEqual([]);
+
+    const badText = buildEdge();
+    badText.tasks[0].title = "see pane w9:q7 for details";
+    badText.tasks[0].blocker = "host on qa-box:50051 unreachable";
+    expect(
+      shapeViolations(badText).some((v) => v.includes("pane/workspace id")),
+      "pane-shaped id in free text must fail the shape scan",
+    ).toBe(true);
+    expect(
+      shapeViolations(badText).some((v) => v.includes("host:port")),
+      "host:port shape in free text must fail the shape scan",
+    ).toBe(true);
+    expect(sanitizeDataset(badText)).not.toEqual([]);
+
+    const badRef = buildEdge();
+    badRef.tasks[0].refs.pr = "https://qa.acme-example.net/x";
+    expect(
+      identifierViolations(badRef).some((v) => v.includes("refs.pr")),
+      "non-example.invalid PR URL must fail the allowlist",
+    ).toBe(true);
+    expect(
+      shapeViolations(badRef).some((v) => v.includes("non-example.invalid URL") || v.includes("real-TLD domain")),
+      "real-TLD URL must also fail the shape scan",
+    ).toBe(true);
+    expect(sanitizeDataset(badRef)).not.toEqual([]);
   });
 
   it("labels every dataset as synthetic, never the production backlog", () => {

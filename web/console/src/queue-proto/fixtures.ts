@@ -8,21 +8,6 @@ import type { Dataset, Enrichment, ProtoTask } from "./types";
 export const GENERATED_AT = "2026-09-19T09:00:00+09:00";
 export const PREVIEW_CLAMP = 96;
 
-/** Real identifiers that must never appear in any fixture string. */
-export const DENYLIST = [
-  "director-1",
-  "builder-456",
-  "b456-queue-prototype",
-  "mac-personal",
-  "mgh3326",
-  "github.com/mgh3326",
-  "handoffkeep-work",
-  "w16:",
-  "8801",
-  "devin.ai",
-  "cognition.ai",
-];
-
 // Declared synthetic distribution for the 200-row sample. It reproduces only
 // the observed capped sample's proportions: kind=fix 103/200 (51.5%) and the
 // dominant lane 152/200 (76%). Remaining mass is a declared invention, not an
