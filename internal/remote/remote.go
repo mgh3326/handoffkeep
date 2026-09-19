@@ -274,6 +274,38 @@ func (c Client) ListTasksPage(ctx context.Context, lane, state, parentLane strin
 	err := c.call(ctx, "GET", "/v1/tasks?"+q.Encode(), nil, &out)
 	return out.Tasks, err
 }
+
+// ExportTasks fetches one consistent task snapshot and returns the exact
+// response body so callers print the evidence document byte-for-byte. A
+// limit below 1 omits the parameter so the server default applies.
+func (c Client) ExportTasks(ctx context.Context, lane, state, parentLane string, limit int) ([]byte, error) {
+	q := url.Values{"lane": {lane}, "state": {state}, "parent_lane": {parentLane}}
+	if limit > 0 {
+		q.Set("limit", fmt.Sprint(limit))
+	}
+	r, e := http.NewRequestWithContext(ctx, "GET", strings.TrimRight(c.URL, "/")+"/v1/tasks/export?"+q.Encode(), nil)
+	if e != nil {
+		return nil, e
+	}
+	r.Header.Set("Authorization", "Bearer "+c.Token)
+	h := c.HTTP
+	if h == nil {
+		h = http.DefaultClient
+	}
+	resp, e := h.Do(r)
+	if e != nil {
+		return nil, e
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		var x struct {
+			Error string `json:"error"`
+		}
+		_ = json.NewDecoder(resp.Body).Decode(&x)
+		return nil, errors.New(x.Error)
+	}
+	return io.ReadAll(resp.Body)
+}
 func (c Client) GetTask(ctx context.Context, id int64) (store.Task, bool, error) {
 	var out store.Task
 	err := c.call(ctx, "GET", fmt.Sprintf("/v1/tasks/%d", id), nil, &out)

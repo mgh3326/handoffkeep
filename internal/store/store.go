@@ -1118,7 +1118,7 @@ func (s *Store) TransitionTask(ctx context.Context, id int64, to, by, note strin
 }
 
 func (s *Store) ListTasks(ctx context.Context, lane, state, parentLane string, limit int) ([]Task, error) {
-	if (lane != "" && !validName(lane)) || (parentLane != "" && !validName(parentLane)) || (state != "" && !taskStates[state]) {
+	if !validTaskQuery(lane, state, parentLane) {
 		return nil, errors.New("invalid task query")
 	}
 	if limit < 1 {
@@ -1162,7 +1162,7 @@ func (s *Store) ListTasks(ctx context.Context, lane, state, parentLane string, l
 // the complete task set. afterID is exclusive; ListTasks retains its queue
 // priority ordering for existing callers.
 func (s *Store) ListTasksPage(ctx context.Context, lane, state, parentLane string, afterID int64, limit int) ([]Task, error) {
-	if (lane != "" && !validName(lane)) || (parentLane != "" && !validName(parentLane)) || (state != "" && !taskStates[state]) || afterID < 0 {
+	if !validTaskQuery(lane, state, parentLane) || afterID < 0 {
 		return nil, errors.New("invalid task query")
 	}
 	if limit < 1 {
