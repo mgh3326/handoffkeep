@@ -454,6 +454,7 @@ func TestExportDigests(t *testing.T) {
 	if got := hex.EncodeToString(rowsHash.Sum(nil)); got != doc.RowsSHA256 {
 		t.Fatalf("rows_sha256=%s recomputed=%s", doc.RowsSHA256, got)
 	}
+	t.Logf("digest recount: ids_sha256=%s rows_sha256=%s (recomputed from %d decoded rows)", doc.IDsSHA256, doc.RowsSHA256, len(doc.Tasks))
 
 	reversed := sha256.New()
 	for i := len(doc.Tasks) - 1; i >= 0; i-- {
