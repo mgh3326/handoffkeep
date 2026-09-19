@@ -224,6 +224,25 @@ func (s Service) ListTasks(ctx context.Context, lane, state, parentLane string, 
 func (s Service) ListTasksPage(ctx context.Context, lane, state, parentLane string, afterID int64, limit int) ([]store.Task, error) {
 	return s.Store.ListTasksPage(ctx, lane, state, parentLane, afterID, limit)
 }
+
+// ExportTasks returns a consistent task snapshot and stamps the serving
+// build's VCS revision into the source object. The revision is the binary's
+// embedded stamp; "unknown" is emitted rather than invented when it is absent.
+func (s Service) ExportTasks(ctx context.Context, lane, state, parentLane string, limit int) (store.TaskExport, error) {
+	out, err := s.Store.ExportTasks(ctx, lane, state, parentLane, limit)
+	if err != nil {
+		return out, err
+	}
+	out.Source = store.TaskExportSource{VCSRevision: "unknown"}
+	if info, ok := readBuildInfo(); ok {
+		for _, setting := range info.Settings {
+			if setting.Key == "vcs.revision" {
+				out.Source.VCSRevision = setting.Value
+			}
+		}
+	}
+	return out, nil
+}
 func (s Service) GetTask(ctx context.Context, id int64) (store.Task, bool, error) {
 	return s.Store.GetTask(ctx, id)
 }
@@ -333,6 +352,7 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("GET /metrics", s.metrics)
 	m.HandleFunc("POST /v1/tasks", s.tasksCreate)
 	m.HandleFunc("GET /v1/tasks", s.tasksList)
+	m.HandleFunc("GET /v1/tasks/export", s.tasksExport)
 	m.HandleFunc("POST /v1/tasks/next", s.tasksNext)
 	m.HandleFunc("GET /v1/tasks/{id}", s.task)
 	m.HandleFunc("POST /v1/tasks/{id}/claim", s.taskClaim)
@@ -512,6 +532,32 @@ func (s Server) tasksList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOut(w, http.StatusOK, map[string]any{"tasks": xs})
+}
+
+// tasksExport serves one consistent task snapshot. It reuses the existing
+// bearer authentication and filter validation; it adds no credential class.
+// Error bodies carry only a stable code — never task content or scope data.
+func (s Server) tasksExport(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	if _, ok := s.auth(w, r); !ok {
+		return
+	}
+	limit, err := queryLimit(r, 1000, store.ExportLimitMax)
+	if err != nil {
+		jsonOut(w, http.StatusBadRequest, map[string]string{"error": "invalid_export_query"})
+		return
+	}
+	lane, state, parentLane := r.URL.Query().Get("lane"), r.URL.Query().Get("state"), r.URL.Query().Get("parent_lane")
+	out, err := s.Service.ExportTasks(r.Context(), lane, state, parentLane, limit)
+	if err != nil {
+		if errors.Is(err, store.ErrInvalidExportQuery) {
+			jsonOut(w, http.StatusBadRequest, map[string]string{"error": "invalid_export_query"})
+			return
+		}
+		jsonOut(w, http.StatusInternalServerError, map[string]string{"error": "export_unavailable"})
+		return
+	}
+	jsonOut(w, http.StatusOK, out)
 }
 
 func (s Server) task(w http.ResponseWriter, r *http.Request) {

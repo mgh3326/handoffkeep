@@ -226,7 +226,7 @@ func normalizeTaskArgs(args []string) ([]string, error) {
 
 func tasksCmd(args []string, out io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: tasks add|list|claim|next|transition|show")
+		return errors.New("usage: tasks add|list|export|claim|next|transition|show")
 	}
 	fs := flag.NewFlagSet("tasks "+args[0], flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -323,6 +323,24 @@ func tasksCmd(args []string, out io.Writer) error {
 			return err
 		}
 		return printJSON(out, map[string]any{"tasks": xs})
+	case "export":
+		if fs.NArg() != 0 {
+			return errors.New("tasks export takes flags only")
+		}
+		// An unset --limit leaves the route's own default in force rather than
+		// silently exporting fewer rows.
+		exportLimit := 0
+		fs.Visit(func(item *flag.Flag) {
+			if item.Name == "limit" {
+				exportLimit = *limit
+			}
+		})
+		doc, err := c.ExportTasks(ctx, *lane, *state, *parentLane, exportLimit)
+		if err != nil {
+			return err
+		}
+		_, err = out.Write(doc)
+		return err
 	case "claim":
 		id, err := parseID()
 		if err != nil {
@@ -396,7 +414,7 @@ func tasksCmd(args []string, out io.Writer) error {
 		}
 		return printJSON(out, x)
 	default:
-		return errors.New("usage: tasks add|list|claim|next|transition|show")
+		return errors.New("usage: tasks add|list|export|claim|next|transition|show")
 	}
 }
 
