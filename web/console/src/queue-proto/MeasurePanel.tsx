@@ -40,9 +40,36 @@ export const EXPERIMENT_SCRIPTS = [
     title: "duplicate vs implement/verify",
     text: "distinguish the duplicate-candidate pair from the intentionally similar implement/verify pair; find relation evidence",
   },
+  // Iteration-1 trial set (task #462 amendment): five tasks, each run twice,
+  // alternating U1-baseline / iter1 order. See evidence/TRIAL.md.
+  {
+    id: "I1",
+    title: "find a view",
+    text: "using the view navigator, switch to the All view and report the shown task count",
+  },
+  {
+    id: "I2",
+    title: "urgent candidate",
+    text: "find the urgent candidate (priority ≥ 90) in the fixture; answer 'none valid' when no task qualifies",
+  },
+  {
+    id: "I3",
+    title: "blocked evidence",
+    text: "find the blocked task and read its blocker evidence from the detail drawer",
+  },
+  {
+    id: "I4",
+    title: "ownership flow",
+    text: "trace the claimant chain of the handoff task through its history events",
+  },
+  {
+    id: "I5",
+    title: "return to list",
+    text: "open a task's detail, close the drawer, and confirm the same row is still selected and in place",
+  },
 ] as const;
 
-export const CONDITIONS = ["current-like", "compact-list", "compact-board"] as const;
+export const CONDITIONS = ["current-like", "compact-list", "compact-board", "iter1-rail"] as const;
 export const OUTCOMES = ["correct", "wrong-task", "timeout", "abandoned"] as const;
 
 export type MeasureRecord = {

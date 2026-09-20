@@ -90,6 +90,13 @@ let loadedResolve = null;
 client.on("Page.loadEventFired", () => loadedResolve?.());
 
 async function navigate(url) {
+  // Each scenario starts from clean persisted state — earlier captures write
+  // presentation state to localStorage and it would leak into later pages.
+  try {
+    await evalJs(`localStorage.clear()`);
+  } catch {
+    // first navigation happens from about:blank — storage access may fail
+  }
   const loaded = new Promise((r) => (loadedResolve = r));
   await client.send("Page.navigate", { url });
   await Promise.race([loaded, sleep(15000)]);
@@ -120,6 +127,12 @@ async function viewport(width, height, scale = 1) {
 }
 
 async function diagJson(name) {
+  // The diag <pre> is written on mount/state-change/window-resize. Force one
+  // rewrite after the virtual list's ResizeObserver has settled so the
+  // captured facts reflect steady-state geometry, not first-commit layout.
+  await sleep(600);
+  await evalJs(`window.dispatchEvent(new Event("resize"))`);
+  await sleep(150);
   const text = await evalJs(`document.getElementById("diag")?.textContent ?? ""`);
   if (!text) {
     throw new Error(`diag empty for ${name}`);
@@ -128,7 +141,7 @@ async function diagJson(name) {
   const facts = JSON.parse(text);
   console.log(
     `${name}: scroll=${facts.viewport.scrollWidth}/${facts.viewport.clientWidth} ` +
-      `rows=${facts.rendered.listRows} cols=${facts.rendered.populatedColumns} ` +
+      `rows=${facts.rendered.listRows} firstVp=${facts.geometry?.firstViewportRows} cols=${facts.rendered.populatedColumns} ` +
       `controls=${Object.entries(facts.controls)
         .map(([k, v]) => `${k}:${v.present ? (v.inViewport === false ? "offscreen" : "ok") : "absent"}`)
         .join(",")}`,
@@ -148,6 +161,12 @@ await navigate(`${BASE}?view=active&layout=board`);
 await shot("board-active-1440x900.png");
 await navigate(`${BASE}?view=backlog&layout=list&group=area`);
 await shot("grouped-1440x900.png");
+// the representative two-group fixture, grouped — the K5.1 density surface
+await navigate(`${BASE}?set=stale63&view=all&layout=list&group=area`);
+await shot("iter1-grouped-1440x900.png");
+await navigate(`${BASE}?diag=1&set=stale63&view=all&layout=list&group=area`);
+await sleep(300);
+await diagJson("diag-iter1-grouped-1440x900.json");
 await navigate(`${BASE}?diag=1&view=backlog&layout=list`);
 await sleep(300);
 await diagJson("diag-1440x900.json");

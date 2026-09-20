@@ -2,7 +2,8 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { QueueProtoApp } from "./QueueProtoApp";
 import { buildDatasets } from "./fixtures";
-import { applyView, EMPTY_FILTERS } from "./adapter";
+import { applyView, EMPTY_FILTERS, groupByArea } from "./adapter";
+import { flattenGrouped } from "./ListView";
 
 const datasets = buildDatasets();
 const edge = datasets.edge;
@@ -26,7 +27,7 @@ describe("shared detail drawer", () => {
 
   it("Enter opens the focused row; drawer shows the full unclamped title", () => {
     const { container } = render(<QueueProtoApp datasets={datasets} initialSet="edge" />);
-    fireEvent.click(screen.getByRole("button", { name: "All" }));
+    fireEvent.click(screen.getByRole("link", { name: "All" }));
     openRow(container, 5011);
     const drawer = screen.getByRole("dialog");
     const task = edge.tasks.find((t) => t.id === 5011)!;
@@ -37,7 +38,7 @@ describe("shared detail drawer", () => {
 
   it("Escape closes and focus returns to the originating row", () => {
     const { container } = render(<QueueProtoApp datasets={datasets} initialSet="edge" />);
-    fireEvent.click(screen.getByRole("button", { name: "All" }));
+    fireEvent.click(screen.getByRole("link", { name: "All" }));
     const row = openRow(container, 5005);
     const drawer = screen.getByRole("dialog");
     expect(document.getElementById("qp-main")!.hasAttribute("inert")).toBe(true);
@@ -49,7 +50,7 @@ describe("shared detail drawer", () => {
 
   it("visible close control closes and returns focus", () => {
     const { container } = render(<QueueProtoApp datasets={datasets} initialSet="edge" />);
-    fireEvent.click(screen.getByRole("button", { name: "All" }));
+    fireEvent.click(screen.getByRole("link", { name: "All" }));
     const row = openRow(container, 5005);
     fireEvent.click(screen.getByRole("button", { name: "Close detail" }));
     expect(screen.queryByRole("dialog")).toBeNull();
@@ -58,8 +59,10 @@ describe("shared detail drawer", () => {
 
   it("prev/next navigation works via buttons and arrow keys", () => {
     const { container } = render(<QueueProtoApp datasets={datasets} initialSet="edge" />);
-    fireEvent.click(screen.getByRole("button", { name: "All" }));
-    const ordered = applyView(edge.tasks, { view: "all", filters: EMPTY_FILTERS }).map((t) => t.id);
+    fireEvent.click(screen.getByRole("link", { name: "All" }));
+    // drawer prev/next follows the displayed (grouped) list order
+    const flat = flattenGrouped(groupByArea(applyView(edge.tasks, { view: "all", filters: EMPTY_FILTERS }), edge.enrichment, edge.generatedAt), []);
+    const ordered = flat.filter((r) => r.kind === "task").map((r) => (r.kind === "task" ? r.task.id : -1));
     const start = ordered[1];
     openRow(container, start);
     const drawer = screen.getByRole("dialog");
@@ -77,7 +80,7 @@ describe("shared detail drawer", () => {
 
   it("renders unavailable due/blocker as unknown — not blank, not zero", () => {
     const { container } = render(<QueueProtoApp datasets={datasets} initialSet="edge" />);
-    fireEvent.click(screen.getByRole("button", { name: "All" }));
+    fireEvent.click(screen.getByRole("link", { name: "All" }));
     openRow(container, 5003);
     const drawer = screen.getByRole("dialog") as HTMLElement;
     expect(ddValue(drawer, "due")).toBe("unknown");
@@ -88,19 +91,20 @@ describe("shared detail drawer", () => {
 
   it("renders unknown current-state age distinctly", () => {
     const { container } = render(<QueueProtoApp datasets={datasets} initialSet="edge" />);
-    fireEvent.click(screen.getByRole("button", { name: "All" }));
+    fireEvent.click(screen.getByRole("link", { name: "All" }));
     openRow(container, 5001);
     const drawer = screen.getByRole("dialog") as HTMLElement;
-    expect(ddValue(drawer, "current-state age")).toBe("unknown");
+    expect(ddValue(drawer, "current-state age")).toContain("unknown");
+    expect(ddValue(drawer, "current-state age")).toContain("state_entered_at");
     // a normal task renders a numeric age instead
     fireEvent.keyDown(drawer, { key: "Escape" });
     openRow(container, 5005);
-    expect(ddValue(screen.getByRole("dialog") as HTMLElement, "current-state age")).toMatch(/^\d+d$/);
+    expect(ddValue(screen.getByRole("dialog") as HTMLElement, "current-state age")).toMatch(/^\d+d/);
   });
 
   it("missing coverage reads unknown; collected zero reads 0", () => {
     const { container } = render(<QueueProtoApp datasets={datasets} initialSet="edge" />);
-    fireEvent.click(screen.getByRole("button", { name: "All" }));
+    fireEvent.click(screen.getByRole("link", { name: "All" }));
     openRow(container, 5002);
     let drawer = screen.getByRole("dialog") as HTMLElement;
     expect(drawer.textContent).toContain("unknown — not collected");
@@ -114,7 +118,7 @@ describe("shared detail drawer", () => {
 
   it("unknown lane/claimant renders unknown, not blank", () => {
     const { container } = render(<QueueProtoApp datasets={datasets} initialSet="edge" />);
-    fireEvent.click(screen.getByRole("button", { name: "All" }));
+    fireEvent.click(screen.getByRole("link", { name: "All" }));
     openRow(container, 5013);
     const drawer = screen.getByRole("dialog") as HTMLElement;
     expect(ddValue(drawer, "lane")).toBe("unknown");
@@ -123,7 +127,7 @@ describe("shared detail drawer", () => {
 
   it("shows relation evidence for the duplicate and implement/verify pairs", () => {
     const { container } = render(<QueueProtoApp datasets={datasets} initialSet="edge" />);
-    fireEvent.click(screen.getByRole("button", { name: "All" }));
+    fireEvent.click(screen.getByRole("link", { name: "All" }));
     openRow(container, 5007);
     expect(screen.getByRole("dialog").textContent).toContain("duplicate-candidate → #5008");
     fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });

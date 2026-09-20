@@ -1,33 +1,33 @@
 {
-  "at": "2026-09-19T22:26:24.818Z",
+  "at": "2026-09-19T22:26:18.521Z",
   "dataset": {
-    "key": "sample200",
-    "size": 200,
-    "completeness": "partial"
+    "key": "stale63",
+    "size": 63,
+    "completeness": "complete"
   },
   "viewport": {
-    "innerWidth": 390,
-    "innerHeight": 844,
+    "innerWidth": 1440,
+    "innerHeight": 900,
     "devicePixelRatio": 1,
-    "scrollWidth": 390,
-    "clientWidth": 390,
+    "scrollWidth": 1440,
+    "clientWidth": 1440,
     "bodyHorizontalScroll": 0
   },
   "geometry": {
-    "railWidth": 0,
-    "chromeHeight": 221,
+    "railWidth": 232,
+    "chromeHeight": 84,
     "contentMarginLeft": 12,
-    "contentMarginRight": 390,
-    "mainAvailableWidth": 390,
-    "firstViewportRows": 11,
+    "contentMarginRight": 12,
+    "mainAvailableWidth": 1208,
+    "firstViewportRows": 20,
     "rowHeight": 38,
     "rowFontSizePx": 14,
     "colHeaderHeight": 26
   },
   "rendered": {
-    "listRows": 18,
-    "groupHeaders": 6,
-    "staleBadges": 10,
+    "listRows": 28,
+    "groupHeaders": 1,
+    "staleBadges": 16,
     "populatedColumns": 0,
     "perColumn": {},
     "cards": 0
@@ -39,8 +39,8 @@
       "rect": {
         "top": 0,
         "left": 0,
-        "width": 0,
-        "height": 0
+        "width": 232,
+        "height": 900
       }
     },
     "railToggle": {
@@ -48,7 +48,7 @@
       "inViewport": true,
       "rect": {
         "top": 4,
-        "left": 12,
+        "left": 244,
         "width": 63,
         "height": 21
       }
@@ -57,8 +57,8 @@
       "present": true,
       "inViewport": true,
       "rect": {
-        "top": 86,
-        "left": 12,
+        "top": 36,
+        "left": 244,
         "width": 192,
         "height": 22
       }
@@ -67,8 +67,8 @@
       "present": true,
       "inViewport": true,
       "rect": {
-        "top": 86,
-        "left": 211,
+        "top": 36,
+        "left": 443,
         "width": 96,
         "height": 22
       }
@@ -77,8 +77,8 @@
       "present": true,
       "inViewport": true,
       "rect": {
-        "top": 115,
-        "left": 12,
+        "top": 36,
+        "left": 547,
         "width": 137,
         "height": 22
       }
@@ -93,9 +93,9 @@
       "present": true,
       "inViewport": true,
       "rect": {
-        "top": 820,
-        "left": 0,
-        "width": 390,
+        "top": 876,
+        "left": 232,
+        "width": 1208,
         "height": 24
       }
     }

@@ -1,16 +1,14 @@
 import { KNOWN_STATES, type FilterState, type Layout, type ProtoState } from "./types";
-import type { SavedView } from "./storage";
 
 type ToolbarProps = {
   state: ProtoState;
   lanes: string[];
   kinds: string[];
-  views: Record<string, SavedView>;
+  visibleCount: number;
   onChange: (next: ProtoState) => void;
-  onApplyView: (name: string) => void;
 };
 
-export function Toolbar({ state, lanes, kinds, views, onChange, onApplyView }: ToolbarProps) {
+export function Toolbar({ state, lanes, kinds, visibleCount, onChange }: ToolbarProps) {
   const setFilters = (filters: Partial<FilterState>) => onChange({ ...state, filters: { ...state.filters, ...filters } });
   const set = (part: Partial<ProtoState>) => onChange({ ...state, ...part });
 
@@ -99,22 +97,6 @@ export function Toolbar({ state, lanes, kinds, views, onChange, onApplyView }: T
           </option>
         ))}
       </select>
-      <select
-        aria-label="named view"
-        value=""
-        onChange={(event) => {
-          if (event.target.value !== "") {
-            onApplyView(event.target.value);
-          }
-        }}
-      >
-        <option value="">saved views…</option>
-        {Object.keys(views).map((name) => (
-          <option key={name} value={name}>
-            {name}
-          </option>
-        ))}
-      </select>
       <details className="qp-more">
         <summary>states</summary>
         <fieldset className="qp-states">
@@ -159,6 +141,9 @@ export function Toolbar({ state, lanes, kinds, views, onChange, onApplyView }: T
           ))}
         </div>
       ) : null}
+      <span className="qp-count muted">
+        {visibleCount} unique tasks{state.grouping === "area" ? " · disjoint groups (no double counting)" : ""}
+      </span>
     </div>
   );
 }

@@ -29,21 +29,21 @@ describe("QueueProtoApp", () => {
     expect(container.querySelectorAll(".qp-row").length).toBeGreaterThan(0);
     expect(container.querySelectorAll(".qp-col").length).toBe(0);
 
-    fireEvent.click(screen.getByRole("button", { name: "Active" }));
+    fireEvent.click(screen.getByRole("link", { name: "Active" }));
     expect(container.querySelectorAll(".qp-col").length).toBeGreaterThan(0);
     expect(container.querySelectorAll(".qp-row").length).toBe(0);
 
-    fireEvent.click(screen.getByRole("button", { name: "Backlog" }));
+    fireEvent.click(screen.getByRole("link", { name: "Backlog" }));
     expect(container.querySelectorAll(".qp-row").length).toBeGreaterThan(0);
 
-    fireEvent.click(screen.getByRole("button", { name: "All" }));
+    fireEvent.click(screen.getByRole("link", { name: "All" }));
     expect(container.querySelectorAll(".qp-row").length).toBeGreaterThan(0);
     expect(container.querySelectorAll(".qp-col").length).toBe(0);
   });
 
   it("board never shows all nine state columns by default", () => {
     const { container } = render(<QueueProtoApp datasets={datasets} initialSet="sample200" />);
-    fireEvent.click(screen.getByRole("button", { name: "Active" }));
+    fireEvent.click(screen.getByRole("link", { name: "Active" }));
     const cols = container.querySelectorAll(".qp-col");
     expect(cols.length).toBeGreaterThan(0);
     expect(cols.length).toBeLessThan(9);
@@ -51,7 +51,7 @@ describe("QueueProtoApp", () => {
 
   it("layout switch preserves the exact unique task-ID set", () => {
     const { container } = render(<QueueProtoApp datasets={datasets} initialSet="sample200" />);
-    fireEvent.click(screen.getByRole("button", { name: "All" }));
+    fireEvent.click(screen.getByRole("link", { name: "All" }));
     const listSet = rowIds(container, ".qp-row");
     expect(listSet.size).toBe(200);
     fireEvent.click(within(container.querySelector("#qp-layout-toggle")!).getByRole("button", { name: "board" }));
@@ -82,7 +82,7 @@ describe("QueueProtoApp", () => {
 
   it("search by #id, numeric id, korean, and post-clamp text", () => {
     const { container } = render(<QueueProtoApp datasets={datasets} initialSet="sample200" />);
-    fireEvent.click(screen.getByRole("button", { name: "All" }));
+    fireEvent.click(screen.getByRole("link", { name: "All" }));
     const search = screen.getByLabelText("search");
     fireEvent.change(search, { target: { value: "#1150" } });
     expect(rowIds(container, ".qp-row")).toEqual(new Set([1150]));
@@ -98,8 +98,8 @@ describe("QueueProtoApp", () => {
     expect(screen.getByRole("alert").textContent).toContain("saved view reset — version mismatch");
   });
 
-  it("measurement panel lists the seven fixed scripts", async () => {
+  it("measurement panel lists the fixed scripts incl. the iteration-1 trial set", async () => {
     const { EXPERIMENT_SCRIPTS } = await import("./MeasurePanel");
-    expect(EXPERIMENT_SCRIPTS.map((s) => s.id)).toEqual(["U1", "U2", "U3", "U4", "U5", "T6", "T7"]);
+    expect(EXPERIMENT_SCRIPTS.map((s) => s.id)).toEqual(["U1", "U2", "U3", "U4", "U5", "T6", "T7", "I1", "I2", "I3", "I4", "I5"]);
   });
 });

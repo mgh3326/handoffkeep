@@ -76,6 +76,33 @@ export function applyView(tasks: ProtoTask[], state: Pick<ProtoState, "view" | "
   return tasks.filter((task) => inView(task) && matchesFilters(task, state.filters)).sort(taskOrder);
 }
 
+/** Per-view counts under the current filters — the rail shows these, so the
+ * number next to a view name is exactly the row set that view would render. */
+export function countByView(tasks: ProtoTask[], filters: FilterState): Record<ProtoView, number> {
+  const counts: Record<ProtoView, number> = { operator: 0, active: 0, backlog: 0, all: 0 };
+  for (const view of Object.keys(counts) as ProtoView[]) {
+    const inView = viewPredicate(view);
+    counts[view] = tasks.filter((task) => inView(task) && matchesFilters(task, filters)).length;
+  }
+  return counts;
+}
+
+// ---- staleness ----------------------------------------------------------
+
+/** Explicit stale rule: a non-terminal task whose age since `created_at`
+ * reaches STALE_MIN_AGE_DAYS is marked stale. Age says nothing about
+ * execution readiness — the marker only flags that the premise may be old. */
+export const STALE_MIN_AGE_DAYS = 7;
+export const TERMINAL_STATES = ["merged", "dropped"] as const;
+
+export function isStale(task: ProtoTask, now: string): boolean {
+  if ((TERMINAL_STATES as readonly string[]).includes(task.state)) {
+    return false;
+  }
+  const age = ageDays(now, task.created_at);
+  return age !== null && age >= STALE_MIN_AGE_DAYS;
+}
+
 // ---- grouping -----------------------------------------------------------
 
 export type GroupSignals = {
@@ -84,12 +111,13 @@ export type GroupSignals = {
   hold: number;
   unknown: number;
   urgent: number;
+  stale: number;
 };
 
 export type BundleGroup = { key: string; name: string; tasks: ProtoTask[]; signals: GroupSignals };
 export type AreaGroup = { key: string; name: string; bundles: BundleGroup[]; signals: GroupSignals };
 
-export function taskSignals(task: ProtoTask): { decision: boolean; hold: boolean; unknown: boolean; urgent: boolean } {
+export function taskSignals(task: ProtoTask, now: string): { decision: boolean; hold: boolean; unknown: boolean; urgent: boolean; stale: boolean } {
   const unknown =
     task.state_entered_at === null ||
     task.claimant === null ||
@@ -100,20 +128,22 @@ export function taskSignals(task: ProtoTask): { decision: boolean; hold: boolean
     hold: task.state === "hold",
     unknown,
     urgent: task.priority >= 90,
+    stale: isStale(task, now),
   };
 }
 
 function emptySignals(): GroupSignals {
-  return { count: 0, decision: 0, hold: 0, unknown: 0, urgent: 0 };
+  return { count: 0, decision: 0, hold: 0, unknown: 0, urgent: 0, stale: 0 };
 }
 
-function addSignals(signals: GroupSignals, task: ProtoTask): void {
-  const s = taskSignals(task);
+function addSignals(signals: GroupSignals, task: ProtoTask, now: string): void {
+  const s = taskSignals(task, now);
   signals.count += 1;
   if (s.decision) signals.decision += 1;
   if (s.hold) signals.hold += 1;
   if (s.unknown) signals.unknown += 1;
   if (s.urgent) signals.urgent += 1;
+  if (s.stale) signals.stale += 1;
 }
 
 function mergeSignals(into: GroupSignals, from: GroupSignals): void {
@@ -122,6 +152,7 @@ function mergeSignals(into: GroupSignals, from: GroupSignals): void {
   into.hold += from.hold;
   into.unknown += from.unknown;
   into.urgent += from.urgent;
+  into.stale += from.stale;
 }
 
 /**
@@ -129,7 +160,7 @@ function mergeSignals(into: GroupSignals, from: GroupSignals): void {
  * are always-present top-level groups. Never inferred from titles — reads
  * only the synthetic enrichment fixture.
  */
-export function groupByArea(tasks: ProtoTask[], enrichment: Record<number, Enrichment>): AreaGroup[] {
+export function groupByArea(tasks: ProtoTask[], enrichment: Record<number, Enrichment>, now: string): AreaGroup[] {
   const areas = new Map<string, Map<string, ProtoTask[]>>();
   const standalone: ProtoTask[] = [];
   const unclassified: ProtoTask[] = [];
@@ -163,7 +194,7 @@ export function groupByArea(tasks: ProtoTask[], enrichment: Record<number, Enric
     for (const [bundleName, bundleTasks] of [...areas.get(name)!.entries()].sort()) {
       const bSignals = emptySignals();
       for (const task of bundleTasks) {
-        addSignals(bSignals, task);
+        addSignals(bSignals, task, now);
       }
       bundles.push({ key: `${name}/${bundleName}`, name: bundleName, tasks: bundleTasks, signals: bSignals });
       mergeSignals(signals, bSignals);
@@ -174,7 +205,7 @@ export function groupByArea(tasks: ProtoTask[], enrichment: Record<number, Enric
   const special = (key: string, name: string, members: ProtoTask[]): AreaGroup => {
     const signals = emptySignals();
     for (const task of members) {
-      addSignals(signals, task);
+      addSignals(signals, task, now);
     }
     return { key, name, bundles: [{ key: `${key}/all`, name, tasks: members, signals }], signals };
   };
@@ -224,5 +255,9 @@ export function ageDays(nowIso: string, iso: string | null): number | null {
     return null;
   }
   const ms = Date.parse(nowIso) - Date.parse(iso);
+  if (!Number.isFinite(ms)) {
+    // unparseable/absent timestamp → unknown, never a fabricated number
+    return null;
+  }
   return Math.max(0, Math.floor(ms / 86_400_000));
 }
