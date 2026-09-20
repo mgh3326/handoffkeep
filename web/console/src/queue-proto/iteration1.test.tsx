@@ -350,9 +350,10 @@ describe("production isolation — adversarial: proto/measurement leak must fail
     expect(leaked).toEqual([]);
   });
 
-  it("vite production config wires queue-proto as the board entry", () => {
+  it("vite production config has no queue-proto input", () => {
     const cfg = readFileSync(resolve(srcRoot, "..", "vite.config.ts"), "utf8");
-    expect(cfg).toContain('board: resolve(root, "src/queue-proto/main.tsx")');
+    expect(cfg).not.toContain("queue-proto");
     expect(cfg).toContain('fleet: resolve(root, "src/main.tsx")');
+    expect(cfg).toContain('board: resolve(root, "src/board.tsx")');
   });
 });

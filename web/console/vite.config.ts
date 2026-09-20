@@ -19,10 +19,7 @@ export default defineConfig({
     rollupOptions: {
       input: {
         fleet: resolve(root, "src/main.tsx"),
-        // /ui/queue loads the queue prototype: board.js/board.css are built
-        // from src/queue-proto/, so the committed bundle is what the page
-        // actually serves.
-        board: resolve(root, "src/queue-proto/main.tsx"),
+        board: resolve(root, "src/board.tsx"),
       },
       output: {
         entryFileNames: "[name].js",
