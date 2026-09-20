@@ -1,5 +1,5 @@
 {
-  "at": "2026-09-19T08:26:40.703Z",
+  "at": "2026-09-19T22:26:25.914Z",
   "dataset": {
     "key": "sample200",
     "size": 200,
@@ -13,19 +13,51 @@
     "clientWidth": 390,
     "bodyHorizontalScroll": 0
   },
+  "geometry": {
+    "railWidth": 0,
+    "chromeHeight": 221,
+    "contentMarginLeft": 12,
+    "contentMarginRight": 390,
+    "mainAvailableWidth": 390,
+    "firstViewportRows": 11,
+    "rowHeight": 38,
+    "rowFontSizePx": 14,
+    "colHeaderHeight": 26
+  },
   "rendered": {
-    "listRows": 13,
+    "listRows": 18,
     "groupHeaders": 6,
+    "staleBadges": 10,
     "populatedColumns": 0,
     "perColumn": {},
     "cards": 0
   },
   "controls": {
+    "rail": {
+      "present": true,
+      "inViewport": true,
+      "rect": {
+        "top": 0,
+        "left": 0,
+        "width": 0,
+        "height": 0
+      }
+    },
+    "railToggle": {
+      "present": true,
+      "inViewport": true,
+      "rect": {
+        "top": 4,
+        "left": 12,
+        "width": 63,
+        "height": 21
+      }
+    },
     "search": {
       "present": true,
       "inViewport": true,
       "rect": {
-        "top": 186,
+        "top": 86,
         "left": 12,
         "width": 192,
         "height": 22
@@ -35,7 +67,7 @@
       "present": true,
       "inViewport": true,
       "rect": {
-        "top": 186,
+        "top": 86,
         "left": 211,
         "width": 96,
         "height": 22
@@ -45,20 +77,10 @@
       "present": true,
       "inViewport": true,
       "rect": {
-        "top": 215,
+        "top": 115,
         "left": 12,
         "width": 137,
         "height": 22
-      }
-    },
-    "viewBar": {
-      "present": true,
-      "inViewport": true,
-      "rect": {
-        "top": 86,
-        "left": 0,
-        "width": 390,
-        "height": 94
       }
     },
     "drawer": {
@@ -85,10 +107,10 @@
       "present": true,
       "inViewport": true,
       "rect": {
-        "top": 478,
+        "top": 820,
         "left": 0,
         "width": 390,
-        "height": 29
+        "height": 24
       }
     }
   }

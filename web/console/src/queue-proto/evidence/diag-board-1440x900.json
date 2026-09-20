@@ -1,5 +1,5 @@
 {
-  "at": "2026-09-19T08:26:38.794Z",
+  "at": "2026-09-19T22:26:22.834Z",
   "dataset": {
     "key": "sample200",
     "size": 200,
@@ -13,9 +13,21 @@
     "clientWidth": 1440,
     "bodyHorizontalScroll": 0
   },
+  "geometry": {
+    "railWidth": 232,
+    "chromeHeight": 90,
+    "contentMarginLeft": null,
+    "contentMarginRight": null,
+    "mainAvailableWidth": 1208,
+    "firstViewportRows": 0,
+    "rowHeight": null,
+    "rowFontSizePx": null,
+    "colHeaderHeight": null
+  },
   "rendered": {
     "listRows": 0,
     "groupHeaders": 0,
+    "staleBadges": 14,
     "populatedColumns": 4,
     "perColumn": {
       "claimed": 10,
@@ -26,12 +38,32 @@
     "cards": 35
   },
   "controls": {
+    "rail": {
+      "present": true,
+      "inViewport": true,
+      "rect": {
+        "top": 0,
+        "left": 0,
+        "width": 232,
+        "height": 900
+      }
+    },
+    "railToggle": {
+      "present": true,
+      "inViewport": true,
+      "rect": {
+        "top": 4,
+        "left": 244,
+        "width": 63,
+        "height": 21
+      }
+    },
     "search": {
       "present": true,
       "inViewport": true,
       "rect": {
-        "top": 94,
-        "left": 12,
+        "top": 36,
+        "left": 244,
         "width": 192,
         "height": 22
       }
@@ -40,8 +72,8 @@
       "present": true,
       "inViewport": true,
       "rect": {
-        "top": 94,
-        "left": 211,
+        "top": 36,
+        "left": 443,
         "width": 96,
         "height": 22
       }
@@ -50,20 +82,10 @@
       "present": true,
       "inViewport": true,
       "rect": {
-        "top": 94,
-        "left": 315,
+        "top": 36,
+        "left": 547,
         "width": 137,
         "height": 22
-      }
-    },
-    "viewBar": {
-      "present": true,
-      "inViewport": true,
-      "rect": {
-        "top": 32,
-        "left": 0,
-        "width": 1440,
-        "height": 55
       }
     },
     "drawer": {
@@ -76,10 +98,10 @@
       "present": true,
       "inViewport": true,
       "rect": {
-        "top": 853,
-        "left": 0,
-        "width": 1440,
-        "height": 29
+        "top": 876,
+        "left": 232,
+        "width": 1208,
+        "height": 24
       }
     }
   }

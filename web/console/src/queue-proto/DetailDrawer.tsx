@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { ageDays } from "./adapter";
+import { ageDays, isStale, STALE_MIN_AGE_DAYS } from "./adapter";
 import type { Dataset, Enrichment, ProtoTask } from "./types";
 
 function safeHref(value: string): string | undefined {
@@ -73,6 +73,12 @@ export function DetailDrawer({ dataset, task, orderedIds, onClose, onNav }: Draw
       <p className="qp-source-status">
         source status: <strong>synthetic fixture</strong> — {dataset.completeness} · {dataset.completenessNote}
       </p>
+      {isStale(task, now) ? (
+        <p className="qp-stale-note" role="note">
+          ⚠ stale — non-terminal task aged ≥{STALE_MIN_AGE_DAYS}d since created_at. Age does not imply the premise is still
+          valid or safe to execute.
+        </p>
+      ) : null}
       <dl className="qp-drawer-meta">
         <dt>state</dt>
         <dd>{task.state}</dd>
@@ -87,9 +93,15 @@ export function DetailDrawer({ dataset, task, orderedIds, onClose, onNav }: Draw
         <dt>priority</dt>
         <dd>p{task.priority}</dd>
         <dt>created age</dt>
-        <dd>{createdAge === null ? <span className="qp-unknown">unknown</span> : `${createdAge}d`}</dd>
+        <dd>
+          {createdAge === null ? <span className="qp-unknown">unknown</span> : `${createdAge}d`}{" "}
+          <span className="muted">(since created_at)</span>
+        </dd>
         <dt>current-state age</dt>
-        <dd>{stateAge === null ? <span className="qp-unknown">unknown</span> : `${stateAge}d`}</dd>
+        <dd>
+          {stateAge === null ? <span className="qp-unknown">unknown</span> : `${stateAge}d`}{" "}
+          <span className="muted">(since state_entered_at)</span>
+        </dd>
         <dt>due</dt>
         <dd>
           <Val value={task.due_at} />

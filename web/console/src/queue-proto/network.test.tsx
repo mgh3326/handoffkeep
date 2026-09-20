@@ -26,7 +26,7 @@ describe("zero network I/O", () => {
     const { container } = render(<QueueProtoApp datasets={datasets} initialSet="sample200" />);
     // exercise every interactive surface
     for (const view of ["Operator", "Active", "Backlog", "All"]) {
-      fireEvent.click(screen.getByRole("button", { name: view }));
+      fireEvent.click(screen.getByRole("link", { name: view }));
     }
     fireEvent.change(screen.getByLabelText("search"), { target: { value: "drawer" } });
     fireEvent.change(screen.getByLabelText("lane filter"), { target: { value: "synth-lane-ops" } });
