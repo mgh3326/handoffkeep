@@ -20,8 +20,10 @@ function* walk(dir: string): Generator<string> {
 }
 
 describe("production isolation", () => {
-  it("prototype is NOT in the production vite entry inputs", () => {
+  it("the prototype is not wired into the production vite entry inputs", () => {
     const viteConfig = readFileSync(join(root, "vite.config.ts"), "utf8");
+    // /ui/queue serves the real board app; queue-proto stays a preview-only
+    // bundle and must never appear in the production entry inputs.
     expect(viteConfig).not.toContain("queue-proto");
     // production inputs stay exactly fleet + board
     expect(viteConfig).toContain('fleet: resolve(root, "src/main.tsx")');

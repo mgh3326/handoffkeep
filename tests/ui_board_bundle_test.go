@@ -113,6 +113,27 @@ func consoleContractsError(tree map[string][]byte) error {
 	return nil
 }
 
+// consoleSiblingEntriesError checks that a build kept every pre-existing
+// console entry output. Adding or repointing an entry must never delete a
+// sibling's emitted file.
+func consoleSiblingEntriesError(tree map[string][]byte) error {
+	for _, name := range []string{"fleet.js", "fleet.css", "board.js", "board.css"} {
+		if len(tree[name]) == 0 {
+			return fmt.Errorf("sibling entry output %s missing", name)
+		}
+	}
+	shared := 0
+	for name, body := range tree {
+		if strings.HasPrefix(name, "shared-") && strings.HasSuffix(name, ".js") && len(body) > 0 {
+			shared++
+		}
+	}
+	if shared == 0 {
+		return errors.New("build emitted no shared-*.js chunk")
+	}
+	return nil
+}
+
 func consoleProjectDir(t *testing.T) string {
 	t.Helper()
 	_, file, _, ok := runtime.Caller(0)
@@ -233,6 +254,9 @@ func TestConsoleCleanBuildMatchesCommitted(t *testing.T) {
 	}
 	if err := consoleContractsError(emitted); err != nil {
 		t.Fatalf("clean multi-entry build lost an entry contract: %v", err)
+	}
+	if err := consoleSiblingEntriesError(emitted); err != nil {
+		t.Fatalf("clean build dropped a sibling entry: %v", err)
 	}
 }
 

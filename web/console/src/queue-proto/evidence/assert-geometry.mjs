@@ -49,10 +49,14 @@ for (const file of files) {
   }
 
   // every viewport: core controls must remain reachable (the rail may be
-  // collapsed to its toggle — presence of the toggle is the invariant)
-  check(file, "rail toggle reachable", controls.railToggle?.present === true && controls.railToggle.inViewport !== false, "toggle");
-  check(file, "search reachable", controls.search?.present === true && controls.search.inViewport !== false, "search");
-  check(file, "layout toggle reachable", controls.layoutToggle?.present === true && controls.layoutToggle.inViewport !== false, "layout");
+  // collapsed to its toggle — presence of the toggle is the invariant). A
+  // control also needs a positive-size rect: a zero-area element matched at
+  // the viewport origin is not reachable no matter what inViewport says.
+  const reachable = (c) =>
+    c?.present === true && c.inViewport !== false && c.rect != null && c.rect.width > 0 && c.rect.height > 0;
+  check(file, "rail toggle reachable", reachable(controls.railToggle), `toggle ${JSON.stringify(controls.railToggle?.rect)}`);
+  check(file, "search reachable", reachable(controls.search), `search ${JSON.stringify(controls.search?.rect)}`);
+  check(file, "layout toggle reachable", reachable(controls.layoutToggle), `layout ${JSON.stringify(controls.layoutToggle?.rect)}`);
 }
 
 console.log(failures === 0 ? "ALL GEOMETRY ASSERTIONS PASSED" : `${failures} geometry assertion(s) FAILED`);

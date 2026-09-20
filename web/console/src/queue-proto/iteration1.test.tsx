@@ -81,6 +81,27 @@ describe("view rail — semantic navigation, not tabs", () => {
     expect(document.getElementById("qp-rail")!.textContent).not.toContain("63+");
   });
 
+  it("modified and non-primary link clicks keep native behaviour (no preventDefault)", () => {
+    render(<QueueProtoApp datasets={datasets} initialSet="sample200" />);
+    const all = screen.getByRole("link", { name: "All" });
+    // fireEvent.click returns false when a handler called preventDefault —
+    // true means the native path (new tab/window etc.) was left intact.
+    for (const init of [
+      { metaKey: true },
+      { ctrlKey: true },
+      { shiftKey: true },
+      { altKey: true },
+      { button: 1 }, // middle click
+    ]) {
+      expect(fireEvent.click(all, init)).toBe(true);
+      // native path was left alone — the app state must not have switched
+      expect(screen.getByRole("link", { name: "Backlog" }).getAttribute("aria-current")).toBe("page");
+    }
+    // unmodified primary click is still intercepted in place
+    expect(fireEvent.click(all, { button: 0 })).toBe(false);
+    expect(all.getAttribute("aria-current")).toBe("page");
+  });
+
   it("sidebar collapses via the header toggle and reopens", () => {
     render(<QueueProtoApp datasets={datasets} initialSet="sample200" />);
     const root = document.querySelector(".qp-root")!;
@@ -294,7 +315,8 @@ describe("production isolation — adversarial: proto/measurement leak must fail
     const entries = ["main.tsx", "board.tsx"].map((f) => resolve(srcRoot, f));
     const seen = new Set<string>();
     const stack = [...entries];
-    const importRe = /(?:import|export)[^'"]*?from\s+["']([^"']+)["']|import\s*\(\s*["']([^"']+)["']/g;
+    const importRe =
+      /(?:import|export)[^'"]*?from\s+["']([^"']+)["']|import\s*\(\s*["']([^"']+)["']|import\s*["']([^"']+)["']/g;
     while (stack.length > 0) {
       const file = stack.pop()!;
       if (seen.has(file) || !existsSync(file)) {
@@ -303,13 +325,16 @@ describe("production isolation — adversarial: proto/measurement leak must fail
       seen.add(file);
       const text = readFileSync(file, "utf8");
       for (const m of text.matchAll(importRe)) {
-        const spec = m[1] ?? m[2];
+        const spec = m[1] ?? m[2] ?? m[3];
         if (!spec?.startsWith(".")) {
           continue; // package imports can't reach queue-proto
         }
         const base = resolve(dirname(file), spec);
         for (const cand of [base, `${base}.ts`, `${base}.tsx`, `${base}.css`, `${base}/index.ts`, `${base}/index.tsx`]) {
-          if (existsSync(cand) && /\.(ts|tsx)$/.test(cand)) {
+          // bare side-effect imports (e.g. `import "./queue-proto/proto.css"`)
+          // resolve to non-code leaves — they are still reachable modules and
+          // still count as a leak.
+          if (existsSync(cand) && /\.(ts|tsx|css)$/.test(cand)) {
             stack.push(cand);
           }
         }
