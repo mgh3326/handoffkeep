@@ -226,7 +226,7 @@ func normalizeTaskArgs(args []string) ([]string, error) {
 
 func tasksCmd(args []string, out io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: tasks add|list|claim|next|transition|show")
+		return errors.New("usage: tasks add|list|export|claim|next|transition|show")
 	}
 	fs := flag.NewFlagSet("tasks "+args[0], flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -323,6 +323,31 @@ func tasksCmd(args []string, out io.Writer) error {
 			return err
 		}
 		return printJSON(out, map[string]any{"tasks": xs})
+	case "export":
+		if fs.NArg() != 0 {
+			return errors.New("tasks export takes flags only")
+		}
+		// An unset --limit leaves the route's own default in force rather than
+		// silently exporting fewer rows. An explicitly set --limit outside the
+		// route's range is rejected here so an invalid export never leaves the
+		// process.
+		exportLimit := 0
+		limitSet := false
+		fs.Visit(func(item *flag.Flag) {
+			if item.Name == "limit" {
+				limitSet = true
+				exportLimit = *limit
+			}
+		})
+		if limitSet && (exportLimit < 1 || exportLimit > store.ExportLimitMax) {
+			return fmt.Errorf("invalid_export_query: limit must be between 1 and %d", store.ExportLimitMax)
+		}
+		doc, err := c.ExportTasks(ctx, *lane, *state, *parentLane, exportLimit)
+		if err != nil {
+			return err
+		}
+		_, err = out.Write(doc)
+		return err
 	case "claim":
 		id, err := parseID()
 		if err != nil {
@@ -396,7 +421,7 @@ func tasksCmd(args []string, out io.Writer) error {
 		}
 		return printJSON(out, x)
 	default:
-		return errors.New("usage: tasks add|list|claim|next|transition|show")
+		return errors.New("usage: tasks add|list|export|claim|next|transition|show")
 	}
 }
 

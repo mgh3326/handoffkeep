@@ -28,6 +28,7 @@ handoffkeep tasks transition 42 --to in_progress --note "started"
 handoffkeep tasks transition 42 --to needs_decision --question "Which interface should own this?"
 handoffkeep tasks list --parent-lane lane-a --state needs_decision
 handoffkeep tasks show 42
+handoffkeep tasks export [--lane L --state S --parent-lane P --limit N]
 ```
 
 `add` accepts `--parent-lane`, `--pr`, `--head-sha`, `--report-path`, and
@@ -73,6 +74,11 @@ The HTTP API uses the usual bearer token: `POST /v1/tasks`, `GET /v1/tasks`,
 `GET /v1/tasks/{id}`, `POST /v1/tasks/{id}/claim`, and
 `POST /v1/tasks/{id}/transition`. `POST /v1/tasks/next` supports the CLI's
 atomic `next` operation. Invalid state changes and competing claims return 409.
+`GET /v1/tasks/export` returns one consistent snapshot of the queue — a
+single bounded JSON document carrying the snapshot ID, watermarks, filtered
+counts, integrity digests, and the task rows — read inside one repeatable-read
+read-only transaction. `handoffkeep tasks export` prints the document
+unchanged; see docs/contract.md for the full envelope and digest contract.
 
 ### Optional hk → Linear synchronization
 
