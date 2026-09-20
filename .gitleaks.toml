@@ -1,6 +1,21 @@
 # 테스트 픽스처 전용 가짜 키(2026-09-04): 이 단위 테스트 파일의
 # 합성 credential-shaped 입력만 허용한다. 실제 소스와 다른 경로는 검사한다.
+[extend]
+useDefault = true
+
+# baseline(2026-09-21, gitleaks 8.30.1, useDefault + allowlist 없음)에서
+# 측정된 finding 2건에 1:1로 대응하는 최소 allowlist.
+# paths 는 의도적으로 쓰지 않는다: 디렉터리 스캔(--no-git)의 파일 필터는
+# condition 과 무관하게 paths 만으로 파일을 통째로 건너뛰므로,
+# 경로를 넣으면 이 파일이 다시 면제된다(지금 고치는 결함과 같은 종류).
+# finding 의 match 텍스트가 아래 regexes 중 하나와 일치할 때만 제외된다.
 [allowlist]
-paths = [
-  '''internal/guard/guard_test\.go''',
+description = "synthetic credential fixtures in internal/guard/guard_test.go"
+regexTarget = "match"
+regexes = [
+  # slack-bot-token @ guard_test.go:14 — 소스에 연속 존재하는 합성 리터럴
+  '''xoxb-1234567890-1234567890-''',
+  # generic-api-key @ guard_test.go:13 — "github_token", 키워드 뒤에 오는
+  # 같은 xoxb 합성 리터럴을 secret 으로 오인한 finding 의 match 텍스트
+  '''github_token",''',
 ]
