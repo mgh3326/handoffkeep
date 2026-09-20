@@ -20,12 +20,10 @@ function* walk(dir: string): Generator<string> {
 }
 
 describe("production isolation", () => {
-  it("prototype is NOT in the production vite entry inputs", () => {
+  it("the production board entry is the queue prototype; fleet is unchanged", () => {
     const viteConfig = readFileSync(join(root, "vite.config.ts"), "utf8");
-    expect(viteConfig).not.toContain("queue-proto");
-    // production inputs stay exactly fleet + board
+    expect(viteConfig).toContain('board: resolve(root, "src/queue-proto/main.tsx")');
     expect(viteConfig).toContain('fleet: resolve(root, "src/main.tsx")');
-    expect(viteConfig).toContain('board: resolve(root, "src/board.tsx")');
   });
 
   it("no production source imports or references queue-proto", () => {

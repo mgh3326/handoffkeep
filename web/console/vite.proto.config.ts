@@ -5,9 +5,11 @@ import { fileURLToPath } from "node:url";
 
 const root = dirname(fileURLToPath(import.meta.url));
 
-// Prototype-only build. Emits to gitignored dist-proto/ and is never wired
-// into vite.config.ts rollupOptions.input — the production build's entry
-// set (fleet.js, board.js, fleet.css, board.css, shared-*.js) is unchanged.
+// Standalone preview build for the queue prototype. Emits to gitignored
+// dist-proto/ and is used by the evidence harness (capture.mjs,
+// assert-rail-pointer.mjs) via `vite preview`. The same entry module is also
+// the production `board` input in vite.config.ts — the committed
+// board.js/board.css it emits are what /ui/queue actually serves.
 export default defineConfig({
   plugins: [react()],
   base: "/",

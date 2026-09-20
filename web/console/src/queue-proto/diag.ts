@@ -6,7 +6,10 @@ function bounds(selector: string): { present: boolean; inViewport?: boolean; rec
     return { present: false };
   }
   const r = el.getBoundingClientRect();
-  const inViewport = r.bottom >= 0 && r.right >= 0 && r.top <= window.innerHeight && r.left <= window.innerWidth;
+  // A zero-area element at the viewport origin satisfies the raw edge test
+  // without occupying a single pixel — it can neither be seen nor hit, so it
+  // is not "in viewport".
+  const inViewport = r.width > 0 && r.height > 0 && r.bottom >= 0 && r.right >= 0 && r.top <= window.innerHeight && r.left <= window.innerWidth;
   return { present: true, inViewport, rect: { top: Math.round(r.top), left: Math.round(r.left), width: Math.round(r.width), height: Math.round(r.height) } };
 }
 

@@ -28,6 +28,10 @@ var allowedAbsoluteURLs = []string{
 	"http://www.w3.org/2000/svg",
 	"http://www.w3.org/1998/Math/MathML",
 	"http://www.w3.org/1999/xhtml",
+	// RFC-2606 reserved TLD used by the queue prototype's synthetic fixtures
+	// (see web/console/src/queue-proto/sanitize.ts) — structurally
+	// non-routable, so it can never become an external load.
+	"https://example.invalid/",
 }
 
 func consoleDir(t *testing.T) string {

@@ -100,7 +100,9 @@ func consoleContractsError(tree map[string][]byte) error {
 		return errors.New("fleet.js lost the /ui/api/fleet contract")
 	}
 	board := string(tree["board.js"])
-	for _, want := range []string{"/ui/api/board/tasks", "/ui/api/policy/active"} {
+	// The /ui/queue bundle is the queue prototype: it must carry its mount
+	// points, not the old board app's BFF API paths.
+	for _, want := range []string{"queue-proto-root", "board-root"} {
 		if !strings.Contains(board, want) {
 			return fmt.Errorf("board.js missing %q", want)
 		}
@@ -109,6 +111,27 @@ func consoleContractsError(tree map[string][]byte) error {
 		if strings.Contains(body, "/v1/nodes") || strings.Contains(body, "/v1/jobs") || strings.Contains(body, fleetTestSecret) {
 			return fmt.Errorf("%s contains a hub path or secret", name)
 		}
+	}
+	return nil
+}
+
+// consoleSiblingEntriesError checks that a build kept every pre-existing
+// console entry output. Adding or repointing an entry must never delete a
+// sibling's emitted file.
+func consoleSiblingEntriesError(tree map[string][]byte) error {
+	for _, name := range []string{"fleet.js", "fleet.css", "board.js", "board.css"} {
+		if len(tree[name]) == 0 {
+			return fmt.Errorf("sibling entry output %s missing", name)
+		}
+	}
+	shared := 0
+	for name, body := range tree {
+		if strings.HasPrefix(name, "shared-") && strings.HasSuffix(name, ".js") && len(body) > 0 {
+			shared++
+		}
+	}
+	if shared == 0 {
+		return errors.New("build emitted no shared-*.js chunk")
 	}
 	return nil
 }
@@ -234,6 +257,9 @@ func TestConsoleCleanBuildMatchesCommitted(t *testing.T) {
 	if err := consoleContractsError(emitted); err != nil {
 		t.Fatalf("clean multi-entry build lost an entry contract: %v", err)
 	}
+	if err := consoleSiblingEntriesError(emitted); err != nil {
+		t.Fatalf("clean build dropped a sibling entry: %v", err)
+	}
 }
 
 // Each destructive mutant must turn the drift gate RED. Tree mutants check
@@ -289,7 +315,7 @@ func TestConsoleBuildDriftMutantsTurnRed(t *testing.T) {
 	// not silently shrink to the fleet entry.
 	t.Run("config-single-entry", func(t *testing.T) {
 		config := writeMutantConfig(t, projectDir, "single-entry", func(source string) string {
-			return strings.Replace(source, "\n        board: resolve(root, \"src/board.tsx\"),", "", 1)
+			return strings.Replace(source, "\n        board: resolve(root, \"src/queue-proto/main.tsx\"),", "", 1)
 		})
 		outDir := filepath.Join(t.TempDir(), "out")
 		viteBuild(t, npm, projectDir, config, outDir)

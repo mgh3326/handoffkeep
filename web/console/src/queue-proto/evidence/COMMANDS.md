@@ -62,9 +62,13 @@ rail through `Input.dispatchMouseEvent` — the real hit-test path, not DOM
 pointer click on `#qp-rail-toggle` opens the rail; while open,
 `document.elementFromPoint` at the toggle's center still returns the toggle
 (the fixed `.qp-rail` overlay starts at `--qp-head-h`, below the header, so
-it never covers the only close control); the toggle rect does not overlap
-the first `.qp-rail-h` content rect; and a second pointer click closes the
-rail. Exits nonzero on any failure.
+it never covers the only close control); the `.qp-head` and `.qp-rail-h`
+anchors must be present and non-empty — a missing anchor is a failure, never
+a vacuous pass; the rail's top edge must clear the header's bottom edge
+(`rail_rect.top >= head_rect.bottom`, the repair invariant asserted
+directly); the toggle rect does not overlap the first `.qp-rail-h` content
+rect; and a second pointer click closes the rail. Exits nonzero on any
+failure.
 
 ## Manual equivalents
 

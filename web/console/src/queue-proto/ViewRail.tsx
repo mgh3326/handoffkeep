@@ -48,6 +48,12 @@ export function ViewRail({ dataset, view, counts, views, onSelectView, onApplyVi
             className={`qp-rail-link${view === v ? " on" : ""}`}
             aria-current={view === v ? "page" : undefined}
             onClick={(event) => {
+              // Modified (Cmd/Ctrl/Shift/Alt) and non-primary clicks keep
+              // their native behaviour — open-in-new-tab/window, etc. Only an
+              // unmodified primary click is intercepted for in-place state.
+              if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) {
+                return;
+              }
               event.preventDefault();
               onSelectView(v);
             }}

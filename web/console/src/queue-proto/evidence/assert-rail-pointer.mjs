@@ -125,20 +125,23 @@ async function pointerClick(x, y) {
 const MEASURE = `(() => {
   const toggle = document.getElementById("qp-rail-toggle");
   const rail = document.getElementById("qp-rail");
+  const head = document.querySelector(".qp-head");
   const firstContent = rail?.querySelector(".qp-rail-h");
   const tr = toggle?.getBoundingClientRect();
   const cx = tr ? tr.left + tr.width / 2 : 0;
   const cy = tr ? tr.top + tr.height / 2 : 0;
   const at = tr ? document.elementFromPoint(cx, cy) : null;
   const rr = rail?.getBoundingClientRect();
+  const hr = head?.getBoundingClientRect();
   const fr = firstContent?.getBoundingClientRect();
-  const rect = (r) => (r ? { left: r.left, top: r.top, width: r.width, height: r.height } : null);
+  const rect = (r) => (r ? { left: r.left, top: r.top, width: r.width, height: r.height, right: r.right, bottom: r.bottom } : null);
   return {
     aria_expanded: toggle?.getAttribute("aria-expanded") ?? null,
     toggle_rect: rect(tr),
     toggle_center: { x: cx, y: cy },
     element_at_toggle_center: at ? { tag: at.tagName, id: at.id || null, class: at.className || null, is_toggle: at.closest("#qp-rail-toggle") !== null } : null,
     rail_rect: rect(rr),
+    head_rect: rect(hr),
     first_rail_content_rect: rect(fr),
     overlap: !!(tr && fr && tr.left < fr.right && tr.right > fr.left && tr.top < fr.bottom && tr.bottom > fr.top),
   };
@@ -172,9 +175,26 @@ check(
   open.element_at_toggle_center?.is_toggle === true,
   `elementFromPoint=${JSON.stringify(open.element_at_toggle_center)}`,
 );
+// Anchor checks must see their own subject: a missing .qp-rail-h or .qp-head
+// is a failure, never a vacuous pass.
+check(
+  "header anchor present",
+  open.head_rect !== null && open.head_rect.height > 0,
+  `head=${JSON.stringify(open.head_rect)}`,
+);
+check(
+  "first rail content anchor present",
+  open.first_rail_content_rect !== null,
+  `first=${JSON.stringify(open.first_rail_content_rect)}`,
+);
+check(
+  "rail top clears the header bottom",
+  open.rail_rect !== null && open.head_rect !== null && open.rail_rect.top >= open.head_rect.bottom,
+  `rail.top=${open.rail_rect?.top} head.bottom=${open.head_rect?.bottom}`,
+);
 check(
   "toggle rect does not overlap first rail content",
-  open.overlap === false,
+  open.toggle_rect !== null && open.first_rail_content_rect !== null && open.overlap === false,
   `toggle=${JSON.stringify(open.toggle_rect)} first=${JSON.stringify(open.first_rail_content_rect)}`,
 );
 
