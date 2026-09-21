@@ -419,13 +419,16 @@ type AttachmentUsage struct {
 	TotalBytes int64  `json:"bytes_total"`
 }
 type SearchResult struct {
-	Scope     string    `json:"scope"`
-	Key       string    `json:"key"`
-	Session   string    `json:"session"`
-	Kind      string    `json:"kind"`
-	Title     string    `json:"title"`
-	Snippet   string    `json:"snippet"`
-	Refs      Refs      `json:"refs,omitempty"`
+	Scope   string `json:"scope"`
+	Key     string `json:"key"`
+	Session string `json:"session"`
+	Kind    string `json:"kind"`
+	Title   string `json:"title"`
+	Snippet string `json:"snippet"`
+	Refs    Refs   `json:"refs,omitempty"`
+	// Truncated is set on every row of a page that was cut at the result cap,
+	// so a truncated page is never presented as the complete result set.
+	Truncated bool      `json:"truncated,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 }
 
@@ -2075,8 +2078,11 @@ func (s *Store) AttachmentObjectCount(ctx context.Context) (int64, error) {
 	return n, s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM attachments`).Scan(&n)
 }
 func (s *Store) Search(ctx context.Context, q, scope, session string, limit int) ([]SearchResult, error) {
-	if strings.TrimSpace(q) == "" || len(q) > 512 || !validText(session, 128) || (scope != "all" && scope != "ctx" && scope != "docs" && scope != "memory") {
+	if strings.TrimSpace(q) == "" || len(q) > 512 || !validText(session, 128) || (scope != "all" && scope != "ctx" && scope != "docs" && scope != "memory" && scope != "tasks") {
 		return nil, errors.New("invalid search")
+	}
+	if scope == "tasks" {
+		return s.searchTasks(ctx, q, session, limit)
 	}
 	if limit < 1 {
 		limit = 20
@@ -2111,5 +2117,157 @@ func (s *Store) Search(ctx context.Context, q, scope, session string, limit int)
 		}
 		out = append(out, x)
 	}
-	return out, rows.Err()
+	if e = rows.Err(); e != nil {
+		return nil, e
+	}
+	if scope == "all" || scope == "docs" {
+		if e = s.linkTaskDocs(ctx, out); e != nil {
+			return nil, e
+		}
+	}
+	return out, nil
+}
+
+// linkTaskDocs annotates docs-scope hits with the ids of tasks whose body_doc
+// points at that document.  tasks.body_doc is additive DDL shipped by a
+// parallel task; when the column is absent this is a no-op so search results
+// stay byte-identical to before.
+func (s *Store) linkTaskDocs(ctx context.Context, out []SearchResult) error {
+	var hasBodyDoc bool
+	if e := s.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND column_name = 'body_doc' AND table_name = 'tasks')`).Scan(&hasBodyDoc); e != nil {
+		return fmt.Errorf("search task docs probe: %w", e)
+	}
+	if !hasBodyDoc {
+		return nil
+	}
+	keys := []string{}
+	for _, x := range out {
+		if x.Scope == "docs" {
+			keys = append(keys, x.Key)
+		}
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+	rows, e := s.pool.Query(ctx, `SELECT id, body_doc FROM tasks WHERE body_doc = ANY($1)`, keys)
+	if e != nil {
+		return fmt.Errorf("search task docs: %w", e)
+	}
+	defer rows.Close()
+	byDoc := map[string][]string{}
+	for rows.Next() {
+		var id int64
+		var key string
+		if e = rows.Scan(&id, &key); e != nil {
+			return e
+		}
+		byDoc[key] = append(byDoc[key], strconv.FormatInt(id, 10))
+	}
+	if e = rows.Err(); e != nil {
+		return e
+	}
+	for i := range out {
+		if out[i].Scope == "docs" && len(byDoc[out[i].Key]) > 0 {
+			if out[i].Refs == nil {
+				out[i].Refs = Refs{}
+			}
+			out[i].Refs["tasks"] = byDoc[out[i].Key]
+		}
+	}
+	return nil
+}
+
+var taskIDQuery = regexp.MustCompile(`^#?([0-9]+)$`)
+
+// searchTasks implements scope "tasks": title FTS/ILIKE over the tasks table
+// (all states, merged and dropped included) plus task_comments bodies when
+// that table exists.  "#<n>" and bare-number queries are answered by exact id
+// lookup first; the exact match always leads the page and a missing id yields
+// an empty result set.  Default page is 20, hard cap 50; a truncated page sets
+// Truncated on every returned row.  The session argument filters on lane.
+func (s *Store) searchTasks(ctx context.Context, q, lane string, limit int) ([]SearchResult, error) {
+	if limit < 1 {
+		limit = 20
+	}
+	if limit > 50 {
+		limit = 50
+	}
+	like := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(q)
+	var exactID int64 = -1
+	if m := taskIDQuery.FindStringSubmatch(strings.TrimSpace(q)); m != nil {
+		id, e := strconv.ParseInt(m[1], 10, 64)
+		if e != nil {
+			return []SearchResult{}, nil
+		}
+		exactID = id
+	}
+	refsExpr := `jsonb_strip_nulls(jsonb_build_object('id',t.id::text,'state',t.state,'lane',t.lane,'priority',t.priority::text,'pr',t.refs->>'pr','head_sha',t.refs->>'head_sha','report_path',t.refs->>'report_path'))`
+	titleMatch := `(to_tsvector('simple',t.title) @@ plainto_tsquery('simple',$2) OR t.title ILIKE '%'||$4||'%' ESCAPE '\')`
+	out := []SearchResult{}
+	if exactID >= 0 {
+		row := s.pool.QueryRow(ctx, `SELECT t.id::text,t.lane,t.kind,t.title,`+refsExpr+`,t.created_at FROM tasks t WHERE t.id=$2 AND ($1='' OR t.lane=$1)`, lane, exactID)
+		var x SearchResult
+		var refs []byte
+		switch e := row.Scan(&x.Key, &x.Session, &x.Kind, &x.Title, &refs, &x.CreatedAt); {
+		case e == nil:
+			if e = json.Unmarshal(refs, &x.Refs); e != nil {
+				return nil, e
+			}
+			x.Scope, x.Snippet = "tasks", x.Title
+			out = append(out, x)
+		case errors.Is(e, pgx.ErrNoRows):
+			return out, nil
+		default:
+			return nil, fmt.Errorf("search tasks exact: %w", e)
+		}
+	}
+	var comments bool
+	if e := s.pool.QueryRow(ctx, `SELECT to_regclass('task_comments') IS NOT NULL`).Scan(&comments); e != nil {
+		return nil, fmt.Errorf("search tasks probe: %w", e)
+	}
+	parts := []string{`SELECT 'tasks' scope,t.id::text key,t.lane session,t.kind,t.title,` +
+		`COALESCE(NULLIF(ts_headline('simple',t.title,plainto_tsquery('simple',$2),'MaxWords=24,MinWords=8'),''),left(t.title,160)) snippet,` +
+		refsExpr + ` refs,t.created_at,0 match_rank FROM tasks t WHERE ($1='' OR t.lane=$1) AND ` + titleMatch}
+	if comments {
+		// DISTINCT ON keeps one row per task no matter how many comments match —
+		// otherwise a comment-heavy task would consume the LIMIT+1 window and the
+		// page could report "complete" while other tasks went unfetched.
+		parts = append(parts, `(SELECT DISTINCT ON (t.id) 'tasks' scope,t.id::text key,t.lane session,t.kind,t.title,`+
+			`COALESCE(NULLIF(ts_headline('simple',c.body,plainto_tsquery('simple',$2),'MaxWords=24,MinWords=8'),''),left(c.body,160)) snippet,`+
+			refsExpr+` refs,t.created_at,1 match_rank FROM task_comments c JOIN tasks t ON t.id=c.task_id WHERE ($1='' OR t.lane=$1) AND (to_tsvector('simple',c.body) @@ plainto_tsquery('simple',$2) OR c.body ILIKE '%'||$4||'%' ESCAPE '\') AND NOT `+titleMatch+` ORDER BY t.id, c.created_at DESC, c.id DESC)`)
+	}
+	rows, e := s.pool.Query(ctx, `SELECT scope,key,session,kind,title,snippet,refs,created_at FROM (`+strings.Join(parts, " UNION ALL ")+") r ORDER BY r.match_rank,r.created_at DESC LIMIT $3", lane, q, limit+1, like)
+	if e != nil {
+		return nil, fmt.Errorf("search tasks: %w", e)
+	}
+	defer rows.Close()
+	seen := map[string]bool{}
+	for _, x := range out {
+		seen[x.Key] = true
+	}
+	for rows.Next() {
+		var x SearchResult
+		var refs []byte
+		if e = rows.Scan(&x.Scope, &x.Key, &x.Session, &x.Kind, &x.Title, &x.Snippet, &refs, &x.CreatedAt); e != nil {
+			return nil, e
+		}
+		if e = json.Unmarshal(refs, &x.Refs); e != nil {
+			return nil, e
+		}
+		if seen[x.Key] {
+			continue
+		}
+		seen[x.Key] = true
+		out = append(out, x)
+	}
+	if e = rows.Err(); e != nil {
+		return nil, e
+	}
+	if len(out) > limit {
+		out = out[:limit]
+		for i := range out {
+			out[i].Truncated = true
+		}
+	}
+	return out, nil
 }
