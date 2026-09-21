@@ -615,6 +615,17 @@ func ctxCmd(args []string, out io.Writer) error {
 		if len(searchQuery) != 1 {
 			return errors.New("ctx search requires query")
 		}
+		if *scope == "tasks" {
+			limitSet := false
+			fs.Visit(func(f *flag.Flag) {
+				if f.Name == "limit" {
+					limitSet = true
+				}
+			})
+			if !limitSet {
+				*limit = 20
+			}
+		}
 		v, e := c.Search(ctx, searchQuery[0], *scope, *session, *limit)
 		if e != nil {
 			return e
