@@ -69,7 +69,7 @@ func TestUIBoardAuthBoundary(t *testing.T) {
 	defer h.Close()
 	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
 
-	for _, path := range []string{"/ui/api/board/tasks", "/ui/api/board/tasks/1", "/ui/api/policy/active", "/ui/queue"} {
+	for _, path := range []string{"/ui/api/board/tasks", "/ui/api/board/tasks/1", "/ui/api/policy/active", "/ui/queue", "/ui/tasks/1"} {
 		response := uiRequest(t, h.Client(), http.MethodGet, h.URL+path, "", "")
 		if response.StatusCode != http.StatusUnauthorized || responseText(t, response) != "" {
 			t.Fatalf("%s unauthenticated status=%d", path, response.StatusCode)
@@ -96,11 +96,13 @@ func TestUIBoardAuthBoundary(t *testing.T) {
 		}
 		response.Body.Close()
 	}
-	response := p3Request(t, service.Client(), http.MethodGet, service.URL+"/ui/queue", serviceAssertion, nil, "")
-	if response.StatusCode != http.StatusForbidden {
-		t.Fatalf("service /ui/queue status=%d", response.StatusCode)
+	for _, path := range []string{"/ui/queue", "/ui/tasks/1"} {
+		response := p3Request(t, service.Client(), http.MethodGet, service.URL+path, serviceAssertion, nil, "")
+		if response.StatusCode != http.StatusForbidden {
+			t.Fatalf("service %s status=%d", path, response.StatusCode)
+		}
+		response.Body.Close()
 	}
-	response.Body.Close()
 }
 
 func TestUIBoardPageCSPAndNoSecret(t *testing.T) {
@@ -135,6 +137,50 @@ func TestUIBoardPageCSPAndNoSecret(t *testing.T) {
 		}
 		assertNoSecret(t, body, response.Header, fleetTestSecret, "http://hub.internal:9000")
 	}
+}
+
+// The /ui/tasks/<id> deep-link page is a plain UI route: authenticated GET
+// renders the same board mount the queue uses, HTML is never cached, and a
+// malformed id is a 400 — never a silently different page.
+func TestUITaskPageRoute(t *testing.T) {
+	s := uiStore(t)
+	fixture := newUIJWTFixture(t)
+	h := newUITestServer(t, s, fixture, "", "", 0)
+	defer h.Close()
+	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
+
+	response := uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/tasks/42", assertion, "")
+	body := responseText(t, response)
+	if response.StatusCode != http.StatusOK || !strings.Contains(body, `id="board-root"`) || !strings.Contains(body, "/ui/static/console/board.js") {
+		t.Fatalf("task page status=%d body=%q", response.StatusCode, body)
+	}
+	if response.Header.Get("Cache-Control") != "no-cache" {
+		t.Fatalf("task page cache-control=%q", response.Header.Get("Cache-Control"))
+	}
+	if response.Header.Get("Content-Security-Policy") != ui.ConsoleCSP {
+		t.Fatalf("task page csp=%q", response.Header.Get("Content-Security-Policy"))
+	}
+	for _, path := range []string{"/ui/tasks/abc", "/ui/tasks/-1", "/ui/tasks/0", "/ui/tasks/01", "/ui/tasks/9999999999999999", "/ui/tasks/42/extra"} {
+		response = uiRequest(t, h.Client(), http.MethodGet, h.URL+path, assertion, "")
+		if response.StatusCode != http.StatusBadRequest {
+			t.Fatalf("%s status=%d, want 400", path, response.StatusCode)
+		}
+		response.Body.Close()
+	}
+
+	// ?task= deep links on the queue page get the same shape check.
+	for _, query := range []string{"task=abc", "task=-1", "task=0", "task=%3Cscript%3E", "task=9999999999999999"} {
+		response = uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/queue?"+query, assertion, "")
+		if response.StatusCode != http.StatusBadRequest {
+			t.Fatalf("/ui/queue?%s status=%d, want 400", query, response.StatusCode)
+		}
+		response.Body.Close()
+	}
+	response = uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/queue?task=42&view=all", assertion, "")
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("/ui/queue?task=42 status=%d", response.StatusCode)
+	}
+	response.Body.Close()
 }
 
 func TestUIBoardTasksPagination(t *testing.T) {

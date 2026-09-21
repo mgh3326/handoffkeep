@@ -1,5 +1,5 @@
 import { VirtualList } from "./VirtualList";
-import { RowFields } from "./TaskRow";
+import { CardFields } from "./TaskRow";
 import type { Dataset, ProtoState, ProtoTask } from "./types";
 
 type BoardViewProps = {
@@ -13,7 +13,7 @@ type BoardViewProps = {
 export function BoardView({ dataset, columns, density, selectedId, onOpen }: BoardViewProps) {
   const cardHeight = density === "compact" ? 76 : 96;
   return (
-    <div className="qp-board">
+    <div className={`qp-board ${density}`}>
       {columns.map((col) => (
         <section key={col.state} className="qp-col" data-state={col.state}>
           <h3 className="qp-col-head">
@@ -36,7 +36,7 @@ export function BoardView({ dataset, columns, density, selectedId, onOpen }: Boa
                   }
                 }}
               >
-                <RowFields task={task} now={dataset.generatedAt} />
+                <CardFields task={task} now={dataset.generatedAt} />
               </button>
             )}
           />

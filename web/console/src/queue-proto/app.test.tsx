@@ -61,6 +61,22 @@ describe("QueueProtoApp", () => {
     expect(rowIds(container, ".qp-row")).toEqual(listSet);
   });
 
+  it("board cards render the reduced field set sized for the fixed row height", () => {
+    const { container } = render(<QueueProtoApp datasets={datasets} initialSet="sample200" />);
+    fireEvent.click(screen.getByRole("link", { name: "All" }));
+    fireEvent.click(within(container.querySelector("#qp-layout-toggle")!).getByRole("button", { name: "board" }));
+    const card = container.querySelector(".qp-card")!;
+    // Identity lines only: one age, no state cell — the column head already
+    // names the state, and every extra line is clipped by the fixed-height
+    // virtual row. Real fit is measured by evidence/assert-card-fit.mjs.
+    expect(card.querySelectorAll(".qp-age").length).toBe(1);
+    expect(card.querySelector(".qp-state")).toBeNull();
+    expect(card.querySelector(".qp-title")).toBeTruthy();
+    expect(card.querySelector(".qp-lane")).toBeTruthy();
+    // board is pushed into the URL — restore list so later tests unpolluted
+    fireEvent.click(within(container.querySelector("#qp-layout-toggle")!).getByRole("button", { name: "list" }));
+  });
+
   it("applied filters show as chips and clear", () => {
     const { container } = render(<QueueProtoApp datasets={datasets} initialSet="sample200" />);
     fireEvent.change(screen.getByLabelText("lane filter"), { target: { value: "synth-lane-ops" } });

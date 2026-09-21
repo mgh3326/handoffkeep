@@ -3,10 +3,21 @@ import type { BoardDetail, BoardTask, BoardTasksResponse, PolicyResponse } from 
 const PAGE_LIMIT = 500;
 const MAX_TASKS = 5000;
 
+/** HTTP failure with the status preserved — callers distinguish a missing
+ * task (404 → "없음") from a transient error without parsing the message. */
+export class HttpError extends Error {
+  readonly status: number;
+  constructor(status: number) {
+    super(`request failed: ${status}`);
+    this.name = "HttpError";
+    this.status = status;
+  }
+}
+
 async function getJSON<T>(path: string): Promise<T> {
   const response = await fetch(path);
   if (!response.ok) {
-    throw new Error(`request failed: ${response.status}`);
+    throw new HttpError(response.status);
   }
   return (await response.json()) as T;
 }

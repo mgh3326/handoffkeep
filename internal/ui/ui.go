@@ -13,6 +13,8 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"regexp"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
@@ -50,24 +52,32 @@ type Handler struct {
 	lanes         []string
 	laneSet       map[string]bool
 	directorLanes map[string]bool
+	// assetVersion is the build stamp appended to static asset URLs (?v=). It
+	// is empty on unstamped builds, where the static handler must not emit a
+	// long-lived cache policy.
+	assetVersion string
+}
+
+// readBuildInfo is a variable so tests can stamp or unstamp build info.
+var readBuildInfo = debug.ReadBuildInfo
+
+// vcsRevision returns the binary's VCS stamp, or "" on unstamped builds
+// (source export, -buildvcs=false, plain go run).
+func vcsRevision() string {
+	if info, ok := readBuildInfo(); ok {
+		for _, setting := range info.Settings {
+			if setting.Key == "vcs.revision" {
+				return setting.Value
+			}
+		}
+	}
+	return ""
 }
 
 // New builds the optional fleet console.
 func New(config Config) (*Handler, error) {
 	if config.Store == nil || config.Access == nil {
 		return nil, errors.New("UI requires store and Cloudflare Access verifier")
-	}
-	tmpl, err := template.New("ui").Funcs(template.FuncMap{
-		"formatTime":       formatTime,
-		"shortHead":        shortHead,
-		"githubLink":       githubLink,
-		"message":          messageParts,
-		"ingressLabel":     ingressLabel,
-		"decisionFormData": decisionFormData,
-		"eventFormData":    eventFormData,
-	}).ParseFS(assets, "templates/*.html")
-	if err != nil {
-		return nil, err
 	}
 	static, err := fs.Sub(assets, "static")
 	if err != nil {
@@ -98,10 +108,9 @@ func New(config Config) (*Handler, error) {
 	} else {
 		hub.cacheTTL = 10 * time.Second
 	}
-	return &Handler{
+	h := &Handler{
 		store:         config.Store,
 		access:        config.Access,
-		templates:     tmpl,
 		hub:           hub,
 		pollInterval:  poll,
 		static:        static,
@@ -109,14 +118,40 @@ func New(config Config) (*Handler, error) {
 		lanes:         lanes,
 		laneSet:       laneSet,
 		directorLanes: directorLanes,
-	}, nil
+		assetVersion:  vcsRevision(),
+	}
+	tmpl, err := template.New("ui").Funcs(template.FuncMap{
+		"formatTime":       formatTime,
+		"shortHead":        shortHead,
+		"githubLink":       githubLink,
+		"message":          messageParts,
+		"ingressLabel":     ingressLabel,
+		"decisionFormData": decisionFormData,
+		"eventFormData":    eventFormData,
+		"assetURL":         h.assetURL,
+	}).ParseFS(assets, "templates/*.html")
+	if err != nil {
+		return nil, err
+	}
+	h.templates = tmpl
+	return h, nil
+}
+
+// assetURL appends the build stamp to a static asset path so a deploy changes
+// the URL browsers fetch. On unstamped builds it returns the path bare —
+// never a bare ?v= — and the static handler answers such requests no-cache.
+func (h *Handler) assetURL(p string) string {
+	if h.assetVersion == "" {
+		return p
+	}
+	return p + "?v=" + url.QueryEscape(h.assetVersion)
 }
 
 // ServeHTTP keeps the UI authentication and method boundary separate from the
 // existing bearer-token API. Only the explicit UI write routes can reach a
 // mutating operation.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path == "/ui/fleet" || r.URL.Path == "/ui/queue" || strings.HasPrefix(r.URL.Path, "/ui/api/") {
+	if r.URL.Path == "/ui/fleet" || r.URL.Path == "/ui/queue" || strings.HasPrefix(r.URL.Path, "/ui/tasks/") || strings.HasPrefix(r.URL.Path, "/ui/api/") {
 		setConsoleCSP(w)
 	}
 	identity, authenticated := h.access.AuthenticatedIdentity(r)
@@ -196,12 +231,34 @@ func (h *Handler) serveSubroute(w http.ResponseWriter, r *http.Request, email st
 		h.document(w, r, key)
 		return
 	}
+	if raw, ok := strings.CutPrefix(r.URL.Path, "/ui/tasks/"); ok {
+		h.taskPage(w, r, raw)
+		return
+	}
 	if file, ok := strings.CutPrefix(r.URL.Path, "/ui/static/"); ok {
 		h.staticFile(w, r, file)
 		return
 	}
 	http.NotFound(w, r)
 }
+
+// taskPage serves the deep-link task page /ui/tasks/<id>. The queue bundle
+// reads the id from the path and mounts the shared detail component; the
+// server only gates the id shape — a non-numeric or out-of-range id is a 400,
+// never a silently different page.
+func (h *Handler) taskPage(w http.ResponseWriter, r *http.Request, raw string) {
+	if raw == "" {
+		http.NotFound(w, r)
+		return
+	}
+	if !taskIDPattern.MatchString(raw) {
+		http.Error(w, "invalid task id", http.StatusBadRequest)
+		return
+	}
+	h.render(w, "board_page", nil)
+}
+
+var taskIDPattern = regexp.MustCompile(`^[1-9][0-9]{0,14}$`)
 
 func (h *Handler) staticFile(w http.ResponseWriter, r *http.Request, file string) {
 	clean := path.Clean(file)
@@ -227,7 +284,16 @@ func (h *Handler) staticFile(w http.ResponseWriter, r *http.Request, file string
 	default:
 		w.Header().Set("Content-Type", "application/octet-stream")
 	}
-	w.Header().Set("Cache-Control", "public, max-age=86400")
+	// Long-lived caching is only safe when the request URL carries this exact
+	// build's stamp. Requests without it — including the fixed shared-*.js
+	// chunk paths inside bundles — must revalidate so a deploy cannot serve a
+	// stale bundle or chunk. Unstamped builds (no vcs.revision) disable the
+	// cache outright rather than emitting an empty ?v=.
+	if h.assetVersion != "" && r.URL.Query().Get("v") == h.assetVersion {
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+	} else {
+		w.Header().Set("Cache-Control", "no-cache")
+	}
 	_, _ = w.Write(b)
 }
 
@@ -309,8 +375,14 @@ func (h *Handler) timelineData(r *http.Request) (timelineData, error) {
 
 // board serves the React queue board page on the same /ui/queue URL the htmx
 // table used to occupy. All task data reaches the browser through the
-// /ui/api/board/* BFF routes; this page is only the mount point.
+// /ui/api/board/* BFF routes; this page is only the mount point. A ?task=
+// deep-link id is shape-checked here so a malformed value gets a 400 instead
+// of an arbitrary script-level string.
 func (h *Handler) board(w http.ResponseWriter, r *http.Request) {
+	if raw := r.URL.Query().Get("task"); raw != "" && !taskIDPattern.MatchString(raw) {
+		http.Error(w, "invalid task id", http.StatusBadRequest)
+		return
+	}
 	h.render(w, "board_page", nil)
 }
 
@@ -505,6 +577,9 @@ func (h *Handler) fleet(w http.ResponseWriter, r *http.Request, fragment bool) {
 
 func (h *Handler) render(w http.ResponseWriter, name string, data any) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	// HTML must always be revalidated: it is the carrier of the ?v= asset
+	// stamps, so a cached page would pin a stale bundle.
+	w.Header().Set("Cache-Control", "no-cache")
 	if err := h.templates.ExecuteTemplate(w, name, data); err != nil {
 		// A static embedded-template error is not safe to render as a response.
 		// It is only observable in the server's error log via the standard HTTP

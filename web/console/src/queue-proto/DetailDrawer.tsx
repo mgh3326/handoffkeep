@@ -1,11 +1,12 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { BoardDetail } from "../board/types";
 import { ageDays, isStale, STALE_MIN_AGE_DAYS } from "./adapter";
 import type { Dataset, Enrichment, ProtoTask } from "./types";
 
 /** Lazily fetched per-drawer detail (live mode). Absent → the task's own
- * fields are the truth, which is the fixture/test path. */
-export type DetailFetchState = { status: "loading" } | { status: "loaded"; data: BoardDetail } | { status: "error" };
+ * fields are the truth, which is the fixture/test path. "notfound" is a
+ * resolved 404 — the task id does not exist — never collapsed into "error". */
+export type DetailFetchState = { status: "loading" } | { status: "loaded"; data: BoardDetail } | { status: "error" } | { status: "notfound" };
 
 function safeHref(value: string): string | undefined {
   try {
@@ -22,40 +23,52 @@ function Val({ value }: { value: string | number | null }) {
   return <span>{value}</span>;
 }
 
-type DrawerProps = {
+/** Copies the canonical /ui/tasks/<id> link — the same URL the full-page
+ * detail serves. Hovering the button shows the target even when the
+ * clipboard API is unavailable (insecure context, denied permission). */
+export function CopyTaskLink({ id }: { id: number }) {
+  const [copied, setCopied] = useState(false);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (timer.current !== null) {
+        clearTimeout(timer.current);
+      }
+    },
+    [],
+  );
+  const url = `${window.location.origin}/ui/tasks/${id}`;
+  const copy = () => {
+    const done = () => {
+      setCopied(true);
+      if (timer.current !== null) {
+        clearTimeout(timer.current);
+      }
+      timer.current = setTimeout(() => setCopied(false), 1500);
+    };
+    if (navigator.clipboard?.writeText) {
+      void navigator.clipboard.writeText(url).then(done, () => {});
+    }
+  };
+  return (
+    <button type="button" className="qp-copylink" aria-label="Copy task link" title={url} onClick={copy}>
+      {copied ? "✓ copied" : "🔗 copy link"}
+    </button>
+  );
+}
+
+type BodyProps = {
   dataset: Dataset;
   task: ProtoTask;
   detail?: DetailFetchState;
-  orderedIds: number[];
-  onClose: () => void;
-  onNav: (id: number) => void;
 };
 
-export function DetailDrawer({ dataset, task, detail, orderedIds, onClose, onNav }: DrawerProps) {
-  const ref = useRef<HTMLDivElement>(null);
-  const index = orderedIds.indexOf(task.id);
-  const prevId = index > 0 ? orderedIds[index - 1] : null;
-  const nextId = index >= 0 && index < orderedIds.length - 1 ? orderedIds[index + 1] : null;
+/** The task detail content — one component shared by the peek drawer and the
+ * /ui/tasks/<id> page. Shell chrome (nav/close/back-link) is each host's own;
+ * the sections below are not duplicated. */
+export function DetailBody({ dataset, task, detail }: BodyProps) {
   const enr: Enrichment | undefined = dataset.enrichment[task.id];
   const now = dataset.generatedAt;
-
-  useEffect(() => {
-    ref.current?.focus();
-  }, [task.id]);
-
-  const onKeyDown = (event: React.KeyboardEvent) => {
-    if (event.key === "Escape") {
-      event.preventDefault();
-      onClose();
-    } else if (event.key === "ArrowUp" && prevId !== null) {
-      event.preventDefault();
-      onNav(prevId);
-    } else if (event.key === "ArrowDown" && nextId !== null) {
-      event.preventDefault();
-      onNav(nextId);
-    }
-  };
-
   const stateAge = ageDays(now, task.state_entered_at);
   const createdAge = ageDays(now, task.created_at);
 
@@ -73,21 +86,7 @@ export function DetailDrawer({ dataset, task, detail, orderedIds, onClose, onNav
       : { status: task.coverage.status, participants: task.coverage.participants, truncated: false };
 
   return (
-    <div className="qp-drawer" role="dialog" aria-modal="true" aria-label={`task ${task.id} detail`} ref={ref} tabIndex={-1} onKeyDown={onKeyDown}>
-      <div className="qp-drawer-head">
-        <h3>#{task.id}</h3>
-        <div className="qp-drawer-nav">
-          <button type="button" aria-label="Previous task" disabled={prevId === null} onClick={() => prevId !== null && onNav(prevId)}>
-            ↑ prev
-          </button>
-          <button type="button" aria-label="Next task" disabled={nextId === null} onClick={() => nextId !== null && onNav(nextId)}>
-            ↓ next
-          </button>
-          <button type="button" aria-label="Close detail" className="qp-drawer-close" onClick={onClose}>
-            ✕ close
-          </button>
-        </div>
-      </div>
+    <>
       <p className="qp-drawer-title">{task.title}</p>
       <p className="qp-source-status">
         source status: <strong>{dataset.source === "live" ? "live /ui/api/board" : "synthetic fixture"}</strong> — {dataset.completeness} ·{" "}
@@ -254,6 +253,8 @@ export function DetailDrawer({ dataset, task, detail, orderedIds, onClose, onNav
           <p className="muted">loading…</p>
         ) : detail.status === "error" ? (
           <p className="qp-unknown">unavailable — detail fetch failed</p>
+        ) : detail.status === "notfound" ? (
+          <p className="qp-unknown">unavailable — task not found</p>
         ) : detail.data.events.length === 0 ? (
           <p className="muted">none recorded</p>
         ) : (
@@ -267,6 +268,95 @@ export function DetailDrawer({ dataset, task, detail, orderedIds, onClose, onNav
           </ol>
         )}
       </section>
+    </>
+  );
+}
+
+type DrawerProps = {
+  dataset: Dataset;
+  /** The requested id — shown in the head even before the task resolves. */
+  taskId: number;
+  /** null while a deep-linked task is fetched, or when it does not exist. */
+  task: ProtoTask | null;
+  detail?: DetailFetchState;
+  orderedIds: number[];
+  /** true once the task is known-absent (404, or no fetcher and no row). */
+  notFound?: boolean;
+  onClose: () => void;
+  onNav: (id: number) => void;
+};
+
+// Non-modal peek panel: no inert background, no aria-modal — the list stays
+// live and clicking another row swaps the content. Focus lands in the panel
+// only on the closed→open transition; switching tasks keeps focus where the
+// user is so keyboard and pointer both travel list↔panel freely.
+export function DetailDrawer({ dataset, taskId, task, detail, orderedIds, notFound = false, onClose, onNav }: DrawerProps) {
+  const ref = useRef<HTMLDivElement>(null);
+  const index = orderedIds.indexOf(taskId);
+  const prevId = index > 0 ? orderedIds[index - 1] : null;
+  const nextId = index >= 0 && index < orderedIds.length - 1 ? orderedIds[index + 1] : null;
+
+  useEffect(() => {
+    ref.current?.focus();
+  }, []);
+
+  // Non-modal panel: focus may legitimately sit in the list while the panel
+  // is open, so Escape listens at the document — closing must not depend on
+  // where focus is. Arrow prev/next stays panel-scoped.
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        onClose();
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const onKeyDown = (event: React.KeyboardEvent) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      onClose();
+    } else if (event.key === "ArrowUp" && prevId !== null) {
+      event.preventDefault();
+      onNav(prevId);
+    } else if (event.key === "ArrowDown" && nextId !== null) {
+      event.preventDefault();
+      onNav(nextId);
+    }
+  };
+
+  return (
+    <div className="qp-drawer" role="dialog" aria-label={`task ${taskId} detail`} ref={ref} tabIndex={-1} onKeyDown={onKeyDown}>
+      <div className="qp-drawer-head">
+        <h3>
+          #{taskId} <CopyTaskLink id={taskId} />
+        </h3>
+        <div className="qp-drawer-nav">
+          <button type="button" aria-label="Previous task" disabled={prevId === null} onClick={() => prevId !== null && onNav(prevId)}>
+            ↑ prev
+          </button>
+          <button type="button" aria-label="Next task" disabled={nextId === null} onClick={() => nextId !== null && onNav(nextId)}>
+            ↓ next
+          </button>
+          <button type="button" aria-label="Close detail" className="qp-drawer-close" onClick={onClose}>
+            ✕ close
+          </button>
+        </div>
+      </div>
+      {task === null ? (
+        notFound ? (
+          <p className="qp-unknown" role="note">
+            task #{taskId} not found — no queue task has this id
+          </p>
+        ) : detail?.status === "error" ? (
+          <p className="qp-unknown">unavailable — detail fetch failed</p>
+        ) : (
+          <p className="muted">loading…</p>
+        )
+      ) : (
+        <DetailBody dataset={dataset} task={task} detail={detail} />
+      )}
     </div>
   );
 }

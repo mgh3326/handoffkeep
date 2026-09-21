@@ -36,12 +36,34 @@ describe("shared detail drawer", () => {
     expect(within(drawer).getByText("CLAMPED-TAIL-MARKER-5011", { exact: false })).toBeTruthy();
   });
 
+  it("peek panel is non-modal: no aria-modal, list never inert", () => {
+    const { container } = render(<QueueProtoApp datasets={datasets} initialSet="edge" />);
+    fireEvent.click(screen.getByRole("link", { name: "All" }));
+    openRow(container, 5005);
+    const drawer = screen.getByRole("dialog");
+    expect(drawer.getAttribute("aria-modal")).toBeNull();
+    expect(document.getElementById("qp-main")!.hasAttribute("inert")).toBe(false);
+  });
+
+  it("non-modal peek: activating another row while open swaps the panel", () => {
+    const { container } = render(<QueueProtoApp datasets={datasets} initialSet="edge" />);
+    fireEvent.click(screen.getByRole("link", { name: "All" }));
+    openRow(container, 5005);
+    expect(screen.getByRole("dialog").getAttribute("aria-label")).toContain("task 5005");
+    // The list stays live — a direct click on another row retargets the open
+    // panel instead of being swallowed by a modal.
+    const other = container.querySelector<HTMLElement>('[data-task-id="5011"]')!;
+    fireEvent.click(other);
+    expect(screen.getByRole("dialog").getAttribute("aria-label")).toContain("task 5011");
+    const task = edge.tasks.find((t) => t.id === 5011)!;
+    expect(within(screen.getByRole("dialog")).getByText(task.title)).toBeTruthy();
+  });
+
   it("Escape closes and focus returns to the originating row", () => {
     const { container } = render(<QueueProtoApp datasets={datasets} initialSet="edge" />);
     fireEvent.click(screen.getByRole("link", { name: "All" }));
     const row = openRow(container, 5005);
     const drawer = screen.getByRole("dialog");
-    expect(document.getElementById("qp-main")!.hasAttribute("inert")).toBe(true);
     fireEvent.keyDown(drawer, { key: "Escape" });
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(document.getElementById("qp-main")!.hasAttribute("inert")).toBe(false);
