@@ -77,7 +77,8 @@ export function ViewRail({ dataset, view, counts, views, onSelectView, onApplyVi
         <p data-testid="status-line">{statusLine(dataset)}</p>
         <p>
           {dataset.tasks.length}
-          {partial ? "+" : ""} fixture tasks{partial ? ` — ${dataset.completeness} (partial load; total may exceed the shown count)` : ""}
+          {partial ? "+" : ""} {dataset.source === "synthetic" ? "fixture tasks" : "tasks"}
+          {partial ? ` — ${dataset.completeness} (partial load; total may exceed the shown count)` : ""}
         </p>
       </div>
     </aside>

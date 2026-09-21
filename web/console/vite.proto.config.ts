@@ -5,9 +5,10 @@ import { fileURLToPath } from "node:url";
 
 const root = dirname(fileURLToPath(import.meta.url));
 
-// Prototype-only build. Emits to gitignored dist-proto/ and is never wired
-// into vite.config.ts rollupOptions.input — the production build's entry
-// set (fleet.js, board.js, fleet.css, board.css, shared-*.js) is unchanged.
+// Fixture-preview build. Emits to gitignored dist-proto/ and shares no input
+// with vite.config.ts: the production `board` entry builds src/queue-proto/
+// main.tsx (live API data), while this build mounts preview.tsx — the only
+// entry that imports the synthetic fixtures.
 export default defineConfig({
   plugins: [react()],
   base: "/",

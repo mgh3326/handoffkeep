@@ -12,13 +12,15 @@ export const VIEW_STATES: Record<ProtoView, string[]> = {
   all: [...KNOWN_STATES],
 };
 
-export function viewPredicate(view: ProtoView): (task: ProtoTask) => boolean {
+export function viewPredicate(view: ProtoView, states: readonly string[] = KNOWN_STATES): (task: ProtoTask) => boolean {
   if (view === "operator") {
     // Operator view: anything waiting on an operator decision plus backlog.
     return (task) =>
       task.state === "backlog" || task.state === "needs_decision" || (task.kind === "decide" && task.state !== "merged" && task.state !== "dropped");
   }
-  const allowed = new Set(VIEW_STATES[view]);
+  // "all" enumerates the dataset's own states (server-provided when live);
+  // "active"/"backlog" are semantic subsets and stay fixed.
+  const allowed = new Set(view === "all" ? states : VIEW_STATES[view]);
   return (task) => allowed.has(task.state);
 }
 
@@ -71,17 +73,21 @@ export function taskOrder(a: ProtoTask, b: ProtoTask): number {
 }
 
 /** The one shared path. Both renderers display exactly this set. */
-export function applyView(tasks: ProtoTask[], state: Pick<ProtoState, "view" | "filters">): ProtoTask[] {
-  const inView = viewPredicate(state.view);
+export function applyView(
+  tasks: ProtoTask[],
+  state: Pick<ProtoState, "view" | "filters">,
+  states: readonly string[] = KNOWN_STATES,
+): ProtoTask[] {
+  const inView = viewPredicate(state.view, states);
   return tasks.filter((task) => inView(task) && matchesFilters(task, state.filters)).sort(taskOrder);
 }
 
 /** Per-view counts under the current filters — the rail shows these, so the
  * number next to a view name is exactly the row set that view would render. */
-export function countByView(tasks: ProtoTask[], filters: FilterState): Record<ProtoView, number> {
+export function countByView(tasks: ProtoTask[], filters: FilterState, states: readonly string[] = KNOWN_STATES): Record<ProtoView, number> {
   const counts: Record<ProtoView, number> = { operator: 0, active: 0, backlog: 0, all: 0 };
   for (const view of Object.keys(counts) as ProtoView[]) {
-    const inView = viewPredicate(view);
+    const inView = viewPredicate(view, states);
     counts[view] = tasks.filter((task) => inView(task) && matchesFilters(task, filters)).length;
   }
   return counts;
@@ -229,9 +235,15 @@ export function groupTaskIds(group: AreaGroup): Set<number> {
 // ---- board columns ------------------------------------------------------
 
 /** Bounded columns: only populated states relevant to the current view —
- * never all nine by default. */
-export function boardColumns(visible: ProtoTask[], view: ProtoView, hiddenColumns: string[]): { state: string; tasks: ProtoTask[] }[] {
-  const candidates = view === "all" ? [...KNOWN_STATES] : VIEW_STATES[view];
+ * never all nine by default. Enumerating views ("all", "operator") take the
+ * dataset's states — server-provided when live — not a hardcoded list. */
+export function boardColumns(
+  visible: ProtoTask[],
+  view: ProtoView,
+  hiddenColumns: string[],
+  states: readonly string[] = KNOWN_STATES,
+): { state: string; tasks: ProtoTask[] }[] {
+  const candidates = view === "all" || view === "operator" ? [...states] : VIEW_STATES[view];
   const byState = new Map<string, ProtoTask[]>();
   for (const task of visible) {
     if (!byState.has(task.state)) {
@@ -247,7 +259,8 @@ export function boardColumns(visible: ProtoTask[], view: ProtoView, hiddenColumn
 // ---- status line --------------------------------------------------------
 
 export function statusLine(dataset: Dataset): string {
-  return `scope: ${dataset.label} · source: local synthetic fixture · generated: ${dataset.generatedAt} · completeness: ${dataset.completeness} — ${dataset.completenessNote}`;
+  const source = dataset.source === "live" ? "live /ui/api/board" : "local synthetic fixture";
+  return `scope: ${dataset.label} · source: ${source} · generated: ${dataset.generatedAt} · completeness: ${dataset.completeness} — ${dataset.completenessNote}`;
 }
 
 export function ageDays(nowIso: string, iso: string | null): number | null {
