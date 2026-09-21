@@ -629,3 +629,127 @@ func TestDispositionCommentIsNotAnAnswer(t *testing.T) {
 		t.Fatalf("a comment recorded an answer: %+v", got.Refs.Disposition.Answer)
 	}
 }
+
+// Director ruling on SHOULD-1: an item's origin is fixed at creation in every
+// state, through every refs-writing path.
+func TestDispositionOriginIsFixedAfterCreation(t *testing.T) {
+	s := uiStore(t)
+	lane := uiLane(t, "director")
+	t.Cleanup(func() { drainOpenDispositions(t, s) })
+	prA, prB := dispositionPR(t), dispositionPR(t)
+	x := mustCreateDisposition(t, s, dispositionInput(lane, prA, 0, "D"))
+	parent := claimAndTransition(t, s, createUITask(t, s, lane, "parent"), "dropped", "done")
+	patches := map[string]store.TaskRefs{
+		"other origin_pr":       {OriginPR: prB},
+		"same origin_pr":        {OriginPR: prA},
+		"added origin_task":     {OriginTask: parent.ID},
+		"origin_pr and pr":      {OriginPR: prB, PR: prB},
+		"origin_task with note": {OriginTask: parent.ID, ReportPath: "report.md"},
+	}
+	try := func(state string) {
+		t.Helper()
+		for name, patch := range patches {
+			for _, to := range []string{"needs_decision", "hold", "dropped", "in_progress"} {
+				p := patch
+				if _, err := s.TransitionTask(t.Context(), x.ID, to, "director-node", "re-point", &p); err == nil {
+					t.Fatalf("%s: %s -> %s with %s accepted", state, state, to, name)
+				}
+			}
+		}
+		got, _, _ := s.GetTask(t.Context(), x.ID)
+		if got.State != state || got.Refs.OriginPR != prA || got.Refs.OriginTask != 0 {
+			t.Fatalf("%s: origin moved: state=%s origin_pr=%s origin_task=%d", state, got.State, got.Refs.OriginPR, got.Refs.OriginTask)
+		}
+	}
+	try("needs_decision") // refused by the operator-only guard
+	if _, err := s.AnswerDisposition(t.Context(), store.DispositionAnswerInput{ID: x.ID, Gen: openGen(t, s, x.ID), Key: "D", OperatorEmail: "admin@example.com", EventID: "e-o"}); err != nil {
+		t.Fatal(err)
+	}
+	try("claimed")
+	if _, err := s.ApplyDisposition(t.Context(), x.ID, "director-node", ""); err != nil {
+		t.Fatal(err)
+	}
+	try("hold")
+	// The bearer transition route is refused the same way.
+	server := httptest.NewServer(api.Server{Service: api.Service{Store: s}, Tokens: api.Tokens{"director-node": "node-token"}}.Handler())
+	defer server.Close()
+	raw, _ := json.Marshal(map[string]any{"to": "needs_decision", "note": "re-ask", "refs": map[string]any{"origin_pr": prB}})
+	req, _ := http.NewRequestWithContext(t.Context(), http.MethodPost, fmt.Sprintf("%s/v1/tasks/%d/transition", server.URL, x.ID), bytes.NewReader(raw))
+	req.Header.Set("Authorization", "Bearer node-token")
+	req.Header.Set("Content-Type", "application/json")
+	response, err := server.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusConflict {
+		t.Fatalf("bearer re-point status=%d", response.StatusCode)
+	}
+	// prB is still free: its own item can be created and is independent.
+	other, created, err := s.CreateDisposition(t.Context(), dispositionInput(lane, prB, 0, "E"))
+	if err != nil || !created || other.ID == x.ID {
+		t.Fatalf("prB item: id=%d created=%v err=%v", other.ID, created, err)
+	}
+	// A re-ask without refs stays allowed and keeps the origin.
+	if got, err := s.TransitionTask(t.Context(), x.ID, "needs_decision", "director-node", "re-ask", nil); err != nil || got.Refs.OriginPR != prA {
+		t.Fatalf("plain re-ask: origin=%s err=%v", got.Refs.OriginPR, err)
+	}
+}
+
+// Director ruling on SHOULD-2: re-asking clears the previous answer.
+func TestDispositionReaskClearsAnswer(t *testing.T) {
+	s := uiStore(t)
+	drainOpenDispositions(t, s)
+	t.Cleanup(func() { drainOpenDispositions(t, s) })
+	lane := uiLane(t, "director")
+	x := mustCreateDisposition(t, s, dispositionInput(lane, dispositionPR(t), 0, "D"))
+	eventID := "web-disposition-reask-unnotified"
+	if _, err := s.AnswerDisposition(t.Context(), store.DispositionAnswerInput{ID: x.ID, Gen: openGen(t, s, x.ID), Key: "D", OperatorEmail: "admin@example.com", EventID: eventID}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := s.DispositionSummary(t.Context(), time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ApplyDisposition(t.Context(), x.ID, "director-node", ""); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.TransitionTask(t.Context(), x.ID, "needs_decision", "director-node", "re-ask with new facts", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Refs.Disposition.Answer != nil {
+		t.Fatalf("re-ask kept the previous answer: %+v", got.Refs.Disposition.Answer)
+	}
+	after, err := s.DispositionSummary(t.Context(), time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.SingleAnswers24h != before.SingleAnswers24h-1 || after.Open != before.Open+1 {
+		t.Fatalf("summary still counts the superseded answer: before=%+v after=%+v", before, after)
+	}
+	pending, err := s.ListUnnotifiedDispositions(t.Context(), 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, task := range pending {
+		if task.ID == x.ID {
+			t.Fatal("superseded answer still listed as a pending notice")
+		}
+	}
+	// The history keeps the old answer in the append-only event snapshots.
+	full, _, _ := s.GetTask(t.Context(), x.ID)
+	kept := false
+	for _, e := range full.Events {
+		if e.Refs != nil && e.Refs.Disposition != nil && e.Refs.Disposition.Answer != nil && e.Refs.Disposition.Answer.EventID == eventID {
+			kept = true
+		}
+	}
+	if !kept {
+		t.Fatal("the superseded answer is missing from task_events history")
+	}
+	// A fresh answer works on the new generation.
+	if _, err := s.AnswerDisposition(t.Context(), store.DispositionAnswerInput{ID: x.ID, Gen: openGen(t, s, x.ID), Key: "E", OperatorEmail: "admin@example.com", EventID: "e-new"}); err != nil {
+		t.Fatal(err)
+	}
+}

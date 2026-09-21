@@ -1131,7 +1131,10 @@ func (s *Store) TransitionTask(ctx context.Context, id int64, to, by, note strin
 			return Task{}, ErrDispositionOperatorOnly
 		}
 		// A disposition item never returns to backlog: NextTask would claim it.
-		if to == "backlog" || (refs != nil && refs.DecisionOptions != nil) {
+		// Its closed options and its origin are fixed at creation, in every
+		// state: re-pointing origin_pr/origin_task would detach the recorded
+		// facts from their source and let one origin own two items over time.
+		if to == "backlog" || (refs != nil && (refs.DecisionOptions != nil || refs.OriginPR != "" || refs.OriginTask != 0)) {
 			return Task{}, ErrTaskConflict
 		}
 	}
@@ -1148,6 +1151,12 @@ func (s *Store) TransitionTask(ctx context.Context, id int64, to, by, note strin
 		if x.Refs.Disposition != nil && !validTaskRefs(x.Refs) {
 			return Task{}, errors.New("invalid task transition: disposition refs")
 		}
+	}
+	// Re-asking reopens the question: the previous answer no longer describes
+	// the item and must not count as an answer, pending application, or a
+	// pending notice. The old answer stays in the task_events refs snapshots.
+	if x.Refs.Disposition != nil && to == "needs_decision" {
+		x.Refs.Disposition.Answer = nil
 	}
 	if to == "needs_decision" && x.Refs.DecisionOptions != nil {
 		finalText := note + "\n" + FormatDecisionOptions(*x.Refs.DecisionOptions)

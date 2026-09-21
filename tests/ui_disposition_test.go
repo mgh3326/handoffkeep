@@ -338,3 +338,29 @@ func TestUIDispositionRefusesNonOperatorPaths(t *testing.T) {
 		t.Fatalf("operator answer status=%d state=%s", response.StatusCode, got.State)
 	}
 }
+
+// Director ruling on SHOULD-3: glance reports open disposition items beside,
+// not inside, decisions_pending.
+func TestUIGlanceReportsDispositionsSeparately(t *testing.T) {
+	s := uiStore(t)
+	drainOpenDispositions(t, s)
+	t.Cleanup(func() { drainOpenDispositions(t, s) })
+	fixture := newUIJWTFixture(t)
+	h := newP3UITestServer(t, s, fixture, "", "", []string{"glance-fixture"})
+	defer h.Close()
+	assertion := p3ServiceAssertion(t, fixture)
+	_, before := p3Glance(t, h, assertion)
+	lane := uiLane(t, "director")
+	mustCreateDisposition(t, s, dispositionInput(lane, dispositionPR(t), 0, "A"))
+	mustCreateDisposition(t, s, dispositionInput(lane, dispositionPR(t), 0, "E"))
+	claimAndTransition(t, s, createUITask(t, s, lane, "builder question"), "needs_decision", "which?")
+	_, after := p3Glance(t, h, assertion)
+	b, a := before["tasks"].(map[string]any), after["tasks"].(map[string]any)
+	delta := func(key string) int { return int(a[key].(float64)) - int(b[key].(float64)) }
+	if delta("dispositions_open") != 2 || delta("decisions_pending") != 1 {
+		t.Fatalf("glance: dispositions_open +%d decisions_pending +%d, want +2 and +1", delta("dispositions_open"), delta("decisions_pending"))
+	}
+	if int(a["by_state"].(map[string]any)["needs_decision"].(float64))-int(b["by_state"].(map[string]any)["needs_decision"].(float64)) != 3 {
+		t.Fatal("by_state.needs_decision must stay the raw state tally")
+	}
+}

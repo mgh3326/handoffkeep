@@ -40,6 +40,7 @@ type glanceTask struct {
 type glanceTasks struct {
 	ByState          map[string]int `json:"by_state"`
 	DecisionsPending int            `json:"decisions_pending"`
+	DispositionsOpen int            `json:"dispositions_open"`
 	Active           []glanceTask   `json:"active"`
 }
 
@@ -90,6 +91,11 @@ func (h *Handler) glance(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "fleet console unavailable", http.StatusInternalServerError)
 		return
 	}
+	taskDecisions, dispositionsOpen, err := h.store.CountNeedsDecision(r.Context())
+	if err != nil {
+		http.Error(w, "fleet console unavailable", http.StatusInternalServerError)
+		return
+	}
 	byState := make(map[string]int, len(glanceStates))
 	for _, state := range glanceStates {
 		byState[state] = counts[state]
@@ -102,7 +108,10 @@ func (h *Handler) glance(w http.ResponseWriter, r *http.Request) {
 		Jobs:        []json.RawMessage{},
 		Tasks: glanceTasks{
 			ByState:          byState,
-			DecisionsPending: byState["needs_decision"] + len(laneDecisions),
+			// Disposition items are a separate figure (never summed): they are
+			// answered only on the operator disposition routes.
+			DecisionsPending: taskDecisions + len(laneDecisions),
+			DispositionsOpen: dispositionsOpen,
 			Active:           glanceActiveTasks(active),
 		},
 		ConsolePaths: map[string]string{

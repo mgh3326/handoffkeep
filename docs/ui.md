@@ -219,7 +219,10 @@ producer label as a sender badge; other `reason` values remain hidden.
 contains the UTC generation time, sanitized hub health, raw hub `nodes`,
 `lanes`, and `jobs` data (with only per-node `active_jobs` added), seven task
 state totals, unresolved decisions, the newest 20 active tasks, and fixed
-console paths. Hub setup, transport, decoding, and non-200 failures retain a
+console paths. `tasks.decisions_pending` counts generic `needs_decision` tasks
+plus open `[decision-needed]` lane events; open disposition items are reported
+separately as `tasks.dispositions_open` and are not part of that sum.
+`tasks.by_state.needs_decision` remains the raw state tally and includes both. Hub setup, transport, decoding, and non-200 failures retain a
 200 response with empty hub arrays and only `unconfigured`, `unreachable`, or
 `status_<code>` as the health error. The body is capped at 256 KiB by dropping
 oldest entries from `tasks.active` and marking `truncated`.
@@ -238,8 +241,12 @@ header is `DispositionSummary` (the same function as
 `다음 묶음 m건` when more than 50 items are open, and a detail line with
 pending application, holds, merged PRs without an item (candidates), and the
 last 24 hours of batch and single answers. Disposition items never appear in
-the generic task cards, `mode=recommended`, or glance's unresolved decisions;
-the generic answer routes refuse them before any hub emit.
+the generic task cards or `mode=recommended`; glance reports them as
+`tasks.dispositions_open`, outside `tasks.decisions_pending`. The generic answer
+routes refuse them before any hub emit. Origins and options are fixed at
+creation (transition refs patches touching `origin_pr`, `origin_task`, or
+`decision_options` are refused in every state), and re-asking
+(`→ needs_decision`) clears the previous answer.
 
 - `POST /ui/dispositions/answer` (`id`, `gen`, `key`) records the answer first
   (`needs_decision → claimed`, `by=operator:<email>`, `refs.disposition.answer`)
