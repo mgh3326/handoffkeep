@@ -512,6 +512,15 @@ body {
 .qp-drawer:focus {
   outline: none;
 }
+/* While the non-modal panel is open, reserve its width inside #qp-main so
+ * every list row and board column stays pointer-reachable — without this the
+ * fixed overlay covers the rightmost board column and its horizontal scroller
+ * can never bring it out from under the panel. */
+@media (min-width: 641px) {
+  .qp-peek-open #qp-main {
+    padding-right: min(30rem, 92vw);
+  }
+}
 .qp-drawer-head {
   display: flex;
   justify-content: space-between;
@@ -700,12 +709,21 @@ body {
   }
   /* The peek panel is non-modal — it must never cover the whole viewport.
    * A bottom sheet leaves the list visible and clickable above it, so
-   * switching to another row stays possible at any width. */
+   * switching to another row stays possible at any width. Height is capped so
+   * at least one list row fits between the toolbar and the sheet; the matching
+   * content padding lets every row scroll into that band. */
   .qp-drawer {
     inset: auto 0 0 0;
-    height: 65%;
+    width: 100%;
+    height: min(60vh, 280px);
     border-left: none;
     border-top: 1px solid #8a8a8a;
+  }
+  .qp-peek-open .qp-content {
+    padding-bottom: min(60vh, 280px);
+  }
+  .qp-peek-open .qp-list {
+    min-height: 0;
   }
   .qp-count {
     flex-basis: 100%;

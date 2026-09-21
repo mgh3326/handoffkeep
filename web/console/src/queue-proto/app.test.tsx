@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { QueueProtoApp } from "./QueueProtoApp";
 import { buildDatasets } from "./fixtures";
@@ -13,6 +13,11 @@ function rowIds(container: HTMLElement, selector: string): Set<number> {
 describe("QueueProtoApp", () => {
   beforeEach(() => {
     localStorage.clear();
+  });
+  afterEach(() => {
+    // Navigation state rides the URL — a test that left layout/view/task in it
+    // would pollute every later render.
+    window.history.replaceState(null, "", "/queue-proto.html");
   });
 
   it("labels the dataset as synthetic and shows the completeness status line", () => {
@@ -73,8 +78,6 @@ describe("QueueProtoApp", () => {
     expect(card.querySelector(".qp-state")).toBeNull();
     expect(card.querySelector(".qp-title")).toBeTruthy();
     expect(card.querySelector(".qp-lane")).toBeTruthy();
-    // board is pushed into the URL — restore list so later tests unpolluted
-    fireEvent.click(within(container.querySelector("#qp-layout-toggle")!).getByRole("button", { name: "list" }));
   });
 
   it("applied filters show as chips and clear", () => {

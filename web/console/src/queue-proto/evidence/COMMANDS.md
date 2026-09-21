@@ -76,6 +76,10 @@ failure.
 node src/queue-proto/evidence/assert-card-fit.mjs
 ```
 
+With no argument the script builds `dist-proto/` if absent and serves it on
+its own ephemeral port — never trust a shared default port for this check.
+An explicit base URL is accepted but validated to serve the fixture page.
+
 Spawns Chrome `--headless=new --remote-debugging-port=9334` and measures real
 layout — jsdom computes none, so this is the only fit check that counts. For
 each density (`comfortable`, `compact`) at 100% and 125% zoom

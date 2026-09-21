@@ -5,8 +5,12 @@ import (
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"runtime/debug"
 	"strings"
 	"testing"
+
+	"github.com/mgh3326/handoffkeep/internal/cfaccess"
+	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
 // newAssetTestHandler builds a Handler with only the fields assetURL,
@@ -90,6 +94,44 @@ func TestAssetURLUnstampedDisablesCaching(t *testing.T) {
 		if rec := serveStatic(t, h, target); rec.Header().Get("Cache-Control") != "no-cache" {
 			t.Fatalf("unstamped %s cache-control=%q — must not stay long-lived", target, rec.Header().Get("Cache-Control"))
 		}
+	}
+}
+
+// TestNewWiresBuildInfoIntoAssetStamp guards the wiring, not just the helper:
+// New() must stamp asset URLs from the binary's own vcs.revision — a constant
+// or empty stamp here is the original stale-cache bug. Building Handler by
+// hand (newAssetTestHandler) cannot see this path.
+func TestNewWiresBuildInfoIntoAssetStamp(t *testing.T) {
+	orig := readBuildInfo
+	defer func() { readBuildInfo = orig }()
+	readBuildInfo = func() (*debug.BuildInfo, bool) {
+		return &debug.BuildInfo{Settings: []debug.BuildSetting{{Key: "vcs.revision", Value: "testrev0123"}}}, true
+	}
+	h, err := New(Config{Store: &store.Store{}, Access: &cfaccess.Verifier{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	h.render(rec, "board_page", nil)
+	if body := rec.Body.String(); !strings.Contains(body, "/ui/static/console/board.js?v=testrev0123") {
+		t.Fatalf("New() did not stamp board assets from build info: %q", body)
+	}
+	if rec := serveStatic(t, h, "/ui/static/console/board.js?v=testrev0123"); rec.Header().Get("Cache-Control") != "public, max-age=86400" {
+		t.Fatalf("stamped asset cache-control=%q", rec.Header().Get("Cache-Control"))
+	}
+	if rec := serveStatic(t, h, "/ui/static/console/board.js?v=other"); rec.Header().Get("Cache-Control") != "no-cache" {
+		t.Fatalf("wrong stamp cache-control=%q", rec.Header().Get("Cache-Control"))
+	}
+
+	readBuildInfo = func() (*debug.BuildInfo, bool) { return nil, false }
+	h2, err := New(Config{Store: &store.Store{}, Access: &cfaccess.Verifier{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec = httptest.NewRecorder()
+	h2.render(rec, "board_page", nil)
+	if body := rec.Body.String(); strings.Contains(body, "?v=") {
+		t.Fatalf("unstamped New() emitted a version query: %q", body)
 	}
 }
 

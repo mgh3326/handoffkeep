@@ -59,6 +59,29 @@ describe("shared detail drawer", () => {
     expect(within(screen.getByRole("dialog")).getByText(task.title)).toBeTruthy();
   });
 
+  it("Escape with focus on a list row still closes the panel; focus is not stolen", () => {
+    const { container } = render(<QueueProtoApp datasets={datasets} initialSet="edge" />);
+    fireEvent.click(screen.getByRole("link", { name: "All" }));
+    openRow(container, 5005);
+    expect(screen.getByRole("dialog")).toBeTruthy();
+    const row2 = container.querySelector<HTMLElement>('[data-task-id="5011"]')!;
+    row2.focus();
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(document.activeElement).toBe(row2);
+  });
+
+  it("switching tasks while focus is on a row does not pull focus into the panel", () => {
+    const { container } = render(<QueueProtoApp datasets={datasets} initialSet="edge" />);
+    fireEvent.click(screen.getByRole("link", { name: "All" }));
+    openRow(container, 5005);
+    const row2 = container.querySelector<HTMLElement>('[data-task-id="5011"]')!;
+    row2.focus();
+    fireEvent.click(row2);
+    expect(screen.getByRole("dialog").getAttribute("aria-label")).toContain("task 5011");
+    expect(document.activeElement).toBe(row2);
+  });
+
   it("Escape closes and focus returns to the originating row", () => {
     const { container } = render(<QueueProtoApp datasets={datasets} initialSet="edge" />);
     fireEvent.click(screen.getByRole("link", { name: "All" }));

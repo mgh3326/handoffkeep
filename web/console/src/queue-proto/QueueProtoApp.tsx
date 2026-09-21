@@ -311,7 +311,7 @@ export function QueueProtoApp({ datasets, initialSet, storage, diag = false, per
   }, [perfMode, dataset]);
 
   return (
-    <div className={`qp-root${state.sidebarCollapsed ? " rail-collapsed" : ""}`} ref={rootRef}>
+    <div className={`qp-root${state.sidebarCollapsed ? " rail-collapsed" : ""}${openId !== null ? " qp-peek-open" : ""}`} ref={rootRef}>
       <div id="qp-main" ref={mainRef}>
         <ViewRail dataset={dataset} view={state.view} counts={viewCounts} views={views} onSelectView={setView} onApplyView={applyNamedView} />
         <div className="qp-body">

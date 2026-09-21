@@ -4,20 +4,79 @@
 // out — so the measurement runs in real Chrome over CDP and fails the
 // process when any card's scrollHeight exceeds its clientHeight.
 //
-// Usage:
-//   npx vite preview --config vite.proto.config.ts --port 5199 --strictPort &
+// Usage (from web/console):
 //   node src/queue-proto/evidence/assert-card-fit.mjs [baseUrl]
+//
+// With no baseUrl the script builds dist-proto if needed and serves it on its
+// own ephemeral port — measuring a leftover preview from another worktree on
+// a shared default port is a real failure mode, so the default path never
+// trusts a port it did not open. An explicit baseUrl is still validated to
+// serve the queue-proto fixture page.
 //
 // Exit 0 = every measured card fits; exit 2 = at least one card overflows.
 
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import { createServer } from "node:net";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const CDP_PORT = 9334;
-const BASE = process.argv[2] ?? "http://localhost:5199/queue-proto.html";
 const PROFILE = "/tmp/queue-proto-cardfit-profile";
+const CONSOLE_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function freePort() {
+  const srv = createServer();
+  await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+  const { port } = srv.address();
+  await new Promise((r) => srv.close(r));
+  return port;
+}
+
+let BASE = process.argv[2];
+let preview = null;
+if (!BASE) {
+  if (!existsSync(resolve(CONSOLE_DIR, "dist-proto/queue-proto.html"))) {
+    const build = spawnSync("npx", ["vite", "build", "--config", "vite.proto.config.ts"], { cwd: CONSOLE_DIR, stdio: "inherit" });
+    if (build.status !== 0) {
+      console.error("vite build --config vite.proto.config.ts failed");
+      process.exit(2);
+    }
+  }
+  const port = await freePort();
+  preview = spawn("npx", ["vite", "preview", "--config", "vite.proto.config.ts", "--host", "127.0.0.1", "--port", String(port), "--strictPort"], { cwd: CONSOLE_DIR, stdio: "ignore" });
+  process.on("exit", () => preview.kill("SIGTERM"));
+  BASE = `http://127.0.0.1:${port}/queue-proto.html`;
+}
+// Whatever answers at BASE must be this fixture page — never measure a server
+// we cannot identify.
+{
+  let html = null;
+  for (let i = 0; i < 100 && html === null; i++) {
+    try {
+      const res = await fetch(BASE);
+      if (res.ok) {
+        html = await res.text();
+      }
+    } catch {
+      // preview still starting
+    }
+    if (html === null) {
+      await sleep(200);
+    }
+  }
+  if (html === null) {
+    console.error(`${BASE} never served — UNVERIFIED`);
+    process.exit(2);
+  }
+  if (!html.includes('id="queue-proto-root"')) {
+    console.error(`${BASE} is not the queue-proto fixture page — refusing to measure`);
+    process.exit(2);
+  }
+}
 
 async function devtoolsTarget() {
   for (let i = 0; i < 100; i++) {
