@@ -52,3 +52,33 @@ export function RowFields({ task, now }: { task: ProtoTask; now: string }) {
     </>
   );
 }
+
+/** Board card fields — deliberately fewer lines than the dense list row. The
+ * card lives inside a fixed-height virtual row (76/96px) with
+ * overflow:hidden, so every extra line is clipped content. The column head
+ * already names the state and the second age column adds nothing a card
+ * needs, so both stay out; what remains is identity: pri · id · age · stale ·
+ * title (clamped) · lane/claimant. */
+export function CardFields({ task, now }: { task: ProtoTask; now: string }) {
+  const stale = isStale(task, now);
+  return (
+    <>
+      <span className="qp-cell qp-pri">p{task.priority}</span>
+      <span className="qp-cell qp-id">#{task.id}</span>
+      <span className="qp-cell qp-age" title="days since created_at">
+        <AgeCell days={ageDays(now, task.created_at)} />
+      </span>
+      {stale ? (
+        <span className="qp-cell qp-flag">
+          <span className="qp-stale" title="age ≥ 7 days does not imply the premise is still valid">
+            ⚠ stale
+          </span>
+        </span>
+      ) : null}
+      <span className="qp-cell qp-title">{taskPreview(task)}</span>
+      <span className="qp-cell qp-lane">
+        {task.lane}/{task.claimant === null ? <span className="qp-unknown">unknown</span> : task.claimant}
+      </span>
+    </>
+  );
+}

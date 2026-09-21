@@ -22,9 +22,6 @@ body {
   min-height: 0;
   overflow: hidden;
 }
-#qp-main[inert] {
-  user-select: none;
-}
 .qp-body {
   display: flex;
   flex-direction: column;
@@ -453,6 +450,7 @@ body {
 .qp-card {
   display: flex;
   flex-wrap: wrap;
+  align-content: flex-start;
   gap: 0.15rem 0.6rem;
   width: 100%;
   height: 100%;
@@ -462,10 +460,20 @@ body {
   color: inherit;
   font: inherit;
   font-size: 0.85em;
+  line-height: 1.3;
   padding: 0.3rem 0.5rem;
   cursor: pointer;
   text-align: left;
   overflow: hidden;
+}
+/* Cards wrap freely — the fixed list-column widths would force extra lines
+ * the fixed card height cannot fit. Everything on a card is auto-width. */
+.qp-card .qp-pri,
+.qp-card .qp-id,
+.qp-card .qp-age,
+.qp-card .qp-flag {
+  width: auto;
+  text-align: left;
 }
 .qp-card.selected {
   outline: 2px solid #1967d2;
@@ -477,6 +485,14 @@ body {
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
+}
+.qp-board.compact .qp-card .qp-title {
+  -webkit-line-clamp: 1;
+}
+.qp-card .qp-lane {
+  flex-basis: 100%;
+  width: auto;
+  white-space: nowrap;
 }
 
 /* shared drawer */
@@ -495,6 +511,15 @@ body {
 }
 .qp-drawer:focus {
   outline: none;
+}
+/* While the non-modal panel is open, reserve its width inside #qp-main so
+ * every list row and board column stays pointer-reachable — without this the
+ * fixed overlay covers the rightmost board column and its horizontal scroller
+ * can never bring it out from under the panel. */
+@media (min-width: 641px) {
+  .qp-peek-open #qp-main {
+    padding-right: min(30rem, 92vw);
+  }
 }
 .qp-drawer-head {
   display: flex;
@@ -522,6 +547,30 @@ body {
 .qp-drawer-nav button:disabled {
   opacity: 0.45;
   cursor: default;
+}
+.qp-copylink {
+  border: 1px solid #8a8a8a;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: 0.72em;
+  padding: 0.05rem 0.45rem;
+  border-radius: 0.3rem;
+  cursor: pointer;
+  vertical-align: middle;
+}
+/* full-page deep link /ui/tasks/<id> — same detail sections, page width */
+.qp-taskpage {
+  max-width: 46rem;
+  padding: 0.8rem 1rem;
+}
+.qp-taskpage-queue {
+  font-size: 0.85em;
+  border: 1px solid #8a8a8a;
+  border-radius: 0.3rem;
+  padding: 0.15rem 0.5rem;
+  text-decoration: none;
+  color: inherit;
 }
 .qp-drawer-title {
   overflow-wrap: anywhere;
@@ -658,10 +707,23 @@ body {
   .qp-age:last-child {
     display: none;
   }
+  /* The peek panel is non-modal — it must never cover the whole viewport.
+   * A bottom sheet leaves the list visible and clickable above it, so
+   * switching to another row stays possible at any width. Height is capped so
+   * at least one list row fits between the toolbar and the sheet; the matching
+   * content padding lets every row scroll into that band. */
   .qp-drawer {
-    inset: 0;
+    inset: auto 0 0 0;
     width: 100%;
+    height: min(60vh, 280px);
     border-left: none;
+    border-top: 1px solid #8a8a8a;
+  }
+  .qp-peek-open .qp-content {
+    padding-bottom: min(60vh, 280px);
+  }
+  .qp-peek-open .qp-list {
+    min-height: 0;
   }
   .qp-count {
     flex-basis: 100%;

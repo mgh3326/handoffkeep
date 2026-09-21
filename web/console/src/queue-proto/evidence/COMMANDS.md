@@ -70,6 +70,26 @@ directly); the toggle rect does not overlap the first `.qp-rail-h` content
 rect; and a second pointer click closes the rail. Exits nonzero on any
 failure.
 
+## Card-fit assertion (board clipping gate)
+
+```bash
+node src/queue-proto/evidence/assert-card-fit.mjs
+```
+
+With no argument the script builds `dist-proto/` if absent and serves it on
+its own ephemeral port — never trust a shared default port for this check.
+An explicit base URL is accepted but validated to serve the fixture page.
+
+Spawns Chrome `--headless=new --remote-debugging-port=9334` and measures real
+layout — jsdom computes none, so this is the only fit check that counts. For
+each density (`comfortable`, `compact`) at 100% and 125% zoom
+(`deviceScaleFactor`), it scrolls every `.qp-col-cards` virtual list end to
+end — two rAF frames per position so React commits each window before the
+read — and asserts `scrollHeight <= clientHeight` for every `.qp-card`. The
+measured count is cross-checked against the `data-col-count` column heads so
+a skipped card is a failure, not a vacuous pass. Exits nonzero when any card
+overflows or coverage is incomplete.
+
 ## Manual equivalents
 
 ```bash
@@ -102,13 +122,13 @@ the supported evidence route; it waits for the elements to populate.)
   all nine.
 - `grouped-1440x900.png` — area→bundle grouping with collapsed signal
   rollups.
-- `drawer-1440x900.png` / `diag-drawer-1440x900.json` — shared drawer open,
-  `#qp-main` inert, close control in viewport.
+- `drawer-1440x900.png` / `diag-drawer-1440x900.json` — shared peek panel
+  open; the panel is non-modal so `#qp-main` is never inert.
 - `list-390x844.png` / `diag-390x844.json` — scrollWidth=clientWidth=390,
   zero body horizontal scroll; rail overlay + toggle keeps core controls
   reachable.
-- `drawer-390x844.png` / `diag-drawer-390x844.json` — full-screen drawer,
-  `inert` on background.
+- `drawer-390x844.png` / `diag-drawer-390x844.json` — narrow viewport: the
+  peek panel docks as a bottom sheet so the list above stays clickable.
 - `diag-zoom200.json` — `--force-device-scale-factor=2` equivalent via CDP
   deviceScaleFactor=2: essential controls in viewport.
 - `perf-5000.json` / `perf-5000.png` — 20 raw filter-to-paint observations

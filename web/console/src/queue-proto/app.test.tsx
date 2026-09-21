@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { QueueProtoApp } from "./QueueProtoApp";
 import { buildDatasets } from "./fixtures";
@@ -13,6 +13,11 @@ function rowIds(container: HTMLElement, selector: string): Set<number> {
 describe("QueueProtoApp", () => {
   beforeEach(() => {
     localStorage.clear();
+  });
+  afterEach(() => {
+    // Navigation state rides the URL — a test that left layout/view/task in it
+    // would pollute every later render.
+    window.history.replaceState(null, "", "/queue-proto.html");
   });
 
   it("labels the dataset as synthetic and shows the completeness status line", () => {
@@ -59,6 +64,20 @@ describe("QueueProtoApp", () => {
     expect(boardSet).toEqual(listSet);
     fireEvent.click(within(container.querySelector("#qp-layout-toggle")!).getByRole("button", { name: "list" }));
     expect(rowIds(container, ".qp-row")).toEqual(listSet);
+  });
+
+  it("board cards render the reduced field set sized for the fixed row height", () => {
+    const { container } = render(<QueueProtoApp datasets={datasets} initialSet="sample200" />);
+    fireEvent.click(screen.getByRole("link", { name: "All" }));
+    fireEvent.click(within(container.querySelector("#qp-layout-toggle")!).getByRole("button", { name: "board" }));
+    const card = container.querySelector(".qp-card")!;
+    // Identity lines only: one age, no state cell — the column head already
+    // names the state, and every extra line is clipped by the fixed-height
+    // virtual row. Real fit is measured by evidence/assert-card-fit.mjs.
+    expect(card.querySelectorAll(".qp-age").length).toBe(1);
+    expect(card.querySelector(".qp-state")).toBeNull();
+    expect(card.querySelector(".qp-title")).toBeTruthy();
+    expect(card.querySelector(".qp-lane")).toBeTruthy();
   });
 
   it("applied filters show as chips and clear", () => {

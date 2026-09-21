@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { BoardDetail } from "../board/types";
 import { applyView, boardColumns, countByView, EMPTY_FILTERS, groupByArea } from "./adapter";
+import { boardTaskToProto } from "./boardtask";
 import { flattenGrouped } from "./ListView";
 import { DetailDrawer, type DetailFetchState } from "./DetailDrawer";
 import { ListView } from "./ListView";
@@ -39,17 +40,34 @@ function applyNavParams(state: ProtoState, params: URLSearchParams): ProtoState 
   return next;
 }
 
-/** The nav-relevant part of state — only view/layout/grouping enter browser
- * history, so Back steps through screens, never through filter keystrokes. */
-function navKey(state: ProtoState): string {
-  return `${state.view}|${state.layout}|${state.grouping}`;
+/** ?task=<id> deep link — the server shape-checks the value, so a value that
+ * reaches the page is numeric or absent; a hand-crafted client-side value is
+ * still discarded rather than trusted. */
+function parseTaskParam(raw: string | null): number | null {
+  if (raw === null || !/^[1-9][0-9]{0,14}$/.test(raw)) {
+    return null;
+  }
+  const id = Number(raw);
+  return Number.isSafeInteger(id) ? id : null;
 }
 
-function navParams(state: ProtoState): string {
+/** The nav-relevant part of state — only view/layout/grouping/open-task enter
+ * browser history, so Back steps through screens and open tasks, never
+ * through filter keystrokes. */
+function navKey(state: ProtoState, openId: number | null): string {
+  return `${state.view}|${state.layout}|${state.grouping}|${openId ?? ""}`;
+}
+
+function navParams(state: ProtoState, openId: number | null): string {
   const params = new URLSearchParams(window.location.search);
   params.set("view", state.view);
   params.set("layout", state.layout);
   params.set("group", state.grouping);
+  if (openId !== null) {
+    params.set("task", String(openId));
+  } else {
+    params.delete("task");
+  }
   return `?${params.toString()}`;
 }
 
@@ -82,7 +100,7 @@ export function QueueProtoApp({ datasets, initialSet, storage, diag = false, per
     sidebarCollapsed: typeof window !== "undefined" ? window.innerWidth < 900 : false,
   }));
   const [views] = useState<Record<string, SavedView>>(loaded.views);
-  const [openId, setOpenId] = useState<number | null>(null);
+  const [openId, setOpenId] = useState<number | null>(() => parseTaskParam(params.get("task")));
   const [details, setDetails] = useState<Record<number, DetailFetchState>>({});
   const rootRef = useRef<HTMLDivElement>(null);
   const headRef = useRef<HTMLElement>(null);
@@ -90,7 +108,7 @@ export function QueueProtoApp({ datasets, initialSet, storage, diag = false, per
   const openerRef = useRef<HTMLElement | null>(null);
   const diagRef = useRef<HTMLPreElement>(null);
   const perfRef = useRef<HTMLPreElement>(null);
-  const navRef = useRef(navKey(state));
+  const navRef = useRef(navKey(state, openId));
 
   const visible = useMemo(() => applyView(dataset.tasks, state, dataset.states), [dataset.tasks, dataset.states, state]);
   const viewCounts = useMemo(() => countByView(dataset.tasks, state.filters, dataset.states), [dataset.tasks, dataset.states, state.filters]);
@@ -122,48 +140,48 @@ export function QueueProtoApp({ datasets, initialSet, storage, diag = false, per
     savePresentation(state, views, storage);
   }, [state, views, storage]);
 
-  // Browser history: a nav-level change (view/layout/grouping) pushes one
-  // entry; Back restores it via popstate. Filter edits never push entries.
-  // The entry URL is normalized on mount so every history entry carries the
-  // full nav params.
+  // Browser history: a nav-level change (view/layout/grouping/open task)
+  // pushes one entry; Back restores it via popstate. Filter edits never push
+  // entries. The entry URL is normalized on mount so every history entry
+  // carries the full nav params.
   useEffect(() => {
-    window.history.replaceState(null, "", navParams(state));
+    window.history.replaceState(null, "", navParams(state, openId));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
-    const key = navKey(state);
+    const key = navKey(state, openId);
     if (key !== navRef.current) {
       navRef.current = key;
-      window.history.pushState(null, "", navParams(state));
+      window.history.pushState(null, "", navParams(state, openId));
     }
-  }, [state]);
+  }, [state, openId]);
 
   useEffect(() => {
     const onPop = () => {
       const p = new URLSearchParams(window.location.search);
+      const taskId = parseTaskParam(p.get("task"));
       setState((s) => {
         const next = applyNavParams(s, p);
         next.grouping = p.get("group") === "area" ? "area" : "none";
-        navRef.current = navKey(next);
+        navRef.current = navKey(next, taskId);
         return next;
       });
+      setOpenId(taskId);
     };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
   }, []);
 
-  // inert background + focus return to the originating row/card on close.
+  // Non-modal panel: the list is never inert. On close, focus returns to the
+  // originating row/card — but only when focus was inside the panel; focus
+  // already back in the list (peek navigation) is left alone. A deep-linked
+  // or unmounted opener has no row to return to, so focus lands on a stable
+  // queue control instead of document.body.
   useEffect(() => {
-    const el = mainRef.current;
-    if (!el) {
-      return;
-    }
-    if (openId !== null) {
-      el.setAttribute("inert", "");
-    } else {
-      el.removeAttribute("inert");
-      openerRef.current?.focus();
+    if (openId === null && !mainRef.current?.contains(document.activeElement)) {
+      const opener = openerRef.current;
+      (opener?.isConnected ? opener : document.getElementById("qp-rail-toggle"))?.focus();
     }
   }, [openId]);
 
@@ -173,7 +191,10 @@ export function QueueProtoApp({ datasets, initialSet, storage, diag = false, per
   // changes, at which point the rendered `details` snapshot is current.
   // Detail fetches are never cancelled: closing or navigating the drawer lets
   // the request finish and cache, so reopening hits the cache instead of a
-  // zombie "loading" entry. An "error" entry retries on the next open.
+  // zombie "loading" entry. An "error" entry retries on the next open. A 404
+  // is a resolved answer — the id does not exist — and is kept distinct from
+  // a transient failure both for the panel's "not found" state and so it is
+  // not retried on every render.
   useEffect(() => {
     if (openId === null || fetchDetail === undefined) {
       return;
@@ -187,8 +208,9 @@ export function QueueProtoApp({ datasets, initialSet, storage, diag = false, per
       (data) => {
         setDetails((d) => ({ ...d, [openId]: { status: "loaded", data } }));
       },
-      () => {
-        setDetails((d) => ({ ...d, [openId]: { status: "error" } }));
+      (err) => {
+        const status = (err as { status?: number } | null)?.status;
+        setDetails((d) => ({ ...d, [openId]: status === 404 ? { status: "notfound" } : { status: "error" } }));
       },
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -249,7 +271,18 @@ export function QueueProtoApp({ datasets, initialSet, storage, diag = false, per
     setState((s) => ({ ...s, view: "all", filters: EMPTY_FILTERS }));
   }, []);
 
-  const openTask = openId !== null ? dataset.tasks.find((t) => t.id === openId) ?? null : null;
+  // The open task resolves from the list dataset first; a deep link to a task
+  // outside the current filter — or outside a truncated dataset — falls back
+  // to the single-task detail fetch. Absent from the list must never mean
+  // "not found".
+  const openDetail = openId !== null ? details[openId] : undefined;
+  const openTask =
+    openId !== null
+      ? (dataset.tasks.find((t) => t.id === openId) ??
+        (openDetail?.status === "loaded" ? boardTaskToProto(openDetail.data.task) : null))
+      : null;
+  const openNotFound =
+    openId !== null && openTask === null && (fetchDetail === undefined || openDetail?.status === "notfound");
 
   // diag mode: measure the real DOM into <pre id="diag"> during commit so
   // headless --dump-dom / CDP captures always see populated facts.
@@ -281,7 +314,7 @@ export function QueueProtoApp({ datasets, initialSet, storage, diag = false, per
   }, [perfMode, dataset]);
 
   return (
-    <div className={`qp-root${state.sidebarCollapsed ? " rail-collapsed" : ""}`} ref={rootRef}>
+    <div className={`qp-root${state.sidebarCollapsed ? " rail-collapsed" : ""}${openId !== null ? " qp-peek-open" : ""}`} ref={rootRef}>
       <div id="qp-main" ref={mainRef}>
         <ViewRail dataset={dataset} view={state.view} counts={viewCounts} views={views} onSelectView={setView} onApplyView={applyNamedView} />
         <div className="qp-body">
@@ -337,11 +370,13 @@ export function QueueProtoApp({ datasets, initialSet, storage, diag = false, per
           <MeasurePanel />
         </div>
       </div>
-      {openTask ? (
+      {openId !== null ? (
         <DetailDrawer
           dataset={dataset}
+          taskId={openId}
           task={openTask}
-          detail={fetchDetail ? (details[openTask.id] ?? { status: "loading" }) : undefined}
+          detail={fetchDetail ? (openDetail ?? { status: "loading" }) : undefined}
+          notFound={openNotFound}
           orderedIds={orderedIds}
           onClose={close}
           onNav={setOpenId}
