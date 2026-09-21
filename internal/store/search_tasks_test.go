@@ -240,12 +240,16 @@ func TestSearchTasksCommentsOptional(t *testing.T) {
 	ctx := context.Background()
 	hit := seedTaskRow(t, pool, "lane-a", "commentprobe in title", "backlog")
 	other := seedTaskRow(t, pool, "lane-a", "unrelated title here", "backlog")
-	// Table absent (pre-#537 schema): search must still succeed.
+	// Table absent (pre-#537 schema): search must still succeed. Drop first so
+	// the test stays valid after #537's migration lands and creates it.
+	if _, err := pool.Exec(ctx, `DROP TABLE IF EXISTS task_comments`); err != nil {
+		t.Fatal(err)
+	}
 	xs, err := s.Search(ctx, "commentprobe", "tasks", "", 10)
 	if err != nil || len(xs) != 1 {
 		t.Fatalf("absent task_comments: xs=%v err=%v", resultKeys(xs), err)
 	}
-	if _, err = pool.Exec(ctx, `CREATE TABLE task_comments(id BIGSERIAL PRIMARY KEY, task_id BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE, body TEXT NOT NULL, author TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL)`); err != nil {
+	if _, err = pool.Exec(ctx, `CREATE TABLE IF NOT EXISTS task_comments(id BIGSERIAL PRIMARY KEY, task_id BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE, body TEXT NOT NULL, author TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL)`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = pool.Exec(ctx, `INSERT INTO task_comments(task_id,body,author,created_at) VALUES($1,'코멘트 본문 고유키워드','tester',now())`, other); err != nil {
@@ -278,7 +282,8 @@ func TestSearchTasksCommentsOptional(t *testing.T) {
 func TestSearchTasksCommentDedupeKeepsPage(t *testing.T) {
 	s, pool := searchTestStore(t)
 	ctx := context.Background()
-	if _, err := pool.Exec(ctx, `CREATE TABLE task_comments(id BIGSERIAL PRIMARY KEY, task_id BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE, body TEXT NOT NULL, author TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL)`); err != nil {
+	// IF NOT EXISTS: survives whichever of #537/#538 merges first.
+	if _, err := pool.Exec(ctx, `CREATE TABLE IF NOT EXISTS task_comments(id BIGSERIAL PRIMARY KEY, task_id BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE, body TEXT NOT NULL, author TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL)`); err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 25; i++ {

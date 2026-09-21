@@ -2166,7 +2166,7 @@ func (s *Store) searchTasks(ctx context.Context, q, lane string, limit int) ([]S
 		// page could report "complete" while other tasks went unfetched.
 		parts = append(parts, `(SELECT DISTINCT ON (t.id) 'tasks' scope,t.id::text key,t.lane session,t.kind,t.title,`+
 			`COALESCE(NULLIF(ts_headline('simple',c.body,plainto_tsquery('simple',$2),'MaxWords=24,MinWords=8'),''),left(c.body,160)) snippet,`+
-			refsExpr+` refs,t.created_at,1 match_rank FROM task_comments c JOIN tasks t ON t.id=c.task_id WHERE ($1='' OR t.lane=$1) AND (to_tsvector('simple',c.body) @@ plainto_tsquery('simple',$2) OR c.body ILIKE '%'||$4||'%' ESCAPE '\') AND NOT `+titleMatch+` ORDER BY t.id, c.created_at DESC)`)
+			refsExpr+` refs,t.created_at,1 match_rank FROM task_comments c JOIN tasks t ON t.id=c.task_id WHERE ($1='' OR t.lane=$1) AND (to_tsvector('simple',c.body) @@ plainto_tsquery('simple',$2) OR c.body ILIKE '%'||$4||'%' ESCAPE '\') AND NOT `+titleMatch+` ORDER BY t.id, c.created_at DESC, c.id DESC)`)
 	}
 	rows, e := s.pool.Query(ctx, `SELECT scope,key,session,kind,title,snippet,refs,created_at FROM (`+strings.Join(parts, " UNION ALL ")+") r ORDER BY r.match_rank,r.created_at DESC LIMIT $3", lane, q, limit+1, like)
 	if e != nil {
