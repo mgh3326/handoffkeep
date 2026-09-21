@@ -426,7 +426,8 @@ func (counter p4OwnedDecisionCounter) counts(t *testing.T) p4OpenDecisionCounts 
 		(SELECT COUNT(*) FROM relay_events e WHERE e.id = ANY($3) AND e.kind='lane.event'
 		AND e.text LIKE '[decision-needed]%' AND NOT EXISTS (
 			SELECT 1 FROM relay_events resolved WHERE resolved.kind='lane.event'
-			AND resolved.owner_lane=e.owner_lane AND resolved.text LIKE '[decision-answered]%' AND resolved.id>e.id
+			AND resolved.owner_lane=e.owner_lane AND resolved.id>e.id
+			AND resolved.text LIKE '[decision-answered] #' || e.id::text || ':%'
 		))`, counter.taskIDs, counter.escalationIDs, counter.laneIDs).Scan(&counts.Tasks, &counts.Escalations, &counts.Lanes)
 	if err != nil {
 		t.Fatal(err)
@@ -1245,16 +1246,20 @@ func p4LaneDecisions(t *testing.T, s *store.Store, lane string, count int) []int
 		ids = append(ids, event.ID)
 	}
 	// The package shares one database. Left open, these rows would render on
-	// every later test's decision page and slow the suite to a timeout. A
-	// single answered event on this lane closes all of them, which is the same
-	// rule the console itself uses. t.Context is already cancelled by the time
-	// cleanup runs, so this uses its own context.
+	// every later test's decision page and slow the suite to a timeout. Each
+	// question closes only through an exact "[decision-answered] #<id>:" answer,
+	// so cleanup writes one per seeded row, which is the same rule the console
+	// itself uses. t.Context is already cancelled by the time cleanup runs, so
+	// this uses its own context.
 	t.Cleanup(func() {
-		if _, _, err := s.AppendRelayEvent(context.Background(), store.RelayEvent{
-			Kind: "lane.event", JobID: "ht-cleanup", OwnerLane: lane,
-			Text: "[decision-answered] HT cleanup", EventID: "ht-cleanup-" + lane,
-		}); err != nil {
-			t.Logf("lane decision cleanup: %v", err)
+		for index, id := range ids {
+			if _, _, err := s.AppendRelayEvent(context.Background(), store.RelayEvent{
+				Kind: "lane.event", JobID: "ht-cleanup", OwnerLane: lane,
+				Text:    "[decision-answered] #" + strconv.FormatInt(id, 10) + ": HT cleanup",
+				EventID: fmt.Sprintf("ht-cleanup-%s-%d", lane, index),
+			}); err != nil {
+				t.Logf("lane decision cleanup: %v", err)
+			}
 		}
 	})
 	return ids
@@ -1657,7 +1662,7 @@ func TestUIP4StaleEscalationsFoldIntoSignals(t *testing.T) {
 				t.Logf("stale escalation cleanup: %v", err)
 			}
 		}
-		if _, _, err := s.AppendRelayEvent(context.Background(), store.RelayEvent{Kind: "lane.event", OwnerLane: lane, EventID: "stale-cleanup-" + lane, Text: "[decision-answered] cleanup"}); err != nil {
+		if _, _, err := s.AppendRelayEvent(context.Background(), store.RelayEvent{Kind: "lane.event", OwnerLane: lane, EventID: "stale-cleanup-" + lane, Text: "[decision-answered] #" + strconv.FormatInt(laneEvent.ID, 10) + ": cleanup"}); err != nil {
 			t.Logf("stale lane cleanup: %v", err)
 		}
 	})
