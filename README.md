@@ -50,7 +50,7 @@ transaction, so it is never claimable; at most one item per source is open.
 
 ```bash
 gh pr view <url> --json url,state,mergeCommit,mergedAt > pr.json
-handoffkeep tasks disposition add --lane director-1 --origin-pr <url> --gh-json pr.json \
+handoffkeep tasks disposition add --lane lane-a --origin-pr <url> --gh-json pr.json \
   --residuals residuals.json --recommended C [--install-state unknown]
 handoffkeep tasks disposition summary [--as-of RFC3339] [--json]
 handoffkeep tasks disposition apply <id> [--note text]

@@ -51,7 +51,7 @@ func TestDispositionAddCopiesToolFacts(t *testing.T) {
 	gh := writeTestFile(t, "pr.json", `{"url":"`+testOriginPR+`","state":"MERGED","mergeCommit":{"oid":"`+strings.Repeat("b", 40)+`"},"mergedAt":"2026-09-21T01:02:03Z"}`)
 	residuals := writeTestFile(t, "r.json", `["log rotation unverified",{"title":"probe missing","severity":"SHOULD","evidence":"report §3"}]`)
 	var out bytes.Buffer
-	err := run([]string{"tasks", "disposition", "add", "--lane", "director-1", "--origin-pr", testOriginPR, "--gh-json", gh, "--residuals", residuals, "--recommended", "A"}, &out, &bytes.Buffer{})
+	err := run([]string{"tasks", "disposition", "add", "--lane", "lane-a", "--origin-pr", testOriginPR, "--gh-json", gh, "--residuals", residuals, "--recommended", "A"}, &out, &bytes.Buffer{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +80,7 @@ func TestDispositionAddRejectsUnverifiedGHOutput(t *testing.T) {
 	}
 	for name, body := range cases {
 		gh := writeTestFile(t, "pr.json", body)
-		if err := run([]string{"tasks", "disposition", "add", "--lane", "director-1", "--origin-pr", testOriginPR, "--gh-json", gh, "--recommended", "A"}, &bytes.Buffer{}, &bytes.Buffer{}); err == nil {
+		if err := run([]string{"tasks", "disposition", "add", "--lane", "lane-a", "--origin-pr", testOriginPR, "--gh-json", gh, "--recommended", "A"}, &bytes.Buffer{}, &bytes.Buffer{}); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
 	}
