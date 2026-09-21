@@ -80,6 +80,29 @@ counts, integrity digests, and the task rows — read inside one repeatable-read
 read-only transaction. `handoffkeep tasks export` prints the document
 unchanged; see docs/contract.md for the full envelope and digest contract.
 
+### Task comments
+
+Each task has an append-only comment thread in `task_comments`. A comment is
+data only: writing one never changes the task's state, priority, refs,
+`task_events`, lane events, or any decision, whatever its text says (a
+`[decision] #42: …` comment is just text). There is no edit or delete; a
+database trigger rejects `UPDATE`, `DELETE`, and `TRUNCATE`, so a correction is
+a new comment. The author is always the bearer-token client id — a request
+carrying `author` or `created_by` is refused with `400 author_not_accepted`.
+Comment ids increase in commit order, so `after_id` works as a read cursor.
+
+```bash
+handoffkeep tasks comment 42 --body "verified on head abc123"
+handoffkeep tasks comment 42 --file notes.md   # --file - reads stdin
+handoffkeep tasks comments 42 [--after-id N --limit N]
+```
+
+`POST /v1/tasks/{id}/comments` takes `{"body": "..."}` and returns 201.
+`GET /v1/tasks/{id}/comments?after_id=&limit=` returns `{"comments": [...]}` in
+id order (limit default 100, max 500). Errors are distinct: 401
+`unauthorized`, 400 `comment_empty`, 413 `comment_too_long` (body over 64 KiB),
+404 `not_found` (no such task), 400 `secret_like_content`.
+
 ### Optional hk → Linear synchronization
 
 `serve --linear-sync` is off by default. The `handoffkeep-work(:8801)`
