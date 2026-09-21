@@ -107,7 +107,7 @@ func (h *Handler) glance(w http.ResponseWriter, r *http.Request) {
 		Lanes:       []json.RawMessage{},
 		Jobs:        []json.RawMessage{},
 		Tasks: glanceTasks{
-			ByState:          byState,
+			ByState: byState,
 			// Disposition items are a separate figure (never summed): they are
 			// answered only on the operator disposition routes.
 			DecisionsPending: taskDecisions + len(laneDecisions),
