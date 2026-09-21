@@ -138,6 +138,12 @@ func writeAction(path string) string {
 		return "decision-batch"
 	case "/ui/compose":
 		return "compose"
+	case "/ui/dispositions/answer":
+		return "disposition"
+	case "/ui/dispositions/accept-batch":
+		return "disposition-batch"
+	case "/ui/dispositions/renotify":
+		return "disposition-renotify"
 	default:
 		if strings.HasPrefix(path, "/ui/api/nodes/") && strings.HasSuffix(path, "/accepting") {
 			return "accepting"
@@ -203,6 +209,13 @@ func (h *Handler) answerDecision(w http.ResponseWriter, r *http.Request, email s
 		}
 		if !found {
 			h.decisionResult(w, r, email, "Task not found.", http.StatusBadRequest)
+			return
+		}
+		// Disposition items have their own operator route; refusing here keeps
+		// the generic emit-then-transition path from emitting an answer the
+		// store guard would then refuse to record.
+		if task.Refs.Disposition != nil {
+			h.decisionResult(w, r, email, "처분 항목은 처분 구획에서만 답합니다.", http.StatusConflict)
 			return
 		}
 		if task.State != "needs_decision" {
@@ -480,7 +493,7 @@ func (h *Handler) answerDecisionBatch(w http.ResponseWriter, r *http.Request, em
 }
 
 func (h *Handler) renderDecisionBatch(w http.ResponseWriter, r *http.Request, email, notice string, results []decisionBatchResult) {
-	data, err := h.decisionData(r, h.csrfForForm(w, r, email), notice)
+	data, err := h.decisionData(r, h.csrfForForm(w, r, email), email, notice)
 	if err != nil {
 		http.Error(w, "fleet console unavailable", http.StatusInternalServerError)
 		return
@@ -497,6 +510,9 @@ func (h *Handler) openBatchDecision(r *http.Request, kind string, id int64) (dec
 		}
 		if !found || task.State != "needs_decision" {
 			return decisionTarget{}, http.StatusConflict, "이미 답변됨"
+		}
+		if task.Refs.Disposition != nil {
+			return decisionTarget{}, http.StatusConflict, "처분 항목은 처분 구획에서만 답합니다."
 		}
 		target := decisionTarget{Lane: task.Lane, Structured: task.Refs.DecisionOptions}
 		if target.Structured == nil {

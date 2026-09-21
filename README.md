@@ -33,7 +33,42 @@ handoffkeep tasks export [--lane L --state S --parent-lane P --limit N]
 
 `add` accepts `--parent-lane`, `--pr`, `--head-sha`, `--report-path`, and
 `--job-id` as durable references. `transition` accepts the same reference flags.
-`needs_decision` always requires `--question`.
+`needs_decision` always requires `--question`. `add` also accepts the typed
+origin relations `--origin-pr <merged PR URL>` and `--origin-task <id>`
+(`refs.origin_pr` / `refs.origin_task`, "this row came from"; `closing_pr` is
+reserved for #494).
+
+### Disposition items (merge → operator)
+
+A disposition item is a `kind=decide` task whose `refs.disposition` records one
+source (exactly one of `origin_pr` or `origin_task`), facts copied from tools
+(merge SHA and time from `gh pr view --json url,state,mergeCommit,mergedAt`,
+install state with a witness doc or `unknown`, residual count from a list), a
+closed choice set (A 배포 · B 후속 발주 · C 잔여 수용 · D 보류 · E 조치 없음)
+and one recommendation. It is created directly in `needs_decision` inside one
+transaction, so it is never claimable; at most one item per source is open.
+
+```bash
+gh pr view <url> --json url,state,mergeCommit,mergedAt > pr.json
+handoffkeep tasks disposition add --lane director-1 --origin-pr <url> --gh-json pr.json \
+  --residuals residuals.json --recommended C [--install-state unknown]
+handoffkeep tasks disposition summary [--as-of RFC3339] [--json]
+handoffkeep tasks disposition apply <id> [--note text]
+```
+
+Only the operator's Access-authenticated web route answers an item
+(`/ui/dispositions/answer`, `/ui/dispositions/accept-batch`); generic
+transitions, `decisions resolve`, and compose are refused with
+`disposition_operator_only`. Silence changes nothing: no code path answers,
+demotes, or claims an open item. `apply` records the director's application of
+the operator's answer with legal edges only (A/B/C → `merged`, D → `hold`,
+E → `dropped`); an item never returns to `backlog`. An "A 배포" answer is
+consent to order a deploy; deploy windows and the installer procedure are
+unchanged. `summary` is the one definition of the digest header
+(`미처분 n · 최고령 x일`, plus `다음 묶음 m건` beyond 50) and is replayed
+from `task_events`, so `--as-of` reproduces a past header. Bearer routes:
+`POST /v1/tasks/dispositions`, `GET /v1/tasks/dispositions/summary`,
+`POST /v1/tasks/dispositions/{id}/apply`.
 
 ```mermaid
 stateDiagram-v2

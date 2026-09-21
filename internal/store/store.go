@@ -55,6 +55,13 @@ type TaskRefs struct {
 	JobID           string           `json:"job_id,omitempty"`
 	DecisionOptions *DecisionOptions `json:"decision_options,omitempty"`
 	Linear          *TaskLinear      `json:"linear,omitempty"`
+	// OriginPR and OriginTask are the typed "this row came from" relations
+	// shared with #494 (hk:doc design/2026-09-21/task493-disposition-contract
+	// §3). Unknown refs keys are dropped by the next transition, so these names
+	// are part of the durable contract, not presentation.
+	OriginPR    string       `json:"origin_pr,omitempty"`
+	OriginTask  int64        `json:"origin_task,omitempty"`
+	Disposition *Disposition `json:"disposition,omitempty"`
 }
 
 type TaskLinear struct {
@@ -829,6 +836,15 @@ func validTaskRefs(x TaskRefs) bool {
 	if x.Linear != nil && !validTaskLinear(*x.Linear) {
 		return false
 	}
+	if x.OriginPR != "" && !originPRRE.MatchString(x.OriginPR) {
+		return false
+	}
+	if x.OriginTask < 0 {
+		return false
+	}
+	if x.Disposition != nil && !validDisposition(x) {
+		return false
+	}
 	return true
 }
 
@@ -869,6 +885,10 @@ func rejectTaskRefs(x TaskRefs) error {
 		values = append(values, x.Linear.Tier, x.Linear.Grade, x.Linear.Brief, x.Linear.Report, x.Linear.Verify, x.Linear.Decision, x.Linear.DeploySHA)
 		values = append(values, x.Linear.Labels...)
 	}
+	values = append(values, x.OriginPR)
+	if x.Disposition != nil {
+		values = append(values, x.Disposition.Facts.ResidualDoc, x.Disposition.Facts.Install.Witness)
+	}
 	return guard.Reject(strings.Join(values, "\n"))
 }
 
@@ -889,6 +909,12 @@ func mergeTaskRefs(old, patch TaskRefs) TaskRefs {
 	}
 	if patch.DecisionOptions != nil {
 		old.DecisionOptions = patch.DecisionOptions
+	}
+	if patch.OriginPR != "" {
+		old.OriginPR = patch.OriginPR
+	}
+	if patch.OriginTask != 0 {
+		old.OriginTask = patch.OriginTask
 	}
 	if patch.Linear != nil {
 		merged := TaskLinear{}
@@ -948,6 +974,11 @@ const taskColumns = `id,lane,parent_lane,title,kind,state,priority,refs,claimed_
 func (s *Store) CreateTask(ctx context.Context, x Task) (Task, error) {
 	if !validTask(x) {
 		return x, errors.New("invalid task")
+	}
+	// Disposition items are born only through CreateDisposition, which moves
+	// them to needs_decision inside the creating transaction.
+	if x.Refs.Disposition != nil {
+		return x, errors.New("invalid task: disposition items use CreateDisposition")
 	}
 	if err := guard.Reject(x.Title); err != nil {
 		return x, err
@@ -1069,6 +1100,11 @@ func (s *Store) TransitionTask(ctx context.Context, id int64, to, by, note strin
 		if err := rejectTaskRefs(*refs); err != nil {
 			return Task{}, err
 		}
+		// The disposition object (and its answer) is written only by
+		// CreateDisposition and AnswerDisposition(Batch).
+		if refs.Disposition != nil {
+			return Task{}, errors.New("invalid task transition: disposition refs are not patchable")
+		}
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -1083,6 +1119,19 @@ func (s *Store) TransitionTask(ctx context.Context, id int64, to, by, note strin
 		return Task{}, err
 	}
 	from := x.State
+	// Placed after the row lock and before the transition-table check so every
+	// generic caller (API, MCP, CLI, UI generic decision forms) is refused while
+	// a disposition item awaits the operator, whatever edge it asks for. The
+	// operator's answer uses AnswerDisposition, which does not come through here.
+	if x.Refs.Disposition != nil {
+		if from == "needs_decision" {
+			return Task{}, ErrDispositionOperatorOnly
+		}
+		// A disposition item never returns to backlog: NextTask would claim it.
+		if to == "backlog" || (refs != nil && refs.DecisionOptions != nil) {
+			return Task{}, ErrTaskConflict
+		}
+	}
 	if !taskTransitionAllowed(from, to) {
 		return Task{}, ErrTaskConflict
 	}
@@ -1091,6 +1140,11 @@ func (s *Store) TransitionTask(ctx context.Context, id int64, to, by, note strin
 	}
 	if refs != nil {
 		x.Refs = mergeTaskRefs(x.Refs, *refs)
+		// A patch is validated alone above; a disposition item's merged refs
+		// must still be a valid disposition (one origin, closed options).
+		if x.Refs.Disposition != nil && !validTaskRefs(x.Refs) {
+			return Task{}, errors.New("invalid task transition: disposition refs")
+		}
 	}
 	if to == "needs_decision" && x.Refs.DecisionOptions != nil {
 		finalText := note + "\n" + FormatDecisionOptions(*x.Refs.DecisionOptions)
@@ -1527,6 +1581,8 @@ type TaskDecision struct {
 }
 
 // ListOpenTaskDecisions implements the decision inbox task definition.
+// Disposition items are listed separately by ListOpenDispositions: they are
+// answered only through the operator disposition routes.
 func (s *Store) ListOpenTaskDecisions(ctx context.Context, limit int) ([]TaskDecision, error) {
 	if limit < 1 {
 		limit = 1000
@@ -1536,7 +1592,7 @@ func (s *Store) ListOpenTaskDecisions(ctx context.Context, limit int) ([]TaskDec
 	}
 	rows, err := s.pool.Query(ctx, `SELECT t.id,t.lane,t.parent_lane,t.title,t.kind,t.state,t.priority,t.refs,t.claimed_by,t.created_by,t.created_at,t.updated_at,
 		COALESCE((SELECT note FROM task_events WHERE task_id=t.id AND "to"='needs_decision' ORDER BY at DESC,id DESC LIMIT 1),'')
-		FROM tasks t WHERE t.state='needs_decision' ORDER BY t.updated_at DESC,t.id DESC LIMIT $1`, limit)
+		FROM tasks t WHERE t.state='needs_decision' AND NOT (t.refs ? 'disposition') ORDER BY t.updated_at DESC,t.id DESC LIMIT $1`, limit)
 	if err != nil {
 		return nil, err
 	}

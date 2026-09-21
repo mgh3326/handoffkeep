@@ -230,6 +230,39 @@ then relays it to the hub with the server-side credential. Hub status and up to
 64 KiB of its body are forwarded without exposing hub configuration; an
 unconfigured or unreachable hub returns `502 {"error":"hub_unavailable"}`.
 
+## Disposition items (#493)
+
+`/ui/decisions` renders a **처분 대기** section above the generic form. Its
+header is `DispositionSummary` (the same function as
+`handoffkeep tasks disposition summary`): `미처분 n · 최고령 x일`, then
+`다음 묶음 m건` when more than 50 items are open, and a detail line with
+pending application, holds, merged PRs without an item (candidates), and the
+last 24 hours of batch and single answers. Disposition items never appear in
+the generic task cards, `mode=recommended`, or glance's unresolved decisions;
+the generic answer routes refuse them before any hub emit.
+
+- `POST /ui/dispositions/answer` (`id`, `gen`, `key`) records the answer first
+  (`needs_decision → claimed`, `by=operator:<email>`, `refs.disposition.answer`)
+  and then emits `[decision] #<id>: <key>: <label> (from operator(web) <email>)`
+  with event ID `web-disposition-<id>-g<gen>`. A changed question generation is
+  409; a second answer is 409 and emits nothing.
+- `POST /ui/dispositions/accept-batch` answers, in one transaction, exactly the
+  oldest-50 snapshot the page rendered. The snapshot (`id:gen` list) is signed
+  with the process key and bound to the operator email, batch ID and issue time
+  (12 h). Items created after rendering are not in it; items whose generation
+  changed are skipped. One lane event per lane:
+  `[decision] disposition-batch <batch>: #a=A #b=C … (from operator(web) <email>)`
+  with ID `web-disposition-batch-<batch>-<lane>`.
+- If the emit fails the answer stays recorded and the item is listed under
+  **통지 대기**; `POST /ui/dispositions/renotify` (`event_id`) re-sends the same
+  text under the same event ID until that event reaches `relay_events`.
+
+These routes are outside `/ui/api/`, so `ServeHTTP` refuses Access service
+identities, and each handler independently requires an Access **email**
+identity before origin, CSRF, hub, or store checks. Requests without an Access
+assertion — including ones sent straight to the tailnet listener, which serves
+the same mux — are 401 before any handler runs.
+
 ## P4 decision options, batch answers, and resolve
 
 Structured choices are stored additively in `tasks.refs.decision_options`; no
