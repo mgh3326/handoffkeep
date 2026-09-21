@@ -1,4 +1,4 @@
-import type { FilterState, Layout, ProtoState } from "./types";
+import type { FilterState, Grouping, Layout, ProtoState } from "./types";
 
 type ToolbarProps = {
   state: ProtoState;
@@ -8,10 +8,37 @@ type ToolbarProps = {
    * (server-provided when live), never a hardcoded superset. */
   states: string[];
   visibleCount: number;
+  /** Rows came from a partial load, so the count is a lower bound. */
+  partial: boolean;
+  /** Offer the synthetic area→bundle draft grouping. Local preview only —
+   * the live queue has no classification source for it. */
+  allowAreaGrouping: boolean;
   onChange: (next: ProtoState) => void;
 };
 
-export function Toolbar({ state, lanes, kinds, states, visibleCount, onChange }: ToolbarProps) {
+const GROUPING_LABEL: Record<Grouping, string> = {
+  state: "상태별",
+  none: "그룹 없음",
+  area: "area→bundle (draft)",
+};
+
+/** Number of filters that narrow the row set — the "필터 n" count. */
+export function activeFilterCount(filters: FilterState): number {
+  return (
+    (filters.lane !== "" ? 1 : 0) +
+    (filters.kind !== "" ? 1 : 0) +
+    filters.hiddenStates.length +
+    (filters.minPriority !== null ? 1 : 0)
+  );
+}
+
+/**
+ * Toolbar: search, list/board, and one "필터 n" disclosure holding the
+ * secondary controls (lane, kind, states, priority, grouping, board columns).
+ * Applied filters also show as removable chips so a narrowed list is never
+ * mistaken for the whole queue.
+ */
+export function Toolbar({ state, lanes, kinds, states, visibleCount, partial, allowAreaGrouping, onChange }: ToolbarProps) {
   const setFilters = (filters: Partial<FilterState>) => onChange({ ...state, filters: { ...state.filters, ...filters } });
   const set = (part: Partial<ProtoState>) => onChange({ ...state, ...part });
 
@@ -41,25 +68,29 @@ export function Toolbar({ state, lanes, kinds, states, visibleCount, onChange }:
     chips.push({ label: `p≥${state.filters.minPriority}`, clear: () => setFilters({ minPriority: null }) });
   }
   if (state.grouping === "area") {
-    chips.push({ label: "grouped: area→bundle (draft)", clear: () => set({ grouping: "none" }) });
+    chips.push({ label: "grouped: area→bundle (draft)", clear: () => set({ grouping: "state" }) });
   }
+
+  const groupings: Grouping[] = allowAreaGrouping ? ["state", "none", "area"] : ["state", "none"];
+  const filterCount = activeFilterCount(state.filters);
+  const groupingNote = state.layout === "list" ? ` · ${GROUPING_LABEL[state.grouping]}` : "";
 
   return (
     <div className="qp-toolbar">
       <input
         id="qp-search"
         type="search"
-        placeholder="search title or #id"
+        placeholder="제목 또는 #id 검색"
         aria-label="search"
         value={state.filters.query}
         onChange={(event) => setFilters({ query: event.target.value })}
       />
-      <div id="qp-layout-toggle" className="qp-seg" role="group" aria-label="layout">
+      <div id="qp-layout-toggle" className="qp-seg hk-seg" role="group" aria-label="보기">
         {(["list", "board"] as Layout[]).map((layout) => (
           <button
             key={layout}
             type="button"
-            className={state.layout === layout ? "on" : ""}
+            className={`hk-btn${state.layout === layout ? " on" : ""}`}
             aria-pressed={state.layout === layout}
             onClick={() => set({ layout })}
           >
@@ -67,73 +98,75 @@ export function Toolbar({ state, lanes, kinds, states, visibleCount, onChange }:
           </button>
         ))}
       </div>
-      <button
-        type="button"
-        id="qp-group-toggle"
-        className={state.grouping === "area" ? "on" : ""}
-        aria-pressed={state.grouping === "area"}
-        onClick={() => set({ grouping: state.grouping === "area" ? "none" : "area" })}
-      >
-        group: {state.grouping === "area" ? "area→bundle" : "off"}
-      </button>
-      <button
-        type="button"
-        id="qp-density"
-        aria-pressed={state.density === "comfortable"}
-        onClick={() => set({ density: state.density === "compact" ? "comfortable" : "compact" })}
-      >
-        density: {state.density}
-      </button>
-      <select aria-label="lane filter" value={state.filters.lane} onChange={(event) => setFilters({ lane: event.target.value })}>
-        <option value="">lane: all</option>
-        {lanes.map((lane) => (
-          <option key={lane} value={lane}>
-            {lane}
-          </option>
-        ))}
-      </select>
-      <select aria-label="kind filter" value={state.filters.kind} onChange={(event) => setFilters({ kind: event.target.value })}>
-        <option value="">kind: all</option>
-        {kinds.map((kind) => (
-          <option key={kind} value={kind}>
-            {kind}
-          </option>
-        ))}
-      </select>
-      <details className="qp-more">
-        <summary>states</summary>
-        <fieldset className="qp-states">
-          {states.map((s) => (
-            <label key={s}>
-              <input type="checkbox" checked={!state.filters.hiddenStates.includes(s)} onChange={() => toggleHiddenState(s)} /> {s}
-            </label>
-          ))}
-        </fieldset>
-      </details>
-      {state.layout === "board" ? (
-        <details className="qp-more">
-          <summary>columns</summary>
+      <details className="qp-more qp-filter">
+        <summary className="hk-btn">필터 {filterCount}</summary>
+        <div className="qp-filter-panel">
+          <label className="qp-field">
+            <span>lane</span>
+            <select aria-label="lane filter" value={state.filters.lane} onChange={(event) => setFilters({ lane: event.target.value })}>
+              <option value="">lane: all</option>
+              {lanes.map((lane) => (
+                <option key={lane} value={lane}>
+                  {lane}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="qp-field">
+            <span>kind</span>
+            <select aria-label="kind filter" value={state.filters.kind} onChange={(event) => setFilters({ kind: event.target.value })}>
+              <option value="">kind: all</option>
+              {kinds.map((kind) => (
+                <option key={kind} value={kind}>
+                  {kind}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="qp-field">
+            <span>최소 priority</span>
+            <input
+              type="number"
+              min={0}
+              max={99}
+              value={state.filters.minPriority ?? ""}
+              onChange={(event) => setFilters({ minPriority: event.target.value === "" ? null : Number(event.target.value) })}
+            />
+          </label>
+          <label className="qp-field">
+            <span>그룹</span>
+            <select
+              id="qp-grouping"
+              aria-label="grouping"
+              value={state.grouping}
+              onChange={(event) => set({ grouping: event.target.value as Grouping })}
+            >
+              {groupings.map((g) => (
+                <option key={g} value={g}>
+                  {GROUPING_LABEL[g]}
+                </option>
+              ))}
+            </select>
+          </label>
           <fieldset className="qp-states">
+            <legend>표시할 상태</legend>
             {states.map((s) => (
               <label key={s}>
-                <input type="checkbox" checked={!state.hiddenColumns.includes(s)} onChange={() => toggleHiddenColumn(s)} /> {s}
+                <input type="checkbox" checked={!state.filters.hiddenStates.includes(s)} onChange={() => toggleHiddenState(s)} /> {s}
               </label>
             ))}
           </fieldset>
-        </details>
-      ) : null}
-      <details className="qp-more">
-        <summary>priority</summary>
-        <label>
-          min p{" "}
-          <input
-            type="number"
-            min={0}
-            max={99}
-            value={state.filters.minPriority ?? ""}
-            onChange={(event) => setFilters({ minPriority: event.target.value === "" ? null : Number(event.target.value) })}
-          />
-        </label>
+          {state.layout === "board" ? (
+            <fieldset className="qp-states qp-columns">
+              <legend>보드 열</legend>
+              {states.map((s) => (
+                <label key={s}>
+                  <input type="checkbox" checked={!state.hiddenColumns.includes(s)} onChange={() => toggleHiddenColumn(s)} /> {s}
+                </label>
+              ))}
+            </fieldset>
+          ) : null}
+        </div>
       </details>
       {chips.length > 0 ? (
         <div className="qp-chips" aria-label="applied filters">
@@ -144,8 +177,9 @@ export function Toolbar({ state, lanes, kinds, states, visibleCount, onChange }:
           ))}
         </div>
       ) : null}
-      <span className="qp-count muted">
-        {visibleCount} unique tasks{state.grouping === "area" ? " · disjoint groups (no double counting)" : ""}
+      <span className="qp-count">
+        {partial ? `확인된 ${visibleCount}건 · 일부만 조회됨` : `${visibleCount}건`}
+        {groupingNote} · priority 큰 값 먼저
       </span>
     </div>
   );

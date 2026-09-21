@@ -35,12 +35,12 @@ describe("zero network I/O", () => {
     fireEvent.keyDown(row, { key: "Enter" });
     fireEvent.click(screen.getByRole("button", { name: "Next task" }));
     fireEvent.click(screen.getByRole("button", { name: "Close detail" }));
-    fireEvent.click(screen.getByRole("button", { name: /group:/ }));
+    fireEvent.change(screen.getByLabelText("grouping"), { target: { value: "state" } });
     const group = container.querySelector<HTMLElement>(".qp-group");
     if (group) {
       fireEvent.click(group);
     }
-    fireEvent.click(screen.getByRole("button", { name: /density:/ }));
+    fireEvent.click(screen.getByRole("button", { name: /56px/ }));
 
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(xhrOpen).not.toHaveBeenCalled();

@@ -24,6 +24,9 @@ export default defineConfig({
         // real board API — the synthetic fixture path lives only in
         // preview.tsx, which this input never reaches.
         board: resolve(root, "src/queue-proto/main.tsx"),
+        // The --hk-* design tokens ship as their own static stylesheet so the
+        // React entries and the Go templates link one and the same file.
+        tokens: resolve(root, "src/design/tokens.css"),
       },
       output: {
         entryFileNames: "[name].js",

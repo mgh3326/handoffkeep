@@ -10,16 +10,24 @@ export const MEASURE_KEY = "queue-proto:measurements:v1";
 
 export type SavedView = Pick<ProtoState, "view" | "layout" | "grouping" | "density" | "filters" | "hiddenColumns">;
 
+// Product default: state groups, 40px single-line rows (operator 09-21,
+// hk:doc 2408 §2 AC3). The view stays "backlog" — design does not change
+// which tasks the queue opens on.
 export const DEFAULT_STATE: ProtoState = {
   view: "backlog",
   layout: "list",
-  grouping: "area",
+  grouping: "state",
   density: "compact",
   filters: EMPTY_FILTERS,
   hiddenColumns: [],
   collapsedGroups: [],
   sidebarCollapsed: false,
 };
+
+/** The synthetic local preview keeps its prior area→bundle draft default so
+ * the fixture harness measures what it always measured; only the live
+ * product switched to state groups. */
+export const PREVIEW_DEFAULT_STATE: ProtoState = { ...DEFAULT_STATE, grouping: "area" };
 
 // ≥3 named local views shipped with the prototype.
 export const NAMED_VIEWS: Record<string, SavedView> = {
@@ -42,7 +50,7 @@ export const NAMED_VIEWS: Record<string, SavedView> = {
   "backlog-scan": {
     view: "backlog",
     layout: "list",
-    grouping: "area",
+    grouping: "state",
     density: "compact",
     filters: EMPTY_FILTERS,
     hiddenColumns: [],
@@ -82,7 +90,20 @@ function sane(saved: unknown): saved is SavedView {
   return ["operator", "active", "backlog", "all"].includes(s.view) && ["list", "board"].includes(s.layout) && typeof s.filters === "object";
 }
 
-export function loadPresentation(storage: Pick<Storage, "getItem"> = localStorage): LoadResult {
+/** Grouping/density outside the known values fall back to the defaults
+ * rather than reaching the renderer as an unhandled string. */
+function withKnownPresentation<T extends Partial<SavedView>>(saved: T): T {
+  const out = { ...saved };
+  if (out.grouping !== undefined && !["state", "none", "area"].includes(out.grouping)) {
+    out.grouping = DEFAULT_STATE.grouping;
+  }
+  if (out.density !== undefined && !["compact", "comfortable"].includes(out.density)) {
+    out.density = DEFAULT_STATE.density;
+  }
+  return out;
+}
+
+export function loadPresentation(storage: Pick<Storage, "getItem"> = localStorage, defaults: ProtoState = DEFAULT_STATE): LoadResult {
   let raw: string | null = null;
   try {
     raw = storage.getItem(STORAGE_KEY);
@@ -90,19 +111,27 @@ export function loadPresentation(storage: Pick<Storage, "getItem"> = localStorag
     raw = null;
   }
   if (raw === null) {
-    return { state: DEFAULT_STATE, views: NAMED_VIEWS, versionMismatch: false };
+    return { state: defaults, views: NAMED_VIEWS, versionMismatch: false };
   }
   try {
     const parsed = JSON.parse(raw) as PersistedPayload;
     if (parsed.schemaVersion !== SCHEMA_VERSION) {
       // Explicit fallback: defaults + a visible signal, never a silent empty view.
-      return { state: DEFAULT_STATE, views: NAMED_VIEWS, versionMismatch: true };
+      return { state: defaults, views: NAMED_VIEWS, versionMismatch: true };
     }
-    const state: ProtoState = sane(parsed.current) ? { ...DEFAULT_STATE, ...parsed.current, collapsedGroups: [] } : DEFAULT_STATE;
-    const views = typeof parsed.views === "object" && parsed.views !== null ? { ...NAMED_VIEWS, ...parsed.views } : NAMED_VIEWS;
+    const state: ProtoState = sane(parsed.current)
+      ? { ...defaults, ...withKnownPresentation(parsed.current), collapsedGroups: [] }
+      : defaults;
+    const storedViews: Record<string, SavedView> = {};
+    if (typeof parsed.views === "object" && parsed.views !== null) {
+      for (const [name, view] of Object.entries(parsed.views)) {
+        storedViews[name] = withKnownPresentation(view);
+      }
+    }
+    const views = { ...NAMED_VIEWS, ...storedViews };
     return { state, views, versionMismatch: false };
   } catch {
-    return { state: DEFAULT_STATE, views: NAMED_VIEWS, versionMismatch: true };
+    return { state: defaults, views: NAMED_VIEWS, versionMismatch: true };
   }
 }
 

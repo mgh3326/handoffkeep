@@ -1,6 +1,7 @@
 // Single shared adapter. List and board both consume applyView() output, so
 // switching layouts can never change the visible unique task-ID set.
 
+import { STATE_GROUP_ORDER } from "./states";
 import { KNOWN_STATES, type Dataset, type Enrichment, type FilterState, type ProtoState, type ProtoTask, type ProtoView } from "./types";
 
 export const EMPTY_FILTERS: FilterState = { query: "", lane: "", kind: "", hiddenStates: [], minPriority: null };
@@ -24,11 +25,7 @@ export function viewPredicate(view: ProtoView, states: readonly string[] = KNOWN
   return (task) => allowed.has(task.state);
 }
 
-export function clampPreview(title: string, clamp: number): string {
-  return title.length > clamp ? `${title.slice(0, clamp)}…` : title;
-}
-
-/** Search matches the FULL original title (never the clamped preview) plus
+/** Search matches the FULL original title plus
  * the numeric task ID in both `123` and `#123` forms, case-insensitive. */
 export function matchesQuery(task: ProtoTask, rawQuery: string): boolean {
   const query = rawQuery.trim();
@@ -218,6 +215,32 @@ export function groupByArea(tasks: ProtoTask[], enrichment: Record<number, Enric
   groups.push(special("area:standalone", "standalone", standalone));
   groups.push(special("area:unclassified", "unclassified", unclassified));
   return groups;
+}
+
+export type StateGroup = { key: string; state: string; tasks: ProtoTask[] };
+
+/** One group per task state in STATE_GROUP_ORDER (operator-facing first,
+ * terminal last); states outside the canonical nine — a server-only enum —
+ * follow in first-seen order, each in its own group so the raw value is
+ * kept. Empty states produce no group. Task order inside a group is the
+ * input order (applyView already sorted by priority, largest first). */
+export function groupByState(tasks: ProtoTask[]): StateGroup[] {
+  const byState = new Map<string, ProtoTask[]>();
+  for (const task of tasks) {
+    const list = byState.get(task.state);
+    if (list) {
+      list.push(task);
+    } else {
+      byState.set(task.state, [task]);
+    }
+  }
+  const order: string[] = STATE_GROUP_ORDER.filter((s) => byState.has(s));
+  for (const state of byState.keys()) {
+    if (!order.includes(state)) {
+      order.push(state);
+    }
+  }
+  return order.map((state) => ({ key: `state:${state}`, state, tasks: byState.get(state)! }));
 }
 
 /** Unique task IDs inside a collapsed group tree — used by tests to prove

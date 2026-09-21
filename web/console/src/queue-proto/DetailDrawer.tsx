@@ -148,10 +148,14 @@ export function DetailBody({ dataset, task, detail, fetchDoc }: BodyProps) {
   const overview = (
     <>
       <TaskBodySection task={task} fetchDoc={fetchDoc} />
-      <p className="qp-source-status">
-        source status: <strong>{dataset.source === "live" ? "live /ui/api/board" : "synthetic fixture"}</strong> — {dataset.completeness} ·{" "}
-        {dataset.completenessNote}
-      </p>
+      {/* Provenance of synthetic preview rows stays explicit. The live queue
+          names its data status in the page header; internal endpoint names
+          are developer detail and stay off the product screen (2402 Q9). */}
+      {dataset.source === "synthetic" ? (
+        <p className="qp-source-status">
+          source status: <strong>synthetic fixture</strong> — {dataset.completeness} · {dataset.completenessNote}
+        </p>
+      ) : null}
       {isStale(task, now) ? (
         <p className="qp-stale-note" role="note">
           ⚠ stale — non-terminal task aged ≥{STALE_MIN_AGE_DAYS}d since created_at. Age does not imply the premise is still
@@ -225,36 +229,38 @@ export function DetailBody({ dataset, task, detail, fetchDoc }: BodyProps) {
           ) : null}
         </ul>
       </section>
-      <section className="qp-drawer-sec">
-        <h4>draft enrichment (synthetic, unreviewed)</h4>
-        {enr ? (
-          <dl className="qp-drawer-meta">
-            <dt>area</dt>
-            <dd>
-              <Val value={enr.area} />
-            </dd>
-            <dt>bundle</dt>
-            <dd>
-              <Val value={enr.bundle} />
-            </dd>
-            <dt>standalone</dt>
-            <dd>{enr.standalone ? "yes (intentional)" : "no"}</dd>
-            <dt>labels</dt>
-            <dd>{enr.labels.length > 0 ? enr.labels.join(", ") : "none"}</dd>
-          </dl>
-        ) : (
-          <p className="muted">unclassified — no draft enrichment</p>
-        )}
-        {enr && enr.relations.length > 0 ? (
-          <ul className="qp-drawer-refs">
-            {enr.relations.map((rel) => (
-              <li key={`${rel.type}-${rel.otherId}`}>
-                {rel.type} → #{rel.otherId} <span className="muted">({rel.note})</span>
-              </li>
-            ))}
-          </ul>
-        ) : null}
-      </section>
+      {dataset.source === "synthetic" ? (
+        <section className="qp-drawer-sec">
+          <h4>draft enrichment (synthetic, unreviewed)</h4>
+          {enr ? (
+            <dl className="qp-drawer-meta">
+              <dt>area</dt>
+              <dd>
+                <Val value={enr.area} />
+              </dd>
+              <dt>bundle</dt>
+              <dd>
+                <Val value={enr.bundle} />
+              </dd>
+              <dt>standalone</dt>
+              <dd>{enr.standalone ? "yes (intentional)" : "no"}</dd>
+              <dt>labels</dt>
+              <dd>{enr.labels.length > 0 ? enr.labels.join(", ") : "none"}</dd>
+            </dl>
+          ) : (
+            <p className="muted">unclassified — no draft enrichment</p>
+          )}
+          {enr && enr.relations.length > 0 ? (
+            <ul className="qp-drawer-refs">
+              {enr.relations.map((rel) => (
+                <li key={`${rel.type}-${rel.otherId}`}>
+                  {rel.type} → #{rel.otherId} <span className="muted">({rel.note})</span>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </section>
+      ) : null}
       <section className="qp-drawer-sec">
         <h4>dwell</h4>
         {detail?.status === "loading" ? (

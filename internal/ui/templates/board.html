@@ -5,20 +5,22 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Queue · Fleet console</title>
+  <link rel="stylesheet" href="{{assetURL "/ui/static/console/tokens.css"}}">
   <link rel="stylesheet" href="{{assetURL "/ui/static/console/board.css"}}">
 </head>
 <body>
-  <h1>Fleet console</h1>
-  <nav aria-label="Fleet console pages">
-    <a href="/ui/timeline">Timeline</a>
-    <a href="/ui/queue">Queue</a>
-    <a href="/ui/decisions">Decisions</a>
-    <a href="/ui/compose">Compose</a>
-    <a href="/ui/fleet">Fleet</a>
-  </nav>
-  <main>
-    <div id="board-root"></div>
-  </main>
+  <div id="board-root">
+    <!-- Replaced by the queue app on mount; the app's sidebar carries the
+         global navigation, so the page never shows two navigation blocks.
+         Without JavaScript these links remain the way out. -->
+    <nav aria-label="Fleet console pages">
+      <a href="/ui/timeline">Timeline</a>
+      <a href="/ui/queue">Queue</a>
+      <a href="/ui/decisions">Decisions</a>
+      <a href="/ui/compose">Compose</a>
+      <a href="/ui/fleet">Fleet</a>
+    </nav>
+  </div>
   <script type="module" src="{{assetURL "/ui/static/console/board.js"}}"></script>
 </body>
 </html>
