@@ -175,10 +175,13 @@ export function QueueProtoApp({ datasets, initialSet, storage, diag = false, per
 
   // Non-modal panel: the list is never inert. On close, focus returns to the
   // originating row/card — but only when focus was inside the panel; focus
-  // already back in the list (peek navigation) is left alone.
+  // already back in the list (peek navigation) is left alone. A deep-linked
+  // or unmounted opener has no row to return to, so focus lands on a stable
+  // queue control instead of document.body.
   useEffect(() => {
     if (openId === null && !mainRef.current?.contains(document.activeElement)) {
-      openerRef.current?.focus();
+      const opener = openerRef.current;
+      (opener?.isConnected ? opener : document.getElementById("qp-rail-toggle"))?.focus();
     }
   }, [openId]);
 

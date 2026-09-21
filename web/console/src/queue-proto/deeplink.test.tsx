@@ -94,6 +94,16 @@ describe("task deep links (/ui/queue?task=<id>)", () => {
     expect(screen.getByRole("dialog").getAttribute("aria-label")).toContain("task 5011");
   });
 
+  it("deep-linked open has no opener row — closing lands focus on a stable control", () => {
+    window.history.replaceState(null, "", "/ui/queue?view=all&task=5005");
+    render(<QueueProtoApp datasets={datasets} initialSet="edge" />);
+    const drawer = screen.getByRole("dialog");
+    drawer.focus();
+    fireEvent.keyDown(drawer, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(document.activeElement?.id).toBe("qp-rail-toggle");
+  });
+
   it("panel head shows #<id> and a copy-link control targeting /ui/tasks/<id>", () => {
     window.history.replaceState(null, "", "/ui/queue?view=all");
     const { container } = render(<QueueProtoApp datasets={datasets} initialSet="edge" />);

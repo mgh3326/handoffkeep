@@ -7,7 +7,7 @@
 // Usage (from web/console):
 //   node src/queue-proto/evidence/assert-card-fit.mjs [baseUrl]
 //
-// With no baseUrl the script builds dist-proto if needed and serves it on its
+// With no baseUrl the script always rebuilds dist-proto and serves it on its
 // own ephemeral port — measuring a leftover preview from another worktree on
 // a shared default port is a real failure mode, so the default path never
 // trusts a port it did not open. An explicit baseUrl is still validated to
@@ -16,7 +16,6 @@
 // Exit 0 = every measured card fits; exit 2 = at least one card overflows.
 
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
 import { createServer } from "node:net";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -39,12 +38,12 @@ async function freePort() {
 let BASE = process.argv[2];
 let preview = null;
 if (!BASE) {
-  if (!existsSync(resolve(CONSOLE_DIR, "dist-proto/queue-proto.html"))) {
-    const build = spawnSync("npx", ["vite", "build", "--config", "vite.proto.config.ts"], { cwd: CONSOLE_DIR, stdio: "inherit" });
-    if (build.status !== 0) {
-      console.error("vite build --config vite.proto.config.ts failed");
-      process.exit(2);
-    }
+  // Always rebuild — a stale dist-proto from an earlier checkout must never
+  // be what this gate measures.
+  const build = spawnSync("npx", ["vite", "build", "--config", "vite.proto.config.ts"], { cwd: CONSOLE_DIR, stdio: "inherit" });
+  if (build.status !== 0) {
+    console.error("vite build --config vite.proto.config.ts failed");
+    process.exit(2);
   }
   const port = await freePort();
   preview = spawn("npx", ["vite", "preview", "--config", "vite.proto.config.ts", "--host", "127.0.0.1", "--port", String(port), "--strictPort"], { cwd: CONSOLE_DIR, stdio: "ignore" });
@@ -255,8 +254,12 @@ for (const [label, scale] of [
 
 await client.close();
 chrome.kill("SIGTERM");
+preview?.kill("SIGTERM");
 if (process.exitCode === 2) {
   console.error("CARD-FIT: FAIL");
 } else {
   console.log("CARD-FIT: PASS");
 }
+// Live child-process handles keep the event loop alive — exit explicitly or
+// the no-arg path never delivers its documented exit code.
+process.exit(process.exitCode ?? 0);
