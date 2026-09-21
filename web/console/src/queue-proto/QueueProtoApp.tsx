@@ -169,9 +169,8 @@ export function QueueProtoApp({ datasets, initialSet, storage, diag = false, per
 
   // Detail drawer lazy fetch: at most one call per open task id, only while
   // the drawer is open — the list never issues per-task requests. `details`
-  // is deliberately not a dep: a re-run's cleanup would cancel the in-flight
-  // fetch it guards. Runs only when openId/fetchDetail changes, at which
-  // point the rendered `details` snapshot is current.
+  // is deliberately not a dep: the effect runs only when openId/fetchDetail
+  // changes, at which point the rendered `details` snapshot is current.
   // Detail fetches are never cancelled: closing or navigating the drawer lets
   // the request finish and cache, so reopening hits the cache instead of a
   // zombie "loading" entry. An "error" entry retries on the next open.

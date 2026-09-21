@@ -1,6 +1,6 @@
-// Synthetic-only prototype model. These shapes mirror the read-only queue
-// contract (hk:doc 2199) but every record is generated locally; nothing here
-// is a production task.
+// Queue prototype model — shared by the synthetic preview datasets and the
+// live production app. These shapes mirror the read-only queue contract
+// (hk:doc 2199); `Dataset.source` marks which records are generated locally.
 
 export const KNOWN_STATES = [
   "backlog",
