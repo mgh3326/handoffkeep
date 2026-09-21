@@ -3,7 +3,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { QueueProtoApp } from "./QueueProtoApp";
 import { boardTaskToProto, fetchLiveDataset, LiveQueue } from "./live";
 import type { BoardDetail, BoardTask, BoardTasksResponse } from "../board/types";
-import type { Dataset } from "./types";
+import { KNOWN_STATES, type Dataset } from "./types";
 
 function mkBoardTask(over: Partial<BoardTask>): BoardTask {
   return {
@@ -21,7 +21,7 @@ function mkBoardTask(over: Partial<BoardTask>): BoardTask {
   };
 }
 
-function liveDataset(tasks: BoardTask[]): Dataset {
+function liveDataset(tasks: BoardTask[], states: string[] = [...KNOWN_STATES]): Dataset {
   return {
     key: "live",
     label: "live queue backlog",
@@ -29,6 +29,7 @@ function liveDataset(tasks: BoardTask[]): Dataset {
     generatedAt: "2026-09-21T09:00:00+09:00",
     completeness: "complete",
     completenessNote: "live test dataset",
+    states,
     tasks: tasks.map(boardTaskToProto),
     enrichment: {},
   };
@@ -63,8 +64,8 @@ function openRow(container: HTMLElement, id: number): void {
   fireEvent.keyDown(container.querySelector<HTMLElement>(`[data-task-id="${id}"]`)!, { key: "Enter" });
 }
 
-function page(tasks: BoardTask[], truncated: boolean, nextAfterId?: number): BoardTasksResponse {
-  return { generated_at: "2026-09-21T09:00:00+09:00", states: ["backlog"], tasks, truncated, next_after_id: nextAfterId };
+function page(tasks: BoardTask[], truncated: boolean, nextAfterId?: number, states: string[] = ["backlog"]): BoardTasksResponse {
+  return { generated_at: "2026-09-21T09:00:00+09:00", states, tasks, truncated, next_after_id: nextAfterId };
 }
 
 function jsonResponse(body: unknown): Response {
@@ -92,6 +93,19 @@ describe("boardTaskToProto — field mapping", () => {
     expect(proto.decision).toBeUndefined();
     // nothing fabricated: no zeroes, no empty-string stand-ins
     expect(JSON.stringify([proto.state_entered_at, proto.due_at, proto.blocker])).toBe("[null,null,null]");
+  });
+
+  it("carries updated_at and parent_lane through — absent → null, never 0 or empty string", () => {
+    const proto = boardTaskToProto(mkBoardTask({ updated_at: "2026-09-21T03:00:00+09:00", parent_lane: "builder-lane" }));
+    expect(proto.updated_at).toBe("2026-09-21T03:00:00+09:00");
+    expect(proto.parent_lane).toBe("builder-lane");
+    const bare = boardTaskToProto(mkBoardTask({}));
+    expect(bare.parent_lane).toBeNull();
+    // A server omission arrives as undefined — it must become null (→ unknown),
+    // never an empty string or 0.
+    const omitted = boardTaskToProto(mkBoardTask({ updated_at: undefined }));
+    expect(omitted.updated_at).toBeNull();
+    expect(JSON.stringify([bare.parent_lane, omitted.updated_at])).toBe("[null,null]");
   });
 });
 
@@ -136,6 +150,19 @@ describe("fetchLiveDataset", () => {
     vi.stubGlobal("fetch", fetchSpy);
     await expect(fetchLiveDataset()).rejects.toThrow("non-advancing board cursor");
     expect(fetchSpy).toHaveBeenCalledTimes(2); // stops at the first repeat
+  });
+
+  it("carries the server's states enumeration — KNOWN_STATES is fallback only", async () => {
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(jsonResponse(page([mkBoardTask({ id: 1 })], false, undefined, ["backlog", "parked", "in_review"])))));
+    const ds = await fetchLiveDataset();
+    expect(ds.states).toEqual(["backlog", "parked", "in_review"]);
+    // server sends an empty list → fallback, not an empty filter enumeration
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(jsonResponse(page([mkBoardTask({ id: 1 })], false, undefined, [])))));
+    expect((await fetchLiveDataset()).states).toEqual([...KNOWN_STATES]);
+    // server omits the field entirely → same fallback
+    const noStates = { generated_at: "2026-09-21T09:00:00+09:00", tasks: [mkBoardTask({ id: 1 })], truncated: false };
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(jsonResponse(noStates))));
+    expect((await fetchLiveDataset()).states).toEqual([...KNOWN_STATES]);
   });
 });
 
@@ -192,6 +219,68 @@ describe("live render — absent fields show unknown, never 0/blank (two-way)", 
     fireEvent.click(screen.getByRole("link", { name: "All" }));
     openRow(container, 7002);
     expect(ddValue(screen.getByRole("dialog") as HTMLElement, "claimant")).toBe("worker-7");
+  });
+
+  it("drawer renders created_by, updated_at and parent_lane values from the list row", () => {
+    const { container } = render(
+      <QueueProtoApp
+        datasets={{
+          live: liveDataset([mkBoardTask({ id: 7001, parent_lane: "builder-lane", updated_at: "2026-09-20T15:30:00+09:00" })]),
+        }}
+        initialSet="live"
+      />,
+    );
+    fireEvent.click(screen.getByRole("link", { name: "All" }));
+    openRow(container, 7001);
+    const drawer = screen.getByRole("dialog") as HTMLElement;
+    expect(ddValue(drawer, "created by")).toBe("live-op");
+    expect(ddValue(drawer, "updated")).toBe("2026-09-20T15:30:00+09:00");
+    expect(ddValue(drawer, "parent lane")).toBe("builder-lane");
+  });
+
+  it("drawer renders unknown for absent parent_lane/updated_at/created_by — never 0 or blank", () => {
+    const { container } = render(
+      <QueueProtoApp
+        datasets={{ live: liveDataset([mkBoardTask({ id: 7001, updated_at: undefined, created_by: "" })]) }}
+        initialSet="live"
+      />,
+    );
+    fireEvent.click(screen.getByRole("link", { name: "All" }));
+    openRow(container, 7001);
+    const drawer = screen.getByRole("dialog") as HTMLElement;
+    for (const label of ["parent lane", "updated", "created by"]) {
+      expect(ddValue(drawer, label)).toBe("unknown");
+      expect(ddValue(drawer, label)).not.toBe("0");
+      expect(ddValue(drawer, label)).not.toBe("");
+    }
+  });
+
+  it("the states filter enumerates the dataset's server states, not the hardcoded nine", () => {
+    const { container } = render(
+      <QueueProtoApp datasets={{ live: liveDataset([mkBoardTask({})], ["backlog", "parked"]) }} initialSet="live" />,
+    );
+    const fieldset = container.querySelector<HTMLElement>(".qp-states")!;
+    const labels = [...fieldset.querySelectorAll("label")].map((l) => l.textContent?.trim());
+    expect(labels).toEqual(["backlog", "parked"]);
+    // a KNOWN_STATES member the server did not send must not appear
+    expect(labels).not.toContain("merged");
+  });
+
+  it("board layout renders a column for a server-only state the hardcoded list lacks", () => {
+    const { container } = render(
+      <QueueProtoApp
+        datasets={{ live: liveDataset([mkBoardTask({ id: 7001, state: "parked" })], ["backlog", "parked"]) }}
+        initialSet="live"
+      />,
+    );
+    fireEvent.click(screen.getByRole("link", { name: "All" }));
+    fireEvent.click(screen.getByRole("button", { name: "board" }));
+    // "parked" is not in KNOWN_STATES — the task must still get a column
+    const col = container.querySelector<HTMLElement>('.qp-col[data-state="parked"]');
+    expect(col).toBeTruthy();
+    expect(col!.textContent).toContain("live task alpha");
+    // and the "all" view itself did not hide the task for lacking a known state
+    expect(container.querySelector('.qp-col[data-state="parked"] .qp-card')).toBeTruthy();
   });
 
   it("list rows show unknown for absent claimant and state age, not 0", () => {

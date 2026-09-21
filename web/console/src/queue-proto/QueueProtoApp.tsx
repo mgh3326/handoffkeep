@@ -92,15 +92,15 @@ export function QueueProtoApp({ datasets, initialSet, storage, diag = false, per
   const perfRef = useRef<HTMLPreElement>(null);
   const navRef = useRef(navKey(state));
 
-  const visible = useMemo(() => applyView(dataset.tasks, state), [dataset.tasks, state]);
-  const viewCounts = useMemo(() => countByView(dataset.tasks, state.filters), [dataset.tasks, state.filters]);
+  const visible = useMemo(() => applyView(dataset.tasks, state, dataset.states), [dataset.tasks, dataset.states, state]);
+  const viewCounts = useMemo(() => countByView(dataset.tasks, state.filters, dataset.states), [dataset.tasks, dataset.states, state.filters]);
   const groups = useMemo(
     () => (state.grouping === "area" ? groupByArea(visible, dataset.enrichment, dataset.generatedAt) : null),
     [state.grouping, visible, dataset.enrichment, dataset.generatedAt],
   );
   const columns = useMemo(
-    () => (state.layout === "board" ? boardColumns(visible, state.view, state.hiddenColumns) : []),
-    [state.layout, visible, state.view, state.hiddenColumns],
+    () => (state.layout === "board" ? boardColumns(visible, state.view, state.hiddenColumns, dataset.states) : []),
+    [state.layout, visible, state.view, state.hiddenColumns, dataset.states],
   );
 
   // Drawer prev/next follows the displayed order in the active layout.
@@ -310,7 +310,7 @@ export function QueueProtoApp({ datasets, initialSet, storage, diag = false, per
               saved view reset — version mismatch
             </p>
           ) : null}
-          <Toolbar state={state} lanes={lanes} kinds={kinds} visibleCount={visible.length} onChange={setState} />
+          <Toolbar state={state} lanes={lanes} kinds={kinds} states={dataset.states} visibleCount={visible.length} onChange={setState} />
           <div className="qp-content">
             {visible.length === 0 ? (
               <div className="qp-empty">

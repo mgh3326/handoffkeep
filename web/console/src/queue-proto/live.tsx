@@ -8,7 +8,7 @@ import { useEffect, useRef, useState } from "react";
 import { fetchBoardTasks, fetchTaskDetail } from "../board/api";
 import type { BoardTask } from "../board/types";
 import { QueueProtoApp } from "./QueueProtoApp";
-import type { Dataset, ProtoTask } from "./types";
+import { KNOWN_STATES, type Dataset, type ProtoTask } from "./types";
 
 /** BoardTask → ProtoTask. The five fields the list API does not expose enter
  * as the type contract demands: null / [] / not_collected. */
@@ -26,6 +26,8 @@ export function boardTaskToProto(task: BoardTask): ProtoTask {
     due_at: null,
     blocker: null,
     created_by: task.created_by,
+    updated_at: task.updated_at ?? null,
+    parent_lane: task.parent_lane ?? null,
     refs: task.refs,
     events: [],
     dwell: [],
@@ -47,6 +49,9 @@ export async function fetchLiveDataset(): Promise<Dataset> {
     completenessNote: board.truncated
       ? "live /ui/api/board/tasks — truncated at the client page cap; shown rows are a subset"
       : "live /ui/api/board/tasks — every page walked to the cursor end",
+    // Server-provided state enumeration; the hardcoded list is a fallback for
+    // when the server sends none, not a replacement for it.
+    states: Array.isArray(board.states) && board.states.length > 0 ? [...board.states] : [...KNOWN_STATES],
     tasks: board.tasks.map(boardTaskToProto),
     enrichment: {},
   };

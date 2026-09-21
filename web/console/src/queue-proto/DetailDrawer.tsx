@@ -106,6 +106,10 @@ export function DetailDrawer({ dataset, task, detail, orderedIds, onClose, onNav
         <dd>{task.kind}</dd>
         <dt>lane</dt>
         <dd>{task.lane}</dd>
+        <dt>parent lane</dt>
+        <dd>
+          <Val value={task.parent_lane} />
+        </dd>
         <dt>claimant</dt>
         <dd>
           <Val value={task.claimant} />
@@ -116,6 +120,14 @@ export function DetailDrawer({ dataset, task, detail, orderedIds, onClose, onNav
         <dd>
           {createdAge === null ? <span className="qp-unknown">unknown</span> : `${createdAge}d`}{" "}
           <span className="muted">(since created_at)</span>
+        </dd>
+        <dt>created by</dt>
+        <dd>
+          <Val value={task.created_by === "" ? null : task.created_by} />
+        </dd>
+        <dt>updated</dt>
+        <dd>
+          <Val value={task.updated_at} />
         </dd>
         <dt>current-state age</dt>
         <dd>

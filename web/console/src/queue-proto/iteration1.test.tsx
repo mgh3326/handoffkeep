@@ -26,6 +26,8 @@ function mkTask(over: Partial<ProtoTask>): ProtoTask {
     due_at: null,
     blocker: null,
     created_by: "synth-op",
+    updated_at: GENERATED_AT,
+    parent_lane: null,
     refs: {},
     events: [],
     dwell: [],

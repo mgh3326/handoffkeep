@@ -3,7 +3,7 @@
 // here is a real task, lane, or identifier.
 
 import { intBetween, mulberry32, pick } from "./rng";
-import type { Dataset, Enrichment, ProtoTask } from "./types";
+import { KNOWN_STATES, type Dataset, type Enrichment, type ProtoTask } from "./types";
 
 export const GENERATED_AT = "2026-09-19T09:00:00+09:00";
 export { PREVIEW_CLAMP } from "./types";
@@ -119,6 +119,8 @@ function baseTask(id: number, rand: () => number): ProtoTask {
     due_at: rand() < 0.25 ? `2026-09-${String(Math.min(28, enteredDay + 7)).padStart(2, "0")}T00:00:00+09:00` : null,
     blocker: rand() < 0.15 ? `synth blocker note ${id}` : null,
     created_by: "synth-op",
+    updated_at: `2026-09-${String(enteredDay).padStart(2, "0")}T${String(intBetween(rand, 0, 23)).padStart(2, "0")}:45:00+09:00`,
+    parent_lane: rand() < 0.2 ? "synth-lane-parent" : null,
     refs: {
       report_path: `synth/reports/task-${id}.md`,
       job_id: `synth-job-${id}`,
@@ -197,6 +199,7 @@ export function buildSample200(seed = 7): Dataset {
     generatedAt: GENERATED_AT,
     completeness: "partial",
     completenessNote: "capped-sample proportions only — synthetic, not the production backlog",
+    states: [...KNOWN_STATES],
     tasks,
     enrichment,
   };
@@ -234,6 +237,8 @@ export function buildEdge(): Dataset {
     due_at: at(25),
     blocker: null,
     created_by: "synth-op",
+    updated_at: at(9),
+    parent_lane: null,
     refs: { report_path: `synth/reports/task-${id}.md`, job_id: `synth-job-${id}` },
     events: [{ id: id * 10, from: "backlog", to: "backlog", by: "synth-op", note: "synthetic", at: at(6) }],
     dwell: [{ state: "backlog", seconds: 86400, open: true }],
@@ -304,6 +309,7 @@ export function buildEdge(): Dataset {
     generatedAt: GENERATED_AT,
     completeness: "partial",
     completenessNote: "explicit edge cases only — synthetic, not the production backlog",
+    states: [...KNOWN_STATES],
     tasks,
     enrichment,
   };
@@ -356,6 +362,7 @@ export function buildPerf5000(seed = 7): Dataset {
     generatedAt: GENERATED_AT,
     completeness: "complete",
     completenessNote: "self-contained synthetic set — deterministic seed, not the production backlog",
+    states: [...KNOWN_STATES],
     tasks,
     enrichment,
   };
@@ -463,11 +470,13 @@ export function buildStale63(): Dataset {
     task.id = id;
     task.title = `stale63 anchor: age unmeasurable (no timestamp) ${id}`;
     task.state = "backlog";
+    task.priority = 50; // pinned — rand-dependent fields must not leak an anchor value
     task.created_at = "";
     task.state_entered_at = null;
     task.due_at = null;
     task.blocker = null;
     task.claimant = null;
+    task.updated_at = null;
     task.events = [];
     tasks.push(task);
     enrichment[id] = { area: "synth-area-alpha", bundle: "synth-bundle-ledger", standalone: false, labels: [], relations: [] };
@@ -480,6 +489,7 @@ export function buildStale63(): Dataset {
     generatedAt: GENERATED_AT,
     completeness: "complete",
     completenessNote: "self-contained synthetic set — deterministic, not the production backlog",
+    states: [...KNOWN_STATES],
     tasks,
     enrichment,
   };
