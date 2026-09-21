@@ -272,6 +272,46 @@ func TestSearchTasksCommentsOptional(t *testing.T) {
 	}
 }
 
+// A task with many matching comments must not consume the fetch window:
+// without per-task dedupe in SQL the LIMIT+1 rows are spent on one task and
+// the page reports "complete" while other tasks went unfetched.
+func TestSearchTasksCommentDedupeKeepsPage(t *testing.T) {
+	s, pool := searchTestStore(t)
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx, `CREATE TABLE task_comments(id BIGSERIAL PRIMARY KEY, task_id BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE, body TEXT NOT NULL, author TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 25; i++ {
+		id := seedTaskRow(t, pool, "lane-a", fmt.Sprintf("commented task %d", i), "backlog")
+		if _, err := pool.Exec(ctx, `INSERT INTO task_comments(task_id,body,author,created_at) VALUES($1,'starvekw body','t',now())`, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Created last so its comment rows lead the match_rank=1 ordering.
+	heavy := seedTaskRow(t, pool, "lane-a", "heavy comments task", "backlog")
+	for i := 0; i < 30; i++ {
+		if _, err := pool.Exec(ctx, `INSERT INTO task_comments(task_id,body,author,created_at) VALUES($1,'starvekw body','t',now())`, heavy); err != nil {
+			t.Fatal(err)
+		}
+	}
+	xs, err := s.Search(ctx, "starvekw", "tasks", "", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(xs) != 20 || !xs[0].Truncated {
+		t.Fatalf("want 20 truncated rows, got %d truncated=%v", len(xs), len(xs) > 0 && xs[0].Truncated)
+	}
+	seen := map[string]int{}
+	for _, k := range resultKeys(xs) {
+		seen[k]++
+	}
+	for k, n := range seen {
+		if n > 1 {
+			t.Fatalf("duplicate key %s in %v", k, resultKeys(xs))
+		}
+	}
+}
+
 func TestSearchTasksLaneFilterAndOtherScopes(t *testing.T) {
 	s, pool := searchTestStore(t)
 	ctx := context.Background()
