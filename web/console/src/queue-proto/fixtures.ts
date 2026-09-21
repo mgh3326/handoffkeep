@@ -6,7 +6,7 @@ import { intBetween, mulberry32, pick } from "./rng";
 import type { Dataset, Enrichment, ProtoTask } from "./types";
 
 export const GENERATED_AT = "2026-09-19T09:00:00+09:00";
-export const PREVIEW_CLAMP = 96;
+export { PREVIEW_CLAMP } from "./types";
 
 // Declared synthetic distribution for the 200-row sample. It reproduces only
 // the observed capped sample's proportions: kind=fix 103/200 (51.5%) and the
@@ -192,6 +192,7 @@ export function buildSample200(seed = 7): Dataset {
   }
   return {
     key: "sample200",
+    source: "synthetic",
     label: "synthetic 200-task sample",
     generatedAt: GENERATED_AT,
     completeness: "partial",
@@ -298,6 +299,7 @@ export function buildEdge(): Dataset {
   };
   return {
     key: "edge",
+    source: "synthetic",
     label: "synthetic 12-case edge set",
     generatedAt: GENERATED_AT,
     completeness: "partial",
@@ -349,6 +351,7 @@ export function buildPerf5000(seed = 7): Dataset {
   }
   return {
     key: "perf5000",
+    source: "synthetic",
     label: "synthetic 5000-task performance set",
     generatedAt: GENERATED_AT,
     completeness: "complete",
@@ -472,6 +475,7 @@ export function buildStale63(): Dataset {
 
   return {
     key: "stale63",
+    source: "synthetic",
     label: "synthetic 63-task staleness profile (6/14/17/24)",
     generatedAt: GENERATED_AT,
     completeness: "complete",

@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { BoardDetail } from "../board/types";
 import { applyView, boardColumns, countByView, EMPTY_FILTERS, groupByArea } from "./adapter";
 import { flattenGrouped } from "./ListView";
-import { buildDatasets } from "./fixtures";
-import { DetailDrawer } from "./DetailDrawer";
+import { DetailDrawer, type DetailFetchState } from "./DetailDrawer";
 import { ListView } from "./ListView";
 import { BoardView } from "./BoardView";
 import { Toolbar } from "./Toolbar";
@@ -54,18 +54,23 @@ function navParams(state: ProtoState): string {
 }
 
 type AppProps = {
-  datasets?: Record<string, Dataset>;
+  /** Every dataset the rail can switch to. Required — the app never invents
+   * rows; the fixture module stays unreachable from the production entry. */
+  datasets: Record<string, Dataset>;
   initialSet?: string;
   storage?: Storage;
   diag?: boolean;
   perf?: boolean;
+  /** Per-drawer detail loader (live mode). Absent → the drawer renders the
+   * task's own fields, which is the fixture/test path. */
+  fetchDetail?: (id: number) => Promise<BoardDetail>;
 };
 
-export function QueueProtoApp({ datasets, initialSet, storage, diag = false, perf = false }: AppProps) {
-  const all = useMemo(() => datasets ?? buildDatasets(), [datasets]);
+export function QueueProtoApp({ datasets, initialSet, storage, diag = false, perf = false, fetchDetail }: AppProps) {
+  const all = datasets;
   const params = typeof window !== "undefined" ? new URLSearchParams(window.location.search) : new URLSearchParams();
   const setKey = initialSet ?? params.get("set") ?? (perf ? "perf5000" : "sample200");
-  const dataset = all[setKey] ?? all.sample200;
+  const dataset = all[setKey] ?? Object.values(all)[0];
   const diagMode = diag || params.get("diag") === "1";
   const perfMode = perf || params.get("perf") === "1";
 
@@ -78,6 +83,7 @@ export function QueueProtoApp({ datasets, initialSet, storage, diag = false, per
   }));
   const [views] = useState<Record<string, SavedView>>(loaded.views);
   const [openId, setOpenId] = useState<number | null>(null);
+  const [details, setDetails] = useState<Record<number, DetailFetchState>>({});
   const rootRef = useRef<HTMLDivElement>(null);
   const headRef = useRef<HTMLElement>(null);
   const mainRef = useRef<HTMLDivElement>(null);
@@ -160,6 +166,35 @@ export function QueueProtoApp({ datasets, initialSet, storage, diag = false, per
       openerRef.current?.focus();
     }
   }, [openId]);
+
+  // Detail drawer lazy fetch: at most one call per open task id, only while
+  // the drawer is open — the list never issues per-task requests. `details`
+  // is deliberately not a dep: a re-run's cleanup would cancel the in-flight
+  // fetch it guards. Runs only when openId/fetchDetail changes, at which
+  // point the rendered `details` snapshot is current.
+  useEffect(() => {
+    if (openId === null || fetchDetail === undefined || details[openId] !== undefined) {
+      return;
+    }
+    let cancelled = false;
+    setDetails((d) => ({ ...d, [openId]: { status: "loading" } }));
+    fetchDetail(openId).then(
+      (data) => {
+        if (!cancelled) {
+          setDetails((d) => ({ ...d, [openId]: { status: "loaded", data } }));
+        }
+      },
+      () => {
+        if (!cancelled) {
+          setDetails((d) => ({ ...d, [openId]: { status: "error" } }));
+        }
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openId, fetchDetail]);
 
   const open = useCallback((id: number, el: HTMLElement) => {
     openerRef.current = el;
@@ -263,8 +298,14 @@ export function QueueProtoApp({ datasets, initialSet, storage, diag = false, per
               ☰ views
             </button>
             <span className="qp-ws">queue</span>
-            <span className="qp-synth-badge">SYNTHETIC FIXTURE — not the production backlog</span>
-            <nav className="qp-nav muted">timeline · decisions · fleet (prototype — links inert)</nav>
+            {dataset.source === "synthetic" ? (
+              <span className="qp-synth-badge">SYNTHETIC FIXTURE — not the production backlog</span>
+            ) : (
+              <span className="qp-live-badge">LIVE — /ui/api/board</span>
+            )}
+            <nav className="qp-nav muted">
+              {dataset.source === "synthetic" ? "timeline · decisions · fleet (prototype — links inert)" : "timeline · decisions · fleet"}
+            </nav>
           </header>
           {loaded.versionMismatch ? (
             <p className="qp-reset-notice" role="alert">
@@ -298,7 +339,16 @@ export function QueueProtoApp({ datasets, initialSet, storage, diag = false, per
           <MeasurePanel />
         </div>
       </div>
-      {openTask ? <DetailDrawer dataset={dataset} task={openTask} orderedIds={orderedIds} onClose={close} onNav={setOpenId} /> : null}
+      {openTask ? (
+        <DetailDrawer
+          dataset={dataset}
+          task={openTask}
+          detail={fetchDetail ? (details[openTask.id] ?? { status: "loading" }) : undefined}
+          orderedIds={orderedIds}
+          onClose={close}
+          onNav={setOpenId}
+        />
+      ) : null}
       {diagMode ? <pre id="diag" ref={diagRef} /> : null}
       {perfMode ? <pre id="perf" ref={perfRef} /> : null}
     </div>

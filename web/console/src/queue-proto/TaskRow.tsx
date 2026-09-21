@@ -1,6 +1,5 @@
 import { ageDays, clampPreview, isStale } from "./adapter";
-import { PREVIEW_CLAMP } from "./fixtures";
-import type { ProtoTask } from "./types";
+import { PREVIEW_CLAMP, type ProtoTask } from "./types";
 
 export function AgeCell({ days }: { days: number | null }) {
   if (days === null) {
@@ -42,7 +41,7 @@ export function RowFields({ task, now }: { task: ProtoTask; now: string }) {
         ) : null}
       </span>
       <span className="qp-cell qp-lane">
-        {task.lane}/{task.claimant ?? "unknown"}
+        {task.lane}/{task.claimant === null ? <span className="qp-unknown">unknown</span> : task.claimant}
       </span>
       <span className="qp-cell qp-age" title="days since created_at">
         <AgeCell days={ageDays(now, task.created_at)} />

@@ -247,7 +247,8 @@ export function boardColumns(visible: ProtoTask[], view: ProtoView, hiddenColumn
 // ---- status line --------------------------------------------------------
 
 export function statusLine(dataset: Dataset): string {
-  return `scope: ${dataset.label} · source: local synthetic fixture · generated: ${dataset.generatedAt} · completeness: ${dataset.completeness} — ${dataset.completenessNote}`;
+  const source = dataset.source === "live" ? "live /ui/api/board" : "local synthetic fixture";
+  return `scope: ${dataset.label} · source: ${source} · generated: ${dataset.generatedAt} · completeness: ${dataset.completeness} — ${dataset.completenessNote}`;
 }
 
 export function ageDays(nowIso: string, iso: string | null): number | null {

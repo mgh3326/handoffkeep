@@ -133,6 +133,21 @@ body {
   text-transform: uppercase;
   letter-spacing: 0.02em;
 }
+.qp-live-badge {
+  border: 1px solid #1a7f37;
+  color: #1a7f37;
+  border-radius: 0.25rem;
+  padding: 0.05rem 0.4rem;
+  font-size: 0.78em;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+.qp-load-error {
+  border: 1px solid #b10020;
+  color: #b10020;
+  border-radius: 0.3rem;
+  padding: 0.5rem 0.75rem;
+}
 .qp-nav {
   margin-left: auto;
   font-size: 0.85em;

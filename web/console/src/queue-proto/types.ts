@@ -56,12 +56,20 @@ export type Enrichment = {
 export type Dataset = {
   key: string;
   label: string;
+  /** "synthetic" rows are generated locally and must be badged as such;
+   * "live" rows came from the queue API. Drives the header badge and the
+   * status line — never let synthetic rows masquerade as the real backlog. */
+  source: "synthetic" | "live";
   generatedAt: string;
   completeness: "complete" | "partial" | "unknown";
   completenessNote: string;
   tasks: ProtoTask[];
   enrichment: Record<number, Enrichment>;
 };
+
+/** Title clamp for the dense list preview. A UI constant, not fixture data —
+ * it lives here so production rows never need to import the fixture module. */
+export const PREVIEW_CLAMP = 96;
 
 export type ProtoView = "operator" | "active" | "backlog" | "all";
 export type Layout = "list" | "board";

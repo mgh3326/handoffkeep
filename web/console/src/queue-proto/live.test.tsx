@@ -1,0 +1,268 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { QueueProtoApp } from "./QueueProtoApp";
+import { boardTaskToProto, fetchLiveDataset, LiveQueue } from "./live";
+import type { BoardDetail, BoardTask, BoardTasksResponse } from "../board/types";
+import type { Dataset } from "./types";
+
+function mkBoardTask(over: Partial<BoardTask>): BoardTask {
+  return {
+    id: 7001,
+    lane: "live-lane-ops",
+    title: "live task alpha",
+    kind: "fix",
+    state: "backlog",
+    priority: 42,
+    created_by: "live-op",
+    created_at: "2026-09-20T10:00:00+09:00",
+    updated_at: "2026-09-20T10:00:00+09:00",
+    refs: {},
+    ...over,
+  };
+}
+
+function liveDataset(tasks: BoardTask[]): Dataset {
+  return {
+    key: "live",
+    label: "live queue backlog",
+    source: "live",
+    generatedAt: "2026-09-21T09:00:00+09:00",
+    completeness: "complete",
+    completenessNote: "live test dataset",
+    tasks: tasks.map(boardTaskToProto),
+    enrichment: {},
+  };
+}
+
+function mkDetail(over: Partial<BoardDetail>): BoardDetail {
+  return {
+    task: mkBoardTask({}),
+    events: [],
+    dwell: [],
+    linear: null,
+    participants: { task_ref: "#7001", coverage: "not_collected", segments: [] },
+    ...over,
+  };
+}
+
+function ddValue(drawer: HTMLElement, dtLabel: string): string {
+  const dts = [...drawer.querySelectorAll("dt")];
+  const dt = dts.find((d) => d.textContent?.trim() === dtLabel);
+  return dt?.nextElementSibling?.textContent?.trim() ?? "<missing>";
+}
+
+function section(drawer: HTMLElement, heading: string): HTMLElement {
+  const sec = [...drawer.querySelectorAll("section")].find((s) => s.querySelector("h4")?.textContent === heading);
+  if (!sec) {
+    throw new Error(`drawer section ${heading} missing`);
+  }
+  return sec;
+}
+
+function openRow(container: HTMLElement, id: number): void {
+  fireEvent.keyDown(container.querySelector<HTMLElement>(`[data-task-id="${id}"]`)!, { key: "Enter" });
+}
+
+function page(tasks: BoardTask[], truncated: boolean, nextAfterId?: number): BoardTasksResponse {
+  return { generated_at: "2026-09-21T09:00:00+09:00", states: ["backlog"], tasks, truncated, next_after_id: nextAfterId };
+}
+
+function jsonResponse(body: unknown): Response {
+  return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+}
+
+describe("boardTaskToProto — field mapping", () => {
+  it("maps direct fields and collapses claimed_by to claimant ?? null", () => {
+    const proto = boardTaskToProto(mkBoardTask({ id: 9, claimed_by: "wk-1", refs: { pr: "https://github.com/x/y/pull/1" } }));
+    expect(proto.id).toBe(9);
+    expect(proto.claimant).toBe("wk-1");
+    expect(proto.refs.pr).toBe("https://github.com/x/y/pull/1");
+    expect(boardTaskToProto(mkBoardTask({})).claimant).toBeNull();
+    expect(boardTaskToProto(mkBoardTask({ claimed_by: undefined })).claimant).toBeNull();
+  });
+
+  it("enters the five API-absent fields as null/[]/not_collected — never 0 or false", () => {
+    const proto = boardTaskToProto(mkBoardTask({}));
+    expect(proto.state_entered_at).toBeNull();
+    expect(proto.due_at).toBeNull();
+    expect(proto.blocker).toBeNull();
+    expect(proto.dwell).toEqual([]);
+    expect(proto.coverage).toEqual({ status: "not_collected", participants: null });
+    expect(proto.events).toEqual([]);
+    expect(proto.decision).toBeUndefined();
+    // nothing fabricated: no zeroes, no empty-string stand-ins
+    expect(JSON.stringify([proto.state_entered_at, proto.due_at, proto.blocker])).toBe("[null,null,null]");
+  });
+});
+
+describe("fetchLiveDataset", () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("walks the after_id cursor to the end and keeps the server snapshot time", async () => {
+    const fetchSpy = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("after_id=7")) {
+        return Promise.resolve(jsonResponse(page([mkBoardTask({ id: 8 })], false)));
+      }
+      return Promise.resolve(jsonResponse(page([mkBoardTask({ id: 7 })], true, 7)));
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    const ds = await fetchLiveDataset();
+    expect(ds.tasks.map((t) => t.id)).toEqual([7, 8]);
+    expect(ds.source).toBe("live");
+    expect(ds.generatedAt).toBe("2026-09-21T09:00:00+09:00");
+    expect(ds.completeness).toBe("complete");
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(String(fetchSpy.mock.calls[0][0])).toContain("/ui/api/board/tasks");
+    expect(String(fetchSpy.mock.calls[1][0])).toContain("after_id=7");
+  });
+
+  it("marks a client-capped walk partial and propagates fetch errors", async () => {
+    const fetchSpy = vi.fn(() => Promise.resolve(jsonResponse(page([mkBoardTask({ id: 1 })], true, 0))));
+    vi.stubGlobal("fetch", fetchSpy);
+    const ds = await fetchLiveDataset();
+    expect(ds.completeness).toBe("partial");
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(new Response("nope", { status: 500 }))));
+    await expect(fetchLiveDataset()).rejects.toThrow("request failed: 500");
+  });
+});
+
+describe("live render — absent fields show unknown, never 0/blank (two-way)", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    window.history.replaceState(null, "", "/ui/queue");
+  });
+
+  it("drawer renders every deficit field as unknown — dwell path included", () => {
+    const { container } = render(
+      <QueueProtoApp datasets={{ live: liveDataset([mkBoardTask({})]) }} initialSet="live" fetchDetail={() => new Promise(() => {})} />,
+    );
+    fireEvent.click(screen.getByRole("link", { name: "All" }));
+    openRow(container, 7001);
+    const drawer = screen.getByRole("dialog") as HTMLElement;
+    expect(ddValue(drawer, "claimant")).toBe("unknown");
+    expect(ddValue(drawer, "current-state age")).toContain("unknown");
+    expect(ddValue(drawer, "due")).toBe("unknown");
+    expect(ddValue(drawer, "blocker")).toBe("unknown");
+    // dwell: the dangerous path — an empty array must not become "0s" or blank
+    expect(section(drawer, "dwell").textContent).toContain("unknown — not collected");
+    expect(section(drawer, "dwell").textContent).not.toContain("0s");
+    expect(section(drawer, "participation coverage").textContent).toContain("unknown — not collected");
+    expect(within(drawer).queryByTestId("participant-count")).toBeNull();
+    // two-way: any null→0 mutant makes these exact assertions fail
+    for (const label of ["claimant", "due", "blocker"]) {
+      expect(ddValue(drawer, label)).not.toBe("0");
+      expect(ddValue(drawer, label)).not.toBe("");
+    }
+    // while the detail is still loading the history section says so, not 0 rows
+    expect(section(drawer, "history").textContent).toContain("loading");
+  });
+
+  it("a real claimant renders — the mapping is not unconditionally unknown", () => {
+    const { container } = render(
+      <QueueProtoApp
+        datasets={{ live: liveDataset([mkBoardTask({ id: 7002, claimed_by: "worker-7" })]) }}
+        initialSet="live"
+        fetchDetail={() => new Promise(() => {})}
+      />,
+    );
+    fireEvent.click(screen.getByRole("link", { name: "All" }));
+    openRow(container, 7002);
+    expect(ddValue(screen.getByRole("dialog") as HTMLElement, "claimant")).toBe("worker-7");
+  });
+
+  it("list rows show unknown for absent claimant and state age, not 0", () => {
+    const { container } = render(<QueueProtoApp datasets={{ live: liveDataset([mkBoardTask({})]) }} initialSet="live" />);
+    fireEvent.click(screen.getByRole("link", { name: "All" }));
+    const row = container.querySelector<HTMLElement>('[data-task-id="7001"]')!;
+    expect(row.textContent).toContain("unknown");
+    expect(row.querySelectorAll(".qp-unknown").length).toBeGreaterThanOrEqual(2); // claimant + state age
+    expect(row.textContent).not.toMatch(/unknown\/0d|\b0d\b.*state_entered/);
+  });
+});
+
+describe("lazy detail fetch — no N+1 on the list path", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    window.history.replaceState(null, "", "/ui/queue");
+  });
+
+  it("fetchDetail is not called until a drawer opens, and is cached per id", async () => {
+    const fetchDetail = vi.fn((id: number) => Promise.resolve(mkDetail({ task: mkBoardTask({ id }) })));
+    const ds = liveDataset([mkBoardTask({ id: 7001 }), mkBoardTask({ id: 7002 }), mkBoardTask({ id: 7003 })]);
+    const { container } = render(<QueueProtoApp datasets={{ live: ds }} initialSet="live" fetchDetail={fetchDetail} />);
+    fireEvent.click(screen.getByRole("link", { name: "All" }));
+    // list renders every row without a single detail call
+    expect(container.querySelectorAll(".qp-row").length).toBe(3);
+    expect(fetchDetail).not.toHaveBeenCalled();
+    openRow(container, 7001);
+    await waitFor(() => expect(fetchDetail).toHaveBeenCalledTimes(1));
+    expect(fetchDetail).toHaveBeenCalledWith(7001);
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+    openRow(container, 7001);
+    await waitFor(() => expect(section(screen.getByRole("dialog") as HTMLElement, "history")).toBeTruthy());
+    expect(fetchDetail).toHaveBeenCalledTimes(1); // cached
+  });
+
+  it("loaded detail replaces unknown with real dwell, coverage and events", async () => {
+    const detail = mkDetail({
+      task: mkBoardTask({ id: 7001 }),
+      dwell: [
+        { state: "backlog", seconds: 120, open: false },
+        { state: "claimed", seconds: 30, open: true },
+      ],
+      events: [{ id: 1, from: "backlog", to: "claimed", by: "wk-1", at: "2026-09-21T08:00:00+09:00", note: "claimed" }],
+      participants: { task_ref: "#7001", coverage: "collected", segments: [{ role: "impl", model_id: "m", reps: 1, rounds: 1, blockers_found: 0, completed: 1, input_tokens: null, output_tokens: null }] },
+    });
+    const fetchDetail = vi.fn(() => Promise.resolve(detail));
+    const { container } = render(
+      <QueueProtoApp datasets={{ live: liveDataset([mkBoardTask({})]) }} initialSet="live" fetchDetail={fetchDetail} />,
+    );
+    fireEvent.click(screen.getByRole("link", { name: "All" }));
+    openRow(container, 7001);
+    const drawer = screen.getByRole("dialog") as HTMLElement;
+    await waitFor(() => expect(section(drawer, "dwell").textContent).toContain("backlog: 120s"));
+    expect(section(drawer, "dwell").textContent).toContain("claimed: 30s (in progress)");
+    expect(within(drawer).getByTestId("participant-count").textContent).toBe("1");
+    expect(section(drawer, "history").textContent).toContain("backlog → claimed by wk-1");
+    expect(section(drawer, "dwell").textContent).not.toContain("unknown — not collected");
+  });
+
+  it("a failed detail fetch marks history unavailable, never fabricated", async () => {
+    const fetchDetail = vi.fn(() => Promise.reject(new Error("boom")));
+    const { container } = render(
+      <QueueProtoApp datasets={{ live: liveDataset([mkBoardTask({})]) }} initialSet="live" fetchDetail={fetchDetail} />,
+    );
+    fireEvent.click(screen.getByRole("link", { name: "All" }));
+    openRow(container, 7001);
+    const drawer = screen.getByRole("dialog") as HTMLElement;
+    await waitFor(() => expect(section(drawer, "history").textContent).toContain("unavailable"));
+    expect(section(drawer, "history").textContent).not.toContain("0 events");
+  });
+});
+
+describe("LiveQueue mount", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    window.history.replaceState(null, "", "/ui/queue");
+  });
+
+  it("renders the live dataset with the LIVE badge — no synthetic marker", async () => {
+    render(<LiveQueue loadDataset={() => Promise.resolve(liveDataset([mkBoardTask({})]))} />);
+    expect(screen.getByText(/loading queue/)).toBeTruthy();
+    await screen.findByText("LIVE — /ui/api/board");
+    expect(screen.queryByText(/SYNTHETIC FIXTURE/)).toBeNull();
+    expect(screen.getByTestId("status-line").textContent).toContain("source: live /ui/api/board");
+  });
+
+  it("a failed load renders an error — never a fallback dataset", async () => {
+    render(<LiveQueue loadDataset={() => Promise.reject(new Error("request failed: 500"))} />);
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("queue unavailable");
+    expect(alert.textContent).toContain("request failed: 500");
+    expect(screen.queryByText(/SYNTHETIC FIXTURE/)).toBeNull();
+    expect(document.querySelector(".qp-root")).toBeNull(); // app never mounts
+  });
+});

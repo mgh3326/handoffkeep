@@ -306,15 +306,13 @@ describe("trial harness — in-app scripts match the graded TRIAL.md answers", (
   });
 });
 
-describe("production isolation — adversarial: proto/measurement leak must fail", () => {
+describe("production isolation — adversarial: fixture leak into the live bundle must fail", () => {
   const srcRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
-  /** Walk the static import graph from the production entries; assert no
-   * reachable module lives under src/queue-proto/. */
-  function reachableFromProdEntries(): string[] {
-    const entries = ["main.tsx", "board.tsx"].map((f) => resolve(srcRoot, f));
+  /** Walk the static import graph from one entry file. */
+  function reachableFromEntry(entry: string): string[] {
     const seen = new Set<string>();
-    const stack = [...entries];
+    const stack = [entry];
     const importRe =
       /(?:import|export)[^'"]*?from\s+["']([^"']+)["']|import\s*\(\s*["']([^"']+)["']|import\s*["']([^"']+)["']/g;
     while (stack.length > 0) {
@@ -327,13 +325,12 @@ describe("production isolation — adversarial: proto/measurement leak must fail
       for (const m of text.matchAll(importRe)) {
         const spec = m[1] ?? m[2] ?? m[3];
         if (!spec?.startsWith(".")) {
-          continue; // package imports can't reach queue-proto
+          continue; // package imports can't reach local modules
         }
         const base = resolve(dirname(file), spec);
         for (const cand of [base, `${base}.ts`, `${base}.tsx`, `${base}.css`, `${base}/index.ts`, `${base}/index.tsx`]) {
           // bare side-effect imports (e.g. `import "./queue-proto/proto.css"`)
-          // resolve to non-code leaves — they are still reachable modules and
-          // still count as a leak.
+          // resolve to non-code leaves — they are still reachable modules.
           if (existsSync(cand) && /\.(ts|tsx|css)$/.test(cand)) {
             stack.push(cand);
           }
@@ -343,17 +340,23 @@ describe("production isolation — adversarial: proto/measurement leak must fail
     return [...seen];
   }
 
-  it("no production entry transitively imports queue-proto", () => {
-    const reachable = reachableFromProdEntries();
-    expect(reachable.length).toBeGreaterThan(5); // graph walk actually ran
+  it("the fleet entry transitively imports no queue-proto module", () => {
+    const reachable = reachableFromEntry(resolve(srcRoot, "main.tsx"));
+    expect(reachable.length).toBeGreaterThan(1); // graph walk actually ran
     const leaked = reachable.filter((f) => f.includes("queue-proto"));
     expect(leaked).toEqual([]);
   });
 
-  it("vite production config has no queue-proto input", () => {
+  it("the queue entry transitively imports no fixture module", () => {
+    const reachable = reachableFromEntry(resolve(srcRoot, "queue-proto", "main.tsx"));
+    expect(reachable.length).toBeGreaterThan(5); // graph walk actually ran
+    const leaked = reachable.filter((f) => /fixtures\.ts$|rng\.ts$|preview\.tsx$/.test(f));
+    expect(leaked).toEqual([]);
+  });
+
+  it("vite production config points board at the queue app entry", () => {
     const cfg = readFileSync(resolve(srcRoot, "..", "vite.config.ts"), "utf8");
-    expect(cfg).not.toContain("queue-proto");
     expect(cfg).toContain('fleet: resolve(root, "src/main.tsx")');
-    expect(cfg).toContain('board: resolve(root, "src/board.tsx")');
+    expect(cfg).toContain('board: resolve(root, "src/queue-proto/main.tsx")');
   });
 });

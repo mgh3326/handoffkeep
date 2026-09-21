@@ -100,7 +100,10 @@ func consoleContractsError(tree map[string][]byte) error {
 		return errors.New("fleet.js lost the /ui/api/fleet contract")
 	}
 	board := string(tree["board.js"])
-	for _, want := range []string{"/ui/api/board/tasks", "/ui/api/policy/active"} {
+	// /ui/queue's bundle is the queue app: it must carry the board BFF list
+	// contract and both mount points. It no longer serves the old board app's
+	// policy panel, so /ui/api/policy/active is not part of this contract.
+	for _, want := range []string{"/ui/api/board/tasks", "board-root", "queue-proto-root"} {
 		if !strings.Contains(board, want) {
 			return fmt.Errorf("board.js missing %q", want)
 		}
@@ -313,7 +316,7 @@ func TestConsoleBuildDriftMutantsTurnRed(t *testing.T) {
 	// not silently shrink to the fleet entry.
 	t.Run("config-single-entry", func(t *testing.T) {
 		config := writeMutantConfig(t, projectDir, "single-entry", func(source string) string {
-			return strings.Replace(source, "\n        board: resolve(root, \"src/board.tsx\"),", "", 1)
+			return strings.Replace(source, "\n        board: resolve(root, \"src/queue-proto/main.tsx\"),", "", 1)
 		})
 		outDir := filepath.Join(t.TempDir(), "out")
 		viteBuild(t, npm, projectDir, config, outDir)
