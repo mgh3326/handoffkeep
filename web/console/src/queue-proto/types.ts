@@ -77,14 +77,13 @@ export type Dataset = {
   enrichment: Record<number, Enrichment>;
 };
 
-/** Title clamp for the dense list preview. A UI constant, not fixture data —
- * it lives here so production rows never need to import the fixture module. */
-export const PREVIEW_CLAMP = 96;
-
 export type ProtoView = "operator" | "active" | "backlog" | "all";
 export type Layout = "list" | "board";
 export type Density = "compact" | "comfortable";
-export type Grouping = "none" | "area";
+/** "state" = collapsible groups per task state (product default). "area" is
+ * the synthetic area→bundle draft — local preview only; the live queue
+ * normalizes it to "state" because no classification source exists. */
+export type Grouping = "none" | "state" | "area";
 
 export type FilterState = {
   query: string;

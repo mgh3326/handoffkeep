@@ -88,21 +88,14 @@ export function LiveQueue({ loadDataset = fetchLiveDataset }: { loadDataset?: ()
   if (error !== null) {
     return (
       <p className="qp-load-error" role="alert">
-        queue unavailable — {error}
+        큐를 불러오지 못했습니다 (queue unavailable) — {error}
       </p>
     );
   }
   if (dataset === null) {
-    return <p className="muted">loading queue…</p>;
+    return <p className="qp-loading">큐를 불러오는 중…</p>;
   }
-  return (
-    <>
-      {refreshFailed ? (
-        <p className="qp-refresh-warn" role="status">
-          refresh failed — showing last received data
-        </p>
-      ) : null}
-      <QueueProtoApp datasets={{ live: dataset }} initialSet="live" fetchDetail={fetchTaskDetail} />
-    </>
-  );
+  // A failed refresh keeps the last good rows and says so in the page header
+  // next to their snapshot time — never a silent stale list.
+  return <QueueProtoApp datasets={{ live: dataset }} initialSet="live" fetchDetail={fetchTaskDetail} refreshFailed={refreshFailed} />;
 }

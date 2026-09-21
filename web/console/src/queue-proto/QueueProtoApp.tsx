@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { BoardDetail } from "../board/types";
-import { applyView, boardColumns, countByView, EMPTY_FILTERS, groupByArea } from "./adapter";
+import { applyView, boardColumns, countByView, EMPTY_FILTERS, groupByArea, groupByState } from "./adapter";
 import { boardTaskToProto } from "./boardtask";
 import { flattenGrouped } from "./ListView";
 import { DetailDrawer, type DetailFetchState } from "./DetailDrawer";
@@ -9,11 +9,10 @@ import { ListView } from "./ListView";
 import { BoardView } from "./BoardView";
 import { Toolbar } from "./Toolbar";
 import { ViewRail } from "./ViewRail";
-import { MeasurePanel } from "./MeasurePanel";
-import { loadPresentation, savePresentation, type SavedView } from "./storage";
+import { DEFAULT_STATE, loadPresentation, PREVIEW_DEFAULT_STATE, savePresentation, type SavedView } from "./storage";
 import { runDiag } from "./diag";
 import { runPerf } from "./perf";
-import type { Dataset, ProtoState, ProtoView } from "./types";
+import type { Dataset, Density, Grouping, ProtoState, ProtoView } from "./types";
 
 export function defaultLayout(view: ProtoView): "list" | "board" {
   return view === "active" ? "board" : "list";
@@ -34,11 +33,39 @@ function applyNavParams(state: ProtoState, params: URLSearchParams): ProtoState 
   if (l === "list" || l === "board") {
     next.layout = l;
   }
-  const g = params.get("group");
-  if (g === "area" || g === "none") {
+  const g = parseGrouping(params.get("group"));
+  if (g) {
     next.grouping = g;
   }
   return next;
+}
+
+function parseGrouping(value: string | null): Grouping | null {
+  return value === "state" || value === "none" || value === "area" ? value : null;
+}
+
+/** The area→bundle grouping reads the synthetic enrichment fixture; the live
+ * queue has no classification source, so a stored or linked "area" becomes
+ * the product default (state groups) there instead of an empty draft. */
+function normalizeGrouping(state: ProtoState, source: Dataset["source"]): ProtoState {
+  return source === "live" && state.grouping === "area" ? { ...state, grouping: "state" } : state;
+}
+
+/** Fields the list API does not carry for any row. The header names them so
+ * a row's "미수집" reads as a known gap, not as a per-task accident. */
+const LIST_GAP_FIELDS: { key: "state_entered_at" | "due_at" | "blocker"; label: string }[] = [
+  { key: "state_entered_at", label: "상태 진입 시각" },
+  { key: "due_at", label: "기한" },
+  { key: "blocker", label: "막힘" },
+];
+
+function formatClock(iso: string): string | null {
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) {
+    return null;
+  }
+  const d = new Date(t);
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
 /** ?task=<id> deep link — the server shape-checks the value, so a value that
@@ -86,9 +113,14 @@ type AppProps = {
   /** Body document loader for the detail overview; defaults to the board BFF.
    * Called only for a task that carries body_doc. */
   fetchDoc?: FetchDoc;
+  /** The latest poll failed; the rows are the last good snapshot. */
+  refreshFailed?: boolean;
+  /** Preview-only tooling rendered under the list (the measurement panel).
+   * The production entry passes nothing, so it never imports that code. */
+  extras?: ReactNode;
 };
 
-export function QueueProtoApp({ datasets, initialSet, storage, diag = false, perf = false, fetchDetail, fetchDoc }: AppProps) {
+export function QueueProtoApp({ datasets, initialSet, storage, diag = false, perf = false, fetchDetail, fetchDoc, refreshFailed = false, extras }: AppProps) {
   const all = datasets;
   const params = typeof window !== "undefined" ? new URLSearchParams(window.location.search) : new URLSearchParams();
   const setKey = initialSet ?? params.get("set") ?? (perf ? "perf5000" : "sample200");
@@ -96,9 +128,13 @@ export function QueueProtoApp({ datasets, initialSet, storage, diag = false, per
   const diagMode = diag || params.get("diag") === "1";
   const perfMode = perf || params.get("perf") === "1";
 
-  const loaded = useMemo(() => loadPresentation(storage), [storage]);
+  const source = dataset.source;
+  const loaded = useMemo(
+    () => loadPresentation(storage, source === "synthetic" ? PREVIEW_DEFAULT_STATE : DEFAULT_STATE),
+    [storage, source],
+  );
   const [state, setState] = useState<ProtoState>(() => ({
-    ...applyNavParams(loaded.state, params),
+    ...normalizeGrouping(applyNavParams(loaded.state, params), dataset.source),
     // Narrow viewports (incl. 200% zoom) start with the rail collapsed; the
     // header toggle always stays reachable.
     sidebarCollapsed: typeof window !== "undefined" ? window.innerWidth < 900 : false,
@@ -133,8 +169,11 @@ export function QueueProtoApp({ datasets, initialSet, storage, diag = false, per
     if (groups) {
       return flattenGrouped(groups, []).filter((r) => r.kind === "task").map((r) => (r.kind === "task" ? r.task.id : -1));
     }
+    if (state.grouping === "state") {
+      return groupByState(visible).flatMap((g) => g.tasks.map((t) => t.id));
+    }
     return visible.map((t) => t.id);
-  }, [state.layout, columns, groups, visible]);
+  }, [state.layout, state.grouping, columns, groups, visible]);
 
   const lanes = useMemo(() => [...new Set(dataset.tasks.map((t) => t.lane))].sort(), [dataset.tasks]);
   const kinds = useMemo(() => [...new Set(dataset.tasks.map((t) => t.kind))].sort(), [dataset.tasks]);
@@ -167,7 +206,10 @@ export function QueueProtoApp({ datasets, initialSet, storage, diag = false, per
       const taskId = parseTaskParam(p.get("task"));
       setState((s) => {
         const next = applyNavParams(s, p);
-        next.grouping = p.get("group") === "area" ? "area" : "none";
+        next.grouping = parseGrouping(p.get("group")) ?? "state";
+        if (source === "live" && next.grouping === "area") {
+          next.grouping = "state";
+        }
         navRef.current = navKey(next, taskId);
         return next;
       });
@@ -175,7 +217,7 @@ export function QueueProtoApp({ datasets, initialSet, storage, diag = false, per
     };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
-  }, []);
+  }, [source]);
 
   // Non-modal panel: the list is never inert. On close, focus returns to the
   // originating row/card — but only when focus was inside the panel; focus
@@ -246,6 +288,8 @@ export function QueueProtoApp({ datasets, initialSet, storage, diag = false, per
     return () => observer.disconnect();
   }, []);
 
+  const changeState = useCallback((next: ProtoState) => setState(normalizeGrouping(next, source)), [source]);
+
   const setView = useCallback((view: ProtoView) => {
     setState((s) => ({ ...s, view, layout: defaultLayout(view) }));
   }, []);
@@ -254,10 +298,10 @@ export function QueueProtoApp({ datasets, initialSet, storage, diag = false, per
     (name: string) => {
       const saved = views[name];
       if (saved) {
-        setState((s) => ({ ...s, ...saved, collapsedGroups: [] }));
+        setState((s) => normalizeGrouping({ ...s, ...saved, collapsedGroups: [] }, source));
       }
     },
-    [views],
+    [views, source],
   );
 
   const toggleGroup = useCallback((key: string) => {
@@ -266,6 +310,8 @@ export function QueueProtoApp({ datasets, initialSet, storage, diag = false, per
       collapsedGroups: s.collapsedGroups.includes(key) ? s.collapsedGroups.filter((k) => k !== key) : [...s.collapsedGroups, key],
     }));
   }, []);
+
+  const setDensity = useCallback((density: Density) => setState((s) => ({ ...s, density })), []);
 
   const toggleRail = useCallback(() => {
     setState((s) => ({ ...s, sidebarCollapsed: !s.sidebarCollapsed }));
@@ -317,42 +363,94 @@ export function QueueProtoApp({ datasets, initialSet, storage, diag = false, per
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [perfMode, dataset]);
 
+  const clock = formatClock(dataset.generatedAt);
+  const gapFields = useMemo(
+    () => (dataset.tasks.length === 0 ? [] : LIST_GAP_FIELDS.filter((f) => dataset.tasks.every((t) => t[f.key] === null))),
+    [dataset.tasks],
+  );
+  const partial = dataset.completeness !== "complete";
+
   return (
     <div className={`qp-root${state.sidebarCollapsed ? " rail-collapsed" : ""}${openId !== null ? " qp-peek-open" : ""}`} ref={rootRef}>
       <div id="qp-main" ref={mainRef}>
-        <ViewRail dataset={dataset} view={state.view} counts={viewCounts} views={views} onSelectView={setView} onApplyView={applyNamedView} />
+        <ViewRail
+          dataset={dataset}
+          view={state.view}
+          counts={viewCounts}
+          views={views}
+          onSelectView={setView}
+          onApplyView={applyNamedView}
+          density={state.density}
+          onDensity={setDensity}
+        />
         <div className="qp-body">
           <header className="qp-head" ref={headRef}>
             <button
               type="button"
               id="qp-rail-toggle"
+              className="hk-iconbtn"
               aria-expanded={!state.sidebarCollapsed}
               aria-controls="qp-rail"
+              aria-label="뷰 패널"
+              title="뷰 패널 열기/닫기"
               onClick={toggleRail}
             >
-              ☰ views
+              <svg className="hk-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" aria-hidden="true">
+                <rect x="4" y="5" width="16" height="14" rx="2" />
+                <path d="M9.5 5v14" />
+              </svg>
             </button>
-            <span className="qp-ws">queue</span>
+            <nav className="qp-crumb" aria-label="위치">
+              <span>Fleet console</span>
+              <span className="qp-crumb-sep" aria-hidden="true">
+                ›
+              </span>
+              <span className="qp-crumb-here" aria-current="page">
+                Queue
+              </span>
+            </nav>
             {dataset.source === "synthetic" ? (
               <span className="qp-synth-badge">SYNTHETIC FIXTURE — not the production backlog</span>
-            ) : (
-              <span className="qp-live-badge">LIVE — /ui/api/board</span>
-            )}
-            <nav className="qp-nav muted">
-              {dataset.source === "synthetic" ? "timeline · decisions · fleet (prototype — links inert)" : "timeline · decisions · fleet"}
-            </nav>
+            ) : null}
+            <div className="qp-datastatus" role="status" data-testid="data-status">
+              <span className="qp-asof">{clock === null ? "확인 시각 알 수 없음" : `${clock} 확인 자료`}</span>
+              {refreshFailed ? (
+                <span className="qp-status-warn" data-status="refresh-failed">
+                  ⚠ 갱신 실패 · {clock === null ? "이전" : clock} 자료를 보여 주는 중
+                </span>
+              ) : null}
+              {partial ? (
+                <span className="qp-status-warn" data-status="partial">
+                  ⚠ 일부 자료만 조회됨 · 확인된 {dataset.tasks.length}건
+                </span>
+              ) : null}
+              {gapFields.length > 0 ? (
+                <span className="qp-status-warn" data-status="not-collected">
+                  ⚠ {gapFields.map((f) => f.label).join(" · ")}은 아직 수집하지 않습니다
+                </span>
+              ) : null}
+            </div>
           </header>
           {loaded.versionMismatch ? (
             <p className="qp-reset-notice" role="alert">
-              saved view reset — version mismatch
+              저장한 뷰 형식이 달라 기본값으로 되돌렸습니다 (saved view reset — version mismatch)
             </p>
           ) : null}
-          <Toolbar state={state} lanes={lanes} kinds={kinds} states={dataset.states} visibleCount={visible.length} onChange={setState} />
+          <Toolbar
+            state={state}
+            lanes={lanes}
+            kinds={kinds}
+            states={dataset.states}
+            visibleCount={visible.length}
+            partial={partial}
+            allowAreaGrouping={dataset.source === "synthetic"}
+            onChange={changeState}
+          />
           <div className="qp-content">
             {visible.length === 0 ? (
               <div className="qp-empty">
-                <p>No tasks match the current view and filters.</p>
-                <button type="button" onClick={showAll}>
+                <p>현재 뷰와 필터에 맞는 태스크가 없습니다.</p>
+                <button type="button" className="hk-btn" onClick={showAll}>
                   Show All view
                 </button>
               </div>
@@ -371,7 +469,7 @@ export function QueueProtoApp({ datasets, initialSet, storage, diag = false, per
               <BoardView dataset={dataset} columns={columns} density={state.density} selectedId={openId} onOpen={open} />
             )}
           </div>
-          <MeasurePanel />
+          {extras}
         </div>
       </div>
       {openId !== null ? (

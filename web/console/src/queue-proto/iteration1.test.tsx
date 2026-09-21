@@ -107,7 +107,7 @@ describe("view rail — semantic navigation, not tabs", () => {
   it("sidebar collapses via the header toggle and reopens", () => {
     render(<QueueProtoApp datasets={datasets} initialSet="sample200" />);
     const root = document.querySelector(".qp-root")!;
-    const toggle = screen.getByRole("button", { name: /views/ });
+    const toggle = screen.getByRole("button", { name: /뷰 패널/ });
     expect(root.classList.contains("rail-collapsed")).toBe(false);
     fireEvent.click(toggle);
     expect(root.classList.contains("rail-collapsed")).toBe(true);
@@ -128,8 +128,11 @@ describe("dense grouped list — adversarial: rail without list must fail", () =
     expect(document.getElementById("qp-rail")).toBeTruthy();
     expect(container.querySelectorAll(".qp-group").length).toBeGreaterThanOrEqual(2);
     expect(container.querySelectorAll(".qp-row").length).toBe(63);
-    expect(container.querySelector(".qp-colhead")!.textContent).toContain("created age");
-    expect(container.querySelector(".qp-colhead")!.textContent).toContain("state age");
+    // No column header row any more: each row names its own age basis —
+    // created age and current-state age are separate, labelled cells.
+    const row = container.querySelector<HTMLElement>(".qp-row")!;
+    const ages = [...row.querySelectorAll<HTMLElement>(".qp-age")].map((a) => a.getAttribute("title"));
+    expect(ages).toEqual(["생성(created_at) 기준", "현재 상태 진입(state_entered_at) 기준"]);
   });
 
   it("group header counts come from the full filtered fixture, not rendered rows", () => {
@@ -152,7 +155,7 @@ describe("dense grouped list — adversarial: rail without list must fail", () =
       collapsedTotal += Number(h.querySelector<HTMLElement>(".qp-badge")!.textContent);
     }
     expect(collapsedTotal).toBe(63);
-    expect(container.textContent).toContain("63 unique tasks");
+    expect(container.querySelector(".qp-count")!.textContent).toContain("63건");
   });
 });
 
@@ -207,7 +210,7 @@ describe("staleness — explicit threshold, deterministic buckets", () => {
     const badges = container.querySelectorAll(".qp-stale");
     expect(badges.length).toBe(24);
     for (const b of badges) {
-      expect(b.textContent).toContain("stale");
+      expect(b.textContent).toContain("7일+");
     }
     // no element may claim a stale task is ready/safe to run
     expect(container.textContent).not.toContain("ready to execute");

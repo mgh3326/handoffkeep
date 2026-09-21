@@ -287,9 +287,10 @@ describe("live render — absent fields show unknown, never 0/blank (two-way)", 
     const { container } = render(<QueueProtoApp datasets={{ live: liveDataset([mkBoardTask({})]) }} initialSet="live" />);
     fireEvent.click(screen.getByRole("link", { name: "All" }));
     const row = container.querySelector<HTMLElement>('[data-task-id="7001"]')!;
-    expect(row.textContent).toContain("unknown");
+    expect(row.textContent).toContain("인수자 미상");
+    expect(row.textContent).toContain("진입 미수집");
     expect(row.querySelectorAll(".qp-unknown").length).toBeGreaterThanOrEqual(2); // claimant + state age
-    expect(row.textContent).not.toMatch(/unknown\/0d|\b0d\b.*state_entered/);
+    expect(row.textContent).not.toMatch(/진입 0|\b0d\b|진입 \d+시간/);
   });
 });
 
@@ -405,12 +406,17 @@ describe("LiveQueue mount", () => {
     window.history.replaceState(null, "", "/ui/queue");
   });
 
-  it("renders the live dataset with the LIVE badge — no synthetic marker", async () => {
+  it("renders the live dataset with its data status — no synthetic marker, no internal endpoint", async () => {
     render(<LiveQueue loadDataset={() => Promise.resolve(liveDataset([mkBoardTask({})]))} />);
-    expect(screen.getByText(/loading queue/)).toBeTruthy();
-    await screen.findByText("LIVE — /ui/api/board");
+    expect(screen.getByText(/불러오는 중/)).toBeTruthy();
+    const status = await screen.findByTestId("data-status");
+    expect(status.textContent).toMatch(/\d\d:\d\d 확인 자료/);
+    // the list API never carries these — the header says so on the default screen
+    expect(status.querySelector('[data-status="not-collected"]')!.textContent).toContain("상태 진입 시각 · 기한 · 막힘");
     expect(screen.queryByText(/SYNTHETIC FIXTURE/)).toBeNull();
-    expect(screen.getByTestId("status-line").textContent).toContain("source: live /ui/api/board");
+    // internal endpoints are developer detail, not user-facing status
+    expect(document.querySelector(".qp-root")!.textContent).not.toContain("/ui/api");
+    expect(screen.queryByTestId("status-line")).toBeNull();
   });
 
   it("a failed load renders an error — never a fallback dataset", async () => {
@@ -493,13 +499,14 @@ describe("LiveQueue polling — 15s refresh parity with the old board", () => {
       await vi.advanceTimersByTimeAsync(15_000);
     });
     // last data stays on screen, flagged — the page is not torn down
-    expect(screen.getByText(/refresh failed/)).toBeTruthy();
+    expect(screen.getByText(/갱신 실패/)).toBeTruthy();
+    expect(screen.getByText(/갱신 실패/).closest('[role="status"]')).toBeTruthy();
     expect(screen.getByText(/task alpha/)).toBeTruthy();
     await act(async () => {
       await vi.advanceTimersByTimeAsync(15_000);
     });
     expect(loadDataset).toHaveBeenCalledTimes(3);
-    expect(screen.queryByText(/refresh failed/)).toBeNull();
+    expect(screen.queryByText(/갱신 실패/)).toBeNull();
   });
 
   it("a first-load failure shows the error and keeps polling until the API returns", async () => {

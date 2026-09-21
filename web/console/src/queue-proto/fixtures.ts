@@ -6,7 +6,10 @@ import { intBetween, mulberry32, pick } from "./rng";
 import { KNOWN_STATES, type Dataset, type Enrichment, type ProtoTask } from "./types";
 
 export const GENERATED_AT = "2026-09-19T09:00:00+09:00";
-export { PREVIEW_CLAMP } from "./types";
+/** Length past which a fixture title counts as "long": the old 96-char list
+ * preview cut. The UI no longer cuts titles in JS (CSS line-clamp only), so
+ * this is a fixture property — long titles carry a tail marker beyond it. */
+export const PREVIEW_CLAMP = 96;
 
 // Declared synthetic distribution for the 200-row sample. It reproduces only
 // the observed capped sample's proportions: kind=fix 103/200 (51.5%) and the
