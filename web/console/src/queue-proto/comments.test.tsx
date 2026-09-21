@@ -153,8 +153,9 @@ describe("write form", () => {
     const { container } = render(<TaskComments taskId={8001} client={mkClient()} />);
     await settled(container);
     const form = screen.getByRole("form", { name: "코멘트 작성" });
-    const notice = within(form).getByText(NOTICE);
-    expect(notice.closest("[hidden]")).toBeNull();
+    const notice = [...form.querySelectorAll<HTMLElement>("[role=note]")].find((el) => el.textContent?.includes(NOTICE));
+    expect(notice?.textContent ?? "").toContain(NOTICE);
+    expect(notice?.closest("[hidden]")).toBeNull();
     expect(form.textContent).toContain("상태·우선순위·전이는 바뀌지 않고");
   });
 
