@@ -7,11 +7,20 @@ import { fetchTaskDetail } from "../board/api";
 import type { BoardDetail } from "../board/types";
 import { boardTaskToProto } from "./boardtask";
 import { CopyTaskLink, DetailBody } from "./DetailDrawer";
+import type { FetchDoc } from "./DocInline";
 import { KNOWN_STATES, type Dataset } from "./types";
 
 type PageState = "loading" | "loaded" | "notfound" | "error";
 
-export function TaskPage({ id, fetchDetail = fetchTaskDetail }: { id: number; fetchDetail?: (id: number) => Promise<BoardDetail> }) {
+export function TaskPage({
+  id,
+  fetchDetail = fetchTaskDetail,
+  fetchDoc,
+}: {
+  id: number;
+  fetchDetail?: (id: number) => Promise<BoardDetail>;
+  fetchDoc?: FetchDoc;
+}) {
   const [state, setState] = useState<PageState>("loading");
   const [detail, setDetail] = useState<BoardDetail | null>(null);
   const [dataset, setDataset] = useState<Dataset | null>(null);
@@ -70,7 +79,7 @@ export function TaskPage({ id, fetchDetail = fetchTaskDetail }: { id: number; fe
       ) : null}
       {state === "error" ? <p className="qp-unknown">unavailable — detail fetch failed</p> : null}
       {state === "loaded" && detail !== null && dataset !== null ? (
-        <DetailBody dataset={dataset} task={boardTaskToProto(detail.task)} detail={{ status: "loaded", data: detail }} />
+        <DetailBody dataset={dataset} task={boardTaskToProto(detail.task)} detail={{ status: "loaded", data: detail }} fetchDoc={fetchDoc} />
       ) : null}
     </div>
   );

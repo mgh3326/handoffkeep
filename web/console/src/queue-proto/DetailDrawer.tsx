@@ -1,6 +1,9 @@
-import { useEffect, useRef, useState } from "react";
-import type { BoardDetail } from "../board/types";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import type { BoardDetail, ParticipantSegment } from "../board/types";
+import { ActivityTabs } from "./ActivityTabs";
 import { ageDays, isStale, STALE_MIN_AGE_DAYS } from "./adapter";
+import { docPageHref, titleDocKeys } from "./bodydoc";
+import { DocInline, type FetchDoc } from "./DocInline";
 import type { Dataset, Enrichment, ProtoTask } from "./types";
 
 /** Lazily fetched per-drawer detail (live mode). Absent → the task's own
@@ -57,16 +60,72 @@ export function CopyTaskLink({ id }: { id: number }) {
   );
 }
 
+/** The overview's body section. Only body_doc is rendered inline; a key found
+ * in the title is a named link, never inlined and never written back. An
+ * absent body is said in words — the overview is never silently blank. */
+function TaskBodySection({ task, fetchDoc }: { task: ProtoTask; fetchDoc?: FetchDoc }) {
+  const bodyDoc = task.body_doc ?? "";
+  let content: ReactNode;
+  if (bodyDoc !== "") {
+    content = <DocInline bodyDoc={bodyDoc} fetchDoc={fetchDoc} />;
+  } else {
+    const titleKeys = titleDocKeys(task.title);
+    content = (
+      <div className="qp-doc" data-doc-state={titleKeys.length > 0 ? "title-fallback" : "none"}>
+        <p className="qp-unknown" role="note">
+          본문 문서가 연결되지 않았습니다 (body_doc 없음). 본문은 등재할 때 <code>tasks add --doc &lt;key&gt;</code> 로 붙입니다.
+        </p>
+        {titleKeys.length > 0 ? (
+          <>
+            <p>title 에서 찾은 문서 — 링크만 제공하고 본문으로 렌더하지 않습니다:</p>
+            <ul className="qp-drawer-refs">
+              {titleKeys.map((key) => (
+                <li key={key}>
+                  <a href={docPageHref(key)}>{key}</a> <span className="muted">(title 에서 찾은 문서)</span>
+                </li>
+              ))}
+            </ul>
+          </>
+        ) : null}
+      </div>
+    );
+  }
+  return (
+    <section className="qp-drawer-sec qp-body-sec">
+      <h4>본문</h4>
+      {content}
+    </section>
+  );
+}
+
+function SegmentRow({ segment }: { segment: ParticipantSegment }) {
+  const cell = (value: number | null) => (value === null ? <td className="qp-unknown">미수집</td> : <td>{value}</td>);
+  return (
+    <tr>
+      <td>{segment.role ?? "unknown"}</td>
+      <td>{segment.model_id ?? "unknown"}</td>
+      <td>{segment.reps}</td>
+      {cell(segment.rounds)}
+      {cell(segment.blockers_found)}
+      {cell(segment.completed)}
+      {cell(segment.input_tokens)}
+      {cell(segment.output_tokens)}
+    </tr>
+  );
+}
+
 type BodyProps = {
   dataset: Dataset;
   task: ProtoTask;
   detail?: DetailFetchState;
+  /** Document loader for the overview body; defaults to the board BFF. */
+  fetchDoc?: FetchDoc;
 };
 
-/** The task detail content — one component shared by the peek drawer and the
- * /ui/tasks/<id> page. Shell chrome (nav/close/back-link) is each host's own;
- * the sections below are not duplicated. */
-export function DetailBody({ dataset, task, detail }: BodyProps) {
+/** The task detail content — the one component shared by the peek drawer and
+ * the /ui/tasks/<id> page. Shell chrome (nav/close/back-link) is each host's
+ * own; the tabs and sections below are not duplicated anywhere. */
+export function DetailBody({ dataset, task, detail, fetchDoc }: BodyProps) {
   const enr: Enrichment | undefined = dataset.enrichment[task.id];
   const now = dataset.generatedAt;
   const stateAge = ageDays(now, task.state_entered_at);
@@ -85,9 +144,10 @@ export function DetailBody({ dataset, task, detail }: BodyProps) {
         }
       : { status: task.coverage.status, participants: task.coverage.participants, truncated: false };
 
-  return (
+  // The body comes first: it is what the one-line title stands in for.
+  const overview = (
     <>
-      <p className="qp-drawer-title">{task.title}</p>
+      <TaskBodySection task={task} fetchDoc={fetchDoc} />
       <p className="qp-source-status">
         source status: <strong>{dataset.source === "live" ? "live /ui/api/board" : "synthetic fixture"}</strong> — {dataset.completeness} ·{" "}
         {dataset.completenessNote}
@@ -160,6 +220,9 @@ export function DetailBody({ dataset, task, detail }: BodyProps) {
             </li>
           ) : null}
           {task.refs.head_sha ? <li>head: {task.refs.head_sha.slice(0, 9)}</li> : null}
+          {detail?.status === "loaded" && detail.data.linear ? (
+            <li>linear: {detail.data.linear.identifier || detail.data.linear.issue_id}</li>
+          ) : null}
         </ul>
       </section>
       <section className="qp-drawer-sec">
@@ -225,49 +288,95 @@ export function DetailBody({ dataset, task, detail }: BodyProps) {
         ) : coverage.status === "not_collected" ? (
           <p className="qp-unknown">unknown — not collected</p>
         ) : (
-          <p>
-            collected · participants:{" "}
-            <strong data-testid="participant-count">
-              {coverage.participants ?? "unknown"}
-              {coverage.truncated ? "+" : ""}
-            </strong>
-          </p>
+          <>
+            <p>
+              collected · participants:{" "}
+              <strong data-testid="participant-count">
+                {coverage.participants ?? "unknown"}
+                {coverage.truncated ? "+" : ""}
+              </strong>
+            </p>
+            {detail?.status === "loaded" && detail.data.participants.segments.length > 0 ? (
+              <div className="qp-table-scroll">
+                <table className="qp-participants">
+                  <thead>
+                    <tr>
+                      <th>role</th>
+                      <th>model</th>
+                      <th>reps</th>
+                      <th>rounds</th>
+                      <th>blockers</th>
+                      <th>completed</th>
+                      <th>input tokens</th>
+                      <th>output tokens</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {detail.data.participants.segments.map((segment, index) => (
+                      <SegmentRow key={`${segment.role ?? ""}:${segment.model_id ?? ""}:${index}`} segment={segment} />
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : null}
+          </>
         )}
       </section>
-      <section className="qp-drawer-sec">
-        <h4>history</h4>
-        {detail === undefined ? (
-          task.events.length === 0 ? (
-            <p className="muted">none recorded</p>
-          ) : (
-            <ol className="qp-drawer-refs">
-              {task.events.map((event) => (
-                <li key={event.id}>
-                  {event.from} → {event.to} by {event.by} at <time>{event.at}</time>
-                  {event.note ? <span className="muted"> — {event.note}</span> : null}
-                </li>
-              ))}
-            </ol>
-          )
-        ) : detail.status === "loading" ? (
-          <p className="muted">loading…</p>
-        ) : detail.status === "error" ? (
-          <p className="qp-unknown">unavailable — detail fetch failed</p>
-        ) : detail.status === "notfound" ? (
-          <p className="qp-unknown">unavailable — task not found</p>
-        ) : detail.data.events.length === 0 ? (
+    </>
+  );
+
+  const comments = (
+    <section className="qp-drawer-sec">
+      <h4>코멘트</h4>
+      <p className="qp-unknown" role="note">
+        아직 연결되지 않았습니다 — 코멘트 조회가 이 화면에 연결되기 전이며, 코멘트가 없다는 뜻이 아닙니다.
+      </p>
+    </section>
+  );
+
+  // Transitions are task_events. A note is data: plain text only, never
+  // parsed as markdown or HTML.
+  const transitions = (
+    <section className="qp-drawer-sec">
+      <h4>history</h4>
+      {detail === undefined ? (
+        task.events.length === 0 ? (
           <p className="muted">none recorded</p>
         ) : (
           <ol className="qp-drawer-refs">
-            {detail.data.events.map((event) => (
+            {task.events.map((event) => (
               <li key={event.id}>
                 {event.from} → {event.to} by {event.by} at <time>{event.at}</time>
                 {event.note ? <span className="muted"> — {event.note}</span> : null}
               </li>
             ))}
           </ol>
-        )}
-      </section>
+        )
+      ) : detail.status === "loading" ? (
+        <p className="muted">loading…</p>
+      ) : detail.status === "error" ? (
+        <p className="qp-unknown">unavailable — detail fetch failed</p>
+      ) : detail.status === "notfound" ? (
+        <p className="qp-unknown">unavailable — task not found</p>
+      ) : detail.data.events.length === 0 ? (
+        <p className="muted">none recorded</p>
+      ) : (
+        <ol className="qp-drawer-refs">
+          {detail.data.events.map((event) => (
+            <li key={event.id}>
+              {event.from} → {event.to} by {event.by} at <time>{event.at}</time>
+              {event.note ? <span className="muted"> — {event.note}</span> : null}
+            </li>
+          ))}
+        </ol>
+      )}
+    </section>
+  );
+
+  return (
+    <>
+      <p className="qp-drawer-title">{task.title}</p>
+      <ActivityTabs panels={{ overview, comments, transitions }} />
     </>
   );
 }
@@ -284,13 +393,14 @@ type DrawerProps = {
   notFound?: boolean;
   onClose: () => void;
   onNav: (id: number) => void;
+  fetchDoc?: FetchDoc;
 };
 
 // Non-modal peek panel: no inert background, no aria-modal — the list stays
 // live and clicking another row swaps the content. Focus lands in the panel
 // only on the closed→open transition; switching tasks keeps focus where the
 // user is so keyboard and pointer both travel list↔panel freely.
-export function DetailDrawer({ dataset, taskId, task, detail, orderedIds, notFound = false, onClose, onNav }: DrawerProps) {
+export function DetailDrawer({ dataset, taskId, task, detail, orderedIds, notFound = false, onClose, onNav, fetchDoc }: DrawerProps) {
   const ref = useRef<HTMLDivElement>(null);
   const index = orderedIds.indexOf(taskId);
   const prevId = index > 0 ? orderedIds[index - 1] : null;
@@ -355,7 +465,7 @@ export function DetailDrawer({ dataset, taskId, task, detail, orderedIds, notFou
           <p className="muted">loading…</p>
         )
       ) : (
-        <DetailBody dataset={dataset} task={task} detail={detail} />
+        <DetailBody dataset={dataset} task={task} detail={detail} fetchDoc={fetchDoc} />
       )}
     </div>
   );

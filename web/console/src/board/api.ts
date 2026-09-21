@@ -1,4 +1,4 @@
-import type { BoardDetail, BoardTask, BoardTasksResponse, PolicyResponse } from "./types";
+import type { BoardDetail, BoardDoc, BoardTask, BoardTasksResponse, PolicyResponse } from "./types";
 
 const PAGE_LIMIT = 500;
 const MAX_TASKS = 5000;
@@ -64,6 +64,12 @@ export async function fetchBoardTasks(): Promise<BoardData> {
 
 export function fetchTaskDetail(id: number): Promise<BoardDetail> {
   return getJSON<BoardDetail>(`/ui/api/board/tasks/${id}`);
+}
+
+/** Reads one hk document by key for the task overview. The key is the part of
+ * body_doc before "#"; the section suffix never leaves the browser. */
+export function fetchBoardDoc(key: string): Promise<BoardDoc> {
+  return getJSON<BoardDoc>(`/ui/api/board/doc?key=${encodeURIComponent(key)}`);
 }
 
 export function fetchPolicyActive(): Promise<PolicyResponse> {

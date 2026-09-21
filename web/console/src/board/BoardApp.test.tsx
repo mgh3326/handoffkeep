@@ -140,24 +140,15 @@ describe("BoardApp", () => {
     expect(screen.getByText("접힘 (1)")).toBeTruthy();
   });
 
-  it("loads task detail on card selection and keeps all participant segments", async () => {
-    stubBoard([task({ id: 7, title: "selectable" })], {
-      "/ui/api/board/tasks/7": {
-        task: task({ id: 7, title: "selectable" }),
-        events: [{ id: 1, from: "backlog", to: "claimed", by: "worker-a", note: "claimed it", at: "2026-09-01T00:00:00Z" }],
-        dwell: [{ state: "backlog", seconds: 5, open: true }],
-        linear: null,
-        participants: { task_ref: "hk:task/7", coverage: "not_collected", segments: [] },
-      },
-    });
+  it("card selection links to the single task detail page instead of a second detail", async () => {
+    stubBoard([task({ id: 7, title: "selectable" })]);
     render(<BoardApp />);
     const card = await screen.findByText(/selectable/);
     fireEvent.click(card);
-    await screen.findByText("수집된 bench rep이 없습니다.");
-    expect(screen.getByText("backlog → claimed")).toBeTruthy();
-    expect(screen.getByText("hk:task/7")).toBeTruthy();
+    const link = screen.getByRole("link", { name: "#7 상세 열기" });
+    expect(link.getAttribute("href")).toBe("/ui/tasks/7");
     fireEvent.click(screen.getByText("닫기"));
-    expect(screen.queryByText("전이 기록")).toBeNull();
+    expect(screen.queryByRole("link", { name: "#7 상세 열기" })).toBeNull();
   });
 
   it("shows loading, empty, and error states explicitly", async () => {

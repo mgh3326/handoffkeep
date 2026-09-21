@@ -32,6 +32,11 @@ var allowedAbsoluteURLs = []string{
 	// (see web/console/src/queue-proto/sanitize.ts) — structurally
 	// non-routable, so it can never become an external load.
 	"https://example.invalid/",
+	// Error-message documentation links inside the lazily loaded markdown
+	// renderer chunk (react-markdown, hast-util-to-jsx-runtime) — string
+	// constants in thrown messages, never requested.
+	"https://github.com/remarkjs/react-markdown/blob/main/changelog.md",
+	"https://github.com/syntax-tree/hast-util-to-jsx-runtime",
 }
 
 func consoleDir(t *testing.T) string {

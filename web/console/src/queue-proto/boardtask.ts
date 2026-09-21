@@ -24,6 +24,7 @@ export function boardTaskToProto(task: BoardTask): ProtoTask {
     updated_at: task.updated_at ?? null,
     parent_lane: task.parent_lane ?? null,
     refs: task.refs,
+    ...(task.body_doc ? { body_doc: task.body_doc } : {}),
     events: [],
     dwell: [],
     coverage: { status: "not_collected", participants: null },

@@ -38,6 +38,13 @@ origin relations `--origin-pr <merged PR URL>` and `--origin-task <id>`
 (`refs.origin_pr` / `refs.origin_task`, "this row came from"; `closing_pr` is
 reserved for #494).
 
+`add --doc <key>` attaches the task body: `tasks.body_doc` holds only the hk
+document key (or the transitional `key#section`, where the section is a scroll
+position), while the body text stays in `documents` (`doc put` / `doc get`).
+Only the key shape is checked — the document may be written later — and the
+console's task overview renders that document inline. No other subcommand
+writes `body_doc`; `--doc` elsewhere is refused.
+
 ### Disposition items (merge → operator)
 
 A disposition item is a `kind=decide` task whose `refs.disposition` records one

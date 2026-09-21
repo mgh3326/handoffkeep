@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { fetchBoardTasks, fetchPolicyActive, type BoardData } from "./api";
 import type { BoardTask, PolicyResponse } from "./types";
-import { TaskDetail } from "../task-detail/TaskDetail";
 import { PolicyPanel } from "./PolicyPanel";
 
 const FALLBACK_STATES = [
@@ -256,7 +255,17 @@ export function BoardApp() {
         })}
       </div>
       {board.tasks.length === 0 ? <p className="muted">표시할 태스크가 없습니다.</p> : null}
-      {selectedId !== null ? <TaskDetail id={selectedId} onClose={() => setSelectedId(null)} /> : null}
+      {selectedId !== null ? (
+        // The task detail has one implementation — the /ui/tasks/<id> page and
+        // the queue's peek panel. This legacy board links to it rather than
+        // carrying a second detail component.
+        <p className="board-selected" data-task-id={selectedId}>
+          <a href={`/ui/tasks/${selectedId}`}>#{selectedId} 상세 열기</a>{" "}
+          <button type="button" onClick={() => setSelectedId(null)}>
+            닫기
+          </button>
+        </p>
+      ) : null}
       <PolicyPanel policy={policy} error={policyError} />
     </section>
   );

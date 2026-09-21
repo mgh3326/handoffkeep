@@ -18,6 +18,9 @@ export type BoardTask = {
   created_at: string;
   updated_at: string;
   refs: TaskRefs;
+  /** hk document key holding the task body: "key" or the transitional
+   * "key#section". Absent when no body document is attached. */
+  body_doc?: string;
 };
 
 export type BoardTasksResponse = {
@@ -86,4 +89,17 @@ export type PolicyResponse = {
   release?: string;
   items: PolicyItem[];
   truncated?: boolean;
+};
+
+/** GET /ui/api/board/doc — one hk document by exact key. Only "markdown"
+ * may reach the renderer; "unsupported" is shown as raw text only. */
+export type BoardDoc = {
+  key: string;
+  kind: string;
+  sha256: string;
+  updated_at: string;
+  bytes: number;
+  format: "markdown" | "unsupported";
+  reason?: "not_text" | "too_large" | "json";
+  body: string;
 };
