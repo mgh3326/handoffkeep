@@ -1,0 +1,10 @@
+# NOTE: .git is intentionally NOT listed here. The image build needs it so
+# `go build` can stamp vcs.revision into the binary (deploy runbook verifies
+# the stamp). Adding a `.git` entry must fail tests/image_pipeline_test.go.
+.env
+.env.*
+**/node_modules/
+web/console/dist-proto/
+**/*.test
+**/*.out
+**/coverage.*
