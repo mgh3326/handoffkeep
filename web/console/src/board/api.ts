@@ -38,10 +38,16 @@ export async function fetchBoardTasks(): Promise<BoardData> {
     if (!page.truncated) {
       return { tasks, states, truncated: false, generatedAt };
     }
-    afterID = page.next_after_id ?? 0;
-    if (afterID <= 0 || tasks.length >= MAX_TASKS) {
+    const next = page.next_after_id ?? 0;
+    if (next <= 0 || tasks.length >= MAX_TASKS) {
       return { tasks, states, truncated: true, generatedAt };
     }
+    if (next <= afterID) {
+      // A cursor that does not advance would re-request the same page until
+      // the cap — reject loudly instead of looping on a server violation.
+      throw new Error(`non-advancing board cursor: after_id=${afterID} next_after_id=${next}`);
+    }
+    afterID = next;
   }
 }
 

@@ -4,7 +4,7 @@
 // or a blank. Detail-only fields (events, dwell, coverage) are fetched lazily
 // per open drawer via BoardDetail, never per list row.
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { fetchBoardTasks, fetchTaskDetail } from "../board/api";
 import type { BoardTask } from "../board/types";
 import { QueueProtoApp } from "./QueueProtoApp";
@@ -52,28 +52,55 @@ export async function fetchLiveDataset(): Promise<Dataset> {
   };
 }
 
-/** Production mount: renders the app only once the live dataset has loaded —
- * live data only. A fetch failure renders an explicit error, never a fixture
- * and never a fabricated dataset. */
+const POLL_MS = 15_000;
+
+/** Production mount: renders the app once the live dataset has loaded — live
+ * data only, refreshed on a 15s poll. The next poll is scheduled only after
+ * the in-flight load settles, so requests can never overlap; a seq guard
+ * keeps a stale response from overwriting newer state. A refresh failure
+ * keeps the last good dataset and flags it; the first-load failure renders
+ * an explicit error, never a fixture and never a fabricated dataset — and
+ * polling continues so the page recovers when the API returns. */
 export function LiveQueue({ loadDataset = fetchLiveDataset }: { loadDataset?: () => Promise<Dataset> }) {
   const [dataset, setDataset] = useState<Dataset | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [refreshFailed, setRefreshFailed] = useState(false);
+  const hasData = useRef(false);
   useEffect(() => {
     let cancelled = false;
-    loadDataset().then(
-      (next) => {
-        if (!cancelled) {
+    let timer = 0;
+    let seq = 0;
+    const load = async () => {
+      const mine = ++seq;
+      try {
+        const next = await loadDataset();
+        if (!cancelled && mine === seq) {
+          hasData.current = true;
           setDataset(next);
+          setError(null);
+          setRefreshFailed(false);
         }
-      },
-      (err: unknown) => {
+      } catch (err) {
+        if (!cancelled && mine === seq) {
+          const message = err instanceof Error ? err.message : String(err);
+          if (hasData.current) {
+            setRefreshFailed(true);
+          } else {
+            setError(message);
+          }
+        }
+      } finally {
         if (!cancelled) {
-          setError(err instanceof Error ? err.message : String(err));
+          timer = window.setTimeout(() => {
+            void load();
+          }, POLL_MS);
         }
-      },
-    );
+      }
+    };
+    void load();
     return () => {
       cancelled = true;
+      window.clearTimeout(timer);
     };
   }, [loadDataset]);
   if (error !== null) {
@@ -86,5 +113,14 @@ export function LiveQueue({ loadDataset = fetchLiveDataset }: { loadDataset?: ()
   if (dataset === null) {
     return <p className="muted">loading queue…</p>;
   }
-  return <QueueProtoApp datasets={{ live: dataset }} initialSet="live" fetchDetail={fetchTaskDetail} />;
+  return (
+    <>
+      {refreshFailed ? (
+        <p className="qp-refresh-warn" role="status">
+          refresh failed — showing last received data
+        </p>
+      ) : null}
+      <QueueProtoApp datasets={{ live: dataset }} initialSet="live" fetchDetail={fetchTaskDetail} />
+    </>
+  );
 }

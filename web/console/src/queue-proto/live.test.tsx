@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueueProtoApp } from "./QueueProtoApp";
 import { boardTaskToProto, fetchLiveDataset, LiveQueue } from "./live";
@@ -126,6 +126,16 @@ describe("fetchLiveDataset", () => {
     expect(ds.completeness).toBe("partial");
     vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(new Response("nope", { status: 500 }))));
     await expect(fetchLiveDataset()).rejects.toThrow("request failed: 500");
+  });
+
+  it("rejects a non-advancing cursor instead of re-requesting the same page to the cap", async () => {
+    // Server violation: page 2 reports the same next_after_id it was asked
+    // after. Without the guard this loop re-fetches the identical page until
+    // the 5000-task cap — 10 wasted requests on the only data path /ui/queue has.
+    const fetchSpy = vi.fn(() => Promise.resolve(jsonResponse(page([mkBoardTask({ id: 7 })], true, 7))));
+    vi.stubGlobal("fetch", fetchSpy);
+    await expect(fetchLiveDataset()).rejects.toThrow("non-advancing board cursor");
+    expect(fetchSpy).toHaveBeenCalledTimes(2); // stops at the first repeat
   });
 });
 
@@ -321,5 +331,117 @@ describe("LiveQueue mount", () => {
     expect(alert.textContent).toContain("request failed: 500");
     expect(screen.queryByText(/SYNTHETIC FIXTURE/)).toBeNull();
     expect(document.querySelector(".qp-root")).toBeNull(); // app never mounts
+  });
+});
+
+describe("LiveQueue polling — 15s refresh parity with the old board", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    window.history.replaceState(null, "", "/ui/queue");
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  // The mutant the contract pins: not "a timer was registered" but "the list
+  // actually refreshes N seconds later".
+  it("re-fetches and re-renders the list 15 seconds after the first load", async () => {
+    const loadDataset = vi
+      .fn<() => Promise<Dataset>>()
+      .mockResolvedValueOnce(liveDataset([mkBoardTask({ title: "task alpha" })]))
+      .mockResolvedValue(liveDataset([mkBoardTask({ title: "task beta" })]));
+    render(<LiveQueue loadDataset={loadDataset} />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(loadDataset).toHaveBeenCalledTimes(1);
+    expect(screen.getByText(/task alpha/)).toBeTruthy();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(14_999);
+    });
+    expect(loadDataset).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(loadDataset).toHaveBeenCalledTimes(2);
+    expect(screen.getByText(/task beta/)).toBeTruthy();
+  });
+
+  it("never overlaps — the next poll is scheduled only after the in-flight load settles", async () => {
+    let resolveFirst!: (d: Dataset) => void;
+    const loadDataset = vi
+      .fn<() => Promise<Dataset>>()
+      .mockImplementationOnce(() => new Promise<Dataset>((res) => (resolveFirst = res)))
+      .mockResolvedValue(liveDataset([mkBoardTask({})]));
+    render(<LiveQueue loadDataset={loadDataset} />);
+    // A slow first load outlives several poll windows — still exactly one call.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    expect(loadDataset).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      resolveFirst(liveDataset([mkBoardTask({})]));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(15_000);
+    });
+    expect(loadDataset).toHaveBeenCalledTimes(2);
+  });
+
+  it("a failed refresh keeps the last dataset with a warning, and recovery clears it", async () => {
+    const loadDataset = vi
+      .fn<() => Promise<Dataset>>()
+      .mockResolvedValueOnce(liveDataset([mkBoardTask({ title: "task alpha" })]))
+      .mockRejectedValueOnce(new Error("boom"))
+      .mockResolvedValue(liveDataset([mkBoardTask({ title: "task alpha" })]));
+    render(<LiveQueue loadDataset={loadDataset} />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(screen.getByText(/task alpha/)).toBeTruthy();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(15_000);
+    });
+    // last data stays on screen, flagged — the page is not torn down
+    expect(screen.getByText(/refresh failed/)).toBeTruthy();
+    expect(screen.getByText(/task alpha/)).toBeTruthy();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(15_000);
+    });
+    expect(loadDataset).toHaveBeenCalledTimes(3);
+    expect(screen.queryByText(/refresh failed/)).toBeNull();
+  });
+
+  it("a first-load failure shows the error and keeps polling until the API returns", async () => {
+    const loadDataset = vi
+      .fn<() => Promise<Dataset>>()
+      .mockRejectedValueOnce(new Error("request failed: 500"))
+      .mockResolvedValue(liveDataset([mkBoardTask({ title: "task alpha" })]));
+    render(<LiveQueue loadDataset={loadDataset} />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(screen.getByRole("alert").textContent).toContain("queue unavailable");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(15_000);
+    });
+    expect(loadDataset).toHaveBeenCalledTimes(2);
+    expect(screen.getByText(/task alpha/)).toBeTruthy();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("unmount stops the chain — no leaked timer keeps fetching", async () => {
+    const loadDataset = vi.fn<() => Promise<Dataset>>(() => Promise.resolve(liveDataset([mkBoardTask({})])));
+    const { unmount } = render(<LiveQueue loadDataset={loadDataset} />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(loadDataset).toHaveBeenCalledTimes(1);
+    unmount();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    expect(loadDataset).toHaveBeenCalledTimes(1);
   });
 });

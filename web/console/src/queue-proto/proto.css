@@ -148,6 +148,13 @@ body {
   border-radius: 0.3rem;
   padding: 0.5rem 0.75rem;
 }
+.qp-refresh-warn {
+  margin: 0.3rem 0.75rem;
+  padding: 0.3rem 0.6rem;
+  border: 1px solid #a65b00;
+  color: #a65b00;
+  border-radius: 0.3rem;
+}
 .qp-nav {
   margin-left: auto;
   font-size: 0.85em;
