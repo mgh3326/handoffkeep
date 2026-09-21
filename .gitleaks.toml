@@ -1,6 +1,22 @@
 # 테스트 픽스처 전용 가짜 키(2026-09-04): 이 단위 테스트 파일의
 # 합성 credential-shaped 입력만 허용한다. 실제 소스와 다른 경로는 검사한다.
-[allowlist]
-paths = [
-  '''internal/guard/guard_test\.go''',
+[extend]
+useDefault = true
+
+# baseline(2026-09-21, gitleaks 8.30.1, useDefault + allowlist 없음)에서
+# 측정된 finding 2건(slack-bot-token @ guard_test.go:14, generic-api-key @ :13)에
+# 대응하는 allowlist. 두 finding 의 match 텍스트 모두 같은 합성 리터럴을 포함하므로
+# regex 하나로 충분하다(실측).
+# targetRules 로 rule-scoped 로 보내 전역 allowlist 목록에서 빠진다 —
+# 전역 목록의 paths 는 디렉터리 스캔의 파일 필터(shouldSkipPath)가 condition 과
+# 무관하게 적용해 파일을 통째로 건너뛰게 하므로 여기서는 쓸 수 없다.
+# condition=AND 가 필수: OR 이면 regexes 만으로 전역 억제로 샌다.
+[[allowlists]]
+description = "synthetic credential fixtures in internal/guard/guard_test.go"
+targetRules = ["slack-bot-token", "generic-api-key"]
+condition = "AND"
+paths = ['''internal/guard/guard_test\.go''']
+regexTarget = "match"
+regexes = [
+  '''xoxb-1234567890-1234567890-''',
 ]
