@@ -183,3 +183,12 @@ and optional `X-HK-Ref` (`checkpoint:<id>`, `document:<key>`, or
 service; add `?presign=1` for a ten-minute private URL. `/v1/usage` and
 authenticated `/metrics` expose the local fuse counters. `r2usage` is optional
 and safely reports `skipped` when Cloudflare analytics credentials are absent.
+
+## Container image
+
+CI builds `ghcr.io/mgh3326/handoffkeep` — a single static binary on distroless,
+running as nonroot — on every PR, and pushes it (tags: full commit SHA and
+`main`) on each `main` push. Image contents, tag rules, the `vcs.revision`
+verification command, and the environment-variable name list live in
+[docs/image.md](docs/image.md). This pipeline produces the image only; the
+deployment path is unchanged.
