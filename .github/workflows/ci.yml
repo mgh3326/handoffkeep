@@ -40,6 +40,11 @@ jobs:
       - uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_CONFIG: .gitleaks.toml
+          # Pin the scanner to the version this config was verified with.
+          # [[allowlists]]/targetRules/condition require gitleaks >= 8.25.0;
+          # older versions silently drop unknown keys (allowlist = none).
+          GITLEAKS_VERSION: "8.30.1"
   build:
     runs-on: ubuntu-latest
     strategy:

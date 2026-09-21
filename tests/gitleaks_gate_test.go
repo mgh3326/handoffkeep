@@ -1,0 +1,190 @@
+package tests
+
+import (
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"testing"
+
+	"github.com/BurntSushi/toml"
+	"go.yaml.in/yaml/v3"
+)
+
+// .gitleaks.toml must explicitly enable the default rule set. gitleaks v8 uses
+// only the rules present in a supplied config file, so a config without
+// extend.useDefault leaves the repository leak gate scanning with zero rules.
+func TestGitleaksConfigEnablesDefaultRules(t *testing.T) {
+	body, err := os.ReadFile(filepath.Join("..", ".gitleaks.toml"))
+	if err != nil {
+		t.Fatalf("read .gitleaks.toml: %v", err)
+	}
+	var cfg struct {
+		Extend struct {
+			UseDefault bool `toml:"useDefault"`
+		} `toml:"extend"`
+	}
+	meta, err := toml.Decode(string(body), &cfg)
+	if err != nil {
+		t.Fatalf("parse .gitleaks.toml: %v", err)
+	}
+	if !meta.IsDefined("extend", "useDefault") {
+		t.Fatal(".gitleaks.toml does not define [extend] useDefault")
+	}
+	if cfg.Extend.UseDefault != true {
+		t.Fatalf(".gitleaks.toml extend.useDefault = %v, want exactly true", cfg.Extend.UseDefault)
+	}
+}
+
+// A global gitleaks allowlist entry (one without targetRules) must not scope
+// findings by paths, regexes, or stopwords. Global regexes/stopwords suppress
+// matching findings anywhere in the repo, and global paths make the directory
+// scanner skip the whole file regardless of the entry's condition. Scoping
+// belongs on rule-scoped [[allowlists]] entries (targetRules + condition=AND).
+func TestGitleaksConfigHasNoUnscopedGlobalAllowlist(t *testing.T) {
+	type allowlist struct {
+		Condition   string   `toml:"condition"`
+		TargetRules []string `toml:"targetRules"`
+		Paths       []string `toml:"paths"`
+		Regexes     []string `toml:"regexes"`
+		StopWords   []string `toml:"stopwords"`
+	}
+	var cfg struct {
+		AllowList  *allowlist  `toml:"allowlist"`
+		Allowlists []allowlist `toml:"allowlists"`
+	}
+	body, err := os.ReadFile(filepath.Join("..", ".gitleaks.toml"))
+	if err != nil {
+		t.Fatalf("read .gitleaks.toml: %v", err)
+	}
+	if _, err := toml.Decode(string(body), &cfg); err != nil {
+		t.Fatalf("parse .gitleaks.toml: %v", err)
+	}
+	all := cfg.Allowlists
+	if cfg.AllowList != nil {
+		all = append(all, *cfg.AllowList)
+	}
+	for i, a := range all {
+		if len(a.TargetRules) > 0 {
+			continue
+		}
+		if len(a.Paths) > 0 || len(a.Regexes) > 0 || len(a.StopWords) > 0 {
+			t.Fatalf("global allowlist[%d] scopes findings by paths/regexes/stopwords; "+
+				"use [[allowlists]] with targetRules instead", i)
+		}
+	}
+}
+
+// The CI gitleaks step must name the repository config file instead of relying
+// on auto-discovery, so the gate cannot silently fall back to another config.
+func TestCIGitleaksStepSpecifiesRepoConfig(t *testing.T) {
+	env := ciGitleaksStepEnv(t)
+	if got := env["GITLEAKS_CONFIG"]; got != ".gitleaks.toml" {
+		t.Fatalf("gitleaks step GITLEAKS_CONFIG=%q, want .gitleaks.toml", got)
+	}
+}
+
+// .gitleaks.toml uses [[allowlists]]/targetRules/condition, syntax that exists
+// only in gitleaks >= 8.25.0. Older scanners parse the file without error but
+// silently drop the unknown keys, leaving no allowlist at all. If the config
+// uses that syntax, CI must pin GITLEAKS_VERSION >= 8.25.0 so the version that
+// was verified locally is the version that runs in CI.
+func TestGitleaksConfigSyntaxSupportedByPinnedVersion(t *testing.T) {
+	body, err := os.ReadFile(filepath.Join("..", ".gitleaks.toml"))
+	if err != nil {
+		t.Fatalf("read .gitleaks.toml: %v", err)
+	}
+	var cfg map[string]any
+	meta, err := toml.Decode(string(body), &cfg)
+	if err != nil {
+		t.Fatalf("parse .gitleaks.toml: %v", err)
+	}
+	needsMin := false
+	for _, key := range meta.Keys() {
+		if len(key) == 0 {
+			continue
+		}
+		head, last := key[0], key[len(key)-1]
+		scoped := head == "allowlist" || head == "allowlists"
+		if head == "allowlists" || (scoped && (last == "targetRules" || last == "condition")) {
+			needsMin = true
+		}
+	}
+	if !needsMin {
+		return
+	}
+	const minVersion = "8.25.0"
+	env := ciGitleaksStepEnv(t)
+	version := env["GITLEAKS_VERSION"]
+	if version == "" {
+		t.Fatalf(".gitleaks.toml uses gitleaks >= %s syntax but the ci.yml "+
+			"gitleaks step does not pin GITLEAKS_VERSION", minVersion)
+	}
+	if compareVersion(version, minVersion) < 0 {
+		t.Fatalf(".gitleaks.toml uses gitleaks >= %s syntax but ci.yml pins "+
+			"GITLEAKS_VERSION=%q", minVersion, version)
+	}
+}
+
+func ciGitleaksStepEnv(t *testing.T) map[string]string {
+	t.Helper()
+	body, err := os.ReadFile(filepath.Join("..", ".github", "workflows", "ci.yml"))
+	if err != nil {
+		t.Fatalf("read ci.yml: %v", err)
+	}
+	var workflow struct {
+		Jobs map[string]struct {
+			Steps []struct {
+				Uses string            `yaml:"uses"`
+				Env  map[string]string `yaml:"env"`
+			} `yaml:"steps"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal(body, &workflow); err != nil {
+		t.Fatalf("parse ci.yml: %v", err)
+	}
+	for _, job := range workflow.Jobs {
+		for _, step := range job.Steps {
+			if step.Uses == "" || step.Uses[:1] == "." {
+				continue
+			}
+			if len(step.Uses) < len("gitleaks/gitleaks-action@") ||
+				step.Uses[:len("gitleaks/gitleaks-action@")] != "gitleaks/gitleaks-action@" {
+				continue
+			}
+			return step.Env
+		}
+	}
+	t.Fatal("ci.yml has no gitleaks/gitleaks-action step")
+	return nil
+}
+
+// compareVersion compares two dotted numeric versions like "8.24.3" and
+// "8.25.0" numerically per component (not as strings, so 8.9.0 < 8.25.0).
+func compareVersion(a, b string) int {
+	parse := func(v string) [3]int {
+		var parts [3]int
+		v = strings.TrimPrefix(strings.TrimSpace(v), "v")
+		for i, s := range strings.SplitN(v, ".", 4) {
+			if i >= 3 {
+				break
+			}
+			n, err := strconv.Atoi(s)
+			if err != nil {
+				return [3]int{-1, -1, -1}
+			}
+			parts[i] = n
+		}
+		return parts
+	}
+	pa, pb := parse(a), parse(b)
+	for i := range pa {
+		switch {
+		case pa[i] < pb[i]:
+			return -1
+		case pa[i] > pb[i]:
+			return 1
+		}
+	}
+	return 0
+}
