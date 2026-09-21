@@ -172,27 +172,26 @@ export function QueueProtoApp({ datasets, initialSet, storage, diag = false, per
   // is deliberately not a dep: a re-run's cleanup would cancel the in-flight
   // fetch it guards. Runs only when openId/fetchDetail changes, at which
   // point the rendered `details` snapshot is current.
+  // Detail fetches are never cancelled: closing or navigating the drawer lets
+  // the request finish and cache, so reopening hits the cache instead of a
+  // zombie "loading" entry. An "error" entry retries on the next open.
   useEffect(() => {
-    if (openId === null || fetchDetail === undefined || details[openId] !== undefined) {
+    if (openId === null || fetchDetail === undefined) {
       return;
     }
-    let cancelled = false;
+    const existing = details[openId];
+    if (existing !== undefined && existing.status !== "error") {
+      return;
+    }
     setDetails((d) => ({ ...d, [openId]: { status: "loading" } }));
     fetchDetail(openId).then(
       (data) => {
-        if (!cancelled) {
-          setDetails((d) => ({ ...d, [openId]: { status: "loaded", data } }));
-        }
+        setDetails((d) => ({ ...d, [openId]: { status: "loaded", data } }));
       },
       () => {
-        if (!cancelled) {
-          setDetails((d) => ({ ...d, [openId]: { status: "error" } }));
-        }
+        setDetails((d) => ({ ...d, [openId]: { status: "error" } }));
       },
     );
-    return () => {
-      cancelled = true;
-    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [openId, fetchDetail]);
 

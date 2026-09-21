@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueueProtoApp } from "./QueueProtoApp";
 import { boardTaskToProto, fetchLiveDataset, LiveQueue } from "./live";
 import type { BoardDetail, BoardTask, BoardTasksResponse } from "../board/types";
@@ -146,10 +146,10 @@ describe("live render — absent fields show unknown, never 0/blank (two-way)", 
     expect(ddValue(drawer, "current-state age")).toContain("unknown");
     expect(ddValue(drawer, "due")).toBe("unknown");
     expect(ddValue(drawer, "blocker")).toBe("unknown");
-    // dwell: the dangerous path — an empty array must not become "0s" or blank
-    expect(section(drawer, "dwell").textContent).toContain("unknown — not collected");
+    // dwell/coverage: detail fetch pending → honest transient state, never "0s" or blank
+    expect(section(drawer, "dwell").textContent).toContain("loading");
     expect(section(drawer, "dwell").textContent).not.toContain("0s");
-    expect(section(drawer, "participation coverage").textContent).toContain("unknown — not collected");
+    expect(section(drawer, "participation coverage").textContent).toContain("loading");
     expect(within(drawer).queryByTestId("participant-count")).toBeNull();
     // two-way: any null→0 mutant makes these exact assertions fail
     for (const label of ["claimant", "due", "blocker"]) {
@@ -158,6 +158,17 @@ describe("live render — absent fields show unknown, never 0/blank (two-way)", 
     }
     // while the detail is still loading the history section says so, not 0 rows
     expect(section(drawer, "history").textContent).toContain("loading");
+  });
+
+  it("with no detail fetcher at all, absent dwell/coverage render unknown — not collected", () => {
+    const { container } = render(<QueueProtoApp datasets={{ live: liveDataset([mkBoardTask({})]) }} initialSet="live" />);
+    fireEvent.click(screen.getByRole("link", { name: "All" }));
+    openRow(container, 7001);
+    const drawer = screen.getByRole("dialog") as HTMLElement;
+    // the dangerous path: empty dwell must never look like "0s dwell" or blank
+    expect(section(drawer, "dwell").textContent).toContain("unknown — not collected");
+    expect(section(drawer, "dwell").textContent).not.toContain("0s");
+    expect(section(drawer, "participation coverage").textContent).toContain("unknown — not collected");
   });
 
   it("a real claimant renders — the mapping is not unconditionally unknown", () => {
@@ -240,6 +251,52 @@ describe("lazy detail fetch — no N+1 on the list path", () => {
     const drawer = screen.getByRole("dialog") as HTMLElement;
     await waitFor(() => expect(section(drawer, "history").textContent).toContain("unavailable"));
     expect(section(drawer, "history").textContent).not.toContain("0 events");
+    // error state marks dwell/coverage unavailable too — not silently "not collected"
+    expect(section(drawer, "dwell").textContent).toContain("unavailable");
+    expect(section(drawer, "participation coverage").textContent).toContain("unavailable");
+  });
+
+  it("closing mid-fetch still caches the result — reopening never sticks on loading", async () => {
+    let resolveDetail!: (d: BoardDetail) => void;
+    const fetchDetail = vi.fn(() => new Promise<BoardDetail>((res) => (resolveDetail = res)));
+    const { container } = render(
+      <QueueProtoApp datasets={{ live: liveDataset([mkBoardTask({})]) }} initialSet="live" fetchDetail={fetchDetail} />,
+    );
+    fireEvent.click(screen.getByRole("link", { name: "All" }));
+    openRow(container, 7001);
+    expect(fetchDetail).toHaveBeenCalledTimes(1);
+    // close while the request is still in flight
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+    await act(async () => {
+      resolveDetail(
+        mkDetail({ task: mkBoardTask({ id: 7001 }), dwell: [{ state: "backlog", seconds: 42, open: false }] }),
+      );
+    });
+    // reopen: the completed fetch must be cached, not stuck on "loading…"
+    openRow(container, 7001);
+    const drawer = screen.getByRole("dialog") as HTMLElement;
+    await waitFor(() => expect(section(drawer, "dwell").textContent).toContain("backlog: 42s"));
+    expect(fetchDetail).toHaveBeenCalledTimes(1);
+  });
+
+  it("a failed detail fetch retries on reopen", async () => {
+    const fetchDetail = vi
+      .fn<() => Promise<BoardDetail>>()
+      .mockRejectedValueOnce(new Error("boom"))
+      .mockResolvedValue(mkDetail({ task: mkBoardTask({ id: 7001 }), dwell: [{ state: "claimed", seconds: 7, open: true }] }));
+    const { container } = render(
+      <QueueProtoApp datasets={{ live: liveDataset([mkBoardTask({})]) }} initialSet="live" fetchDetail={fetchDetail} />,
+    );
+    fireEvent.click(screen.getByRole("link", { name: "All" }));
+    openRow(container, 7001);
+    const drawer = screen.getByRole("dialog") as HTMLElement;
+    await waitFor(() => expect(section(drawer, "history").textContent).toContain("unavailable"));
+    fireEvent.keyDown(drawer, { key: "Escape" });
+    openRow(container, 7001);
+    await waitFor(() => expect(fetchDetail).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(section(screen.getByRole("dialog") as HTMLElement, "dwell").textContent).toContain("claimed: 7s"),
+    );
   });
 });
 

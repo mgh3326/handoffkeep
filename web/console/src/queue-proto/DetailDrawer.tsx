@@ -59,8 +59,9 @@ export function DetailDrawer({ dataset, task, detail, orderedIds, onClose, onNav
   const stateAge = ageDays(now, task.state_entered_at);
   const createdAge = ageDays(now, task.created_at);
 
-  // Detail-loaded fields fall back to the task's own values. An absent or
-  // empty value stays honest: not-collected renders "unknown", never 0.
+  // Detail-loaded fields fall back to the task's own values only while no
+  // fetch state exists; loading/error get their own honest states. An absent
+  // or empty value stays honest: not-collected renders "unknown", never 0.
   const dwell = detail?.status === "loaded" ? detail.data.dwell : task.dwell;
   const coverage =
     detail?.status === "loaded"
@@ -182,7 +183,11 @@ export function DetailDrawer({ dataset, task, detail, orderedIds, onClose, onNav
       </section>
       <section className="qp-drawer-sec">
         <h4>dwell</h4>
-        {dwell.length === 0 ? (
+        {detail?.status === "loading" ? (
+          <p className="muted">loading…</p>
+        ) : detail?.status === "error" ? (
+          <p className="qp-unknown">unavailable — detail fetch failed</p>
+        ) : dwell.length === 0 ? (
           detail?.status === "loaded" ? (
             <p className="muted">none recorded</p>
           ) : (
@@ -202,7 +207,11 @@ export function DetailDrawer({ dataset, task, detail, orderedIds, onClose, onNav
       </section>
       <section className="qp-drawer-sec">
         <h4>participation coverage</h4>
-        {coverage.status === "not_collected" ? (
+        {detail?.status === "loading" ? (
+          <p className="muted">loading…</p>
+        ) : detail?.status === "error" ? (
+          <p className="qp-unknown">unavailable — detail fetch failed</p>
+        ) : coverage.status === "not_collected" ? (
           <p className="qp-unknown">unknown — not collected</p>
         ) : (
           <p>
