@@ -9,23 +9,26 @@ export type Theme = "dark" | "light";
 export const THEME_KEY = "hk-console:theme";
 
 /** Dark is the default and the only operator-approved theme; light applies
- * only after the viewer explicitly picks it. */
-export function loadTheme(storage: Pick<Storage, "getItem"> | undefined = globalThis.localStorage): Theme {
+ * only after the viewer explicitly picks it. Storage is resolved inside the
+ * try: in a sandboxed or storage-blocked browser even reading the
+ * localStorage property throws, and that must never stop the queue from
+ * mounting. */
+export function loadTheme(storage?: Pick<Storage, "getItem">): Theme {
   try {
-    return storage?.getItem(THEME_KEY) === "light" ? "light" : "dark";
+    return (storage ?? globalThis.localStorage)?.getItem(THEME_KEY) === "light" ? "light" : "dark";
   } catch {
     return "dark";
   }
 }
 
-export function applyTheme(theme: Theme, storage: Pick<Storage, "setItem"> | undefined = globalThis.localStorage): void {
+export function applyTheme(theme: Theme, storage?: Pick<Storage, "setItem">): void {
   if (theme === "light") {
     document.documentElement.dataset.theme = "light";
   } else {
     delete document.documentElement.dataset.theme;
   }
   try {
-    storage?.setItem(THEME_KEY, theme);
+    (storage ?? globalThis.localStorage)?.setItem(THEME_KEY, theme);
   } catch {
     // storage unavailable — the choice lasts for this page only
   }

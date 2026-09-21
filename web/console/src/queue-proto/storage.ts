@@ -82,12 +82,36 @@ function toView(state: ProtoState): SavedView {
   };
 }
 
+const isStringArray = (v: unknown): v is string[] => Array.isArray(v) && v.every((x) => typeof x === "string");
+
+function saneFilters(f: unknown): boolean {
+  if (typeof f !== "object" || f === null) {
+    return false;
+  }
+  const x = f as Record<string, unknown>;
+  return (
+    typeof x.query === "string" &&
+    typeof x.lane === "string" &&
+    typeof x.kind === "string" &&
+    isStringArray(x.hiddenStates) &&
+    (x.minPriority === null || (typeof x.minPriority === "number" && Number.isFinite(x.minPriority)))
+  );
+}
+
+/** A stored view is used only if every field the renderer reads has the
+ * right shape — a hand-edited or corrupted entry (filters: null, a missing
+ * array) would otherwise crash the first render. */
 function sane(saved: unknown): saved is SavedView {
   if (typeof saved !== "object" || saved === null) {
     return false;
   }
   const s = saved as SavedView;
-  return ["operator", "active", "backlog", "all"].includes(s.view) && ["list", "board"].includes(s.layout) && typeof s.filters === "object";
+  return (
+    ["operator", "active", "backlog", "all"].includes(s.view) &&
+    ["list", "board"].includes(s.layout) &&
+    saneFilters(s.filters) &&
+    (s.hiddenColumns === undefined || isStringArray(s.hiddenColumns))
+  );
 }
 
 /** Grouping/density outside the known values fall back to the defaults
@@ -103,10 +127,12 @@ function withKnownPresentation<T extends Partial<SavedView>>(saved: T): T {
   return out;
 }
 
-export function loadPresentation(storage: Pick<Storage, "getItem"> = localStorage, defaults: ProtoState = DEFAULT_STATE): LoadResult {
+// Storage is resolved inside the try in both directions: reading the
+// localStorage property itself throws in storage-blocked browsers.
+export function loadPresentation(storage?: Pick<Storage, "getItem">, defaults: ProtoState = DEFAULT_STATE): LoadResult {
   let raw: string | null = null;
   try {
-    raw = storage.getItem(STORAGE_KEY);
+    raw = (storage ?? globalThis.localStorage).getItem(STORAGE_KEY);
   } catch {
     raw = null;
   }
@@ -125,7 +151,11 @@ export function loadPresentation(storage: Pick<Storage, "getItem"> = localStorag
     const storedViews: Record<string, SavedView> = {};
     if (typeof parsed.views === "object" && parsed.views !== null) {
       for (const [name, view] of Object.entries(parsed.views)) {
-        storedViews[name] = withKnownPresentation(view);
+        // A malformed entry is dropped on its own; the rest still load and a
+        // shipped view of the same name keeps its default.
+        if (sane(view)) {
+          storedViews[name] = withKnownPresentation({ ...view, hiddenColumns: view.hiddenColumns ?? [] });
+        }
       }
     }
     const views = { ...NAMED_VIEWS, ...storedViews };
@@ -135,10 +165,10 @@ export function loadPresentation(storage: Pick<Storage, "getItem"> = localStorag
   }
 }
 
-export function savePresentation(state: ProtoState, views: Record<string, SavedView>, storage: Pick<Storage, "setItem"> = localStorage): void {
+export function savePresentation(state: ProtoState, views: Record<string, SavedView>, storage?: Pick<Storage, "setItem">): void {
   try {
     const payload: PersistedPayload = { schemaVersion: SCHEMA_VERSION, current: toView(state), views };
-    storage.setItem(STORAGE_KEY, JSON.stringify(payload));
+    (storage ?? globalThis.localStorage).setItem(STORAGE_KEY, JSON.stringify(payload));
   } catch {
     // localStorage may be unavailable — presentation state simply won't persist.
   }

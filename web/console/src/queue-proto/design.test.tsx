@@ -7,9 +7,10 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gzipSync } from "node:zlib";
 import { renderToStaticMarkup } from "react-dom/server";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import type { BoardTask } from "../board/types";
+import { applyTheme, loadTheme } from "./AppShell";
 import { boardTaskToProto } from "./boardtask";
 import { QueueProtoApp } from "./QueueProtoApp";
 import { STATE_SHAPES, StateIcon } from "./StateIcon";
@@ -465,5 +466,95 @@ describe("product entry and bundle budget", () => {
       const text = read(built, name);
       expect(text, name).not.toMatch(/@import|fonts\.googleapis|fonts\.gstatic|url\(\s*["']?https?:/);
     }
+  });
+});
+
+// ---- first screen survives broken browser storage (PR #32 gate round) ----
+
+describe("storage failures never stop the queue from mounting", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    delete document.documentElement.dataset.theme;
+  });
+
+  it("reading the localStorage property itself throws (storage-blocked browser)", () => {
+    const original = Object.getOwnPropertyDescriptor(globalThis, "localStorage")!;
+    Object.defineProperty(globalThis, "localStorage", {
+      configurable: true,
+      get() {
+        throw new DOMException("storage disabled", "SecurityError");
+      },
+    });
+    try {
+      let theme: string | undefined;
+      expect(() => (theme = loadTheme())).not.toThrow();
+      expect(theme).toBe("dark");
+      expect(() => applyTheme("light")).not.toThrow();
+      expect(document.documentElement.dataset.theme).toBe("light");
+      let view: ReturnType<typeof renderLive> | undefined;
+      expect(() => (view = renderLive([mkBoardTask({})]))).not.toThrow();
+      const container = view!.container;
+      expect(container.querySelector('[data-task-id="7001"]')).toBeTruthy();
+      // choosing a density still works for this page, it just is not saved
+      fireEvent.click(screen.getByRole("button", { name: "행 56px · 2줄" }));
+      expect(container.querySelector(".qp-listwrap")!.getAttribute("data-density")).toBe("comfortable");
+    } finally {
+      Object.defineProperty(globalThis, "localStorage", original);
+    }
+  });
+
+  it("getItem and setItem throw", () => {
+    vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+      throw new DOMException("quota", "QuotaExceededError");
+    });
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new DOMException("quota", "QuotaExceededError");
+    });
+    let theme: string | undefined;
+    expect(() => (theme = loadTheme())).not.toThrow();
+    expect(theme).toBe("dark");
+    expect(() => applyTheme("dark")).not.toThrow();
+    let view: ReturnType<typeof renderLive> | undefined;
+    expect(() => (view = renderLive([mkBoardTask({})]))).not.toThrow();
+    const container = view!.container;
+    expect(container.querySelector('[data-task-id="7001"]')).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "행 56px · 2줄" }));
+    expect(container.querySelector(".qp-listwrap")!.getAttribute("data-density")).toBe("comfortable");
+  });
+});
+
+describe("a corrupted saved view is dropped, never crashes the first render", () => {
+  const good = { view: "all", layout: "list", grouping: "state", density: "compact", filters: { query: "", lane: "", kind: "", hiddenStates: [], minPriority: null }, hiddenColumns: [] };
+
+  it("drops malformed views and a malformed current state; valid ones still load", () => {
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        schemaVersion: 1,
+        current: { view: "all", layout: "list", filters: {} },
+        views: {
+          "broken-null-filters": { view: "all", layout: "list", filters: null },
+          "broken-states": { ...good, filters: { ...good.filters, hiddenStates: "merged" } },
+          "broken-columns": { ...good, hiddenColumns: { a: 1 } },
+          "ops-triage": { view: "all", layout: "list" },
+          "my-view": { ...good, filters: { ...good.filters, lane: "live-lane" } },
+        },
+      }),
+    );
+    window.history.replaceState(null, "", "/ui/queue");
+    let view: ReturnType<typeof renderLive> | undefined;
+    expect(() => (view = renderLive([mkBoardTask({})]))).not.toThrow();
+    const container = view!.container;
+    const rail = document.getElementById("qp-rail")!;
+    const saved = [...rail.querySelectorAll<HTMLElement>(".qp-rail-saved")].map((b) => b.textContent);
+    expect(saved).toEqual(["ops-triage", "active-flow", "backlog-scan", "my-view"]);
+    // malformed current → product default (backlog view), not a crash
+    expect(screen.getByRole("link", { name: "Backlog" }).getAttribute("aria-current")).toBe("page");
+    // the shipped view keeps its default after the corrupt override is dropped
+    fireEvent.click(screen.getByRole("button", { name: "ops-triage" }));
+    expect(screen.getByRole("link", { name: "Operator" }).getAttribute("aria-current")).toBe("page");
+    expect(() => fireEvent.click(screen.getByRole("button", { name: "my-view" }))).not.toThrow();
+    expect(screen.getByRole("link", { name: "All" }).getAttribute("aria-current")).toBe("page");
+    expect(container.querySelector('[data-task-id="7001"]')).toBeTruthy();
   });
 });
