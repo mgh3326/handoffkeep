@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -248,6 +250,9 @@ type TaskEvent struct {
 	At     time.Time `json:"at"`
 }
 
+// Task.BodyDoc points at the hk document holding the task's body ("key" or
+// the transitional "key#section"). The body text stays in documents; tasks
+// keep only this pointer (hk:doc decision/2026-09-21/task536-body-storage-approved).
 type Task struct {
 	ID         int64       `json:"id"`
 	Lane       string      `json:"lane"`
@@ -261,6 +266,7 @@ type Task struct {
 	CreatedBy  string      `json:"created_by"`
 	CreatedAt  time.Time   `json:"created_at"`
 	UpdatedAt  time.Time   `json:"updated_at"`
+	BodyDoc    string      `json:"body_doc,omitempty"`
 	Events     []TaskEvent `json:"events,omitempty"`
 }
 
@@ -487,7 +493,14 @@ func (s *Store) migrate(ctx context.Context) error {
 		`ALTER TABLE task_events ADD COLUMN IF NOT EXISTS refs JSONB`,
 		`CREATE OR REPLACE FUNCTION handoffkeep_task_events_append_only() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'task_events is append-only'; RETURN NULL; END; $$`,
 		`DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'task_events_append_only' AND tgrelid = 'task_events'::regclass) THEN CREATE TRIGGER task_events_append_only BEFORE UPDATE OR DELETE OR TRUNCATE ON task_events FOR EACH STATEMENT EXECUTE FUNCTION handoffkeep_task_events_append_only(); END IF; END $$`,
-		`INSERT INTO schema_version(version) VALUES (5) ON CONFLICT DO NOTHING`}
+		`INSERT INTO schema_version(version) VALUES (5) ON CONFLICT DO NOTHING`,
+		// Additive and idempotent at every start: the body document pointer
+		// (#536). A constant default makes the ADD COLUMN metadata-only. The
+		// catalog check comes first because ALTER TABLE takes an ACCESS
+		// EXCLUSIVE lock on tasks even when IF NOT EXISTS finds the column —
+		// every later start would queue behind open readers and stall the
+		// queue behind it.
+		`DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'tasks' AND column_name = 'body_doc') THEN ALTER TABLE tasks ADD COLUMN IF NOT EXISTS body_doc TEXT NOT NULL DEFAULT ''; END IF; END $$`}
 	stmts = append(stmts,
 		`CREATE TABLE IF NOT EXISTS relay_events (id BIGSERIAL PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('job.completed','job.escalate','job.joined')), job_id TEXT NOT NULL, epoch INTEGER NOT NULL DEFAULT 0, owner_lane TEXT NOT NULL, machine TEXT NOT NULL DEFAULT '', pane_id TEXT NOT NULL DEFAULT '', report_path TEXT NOT NULL DEFAULT '', report_last_line TEXT NOT NULL DEFAULT '', question TEXT NOT NULL DEFAULT '', pr TEXT NOT NULL DEFAULT '', head TEXT NOT NULL DEFAULT '', reason TEXT NOT NULL DEFAULT '', event_time TIMESTAMPTZ, received_at TIMESTAMPTZ NOT NULL, delivered_at TIMESTAMPTZ, delivered_to TEXT NOT NULL DEFAULT '', attempts INTEGER NOT NULL DEFAULT 0)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS relay_events_idempotency ON relay_events(kind, job_id, epoch, report_path, reason)`,
@@ -964,20 +977,56 @@ func mergeTaskRefs(old, patch TaskRefs) TaskRefs {
 }
 
 func validTask(x Task) bool {
-	return validName(x.Lane) && (x.ParentLane == "" || validName(x.ParentLane)) && x.Title != "" && validText(x.Title, MaxBytes) && taskKinds[x.Kind] && x.CreatedBy != "" && validText(x.CreatedBy, 128) && validTaskRefs(x.Refs)
+	return validName(x.Lane) && (x.ParentLane == "" || validName(x.ParentLane)) && x.Title != "" && validText(x.Title, MaxBytes) && taskKinds[x.Kind] && x.CreatedBy != "" && validText(x.CreatedBy, 128) && validTaskRefs(x.Refs) && (x.BodyDoc == "" || ValidBodyDoc(x.BodyDoc))
+}
+
+// bodyDocKeyRE is the document key alphabet the console can fetch and link
+// (internal/ui docKeyRE). A body_doc outside it could be stored but never
+// shown, so it is refused at the pointer instead.
+var bodyDocKeyRE = regexp.MustCompile(`^[A-Za-z0-9._\-/]{1,512}$`)
+
+// BodyDocSectionMax bounds the transitional "#section" suffix of body_doc.
+const BodyDocSectionMax = 200
+
+// ValidBodyDoc checks only the shape of a task body pointer: "key" or
+// "key#section". The document need not exist yet — tasks may be filed before
+// their body is written, and the console reports a missing document itself.
+// The section is a scroll position only; it is never hashed or verified.
+// Whitespace and control characters are refused anywhere, so the pointer can
+// never carry body text.
+func ValidBodyDoc(v string) bool {
+	key, section, hasSection := strings.Cut(v, "#")
+	if !bodyDocKeyRE.MatchString(key) || strings.HasPrefix(key, "/") || strings.Contains(key, "..") || !validDocKey(key) {
+		return false
+	}
+	if !hasSection {
+		return true
+	}
+	if section == "" || len(section) > BodyDocSectionMax || !utf8.ValidString(section) {
+		return false
+	}
+	for _, r := range section {
+		if unicode.IsSpace(r) || unicode.IsControl(r) || r == '#' {
+			return false
+		}
+	}
+	return true
 }
 
 func scanTask(row interface{ Scan(...any) error }, x *Task) error {
 	var refs []byte
-	if err := row.Scan(&x.ID, &x.Lane, &x.ParentLane, &x.Title, &x.Kind, &x.State, &x.Priority, &refs, &x.ClaimedBy, &x.CreatedBy, &x.CreatedAt, &x.UpdatedAt); err != nil {
+	if err := row.Scan(&x.ID, &x.Lane, &x.ParentLane, &x.Title, &x.Kind, &x.State, &x.Priority, &refs, &x.ClaimedBy, &x.CreatedBy, &x.CreatedAt, &x.UpdatedAt, &x.BodyDoc); err != nil {
 		return err
 	}
 	return json.Unmarshal(refs, &x.Refs)
 }
 
-const taskColumns = `id,lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at`
+const taskColumns = `id,lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at,body_doc`
 
 func (s *Store) CreateTask(ctx context.Context, x Task) (Task, error) {
+	if x.BodyDoc != "" && !ValidBodyDoc(x.BodyDoc) {
+		return x, errors.New("invalid task: body_doc must be a document key or key#section")
+	}
 	if !validTask(x) {
 		return x, errors.New("invalid task")
 	}
@@ -1004,7 +1053,7 @@ func (s *Store) CreateTask(ctx context.Context, x Task) (Task, error) {
 		return x, err
 	}
 	defer tx.Rollback(ctx)
-	if err = scanTask(tx.QueryRow(ctx, `INSERT INTO tasks(lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11) RETURNING `+taskColumns, x.Lane, x.ParentLane, x.Title, x.Kind, x.State, x.Priority, string(refs), x.ClaimedBy, x.CreatedBy, x.CreatedAt, x.UpdatedAt), &x); err != nil {
+	if err = scanTask(tx.QueryRow(ctx, `INSERT INTO tasks(lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at,body_doc) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$12) RETURNING `+taskColumns, x.Lane, x.ParentLane, x.Title, x.Kind, x.State, x.Priority, string(refs), x.ClaimedBy, x.CreatedBy, x.CreatedAt, x.UpdatedAt, x.BodyDoc), &x); err != nil {
 		return x, err
 	}
 	if s.LinearSyncEnabled() && x.Refs.Linear != nil && x.Refs.Linear.Sync {
@@ -2129,9 +2178,10 @@ func (s *Store) Search(ctx context.Context, q, scope, session string, limit int)
 }
 
 // linkTaskDocs annotates docs-scope hits with the ids of tasks whose body_doc
-// points at that document.  tasks.body_doc is additive DDL shipped by a
-// parallel task; when the column is absent this is a no-op so search results
-// stay byte-identical to before.
+// points at that document.  tasks.body_doc is additive DDL (#536) applied by
+// migrate; the probe keeps a database opened by an older binary a no-op.  A
+// transitional "key#section" pointer links to its key: the section is only a
+// scroll position.
 func (s *Store) linkTaskDocs(ctx context.Context, out []SearchResult) error {
 	var hasBodyDoc bool
 	if e := s.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND column_name = 'body_doc' AND table_name = 'tasks')`).Scan(&hasBodyDoc); e != nil {
@@ -2149,7 +2199,7 @@ func (s *Store) linkTaskDocs(ctx context.Context, out []SearchResult) error {
 	if len(keys) == 0 {
 		return nil
 	}
-	rows, e := s.pool.Query(ctx, `SELECT id, body_doc FROM tasks WHERE body_doc = ANY($1)`, keys)
+	rows, e := s.pool.Query(ctx, `SELECT id, split_part(body_doc, '#', 1) FROM tasks WHERE body_doc <> '' AND split_part(body_doc, '#', 1) = ANY($1) ORDER BY id`, keys)
 	if e != nil {
 		return fmt.Errorf("search task docs: %w", e)
 	}

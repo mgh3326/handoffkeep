@@ -360,7 +360,13 @@ func TestSearchDocsLinkBodyDoc(t *testing.T) {
 	if _, _, err := s.PutDocument(ctx, Document{Key: "k/bodydoc", Kind: "note", Body: "docprobe body", CreatedBy: "t"}); err != nil {
 		t.Fatal(err)
 	}
-	// Without tasks.body_doc the docs result carries no task link.
+	// migrate now creates tasks.body_doc; the statement below must stay
+	// idempotent against it (IF NOT EXISTS), as a hand-applied DDL would be.
+	if _, err := pool.Exec(ctx, `ALTER TABLE tasks ADD COLUMN IF NOT EXISTS body_doc TEXT NOT NULL DEFAULT ''`); err != nil {
+		t.Fatal(err)
+	}
+	// With no task pointing at the document the docs result carries no link.
+	unrelated := seedTaskRow(t, pool, "lane-a", "no body doc", "backlog")
 	xs, err := s.Search(ctx, "docprobe", "docs", "", 10)
 	if err != nil || len(xs) != 1 {
 		t.Fatalf("docs xs=%v err=%v", xs, err)
@@ -368,11 +374,17 @@ func TestSearchDocsLinkBodyDoc(t *testing.T) {
 	if len(xs[0].Refs["tasks"]) != 0 {
 		t.Fatalf("unexpected task link without body_doc: %+v", xs[0].Refs)
 	}
-	if _, err = pool.Exec(ctx, `ALTER TABLE tasks ADD COLUMN body_doc TEXT NOT NULL DEFAULT ''`); err != nil {
-		t.Fatal(err)
-	}
 	id := seedTaskRow(t, pool, "lane-a", "has body doc", "backlog")
 	if _, err = pool.Exec(ctx, `UPDATE tasks SET body_doc='k/bodydoc' WHERE id=$1`, id); err != nil {
+		t.Fatal(err)
+	}
+	// A transitional key#section pointer links to its key as well; a pointer
+	// that only shares a prefix does not.
+	section := seedTaskRow(t, pool, "lane-a", "has body doc section", "backlog")
+	if _, err = pool.Exec(ctx, `UPDATE tasks SET body_doc='k/bodydoc#3-task' WHERE id=$1`, section); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = pool.Exec(ctx, `UPDATE tasks SET body_doc='k/bodydoc-other' WHERE id=$1`, unrelated); err != nil {
 		t.Fatal(err)
 	}
 	xs, err = s.Search(ctx, "docprobe", "docs", "", 10)
@@ -380,7 +392,37 @@ func TestSearchDocsLinkBodyDoc(t *testing.T) {
 		t.Fatalf("docs xs=%v err=%v", xs, err)
 	}
 	got := xs[0].Refs["tasks"]
-	if len(got) != 1 || got[0] != strconv.FormatInt(id, 10) {
-		t.Fatalf("task link=%v", got)
+	want := []string{strconv.FormatInt(id, 10), strconv.FormatInt(section, 10)}
+	if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("task link=%v want %v", got, want)
+	}
+}
+
+// TestMigrateAddsTaskBodyDoc proves the production migrate creates
+// tasks.body_doc (so docs search links tasks without any hand-applied DDL) and
+// that a second migrate over the same schema stays idempotent.
+func TestMigrateAddsTaskBodyDoc(t *testing.T) {
+	s, pool := searchTestStore(t)
+	ctx := context.Background()
+	var n int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'tasks' AND column_name = 'body_doc' AND is_nullable = 'NO' AND data_type = 'text' AND column_default IS NOT NULL`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("tasks.body_doc column count=%d err=%v", n, err)
+	}
+	if err := s.migrate(ctx); err != nil {
+		t.Fatalf("second migrate: %v", err)
+	}
+	if _, _, err := s.PutDocument(ctx, Document{Key: "k/migrated", Kind: "note", Body: "migrateprobe body", CreatedBy: "t"}); err != nil {
+		t.Fatal(err)
+	}
+	x, err := s.CreateTask(ctx, Task{Lane: "lane-a", Title: "migrated body", Kind: "implement", CreatedBy: "t", BodyDoc: "k/migrated"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	xs, err := s.Search(ctx, "migrateprobe", "docs", "", 10)
+	if err != nil || len(xs) != 1 {
+		t.Fatalf("docs xs=%v err=%v", xs, err)
+	}
+	if got := xs[0].Refs["tasks"]; len(got) != 1 || got[0] != strconv.FormatInt(x.ID, 10) {
+		t.Fatalf("task link=%v want %d", got, x.ID)
 	}
 }

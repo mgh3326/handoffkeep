@@ -36,6 +36,9 @@ export type ProtoTask = {
   /** null → no parent lane recorded, rendered as unknown. */
   parent_lane: string | null;
   refs: { pr?: string; head_sha?: string; report_path?: string; job_id?: string };
+  /** hk document key of the task body ("key" or "key#section"). Absent or
+   * empty → no body document; the overview says so instead of going blank. */
+  body_doc?: string;
   events: { id: number; from: string; to: string; by: string; note?: string; at: string }[];
   dwell: { state: string; seconds: number; open: boolean }[];
   /** "collected" may carry an honest 0; "not_collected" renders as unknown. */

@@ -204,7 +204,7 @@ func taskRefs(pr, headSHA, reportPath, jobID string, linear *store.TaskLinear) (
 }
 
 func normalizeTaskArgs(args []string) ([]string, error) {
-	valueFlags := map[string]bool{"--url": true, "--token": true, "--lane": true, "--parent-lane": true, "--state": true, "--title": true, "--kind": true, "--priority": true, "--by": true, "--to": true, "--note": true, "--question": true, "--limit": true, "--pr": true, "--head-sha": true, "--report-path": true, "--job-id": true, "--option": true, "--recommended": true, "--tier": true, "--grade": true, "--brief-key": true, "--label": true, "--linear-report-key": true, "--linear-verify-key": true, "--linear-decision-key": true, "--deploy-sha": true, "--origin-pr": true, "--origin-task": true}
+	valueFlags := map[string]bool{"--url": true, "--token": true, "--lane": true, "--parent-lane": true, "--state": true, "--title": true, "--kind": true, "--priority": true, "--by": true, "--to": true, "--note": true, "--question": true, "--limit": true, "--pr": true, "--head-sha": true, "--report-path": true, "--job-id": true, "--option": true, "--recommended": true, "--tier": true, "--grade": true, "--brief-key": true, "--label": true, "--linear-report-key": true, "--linear-verify-key": true, "--linear-decision-key": true, "--deploy-sha": true, "--origin-pr": true, "--origin-task": true, "--doc": true}
 	flags, positional := []string{}, []string{}
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -254,6 +254,7 @@ func tasksCmd(args []string, out io.Writer) error {
 	jobID := fs.String("job-id", "", "job reference")
 	originPR := fs.String("origin-pr", "", "merged pull request this task came from")
 	originTask := fs.Int64("origin-task", 0, "task this task came from (a disposition item for an ordered follow-up)")
+	bodyDoc := fs.String("doc", "", "hk document key holding the task body: key or key#section (tasks add only)")
 	linearSync := fs.Bool("linear-sync", false, "mirror this builder task when the serving instance also enables Linear sync")
 	tier := fs.String("tier", "", "Linear task tier metadata (T0..T3)")
 	grade := fs.String("grade", "", "Linear task grade metadata (S+..C)")
@@ -275,8 +276,11 @@ func tasksCmd(args []string, out io.Writer) error {
 	if err := fs.Parse(parseArgs); err != nil {
 		return err
 	}
-	linearFlagsUsed := false
+	linearFlagsUsed, docFlagUsed := false, false
 	fs.Visit(func(item *flag.Flag) {
+		if item.Name == "doc" {
+			docFlagUsed = true
+		}
 		switch item.Name {
 		case "linear-sync", "tier", "grade", "brief-key", "label", "linear-report-key", "linear-verify-key", "linear-decision-key", "deploy-sha":
 			linearFlagsUsed = true
@@ -295,6 +299,11 @@ func tasksCmd(args []string, out io.Writer) error {
 			Decision:  *linearDecisionKey,
 			DeploySHA: *deploySHA,
 		}
+	}
+	// A task body is attached only when the task is filed; no other
+	// subcommand writes body_doc, so the flag must not be silently ignored.
+	if docFlagUsed && args[0] != "add" {
+		return errors.New("--doc is accepted only by tasks add")
 	}
 	if err := mustClient(c); err != nil {
 		return err
@@ -316,9 +325,13 @@ func tasksCmd(args []string, out io.Writer) error {
 		if fs.NArg() != 0 {
 			return errors.New("tasks add takes flags only")
 		}
+		// Shape only: the document may be written after the task is filed.
+		if *bodyDoc != "" && !store.ValidBodyDoc(*bodyDoc) {
+			return errors.New("--doc must be a document key or key#section")
+		}
 		refs, _ := taskRefs(*pr, *headSHA, *reportPath, *jobID, linearRefs)
 		refs.OriginPR, refs.OriginTask = *originPR, *originTask
-		x, err := c.CreateTask(ctx, store.Task{Lane: *lane, ParentLane: *parentLane, Title: *title, Kind: *kind, Priority: *priority, Refs: *refs})
+		x, err := c.CreateTask(ctx, store.Task{Lane: *lane, ParentLane: *parentLane, Title: *title, Kind: *kind, Priority: *priority, Refs: *refs, BodyDoc: *bodyDoc})
 		if err != nil {
 			return err
 		}

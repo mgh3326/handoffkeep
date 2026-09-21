@@ -563,7 +563,7 @@ func (s *Store) ListOpenDispositions(ctx context.Context, limit int) ([]OpenDisp
 	for rows.Next() {
 		var x OpenDisposition
 		var refs []byte
-		if err := rows.Scan(&x.Task.ID, &x.Task.Lane, &x.Task.ParentLane, &x.Task.Title, &x.Task.Kind, &x.Task.State, &x.Task.Priority, &refs, &x.Task.ClaimedBy, &x.Task.CreatedBy, &x.Task.CreatedAt, &x.Task.UpdatedAt, &x.Gen, &x.Question); err != nil {
+		if err := rows.Scan(&x.Task.ID, &x.Task.Lane, &x.Task.ParentLane, &x.Task.Title, &x.Task.Kind, &x.Task.State, &x.Task.Priority, &refs, &x.Task.ClaimedBy, &x.Task.CreatedBy, &x.Task.CreatedAt, &x.Task.UpdatedAt, &x.Task.BodyDoc, &x.Gen, &x.Question); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal(refs, &x.Task.Refs); err != nil {

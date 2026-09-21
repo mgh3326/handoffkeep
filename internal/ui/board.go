@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
@@ -32,6 +33,9 @@ const (
 	policyItemsMax         = 200
 	policyPointerKey       = "policy/active"
 	policyTitleMax         = 200
+	// boardDocRenderMaxBytes is the inline-render budget: a larger document
+	// is served as unsupported and the console offers only the raw view.
+	boardDocRenderMaxBytes = 256 << 10
 )
 
 type boardTask struct {
@@ -47,6 +51,7 @@ type boardTask struct {
 	CreatedAt  time.Time      `json:"created_at"`
 	UpdatedAt  time.Time      `json:"updated_at"`
 	Refs       store.TaskRefs `json:"refs"`
+	BodyDoc    string         `json:"body_doc,omitempty"`
 }
 
 type boardTasksResponse struct {
@@ -71,6 +76,7 @@ func projectBoardTask(task store.Task) boardTask {
 		CreatedAt:  task.CreatedAt.UTC(),
 		UpdatedAt:  task.UpdatedAt.UTC(),
 		Refs:       task.Refs,
+		BodyDoc:    task.BodyDoc,
 	}
 }
 
@@ -330,6 +336,67 @@ func (h *Handler) boardTaskDetail(w http.ResponseWriter, r *http.Request) {
 	response.Participants = projectParticipants(id, reps)
 	response.Participants.Truncated = truncated
 	writeBoardJSON(w, response)
+}
+
+// boardDocResponse is the read-only document payload behind the task
+// overview's inline body. Format tells the console whether it may hand the
+// body to the markdown renderer; anything else is shown only as raw text.
+type boardDocResponse struct {
+	Key       string    `json:"key"`
+	Kind      string    `json:"kind"`
+	SHA256    string    `json:"sha256"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Bytes     int       `json:"bytes"`
+	Format    string    `json:"format"`
+	Reason    string    `json:"reason,omitempty"`
+	Body      string    `json:"body"`
+}
+
+// boardDocFormat classifies a document body for inline rendering. Only
+// UTF-8 text within the render budget that is not a JSON value is markdown.
+func boardDocFormat(body string) (string, string) {
+	switch {
+	case !utf8.ValidString(body):
+		return "unsupported", "not_text"
+	case len(body) > boardDocRenderMaxBytes:
+		return "unsupported", "too_large"
+	}
+	trimmed := strings.TrimSpace(body)
+	if (strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[")) && json.Valid([]byte(trimmed)) {
+		return "unsupported", "json"
+	}
+	return "markdown", ""
+}
+
+// boardDoc serves one hk document by exact key for the task overview. It
+// reads documents only: the key is shape-checked like /ui/doc, never joined
+// to a filesystem path, and report_path is never resolved here.
+func (h *Handler) boardDoc(w http.ResponseWriter, r *http.Request) {
+	key := r.URL.Query().Get("key")
+	if !validDocumentKey(key) {
+		http.Error(w, "invalid document key", http.StatusBadRequest)
+		return
+	}
+	document, found, err := h.store.GetDocument(r.Context(), key)
+	if err != nil {
+		http.Error(w, "fleet console unavailable", http.StatusInternalServerError)
+		return
+	}
+	if !found {
+		http.NotFound(w, r)
+		return
+	}
+	format, reason := boardDocFormat(document.Body)
+	writeBoardJSON(w, boardDocResponse{
+		Key:       document.Key,
+		Kind:      document.Kind,
+		SHA256:    document.SHA256,
+		UpdatedAt: document.UpdatedAt.UTC(),
+		Bytes:     len(document.Body),
+		Format:    format,
+		Reason:    reason,
+		Body:      strings.ToValidUTF8(document.Body, "\uFFFD"),
+	})
 }
 
 // Policy canon is resolved from two exact document keys. The pointer document

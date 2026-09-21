@@ -4,6 +4,7 @@ import { applyView, boardColumns, countByView, EMPTY_FILTERS, groupByArea } from
 import { boardTaskToProto } from "./boardtask";
 import { flattenGrouped } from "./ListView";
 import { DetailDrawer, type DetailFetchState } from "./DetailDrawer";
+import type { FetchDoc } from "./DocInline";
 import { ListView } from "./ListView";
 import { BoardView } from "./BoardView";
 import { Toolbar } from "./Toolbar";
@@ -82,9 +83,12 @@ type AppProps = {
   /** Per-drawer detail loader (live mode). Absent → the drawer renders the
    * task's own fields, which is the fixture/test path. */
   fetchDetail?: (id: number) => Promise<BoardDetail>;
+  /** Body document loader for the detail overview; defaults to the board BFF.
+   * Called only for a task that carries body_doc. */
+  fetchDoc?: FetchDoc;
 };
 
-export function QueueProtoApp({ datasets, initialSet, storage, diag = false, perf = false, fetchDetail }: AppProps) {
+export function QueueProtoApp({ datasets, initialSet, storage, diag = false, perf = false, fetchDetail, fetchDoc }: AppProps) {
   const all = datasets;
   const params = typeof window !== "undefined" ? new URLSearchParams(window.location.search) : new URLSearchParams();
   const setKey = initialSet ?? params.get("set") ?? (perf ? "perf5000" : "sample200");
@@ -380,6 +384,7 @@ export function QueueProtoApp({ datasets, initialSet, storage, diag = false, per
           orderedIds={orderedIds}
           onClose={close}
           onNav={setOpenId}
+          fetchDoc={fetchDoc}
         />
       ) : null}
       {diagMode ? <pre id="diag" ref={diagRef} /> : null}
