@@ -138,6 +138,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	email := identity.Email
 	if r.Method == http.MethodPost {
 		switch r.URL.Path {
+		case "/ui/dispositions/answer":
+			h.answerDisposition(w, r, identity)
+		case "/ui/dispositions/accept-batch":
+			h.acceptDispositionBatch(w, r, identity)
+		case "/ui/dispositions/renotify":
+			h.renotifyDisposition(w, r, identity)
 		case "/ui/decisions/answer":
 			h.answerDecision(w, r, email)
 		case "/ui/decisions/answer-batch":
@@ -315,7 +321,7 @@ func (h *Handler) board(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) decisions(w http.ResponseWriter, r *http.Request, fragment bool, email, notice string) {
-	data, err := h.decisionData(r, h.csrfForForm(w, r, email), notice)
+	data, err := h.decisionData(r, h.csrfForForm(w, r, email), email, notice)
 	if err != nil {
 		http.Error(w, "fleet console unavailable", http.StatusInternalServerError)
 		return
@@ -342,6 +348,7 @@ type decisionData struct {
 	Rendered      int
 	Retrieved     int
 	RenderNotice  string
+	Disposition   *dispositionSection
 }
 
 type taskDecisionView struct {
@@ -406,7 +413,7 @@ func eventFormData(kind string, event store.RelayEvent, csrf string, canWrite bo
 // Rendering no more cards than one request can parse keeps that unreachable.
 // Signals are not answerable and carry no form fields, so they are neither
 // capped nor counted in the notice.
-func (h *Handler) decisionData(r *http.Request, csrf, notice string) (decisionData, error) {
+func (h *Handler) decisionData(r *http.Request, csrf, email, notice string) (decisionData, error) {
 	tasks, err := h.store.ListOpenTaskDecisions(r.Context(), 1000)
 	if err != nil {
 		return decisionData{}, err
@@ -422,6 +429,9 @@ func (h *Handler) decisionData(r *http.Request, csrf, notice string) (decisionDa
 	data := decisionData{CSRF: csrf, CanWrite: h.hub.configured(), Notice: notice, HasApproval: len(h.directorLanes) > 0}
 	if !data.CanWrite {
 		data.WriteReason = "Hub is not configured."
+	}
+	if data.Disposition, err = h.dispositionData(r, csrf, email, data.CanWrite); err != nil {
+		return decisionData{}, err
 	}
 	// Each list is already capped at 1000 by its query, so this sum is what the
 	// console retrieved, not a claim about how many decisions exist.

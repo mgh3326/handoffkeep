@@ -219,7 +219,10 @@ producer label as a sender badge; other `reason` values remain hidden.
 contains the UTC generation time, sanitized hub health, raw hub `nodes`,
 `lanes`, and `jobs` data (with only per-node `active_jobs` added), seven task
 state totals, unresolved decisions, the newest 20 active tasks, and fixed
-console paths. Hub setup, transport, decoding, and non-200 failures retain a
+console paths. `tasks.decisions_pending` counts generic `needs_decision` tasks
+plus open `[decision-needed]` lane events; open disposition items are reported
+separately as `tasks.dispositions_open` and are not part of that sum.
+`tasks.by_state.needs_decision` remains the raw state tally and includes both. Hub setup, transport, decoding, and non-200 failures retain a
 200 response with empty hub arrays and only `unconfigured`, `unreachable`, or
 `status_<code>` as the health error. The body is capped at 256 KiB by dropping
 oldest entries from `tasks.active` and marking `truncated`.
@@ -229,6 +232,43 @@ oldest entries from `tasks.active` and marking `truncated`.
 then relays it to the hub with the server-side credential. Hub status and up to
 64 KiB of its body are forwarded without exposing hub configuration; an
 unconfigured or unreachable hub returns `502 {"error":"hub_unavailable"}`.
+
+## Disposition items (#493)
+
+`/ui/decisions` renders a **처분 대기** section above the generic form. Its
+header is `DispositionSummary` (the same function as
+`handoffkeep tasks disposition summary`): `미처분 n · 최고령 x일`, then
+`다음 묶음 m건` when more than 50 items are open, and a detail line with
+pending application, holds, merged PRs without an item (candidates), and the
+last 24 hours of batch and single answers. Disposition items never appear in
+the generic task cards or `mode=recommended`; glance reports them as
+`tasks.dispositions_open`, outside `tasks.decisions_pending`. The generic answer
+routes refuse them before any hub emit. Origins and options are fixed at
+creation (transition refs patches touching `origin_pr`, `origin_task`, or
+`decision_options` are refused in every state), and re-asking
+(`→ needs_decision`) clears the previous answer.
+
+- `POST /ui/dispositions/answer` (`id`, `gen`, `key`) records the answer first
+  (`needs_decision → claimed`, `by=operator:<email>`, `refs.disposition.answer`)
+  and then emits `[decision] #<id>: <key>: <label> (from operator(web) <email>)`
+  with event ID `web-disposition-<id>-g<gen>`. A changed question generation is
+  409; a second answer is 409 and emits nothing.
+- `POST /ui/dispositions/accept-batch` answers, in one transaction, exactly the
+  oldest-50 snapshot the page rendered. The snapshot (`id:gen` list) is signed
+  with the process key and bound to the operator email, batch ID and issue time
+  (12 h). Items created after rendering are not in it; items whose generation
+  changed are skipped. One lane event per lane:
+  `[decision] disposition-batch <batch>: #a=A #b=C … (from operator(web) <email>)`
+  with ID `web-disposition-batch-<batch>-<lane>`.
+- If the emit fails the answer stays recorded and the item is listed under
+  **통지 대기**; `POST /ui/dispositions/renotify` (`event_id`) re-sends the same
+  text under the same event ID until that event reaches `relay_events`.
+
+These routes are outside `/ui/api/`, so `ServeHTTP` refuses Access service
+identities, and each handler independently requires an Access **email**
+identity before origin, CSRF, hub, or store checks. Requests without an Access
+assertion — including ones sent straight to the tailnet listener, which serves
+the same mux — are 401 before any handler runs.
 
 ## P4 decision options, batch answers, and resolve
 

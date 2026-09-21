@@ -81,6 +81,7 @@
   {{if not .CanWrite}}<p class="muted">{{.WriteReason}}</p>{{end}}
   {{if .RenderNotice}}<p class="badge" data-render-notice>{{.RenderNotice}}</p>{{end}}
   {{if .Results}}<section><h3>Answer results</h3><ul>{{range .Results}}<li data-item-status="{{.Status}}">{{.Message}}</li>{{end}}</ul></section>{{end}}
+  {{with .Disposition}}{{template "disposition_section" .}}{{end}}
   <form method="post" action="/ui/decisions/answer-batch">
   <input type="hidden" name="csrf" value="{{.CSRF}}">
   <p><button name="mode" value="selected" {{if not .CanWrite}}disabled{{end}}>선택한 항목 답변</button> <button name="mode" value="recommended" {{if not .CanWrite}}disabled{{end}}>권고안 전부 답변</button></p>
@@ -98,6 +99,31 @@
   </section>
   <details><summary>signals</summary>{{range .Signals}}<article class="decision"><strong>{{.OwnerLane}}</strong> · job {{.JobID}}<pre>{{range message .}}{{if .DocKey}}<a href="/ui/doc/{{.DocKey}}">doc:{{.DocKey}}</a>{{else}}{{.Text}}{{end}}{{end}}</pre></article>{{else}}<p class="muted">No signals.</p>{{end}}</details>
   </form>
+</section>
+{{end}}
+
+{{define "disposition_section"}}
+<section id="dispositions" data-dispositions><h3>처분 대기</h3>
+  <p class="badge" data-disposition-head>{{.Head}}</p>
+  <p class="muted" data-disposition-detail>{{.Detail}}</p>
+  {{if .Items}}
+  <form method="post" action="/ui/dispositions/accept-batch">
+    <input type="hidden" name="csrf" value="{{.CSRF}}"><input type="hidden" name="batch_id" value="{{.BatchID}}"><input type="hidden" name="issued_at" value="{{.IssuedAt}}"><input type="hidden" name="snapshot" value="{{.Snapshot}}"><input type="hidden" name="token" value="{{.Token}}">
+    <p><button type="submit" data-disposition-batch {{if not .CanWrite}}disabled{{end}}>권고 일괄 수락 {{.BatchN}}건 ({{.Counts}})</button>{{if .NextBatch}} <span class="badge" data-next-batch>다음 묶음 {{.NextBatch}}건</span>{{end}}</p>
+  </form>
+  {{range .Items}}
+  <article class="decision decision-card" data-disposition-id="{{.Task.ID}}"><strong>#{{.Task.ID}} {{.Task.Title}}</strong> · {{.Task.Lane}} · {{.AgeDays}}일<pre>{{.Question}}</pre>
+    <form method="post" action="/ui/dispositions/answer"><input type="hidden" name="csrf" value="{{.CSRF}}"><input type="hidden" name="id" value="{{.Task.ID}}"><input type="hidden" name="gen" value="{{.Gen}}">
+      <fieldset {{if not .CanWrite}}disabled{{end}}><legend>처분</legend>
+      {{range .Options}}<label><input type="radio" name="key" value="{{.Key}}" {{if .Recommended}}checked{{end}}> {{.Key}}. {{.Label}} {{if .Recommended}}<span class="badge">권고</span>{{end}}</label>{{end}}
+      <button type="submit">이 항목 처분</button></fieldset>
+    </form>
+  </article>
+  {{end}}
+  {{else}}<p class="muted">미처분 항목 없음.</p>{{end}}
+  {{if .Unnotified}}<h4>통지 대기</h4>
+  {{range .Unnotified}}<form method="post" action="/ui/dispositions/renotify" data-disposition-unnotified="{{.EventID}}"><input type="hidden" name="csrf" value="{{.CSRF}}"><input type="hidden" name="event_id" value="{{.EventID}}"><span>{{.IDs}} · {{.EventID}}</span> <button type="submit">재통지</button></form>{{end}}
+  {{end}}
 </section>
 {{end}}
 

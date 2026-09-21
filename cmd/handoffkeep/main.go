@@ -204,7 +204,7 @@ func taskRefs(pr, headSHA, reportPath, jobID string, linear *store.TaskLinear) (
 }
 
 func normalizeTaskArgs(args []string) ([]string, error) {
-	valueFlags := map[string]bool{"--url": true, "--token": true, "--lane": true, "--parent-lane": true, "--state": true, "--title": true, "--kind": true, "--priority": true, "--by": true, "--to": true, "--note": true, "--question": true, "--limit": true, "--pr": true, "--head-sha": true, "--report-path": true, "--job-id": true, "--option": true, "--recommended": true, "--tier": true, "--grade": true, "--brief-key": true, "--label": true, "--linear-report-key": true, "--linear-verify-key": true, "--linear-decision-key": true, "--deploy-sha": true}
+	valueFlags := map[string]bool{"--url": true, "--token": true, "--lane": true, "--parent-lane": true, "--state": true, "--title": true, "--kind": true, "--priority": true, "--by": true, "--to": true, "--note": true, "--question": true, "--limit": true, "--pr": true, "--head-sha": true, "--report-path": true, "--job-id": true, "--option": true, "--recommended": true, "--tier": true, "--grade": true, "--brief-key": true, "--label": true, "--linear-report-key": true, "--linear-verify-key": true, "--linear-decision-key": true, "--deploy-sha": true, "--origin-pr": true, "--origin-task": true}
 	flags, positional := []string{}, []string{}
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -226,7 +226,10 @@ func normalizeTaskArgs(args []string) ([]string, error) {
 
 func tasksCmd(args []string, out io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: tasks add|list|export|claim|next|transition|show|comment|comments")
+		return errors.New("usage: tasks add|list|export|claim|next|transition|show|comment|comments|disposition")
+	}
+	if args[0] == "disposition" {
+		return dispositionCmd(args[1:], out)
 	}
 	if args[0] == "comment" || args[0] == "comments" {
 		return taskCommentsCmd(args, os.Stdin, out)
@@ -249,6 +252,8 @@ func tasksCmd(args []string, out io.Writer) error {
 	headSHA := fs.String("head-sha", "", "head revision reference")
 	reportPath := fs.String("report-path", "", "report path reference")
 	jobID := fs.String("job-id", "", "job reference")
+	originPR := fs.String("origin-pr", "", "merged pull request this task came from")
+	originTask := fs.Int64("origin-task", 0, "task this task came from (a disposition item for an ordered follow-up)")
 	linearSync := fs.Bool("linear-sync", false, "mirror this builder task when the serving instance also enables Linear sync")
 	tier := fs.String("tier", "", "Linear task tier metadata (T0..T3)")
 	grade := fs.String("grade", "", "Linear task grade metadata (S+..C)")
@@ -312,6 +317,7 @@ func tasksCmd(args []string, out io.Writer) error {
 			return errors.New("tasks add takes flags only")
 		}
 		refs, _ := taskRefs(*pr, *headSHA, *reportPath, *jobID, linearRefs)
+		refs.OriginPR, refs.OriginTask = *originPR, *originTask
 		x, err := c.CreateTask(ctx, store.Task{Lane: *lane, ParentLane: *parentLane, Title: *title, Kind: *kind, Priority: *priority, Refs: *refs})
 		if err != nil {
 			return err
@@ -424,7 +430,7 @@ func tasksCmd(args []string, out io.Writer) error {
 		}
 		return printJSON(out, x)
 	default:
-		return errors.New("usage: tasks add|list|export|claim|next|transition|show|comment|comments")
+		return errors.New("usage: tasks add|list|export|claim|next|transition|show|comment|comments|disposition")
 	}
 }
 

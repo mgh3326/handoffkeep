@@ -15,6 +15,7 @@ import (
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/mgh3326/handoffkeep/internal/attachments"
 	"github.com/mgh3326/handoffkeep/internal/store"
@@ -80,6 +81,12 @@ func (s Service) ResolveDecision(ctx context.Context, input DecisionResolveInput
 		}
 		if !found {
 			return store.RelayEvent{}, store.ErrTaskNotFound
+		}
+		// Disposition items are answered only by the operator's Access-authenticated
+		// web route; a bearer token identifies a machine, not the operator, and
+		// By is a free string. Refuse before any lane event is written.
+		if task.Refs.Disposition != nil {
+			return store.RelayEvent{}, store.ErrDispositionOperatorOnly
 		}
 		if task.State != "needs_decision" {
 			return store.RelayEvent{}, store.ErrTaskConflict
@@ -214,6 +221,16 @@ func (s Service) ClaimTask(ctx context.Context, id int64, by string) (store.Task
 }
 func (s Service) NextTask(ctx context.Context, lane, by string) (store.Task, error) {
 	return s.Store.NextTask(ctx, lane, by)
+}
+func (s Service) CreateDisposition(ctx context.Context, client string, x store.DispositionInput) (store.Task, bool, error) {
+	x.CreatedBy = client
+	return s.Store.CreateDisposition(ctx, x)
+}
+func (s Service) DispositionSummary(ctx context.Context, asOf time.Time) (store.DispositionSummary, error) {
+	return s.Store.DispositionSummary(ctx, asOf)
+}
+func (s Service) ApplyDisposition(ctx context.Context, id int64, client, note string) (store.Task, error) {
+	return s.Store.ApplyDisposition(ctx, id, client, note)
 }
 func (s Service) TransitionTask(ctx context.Context, id int64, to, client, note string, refs *store.TaskRefs) (store.Task, error) {
 	return s.Store.TransitionTask(ctx, id, to, client, note, refs)
@@ -357,6 +374,9 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("GET /v1/tasks/{id}", s.task)
 	m.HandleFunc("POST /v1/tasks/{id}/claim", s.taskClaim)
 	m.HandleFunc("POST /v1/tasks/{id}/transition", s.taskTransition)
+	m.HandleFunc("POST /v1/tasks/dispositions", s.dispositionCreate)
+	m.HandleFunc("GET /v1/tasks/dispositions/summary", s.dispositionSummary)
+	m.HandleFunc("POST /v1/tasks/dispositions/{id}/apply", s.dispositionApply)
 	m.HandleFunc("GET /v1/tasks/{id}/comments", s.taskCommentsList)
 	m.HandleFunc("POST /v1/tasks/{id}/comments", s.taskCommentCreate)
 	m.HandleFunc("GET /v1/linear/status", s.linearStatus)
@@ -455,6 +475,12 @@ func appErr(w http.ResponseWriter, e error) {
 		return
 	case errors.Is(e, store.ErrTaskConflict):
 		jsonOut(w, http.StatusConflict, map[string]string{"error": "task_conflict"})
+		return
+	case errors.Is(e, store.ErrDispositionOperatorOnly):
+		jsonOut(w, http.StatusConflict, map[string]string{"error": "disposition_operator_only"})
+		return
+	case errors.Is(e, store.ErrDispositionStale):
+		jsonOut(w, http.StatusConflict, map[string]string{"error": "disposition_stale"})
 		return
 	case errors.Is(e, store.ErrTaskNotFound):
 		jsonOut(w, http.StatusNotFound, map[string]string{"error": "not_found"})
@@ -654,6 +680,76 @@ func (s Server) taskTransition(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	x, err := s.Service.TransitionTask(r.Context(), id, input.To, client, input.Note, input.Refs)
+	if err != nil {
+		appErr(w, err)
+		return
+	}
+	jsonOut(w, http.StatusOK, x)
+}
+
+func (s Server) dispositionCreate(w http.ResponseWriter, r *http.Request) {
+	client, ok := s.auth(w, r)
+	if !ok {
+		return
+	}
+	defer r.Body.Close()
+	var input store.DispositionInput
+	if err := decode(r, &input, store.MaxBytes); err != nil {
+		appErr(w, err)
+		return
+	}
+	x, created, err := s.Service.CreateDisposition(r.Context(), client, input)
+	if err != nil {
+		appErr(w, err)
+		return
+	}
+	status := http.StatusOK
+	if created {
+		status = http.StatusCreated
+	}
+	jsonOut(w, status, map[string]any{"task": x, "created": created})
+}
+
+func (s Server) dispositionSummary(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.auth(w, r); !ok {
+		return
+	}
+	asOf := time.Now().UTC()
+	if raw := strings.TrimSpace(r.URL.Query().Get("as_of")); raw != "" {
+		parsed, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			jsonOut(w, http.StatusBadRequest, map[string]string{"error": "invalid as_of"})
+			return
+		}
+		asOf = parsed
+	}
+	summary, err := s.Service.DispositionSummary(r.Context(), asOf)
+	if err != nil {
+		appErr(w, err)
+		return
+	}
+	jsonOut(w, http.StatusOK, summary)
+}
+
+func (s Server) dispositionApply(w http.ResponseWriter, r *http.Request) {
+	client, ok := s.auth(w, r)
+	if !ok {
+		return
+	}
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id < 1 {
+		jsonOut(w, http.StatusBadRequest, map[string]string{"error": "invalid id"})
+		return
+	}
+	defer r.Body.Close()
+	var input struct {
+		Note string `json:"note"`
+	}
+	if err := decode(r, &input, store.MaxBytes); err != nil {
+		appErr(w, err)
+		return
+	}
+	x, err := s.Service.ApplyDisposition(r.Context(), id, client, input.Note)
 	if err != nil {
 		appErr(w, err)
 		return

@@ -252,6 +252,28 @@ func (c Client) TransitionTask(ctx context.Context, id int64, to, note string, r
 	}{to, note, refs}, &out)
 	return out, err
 }
+func (c Client) CreateDisposition(ctx context.Context, x store.DispositionInput) (store.Task, bool, error) {
+	var out struct {
+		Task    store.Task `json:"task"`
+		Created bool       `json:"created"`
+	}
+	err := c.call(ctx, "POST", "/v1/tasks/dispositions", x, &out)
+	return out.Task, out.Created, err
+}
+func (c Client) DispositionSummary(ctx context.Context, asOf string) (store.DispositionSummary, error) {
+	var out store.DispositionSummary
+	path := "/v1/tasks/dispositions/summary"
+	if asOf != "" {
+		path += "?" + url.Values{"as_of": {asOf}}.Encode()
+	}
+	err := c.call(ctx, "GET", path, nil, &out)
+	return out, err
+}
+func (c Client) ApplyDisposition(ctx context.Context, id int64, note string) (store.Task, error) {
+	var out store.Task
+	err := c.call(ctx, "POST", fmt.Sprintf("/v1/tasks/dispositions/%d/apply", id), map[string]string{"note": note}, &out)
+	return out, err
+}
 func (c Client) ListTasks(ctx context.Context, lane, state, parentLane string, limit int) ([]store.Task, error) {
 	var out struct {
 		Tasks []store.Task `json:"tasks"`
