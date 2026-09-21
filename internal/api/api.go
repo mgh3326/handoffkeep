@@ -377,6 +377,8 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("POST /v1/tasks/dispositions", s.dispositionCreate)
 	m.HandleFunc("GET /v1/tasks/dispositions/summary", s.dispositionSummary)
 	m.HandleFunc("POST /v1/tasks/dispositions/{id}/apply", s.dispositionApply)
+	m.HandleFunc("GET /v1/tasks/{id}/comments", s.taskCommentsList)
+	m.HandleFunc("POST /v1/tasks/{id}/comments", s.taskCommentCreate)
 	m.HandleFunc("GET /v1/linear/status", s.linearStatus)
 	m.HandleFunc("POST /v1/decisions/resolve", s.decisionResolve)
 	m.HandleFunc("POST /v1/relay/events", s.relayEventsCreate)
