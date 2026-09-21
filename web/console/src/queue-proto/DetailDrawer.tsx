@@ -1,6 +1,11 @@
 import { useEffect, useRef } from "react";
+import type { BoardDetail } from "../board/types";
 import { ageDays, isStale, STALE_MIN_AGE_DAYS } from "./adapter";
 import type { Dataset, Enrichment, ProtoTask } from "./types";
+
+/** Lazily fetched per-drawer detail (live mode). Absent → the task's own
+ * fields are the truth, which is the fixture/test path. */
+export type DetailFetchState = { status: "loading" } | { status: "loaded"; data: BoardDetail } | { status: "error" };
 
 function safeHref(value: string): string | undefined {
   try {
@@ -20,12 +25,13 @@ function Val({ value }: { value: string | number | null }) {
 type DrawerProps = {
   dataset: Dataset;
   task: ProtoTask;
+  detail?: DetailFetchState;
   orderedIds: number[];
   onClose: () => void;
   onNav: (id: number) => void;
 };
 
-export function DetailDrawer({ dataset, task, orderedIds, onClose, onNav }: DrawerProps) {
+export function DetailDrawer({ dataset, task, detail, orderedIds, onClose, onNav }: DrawerProps) {
   const ref = useRef<HTMLDivElement>(null);
   const index = orderedIds.indexOf(task.id);
   const prevId = index > 0 ? orderedIds[index - 1] : null;
@@ -53,6 +59,19 @@ export function DetailDrawer({ dataset, task, orderedIds, onClose, onNav }: Draw
   const stateAge = ageDays(now, task.state_entered_at);
   const createdAge = ageDays(now, task.created_at);
 
+  // Detail-loaded fields fall back to the task's own values only while no
+  // fetch state exists; loading/error get their own honest states. An absent
+  // or empty value stays honest: not-collected renders "unknown", never 0.
+  const dwell = detail?.status === "loaded" ? detail.data.dwell : task.dwell;
+  const coverage =
+    detail?.status === "loaded"
+      ? {
+          status: detail.data.participants.coverage,
+          participants: detail.data.participants.coverage === "collected" ? detail.data.participants.segments.length : null,
+          truncated: detail.data.participants.truncated === true,
+        }
+      : { status: task.coverage.status, participants: task.coverage.participants, truncated: false };
+
   return (
     <div className="qp-drawer" role="dialog" aria-modal="true" aria-label={`task ${task.id} detail`} ref={ref} tabIndex={-1} onKeyDown={onKeyDown}>
       <div className="qp-drawer-head">
@@ -71,7 +90,8 @@ export function DetailDrawer({ dataset, task, orderedIds, onClose, onNav }: Draw
       </div>
       <p className="qp-drawer-title">{task.title}</p>
       <p className="qp-source-status">
-        source status: <strong>synthetic fixture</strong> — {dataset.completeness} · {dataset.completenessNote}
+        source status: <strong>{dataset.source === "live" ? "live /ui/api/board" : "synthetic fixture"}</strong> — {dataset.completeness} ·{" "}
+        {dataset.completenessNote}
       </p>
       {isStale(task, now) ? (
         <p className="qp-stale-note" role="note">
@@ -86,6 +106,10 @@ export function DetailDrawer({ dataset, task, orderedIds, onClose, onNav }: Draw
         <dd>{task.kind}</dd>
         <dt>lane</dt>
         <dd>{task.lane}</dd>
+        <dt>parent lane</dt>
+        <dd>
+          <Val value={task.parent_lane} />
+        </dd>
         <dt>claimant</dt>
         <dd>
           <Val value={task.claimant} />
@@ -96,6 +120,14 @@ export function DetailDrawer({ dataset, task, orderedIds, onClose, onNav }: Draw
         <dd>
           {createdAge === null ? <span className="qp-unknown">unknown</span> : `${createdAge}d`}{" "}
           <span className="muted">(since created_at)</span>
+        </dd>
+        <dt>created by</dt>
+        <dd>
+          <Val value={task.created_by === "" ? null : task.created_by} />
+        </dd>
+        <dt>updated</dt>
+        <dd>
+          <Val value={task.updated_at} />
         </dd>
         <dt>current-state age</dt>
         <dd>
@@ -163,34 +195,77 @@ export function DetailDrawer({ dataset, task, orderedIds, onClose, onNav }: Draw
       </section>
       <section className="qp-drawer-sec">
         <h4>dwell</h4>
-        <ul className="qp-drawer-refs">
-          {task.dwell.map((seg) => (
-            <li key={seg.state}>
-              {seg.state}: {seg.seconds}s{seg.open ? " (in progress)" : ""}
-            </li>
-          ))}
-        </ul>
+        {detail?.status === "loading" ? (
+          <p className="muted">loading…</p>
+        ) : detail?.status === "error" ? (
+          <p className="qp-unknown">unavailable — detail fetch failed</p>
+        ) : dwell.length === 0 ? (
+          detail?.status === "loaded" ? (
+            <p className="muted">none recorded</p>
+          ) : (
+            // An empty dwell list means not collected — it must render as
+            // unknown, never as an implied "0s dwell" blank section.
+            <p className="qp-unknown">unknown — not collected</p>
+          )
+        ) : (
+          <ul className="qp-drawer-refs">
+            {dwell.map((seg) => (
+              <li key={seg.state}>
+                {seg.state}: {seg.seconds}s{seg.open ? " (in progress)" : ""}
+              </li>
+            ))}
+          </ul>
+        )}
       </section>
       <section className="qp-drawer-sec">
         <h4>participation coverage</h4>
-        {task.coverage.status === "not_collected" ? (
+        {detail?.status === "loading" ? (
+          <p className="muted">loading…</p>
+        ) : detail?.status === "error" ? (
+          <p className="qp-unknown">unavailable — detail fetch failed</p>
+        ) : coverage.status === "not_collected" ? (
           <p className="qp-unknown">unknown — not collected</p>
         ) : (
           <p>
-            collected · participants: <strong data-testid="participant-count">{task.coverage.participants ?? "unknown"}</strong>
+            collected · participants:{" "}
+            <strong data-testid="participant-count">
+              {coverage.participants ?? "unknown"}
+              {coverage.truncated ? "+" : ""}
+            </strong>
           </p>
         )}
       </section>
       <section className="qp-drawer-sec">
         <h4>history</h4>
-        <ol className="qp-drawer-refs">
-          {task.events.map((event) => (
-            <li key={event.id}>
-              {event.from} → {event.to} by {event.by} at <time>{event.at}</time>
-              {event.note ? <span className="muted"> — {event.note}</span> : null}
-            </li>
-          ))}
-        </ol>
+        {detail === undefined ? (
+          task.events.length === 0 ? (
+            <p className="muted">none recorded</p>
+          ) : (
+            <ol className="qp-drawer-refs">
+              {task.events.map((event) => (
+                <li key={event.id}>
+                  {event.from} → {event.to} by {event.by} at <time>{event.at}</time>
+                  {event.note ? <span className="muted"> — {event.note}</span> : null}
+                </li>
+              ))}
+            </ol>
+          )
+        ) : detail.status === "loading" ? (
+          <p className="muted">loading…</p>
+        ) : detail.status === "error" ? (
+          <p className="qp-unknown">unavailable — detail fetch failed</p>
+        ) : detail.data.events.length === 0 ? (
+          <p className="muted">none recorded</p>
+        ) : (
+          <ol className="qp-drawer-refs">
+            {detail.data.events.map((event) => (
+              <li key={event.id}>
+                {event.from} → {event.to} by {event.by} at <time>{event.at}</time>
+                {event.note ? <span className="muted"> — {event.note}</span> : null}
+              </li>
+            ))}
+          </ol>
+        )}
       </section>
     </div>
   );

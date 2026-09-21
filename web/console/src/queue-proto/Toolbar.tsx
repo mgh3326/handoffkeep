@@ -1,14 +1,17 @@
-import { KNOWN_STATES, type FilterState, type Layout, type ProtoState } from "./types";
+import type { FilterState, Layout, ProtoState } from "./types";
 
 type ToolbarProps = {
   state: ProtoState;
   lanes: string[];
   kinds: string[];
+  /** State enumeration for the filter/column lists — the dataset's own
+   * (server-provided when live), never a hardcoded superset. */
+  states: string[];
   visibleCount: number;
   onChange: (next: ProtoState) => void;
 };
 
-export function Toolbar({ state, lanes, kinds, visibleCount, onChange }: ToolbarProps) {
+export function Toolbar({ state, lanes, kinds, states, visibleCount, onChange }: ToolbarProps) {
   const setFilters = (filters: Partial<FilterState>) => onChange({ ...state, filters: { ...state.filters, ...filters } });
   const set = (part: Partial<ProtoState>) => onChange({ ...state, ...part });
 
@@ -100,7 +103,7 @@ export function Toolbar({ state, lanes, kinds, visibleCount, onChange }: Toolbar
       <details className="qp-more">
         <summary>states</summary>
         <fieldset className="qp-states">
-          {KNOWN_STATES.map((s) => (
+          {states.map((s) => (
             <label key={s}>
               <input type="checkbox" checked={!state.filters.hiddenStates.includes(s)} onChange={() => toggleHiddenState(s)} /> {s}
             </label>
@@ -111,7 +114,7 @@ export function Toolbar({ state, lanes, kinds, visibleCount, onChange }: Toolbar
         <details className="qp-more">
           <summary>columns</summary>
           <fieldset className="qp-states">
-            {KNOWN_STATES.map((s) => (
+            {states.map((s) => (
               <label key={s}>
                 <input type="checkbox" checked={!state.hiddenColumns.includes(s)} onChange={() => toggleHiddenColumn(s)} /> {s}
               </label>

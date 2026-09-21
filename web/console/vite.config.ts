@@ -19,7 +19,11 @@ export default defineConfig({
     rollupOptions: {
       input: {
         fleet: resolve(root, "src/main.tsx"),
-        board: resolve(root, "src/board.tsx"),
+        // /ui/queue loads the queue app built from src/queue-proto: board.js/
+        // board.css are what the page actually serves. The entry fetches the
+        // real board API — the synthetic fixture path lives only in
+        // preview.tsx, which this input never reaches.
+        board: resolve(root, "src/queue-proto/main.tsx"),
       },
       output: {
         entryFileNames: "[name].js",
