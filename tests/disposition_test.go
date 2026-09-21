@@ -612,3 +612,23 @@ func TestDispositionGuardLeavesOtherDecisionsUnchanged(t *testing.T) {
 		t.Fatalf("origin refs must not trigger the disposition guard: %v", err)
 	}
 }
+
+// hk:doc brief/2026-09-21/hkui-home-direction §3: a general comment never
+// creates a decision or moves a task — including a disposition item.
+func TestDispositionCommentIsNotAnAnswer(t *testing.T) {
+	s := uiStore(t)
+	lane := uiLane(t, "director")
+	x := mustCreateDisposition(t, s, dispositionInput(lane, dispositionPR(t), 0, "A"))
+	t.Cleanup(func() { drainOpenDispositions(t, s) })
+	before := dispositionRowCounts(t, lane, x.ID)
+	if _, err := s.CreateTaskComment(t.Context(), x.ID, "operator@example.com", fmt.Sprintf("[decision] #%d: A: 배포", x.ID)); err != nil {
+		t.Fatal(err)
+	}
+	after := dispositionRowCounts(t, lane, x.ID)
+	if after.ItemState != "needs_decision" || after.ItemEvents != before.ItemEvents || after.Relay != before.Relay {
+		t.Fatalf("a comment acted as a disposition answer: before=%+v after=%+v", before, after)
+	}
+	if got, _, _ := s.GetTask(t.Context(), x.ID); got.Refs.Disposition.Answer != nil {
+		t.Fatalf("a comment recorded an answer: %+v", got.Refs.Disposition.Answer)
+	}
+}
