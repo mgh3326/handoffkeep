@@ -1599,7 +1599,7 @@ func (s *Store) ListOpenLaneDecisions(ctx context.Context, limit int) ([]RelayEv
 	rows, err := s.pool.Query(ctx, `SELECT `+relayEventColumns+` FROM relay_events e
 		WHERE e.kind='lane.event' AND e.text LIKE '[decision-needed]%' AND NOT EXISTS (
 			SELECT 1 FROM relay_events resolved WHERE resolved.kind='lane.event' AND resolved.owner_lane=e.owner_lane
-			AND resolved.text LIKE '[decision-answered]%' AND resolved.id>e.id
+			AND resolved.text LIKE '[decision-answered] #' || e.id::text || ':%' AND resolved.id>e.id
 		) ORDER BY e.id DESC LIMIT $1`, limit)
 	if err != nil {
 		return nil, err

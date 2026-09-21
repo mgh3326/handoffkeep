@@ -110,12 +110,15 @@ starts with `https://github.com/`; other values are rendered as text.
      for the answer form's question display only; durable event text is never
      rewritten.
   3. A `lane.event` whose `text` begins `[decision-needed]` is shown when no
-     later-ID `lane.event` from the same `owner_lane` has text beginning
-     `[decision-answered]`.
+     later-ID `lane.event` from the same `owner_lane` has text beginning with
+     the exact prefix `[decision-answered] #<event id>:` naming that question's
+     durable id.
 
   The P2 lane-answer route emits a later event beginning exactly
-  `[decision-answered]`; that prefix and same-owner-lane relationship close the
-  item. Other messages do not close it.
+  `[decision-answered] #<event id>:`; that exact-prefix and same-owner-lane
+  relationship closes only the question with that id. Other
+  `[decision-answered]` messages — generic text, a different id, or another
+  lane — do not close it.
 - `/ui/fleet` is a React session table mounted in the existing fleet slot. The
   browser calls only `GET /ui/api/fleet` every ten seconds. `/ui/queue` is the
   other React page; timeline and decisions remain htmx. React pages and every
