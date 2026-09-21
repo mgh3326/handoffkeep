@@ -53,7 +53,9 @@ func mustCreateDisposition(t *testing.T, s *store.Store, in store.DispositionInp
 
 // drainOpenDispositions closes every open item through the operator path
 // (answer E, apply) so list- and count-sensitive tests start from zero. It
-// uses no privileged SQL: task_events is append-only.
+// uses no privileged SQL: task_events is append-only. It deliberately writes
+// no relay_events: the shared test DB's lane-decision query is quadratic in
+// lane events, and the heavy P4 backlog test runs later in this package.
 func drainOpenDispositions(t *testing.T, s *store.Store) {
 	t.Helper()
 	// Background, not t.Context(): this also runs from t.Cleanup.
@@ -65,11 +67,6 @@ func drainOpenDispositions(t *testing.T, s *store.Store) {
 	for _, item := range open {
 		eventID := fmt.Sprintf("drain-%d-g%d", item.Task.ID, item.Gen)
 		if _, err := s.AnswerDisposition(ctx, store.DispositionAnswerInput{ID: item.Task.ID, Gen: item.Gen, Key: "E", OperatorEmail: "drain@example.com", EventID: eventID}); err != nil {
-			t.Fatal(err)
-		}
-		// Mark the notification delivered so drained items never linger in the
-		// console's pending-notice list.
-		if _, _, err := s.AppendRelayEvent(ctx, store.RelayEvent{Kind: "lane.event", OwnerLane: item.Task.Lane, EventID: eventID, Text: "[decision] drain"}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := s.ApplyDisposition(ctx, item.Task.ID, "test-drain", ""); err != nil {
