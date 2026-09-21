@@ -8,6 +8,7 @@ import { useEffect, useRef, useState } from "react";
 import { fetchBoardTasks, fetchTaskDetail } from "../board/api";
 import { boardTaskToProto } from "./boardtask";
 import { QueueProtoApp } from "./QueueProtoApp";
+import { liveCommentsClient } from "./TaskComments";
 import { KNOWN_STATES, type Dataset } from "./types";
 
 export { boardTaskToProto } from "./boardtask";
@@ -97,5 +98,5 @@ export function LiveQueue({ loadDataset = fetchLiveDataset }: { loadDataset?: ()
   }
   // A failed refresh keeps the last good rows and says so in the page header
   // next to their snapshot time — never a silent stale list.
-  return <QueueProtoApp datasets={{ live: dataset }} initialSet="live" fetchDetail={fetchTaskDetail} refreshFailed={refreshFailed} />;
+  return <QueueProtoApp datasets={{ live: dataset }} initialSet="live" fetchDetail={fetchTaskDetail} comments={liveCommentsClient} refreshFailed={refreshFailed} />;
 }

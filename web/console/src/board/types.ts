@@ -103,3 +103,19 @@ export type BoardDoc = {
   reason?: "not_text" | "too_large" | "json";
   body: string;
 };
+
+/** One append-only task comment from /ui/api/board/tasks/<id>/comments.
+ * author is the authenticated writer recorded by the server. */
+export type BoardComment = {
+  id: number;
+  task_id: number;
+  body: string;
+  author: string;
+  created_at: string;
+};
+
+export type BoardCommentsResponse = {
+  comments: BoardComment[];
+  truncated: boolean;
+  next_after_id?: number;
+};

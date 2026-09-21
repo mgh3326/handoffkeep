@@ -50,7 +50,7 @@ func serveStatic(t *testing.T, h *Handler, target string) *httptest.ResponseReco
 func TestAssetURLStampsVersionedRequests(t *testing.T) {
 	h := newAssetTestHandler(t, "abc123def")
 	rec := httptest.NewRecorder()
-	h.render(rec, "board_page", nil)
+	h.render(rec, "board_page", boardPageData{})
 	body := rec.Body.String()
 	if !strings.Contains(body, "/ui/static/console/board.js?v=abc123def") || !strings.Contains(body, "/ui/static/console/board.css?v=abc123def") {
 		t.Fatalf("stamped board page did not version asset URLs: %q", body)
@@ -82,7 +82,7 @@ func TestAssetURLUnstampedDisablesCaching(t *testing.T) {
 		t.Fatalf("unstamped assetURL emitted %q — empty ?v= must never appear", got)
 	}
 	rec := httptest.NewRecorder()
-	h.render(rec, "board_page", nil)
+	h.render(rec, "board_page", boardPageData{})
 	body := rec.Body.String()
 	if strings.Contains(body, "?v=") {
 		t.Fatalf("unstamped page emitted an empty version query: %q", body)
@@ -112,7 +112,7 @@ func TestNewWiresBuildInfoIntoAssetStamp(t *testing.T) {
 		t.Fatal(err)
 	}
 	rec := httptest.NewRecorder()
-	h.render(rec, "board_page", nil)
+	h.render(rec, "board_page", boardPageData{})
 	if body := rec.Body.String(); !strings.Contains(body, "/ui/static/console/board.js?v=testrev0123") {
 		t.Fatalf("New() did not stamp board assets from build info: %q", body)
 	}
@@ -129,7 +129,7 @@ func TestNewWiresBuildInfoIntoAssetStamp(t *testing.T) {
 		t.Fatal(err)
 	}
 	rec = httptest.NewRecorder()
-	h2.render(rec, "board_page", nil)
+	h2.render(rec, "board_page", boardPageData{})
 	if body := rec.Body.String(); strings.Contains(body, "?v=") {
 		t.Fatalf("unstamped New() emitted a version query: %q", body)
 	}
@@ -156,7 +156,7 @@ func TestTaskPageIDShape(t *testing.T) {
 	} {
 		req := httptest.NewRequest(http.MethodGet, "/ui/tasks/"+tc.raw, nil)
 		rec := httptest.NewRecorder()
-		h.taskPage(rec, req, tc.raw)
+		h.taskPage(rec, req, tc.raw, "admin@example.com")
 		if rec.Code != tc.want {
 			t.Fatalf("taskPage(%q)=%d, want %d", tc.raw, rec.Code, tc.want)
 		}

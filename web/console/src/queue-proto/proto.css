@@ -922,6 +922,127 @@ summary {
   box-shadow: inset 3px 0 0 var(--hk-accent);
 }
 
+/* 코멘트 tab: append-only list (oldest first) and the write form */
+.qp-comments {
+  margin: 0 0 var(--hk-space-4);
+  padding: 0;
+  list-style: none;
+}
+.qp-comment {
+  padding: var(--hk-space-2) 0;
+  border-bottom: 1px solid var(--hk-border-subtle);
+}
+.qp-comment-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--hk-space-2);
+  font-size: var(--hk-font-meta);
+  line-height: var(--hk-leading-meta);
+  color: var(--hk-text-muted);
+}
+.qp-comment-author {
+  color: var(--hk-text-primary);
+  font-weight: var(--hk-weight-medium);
+  overflow-wrap: anywhere;
+}
+.qp-comment-body > :first-child {
+  margin-top: var(--hk-space-1);
+}
+.qp-comment-body > :last-child {
+  margin-bottom: 0;
+}
+.qp-comment-raw {
+  margin-top: var(--hk-space-1);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.qp-comment-form fieldset {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+.qp-comment-notice {
+  margin: 0 0 var(--hk-space-3);
+  padding: var(--hk-space-2);
+  border: 1px solid var(--hk-border-control);
+  border-radius: var(--hk-radius-md);
+  background: var(--hk-surface-1);
+  color: var(--hk-text-secondary);
+  font-size: var(--hk-font-meta);
+  line-height: var(--hk-leading-meta);
+}
+.qp-comment-notice strong {
+  color: var(--hk-text-primary);
+}
+.qp-comment-label {
+  display: block;
+  margin-bottom: var(--hk-space-1);
+  font-size: var(--hk-font-meta);
+  line-height: var(--hk-leading-meta);
+}
+.qp-comment-input {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 6rem;
+  padding: var(--hk-space-2);
+  border: 1px solid var(--hk-border-control);
+  border-radius: var(--hk-radius-md);
+  background: var(--hk-surface-0);
+  color: var(--hk-text-primary);
+  font: inherit;
+  resize: vertical;
+}
+.qp-comment-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--hk-space-2);
+  margin-top: var(--hk-space-2);
+}
+.qp-comment-count {
+  font-size: var(--hk-font-meta);
+}
+.qp-comment-over {
+  color: var(--hk-danger);
+}
+.qp-comment-submit {
+  height: var(--hk-control-height);
+  padding: 0 var(--hk-space-3);
+  border: 1px solid var(--hk-action-bg);
+  border-radius: var(--hk-radius-md);
+  background: var(--hk-action-bg);
+  color: var(--hk-action-fg);
+  font-weight: var(--hk-weight-medium);
+  cursor: pointer;
+}
+.qp-comment-submit:disabled,
+.qp-comment-form fieldset:disabled .qp-comment-submit {
+  opacity: 0.6;
+  cursor: default;
+}
+.qp-comment-reload {
+  padding: 0 var(--hk-space-2);
+  border: 1px solid var(--hk-border-control);
+  border-radius: var(--hk-radius-md);
+  background: transparent;
+  color: var(--hk-text-primary);
+  font-size: var(--hk-font-meta);
+  font-style: normal;
+  cursor: pointer;
+}
+.qp-comment-result {
+  min-height: var(--hk-leading-meta);
+  margin: var(--hk-space-1) 0 0;
+  font-size: var(--hk-font-meta);
+  line-height: var(--hk-leading-meta);
+  color: var(--hk-text-secondary);
+}
+.qp-comment-result[data-write-state="refused"] {
+  color: var(--hk-warning);
+}
+
 /* measurement panel (local preview only) */
 .qp-measure {
   padding: var(--hk-space-1) var(--hk-space-4);

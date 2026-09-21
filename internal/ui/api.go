@@ -65,6 +65,9 @@ func (h *Handler) serveAPI(w http.ResponseWriter, r *http.Request, identity cfac
 		h.glance(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/ui/api/board/tasks":
 		h.boardTasks(w, r)
+	case r.Method == http.MethodGet && boardCommentsPathRE.MatchString(r.URL.Path):
+		id, _ := pathTaskID(boardCommentsPathRE, r.URL.Path)
+		h.boardTaskComments(w, r, id)
 	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/ui/api/board/tasks/"):
 		h.boardTaskDetail(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/ui/api/policy/active":

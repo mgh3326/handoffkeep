@@ -1,7 +1,8 @@
-import type { BoardDetail, BoardDoc, BoardTask, BoardTasksResponse, PolicyResponse } from "./types";
+import type { BoardComment, BoardCommentsResponse, BoardDetail, BoardDoc, BoardTask, BoardTasksResponse, PolicyResponse } from "./types";
 
 const PAGE_LIMIT = 500;
 const MAX_TASKS = 5000;
+const MAX_COMMENTS = 2000;
 
 /** HTTP failure with the status preserved — callers distinguish a missing
  * task (404 → "없음") from a transient error without parsing the message. */
@@ -74,4 +75,76 @@ export function fetchBoardDoc(key: string): Promise<BoardDoc> {
 
 export function fetchPolicyActive(): Promise<PolicyResponse> {
   return getJSON<PolicyResponse>("/ui/api/policy/active");
+}
+
+export type TaskComments = { comments: BoardComment[]; truncated: boolean };
+
+/** Reads a task's comments in creation order, walking the after_id cursor.
+ * Past the client cap the list is returned marked truncated — never as if it
+ * were complete. A missing task rejects with HttpError(404). */
+export async function fetchTaskComments(id: number): Promise<TaskComments> {
+  const comments: BoardComment[] = [];
+  let afterID = 0;
+  for (;;) {
+    const query = afterID > 0 ? `?after_id=${afterID}` : "";
+    const page = await getJSON<BoardCommentsResponse>(`/ui/api/board/tasks/${id}/comments${query}`);
+    comments.push(...page.comments);
+    if (!page.truncated) {
+      return { comments, truncated: false };
+    }
+    const next = page.next_after_id ?? 0;
+    if (next <= afterID || comments.length >= MAX_COMMENTS) {
+      return { comments, truncated: true };
+    }
+    afterID = next;
+  }
+}
+
+/** A refused or failed comment write: the HTTP status and the server's error
+ * code (empty when the response carried none, e.g. an auth gate's bare 401). */
+export class CommentWriteError extends Error {
+  readonly status: number;
+  readonly code: string;
+  constructor(status: number, code: string) {
+    super(`comment write failed: ${status} ${code}`);
+    this.name = "CommentWriteError";
+    this.status = status;
+    this.code = code;
+  }
+}
+
+/** The session CSRF token the queue page carries for its one write form. The
+ * cookie it pairs with is HttpOnly, so the page hands the token over in a
+ * meta tag; null when the page has none. */
+export function readCsrfToken(): string | null {
+  const value = document.querySelector<HTMLMetaElement>('meta[name="hk-csrf"]')?.content ?? "";
+  return value === "" ? null : value;
+}
+
+/** Appends a comment through the console's form-write path — the same
+ * authentication, origin and CSRF checks as the decision answers. Only the
+ * body and the CSRF token are sent: the author is whoever is signed in. */
+export async function postTaskComment(id: number, body: string, csrf: string): Promise<BoardComment> {
+  let response: Response;
+  try {
+    response = await fetch(`/ui/tasks/${id}/comments`, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ body, csrf }).toString(),
+    });
+  } catch {
+    throw new CommentWriteError(0, "network");
+  }
+  if (response.status === 201) {
+    return (await response.json()) as BoardComment;
+  }
+  let code = "";
+  try {
+    const parsed = (await response.json()) as { error?: unknown };
+    code = typeof parsed.error === "string" ? parsed.error : "";
+  } catch {
+    // an auth gate answers with an empty body; the status still says why
+  }
+  throw new CommentWriteError(response.status, code);
 }
