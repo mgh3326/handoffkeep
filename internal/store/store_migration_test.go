@@ -85,3 +85,63 @@ func TestRelayEventsV6ToV7Upgrade(t *testing.T) {
 	}
 	t.Logf("v6→v7 upgrade: historic_rows=%d job_attempts=%d lane_event_id=%d", count, job.Attempts, lane.ID)
 }
+
+// TestTaskCommentsMigrationIsAdditiveAndIdempotent opens a database that
+// already holds tasks, migrates twice, and proves the comment table and its
+// append-only trigger exist once without claiming a schema version.
+func TestTaskCommentsMigrationIsAdditiveAndIdempotent(t *testing.T) {
+	url := os.Getenv("HANDOFFKEEP_TEST_DB_URL")
+	if url == "" {
+		t.Skip("HANDOFFKEEP_TEST_DB_URL is required for PostgreSQL migration tests")
+	}
+	ctx := context.Background()
+	admin, err := pgxpool.New(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer admin.Close()
+	schema := fmt.Sprintf("task_comments_%d", time.Now().UnixNano())
+	if _, err = admin.Exec(ctx, "CREATE SCHEMA "+schema); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = admin.Exec(ctx, "DROP SCHEMA "+schema+" CASCADE") }()
+	config, err := pgxpool.ParseConfig(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.ConnConfig.RuntimeParams["search_path"] = schema + ",public"
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	s := &Store{pool: pool}
+	if err = s.migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	task, err := s.CreateTask(ctx, Task{Lane: "lane-a", Title: "existing", Kind: "implement", CreatedBy: "node"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := s.CreateTaskComment(ctx, task.ID, "node", "before reopen")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var tables, triggers, version int
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM pg_tables WHERE schemaname=$1 AND tablename='task_comments'`, schema).Scan(&tables); err != nil || tables != 1 {
+		t.Fatalf("tables=%d err=%v", tables, err)
+	}
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM pg_trigger WHERE tgname='task_comments_append_only' AND tgrelid='task_comments'::regclass`).Scan(&triggers); err != nil || triggers != 1 {
+		t.Fatalf("triggers=%d err=%v", triggers, err)
+	}
+	if err = pool.QueryRow(ctx, `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != 11 {
+		t.Fatalf("schema version=%d err=%v", version, err)
+	}
+	xs, err := s.ListTaskComments(ctx, task.ID, 0, 10)
+	if err != nil || len(xs) != 1 || xs[0].ID != first.ID {
+		t.Fatalf("comments=%+v err=%v", xs, err)
+	}
+}
