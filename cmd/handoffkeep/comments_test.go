@@ -84,6 +84,10 @@ func TestTasksCommentsCLIListsWithCursor(t *testing.T) {
 func TestTasksCommentCLIRejectsBadInputBeforeSending(t *testing.T) {
 	h, seen := commentServer(t)
 	base := []string{"--url", h.URL, "--token", "tok"}
+	big := filepath.Join(t.TempDir(), "big.log")
+	if err := os.WriteFile(big, bytes.Repeat([]byte("x"), 1<<20), 0600); err != nil {
+		t.Fatal(err)
+	}
 	for _, tc := range []struct {
 		args []string
 		want string
@@ -92,6 +96,7 @@ func TestTasksCommentCLIRejectsBadInputBeforeSending(t *testing.T) {
 		{[]string{"tasks", "comment", "42", "--body", "a", "--file", "x"}, "exactly one of --body or --file"},
 		{[]string{"tasks", "comment", "42", "--body", "  "}, "comment_empty"},
 		{[]string{"tasks", "comment", "42", "--body", strings.Repeat("a", 64<<10+1)}, "comment_too_long"},
+		{[]string{"tasks", "comment", "42", "--file", big}, "comment_too_long"},
 		{[]string{"tasks", "comment", "42", "--author", "operator", "--body", "a"}, "flag provided but not defined"},
 		{[]string{"tasks", "comment", "0", "--body", "a"}, "task id must be positive"},
 		{[]string{"tasks", "comment", "--body", "a"}, "usage: tasks comment <id>"},

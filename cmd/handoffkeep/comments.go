@@ -65,12 +65,18 @@ func taskCommentsCmd(args []string, in io.Reader, out io.Writer) error {
 		}
 		text := *body
 		if set["file"] {
-			var b []byte
-			if *file == "-" {
-				b, err = io.ReadAll(io.LimitReader(in, store.TaskCommentMaxBytes+1))
-			} else {
-				b, err = os.ReadFile(*file)
+			src := in
+			if *file != "-" {
+				f, err := os.Open(*file)
+				if err != nil {
+					return err
+				}
+				defer f.Close()
+				src = f
 			}
+			// Read one byte past the limit so an oversized file is reported
+			// as too long without loading all of it.
+			b, err := io.ReadAll(io.LimitReader(src, store.TaskCommentMaxBytes+1))
 			if err != nil {
 				return err
 			}

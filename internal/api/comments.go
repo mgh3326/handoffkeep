@@ -20,10 +20,11 @@ func (s Service) ListTaskComments(ctx context.Context, taskID, afterID int64, li
 
 // taskCommentInput accepts only a body. Author-like fields are decoded so a
 // forged author is refused with its own error rather than silently dropped.
+// They are raw values, not pointers, so an explicit null is detected too.
 type taskCommentInput struct {
-	Body      string           `json:"body"`
-	Author    *json.RawMessage `json:"author,omitempty"`
-	CreatedBy *json.RawMessage `json:"created_by,omitempty"`
+	Body      string          `json:"body"`
+	Author    json.RawMessage `json:"author,omitempty"`
+	CreatedBy json.RawMessage `json:"created_by,omitempty"`
 }
 
 // taskCommentRequestMax leaves room for JSON escaping (up to six bytes per
@@ -67,7 +68,7 @@ func (s Server) taskCommentCreate(w http.ResponseWriter, r *http.Request) {
 		appErr(w, err)
 		return
 	}
-	if input.Author != nil || input.CreatedBy != nil {
+	if len(input.Author) != 0 || len(input.CreatedBy) != 0 {
 		jsonOut(w, http.StatusBadRequest, map[string]string{"error": "author_not_accepted"})
 		return
 	}
