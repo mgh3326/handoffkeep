@@ -176,6 +176,9 @@ func (s Service) PutDocument(ctx context.Context, client string, x store.Documen
 func (s Service) GetDocument(ctx context.Context, key string) (store.Document, bool, error) {
 	return s.Store.GetDocument(ctx, key)
 }
+func (s Service) GetDocumentByID(ctx context.Context, id int64) (store.Document, bool, error) {
+	return s.Store.GetDocumentByID(ctx, id)
+}
 func (s Service) ListDocuments(ctx context.Context, prefix, kind, session string, limit int) ([]store.Document, error) {
 	return s.Store.ListDocuments(ctx, prefix, kind, session, limit)
 }
@@ -1077,6 +1080,28 @@ func (s Server) search(w http.ResponseWriter, r *http.Request) {
 }
 func (s Server) documents(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.auth(w, r); !ok {
+		return
+	}
+	// ?id=<n> fetches one document by numeric id (#551): key is the public
+	// handle but callers often only have the id. A document id is never a
+	// valid key, so the {key...} wildcard route cannot express this lookup.
+	if r.URL.Query().Has("id") {
+		raw := r.URL.Query().Get("id")
+		id, e := strconv.ParseInt(raw, 10, 64)
+		if e != nil || id < 1 {
+			jsonOut(w, 400, map[string]string{"error": "invalid_document_id"})
+			return
+		}
+		x, found, e := s.Service.GetDocumentByID(r.Context(), id)
+		if e != nil {
+			appErr(w, e)
+			return
+		}
+		if !found {
+			jsonOut(w, 404, map[string]string{"error": "not_found"})
+			return
+		}
+		jsonOut(w, 200, x)
 		return
 	}
 	n, e := queryLimit(r, 100, 1000)

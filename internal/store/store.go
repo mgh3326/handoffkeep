@@ -1906,6 +1906,20 @@ func (s *Store) GetDocument(ctx context.Context, key string) (Document, bool, er
 	}
 	return x, true, nil
 }
+func (s *Store) GetDocumentByID(ctx context.Context, id int64) (Document, bool, error) {
+	if id < 1 {
+		return Document{}, false, errors.New("invalid document id")
+	}
+	var x Document
+	e := s.pool.QueryRow(ctx, `SELECT id,key,kind,session,job,body,sha256,created_by,created_at,updated_at FROM documents WHERE id=$1`, id).Scan(&x.ID, &x.Key, &x.Kind, &x.Session, &x.Job, &x.Body, &x.SHA256, &x.CreatedBy, &x.CreatedAt, &x.UpdatedAt)
+	if e != nil {
+		if strings.Contains(e.Error(), "no rows") {
+			return x, false, nil
+		}
+		return x, false, e
+	}
+	return x, true, nil
+}
 func (s *Store) ListDocuments(ctx context.Context, prefix, kind, session string, limit int) ([]Document, error) {
 	if !validText(prefix, 512) || !validText(session, 128) || (kind != "" && !documentKinds[kind]) {
 		return nil, errors.New("invalid document query")
@@ -2139,6 +2153,32 @@ func (s *Store) Search(ctx context.Context, q, scope, session string, limit int)
 	if limit > 100 {
 		limit = 100
 	}
+	out := []SearchResult{}
+	// "#<n>" and bare-number queries are document-id lookups in the scopes
+	// that contain documents (all, docs), the same way scope "tasks" resolves
+	// task ids. The exact match always leads the page and a missing id yields
+	// an empty result set rather than rows that merely mention the digits.
+	exactDocKey := ""
+	if scope == "all" || scope == "docs" {
+		if m := numericIDQuery.FindStringSubmatch(strings.TrimSpace(q)); m != nil {
+			id, e := strconv.ParseInt(m[1], 10, 64)
+			if e != nil {
+				return out, nil
+			}
+			row := s.pool.QueryRow(ctx, `SELECT key,session,kind,left(body,160),created_at FROM documents WHERE id=$2 AND ($1='' OR session=$1)`, session, id)
+			var x SearchResult
+			switch e := row.Scan(&x.Key, &x.Session, &x.Kind, &x.Snippet, &x.CreatedAt); {
+			case e == nil:
+				x.Scope, x.Title = "docs", x.Key
+				out = append(out, x)
+				exactDocKey = x.Key
+			case errors.Is(e, pgx.ErrNoRows):
+				return out, nil
+			default:
+				return nil, fmt.Errorf("search docs exact: %w", e)
+			}
+		}
+	}
 	parts := []string{}
 	if scope == "all" || scope == "ctx" {
 		parts = append(parts, `SELECT 'ctx' scope,'' key,session,kind,title,ts_headline('simple',body,plainto_tsquery('simple',$2),'MaxWords=24,MinWords=8') snippet,refs,created_at FROM checkpoints WHERE ($1='' OR session=$1) AND (to_tsvector('simple',title || ' ' || body) @@ plainto_tsquery('simple',$2) OR title || ' ' || body ILIKE '%' || $2 || '%')`)
@@ -2149,12 +2189,11 @@ func (s *Store) Search(ctx context.Context, q, scope, session string, limit int)
 	if scope == "all" || scope == "docs" {
 		parts = append(parts, `SELECT 'docs' scope,key,session,kind,key title,ts_headline('simple',body,plainto_tsquery('simple',$2),'MaxWords=24,MinWords=8') snippet,'{}'::jsonb refs,created_at FROM documents WHERE ($1='' OR session=$1) AND (to_tsvector('simple',key || ' ' || body) @@ plainto_tsquery('simple',$2) OR key || ' ' || body ILIKE '%' || $2 || '%')`)
 	}
-	rows, e := s.pool.Query(ctx, `SELECT scope,key,session,kind,title,snippet,refs,created_at FROM (`+strings.Join(parts, " UNION ALL ")+") r ORDER BY created_at DESC LIMIT $3", session, q, limit)
+	rows, e := s.pool.Query(ctx, `SELECT scope,key,session,kind,title,snippet,refs,created_at FROM (`+strings.Join(parts, " UNION ALL ")+") r ORDER BY created_at DESC LIMIT $3", session, q, limit+1)
 	if e != nil {
 		return nil, fmt.Errorf("search: %w", e)
 	}
 	defer rows.Close()
-	out := []SearchResult{}
 	for rows.Next() {
 		var x SearchResult
 		var refs []byte
@@ -2164,10 +2203,19 @@ func (s *Store) Search(ctx context.Context, q, scope, session string, limit int)
 		if e = json.Unmarshal(refs, &x.Refs); e != nil {
 			return nil, e
 		}
+		if x.Scope == "docs" && x.Key == exactDocKey {
+			continue
+		}
 		out = append(out, x)
 	}
 	if e = rows.Err(); e != nil {
 		return nil, e
+	}
+	if len(out) > limit {
+		out = out[:limit]
+		for i := range out {
+			out[i].Truncated = true
+		}
 	}
 	if scope == "all" || scope == "docs" {
 		if e = s.linkTaskDocs(ctx, out); e != nil {
@@ -2227,7 +2275,7 @@ func (s *Store) linkTaskDocs(ctx context.Context, out []SearchResult) error {
 	return nil
 }
 
-var taskIDQuery = regexp.MustCompile(`^#?([0-9]+)$`)
+var numericIDQuery = regexp.MustCompile(`^#?([0-9]+)$`)
 
 // searchTasks implements scope "tasks": title FTS/ILIKE over the tasks table
 // (all states, merged and dropped included) plus task_comments bodies when
@@ -2244,7 +2292,7 @@ func (s *Store) searchTasks(ctx context.Context, q, lane string, limit int) ([]S
 	}
 	like := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(q)
 	var exactID int64 = -1
-	if m := taskIDQuery.FindStringSubmatch(strings.TrimSpace(q)); m != nil {
+	if m := numericIDQuery.FindStringSubmatch(strings.TrimSpace(q)); m != nil {
 		id, e := strconv.ParseInt(m[1], 10, 64)
 		if e != nil {
 			return []SearchResult{}, nil
