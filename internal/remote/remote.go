@@ -148,15 +148,22 @@ func (c Client) ListDocuments(ctx context.Context, prefix, kind, session string,
 	e := c.call(ctx, "GET", "/v1/documents?"+p.Encode(), nil, &out)
 	return out.Documents, e
 }
+
+// searchWireCap is the largest limit the /v1/search API accepts
+// (queryLimit def=20 max=100); requesting beyond it is a 400.
+const searchWireCap = 100
+
 func (c Client) Search(ctx context.Context, q, scope, session string, limit int) ([]store.SearchResult, error) {
 	var out struct {
 		Results []store.SearchResult `json:"results"`
 	}
 	// Request one extra row so a cut page stays detectable against a server
 	// that predates per-row truncated markers: len(results) > limit means more
-	// rows exist. limit < 1 defers to the server default and is passed through.
+	// rows exist. The API rejects limits above its 100 cap, so the probe only
+	// applies strictly below it — at the cap the page cannot be probed.
+	// limit < 1 is passed through unchanged.
 	req := limit
-	if req >= 1 {
+	if req >= 1 && req < searchWireCap {
 		req++
 	}
 	p := url.Values{"q": {q}, "scope": {scope}, "session": {session}, "limit": {fmt.Sprint(req)}}

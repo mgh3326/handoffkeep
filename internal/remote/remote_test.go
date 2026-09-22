@@ -62,6 +62,12 @@ func TestSearchExtraRowProbe(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		wireLimit = r.URL.Query().Get("limit")
 		n, _ := strconv.Atoi(wireLimit)
+		// Same contract as the real queryLimit: limit > 100 is a 400.
+		if n > 100 {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid_context"})
+			return
+		}
 		if n > total {
 			n = total
 		}
@@ -105,5 +111,21 @@ func TestSearchExtraRowProbe(t *testing.T) {
 		if x.Truncated {
 			t.Fatalf("row %d wrongly marked truncated", i)
 		}
+	}
+
+	// At the server cap the probe must not push the wire limit past 100 —
+	// the API rejects it. Above the cap the request still fails loudly.
+	total = 150
+	if _, err = c.Search(context.Background(), "q", "docs", "", 100); err != nil {
+		t.Fatalf("limit=100 must stay valid: %v", err)
+	}
+	if wireLimit != "100" {
+		t.Fatalf("wire limit=%s want 100", wireLimit)
+	}
+	if _, err = c.Search(context.Background(), "q", "docs", "", 101); err == nil {
+		t.Fatal("limit=101 must fail")
+	}
+	if wireLimit != "101" {
+		t.Fatalf("wire limit=%s want 101", wireLimit)
 	}
 }
