@@ -835,7 +835,13 @@ func docCmd(args []string, out io.Writer) error {
 		}
 		return printJSON(out, map[string]any{"document": v, "changed": changed})
 	case "get":
-		if *docID != "" {
+		idSet := false
+		fs.Visit(func(f *flag.Flag) {
+			if f.Name == "id" {
+				idSet = true
+			}
+		})
+		if idSet {
 			if fs.NArg() != 0 {
 				return errors.New("doc get --id cannot be combined with a key")
 			}

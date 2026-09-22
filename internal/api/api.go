@@ -1085,7 +1085,8 @@ func (s Server) documents(w http.ResponseWriter, r *http.Request) {
 	// ?id=<n> fetches one document by numeric id (#551): key is the public
 	// handle but callers often only have the id. A document id is never a
 	// valid key, so the {key...} wildcard route cannot express this lookup.
-	if raw := r.URL.Query().Get("id"); raw != "" {
+	if r.URL.Query().Has("id") {
+		raw := r.URL.Query().Get("id")
 		id, e := strconv.ParseInt(raw, 10, 64)
 		if e != nil || id < 1 {
 			jsonOut(w, 400, map[string]string{"error": "invalid_document_id"})

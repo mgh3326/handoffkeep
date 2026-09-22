@@ -54,7 +54,7 @@ func TestDocGetByID(t *testing.T) {
 	}
 	// Malformed ids fail client-side without reaching the server.
 	before := len(queries)
-	for _, arg := range []string{"abc", "-3", "0", "1.5", "k/five", "5x"} {
+	for _, arg := range []string{"", "abc", "-3", "0", "1.5", "k/five", "5x"} {
 		if err := docCmd([]string{"get", "--id", arg}, &bytes.Buffer{}); err == nil || err.Error() != "invalid document id" {
 			t.Fatalf("--id %s err=%v", arg, err)
 		}

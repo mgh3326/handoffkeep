@@ -71,8 +71,9 @@ func TestDocumentGetByIDRoute(t *testing.T) {
 	}
 	resp.Body.Close()
 
-	// Malformed and non-positive ids are 400, not a list fallback.
-	for _, bad := range []string{"abc", "0", "-5", "1.5"} {
+	// Malformed and non-positive ids are 400, not a list fallback; an
+	// explicitly empty ?id= is malformed too.
+	for _, bad := range []string{"", "abc", "0", "-5", "1.5"} {
 		resp = request(t, h.Client(), http.MethodGet, h.URL+"/v1/documents?id="+bad, "node-token", nil)
 		if resp.StatusCode != http.StatusBadRequest {
 			t.Fatalf("id=%s status=%d", bad, resp.StatusCode)

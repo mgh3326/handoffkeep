@@ -176,9 +176,10 @@ comment and are archived; the connector has no delete operation. Use
 
 `doc get <key>` fetches a document by key; `doc get --id <n>` fetches one by
 its numeric id (`GET /v1/documents?id=<n>`, `404 not_found` when absent,
-`400 invalid_document_id` for a malformed id). `ctx search --scope docs`
-treats a bare-number or `#<n>` query as a document-id lookup — the exact match
-leads the page and a missing id returns an empty result set, the same way
+`400 invalid_document_id` for a malformed id). `ctx search --scope docs` and
+`ctx search --scope all` treat a bare-number or `#<n>` query as a document-id
+lookup — the exact match leads the page and a missing id returns an empty
+result set, the same way
 `--scope tasks` resolves task ids. Search pages default to 20 rows (hard cap
 100, `--scope tasks` 50); a page cut at the cap marks every row
 `truncated: true` rather than presenting a partial set as complete.
