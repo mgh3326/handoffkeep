@@ -77,8 +77,39 @@ func TestDocGetByID(t *testing.T) {
 	}
 }
 
+// A server that predates ?id= ignores the parameter and answers 200 with the
+// documents list envelope. That must surface as an error, never as an empty
+// document with rc 0 (#584).
+func TestDocGetByIDOldServerSkew(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"documents": []store.Document{
+			{ID: 3, Key: "k/three", Kind: "note"},
+		}})
+	}))
+	defer server.Close()
+	t.Setenv("HANDOFFKEEP_URL", server.URL)
+	t.Setenv("HANDOFFKEEP_TOKEN", "test-token")
+
+	for _, id := range []string{"1", "3", "999999"} {
+		var out bytes.Buffer
+		err := docCmd([]string{"get", "--id", id}, &out)
+		if err == nil {
+			t.Fatalf("--id %s: expected error, got output %s", id, out.String())
+		}
+		if !strings.Contains(err.Error(), "?id=") {
+			t.Fatalf("--id %s: error should name the unsupported lookup: %v", id, err)
+		}
+		if strings.Contains(out.String(), `"id"`) {
+			t.Fatalf("--id %s: printed a document on failure: %s", id, out.String())
+		}
+	}
+}
+
 // ctx search defaults to 20 rows for every scope (the 3-per-query cap made
-// discovery unusable) while an explicit --limit is still honored (#551).
+// discovery unusable) while an explicit --limit is still honored (#551). The
+// client asks for one extra row so a cut page stays detectable on servers that
+// predate per-row truncated markers, hence the wire limit is limit+1 (#584).
 func TestCtxSearchDefaultLimit(t *testing.T) {
 	var limits []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -110,7 +141,7 @@ func TestCtxSearchDefaultLimit(t *testing.T) {
 	if err := ctxCmd([]string{"recent", "--session", "s"}, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"20", "20", "20", "20", "20", "7", "recent:3"}
+	want := []string{"21", "21", "21", "21", "21", "8", "recent:3"}
 	if strings.Join(limits, ",") != strings.Join(want, ",") {
 		t.Fatalf("limits=%v want %v", limits, want)
 	}

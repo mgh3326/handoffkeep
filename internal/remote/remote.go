@@ -129,7 +129,16 @@ func (c Client) GetDocumentByID(ctx context.Context, id int64) (store.Document, 
 	if e != nil && e.Error() == "not_found" {
 		return out, false, nil
 	}
-	return out, e == nil, e
+	if e != nil {
+		return out, false, e
+	}
+	// A server older than this CLI ignores ?id= and returns a documents list,
+	// which decodes to a zero Document — never report that as found. Any other
+	// id mismatch means the server answered a different document.
+	if out.ID != id {
+		return out, false, fmt.Errorf("server returned document id %d for requested id %d: server may not support ?id= lookup (older than this CLI)", out.ID, id)
+	}
+	return out, true, nil
 }
 func (c Client) ListDocuments(ctx context.Context, prefix, kind, session string, limit int) ([]store.Document, error) {
 	var out struct {
@@ -143,9 +152,26 @@ func (c Client) Search(ctx context.Context, q, scope, session string, limit int)
 	var out struct {
 		Results []store.SearchResult `json:"results"`
 	}
-	p := url.Values{"q": {q}, "scope": {scope}, "session": {session}, "limit": {fmt.Sprint(limit)}}
+	// Request one extra row so a cut page stays detectable against a server
+	// that predates per-row truncated markers: len(results) > limit means more
+	// rows exist. limit < 1 defers to the server default and is passed through.
+	req := limit
+	if req >= 1 {
+		req++
+	}
+	p := url.Values{"q": {q}, "scope": {scope}, "session": {session}, "limit": {fmt.Sprint(req)}}
 	e := c.call(ctx, "GET", "/v1/search?"+p.Encode(), nil, &out)
-	return out.Results, e
+	if e != nil {
+		return nil, e
+	}
+	xs := out.Results
+	if limit >= 1 && len(xs) > limit {
+		xs = xs[:limit]
+		for i := range xs {
+			xs[i].Truncated = true
+		}
+	}
+	return xs, nil
 }
 func (c Client) PutAttachment(ctx context.Context, _ string, name, mime, ref string, body []byte) (store.Attachment, bool, error) {
 	r, e := http.NewRequestWithContext(ctx, "PUT", strings.TrimRight(c.URL, "/")+"/v1/attachments", bytes.NewReader(body))
