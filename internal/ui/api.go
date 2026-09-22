@@ -70,6 +70,8 @@ func (h *Handler) serveAPI(w http.ResponseWriter, r *http.Request, identity cfac
 		h.boardTaskComments(w, r, id)
 	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/ui/api/board/tasks/"):
 		h.boardTaskDetail(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/ui/api/search":
+		h.search(w, r, identity)
 	case r.Method == http.MethodGet && r.URL.Path == "/ui/api/policy/active":
 		h.policyActive(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/ui/api/board/doc":

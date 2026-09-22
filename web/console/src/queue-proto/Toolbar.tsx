@@ -80,8 +80,10 @@ export function Toolbar({ state, lanes, kinds, states, visibleCount, partial, al
       <input
         id="qp-search"
         type="search"
-        placeholder="제목 또는 #id 검색"
+        placeholder="이 목록에서 거르기 — 제목 · #id"
+        title="이미 불러온 목록 안에서만 거릅니다. 닫힌 태스크까지 찾으려면 위의 전체 검색을 쓰세요."
         aria-label="search"
+        aria-description="이 목록에서 거르기 — 불러온 행만"
         value={state.filters.query}
         onChange={(event) => setFilters({ query: event.target.value })}
       />
