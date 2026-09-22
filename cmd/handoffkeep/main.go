@@ -637,16 +637,17 @@ func ctxCmd(args []string, out io.Writer) error {
 		if len(searchQuery) != 1 {
 			return errors.New("ctx search requires query")
 		}
-		if *scope == "tasks" {
-			limitSet := false
-			fs.Visit(func(f *flag.Flag) {
-				if f.Name == "limit" {
-					limitSet = true
-				}
-			})
-			if !limitSet {
-				*limit = 20
+		// The 3-per-query default made discovery unusable (#551); search now
+		// defaults to 20 rows for every scope and the store marks a page cut
+		// at its cap with truncated=true on every row.
+		limitSet := false
+		fs.Visit(func(f *flag.Flag) {
+			if f.Name == "limit" {
+				limitSet = true
 			}
+		})
+		if !limitSet {
+			*limit = 20
 		}
 		v, e := c.Search(ctx, searchQuery[0], *scope, *session, *limit)
 		if e != nil {
@@ -795,6 +796,7 @@ func docCmd(args []string, out io.Writer) error {
 		c = remoteClient(fs)
 	}
 	key := fs.String("key", "", "key")
+	docID := fs.String("id", "", "document id")
 	kind := fs.String("kind", "", "kind")
 	session := fs.String("session", "", "session")
 	job := fs.String("job", "", "job")
@@ -833,6 +835,23 @@ func docCmd(args []string, out io.Writer) error {
 		}
 		return printJSON(out, map[string]any{"document": v, "changed": changed})
 	case "get":
+		if *docID != "" {
+			if fs.NArg() != 0 {
+				return errors.New("doc get --id cannot be combined with a key")
+			}
+			id, e := parseDocumentID(*docID)
+			if e != nil {
+				return e
+			}
+			v, ok, e := c.GetDocumentByID(ctx, id)
+			if e != nil {
+				return e
+			}
+			if !ok {
+				return errors.New("not_found")
+			}
+			return printJSON(out, v)
+		}
 		if fs.NArg() != 1 {
 			return errors.New("doc get requires key")
 		}
@@ -861,6 +880,22 @@ func docCmd(args []string, out io.Writer) error {
 	default:
 		return errors.New("usage: doc put|get|list|import")
 	}
+}
+
+var docIDArg = regexp.MustCompile(`^#?([0-9]+)$`)
+
+// parseDocumentID accepts a bare number or "#<n>" and rejects anything else —
+// a mistyped key must fail loudly rather than be looked up as an id.
+func parseDocumentID(arg string) (int64, error) {
+	m := docIDArg.FindStringSubmatch(strings.TrimSpace(arg))
+	if m == nil {
+		return 0, errors.New("invalid document id")
+	}
+	id, e := strconv.ParseInt(m[1], 10, 64)
+	if e != nil || id < 1 {
+		return 0, errors.New("invalid document id")
+	}
+	return id, nil
 }
 
 func hasFlag(args []string, name string) bool {

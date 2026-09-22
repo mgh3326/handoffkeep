@@ -123,6 +123,14 @@ func (c Client) GetDocument(ctx context.Context, key string) (store.Document, bo
 	}
 	return out, e == nil, e
 }
+func (c Client) GetDocumentByID(ctx context.Context, id int64) (store.Document, bool, error) {
+	var out store.Document
+	e := c.call(ctx, "GET", "/v1/documents?id="+fmt.Sprint(id), nil, &out)
+	if e != nil && e.Error() == "not_found" {
+		return out, false, nil
+	}
+	return out, e == nil, e
+}
 func (c Client) ListDocuments(ctx context.Context, prefix, kind, session string, limit int) ([]store.Document, error) {
 	var out struct {
 		Documents []store.Document `json:"documents"`
