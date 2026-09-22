@@ -2,6 +2,8 @@
 // the global navigation block of the left sidebar and the theme choice.
 
 import { useState, type ReactNode } from "react";
+import { GlobalSearch } from "./GlobalSearch";
+import type { SearchFn } from "./search";
 import type { Density } from "./types";
 
 export type Theme = "dark" | "light";
@@ -106,8 +108,13 @@ export function ThemeChoice() {
   );
 }
 
-/** Full-page shell for routes that have no view rail (/ui/tasks/<id>). */
-export function PageShell({ current, children }: { current: NavKey; children: ReactNode }) {
+/** Leaves the page for a picked search result. A variable so tests can
+ * observe navigation without jsdom performing it. */
+export const navigate = { to: (href: string) => window.location.assign(href) };
+
+/** Full-page shell for routes that have no view rail (/ui/tasks/<id>). The
+ * header search leaves for the picked task's own page. */
+export function PageShell({ current, children, search }: { current: NavKey; children: ReactNode; search?: SearchFn }) {
   return (
     <div className="hk-page">
       <aside className="hk-side" aria-label="콘솔 탐색">
@@ -116,7 +123,12 @@ export function PageShell({ current, children }: { current: NavKey; children: Re
           <ThemeChoice />
         </div>
       </aside>
-      <main className="hk-page-main">{children}</main>
+      <main className="hk-page-main">
+        <header className="qp-head">
+          <GlobalSearch onPick={(id) => navigate.to(`/ui/tasks/${id}`)} search={search} />
+        </header>
+        {children}
+      </main>
     </div>
   );
 }

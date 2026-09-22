@@ -317,6 +317,69 @@ summary {
   color: var(--hk-warning);
 }
 
+/* header search — server-side, every state (GlobalSearch.tsx) */
+.qp-gs {
+  position: relative;
+  flex: 0 1 22rem;
+}
+.qp-gs input {
+  width: 100%;
+}
+.qp-gs-panel {
+  position: absolute;
+  top: 100%;
+  z-index: var(--hk-z-popover);
+  width: min(40rem, 90vw);
+  max-height: 70vh;
+  overflow-y: auto;
+  border: 1px solid var(--hk-border-subtle);
+  border-radius: var(--hk-radius-lg);
+  background: var(--hk-surface-1);
+  box-shadow: var(--hk-elevation-panel);
+}
+.qp-gs-panel p {
+  margin: 0;
+  padding: var(--hk-space-1) var(--hk-space-3);
+  font-size: var(--hk-font-meta);
+}
+.qp-gs-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.qp-gs-list li {
+  display: flex;
+  gap: var(--hk-space-2);
+  padding: var(--hk-space-1) var(--hk-space-3);
+  cursor: pointer;
+}
+.qp-gs-list [aria-selected="true"] {
+  background: var(--hk-surface-selected);
+}
+.qp-gs-main {
+  flex: 1;
+  min-width: 0;
+}
+.qp-gs-main > span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.qp-gs-id {
+  font-family: var(--hk-font-mono);
+  color: var(--hk-text-secondary);
+}
+.qp-gs-snippet,
+.qp-gs-meta {
+  font-size: var(--hk-font-meta);
+}
+.qp-gs-hit {
+  background: none;
+  color: var(--hk-accent);
+  font-weight: var(--hk-weight-strong);
+}
+
 /* toolbar — search, list/board, 필터 n, count, density */
 .qp-toolbar {
   display: flex;
@@ -327,6 +390,7 @@ summary {
   border-bottom: 1px solid var(--hk-border-subtle);
 }
 .qp-toolbar input[type="search"],
+.qp-gs input,
 .qp-field select,
 .qp-field input {
   height: var(--hk-control-height);
@@ -340,7 +404,8 @@ summary {
   width: 16rem;
   max-width: 100%;
 }
-.qp-toolbar input::placeholder {
+.qp-toolbar input::placeholder,
+.qp-gs input::placeholder {
   color: var(--hk-text-muted);
 }
 .qp-more {
@@ -359,7 +424,7 @@ summary {
 .qp-filter-panel {
   position: absolute;
   z-index: var(--hk-z-popover);
-  top: calc(100% + var(--hk-space-1));
+  top: 100%;
   left: 0;
   display: grid;
   gap: var(--hk-space-3);

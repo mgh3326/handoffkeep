@@ -9,6 +9,8 @@ import type { CommentsClient } from "./TaskComments";
 import { ListView } from "./ListView";
 import { BoardView } from "./BoardView";
 import { Toolbar } from "./Toolbar";
+import { GlobalSearch } from "./GlobalSearch";
+import type { SearchFn } from "./search";
 import { ViewRail } from "./ViewRail";
 import { DEFAULT_STATE, loadPresentation, PREVIEW_DEFAULT_STATE, savePresentation, type SavedView } from "./storage";
 import { runDiag } from "./diag";
@@ -117,12 +119,14 @@ type AppProps = {
   comments?: CommentsClient;
   /** The latest poll failed; the rows are the last good snapshot. */
   refreshFailed?: boolean;
+  /** Header search lookup; defaults to the live /ui/api/search. */
+  search?: SearchFn;
   /** Preview-only tooling rendered under the list (the measurement panel).
    * The production entry passes nothing, so it never imports that code. */
   extras?: ReactNode;
 };
 
-export function QueueProtoApp({ datasets, initialSet, storage, diag = false, perf = false, fetchDetail, fetchDoc, comments, refreshFailed = false, extras }: AppProps) {
+export function QueueProtoApp({ datasets, initialSet, storage, diag = false, perf = false, fetchDetail, fetchDoc, comments, refreshFailed = false, search, extras }: AppProps) {
   const all = datasets;
   const params = typeof window !== "undefined" ? new URLSearchParams(window.location.search) : new URLSearchParams();
   const setKey = initialSet ?? params.get("set") ?? (perf ? "perf5000" : "sample200");
@@ -271,6 +275,15 @@ export function QueueProtoApp({ datasets, initialSet, storage, diag = false, per
 
   const close = useCallback(() => setOpenId(null), []);
 
+  // A header search pick opens the same non-modal panel as a row click; the
+  // search box is the opener focus returns to. The panel resolves a task
+  // outside the loaded list (merged, dropped, filtered out) through the
+  // single-task detail fetch.
+  const pickSearch = useCallback((id: number, input: HTMLInputElement) => {
+    openerRef.current = input;
+    setOpenId(id);
+  }, []);
+
   // At ≤900px the rail is a fixed overlay; pinning its top edge to the
   // measured header height keeps #qp-rail-toggle — the only close control —
   // outside the overlay's hit area no matter how tall the header wraps.
@@ -411,6 +424,7 @@ export function QueueProtoApp({ datasets, initialSet, storage, diag = false, per
                 Queue
               </span>
             </nav>
+            <GlobalSearch onPick={pickSearch} search={search} />
             {dataset.source === "synthetic" ? (
               <span className="qp-synth-badge">SYNTHETIC FIXTURE — not the production backlog</span>
             ) : null}
