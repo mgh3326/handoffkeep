@@ -148,6 +148,9 @@ func writeAction(path string) string {
 		if strings.HasPrefix(path, "/ui/api/nodes/") && strings.HasSuffix(path, "/accepting") {
 			return "accepting"
 		}
+		if taskCommentsPathRE.MatchString(path) {
+			return "comment"
+		}
 		return "invalid"
 	}
 }

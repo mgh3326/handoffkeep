@@ -4,6 +4,7 @@ import { ActivityTabs } from "./ActivityTabs";
 import { ageDays, isStale, STALE_MIN_AGE_DAYS } from "./adapter";
 import { docPageHref, titleDocKeys } from "./bodydoc";
 import { DocInline, type FetchDoc } from "./DocInline";
+import { TaskComments, type CommentsClient } from "./TaskComments";
 import type { Dataset, Enrichment, ProtoTask } from "./types";
 
 /** Lazily fetched per-drawer detail (live mode). Absent → the task's own
@@ -120,12 +121,15 @@ type BodyProps = {
   detail?: DetailFetchState;
   /** Document loader for the overview body; defaults to the board BFF. */
   fetchDoc?: FetchDoc;
+  /** Comment reader/writer for the 코멘트 tab. Absent → the synthetic
+   * preview path, which never touches the network and says so. */
+  comments?: CommentsClient;
 };
 
 /** The task detail content — the one component shared by the peek drawer and
  * the /ui/tasks/<id> page. Shell chrome (nav/close/back-link) is each host's
  * own; the tabs and sections below are not duplicated anywhere. */
-export function DetailBody({ dataset, task, detail, fetchDoc }: BodyProps) {
+export function DetailBody({ dataset, task, detail, fetchDoc, comments: commentsClient }: BodyProps) {
   const enr: Enrichment | undefined = dataset.enrichment[task.id];
   const now = dataset.generatedAt;
   const stateAge = ageDays(now, task.state_entered_at);
@@ -331,12 +335,18 @@ export function DetailBody({ dataset, task, detail, fetchDoc }: BodyProps) {
     </>
   );
 
+  // Keyed by task: switching tasks in the peek panel starts a fresh list and
+  // an empty draft, never the previous task's comments.
   const comments = (
     <section className="qp-drawer-sec">
       <h4>코멘트</h4>
-      <p className="qp-unknown" role="note">
-        아직 연결되지 않았습니다 — 코멘트 조회가 이 화면에 연결되기 전이며, 코멘트가 없다는 뜻이 아닙니다.
-      </p>
+      {commentsClient ? (
+        <TaskComments key={task.id} taskId={task.id} client={commentsClient} />
+      ) : (
+        <p className="qp-unknown" role="note">
+          코멘트가 연결되지 않은 화면입니다(합성 미리보기) — 코멘트가 없다는 뜻이 아닙니다.
+        </p>
+      )}
     </section>
   );
 
@@ -400,13 +410,14 @@ type DrawerProps = {
   onClose: () => void;
   onNav: (id: number) => void;
   fetchDoc?: FetchDoc;
+  comments?: CommentsClient;
 };
 
 // Non-modal peek panel: no inert background, no aria-modal — the list stays
 // live and clicking another row swaps the content. Focus lands in the panel
 // only on the closed→open transition; switching tasks keeps focus where the
 // user is so keyboard and pointer both travel list↔panel freely.
-export function DetailDrawer({ dataset, taskId, task, detail, orderedIds, notFound = false, onClose, onNav, fetchDoc }: DrawerProps) {
+export function DetailDrawer({ dataset, taskId, task, detail, orderedIds, notFound = false, onClose, onNav, fetchDoc, comments }: DrawerProps) {
   const ref = useRef<HTMLDivElement>(null);
   const index = orderedIds.indexOf(taskId);
   const prevId = index > 0 ? orderedIds[index - 1] : null;
@@ -471,7 +482,7 @@ export function DetailDrawer({ dataset, taskId, task, detail, orderedIds, notFou
           <p className="muted">loading…</p>
         )
       ) : (
-        <DetailBody dataset={dataset} task={task} detail={detail} fetchDoc={fetchDoc} />
+        <DetailBody dataset={dataset} task={task} detail={detail} fetchDoc={fetchDoc} comments={comments} />
       )}
     </div>
   );

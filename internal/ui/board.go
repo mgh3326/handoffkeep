@@ -493,6 +493,10 @@ func (h *Handler) policyActive(w http.ResponseWriter, r *http.Request) {
 }
 
 func writeBoardJSON(w http.ResponseWriter, response any) {
+	writeBoardJSONStatus(w, http.StatusOK, response)
+}
+
+func writeBoardJSONStatus(w http.ResponseWriter, status int, response any) {
 	body, err := json.Marshal(response)
 	if err != nil {
 		http.Error(w, "fleet console unavailable", http.StatusInternalServerError)
@@ -500,5 +504,6 @@ func writeBoardJSON(w http.ResponseWriter, response any) {
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(status)
 	_, _ = w.Write(body)
 }

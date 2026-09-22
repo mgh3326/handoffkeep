@@ -186,6 +186,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		case "/ui/compose":
 			h.composePost(w, r, email)
 		default:
+			if id, ok := pathTaskID(taskCommentsPathRE, r.URL.Path); ok {
+				h.createTaskComment(w, r, email, id)
+				return
+			}
 			h.audit(email, writeAction(r.URL.Path), "-", "-", "invalid")
 			w.Header().Set("Allow", http.MethodGet)
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -203,7 +207,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "/ui/timeline":
 		h.timeline(w, r, false)
 	case "/ui/queue":
-		h.board(w, r)
+		h.board(w, r, email)
 	case "/ui/decisions":
 		h.decisions(w, r, false, email, r.URL.Query().Get("result"))
 	case "/ui/compose":
@@ -238,7 +242,7 @@ func (h *Handler) serveSubroute(w http.ResponseWriter, r *http.Request, email st
 		return
 	}
 	if raw, ok := strings.CutPrefix(r.URL.Path, "/ui/tasks/"); ok {
-		h.taskPage(w, r, raw)
+		h.taskPage(w, r, raw, email)
 		return
 	}
 	if file, ok := strings.CutPrefix(r.URL.Path, "/ui/static/"); ok {
@@ -252,7 +256,7 @@ func (h *Handler) serveSubroute(w http.ResponseWriter, r *http.Request, email st
 // reads the id from the path and mounts the shared detail component; the
 // server only gates the id shape — a non-numeric or out-of-range id is a 400,
 // never a silently different page.
-func (h *Handler) taskPage(w http.ResponseWriter, r *http.Request, raw string) {
+func (h *Handler) taskPage(w http.ResponseWriter, r *http.Request, raw, email string) {
 	if raw == "" {
 		http.NotFound(w, r)
 		return
@@ -261,7 +265,7 @@ func (h *Handler) taskPage(w http.ResponseWriter, r *http.Request, raw string) {
 		http.Error(w, "invalid task id", http.StatusBadRequest)
 		return
 	}
-	h.render(w, "board_page", nil)
+	h.render(w, "board_page", boardPageData{CSRF: h.csrfForForm(w, r, email)})
 }
 
 var taskIDPattern = regexp.MustCompile(`^[1-9][0-9]{0,14}$`)
@@ -384,12 +388,20 @@ func (h *Handler) timelineData(r *http.Request) (timelineData, error) {
 // /ui/api/board/* BFF routes; this page is only the mount point. A ?task=
 // deep-link id is shape-checked here so a malformed value gets a 400 instead
 // of an arbitrary script-level string.
-func (h *Handler) board(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) board(w http.ResponseWriter, r *http.Request, email string) {
 	if raw := r.URL.Query().Get("task"); raw != "" && !taskIDPattern.MatchString(raw) {
 		http.Error(w, "invalid task id", http.StatusBadRequest)
 		return
 	}
-	h.render(w, "board_page", nil)
+	h.render(w, "board_page", boardPageData{CSRF: h.csrfForForm(w, r, email)})
+}
+
+// boardPageData carries the session CSRF token for the queue bundle's one
+// write form (task comments). It is the same token and cookie csrfForForm
+// issues for the decision forms; the bundle reads it from a meta tag because
+// the cookie is HttpOnly.
+type boardPageData struct {
+	CSRF string
 }
 
 func (h *Handler) decisions(w http.ResponseWriter, r *http.Request, fragment bool, email, notice string) {

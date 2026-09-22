@@ -184,10 +184,28 @@ func TestTaskCommentAuthorComesOnlyFromToken(t *testing.T) {
 	for _, body := range []map[string]string{
 		{"body": "forged", "author": "operator"},
 		{"body": "forged", "created_by": "operator"},
+		{"body": "forged", "Author": "operator"},
 	} {
 		status, out := postComment(t, h.Client(), h.URL, "node-token", task.ID, body)
 		if status != http.StatusBadRequest || out["error"] != "author_not_accepted" {
 			t.Fatalf("forged body %v: status=%d out=%v", body, status, out)
+		}
+	}
+	for _, raw := range []string{`{"body":"forged","author":null}`, `{"body":"forged","created_by":null}`} {
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, commentURL(h.URL, task.ID), strings.NewReader(raw))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer node-token")
+		resp, err := h.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := map[string]any{}
+		_ = json.NewDecoder(resp.Body).Decode(&out)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest || out["error"] != "author_not_accepted" {
+			t.Fatalf("null author %s: status=%d out=%v", raw, resp.StatusCode, out)
 		}
 	}
 	if got := listComments(t, s, task.ID); len(got) != 0 {

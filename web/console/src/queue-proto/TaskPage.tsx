@@ -8,6 +8,7 @@ import type { BoardDetail } from "../board/types";
 import { boardTaskToProto } from "./boardtask";
 import { CopyTaskLink, DetailBody } from "./DetailDrawer";
 import type { FetchDoc } from "./DocInline";
+import { liveCommentsClient, type CommentsClient } from "./TaskComments";
 import { KNOWN_STATES, type Dataset } from "./types";
 
 type PageState = "loading" | "loaded" | "notfound" | "error";
@@ -16,10 +17,12 @@ export function TaskPage({
   id,
   fetchDetail = fetchTaskDetail,
   fetchDoc,
+  comments = liveCommentsClient,
 }: {
   id: number;
   fetchDetail?: (id: number) => Promise<BoardDetail>;
   fetchDoc?: FetchDoc;
+  comments?: CommentsClient;
 }) {
   const [state, setState] = useState<PageState>("loading");
   const [detail, setDetail] = useState<BoardDetail | null>(null);
@@ -79,7 +82,7 @@ export function TaskPage({
       ) : null}
       {state === "error" ? <p className="qp-unknown">unavailable — detail fetch failed</p> : null}
       {state === "loaded" && detail !== null && dataset !== null ? (
-        <DetailBody dataset={dataset} task={boardTaskToProto(detail.task)} detail={{ status: "loaded", data: detail }} fetchDoc={fetchDoc} />
+        <DetailBody dataset={dataset} task={boardTaskToProto(detail.task)} detail={{ status: "loaded", data: detail }} fetchDoc={fetchDoc} comments={comments} />
       ) : null}
     </div>
   );

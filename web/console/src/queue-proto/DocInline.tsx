@@ -10,8 +10,9 @@ import type { BoardDoc } from "../board/types";
 import { docPageHref, parseBodyDoc } from "./bodydoc";
 
 // The dynamic import is the list/renderer split point: this module is in the
-// queue entry's static graph, DocMarkdown is not.
-const DocMarkdown = lazy(() => import("./DocMarkdown"));
+// queue entry's static graph, DocMarkdown is not. The comment tab renders
+// through this same lazy component — one split point, one renderer.
+export const DocMarkdown = lazy(() => import("./DocMarkdown"));
 
 export type FetchDoc = (key: string) => Promise<BoardDoc>;
 
@@ -36,7 +37,7 @@ function RawText({ body }: { body: string }) {
 
 /** Catches a failed renderer chunk load or a render error and falls back to
  * the raw text — the document stays readable, the reason is stated. */
-class RendererBoundary extends Component<{ body: string; children: ReactNode }, { failed: boolean }> {
+export class RendererBoundary extends Component<{ body: string; children: ReactNode }, { failed: boolean }> {
   state = { failed: false };
   static getDerivedStateFromError() {
     return { failed: true };

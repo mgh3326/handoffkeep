@@ -95,11 +95,12 @@ describe("detail tabs — 개요 / 코멘트 / 전이", () => {
     expect(drawer.getAttribute("aria-label")).toContain("task 8001");
   });
 
-  it("the comments tab says not connected — never a zero count", () => {
+  it("without a comments client (synthetic preview) the tab says not connected — never 'no comments'", () => {
     const { drawer } = openPanel([mkBoardTask({})], vi.fn<FetchDoc>());
     fireEvent.click(within(drawer).getByRole("tab", { name: "코멘트" }));
     const comments = panel(drawer, "comments");
-    expect(comments.textContent).toContain("아직 연결되지 않았습니다");
+    expect(comments.textContent).toContain("코멘트가 연결되지 않은 화면입니다");
+    expect(comments.textContent).not.toContain("코멘트 없음");
     expect(comments.textContent).not.toMatch(/\d/);
   });
 

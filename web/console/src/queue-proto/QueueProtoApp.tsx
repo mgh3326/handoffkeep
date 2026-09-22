@@ -5,6 +5,7 @@ import { boardTaskToProto } from "./boardtask";
 import { flattenGrouped } from "./ListView";
 import { DetailDrawer, type DetailFetchState } from "./DetailDrawer";
 import type { FetchDoc } from "./DocInline";
+import type { CommentsClient } from "./TaskComments";
 import { ListView } from "./ListView";
 import { BoardView } from "./BoardView";
 import { Toolbar } from "./Toolbar";
@@ -113,6 +114,7 @@ type AppProps = {
   /** Body document loader for the detail overview; defaults to the board BFF.
    * Called only for a task that carries body_doc. */
   fetchDoc?: FetchDoc;
+  comments?: CommentsClient;
   /** The latest poll failed; the rows are the last good snapshot. */
   refreshFailed?: boolean;
   /** Preview-only tooling rendered under the list (the measurement panel).
@@ -120,7 +122,7 @@ type AppProps = {
   extras?: ReactNode;
 };
 
-export function QueueProtoApp({ datasets, initialSet, storage, diag = false, perf = false, fetchDetail, fetchDoc, refreshFailed = false, extras }: AppProps) {
+export function QueueProtoApp({ datasets, initialSet, storage, diag = false, perf = false, fetchDetail, fetchDoc, comments, refreshFailed = false, extras }: AppProps) {
   const all = datasets;
   const params = typeof window !== "undefined" ? new URLSearchParams(window.location.search) : new URLSearchParams();
   const setKey = initialSet ?? params.get("set") ?? (perf ? "perf5000" : "sample200");
@@ -483,6 +485,7 @@ export function QueueProtoApp({ datasets, initialSet, storage, diag = false, per
           onClose={close}
           onNav={setOpenId}
           fetchDoc={fetchDoc}
+          comments={comments}
         />
       ) : null}
       {diagMode ? <pre id="diag" ref={diagRef} /> : null}
