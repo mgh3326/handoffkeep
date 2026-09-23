@@ -154,7 +154,10 @@ func TestUIDeployPendingServiceLines(t *testing.T) {
 	defer h.Close()
 	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
 
-	deployedAt := "2026-09-22T13:40:36Z"
+	// The boundary is derived from now() so each run's events rank newest in
+	// the DESC scan window — a fixed date decays once the shared test DB
+	// accumulates more merged events than the handler's scan limit.
+	deployedAt := time.Now().UTC().Add(-time.Hour).Truncate(time.Second).Format(time.RFC3339)
 	seedDeployDoc(t, s, "deploy/handoffkeep/20260923T033049Z", deployFixtureBody(t, "handoffkeep", "success", "92ee9e2d0ddc47593677adcc9e83040dd9873463", deployedAt, nil))
 	// auto_trader: the production backfill has deployed_at=null — the merged
 	// boundary must report "unrecorded", never fall back to record time.

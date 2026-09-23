@@ -147,8 +147,9 @@ type deployPendingResponse struct {
 	GeneratedAt time.Time           `json:"generated_at"`
 	PRSource    string              `json:"pr_source"`
 	Services    []deployServiceView `json:"services"`
-	// EventsCapped is set when the merged-events scan hit its bound — the
-	// lists below are then known to be a prefix, not the full set.
+	// EventsCapped is set when the merged-events scan hit its bound and the
+	// oldest scanned event is still after some service's boundary — only then
+	// is a merged_since list actually known to be a prefix, not the full set.
 	EventsCapped bool `json:"events_capped,omitempty"`
 }
 
@@ -159,16 +160,23 @@ func (h *Handler) deployPending(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response := deployPendingResponse{
-		GeneratedAt:  time.Now().UTC(),
-		PRSource:     "refs.pr",
-		Services:     []deployServiceView{},
-		EventsCapped: len(events) == deployEventsLimit,
+		GeneratedAt: time.Now().UTC(),
+		PRSource:    "refs.pr",
+		Services:    []deployServiceView{},
 	}
+	scanCapped := len(events) == deployEventsLimit
 	for _, svc := range deployServices {
 		view, err := h.deployServiceView(r, svc.Name, svc.Repo, events)
 		if err != nil {
 			http.Error(w, "fleet console unavailable", http.StatusInternalServerError)
 			return
+		}
+		// The DESC-ordered scan truncates this service's list only when its
+		// oldest scanned event is still after the boundary — a full cap with
+		// an older tail means the list is complete and must not warn.
+		if scanCapped && view.Current != nil && view.Current.DeployedAt != nil &&
+			events[len(events)-1].At.After(*view.Current.DeployedAt) {
+			response.EventsCapped = true
 		}
 		response.Services = append(response.Services, view)
 	}
