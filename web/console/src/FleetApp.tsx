@@ -11,6 +11,7 @@ import {
   type LiveResponse,
   type LiveSession,
 } from "./live";
+import { ReapPanel } from "./ReapPanel";
 
 const LIVE_API = "/ui/api/live";
 const POLL_MS = 10_000;
@@ -218,6 +219,7 @@ export function FleetApp() {
       ) : (
         nodes.map((node) => <MachineBlock key={node.machine_id} node={node} live={data} />)
       )}
+      <ReapPanel />
     </section>
   );
 }

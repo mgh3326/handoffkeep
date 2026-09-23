@@ -63,6 +63,8 @@ func (h *Handler) serveAPI(w http.ResponseWriter, r *http.Request, identity cfac
 		h.fleetAPI(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/ui/api/live":
 		h.liveAPI(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/ui/api/reap":
+		h.reapAPI(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/ui/api/glance":
 		h.glance(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/ui/api/board/tasks":

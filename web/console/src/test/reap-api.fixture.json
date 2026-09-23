@@ -1,0 +1,203 @@
+{
+  "generated_at": "2026-09-23T13:00:00Z",
+  "status": "ok",
+  "fetched_at": "2026-09-23T13:00:00Z",
+  "candidates": [
+    {
+      "machine": "node-a",
+      "pane_id": "w2:p25",
+      "tab_id": "w2:t25",
+      "agent_name": "t601-verify",
+      "status": "idle",
+      "job_id": "601-verify-20260923-1100",
+      "owner_lane": "b601-builder",
+      "role": "worker",
+      "basis": "job-terminal",
+      "terminal_kind": "job.completed",
+      "terminal_at": "2026-09-23T12:00:00Z"
+    },
+    {
+      "machine": "node-a",
+      "pane_id": "w2:p32",
+      "tab_id": "w2:t32",
+      "agent_name": "b599-merged",
+      "status": "done",
+      "job_id": "599-merged-builder-20260923",
+      "owner_lane": "b599-merged",
+      "role": "builder",
+      "basis": "task-terminal",
+      "task_id": 599,
+      "task_state": "merged"
+    }
+  ],
+  "held": [
+    {
+      "machine": "node-a",
+      "pane_id": "w2:p1",
+      "tab_id": "w2:t1",
+      "agent_name": "b597-grade-table",
+      "status": "working",
+      "job_id": "597-grade-table-20260923-2100",
+      "owner_lane": "b597-grade-table",
+      "role": "builder",
+      "reason": "status=working"
+    },
+    {
+      "machine": "node-a",
+      "pane_id": "w2:p2",
+      "tab_id": "w2:t2",
+      "agent_name": "w598-verify-r2",
+      "status": "idle",
+      "job_id": "598-verify-20260923-1500",
+      "owner_lane": "b598-live-load",
+      "role": "worker",
+      "reason": "no-terminal-event"
+    },
+    {
+      "machine": "node-a",
+      "pane_id": "w2:p26",
+      "tab_id": "w2:t26",
+      "agent_name": "consult-arch",
+      "status": "done",
+      "job_id": "consult-arch-20260923",
+      "owner_lane": "operator-desk",
+      "role": "worker",
+      "reason": "protected",
+      "terminal_kind": "job.completed",
+      "terminal_at": "2026-09-23T12:00:00Z"
+    },
+    {
+      "machine": "node-a",
+      "pane_id": "w2:p27",
+      "tab_id": "w2:t27",
+      "agent_name": "t590-verify-r2",
+      "status": "idle",
+      "job_id": "590-verify-20260923-1000",
+      "owner_lane": "b590-builder",
+      "role": "worker",
+      "reason": "label-mismatch",
+      "terminal_kind": "job.completed",
+      "terminal_at": "2026-09-23T12:00:00Z"
+    },
+    {
+      "machine": "node-a",
+      "pane_id": "w2:p28",
+      "tab_id": "w2:t28",
+      "status": "idle",
+      "job_id": "591-impl-20260923-1000",
+      "owner_lane": "b591-builder",
+      "role": "worker",
+      "reason": "label-unknown",
+      "terminal_kind": "job.completed",
+      "terminal_at": "2026-09-23T12:00:00Z"
+    },
+    {
+      "machine": "node-a",
+      "pane_id": "w2:p29",
+      "tab_id": "w2:t29",
+      "agent_name": "checker-2",
+      "status": "idle",
+      "job_id": "checker-2-20260923",
+      "owner_lane": "director-1",
+      "role": "resident",
+      "reason": "protected-role",
+      "terminal_kind": "job.completed",
+      "terminal_at": "2026-09-23T12:00:00Z"
+    },
+    {
+      "machine": "node-a",
+      "pane_id": "w2:p3",
+      "tab_id": "w2:t3",
+      "agent_name": "b529-deploy-view",
+      "status": "idle",
+      "job_id": "529-deploy-view-20260923-1535",
+      "owner_lane": "b529-deploy-view",
+      "role": "builder",
+      "reason": "task-open",
+      "terminal_kind": "job.completed",
+      "terminal_at": "2026-09-23T11:00:00Z",
+      "task_id": 529,
+      "task_state": "in_progress"
+    },
+    {
+      "machine": "node-a",
+      "pane_id": "w2:p30",
+      "tab_id": "w2:t30",
+      "agent_name": "w595-b",
+      "status": "idle",
+      "job_id": "595-conflict-20260923",
+      "owner_lane": "b595-builder",
+      "role": "worker",
+      "reason": "label-conflict",
+      "terminal_kind": "job.completed",
+      "terminal_at": "2026-09-23T12:00:00Z"
+    },
+    {
+      "machine": "node-a",
+      "pane_id": "w2:p31",
+      "tab_id": "w2:t31",
+      "agent_name": "w596-x",
+      "status": "idle",
+      "job_id": "596-second-20260923",
+      "owner_lane": "b596-builder",
+      "role": "worker",
+      "reason": "pane-ambiguous",
+      "terminal_kind": "job.completed",
+      "terminal_at": "2026-09-23T12:00:00Z"
+    },
+    {
+      "machine": "node-a",
+      "pane_id": "w2:p4",
+      "tab_id": "w2:t4",
+      "agent_name": "b603-session-reap",
+      "status": "working",
+      "job_id": "603-session-reap-20260923-2100",
+      "owner_lane": "b603-session-reap",
+      "role": "builder",
+      "reason": "status=working"
+    },
+    {
+      "machine": "node-a",
+      "pane_id": "w6:p1",
+      "tab_id": "w6:t1",
+      "status": "done",
+      "job_id": "400-old-20260901",
+      "owner_lane": "b400-builder",
+      "role": "worker",
+      "reason": "label-unknown",
+      "terminal_kind": "job.completed",
+      "terminal_at": "2026-09-01T01:00:00Z"
+    },
+    {
+      "machine": "node-a",
+      "pane_id": "w6:p3",
+      "tab_id": "w6:t3",
+      "agent_name": "consult-projects",
+      "status": "idle",
+      "job_id": "consult-projects-20260923d",
+      "owner_lane": "operator-desk",
+      "role": "worker",
+      "reason": "no-terminal-event"
+    }
+  ],
+  "nodes": [
+    {
+      "machine_id": "node-a",
+      "state": "connected",
+      "stale": false,
+      "received_at": "2026-09-23T13:00:00Z",
+      "generated_at": "2026-09-23T13:00:00Z",
+      "grace_seconds": 600,
+      "observed": true,
+      "jobs_readable": true,
+      "truncated": false,
+      "summary": {
+        "panes": 20,
+        "no_job": 6,
+        "candidate": 1,
+        "builder_task_gate": 2,
+        "held": 11
+      }
+    }
+  ]
+}
