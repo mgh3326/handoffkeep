@@ -1,4 +1,5 @@
 import { ageDays, isStale } from "./adapter";
+import { LIVE_TASK_STATES, liveAgeLabel, liveSectionLabel, taskLiveJobs, type LiveJob, type LiveResponse } from "../live";
 import { StateIcon } from "./StateIcon";
 import { stateLabel } from "./states";
 import type { ProtoTask } from "./types";
@@ -35,12 +36,75 @@ function Missing({ children }: { children: string }) {
   return <span className="qp-unknown">{children}</span>;
 }
 
+/** One hub job as a row chip: role · machine · pane · elapsed · last-event
+ * age. Every field renders or says 미상/미기록 — never blank, never 0. */
+function JobChip({ job, now }: { job: LiveJob; now: string }) {
+  const elapsed = liveAgeLabel(now, job.started_at);
+  const eventAge = liveAgeLabel(now, job.last_event_at);
+  const title = [`job ${job.job_id}`];
+  if (job.owner_lane) {
+    title.push(`owner ${job.owner_lane}`);
+  }
+  if (job.last_event_kind) {
+    title.push(`last ${job.last_event_kind}`);
+  }
+  return (
+    <span className="qp-livechip" title={title.join(" · ")}>
+      <span className="qp-livechip-role">{job.role && job.role !== "" ? job.role : "role 미상"}</span>
+      <span className="qp-livechip-machine">{job.machine === "" ? "머신 미상" : job.machine}</span>
+      {job.pane ? <span className="qp-livechip-pane">{job.pane}</span> : null}
+      <span className="qp-livechip-age">{elapsed === null ? "경과 미상" : `${elapsed}째`}</span>
+      <span className="qp-livechip-evt">{eventAge === null ? "이벤트 미상" : `evt ${eventAge} 전`}</span>
+    </span>
+  );
+}
+
+/** Live chips for claimed · in_progress · verifying rows (#598): the task's
+ * own refs.job_id job plus one-hop owner_lane children (tester/worker).
+ * Failure modes stay explicit — a hub outage is "잡 조회 불가", a task with
+ * no recorded job is "잡 ID 미기록", a recorded job missing from the hub is
+ * "활성 잡 없음". Synthetic datasets (live === undefined) show nothing. */
+export function LiveChips({ task, now, live }: { task: ProtoTask; now: string; live: LiveResponse | undefined }) {
+  if (live === undefined || !LIVE_TASK_STATES.has(task.state)) {
+    return null;
+  }
+  if (live.jobs.fetched_at === "") {
+    return <span className="qp-livechip qp-livechip-warn">잡 조회 불가 · {liveSectionLabel(live.jobs.status)}</span>;
+  }
+  const { recorded, primary, children } = taskLiveJobs(live, task.id);
+  if (!recorded) {
+    return <span className="qp-livechip qp-livechip-warn">잡 ID 미기록</span>;
+  }
+  if (primary === null) {
+    return <span className="qp-livechip qp-livechip-warn">활성 잡 없음</span>;
+  }
+  return (
+    <span className="qp-livechips">
+      <JobChip job={primary} now={now} />
+      {children.map((job) => (
+        <JobChip key={job.job_id} job={job} now={now} />
+      ))}
+    </span>
+  );
+}
+
+/** The hub job standing in for an unrecorded claimant: the task's primary
+ * job owner_lane, exact-matched — never a guessed string. */
+function liveClaimant(task: ProtoTask, live: LiveResponse | undefined): string | null {
+  if (live === undefined || live.jobs.fetched_at === "" || task.claimant !== null) {
+    return null;
+  }
+  return taskLiveJobs(live, task.id).primary?.owner_lane ?? null;
+}
+
 type RowFieldsProps = {
   task: ProtoTask;
   now: string;
   /** Flat (ungrouped) lists have no group header naming the state, so the
    * row shows the state label next to the shape. */
   showStateLabel?: boolean;
+  /** /ui/api/live aggregation; absent for synthetic datasets. */
+  live?: LiveResponse;
 };
 
 /**
@@ -49,10 +113,11 @@ type RowFieldsProps = {
  * line-clamp (1 line at 40px, 2 lines at 56px), never cut in JS, so the DOM,
  * copy/paste and assistive tech keep every character.
  */
-export function RowFields({ task, now, showStateLabel = false }: RowFieldsProps) {
+export function RowFields({ task, now, showStateLabel = false, live }: RowFieldsProps) {
   const created = ageLabel(now, task.created_at);
   const entered = ageLabel(now, task.state_entered_at);
   const stale = isStale(task, now);
+  const claimantFill = liveClaimant(task, live);
   return (
     <>
       <span className="qp-cell qp-state-icon" title={stateLabel(task.state)}>
@@ -69,11 +134,18 @@ export function RowFields({ task, now, showStateLabel = false }: RowFieldsProps)
             /
           </span>
           {task.claimant === null ? (
-            <Missing>인수자 미상</Missing>
+            claimantFill === null ? (
+              <Missing>인수자 미상</Missing>
+            ) : (
+              <span className="qp-claimant qp-claimant-live" title="허브 잡의 owner_lane — 태스크에 기록된 인수자 없음">
+                {claimantFill}
+              </span>
+            )
           ) : (
             <span className="qp-claimant">{task.claimant}</span>
           )}
         </span>
+        <LiveChips task={task} now={now} live={live} />
         <span className="qp-meta-age">
           <span className="qp-age" title="생성(created_at) 기준">
             {created === null ? <Missing>생성 미상</Missing> : `생성 ${created} 전`}
@@ -98,8 +170,9 @@ export function RowFields({ task, now, showStateLabel = false }: RowFieldsProps)
  * already names the state and the second age column adds nothing a card
  * needs, so both stay out; what remains is identity: pri · id · age · stale ·
  * title (CSS-clamped, full text in the DOM) · lane/claimant. */
-export function CardFields({ task, now }: { task: ProtoTask; now: string }) {
+export function CardFields({ task, now, live }: { task: ProtoTask; now: string; live?: LiveResponse }) {
   const stale = isStale(task, now);
+  const claimantFill = liveClaimant(task, live);
   return (
     <>
       <span className="qp-cell qp-pri">p{task.priority}</span>
@@ -115,8 +188,18 @@ export function CardFields({ task, now }: { task: ProtoTask; now: string }) {
         </span>
       ) : null}
       <span className="qp-cell qp-title">{task.title}</span>
+      <LiveChips task={task} now={now} live={live} />
       <span className="qp-cell qp-lane">
-        {task.lane}/{task.claimant === null ? <span className="qp-unknown">unknown</span> : task.claimant}
+        {task.lane}/
+        {task.claimant === null ? (
+          claimantFill === null ? (
+            <span className="qp-unknown">unknown</span>
+          ) : (
+            claimantFill
+          )
+        ) : (
+          task.claimant
+        )}
       </span>
     </>
   );

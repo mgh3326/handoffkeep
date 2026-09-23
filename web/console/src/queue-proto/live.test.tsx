@@ -72,6 +72,18 @@ function jsonResponse(body: unknown): Response {
   return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
 }
 
+// Minimal /ui/api/live payload for fetch stubs — the real shape lives in
+// internal/ui/live.go; the dataset only needs a parseable envelope.
+function livePayload() {
+  return {
+    generated_at: "2026-09-21T09:00:00+09:00",
+    jobs: { status: "ok", fetched_at: "2026-09-21T09:00:00+09:00", items: [] },
+    nodes: { status: "ok", fetched_at: "2026-09-21T09:00:00+09:00", items: [] },
+    links: [],
+    mismatch: { basis: "current", tasks_without_job: [], jobs_without_task: [] },
+  };
+}
+
 describe("boardTaskToProto — field mapping", () => {
   it("maps direct fields and collapses claimed_by to claimant ?? null", () => {
     const proto = boardTaskToProto(mkBoardTask({ id: 9, claimed_by: "wk-1", refs: { pr: "https://github.com/x/y/pull/1" } }));
@@ -117,6 +129,9 @@ describe("fetchLiveDataset", () => {
   it("walks the after_id cursor to the end and keeps the server snapshot time", async () => {
     const fetchSpy = vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
+      if (url.includes("/ui/api/live")) {
+        return Promise.resolve(jsonResponse(livePayload()));
+      }
       if (url.includes("after_id=7")) {
         return Promise.resolve(jsonResponse(page([mkBoardTask({ id: 8 })], false)));
       }
@@ -128,9 +143,11 @@ describe("fetchLiveDataset", () => {
     expect(ds.source).toBe("live");
     expect(ds.generatedAt).toBe("2026-09-21T09:00:00+09:00");
     expect(ds.completeness).toBe("complete");
-    expect(fetchSpy).toHaveBeenCalledTimes(2);
-    expect(String(fetchSpy.mock.calls[0][0])).toContain("/ui/api/board/tasks");
-    expect(String(fetchSpy.mock.calls[1][0])).toContain("after_id=7");
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
+    const called = fetchSpy.mock.calls.map((c) => String(c[0]));
+    expect(called.filter((u) => u.includes("/ui/api/board/tasks"))).toHaveLength(2);
+    expect(called.some((u) => u.includes("after_id=7"))).toBe(true);
+    expect(called.some((u) => u.includes("/ui/api/live"))).toBe(true);
   });
 
   it("marks a client-capped walk partial and propagates fetch errors", async () => {
@@ -146,10 +163,14 @@ describe("fetchLiveDataset", () => {
     // Server violation: page 2 reports the same next_after_id it was asked
     // after. Without the guard this loop re-fetches the identical page until
     // the 5000-task cap — 10 wasted requests on the only data path /ui/queue has.
-    const fetchSpy = vi.fn(() => Promise.resolve(jsonResponse(page([mkBoardTask({ id: 7 })], true, 7))));
+    const fetchSpy = vi.fn((input: RequestInfo | URL) =>
+      String(input).includes("/ui/api/live")
+        ? Promise.resolve(jsonResponse(livePayload()))
+        : Promise.resolve(jsonResponse(page([mkBoardTask({ id: 7 })], true, 7))),
+    );
     vi.stubGlobal("fetch", fetchSpy);
     await expect(fetchLiveDataset()).rejects.toThrow("non-advancing board cursor");
-    expect(fetchSpy).toHaveBeenCalledTimes(2); // stops at the first repeat
+    expect(fetchSpy).toHaveBeenCalledTimes(3); // two board pages + one live
   });
 
   it("carries the server's states enumeration — KNOWN_STATES is fallback only", async () => {

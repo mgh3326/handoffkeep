@@ -32,6 +32,14 @@ export default defineConfig({
         entryFileNames: "[name].js",
         chunkFileNames: "shared-[name].js",
         assetFileNames: "[name][extname]",
+        // Pin the react/react-dom runtime to a fixed chunk name — the served
+        // asset contract (and its cache tests) reference shared-client.js,
+        // and a build-derived name would shift whenever module sharing moves.
+        manualChunks(id) {
+          if (/node_modules\/(react|react-dom|scheduler)\//.test(id)) {
+            return "client";
+          }
+        },
       },
     },
   },

@@ -36,7 +36,7 @@ export function BoardView({ dataset, columns, density, selectedId, onOpen }: Boa
                   }
                 }}
               >
-                <CardFields task={task} now={dataset.generatedAt} />
+                <CardFields task={task} now={dataset.generatedAt} live={dataset.live} />
               </button>
             )}
           />
