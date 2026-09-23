@@ -92,6 +92,7 @@ const REASON_LABELS: Record<string, string> = {
   "tasks-truncated": "태스크 목록 잘림",
   "node-not-connected": "노드 끊김",
   "node-unobserved": "노드 관측 불가",
+  "report-shape": "보고 형식 불명",
 };
 
 export function reapReasonLabel(reason: string | undefined): string {

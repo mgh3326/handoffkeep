@@ -66,6 +66,14 @@ describe("ReapPanel (#603 정리 후보, report only)", () => {
     await waitFor(() => expect(second.container.textContent).toContain("정리 후보 조회 불가"));
   });
 
+  it("badges every node that is not connected, even when stale is false", async () => {
+    const disconnected = { ...payload, nodes: payload.nodes.map((node) => ({ ...node, state: "disconnected", stale: false })) };
+    stubFetch(disconnected);
+    const { container } = render(<ReapPanel />);
+    await waitFor(() => expect(container.textContent).toContain("t601-verify"));
+    expect([...container.querySelectorAll(".badge.stale")].map((badge) => badge.textContent)).toContain("disconnected");
+  });
+
   it("helpers", () => {
     expect(isReapResponse(payload)).toBe(true);
     expect(isReapResponse({ status: "ok" })).toBe(false);

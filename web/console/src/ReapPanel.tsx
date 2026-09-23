@@ -65,7 +65,7 @@ function ReapBody({ data }: { data: ReapResponse }) {
         {data.nodes.map((node) => (
           <span key={node.machine_id}>
             {node.machine_id}{" "}
-            {node.stale ? <span className="badge stale">{node.state || "stale"}</span> : null}
+            {node.stale || (node.state !== "" && node.state !== "connected") ? <span className="badge stale">{node.state || "stale"}</span> : null}
             {!node.observed || !node.jobs_readable ? <span className="badge stale">관측 불가</span> : null}
             {node.truncated ? <span className="badge">잘림</span> : null}
             <span className="muted">

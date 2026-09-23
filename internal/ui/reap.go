@@ -22,6 +22,10 @@ import (
 // equality), that task is merged or dropped, and it has been so for longer
 // than the node's grace. Every other outcome is held with a reason.
 
+// reapReportSchema is the panewire session.reap.report schema this join
+// understands; any other value holds every row.
+const reapReportSchema = 1
+
 const (
 	reapClassCandidate       = "candidate"
 	reapClassBuilderTaskGate = "builder-task-gate"
@@ -152,12 +156,18 @@ func projectReap(nodes []hubReapNode, tasks []store.Task, tasksTruncated bool, n
 				class, row.Reason = reapClassHeld, "node-not-connected"
 			case !report.Observed || !report.JobsReadable:
 				class, row.Reason = reapClassHeld, "node-unobserved"
+			case report.Schema != reapReportSchema:
+				// A future schema may change what a class means; trust none.
+				class, row.Reason = reapClassHeld, "report-shape"
 			case class == reapClassCandidate:
 				if source.Role != "worker" || source.TerminalKind == "" {
 					class, row.Reason = reapClassHeld, "candidate-shape"
 				} else {
 					row.Basis = "job-terminal"
 				}
+			case report.GraceSeconds <= 0:
+				// Without a positive grace the builder wait would be skipped.
+				class, row.Reason = reapClassHeld, "report-shape"
 			default:
 				class, row.Reason = reapBuilderTaskGate(&row, byJob[source.JobID], tasksTruncated, grace, now)
 			}

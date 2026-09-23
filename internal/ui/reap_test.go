@@ -164,3 +164,23 @@ func TestProjectReapOnlyLowers(t *testing.T) {
 		t.Fatalf("unknown class: candidates=%+v", candidates)
 	}
 }
+
+// A report whose schema this join does not know, or whose grace is not
+// positive, cannot vouch for anything: no candidates, reason report-shape.
+func TestProjectReapReportShape(t *testing.T) {
+	merged := []store.Task{reapTask(599, reapMergedBuilderJob, "merged", reapNow.Add(-time.Hour))}
+	future := reapFixtureNodes(t)
+	future[0].Report.Schema = 2
+	candidates, held, _ := projectReap(future, merged, false, reapNow)
+	if len(candidates) != 0 || reapByPane(held)["w2:p25"].Reason != "report-shape" || reapByPane(held)["w2:p32"].Reason != "report-shape" {
+		t.Fatalf("schema 2: candidates=%+v", candidates)
+	}
+	for _, grace := range []int64{0, -600} {
+		nodes := reapFixtureNodes(t)
+		nodes[0].Report.GraceSeconds = grace
+		candidates, held, _ := projectReap(nodes, merged, false, reapNow)
+		if _, promoted := reapByPane(candidates)["w2:p32"]; promoted || reapByPane(held)["w2:p32"].Reason != "report-shape" {
+			t.Fatalf("grace %d promoted the builder: %+v", grace, candidates)
+		}
+	}
+}
