@@ -86,6 +86,14 @@ func (h *Handler) serveAPI(w http.ResponseWriter, r *http.Request, identity cfac
 			return
 		}
 		h.boardDoc(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/ui/api/bench/catalog":
+		// The grade catalog is the same operator-only reading material as
+		// /ui/api/board/doc — provenance fields are not for service tokens.
+		if identity.ServiceName != "" {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		h.benchCatalog(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/ui/api/deploy-pending":
 		// Deploy status is assembled from deploy-record documents and task
 		// events — the same operator-only reading material as /ui/api/board/doc.

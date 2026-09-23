@@ -1,0 +1,31 @@
+{{define "grades_page"}}
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Grades · Fleet console</title>
+  <link rel="stylesheet" href="{{assetURL "/ui/static/console/tokens.css"}}">
+  <link rel="stylesheet" href="{{assetURL "/ui/static/console/grades.css"}}">
+</head>
+<body>
+  <div id="grades-root">
+    <!-- Replaced by the grades app on mount (PageShell brings its own main
+         landmark and sidebar nav), so the page never shows two navigation
+         blocks. Without JavaScript this fallback remains the way out. -->
+    <main>
+      <h1>급표 — Grades</h1>
+      <nav aria-label="Fleet console pages">
+        <a href="/ui/timeline">Timeline</a>
+        <a href="/ui/queue">Queue</a>
+        <a href="/ui/decisions">Decisions</a>
+        <a href="/ui/compose">Compose</a>
+        <a href="/ui/fleet">Fleet</a>
+        <a href="/ui/grades">Grades</a>
+      </nav>
+    </main>
+  </div>
+  <script type="module" src="{{assetURL "/ui/static/console/grades.js"}}"></script>
+</body>
+</html>
+{{end}}
