@@ -75,9 +75,13 @@ export type Dataset = {
   states: string[];
   tasks: ProtoTask[];
   enrichment: Record<number, Enrichment>;
+  /** /ui/api/live aggregation — hub jobs, machine nodes, task↔job links and
+   * mismatches. Absent for synthetic datasets and for the production build's
+   * older server; section statuses inside carry hub failures explicitly. */
+  live?: import("../live").LiveResponse;
 };
 
-export type ProtoView = "operator" | "active" | "backlog" | "all";
+export type ProtoView = "operator" | "live" | "active" | "backlog" | "all";
 export type Layout = "list" | "board";
 export type Density = "compact" | "comfortable";
 /** "state" = collapsible groups per task state (product default). "area" is

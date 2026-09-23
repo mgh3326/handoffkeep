@@ -96,8 +96,9 @@ func consoleContractsError(tree map[string][]byte) error {
 		}
 	}
 	fleet := string(tree["fleet.js"])
-	if !strings.Contains(fleet, "/ui/api/fleet") {
-		return errors.New("fleet.js lost the /ui/api/fleet contract")
+	// #598: the fleet page reads the live aggregation BFF, not /ui/api/fleet.
+	if !strings.Contains(fleet, "/ui/api/live") {
+		return errors.New("fleet.js lost the /ui/api/live contract")
 	}
 	board := string(tree["board.js"])
 	// /ui/queue's bundle is the queue app: it must carry the board BFF list

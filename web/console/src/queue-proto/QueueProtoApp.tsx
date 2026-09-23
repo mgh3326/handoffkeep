@@ -8,6 +8,7 @@ import type { FetchDoc } from "./DocInline";
 import type { CommentsClient } from "./TaskComments";
 import { ListView } from "./ListView";
 import { BoardView } from "./BoardView";
+import { LiveStrip } from "./LiveStrip";
 import { Toolbar } from "./Toolbar";
 import { GlobalSearch } from "./GlobalSearch";
 import type { SearchFn } from "./search";
@@ -22,7 +23,7 @@ export function defaultLayout(view: ProtoView): "list" | "board" {
 }
 
 function parseView(value: string | null): ProtoView | null {
-  return value === "operator" || value === "active" || value === "backlog" || value === "all" ? value : null;
+  return value === "operator" || value === "live" || value === "active" || value === "backlog" || value === "all" ? value : null;
 }
 
 function applyNavParams(state: ProtoState, params: URLSearchParams): ProtoState {
@@ -452,6 +453,7 @@ export function QueueProtoApp({ datasets, initialSet, storage, diag = false, per
               저장한 뷰 형식이 달라 기본값으로 되돌렸습니다 (saved view reset — version mismatch)
             </p>
           ) : null}
+          {dataset.live !== undefined ? <LiveStrip live={dataset.live} /> : null}
           <Toolbar
             state={state}
             lanes={lanes}

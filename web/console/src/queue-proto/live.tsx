@@ -5,7 +5,8 @@
 // per open drawer via BoardDetail, never per list row.
 
 import { useEffect, useRef, useState } from "react";
-import { fetchBoardTasks, fetchTaskDetail } from "../board/api";
+import { fetchBoardTasks, fetchLive, fetchTaskDetail } from "../board/api";
+import { liveRequestFailed } from "../live";
 import { boardTaskToProto } from "./boardtask";
 import { QueueProtoApp } from "./QueueProtoApp";
 import { liveCommentsClient } from "./TaskComments";
@@ -15,9 +16,11 @@ export { boardTaskToProto } from "./boardtask";
 
 /** Fetches the whole queue via the board BFF cursor walk and packages it as a
  * live Dataset. generatedAt is the server snapshot timestamp — the honest
- * "now" for staleness, not the client's clock. */
+ * "now" for staleness, not the client's clock. The /ui/api/live aggregation
+ * rides along; a failed live request lands as explicit failed sections, never
+ * as silently missing chips. */
 export async function fetchLiveDataset(): Promise<Dataset> {
-  const board = await fetchBoardTasks();
+  const [board, live] = await Promise.all([fetchBoardTasks(), fetchLive().catch(() => liveRequestFailed())]);
   return {
     key: "live",
     label: "live queue backlog",
@@ -32,6 +35,7 @@ export async function fetchLiveDataset(): Promise<Dataset> {
     states: Array.isArray(board.states) && board.states.length > 0 ? [...board.states] : [...KNOWN_STATES],
     tasks: board.tasks.map(boardTaskToProto),
     enrichment: {},
+    live,
   };
 }
 

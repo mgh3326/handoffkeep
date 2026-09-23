@@ -127,8 +127,9 @@ func TestFleetBundleNoAbsoluteURLs(t *testing.T) {
 func TestFleetBundleFetchOnlyUIAPI(t *testing.T) {
 	artifacts := readConsoleArtifacts(t)
 	js := artifacts["fleet.js"]
-	if !strings.Contains(js, "/ui/api/fleet") {
-		t.Fatal("bundle does not contain /ui/api/fleet")
+	// #598: the fleet page reads the live aggregation BFF, not /ui/api/fleet.
+	if !strings.Contains(js, "/ui/api/live") {
+		t.Fatal("bundle does not contain /ui/api/live")
 	}
 	if strings.Contains(js, "/v1/nodes") || strings.Contains(js, "/v1/jobs") {
 		t.Fatal("bundle contains a hub path")

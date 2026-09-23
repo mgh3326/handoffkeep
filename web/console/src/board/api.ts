@@ -1,4 +1,5 @@
 import type { BoardComment, BoardCommentsResponse, BoardDetail, BoardDoc, BoardTask, BoardTasksResponse, PolicyResponse } from "./types";
+import type { LiveResponse } from "../live";
 
 const PAGE_LIMIT = 500;
 const MAX_TASKS = 5000;
@@ -65,6 +66,12 @@ export async function fetchBoardTasks(): Promise<BoardData> {
 
 export function fetchTaskDetail(id: number): Promise<BoardDetail> {
   return getJSON<BoardDetail>(`/ui/api/board/tasks/${id}`);
+}
+
+/** The live jobs/machine aggregation (#598). Read-only; section statuses
+ * inside the payload carry hub failures explicitly. */
+export function fetchLive(): Promise<LiveResponse> {
+  return getJSON<LiveResponse>("/ui/api/live");
 }
 
 /** Reads one hk document by key for the task overview. The key is the part of

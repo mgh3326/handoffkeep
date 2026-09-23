@@ -1211,3 +1211,41 @@ summary {
     margin-left: 0;
   }
 }
+
+/* live hub-job chips on queue rows (#598) — read-only markers, not buttons */
+.qp-livechips,
+.qp-livechip {
+  display: inline-flex;
+  gap: var(--hk-space-half);
+}
+.qp-livechips {
+  min-width: 0;
+}
+.qp-livechip {
+  align-items: baseline;
+  max-width: 22rem;
+  padding: 0 var(--hk-space-1);
+  border: 1px solid var(--hk-border-subtle);
+  border-radius: var(--hk-radius-md);
+  font-size: var(--hk-font-meta);
+  color: var(--hk-text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+}
+.qp-livechip-role,
+.qp-claimant-live {
+  color: var(--hk-accent);
+}
+.qp-livechip-warn {
+  border-color: var(--hk-warning);
+  color: var(--hk-warning);
+}
+.qp-livestrip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--hk-space-2);
+  padding: var(--hk-space-1) var(--hk-space-2);
+  border-bottom: 1px solid var(--hk-border-subtle);
+  font-size: var(--hk-font-meta);
+  color: var(--hk-text-muted);
+}
