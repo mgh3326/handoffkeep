@@ -197,7 +197,7 @@ export function ListView({ dataset, visible, grouping, collapsedGroups, density,
                 }
               }}
             >
-              <RowFields task={task} now={dataset.generatedAt} showStateLabel={grouping === "none"} />
+              <RowFields task={task} now={dataset.generatedAt} showStateLabel={grouping === "none"} live={dataset.live} />
             </a>
           );
         }}

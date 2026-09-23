@@ -8,6 +8,9 @@ export const EMPTY_FILTERS: FilterState = { query: "", lane: "", kind: "", hidde
 
 export const VIEW_STATES: Record<ProtoView, string[]> = {
   operator: [...KNOWN_STATES],
+  // "live" is the currently-working set — the states that show live hub-job
+  // chips (claimed · in_progress · verifying).
+  live: ["claimed", "in_progress", "verifying"],
   active: ["claimed", "in_progress", "verifying", "join", "needs_decision"],
   backlog: ["backlog", "hold"],
   all: [...KNOWN_STATES],
@@ -82,7 +85,7 @@ export function applyView(
 /** Per-view counts under the current filters — the rail shows these, so the
  * number next to a view name is exactly the row set that view would render. */
 export function countByView(tasks: ProtoTask[], filters: FilterState, states: readonly string[] = KNOWN_STATES): Record<ProtoView, number> {
-  const counts: Record<ProtoView, number> = { operator: 0, active: 0, backlog: 0, all: 0 };
+  const counts: Record<ProtoView, number> = { operator: 0, live: 0, active: 0, backlog: 0, all: 0 };
   for (const view of Object.keys(counts) as ProtoView[]) {
     const inView = viewPredicate(view, states);
     counts[view] = tasks.filter((task) => inView(task) && matchesFilters(task, filters)).length;

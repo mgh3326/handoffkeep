@@ -33,6 +33,10 @@ type hubProxy struct {
 	lastResult  fleetResponse
 	fleetWait   chan struct{}
 	lastSuccess *fleetResponse
+
+	liveMu     sync.Mutex
+	liveJobsC  liveJobsCache
+	liveNodesC liveNodesCache
 }
 
 type hubStatusError int
@@ -271,6 +275,7 @@ type hubNode struct {
 	AcceptingOverride  string              `json:"accepting_override"`
 	AlertClass         string              `json:"alert_class"`
 	LastPingMS         *int64              `json:"last_ping_ms"`
+	Load               *hubNodeLoad        `json:"load"`
 	Memory             *hubMemory          `json:"memory"`
 	RemoteMeta         json.RawMessage     `json:"remote_meta"`
 	SessionSnapshot    *hubSessionSnapshot `json:"session_snapshot"`
@@ -291,6 +296,8 @@ type hubSession struct {
 	PaneID           string `json:"pane_id"`
 	WorkspaceID      string `json:"workspace_id"`
 	Label            string `json:"label"`
+	AgentName        string `json:"agent_name,omitempty"`
+	DisplayLabel     string `json:"display_label,omitempty"`
 	Status           string `json:"status"`
 	InteractiveReady *bool  `json:"interactive_ready,omitempty"`
 	Revision         int64  `json:"revision"`
@@ -305,13 +312,25 @@ type hubMemory struct {
 	Source       string   `json:"source"`
 }
 
+// hubNodeLoad mirrors panewire hub.go HubNodeLoad: every field is a pointer so
+// an unmeasured value decodes as nil rather than a fabricated zero.
+type hubNodeLoad struct {
+	Load1  *float64 `json:"load1"`
+	Load5  *float64 `json:"load5"`
+	Load15 *float64 `json:"load15"`
+	NCPU   *int     `json:"ncpu"`
+}
+
 type hubJob struct {
-	Machine   string `json:"machine"`
-	JobID     string `json:"job_id"`
-	OwnerLane string `json:"owner_lane"`
-	Pane      string `json:"pane"`
-	Tier      string `json:"tier"`
-	StartedAt string `json:"started_at"`
+	Machine       string `json:"machine"`
+	JobID         string `json:"job_id"`
+	OwnerLane     string `json:"owner_lane"`
+	Pane          string `json:"pane"`
+	Tier          string `json:"tier"`
+	Role          string `json:"role"`
+	StartedAt     string `json:"started_at"`
+	LastEventKind string `json:"last_event_kind"`
+	LastEventAt   string `json:"last_event_at"`
 }
 
 func nodeViews(nodes []hubNode) []hubNodeView {

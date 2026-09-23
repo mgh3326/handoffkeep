@@ -47,6 +47,14 @@ export const NAMED_VIEWS: Record<string, SavedView> = {
     filters: EMPTY_FILTERS,
     hiddenColumns: [],
   },
+  "live-now": {
+    view: "live",
+    layout: "list",
+    grouping: "state",
+    density: "compact",
+    filters: EMPTY_FILTERS,
+    hiddenColumns: [],
+  },
   "backlog-scan": {
     view: "backlog",
     layout: "list",
@@ -107,7 +115,7 @@ function sane(saved: unknown): saved is SavedView {
   }
   const s = saved as SavedView;
   return (
-    ["operator", "active", "backlog", "all"].includes(s.view) &&
+    ["operator", "live", "active", "backlog", "all"].includes(s.view) &&
     ["list", "board"].includes(s.layout) &&
     saneFilters(s.filters) &&
     (s.hiddenColumns === undefined || isStringArray(s.hiddenColumns))

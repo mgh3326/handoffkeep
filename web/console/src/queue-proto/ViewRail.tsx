@@ -5,6 +5,7 @@ import type { Dataset, Density, ProtoView } from "./types";
 
 export const VIEW_LABELS: { view: ProtoView; label: string }[] = [
   { view: "operator", label: "Operator" },
+  { view: "live", label: "Live" },
   { view: "active", label: "Active" },
   { view: "backlog", label: "Backlog" },
   { view: "all", label: "All" },
