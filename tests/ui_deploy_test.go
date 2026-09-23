@@ -107,6 +107,19 @@ func seedMergedEvent(t *testing.T, db *pgx.Conn, s *store.Store, title, pr strin
 	return task.ID
 }
 
+// seedMergedEventsBulk inserts n merged events on one task in a single
+// statement — used to fill the handler's scan window without n store calls.
+func seedMergedEventsBulk(t *testing.T, db *pgx.Conn, s *store.Store, n int, at time.Time) {
+	t.Helper()
+	task := createUITask(t, s, uiLane(t, "deploy"), "bulk merged")
+	if _, err := db.Exec(t.Context(),
+		`INSERT INTO task_events(task_id,"from","to","by",note,refs,at)
+		 SELECT $1,'join','merged','deploy-test','','{}'::jsonb,$2 FROM generate_series(1,$3)`,
+		task.ID, at, n); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func getDeployPending(t *testing.T, h *httptest.Server, assertion string) map[string]any {
 	t.Helper()
 	response := uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/api/deploy-pending", assertion, "")
@@ -325,6 +338,58 @@ func TestUIDeployPendingDocsCapped(t *testing.T) {
 	pw := serviceView(t, response, "panewire-hub")
 	if pw["docs_capped"] != true || pw["record_count"] != float64(200) {
 		t.Fatalf("docs_capped=%v record_count=%v", pw["docs_capped"], pw["record_count"])
+	}
+}
+
+// Regression (tester NICE): the merged-events scan fetches limit+1 rows, so a
+// fleet sitting exactly at the bound is NOT flagged truncated — only a row
+// left unscanned is. task_events is append-only, so the exact-limit case can
+// only run while the shared DB is below the bound; the truncation case
+// derives its boundary from the oldest scanned row so it holds however many
+// events earlier runs accumulated.
+func TestUIDeployPendingEventsCappedExactLimit(t *testing.T) {
+	s := uiStore(t)
+	db := deployDB(t)
+	wipeDeployDocs(t, db)
+	fixture := newUIJWTFixture(t)
+	h := newUITestServer(t, s, fixture, "", "", 0)
+	defer h.Close()
+	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
+
+	const limit = 1000 // must equal deployEventsLimit in internal/ui/deploys.go
+	var total int
+	if err := db.QueryRow(t.Context(), `SELECT count(*) FROM task_events WHERE "to"='merged'`).Scan(&total); err != nil {
+		t.Fatal(err)
+	}
+
+	if total < limit {
+		// Fill to exactly the bound: nothing is left unscanned, so no service
+		// may report events_capped regardless of where its boundary sits.
+		seedMergedEventsBulk(t, db, s, limit-total, time.Now())
+		seedDeployDoc(t, s, "deploy/handoffkeep/20260923T050000Z",
+			deployFixtureBody(t, "handoffkeep", "success", "dddddddddddddddddddddddddddddddddddddddd", time.Now().Add(-time.Hour).UTC().Truncate(time.Second).Format(time.RFC3339), nil))
+		response := getDeployPending(t, h, assertion)
+		if capped, ok := response["events_capped"].(bool); ok && capped {
+			t.Fatalf("exactly %d merged events — nothing was truncated but events_capped is set", limit)
+		}
+		wipeDeployDocs(t, db)
+	} else {
+		t.Logf("exact-limit case skipped: %d merged events already in shared DB", total)
+	}
+
+	// A row beyond the bound is real truncation: when the oldest scanned
+	// event is still after a service's boundary, the flag must fire.
+	seedMergedEventsBulk(t, db, s, 1, time.Now())
+	var oldest time.Time
+	if err := db.QueryRow(t.Context(),
+		`SELECT at FROM task_events WHERE "to"='merged' ORDER BY at DESC, id DESC OFFSET $1 LIMIT 1`, limit-1).Scan(&oldest); err != nil {
+		t.Fatal(err)
+	}
+	seedDeployDoc(t, s, "deploy/handoffkeep/20260923T060000Z",
+		deployFixtureBody(t, "handoffkeep", "success", "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", oldest.Add(-time.Second).UTC().Format(time.RFC3339), nil))
+	response := getDeployPending(t, h, assertion)
+	if response["events_capped"] != true {
+		t.Fatalf("scan truncated and oldest scanned event is post-boundary — events_capped must be set: %v", response)
 	}
 }
 

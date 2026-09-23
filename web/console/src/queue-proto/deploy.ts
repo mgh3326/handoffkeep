@@ -43,20 +43,59 @@ export type DeployPendingResponse = {
   events_capped?: boolean;
 };
 
-const isRecordView = (v: unknown): v is DeployRecordView =>
-  typeof v === "object" && v !== null &&
-  typeof (v as DeployRecordView).record_key === "string" &&
-  typeof (v as DeployRecordView).result === "string";
+// Every field the panel dereferences is checked, including nullable ones —
+// a record missing failed_step must not pass and render "step undefined"
+// instead of failing loudly.
+const isRecordView = (v: unknown): v is DeployRecordView => {
+  if (typeof v !== "object" || v === null) {
+    return false;
+  }
+  const r = v as DeployRecordView;
+  return (
+    typeof r.record_key === "string" &&
+    typeof r.result === "string" &&
+    (r.deployed_ref === null || typeof r.deployed_ref === "string") &&
+    (r.deployed_at === null || typeof r.deployed_at === "string") &&
+    (r.failed_step === null || typeof r.failed_step === "number") &&
+    typeof r.recorded_at === "string" &&
+    typeof r.source === "string" &&
+    (r.serving_maybe_changed === undefined || typeof r.serving_maybe_changed === "boolean")
+  );
+};
 
-const isServiceView = (v: unknown): v is DeployServiceView =>
-  typeof v === "object" && v !== null &&
-  typeof (v as DeployServiceView).service === "string" &&
-  typeof (v as DeployServiceView).repo === "string" &&
-  typeof (v as DeployServiceView).record_count === "number" &&
-  typeof (v as DeployServiceView).merged_boundary === "string" &&
-  Array.isArray((v as DeployServiceView).merged_since) &&
-  ((v as DeployServiceView).current === null || isRecordView((v as DeployServiceView).current)) &&
-  ((v as DeployServiceView).latest === undefined || isRecordView((v as DeployServiceView).latest));
+const isMergedTask = (v: unknown): v is DeployMergedTask => {
+  if (typeof v !== "object" || v === null) {
+    return false;
+  }
+  const t = v as DeployMergedTask;
+  return (
+    typeof t.task_id === "number" &&
+    typeof t.title === "string" &&
+    typeof t.pr === "string" &&
+    typeof t.merged_at === "string"
+  );
+};
+
+const isServiceView = (v: unknown): v is DeployServiceView => {
+  if (typeof v !== "object" || v === null) {
+    return false;
+  }
+  const s = v as DeployServiceView;
+  return (
+    typeof s.service === "string" &&
+    typeof s.repo === "string" &&
+    typeof s.doc_url === "string" &&
+    (s.target === undefined || typeof s.target === "string") &&
+    typeof s.record_count === "number" &&
+    (s.invalid_count === undefined || typeof s.invalid_count === "number") &&
+    (s.docs_capped === undefined || typeof s.docs_capped === "boolean") &&
+    typeof s.merged_boundary === "string" &&
+    Array.isArray(s.merged_since) &&
+    s.merged_since.every(isMergedTask) &&
+    (s.current === null || isRecordView(s.current)) &&
+    (s.latest === undefined || isRecordView(s.latest))
+  );
+};
 
 /** A payload that only matches the outer `services` array is still malformed —
  * nested rows must carry the fields the panel dereferences, or the response is

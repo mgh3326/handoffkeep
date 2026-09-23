@@ -200,6 +200,53 @@ describe("DeployPanel", () => {
     );
     await waitFor(() => expect(screen.getByText(/불러오지 못했습니다/)).toBeTruthy());
   });
+
+  it("a merged_since row that is not a task is rejected, not crashed on (r2 probe)", async () => {
+    // merged_since:[null] passes Array.isArray but the row is dereferenced
+    // during render — the payload must fail validation wholesale.
+    const data = fixture();
+    (data.services[0] as unknown as Record<string, unknown>).merged_since = [null];
+    render(
+      <DeployPanel
+        fetchStatus={vi.fn(() => Promise.resolve(data as unknown as DeployPendingResponse))}
+        pollMs={600_000}
+      />,
+    );
+    await waitFor(() => expect(screen.getByText(/불러오지 못했습니다/)).toBeTruthy());
+    expect(document.querySelector("[data-deploy-state]")?.getAttribute("data-deploy-state")).toBe("error");
+  });
+
+  it("a record missing nullable fields is rejected, not half-rendered (r2 probe)", async () => {
+    // current:{record_key,result} satisfies a shallow record check but
+    // renders "step undefined" — every field the panel reads is validated.
+    const data = fixture();
+    (data.services[0] as unknown as Record<string, unknown>).current = {
+      record_key: "deploy/handoffkeep/20260923T050000Z",
+      result: "success",
+    };
+    render(
+      <DeployPanel
+        fetchStatus={vi.fn(() => Promise.resolve(data as unknown as DeployPendingResponse))}
+        pollMs={600_000}
+      />,
+    );
+    await waitFor(() => expect(screen.getByText(/불러오지 못했습니다/)).toBeTruthy());
+    expect(document.querySelector("[data-deploy-state]")?.getAttribute("data-deploy-state")).toBe("error");
+  });
+
+  it("under a capped scan, no in-window success reads 'unverified', not 'none'", async () => {
+    // docs_capped + current:null means an older success may exist beyond the
+    // scan window — the row must not assert "성공 배포 기록 없음".
+    const data = fixture();
+    const pw = data.services[2];
+    pw.record_count = 200;
+    pw.docs_capped = true;
+    render(<DeployPanel fetchStatus={fetcher(data)} pollMs={600_000} />);
+    await waitFor(() => expect(screen.getByText(/조회 범위 안에 성공 배포 기록이 없습니다/)).toBeTruthy());
+    const section = screen.getByLabelText("panewire-hub 배포");
+    expect(section.textContent).not.toContain("성공 배포 기록 없음");
+    expect(section.textContent).toContain("더 오래된 배포 기록이 있을 수 있습니다");
+  });
 });
 
 describe("deploy helpers", () => {

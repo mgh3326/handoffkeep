@@ -114,7 +114,13 @@ function MergedList({ svc }: { svc: DeployServiceView }) {
     return <p style={noteStyle}>배포 시각(deployed_at) 미기록 — 마지막 배포 이후 머지 목록의 기준이 없습니다.</p>;
   }
   if (svc.merged_boundary === "no_current") {
-    return <p style={noteStyle}>성공 배포 기록이 없어 마지막 배포 이후 머지 목록을 계산할 수 없습니다.</p>;
+    return (
+      <p style={noteStyle}>
+        {svc.docs_capped
+          ? "조회 범위 안에 성공 배포 기록이 없어 마지막 배포 이후 머지 목록을 계산할 수 없습니다."
+          : "성공 배포 기록이 없어 마지막 배포 이후 머지 목록을 계산할 수 없습니다."}
+      </p>
+    );
   }
   return (
     <div style={{ marginTop: "var(--hk-space-1)" }}>
@@ -149,7 +155,16 @@ function ServiceRow({ svc, now }: { svc: DeployServiceView; now: string }) {
       </div>
       {svc.current === null ? (
         <div style={recStyle} data-result="none">
-          <span className="muted">{svc.record_count === 0 ? "기록 없음" : "성공 배포 기록 없음"}</span>
+          {/* Under a capped scan, "no success" only holds inside the window —
+              an older success may exist beyond it, so say "unverified", not
+              "none". */}
+          <span className="muted">
+            {svc.record_count === 0
+              ? "기록 없음"
+              : svc.docs_capped
+                ? "조회 범위 안에 성공 배포 기록이 없습니다 — 상한 밖은 미확인"
+                : "성공 배포 기록 없음"}
+          </span>
         </div>
       ) : (
         <RecordLine label="현재 판" rec={svc.current} now={now} />

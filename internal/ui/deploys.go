@@ -157,7 +157,10 @@ type deployPendingResponse struct {
 }
 
 func (h *Handler) deployPending(w http.ResponseWriter, r *http.Request) {
-	events, err := h.store.ListMergedTaskEvents(r.Context(), deployEventsLimit)
+	// Fetch one row past the bound: "returned full" must mean an event was
+	// actually left unscanned. At exactly the bound nothing was omitted and
+	// no truncation warning is owed.
+	events, err := h.store.ListMergedTaskEvents(r.Context(), deployEventsLimit+1)
 	if err != nil {
 		http.Error(w, "fleet console unavailable", http.StatusInternalServerError)
 		return
@@ -167,7 +170,10 @@ func (h *Handler) deployPending(w http.ResponseWriter, r *http.Request) {
 		PRSource:    "refs.pr",
 		Services:    []deployServiceView{},
 	}
-	scanCapped := len(events) == deployEventsLimit
+	scanCapped := len(events) > deployEventsLimit
+	if scanCapped {
+		events = events[:deployEventsLimit]
+	}
 	for _, svc := range deployServices {
 		view, err := h.deployServiceView(r, svc.Name, svc.Repo, events)
 		if err != nil {
