@@ -334,6 +334,7 @@ describe("state-grouped list structure", () => {
       "/ui/queue",
       "/ui/decisions",
       "/ui/fleet",
+      "/ui/grades",
       "/ui/timeline",
       "/ui/compose",
     ]);
