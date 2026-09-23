@@ -18,6 +18,8 @@ All requests and responses use `Content-Type: application/json`.
 | PUT | `/v1/bench/reps` | Body `{"reps":[...]}`; 1–1000 rows, response `{"upserted":N}` |
 | GET | `/v1/bench/grades` | `{"grades":[...]}`; ordered by `profile` |
 | PUT | `/v1/bench/grades` | Body `{"grades":[...]}`; 1–1000 rows, response `{"upserted":N}` |
+| GET | `/v1/bench/catalog?pool=&include_retired=` | `{"catalog":[...]}`; ordered by `pool`, grade (`S+`→`C`), `profile`, effort rung |
+| PUT | `/v1/bench/catalog` | **Operator token only.** Body `{"catalog":[...]}`; 1–1000 rows, response `{"upserted":N}` |
 
 GET limits default to 1000 and are capped at 5000. Each PUT is one database
 transaction: a validation or storage error rejects the complete batch.
@@ -105,17 +107,86 @@ Grade rows have this shape:
 }
 ```
 
+## Catalog
+
+`bench_catalog` is the canonical (profile, effort)-keyed grade catalog; the
+legacy `bench_grades` table and its `/v1/bench/grades` routes are a
+compatibility projection over the catalog's profile-default (`effort=""`)
+rows. Both PUT paths mirror each other: a grades write upserts the catalog's
+default row, and a catalog default-row write upserts `bench_grades` (or
+deletes the legacy row when the catalog row is retired), so pre-catalog
+clients keep working during version skew.
+
+Catalog rows have this shape:
+
+```json
+{
+  "profile": "codex-sol",
+  "effort": "max",
+  "model_id": "gpt-5.6-sol",
+  "pool": "codex",
+  "grade": "S+",
+  "score": 67.0,
+  "gate": "default",
+  "gate_reason": null,
+  "benchmark_source": "AA-agent",
+  "benchmark_annotation": null,
+  "boundary_version": "2026-09-23",
+  "deviation_ref": "decision/2026-09-23/dispatch-...",
+  "decided_at": "2026-09-23T00:00:00Z",
+  "decided_by": "ops-review",
+  "retired_at": null
+}
+```
+
+- `profile` and `effort` form the row key. `effort=""` is the profile-default
+  row; known rungs are `low < medium < high < xhigh < max`. Unknown effort
+  strings are allowed but exempt from the monotonicity rule below.
+- `grade` uses the same closed ladder as grades. `gate` is one of `default`,
+  `escalation`, `consult_only`.
+- `score`, `gate_reason`, `benchmark_source`, `benchmark_annotation`, and
+  `retired_at` are nullable. `score` must be a finite 0–100.
+- Unlike the other PUTs, `decided_by` is **required caller-supplied
+  provenance** (who or which decision produced the row) — a missing or blank
+  value is a 400. The server does not overwrite it because the caller is
+  always the operator.
+- Validation: `deviation_ref` non-blank (as with grades); Sol profiles
+  (`codex-sol`, `kiro-sol` — the scopefuel `_SOL_PROFILES` set) accept only
+  `S+`; and within one profile the merged post-write state must be monotonic —
+  a higher known effort rung may not carry a worse grade. Violations roll back
+  the whole batch.
+- `GET /v1/bench/catalog` returns non-retired rows including `consult_only`.
+  `?include_retired=1` also returns retired rows. `?pool=<pool>` returns the
+  subscription ladder: that pool's non-retired, non-`consult_only` rows,
+  ordered grade-descending, then `profile`, then effort rung.
+- `PUT /v1/bench/catalog` requires the operator credential — the bearer token
+  whose auth-file client id is `operator` (`HANDOFFKEEP_TOKEN_operator`), the
+  same hardened-boundary convention as panewire #68's `HUB_TOKEN_operator`.
+  Other tokens get 403 `{"error":"operator_required"}`; deployments without
+  the entry fail closed.
+
+The `catalog` array in the PUT body is the JSON input format that
+`scopefuel bench push-catalog` consumes: one object per row with the fields
+above (`retired_at` may be an RFC 3339 timestamp to retire, otherwise null or
+omitted).
+
 ## Errors
 
 | Status | Body | Meaning |
 |---|---|---|
 | 401 | `{"error":"unauthorized"}` | Missing or unknown bearer token |
+| 403 | `{"error":"operator_required"}` | Catalog write without the operator token |
 | 400 | `{"error":"invalid_context"}` | Malformed body, invalid field, empty batch, or batch over 1000 |
 | 400 | `{"error":"deviation_ref_required"}` | Grade write has no usable deviation reference |
+| 400 | `{"error":"decided_by_required"}` | Catalog write has no usable `decided_by` |
+| 400 | `{"error":"bench_catalog_not_monotonic"}` | Catalog write would put a worse grade on a higher effort rung |
+| 400 | `{"error":"bench_catalog_sol_grade"}` | Sol profile graded other than `S+` |
 | 400 | `{"error":"secret_like_content","pattern":"<name>"}` | Secret guard rejected client text |
 | 404 | `{"error":"not_found"}` | Unknown path |
 
 Schema version 9 is intentional. Version 8 is reserved for another additive
 change, so this migration skips that number; schema-version rows are markers,
 and the harmless gap prevents either change from accidentally satisfying the
-other migration's gate.
+other migration's gate. Schema version 12 adds `bench_catalog` and backfills
+it from `bench_grades` with `ON CONFLICT DO NOTHING`; like v9 it is gated on
+its schema-version marker so a replay never disturbs catalog-only columns.

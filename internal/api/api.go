@@ -305,6 +305,16 @@ func (s Service) UpsertBenchGrades(ctx context.Context, client string, xs []stor
 	}
 	return s.Store.UpsertBenchGrades(ctx, xs)
 }
+func (s Service) ListBenchCatalog(ctx context.Context, pool string, includeRetired bool) ([]store.BenchCatalogEntry, error) {
+	return s.Store.ListBenchCatalog(ctx, pool, includeRetired)
+}
+
+// UpsertBenchCatalog deliberately does not overwrite DecidedBy with the
+// authenticated client: the field records which decision produced the row,
+// and the caller is always the operator anyway.
+func (s Service) UpsertBenchCatalog(ctx context.Context, xs []store.BenchCatalogEntry) (int, error) {
+	return s.Store.UpsertBenchCatalog(ctx, xs)
+}
 
 type Tokens map[string]string
 
@@ -393,6 +403,8 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("PUT /v1/bench/reps", s.benchRepsPut)
 	m.HandleFunc("GET /v1/bench/grades", s.benchGradesList)
 	m.HandleFunc("PUT /v1/bench/grades", s.benchGradesPut)
+	m.HandleFunc("GET /v1/bench/catalog", s.benchCatalogList)
+	m.HandleFunc("PUT /v1/bench/catalog", s.benchCatalogPut)
 	m.HandleFunc("PUT /v1/chat/questions/{id}", s.chatQuestionPut)
 	m.HandleFunc("POST /v1/chat/questions", s.chatQuestionPost)
 	m.HandleFunc("POST /v1/chat/questions/{id}/transition", s.chatQuestionTransition)
@@ -493,6 +505,15 @@ func appErr(w http.ResponseWriter, e error) {
 		return
 	case errors.Is(e, store.ErrDeviationRefRequired):
 		jsonOut(w, http.StatusBadRequest, map[string]string{"error": "deviation_ref_required"})
+		return
+	case errors.Is(e, store.ErrDecidedByRequired):
+		jsonOut(w, http.StatusBadRequest, map[string]string{"error": "decided_by_required"})
+		return
+	case errors.Is(e, store.ErrBenchCatalogMonotonicity):
+		jsonOut(w, http.StatusBadRequest, map[string]string{"error": "bench_catalog_not_monotonic"})
+		return
+	case errors.Is(e, store.ErrBenchCatalogSolGrade):
+		jsonOut(w, http.StatusBadRequest, map[string]string{"error": "bench_catalog_sol_grade"})
 		return
 	case errors.Is(e, store.ErrQueueEmpty):
 		jsonOut(w, http.StatusNotFound, map[string]string{"error": "queue_empty"})
@@ -1003,6 +1024,56 @@ func (s Server) benchGradesPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	n, err := s.Service.UpsertBenchGrades(r.Context(), client, input.Grades)
+	if err != nil {
+		appErr(w, err)
+		return
+	}
+	jsonOut(w, http.StatusOK, map[string]int{"upserted": n})
+}
+
+// operatorClientID is the reserved auth-file client id carrying the operator
+// credential (HANDOFFKEEP_TOKEN_operator), the same convention panewire #68
+// established with HUB_TOKEN_operator. Deployments without the entry fail
+// closed: every PUT /v1/bench/catalog gets 403.
+const operatorClientID = "operator"
+
+type benchCatalogInput struct {
+	Catalog []store.BenchCatalogEntry `json:"catalog"`
+}
+
+func (s Server) benchCatalogList(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.auth(w, r); !ok {
+		return
+	}
+	q := r.URL.Query()
+	includeRetired := q.Get("include_retired") == "1" || q.Get("include_retired") == "true"
+	xs, err := s.Service.ListBenchCatalog(r.Context(), q.Get("pool"), includeRetired)
+	if err != nil {
+		appErr(w, err)
+		return
+	}
+	jsonOut(w, http.StatusOK, map[string]any{"catalog": xs})
+}
+
+func (s Server) benchCatalogPut(w http.ResponseWriter, r *http.Request) {
+	client, ok := s.auth(w, r)
+	if !ok {
+		return
+	}
+	if client != operatorClientID {
+		jsonOut(w, http.StatusForbidden, map[string]string{"error": "operator_required"})
+		return
+	}
+	defer r.Body.Close()
+	var input benchCatalogInput
+	if err := decode(r, &input, benchRequestMaxBytes); err != nil || !benchBatchValid(len(input.Catalog)) {
+		if err == nil {
+			err = errors.New("invalid bench catalog")
+		}
+		appErr(w, err)
+		return
+	}
+	n, err := s.Service.UpsertBenchCatalog(r.Context(), input.Catalog)
 	if err != nil {
 		appErr(w, err)
 		return
