@@ -11,10 +11,13 @@ import { liveSectionLabel, type LiveResponse } from "../live";
 export function LiveStrip({ live }: { live: LiveResponse }) {
   const parts: ReactNode[] = [];
   const { jobs, nodes, mismatch } = live;
-  if (jobs.fetched_at !== "") {
+  if (jobs.fetched_at !== "" || nodes.fetched_at !== "") {
+    // Each section counts only what it actually fetched — a failed section
+    // reports 미상, never 0.
     parts.push(
       <span key="counts" className="qp-livestat">
-        live · 잡 {jobs.items.length} · 머신 {nodes.items.length}
+        live · 잡 {jobs.fetched_at === "" ? "미상" : jobs.items.length} · 머신{" "}
+        {nodes.fetched_at === "" ? "미상" : nodes.items.length}
       </span>,
     );
   }

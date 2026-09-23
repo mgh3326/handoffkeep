@@ -225,13 +225,30 @@ export function taskLiveJobs(
   return { recorded: true, primary: byId.get(link.job_id) ?? null, children };
 }
 
-/** Session → job lookup by exact pane_id equality — the only session↔job key
- * the hub guarantees. */
-export function jobForPane(live: LiveResponse, paneId: string): LiveJob | null {
+/** Session → job lookup by exact pane_id equality on the same machine —
+ * pane_id has no machine namespace (panewire accepts any printable ≤128-char
+ * string), so a pane match on a different machine is not a link. */
+export function jobForPane(live: LiveResponse, machineId: string, paneId: string): LiveJob | null {
   if (paneId === "") {
     return null;
   }
-  return live.jobs.items.find((job) => job.pane === paneId) ?? null;
+  return live.jobs.items.find((job) => job.pane === paneId && job.machine === machineId) ?? null;
+}
+
+/** Hub `last_ping_ms` is the age of the node's last ping in milliseconds
+ * (panewire hub.go Nodes(): `age.Milliseconds()`), not an RTT — render it as
+ * an age, never as "Nms" latency. */
+export function pingAgeLabel(ms: number | null): string {
+  if (ms === null) {
+    return "미측정";
+  }
+  if (ms < 60_000) {
+    return `${Math.max(0, Math.round(ms / 1000))}초 전`;
+  }
+  if (ms < 3_600_000) {
+    return `${Math.floor(ms / 60_000)}분 전`;
+  }
+  return `${Math.floor(ms / 3_600_000)}시간 전`;
 }
 
 /** Job → task reverse link by exact job_id equality (no prefix matching). */

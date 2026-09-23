@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -25,7 +26,7 @@ import (
 //
 // No fixture invents a shape the hub cannot send.
 
-func liveNodeFixture(machine, state string, lastPing *int64, load, memory, snap map[string]any) map[string]any {
+func liveNodeFixture(machine, state string, lastPing int64, load, memory, snap map[string]any) map[string]any {
 	node := map[string]any{
 		"machine_id":          machine,
 		"alert_class":         "",
@@ -33,11 +34,11 @@ func liveNodeFixture(machine, state string, lastPing *int64, load, memory, snap 
 		"accepting_effective": true,
 		"accepting_override":  "",
 		"connected_since":     "2026-09-23T03:00:00Z",
-		"remote_meta":         map[string]any{"version": "1.2.3"},
-		"state":               state,
-	}
-	if lastPing != nil {
-		node["last_ping_ms"] = *lastPing
+		// The hub always emits last_ping_ms (hub.go Nodes(): age.Milliseconds(),
+		// a non-pointer int64) — it is the age of the last ping, not an RTT.
+		"last_ping_ms": lastPing,
+		"remote_meta":  map[string]any{"version": "1.2.3"},
+		"state":        state,
 	}
 	if load != nil {
 		node["load"] = load
@@ -53,11 +54,12 @@ func liveNodeFixture(machine, state string, lastPing *int64, load, memory, snap 
 
 func liveJobFixture(machine, jobID, ownerLane, pane, role string) map[string]any {
 	return map[string]any{
-		"machine":         machine,
-		"job_id":          jobID,
-		"owner_lane":      ownerLane,
-		"pane":            pane,
-		"tier":            "A+",
+		"machine":    machine,
+		"job_id":     jobID,
+		"owner_lane": ownerLane,
+		"pane":       pane,
+		// tier normalizes to T0–T3 or "" on the wire (hub_jobs.go:33).
+		"tier":            "T2",
 		"role":            role,
 		"started_at":      "2026-09-23T11:00:00Z",
 		"last_event_kind": "heartbeat",
@@ -154,7 +156,7 @@ func TestLiveAPIJoinsTasksJobsAndNodes(t *testing.T) {
 	hub := &liveHubFixture{
 		nodes: []map[string]any{
 			// m1a: fully measured node with a session snapshot.
-			liveNodeFixture("m1a", "ready", &ping,
+			liveNodeFixture("m1a", "connected", ping,
 				map[string]any{"load1": 1.2, "load5": 2.5, "load15": 3.1, "ncpu": 10},
 				map[string]any{"free_pct": 41.5, "compressed_mb": 2048.0, "swap_used_mb": 128.0, "psi_some_avg10": 0.4, "source": "memory_pressure"},
 				sessionSnapshot("ok", false, false, "2026-09-23T12:00:00Z", []map[string]any{
@@ -162,15 +164,17 @@ func TestLiveAPIJoinsTasksJobsAndNodes(t *testing.T) {
 				})),
 			// m1b: vm_stat memory (unusable % per panewire checks.go), stale
 			// snapshot with zero sessions — must surface as stale, never idle.
-			liveNodeFixture("m1b", "ready", nil, nil,
+			liveNodeFixture("m1b", "connected", 90_000, nil,
 				map[string]any{"free_pct": 12.5, "source": "vm_stat"},
 				sessionSnapshot("ok", false, true, "2026-09-23T10:00:00Z", nil)),
 			// m1c: no load, no memory, no session_snapshot at all.
-			liveNodeFixture("m1c", "ready", nil, nil, nil, nil),
+			liveNodeFixture("m1c", "connected", 45_000, nil, nil, nil),
 		},
 		jobs: []map[string]any{
-			liveJobFixture("m1a", "job-b598", "b598-lane", "w1:p1", "builder"),
-			liveJobFixture("m1a", "job-t598", "b598-lane", "w16:p2", "tester"),
+			// A builder claim reaches /v1/jobs with role normalized away —
+			// normalizeHubActiveJobMetadata keeps only worker|captain.
+			liveJobFixture("m1a", "job-b598", "b598-lane", "w1:p1", ""),
+			liveJobFixture("m1a", "job-t598", "b598-lane", "w16:p2", "worker"),
 			liveJobFixture("m1b", "job-lane-mate", "b598-lane-x", "w2:p1", "worker"),
 			liveJobFixture("m1b", "job-orphan", "", "w2:p2", "worker"),
 		},
@@ -213,9 +217,14 @@ func TestLiveAPIJoinsTasksJobsAndNodes(t *testing.T) {
 	if len(liveItems(t, decoded, "jobs")) != 4 {
 		t.Fatalf("jobs.items=%v", liveItems(t, decoded, "jobs"))
 	}
-	job := liveItems(t, decoded, "jobs")[0]
-	if job["role"] != "builder" || job["last_event_kind"] != "heartbeat" || job["last_event_at"] == nil || job["started_at"] == nil {
+	job := liveItems(t, decoded, "jobs")[1]
+	if job["role"] != "worker" || job["last_event_kind"] != "heartbeat" || job["last_event_at"] == nil || job["started_at"] == nil {
 		t.Fatalf("job fields dropped: %v", job)
+	}
+	// The builder job's role is normalized away on the wire — it must arrive
+	// absent (omitempty), never as a fabricated value.
+	if _, ok := liveItems(t, decoded, "jobs")[0]["role"]; ok {
+		t.Fatalf("normalized-empty role must be omitted: %v", liveItems(t, decoded, "jobs")[0])
 	}
 
 	nodes := liveItems(t, decoded, "nodes")
@@ -401,8 +410,8 @@ func TestLiveAPIFailureAndUnavailableStates(t *testing.T) {
 func TestLiveAPIDegradedServesLastGood(t *testing.T) {
 	ping := int64(50)
 	hub := &liveHubFixture{
-		nodes: []map[string]any{liveNodeFixture("m1b", "ready", &ping, nil, nil, nil)},
-		jobs:  []map[string]any{liveJobFixture("m1b", "job-b", "lane-b", "", "tester")},
+		nodes: []map[string]any{liveNodeFixture("m1b", "connected", ping, nil, nil, nil)},
+		jobs:  []map[string]any{liveJobFixture("m1b", "job-b", "lane-b", "", "worker")},
 	}
 
 	// Exercise the last-good path: fresh handler, ok fetch, then flip the
@@ -496,4 +505,99 @@ func TestLiveAPITaskScanCoversAllStates(t *testing.T) {
 			t.Fatalf("tasks_without_task contains held task: %v", mismatch["tasks_without_job"])
 		}
 	}
+}
+
+// S-1: a director-owned worker's owner_lane is the whole director lane — every
+// director worker shares it. The one-hop sibling join is a builder-lane join
+// only; a worker-primary task must not collect same-lane siblings as children
+// and must not suppress them from jobs_without_task. The hub normalizes
+// role to worker|captain|"" so this gates on the worker role, not "builder".
+func TestLiveAPIWorkerPrimaryHasNoSiblingJoin(t *testing.T) {
+	s := uiStore(t)
+	hub := &liveHubFixture{
+		nodes: []map[string]any{},
+		jobs: []map[string]any{
+			// The task's own job — a worker owned by the director lane.
+			liveJobFixture("m1a", "job-w470", "director-1", "w1:p1", "worker"),
+			// Unrelated director-lane siblings that must NOT join as children.
+			liveJobFixture("m1a", "job-w471", "director-1", "w2:p1", "worker"),
+			liveJobFixture("m1b", "job-w499", "director-1", "w3:p1", "worker"),
+		},
+	}
+	server := httptest.NewServer(hub)
+	defer server.Close()
+	ui, assertion := newFleetUI(t, server.URL, fleetTestSecret, 10*time.Second)
+
+	lane := uiLane(t, "live-worker-primary")
+	task := createJobTask(t, s, lane, "director-owned worker task", "job-w470")
+	claimAndTransition(t, s, task, "in_progress", "started")
+
+	_, _, decoded := getLiveAPI(t, ui, assertion)
+	link := liveLinkFor(t, decoded, task.ID)
+	if link == nil || link["job_found"] != true {
+		t.Fatalf("worker-primary task link=%v", link)
+	}
+	if children, _ := link["children"].([]any); len(children) != 0 {
+		t.Fatalf("worker primary must not inherit same-lane children: %v", children)
+	}
+	withoutTask, _ := decoded["mismatch"].(map[string]any)["jobs_without_task"].([]any)
+	gotJobs := map[string]bool{}
+	for _, item := range withoutTask {
+		gotJobs[item.(string)] = true
+	}
+	// The siblings are orphans — suppressing them via connectedLanes would
+	// hide real jobs from the mismatch list.
+	if !gotJobs["job-w471"] || !gotJobs["job-w499"] || gotJobs["job-w470"] {
+		t.Fatalf("jobs_without_task=%v want job-w471+job-w499", withoutTask)
+	}
+}
+
+// S-4: nodes delivered but jobs did not → active_jobs must stay null (미상),
+// never fabricated as 0.
+func TestLiveAPIActiveJobsNullWhenJobsUnavailable(t *testing.T) {
+	ping := int64(50)
+	hub := &liveHubFixture{
+		nodes: []map[string]any{liveNodeFixture("m1a", "connected", ping, nil, nil, nil)},
+	}
+	hub.jobsStatus.Store(http.StatusNotFound)
+	server := httptest.NewServer(hub)
+	defer server.Close()
+	ui, assertion := newFleetUI(t, server.URL, fleetTestSecret, 10*time.Second)
+
+	_, _, decoded := getLiveAPI(t, ui, assertion)
+	if liveSection(t, decoded, "jobs")["status"] != "unsupported" {
+		t.Fatalf("jobs.status=%v want unsupported", liveSection(t, decoded, "jobs")["status"])
+	}
+	nodes := liveItems(t, decoded, "nodes")
+	if len(nodes) != 1 || nodes[0]["active_jobs"] != nil {
+		t.Fatalf("active_jobs must be null without jobs data: %v", nodes)
+	}
+}
+
+// S-2 regression: concurrent requests share the last-good nodes cache. The
+// handler mutates ActiveJobs on its own copy — under -race this fails if it
+// writes into the shared backing array.
+func TestLiveAPIConcurrentRequestsNoRace(t *testing.T) {
+	ping := int64(50)
+	hub := &liveHubFixture{
+		nodes: []map[string]any{liveNodeFixture("m1a", "connected", ping, nil, nil, nil)},
+		jobs:  []map[string]any{liveJobFixture("m1a", "job-b", "lane-b", "", "worker")},
+	}
+	server := httptest.NewServer(hub)
+	defer server.Close()
+	ui, assertion := newFleetUI(t, server.URL, fleetTestSecret, 10*time.Second)
+
+	getLiveAPI(t, ui, assertion) // warm the last-good cache
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 5; j++ {
+				response := uiRequest(t, ui.Client(), http.MethodGet, ui.URL+"/ui/api/live", assertion, "")
+				response.Body.Close()
+			}
+		}()
+	}
+	wg.Wait()
 }

@@ -134,7 +134,12 @@ type liveSession struct {
 
 // liveTaskLink joins one task to hub jobs. JobID is the task's own
 // refs.job_id. Children are the one-hop owner_lane siblings (tester/worker
-// jobs spawned with --owner <builder lane>); no deeper chain is followed.
+// jobs spawned with --owner <builder lane>) — but only when the primary job
+// is the builder's own job. The hub normalizes role to worker|captain|""
+// (hub_jobs.go normalizeHubActiveJobMetadata: builder claims arrive as
+// "" or legacy "captain"), so a "worker" primary — e.g. a director-owned
+// job whose owner_lane is the whole director lane — must not fan out to
+// every job sharing that lane. No deeper chain is followed either way.
 type liveTaskLink struct {
 	TaskID   int64    `json:"task_id"`
 	JobID    string   `json:"job_id"`
@@ -183,15 +188,19 @@ func (h *Handler) liveAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	jobsKnown := jobs.FetchedAt != ""
 	if jobsKnown {
-		for i := range nodes.Items {
+		// nodes.Items aliases the last-good cache — copy before writing so
+		// concurrent requests never race on the shared backing array.
+		items := append([]liveNode(nil), nodes.Items...)
+		for i := range items {
 			count := 0
 			for _, job := range jobs.Items {
-				if job.Machine == nodes.Items[i].MachineID {
+				if job.Machine == items[i].MachineID {
 					count++
 				}
 			}
-			nodes.Items[i].ActiveJobs = &count
+			items[i].ActiveJobs = &count
 		}
+		nodes.Items = items
 	}
 
 	links := make([]liveTaskLink, 0)
@@ -218,10 +227,8 @@ func (h *Handler) liveAPI(w http.ResponseWriter, r *http.Request) {
 			claimedJobIDs[jobID] = true
 			primary, found = byJob[jobID]
 			link := liveTaskLink{TaskID: task.ID, JobID: jobID, JobFound: found, Children: []string{}}
-			if found {
-				if primary.OwnerLane != "" {
-					connectedLanes[primary.OwnerLane] = true
-				}
+			if found && primary.Role != "worker" && primary.OwnerLane != "" {
+				connectedLanes[primary.OwnerLane] = true
 				for _, job := range jobs.Items {
 					if job.JobID != jobID && job.OwnerLane != "" && job.OwnerLane == primary.OwnerLane {
 						link.Children = append(link.Children, job.JobID)
