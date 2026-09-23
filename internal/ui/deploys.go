@@ -19,10 +19,9 @@ import (
 const (
 	deployRecordSchema = "deploy-record/v0"
 	deployDocsPerSvc   = 200
-	// deployDocsHardCap bounds the deep scan the handler pages through when a
-	// full first window holds no success record — the last successful deploy
-	// may sit just beyond it, and "no success" must never be asserted on a
-	// partial scan.
+	// deployDocsHardCap bounds the scan when the first window comes back
+	// full — deployed_at can reorder against record keys, so every document
+	// up to this bound is compared before current is asserted.
 	deployDocsHardCap = 2000
 	deployEventsLimit = 1000
 )
@@ -248,11 +247,12 @@ func (h *Handler) deployServiceView(r *http.Request, service, repo string, event
 		return out
 	}
 	parsed := parseDocs(docs)
-	// A full window without a success is not proof none exists — the last
-	// successful deploy may sit just beyond the bound. Page deeper (bounded
-	// by deployDocsHardCap) before reporting current:null; the flag clears
-	// only when a short page proves the scan reached the end of the space.
-	if view.DocsCapped && !deployHasSuccess(parsed) {
+	// A full first window is never proof of completeness — deployed_at can
+	// reorder against keys (a record's key is write time, its deployed_at is
+	// measured), so the true current success may sit on any page. Drain to
+	// deployDocsHardCap; the flag clears only when a short page proves the
+	// scan reached the end of the key space.
+	if view.DocsCapped {
 		cursor := docs[len(docs)-1].Key
 		for view.DocsCapped && view.RecordCount < deployDocsHardCap {
 			var older []store.Document
@@ -271,9 +271,6 @@ func (h *Handler) deployServiceView(r *http.Request, service, repo string, event
 			}
 			cursor = older[len(older)-1].Key
 			parsed = append(parsed, parseDocs(older)...)
-			if deployHasSuccess(parsed) {
-				break
-			}
 		}
 	}
 	if len(parsed) == 0 {
@@ -329,15 +326,6 @@ func (h *Handler) deployServiceView(r *http.Request, service, repo string, event
 		view.Latest = &lv
 	}
 	return view, nil
-}
-
-func deployHasSuccess(parsed []deployParsedDoc) bool {
-	for i := range parsed {
-		if parsed[i].rec.Result == "success" {
-			return true
-		}
-	}
-	return false
 }
 
 // deployRecordLess orders success records by deployed_at, falling back to the

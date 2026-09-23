@@ -44,6 +44,7 @@ export type DeployPendingResponse = {
 };
 
 const MERGED_BOUNDARIES = new Set(["deployed_at", "unrecorded", "no_current"]);
+const RECORD_RESULTS = new Set(["success", "failed", "rolled_back"]);
 
 // Every field the panel dereferences is checked, including nullable ones —
 // a record missing failed_step must not pass and render "step undefined"
@@ -55,7 +56,7 @@ const isRecordView = (v: unknown): v is DeployRecordView => {
   const r = v as DeployRecordView;
   return (
     typeof r.record_key === "string" &&
-    typeof r.result === "string" &&
+    RECORD_RESULTS.has(r.result) &&
     (r.deployed_ref === null || typeof r.deployed_ref === "string") &&
     (r.deployed_at === null || typeof r.deployed_at === "string") &&
     (r.failed_step === null || typeof r.failed_step === "number") &&

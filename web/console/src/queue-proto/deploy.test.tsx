@@ -251,6 +251,19 @@ describe("DeployPanel", () => {
     }
   });
 
+  it("a record result outside the contract enum is rejected (r4 probe)", async () => {
+    const data = fixture();
+    (data.services[0].current as unknown as Record<string, unknown>).result = "unknown";
+    render(
+      <DeployPanel
+        fetchStatus={vi.fn(() => Promise.resolve(data as unknown as DeployPendingResponse))}
+        pollMs={600_000}
+      />,
+    );
+    await waitFor(() => expect(screen.getByText(/불러오지 못했습니다/)).toBeTruthy());
+    expect(document.querySelector("[data-deploy-state]")?.getAttribute("data-deploy-state")).toBe("error");
+  });
+
   it("a merged_boundary outside the contract enum is rejected", async () => {
     const data = fixture();
     (data.services[0] as unknown as Record<string, unknown>).merged_boundary = "guessed";

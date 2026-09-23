@@ -376,6 +376,43 @@ func TestUIDeployPendingDocsDeepScanFindsOlderSuccess(t *testing.T) {
 	}
 }
 
+// Regression (tester BLOCKER r4): key order and contract time can reorder
+// ACROSS pages — an older-key record may carry a later deployed_at. A full
+// first window that already contains a success must still page deeper: the
+// true current is the newest success by deployed_at over the whole scanned
+// space, not the first page's success.
+func TestUIDeployPendingDocsCrossPageContractTime(t *testing.T) {
+	s := uiStore(t)
+	db := deployDB(t)
+	wipeDeployDocs(t, db)
+	fixture := newUIJWTFixture(t)
+	h := newUITestServer(t, s, fixture, "", "", 0)
+	defer h.Close()
+	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
+
+	// Oldest key, but the contract-newest success (deployed_at 01-10).
+	seedDeployDoc(t, s, "deploy/handoffkeep/20260101T000000Z",
+		deployFixtureBody(t, "handoffkeep", "success", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "2026-01-10T00:00:00Z", nil))
+	// Newer key, contract-older success (deployed_at 01-02) — lands in the
+	// first window.
+	seedDeployDoc(t, s, "deploy/handoffkeep/20260102T000000Z",
+		deployFixtureBody(t, "handoffkeep", "success", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "2026-01-02T00:00:00Z", nil))
+	// 199 failed records fill the rest of the first window.
+	for i := 1; i <= 199; i++ {
+		seedDeployDoc(t, s, "deploy/handoffkeep/20260103T"+time.Date(2026, 1, 3, 0, 0, 0, 0, time.UTC).Add(time.Duration(i)*time.Second).Format("150405")+"Z",
+			deployFixtureBody(t, "handoffkeep", "failed", "", "2026-01-03T00:00:00Z", nil))
+	}
+	response := getDeployPending(t, h, assertion)
+	hk := serviceView(t, response, "handoffkeep")
+	current, ok := hk["current"].(map[string]any)
+	if !ok || current["deployed_ref"] != "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" {
+		t.Fatalf("current must be the success with the latest deployed_at across pages: %v", hk["current"])
+	}
+	if hk["docs_capped"] == true || hk["record_count"] != float64(201) {
+		t.Fatalf("scan reached the end — docs_capped must clear: %v", hk)
+	}
+}
+
 // The deep scan is bounded by deployDocsHardCap — past it the flag stays up
 // and the UI warns that older records may exist rather than claiming none.
 func TestUIDeployPendingDocsHardCap(t *testing.T) {
