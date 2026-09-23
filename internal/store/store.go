@@ -903,6 +903,11 @@ func (s *Store) UpsertBenchGrades(ctx context.Context, xs []BenchGrade) (int, er
 		if !validBenchGrade(x) {
 			return 0, errors.New("invalid bench grade")
 		}
+		// The legacy path mirrors into the catalog, so it must not admit rows
+		// the catalog itself would reject — the Sol rule applies here too.
+		if benchSolProfiles[x.Profile] && x.Grade != "S+" {
+			return 0, ErrBenchCatalogSolGrade
+		}
 		if err := guard.Reject(x.BoundaryVersion); err != nil {
 			return 0, err
 		}

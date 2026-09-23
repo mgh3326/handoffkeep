@@ -769,6 +769,14 @@ func TestBenchCatalogAPI(t *testing.T) {
 	if legacy["bench-cat-retired"] != nil {
 		t.Fatalf("retired catalog row leaked into grades projection")
 	}
+	// The legacy write path enforces the same Sol rule as the catalog — the
+	// mirror must not admit rows the catalog would reject.
+	resp = benchRequest(t, h.Client(), http.MethodPut, h.URL+"/v1/bench/grades", "test-token", benchBody(t, "grades", map[string]any{
+		"profile": "codex-sol", "grade": "A", "deviation_ref": "deviation-compat-592",
+	}))
+	if resp.StatusCode != http.StatusBadRequest || benchJSON(t, resp)["error"] != "bench_catalog_sol_grade" {
+		t.Fatalf("legacy sol bypass status=%d", resp.StatusCode)
+	}
 	// The legacy write path mirrors into the catalog's default row.
 	resp = benchRequest(t, h.Client(), http.MethodPut, h.URL+"/v1/bench/grades", "test-token", benchBody(t, "grades", map[string]any{
 		"profile": "bench-grade-cat-compat", "grade": "A", "boundary_version": "2026-09-23",
