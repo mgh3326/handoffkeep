@@ -276,6 +276,28 @@ describe("DeployPanel", () => {
     await waitFor(() => expect(screen.getByText(/불러오지 못했습니다/)).toBeTruthy());
   });
 
+  it("under a capped scan, a shown current is scoped, not asserted as final (r5 probe)", async () => {
+    // docs_capped means the scan stopped before the end of the key space —
+    // an unscanned record could carry a later deployed_at, so the shown
+    // current/latest are in-window results, never fleet truth.
+    const data = fixture();
+    const hk = data.services[0];
+    hk.docs_capped = true;
+    hk.latest = {
+      record_key: "deploy/handoffkeep/20260923T050000Z",
+      result: "failed",
+      deployed_ref: null,
+      deployed_at: "2026-09-23T03:50:00Z",
+      failed_step: 7,
+      recorded_at: "2026-09-23T03:50:00Z",
+      source: "installer",
+    };
+    render(<DeployPanel fetchStatus={fetcher(data)} pollMs={600_000} />);
+    await waitFor(() => expect(screen.getByText("현재 판(조회 범위 내)")).toBeTruthy());
+    expect(screen.getByText("최근 시도(조회 범위 내)")).toBeTruthy();
+    expect(screen.getByText(/현재 판·최근 시도·머지 목록 모두 조회 범위 안의 결과입니다/)).toBeTruthy();
+  });
+
   it("under a capped scan, no in-window success reads 'unverified', not 'none'", async () => {
     // docs_capped + current:null means an older success may exist beyond the
     // scan window — the row must not assert "성공 배포 기록 없음".

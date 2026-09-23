@@ -167,12 +167,18 @@ function ServiceRow({ svc, now }: { svc: DeployServiceView; now: string }) {
           </span>
         </div>
       ) : (
-        <RecordLine label="현재 판" rec={svc.current} now={now} />
+        /* docs_capped means the scan stopped before the end of the key space —
+           a record beyond the cap could carry a later deployed_at, so the
+           shown current/latest are in-window results, not fleet truth. */
+        <RecordLine label={svc.docs_capped ? "현재 판(조회 범위 내)" : "현재 판"} rec={svc.current} now={now} />
       )}
-      {svc.latest !== undefined ? <RecordLine label="최근 시도" rec={svc.latest} now={now} /> : null}
+      {svc.latest !== undefined ? (
+        <RecordLine label={svc.docs_capped ? "최근 시도(조회 범위 내)" : "최근 시도"} rec={svc.latest} now={now} />
+      ) : null}
       {svc.docs_capped ? (
         <p className="qp-status-warn" style={{ margin: "var(--hk-space-1) 0 0", fontSize: "var(--hk-font-meta)" }}>
-          기록 조회 상한에 닿았습니다 — 더 오래된 배포 기록이 있을 수 있습니다.
+          기록 조회 상한에 닿았습니다 — 더 오래된 배포 기록이 있을 수 있어 현재 판·최근 시도·머지 목록 모두 조회 범위
+          안의 결과입니다.
         </p>
       ) : null}
       {svc.invalid_count !== undefined && svc.invalid_count > 0 ? (
