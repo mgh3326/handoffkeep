@@ -319,8 +319,10 @@ func TestUIDeployPendingLatestByContractTime(t *testing.T) {
 	}
 }
 
-// The document scan is bounded — when it returns full, the view must say so
-// instead of implying the record set (and chosen current) is complete.
+// The first scan window is bounded, but a full window that holds no success
+// pages deeper rather than asserting "no success" on a partial scan. 201
+// failed records — the exact tester counterexample — must exhaust the space
+// and clear the cap flag, since nothing was left unscanned.
 func TestUIDeployPendingDocsCapped(t *testing.T) {
 	s := uiStore(t)
 	db := deployDB(t)
@@ -330,23 +332,79 @@ func TestUIDeployPendingDocsCapped(t *testing.T) {
 	defer h.Close()
 	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
 
-	for i := 0; i < 200; i++ {
+	for i := 0; i < 201; i++ {
 		seedDeployDoc(t, s, "deploy/panewire-hub/20260102T"+time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC).Add(time.Duration(i)*time.Second).Format("150405")+"Z",
 			deployFixtureBody(t, "panewire-hub", "failed", "", "2026-01-02T00:00:00Z", nil))
 	}
 	response := getDeployPending(t, h, assertion)
 	pw := serviceView(t, response, "panewire-hub")
-	if pw["docs_capped"] != true || pw["record_count"] != float64(200) {
-		t.Fatalf("docs_capped=%v record_count=%v", pw["docs_capped"], pw["record_count"])
+	if pw["docs_capped"] == true || pw["record_count"] != float64(201) || pw["current"] != nil {
+		t.Fatalf("exhausted scan must clear docs_capped and report honest no-success: %v", pw)
+	}
+}
+
+// Regression (tester SHOULD): the last success may sit beyond the first
+// window — a full page of failed attempts must not hide it. The handler
+// pages deeper and the oldest success becomes current.
+func TestUIDeployPendingDocsDeepScanFindsOlderSuccess(t *testing.T) {
+	s := uiStore(t)
+	db := deployDB(t)
+	wipeDeployDocs(t, db)
+	fixture := newUIJWTFixture(t)
+	h := newUITestServer(t, s, fixture, "", "", 0)
+	defer h.Close()
+	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
+
+	// Oldest key = the only success; the 200 newer keys are all failed.
+	seedDeployDoc(t, s, "deploy/handoffkeep/20260102T000000Z",
+		deployFixtureBody(t, "handoffkeep", "success", "cccccccccccccccccccccccccccccccccccccccc", "2026-01-02T00:00:00Z", nil))
+	for i := 1; i <= 200; i++ {
+		seedDeployDoc(t, s, "deploy/handoffkeep/20260102T"+time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC).Add(time.Duration(i)*time.Second).Format("150405")+"Z",
+			deployFixtureBody(t, "handoffkeep", "failed", "", "2026-01-02T00:00:00Z", nil))
+	}
+	response := getDeployPending(t, h, assertion)
+	hk := serviceView(t, response, "handoffkeep")
+	current, ok := hk["current"].(map[string]any)
+	if !ok || current["deployed_ref"] != "cccccccccccccccccccccccccccccccccccccccc" || current["result"] != "success" {
+		t.Fatalf("older success beyond the window must surface as current: %v", hk["current"])
+	}
+	if hk["docs_capped"] == true || hk["record_count"] != float64(201) {
+		t.Fatalf("scan reached the end — docs_capped must clear: %v", hk)
+	}
+	if hk["latest"].(map[string]any)["result"] != "failed" {
+		t.Fatalf("newer failed attempt must still show as latest: %v", hk["latest"])
+	}
+}
+
+// The deep scan is bounded by deployDocsHardCap — past it the flag stays up
+// and the UI warns that older records may exist rather than claiming none.
+func TestUIDeployPendingDocsHardCap(t *testing.T) {
+	s := uiStore(t)
+	db := deployDB(t)
+	wipeDeployDocs(t, db)
+	fixture := newUIJWTFixture(t)
+	h := newUITestServer(t, s, fixture, "", "", 0)
+	defer h.Close()
+	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
+
+	base := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < 2001; i++ {
+		seedDeployDoc(t, s, "deploy/panewire-hub/20260102T"+base.Add(time.Duration(i)*time.Second).Format("150405")+"Z",
+			deployFixtureBody(t, "panewire-hub", "failed", "", "2026-01-02T00:00:00Z", nil))
+	}
+	response := getDeployPending(t, h, assertion)
+	pw := serviceView(t, response, "panewire-hub")
+	if pw["docs_capped"] != true || pw["current"] != nil {
+		t.Fatalf("hard-capped scan must keep docs_capped and not fabricate current: %v", pw)
 	}
 }
 
 // Regression (tester NICE): the merged-events scan fetches limit+1 rows, so a
 // fleet sitting exactly at the bound is NOT flagged truncated — only a row
-// left unscanned is. task_events is append-only, so the exact-limit case can
-// only run while the shared DB is below the bound; the truncation case
-// derives its boundary from the oldest scanned row so it holds however many
-// events earlier runs accumulated.
+// left unscanned is. task_events is append-only, so the test clears merged
+// events via the replication role when the account allows it — keeping the
+// exact-limit case deterministic on a shared DB; without the role it falls
+// back to the count check.
 func TestUIDeployPendingEventsCappedExactLimit(t *testing.T) {
 	s := uiStore(t)
 	db := deployDB(t)
@@ -357,6 +415,14 @@ func TestUIDeployPendingEventsCappedExactLimit(t *testing.T) {
 	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
 
 	const limit = 1000 // must equal deployEventsLimit in internal/ui/deploys.go
+	if _, err := db.Exec(t.Context(), `SET session_replication_role='replica'`); err == nil {
+		if _, err := db.Exec(t.Context(), `DELETE FROM task_events WHERE "to"='merged'`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(t.Context(), `SET session_replication_role='origin'`); err != nil {
+			t.Fatal(err)
+		}
+	}
 	var total int
 	if err := db.QueryRow(t.Context(), `SELECT count(*) FROM task_events WHERE "to"='merged'`).Scan(&total); err != nil {
 		t.Fatal(err)
@@ -374,7 +440,7 @@ func TestUIDeployPendingEventsCappedExactLimit(t *testing.T) {
 		}
 		wipeDeployDocs(t, db)
 	} else {
-		t.Logf("exact-limit case skipped: %d merged events already in shared DB", total)
+		t.Fatalf("exact-limit case unrunnable: %d merged events survive in shared DB and trigger wipe failed", total)
 	}
 
 	// A row beyond the bound is real truncation: when the oldest scanned

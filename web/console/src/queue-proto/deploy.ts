@@ -43,6 +43,8 @@ export type DeployPendingResponse = {
   events_capped?: boolean;
 };
 
+const MERGED_BOUNDARIES = new Set(["deployed_at", "unrecorded", "no_current"]);
+
 // Every field the panel dereferences is checked, including nullable ones —
 // a record missing failed_step must not pass and render "step undefined"
 // instead of failing loudly.
@@ -89,7 +91,7 @@ const isServiceView = (v: unknown): v is DeployServiceView => {
     typeof s.record_count === "number" &&
     (s.invalid_count === undefined || typeof s.invalid_count === "number") &&
     (s.docs_capped === undefined || typeof s.docs_capped === "boolean") &&
-    typeof s.merged_boundary === "string" &&
+    MERGED_BOUNDARIES.has(s.merged_boundary) &&
     Array.isArray(s.merged_since) &&
     s.merged_since.every(isMergedTask) &&
     (s.current === null || isRecordView(s.current)) &&
@@ -99,13 +101,20 @@ const isServiceView = (v: unknown): v is DeployServiceView => {
 
 /** A payload that only matches the outer `services` array is still malformed —
  * nested rows must carry the fields the panel dereferences, or the response is
- * rejected wholesale instead of crashing mid-render. */
+ * rejected wholesale instead of crashing mid-render. Required top-level fields
+ * are checked too: a missing generated_at would silently render without the
+ * elapsed baseline the panel needs. */
 export function isDeployPendingResponse(body: unknown): body is DeployPendingResponse {
+  if (typeof body !== "object" || body === null) {
+    return false;
+  }
+  const b = body as DeployPendingResponse;
   return (
-    typeof body === "object" &&
-    body !== null &&
-    Array.isArray((body as DeployPendingResponse).services) &&
-    (body as DeployPendingResponse).services.every(isServiceView)
+    typeof b.generated_at === "string" &&
+    typeof b.pr_source === "string" &&
+    (b.events_capped === undefined || typeof b.events_capped === "boolean") &&
+    Array.isArray(b.services) &&
+    b.services.every(isServiceView)
   );
 }
 

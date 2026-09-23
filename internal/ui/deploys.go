@@ -19,7 +19,12 @@ import (
 const (
 	deployRecordSchema = "deploy-record/v0"
 	deployDocsPerSvc   = 200
-	deployEventsLimit  = 1000
+	// deployDocsHardCap bounds the deep scan the handler pages through when a
+	// full first window holds no success record — the last successful deploy
+	// may sit just beyond it, and "no success" must never be asserted on a
+	// partial scan.
+	deployDocsHardCap = 2000
+	deployEventsLimit = 1000
 )
 
 // deployService maps the v0 services onto the GitHub repo a refs.pr value must
@@ -215,23 +220,59 @@ func (h *Handler) deployServiceView(r *http.Request, service, repo string, event
 		MergedBoundary: "no_current",
 		MergedSince:    []deployMergedTask{},
 	}
-	docs, err := h.store.ListDocumentsByPrefix(r.Context(), "deploy/"+service+"/", deployDocsPerSvc)
+	prefix := "deploy/" + service + "/"
+	// One row past the bound distinguishes "exactly full" from "truncated" —
+	// at exactly the bound nothing was omitted and no warning is owed.
+	docs, err := h.store.ListDocumentsByPrefix(r.Context(), prefix, deployDocsPerSvc+1)
 	if err != nil {
 		return view, err
 	}
+	view.DocsCapped = len(docs) > deployDocsPerSvc
+	if view.DocsCapped {
+		docs = docs[:deployDocsPerSvc]
+	}
 	view.RecordCount = len(docs)
-	// The scan is bounded; when it returns full there may be older records
-	// beyond the window — say so rather than implying completeness.
-	view.DocsCapped = len(docs) == deployDocsPerSvc
-	parsed := []deployParsedDoc{}
-	for _, doc := range docs {
-		rec, deployedAt, ok := parseDeployRecord(doc.Key, service, doc.Body)
-		if !ok {
-			view.InvalidCount++
-			continue
+	parseDocs := func(page []store.Document) []deployParsedDoc {
+		out := []deployParsedDoc{}
+		for _, doc := range page {
+			rec, deployedAt, ok := parseDeployRecord(doc.Key, service, doc.Body)
+			if !ok {
+				view.InvalidCount++
+				continue
+			}
+			keyTime, _ := deployRecordKeyTime(doc.Key)
+			out = append(out, deployParsedDoc{key: doc.Key, rec: rec, deployedAt: deployedAt, keyTime: keyTime, recordedAt: doc.CreatedAt})
 		}
-		keyTime, _ := deployRecordKeyTime(doc.Key)
-		parsed = append(parsed, deployParsedDoc{key: doc.Key, rec: rec, deployedAt: deployedAt, keyTime: keyTime, recordedAt: doc.CreatedAt})
+		return out
+	}
+	parsed := parseDocs(docs)
+	// A full window without a success is not proof none exists — the last
+	// successful deploy may sit just beyond the bound. Page deeper (bounded
+	// by deployDocsHardCap) before reporting current:null; the flag clears
+	// only when a short page proves the scan reached the end of the space.
+	if view.DocsCapped && !deployHasSuccess(parsed) {
+		cursor := docs[len(docs)-1].Key
+		for view.DocsCapped && view.RecordCount < deployDocsHardCap {
+			var older []store.Document
+			older, err = h.store.ListDocumentsByPrefixBefore(r.Context(), prefix, cursor, deployDocsPerSvc+1)
+			if err != nil {
+				return view, err
+			}
+			if len(older) > deployDocsPerSvc {
+				older = older[:deployDocsPerSvc]
+			} else {
+				view.DocsCapped = false
+			}
+			view.RecordCount += len(older)
+			if len(older) == 0 {
+				break
+			}
+			cursor = older[len(older)-1].Key
+			parsed = append(parsed, parseDocs(older)...)
+			if deployHasSuccess(parsed) {
+				break
+			}
+		}
 	}
 	if len(parsed) == 0 {
 		return view, nil
@@ -286,6 +327,15 @@ func (h *Handler) deployServiceView(r *http.Request, service, repo string, event
 		view.Latest = &lv
 	}
 	return view, nil
+}
+
+func deployHasSuccess(parsed []deployParsedDoc) bool {
+	for i := range parsed {
+		if parsed[i].rec.Result == "success" {
+			return true
+		}
+	}
+	return false
 }
 
 // deployRecordLess orders success records by deployed_at, falling back to the

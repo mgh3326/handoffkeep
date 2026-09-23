@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // ListDocumentsByPrefix returns documents whose key starts with prefix,
@@ -12,6 +14,20 @@ import (
 // metadata listing. The match is a literal strpos prefix, never LIKE, so a
 // caller pattern can never widen the scan past the intended key space.
 func (s *Store) ListDocumentsByPrefix(ctx context.Context, prefix string, limit int) ([]Document, error) {
+	return s.listDocumentsByPrefix(ctx, prefix, "", limit)
+}
+
+// ListDocumentsByPrefixBefore continues a ListDocumentsByPrefix scan strictly
+// below before (key ordering), so a caller whose bounded newest-first window
+// came back full can page deeper instead of treating the window as the world.
+func (s *Store) ListDocumentsByPrefixBefore(ctx context.Context, prefix, before string, limit int) ([]Document, error) {
+	if before == "" {
+		return nil, errors.New("missing cursor key")
+	}
+	return s.listDocumentsByPrefix(ctx, prefix, before, limit)
+}
+
+func (s *Store) listDocumentsByPrefix(ctx context.Context, prefix, before string, limit int) ([]Document, error) {
 	if prefix == "" || !validText(prefix, 512) {
 		return nil, errors.New("invalid document prefix")
 	}
@@ -21,7 +37,13 @@ func (s *Store) ListDocumentsByPrefix(ctx context.Context, prefix string, limit 
 	if limit > 1000 {
 		limit = 1000
 	}
-	rows, err := s.pool.Query(ctx, `SELECT id,key,kind,session,job,body,sha256,created_by,created_at,updated_at FROM documents WHERE strpos(key, $1) = 1 ORDER BY key DESC LIMIT $2`, prefix, limit)
+	var rows pgx.Rows
+	var err error
+	if before == "" {
+		rows, err = s.pool.Query(ctx, `SELECT id,key,kind,session,job,body,sha256,created_by,created_at,updated_at FROM documents WHERE strpos(key, $1) = 1 ORDER BY key DESC LIMIT $2`, prefix, limit)
+	} else {
+		rows, err = s.pool.Query(ctx, `SELECT id,key,kind,session,job,body,sha256,created_by,created_at,updated_at FROM documents WHERE strpos(key, $1) = 1 AND key < $2 ORDER BY key DESC LIMIT $3`, prefix, before, limit)
+	}
 	if err != nil {
 		return nil, err
 	}

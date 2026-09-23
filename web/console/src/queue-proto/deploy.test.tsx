@@ -234,6 +234,35 @@ describe("DeployPanel", () => {
     expect(document.querySelector("[data-deploy-state]")?.getAttribute("data-deploy-state")).toBe("error");
   });
 
+  it("a response missing required top-level fields is rejected (r3 probe)", async () => {
+    // generated_at is the elapsed-time baseline — absent it the panel would
+    // render "ready" with silently missing times instead of failing loudly.
+    for (const field of ["generated_at", "pr_source"] as const) {
+      const data = fixture() as unknown as Record<string, unknown>;
+      delete data[field];
+      const { unmount } = render(
+        <DeployPanel
+          fetchStatus={vi.fn(() => Promise.resolve(data as unknown as DeployPendingResponse))}
+          pollMs={600_000}
+        />,
+      );
+      await waitFor(() => expect(screen.getByText(/불러오지 못했습니다/)).toBeTruthy());
+      unmount();
+    }
+  });
+
+  it("a merged_boundary outside the contract enum is rejected", async () => {
+    const data = fixture();
+    (data.services[0] as unknown as Record<string, unknown>).merged_boundary = "guessed";
+    render(
+      <DeployPanel
+        fetchStatus={vi.fn(() => Promise.resolve(data as unknown as DeployPendingResponse))}
+        pollMs={600_000}
+      />,
+    );
+    await waitFor(() => expect(screen.getByText(/불러오지 못했습니다/)).toBeTruthy());
+  });
+
   it("under a capped scan, no in-window success reads 'unverified', not 'none'", async () => {
     // docs_capped + current:null means an older success may exist beyond the
     // scan window — the row must not assert "성공 배포 기록 없음".
