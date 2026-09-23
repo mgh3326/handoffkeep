@@ -110,6 +110,31 @@ function Row({ entry }: { entry: BenchCatalogEntry }) {
 
 export type LoadCatalog = (query: CatalogQuery) => Promise<CatalogResponse>;
 
+/** Row-level wire check: every field the table reads must be present with the
+ * type the Go struct emits — required fields as strings, nullable fields as
+ * null-or-typed. A row missing a key is a partial payload: fail loudly into
+ * the error state instead of rendering undefined or throwing mid-render. */
+const ROW_STRING_KEYS = ["profile", "effort", "model_id", "pool", "grade", "gate", "boundary_version", "deviation_ref", "decided_at", "decided_by"] as const;
+const ROW_NULLABLE_STRING_KEYS = ["gate_reason", "benchmark_source", "benchmark_annotation", "retired_at"] as const;
+
+function validRow(row: unknown): boolean {
+  if (row === null || typeof row !== "object") {
+    return false;
+  }
+  const r = row as Record<string, unknown>;
+  for (const k of ROW_STRING_KEYS) {
+    if (typeof r[k] !== "string") {
+      return false;
+    }
+  }
+  for (const k of ROW_NULLABLE_STRING_KEYS) {
+    if (r[k] !== null && typeof r[k] !== "string") {
+      return false;
+    }
+  }
+  return r.score === null || typeof r.score === "number";
+}
+
 /** A loaded catalog is bound to the query that produced it — rows from one
  * filter selection are never shown under another. */
 const keyOf = (q: CatalogQuery) => `${q.pool ?? ""}\u0001${q.includeRetired ? "1" : "0"}`;
@@ -139,9 +164,13 @@ export function GradesApp({ load = fetchCatalog }: { load?: LoadCatalog }) {
           return;
         }
         // A payload without a catalog array is a failure, never an empty
-        // table — regardless of which loader produced it.
+        // table — regardless of which loader produced it. Rows missing the
+        // fields this screen reads are a partial payload: same treatment.
         if (next === null || typeof next !== "object" || !Array.isArray(next.catalog)) {
           throw new Error("catalog response has no catalog array");
+        }
+        if (!next.catalog.every(validRow)) {
+          throw new Error("catalog row is missing required fields");
         }
         goodKey.current = keyOf(query);
         setData({ key: keyOf(query), body: next });

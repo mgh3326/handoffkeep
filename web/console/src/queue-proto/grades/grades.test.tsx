@@ -80,6 +80,18 @@ describe("grade table renders the real catalog shape", () => {
     render(<GradesApp load={loader({ generated_at: fixture.generated_at } as unknown as CatalogResponse)} />);
     await waitFor(() => expect(document.querySelector('[role="alert"]')).toBeTruthy());
   });
+
+  it("a row missing a required key is an error, never a half-rendered table", async () => {
+    const partial = JSON.parse(JSON.stringify(fixture)) as CatalogResponse;
+    const row = partial.catalog[0] as Record<string, unknown>;
+    delete row.score;
+    delete row.retired_at;
+    render(<GradesApp load={loader(partial)} />);
+    await waitFor(() => expect(document.querySelector('[role="alert"]')).toBeTruthy());
+    expect(document.querySelector(".gr-table")).toBeNull();
+    // the app stays mounted — the error is stated, not a blank screen
+    expect(document.querySelector(".gr-root")).toBeTruthy();
+  });
 });
 
 describe("retired rows", () => {
@@ -169,6 +181,39 @@ describe("pool filter", () => {
     await waitFor(() => expect(screen.getByTestId("catalog-status").textContent).toContain("갱신 실패"));
     expect(document.querySelector('tr[data-profile="codex-sol"]')).toBeTruthy();
     expect(document.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it("hides the previous query's rows while a changed filter is in flight", async () => {
+    let resolveClaude: ((v: CatalogResponse) => void) | null = null;
+    const load: LoadCatalog = async (query) => {
+      if (query.pool === "claude") {
+        return await new Promise<CatalogResponse>((res) => {
+          resolveClaude = res;
+        });
+      }
+      return byGrade(query.pool);
+    };
+    render(<GradesApp load={load} />);
+    await waitFor(() => expect(document.querySelector('tr[data-profile="codex-sol"]')).toBeTruthy());
+    fireEvent.change(screen.getByLabelText("pool filter"), { target: { value: "claude" } });
+    // in-flight: the all-pool rows are gone — this query has no data yet
+    await waitFor(() => expect(document.querySelector('tr[data-profile="codex-sol"]')).toBeNull());
+    expect(document.querySelector(".gr-loading")).toBeTruthy();
+    resolveClaude!(byGrade("claude"));
+    await waitFor(() => expect(document.querySelector('tr[data-profile="opus"]')).toBeTruthy());
+  });
+
+  it("keeps the full pool option list after a filtered response arrives", async () => {
+    const load: LoadCatalog = async (query) => byGrade(query.pool);
+    render(<GradesApp load={load} />);
+    await waitFor(() => expect(document.querySelector('tr[data-profile="codex-sol"]')).toBeTruthy());
+    const select = screen.getByLabelText("pool filter") as HTMLSelectElement;
+    const allPools = [...select.options].map((o) => o.value);
+    fireEvent.change(select, { target: { value: "claude" } });
+    await waitFor(() => expect(document.querySelector('tr[data-profile="opus"]')).toBeTruthy());
+    // the filtered ladder must not shrink the selector — consult_only-only
+    // pools would vanish from the control entirely otherwise
+    expect([...select.options].map((o) => o.value)).toEqual(allPools);
   });
 });
 
