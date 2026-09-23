@@ -8,9 +8,11 @@ import (
 	"net/http/httptest"
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/mgh3326/handoffkeep/internal/cfaccess"
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
@@ -104,22 +106,33 @@ func TestBenchCatalogBFFReadOnly(t *testing.T) {
 	s := testCatalogStore(t)
 	ctx := context.Background()
 	// Unique pools per run: the test DB may carry other rows, so assertions
-	// look at the filtered ladder instead of global counts. No cleanup is
-	// needed — retired markers would still be real catalog history.
+	// look at the filtered ladder instead of global counts. Every seed uses a
+	// non-empty effort on purpose — effort='' rows mirror into bench_grades
+	// and would pollute the e2e grade-list assertions in tests/ that share
+	// this database. Rows are still cleaned up for tidiness.
 	poolX := fmt.Sprintf("tpool-x-%d", time.Now().UnixNano())
 	poolY := fmt.Sprintf("tpool-y-%d", time.Now().UnixNano())
+	prefix := fmt.Sprintf("t597prof-%d-", time.Now().UnixNano())
 	decided := time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC)
 	retired := decided.Add(24 * time.Hour)
 	reason := "advisory only"
 	rows := []store.BenchCatalogEntry{
-		{Profile: "prof-a", ModelID: "model-a", Pool: poolX, Grade: "S", Gate: "default", DeviationRef: "dev-a", DecidedAt: decided, DecidedBy: "test"},
-		{Profile: "prof-b", ModelID: "model-b", Pool: poolX, Grade: "A", Gate: "consult_only", GateReason: &reason, DeviationRef: "dev-b", DecidedAt: decided, DecidedBy: "test"},
-		{Profile: "prof-d", ModelID: "model-d", Pool: poolX, Grade: "C", Gate: "default", DeviationRef: "dev-d", DecidedAt: decided, DecidedBy: "test", RetiredAt: &retired},
-		{Profile: "prof-c", ModelID: "model-c", Pool: poolY, Grade: "B", Gate: "default", DeviationRef: "dev-c", DecidedAt: decided, DecidedBy: "test"},
+		{Profile: prefix + "a", Effort: "low", ModelID: "model-a", Pool: poolX, Grade: "S", Gate: "default", DeviationRef: "dev-a", DecidedAt: decided, DecidedBy: "test"},
+		{Profile: prefix + "b", Effort: "low", ModelID: "model-b", Pool: poolX, Grade: "A", Gate: "consult_only", GateReason: &reason, DeviationRef: "dev-b", DecidedAt: decided, DecidedBy: "test"},
+		{Profile: prefix + "d", Effort: "low", ModelID: "model-d", Pool: poolX, Grade: "C", Gate: "default", DeviationRef: "dev-d", DecidedAt: decided, DecidedBy: "test", RetiredAt: &retired},
+		{Profile: prefix + "c", Effort: "low", ModelID: "model-c", Pool: poolY, Grade: "B", Gate: "default", DeviationRef: "dev-c", DecidedAt: decided, DecidedBy: "test"},
 	}
 	if n, err := s.UpsertBenchCatalog(ctx, rows); err != nil || n != len(rows) {
 		t.Fatalf("seed: n=%d err=%v", n, err)
 	}
+	t.Cleanup(func() {
+		db, err := pgx.Connect(context.Background(), os.Getenv("HANDOFFKEEP_TEST_DB_URL"))
+		if err != nil {
+			return
+		}
+		defer db.Close(context.Background())
+		_, _ = db.Exec(context.Background(), `DELETE FROM bench_catalog WHERE profile LIKE $1`, prefix+"%")
+	})
 	h := &Handler{store: s}
 
 	get := func(path string) benchCatalogResponse {
@@ -144,26 +157,28 @@ func TestBenchCatalogBFFReadOnly(t *testing.T) {
 	}
 
 	ladder := get("/ui/api/bench/catalog?pool=" + poolX)
-	if got := profiles(ladder.Catalog); !reflect.DeepEqual(got, []string{"prof-a"}) {
+	if got := profiles(ladder.Catalog); !reflect.DeepEqual(got, []string{prefix + "a"}) {
 		t.Fatalf("pool ladder must drop consult_only and retired: %v", got)
 	}
 	full := get("/ui/api/bench/catalog?pool=" + poolX + "&include_retired=1")
-	if got := profiles(full.Catalog); !reflect.DeepEqual(got, []string{"prof-a", "prof-d"}) {
+	if got := profiles(full.Catalog); !reflect.DeepEqual(got, []string{prefix + "a", prefix + "d"}) {
 		t.Fatalf("pool+include_retired must keep grade order and still drop consult_only: %v", got)
 	}
 	all := get("/ui/api/bench/catalog")
 	foundConsultOnly := false
 	for _, row := range all.Catalog {
-		if row.Profile == "prof-b" {
+		if row.Profile == prefix+"b" {
 			foundConsultOnly = true
 		}
 	}
 	if !foundConsultOnly || all.GeneratedAt.IsZero() {
 		t.Fatalf("unfiltered must keep consult_only and stamp generated_at: %+v", all)
 	}
+	// The pool key is verbatim catalog semantics — only length/NUL are
+	// rejected, so a spacey name is a valid (empty) ladder, not a 400.
 	bad := httptest.NewRecorder()
-	h.benchCatalog(bad, httptest.NewRequest(http.MethodGet, "/ui/api/bench/catalog?pool=bad%20pool", nil))
+	h.benchCatalog(bad, httptest.NewRequest(http.MethodGet, "/ui/api/bench/catalog?pool="+strings.Repeat("x", 201), nil))
 	if bad.Code != http.StatusBadRequest {
-		t.Fatalf("invalid pool: status=%d", bad.Code)
+		t.Fatalf("over-limit pool: status=%d", bad.Code)
 	}
 }

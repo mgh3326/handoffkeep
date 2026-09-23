@@ -200,3 +200,13 @@
   color: var(--hk-text-secondary);
   white-space: nowrap;
 }
+
+.gr-ref {
+  display: block;
+  font-size: var(--hk-font-meta);
+  color: var(--hk-text-muted);
+}
+
+.gr-bv {
+  color: var(--hk-text-secondary);
+}

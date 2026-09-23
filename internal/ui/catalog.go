@@ -27,8 +27,11 @@ type benchCatalogResponse struct {
 // principals even though the /v1 route admits any bearer token.
 func (h *Handler) benchCatalog(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	pool := strings.TrimSpace(q.Get("pool"))
-	if pool != "" && !boardNameRE.MatchString(pool) {
+	// The pool key is matched verbatim — catalog pool names allow spaces and
+	// other characters (validBenchRequiredText: non-empty, ≤200 bytes, no
+	// NUL), so trimming or a narrower pattern would diverge from /v1.
+	pool := q.Get("pool")
+	if pool != "" && (len(pool) > 200 || strings.ContainsRune(pool, 0)) {
 		http.Error(w, "invalid catalog query", http.StatusBadRequest)
 		return
 	}

@@ -97,8 +97,12 @@ function Row({ entry }: { entry: BenchCatalogEntry }) {
         {entry.benchmark_source ?? <span className="gr-missing">출처 없음</span>}
         {entry.benchmark_annotation !== null ? <span className="gr-annotation">{entry.benchmark_annotation}</span> : null}
       </td>
-      <td className="gr-decided" title={entry.deviation_ref}>
+      <td className="gr-decided">
         {entry.decided_by} · {formatDay(entry.decided_at)}
+        <span className="gr-ref">
+          {entry.deviation_ref === "" ? <span className="gr-missing">ref 미상</span> : entry.deviation_ref}
+          {entry.boundary_version === "" ? null : <span className="gr-bv"> · {entry.boundary_version}</span>}
+        </span>
       </td>
     </tr>
   );
@@ -106,17 +110,24 @@ function Row({ entry }: { entry: BenchCatalogEntry }) {
 
 export type LoadCatalog = (query: CatalogQuery) => Promise<CatalogResponse>;
 
+/** A loaded catalog is bound to the query that produced it — rows from one
+ * filter selection are never shown under another. */
+const keyOf = (q: CatalogQuery) => `${q.pool ?? ""}\u0001${q.includeRetired ? "1" : "0"}`;
+
 /** The grade table owns its fetch lifecycle like LiveQueue: first-load
  * failure is an explicit error, a later refetch failure keeps the last good
- * table under a warning banner — a stale table is never dressed as fresh. */
+ * table under a warning banner — a stale table is never dressed as fresh.
+ * Last-good rows are only reused for a refresh of the *same* query; a failed
+ * fetch for a changed pool/retired selection is an error, not someone else's
+ * ladder. */
 export function GradesApp({ load = fetchCatalog }: { load?: LoadCatalog }) {
   const [pool, setPool] = useState("");
   const [includeRetired, setIncludeRetired] = useState(false);
   const [pools, setPools] = useState<string[]>([]);
-  const [data, setData] = useState<CatalogResponse | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [data, setData] = useState<{ key: string; body: CatalogResponse } | null>(null);
+  const [error, setError] = useState<{ key: string; message: string } | null>(null);
   const [refreshFailed, setRefreshFailed] = useState(false);
-  const hasData = useRef(false);
+  const goodKey = useRef<string | null>(null);
   const seq = useRef(0);
 
   const reload = useCallback(
@@ -132,8 +143,8 @@ export function GradesApp({ load = fetchCatalog }: { load?: LoadCatalog }) {
         if (next === null || typeof next !== "object" || !Array.isArray(next.catalog)) {
           throw new Error("catalog response has no catalog array");
         }
-        hasData.current = true;
-        setData(next);
+        goodKey.current = keyOf(query);
+        setData({ key: keyOf(query), body: next });
         setError(null);
         setRefreshFailed(false);
         // Pool choices always come from the unfiltered catalog — a filtered
@@ -147,10 +158,10 @@ export function GradesApp({ load = fetchCatalog }: { load?: LoadCatalog }) {
           return;
         }
         const message = err instanceof Error ? err.message : String(err);
-        if (hasData.current) {
+        if (goodKey.current === keyOf(query)) {
           setRefreshFailed(true);
         } else {
-          setError(message);
+          setError({ key: keyOf(query), message });
         }
       }
     },
@@ -161,8 +172,11 @@ export function GradesApp({ load = fetchCatalog }: { load?: LoadCatalog }) {
     void reload({ pool, includeRetired });
   }, [pool, includeRetired, reload]);
 
-  const groups = useMemo(() => groupByGrade(data?.catalog ?? []), [data]);
-  const clock = data === null ? null : formatClock(data.generated_at);
+  const currentKey = keyOf({ pool, includeRetired });
+  const showing = data !== null && data.key === currentKey ? data.body : null;
+  const groups = useMemo(() => groupByGrade(showing?.catalog ?? []), [showing]);
+  const clock = showing === null ? null : formatClock(showing.generated_at);
+  const shownError = error !== null && error.key === currentKey ? error.message : null;
 
   return (
     <div className="gr-root">
@@ -192,7 +206,7 @@ export function GradesApp({ load = fetchCatalog }: { load?: LoadCatalog }) {
           </button>
           <span className="gr-status" role="status" data-testid="catalog-status">
             {clock === null ? "확인 시각 알 수 없음" : `${clock} 확인 자료`}
-            {refreshFailed ? <span className="gr-warn"> ⚠ 갱신 실패 — 마지막으로 확인한 자료를 보여 주는 중</span> : null}
+            {refreshFailed && showing !== null ? <span className="gr-warn"> ⚠ 갱신 실패 — 마지막으로 확인한 자료를 보여 주는 중</span> : null}
           </span>
         </div>
         {pool !== "" ? (
@@ -201,11 +215,11 @@ export function GradesApp({ load = fetchCatalog }: { load?: LoadCatalog }) {
           </p>
         ) : null}
       </header>
-      {error !== null ? (
+      {shownError !== null ? (
         <p className="gr-error" role="alert">
-          급표를 불러오지 못했습니다 (catalog unavailable) — {error}
+          급표를 불러오지 못했습니다 (catalog unavailable) — {shownError}
         </p>
-      ) : data === null ? (
+      ) : showing === null ? (
         <p className="gr-loading">급표를 불러오는 중…</p>
       ) : groups.length === 0 ? (
         <div className="gr-empty" role="status">

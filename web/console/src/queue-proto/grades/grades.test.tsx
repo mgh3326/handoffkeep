@@ -133,6 +133,43 @@ describe("pool filter", () => {
     expect(spy).toHaveBeenCalledWith("/ui/api/bench/catalog");
     vi.unstubAllGlobals();
   });
+
+  it("a failed fetch for a changed filter is an error, never the previous query's rows", async () => {
+    const load: LoadCatalog = async (query) => {
+      if (query.pool === "claude") {
+        throw new Error("pool fetch failed");
+      }
+      return byGrade(query.pool);
+    };
+    render(<GradesApp load={load} />);
+    await waitFor(() => expect(document.querySelector('tr[data-profile="codex-sol"]')).toBeTruthy());
+    fireEvent.change(screen.getByLabelText("pool filter"), { target: { value: "claude" } });
+    await waitFor(() => expect(document.querySelector('[role="alert"]')).toBeTruthy());
+    // the all-pool table must not linger under the claude selection — the
+    // rows it would show were never fetched for this query.
+    expect(document.querySelector(".gr-table")).toBeNull();
+    expect(document.querySelector('tr[data-profile="codex-sol"]')).toBeNull();
+    // switching back shows the rows bound to that query again
+    fireEvent.change(screen.getByLabelText("pool filter"), { target: { value: "" } });
+    await waitFor(() => expect(document.querySelector('tr[data-profile="codex-sol"]')).toBeTruthy());
+  });
+
+  it("a failed same-query refresh keeps the last good table under a warning", async () => {
+    let fail = false;
+    const load: LoadCatalog = async () => {
+      if (fail) {
+        throw new Error("refresh failed");
+      }
+      return byGrade(undefined);
+    };
+    render(<GradesApp load={load} />);
+    await waitFor(() => expect(document.querySelector('tr[data-profile="codex-sol"]')).toBeTruthy());
+    fail = true;
+    fireEvent.click(screen.getByRole("button", { name: "새로고침" }));
+    await waitFor(() => expect(screen.getByTestId("catalog-status").textContent).toContain("갱신 실패"));
+    expect(document.querySelector('tr[data-profile="codex-sol"]')).toBeTruthy();
+    expect(document.querySelector('[role="alert"]')).toBeNull();
+  });
 });
 
 describe("read-only surface", () => {
