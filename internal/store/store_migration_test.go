@@ -55,14 +55,14 @@ func TestRelayEventsV6ToV7Upgrade(t *testing.T) {
 		t.Fatal(err)
 	}
 	var version int
-	if err = pool.QueryRow(ctx, `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != 11 {
+	if err = pool.QueryRow(ctx, `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != 12 {
 		t.Fatalf("schema version=%d err=%v", version, err)
 	}
 	var constraintOID uint32
 	if err = pool.QueryRow(ctx, `SELECT oid FROM pg_constraint WHERE conrelid='relay_events'::regclass AND conname='relay_events_kind_check'`).Scan(&constraintOID); err != nil {
 		t.Fatal(err)
 	}
-	// A second open must see schema version 11 and skip the lock-heavy v7 DDL.
+	// A second open must see schema version 12 and skip the lock-heavy v7 DDL.
 	// The constraint OID would change if it were dropped and re-added again.
 	if err = s.migrate(ctx); err != nil {
 		t.Fatal(err)
@@ -137,11 +137,123 @@ func TestTaskCommentsMigrationIsAdditiveAndIdempotent(t *testing.T) {
 	if err = pool.QueryRow(ctx, `SELECT count(*) FROM pg_trigger WHERE tgname='task_comments_append_only' AND tgrelid='task_comments'::regclass`).Scan(&triggers); err != nil || triggers != 1 {
 		t.Fatalf("triggers=%d err=%v", triggers, err)
 	}
-	if err = pool.QueryRow(ctx, `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != 11 {
+	if err = pool.QueryRow(ctx, `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != 12 {
 		t.Fatalf("schema version=%d err=%v", version, err)
 	}
 	xs, err := s.ListTaskComments(ctx, task.ID, 0, 10)
 	if err != nil || len(xs) != 1 || xs[0].ID != first.ID {
 		t.Fatalf("comments=%+v err=%v", xs, err)
+	}
+}
+
+// TestBenchCatalogV11ToV12Upgrade starts from a v9-shaped bench_grades table
+// holding a historic row and proves the v12 migration copies it into
+// bench_catalog as the profile-default row, survives a second migrate, and
+// leaves later catalog edits untouched when the backfill cannot re-run.
+func TestBenchCatalogV11ToV12Upgrade(t *testing.T) {
+	url := os.Getenv("HANDOFFKEEP_TEST_DB_URL")
+	if url == "" {
+		t.Skip("HANDOFFKEEP_TEST_DB_URL is required for PostgreSQL migration tests")
+	}
+	ctx := context.Background()
+	admin, err := pgxpool.New(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer admin.Close()
+	schema := fmt.Sprintf("bench_catalog_%d", time.Now().UnixNano())
+	if _, err = admin.Exec(ctx, "CREATE SCHEMA "+schema); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = admin.Exec(ctx, "DROP SCHEMA "+schema+" CASCADE") }()
+	config, err := pgxpool.ParseConfig(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.ConnConfig.RuntimeParams["search_path"] = schema + ",public"
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if _, err = pool.Exec(ctx, `CREATE TABLE bench_grades (profile TEXT PRIMARY KEY, grade TEXT NOT NULL CHECK(grade IN ('S+','S','A+','A','B','C')), boundary_version TEXT NOT NULL DEFAULT '', deviation_ref TEXT NOT NULL, decided_at TIMESTAMPTZ NOT NULL, decided_by TEXT NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = pool.Exec(ctx, `INSERT INTO bench_grades(profile,grade,boundary_version,deviation_ref,decided_at,decided_by) VALUES('devin-ds41','A+','2026-09-07','deviation-2026-09-07','2026-09-07T04:30:00Z','mac-personal')`); err != nil {
+		t.Fatal(err)
+	}
+
+	s := &Store{pool: pool}
+	if err = s.migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var profile, effort, grade, boundaryVersion string
+	if err = pool.QueryRow(ctx, `SELECT profile,effort,grade,boundary_version FROM bench_catalog WHERE profile='devin-ds41'`).Scan(&profile, &effort, &grade, &boundaryVersion); err != nil {
+		t.Fatal(err)
+	}
+	if effort != "" || grade != "A+" || boundaryVersion != "2026-09-07" {
+		t.Fatalf("migrated catalog row=(%s,%s,%s,%s)", profile, effort, grade, boundaryVersion)
+	}
+	if _, err = pool.Exec(ctx, `UPDATE bench_catalog SET model_id='devin-ds41-model', pool='devin' WHERE profile='devin-ds41'`); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var version, rows, modelRows int
+	if err = pool.QueryRow(ctx, `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != 12 {
+		t.Fatalf("schema version=%d err=%v", version, err)
+	}
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM schema_version WHERE version=12`).Scan(&version); err != nil || version != 1 {
+		t.Fatalf("version 12 rows=%d err=%v", version, err)
+	}
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM bench_catalog`).Scan(&rows); err != nil || rows != 1 {
+		t.Fatalf("catalog rows=%d err=%v", rows, err)
+	}
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM bench_catalog WHERE profile='devin-ds41' AND model_id='devin-ds41-model'`).Scan(&modelRows); err != nil || modelRows != 1 {
+		t.Fatalf("catalog edit preserved=%d err=%v", modelRows, err)
+	}
+	grades, err := s.ListBenchGrades(ctx)
+	if err != nil || len(grades) != 1 || grades[0].Profile != "devin-ds41" || grades[0].Grade != "A+" {
+		t.Fatalf("legacy grade projection=%+v err=%v", grades, err)
+	}
+	t.Logf("v11→v12 upgrade: catalog_rows=%d legacy_projection=%d", rows, len(grades))
+}
+
+// TestBenchCatalogEmptyMigration proves the v12 block is a no-op on a database
+// that never had bench_grades rows: the table exists, empty, after one migrate.
+func TestBenchCatalogEmptyMigration(t *testing.T) {
+	url := os.Getenv("HANDOFFKEEP_TEST_DB_URL")
+	if url == "" {
+		t.Skip("HANDOFFKEEP_TEST_DB_URL is required for PostgreSQL migration tests")
+	}
+	ctx := context.Background()
+	admin, err := pgxpool.New(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer admin.Close()
+	schema := fmt.Sprintf("bench_empty_%d", time.Now().UnixNano())
+	if _, err = admin.Exec(ctx, "CREATE SCHEMA "+schema); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = admin.Exec(ctx, "DROP SCHEMA "+schema+" CASCADE") }()
+	config, err := pgxpool.ParseConfig(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.ConnConfig.RuntimeParams["search_path"] = schema + ",public"
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	s := &Store{pool: pool}
+	if err = s.migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var rows int
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM bench_catalog`).Scan(&rows); err != nil || rows != 0 {
+		t.Fatalf("empty catalog rows=%d err=%v", rows, err)
 	}
 }

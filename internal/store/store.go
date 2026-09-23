@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"math"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -43,6 +44,14 @@ var (
 	ErrTaskNotFound         = errors.New("task_not_found")
 	ErrRelayEventNotFound   = errors.New("relay_event_not_found")
 	ErrDeviationRefRequired = errors.New("deviation_ref_required")
+	ErrDecidedByRequired    = errors.New("decided_by_required")
+	// ErrBenchCatalogMonotonicity is returned when a catalog batch would leave
+	// a profile whose grade falls as effort rises (higher effort must not
+	// degrade to a worse grade).
+	ErrBenchCatalogMonotonicity = errors.New("bench_catalog_not_monotonic")
+	// ErrBenchCatalogSolGrade enforces the scopefuel _SOL_PROFILES rule on the
+	// server: Sol profiles may only ever be graded S+.
+	ErrBenchCatalogSolGrade = errors.New("bench_catalog_sol_grade")
 	// ErrQueueEmpty is deliberately distinct from a missing task.  It lets
 	// queue consumers treat an empty lane as an expected terminal condition.
 	ErrQueueEmpty = errors.New("queue_empty")
@@ -405,6 +414,30 @@ type BenchGrade struct {
 	DecidedBy       string    `json:"decided_by"`
 }
 
+// BenchCatalogEntry is one row of the (profile, effort)-keyed canonical grade
+// catalog. Unlike BenchGrade — where the server stamps the authenticated
+// client into decided_by — DecidedBy here is caller-supplied provenance: the
+// operator-only PUT records who or which decision produced the assignment.
+// Effort "" is the profile-default row and also the compatibility projection
+// point for the legacy bench_grades surface.
+type BenchCatalogEntry struct {
+	Profile             string     `json:"profile"`
+	Effort              string     `json:"effort"`
+	ModelID             string     `json:"model_id"`
+	Pool                string     `json:"pool"`
+	Grade               string     `json:"grade"`
+	Score               *float64   `json:"score"`
+	Gate                string     `json:"gate"`
+	GateReason          *string    `json:"gate_reason"`
+	BenchmarkSource     *string    `json:"benchmark_source"`
+	BenchmarkAnnotation *string    `json:"benchmark_annotation"`
+	BoundaryVersion     string     `json:"boundary_version"`
+	DeviationRef        string     `json:"deviation_ref"`
+	DecidedAt           time.Time  `json:"decided_at"`
+	DecidedBy           string     `json:"decided_by"`
+	RetiredAt           *time.Time `json:"retired_at"`
+}
+
 // Attachment is immutable binary metadata. Object bytes are kept in R2; PostgreSQL
 // holds only the content address, provenance, and references.
 type Attachment struct {
@@ -587,6 +620,23 @@ func (s *Store) migrate(ctx context.Context) error {
 			return err
 		}
 	}
+	var v12Applied bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_version WHERE version=12)`).Scan(&v12Applied); err != nil {
+		return err
+	}
+	if !v12Applied {
+		v12 := []string{
+			`CREATE TABLE IF NOT EXISTS bench_catalog (profile TEXT, effort TEXT NOT NULL DEFAULT '', model_id TEXT NOT NULL, pool TEXT NOT NULL, grade TEXT NOT NULL CHECK(grade IN ('S+','S','A+','A','B','C')), score DOUBLE PRECISION, gate TEXT NOT NULL DEFAULT 'default' CHECK(gate IN ('default','escalation','consult_only')), gate_reason TEXT, benchmark_source TEXT, benchmark_annotation TEXT, boundary_version TEXT NOT NULL DEFAULT '', deviation_ref TEXT NOT NULL, decided_at TIMESTAMPTZ NOT NULL, decided_by TEXT NOT NULL, retired_at TIMESTAMPTZ, PRIMARY KEY(profile, effort))`,
+			`CREATE INDEX IF NOT EXISTS bench_catalog_pool ON bench_catalog(pool) WHERE retired_at IS NULL`,
+			`INSERT INTO bench_catalog(profile, effort, model_id, pool, grade, boundary_version, deviation_ref, decided_at, decided_by) SELECT profile, '', '', '', grade, boundary_version, deviation_ref, decided_at, decided_by FROM bench_grades ON CONFLICT (profile, effort) DO NOTHING`,
+			`INSERT INTO schema_version(version) VALUES (12)`,
+		}
+		for _, q := range v12 {
+			if _, err := tx.Exec(ctx, q); err != nil {
+				return err
+			}
+		}
+	}
 	if err := migrateTaskComments(ctx, tx); err != nil {
 		return err
 	}
@@ -644,6 +694,52 @@ func validBenchRep(x BenchRep) bool {
 
 func validBenchGrade(x BenchGrade) bool {
 	return validBenchRequiredText(x.Profile) && benchGradeValues[x.Grade] && validBenchText(x.BoundaryVersion) && validBenchText(x.DeviationRef) && validBenchClient(x.DecidedBy)
+}
+
+var benchGateValues = map[string]bool{"default": true, "escalation": true, "consult_only": true}
+
+// benchEffortRanks orders the effort ladder scopefuel publishes
+// (low<medium<high<xhigh<max). The profile-default row ("") and unknown effort
+// strings are exempt from the monotonicity rule — effort is an open column on
+// purpose. In ladder views "" leads the profile's rows and unknown efforts
+// sort after the known rungs.
+var benchEffortRanks = map[string]int{"low": 0, "medium": 1, "high": 2, "xhigh": 3, "max": 4}
+
+// benchSolProfiles mirrors scopefuel's _SOL_PROFILES: Sol profiles are S+ only.
+var benchSolProfiles = map[string]bool{"codex-sol": true, "kiro-sol": true}
+
+func benchGradeRank(grade string) int {
+	switch grade {
+	case "S+":
+		return 0
+	case "S":
+		return 1
+	case "A+":
+		return 2
+	case "A":
+		return 3
+	case "B":
+		return 4
+	default:
+		return 5
+	}
+}
+
+func validBenchCatalogEntry(x BenchCatalogEntry) bool {
+	if !validBenchRequiredText(x.Profile) || !validText(x.Effort, 200) || !validBenchRequiredText(x.ModelID) ||
+		!validBenchRequiredText(x.Pool) || !benchGradeValues[x.Grade] || !benchGateValues[x.Gate] ||
+		!validBenchText(x.BoundaryVersion) || !validBenchText(x.DeviationRef) || !validBenchRequiredText(x.DecidedBy) {
+		return false
+	}
+	if x.Score != nil && (math.IsNaN(*x.Score) || math.IsInf(*x.Score, 0) || *x.Score < 0 || *x.Score > 100) {
+		return false
+	}
+	for _, value := range []*string{x.GateReason, x.BenchmarkSource, x.BenchmarkAnnotation} {
+		if value != nil && !validBenchText(*value) {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Store) UpsertBenchScores(ctx context.Context, xs []BenchScore) (int, error) {
@@ -808,6 +904,11 @@ func (s *Store) UpsertBenchGrades(ctx context.Context, xs []BenchGrade) (int, er
 		if !validBenchGrade(x) {
 			return 0, errors.New("invalid bench grade")
 		}
+		// The legacy path mirrors into the catalog, so it must not admit rows
+		// the catalog itself would reject — the Sol rule applies here too.
+		if benchSolProfiles[x.Profile] && x.Grade != "S+" {
+			return 0, ErrBenchCatalogSolGrade
+		}
 		if err := guard.Reject(x.BoundaryVersion); err != nil {
 			return 0, err
 		}
@@ -821,12 +922,24 @@ func (s *Store) UpsertBenchGrades(ctx context.Context, xs []BenchGrade) (int, er
 		if err != nil {
 			return 0, err
 		}
+		// Mirror into the catalog's profile-default row so the canonical store
+		// sees legacy writes; catalog-only columns (model_id, pool, gate, ...)
+		// are preserved on conflict. A legacy grade write un-retires the row.
+		_, err = tx.Exec(ctx, `INSERT INTO bench_catalog(profile,effort,model_id,pool,grade,boundary_version,deviation_ref,decided_at,decided_by) VALUES($1,'','','',$2,$3,$4,$5,$6) ON CONFLICT (profile,effort) DO UPDATE SET grade=EXCLUDED.grade,boundary_version=EXCLUDED.boundary_version,deviation_ref=EXCLUDED.deviation_ref,decided_at=EXCLUDED.decided_at,decided_by=EXCLUDED.decided_by,retired_at=NULL`, x.Profile, x.Grade, x.BoundaryVersion, x.DeviationRef, x.DecidedAt, x.DecidedBy)
+		if err != nil {
+			return 0, err
+		}
 	}
 	return len(xs), tx.Commit(ctx)
 }
 
 func (s *Store) ListBenchGrades(ctx context.Context) ([]BenchGrade, error) {
-	rows, err := s.pool.Query(ctx, `SELECT profile,grade,boundary_version,deviation_ref,decided_at,decided_by FROM bench_grades ORDER BY profile`)
+	// The catalog is canonical: project its profile-default rows. The UNION
+	// limb keeps bench_grades rows readable when a catalog row does not exist
+	// yet (for example a write from a pre-migration binary during a rollback
+	// skew window). Once any catalog effort='' row exists — even a retired one —
+	// it alone speaks for the profile.
+	rows, err := s.pool.Query(ctx, `SELECT profile,grade,boundary_version,deviation_ref,decided_at,decided_by FROM bench_catalog WHERE effort='' AND retired_at IS NULL UNION ALL SELECT g.profile,g.grade,g.boundary_version,g.deviation_ref,g.decided_at,g.decided_by FROM bench_grades g WHERE NOT EXISTS (SELECT 1 FROM bench_catalog c WHERE c.profile=g.profile AND c.effort='') ORDER BY profile`)
 	if err != nil {
 		return nil, err
 	}
@@ -838,6 +951,151 @@ func (s *Store) ListBenchGrades(ctx context.Context) ([]BenchGrade, error) {
 			return nil, err
 		}
 		x.DecidedAt = x.DecidedAt.UTC()
+		out = append(out, x)
+	}
+	return out, rows.Err()
+}
+
+// UpsertBenchCatalog is the operator write path for the canonical grade
+// catalog. The batch is atomic: every row validates first, profile-default
+// (effort=”) rows mirror into bench_grades so legacy readers keep working,
+// and the merged post-write state must satisfy the per-profile effort
+// monotonicity rule or the whole batch rolls back.
+func (s *Store) UpsertBenchCatalog(ctx context.Context, xs []BenchCatalogEntry) (int, error) {
+	if len(xs) < 1 || len(xs) > benchBatchMax {
+		return 0, errors.New("invalid bench catalog")
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback(ctx)
+	now := time.Now().UTC()
+	profiles := map[string]bool{}
+	for _, x := range xs {
+		if strings.TrimSpace(x.DeviationRef) == "" {
+			return 0, ErrDeviationRefRequired
+		}
+		if strings.TrimSpace(x.DecidedBy) == "" {
+			return 0, ErrDecidedByRequired
+		}
+		if x.Gate == "" {
+			x.Gate = "default"
+		}
+		if !validBenchCatalogEntry(x) {
+			return 0, errors.New("invalid bench catalog entry")
+		}
+		if benchSolProfiles[x.Profile] && x.Grade != "S+" {
+			return 0, ErrBenchCatalogSolGrade
+		}
+		for _, value := range []*string{x.GateReason, x.BenchmarkSource, x.BenchmarkAnnotation} {
+			if value != nil {
+				if err := guard.Reject(*value); err != nil {
+					return 0, err
+				}
+			}
+		}
+		if err := guard.Reject(x.BoundaryVersion); err != nil {
+			return 0, err
+		}
+		if err := guard.Reject(x.DeviationRef); err != nil {
+			return 0, err
+		}
+		if err := guard.Reject(x.DecidedBy); err != nil {
+			return 0, err
+		}
+		if x.DecidedAt.IsZero() {
+			x.DecidedAt = now
+		}
+		_, err = tx.Exec(ctx, `INSERT INTO bench_catalog(profile,effort,model_id,pool,grade,score,gate,gate_reason,benchmark_source,benchmark_annotation,boundary_version,deviation_ref,decided_at,decided_by,retired_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) ON CONFLICT (profile,effort) DO UPDATE SET model_id=EXCLUDED.model_id,pool=EXCLUDED.pool,grade=EXCLUDED.grade,score=EXCLUDED.score,gate=EXCLUDED.gate,gate_reason=EXCLUDED.gate_reason,benchmark_source=EXCLUDED.benchmark_source,benchmark_annotation=EXCLUDED.benchmark_annotation,boundary_version=EXCLUDED.boundary_version,deviation_ref=EXCLUDED.deviation_ref,decided_at=EXCLUDED.decided_at,decided_by=EXCLUDED.decided_by,retired_at=EXCLUDED.retired_at`, x.Profile, x.Effort, x.ModelID, x.Pool, x.Grade, x.Score, x.Gate, x.GateReason, x.BenchmarkSource, x.BenchmarkAnnotation, x.BoundaryVersion, x.DeviationRef, x.DecidedAt, x.DecidedBy, x.RetiredAt)
+		if err != nil {
+			return 0, err
+		}
+		if x.Effort == "" {
+			if x.RetiredAt == nil {
+				_, err = tx.Exec(ctx, `INSERT INTO bench_grades(profile,grade,boundary_version,deviation_ref,decided_at,decided_by) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT (profile) DO UPDATE SET grade=EXCLUDED.grade,boundary_version=EXCLUDED.boundary_version,deviation_ref=EXCLUDED.deviation_ref,decided_at=EXCLUDED.decided_at,decided_by=EXCLUDED.decided_by`, x.Profile, x.Grade, x.BoundaryVersion, x.DeviationRef, x.DecidedAt, x.DecidedBy)
+			} else {
+				_, err = tx.Exec(ctx, `DELETE FROM bench_grades WHERE profile=$1`, x.Profile)
+			}
+			if err != nil {
+				return 0, err
+			}
+		}
+		profiles[x.Profile] = true
+	}
+	if err := checkBenchCatalogMonotonicity(ctx, tx, profiles); err != nil {
+		return 0, err
+	}
+	return len(xs), tx.Commit(ctx)
+}
+
+// checkBenchCatalogMonotonicity rejects a merged catalog state where a known
+// higher-effort rung carries a worse grade than a lower rung of the same
+// profile. Retired rows, the profile-default row (effort=”) and unknown
+// effort strings do not participate.
+func checkBenchCatalogMonotonicity(ctx context.Context, tx pgx.Tx, profiles map[string]bool) error {
+	list := make([]string, 0, len(profiles))
+	for p := range profiles {
+		list = append(list, p)
+	}
+	rows, err := tx.Query(ctx, `SELECT profile,effort,grade FROM bench_catalog WHERE profile = ANY($1) AND retired_at IS NULL AND effort <> ''`, list)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	byProfile := map[string][]BenchCatalogEntry{}
+	for rows.Next() {
+		var x BenchCatalogEntry
+		if err := rows.Scan(&x.Profile, &x.Effort, &x.Grade); err != nil {
+			return err
+		}
+		if _, ok := benchEffortRanks[x.Effort]; !ok {
+			continue
+		}
+		byProfile[x.Profile] = append(byProfile[x.Profile], x)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for profile, entries := range byProfile {
+		sort.Slice(entries, func(i, j int) bool { return benchEffortRanks[entries[i].Effort] < benchEffortRanks[entries[j].Effort] })
+		best := benchGradeRank("C")
+		for _, x := range entries {
+			rank := benchGradeRank(x.Grade)
+			if rank > best {
+				return fmt.Errorf("%w: %s effort %s grade %s below lower effort", ErrBenchCatalogMonotonicity, profile, x.Effort, x.Grade)
+			}
+			best = rank
+		}
+	}
+	return nil
+}
+
+// ListBenchCatalog returns catalog rows in ladder order — pool, then grade
+// descending (S+ first), then profile, then effort rung. A pool filter turns
+// the result into the subscription ladder for that pool and drops
+// consult_only rows (they remain visible in the unfiltered listing). Retired
+// rows are hidden unless includeRetired is set.
+func (s *Store) ListBenchCatalog(ctx context.Context, pool string, includeRetired bool) ([]BenchCatalogEntry, error) {
+	if !validText(pool, 200) {
+		return nil, errors.New("invalid bench catalog query")
+	}
+	rows, err := s.pool.Query(ctx, `SELECT profile,effort,model_id,pool,grade,score,gate,gate_reason,benchmark_source,benchmark_annotation,boundary_version,deviation_ref,decided_at,decided_by,retired_at FROM bench_catalog WHERE ($1='' OR pool=$1) AND ($1='' OR gate<>'consult_only') AND ($2 OR retired_at IS NULL) ORDER BY pool, CASE grade WHEN 'S+' THEN 0 WHEN 'S' THEN 1 WHEN 'A+' THEN 2 WHEN 'A' THEN 3 WHEN 'B' THEN 4 ELSE 5 END, profile, CASE effort WHEN '' THEN 0 WHEN 'low' THEN 1 WHEN 'medium' THEN 2 WHEN 'high' THEN 3 WHEN 'xhigh' THEN 4 WHEN 'max' THEN 5 ELSE 6 END, effort`, pool, includeRetired)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []BenchCatalogEntry{}
+	for rows.Next() {
+		var x BenchCatalogEntry
+		if err := rows.Scan(&x.Profile, &x.Effort, &x.ModelID, &x.Pool, &x.Grade, &x.Score, &x.Gate, &x.GateReason, &x.BenchmarkSource, &x.BenchmarkAnnotation, &x.BoundaryVersion, &x.DeviationRef, &x.DecidedAt, &x.DecidedBy, &x.RetiredAt); err != nil {
+			return nil, err
+		}
+		x.DecidedAt = x.DecidedAt.UTC()
+		if x.RetiredAt != nil {
+			t := x.RetiredAt.UTC()
+			x.RetiredAt = &t
+		}
 		out = append(out, x)
 	}
 	return out, rows.Err()
