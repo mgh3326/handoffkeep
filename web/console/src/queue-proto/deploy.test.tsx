@@ -309,7 +309,7 @@ describe("DeployPanel", () => {
     await waitFor(() => expect(screen.getByText(/조회 범위 안에 성공 배포 기록이 없습니다/)).toBeTruthy());
     const section = screen.getByLabelText("panewire-hub 배포");
     expect(section.textContent).not.toContain("성공 배포 기록 없음");
-    expect(section.textContent).toContain("더 오래된 배포 기록이 있을 수 있습니다");
+    expect(section.textContent).toContain("더 오래된 배포 기록이 있을 수 있어");
   });
 });
 
