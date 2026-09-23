@@ -165,8 +165,9 @@ func projectReap(nodes []hubReapNode, tasks []store.Task, tasksTruncated bool, n
 				} else {
 					row.Basis = "job-terminal"
 				}
-			case report.GraceSeconds <= 0:
-				// Without a positive grace the builder wait would be skipped.
+			case report.GraceSeconds < 0:
+				// A negative grace would make every merged task look old
+				// enough. Zero is a valid operator choice (wrk reap --grace 0).
 				class, row.Reason = reapClassHeld, "report-shape"
 			default:
 				class, row.Reason = reapBuilderTaskGate(&row, byJob[source.JobID], tasksTruncated, grace, now)

@@ -165,8 +165,8 @@ func TestProjectReapOnlyLowers(t *testing.T) {
 	}
 }
 
-// A report whose schema this join does not know, or whose grace is not
-// positive, cannot vouch for anything: no candidates, reason report-shape.
+// A report whose schema this join does not know cannot vouch for anything,
+// and a negative grace cannot gate a builder: both hold, reason report-shape.
 func TestProjectReapReportShape(t *testing.T) {
 	merged := []store.Task{reapTask(599, reapMergedBuilderJob, "merged", reapNow.Add(-time.Hour))}
 	future := reapFixtureNodes(t)
@@ -175,12 +175,18 @@ func TestProjectReapReportShape(t *testing.T) {
 	if len(candidates) != 0 || reapByPane(held)["w2:p25"].Reason != "report-shape" || reapByPane(held)["w2:p32"].Reason != "report-shape" {
 		t.Fatalf("schema 2: candidates=%+v", candidates)
 	}
-	for _, grace := range []int64{0, -600} {
-		nodes := reapFixtureNodes(t)
-		nodes[0].Report.GraceSeconds = grace
-		candidates, held, _ := projectReap(nodes, merged, false, reapNow)
-		if _, promoted := reapByPane(candidates)["w2:p32"]; promoted || reapByPane(held)["w2:p32"].Reason != "report-shape" {
-			t.Fatalf("grace %d promoted the builder: %+v", grace, candidates)
-		}
+	negative := reapFixtureNodes(t)
+	negative[0].Report.GraceSeconds = -600
+	candidates, held, _ = projectReap(negative, merged, false, reapNow)
+	if _, promoted := reapByPane(candidates)["w2:p32"]; promoted || reapByPane(held)["w2:p32"].Reason != "report-shape" {
+		t.Fatalf("negative grace promoted the builder: %+v", candidates)
+	}
+	// Zero is a valid operator choice (wrk reap --grace 0): a merged task
+	// promotes its builder at once.
+	zero := reapFixtureNodes(t)
+	zero[0].Report.GraceSeconds = 0
+	justMerged := []store.Task{reapTask(599, reapMergedBuilderJob, "merged", reapNow)}
+	if candidates, _, _ := projectReap(zero, justMerged, false, reapNow); reapByPane(candidates)["w2:p32"].Basis != "task-terminal" {
+		t.Fatalf("grace 0 held the builder: %+v", candidates)
 	}
 }
