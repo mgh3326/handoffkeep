@@ -131,12 +131,14 @@ type deployServiceView struct {
 	Repo    string `json:"repo"`
 	Target  string `json:"target,omitempty"`
 	DocURL  string `json:"doc_url"`
-	// RecordCount covers every document under deploy/<service>/ — including
-	// ones this view could not parse (InvalidCount).
+	// RecordCount covers every document scanned under deploy/<service>/ —
+	// including ones this view could not parse (InvalidCount). When
+	// DocsCapped is set the space may hold more than were scanned.
 	RecordCount  int `json:"record_count"`
 	InvalidCount int `json:"invalid_count,omitempty"`
-	// DocsCapped is set when the document scan returned its full bound — the
-	// record list (and possibly the chosen current) may be incomplete.
+	// DocsCapped is set when the scan stopped while older documents may
+	// remain — either the first window was full, or the deeper scan hit its
+	// hard cap before finding a success or reaching the end of the space.
 	DocsCapped bool              `json:"docs_capped,omitempty"`
 	Current    *deployRecordView `json:"current"`
 	// Latest is the newest parseable record overall — present whenever it is
