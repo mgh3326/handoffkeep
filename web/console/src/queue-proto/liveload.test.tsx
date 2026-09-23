@@ -16,7 +16,7 @@ import {
 } from "../live";
 import { applyView, EMPTY_FILTERS } from "./adapter";
 import { FleetApp } from "../FleetApp";
-import { LiveChips, RowFields } from "./TaskRow";
+import { CardFields, LiveChips, RowFields } from "./TaskRow";
 import { LiveStrip } from "./LiveStrip";
 import type { ProtoTask } from "./types";
 
@@ -240,6 +240,62 @@ describe("LiveChips", () => {
     expect(backlog.container.textContent).toBe("");
     const synth = render(<LiveChips task={linkedTask} now={NOW} live={undefined} />);
     expect(synth.container.textContent).toBe("");
+  });
+});
+
+describe("board card live marker — claimant never clipped (#598 R3)", () => {
+  // CardFields renders inside a fixed-height virtual row (76/96px) with
+  // overflow:hidden. A per-job chip row of its own would push the
+  // lane/claimant line out of the clipped box, so cards carry one inline
+  // summary marker on the meta line instead.
+  const linkedTask = mkTask({ refs: { job_id: "job-b598" }, claimant: "wk-7" });
+  const live = mkLive({
+    jobs: {
+      status: "ok",
+      fetched_at: "2026-09-23T11:59:59Z",
+      items: [mkJob({}), mkJob({ job_id: "job-t598", role: "worker", pane: "w16:p2" })],
+    },
+    links: [{ task_id: 598, job_id: "job-b598", job_found: true, children: ["job-t598"] }],
+  });
+
+  it("card renders a single 'live N' marker on the meta line; claimant stays", () => {
+    const { container } = render(<CardFields task={linkedTask} now={NOW} live={live} />);
+    const marker = container.querySelector(".qp-livesum");
+    expect(marker?.textContent).toBe("● live 2");
+    expect(marker?.getAttribute("title")).toContain("job-b598");
+    expect(marker?.getAttribute("title")).toContain("job-t598");
+    // No per-job chip row: exactly one livechip element in the whole card.
+    expect(container.querySelectorAll(".qp-livechip")).toHaveLength(1);
+    expect(container.querySelector(".qp-livechips")).toBeNull();
+    // DOM order pins the layout: marker rides the meta line, before the
+    // title; the lane/claimant cell remains the last line of the card.
+    const cells = [...container.children];
+    const title = container.querySelector(".qp-title")!;
+    const lane = container.querySelector(".qp-lane")!;
+    expect(cells.indexOf(marker!)).toBeGreaterThanOrEqual(0);
+    expect(cells.indexOf(marker!)).toBeLessThan(cells.indexOf(title));
+    expect(cells.indexOf(lane)).toBe(cells.length - 1);
+    expect(lane.textContent).toContain("wk-7");
+  });
+
+  it("card failure states stay explicit — never blank, never 'idle'", () => {
+    const failed = render(<CardFields task={linkedTask} now={NOW} live={mkLive({ jobs: { status: "timeout", fetched_at: "", items: [] } })} />);
+    expect(failed.container.textContent).toContain("잡 조회 불가");
+    expect(failed.container.querySelector(".qp-livechip-warn")).not.toBeNull();
+    expect(failed.container.querySelector(".qp-lane")?.textContent).toContain("wk-7");
+    const absent = render(
+      <CardFields task={linkedTask} now={NOW} live={mkLive({ links: [{ task_id: 598, job_id: "job-b598", job_found: false, children: [] }] })} />,
+    );
+    expect(absent.container.textContent).toContain("활성 잡 없음");
+    const unrecorded = render(<CardFields task={mkTask({ id: 599, refs: {} })} now={NOW} live={live} />);
+    expect(unrecorded.container.textContent).toContain("잡 ID 미기록");
+  });
+
+  it("non-live card and synthetic dataset render no marker", () => {
+    const backlog = render(<CardFields task={mkTask({ state: "backlog" })} now={NOW} live={live} />);
+    expect(backlog.container.querySelector(".qp-livechip")).toBeNull();
+    const synth = render(<CardFields task={linkedTask} now={NOW} live={undefined} />);
+    expect(synth.container.querySelector(".qp-livechip")).toBeNull();
   });
 });
 

@@ -88,6 +88,45 @@ export function LiveChips({ task, now, live }: { task: ProtoTask; now: string; l
   );
 }
 
+/** One-line live marker for the fixed-height board card: the clipped card
+ * box (76/96px) cannot spare a chip row without pushing the lane/claimant
+ * line out, so cards carry a dot + job count instead of per-job chips.
+ * Failure states keep their explicit words — never blank, never idle-looking.
+ * Full role·machine·pane·elapsed chips stay on list rows. */
+function LiveChipSummary({ task, now, live }: { task: ProtoTask; now: string; live: LiveResponse | undefined }) {
+  if (live === undefined || !LIVE_TASK_STATES.has(task.state)) {
+    return null;
+  }
+  if (live.jobs.fetched_at === "") {
+    return (
+      <span className="qp-livechip qp-livechip-warn" title={`잡 조회 불가 · ${liveSectionLabel(live.jobs.status)}`}>
+        잡 조회 불가
+      </span>
+    );
+  }
+  const { recorded, primary, children } = taskLiveJobs(live, task.id);
+  if (!recorded) {
+    return <span className="qp-livechip qp-livechip-warn">잡 ID 미기록</span>;
+  }
+  if (primary === null) {
+    return <span className="qp-livechip qp-livechip-warn">활성 잡 없음</span>;
+  }
+  const elapsed = liveAgeLabel(now, primary.started_at);
+  const title = [
+    `job ${primary.job_id}`,
+    primary.role === "" ? "role 미상" : primary.role,
+    primary.machine === "" ? "머신 미상" : primary.machine,
+    elapsed === null ? "경과 미상" : `${elapsed}째`,
+    ...children.map((job) => `+ job ${job.job_id}`),
+  ];
+  return (
+    <span className="qp-livechip qp-livesum" title={title.join(" · ")}>
+      <span className="qp-livechip-role">●</span>
+      {` live ${1 + children.length}`}
+    </span>
+  );
+}
+
 /** The hub job standing in for an unrecorded claimant: the task's primary
  * job owner_lane, exact-matched — never a guessed string. */
 function liveClaimant(task: ProtoTask, live: LiveResponse | undefined): string | null {
@@ -169,7 +208,8 @@ export function RowFields({ task, now, showStateLabel = false, live }: RowFields
  * overflow:hidden, so every extra line is clipped content. The column head
  * already names the state and the second age column adds nothing a card
  * needs, so both stay out; what remains is identity: pri · id · age · stale ·
- * title (CSS-clamped, full text in the DOM) · lane/claimant. */
+ * live summary (inline on the meta line — a chip row of its own would clip
+ * the claimant) · title (CSS-clamped, full text in the DOM) · lane/claimant. */
 export function CardFields({ task, now, live }: { task: ProtoTask; now: string; live?: LiveResponse }) {
   const stale = isStale(task, now);
   const claimantFill = liveClaimant(task, live);
@@ -187,8 +227,8 @@ export function CardFields({ task, now, live }: { task: ProtoTask; now: string; 
           </span>
         </span>
       ) : null}
+      <LiveChipSummary task={task} now={now} live={live} />
       <span className="qp-cell qp-title">{task.title}</span>
-      <LiveChips task={task} now={now} live={live} />
       <span className="qp-cell qp-lane">
         {task.lane}/
         {task.claimant === null ? (
