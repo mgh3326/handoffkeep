@@ -1,17 +1,16 @@
-{{define "board_page"}}
+{{define "grades_page"}}
 <!doctype html>
 <html lang="ko">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Queue · Fleet console</title>
-  <meta name="hk-csrf" content="{{.CSRF}}">
+  <title>Grades · Fleet console</title>
   <link rel="stylesheet" href="{{assetURL "/ui/static/console/tokens.css"}}">
-  <link rel="stylesheet" href="{{assetURL "/ui/static/console/board.css"}}">
+  <link rel="stylesheet" href="{{assetURL "/ui/static/console/grades.css"}}">
 </head>
 <body>
-  <div id="board-root">
-    <!-- Replaced by the queue app on mount; the app's sidebar carries the
+  <div id="grades-root">
+    <!-- Replaced by the grades app on mount; the app's sidebar carries the
          global navigation, so the page never shows two navigation blocks.
          Without JavaScript these links remain the way out. -->
     <nav aria-label="Fleet console pages">
@@ -23,7 +22,7 @@
       <a href="/ui/grades">Grades</a>
     </nav>
   </div>
-  <script type="module" src="{{assetURL "/ui/static/console/board.js"}}"></script>
+  <script type="module" src="{{assetURL "/ui/static/console/grades.js"}}"></script>
 </body>
 </html>
 {{end}}

@@ -36,7 +36,7 @@ export function applyTheme(theme: Theme, storage?: Pick<Storage, "setItem">): vo
   }
 }
 
-export type NavKey = "queue" | "decisions" | "fleet" | "timeline" | "compose";
+export type NavKey = "queue" | "decisions" | "fleet" | "grades" | "timeline" | "compose";
 
 /** Global destinations. Home (#500) does not exist yet, so it is listed as
  * not-yet-available text instead of a link that leads nowhere. */
@@ -44,6 +44,7 @@ const NAV_LINKS: { key: NavKey; label: string; href: string }[] = [
   { key: "queue", label: "Queue", href: "/ui/queue" },
   { key: "decisions", label: "Decisions", href: "/ui/decisions" },
   { key: "fleet", label: "Fleet", href: "/ui/fleet" },
+  { key: "grades", label: "Grades", href: "/ui/grades" },
   { key: "timeline", label: "Timeline", href: "/ui/timeline" },
   { key: "compose", label: "Compose", href: "/ui/compose" },
 ];
