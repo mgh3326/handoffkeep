@@ -82,6 +82,14 @@ func (h *Handler) serveAPI(w http.ResponseWriter, r *http.Request, identity cfac
 			return
 		}
 		h.boardDoc(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/ui/api/deploy-pending":
+		// Deploy status is assembled from deploy-record documents and task
+		// events — the same operator-only reading material as /ui/api/board/doc.
+		if identity.ServiceName != "" {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		h.deployPending(w, r)
 	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/ui/api/nodes/"):
 		h.setAccepting(w, r, identity)
 	default:
