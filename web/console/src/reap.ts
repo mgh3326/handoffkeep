@@ -81,6 +81,7 @@ const REASON_LABELS: Record<string, string> = {
   "label-conflict": "claim·spawn label 불일치",
   "label-reused": "label 재사용",
   "pane-ambiguous": "pane 중복",
+  "record-unreadable": "job 기록 읽기 불가",
   "lane-route": "레인 라우트(상주)",
   "lanes-unreadable": "레인 확인 불가",
   "no-terminal-event": "job 진행 중",
