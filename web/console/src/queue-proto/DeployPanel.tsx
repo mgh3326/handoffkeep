@@ -13,6 +13,7 @@ import {
   deployPRLabel,
   deployStamp,
   fetchDeployPending,
+  isDeployPendingResponse,
   shortDeployedRef,
   type DeployPendingResponse,
   type DeployRecordView,
@@ -154,6 +155,11 @@ function ServiceRow({ svc, now }: { svc: DeployServiceView; now: string }) {
         <RecordLine label="현재 판" rec={svc.current} now={now} />
       )}
       {svc.latest !== undefined ? <RecordLine label="최근 시도" rec={svc.latest} now={now} /> : null}
+      {svc.docs_capped ? (
+        <p className="qp-status-warn" style={{ margin: "var(--hk-space-1) 0 0", fontSize: "var(--hk-font-meta)" }}>
+          기록 조회 상한에 닿았습니다 — 더 오래된 배포 기록이 있을 수 있습니다.
+        </p>
+      ) : null}
       {svc.invalid_count !== undefined && svc.invalid_count > 0 ? (
         <p className="qp-status-warn" style={{ margin: "var(--hk-space-1) 0 0", fontSize: "var(--hk-font-meta)" }}>
           형식이 맞지 않는 기록 {svc.invalid_count}건은 표시하지 않았습니다.
@@ -181,9 +187,9 @@ export function DeployPanel({ fetchStatus = fetchDeployPending, pollMs = 15_000 
     const load = async () => {
       try {
         const next = await fetchStatus();
-        // A payload without the services array is a contract violation —
-        // render the failure state, never a partially-shaped board.
-        if (!cancelled && next !== null && Array.isArray(next.services)) {
+        // A payload that only matches the outer shape is still a contract
+        // violation — validate nested rows, never render a partial board.
+        if (!cancelled && isDeployPendingResponse(next)) {
           setData(next);
           setFailed(false);
         } else if (!cancelled) {

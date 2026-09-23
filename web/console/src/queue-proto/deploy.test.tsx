@@ -174,6 +174,32 @@ describe("DeployPanel", () => {
     await waitFor(() => expect(screen.getByText(/불러오지 못했습니다/)).toBeTruthy());
     expect(document.querySelector("[data-deploy-state]")?.getAttribute("data-deploy-state")).toBe("error");
   });
+
+  it("a nested malformed payload fails explicitly instead of crashing render", async () => {
+    // services:[null] passes a shallow Array.isArray check but must never
+    // reach the row renderer — the panel shows the failure state.
+    const malformed = { generated_at: "2026-09-23T04:00:00Z", pr_source: "refs.pr", services: [null] };
+    render(
+      <DeployPanel
+        fetchStatus={vi.fn(() => Promise.resolve(malformed as unknown as DeployPendingResponse))}
+        pollMs={600_000}
+      />,
+    );
+    await waitFor(() => expect(screen.getByText(/불러오지 못했습니다/)).toBeTruthy());
+    expect(document.querySelector("[data-deploy-state]")?.getAttribute("data-deploy-state")).toBe("error");
+  });
+
+  it("a resolved payload missing record fields is rejected, not half-rendered", async () => {
+    const data = fixture() as unknown as Record<string, unknown>;
+    (data.services as unknown[])[0] = { service: "handoffkeep" };
+    render(
+      <DeployPanel
+        fetchStatus={vi.fn(() => Promise.resolve(data as unknown as DeployPendingResponse))}
+        pollMs={600_000}
+      />,
+    );
+    await waitFor(() => expect(screen.getByText(/불러오지 못했습니다/)).toBeTruthy());
+  });
 });
 
 describe("deploy helpers", () => {

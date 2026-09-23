@@ -277,6 +277,57 @@ func TestUIDeployPendingFailedAndRolledBack(t *testing.T) {
 	}
 }
 
+// Regression (tester BLOCKER): "latest attempt" is selected by contract time
+// (deployed_at, key-time fallback), not document key order — a failed attempt
+// whose deployed_at postdates the last success must surface even when its key
+// sorts earlier.
+func TestUIDeployPendingLatestByContractTime(t *testing.T) {
+	s := uiStore(t)
+	db := deployDB(t)
+	wipeDeployDocs(t, db)
+	fixture := newUIJWTFixture(t)
+	h := newUITestServer(t, s, fixture, "", "", 0)
+	defer h.Close()
+	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
+
+	// Later key, earlier deployed_at: the success.
+	seedDeployDoc(t, s, "deploy/handoffkeep/20260924T000000Z", deployFixtureBody(t, "handoffkeep", "success", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "2026-09-20T00:00:00Z", nil))
+	// Earlier key, later deployed_at: the more recent attempt, failed.
+	seedDeployDoc(t, s, "deploy/handoffkeep/20260923T000000Z", deployFixtureBody(t, "handoffkeep", "failed", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "2026-09-25T00:00:00Z", nil))
+
+	response := getDeployPending(t, h, assertion)
+	hk := serviceView(t, response, "handoffkeep")
+	if hk["current"].(map[string]any)["deployed_ref"] != "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
+		t.Fatalf("current=%v", hk["current"])
+	}
+	latest, ok := hk["latest"].(map[string]any)
+	if !ok || latest["result"] != "failed" || latest["record_key"] != "deploy/handoffkeep/20260923T000000Z" {
+		t.Fatalf("newer failed attempt by deployed_at must surface as latest: %v", hk["latest"])
+	}
+}
+
+// The document scan is bounded — when it returns full, the view must say so
+// instead of implying the record set (and chosen current) is complete.
+func TestUIDeployPendingDocsCapped(t *testing.T) {
+	s := uiStore(t)
+	db := deployDB(t)
+	wipeDeployDocs(t, db)
+	fixture := newUIJWTFixture(t)
+	h := newUITestServer(t, s, fixture, "", "", 0)
+	defer h.Close()
+	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
+
+	for i := 0; i < 200; i++ {
+		seedDeployDoc(t, s, "deploy/panewire-hub/20260102T"+time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC).Add(time.Duration(i)*time.Second).Format("150405")+"Z",
+			deployFixtureBody(t, "panewire-hub", "failed", "", "2026-01-02T00:00:00Z", nil))
+	}
+	response := getDeployPending(t, h, assertion)
+	pw := serviceView(t, response, "panewire-hub")
+	if pw["docs_capped"] != true || pw["record_count"] != float64(200) {
+		t.Fatalf("docs_capped=%v record_count=%v", pw["docs_capped"], pw["record_count"])
+	}
+}
+
 func TestUIDeployPendingInvalidRecords(t *testing.T) {
 	s := uiStore(t)
 	db := deployDB(t)

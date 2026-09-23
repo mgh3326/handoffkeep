@@ -29,6 +29,7 @@ export type DeployServiceView = {
   doc_url: string;
   record_count: number;
   invalid_count?: number;
+  docs_capped?: boolean;
   current: DeployRecordView | null;
   latest?: DeployRecordView;
   merged_boundary: "deployed_at" | "unrecorded" | "no_current";
@@ -42,13 +43,40 @@ export type DeployPendingResponse = {
   events_capped?: boolean;
 };
 
+const isRecordView = (v: unknown): v is DeployRecordView =>
+  typeof v === "object" && v !== null &&
+  typeof (v as DeployRecordView).record_key === "string" &&
+  typeof (v as DeployRecordView).result === "string";
+
+const isServiceView = (v: unknown): v is DeployServiceView =>
+  typeof v === "object" && v !== null &&
+  typeof (v as DeployServiceView).service === "string" &&
+  typeof (v as DeployServiceView).repo === "string" &&
+  typeof (v as DeployServiceView).record_count === "number" &&
+  typeof (v as DeployServiceView).merged_boundary === "string" &&
+  Array.isArray((v as DeployServiceView).merged_since) &&
+  ((v as DeployServiceView).current === null || isRecordView((v as DeployServiceView).current)) &&
+  ((v as DeployServiceView).latest === undefined || isRecordView((v as DeployServiceView).latest));
+
+/** A payload that only matches the outer `services` array is still malformed —
+ * nested rows must carry the fields the panel dereferences, or the response is
+ * rejected wholesale instead of crashing mid-render. */
+export function isDeployPendingResponse(body: unknown): body is DeployPendingResponse {
+  return (
+    typeof body === "object" &&
+    body !== null &&
+    Array.isArray((body as DeployPendingResponse).services) &&
+    (body as DeployPendingResponse).services.every(isServiceView)
+  );
+}
+
 export async function fetchDeployPending(): Promise<DeployPendingResponse> {
   const response = await fetch("/ui/api/deploy-pending");
   if (!response.ok) {
     throw new Error(`deploy-pending ${response.status}`);
   }
-  const body = (await response.json()) as DeployPendingResponse;
-  if (body === null || !Array.isArray(body.services)) {
+  const body: unknown = await response.json();
+  if (!isDeployPendingResponse(body)) {
     throw new Error("deploy-pending: malformed payload");
   }
   return body;

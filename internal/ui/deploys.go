@@ -128,9 +128,12 @@ type deployServiceView struct {
 	DocURL  string `json:"doc_url"`
 	// RecordCount covers every document under deploy/<service>/ — including
 	// ones this view could not parse (InvalidCount).
-	RecordCount  int               `json:"record_count"`
-	InvalidCount int               `json:"invalid_count,omitempty"`
-	Current      *deployRecordView `json:"current"`
+	RecordCount  int `json:"record_count"`
+	InvalidCount int `json:"invalid_count,omitempty"`
+	// DocsCapped is set when the document scan returned its full bound — the
+	// record list (and possibly the chosen current) may be incomplete.
+	DocsCapped bool              `json:"docs_capped,omitempty"`
+	Current    *deployRecordView `json:"current"`
 	// Latest is the newest parseable record overall — present whenever it is
 	// not the current one, so a failed/rolled_back attempt after the last
 	// success is visible instead of hidden behind the good deploy.
@@ -211,6 +214,9 @@ func (h *Handler) deployServiceView(r *http.Request, service, repo string, event
 		return view, err
 	}
 	view.RecordCount = len(docs)
+	// The scan is bounded; when it returns full there may be older records
+	// beyond the window — say so rather than implying completeness.
+	view.DocsCapped = len(docs) == deployDocsPerSvc
 	parsed := []deployParsedDoc{}
 	for _, doc := range docs {
 		rec, deployedAt, ok := parseDeployRecord(doc.Key, service, doc.Body)
@@ -224,12 +230,16 @@ func (h *Handler) deployServiceView(r *http.Request, service, repo string, event
 	if len(parsed) == 0 {
 		return view, nil
 	}
-	// docs arrive newest-key first, so parsed[0] is the latest record overall.
+	// Both selections are by contract time (deployed_at, key time fallback),
+	// not document order — a failed attempt whose deployed_at postdates the
+	// last success must surface even when its key sorts earlier.
 	latest := parsed[0]
-	view.Target = latest.rec.Target
 	var current *deployParsedDoc
 	for i := range parsed {
 		p := &parsed[i]
+		if deployRecordLess(latest, *p) {
+			latest = *p
+		}
 		if p.rec.Result != "success" {
 			continue
 		}
@@ -237,6 +247,7 @@ func (h *Handler) deployServiceView(r *http.Request, service, repo string, event
 			current = p
 		}
 	}
+	view.Target = latest.rec.Target
 	toView := func(p deployParsedDoc) deployRecordView {
 		return deployRecordView{
 			RecordKey:           p.key,
