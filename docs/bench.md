@@ -90,7 +90,9 @@ The repetition wire row also includes the server-owned identity fields:
 Grades use the closed ladder `S+`, `S`, `A+`, `A`, `B`, `C`. Every write must
 include a non-blank `deviation_ref`; a missing, empty, or whitespace-only
 reference rejects the whole batch. `decided_by` is server-set, and `decided_at`
-is set to the server time when omitted. Client text in `provenance`, `notes`,
+is set to the server time when omitted. `codex-sol` and `kiro-sol` accept only
+`S+`; any other grade is rejected with `400 bench_catalog_sol_grade`, matching
+the catalog invariant. Client text in `provenance`, `notes`,
 `task_ref`, `boundary_version`, and `deviation_ref` passes through the secret
 guard before storage.
 

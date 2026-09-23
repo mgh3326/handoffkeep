@@ -701,6 +701,8 @@ func TestBenchCatalogAPI(t *testing.T) {
 		benchCatalogRow("bench-cat-low", "medium", "codex", "A", nil),
 		benchCatalogRow("bench-cat-fable", "", "codex", "S", map[string]any{"gate": "consult_only", "gate_reason": "subscription advisory only"}),
 		benchCatalogRow("bench-cat-opus", "", "claude", "S+", nil),
+		benchCatalogRow("bench-cat-rungs", "medium", "claude", "S", nil),
+		benchCatalogRow("bench-cat-rungs", "high", "claude", "S", nil),
 		benchCatalogRow("bench-cat-retired", "", "codex", "B", map[string]any{"retired_at": "2026-09-20T00:00:00Z"}),
 	}
 	resp = put("operator-token", seed...)
@@ -739,6 +741,54 @@ func TestBenchCatalogAPI(t *testing.T) {
 	withRetired := benchCatalogGet(t, h, "?pool=codex&include_retired=1")
 	if len(withRetired) != len(ladder)+1 || withRetired[len(withRetired)-1]["profile"] != "bench-cat-retired" {
 		t.Fatalf("include_retired rows=%v", withRetired)
+	}
+	// Same-grade rungs of one profile order by rung, not alphabetically:
+	// medium precedes high here even though "high" < "medium" as strings.
+	claudeLadder := benchCatalogGet(t, h, "?pool=claude")
+	var claudeKeys []string
+	for _, x := range claudeLadder {
+		claudeKeys = append(claudeKeys, fmt.Sprintf("%s/%s/%s", x["profile"], x["effort"], x["grade"]))
+	}
+	wantClaude := []string{"bench-cat-opus//S+", "bench-cat-rungs/medium/S", "bench-cat-rungs/high/S"}
+	if fmt.Sprint(claudeKeys) != fmt.Sprint(wantClaude) {
+		t.Fatalf("claude ladder=%v want=%v", claudeKeys, wantClaude)
+	}
+
+	// Retired rungs do not constrain monotonicity: a retired high=B must not
+	// block a live low=A on the same profile.
+	resp = put("operator-token", benchCatalogRow("bench-cat-retmono", "high", "misc", "B", map[string]any{"retired_at": "2026-09-24T00:00:00Z"}))
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		t.Fatalf("retired rung put status=%d", resp.StatusCode)
+	}
+	resp.Body.Close()
+	resp = put("operator-token", benchCatalogRow("bench-cat-retmono", "low", "misc", "A", nil))
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		t.Fatalf("retired rung must not constrain monotonicity status=%d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// A legacy grades write updates an existing catalog default row in place:
+	// catalog-only fields (model_id, pool, score) survive the mirror.
+	resp = put("operator-token", benchCatalogRow("bench-cat-legupd", "", "misc", "A", map[string]any{"score": 50.0}))
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		t.Fatalf("catalog default put status=%d", resp.StatusCode)
+	}
+	resp.Body.Close()
+	resp = benchRequest(t, h.Client(), http.MethodPut, h.URL+"/v1/bench/grades", "test-token", benchBody(t, "grades", map[string]any{
+		"profile": "bench-cat-legupd", "grade": "C", "deviation_ref": "deviation-compat-592",
+	}))
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		t.Fatalf("legacy update status=%d", resp.StatusCode)
+	}
+	resp.Body.Close()
+	var legGrade, legModel, legPool string
+	var legScore float64
+	if err := p.QueryRow(t.Context(), `SELECT grade,model_id,pool,score FROM bench_catalog WHERE profile='bench-cat-legupd' AND effort=''`).Scan(&legGrade, &legModel, &legPool, &legScore); err != nil || legGrade != "C" || legModel != "m-bench-cat-legupd" || legPool != "misc" || legScore != 50 {
+		t.Fatalf("legacy update lost catalog fields grade=%q model_id=%q pool=%q score=%v err=%v", legGrade, legModel, legPool, legScore, err)
 	}
 
 	// Compatibility projection: catalog effort='' rows surface on the legacy

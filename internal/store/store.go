@@ -701,7 +701,8 @@ var benchGateValues = map[string]bool{"default": true, "escalation": true, "cons
 // benchEffortRanks orders the effort ladder scopefuel publishes
 // (low<medium<high<xhigh<max). The profile-default row ("") and unknown effort
 // strings are exempt from the monotonicity rule — effort is an open column on
-// purpose — but always sort after the known rungs in ladder views.
+// purpose. In ladder views "" leads the profile's rows and unknown efforts
+// sort after the known rungs.
 var benchEffortRanks = map[string]int{"low": 0, "medium": 1, "high": 2, "xhigh": 3, "max": 4}
 
 // benchSolProfiles mirrors scopefuel's _SOL_PROFILES: Sol profiles are S+ only.
