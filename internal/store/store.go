@@ -660,6 +660,21 @@ func (s *Store) migrate(ctx context.Context) error {
 			}
 		}
 	}
+	// Lane-knownness probes for relane run once per batch item. These
+	// indexes keep each probe an index lookup instead of a full scan —
+	// the existing relay_events index on owner_lane is partial and
+	// cannot serve a bare owner_lane probe. They must run after the
+	// relay_events and chat_questions CREATE TABLEs above: under a
+	// test-only search_path an earlier statement would resolve to the
+	// public table (or fail where no table exists yet).
+	for _, q := range []string{
+		`CREATE INDEX IF NOT EXISTS relay_events_owner_lane ON relay_events(owner_lane)`,
+		`CREATE INDEX IF NOT EXISTS chat_questions_lane ON chat_questions(lane)`,
+	} {
+		if _, err := tx.Exec(ctx, q); err != nil {
+			return err
+		}
+	}
 	if err := migrateTaskComments(ctx, tx); err != nil {
 		return err
 	}
@@ -1521,12 +1536,10 @@ func (s *Store) TransitionTask(ctx context.Context, id int64, to, by, note strin
 // carries a live lane name.
 func knownTaskLanesTx(ctx context.Context, tx pgx.Tx, name string) (bool, error) {
 	var known bool
-	err := tx.QueryRow(ctx, `SELECT EXISTS(
-		SELECT 1 FROM (
-			SELECT lane FROM tasks UNION SELECT parent_lane FROM tasks
-			UNION SELECT owner_lane FROM relay_events UNION SELECT lane FROM chat_questions
-		) lanes WHERE lanes.lane=$1
-	)`, name).Scan(&known)
+	err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM tasks WHERE lane=$1)
+		OR EXISTS(SELECT 1 FROM tasks WHERE parent_lane=$1)
+		OR EXISTS(SELECT 1 FROM relay_events WHERE owner_lane=$1)
+		OR EXISTS(SELECT 1 FROM chat_questions WHERE lane=$1)`, name).Scan(&known)
 	return known, err
 }
 

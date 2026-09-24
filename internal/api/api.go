@@ -715,9 +715,10 @@ func (s Server) taskTransition(w http.ResponseWriter, r *http.Request) {
 	jsonOut(w, http.StatusOK, x)
 }
 
-// taskRelaneBatchMax bounds one relane request. It comfortably covers the
+// TaskRelaneBatchMax bounds one relane request. It comfortably covers the
 // triage migrations this route exists for while keeping a mistake bounded.
-const taskRelaneBatchMax = 500
+// Exported so the CLI can refuse an oversized batch before sending.
+const TaskRelaneBatchMax = 500
 
 type taskRelaneInput struct {
 	IDs          []int64 `json:"ids"`
@@ -775,7 +776,7 @@ func (s Server) tasksRelane(w http.ResponseWriter, r *http.Request) {
 		appErr(w, err)
 		return
 	}
-	if len(input.IDs) < 1 || len(input.IDs) > taskRelaneBatchMax || strings.TrimSpace(input.To) == "" || strings.TrimSpace(input.Note) == "" {
+	if len(input.IDs) < 1 || len(input.IDs) > TaskRelaneBatchMax || strings.TrimSpace(input.To) == "" || strings.TrimSpace(input.Note) == "" {
 		jsonOut(w, http.StatusBadRequest, map[string]string{"error": "invalid_task_relane"})
 		return
 	}

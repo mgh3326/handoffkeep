@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mgh3326/handoffkeep/internal/api"
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
@@ -91,6 +92,9 @@ func taskRelaneCmd(args []string, in io.Reader, out io.Writer) error {
 	if len(ids) == 0 {
 		return errors.New("tasks relane requires an id or --ids")
 	}
+	if len(ids) > api.TaskRelaneBatchMax {
+		return fmt.Errorf("tasks relane accepts at most %d ids per request", api.TaskRelaneBatchMax)
+	}
 	if strings.TrimSpace(*to) == "" {
 		return errors.New("tasks relane requires --to")
 	}
@@ -100,7 +104,9 @@ func taskRelaneCmd(args []string, in io.Reader, out io.Writer) error {
 	if err := mustClient(c); err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	// Each item is its own server-side transaction; a max-size batch needs
+	// longer than the default deadline, so the timeout scales with id count.
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second+time.Duration(len(ids))*100*time.Millisecond)
 	defer cancel()
 	batch, err := c.RelaneTasks(ctx, ids, *to, *note, *allowNewLane)
 	if err != nil {

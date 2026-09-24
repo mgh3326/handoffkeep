@@ -8,19 +8,46 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
+// relaneAPIServer runs a real Server against a throwaway schema. Migrating
+// and writing the shared public schema races every other package that opens
+// the same test database — the unconditional ALTERs in migrate take ACCESS
+// EXCLUSIVE and can wedge behind another suite's open snapshot transaction.
 func relaneAPIServer(t *testing.T) (*httptest.Server, *store.Store) {
 	t.Helper()
 	dbURL := os.Getenv("HANDOFFKEEP_TEST_DB_URL")
 	if dbURL == "" {
 		t.Skip("HANDOFFKEEP_TEST_DB_URL is required for PostgreSQL relane API tests")
 	}
-	st, err := store.Open(context.Background(), dbURL)
+	ctx := context.Background()
+	admin, err := pgxpool.New(ctx, dbURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer admin.Close()
+	schema := fmt.Sprintf("relane_api_%d", time.Now().UnixNano())
+	if _, err = admin.Exec(ctx, "CREATE SCHEMA "+schema); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		c, e := pgxpool.New(context.Background(), dbURL)
+		if e == nil {
+			_, _ = c.Exec(context.Background(), "DROP SCHEMA "+schema+" CASCADE")
+			c.Close()
+		}
+	})
+	sep := "?"
+	if strings.Contains(dbURL, "?") {
+		sep = "&"
+	}
+	st, err := store.Open(ctx, dbURL+sep+"search_path="+schema+",public")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,7 +245,7 @@ func TestTasksRelaneAPIRejectsBadRequests(t *testing.T) {
 		t.Fatalf("bad token code=%d, want 401", code)
 	}
 	// Over the batch cap is a 400, not 500 partial work.
-	tooMany := make([]int64, taskRelaneBatchMax+1)
+	tooMany := make([]int64, TaskRelaneBatchMax+1)
 	for i := range tooMany {
 		tooMany[i] = int64(i + 1)
 	}

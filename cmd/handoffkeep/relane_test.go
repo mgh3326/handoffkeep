@@ -6,8 +6,11 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/mgh3326/handoffkeep/internal/api"
 )
 
 type relaneRequest struct {
@@ -117,14 +120,15 @@ func TestTasksRelaneCLIPartialFailureExitsNonzero(t *testing.T) {
 	}
 }
 
-// A pre-relane server has no route: the CLI surfaces a plain http_404 rather
-// than a blank error.
+// A pre-relane server has no route: its mux matches GET /v1/tasks/{id} on
+// the path and refuses POST with 405, so the CLI surfaces http_405 rather
+// than a blank error. Observed live against the e46b897 deployment.
 func TestTasksRelaneCLIOldServer(t *testing.T) {
-	h, _ := relaneServer(t, 404, `404 page not found`)
+	h, _ := relaneServer(t, 405, `Method Not Allowed`)
 	var out bytes.Buffer
 	err := run([]string{"tasks", "relane", "999999", "--to", "director-1", "--note", "probe", "--url", h.URL, "--token", "tok"}, &out, io.Discard)
-	if err == nil || !strings.Contains(err.Error(), "http_404") {
-		t.Fatalf("err=%v, want http_404", err)
+	if err == nil || !strings.Contains(err.Error(), "http_405") {
+		t.Fatalf("err=%v, want http_405", err)
 	}
 }
 
@@ -148,6 +152,15 @@ func TestTasksRelaneCLIRejectsBadInputBeforeSending(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%v: err=%v want %q", tc.args, err, tc.want)
 		}
+	}
+	// Over the batch cap is a local refusal naming the limit.
+	tooMany := make([]string, api.TaskRelaneBatchMax+1)
+	for i := range tooMany {
+		tooMany[i] = strconv.Itoa(i + 1)
+	}
+	err := run([]string{"tasks", "relane", "--ids", strings.Join(tooMany, ","), "--to", "x", "--note", "n", "--url", h.URL, "--token", "tok"}, io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "at most 500 ids") {
+		t.Fatalf("oversized batch err=%v", err)
 	}
 	if len(*seen) != 0 {
 		t.Fatalf("invalid input reached the server: %+v", *seen)

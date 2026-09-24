@@ -137,7 +137,10 @@ handoffkeep tasks relane 42 --to lane-new --note "w" --allow-new-lane
 
 The CLI prints `{"results": [...], "moved": N, "unchanged": N, "failed": N}`
 and exits nonzero when any item fails. A relane to the task's current lane is
-an idempotent no-op: `changed` is false and no event is written.
+an idempotent no-op: `changed` is false and no event is written. A request
+takes at most 500 ids (the CLI refuses larger batches locally) and the CLI
+deadline scales with the id count so a max-size batch cannot expire silently
+mid-request.
 `GET /v1/tasks/export` returns one consistent snapshot of the queue — a
 single bounded JSON document carrying the snapshot ID, watermarks, filtered
 counts, integrity digests, and the task rows — read inside one repeatable-read

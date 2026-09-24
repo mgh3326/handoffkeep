@@ -316,8 +316,9 @@ type RelaneBatch struct {
 	Failed    int            `json:"failed"`
 }
 
-// RelaneTasks moves tasks between lanes. An old server without the route
-// answers 404, which call surfaces as http_404 via its status fallback.
+// RelaneTasks moves tasks between lanes. A pre-relane server has no route:
+// its mux matches GET /v1/tasks/{id} on the path and answers 405, which
+// call surfaces as http_405 via its status fallback.
 func (c Client) RelaneTasks(ctx context.Context, ids []int64, to, note string, allowNewLane bool) (RelaneBatch, error) {
 	var out RelaneBatch
 	err := c.call(ctx, "POST", "/v1/tasks/relane", struct {

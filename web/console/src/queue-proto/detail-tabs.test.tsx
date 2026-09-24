@@ -126,9 +126,12 @@ describe("detail tabs — 개요 / 코멘트 / 전이", () => {
     const { drawer } = openPanel([task], vi.fn<FetchDoc>(), () => Promise.resolve(detail));
     fireEvent.click(within(drawer).getByRole("tab", { name: "전이" }));
     const transitions = panel(drawer, "transitions");
-    await waitFor(() => expect(transitions.textContent).toContain("lane: admiral-1 → director-1 by ops"));
-    expect(transitions.textContent).toContain("backlog → claimed by builder-a");
-    expect(transitions.textContent).toContain("— triage");
+    await waitFor(() => expect(transitions.querySelectorAll("li").length).toBe(2));
+    const rows = [...transitions.querySelectorAll("li")].map((li) => li.textContent ?? "");
+    expect(rows[0]).toContain("backlog → claimed by builder-a");
+    expect(rows[0]).not.toContain("lane:");
+    expect(rows[1]).toContain("lane: admiral-1 → director-1 by ops");
+    expect(rows[1]).toContain("— triage");
   });
 });
 
