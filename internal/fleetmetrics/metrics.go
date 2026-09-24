@@ -13,15 +13,23 @@ import (
 // DeployRepos maps deploy-record services onto the GitHub repo whose merges
 // they ship. A repo listed here is in the "deploy" lead-time group; any other
 // repo has no deploy-record stream and is in the "merge-only" group.
-var DeployRepos = map[string]string{
-	"handoffkeep":   "mgh3326/handoffkeep",
-	"auto_trader":   "mgh3326/auto_trader",
-	"panewire-hub":  "mgh3326/panewire",
-	"panewire-node": "mgh3326/panewire",
-	"scopefuel":     "mgh3326/scopefuel",
-	"brewdial-api":  "mgh3326/brewdial",
-	"brewdial-db":   "mgh3326/brewdial",
-	"brewdial-data": "mgh3326/brewdial",
+var DeployRepos = deployRepoMap([]struct{ Service, Repo string }{
+	{Service: "handoffkeep", Repo: "mgh3326/handoffkeep"},
+	{Service: "auto_trader", Repo: "mgh3326/auto_trader"},
+	{Service: "panewire-hub", Repo: "mgh3326/panewire"},
+	{Service: "panewire-node", Repo: "mgh3326/panewire"},
+	{Service: "scopefuel", Repo: "mgh3326/scopefuel"},
+	{Service: "brewdial-api", Repo: "mgh3326/brewdial"},
+	{Service: "brewdial-db", Repo: "mgh3326/brewdial"},
+	{Service: "brewdial-data", Repo: "mgh3326/brewdial"},
+})
+
+func deployRepoMap(xs []struct{ Service, Repo string }) map[string]string {
+	out := make(map[string]string, len(xs))
+	for _, x := range xs {
+		out[x.Service] = x.Repo
+	}
+	return out
 }
 
 // Compute derives the report from a snapshot. It never mutates s.
