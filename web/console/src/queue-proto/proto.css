@@ -986,6 +986,21 @@ summary {
   padding-left: var(--hk-space-2);
   box-shadow: inset 3px 0 0 var(--hk-accent);
 }
+/* 등재 원문 — the registration text of a task with no body document */
+.qp-raw-title {
+  margin-top: var(--hk-space-3);
+  font-size: var(--hk-font-meta);
+}
+.qp-raw-title > summary {
+  color: var(--hk-text-muted);
+  cursor: pointer;
+}
+.qp-raw-title > p {
+  margin: var(--hk-space-1) 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--hk-text-secondary);
+}
 
 /* 코멘트 tab: append-only list (oldest first) and the write form */
 .qp-comments {

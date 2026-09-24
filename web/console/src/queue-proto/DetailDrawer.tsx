@@ -1,8 +1,8 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { BoardDetail, ParticipantSegment } from "../board/types";
 import { ActivityTabs } from "./ActivityTabs";
 import { ageDays, isStale, STALE_MIN_AGE_DAYS } from "./adapter";
-import { docPageHref, titleDocKeys } from "./bodydoc";
+import { docPageHref, scanTitleDocs } from "./bodydoc";
 import { DocInline, type FetchDoc } from "./DocInline";
 import { TaskComments, type CommentsClient } from "./TaskComments";
 import type { Dataset, Enrichment, ProtoTask } from "./types";
@@ -61,42 +61,91 @@ export function CopyTaskLink({ id }: { id: number }) {
   );
 }
 
-/** The overview's body section. Only body_doc is rendered inline; a key found
- * in the title is a named link, never inlined and never written back. An
- * absent body is said in words — the overview is never silently blank. */
+/** The overview's body section. body_doc is always the body — even when its
+ * fetch fails, nothing else is substituted in its place. With no body_doc,
+ * exactly one explicit "본문 hk:doc <key>" candidate in the title renders
+ * inline through the same DocInline path (marked "title 에서 찾은 본문 ·
+ * 미연결"); several candidates get a pick-list, never an arbitrary first;
+ * plain citations stay related links and numeric IDs are never key-linked.
+ * A task with no body document keeps its full registration text readable
+ * below in "등재 원문". */
 function TaskBodySection({ task, fetchDoc }: { task: ProtoTask; fetchDoc?: FetchDoc }) {
   const bodyDoc = task.body_doc ?? "";
-  let content: ReactNode;
   if (bodyDoc !== "") {
-    content = <DocInline bodyDoc={bodyDoc} fetchDoc={fetchDoc} />;
-  } else {
-    const titleKeys = titleDocKeys(task.title);
-    content = (
-      <div className="qp-doc" data-doc-state={titleKeys.length > 0 ? "title-fallback" : "none"}>
+    return (
+      <section className="qp-drawer-sec qp-body-sec">
+        <h4>본문</h4>
+        <DocInline bodyDoc={bodyDoc} fetchDoc={fetchDoc} />
+      </section>
+    );
+  }
+  const scan = scanTitleDocs(task.title);
+  const sole = scan.body.length === 1 ? scan.body[0] : null;
+  return (
+    <section className="qp-drawer-sec qp-body-sec">
+      <h4>본문</h4>
+      <div
+        className="qp-doc"
+        data-doc-state={sole !== null ? "title-body" : scan.body.length > 1 ? "title-candidates" : "none"}
+      >
         <p className="qp-unknown" role="note">
           본문 문서가 연결되지 않았습니다 (body_doc 없음). 본문은 등재할 때 <code>tasks add --doc &lt;key&gt;</code> 로 붙입니다.
         </p>
-        {titleKeys.length > 0 ? (
+        {sole !== null ? (
           <>
-            <p>title 에서 찾은 문서 — 링크만 제공하고 본문으로 렌더하지 않습니다:</p>
+            <p className="qp-doc-source">
+              title 에서 찾은 본문 <code>{sole}</code> · 미연결
+            </p>
+            <DocInline bodyDoc={sole} fetchDoc={fetchDoc} />
+          </>
+        ) : null}
+        {scan.body.length > 1 ? (
+          <>
+            <p>본문 후보가 {scan.body.length}개 있습니다 — 어느 문서가 본문인지 선택이 필요합니다(자동으로 고르지 않습니다):</p>
             <ul className="qp-drawer-refs">
-              {titleKeys.map((key) => (
+              {scan.body.map((key) => (
                 <li key={key}>
-                  <a href={docPageHref(key)}>{key}</a> <span className="muted">(title 에서 찾은 문서)</span>
+                  <a href={docPageHref(key)}>{key}</a> <span className="muted">(본문 후보)</span>
+                </li>
+              ))}
+            </ul>
+          </>
+        ) : null}
+        {scan.related.length > 0 || scan.ids.length > 0 ? (
+          <>
+            <p>관련 문서 — title 에서 찾은 인용입니다(본문이 아닙니다):</p>
+            <ul className="qp-drawer-refs">
+              {scan.related.map((key) => (
+                <li key={key}>
+                  <a href={docPageHref(key)}>{key}</a>
+                </li>
+              ))}
+              {scan.ids.map((id) => (
+                <li key={`id-${id}`}>
+                  hk:doc {id} <span className="muted">(문서 ID — key 가 아니므로 링크하지 않습니다)</span>
                 </li>
               ))}
             </ul>
           </>
         ) : null}
       </div>
-    );
-  }
-  return (
-    <section className="qp-drawer-sec qp-body-sec">
-      <h4>본문</h4>
-      {content}
+      {isLongTitle(task.title) ? (
+        // B7 — a body-less task's long title is the only place its spec
+        // lives; keep it readable in full below the document block.
+        <details className="qp-raw-title">
+          <summary>등재 원문</summary>
+          <p>{task.title}</p>
+        </details>
+      ) : null}
     </section>
   );
+}
+
+/** Titles past the old 96-char list preview cut count as "long" — only those
+ * can be carrying the spec that a missing body document would have held. */
+const LONG_TITLE_MIN = 96;
+function isLongTitle(title: string): boolean {
+  return [...title].length > LONG_TITLE_MIN;
 }
 
 function SegmentRow({ segment }: { segment: ParticipantSegment }) {

@@ -4,6 +4,7 @@ import { QueueProtoApp } from "./QueueProtoApp";
 import { TaskPage } from "./TaskPage";
 import { boardTaskToProto } from "./boardtask";
 import type { FetchDoc } from "./DocInline";
+import { HttpError } from "../board/api";
 import type { BoardDetail, BoardDoc, BoardTask } from "../board/types";
 import { KNOWN_STATES, type Dataset } from "./types";
 
@@ -141,14 +142,15 @@ describe("overview body", () => {
     expect(fetchDoc).not.toHaveBeenCalled();
   });
 
-  it("a title-only hk:doc key is a named link, never inlined or fetched", () => {
+  it("a plain title hk:doc citation is a related link, never inlined or fetched (B3)", () => {
     const fetchDoc = vi.fn<FetchDoc>(() => Promise.resolve(doc("# must not render")));
-    const { drawer } = openPanel([mkBoardTask({ title: "fix it — 본문 hk:doc design/2026-09-21/task-body" })], fetchDoc);
+    const { drawer } = openPanel([mkBoardTask({ title: "fix it — 참고 hk:doc design/2026-09-21/task-body" })], fetchDoc);
     const overview = panel(drawer, "overview");
     const link = within(overview).getByRole("link", { name: "design/2026-09-21/task-body" });
     expect(link.getAttribute("href")).toBe("/ui/doc/design/2026-09-21/task-body");
-    expect(link.parentElement?.textContent).toContain("title 에서 찾은 문서");
-    expect(overview.querySelector("[data-doc-state]")?.getAttribute("data-doc-state")).toBe("title-fallback");
+    expect(overview.textContent).toContain("관련 문서");
+    expect(overview.textContent).toContain("본문이 아닙니다");
+    expect(overview.querySelector("[data-doc-state]")?.getAttribute("data-doc-state")).toBe("none");
     expect(overview.querySelector("[data-doc-renderer]")).toBeNull();
     expect(fetchDoc).not.toHaveBeenCalled();
   });
@@ -158,7 +160,137 @@ describe("overview body", () => {
     const { drawer } = openPanel([mkBoardTask({ title: "x hk:doc design/other", body_doc: "design/body" })], fetchDoc);
     await waitFor(() => expect(panel(drawer, "overview").querySelector("[data-doc-renderer] h1")?.textContent).toBe("from body_doc"));
     expect(fetchDoc.mock.calls).toEqual([["design/body"]]);
-    expect(panel(drawer, "overview").textContent).not.toContain("title 에서 찾은 문서");
+    expect(panel(drawer, "overview").textContent).not.toContain("관련 문서");
+  });
+});
+
+describe("overview body — title-found candidates (#619)", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    window.history.replaceState(null, "", "/ui/queue");
+  });
+
+  const bodySection = (root: HTMLElement) =>
+    [...panel(root, "overview").querySelectorAll("section")].find((s) => s.querySelector("h4")?.textContent === "본문")!;
+
+  it("B2: one explicit 본문 hk:doc candidate renders inline, marked title-found and unlinked", async () => {
+    const fetchDoc = vi.fn<FetchDoc>((key) => Promise.resolve({ ...doc(`# title 본문 ${key}`), key }));
+    const { drawer } = openPanel([mkBoardTask({ title: "quota store v2 — 본문 hk:doc task/2026-09-22/quota-store" })], fetchDoc);
+    const overview = panel(drawer, "overview");
+    await waitFor(() => expect(overview.querySelector("[data-doc-renderer] h1")?.textContent).toBe("title 본문 task/2026-09-22/quota-store"));
+    expect(fetchDoc.mock.calls).toEqual([["task/2026-09-22/quota-store"]]);
+    expect(overview.textContent).toContain("title 에서 찾은 본문");
+    expect(overview.textContent).toContain("미연결");
+    expect(overview.textContent).not.toContain("관련 문서");
+  });
+
+  it("B1: body_doc wins even while a 본문-marked title key exists; a body_doc error never substitutes it", async () => {
+    const fetchDoc = vi.fn<FetchDoc>((key) =>
+      key === "design/body" ? Promise.resolve(doc("# the real body")) : Promise.reject(new HttpError(403)),
+    );
+    const { drawer } = openPanel([mkBoardTask({ title: "x 본문 hk:doc design/other", body_doc: "design/body" })], fetchDoc);
+    const overview = panel(drawer, "overview");
+    await waitFor(() => expect(overview.querySelector("[data-doc-renderer] h1")?.textContent).toBe("the real body"));
+    expect(fetchDoc.mock.calls).toEqual([["design/body"]]);
+    expect(overview.textContent).not.toContain("title 에서 찾은 본문");
+  });
+
+  it("B1: a failing body_doc shows its own error — the title candidate is never fetched", async () => {
+    const fetchDoc = vi.fn<FetchDoc>(() => Promise.reject(new HttpError(403)));
+    const { drawer } = openPanel([mkBoardTask({ title: "x 본문 hk:doc design/other", body_doc: "design/body" })], fetchDoc);
+    const overview = panel(drawer, "overview");
+    await waitFor(() => expect(overview.textContent).toContain("권한 없음"));
+    expect(fetchDoc.mock.calls).toEqual([["design/body"]]);
+    expect(overview.querySelector("[data-doc-renderer]")).toBeNull();
+  });
+
+  it("B2/B6: a missing or forbidden title-body candidate shows the honest state, no substitute", async () => {
+    for (const [status, text] of [[404, "문서 없음"], [403, "권한 없음"]] as const) {
+      const fetchDoc = vi.fn<FetchDoc>(() => Promise.reject(new HttpError(status)));
+      const { drawer, unmount } = openPanel([mkBoardTask({ title: "본문 hk:doc task/2026-09-22/gone" })], fetchDoc);
+      const overview = panel(drawer, "overview");
+      await waitFor(() => expect(overview.textContent).toContain(text));
+      expect(fetchDoc.mock.calls).toEqual([["task/2026-09-22/gone"]]);
+      expect(overview.querySelector("[data-doc-renderer]")).toBeNull();
+      unmount();
+    }
+  });
+
+  it("B4: two 본문 candidates render neither — a pick-list with both links", () => {
+    const fetchDoc = vi.fn<FetchDoc>(() => Promise.resolve(doc("# must not render")));
+    const { drawer } = openPanel([mkBoardTask({ title: "본문 hk:doc a/x 그리고 본문 hk:doc b/y" })], fetchDoc);
+    const overview = panel(drawer, "overview");
+    expect(bodySection(drawer).querySelector("[data-doc-state]")?.getAttribute("data-doc-state")).toBe("title-candidates");
+    expect(overview.textContent).toContain("본문 후보가 2개 있습니다");
+    expect(overview.querySelector("[data-doc-renderer]")).toBeNull();
+    expect(fetchDoc).not.toHaveBeenCalled();
+    const hrefs = [...overview.querySelectorAll("a")].map((a) => a.getAttribute("href"));
+    expect(hrefs).toContain("/ui/doc/a/x");
+    expect(hrefs).toContain("/ui/doc/b/y");
+  });
+
+  it("B3: a numeric hk:doc ID is text, never a doc-page link or a fetch", () => {
+    const fetchDoc = vi.fn<FetchDoc>();
+    const { drawer } = openPanel([mkBoardTask({ title: "자문 Q(hk:doc 2299) 참고" })], fetchDoc);
+    const overview = panel(drawer, "overview");
+    expect(overview.textContent).toContain("hk:doc 2299");
+    expect([...overview.querySelectorAll("a")].some((a) => (a.getAttribute("href") ?? "").includes("2299"))).toBe(false);
+    expect(fetchDoc).not.toHaveBeenCalled();
+  });
+
+  it("B3: an advisory citation with no 본문 marker stays a related link even when it is the only one", () => {
+    const fetchDoc = vi.fn<FetchDoc>(() => Promise.resolve(doc("# must not render")));
+    const { drawer } = openPanel([mkBoardTask({ title: "fix per hk:doc advice/2026-09-24/x" })], fetchDoc);
+    const overview = panel(drawer, "overview");
+    expect(overview.textContent).toContain("관련 문서");
+    expect(overview.querySelector("[data-doc-renderer]")).toBeNull();
+    expect(fetchDoc).not.toHaveBeenCalled();
+  });
+
+  it("B6: 본문 body + a 참고 citation — the citation key stays a related link, only the body is fetched", async () => {
+    const fetchDoc = vi.fn<FetchDoc>((key) => Promise.resolve({ ...doc(`# body ${key}`), key }));
+    const { drawer } = openPanel([mkBoardTask({ title: "본문 hk:doc a/x, 참고 hk:doc b/y" })], fetchDoc);
+    const overview = panel(drawer, "overview");
+    await waitFor(() => expect(overview.querySelector("[data-doc-renderer] h1")?.textContent).toBe("body a/x"));
+    expect(fetchDoc.mock.calls).toEqual([["a/x"]]);
+    expect(within(overview).getByRole("link", { name: "b/y" }).getAttribute("href")).toBe("/ui/doc/b/y");
+  });
+
+  it("B6: duplicate citations collapse to one link", () => {
+    const fetchDoc = vi.fn<FetchDoc>();
+    const { drawer } = openPanel([mkBoardTask({ title: "hk:doc a/x and again hk:doc a/x" })], fetchDoc);
+    const overview = panel(drawer, "overview");
+    expect(within(overview).getAllByRole("link", { name: "a/x" })).toHaveLength(1);
+  });
+
+  it("B6: a hostile document through the title-body path is sanitized like body_doc", async () => {
+    const hostile = "# ok\n\n<script>window.__pwned = 1</script>\n\n[js](javascript:window.__pwned=2)\n\n[safe](/ui/tasks/5)";
+    const fetchDoc = vi.fn<FetchDoc>(() => Promise.resolve({ ...doc(hostile), key: "task/2026-09-22/hostile" }));
+    const { container } = openPanel([mkBoardTask({ title: "본문 hk:doc task/2026-09-22/hostile" })], fetchDoc);
+    await waitFor(() => expect(container.querySelector("[data-doc-renderer] h1")?.textContent).toBe("ok"));
+    const body = container.querySelector("[data-doc-renderer]")!;
+    expect(body.querySelector("script")).toBeNull();
+    expect([...body.querySelectorAll("a")].some((a) => (a.getAttribute("href") ?? "").includes("javascript"))).toBe(false);
+    expect(body.textContent).toContain("js");
+    expect((window as { __pwned?: number }).__pwned).toBeUndefined();
+  });
+
+  it("B7: a task with no body keeps its full registration text under 등재 원문", () => {
+    const longTitle = `긴 등재 원문 ${"가".repeat(300)} tail-marker`;
+    const fetchDoc = vi.fn<FetchDoc>();
+    const { drawer } = openPanel([mkBoardTask({ title: longTitle })], fetchDoc);
+    const body = bodySection(drawer);
+    const raw = body.querySelector("details.qp-raw-title")!;
+    expect(raw).not.toBeNull();
+    expect(raw.querySelector("p")?.textContent).toBe(longTitle);
+  });
+
+  it("B7: a task with body_doc has no 등재 원문", async () => {
+    const fetchDoc = vi.fn<FetchDoc>(() => Promise.resolve(doc("# body")));
+    const { drawer } = openPanel([mkBoardTask({ body_doc: "design/body" })], fetchDoc);
+    const body = bodySection(drawer);
+    await waitFor(() => expect(body.querySelector("[data-doc-renderer]")).not.toBeNull());
+    expect(body.querySelector("details.qp-raw-title")).toBeNull();
   });
 });
 
