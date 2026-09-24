@@ -73,6 +73,11 @@ type TaskRefs struct {
 	ReportPath      string           `json:"report_path,omitempty"`
 	JobID           string           `json:"job_id,omitempty"`
 	DecisionOptions *DecisionOptions `json:"decision_options,omitempty"`
+	// DecisionRequest is the task's current structured decision request
+	// (#618). It is written only by RecordDecisionRequest and
+	// ResolveDecisionRequest; while it exists, decision_options are its
+	// choices and are not patchable by a generic transition.
+	DecisionRequest *DecisionRequest `json:"decision_request,omitempty"`
 	Linear          *TaskLinear      `json:"linear,omitempty"`
 	// OriginPR and OriginTask are the typed "this row came from" relations
 	// shared with #494 (hk:doc design/2026-09-21/task493-disposition-contract
@@ -655,6 +660,29 @@ func (s *Store) migrate(ctx context.Context) error {
 			`INSERT INTO schema_version(version) VALUES (12)`,
 		}
 		for _, q := range v12 {
+			if _, err := tx.Exec(ctx, q); err != nil {
+				return err
+			}
+		}
+	}
+	var v13Applied bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_version WHERE version=13)`).Scan(&v13Applied); err != nil {
+		return err
+	}
+	if !v13Applied {
+		// Version 13 (#618) admits kind='decision' task_events: a decision
+		// request or its resolution recorded without a state change. They
+		// cannot be 'transition' rows — readers of "to"='merged' (deploys,
+		// disposition summary) would count a same-state row on a merged
+		// task, which is exactly where an uncleaned request is closed. The
+		// CHECK swap takes an ACCESS EXCLUSIVE lock, so it is version gated
+		// and runs once, like v7.
+		v13 := []string{
+			`ALTER TABLE task_events DROP CONSTRAINT IF EXISTS task_events_kind_check`,
+			`ALTER TABLE task_events ADD CONSTRAINT task_events_kind_check CHECK(kind IN ('transition','relane','decision'))`,
+			`INSERT INTO schema_version(version) VALUES (13)`,
+		}
+		for _, q := range v13 {
 			if _, err := tx.Exec(ctx, q); err != nil {
 				return err
 			}
@@ -1331,6 +1359,9 @@ func (s *Store) CreateTask(ctx context.Context, x Task) (Task, error) {
 	if x.Refs.Disposition != nil {
 		return x, errors.New("invalid task: disposition items use CreateDisposition")
 	}
+	if x.Refs.DecisionRequest != nil {
+		return x, errors.New("invalid task: decision requests use tasks decision-request")
+	}
 	if err := guard.Reject(x.Title); err != nil {
 		return x, err
 	}
@@ -1456,6 +1487,9 @@ func (s *Store) TransitionTask(ctx context.Context, id int64, to, by, note strin
 		if refs.Disposition != nil {
 			return Task{}, errors.New("invalid task transition: disposition refs are not patchable")
 		}
+		if refs.DecisionRequest != nil {
+			return Task{}, errors.New("invalid task transition: decision_request is written by tasks decision-request only")
+		}
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -1488,6 +1522,16 @@ func (s *Store) TransitionTask(ctx context.Context, id int64, to, by, note strin
 	}
 	if !taskTransitionAllowed(from, to) {
 		return Task{}, ErrTaskConflict
+	}
+	// Once a task carries a structured request, its question and choices
+	// change only through a new request revision: a generic needs_decision
+	// question or option patch would pair new text with the recorded
+	// request's id (or an old request's choices with a new question).
+	if x.Refs.DecisionRequest != nil && (to == "needs_decision" || (refs != nil && refs.DecisionOptions != nil)) {
+		if x.Refs.DecisionRequest.Status == DecisionRequestOpen {
+			return Task{}, ErrDecisionRequestOpen
+		}
+		return Task{}, invalidDecisionRequest("this task's decisions are recorded with tasks decision-request; record a new request instead")
 	}
 	if to == "needs_decision" && strings.TrimSpace(note) == "" {
 		return Task{}, errors.New("needs_decision requires question")
@@ -2015,7 +2059,9 @@ type TaskDecision struct {
 
 // ListOpenTaskDecisions implements the decision inbox task definition.
 // Disposition items are listed separately by ListOpenDispositions: they are
-// answered only through the operator disposition routes.
+// answered only through the operator disposition routes. Tasks whose current
+// structured request is open are listed by ListOpenDecisionRequests instead,
+// so one question never appears twice (or with two answer paths).
 func (s *Store) ListOpenTaskDecisions(ctx context.Context, limit int) ([]TaskDecision, error) {
 	if limit < 1 {
 		limit = 1000
@@ -2025,7 +2071,7 @@ func (s *Store) ListOpenTaskDecisions(ctx context.Context, limit int) ([]TaskDec
 	}
 	rows, err := s.pool.Query(ctx, `SELECT t.id,t.lane,t.parent_lane,t.title,t.kind,t.state,t.priority,t.refs,t.claimed_by,t.created_by,t.created_at,t.updated_at,
 		COALESCE((SELECT note FROM task_events WHERE task_id=t.id AND kind='transition' AND "to"='needs_decision' ORDER BY at DESC,id DESC LIMIT 1),'')
-		FROM tasks t WHERE t.state='needs_decision' AND NOT (t.refs ? 'disposition') ORDER BY t.updated_at DESC,t.id DESC LIMIT $1`, limit)
+		FROM tasks t WHERE t.state='needs_decision' AND NOT (t.refs ? 'disposition') AND COALESCE(t.refs->'decision_request'->>'status','')<>'open' ORDER BY t.updated_at DESC,t.id DESC LIMIT $1`, limit)
 	if err != nil {
 		return nil, err
 	}

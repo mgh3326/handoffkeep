@@ -582,11 +582,19 @@ func prefixedTaskColumns(alias string) string {
 	return strings.Join(cols, ",")
 }
 
-// CountNeedsDecision splits needs_decision tasks, in one statement, into
+// CountNeedsDecision splits pending decisions, in one statement, into
 // generic decisions and disposition items. The two are reported side by side,
-// never summed.
+// never summed. Generic decisions are the Decisions page's two task sources:
+// needs_decision tasks without an open structured request, plus open
+// structured requests on non-terminal tasks in any state (#618) — the same
+// pending figure the queue shows. Uncleaned requests on merged/dropped tasks
+// are not pending decisions and are not counted here.
 func (s *Store) CountNeedsDecision(ctx context.Context) (decisions, dispositions int, err error) {
-	err = s.pool.QueryRow(ctx, `SELECT COUNT(*) FILTER (WHERE NOT (refs ? 'disposition')), COUNT(*) FILTER (WHERE refs ? 'disposition') FROM tasks WHERE state='needs_decision'`).Scan(&decisions, &dispositions)
+	err = s.pool.QueryRow(ctx, `SELECT
+		COUNT(*) FILTER (WHERE state='needs_decision' AND NOT (refs ? 'disposition') AND COALESCE(refs->'decision_request'->>'status','')<>'open')
+		+ COUNT(*) FILTER (WHERE refs->'decision_request'->>'status'='open' AND state NOT IN ('merged','dropped')),
+		COUNT(*) FILTER (WHERE state='needs_decision' AND refs ? 'disposition')
+		FROM tasks WHERE state='needs_decision' OR refs->'decision_request'->>'status'='open'`).Scan(&decisions, &dispositions)
 	return decisions, dispositions, err
 }
 

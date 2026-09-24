@@ -91,6 +91,12 @@ func (s Service) ResolveDecision(ctx context.Context, input DecisionResolveInput
 		if task.State != "needs_decision" {
 			return store.RelayEvent{}, store.ErrTaskConflict
 		}
+		// An open structured request is closed with tasks decision-resolve,
+		// which records the answer on that request_id. Resolving it here
+		// would unblock the task and leave the request open.
+		if task.Refs.DecisionRequest != nil && task.Refs.DecisionRequest.Status == store.DecisionRequestOpen {
+			return store.RelayEvent{}, store.ErrDecisionRequestOpen
+		}
 		lane = task.Lane
 	} else {
 		var events []store.RelayEvent
@@ -391,6 +397,8 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("POST /v1/tasks/{id}/claim", s.taskClaim)
 	m.HandleFunc("POST /v1/tasks/{id}/transition", s.taskTransition)
 	m.HandleFunc("POST /v1/tasks/relane", s.tasksRelane)
+	m.HandleFunc("POST /v1/tasks/{id}/decision-request", s.taskDecisionRequest)
+	m.HandleFunc("POST /v1/tasks/{id}/decision-request/resolve", s.taskDecisionResolve)
 	m.HandleFunc("POST /v1/tasks/dispositions", s.dispositionCreate)
 	m.HandleFunc("GET /v1/tasks/dispositions/summary", s.dispositionSummary)
 	m.HandleFunc("POST /v1/tasks/dispositions/{id}/apply", s.dispositionApply)
@@ -503,6 +511,23 @@ func appErr(w http.ResponseWriter, e error) {
 		return
 	case errors.Is(e, store.ErrTaskNotFound):
 		jsonOut(w, http.StatusNotFound, map[string]string{"error": "not_found"})
+		return
+	case errors.Is(e, store.ErrTaskTerminal):
+		jsonOut(w, http.StatusConflict, map[string]string{"error": "task_terminal"})
+		return
+	case errors.Is(e, store.ErrDecisionRequestOpen):
+		jsonOut(w, http.StatusConflict, map[string]string{"error": "decision_request_open"})
+		return
+	case errors.Is(e, store.ErrDecisionRequestStale):
+		jsonOut(w, http.StatusConflict, map[string]string{"error": "decision_request_stale"})
+		return
+	case errors.Is(e, store.ErrDecisionRequestResolved):
+		jsonOut(w, http.StatusConflict, map[string]string{"error": "decision_request_resolved"})
+		return
+	case errors.Is(e, store.ErrInvalidDecisionRequest):
+		// The reason is produced by the store's own validators (limits and
+		// field names), never echoed input, so it is safe to return.
+		jsonOut(w, http.StatusBadRequest, map[string]string{"error": e.Error()})
 		return
 	case errors.Is(e, store.ErrRelayEventNotFound):
 		jsonOut(w, http.StatusNotFound, map[string]string{"error": "not_found"})
@@ -708,6 +733,63 @@ func (s Server) taskTransition(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	x, err := s.Service.TransitionTask(r.Context(), id, input.To, client, input.Note, input.Refs)
+	if err != nil {
+		appErr(w, err)
+		return
+	}
+	jsonOut(w, http.StatusOK, x)
+}
+
+// taskDecisionRequest records a structured decision request (#618). The
+// requester is the authenticated client. 201 is a new record, 200 a
+// duplicate re-send returning the already recorded request_id.
+func (s Server) taskDecisionRequest(w http.ResponseWriter, r *http.Request) {
+	client, ok := s.auth(w, r)
+	if !ok {
+		return
+	}
+	id, err := taskID(r)
+	if err != nil || id < 1 {
+		appErr(w, errors.New("task id"))
+		return
+	}
+	defer r.Body.Close()
+	var input store.DecisionRequestInput
+	if err := decode(r, &input, store.MaxBytes); err != nil {
+		appErr(w, err)
+		return
+	}
+	x, err := s.Service.Store.RecordDecisionRequest(r.Context(), id, client, input)
+	if err != nil {
+		appErr(w, err)
+		return
+	}
+	status := http.StatusCreated
+	if x.Duplicate {
+		status = http.StatusOK
+	}
+	jsonOut(w, status, x)
+}
+
+// taskDecisionResolve closes the current request (answered, default_applied
+// with a receipt, or withdrawn). It never changes the task state.
+func (s Server) taskDecisionResolve(w http.ResponseWriter, r *http.Request) {
+	client, ok := s.auth(w, r)
+	if !ok {
+		return
+	}
+	id, err := taskID(r)
+	if err != nil || id < 1 {
+		appErr(w, errors.New("task id"))
+		return
+	}
+	defer r.Body.Close()
+	var input store.DecisionResolveInput
+	if err := decode(r, &input, store.MaxBytes); err != nil {
+		appErr(w, err)
+		return
+	}
+	x, err := s.Service.Store.ResolveDecisionRequest(r.Context(), id, client, input)
 	if err != nil {
 		appErr(w, err)
 		return

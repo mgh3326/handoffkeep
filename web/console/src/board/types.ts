@@ -3,6 +3,65 @@ export type TaskRefs = {
   head_sha?: string;
   report_path?: string;
   job_id?: string;
+  /** The task's current structured decision request (#618). The list only
+   * needs its identity and status; the drawer reads the full request and
+   * its history from the detail's decision_requests. */
+  decision_request?: DecisionRequestRef;
+};
+
+/** status is the stored request status; "open" is the only one the queue
+ * counts (pending on live tasks, uncleaned on merged/dropped ones). */
+export type DecisionRequestRef = {
+  id: string;
+  revision: number;
+  status: "open" | "answered" | "default_applied" | "withdrawn" | string;
+};
+
+export type DecisionOption = { key: string; label: string; recommended?: boolean };
+
+export type DecisionResolution = {
+  kind: "answered" | "default_applied" | "withdrawn" | string;
+  option?: string;
+  text?: string;
+  receipt?: string;
+  responder?: string;
+  by: string;
+  at: string;
+};
+
+/** One request as the detail BFF derives it. state is computed server-side:
+ * overdue = deadline passed with no application recorded; uncleaned = open
+ * on a merged/dropped task. The console never re-derives it. */
+export type DecisionRequestView = {
+  id: string;
+  revision: number;
+  supersedes?: string;
+  superseded_by?: string;
+  current: boolean;
+  state: "open" | "overdue" | "uncleaned" | "answered" | "default_applied" | "withdrawn" | "superseded" | string;
+  state_label: string;
+  question: string;
+  options: DecisionOption[];
+  allow_free: boolean;
+  reason?: string;
+  default_action: string;
+  default_option?: string;
+  default_trigger?: string;
+  due_at?: string;
+  doc?: string;
+  requested_by: string;
+  requested_at: string;
+  resolution?: DecisionResolution;
+};
+
+/** needs_decision with no open request: the question exists only as a
+ * transition note (state "unrecorded", shown as 미기록). */
+export type LegacyDecisionView = {
+  state: string;
+  state_label: string;
+  question: string;
+  options: DecisionOption[];
+  allow_free: boolean;
 };
 
 export type BoardTask = {
@@ -35,7 +94,7 @@ export type BoardEvent = {
   id: number;
   /** "transition" rows change state; "relane" rows move the task between
    * lanes and from/to carry lane names. Absent on pre-relane servers. */
-  kind?: "transition" | "relane";
+  kind?: "transition" | "relane" | "decision";
   from: string;
   to: string;
   by: string;
@@ -74,6 +133,9 @@ export type BoardDetail = {
   dwell: DwellSegment[];
   linear: { issue_id: string; identifier: string } | null;
   participants: BoardParticipants;
+  /** Absent on servers before #618 — "not provided", never "none". */
+  decision_requests?: DecisionRequestView[];
+  decision_legacy?: LegacyDecisionView | null;
 };
 
 export type PolicyItem = {

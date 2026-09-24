@@ -226,7 +226,7 @@ func normalizeTaskArgs(args []string) ([]string, error) {
 
 func tasksCmd(args []string, out io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: tasks add|list|export|claim|next|transition|relane|show|comment|comments|disposition")
+		return errors.New("usage: tasks add|list|export|claim|next|transition|relane|decision-request|decision-resolve|show|comment|comments|disposition")
 	}
 	if args[0] == "disposition" {
 		return dispositionCmd(args[1:], out)
@@ -236,6 +236,12 @@ func tasksCmd(args []string, out io.Writer) error {
 	}
 	if args[0] == "relane" {
 		return taskRelaneCmd(args, os.Stdin, out)
+	}
+	if args[0] == "decision-request" {
+		return decisionRequestCmd(args, out)
+	}
+	if args[0] == "decision-resolve" {
+		return decisionResolveCmd(args, out)
 	}
 	fs := flag.NewFlagSet("tasks "+args[0], flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -446,7 +452,7 @@ func tasksCmd(args []string, out io.Writer) error {
 		}
 		return printJSON(out, x)
 	default:
-		return errors.New("usage: tasks add|list|export|claim|next|transition|relane|show|comment|comments|disposition")
+		return errors.New("usage: tasks add|list|export|claim|next|transition|relane|decision-request|decision-resolve|show|comment|comments|disposition")
 	}
 }
 
@@ -482,7 +488,9 @@ func parseTaskDecisionOptions(values []string, recommended string, noFreeAnswer 
 			options.Options[index].Recommended = options.Options[index].Key == recommended
 		}
 	}
-	if err := store.ValidateDecisionOptions(options); err != nil {
+	// The detailed validator names the failing rule, e.g. a label over the
+	// 120-byte limit (bytes, not characters).
+	if err := store.ValidateDecisionOptionsDetailed(options); err != nil {
 		return store.DecisionOptions{}, err
 	}
 	return options, nil

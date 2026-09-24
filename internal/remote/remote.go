@@ -297,6 +297,20 @@ func (c Client) TransitionTask(ctx context.Context, id int64, to, note string, r
 	return out, err
 }
 
+// RecordDecisionRequest records a structured decision request on a task.
+func (c Client) RecordDecisionRequest(ctx context.Context, id int64, in store.DecisionRequestInput) (store.DecisionRequestResult, error) {
+	var out store.DecisionRequestResult
+	err := c.call(ctx, "POST", fmt.Sprintf("/v1/tasks/%d/decision-request", id), in, &out)
+	return out, err
+}
+
+// ResolveDecisionRequest closes a task's current decision request.
+func (c Client) ResolveDecisionRequest(ctx context.Context, id int64, in store.DecisionResolveInput) (store.DecisionRequestResult, error) {
+	var out store.DecisionRequestResult
+	err := c.call(ctx, "POST", fmt.Sprintf("/v1/tasks/%d/decision-request/resolve", id), in, &out)
+	return out, err
+}
+
 // RelaneResult is one item's outcome in a RelaneTasks response. The batch
 // continues past item failures, so callers must inspect every entry.
 type RelaneResult struct {

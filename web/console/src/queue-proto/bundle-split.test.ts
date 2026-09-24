@@ -143,3 +143,27 @@ describe("renderer stays out of the list's initial load (mutant b)", () => {
     expect(gzip).toBeLessThanOrEqual(BUDGET_GZIP);
   });
 });
+
+// #618 budget choice (a): the drawer's decision card is its own lazy chunk.
+// Only the row badge and the one-line count stay in the initial bundle.
+const isDecisionChunk = (name: string) => readFileSync(join(built, name), "utf8").includes("data-decision-options");
+
+describe("decision card stays out of the list's initial load (#618)", () => {
+  const entry = join(root, "src", "queue-proto", "main.tsx");
+
+  it("source: DecisionCard is reachable only through a dynamic import", () => {
+    expect([...sourceGraph(entry, false).files].filter((f) => f.endsWith("DecisionCard.tsx"))).toEqual([]);
+    expect([...sourceGraph(entry, true).files].some((f) => f.endsWith("DecisionCard.tsx"))).toBe(true);
+  });
+
+  it("build: exactly one lazy chunk carries the card, none of the initial closure does, and it never imports an entry", () => {
+    for (const name of staticClosure("board.js")) {
+      expect(isDecisionChunk(name), `${name} carries the decision card`).toBe(false);
+    }
+    const chunks = chunkImports("board.js").dynamic.filter(isDecisionChunk);
+    expect(chunks).toHaveLength(1);
+    for (const name of staticClosure(chunks[0])) {
+      expect(["board.js", "fleet.js"], `${chunks[0]} reaches ${name}`).not.toContain(name);
+    }
+  });
+});
