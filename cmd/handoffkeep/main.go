@@ -226,13 +226,16 @@ func normalizeTaskArgs(args []string) ([]string, error) {
 
 func tasksCmd(args []string, out io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: tasks add|list|export|claim|next|transition|show|comment|comments|disposition")
+		return errors.New("usage: tasks add|list|export|claim|next|transition|relane|show|comment|comments|disposition")
 	}
 	if args[0] == "disposition" {
 		return dispositionCmd(args[1:], out)
 	}
 	if args[0] == "comment" || args[0] == "comments" {
 		return taskCommentsCmd(args, os.Stdin, out)
+	}
+	if args[0] == "relane" {
+		return taskRelaneCmd(args, os.Stdin, out)
 	}
 	fs := flag.NewFlagSet("tasks "+args[0], flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -443,7 +446,7 @@ func tasksCmd(args []string, out io.Writer) error {
 		}
 		return printJSON(out, x)
 	default:
-		return errors.New("usage: tasks add|list|export|claim|next|transition|show|comment|comments|disposition")
+		return errors.New("usage: tasks add|list|export|claim|next|transition|relane|show|comment|comments|disposition")
 	}
 }
 

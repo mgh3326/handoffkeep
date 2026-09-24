@@ -55,6 +55,14 @@ var (
 	// ErrQueueEmpty is deliberately distinct from a missing task.  It lets
 	// queue consumers treat an empty lane as an expected terminal condition.
 	ErrQueueEmpty = errors.New("queue_empty")
+	// ErrTaskTerminal rejects a relane on a merged or dropped task. Terminal
+	// rows are history: moving them between lanes never returns them to a
+	// queue and would falsify lane-level end-state reports.
+	ErrTaskTerminal = errors.New("task_terminal")
+	// ErrTaskLaneUnknown rejects a relane target outside the set of lanes any
+	// current row uses. It exists so a mistyped lane name cannot quietly
+	// strand a task where no lane owner ever lists it.
+	ErrTaskLaneUnknown = errors.New("unknown_lane")
 )
 
 // TaskRefs holds the durable links that let a captain resume work without
@@ -248,9 +256,18 @@ func ValidateDecisionOptions(x DecisionOptions) error {
 	return nil
 }
 
+// TaskEvent kind values. "transition" rows carry state names in from/to and
+// dominate history; "relane" rows carry lane names and are produced only by
+// RelaneTask. Consumers that read "to" as a state must filter kind.
+const (
+	TaskEventTransition = "transition"
+	TaskEventRelane     = "relane"
+)
+
 type TaskEvent struct {
 	ID     int64     `json:"id"`
 	TaskID int64     `json:"task_id"`
+	Kind   string    `json:"kind"`
 	From   string    `json:"from"`
 	To     string    `json:"to"`
 	By     string    `json:"by"`
@@ -533,7 +550,13 @@ func (s *Store) migrate(ctx context.Context) error {
 		// EXCLUSIVE lock on tasks even when IF NOT EXISTS finds the column —
 		// every later start would queue behind open readers and stall the
 		// queue behind it.
-		`DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'tasks' AND column_name = 'body_doc') THEN ALTER TABLE tasks ADD COLUMN IF NOT EXISTS body_doc TEXT NOT NULL DEFAULT ''; END IF; END $$`}
+		`DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'tasks' AND column_name = 'body_doc') THEN ALTER TABLE tasks ADD COLUMN IF NOT EXISTS body_doc TEXT NOT NULL DEFAULT ''; END IF; END $$`,
+		// task_events.kind marks relane rows so state-reading consumers can
+		// exclude them. Same shape as body_doc: catalog check first because
+		// ALTER TABLE takes an ACCESS EXCLUSIVE lock even when the column
+		// exists; the constant default makes the add metadata-only. The CHECK
+		// closes the column to the two produced kinds.
+		`DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'task_events' AND column_name = 'kind') THEN ALTER TABLE task_events ADD COLUMN kind TEXT NOT NULL DEFAULT 'transition' CHECK(kind IN ('transition','relane')); END IF; END $$`}
 	stmts = append(stmts,
 		`CREATE TABLE IF NOT EXISTS relay_events (id BIGSERIAL PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('job.completed','job.escalate','job.joined')), job_id TEXT NOT NULL, epoch INTEGER NOT NULL DEFAULT 0, owner_lane TEXT NOT NULL, machine TEXT NOT NULL DEFAULT '', pane_id TEXT NOT NULL DEFAULT '', report_path TEXT NOT NULL DEFAULT '', report_last_line TEXT NOT NULL DEFAULT '', question TEXT NOT NULL DEFAULT '', pr TEXT NOT NULL DEFAULT '', head TEXT NOT NULL DEFAULT '', reason TEXT NOT NULL DEFAULT '', event_time TIMESTAMPTZ, received_at TIMESTAMPTZ NOT NULL, delivered_at TIMESTAMPTZ, delivered_to TEXT NOT NULL DEFAULT '', attempts INTEGER NOT NULL DEFAULT 0)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS relay_events_idempotency ON relay_events(kind, job_id, epoch, report_path, reason)`,
@@ -635,6 +658,21 @@ func (s *Store) migrate(ctx context.Context) error {
 			if _, err := tx.Exec(ctx, q); err != nil {
 				return err
 			}
+		}
+	}
+	// Lane-knownness probes for relane run once per batch item. These
+	// indexes keep each probe an index lookup instead of a full scan —
+	// the existing relay_events index on owner_lane is partial and
+	// cannot serve a bare owner_lane probe. They must run after the
+	// relay_events and chat_questions CREATE TABLEs above: under a
+	// test-only search_path an earlier statement would resolve to the
+	// public table (or fail where no table exists yet).
+	for _, q := range []string{
+		`CREATE INDEX IF NOT EXISTS relay_events_owner_lane ON relay_events(owner_lane)`,
+		`CREATE INDEX IF NOT EXISTS chat_questions_lane ON chat_questions(lane)`,
+	} {
+		if _, err := tx.Exec(ctx, q); err != nil {
+			return err
 		}
 	}
 	if err := migrateTaskComments(ctx, tx); err != nil {
@@ -1493,6 +1531,79 @@ func (s *Store) TransitionTask(ctx context.Context, id int64, to, by, note strin
 	return x, tx.Commit(ctx)
 }
 
+// knownTaskLanesTx reports whether name is a lane some current row uses. hk
+// has no lane table, so the known set is the union of every column that
+// carries a live lane name.
+func knownTaskLanesTx(ctx context.Context, tx pgx.Tx, name string) (bool, error) {
+	var known bool
+	err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM tasks WHERE lane=$1)
+		OR EXISTS(SELECT 1 FROM tasks WHERE parent_lane=$1)
+		OR EXISTS(SELECT 1 FROM relay_events WHERE owner_lane=$1)
+		OR EXISTS(SELECT 1 FROM chat_questions WHERE lane=$1)`, name).Scan(&known)
+	return known, err
+}
+
+// RelaneTask moves a task to another lane without touching state, priority,
+// refs, or claimant. The move is recorded as an append-only task_events row
+// with kind='relane' so transition readers never mistake a lane name for a
+// state. The row lock serializes against TransitionTask: both can succeed,
+// and their event order is lock order.
+//
+// changed is false when the task already sits in the target lane — a no-op
+// writes no event, so rerunning a batch relane stays idempotent without
+// falsifying history. Terminal tasks are refused outright: merged/dropped
+// rows are history, and moving them would corrupt end-state reports without
+// ever returning them to a queue. to must be a lane some current row uses
+// unless allowNewLane is set, so a typo cannot strand a task in a lane no
+// owner lists.
+func (s *Store) RelaneTask(ctx context.Context, id int64, to, by, note string, allowNewLane bool) (x Task, changed bool, err error) {
+	if !validName(to) || by == "" || !validText(by, 128) || strings.TrimSpace(note) == "" || !validText(note, MaxBytes) {
+		return Task{}, false, errors.New("invalid task relane")
+	}
+	if err := guard.Reject(note); err != nil {
+		return Task{}, false, err
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Task{}, false, err
+	}
+	defer tx.Rollback(ctx)
+	if err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, id), &x); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Task{}, false, ErrTaskNotFound
+		}
+		return Task{}, false, err
+	}
+	if x.State == "merged" || x.State == "dropped" {
+		return Task{}, false, ErrTaskTerminal
+	}
+	if x.Lane == to {
+		return x, false, tx.Commit(ctx)
+	}
+	if !allowNewLane {
+		known, err := knownTaskLanesTx(ctx, tx, to)
+		if err != nil {
+			return Task{}, false, err
+		}
+		if !known {
+			return Task{}, false, ErrTaskLaneUnknown
+		}
+	}
+	from := x.Lane
+	encoded, err := json.Marshal(x.Refs)
+	if err != nil {
+		return Task{}, false, err
+	}
+	x.UpdatedAt = time.Now().UTC()
+	if err = scanTask(tx.QueryRow(ctx, `UPDATE tasks SET lane=$2,updated_at=$3 WHERE id=$1 RETURNING `+taskColumns, id, to, x.UpdatedAt), &x); err != nil {
+		return Task{}, false, err
+	}
+	if _, err = tx.Exec(ctx, `INSERT INTO task_events(task_id,"from","to","by",note,refs,at,kind) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,'relane')`, id, from, to, by, note, string(encoded), x.UpdatedAt); err != nil {
+		return Task{}, false, err
+	}
+	return x, true, tx.Commit(ctx)
+}
+
 func (s *Store) ListTasks(ctx context.Context, lane, state, parentLane string, limit int) ([]Task, error) {
 	if !validTaskQuery(lane, state, parentLane) {
 		return nil, errors.New("invalid task query")
@@ -1629,7 +1740,7 @@ func (s *Store) GetTask(ctx context.Context, id int64) (Task, bool, error) {
 		}
 		return Task{}, false, err
 	}
-	rows, err := s.pool.Query(ctx, `SELECT id,task_id,"from","to","by",note,refs,at FROM task_events WHERE task_id=$1 ORDER BY at,id`, id)
+	rows, err := s.pool.Query(ctx, `SELECT id,task_id,"from","to","by",note,refs,at,kind FROM task_events WHERE task_id=$1 ORDER BY at,id`, id)
 	if err != nil {
 		return Task{}, false, err
 	}
@@ -1637,7 +1748,7 @@ func (s *Store) GetTask(ctx context.Context, id int64) (Task, bool, error) {
 	for rows.Next() {
 		var e TaskEvent
 		var refs []byte
-		if err := rows.Scan(&e.ID, &e.TaskID, &e.From, &e.To, &e.By, &e.Note, &refs, &e.At); err != nil {
+		if err := rows.Scan(&e.ID, &e.TaskID, &e.From, &e.To, &e.By, &e.Note, &refs, &e.At, &e.Kind); err != nil {
 			return Task{}, false, err
 		}
 		if len(refs) != 0 {
@@ -1913,7 +2024,7 @@ func (s *Store) ListOpenTaskDecisions(ctx context.Context, limit int) ([]TaskDec
 		limit = 1000
 	}
 	rows, err := s.pool.Query(ctx, `SELECT t.id,t.lane,t.parent_lane,t.title,t.kind,t.state,t.priority,t.refs,t.claimed_by,t.created_by,t.created_at,t.updated_at,
-		COALESCE((SELECT note FROM task_events WHERE task_id=t.id AND "to"='needs_decision' ORDER BY at DESC,id DESC LIMIT 1),'')
+		COALESCE((SELECT note FROM task_events WHERE task_id=t.id AND kind='transition' AND "to"='needs_decision' ORDER BY at DESC,id DESC LIMIT 1),'')
 		FROM tasks t WHERE t.state='needs_decision' AND NOT (t.refs ? 'disposition') ORDER BY t.updated_at DESC,t.id DESC LIMIT $1`, limit)
 	if err != nil {
 		return nil, err

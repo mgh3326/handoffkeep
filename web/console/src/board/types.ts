@@ -33,6 +33,9 @@ export type BoardTasksResponse = {
 
 export type BoardEvent = {
   id: number;
+  /** "transition" rows change state; "relane" rows move the task between
+   * lanes and from/to carry lane names. Absent on pre-relane servers. */
+  kind?: "transition" | "relane";
   from: string;
   to: string;
   by: string;

@@ -76,7 +76,7 @@ func (s *Store) ListMergedTaskEvents(ctx context.Context, limit int) ([]MergedTa
 	if limit > 2000 {
 		limit = 2000
 	}
-	rows, err := s.pool.Query(ctx, `SELECT e.task_id, t.title, e.at, e.refs FROM task_events e JOIN tasks t ON t.id = e.task_id WHERE e."to"='merged' ORDER BY e.at DESC, e.id DESC LIMIT $1`, limit)
+	rows, err := s.pool.Query(ctx, `SELECT e.task_id, t.title, e.at, e.refs FROM task_events e JOIN tasks t ON t.id = e.task_id WHERE e.kind='transition' AND e."to"='merged' ORDER BY e.at DESC, e.id DESC LIMIT $1`, limit)
 	if err != nil {
 		return nil, err
 	}

@@ -4,18 +4,42 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
+// testExportStore migrates inside a throwaway schema. The export tests
+// compare whole-table counts, so sharing public with other packages' tests
+// makes them flaky — any concurrent writer fails the comparison, and the
+// migrate ALTERs can wedge behind another suite's open snapshot.
 func testExportStore(t *testing.T) *Store {
 	t.Helper()
-	url := os.Getenv("HANDOFFKEEP_TEST_DB_URL")
-	if url == "" {
+	base := os.Getenv("HANDOFFKEEP_TEST_DB_URL")
+	if base == "" {
 		t.Skip("HANDOFFKEEP_TEST_DB_URL is required for PostgreSQL export tests")
 	}
-	st, err := Open(t.Context(), url)
+	admin, err := pgx.Connect(t.Context(), base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = admin.Close(context.Background()) })
+	schema := fmt.Sprintf("export_%d", time.Now().UnixNano())
+	if _, err := admin.Exec(t.Context(), "CREATE SCHEMA "+schema); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = admin.Exec(context.Background(), "DROP SCHEMA "+schema+" CASCADE") })
+	parsed, err := url.Parse(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := parsed.Query()
+	query.Set("search_path", schema+",public")
+	parsed.RawQuery = query.Encode()
+	st, err := Open(t.Context(), parsed.String())
 	if err != nil {
 		t.Fatal(err)
 	}
