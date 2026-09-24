@@ -78,7 +78,7 @@ function TaskBodySection({ task, fetchDoc }: { task: ProtoTask; fetchDoc: FetchD
   const bodyDoc = task.body_doc ?? "";
   let content: ReactNode;
   if (bodyDoc !== "") {
-    content = <DocInline bodyDoc={bodyDoc} fetchDoc={fetchDoc} />;
+    content = <DocInline bodyDoc={bodyDoc} fetchDoc={fetchDoc} stripFrontMatter />;
   } else {
     const titleKeys = titleDocKeys(task.title);
     content = (
@@ -103,7 +103,9 @@ function TaskBodySection({ task, fetchDoc }: { task: ProtoTask; fetchDoc: FetchD
   }
   return (
     <section className="qp-drawer-sec qp-body-sec">
-      <h4>명세 · 본문</h4>
+      {/* kept as "본문" — #619's test helper locates this section by heading,
+          so renaming it would silently break that suite after merge. */}
+      <h4>본문</h4>
       {content}
       {bodyDoc === "" && isLongTitle(task.title) ? (
         // A body-less task's long title is the only place its spec lives;
@@ -184,6 +186,9 @@ export function DetailBody({ dataset, task, detail, fetchDoc, comments: comments
         return hit;
       }
       const promise = base(key);
+      // A rejected fetch is dropped so reopening the drawer retries — a
+      // transient error must not stick for the session's lifetime.
+      promise.catch(() => cache.delete(key));
       cache.set(key, promise);
       return promise;
     };
@@ -252,7 +257,14 @@ export function DetailBody({ dataset, task, detail, fetchDoc, comments: comments
             <p className="muted">evidence: {task.decision.evidence}</p>
           </>
         ) : (
-          <p className="muted">열린 결정 요청이 없습니다 — 결정 카드 데이터 연결은 #618 에서 이뤄집니다.</p>
+          // task.decision is only ever populated for synthetic fixtures — on
+          // live data "absent" means "not connected", never "no request".
+          // A needs_decision state still names itself honestly.
+          <p className="muted">
+            {task.state === "needs_decision"
+              ? "상태는 결정 필요 — 결정 내용은 이 화면에 아직 연결되지 않았습니다."
+              : "결정 요청 정보 미연결 — 결정 카드 데이터 연결은 #618 에서 이뤄집니다."}
+          </p>
         )}
       </section>
       <TaskBodySection task={task} fetchDoc={sharedFetchDoc} />

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseTaskDocMeta } from "./taskmeta";
+import { parseTaskDocMeta, stripTaskFrontMatter } from "./taskmeta";
 
 describe("parseTaskDocMeta — hk-task/v1 front-matter read contract", () => {
   it("reads summary and display_title from a gated block", () => {
@@ -48,5 +48,20 @@ describe("parseTaskDocMeta — hk-task/v1 front-matter read contract", () => {
 
   it("does not read a fence that is not at byte 0", () => {
     expect(parseTaskDocMeta("\n---\nschema: hk-task/v1\nsummary: x\n---\n")).toBeNull();
+  });
+
+  it("YAML block-scalar indicators read as absent, never as the value", () => {
+    const body = "---\nschema: hk-task/v1\nsummary: >\ndisplay_title: |+\n---\n";
+    expect(parseTaskDocMeta(body)).toEqual({ summary: null, displayTitle: null });
+  });
+});
+
+describe("stripTaskFrontMatter — what the renderer sees", () => {
+  it("removes only a gated block; ungated bodies render untouched", () => {
+    const gated = "---\nschema: hk-task/v1\nsummary: s\n---\n# 본문\n";
+    expect(stripTaskFrontMatter(gated)).toBe("# 본문\n");
+    const ungated = "---\nsummary: s\n---\n# 본문\n";
+    expect(stripTaskFrontMatter(ungated)).toBe(ungated);
+    expect(stripTaskFrontMatter("# no fence")).toBe("# no fence");
   });
 });

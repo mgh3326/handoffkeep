@@ -886,33 +886,26 @@ summary {
   margin: calc(-1 * var(--hk-space-2)) 0 var(--hk-space-1);
   font-size: var(--hk-font-meta);
 }
-.qp-title-src {
-  font-size: var(--hk-font-meta);
-}
-.qp-title-src > summary {
-  color: var(--hk-text-muted);
-  cursor: pointer;
-}
-.qp-title-src > p {
-  margin: var(--hk-space-1) 0 0;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  color: var(--hk-text-secondary);
-}
-/* 등재 원문 — the registration text of a task with no body document */
+/* .qp-title-src = 원문 제목 펼치기 (header); .qp-raw-title = 등재 원문
+ * (spec section, #619 B7 markup). Identical details/p/summary styling. */
+.qp-title-src,
 .qp-raw-title {
-  margin-top: var(--hk-space-3);
   font-size: var(--hk-font-meta);
 }
+.qp-title-src > summary,
 .qp-raw-title > summary {
   color: var(--hk-text-muted);
   cursor: pointer;
 }
+.qp-title-src > p,
 .qp-raw-title > p {
   margin: var(--hk-space-1) 0 0;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   color: var(--hk-text-secondary);
+}
+.qp-raw-title {
+  margin-top: var(--hk-space-3);
 }
 .qp-meta-more > summary {
   color: var(--hk-text-muted);

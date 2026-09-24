@@ -213,7 +213,7 @@ describe("overview order — 목적 → 현재 상황 → 다음 행동 → 결�
     const { container } = renderBody(mkProtoTask({}));
     const overview = container.querySelector<HTMLElement>('[role="tabpanel"][data-tab="overview"]')!;
     const headings = [...overview.querySelectorAll("section.qp-drawer-sec h4")].map((h) => h.textContent);
-    expect(headings.slice(0, 6)).toEqual(["목적", "현재 상황", "다음 행동 · 대기", "결정", "명세 · 본문", "refs"]);
+    expect(headings.slice(0, 6)).toEqual(["목적", "현재 상황", "다음 행동 · 대기", "결정", "본문", "refs"]);
   });
 
   it("목적 reads summary only from hk-task/v1 metadata; absent → 요약 미작성", async () => {
@@ -236,6 +236,36 @@ describe("overview order — 목적 → 현재 상황 → 다음 행동 → 결�
 
     const nobody = renderBody(mkProtoTask({}));
     expect(nobody.container.querySelector(".qp-purpose")?.textContent).toContain("요약 미작성");
+  });
+
+  it("loading shows 요약 확인 중 — never a premature 미작성", () => {
+    const { container } = renderBody(mkProtoTask({ body_doc: "design/body" }), vi.fn<FetchDoc>(() => new Promise<BoardDoc>(() => {})));
+    expect(container.querySelector(".qp-purpose")?.textContent).toContain("요약 확인 중");
+  });
+
+  it("non-markdown docs never feed metadata even with a gated fence", async () => {
+    const fetchDoc = vi.fn<FetchDoc>(() =>
+      Promise.resolve({ ...doc(metaDoc("summary: should not leak\n")), format: "unsupported", reason: "not_text" as const }),
+    );
+    const { container } = renderBody(mkProtoTask({ body_doc: "design/body" }), fetchDoc);
+    await waitFor(() => expect(container.querySelector(".qp-purpose")?.textContent).toContain("요약 미작성"));
+    expect(container.querySelector(".qp-drawer-title")?.textContent).toBe("short task title");
+  });
+
+  it("gate keys are not substituted — description/title fields do not become summary/display_title", async () => {
+    const fetchDoc = vi.fn<FetchDoc>(() => Promise.resolve(doc(metaDoc("description: 다른 키\ntitle: 다른 제목\n"))));
+    const { container } = renderBody(mkProtoTask({ body_doc: "design/body" }), fetchDoc);
+    await waitFor(() => expect(container.querySelector(".qp-purpose")?.textContent).toContain("요약 미작성"));
+    expect(container.querySelector(".qp-drawer-title")?.textContent).toBe("short task title");
+  });
+
+  it("the gated front-matter is stripped from the rendered spec — no metadata heading", async () => {
+    const fetchDoc = vi.fn<FetchDoc>(() => Promise.resolve(doc(metaDoc("summary: s\n") + "\n## 실제 명세\n")));
+    const { container } = renderBody(mkProtoTask({ body_doc: "design/body" }), fetchDoc);
+    const body = container.querySelector<HTMLElement>(".qp-body-sec")!;
+    await waitFor(() => expect(body.querySelector("[data-doc-renderer] h2")?.textContent).toBe("실제 명세"));
+    expect(body.querySelector("[data-doc-renderer]")?.textContent).not.toContain("hk-task/v1");
+    expect(body.querySelectorAll("[data-doc-renderer] hr")).toHaveLength(0);
   });
 
   it("현재 상황 names state·lane·실행 담당; 미기록 when claimant is null — never created_by", () => {
@@ -265,15 +295,25 @@ describe("overview order — 목적 → 현재 상황 → 다음 행동 → 결�
     expect(next.textContent).not.toContain("자유 문장");
   });
 
-  it("결정 자리: 열린 요청 없음 placeholder, 있으면 질문 표시", () => {
+  it("결정 자리: 데이터 미연결은 '없음'이 아니라 '미연결' — needs_decision 은 스스로를 말한다", () => {
     const noDecision = renderBody(mkProtoTask({}));
-    expect(noDecision.container.querySelector(".qp-decision")?.textContent).toContain("열린 결정 요청이 없습니다");
+    const slot = noDecision.container.querySelector<HTMLElement>(".qp-decision")!;
+    expect(slot.textContent).toContain("결정 요청 정보 미연결");
+    expect(slot.textContent).not.toContain("없습니다");
     noDecision.unmount();
 
+    // A live needs_decision task must never read as "no open request" —
+    // the state names the need even while the card data is unwired (#618).
+    const needs = renderBody(mkProtoTask({ state: "needs_decision" }));
+    const needsSlot = needs.container.querySelector<HTMLElement>(".qp-decision")!;
+    expect(needsSlot.textContent).toContain("결정 필요");
+    expect(needsSlot.textContent).not.toContain("없습니다");
+    needs.unmount();
+
     const decided = renderBody(mkProtoTask({ decision: { question: "A안 채택?", evidence: "hk:doc x" } }));
-    const slot = decided.container.querySelector<HTMLElement>(".qp-decision")!;
-    expect(slot.textContent).toContain("A안 채택?");
-    expect(slot.textContent).toContain("hk:doc x");
+    const decidedSlot = decided.container.querySelector<HTMLElement>(".qp-decision")!;
+    expect(decidedSlot.textContent).toContain("A안 채택?");
+    expect(decidedSlot.textContent).toContain("hk:doc x");
   });
 });
 
