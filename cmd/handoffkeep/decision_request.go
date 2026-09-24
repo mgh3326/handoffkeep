@@ -79,14 +79,14 @@ func decisionRequestCmd(args []string, out io.Writer) error {
 	valueFlags := map[string]bool{"--url": true, "--token": true, "--question": true, "--option": true, "--recommended": true, "--reason": true, "--default-action": true, "--default-option": true, "--default-trigger": true, "--due": true, "--doc": true, "--supersedes": true}
 	parseArgs, err := splitSubcommandArgs(args[1:], valueFlags)
 	if err != nil {
-		return err
+		return notRecorded(err)
 	}
 	if err := fs.Parse(parseArgs); err != nil {
-		return err
+		return notRecorded(err)
 	}
 	id, err := parseSubcommandTaskID(fs, decisionRequestUsage)
 	if err != nil {
-		return err
+		return notRecorded(err)
 	}
 	input := store.DecisionRequestInput{
 		Question:       strings.TrimSpace(*question),
@@ -163,14 +163,14 @@ func decisionResolveCmd(args []string, out io.Writer) error {
 	valueFlags := map[string]bool{"--url": true, "--token": true, "--request": true, "--kind": true, "--option": true, "--text": true, "--receipt": true, "--responder": true}
 	parseArgs, err := splitSubcommandArgs(args[1:], valueFlags)
 	if err != nil {
-		return err
+		return fmt.Errorf("decision resolution NOT recorded: %v", err)
 	}
 	if err := fs.Parse(parseArgs); err != nil {
-		return err
+		return fmt.Errorf("decision resolution NOT recorded: %v", err)
 	}
 	id, err := parseSubcommandTaskID(fs, decisionResolveUsage)
 	if err != nil {
-		return err
+		return fmt.Errorf("decision resolution NOT recorded: %v", err)
 	}
 	input := store.DecisionResolveInput{
 		RequestID: strings.TrimSpace(*requestID),
@@ -184,7 +184,7 @@ func decisionResolveCmd(args []string, out io.Writer) error {
 		return fmt.Errorf("decision resolution NOT recorded: %v", err)
 	}
 	if err := mustClient(c); err != nil {
-		return err
+		return fmt.Errorf("decision resolution NOT recorded: %v", err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()

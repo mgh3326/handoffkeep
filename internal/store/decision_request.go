@@ -340,8 +340,9 @@ func isTerminalTaskState(state string) bool {
 }
 
 // RecordDecisionRequest records a request on a task. A byte-identical
-// re-send of the task's latest request returns it with Duplicate set and
-// writes nothing. A different request while one is open is refused unless
+// re-send of the task's latest request (with no supersedes, or the same
+// supersedes it was recorded with) returns it with Duplicate set and writes
+// nothing. A different request while one is open is refused unless
 // Supersedes names the open request; the new one gets the next revision and
 // no resolution. New requests are refused on merged/dropped tasks.
 func (s *Store) RecordDecisionRequest(ctx context.Context, taskID int64, by string, in DecisionRequestInput) (DecisionRequestResult, error) {
@@ -378,7 +379,10 @@ func (s *Store) RecordDecisionRequest(ctx context.Context, taskID int64, by stri
 		return DecisionRequestResult{}, invalidDecisionRequest("disposition items take no decision requests")
 	}
 	current := x.Refs.DecisionRequest
-	if current != nil && in.Supersedes == "" && sameDecisionRequest(*current, x.Refs.DecisionOptions, in) {
+	// A re-send of the latest request is a duplicate — including a retried
+	// supersede, which names the request the recorded one already replaced.
+	// Naming the current request itself is an explicit new revision.
+	if current != nil && (in.Supersedes == "" || in.Supersedes == current.Supersedes) && sameDecisionRequest(*current, x.Refs.DecisionOptions, in) {
 		return DecisionRequestResult{Task: x, Request: *current, Duplicate: true}, nil
 	}
 	if isTerminalTaskState(x.State) {

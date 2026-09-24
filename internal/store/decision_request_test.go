@@ -253,6 +253,25 @@ func TestDecisionRequestDuplicateSend(t *testing.T) {
 	if err != nil || !retry.Duplicate || retry.Request.ID != first.Request.ID || retry.Request.Status != DecisionRequestAnswered {
 		t.Fatalf("retry after answer=%+v err=%v", retry, err)
 	}
+	// A retried supersede (same content, same supersedes) returns the
+	// recorded revision instead of failing as stale.
+	second := decisionInput()
+	second.Question = "재질문"
+	second.Supersedes = first.Request.ID
+	replaced, err := s.RecordDecisionRequest(ctx, task.ID, "director-1", second)
+	if err != nil || replaced.Request.Revision != 2 {
+		t.Fatalf("supersede answered request: %+v %v", replaced.Request, err)
+	}
+	retried, err := s.RecordDecisionRequest(ctx, task.ID, "director-1", second)
+	if err != nil || !retried.Duplicate || retried.Request.ID != replaced.Request.ID {
+		t.Fatalf("retried supersede=%+v err=%v", retried, err)
+	}
+	// Naming the current request itself is a deliberate new revision.
+	third := second
+	third.Supersedes = replaced.Request.ID
+	if again, err := s.RecordDecisionRequest(ctx, task.ID, "director-1", third); err != nil || again.Duplicate || again.Request.Revision != 3 {
+		t.Fatalf("explicit re-ask=%+v err=%v", again, err)
+	}
 }
 
 // A4: requests are listed whatever the task state; an open request on a
@@ -369,6 +388,12 @@ func TestDecisionRequestBlockListsOnce(t *testing.T) {
 	if _, err := s.TransitionTask(ctx, task.ID, "hold", "dr-test", "park", &TaskRefs{DecisionRequest: &DecisionRequest{ID: "dr-1-9"}}); err == nil {
 		t.Fatalf("decision_request patch accepted")
 	}
+	// Resuming the blocked task without resolving the request is refused
+	// under the row lock (the legacy answer paths' race), whatever the caller
+	// pre-checked; parking is allowed.
+	if _, err := s.TransitionTask(ctx, task.ID, "claimed", "dr-test", "answer via legacy path", nil); !errors.Is(err, ErrDecisionRequestOpen) {
+		t.Fatalf("needs_decision→claimed while open: %v", err)
+	}
 	if _, err := s.TransitionTask(ctx, task.ID, "hold", "dr-test", "park", nil); err != nil {
 		t.Fatalf("plain transition: %v", err)
 	}
@@ -445,5 +470,26 @@ func TestDecisionRequestRejections(t *testing.T) {
 	}
 	if _, err := s.ResolveDecisionRequest(ctx, 987654321, "director-1", DecisionResolveInput{RequestID: id, Kind: DecisionRequestAnswered, Option: "A"}); !errors.Is(err, ErrTaskNotFound) {
 		t.Fatalf("resolve unknown task: %v", err)
+	}
+}
+
+// Resolve first, then resume: once the request is answered the blocked task
+// leaves needs_decision normally, and the answer stays on the request.
+func TestDecisionRequestResolveThenResume(t *testing.T) {
+	s, _ := searchTestStore(t)
+	ctx := context.Background()
+	task := decisionTask(t, s, "in_progress")
+	in := decisionInput()
+	in.Block = true
+	got, err := s.RecordDecisionRequest(ctx, task.ID, "director-1", in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ResolveDecisionRequest(ctx, task.ID, "director-1", DecisionResolveInput{RequestID: got.Request.ID, Kind: DecisionRequestAnswered, Option: "A", Responder: "operator"}); err != nil {
+		t.Fatal(err)
+	}
+	resumed, err := s.TransitionTask(ctx, task.ID, "claimed", "director-1", "A 로 진행", nil)
+	if err != nil || resumed.State != "claimed" || resumed.Refs.DecisionRequest.Status != DecisionRequestAnswered {
+		t.Fatalf("resume after answer: %+v %v", resumed.Refs.DecisionRequest, err)
 	}
 }

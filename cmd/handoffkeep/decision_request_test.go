@@ -74,7 +74,20 @@ func TestTasksDecisionRequestCLIRefusals(t *testing.T) {
 	if err := run(append(append([]string{}, base...), "--option", "A|"+strings.Repeat("가", 40)), io.Discard, io.Discard); err == nil || strings.Contains(err.Error(), "bytes") {
 		t.Fatalf("120-byte label: %v", err)
 	}
-	if err := run([]string{"tasks", "decision-request", "abc", "--question", "q"}, io.Discard, io.Discard); err == nil || !strings.Contains(err.Error(), "task id must be positive") {
+	// Argument errors are refusals too: every one says NOT recorded.
+	for name, args := range map[string][]string{
+		"bad id":         {"tasks", "decision-request", "abc", "--question", "q"},
+		"no id":          {"tasks", "decision-request", "--question", "q"},
+		"unknown flag":   {"tasks", "decision-request", "618", "--nope"},
+		"missing value":  {"tasks", "decision-request", "618", "--question"},
+		"resolve bad id": {"tasks", "decision-resolve", "abc", "--request", "dr-1-1", "--kind", "withdrawn", "--text", "x"},
+	} {
+		err := run(args, io.Discard, io.Discard)
+		if err == nil || !strings.Contains(err.Error(), "NOT recorded") {
+			t.Errorf("%s: err=%v", name, err)
+		}
+	}
+	if err := run([]string{"tasks", "decision-request", "abc", "--question", "q"}, io.Discard, io.Discard); err == nil || !strings.Contains(err.Error(), "task id must be positive") || !strings.Contains(err.Error(), "do not notify") {
 		t.Fatalf("bad id: %v", err)
 	}
 }

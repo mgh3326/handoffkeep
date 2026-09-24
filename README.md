@@ -174,7 +174,10 @@ a timer: a passed deadline is shown as "deadline passed, not applied" until a
 `default_applied` resolution with a receipt is recorded. Open requests left on
 merged/dropped tasks are listed as uncleaned and closed with
 `decision-resolve`. Once a task has a request, generic `transition --to
-needs_decision` and option patches on it are refused. The console (queue row
+needs_decision` and option patches on it are refused, and while the request
+is open a blocked task cannot leave `needs_decision` for `claimed` (the
+generic answer paths): record the answer with `decision-resolve` first, then
+resume. The console (queue row
 badge and count, drawer card, Decisions) reads these records only; answering
 from the console is #580.
 

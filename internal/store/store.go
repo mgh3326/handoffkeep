@@ -1561,6 +1561,14 @@ func (s *Store) TransitionTask(ctx context.Context, id int64, to, by, note strin
 		}
 		return Task{}, invalidDecisionRequest("this task's decisions are recorded with tasks decision-request; record a new request instead")
 	}
+	// Leaving needs_decision for claimed is how every generic answer path
+	// resumes a task. Checked here, under the row lock, so a request recorded
+	// after a caller's pre-check still cannot be left open behind a resumed
+	// task: resolve it with tasks decision-resolve first. Parking (hold),
+	// dropping and returning to backlog stay allowed.
+	if from == "needs_decision" && to == "claimed" && x.Refs.DecisionRequest != nil && x.Refs.DecisionRequest.Status == DecisionRequestOpen {
+		return Task{}, ErrDecisionRequestOpen
+	}
 	if to == "needs_decision" && strings.TrimSpace(note) == "" {
 		return Task{}, errors.New("needs_decision requires question")
 	}
