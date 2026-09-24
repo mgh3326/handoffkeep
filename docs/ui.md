@@ -95,7 +95,8 @@ starts with `https://github.com/`; other values are rendered as text.
   1. A task is shown when `state='needs_decision'`; its question is the `note`
      from that task's latest `task_events` row with `to='needs_decision'`.
   2. A `job.escalate` relay event is *open* when no later-ID event with the
-     same `job_id` has kind `job.joined` or `job.completed`, and no later
+     same `job_id` has kind `job.joined`, `job.completed`, `job.lost`, or
+     `job.revoked`, and no later
      `lane.event` from the same `owner_lane` has an `event_id` matching
      `%decision-escalation-<escalation id>-%`. This event-ID condition closes
      web and CLI escalation answers without allowing an unrelated task answer
