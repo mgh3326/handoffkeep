@@ -332,6 +332,7 @@ describe("state-grouped list structure", () => {
     expect(global.querySelector('[aria-current="page"]')!.textContent).toBe("Queue");
     expect([...global.querySelectorAll("a")].map((a) => a.getAttribute("href"))).toEqual([
       "/ui/queue",
+      "/ui/deploys",
       "/ui/decisions",
       "/ui/fleet",
       "/ui/grades",

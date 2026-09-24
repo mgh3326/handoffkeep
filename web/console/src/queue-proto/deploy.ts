@@ -22,6 +22,15 @@ export type DeployMergedTask = {
   merged_at: string;
 };
 
+/** One scanned document that is not a deploy record, with the reason classes
+ * that failed ("key" · "deployed_at" · "schema"; #620 AC4). Unknown reason
+ * strings render verbatim — a newer server's extra class must not fail the
+ * whole payload. */
+export type DeployInvalidRecord = {
+  key: string;
+  reasons: string[];
+};
+
 export type DeployServiceView = {
   service: string;
   repo: string;
@@ -29,6 +38,7 @@ export type DeployServiceView = {
   doc_url: string;
   record_count: number;
   invalid_count?: number;
+  invalid?: DeployInvalidRecord[];
   docs_capped?: boolean;
   current: DeployRecordView | null;
   latest?: DeployRecordView;
@@ -79,6 +89,19 @@ const isMergedTask = (v: unknown): v is DeployMergedTask => {
   );
 };
 
+const isInvalidRecord = (v: unknown): v is DeployInvalidRecord => {
+  if (typeof v !== "object" || v === null) {
+    return false;
+  }
+  const r = v as DeployInvalidRecord;
+  return (
+    typeof r.key === "string" &&
+    Array.isArray(r.reasons) &&
+    r.reasons.length > 0 &&
+    r.reasons.every((reason) => typeof reason === "string")
+  );
+};
+
 const isServiceView = (v: unknown): v is DeployServiceView => {
   if (typeof v !== "object" || v === null) {
     return false;
@@ -91,6 +114,7 @@ const isServiceView = (v: unknown): v is DeployServiceView => {
     (s.target === undefined || typeof s.target === "string") &&
     typeof s.record_count === "number" &&
     (s.invalid_count === undefined || typeof s.invalid_count === "number") &&
+    (s.invalid === undefined || (Array.isArray(s.invalid) && s.invalid.every(isInvalidRecord))) &&
     (s.docs_capped === undefined || typeof s.docs_capped === "boolean") &&
     MERGED_BOUNDARIES.has(s.merged_boundary) &&
     Array.isArray(s.merged_since) &&

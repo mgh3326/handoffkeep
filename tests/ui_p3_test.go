@@ -374,7 +374,7 @@ func TestUIP3ServiceIdentityBoundaryAndFailClosed(t *testing.T) {
 		h := newP3UITestServer(t, s, fixture, "", "", []string{"glance-fixture"})
 		defer h.Close()
 		for _, test := range []struct{ method, path string }{
-			{http.MethodGet, "/ui"}, {http.MethodGet, "/ui/timeline"}, {http.MethodGet, "/ui/queue"}, {http.MethodGet, "/ui/decisions"}, {http.MethodGet, "/ui/compose"}, {http.MethodGet, "/ui/fleet"}, {http.MethodGet, "/ui/events"}, {http.MethodGet, "/ui/fragments/timeline"}, {http.MethodGet, "/ui/doc/synthetic"}, {http.MethodGet, "/ui/static/htmx.min.js"}, {http.MethodPost, "/ui/decisions/answer"}, {http.MethodPost, "/ui/compose"},
+			{http.MethodGet, "/ui"}, {http.MethodGet, "/ui/timeline"}, {http.MethodGet, "/ui/queue"}, {http.MethodGet, "/ui/deploys"}, {http.MethodGet, "/ui/decisions"}, {http.MethodGet, "/ui/compose"}, {http.MethodGet, "/ui/fleet"}, {http.MethodGet, "/ui/events"}, {http.MethodGet, "/ui/fragments/timeline"}, {http.MethodGet, "/ui/doc/synthetic"}, {http.MethodGet, "/ui/static/htmx.min.js"}, {http.MethodPost, "/ui/decisions/answer"}, {http.MethodPost, "/ui/compose"},
 		} {
 			response := p3Request(t, h.Client(), test.method, h.URL+test.path, service, nil, "")
 			if response.StatusCode != http.StatusForbidden {

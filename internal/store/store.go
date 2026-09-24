@@ -665,24 +665,26 @@ func (s *Store) migrate(ctx context.Context) error {
 			}
 		}
 	}
-	var v13Applied bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_version WHERE version=13)`).Scan(&v13Applied); err != nil {
+	var v14Applied bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_version WHERE version=14)`).Scan(&v14Applied); err != nil {
 		return err
 	}
-	if !v13Applied {
-		// Version 13 (#618) admits kind='decision' task_events: a decision
+	if !v14Applied {
+		// Version 14 (#618) admits kind='decision' task_events: a decision
 		// request or its resolution recorded without a state change. They
 		// cannot be 'transition' rows — readers of "to"='merged' (deploys,
 		// disposition summary) would count a same-state row on a merged
 		// task, which is exactly where an uncleaned request is closed. The
 		// CHECK swap takes an ACCESS EXCLUSIVE lock, so it is version gated
-		// and runs once, like v7.
-		v13 := []string{
+		// and runs once, like v7. It is 14, not 13: #627 (relay_events
+		// job.lost/revoked) claims 13, and two different blocks behind one
+		// version number would leave the second deploy's DDL unapplied.
+		v14 := []string{
 			`ALTER TABLE task_events DROP CONSTRAINT IF EXISTS task_events_kind_check`,
 			`ALTER TABLE task_events ADD CONSTRAINT task_events_kind_check CHECK(kind IN ('transition','relane','decision'))`,
-			`INSERT INTO schema_version(version) VALUES (13)`,
+			`INSERT INTO schema_version(version) VALUES (14)`,
 		}
-		for _, q := range v13 {
+		for _, q := range v14 {
 			if _, err := tx.Exec(ctx, q); err != nil {
 				return err
 			}

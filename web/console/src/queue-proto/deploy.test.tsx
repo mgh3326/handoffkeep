@@ -5,8 +5,9 @@
 // to — never instead of — the last success.
 
 import { describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import { DeployPanel } from "./DeployPanel";
+import { DeploySummary } from "./DeploySummary";
 import { deployElapsed, deployPRLabel, deployStamp, shortDeployedRef, type DeployPendingResponse } from "./deploy";
 
 const SHA = "92ee9e2d0ddc47593677adcc9e83040dd9873463";
@@ -298,6 +299,57 @@ describe("DeployPanel", () => {
     expect(screen.getByText(/현재 판·최근 시도·머지 목록 모두 조회 범위 안의 결과입니다/)).toBeTruthy();
   });
 
+  it("invalid records list each key with its reason classes (#620 AC4)", async () => {
+    // The operational incident: the key lost its seconds AND deployed_at was
+    // not RFC3339 — one record carries both reasons.
+    const data = fixture();
+    data.services[0].invalid_count = 2;
+    data.services[0].invalid = [
+      { key: "deploy/handoffkeep/20260923T1456Z", reasons: ["key", "deployed_at"] },
+      { key: "deploy/handoffkeep/20260924T010000Z", reasons: ["schema"] },
+    ];
+    render(<DeployPanel fetchStatus={fetcher(data)} pollMs={600_000} />);
+    await waitFor(() => expect(screen.getByTestId("deploy-invalid-list")).toBeTruthy());
+    const list = screen.getByTestId("deploy-invalid-list");
+    expect(list.textContent).toContain("deploy/handoffkeep/20260923T1456Z");
+    expect(list.textContent).toContain("키 시각 형식이 계약(YYYYMMDDTHHMMSSZ)이 아님");
+    expect(list.textContent).toContain("deployed_at이 RFC3339가 아님");
+    expect(list.textContent).toContain("deploy/handoffkeep/20260924T010000Z");
+    expect(list.textContent).toContain("deploy-record/v0 본문이 아님(schema·service·result)");
+  });
+
+  it("unknown reason strings render verbatim so a newer server never hides why", async () => {
+    const data = fixture();
+    data.services[0].invalid_count = 1;
+    data.services[0].invalid = [{ key: "deploy/handoffkeep/20260924T030000Z", reasons: ["doc_url_missing"] }];
+    render(<DeployPanel fetchStatus={fetcher(data)} pollMs={600_000} />);
+    await waitFor(() => expect(screen.getByText("doc_url_missing")).toBeTruthy());
+  });
+
+  it("count-only warning still renders when an older server sends no invalid list", async () => {
+    const data = fixture();
+    data.services[0].invalid_count = 3;
+    render(<DeployPanel fetchStatus={fetcher(data)} pollMs={600_000} />);
+    await waitFor(() =>
+      expect(screen.getByText("형식이 맞지 않는 기록 3건은 표시하지 않았습니다.")).toBeTruthy()
+    );
+    expect(screen.queryByTestId("deploy-invalid-list")).toBeNull();
+  });
+
+  it("a malformed invalid row rejects the payload instead of half-rendering (r6 probe)", async () => {
+    const data = fixture();
+    data.services[0].invalid_count = 1;
+    data.services[0].invalid = [{ key: "deploy/handoffkeep/20260923T1456Z", reasons: [] }];
+    render(
+      <DeployPanel
+        fetchStatus={vi.fn(() => Promise.resolve(data as unknown as DeployPendingResponse))}
+        pollMs={600_000}
+      />,
+    );
+    await waitFor(() => expect(screen.getByText(/불러오지 못했습니다/)).toBeTruthy());
+    expect(document.querySelector("[data-deploy-state]")?.getAttribute("data-deploy-state")).toBe("error");
+  });
+
   it("under a capped scan, no in-window success reads 'unverified', not 'none'", async () => {
     // docs_capped + current:null means an older success may exist beyond the
     // scan window — the row must not assert "성공 배포 기록 없음".
@@ -310,6 +362,70 @@ describe("DeployPanel", () => {
     const section = screen.getByLabelText("panewire-hub 배포");
     expect(section.textContent).not.toContain("성공 배포 기록 없음");
     expect(section.textContent).toContain("더 오래된 배포 기록이 있을 수 있어");
+  });
+});
+
+describe("DeploySummary (#620 — the queue's one-line pointer to /ui/deploys)", () => {
+  it("shows pending-merge and invalid counts and links to Deploys", async () => {
+    const data = fixture();
+    data.services[0].invalid_count = 2;
+    data.services[0].invalid = [
+      { key: "deploy/handoffkeep/20260923T1456Z", reasons: ["key", "deployed_at"] },
+      { key: "deploy/handoffkeep/20260924T010000Z", reasons: ["schema"] },
+    ];
+    render(<DeploySummary fetchStatus={fetcher(data)} pollMs={600_000} />);
+    await waitFor(() => expect(screen.getByTestId("deploy-summary")).toBeTruthy());
+    const line = screen.getByTestId("deploy-summary");
+    expect(line.textContent).toContain("배포 대기 머지 1건");
+    expect(line.textContent).toContain("형식 오류 기록 2건");
+    const link = line.querySelector("a") as HTMLAnchorElement;
+    expect(link.getAttribute("href")).toBe("/ui/deploys");
+  });
+
+  it("sums counts across every service (mutant: must not read only the first)", async () => {
+    const data = fixture();
+    // fixture already has 1 pending merge on handoffkeep; add more on the
+    // other two services so a first-service-only count reads a wrong number.
+    data.services[1].merged_since = [
+      { task_id: 1, title: "a", pr: "https://github.com/mgh3326/auto_trader/pull/9", merged_at: "2026-09-23T02:00:00Z" },
+      { task_id: 2, title: "b", pr: "https://github.com/mgh3326/auto_trader/pull/10", merged_at: "2026-09-23T02:00:00Z" },
+    ];
+    data.services[2].invalid_count = 1;
+    data.services[2].invalid = [{ key: "deploy/panewire-hub/bad", reasons: ["key"] }];
+    render(<DeploySummary fetchStatus={fetcher(data)} pollMs={600_000} />);
+    await waitFor(() => expect(screen.getByTestId("deploy-summary")).toBeTruthy());
+    const line = screen.getByTestId("deploy-summary");
+    expect(line.textContent).toContain("배포 대기 머지 3건");
+    expect(line.textContent).toContain("형식 오류 기록 1건");
+  });
+
+  it("renders nothing when both counts are zero (AC2 hide)", async () => {
+    const data = fixture();
+    data.services[0].merged_since = [];
+    const spy = fetcher(data);
+    const { container } = render(<DeploySummary fetchStatus={spy} pollMs={600_000} />);
+    // barrier: fetch resolved AND the state update flushed, or the empty
+    // assertion would pass vacuously on the loading state.
+    await waitFor(() => expect(spy).toHaveBeenCalledTimes(1));
+    await act(async () => {});
+    expect(container.innerHTML).toBe("");
+    expect(screen.queryByTestId("deploy-summary")).toBeNull();
+  });
+
+  it("marks a truncated merged scan as a lower bound, never an exact count", async () => {
+    const data = fixture({ events_capped: true });
+    render(<DeploySummary fetchStatus={fetcher(data)} pollMs={600_000} />);
+    await waitFor(() => expect(screen.getByTestId("deploy-summary")).toBeTruthy());
+    expect(screen.getByTestId("deploy-summary").textContent).toContain("배포 대기 머지 1건 이상");
+  });
+
+  it("renders nothing while loading and nothing after a failed fetch — Deploys owns the error surface", async () => {
+    const spy = vi.fn(() => Promise.reject(new Error("boom")));
+    const { container } = render(<DeploySummary fetchStatus={spy} pollMs={600_000} />);
+    await waitFor(() => expect(spy).toHaveBeenCalledTimes(1));
+    await act(async () => {});
+    expect(container.innerHTML).toBe("");
+    expect(screen.queryByTestId("deploy-summary")).toBeNull();
   });
 });
 
