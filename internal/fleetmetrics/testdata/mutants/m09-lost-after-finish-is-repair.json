@@ -1,0 +1,8 @@
+{
+ "name": "m09-lost-after-finish-is-repair",
+ "file": "metrics.go",
+ "old": "\t\t\t\tif !finished {\n\t\t\t\t\tout[\"manual_recovery\"] = true\n\t\t\t\t}",
+ "new": "\t\t\t\tif !finished || finished {\n\t\t\t\t\tout[\"manual_recovery\"] = true\n\t\t\t\t}",
+ "test": "TestNormalPath",
+ "description": "a job.lost written after the job completed and was reaped is counted as a manual recovery"
+}

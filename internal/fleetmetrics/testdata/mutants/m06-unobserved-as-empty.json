@@ -1,0 +1,8 @@
+{
+ "name": "m06-unobserved-as-empty",
+ "file": "metrics.go",
+ "old": "\t\t\t\tlo = max(0, empty-unknown)",
+ "new": "\t\t\t\tlo = max(0, empty-0*unknown)",
+ "test": "TestSlots",
+ "description": "fill missing: a minute with an unobserved builder is counted as fully empty"
+}

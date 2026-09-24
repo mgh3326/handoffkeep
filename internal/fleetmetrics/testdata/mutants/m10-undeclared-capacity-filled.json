@@ -1,0 +1,8 @@
+{
+ "name": "m10-undeclared-capacity-filled",
+ "file": "metrics.go",
+ "old": "\t\t\tif slotsNow < 0 {\n\t\t\t\tcapacityCov.Detail[\"no capacity declared yet: \"+c.Machine]++\n\t\t\t\tcontinue\n\t\t\t}",
+ "new": "\t\t\tif slotsNow < 0 {\n\t\t\t\tcapacityCov.Detail[\"no capacity declared yet: \"+c.Machine]++\n\t\t\t\tslotsNow = c.Slots\n\t\t\t}",
+ "test": "TestSlotsCapacityTimeline",
+ "description": "fill missing capacity with the latest value for minutes before any declaration"
+}

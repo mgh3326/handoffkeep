@@ -1,0 +1,8 @@
+{
+ "name": "m15-undated-stream-as-pre-stream",
+ "file": "metrics.go",
+ "old": "\t\tout.state = \"no dated deploy record for the repo's services\"",
+ "new": "\t\tout.state = \"merged before the deploy-record stream began\"",
+ "test": "TestLeadTime",
+ "description": "a deploy stream with no dated record is reported as the merge predating the stream (tester devin-ds41 SHOULD-1)"
+}

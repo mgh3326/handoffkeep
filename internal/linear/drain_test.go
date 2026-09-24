@@ -312,9 +312,23 @@ func TestLinearDrainAdvisoryLockSingleOwnerAndRelease(t *testing.T) {
 	}
 	stopFirst()
 	stopSecond()
+	// The advisory lock is database-wide, and go test ./... runs packages in
+	// parallel against the same database: cmd/handoffkeep's drain test can hold
+	// the lock briefly. Retry until it frees; a lease leaked by the stopped
+	// drains above is never released, so that still fails at the deadline.
 	var acquired bool
-	if err := connection.QueryRow(t.Context(), `SELECT pg_try_advisory_lock($1)`, store.LinearDrainAdvisoryLock).Scan(&acquired); err != nil || !acquired {
-		t.Fatalf("reacquire=%t err=%v", acquired, err)
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		if err := connection.QueryRow(t.Context(), `SELECT pg_try_advisory_lock($1)`, store.LinearDrainAdvisoryLock).Scan(&acquired); err != nil {
+			t.Fatal(err)
+		}
+		if acquired {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("reacquire=%t after stopping both drains", acquired)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 	if _, err := connection.Exec(t.Context(), `SELECT pg_advisory_unlock($1)`, store.LinearDrainAdvisoryLock); err != nil {
 		t.Fatal(err)

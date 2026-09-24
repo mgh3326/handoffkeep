@@ -1,0 +1,11 @@
+schema: deploy-record/v0
+service: scopefuel
+deployed_at: 2026-09-24T08:08:17Z
+sha: 40d901c10c32380a99ac2a8a409b62d34e567df7
+previous_sha: af2233fae9299cd4a2a77eddd5dacf98fafea067
+change: "#639 PR #79 — lock-skipped probe round keeps last good snapshot, never hides newer failure"
+hosts: [mbp-server, m1b, desktop, rpi, ncp:mgh3326]
+method: uv tool install --force git rev
+verify: receipt rev=40d901c on all 5; scopefuel gate -m devin-swe2 → pool=devin 15% spend on 4 hosts; ncp → "대안(A+) 없음" (devin 레인 없는 호스트, 기존과 동일)
+operator: operator-desk (director-1 relay, 운영자 오늘 설치 위임)
+
