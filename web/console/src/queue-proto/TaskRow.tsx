@@ -1,4 +1,4 @@
-import { ageDays, isStale } from "./adapter";
+import { ageDays, decisionMark, isStale } from "./adapter";
 import { LIVE_TASK_STATES, liveAgeLabel, liveSectionLabel, taskLiveJobs, type LiveJob, type LiveResponse } from "../live";
 import { StateIcon } from "./StateIcon";
 import { stateLabel } from "./states";
@@ -127,6 +127,18 @@ function LiveChipSummary({ task, now, live }: { task: ProtoTask; now: string; li
   );
 }
 
+/** #618 row badge: only the fact that a recorded decision request is open
+ * (the drawer carries the question and choices; answering is #580). Text,
+ * not color alone, says which. */
+function DecisionBadge({ task }: { task: ProtoTask }) {
+  const mark = decisionMark(task);
+  return mark === null ? null : (
+    <span className="qp-livechip qp-livechip-warn" data-decision={mark} title={task.refs.decision_request?.id}>
+      {mark === "pending" ? "내 결정 대기" : "미정리 요청"}
+    </span>
+  );
+}
+
 /** The hub job standing in for an unrecorded claimant: the task's primary
  * job owner_lane, exact-matched — never a guessed string. */
 function liveClaimant(task: ProtoTask, live: LiveResponse | undefined): string | null {
@@ -184,6 +196,7 @@ export function RowFields({ task, now, showStateLabel = false, live }: RowFields
             <span className="qp-claimant">{task.claimant}</span>
           )}
         </span>
+        <DecisionBadge task={task} />
         <LiveChips task={task} now={now} live={live} />
         <span className="qp-meta-age">
           <span className="qp-age" title="생성(created_at) 기준">
@@ -227,6 +240,7 @@ export function CardFields({ task, now, live }: { task: ProtoTask; now: string; 
           </span>
         </span>
       ) : null}
+      <DecisionBadge task={task} />
       <LiveChipSummary task={task} now={now} live={live} />
       <span className="qp-cell qp-title">{task.title}</span>
       <span className="qp-cell qp-lane">

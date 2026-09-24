@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
 	"testing"
 	"time"
 
@@ -55,14 +56,14 @@ func TestRelayEventsV6ToV7Upgrade(t *testing.T) {
 		t.Fatal(err)
 	}
 	var version int
-	if err = pool.QueryRow(ctx, `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != 13 {
+	if err = pool.QueryRow(ctx, `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != 14 {
 		t.Fatalf("schema version=%d err=%v", version, err)
 	}
 	var constraintOID uint32
 	if err = pool.QueryRow(ctx, `SELECT oid FROM pg_constraint WHERE conrelid='relay_events'::regclass AND conname='relay_events_kind_check'`).Scan(&constraintOID); err != nil {
 		t.Fatal(err)
 	}
-	// A second open must see schema version 13 and skip the lock-heavy relay DDL.
+	// A second open must see schema version 14 and skip the lock-heavy relay DDL.
 	// The constraint OID would change if it were dropped and re-added again.
 	if err = s.migrate(ctx); err != nil {
 		t.Fatal(err)
@@ -142,8 +143,9 @@ func TestRelayEventsV12ToV13Upgrade(t *testing.T) {
 		t.Fatal(err)
 	}
 	var version, historic int
-	if err = pool.QueryRow(ctx, `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != 13 {
-		t.Fatalf("schema version=%d err=%v", version, err)
+	// v13 re-ran and recorded itself once; max is 14 (#618) so assert the row.
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM schema_version WHERE version=13`).Scan(&version); err != nil || version != 1 {
+		t.Fatalf("version 13 rows=%d err=%v", version, err)
 	}
 	if err = pool.QueryRow(ctx, `SELECT count(*) FROM relay_events WHERE job_id='historic-job' OR event_id='historic-lane'`).Scan(&historic); err != nil || historic != 2 {
 		t.Fatalf("historic rows=%d err=%v", historic, err)
@@ -228,7 +230,7 @@ func TestTaskCommentsMigrationIsAdditiveAndIdempotent(t *testing.T) {
 	if err = pool.QueryRow(ctx, `SELECT count(*) FROM pg_trigger WHERE tgname='task_comments_append_only' AND tgrelid='task_comments'::regclass`).Scan(&triggers); err != nil || triggers != 1 {
 		t.Fatalf("triggers=%d err=%v", triggers, err)
 	}
-	if err = pool.QueryRow(ctx, `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != 13 {
+	if err = pool.QueryRow(ctx, `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != 14 {
 		t.Fatalf("schema version=%d err=%v", version, err)
 	}
 	xs, err := s.ListTaskComments(ctx, task.ID, 0, 10)
@@ -292,7 +294,7 @@ func TestBenchCatalogV11ToV12Upgrade(t *testing.T) {
 		t.Fatal(err)
 	}
 	var version, rows, modelRows int
-	if err = pool.QueryRow(ctx, `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != 13 {
+	if err = pool.QueryRow(ctx, `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != 14 {
 		t.Fatalf("schema version=%d err=%v", version, err)
 	}
 	if err = pool.QueryRow(ctx, `SELECT count(*) FROM schema_version WHERE version=12`).Scan(&version); err != nil || version != 1 {
@@ -346,5 +348,130 @@ func TestBenchCatalogEmptyMigration(t *testing.T) {
 	var rows int
 	if err = pool.QueryRow(ctx, `SELECT count(*) FROM bench_catalog`).Scan(&rows); err != nil || rows != 0 {
 		t.Fatalf("empty catalog rows=%d err=%v", rows, err)
+	}
+}
+
+// TestTaskEventsDecisionKindUpgradeToV14 starts from a database whose
+// task_events.kind CHECK admits only transition/relane and holds history,
+// and proves v14 admits 'decision' once, keeps every row, and still refuses
+// an unknown kind.
+func TestTaskEventsDecisionKindUpgradeToV14(t *testing.T) {
+	s, pool := searchTestStore(t)
+	ctx := context.Background()
+	for _, q := range []string{
+		`DELETE FROM schema_version WHERE version=14`,
+		`ALTER TABLE task_events DROP CONSTRAINT task_events_kind_check`,
+		`ALTER TABLE task_events ADD CONSTRAINT task_events_kind_check CHECK(kind IN ('transition','relane'))`,
+	} {
+		if _, err := pool.Exec(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	x, err := s.CreateTask(ctx, Task{Lane: "v14-lane", Title: "history", Kind: "implement", CreatedBy: "v14"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.ClaimTask(ctx, x.ID, "v14"); err != nil {
+		t.Fatal(err)
+	}
+	insertDecision := func(kind string) error {
+		_, err := pool.Exec(ctx, `INSERT INTO task_events(task_id,"from","to","by",note,at,kind) VALUES($1,'claimed','claimed','v14','',now(),$2)`, x.ID, kind)
+		return err
+	}
+	if insertDecision("decision") == nil {
+		t.Fatal("pre-v14 constraint admitted a decision row")
+	}
+	// Prove v14 does not scan existing rows (M3): a row the new CHECK would
+	// reject is present when v14 runs. A validating ADD CONSTRAINT would fail
+	// the whole migration here; NOT VALID adds the constraint without a scan.
+	// (Real rows always satisfied the old, narrower CHECK; this one is
+	// planted with the constraint briefly removed.)
+	for _, q := range []string{
+		`ALTER TABLE task_events DROP CONSTRAINT task_events_kind_check`,
+		`INSERT INTO task_events(task_id,"from","to","by",note,at,kind) VALUES(` + strconv.FormatInt(x.ID, 10) + `,'claimed','claimed','v14','planted',now(),'unscanned')`,
+		`ALTER TABLE task_events ADD CONSTRAINT task_events_kind_check CHECK(kind IN ('transition','relane')) NOT VALID`,
+	} {
+		if _, err := pool.Exec(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err = s.migrate(ctx); err != nil {
+		t.Fatalf("v14 scanned existing rows: %v", err)
+	}
+	var validated bool
+	if err = pool.QueryRow(ctx, `SELECT convalidated FROM pg_constraint WHERE conrelid='task_events'::regclass AND conname='task_events_kind_check'`).Scan(&validated); err != nil || validated {
+		t.Fatalf("task_events_kind_check convalidated=%t err=%v, want NOT VALID", validated, err)
+	}
+	var version, rows int
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM schema_version WHERE version=14`).Scan(&version); err != nil || version != 1 {
+		t.Fatalf("version 14 rows=%d err=%v", version, err)
+	}
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM task_events WHERE task_id=$1`, x.ID).Scan(&rows); err != nil || rows != 2 {
+		t.Fatalf("history rows=%d err=%v (claim + planted row)", rows, err)
+	}
+	if err = insertDecision("decision"); err != nil {
+		t.Fatalf("v14 refused a decision row: %v", err)
+	}
+	if insertDecision("bogus") == nil {
+		t.Fatal("v14 admitted an unknown kind")
+	}
+	// A second start sees v14 and does not repeat the lock-heavy swap.
+	if err = s.migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM schema_version WHERE version=14`).Scan(&version); err != nil || version != 1 {
+		t.Fatalf("version 14 rows after restart=%d err=%v", version, err)
+	}
+}
+
+// TestV13ThenV14BothChecksHold is the deploy-order case for #627 (#47) and
+// #618: a database that already recorded version 13 — #627's relay_events
+// CHECK admitting job.lost/job.revoked, applied here as a stub of that shape
+// — must still run this package's v14. Had #618 also used 13, the version
+// gate would skip its DDL and task_events would refuse 'decision'. The test
+// holds whether or not #627's own v13 code is present in this tree.
+func TestV13ThenV14BothChecksHold(t *testing.T) {
+	s, pool := searchTestStore(t)
+	ctx := context.Background()
+	for _, q := range []string{
+		// Back to a v12 shape for both tables.
+		`DELETE FROM schema_version WHERE version IN (13,14)`,
+		`ALTER TABLE task_events DROP CONSTRAINT task_events_kind_check`,
+		`ALTER TABLE task_events ADD CONSTRAINT task_events_kind_check CHECK(kind IN ('transition','relane'))`,
+		`ALTER TABLE relay_events DROP CONSTRAINT relay_events_kind_check`,
+		`ALTER TABLE relay_events ADD CONSTRAINT relay_events_kind_check CHECK(kind IN ('job.completed','job.escalate','job.joined','lane.event'))`,
+		// #627's v13 (stub of its CHECK swap), deployed first.
+		`ALTER TABLE relay_events DROP CONSTRAINT relay_events_kind_check`,
+		`ALTER TABLE relay_events ADD CONSTRAINT relay_events_kind_check CHECK(kind IN ('job.completed','job.escalate','job.joined','job.lost','job.revoked','lane.event'))`,
+		`INSERT INTO schema_version(version) VALUES (13)`,
+	} {
+		if _, err := pool.Exec(ctx, q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	x, err := s.CreateTask(ctx, Task{Lane: "v13v14-lane", Title: "stacked", Kind: "implement", CreatedBy: "v14"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO task_events(task_id,"from","to","by",note,at,kind) VALUES($1,'backlog','backlog','v14','',now(),'decision')`, x.ID); err == nil {
+		t.Fatal("decision row admitted before v14 ran")
+	}
+	if err = s.migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var v13, v14 int
+	if err = pool.QueryRow(ctx, `SELECT count(*) FILTER (WHERE version=13), count(*) FILTER (WHERE version=14) FROM schema_version`).Scan(&v13, &v14); err != nil || v13 != 1 || v14 != 1 {
+		t.Fatalf("versions 13=%d 14=%d err=%v", v13, v14, err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO task_events(task_id,"from","to","by",note,at,kind) VALUES($1,'backlog','backlog','v14','',now(),'decision')`, x.ID); err != nil {
+		t.Fatalf("task_events refused 'decision' after v13 then v14: %v", err)
+	}
+	for _, kind := range []string{"job.lost", "job.revoked"} {
+		if _, err := pool.Exec(ctx, `INSERT INTO relay_events(kind,job_id,owner_lane,received_at) VALUES($1,$2,'v14-lane',now())`, kind, "v13v14-"+kind); err != nil {
+			t.Fatalf("relay_events refused %s after v14 ran: %v", kind, err)
+		}
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO relay_events(kind,job_id,owner_lane,received_at) VALUES('job.bogus','x','v14-lane',now())`); err == nil {
+		t.Fatal("relay_events admitted an unknown kind")
 	}
 }

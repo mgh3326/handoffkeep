@@ -185,6 +185,11 @@ type boardDetailResponse struct {
 	Dwell        []dwellSegment    `json:"dwell"`
 	Linear       *boardLinear      `json:"linear"`
 	Participants boardParticipants `json:"participants"`
+	// DecisionRequests is every structured request of the task, newest
+	// first, with its derived display state (#618). Always present (possibly
+	// empty) so a client can tell "none recorded" from an older server.
+	DecisionRequests []decisionRequestView `json:"decision_requests"`
+	DecisionLegacy   *legacyDecisionView   `json:"decision_legacy,omitempty"`
 }
 
 func taskRef(id int64) string {
@@ -192,14 +197,15 @@ func taskRef(id int64) string {
 }
 
 // taskDwell totals the time spent in each canonical state. Relane events
-// carry lane names, not states, so they are excluded — a lane change must not
-// end the open dwell segment. The final segment stays open: its seconds run
+// carry lane names, not states, and decision events record a request without
+// a state change, so both are excluded — neither may end the open dwell
+// segment. The final segment stays open: its seconds run
 // from the last transition to now.
 func taskDwell(task store.Task, now time.Time) []dwellSegment {
 	totals := map[string]int64{}
 	current, start := "backlog", task.CreatedAt
 	for _, event := range task.Events {
-		if event.Kind == store.TaskEventRelane {
+		if event.Kind == store.TaskEventRelane || event.Kind == store.TaskEventDecision {
 			continue
 		}
 		if event.At.After(start) {
@@ -308,12 +314,14 @@ func (h *Handler) boardTaskDetail(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	now := time.Now().UTC()
 	response := boardDetailResponse{
 		Task:   projectBoardTask(task),
 		Events: make([]boardEvent, 0, len(task.Events)),
-		Dwell:  taskDwell(task, time.Now().UTC()),
+		Dwell:  taskDwell(task, now),
 		Linear: nil,
 	}
+	response.DecisionRequests, response.DecisionLegacy = taskDecisionViews(task, now)
 	for _, event := range task.Events {
 		response.Events = append(response.Events, boardEvent{
 			ID: event.ID, Kind: event.Kind, From: event.From, To: event.To, By: event.By,

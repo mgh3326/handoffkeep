@@ -446,10 +446,12 @@ describe("overview order — 목적 → 현재 상황 → 다음 행동 → 결�
     expect(next.textContent).not.toContain("자유 문장");
   });
 
-  it("결정 자리: 데이터 미연결은 '없음'이 아니라 '미연결' — needs_decision 은 스스로를 말한다", () => {
+  it("결정 자리: 데이터 미연결은 '없음'이 아니라 '미연결' — needs_decision 은 스스로를 말한다", async () => {
+    // The card is a lazy chunk (#618): wait for it instead of relying on an
+    // earlier test in this file having loaded it.
     const noDecision = renderBody(mkProtoTask({}));
     const slot = noDecision.container.querySelector<HTMLElement>(".qp-decision")!;
-    expect(slot.textContent).toContain("결정 요청 정보 미연결");
+    await waitFor(() => expect(slot.textContent).toContain("결정 요청 정보 미연결"));
     expect(slot.textContent).not.toContain("없습니다");
     noDecision.unmount();
 
@@ -457,13 +459,13 @@ describe("overview order — 목적 → 현재 상황 → 다음 행동 → 결�
     // the state names the need even while the card data is unwired (#618).
     const needs = renderBody(mkProtoTask({ state: "needs_decision" }));
     const needsSlot = needs.container.querySelector<HTMLElement>(".qp-decision")!;
-    expect(needsSlot.textContent).toContain("결정 필요");
+    await waitFor(() => expect(needsSlot.textContent).toContain("결정 필요"));
     expect(needsSlot.textContent).not.toContain("없습니다");
     needs.unmount();
 
     const decided = renderBody(mkProtoTask({ decision: { question: "A안 채택?", evidence: "hk:doc x" } }));
     const decidedSlot = decided.container.querySelector<HTMLElement>(".qp-decision")!;
-    expect(decidedSlot.textContent).toContain("A안 채택?");
+    await waitFor(() => expect(decidedSlot.textContent).toContain("A안 채택?"));
     expect(decidedSlot.textContent).toContain("hk:doc x");
   });
 });

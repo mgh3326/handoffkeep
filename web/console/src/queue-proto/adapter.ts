@@ -16,11 +16,24 @@ export const VIEW_STATES: Record<ProtoView, string[]> = {
   all: [...KNOWN_STATES],
 };
 
+/** #618 queue mark from the list refs: an open request is "pending" on a
+ * live task and "uncleaned" on a merged/dropped one — the same split as the
+ * server's DecisionRequestCounts, so queue, drawer and Decisions agree. */
+export function decisionMark(task: ProtoTask): "pending" | "uncleaned" | null {
+  if (task.refs.decision_request?.status !== "open") {
+    return null;
+  }
+  return task.state === "merged" || task.state === "dropped" ? "uncleaned" : "pending";
+}
+
 export function viewPredicate(view: ProtoView, states: readonly string[] = KNOWN_STATES): (task: ProtoTask) => boolean {
   if (view === "operator") {
     // Operator view: anything waiting on an operator decision plus backlog.
     return (task) =>
-      task.state === "backlog" || task.state === "needs_decision" || (task.kind === "decide" && task.state !== "merged" && task.state !== "dropped");
+      task.state === "backlog" ||
+      task.state === "needs_decision" ||
+      decisionMark(task) === "pending" ||
+      (task.kind === "decide" && task.state !== "merged" && task.state !== "dropped");
   }
   // "all" enumerates the dataset's own states (server-provided when live);
   // "active"/"backlog" are semantic subsets and stay fixed.
@@ -130,7 +143,7 @@ export function taskSignals(task: ProtoTask, now: string): { decision: boolean; 
     task.coverage.status === "not_collected" ||
     (task.due_at === null && task.blocker === null);
   return {
-    decision: task.state === "needs_decision" || task.kind === "decide" || task.decision !== undefined,
+    decision: task.state === "needs_decision" || task.kind === "decide" || task.decision !== undefined || decisionMark(task) === "pending",
     hold: task.state === "hold",
     unknown,
     urgent: task.priority >= 90,

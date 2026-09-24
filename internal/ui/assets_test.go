@@ -24,6 +24,7 @@ func newAssetTestHandler(t *testing.T, version string) *Handler {
 	h := &Handler{static: static, assetVersion: version}
 	tmpl, err := template.New("ui").Funcs(template.FuncMap{
 		"formatTime":       formatTime,
+		"formatTimePtr":    formatTimePtr,
 		"shortHead":        shortHead,
 		"githubLink":       githubLink,
 		"message":          messageParts,

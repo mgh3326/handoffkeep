@@ -82,6 +82,7 @@
   {{if .RenderNotice}}<p class="badge" data-render-notice>{{.RenderNotice}}</p>{{end}}
   {{if .Results}}<section><h3>Answer results</h3><ul>{{range .Results}}<li data-item-status="{{.Status}}">{{.Message}}</li>{{end}}</ul></section>{{end}}
   {{with .Disposition}}{{template "disposition_section" .}}{{end}}
+  {{template "decision_request_section" .Requests}}
   <form method="post" action="/ui/decisions/answer-batch">
   <input type="hidden" name="csrf" value="{{.CSRF}}">
   <p><button name="mode" value="selected" {{if not .CanWrite}}disabled{{end}}>선택한 항목 답변</button> <button name="mode" value="recommended" {{if not .CanWrite}}disabled{{end}}>권고안 전부 답변</button></p>
@@ -99,6 +100,22 @@
   </section>
   <details><summary>signals</summary>{{range .Signals}}<article class="decision"><strong>{{.OwnerLane}}</strong> · job {{.JobID}}<pre>{{range message .}}{{if .DocKey}}<a href="/ui/doc/{{.DocKey}}">doc:{{.DocKey}}</a>{{else}}{{.Text}}{{end}}{{end}}</pre></article>{{else}}<p class="muted">No signals.</p>{{end}}</details>
   </form>
+</section>
+{{end}}
+
+{{define "decision_request_section"}}
+<section id="decision-requests" data-decision-requests><h3>결정 요청</h3>
+  <p class="badge" data-decision-request-count data-pending="{{.Pending}}" data-uncleaned="{{.Uncleaned}}">내 결정 대기 {{.Pending}}건{{if .Truncated}}+{{end}}{{if .Uncleaned}} · 미정리 요청 {{.Uncleaned}}건{{end}}</p>
+  <p class="muted">읽기 전용 — hk 에 기록된 요청입니다. 콘솔 답변은 #580 에서 붙습니다. 기한이 지나도 적용 기록 없이는 "기본값 적용됨"이 아닙니다.</p>
+  {{range .Items}}
+  <article class="decision decision-card" data-decision-request="{{.View.ID}}" data-state="{{.View.State}}"><strong>#{{.Task.ID}} {{.Task.Title}}</strong> · {{.Task.Lane}} · {{.Task.State}} <span class="badge">{{.View.StateLabel}}</span>
+    <pre>{{.View.Question}}</pre>
+    <ul>{{range .View.Options}}<li>{{.Key}}. {{.Label}}{{if .Recommended}} <span class="badge">권고</span>{{end}}</li>{{end}}{{if .View.AllowFree}}<li class="muted">직접 답변 허용</li>{{end}}</ul>
+    {{if .View.Reason}}<p>권고 이유: {{.View.Reason}}</p>{{end}}
+    <p>무응답 시: {{.View.DefaultAction}}{{if .View.DefaultOption}} (선택지 {{.View.DefaultOption}}){{end}} · 발동: {{if .View.DefaultTrigger}}{{.View.DefaultTrigger}}{{else}}발동 시점 미기록{{end}} · 기한: {{if .View.DueAt}}<time>{{formatTimePtr .View.DueAt}}</time>{{else}}기한 미지정{{end}}</p>
+    <p class="muted">{{.View.ID}} · r{{.View.Revision}}{{if .View.Supersedes}} (대체: {{.View.Supersedes}}){{end}} · {{.View.RequestedBy}} · <time>{{formatTime .View.RequestedAt}}</time>{{if .View.Doc}} · <a href="/ui/doc/{{.View.Doc}}">요청 문서</a>{{end}} · <a href="/ui/queue?task={{.Task.ID}}">drawer</a></p>
+  </article>
+  {{else}}<p class="muted">열린 결정 요청 없음.</p>{{end}}
 </section>
 {{end}}
 

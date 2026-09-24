@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { BoardDetail } from "../board/types";
-import { applyView, boardColumns, countByView, EMPTY_FILTERS, groupByArea, groupByState } from "./adapter";
+import { applyView, boardColumns, countByView, decisionMark, EMPTY_FILTERS, groupByArea, groupByState } from "./adapter";
 import { boardTaskToProto } from "./boardtask";
 import { flattenGrouped } from "./ListView";
 import { DetailDrawer, type DetailFetchState } from "./DetailDrawer";
@@ -386,6 +386,18 @@ export function QueueProtoApp({ datasets, initialSet, storage, diag = false, per
     [dataset.tasks],
   );
   const partial = dataset.completeness !== "complete";
+  // #618 one-line count from the same list refs as the row badges. A
+  // partial dataset marks it "+": an incomplete read is never a firm count.
+  const decisionCounts = useMemo(() => {
+    const out = { pending: 0, uncleaned: 0 };
+    for (const task of dataset.tasks) {
+      const mark = decisionMark(task);
+      if (mark !== null) {
+        out[mark] += 1;
+      }
+    }
+    return out;
+  }, [dataset.tasks]);
 
   return (
     <div className={`qp-root${state.sidebarCollapsed ? " rail-collapsed" : ""}${openId !== null ? " qp-peek-open" : ""}`} ref={rootRef}>
@@ -435,6 +447,12 @@ export function QueueProtoApp({ datasets, initialSet, storage, diag = false, per
               {refreshFailed ? (
                 <span className="qp-status-warn" data-status="refresh-failed">
                   ⚠ 갱신 실패 · {clock === null ? "이전" : clock} 자료를 보여 주는 중
+                </span>
+              ) : null}
+              {dataset.source === "live" ? (
+                <span className="qp-asof" data-status="decisions">
+                  내 결정 대기 {decisionCounts.pending}
+                  {partial ? "+" : ""}건{decisionCounts.uncleaned > 0 ? ` · 미정리 요청 ${decisionCounts.uncleaned}건` : ""}
                 </span>
               ) : null}
               {partial ? (

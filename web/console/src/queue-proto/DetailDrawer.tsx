@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { fetchBoardDoc } from "../board/api";
 import type { BoardDetail, BoardDoc, ParticipantSegment } from "../board/types";
 import { ActivityTabs } from "./ActivityTabs";
@@ -8,6 +8,10 @@ import { DocInline, type FetchDoc } from "./DocInline";
 import { TaskComments, type CommentsClient } from "./TaskComments";
 import { useTaskDocMeta, type TaskDocMetaState } from "./taskmeta";
 import type { Dataset, Enrichment, ProtoTask } from "./types";
+
+// #618 decision card: a lazy chunk so the queue list's initial bundle does
+// not grow with it (budget: design.test / bundle-split.test).
+const DecisionCard = lazy(() => import("./DecisionCard"));
 
 /** Lazily fetched per-drawer detail (live mode). Absent → the task's own
  * fields are the truth, which is the fixture/test path. "notfound" is a
@@ -281,21 +285,9 @@ export function DetailBody({ dataset, task, detail, fetchDoc, comments: comments
       </section>
       <section className="qp-drawer-sec qp-decision">
         <h4>결정</h4>
-        {task.decision ? (
-          <>
-            <p>{task.decision.question}</p>
-            <p className="muted">evidence: {task.decision.evidence}</p>
-          </>
-        ) : (
-          // task.decision is only ever populated for synthetic fixtures — on
-          // live data "absent" means "not connected", never "no request".
-          // A needs_decision state still names itself honestly.
-          <p className="muted">
-            {task.state === "needs_decision"
-              ? "상태는 결정 필요 — 결정 내용은 아직 미연결입니다."
-              : "결정 요청 정보 미연결 — 결정 카드 연결은 #618 에서."}
-          </p>
-        )}
+        <Suspense fallback={<p className="muted">결정 요청 확인 중…</p>}>
+          <DecisionCard task={task} detail={detail} />
+        </Suspense>
       </section>
       <TaskBodySection task={task} fetchDoc={sharedFetchDoc} />
       <section className="qp-drawer-sec">
@@ -460,11 +452,12 @@ export function DetailBody({ dataset, task, detail, fetchDoc, comments: comments
   );
 
   // History rows are task_events. A relane row's from/to are lane names, not
-  // states, so it is prefixed "lane:" rather than read as a state transition.
+  // states, so it is prefixed "lane:" rather than read as a state transition;
+  // a decision row records a request without a state change.
   // A note is data: plain text only, never parsed as markdown or HTML.
   const eventLine = (event: { id: number; kind?: string; from: string; to: string; by: string; note?: string; at: string }) => (
     <li key={event.id}>
-      {event.kind === "relane" ? "lane: " : ""}
+      {event.kind === "relane" ? "lane: " : event.kind === "decision" ? "결정: " : ""}
       {event.from} → {event.to} by {event.by} at <time>{event.at}</time>
       {event.note ? <span className="muted"> — {event.note}</span> : null}
     </li>

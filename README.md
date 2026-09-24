@@ -150,6 +150,57 @@ an idempotent no-op: `changed` is false and no event is written. A request
 takes at most 500 ids (the CLI refuses larger batches locally) and the CLI
 deadline scales with the id count so a max-size batch cannot expire silently
 mid-request.
+### Decision requests
+
+A question put to the operator is recorded on its task before any pane
+notification (#618). Schema v14 widens the `task_events.kind` CHECK to admit
+`decision` as `NOT VALID` (a catalog-only change, with no scan of existing rows
+under the exclusive lock); `ALTER TABLE task_events VALIDATE CONSTRAINT
+task_events_kind_check` can be run later without blocking reads or writes. The request lives in `refs.decision_request` next to the
+existing `refs.decision_options`; every write appends a `task_events` row with
+`kind='decision'` (from = to = the current state) whose refs snapshot keeps the
+full request, so history is read back from events and no table is added.
+
+```bash
+handoffkeep tasks decision-request 42 --question "Where should the allowlist live?" \
+  --option 'A|writer spec' --option 'B|backfill tool' --recommended A --reason "one choke point" \
+  --default-action "hold and move to the next task" [--default-option B] \
+  [--default-trigger "director applies after the deadline"] [--due 2026-09-25T18:00:00+09:00] \
+  [--doc key] [--supersedes dr-42-1] [--block]
+handoffkeep tasks decision-resolve 42 --request dr-42-1 --kind answered --option A --responder operator
+handoffkeep tasks decision-resolve 42 --request dr-42-1 --kind default_applied --receipt <evidence>
+handoffkeep tasks decision-resolve 42 --request dr-42-1 --kind withdrawn --text "no longer relevant"
+```
+
+The CLI prints the `request_id` (`dr-<task>-<revision>`) and a `notify` line
+to paste into the pane message. A failure before the request is sent, or a
+refusal the server sends (401/403/404/409 or a named 400), says `NOT
+recorded`: the request must not be announced as visible in the console. A
+transport error, timeout, undecodable reply, 5xx or the catch-all 400
+`invalid_context` after the request was sent says outcome `UNKNOWN` and exits
+4, because the server may already have committed: check `tasks show <id>` or
+re-send the identical command, which returns a recorded request as
+`duplicate`, before notifying. A value flag never takes the next flag as its
+value (`--reason --block` is refused); pass text that starts with `-` as
+`--reason=-text`. The recommendation,
+the no-response action (required; write "자동 적용 없음" when nothing is
+applied) and the deadline are separate fields. Option labels are at most 120
+bytes (not characters); longer outcome text goes in `--doc`. A byte-identical
+re-send returns the recorded request (`duplicate`); a different request while
+one is open is refused (`decision_request_open`) unless `--supersedes` names
+it, and the new revision starts with no answer. `--block` also moves the task
+to `needs_decision`; without it the state is unchanged. Nothing is applied on
+a timer: a passed deadline is shown as "deadline passed, not applied" until a
+`default_applied` resolution with a receipt is recorded. Open requests left on
+merged/dropped tasks are listed as uncleaned and closed with
+`decision-resolve`. Once a task has a request, generic `transition --to
+needs_decision` and option patches on it are refused, and while the request
+is open a blocked task cannot leave `needs_decision` for `claimed` (the
+generic answer paths): record the answer with `decision-resolve` first, then
+resume. The console (queue row
+badge and count, drawer card, Decisions) reads these records only; answering
+from the console is #580.
+
 `GET /v1/tasks/export` returns one consistent snapshot of the queue — a
 single bounded JSON document carrying the snapshot ID, watermarks, filtered
 counts, integrity digests, and the task rows — read inside one repeatable-read

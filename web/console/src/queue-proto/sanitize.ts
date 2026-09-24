@@ -74,7 +74,7 @@ export function* fixtureStrings(dataset: Dataset): Generator<string> {
     yield task.due_at ?? "";
     yield task.blocker ?? "";
     for (const [k, v] of Object.entries(task.refs)) {
-      yield `${k}:${v}`;
+      yield `${k}:${typeof v === "string" ? v : JSON.stringify(v)}`;
     }
     for (const e of task.events) {
       yield `${e.by} ${e.note ?? ""}`;
@@ -119,7 +119,7 @@ export function identifierViolations(dataset: Dataset): string[] {
       const rule = refRules[k];
       if (!rule) {
         out.push(`task ${task.id} refs.${k} has no declared synthetic pattern`);
-      } else if (!rule.ok(v)) {
+      } else if (typeof v !== "string" || !rule.ok(v)) {
         out.push(`task ${task.id} ${rule.field} ${JSON.stringify(v)} is outside the declared synthetic namespace (${rule.expect})`);
       }
     }

@@ -197,12 +197,20 @@ func (ix *index) buildLineage() {
 	}
 }
 
+// stateEvent reports whether e is a state transition. relane rows carry lane
+// names and decision rows (#618) record a request or its resolution with
+// from == to == the current state; neither enters or leaves a state, so
+// every state reader here skips them. Pre-kind rows ("") are transitions.
+func stateEvent(e store.TaskEvent) bool {
+	return e.Kind == "" || e.Kind == store.TaskEventTransition
+}
+
 // firstTo returns the first transition event into state (at or after
 // notBefore when non-zero).
 func firstTo(t *store.Task, state string) *store.TaskEvent {
 	for i := range t.Events {
 		e := &t.Events[i]
-		if e.Kind != "relane" && e.To == state {
+		if stateEvent(*e) && e.To == state {
 			return e
 		}
 	}
@@ -213,7 +221,7 @@ func lastTo(t *store.Task, state string) *store.TaskEvent {
 	var out *store.TaskEvent
 	for i := range t.Events {
 		e := &t.Events[i]
-		if e.Kind != "relane" && e.To == state {
+		if stateEvent(*e) && e.To == state {
 			out = e
 		}
 	}
@@ -253,7 +261,7 @@ func stateAt(t *store.Task, at time.Time) string {
 	}
 	state := "backlog"
 	for _, e := range t.Events {
-		if e.Kind == "relane" {
+		if !stateEvent(e) {
 			continue
 		}
 		if e.At.After(at) {

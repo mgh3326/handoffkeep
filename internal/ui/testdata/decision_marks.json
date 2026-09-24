@@ -1,0 +1,14 @@
+{
+  "note": "#618 shared fixture: the queue (web/console decisionMark) and the server (store.DecisionRequestCounts, used by Decisions and glance) must split these rows identically.",
+  "tasks": [
+    {"id": 1, "state": "backlog", "refs": {"decision_request": {"id": "dr-1-1", "revision": 1, "status": "open"}}},
+    {"id": 2, "state": "in_progress", "refs": {"decision_request": {"id": "dr-2-2", "revision": 2, "status": "open", "supersedes": "dr-2-1"}}},
+    {"id": 3, "state": "needs_decision", "refs": {"decision_request": {"id": "dr-3-1", "revision": 1, "status": "open"}}},
+    {"id": 4, "state": "merged", "refs": {"decision_request": {"id": "dr-4-1", "revision": 1, "status": "open"}}},
+    {"id": 5, "state": "dropped", "refs": {"decision_request": {"id": "dr-5-1", "revision": 1, "status": "withdrawn"}}},
+    {"id": 6, "state": "in_progress", "refs": {"decision_request": {"id": "dr-6-1", "revision": 1, "status": "answered"}}},
+    {"id": 7, "state": "needs_decision", "refs": {}},
+    {"id": 8, "state": "claimed", "refs": {"decision_request": {"id": "dr-8-1", "revision": 1, "status": "default_applied"}}}
+  ],
+  "want": {"pending": 3, "uncleaned": 1}
+}

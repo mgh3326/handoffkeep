@@ -122,6 +122,7 @@ func New(config Config) (*Handler, error) {
 	}
 	tmpl, err := template.New("ui").Funcs(template.FuncMap{
 		"formatTime":       formatTime,
+		"formatTimePtr":    formatTimePtr,
 		"shortHead":        shortHead,
 		"githubLink":       githubLink,
 		"message":          messageParts,
@@ -437,6 +438,7 @@ type decisionData struct {
 	Retrieved     int
 	RenderNotice  string
 	Disposition   *dispositionSection
+	Requests      decisionRequestSection
 }
 
 type taskDecisionView struct {
@@ -519,6 +521,11 @@ func (h *Handler) decisionData(r *http.Request, csrf, email, notice string) (dec
 		data.WriteReason = "Hub is not configured."
 	}
 	if data.Disposition, err = h.dispositionData(r, csrf, email, data.CanWrite); err != nil {
+		return decisionData{}, err
+	}
+	// A failed read fails the page: an unreadable list is never shown as
+	// "0 pending".
+	if data.Requests, err = h.decisionRequestData(r); err != nil {
 		return decisionData{}, err
 	}
 	// Each list is already capped at 1000 by its query, so this sum is what the
@@ -675,6 +682,13 @@ func formatTime(value time.Time) string {
 		return ""
 	}
 	return value.UTC().Format(time.RFC3339)
+}
+
+func formatTimePtr(value *time.Time) string {
+	if value == nil {
+		return ""
+	}
+	return formatTime(*value)
 }
 
 func writeSSE(w http.ResponseWriter, relayMaxID, taskEventMaxID int64) {

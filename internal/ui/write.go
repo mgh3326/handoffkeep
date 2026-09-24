@@ -225,6 +225,15 @@ func (h *Handler) answerDecision(w http.ResponseWriter, r *http.Request, email s
 			h.decisionResult(w, r, email, "Task has already been answered.", http.StatusConflict)
 			return
 		}
+		// A structured request (#618) is answered on its own request_id, not
+		// by this generic form — a form rendered before the request was
+		// recorded must not unblock the task and leave the request open.
+		// Console answers for requests belong to #580.
+		if task.Refs.DecisionRequest != nil && task.Refs.DecisionRequest.Status == store.DecisionRequestOpen {
+			outcome.result = "decision_request_open"
+			h.decisionResult(w, r, email, "결정 요청 "+task.Refs.DecisionRequest.ID+" 이 열려 있습니다 — 이 양식으로는 답하지 않습니다(화면을 새로고침하세요).", http.StatusConflict)
+			return
+		}
 		lane = task.Lane
 	} else {
 		event, found, eventErr := h.openDecisionEvent(r, kind, id)
@@ -516,6 +525,11 @@ func (h *Handler) openBatchDecision(r *http.Request, kind string, id int64) (dec
 		}
 		if task.Refs.Disposition != nil {
 			return decisionTarget{}, http.StatusConflict, "처분 항목은 처분 구획에서만 답합니다."
+		}
+		// Same guard as answerDecision: an open structured request is not
+		// answered by the generic batch (and never by "권고안 전부 답변").
+		if task.Refs.DecisionRequest != nil && task.Refs.DecisionRequest.Status == store.DecisionRequestOpen {
+			return decisionTarget{}, http.StatusConflict, "결정 요청 " + task.Refs.DecisionRequest.ID + " 이 열려 있습니다 — 이 양식으로는 답하지 않습니다."
 		}
 		target := decisionTarget{Lane: task.Lane, Structured: task.Refs.DecisionOptions}
 		if target.Structured == nil {
