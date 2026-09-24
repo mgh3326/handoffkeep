@@ -26,6 +26,7 @@ handoffkeep tasks list --lane lane-a --state backlog
 handoffkeep tasks next --lane lane-a --by session-a  # exits 3 when empty
 handoffkeep tasks transition 42 --to in_progress --note "started"
 handoffkeep tasks transition 42 --to needs_decision --question "Which interface should own this?"
+handoffkeep tasks relane 42 --to lane-b --note "triage follow-up"
 handoffkeep tasks list --parent-lane lane-a --state needs_decision
 handoffkeep tasks show 42
 handoffkeep tasks export [--lane L --state S --parent-lane P --limit N]
@@ -116,6 +117,30 @@ The HTTP API uses the usual bearer token: `POST /v1/tasks`, `GET /v1/tasks`,
 `GET /v1/tasks/{id}`, `POST /v1/tasks/{id}/claim`, and
 `POST /v1/tasks/{id}/transition`. `POST /v1/tasks/next` supports the CLI's
 atomic `next` operation. Invalid state changes and competing claims return 409.
+`POST /v1/tasks/relane` moves tasks between lanes without touching state,
+priority, refs, or claimant: `{"ids": [42], "to": "lane-b", "note": "why"}`.
+Each id commits independently and every item reports `ok`, `changed`, or a
+stable error (`not_found`, `task_terminal`, `unknown_lane`, `task_conflict`,
+`secret_like_content`, `invalid_task_relane`, `internal_error`). A target
+lane no current row uses is refused unless
+`"allow_new_lane": true`; merged/dropped tasks are always refused. The move is
+recorded as an append-only `task_events` row with `kind='relane'` — `from`/`to`
+carry lane names, not states — so state readers never mistake a relane for a
+transition. The event's `by` is the bearer-token client id.
+
+```bash
+handoffkeep tasks relane 42 --to lane-b --note "triage follow-up"
+handoffkeep tasks relane --ids 33,37,38 --to lane-b --note "batch move"
+handoffkeep tasks relane --ids - --to lane-b --note "stdin ids"   # whitespace-separated
+handoffkeep tasks relane 42 --to lane-new --note "w" --allow-new-lane
+```
+
+The CLI prints `{"results": [...], "moved": N, "unchanged": N, "failed": N}`
+and exits nonzero when any item fails. A relane to the task's current lane is
+an idempotent no-op: `changed` is false and no event is written. A request
+takes at most 500 ids (the CLI refuses larger batches locally) and the CLI
+deadline scales with the id count so a max-size batch cannot expire silently
+mid-request.
 `GET /v1/tasks/export` returns one consistent snapshot of the queue — a
 single bounded JSON document carrying the snapshot ID, watermarks, filtered
 counts, integrity digests, and the task rows — read inside one repeatable-read

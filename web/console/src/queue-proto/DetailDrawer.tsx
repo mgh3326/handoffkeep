@@ -430,8 +430,16 @@ export function DetailBody({ dataset, task, detail, fetchDoc, comments: comments
     </section>
   );
 
-  // Transitions are task_events. A note is data: plain text only, never
-  // parsed as markdown or HTML.
+  // History rows are task_events. A relane row's from/to are lane names, not
+  // states, so it is prefixed "lane:" rather than read as a state transition.
+  // A note is data: plain text only, never parsed as markdown or HTML.
+  const eventLine = (event: { id: number; kind?: string; from: string; to: string; by: string; note?: string; at: string }) => (
+    <li key={event.id}>
+      {event.kind === "relane" ? "lane: " : ""}
+      {event.from} → {event.to} by {event.by} at <time>{event.at}</time>
+      {event.note ? <span className="muted"> — {event.note}</span> : null}
+    </li>
+  );
   const transitions = (
     <section className="qp-drawer-sec">
       <h4>history</h4>
@@ -439,14 +447,7 @@ export function DetailBody({ dataset, task, detail, fetchDoc, comments: comments
         task.events.length === 0 ? (
           <p className="muted">none recorded</p>
         ) : (
-          <ol className="qp-drawer-refs">
-            {task.events.map((event) => (
-              <li key={event.id}>
-                {event.from} → {event.to} by {event.by} at <time>{event.at}</time>
-                {event.note ? <span className="muted"> — {event.note}</span> : null}
-              </li>
-            ))}
-          </ol>
+          <ol className="qp-drawer-refs">{task.events.map(eventLine)}</ol>
         )
       ) : detail.status === "loading" ? (
         <p className="muted">loading…</p>
@@ -457,14 +458,7 @@ export function DetailBody({ dataset, task, detail, fetchDoc, comments: comments
       ) : detail.data.events.length === 0 ? (
         <p className="muted">none recorded</p>
       ) : (
-        <ol className="qp-drawer-refs">
-          {detail.data.events.map((event) => (
-            <li key={event.id}>
-              {event.from} → {event.to} by {event.by} at <time>{event.at}</time>
-              {event.note ? <span className="muted"> — {event.note}</span> : null}
-            </li>
-          ))}
-        </ol>
+        <ol className="qp-drawer-refs">{detail.data.events.map(eventLine)}</ol>
       )}
     </section>
   );

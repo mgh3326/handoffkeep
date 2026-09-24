@@ -135,6 +135,7 @@ func (h *Handler) boardTasks(w http.ResponseWriter, r *http.Request) {
 
 type boardEvent struct {
 	ID   int64           `json:"id"`
+	Kind string          `json:"kind"`
 	From string          `json:"from"`
 	To   string          `json:"to"`
 	By   string          `json:"by"`
@@ -190,12 +191,17 @@ func taskRef(id int64) string {
 	return "hk:task/" + strconv.FormatInt(id, 10)
 }
 
-// taskDwell totals the time spent in each canonical state. The final segment
-// stays open: its seconds run from the last transition to now.
+// taskDwell totals the time spent in each canonical state. Relane events
+// carry lane names, not states, so they are excluded — a lane change must not
+// end the open dwell segment. The final segment stays open: its seconds run
+// from the last transition to now.
 func taskDwell(task store.Task, now time.Time) []dwellSegment {
 	totals := map[string]int64{}
 	current, start := "backlog", task.CreatedAt
 	for _, event := range task.Events {
+		if event.Kind == store.TaskEventRelane {
+			continue
+		}
 		if event.At.After(start) {
 			totals[current] += int64(event.At.Sub(start).Seconds())
 		}
@@ -310,7 +316,7 @@ func (h *Handler) boardTaskDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, event := range task.Events {
 		response.Events = append(response.Events, boardEvent{
-			ID: event.ID, From: event.From, To: event.To, By: event.By,
+			ID: event.ID, Kind: event.Kind, From: event.From, To: event.To, By: event.By,
 			Note: event.Note, Refs: event.Refs, At: event.At.UTC(),
 		})
 	}
