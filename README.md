@@ -222,19 +222,23 @@ additive `kind` parameter selects one supported kind, and `after_id` is an
 exclusive durable-ID cursor; use the last returned ID as the next `after_id` to
 advance through a recovery backlog without repeating an earlier page.
 
-For `job.completed`, `job.escalate`, and `job.joined`, the idempotency key is
+For the job kinds — `job.completed`, `job.escalate`, `job.joined`,
+`job.lost`, and `job.revoked` — the idempotency key is
 `(kind, job_id, epoch, report_path, reason)`. A first append returns 201; a
 duplicate returns 200 with the same event ID. `attempts` starts at zero and
 increases once for every duplicate receipt, so it measures duplicate receive
-attempts rather than successful deliveries.
+attempts rather than successful deliveries. Panewire sends the durable job
+event filename as `event_id`; job kinds store it, but deduplication still
+uses the five-field key, never that producer filename.
 
 `lane.event` is a directly addressed, durable lane notification. Its required
 fields are `kind: "lane.event"`, `owner_lane`, `event_id`, and `text`; its
 idempotency key is `(owner_lane, event_id)`. `owner_lane` is the destination
 lane, not a parent-routing hint. `text` must be nonempty, at most 2048 bytes,
 and contain no NUL or C0/C1 control characters (including tab, CR, and LF).
-Job event kinds reject a nonempty `event_id` or `text`; this makes the two
-idempotency families unambiguous. As with job events, duplicate lane-event
+Job event kinds reject a nonempty `text`; their `event_id` is a stored
+producer label rather than a deduplication input, so the two idempotency
+families stay unambiguous. As with job events, duplicate lane-event
 posts return the first writer's original row, increment `attempts`, and never
 change `delivered_at`.
 
