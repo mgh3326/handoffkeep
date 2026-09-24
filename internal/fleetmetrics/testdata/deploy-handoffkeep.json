@@ -1,0 +1,28 @@
+{
+ "schema": "deploy-record/v0",
+ "target": "ncp",
+ "service": "handoffkeep",
+ "head_sha": "dbbcc7b92384a19769fbe65f2cb66f2020320726",
+ "deployed_ref": "dbbcc7b92384a19769fbe65f2cb66f2020320726",
+ "previous_ref": "39d1ce48f81ab0660a252f3fabe78f170d04d847",
+ "result": "success",
+ "failed_step": null,
+ "job_id": null,
+ "source": "operator-desk",
+ "approval_ref": "hk:doc decision/2026-09-24/deploy-bundle-and-settings (운영자 '권고대로 진행해')",
+ "included_prs": [
+  "handoffkeep#45 (#628 drawer overview)",
+  "handoffkeep#44 (#619 title body doc inline)",
+  "handoffkeep#46 (#620 Deploys tab)"
+ ],
+ "deployed_at": "2026-09-24T07:09:58Z",
+ "evidence": {
+  "build": "clean worktree(제거) linux/amd64 vcs.revision=dbbcc7b modified=false",
+  "staging": "sha256sum -c OK, prev-39d1ce4/",
+  "backups": "handoffkeep-20260924T070952Z.pgdump 12,390,464B · work 52,231B",
+  "preconditions": "linear-sync 0 · config.env · 기준선 401/404/401×2 · store.go 스키마 변경 0",
+  "post_checks": "deploy_rc=0 · active×2 · healthz dbbcc7b ×2 modified false · 401/404 · 401/401 · journal error 0 · task #648 왕복(dropped) · /ui/deploys 401(라우트 존재)",
+  "binary_backup": "/usr/local/bin/handoffkeep.bak-20260924T070958Z",
+  "rollback": "cp -a /usr/local/bin/handoffkeep.bak-20260924T070958Z /usr/local/bin/handoffkeep && systemctl restart handoffkeep handoffkeep-work"
+ }
+}

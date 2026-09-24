@@ -12,6 +12,15 @@ complete and uses a separate Access assertion from the API bearer token. See
 [docs/ui.md](docs/ui.md) for configuration, security boundaries, hub behavior,
 and the SSE contract.
 
+## Fleet metrics
+
+`handoffkeep fleet-metrics --machine <hub id> --since 7d` prints the five fleet
+operating metrics (order → usable time, verify rounds, empty task slots,
+decision dwell, normal-path share), each with the coverage of the identifiers
+it needs; a missing identifier lowers coverage and is never counted as 0. It
+only reads (hk GETs, local job directories, `scopefuel reps list`, `gh api`).
+See [docs/fleet-metrics.md](docs/fleet-metrics.md).
+
 ## Tasks
 
 `tasks` is the durable, Postgres-backed work queue for captains. A task belongs

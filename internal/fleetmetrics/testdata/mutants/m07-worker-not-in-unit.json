@@ -1,0 +1,8 @@
+{
+ "name": "m07-worker-not-in-unit",
+ "file": "metrics.go",
+ "old": "\t\tif statusAt(w.Status, t) == \"working\" {",
+ "new": "\t\tif statusAt(w.Status, t) == \"never\" {",
+ "test": "TestSlots",
+ "description": "task unit: the builder's WORKING tester does not make the unit working"
+}

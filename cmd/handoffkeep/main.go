@@ -46,7 +46,7 @@ func main() {
 }
 func run(args []string, out, errout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: handoffkeep serve|mcp|ctx|memory|doc|attach|r2usage|tasks|decisions|linear")
+		return errors.New("usage: handoffkeep serve|mcp|ctx|memory|doc|attach|r2usage|tasks|decisions|linear|fleet-metrics")
 	}
 	switch args[0] {
 	case "serve":
@@ -69,8 +69,10 @@ func run(args []string, out, errout io.Writer) error {
 		return decisionsCmd(args[1:], out)
 	case "linear":
 		return linearCmd(args[1:], out)
+	case "fleet-metrics":
+		return fleetMetricsCmd(args[1:], out)
 	default:
-		return errors.New("usage: handoffkeep serve|mcp|ctx|memory|doc|attach|r2usage|tasks|decisions|linear")
+		return errors.New("usage: handoffkeep serve|mcp|ctx|memory|doc|attach|r2usage|tasks|decisions|linear|fleet-metrics")
 	}
 }
 
