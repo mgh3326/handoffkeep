@@ -66,32 +66,46 @@ func deployRecordKeyTime(key string) (time.Time, bool) {
 	return t, err == nil
 }
 
-// parseDeployRecord validates one document body as a deploy record for the
-// expected service. A record whose service field disagrees with its key, or
-// whose schema/result is outside the contract, is not a deploy record for
-// this view.
-func parseDeployRecord(key, service, body string) (*deployRecord, *time.Time, bool) {
+// classifyDeployRecord validates one document as a deploy record for the
+// expected service and reports every contract violation it can determine:
+// "key" (the key's timestamp is not the contract YYYYMMDDTHHMMSSZ — the
+// 09-24 operator record deploy/handoffkeep/20260923T1456Z had no seconds),
+// "schema" (unparseable JSON, wrong schema/service, or result outside the
+// enum), "deployed_at" (present but not RFC3339). A document carrying any
+// reason is not a deploy record for this view — it lands in InvalidCount and
+// the Invalid list instead of competing for current/latest. Before #620 a
+// malformed key was silently ignored; it is a format error now so the
+// operator can see and fix it.
+func classifyDeployRecord(key, service, body string) (*deployRecord, *time.Time, []string) {
+	var reasons []string
+	if _, ok := deployRecordKeyTime(key); !ok {
+		reasons = append(reasons, "key")
+	}
 	var rec deployRecord
 	if err := json.Unmarshal([]byte(body), &rec); err != nil {
-		return nil, nil, false
+		return nil, nil, append(reasons, "schema")
 	}
 	if rec.Schema != deployRecordSchema || rec.Service != service {
-		return nil, nil, false
+		return nil, nil, append(reasons, "schema")
 	}
 	switch rec.Result {
 	case "success", "failed", "rolled_back":
 	default:
-		return nil, nil, false
+		return nil, nil, append(reasons, "schema")
 	}
 	var deployedAt *time.Time
 	if rec.DeployedAt != nil {
 		parsed, err := time.Parse(time.RFC3339, *rec.DeployedAt)
 		if err != nil {
-			return nil, nil, false
+			reasons = append(reasons, "deployed_at")
+		} else {
+			deployedAt = &parsed
 		}
-		deployedAt = &parsed
 	}
-	return &rec, deployedAt, true
+	if len(reasons) > 0 {
+		return nil, nil, reasons
+	}
+	return &rec, deployedAt, nil
 }
 
 // deployRepoOfPR returns the "owner/repo" a refs.pr GitHub URL points at.
@@ -118,6 +132,13 @@ type deployRecordView struct {
 	ServingMaybeChanged bool `json:"serving_maybe_changed,omitempty"`
 }
 
+// deployInvalidRecord is one scanned document that is not a deploy record —
+// the key plus every failed check, so the operator sees what to rewrite.
+type deployInvalidRecord struct {
+	Key     string   `json:"key"`
+	Reasons []string `json:"reasons"`
+}
+
 type deployMergedTask struct {
 	TaskID   int64     `json:"task_id"`
 	Title    string    `json:"title"`
@@ -135,6 +156,10 @@ type deployServiceView struct {
 	// DocsCapped is set the space may hold more than were scanned.
 	RecordCount  int `json:"record_count"`
 	InvalidCount int `json:"invalid_count,omitempty"`
+	// Invalid lists every scanned document that failed the record contract,
+	// newest key first, with the reason classes that failed — the count-only
+	// warning could never say which key to fix (#620 AC4).
+	Invalid []deployInvalidRecord `json:"invalid,omitempty"`
 	// DocsCapped is set when the scan stopped while older documents may
 	// remain — either the first window was full, or the deeper scan hit its
 	// hard cap before finding a success or reaching the end of the space.
@@ -236,9 +261,10 @@ func (h *Handler) deployServiceView(r *http.Request, service, repo string, event
 	parseDocs := func(page []store.Document) []deployParsedDoc {
 		out := []deployParsedDoc{}
 		for _, doc := range page {
-			rec, deployedAt, ok := parseDeployRecord(doc.Key, service, doc.Body)
-			if !ok {
+			rec, deployedAt, reasons := classifyDeployRecord(doc.Key, service, doc.Body)
+			if len(reasons) > 0 {
 				view.InvalidCount++
+				view.Invalid = append(view.Invalid, deployInvalidRecord{Key: doc.Key, Reasons: reasons})
 				continue
 			}
 			keyTime, _ := deployRecordKeyTime(doc.Key)
@@ -362,4 +388,13 @@ func mergedTasksSince(events []store.MergedTaskEvent, repo string, since time.Ti
 		out = append(out, deployMergedTask{TaskID: event.TaskID, Title: event.Title, PR: event.Refs.PR, MergedAt: event.At.UTC()})
 	}
 	return out
+}
+
+// deploys serves the Deploys page (#620) — the #529 per-service deploy
+// status block moved off the queue onto its own screen. Like /ui/grades it
+// is only a mount point: all data reaches the browser through
+// GET /ui/api/deploy-pending and the page carries no CSRF token because it
+// has no write form.
+func (h *Handler) deploys(w http.ResponseWriter, r *http.Request) {
+	h.render(w, "deploys_page", nil)
 }

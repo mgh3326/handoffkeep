@@ -10,6 +10,7 @@ package tests
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -519,6 +520,76 @@ func TestUIDeployPendingInvalidRecords(t *testing.T) {
 	}
 	if hk["current"].(map[string]any)["deployed_ref"] != "cccccccccccccccccccccccccccccccccccccccc" {
 		t.Fatalf("current=%v", hk["current"])
+	}
+}
+
+// #620 AC4 — invalid_count alone could never say which key to fix. The
+// response now carries an "invalid" list: every scanned document that failed
+// the record contract, with every failed check named. Fixture reproduces the
+// 09-24 operational record deploy/handoffkeep/20260923T1456Z — the key lost
+// its seconds AND deployed_at was not RFC3339, so one document carries both
+// reasons. A malformed key was silently ignored before #620; it is a format
+// error now so the operator can see and rewrite it.
+func TestUIDeployPendingInvalidListReasons(t *testing.T) {
+	s := uiStore(t)
+	db := deployDB(t)
+	wipeDeployDocs(t, db)
+	fixture := newUIJWTFixture(t)
+	h := newUITestServer(t, s, fixture, "", "", 0)
+	defer h.Close()
+	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
+
+	// The incident document: key timestamp has no seconds and deployed_at is
+	// not RFC3339 — both reasons on one record.
+	seedDeployDoc(t, s, "deploy/handoffkeep/20260923T1456Z",
+		deployFixtureBody(t, "handoffkeep", "success", "cccccccccccccccccccccccccccccccccccccccc", "2026-09-23T14:56", nil))
+	// Bad key only — a fully valid body under a key this view cannot time.
+	seedDeployDoc(t, s, "deploy/handoffkeep/20260923T1456",
+		deployFixtureBody(t, "handoffkeep", "failed", "", "2026-09-23T05:00:00Z", nil))
+	// Bad deployed_at only — the key is contract-shaped.
+	seedDeployDoc(t, s, "deploy/handoffkeep/20260923T060000Z",
+		deployFixtureBody(t, "handoffkeep", "success", "dddddddddddddddddddddddddddddddddddddddd", "yesterday", nil))
+	// Bad body only — unparseable JSON under a good key.
+	seedDeployDoc(t, s, "deploy/handoffkeep/20260923T070000Z", `not json`)
+	// One fully valid record anchors the block and must not appear in the list.
+	seedDeployDoc(t, s, "deploy/handoffkeep/20260923T080000Z",
+		deployFixtureBody(t, "handoffkeep", "success", "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "2026-09-23T08:00:00Z", nil))
+
+	response := getDeployPending(t, h, assertion)
+	hk := serviceView(t, response, "handoffkeep")
+	if hk["record_count"] != float64(5) || hk["invalid_count"] != float64(4) {
+		t.Fatalf("record/invalid counts: %v", hk)
+	}
+	invalid, ok := hk["invalid"].([]any)
+	if !ok || len(invalid) != 4 {
+		t.Fatalf("invalid list missing or wrong size: %v", hk["invalid"])
+	}
+	// Scan order is newest key first — assert the exact sequence so a
+	// count-only or unordered payload cannot pass.
+	want := []struct {
+		key     string
+		reasons []string
+	}{
+		{"deploy/handoffkeep/20260923T1456Z", []string{"key", "deployed_at"}},
+		{"deploy/handoffkeep/20260923T1456", []string{"key"}},
+		{"deploy/handoffkeep/20260923T070000Z", []string{"schema"}},
+		{"deploy/handoffkeep/20260923T060000Z", []string{"deployed_at"}},
+	}
+	for i, raw := range invalid {
+		row := raw.(map[string]any)
+		if row["key"] != want[i].key {
+			t.Fatalf("invalid[%d].key=%v, want %s (list must be newest-key-first)", i, row["key"], want[i].key)
+		}
+		reasons := []string{}
+		for _, r := range row["reasons"].([]any) {
+			reasons = append(reasons, r.(string))
+		}
+		if fmt.Sprintf("%v", reasons) != fmt.Sprintf("%v", want[i].reasons) {
+			t.Fatalf("invalid[%d] %s reasons=%v, want %v", i, want[i].key, reasons, want[i].reasons)
+		}
+	}
+	if hk["current"].(map[string]any)["deployed_ref"] != "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" {
+		t.Fatalf("valid record must still be current: %v", hk["current"])
 	}
 }
 

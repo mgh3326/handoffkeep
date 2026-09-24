@@ -143,3 +143,48 @@ describe("renderer stays out of the list's initial load (mutant b)", () => {
     expect(gzip).toBeLessThanOrEqual(BUDGET_GZIP);
   });
 });
+
+// #620 — the deploy status screen is its own entry so the queue's initial
+// bundle carries the one-line summary but none of the panel.
+describe("deploys entry stays out of the queue's initial load (#620)", () => {
+  const entry = join(root, "src", "queue-proto", "main.tsx");
+  // Marker literals: the panel heading lives only in DeployPanel, the
+  // summary string only in DeploySummary, the api path in deploy.ts.
+  const PANEL_MARKER = "마지막 배포 이후 머지됨";
+  const SUMMARY_MARKER = "배포 대기 머지";
+
+  it("source: the queue entry's static graph has the summary, not the panel", () => {
+    const graph = sourceGraph(entry, false);
+    const names = [...graph.files];
+    expect(names.filter((f) => /DeployPanel\.tsx$|deploys\//.test(f))).toEqual([]);
+    // Non-vacuous: the queue's own summary line is in the graph.
+    expect(names.some((f) => f.endsWith("DeploySummary.tsx"))).toBe(true);
+    expect(names.some((f) => f.endsWith("deployPoll.ts"))).toBe(true);
+    // Non-vacuous: the deploys entry's graph does reach the panel.
+    const deploysGraph = sourceGraph(join(root, "src", "queue-proto", "deploys", "main.tsx"), false);
+    expect([...deploysGraph.files].some((f) => f.endsWith("DeployPanel.tsx"))).toBe(true);
+  });
+
+  it("build: board.js's static chunk closure carries the summary, never the panel", () => {
+    const closure = staticClosure("board.js");
+    let sawSummary = false;
+    for (const name of closure) {
+      const text = readFileSync(join(built, name), "utf8");
+      expect(text.includes(PANEL_MARKER), `${name} carries the deploy panel`).toBe(false);
+      sawSummary = sawSummary || text.includes(SUMMARY_MARKER);
+    }
+    expect(sawSummary).toBe(true);
+  });
+
+  it("build: deploys.js exists, carries the panel, and never imports board.js", () => {
+    expect(existsSync(join(built, "deploys.js"))).toBe(true);
+    expect(existsSync(join(built, "deploys.css"))).toBe(true);
+    const closure = staticClosure("deploys.js");
+    let sawPanel = false;
+    for (const name of closure) {
+      expect(["board.js", "grades.js", "fleet.js"], `deploys.js reaches ${name}`).not.toContain(name);
+      sawPanel = sawPanel || readFileSync(join(built, name), "utf8").includes(PANEL_MARKER);
+    }
+    expect(sawPanel).toBe(true);
+  });
+});

@@ -8,7 +8,7 @@ import type { FetchDoc } from "./DocInline";
 import type { CommentsClient } from "./TaskComments";
 import { ListView } from "./ListView";
 import { BoardView } from "./BoardView";
-import { DeployPanel } from "./DeployPanel";
+import { DeploySummary } from "./DeploySummary";
 import { LiveStrip } from "./LiveStrip";
 import { Toolbar } from "./Toolbar";
 import { GlobalSearch } from "./GlobalSearch";
@@ -465,10 +465,11 @@ export function QueueProtoApp({ datasets, initialSet, storage, diag = false, per
             allowAreaGrouping={dataset.source === "synthetic"}
             onChange={changeState}
           />
-          {/* #529 deploy status — live only: the preview/test datasets have
-              no /ui/api/deploy-pending behind them, so the panel mounts only
-              where its BFF exists. It owns its own fetch and poll. */}
-          {source === "live" ? <DeployPanel /> : null}
+          {/* #620 — the #529 deploy block moved to /ui/deploys; the queue
+              keeps only a one-line pointer. Live only: the preview/test
+              datasets have no /ui/api/deploy-pending behind them, and the
+              line stays hidden while there is nothing to report. */}
+          {source === "live" ? <DeploySummary /> : null}
           <div className="qp-content">
             {visible.length === 0 ? (
               <div className="qp-empty">

@@ -27,6 +27,9 @@ export default defineConfig({
         // /ui/grades loads the read-only grade table built from src/queue-proto/grades —
         // a separate entry so the queue's initial bundle carries none of it.
         grades: resolve(root, "src/queue-proto/grades/main.tsx"),
+        // /ui/deploys loads the deploy status screen built from
+        // src/queue-proto/deploys — same separate-entry constraint (#620).
+        deploys: resolve(root, "src/queue-proto/deploys/main.tsx"),
         // The --hk-* design tokens ship as their own static stylesheet so the
         // React entries and the Go templates link one and the same file.
         tokens: resolve(root, "src/design/tokens.css"),
