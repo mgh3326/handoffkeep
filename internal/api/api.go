@@ -238,6 +238,9 @@ func (s Service) ApplyDisposition(ctx context.Context, id int64, client, note st
 func (s Service) TransitionTask(ctx context.Context, id int64, to, client, note string, refs *store.TaskRefs) (store.Task, error) {
 	return s.Store.TransitionTask(ctx, id, to, client, note, refs)
 }
+func (s Service) RelaneTask(ctx context.Context, id int64, to, client, note string, allowNewLane bool) (store.Task, bool, error) {
+	return s.Store.RelaneTask(ctx, id, to, client, note, allowNewLane)
+}
 func (s Service) ListTasks(ctx context.Context, lane, state, parentLane string, limit int) ([]store.Task, error) {
 	return s.Store.ListTasks(ctx, lane, state, parentLane, limit)
 }
@@ -387,6 +390,7 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("GET /v1/tasks/{id}", s.task)
 	m.HandleFunc("POST /v1/tasks/{id}/claim", s.taskClaim)
 	m.HandleFunc("POST /v1/tasks/{id}/transition", s.taskTransition)
+	m.HandleFunc("POST /v1/tasks/relane", s.tasksRelane)
 	m.HandleFunc("POST /v1/tasks/dispositions", s.dispositionCreate)
 	m.HandleFunc("GET /v1/tasks/dispositions/summary", s.dispositionSummary)
 	m.HandleFunc("POST /v1/tasks/dispositions/{id}/apply", s.dispositionApply)
@@ -709,6 +713,100 @@ func (s Server) taskTransition(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOut(w, http.StatusOK, x)
+}
+
+// TaskRelaneBatchMax bounds one relane request. It comfortably covers the
+// triage migrations this route exists for while keeping a mistake bounded.
+// Exported so the CLI can refuse an oversized batch before sending.
+const TaskRelaneBatchMax = 500
+
+type taskRelaneInput struct {
+	IDs          []int64 `json:"ids"`
+	To           string  `json:"to"`
+	Note         string  `json:"note"`
+	AllowNewLane bool    `json:"allow_new_lane,omitempty"`
+}
+
+// taskRelaneResult is one item's outcome. A failed item carries a stable
+// error code; the request keeps processing the rest of the batch.
+type taskRelaneResult struct {
+	ID      int64       `json:"id"`
+	OK      bool        `json:"ok"`
+	Changed bool        `json:"changed"`
+	Task    *store.Task `json:"task,omitempty"`
+	Error   string      `json:"error,omitempty"`
+}
+
+// relaneErrorCode maps a store failure to the closed error vocabulary items
+// report. Validation errors collapse to invalid_task_relane; unrecognized
+// errors (driver faults, cancelled contexts) report internal_error rather
+// than leaking internals or posing as a retry-safe validation failure.
+func relaneErrorCode(err error) string {
+	switch {
+	case errors.Is(err, store.ErrTaskNotFound):
+		return "not_found"
+	case errors.Is(err, store.ErrTaskTerminal):
+		return "task_terminal"
+	case errors.Is(err, store.ErrTaskLaneUnknown):
+		return "unknown_lane"
+	case errors.Is(err, store.ErrTaskConflict):
+		return "task_conflict"
+	}
+	if strings.HasPrefix(err.Error(), "secret_like_content") {
+		return "secret_like_content"
+	}
+	if strings.HasPrefix(err.Error(), "invalid task relane") {
+		return "invalid_task_relane"
+	}
+	return "internal_error"
+}
+
+// tasksRelane moves one or more tasks between lanes. It reuses the existing
+// bearer write authentication — no new credential class — and each id runs in
+// its own store transaction so one failure never rolls back the batch's
+// other items.
+func (s Server) tasksRelane(w http.ResponseWriter, r *http.Request) {
+	client, ok := s.auth(w, r)
+	if !ok {
+		return
+	}
+	defer r.Body.Close()
+	var input taskRelaneInput
+	if err := decode(r, &input, store.MaxBytes); err != nil {
+		appErr(w, err)
+		return
+	}
+	if len(input.IDs) < 1 || len(input.IDs) > TaskRelaneBatchMax || strings.TrimSpace(input.To) == "" || strings.TrimSpace(input.Note) == "" {
+		jsonOut(w, http.StatusBadRequest, map[string]string{"error": "invalid_task_relane"})
+		return
+	}
+	for _, id := range input.IDs {
+		if id < 1 {
+			jsonOut(w, http.StatusBadRequest, map[string]string{"error": "invalid_task_relane"})
+			return
+		}
+	}
+	results := make([]taskRelaneResult, 0, len(input.IDs))
+	moved, unchanged, failed := 0, 0, 0
+	for _, id := range input.IDs {
+		task, changed, err := s.Service.RelaneTask(r.Context(), id, input.To, client, input.Note, input.AllowNewLane)
+		item := taskRelaneResult{ID: id}
+		if err != nil {
+			item.Error = relaneErrorCode(err)
+			failed++
+		} else {
+			item.OK = true
+			item.Changed = changed
+			item.Task = &task
+			if changed {
+				moved++
+			} else {
+				unchanged++
+			}
+		}
+		results = append(results, item)
+	}
+	jsonOut(w, http.StatusOK, map[string]any{"results": results, "moved": moved, "unchanged": unchanged, "failed": failed})
 }
 
 func (s Server) dispositionCreate(w http.ResponseWriter, r *http.Request) {

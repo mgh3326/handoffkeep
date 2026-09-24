@@ -329,7 +329,7 @@ func dispositionGen(ctx context.Context, q interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
 }, id int64) (int64, error) {
 	var gen int64
-	err := q.QueryRow(ctx, `SELECT id FROM task_events WHERE task_id=$1 AND "to"='needs_decision' ORDER BY at DESC,id DESC LIMIT 1`, id).Scan(&gen)
+	err := q.QueryRow(ctx, `SELECT id FROM task_events WHERE task_id=$1 AND kind='transition' AND "to"='needs_decision' ORDER BY at DESC,id DESC LIMIT 1`, id).Scan(&gen)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, nil
 	}
@@ -552,8 +552,8 @@ func (s *Store) ListOpenDispositions(ctx context.Context, limit int) ([]OpenDisp
 		limit = 1000
 	}
 	rows, err := s.pool.Query(ctx, `SELECT `+prefixedTaskColumns("t")+`,
-		COALESCE((SELECT id FROM task_events WHERE task_id=t.id AND "to"='needs_decision' ORDER BY at DESC,id DESC LIMIT 1),0),
-		COALESCE((SELECT note FROM task_events WHERE task_id=t.id AND "to"='needs_decision' ORDER BY at DESC,id DESC LIMIT 1),'')
+		COALESCE((SELECT id FROM task_events WHERE task_id=t.id AND kind='transition' AND "to"='needs_decision' ORDER BY at DESC,id DESC LIMIT 1),0),
+		COALESCE((SELECT note FROM task_events WHERE task_id=t.id AND kind='transition' AND "to"='needs_decision' ORDER BY at DESC,id DESC LIMIT 1),'')
 		FROM tasks t WHERE t.state='needs_decision' AND t.refs ? 'disposition' ORDER BY t.created_at ASC,t.id ASC LIMIT $1`, limit)
 	if err != nil {
 		return nil, err
@@ -662,8 +662,8 @@ func (s *Store) DispositionSummary(ctx context.Context, asOf time.Time) (Disposi
 	asOf = asOf.UTC()
 	out := DispositionSummary{AsOf: asOf, OldestOpenDays: -1, OldestPendingApplyDay: -1}
 	rows, err := s.pool.Query(ctx, `SELECT t.id, t.created_at, t.refs,
-		(SELECT e."to" FROM task_events e WHERE e.task_id=t.id AND e.at<=$1 ORDER BY e.at DESC, e.id DESC LIMIT 1),
-		(SELECT e.at FROM task_events e WHERE e.task_id=t.id AND e.at<=$1 ORDER BY e.at DESC, e.id DESC LIMIT 1)
+		(SELECT e."to" FROM task_events e WHERE e.task_id=t.id AND e.kind='transition' AND e.at<=$1 ORDER BY e.at DESC, e.id DESC LIMIT 1),
+		(SELECT e.at FROM task_events e WHERE e.task_id=t.id AND e.kind='transition' AND e.at<=$1 ORDER BY e.at DESC, e.id DESC LIMIT 1)
 		FROM tasks t WHERE t.refs ? 'disposition' AND t.created_at<=$1 ORDER BY t.created_at ASC, t.id ASC`, asOf)
 	if err != nil {
 		return out, err
@@ -730,7 +730,7 @@ func (s *Store) DispositionSummary(ctx context.Context, asOf time.Time) (Disposi
 		// is a candidate count, not a verdict.
 		if err := s.pool.QueryRow(ctx, `SELECT COUNT(DISTINCT t.refs->>'pr') FROM tasks t
 			WHERE COALESCE(t.refs->>'pr','') <> '' AND NOT (t.refs ? 'disposition')
-			AND EXISTS (SELECT 1 FROM task_events e WHERE e.task_id=t.id AND e."to"='merged' AND e.at >= $1 AND e.at <= $2)
+			AND EXISTS (SELECT 1 FROM task_events e WHERE e.task_id=t.id AND e.kind='transition' AND e."to"='merged' AND e.at >= $1 AND e.at <= $2)
 			AND NOT EXISTS (SELECT 1 FROM tasks d WHERE d.refs ? 'disposition' AND d.refs->>'origin_pr' = t.refs->>'pr' AND d.created_at <= $2)`,
 			*out.CoverageEpoch, asOf).Scan(&out.MergedWithoutItem); err != nil {
 			return out, err
