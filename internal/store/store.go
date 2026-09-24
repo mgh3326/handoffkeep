@@ -35,7 +35,12 @@ var memoryTypes = map[string]bool{"user": true, "feedback": true, "project": tru
 var documentKinds = map[string]bool{"brief": true, "report": true, "answer": true, "handoff": true, "note": true, "other": true}
 var taskKinds = map[string]bool{"implement": true, "verify": true, "fix": true, "decide": true, "ops": true}
 var taskStates = map[string]bool{"backlog": true, "claimed": true, "in_progress": true, "verifying": true, "join": true, "hold": true, "needs_decision": true, "merged": true, "dropped": true}
-var relayEventKinds = map[string]bool{"job.completed": true, "job.escalate": true, "job.joined": true, "lane.event": true}
+var relayEventKinds = map[string]bool{"job.completed": true, "job.escalate": true, "job.joined": true, "job.lost": true, "job.revoked": true, "lane.event": true}
+
+// PostgreSQL can infer a broader partial index from a narrower ON CONFLICT
+// predicate. Keep both predicates explicit so a one-sided edit is testable.
+const relayJobIndexPredicate = "kind IN ('job.completed','job.escalate','job.joined','job.lost','job.revoked')"
+const relayJobConflictPredicate = "kind IN ('job.completed','job.escalate','job.joined','job.lost','job.revoked')"
 
 const RelayLaneEventMaxBytes = 2048
 
@@ -655,6 +660,27 @@ func (s *Store) migrate(ctx context.Context) error {
 			`INSERT INTO schema_version(version) VALUES (12)`,
 		}
 		for _, q := range v12 {
+			if _, err := tx.Exec(ctx, q); err != nil {
+				return err
+			}
+		}
+	}
+	var v13Applied bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_version WHERE version=13)`).Scan(&v13Applied); err != nil {
+		return err
+	}
+	if !v13Applied {
+		// Version 13 admits the two hub terminal signals. Rebuild the partial
+		// index in the same transaction as the CHECK so a newly accepted kind
+		// always has the same five-field idempotency key as older job events.
+		v13 := []string{
+			`ALTER TABLE relay_events DROP CONSTRAINT relay_events_kind_check`,
+			`ALTER TABLE relay_events ADD CONSTRAINT relay_events_kind_check CHECK(kind IN ('job.completed','job.escalate','job.joined','job.lost','job.revoked','lane.event'))`,
+			`DROP INDEX relay_events_idempotency`,
+			`CREATE UNIQUE INDEX relay_events_idempotency ON relay_events(kind, job_id, epoch, report_path, reason) WHERE ` + relayJobIndexPredicate,
+			`INSERT INTO schema_version(version) VALUES (13)`,
+		}
+		for _, q := range v13 {
 			if _, err := tx.Exec(ctx, q); err != nil {
 				return err
 			}
@@ -1797,7 +1823,9 @@ func validRelayEvent(x RelayEvent) bool {
 	if x.Kind == "lane.event" {
 		return x.EventID != "" && validText(x.EventID, MaxBytes) && validLaneEventText(x.Text)
 	}
-	if x.JobID == "" || x.EventID != "" || x.Text != "" {
+	// Panewire sends the durable job event filename as event_id. Job relay
+	// deduplication still uses the five-field key, not that producer filename.
+	if x.JobID == "" || x.Text != "" {
 		return false
 	}
 	return true
@@ -1835,7 +1863,7 @@ func (s *Store) AppendRelayEvent(ctx context.Context, x RelayEvent) (RelayEvent,
 	if x.Kind == "lane.event" {
 		query += ` ON CONFLICT (owner_lane,event_id) WHERE kind='lane.event' DO UPDATE SET attempts=relay_events.attempts+1`
 	} else {
-		query += ` ON CONFLICT (kind,job_id,epoch,report_path,reason) WHERE kind IN ('job.completed','job.escalate','job.joined') DO UPDATE SET attempts=relay_events.attempts+1`
+		query += ` ON CONFLICT (kind,job_id,epoch,report_path,reason) WHERE ` + relayJobConflictPredicate + ` DO UPDATE SET attempts=relay_events.attempts+1`
 	}
 	err := scanRelayEventCreated(s.pool.QueryRow(ctx, query+` RETURNING `+relayEventColumns+`,(xmax=0) AS created`, x.Kind, x.JobID, x.Epoch, x.OwnerLane, x.Machine, x.PaneID, x.ReportPath, x.ReportLastLine, x.Question, x.PR, x.Head, x.Reason, x.EventID, x.Text, x.EventTime), &x, &created)
 	if err != nil {
@@ -2056,7 +2084,7 @@ func (s *Store) ListOpenEscalations(ctx context.Context, limit int) ([]RelayEven
 	rows, err := s.pool.Query(ctx, `SELECT `+relayEventColumns+` FROM relay_events e
 		WHERE e.kind='job.escalate' AND NOT EXISTS (
 			SELECT 1 FROM relay_events resolved WHERE resolved.job_id=e.job_id
-			AND resolved.kind IN ('job.joined','job.completed') AND resolved.id>e.id
+			AND resolved.kind IN ('job.joined','job.completed','job.lost','job.revoked') AND resolved.id>e.id
 		) AND NOT EXISTS (
 			SELECT 1 FROM relay_events resolved WHERE resolved.kind='lane.event'
 			AND resolved.owner_lane=e.owner_lane AND resolved.id>e.id
