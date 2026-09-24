@@ -483,7 +483,7 @@ func TestUIWriteNeverLeaksHubToken(t *testing.T) {
 	h := newUITestServer(t, s, fixture, hub.server.URL, token, 0)
 	defer h.Close()
 	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
-	for _, endpoint := range []string{"/ui/timeline", "/ui/queue", "/ui/decisions", "/ui/fleet", "/ui/compose"} {
+	for _, endpoint := range []string{"/ui/timeline", "/ui/queue", "/ui/deploys", "/ui/decisions", "/ui/fleet", "/ui/compose"} {
 		response := uiRequest(t, h.Client(), http.MethodGet, h.URL+endpoint, assertion, "")
 		body := responseText(t, response)
 		if strings.Contains(body, token) {

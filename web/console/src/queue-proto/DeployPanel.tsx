@@ -1,24 +1,25 @@
-// #529 — 서비스별 배포 상태 블록. Read-only: one GET to /ui/api/deploy-pending
-// on mount and on the queue's poll cadence; no writes, no notifications, no
-// GitHub calls. The merged list heading stays "마지막 배포 이후 머지됨" — the
+// #529 — 서비스별 배포 상태 블록. Since #620 it renders on the Deploys page
+// (deploys/DeploysApp), not on the queue — the queue keeps only a one-line
+// summary (DeploySummary). Read-only: one GET to /ui/api/deploy-pending on
+// mount and on the poll cadence; no writes, no notifications, no GitHub
+// calls. The merged list heading stays "마지막 배포 이후 머지됨" — the
 // surface must never claim "미배포 확정" (design doc §2 advisory), and a
 // service without records renders "기록 없음", never "최신".
-// Styles are inline: the queue CSS budget (tokens+board ≤ 24KiB raw) has no
-// headroom, while the JS budget does — and VirtualList already sets this
-// precedent for layout-critical inline styles.
+// Styles are inline except dp-warn/muted, which deploys.css defines — the
+// queue CSS budget never carried this panel's classes.
 
-import { useEffect, useState, type CSSProperties } from "react";
+import type { CSSProperties } from "react";
 import {
   deployElapsed,
   deployPRLabel,
   deployStamp,
   fetchDeployPending,
-  isDeployPendingResponse,
   shortDeployedRef,
   type DeployPendingResponse,
   type DeployRecordView,
   type DeployServiceView,
 } from "./deploy";
+import { useDeployPending } from "./deployPoll";
 
 const RESULT_LABEL: Record<string, string> = {
   success: "success",
@@ -84,6 +85,28 @@ const mergedTitleStyle: CSSProperties = {
   color: "var(--hk-text-secondary)",
 };
 const dangerStyle: CSSProperties = { color: "var(--hk-danger)" };
+const invalidListStyle: CSSProperties = {
+  margin: "var(--hk-space-1) 0 0",
+  padding: 0,
+  listStyle: "none",
+};
+const invalidItemStyle: CSSProperties = {
+  display: "flex",
+  flexWrap: "wrap",
+  alignItems: "baseline",
+  gap: "var(--hk-space-2)",
+  fontSize: "var(--hk-font-meta)",
+  lineHeight: "var(--hk-leading-meta)",
+};
+
+/** Reason classes the server emits for a malformed deploy record; anything
+ * newer than this list renders verbatim. */
+const INVALID_REASON_LABEL: Record<string, string> = {
+  key: "키 시각 형식이 계약(YYYYMMDDTHHMMSSZ)이 아님",
+  deployed_at: "deployed_at이 RFC3339가 아님",
+  schema: "deploy-record/v0 본문이 아님(schema·service·result)",
+};
+const invalidReasonLabel = (reason: string) => INVALID_REASON_LABEL[reason] ?? reason;
 
 function RecordLine({ label, rec, now }: { label: string; rec: DeployRecordView; now: string }) {
   const ref = shortDeployedRef(rec.deployed_ref);
@@ -101,7 +124,7 @@ function RecordLine({ label, rec, now }: { label: string; rec: DeployRecordView;
       </span>
       {rec.failed_step !== null ? <span className="muted">step {rec.failed_step}</span> : null}
       {rec.serving_maybe_changed ? (
-        <span className="qp-status-warn" role="note">
+        <span className="dp-warn" role="note">
           배포 명령은 완료 — 서빙 판이 바뀌었을 수 있음
         </span>
       ) : null}
@@ -176,15 +199,31 @@ function ServiceRow({ svc, now }: { svc: DeployServiceView; now: string }) {
         <RecordLine label={svc.docs_capped ? "최근 시도(조회 범위 내)" : "최근 시도"} rec={svc.latest} now={now} />
       ) : null}
       {svc.docs_capped ? (
-        <p className="qp-status-warn" style={{ margin: "var(--hk-space-1) 0 0", fontSize: "var(--hk-font-meta)" }}>
+        <p className="dp-warn" style={{ margin: "var(--hk-space-1) 0 0", fontSize: "var(--hk-font-meta)" }}>
           기록 조회 상한에 닿았습니다 — 더 오래된 배포 기록이 있을 수 있어 현재 판·최근 시도·머지 목록 모두 조회 범위
           안의 결과입니다.
         </p>
       ) : null}
       {svc.invalid_count !== undefined && svc.invalid_count > 0 ? (
-        <p className="qp-status-warn" style={{ margin: "var(--hk-space-1) 0 0", fontSize: "var(--hk-font-meta)" }}>
-          형식이 맞지 않는 기록 {svc.invalid_count}건은 표시하지 않았습니다.
-        </p>
+        <div style={{ margin: "var(--hk-space-1) 0 0" }}>
+          <p className="dp-warn" style={{ margin: 0, fontSize: "var(--hk-font-meta)" }}>
+            형식이 맞지 않는 기록 {svc.invalid_count}건은 표시하지 않았습니다.
+          </p>
+          {/* #620 AC4 — each malformed record names its key and every failed
+              check so the operator knows what to rewrite; the count-only
+              warning never did. An older server sends no list — the count
+              line still stands on its own then. */}
+          {svc.invalid !== undefined && svc.invalid.length > 0 ? (
+            <ul style={invalidListStyle} data-testid="deploy-invalid-list">
+              {svc.invalid.map((rec) => (
+                <li key={rec.key} style={invalidItemStyle}>
+                  <span style={monoStyle}>{rec.key}</span>
+                  <span className="muted">{rec.reasons.map(invalidReasonLabel).join(" · ")}</span>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
       ) : null}
       <MergedList svc={svc} />
     </section>
@@ -196,42 +235,12 @@ type Props = {
   pollMs?: number;
 };
 
-/** Self-fetching block: keeps its own poll so the queue list's dataset and
- * types stay untouched. A failed refresh keeps the last good payload with a
- * warning; a first-load failure is an explicit error, never an empty board. */
+/** Self-fetching block: owns its own poll via useDeployPending so the queue
+ * list's dataset and types stay untouched. A failed refresh keeps the last
+ * good payload with a warning; a first-load failure is an explicit error,
+ * never an empty board. */
 export function DeployPanel({ fetchStatus = fetchDeployPending, pollMs = 15_000 }: Props) {
-  const [data, setData] = useState<DeployPendingResponse | null>(null);
-  const [failed, setFailed] = useState(false);
-  useEffect(() => {
-    let cancelled = false;
-    let timer = 0;
-    const load = async () => {
-      try {
-        const next = await fetchStatus();
-        // A payload that only matches the outer shape is still a contract
-        // violation — validate nested rows, never render a partial board.
-        if (!cancelled && isDeployPendingResponse(next)) {
-          setData(next);
-          setFailed(false);
-        } else if (!cancelled) {
-          setFailed(true);
-        }
-      } catch {
-        if (!cancelled) {
-          setFailed(true);
-        }
-      } finally {
-        if (!cancelled) {
-          timer = window.setTimeout(() => void load(), pollMs);
-        }
-      }
-    };
-    void load();
-    return () => {
-      cancelled = true;
-      window.clearTimeout(timer);
-    };
-  }, [fetchStatus, pollMs]);
+  const { data, failed } = useDeployPending(fetchStatus, pollMs);
 
   if (data === null) {
     return (
@@ -244,9 +253,9 @@ export function DeployPanel({ fetchStatus = fetchDeployPending, pollMs = 15_000 
     <section style={panelStyle} aria-label="배포 상태" data-deploy-state={failed ? "stale" : "ready"}>
       <div style={headStyle}>
         <h2 style={titleStyle}>배포</h2>
-        {failed ? <span className="qp-status-warn">갱신 실패 — 이전 자료를 보여 주는 중</span> : null}
+        {failed ? <span className="dp-warn">갱신 실패 — 이전 자료를 보여 주는 중</span> : null}
         {data.events_capped ? (
-          <span className="qp-status-warn">머지 이벤트 조회 상한에 닿아 목록이 잘렸을 수 있습니다.</span>
+          <span className="dp-warn">머지 이벤트 조회 상한에 닿아 목록이 잘렸을 수 있습니다.</span>
         ) : null}
       </div>
       {data.services.map((svc) => (

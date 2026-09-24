@@ -282,7 +282,7 @@ func TestUIFailClosedAndMethodGuard(t *testing.T) {
 	defer h.Close()
 	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
 	before := uiRowCounts(t)
-	for _, endpoint := range []string{"/ui", "/ui/timeline", "/ui/queue", "/ui/decisions", "/ui/fleet", "/ui/events", "/ui/fragments/timeline"} {
+	for _, endpoint := range []string{"/ui", "/ui/timeline", "/ui/queue", "/ui/deploys", "/ui/decisions", "/ui/fleet", "/ui/events", "/ui/fragments/timeline"} {
 		for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete} {
 			response := uiRequest(t, h.Client(), method, h.URL+endpoint, assertion, "")
 			if response.StatusCode != http.StatusMethodNotAllowed {

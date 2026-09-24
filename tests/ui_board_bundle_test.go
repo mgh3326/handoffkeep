@@ -231,6 +231,17 @@ func TestConsoleMultiEntryArtifacts(t *testing.T) {
 			t.Fatalf("fleet.html missing %q", want)
 		}
 	}
+	// #620 — /ui/deploys is its own mount page on its own entry, same shape
+	// as board/fleet: the template must name its root and both artifacts.
+	deploys, err := os.ReadFile(filepath.Join(filepath.Dir(fleetPagePath(t)), "deploys.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`id="deploys-root"`, "/ui/static/console/deploys.js", "/ui/static/console/deploys.css"} {
+		if !strings.Contains(string(deploys), want) {
+			t.Fatalf("deploys.html missing %q", want)
+		}
+	}
 }
 
 // One clean build into a scratch outDir must emit exactly the committed file
