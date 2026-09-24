@@ -192,14 +192,35 @@ export function DetailBody({ dataset, task, detail, fetchDoc, comments: comments
       cache.set(key, promise);
       return promise;
     };
-  }, [fetchDoc]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- the cache is
+    // scoped to the current task so a stale body never survives a switch.
+  }, [fetchDoc, task.id]);
   const meta = useTaskDocMeta(task.body_doc ?? "", sharedFetchDoc);
   const displayTitle = meta.status === "ready" ? (meta.meta?.displayTitle ?? null) : null;
   const titleLong = isLongTitle(task.title);
+  // The two-line clamp is CSS — whether it actually clipped depends on the
+  // rendered width (drawer is min(30rem, 92vw)), so measure overflow: any
+  // clipped title must offer the 원문 disclosure, count alone is not enough.
+  const titleRef = useRef<HTMLParagraphElement>(null);
+  const [titleClamped, setTitleClamped] = useState(false);
+  useEffect(() => {
+    const el = titleRef.current;
+    if (el === null) {
+      return;
+    }
+    const check = () => setTitleClamped(el.scrollHeight > el.clientHeight + 1);
+    check();
+    if (typeof ResizeObserver === "undefined") {
+      return;
+    }
+    const ro = new ResizeObserver(check);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [task.title, displayTitle]);
   // The original title is recoverable in one keyboard step whenever the
-  // header shows something else: a metadata display_title, or a two-line
-  // excerpt of a long title.
-  const showTitleSrc = titleLong || displayTitle !== null;
+  // header shows something else: a metadata display_title, a measured
+  // clip, or a two-line excerpt of a long title.
+  const showTitleSrc = titleLong || titleClamped || displayTitle !== null;
 
   // Detail-loaded fields fall back to the task's own values only while no
   // fetch state exists; loading/error get their own honest states. An absent
@@ -492,7 +513,7 @@ export function DetailBody({ dataset, task, detail, fetchDoc, comments: comments
   return (
     <>
       <div className="qp-drawer-titlewrap">
-        <p className="qp-drawer-title qp-title-clamp">{displayTitle ?? task.title}</p>
+        <p className="qp-drawer-title qp-title-clamp" ref={titleRef}>{displayTitle ?? task.title}</p>
         {displayTitle !== null ? (
           <p className="qp-title-note muted">표시 제목 — 본문 문서 메타데이터의 display_title 입니다.</p>
         ) : titleLong ? (
