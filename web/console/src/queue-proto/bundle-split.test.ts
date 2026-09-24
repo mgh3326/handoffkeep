@@ -165,7 +165,6 @@ describe("decision card stays out of the list's initial load (#618)", () => {
     for (const name of staticClosure(chunks[0])) {
       expect(["board.js", "fleet.js"], `${chunks[0]} reaches ${name}`).not.toContain(name);
     }
-    });
   });
 });
 
