@@ -114,6 +114,22 @@ describe("detail tabs — 개요 / 코멘트 / 전이", () => {
     expect(transitions.querySelector("b, strong")).toBeNull();
     expect(transitions.querySelector("time")?.textContent).toBe("2026-09-21T10:30:00Z");
   });
+
+  it("a relane event renders as a lane change, not a state transition", async () => {
+    const task = mkBoardTask({});
+    const detail = mkDetail(task, {
+      events: [
+        { id: 1, kind: "transition", from: "backlog", to: "claimed", by: "builder-a", at: "2026-09-21T10:30:00Z" },
+        { id: 2, kind: "relane", from: "admiral-1", to: "director-1", by: "ops", note: "triage", at: "2026-09-21T11:00:00Z" },
+      ],
+    });
+    const { drawer } = openPanel([task], vi.fn<FetchDoc>(), () => Promise.resolve(detail));
+    fireEvent.click(within(drawer).getByRole("tab", { name: "전이" }));
+    const transitions = panel(drawer, "transitions");
+    await waitFor(() => expect(transitions.textContent).toContain("lane: admiral-1 → director-1 by ops"));
+    expect(transitions.textContent).toContain("backlog → claimed by builder-a");
+    expect(transitions.textContent).toContain("— triage");
+  });
 });
 
 describe("overview body", () => {
