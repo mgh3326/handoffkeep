@@ -1,0 +1,5 @@
+# #644: false positive in superseded commit 3ec0beb — `"brewdial-api": "mgh3326/brewdial"`
+# is a deploy-service → GitHub-repo map entry, not a credential. The line was
+# rewritten as keyed struct fields in the next commit; this pins only that one
+# historical fingerprint (commit:file:rule:line), no rule or path allowlist.
+3ec0beb5e84be16feea563eda6b009d1d93f2117:internal/fleetmetrics/metrics.go:generic-api-key:22
