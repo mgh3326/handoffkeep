@@ -31,9 +31,12 @@ describe("shared detail drawer", () => {
     openRow(container, 5011);
     const drawer = screen.getByRole("dialog");
     const task = edge.tasks.find((t) => t.id === 5011)!;
-    expect(within(drawer).getByText(task.title)).toBeTruthy();
+    // The header clamps to two lines; the full text also lives in the
+    // "원문 제목 펼치기" details and the "등재 원문" block — intentional
+    // duplication, so assert the header node itself.
+    expect(drawer.querySelector(".qp-drawer-title")?.textContent).toBe(task.title);
     expect(within(drawer).getByText(/source status:/).textContent).toContain("synthetic fixture");
-    expect(within(drawer).getByText("CLAMPED-TAIL-MARKER-5011", { exact: false })).toBeTruthy();
+    expect(within(drawer).getAllByText("CLAMPED-TAIL-MARKER-5011", { exact: false }).length).toBeGreaterThan(0);
   });
 
   it("peek panel is non-modal: no aria-modal, list never inert", () => {
@@ -56,7 +59,7 @@ describe("shared detail drawer", () => {
     fireEvent.click(other);
     expect(screen.getByRole("dialog").getAttribute("aria-label")).toContain("task 5011");
     const task = edge.tasks.find((t) => t.id === 5011)!;
-    expect(within(screen.getByRole("dialog")).getByText(task.title)).toBeTruthy();
+    expect(screen.getByRole("dialog").querySelector(".qp-drawer-title")?.textContent).toBe(task.title);
   });
 
   it("Escape with focus on a list row still closes the panel; focus is not stolen", () => {

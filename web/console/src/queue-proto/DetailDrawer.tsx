@@ -1,10 +1,12 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
-import type { BoardDetail, ParticipantSegment } from "../board/types";
+import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { fetchBoardDoc } from "../board/api";
+import type { BoardDetail, BoardDoc, ParticipantSegment } from "../board/types";
 import { ActivityTabs } from "./ActivityTabs";
 import { ageDays, isStale, STALE_MIN_AGE_DAYS } from "./adapter";
 import { docPageHref, titleDocKeys } from "./bodydoc";
 import { DocInline, type FetchDoc } from "./DocInline";
 import { TaskComments, type CommentsClient } from "./TaskComments";
+import { useTaskDocMeta, type TaskDocMetaState } from "./taskmeta";
 import type { Dataset, Enrichment, ProtoTask } from "./types";
 
 /** Lazily fetched per-drawer detail (live mode). Absent → the task's own
@@ -61,14 +63,22 @@ export function CopyTaskLink({ id }: { id: number }) {
   );
 }
 
-/** The overview's body section. Only body_doc is rendered inline; a key found
+/** Titles past the old 96-char list preview cut count as "long" — only those
+ * can be carrying the spec that a missing body document would have held. */
+const LONG_TITLE_MIN = 96;
+function isLongTitle(title: string): boolean {
+  return [...title].length > LONG_TITLE_MIN;
+}
+
+/** The overview's spec section. Only body_doc is rendered inline; a key found
  * in the title is a named link, never inlined and never written back. An
- * absent body is said in words — the overview is never silently blank. */
-function TaskBodySection({ task, fetchDoc }: { task: ProtoTask; fetchDoc?: FetchDoc }) {
+ * absent body is said in words — the overview is never silently blank — and
+ * a body-less task's long title stays readable in full in "등재 원문". */
+function TaskBodySection({ task, fetchDoc }: { task: ProtoTask; fetchDoc: FetchDoc }) {
   const bodyDoc = task.body_doc ?? "";
   let content: ReactNode;
   if (bodyDoc !== "") {
-    content = <DocInline bodyDoc={bodyDoc} fetchDoc={fetchDoc} />;
+    content = <DocInline bodyDoc={bodyDoc} fetchDoc={fetchDoc} stripFrontMatter />;
   } else {
     const titleKeys = titleDocKeys(task.title);
     content = (
@@ -93,8 +103,38 @@ function TaskBodySection({ task, fetchDoc }: { task: ProtoTask; fetchDoc?: Fetch
   }
   return (
     <section className="qp-drawer-sec qp-body-sec">
+      {/* kept as "본문" — #619's test helper locates this section by heading,
+          so renaming it would silently break that suite after merge. */}
       <h4>본문</h4>
       {content}
+      {bodyDoc === "" && isLongTitle(task.title) ? (
+        // A body-less task's long title is the only place its spec lives;
+        // keep it readable in full below the document block.
+        <details className="qp-raw-title">
+          <summary>등재 원문</summary>
+          <p>{task.title}</p>
+        </details>
+      ) : null}
+    </section>
+  );
+}
+
+/** 목적 — the task's summary, read only from the linked body_doc's
+ * hk-task/v1 front-matter. Nothing is inferred: no metadata reads as
+ * "요약 미작성", an unreadable document reads as unverified. */
+function PurposeSection({ meta }: { meta: TaskDocMetaState }) {
+  return (
+    <section className="qp-drawer-sec qp-purpose">
+      <h4>목적</h4>
+      {meta.status === "loading" ? (
+        <p className="muted">요약 확인 중…</p>
+      ) : meta.status === "error" ? (
+        <p className="qp-unknown">요약 미확인 — 본문 문서를 읽지 못했습니다.</p>
+      ) : meta.status === "ready" && meta.meta?.summary ? (
+        <p>{meta.meta.summary}</p>
+      ) : (
+        <p className="muted">요약 미작성</p>
+      )}
     </section>
   );
 }
@@ -135,6 +175,33 @@ export function DetailBody({ dataset, task, detail, fetchDoc, comments: comments
   const stateAge = ageDays(now, task.state_entered_at);
   const createdAge = ageDays(now, task.created_at);
 
+  // One fetch per document key, shared by the metadata read and the body
+  // renderer — the overview never asks the BFF for the same doc twice.
+  const sharedFetchDoc = useMemo<FetchDoc>(() => {
+    const base = fetchDoc ?? fetchBoardDoc;
+    const cache = new Map<string, Promise<BoardDoc>>();
+    return (key: string) => {
+      const hit = cache.get(key);
+      if (hit !== undefined) {
+        return hit;
+      }
+      const promise = base(key);
+      // A rejected fetch is dropped so reopening the drawer retries — a
+      // transient error must not stick for the session's lifetime.
+      promise.catch(() => cache.delete(key));
+      cache.set(key, promise);
+      return promise;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- the cache is
+    // scoped to the current task so a stale body never survives a switch.
+  }, [fetchDoc, task.id]);
+  const meta = useTaskDocMeta(task.body_doc ?? "", sharedFetchDoc);
+  const displayTitle = meta.status === "ready" ? (meta.meta?.displayTitle ?? null) : null;
+  const titleLong = isLongTitle(task.title);
+  // The 원문 text mounts on open — a closed details must not duplicate the
+  // title into the DOM (text queries, find-in-page, copy all see it once).
+  const [titleSrcOpen, setTitleSrcOpen] = useState(false);
+
   // Detail-loaded fields fall back to the task's own values only while no
   // fetch state exists; loading/error get their own honest states. An absent
   // or empty value stays honest: not-collected renders "unknown", never 0.
@@ -148,10 +215,11 @@ export function DetailBody({ dataset, task, detail, fetchDoc, comments: comments
         }
       : { status: task.coverage.status, participants: task.coverage.participants, truncated: false };
 
-  // The body comes first: it is what the one-line title stands in for.
+  // Reading order is the operator's question order: what → why → who is
+  // waiting on what → decision → spec → auxiliaries. Missing values are
+  // named "미기록", never inferred from created_by or the latest note.
   const overview = (
     <>
-      <TaskBodySection task={task} fetchDoc={fetchDoc} />
       {/* Provenance of synthetic preview rows stays explicit. The live queue
           names its data status in the page header; internal endpoint names
           are developer detail and stay off the product screen (2402 Q9). */}
@@ -160,63 +228,47 @@ export function DetailBody({ dataset, task, detail, fetchDoc, comments: comments
           source status: <strong>synthetic fixture</strong> — {dataset.completeness} · {dataset.completenessNote}
         </p>
       ) : null}
-      {isStale(task, now) ? (
-        <p className="qp-stale-note" role="note">
-          ⚠ stale — non-terminal task aged ≥{STALE_MIN_AGE_DAYS}d since created_at. Age does not imply the premise is still
-          valid or safe to execute.
+      <PurposeSection meta={meta} />
+      <section className="qp-drawer-sec qp-now">
+        <h4>현재 상황</h4>
+        <p>
+          <strong>{task.state}</strong> · 책임 {task.lane !== "" ? task.lane : "미기록"} · 실행 담당{" "}
+          {task.claimant !== null && task.claimant !== "" ? task.claimant : "미기록"}
         </p>
-      ) : null}
-      <dl className="qp-drawer-meta">
-        <dt>state</dt>
-        <dd>{task.state}</dd>
-        <dt>kind</dt>
-        <dd>{task.kind}</dd>
-        <dt>lane</dt>
-        <dd>{task.lane}</dd>
-        <dt>parent lane</dt>
-        <dd>
-          <Val value={task.parent_lane} />
-        </dd>
-        <dt>claimant</dt>
-        <dd>
-          <Val value={task.claimant} />
-        </dd>
-        <dt>priority</dt>
-        <dd>p{task.priority}</dd>
-        <dt>created age</dt>
-        <dd>
-          {createdAge === null ? <span className="qp-unknown">unknown</span> : `${createdAge}d`}{" "}
-          <span className="muted">(since created_at)</span>
-        </dd>
-        <dt>created by</dt>
-        <dd>
-          <Val value={task.created_by === "" ? null : task.created_by} />
-        </dd>
-        <dt>updated</dt>
-        <dd>
-          <Val value={task.updated_at} />
-        </dd>
-        <dt>current-state age</dt>
-        <dd>
-          {stateAge === null ? <span className="qp-unknown">unknown</span> : `${stateAge}d`}{" "}
-          <span className="muted">(since state_entered_at)</span>
-        </dd>
-        <dt>due</dt>
-        <dd>
-          <Val value={task.due_at} />
-        </dd>
-        <dt>blocker</dt>
-        <dd>
-          <Val value={task.blocker} />
-        </dd>
-      </dl>
-      {task.decision ? (
-        <section className="qp-drawer-sec">
-          <h4>decision needed</h4>
-          <p>{task.decision.question}</p>
-          <p className="muted">evidence: {task.decision.evidence}</p>
-        </section>
-      ) : null}
+        {isStale(task, now) ? (
+          <p className="qp-stale-note" role="note">
+            ⚠ stale — non-terminal task aged ≥{STALE_MIN_AGE_DAYS}d since created_at. Age does not imply the premise is still
+            valid or safe to execute.
+          </p>
+        ) : null}
+      </section>
+      <section className="qp-drawer-sec qp-next">
+        <h4>다음 행동 · 대기</h4>
+        {task.blocker !== null && task.blocker !== "" ? (
+          <p>대기 — {task.blocker}</p>
+        ) : (
+          <p className="muted">대기 사유 미기록</p>
+        )}
+      </section>
+      <section className="qp-drawer-sec qp-decision">
+        <h4>결정</h4>
+        {task.decision ? (
+          <>
+            <p>{task.decision.question}</p>
+            <p className="muted">evidence: {task.decision.evidence}</p>
+          </>
+        ) : (
+          // task.decision is only ever populated for synthetic fixtures — on
+          // live data "absent" means "not connected", never "no request".
+          // A needs_decision state still names itself honestly.
+          <p className="muted">
+            {task.state === "needs_decision"
+              ? "상태는 결정 필요 — 결정 내용은 아직 미연결입니다."
+              : "결정 요청 정보 미연결 — 결정 카드 연결은 #618 에서."}
+          </p>
+        )}
+      </section>
+      <TaskBodySection task={task} fetchDoc={sharedFetchDoc} />
       <section className="qp-drawer-sec">
         <h4>refs</h4>
         <ul className="qp-drawer-refs">
@@ -233,6 +285,34 @@ export function DetailBody({ dataset, task, detail, fetchDoc, comments: comments
           ) : null}
         </ul>
       </section>
+      {/* Raw record fields stay recoverable but folded — they are audit
+          data, not part of the five-second overview. */}
+      <details className="qp-drawer-sec qp-meta-more">
+        <summary>기록 세부</summary>
+        <dl className="qp-drawer-meta">
+          {([
+            ["state", task.state],
+            ["kind", task.kind],
+            ["lane", task.lane !== "" ? task.lane : null],
+            ["parent lane", task.parent_lane],
+            ["claimant", task.claimant],
+            ["priority", `p${task.priority}`],
+            ["created age", createdAge === null ? null : `${createdAge}d`, "since created_at"],
+            ["created by", task.created_by === "" ? null : task.created_by],
+            ["updated", task.updated_at],
+            ["current-state age", stateAge === null ? null : `${stateAge}d`, "since state_entered_at"],
+            ["due", task.due_at],
+            ["blocker", task.blocker],
+          ] as [string, string | number | null, string?][]).map(([k, v, src]) => (
+            <Fragment key={k}>
+              <dt>{k}</dt>
+              <dd>
+                <Val value={v} /> {src !== undefined ? <span className="muted">({src})</span> : null}
+              </dd>
+            </Fragment>
+          ))}
+        </dl>
+      </details>
       {dataset.source === "synthetic" ? (
         <section className="qp-drawer-sec">
           <h4>draft enrichment (synthetic, unreviewed)</h4>
@@ -385,7 +465,21 @@ export function DetailBody({ dataset, task, detail, fetchDoc, comments: comments
 
   return (
     <>
-      <p className="qp-drawer-title">{task.title}</p>
+      <div className="qp-drawer-titlewrap">
+        <p className="qp-drawer-title qp-title-clamp">{displayTitle ?? task.title}</p>
+        {displayTitle !== null ? (
+          <p className="qp-title-note muted">표시 제목 — 본문 문서의 display_title 입니다.</p>
+        ) : titleLong ? (
+          <p className="qp-title-note muted">긴 제목의 발췌입니다 — 원문은 펼치기로.</p>
+        ) : null}
+        {/* Every displayed title is clamped to two lines, so the 원문
+            disclosure is always offered — a clipped title is never left
+            without one-action recovery, at any width or zoom. */}
+        <details className="qp-title-src" onToggle={(e) => setTitleSrcOpen(e.currentTarget.open)}>
+          <summary>원문 제목 펼치기</summary>
+          {titleSrcOpen ? <p>{task.title}</p> : null}
+        </details>
+      </div>
       <ActivityTabs panels={{ overview, comments, transitions }} />
     </>
   );

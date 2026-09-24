@@ -8,6 +8,7 @@ import { Component, lazy, Suspense, useEffect, useState, type ReactNode } from "
 import { fetchBoardDoc } from "../board/api";
 import type { BoardDoc } from "../board/types";
 import { docPageHref, parseBodyDoc } from "./bodydoc";
+import { stripTaskFrontMatter } from "./taskmeta";
 
 // The dynamic import is the list/renderer split point: this module is in the
 // queue entry's static graph, DocMarkdown is not. The comment tab renders
@@ -61,7 +62,7 @@ function statusOf(err: unknown): number | undefined {
   return (err as { status?: number } | null)?.status;
 }
 
-export function DocInline({ bodyDoc, fetchDoc = fetchBoardDoc }: { bodyDoc: string; fetchDoc?: FetchDoc }) {
+export function DocInline({ bodyDoc, fetchDoc = fetchBoardDoc, stripFrontMatter = false }: { bodyDoc: string; fetchDoc?: FetchDoc; stripFrontMatter?: boolean }) {
   const ref = parseBodyDoc(bodyDoc);
   const key = ref?.key ?? null;
   // The state remembers which key it belongs to: a late response for a
@@ -163,9 +164,16 @@ export function DocInline({ bodyDoc, fetchDoc = fetchBoardDoc }: { bodyDoc: stri
         </>
       ) : null}
       {current.status === "ready" ? (
+        // A gated hk-task/v1 front-matter block is machine metadata — the
+        // drawer reads it as fields, so it is stripped before rendering.
+        // The renderer-failure fallback still shows the untouched raw text.
         <RendererBoundary key={`${ref.key}@${current.doc.sha256}`} body={current.doc.body}>
           <Suspense fallback={<p className="muted">본문 렌더러를 불러오는 중…</p>}>
-            <DocMarkdown body={current.doc.body} section={ref.section} onSection={setSectionFound} />
+            <DocMarkdown
+              body={stripFrontMatter ? stripTaskFrontMatter(current.doc.body) : current.doc.body}
+              section={ref.section}
+              onSection={setSectionFound}
+            />
           </Suspense>
         </RendererBoundary>
       ) : null}
