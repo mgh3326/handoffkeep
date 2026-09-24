@@ -2,15 +2,18 @@ package tests
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
@@ -49,6 +52,34 @@ func postRelayEvent(t *testing.T, hURL, token string, body map[string]any) (int,
 		t.Fatal(err)
 	}
 	return resp.StatusCode, got
+}
+
+// relayEscalationOpen applies the ListOpenEscalations predicate to one
+// escalation id. The list is a 1000-row window over every lane, so a closed
+// check that only scans it passes vacuously once more than 1000 newer open
+// escalations exist; this query always reaches the target row.
+func relayEscalationOpen(t *testing.T, id int64) bool {
+	t.Helper()
+	db, err := pgx.Connect(t.Context(), os.Getenv("HANDOFFKEEP_TEST_DB_URL"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close(context.Background())
+	var open bool
+	err = db.QueryRow(t.Context(), `SELECT EXISTS(
+		SELECT 1 FROM relay_events e WHERE e.id=$1 AND e.kind='job.escalate'
+		AND NOT EXISTS (
+			SELECT 1 FROM relay_events resolved WHERE resolved.job_id=e.job_id
+			AND resolved.kind IN ('job.joined','job.completed','job.lost','job.revoked') AND resolved.id>e.id
+		) AND NOT EXISTS (
+			SELECT 1 FROM relay_events resolved WHERE resolved.kind='lane.event'
+			AND resolved.owner_lane=e.owner_lane AND resolved.id>e.id
+			AND resolved.event_id LIKE '%decision-escalation-' || e.id::text || '-%'
+		))`, id).Scan(&open)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return open
 }
 
 func TestRelayEventsIdempotent(t *testing.T) {
@@ -90,6 +121,9 @@ func TestRelayTerminalKindsFromPanewire(t *testing.T) {
 			if status != http.StatusCreated {
 				t.Fatalf("escalation status=%d", status)
 			}
+			if !relayEscalationOpen(t, earlier.ID) {
+				t.Fatalf("escalation %d not open before %s", earlier.ID, tc.kind)
+			}
 			open, err := s.ListOpenEscalations(t.Context(), 1000)
 			if err != nil || !slices.ContainsFunc(open, func(x store.RelayEvent) bool { return x.ID == earlier.ID }) {
 				t.Fatalf("open escalation=%+v err=%v", open, err)
@@ -111,6 +145,44 @@ func TestRelayTerminalKindsFromPanewire(t *testing.T) {
 			open, err = s.ListOpenEscalations(t.Context(), 1000)
 			if err != nil || slices.ContainsFunc(open, func(x store.RelayEvent) bool { return x.ID == earlier.ID }) {
 				t.Fatalf("escalation after %s=%+v err=%v", tc.kind, open, err)
+			}
+			if relayEscalationOpen(t, earlier.ID) {
+				t.Fatalf("escalation %d still open after %s", earlier.ID, tc.kind)
+			}
+		})
+	}
+}
+
+// Panewire stamps the durable event filename as event_id on the pre-existing
+// job kinds too, not only the terminal ones. Those kinds must accept it (the
+// #627 production fix) and keep deduplicating on the five-field key — a
+// resend under a renamed filename is still the same event.
+func TestRelayJobKindsAcceptPanewireEventID(t *testing.T) {
+	for _, kind := range []string{"job.completed", "job.escalate", "job.joined"} {
+		t.Run(kind, func(t *testing.T) {
+			s := taskTestStore(t)
+			h := taskHTTP(s)
+			defer h.Close()
+			lane, job := taskLane(t), "relay-eventid-"+taskLane(t)
+			body := relayPayload(lane, job)
+			body["kind"] = kind
+			body["event_id"] = "00003-" + kind + ".json"
+			firstStatus, first := postRelayEvent(t, h.URL, "node-token", body)
+			secondStatus, second := postRelayEvent(t, h.URL, "node-token", body)
+			if firstStatus != http.StatusCreated || secondStatus != http.StatusOK || first.ID != second.ID || second.Attempts != 1 || second.EventID != "00003-"+kind+".json" {
+				t.Fatalf("first=(%d,%+v) resend=(%d,%+v)", firstStatus, first, secondStatus, second)
+			}
+			body["event_id"] = "00004-" + kind + ".json"
+			thirdStatus, third := postRelayEvent(t, h.URL, "node-token", body)
+			if thirdStatus != http.StatusOK || third.ID != first.ID || third.Attempts != 2 || third.EventID != "00003-"+kind+".json" {
+				t.Fatalf("renamed resend=(%d,%+v)", thirdStatus, third)
+			}
+			if kind == "job.escalate" {
+				// Leave no stray open escalation in the shared test database.
+				cleanupStatus, _ := postRelayEvent(t, h.URL, "node-token", relayPayload(lane, job))
+				if cleanupStatus != http.StatusCreated {
+					t.Fatalf("escalation cleanup status=%d", cleanupStatus)
+				}
 			}
 		})
 	}

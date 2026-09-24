@@ -417,7 +417,7 @@ func (counter p4OwnedDecisionCounter) counts(t *testing.T) p4OpenDecisionCounts 
 		(SELECT COUNT(*) FROM tasks WHERE id = ANY($1) AND state='needs_decision'),
 		(SELECT COUNT(*) FROM relay_events e WHERE e.id = ANY($2) AND e.kind='job.escalate' AND NOT EXISTS (
 			SELECT 1 FROM relay_events resolved WHERE resolved.job_id=e.job_id
-			AND resolved.kind IN ('job.joined','job.completed') AND resolved.id>e.id
+			AND resolved.kind IN ('job.joined','job.completed','job.lost','job.revoked') AND resolved.id>e.id
 		) AND NOT EXISTS (
 			SELECT 1 FROM relay_events resolved WHERE resolved.kind='lane.event'
 			AND resolved.owner_lane=e.owner_lane AND resolved.id>e.id
@@ -666,6 +666,11 @@ func TestUIP4ResolveClosesOnlyItsDecision(t *testing.T) {
 		if event.ID == escalation.ID {
 			t.Fatal("resolved escalation remained open")
 		}
+	}
+	// The list above is a global 1000-row window, so absence in it can be
+	// vacuous; target this escalation's id directly.
+	if relayEscalationOpen(t, escalation.ID) {
+		t.Fatal("resolved escalation remained open")
 	}
 
 	falsePositive := seedRelay(t, s, lane, "job.escalate", uiLane(t, "false-positive"), "", "must remain", "")
