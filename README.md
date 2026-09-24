@@ -120,8 +120,9 @@ atomic `next` operation. Invalid state changes and competing claims return 409.
 `POST /v1/tasks/relane` moves tasks between lanes without touching state,
 priority, refs, or claimant: `{"ids": [42], "to": "lane-b", "note": "why"}`.
 Each id commits independently and every item reports `ok`, `changed`, or a
-stable error (`not_found`, `task_terminal`, `unknown_lane`,
-`invalid_task_relane`). A target lane no current row uses is refused unless
+stable error (`not_found`, `task_terminal`, `unknown_lane`, `task_conflict`,
+`secret_like_content`, `invalid_task_relane`, `internal_error`). A target
+lane no current row uses is refused unless
 `"allow_new_lane": true`; merged/dropped tasks are always refused. The move is
 recorded as an append-only `task_events` row with `kind='relane'` — `from`/`to`
 carry lane names, not states — so state readers never mistake a relane for a

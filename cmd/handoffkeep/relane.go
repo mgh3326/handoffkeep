@@ -68,9 +68,12 @@ func taskRelaneCmd(args []string, in io.Reader, out io.Writer) error {
 	}
 	for _, group := range idsFlag {
 		if strings.TrimSpace(group) == "-" {
-			b, err := io.ReadAll(io.LimitReader(in, store.MaxBytes))
+			b, err := io.ReadAll(io.LimitReader(in, store.MaxBytes+1))
 			if err != nil {
 				return err
+			}
+			if len(b) > store.MaxBytes {
+				return fmt.Errorf("stdin ids exceed %d bytes", store.MaxBytes)
 			}
 			for _, piece := range strings.Fields(string(b)) {
 				if err := appendID(piece); err != nil {

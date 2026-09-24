@@ -737,8 +737,9 @@ type taskRelaneResult struct {
 }
 
 // relaneErrorCode maps a store failure to the closed error vocabulary items
-// report. Unknown errors collapse to invalid_task_relane rather than leaking
-// driver internals into the response.
+// report. Validation errors collapse to invalid_task_relane; unrecognized
+// errors (driver faults, cancelled contexts) report internal_error rather
+// than leaking internals or posing as a retry-safe validation failure.
 func relaneErrorCode(err error) string {
 	switch {
 	case errors.Is(err, store.ErrTaskNotFound):
@@ -753,7 +754,10 @@ func relaneErrorCode(err error) string {
 	if strings.HasPrefix(err.Error(), "secret_like_content") {
 		return "secret_like_content"
 	}
-	return "invalid_task_relane"
+	if strings.HasPrefix(err.Error(), "invalid task relane") {
+		return "invalid_task_relane"
+	}
+	return "internal_error"
 }
 
 // tasksRelane moves one or more tasks between lanes. It reuses the existing
