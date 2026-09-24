@@ -1,5 +1,9 @@
-# #644: false positive in superseded commit 3ec0beb — `"brewdial-api": "mgh3326/brewdial"`
-# is a deploy-service → GitHub-repo map entry, not a credential. The line was
-# rewritten as keyed struct fields in the next commit; this pins only that one
-# historical fingerprint (commit:file:rule:line), no rule or path allowlist.
+# #644: generic-api-key false positives, pinned by exact fingerprint
+# (commit:file:rule:line) only; no rule or path allowlist.
+# - 3ec0beb metrics.go:22 is a deploy-service to GitHub-repo map entry
+#   (brewdial API service name to its repo path), not a credential. The
+#   next commit rewrote it as keyed struct fields.
+# - fbb9c03 .gitleaksignore:1 is the first version of this comment, which
+#   quoted that map entry verbatim. The comment no longer quotes it.
 3ec0beb5e84be16feea563eda6b009d1d93f2117:internal/fleetmetrics/metrics.go:generic-api-key:22
+fbb9c0310addfc23626fe07b2740a899a795cf58:.gitleaksignore:generic-api-key:1

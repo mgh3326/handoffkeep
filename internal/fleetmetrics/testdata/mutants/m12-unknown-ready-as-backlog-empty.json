@@ -1,0 +1,8 @@
+{
+ "name": "m12-unknown-ready-as-backlog-empty",
+ "file": "metrics.go",
+ "old": "\t\t\tcase ready[m] == 0:",
+ "new": "\t\t\tcase ready[m] <= 0:",
+ "test": "TestSlots",
+ "description": "minutes whose ready-work state is unknown are labelled backlog empty (tester devin-ds41 x01)"
+}

@@ -49,6 +49,9 @@ func TestSlotsHeldIdleIsNotEmpty(t *testing.T) {
 	if r.EmptyWithReady != 45 || r.EmptyWithReadyMax != 45 {
 		t.Fatalf("empty with ready = %d…%d, want 45…45", r.EmptyWithReady, r.EmptyWithReadyMax)
 	}
+	if r.ByReason["ready work, eligibility unrecorded"] != 45 || len(r.ByReason) != 1 {
+		t.Fatalf("by reason = %v, want only 45 ready-work minutes", r.ByReason)
+	}
 	units := findCoverage(r.Coverage, "builder units")
 	if units.Linked != 3 || units.Total != 3 {
 		t.Fatalf("unit coverage = %+v, want 3/3 (J4 ends with its task)", units)
@@ -137,5 +140,65 @@ func TestSlotsUnrefetchedTerminalTaskEndsUnit(t *testing.T) {
 	}
 	if c := findCoverage(r.Coverage, "machine-minutes where"); c.Linked != 60 {
 		t.Fatalf("minute coverage = %+v, want 60/60", c)
+	}
+}
+
+// The only other task was not refetched (Events == nil) and last changed at
+// minute 30: before that its state is unknown, so whether ready work existed
+// is unknown too. Those empty minutes are "ready work unknown", never
+// "backlog empty". Empty per minute: 5–9 → 5, 20–29 → 10, 30–59 → 30.
+func TestSlotsUnknownReadyIsNotBacklogEmpty(t *testing.T) {
+	s := slotsFixture()
+	s.Tasks[1] = task(10, "in_progress", -1, store.TaskRefs{})
+	s.Tasks[1].Events, s.Tasks[1].UpdatedAt = nil, at(mins(30))
+	r := Compute(s).EmptySlots
+	if r.Empty != 45 || r.EmptyWithReady != 0 {
+		t.Fatalf("empty %d empty-with-ready %d, want 45 and 0", r.Empty, r.EmptyWithReady)
+	}
+	if r.ByReason["ready work unknown"] != 15 || r.ByReason["no ready work (backlog empty)"] != 30 {
+		t.Fatalf("by reason = %v, want 15 unknown and 30 backlog-empty", r.ByReason)
+	}
+}
+
+// Two live builders on a 1-slot machine, one WORKING and one idle for the
+// whole hour: working takes the slot, the idle one does not fit, and the
+// excess is overflow — held-idle never exceeds the capacity left over.
+func TestSlotsOverCapacityIsOverflowNotHeld(t *testing.T) {
+	s := snap(0, 1)
+	s.Tasks = []store.Task{task(10, "backlog", -1, store.TaskRefs{})}
+	s.Jobs = []Job{
+		{JobID: "ja-builder", Machine: "m1", Role: "builder", OwnerLane: "ba", Live: true,
+			Events: []JobEvent{jev("job.claim", 0)}, Status: []StatusRun{run(0, 60, "working")}},
+		{JobID: "jb-builder", Machine: "m1", Role: "builder", OwnerLane: "bb", Live: true,
+			Events: []JobEvent{jev("job.claim", 0)}, Status: []StatusRun{run(0, 60, "idle")}},
+	}
+	s.JobRoots = []JobRoot{{Path: "/fixture", Machine: "m1"}}
+	s.Slots = []SlotCapacity{{Machine: "m1", Slots: 1, Source: "fixture"}}
+	r := Compute(s).EmptySlots
+	if r.SlotMinutes != 60 || r.Working != 60 || r.HeldIdle != 0 || r.Empty != 0 || r.Overflow != 60 {
+		t.Fatalf("slot %d working %d held %d empty %d overflow %d, want 60/60/0/0/60", r.SlotMinutes, r.Working, r.HeldIdle, r.Empty, r.Overflow)
+	}
+}
+
+// A builder linked to two tasks holds its slot until the later one ends
+// (minute 40), not the first (minute 10).
+func TestSlotsUnitEndsWithLastLinkedTask(t *testing.T) {
+	s := snap(0, 1)
+	refs := store.TaskRefs{JobID: "j6-builder"}
+	s.Tasks = []store.Task{
+		task(10, "backlog", -1, store.TaskRefs{}),
+		task(12, "merged", -1, refs, mergedChain(-0.9, -0.8, mins(10), nil)...),
+		task(13, "merged", -1, refs, mergedChain(-0.9, -0.8, mins(40), nil)...),
+	}
+	s.Jobs = []Job{{JobID: "j6-builder", Machine: "m1", Role: "builder", OwnerLane: "b6",
+		Events: []JobEvent{jev("job.claim", 0), jev("job.spawned", 0)}}}
+	s.JobRoots = []JobRoot{{Path: "/fixture", Machine: "m1"}}
+	s.Slots = []SlotCapacity{{Machine: "m1", Slots: 1, Source: "fixture"}}
+	r := Compute(s).EmptySlots
+	if r.Working+r.HeldIdle != 40 || r.Empty != 20 || r.EmptyWithReady != 20 {
+		t.Fatalf("occupied %d empty %d empty-with-ready %d, want 40/20/20", r.Working+r.HeldIdle, r.Empty, r.EmptyWithReady)
+	}
+	if units := findCoverage(r.Coverage, "builder units"); units.Linked != 1 || units.Total != 1 {
+		t.Fatalf("unit coverage = %+v, want 1/1", units)
 	}
 }

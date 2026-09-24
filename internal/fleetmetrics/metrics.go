@@ -123,7 +123,13 @@ func (ix *index) prUsable(url, repo string, number int, hkMerged *time.Time) prU
 			firstRecord = d.DeployedAt
 		}
 	}
-	if firstRecord == nil || out.mergedAt.Before(*firstRecord) {
+	// No dated record at all means the stream exists but none of it parsed
+	// (or carries a deployed_at); that is not evidence the merge is older.
+	if firstRecord == nil {
+		out.state = "no dated deploy record for the repo's services"
+		return out
+	}
+	if out.mergedAt.Before(*firstRecord) {
 		out.state = "merged before the deploy-record stream began"
 		return out
 	}

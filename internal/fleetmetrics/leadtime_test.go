@@ -123,3 +123,25 @@ func TestLeadTimeNoObservationIsNil(t *testing.T) {
 		t.Fatalf("got %+v / %+v, want nil distributions", r.Deploy, r.MergeOnly)
 	}
 }
+
+// A deploy-group repo whose records exist but none is dated (unparseable
+// bodies, or YAML without deployed_at) is its own unlinked reason: the merge
+// is not claimed to predate a stream that exists but did not parse.
+func TestLeadTimeUndatedDeployStreamIsNotPreStream(t *testing.T) {
+	const bd = "https://github.com/mgh3326/brewdial/pull/3"
+	s := snap(0, 48)
+	s.Tasks = []store.Task{task(1, "merged", 0.5, store.TaskRefs{PR: bd}, mergedChain(1, 2, 3, nil)...)}
+	s.PRs = map[string]PRFact{bd: pr(bd, "bbbbbbb03", 3)}
+	s.Deploys = []DeployRecord{
+		{Key: "deploy/brewdial-api/x", Service: "brewdial-api", Format: "invalid"},
+		{Key: "deploy/brewdial-db/y", Service: "brewdial-db", Format: "yaml"},
+	}
+	r := Compute(s).LeadTime
+	if r.Deploy != nil {
+		t.Fatalf("deploy group = %+v, want nil (no usable time is known)", r.Deploy)
+	}
+	pop := findCoverage(r.Coverage, "tasks merged in window")
+	if pop.Linked != 0 || pop.Detail["no dated deploy record for the repo's services"] != 1 || pop.Detail["merged before the deploy-record stream began"] != 0 {
+		t.Fatalf("coverage = %+v, want the undated-stream reason, not the pre-stream one", pop)
+	}
+}

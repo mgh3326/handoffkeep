@@ -1,0 +1,8 @@
+{
+ "name": "m13-held-not-clamped",
+ "file": "metrics.go",
+ "old": "\t\t\th := min(held, c.Slots-w)",
+ "new": "\t\t\th := held",
+ "test": "TestSlots",
+ "description": "held-idle occupancy is not clamped to the capacity left after working units (tester devin-ds41 x02)"
+}
