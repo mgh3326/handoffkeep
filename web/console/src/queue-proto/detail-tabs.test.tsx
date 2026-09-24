@@ -320,21 +320,25 @@ describe("overview order — 목적 → 현재 상황 → 다음 행동 → 결�
 describe("header title — two-line clamp with keyboard-recoverable 원문", () => {
   const longTitle = `긴 등재 제목 — ${"아주 ".repeat(40)}길어지는 원문`;
 
-  it("long title: clamped node + 원문 제목 펼치기 details holds the full text", () => {
+  it("long title: clamped node + 원문 제목 펼치기 details holds the full text", async () => {
     const { container } = renderBody(mkProtoTask({ title: longTitle }));
     const wrap = container.querySelector<HTMLElement>(".qp-drawer-titlewrap")!;
     expect(wrap.querySelector(".qp-drawer-title.qp-title-clamp")?.textContent).toBe(longTitle);
     const src = wrap.querySelector<HTMLDetailsElement>("details.qp-title-src")!;
     expect(src.querySelector("summary")?.textContent).toBe("원문 제목 펼치기");
-    expect(src.querySelector(".qp-title-full")?.textContent).toBe(longTitle);
     expect(wrap.textContent).toContain("발췌");
     fireEvent.click(src.querySelector("summary")!);
     expect(src.open).toBe(true);
+    await waitFor(() => expect(src.querySelector("p")?.textContent).toBe(longTitle));
   });
 
-  it("short title: no excerpt note, no 펼치기", () => {
+  it("every title keeps the 원문 disclosure — nothing clipped is unrecoverable", async () => {
     const { container } = renderBody(mkProtoTask({ title: "short task title" }));
-    expect(container.querySelector(".qp-title-src")).toBeNull();
+    // even a short title gets the details: clamping is width-dependent, so
+    // recovery can never depend on a character count.
+    const src = container.querySelector<HTMLDetailsElement>("details.qp-title-src")!;
+    fireEvent.click(src.querySelector("summary")!);
+    await waitFor(() => expect(src.querySelector("p")?.textContent).toBe("short task title"));
     expect(container.querySelector(".qp-title-note")).toBeNull();
     expect(container.querySelector(".qp-drawer-title")?.textContent).toBe("short task title");
   });
@@ -344,7 +348,9 @@ describe("header title — two-line clamp with keyboard-recoverable 원문", () 
     const { container } = renderBody(mkProtoTask({ body_doc: "design/body" }), fetchDoc);
     await waitFor(() => expect(container.querySelector(".qp-drawer-title")?.textContent).toBe("메타 표시 제목"));
     expect(container.querySelector(".qp-title-note")?.textContent).toContain("display_title");
-    expect(container.querySelector(".qp-title-full")?.textContent).toBe("short task title");
+    const src = container.querySelector<HTMLDetailsElement>("details.qp-title-src")!;
+    fireEvent.click(src.querySelector("summary")!);
+    await waitFor(() => expect(src.querySelector("p")?.textContent).toBe("short task title"));
   });
 });
 

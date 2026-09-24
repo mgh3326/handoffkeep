@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { fetchBoardDoc } from "../board/api";
 import type { BoardDetail, BoardDoc, ParticipantSegment } from "../board/types";
 import { ActivityTabs } from "./ActivityTabs";
@@ -198,29 +198,9 @@ export function DetailBody({ dataset, task, detail, fetchDoc, comments: comments
   const meta = useTaskDocMeta(task.body_doc ?? "", sharedFetchDoc);
   const displayTitle = meta.status === "ready" ? (meta.meta?.displayTitle ?? null) : null;
   const titleLong = isLongTitle(task.title);
-  // The two-line clamp is CSS — whether it actually clipped depends on the
-  // rendered width (drawer is min(30rem, 92vw)), so measure overflow: any
-  // clipped title must offer the 원문 disclosure, count alone is not enough.
-  const titleRef = useRef<HTMLParagraphElement>(null);
-  const [titleClamped, setTitleClamped] = useState(false);
-  useEffect(() => {
-    const el = titleRef.current;
-    if (el === null) {
-      return;
-    }
-    const check = () => setTitleClamped(el.scrollHeight > el.clientHeight + 1);
-    check();
-    if (typeof ResizeObserver === "undefined") {
-      return;
-    }
-    const ro = new ResizeObserver(check);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [task.title, displayTitle]);
-  // The original title is recoverable in one keyboard step whenever the
-  // header shows something else: a metadata display_title, a measured
-  // clip, or a two-line excerpt of a long title.
-  const showTitleSrc = titleLong || titleClamped || displayTitle !== null;
+  // The 원문 text mounts on open — a closed details must not duplicate the
+  // title into the DOM (text queries, find-in-page, copy all see it once).
+  const [titleSrcOpen, setTitleSrcOpen] = useState(false);
 
   // Detail-loaded fields fall back to the task's own values only while no
   // fetch state exists; loading/error get their own honest states. An absent
@@ -283,8 +263,8 @@ export function DetailBody({ dataset, task, detail, fetchDoc, comments: comments
           // A needs_decision state still names itself honestly.
           <p className="muted">
             {task.state === "needs_decision"
-              ? "상태는 결정 필요 — 결정 내용은 이 화면에 아직 연결되지 않았습니다."
-              : "결정 요청 정보 미연결 — 결정 카드 데이터 연결은 #618 에서 이뤄집니다."}
+              ? "상태는 결정 필요 — 결정 내용은 아직 미연결입니다."
+              : "결정 요청 정보 미연결 — 결정 카드 연결은 #618 에서."}
           </p>
         )}
       </section>
@@ -310,48 +290,27 @@ export function DetailBody({ dataset, task, detail, fetchDoc, comments: comments
       <details className="qp-drawer-sec qp-meta-more">
         <summary>기록 세부</summary>
         <dl className="qp-drawer-meta">
-          <dt>state</dt>
-          <dd>{task.state}</dd>
-          <dt>kind</dt>
-          <dd>{task.kind}</dd>
-          <dt>lane</dt>
-          <dd>{task.lane !== "" ? task.lane : "unknown"}</dd>
-          <dt>parent lane</dt>
-          <dd>
-            <Val value={task.parent_lane} />
-          </dd>
-          <dt>claimant</dt>
-          <dd>
-            <Val value={task.claimant} />
-          </dd>
-          <dt>priority</dt>
-          <dd>p{task.priority}</dd>
-          <dt>created age</dt>
-          <dd>
-            {createdAge === null ? <span className="qp-unknown">unknown</span> : `${createdAge}d`}{" "}
-            <span className="muted">(since created_at)</span>
-          </dd>
-          <dt>created by</dt>
-          <dd>
-            <Val value={task.created_by === "" ? null : task.created_by} />
-          </dd>
-          <dt>updated</dt>
-          <dd>
-            <Val value={task.updated_at} />
-          </dd>
-          <dt>current-state age</dt>
-          <dd>
-            {stateAge === null ? <span className="qp-unknown">unknown</span> : `${stateAge}d`}{" "}
-            <span className="muted">(since state_entered_at)</span>
-          </dd>
-          <dt>due</dt>
-          <dd>
-            <Val value={task.due_at} />
-          </dd>
-          <dt>blocker</dt>
-          <dd>
-            <Val value={task.blocker} />
-          </dd>
+          {([
+            ["state", task.state],
+            ["kind", task.kind],
+            ["lane", task.lane !== "" ? task.lane : null],
+            ["parent lane", task.parent_lane],
+            ["claimant", task.claimant],
+            ["priority", `p${task.priority}`],
+            ["created age", createdAge === null ? null : `${createdAge}d`, "since created_at"],
+            ["created by", task.created_by === "" ? null : task.created_by],
+            ["updated", task.updated_at],
+            ["current-state age", stateAge === null ? null : `${stateAge}d`, "since state_entered_at"],
+            ["due", task.due_at],
+            ["blocker", task.blocker],
+          ] as [string, string | number | null, string?][]).map(([k, v, src]) => (
+            <Fragment key={k}>
+              <dt>{k}</dt>
+              <dd>
+                <Val value={v} /> {src !== undefined ? <span className="muted">({src})</span> : null}
+              </dd>
+            </Fragment>
+          ))}
         </dl>
       </details>
       {dataset.source === "synthetic" ? (
@@ -513,18 +472,19 @@ export function DetailBody({ dataset, task, detail, fetchDoc, comments: comments
   return (
     <>
       <div className="qp-drawer-titlewrap">
-        <p className="qp-drawer-title qp-title-clamp" ref={titleRef}>{displayTitle ?? task.title}</p>
+        <p className="qp-drawer-title qp-title-clamp">{displayTitle ?? task.title}</p>
         {displayTitle !== null ? (
-          <p className="qp-title-note muted">표시 제목 — 본문 문서 메타데이터의 display_title 입니다.</p>
+          <p className="qp-title-note muted">표시 제목 — 본문 문서의 display_title 입니다.</p>
         ) : titleLong ? (
-          <p className="qp-title-note muted">긴 제목의 발췌입니다 — 원문은 펼치기로 전체를 읽습니다.</p>
+          <p className="qp-title-note muted">긴 제목의 발췌입니다 — 원문은 펼치기로.</p>
         ) : null}
-        {showTitleSrc ? (
-          <details className="qp-title-src">
-            <summary>원문 제목 펼치기</summary>
-            <p className="qp-title-full">{task.title}</p>
-          </details>
-        ) : null}
+        {/* Every displayed title is clamped to two lines, so the 원문
+            disclosure is always offered — a clipped title is never left
+            without one-action recovery, at any width or zoom. */}
+        <details className="qp-title-src" onToggle={(e) => setTitleSrcOpen(e.currentTarget.open)}>
+          <summary>원문 제목 펼치기</summary>
+          {titleSrcOpen ? <p>{task.title}</p> : null}
+        </details>
       </div>
       <ActivityTabs panels={{ overview, comments, transitions }} />
     </>
