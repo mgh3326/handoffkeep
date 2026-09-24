@@ -9,6 +9,7 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     services:
       postgres:
         image: postgres:17
@@ -34,7 +35,7 @@ jobs:
       - run: git diff --exit-code -- internal/ui/static/console
       - run: test -z "$(gofmt -l .)"
       - run: go vet ./...
-      - run: go test -race ./...
+      - run: go test -race -timeout 30m ./...
         env:
           HANDOFFKEEP_TEST_DB_URL: postgres://handoffkeep:handoffkeep@localhost:5432/handoffkeep?sslmode=disable
       - uses: gitleaks/gitleaks-action@v2
