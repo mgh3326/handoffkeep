@@ -11,8 +11,8 @@ import (
 )
 
 // TestRelayEventsV6ToV7Upgrade starts from the v6 relay table rather than a
-// fresh v7 database. It proves historic job rows and their five-field conflict
-// behavior survive the additive v7 migration.
+// fresh database. It proves historic job rows and their five-field conflict
+// behavior survive every later additive relay migration.
 func TestRelayEventsV6ToV7Upgrade(t *testing.T) {
 	url := os.Getenv("HANDOFFKEEP_TEST_DB_URL")
 	if url == "" {
@@ -55,14 +55,14 @@ func TestRelayEventsV6ToV7Upgrade(t *testing.T) {
 		t.Fatal(err)
 	}
 	var version int
-	if err = pool.QueryRow(ctx, `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != 12 {
+	if err = pool.QueryRow(ctx, `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != 13 {
 		t.Fatalf("schema version=%d err=%v", version, err)
 	}
 	var constraintOID uint32
 	if err = pool.QueryRow(ctx, `SELECT oid FROM pg_constraint WHERE conrelid='relay_events'::regclass AND conname='relay_events_kind_check'`).Scan(&constraintOID); err != nil {
 		t.Fatal(err)
 	}
-	// A second open must see schema version 12 and skip the lock-heavy v7 DDL.
+	// A second open must see schema version 13 and skip the lock-heavy relay DDL.
 	// The constraint OID would change if it were dropped and re-added again.
 	if err = s.migrate(ctx); err != nil {
 		t.Fatal(err)
@@ -83,7 +83,98 @@ func TestRelayEventsV6ToV7Upgrade(t *testing.T) {
 	if err != nil || !created || lane.ID == 0 {
 		t.Fatalf("lane event=%+v created=%t err=%v", lane, created, err)
 	}
-	t.Logf("v6→v7 upgrade: historic_rows=%d job_attempts=%d lane_event_id=%d", count, job.Attempts, lane.ID)
+	t.Logf("v6→v13 upgrade: historic_rows=%d job_attempts=%d lane_event_id=%d", count, job.Attempts, lane.ID)
+}
+
+func TestRelayEventsV12ToV13Upgrade(t *testing.T) {
+	// A one-sided edit to either partial-index predicate can still appear to
+	// work because PostgreSQL may infer a broader partial index from a
+	// narrower ON CONFLICT target. Require exact equality in this duplicate
+	// resend test so either one-sided mutant turns it red.
+	if relayJobIndexPredicate != relayJobConflictPredicate {
+		t.Fatalf("index predicate %q differs from ON CONFLICT predicate %q", relayJobIndexPredicate, relayJobConflictPredicate)
+	}
+	url := os.Getenv("HANDOFFKEEP_TEST_DB_URL")
+	if url == "" {
+		t.Skip("HANDOFFKEEP_TEST_DB_URL is required for PostgreSQL migration tests")
+	}
+	ctx := context.Background()
+	admin, err := pgxpool.New(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer admin.Close()
+	schema := fmt.Sprintf("relay_v13_%d", time.Now().UnixNano())
+	if _, err = admin.Exec(ctx, "CREATE SCHEMA "+schema); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = admin.Exec(ctx, "DROP SCHEMA "+schema+" CASCADE") }()
+	config, err := pgxpool.ParseConfig(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.ConnConfig.RuntimeParams["search_path"] = schema + ",public"
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	s := &Store{pool: pool}
+	if err = s.migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// Restore the v12 relay DDL and marker in this throwaway schema, with old
+	// job and lane rows present before invoking the actual v13 migration.
+	for _, q := range []string{
+		`INSERT INTO relay_events(kind,job_id,epoch,owner_lane,report_path,received_at) VALUES('job.completed','historic-job',1,'lane-a','report.md',now())`,
+		`INSERT INTO relay_events(kind,job_id,epoch,owner_lane,event_id,text,received_at) VALUES('lane.event','',0,'lane-a','historic-lane','payload',now())`,
+		`DELETE FROM schema_version WHERE version=13`,
+		`ALTER TABLE relay_events DROP CONSTRAINT relay_events_kind_check`,
+		`ALTER TABLE relay_events ADD CONSTRAINT relay_events_kind_check CHECK(kind IN ('job.completed','job.escalate','job.joined','lane.event'))`,
+		`DROP INDEX relay_events_idempotency`,
+		`CREATE UNIQUE INDEX relay_events_idempotency ON relay_events(kind,job_id,epoch,report_path,reason) WHERE kind IN ('job.completed','job.escalate','job.joined')`,
+	} {
+		if _, err = pool.Exec(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err = s.migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var version, historic int
+	if err = pool.QueryRow(ctx, `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != 13 {
+		t.Fatalf("schema version=%d err=%v", version, err)
+	}
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM relay_events WHERE job_id='historic-job' OR event_id='historic-lane'`).Scan(&historic); err != nil || historic != 2 {
+		t.Fatalf("historic rows=%d err=%v", historic, err)
+	}
+	for _, kind := range []string{"job.lost", "job.revoked"} {
+		x := RelayEvent{Kind: kind, JobID: kind, Epoch: 1, OwnerLane: "lane-a", Reason: "test", EventID: "00001-" + kind + ".json"}
+		first, created, err := s.AppendRelayEvent(ctx, x)
+		if err != nil || !created {
+			t.Fatalf("%s insert=%+v created=%t err=%v", kind, first, created, err)
+		}
+		second, created, err := s.AppendRelayEvent(ctx, x)
+		if err != nil || created || second.ID != first.ID {
+			t.Fatalf("%s resend=%+v created=%t err=%v", kind, second, created, err)
+		}
+	}
+	var constraintOID, indexOID, repeatedConstraintOID, repeatedIndexOID uint32
+	if err = pool.QueryRow(ctx, `SELECT oid FROM pg_constraint WHERE conrelid='relay_events'::regclass AND conname='relay_events_kind_check'`).Scan(&constraintOID); err != nil {
+		t.Fatal(err)
+	}
+	if err = pool.QueryRow(ctx, `SELECT indexrelid FROM pg_index WHERE indexrelid='relay_events_idempotency'::regclass`).Scan(&indexOID); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err = pool.QueryRow(ctx, `SELECT oid FROM pg_constraint WHERE conrelid='relay_events'::regclass AND conname='relay_events_kind_check'`).Scan(&repeatedConstraintOID); err != nil || repeatedConstraintOID != constraintOID {
+		t.Fatalf("repeat constraint oid=%d want=%d err=%v", repeatedConstraintOID, constraintOID, err)
+	}
+	if err = pool.QueryRow(ctx, `SELECT indexrelid FROM pg_index WHERE indexrelid='relay_events_idempotency'::regclass`).Scan(&repeatedIndexOID); err != nil || repeatedIndexOID != indexOID {
+		t.Fatalf("repeat index oid=%d want=%d err=%v", repeatedIndexOID, indexOID, err)
+	}
 }
 
 // TestTaskCommentsMigrationIsAdditiveAndIdempotent opens a database that
@@ -137,7 +228,7 @@ func TestTaskCommentsMigrationIsAdditiveAndIdempotent(t *testing.T) {
 	if err = pool.QueryRow(ctx, `SELECT count(*) FROM pg_trigger WHERE tgname='task_comments_append_only' AND tgrelid='task_comments'::regclass`).Scan(&triggers); err != nil || triggers != 1 {
 		t.Fatalf("triggers=%d err=%v", triggers, err)
 	}
-	if err = pool.QueryRow(ctx, `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != 12 {
+	if err = pool.QueryRow(ctx, `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != 13 {
 		t.Fatalf("schema version=%d err=%v", version, err)
 	}
 	xs, err := s.ListTaskComments(ctx, task.ID, 0, 10)
@@ -201,7 +292,7 @@ func TestBenchCatalogV11ToV12Upgrade(t *testing.T) {
 		t.Fatal(err)
 	}
 	var version, rows, modelRows int
-	if err = pool.QueryRow(ctx, `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != 12 {
+	if err = pool.QueryRow(ctx, `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != 13 {
 		t.Fatalf("schema version=%d err=%v", version, err)
 	}
 	if err = pool.QueryRow(ctx, `SELECT count(*) FROM schema_version WHERE version=12`).Scan(&version); err != nil || version != 1 {
