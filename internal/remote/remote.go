@@ -51,19 +51,36 @@ func (c Client) call(ctx context.Context, method, path string, input, output any
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		var x struct{ Error, Pattern string }
 		_ = json.NewDecoder(resp.Body).Decode(&x)
-		if x.Pattern != "" {
-			return fmt.Errorf("%s:%s", x.Error, x.Pattern)
-		}
-		if x.Error == "" {
-			return fmt.Errorf("http_%d", resp.StatusCode)
-		}
-		return errors.New(x.Error)
+		return &HTTPError{Status: resp.StatusCode, Code: x.Error, Pattern: x.Pattern}
 	}
 	if output != nil {
 		return json.NewDecoder(resp.Body).Decode(output)
 	}
 	return nil
 }
+
+// HTTPError is a response the server actually sent with a non-2xx status.
+// Its text is unchanged from the untyped errors it replaces, so callers that
+// compare err.Error() keep working; callers that must know whether a write
+// may have happened check the status instead. Any other error from call —
+// transport failure, timeout, an undecodable 2xx body — means the outcome of
+// a write is unknown: the server may have committed it.
+type HTTPError struct {
+	Status  int
+	Code    string
+	Pattern string
+}
+
+func (e *HTTPError) Error() string {
+	if e.Pattern != "" {
+		return fmt.Sprintf("%s:%s", e.Code, e.Pattern)
+	}
+	if e.Code == "" {
+		return fmt.Sprintf("http_%d", e.Status)
+	}
+	return e.Code
+}
+
 func esc(x string) string { return url.PathEscape(x) }
 func (c Client) Checkpoint(ctx context.Context, _ string, x store.Checkpoint) (store.Checkpoint, error) {
 	var out store.Checkpoint

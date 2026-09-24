@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
 	"testing"
 	"time"
 
@@ -380,15 +381,33 @@ func TestTaskEventsDecisionKindUpgradeToV14(t *testing.T) {
 	if insertDecision("decision") == nil {
 		t.Fatal("pre-v14 constraint admitted a decision row")
 	}
+	// Prove v14 does not scan existing rows (M3): a row the new CHECK would
+	// reject is present when v14 runs. A validating ADD CONSTRAINT would fail
+	// the whole migration here; NOT VALID adds the constraint without a scan.
+	// (Real rows always satisfied the old, narrower CHECK; this one is
+	// planted with the constraint briefly removed.)
+	for _, q := range []string{
+		`ALTER TABLE task_events DROP CONSTRAINT task_events_kind_check`,
+		`INSERT INTO task_events(task_id,"from","to","by",note,at,kind) VALUES(` + strconv.FormatInt(x.ID, 10) + `,'claimed','claimed','v14','planted',now(),'unscanned')`,
+		`ALTER TABLE task_events ADD CONSTRAINT task_events_kind_check CHECK(kind IN ('transition','relane')) NOT VALID`,
+	} {
+		if _, err := pool.Exec(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if err = s.migrate(ctx); err != nil {
-		t.Fatal(err)
+		t.Fatalf("v14 scanned existing rows: %v", err)
+	}
+	var validated bool
+	if err = pool.QueryRow(ctx, `SELECT convalidated FROM pg_constraint WHERE conrelid='task_events'::regclass AND conname='task_events_kind_check'`).Scan(&validated); err != nil || validated {
+		t.Fatalf("task_events_kind_check convalidated=%t err=%v, want NOT VALID", validated, err)
 	}
 	var version, rows int
 	if err = pool.QueryRow(ctx, `SELECT count(*) FROM schema_version WHERE version=14`).Scan(&version); err != nil || version != 1 {
 		t.Fatalf("version 14 rows=%d err=%v", version, err)
 	}
-	if err = pool.QueryRow(ctx, `SELECT count(*) FROM task_events WHERE task_id=$1`, x.ID).Scan(&rows); err != nil || rows != 1 {
-		t.Fatalf("history rows=%d err=%v", rows, err)
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM task_events WHERE task_id=$1`, x.ID).Scan(&rows); err != nil || rows != 2 {
+		t.Fatalf("history rows=%d err=%v (claim + planted row)", rows, err)
 	}
 	if err = insertDecision("decision"); err != nil {
 		t.Fatalf("v14 refused a decision row: %v", err)

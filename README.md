@@ -153,7 +153,10 @@ mid-request.
 ### Decision requests
 
 A question put to the operator is recorded on its task before any pane
-notification (#618). The request lives in `refs.decision_request` next to the
+notification (#618). Schema v14 widens the `task_events.kind` CHECK to admit
+`decision` as `NOT VALID` (a catalog-only change, with no scan of existing rows
+under the exclusive lock); `ALTER TABLE task_events VALIDATE CONSTRAINT
+task_events_kind_check` can be run later without blocking reads or writes. The request lives in `refs.decision_request` next to the
 existing `refs.decision_options`; every write appends a `task_events` row with
 `kind='decision'` (from = to = the current state) whose refs snapshot keeps the
 full request, so history is read back from events and no table is added.
@@ -170,8 +173,16 @@ handoffkeep tasks decision-resolve 42 --request dr-42-1 --kind withdrawn --text 
 ```
 
 The CLI prints the `request_id` (`dr-<task>-<revision>`) and a `notify` line
-to paste into the pane message; on any failure it says `NOT recorded` and the
-request must not be announced as visible in the console. The recommendation,
+to paste into the pane message. A failure before the request is sent, or a
+refusal the server sends (401/403/404/409 or a named 400), says `NOT
+recorded`: the request must not be announced as visible in the console. A
+transport error, timeout, undecodable reply, 5xx or the catch-all 400
+`invalid_context` after the request was sent says outcome `UNKNOWN` and exits
+4, because the server may already have committed: check `tasks show <id>` or
+re-send the identical command, which returns a recorded request as
+`duplicate`, before notifying. A value flag never takes the next flag as its
+value (`--reason --block` is refused); pass text that starts with `-` as
+`--reason=-text`. The recommendation,
 the no-response action (required; write "자동 적용 없음" when nothing is
 applied) and the deadline are separate fields. Option labels are at most 120
 bytes (not characters); longer outcome text goes in `--doc`. A byte-identical

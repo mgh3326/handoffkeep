@@ -705,9 +705,20 @@ func (s *Store) migrate(ctx context.Context) error {
 		// and runs once, like v7. It is 14, not 13: #627 (relay_events
 		// job.lost/revoked) claims 13, and two different blocks behind one
 		// version number would leave the second deploy's DDL unapplied.
+		//
+		// The swap is one ALTER and the new CHECK is NOT VALID, so the
+		// ACCESS EXCLUSIVE lock covers catalog changes only — no scan of
+		// task_events while claims and transitions wait. New rows are checked
+		// immediately. Existing rows need no re-check: each one already
+		// satisfied the replaced CHECK (transition, relane), a subset of the
+		// new one. The constraint therefore reads convalidated=false; an
+		// operator may run `ALTER TABLE task_events VALIDATE CONSTRAINT
+		// task_events_kind_check` later, which takes SHARE UPDATE EXCLUSIVE
+		// and does not block reads or writes. Not run here: migrate holds its
+		// locks until its single transaction commits, so validating inside
+		// it would bring the scan back under the exclusive lock.
 		v14 := []string{
-			`ALTER TABLE task_events DROP CONSTRAINT IF EXISTS task_events_kind_check`,
-			`ALTER TABLE task_events ADD CONSTRAINT task_events_kind_check CHECK(kind IN ('transition','relane','decision'))`,
+			`ALTER TABLE task_events DROP CONSTRAINT IF EXISTS task_events_kind_check, ADD CONSTRAINT task_events_kind_check CHECK(kind IN ('transition','relane','decision')) NOT VALID`,
 			`INSERT INTO schema_version(version) VALUES (14)`,
 		}
 		for _, q := range v14 {

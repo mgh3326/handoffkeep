@@ -3,8 +3,12 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -106,5 +110,76 @@ func TestTasksDecisionResolveCLI(t *testing.T) {
 	}
 	if len(*seen) != 1 {
 		t.Fatalf("receipt-less application reached the server")
+	}
+}
+
+// M1 (CodeRabbit, #48): a value flag never swallows the next flag. With
+// "--reason --block" the old parser recorded reason="--block" and never set
+// Block, so the request was written without blocking the task. Text that
+// starts with "-" still passes in the "--reason=-text" form.
+func TestTasksDecisionRequestCLIFlagIsNotAValue(t *testing.T) {
+	h, seen := relaneServer(t, 201, decisionRequestOKBody)
+	base := []string{"tasks", "decision-request", "618", "--question", "q", "--option", "A|x", "--default-action", "보류", "--url", h.URL, "--token", "tok"}
+	err := run(append(append([]string{}, base...), "--reason", "--block"), io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "--reason requires a value") || !strings.Contains(err.Error(), "NOT recorded") {
+		t.Fatalf("flag taken as value: err=%v", err)
+	}
+	if len(*seen) != 0 {
+		t.Fatalf("a request was sent: %+v", (*seen)[0].Body)
+	}
+	if err := run(append(append([]string{}, base...), "--reason=--not-a-flag", "--block"), io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if body := (*seen)[0].Body; body["reason"] != "--not-a-flag" || body["block"] != true {
+		t.Fatalf("explicit = form: body=%v", body)
+	}
+}
+
+// M2 (CodeRabbit, #48): once the POST has left the process, only a refusal
+// the server actually sent proves nothing was written. A dropped connection
+// after the server committed, an undecodable reply, a 5xx or the API's
+// catch-all 400 are UNKNOWN (exit 4) — never "NOT recorded", never success.
+func TestTasksDecisionWriteOutcomeUnknown(t *testing.T) {
+	var committed atomic.Int32
+	drop := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		committed.Add(1) // the server records the request, then the reply is lost
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err == nil {
+			conn.Close()
+		}
+	}))
+	t.Cleanup(drop.Close)
+	garbage, _ := relaneServer(t, 201, `{"task":`)
+	gateway, _ := relaneServer(t, 502, `<html>bad gateway</html>`)
+	catchAll, _ := relaneServer(t, 400, `{"error":"invalid_context"}`)
+	refused, _ := relaneServer(t, 409, `{"error":"decision_request_open"}`)
+	request := func(url string) []string {
+		return []string{"tasks", "decision-request", "618", "--question", "q", "--option", "A|x", "--default-action", "보류", "--url", url, "--token", "tok"}
+	}
+	resolve := func(url string) []string {
+		return []string{"tasks", "decision-resolve", "618", "--request", "dr-618-1", "--kind", "withdrawn", "--text", "x", "--url", url, "--token", "tok"}
+	}
+	for name, args := range map[string][]string{
+		"request dropped after commit":    request(drop.URL),
+		"resolution dropped after commit": resolve(drop.URL),
+		"undecodable 201":                 request(garbage.URL),
+		"502":                             request(gateway.URL),
+		"400 invalid_context":             resolve(catchAll.URL),
+	} {
+		err := run(args, io.Discard, io.Discard)
+		var exit exitCodeError
+		if err == nil || !errors.As(err, &exit) || exit.code != exitWriteUnknown || !strings.Contains(err.Error(), "UNKNOWN") ||
+			!strings.Contains(err.Error(), "tasks show 618") || strings.Contains(err.Error(), "NOT recorded") {
+			t.Errorf("%s: err=%v", name, err)
+		}
+	}
+	if n := committed.Load(); n != 2 {
+		t.Fatalf("drop server saw %d writes, want 2", n)
+	}
+	// A refusal the server sent is still NOT recorded (exit 1, not 4).
+	err := run(request(refused.URL), io.Discard, io.Discard)
+	var exit exitCodeError
+	if err == nil || errors.As(err, &exit) || !strings.Contains(err.Error(), "NOT recorded") {
+		t.Fatalf("409 refusal: err=%v", err)
 	}
 }

@@ -306,7 +306,7 @@ func timeIn(t *store.Task, state string, from, to time.Time) time.Duration {
 	var total time.Duration
 	var enter *time.Time
 	for _, e := range t.Events {
-		if e.Kind == "relane" {
+		if !stateEvent(e) {
 			continue
 		}
 		if e.To == state && enter == nil {
@@ -377,7 +377,7 @@ func rounds(ix *index) Rounds {
 		for _, id := range members[root] {
 			t := ix.tasks[id]
 			for _, e := range t.Events {
-				if e.Kind == "relane" {
+				if !stateEvent(e) {
 					continue
 				}
 				if e.To == "verifying" {
@@ -819,7 +819,7 @@ func decisions(ix *index) Decisions {
 	for _, id := range sortedIDs(ix) {
 		t := ix.tasks[id]
 		for i, e := range t.Events {
-			if e.Kind == "relane" || e.To != "needs_decision" {
+			if !stateEvent(e) || e.To != "needs_decision" {
 				continue
 			}
 			q := decisionReq{kind: "task", ref: "task#" + strconv.FormatInt(id, 10), at: e.At}
@@ -828,7 +828,7 @@ func decisions(ix *index) Decisions {
 			}
 			for k := i + 1; k < len(t.Events); k++ {
 				a := t.Events[k]
-				if a.Kind == "relane" || a.From != "needs_decision" {
+				if !stateEvent(a) || a.From != "needs_decision" {
 					continue
 				}
 				at := a.At
@@ -838,7 +838,7 @@ func decisions(ix *index) Decisions {
 					q.answeredBy = "operator(web)"
 				}
 				for c := k + 1; c < len(t.Events); c++ {
-					if t.Events[c].Kind != "relane" {
+					if stateEvent(t.Events[c]) {
 						ct := t.Events[c].At
 						q.consume = &ct
 						break

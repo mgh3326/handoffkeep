@@ -2,6 +2,7 @@ package fleetmetrics
 
 import (
 	"testing"
+	"time"
 
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
@@ -91,5 +92,39 @@ func TestDecisionMissingAnswerLowersCoverageNotValue(t *testing.T) {
 	ans := findCoverage(r.Coverage, "decision requests")
 	if ans.Linked != 2 || ans.Detail["closed without recorded answer"] != 2 {
 		t.Fatalf("answer coverage = %+v, want 2 linked, 2 closed without answer", ans)
+	}
+}
+
+// dev is a #618 decision row: a request recorded (or resolved) with no state
+// change, from == to == the task's current state.
+func dev(h float64, state string) store.TaskEvent {
+	e := ev(h, state, state, nil, "decision-request dr-x-1: q")
+	e.Kind = store.TaskEventDecision
+	return e
+}
+
+// Decision rows are not state changes: a superseding request recorded while
+// the task sits in needs_decision is not a second entry nor an answer, and a
+// request closed on a merged task does not move the task's terminal time.
+func TestDecisionRowsAreNotStateEvents(t *testing.T) {
+	s := snap(0, 48)
+	s.Tasks = []store.Task{
+		task(30, "claimed", 0, store.TaskRefs{},
+			ev(0.5, "backlog", "claimed", nil), ev(1, "claimed", "needs_decision", nil, "A or B?"),
+			dev(2, "needs_decision"), ev(3, "needs_decision", "claimed", nil, "A")),
+	}
+	r := Compute(s).Decisions
+	if r.Requests != 1 || r.ByKind["task"] != 1 {
+		t.Fatalf("requests = %d %v, want 1 task request (the decision row is not a new entry)", r.Requests, r.ByKind)
+	}
+	if r.ToAnswer == nil || r.ToAnswer.N != 1 || r.ToAnswer.Max != 2 {
+		t.Fatalf("request→answer = %+v, want n=1 max=2 (answered at the transition, not the decision row)", r.ToAnswer)
+	}
+	merged := task(31, "merged", 0, store.TaskRefs{}, append(mergedChain(1, 2, 3, nil), dev(10, "merged"))...)
+	if at := terminalAt(&merged); at == nil || !at.Equal(t0.Add(3*time.Hour)) {
+		t.Fatalf("terminalAt = %v, want the merge at +3h, not the decision row at +10h", at)
+	}
+	if st := stateAt(&merged, t0.Add(11*time.Hour)); st != "merged" {
+		t.Fatalf("stateAt = %q", st)
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mgh3326/handoffkeep/internal/remote"
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
@@ -17,7 +18,11 @@ const decisionRequestUsage = "usage: tasks decision-request <id> --question <tex
 
 const decisionResolveUsage = "usage: tasks decision-resolve <id> --request dr-<id>-<rev> --kind answered|default_applied|withdrawn [--option A] [--text <text>] [--receipt <ref>] [--responder <who>]"
 
-// splitSubcommandArgs lets flags and the positional id come in any order.
+// splitSubcommandArgs lets flags and the positional id come in any order. A
+// value flag never takes a following flag as its value: "--reason --block"
+// is a missing value, not reason="--block" with --block silently dropped
+// (the request would be recorded without blocking). Text that starts with
+// "-" is passed in the explicit "--reason=-text" form, which stays one token.
 func splitSubcommandArgs(rest []string, valueFlags map[string]bool) ([]string, error) {
 	flags, positional := []string{}, []string{}
 	for i := 0; i < len(rest); i++ {
@@ -31,6 +36,9 @@ func splitSubcommandArgs(rest []string, valueFlags map[string]bool) ([]string, e
 			i++
 			if i >= len(rest) {
 				return nil, fmt.Errorf("%s requires a value", arg)
+			}
+			if strings.HasPrefix(rest[i], "-") {
+				return nil, fmt.Errorf("%s requires a value, got flag %q (write %s=%s for text that starts with -)", arg, rest[i], arg, rest[i])
 			}
 			flags = append(flags, rest[i])
 		}
@@ -47,6 +55,42 @@ func parseSubcommandTaskID(fs *flag.FlagSet, usage string) (int64, error) {
 		return 0, errors.New("task id must be positive")
 	}
 	return id, nil
+}
+
+// exitWriteUnknown is the exit status when a write's outcome is unknown.
+const exitWriteUnknown = 4
+
+// serverRefused reports whether err is a refusal the server sent before
+// writing anything: auth (401/403), unknown task (404), a documented
+// conflict (409), or a named validation error (400). "invalid_context" is the
+// API's catch-all for unexpected store errors — a failed commit among them —
+// so it does not prove the write was refused.
+func serverRefused(err error) bool {
+	var httpErr *remote.HTTPError
+	if !errors.As(err, &httpErr) {
+		return false
+	}
+	switch httpErr.Status {
+	case 401, 403, 404, 409:
+		return true
+	case 400:
+		return httpErr.Code != "" && httpErr.Code != "invalid_context"
+	}
+	return false
+}
+
+// writeFailed classifies an error returned by a decision write. Only a known
+// refusal is "NOT recorded". A transport error, timeout, undecodable reply or
+// server error after the POST left the process may come after the server
+// committed — reporting it as not recorded would invite a second, different
+// request; reporting it as recorded would be a guess. It is UNKNOWN: check
+// the task, or re-send the identical command, which returns the recorded
+// request as a duplicate.
+func writeFailed(what string, id int64, err error) error {
+	if serverRefused(err) {
+		return fmt.Errorf("%s NOT recorded: %v — do not notify that it is visible in the console", what, err)
+	}
+	return exitCodeError{code: exitWriteUnknown, err: fmt.Errorf("%s outcome UNKNOWN: %v — the server may have recorded it; check `handoffkeep tasks show %d` (refs.decision_request) or re-send the identical command (a recorded request comes back as duplicate); do not notify until confirmed", what, err, id)}
 }
 
 // notRecorded wraps every failure of a request write. A6: a producer that
@@ -122,7 +166,7 @@ func decisionRequestCmd(args []string, out io.Writer) error {
 	defer cancel()
 	result, err := c.RecordDecisionRequest(ctx, id, input)
 	if err != nil {
-		return notRecorded(err)
+		return writeFailed("decision request", id, err)
 	}
 	return printJSON(out, decisionRequestOutput(result))
 }
@@ -190,7 +234,7 @@ func decisionResolveCmd(args []string, out io.Writer) error {
 	defer cancel()
 	result, err := c.ResolveDecisionRequest(ctx, id, input)
 	if err != nil {
-		return fmt.Errorf("decision resolution NOT recorded: %v", err)
+		return writeFailed("decision resolution", id, err)
 	}
 	return printJSON(out, map[string]any{
 		"recorded":   true,
