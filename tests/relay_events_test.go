@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -67,6 +68,54 @@ func TestRelayEventsIdempotent(t *testing.T) {
 	}
 }
 
+// Panewire's job outbox uses the event filename as event_id (see panewire
+// hub_jobs_client.go:266-269 and emit.go:311). A resend must return the same
+// row, and either terminal signal must close an earlier job escalation.
+func TestRelayTerminalKindsFromPanewire(t *testing.T) {
+	for _, tc := range []struct {
+		kind, eventID, reason string
+	}{
+		{"job.lost", "00001-job.lost.json", "herdr_unreachable"},
+		{"job.revoked", "00002-job.revoked.json", "operator_revoked"},
+	} {
+		t.Run(tc.kind, func(t *testing.T) {
+			s := taskTestStore(t)
+			h := taskHTTP(s)
+			defer h.Close()
+			lane, job := taskLane(t), "relay-terminal-"+taskLane(t)
+			escalation := relayPayload(lane, job)
+			escalation["kind"] = "job.escalate"
+			escalation["reason"] = "needs decision"
+			status, earlier := postRelayEvent(t, h.URL, "node-token", escalation)
+			if status != http.StatusCreated {
+				t.Fatalf("escalation status=%d", status)
+			}
+			open, err := s.ListOpenEscalations(t.Context(), 1000)
+			if err != nil || !slices.ContainsFunc(open, func(x store.RelayEvent) bool { return x.ID == earlier.ID }) {
+				t.Fatalf("open escalation=%+v err=%v", open, err)
+			}
+			terminal := relayPayload(lane, job)
+			terminal["kind"] = tc.kind
+			terminal["event_id"] = tc.eventID
+			terminal["report_path"] = "/tmp/jobs/" + job + "/events/" + tc.eventID
+			terminal["reason"] = tc.reason
+			firstStatus, first := postRelayEvent(t, h.URL, "node-token", terminal)
+			secondStatus, second := postRelayEvent(t, h.URL, "node-token", terminal)
+			if firstStatus != http.StatusCreated || secondStatus != http.StatusOK || first.ID != second.ID || second.Attempts != 1 || second.EventID != tc.eventID {
+				t.Fatalf("first=(%d,%+v) resend=(%d,%+v)", firstStatus, first, secondStatus, second)
+			}
+			rows, err := s.ListRelayEvents(t.Context(), lane, false, 0)
+			if err != nil || len(rows) != 2 {
+				t.Fatalf("relay rows=%+v err=%v", rows, err)
+			}
+			open, err = s.ListOpenEscalations(t.Context(), 1000)
+			if err != nil || slices.ContainsFunc(open, func(x store.RelayEvent) bool { return x.ID == earlier.ID }) {
+				t.Fatalf("escalation after %s=%+v err=%v", tc.kind, open, err)
+			}
+		})
+	}
+}
+
 func TestLaneEventsIdempotentAndDelivered(t *testing.T) {
 	s := taskTestStore(t)
 	h := taskHTTP(s)
@@ -115,11 +164,11 @@ func TestLaneEventsRequireLaneAndEventID(t *testing.T) {
 		t.Fatalf("invalid lane-event created rows=%+v err=%v", got, err)
 	}
 	job := relayPayload(lane, "lane-event-job-field-"+lane)
-	job["event_id"] = "not-allowed"
+	job["text"] = "not-allowed"
 	resp := request(t, h.Client(), http.MethodPost, h.URL+"/v1/relay/events", "node-token", job)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("job event-id status=%d", resp.StatusCode)
+		t.Fatalf("job text status=%d", resp.StatusCode)
 	}
 	oversize := laneEventPayload(lane, "producer-oversize", "payload")
 	oversize["report_path"] = strings.Repeat("x", store.MaxBytes+1)
