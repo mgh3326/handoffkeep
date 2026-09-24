@@ -2,11 +2,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueueProtoApp } from "./QueueProtoApp";
 import { TaskPage } from "./TaskPage";
+import { DetailBody } from "./DetailDrawer";
 import { boardTaskToProto } from "./boardtask";
 import type { FetchDoc } from "./DocInline";
 import { HttpError } from "../board/api";
 import type { BoardDetail, BoardDoc, BoardTask } from "../board/types";
-import { KNOWN_STATES, type Dataset } from "./types";
+import { KNOWN_STATES, type Dataset, type ProtoTask } from "./types";
 
 function mkBoardTask(over: Partial<BoardTask>): BoardTask {
   return {
@@ -115,6 +116,25 @@ describe("detail tabs — 개요 / 코멘트 / 전이", () => {
     expect(transitions.querySelector("b, strong")).toBeNull();
     expect(transitions.querySelector("time")?.textContent).toBe("2026-09-21T10:30:00Z");
   });
+
+  it("a relane event renders as a lane change, not a state transition", async () => {
+    const task = mkBoardTask({});
+    const detail = mkDetail(task, {
+      events: [
+        { id: 1, kind: "transition", from: "backlog", to: "claimed", by: "builder-a", at: "2026-09-21T10:30:00Z" },
+        { id: 2, kind: "relane", from: "admiral-1", to: "director-1", by: "ops", note: "triage", at: "2026-09-21T11:00:00Z" },
+      ],
+    });
+    const { drawer } = openPanel([task], vi.fn<FetchDoc>(), () => Promise.resolve(detail));
+    fireEvent.click(within(drawer).getByRole("tab", { name: "전이" }));
+    const transitions = panel(drawer, "transitions");
+    await waitFor(() => expect(transitions.querySelectorAll("li").length).toBe(2));
+    const rows = [...transitions.querySelectorAll("li")].map((li) => li.textContent ?? "");
+    expect(rows[0]).toContain("backlog → claimed by builder-a");
+    expect(rows[0]).not.toContain("lane:");
+    expect(rows[1]).toContain("lane: admiral-1 → director-1 by ops");
+    expect(rows[1]).toContain("— triage");
+  });
 });
 
 describe("overview body", () => {
@@ -134,7 +154,7 @@ describe("overview body", () => {
   it("no body_doc: the overview says so instead of going blank (mutant c)", () => {
     const fetchDoc = vi.fn<FetchDoc>();
     const { drawer } = openPanel([mkBoardTask({})], fetchDoc);
-    const body = [...panel(drawer, "overview").querySelectorAll("section")].find((s) => s.querySelector("h4")?.textContent === "본문")!;
+    const body = panel(drawer, "overview").querySelector<HTMLElement>("section.qp-body-sec")!;
     expect(body).toBeTruthy();
     expect(body.querySelector("[data-doc-state]")?.getAttribute("data-doc-state")).toBe("none");
     expect(body.textContent).toContain("본문 문서가 연결되지 않았습니다");
@@ -291,6 +311,216 @@ describe("overview body — title-found candidates (#619)", () => {
     const body = bodySection(drawer);
     await waitFor(() => expect(body.querySelector("[data-doc-renderer]")).not.toBeNull());
     expect(body.querySelector("details.qp-raw-title")).toBeNull();
+  });
+});
+
+// ---- #628 overview: what → why → who waits on what → decision → spec -----
+
+function mkProtoTask(over: Partial<ProtoTask>): ProtoTask {
+  return {
+    id: 9101,
+    title: "short task title",
+    kind: "implement",
+    state: "in_progress",
+    lane: "owner-lane",
+    claimant: "worker-7",
+    priority: 10,
+    created_at: "2026-09-21T10:00:00Z",
+    state_entered_at: "2026-09-22T10:00:00Z",
+    due_at: null,
+    blocker: null,
+    created_by: "director-1",
+    updated_at: "2026-09-23T10:00:00Z",
+    parent_lane: "director-1",
+    refs: {},
+    events: [],
+    dwell: [],
+    coverage: { status: "not_collected", participants: null },
+    ...over,
+  };
+}
+
+function renderBody(task: ProtoTask, fetchDoc: FetchDoc = vi.fn<FetchDoc>()) {
+  const ds: Dataset = {
+    key: "live",
+    label: "live",
+    source: "live",
+    generatedAt: "2026-09-24T12:00:00Z",
+    completeness: "complete",
+    completenessNote: "test",
+    states: [...KNOWN_STATES],
+    tasks: [task],
+    enrichment: {},
+  };
+  return render(<DetailBody dataset={ds} task={task} fetchDoc={fetchDoc} />);
+}
+
+function metaDoc(fields: string): string {
+  return `---\nschema: hk-task/v1\n${fields}---\n# 본문\n`;
+}
+
+describe("overview order — 목적 → 현재 상황 → 다음 행동 → 결정 → 명세", () => {
+  it("sections follow the operator reading order", () => {
+    const { container } = renderBody(mkProtoTask({}));
+    const overview = container.querySelector<HTMLElement>('[role="tabpanel"][data-tab="overview"]')!;
+    const headings = [...overview.querySelectorAll("section.qp-drawer-sec h4")].map((h) => h.textContent);
+    expect(headings.slice(0, 6)).toEqual(["목적", "현재 상황", "다음 행동 · 대기", "결정", "본문", "refs"]);
+  });
+
+  it("목적 reads summary only from hk-task/v1 metadata; absent → 요약 미작성", async () => {
+    const fetchDoc = vi.fn<FetchDoc>((key) =>
+      Promise.resolve(doc(metaDoc(key === "design/body" ? "summary: 반출 정책을 정한다\n" : ""))),
+    );
+    const { container } = renderBody(mkProtoTask({ body_doc: "design/body" }), fetchDoc);
+    const purpose = container.querySelector<HTMLElement>(".qp-purpose")!;
+    await waitFor(() => expect(purpose.textContent).toContain("반출 정책을 정한다"));
+  });
+
+  it("메타데이터 없는 문서 → 요약 미작성; 읽기 실패 → 미확인; 본문 없음 → 요약 미작성", async () => {
+    const plain = renderBody(mkProtoTask({ body_doc: "design/body" }), vi.fn<FetchDoc>(() => Promise.resolve(doc("# plain doc"))));
+    await waitFor(() => expect(plain.container.querySelector(".qp-purpose")?.textContent).toContain("요약 미작성"));
+    plain.unmount();
+
+    const failing = renderBody(mkProtoTask({ body_doc: "design/body" }), vi.fn<FetchDoc>(() => Promise.reject(Object.assign(new Error("x"), { status: 500 }))));
+    await waitFor(() => expect(failing.container.querySelector(".qp-purpose")?.textContent).toContain("요약 미확인"));
+    failing.unmount();
+
+    const nobody = renderBody(mkProtoTask({}));
+    expect(nobody.container.querySelector(".qp-purpose")?.textContent).toContain("요약 미작성");
+  });
+
+  it("loading shows 요약 확인 중 — never a premature 미작성", () => {
+    const { container } = renderBody(mkProtoTask({ body_doc: "design/body" }), vi.fn<FetchDoc>(() => new Promise<BoardDoc>(() => {})));
+    expect(container.querySelector(".qp-purpose")?.textContent).toContain("요약 확인 중");
+  });
+
+  it("non-markdown docs never feed metadata even with a gated fence", async () => {
+    const fetchDoc = vi.fn<FetchDoc>(() =>
+      Promise.resolve({ ...doc(metaDoc("summary: should not leak\n")), format: "unsupported", reason: "not_text" as const }),
+    );
+    const { container } = renderBody(mkProtoTask({ body_doc: "design/body" }), fetchDoc);
+    await waitFor(() => expect(container.querySelector(".qp-purpose")?.textContent).toContain("요약 미작성"));
+    expect(container.querySelector(".qp-drawer-title")?.textContent).toBe("short task title");
+  });
+
+  it("gate keys are not substituted — description/title fields do not become summary/display_title", async () => {
+    const fetchDoc = vi.fn<FetchDoc>(() => Promise.resolve(doc(metaDoc("description: 다른 키\ntitle: 다른 제목\n"))));
+    const { container } = renderBody(mkProtoTask({ body_doc: "design/body" }), fetchDoc);
+    await waitFor(() => expect(container.querySelector(".qp-purpose")?.textContent).toContain("요약 미작성"));
+    expect(container.querySelector(".qp-drawer-title")?.textContent).toBe("short task title");
+  });
+
+  it("the gated front-matter is stripped from the rendered spec — no metadata heading", async () => {
+    const fetchDoc = vi.fn<FetchDoc>(() => Promise.resolve(doc(metaDoc("summary: s\n") + "\n## 실제 명세\n")));
+    const { container } = renderBody(mkProtoTask({ body_doc: "design/body" }), fetchDoc);
+    const body = container.querySelector<HTMLElement>(".qp-body-sec")!;
+    await waitFor(() => expect(body.querySelector("[data-doc-renderer] h2")?.textContent).toBe("실제 명세"));
+    expect(body.querySelector("[data-doc-renderer]")?.textContent).not.toContain("hk-task/v1");
+    expect(body.querySelectorAll("[data-doc-renderer] hr")).toHaveLength(0);
+  });
+
+  it("현재 상황 names state·lane·실행 담당; 미기록 when claimant is null — never created_by", () => {
+    const { container } = renderBody(mkProtoTask({ claimant: null, created_by: "director-1" }));
+    const now = container.querySelector<HTMLElement>(".qp-now")!;
+    expect(now.textContent).toContain("in_progress");
+    expect(now.textContent).toContain("책임 owner-lane");
+    expect(now.textContent).toContain("실행 담당 미기록");
+    // created_by must not pose as the executor — it stays in 기록 세부 only.
+    expect(now.textContent).not.toContain("director-1");
+    expect(container.querySelector(".qp-meta-more")?.textContent).toContain("director-1");
+  });
+
+  it("다음 행동 shows the recorded blocker, else 대기 사유 미기록 — never the latest note", () => {
+    const waiting = renderBody(mkProtoTask({ blocker: "운영자 선택 대기" }));
+    expect(waiting.container.querySelector(".qp-next")?.textContent).toContain("운영자 선택 대기");
+    waiting.unmount();
+
+    const none = renderBody(
+      mkProtoTask({
+        blocker: null,
+        events: [{ id: 1, from: "backlog", to: "in_progress", by: "x", note: "자유 문장 — 대기 사유가 아니다", at: "2026-09-23T00:00:00Z" }],
+      }),
+    );
+    const next = none.container.querySelector<HTMLElement>(".qp-next")!;
+    expect(next.textContent).toContain("대기 사유 미기록");
+    expect(next.textContent).not.toContain("자유 문장");
+  });
+
+  it("결정 자리: 데이터 미연결은 '없음'이 아니라 '미연결' — needs_decision 은 스스로를 말한다", () => {
+    const noDecision = renderBody(mkProtoTask({}));
+    const slot = noDecision.container.querySelector<HTMLElement>(".qp-decision")!;
+    expect(slot.textContent).toContain("결정 요청 정보 미연결");
+    expect(slot.textContent).not.toContain("없습니다");
+    noDecision.unmount();
+
+    // A live needs_decision task must never read as "no open request" —
+    // the state names the need even while the card data is unwired (#618).
+    const needs = renderBody(mkProtoTask({ state: "needs_decision" }));
+    const needsSlot = needs.container.querySelector<HTMLElement>(".qp-decision")!;
+    expect(needsSlot.textContent).toContain("결정 필요");
+    expect(needsSlot.textContent).not.toContain("없습니다");
+    needs.unmount();
+
+    const decided = renderBody(mkProtoTask({ decision: { question: "A안 채택?", evidence: "hk:doc x" } }));
+    const decidedSlot = decided.container.querySelector<HTMLElement>(".qp-decision")!;
+    expect(decidedSlot.textContent).toContain("A안 채택?");
+    expect(decidedSlot.textContent).toContain("hk:doc x");
+  });
+});
+
+describe("header title — two-line clamp with keyboard-recoverable 원문", () => {
+  const longTitle = `긴 등재 제목 — ${"아주 ".repeat(40)}길어지는 원문`;
+
+  it("long title: clamped node + 원문 제목 펼치기 details holds the full text", async () => {
+    const { container } = renderBody(mkProtoTask({ title: longTitle }));
+    const wrap = container.querySelector<HTMLElement>(".qp-drawer-titlewrap")!;
+    expect(wrap.querySelector(".qp-drawer-title.qp-title-clamp")?.textContent).toBe(longTitle);
+    const src = wrap.querySelector<HTMLDetailsElement>("details.qp-title-src")!;
+    expect(src.querySelector("summary")?.textContent).toBe("원문 제목 펼치기");
+    expect(wrap.textContent).toContain("발췌");
+    fireEvent.click(src.querySelector("summary")!);
+    expect(src.open).toBe(true);
+    await waitFor(() => expect(src.querySelector("p")?.textContent).toBe(longTitle));
+  });
+
+  it("every title keeps the 원문 disclosure — nothing clipped is unrecoverable", async () => {
+    const { container } = renderBody(mkProtoTask({ title: "short task title" }));
+    // even a short title gets the details: clamping is width-dependent, so
+    // recovery can never depend on a character count.
+    const src = container.querySelector<HTMLDetailsElement>("details.qp-title-src")!;
+    fireEvent.click(src.querySelector("summary")!);
+    await waitFor(() => expect(src.querySelector("p")?.textContent).toBe("short task title"));
+    expect(container.querySelector(".qp-title-note")).toBeNull();
+    expect(container.querySelector(".qp-drawer-title")?.textContent).toBe("short task title");
+  });
+
+  it("display_title from metadata wins; 원문 펼치기 still reveals the original", async () => {
+    const fetchDoc = vi.fn<FetchDoc>(() => Promise.resolve(doc(metaDoc("display_title: 메타 표시 제목\n"))));
+    const { container } = renderBody(mkProtoTask({ body_doc: "design/body" }), fetchDoc);
+    await waitFor(() => expect(container.querySelector(".qp-drawer-title")?.textContent).toBe("메타 표시 제목"));
+    expect(container.querySelector(".qp-title-note")?.textContent).toContain("display_title");
+    const src = container.querySelector<HTMLDetailsElement>("details.qp-title-src")!;
+    fireEvent.click(src.querySelector("summary")!);
+    await waitFor(() => expect(src.querySelector("p")?.textContent).toBe("short task title"));
+  });
+});
+
+describe("등재 원문 — body-less long title stays readable (B7 coordination)", () => {
+  const longTitle = `긴 등재 제목 — ${"아주 ".repeat(40)}길어지는 원문`;
+
+  it("no body_doc + long title → 등재 원문 holds the whole title", () => {
+    const { container } = renderBody(mkProtoTask({ title: longTitle }));
+    const raw = container.querySelector<HTMLDetailsElement>("details.qp-raw-title")!;
+    expect(raw.querySelector("summary")?.textContent).toBe("등재 원문");
+    expect(raw.querySelector("p")?.textContent).toBe(longTitle);
+  });
+
+  it("short title or an attached body_doc → no 등재 원문", () => {
+    const short = renderBody(mkProtoTask({ title: "short task title" }));
+    expect(short.container.querySelector(".qp-raw-title")).toBeNull();
+    short.unmount();
+    const withBody = renderBody(mkProtoTask({ title: longTitle, body_doc: "design/body" }), vi.fn<FetchDoc>(() => Promise.resolve(doc("# b"))));
+    expect(withBody.container.querySelector(".qp-raw-title")).toBeNull();
   });
 });
 

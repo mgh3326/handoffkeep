@@ -39,7 +39,7 @@ export type ProtoTask = {
   /** hk document key of the task body ("key" or "key#section"). Absent or
    * empty → no body document; the overview says so instead of going blank. */
   body_doc?: string;
-  events: { id: number; from: string; to: string; by: string; note?: string; at: string }[];
+  events: { id: number; kind?: "transition" | "relane"; from: string; to: string; by: string; note?: string; at: string }[];
   dwell: { state: string; seconds: number; open: boolean }[];
   /** "collected" may carry an honest 0; "not_collected" renders as unknown. */
   coverage: { status: "collected" | "not_collected"; participants: number | null };

@@ -54,6 +54,9 @@ func (c Client) call(ctx context.Context, method, path string, input, output any
 		if x.Pattern != "" {
 			return fmt.Errorf("%s:%s", x.Error, x.Pattern)
 		}
+		if x.Error == "" {
+			return fmt.Errorf("http_%d", resp.StatusCode)
+		}
 		return errors.New(x.Error)
 	}
 	if output != nil {
@@ -291,6 +294,39 @@ func (c Client) TransitionTask(ctx context.Context, id int64, to, note string, r
 		Note string          `json:"note"`
 		Refs *store.TaskRefs `json:"refs,omitempty"`
 	}{to, note, refs}, &out)
+	return out, err
+}
+
+// RelaneResult is one item's outcome in a RelaneTasks response. The batch
+// continues past item failures, so callers must inspect every entry.
+type RelaneResult struct {
+	ID      int64       `json:"id"`
+	OK      bool        `json:"ok"`
+	Changed bool        `json:"changed"`
+	Task    *store.Task `json:"task,omitempty"`
+	Error   string      `json:"error,omitempty"`
+}
+
+// RelaneBatch is the full relane response: per-item results plus the moved /
+// unchanged / failed tallies the server counted.
+type RelaneBatch struct {
+	Results   []RelaneResult `json:"results"`
+	Moved     int            `json:"moved"`
+	Unchanged int            `json:"unchanged"`
+	Failed    int            `json:"failed"`
+}
+
+// RelaneTasks moves tasks between lanes. A pre-relane server has no route:
+// its mux matches GET /v1/tasks/{id} on the path and answers 405, which
+// call surfaces as http_405 via its status fallback.
+func (c Client) RelaneTasks(ctx context.Context, ids []int64, to, note string, allowNewLane bool) (RelaneBatch, error) {
+	var out RelaneBatch
+	err := c.call(ctx, "POST", "/v1/tasks/relane", struct {
+		IDs          []int64 `json:"ids"`
+		To           string  `json:"to"`
+		Note         string  `json:"note"`
+		AllowNewLane bool    `json:"allow_new_lane,omitempty"`
+	}{ids, to, note, allowNewLane}, &out)
 	return out, err
 }
 func (c Client) CreateDisposition(ctx context.Context, x store.DispositionInput) (store.Task, bool, error) {

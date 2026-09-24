@@ -872,6 +872,49 @@ summary {
   font-weight: var(--hk-weight-strong);
   overflow-wrap: anywhere;
 }
+/* The header shows at most two lines — the full original title is one
+ * keyboard-toggle away in .qp-title-src, never lost and never truncated
+ * without recovery. */
+.qp-title-clamp {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.qp-title-note {
+  margin: calc(-1 * var(--hk-space-2)) 0 var(--hk-space-1);
+  font-size: var(--hk-font-meta);
+}
+/* .qp-title-src = 원문 제목 펼치기 (header); .qp-raw-title = 등재 원문
+ * (spec section, #619 B7 markup). Identical details/p/summary styling. */
+.qp-title-src,
+.qp-raw-title {
+  font-size: var(--hk-font-meta);
+}
+.qp-title-src > summary,
+.qp-raw-title > summary {
+  color: var(--hk-text-muted);
+  cursor: pointer;
+}
+.qp-title-src > p,
+.qp-raw-title > p {
+  margin: var(--hk-space-1) 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--hk-text-secondary);
+}
+.qp-raw-title {
+  margin-top: var(--hk-space-3);
+}
+.qp-meta-more > summary {
+  color: var(--hk-text-muted);
+  cursor: pointer;
+  font-size: var(--hk-font-meta);
+}
+.qp-meta-more > .qp-drawer-meta {
+  margin-top: var(--hk-space-2);
+}
 .qp-source-status {
   padding: var(--hk-space-1) var(--hk-space-2);
   border: 1px dashed var(--hk-border-control);
@@ -985,21 +1028,6 @@ summary {
 .qp-doc-section-target {
   padding-left: var(--hk-space-2);
   box-shadow: inset 3px 0 0 var(--hk-accent);
-}
-/* 등재 원문 — the registration text of a task with no body document */
-.qp-raw-title {
-  margin-top: var(--hk-space-3);
-  font-size: var(--hk-font-meta);
-}
-.qp-raw-title > summary {
-  color: var(--hk-text-muted);
-  cursor: pointer;
-}
-.qp-raw-title > p {
-  margin: var(--hk-space-1) 0 0;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  color: var(--hk-text-secondary);
 }
 
 /* 코멘트 tab: append-only list (oldest first) and the write form */

@@ -31,8 +31,9 @@ describe("shared detail drawer", () => {
     openRow(container, 5011);
     const drawer = screen.getByRole("dialog");
     const task = edge.tasks.find((t) => t.id === 5011)!;
-    // A body-less long title appears twice: the head title and the 등재 원문
-    // block (#619 B7). The head element is the unclamped one being checked.
+    // The header clamps to two lines; the full text also lives in the
+    // "원문 제목 펼치기" details and the "등재 원문" block — intentional
+    // duplication, so assert the header node itself.
     expect(drawer.querySelector(".qp-drawer-title")?.textContent).toBe(task.title);
     expect(within(drawer).getByText(/source status:/).textContent).toContain("synthetic fixture");
     expect(within(drawer).getAllByText("CLAMPED-TAIL-MARKER-5011", { exact: false }).length).toBeGreaterThan(0);

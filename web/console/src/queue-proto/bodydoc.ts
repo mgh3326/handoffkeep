@@ -55,7 +55,10 @@ const HK_DOC_RE = /hk:doc\s+`?([A-Za-z0-9._\-/]+)`?/g;
  * Korean particle, optional punctuation) directly ahead of hk:doc <key>.
  * A bare hk:doc citation elsewhere in the title is not a body candidate —
  * and an hk:doc followed by other words before the key never matches. */
-const BODY_MARKER_RE = /본문(?:\s*문서)?\s*[은는이가을를]?\s*[:：=·\-—~]?\s*hk:doc\s+`?([A-Za-z0-9._\-/]+)`?/g;
+// Each optional particle/punctuation keeps its whitespace inside the group —
+// adjacent \s* runs between optional one-char classes gave O(n³) backtracking
+// on a title padded with spaces (tester S1).
+const BODY_MARKER_RE = /본문(?:\s*문서)?\s*(?:[은는이가을를]\s*)?(?:[:：=·\-—~]\s*)?hk:doc\s+`?([A-Za-z0-9._\-/]+)`?/g;
 
 /** An all-numeric citation ("hk:doc 2299") is a document ID, not a key —
  * IDs and keys are never interchanged, so it is neither fetched nor linked. */
