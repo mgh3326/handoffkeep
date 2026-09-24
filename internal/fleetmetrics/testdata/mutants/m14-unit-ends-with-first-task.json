@@ -1,0 +1,8 @@
+{
+ "name": "m14-unit-ends-with-first-task",
+ "file": "metrics.go",
+ "old": "\t\tif end == nil || at.After(*end) {",
+ "new": "\t\tif end == nil || at.Before(*end) {",
+ "test": "TestSlots",
+ "description": "a builder linked to several tasks releases its slot when the first one ends (tester devin-ds41 x03)"
+}

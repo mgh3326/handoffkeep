@@ -1,0 +1,8 @@
+{
+ "name": "m05-held-idle-as-empty",
+ "file": "metrics.go",
+ "old": "\t\t\th := min(held, c.Slots-w)",
+ "new": "\t\t\th := 0 * min(held, c.Slots-w)",
+ "test": "TestSlots",
+ "description": "operator rule: an idle builder waiting on an external condition is counted as an empty slot"
+}

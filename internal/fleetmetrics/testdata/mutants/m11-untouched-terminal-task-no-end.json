@@ -1,0 +1,8 @@
+{
+ "name": "m11-untouched-terminal-task-no-end",
+ "file": "linkage.go",
+ "old": "\tif t.Events == nil {\n\t\t// Not refetched",
+ "new": "\tif t.Events == nil && false {\n\t\t// Not refetched",
+ "test": "TestSlotsUnrefetched",
+ "description": "a builder whose linked task ended (not refetched) is treated as having no end"
+}

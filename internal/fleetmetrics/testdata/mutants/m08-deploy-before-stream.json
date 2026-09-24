@@ -1,0 +1,8 @@
+{
+ "name": "m08-deploy-before-stream",
+ "file": "metrics.go",
+ "old": "\tif out.mergedAt.Before(*firstRecord) {",
+ "new": "\tif false && out.mergedAt.Before(*firstRecord) {",
+ "test": "TestLeadTime",
+ "description": "a merge older than the deploy-record stream is linked to the first recorded deploy"
+}

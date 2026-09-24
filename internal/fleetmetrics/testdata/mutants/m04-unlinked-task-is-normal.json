@@ -1,0 +1,8 @@
+{
+ "name": "m04-unlinked-task-is-normal",
+ "file": "metrics.go",
+ "old": "\t\tif !history && len(sig) == 0 {",
+ "new": "\t\tif !history && len(sig) < 0 {",
+ "test": "TestNormalPath",
+ "description": "fill missing with 0 repairs: a task with no linked job history is counted as normal path"
+}

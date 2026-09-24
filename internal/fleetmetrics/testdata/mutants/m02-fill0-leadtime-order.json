@@ -1,0 +1,8 @@
+{
+ "name": "m02-fill0-leadtime-order",
+ "file": "metrics.go",
+ "old": "\t\t\torder := firstTo(t, \"claimed\")\n\t\t\tprs := ix.taskPRs[id]",
+ "new": "\t\t\torder := firstTo(t, \"claimed\")\n\t\t\tif order == nil {\n\t\t\t\torder = lastTo(t, \"merged\")\n\t\t\t}\n\t\t\tprs := ix.taskPRs[id]",
+ "test": "TestLeadTime",
+ "description": "fill missing with 0: a task with no claim event uses its merge as the order time (0h)"
+}

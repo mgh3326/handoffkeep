@@ -1,0 +1,8 @@
+{
+ "name": "m01-fill0-rounds",
+ "file": "metrics.go",
+ "old": "\t\t\tcov.Detail[\"no verify transition recorded\"]++\n\t\t\tcontinue\n\t\t}",
+ "new": "\t\t\tcov.Detail[\"no verify transition recorded\"]++\n\t\t}",
+ "test": "TestRounds",
+ "description": "fill missing with 0: a lineage with no verify transition enters the distribution as 0 rounds"
+}

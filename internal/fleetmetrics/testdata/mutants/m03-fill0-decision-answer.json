@@ -1,0 +1,8 @@
+{
+ "name": "m03-fill0-decision-answer",
+ "file": "metrics.go",
+ "old": "\t\tif q.answer == nil {\n\t\t\tif q.answeredBy != \"\" {",
+ "new": "\t\tif q.answer == nil && q.answeredBy != \"\" {\n\t\t\ta := q.at\n\t\t\tq.answer = &a\n\t\t}\n\t\tif q.answer == nil {\n\t\t\tif q.answeredBy != \"\" {",
+ "test": "TestDecision",
+ "description": "fill missing with 0: a request closed without a recorded answer is measured as a 0h answer"
+}
