@@ -57,6 +57,8 @@ jobs:
         working-directory: web/console
       - run: npm test
         working-directory: web/console
+        env:
+          TZ: Asia/Seoul
   build:
     runs-on: ubuntu-latest
     strategy:
