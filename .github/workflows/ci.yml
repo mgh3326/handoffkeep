@@ -1,7 +1,7 @@
 name: ci
 on:
   push:
-    branches: ["**"]
+    branches: [main]
   pull_request:
   workflow_dispatch:
 permissions:
@@ -46,6 +46,17 @@ jobs:
           # [[allowlists]]/targetRules/condition require gitleaks >= 8.25.0;
           # older versions silently drop unknown keys (allowlist = none).
           GITLEAKS_VERSION: "8.30.1"
+  vitest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: {node-version: "22", cache: npm, cache-dependency-path: web/console/package-lock.json}
+      - run: npm ci
+        working-directory: web/console
+      - run: npm test
+        working-directory: web/console
   build:
     runs-on: ubuntu-latest
     strategy:
