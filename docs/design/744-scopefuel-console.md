@@ -144,9 +144,10 @@ Field notes:
 - **Source.** `ProviderResult.source` holds provider-specific strings
   (`wham-usage-api`, `oauth-usage-api`, `local-server`, `cloud`,
   `cli:/usage`, `fixed`, …). These are **mapped, not forwarded**:
-  - a quota-share remote result maps to `remote`;
-  - a `manual` operator self-report maps to `operator`;
-  - everything else, the provider's own measurement path, maps to `local`.
+  - `remote` (the value quota share sets, `quota_share.py`) maps to `remote`;
+  - `operator` (the value manual self-reports set, `manual.py` `SOURCE`) maps
+    to `operator`;
+  - every other value, the provider's own measurement path, maps to `local`.
 
   The raw string is never sent, and the ingest enum is exactly these three
   values.
@@ -420,8 +421,20 @@ faster polling buys nothing.
 
 **D. Catalog** (the grades table component, fed by the projection BFF)
 
-- Structured fields pass through: profile, effort, model_id, pool, grade,
-  gate (`default|escalation|consult_only`), retired_at and decided_at.
+- **Wire shape.** Each row has exactly the keys of `store.BenchCatalogEntry`,
+  so the grades table component keeps working. Every string value is either
+  shown after passing its rule, or replaced by the literal `(hidden)`. A key is
+  never omitted, because the current component rejects rows with missing
+  keys. The envelope adds `withheld_rows` (a count).
+- **Enums and times pass through as parsed values:** grade (the ladder), gate
+  (`default|escalation|consult_only`), score (a finite number or null),
+  retired_at and decided_at (RFC 3339).
+- **Identifiers** (`profile`, `effort`, `model_id`, `pool`, `boundary_version`)
+  must match `^[A-Za-z0-9][A-Za-z0-9 ._:+-]{0,127}$` (no `@`, no `/`, no `~`)
+  and pass `guard.Reject`. The catalog PUT does not guard these columns
+  today. If `profile`, `effort`, `model_id` or `pool` fails, the **whole row
+  is withheld** and counted, because a row keyed by a hidden identifier is
+  meaningless. A failing `boundary_version` becomes `(hidden)`.
 - **Free-text catalog fields are filtered.** `gate_reason`,
   `benchmark_annotation`, `deviation_ref` and `decided_by` accept arbitrary
   non-NUL text on `PUT /v1/bench/catalog`, and the guard checks only
@@ -593,7 +606,8 @@ field-specific rule at write time, not just `guard.Reject`:
   `.,;:'()#+=%_-`.
 - No `@` anywhere, which rules out email addresses.
 - `/` and `~` are allowed only inside allowlisted reference tokens:
-  `hk:task/<digits>`, `hk:doc/[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*`, and
+  `hk:task/<digits>`, `hk:scopefuel-approval/<digits>` (the runner's
+  approval reference, section 4.2), `hk:doc/[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*`, and
   `https://github.com/<owner>/<repo>/(pull|issues)/<digits>`. That rules
   out filesystem paths and arbitrary URLs.
 - `guard.Reject` must also pass.
@@ -615,10 +629,29 @@ is tested in both repos (task T-6):
   `_active_override`).
 - A `scope = 'profile'` row must be `class = 'exclude'` with `until`, and must
   leave every other field null.
-- Profile rows are **refused by the API** (`422 profile_scope_not_enabled`)
-  while any host reporting `policy.mode=server` lacks the
-  `profile-exclude-v1` capability (#742 plus T-10) in its report. A stored
-  profile exclude can therefore never meet a gate that ignores it.
+- **Server-mode enrollment.** Report presence is not a fleet gate: a
+  server-mode host can be silent, stale, or behind the report kill switch. So
+  hk keeps its own table:
+
+  ```
+  scopefuel_policy_hosts
+    host PK, mode ('server'), capabilities TEXT[], enrolled_at, last_ack_at
+  ```
+
+  - A host enters server mode only by `POST /v1/scopefuel/policy/enroll` with
+    its per-host client. This is part of the verified-revision entry step
+    (section 3.4); no enrollment, no server mode.
+  - Every policy fetch sends `X-Scopefuel-Capabilities`, which refreshes
+    `last_ack_at` and `capabilities`.
+  - Rolling back to `local` calls `…/unenroll`. A host that rolls back while
+    offline stays enrolled, which errs toward refusing.
+- **Profile rows are refused by the API** (`422 profile_scope_not_enabled`)
+  unless **every enrolled host** lists `profile-exclude-v1` (#742 plus T-12)
+  with `last_ack_at` under 24 h old. A missing, stale or unknown host fails
+  closed. The operator either waits for it or unenrolls it explicitly
+  (operator client, audited).
+- Hosts in `local` mode ignore all server policy by design (section 3.5), and
+  the page lists them.
 - A pool name a host does not know is accepted. That host reports
   `known_to_host=false`, and the gate cannot admit a pool it has no provider
   for anyway.
@@ -749,10 +782,18 @@ columns.
    the current revision. Watch the
    gate lines for `policy.source=server` and the unchanged admission set on
    the page for 24 h. Then flip desktop and mac-personal.
-6. **Clear local brakes.** Once all hosts run `server`, `scopefuel policy
-   migrate --clear-local` removes class, until, note and boost from each host's
-   config.toml after backing it up to `config.toml.pre-744`. Leftover local
-   `exclude`s would otherwise keep tightening forever, invisibly.
+6. **Clear local brakes, per scope.** Leftover local `exclude`s would
+   otherwise keep tightening forever, invisibly. Each run backs up to
+   `config.toml.pre-744`.
+   - `scopefuel policy migrate --clear-local --scope pool` removes pool class,
+     until, note and boost. It is allowed once all hosts run `server` and pool
+     drift has been 0 for 24 h. It never touches profile entries.
+   - `--scope profile` removes #742's local profile excludes. It is refused
+     unless T-12 is shipped, the profile excludes are seeded on the server,
+     every enrolled host acknowledges `profile-exclude-v1`, and profile drift
+     has been 0 for 24 h. Otherwise it exits non-zero and names the unmet
+     condition.
+   - There is no scope-less form.
 7. **Retire (T-13, T3, later).** `local` mode is removed only after 30 days
    without a rollback.
 
@@ -920,17 +961,17 @@ Tiers: **T3** = changes what the gate admits (or how it ranks) on every host.
 | T-1 | `guard`: add Claude OAuth token prefixes (`sk-ant-oat01-`, `sk-ant-ort01-`) and tests | hk | T1 | — |
 | T-2 | Host report ingest: schema, validator, `scopefuel_host_reports`, per-host client binding plus the shared-token transition flag, and docs | hk | T2 | T-1 |
 | T-3 | `scopefuel report build/push`, the change-triggered push in collect/refresh, systemd and launchd timer units, `allow_plaintext_host_report`, and kill switch | scopefuel | T2 | T-2 |
-| T-4 | BFF `/ui/api/scopefuel/{overview,reps,proposal}` plus the catalog digest in Go (shared digest fixture with scopefuel) | hk | T2 | T-2 |
+| T-4 | BFF `/ui/api/scopefuel/{overview,reps,proposal,catalog}`, with the catalog projection and its validation (section 2.1 D), plus the catalog digest in Go (shared digest fixture with scopefuel) | hk | T2 | T-2 |
 | T-5 | `/ui/scopefuel` React entry: panels A–G, states table, nav link, vitest | hk | T2 | T-4 |
 | T-5b | `GET /v1/bench/reps/watermark`; `grades propose --publish`: the structured projection with `generated_at` and `evidence_watermark` (section 1.7), the local artifact cache, a daily publish from the designated host, and the hk-side projection parser | scopefuel + hk | T2 | — |
 | T-6 | Pool-policy validation contract: shared JSON case file, tested in both repos | both | T1 | — |
 | T-7 | Server pool policy: tables, `GET/PUT/DELETE/import` routes (operator for writes), revision/ETag/If-Match, events, lane-event emit, docs | hk | T2 (no reader yet) | T-6 |
 | T-8 | scopefuel `[policy] source` with `local` and `shadow`: fetch, cache, `drift` in report, `policy export --json` | scopefuel | T2 (no admission change) | T-3, T-7 |
 | T-9 | Seed: export on each host, reconcile, operator import | ops | T2 | T-8 |
-| T-10 | scopefuel `server` mode: restrictive merge, offline rule, `policy.source` disclosure, CLI writes to hk, then host-by-host flip | scopefuel + ops | **T3** | T-9 plus 24 h zero drift |
+| T-10 | scopefuel `server` mode: enrollment and capability acknowledgement (with the hk `scopefuel_policy_hosts` table and enroll/unenroll routes), restrictive merge, offline rule, `policy.source` disclosure, CLI writes to hk, then host-by-host flip | scopefuel + ops | **T3** | T-9 plus 24 h zero drift |
 | T-11 | Phase 2 UI writes: operator allowlist, CSRF routes, preview/confirm, revert, audit | hk | **T3** | T-10 |
 | T-12 | Profile-level exclude on the server: scopefuel reads profile rows (merge with #742's local spelling), reports `profile-exclude-v1`, and the hk API accepts profile scope | scopefuel + hk | **T3** | #742, T-10 |
-| T-13 | `policy migrate --clear-local`, then retire `local` mode after 30 days | scopefuel | **T3** | T-10 plus 30 days |
+| T-13 | `policy migrate --clear-local --scope pool|profile` (per-scope preconditions, section 3.6), then retire `local` mode after 30 days | scopefuel | **T3** | pool: T-10 + parity; profile: T-12 + seed + parity; retire: 30 days |
 | T-14 | `scopefuel_grade_approvals`, the UI approve route, operator-only claim/finish routes, and runner `grades apply --approval <id>` | hk + scopefuel | **T3** | #741, T-11, T-5b |
 | T-15 | P-b: `cutoff`/`on_exhaust` to server policy | both | **T3** | T-10 |
 | T-16 | Follow-up (pre-existing exposure): apply the section 2.1 D free-text projection to `/ui/api/bench/catalog` and `/ui/grades` | hk | T2 | — |
