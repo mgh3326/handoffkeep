@@ -95,17 +95,21 @@ field set; exact names are fixed by the implementation task.
     "mode": "local|shadow|server",
     "server_revision": 17,
     "server_fetched_age_s": 30,
+    "capabilities": ["profile-exclude-v1"],
     "effective": [
-      {"pool": "codex", "class": "exclude", "class_origin": "local|server|builtin",
-       "until": "2026-09-30", "boost": null, "boost_origin": null,
-       "subscribed": true, "status": "expires 2026-09-30"}
+      {"scope": "pool", "name": "codex", "class": "exclude",
+       "class_origin": "local|server|builtin", "until": "2026-09-30",
+       "boost": null, "boost_origin": null, "known_to_host": true,
+       "status": "expires 2026-09-30"},
+      {"scope": "profile", "name": "codex-luna", "class": "exclude",
+       "class_origin": "server", "until": "2026-10-31", "known_to_host": true}
     ],
-    "drift": [{"pool": "codex", "field": "class", "local": "exclude", "server": "spend"}]
+    "drift": [{"scope": "pool", "name": "codex", "field": "class", "local": "exclude", "server": "spend"}]
   },
   "pools": [
     {
       "pool": "codex",
-      "status": "ok|stale|error|backoff|in_progress|disabled|unsubscribed",
+      "status": "ok|stale|error|backoff|in_progress|disabled",
       "source": "local|remote|operator",   // mapped, see notes
       "fetched_age_s": 95,
       "error_kind": null,
@@ -397,8 +401,8 @@ faster polling buys nothing.
   successful measurement. A "3 hosts" chip expands to per-host values, and
   disagreements over 5 pct-points are flagged. Such disagreements are usually
   measurement lag, sometimes a wrong account binding.
-- A pool whose effective class is `exclude` or `unsubscribed` on *any* host is
-  badged, with the hosts named.
+- A pool whose effective class is `exclude` on *any* host is badged, with the
+  hosts named and the exclusion's `until`.
 
 **C. Host measurement status** (grid: host × pool)
 
@@ -429,7 +433,7 @@ faster polling buys nothing.
 - Existing `/ui/grades` renders these fields verbatim today. That exposure
   predates #744 and is listed as follow-up T-16. It is not widened here.
 - The table also has one derived column,
-  **admission now**: `ok`, `pool excluded (hosts…)`, `pool unsubscribed`,
+  **admission now**: `ok`, `pool excluded (hosts…)`, `profile excluded`,
   `consult_only`, or `retired`. This column is derived from host reports and
   server policy for display. It is not a gate call.
 
@@ -438,7 +442,7 @@ faster polling buys nothing.
 - Before section 3 exists: the per-host *effective* policy from reports, one
   row per pool, with columns per host. Cells that differ across hosts are
   highlighted, which is today's hand-applied state made visible.
-- After section 3: server policy rows (class, boost, until, subscribed,
+- After section 3: server policy rows (scope pool/profile, name, class, boost, until,
   decided_by, reason, revision, updated_at), the audit tail (last 20 events),
   and per-host drift from shadow mode.
 - Expired entries are shown struck through with "expired", mirroring
@@ -491,7 +495,8 @@ faster polling buys nothing.
 | Pool `fetched_age_s` older than 2 × the scopefuel provider TTL | cell amber "measured 25m ago" even if the report is fresh |
 | Pool status `error` | enum and HTTP status only (for example `auth · 401`); never a message body |
 | Pool status `backoff` | "backoff 7m left", with the last known value dimmed |
-| `unsubscribed` | grey, no values, "not measured (unsubscribed)" |
+| Pool excluded by policy | values still shown (an excluded pool is still measured, as today), with an "excluded until <date>" badge |
+| Policy row for a pool or profile a host does not know (for example `omniroute` on a host older than #742) | "unknown to <host>" chip on that row |
 | Catalog `snapshot` on a host | red "catalog=stale" chip on that host |
 | No proposal document | "no proposal published yet", with the command that publishes one |
 | Proposal superseded | amber, "evidence changed since proposal" |
@@ -519,17 +524,28 @@ cannot reach the browser.
 
 Today `[pools.<p>]` in `~/.config/scopefuel/config.toml` holds `class`, `until`,
 `note`, `boost` (pool-level; boost shares `until`), `cutoff`, `on_exhaust`,
-`plan`, `price_usd` and `capacity_weight`. The keys are pools (provider ids),
-not profiles.
+`plan`, `price_usd` and `capacity_weight`. The keys are pools (provider ids).
+Task #742 (in progress) adds **profile-level exclude** and lists pools that
+`policy list` misses today (for example `omniroute`).
 
-Profile-level restriction already has a server home: the catalog's `gate` and
-`retired_at`. So server policy stays **pool-level** (open question Q5).
+**"Unsubscribed" reuses `exclude`.** There is no separate subscription flag
+(Q6). Pool-level `class = "exclude"` with `until` already does the job: on
+2026-09-26, operator-desk applied it by hand on 4 hosts to agy, kiro,
+clinepass and upstage (hk:doc deploy/scopefuel-policy/20260926T071718Z). An
+unsubscribed account is an `exclude` with a long `until` and a reason saying
+why. Server policy therefore has two scopes:
+
+- `pool`: every field below.
+- `profile`: `class = "exclude"` with `until` only, mirroring #742. Profile
+  rows never carry boost, spend, preserve or cutoff. The catalog's `gate` and
+  `retired_at` stay the durable, placement-level restriction. A profile
+  exclude is the temporary operational one.
 
 The fields move in two steps:
 
 | Step | Fields | Effect on admission |
 |---|---|---|
-| P-a | `class`, `until`, `note→reason`, `boost`, new `subscribed` | class/subscribed: yes (T3); boost: ranking only |
+| P-a | pool `class`, `until`, `note→reason`, `boost`; profile `exclude` + `until` (after #742) | class/exclude: yes (T3); boost: ranking only |
 | P-b (later) | `cutoff`, `on_exhaust` | yes (T3) |
 | stays local for now | `plan`, `price_usd`, `capacity_weight`, `[settings]`, `[bench]` | ranking or host configuration |
 
@@ -541,11 +557,16 @@ is unrelated. Everything here is named "pool policy" and lives under
 
 ```
 scopefuel_pool_policy
-  pool          TEXT PRIMARY KEY        -- provider id, [a-z][a-z0-9._-]{0,63}
+  scope         TEXT NOT NULL CHECK (scope IN ('pool','profile'))
+  name          TEXT NOT NULL           -- pool: provider id; profile: herdr-spawn profile
+                                        -- name as #742 spells it; [a-z][a-z0-9._@-]{0,63}.
+                                        -- Not checked against a fixed list: a pool a host
+                                        -- does not know (omniroute) is stored and shown.
+  PRIMARY KEY (scope, name)
   class         TEXT NULL CHECK (class IN ('preserve','spend','exclude'))
+                                        -- scope='profile' => class = 'exclude' only
   until         DATE NULL               -- UTC date, inclusive (expired when until < today)
-  boost         INTEGER NULL
-  subscribed    BOOLEAN NOT NULL DEFAULT TRUE
+  boost         INTEGER NULL            -- scope='pool' only
   cutoff        DOUBLE PRECISION NULL   -- P-b; NULL = host default
   on_exhaust    TEXT NULL               -- P-b
   reason        TEXT NOT NULL           -- required, 8..500 bytes, reason grammar (below)
@@ -560,7 +581,7 @@ scopefuel_policy_meta
 
 scopefuel_policy_events                 -- append-only audit
   id BIGSERIAL, revision BIGINT, pool TEXT, action TEXT
-  ('set','clear','subscribe','unsubscribe','import','revert'),
+  ('set','clear','import','revert'), scope TEXT, name TEXT,
   before JSONB, after JSONB, reason TEXT, decided_by TEXT,
   source TEXT ('ui','cli','migration'), confirm_ref TEXT NULL, at TIMESTAMPTZ
 ```
@@ -592,14 +613,15 @@ is tested in both repos (task T-6):
 - `boost` must be an int, not a bool, and requires `until`.
 - A boost-only row may omit `class` (the provider builtin is inherited, as in
   `_active_override`).
-- `subscribed = false` is **refused by the API** (`422
-  subscription_not_enabled`) until T-10 has shipped gate support for it and
-  the operator sets `HANDOFFKEEP_SCOPEFUEL_SUBSCRIPTION=1`. Even with the flag
-  set, it is refused while any host reporting `policy.mode=server` lacks the
-  `subscribed-v1` capability in its report. A stored `subscribed=false` can
-  therefore never meet a gate that ignores it.
-- `subscribed = false` does not take `until`. It lasts until the operator
-  resubscribes.
+- A `scope = 'profile'` row must be `class = 'exclude'` with `until`, and must
+  leave every other field null.
+- Profile rows are **refused by the API** (`422 profile_scope_not_enabled`)
+  while any host reporting `policy.mode=server` lacks the
+  `profile-exclude-v1` capability (#742 plus T-10) in its report. A stored
+  profile exclude can therefore never meet a gate that ignores it.
+- A pool name a host does not know is accepted. That host reports
+  `known_to_host=false`, and the gate cannot admit a pool it has no provider
+  for anyway.
 - `clear` deletes the row (recorded in events with `before`).
 
 There is no per-host override column (open question Q4). If per-host overrides
@@ -611,7 +633,7 @@ are wanted later, they become a `host` key column with `*` as the fleet row.
   generated_at, pools:[…]}` without `decided_by` emails (only
   `decided_by_kind`), with `ETag: "r<revision>"`, and answers
   `If-None-Match` with 304.
-- `PUT /v1/scopefuel/policy/{pool}` and `DELETE …/{pool}` require the
+- `PUT /v1/scopefuel/policy/{scope}/{name}` and `DELETE …/{scope}/{name}` require the
   `operator` client (CLI path). The request needs `If-Match: "r<revision>"`
   (409 on mismatch, so no lost update) and a `reason`.
 - `POST /v1/scopefuel/policy/import` requires `operator`. It is a one-time
@@ -634,7 +656,7 @@ are wanted later, they become a `host` key column with `*` as the fleet row.
     `spend`'s 99% (`recommend.py`). A cached server `preserve` on a `spend`
     pool is therefore restrictive.
   - Restrictive entries from the last known server policy (a class stricter
-    than builtin, `subscribed=false`, and in P-b a lower `cutoff`) are honoured
+    than builtin, any profile `exclude`, and in P-b a lower `cutoff`) are honoured
     for as long as their own `until` says, **regardless of cache age**. An
     outage never lifts an exclusion or a preserve early. Put another way: the
     effective class is never looser than the stricter of the cached class and
@@ -645,7 +667,7 @@ are wanted later, they become a `host` key column with `*` as the fleet row.
     After that they drop to builtin, labelled `policy=stale`.
   - **Unavailable is non-admitting.** Builtin classes are never a fallback in
     server mode, because builtin says nothing about a server-side `exclude`
-    or `subscribed=false`, and the gate refuses a pool only when its
+    or profile exclude, and the gate refuses a pool only when its
     effective class is `exclude` (`recommend.py`). The rules:
     - *Entry requires a verified revision.* `[policy] source = "server"` takes
       effect only when `policy-server.json` holds a revision this host fetched
@@ -690,8 +712,8 @@ The `server` merge, per pool:
   `preserve` beats `spend`). A local `exclude` still works as an emergency
   brake on one host while offline. A local `spend` or boost can **never**
   widen server policy.
-- **subscribed:** false if either side says false. Locally, "unsubscribed"
-  has no config.toml spelling in v1; the server is the only writer.
+- **profile exclude:** the union of server and local (#742's config.toml
+  spelling). An active exclude on either side excludes.
 - **boost:** server only. A local boost is ignored with a one-line warning.
 - Fields not yet on the server (P-b and the local-only fields) keep reading
   config.toml.
@@ -713,7 +735,11 @@ columns.
    A reconcile script lists per-pool differences. The operator picks one value
    per pool (Q14 default: the most restrictive, with the latest `until`). The
    result goes to `POST /v1/scopefuel/policy/import` with
-   `decided_by=migration` and reason `hk:task/744 seed`.
+   `decided_by=migration` and reason `hk:task/744 seed`. The expected starting
+   state is the hand-applied pool excludes for agy, kiro, clinepass and
+   upstage on 4 hosts (hk:doc deploy/scopefuel-policy/20260926T071718Z). The
+   reconcile flags any host missing one. Profile excludes from #742 are
+   seeded only once T-12 enables profile scope.
 4. **Parity window.** Every host in `shadow` shows `drift = 0` on the page for
    24 h. Any drift is resolved by editing server policy or local config, not
    by flipping.
@@ -777,8 +803,8 @@ with its own audit row.
 |---|---|---|---|
 | Set class preserve/spend/exclude with until | `POST /ui/scopefuel/policy/set` | server mode shipped (T-10) | T3 |
 | Set/clear boost with until | same | same | T3 (ranking on every host) |
-| Clear a pool row | `POST /ui/scopefuel/policy/clear` | same | T3 |
-| Unsubscribe / resubscribe | `POST /ui/scopefuel/policy/subscription` | T-12 semantics shipped | T3 |
+| Exclude or un-exclude a profile, with until | `POST /ui/scopefuel/policy/set` (scope=profile) | #742 and T-12 shipped (`profile-exclude-v1` on every server-mode host) | T3 |
+| Clear a pool or profile row | `POST /ui/scopefuel/policy/clear` | same as the row's scope | T3 |
 | Revert to revision N | `POST /ui/scopefuel/policy/revert` | — | T3 |
 | Approve grades apply for proposal digest D | `POST /ui/scopefuel/grades/approve` | #741 degraded-input refusal merged; proposal neither superseded nor not comparable (section 1.7) | T3 |
 
@@ -786,12 +812,13 @@ with its own audit row.
 
 1. The page sends `POST …/preview` with the intended change. The server
    returns the diff (`before → after`) and the **projected impact**: for a
-   class, subscription or cutoff change, the catalog rungs whose "admission
+   class, profile-exclude or cutoff change, the catalog rungs whose "admission
    now" column would change and the hosts currently reporting that pool. This
    is computed from the latest reports and the catalog, and labelled
    "projection, not a gate call".
-2. The operator enters a reason (required, 8–500 bytes) and, for `exclude`,
-   `unsubscribe` and `approve`, **types the pool name or digest** to confirm.
+2. The operator enters a reason (required, 8–500 bytes) and, for `exclude`
+   (pool or profile) and `approve`, **types the pool name, profile name or
+   digest** to confirm.
 3. `POST …/set` carries `If-Match: r<revision>` from the preview. A 409 means
    someone else changed the policy, and the page re-previews.
 4. The result shows the new revision and the hosts that have not yet fetched
@@ -799,9 +826,12 @@ with its own audit row.
 
 Bounds (Q7):
 
-- `until` may be at most 30 days ahead for class and boost.
+- `until` may be at most 30 days ahead for `spend`, `preserve` and boost.
+- `until` may be at most 365 days ahead for `exclude`, which is how an
+  unsubscribed account is held out. A long exclude still expires visibly, so
+  it is never permanent by accident (the `policy.py` rule that `class` needs
+  `until`).
 - `boost` must be within [-100, 100].
-- `unsubscribe` has no `until`.
 
 **Grades apply, with no operator token in the browser or in hk's UI process:**
 
@@ -897,9 +927,9 @@ Tiers: **T3** = changes what the gate admits (or how it ranks) on every host.
 | T-7 | Server pool policy: tables, `GET/PUT/DELETE/import` routes (operator for writes), revision/ETag/If-Match, events, lane-event emit, docs | hk | T2 (no reader yet) | T-6 |
 | T-8 | scopefuel `[policy] source` with `local` and `shadow`: fetch, cache, `drift` in report, `policy export --json` | scopefuel | T2 (no admission change) | T-3, T-7 |
 | T-9 | Seed: export on each host, reconcile, operator import | ops | T2 | T-8 |
-| T-10 | scopefuel `server` mode: restrictive merge, offline rule, `policy.source` disclosure, CLI writes to hk, **gate treats `subscribed=false` as exclude** (and reports the `subscribed-v1` capability), then host-by-host flip | scopefuel + ops | **T3** | T-9 plus 24 h zero drift |
+| T-10 | scopefuel `server` mode: restrictive merge, offline rule, `policy.source` disclosure, CLI writes to hk, then host-by-host flip | scopefuel + ops | **T3** | T-9 plus 24 h zero drift |
 | T-11 | Phase 2 UI writes: operator allowlist, CSRF routes, preview/confirm, revert, audit | hk | **T3** | T-10 |
-| T-12 | Unsubscribe beyond the gate: collect skips measuring that pool, report status `unsubscribed`, the hk UI toggle, and enabling `HANDOFFKEEP_SCOPEFUEL_SUBSCRIPTION` | scopefuel + hk | **T3** | T-10 on every host |
+| T-12 | Profile-level exclude on the server: scopefuel reads profile rows (merge with #742's local spelling), reports `profile-exclude-v1`, and the hk API accepts profile scope | scopefuel + hk | **T3** | #742, T-10 |
 | T-13 | `policy migrate --clear-local`, then retire `local` mode after 30 days | scopefuel | **T3** | T-10 plus 30 days |
 | T-14 | `scopefuel_grade_approvals`, the UI approve route, operator-only claim/finish routes, and runner `grades apply --approval <id>` | hk + scopefuel | **T3** | #741, T-11, T-5b |
 | T-15 | P-b: `cutoff`/`on_exhaust` to server policy | both | **T3** | T-10 |
@@ -921,9 +951,9 @@ before server policy exists.
 | Q2 | Push cadence | On change (at most once per 60 s) plus a 5 min cache-only heartbeat timer. |
 | Q3 | Expected host list | `desktop,m1b,pi,mac-personal`. m1 and ncp appear automatically if they report. |
 | Q4 | Per-host policy overrides on the server? | No. Fleet-wide rows only. A local tighten-only brake covers emergencies. |
-| Q5 | Profile-level policy? | No. Profile restriction stays in the catalog (`gate`, `retired_at`). |
-| Q6 | Meaning of "unsubscribed" | Durable, no `until`. The gate treats it as exclude, the pool is not measured (no 401/429 noise), and it shows grey. Resubscribing is an operator write. |
-| Q7 | Bounds on UI edits | `until` at most 30 days ahead, boost within [-100,100], a reason is always required, and a typed confirmation for exclude, unsubscribe and approve. |
+| Q5 | Profile-level policy on the server? | Yes, exclude only (mirroring #742), with `until`. Durable placement changes stay in the catalog (`gate`, `retired_at`). |
+| Q6 | How to express "unsubscribed" | Reuse pool `exclude` with a long `until` (≤ 365 days) and a reason, as already applied to agy, kiro, clinepass and upstage. No new flag. Excluded pools are still measured. Skipping measurement would be a separate change if the 401/429 noise matters. |
+| Q7 | Bounds on UI edits | `until` at most 30 days ahead for spend, preserve and boost, and at most 365 days for exclude. Boost within [-100,100]. A reason is always required, and a typed confirmation for exclude and approve. |
 | Q8 | Offline window for *permissive* server policy | 24 h (`policy_stale_max_s`, same as the catalog). Entries stricter than builtin (`exclude`, and `preserve` on a `spend` pool) persist to their own `until`. |
 | Q9 | Who is an operator in the UI? | The new `HANDOFFKEEP_UI_OPERATOR_EMAILS`. Empty means writes are disabled. |
 | Q10 | Grades publish and apply runner host | One host that both publishes proposals and runs apply: the host that runs `push-catalog` with the operator token today. The token never enters hk's UI process. |
