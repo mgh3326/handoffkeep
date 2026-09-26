@@ -242,11 +242,20 @@ buckets each, which is under 8 KiB).
 
 **Grades proposal.** `grades propose` is Python and evaluates the #735 rule
 client side. hk does **not** re-implement the rule, because two
-implementations would drift. A designated host (default: desktop) runs
+implementations would drift. The designated runner host (Q10) runs
 `scopefuel grades propose --publish` daily, and also on demand from the CLI.
-That PUTs a `note` document under that key. `proposal_to_json` itself has
-no generation time and nests `host` under `reps`, so the published document
-is an **envelope** around the unchanged artifact:
+That PUTs a `note` document under that key.
+
+**What is published is a structured projection, not the artifact.**
+`proposal_to_json` has no generation time, nests `host` under `reps`, and
+holds free text: `unrung` strings from `_fmt_evidence` embed raw
+`rep.task_ref`, each result's `note` is prose, and exclusion specs are
+operator-typed. Rep task refs accept arbitrary text, and the guard does not
+catch emails or local paths, so the artifact is never uploaded. The full
+artifact stays on the publishing host at
+`~/.cache/scopefuel/proposals/<digest>.json` (0600). That host is also the
+apply runner (Q10), which is why it is the only place the artifact is needed.
+The published document is:
 
 ```json
 {
@@ -255,28 +264,52 @@ is an **envelope** around the unchanged artifact:
   "host": "desktop",
   "evidence_watermark": {
     "reps_backend": "handoffkeep",
-    "server_reps_max_id": 1043,
-    "server_reps_count": 212,
+    "reps_watermark": {"max_id": 1043, "count": 212, "content_sha": "9f8e7d6c5b4a3921"},
     "local_reps_count": 0,
     "catalog_digest": "a1b2c3d4e5f60718",
     "catalog_source": "server"
   },
-  "artifact": { "...": "proposal_to_json(...) unchanged" }
+  "proposal": {
+    "digest": "0a1b2c3d4e5f6071", "rule_version": 1, "min_passes": 2,
+    "window_incomplete": false, "unrung_count": 3, "exclusion_count": 2,
+    "results": [
+      {"profile": "opus", "effort": "medium", "current": "S", "action": "promote",
+       "target": "S+", "evidence": ["srv:1031", "srv:1040"],
+       "passes_at": {"S+": ["srv:1031", "srv:1040"]},
+       "ungraded_passes": [], "unclean_passes": [],
+       "fails": [["srv:990", "A"]]}
+    ]
+  }
 }
 ```
 
-- `server_reps_max_id` is the highest hk `bench_reps.id` in the evidence
-  (the `srv:<id>` refs).
+Projection rules, enforced by the publisher and again by the hk parser (which
+rejects the whole document on any violation):
+
+- `profile` and `effort` must be in the live catalog's key set.
+- `action` and `current`/`target` are enums (grade ladder).
+- Every ref matches `^(srv:\d+|local:\d+|local@[a-z0-9][a-z0-9._-]{0,62}:\d+)$`.
+  A fail's second element is a grade enum or null.
+- `note`, `unrung` strings, `exclusions` specs, `params.cli_exclusions`, and
+  `reps.host` are **dropped**. They appear only as counts.
+- The operator reads them with `scopefuel grades propose` on the runner
+  host.
+
+- `reps_watermark` is computed **by hk**, not by the publisher. A new
+  `GET /v1/bench/reps/watermark` returns `{max_id, count, content_sha}`, where
+  `content_sha` = sha256 over every `bench_reps` row's full column tuple in id
+  order, truncated to 16 hex. It therefore changes on the `ON CONFLICT … DO
+  UPDATE` path of `UpsertBenchReps`, which keeps the id. The publisher reads
+  the watermark before and after `propose`, and publishes only when the two
+  readings are equal. Otherwise it retries once, then gives up with a
+  message.
 - `catalog_digest` uses the same row digest as the host report (section 1.2).
-- The artifact carries rule_version, min_passes, digest,
-  params.cli_exclusions, the reps backend summary, `window_incomplete`, and
-  per-rung results with evidence refs. It carries no secrets.
 
 **Freshness check at read time**, in Go, with no rule re-implementation:
 
-- **superseded** when the current `max(bench_reps.id)` is greater than
-  `server_reps_max_id`, or the live catalog digest differs from
-  `catalog_digest`. The page says "evidence changed since proposal; rerun
+- **superseded** when hk's current reps watermark differs from
+  `reps_watermark` (any insert *or* in-place update), or the live catalog
+  digest differs from `catalog_digest`. The page says "evidence changed since proposal; rerun
   propose". The proposal digest itself cannot be recomputed in Go, so it is
   never called invalid.
 - **not comparable** when `reps_backend` is not `handoffkeep`,
@@ -285,6 +318,12 @@ is an **envelope** around the unchanged artifact:
   shows it amber, and Phase 2 approval is refused for it (section 4.2).
 - A document without the envelope schema is shown as "unrecognised proposal
   document" and never parsed further.
+- The document key has no ACL (any bearer client can PUT it). The page shows
+  who wrote it (`created_by` client id) and flags anything not written by the
+  runner's per-host client as `unverified publisher`. A forged document can
+  mislead the display, but it cannot lead to an apply: an approval pins the
+  digest and watermarks, and the runner refuses any digest it has no local
+  artifact for (section 4.2).
 
 ---
 
@@ -403,8 +442,9 @@ faster polling buys nothing.
   and the superseded state.
 - Rows: rung, current grade → target, action
   (`promote|demote|conflicted|hold`), evidence refs, and counted and uncounted
-  passes and fails. Conflicted rows show both sides. `unrung` evidence is
-  collapsed under a toggle.
+  passes and fails. Conflicted rows show both sides. `unrung` and exclusions
+  appear only as counts ("3 unrung reps, 2 exclusions: see `scopefuel grades
+  propose` on <host>"). No free text from the proposal is rendered.
 
 ### 2.2 Empty, stale and error states
 
@@ -429,9 +469,10 @@ faster polling buys nothing.
 Tokens or any bearer material, CSRF values, account emails, account UUIDs, full
 fingerprints (only fp8), `session_fp`, provider error text, hk or hub URLs,
 local paths, manual self-report reasons, and **rep notes or unrecognised
-task_ref values** (see panel F). Policy `reason` text is written by the
-operator through the guarded Phase 2 write path (section 3.2). It is
-therefore the one free-text field the page shows. The label is the existing
+task_ref values** (see panel F), and proposal notes, unrung strings or
+exclusion specs (see section 1.7). Policy `reason` is the one free-text field
+the page shows. It must pass the reason grammar (section 3.2) at write time,
+which bars `@`, paths and non-allowlisted URLs, and again at read time. The label is the existing
 safe display name only. The BFF builds its response from typed structs, never by
 passing stored JSON through, so a field the ingest validator missed still
 cannot reach the browser.
@@ -473,7 +514,7 @@ scopefuel_pool_policy
   subscribed    BOOLEAN NOT NULL DEFAULT TRUE
   cutoff        DOUBLE PRECISION NULL   -- P-b; NULL = host default
   on_exhaust    TEXT NULL               -- P-b
-  reason        TEXT NOT NULL           -- required, 8..500 bytes, guard-checked
+  reason        TEXT NOT NULL           -- required, 8..500 bytes, reason grammar (below)
   decided_by    TEXT NOT NULL           -- 'operator(web) <email>' | 'cli:<client>' | 'migration'
                                         -- (the operator's own Access identity, as decision events
                                         --  already record it; never a provider account email)
@@ -489,6 +530,26 @@ scopefuel_policy_events                 -- append-only audit
   before JSONB, after JSONB, reason TEXT, decided_by TEXT,
   source TEXT ('ui','cli','migration'), confirm_ref TEXT NULL, at TIMESTAMPTZ
 ```
+
+**Reason grammar.** A reason is shown on the page, so it is held to a
+field-specific rule at write time, not just `guard.Reject`:
+
+- Allowed characters are Unicode letters and digits, space, and
+  `.,;:'()#+=%_-`.
+- No `@` anywhere, which rules out email addresses.
+- `/` and `~` are allowed only inside allowlisted reference tokens:
+  `hk:task/<digits>`, `hk:doc/[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*`, and
+  `https://github.com/<owner>/<repo>/(pull|issues)/<digits>`. That rules
+  out filesystem paths and arbitrary URLs.
+- `guard.Reject` must also pass.
+
+The rule applies to UI, CLI and import writes alike. During the seed (step 3),
+a config.toml `note` that fails the rule is not imported silently: the
+reconcile listing shows it as `note rejected by reason grammar`, and the
+operator writes a new reason. The BFF re-checks every reason at read time and
+renders `(reason hidden)` for any row that fails, which covers a rule change
+after the write. Audit `before`/`after` JSON carries the same field and gets
+the same read-time check.
 
 The validation rules are identical to `policy.py`, and a shared JSON case file
 is tested in both repos (task T-6):
@@ -527,14 +588,21 @@ are wanted later, they become a `host` key column with `*` as the fleet row.
   `{revision, fetched_at, pools}`, written atomically under the existing cache
   lock.
 - **Offline rule (fail-degraded-closed):**
-  - Restrictive entries from the last known server policy (`class=exclude`,
-    `subscribed=false`, and in P-b a lower `cutoff`) are honoured for as long
-    as their own `until` says, **regardless of cache age**. An outage never
-    lifts an exclusion early.
-  - Permissive entries (`class=spend`, `boost`, and in P-b a raised `cutoff` or
-    `on_exhaust`) are honoured while the cache is younger than
-    `policy_stale_max_s` (default 24 h, matching `catalog_stale_max_s`). After
-    that they drop to builtin, labelled `policy=stale`.
+  - Restrictiveness is measured **relative to the pool's builtin**, on the
+    order `exclude` > `preserve` > `spend`. Every builtin provider is `spend`
+    today (`providers/__init__.py`), and `preserve` cuts off at 90% against
+    `spend`'s 99% (`recommend.py`). A cached server `preserve` on a `spend`
+    pool is therefore restrictive.
+  - Restrictive entries from the last known server policy (a class stricter
+    than builtin, `subscribed=false`, and in P-b a lower `cutoff`) are honoured
+    for as long as their own `until` says, **regardless of cache age**. An
+    outage never lifts an exclusion or a preserve early. Put another way: the
+    effective class is never looser than the stricter of the cached class and
+    builtin.
+  - Permissive entries (a class looser than builtin, `boost`, and in P-b a
+    raised `cutoff` or `on_exhaust`) are honoured while the cache is younger
+    than `policy_stale_max_s` (default 24 h, matching `catalog_stale_max_s`).
+    After that they drop to builtin, labelled `policy=stale`.
   - **Unavailable is non-admitting.** Builtin classes are never a fallback in
     server mode, because builtin says nothing about a server-side `exclude`
     or `subscribed=false`, and the gate refuses a pool only when its
@@ -697,19 +765,51 @@ Bounds (Q7):
 
 **Grades apply, with no operator token in the browser or in hk's UI process:**
 
-- "Approve" records `{digest, decided_by=operator(web) <email>, reason,
-  deviation_ref}` as an approval document and emits a
-  `[decision] grades-apply <digest>` lane event to operator-desk.
-- The designated runner host, which already holds the operator credential used
-  for `push-catalog` today (Q10), runs `scopefuel grades apply --approval
-  <doc>`. That command:
-  - re-derives the proposal and requires the digest to match (existing
-    `apply_proposals` behaviour);
-  - requires #741's degraded-input refusal to pass (reps backend complete, no
-    `window_incomplete`, catalog `source=server`);
-  - PUTs the catalog with `decided_by` taken from the approval;
-  - writes the outcome back to the approval document.
-- The page shows `approved → applied|refused(<reason>)`.
+- **Approvals are not documents.** `/v1/documents/{key}` accepts a PUT from
+  any bearer client and replaces the body in place, so it cannot carry
+  authorization. Approvals live in a dedicated table:
+
+  ```
+  scopefuel_grade_approvals
+    id BIGSERIAL PK, proposal_digest TEXT, reps_watermark TEXT, catalog_digest TEXT,
+    approved_by TEXT, reason TEXT, deviation_ref TEXT, approved_at TIMESTAMPTZ,
+    expires_at TIMESTAMPTZ,            -- approved_at + 24 h
+    state TEXT CHECK (state IN ('approved','claimed','applied','refused','expired')),
+    claimed_by TEXT, claimed_at TIMESTAMPTZ, outcome TEXT, finished_at TIMESTAMPTZ
+  ```
+
+  - **Rows are inserted only by the UI approve route.** That route requires
+    the operator email role, CSRF, the typed digest confirmation, and a reason
+    that passes the reason grammar, and it writes the audit line. There is no
+    `/v1` insert route.
+  - The row's identifying columns (`proposal_digest` through `expires_at`)
+    are immutable. `UPDATE` touches only the state columns, and only through
+    the transitions below, enforced in SQL with `WHERE state = …`.
+- **Runner protocol.** The runner is the designated host that holds the
+  operator credential used for `push-catalog` today, and that published the
+  proposal (Q10).
+  1. `POST /v1/scopefuel/grades/approvals/{id}/claim`, **operator client
+     only**, performs `approved → claimed` atomically. It returns 409 unless
+     the row is `approved` and not expired. That rules out double apply and
+     applying a forged or edited approval, because nothing but the UI route
+     can create an `approved` row.
+  2. The runner checks that the claimed row's `proposal_digest` matches its
+     local artifact at `~/.cache/scopefuel/proposals/<digest>.json`, and that
+     hk's current reps watermark and catalog digest equal the row's. It then
+     runs `apply_proposals` (a full digest re-derivation against live stores)
+     and #741's degraded-input refusal (reps backend complete, no
+     `window_incomplete`, catalog `source=server`).
+  3. The runner PUTs the catalog with `decided_by` = the row's `approved_by`
+     and `deviation_ref` = `hk:scopefuel-approval/<id>; <row deviation_ref>`.
+  4. `POST …/{id}/finish` (operator only) moves the row `claimed →
+     applied|refused` with an enum outcome (`applied`, `digest_mismatch`,
+     `watermark_changed`, `degraded_input`, `catalog_put_failed`). No free
+     text is stored.
+- The UI emits a `[decision] grades-apply approval <id>` lane event to
+  operator-desk to wake the runner (fail-open). The runner only ever acts on
+  a claimed row, never on the event text.
+- The page shows `approved → claimed → applied|refused(<enum>)` and marks rows
+  `expired` after 24 h.
 - Until #741 is merged, the Approve button is not rendered. The route also
   refuses with `409 degraded_input_guard_missing`, keyed off a scopefuel
   capability flag in the proposal artifact, so an old runner cannot apply it.
@@ -749,7 +849,7 @@ Tiers: **T3** = changes what the gate admits (or how it ranks) on every host.
 | T-3 | `scopefuel report build/push`, the change-triggered push in collect/refresh, systemd and launchd timer units, `allow_plaintext_host_report`, and kill switch | scopefuel | T2 | T-2 |
 | T-4 | BFF `/ui/api/scopefuel/{overview,reps,proposal}` plus the catalog digest in Go (shared digest fixture with scopefuel) | hk | T2 | T-2 |
 | T-5 | `/ui/scopefuel` React entry: panels A–G, states table, nav link, vitest | hk | T2 | T-4 |
-| T-5b | `grades propose --publish`: the envelope with `generated_at` and `evidence_watermark` (section 1.7), a daily publish from the designated host to `scopefuel/grades/proposal/latest`, and the hk-side envelope parser | scopefuel + hk | T1 | — |
+| T-5b | `GET /v1/bench/reps/watermark`; `grades propose --publish`: the structured projection with `generated_at` and `evidence_watermark` (section 1.7), the local artifact cache, a daily publish from the designated host, and the hk-side projection parser | scopefuel + hk | T2 | — |
 | T-6 | Pool-policy validation contract: shared JSON case file, tested in both repos | both | T1 | — |
 | T-7 | Server pool policy: tables, `GET/PUT/DELETE/import` routes (operator for writes), revision/ETag/If-Match, events, lane-event emit, docs | hk | T2 (no reader yet) | T-6 |
 | T-8 | scopefuel `[policy] source` with `local` and `shadow`: fetch, cache, `drift` in report, `policy export --json` | scopefuel | T2 (no admission change) | T-3, T-7 |
@@ -758,7 +858,7 @@ Tiers: **T3** = changes what the gate admits (or how it ranks) on every host.
 | T-11 | Phase 2 UI writes: operator allowlist, CSRF routes, preview/confirm, revert, audit | hk | **T3** | T-10 |
 | T-12 | `subscribed=false` semantics: gate treats it as exclude, collect skips measuring that pool, report status `unsubscribed` | scopefuel (+ hk UI toggle) | **T3** | T-10 |
 | T-13 | `policy migrate --clear-local`, then retire `local` mode after 30 days | scopefuel | **T3** | T-10 plus 30 days |
-| T-14 | Grades approve route plus runner `grades apply --approval` | hk + scopefuel | **T3** | #741, T-11, T-5b |
+| T-14 | `scopefuel_grade_approvals`, the UI approve route, operator-only claim/finish routes, and runner `grades apply --approval <id>` | hk + scopefuel | **T3** | #741, T-11, T-5b |
 | T-15 | P-b: `cutoff`/`on_exhaust` to server policy | both | **T3** | T-10 |
 
 Order: Phase 1 is T-1 → T-2 → (T-3 ∥ T-4) → T-5. T-5b is independent. The
@@ -780,9 +880,9 @@ before server policy exists.
 | Q5 | Profile-level policy? | No. Profile restriction stays in the catalog (`gate`, `retired_at`). |
 | Q6 | Meaning of "unsubscribed" | Durable, no `until`. The gate treats it as exclude, the pool is not measured (no 401/429 noise), and it shows grey. Resubscribing is an operator write. |
 | Q7 | Bounds on UI edits | `until` at most 30 days ahead, boost within [-100,100], a reason is always required, and a typed confirmation for exclude, unsubscribe and approve. |
-| Q8 | Offline window for *permissive* server policy | 24 h (`policy_stale_max_s`, same as the catalog). Restrictive entries persist to their own `until`. |
+| Q8 | Offline window for *permissive* server policy | 24 h (`policy_stale_max_s`, same as the catalog). Entries stricter than builtin (`exclude`, and `preserve` on a `spend` pool) persist to their own `until`. |
 | Q9 | Who is an operator in the UI? | The new `HANDOFFKEEP_UI_OPERATOR_EMAILS`. Empty means writes are disabled. |
-| Q10 | Grades apply runner host | The host that runs `push-catalog` with the operator token today. The token never enters hk's UI process. |
+| Q10 | Grades publish and apply runner host | One host that both publishes proposals and runs apply: the host that runs `push-catalog` with the operator token today. The token never enters hk's UI process. |
 | Q11 | Plaintext opt-ins vs https first | Ship with per-use opt-ins now (#697 pattern). Move hk to `tailscale serve --https` as a separate task, after which the opt-ins lapse. |
 | Q12 | Keep report history? | No, latest only in Phase 1. Revisit with fleet-metrics' eligibility gap. |
 | Q13 | Should the UI trigger a measurement refresh? | No, never (#653). |
