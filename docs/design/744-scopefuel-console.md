@@ -106,7 +106,7 @@ field set; exact names are fixed by the implementation task.
     {
       "pool": "codex",
       "status": "ok|stale|error|backoff|in_progress|disabled|unsubscribed",
-      "source": "local|remote|operator",
+      "source": "local|remote|operator",   // mapped, see notes
       "fetched_age_s": 95,
       "error_kind": null,
       "http_status": null,
@@ -137,6 +137,15 @@ Field notes:
   per-rate-limit buckets (`Scope("model", name)` in `providers/codex.py`) come
   through unchanged. The report does not invent windows. Whatever the provider
   measured is what is shown.
+- **Source.** `ProviderResult.source` holds provider-specific strings
+  (`wham-usage-api`, `oauth-usage-api`, `local-server`, `cloud`,
+  `cli:/usage`, `fixed`, …). These are **mapped, not forwarded**:
+  - a quota-share remote result maps to `remote`;
+  - a `manual` operator self-report maps to `operator`;
+  - everything else, the provider's own measurement path, maps to `local`.
+
+  The raw string is never sent, and the ingest enum is exactly these three
+  values.
 - **Measurement errors.** Only the enum `error_kind` (the #576 vocabulary:
   `rate_limited|server|network|auth|credentials|http|unknown`), `http_status`
   and `backoff_remaining_s`. The `error`, `warning`, `last_error` and `hint`
@@ -283,13 +292,25 @@ The published document is:
 }
 ```
 
-Projection rules, enforced by the publisher and again by the hk parser (which
-rejects the whole document on any violation):
+Projection rules, enforced by the publisher and again by the hk parser:
 
+- **Envelope level.** A wrong schema, a malformed watermark, or a bad digest
+  rejects the whole document ("unrecognised proposal document").
+- **Row level.** A row that violates a rule is **withheld**, not fatal. The
+  page shows "n rows withheld (see `scopefuel grades propose`)" beside the
+  rows that passed, so degraded evidence cannot make the whole proposal
+  disappear.
 - `profile` and `effort` must be in the live catalog's key set.
-- `action` and `current`/`target` are enums (grade ladder).
+- `action` is the evaluator's full set: `promote`, `demote`, `conflicted`,
+  `blocked`, `hold`, `insufficient` (`grades.py` `_evaluate_row`). An action
+  outside the set withholds the row.
+- `current` and `target` are on the grade ladder.
 - Every ref matches `^(srv:\d+|local:\d+|local@[a-z0-9][a-z0-9._-]{0,62}:\d+)$`.
-  A fail's second element is a grade enum or null.
+  A non-matching ref withholds the row.
+- A fail's second element is a ladder grade, null, or the literal token
+  `off_ladder`. The publisher maps any out-of-ladder rep grade, which the
+  evaluator deliberately keeps in `fails`, to `off_ladder` and never forwards
+  the raw text.
 - `note`, `unrung` strings, `exclusions` specs, `params.cli_exclusions`, and
   `reps.host` are **dropped**. They appear only as counts.
 - The operator reads them with `scopefuel grades propose` on the runner
@@ -340,7 +361,9 @@ BFF routes (all GET, `no-store`, service identities refused):
   digest, in one response so panels agree on one `generated_at`.
 - `/ui/api/scopefuel/reps?limit=50&profile=&grade=&effort=`
 - `/ui/api/scopefuel/proposal`
-- The catalog reuses `/ui/api/bench/catalog`.
+- `/ui/api/scopefuel/catalog`: a **projection** of catalog rows (section
+  2.1 D). The page does not reuse `/ui/api/bench/catalog`, which returns
+  rows verbatim.
 
 Polling is every 30 s, non-overlapping, and keeps the last good data on
 failure (the queue board pattern). Reports arrive every 5 min at most, so
@@ -391,10 +414,21 @@ faster polling buys nothing.
   change, and a silent expected host appears as *never reported* instead of
   vanishing.
 
-**D. Catalog** (reuse the grades table component)
+**D. Catalog** (the grades table component, fed by the projection BFF)
 
-- profile, effort, model_id, pool, grade, gate (`default|escalation|consult_only`),
-  retired, decided_by/at, deviation_ref, plus one derived column
+- Structured fields pass through: profile, effort, model_id, pool, grade,
+  gate (`default|escalation|consult_only`), retired_at and decided_at.
+- **Free-text catalog fields are filtered.** `gate_reason`,
+  `benchmark_annotation`, `deviation_ref` and `decided_by` accept arbitrary
+  non-NUL text on `PUT /v1/bench/catalog`, and the guard checks only
+  credential patterns. The projection passes each of them through the reason
+  grammar from section 3.2 (no `@`, `/` only inside allowlisted reference
+  tokens, plus `guard.Reject`). A value that fails is replaced by
+  `(hidden)`. `benchmark_source` is shown only when it is an https URL on a
+  host in a small allowlist; otherwise it is `(hidden)`.
+- Existing `/ui/grades` renders these fields verbatim today. That exposure
+  predates #744 and is listed as follow-up T-16. It is not widened here.
+- The table also has one derived column,
   **admission now**: `ok`, `pool excluded (hosts…)`, `pool unsubscribed`,
   `consult_only`, or `retired`. This column is derived from host reports and
   server policy for display. It is not a gate call.
@@ -441,7 +475,7 @@ faster polling buys nothing.
   catalog_source, reps backend and `window_incomplete` (a warning when true),
   and the superseded state.
 - Rows: rung, current grade → target, action
-  (`promote|demote|conflicted|hold`), evidence refs, and counted and uncounted
+  (`promote|demote|conflicted|blocked|hold|insufficient`), evidence refs, and counted and uncounted
   passes and fails. Conflicted rows show both sides. `unrung` and exclusions
   appear only as counts ("3 unrung reps, 2 exclusions: see `scopefuel grades
   propose` on <host>"). No free text from the proposal is rendered.
@@ -558,6 +592,12 @@ is tested in both repos (task T-6):
 - `boost` must be an int, not a bool, and requires `until`.
 - A boost-only row may omit `class` (the provider builtin is inherited, as in
   `_active_override`).
+- `subscribed = false` is **refused by the API** (`422
+  subscription_not_enabled`) until T-10 has shipped gate support for it and
+  the operator sets `HANDOFFKEEP_SCOPEFUEL_SUBSCRIPTION=1`. Even with the flag
+  set, it is refused while any host reporting `policy.mode=server` lacks the
+  `subscribed-v1` capability in its report. A stored `subscribed=false` can
+  therefore never meet a gate that ignores it.
 - `subscribed = false` does not take `until`. It lasts until the operator
   resubscribes.
 - `clear` deletes the row (recorded in events with `before`).
@@ -773,6 +813,7 @@ Bounds (Q7):
   scopefuel_grade_approvals
     id BIGSERIAL PK, proposal_digest TEXT, reps_watermark TEXT, catalog_digest TEXT,
     approved_by TEXT, reason TEXT, deviation_ref TEXT, approved_at TIMESTAMPTZ,
+                                       -- reason and deviation_ref must pass the reason grammar at insert
     expires_at TIMESTAMPTZ,            -- approved_at + 24 h
     state TEXT CHECK (state IN ('approved','claimed','applied','refused','expired')),
     claimed_by TEXT, claimed_at TIMESTAMPTZ, outcome TEXT, finished_at TIMESTAMPTZ
@@ -799,7 +840,9 @@ Bounds (Q7):
      runs `apply_proposals` (a full digest re-derivation against live stores)
      and #741's degraded-input refusal (reps backend complete, no
      `window_incomplete`, catalog `source=server`).
-  3. The runner PUTs the catalog with `decided_by` = the row's `approved_by`
+  3. The runner re-checks `deviation_ref` against the reason grammar (it
+     refuses with `unsafe_ref` otherwise; the value is later copied into
+     catalog rows). It then PUTs the catalog with `decided_by` = the row's `approved_by`
      and `deviation_ref` = `hk:scopefuel-approval/<id>; <row deviation_ref>`.
   4. `POST …/{id}/finish` (operator only) moves the row `claimed →
      applied|refused` with an enum outcome (`applied`, `digest_mismatch`,
@@ -854,12 +897,13 @@ Tiers: **T3** = changes what the gate admits (or how it ranks) on every host.
 | T-7 | Server pool policy: tables, `GET/PUT/DELETE/import` routes (operator for writes), revision/ETag/If-Match, events, lane-event emit, docs | hk | T2 (no reader yet) | T-6 |
 | T-8 | scopefuel `[policy] source` with `local` and `shadow`: fetch, cache, `drift` in report, `policy export --json` | scopefuel | T2 (no admission change) | T-3, T-7 |
 | T-9 | Seed: export on each host, reconcile, operator import | ops | T2 | T-8 |
-| T-10 | scopefuel `server` mode: restrictive merge, offline rule, `policy.source` disclosure, CLI writes to hk, then host-by-host flip | scopefuel + ops | **T3** | T-9 plus 24 h zero drift |
+| T-10 | scopefuel `server` mode: restrictive merge, offline rule, `policy.source` disclosure, CLI writes to hk, **gate treats `subscribed=false` as exclude** (and reports the `subscribed-v1` capability), then host-by-host flip | scopefuel + ops | **T3** | T-9 plus 24 h zero drift |
 | T-11 | Phase 2 UI writes: operator allowlist, CSRF routes, preview/confirm, revert, audit | hk | **T3** | T-10 |
-| T-12 | `subscribed=false` semantics: gate treats it as exclude, collect skips measuring that pool, report status `unsubscribed` | scopefuel (+ hk UI toggle) | **T3** | T-10 |
+| T-12 | Unsubscribe beyond the gate: collect skips measuring that pool, report status `unsubscribed`, the hk UI toggle, and enabling `HANDOFFKEEP_SCOPEFUEL_SUBSCRIPTION` | scopefuel + hk | **T3** | T-10 on every host |
 | T-13 | `policy migrate --clear-local`, then retire `local` mode after 30 days | scopefuel | **T3** | T-10 plus 30 days |
 | T-14 | `scopefuel_grade_approvals`, the UI approve route, operator-only claim/finish routes, and runner `grades apply --approval <id>` | hk + scopefuel | **T3** | #741, T-11, T-5b |
 | T-15 | P-b: `cutoff`/`on_exhaust` to server policy | both | **T3** | T-10 |
+| T-16 | Follow-up (pre-existing exposure): apply the section 2.1 D free-text projection to `/ui/api/bench/catalog` and `/ui/grades` | hk | T2 | — |
 
 Order: Phase 1 is T-1 → T-2 → (T-3 ∥ T-4) → T-5. T-5b is independent. The
 policy line is T-6 → T-7 → T-8 → T-9 → T-10 → (T-11, T-12, T-13) → T-15.
