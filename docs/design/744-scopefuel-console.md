@@ -208,9 +208,13 @@ buckets each, which is under 8 KiB).
 ### 1.5 Ingest validation (server side, fail-closed)
 
 - `DisallowUnknownFields` at every level. The schema version is exact.
-- Every string: a length cap, a character class per field (enums are
-  enumerated; `label` rejects `@`, quotes and control characters), and
-  `guard.Reject`. **`guard` must first learn the Claude OAuth token prefixes**
+- Every string: a length cap, a character class per field, and `guard.Reject`.
+  Enums are enumerated. `label` accepts exactly the output alphabet of
+  scopefuel's `safe_label()` (`model.py` `_LABEL_DROP`: Unicode word
+  characters, space, `.`, `'`, `(`, `)`, `-`, at most 32 characters, no `@`).
+  An ordinary label such as `Bob's Org` is therefore accepted. Anything
+  outside that set is rejected. The producer and the validator share one
+  fixture of label cases (T-6). **`guard` must first learn the Claude OAuth token prefixes**
   (`sk-ant-oat01-`, `sk-ant-ort01-`), which `docs/quota-share.md` records as
   missed today. That is task T-1 below and a prerequisite for ingest.
 - Numbers must be finite. `used_pct` must be in [0,100] or null.
@@ -239,18 +243,48 @@ buckets each, which is under 8 KiB).
 **Grades proposal.** `grades propose` is Python and evaluates the #735 rule
 client side. hk does **not** re-implement the rule, because two
 implementations would drift. A designated host (default: desktop) runs
-`scopefuel grades propose --json` daily, and also on demand from the CLI, then
-PUTs the artifact as a `note` document under that key. The artifact is
-`proposal_to_json` unchanged: rule_version, min_passes, digest,
-params.cli_exclusions, reps backend summary, `window_incomplete`, per-rung
-results with evidence refs. It carries no secrets. It uses `host` only as a
-provenance string.
+`scopefuel grades propose --publish` daily, and also on demand from the CLI.
+That PUTs a `note` document under that key. `proposal_to_json` itself has
+no generation time and nests `host` under `reps`, so the published document
+is an **envelope** around the unchanged artifact:
 
-hk adds a derived **freshness check** at read time: the proposal is
-*superseded* when `max(bench_reps.id)` or the catalog digest has changed since
-the artifact's `generated_at`. The digest itself cannot be recomputed in Go, so
-the page says "evidence changed since proposal; rerun propose" rather than
-claiming the digest is invalid.
+```json
+{
+  "schema": "scopefuel.grades-proposal-pub.v1",
+  "generated_at": "2026-09-26T03:00:12Z",
+  "host": "desktop",
+  "evidence_watermark": {
+    "reps_backend": "handoffkeep",
+    "server_reps_max_id": 1043,
+    "server_reps_count": 212,
+    "local_reps_count": 0,
+    "catalog_digest": "a1b2c3d4e5f60718",
+    "catalog_source": "server"
+  },
+  "artifact": { "...": "proposal_to_json(...) unchanged" }
+}
+```
+
+- `server_reps_max_id` is the highest hk `bench_reps.id` in the evidence
+  (the `srv:<id>` refs).
+- `catalog_digest` uses the same row digest as the host report (section 1.2).
+- The artifact carries rule_version, min_passes, digest,
+  params.cli_exclusions, the reps backend summary, `window_incomplete`, and
+  per-rung results with evidence refs. It carries no secrets.
+
+**Freshness check at read time**, in Go, with no rule re-implementation:
+
+- **superseded** when the current `max(bench_reps.id)` is greater than
+  `server_reps_max_id`, or the live catalog digest differs from
+  `catalog_digest`. The page says "evidence changed since proposal; rerun
+  propose". The proposal digest itself cannot be recomputed in Go, so it is
+  never called invalid.
+- **not comparable** when `reps_backend` is not `handoffkeep`,
+  `local_reps_count > 0`, or `catalog_source` is not `server`. The evidence
+  includes rows hk cannot see, so hk cannot vouch for freshness. The page
+  shows it amber, and Phase 2 approval is refused for it (section 4.2).
+- A document without the envelope schema is shown as "unrecognised proposal
+  document" and never parsed further.
 
 ---
 
@@ -339,11 +373,28 @@ faster polling buys nothing.
 
 **F. Recent reps**
 
-- id, recorded_at, profile, effort, model_id, task_ref (a `hk:task/<id>`
-  reference links to `/ui/tasks/<id>`; everything else is text), tier, role,
-  grade, rounds, blockers_found, completed, created_by (the client id), and
-  notes truncated to 160 characters with the full text on expand (text only,
-  as React already escapes).
+- id, recorded_at, profile, effort, model_id, tier, role, grade, rounds,
+  blockers_found, completed, created_by (the client id).
+- **task_ref** is shown only when it matches a closed reference grammar:
+  `hk:task/<digits>` (linked to `/ui/tasks/<id>`), `#<digits>`, `ROB-<digits>`,
+  a bare task number, or a `https://github.com/<owner>/<repo>/pull/<digits>`
+  URL. Any other value renders as `(unrecognised ref)`. The value is never
+  echoed.
+- **notes are not rendered.** `bench_reps.task_ref` and `notes` accept
+  arbitrary non-NUL text on write, and the write guard misses the Claude
+  OAuth prefixes, so legacy rows may already hold anything. The BFF derives
+  only structured flags from notes, and the page shows those flags and
+  nothing else:
+  - `fail_marker` (the `[rollback]` or `[post-merge-blocker]` vocabulary
+    from `grades.FAIL_MARKERS`);
+  - `supersedes=<id>` (from `SUPERSEDES_RE`);
+  - `has_notes`, which is a boolean.
+
+  The notes text itself is not in the response. To read one, the operator
+  uses the CLI (`scopefuel reps list`).
+- Future display of free text (open question Q16) would need read-time
+  redaction through the extended guard plus a rule that suppresses the whole
+  field on any hit. It is out of scope here.
 
 **G. Grades proposal**
 
@@ -377,8 +428,11 @@ faster polling buys nothing.
 
 Tokens or any bearer material, CSRF values, account emails, account UUIDs, full
 fingerprints (only fp8), `session_fp`, provider error text, hk or hub URLs,
-local paths, and manual self-report reasons. The label is the existing safe
-display name only. The BFF builds its response from typed structs, never by
+local paths, manual self-report reasons, and **rep notes or unrecognised
+task_ref values** (see panel F). Policy `reason` text is written by the
+operator through the guarded Phase 2 write path (section 3.2). It is
+therefore the one free-text field the page shows. The label is the existing
+safe display name only. The BFF builds its response from typed structs, never by
 passing stored JSON through, so a field the ingest validator missed still
 cannot reach the browser.
 
@@ -421,6 +475,8 @@ scopefuel_pool_policy
   on_exhaust    TEXT NULL               -- P-b
   reason        TEXT NOT NULL           -- required, 8..500 bytes, guard-checked
   decided_by    TEXT NOT NULL           -- 'operator(web) <email>' | 'cli:<client>' | 'migration'
+                                        -- (the operator's own Access identity, as decision events
+                                        --  already record it; never a provider account email)
   revision      BIGINT NOT NULL         -- global revision at which this row last changed
   updated_at    TIMESTAMPTZ NOT NULL
 
@@ -479,11 +535,34 @@ are wanted later, they become a `host` key column with `*` as the fleet row.
     `on_exhaust`) are honoured while the cache is younger than
     `policy_stale_max_s` (default 24 h, matching `catalog_stale_max_s`). After
     that they drop to builtin, labelled `policy=stale`.
-  - No cache at all in server mode: builtin classes, labelled
-    `policy=unavailable`. The gate proceeds for `default`-gate profiles, as for
-    `catalog=stale`.
+  - **Unavailable is non-admitting.** Builtin classes are never a fallback in
+    server mode, because builtin says nothing about a server-side `exclude`
+    or `subscribed=false`, and the gate refuses a pool only when its
+    effective class is `exclude` (`recommend.py`). The rules:
+    - *Entry requires a verified revision.* `[policy] source = "server"` takes
+      effect only when `policy-server.json` holds a revision this host fetched
+      and parsed successfully (checked with `revision >= 1`, a matching
+      schema, and a sha256 of the body stored alongside). Otherwise the host
+      stays in `shadow` and says so on every gate line (`policy=shadow
+      reason=no-verified-revision`). The flip in step 5 cannot happen on a
+      host that has never fetched the policy.
+    - *Durable cache.* The cache is written temp-file, fsync, then rename. The
+      previous good copy is kept as `policy-server.prev.json`. An unreadable
+      current file falls back to `.prev`, which carries the same restrictive
+      and permissive rules as any cache.
+    - *Both unreadable and server unreachable* (`policy=unavailable`): the gate
+      **refuses every pool-quota launch** with a distinct exit code and reason
+      `policy unavailable`, whatever the profile's gate. `--operator-request`
+      does not lift it (#461). The recovery is `scopefuel policy fetch` once hk
+      is reachable, or an explicit rollback to `SCOPEFUEL_POLICY_SOURCE=local`,
+      which is a visible operator act (section 3.6). This is the one path where
+      an outage stops dispatch on a host. It needs cache loss *and* an outage
+      at the same time, and it is reported in the host report
+      (`policy.mode=server, source=unavailable`) so the page shows it red.
+    - Under the tighten-only merge (section 3.5), a local `exclude` in
+      config.toml still applies in every one of these states.
   - Every gate line and `--json` output carries `policy.source`
-    (`server|cache|stale|local`) and the revision. That is the disclosure
+    (`server|cache|stale|unavailable|local|shadow`) and the revision. That is the disclosure
     precondition.
 
 ### 3.5 Precedence during migration
@@ -530,7 +609,10 @@ columns.
 4. **Parity window.** Every host in `shadow` shows `drift = 0` on the page for
    24 h. Any drift is resolved by editing server policy or local config, not
    by flipping.
-5. **Canary flip (T-10, T3).** Flip `pi` to `server`, then m1b. Watch the
+5. **Canary flip (T-10, T3).** Flip `pi` to `server`, then m1b. The flip
+   is refused until the host holds a verified revision (section 3.4). Run
+   `scopefuel policy fetch` first and check that the page shows the host on
+   the current revision. Watch the
    gate lines for `policy.source=server` and the unchanged admission set on
    the page for 24 h. Then flip desktop and mac-personal.
 6. **Clear local brakes.** Once all hosts run `server`, `scopefuel policy
@@ -590,7 +672,7 @@ with its own audit row.
 | Clear a pool row | `POST /ui/scopefuel/policy/clear` | same | T3 |
 | Unsubscribe / resubscribe | `POST /ui/scopefuel/policy/subscription` | T-12 semantics shipped | T3 |
 | Revert to revision N | `POST /ui/scopefuel/policy/revert` | — | T3 |
-| Approve grades apply for proposal digest D | `POST /ui/scopefuel/grades/approve` | #741 degraded-input refusal merged; proposal not superseded | T3 |
+| Approve grades apply for proposal digest D | `POST /ui/scopefuel/grades/approve` | #741 degraded-input refusal merged; proposal neither superseded nor not comparable (section 1.7) | T3 |
 
 **Confirmation flow**, for every action:
 
@@ -667,7 +749,7 @@ Tiers: **T3** = changes what the gate admits (or how it ranks) on every host.
 | T-3 | `scopefuel report build/push`, the change-triggered push in collect/refresh, systemd and launchd timer units, `allow_plaintext_host_report`, and kill switch | scopefuel | T2 | T-2 |
 | T-4 | BFF `/ui/api/scopefuel/{overview,reps,proposal}` plus the catalog digest in Go (shared digest fixture with scopefuel) | hk | T2 | T-2 |
 | T-5 | `/ui/scopefuel` React entry: panels A–G, states table, nav link, vitest | hk | T2 | T-4 |
-| T-5b | Designated-host daily `grades propose --json` publish to `scopefuel/grades/proposal/latest` | scopefuel | T1 | — |
+| T-5b | `grades propose --publish`: the envelope with `generated_at` and `evidence_watermark` (section 1.7), a daily publish from the designated host to `scopefuel/grades/proposal/latest`, and the hk-side envelope parser | scopefuel + hk | T1 | — |
 | T-6 | Pool-policy validation contract: shared JSON case file, tested in both repos | both | T1 | — |
 | T-7 | Server pool policy: tables, `GET/PUT/DELETE/import` routes (operator for writes), revision/ETag/If-Match, events, lane-event emit, docs | hk | T2 (no reader yet) | T-6 |
 | T-8 | scopefuel `[policy] source` with `local` and `shadow`: fetch, cache, `drift` in report, `policy export --json` | scopefuel | T2 (no admission change) | T-3, T-7 |
@@ -706,3 +788,5 @@ before server policy exists.
 | Q13 | Should the UI trigger a measurement refresh? | No, never (#653). |
 | Q14 | Seed conflict rule when hosts disagree | The most restrictive class and the latest `until`, listed for the operator to confirm before import. |
 | Q15 | Lane-event notification on policy change | Yes, to operator-desk, fail-open. |
+| Q16 | Show rep `notes` text on the page? | No. Only derived flags. Free text stays on the CLI until read-time redaction exists. |
+| Q17 | Behaviour when server-mode policy is unavailable (no readable cache and hk unreachable) | Refuse pool-quota launches on that host (section 3.4). The alternative, builtin classes, would silently drop server excludes. |
