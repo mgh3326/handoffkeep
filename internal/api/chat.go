@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
@@ -21,6 +22,9 @@ func (s Service) ListChatQuestions(ctx context.Context, lane, state, afterID str
 func (s Service) CreateChatMessage(ctx context.Context, x store.ChatMessage) (store.ChatMessage, error) {
 	return s.Store.CreateChatMessage(ctx, x)
 }
+func (s Service) PostChatMessage(ctx context.Context, x store.ChatMessagePost) (store.ChatMessage, bool, error) {
+	return s.Store.PostChatMessage(ctx, x)
+}
 func (s Service) MarkChatMessageDelivered(ctx context.Context, id int64) (store.ChatMessage, error) {
 	return s.Store.MarkChatMessageDelivered(ctx, id)
 }
@@ -32,9 +36,10 @@ func (s Service) ListChatMessages(ctx context.Context, author string, undelivere
 }
 
 type chatQuestionInput struct {
-	ID   string `json:"id"`
-	Lane string `json:"lane"`
-	Body string `json:"body"`
+	ID             string `json:"id"`
+	ConversationID string `json:"conversation_id"`
+	Lane           string `json:"lane"`
+	Body           string `json:"body"`
 }
 
 func (s Server) chatQuestionUpsert(w http.ResponseWriter, r *http.Request, id string) {
@@ -54,7 +59,7 @@ func (s Server) chatQuestionUpsert(w http.ResponseWriter, r *http.Request, id st
 		}
 		id = input.ID
 	}
-	x, created, err := s.Service.UpsertChatQuestion(r.Context(), store.ChatQuestion{ID: id, Lane: input.Lane, Body: input.Body})
+	x, created, err := s.Service.UpsertChatQuestion(r.Context(), store.ChatQuestion{ID: id, ConversationID: input.ConversationID, Lane: input.Lane, Body: input.Body})
 	if err != nil {
 		appErr(w, err)
 		return
@@ -100,6 +105,10 @@ func (s Server) chatQuestionsList(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.auth(w, r); !ok {
 		return
 	}
+	if id := r.URL.Query().Get("conversation_id"); id != "" && id != store.ChatConversationID {
+		appErr(w, store.ErrChatConversation)
+		return
+	}
 	limit, err := queryLimit(r, 20, 1000)
 	if err != nil {
 		appErr(w, err)
@@ -114,8 +123,15 @@ func (s Server) chatQuestionsList(w http.ResponseWriter, r *http.Request) {
 }
 
 type chatMessageInput struct {
-	Author string `json:"author"`
-	Body   string `json:"body"`
+	ConversationID       string              `json:"conversation_id"`
+	Author               string              `json:"author"`
+	Body                 string              `json:"body"`
+	SourceChannel        string              `json:"source_channel"`
+	OriginEventID        string              `json:"origin_event_id"`
+	OriginTimestamp      *time.Time          `json:"origin_timestamp"`
+	Questions            []chatQuestionInput `json:"questions"`
+	QuestionIDs          []string            `json:"question_ids"`
+	ProcessedQuestionIDs []string            `json:"processed_question_ids"`
 }
 
 func (s Server) chatMessageCreate(w http.ResponseWriter, r *http.Request) {
@@ -131,16 +147,28 @@ func (s Server) chatMessageCreate(w http.ResponseWriter, r *http.Request) {
 	if input.Author == "" {
 		input.Author = "operator"
 	}
-	x, err := s.Service.CreateChatMessage(r.Context(), store.ChatMessage{Author: input.Author, Body: input.Body})
+	questions := make([]store.ChatQuestion, 0, len(input.Questions))
+	for _, q := range input.Questions {
+		questions = append(questions, store.ChatQuestion{ID: q.ID, ConversationID: q.ConversationID, Lane: q.Lane, Body: q.Body})
+	}
+	x, created, err := s.Service.PostChatMessage(r.Context(), store.ChatMessagePost{Message: store.ChatMessage{ConversationID: input.ConversationID, Author: input.Author, Body: input.Body, SourceChannel: input.SourceChannel, OriginEventID: input.OriginEventID, OriginTimestamp: input.OriginTimestamp}, Questions: questions, QuestionIDs: input.QuestionIDs, ProcessedQuestionIDs: input.ProcessedQuestionIDs})
 	if err != nil {
 		appErr(w, err)
 		return
 	}
-	jsonOut(w, http.StatusCreated, x)
+	status := http.StatusCreated
+	if !created {
+		status = http.StatusOK
+	}
+	jsonOut(w, status, x)
 }
 
 func (s Server) chatMessagesList(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.auth(w, r); !ok {
+		return
+	}
+	if id := r.URL.Query().Get("conversation_id"); id != "" && id != store.ChatConversationID {
+		appErr(w, store.ErrChatConversation)
 		return
 	}
 	limit, err := queryLimit(r, 200, 1000)

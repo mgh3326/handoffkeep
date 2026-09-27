@@ -56,14 +56,14 @@ func TestRelayEventsV6ToV7Upgrade(t *testing.T) {
 		t.Fatal(err)
 	}
 	var version int
-	if err = pool.QueryRow(ctx, `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != 15 {
+	if err = pool.QueryRow(ctx, `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != 16 {
 		t.Fatalf("schema version=%d err=%v", version, err)
 	}
 	var constraintOID uint32
 	if err = pool.QueryRow(ctx, `SELECT oid FROM pg_constraint WHERE conrelid='relay_events'::regclass AND conname='relay_events_kind_check'`).Scan(&constraintOID); err != nil {
 		t.Fatal(err)
 	}
-	// A second open must see schema version 15 and skip the lock-heavy relay DDL.
+	// A second open must see the current schema version and skip lock-heavy relay DDL.
 	// The constraint OID would change if it were dropped and re-added again.
 	if err = s.migrate(ctx); err != nil {
 		t.Fatal(err)
@@ -85,6 +85,71 @@ func TestRelayEventsV6ToV7Upgrade(t *testing.T) {
 		t.Fatalf("lane event=%+v created=%t err=%v", lane, created, err)
 	}
 	t.Logf("v6→v13 upgrade: historic_rows=%d job_attempts=%d lane_event_id=%d", count, job.Attempts, lane.ID)
+}
+
+func TestChatV15ToV16AuthoritativeBackfill(t *testing.T) {
+	s, pool := searchTestStore(t)
+	ctx := t.Context()
+	for _, q := range []string{
+		`DELETE FROM schema_version WHERE version=16`,
+		`DROP TABLE chat_message_questions`,
+		`DROP INDEX chat_messages_event_key`,
+		`DROP INDEX chat_messages_undelivered`,
+		`ALTER TABLE chat_messages DROP CONSTRAINT chat_messages_author_relay_check`,
+		`ALTER TABLE chat_messages DROP CONSTRAINT chat_messages_relay_state_check, ADD CONSTRAINT chat_messages_relay_state_check CHECK(relay_state IN ('stored','delivered','failed'))`,
+		`ALTER TABLE chat_messages DROP COLUMN conversation_id, DROP COLUMN source_channel, DROP COLUMN origin_event_id, DROP COLUMN origin_timestamp, DROP COLUMN semantic_hash`,
+		`ALTER TABLE chat_questions DROP COLUMN conversation_id`,
+		`CREATE INDEX chat_messages_undelivered ON chat_messages(id ASC) WHERE delivered_at IS NULL`,
+	} {
+		if _, err := pool.Exec(ctx, q); err != nil {
+			t.Fatalf("rewind chat schema: %v", err)
+		}
+	}
+	q1, q2 := "Q-20260928-8101", "Q-20260928-8102"
+	for _, id := range []string{q1, q2} {
+		if _, err := pool.Exec(ctx, `INSERT INTO chat_questions(id,lane,body,state,created_at,updated_at) VALUES($1,'desk-lane',$1,'pending',now(),now())`, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var linked, unlinked, desk int64
+	for _, row := range []struct {
+		id           *int64
+		author, body string
+	}{{&linked, "operator", "old answer"}, {&unlinked, "operator", "unlinked answer"}, {&desk, "desk", "old desk body"}} {
+		if err := pool.QueryRow(ctx, `INSERT INTO chat_messages(author,body,relay_state,created_at) VALUES($1,$2,'stored',now()) RETURNING id`, row.author, row.body).Scan(row.id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO relay_events(kind,job_id,owner_lane,question,event_id,reason,received_at) VALUES('lane.event','','desk-lane',$1,$2,'operator_chat',now()),('lane.event','','desk-lane',$3,$4,'unrelated',now())`, q1, fmt.Sprintf("chat-%d", linked), q2, fmt.Sprintf("chat-%d", unlinked)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := s.ListChatMessages(ctx, "", false, 0, 10)
+	if err != nil || len(rows) != 3 {
+		t.Fatalf("rows=%+v err=%v", rows, err)
+	}
+	byID := map[int64]ChatMessage{}
+	for _, row := range rows {
+		byID[row.ID] = row
+	}
+	if got := byID[linked]; got.ConversationID != ChatConversationID || got.SourceChannel != "legacy" || got.Body != "old answer" || len(got.QuestionRelations) != 1 || got.QuestionRelations[0].QuestionID != q1 || got.QuestionRelations[0].QuestionText != q1 {
+		t.Fatalf("linked=%+v", got)
+	}
+	if got := byID[unlinked]; got.Body != "unlinked answer" || len(got.QuestionRelations) != 0 {
+		t.Fatalf("unlinked=%+v", got)
+	}
+	if got := byID[desk]; got.Body != "old desk body" || got.RelayState != "not_sent" || len(got.QuestionRelations) != 0 {
+		t.Fatalf("desk=%+v", got)
+	}
+	undelivered, err := s.ListChatMessages(ctx, "", true, 0, 10)
+	if err != nil || len(undelivered) != 2 {
+		t.Fatalf("undelivered=%+v err=%v", undelivered, err)
+	}
 }
 
 func TestRelayEventsV12ToV13Upgrade(t *testing.T) {
@@ -230,7 +295,7 @@ func TestTaskCommentsMigrationIsAdditiveAndIdempotent(t *testing.T) {
 	if err = pool.QueryRow(ctx, `SELECT count(*) FROM pg_trigger WHERE tgname='task_comments_append_only' AND tgrelid='task_comments'::regclass`).Scan(&triggers); err != nil || triggers != 1 {
 		t.Fatalf("triggers=%d err=%v", triggers, err)
 	}
-	if err = pool.QueryRow(ctx, `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != 15 {
+	if err = pool.QueryRow(ctx, `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != 16 {
 		t.Fatalf("schema version=%d err=%v", version, err)
 	}
 	xs, err := s.ListTaskComments(ctx, task.ID, 0, 10)
@@ -294,7 +359,7 @@ func TestBenchCatalogV11ToV12Upgrade(t *testing.T) {
 		t.Fatal(err)
 	}
 	var version, rows, modelRows int
-	if err = pool.QueryRow(ctx, `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != 15 {
+	if err = pool.QueryRow(ctx, `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != 16 {
 		t.Fatalf("schema version=%d err=%v", version, err)
 	}
 	if err = pool.QueryRow(ctx, `SELECT count(*) FROM schema_version WHERE version=12`).Scan(&version); err != nil || version != 1 {

@@ -612,6 +612,9 @@ func appErr(w http.ResponseWriter, e error) {
 	case errors.Is(e, store.ErrChatQuestionConflict):
 		jsonOut(w, http.StatusConflict, map[string]string{"error": "chat_question_conflict"})
 		return
+	case errors.Is(e, store.ErrChatConversation):
+		jsonOut(w, http.StatusConflict, map[string]string{"error": "chat_conversation_conflict"})
+		return
 	case errors.Is(e, store.ErrChatMessageConflict):
 		jsonOut(w, http.StatusConflict, map[string]string{"error": "chat_message_conflict"})
 		return
