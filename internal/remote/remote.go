@@ -515,9 +515,24 @@ func taskProjectFilterOK(xs []store.Task, project *string) error {
 	return nil
 }
 
+// taskProjectEchoOK requires the list response to echo the requested filter.
+// A server that predates the project column silently drops the parameter and
+// cannot echo it — and an empty page has no rows for taskProjectFilterOK to
+// inspect, so the echo is the only reliable old-server signal there.
+func taskProjectEchoOK(echo *string, project *string) error {
+	if project == nil {
+		return nil
+	}
+	if echo == nil || *echo != *project {
+		return fmt.Errorf("list_project_filter_ignored: server response lacks the project echo — it predates --project filtering")
+	}
+	return nil
+}
+
 func (c Client) ListTasks(ctx context.Context, lane, state, parentLane string, project *string, limit int) ([]store.Task, error) {
 	var out struct {
-		Tasks []store.Task `json:"tasks"`
+		Tasks   []store.Task `json:"tasks"`
+		Project *string      `json:"project"`
 	}
 	q := url.Values{"lane": {lane}, "state": {state}, "parent_lane": {parentLane}, "limit": {fmt.Sprint(limit)}}
 	if project != nil {
@@ -527,6 +542,9 @@ func (c Client) ListTasks(ctx context.Context, lane, state, parentLane string, p
 	if err != nil {
 		return nil, err
 	}
+	if err := taskProjectEchoOK(out.Project, project); err != nil {
+		return nil, err
+	}
 	if err := taskProjectFilterOK(out.Tasks, project); err != nil {
 		return nil, err
 	}
@@ -534,7 +552,8 @@ func (c Client) ListTasks(ctx context.Context, lane, state, parentLane string, p
 }
 func (c Client) ListTasksPage(ctx context.Context, lane, state, parentLane string, project *string, afterID int64, limit int) ([]store.Task, error) {
 	var out struct {
-		Tasks []store.Task `json:"tasks"`
+		Tasks   []store.Task `json:"tasks"`
+		Project *string      `json:"project"`
 	}
 	q := url.Values{
 		"lane":        {lane},
@@ -548,6 +567,9 @@ func (c Client) ListTasksPage(ctx context.Context, lane, state, parentLane strin
 	}
 	err := c.call(ctx, "GET", "/v1/tasks?"+q.Encode(), nil, &out)
 	if err != nil {
+		return nil, err
+	}
+	if err := taskProjectEchoOK(out.Project, project); err != nil {
 		return nil, err
 	}
 	if err := taskProjectFilterOK(out.Tasks, project); err != nil {
@@ -644,7 +666,27 @@ func (c Client) ExportTasks(ctx context.Context, lane, state, parentLane string,
 		_ = json.NewDecoder(resp.Body).Decode(&x)
 		return nil, errors.New(x.Error)
 	}
-	return io.ReadAll(resp.Body)
+	body, e := io.ReadAll(resp.Body)
+	if e != nil {
+		return nil, e
+	}
+	// A requested project filter must echo back inside scope. A server that
+	// predates the field silently ignores the parameter and returns an
+	// unfiltered export — the byte-for-byte document would carry no signal.
+	if project != nil {
+		var probe struct {
+			Scope struct {
+				Project *string `json:"project"`
+			} `json:"scope"`
+		}
+		if err := json.Unmarshal(body, &probe); err != nil {
+			return nil, fmt.Errorf("export_project_filter_unchecked: server export body did not parse — cannot confirm the project filter was applied: %w", err)
+		}
+		if probe.Scope.Project == nil || *probe.Scope.Project != *project {
+			return nil, fmt.Errorf("export_project_filter_ignored: server export lacks scope.project=%q — it predates --project filtering", *project)
+		}
+	}
+	return body, nil
 }
 func (c Client) GetTask(ctx context.Context, id int64) (store.Task, bool, error) {
 	var out store.Task

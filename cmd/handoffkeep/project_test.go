@@ -35,7 +35,14 @@ func projectServer(t *testing.T, status int) (*httptest.Server, *[]relaneRequest
 		case r.URL.Path == "/v1/tasks" && r.Method == http.MethodPost:
 			_, _ = w.Write([]byte(`{"id":9,"project":"experiment"}`))
 		case r.URL.Path == "/v1/tasks":
-			_, _ = w.Write([]byte(`{"tasks":[]}`))
+			// A project-aware server echoes the requested filter; the echo
+			// is what lets the client detect an old server on an empty page.
+			if r.URL.Query().Has("project") {
+				resp, _ := json.Marshal(map[string]any{"tasks": []any{}, "project": r.URL.Query().Get("project")})
+				_, _ = w.Write(resp)
+			} else {
+				_, _ = w.Write([]byte(`{"tasks":[]}`))
+			}
 		default:
 			_, _ = w.Write([]byte(`{}`))
 		}
@@ -93,6 +100,44 @@ func TestTasksListSendsProjectFilter(t *testing.T) {
 	}
 	if !strings.Contains((*seen)[1].Path, "project=") {
 		t.Fatalf("legacy-bucket list path=%q", (*seen)[1].Path)
+	}
+}
+
+// An old server silently drops ?project and returns an unfiltered list —
+// including an empty one. With no echo key in the body the CLI must still
+// fail loudly rather than print a legitimate-looking empty result.
+func TestTasksListOldServerEmptyPageRefusal(t *testing.T) {
+	old := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"tasks":[]}`))
+	}))
+	t.Cleanup(old.Close)
+	var out bytes.Buffer
+	err := run([]string{"tasks", "list", "--project", "wrk", "--url", old.URL, "--token", "tok"}, &out, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "list_project_filter_ignored") {
+		t.Fatalf("empty-page skew err=%v, want list_project_filter_ignored", err)
+	}
+	// The legacy bucket on an old server must fail too — unfiltered rows
+	// decode as NULL project and would masquerade as the bucket.
+	out.Reset()
+	err = run([]string{"tasks", "list", "--project", "", "--url", old.URL, "--token", "tok"}, &out, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "list_project_filter_ignored") {
+		t.Fatalf("legacy-bucket skew err=%v, want list_project_filter_ignored", err)
+	}
+}
+
+// A project-filtered export against an old server returns an unfiltered
+// document with no scope.project — the CLI must refuse it, not emit it.
+func TestTasksExportOldServerRefusal(t *testing.T) {
+	old := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"snapshot_id":"x","scope":{"lane":"","state":""},"tasks":[]}`))
+	}))
+	t.Cleanup(old.Close)
+	var out bytes.Buffer
+	err := run([]string{"tasks", "export", "--project", "wrk", "--url", old.URL, "--token", "tok"}, &out, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "export_project_filter_ignored") {
+		t.Fatalf("old-server export err=%v, want export_project_filter_ignored", err)
 	}
 }
 

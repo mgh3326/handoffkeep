@@ -676,7 +676,13 @@ func (s Server) tasksList(w http.ResponseWriter, r *http.Request) {
 		appErr(w, err)
 		return
 	}
-	jsonOut(w, http.StatusOK, map[string]any{"tasks": xs})
+	body := map[string]any{"tasks": xs}
+	if project != nil {
+		// Echo the requested filter so new clients can tell a filtered
+		// answer from an old server that silently dropped the parameter.
+		body["project"] = *project
+	}
+	jsonOut(w, http.StatusOK, body)
 }
 
 // tasksExport serves one consistent task snapshot. It reuses the existing

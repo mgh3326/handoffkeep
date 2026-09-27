@@ -92,6 +92,18 @@ func TestSetTaskProjectEvent(t *testing.T) {
 	if _, _, err = s.SetTaskProject(ctx, 999999, "wrk", "proj-test", "ghost"); !errors.Is(err, ErrTaskNotFound) {
 		t.Fatalf("SetTaskProject(missing) err=%v", err)
 	}
+	// Terminal rows stay reclassifiable — project is metadata, not lifecycle.
+	if _, err = s.TransitionTask(ctx, x.ID, "dropped", "proj-test", "", nil, ""); err != nil {
+		t.Fatalf("drop for terminal-relabel probe: %v", err)
+	}
+	x, changed, err = s.SetTaskProject(ctx, x.ID, "fleet-ops", "proj-test", "post-close reclass")
+	if err != nil || !changed || x.Project == nil || *x.Project != "fleet-ops" || x.State != "dropped" {
+		t.Fatalf("terminal SetTaskProject=%+v changed=%t err=%v", x, changed, err)
+	}
+	var lastTo string
+	if err = pool.QueryRow(ctx, `SELECT "to" FROM task_events WHERE task_id=$1 AND kind='project' ORDER BY id DESC LIMIT 1`, x.ID).Scan(&lastTo); err != nil || lastTo != "fleet-ops" {
+		t.Fatalf("terminal project event to=%q err=%v", lastTo, err)
+	}
 }
 
 // TestTaskProjectVocabulary covers seeding, listing, and extension.
