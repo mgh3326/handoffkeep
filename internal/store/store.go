@@ -1446,15 +1446,35 @@ func taskTransitionAllowed(from, to string) bool {
 	return TaskTransitions[from][to]
 }
 
-func (s *Store) claimTaskTx(ctx context.Context, tx pgx.Tx, id int64, by string) (Task, error) {
+func (s *Store) claimTaskTx(ctx context.Context, tx pgx.Tx, id int64, by, jobID string) (Task, error) {
 	if !validText(by, 128) || by == "" {
 		return Task{}, errors.New("invalid task claimant")
 	}
+	if !validText(jobID, 4096) {
+		return Task{}, errors.New("invalid task claim job_id")
+	}
+	if err := guard.Reject(jobID); err != nil {
+		return Task{}, err
+	}
 	var x Task
-	if err := scanTask(tx.QueryRow(ctx, `UPDATE tasks SET state='claimed', claimed_by=$2, updated_at=$3 WHERE id=$1 AND state='backlog' RETURNING `+taskColumns, id, by, time.Now().UTC()), &x); err != nil {
+	if err := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, id), &x); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Task{}, ErrTaskConflict
 		}
+		return Task{}, err
+	}
+	if x.State != "backlog" {
+		// A replayed claim — same claimant, same non-empty job id — is a
+		// no-op: the row is returned as recorded and no second event is
+		// written. Every other claim of a task that is not in backlog is a
+		// conflict, with the reason wrapped on the sentinel so HTTP callers
+		// can surface it.
+		if jobID != "" && x.ClaimedBy == by && x.Refs.JobID == jobID {
+			return x, nil
+		}
+		return Task{}, claimConflict(x, by, jobID)
+	}
+	if err := scanTask(tx.QueryRow(ctx, `UPDATE tasks SET state='claimed', claimed_by=$2, refs=CASE WHEN $3<>'' THEN refs||jsonb_build_object('job_id',$3::text) ELSE refs END, updated_at=$4 WHERE id=$1 RETURNING `+taskColumns, id, by, jobID, time.Now().UTC()), &x); err != nil {
 		return Task{}, err
 	}
 	refs, err := json.Marshal(x.Refs)
@@ -1472,13 +1492,34 @@ func (s *Store) claimTaskTx(ctx context.Context, tx pgx.Tx, id int64, by string)
 	return x, nil
 }
 
-func (s *Store) ClaimTask(ctx context.Context, id int64, by string) (Task, error) {
+// claimConflict names why a non-backlog task refused a claim. The sentinel
+// stays ErrTaskConflict so errors.Is and the HTTP 409 mapping are unchanged;
+// the wrapped reason is what the API copies into the response body.
+func claimConflict(x Task, by, jobID string) error {
+	switch {
+	case x.ClaimedBy == "":
+		return fmt.Errorf("%w: task state %s cannot be claimed", ErrTaskConflict, x.State)
+	case x.ClaimedBy != by:
+		return fmt.Errorf("%w: already claimed by %s", ErrTaskConflict, x.ClaimedBy)
+	case jobID != "" && x.Refs.JobID != jobID:
+		if x.Refs.JobID == "" {
+			return fmt.Errorf("%w: already claimed without job_id", ErrTaskConflict)
+		}
+		return fmt.Errorf("%w: already claimed with job_id %s", ErrTaskConflict, x.Refs.JobID)
+	case x.State == "claimed":
+		return fmt.Errorf("%w: already claimed", ErrTaskConflict)
+	default:
+		return fmt.Errorf("%w: task state %s cannot be claimed", ErrTaskConflict, x.State)
+	}
+}
+
+func (s *Store) ClaimTask(ctx context.Context, id int64, by, jobID string) (Task, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return Task{}, err
 	}
 	defer tx.Rollback(ctx)
-	x, err := s.claimTaskTx(ctx, tx, id, by)
+	x, err := s.claimTaskTx(ctx, tx, id, by, jobID)
 	if err != nil {
 		return Task{}, err
 	}
@@ -1503,7 +1544,7 @@ func (s *Store) NextTask(ctx context.Context, lane, by string) (Task, error) {
 	if err != nil {
 		return Task{}, err
 	}
-	x, err := s.claimTaskTx(ctx, tx, id, by)
+	x, err := s.claimTaskTx(ctx, tx, id, by, "")
 	if err != nil {
 		return Task{}, err
 	}

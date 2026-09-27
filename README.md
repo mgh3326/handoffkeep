@@ -126,6 +126,9 @@ The HTTP API uses the usual bearer token: `POST /v1/tasks`, `GET /v1/tasks`,
 `GET /v1/tasks/{id}`, `POST /v1/tasks/{id}/claim`, and
 `POST /v1/tasks/{id}/transition`. `POST /v1/tasks/next` supports the CLI's
 atomic `next` operation. Invalid state changes and competing claims return 409.
+A claim may carry `job_id`: the server writes `claimed_by` and `refs.job_id`
+in the same transaction, and replaying the identical claim (same claimant,
+same non-empty job id) is a no-op that returns the row instead of a 409.
 `POST /v1/tasks/relane` moves tasks between lanes without touching state,
 priority, refs, or claimant: `{"ids": [42], "to": "lane-b", "note": "why"}`.
 Each id commits independently and every item reports `ok`, `changed`, or a

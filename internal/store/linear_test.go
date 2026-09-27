@@ -72,10 +72,10 @@ func TestLinearOutboxMutationAtomicity(t *testing.T) {
 	if err != nil || len(rows) != 1 || rows[0].Seq != 1 || rows[0].Op != LinearOpIssueCreate {
 		t.Fatalf("create outbox=%+v err=%v", rows, err)
 	}
-	if _, err = st.ClaimTask(t.Context(), task.ID, "builder"); err != nil {
+	if _, err = st.ClaimTask(t.Context(), task.ID, "builder", ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = st.ClaimTask(t.Context(), task.ID, "builder-again"); !errors.Is(err, ErrTaskConflict) {
+	if _, err = st.ClaimTask(t.Context(), task.ID, "builder-again", ""); !errors.Is(err, ErrTaskConflict) {
 		t.Fatalf("duplicate claim error=%v", err)
 	}
 	rows, err = st.ListLinearOutbox(t.Context(), task.ID)
@@ -140,7 +140,7 @@ func TestLinearOptInAndNeedsDecisionBoundaries(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			task := linearTask(t, st, refs)
-			if _, err := st.ClaimTask(t.Context(), task.ID, "builder"); err != nil {
+			if _, err := st.ClaimTask(t.Context(), task.ID, "builder", ""); err != nil {
 				t.Fatal(err)
 			}
 			for _, state := range []string{"in_progress", "verifying", "merged"} {
@@ -155,7 +155,7 @@ func TestLinearOptInAndNeedsDecisionBoundaries(t *testing.T) {
 		})
 	}
 	task := linearTask(t, st, TaskRefs{Linear: &TaskLinear{Sync: true}})
-	if _, err := st.ClaimTask(t.Context(), task.ID, "builder"); err != nil {
+	if _, err := st.ClaimTask(t.Context(), task.ID, "builder", ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.TransitionTask(t.Context(), task.ID, "needs_decision", "builder", "choose", nil); err != nil {
@@ -199,7 +199,7 @@ func TestLinearCreateAndTerminalPayloads(t *testing.T) {
 	if !reflect.DeepEqual(gotLabels, wantLabels) {
 		t.Fatalf("labels=%v want=%v", gotLabels, wantLabels)
 	}
-	if _, err = st.ClaimTask(t.Context(), task.ID, "builder"); err != nil {
+	if _, err = st.ClaimTask(t.Context(), task.ID, "builder", ""); err != nil {
 		t.Fatal(err)
 	}
 	for _, state := range []string{"in_progress", "verifying", "merged"} {
@@ -231,7 +231,7 @@ func TestLinearTransitionMergesNestedRefs(t *testing.T) {
 		Verify: "report/verify", Decision: "decision/connector", DeploySHA: "abcdef0123456789",
 	}
 	task := linearTask(t, st, TaskRefs{Linear: original})
-	if _, err := st.ClaimTask(t.Context(), task.ID, "builder"); err != nil {
+	if _, err := st.ClaimTask(t.Context(), task.ID, "builder", ""); err != nil {
 		t.Fatal(err)
 	}
 	updated, err := st.TransitionTask(t.Context(), task.ID, "in_progress", "builder", "partial metadata", &TaskRefs{

@@ -47,7 +47,7 @@ func TestLinearSyncDefaultsOff(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.ClaimTask(t.Context(), task.ID, "builder"); err != nil {
+	if _, err := st.ClaimTask(t.Context(), task.ID, "builder", ""); err != nil {
 		t.Fatal(err)
 	}
 	rows, err := st.ListLinearOutbox(t.Context(), task.ID)

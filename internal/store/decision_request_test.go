@@ -25,7 +25,7 @@ func decisionTask(t *testing.T, s *Store, state string) Task {
 	}[state]
 	for _, to := range path {
 		if to == "claimed" {
-			x, err = s.ClaimTask(ctx, x.ID, "dr-test")
+			x, err = s.ClaimTask(ctx, x.ID, "dr-test", "")
 		} else {
 			x, err = s.TransitionTask(ctx, x.ID, to, "dr-test", "step", nil)
 		}

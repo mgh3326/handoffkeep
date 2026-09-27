@@ -129,7 +129,7 @@ func TestTaskCommentNeverMovesTaskOrDecisions(t *testing.T) {
 	s := taskTestStore(t)
 	lane := taskLane(t)
 	task := newTask(t, s, lane, "comment is data", 7)
-	if _, err := s.ClaimTask(t.Context(), task.ID, "builder"); err != nil {
+	if _, err := s.ClaimTask(t.Context(), task.ID, "builder", ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.TransitionTask(t.Context(), task.ID, "needs_decision", "builder", "pick one", nil); err != nil {

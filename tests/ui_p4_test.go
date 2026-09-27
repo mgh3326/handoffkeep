@@ -453,7 +453,7 @@ func p4DecideTask(t *testing.T, s *store.Store, lane, title, state string) store
 	if state == "backlog" {
 		return task
 	}
-	task, err = s.ClaimTask(t.Context(), task.ID, "worker-a")
+	task, err = s.ClaimTask(t.Context(), task.ID, "worker-a", "")
 	if err != nil {
 		t.Fatal(err)
 	}

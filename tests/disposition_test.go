@@ -444,7 +444,7 @@ func TestDispositionSummaryDefinition(t *testing.T) {
 	}
 	// A merged PR without an item is a coverage candidate.
 	merged := createUITask(t, s, laneA, "merged work")
-	if _, err := s.ClaimTask(ctx, merged.ID, "b"); err != nil {
+	if _, err := s.ClaimTask(ctx, merged.ID, "b", ""); err != nil {
 		t.Fatal(err)
 	}
 	for _, to := range []string{"in_progress", "join"} {

@@ -386,7 +386,7 @@ func tasksCmd(args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		x, err := c.ClaimTask(ctx, id, *by)
+		x, err := c.ClaimTask(ctx, id, *by, *jobID)
 		if err != nil {
 			return err
 		}
