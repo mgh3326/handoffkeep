@@ -134,14 +134,15 @@ func (h *Handler) boardTasks(w http.ResponseWriter, r *http.Request) {
 }
 
 type boardEvent struct {
-	ID   int64           `json:"id"`
-	Kind string          `json:"kind"`
-	From string          `json:"from"`
-	To   string          `json:"to"`
-	By   string          `json:"by"`
-	Note string          `json:"note,omitempty"`
-	Refs *store.TaskRefs `json:"refs,omitempty"`
-	At   time.Time       `json:"at"`
+	ID    int64           `json:"id"`
+	Kind  string          `json:"kind"`
+	From  string          `json:"from"`
+	To    string          `json:"to"`
+	By    string          `json:"by"`
+	Note  string          `json:"note,omitempty"`
+	NoJob string          `json:"no_job,omitempty"`
+	Refs  *store.TaskRefs `json:"refs,omitempty"`
+	At    time.Time       `json:"at"`
 }
 
 type dwellSegment struct {
@@ -325,7 +326,7 @@ func (h *Handler) boardTaskDetail(w http.ResponseWriter, r *http.Request) {
 	for _, event := range task.Events {
 		response.Events = append(response.Events, boardEvent{
 			ID: event.ID, Kind: event.Kind, From: event.From, To: event.To, By: event.By,
-			Note: event.Note, Refs: event.Refs, At: event.At.UTC(),
+			Note: event.Note, NoJob: event.NoJob, Refs: event.Refs, At: event.At.UTC(),
 		})
 	}
 	issue, found, err := h.store.GetLinearIssue(r.Context(), id)

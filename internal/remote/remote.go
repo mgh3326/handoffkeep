@@ -326,6 +326,11 @@ func (c Client) ClaimTask(ctx context.Context, id int64, claimedBy, jobID, noJob
 	// silently dropping the field. Treat that as failure: the task is
 	// claimed but unlinked, and reporting success here would falsify the
 	// job link.
+	// A same-claimant replay on an already-active row answers with that
+	// row's state (claimed or in_progress), so both are honest responses.
+	if out.State != "claimed" && out.State != "in_progress" {
+		return out, fmt.Errorf("claim_not_applied: server response has state=%q, want claimed", out.State)
+	}
 	if jobID != "" && out.Refs.JobID != jobID {
 		return out, fmt.Errorf("claim_job_id_not_recorded: server response has refs.job_id=%q, want %q (server predates job_id claims)", out.Refs.JobID, jobID)
 	}
@@ -348,6 +353,9 @@ func (c Client) NextTask(ctx context.Context, lane, claimedBy, jobID, noJob stri
 		}
 		return out, err
 	}
+	if out.State != "claimed" {
+		return out, fmt.Errorf("next_not_applied: server response has state=%q, want claimed", out.State)
+	}
 	if jobID != "" && out.Refs.JobID != jobID {
 		return out, fmt.Errorf("next_job_id_not_recorded: server response has refs.job_id=%q, want %q (server predates job_id claims)", out.Refs.JobID, jobID)
 	}
@@ -369,7 +377,19 @@ func (c Client) TransitionTask(ctx context.Context, id int64, to, note string, r
 			return out, fmt.Errorf("transition_no_job_rejected: server refused the transition with invalid_context — it likely predates no_job support")
 		}
 	}
-	return out, err
+	if err != nil {
+		return out, err
+	}
+	// A 200 that does not reflect the request is a lie, not a success: the
+	// state must be the one asked for, and a job_id sent for linkage must be
+	// recorded (same silent-drop defense as claims).
+	if out.State != to {
+		return out, fmt.Errorf("transition_not_applied: server response has state=%q, want %q", out.State, to)
+	}
+	if refs != nil && refs.JobID != "" && out.Refs.JobID != refs.JobID {
+		return out, fmt.Errorf("transition_job_id_not_recorded: server response has refs.job_id=%q, want %q", out.Refs.JobID, refs.JobID)
+	}
+	return out, nil
 }
 
 // RecordDecisionRequest records a structured decision request on a task.

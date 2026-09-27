@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -416,6 +417,80 @@ func TestTaskNoJobWireCompatWithOldServer(t *testing.T) {
 	// Without the flag the same server error stays the raw invalid_context.
 	if _, err := c.TransitionTask(t.Context(), 7, "claimed", "", nil, ""); err == nil || err.Error() != "invalid_context" {
 		t.Fatalf("plain transition err=%v, want invalid_context", err)
+	}
+}
+
+// A 200 whose body contradicts the request is a lie: the client names it
+// rather than reporting success on a write that never landed.
+func TestTaskClientRejectsContradictory200(t *testing.T) {
+	var h *httptest.Server
+	h = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		state := "claimed"
+		refs := map[string]any{}
+		if strings.Contains(r.URL.Path, "/transition") {
+			// Claim applied but the asked-for state did not.
+			state = "backlog"
+		}
+		fmt.Fprintf(w, `{"id":7,"lane":"x","title":"t","state":%q,"claimed_by":"captain-a","refs":%s,"priority":0,"kind":"implement","created_by":"x","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}`, state, mustJSON(refs))
+	}))
+	defer h.Close()
+	c := remote.Client{URL: h.URL, Token: "t", HTTP: h.Client()}
+	if _, err := c.TransitionTask(t.Context(), 7, "in_progress", "", nil, ""); err == nil || !strings.Contains(err.Error(), "transition_not_applied") {
+		t.Fatalf("transition err=%v, want transition_not_applied", err)
+	}
+	if _, err := c.ClaimTask(t.Context(), 7, "captain-a", "job-1", ""); err == nil || !strings.Contains(err.Error(), "claim_job_id_not_recorded") {
+		t.Fatalf("claim err=%v, want claim_job_id_not_recorded", err)
+	}
+	// A replayed claim on an already-active row is honest: in_progress is
+	// accepted when claimant and job match the request.
+	h2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":7,"lane":"x","title":"t","state":"in_progress","claimed_by":"captain-a","refs":{"job_id":"job-1"},"priority":0,"kind":"implement","created_by":"x","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}`)
+	}))
+	defer h2.Close()
+	c2 := remote.Client{URL: h2.URL, Token: "t", HTTP: h2.Client()}
+	if got, err := c2.ClaimTask(t.Context(), 7, "captain-a", "job-1", ""); err != nil || got.State != "in_progress" {
+		t.Fatalf("replayed claim got=%v err=%v", got.State, err)
+	}
+}
+
+func mustJSON(v any) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		panic(err)
+	}
+	return string(b)
+}
+
+// The console detail endpoint (/ui/api/board/tasks/<id>) must project
+// no_job through to the drawer — a recorded reason the UI drops is an
+// invisible exemption.
+func TestTaskBoardDetailProjectsNoJob(t *testing.T) {
+	s := uiStore(t)
+	fixture := newUIJWTFixture(t)
+	h := newUITestServer(t, s, fixture, "", "", 0)
+	defer h.Close()
+	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
+
+	task := createUITask(t, s, uiLane(t, "lane-a"), "projected reason")
+	if _, err := s.ClaimTask(t.Context(), task.ID, "captain-a", "", "manual queue item"); err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Events []struct {
+			To    string `json:"to"`
+			NoJob string `json:"no_job"`
+		} `json:"events"`
+	}
+	url := h.URL + "/ui/api/board/tasks/" + fmt.Sprint(task.ID)
+	if status := boardJSON(t, h.Client(), url, assertion, &got); status != http.StatusOK {
+		t.Fatalf("detail status=%d", status)
+	}
+	if len(got.Events) != 1 || got.Events[0].NoJob != "manual queue item" {
+		t.Fatalf("detail events=%+v want the recorded no_job", got.Events)
 	}
 }
 
