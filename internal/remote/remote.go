@@ -298,19 +298,27 @@ func (c Client) CreateTask(ctx context.Context, x store.Task) (store.Task, error
 	err := c.call(ctx, "POST", "/v1/tasks", x, &out)
 	return out, err
 }
-func (c Client) ClaimTask(ctx context.Context, id int64, claimedBy, jobID string) (store.Task, error) {
+func (c Client) ClaimTask(ctx context.Context, id int64, claimedBy, jobID, noJob string) (store.Task, error) {
 	var out store.Task
 	body := map[string]string{"claimed_by": claimedBy}
 	if jobID != "" {
 		body["job_id"] = jobID
 	}
+	if noJob != "" {
+		body["no_job"] = noJob
+	}
 	err := c.call(ctx, "POST", fmt.Sprintf("/v1/tasks/%d/claim", id), body, &out)
 	if err != nil {
 		// Servers whose decoder rejects unknown fields answer the new body
-		// with the generic invalid_context rather than naming job_id.
+		// with the generic invalid_context rather than naming job_id/no_job.
 		var he *HTTPError
-		if jobID != "" && errors.As(err, &he) && he.Code == "invalid_context" {
-			return out, fmt.Errorf("claim_job_id_rejected: server refused the claim with invalid_context (job_id=%q) — it likely predates job_id claim support", jobID)
+		if errors.As(err, &he) && he.Code == "invalid_context" {
+			if jobID != "" {
+				return out, fmt.Errorf("claim_job_id_rejected: server refused the claim with invalid_context (job_id=%q) — it likely predates job_id claim support", jobID)
+			}
+			if noJob != "" {
+				return out, fmt.Errorf("claim_no_job_rejected: server refused the claim with invalid_context — it likely predates no_job claim support")
+			}
 		}
 		return out, err
 	}
@@ -323,18 +331,44 @@ func (c Client) ClaimTask(ctx context.Context, id int64, claimedBy, jobID string
 	}
 	return out, nil
 }
-func (c Client) NextTask(ctx context.Context, lane, claimedBy string) (store.Task, error) {
+func (c Client) NextTask(ctx context.Context, lane, claimedBy, jobID, noJob string) (store.Task, error) {
 	var out store.Task
-	err := c.call(ctx, "POST", "/v1/tasks/next", map[string]string{"lane": lane, "claimed_by": claimedBy}, &out)
-	return out, err
+	body := map[string]string{"lane": lane, "claimed_by": claimedBy}
+	if jobID != "" {
+		body["job_id"] = jobID
+	}
+	if noJob != "" {
+		body["no_job"] = noJob
+	}
+	err := c.call(ctx, "POST", "/v1/tasks/next", body, &out)
+	if err != nil {
+		var he *HTTPError
+		if errors.As(err, &he) && he.Code == "invalid_context" && noJob != "" {
+			return out, fmt.Errorf("next_no_job_rejected: server refused the claim with invalid_context — it likely predates no_job support")
+		}
+		return out, err
+	}
+	if jobID != "" && out.Refs.JobID != jobID {
+		return out, fmt.Errorf("next_job_id_not_recorded: server response has refs.job_id=%q, want %q (server predates job_id claims)", out.Refs.JobID, jobID)
+	}
+	return out, nil
 }
-func (c Client) TransitionTask(ctx context.Context, id int64, to, note string, refs *store.TaskRefs) (store.Task, error) {
+func (c Client) TransitionTask(ctx context.Context, id int64, to, note string, refs *store.TaskRefs, noJob string) (store.Task, error) {
 	var out store.Task
 	err := c.call(ctx, "POST", fmt.Sprintf("/v1/tasks/%d/transition", id), struct {
-		To   string          `json:"to"`
-		Note string          `json:"note"`
-		Refs *store.TaskRefs `json:"refs,omitempty"`
-	}{to, note, refs}, &out)
+		To    string          `json:"to"`
+		Note  string          `json:"note"`
+		Refs  *store.TaskRefs `json:"refs,omitempty"`
+		NoJob string          `json:"no_job,omitempty"`
+	}{to, note, refs, noJob}, &out)
+	if err != nil && noJob != "" {
+		// Same strict-decoder translation as claims: a server that predates
+		// the no_job field answers invalid_context rather than naming it.
+		var he *HTTPError
+		if errors.As(err, &he) && he.Code == "invalid_context" {
+			return out, fmt.Errorf("transition_no_job_rejected: server refused the transition with invalid_context — it likely predates no_job support")
+		}
+	}
 	return out, err
 }
 
@@ -476,7 +510,7 @@ func (c Client) LinearOutboxStatus(ctx context.Context) (store.LinearOutboxStatu
 }
 
 // ResolveDecision closes an already-handled decision through the bearer API.
-func (c Client) ResolveDecision(ctx context.Context, kind string, id int64, by, answer, note string, noInject bool) (store.RelayEvent, error) {
+func (c Client) ResolveDecision(ctx context.Context, kind string, id int64, by, answer, note string, noInject bool, noJob string) (store.RelayEvent, error) {
 	var out struct {
 		Event store.RelayEvent `json:"event"`
 	}
@@ -487,6 +521,13 @@ func (c Client) ResolveDecision(ctx context.Context, kind string, id int64, by, 
 		Answer   string `json:"answer"`
 		Note     string `json:"note,omitempty"`
 		NoInject bool   `json:"no_inject,omitempty"`
-	}{kind, id, by, answer, note, noInject}, &out)
+		NoJob    string `json:"no_job,omitempty"`
+	}{kind, id, by, answer, note, noInject, noJob}, &out)
+	if err != nil && noJob != "" {
+		var he *HTTPError
+		if errors.As(err, &he) && he.Code == "invalid_context" {
+			return out.Event, fmt.Errorf("resolve_no_job_rejected: server refused the resolve with invalid_context — it likely predates no_job support")
+		}
+	}
 	return out.Event, err
 }

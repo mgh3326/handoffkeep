@@ -193,10 +193,16 @@ func createUITask(t *testing.T, s *store.Store, lane, title string) store.Task {
 
 func claimAndTransition(t *testing.T, s *store.Store, task store.Task, to, note string) store.Task {
 	t.Helper()
-	if _, err := s.ClaimTask(t.Context(), task.ID, "test-owner", ""); err != nil {
+	// A task filed with a refs.job_id keeps it — claiming with a different
+	// id would clobber the link fixtures assert on.
+	jobID := task.Refs.JobID
+	if jobID == "" {
+		jobID = "job-1"
+	}
+	if _, err := s.ClaimTask(t.Context(), task.ID, "test-owner", jobID, ""); err != nil {
 		t.Fatal(err)
 	}
-	updated, err := s.TransitionTask(t.Context(), task.ID, to, "test-node", note, nil)
+	updated, err := s.TransitionTask(t.Context(), task.ID, to, "test-node", note, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -434,7 +440,7 @@ func TestUIDecisionInbox(t *testing.T) {
 	claimAndTransition(t, s, openTask, "needs_decision", question)
 	closedTask := createUITask(t, s, lane, "closed decision")
 	claimAndTransition(t, s, closedTask, "needs_decision", "closed question")
-	if _, err := s.TransitionTask(t.Context(), closedTask.ID, "claimed", "test-node", "resolved", nil); err != nil {
+	if _, err := s.TransitionTask(t.Context(), closedTask.ID, "claimed", "test-node", "resolved", nil, ""); err != nil {
 		t.Fatal(err)
 	}
 	openEscalation := seedRelay(t, s, lane, "job.escalate", "open-escalation-"+strconv.FormatInt(time.Now().UnixNano(), 10), "", "[decision-needed] open escalation", "")

@@ -237,44 +237,44 @@ func TestExportCountsAndFilters(t *testing.T) {
 
 	newTask(t, s, laneA, "backlog task", 0)
 	claimed := newTask(t, s, laneA, "claimed task", 0)
-	if _, err := s.ClaimTask(t.Context(), claimed.ID, "captain", ""); err != nil {
+	if _, err := s.ClaimTask(t.Context(), claimed.ID, "captain", "job-1", ""); err != nil {
 		t.Fatal(err)
 	}
 	inProgress := newTask(t, s, laneA, "progress task", 0)
-	if _, err := s.ClaimTask(t.Context(), inProgress.ID, "captain", ""); err != nil {
+	if _, err := s.ClaimTask(t.Context(), inProgress.ID, "captain", "job-1", ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.TransitionTask(t.Context(), inProgress.ID, "in_progress", "node", "", nil); err != nil {
+	if _, err := s.TransitionTask(t.Context(), inProgress.ID, "in_progress", "node", "", nil, ""); err != nil {
 		t.Fatal(err)
 	}
 	verifying := newTask(t, s, laneA, "verify task", 0)
-	if _, err := s.ClaimTask(t.Context(), verifying.ID, "captain", ""); err != nil {
+	if _, err := s.ClaimTask(t.Context(), verifying.ID, "captain", "job-1", ""); err != nil {
 		t.Fatal(err)
 	}
 	for _, to := range []string{"in_progress", "verifying"} {
-		if _, err := s.TransitionTask(t.Context(), verifying.ID, to, "node", "", nil); err != nil {
+		if _, err := s.TransitionTask(t.Context(), verifying.ID, to, "node", "", nil, ""); err != nil {
 			t.Fatal(err)
 		}
 	}
 
 	join := newTask(t, s, laneB, "join task", 0)
-	if _, err := s.ClaimTask(t.Context(), join.ID, "captain", ""); err != nil {
+	if _, err := s.ClaimTask(t.Context(), join.ID, "captain", "job-1", ""); err != nil {
 		t.Fatal(err)
 	}
 	for _, to := range []string{"in_progress", "join"} {
-		if _, err := s.TransitionTask(t.Context(), join.ID, to, "node", "", nil); err != nil {
+		if _, err := s.TransitionTask(t.Context(), join.ID, to, "node", "", nil, ""); err != nil {
 			t.Fatal(err)
 		}
 	}
 	hold := newTask(t, s, laneB, "hold task", 0)
-	if _, err := s.TransitionTask(t.Context(), hold.ID, "hold", "node", "", nil); err != nil {
+	if _, err := s.TransitionTask(t.Context(), hold.ID, "hold", "node", "", nil, ""); err != nil {
 		t.Fatal(err)
 	}
 	decision := newTask(t, s, laneB, "decision task", 0)
-	if _, err := s.ClaimTask(t.Context(), decision.ID, "captain", ""); err != nil {
+	if _, err := s.ClaimTask(t.Context(), decision.ID, "captain", "job-1", ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.TransitionTask(t.Context(), decision.ID, "needs_decision", "node", "which path?", nil); err != nil {
+	if _, err := s.TransitionTask(t.Context(), decision.ID, "needs_decision", "node", "which path?", nil, ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.CreateTask(t.Context(), store.Task{Lane: laneB, ParentLane: laneA, Title: "child decision", Kind: "implement", CreatedBy: "node"}); err != nil {
@@ -282,16 +282,16 @@ func TestExportCountsAndFilters(t *testing.T) {
 	}
 
 	merged := newTask(t, s, laneC, "merged task", 0)
-	if _, err := s.ClaimTask(t.Context(), merged.ID, "captain", ""); err != nil {
+	if _, err := s.ClaimTask(t.Context(), merged.ID, "captain", "job-1", ""); err != nil {
 		t.Fatal(err)
 	}
 	for _, to := range []string{"in_progress", "verifying", "merged"} {
-		if _, err := s.TransitionTask(t.Context(), merged.ID, to, "node", "", nil); err != nil {
+		if _, err := s.TransitionTask(t.Context(), merged.ID, to, "node", "", nil, ""); err != nil {
 			t.Fatal(err)
 		}
 	}
 	dropped := newTask(t, s, laneC, "dropped task", 0)
-	if _, err := s.TransitionTask(t.Context(), dropped.ID, "dropped", "node", "", nil); err != nil {
+	if _, err := s.TransitionTask(t.Context(), dropped.ID, "dropped", "node", "", nil, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -417,7 +417,7 @@ func TestExportDigests(t *testing.T) {
 			t.Fatal(err)
 		}
 		if i == 0 {
-			if _, err := s.ClaimTask(t.Context(), task.ID, "captain-k", ""); err != nil {
+			if _, err := s.ClaimTask(t.Context(), task.ID, "captain-k", "job-1", ""); err != nil {
 				t.Fatal(err)
 			}
 		}

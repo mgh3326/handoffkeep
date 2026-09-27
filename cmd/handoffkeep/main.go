@@ -206,7 +206,7 @@ func taskRefs(pr, headSHA, reportPath, jobID string, linear *store.TaskLinear) (
 }
 
 func normalizeTaskArgs(args []string) ([]string, error) {
-	valueFlags := map[string]bool{"--url": true, "--token": true, "--lane": true, "--parent-lane": true, "--state": true, "--title": true, "--kind": true, "--priority": true, "--by": true, "--to": true, "--note": true, "--question": true, "--limit": true, "--pr": true, "--head-sha": true, "--report-path": true, "--job-id": true, "--option": true, "--recommended": true, "--tier": true, "--grade": true, "--brief-key": true, "--label": true, "--linear-report-key": true, "--linear-verify-key": true, "--linear-decision-key": true, "--deploy-sha": true, "--origin-pr": true, "--origin-task": true, "--doc": true}
+	valueFlags := map[string]bool{"--url": true, "--token": true, "--lane": true, "--parent-lane": true, "--state": true, "--title": true, "--kind": true, "--priority": true, "--by": true, "--to": true, "--note": true, "--question": true, "--limit": true, "--pr": true, "--head-sha": true, "--report-path": true, "--job-id": true, "--no-job": true, "--option": true, "--recommended": true, "--tier": true, "--grade": true, "--brief-key": true, "--label": true, "--linear-report-key": true, "--linear-verify-key": true, "--linear-decision-key": true, "--deploy-sha": true, "--origin-pr": true, "--origin-task": true, "--doc": true}
 	flags, positional := []string{}, []string{}
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -263,6 +263,7 @@ func tasksCmd(args []string, out io.Writer) error {
 	headSHA := fs.String("head-sha", "", "head revision reference")
 	reportPath := fs.String("report-path", "", "report path reference")
 	jobID := fs.String("job-id", "", "job reference")
+	noJob := fs.String("no-job", "", "recorded reason a claimed/in_progress transition may run without refs.job_id (exclusive with --job-id)")
 	originPR := fs.String("origin-pr", "", "merged pull request this task came from")
 	originTask := fs.Int64("origin-task", 0, "task this task came from (a disposition item for an ordered follow-up)")
 	bodyDoc := fs.String("doc", "", "hk document key holding the task body: key or key#section (tasks add only)")
@@ -287,16 +288,33 @@ func tasksCmd(args []string, out io.Writer) error {
 	if err := fs.Parse(parseArgs); err != nil {
 		return err
 	}
-	linearFlagsUsed, docFlagUsed := false, false
+	linearFlagsUsed, docFlagUsed, noJobSet := false, false, false
 	fs.Visit(func(item *flag.Flag) {
 		if item.Name == "doc" {
 			docFlagUsed = true
+		}
+		if item.Name == "no-job" {
+			noJobSet = true
 		}
 		switch item.Name {
 		case "linear-sync", "tier", "grade", "brief-key", "label", "linear-report-key", "linear-verify-key", "linear-decision-key", "deploy-sha":
 			linearFlagsUsed = true
 		}
 	})
+	noJobReason := ""
+	if noJobSet {
+		// An explicit empty flag is a caller mistake, not a request for the
+		// exemption: refuse before any request is sent.
+		noJobReason = strings.TrimSpace(*noJob)
+		if noJobReason == "" {
+			return errors.New("--no-job requires a non-empty reason")
+		}
+		switch args[0] {
+		case "claim", "next", "transition":
+		default:
+			return fmt.Errorf("--no-job is not accepted by tasks %s", args[0])
+		}
+	}
 	var linearRefs *store.TaskLinear
 	if linearFlagsUsed {
 		linearRefs = &store.TaskLinear{
@@ -386,7 +404,10 @@ func tasksCmd(args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		x, err := c.ClaimTask(ctx, id, *by, *jobID)
+		if noJobSet && *jobID != "" {
+			return errors.New("--job-id and --no-job are exclusive")
+		}
+		x, err := c.ClaimTask(ctx, id, *by, *jobID, noJobReason)
 		if err != nil {
 			return err
 		}
@@ -395,7 +416,10 @@ func tasksCmd(args []string, out io.Writer) error {
 		if fs.NArg() != 0 {
 			return errors.New("tasks next takes flags only")
 		}
-		x, err := c.NextTask(ctx, *lane, *by)
+		if noJobSet && *jobID != "" {
+			return errors.New("--job-id and --no-job are exclusive")
+		}
+		x, err := c.NextTask(ctx, *lane, *by, *jobID, noJobReason)
 		if err != nil {
 			if err.Error() == "queue_empty" {
 				return exitCodeError{code: 3, err: errors.New("no backlog task")}
@@ -407,6 +431,9 @@ func tasksCmd(args []string, out io.Writer) error {
 		id, err := parseID()
 		if err != nil {
 			return err
+		}
+		if noJobSet && *jobID != "" {
+			return errors.New("--job-id and --no-job are exclusive")
 		}
 		usingOptions := len(optionValues) > 0 || *recommended != "" || *noFreeAnswer
 		if usingOptions && *to != "needs_decision" {
@@ -435,7 +462,7 @@ func tasksCmd(args []string, out io.Writer) error {
 		if !hasRefs {
 			refs = nil
 		}
-		x, err := c.TransitionTask(ctx, id, *to, *note, refs)
+		x, err := c.TransitionTask(ctx, id, *to, *note, refs, noJobReason)
 		if err != nil {
 			return err
 		}
@@ -499,7 +526,7 @@ func parseTaskDecisionOptions(values []string, recommended string, noFreeAnswer 
 }
 
 func normalizeDecisionArgs(args []string) ([]string, error) {
-	valueFlags := map[string]bool{"--url": true, "--token": true, "--by": true, "--answer": true, "--note": true}
+	valueFlags := map[string]bool{"--url": true, "--token": true, "--by": true, "--answer": true, "--note": true, "--no-job": true}
 	flags, positional := []string{}, []string{}
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -530,6 +557,7 @@ func decisionsCmd(args []string, out io.Writer) error {
 	answer := fs.String("answer", "", "decision answer")
 	note := fs.String("note", "", "optional decision note")
 	noInject := fs.Bool("no-inject", false, "mark the event delivered without injection")
+	noJob := fs.String("no-job", "", "recorded reason when the resolved task re-enters claimed without a job link")
 	parseArgs, err := normalizeDecisionArgs(args[1:])
 	if err != nil {
 		return err
@@ -549,7 +577,7 @@ func decisionsCmd(args []string, out io.Writer) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	event, err := c.ResolveDecision(ctx, fs.Arg(0), id, *by, *answer, *note, *noInject)
+	event, err := c.ResolveDecision(ctx, fs.Arg(0), id, *by, *answer, *note, *noInject, strings.TrimSpace(*noJob))
 	if err != nil {
 		return err
 	}

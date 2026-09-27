@@ -151,9 +151,9 @@ func TestTasksRelaneAPIBatchPartialFailure(t *testing.T) {
 	for _, step := range []struct{ to string }{{"claimed"}, {"in_progress"}, {"verifying"}, {"merged"}} {
 		var err error
 		if step.to == "claimed" {
-			_, err = st.ClaimTask(ctx, term.ID, "c", "")
+			_, err = st.ClaimTask(ctx, term.ID, "c", "job-1", "")
 		} else {
-			_, err = st.TransitionTask(ctx, term.ID, step.to, "c", "", nil)
+			_, err = st.TransitionTask(ctx, term.ID, step.to, "c", "", nil, "")
 		}
 		if err != nil {
 			t.Fatal(err)

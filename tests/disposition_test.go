@@ -190,7 +190,7 @@ func TestDispositionIsNeverClaimable(t *testing.T) {
 	s := uiStore(t)
 	lane := uiLane(t, "director")
 	mustCreateDisposition(t, s, dispositionInput(lane, dispositionPR(t), 0, "A"))
-	if _, err := s.NextTask(t.Context(), lane, "director"); !errors.Is(err, store.ErrQueueEmpty) {
+	if _, err := s.NextTask(t.Context(), lane, "director", "job-1", ""); !errors.Is(err, store.ErrQueueEmpty) {
 		t.Fatalf("NextTask on a lane holding only a disposition item: err=%v, want queue_empty", err)
 	}
 }
@@ -203,7 +203,7 @@ func TestDispositionSilenceIsInert(t *testing.T) {
 	before := dispositionRowCounts(t, lane, x.ID)
 	ctx := t.Context()
 	for range 3 {
-		if _, err := s.NextTask(ctx, lane, "director"); !errors.Is(err, store.ErrQueueEmpty) {
+		if _, err := s.NextTask(ctx, lane, "director", "job-1", ""); !errors.Is(err, store.ErrQueueEmpty) {
 			t.Fatalf("NextTask err=%v", err)
 		}
 	}
@@ -249,7 +249,7 @@ func TestDispositionOnlyOperatorLeavesNeedsDecision(t *testing.T) {
 	x := mustCreateDisposition(t, s, dispositionInput(lane, dispositionPR(t), 0, "A"))
 	before := dispositionRowCounts(t, lane, x.ID)
 	for _, to := range []string{"claimed", "backlog", "hold", "dropped"} {
-		if _, err := s.TransitionTask(t.Context(), x.ID, to, "director-node", "self-dispose", nil); !errors.Is(err, store.ErrDispositionOperatorOnly) {
+		if _, err := s.TransitionTask(t.Context(), x.ID, to, "director-node", "self-dispose", nil, ""); !errors.Is(err, store.ErrDispositionOperatorOnly) {
 			t.Errorf("TransitionTask(%s) err=%v, want disposition_operator_only", to, err)
 		}
 	}
@@ -270,22 +270,22 @@ func TestDispositionOnlyOperatorLeavesNeedsDecision(t *testing.T) {
 	}
 	forged := answered.Refs
 	forged.Disposition.Answer.Key = "A"
-	if _, err := s.TransitionTask(t.Context(), x.ID, "hold", "director-node", "", &forged); err == nil {
+	if _, err := s.TransitionTask(t.Context(), x.ID, "hold", "director-node", "", &forged, ""); err == nil {
 		t.Fatal("transition patched the disposition answer")
 	}
 	if _, err := s.ApplyDisposition(t.Context(), x.ID, "director-node", ""); err != nil {
 		t.Fatal(err)
 	}
 	// D -> hold; a disposition item never returns to backlog (NextTask would claim it).
-	if _, err := s.TransitionTask(t.Context(), x.ID, "backlog", "director-node", "", nil); !errors.Is(err, store.ErrTaskConflict) {
+	if _, err := s.TransitionTask(t.Context(), x.ID, "backlog", "director-node", "", nil, ""); !errors.Is(err, store.ErrTaskConflict) {
 		t.Fatalf("hold->backlog err=%v, want task_conflict", err)
 	}
 	// Origins are not re-pointable through a transition patch.
-	if _, err := s.TransitionTask(t.Context(), x.ID, "hold", "director-node", "", &store.TaskRefs{OriginTask: x.ID}); err == nil {
+	if _, err := s.TransitionTask(t.Context(), x.ID, "hold", "director-node", "", &store.TaskRefs{OriginTask: x.ID}, ""); err == nil {
 		t.Fatal("transition gave a disposition item a second origin")
 	}
 	// Re-asking (into needs_decision) is allowed and opens a new generation.
-	if _, err := s.TransitionTask(t.Context(), x.ID, "needs_decision", "director-node", "re-ask", nil); err != nil {
+	if _, err := s.TransitionTask(t.Context(), x.ID, "needs_decision", "director-node", "re-ask", nil, ""); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -343,7 +343,7 @@ func TestDispositionBatchIsScopedToSnapshot(t *testing.T) {
 	if _, err := s.ApplyDisposition(t.Context(), stale.ID, "director-node", ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.TransitionTask(t.Context(), stale.ID, "needs_decision", "director-node", "re-ask", nil); err != nil {
+	if _, err := s.TransitionTask(t.Context(), stale.ID, "needs_decision", "director-node", "re-ask", nil, ""); err != nil {
 		t.Fatal(err)
 	}
 	late := mustCreateDisposition(t, s, dispositionInput(lane, dispositionPR(t), 0, "A"))
@@ -417,7 +417,7 @@ func TestDispositionSummaryDefinition(t *testing.T) {
 		t.Fatal(err)
 	}
 	time.Sleep(20 * time.Millisecond)
-	if _, err := s.TransitionTask(ctx, reasked.ID, "needs_decision", "director-node", "re-ask with new facts", nil); err != nil {
+	if _, err := s.TransitionTask(ctx, reasked.ID, "needs_decision", "director-node", "re-ask with new facts", nil, ""); err != nil {
 		t.Fatal(err)
 	}
 	base, err := s.DispositionSummary(ctx, time.Now().UTC())
@@ -444,15 +444,15 @@ func TestDispositionSummaryDefinition(t *testing.T) {
 	}
 	// A merged PR without an item is a coverage candidate.
 	merged := createUITask(t, s, laneA, "merged work")
-	if _, err := s.ClaimTask(ctx, merged.ID, "b", ""); err != nil {
+	if _, err := s.ClaimTask(ctx, merged.ID, "b", "job-1", ""); err != nil {
 		t.Fatal(err)
 	}
 	for _, to := range []string{"in_progress", "join"} {
-		if _, err := s.TransitionTask(ctx, merged.ID, to, "b", "", nil); err != nil {
+		if _, err := s.TransitionTask(ctx, merged.ID, to, "b", "", nil, ""); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if _, err := s.TransitionTask(ctx, merged.ID, "merged", "b", "", &store.TaskRefs{PR: dispositionPR(t)}); err != nil {
+	if _, err := s.TransitionTask(ctx, merged.ID, "merged", "b", "", &store.TaskRefs{PR: dispositionPR(t)}, ""); err != nil {
 		t.Fatal(err)
 	}
 	now, err := s.DispositionSummary(ctx, time.Now().UTC())
@@ -589,7 +589,7 @@ func TestDispositionGuardLeavesOtherDecisionsUnchanged(t *testing.T) {
 	if !seen[viaTransition.ID] || !seen[viaResolve.ID] {
 		t.Fatalf("builder questions missing from the generic inbox: %v", seen)
 	}
-	if got, err := s.TransitionTask(t.Context(), viaTransition.ID, "claimed", "director-node", "answered in chat", nil); err != nil || got.State != "claimed" {
+	if got, err := s.TransitionTask(t.Context(), viaTransition.ID, "claimed", "director-node", "answered in chat", nil, ""); err != nil || got.State != "claimed" {
 		t.Fatalf("generic transition of a builder question: state=%s err=%v", got.State, err)
 	}
 	svc := api.Service{Store: s}
@@ -605,7 +605,7 @@ func TestDispositionGuardLeavesOtherDecisionsUnchanged(t *testing.T) {
 		t.Fatalf("follow-up with origin_task: %+v err=%v", child, err)
 	}
 	child = claimAndTransition(t, s, child, "needs_decision", "q")
-	if _, err := s.TransitionTask(t.Context(), child.ID, "backlog", "director-node", "", nil); err != nil {
+	if _, err := s.TransitionTask(t.Context(), child.ID, "backlog", "director-node", "", nil, ""); err != nil {
 		t.Fatalf("origin refs must not trigger the disposition guard: %v", err)
 	}
 }
@@ -651,7 +651,7 @@ func TestDispositionOriginIsFixedAfterCreation(t *testing.T) {
 		for name, patch := range patches {
 			for _, to := range []string{"needs_decision", "hold", "dropped", "in_progress"} {
 				p := patch
-				if _, err := s.TransitionTask(t.Context(), x.ID, to, "director-node", "re-point", &p); err == nil {
+				if _, err := s.TransitionTask(t.Context(), x.ID, to, "director-node", "re-point", &p, ""); err == nil {
 					t.Fatalf("%s: %s -> %s with %s accepted", state, state, to, name)
 				}
 			}
@@ -691,7 +691,7 @@ func TestDispositionOriginIsFixedAfterCreation(t *testing.T) {
 		t.Fatalf("prB item: id=%d created=%v err=%v", other.ID, created, err)
 	}
 	// A re-ask without refs stays allowed and keeps the origin.
-	if got, err := s.TransitionTask(t.Context(), x.ID, "needs_decision", "director-node", "re-ask", nil); err != nil || got.Refs.OriginPR != prA {
+	if got, err := s.TransitionTask(t.Context(), x.ID, "needs_decision", "director-node", "re-ask", nil, ""); err != nil || got.Refs.OriginPR != prA {
 		t.Fatalf("plain re-ask: origin=%s err=%v", got.Refs.OriginPR, err)
 	}
 }
@@ -714,7 +714,7 @@ func TestDispositionReaskClearsAnswer(t *testing.T) {
 	if _, err := s.ApplyDisposition(t.Context(), x.ID, "director-node", ""); err != nil {
 		t.Fatal(err)
 	}
-	got, err := s.TransitionTask(t.Context(), x.ID, "needs_decision", "director-node", "re-ask with new facts", nil)
+	got, err := s.TransitionTask(t.Context(), x.ID, "needs_decision", "director-node", "re-ask with new facts", nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}

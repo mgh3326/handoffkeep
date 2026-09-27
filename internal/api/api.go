@@ -28,6 +28,11 @@ type Service struct {
 
 var decisionResolverRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 
+// noJobReasonDecisionResolve is the recorded no-job reason when a task
+// decision resolve lands a task back in claimed without job linkage; the
+// answer itself is the explicit exception, named by the path that used it.
+const noJobReasonDecisionResolve = "decision resolved; task has no job link"
+
 // DecisionResolveInput records an answer made outside the web console and
 // closes the matching open decision. It is shared by the HTTP route and the
 // authenticated remote client payload.
@@ -38,6 +43,9 @@ type DecisionResolveInput struct {
 	Answer   string `json:"answer"`
 	Note     string `json:"note,omitempty"`
 	NoInject bool   `json:"no_inject,omitempty"`
+	// NoJob is the caller-stated reason recorded when the resolve lands a
+	// task without claimed_by + refs.job_id back in claimed.
+	NoJob string `json:"no_job,omitempty"`
 }
 
 func validDecisionResolveText(value string, required bool) bool {
@@ -69,7 +77,7 @@ func decisionEventID(prefix string) (string, error) {
 // ResolveDecision writes a lane event before transitioning a task, preserving
 // the same durable ordering as the web decision-answer route.
 func (s Service) ResolveDecision(ctx context.Context, input DecisionResolveInput) (store.RelayEvent, error) {
-	if (input.Type != "task" && input.Type != "escalation" && input.Type != "lane") || input.ID < 1 || !decisionResolverRE.MatchString(input.By) || !validDecisionResolveText(input.Answer, true) || !validDecisionResolveText(input.Note, false) {
+	if (input.Type != "task" && input.Type != "escalation" && input.Type != "lane") || input.ID < 1 || !decisionResolverRE.MatchString(input.By) || !validDecisionResolveText(input.Answer, true) || !validDecisionResolveText(input.Note, false) || !validDecisionResolveText(input.NoJob, false) {
 		return store.RelayEvent{}, errors.New("invalid decision resolve")
 	}
 
@@ -151,7 +159,14 @@ func (s Service) ResolveDecision(ctx context.Context, input DecisionResolveInput
 			note += " — " + input.Note
 		}
 		note += " — resolved by " + input.By
-		if _, err := s.Store.TransitionTask(ctx, input.ID, "claimed", input.By, note, nil); err != nil {
+		// A jobless task resumed by an answered decision needs its no-job
+		// reason recorded on the transition event; a caller-supplied reason
+		// wins over the path-identifying fallback.
+		noJob := strings.TrimSpace(input.NoJob)
+		if noJob == "" {
+			noJob = noJobReasonDecisionResolve
+		}
+		if _, err := s.Store.TransitionTask(ctx, input.ID, "claimed", input.By, note, nil, noJob); err != nil {
 			return store.RelayEvent{}, err
 		}
 	}
@@ -225,11 +240,11 @@ func (s Service) CreateTask(ctx context.Context, client string, x store.Task) (s
 	x.CreatedBy = client
 	return s.Store.CreateTask(ctx, x)
 }
-func (s Service) ClaimTask(ctx context.Context, id int64, by, jobID string) (store.Task, error) {
-	return s.Store.ClaimTask(ctx, id, by, jobID)
+func (s Service) ClaimTask(ctx context.Context, id int64, by, jobID, noJob string) (store.Task, error) {
+	return s.Store.ClaimTask(ctx, id, by, jobID, noJob)
 }
-func (s Service) NextTask(ctx context.Context, lane, by string) (store.Task, error) {
-	return s.Store.NextTask(ctx, lane, by)
+func (s Service) NextTask(ctx context.Context, lane, by, jobID, noJob string) (store.Task, error) {
+	return s.Store.NextTask(ctx, lane, by, jobID, noJob)
 }
 func (s Service) CreateDisposition(ctx context.Context, client string, x store.DispositionInput) (store.Task, bool, error) {
 	x.CreatedBy = client
@@ -241,8 +256,8 @@ func (s Service) DispositionSummary(ctx context.Context, asOf time.Time) (store.
 func (s Service) ApplyDisposition(ctx context.Context, id int64, client, note string) (store.Task, error) {
 	return s.Store.ApplyDisposition(ctx, id, client, note)
 }
-func (s Service) TransitionTask(ctx context.Context, id int64, to, client, note string, refs *store.TaskRefs) (store.Task, error) {
-	return s.Store.TransitionTask(ctx, id, to, client, note, refs)
+func (s Service) TransitionTask(ctx context.Context, id int64, to, client, note string, refs *store.TaskRefs, noJob string) (store.Task, error) {
+	return s.Store.TransitionTask(ctx, id, to, client, note, refs, noJob)
 }
 func (s Service) RelaneTask(ctx context.Context, id int64, to, client, note string, allowNewLane bool) (store.Task, bool, error) {
 	return s.Store.RelaneTask(ctx, id, to, client, note, allowNewLane)
@@ -507,6 +522,13 @@ func appErr(w http.ResponseWriter, e error) {
 		}
 		jsonOut(w, http.StatusConflict, body)
 		return
+	case errors.Is(e, store.ErrTaskJobRequired):
+		body := map[string]string{"error": "task_job_required"}
+		if reason, ok := strings.CutPrefix(e.Error(), "task_job_required: "); ok && reason != "" {
+			body["reason"] = reason
+		}
+		jsonOut(w, http.StatusConflict, body)
+		return
 	case errors.Is(e, store.ErrDispositionOperatorOnly):
 		jsonOut(w, http.StatusConflict, map[string]string{"error": "disposition_operator_only"})
 		return
@@ -669,6 +691,9 @@ func (s Server) task(w http.ResponseWriter, r *http.Request) {
 type taskClaimInput struct {
 	ClaimedBy string `json:"claimed_by"`
 	JobID     string `json:"job_id"`
+	// NoJob records why a claim without job_id is allowed; the claim event
+	// keeps it. An empty reason is refused with task_job_required.
+	NoJob string `json:"no_job,omitempty"`
 }
 
 func (s Server) taskClaim(w http.ResponseWriter, r *http.Request) {
@@ -686,7 +711,7 @@ func (s Server) taskClaim(w http.ResponseWriter, r *http.Request) {
 		appErr(w, err)
 		return
 	}
-	x, err := s.Service.ClaimTask(r.Context(), id, input.ClaimedBy, input.JobID)
+	x, err := s.Service.ClaimTask(r.Context(), id, input.ClaimedBy, input.JobID, input.NoJob)
 	if err != nil {
 		appErr(w, err)
 		return
@@ -702,12 +727,14 @@ func (s Server) tasksNext(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		Lane      string `json:"lane"`
 		ClaimedBy string `json:"claimed_by"`
+		JobID     string `json:"job_id"`
+		NoJob     string `json:"no_job,omitempty"`
 	}
 	if err := decode(r, &input, 4096); err != nil {
 		appErr(w, err)
 		return
 	}
-	x, err := s.Service.NextTask(r.Context(), input.Lane, input.ClaimedBy)
+	x, err := s.Service.NextTask(r.Context(), input.Lane, input.ClaimedBy, input.JobID, input.NoJob)
 	if err != nil {
 		appErr(w, err)
 		return
@@ -719,6 +746,10 @@ type taskTransitionInput struct {
 	To   string          `json:"to"`
 	Note string          `json:"note"`
 	Refs *store.TaskRefs `json:"refs,omitempty"`
+	// NoJob records the caller-stated reason a transition may land in
+	// claimed/in_progress without claimed_by + refs.job_id. Without linkage
+	// an empty reason is refused with task_job_required.
+	NoJob string `json:"no_job,omitempty"`
 }
 
 func (s Server) taskTransition(w http.ResponseWriter, r *http.Request) {
@@ -737,7 +768,7 @@ func (s Server) taskTransition(w http.ResponseWriter, r *http.Request) {
 		appErr(w, err)
 		return
 	}
-	x, err := s.Service.TransitionTask(r.Context(), id, input.To, client, input.Note, input.Refs)
+	x, err := s.Service.TransitionTask(r.Context(), id, input.To, client, input.Note, input.Refs, input.NoJob)
 	if err != nil {
 		appErr(w, err)
 		return

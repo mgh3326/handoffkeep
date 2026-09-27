@@ -60,7 +60,7 @@ func TestTaskConcurrentClaimHasExactlyOneWinner(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			_, err := clients[i%len(clients)].ClaimTask(t.Context(), task.ID, "captain-"+string(rune('a'+i%26)), "")
+			_, err := clients[i%len(clients)].ClaimTask(t.Context(), task.ID, "captain-"+string(rune('a'+i%26)), fmt.Sprintf("job-race-%d", i), "")
 			mu.Lock()
 			defer mu.Unlock()
 			if err == nil {
@@ -100,11 +100,11 @@ func TestTaskIllegalTransitionReturnsConflict(t *testing.T) {
 func TestTaskEveryTransitionWritesOneEvent(t *testing.T) {
 	s := taskTestStore(t)
 	task := newTask(t, s, taskLane(t), "event audit", 0)
-	if _, err := s.ClaimTask(t.Context(), task.ID, "captain-a", ""); err != nil {
+	if _, err := s.ClaimTask(t.Context(), task.ID, "captain-a", "job-1", ""); err != nil {
 		t.Fatal(err)
 	}
 	for _, to := range []string{"in_progress", "verifying", "in_progress", "verifying", "merged"} {
-		if _, err := s.TransitionTask(t.Context(), task.ID, to, "node", "", nil); err != nil {
+		if _, err := s.TransitionTask(t.Context(), task.ID, to, "node", "", nil, ""); err != nil {
 			t.Fatalf("to %s: %v", to, err)
 		}
 	}
@@ -126,12 +126,12 @@ func TestTaskNextClaimsPriorityThenCreationOrder(t *testing.T) {
 	highFirst := newTask(t, s, lane, "high first", 9)
 	highSecond := newTask(t, s, lane, "high second", 9)
 	for _, want := range []int64{highFirst.ID, highSecond.ID, low.ID} {
-		got, err := s.NextTask(t.Context(), lane, "captain-a")
+		got, err := s.NextTask(t.Context(), lane, "captain-a", "job-1", "")
 		if err != nil || got.ID != want || got.State != "claimed" {
 			t.Fatalf("got=%+v err=%v want=%d", got, err, want)
 		}
 	}
-	if _, err := s.NextTask(t.Context(), lane, "captain-a"); !errors.Is(err, store.ErrQueueEmpty) {
+	if _, err := s.NextTask(t.Context(), lane, "captain-a", "job-1", ""); !errors.Is(err, store.ErrQueueEmpty) {
 		t.Fatalf("empty next err=%v", err)
 	}
 }
@@ -151,7 +151,7 @@ func TestTaskNextEmptyIsExplicitQueueEmptyAndCLIExitThree(t *testing.T) {
 		t.Fatalf("body=%v err=%v", body, err)
 	}
 	client := remote.Client{URL: h.URL, Token: "node-token", HTTP: h.Client()}
-	if _, err := client.NextTask(t.Context(), lane, "captain"); err == nil || err.Error() != "queue_empty" {
+	if _, err := client.NextTask(t.Context(), lane, "captain", "job-1", ""); err == nil || err.Error() != "queue_empty" {
 		t.Fatalf("remote error=%v", err)
 	}
 }
@@ -161,25 +161,25 @@ func TestTaskTransitionGraphAndRefsSnapshots(t *testing.T) {
 	// join -> hold is forbidden; needs_decision -> claimed is the canonical
 	// decision-resume path (backlog remains an allowed alternative).
 	join := newTask(t, s, taskLane(t), "joined", 0)
-	if _, err := s.ClaimTask(t.Context(), join.ID, "captain", ""); err != nil {
+	if _, err := s.ClaimTask(t.Context(), join.ID, "captain", "job-1", ""); err != nil {
 		t.Fatal(err)
 	}
 	for _, to := range []string{"in_progress", "join"} {
-		if _, err := s.TransitionTask(t.Context(), join.ID, to, "node", "", nil); err != nil {
+		if _, err := s.TransitionTask(t.Context(), join.ID, to, "node", "", nil, ""); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if _, err := s.TransitionTask(t.Context(), join.ID, "hold", "node", "", nil); !errors.Is(err, store.ErrTaskConflict) {
+	if _, err := s.TransitionTask(t.Context(), join.ID, "hold", "node", "", nil, ""); !errors.Is(err, store.ErrTaskConflict) {
 		t.Fatalf("join->hold error=%v", err)
 	}
 	decision := newTask(t, s, taskLane(t), "decision", 0)
-	if _, err := s.ClaimTask(t.Context(), decision.ID, "captain", ""); err != nil {
+	if _, err := s.ClaimTask(t.Context(), decision.ID, "captain", "job-1", ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.TransitionTask(t.Context(), decision.ID, "needs_decision", "node", "choose", nil); err != nil {
+	if _, err := s.TransitionTask(t.Context(), decision.ID, "needs_decision", "node", "choose", nil, ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.TransitionTask(t.Context(), decision.ID, "claimed", "node", "resolved", nil); err != nil {
+	if _, err := s.TransitionTask(t.Context(), decision.ID, "claimed", "node", "resolved", nil, ""); err != nil {
 		t.Fatalf("needs_decision->claimed: %v", err)
 	}
 
@@ -188,10 +188,10 @@ func TestTaskTransitionGraphAndRefsSnapshots(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = s.ClaimTask(t.Context(), task.ID, "captain", ""); err != nil {
+	if _, err = s.ClaimTask(t.Context(), task.ID, "captain", "job-4", ""); err != nil {
 		t.Fatal(err)
 	}
-	got, err := s.TransitionTask(t.Context(), task.ID, "in_progress", "node", "started", &store.TaskRefs{PR: "5"})
+	got, err := s.TransitionTask(t.Context(), task.ID, "in_progress", "node", "started", &store.TaskRefs{PR: "5"}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,7 +211,7 @@ func TestTaskRejectsSecretNoteQuestionAndRefsWithoutStorage(t *testing.T) {
 	defer h.Close()
 	secret := "sk-abcdefghijklmnopqrstuvwxyz"
 	task := newTask(t, s, taskLane(t), "secret test", 0)
-	if _, err := s.ClaimTask(t.Context(), task.ID, "captain", ""); err != nil {
+	if _, err := s.ClaimTask(t.Context(), task.ID, "captain", "job-1", ""); err != nil {
 		t.Fatal(err)
 	}
 	for _, body := range []map[string]any{
@@ -235,7 +235,7 @@ func TestTaskRejectsSecretNoteQuestionAndRefsWithoutStorage(t *testing.T) {
 func TestTaskEventsDatabaseAppendOnly(t *testing.T) {
 	s := taskTestStore(t)
 	task := newTask(t, s, taskLane(t), "append only", 0)
-	if _, err := s.ClaimTask(t.Context(), task.ID, "captain", ""); err != nil {
+	if _, err := s.ClaimTask(t.Context(), task.ID, "captain", "job-1", ""); err != nil {
 		t.Fatal(err)
 	}
 	got, found, err := s.GetTask(t.Context(), task.ID)

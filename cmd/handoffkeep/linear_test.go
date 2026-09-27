@@ -47,7 +47,7 @@ func TestLinearSyncDefaultsOff(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.ClaimTask(t.Context(), task.ID, "builder", ""); err != nil {
+	if _, err := st.ClaimTask(t.Context(), task.ID, "builder", "job-1", ""); err != nil {
 		t.Fatal(err)
 	}
 	rows, err := st.ListLinearOutbox(t.Context(), task.ID)
@@ -243,7 +243,7 @@ func TestTasksTransitionSucceedsWhileLinearUnavailableAndStatusReportsBacklog(t 
 	if err := json.Unmarshal(addOutput.Bytes(), &task); err != nil {
 		t.Fatal(err)
 	}
-	if err := tasksCmd([]string{"claim", fmt.Sprint(task.ID), "--by", "builder"}, &bytes.Buffer{}); err != nil {
+	if err := tasksCmd([]string{"claim", fmt.Sprint(task.ID), "--by", "builder", "--job-id", "job-linear-1"}, &bytes.Buffer{}); err != nil {
 		t.Fatalf("tasks claim returned an error: %v", err)
 	}
 	var transitionOutput bytes.Buffer

@@ -371,7 +371,7 @@ func TestTaskEventsDecisionKindUpgradeToV14(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = s.ClaimTask(ctx, x.ID, "v14", ""); err != nil {
+	if _, err = s.ClaimTask(ctx, x.ID, "v14", "job-1", ""); err != nil {
 		t.Fatal(err)
 	}
 	insertDecision := func(kind string) error {

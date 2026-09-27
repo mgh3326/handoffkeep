@@ -254,30 +254,30 @@ func TestUIP3GlanceTaskAggregation(t *testing.T) {
 	backlog := createUITask(t, s, lane, "backlog")
 	_ = backlog
 	claimed := createUITask(t, s, lane, "claimed")
-	if _, err := s.ClaimTask(t.Context(), claimed.ID, "p3-worker", ""); err != nil {
+	if _, err := s.ClaimTask(t.Context(), claimed.ID, "p3-worker", "job-1", ""); err != nil {
 		t.Fatal(err)
 	}
 	inProgress := createUITask(t, s, lane, "in progress")
 	inProgress = claimAndTransition(t, s, inProgress, "in_progress", "work")
 	verifying := createUITask(t, s, lane, "verifying")
 	verifying = claimAndTransition(t, s, verifying, "in_progress", "work")
-	if _, err := s.TransitionTask(t.Context(), verifying.ID, "verifying", "p3-worker", "verify", nil); err != nil {
+	if _, err := s.TransitionTask(t.Context(), verifying.ID, "verifying", "p3-worker", "verify", nil, ""); err != nil {
 		t.Fatal(err)
 	}
 	joining := createUITask(t, s, lane, "joining")
 	joining = claimAndTransition(t, s, joining, "in_progress", "work")
-	if _, err := s.TransitionTask(t.Context(), joining.ID, "join", "p3-worker", "join", nil); err != nil {
+	if _, err := s.TransitionTask(t.Context(), joining.ID, "join", "p3-worker", "join", nil, ""); err != nil {
 		t.Fatal(err)
 	}
 	decision := createUITask(t, s, lane, "decision")
 	_ = claimAndTransition(t, s, decision, "needs_decision", "choose")
 	hold := createUITask(t, s, lane, "hold")
-	if _, err := s.TransitionTask(t.Context(), hold.ID, "hold", "p3-worker", "hold", nil); err != nil {
+	if _, err := s.TransitionTask(t.Context(), hold.ID, "hold", "p3-worker", "hold", nil, ""); err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 21; i++ {
 		task := createUITask(t, s, lane, "active task")
-		if _, err := s.ClaimTask(t.Context(), task.ID, "p3-worker", ""); err != nil {
+		if _, err := s.ClaimTask(t.Context(), task.ID, "p3-worker", "job-1", ""); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -356,7 +356,7 @@ func TestUIP3GlanceTruncation(t *testing.T) {
 	lane := uiLane(t, "p3-large")
 	for i := 0; i < 5; i++ {
 		task := createUITask(t, s, lane, strings.Repeat("x", 60*1024))
-		if _, err := s.ClaimTask(t.Context(), task.ID, "p3-worker", ""); err != nil {
+		if _, err := s.ClaimTask(t.Context(), task.ID, "p3-worker", "job-1", ""); err != nil {
 			t.Fatal(err)
 		}
 	}

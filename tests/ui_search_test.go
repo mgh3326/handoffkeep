@@ -61,7 +61,7 @@ func TestUISearchTasks(t *testing.T) {
 		if to == "merged" {
 			refs = &store.TaskRefs{PR: dispositionPR(t)}
 		}
-		if merged, err = s.TransitionTask(t.Context(), merged.ID, to, "test-node", "", refs); err != nil {
+		if merged, err = s.TransitionTask(t.Context(), merged.ID, to, "test-node", "", refs, ""); err != nil {
 			t.Fatal(err)
 		}
 	}

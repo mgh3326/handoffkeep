@@ -68,6 +68,11 @@ var (
 	// current row uses. It exists so a mistyped lane name cannot quietly
 	// strand a task where no lane owner ever lists it.
 	ErrTaskLaneUnknown = errors.New("unknown_lane")
+	// ErrTaskJobRequired rejects a claim or a transition that would leave a
+	// task in claimed/in_progress without claimed_by and refs.job_id
+	// (decision/2026-09-27/task-job-linkage). A jobless task needs a recorded
+	// no-job reason instead.
+	ErrTaskJobRequired = errors.New("task_job_required")
 )
 
 // TaskRefs holds the durable links that let a captain resume work without
@@ -275,15 +280,19 @@ const (
 )
 
 type TaskEvent struct {
-	ID     int64     `json:"id"`
-	TaskID int64     `json:"task_id"`
-	Kind   string    `json:"kind"`
-	From   string    `json:"from"`
-	To     string    `json:"to"`
-	By     string    `json:"by"`
-	Note   string    `json:"note,omitempty"`
-	Refs   *TaskRefs `json:"refs,omitempty"`
-	At     time.Time `json:"at"`
+	ID     int64  `json:"id"`
+	TaskID int64  `json:"task_id"`
+	Kind   string `json:"kind"`
+	From   string `json:"from"`
+	To     string `json:"to"`
+	By     string `json:"by"`
+	Note   string `json:"note,omitempty"`
+	// NoJob records why a transition into claimed/in_progress was allowed
+	// without claimed_by + refs.job_id. It is set only on events where the
+	// exemption was actually used; linked transitions leave it empty.
+	NoJob string    `json:"no_job,omitempty"`
+	Refs  *TaskRefs `json:"refs,omitempty"`
+	At    time.Time `json:"at"`
 }
 
 // Task.BodyDoc points at the hk document holding the task's body ("key" or
@@ -566,7 +575,12 @@ func (s *Store) migrate(ctx context.Context) error {
 		// ALTER TABLE takes an ACCESS EXCLUSIVE lock even when the column
 		// exists; the constant default makes the add metadata-only. The CHECK
 		// closes the column to the two produced kinds.
-		`DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'task_events' AND column_name = 'kind') THEN ALTER TABLE task_events ADD COLUMN kind TEXT NOT NULL DEFAULT 'transition' CHECK(kind IN ('transition','relane')); END IF; END $$`}
+		`DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'task_events' AND column_name = 'kind') THEN ALTER TABLE task_events ADD COLUMN kind TEXT NOT NULL DEFAULT 'transition' CHECK(kind IN ('transition','relane')); END IF; END $$`,
+		// task_events.no_job records why a transition into claimed/in_progress
+		// ran without claimed_by + refs.job_id (the explicit exception under
+		// decision/2026-09-27/task-job-linkage). Constant default keeps the
+		// add metadata-only on existing databases.
+		`DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'task_events' AND column_name = 'no_job') THEN ALTER TABLE task_events ADD COLUMN no_job TEXT NOT NULL DEFAULT ''; END IF; END $$`}
 	stmts = append(stmts,
 		`CREATE TABLE IF NOT EXISTS relay_events (id BIGSERIAL PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('job.completed','job.escalate','job.joined')), job_id TEXT NOT NULL, epoch INTEGER NOT NULL DEFAULT 0, owner_lane TEXT NOT NULL, machine TEXT NOT NULL DEFAULT '', pane_id TEXT NOT NULL DEFAULT '', report_path TEXT NOT NULL DEFAULT '', report_last_line TEXT NOT NULL DEFAULT '', question TEXT NOT NULL DEFAULT '', pr TEXT NOT NULL DEFAULT '', head TEXT NOT NULL DEFAULT '', reason TEXT NOT NULL DEFAULT '', event_time TIMESTAMPTZ, received_at TIMESTAMPTZ NOT NULL, delivered_at TIMESTAMPTZ, delivered_to TEXT NOT NULL DEFAULT '', attempts INTEGER NOT NULL DEFAULT 0)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS relay_events_idempotency ON relay_events(kind, job_id, epoch, report_path, reason)`,
@@ -1446,14 +1460,24 @@ func taskTransitionAllowed(from, to string) bool {
 	return TaskTransitions[from][to]
 }
 
-func (s *Store) claimTaskTx(ctx context.Context, tx pgx.Tx, id int64, by, jobID string) (Task, error) {
+func (s *Store) claimTaskTx(ctx context.Context, tx pgx.Tx, id int64, by, jobID, noJob string) (Task, error) {
 	if !validText(by, 128) || by == "" {
 		return Task{}, errors.New("invalid task claimant")
 	}
 	if !validText(jobID, 4096) {
 		return Task{}, errors.New("invalid task claim job_id")
 	}
+	noJob = strings.TrimSpace(noJob)
+	if !validText(noJob, MaxBytes) {
+		return Task{}, errors.New("invalid task claim no_job")
+	}
+	if jobID != "" && noJob != "" {
+		return Task{}, errors.New("invalid task claim: job_id and no_job are exclusive")
+	}
 	if err := guard.Reject(jobID); err != nil {
+		return Task{}, err
+	}
+	if err := guard.Reject(noJob); err != nil {
 		return Task{}, err
 	}
 	var x Task
@@ -1466,13 +1490,23 @@ func (s *Store) claimTaskTx(ctx context.Context, tx pgx.Tx, id int64, by, jobID 
 	if x.State != "backlog" {
 		// A replayed claim — same claimant, same non-empty job id — is a
 		// no-op: the row is returned as recorded and no second event is
-		// written. Every other claim of a task that is not in backlog is a
-		// conflict, with the reason wrapped on the sentinel so HTTP callers
-		// can surface it.
-		if jobID != "" && x.ClaimedBy == by && x.Refs.JobID == jobID {
+		// written. A jobless claim replays only for the same claimant on a
+		// row still carrying no job_id, and only when the caller again
+		// supplies its no-job reason. Every other claim of a task that is
+		// not in backlog is a conflict, with the reason wrapped on the
+		// sentinel so HTTP callers can surface it.
+		replay := x.ClaimedBy == by && x.Refs.JobID == jobID && (jobID != "" || noJob != "")
+		if replay {
 			return x, nil
 		}
 		return Task{}, claimConflict(x, by, jobID)
+	}
+	// A claim lands the task in claimed, so it must establish the task/job
+	// link itself: either job_id binds the claimant's job or a recorded
+	// no-job reason marks the deliberate exception. Bare claims stay
+	// refused so claimed rows always carry accountable linkage.
+	if jobID == "" && noJob == "" {
+		return Task{}, fmt.Errorf("%w: claim requires job_id or a no-job reason", ErrTaskJobRequired)
 	}
 	if err := scanTask(tx.QueryRow(ctx, `UPDATE tasks SET state='claimed', claimed_by=$2, refs=CASE WHEN $3<>'' THEN refs||jsonb_build_object('job_id',$3::text) ELSE refs END, updated_at=$4 WHERE id=$1 RETURNING `+taskColumns, id, by, jobID, time.Now().UTC()), &x); err != nil {
 		return Task{}, err
@@ -1481,7 +1515,7 @@ func (s *Store) claimTaskTx(ctx context.Context, tx pgx.Tx, id int64, by, jobID 
 	if err != nil {
 		return Task{}, err
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO task_events(task_id,"from","to","by",note,refs,at) VALUES($1,'backlog','claimed',$2,'',$3::jsonb,$4)`, id, by, string(refs), x.UpdatedAt); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO task_events(task_id,"from","to","by",note,refs,at,no_job) VALUES($1,'backlog','claimed',$2,'',$3::jsonb,$4,$5)`, id, by, string(refs), x.UpdatedAt, noJob); err != nil {
 		return Task{}, err
 	}
 	if s.LinearSyncEnabled() && x.Refs.Linear != nil && x.Refs.Linear.Sync {
@@ -1513,21 +1547,23 @@ func claimConflict(x Task, by, jobID string) error {
 	}
 }
 
-func (s *Store) ClaimTask(ctx context.Context, id int64, by, jobID string) (Task, error) {
+func (s *Store) ClaimTask(ctx context.Context, id int64, by, jobID, noJob string) (Task, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return Task{}, err
 	}
 	defer tx.Rollback(ctx)
-	x, err := s.claimTaskTx(ctx, tx, id, by, jobID)
+	x, err := s.claimTaskTx(ctx, tx, id, by, jobID, noJob)
 	if err != nil {
 		return Task{}, err
 	}
 	return x, tx.Commit(ctx)
 }
 
-// NextTask claims the oldest highest-priority runnable task in one transaction.
-func (s *Store) NextTask(ctx context.Context, lane, by string) (Task, error) {
+// NextTask claims the oldest highest-priority runnable task in one
+// transaction. Like ClaimTask, the claim must carry jobID or a recorded
+// noJob reason; a bare pull is refused with ErrTaskJobRequired.
+func (s *Store) NextTask(ctx context.Context, lane, by, jobID, noJob string) (Task, error) {
 	if !validName(lane) {
 		return Task{}, errors.New("invalid task lane")
 	}
@@ -1544,18 +1580,22 @@ func (s *Store) NextTask(ctx context.Context, lane, by string) (Task, error) {
 	if err != nil {
 		return Task{}, err
 	}
-	x, err := s.claimTaskTx(ctx, tx, id, by, "")
+	x, err := s.claimTaskTx(ctx, tx, id, by, jobID, noJob)
 	if err != nil {
 		return Task{}, err
 	}
 	return x, tx.Commit(ctx)
 }
 
-func (s *Store) TransitionTask(ctx context.Context, id int64, to, by, note string, refs *TaskRefs) (Task, error) {
-	if !taskStates[to] || !validText(by, 128) || by == "" || !validText(note, MaxBytes) || (refs != nil && !validTaskRefs(*refs)) {
+func (s *Store) TransitionTask(ctx context.Context, id int64, to, by, note string, refs *TaskRefs, noJob string) (Task, error) {
+	noJob = strings.TrimSpace(noJob)
+	if !taskStates[to] || !validText(by, 128) || by == "" || !validText(note, MaxBytes) || !validText(noJob, MaxBytes) || (refs != nil && !validTaskRefs(*refs)) {
 		return Task{}, errors.New("invalid task transition")
 	}
 	if err := guard.Reject(note); err != nil {
+		return Task{}, err
+	}
+	if err := guard.Reject(noJob); err != nil {
 		return Task{}, err
 	}
 	if refs != nil {
@@ -1644,6 +1684,22 @@ func (s *Store) TransitionTask(ctx context.Context, id int64, to, by, note strin
 			return Task{}, errors.New("decision question and options exceed 2048 bytes")
 		}
 	}
+	// The task/job-linkage guard (decision/2026-09-27/task-job-linkage item
+	// 2): landing in claimed or in_progress without both claimed_by and
+	// refs.job_id is refused unless the caller records a no-job reason,
+	// which the event below persists. Runs under the row lock, after the
+	// refs merge, so a concurrent claim cannot interleave between the check
+	// and the write. Tasks already in claimed/in_progress keep moving to
+	// non-active states freely — the guard only watches the two entries.
+	recordedNoJob := ""
+	if to == "claimed" || to == "in_progress" {
+		if x.ClaimedBy == "" || x.Refs.JobID == "" {
+			if noJob == "" {
+				return Task{}, fmt.Errorf("%w: transition to %s requires claimed_by and refs.job_id, or a no-job reason", ErrTaskJobRequired, to)
+			}
+			recordedNoJob = noJob
+		}
+	}
 	encoded, err := json.Marshal(x.Refs)
 	if err != nil {
 		return Task{}, err
@@ -1652,7 +1708,7 @@ func (s *Store) TransitionTask(ctx context.Context, id int64, to, by, note strin
 	if err = scanTask(tx.QueryRow(ctx, `UPDATE tasks SET state=$2,refs=$3::jsonb,updated_at=$4 WHERE id=$1 RETURNING `+taskColumns, id, to, string(encoded), x.UpdatedAt), &x); err != nil {
 		return Task{}, err
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO task_events(task_id,"from","to","by",note,refs,at) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7)`, id, from, to, by, note, string(encoded), x.UpdatedAt); err != nil {
+	if _, err = tx.Exec(ctx, `INSERT INTO task_events(task_id,"from","to","by",note,refs,at,no_job) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,$8)`, id, from, to, by, note, string(encoded), x.UpdatedAt, recordedNoJob); err != nil {
 		return Task{}, err
 	}
 	if s.LinearSyncEnabled() && x.Refs.Linear != nil && x.Refs.Linear.Sync {
@@ -1872,7 +1928,7 @@ func (s *Store) GetTask(ctx context.Context, id int64) (Task, bool, error) {
 		}
 		return Task{}, false, err
 	}
-	rows, err := s.pool.Query(ctx, `SELECT id,task_id,"from","to","by",note,refs,at,kind FROM task_events WHERE task_id=$1 ORDER BY at,id`, id)
+	rows, err := s.pool.Query(ctx, `SELECT id,task_id,"from","to","by",note,refs,at,kind,no_job FROM task_events WHERE task_id=$1 ORDER BY at,id`, id)
 	if err != nil {
 		return Task{}, false, err
 	}
@@ -1880,7 +1936,7 @@ func (s *Store) GetTask(ctx context.Context, id int64) (Task, bool, error) {
 	for rows.Next() {
 		var e TaskEvent
 		var refs []byte
-		if err := rows.Scan(&e.ID, &e.TaskID, &e.From, &e.To, &e.By, &e.Note, &refs, &e.At, &e.Kind); err != nil {
+		if err := rows.Scan(&e.ID, &e.TaskID, &e.From, &e.To, &e.By, &e.Note, &refs, &e.At, &e.Kind, &e.NoJob); err != nil {
 			return Task{}, false, err
 		}
 		if len(refs) != 0 {

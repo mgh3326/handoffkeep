@@ -238,7 +238,7 @@ func TestUIWriteDecisionRoutes(t *testing.T) {
 	conflictTask := createUITask(t, s, "lane-a", "conflict task")
 	claimAndTransition(t, s, conflictTask, "needs_decision", "choose")
 	hub.persist = func(ingressRequest) {
-		if _, err := s.TransitionTask(context.Background(), conflictTask.ID, "claimed", "other-operator", "already handled", nil); err != nil {
+		if _, err := s.TransitionTask(context.Background(), conflictTask.ID, "claimed", "other-operator", "already handled", nil, ""); err != nil {
 			t.Errorf("make task conflict: %v", err)
 		}
 	}
