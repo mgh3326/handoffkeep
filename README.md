@@ -329,8 +329,9 @@ question post, reply target, or processed target on that key returns HTTP 409
 before any Q mutation. A new event ID creates a new row even if the text is
 identical. New web and hook clients must send an event ID. Legacy clients may
 omit the new fields: they get conversation `operator-desk`, source `legacy`,
-and a fresh row per request. The body and each question body have a 64 KiB
-limit and secret-shaped content is rejected without echoing it.
+and a fresh row per request. The complete JSON request is limited to 68 KiB;
+within it, the body and each question body have a 64 KiB field limit.
+Secret-shaped content is rejected without echoing it.
 
 `PUT /v1/chat/questions/{id}` (or `POST /v1/chat/questions` with the ID in the
 body) still upserts by producer Q ID. Question upsert and list rows include

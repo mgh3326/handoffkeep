@@ -385,7 +385,15 @@ func TestChatPostAtomicReplayAndDeskIsolation(t *testing.T) {
 		t.Fatalf("upsert=%+v", updated)
 	}
 	listed, err := s.ListChatMessages(t.Context(), "operator", false, reply.ID-1, 10)
-	if err != nil || len(listed) != 1 || listed[0].QuestionRelations[0].QuestionText != "first question" {
+	snapshot := ""
+	if err == nil && len(listed) == 1 {
+		for _, relation := range listed[0].QuestionRelations {
+			if relation.QuestionID == q1 {
+				snapshot = relation.QuestionText
+			}
+		}
+	}
+	if err != nil || len(listed) != 1 || snapshot != "first question" {
 		t.Fatalf("snapshot rows=%+v err=%v", listed, err)
 	}
 	status, replay = postChatMessage(t, h.URL, "node-token", base)
