@@ -40,14 +40,18 @@ var exportSeam func(ctx context.Context)
 var exportSnapshotSeam func(ctx context.Context)
 
 // validTaskQuery is the shared filter validation used by task list reads and
-// the snapshot export.
-func validTaskQuery(lane, state, parentLane string) bool {
-	return (lane == "" || validName(lane)) && (parentLane == "" || validName(parentLane)) && (state == "" || taskStates[state])
+// the snapshot export. project is a tri-state filter: nil means unset, ""
+// selects only legacy rows whose project is NULL, and any other value must
+// be a well-formed project name (membership in task_projects is not required
+// — filtering by a configured-but-unused name is a valid query).
+func validTaskQuery(lane, state, parentLane string, project *string) bool {
+	return (lane == "" || validName(lane)) && (parentLane == "" || validName(parentLane)) && (state == "" || taskStates[state]) && (project == nil || *project == "" || validName(*project))
 }
 
-// taskFilter renders the optional lane/parent_lane/state predicates shared by
-// every export query so counts, watermarks, and rows cover one scope.
-func taskFilter(lane, state, parentLane string) (string, []any) {
+// taskFilter renders the optional lane/parent_lane/state/project predicates
+// shared by every export query so counts, watermarks, and rows cover one
+// scope.
+func taskFilter(lane, state, parentLane string, project *string) (string, []any) {
 	where := ""
 	args := []any{}
 	if lane != "" {
@@ -62,6 +66,14 @@ func taskFilter(lane, state, parentLane string) (string, []any) {
 		args = append(args, state)
 		where += fmt.Sprintf(" AND state=$%d", len(args))
 	}
+	if project != nil {
+		if *project == "" {
+			where += " AND project IS NULL"
+		} else {
+			args = append(args, *project)
+			where += fmt.Sprintf(" AND project=$%d", len(args))
+		}
+	}
 	return where, args
 }
 
@@ -73,12 +85,14 @@ type TaskExportSource struct {
 }
 
 // TaskExportScope is the normalized filter set actually applied to the
-// export. Empty strings mean the filter was unset.
+// export. Empty strings mean the filter was unset. Project is absent when
+// unfiltered, "" when the export was scoped to legacy NULL-project rows.
 type TaskExportScope struct {
-	Lane       string `json:"lane"`
-	State      string `json:"state"`
-	ParentLane string `json:"parent_lane"`
-	Limit      int    `json:"limit"`
+	Lane       string  `json:"lane"`
+	State      string  `json:"state"`
+	ParentLane string  `json:"parent_lane"`
+	Project    *string `json:"project,omitempty"`
+	Limit      int     `json:"limit"`
 }
 
 // TaskExportWatermark bounds the event streams at the export snapshot. A zero
@@ -127,8 +141,8 @@ type TaskExport struct {
 // repeatable-read transaction. Rows come back in ascending numeric ID order,
 // at most limit rows. Truncated is exactly Counts.Total > limit; Complete is
 // its inverse, so a complete export always returns every counted row.
-func (s *Store) ExportTasks(ctx context.Context, lane, state, parentLane string, limit int) (TaskExport, error) {
-	if !validTaskQuery(lane, state, parentLane) || limit < 1 || limit > ExportLimitMax {
+func (s *Store) ExportTasks(ctx context.Context, lane, state, parentLane string, project *string, limit int) (TaskExport, error) {
+	if !validTaskQuery(lane, state, parentLane, project) || limit < 1 || limit > ExportLimitMax {
 		return TaskExport{}, ErrInvalidExportQuery
 	}
 	tx, err := s.pool.BeginTx(ctx, exportTxOptions)
@@ -138,7 +152,7 @@ func (s *Store) ExportTasks(ctx context.Context, lane, state, parentLane string,
 	defer tx.Rollback(ctx)
 
 	out := TaskExport{
-		Scope: TaskExportScope{Lane: lane, State: state, ParentLane: parentLane, Limit: limit},
+		Scope: TaskExportScope{Lane: lane, State: state, ParentLane: parentLane, Project: project, Limit: limit},
 		Tasks: []Task{},
 		Counts: TaskExportCounts{
 			ByState: map[string]int{},
@@ -160,7 +174,7 @@ func (s *Store) ExportTasks(ctx context.Context, lane, state, parentLane string,
 		exportSnapshotSeam(ctx)
 	}
 
-	where, args := taskFilter(lane, state, parentLane)
+	where, args := taskFilter(lane, state, parentLane, project)
 	if err = tx.QueryRow(ctx, `SELECT COUNT(*) FROM tasks WHERE 1=1`+where, args...).Scan(&out.Counts.Total); err != nil {
 		return TaskExport{}, err
 	}

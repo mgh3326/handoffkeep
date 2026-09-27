@@ -23,6 +23,10 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
+// projectPtr supplies the required task project for fixture creates; the
+// value is a member of the seeded task_projects vocabulary.
+func projectPtr(v string) *string { return &v }
+
 func TestLinearSyncDefaultsOff(t *testing.T) {
 	st := shutdownTestStore(t)
 	baseline := runtime.NumGoroutine()
@@ -43,6 +47,7 @@ func TestLinearSyncDefaultsOff(t *testing.T) {
 		Kind:      "implement",
 		CreatedBy: "linear-off-test",
 		Refs:      store.TaskRefs{Linear: &store.TaskLinear{Sync: true}},
+		Project:   projectPtr("experiment"),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -207,7 +212,7 @@ func TestTaskLinearCLIFlagsAreExplicitMetadata(t *testing.T) {
 	t.Setenv("HANDOFFKEEP_URL", server.URL)
 	t.Setenv("HANDOFFKEEP_TOKEN", "fixture-token")
 	args := []string{
-		"add", "--lane", "builder-lane", "--title", "metadata", "--linear-sync",
+		"add", "--lane", "builder-lane", "--title", "metadata", "--project", "experiment", "--linear-sync",
 		"--tier", "T3", "--grade", "S+", "--brief-key", "brief/connector",
 		"--label", "connector", "--label", "approved",
 		"--linear-report-key", "report/connector", "--linear-verify-key", "report/connector/verify",
@@ -235,7 +240,7 @@ func TestTasksTransitionSucceedsWhileLinearUnavailableAndStatusReportsBacklog(t 
 	var addOutput bytes.Buffer
 	if err := tasksCmd([]string{
 		"add", "--lane", "linear-unavailable", "--title", "transition remains available",
-		"--linear-sync", "--tier", "T3", "--grade", "S+",
+		"--project", "experiment", "--linear-sync", "--tier", "T3", "--grade", "S+",
 	}, &addOutput); err != nil {
 		t.Fatalf("tasks add returned an error: %v", err)
 	}

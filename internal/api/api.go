@@ -269,18 +269,27 @@ func (s Service) TransitionTask(ctx context.Context, id int64, to, client, note 
 func (s Service) RelaneTask(ctx context.Context, id int64, to, client, note string, allowNewLane bool) (store.Task, bool, error) {
 	return s.Store.RelaneTask(ctx, id, to, client, note, allowNewLane)
 }
-func (s Service) ListTasks(ctx context.Context, lane, state, parentLane string, limit int) ([]store.Task, error) {
-	return s.Store.ListTasks(ctx, lane, state, parentLane, limit)
+func (s Service) SetTaskProject(ctx context.Context, id int64, project, client, note string) (store.Task, bool, error) {
+	return s.Store.SetTaskProject(ctx, id, project, client, note)
 }
-func (s Service) ListTasksPage(ctx context.Context, lane, state, parentLane string, afterID int64, limit int) ([]store.Task, error) {
-	return s.Store.ListTasksPage(ctx, lane, state, parentLane, afterID, limit)
+func (s Service) ListTaskProjects(ctx context.Context) ([]string, error) {
+	return s.Store.ListTaskProjects(ctx)
+}
+func (s Service) AddTaskProject(ctx context.Context, client, name string) (bool, error) {
+	return s.Store.AddTaskProject(ctx, name, client)
+}
+func (s Service) ListTasks(ctx context.Context, lane, state, parentLane string, project *string, limit int) ([]store.Task, error) {
+	return s.Store.ListTasks(ctx, lane, state, parentLane, project, limit)
+}
+func (s Service) ListTasksPage(ctx context.Context, lane, state, parentLane string, project *string, afterID int64, limit int) ([]store.Task, error) {
+	return s.Store.ListTasksPage(ctx, lane, state, parentLane, project, afterID, limit)
 }
 
 // ExportTasks returns a consistent task snapshot and stamps the serving
 // build's VCS revision into the source object. The revision is the binary's
 // embedded stamp; "unknown" is emitted rather than invented when it is absent.
-func (s Service) ExportTasks(ctx context.Context, lane, state, parentLane string, limit int) (store.TaskExport, error) {
-	out, err := s.Store.ExportTasks(ctx, lane, state, parentLane, limit)
+func (s Service) ExportTasks(ctx context.Context, lane, state, parentLane string, project *string, limit int) (store.TaskExport, error) {
+	out, err := s.Store.ExportTasks(ctx, lane, state, parentLane, project, limit)
 	if err != nil {
 		return out, err
 	}
@@ -415,9 +424,12 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("GET /v1/tasks", s.tasksList)
 	m.HandleFunc("GET /v1/tasks/export", s.tasksExport)
 	m.HandleFunc("POST /v1/tasks/next", s.tasksNext)
+	m.HandleFunc("GET /v1/tasks/projects", s.taskProjectsList)
+	m.HandleFunc("POST /v1/tasks/projects", s.taskProjectsCreate)
 	m.HandleFunc("GET /v1/tasks/{id}", s.task)
 	m.HandleFunc("POST /v1/tasks/{id}/claim", s.taskClaim)
 	m.HandleFunc("POST /v1/tasks/{id}/transition", s.taskTransition)
+	m.HandleFunc("POST /v1/tasks/{id}/project", s.taskProject)
 	m.HandleFunc("POST /v1/tasks/relane", s.tasksRelane)
 	m.HandleFunc("POST /v1/tasks/{id}/decision-request", s.taskDecisionRequest)
 	m.HandleFunc("POST /v1/tasks/{id}/decision-request/resolve", s.taskDecisionResolve)
@@ -536,6 +548,20 @@ func appErr(w http.ResponseWriter, e error) {
 		}
 		jsonOut(w, http.StatusConflict, body)
 		return
+	case errors.Is(e, store.ErrTaskProjectRequired):
+		body := map[string]string{"error": "task_project_required"}
+		if reason, ok := strings.CutPrefix(e.Error(), "task_project_required: "); ok && reason != "" {
+			body["reason"] = reason
+		}
+		jsonOut(w, http.StatusBadRequest, body)
+		return
+	case errors.Is(e, store.ErrTaskProjectUnknown):
+		body := map[string]string{"error": "task_project_unknown"}
+		if reason, ok := strings.CutPrefix(e.Error(), "task_project_unknown: "); ok && reason != "" {
+			body["reason"] = reason
+		}
+		jsonOut(w, http.StatusBadRequest, body)
+		return
 	case errors.Is(e, store.ErrDispositionOperatorOnly):
 		jsonOut(w, http.StatusConflict, map[string]string{"error": "disposition_operator_only"})
 		return
@@ -630,6 +656,11 @@ func (s Server) tasksList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	lane, state, parentLane := r.URL.Query().Get("lane"), r.URL.Query().Get("state"), r.URL.Query().Get("parent_lane")
+	var project *string
+	if r.URL.Query().Has("project") {
+		v := r.URL.Query().Get("project")
+		project = &v
+	}
 	var xs []store.Task
 	if r.URL.Query().Has("after_id") {
 		afterID, parseErr := queryAfterID(r)
@@ -637,9 +668,9 @@ func (s Server) tasksList(w http.ResponseWriter, r *http.Request) {
 			appErr(w, parseErr)
 			return
 		}
-		xs, err = s.Service.ListTasksPage(r.Context(), lane, state, parentLane, afterID, limit)
+		xs, err = s.Service.ListTasksPage(r.Context(), lane, state, parentLane, project, afterID, limit)
 	} else {
-		xs, err = s.Service.ListTasks(r.Context(), lane, state, parentLane, limit)
+		xs, err = s.Service.ListTasks(r.Context(), lane, state, parentLane, project, limit)
 	}
 	if err != nil {
 		appErr(w, err)
@@ -662,7 +693,12 @@ func (s Server) tasksExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	lane, state, parentLane := r.URL.Query().Get("lane"), r.URL.Query().Get("state"), r.URL.Query().Get("parent_lane")
-	out, err := s.Service.ExportTasks(r.Context(), lane, state, parentLane, limit)
+	var project *string
+	if r.URL.Query().Has("project") {
+		v := r.URL.Query().Get("project")
+		project = &v
+	}
+	out, err := s.Service.ExportTasks(r.Context(), lane, state, parentLane, project, limit)
 	if err != nil {
 		if errors.Is(err, store.ErrInvalidExportQuery) {
 			jsonOut(w, http.StatusBadRequest, map[string]string{"error": "invalid_export_query"})
@@ -701,6 +737,78 @@ type taskClaimInput struct {
 	// NoJob records why a claim without job_id is allowed; the claim event
 	// keeps it. An empty reason is refused with task_job_required.
 	NoJob string `json:"no_job,omitempty"`
+}
+
+// taskProjectsList answers the server-configured project vocabulary — the
+// set tasks add --project accepts. The list is data, not code: operators
+// extend it through taskProjectsCreate.
+func (s Server) taskProjectsList(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.auth(w, r); !ok {
+		return
+	}
+	names, err := s.Service.ListTaskProjects(r.Context())
+	if err != nil {
+		appErr(w, err)
+		return
+	}
+	jsonOut(w, http.StatusOK, map[string]any{"projects": names})
+}
+
+// taskProjectsCreate extends the project vocabulary by one name. Re-adding
+// an existing name is an idempotent 200 rather than a conflict.
+func (s Server) taskProjectsCreate(w http.ResponseWriter, r *http.Request) {
+	client, ok := s.auth(w, r)
+	if !ok {
+		return
+	}
+	defer r.Body.Close()
+	var input struct {
+		Name string `json:"name"`
+	}
+	if err := decode(r, &input, 4096); err != nil {
+		appErr(w, err)
+		return
+	}
+	created, err := s.Service.AddTaskProject(r.Context(), client, input.Name)
+	if err != nil {
+		appErr(w, err)
+		return
+	}
+	status := http.StatusOK
+	if created {
+		status = http.StatusCreated
+	}
+	jsonOut(w, status, map[string]any{"name": input.Name, "created": created})
+}
+
+// taskProject reclassifies one task inside the configured vocabulary and
+// records the move as a kind='project' event — the relane-like audit trail
+// for the field.
+func (s Server) taskProject(w http.ResponseWriter, r *http.Request) {
+	client, ok := s.auth(w, r)
+	if !ok {
+		return
+	}
+	id, err := taskID(r)
+	if err != nil || id < 1 {
+		appErr(w, errors.New("task id"))
+		return
+	}
+	defer r.Body.Close()
+	var input struct {
+		Project string `json:"project"`
+		Note    string `json:"note"`
+	}
+	if err := decode(r, &input, 4096); err != nil {
+		appErr(w, err)
+		return
+	}
+	x, _, err := s.Service.SetTaskProject(r.Context(), id, input.Project, client, input.Note)
+	if err != nil {
+		appErr(w, err)
+		return
+	}
+	jsonOut(w, http.StatusOK, x)
 }
 
 func (s Server) taskClaim(w http.ResponseWriter, r *http.Request) {

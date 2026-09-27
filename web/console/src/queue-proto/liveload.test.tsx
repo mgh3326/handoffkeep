@@ -90,6 +90,7 @@ function mkTask(over: Partial<ProtoTask>): ProtoTask {
     created_by: "test",
     updated_at: null,
     parent_lane: null,
+    project: null,
     refs: {},
     events: [],
     dwell: [],

@@ -277,7 +277,7 @@ func TestExportCountsAndFilters(t *testing.T) {
 	if _, err := s.TransitionTask(t.Context(), decision.ID, "needs_decision", "node", "which path?", nil, ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.CreateTask(t.Context(), store.Task{Lane: laneB, ParentLane: laneA, Title: "child decision", Kind: "implement", CreatedBy: "node"}); err != nil {
+	if _, err := s.CreateTask(t.Context(), store.Task{Lane: laneB, ParentLane: laneA, Title: "child decision", Kind: "implement", CreatedBy: "node", Project: projectRef("experiment")}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -412,7 +412,7 @@ func TestExportDigests(t *testing.T) {
 	s := taskTestStore(t)
 	lane := taskLane(t)
 	for i := 0; i < 3; i++ {
-		task, err := s.CreateTask(t.Context(), store.Task{Lane: lane, Title: fmt.Sprintf("digest 태스크 %d <&>", i), Kind: "implement", Priority: i, Refs: store.TaskRefs{PR: strconv.Itoa(100 + i), HeadSHA: fmt.Sprintf("sha%d", i)}, CreatedBy: "node"})
+		task, err := s.CreateTask(t.Context(), store.Task{Lane: lane, Title: fmt.Sprintf("digest 태스크 %d <&>", i), Kind: "implement", Priority: i, Refs: store.TaskRefs{PR: strconv.Itoa(100 + i), HeadSHA: fmt.Sprintf("sha%d", i)}, CreatedBy: "node", Project: projectRef("experiment")})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -515,7 +515,7 @@ func TestExportDigests(t *testing.T) {
 func TestExportNoStoreAndErrorBodies(t *testing.T) {
 	s := taskTestStore(t)
 	lane := taskLane(t)
-	if _, err := s.CreateTask(t.Context(), store.Task{Lane: lane, Title: "sensitive-export-title", Kind: "implement", Refs: store.TaskRefs{PR: "sensitive-pr-458"}, CreatedBy: "node"}); err != nil {
+	if _, err := s.CreateTask(t.Context(), store.Task{Lane: lane, Title: "sensitive-export-title", Kind: "implement", Refs: store.TaskRefs{PR: "sensitive-pr-458"}, CreatedBy: "node", Project: projectRef("experiment")}); err != nil {
 		t.Fatal(err)
 	}
 	h := taskHTTP(s)

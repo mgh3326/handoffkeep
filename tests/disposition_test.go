@@ -34,7 +34,7 @@ func dispositionPR(t *testing.T) string {
 
 func dispositionInput(lane, originPR string, residuals int, recommended string) store.DispositionInput {
 	merged := time.Now().UTC().Add(-time.Hour)
-	in := store.DispositionInput{Lane: lane, Title: "[처분] " + originPR, OriginPR: originPR, MergeSHA: strings.Repeat("a", 40), MergedAt: &merged,
+	in := store.DispositionInput{Lane: lane, Project: "experiment", Title: "[처분] " + originPR, OriginPR: originPR, MergeSHA: strings.Repeat("a", 40), MergedAt: &merged,
 		Install: store.DispositionInstall{State: "unknown"}, ResidualN: residuals, Recommended: recommended, CreatedBy: "director-node"}
 	if residuals > 0 {
 		in.ResidualDoc = "disposition/2026-09-21/fixture"
@@ -169,7 +169,7 @@ func TestDispositionCreateRejectsUnsourcedFacts(t *testing.T) {
 		}
 	}
 	// A parent-task origin must be terminal; hk reads that fact itself.
-	in := store.DispositionInput{Lane: lane, Title: "[처분] #parent", OriginTask: parent.ID, Install: store.DispositionInstall{State: "unknown"}, Recommended: "E", CreatedBy: "director-node"}
+	in := store.DispositionInput{Lane: lane, Project: "experiment", Title: "[처분] #parent", OriginTask: parent.ID, Install: store.DispositionInstall{State: "unknown"}, Recommended: "E", CreatedBy: "director-node"}
 	if _, _, err := s.CreateDisposition(t.Context(), in); err == nil {
 		t.Fatal("non-terminal parent accepted")
 	}
@@ -179,7 +179,7 @@ func TestDispositionCreateRejectsUnsourcedFacts(t *testing.T) {
 		t.Fatalf("terminal parent origin: %+v created=%v err=%v", x, created, err)
 	}
 	// Disposition refs cannot be forged through the generic create path.
-	forged := store.Task{Lane: lane, Title: "forged", Kind: "decide", CreatedBy: "n", Refs: x.Refs}
+	forged := store.Task{Lane: lane, Title: "forged", Kind: "decide", CreatedBy: "n", Project: projectRef("experiment"), Refs: x.Refs}
 	if _, err := s.CreateTask(t.Context(), forged); err == nil {
 		t.Fatal("CreateTask accepted disposition refs")
 	}
@@ -207,7 +207,7 @@ func TestDispositionSilenceIsInert(t *testing.T) {
 			t.Fatalf("NextTask err=%v", err)
 		}
 	}
-	if _, err := s.ListTasks(ctx, lane, "", "", 100); err != nil {
+	if _, err := s.ListTasks(ctx, lane, "", "", nil, 100); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.ListOpenTaskDecisions(ctx, 1000); err != nil {
@@ -600,7 +600,7 @@ func TestDispositionGuardLeavesOtherDecisionsUnchanged(t *testing.T) {
 		t.Fatalf("resolved builder question state=%s", got.State)
 	}
 	// A task that merely carries origin refs is not a disposition item.
-	child, err := s.CreateTask(t.Context(), store.Task{Lane: lane, Title: "ordered follow-up", Kind: "implement", CreatedBy: "n", Refs: store.TaskRefs{OriginTask: viaResolve.ID}})
+	child, err := s.CreateTask(t.Context(), store.Task{Lane: lane, Title: "ordered follow-up", Kind: "implement", CreatedBy: "n", Project: projectRef("experiment"), Refs: store.TaskRefs{OriginTask: viaResolve.ID}})
 	if err != nil || child.Refs.OriginTask != viaResolve.ID {
 		t.Fatalf("follow-up with origin_task: %+v err=%v", child, err)
 	}

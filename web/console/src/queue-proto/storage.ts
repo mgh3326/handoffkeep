@@ -126,7 +126,7 @@ function sane(saved: unknown): saved is SavedView {
  * rather than reaching the renderer as an unhandled string. */
 function withKnownPresentation<T extends Partial<SavedView>>(saved: T): T {
   const out = { ...saved };
-  if (out.grouping !== undefined && !["state", "none", "area"].includes(out.grouping)) {
+  if (out.grouping !== undefined && !["state", "none", "area", "project"].includes(out.grouping)) {
     out.grouping = DEFAULT_STATE.grouping;
   }
   if (out.density !== undefined && !["compact", "comfortable"].includes(out.density)) {

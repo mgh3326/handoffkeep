@@ -112,6 +112,7 @@ func dispositionCmd(args []string, out io.Writer) error {
 	fs.SetOutput(io.Discard)
 	c := remoteClient(fs)
 	lane := fs.String("lane", "", "director lane that applies the answer")
+	project := fs.String("project", "", "task project for the created item (required on add; the allowed set is listed by tasks projects)")
 	title := fs.String("title", "", "item title (default: [처분] <origin>)")
 	originPR := fs.String("origin-pr", "", "merged pull request URL")
 	ghJSON := fs.String("gh-json", "", "file with gh pr view --json url,state,mergeCommit,mergedAt output")
@@ -159,10 +160,13 @@ func dispositionCmd(args []string, out io.Writer) error {
 		if fs.NArg() != 0 {
 			return errors.New("tasks disposition add takes flags only")
 		}
+		if strings.TrimSpace(*project) == "" {
+			return errors.New("tasks disposition add requires --project <name> (the allowed set is listed by tasks projects)")
+		}
 		if (*originPR == "") == (*originTask == 0) {
 			return errors.New("exactly one of --origin-pr or --origin-task is required")
 		}
-		input := store.DispositionInput{Lane: *lane, Title: *title, OriginPR: *originPR, OriginTask: *originTask, Recommended: *recommended, Note: *note,
+		input := store.DispositionInput{Lane: *lane, Project: *project, Title: *title, OriginPR: *originPR, OriginTask: *originTask, Recommended: *recommended, Note: *note,
 			Install: store.DispositionInstall{State: *installState, TargetsPass: *installPass, TargetsTotal: *installTotal, Witness: *installWitness}}
 		if *originPR != "" {
 			if *ghJSON == "" {

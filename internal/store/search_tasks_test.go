@@ -414,7 +414,7 @@ func TestMigrateAddsTaskBodyDoc(t *testing.T) {
 	if _, _, err := s.PutDocument(ctx, Document{Key: "k/migrated", Kind: "note", Body: "migrateprobe body", CreatedBy: "t"}); err != nil {
 		t.Fatal(err)
 	}
-	x, err := s.CreateTask(ctx, Task{Lane: "lane-a", Title: "migrated body", Kind: "implement", CreatedBy: "t", BodyDoc: "k/migrated"})
+	x, err := s.CreateTask(ctx, Task{Lane: "lane-a", Title: "migrated body", Kind: "implement", CreatedBy: "t", BodyDoc: "k/migrated", Project: projectPtr(testProjectName)})
 	if err != nil {
 		t.Fatal(err)
 	}

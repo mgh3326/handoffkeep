@@ -19,6 +19,7 @@ type ToolbarProps = {
 const GROUPING_LABEL: Record<Grouping, string> = {
   state: "상태별",
   none: "그룹 없음",
+  project: "프로젝트별",
   area: "area→bundle (draft)",
 };
 
@@ -71,7 +72,7 @@ export function Toolbar({ state, lanes, kinds, states, visibleCount, partial, al
     chips.push({ label: "grouped: area→bundle (draft)", clear: () => set({ grouping: "state" }) });
   }
 
-  const groupings: Grouping[] = allowAreaGrouping ? ["state", "none", "area"] : ["state", "none"];
+  const groupings: Grouping[] = allowAreaGrouping ? ["state", "project", "none", "area"] : ["state", "project", "none"];
   const filterCount = activeFilterCount(state.filters);
   const groupingNote = state.layout === "list" ? ` · ${GROUPING_LABEL[state.grouping]}` : "";
 

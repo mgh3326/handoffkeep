@@ -104,7 +104,7 @@ func linearCmd(args []string, out io.Writer) error {
 		Client: linearClient,
 		ListTasks: func(ctx context.Context) ([]store.Task, error) {
 			return listAllReconcileTasks(ctx, func(ctx context.Context, afterID int64, limit int) ([]store.Task, error) {
-				return hkClient.ListTasksPage(ctx, "", "", "", afterID, limit)
+				return hkClient.ListTasksPage(ctx, "", "", "", nil, afterID, limit)
 			})
 		},
 		OutboxStatus: hkClient.LinearOutboxStatus,
@@ -206,7 +206,7 @@ func taskRefs(pr, headSHA, reportPath, jobID string, linear *store.TaskLinear) (
 }
 
 func normalizeTaskArgs(args []string) ([]string, error) {
-	valueFlags := map[string]bool{"--url": true, "--token": true, "--lane": true, "--parent-lane": true, "--state": true, "--title": true, "--kind": true, "--priority": true, "--by": true, "--to": true, "--note": true, "--question": true, "--limit": true, "--pr": true, "--head-sha": true, "--report-path": true, "--job-id": true, "--no-job": true, "--option": true, "--recommended": true, "--tier": true, "--grade": true, "--brief-key": true, "--label": true, "--linear-report-key": true, "--linear-verify-key": true, "--linear-decision-key": true, "--deploy-sha": true, "--origin-pr": true, "--origin-task": true, "--doc": true}
+	valueFlags := map[string]bool{"--url": true, "--token": true, "--lane": true, "--parent-lane": true, "--state": true, "--title": true, "--kind": true, "--priority": true, "--by": true, "--to": true, "--note": true, "--question": true, "--limit": true, "--pr": true, "--head-sha": true, "--report-path": true, "--job-id": true, "--no-job": true, "--option": true, "--recommended": true, "--tier": true, "--grade": true, "--brief-key": true, "--label": true, "--linear-report-key": true, "--linear-verify-key": true, "--linear-decision-key": true, "--deploy-sha": true, "--origin-pr": true, "--origin-task": true, "--doc": true, "--project": true}
 	flags, positional := []string{}, []string{}
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -228,7 +228,7 @@ func normalizeTaskArgs(args []string) ([]string, error) {
 
 func tasksCmd(args []string, out io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: tasks add|list|export|claim|next|transition|relane|decision-request|decision-resolve|show|comment|comments|disposition")
+		return errors.New("usage: tasks add|list|export|claim|next|transition|relane|project|projects|decision-request|decision-resolve|show|comment|comments|disposition")
 	}
 	if args[0] == "disposition" {
 		return dispositionCmd(args[1:], out)
@@ -238,6 +238,9 @@ func tasksCmd(args []string, out io.Writer) error {
 	}
 	if args[0] == "relane" {
 		return taskRelaneCmd(args, os.Stdin, out)
+	}
+	if args[0] == "project" || args[0] == "projects" {
+		return taskProjectCmd(args, out)
 	}
 	if args[0] == "decision-request" {
 		return decisionRequestCmd(args, out)
@@ -251,6 +254,7 @@ func tasksCmd(args []string, out io.Writer) error {
 	lane := fs.String("lane", "", "task lane")
 	parentLane := fs.String("parent-lane", "", "parent lane")
 	state := fs.String("state", "", "task state")
+	project := fs.String("project", "", "task project (required on add; an explicit empty value lists legacy no-project rows on list/export)")
 	title := fs.String("title", "", "task title")
 	kind := fs.String("kind", "implement", "task kind")
 	priority := fs.Int("priority", 0, "higher is first")
@@ -288,13 +292,16 @@ func tasksCmd(args []string, out io.Writer) error {
 	if err := fs.Parse(parseArgs); err != nil {
 		return err
 	}
-	linearFlagsUsed, docFlagUsed, noJobSet := false, false, false
+	linearFlagsUsed, docFlagUsed, noJobSet, projectSet := false, false, false, false
 	fs.Visit(func(item *flag.Flag) {
 		if item.Name == "doc" {
 			docFlagUsed = true
 		}
 		if item.Name == "no-job" {
 			noJobSet = true
+		}
+		if item.Name == "project" {
+			projectSet = true
 		}
 		switch item.Name {
 		case "linear-sync", "tier", "grade", "brief-key", "label", "linear-report-key", "linear-verify-key", "linear-decision-key", "deploy-sha":
@@ -354,13 +361,16 @@ func tasksCmd(args []string, out io.Writer) error {
 		if fs.NArg() != 0 {
 			return errors.New("tasks add takes flags only")
 		}
+		if !projectSet || strings.TrimSpace(*project) == "" {
+			return errors.New("tasks add requires --project <name> (the allowed set is listed by tasks projects)")
+		}
 		// Shape only: the document may be written after the task is filed.
 		if *bodyDoc != "" && !store.ValidBodyDoc(*bodyDoc) {
 			return errors.New("--doc must be a document key or key#section")
 		}
 		refs, _ := taskRefs(*pr, *headSHA, *reportPath, *jobID, linearRefs)
 		refs.OriginPR, refs.OriginTask = *originPR, *originTask
-		x, err := c.CreateTask(ctx, store.Task{Lane: *lane, ParentLane: *parentLane, Title: *title, Kind: *kind, Priority: *priority, Refs: *refs, BodyDoc: *bodyDoc})
+		x, err := c.CreateTask(ctx, store.Task{Lane: *lane, ParentLane: *parentLane, Title: *title, Kind: *kind, Priority: *priority, Refs: *refs, BodyDoc: *bodyDoc, Project: project})
 		if err != nil {
 			return err
 		}
@@ -369,7 +379,11 @@ func tasksCmd(args []string, out io.Writer) error {
 		if fs.NArg() != 0 {
 			return errors.New("tasks list takes flags only")
 		}
-		xs, err := c.ListTasks(ctx, *lane, *state, *parentLane, *limit)
+		var projectFilter *string
+		if projectSet {
+			projectFilter = project
+		}
+		xs, err := c.ListTasks(ctx, *lane, *state, *parentLane, projectFilter, *limit)
 		if err != nil {
 			return err
 		}
@@ -393,7 +407,11 @@ func tasksCmd(args []string, out io.Writer) error {
 		if limitSet && (exportLimit < 1 || exportLimit > store.ExportLimitMax) {
 			return fmt.Errorf("invalid_export_query: limit must be between 1 and %d", store.ExportLimitMax)
 		}
-		doc, err := c.ExportTasks(ctx, *lane, *state, *parentLane, exportLimit)
+		var projectFilter *string
+		if projectSet {
+			projectFilter = project
+		}
+		doc, err := c.ExportTasks(ctx, *lane, *state, *parentLane, projectFilter, exportLimit)
 		if err != nil {
 			return err
 		}
@@ -481,7 +499,7 @@ func tasksCmd(args []string, out io.Writer) error {
 		}
 		return printJSON(out, x)
 	default:
-		return errors.New("usage: tasks add|list|export|claim|next|transition|relane|decision-request|decision-resolve|show|comment|comments|disposition")
+		return errors.New("usage: tasks add|list|export|claim|next|transition|relane|project|projects|decision-request|decision-resolve|show|comment|comments|disposition")
 	}
 }
 
@@ -1563,7 +1581,7 @@ func configureLinearWorkers(enabled bool, st *store.Store, apiURL, teamID string
 			Client: linearClient,
 			ListTasks: func(ctx context.Context) ([]store.Task, error) {
 				return listAllReconcileTasks(ctx, func(ctx context.Context, afterID int64, limit int) ([]store.Task, error) {
-					return st.ListTasksPage(ctx, "", "", "", afterID, limit)
+					return st.ListTasksPage(ctx, "", "", "", nil, afterID, limit)
 				})
 			},
 			OutboxStatus: st.GetLinearOutboxStatus,

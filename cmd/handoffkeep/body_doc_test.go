@@ -26,7 +26,7 @@ func TestTasksAddDocRoundTrip(t *testing.T) {
 	t.Setenv("HANDOFFKEEP_TOKEN", "fixture-token")
 
 	var addOutput bytes.Buffer
-	if err := tasksCmd([]string{"add", "--lane", "doc-lane", "--title", "one operator line", "--doc", "design/2026-09-21/body#3"}, &addOutput); err != nil {
+	if err := tasksCmd([]string{"add", "--lane", "doc-lane", "--title", "one operator line", "--project", "experiment", "--doc", "design/2026-09-21/body#3"}, &addOutput); err != nil {
 		t.Fatal(err)
 	}
 	var task store.Task
@@ -49,7 +49,7 @@ func TestTasksAddDocRoundTrip(t *testing.T) {
 	}
 
 	// Server-side shape check: a raw API client cannot store body text.
-	req, _ := http.NewRequest(http.MethodPost, hkServer.URL+"/v1/tasks", strings.NewReader(`{"lane":"doc-lane","title":"raw","kind":"implement","body_doc":"this is body text"}`))
+	req, _ := http.NewRequest(http.MethodPost, hkServer.URL+"/v1/tasks", strings.NewReader(`{"lane":"doc-lane","title":"raw","kind":"implement","project":"experiment","body_doc":"this is body text"}`))
 	req.Header.Set("Authorization", "Bearer fixture-token")
 	req.Header.Set("Content-Type", "application/json")
 	res, err := http.DefaultClient.Do(req)
@@ -72,7 +72,7 @@ func TestTasksDocFlagShapeAndScope(t *testing.T) {
 	t.Setenv("HANDOFFKEEP_URL", server.URL)
 	t.Setenv("HANDOFFKEEP_TOKEN", "fixture-token")
 	for _, bad := range []string{"body text", "../x", "k#a b"} {
-		err := tasksCmd([]string{"add", "--lane", "l", "--title", "t", "--doc", bad}, &bytes.Buffer{})
+		err := tasksCmd([]string{"add", "--lane", "l", "--title", "t", "--project", "experiment", "--doc", bad}, &bytes.Buffer{})
 		if err == nil || !strings.Contains(err.Error(), "--doc") {
 			t.Fatalf("--doc %q err=%v", bad, err)
 		}

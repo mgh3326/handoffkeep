@@ -180,8 +180,11 @@ func validDisposition(refs TaskRefs) bool {
 
 // DispositionInput is what the director supplies. Facts that hk can observe
 // itself (the parent task for an origin_task) are read by the store.
+// Project is required like on tasks add: a disposition item is a new task
+// row and passes the same task_projects gate rather than bypassing it.
 type DispositionInput struct {
 	Lane        string             `json:"lane"`
+	Project     string             `json:"project"`
 	Title       string             `json:"title"`
 	OriginPR    string             `json:"origin_pr,omitempty"`
 	OriginTask  int64              `json:"origin_task,omitempty"`
@@ -287,6 +290,13 @@ func (s *Store) CreateDisposition(ctx context.Context, in DispositionInput) (Tas
 		return Task{}, false, err
 	}
 	defer tx.Rollback(ctx)
+	var project *string
+	if in.Project != "" {
+		project = &in.Project
+	}
+	if err = requireTaskProject(ctx, tx, project); err != nil {
+		return Task{}, false, err
+	}
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, "disposition:"+dispositionOriginKey(in.OriginPR, in.OriginTask)); err != nil {
 		return Task{}, false, err
 	}
@@ -316,7 +326,7 @@ func (s *Store) CreateDisposition(ctx context.Context, in DispositionInput) (Tas
 		return Task{}, false, err
 	}
 	var x Task
-	if err = scanTask(tx.QueryRow(ctx, `INSERT INTO tasks(lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at) VALUES($1,'',$2,'decide','needs_decision',0,$3::jsonb,$4,$4,$5,$5) RETURNING `+taskColumns, in.Lane, in.Title, string(encoded), in.CreatedBy, now), &x); err != nil {
+	if err = scanTask(tx.QueryRow(ctx, `INSERT INTO tasks(lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at,project) VALUES($1,'',$2,'decide','needs_decision',0,$3::jsonb,$4,$4,$5,$5,$6) RETURNING `+taskColumns, in.Lane, in.Title, string(encoded), in.CreatedBy, now, in.Project), &x); err != nil {
 		return Task{}, false, err
 	}
 	// The legal path is recorded explicitly so the event history never shows
@@ -572,7 +582,7 @@ func (s *Store) ListOpenDispositions(ctx context.Context, limit int) ([]OpenDisp
 	for rows.Next() {
 		var x OpenDisposition
 		var refs []byte
-		if err := rows.Scan(&x.Task.ID, &x.Task.Lane, &x.Task.ParentLane, &x.Task.Title, &x.Task.Kind, &x.Task.State, &x.Task.Priority, &refs, &x.Task.ClaimedBy, &x.Task.CreatedBy, &x.Task.CreatedAt, &x.Task.UpdatedAt, &x.Task.BodyDoc, &x.Gen, &x.Question); err != nil {
+		if err := rows.Scan(&x.Task.ID, &x.Task.Lane, &x.Task.ParentLane, &x.Task.Title, &x.Task.Kind, &x.Task.State, &x.Task.Priority, &refs, &x.Task.ClaimedBy, &x.Task.CreatedBy, &x.Task.CreatedAt, &x.Task.UpdatedAt, &x.Task.BodyDoc, &x.Task.Project, &x.Gen, &x.Question); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal(refs, &x.Task.Refs); err != nil {

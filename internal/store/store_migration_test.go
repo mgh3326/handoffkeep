@@ -56,14 +56,14 @@ func TestRelayEventsV6ToV7Upgrade(t *testing.T) {
 		t.Fatal(err)
 	}
 	var version int
-	if err = pool.QueryRow(ctx, `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != 14 {
+	if err = pool.QueryRow(ctx, `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != 15 {
 		t.Fatalf("schema version=%d err=%v", version, err)
 	}
 	var constraintOID uint32
 	if err = pool.QueryRow(ctx, `SELECT oid FROM pg_constraint WHERE conrelid='relay_events'::regclass AND conname='relay_events_kind_check'`).Scan(&constraintOID); err != nil {
 		t.Fatal(err)
 	}
-	// A second open must see schema version 14 and skip the lock-heavy relay DDL.
+	// A second open must see schema version 15 and skip the lock-heavy relay DDL.
 	// The constraint OID would change if it were dropped and re-added again.
 	if err = s.migrate(ctx); err != nil {
 		t.Fatal(err)
@@ -212,7 +212,7 @@ func TestTaskCommentsMigrationIsAdditiveAndIdempotent(t *testing.T) {
 	if err = s.migrate(ctx); err != nil {
 		t.Fatal(err)
 	}
-	task, err := s.CreateTask(ctx, Task{Lane: "lane-a", Title: "existing", Kind: "implement", CreatedBy: "node"})
+	task, err := s.CreateTask(ctx, Task{Lane: "lane-a", Title: "existing", Kind: "implement", CreatedBy: "node", Project: projectPtr(testProjectName)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,7 +230,7 @@ func TestTaskCommentsMigrationIsAdditiveAndIdempotent(t *testing.T) {
 	if err = pool.QueryRow(ctx, `SELECT count(*) FROM pg_trigger WHERE tgname='task_comments_append_only' AND tgrelid='task_comments'::regclass`).Scan(&triggers); err != nil || triggers != 1 {
 		t.Fatalf("triggers=%d err=%v", triggers, err)
 	}
-	if err = pool.QueryRow(ctx, `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != 14 {
+	if err = pool.QueryRow(ctx, `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != 15 {
 		t.Fatalf("schema version=%d err=%v", version, err)
 	}
 	xs, err := s.ListTaskComments(ctx, task.ID, 0, 10)
@@ -294,7 +294,7 @@ func TestBenchCatalogV11ToV12Upgrade(t *testing.T) {
 		t.Fatal(err)
 	}
 	var version, rows, modelRows int
-	if err = pool.QueryRow(ctx, `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != 14 {
+	if err = pool.QueryRow(ctx, `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != 15 {
 		t.Fatalf("schema version=%d err=%v", version, err)
 	}
 	if err = pool.QueryRow(ctx, `SELECT count(*) FROM schema_version WHERE version=12`).Scan(&version); err != nil || version != 1 {
@@ -367,7 +367,7 @@ func TestTaskEventsDecisionKindUpgradeToV14(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	x, err := s.CreateTask(ctx, Task{Lane: "v14-lane", Title: "history", Kind: "implement", CreatedBy: "v14"})
+	x, err := s.CreateTask(ctx, Task{Lane: "v14-lane", Title: "history", Kind: "implement", CreatedBy: "v14", Project: projectPtr(testProjectName)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -449,7 +449,7 @@ func TestV13ThenV14BothChecksHold(t *testing.T) {
 			t.Fatalf("%s: %v", q, err)
 		}
 	}
-	x, err := s.CreateTask(ctx, Task{Lane: "v13v14-lane", Title: "stacked", Kind: "implement", CreatedBy: "v14"})
+	x, err := s.CreateTask(ctx, Task{Lane: "v13v14-lane", Title: "stacked", Kind: "implement", CreatedBy: "v14", Project: projectPtr(testProjectName)})
 	if err != nil {
 		t.Fatal(err)
 	}

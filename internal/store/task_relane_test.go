@@ -17,7 +17,7 @@ func relaneLane(t *testing.T, prefix string) string {
 
 func relaneTask(t *testing.T, s *Store, lane, title string) Task {
 	t.Helper()
-	x, err := s.CreateTask(context.Background(), Task{Lane: lane, Title: title, Kind: "implement", CreatedBy: "relane-test"})
+	x, err := s.CreateTask(context.Background(), Task{Lane: lane, Title: title, Kind: "implement", CreatedBy: "relane-test", Project: projectPtr(testProjectName)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,6 +34,7 @@ func TestRelaneTaskMovesLaneAndRecordsEvent(t *testing.T) {
 	x, err := s.CreateTask(ctx, Task{
 		Lane: from, ParentLane: "director-1", Title: "moving task", Kind: "fix", Priority: 7,
 		Refs: TaskRefs{PR: "org/repo#123", JobID: "job-9"}, CreatedBy: "relane-test", BodyDoc: "doc/keep-me",
+		Project: projectPtr(testProjectName),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -137,7 +138,7 @@ func TestRelaneTaskUnknownLaneRejected(t *testing.T) {
 	// that appears only as a parent_lane and one that appears only as a
 	// relay owner both pass without the override.
 	parentOnly := relaneLane(t, "relane-parent-only")
-	if _, err := s.CreateTask(ctx, Task{Lane: relaneLane(t, "relane-child"), ParentLane: parentOnly, Title: "child", Kind: "implement", CreatedBy: "relane-test"}); err != nil {
+	if _, err := s.CreateTask(ctx, Task{Lane: relaneLane(t, "relane-child"), ParentLane: parentOnly, Title: "child", Kind: "implement", CreatedBy: "relane-test", Project: projectPtr(testProjectName)}); err != nil {
 		t.Fatal(err)
 	}
 	y := relaneTask(t, s, from, "parent lane target")

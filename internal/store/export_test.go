@@ -54,7 +54,7 @@ func exportLane(t *testing.T) string {
 
 func exportTask(t *testing.T, st *Store, lane, title string) Task {
 	t.Helper()
-	task, err := st.CreateTask(t.Context(), Task{Lane: lane, Title: title, Kind: "implement", CreatedBy: "export-test"})
+	task, err := st.CreateTask(t.Context(), Task{Lane: lane, Title: title, Kind: "implement", CreatedBy: "export-test", Project: projectPtr(testProjectName)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +105,7 @@ func TestExportTasksSingleSnapshot(t *testing.T) {
 	}
 	done := make(chan exportResult, 1)
 	go func() {
-		out, err := s.ExportTasks(t.Context(), lane, "", "", 100)
+		out, err := s.ExportTasks(t.Context(), lane, "", "", nil, 100)
 		done <- exportResult{out, err}
 	}()
 	select {
@@ -162,7 +162,7 @@ func TestExportTasksSingleSnapshot(t *testing.T) {
 
 	// A second export is an independent post-change snapshot: two rows in
 	// ascending ID order, the claim visible with its event watermark.
-	after, err := s.ExportTasks(t.Context(), lane, "", "", 100)
+	after, err := s.ExportTasks(t.Context(), lane, "", "", nil, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,7 +216,7 @@ func TestExportTasksSnapshotFixedBeforeCounts(t *testing.T) {
 	}
 	done := make(chan exportResult, 1)
 	go func() {
-		out, err := s.ExportTasks(t.Context(), lane, "", "", 100)
+		out, err := s.ExportTasks(t.Context(), lane, "", "", nil, 100)
 		done <- exportResult{out, err}
 	}()
 	select {
@@ -284,10 +284,10 @@ func TestExportTasksReadOnly(t *testing.T) {
 	exportTask(t, s, lane, "read only")
 
 	before := exportTableCounts(t, s)
-	if _, err := s.ExportTasks(t.Context(), lane, "", "", 10); err != nil {
+	if _, err := s.ExportTasks(t.Context(), lane, "", "", nil, 10); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.ExportTasks(t.Context(), "", "", "", ExportLimitMax); err != nil {
+	if _, err := s.ExportTasks(t.Context(), "", "", "", nil, ExportLimitMax); err != nil {
 		t.Fatal(err)
 	}
 	if after := exportTableCounts(t, s); after != before {
@@ -318,11 +318,11 @@ func TestExportTasksValidation(t *testing.T) {
 		{"", "", "", -1},
 		{"", "", "", ExportLimitMax + 1},
 	} {
-		if _, err := s.ExportTasks(t.Context(), args.lane, args.state, args.parentLane, args.limit); !errors.Is(err, ErrInvalidExportQuery) {
+		if _, err := s.ExportTasks(t.Context(), args.lane, args.state, args.parentLane, nil, args.limit); !errors.Is(err, ErrInvalidExportQuery) {
 			t.Fatalf("args=%+v err=%v", args, err)
 		}
 	}
-	out, err := s.ExportTasks(t.Context(), lane, "", "", 10)
+	out, err := s.ExportTasks(t.Context(), lane, "", "", nil, 10)
 	if err != nil {
 		t.Fatal(err)
 	}

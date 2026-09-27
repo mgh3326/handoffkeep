@@ -73,6 +73,14 @@ var (
 	// (decision/2026-09-27/task-job-linkage). A jobless task needs a recorded
 	// no-job reason instead.
 	ErrTaskJobRequired = errors.New("task_job_required")
+	// ErrTaskProjectRequired rejects a create that carries no project. Every
+	// new task row must be classified so the queue stays groupable
+	// (decision/2026-09-27/hk-queue-cleanup, option A item 2).
+	ErrTaskProjectRequired = errors.New("task_project_required")
+	// ErrTaskProjectUnknown rejects a project outside the server-configured
+	// task_projects vocabulary — wrong spellings would fragment the groups
+	// the field exists to provide.
+	ErrTaskProjectUnknown = errors.New("task_project_unknown")
 )
 
 // TaskRefs holds the durable links that let a captain resume work without
@@ -277,6 +285,10 @@ func ValidateDecisionOptions(x DecisionOptions) error {
 const (
 	TaskEventTransition = "transition"
 	TaskEventRelane     = "relane"
+	// TaskEventProject marks task_events rows written by SetTaskProject.
+	// Like relane rows they carry classification values, not states, in
+	// from/to — the same readers that filter kind must skip them.
+	TaskEventProject = "project"
 )
 
 type TaskEvent struct {
@@ -299,20 +311,26 @@ type TaskEvent struct {
 // the transitional "key#section"). The body text stays in documents; tasks
 // keep only this pointer (hk:doc decision/2026-09-21/task536-body-storage-approved).
 type Task struct {
-	ID         int64       `json:"id"`
-	Lane       string      `json:"lane"`
-	ParentLane string      `json:"parent_lane,omitempty"`
-	Title      string      `json:"title"`
-	Kind       string      `json:"kind"`
-	State      string      `json:"state"`
-	Priority   int         `json:"priority"`
-	Refs       TaskRefs    `json:"refs"`
-	ClaimedBy  string      `json:"claimed_by,omitempty"`
-	CreatedBy  string      `json:"created_by"`
-	CreatedAt  time.Time   `json:"created_at"`
-	UpdatedAt  time.Time   `json:"updated_at"`
-	BodyDoc    string      `json:"body_doc,omitempty"`
-	Events     []TaskEvent `json:"events,omitempty"`
+	ID         int64     `json:"id"`
+	Lane       string    `json:"lane"`
+	ParentLane string    `json:"parent_lane,omitempty"`
+	Title      string    `json:"title"`
+	Kind       string    `json:"kind"`
+	State      string    `json:"state"`
+	Priority   int       `json:"priority"`
+	Refs       TaskRefs  `json:"refs"`
+	ClaimedBy  string    `json:"claimed_by,omitempty"`
+	CreatedBy  string    `json:"created_by"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
+	BodyDoc    string    `json:"body_doc,omitempty"`
+	// Project is the task's entry in the server-configured task_projects
+	// vocabulary. NULL on rows created before the field existed — legacy
+	// rows keep it (no backfill) and render as the "no project" bucket.
+	// The field is always emitted, so a null means an unset project rather
+	// than a server that predates the column.
+	Project *string     `json:"project"`
+	Events  []TaskEvent `json:"events,omitempty"`
 }
 
 // RelayEvent is a durable report from a worker to its owning lane.  Delivery
@@ -736,6 +754,35 @@ func (s *Store) migrate(ctx context.Context) error {
 			`INSERT INTO schema_version(version) VALUES (14)`,
 		}
 		for _, q := range v14 {
+			if _, err := tx.Exec(ctx, q); err != nil {
+				return err
+			}
+		}
+	}
+	var v15Applied bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_version WHERE version=15)`).Scan(&v15Applied); err != nil {
+		return err
+	}
+	if !v15Applied {
+		// Version 15 (#763) adds the task project: tasks.project is a
+		// nullable column classified against task_projects, the
+		// server-configured closed vocabulary. Existing rows stay NULL —
+		// classification of legacy rows is an explicit operator action
+		// (tasks project <id> <p>), never a guess by migration.
+		//
+		// The seed is the #762 vocabulary written with ON CONFLICT DO
+		// NOTHING, so a vocabulary the operator already extended is
+		// preserved verbatim. The kind CHECK swap admits 'project' events
+		// and follows the v14 pattern: NOT VALID, lock-heavy DDL runs once
+		// behind the version gate, existing rows need no re-check.
+		v15 := []string{
+			`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS project TEXT`,
+			`CREATE TABLE IF NOT EXISTS task_projects (name TEXT PRIMARY KEY CHECK(name ~ '^[A-Za-z0-9._-]{1,128}$'), created_by TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL)`,
+			`INSERT INTO task_projects(name,created_by,created_at) SELECT name,'seed',now() FROM (VALUES('admiral'),('agent-skills'),('auto_trader'),('auto_trader-operator'),('brewdial'),('experiment'),('fillwire'),('fleet-ops'),('handoffkeep'),('herdr'),('other'),('paneglance'),('panewire'),('plane-pilot'),('remy-client'),('robin-prefect-automations'),('scopefuel'),('wrk')) v(name) ON CONFLICT (name) DO NOTHING`,
+			`ALTER TABLE task_events DROP CONSTRAINT IF EXISTS task_events_kind_check, ADD CONSTRAINT task_events_kind_check CHECK(kind IN ('transition','relane','decision','project')) NOT VALID`,
+			`INSERT INTO schema_version(version) VALUES (15)`,
+		}
+		for _, q := range v15 {
 			if _, err := tx.Exec(ctx, q); err != nil {
 				return err
 			}
@@ -1419,13 +1466,41 @@ func ValidBodyDoc(v string) bool {
 
 func scanTask(row interface{ Scan(...any) error }, x *Task) error {
 	var refs []byte
-	if err := row.Scan(&x.ID, &x.Lane, &x.ParentLane, &x.Title, &x.Kind, &x.State, &x.Priority, &refs, &x.ClaimedBy, &x.CreatedBy, &x.CreatedAt, &x.UpdatedAt, &x.BodyDoc); err != nil {
+	if err := row.Scan(&x.ID, &x.Lane, &x.ParentLane, &x.Title, &x.Kind, &x.State, &x.Priority, &refs, &x.ClaimedBy, &x.CreatedBy, &x.CreatedAt, &x.UpdatedAt, &x.BodyDoc, &x.Project); err != nil {
 		return err
 	}
 	return json.Unmarshal(refs, &x.Refs)
 }
 
-const taskColumns = `id,lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at,body_doc`
+const taskColumns = `id,lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at,body_doc,project`
+
+// taskProjectQuerier is the row-query seam requireTaskProject runs against:
+// the caller's transaction, so membership is judged in the same snapshot the
+// insert commits under.
+type taskProjectQuerier interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+// requireTaskProject is the single create-time gate every new task row
+// passes through — CreateTask and CreateDisposition alike. A nil or empty
+// project is refused as required, a name outside the task_projects
+// vocabulary (or outside the lane-alphabet shape) as unknown.
+func requireTaskProject(ctx context.Context, q taskProjectQuerier, project *string) error {
+	if project == nil || *project == "" {
+		return fmt.Errorf("%w: new tasks require --project <name> (the allowed set is listed by tasks projects)", ErrTaskProjectRequired)
+	}
+	if !validName(*project) {
+		return fmt.Errorf("%w: project names match the lane alphabet [A-Za-z0-9._-]{1,128}", ErrTaskProjectUnknown)
+	}
+	var known bool
+	if err := q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM task_projects WHERE name=$1)`, *project).Scan(&known); err != nil {
+		return err
+	}
+	if !known {
+		return fmt.Errorf("%w: %q is not in the server's project set (the allowed set is listed by tasks projects)", ErrTaskProjectUnknown, *project)
+	}
+	return nil
+}
 
 func (s *Store) CreateTask(ctx context.Context, x Task) (Task, error) {
 	if x.BodyDoc != "" && !ValidBodyDoc(x.BodyDoc) {
@@ -1460,7 +1535,10 @@ func (s *Store) CreateTask(ctx context.Context, x Task) (Task, error) {
 		return x, err
 	}
 	defer tx.Rollback(ctx)
-	if err = scanTask(tx.QueryRow(ctx, `INSERT INTO tasks(lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at,body_doc) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$12) RETURNING `+taskColumns, x.Lane, x.ParentLane, x.Title, x.Kind, x.State, x.Priority, string(refs), x.ClaimedBy, x.CreatedBy, x.CreatedAt, x.UpdatedAt, x.BodyDoc), &x); err != nil {
+	if err = requireTaskProject(ctx, tx, x.Project); err != nil {
+		return x, err
+	}
+	if err = scanTask(tx.QueryRow(ctx, `INSERT INTO tasks(lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at,body_doc,project) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$12,$13) RETURNING `+taskColumns, x.Lane, x.ParentLane, x.Title, x.Kind, x.State, x.Priority, string(refs), x.ClaimedBy, x.CreatedBy, x.CreatedAt, x.UpdatedAt, x.BodyDoc, x.Project), &x); err != nil {
 		return x, err
 	}
 	if s.LinearSyncEnabled() && x.Refs.Linear != nil && x.Refs.Linear.Sync {
@@ -1819,8 +1897,92 @@ func (s *Store) RelaneTask(ctx context.Context, id int64, to, by, note string, a
 	return x, true, tx.Commit(ctx)
 }
 
-func (s *Store) ListTasks(ctx context.Context, lane, state, parentLane string, limit int) ([]Task, error) {
-	if !validTaskQuery(lane, state, parentLane) {
+// SetTaskProject reclassifies one task within the server-configured project
+// vocabulary. It follows RelaneTask's shape — row lock, append-only event —
+// but writes kind='project' events whose from/to carry project names, never
+// states. Unlike a relane it is allowed on terminal rows: project is
+// classification metadata, so legacy history can still be bucketed without
+// falsifying lane-level reports. A no-op change records no event.
+func (s *Store) SetTaskProject(ctx context.Context, id int64, project, by, note string) (x Task, changed bool, err error) {
+	if !validName(project) || by == "" || !validText(by, 128) || !validText(note, MaxBytes) {
+		return Task{}, false, errors.New("invalid task project change")
+	}
+	if err := guard.Reject(note); err != nil {
+		return Task{}, false, err
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Task{}, false, err
+	}
+	defer tx.Rollback(ctx)
+	if err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, id), &x); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Task{}, false, ErrTaskNotFound
+		}
+		return Task{}, false, err
+	}
+	var known bool
+	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM task_projects WHERE name=$1)`, project).Scan(&known); err != nil {
+		return Task{}, false, err
+	}
+	if !known {
+		return Task{}, false, fmt.Errorf("%w: %q is not in the server's project set (the allowed set is listed by tasks projects)", ErrTaskProjectUnknown, project)
+	}
+	from := ""
+	if x.Project != nil {
+		from = *x.Project
+	}
+	if from == project {
+		return x, false, tx.Commit(ctx)
+	}
+	encoded, err := json.Marshal(x.Refs)
+	if err != nil {
+		return Task{}, false, err
+	}
+	x.UpdatedAt = time.Now().UTC()
+	if err = scanTask(tx.QueryRow(ctx, `UPDATE tasks SET project=$2,updated_at=$3 WHERE id=$1 RETURNING `+taskColumns, id, project, x.UpdatedAt), &x); err != nil {
+		return Task{}, false, err
+	}
+	if _, err = tx.Exec(ctx, `INSERT INTO task_events(task_id,"from","to","by",note,refs,at,kind) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,'project')`, id, from, project, by, note, string(encoded), x.UpdatedAt); err != nil {
+		return Task{}, false, err
+	}
+	return x, true, tx.Commit(ctx)
+}
+
+// ListTaskProjects returns the server-configured project vocabulary in
+// name order. This is the set tasks add --project accepts.
+func (s *Store) ListTaskProjects(ctx context.Context) ([]string, error) {
+	rows, err := s.pool.Query(ctx, `SELECT name FROM task_projects ORDER BY name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		out = append(out, name)
+	}
+	return out, rows.Err()
+}
+
+// AddTaskProject extends the server-configured project vocabulary. Names
+// share the lane alphabet; created=false when the name already exists.
+func (s *Store) AddTaskProject(ctx context.Context, name, by string) (bool, error) {
+	if !validName(name) || by == "" || !validText(by, 128) {
+		return false, errors.New("invalid task project")
+	}
+	tag, err := s.pool.Exec(ctx, `INSERT INTO task_projects(name,created_by,created_at) VALUES($1,$2,now()) ON CONFLICT (name) DO NOTHING`, name, by)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+func (s *Store) ListTasks(ctx context.Context, lane, state, parentLane string, project *string, limit int) ([]Task, error) {
+	if !validTaskQuery(lane, state, parentLane, project) {
 		return nil, errors.New("invalid task query")
 	}
 	if limit < 1 {
@@ -1841,6 +2003,14 @@ func (s *Store) ListTasks(ctx context.Context, lane, state, parentLane string, l
 	if state != "" {
 		args = append(args, state)
 		q += fmt.Sprintf(" AND state=$%d", len(args))
+	}
+	if project != nil {
+		if *project == "" {
+			q += " AND project IS NULL"
+		} else {
+			args = append(args, *project)
+			q += fmt.Sprintf(" AND project=$%d", len(args))
+		}
 	}
 	args = append(args, limit)
 	q += fmt.Sprintf(" ORDER BY priority DESC,created_at ASC,id ASC LIMIT $%d", len(args))
@@ -1863,8 +2033,8 @@ func (s *Store) ListTasks(ctx context.Context, lane, state, parentLane string, l
 // ListTasksPage returns a stable ID-ordered page for callers that must visit
 // the complete task set. afterID is exclusive; ListTasks retains its queue
 // priority ordering for existing callers.
-func (s *Store) ListTasksPage(ctx context.Context, lane, state, parentLane string, afterID int64, limit int) ([]Task, error) {
-	if !validTaskQuery(lane, state, parentLane) || afterID < 0 {
+func (s *Store) ListTasksPage(ctx context.Context, lane, state, parentLane string, project *string, afterID int64, limit int) ([]Task, error) {
+	if !validTaskQuery(lane, state, parentLane, project) || afterID < 0 {
 		return nil, errors.New("invalid task query")
 	}
 	if limit < 1 {
@@ -1885,6 +2055,14 @@ func (s *Store) ListTasksPage(ctx context.Context, lane, state, parentLane strin
 	if state != "" {
 		args = append(args, state)
 		q += fmt.Sprintf(" AND state=$%d", len(args))
+	}
+	if project != nil {
+		if *project == "" {
+			q += " AND project IS NULL"
+		} else {
+			args = append(args, *project)
+			q += fmt.Sprintf(" AND project=$%d", len(args))
+		}
 	}
 	args = append(args, limit)
 	q += fmt.Sprintf(" ORDER BY id ASC LIMIT $%d", len(args))

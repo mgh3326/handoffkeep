@@ -20,7 +20,7 @@ func TestUIBoardTaskBodyDoc(t *testing.T) {
 	defer h.Close()
 	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
 	lane := uiLane(t, "bodydoc")
-	withDoc, err := s.CreateTask(t.Context(), store.Task{Lane: lane, Title: "one line", Kind: "implement", CreatedBy: "board-test", BodyDoc: "design/body-test#3"})
+	withDoc, err := s.CreateTask(t.Context(), store.Task{Lane: lane, Title: "one line", Kind: "implement", CreatedBy: "board-test", BodyDoc: "design/body-test#3", Project: projectRef("experiment")})
 	if err != nil {
 		t.Fatal(err)
 	}
