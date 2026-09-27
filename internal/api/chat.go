@@ -19,6 +19,9 @@ func (s Service) TransitionChatQuestion(ctx context.Context, id, to string) (sto
 func (s Service) ListChatQuestions(ctx context.Context, lane, state, afterID string, limit int) ([]store.ChatQuestion, error) {
 	return s.Store.ListChatQuestions(ctx, lane, state, afterID, limit)
 }
+func (s Service) GetChatQuestion(ctx context.Context, id string) (store.ChatQuestion, bool, error) {
+	return s.Store.GetChatQuestion(ctx, id)
+}
 func (s Service) CreateChatMessage(ctx context.Context, x store.ChatMessage) (store.ChatMessage, error) {
 	return s.Store.CreateChatMessage(ctx, x)
 }
@@ -77,6 +80,22 @@ func (s Server) chatQuestionPut(w http.ResponseWriter, r *http.Request) {
 
 func (s Server) chatQuestionPost(w http.ResponseWriter, r *http.Request) {
 	s.chatQuestionUpsert(w, r, "")
+}
+
+func (s Server) chatQuestionGet(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.auth(w, r); !ok {
+		return
+	}
+	x, found, err := s.Service.GetChatQuestion(r.Context(), r.PathValue("id"))
+	if err != nil {
+		appErr(w, err)
+		return
+	}
+	if !found {
+		jsonOut(w, http.StatusNotFound, map[string]string{"error": "chat_question_not_found"})
+		return
+	}
+	jsonOut(w, http.StatusOK, x)
 }
 
 type chatQuestionTransitionInput struct {

@@ -452,6 +452,7 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("GET /v1/bench/catalog", s.benchCatalogList)
 	m.HandleFunc("PUT /v1/bench/catalog", s.benchCatalogPut)
 	m.HandleFunc("PUT /v1/chat/questions/{id}", s.chatQuestionPut)
+	m.HandleFunc("GET /v1/chat/questions/{id}", s.chatQuestionGet)
 	m.HandleFunc("POST /v1/chat/questions", s.chatQuestionPost)
 	m.HandleFunc("POST /v1/chat/questions/{id}/transition", s.chatQuestionTransition)
 	m.HandleFunc("GET /v1/chat/questions", s.chatQuestionsList)

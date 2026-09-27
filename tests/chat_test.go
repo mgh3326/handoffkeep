@@ -84,6 +84,43 @@ func TestChatQuestionValidation(t *testing.T) {
 	}
 }
 
+func TestChatQuestionDirectGetRequiresAuthAndFullID(t *testing.T) {
+	s := taskTestStore(t)
+	h := taskHTTP(s)
+	defer h.Close()
+	id := chatQuestionID(t, 49)
+	if status, _ := putChatQuestion(t, h.URL, "node-token", id, taskLane(t), "linked question"); status != http.StatusCreated {
+		t.Fatalf("put status=%d", status)
+	}
+	for _, tc := range []struct {
+		id, token string
+		status    int
+	}{
+		{id, "node-token", http.StatusOK},
+		{id, "", http.StatusUnauthorized},
+		{"Q-20260928-99999999", "node-token", http.StatusNotFound},
+		{"Q-20260928-", "node-token", http.StatusBadRequest},
+	} {
+		resp := request(t, h.Client(), http.MethodGet, h.URL+"/v1/chat/questions/"+tc.id, tc.token, nil)
+		if resp.StatusCode != tc.status {
+			resp.Body.Close()
+			t.Fatalf("get id=%s status=%d want=%d", tc.id, resp.StatusCode, tc.status)
+		}
+		if tc.status == http.StatusOK {
+			var got store.ChatQuestion
+			if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+				resp.Body.Close()
+				t.Fatal(err)
+			}
+			if got.ID != id || got.Body != "linked question" || got.ConversationID != store.ChatConversationID {
+				resp.Body.Close()
+				t.Fatalf("direct get=%+v", got)
+			}
+		}
+		resp.Body.Close()
+	}
+}
+
 func TestChatQuestionTransitionPendingToResolved(t *testing.T) {
 	s := taskTestStore(t)
 	h := taskHTTP(s)

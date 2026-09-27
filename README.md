@@ -335,7 +335,9 @@ limit and secret-shaped content is rejected without echoing it.
 `PUT /v1/chat/questions/{id}` (or `POST /v1/chat/questions` with the ID in the
 body) still upserts by producer Q ID. Question upsert and list rows include
 `conversation_id`. `GET /v1/chat/questions?conversation_id=&lane=&state=&after_id=&limit=`
-pages by Q ID. `POST /v1/chat/questions/{id}/transition` still explicitly
+pages by full Q ID. `GET /v1/chat/questions/{id}` returns one authenticated
+question or 404, so a reply can validate a question outside the recent page.
+`POST /v1/chat/questions/{id}/transition` still explicitly
 resolves or withdraws a pending Q.
 
 Operator messages start `stored`; `POST /v1/chat/messages/{id}/delivered` or
