@@ -764,6 +764,16 @@ func (s *Store) migrate(ctx context.Context) error {
 func validName(x string) bool        { return nameRE.MatchString(x) }
 func validText(x string, n int) bool { return len(x) <= n && !strings.ContainsRune(x, 0) }
 
+// taskReasonText normalizes a no-job reason before it is judged: a string
+// made only of spaces and Unicode format characters (zero-width space,
+// BOM, soft hyphen …) is as empty as "" — it must not satisfy the
+// exception's "recorded reason" requirement while rendering blank.
+func taskReasonText(s string) string {
+	return strings.TrimFunc(s, func(r rune) bool {
+		return unicode.IsSpace(r) || unicode.Is(unicode.Cf, r) || unicode.Is(unicode.Cc, r)
+	})
+}
+
 const benchBatchMax = 1000
 
 var benchGradeValues = map[string]bool{"S+": true, "S": true, "A+": true, "A": true, "B": true, "C": true}
@@ -1467,7 +1477,7 @@ func (s *Store) claimTaskTx(ctx context.Context, tx pgx.Tx, id int64, by, jobID,
 	if !validText(jobID, 4096) {
 		return Task{}, errors.New("invalid task claim job_id")
 	}
-	noJob = strings.TrimSpace(noJob)
+	noJob = taskReasonText(noJob)
 	if !validText(noJob, MaxBytes) {
 		return Task{}, errors.New("invalid task claim no_job")
 	}
@@ -1588,7 +1598,7 @@ func (s *Store) NextTask(ctx context.Context, lane, by, jobID, noJob string) (Ta
 }
 
 func (s *Store) TransitionTask(ctx context.Context, id int64, to, by, note string, refs *TaskRefs, noJob string) (Task, error) {
-	noJob = strings.TrimSpace(noJob)
+	noJob = taskReasonText(noJob)
 	if !taskStates[to] || !validText(by, 128) || by == "" || !validText(note, MaxBytes) || !validText(noJob, MaxBytes) || (refs != nil && !validTaskRefs(*refs)) {
 		return Task{}, errors.New("invalid task transition")
 	}

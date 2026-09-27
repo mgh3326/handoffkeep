@@ -331,6 +331,9 @@ func (c Client) ClaimTask(ctx context.Context, id int64, claimedBy, jobID, noJob
 	if out.State != "claimed" && out.State != "in_progress" {
 		return out, fmt.Errorf("claim_not_applied: server response has state=%q, want claimed", out.State)
 	}
+	if out.ClaimedBy != claimedBy {
+		return out, fmt.Errorf("claim_claimant_not_recorded: server response has claimed_by=%q, want %q", out.ClaimedBy, claimedBy)
+	}
 	if jobID != "" && out.Refs.JobID != jobID {
 		return out, fmt.Errorf("claim_job_id_not_recorded: server response has refs.job_id=%q, want %q (server predates job_id claims)", out.Refs.JobID, jobID)
 	}
@@ -355,6 +358,9 @@ func (c Client) NextTask(ctx context.Context, lane, claimedBy, jobID, noJob stri
 	}
 	if out.State != "claimed" {
 		return out, fmt.Errorf("next_not_applied: server response has state=%q, want claimed", out.State)
+	}
+	if out.ClaimedBy != claimedBy {
+		return out, fmt.Errorf("next_claimant_not_recorded: server response has claimed_by=%q, want %q", out.ClaimedBy, claimedBy)
 	}
 	if jobID != "" && out.Refs.JobID != jobID {
 		return out, fmt.Errorf("next_job_id_not_recorded: server response has refs.job_id=%q, want %q (server predates job_id claims)", out.Refs.JobID, jobID)
@@ -385,6 +391,12 @@ func (c Client) TransitionTask(ctx context.Context, id int64, to, note string, r
 	// recorded (same silent-drop defense as claims).
 	if out.State != to {
 		return out, fmt.Errorf("transition_not_applied: server response has state=%q, want %q", out.State, to)
+	}
+	// Landing in an active state without the exception means the response
+	// must show the accountable pair — a pre-guard or lying server can 200
+	// while leaving the row unlinked.
+	if noJob == "" && (to == "claimed" || to == "in_progress") && (out.ClaimedBy == "" || out.Refs.JobID == "") {
+		return out, fmt.Errorf("transition_linkage_missing: server response has claimed_by=%q refs.job_id=%q for an active transition", out.ClaimedBy, out.Refs.JobID)
 	}
 	if refs != nil && refs.JobID != "" && out.Refs.JobID != refs.JobID {
 		return out, fmt.Errorf("transition_job_id_not_recorded: server response has refs.job_id=%q, want %q", out.Refs.JobID, refs.JobID)

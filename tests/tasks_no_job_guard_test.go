@@ -506,3 +506,55 @@ func TestTaskEventsNoJobColumnDefaultsEmpty(t *testing.T) {
 		t.Fatalf("events=%+v found=%v err=%v", row.Events, found, err)
 	}
 }
+
+// A reason made only of invisible Unicode (zero-width space, BOM) renders
+// blank and must be refused like empty; visible reasons still record.
+func TestTaskNoJobReasonInvisibleCharsRefused(t *testing.T) {
+	s := taskTestStore(t)
+	for _, reason := range []string{"\u200B", "\uFEFF", " \u200B \uFEFF ", "\u2007\u200B\u00AD"} {
+		task := newTask(t, s, taskLane(t), "invisible", 0)
+		if _, err := s.TransitionTask(t.Context(), task.ID, "claimed", "captain-a", "", nil, reason); !errors.Is(err, store.ErrTaskJobRequired) {
+			t.Fatalf("invisible reason %q transition err=%v want ErrTaskJobRequired", reason, err)
+		}
+		if _, err := s.ClaimTask(t.Context(), task.ID, "captain-a", "", reason); !errors.Is(err, store.ErrTaskJobRequired) {
+			t.Fatalf("invisible reason %q err=%v want ErrTaskJobRequired", reason, err)
+		}
+	}
+	// A visible reason keeps its content even with leading invisible runes.
+	task := newTask(t, s, taskLane(t), "visible", 0)
+	got, err := s.ClaimTask(t.Context(), task.ID, "captain-a", "", "\u200Bmanual queue item")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row, found, err := s.GetTask(t.Context(), task.ID); err != nil || !found || len(row.Events) != 1 || row.Events[0].NoJob != "manual queue item" {
+		t.Fatalf("events=%+v found=%v err=%v", row.Events, found, err)
+	} else if got.State != "claimed" {
+		t.Fatalf("state=%s", got.State)
+	}
+}
+
+// A successful-looking response that lands in an active state without the
+// claimant or job link is refused rather than reported as linked work.
+func TestTaskClientRejectsUnlinkedActive200(t *testing.T) {
+	h := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":9,"lane":"x","title":"t","state":"claimed","claimed_by":"intruder","refs":{"job_id":"job-1"},"priority":0,"kind":"implement","created_by":"x","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}`)
+	}))
+	defer h.Close()
+	c := remote.Client{URL: h.URL, Token: "t", HTTP: h.Client()}
+	if _, err := c.ClaimTask(t.Context(), 9, "captain-a", "job-1", ""); err == nil || !strings.Contains(err.Error(), "claimant_not_recorded") {
+		t.Fatalf("claim err=%v", err)
+	}
+	if _, err := c.NextTask(t.Context(), "lane-a", "captain-a", "job-1", ""); err == nil || !strings.Contains(err.Error(), "claimant_not_recorded") {
+		t.Fatalf("next err=%v", err)
+	}
+	h2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":9,"lane":"x","title":"t","state":"claimed","claimed_by":"","refs":{},"priority":0,"kind":"implement","created_by":"x","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}`)
+	}))
+	defer h2.Close()
+	c2 := remote.Client{URL: h2.URL, Token: "t", HTTP: h2.Client()}
+	if _, err := c2.TransitionTask(t.Context(), 9, "claimed", "captain-a", &store.TaskRefs{JobID: "job-1"}, ""); err == nil || !strings.Contains(err.Error(), "linkage_missing") {
+		t.Fatalf("transition err=%v", err)
+	}
+}
