@@ -176,6 +176,49 @@ func TestListTasksProjectFilter(t *testing.T) {
 	}
 }
 
+// TestCreateDispositionRequiresProject pins the director's call-site-inventory
+// requirement (hk report/2026-09-28/tasks-add-inventory-763): the decide task
+// behind CreateDisposition is a direct INSERT INTO tasks, so it must pass the
+// same requireTaskProject gate — absent and unknown projects are refused
+// before the row exists, and a valid project lands on the created row.
+func TestCreateDispositionRequiresProject(t *testing.T) {
+	s, pool := searchTestStore(t)
+	ctx := context.Background()
+	lane := taskProjectLane(t)
+	merged := time.Now().UTC().Add(-time.Hour)
+	pull := fmt.Sprintf("https://github.com/example/proj-gate/pull/%d", time.Now().UnixNano()%1_000_000_000)
+	base := DispositionInput{Lane: lane, Title: "[처분] gate probe", OriginPR: pull, MergeSHA: strings.Repeat("a", 40), MergedAt: &merged,
+		Install: DispositionInstall{State: "unknown"}, Recommended: "E", CreatedBy: "proj-test"}
+	for _, tc := range []struct {
+		name    string
+		project string
+		want    error
+	}{
+		{"missing", "", ErrTaskProjectRequired},
+		{"bad-shape", "bad name!", ErrTaskProjectUnknown},
+		{"unregistered", "not-a-project", ErrTaskProjectUnknown},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := base
+			in.Project = tc.project
+			_, created, err := s.CreateDisposition(ctx, in)
+			if !errors.Is(err, tc.want) || created {
+				t.Fatalf("CreateDisposition created=%t err=%v, want %v", created, err, tc.want)
+			}
+		})
+	}
+	var rows int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM tasks WHERE lane=$1`, lane).Scan(&rows); err != nil || rows != 0 {
+		t.Fatalf("refused dispositions left %d rows err=%v", rows, err)
+	}
+	in := base
+	in.Project = "herdr"
+	x, created, err := s.CreateDisposition(ctx, in)
+	if err != nil || !created || x.Project == nil || *x.Project != "herdr" || x.Kind != "decide" || x.State != "needs_decision" {
+		t.Fatalf("CreateDisposition=%+v created=%t err=%v", x, created, err)
+	}
+}
+
 // TestTaskProjectMigrationIsAdditive runs v15 against a schema holding rows
 // created before the column existed and proves the column arrives nullable,
 // the legacy row keeps NULL, the seed lands, and a second migrate is a no-op.
