@@ -129,10 +129,10 @@ func TestTaskCommentNeverMovesTaskOrDecisions(t *testing.T) {
 	s := taskTestStore(t)
 	lane := taskLane(t)
 	task := newTask(t, s, lane, "comment is data", 7)
-	if _, err := s.ClaimTask(t.Context(), task.ID, "builder", ""); err != nil {
+	if _, err := s.ClaimTask(t.Context(), task.ID, "builder", "job-1", ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.TransitionTask(t.Context(), task.ID, "needs_decision", "builder", "pick one", nil); err != nil {
+	if _, err := s.TransitionTask(t.Context(), task.ID, "needs_decision", "builder", "pick one", nil, ""); err != nil {
 		t.Fatal(err)
 	}
 	question, _, err := s.AppendRelayEvent(t.Context(), store.RelayEvent{Kind: "lane.event", OwnerLane: lane, EventID: "comment-q-" + lane, Text: "[decision-needed] ship it?"})
@@ -142,7 +142,7 @@ func TestTaskCommentNeverMovesTaskOrDecisions(t *testing.T) {
 	t.Cleanup(func() {
 		ctx := context.Background()
 		_, _, _ = s.AppendRelayEvent(ctx, store.RelayEvent{Kind: "lane.event", OwnerLane: lane, EventID: "comment-q-cleanup-" + lane, Text: "[decision-answered] #" + strconv.FormatInt(question.ID, 10) + ": cleanup"})
-		_, _ = s.TransitionTask(ctx, task.ID, "dropped", "cleanup", "", nil)
+		_, _ = s.TransitionTask(ctx, task.ID, "dropped", "cleanup", "", nil, "")
 	})
 	db, err := pgx.Connect(t.Context(), os.Getenv("HANDOFFKEEP_TEST_DB_URL"))
 	if err != nil {

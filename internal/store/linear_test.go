@@ -72,17 +72,17 @@ func TestLinearOutboxMutationAtomicity(t *testing.T) {
 	if err != nil || len(rows) != 1 || rows[0].Seq != 1 || rows[0].Op != LinearOpIssueCreate {
 		t.Fatalf("create outbox=%+v err=%v", rows, err)
 	}
-	if _, err = st.ClaimTask(t.Context(), task.ID, "builder", ""); err != nil {
+	if _, err = st.ClaimTask(t.Context(), task.ID, "builder", "job-1", ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = st.ClaimTask(t.Context(), task.ID, "builder-again", ""); !errors.Is(err, ErrTaskConflict) {
+	if _, err = st.ClaimTask(t.Context(), task.ID, "builder-again", "job-1", ""); !errors.Is(err, ErrTaskConflict) {
 		t.Fatalf("duplicate claim error=%v", err)
 	}
 	rows, err = st.ListLinearOutbox(t.Context(), task.ID)
 	if err != nil || len(rows) != 2 || rows[1].Seq != 2 || rows[1].Op != LinearOpIssueState {
 		t.Fatalf("claim outbox=%+v err=%v", rows, err)
 	}
-	if _, err = st.TransitionTask(t.Context(), task.ID, "in_progress", "builder", "started", nil); err != nil {
+	if _, err = st.TransitionTask(t.Context(), task.ID, "in_progress", "builder", "started", nil, ""); err != nil {
 		t.Fatal(err)
 	}
 	before, found, err := st.GetTask(t.Context(), task.ID)
@@ -106,7 +106,7 @@ func TestLinearOutboxMutationAtomicity(t *testing.T) {
 	if _, err = connection.Exec(t.Context(), fmt.Sprintf(`CREATE TRIGGER %s BEFORE INSERT ON linear_outbox FOR EACH ROW WHEN (NEW.task_id=%d) EXECUTE FUNCTION %s()`, triggerName, task.ID, functionName)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = st.TransitionTask(t.Context(), task.ID, "verifying", "builder", "must roll back", nil); err == nil || !strings.Contains(err.Error(), "forced outbox failure") {
+	if _, err = st.TransitionTask(t.Context(), task.ID, "verifying", "builder", "must roll back", nil, ""); err == nil || !strings.Contains(err.Error(), "forced outbox failure") {
 		t.Fatalf("forced transition error=%v", err)
 	}
 	after, found, err := st.GetTask(t.Context(), task.ID)
@@ -140,11 +140,11 @@ func TestLinearOptInAndNeedsDecisionBoundaries(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			task := linearTask(t, st, refs)
-			if _, err := st.ClaimTask(t.Context(), task.ID, "builder", ""); err != nil {
+			if _, err := st.ClaimTask(t.Context(), task.ID, "builder", "job-1", ""); err != nil {
 				t.Fatal(err)
 			}
 			for _, state := range []string{"in_progress", "verifying", "merged"} {
-				if _, err := st.TransitionTask(t.Context(), task.ID, state, "builder", state, nil); err != nil {
+				if _, err := st.TransitionTask(t.Context(), task.ID, state, "builder", state, nil, ""); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -155,10 +155,10 @@ func TestLinearOptInAndNeedsDecisionBoundaries(t *testing.T) {
 		})
 	}
 	task := linearTask(t, st, TaskRefs{Linear: &TaskLinear{Sync: true}})
-	if _, err := st.ClaimTask(t.Context(), task.ID, "builder", ""); err != nil {
+	if _, err := st.ClaimTask(t.Context(), task.ID, "builder", "job-1", ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.TransitionTask(t.Context(), task.ID, "needs_decision", "builder", "choose", nil); err != nil {
+	if _, err := st.TransitionTask(t.Context(), task.ID, "needs_decision", "builder", "choose", nil, ""); err != nil {
 		t.Fatal(err)
 	}
 	rows, err := st.ListLinearOutbox(t.Context(), task.ID)
@@ -199,11 +199,11 @@ func TestLinearCreateAndTerminalPayloads(t *testing.T) {
 	if !reflect.DeepEqual(gotLabels, wantLabels) {
 		t.Fatalf("labels=%v want=%v", gotLabels, wantLabels)
 	}
-	if _, err = st.ClaimTask(t.Context(), task.ID, "builder", ""); err != nil {
+	if _, err = st.ClaimTask(t.Context(), task.ID, "builder", "job-1", ""); err != nil {
 		t.Fatal(err)
 	}
 	for _, state := range []string{"in_progress", "verifying", "merged"} {
-		if _, err = st.TransitionTask(t.Context(), task.ID, state, "builder", "terminal summary", nil); err != nil {
+		if _, err = st.TransitionTask(t.Context(), task.ID, state, "builder", "terminal summary", nil, ""); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -231,12 +231,12 @@ func TestLinearTransitionMergesNestedRefs(t *testing.T) {
 		Verify: "report/verify", Decision: "decision/connector", DeploySHA: "abcdef0123456789",
 	}
 	task := linearTask(t, st, TaskRefs{Linear: original})
-	if _, err := st.ClaimTask(t.Context(), task.ID, "builder", ""); err != nil {
+	if _, err := st.ClaimTask(t.Context(), task.ID, "builder", "job-1", ""); err != nil {
 		t.Fatal(err)
 	}
 	updated, err := st.TransitionTask(t.Context(), task.ID, "in_progress", "builder", "partial metadata", &TaskRefs{
 		Linear: &TaskLinear{Report: "report/updated"},
-	})
+	}, "")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -235,13 +235,18 @@ func DispositionQuestion(refs TaskRefs, note string) string {
 	return text
 }
 
-func insertTaskEvent(ctx context.Context, tx pgx.Tx, id int64, from, to, by, note string, refs TaskRefs, at time.Time) (int64, error) {
+// dispositionNoJobReason marks the claimed/in_progress hops a disposition
+// item makes. These items are operator-only decide tasks that never carry a
+// job, so the recorded reason is fixed to the path itself.
+const dispositionNoJobReason = "disposition item; no job link"
+
+func insertTaskEvent(ctx context.Context, tx pgx.Tx, id int64, from, to, by, note string, refs TaskRefs, at time.Time, noJob string) (int64, error) {
 	encoded, err := json.Marshal(refs)
 	if err != nil {
 		return 0, err
 	}
 	var eventID int64
-	err = tx.QueryRow(ctx, `INSERT INTO task_events(task_id,"from","to","by",note,refs,at) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7) RETURNING id`, id, from, to, by, note, string(encoded), at).Scan(&eventID)
+	err = tx.QueryRow(ctx, `INSERT INTO task_events(task_id,"from","to","by",note,refs,at,no_job) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,$8) RETURNING id`, id, from, to, by, note, string(encoded), at, noJob).Scan(&eventID)
 	return eventID, err
 }
 
@@ -316,10 +321,10 @@ func (s *Store) CreateDisposition(ctx context.Context, in DispositionInput) (Tas
 	}
 	// The legal path is recorded explicitly so the event history never shows
 	// an edge the transition table does not allow.
-	if _, err = insertTaskEvent(ctx, tx, x.ID, "backlog", "claimed", in.CreatedBy, "disposition:create", refs, now); err != nil {
+	if _, err = insertTaskEvent(ctx, tx, x.ID, "backlog", "claimed", in.CreatedBy, "disposition:create", refs, now, dispositionNoJobReason); err != nil {
 		return Task{}, false, err
 	}
-	if _, err = insertTaskEvent(ctx, tx, x.ID, "claimed", "needs_decision", in.CreatedBy, question, refs, now); err != nil {
+	if _, err = insertTaskEvent(ctx, tx, x.ID, "claimed", "needs_decision", in.CreatedBy, question, refs, now, ""); err != nil {
 		return Task{}, false, err
 	}
 	return x, true, tx.Commit(ctx)
@@ -392,7 +397,7 @@ func answerDispositionTx(ctx context.Context, tx pgx.Tx, in DispositionAnswerInp
 	if in.BatchID != "" {
 		note += " batch=" + in.BatchID
 	}
-	if _, err = insertTaskEvent(ctx, tx, in.ID, "needs_decision", "claimed", "operator:"+in.OperatorEmail, note, x.Refs, now); err != nil {
+	if _, err = insertTaskEvent(ctx, tx, in.ID, "needs_decision", "claimed", "operator:"+in.OperatorEmail, note, x.Refs, now, dispositionNoJobReason); err != nil {
 		return Task{}, "", err
 	}
 	return x, "", nil
@@ -529,7 +534,11 @@ func (s *Store) ApplyDisposition(ctx context.Context, id int64, by, note string)
 		if !taskTransitionAllowed(from, to) {
 			return Task{}, ErrTaskConflict
 		}
-		if _, err = insertTaskEvent(ctx, tx, id, from, to, by, text, x.Refs, now); err != nil {
+		hopNoJob := ""
+		if to == "claimed" || to == "in_progress" {
+			hopNoJob = dispositionNoJobReason
+		}
+		if _, err = insertTaskEvent(ctx, tx, id, from, to, by, text, x.Refs, now, hopNoJob); err != nil {
 			return Task{}, err
 		}
 		from = to

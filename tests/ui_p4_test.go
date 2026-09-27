@@ -69,7 +69,7 @@ func p4Task(t *testing.T, h *httptest.Server, lane, title, kind string) int64 {
 func p4DecisionTask(t *testing.T, h *httptest.Server, lane, title string, options map[string]any) int64 {
 	t.Helper()
 	id := p4Task(t, h, lane, title, "implement")
-	if status, body := p4PostJSON(t, h, "/v1/tasks/"+strconv.FormatInt(id, 10)+"/claim", map[string]any{"claimed_by": "worker-a"}); status != http.StatusOK {
+	if status, body := p4PostJSON(t, h, "/v1/tasks/"+strconv.FormatInt(id, 10)+"/claim", map[string]any{"claimed_by": "worker-a", "job_id": "job-p4"}); status != http.StatusOK {
 		t.Fatalf("claim status=%d body=%q", status, body)
 	}
 	input := map[string]any{"to": "needs_decision", "note": "어떤 저장소를 선택할까요?", "refs": map[string]any{"job_id": "job-p4", "decision_options": options}}
@@ -82,7 +82,7 @@ func p4DecisionTask(t *testing.T, h *httptest.Server, lane, title string, option
 func p4LegacyDecisionTask(t *testing.T, h *httptest.Server, lane, title string) int64 {
 	t.Helper()
 	id := p4Task(t, h, lane, title, "implement")
-	if status, body := p4PostJSON(t, h, "/v1/tasks/"+strconv.FormatInt(id, 10)+"/claim", map[string]any{"claimed_by": "worker-a"}); status != http.StatusOK {
+	if status, body := p4PostJSON(t, h, "/v1/tasks/"+strconv.FormatInt(id, 10)+"/claim", map[string]any{"claimed_by": "worker-a", "job_id": "job-p4"}); status != http.StatusOK {
 		t.Fatalf("claim status=%d body=%q", status, body)
 	}
 	input := map[string]any{"to": "needs_decision", "note": "배포를 진행할까요?\noptions: 승인 | 반려", "refs": map[string]any{"job_id": "job-p4"}}
@@ -453,7 +453,7 @@ func p4DecideTask(t *testing.T, s *store.Store, lane, title, state string) store
 	if state == "backlog" {
 		return task
 	}
-	task, err = s.ClaimTask(t.Context(), task.ID, "worker-a", "")
+	task, err = s.ClaimTask(t.Context(), task.ID, "worker-a", "job-1", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -462,13 +462,13 @@ func p4DecideTask(t *testing.T, s *store.Store, lane, title, state string) store
 	}
 	if state == "merged" {
 		for _, next := range []string{"in_progress", "verifying"} {
-			task, err = s.TransitionTask(t.Context(), task.ID, next, "node", "p4 decide state", nil)
+			task, err = s.TransitionTask(t.Context(), task.ID, next, "node", "p4 decide state", nil, "")
 			if err != nil {
 				t.Fatal(err)
 			}
 		}
 	}
-	task, err = s.TransitionTask(t.Context(), task.ID, state, "node", "p4 decide state", nil)
+	task, err = s.TransitionTask(t.Context(), task.ID, state, "node", "p4 decide state", nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}

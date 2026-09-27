@@ -455,11 +455,12 @@ export function DetailBody({ dataset, task, detail, fetchDoc, comments: comments
   // states, so it is prefixed "lane:" rather than read as a state transition;
   // a decision row records a request without a state change.
   // A note is data: plain text only, never parsed as markdown or HTML.
-  const eventLine = (event: { id: number; kind?: string; from: string; to: string; by: string; note?: string; at: string }) => (
+  const eventLine = (event: { id: number; kind?: string; from: string; to: string; by: string; note?: string; no_job?: string; at: string }) => (
     <li key={event.id}>
       {event.kind === "relane" ? "lane: " : event.kind === "decision" ? "결정: " : ""}
       {event.from} → {event.to} by {event.by} at <time>{event.at}</time>
       {event.note ? <span className="muted"> — {event.note}</span> : null}
+      {event.no_job ? <span className="muted"> · no job: {event.no_job}</span> : null}
     </li>
   );
   const transitions = (

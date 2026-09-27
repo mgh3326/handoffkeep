@@ -39,7 +39,7 @@ func TestRelaneTaskMovesLaneAndRecordsEvent(t *testing.T) {
 		t.Fatal(err)
 	}
 	relaneTask(t, s, to, "lane anchor") // to must be a lane some row uses
-	claimed, err := s.ClaimTask(ctx, x.ID, "captain", "")
+	claimed, err := s.ClaimTask(ctx, x.ID, "captain", "job-9", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,7 +228,7 @@ func TestRelaneTaskConcurrentTransition(t *testing.T) {
 		from, to := relaneLane(t, "relane-race-a"), relaneLane(t, "relane-race-b")
 		x := relaneTask(t, s, from, "race")
 		relaneTask(t, s, to, "anchor")
-		if _, err := s.ClaimTask(ctx, x.ID, "captain", ""); err != nil {
+		if _, err := s.ClaimTask(ctx, x.ID, "captain", "job-1", ""); err != nil {
 			t.Fatal(err)
 		}
 		ids = append(ids, x.ID)
@@ -242,7 +242,7 @@ func TestRelaneTaskConcurrentTransition(t *testing.T) {
 		}(x.ID, to)
 		go func(id int64) {
 			defer wg.Done()
-			if _, err := s.TransitionTask(ctx, id, "in_progress", "racer-b", "", nil); err != nil {
+			if _, err := s.TransitionTask(ctx, id, "in_progress", "racer-b", "", nil, ""); err != nil {
 				errs <- err
 			}
 		}(x.ID)

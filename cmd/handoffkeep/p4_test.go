@@ -25,7 +25,7 @@ func TestTasksTransitionDecisionOptionFlags(t *testing.T) {
 			t.Fatal(err)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"id": 41})
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": 41, "state": input.To})
 	}))
 	defer server.Close()
 	t.Setenv("HANDOFFKEEP_URL", server.URL)

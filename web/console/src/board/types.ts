@@ -99,6 +99,9 @@ export type BoardEvent = {
   to: string;
   by: string;
   note?: string;
+  /** Recorded reason a claimed/in_progress transition ran without a job
+   * link (#769). Absent on pre-change servers and on linked events. */
+  no_job?: string;
   refs?: TaskRefs;
   at: string;
 };

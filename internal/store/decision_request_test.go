@@ -25,9 +25,9 @@ func decisionTask(t *testing.T, s *Store, state string) Task {
 	}[state]
 	for _, to := range path {
 		if to == "claimed" {
-			x, err = s.ClaimTask(ctx, x.ID, "dr-test", "")
+			x, err = s.ClaimTask(ctx, x.ID, "dr-test", "job-1", "")
 		} else {
-			x, err = s.TransitionTask(ctx, x.ID, to, "dr-test", "step", nil)
+			x, err = s.TransitionTask(ctx, x.ID, to, "dr-test", "step", nil, "")
 		}
 		if err != nil {
 			t.Fatalf("to %s: %v", to, err)
@@ -290,7 +290,7 @@ func TestDecisionRequestStateIndependentAndUncleaned(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, to := range []string{"verifying", "merged"} {
-		if _, err := s.TransitionTask(ctx, work.ID, to, "dr-test", "step", nil); err != nil {
+		if _, err := s.TransitionTask(ctx, work.ID, to, "dr-test", "step", nil, ""); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -382,22 +382,22 @@ func TestDecisionRequestBlockListsOnce(t *testing.T) {
 		t.Fatalf("CountNeedsDecision=%d, want 1", decisions)
 	}
 	// The generic paths can no longer re-ask or re-option it.
-	if _, err := s.TransitionTask(ctx, task.ID, "hold", "dr-test", "park", &TaskRefs{DecisionOptions: &DecisionOptions{Options: []DecisionOption{{Key: "A", Label: "x"}}}}); !errors.Is(err, ErrDecisionRequestOpen) {
+	if _, err := s.TransitionTask(ctx, task.ID, "hold", "dr-test", "park", &TaskRefs{DecisionOptions: &DecisionOptions{Options: []DecisionOption{{Key: "A", Label: "x"}}}}, ""); !errors.Is(err, ErrDecisionRequestOpen) {
 		t.Fatalf("option patch: %v", err)
 	}
-	if _, err := s.TransitionTask(ctx, task.ID, "hold", "dr-test", "park", &TaskRefs{DecisionRequest: &DecisionRequest{ID: "dr-1-9"}}); err == nil {
+	if _, err := s.TransitionTask(ctx, task.ID, "hold", "dr-test", "park", &TaskRefs{DecisionRequest: &DecisionRequest{ID: "dr-1-9"}}, ""); err == nil {
 		t.Fatalf("decision_request patch accepted")
 	}
 	// Resuming the blocked task without resolving the request is refused
 	// under the row lock (the legacy answer paths' race), whatever the caller
 	// pre-checked; parking is allowed.
-	if _, err := s.TransitionTask(ctx, task.ID, "claimed", "dr-test", "answer via legacy path", nil); !errors.Is(err, ErrDecisionRequestOpen) {
+	if _, err := s.TransitionTask(ctx, task.ID, "claimed", "dr-test", "answer via legacy path", nil, ""); !errors.Is(err, ErrDecisionRequestOpen) {
 		t.Fatalf("needs_decision→claimed while open: %v", err)
 	}
-	if _, err := s.TransitionTask(ctx, task.ID, "hold", "dr-test", "park", nil); err != nil {
+	if _, err := s.TransitionTask(ctx, task.ID, "hold", "dr-test", "park", nil, ""); err != nil {
 		t.Fatalf("plain transition: %v", err)
 	}
-	if _, err := s.TransitionTask(ctx, task.ID, "needs_decision", "dr-test", "another question", nil); !errors.Is(err, ErrDecisionRequestOpen) {
+	if _, err := s.TransitionTask(ctx, task.ID, "needs_decision", "dr-test", "another question", nil, ""); !errors.Is(err, ErrDecisionRequestOpen) {
 		t.Fatalf("generic needs_decision while open: %v", err)
 	}
 	if _, err := s.CreateTask(ctx, Task{Lane: "b618", Title: "x", Kind: "implement", CreatedBy: "dr-test", Refs: TaskRefs{DecisionRequest: &DecisionRequest{ID: "dr-1-1"}}}); err == nil {
@@ -488,7 +488,7 @@ func TestDecisionRequestResolveThenResume(t *testing.T) {
 	if _, err := s.ResolveDecisionRequest(ctx, task.ID, "director-1", DecisionResolveInput{RequestID: got.Request.ID, Kind: DecisionRequestAnswered, Option: "A", Responder: "operator"}); err != nil {
 		t.Fatal(err)
 	}
-	resumed, err := s.TransitionTask(ctx, task.ID, "claimed", "director-1", "A 로 진행", nil)
+	resumed, err := s.TransitionTask(ctx, task.ID, "claimed", "director-1", "A 로 진행", nil, "")
 	if err != nil || resumed.State != "claimed" || resumed.Refs.DecisionRequest.Status != DecisionRequestAnswered {
 		t.Fatalf("resume after answer: %+v %v", resumed.Refs.DecisionRequest, err)
 	}

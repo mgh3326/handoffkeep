@@ -90,7 +90,7 @@ func TestReapAPIJoinsHubReportWithTasks(t *testing.T) {
 	merged := createJobTask(t, s, lane, "merged builder task", suffix+"-599-merged-builder-20260923")
 	claimAndTransition(t, s, merged, "in_progress", "built")
 	for _, to := range []string{"verifying", "merged"} {
-		if _, err := s.TransitionTask(t.Context(), merged.ID, to, "test-node", to, nil); err != nil {
+		if _, err := s.TransitionTask(t.Context(), merged.ID, to, "test-node", to, nil, ""); err != nil {
 			t.Fatal(err)
 		}
 	}

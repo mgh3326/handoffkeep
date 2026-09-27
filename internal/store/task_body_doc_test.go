@@ -68,7 +68,7 @@ func TestCreateTaskBodyDoc(t *testing.T) {
 		t.Fatalf("page=%+v err=%v", page, err)
 	}
 	// A transition leaves the pointer alone.
-	moved, err := s.TransitionTask(ctx, x.ID, "hold", "t", "", nil)
+	moved, err := s.TransitionTask(ctx, x.ID, "hold", "t", "", nil, "")
 	if err != nil || moved.BodyDoc != "design/not-written-yet#3" {
 		t.Fatalf("transition body_doc=%q err=%v", moved.BodyDoc, err)
 	}

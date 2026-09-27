@@ -284,10 +284,10 @@ func TestUIBoardTaskDetail(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.ClaimTask(t.Context(), task.ID, "worker-a", ""); err != nil {
+	if _, err := s.ClaimTask(t.Context(), task.ID, "worker-a", "job-1", ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.TransitionTask(t.Context(), task.ID, "in_progress", "worker-a", "started", nil); err != nil {
+	if _, err := s.TransitionTask(t.Context(), task.ID, "in_progress", "worker-a", "started", nil, ""); err != nil {
 		t.Fatal(err)
 	}
 

@@ -37,9 +37,9 @@ func drTask(t *testing.T, s *store.Store, lane string, path ...string) store.Tas
 	var err error
 	for _, to := range path {
 		if to == "claimed" {
-			x, err = s.ClaimTask(t.Context(), x.ID, "dr-test", "")
+			x, err = s.ClaimTask(t.Context(), x.ID, "dr-test", "job-1", "")
 		} else {
-			x, err = s.TransitionTask(t.Context(), x.ID, to, "dr-test", "step", nil)
+			x, err = s.TransitionTask(t.Context(), x.ID, to, "dr-test", "step", nil, "")
 		}
 		if err != nil {
 			t.Fatalf("to %s: %v", to, err)
@@ -114,7 +114,7 @@ func TestUIDecisionRequestViewsAgree(t *testing.T) {
 	merged := drTask(t, s, lane, "claimed", "in_progress")
 	drRecord(t, s, merged.ID, drInput("머지 전 요청"))
 	for _, to := range []string{"verifying", "merged"} {
-		if _, err := s.TransitionTask(t.Context(), merged.ID, to, "dr-test", "step", nil); err != nil {
+		if _, err := s.TransitionTask(t.Context(), merged.ID, to, "dr-test", "step", nil, ""); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -248,7 +248,7 @@ func TestUIDecisionRequestViewsAgree(t *testing.T) {
 	// Detail of a task that never had a request says so explicitly (empty
 	// list, not absent), and a needs_decision task without one is 미기록.
 	plain := drTask(t, s, lane, "claimed", "in_progress")
-	if _, err := s.TransitionTask(t.Context(), plain.ID, "needs_decision", "dr-test", "기록 없는 질문", nil); err != nil {
+	if _, err := s.TransitionTask(t.Context(), plain.ID, "needs_decision", "dr-test", "기록 없는 질문", nil, ""); err != nil {
 		t.Fatal(err)
 	}
 	var raw map[string]json.RawMessage
@@ -272,7 +272,7 @@ func TestDecisionRequestLegacyAnswerPathsRefuseOpenRequest(t *testing.T) {
 	in.Block = true
 	request := drRecord(t, s, x.ID, in)
 	client := remote.Client{URL: h.URL, Token: "node-token", HTTP: h.Client()}
-	if _, err := client.ResolveDecision(t.Context(), "task", x.ID, "director-1", "A", "", true); err == nil || err.Error() != "decision_request_open" {
+	if _, err := client.ResolveDecision(t.Context(), "task", x.ID, "director-1", "A", "", true, ""); err == nil || err.Error() != "decision_request_open" {
 		t.Fatalf("decisions resolve err=%v", err)
 	}
 	got, _, _ := s.GetTask(t.Context(), x.ID)

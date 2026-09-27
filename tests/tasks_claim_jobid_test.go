@@ -24,7 +24,7 @@ func TestTaskClaimWithJobIDRecordsBothAtomically(t *testing.T) {
 	defer h.Close()
 	c := remote.Client{URL: h.URL, Token: "node-token", HTTP: h.Client()}
 
-	got, err := c.ClaimTask(t.Context(), task.ID, "captain-a", "job-782-1")
+	got, err := c.ClaimTask(t.Context(), task.ID, "captain-a", "job-782-1", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,32 +47,58 @@ func TestTaskClaimWithJobIDRecordsBothAtomically(t *testing.T) {
 	}
 }
 
-func TestTaskClaimWithoutJobIDBehaviourUnchanged(t *testing.T) {
+func TestTaskClaimWithoutJobIDRequiresNoJobReason(t *testing.T) {
 	s := taskTestStore(t)
 	task := newTask(t, s, taskLane(t), "claim without job", 0)
 	h := taskHTTP(s)
 	defer h.Close()
 	c := remote.Client{URL: h.URL, Token: "node-token", HTTP: h.Client()}
 
-	got, err := c.ClaimTask(t.Context(), task.ID, "captain-a", "")
+	// A bare claim — no job_id, no no_job reason — is refused outright.
+	if _, err := c.ClaimTask(t.Context(), task.ID, "captain-a", "", ""); err == nil {
+		t.Fatal("bare claim succeeded; want task_job_required")
+	} else {
+		var he *remote.HTTPError
+		if !errors.As(err, &he) || he.Status != http.StatusConflict || he.Code != "task_job_required" {
+			t.Fatalf("bare claim err=%v, want 409 task_job_required", err)
+		}
+	}
+	row, _, _ := s.GetTask(t.Context(), task.ID)
+	if row.State != "backlog" || len(row.Events) != 0 {
+		t.Fatalf("refused claim wrote state/events: %+v", row)
+	}
+
+	// The explicit exception: a recorded no-job reason claims the task
+	// without a job link.
+	got, err := c.ClaimTask(t.Context(), task.ID, "captain-a", "", "manual queue item")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got.State != "claimed" || got.ClaimedBy != "captain-a" || got.Refs.JobID != "" {
 		t.Fatalf("claim response=%+v", got)
 	}
-	// A second claim — any lane — is a conflict, as before #782.
-	for _, by := range []string{"captain-a", "captain-b"} {
-		if _, err := c.ClaimTask(t.Context(), task.ID, by, ""); err == nil {
-			t.Fatalf("re-claim by %s: want task_conflict, got success", by)
-		} else {
-			var he *remote.HTTPError
-			if !errors.As(err, &he) || he.Status != http.StatusConflict || he.Code != "task_conflict" {
-				t.Fatalf("re-claim by %s err=%v", by, err)
-			}
+	row, _, _ = s.GetTask(t.Context(), task.ID)
+	if len(row.Events) != 1 || row.Events[0].NoJob != "manual queue item" {
+		t.Fatalf("claim event=%+v, want recorded no_job reason", row.Events[0])
+	}
+
+	// A re-claim by a different lane is still a conflict; the same claimant
+	// repeating its jobless claim is a no-op, but a bare claim is not.
+	if _, err := c.ClaimTask(t.Context(), task.ID, "captain-b", "", "other"); err == nil {
+		t.Fatal("re-claim by captain-b succeeded; want task_conflict")
+	} else {
+		var he *remote.HTTPError
+		if !errors.As(err, &he) || he.Status != http.StatusConflict || he.Code != "task_conflict" {
+			t.Fatalf("re-claim by captain-b err=%v", err)
 		}
 	}
-	row, _, _ := s.GetTask(t.Context(), task.ID)
+	if _, err := c.ClaimTask(t.Context(), task.ID, "captain-a", "", "manual queue item"); err != nil {
+		t.Fatalf("identical jobless re-claim should be a no-op: %v", err)
+	}
+	if _, err := c.ClaimTask(t.Context(), task.ID, "captain-a", "", ""); err == nil {
+		t.Fatal("bare re-claim succeeded; want task_conflict")
+	}
+	row, _, _ = s.GetTask(t.Context(), task.ID)
 	if row.Refs.JobID != "" || len(row.Events) != 1 {
 		t.Fatalf("task after conflicts=%+v", row)
 	}
@@ -82,11 +108,11 @@ func TestTaskClaimSameLaneSameJobIsIdempotentNoOp(t *testing.T) {
 	s := taskTestStore(t)
 	task := newTask(t, s, taskLane(t), "idempotent claim", 0)
 
-	first, err := s.ClaimTask(t.Context(), task.ID, "captain-a", "job-1")
+	first, err := s.ClaimTask(t.Context(), task.ID, "captain-a", "job-1", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := s.ClaimTask(t.Context(), task.ID, "captain-a", "job-1")
+	second, err := s.ClaimTask(t.Context(), task.ID, "captain-a", "job-1", "")
 	if err != nil {
 		t.Fatalf("re-claim: %v", err)
 	}
@@ -102,10 +128,10 @@ func TestTaskClaimSameLaneSameJobIsIdempotentNoOp(t *testing.T) {
 	}
 
 	// The same replay is still a no-op after the task moved on.
-	if _, err := s.TransitionTask(t.Context(), task.ID, "in_progress", "captain-a", "", nil); err != nil {
+	if _, err := s.TransitionTask(t.Context(), task.ID, "in_progress", "captain-a", "", nil, ""); err != nil {
 		t.Fatal(err)
 	}
-	again, err := s.ClaimTask(t.Context(), task.ID, "captain-a", "job-1")
+	again, err := s.ClaimTask(t.Context(), task.ID, "captain-a", "job-1", "")
 	if err != nil {
 		t.Fatalf("replay on in_progress: %v", err)
 	}
@@ -121,7 +147,7 @@ func TestTaskClaimSameLaneSameJobIsIdempotentNoOp(t *testing.T) {
 func TestTaskClaimConflictsCarryReasonAndWriteNothing(t *testing.T) {
 	s := taskTestStore(t)
 	task := newTask(t, s, taskLane(t), "conflict matrix", 0)
-	if _, err := s.ClaimTask(t.Context(), task.ID, "captain-a", "job-1"); err != nil {
+	if _, err := s.ClaimTask(t.Context(), task.ID, "captain-a", "job-1", ""); err != nil {
 		t.Fatal(err)
 	}
 	cases := []struct {
@@ -134,7 +160,7 @@ func TestTaskClaimConflictsCarryReasonAndWriteNothing(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := s.ClaimTask(t.Context(), task.ID, tc.by, tc.jobID)
+			_, err := s.ClaimTask(t.Context(), task.ID, tc.by, tc.jobID, "")
 			if !errors.Is(err, store.ErrTaskConflict) {
 				t.Fatalf("err=%v, want task_conflict", err)
 			}
@@ -151,20 +177,20 @@ func TestTaskClaimConflictsCarryReasonAndWriteNothing(t *testing.T) {
 
 	// A task claimed without a job refuses a later claim carrying one.
 	noJob := newTask(t, s, taskLane(t), "claimed without job", 0)
-	if _, err := s.ClaimTask(t.Context(), noJob.ID, "captain-c", ""); err != nil {
+	if _, err := s.ClaimTask(t.Context(), noJob.ID, "captain-c", "", "manual queue item"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.ClaimTask(t.Context(), noJob.ID, "captain-c", "job-9"); !errors.Is(err, store.ErrTaskConflict) {
+	if _, err := s.ClaimTask(t.Context(), noJob.ID, "captain-c", "job-9", ""); !errors.Is(err, store.ErrTaskConflict) {
 		t.Fatalf("attach job on claimed task err=%v, want task_conflict", err)
 	}
 }
 
 func TestTaskClaimMissingTaskStillConflicts(t *testing.T) {
 	s := taskTestStore(t)
-	if _, err := s.ClaimTask(t.Context(), 424242, "captain-a", "job-1"); !errors.Is(err, store.ErrTaskConflict) {
+	if _, err := s.ClaimTask(t.Context(), 424242, "captain-a", "job-1", ""); !errors.Is(err, store.ErrTaskConflict) {
 		t.Fatalf("missing task err=%v, want task_conflict", err)
 	}
-	if _, err := s.ClaimTask(t.Context(), 424242, "captain-a", ""); !errors.Is(err, store.ErrTaskConflict) {
+	if _, err := s.ClaimTask(t.Context(), 424242, "captain-a", "job-1", ""); !errors.Is(err, store.ErrTaskConflict) {
 		t.Fatalf("missing task err=%v, want task_conflict", err)
 	}
 }
@@ -182,7 +208,7 @@ func TestTaskClaimConcurrentIdenticalClaimsAllSucceedOnce(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, err := c.ClaimTask(t.Context(), task.ID, "captain-a", "job-same")
+			_, err := c.ClaimTask(t.Context(), task.ID, "captain-a", "job-same", "")
 			mu.Lock()
 			defer mu.Unlock()
 			if err == nil {
@@ -250,11 +276,11 @@ func TestTaskClaimClientDetectsServerDroppingJobID(t *testing.T) {
 	}))
 	defer h.Close()
 	c := remote.Client{URL: h.URL, Token: "t", HTTP: h.Client()}
-	if _, err := c.ClaimTask(t.Context(), 7, "captain-a", "job-1"); err == nil || !strings.Contains(err.Error(), "claim_job_id_not_recorded") {
+	if _, err := c.ClaimTask(t.Context(), 7, "captain-a", "job-1", ""); err == nil || !strings.Contains(err.Error(), "claim_job_id_not_recorded") {
 		t.Fatalf("dropped job_id err=%v, want claim_job_id_not_recorded", err)
 	}
 	// Without --job-id the same old server is fine: behaviour unchanged.
-	if _, err := c.ClaimTask(t.Context(), 7, "captain-a", ""); err != nil {
+	if _, err := c.ClaimTask(t.Context(), 7, "captain-a", "", ""); err != nil {
 		t.Fatalf("claim without job_id on old server: %v", err)
 	}
 }
@@ -270,11 +296,11 @@ func TestTaskClaimClientTranslatesUnknownFieldRejection(t *testing.T) {
 	}))
 	defer h.Close()
 	c := remote.Client{URL: h.URL, Token: "t", HTTP: h.Client()}
-	if _, err := c.ClaimTask(t.Context(), 7, "captain-a", "job-1"); err == nil || !strings.Contains(err.Error(), "claim_job_id_rejected") {
+	if _, err := c.ClaimTask(t.Context(), 7, "captain-a", "job-1", ""); err == nil || !strings.Contains(err.Error(), "claim_job_id_rejected") {
 		t.Fatalf("rejected claim err=%v, want claim_job_id_rejected", err)
 	}
 	// Without --job-id the same response stays the raw server error.
-	if _, err := c.ClaimTask(t.Context(), 7, "captain-a", ""); err == nil || err.Error() != "invalid_context" {
+	if _, err := c.ClaimTask(t.Context(), 7, "captain-a", "", ""); err == nil || err.Error() != "invalid_context" {
 		t.Fatalf("claim without job_id err=%v, want invalid_context", err)
 	}
 }

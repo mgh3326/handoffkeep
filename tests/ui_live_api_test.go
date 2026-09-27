@@ -190,15 +190,21 @@ func TestLiveAPIJoinsTasksJobsAndNodes(t *testing.T) {
 	prefix := createJobTask(t, s, lane, "prefix job_id task", "job-b59")
 	claimAndTransition(t, s, prefix, "in_progress", "started")
 	// A live-state task with no recorded job_id is the same mismatch shape.
+	// Jobless active states now require the recorded exception.
 	bare := createUITask(t, s, lane, "claimed without job")
-	claimAndTransition(t, s, bare, "in_progress", "started without refs")
+	if _, err := s.ClaimTask(t.Context(), bare.ID, "test-owner", "", "legacy jobless fixture"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.TransitionTask(t.Context(), bare.ID, "in_progress", "test-node", "started without refs", nil, "legacy jobless fixture"); err != nil {
+		t.Fatal(err)
+	}
 	// A non-live task keeps its link record but is never a mismatch.
 	done := createJobTask(t, s, lane, "merged task", "job-b598")
 	claimAndTransition(t, s, done, "in_progress", "worked")
-	if _, err := s.TransitionTask(t.Context(), done.ID, "verifying", "test-node", "verify", nil); err != nil {
+	if _, err := s.TransitionTask(t.Context(), done.ID, "verifying", "test-node", "verify", nil, ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.TransitionTask(t.Context(), done.ID, "merged", "test-node", "done", nil); err != nil {
+	if _, err := s.TransitionTask(t.Context(), done.ID, "merged", "test-node", "done", nil, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -484,7 +490,7 @@ func TestLiveAPITaskScanCoversAllStates(t *testing.T) {
 	lane := uiLane(t, "live-scan")
 	held := createJobTask(t, s, lane, "held task with a live job", "job-hold")
 	claimAndTransition(t, s, held, "in_progress", "started")
-	if _, err := s.TransitionTask(t.Context(), held.ID, "hold", "test-node", "paused", nil); err != nil {
+	if _, err := s.TransitionTask(t.Context(), held.ID, "hold", "test-node", "paused", nil, ""); err != nil {
 		t.Fatal(err)
 	}
 	_, _, decoded := getLiveAPI(t, ui, assertion)
