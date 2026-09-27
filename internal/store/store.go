@@ -774,6 +774,23 @@ func taskReasonText(s string) string {
 	})
 }
 
+// CheckTaskNoJob normalizes a no-job reason exactly as the transition and
+// claim guards do and refuses a reason that can never be recorded:
+// oversized or matching the secret filter. All-invisible input normalizes
+// to ""; the caller decides whether empty means refuse or fall back.
+// Routes that write before the guarded transition (decision resolve)
+// must call this first so a refused reason cannot leave a partial write.
+func CheckTaskNoJob(noJob string) (string, error) {
+	noJob = taskReasonText(noJob)
+	if !validText(noJob, MaxBytes) {
+		return "", ErrTaskJobRequired
+	}
+	if err := guard.Reject(noJob); err != nil {
+		return "", err
+	}
+	return noJob, nil
+}
+
 const benchBatchMax = 1000
 
 var benchGradeValues = map[string]bool{"S+": true, "S": true, "A+": true, "A": true, "B": true, "C": true}

@@ -14,6 +14,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/mgh3326/handoffkeep/internal/api"
 	"github.com/mgh3326/handoffkeep/internal/remote"
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
@@ -557,4 +558,46 @@ func TestTaskClientRejectsUnlinkedActive200(t *testing.T) {
 	if _, err := c2.TransitionTask(t.Context(), 9, "claimed", "captain-a", &store.TaskRefs{JobID: "job-1"}, ""); err == nil || !strings.Contains(err.Error(), "linkage_missing") {
 		t.Fatalf("transition err=%v", err)
 	}
+}
+
+// A resolve whose no-job reason can never be recorded must be refused
+// before the lane event commits — otherwise the task stays needs_decision
+// with a resolved answer already queued for its lane.
+func TestDecisionResolveBadNoJobNoPartialWrite(t *testing.T) {
+	s := taskTestStore(t)
+	svc := api.Service{Store: s}
+	lane := taskLane(t)
+	task := newTask(t, s, lane, "resolve partial write", 0)
+	if _, err := s.ClaimTask(t.Context(), task.ID, "captain-a", "", "decide queue item"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.TransitionTask(t.Context(), task.ID, "needs_decision", "node", "pick", nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.ResolveDecision(t.Context(), api.DecisionResolveInput{Type: "task", ID: task.ID, By: "operator-desk", Answer: "A", NoJob: "sk-abcdefghijklmnopqrstuvwxyz"}); err == nil {
+		t.Fatal("secret-like no_job reason resolved")
+	}
+	row, found, err := s.GetTask(t.Context(), task.ID)
+	if err != nil || !found || row.State != "needs_decision" {
+		t.Fatalf("state=%v found=%v err=%v", row.State, found, err)
+	}
+	events, err := s.ListRelayEvents(t.Context(), lane, false, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range events {
+		if e.Kind == "lane.event" && strings.Contains(e.Text, "resolved by operator-desk") {
+			t.Fatalf("refused resolve still queued a lane event: %+v", e)
+		}
+	}
+	// An invisible reason normalizes to empty and takes the path fallback,
+	// so the resolve completes with a recorded reason, not a dangling event.
+	got, err := svc.ResolveDecision(t.Context(), api.DecisionResolveInput{Type: "task", ID: task.ID, By: "operator-desk", Answer: "A", NoJob: "​"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row, _, _ := s.GetTask(t.Context(), task.ID); row.State != "claimed" || row.Events[len(row.Events)-1].NoJob != "decision resolved; task has no job link" {
+		t.Fatalf("state=%s events=%+v", row.State, row.Events)
+	}
+	_ = got
 }

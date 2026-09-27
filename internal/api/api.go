@@ -82,6 +82,7 @@ func (s Service) ResolveDecision(ctx context.Context, input DecisionResolveInput
 	}
 
 	lane := ""
+	noJob := ""
 	if input.Type == "task" {
 		task, found, err := s.Store.GetTask(ctx, input.ID)
 		if err != nil {
@@ -104,6 +105,12 @@ func (s Service) ResolveDecision(ctx context.Context, input DecisionResolveInput
 		// would unblock the task and leave the request open.
 		if task.Refs.DecisionRequest != nil && task.Refs.DecisionRequest.Status == store.DecisionRequestOpen {
 			return store.RelayEvent{}, store.ErrDecisionRequestOpen
+		}
+		// Validate the no-job reason before the lane event below commits:
+		// a reason the transition would reject (secret-looking content)
+		// must not leave a resolved answer queued behind a refused task.
+		if noJob, err = store.CheckTaskNoJob(input.NoJob); err != nil {
+			return store.RelayEvent{}, err
 		}
 		lane = task.Lane
 	} else {
@@ -161,8 +168,8 @@ func (s Service) ResolveDecision(ctx context.Context, input DecisionResolveInput
 		note += " — resolved by " + input.By
 		// A jobless task resumed by an answered decision needs its no-job
 		// reason recorded on the transition event; a caller-supplied reason
-		// wins over the path-identifying fallback.
-		noJob := strings.TrimSpace(input.NoJob)
+		// wins over the path-identifying fallback. noJob was already
+		// normalized and validated before the lane event was written.
 		if noJob == "" {
 			noJob = noJobReasonDecisionResolve
 		}
