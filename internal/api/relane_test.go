@@ -16,6 +16,10 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
+// apiTestProject is a member of the seeded task_projects vocabulary — the
+// create gate requires one.
+var apiTestProject = "experiment"
+
 // relaneAPIServer runs a real Server against a throwaway schema. Migrating
 // and writing the shared public schema races every other package that opens
 // the same test database — the unconditional ALTERs in migrate take ACCESS
@@ -64,7 +68,7 @@ func relaneLane(t *testing.T, prefix string) string {
 
 func relaneAPITask(t *testing.T, st *store.Store, lane, title string) store.Task {
 	t.Helper()
-	x, err := st.CreateTask(context.Background(), store.Task{Lane: lane, Title: title, Kind: "implement", CreatedBy: "relane-api-test"})
+	x, err := st.CreateTask(context.Background(), store.Task{Lane: lane, Title: title, Kind: "implement", CreatedBy: "relane-api-test", Project: &apiTestProject})
 	if err != nil {
 		t.Fatal(err)
 	}

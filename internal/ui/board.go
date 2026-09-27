@@ -52,6 +52,9 @@ type boardTask struct {
 	UpdatedAt  time.Time      `json:"updated_at"`
 	Refs       store.TaskRefs `json:"refs"`
 	BodyDoc    string         `json:"body_doc,omitempty"`
+	// Project is null for legacy rows predating the field and for the
+	// (rare) unclassified row — the console groups them as "no project".
+	Project *string `json:"project"`
 }
 
 type boardTasksResponse struct {
@@ -77,6 +80,7 @@ func projectBoardTask(task store.Task) boardTask {
 		UpdatedAt:  task.UpdatedAt.UTC(),
 		Refs:       task.Refs,
 		BodyDoc:    task.BodyDoc,
+		Project:    task.Project,
 	}
 }
 
@@ -111,7 +115,7 @@ func (h *Handler) boardTasks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// One extra row distinguishes "page is full" from "result set is complete".
-	tasks, err := h.store.ListTasksPage(r.Context(), lane, state, parentLane, afterID, limit+1)
+	tasks, err := h.store.ListTasksPage(r.Context(), lane, state, parentLane, nil, afterID, limit+1)
 	if err != nil {
 		http.Error(w, "fleet console unavailable", http.StatusInternalServerError)
 		return
@@ -197,16 +201,16 @@ func taskRef(id int64) string {
 	return "hk:task/" + strconv.FormatInt(id, 10)
 }
 
-// taskDwell totals the time spent in each canonical state. Relane events
-// carry lane names, not states, and decision events record a request without
-// a state change, so both are excluded — neither may end the open dwell
-// segment. The final segment stays open: its seconds run
-// from the last transition to now.
+// taskDwell totals the time spent in each canonical state. Relane and
+// project events carry classification names, not states, and decision
+// events record a request without a state change, so all three are
+// excluded — none may end the open dwell segment. The final segment stays
+// open: its seconds run from the last transition to now.
 func taskDwell(task store.Task, now time.Time) []dwellSegment {
 	totals := map[string]int64{}
 	current, start := "backlog", task.CreatedAt
 	for _, event := range task.Events {
-		if event.Kind == store.TaskEventRelane || event.Kind == store.TaskEventDecision {
+		if event.Kind == store.TaskEventRelane || event.Kind == store.TaskEventDecision || event.Kind == store.TaskEventProject {
 			continue
 		}
 		if event.At.After(start) {

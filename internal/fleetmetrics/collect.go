@@ -16,7 +16,7 @@ import (
 // HK is the read-only slice of the hk client the collector uses. Every call
 // is a GET.
 type HK interface {
-	ExportTasks(ctx context.Context, lane, state, parentLane string, limit int) ([]byte, error)
+	ExportTasks(ctx context.Context, lane, state, parentLane string, project *string, limit int) ([]byte, error)
 	GetTask(ctx context.Context, id int64) (store.Task, bool, error)
 	ListRelayEventsPage(ctx context.Context, kind string, afterID int64, limit int) ([]store.RelayEvent, error)
 	ListDocuments(ctx context.Context, prefix, kind, session string, limit int) ([]store.Document, error)
@@ -54,7 +54,7 @@ func Collect(ctx context.Context, cfg CollectConfig) (Snapshot, error) {
 	if cfg.Parallel < 1 {
 		cfg.Parallel = 8
 	}
-	raw, err := cfg.HK.ExportTasks(ctx, "", "", "", store.ExportLimitMax)
+	raw, err := cfg.HK.ExportTasks(ctx, "", "", "", nil, store.ExportLimitMax)
 	if err != nil {
 		return s, fmt.Errorf("hk tasks export: %w", err)
 	}

@@ -37,6 +37,10 @@ export const SAMPLE200_DISTRIBUTION = {
 } as const;
 
 export const AREAS = ["synth-area-console", "synth-area-docs", "synth-area-ops", "synth-area-experiments"];
+/** Synthetic project vocabulary for the group-by-project preview — invented
+ * names, and ~15% of rows get null so the "no project" legacy bucket is
+ * exercised without reading real data. */
+export const SYNTH_PROJECTS = ["synth-proj-queue", "synth-proj-docs", "synth-proj-ops", "synth-proj-fleet"];
 export const BUNDLES = [
   "synth-bundle-drawer",
   "synth-bundle-density",
@@ -124,6 +128,7 @@ function baseTask(id: number, rand: () => number): ProtoTask {
     created_by: "synth-op",
     updated_at: `2026-09-${String(enteredDay).padStart(2, "0")}T${String(intBetween(rand, 0, 23)).padStart(2, "0")}:45:00+09:00`,
     parent_lane: rand() < 0.2 ? "synth-lane-parent" : null,
+    project: rand() < 0.15 ? null : pick(rand, SYNTH_PROJECTS),
     refs: {
       report_path: `synth/reports/task-${id}.md`,
       job_id: `synth-job-${id}`,
@@ -242,6 +247,7 @@ export function buildEdge(): Dataset {
     created_by: "synth-op",
     updated_at: at(9),
     parent_lane: null,
+    project: "synth-proj-queue",
     refs: { report_path: `synth/reports/task-${id}.md`, job_id: `synth-job-${id}` },
     events: [{ id: id * 10, from: "backlog", to: "backlog", by: "synth-op", note: "synthetic", at: at(6) }],
     dwell: [{ state: "backlog", seconds: 86400, open: true }],
@@ -258,7 +264,7 @@ export function buildEdge(): Dataset {
       decision: { question: "합성 긴급 결정: 지금 개입이 필요한가?", evidence: "synth/reports/task-5004.md" },
     }),
     mk(5005, { title: "edge: intentional standalone" }),
-    mk(5006, { title: "edge: unclassified task" }),
+    mk(5006, { title: "edge: unclassified task", project: null }),
     mk(5007, { title: "edge: fix queue drawer scroll sync", kind: "fix" }),
     mk(5008, { title: "edge: fix queue drawer scroll sync", kind: "fix" }),
     mk(5009, { title: "edge: implement saved-view version gate", kind: "implement" }),

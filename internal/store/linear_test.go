@@ -36,6 +36,7 @@ func linearTask(t *testing.T, st *Store, refs TaskRefs) Task {
 		Kind:      "implement",
 		Refs:      refs,
 		CreatedBy: "linear-test",
+		Project:   projectPtr(testProjectName),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -256,20 +257,21 @@ func TestListTasksPageUsesStableIDCursor(t *testing.T) {
 		task, err := st.CreateTask(t.Context(), Task{
 			Lane: lane, Title: fmt.Sprintf("page task %d", index), Kind: "implement",
 			Priority: 3 - index, CreatedBy: "linear-page-test",
+			Project: projectPtr(testProjectName),
 		})
 		if err != nil {
 			t.Fatal(err)
 		}
 		created[index] = task
 	}
-	first, err := st.ListTasksPage(t.Context(), lane, "", "", 0, 2)
+	first, err := st.ListTasksPage(t.Context(), lane, "", "", nil, 0, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(first) != 2 || first[0].ID != created[0].ID || first[1].ID != created[1].ID {
 		t.Fatalf("first page=%+v", first)
 	}
-	second, err := st.ListTasksPage(t.Context(), lane, "", "", first[1].ID, 2)
+	second, err := st.ListTasksPage(t.Context(), lane, "", "", nil, first[1].ID, 2)
 	if err != nil {
 		t.Fatal(err)
 	}

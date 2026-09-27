@@ -332,6 +332,7 @@ function mkProtoTask(over: Partial<ProtoTask>): ProtoTask {
     created_by: "director-1",
     updated_at: "2026-09-23T10:00:00Z",
     parent_lane: "director-1",
+    project: null,
     refs: {},
     events: [],
     dwell: [],

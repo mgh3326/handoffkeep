@@ -296,7 +296,21 @@ func (c Client) AttachmentUsage(ctx context.Context) (store.AttachmentUsage, err
 func (c Client) CreateTask(ctx context.Context, x store.Task) (store.Task, error) {
 	var out store.Task
 	err := c.call(ctx, "POST", "/v1/tasks", x, &out)
-	return out, err
+	if err != nil {
+		// Servers whose decoder rejects unknown fields answer a body carrying
+		// project with the generic invalid_context rather than naming it.
+		var he *HTTPError
+		if errors.As(err, &he) && he.Code == "invalid_context" && x.Project != nil {
+			return out, fmt.Errorf("create_project_rejected: server refused the task with invalid_context — it likely predates the task project field")
+		}
+		return out, err
+	}
+	// A server that predates the project column could answer 200 while
+	// silently dropping the field — same silent-drop defense as job_id.
+	if x.Project != nil && (out.Project == nil || *out.Project != *x.Project) {
+		return out, fmt.Errorf("create_project_not_recorded: server response has project unset — it likely predates the task project field")
+	}
+	return out, nil
 }
 func (c Client) ClaimTask(ctx context.Context, id int64, claimedBy, jobID, noJob string) (store.Task, error) {
 	var out store.Task
@@ -456,6 +470,12 @@ func (c Client) CreateDisposition(ctx context.Context, x store.DispositionInput)
 		Created bool       `json:"created"`
 	}
 	err := c.call(ctx, "POST", "/v1/tasks/dispositions", x, &out)
+	if err != nil && x.Project != "" {
+		var he *HTTPError
+		if errors.As(err, &he) && he.Code == "invalid_context" {
+			return out.Task, false, fmt.Errorf("disposition_project_rejected: server refused the disposition with invalid_context — it likely predates the task project field")
+		}
+	}
 	return out.Task, out.Created, err
 }
 func (c Client) DispositionSummary(ctx context.Context, asOf string) (store.DispositionSummary, error) {
@@ -472,17 +492,68 @@ func (c Client) ApplyDisposition(ctx context.Context, id int64, note string) (st
 	err := c.call(ctx, "POST", fmt.Sprintf("/v1/tasks/dispositions/%d/apply", id), map[string]string{"note": note}, &out)
 	return out, err
 }
-func (c Client) ListTasks(ctx context.Context, lane, state, parentLane string, limit int) ([]store.Task, error) {
+
+// taskProjectFilterOK reports the rows a project-filtered list may contain.
+// A server that predates the project column silently ignores the parameter,
+// so every returned row must match the requested filter — nil project never
+// equals a named filter.
+func taskProjectFilterOK(xs []store.Task, project *string) error {
+	if project == nil {
+		return nil
+	}
+	for _, t := range xs {
+		if *project == "" {
+			if t.Project != nil {
+				return fmt.Errorf("list_project_filter_ignored: task %d has project %q — the server predates --project filtering", t.ID, *t.Project)
+			}
+			continue
+		}
+		if t.Project == nil || *t.Project != *project {
+			return fmt.Errorf("list_project_filter_ignored: task %d does not match project %q — the server predates --project filtering", t.ID, *project)
+		}
+	}
+	return nil
+}
+
+// taskProjectEchoOK requires the list response to echo the requested filter.
+// A server that predates the project column silently drops the parameter and
+// cannot echo it — and an empty page has no rows for taskProjectFilterOK to
+// inspect, so the echo is the only reliable old-server signal there.
+func taskProjectEchoOK(echo *string, project *string) error {
+	if project == nil {
+		return nil
+	}
+	if echo == nil || *echo != *project {
+		return fmt.Errorf("list_project_filter_ignored: server response lacks the project echo — it predates --project filtering")
+	}
+	return nil
+}
+
+func (c Client) ListTasks(ctx context.Context, lane, state, parentLane string, project *string, limit int) ([]store.Task, error) {
 	var out struct {
-		Tasks []store.Task `json:"tasks"`
+		Tasks   []store.Task `json:"tasks"`
+		Project *string      `json:"project"`
 	}
 	q := url.Values{"lane": {lane}, "state": {state}, "parent_lane": {parentLane}, "limit": {fmt.Sprint(limit)}}
+	if project != nil {
+		q.Set("project", *project)
+	}
 	err := c.call(ctx, "GET", "/v1/tasks?"+q.Encode(), nil, &out)
-	return out.Tasks, err
+	if err != nil {
+		return nil, err
+	}
+	if err := taskProjectEchoOK(out.Project, project); err != nil {
+		return nil, err
+	}
+	if err := taskProjectFilterOK(out.Tasks, project); err != nil {
+		return nil, err
+	}
+	return out.Tasks, nil
 }
-func (c Client) ListTasksPage(ctx context.Context, lane, state, parentLane string, afterID int64, limit int) ([]store.Task, error) {
+func (c Client) ListTasksPage(ctx context.Context, lane, state, parentLane string, project *string, afterID int64, limit int) ([]store.Task, error) {
 	var out struct {
-		Tasks []store.Task `json:"tasks"`
+		Tasks   []store.Task `json:"tasks"`
+		Project *string      `json:"project"`
 	}
 	q := url.Values{
 		"lane":        {lane},
@@ -491,15 +562,86 @@ func (c Client) ListTasksPage(ctx context.Context, lane, state, parentLane strin
 		"after_id":    {fmt.Sprint(afterID)},
 		"limit":       {fmt.Sprint(limit)},
 	}
+	if project != nil {
+		q.Set("project", *project)
+	}
 	err := c.call(ctx, "GET", "/v1/tasks?"+q.Encode(), nil, &out)
-	return out.Tasks, err
+	if err != nil {
+		return nil, err
+	}
+	if err := taskProjectEchoOK(out.Project, project); err != nil {
+		return nil, err
+	}
+	if err := taskProjectFilterOK(out.Tasks, project); err != nil {
+		return nil, err
+	}
+	return out.Tasks, nil
+}
+
+// ListTaskProjects answers the server-configured project vocabulary. A
+// server that predates the endpoint either 404/405s the route or — for GET —
+// lands on /v1/tasks/{id} with id="projects" and answers invalid_context.
+func (c Client) ListTaskProjects(ctx context.Context) ([]string, error) {
+	var out struct {
+		Projects []string `json:"projects"`
+	}
+	err := c.call(ctx, "GET", "/v1/tasks/projects", nil, &out)
+	if err != nil {
+		var he *HTTPError
+		if errors.As(err, &he) && (he.Status == 404 || he.Status == 405 || he.Code == "invalid_context") {
+			return nil, fmt.Errorf("task_projects_unsupported: server predates the task project vocabulary endpoint")
+		}
+		return nil, err
+	}
+	return out.Projects, nil
+}
+
+// AddTaskProject extends the server-configured project vocabulary. created
+// is false when the name already exists. A server that predates the route
+// answers 404/405 — an invalid name is a real invalid_context rejection and
+// is not translated.
+func (c Client) AddTaskProject(ctx context.Context, name string) (bool, error) {
+	var out struct {
+		Created bool `json:"created"`
+	}
+	err := c.call(ctx, "POST", "/v1/tasks/projects", map[string]string{"name": name}, &out)
+	if err != nil {
+		var he *HTTPError
+		if errors.As(err, &he) && (he.Status == 404 || he.Status == 405) {
+			return false, fmt.Errorf("task_projects_unsupported: server predates the task project vocabulary endpoint")
+		}
+		return false, err
+	}
+	return out.Created, nil
+}
+
+// SetTaskProject reclassifies one task inside the server's configured
+// project vocabulary and returns the updated row. A server that predates the
+// route answers 404/405, surfaced as task_project_unsupported.
+func (c Client) SetTaskProject(ctx context.Context, id int64, project, note string) (store.Task, error) {
+	var out store.Task
+	err := c.call(ctx, "POST", fmt.Sprintf("/v1/tasks/%d/project", id), map[string]string{"project": project, "note": note}, &out)
+	if err != nil {
+		var he *HTTPError
+		if errors.As(err, &he) && (he.Status == 404 || he.Status == 405) {
+			return out, fmt.Errorf("task_project_unsupported: server predates the task project route")
+		}
+		return out, err
+	}
+	if out.Project == nil || *out.Project != project {
+		return out, fmt.Errorf("project_not_applied: server response has project unset — it likely predates the task project field")
+	}
+	return out, nil
 }
 
 // ExportTasks fetches one consistent task snapshot and returns the exact
 // response body so callers print the evidence document byte-for-byte. A
 // limit below 1 omits the parameter so the server default applies.
-func (c Client) ExportTasks(ctx context.Context, lane, state, parentLane string, limit int) ([]byte, error) {
+func (c Client) ExportTasks(ctx context.Context, lane, state, parentLane string, project *string, limit int) ([]byte, error) {
 	q := url.Values{"lane": {lane}, "state": {state}, "parent_lane": {parentLane}}
+	if project != nil {
+		q.Set("project", *project)
+	}
 	if limit > 0 {
 		q.Set("limit", fmt.Sprint(limit))
 	}
@@ -524,7 +666,27 @@ func (c Client) ExportTasks(ctx context.Context, lane, state, parentLane string,
 		_ = json.NewDecoder(resp.Body).Decode(&x)
 		return nil, errors.New(x.Error)
 	}
-	return io.ReadAll(resp.Body)
+	body, e := io.ReadAll(resp.Body)
+	if e != nil {
+		return nil, e
+	}
+	// A requested project filter must echo back inside scope. A server that
+	// predates the field silently ignores the parameter and returns an
+	// unfiltered export — the byte-for-byte document would carry no signal.
+	if project != nil {
+		var probe struct {
+			Scope struct {
+				Project *string `json:"project"`
+			} `json:"scope"`
+		}
+		if err := json.Unmarshal(body, &probe); err != nil {
+			return nil, fmt.Errorf("export_project_filter_unchecked: server export body did not parse — cannot confirm the project filter was applied: %w", err)
+		}
+		if probe.Scope.Project == nil || *probe.Scope.Project != *project {
+			return nil, fmt.Errorf("export_project_filter_ignored: server export lacks scope.project=%q — it predates --project filtering", *project)
+		}
+	}
+	return body, nil
 }
 func (c Client) GetTask(ctx context.Context, id int64) (store.Task, bool, error) {
 	var out store.Task

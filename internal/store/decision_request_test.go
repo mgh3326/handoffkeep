@@ -12,7 +12,7 @@ import (
 func decisionTask(t *testing.T, s *Store, state string) Task {
 	t.Helper()
 	ctx := context.Background()
-	x, err := s.CreateTask(ctx, Task{Lane: "b618-" + strings.ReplaceAll(t.Name(), "/", "-"), Title: "decision task", Kind: "implement", CreatedBy: "dr-test"})
+	x, err := s.CreateTask(ctx, Task{Lane: "b618-" + strings.ReplaceAll(t.Name(), "/", "-"), Title: "decision task", Kind: "implement", CreatedBy: "dr-test", Project: projectPtr(testProjectName)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -400,7 +400,7 @@ func TestDecisionRequestBlockListsOnce(t *testing.T) {
 	if _, err := s.TransitionTask(ctx, task.ID, "needs_decision", "dr-test", "another question", nil, ""); !errors.Is(err, ErrDecisionRequestOpen) {
 		t.Fatalf("generic needs_decision while open: %v", err)
 	}
-	if _, err := s.CreateTask(ctx, Task{Lane: "b618", Title: "x", Kind: "implement", CreatedBy: "dr-test", Refs: TaskRefs{DecisionRequest: &DecisionRequest{ID: "dr-1-1"}}}); err == nil {
+	if _, err := s.CreateTask(ctx, Task{Lane: "b618", Title: "x", Kind: "implement", CreatedBy: "dr-test", Project: projectPtr(testProjectName), Refs: TaskRefs{DecisionRequest: &DecisionRequest{ID: "dr-1-1"}}}); err == nil {
 		t.Fatalf("create with decision_request accepted")
 	}
 }

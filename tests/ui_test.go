@@ -184,7 +184,7 @@ func eventID(kind string) string {
 
 func createUITask(t *testing.T, s *store.Store, lane, title string) store.Task {
 	t.Helper()
-	task, err := s.CreateTask(t.Context(), store.Task{Lane: lane, Title: title, Kind: "implement", CreatedBy: "test-node"})
+	task, err := s.CreateTask(t.Context(), store.Task{Lane: lane, Title: title, Kind: "implement", CreatedBy: "test-node", Project: projectRef("experiment")})
 	if err != nil {
 		t.Fatal(err)
 	}

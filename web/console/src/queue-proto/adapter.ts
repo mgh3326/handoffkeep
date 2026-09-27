@@ -233,6 +233,51 @@ export function groupByArea(tasks: ProtoTask[], enrichment: Record<number, Enric
   return groups;
 }
 
+export type ProjectGroup = { key: string; name: string; tasks: ProtoTask[]; signals: GroupSignals };
+
+/** Label for the legacy NULL-project bucket — classification never invented,
+ * the group name says the field is absent, not empty. */
+export const NO_PROJECT_GROUP = "no project";
+
+/** One-level grouping by the server-side task project. Groups sort by
+ * project name; legacy rows (project === null) sit in a trailing
+ * "no project" bucket so the classification backlog stays visible without
+ * impersonating a real project. Empty projects produce no group. Task order
+ * inside a group is the input order (applyView already sorted). */
+export function groupByProject(tasks: ProtoTask[], now: string): ProjectGroup[] {
+  const byProject = new Map<string, ProtoTask[]>();
+  const noProject: ProtoTask[] = [];
+  for (const task of tasks) {
+    if (task.project === null || task.project === "") {
+      noProject.push(task);
+      continue;
+    }
+    const list = byProject.get(task.project);
+    if (list) {
+      list.push(task);
+    } else {
+      byProject.set(task.project, [task]);
+    }
+  }
+  const groups: ProjectGroup[] = [];
+  for (const name of [...byProject.keys()].sort()) {
+    const members = byProject.get(name)!;
+    const signals = emptySignals();
+    for (const task of members) {
+      addSignals(signals, task, now);
+    }
+    groups.push({ key: `project:${name}`, name, tasks: members, signals });
+  }
+  if (noProject.length > 0) {
+    const signals = emptySignals();
+    for (const task of noProject) {
+      addSignals(signals, task, now);
+    }
+    groups.push({ key: "project:none", name: NO_PROJECT_GROUP, tasks: noProject, signals });
+  }
+  return groups;
+}
+
 export type StateGroup = { key: string; state: string; tasks: ProtoTask[] };
 
 /** One group per task state in STATE_GROUP_ORDER (operator-facing first,

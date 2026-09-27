@@ -1,5 +1,5 @@
 import { useCallback, useMemo } from "react";
-import { groupByArea, groupByState, type AreaGroup, type GroupSignals, type StateGroup } from "./adapter";
+import { groupByArea, groupByProject, groupByState, type AreaGroup, type GroupSignals, type ProjectGroup, type StateGroup } from "./adapter";
 import { StateIcon } from "./StateIcon";
 import { stateLabel } from "./states";
 import { VirtualList } from "./VirtualList";
@@ -70,6 +70,20 @@ export function flattenGrouped(groups: AreaGroup[], collapsed: string[]): FlatRo
   return rows;
 }
 
+export function flattenByProject(groups: ProjectGroup[], collapsed: string[]): FlatRow[] {
+  const rows: FlatRow[] = [];
+  for (const group of groups) {
+    rows.push({ kind: "group", key: group.key, name: group.name, depth: 1, signals: group.signals });
+    if (collapsed.includes(group.key)) {
+      continue;
+    }
+    for (const task of group.tasks) {
+      rows.push({ kind: "task", task });
+    }
+  }
+  return rows;
+}
+
 export function flattenUngrouped(tasks: ProtoTask[]): FlatRow[] {
   return tasks.map((task) => ({ kind: "task", task }));
 }
@@ -114,6 +128,9 @@ export function ListView({ dataset, visible, grouping, collapsedGroups, density,
     }
     if (grouping === "area") {
       return flattenGrouped(groupByArea(visible, dataset.enrichment, dataset.generatedAt), collapsedGroups);
+    }
+    if (grouping === "project") {
+      return flattenByProject(groupByProject(visible, dataset.generatedAt), collapsedGroups);
     }
     return flattenUngrouped(visible);
   }, [visible, grouping, collapsedGroups, dataset.enrichment, dataset.generatedAt]);

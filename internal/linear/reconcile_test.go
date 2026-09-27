@@ -23,7 +23,7 @@ func TestLinearReconcileWritesIdempotentReport(t *testing.T) {
 	reconciler := &Reconciler{
 		Client: fake.client(t),
 		ListTasks: func(ctx context.Context) ([]store.Task, error) {
-			return st.ListTasks(ctx, "", "", "", 1000)
+			return st.ListTasks(ctx, "", "", "", nil, 1000)
 		},
 		OutboxStatus: st.GetLinearOutboxStatus,
 		WriteDocument: func(ctx context.Context, document store.Document) (store.Document, bool, error) {

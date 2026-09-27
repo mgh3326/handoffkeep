@@ -34,9 +34,13 @@ func taskTestStore(t *testing.T) *store.Store {
 
 func taskLane(t *testing.T) string { return fmt.Sprintf("task-%d", time.Now().UnixNano()) }
 
+// projectRef supplies the required task project for fixture creates; the
+// value must be a member of the seeded task_projects vocabulary.
+func projectRef(v string) *string { return &v }
+
 func newTask(t *testing.T, s *store.Store, lane, title string, priority int) store.Task {
 	t.Helper()
-	x, err := s.CreateTask(t.Context(), store.Task{Lane: lane, Title: title, Kind: "implement", Priority: priority, CreatedBy: "test-node"})
+	x, err := s.CreateTask(t.Context(), store.Task{Lane: lane, Title: title, Kind: "implement", Priority: priority, CreatedBy: "test-node", Project: projectRef("experiment")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,7 +188,7 @@ func TestTaskTransitionGraphAndRefsSnapshots(t *testing.T) {
 	}
 
 	refs := store.TaskRefs{PR: "4", HeadSHA: "abc123", ReportPath: "report.md", JobID: "job-4"}
-	task, err := s.CreateTask(t.Context(), store.Task{Lane: taskLane(t), Title: "preserve refs", Kind: "implement", Refs: refs, CreatedBy: "node"})
+	task, err := s.CreateTask(t.Context(), store.Task{Lane: taskLane(t), Title: "preserve refs", Kind: "implement", Refs: refs, CreatedBy: "node", Project: projectRef("experiment")})
 	if err != nil {
 		t.Fatal(err)
 	}

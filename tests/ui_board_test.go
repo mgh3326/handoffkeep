@@ -279,7 +279,8 @@ func TestUIBoardTaskDetail(t *testing.T) {
 
 	task, err := s.CreateTask(t.Context(), store.Task{
 		Lane: lane, Title: "detail task", Kind: "implement", Priority: 3, CreatedBy: "test-node",
-		Refs: store.TaskRefs{PR: "https://github.com/x/y/pull/1", HeadSHA: "abcdef1234567890", ReportPath: "report/x.md", JobID: "job-1"},
+		Refs:    store.TaskRefs{PR: "https://github.com/x/y/pull/1", HeadSHA: "abcdef1234567890", ReportPath: "report/x.md", JobID: "job-1"},
+		Project: projectRef("experiment"),
 	})
 	if err != nil {
 		t.Fatal(err)

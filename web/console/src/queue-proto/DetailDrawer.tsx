@@ -315,6 +315,7 @@ export function DetailBody({ dataset, task, detail, fetchDoc, comments: comments
             ["state", task.state],
             ["kind", task.kind],
             ["lane", task.lane !== "" ? task.lane : null],
+            ["project", task.project],
             ["parent lane", task.parent_lane],
             ["claimant", task.claimant],
             ["priority", `p${task.priority}`],
@@ -453,11 +454,12 @@ export function DetailBody({ dataset, task, detail, fetchDoc, comments: comments
 
   // History rows are task_events. A relane row's from/to are lane names, not
   // states, so it is prefixed "lane:" rather than read as a state transition;
-  // a decision row records a request without a state change.
+  // a decision row records a request without a state change; a project row's
+  // from/to are project names — classification, not lifecycle.
   // A note is data: plain text only, never parsed as markdown or HTML.
   const eventLine = (event: { id: number; kind?: string; from: string; to: string; by: string; note?: string; no_job?: string; at: string }) => (
     <li key={event.id}>
-      {event.kind === "relane" ? "lane: " : event.kind === "decision" ? "결정: " : ""}
+      {event.kind === "relane" ? "lane: " : event.kind === "decision" ? "결정: " : event.kind === "project" ? "project: " : ""}
       {event.from} → {event.to} by {event.by} at <time>{event.at}</time>
       {event.note ? <span className="muted"> — {event.note}</span> : null}
       {event.no_job ? <span className="muted"> · no job: {event.no_job}</span> : null}

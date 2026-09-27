@@ -14,6 +14,10 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
+// projectPtr supplies the required task project for fixture creates; the
+// value is a member of the seeded task_projects vocabulary.
+func projectPtr(v string) *string { return &v }
+
 func isolatedLinearStore(t *testing.T) (*store.Store, string) {
 	t.Helper()
 	baseURL := os.Getenv("HANDOFFKEEP_TEST_DB_URL")
@@ -54,6 +58,7 @@ func createDrainTask(t *testing.T, st *store.Store, refs store.TaskRefs) store.T
 		Kind:      "implement",
 		Refs:      refs,
 		CreatedBy: "fixture-client",
+		Project:   projectPtr("experiment"),
 	})
 	if err != nil {
 		t.Fatal(err)

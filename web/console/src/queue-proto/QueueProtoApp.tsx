@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { BoardDetail } from "../board/types";
-import { applyView, boardColumns, countByView, decisionMark, EMPTY_FILTERS, groupByArea, groupByState } from "./adapter";
+import { applyView, boardColumns, countByView, decisionMark, EMPTY_FILTERS, groupByArea, groupByProject, groupByState } from "./adapter";
 import { boardTaskToProto } from "./boardtask";
 import { flattenGrouped } from "./ListView";
 import { DetailDrawer, type DetailFetchState } from "./DetailDrawer";
@@ -46,7 +46,7 @@ function applyNavParams(state: ProtoState, params: URLSearchParams): ProtoState 
 }
 
 function parseGrouping(value: string | null): Grouping | null {
-  return value === "state" || value === "none" || value === "area" ? value : null;
+  return value === "state" || value === "none" || value === "area" || value === "project" ? value : null;
 }
 
 /** The area→bundle grouping reads the synthetic enrichment fixture; the live
@@ -180,8 +180,11 @@ export function QueueProtoApp({ datasets, initialSet, storage, diag = false, per
     if (state.grouping === "state") {
       return groupByState(visible).flatMap((g) => g.tasks.map((t) => t.id));
     }
+    if (state.grouping === "project") {
+      return groupByProject(visible, dataset.generatedAt).flatMap((g) => g.tasks.map((t) => t.id));
+    }
     return visible.map((t) => t.id);
-  }, [state.layout, state.grouping, columns, groups, visible]);
+  }, [state.layout, state.grouping, columns, groups, visible, dataset.generatedAt]);
 
   const lanes = useMemo(() => [...new Set(dataset.tasks.map((t) => t.lane))].sort(), [dataset.tasks]);
   const kinds = useMemo(() => [...new Set(dataset.tasks.map((t) => t.kind))].sort(), [dataset.tasks]);

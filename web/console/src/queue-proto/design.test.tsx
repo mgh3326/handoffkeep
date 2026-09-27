@@ -363,7 +363,8 @@ describe("area→bundle draft grouping is local-preview only", () => {
   it("the live toolbar does not offer it", () => {
     renderLive([mkBoardTask({})]);
     const options = [...(screen.getByLabelText("grouping") as HTMLSelectElement).options].map((o) => o.value);
-    expect(options).toEqual(["state", "none"]);
+    // "project" is live-capable — the server carries the field on board rows.
+    expect(options).toEqual(["state", "project", "none"]);
   });
 
   it("a stored or linked area grouping becomes state groups on live data", () => {
@@ -376,6 +377,44 @@ describe("area→bundle draft grouping is local-preview only", () => {
     expect(container.querySelector(".qp-listwrap")!.getAttribute("data-grouping")).toBe("state");
     expect(container.querySelector(".qp-group-state")).toBeTruthy();
     expect(new URLSearchParams(window.location.search).get("group")).toBe("state");
+  });
+});
+
+// ---- #763 group by project ---------------------------------------------
+
+describe("project grouping on the live queue", () => {
+  const tasks = [
+    mkBoardTask({ id: 1, state: "backlog", project: "handoffkeep" }),
+    mkBoardTask({ id: 2, state: "claimed", project: "wrk" }),
+    mkBoardTask({ id: 3, state: "backlog", project: "handoffkeep" }),
+    mkBoardTask({ id: 4, state: "backlog", project: null }),
+    mkBoardTask({ id: 5, state: "backlog" }),
+  ];
+
+  const projectGroups = (container: HTMLElement) =>
+    [...container.querySelectorAll<HTMLElement>('[data-group^="project:"]')];
+
+  it("groups rows under project names, legacy NULL rows under no project", () => {
+    const { container } = renderLive(tasks);
+    fireEvent.change(screen.getByLabelText("grouping"), { target: { value: "project" } });
+    const groups = projectGroups(container);
+    expect(groups.map((g) => g.querySelector(".qp-group-name")!.textContent)).toEqual(["▾ handoffkeep", "▾ wrk", "▾ no project"]);
+    // Both JSON-null (id 4) and absent-on-wire (id 5) rows land in the bucket.
+    expect(groups.map((g) => g.querySelector(".qp-badge")!.textContent)).toEqual(["2", "1", "2"]);
+    const ids = [...container.querySelectorAll<HTMLElement>(".qp-row")].map((r) => Number(r.dataset.taskId));
+    expect(ids.sort()).toEqual([1, 2, 3, 4, 5]);
+  });
+
+  it("the group param survives in the URL and a collapse keeps the count", () => {
+    const { container } = renderLive(tasks);
+    fireEvent.change(screen.getByLabelText("grouping"), { target: { value: "project" } });
+    expect(new URLSearchParams(window.location.search).get("group")).toBe("project");
+    fireEvent.click(container.querySelector<HTMLElement>('[data-group="project:handoffkeep"]')!);
+    expect(container.querySelector('[data-task-id="1"]')).toBeNull();
+    expect(container.querySelector('[data-group="project:handoffkeep"] .qp-badge')!.textContent).toBe("2");
+    // Toggling back to state restores the state groups untouched.
+    fireEvent.change(screen.getByLabelText("grouping"), { target: { value: "state" } });
+    expect(container.querySelector(".qp-group-state")).toBeTruthy();
   });
 });
 

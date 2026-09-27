@@ -80,6 +80,10 @@ export type BoardTask = {
   /** hk document key holding the task body: "key" or the transitional
    * "key#section". Absent when no body document is attached. */
   body_doc?: string;
+  /** Server-configured project classification. null on legacy rows that
+   * predate the field; absent on pre-field servers — both render as
+   * "no project", never as an empty string. */
+  project?: string | null;
 };
 
 export type BoardTasksResponse = {
@@ -93,8 +97,9 @@ export type BoardTasksResponse = {
 export type BoardEvent = {
   id: number;
   /** "transition" rows change state; "relane" rows move the task between
-   * lanes and from/to carry lane names. Absent on pre-relane servers. */
-  kind?: "transition" | "relane" | "decision";
+   * lanes and from/to carry lane names; "project" rows reclassify the task
+   * and from/to carry project names. Absent on pre-relane servers. */
+  kind?: "transition" | "relane" | "decision" | "project";
   from: string;
   to: string;
   by: string;

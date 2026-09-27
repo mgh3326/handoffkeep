@@ -53,7 +53,7 @@ func p4PostJSON(t *testing.T, h *httptest.Server, path string, input any) (int, 
 
 func p4Task(t *testing.T, h *httptest.Server, lane, title, kind string) int64 {
 	t.Helper()
-	status, body := p4PostJSON(t, h, "/v1/tasks", map[string]any{"lane": lane, "title": title, "kind": kind})
+	status, body := p4PostJSON(t, h, "/v1/tasks", map[string]any{"lane": lane, "title": title, "kind": kind, "project": "experiment"})
 	if status != http.StatusCreated {
 		t.Fatalf("create task status=%d body=%q", status, body)
 	}
@@ -446,7 +446,7 @@ func p4TasksByRenderedIndex(t *testing.T, body string, tasks []int64) []int64 {
 
 func p4DecideTask(t *testing.T, s *store.Store, lane, title, state string) store.Task {
 	t.Helper()
-	task, err := s.CreateTask(t.Context(), store.Task{Lane: lane, Title: title, Kind: "decide", CreatedBy: "node"})
+	task, err := s.CreateTask(t.Context(), store.Task{Lane: lane, Title: title, Kind: "decide", CreatedBy: "node", Project: projectRef("experiment")})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -51,7 +51,7 @@ func TestDispositionAddCopiesToolFacts(t *testing.T) {
 	gh := writeTestFile(t, "pr.json", `{"url":"`+testOriginPR+`","state":"MERGED","mergeCommit":{"oid":"`+strings.Repeat("b", 40)+`"},"mergedAt":"2026-09-21T01:02:03Z"}`)
 	residuals := writeTestFile(t, "r.json", `["log rotation unverified",{"title":"probe missing","severity":"SHOULD","evidence":"report §3"}]`)
 	var out bytes.Buffer
-	err := run([]string{"tasks", "disposition", "add", "--lane", "lane-a", "--origin-pr", testOriginPR, "--gh-json", gh, "--residuals", residuals, "--recommended", "A"}, &out, &bytes.Buffer{})
+	err := run([]string{"tasks", "disposition", "add", "--lane", "lane-a", "--project", "experiment", "--origin-pr", testOriginPR, "--gh-json", gh, "--residuals", residuals, "--recommended", "A"}, &out, &bytes.Buffer{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,15 +80,15 @@ func TestDispositionAddRejectsUnverifiedGHOutput(t *testing.T) {
 	}
 	for name, body := range cases {
 		gh := writeTestFile(t, "pr.json", body)
-		if err := run([]string{"tasks", "disposition", "add", "--lane", "lane-a", "--origin-pr", testOriginPR, "--gh-json", gh, "--recommended", "A"}, &bytes.Buffer{}, &bytes.Buffer{}); err == nil {
+		if err := run([]string{"tasks", "disposition", "add", "--lane", "lane-a", "--project", "experiment", "--origin-pr", testOriginPR, "--gh-json", gh, "--recommended", "A"}, &bytes.Buffer{}, &bytes.Buffer{}); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
 	}
 	for name, args := range map[string][]string{
-		"no origin":       {"tasks", "disposition", "add", "--lane", "d", "--recommended", "A"},
-		"both origins":    {"tasks", "disposition", "add", "--lane", "d", "--origin-pr", testOriginPR, "--origin-task", "3", "--recommended", "A"},
-		"pr without gh":   {"tasks", "disposition", "add", "--lane", "d", "--origin-pr", testOriginPR, "--recommended", "A"},
-		"multi-line item": {"tasks", "disposition", "add", "--lane", "d", "--origin-task", "3", "--residuals", writeTestFile(t, "r.json", `["a\nb"]`), "--recommended", "A"},
+		"no origin":       {"tasks", "disposition", "add", "--lane", "d", "--project", "experiment", "--recommended", "A"},
+		"both origins":    {"tasks", "disposition", "add", "--lane", "d", "--project", "experiment", "--origin-pr", testOriginPR, "--origin-task", "3", "--recommended", "A"},
+		"pr without gh":   {"tasks", "disposition", "add", "--lane", "d", "--project", "experiment", "--origin-pr", testOriginPR, "--recommended", "A"},
+		"multi-line item": {"tasks", "disposition", "add", "--lane", "d", "--project", "experiment", "--origin-task", "3", "--residuals", writeTestFile(t, "r.json", `["a\nb"]`), "--recommended", "A"},
 	} {
 		if err := run(args, &bytes.Buffer{}, &bytes.Buffer{}); err == nil {
 			t.Errorf("%s: accepted", name)

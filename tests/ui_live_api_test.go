@@ -143,7 +143,7 @@ func liveLinkFor(t *testing.T, decoded map[string]any, taskID int64) map[string]
 
 func createJobTask(t *testing.T, s *store.Store, lane, title, jobID string) store.Task {
 	t.Helper()
-	task, err := s.CreateTask(t.Context(), store.Task{Lane: lane, Title: title, Kind: "implement", CreatedBy: "test-node", Refs: store.TaskRefs{JobID: jobID}})
+	task, err := s.CreateTask(t.Context(), store.Task{Lane: lane, Title: title, Kind: "implement", CreatedBy: "test-node", Project: projectRef("experiment"), Refs: store.TaskRefs{JobID: jobID}})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -298,7 +298,7 @@ func (h *Handler) liveTasks(ctx context.Context) ([]store.Task, bool, error) {
 	tasks := []store.Task{}
 	var after int64
 	for len(tasks) < liveTaskScanMax {
-		page, err := h.store.ListTasksPage(ctx, "", "", "", after, 1000)
+		page, err := h.store.ListTasksPage(ctx, "", "", "", nil, after, 1000)
 		if err != nil {
 			return nil, false, err
 		}
