@@ -49,9 +49,9 @@ func (c Client) call(ctx context.Context, method, path string, input, output any
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		var x struct{ Error, Pattern string }
+		var x struct{ Error, Pattern, Reason string }
 		_ = json.NewDecoder(resp.Body).Decode(&x)
-		return &HTTPError{Status: resp.StatusCode, Code: x.Error, Pattern: x.Pattern}
+		return &HTTPError{Status: resp.StatusCode, Code: x.Error, Pattern: x.Pattern, Reason: x.Reason}
 	}
 	if output != nil {
 		return json.NewDecoder(resp.Body).Decode(output)
@@ -69,11 +69,15 @@ type HTTPError struct {
 	Status  int
 	Code    string
 	Pattern string
+	Reason  string
 }
 
 func (e *HTTPError) Error() string {
 	if e.Pattern != "" {
 		return fmt.Sprintf("%s:%s", e.Code, e.Pattern)
+	}
+	if e.Reason != "" {
+		return fmt.Sprintf("%s: %s", e.Code, e.Reason)
 	}
 	if e.Code == "" {
 		return fmt.Sprintf("http_%d", e.Status)
@@ -294,10 +298,30 @@ func (c Client) CreateTask(ctx context.Context, x store.Task) (store.Task, error
 	err := c.call(ctx, "POST", "/v1/tasks", x, &out)
 	return out, err
 }
-func (c Client) ClaimTask(ctx context.Context, id int64, claimedBy string) (store.Task, error) {
+func (c Client) ClaimTask(ctx context.Context, id int64, claimedBy, jobID string) (store.Task, error) {
 	var out store.Task
-	err := c.call(ctx, "POST", fmt.Sprintf("/v1/tasks/%d/claim", id), map[string]string{"claimed_by": claimedBy}, &out)
-	return out, err
+	body := map[string]string{"claimed_by": claimedBy}
+	if jobID != "" {
+		body["job_id"] = jobID
+	}
+	err := c.call(ctx, "POST", fmt.Sprintf("/v1/tasks/%d/claim", id), body, &out)
+	if err != nil {
+		// Servers whose decoder rejects unknown fields answer the new body
+		// with the generic invalid_context rather than naming job_id.
+		var he *HTTPError
+		if jobID != "" && errors.As(err, &he) && he.Code == "invalid_context" {
+			return out, fmt.Errorf("claim_job_id_rejected: server refused the claim with invalid_context (job_id=%q) — it likely predates job_id claim support", jobID)
+		}
+		return out, err
+	}
+	// A server that predates job_id claims can also answer 200 while
+	// silently dropping the field. Treat that as failure: the task is
+	// claimed but unlinked, and reporting success here would falsify the
+	// job link.
+	if jobID != "" && out.Refs.JobID != jobID {
+		return out, fmt.Errorf("claim_job_id_not_recorded: server response has refs.job_id=%q, want %q (server predates job_id claims)", out.Refs.JobID, jobID)
+	}
+	return out, nil
 }
 func (c Client) NextTask(ctx context.Context, lane, claimedBy string) (store.Task, error) {
 	var out store.Task

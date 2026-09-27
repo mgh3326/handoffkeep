@@ -115,7 +115,7 @@ func TestExportTasksSingleSnapshot(t *testing.T) {
 	}
 	// These commits land after the export's repeatable-read snapshot was
 	// fixed but before its row scan runs.
-	claimed, err := s.ClaimTask(t.Context(), task.ID, "captain")
+	claimed, err := s.ClaimTask(t.Context(), task.ID, "captain", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,7 +227,7 @@ func TestExportTasksSnapshotFixedBeforeCounts(t *testing.T) {
 	// These commits land after the export's repeatable-read snapshot was
 	// fixed but before its first count read: the claim updates the row and
 	// inserts a task_event atomically, the create adds a second row.
-	if _, err := s.ClaimTask(t.Context(), task.ID, "captain"); err != nil {
+	if _, err := s.ClaimTask(t.Context(), task.ID, "captain", ""); err != nil {
 		t.Fatal(err)
 	}
 	extra := exportTask(t, s, lane, "post-snapshot create")

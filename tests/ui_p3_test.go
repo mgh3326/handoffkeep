@@ -254,7 +254,7 @@ func TestUIP3GlanceTaskAggregation(t *testing.T) {
 	backlog := createUITask(t, s, lane, "backlog")
 	_ = backlog
 	claimed := createUITask(t, s, lane, "claimed")
-	if _, err := s.ClaimTask(t.Context(), claimed.ID, "p3-worker"); err != nil {
+	if _, err := s.ClaimTask(t.Context(), claimed.ID, "p3-worker", ""); err != nil {
 		t.Fatal(err)
 	}
 	inProgress := createUITask(t, s, lane, "in progress")
@@ -277,7 +277,7 @@ func TestUIP3GlanceTaskAggregation(t *testing.T) {
 	}
 	for i := 0; i < 21; i++ {
 		task := createUITask(t, s, lane, "active task")
-		if _, err := s.ClaimTask(t.Context(), task.ID, "p3-worker"); err != nil {
+		if _, err := s.ClaimTask(t.Context(), task.ID, "p3-worker", ""); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -356,7 +356,7 @@ func TestUIP3GlanceTruncation(t *testing.T) {
 	lane := uiLane(t, "p3-large")
 	for i := 0; i < 5; i++ {
 		task := createUITask(t, s, lane, strings.Repeat("x", 60*1024))
-		if _, err := s.ClaimTask(t.Context(), task.ID, "p3-worker"); err != nil {
+		if _, err := s.ClaimTask(t.Context(), task.ID, "p3-worker", ""); err != nil {
 			t.Fatal(err)
 		}
 	}

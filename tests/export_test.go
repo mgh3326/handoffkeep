@@ -237,18 +237,18 @@ func TestExportCountsAndFilters(t *testing.T) {
 
 	newTask(t, s, laneA, "backlog task", 0)
 	claimed := newTask(t, s, laneA, "claimed task", 0)
-	if _, err := s.ClaimTask(t.Context(), claimed.ID, "captain"); err != nil {
+	if _, err := s.ClaimTask(t.Context(), claimed.ID, "captain", ""); err != nil {
 		t.Fatal(err)
 	}
 	inProgress := newTask(t, s, laneA, "progress task", 0)
-	if _, err := s.ClaimTask(t.Context(), inProgress.ID, "captain"); err != nil {
+	if _, err := s.ClaimTask(t.Context(), inProgress.ID, "captain", ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.TransitionTask(t.Context(), inProgress.ID, "in_progress", "node", "", nil); err != nil {
 		t.Fatal(err)
 	}
 	verifying := newTask(t, s, laneA, "verify task", 0)
-	if _, err := s.ClaimTask(t.Context(), verifying.ID, "captain"); err != nil {
+	if _, err := s.ClaimTask(t.Context(), verifying.ID, "captain", ""); err != nil {
 		t.Fatal(err)
 	}
 	for _, to := range []string{"in_progress", "verifying"} {
@@ -258,7 +258,7 @@ func TestExportCountsAndFilters(t *testing.T) {
 	}
 
 	join := newTask(t, s, laneB, "join task", 0)
-	if _, err := s.ClaimTask(t.Context(), join.ID, "captain"); err != nil {
+	if _, err := s.ClaimTask(t.Context(), join.ID, "captain", ""); err != nil {
 		t.Fatal(err)
 	}
 	for _, to := range []string{"in_progress", "join"} {
@@ -271,7 +271,7 @@ func TestExportCountsAndFilters(t *testing.T) {
 		t.Fatal(err)
 	}
 	decision := newTask(t, s, laneB, "decision task", 0)
-	if _, err := s.ClaimTask(t.Context(), decision.ID, "captain"); err != nil {
+	if _, err := s.ClaimTask(t.Context(), decision.ID, "captain", ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.TransitionTask(t.Context(), decision.ID, "needs_decision", "node", "which path?", nil); err != nil {
@@ -282,7 +282,7 @@ func TestExportCountsAndFilters(t *testing.T) {
 	}
 
 	merged := newTask(t, s, laneC, "merged task", 0)
-	if _, err := s.ClaimTask(t.Context(), merged.ID, "captain"); err != nil {
+	if _, err := s.ClaimTask(t.Context(), merged.ID, "captain", ""); err != nil {
 		t.Fatal(err)
 	}
 	for _, to := range []string{"in_progress", "verifying", "merged"} {
@@ -417,7 +417,7 @@ func TestExportDigests(t *testing.T) {
 			t.Fatal(err)
 		}
 		if i == 0 {
-			if _, err := s.ClaimTask(t.Context(), task.ID, "captain-k"); err != nil {
+			if _, err := s.ClaimTask(t.Context(), task.ID, "captain-k", ""); err != nil {
 				t.Fatal(err)
 			}
 		}

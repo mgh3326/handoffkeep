@@ -225,8 +225,8 @@ func (s Service) CreateTask(ctx context.Context, client string, x store.Task) (s
 	x.CreatedBy = client
 	return s.Store.CreateTask(ctx, x)
 }
-func (s Service) ClaimTask(ctx context.Context, id int64, by string) (store.Task, error) {
-	return s.Store.ClaimTask(ctx, id, by)
+func (s Service) ClaimTask(ctx context.Context, id int64, by, jobID string) (store.Task, error) {
+	return s.Store.ClaimTask(ctx, id, by, jobID)
 }
 func (s Service) NextTask(ctx context.Context, lane, by string) (store.Task, error) {
 	return s.Store.NextTask(ctx, lane, by)
@@ -501,7 +501,11 @@ func appErr(w http.ResponseWriter, e error) {
 		jsonOut(w, 502, map[string]string{"error": "attachment_r2_unavailable"})
 		return
 	case errors.Is(e, store.ErrTaskConflict):
-		jsonOut(w, http.StatusConflict, map[string]string{"error": "task_conflict"})
+		body := map[string]string{"error": "task_conflict"}
+		if reason, ok := strings.CutPrefix(e.Error(), "task_conflict: "); ok && reason != "" {
+			body["reason"] = reason
+		}
+		jsonOut(w, http.StatusConflict, body)
 		return
 	case errors.Is(e, store.ErrDispositionOperatorOnly):
 		jsonOut(w, http.StatusConflict, map[string]string{"error": "disposition_operator_only"})
@@ -664,6 +668,7 @@ func (s Server) task(w http.ResponseWriter, r *http.Request) {
 
 type taskClaimInput struct {
 	ClaimedBy string `json:"claimed_by"`
+	JobID     string `json:"job_id"`
 }
 
 func (s Server) taskClaim(w http.ResponseWriter, r *http.Request) {
@@ -681,7 +686,7 @@ func (s Server) taskClaim(w http.ResponseWriter, r *http.Request) {
 		appErr(w, err)
 		return
 	}
-	x, err := s.Service.ClaimTask(r.Context(), id, input.ClaimedBy)
+	x, err := s.Service.ClaimTask(r.Context(), id, input.ClaimedBy, input.JobID)
 	if err != nil {
 		appErr(w, err)
 		return

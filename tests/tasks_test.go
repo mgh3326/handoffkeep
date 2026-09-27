@@ -60,15 +60,18 @@ func TestTaskConcurrentClaimHasExactlyOneWinner(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			_, err := clients[i%len(clients)].ClaimTask(t.Context(), task.ID, "captain-"+string(rune('a'+i%26)))
+			_, err := clients[i%len(clients)].ClaimTask(t.Context(), task.ID, "captain-"+string(rune('a'+i%26)), "")
 			mu.Lock()
 			defer mu.Unlock()
 			if err == nil {
 				wins++
-			} else if err.Error() == "task_conflict" {
-				conflicts++
 			} else {
-				t.Errorf("claim: %v", err)
+				var he *remote.HTTPError
+				if errors.As(err, &he) && he.Code == "task_conflict" {
+					conflicts++
+				} else {
+					t.Errorf("claim: %v", err)
+				}
 			}
 		}(i)
 	}
@@ -97,7 +100,7 @@ func TestTaskIllegalTransitionReturnsConflict(t *testing.T) {
 func TestTaskEveryTransitionWritesOneEvent(t *testing.T) {
 	s := taskTestStore(t)
 	task := newTask(t, s, taskLane(t), "event audit", 0)
-	if _, err := s.ClaimTask(t.Context(), task.ID, "captain-a"); err != nil {
+	if _, err := s.ClaimTask(t.Context(), task.ID, "captain-a", ""); err != nil {
 		t.Fatal(err)
 	}
 	for _, to := range []string{"in_progress", "verifying", "in_progress", "verifying", "merged"} {
@@ -158,7 +161,7 @@ func TestTaskTransitionGraphAndRefsSnapshots(t *testing.T) {
 	// join -> hold is forbidden; needs_decision -> claimed is the canonical
 	// decision-resume path (backlog remains an allowed alternative).
 	join := newTask(t, s, taskLane(t), "joined", 0)
-	if _, err := s.ClaimTask(t.Context(), join.ID, "captain"); err != nil {
+	if _, err := s.ClaimTask(t.Context(), join.ID, "captain", ""); err != nil {
 		t.Fatal(err)
 	}
 	for _, to := range []string{"in_progress", "join"} {
@@ -170,7 +173,7 @@ func TestTaskTransitionGraphAndRefsSnapshots(t *testing.T) {
 		t.Fatalf("join->hold error=%v", err)
 	}
 	decision := newTask(t, s, taskLane(t), "decision", 0)
-	if _, err := s.ClaimTask(t.Context(), decision.ID, "captain"); err != nil {
+	if _, err := s.ClaimTask(t.Context(), decision.ID, "captain", ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.TransitionTask(t.Context(), decision.ID, "needs_decision", "node", "choose", nil); err != nil {
@@ -185,7 +188,7 @@ func TestTaskTransitionGraphAndRefsSnapshots(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = s.ClaimTask(t.Context(), task.ID, "captain"); err != nil {
+	if _, err = s.ClaimTask(t.Context(), task.ID, "captain", ""); err != nil {
 		t.Fatal(err)
 	}
 	got, err := s.TransitionTask(t.Context(), task.ID, "in_progress", "node", "started", &store.TaskRefs{PR: "5"})
@@ -208,7 +211,7 @@ func TestTaskRejectsSecretNoteQuestionAndRefsWithoutStorage(t *testing.T) {
 	defer h.Close()
 	secret := "sk-abcdefghijklmnopqrstuvwxyz"
 	task := newTask(t, s, taskLane(t), "secret test", 0)
-	if _, err := s.ClaimTask(t.Context(), task.ID, "captain"); err != nil {
+	if _, err := s.ClaimTask(t.Context(), task.ID, "captain", ""); err != nil {
 		t.Fatal(err)
 	}
 	for _, body := range []map[string]any{
@@ -232,7 +235,7 @@ func TestTaskRejectsSecretNoteQuestionAndRefsWithoutStorage(t *testing.T) {
 func TestTaskEventsDatabaseAppendOnly(t *testing.T) {
 	s := taskTestStore(t)
 	task := newTask(t, s, taskLane(t), "append only", 0)
-	if _, err := s.ClaimTask(t.Context(), task.ID, "captain"); err != nil {
+	if _, err := s.ClaimTask(t.Context(), task.ID, "captain", ""); err != nil {
 		t.Fatal(err)
 	}
 	got, found, err := s.GetTask(t.Context(), task.ID)

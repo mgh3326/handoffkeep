@@ -193,7 +193,7 @@ func createUITask(t *testing.T, s *store.Store, lane, title string) store.Task {
 
 func claimAndTransition(t *testing.T, s *store.Store, task store.Task, to, note string) store.Task {
 	t.Helper()
-	if _, err := s.ClaimTask(t.Context(), task.ID, "test-owner"); err != nil {
+	if _, err := s.ClaimTask(t.Context(), task.ID, "test-owner", ""); err != nil {
 		t.Fatal(err)
 	}
 	updated, err := s.TransitionTask(t.Context(), task.ID, to, "test-node", note, nil)

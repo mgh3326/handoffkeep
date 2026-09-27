@@ -37,7 +37,7 @@ func drTask(t *testing.T, s *store.Store, lane string, path ...string) store.Tas
 	var err error
 	for _, to := range path {
 		if to == "claimed" {
-			x, err = s.ClaimTask(t.Context(), x.ID, "dr-test")
+			x, err = s.ClaimTask(t.Context(), x.ID, "dr-test", "")
 		} else {
 			x, err = s.TransitionTask(t.Context(), x.ID, to, "dr-test", "step", nil)
 		}
