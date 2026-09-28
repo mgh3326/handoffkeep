@@ -307,22 +307,56 @@ change `delivered_at`.
 
 ## Operator chat
 
-Desk sessions post durable questions and the operator answers them in a
-browser. This service owns only the persistence layer; the chat screen lives
-elsewhere. `PUT /v1/chat/questions/{id}` (or `POST /v1/chat/questions` with
-the id in the body) upserts by the producer's
-`Q-YYYYMMDD-NN` id — a repeat id updates the row instead of adding one. A
-question is `pending` until `POST /v1/chat/questions/{id}/transition` moves it
-to `resolved` (which stamps `resolved_at`) or `withdrawn`.
-`GET /v1/chat/questions?lane=&state=&after_id=&limit=` pages by id cursor.
-`POST /v1/chat/messages` stores an `operator` (or `desk`) message with
-`relay_state='stored'`; `POST /v1/chat/messages/{id}/delivered` records
-successful relay and stamps `delivered_at`, while `/{id}/failed` marks a relay
-failure. `GET /v1/chat/messages?author=&undelivered=1&after_id=&limit=` pages
-in insertion order. A built-in daily retention job deletes terminal-state
-chat rows older than one year (`resolved`/`withdrawn` questions, `delivered`
-messages) — `pending` questions and `stored`/`failed` messages are preserved
-regardless of age — bounded to at most 1000 rows per table per run.
+Desk sessions post operator-facing final answers and questions; operators post
+answers in the browser. The single conversation ID is `operator-desk`. This
+service owns persistence; the chat screen lives in the hub.
+
+`POST /v1/chat/messages` accepts `conversation_id`, `author`, `body`,
+`source_channel`, `origin_event_id`, `origin_timestamp`, `questions` (desk
+objects with `id`, `lane`, `body`), `question_ids` (operator reply targets),
+and `processed_question_ids` (desk's explicit resolutions). A desk post
+commits its body, question upserts, posted and resolve relations, and processed
+transitions in one transaction. An operator post commits its body and reply
+relations in one transaction. Every referenced Q must belong to the
+conversation. Replies and delivery never resolve a Q. Each message response
+and list row carries `question_relations` with a durable `question_text`
+snapshot, plus the conversation, source, and original event fields. Lists are
+ordered by server insertion ID; original timestamps do not reorder rows.
+
+The event key is `(conversation_id, source_channel, origin_event_id)`. A
+semantic replay returns the prior row with HTTP 200; a different body, author,
+question post, reply target, or processed target on that key returns HTTP 409
+before any Q mutation. A new event ID creates a new row even if the text is
+identical. New web and hook clients must send an event ID. Legacy clients may
+omit the new fields: they get conversation `operator-desk`, source `legacy`,
+and a fresh row per request. The complete JSON request is limited to 68 KiB;
+within it, the body and each question body have a 64 KiB field limit.
+Secret-shaped content is rejected without echoing it.
+
+`PUT /v1/chat/questions/{id}` (or `POST /v1/chat/questions` with the ID in the
+body) still upserts by producer Q ID. Question upsert and list rows include
+`conversation_id`. `GET /v1/chat/questions?conversation_id=&lane=&state=&after_id=&limit=`
+pages by full Q ID. `GET /v1/chat/questions/{id}` returns one authenticated
+question or 404, so a reply can validate a question outside the recent page.
+`POST /v1/chat/questions/{id}/transition` still explicitly
+resolves or withdraws a pending Q.
+
+Operator messages start `stored`; `POST /v1/chat/messages/{id}/delivered` or
+`/{id}/failed` changes their relay state. Desk messages start `not_sent` and
+cannot use those transitions. `GET /v1/chat/messages?conversation_id=&author=&undelivered=1&after_id=&limit=`
+pages by message ID; `undelivered=1` includes only stored operator rows. Daily
+retention prunes resolved or withdrawn questions and delivered operator rows
+older than one year, at most 1000 per table per run. It preserves desk rows,
+pending questions, and stored or failed operator rows. Relation snapshots
+survive Q pruning until their message is pruned.
+
+Migration defaults older rows to the single conversation and `legacy`
+source, retaining their bodies. It backfills an older reply relation only when
+a durable `lane.event` relay row explicitly identifies both the chat message
+ID and Q; otherwise the relation list is empty. It never invents a desk body.
+Deploy this store before the new hub and hook. Old clients keep using legacy
+mode; newer clients must treat an older store's rejection of the extended
+request as a visible incompatibility and keep their pending posts for retry.
 
 ## Attachments (R2)
 

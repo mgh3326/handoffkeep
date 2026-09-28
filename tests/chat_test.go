@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -80,6 +81,43 @@ func TestChatQuestionValidation(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("empty body status=%d", resp.StatusCode)
+	}
+}
+
+func TestChatQuestionDirectGetRequiresAuthAndFullID(t *testing.T) {
+	s := taskTestStore(t)
+	h := taskHTTP(s)
+	defer h.Close()
+	id := chatQuestionID(t, 49)
+	if status, _ := putChatQuestion(t, h.URL, "node-token", id, taskLane(t), "linked question"); status != http.StatusCreated {
+		t.Fatalf("put status=%d", status)
+	}
+	for _, tc := range []struct {
+		id, token string
+		status    int
+	}{
+		{id, "node-token", http.StatusOK},
+		{id, "", http.StatusUnauthorized},
+		{"Q-20260928-99999999", "node-token", http.StatusNotFound},
+		{"Q-20260928-", "node-token", http.StatusBadRequest},
+	} {
+		resp := request(t, h.Client(), http.MethodGet, h.URL+"/v1/chat/questions/"+tc.id, tc.token, nil)
+		if resp.StatusCode != tc.status {
+			resp.Body.Close()
+			t.Fatalf("get id=%s status=%d want=%d", tc.id, resp.StatusCode, tc.status)
+		}
+		if tc.status == http.StatusOK {
+			var got store.ChatQuestion
+			if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+				resp.Body.Close()
+				t.Fatal(err)
+			}
+			if got.ID != id || got.Body != "linked question" || got.ConversationID != store.ChatConversationID {
+				resp.Body.Close()
+				t.Fatalf("direct get=%+v", got)
+			}
+		}
+		resp.Body.Close()
 	}
 }
 
@@ -253,6 +291,176 @@ func TestChatMessageAuthorValidation(t *testing.T) {
 		}
 		resp.Body.Close()
 	}
+}
+
+func TestChatPostAtomicReplayAndDeskIsolation(t *testing.T) {
+	s := taskTestStore(t)
+	h := taskHTTP(s)
+	defer h.Close()
+	q1, q2 := chatQuestionID(t, 81), chatQuestionID(t, 82)
+	key := fmt.Sprintf("chat-event-%d", time.Now().UnixNano())
+	origin := time.Now().Add(-time.Hour).UTC().Truncate(time.Second)
+	base := map[string]any{
+		"conversation_id": store.ChatConversationID, "author": "desk", "body": "full final answer",
+		"source_channel": "claude_stop", "origin_event_id": key, "origin_timestamp": origin,
+		"questions": []map[string]string{{"id": q1, "lane": "desk-lane", "body": "first question"}, {"id": q2, "lane": "desk-lane", "body": "second question"}},
+	}
+	bad := map[string]any{}
+	for k, v := range base {
+		bad[k] = v
+	}
+	bad["processed_question_ids"] = []string{chatQuestionID(t, 99)}
+	resp := request(t, h.Client(), http.MethodPost, h.URL+"/v1/chat/messages", "node-token", bad)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("rollback status=%d", resp.StatusCode)
+	}
+	resp.Body.Close()
+	if _, found, err := s.GetChatQuestion(t.Context(), q1); err != nil || found {
+		t.Fatalf("rollback left Q: found=%t err=%v", found, err)
+	}
+	status, first := postChatMessage(t, h.URL, "node-token", base)
+	if status != http.StatusCreated || first.RelayState != "not_sent" || first.ConversationID != store.ChatConversationID || first.OriginTimestamp == nil || !first.OriginTimestamp.Equal(origin) || len(first.QuestionRelations) != 2 {
+		t.Fatalf("status=%d first=%+v", status, first)
+	}
+	status, replay := postChatMessage(t, h.URL, "node-token", base)
+	if status != http.StatusOK || replay.ID != first.ID {
+		t.Fatalf("replay status=%d row=%+v", status, replay)
+	}
+	mutated := map[string]any{}
+	for k, v := range base {
+		mutated[k] = v
+	}
+	mutated["body"] = "different body"
+	resp = request(t, h.Client(), http.MethodPost, h.URL+"/v1/chat/messages", "node-token", mutated)
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("collision status=%d", resp.StatusCode)
+	}
+	resp.Body.Close()
+	mutated["body"] = "full final answer"
+	mutated["questions"] = []map[string]string{{"id": q1, "lane": "desk-lane", "body": "changed question"}, {"id": q2, "lane": "desk-lane", "body": "second question"}}
+	resp = request(t, h.Client(), http.MethodPost, h.URL+"/v1/chat/messages", "node-token", mutated)
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("relation collision status=%d", resp.StatusCode)
+	}
+	resp.Body.Close()
+	q, found, err := s.GetChatQuestion(t.Context(), q1)
+	if err != nil || !found || q.Body != "first question" || q.State != "pending" {
+		t.Fatalf("replay changed Q=%+v found=%t err=%v", q, found, err)
+	}
+	base["origin_event_id"] = key + "-new"
+	status, distinct := postChatMessage(t, h.URL, "node-token", base)
+	if status != http.StatusCreated || distinct.ID == first.ID {
+		t.Fatalf("new event status=%d row=%+v", status, distinct)
+	}
+	for _, suffix := range []string{"delivered", "failed"} {
+		resp = request(t, h.Client(), http.MethodPost, fmt.Sprintf("%s/v1/chat/messages/%d/%s", h.URL, first.ID, suffix), "node-token", nil)
+		if resp.StatusCode != http.StatusConflict {
+			t.Fatalf("desk %s status=%d", suffix, resp.StatusCode)
+		}
+		resp.Body.Close()
+	}
+	rows, err := s.ListChatMessages(t.Context(), "", true, first.ID-1, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range rows {
+		if row.ID == first.ID || row.ID == distinct.ID {
+			t.Fatalf("desk in undelivered: %+v", row)
+		}
+	}
+	answer := map[string]any{"conversation_id": store.ChatConversationID, "author": "operator", "body": "both need review", "source_channel": "web", "origin_event_id": key + "-reply", "question_ids": []string{q1, q2}}
+	status, reply := postChatMessage(t, h.URL, "node-token", answer)
+	if status != http.StatusCreated || len(reply.QuestionRelations) != 2 || reply.QuestionRelations[0].QuestionText == "" {
+		t.Fatalf("reply status=%d row=%+v", status, reply)
+	}
+	if _, err := s.MarkChatMessageDelivered(t.Context(), reply.ID); err != nil {
+		t.Fatal(err)
+	}
+	q, _, err = s.GetChatQuestion(t.Context(), q1)
+	if err != nil || q.State != "pending" {
+		t.Fatalf("delivery resolved Q=%+v err=%v", q, err)
+	}
+	_, updated := putChatQuestion(t, h.URL, "node-token", q1, "desk-lane", "edited question")
+	if updated.Body != "edited question" {
+		t.Fatalf("upsert=%+v", updated)
+	}
+	listed, err := s.ListChatMessages(t.Context(), "operator", false, reply.ID-1, 10)
+	snapshot := ""
+	if err == nil && len(listed) == 1 {
+		for _, relation := range listed[0].QuestionRelations {
+			if relation.QuestionID == q1 {
+				snapshot = relation.QuestionText
+			}
+		}
+	}
+	if err != nil || len(listed) != 1 || snapshot != "first question" {
+		t.Fatalf("snapshot rows=%+v err=%v", listed, err)
+	}
+	status, replay = postChatMessage(t, h.URL, "node-token", base)
+	if status != http.StatusOK || replay.ID != distinct.ID {
+		t.Fatalf("late replay status=%d row=%+v", status, replay)
+	}
+	q, _, err = s.GetChatQuestion(t.Context(), q1)
+	if err != nil || q.Body != "edited question" || q.State != "pending" {
+		t.Fatalf("late replay mutated Q=%+v err=%v", q, err)
+	}
+	processed := map[string]any{"conversation_id": store.ChatConversationID, "author": "desk", "body": "processed both", "source_channel": "claude_stop", "origin_event_id": key + "-processed", "processed_question_ids": []string{q1, q2}}
+	status, resolved := postChatMessage(t, h.URL, "node-token", processed)
+	if status != http.StatusCreated || resolved.RelayState != "not_sent" || len(resolved.QuestionRelations) != 2 {
+		t.Fatalf("processed status=%d row=%+v", status, resolved)
+	}
+	q, _, err = s.GetChatQuestion(t.Context(), q1)
+	if err != nil || q.State != "resolved" {
+		t.Fatalf("explicit resolution Q=%+v err=%v", q, err)
+	}
+	p := chatPool(t)
+	if _, err := p.Exec(t.Context(), `UPDATE chat_messages SET created_at=now()-interval '2 years' WHERE id=$1`, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PruneChat(t.Context(), 100); err != nil {
+		t.Fatal(err)
+	}
+	var retained int
+	if err := p.QueryRow(t.Context(), `SELECT count(*) FROM chat_messages WHERE id=$1`, first.ID).Scan(&retained); err != nil || retained != 1 {
+		t.Fatalf("desk pruned: count=%d err=%v", retained, err)
+	}
+}
+
+func TestChatPostCrossConversationAndSecretRejected(t *testing.T) {
+	s := taskTestStore(t)
+	h := taskHTTP(s)
+	defer h.Close()
+	q := chatQuestionID(t, 91)
+	p := chatPool(t)
+	if _, err := p.Exec(t.Context(), `INSERT INTO chat_questions(id,conversation_id,lane,body,state,created_at,updated_at) VALUES($1,'other-desk','other-lane','foreign','pending',now(),now())`, q); err != nil {
+		t.Fatal(err)
+	}
+	base := map[string]any{"conversation_id": store.ChatConversationID, "body": "answer", "source_channel": "web", "origin_event_id": fmt.Sprintf("cross-%d", time.Now().UnixNano()), "question_ids": []string{q}}
+	resp := request(t, h.Client(), http.MethodPost, h.URL+"/v1/chat/messages", "node-token", base)
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("cross conversation status=%d", resp.StatusCode)
+	}
+	resp.Body.Close()
+	base["question_ids"] = []string{}
+	base["body"] = "-----BEGIN PRIVATE KEY-----"
+	resp = request(t, h.Client(), http.MethodPost, h.URL+"/v1/chat/messages", "node-token", base)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("secret status=%d", resp.StatusCode)
+	}
+	var rejected map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&rejected); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if rejected["error"] != "secret_like_content" {
+		t.Fatalf("secret classification=%v", rejected)
+	}
+	base["body"] = strings.Repeat("x", store.MaxBytes+1)
+	resp = request(t, h.Client(), http.MethodPost, h.URL+"/v1/chat/messages", "node-token", base)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("oversize status=%d", resp.StatusCode)
+	}
+	resp.Body.Close()
 }
 
 func TestChatMessageFailedTransition(t *testing.T) {

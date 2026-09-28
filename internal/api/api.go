@@ -452,6 +452,7 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("GET /v1/bench/catalog", s.benchCatalogList)
 	m.HandleFunc("PUT /v1/bench/catalog", s.benchCatalogPut)
 	m.HandleFunc("PUT /v1/chat/questions/{id}", s.chatQuestionPut)
+	m.HandleFunc("GET /v1/chat/questions/{id}", s.chatQuestionGet)
 	m.HandleFunc("POST /v1/chat/questions", s.chatQuestionPost)
 	m.HandleFunc("POST /v1/chat/questions/{id}/transition", s.chatQuestionTransition)
 	m.HandleFunc("GET /v1/chat/questions", s.chatQuestionsList)
@@ -611,6 +612,9 @@ func appErr(w http.ResponseWriter, e error) {
 		return
 	case errors.Is(e, store.ErrChatQuestionConflict):
 		jsonOut(w, http.StatusConflict, map[string]string{"error": "chat_question_conflict"})
+		return
+	case errors.Is(e, store.ErrChatConversation):
+		jsonOut(w, http.StatusConflict, map[string]string{"error": "chat_conversation_conflict"})
 		return
 	case errors.Is(e, store.ErrChatMessageConflict):
 		jsonOut(w, http.StatusConflict, map[string]string{"error": "chat_message_conflict"})

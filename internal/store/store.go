@@ -788,6 +788,37 @@ func (s *Store) migrate(ctx context.Context) error {
 			}
 		}
 	}
+	var v16Applied bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_version WHERE version=16)`).Scan(&v16Applied); err != nil {
+		return err
+	}
+	if !v16Applied {
+		v16 := []string{
+			`ALTER TABLE chat_questions ADD COLUMN conversation_id TEXT NOT NULL DEFAULT 'operator-desk'`,
+			`ALTER TABLE chat_messages ADD COLUMN conversation_id TEXT NOT NULL DEFAULT 'operator-desk'`,
+			`ALTER TABLE chat_messages ADD COLUMN source_channel TEXT NOT NULL DEFAULT 'legacy'`,
+			`ALTER TABLE chat_messages ADD COLUMN origin_event_id TEXT NOT NULL DEFAULT ''`,
+			`ALTER TABLE chat_messages ADD COLUMN origin_timestamp TIMESTAMPTZ`,
+			`ALTER TABLE chat_messages ADD COLUMN semantic_hash TEXT NOT NULL DEFAULT ''`,
+			`ALTER TABLE chat_messages DROP CONSTRAINT chat_messages_relay_state_check, ADD CONSTRAINT chat_messages_relay_state_check CHECK(relay_state IN ('stored','delivered','failed','not_sent'))`,
+			`UPDATE chat_messages SET relay_state='not_sent',delivered_at=NULL WHERE author='desk'`,
+			`ALTER TABLE chat_messages ADD CONSTRAINT chat_messages_author_relay_check CHECK((author='desk' AND relay_state='not_sent' AND delivered_at IS NULL) OR (author='operator' AND relay_state<>'not_sent'))`,
+			`CREATE UNIQUE INDEX chat_messages_event_key ON chat_messages(conversation_id,source_channel,origin_event_id) WHERE origin_event_id<>''`,
+			`DROP INDEX chat_messages_undelivered`,
+			`CREATE INDEX chat_messages_undelivered ON chat_messages(id ASC) WHERE author='operator' AND relay_state='stored'`,
+			`CREATE TABLE chat_message_questions (message_id BIGINT NOT NULL REFERENCES chat_messages(id) ON DELETE CASCADE, question_id TEXT NOT NULL, relation_kind TEXT NOT NULL CHECK(relation_kind IN ('posted','reply','resolve')), question_text TEXT NOT NULL, PRIMARY KEY(message_id,question_id,relation_kind))`,
+			`CREATE INDEX chat_message_questions_question ON chat_message_questions(question_id,message_id)`,
+			// Historic relay rows identify the message and Q explicitly. Do not infer
+			// links from timestamps, body text, or lane proximity.
+			`DO $$ BEGIN IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='relay_events' AND column_name='event_id') THEN INSERT INTO chat_message_questions(message_id,question_id,relation_kind,question_text) SELECT m.id,q.id,'reply',q.body FROM relay_events e JOIN chat_messages m ON m.id=CASE WHEN e.event_id ~ '^chat-[0-9]{1,18}(-[0-9a-f]{8})?$' THEN substring(e.event_id FROM '^chat-([0-9]+)')::bigint END AND m.author='operator' JOIN chat_questions q ON q.id=e.question WHERE e.kind='lane.event' AND e.reason='operator_chat' AND e.question<>'' ON CONFLICT DO NOTHING; END IF; END $$`,
+			`INSERT INTO schema_version(version) VALUES (16)`,
+		}
+		for _, q := range v16 {
+			if _, err := tx.Exec(ctx, q); err != nil {
+				return err
+			}
+		}
+	}
 	// Lane-knownness probes for relane run once per batch item. These
 	// indexes keep each probe an index lookup instead of a full scan —
 	// the existing relay_events index on owner_lane is partial and
