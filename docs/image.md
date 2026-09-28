@@ -48,6 +48,9 @@ Optional server configuration:
 - Hub proxy: `HANDOFFKEEP_HUB_URL`, `HANDOFFKEEP_HUB_TOKEN`
 - `serve --linear-sync` (off by default): `HK_LINEAR_API_KEY`,
   `HK_LINEAR_TEAM_ID`, `HK_LINEAR_API_URL`
+- `serve --plane-sync` (off by default; `--plane-live` for real writes):
+  `HK_PLANE_API_KEY`, `HK_PLANE_API_URL`, `HK_PLANE_WORKSPACE`,
+  `HK_PLANE_PROJECT_MAP`, `HK_PLANE_DEFAULT_PROJECT`
 - Attachments / R2 (all-or-none): `HK_S3_ENDPOINT`, `HK_S3_BUCKET`,
   `HK_S3_ACCESS_KEY_ID`, `HK_S3_SECRET_ACCESS_KEY`; limits:
   `HK_ATTACH_MAX_BYTES`, `HK_ATTACH_STORAGE_CAP_BYTES`,

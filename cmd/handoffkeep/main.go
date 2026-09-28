@@ -28,6 +28,7 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/cfaccess"
 	"github.com/mgh3326/handoffkeep/internal/linear"
 	hkmcp "github.com/mgh3326/handoffkeep/internal/mcp"
+	"github.com/mgh3326/handoffkeep/internal/plane"
 	"github.com/mgh3326/handoffkeep/internal/remote"
 	"github.com/mgh3326/handoffkeep/internal/store"
 	"github.com/mgh3326/handoffkeep/internal/ui"
@@ -46,7 +47,7 @@ func main() {
 }
 func run(args []string, out, errout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: handoffkeep serve|mcp|ctx|memory|doc|attach|r2usage|tasks|decisions|linear|fleet-metrics")
+		return errors.New("usage: handoffkeep serve|mcp|ctx|memory|doc|attach|r2usage|tasks|decisions|linear|plane|fleet-metrics")
 	}
 	switch args[0] {
 	case "serve":
@@ -69,10 +70,12 @@ func run(args []string, out, errout io.Writer) error {
 		return decisionsCmd(args[1:], out)
 	case "linear":
 		return linearCmd(args[1:], out)
+	case "plane":
+		return planeCmd(args[1:], out)
 	case "fleet-metrics":
 		return fleetMetricsCmd(args[1:], out)
 	default:
-		return errors.New("usage: handoffkeep serve|mcp|ctx|memory|doc|attach|r2usage|tasks|decisions|linear|fleet-metrics")
+		return errors.New("usage: handoffkeep serve|mcp|ctx|memory|doc|attach|r2usage|tasks|decisions|linear|plane|fleet-metrics")
 	}
 }
 
@@ -122,6 +125,75 @@ func linearCmd(args []string, out io.Writer) error {
 	report.Body = ""
 	return printJSON(out, report)
 }
+
+func planeCmd(args []string, out io.Writer) error {
+	if len(args) == 0 || (args[0] != "reconcile" && args[0] != "plan") {
+		return errors.New("usage: handoffkeep plane reconcile | plane plan")
+	}
+	fs := flag.NewFlagSet("plane "+args[0], flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	hkClient := remoteClient(fs)
+	apiURL := fs.String("plane-api-url", strings.TrimSpace(os.Getenv("HK_PLANE_API_URL")), "Plane base URL (defaults to the official endpoint)")
+	workspace := fs.String("plane-workspace", strings.TrimSpace(os.Getenv("HK_PLANE_WORKSPACE")), "Plane workspace slug")
+	projectMap := fs.String("plane-project-map", strings.TrimSpace(os.Getenv("HK_PLANE_PROJECT_MAP")), "hk project to Plane project identifier map (hk=IDENT,...)")
+	defaultProject := fs.String("plane-default-project", strings.TrimSpace(os.Getenv("HK_PLANE_DEFAULT_PROJECT")), "Plane project identifier for tasks with unmapped or unset hk project")
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	if err := mustClient(hkClient); err != nil {
+		return err
+	}
+	mapping, err := plane.ParseProjectMapping(*projectMap, *defaultProject)
+	if err != nil {
+		return err
+	}
+	if args[0] == "plan" {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		raw, err := hkClient.ExportTasks(ctx, "", "", "", nil, store.ExportLimitMax)
+		if err != nil {
+			return err
+		}
+		var export store.TaskExport
+		if err := json.Unmarshal(raw, &export); err != nil {
+			return err
+		}
+		plan := plane.EvaluateMirror(export.Tasks, time.Now().UTC(), mapping, linearFreeIssueLimit)
+		return printJSON(out, plan)
+	}
+	planeClient, err := plane.NewClient(plane.Config{
+		APIURL:    *apiURL,
+		APIKey:    strings.TrimSpace(os.Getenv("HK_PLANE_API_KEY")),
+		Workspace: *workspace,
+	})
+	if err != nil {
+		return err
+	}
+	// The CLI reconcile is read-only drift inspection, always: corrections
+	// are a server-side outbox write, which the remote API does not expose.
+	reconciler := &plane.Reconciler{
+		Client:   planeClient,
+		Projects: mapping,
+		ListTasks: func(ctx context.Context) ([]store.Task, error) {
+			return listAllReconcileTasks(ctx, func(ctx context.Context, afterID int64, limit int) ([]store.Task, error) {
+				return hkClient.ListTasksPage(ctx, "", "", "", nil, afterID, limit)
+			})
+		},
+		DryRun: true,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), plane.ReconcilePassBudget)
+	defer cancel()
+	report, err := reconciler.RunOnce(ctx)
+	if err != nil {
+		return err
+	}
+	report.Body = ""
+	return printJSON(out, report)
+}
+
+// linearFreeIssueLimit is Linear's free-tier active-issue ceiling used by the
+// plane plan evaluation.
+const linearFreeIssueLimit = 250
 
 const reconcileTaskPageSize = 1000
 
@@ -1593,6 +1665,62 @@ func configureLinearWorkers(enabled bool, st *store.Store, apiURL, teamID string
 	}, nil
 }
 
+// configurePlaneWorkers builds the Plane mirror drain and daily reconciler.
+// The mirror is opt-in per serving instance via --plane-sync; writes require
+// --plane-live AND HK_PLANE_API_KEY, so a sync-enabled instance without the
+// key only ever prints planned operations. The API key is read from the
+// environment only — never a flag — and this process never logs it.
+func configurePlaneWorkers(enabled, live bool, st *store.Store, apiURL, workspace, projectMap, defaultProject string, apiKey func() string) ([]backgroundWorker, error) {
+	if !enabled {
+		return nil, nil
+	}
+	mapping, err := plane.ParseProjectMapping(projectMap, defaultProject)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(workspace) == "" {
+		return nil, errors.New("plane-sync requires HK_PLANE_WORKSPACE or --plane-workspace")
+	}
+	st.EnablePlaneSync()
+	var planeClient *plane.Client
+	key := ""
+	if apiKey != nil {
+		key = apiKey()
+	}
+	if key != "" {
+		planeClient, err = plane.NewClient(plane.Config{APIURL: apiURL, APIKey: key, Workspace: workspace})
+		if err != nil {
+			return nil, err
+		}
+	}
+	if live && planeClient == nil {
+		return nil, errors.New("plane-live requires HK_PLANE_API_KEY")
+	}
+	workers := []backgroundWorker{
+		&plane.Drain{Store: st, Client: planeClient, Projects: mapping, DryRun: !live},
+	}
+	if planeClient != nil {
+		workers = append(workers, &plane.Reconciler{
+			Client:   planeClient,
+			Projects: mapping,
+			ListTasks: func(ctx context.Context) ([]store.Task, error) {
+				return listAllReconcileTasks(ctx, func(ctx context.Context, afterID int64, limit int) ([]store.Task, error) {
+					return st.ListTasksPage(ctx, "", "", "", nil, afterID, limit)
+				})
+			},
+			LinkedIssues:  st.ListPlaneIssues,
+			EnqueueUpdate: st.EnqueuePlaneUpdate,
+			OutboxStatus:  st.GetPlaneOutboxStatus,
+			WriteDocument: func(ctx context.Context, document store.Document) (store.Document, bool, error) {
+				document.CreatedBy = "plane-reconcile"
+				return st.PutDocument(ctx, document)
+			},
+			DryRun: !live,
+		})
+	}
+	return workers, nil
+}
+
 // runServer owns the serving lifecycle. HTTP listeners stop accepting new
 // connections first, active requests receive their drain budget, background
 // workers are canceled only after that drain, and the store closes last.
@@ -1700,6 +1828,12 @@ func serve(args []string, errout io.Writer) error {
 	linearSync := fs.Bool("linear-sync", false, "enable hk-to-Linear outbox drain and reconciliation (default off)")
 	linearAPIURL := fs.String("linear-api-url", strings.TrimSpace(os.Getenv("HK_LINEAR_API_URL")), "Linear GraphQL URL")
 	linearTeamID := fs.String("linear-team-id", strings.TrimSpace(os.Getenv("HK_LINEAR_TEAM_ID")), "Linear team ID")
+	planeSync := fs.Bool("plane-sync", false, "enable hk-to-Plane mirror outbox drain and reconciliation (default off)")
+	planeLive := fs.Bool("plane-live", false, "allow live Plane writes; without it the drain prints planned operations only")
+	planeAPIURL := fs.String("plane-api-url", strings.TrimSpace(os.Getenv("HK_PLANE_API_URL")), "Plane base URL (defaults to the official endpoint)")
+	planeWorkspace := fs.String("plane-workspace", strings.TrimSpace(os.Getenv("HK_PLANE_WORKSPACE")), "Plane workspace slug")
+	planeProjectMap := fs.String("plane-project-map", strings.TrimSpace(os.Getenv("HK_PLANE_PROJECT_MAP")), "hk project to Plane project identifier map (hk=IDENT,...)")
+	planeDefaultProject := fs.String("plane-default-project", strings.TrimSpace(os.Getenv("HK_PLANE_DEFAULT_PROJECT")), "Plane project identifier for tasks with unmapped or unset hk project")
 	if e := fs.Parse(args); e != nil {
 		return e
 	}
@@ -1741,6 +1875,13 @@ func serve(args []string, errout io.Writer) error {
 	if e != nil {
 		return e
 	}
+	planeWorkers, e := configurePlaneWorkers(*planeSync, *planeLive, st, *planeAPIURL, *planeWorkspace, *planeProjectMap, *planeDefaultProject, func() string {
+		return strings.TrimSpace(os.Getenv("HK_PLANE_API_KEY"))
+	})
+	if e != nil {
+		return e
+	}
+	workers = append(workers, planeWorkers...)
 	workers = append(workers, chatRetentionWorker{store: st})
 	uiHandler, e := uiFromEnv(st)
 	if e != nil {

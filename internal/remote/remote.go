@@ -703,6 +703,12 @@ func (c Client) LinearOutboxStatus(ctx context.Context) (store.LinearOutboxStatu
 	return out, err
 }
 
+func (c Client) PlaneOutboxStatus(ctx context.Context) (store.PlaneOutboxStatus, error) {
+	var out store.PlaneOutboxStatus
+	err := c.call(ctx, "GET", "/v1/plane/status", nil, &out)
+	return out, err
+}
+
 // ResolveDecision closes an already-handled decision through the bearer API.
 func (c Client) ResolveDecision(ctx context.Context, kind string, id int64, by, answer, note string, noInject bool, noJob string) (store.RelayEvent, error) {
 	var out struct {

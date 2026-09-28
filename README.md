@@ -260,6 +260,25 @@ comment and are archived; the connector has no delete operation. Use
 `--dry-run`, the command writes the generated handoffkeep drift report. Use
 `GET /v1/linear/status` to see pending/failed outbox work and its latest error.
 
+### Optional hk → Plane mirror (pilot)
+
+`serve --plane-sync` is off by default and mirrors every task in the same
+transaction that writes it — no per-task opt-in. The projection is a closed
+allowlist (external id, state, lane, kind, priority, project, truncated
+title): notes, refs, report paths and body documents can never leave hk.
+Sensitive titles (key paths, hosts/IPs, repro vectors, credential-shaped
+material) are replaced by `hk:task/<id>` plus a neutral summary.
+
+hk `project` maps to a Plane project via `HK_PLANE_PROJECT_MAP` with
+`HK_PLANE_DEFAULT_PROJECT` as catch-all; `HK_PLANE_WORKSPACE` is required
+when sync is enabled. Live writes need `--plane-live` and `HK_PLANE_API_KEY`
+(environment only — never a flag). Without `--plane-live` the drain prints
+the exact request each op would send and marks it `dryrun`. Terminal tasks
+leave the board (`work_item_remove`); drift resolves hk-wins via the daily
+reconciler or `handoffkeep plane reconcile` (read-only). `GET
+/v1/plane/status` shows outbox counts. See `docs/plane-mirror.md` for the
+full spec and exit plan.
+
 ## Documents and search
 
 `doc get <key>` fetches a document by key; `doc get --id <n>` fetches one by

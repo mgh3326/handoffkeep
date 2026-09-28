@@ -337,6 +337,14 @@ func (s *Store) CreateDisposition(ctx context.Context, in DispositionInput) (Tas
 	if _, err = insertTaskEvent(ctx, tx, x.ID, "claimed", "needs_decision", in.CreatedBy, question, refs, now, ""); err != nil {
 		return Task{}, false, err
 	}
+	if s.PlaneSyncEnabled() {
+		// Disposition items are born in needs_decision, a Mutate:false
+		// state: the create carries no Plane state and the remote board
+		// keeps the work item in its default state until the task moves.
+		if err = enqueuePlaneTaskCreate(ctx, tx, x); err != nil {
+			return Task{}, false, err
+		}
+	}
 	return x, true, tx.Commit(ctx)
 }
 
@@ -365,7 +373,7 @@ type DispositionAnswerInput struct {
 
 // answerDispositionTx returns (task, skipReason, error). A non-empty skip
 // reason means nothing was written for this item.
-func answerDispositionTx(ctx context.Context, tx pgx.Tx, in DispositionAnswerInput, useRecommended bool) (Task, string, error) {
+func (s *Store) answerDispositionTx(ctx context.Context, tx pgx.Tx, in DispositionAnswerInput, useRecommended bool) (Task, string, error) {
 	var x Task
 	if err := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, in.ID), &x); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -410,6 +418,11 @@ func answerDispositionTx(ctx context.Context, tx pgx.Tx, in DispositionAnswerInp
 	if _, err = insertTaskEvent(ctx, tx, in.ID, "needs_decision", "claimed", "operator:"+in.OperatorEmail, note, x.Refs, now, dispositionNoJobReason); err != nil {
 		return Task{}, "", err
 	}
+	if s.PlaneSyncEnabled() {
+		if err = enqueuePlaneTaskUpdate(ctx, tx, x); err != nil {
+			return Task{}, "", err
+		}
+	}
 	return x, "", nil
 }
 
@@ -431,7 +444,7 @@ func (s *Store) AnswerDisposition(ctx context.Context, in DispositionAnswerInput
 		return Task{}, err
 	}
 	defer tx.Rollback(ctx)
-	x, skip, err := answerDispositionTx(ctx, tx, in, false)
+	x, skip, err := s.answerDispositionTx(ctx, tx, in, false)
 	if err != nil {
 		return Task{}, err
 	}
@@ -487,7 +500,7 @@ func (s *Store) AnswerDispositionBatch(ctx context.Context, refs []DispositionRe
 			}
 			return nil, nil, err
 		}
-		x, skip, err := answerDispositionTx(ctx, tx, DispositionAnswerInput{ID: ref.ID, Gen: ref.Gen, OperatorEmail: email, EventID: eventIDForLane(lane), BatchID: batchID}, true)
+		x, skip, err := s.answerDispositionTx(ctx, tx, DispositionAnswerInput{ID: ref.ID, Gen: ref.Gen, OperatorEmail: email, EventID: eventIDForLane(lane), BatchID: batchID}, true)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -555,6 +568,11 @@ func (s *Store) ApplyDisposition(ctx context.Context, id int64, by, note string)
 	}
 	if err = scanTask(tx.QueryRow(ctx, `UPDATE tasks SET state=$2,updated_at=$3 WHERE id=$1 RETURNING `+taskColumns, id, from, now), &x); err != nil {
 		return Task{}, err
+	}
+	if s.PlaneSyncEnabled() {
+		if err = enqueuePlaneTaskUpdate(ctx, tx, x); err != nil {
+			return Task{}, err
+		}
 	}
 	return x, tx.Commit(ctx)
 }

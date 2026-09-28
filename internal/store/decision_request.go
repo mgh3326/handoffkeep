@@ -449,6 +449,11 @@ func (s *Store) RecordDecisionRequest(ctx context.Context, taskID int64, by stri
 				return DecisionRequestResult{}, err
 			}
 		}
+		if s.PlaneSyncEnabled() {
+			if err = enqueuePlaneTaskUpdate(ctx, tx, x); err != nil {
+				return DecisionRequestResult{}, err
+			}
+		}
 	} else if err = insertDecisionEvent(ctx, tx, taskID, x.State, by, note, x.Refs, now); err != nil {
 		return DecisionRequestResult{}, err
 	}
