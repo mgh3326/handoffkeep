@@ -361,6 +361,7 @@ type RelayEvent struct {
 type Store struct {
 	pool       *pgxpool.Pool
 	linearSync atomic.Bool
+	planeSync  atomic.Bool
 }
 
 // Refs stores repeatable named references. Its decoder accepts legacy scalar
@@ -783,6 +784,29 @@ func (s *Store) migrate(ctx context.Context) error {
 			`INSERT INTO schema_version(version) VALUES (15)`,
 		}
 		for _, q := range v15 {
+			if _, err := tx.Exec(ctx, q); err != nil {
+				return err
+			}
+		}
+	}
+	var v16Applied bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_version WHERE version=16)`).Scan(&v16Applied); err != nil {
+		return err
+	}
+	if !v16Applied {
+		// Version 16 (#764) adds the Plane mirror outbox. It mirrors
+		// linear_outbox with one deliberate difference: 'dryrun' is a
+		// terminal state, because the pilot's default mode prints planned
+		// writes without sending them and those rows must drain rather than
+		// retry. plane_issues carries project_id so a later project remap is
+		// detectable drift instead of an invisible move.
+		v16 := []string{
+			`CREATE TABLE IF NOT EXISTS plane_issues (task_id BIGINT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE, work_item_id TEXT NOT NULL, external_id TEXT NOT NULL DEFAULT '', project_id TEXT NOT NULL DEFAULT '', created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL)`,
+			`CREATE TABLE IF NOT EXISTS plane_outbox (id BIGSERIAL PRIMARY KEY, task_id BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE, seq INTEGER NOT NULL, op TEXT NOT NULL CHECK(op IN ('work_item_create','work_item_update','work_item_remove')), payload JSONB NOT NULL, state TEXT NOT NULL CHECK(state IN ('pending','sent','failed','skipped','dryrun')) DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at TIMESTAMPTZ NOT NULL, last_error TEXT NOT NULL DEFAULT '', remote_id TEXT NOT NULL DEFAULT '', created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL, UNIQUE(task_id,seq))`,
+			`CREATE INDEX IF NOT EXISTS plane_outbox_pending ON plane_outbox(next_attempt_at,task_id,seq) WHERE state='pending'`,
+			`INSERT INTO schema_version(version) VALUES (16)`,
+		}
+		for _, q := range v16 {
 			if _, err := tx.Exec(ctx, q); err != nil {
 				return err
 			}
@@ -1546,6 +1570,11 @@ func (s *Store) CreateTask(ctx context.Context, x Task) (Task, error) {
 			return x, err
 		}
 	}
+	if s.PlaneSyncEnabled() {
+		if err = enqueuePlaneTaskCreate(ctx, tx, x); err != nil {
+			return x, err
+		}
+	}
 	return x, tx.Commit(ctx)
 }
 
@@ -1625,6 +1654,11 @@ func (s *Store) claimTaskTx(ctx context.Context, tx pgx.Tx, id int64, by, jobID,
 	}
 	if s.LinearSyncEnabled() && x.Refs.Linear != nil && x.Refs.Linear.Sync {
 		if err := enqueueLinearTaskTransition(ctx, tx, x, ""); err != nil {
+			return Task{}, err
+		}
+	}
+	if s.PlaneSyncEnabled() {
+		if err := enqueuePlaneTaskUpdate(ctx, tx, x); err != nil {
 			return Task{}, err
 		}
 	}
@@ -1821,6 +1855,11 @@ func (s *Store) TransitionTask(ctx context.Context, id int64, to, by, note strin
 			return Task{}, err
 		}
 	}
+	if s.PlaneSyncEnabled() {
+		if err = enqueuePlaneTaskUpdate(ctx, tx, x); err != nil {
+			return Task{}, err
+		}
+	}
 	return x, tx.Commit(ctx)
 }
 
@@ -1894,6 +1933,11 @@ func (s *Store) RelaneTask(ctx context.Context, id int64, to, by, note string, a
 	if _, err = tx.Exec(ctx, `INSERT INTO task_events(task_id,"from","to","by",note,refs,at,kind) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,'relane')`, id, from, to, by, note, string(encoded), x.UpdatedAt); err != nil {
 		return Task{}, false, err
 	}
+	if s.PlaneSyncEnabled() {
+		if err := enqueuePlaneFieldUpdate(ctx, tx, x); err != nil {
+			return Task{}, false, err
+		}
+	}
 	return x, true, tx.Commit(ctx)
 }
 
@@ -1945,6 +1989,11 @@ func (s *Store) SetTaskProject(ctx context.Context, id int64, project, by, note 
 	}
 	if _, err = tx.Exec(ctx, `INSERT INTO task_events(task_id,"from","to","by",note,refs,at,kind) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,'project')`, id, from, project, by, note, string(encoded), x.UpdatedAt); err != nil {
 		return Task{}, false, err
+	}
+	if s.PlaneSyncEnabled() {
+		if err := enqueuePlaneFieldUpdate(ctx, tx, x); err != nil {
+			return Task{}, false, err
+		}
 	}
 	return x, true, tx.Commit(ctx)
 }
