@@ -428,6 +428,45 @@ func TestPlaneMoveCreateFailureConverges(t *testing.T) {
 	}
 }
 
+// TestPlaneMoveDroppedCreateResponseAdoptsOnRetry is the lost-response
+// variant of a project move: the stale item is deleted, the replacement
+// create lands remotely but its response is dropped. The retry must find
+// that item by marker and adopt it — a second create is a BLOCKER-class
+// duplicate.
+func TestPlaneMoveDroppedCreateResponseAdoptsOnRetry(t *testing.T) {
+	st, scopedURL := isolatedPlaneStore(t)
+	st.EnablePlaneSync()
+	fake := newFakePlane(t)
+	fake.failures["issue_create"] = []string{"drop"}
+	task := createPlaneTask(t, st)
+	linkPlaneIssue(t, scopedURL, task.ID, "wi-old", "proj-hk")
+	fake.seed(Issue{
+		ID:              "wi-old",
+		Name:            "Mirror connector contract",
+		DescriptionHTML: "<p>Reference: " + store.PlaneExternalID(task.ID) + "</p>",
+		State:           "st-backlog",
+		Project:         "proj-hk",
+	})
+	stop := startTestDrain(t, &Drain{Store: st, Client: fake.client(t), Projects: testMapping()}, 5*time.Millisecond)
+	waitOutbox(t, st, task.ID, func(rows []store.PlaneOutbox) bool {
+		// "skipped" is the converged outcome: the retry adopts the landed
+		// item by marker, finds every projected field already correct, and
+		// patches nothing.
+		return len(rows) == 1 && (rows[0].State == "sent" || rows[0].State == "skipped")
+	})
+	stop()
+	if fake.issueCount() != 1 {
+		t.Fatalf("dropped create must adopt on retry, not stack: items=%d", fake.issueCount())
+	}
+	if fake.count("issue_create") != 1 {
+		t.Fatalf("create calls=%d want 1 — retry must adopt the dropped item", fake.count("issue_create"))
+	}
+	link, found, err := st.GetPlaneIssue(t.Context(), task.ID)
+	if err != nil || !found || link.ProjectID != "proj-exp" || link.WorkItemID == "wi-old" {
+		t.Fatalf("link after dropped-create retry=%+v found=%t err=%v", link, found, err)
+	}
+}
+
 // TestPlaneMarkerDoesNotAdoptDigitPrefixItem proves the adoption scan cannot
 // confuse hk:task/<N> with a remote item carrying hk:task/<N><digit> — the
 // substring collision CodeRabbit flagged. The foreign item must be left

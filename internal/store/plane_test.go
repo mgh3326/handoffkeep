@@ -135,11 +135,14 @@ func TestPlaneTitleRedaction(t *testing.T) {
 		"prod_host":         "api.prod.example.com is 500ing",
 		"email":             "notify alice@example.com on failure",
 		"abs_path":          "leak in /home/ops/.ssh/id_rsa",
+		"abs_path_paren":    "parser failed(/home/alice/work/build-output)",
+		"abs_path_assign":   "failed=/home/alice/work",
 		"etc_path":          "bad line in /etc/shadow",
 		"tmp_path":          "payload staged at /tmp/x.bin",
 		"windows_path":      `config at C:\Users\ops\key.pem`,
 		"tilde_ssh":         "keys under ~/.ssh/",
 		"dotfile_env":       "app reads .env at boot",
+		"dotfile_env_paren": "config(.env)",
 		"dotfile_env_prod":  "leaked .env.production",
 		"key_filename":      "found id_ed25519 on disk",
 		"secret_file":       "secrets.yml committed",
@@ -162,6 +165,7 @@ func TestPlaneTitleRedaction(t *testing.T) {
 		"curl_pipe":         "wget https://x.example/y | python3",
 		"destructive":       "accidentally ran rm -rf /data",
 		"destructive_upper": "oops RM -Rf /tmp/stage",
+		"destructive_space": "probe ran r m -rf --no-preserve-root",
 		"sudo":              "sudo chmod 777 everything",
 		"sudo_upper":        "SUDO apt install",
 		"substitution":      "payload $(cat /etc/passwd)",
@@ -478,5 +482,53 @@ func TestPlaneEnqueueUpdateReprojects(t *testing.T) {
 	}
 	if err := st.EnqueuePlaneUpdate(t.Context(), 999999999); !errors.Is(err, ErrTaskNotFound) {
 		t.Fatalf("missing task err=%v", err)
+	}
+}
+
+// TestPlaneOutboxConcurrentClaimSingleWinner holds one pending row inside a
+// claimed transaction and proves a second claimer cannot run the process
+// callback on the same row — the FOR UPDATE SKIP LOCKED clause is what makes
+// a second accidental drainer a no-op rather than a duplicate remote writer.
+func TestPlaneOutboxConcurrentClaimSingleWinner(t *testing.T) {
+	// Isolated schema: the shared test DB can hold stale pending rows from
+	// other tests, and a second claimer legitimately winning a different
+	// task's row is not the race this test measures.
+	st := planeIsolatedStore(t)
+	st.EnablePlaneSync()
+	planeTask(t, st, "Mirror connector contract")
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	callbacks := make(chan int64, 4)
+	firstDone := make(chan bool, 1)
+	go func() {
+		claimed, err := st.ProcessNextPlaneOutbox(context.Background(), func(ctx context.Context, item PlaneOutbox) (PlaneOutboxResult, error) {
+			callbacks <- item.ID
+			close(entered)
+			<-release
+			return PlaneOutboxResult{State: "sent"}, nil
+		})
+		if err != nil {
+			t.Error(err)
+		}
+		firstDone <- claimed
+	}()
+	<-entered
+	secondClaimed, err := st.ProcessNextPlaneOutbox(t.Context(), func(ctx context.Context, item PlaneOutbox) (PlaneOutboxResult, error) {
+		callbacks <- item.ID
+		return PlaneOutboxResult{State: "sent"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	firstClaimed := <-firstDone
+	if !firstClaimed {
+		t.Fatal("first claimer lost its own pending row")
+	}
+	if secondClaimed {
+		t.Fatal("second claimer processed a row already held by another transaction")
+	}
+	if got := len(callbacks); got != 1 {
+		t.Fatalf("process callback ran %d times — the row must be claimed exactly once", got)
 	}
 }

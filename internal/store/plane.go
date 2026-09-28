@@ -103,11 +103,14 @@ var planeSensitiveTitlePatterns = []*regexp.Regexp{
 	regexp.MustCompile(`\b(?:[a-zA-Z0-9-]+\.)+(?:prod|staging|internal|corp|lan|local)\.`),
 	regexp.MustCompile(`\b[a-zA-Z0-9._-]+@(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}\b`),
 	// Absolute or sensitive-rooted filesystem paths and key material files.
-	regexp.MustCompile(`(?:^|[\s"'])/(?:home|Users|root|etc|var|usr|opt|srv|tmp|private|mnt|data|Volumes|boot|proc)/\S*`),
+	// The boundary before / or a leading dot is any non-word, non-slash char
+	// (parens, =, :, quotes, brackets) so path(/home/x) and x=/home/x and
+	// config(.env) cannot slip through while repo-relative a/b/c stays out.
+	regexp.MustCompile(`(?:^|[^A-Za-z0-9/])/(?:home|Users|root|etc|var|usr|opt|srv|tmp|private|mnt|data|Volumes|boot|proc)/\S*`),
 	regexp.MustCompile(`\b[A-Za-z]:\\(?:Users|Windows|ProgramData|Program Files)\b`),
 	regexp.MustCompile(`~/(?:\.ssh|\.aws|\.gnupg|\.kube|\.docker|\.config|\.env)\S*`),
 	regexp.MustCompile(`(?i)\b(?:id_rsa|id_dsa|id_ecdsa|id_ed25519|secrets?\.(?:ya?ml|json)|credentials|known_hosts|authorized_keys)\b`),
-	regexp.MustCompile(`(?i)(?:^|[\s"'])\.(?:env|env\.\w+|ssh|aws|gnupg|kube|docker|netrc|pgpass|npmrc|pypirc|htpasswd|pem|key)\b`),
+	regexp.MustCompile(`(?i)(?:^|[^A-Za-z0-9/])\.(?:env|env\.\w+|ssh|aws|gnupg|kube|docker|netrc|pgpass|npmrc|pypirc|htpasswd|pem|key)\b`),
 	regexp.MustCompile(`(?i)\b\S+\.(?:pem|key|p12|pfx|jks|keystore|kubeconfig|asc|ppk)\b`),
 	// Secret-shaped material: KEY=VALUE assignments with credential names,
 	// provider token prefixes, PEM/JWT bodies, and SSH public keys.
@@ -121,7 +124,7 @@ var planeSensitiveTitlePatterns = []*regexp.Regexp{
 	// injection-shaped fragments embedded in a title.
 	regexp.MustCompile(`\|\s*(?:sudo\s+)?(?:[bdckzf]?a?sh|python\d?|perl|ruby|node)\b`),
 	regexp.MustCompile(`(?i)\b(?:curl|wget)\b[^\n|;]*\|`),
-	regexp.MustCompile(`(?i)\brm\s+-[a-z]*[rf][a-z]*\b`),
+	regexp.MustCompile(`(?i)\br\s?m\s+-[a-z]*[rf][a-z]*\b`),
 	regexp.MustCompile(`(?i)\bsudo\s+\S`),
 	regexp.MustCompile(`\$\(`),
 	regexp.MustCompile("`"),

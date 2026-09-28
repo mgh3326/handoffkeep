@@ -19,6 +19,9 @@ import (
 )
 
 const (
+	// DefaultAPIURL is the official Plane cloud endpoint for operators to
+	// configure explicitly — NewClient refuses an empty URL so a missing
+	// config can never silently target a real service.
 	DefaultAPIURL = "https://api.plane.so"
 	HTTPTimeout   = 10 * time.Second
 )
@@ -67,7 +70,7 @@ type Client struct {
 
 func NewClient(config Config) (*Client, error) {
 	if strings.TrimSpace(config.APIURL) == "" {
-		config.APIURL = DefaultAPIURL
+		return nil, errors.New("Plane API URL is required when sync is enabled (set HK_PLANE_API_URL, e.g. " + DefaultAPIURL + ")")
 	}
 	if strings.TrimSpace(config.APIKey) == "" {
 		return nil, errors.New("Plane API key is required when sync is enabled")
@@ -210,7 +213,9 @@ func (client *Client) do(ctx context.Context, operation Operation, method, rawUR
 	case response.StatusCode == http.StatusTooManyRequests || response.StatusCode >= 500:
 		return &APIError{Operation: operation, Message: fmt.Sprintf("HTTP %d", response.StatusCode), Ambiguous: operationMayWrite(operation)}
 	case response.StatusCode < 200 || response.StatusCode >= 300:
-		return &APIError{Operation: operation, Message: fmt.Sprintf("HTTP %d: %s", response.StatusCode, truncate(raw, 300)), Permanent: true}
+		// The response body is remote-controlled text and can echo back
+		// request content — it never reaches logs or outbox.last_error.
+		return &APIError{Operation: operation, Message: fmt.Sprintf("HTTP %d", response.StatusCode), Permanent: true}
 	}
 	if output == nil {
 		return nil
@@ -222,13 +227,6 @@ func (client *Client) do(ctx context.Context, operation Operation, method, rawUR
 		return &APIError{Operation: operation, Message: "invalid JSON response: " + err.Error(), Ambiguous: operationMayWrite(operation)}
 	}
 	return nil
-}
-
-func truncate(raw []byte, n int) string {
-	if len(raw) <= n {
-		return string(raw)
-	}
-	return string(raw[:n]) + "..."
 }
 
 func (client *Client) listAll(ctx context.Context, operation Operation, base string, each func(json.RawMessage) error) error {

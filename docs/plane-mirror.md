@@ -103,7 +103,7 @@ flag, never a file, never logged. Configuration:
 | Variable / flag | Purpose |
 | --- | --- |
 | `HK_PLANE_API_KEY` | workspace API key; required for any remote access |
-| `HK_PLANE_API_URL` | base URL (defaults to `https://api.plane.so`) |
+| `HK_PLANE_API_URL` | base URL — required when a client is needed; set `https://api.plane.so` for the official cloud |
 | `HK_PLANE_WORKSPACE` | workspace slug; required when sync is enabled |
 | `HK_PLANE_PROJECT_MAP` | `hkProject=IDENT,...` |
 | `HK_PLANE_DEFAULT_PROJECT` | identifier for unmapped/unset hk projects |

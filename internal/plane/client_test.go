@@ -49,7 +49,7 @@ func TestNewClientSchemePolicy(t *testing.T) {
 		{"loopback name ok", "http://localhost:9999", false},
 		{"loopback ipv6 ok", "http://[::1]:9999", false},
 		{"non-loopback ip refused", "http://10.0.0.5", true},
-		{"default url", "", false},
+		{"empty url refused", "", true},
 	}
 	for _, tc := range cases {
 		_, err := NewClient(Config{APIURL: tc.apiURL, APIKey: "k", Workspace: "w"})
