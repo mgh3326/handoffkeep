@@ -365,10 +365,9 @@ func (drain *Drain) processMirror(ctx context.Context, item store.PlaneOutbox) s
 	}
 	if remote.Project != "" && remote.Project != projectID {
 		// The task moved hk projects. Plane cannot re-parent a work item
-		// through the public API, so hk wins by replacement: create the
-		// item under the mapped project, then delete the stale one. The
-		// create happens first so a failure mid-move loses the stale copy,
-		// never the canonical one.
+		// through the public API, so hk wins by replacement: delete the
+		// stale item, then recreate under the mapped project — retries of
+		// a half-done move cannot accumulate duplicates.
 		return drain.moveRemote(ctx, item, remote, projectID)
 	}
 	return drain.updateRemote(ctx, item, remote, projectID)
@@ -422,20 +421,17 @@ func (drain *Drain) createRemote(ctx context.Context, item store.PlaneOutbox, pr
 }
 
 // moveRemote replaces a work item that lives in the wrong Plane project.
-// Order matters: the replacement is created under the mapped project before
-// the stale item is deleted, so an interruption leaves a visible duplicate —
-// reconcilable drift — rather than a silently vanished mirror.
+// Order matters: the stale item is deleted before the replacement is
+// created so a retried move never stacks duplicates. If the create fails
+// after the delete landed, the next pass sees the linked id as missing and
+// converges through the marker scan into a fresh create — a temporary gap
+// in the mirror self-heals, while a stray duplicate in the old project
+// would drift forever.
 func (drain *Drain) moveRemote(ctx context.Context, item store.PlaneOutbox, remote Issue, projectID string) store.PlaneOutboxResult {
-	created := drain.createRemote(ctx, item, projectID)
-	if created.State != "sent" && created.State != "skipped" {
-		return created
-	}
 	if err := drain.Client.DeleteIssue(ctx, remote.Project, remote.ID); err != nil {
-		result := drain.failed(item, err)
-		result.LastError = "replacement created as " + created.RemoteID + "; stale item " + remote.ID + " delete failed: " + result.LastError
-		return result
+		return drain.failed(item, err)
 	}
-	return created
+	return drain.createRemote(ctx, item, projectID)
 }
 
 // updateRemote writes the hk snapshot over the remote work item — hk wins on

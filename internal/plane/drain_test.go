@@ -361,6 +361,106 @@ func TestPlaneProjectMoveReplacesItem(t *testing.T) {
 	}
 }
 
+// TestPlaneMoveDeleteFailureLeavesNoDuplicate proves a move that fails on
+// the stale-item delete does not stack a duplicate on every retry: the
+// delete happens before the replacement create, so a delete failure changes
+// nothing remotely and the retry converges to exactly one item.
+func TestPlaneMoveDeleteFailureLeavesNoDuplicate(t *testing.T) {
+	st, scopedURL := isolatedPlaneStore(t)
+	st.EnablePlaneSync()
+	fake := newFakePlane(t)
+	fake.failures["issue_delete"] = []string{"500"}
+	task := createPlaneTask(t, st)
+	linkPlaneIssue(t, scopedURL, task.ID, "wi-old", "proj-hk")
+	fake.seed(Issue{
+		ID:              "wi-old",
+		Name:            "Mirror connector contract",
+		DescriptionHTML: "<p>Reference: " + store.PlaneExternalID(task.ID) + "</p>",
+		State:           "st-backlog",
+		Project:         "proj-hk",
+	})
+	stop := startTestDrain(t, &Drain{Store: st, Client: fake.client(t), Projects: testMapping()}, 5*time.Millisecond)
+	waitOutbox(t, st, task.ID, func(rows []store.PlaneOutbox) bool {
+		return len(rows) == 1 && rows[0].State == "sent"
+	})
+	stop()
+	if fake.issueCount() != 1 {
+		t.Fatalf("issue count after move retry=%d want 1", fake.issueCount())
+	}
+	link, found, err := st.GetPlaneIssue(t.Context(), task.ID)
+	if err != nil || !found || link.ProjectID != "proj-exp" || link.WorkItemID == "wi-old" {
+		t.Fatalf("link after move retry=%+v found=%t err=%v", link, found, err)
+	}
+	if fake.count("issue_create") != 1 {
+		t.Fatalf("create calls=%d — a retried move must not stack duplicates", fake.count("issue_create"))
+	}
+}
+
+// TestPlaneMoveCreateFailureConverges covers the other half-move: the stale
+// item is deleted but the replacement create fails. The retry must heal
+// through the missing-remote path (marker scan, then create) into exactly
+// one item in the mapped project.
+func TestPlaneMoveCreateFailureConverges(t *testing.T) {
+	st, scopedURL := isolatedPlaneStore(t)
+	st.EnablePlaneSync()
+	fake := newFakePlane(t)
+	fake.failures["issue_create"] = []string{"500"}
+	task := createPlaneTask(t, st)
+	linkPlaneIssue(t, scopedURL, task.ID, "wi-old", "proj-hk")
+	fake.seed(Issue{
+		ID:              "wi-old",
+		Name:            "Mirror connector contract",
+		DescriptionHTML: "<p>Reference: " + store.PlaneExternalID(task.ID) + "</p>",
+		State:           "st-backlog",
+		Project:         "proj-hk",
+	})
+	stop := startTestDrain(t, &Drain{Store: st, Client: fake.client(t), Projects: testMapping()}, 5*time.Millisecond)
+	waitOutbox(t, st, task.ID, func(rows []store.PlaneOutbox) bool {
+		return len(rows) == 1 && rows[0].State == "sent"
+	})
+	stop()
+	if fake.issueCount() != 1 || fake.get("wi-old") != nil {
+		t.Fatalf("after half-move retry: items=%d stale_present=%t", fake.issueCount(), fake.get("wi-old") != nil)
+	}
+	link, found, err := st.GetPlaneIssue(t.Context(), task.ID)
+	if err != nil || !found || link.ProjectID != "proj-exp" || link.WorkItemID == "wi-old" {
+		t.Fatalf("link after half-move=%+v found=%t err=%v", link, found, err)
+	}
+}
+
+// TestPlaneMarkerDoesNotAdoptDigitPrefixItem proves the adoption scan cannot
+// confuse hk:task/<N> with a remote item carrying hk:task/<N><digit> — the
+// substring collision CodeRabbit flagged. The foreign item must be left
+// alone and a fresh item must be created for the task.
+func TestPlaneMarkerDoesNotAdoptDigitPrefixItem(t *testing.T) {
+	st, _ := isolatedPlaneStore(t)
+	st.EnablePlaneSync()
+	fake := newFakePlane(t)
+	task := createPlaneTask(t, st)
+	foreign := fake.seed(Issue{
+		ID:              "wi-foreign",
+		Name:            "some other task's mirror",
+		DescriptionHTML: "<p>Reference: " + store.PlaneExternalID(task.ID) + "9</p>",
+		State:           "st-done",
+		Project:         "proj-exp",
+	})
+	stop := startTestDrain(t, &Drain{Store: st, Client: fake.client(t), Projects: testMapping()}, 5*time.Millisecond)
+	waitOutbox(t, st, task.ID, func(rows []store.PlaneOutbox) bool {
+		return len(rows) == 1 && rows[0].State == "sent"
+	})
+	stop()
+	if fake.issueCount() != 2 {
+		t.Fatalf("issue count=%d want 2 (foreign kept + own item)", fake.issueCount())
+	}
+	if current := fake.get(foreign.ID); current == nil || current.Name != "some other task's mirror" {
+		t.Fatalf("foreign item was adopted/rewritten: %+v", current)
+	}
+	link, found, err := st.GetPlaneIssue(t.Context(), task.ID)
+	if err != nil || !found || link.WorkItemID == foreign.ID {
+		t.Fatalf("link adopted foreign item: link=%+v found=%t err=%v", link, found, err)
+	}
+}
+
 func TestPlaneFailureClassification(t *testing.T) {
 	t.Run("permanent", func(t *testing.T) {
 		st, _ := isolatedPlaneStore(t)

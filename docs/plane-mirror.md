@@ -46,9 +46,10 @@ substitution, injection fragments), key paths (`/home/...`, `~/.ssh`,
 `.env`, `*.pem`, Windows user dirs), host or network identifiers (IPs,
 internal/prod-qualified hostnames, emails), or credential-shaped material
 (token assignments, provider key prefixes, PEM/JWT/SSH bodies) is replaced
-with `hk:task/<id> <kind> task (title withheld)`. The check is fail-closed:
-an unrecognized but odd title is withheld rather than shipped. Tests cover
-the classes and common bypass shapes in `internal/store/plane_test.go`.
+with `hk:task/<id> <kind> task (title withheld)`. The check is a pattern
+denylist: a title that matches no pattern is trimmed and truncated normally,
+not withheld. New sensitive shapes need a new pattern. Tests cover the
+classes and common bypass shapes in `internal/store/plane_test.go`.
 
 ### Project mapping
 

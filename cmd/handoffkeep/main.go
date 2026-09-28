@@ -158,6 +158,9 @@ func planeCmd(args []string, out io.Writer) error {
 		if err := json.Unmarshal(raw, &export); err != nil {
 			return err
 		}
+		if export.Truncated || !export.Complete {
+			return fmt.Errorf("plane plan: task export incomplete (%d of %d tasks returned); comparison counts would be wrong", export.RowsReturned, export.Counts.Total)
+		}
 		plan := plane.EvaluateMirror(export.Tasks, time.Now().UTC(), mapping, linearFreeIssueLimit)
 		return printJSON(out, plan)
 	}

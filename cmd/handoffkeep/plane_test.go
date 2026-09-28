@@ -80,6 +80,9 @@ func TestPlanePlanCLIReadsExportSnapshot(t *testing.T) {
 			{ID: 3, State: "merged", Title: "done", Project: &project, UpdatedAt: recent},
 			{ID: 4, State: "dropped", Title: "old", Project: &project, UpdatedAt: old},
 		},
+		RowsReturned: 4,
+		Counts:       store.TaskExportCounts{Total: 4},
+		Complete:     true,
 	}
 	exportCalls := 0
 	hkServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -119,6 +122,35 @@ func TestPlanePlanCLIReadsExportSnapshot(t *testing.T) {
 	}
 	if err := planeCmd([]string{"bogus"}, &output); err == nil {
 		t.Fatal("plane bogus should fail")
+	}
+}
+
+// TestPlanePlanRejectsTruncatedExport proves the comparison numbers are
+// never computed on a partial queue snapshot — a truncated or incomplete
+// export is a hard error, not a quietly smaller denominator.
+func TestPlanePlanRejectsTruncatedExport(t *testing.T) {
+	export := store.TaskExport{
+		Tasks:        []store.Task{{ID: 1, State: "backlog", Title: "open"}},
+		RowsReturned: 1,
+		Counts:       store.TaskExportCounts{Total: 500},
+		Truncated:    true,
+	}
+	hkServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet && r.URL.Path == "/v1/tasks/export" {
+			_ = json.NewEncoder(w).Encode(export)
+			return
+		}
+		http.Error(w, "unexpected", http.StatusNotFound)
+	}))
+	defer hkServer.Close()
+	t.Setenv("HANDOFFKEEP_URL", hkServer.URL)
+	t.Setenv("HANDOFFKEEP_TOKEN", "fixture-token")
+
+	var output bytes.Buffer
+	err := planeCmd([]string{"plan"}, &output)
+	if err == nil || !strings.Contains(err.Error(), "incomplete") {
+		t.Fatalf("truncated export err=%v", err)
 	}
 }
 

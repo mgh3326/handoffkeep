@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -74,22 +75,45 @@ func NewClient(config Config) (*Client, error) {
 	if strings.TrimSpace(config.Workspace) == "" {
 		return nil, errors.New("Plane workspace slug is required when sync is enabled")
 	}
+	apiURL := strings.TrimRight(strings.TrimSpace(config.APIURL), "/")
+	parsed, err := url.Parse(apiURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid Plane API URL %q: %w", config.APIURL, err)
+	}
+	// The client sends X-API-Key on every request, so plaintext http is
+	// refused except for loopback endpoints (tests, local dev servers).
+	if parsed.Scheme != "https" && !isLoopbackHost(parsed.Hostname()) {
+		return nil, fmt.Errorf("Plane API URL %q must use https; http is allowed only for loopback hosts", config.APIURL)
+	}
 	httpClient := config.HTTP
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: HTTPTimeout}
-	} else if httpClient.Timeout == 0 {
+	} else {
 		clone := *httpClient
-		clone.Timeout = HTTPTimeout
+		if clone.Timeout == 0 {
+			clone.Timeout = HTTPTimeout
+		}
 		httpClient = &clone
 	}
+	// Redirects are refused outright so do can never forward the API key to
+	// a foreign host.
+	httpClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	return &Client{
-		apiURL:      strings.TrimRight(strings.TrimSpace(config.APIURL), "/"),
+		apiURL:      apiURL,
 		apiKey:      strings.TrimSpace(config.APIKey),
 		workspace:   strings.TrimSpace(config.Workspace),
 		http:        httpClient,
 		projectIDs:  map[string]string{},
 		projectByID: map[string]string{},
 	}, nil
+}
+
+func isLoopbackHost(host string) bool {
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 type APIError struct {
@@ -391,6 +415,25 @@ func (client *Client) ListIssues(ctx context.Context, projectID string) ([]Issue
 	return issues, err
 }
 
+// hasMarker reports whether html embeds marker bounded by a non-digit or
+// the end of the string. hk:task/1 must not match inside the description of
+// hk:task/10, so a bare substring search is not enough — the digit suffix
+// of a longer id is the only collision shape, because task ids are decimal.
+func hasMarker(html, marker string) bool {
+	for offset := 0; offset+len(marker) <= len(html); {
+		idx := strings.Index(html[offset:], marker)
+		if idx < 0 {
+			return false
+		}
+		end := offset + idx + len(marker)
+		if end == len(html) || html[end] < '0' || html[end] > '9' {
+			return true
+		}
+		offset += idx + 1
+	}
+	return false
+}
+
 // FindIssueByMarker scans one project's work items for the hk:task/<id>
 // marker embedded in the mirrored description. It is the adoption path that
 // makes a retried create idempotent after an ambiguous response loss.
@@ -405,7 +448,7 @@ func (client *Client) FindIssueByMarker(ctx context.Context, projectID, marker s
 			return err
 		}
 		for _, issue := range page {
-			if strings.Contains(issue.DescriptionHTML, marker) {
+			if hasMarker(issue.DescriptionHTML, marker) {
 				found = append(found, issue)
 			}
 		}
