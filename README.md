@@ -35,8 +35,9 @@ toolchain version.
 `rev=unknown` means the
 binary carries no VCS stamp — it was built with `-buildvcs=false`, without
 a `.git` directory, or via `go install module@ref` (where `module` shows
-the pseudo-version instead). The command reads no environment, config, or
-server. The server reports the same stamp at `/healthz`.
+the requested version, a tag or a pseudo-version). The command reads no
+environment, config, or server. The server reports the same stamp at
+`/healthz`.
 
 ## Tasks
 
