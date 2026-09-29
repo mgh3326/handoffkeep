@@ -2,6 +2,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -11,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"reflect"
 	"regexp"
 	"runtime/debug"
 	"strconv"
@@ -1406,12 +1408,22 @@ func (s Server) benchCatalogPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer r.Body.Close()
-	var input benchCatalogInput
-	if err := decode(r, &input, benchRequestMaxBytes); err != nil || !benchBatchValid(len(input.Catalog)) {
-		if err == nil {
-			err = errors.New("invalid bench catalog")
-		}
+	// The body is buffered so a decode failure can be re-walked to name the
+	// field that failed (benchCatalogDecodeDetail); the limit matches decode().
+	body, err := io.ReadAll(io.LimitReader(r.Body, int64(benchRequestMaxBytes+4096)))
+	if err != nil {
 		appErr(w, err)
+		return
+	}
+	var input benchCatalogInput
+	de := json.NewDecoder(bytes.NewReader(body))
+	de.DisallowUnknownFields()
+	if err := de.Decode(&input); err != nil {
+		jsonOut(w, http.StatusBadRequest, map[string]string{"error": "invalid_bench_catalog_json", "detail": benchCatalogDecodeDetail(body, err)})
+		return
+	}
+	if !benchBatchValid(len(input.Catalog)) {
+		appErr(w, errors.New("invalid bench catalog"))
 		return
 	}
 	n, err := s.Service.UpsertBenchCatalog(r.Context(), input.Catalog)
@@ -1420,6 +1432,85 @@ func (s Server) benchCatalogPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOut(w, http.StatusOK, map[string]int{"upserted": n})
+}
+
+// benchCatalogEntryFieldTypes maps each catalog row's JSON field name to its
+// Go type so a decode failure can be re-walked field by field.
+var benchCatalogEntryFieldTypes = func() map[string]reflect.Type {
+	t := reflect.TypeOf(store.BenchCatalogEntry{})
+	m := make(map[string]reflect.Type, t.NumField())
+	for i := 0; i < t.NumField(); i++ {
+		if name, _, _ := strings.Cut(t.Field(i).Tag.Get("json"), ","); name != "" && name != "-" {
+			m[name] = t.Field(i).Type
+		}
+	}
+	return m
+}()
+
+// benchCatalogDecodeDetail renders a catalog PUT decode failure for the
+// operator. When the decoder's own message already names the field (unknown
+// fields, type mismatches) it is returned as-is; when it does not — for
+// example a time.ParseError from a non-RFC3339 decided_at — the buffered
+// body is re-walked to find the first field that fails. Only the field name
+// and the decoder's message are reported, never row contents.
+func benchCatalogDecodeDetail(body []byte, cause error) string {
+	var typeErr *json.UnmarshalTypeError
+	if errors.As(cause, &typeErr) || strings.HasPrefix(cause.Error(), "json: unknown field") {
+		return cause.Error()
+	}
+	var raw struct {
+		Catalog []json.RawMessage `json:"catalog"`
+	}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return cause.Error()
+	}
+	for i, row := range raw.Catalog {
+		var entry store.BenchCatalogEntry
+		de := json.NewDecoder(bytes.NewReader(row))
+		de.DisallowUnknownFields()
+		if err := de.Decode(&entry); err != nil {
+			if field := benchCatalogRowErrorField(row); field != "" {
+				return fmt.Sprintf("catalog[%d] field %s", i, field)
+			}
+			return fmt.Sprintf("catalog[%d]: %v", i, err)
+		}
+	}
+	return cause.Error()
+}
+
+// benchCatalogRowErrorField re-decodes one catalog row field by field, in
+// document order, and returns `"name": <decoder message>` for the first
+// field that fails against its BenchCatalogEntry type. It returns "" when no
+// single field explains the failure — unknown fields and type errors are
+// already named by the decoder's own message.
+func benchCatalogRowErrorField(row []byte) string {
+	de := json.NewDecoder(bytes.NewReader(row))
+	tok, err := de.Token()
+	if err != nil {
+		return ""
+	}
+	if d, ok := tok.(json.Delim); !ok || d != '{' {
+		return ""
+	}
+	for de.More() {
+		key, err := de.Token()
+		if err != nil {
+			return ""
+		}
+		var value json.RawMessage
+		if err := de.Decode(&value); err != nil {
+			return ""
+		}
+		name, _ := key.(string)
+		fieldType, ok := benchCatalogEntryFieldTypes[name]
+		if !ok {
+			continue
+		}
+		if err := json.Unmarshal(value, reflect.New(fieldType).Interface()); err != nil {
+			return fmt.Sprintf("%q: %v", name, err)
+		}
+	}
+	return ""
 }
 
 func decode(r *http.Request, v any, max int) error {
