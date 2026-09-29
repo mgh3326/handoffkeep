@@ -55,7 +55,10 @@ var (
 	// degrade to a worse grade).
 	ErrBenchCatalogMonotonicity = errors.New("bench_catalog_not_monotonic")
 	// ErrBenchCatalogSolGrade enforces the scopefuel _SOL_PROFILES rule on the
-	// server: Sol profiles may only ever be graded S+.
+	// server: Sol profiles may only ever be graded S+. The catalog write path
+	// alone admits one placeholder shape that makes no grade claim — grade C
+	// with score null — for scopefuel #594's E6 measurement rungs; any real
+	// claim below S+ (a scored C, or an unscored A/B/S) still fails here.
 	ErrBenchCatalogSolGrade = errors.New("bench_catalog_sol_grade")
 	// ErrQueueEmpty is deliberately distinct from a missing task.  It lets
 	// queue consumers treat an empty lane as an expected terminal condition.
@@ -929,8 +932,20 @@ var benchGateValues = map[string]bool{"default": true, "escalation": true, "cons
 // sort after the known rungs.
 var benchEffortRanks = map[string]int{"low": 0, "medium": 1, "high": 2, "xhigh": 3, "max": 4}
 
-// benchSolProfiles mirrors scopefuel's _SOL_PROFILES: Sol profiles are S+ only.
+// benchSolProfiles mirrors scopefuel's _SOL_PROFILES: Sol profiles are S+
+// only. The catalog write path alone admits one placeholder shape that makes
+// no grade claim — grade C with score null — because scopefuel #594 emits the
+// E6 measurement rungs that way on purpose: never recommended, marker-gated,
+// and carrying no measurement. The legacy grades path stays strict.
 var benchSolProfiles = map[string]bool{"codex-sol": true, "kiro-sol": true}
+
+// benchSolPlaceholder reports whether a Sol row makes no grade claim: grade
+// C with score null is exactly the shape scopefuel uses for a measurement
+// rung that does not assert a grade. A scored C, or any unscored grade that
+// is not C, is a claim and stays subject to the S+ rule.
+func benchSolPlaceholder(x BenchCatalogEntry) bool {
+	return x.Grade == "C" && x.Score == nil
+}
 
 func benchGradeRank(grade string) int {
 	switch grade {
@@ -1209,7 +1224,7 @@ func (s *Store) UpsertBenchCatalog(ctx context.Context, xs []BenchCatalogEntry) 
 		if !validBenchCatalogEntry(x) {
 			return 0, errors.New("invalid bench catalog entry")
 		}
-		if benchSolProfiles[x.Profile] && x.Grade != "S+" {
+		if benchSolProfiles[x.Profile] && x.Grade != "S+" && !benchSolPlaceholder(x) {
 			return 0, ErrBenchCatalogSolGrade
 		}
 		for _, value := range []*string{x.GateReason, x.BenchmarkSource, x.BenchmarkAnnotation} {

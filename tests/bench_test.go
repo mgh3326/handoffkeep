@@ -2,6 +2,7 @@ package tests
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -862,5 +863,144 @@ func TestBenchCatalogAPI(t *testing.T) {
 		if g["profile"] == "bench-cat-apex" {
 			t.Fatalf("retired profile still in grades projection")
 		}
+	}
+}
+
+// benchSeedGolden loads the golden copy of the scopefuel catalog seed,
+// stripping the // header comment the file carries (JSON has no comment
+// syntax, so the rev and provenance note live in comment lines).
+func benchSeedGolden(t *testing.T) []byte {
+	t.Helper()
+	raw, err := os.ReadFile("testdata/bench_catalog_seed_scopefuel_3759199.jsonc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(string(raw), "\n")
+	for len(lines) > 0 && strings.HasPrefix(strings.TrimSpace(lines[0]), "//") {
+		lines = lines[1:]
+	}
+	return []byte(strings.Join(lines, "\n"))
+}
+
+// TestBenchCatalogScopefuelSeed replays the operator-approved scopefuel
+// catalog seed (rev 3759199, the handoffkeep #955 step-2 activation body)
+// through the real PUT handler. Its two codex-sol E6 measurement rungs ride
+// the placeholder exception — grade C with score null makes no grade claim —
+// while every Sol row that does claim a grade below S+ still fails, and a
+// date-only decided_at fails decode with the named catalog error rather than
+// invalid_context.
+func TestBenchCatalogScopefuelSeed(t *testing.T) {
+	s := benchStore(t)
+	p := benchPool(t)
+	benchClean(t, p)
+	h := benchServer(s)
+	defer h.Close()
+
+	golden := benchSeedGolden(t)
+	var seed struct {
+		Catalog []map[string]any `json:"catalog"`
+	}
+	if err := json.Unmarshal(golden, &seed); err != nil {
+		t.Fatalf("golden seed does not parse: %v", err)
+	}
+	if len(seed.Catalog) != 59 {
+		t.Fatalf("golden seed rows=%d want=59", len(seed.Catalog))
+	}
+	// The seed carries real profile names; clean them before and after so the
+	// shared test database sees no leftovers whichever way the test ends.
+	// context.Background because t.Context() is already canceled by the time
+	// Cleanup functions run.
+	profiles := make([]string, 0, len(seed.Catalog))
+	for _, row := range seed.Catalog {
+		profiles = append(profiles, row["profile"].(string))
+	}
+	cleanSeed := func() {
+		for _, query := range []string{
+			`DELETE FROM bench_catalog WHERE profile = ANY($1)`,
+			`DELETE FROM bench_grades WHERE profile = ANY($1)`,
+		} {
+			if _, err := p.Exec(context.Background(), query, profiles); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	cleanSeed()
+	t.Cleanup(cleanSeed)
+
+	put := func(body []byte) *http.Response {
+		return benchRequest(t, h.Client(), http.MethodPut, h.URL+"/v1/bench/catalog", "operator-token", body)
+	}
+
+	// The whole seed is accepted as one batch.
+	resp := put(golden)
+	if resp.StatusCode != http.StatusOK || benchJSON(t, resp)["upserted"] != float64(len(seed.Catalog)) {
+		t.Fatalf("scopefuel seed put status=%d", resp.StatusCode)
+	}
+	// A read-back lists the two codex-sol placeholder rungs unchanged: grade C
+	// with score null at the medium and high efforts, alongside the scored S+
+	// rungs the seed also carries.
+	solRows := map[string]map[string]any{}
+	for _, x := range benchCatalogGet(t, h, "") {
+		if x["profile"] == "codex-sol" {
+			solRows[x["effort"].(string)] = x
+		}
+	}
+	for _, effort := range []string{"medium", "high"} {
+		row := solRows[effort]
+		if row == nil || row["grade"] != "C" || row["score"] != nil {
+			t.Fatalf("codex-sol %s placeholder changed on write: %v", effort, row)
+		}
+	}
+	for _, effort := range []string{"xhigh", "max"} {
+		if row := solRows[effort]; row == nil || row["grade"] != "S+" {
+			t.Fatalf("codex-sol %s rung changed on write: %v", effort, row)
+		}
+	}
+
+	// The exception covers only rows that make no grade claim. A scored C, an
+	// unscored A, and — on the second Sol profile — a scored S each claim a
+	// grade below S+ and must still fail.
+	for _, row := range []map[string]any{
+		benchCatalogRow("codex-sol", "low", "codex", "C", map[string]any{"score": 10.0}),
+		benchCatalogRow("codex-sol", "low", "codex", "A", nil),
+		benchCatalogRow("kiro-sol", "low", "kiro", "S", map[string]any{"score": 60.0}),
+	} {
+		resp = put(benchCatalogBody(t, row))
+		if resp.StatusCode != http.StatusBadRequest || benchJSON(t, resp)["error"] != "bench_catalog_sol_grade" {
+			t.Fatalf("sol grade claim %s/%s status=%d", row["profile"], row["grade"], resp.StatusCode)
+		}
+	}
+	// The placeholder itself round-trips: an unscored C on the other Sol
+	// profile is accepted the same way the seed rows are.
+	resp = put(benchCatalogBody(t, benchCatalogRow("kiro-sol", "low", "kiro", "C", nil)))
+	if resp.StatusCode != http.StatusOK || benchJSON(t, resp)["upserted"] != float64(1) {
+		t.Fatalf("kiro-sol placeholder status=%d", resp.StatusCode)
+	}
+
+	// The raw emit's date-only decided_at fails decode with the named error,
+	// and the detail names the field — never a bare invalid_context.
+	raw := bytes.Replace(golden, []byte(`"decided_at": "2026-09-27T00:00:00Z"`), []byte(`"decided_at": "2026-09-27"`), 1)
+	if !bytes.Contains(raw, []byte(`"decided_at": "2026-09-27"`)) {
+		t.Fatal("raw seed variant construction failed")
+	}
+	resp = put(raw)
+	body := benchJSON(t, resp)
+	if resp.StatusCode != http.StatusBadRequest || body["error"] != "invalid_bench_catalog_json" {
+		t.Fatalf("date-only decided_at status=%d body=%v", resp.StatusCode, body)
+	}
+	if detail, _ := body["detail"].(string); !strings.Contains(detail, "decided_at") {
+		t.Fatalf("date-only decided_at detail=%q does not name the field", detail)
+	}
+	// An unknown field fails the same named way, with the field named.
+	unknown := benchCatalogRow("bench-cat-unknown", "", "codex", "A", map[string]any{"surprise": 1})
+	resp = put(benchCatalogBody(t, unknown))
+	body = benchJSON(t, resp)
+	if resp.StatusCode != http.StatusBadRequest || body["error"] != "invalid_bench_catalog_json" || !strings.Contains(fmt.Sprint(body["detail"]), "surprise") {
+		t.Fatalf("unknown field status=%d body=%v", resp.StatusCode, body)
+	}
+	// The batch-size failure keeps its own name.
+	resp = put([]byte(`{"catalog":[]}`))
+	if resp.StatusCode != http.StatusBadRequest || benchJSON(t, resp)["error"] != "invalid_context" {
+		t.Fatalf("empty batch status=%d", resp.StatusCode)
 	}
 }
