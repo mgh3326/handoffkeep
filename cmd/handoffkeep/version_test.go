@@ -141,19 +141,62 @@ func TestVersionWithoutVCSStamp(t *testing.T) {
 	}
 }
 
+// TestVersionEmptyVCSValues pins that a vcs.* setting present in the
+// build stamp with an empty Value still reports the literal "unknown" —
+// a field is never printed empty — in both formats.
+func TestVersionEmptyVCSValues(t *testing.T) {
+	stubBuildInfo(t, &debug.BuildInfo{
+		GoVersion: testGoVersion,
+		Main:      debug.Module{Path: "github.com/mgh3326/handoffkeep", Version: "(devel)"},
+		Settings: []debug.BuildSetting{
+			{Key: "vcs.revision", Value: ""},
+			{Key: "vcs.time", Value: ""},
+			{Key: "vcs.modified", Value: ""},
+		},
+	}, true)
+	var out bytes.Buffer
+	if err := run([]string{"version"}, &out, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	want := "handoffkeep rev=unknown time=unknown modified=unknown module=(devel) go=" + testGoVersion + "\n"
+	if out.String() != want {
+		t.Fatalf("got %q want %q", out.String(), want)
+	}
+	out.Reset()
+	if err := run([]string{"version", "--json"}, &out, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]string
+	if err := json.Unmarshal(out.Bytes(), &fields); err != nil {
+		t.Fatal(err)
+	}
+	wantFields := map[string]string{
+		"rev":      "unknown",
+		"time":     "unknown",
+		"modified": "unknown",
+		"module":   "(devel)",
+		"go":       testGoVersion,
+	}
+	if !reflect.DeepEqual(fields, wantFields) {
+		t.Fatalf("got %v want %v", fields, wantFields)
+	}
+}
+
 // TestVersionFlagAlias proves handoffkeep --version is byte-for-byte the
-// same output as handoffkeep version.
+// same output as handoffkeep version, arguments included.
 func TestVersionFlagAlias(t *testing.T) {
 	stubBuildInfo(t, stampedBuildInfo(), true)
-	var sub, flagOut bytes.Buffer
-	if err := run([]string{"version"}, &sub, &bytes.Buffer{}); err != nil {
-		t.Fatal(err)
-	}
-	if err := run([]string{"--version"}, &flagOut, &bytes.Buffer{}); err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(sub.Bytes(), flagOut.Bytes()) {
-		t.Fatalf("--version %q differs from version %q", flagOut.String(), sub.String())
+	for _, args := range [][]string{{}, {"--json"}} {
+		var sub, flagOut bytes.Buffer
+		if err := run(append([]string{"version"}, args...), &sub, &bytes.Buffer{}); err != nil {
+			t.Fatal(err)
+		}
+		if err := run(append([]string{"--version"}, args...), &flagOut, &bytes.Buffer{}); err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(sub.Bytes(), flagOut.Bytes()) {
+			t.Fatalf("args=%v: --version %q differs from version %q", args, flagOut.String(), sub.String())
+		}
 	}
 }
 

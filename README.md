@@ -27,8 +27,10 @@ See [docs/fleet-metrics.md](docs/fleet-metrics.md).
 one line, or as one JSON object with the same fields: `rev` is the
 `vcs.revision` commit, `time` the `vcs.time` commit timestamp, `modified`
 the `vcs.modified` dirty-tree flag, `module` the Go module version
-(`(devel)` for a local build, a pseudo-version for `go install
-module@ref`), and `go` the toolchain version. `rev=unknown` means the
+(a pseudo-version for a `go build` inside a git checkout — `+dirty` when
+the tree is dirty — or for `go install module@ref`; `(devel)` appears
+only when the build has no VCS stamp), and `go` the toolchain version.
+`rev=unknown` means the
 binary carries no VCS stamp — it was built with `-buildvcs=false`, without
 a `.git` directory, or via `go install module@ref` (where `module` shows
 the pseudo-version instead). The command reads no environment, config, or
