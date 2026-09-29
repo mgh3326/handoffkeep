@@ -21,6 +21,19 @@ it needs; a missing identifier lowers coverage and is never counted as 0. It
 only reads (hk GETs, local job directories, `scopefuel reps list`, `gh api`).
 See [docs/fleet-metrics.md](docs/fleet-metrics.md).
 
+## Version
+
+`handoffkeep version [--json]` prints the binary's embedded build stamp on
+one line, or as one JSON object with the same fields: `rev` is the
+`vcs.revision` commit, `time` the `vcs.time` commit timestamp, `modified`
+the `vcs.modified` dirty-tree flag, `module` the Go module version
+(`(devel)` for a local build, a pseudo-version for `go install
+module@ref`), and `go` the toolchain version. `rev=unknown` means the
+binary carries no VCS stamp — it was built with `-buildvcs=false`, without
+a `.git` directory, or via `go install module@ref` (where `module` shows
+the pseudo-version instead). The command reads no environment, config, or
+server. The server reports the same stamp at `/healthz`.
+
 ## Tasks
 
 `tasks` is the durable, Postgres-backed work queue for captains. A task belongs
