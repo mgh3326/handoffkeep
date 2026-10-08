@@ -21,6 +21,25 @@ For persistent local settings use mode 0600
 `HANDOFFKEEP_TOKEN=`. `memory push`, `memory pull`, and `doc import` dry-run
 unless `--apply` is supplied.
 
+When `HANDOFFKEEP_URL` sits behind Cloudflare Access, a service token lets the
+CLI through without a browser login: set `HANDOFFKEEP_CF_ACCESS_CLIENT_ID` and
+`HANDOFFKEEP_CF_ACCESS_CLIENT_SECRET` together (env or config.env, same
+precedence as the URL/token; whitespace-only values count as unset, and
+setting only one is a config error). Every hk request then carries
+`CF-Access-Client-Id`/`CF-Access-Client-Secret` plus an explicit
+`User-Agent`; a redirect to the Access login fails with
+`cf_access_login_redirect` instead of being followed, and the pair is never
+sent to a different host or under a different scheme — a redirect that
+switches `http`/`https` on the same host is refused as
+`redirect_scheme_downgrade`/`redirect_scheme_change`. Redirect Locations that
+cannot be parsed surface as `redirect_location_invalid`, never with the
+Location text. With the pair configured, an attachment download that answers
+a `text/html` page without an attachment disposition is
+`unexpected_html_response` rather than saved bytes. A `text/html` body on a
+JSON API call is rejected the same way with or without the keys, and a
+`tasks add` rejected with `invalid_context` reports the server's own error
+text instead of the retired `create_project_rejected` message.
+
 ## MCP registration
 
 Local stdio delegates to the configured HTTP service:

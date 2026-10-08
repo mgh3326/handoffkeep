@@ -150,38 +150,72 @@ func listAllReconcileTasks(ctx context.Context, fetch func(context.Context, int6
 	}
 }
 
-func config() (string, string) {
-	u, t := os.Getenv("HANDOFFKEEP_URL"), os.Getenv("HANDOFFKEEP_TOKEN")
-	if u != "" && t != "" {
-		return u, t
+// clientKeys are the env/config.env credentials every hk client is built
+// from. Environment values win per key; config.env only fills keys the
+// environment left unset.
+type clientKeys struct {
+	url, token                 string
+	cfAccessID, cfAccessSecret string
+}
+
+func config() clientKeys {
+	k := clientKeys{
+		url:            os.Getenv("HANDOFFKEEP_URL"),
+		token:          os.Getenv("HANDOFFKEEP_TOKEN"),
+		cfAccessID:     os.Getenv("HANDOFFKEEP_CF_ACCESS_CLIENT_ID"),
+		cfAccessSecret: os.Getenv("HANDOFFKEEP_CF_ACCESS_CLIENT_SECRET"),
+	}
+	if k.url != "" && k.token != "" && k.cfAccessID != "" && k.cfAccessSecret != "" {
+		return k
 	}
 	home, _ := os.UserHomeDir()
 	b, _ := os.ReadFile(filepath.Join(home, ".config/handoffkeep/config.env"))
 	for _, l := range strings.Split(string(b), "\n") {
-		k, v, ok := strings.Cut(strings.TrimSpace(l), "=")
-		if ok {
-			if k == "HANDOFFKEEP_URL" && u == "" {
-				u = v
+		key, v, ok := strings.Cut(strings.TrimSpace(l), "=")
+		if !ok {
+			continue
+		}
+		switch key {
+		case "HANDOFFKEEP_URL":
+			if k.url == "" {
+				k.url = v
 			}
-			if k == "HANDOFFKEEP_TOKEN" && t == "" {
-				t = v
+		case "HANDOFFKEEP_TOKEN":
+			if k.token == "" {
+				k.token = v
+			}
+		case "HANDOFFKEEP_CF_ACCESS_CLIENT_ID":
+			if k.cfAccessID == "" {
+				k.cfAccessID = v
+			}
+		case "HANDOFFKEEP_CF_ACCESS_CLIENT_SECRET":
+			if k.cfAccessSecret == "" {
+				k.cfAccessSecret = v
 			}
 		}
 	}
-	return u, t
+	return k
 }
 func remoteClient(fs *flag.FlagSet) *remote.Client {
-	u, t := config()
-	c := &remote.Client{}
-	fs.StringVar(&c.URL, "url", u, "handoffkeep HTTP URL")
-	fs.StringVar(&c.Token, "token", t, "handoffkeep bearer token")
+	k := config()
+	c := &remote.Client{CFAccessClientID: k.cfAccessID, CFAccessClientSecret: k.cfAccessSecret}
+	fs.StringVar(&c.URL, "url", k.url, "handoffkeep HTTP URL")
+	fs.StringVar(&c.Token, "token", k.token, "handoffkeep bearer token")
 	return c
+}
+
+// configuredClient builds the client for the paths that take no --url/--token
+// flags — the mcp stdio server and the r2usage local comparison — so the
+// optional CF Access service-token pair reaches those requests too.
+func configuredClient() remote.Client {
+	k := config()
+	return remote.Client{URL: k.url, Token: k.token, CFAccessClientID: k.cfAccessID, CFAccessClientSecret: k.cfAccessSecret}
 }
 func mustClient(c *remote.Client) error {
 	if c.URL == "" || c.Token == "" {
 		return errors.New("HANDOFFKEEP_URL and HANDOFFKEEP_TOKEN are required (or ~/.config/handoffkeep/config.env)")
 	}
-	return nil
+	return remote.CFAccessPairError(c.CFAccessClientID, c.CFAccessClientSecret)
 }
 func printJSON(w io.Writer, v any) error { return json.NewEncoder(w).Encode(v) }
 
@@ -226,6 +260,13 @@ func normalizeTaskArgs(args []string) ([]string, error) {
 		}
 	}
 	return append(flags, positional...), nil
+}
+
+// taskCreateRequirements is the hint tasks add appends to a server-side
+// invalid_context rejection. The kind set comes from the server's own
+// vocabulary in internal/store so the hint cannot drift from it.
+func taskCreateRequirements() string {
+	return "tasks add requires --lane <name> and --title <text>, and --kind must be one of " + strings.Join(store.TaskKinds(), ", ")
 }
 
 func tasksCmd(args []string, out io.Writer) error {
@@ -374,6 +415,12 @@ func tasksCmd(args []string, out io.Writer) error {
 		refs.OriginPR, refs.OriginTask = *originPR, *originTask
 		x, err := c.CreateTask(ctx, store.Task{Lane: *lane, ParentLane: *parentLane, Title: *title, Kind: *kind, Priority: *priority, Refs: *refs, BodyDoc: *bodyDoc, Project: project})
 		if err != nil {
+			// invalid_context on create is a validation failure; append the
+			// add requirements rather than leave a bare code to diagnose.
+			var he *remote.HTTPError
+			if errors.As(err, &he) && he.Code == "invalid_context" {
+				return fmt.Errorf("%w — %s", err, taskCreateRequirements())
+			}
 			return err
 		}
 		return printJSON(out, x)
@@ -1430,8 +1477,11 @@ func r2UsageCmd(args []string, out io.Writer) error {
 	output := map[string]any{"storage_bytes": bytesTotal, "object_count": objects, "class_a_month": classA, "class_b_month": classB, "storage_ratio": float64(bytesTotal) / float64(10<<30), "alert": alertReason != "", "alert_reason": alertReason}
 	// Compare the independent Cloudflare total with the local immutable-object
 	// ledger when this CLI has normal handoffkeep HTTP credentials configured.
-	if localURL, localToken := config(); localURL != "" && localToken != "" {
-		if local, err := (remote.Client{URL: localURL, Token: localToken}).AttachmentUsage(context.Background()); err == nil {
+	if local := configuredClient(); local.URL != "" && local.Token != "" {
+		if err := remote.CFAccessPairError(local.CFAccessClientID, local.CFAccessClientSecret); err != nil {
+			return err
+		}
+		if local, err := local.AttachmentUsage(context.Background()); err == nil {
 			output["local_bytes_total"] = local.TotalBytes
 			base := bytesTotal
 			if base == 0 {
@@ -1799,9 +1849,12 @@ func uiFromEnv(st *store.Store) (http.Handler, error) {
 	})
 }
 func runMCP() error {
-	u, t := config()
-	if u == "" || t == "" {
+	c := configuredClient()
+	if c.URL == "" || c.Token == "" {
 		return errors.New("mcp requires HANDOFFKEEP_URL and HANDOFFKEEP_TOKEN")
 	}
-	return hkmcp.NewStdio(remote.Client{URL: u, Token: t}, "stdio").Run(context.Background(), &mcp.StdioTransport{})
+	if err := remote.CFAccessPairError(c.CFAccessClientID, c.CFAccessClientSecret); err != nil {
+		return err
+	}
+	return hkmcp.NewStdio(c, "stdio").Run(context.Background(), &mcp.StdioTransport{})
 }

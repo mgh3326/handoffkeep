@@ -8,6 +8,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
 // projectServer records requests and answers with a canned body per route
@@ -206,8 +208,9 @@ func TestTasksProjectOldServerRefusal(t *testing.T) {
 }
 
 // A pre-project server answers create with invalid_context for the unknown
-// "project" field; the CLI must say the server is too old rather than
-// echoing the generic code.
+// "project" field. That code is a validation rejection, so the CLI surfaces
+// the server's code with the add requirements — never a version-skew verdict
+// it cannot prove (#1276).
 func TestTasksAddOldServerCompatError(t *testing.T) {
 	old := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -217,7 +220,64 @@ func TestTasksAddOldServerCompatError(t *testing.T) {
 	t.Cleanup(old.Close)
 	var out bytes.Buffer
 	err := run([]string{"tasks", "add", "--lane", "d", "--title", "x", "--project", "experiment", "--url", old.URL, "--token", "tok"}, &out, io.Discard)
-	if err == nil || !strings.Contains(err.Error(), "create_project_rejected") {
-		t.Fatalf("old-server add err=%v, want create_project_rejected", err)
+	if err == nil || !strings.Contains(err.Error(), "invalid_context") {
+		t.Fatalf("old-server add err=%v, want invalid_context surfaced", err)
+	}
+	for _, banned := range []string{"create_project_rejected", "predates", "project field"} {
+		if strings.Contains(err.Error(), banned) {
+			t.Fatalf("old-server add err contains %q: %v", banned, err)
+		}
+	}
+}
+
+// A server 400 invalid_context reaches the operator unchanged — code and
+// reason — with the add requirements attached: --lane is required and --kind
+// is one of the server's own vocabulary. No project-field or predates
+// wording may appear (#1276 AC10).
+func TestTasksAddInvalidContextNamesRequirements(t *testing.T) {
+	hint := taskCreateRequirements()
+	// The hint's kind list is the server's vocabulary verbatim — pinned so a
+	// store-side change lands here, never drifts silently.
+	if !strings.HasSuffix(hint, strings.Join(store.TaskKinds(), ", ")) {
+		t.Fatalf("hint %q does not render store.TaskKinds()", hint)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"invalid_context","reason":"field validation failed"}`))
+	}))
+	t.Cleanup(server.Close)
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"missing lane", []string{"tasks", "add", "--title", "x", "--project", "experiment"}},
+		{"kind decision", []string{"tasks", "add", "--lane", "d", "--title", "x", "--project", "experiment", "--kind", "decision"}},
+		{"valid add with project", []string{"tasks", "add", "--lane", "d", "--title", "x", "--project", "experiment"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out bytes.Buffer
+			err := run(append(tc.args, "--url", server.URL, "--token", "tok"), &out, io.Discard)
+			if err == nil {
+				t.Fatal("want failure")
+			}
+			combined := err.Error() + out.String()
+			if !strings.Contains(combined, "invalid_context") || !strings.Contains(combined, "field validation failed") {
+				t.Fatalf("server code/text not surfaced: %q", combined)
+			}
+			if !strings.Contains(combined, "--lane") || !strings.Contains(combined, "--kind") {
+				t.Fatalf("hint missing lane/kind requirement: %q", combined)
+			}
+			for _, k := range store.TaskKinds() {
+				if !strings.Contains(combined, k) {
+					t.Fatalf("hint missing kind %q: %q", k, combined)
+				}
+			}
+			for _, banned := range []string{"create_project_rejected", "predates", "project field"} {
+				if strings.Contains(combined, banned) {
+					t.Fatalf("output contains %q: %q", banned, combined)
+				}
+			}
+		})
 	}
 }

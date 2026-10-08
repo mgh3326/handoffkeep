@@ -57,4 +57,7 @@ Optional server configuration:
   `HK_ALERT_DISCORD_WEBHOOK`
 
 Client subcommands (`mcp`, `ctx`, `doc`, `tasks`, …) use `HANDOFFKEEP_URL` and
-`HANDOFFKEEP_TOKEN`.
+`HANDOFFKEEP_TOKEN`. A Cloudflare Access service token for an hk URL behind
+Access is configured with `HANDOFFKEEP_CF_ACCESS_CLIENT_ID` and
+`HANDOFFKEEP_CF_ACCESS_CLIENT_SECRET` (env or config.env; both required
+together).
