@@ -3,9 +3,12 @@ package remote
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -337,15 +340,71 @@ type recordTransport struct {
 }
 
 type recordedRequest struct {
-	scheme string
-	hdr    capturedHeaders
+	scheme, host string
+	hdr          capturedHeaders
 }
 
 func (t *recordTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	t.mu.Lock()
-	t.seen = append(t.seen, recordedRequest{scheme: r.URL.Scheme, hdr: capture(r)})
+	t.seen = append(t.seen, recordedRequest{scheme: r.URL.Scheme, host: r.URL.Host, hdr: capture(r)})
 	t.mu.Unlock()
 	return t.next.RoundTrip(r)
+}
+
+// routeTransport maps logical scheme://host origins onto isolated httptest
+// servers without DNS, so a redirect can land on a real TLS listener under a
+// fake name. Every attempted send is recorded with its headers; unrouted
+// origins fail instead of dialing.
+type routeTransport struct {
+	mu     sync.Mutex
+	routes map[string]*httptest.Server
+	sends  []recordedRequest
+}
+
+func (t *routeTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	t.mu.Lock()
+	t.sends = append(t.sends, recordedRequest{scheme: r.URL.Scheme, host: r.URL.Host, hdr: capture(r)})
+	dest := t.routes[strings.ToLower(r.URL.Scheme+"://"+r.URL.Host)]
+	t.mu.Unlock()
+	if dest == nil {
+		return nil, errors.New("blocked_nonfixture_dial")
+	}
+	c := r.Clone(r.Context())
+	u, _ := url.Parse(dest.URL)
+	u.Path, u.RawPath, u.RawQuery = r.URL.Path, r.URL.RawPath, r.URL.RawQuery
+	c.URL, c.Host = u, u.Host
+	return dest.Client().Transport.RoundTrip(c)
+}
+
+func (t *routeTransport) snapshot() []recordedRequest {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return append([]recordedRequest(nil), t.sends...)
+}
+
+// allRequestForms returns one closure per request kind the client can send:
+// call() GET, call() POST, attachment PUT, presign, download, and export.
+func allRequestForms(c Client) map[string]func(context.Context) error {
+	return map[string]func(context.Context) error{
+		"call-get": func(ctx context.Context) error { _, e := c.ListTaskProjects(ctx); return e },
+		"call-post": func(ctx context.Context) error {
+			_, e := c.Checkpoint(ctx, "", store.Checkpoint{Session: "s"})
+			return e
+		},
+		"put": func(ctx context.Context) error {
+			_, _, e := c.PutAttachment(ctx, "", "n.bin", "application/octet-stream", "", nil)
+			return e
+		},
+		"presign": func(ctx context.Context) error { _, e := c.AttachmentURL(ctx, "ab"); return e },
+		"get": func(ctx context.Context) error {
+			_, body, e := c.GetAttachment(ctx, "ab")
+			if body != nil {
+				_ = body.Close()
+			}
+			return e
+		},
+		"export": func(ctx context.Context) error { _, e := c.ExportTasks(ctx, "", "", "", nil, 0); return e },
+	}
 }
 
 // An https hk answering a same-host redirect to a plaintext Location must be
@@ -440,4 +499,233 @@ func TestHTML200IsErrorOnJSONCalls(t *testing.T) {
 	check("PutAttachment", e)
 	_, e = c.ExportTasks(ctx, "", "", "", nil, 0)
 	check("ExportTasks", e)
+}
+
+// An Access login host is DNS-case-insensitive: an uppercase Location host is
+// the same named failure on every request form, and AttachmentURL never
+// returns the login URL as a usable presign.
+func TestUppercaseAccessLoginHostFailsLoud(t *testing.T) {
+	for _, host := range []string{"CLOUDFLAREACCESS.COM", "TEAM.CloudflareAccess.COM"} {
+		for _, status := range []int{302, 303, 307, 308} {
+			t.Run(fmt.Sprintf("%s/%d", host, status), func(t *testing.T) {
+				hk := newRequestRecorder(t, func(w http.ResponseWriter, r *http.Request) {
+					w.Header().Set("Location", "https://"+host+"/login?opaque=fixture")
+					w.WriteHeader(status)
+				})
+				c := Client{URL: hk.URL, Token: "fixture-token", CFAccessClientID: cfFixtureID, CFAccessClientSecret: cfFixtureSecret}
+				for name, f := range allRequestForms(c) {
+					e := f(context.Background())
+					if e == nil || !strings.Contains(e.Error(), "cf_access_login_redirect") {
+						t.Fatalf("%s: err=%v want cf_access_login_redirect", name, e)
+					}
+					for _, leak := range []string{cfFixtureID, cfFixtureSecret, "fixture-token", host, "opaque=fixture"} {
+						if strings.Contains(e.Error(), leak) {
+							t.Fatalf("%s: error leaks %q: %v", name, leak, e)
+						}
+					}
+				}
+				if got := hk.requests(); len(got) != 6 {
+					t.Fatalf("requests=%d want exactly the six refused sends", len(got))
+				}
+			})
+		}
+	}
+}
+
+// Go interpolates an unparseable Location header verbatim into the Do error.
+// A Location echoing fixture credentials must collapse to the named
+// redirect_location_invalid on every request form — no id, secret, or token
+// in the message, ever.
+func TestMalformedLocationNoLeak(t *testing.T) {
+	for name := range allRequestForms(Client{}) {
+		t.Run(name, func(t *testing.T) {
+			hk := newRequestRecorder(t, func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Location", "https://team.cloudflareaccess.com/%zz?id="+cfFixtureID+"&secret="+cfFixtureSecret+"&bearer=fixture-token")
+				w.WriteHeader(http.StatusFound)
+			})
+			c := Client{URL: hk.URL, Token: "fixture-token", CFAccessClientID: cfFixtureID, CFAccessClientSecret: cfFixtureSecret}
+			e := allRequestForms(c)[name](context.Background())
+			if e == nil || !strings.Contains(e.Error(), "redirect_location_invalid") {
+				t.Fatalf("%s: err=%v want redirect_location_invalid", name, e)
+			}
+			for _, leak := range []string{cfFixtureID, cfFixtureSecret, "fixture-token", "%zz"} {
+				if strings.Contains(e.Error(), leak) {
+					t.Fatalf("%s: error leaks %q: %v", name, leak, e)
+				}
+			}
+		})
+	}
+}
+
+// Credentials are scoped to the configured scheme, not only the host: an
+// http -> https upgrade on the same host is refused as redirect_scheme_change
+// and the TLS listener never sees the request — the reverse of the https ->
+// http downgrade rule.
+func TestSchemeUpgradeRedirectRefused(t *testing.T) {
+	rt := &routeTransport{routes: map[string]*httptest.Server{}}
+	var upgradeHits atomic.Int32
+	upgrade := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgradeHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"projects": []string{"p"}})
+	}))
+	defer upgrade.Close()
+	rt.routes["https://hk.fixture.test:444"] = upgrade
+	hk := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", "https://hk.fixture.test:444/end")
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer hk.Close()
+	rt.routes["http://hk.fixture.test:444"] = hk
+	c := Client{URL: "http://hk.fixture.test:444", Token: "fixture-token", CFAccessClientID: cfFixtureID, CFAccessClientSecret: cfFixtureSecret, HTTP: &http.Client{Transport: rt}}
+
+	if _, e := c.ListTaskProjects(context.Background()); e == nil || !strings.Contains(e.Error(), "redirect_scheme_change") {
+		t.Fatalf("err=%v want redirect_scheme_change", e)
+	}
+	if hits := upgradeHits.Load(); hits != 0 {
+		t.Fatalf("TLS listener received %d requests — credentials crossed schemes", hits)
+	}
+	if sends := rt.snapshot(); len(sends) != 1 || sends[0].scheme != "http" {
+		t.Fatalf("sends=%+v want exactly one http send", sends)
+	}
+}
+
+// Same-scheme https -> https same-host redirects stay followed with headers —
+// the scheme guard refuses only a change of scheme.
+func TestHTTPSSameHostRedirectStillFollowed(t *testing.T) {
+	var mu sync.Mutex
+	var hops []capturedHeaders
+	https := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		hops = append(hops, capture(r))
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path != "/end" {
+			w.Header().Set("Location", "https://"+r.Host+"/end")
+			w.WriteHeader(http.StatusFound)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"projects": []string{"p"}})
+	}))
+	defer https.Close()
+	c := Client{URL: https.URL, Token: "fixture-token", CFAccessClientID: cfFixtureID, CFAccessClientSecret: cfFixtureSecret, HTTP: https.Client()}
+	ps, e := c.ListTaskProjects(context.Background())
+	if e != nil || len(ps) != 1 || ps[0] != "p" {
+		t.Fatalf("https same-host redirect must be followed: ps=%v err=%v", ps, e)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(hops) != 2 {
+		t.Fatalf("hops=%d want 2", len(hops))
+	}
+	for i, h := range hops {
+		if h.id != cfFixtureID || h.secret != cfFixtureSecret || h.auth != "Bearer fixture-token" {
+			t.Fatalf("hop %d lost headers", i)
+		}
+	}
+}
+
+// With the pair configured, a 200 text/html lacking Content-Disposition:
+// attachment is an Access login page, not file bytes — the real server always
+// sets the disposition on this route, so a genuine .html attachment still
+// downloads. With no keys the historical passthrough is unchanged.
+func TestHTMLAttachmentDownloadDisposition(t *testing.T) {
+	var disposition atomic.Bool
+	hk := newRequestRecorder(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if disposition.Load() {
+			w.Header().Set("Content-Disposition", `attachment; filename="page.html"`)
+		}
+		_, _ = io.WriteString(w, "<html>login</html>")
+	})
+	c := Client{URL: hk.URL, Token: "fixture-token", CFAccessClientID: cfFixtureID, CFAccessClientSecret: cfFixtureSecret}
+
+	_, body, e := c.GetAttachment(context.Background(), "ab")
+	if body != nil {
+		_ = body.Close()
+	}
+	if e == nil || !strings.Contains(e.Error(), "unexpected_html_response") {
+		t.Fatalf("configured html download err=%v want unexpected_html_response", e)
+	}
+
+	disposition.Store(true)
+	att, body, e := c.GetAttachment(context.Background(), "ab")
+	if e != nil {
+		t.Fatalf("real .html attachment must still download: %v", e)
+	}
+	_ = body.Close()
+	if att.MIME != "text/html; charset=utf-8" {
+		t.Fatalf("attachment mime=%q", att.MIME)
+	}
+
+	disposition.Store(false)
+	bare := Client{URL: hk.URL, Token: "fixture-token"}
+	_, body, e = bare.GetAttachment(context.Background(), "ab")
+	if e != nil {
+		t.Fatalf("absent-key html download keeps the historical passthrough: %v", e)
+	}
+	_ = body.Close()
+}
+
+// A scheme-relative Location to a foreign host is classified like any other
+// refused foreign redirect.
+func TestSchemeRelativeForeignRedirect(t *testing.T) {
+	hk := newRequestRecorder(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", "//foreign.fixture.test:444/end?opaque=fixture")
+		w.WriteHeader(http.StatusFound)
+	})
+	c := Client{URL: hk.URL, Token: "fixture-token", CFAccessClientID: cfFixtureID, CFAccessClientSecret: cfFixtureSecret}
+	_, e := c.ListTaskProjects(context.Background())
+	if e == nil || !strings.Contains(e.Error(), "redirect_foreign_host") {
+		t.Fatalf("err=%v want redirect_foreign_host", e)
+	}
+	if strings.Contains(e.Error(), "opaque=fixture") {
+		t.Fatalf("error leaks Location content: %v", e)
+	}
+}
+
+// Whitespace-only CF values count as unset for the both-or-neither check, and
+// padded real values are sent trimmed.
+func TestCFAccessWhitespaceValues(t *testing.T) {
+	if err := CFAccessPairError(" ", cfFixtureSecret); err == nil || !strings.Contains(err.Error(), "HANDOFFKEEP_CF_ACCESS_CLIENT_ID") {
+		t.Fatalf("space-only id err=%v must name the missing ID", err)
+	}
+	if err := CFAccessPairError(cfFixtureID, " "); err == nil || !strings.Contains(err.Error(), "HANDOFFKEEP_CF_ACCESS_CLIENT_SECRET") {
+		t.Fatalf("space-only secret err=%v must name the missing SECRET", err)
+	}
+	if err := CFAccessPairError(" ", " "); err != nil {
+		t.Fatalf("both blank is an unset pair, err=%v", err)
+	}
+	var got capturedHeaders
+	hk := newRequestRecorder(t, func(w http.ResponseWriter, r *http.Request) {
+		got = capture(r)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"projects": []string{"p"}})
+	})
+	c := Client{URL: hk.URL, Token: "fixture-token", CFAccessClientID: "  " + cfFixtureID + "  ", CFAccessClientSecret: "\t" + cfFixtureSecret + "\n"}
+	if _, e := c.ListTaskProjects(context.Background()); e != nil {
+		t.Fatalf("padded pair must send trimmed values: %v", e)
+	}
+	if got.id != cfFixtureID || got.secret != cfFixtureSecret {
+		t.Fatalf("wire values must be trimmed: id=%q secret=%q", got.id, got.secret)
+	}
+	blank := Client{URL: hk.URL, Token: "fixture-token", CFAccessClientID: " ", CFAccessClientSecret: " "}
+	if _, e := blank.ListTaskProjects(context.Background()); e != nil {
+		t.Fatalf("blank pair is unset: %v", e)
+	}
+	if got.cfKeys {
+		t.Fatal("whitespace-only pair sent CF headers")
+	}
+	// A whitespace-only pair is unset for the html-download check too: the
+	// disposition-less 200 passes through as it does without keys.
+	html := newRequestRecorder(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, "<html>page</html>")
+	})
+	blank.URL = html.URL
+	_, body, e := blank.GetAttachment(context.Background(), "ab")
+	if e != nil {
+		t.Fatalf("blank pair keeps the absent-key passthrough: %v", e)
+	}
+	_ = body.Close()
 }

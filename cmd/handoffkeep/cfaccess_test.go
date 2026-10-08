@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -210,5 +211,58 @@ func TestCLILoginRedirectFailsLoudWithoutLeaks(t *testing.T) {
 		if strings.Contains(combined, leak) {
 			t.Fatalf("output leaks %q: %s", leak, combined)
 		}
+	}
+}
+
+// A malformed redirect Location whose query echoes the configured
+// credentials must never reach CLI output: Go interpolates the raw header
+// into the Do error, so the client collapses it to redirect_location_invalid.
+func TestCLIMalformedLocationNoLeak(t *testing.T) {
+	isolateConfig(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", "https://team.cloudflareaccess.com/%zz?id="+cfFixtureID+"&secret="+cfFixtureSecret+"&bearer=fixture-token")
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer server.Close()
+	t.Setenv("HANDOFFKEEP_URL", server.URL)
+	t.Setenv("HANDOFFKEEP_TOKEN", "fixture-token")
+	t.Setenv("HANDOFFKEEP_CF_ACCESS_CLIENT_ID", cfFixtureID)
+	t.Setenv("HANDOFFKEEP_CF_ACCESS_CLIENT_SECRET", cfFixtureSecret)
+
+	var out bytes.Buffer
+	err := run([]string{"doc", "get", "--id", "5"}, &out, &out)
+	if err == nil || !strings.Contains(err.Error(), "redirect_location_invalid") {
+		t.Fatalf("err=%v want redirect_location_invalid", err)
+	}
+	combined := err.Error() + out.String()
+	for _, leak := range []string{cfFixtureID, cfFixtureSecret, "fixture-token", "%zz"} {
+		if strings.Contains(combined, leak) {
+			t.Fatalf("output leaks %q: %s", leak, combined)
+		}
+	}
+}
+
+// With the pair configured, attach get refuses a 200 text/html answer that
+// lacks Content-Disposition: attachment — an Access login page is not an
+// attachment body. Exits nonzero and writes nothing.
+func TestCLIAttachGetRejectsHTMLWithoutDisposition(t *testing.T) {
+	isolateConfig(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, "<html>Access login</html>")
+	}))
+	defer server.Close()
+	t.Setenv("HANDOFFKEEP_URL", server.URL)
+	t.Setenv("HANDOFFKEEP_TOKEN", "fixture-token")
+	t.Setenv("HANDOFFKEEP_CF_ACCESS_CLIENT_ID", cfFixtureID)
+	t.Setenv("HANDOFFKEEP_CF_ACCESS_CLIENT_SECRET", cfFixtureSecret)
+
+	var out bytes.Buffer
+	err := run([]string{"attach", "get", "ab"}, &out, &out)
+	if err == nil || !strings.Contains(err.Error(), "unexpected_html_response") {
+		t.Fatalf("attach get err=%v want unexpected_html_response", err)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("attach get wrote %d bytes of the login page", out.Len())
 	}
 }

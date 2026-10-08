@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	"net"
 	"net/http"
 	"net/url"
 	"runtime/debug"
@@ -48,6 +49,7 @@ type Client struct {
 // token: one key without the other is a config error that names the missing
 // key and never prints a value.
 func CFAccessPairError(id, secret string) error {
+	id, secret = strings.TrimSpace(id), strings.TrimSpace(secret)
 	switch {
 	case id != "" && secret == "":
 		return errors.New("cf_access_config_incomplete: HANDOFFKEEP_CF_ACCESS_CLIENT_ID is set but HANDOFFKEEP_CF_ACCESS_CLIENT_SECRET is missing")
@@ -55,6 +57,12 @@ func CFAccessPairError(id, secret string) error {
 		return errors.New("cf_access_config_incomplete: HANDOFFKEEP_CF_ACCESS_CLIENT_SECRET is set but HANDOFFKEEP_CF_ACCESS_CLIENT_ID is missing")
 	}
 	return nil
+}
+
+// cfAccessConfigured reports whether the service-token pair is present;
+// whitespace-only values count as unset.
+func (c Client) cfAccessConfigured() bool {
+	return strings.TrimSpace(c.CFAccessClientID) != "" && strings.TrimSpace(c.CFAccessClientSecret) != ""
 }
 
 // newRequest builds one request against the configured hk URL carrying every
@@ -67,20 +75,30 @@ func (c Client) newRequest(ctx context.Context, method, path string, body io.Rea
 	}
 	r.Header.Set("Authorization", "Bearer "+c.Token)
 	r.Header.Set("User-Agent", UserAgent)
-	if c.CFAccessClientID != "" && c.CFAccessClientSecret != "" {
-		r.Header.Set("CF-Access-Client-Id", c.CFAccessClientID)
-		r.Header.Set("CF-Access-Client-Secret", c.CFAccessClientSecret)
+	if id, secret := strings.TrimSpace(c.CFAccessClientID), strings.TrimSpace(c.CFAccessClientSecret); id != "" && secret != "" {
+		r.Header.Set("CF-Access-Client-Id", id)
+		r.Header.Set("CF-Access-Client-Secret", secret)
 	}
 	return r, nil
 }
 
+// normalizeHost folds a URL Host (hostname[:port]) to the form DNS treats as
+// equal: lowercase with a trailing FQDN dot removed.
+func normalizeHost(h string) string {
+	if host, port, e := net.SplitHostPort(h); e == nil {
+		return strings.ToLower(strings.TrimSuffix(host, ".")) + ":" + port
+	}
+	return strings.ToLower(strings.TrimSuffix(h, "."))
+}
+
 // httpClient returns the client for one hk request wrapped so a redirect that
-// would carry the Authorization or CF Access headers to a different host is
-// never followed — Go re-sends custom headers on cross-host redirects. An
-// https -> plaintext hop on the same host is refused for the same reason: the
-// next request would resend those headers unencrypted. When the wrapped
-// client has no policy of its own, Go's default 10-redirect cap is preserved
-// so a same-host loop cannot hang a call on a generous context.
+// would move the Authorization or CF Access headers outside the configured
+// host or scheme is never followed — Go re-sends custom headers on redirects.
+// An https -> plaintext hop is refused for the same reason as a cross-host
+// hop, as is an http -> https upgrade: credentials are scoped to the
+// configured scheme, not just the host. When the wrapped client has no policy
+// of its own, Go's default 10-redirect cap is preserved so a same-host loop
+// cannot hang a call on a generous context.
 func (c Client) httpClient() *http.Client {
 	h := c.HTTP
 	if h == nil {
@@ -91,9 +109,9 @@ func (c Client) httpClient() *http.Client {
 	hc.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		if len(via) > 0 {
 			switch {
-			case !strings.EqualFold(req.URL.Host, via[0].URL.Host):
+			case normalizeHost(req.URL.Host) != normalizeHost(via[0].URL.Host):
 				return http.ErrUseLastResponse
-			case strings.EqualFold(via[0].URL.Scheme, "https") && !strings.EqualFold(req.URL.Scheme, "https"):
+			case !strings.EqualFold(req.URL.Scheme, via[0].URL.Scheme):
 				return http.ErrUseLastResponse
 			}
 		}
@@ -131,46 +149,94 @@ func isRedirectStatus(code int) bool {
 }
 
 // cfAccessLoginHost reports whether host is a Cloudflare Access login host
-// (<team>.cloudflareaccess.com or the apex).
+// (<team>.cloudflareaccess.com or the apex). DNS names compare
+// case-insensitively with an optional trailing dot.
 func cfAccessLoginHost(host string) bool {
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
 	return host == "cloudflareaccess.com" || strings.HasSuffix(host, ".cloudflareaccess.com")
 }
 
-// sameHostDowngrade reports whether u stays on the configured hk host while
-// dropping the configured https scheme for a plaintext one — a redirect the
-// client must never follow because the next hop would resend credentials
-// unencrypted.
-func (c Client) sameHostDowngrade(u *url.URL) bool {
-	if !u.IsAbs() {
+// sameOriginHost reports whether h names the configured hk host — host
+// comparisons fold case and a trailing dot and include the port.
+func (c Client) sameOriginHost(h string) bool {
+	base, e := url.Parse(strings.TrimRight(c.URL, "/"))
+	return e == nil && normalizeHost(h) == normalizeHost(base.Host)
+}
+
+// sameHostSchemeChange reports whether u stays on the configured hk host but
+// switches scheme — a redirect in either direction (upgrade or downgrade)
+// moves the request outside the scheme the credentials were configured for.
+func (c Client) sameHostSchemeChange(u *url.URL) bool {
+	if !u.IsAbs() || !c.sameOriginHost(u.Host) {
 		return false
 	}
 	base, e := url.Parse(strings.TrimRight(c.URL, "/"))
-	return e == nil && strings.EqualFold(u.Host, base.Host) &&
-		strings.EqualFold(base.Scheme, "https") && !strings.EqualFold(u.Scheme, "https")
+	return e == nil && !strings.EqualFold(u.Scheme, base.Scheme)
 }
 
 // redirectError classifies a redirect the guard surfaced. A Location pointing
 // at a Cloudflare Access login means the service token is missing or not
 // allowed on this hostname; any other redirect off the configured host is
-// refused so request headers cannot leak, as is an https -> plaintext
-// downgrade on the same host. The Location value is never printed — it can
-// carry a signed login query.
+// refused so request headers cannot leak, as is a scheme change on the same
+// host — an https -> plaintext downgrade or an http -> https upgrade alike.
+// The Location value is never printed — it can carry a signed login query.
 func (c Client) redirectError(resp *http.Response) error {
 	loc, e := url.Parse(resp.Header.Get("Location"))
 	if e == nil {
 		if cfAccessLoginHost(loc.Hostname()) {
 			return &HTTPError{Status: resp.StatusCode, Code: "cf_access_login_redirect", Reason: "redirected to the Cloudflare Access login — the CF service token is missing or not allowed for this hostname"}
 		}
-		if loc.IsAbs() {
-			if base, be := url.Parse(strings.TrimRight(c.URL, "/")); be == nil && !strings.EqualFold(loc.Host, base.Host) {
-				return &HTTPError{Status: resp.StatusCode, Code: "redirect_foreign_host", Reason: "refused to follow a redirect away from the configured handoffkeep host"}
-			}
-			if c.sameHostDowngrade(loc) {
-				return &HTTPError{Status: resp.StatusCode, Code: "redirect_scheme_downgrade", Reason: "refused to follow a redirect that drops https for a plaintext scheme on the same host"}
+		if loc.Host != "" {
+			// loc.Host is set for absolute and scheme-relative Locations alike.
+			base, be := url.Parse(strings.TrimRight(c.URL, "/"))
+			if be == nil {
+				switch {
+				case normalizeHost(loc.Host) != normalizeHost(base.Host):
+					return &HTTPError{Status: resp.StatusCode, Code: "redirect_foreign_host", Reason: "refused to follow a redirect away from the configured handoffkeep host"}
+				case strings.EqualFold(base.Scheme, "https") && loc.IsAbs() && !strings.EqualFold(loc.Scheme, "https"):
+					return &HTTPError{Status: resp.StatusCode, Code: "redirect_scheme_downgrade", Reason: "refused to follow a redirect that drops https for a plaintext scheme on the same host"}
+				case loc.IsAbs() && !strings.EqualFold(loc.Scheme, base.Scheme):
+					return &HTTPError{Status: resp.StatusCode, Code: "redirect_scheme_change", Reason: "refused to follow a redirect that leaves the configured scheme on the same host"}
+				}
 			}
 		}
 	}
 	return &HTTPError{Status: resp.StatusCode, Code: "unexpected_redirect", Reason: "a JSON API call answered a redirect"}
+}
+
+// do issues r through cl and keeps transport errors leak-free: Go packs the
+// raw Location header into the url.Error URL when CheckRedirect fails, and
+// interpolates it verbatim when a Location fails to parse — both can carry a
+// signed login query or other response-controlled data, so they collapse to
+// named errors (or the bare policy text). Ordinary dial/TLS/timeout errors on
+// the configured URL surface unchanged.
+func (c Client) do(cl *http.Client, r *http.Request) (*http.Response, error) {
+	resp, e := cl.Do(r)
+	if e == nil {
+		return resp, nil
+	}
+	var ue *url.Error
+	if !errors.As(e, &ue) {
+		return resp, e
+	}
+	switch {
+	case resp != nil:
+		// A redirect policy refusal returns the last response alongside the
+		// error; its url.Error URL is the response-controlled Location string.
+		// The Err itself carries only the policy text, e.g. the redirect cap.
+		return resp, ue.Err
+	case ue.URL != "" && ue.URL != r.URL.String():
+		// A redirect hop failed before any response; the error URL is derived
+		// from a response-controlled Location and must not surface.
+		if hu, pe := url.Parse(ue.URL); pe == nil && !c.sameOriginHost(hu.Host) {
+			return resp, &HTTPError{Code: "redirect_foreign_host", Reason: "a redirect hop failed away from the configured handoffkeep host"}
+		}
+		return resp, &HTTPError{Code: "redirect_location_invalid", Reason: "a redirect hop failed before a response was received"}
+	case strings.HasPrefix(ue.Err.Error(), "failed to parse Location header"):
+		return resp, &HTTPError{Code: "redirect_location_invalid", Reason: "the hk URL answered a redirect with an invalid Location header"}
+	default:
+		return resp, e
+	}
 }
 
 // htmlBodyError rejects a 2xx text/html answer on a JSON API call — the
@@ -201,7 +267,7 @@ func (c Client) call(ctx context.Context, method, path string, input, output any
 	if input != nil {
 		r.Header.Set("Content-Type", "application/json")
 	}
-	resp, e := c.httpClient().Do(r)
+	resp, e := c.do(c.httpClient(), r)
 	if e != nil {
 		return e
 	}
@@ -376,7 +442,7 @@ func (c Client) PutAttachment(ctx context.Context, _ string, name, mime, ref str
 	r.Header.Set("X-HK-Name", name)
 	r.Header.Set("Content-Type", mime)
 	r.Header.Set("X-HK-Ref", ref)
-	resp, e := c.httpClient().Do(r)
+	resp, e := c.do(c.httpClient(), r)
 	if e != nil {
 		return store.Attachment{}, false, e
 	}
@@ -413,7 +479,7 @@ func (c Client) AttachmentURL(ctx context.Context, sha string) (string, error) {
 	if e != nil {
 		return "", e
 	}
-	resp, e := c.httpClientNoFollow().Do(r)
+	resp, e := c.do(c.httpClientNoFollow(), r)
 	if e != nil {
 		return "", e
 	}
@@ -421,10 +487,10 @@ func (c Client) AttachmentURL(ctx context.Context, sha string) (string, error) {
 	if resp.StatusCode == http.StatusFound {
 		loc := resp.Header.Get("Location")
 		// A presign answer pointing at the Access login is the same
-		// missing-token failure as on the JSON routes; a same-host https ->
-		// plaintext Location is a downgrade, not a usable storage URL. The
-		// Location value is never printed.
-		if u, pe := url.Parse(loc); pe == nil && (cfAccessLoginHost(u.Hostname()) || c.sameHostDowngrade(u)) {
+		// missing-token failure as on the JSON routes; a same-host scheme
+		// change is a downgrade or upgrade outside the configured scheme,
+		// not a usable storage URL. The Location value is never printed.
+		if u, pe := url.Parse(loc); pe == nil && (cfAccessLoginHost(u.Hostname()) || c.sameHostSchemeChange(u)) {
 			return "", c.redirectError(resp)
 		}
 		return loc, nil
@@ -439,7 +505,7 @@ func (c Client) GetAttachment(ctx context.Context, sha string) (store.Attachment
 	if e != nil {
 		return store.Attachment{}, nil, e
 	}
-	resp, e := c.httpClient().Do(r)
+	resp, e := c.do(c.httpClient(), r)
 	if e != nil {
 		return store.Attachment{}, nil, e
 	}
@@ -452,6 +518,20 @@ func (c Client) GetAttachment(ctx context.Context, sha string) (store.Attachment
 		var x struct{ Error string }
 		_ = json.NewDecoder(resp.Body).Decode(&x)
 		return store.Attachment{}, nil, errors.New(x.Error)
+	}
+	// With the pair configured a 200 text/html that lacks an attachment
+	// disposition is an Access login page, not file bytes — the real server
+	// always sets Content-Disposition: attachment on this route, so a real
+	// .html attachment still downloads. Without keys the historical
+	// passthrough is unchanged.
+	if c.cfAccessConfigured() {
+		cd, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Disposition"))
+		if !strings.EqualFold(cd, "attachment") {
+			if e := htmlBodyError(resp); e != nil {
+				defer resp.Body.Close()
+				return store.Attachment{}, nil, e
+			}
+		}
 	}
 	return store.Attachment{SHA256: sha, MIME: resp.Header.Get("Content-Type")}, resp.Body, nil
 }
@@ -816,7 +896,7 @@ func (c Client) ExportTasks(ctx context.Context, lane, state, parentLane string,
 	if e != nil {
 		return nil, e
 	}
-	resp, e := c.httpClient().Do(r)
+	resp, e := c.do(c.httpClient(), r)
 	if e != nil {
 		return nil, e
 	}
