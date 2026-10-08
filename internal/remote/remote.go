@@ -8,16 +8,150 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
+	"runtime/debug"
 	"strings"
 
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
+// UserAgent is stamped on every hk request: Cloudflare Access can be
+// configured to block the default Go user agent before a request reaches the
+// service, and a distinct UA keeps hk calls identifiable in Access logs.
+var UserAgent = "handoffkeep/" + buildRevision()
+
+func buildRevision() string {
+	if info, ok := debug.ReadBuildInfo(); ok {
+		for _, s := range info.Settings {
+			if s.Key == "vcs.revision" && s.Value != "" {
+				return s.Value
+			}
+		}
+	}
+	return "unknown"
+}
+
 type Client struct {
 	URL, Token string
-	HTTP       *http.Client
+	// CFAccessClientID and CFAccessClientSecret carry the optional Cloudflare
+	// Access service token for an hk URL behind Access. They are attached only
+	// as a pair and only to requests against the configured URL; a redirect to
+	// a different host is never followed, so they cannot leak off it.
+	CFAccessClientID     string
+	CFAccessClientSecret string
+	HTTP                 *http.Client
+}
+
+// CFAccessPairError rejects a half-configured Cloudflare Access service
+// token: one key without the other is a config error that names the missing
+// key and never prints a value.
+func CFAccessPairError(id, secret string) error {
+	switch {
+	case id != "" && secret == "":
+		return errors.New("cf_access_config_incomplete: HANDOFFKEEP_CF_ACCESS_CLIENT_ID is set but HANDOFFKEEP_CF_ACCESS_CLIENT_SECRET is missing")
+	case id == "" && secret != "":
+		return errors.New("cf_access_config_incomplete: HANDOFFKEEP_CF_ACCESS_CLIENT_SECRET is set but HANDOFFKEEP_CF_ACCESS_CLIENT_ID is missing")
+	}
+	return nil
+}
+
+// newRequest builds one request against the configured hk URL carrying every
+// header an hk call sends: bearer auth, the explicit User-Agent, and — only
+// when both are configured — the Cloudflare Access service-token pair.
+func (c Client) newRequest(ctx context.Context, method, path string, body io.Reader) (*http.Request, error) {
+	r, e := http.NewRequestWithContext(ctx, method, strings.TrimRight(c.URL, "/")+path, body)
+	if e != nil {
+		return nil, e
+	}
+	r.Header.Set("Authorization", "Bearer "+c.Token)
+	r.Header.Set("User-Agent", UserAgent)
+	if c.CFAccessClientID != "" && c.CFAccessClientSecret != "" {
+		r.Header.Set("CF-Access-Client-Id", c.CFAccessClientID)
+		r.Header.Set("CF-Access-Client-Secret", c.CFAccessClientSecret)
+	}
+	return r, nil
+}
+
+// httpClient returns the client for one hk request wrapped so a redirect that
+// would carry the Authorization or CF Access headers to a different host is
+// never followed — Go re-sends custom headers on cross-host redirects.
+func (c Client) httpClient() *http.Client {
+	h := c.HTTP
+	if h == nil {
+		h = http.DefaultClient
+	}
+	hc := *h
+	inner := hc.CheckRedirect
+	hc.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) > 0 && !strings.EqualFold(req.URL.Host, via[0].URL.Host) {
+			return http.ErrUseLastResponse
+		}
+		if inner != nil {
+			return inner(req, via)
+		}
+		return nil
+	}
+	return &hc
+}
+
+// httpClientNoFollow never follows a redirect: the presign answer must surface
+// its Location to the caller rather than forward the CF Access headers — or
+// any headers — to the storage host.
+func (c Client) httpClientNoFollow() *http.Client {
+	h := c.HTTP
+	if h == nil {
+		h = http.DefaultClient
+	}
+	hc := *h
+	hc.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return &hc
+}
+
+// isRedirectStatus reports the 3xx statuses whose Location a client may follow.
+func isRedirectStatus(code int) bool {
+	switch code {
+	case http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther, http.StatusTemporaryRedirect, http.StatusPermanentRedirect:
+		return true
+	}
+	return false
+}
+
+// cfAccessLoginHost reports whether host is a Cloudflare Access login host
+// (<team>.cloudflareaccess.com or the apex).
+func cfAccessLoginHost(host string) bool {
+	return host == "cloudflareaccess.com" || strings.HasSuffix(host, ".cloudflareaccess.com")
+}
+
+// redirectError classifies a redirect the guard surfaced. A Location pointing
+// at a Cloudflare Access login means the service token is missing or not
+// allowed on this hostname; any other redirect off the configured host is
+// refused so request headers cannot leak. The Location value is never
+// printed — it can carry a signed login query.
+func (c Client) redirectError(resp *http.Response) error {
+	loc, e := url.Parse(resp.Header.Get("Location"))
+	if e == nil {
+		if cfAccessLoginHost(loc.Hostname()) {
+			return &HTTPError{Status: resp.StatusCode, Code: "cf_access_login_redirect", Reason: "redirected to the Cloudflare Access login — the CF service token is missing or not allowed for this hostname"}
+		}
+		if loc.IsAbs() {
+			if base, be := url.Parse(strings.TrimRight(c.URL, "/")); be == nil && !strings.EqualFold(loc.Host, base.Host) {
+				return &HTTPError{Status: resp.StatusCode, Code: "redirect_foreign_host", Reason: "refused to follow a redirect away from the configured handoffkeep host"}
+			}
+		}
+	}
+	return &HTTPError{Status: resp.StatusCode, Code: "unexpected_redirect", Reason: "a JSON API call answered a redirect"}
+}
+
+// htmlBodyError rejects a 2xx text/html answer on a JSON API call — the
+// signature of a Cloudflare Access login page served instead of the API.
+func htmlBodyError(resp *http.Response) error {
+	mt, _, e := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	if e == nil && mt == "text/html" {
+		return &HTTPError{Status: resp.StatusCode, Code: "unexpected_html_response", Reason: "the hk URL answered a text/html page instead of JSON — the request likely reached a Cloudflare Access login"}
+	}
+	return nil
 }
 
 func (c Client) call(ctx context.Context, method, path string, input, output any) error {
@@ -31,27 +165,28 @@ func (c Client) call(ctx context.Context, method, path string, input, output any
 	} else {
 		body = bytes.NewReader(nil)
 	}
-	r, e := http.NewRequestWithContext(ctx, method, strings.TrimRight(c.URL, "/")+path, body)
+	r, e := c.newRequest(ctx, method, path, body)
 	if e != nil {
 		return e
 	}
-	r.Header.Set("Authorization", "Bearer "+c.Token)
 	if input != nil {
 		r.Header.Set("Content-Type", "application/json")
 	}
-	h := c.HTTP
-	if h == nil {
-		h = http.DefaultClient
-	}
-	resp, e := h.Do(r)
+	resp, e := c.httpClient().Do(r)
 	if e != nil {
 		return e
 	}
 	defer resp.Body.Close()
+	if isRedirectStatus(resp.StatusCode) {
+		return c.redirectError(resp)
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		var x struct{ Error, Pattern, Reason string }
 		_ = json.NewDecoder(resp.Body).Decode(&x)
 		return &HTTPError{Status: resp.StatusCode, Code: x.Error, Pattern: x.Pattern, Reason: x.Reason}
+	}
+	if e := htmlBodyError(resp); e != nil {
+		return e
 	}
 	if output != nil {
 		return json.NewDecoder(resp.Body).Decode(output)
@@ -205,29 +340,30 @@ func (c Client) Search(ctx context.Context, q, scope, session string, limit int)
 	return xs, nil
 }
 func (c Client) PutAttachment(ctx context.Context, _ string, name, mime, ref string, body []byte) (store.Attachment, bool, error) {
-	r, e := http.NewRequestWithContext(ctx, "PUT", strings.TrimRight(c.URL, "/")+"/v1/attachments", bytes.NewReader(body))
+	r, e := c.newRequest(ctx, "PUT", "/v1/attachments", bytes.NewReader(body))
 	if e != nil {
 		return store.Attachment{}, false, e
 	}
-	r.Header.Set("Authorization", "Bearer "+c.Token)
 	r.Header.Set("X-HK-Name", name)
 	r.Header.Set("Content-Type", mime)
 	r.Header.Set("X-HK-Ref", ref)
-	h := c.HTTP
-	if h == nil {
-		h = http.DefaultClient
-	}
-	resp, e := h.Do(r)
+	resp, e := c.httpClient().Do(r)
 	if e != nil {
 		return store.Attachment{}, false, e
 	}
 	defer resp.Body.Close()
+	if isRedirectStatus(resp.StatusCode) {
+		return store.Attachment{}, false, c.redirectError(resp)
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		var x struct {
 			Error string `json:"error"`
 		}
 		_ = json.NewDecoder(resp.Body).Decode(&x)
 		return store.Attachment{}, false, errors.New(x.Error)
+	}
+	if e := htmlBodyError(resp); e != nil {
+		return store.Attachment{}, false, e
 	}
 	var x struct {
 		Attachment store.Attachment `json:"attachment"`
@@ -244,38 +380,42 @@ func (c Client) ListAttachments(ctx context.Context, ref string, limit int) ([]s
 	return x.Attachments, e
 }
 func (c Client) AttachmentURL(ctx context.Context, sha string) (string, error) {
-	r, e := http.NewRequestWithContext(ctx, "GET", strings.TrimRight(c.URL, "/")+"/v1/attachments/"+esc(sha)+"?presign=1", nil)
+	r, e := c.newRequest(ctx, "GET", "/v1/attachments/"+esc(sha)+"?presign=1", nil)
 	if e != nil {
 		return "", e
 	}
-	r.Header.Set("Authorization", "Bearer "+c.Token)
-	h := c.HTTP
-	if h == nil {
-		h = &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	}
-	resp, e := h.Do(r)
+	resp, e := c.httpClientNoFollow().Do(r)
 	if e != nil {
 		return "", e
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusFound {
-		return "", errors.New("attachment_url_failed")
+	if resp.StatusCode == http.StatusFound {
+		loc := resp.Header.Get("Location")
+		// A presign answer pointing at the Access login is the same
+		// missing-token failure as on the JSON routes; the Location value is
+		// never printed.
+		if u, pe := url.Parse(loc); pe == nil && cfAccessLoginHost(u.Hostname()) {
+			return "", c.redirectError(resp)
+		}
+		return loc, nil
 	}
-	return resp.Header.Get("Location"), nil
+	if isRedirectStatus(resp.StatusCode) {
+		return "", c.redirectError(resp)
+	}
+	return "", errors.New("attachment_url_failed")
 }
 func (c Client) GetAttachment(ctx context.Context, sha string) (store.Attachment, io.ReadCloser, error) {
-	r, e := http.NewRequestWithContext(ctx, "GET", strings.TrimRight(c.URL, "/")+"/v1/attachments/"+esc(sha), nil)
+	r, e := c.newRequest(ctx, "GET", "/v1/attachments/"+esc(sha), nil)
 	if e != nil {
 		return store.Attachment{}, nil, e
 	}
-	r.Header.Set("Authorization", "Bearer "+c.Token)
-	h := c.HTTP
-	if h == nil {
-		h = http.DefaultClient
-	}
-	resp, e := h.Do(r)
+	resp, e := c.httpClient().Do(r)
 	if e != nil {
 		return store.Attachment{}, nil, e
+	}
+	if isRedirectStatus(resp.StatusCode) {
+		defer resp.Body.Close()
+		return store.Attachment{}, nil, c.redirectError(resp)
 	}
 	if resp.StatusCode != 200 {
 		defer resp.Body.Close()
@@ -645,26 +785,27 @@ func (c Client) ExportTasks(ctx context.Context, lane, state, parentLane string,
 	if limit > 0 {
 		q.Set("limit", fmt.Sprint(limit))
 	}
-	r, e := http.NewRequestWithContext(ctx, "GET", strings.TrimRight(c.URL, "/")+"/v1/tasks/export?"+q.Encode(), nil)
+	r, e := c.newRequest(ctx, "GET", "/v1/tasks/export?"+q.Encode(), nil)
 	if e != nil {
 		return nil, e
 	}
-	r.Header.Set("Authorization", "Bearer "+c.Token)
-	h := c.HTTP
-	if h == nil {
-		h = http.DefaultClient
-	}
-	resp, e := h.Do(r)
+	resp, e := c.httpClient().Do(r)
 	if e != nil {
 		return nil, e
 	}
 	defer resp.Body.Close()
+	if isRedirectStatus(resp.StatusCode) {
+		return nil, c.redirectError(resp)
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		var x struct {
 			Error string `json:"error"`
 		}
 		_ = json.NewDecoder(resp.Body).Decode(&x)
 		return nil, errors.New(x.Error)
+	}
+	if e := htmlBodyError(resp); e != nil {
+		return nil, e
 	}
 	body, e := io.ReadAll(resp.Body)
 	if e != nil {

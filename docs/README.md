@@ -21,6 +21,15 @@ For persistent local settings use mode 0600
 `HANDOFFKEEP_TOKEN=`. `memory push`, `memory pull`, and `doc import` dry-run
 unless `--apply` is supplied.
 
+When `HANDOFFKEEP_URL` sits behind Cloudflare Access, a service token lets the
+CLI through without a browser login: set `HANDOFFKEEP_CF_ACCESS_CLIENT_ID` and
+`HANDOFFKEEP_CF_ACCESS_CLIENT_SECRET` together (env or config.env, same
+precedence as the URL/token; setting only one is a config error). Every hk
+request then carries `CF-Access-Client-Id`/`CF-Access-Client-Secret` plus an
+explicit `User-Agent`; a redirect to the Access login fails with
+`cf_access_login_redirect` instead of being followed, and the pair is never
+sent to a different host.
+
 ## MCP registration
 
 Local stdio delegates to the configured HTTP service:
