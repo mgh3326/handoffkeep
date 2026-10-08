@@ -76,7 +76,11 @@ func (c Client) newRequest(ctx context.Context, method, path string, body io.Rea
 
 // httpClient returns the client for one hk request wrapped so a redirect that
 // would carry the Authorization or CF Access headers to a different host is
-// never followed — Go re-sends custom headers on cross-host redirects.
+// never followed — Go re-sends custom headers on cross-host redirects. An
+// https -> plaintext hop on the same host is refused for the same reason: the
+// next request would resend those headers unencrypted. When the wrapped
+// client has no policy of its own, Go's default 10-redirect cap is preserved
+// so a same-host loop cannot hang a call on a generous context.
 func (c Client) httpClient() *http.Client {
 	h := c.HTTP
 	if h == nil {
@@ -85,11 +89,19 @@ func (c Client) httpClient() *http.Client {
 	hc := *h
 	inner := hc.CheckRedirect
 	hc.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		if len(via) > 0 && !strings.EqualFold(req.URL.Host, via[0].URL.Host) {
-			return http.ErrUseLastResponse
+		if len(via) > 0 {
+			switch {
+			case !strings.EqualFold(req.URL.Host, via[0].URL.Host):
+				return http.ErrUseLastResponse
+			case strings.EqualFold(via[0].URL.Scheme, "https") && !strings.EqualFold(req.URL.Scheme, "https"):
+				return http.ErrUseLastResponse
+			}
 		}
 		if inner != nil {
 			return inner(req, via)
+		}
+		if len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
 		}
 		return nil
 	}
@@ -124,11 +136,25 @@ func cfAccessLoginHost(host string) bool {
 	return host == "cloudflareaccess.com" || strings.HasSuffix(host, ".cloudflareaccess.com")
 }
 
+// sameHostDowngrade reports whether u stays on the configured hk host while
+// dropping the configured https scheme for a plaintext one — a redirect the
+// client must never follow because the next hop would resend credentials
+// unencrypted.
+func (c Client) sameHostDowngrade(u *url.URL) bool {
+	if !u.IsAbs() {
+		return false
+	}
+	base, e := url.Parse(strings.TrimRight(c.URL, "/"))
+	return e == nil && strings.EqualFold(u.Host, base.Host) &&
+		strings.EqualFold(base.Scheme, "https") && !strings.EqualFold(u.Scheme, "https")
+}
+
 // redirectError classifies a redirect the guard surfaced. A Location pointing
 // at a Cloudflare Access login means the service token is missing or not
 // allowed on this hostname; any other redirect off the configured host is
-// refused so request headers cannot leak. The Location value is never
-// printed — it can carry a signed login query.
+// refused so request headers cannot leak, as is an https -> plaintext
+// downgrade on the same host. The Location value is never printed — it can
+// carry a signed login query.
 func (c Client) redirectError(resp *http.Response) error {
 	loc, e := url.Parse(resp.Header.Get("Location"))
 	if e == nil {
@@ -138,6 +164,9 @@ func (c Client) redirectError(resp *http.Response) error {
 		if loc.IsAbs() {
 			if base, be := url.Parse(strings.TrimRight(c.URL, "/")); be == nil && !strings.EqualFold(loc.Host, base.Host) {
 				return &HTTPError{Status: resp.StatusCode, Code: "redirect_foreign_host", Reason: "refused to follow a redirect away from the configured handoffkeep host"}
+			}
+			if c.sameHostDowngrade(loc) {
+				return &HTTPError{Status: resp.StatusCode, Code: "redirect_scheme_downgrade", Reason: "refused to follow a redirect that drops https for a plaintext scheme on the same host"}
 			}
 		}
 	}
@@ -392,9 +421,10 @@ func (c Client) AttachmentURL(ctx context.Context, sha string) (string, error) {
 	if resp.StatusCode == http.StatusFound {
 		loc := resp.Header.Get("Location")
 		// A presign answer pointing at the Access login is the same
-		// missing-token failure as on the JSON routes; the Location value is
-		// never printed.
-		if u, pe := url.Parse(loc); pe == nil && cfAccessLoginHost(u.Hostname()) {
+		// missing-token failure as on the JSON routes; a same-host https ->
+		// plaintext Location is a downgrade, not a usable storage URL. The
+		// Location value is never printed.
+		if u, pe := url.Parse(loc); pe == nil && (cfAccessLoginHost(u.Hostname()) || c.sameHostDowngrade(u)) {
 			return "", c.redirectError(resp)
 		}
 		return loc, nil

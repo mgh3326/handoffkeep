@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
@@ -291,12 +292,14 @@ func TestCrossHostRedirectNeverFollowed(t *testing.T) {
 }
 
 // A redirect that stays on the configured host is still followed exactly as
-// before — only cross-host hops are refused.
+// before — only cross-host hops are refused. The Location here is an
+// absolute http URL on the same host:port, the shape tailnet deployments
+// actually serve, so http -> http must keep working unchanged.
 func TestSameHostRedirectStillFollowed(t *testing.T) {
 	hk := newRequestRecorder(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.URL.Path == "/v1/tasks/projects" {
-			w.Header().Set("Location", "/v1/tasks/projects2")
+			w.Header().Set("Location", "http://"+r.Host+"/v1/tasks/projects2")
 			w.WriteHeader(http.StatusFound)
 			return
 		}
@@ -318,6 +321,92 @@ func TestSameHostRedirectStillFollowed(t *testing.T) {
 		if h.id != cfFixtureID || h.secret != cfFixtureSecret {
 			t.Fatalf("hop %d lost the CF headers on a same-host redirect", i)
 		}
+		if h.auth != "Bearer fixture-token" {
+			t.Fatalf("hop %d lost Authorization on a same-host redirect", i)
+		}
+	}
+}
+
+// recordTransport captures the scheme and auth surface of every request the
+// underlying RoundTripper is asked to send — proof of whether a refused
+// redirect hop was ever attempted at all.
+type recordTransport struct {
+	next http.RoundTripper
+	mu   sync.Mutex
+	seen []recordedRequest
+}
+
+type recordedRequest struct {
+	scheme string
+	hdr    capturedHeaders
+}
+
+func (t *recordTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	t.mu.Lock()
+	t.seen = append(t.seen, recordedRequest{scheme: r.URL.Scheme, hdr: capture(r)})
+	t.mu.Unlock()
+	return t.next.RoundTrip(r)
+}
+
+// An https hk answering a same-host redirect to a plaintext Location must be
+// refused: Go would resend Authorization and the CF pair on the follow-up
+// hop, so no request may go out over http at all. The surfaced error is the
+// named redirect_scheme_downgrade and never carries the Location value.
+func TestHTTPSDowngradeRedirectRefused(t *testing.T) {
+	https := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", "http://"+r.Host+"/downgraded?leak=1")
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer https.Close()
+	rt := &recordTransport{next: https.Client().Transport}
+	c := Client{URL: https.URL, Token: "fixture-token", CFAccessClientID: cfFixtureID, CFAccessClientSecret: cfFixtureSecret, HTTP: &http.Client{Transport: rt}}
+	ctx := context.Background()
+
+	_, e := c.ListTaskProjects(ctx)
+	if e == nil || !strings.Contains(e.Error(), "redirect_scheme_downgrade") {
+		t.Fatalf("call: err=%v want redirect_scheme_downgrade", e)
+	}
+	for _, leak := range []string{cfFixtureID, cfFixtureSecret, "fixture-token", "downgraded", "leak=1", "http://"} {
+		if strings.Contains(e.Error(), leak) {
+			t.Fatalf("error leaks %q: %v", leak, e)
+		}
+	}
+	// The presign 302 path classifies the same downgrade rather than handing
+	// the caller a plaintext URL.
+	if _, e := c.AttachmentURL(ctx, "ab"); e == nil || !strings.Contains(e.Error(), "redirect_scheme_downgrade") {
+		t.Fatalf("AttachmentURL: err=%v want redirect_scheme_downgrade", e)
+	}
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	for i, s := range rt.seen {
+		if s.scheme != "https" {
+			t.Fatalf("request %d was sent over %q — the downgrade hop must never leave", i, s.scheme)
+		}
+	}
+	if len(rt.seen) != 2 {
+		t.Fatalf("transport saw %d requests; want the 2 refused redirect hops unsent", len(rt.seen))
+	}
+}
+
+// A same-host redirect loop ends with an error after Go's default ten hops
+// rather than hanging on a generous context — the wrapper must not strip the
+// limit when the wrapped client has no policy of its own.
+func TestSameHostRedirectLoopStopsAfterTen(t *testing.T) {
+	var hits atomic.Int32
+	hk := newRequestRecorder(t, func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Location", r.URL.RequestURI())
+		w.WriteHeader(http.StatusFound)
+	})
+	c := Client{URL: hk.URL, Token: "fixture-token", CFAccessClientID: cfFixtureID, CFAccessClientSecret: cfFixtureSecret}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, e := c.ListTaskProjects(ctx)
+	if e == nil || !strings.Contains(e.Error(), "stopped after 10 redirects") {
+		t.Fatalf("err=%v want stopped after 10 redirects", e)
+	}
+	if hits.Load() != 10 {
+		t.Fatalf("hops=%d want 10", hits.Load())
 	}
 }
 
