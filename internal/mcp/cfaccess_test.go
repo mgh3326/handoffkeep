@@ -17,7 +17,7 @@ import (
 // returned URL. Driven through a real in-memory MCP round trip.
 func TestAttachmentGetURLUppercaseLoginHost(t *testing.T) {
 	hk := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Location", "https://TEAM.CloudflareAccess.COM/login?opaque=fixture")
+		w.Header().Set("Location", "https://TEAM.CloudflareAccess.COM/login?opaque.fixture")
 		w.WriteHeader(http.StatusFound)
 	}))
 	defer hk.Close()
@@ -45,10 +45,13 @@ func TestAttachmentGetURLUppercaseLoginHost(t *testing.T) {
 	}
 	if e == nil && res != nil && res.IsError {
 		raw, _ := json.Marshal(res)
-		for _, leak := range []string{"cf-access-id.fixture.invalid", "cf-access-secret.fixture.invalid", "fixture-token", "opaque=fixture"} {
+		for _, leak := range []string{"cf-access-id.fixture.invalid", "cf-access-secret.fixture.invalid", "fixture-token"} {
 			if strings.Contains(string(raw), leak) {
 				t.Fatalf("tool error result leaks %q", leak)
 			}
+		}
+		if strings.Contains(string(raw), "opaque.fixture") {
+			t.Fatal("tool error result carries the Location query")
 		}
 	}
 }

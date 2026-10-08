@@ -7,3 +7,8 @@
 #   quoted that map entry verbatim. The comment no longer quotes it.
 3ec0beb5e84be16feea563eda6b009d1d93f2117:internal/fleetmetrics/metrics.go:generic-api-key:22
 fbb9c0310addfc23626fe07b2740a899a795cf58:.gitleaksignore:generic-api-key:1
+# - b251b29 cfaccess_test.go:48 puts a synthetic fixture-token literal and a
+#   Location-query sentinel side by side in one test assertion array; the
+#   pair is fake test data. The next commit split the assertion so the
+#   literals no longer abut. This comment does not quote them.
+b251b29fa2f22605b9748bf26e7b4045d60609f2:internal/mcp/cfaccess_test.go:generic-api-key:48
