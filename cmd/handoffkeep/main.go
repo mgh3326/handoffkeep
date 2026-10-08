@@ -262,6 +262,13 @@ func normalizeTaskArgs(args []string) ([]string, error) {
 	return append(flags, positional...), nil
 }
 
+// taskCreateRequirements is the hint tasks add appends to a server-side
+// invalid_context rejection. The kind set comes from the server's own
+// vocabulary in internal/store so the hint cannot drift from it.
+func taskCreateRequirements() string {
+	return "tasks add requires --lane <name> and --title <text>, and --kind must be one of " + strings.Join(store.TaskKinds(), ", ")
+}
+
 func tasksCmd(args []string, out io.Writer) error {
 	if len(args) == 0 {
 		return errors.New("usage: tasks add|list|export|claim|next|transition|relane|project|projects|decision-request|decision-resolve|show|comment|comments|disposition")
@@ -408,6 +415,12 @@ func tasksCmd(args []string, out io.Writer) error {
 		refs.OriginPR, refs.OriginTask = *originPR, *originTask
 		x, err := c.CreateTask(ctx, store.Task{Lane: *lane, ParentLane: *parentLane, Title: *title, Kind: *kind, Priority: *priority, Refs: *refs, BodyDoc: *bodyDoc, Project: project})
 		if err != nil {
+			// invalid_context on create is a validation failure; append the
+			// add requirements rather than leave a bare code to diagnose.
+			var he *remote.HTTPError
+			if errors.As(err, &he) && he.Code == "invalid_context" {
+				return fmt.Errorf("%w — %s", err, taskCreateRequirements())
+			}
 			return err
 		}
 		return printJSON(out, x)

@@ -34,6 +34,18 @@ var kinds = map[string]bool{"checkpoint": true, "handoff": true, "decision": tru
 var memoryTypes = map[string]bool{"user": true, "feedback": true, "project": true, "reference": true}
 var documentKinds = map[string]bool{"brief": true, "report": true, "answer": true, "handoff": true, "note": true, "other": true}
 var taskKinds = map[string]bool{"implement": true, "verify": true, "fix": true, "decide": true, "ops": true}
+
+// TaskKinds is the server's task kind vocabulary — the single source of truth
+// client hints render so the two cannot drift.
+func TaskKinds() []string {
+	xs := make([]string, 0, len(taskKinds))
+	for k := range taskKinds {
+		xs = append(xs, k)
+	}
+	sort.Strings(xs)
+	return xs
+}
+
 var taskStates = map[string]bool{"backlog": true, "claimed": true, "in_progress": true, "verifying": true, "join": true, "hold": true, "needs_decision": true, "merged": true, "dropped": true}
 var relayEventKinds = map[string]bool{"job.completed": true, "job.escalate": true, "job.joined": true, "job.lost": true, "job.revoked": true, "lane.event": true}
 

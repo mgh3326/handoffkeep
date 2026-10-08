@@ -437,12 +437,9 @@ func (c Client) CreateTask(ctx context.Context, x store.Task) (store.Task, error
 	var out store.Task
 	err := c.call(ctx, "POST", "/v1/tasks", x, &out)
 	if err != nil {
-		// Servers whose decoder rejects unknown fields answer a body carrying
-		// project with the generic invalid_context rather than naming it.
-		var he *HTTPError
-		if errors.As(err, &he) && he.Code == "invalid_context" && x.Project != nil {
-			return out, fmt.Errorf("create_project_rejected: server refused the task with invalid_context — it likely predates the task project field")
-		}
+		// The server's code and reason surface unchanged — invalid_context on
+		// create is a validation failure (missing lane, unknown kind), not a
+		// version-skew verdict.
 		return out, err
 	}
 	// A server that predates the project column could answer 200 while
