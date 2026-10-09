@@ -380,88 +380,165 @@ func TestExactURLHopFailureKeepsGoError(t *testing.T) {
 	}
 }
 
-// prefixTransport is a caller transport whose ordinary dial error text starts
-// like Go's Location parse error, without any response or redirect.
-type prefixTransport struct {
-	next    http.RoundTripper
-	rewrite func(error) error
+// forgedParseErrors are caller-transport rewrites of a real dial error into
+// text imitating Go's Location parse error, with no response behind it.
+// "canonical" is byte-identical to Go's rendering for an unparseable
+// Location; the other quotings name the same Location in forms fmt %q never
+// produces.
+func forgedParseErrors() map[string]func(error) error {
+	parseErr := func(loc string) string { _, e := url.Parse(loc); return e.Error() }
+	fixed := func(text string) func(error) error { return func(error) error { return errors.New(text) } }
+	const prefix = "failed to parse Location header "
+	return map[string]func(error) error{
+		"prefix-colon": func(e error) error {
+			return fmt.Errorf("failed to parse Location header: upstream transport diagnostic: %w", e)
+		},
+		"canonical":      fixed(fmt.Sprintf(prefix+"%q: %v", "/%zz", parseErr("/%zz"))),
+		"hex-escape":     fixed(prefix + `"\x2f%zz": ` + parseErr("/%zz")),
+		"unicode-escape": fixed(prefix + `"\u002f%zz": ` + parseErr("/%zz")),
+		"raw-quoted":     fixed(prefix + "`/%zz`: " + parseErr("/%zz")),
+		"rune-quoted":    fixed(prefix + `'%': ` + parseErr("%")),
+		"ascii-escape":   fixed(fmt.Sprintf(prefix+"%+q: %v", "/\u00e9%zz", parseErr("/\u00e9%zz"))),
+	}
 }
 
-func (t prefixTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+// forgeTransport records each error it forges so the test can check the
+// returned chain carries that very error.
+type forgeTransport struct {
+	next    http.RoundTripper
+	rewrite func(error) error
+	mu      sync.Mutex
+	forged  []error
+}
+
+func (t *forgeTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	resp, e := t.next.RoundTrip(r)
 	if e != nil {
-		return nil, t.rewrite(e)
+		e = t.rewrite(e)
+		t.mu.Lock()
+		t.forged = append(t.forged, e)
+		t.mu.Unlock()
+		return nil, e
 	}
 	return resp, nil
 }
 
-// An error on the configured URL with no redirect response is never
-// classified as a redirect, even when a caller transport's text shares Go's
-// malformed-Location prefix: it equals a direct http.Client error, with or
-// without password userinfo and with or without Client.Timeout.
-func TestPrefixCollidingTransportKeepsChain(t *testing.T) {
-	const password = "userinfo-password.fixture"
+// runForged sends one request form to a closed listener through a forging
+// caller transport and returns the error with the error the transport forged.
+func runForged(t *testing.T, form string, rewrite func(error) error, timeout time.Duration, userinfo bool) (error, error) {
+	t.Helper()
 	closed := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
-	closedURL := closed.URL
+	base := closed.URL
 	closed.Close()
-	_, pe := url.Parse("/%zz")
-	goText := fmt.Sprintf("failed to parse Location header %q: %v", "/%zz", pe)
-	formats := map[string]func(error) error{
-		"prefix-colon": func(e error) error {
-			return fmt.Errorf("failed to parse Location header: upstream transport diagnostic: %w", e)
-		},
-		// byte-identical to Go's own parse error for a real unparseable Location
-		"go-exact": func(error) error { return errors.New(goText) },
+	if userinfo {
+		u, _ := url.Parse(base)
+		u.User = url.UserPassword("fixture-user", "userinfo-password.fixture")
+		base = u.String()
 	}
-	for fname, rewrite := range formats {
-		for _, timeout := range []time.Duration{0, 5 * time.Second} {
+	tr := &http.Transport{}
+	defer tr.CloseIdleConnections()
+	ft := &forgeTransport{next: tr, rewrite: rewrite}
+	c := Client{URL: base, Token: "fixture-token", CFAccessClientID: cfFixtureID, CFAccessClientSecret: cfFixtureSecret, HTTP: &http.Client{Transport: ft, Timeout: timeout}}
+	e := allRequestForms(c)[form](context.Background())
+	ft.mu.Lock()
+	defer ft.mu.Unlock()
+	if len(ft.forged) != 1 {
+		t.Fatalf("transport forged %d errors; want 1", len(ft.forged))
+	}
+	return e, ft.forged[0]
+}
+
+// assertPassedThrough checks an error on the configured URL kept Go's
+// url.Error around the transport's own error, as main returns an ordinary
+// error, and carries no password or credential.
+func assertPassedThrough(t *testing.T, e, forged error) {
+	t.Helper()
+	var ue *url.Error
+	var he *HTTPError
+	if errors.As(e, &he) || !errors.As(e, &ue) {
+		t.Fatalf("configured-URL error without a redirect was reclassified: got %T %v", e, e)
+	}
+	if ue.Err != forged {
+		t.Errorf("url.Error no longer wraps the transport's own error: %v", e)
+	}
+	if leaks := errorLeaks(e, "userinfo-password.fixture", cfFixtureID, cfFixtureSecret, "fixture-token"); len(leaks) != 0 {
+		t.Errorf("error output carries %d credential values", len(leaks))
+	}
+}
+
+// Without a client deadline (Timeout zero or negative — Go ignores a
+// nonpositive Timeout) the redirect response is recorded, so no forged
+// parse-error text, canonical or not, turns a configured-URL error into a
+// redirect: on every request form, with or without password userinfo.
+func TestForgedParseErrorWithoutDeadlinePassesThrough(t *testing.T) {
+	for fname, rewrite := range forgedParseErrors() {
+		for _, timeout := range []time.Duration{0, -time.Second} {
 			for _, userinfo := range []bool{false, true} {
-				if fname == "go-exact" && timeout != 0 {
-					continue // no recording transport under Client.Timeout; see do
+				for form := range allRequestForms(Client{}) {
+					t.Run(fmt.Sprintf("%s/timeout-%v/userinfo-%t/%s", fname, timeout, userinfo, form), func(t *testing.T) {
+						e, forged := runForged(t, form, rewrite, timeout, userinfo)
+						assertPassedThrough(t, e, forged)
+					})
 				}
-				t.Run(fmt.Sprintf("%s/timeout-%t/userinfo-%t", fname, timeout != 0, userinfo), func(t *testing.T) {
-					base := closedURL
-					if userinfo {
-						u, _ := url.Parse(base)
-						u.User = url.UserPassword("fixture-user", password)
-						base = u.String()
-					}
-					tr := &http.Transport{}
-					defer tr.CloseIdleConnections()
-					cl := &http.Client{Transport: prefixTransport{tr, rewrite}, Timeout: timeout}
-					c := Client{URL: base, Token: "fixture-token", HTTP: cl}
-					raw, _ := c.newRequest(context.Background(), "GET", "/v1/documents/fixture", nil)
-					_, direct := cl.Do(raw)
-					_, _, e := c.GetDocument(context.Background(), "fixture")
-					var ue *url.Error
-					var he *HTTPError
-					if errors.As(e, &he) || !errors.As(e, &ue) {
-						t.Fatalf("configured-URL error without a redirect was reclassified: got %T %v", e, e)
-					}
-					if direct == nil || e.Error() != direct.Error() {
-						t.Errorf("text differs from a direct http.Client error:\n got: %v\nwant: %v", e, direct)
-					}
-					if leaks := errorLeaks(e, password); len(leaks) != 0 {
-						t.Errorf("error output carries the userinfo password")
-					}
+			}
+		}
+	}
+}
+
+// Under a positive Client.Timeout only Go's canonical rendering is matched:
+// a forged parse error with any other quoting, or without a quoted Location
+// at all, passes through on every request form.
+func TestNonCanonicalForgedParseErrorUnderTimeoutPassesThrough(t *testing.T) {
+	for fname, rewrite := range forgedParseErrors() {
+		if fname == "canonical" {
+			continue
+		}
+		for _, userinfo := range []bool{false, true} {
+			for form := range allRequestForms(Client{}) {
+				t.Run(fmt.Sprintf("%s/userinfo-%t/%s", fname, userinfo, form), func(t *testing.T) {
+					e, forged := runForged(t, form, rewrite, 5*time.Second, userinfo)
+					assertPassedThrough(t, e, forged)
 				})
 			}
 		}
 	}
 }
 
+// Documented excluded case (invariant c amendment): a caller client with a
+// positive Client.Timeout whose transport forges Go's canonical parse-error
+// text is classified redirect_location_invalid — the fixed, leak-free error —
+// because no redirect response can be recorded without changing timeout
+// semantics. Pinned so any change to it is deliberate.
+func TestCanonicalForgedParseErrorUnderTimeoutIsExcludedCase(t *testing.T) {
+	rewrite := forgedParseErrors()["canonical"]
+	for _, userinfo := range []bool{false, true} {
+		for form := range allRequestForms(Client{}) {
+			t.Run(fmt.Sprintf("userinfo-%t/%s", userinfo, form), func(t *testing.T) {
+				e, _ := runForged(t, form, rewrite, 5*time.Second, userinfo)
+				var he *HTTPError
+				if !errors.As(e, &he) || he.Code != "redirect_location_invalid" {
+					t.Fatalf("excluded case changed: err=%T want redirect_location_invalid", e)
+				}
+				if leaks := errorLeaks(e, "%zz", "userinfo-password.fixture", cfFixtureID, cfFixtureSecret, "fixture-token"); len(leaks) != 0 {
+					t.Errorf("excluded-case error leaks %d values", len(leaks))
+				}
+			})
+		}
+	}
+}
+
 // A real malformed Location is still redirect_location_invalid with no byte
 // of it in the error: directly, after a hop back to the exact request URL,
-// and with or without Client.Timeout.
+// and with Client.Timeout zero, negative or positive.
 func TestMalformedLocationStillClassified(t *testing.T) {
 	const location = "https://team.cloudflareaccess.com/%zz?malformed-canary.fixture"
 	for _, afterHop := range []bool{false, true} {
-		for _, timeout := range []time.Duration{0, 5 * time.Second} {
+		for _, timeout := range []time.Duration{0, -time.Second, 5 * time.Second} {
 			for name := range allRequestForms(Client{}) {
 				if afterHop && name == "presign" {
 					continue
 				}
-				t.Run(fmt.Sprintf("hop-%t/timeout-%t/%s", afterHop, timeout != 0, name), func(t *testing.T) {
+				t.Run(fmt.Sprintf("hop-%t/timeout-%v/%s", afterHop, timeout, name), func(t *testing.T) {
 					var hits atomic.Int32
 					hk := newRequestRecorder(t, func(w http.ResponseWriter, r *http.Request) {
 						if hits.Add(1) == 1 && afterHop {

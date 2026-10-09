@@ -229,10 +229,11 @@ func (c Client) redirectError(resp *http.Response) error {
 // signed login query or other response-controlled data, so they collapse to
 // named errors. What happened is recorded for this one request — the policy
 // refusal or followed hop by wrapping cl's policy, the redirect response by
-// wrapping its transport — never inferred from error text or the error URL,
-// which Go rewrites (Location, redacted password). Every other error,
-// including a failure after a hop back to the exact request URL, surfaces
-// unchanged.
+// wrapping its transport — never inferred from the error URL, which Go
+// rewrites (Location, redacted password). Only a caller client with a
+// positive Client.Timeout falls back to matching the parse-error text (see
+// isLocationParseError). Every other error, including a failure after a hop
+// back to the exact request URL, surfaces unchanged.
 func (c Client) do(cl *http.Client, r *http.Request) (*http.Response, error) {
 	hc := *cl
 	policy := hc.CheckRedirect
@@ -254,12 +255,13 @@ func (c Client) do(cl *http.Client, r *http.Request) (*http.Response, error) {
 		}
 		return e
 	}
-	// Client.Timeout treats a transport it does not know differently (legacy
-	// cancel channel, racy timeout detection), so the recording transport is
-	// only installed when the client has no Timeout; otherwise a Location
-	// parse error must be one Go itself would produce for this request.
+	// A positive Client.Timeout treats a transport it does not know
+	// differently (legacy cancel channel, racy timeout detection), so the
+	// recording transport is installed only when the client has no deadline —
+	// Go ignores a nonpositive Timeout. Under a positive Timeout the Location
+	// parse error is matched by its canonical text instead.
 	var trace *redirectTrace
-	if hc.Timeout == 0 {
+	if hc.Timeout <= 0 {
 		trace = &redirectTrace{next: hc.Transport}
 		if trace.next == nil {
 			trace.next = http.DefaultTransport
@@ -319,10 +321,16 @@ func (t *redirectTrace) RoundTrip(r *http.Request) (*http.Response, error) {
 	return resp, e
 }
 
-// isLocationParseError reports whether e is exactly the error Go's client
-// returns when a Location answering a request for base does not parse: the
-// quoted Location must itself fail to resolve against base with the same
-// message, so an ordinary error that merely shares the prefix never matches.
+// isLocationParseError reports whether e has the canonical rendering of
+// Go's Location parse error for a request to base — "failed to parse Location
+// header " then the Location as fmt %q renders it (strconv.Quote; hex,
+// raw-string or rune quoting is rejected), then ": " and the error base.Parse
+// itself returns for that Location. Matching the text does not prove Go wrote
+// it: under a positive Client.Timeout, where no response is recorded, a
+// caller transport that forges this exact text for an unparseable Location is
+// classified redirect_location_invalid — a fixed, leak-free error. That
+// excluded case is unreachable from the CLI, stdio and configuredClient,
+// which never set a Timeout and always record the redirect response.
 func isLocationParseError(e error, base *url.URL) bool {
 	rest, ok := strings.CutPrefix(e.Error(), "failed to parse Location header ")
 	if !ok {
@@ -332,7 +340,10 @@ func isLocationParseError(e error, base *url.URL) bool {
 	if qe != nil {
 		return false
 	}
-	loc, _ := strconv.Unquote(q)
+	loc, ue := strconv.Unquote(q)
+	if ue != nil || q != strconv.Quote(loc) {
+		return false
+	}
 	_, pe := base.Parse(loc)
 	return pe != nil && rest == q+": "+pe.Error()
 }
