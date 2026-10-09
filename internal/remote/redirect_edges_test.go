@@ -12,6 +12,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -285,5 +286,198 @@ func TestConfiguredURLErrorsWithUserinfoKeepChain(t *testing.T) {
 				t.Errorf("error output carries the userinfo password")
 			}
 		})
+	}
+}
+
+// exactHopServer answers the first request with a 307 back to the exact
+// request URI and fails every later request: "stall" blocks until the client
+// gives up, "malformed" writes a response that is not HTTP.
+func exactHopServer(t *testing.T, failure string) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+	var hits atomic.Int32
+	release := make(chan struct{})
+	s := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		if hits.Add(1) == 1 {
+			w.Header().Set("Location", r.URL.RequestURI())
+			w.WriteHeader(http.StatusTemporaryRedirect)
+			return
+		}
+		if failure == "stall" {
+			select {
+			case <-r.Context().Done():
+			case <-release:
+			}
+			return
+		}
+		conn, buf, e := w.(http.Hijacker).Hijack()
+		if e != nil {
+			t.Error("fixture hijack failed")
+			return
+		}
+		_, _ = buf.WriteString("invalid fixture response\r\n\r\n")
+		_ = buf.Flush()
+		_ = conn.Close()
+	}))
+	s.Config.ErrorLog = log.New(io.Discard, "", 0)
+	s.Start()
+	t.Cleanup(func() { close(release); s.Close() })
+	return s, &hits
+}
+
+// A same-origin 307 back to the exact request URL names nothing but the
+// configured URL, so a transport failure or timeout on that hop keeps Go's
+// url.Error chain, Timeout() and transport text on every following request
+// form, with or without password userinfo — as on main.
+func TestExactURLHopFailureKeepsGoError(t *testing.T) {
+	const password = "userinfo-password.fixture"
+	for _, failure := range []string{"stall", "malformed"} {
+		for _, userinfo := range []bool{false, true} {
+			for name := range allRequestForms(Client{}) {
+				if name == "presign" {
+					continue // presign never follows
+				}
+				t.Run(fmt.Sprintf("%s/userinfo-%t/%s", failure, userinfo, name), func(t *testing.T) {
+					s, hits := exactHopServer(t, failure)
+					base := s.URL
+					if userinfo {
+						u, _ := url.Parse(base)
+						u.User = url.UserPassword("fixture-user", password)
+						base = u.String()
+					}
+					tr := &http.Transport{}
+					defer tr.CloseIdleConnections()
+					cl := &http.Client{Transport: tr}
+					if failure == "stall" {
+						cl.Timeout = 200 * time.Millisecond
+					}
+					c := Client{URL: base, Token: "fixture-token", CFAccessClientID: cfFixtureID, CFAccessClientSecret: cfFixtureSecret, HTTP: cl}
+					e := allRequestForms(c)[name](context.Background())
+					var ue *url.Error
+					var he *HTTPError
+					if errors.As(e, &he) || !errors.As(e, &ue) {
+						t.Fatalf("exact-URL hop failure lost Go's url.Error: got %T %v", e, e)
+					}
+					switch failure {
+					case "stall":
+						if !ue.Timeout() || !errors.Is(e, context.DeadlineExceeded) || !strings.Contains(e.Error(), "Client.Timeout exceeded") {
+							t.Errorf("exact-URL hop timeout lost its timeout semantics: %v", e)
+						}
+					case "malformed":
+						if !strings.Contains(e.Error(), "malformed HTTP") {
+							t.Errorf("exact-URL hop transport text changed: %v", e)
+						}
+					}
+					if hits.Load() != 2 {
+						t.Errorf("server saw %d requests; want the 307 and the exact-URL hop", hits.Load())
+					}
+					if leaks := errorLeaks(e, password, cfFixtureID, cfFixtureSecret, "fixture-token"); len(leaks) != 0 {
+						t.Errorf("error output carries %d credential values", len(leaks))
+					}
+				})
+			}
+		}
+	}
+}
+
+// prefixTransport is a caller transport whose ordinary dial error text starts
+// like Go's Location parse error, without any response or redirect.
+type prefixTransport struct {
+	next   http.RoundTripper
+	format string
+}
+
+func (t prefixTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	resp, e := t.next.RoundTrip(r)
+	if e != nil {
+		return nil, fmt.Errorf(t.format, e)
+	}
+	return resp, nil
+}
+
+// An error on the configured URL with no redirect response is never
+// classified as a redirect, even when a caller transport's text shares Go's
+// malformed-Location prefix: it equals a direct http.Client error, with or
+// without password userinfo and with or without Client.Timeout.
+func TestPrefixCollidingTransportKeepsChain(t *testing.T) {
+	const password = "userinfo-password.fixture"
+	closed := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	closedURL := closed.URL
+	closed.Close()
+	formats := map[string]string{
+		"prefix-colon": "failed to parse Location header: upstream transport diagnostic: %w",
+		"go-shaped":    `failed to parse Location header "/%%zz": parse "/%%zz": invalid URL escape "%%zz" (%w)`,
+	}
+	for fname, format := range formats {
+		for _, timeout := range []time.Duration{0, 5 * time.Second} {
+			for _, userinfo := range []bool{false, true} {
+				if fname == "go-shaped" && timeout != 0 {
+					continue // no recording transport under Client.Timeout; see do
+				}
+				t.Run(fmt.Sprintf("%s/timeout-%t/userinfo-%t", fname, timeout != 0, userinfo), func(t *testing.T) {
+					base := closedURL
+					if userinfo {
+						u, _ := url.Parse(base)
+						u.User = url.UserPassword("fixture-user", password)
+						base = u.String()
+					}
+					tr := &http.Transport{}
+					defer tr.CloseIdleConnections()
+					cl := &http.Client{Transport: prefixTransport{tr, format}, Timeout: timeout}
+					c := Client{URL: base, Token: "fixture-token", HTTP: cl}
+					raw, _ := c.newRequest(context.Background(), "GET", "/v1/documents/fixture", nil)
+					_, direct := cl.Do(raw)
+					_, _, e := c.GetDocument(context.Background(), "fixture")
+					var ue *url.Error
+					var he *HTTPError
+					if errors.As(e, &he) || !errors.As(e, &ue) {
+						t.Fatalf("configured-URL error without a redirect was reclassified: got %T %v", e, e)
+					}
+					if direct == nil || e.Error() != direct.Error() {
+						t.Errorf("text differs from a direct http.Client error:\n got: %v\nwant: %v", e, direct)
+					}
+					if leaks := errorLeaks(e, password); len(leaks) != 0 {
+						t.Errorf("error output carries the userinfo password")
+					}
+				})
+			}
+		}
+	}
+}
+
+// A real malformed Location is still redirect_location_invalid with no byte
+// of it in the error: directly, after a hop back to the exact request URL,
+// and with or without Client.Timeout.
+func TestMalformedLocationStillClassified(t *testing.T) {
+	const location = "https://team.cloudflareaccess.com/%zz?malformed-canary.fixture"
+	for _, afterHop := range []bool{false, true} {
+		for _, timeout := range []time.Duration{0, 5 * time.Second} {
+			for name := range allRequestForms(Client{}) {
+				if afterHop && name == "presign" {
+					continue
+				}
+				t.Run(fmt.Sprintf("hop-%t/timeout-%t/%s", afterHop, timeout != 0, name), func(t *testing.T) {
+					var hits atomic.Int32
+					hk := newRequestRecorder(t, func(w http.ResponseWriter, r *http.Request) {
+						if hits.Add(1) == 1 && afterHop {
+							w.Header().Set("Location", r.URL.RequestURI())
+							w.WriteHeader(http.StatusTemporaryRedirect)
+							return
+						}
+						w.Header().Set("Location", location)
+						w.WriteHeader(http.StatusFound)
+					})
+					c := Client{URL: hk.URL, Token: "fixture-token", CFAccessClientID: cfFixtureID, CFAccessClientSecret: cfFixtureSecret, HTTP: &http.Client{Timeout: timeout}}
+					e := allRequestForms(c)[name](context.Background())
+					var he *HTTPError
+					if !errors.As(e, &he) || he.Code != "redirect_location_invalid" {
+						t.Fatalf("err=%v want redirect_location_invalid", e)
+					}
+					if leaks := errorLeaks(e, "malformed-canary", "%zz", cfFixtureID, cfFixtureSecret, "fixture-token"); len(leaks) != 0 {
+						t.Errorf("malformed-Location error leaks %d values", len(leaks))
+					}
+				})
+			}
+		}
 	}
 }

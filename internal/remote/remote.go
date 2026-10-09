@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"runtime/debug"
+	"strconv"
 	"strings"
 
 	"github.com/mgh3326/handoffkeep/internal/store"
@@ -226,10 +227,12 @@ func (c Client) redirectError(resp *http.Response) error {
 // raw Location header into the url.Error URL when CheckRedirect fails, and
 // interpolates it verbatim when a Location fails to parse — both can carry a
 // signed login query or other response-controlled data, so they collapse to
-// named errors. Whether a redirect was refused or followed is recorded by
-// wrapping cl's policy for this one request, never inferred from the error
-// URL, which Go rewrites (Location, redacted password). Ordinary
-// dial/TLS/timeout errors on the configured URL surface unchanged.
+// named errors. What happened is recorded for this one request — the policy
+// refusal or followed hop by wrapping cl's policy, the redirect response by
+// wrapping its transport — never inferred from error text or the error URL,
+// which Go rewrites (Location, redacted password). Every other error,
+// including a failure after a hop back to the exact request URL, surfaces
+// unchanged.
 func (c Client) do(cl *http.Client, r *http.Request) (*http.Response, error) {
 	hc := *cl
 	policy := hc.CheckRedirect
@@ -251,6 +254,18 @@ func (c Client) do(cl *http.Client, r *http.Request) (*http.Response, error) {
 		}
 		return e
 	}
+	// Client.Timeout treats a transport it does not know differently (legacy
+	// cancel channel, racy timeout detection), so the recording transport is
+	// only installed when the client has no Timeout; otherwise a Location
+	// parse error must be one Go itself would produce for this request.
+	var trace *redirectTrace
+	if hc.Timeout == 0 {
+		trace = &redirectTrace{next: hc.Transport}
+		if trace.next == nil {
+			trace.next = http.DefaultTransport
+		}
+		hc.Transport = trace
+	}
 	resp, e := hc.Do(r)
 	if e == nil {
 		return resp, nil
@@ -260,7 +275,7 @@ func (c Client) do(cl *http.Client, r *http.Request) (*http.Response, error) {
 		// The refusal comes back with the last response; Go sets the url.Error
 		// URL to the raw Location, and a caller-supplied policy may wrap or
 		// quote it, so no part of that error surfaces — only the wrapper's own
-		// cap, by identity.
+		// cap, recognized with errors.Is and returned as the bare sentinel.
 		if errors.Is(refused, ErrTooManyRedirects) {
 			return resp, ErrTooManyRedirects
 		}
@@ -269,19 +284,57 @@ func (c Client) do(cl *http.Client, r *http.Request) (*http.Response, error) {
 			status = resp.StatusCode
 		}
 		return resp, &HTTPError{Status: status, Code: "redirect_refused", Reason: "the redirect policy refused to follow a redirect from the configured handoffkeep host"}
-	case hop != nil:
-		// A followed redirect hop failed before a response; the error URL is
-		// derived from a response-controlled Location and must not surface.
+	case hop != nil && hop.String() != r.URL.String():
+		// A followed redirect hop to another URL failed before a response; the
+		// error URL is derived from a response-controlled Location and must not
+		// surface. A hop back to the exact request URL names only the
+		// configured URL, so its error keeps Go's chain like any other.
 		if !c.sameOriginHost(hop.Host) {
 			return resp, &HTTPError{Code: "redirect_foreign_host", Reason: "a redirect hop failed away from the configured handoffkeep host"}
 		}
 		return resp, &HTTPError{Code: "redirect_location_invalid", Reason: "a redirect hop failed before a response was received"}
 	}
+	base := r.URL
+	if hop != nil {
+		base = hop
+	}
 	var ue *url.Error
-	if errors.As(e, &ue) && strings.HasPrefix(ue.Err.Error(), "failed to parse Location header") {
+	if (trace == nil || trace.located) && errors.As(e, &ue) && isLocationParseError(ue.Err, base) {
 		return resp, &HTTPError{Code: "redirect_location_invalid", Reason: "the hk URL answered a redirect with an invalid Location header"}
 	}
 	return resp, e
+}
+
+// redirectTrace records whether the last round trip of one request answered
+// a followable redirect status with a Location — the only state after which
+// Go reports a Location parse error.
+type redirectTrace struct {
+	next    http.RoundTripper
+	located bool
+}
+
+func (t *redirectTrace) RoundTrip(r *http.Request) (*http.Response, error) {
+	resp, e := t.next.RoundTrip(r)
+	t.located = e == nil && resp != nil && isRedirectStatus(resp.StatusCode) && resp.Header.Get("Location") != ""
+	return resp, e
+}
+
+// isLocationParseError reports whether e is exactly the error Go's client
+// returns when a Location answering a request for base does not parse: the
+// quoted Location must itself fail to resolve against base with the same
+// message, so an ordinary error that merely shares the prefix never matches.
+func isLocationParseError(e error, base *url.URL) bool {
+	rest, ok := strings.CutPrefix(e.Error(), "failed to parse Location header ")
+	if !ok {
+		return false
+	}
+	q, qe := strconv.QuotedPrefix(rest)
+	if qe != nil {
+		return false
+	}
+	loc, _ := strconv.Unquote(q)
+	_, pe := base.Parse(loc)
+	return pe != nil && rest == q+": "+pe.Error()
 }
 
 // htmlBodyError rejects a 2xx text/html answer on a JSON API call — the
