@@ -383,14 +383,14 @@ func TestExactURLHopFailureKeepsGoError(t *testing.T) {
 // prefixTransport is a caller transport whose ordinary dial error text starts
 // like Go's Location parse error, without any response or redirect.
 type prefixTransport struct {
-	next   http.RoundTripper
-	format string
+	next    http.RoundTripper
+	rewrite func(error) error
 }
 
 func (t prefixTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	resp, e := t.next.RoundTrip(r)
 	if e != nil {
-		return nil, fmt.Errorf(t.format, e)
+		return nil, t.rewrite(e)
 	}
 	return resp, nil
 }
@@ -404,14 +404,19 @@ func TestPrefixCollidingTransportKeepsChain(t *testing.T) {
 	closed := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	closedURL := closed.URL
 	closed.Close()
-	formats := map[string]string{
-		"prefix-colon": "failed to parse Location header: upstream transport diagnostic: %w",
-		"go-shaped":    `failed to parse Location header "/%%zz": parse "/%%zz": invalid URL escape "%%zz" (%w)`,
+	_, pe := url.Parse("/%zz")
+	goText := fmt.Sprintf("failed to parse Location header %q: %v", "/%zz", pe)
+	formats := map[string]func(error) error{
+		"prefix-colon": func(e error) error {
+			return fmt.Errorf("failed to parse Location header: upstream transport diagnostic: %w", e)
+		},
+		// byte-identical to Go's own parse error for a real unparseable Location
+		"go-exact": func(error) error { return errors.New(goText) },
 	}
-	for fname, format := range formats {
+	for fname, rewrite := range formats {
 		for _, timeout := range []time.Duration{0, 5 * time.Second} {
 			for _, userinfo := range []bool{false, true} {
-				if fname == "go-shaped" && timeout != 0 {
+				if fname == "go-exact" && timeout != 0 {
 					continue // no recording transport under Client.Timeout; see do
 				}
 				t.Run(fmt.Sprintf("%s/timeout-%t/userinfo-%t", fname, timeout != 0, userinfo), func(t *testing.T) {
@@ -423,7 +428,7 @@ func TestPrefixCollidingTransportKeepsChain(t *testing.T) {
 					}
 					tr := &http.Transport{}
 					defer tr.CloseIdleConnections()
-					cl := &http.Client{Transport: prefixTransport{tr, format}, Timeout: timeout}
+					cl := &http.Client{Transport: prefixTransport{tr, rewrite}, Timeout: timeout}
 					c := Client{URL: base, Token: "fixture-token", HTTP: cl}
 					raw, _ := c.newRequest(context.Background(), "GET", "/v1/documents/fixture", nil)
 					_, direct := cl.Do(raw)
