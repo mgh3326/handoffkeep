@@ -29,7 +29,7 @@ func chatPool(t *testing.T) *pgxpool.Pool {
 
 func chatQuestionID(t *testing.T, n int) string {
 	t.Helper()
-	return fmt.Sprintf("Q-%s-%06d%02d", time.Now().UTC().Format("20060102"), time.Now().UnixNano()%1000000, n)
+	return fmt.Sprintf("Q-%s-%d%02d", time.Now().UTC().Format("20060102"), time.Now().UnixNano(), n)
 }
 
 func putChatQuestion(t *testing.T, hURL, token, id, lane, body string) (int, store.ChatQuestion) {

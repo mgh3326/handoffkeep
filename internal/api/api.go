@@ -462,6 +462,10 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("GET /v1/chat/messages", s.chatMessagesList)
 	m.HandleFunc("POST /v1/chat/messages/{id}/delivered", s.chatMessageDelivered)
 	m.HandleFunc("POST /v1/chat/messages/{id}/failed", s.chatMessageFailed)
+	m.HandleFunc("GET /v1/assistant/pending", s.assistantPending)
+	m.HandleFunc("GET /v1/assistant/outbox", s.assistantOutboxList)
+	m.HandleFunc("POST /v1/assistant/outbox/sent", s.assistantOutboxSent)
+	m.HandleFunc("POST /v1/assistant/decisions/resolve", s.assistantDecisionResolve)
 	if s.UI != nil {
 		m.Handle("/ui", s.UI)
 		m.Handle("/ui/", s.UI)
@@ -614,6 +618,21 @@ func appErr(w http.ResponseWriter, e error) {
 		return
 	case errors.Is(e, store.ErrChatQuestionConflict):
 		jsonOut(w, http.StatusConflict, map[string]string{"error": "chat_question_conflict"})
+		return
+	case errors.Is(e, store.ErrChatQuestionStale):
+		jsonOut(w, http.StatusConflict, map[string]string{"error": "chat_question_stale"})
+		return
+	case errors.Is(e, store.ErrDecisionAssistantKind):
+		jsonOut(w, http.StatusBadRequest, map[string]string{"error": "decision_assistant_kind"})
+		return
+	case errors.Is(e, store.ErrDecisionRequestHumanOnly):
+		jsonOut(w, http.StatusConflict, map[string]string{"error": "decision_request_human_only"})
+		return
+	case errors.Is(e, store.ErrOutboxEventNotFound):
+		jsonOut(w, http.StatusNotFound, map[string]string{"error": "not_found"})
+		return
+	case errors.Is(e, store.ErrOutboxConflict):
+		jsonOut(w, http.StatusConflict, map[string]string{"error": "notification_outbox_conflict"})
 		return
 	case errors.Is(e, store.ErrChatConversation):
 		jsonOut(w, http.StatusConflict, map[string]string{"error": "chat_conversation_conflict"})

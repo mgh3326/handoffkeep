@@ -795,6 +795,52 @@ func (c Client) ResolveDecisionRequest(ctx context.Context, id int64, in store.D
 	return out, err
 }
 
+// AssistantPending fetches the assistant surface's pending work list
+// (MGH-36): open decision requests on live tasks, pending chat questions
+// with their revision, and the server's clock.
+func (c Client) AssistantPending(ctx context.Context) (store.AssistantPending, error) {
+	var out store.AssistantPending
+	err := c.call(ctx, "GET", "/v1/assistant/pending", nil, &out)
+	return out, err
+}
+
+// AssistantResolve submits the assistant's answer to an open decision
+// request. Kind is empty unless the caller means "answered"; the server
+// rejects anything else. No responder or by is ever sent — the server
+// derives both from the token and its own constant.
+func (c Client) AssistantResolve(ctx context.Context, in store.DecisionAssistantResolveInput) (store.DecisionRequestResult, error) {
+	var out store.DecisionRequestResult
+	err := c.call(ctx, "POST", "/v1/assistant/decisions/resolve", in, &out)
+	return out, err
+}
+
+// ListUnsentNotifications reads the outbox rows still owed to the hub. A
+// limit under 1 omits the parameter so the server's default applies — the
+// handler rejects an explicit 0.
+func (c Client) ListUnsentNotifications(ctx context.Context, limit int) ([]store.NotificationOutbox, error) {
+	var out struct {
+		Notifications []store.NotificationOutbox `json:"notifications"`
+	}
+	path := "/v1/assistant/outbox"
+	if limit >= 1 {
+		path += "?limit=" + strconv.Itoa(limit)
+	}
+	err := c.call(ctx, "GET", path, nil, &out)
+	return out.Notifications, err
+}
+
+// MarkNotificationSent reports the hub row id a drained outbox event landed
+// as. The mark is idempotent per event id; hub_row_id must be the persisted
+// hub row — a duplicate reply carrying id 0 is not a receipt.
+func (c Client) MarkNotificationSent(ctx context.Context, eventID string, hubRowID int64) (store.NotificationOutbox, error) {
+	var out store.NotificationOutbox
+	err := c.call(ctx, "POST", "/v1/assistant/outbox/sent", struct {
+		EventID  string `json:"event_id"`
+		HubRowID int64  `json:"hub_row_id"`
+	}{eventID, hubRowID}, &out)
+	return out, err
+}
+
 // RelaneResult is one item's outcome in a RelaneTasks response. The batch
 // continues past item failures, so callers must inspect every entry.
 type RelaneResult struct {

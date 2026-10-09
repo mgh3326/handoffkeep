@@ -56,7 +56,7 @@ func TestRelayEventsV6ToV7Upgrade(t *testing.T) {
 		t.Fatal(err)
 	}
 	var version int
-	if err = pool.QueryRow(ctx, `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != 16 {
+	if err = pool.QueryRow(ctx, `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != 17 {
 		t.Fatalf("schema version=%d err=%v", version, err)
 	}
 	var constraintOID uint32
@@ -295,7 +295,7 @@ func TestTaskCommentsMigrationIsAdditiveAndIdempotent(t *testing.T) {
 	if err = pool.QueryRow(ctx, `SELECT count(*) FROM pg_trigger WHERE tgname='task_comments_append_only' AND tgrelid='task_comments'::regclass`).Scan(&triggers); err != nil || triggers != 1 {
 		t.Fatalf("triggers=%d err=%v", triggers, err)
 	}
-	if err = pool.QueryRow(ctx, `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != 16 {
+	if err = pool.QueryRow(ctx, `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != 17 {
 		t.Fatalf("schema version=%d err=%v", version, err)
 	}
 	xs, err := s.ListTaskComments(ctx, task.ID, 0, 10)
@@ -359,7 +359,7 @@ func TestBenchCatalogV11ToV12Upgrade(t *testing.T) {
 		t.Fatal(err)
 	}
 	var version, rows, modelRows int
-	if err = pool.QueryRow(ctx, `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != 16 {
+	if err = pool.QueryRow(ctx, `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != 17 {
 		t.Fatalf("schema version=%d err=%v", version, err)
 	}
 	if err = pool.QueryRow(ctx, `SELECT count(*) FROM schema_version WHERE version=12`).Scan(&version); err != nil || version != 1 {
@@ -538,5 +538,54 @@ func TestV13ThenV14BothChecksHold(t *testing.T) {
 	}
 	if _, err := pool.Exec(ctx, `INSERT INTO relay_events(kind,job_id,owner_lane,received_at) VALUES('job.bogus','x','v14-lane',now())`); err == nil {
 		t.Fatal("relay_events admitted an unknown kind")
+	}
+}
+
+// TestChatV16ToV17Upgrade rewinds a fully migrated schema to the v16 shape —
+// no revision or answer_message_id on chat_questions, no notification_outbox —
+// with rows present, then re-runs migrate. The gate applies v17, keeps every
+// row, and the new columns land with their defaults.
+func TestChatV16ToV17Upgrade(t *testing.T) {
+	s, pool := searchTestStore(t)
+	ctx := context.Background()
+	for _, q := range []string{
+		`DELETE FROM schema_version WHERE version=17`,
+		`ALTER TABLE chat_questions DROP COLUMN revision, DROP COLUMN answer_message_id`,
+		`DROP TABLE notification_outbox`,
+		`DELETE FROM chat_questions WHERE id='Q-20261009-17'`,
+		`DELETE FROM chat_messages WHERE body='historic answer'`,
+		`INSERT INTO chat_questions(id,conversation_id,lane,body,state,created_at,updated_at) VALUES('Q-20261009-17','operator-desk','v16-lane','historic question','pending',now(),now())`,
+		`INSERT INTO chat_messages(author,body,relay_state,created_at) VALUES('operator','historic answer','stored',now())`,
+	} {
+		if _, err := pool.Exec(ctx, q); err != nil {
+			t.Fatalf("rewind: %s: %v", q, err)
+		}
+	}
+	if err := s.migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var version int
+	if err := pool.QueryRow(ctx, `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != 17 {
+		t.Fatalf("schema version=%d err=%v", version, err)
+	}
+	var revision int
+	var answered *int64
+	if err := pool.QueryRow(ctx, `SELECT revision,answer_message_id FROM chat_questions WHERE id='Q-20261009-17'`).Scan(&revision, &answered); err != nil || revision != 1 || answered != nil {
+		t.Fatalf("historic question revision=%d answered=%v err=%v", revision, answered, err)
+	}
+	var outboxTable *string
+	if err := pool.QueryRow(ctx, `SELECT to_regclass('notification_outbox')`).Scan(&outboxTable); err != nil || outboxTable == nil {
+		t.Fatalf("notification_outbox missing err=%v", err)
+	}
+	var messages int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM chat_messages WHERE body='historic answer'`).Scan(&messages); err != nil || messages != 1 {
+		t.Fatalf("historic messages=%d err=%v", messages, err)
+	}
+	// A second migrate is a no-op, and the question still carries its row.
+	if err := s.migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM schema_version WHERE version=17`).Scan(&version); err != nil || version != 1 {
+		t.Fatalf("version 17 rows=%d err=%v", version, err)
 	}
 }

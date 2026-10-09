@@ -69,7 +69,20 @@ var (
 	ErrDecisionRequestStale = errors.New("decision_request_stale")
 	// ErrDecisionRequestResolved refuses a second, different resolution.
 	ErrDecisionRequestResolved = errors.New("decision_request_resolved")
+	// ErrDecisionAssistantKind refuses any resolution kind but answered on
+	// the assistant path: default_applied needs a real application receipt
+	// and withdrawn is the requester's own close, so neither may come back
+	// through an assistant relay.
+	ErrDecisionAssistantKind = errors.New("decision_assistant_kind")
+	// ErrDecisionRequestHumanOnly refuses the assistant path on a request
+	// its producer marked for a human answer only (merge, deploy, spend).
+	ErrDecisionRequestHumanOnly = errors.New("decision_request_human_only")
 )
+
+// DecisionAssistantResponder is the resolution responder the server fixes on
+// the assistant path. Callers never supply it: the record must show the
+// answer came through the assistant relay, not pose as the human operator.
+const DecisionAssistantResponder = "operator-via-berry"
 
 // ErrInvalidDecisionRequest wraps every validation failure so the API can
 // return the specific reason while still classifying it as a bad request.
@@ -87,15 +100,18 @@ type DecisionRequest struct {
 	Question   string `json:"question"`
 	// Reason explains the recommendation; the recommended key itself is the
 	// existing DecisionOption.Recommended flag.
-	Reason         string              `json:"reason,omitempty"`
-	DefaultAction  string              `json:"default_action"`
-	DefaultOption  string              `json:"default_option,omitempty"`
-	DefaultTrigger string              `json:"default_trigger,omitempty"`
-	DueAt          *time.Time          `json:"due_at,omitempty"`
-	Doc            string              `json:"doc,omitempty"`
-	RequestedBy    string              `json:"requested_by"`
-	RequestedAt    time.Time           `json:"requested_at"`
-	Resolution     *DecisionResolution `json:"resolution,omitempty"`
+	Reason         string     `json:"reason,omitempty"`
+	DefaultAction  string     `json:"default_action"`
+	DefaultOption  string     `json:"default_option,omitempty"`
+	DefaultTrigger string     `json:"default_trigger,omitempty"`
+	DueAt          *time.Time `json:"due_at,omitempty"`
+	Doc            string     `json:"doc,omitempty"`
+	RequestedBy    string     `json:"requested_by"`
+	RequestedAt    time.Time  `json:"requested_at"`
+	// HumanOnly marks a request the assistant path must not answer — the
+	// producer's structural "a human decides this" (merge, deploy, spend).
+	HumanOnly  bool                `json:"human_only,omitempty"`
+	Resolution *DecisionResolution `json:"resolution,omitempty"`
 }
 
 // DecisionResolution closes a request. By is the authenticated recorder;
@@ -126,6 +142,10 @@ type DecisionRequestInput struct {
 	// Block also moves the task to needs_decision in the same transaction
 	// (a request that stops the work). Without it the state is unchanged.
 	Block bool `json:"block,omitempty"`
+	// HumanOnly marks the request as answerable only by the human operator's
+	// own paths; the assistant resolve path refuses it. Producers asking
+	// about merge, deploy or spend mark this.
+	HumanOnly bool `json:"human_only,omitempty"`
 }
 
 type DecisionResolveInput struct {
@@ -135,6 +155,17 @@ type DecisionResolveInput struct {
 	Text      string `json:"text,omitempty"`
 	Receipt   string `json:"receipt,omitempty"`
 	Responder string `json:"responder,omitempty"`
+}
+
+// DecisionAssistantResolveInput is what the assistant path accepts: the
+// request to answer and the answer. Kind is optional and may only be
+// "answered". Responder and By are not fields at all — the server fixes
+// Responder to operator-via-berry and By is the authenticated client.
+type DecisionAssistantResolveInput struct {
+	RequestID string `json:"request_id"`
+	Kind      string `json:"kind,omitempty"`
+	Option    string `json:"option,omitempty"`
+	Text      string `json:"text,omitempty"`
 }
 
 // DecisionRequestResult is what a producer needs to notify: the recorded
@@ -148,6 +179,28 @@ type DecisionRequestResult struct {
 
 func decisionRequestID(taskID int64, revision int) string {
 	return "dr-" + strconv.FormatInt(taskID, 10) + "-" + strconv.Itoa(revision)
+}
+
+// ParseDecisionRequestID splits a dr-<task>-<revision> request id into its
+// parts; anything else reports not-ok.
+func ParseDecisionRequestID(id string) (taskID int64, revision int, ok bool) {
+	rest, found := strings.CutPrefix(id, "dr-")
+	if !found {
+		return 0, 0, false
+	}
+	cut := strings.LastIndexByte(rest, '-')
+	if cut < 0 {
+		return 0, 0, false
+	}
+	task, err := strconv.ParseInt(rest[:cut], 10, 64)
+	if err != nil || task < 1 {
+		return 0, 0, false
+	}
+	rev, err := strconv.Atoi(rest[cut+1:])
+	if err != nil || rev < 1 {
+		return 0, 0, false
+	}
+	return task, rev, true
 }
 
 // validDecisionLine accepts one non-empty line of printable text.
@@ -315,7 +368,8 @@ func sameDue(a, b *time.Time) bool {
 func sameDecisionRequest(current DecisionRequest, currentOptions *DecisionOptions, in DecisionRequestInput) bool {
 	return current.Question == in.Question && sameDecisionOptions(currentOptions, &in.Options) && current.Reason == in.Reason &&
 		current.DefaultAction == in.DefaultAction && current.DefaultOption == in.DefaultOption &&
-		current.DefaultTrigger == in.DefaultTrigger && sameDue(current.DueAt, in.DueAt) && current.Doc == in.Doc
+		current.DefaultTrigger == in.DefaultTrigger && sameDue(current.DueAt, in.DueAt) && current.Doc == in.Doc &&
+		current.HumanOnly == in.HumanOnly
 }
 
 func rejectDecisionRequestSecrets(in DecisionRequestInput) error {
@@ -414,6 +468,7 @@ func (s *Store) RecordDecisionRequest(ctx context.Context, taskID int64, by stri
 		DefaultTrigger: in.DefaultTrigger,
 		DueAt:          in.DueAt,
 		Doc:            in.Doc,
+		HumanOnly:      in.HumanOnly,
 		RequestedBy:    by,
 		RequestedAt:    now,
 	}
@@ -468,6 +523,30 @@ func sameResolution(r DecisionResolution, in DecisionResolveInput) bool {
 // request is closed. A request that is not the current one is stale; an
 // identical re-send of the recorded resolution is a duplicate.
 func (s *Store) ResolveDecisionRequest(ctx context.Context, taskID int64, by string, in DecisionResolveInput) (DecisionRequestResult, error) {
+	return s.resolveDecisionRequest(ctx, taskID, by, in, false)
+}
+
+// ResolveDecisionRequestAssistant is the assistant channel's resolve: the
+// kind is fixed to answered, Responder is fixed to operator-via-berry, By is
+// the authenticated client id — none come from caller input. A request on a
+// disposition item or marked human_only is refused, and the recorded
+// resolution carries one notification_outbox row in the same transaction so
+// the lane is owed a notification even if no drainer is up yet.
+func (s *Store) ResolveDecisionRequestAssistant(ctx context.Context, taskID int64, by string, in DecisionAssistantResolveInput) (DecisionRequestResult, error) {
+	if in.Kind != "" && in.Kind != DecisionRequestAnswered {
+		return DecisionRequestResult{}, ErrDecisionAssistantKind
+	}
+	effective := DecisionResolveInput{
+		RequestID: in.RequestID,
+		Kind:      DecisionRequestAnswered,
+		Option:    in.Option,
+		Text:      in.Text,
+		Responder: DecisionAssistantResponder,
+	}
+	return s.resolveDecisionRequest(ctx, taskID, by, effective, true)
+}
+
+func (s *Store) resolveDecisionRequest(ctx context.Context, taskID int64, by string, in DecisionResolveInput, assistant bool) (DecisionRequestResult, error) {
 	if taskID < 1 {
 		return DecisionRequestResult{}, invalidDecisionRequest("task id must be positive")
 	}
@@ -502,6 +581,23 @@ func (s *Store) ResolveDecisionRequest(ctx context.Context, taskID int64, by str
 		}
 		return DecisionRequestResult{}, ErrDecisionRequestResolved
 	}
+	if assistant {
+		// An open request left on a merged or dropped task is uncleaned
+		// state, not answerable work — the pending list already excludes it.
+		// Only the operator path closes it, as request cleanup.
+		if isTerminalTaskState(x.State) {
+			return DecisionRequestResult{}, ErrTaskTerminal
+		}
+		// A disposition item is answered only on the operator's
+		// Access-authenticated web route, and a human_only request names the
+		// boundary in the request itself. Neither may be closed here.
+		if x.Refs.Disposition != nil {
+			return DecisionRequestResult{}, ErrDispositionOperatorOnly
+		}
+		if request.HumanOnly {
+			return DecisionRequestResult{}, ErrDecisionRequestHumanOnly
+		}
+	}
 	if in.Option != "" {
 		if x.Refs.DecisionOptions == nil || !optionKeys(*x.Refs.DecisionOptions)[in.Option] {
 			return DecisionRequestResult{}, invalidDecisionRequest("option " + in.Option + " is not one of the request's options")
@@ -531,6 +627,21 @@ func (s *Store) ResolveDecisionRequest(ctx context.Context, taskID int64, by str
 	}
 	if in.Text != "" {
 		note += ": " + in.Text
+	}
+	if assistant {
+		// The notification is written before the decision event so a failure
+		// anywhere later in the transaction still rolls both back together.
+		head := "[via berry] " + resolved.ID + " answered"
+		if in.Option != "" {
+			head += " " + in.Option
+		}
+		if in.Text != "" {
+			head += ": "
+		}
+		text := assistantLaneText(head, in.Text)
+		if err = insertNotificationOutbox(ctx, tx, OutboxKindDecisionAnswered, x.Lane, decisionAnsweredEventID(resolved.ID), text, now); err != nil {
+			return DecisionRequestResult{}, err
+		}
 	}
 	if err = insertDecisionEvent(ctx, tx, taskID, x.State, by, note, x.Refs, now); err != nil {
 		return DecisionRequestResult{}, err

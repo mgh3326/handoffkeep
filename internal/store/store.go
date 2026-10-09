@@ -834,6 +834,32 @@ func (s *Store) migrate(ctx context.Context) error {
 			}
 		}
 	}
+	var v17Applied bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_version WHERE version=17)`).Scan(&v17Applied); err != nil {
+		return err
+	}
+	if !v17Applied {
+		// Version 17 (MGH-36 PR-1) gives chat questions a monotonic revision
+		// the assistant answer path compares against, and the single-answer
+		// pointer answer_message_id. The notification outbox is hk's durable
+		// record of lane notifications owed for assistant-path resolutions;
+		// event_id is deterministic so a replayed write inserts nothing.
+		// ADD COLUMN with a constant DEFAULT is metadata-only; both ALTERs
+		// take a brief ACCESS EXCLUSIVE lock, so they sit behind the version
+		// gate like v14/v16 instead of running at every start.
+		v17 := []string{
+			`ALTER TABLE chat_questions ADD COLUMN revision INTEGER NOT NULL DEFAULT 1`,
+			`ALTER TABLE chat_questions ADD COLUMN answer_message_id BIGINT`,
+			`CREATE TABLE notification_outbox (id BIGSERIAL PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('decision_answered','chat_answer')), target_lane TEXT NOT NULL, event_id TEXT NOT NULL UNIQUE, text TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL, sent_at TIMESTAMPTZ, hub_row_id BIGINT)`,
+			`CREATE INDEX notification_outbox_unsent ON notification_outbox(id) WHERE sent_at IS NULL`,
+			`INSERT INTO schema_version(version) VALUES (17)`,
+		}
+		for _, q := range v17 {
+			if _, err := tx.Exec(ctx, q); err != nil {
+				return err
+			}
+		}
+	}
 	// Lane-knownness probes for relane run once per batch item. These
 	// indexes keep each probe an index lookup instead of a full scan —
 	// the existing relay_events index on owner_lane is partial and

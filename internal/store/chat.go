@@ -55,22 +55,31 @@ func sortedStateKeys(states map[string]bool) []string {
 var (
 	ErrChatQuestionNotFound = errors.New("chat_question_not_found")
 	ErrChatQuestionConflict = errors.New("chat_question_conflict")
-	ErrChatMessageNotFound  = errors.New("chat_message_not_found")
-	ErrChatMessageConflict  = errors.New("chat_message_conflict")
-	ErrChatConversation     = errors.New("chat_conversation_conflict")
+	// ErrChatQuestionStale refuses an assistant-channel answer whose expected
+	// revision is behind the row's, whose question is no longer pending, or
+	// whose answer slot is already taken — the 409 of the assistant path.
+	ErrChatQuestionStale   = errors.New("chat_question_stale")
+	ErrChatMessageNotFound = errors.New("chat_message_not_found")
+	ErrChatMessageConflict = errors.New("chat_message_conflict")
+	ErrChatConversation    = errors.New("chat_conversation_conflict")
 )
 
 // ChatQuestion is a desk session's durable question for the operator. The id
 // is assigned by the producer (Q-YYYYMMDD-NN) and is the upsert key.
+// Revision rises by one only when the upsert actually changes body or lane;
+// AnswerMessageID points at the one accepted assistant-channel answer and is
+// NULL until then (a human reply never fills it — a reply is not an answer).
 type ChatQuestion struct {
-	ID             string     `json:"id"`
-	ConversationID string     `json:"conversation_id"`
-	Lane           string     `json:"lane"`
-	Body           string     `json:"body"`
-	State          string     `json:"state"`
-	CreatedAt      time.Time  `json:"created_at"`
-	UpdatedAt      time.Time  `json:"updated_at"`
-	ResolvedAt     *time.Time `json:"resolved_at"`
+	ID              string     `json:"id"`
+	ConversationID  string     `json:"conversation_id"`
+	Lane            string     `json:"lane"`
+	Body            string     `json:"body"`
+	State           string     `json:"state"`
+	Revision        int        `json:"revision"`
+	AnswerMessageID *int64     `json:"answer_message_id"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
+	ResolvedAt      *time.Time `json:"resolved_at"`
 }
 
 // ChatMessage is one operator-side chat row. Delivery state is durable here
@@ -95,22 +104,39 @@ type ChatQuestionRelation struct {
 	QuestionText string `json:"question_text"`
 }
 
+// ChatAnswerInput names one pending question an assistant-channel message
+// answers, plus the revision the caller read. The revision makes the write a
+// compare-and-swap: a stale read or an already-answered slot is refused.
+type ChatAnswerInput struct {
+	QuestionID string `json:"question_id"`
+	Revision   int    `json:"revision"`
+}
+
 type ChatMessagePost struct {
 	Message              ChatMessage
 	Questions            []ChatQuestion
 	QuestionIDs          []string
 	ProcessedQuestionIDs []string
+	// Answers is the assistant channel's answer list. Each entry takes the
+	// question's single answer slot in the same transaction as the message.
+	Answers []ChatAnswerInput
 }
 
-const chatQuestionColumns = `id,conversation_id,lane,body,state,created_at,updated_at,resolved_at`
+const chatQuestionColumns = `id,conversation_id,lane,body,state,created_at,updated_at,resolved_at,revision,answer_message_id`
 const chatMessageColumns = `id,conversation_id,author,body,source_channel,origin_event_id,origin_timestamp,relay_state,created_at,delivered_at`
 
+// chatQuestionUpsert refreshes body/lane on the producer's id key. Revision
+// rises exactly when the stored body or lane differs — same-content re-sends
+// and transition-only touches never move it, so an assistant answer compares
+// against the revision it actually read.
+const chatQuestionUpsert = `INSERT INTO chat_questions(id,conversation_id,lane,body,state,created_at,updated_at) VALUES($1,$2,$3,$4,'pending',$5,$5) ON CONFLICT (id) DO UPDATE SET lane=EXCLUDED.lane,body=EXCLUDED.body,updated_at=EXCLUDED.updated_at,revision=chat_questions.revision+CASE WHEN chat_questions.body IS DISTINCT FROM EXCLUDED.body OR chat_questions.lane IS DISTINCT FROM EXCLUDED.lane THEN 1 ELSE 0 END WHERE chat_questions.conversation_id=EXCLUDED.conversation_id RETURNING ` + chatQuestionColumns
+
 func scanChatQuestion(row interface{ Scan(...any) error }, x *ChatQuestion) error {
-	return row.Scan(&x.ID, &x.ConversationID, &x.Lane, &x.Body, &x.State, &x.CreatedAt, &x.UpdatedAt, &x.ResolvedAt)
+	return row.Scan(&x.ID, &x.ConversationID, &x.Lane, &x.Body, &x.State, &x.CreatedAt, &x.UpdatedAt, &x.ResolvedAt, &x.Revision, &x.AnswerMessageID)
 }
 
 func scanChatQuestionCreated(row interface{ Scan(...any) error }, x *ChatQuestion, created *bool) error {
-	return row.Scan(&x.ID, &x.ConversationID, &x.Lane, &x.Body, &x.State, &x.CreatedAt, &x.UpdatedAt, &x.ResolvedAt, created)
+	return row.Scan(&x.ID, &x.ConversationID, &x.Lane, &x.Body, &x.State, &x.CreatedAt, &x.UpdatedAt, &x.ResolvedAt, &x.Revision, &x.AnswerMessageID, created)
 }
 
 func scanChatMessage(row interface{ Scan(...any) error }, x *ChatMessage) error {
@@ -142,7 +168,7 @@ func (s *Store) UpsertChatQuestion(ctx context.Context, x ChatQuestion) (ChatQue
 	x.ConversationID = ChatConversationID
 	now := time.Now().UTC()
 	var created bool
-	err := scanChatQuestionCreated(s.pool.QueryRow(ctx, `INSERT INTO chat_questions(id,conversation_id,lane,body,state,created_at,updated_at) VALUES($1,$2,$3,$4,'pending',$5,$5) ON CONFLICT (id) DO UPDATE SET lane=EXCLUDED.lane,body=EXCLUDED.body,updated_at=EXCLUDED.updated_at WHERE chat_questions.conversation_id=EXCLUDED.conversation_id RETURNING `+chatQuestionColumns+`,(xmax=0) AS created`, x.ID, x.ConversationID, x.Lane, x.Body, now), &x, &created)
+	err := scanChatQuestionCreated(s.pool.QueryRow(ctx, chatQuestionUpsert+`,(xmax=0) AS created`, x.ID, x.ConversationID, x.Lane, x.Body, now), &x, &created)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return x, false, ErrChatConversation
 	}
@@ -254,12 +280,14 @@ func (s *Store) PostChatMessage(ctx context.Context, post ChatMessagePost) (Chat
 		m.SourceChannel = "legacy"
 	}
 	if !chatAuthors[m.Author] || m.Body == "" || !validText(m.Body, MaxBytes) ||
-		(m.SourceChannel != "legacy" && m.SourceChannel != "web" && m.SourceChannel != "claude_stop") ||
+		(m.SourceChannel != "legacy" && m.SourceChannel != "web" && m.SourceChannel != "claude_stop" && m.SourceChannel != "assistant") ||
 		(m.SourceChannel == "web" && m.Author != "operator") ||
+		(m.SourceChannel == "assistant" && m.Author != "operator") ||
 		(m.SourceChannel == "claude_stop" && m.Author != "desk") ||
+		(m.SourceChannel != "assistant" && len(post.Answers) != 0) ||
 		(m.OriginEventID != "" && (len(m.OriginEventID) > 256 || !validText(m.OriginEventID, 256) || strings.ContainsAny(m.OriginEventID, "\n\r"))) ||
 		(m.SourceChannel != "legacy" && m.OriginEventID == "") ||
-		len(post.Questions) > 1000 || len(post.QuestionIDs) > 1000 || len(post.ProcessedQuestionIDs) > 1000 ||
+		len(post.Questions) > 1000 || len(post.QuestionIDs) > 1000 || len(post.ProcessedQuestionIDs) > 1000 || len(post.Answers) > 1000 ||
 		(m.Author == "operator" && (len(post.Questions) != 0 || len(post.ProcessedQuestionIDs) != 0)) ||
 		(m.Author == "desk" && len(post.QuestionIDs) != 0) {
 		return ChatMessage{}, false, errors.New("invalid chat message")
@@ -284,6 +312,23 @@ func (s *Store) PostChatMessage(ctx context.Context, post ChatMessagePost) (Chat
 			return ChatMessage{}, false, errors.New("invalid chat question id")
 		}
 	}
+	answered := map[string]bool{}
+	for _, a := range post.Answers {
+		if !chatQuestionIDRE.MatchString(a.QuestionID) {
+			return ChatMessage{}, false, errors.New("invalid chat question id")
+		}
+		if a.Revision < 1 || answered[a.QuestionID] {
+			return ChatMessage{}, false, errors.New("invalid chat answer")
+		}
+		answered[a.QuestionID] = true
+	}
+	for _, id := range post.QuestionIDs {
+		if answered[id] {
+			// One message cannot both reply-relate and answer the same
+			// question; the answer path writes the relation itself.
+			return ChatMessage{}, false, errors.New("invalid chat answer")
+		}
+	}
 	sort.Slice(post.Questions, func(i, j int) bool { return post.Questions[i].ID < post.Questions[j].ID })
 	for i := 1; i < len(post.Questions); i++ {
 		if post.Questions[i-1].ID == post.Questions[i].ID {
@@ -292,6 +337,7 @@ func (s *Store) PostChatMessage(ctx context.Context, post ChatMessagePost) (Chat
 	}
 	post.QuestionIDs = uniqueSorted(post.QuestionIDs)
 	post.ProcessedQuestionIDs = uniqueSorted(post.ProcessedQuestionIDs)
+	sort.Slice(post.Answers, func(i, j int) bool { return post.Answers[i].QuestionID < post.Answers[j].QuestionID })
 	// Only the semantic fields enter the fingerprint. Current Q state and
 	// timestamps cannot change what a prior event meant.
 	type questionPayload struct{ ID, Lane, Body string }
@@ -303,7 +349,8 @@ func (s *Store) PostChatMessage(ctx context.Context, post ChatMessagePost) (Chat
 		Author, Body                      string
 		Questions                         []questionPayload
 		QuestionIDs, ProcessedQuestionIDs []string
-	}{m.Author, m.Body, qs, post.QuestionIDs, post.ProcessedQuestionIDs})
+		Answers                           []ChatAnswerInput `json:",omitempty"`
+	}{m.Author, m.Body, qs, post.QuestionIDs, post.ProcessedQuestionIDs, post.Answers})
 	hash := fmt.Sprintf("%x", sha256.Sum256(payload))
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -346,7 +393,7 @@ func (s *Store) PostChatMessage(ctx context.Context, post ChatMessagePost) (Chat
 	}
 	for _, q := range post.Questions {
 		var ignored ChatQuestion
-		err := scanChatQuestion(tx.QueryRow(ctx, `INSERT INTO chat_questions(id,conversation_id,lane,body,state,created_at,updated_at) VALUES($1,$2,$3,$4,'pending',$5,$5) ON CONFLICT (id) DO UPDATE SET lane=EXCLUDED.lane,body=EXCLUDED.body,updated_at=EXCLUDED.updated_at WHERE chat_questions.conversation_id=EXCLUDED.conversation_id RETURNING `+chatQuestionColumns, q.ID, m.ConversationID, q.Lane, q.Body, now), &ignored)
+		err := scanChatQuestion(tx.QueryRow(ctx, chatQuestionUpsert, q.ID, m.ConversationID, q.Lane, q.Body, now), &ignored)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ChatMessage{}, false, ErrChatConversation
 		}
@@ -391,6 +438,41 @@ func (s *Store) PostChatMessage(ctx context.Context, post ChatMessagePost) (Chat
 			return ChatMessage{}, false, ErrChatQuestionConflict
 		}
 		if _, err := tx.Exec(ctx, `UPDATE chat_questions SET state='resolved',resolved_at=COALESCE(resolved_at,$2),updated_at=$2 WHERE id=$1 AND state='pending'`, id, now); err != nil {
+			return ChatMessage{}, false, err
+		}
+	}
+	// Assistant-channel answers: each takes the question's one answer slot
+	// under the row lock. State, the caller's expected revision and the empty
+	// slot are the CAS predicate — any mismatch is a stale answer and the
+	// whole post (message, relations, notifications) rolls back.
+	for _, a := range post.Answers {
+		var qLane, qConversation, qState, qBody string
+		var qRevision int
+		var qAnswered *int64
+		err := tx.QueryRow(ctx, `SELECT lane,conversation_id,state,revision,answer_message_id,body FROM chat_questions WHERE id=$1 FOR UPDATE`, a.QuestionID).Scan(&qLane, &qConversation, &qState, &qRevision, &qAnswered, &qBody)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ChatMessage{}, false, ErrChatQuestionNotFound
+		}
+		if err != nil {
+			return ChatMessage{}, false, err
+		}
+		if qConversation != m.ConversationID {
+			return ChatMessage{}, false, ErrChatConversation
+		}
+		if qState != "pending" || qRevision != a.Revision || qAnswered != nil {
+			return ChatMessage{}, false, ErrChatQuestionStale
+		}
+		if tag, err := tx.Exec(ctx, `UPDATE chat_questions SET answer_message_id=$2,updated_at=$3 WHERE id=$1 AND state='pending' AND revision=$4 AND answer_message_id IS NULL`, a.QuestionID, m.ID, now, a.Revision); err != nil {
+			return ChatMessage{}, false, err
+		} else if tag.RowsAffected() != 1 {
+			return ChatMessage{}, false, ErrChatQuestionStale
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO chat_message_questions(message_id,question_id,relation_kind,question_text) VALUES($1,$2,'reply',$3)`, m.ID, a.QuestionID, qBody); err != nil {
+			return ChatMessage{}, false, err
+		}
+		eventID := chatAnsweredEventID(a.QuestionID, a.Revision)
+		text := assistantLaneText("[via berry] "+a.QuestionID+" answered: ", m.Body)
+		if err := insertNotificationOutbox(ctx, tx, OutboxKindChatAnswer, qLane, eventID, text, now); err != nil {
 			return ChatMessage{}, false, err
 		}
 	}

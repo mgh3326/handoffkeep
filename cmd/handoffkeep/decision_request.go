@@ -14,7 +14,7 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
-const decisionRequestUsage = "usage: tasks decision-request <id> --question <text> --option 'A|label' [--option ...] [--recommended A] [--reason <text>] --default-action <text> [--default-option B] [--default-trigger <text>] [--due <RFC3339>] [--doc <key>] [--supersedes dr-<id>-<rev>] [--block] [--no-free-answer]"
+const decisionRequestUsage = "usage: tasks decision-request <id> --question <text> --option 'A|label' [--option ...] [--recommended A] [--reason <text>] --default-action <text> [--default-option B] [--default-trigger <text>] [--due <RFC3339>] [--doc <key>] [--supersedes dr-<id>-<rev>] [--block] [--no-free-answer] [--human-only]"
 
 const decisionResolveUsage = "usage: tasks decision-resolve <id> --request dr-<id>-<rev> --kind answered|default_applied|withdrawn [--option A] [--text <text>] [--receipt <ref>] [--responder <who>]"
 
@@ -120,6 +120,7 @@ func decisionRequestCmd(args []string, out io.Writer) error {
 	supersedes := fs.String("supersedes", "", "the open request this one replaces")
 	block := fs.Bool("block", false, "also move the task to needs_decision")
 	noFreeAnswer := fs.Bool("no-free-answer", false, "disallow a free-form answer")
+	humanOnly := fs.Bool("human-only", false, "reserve the request for the human operator; the assistant path refuses it")
 	valueFlags := map[string]bool{"--url": true, "--token": true, "--question": true, "--option": true, "--recommended": true, "--reason": true, "--default-action": true, "--default-option": true, "--default-trigger": true, "--due": true, "--doc": true, "--supersedes": true}
 	parseArgs, err := splitSubcommandArgs(args[1:], valueFlags)
 	if err != nil {
@@ -141,6 +142,7 @@ func decisionRequestCmd(args []string, out io.Writer) error {
 		Doc:            strings.TrimSpace(*doc),
 		Supersedes:     strings.TrimSpace(*supersedes),
 		Block:          *block,
+		HumanOnly:      *humanOnly,
 	}
 	if len(optionValues) == 0 {
 		return notRecorded(errors.New("at least one --option is required"))
