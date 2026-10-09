@@ -582,6 +582,12 @@ func (s *Store) resolveDecisionRequest(ctx context.Context, taskID int64, by str
 		return DecisionRequestResult{}, ErrDecisionRequestResolved
 	}
 	if assistant {
+		// An open request left on a merged or dropped task is uncleaned
+		// state, not answerable work — the pending list already excludes it.
+		// Only the operator path closes it, as request cleanup.
+		if isTerminalTaskState(x.State) {
+			return DecisionRequestResult{}, ErrTaskTerminal
+		}
 		// A disposition item is answered only on the operator's
 		// Access-authenticated web route, and a human_only request names the
 		// boundary in the request itself. Neither may be closed here.

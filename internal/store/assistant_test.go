@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -81,6 +83,42 @@ func TestAssistantResolveRefusesDisposition(t *testing.T) {
 	}
 	if n := len(outboxRows(t, s)); n != 0 {
 		t.Fatalf("disposition left %d outbox rows", n)
+	}
+}
+
+// Invariant: the assistant path refuses an open request on a merged or
+// dropped task — the pending list already calls that uncleaned state, not
+// answerable work. The refusal writes nothing; the operator path keeps its
+// cleanup meaning and still closes the request.
+func TestAssistantResolveRefusesTerminalTask(t *testing.T) {
+	s, _ := searchTestStore(t)
+	ctx := context.Background()
+	for _, state := range []string{"merged", "dropped"} {
+		task := assistantTask(t, s, "in_progress")
+		request := assistantRecord(t, s, task.ID)
+		if state == "merged" {
+			if _, err := s.TransitionTask(ctx, task.ID, "verifying", "dr-test", "step", nil, ""); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := s.TransitionTask(ctx, task.ID, state, "dr-test", "finish", nil, ""); err != nil {
+			t.Fatal(err)
+		}
+		_, err := s.ResolveDecisionRequestAssistant(ctx, task.ID, "berry-mcp", DecisionAssistantResolveInput{RequestID: request.ID, Option: "A"})
+		if !errors.Is(err, ErrTaskTerminal) {
+			t.Fatalf("state=%s assistant resolve err=%v", state, err)
+		}
+		got, _, _ := s.GetTask(ctx, task.ID)
+		if got.Refs.DecisionRequest.Status != DecisionRequestOpen || got.Refs.DecisionRequest.Resolution != nil {
+			t.Fatalf("state=%s request mutated: %+v", state, got.Refs.DecisionRequest)
+		}
+		closed, err := s.ResolveDecisionRequest(ctx, task.ID, "director-1", DecisionResolveInput{RequestID: request.ID, Kind: DecisionRequestAnswered, Option: "A", Responder: "operator"})
+		if err != nil || closed.Request.Status != DecisionRequestAnswered {
+			t.Fatalf("state=%s operator cleanup resolve=%+v err=%v", state, closed.Request.Status, err)
+		}
+	}
+	if n := len(outboxRows(t, s)); n != 0 {
+		t.Fatalf("terminal resolves left %d outbox rows", n)
 	}
 }
 
@@ -489,6 +527,121 @@ func TestAssistantResolveOutboxRollback(t *testing.T) {
 	got, _, _ := s.GetTask(ctx, task.ID)
 	if got.Refs.DecisionRequest.Status != DecisionRequestOpen || got.Refs.DecisionRequest.Resolution != nil {
 		t.Fatalf("rolled-back resolution recorded: %+v", got.Refs.DecisionRequest)
+	}
+	var outbox int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM notification_outbox`).Scan(&outbox); err != nil || outbox != 0 {
+		t.Fatalf("rolled-back outbox=%d err=%v", outbox, err)
+	}
+}
+
+// Invariant: adding the Answers hash field must not change what a
+// non-assistant payload hashes to — a message stored by pre-v17 code
+// replays byte-identically and returns the stored row, never a conflict.
+func TestPreV17ChatReplayReturnsStored(t *testing.T) {
+	s, pool := searchTestStore(t)
+	ctx := context.Background()
+	// v16 hashed exactly this field set after the same id normalization the
+	// post path still applies; the Answers key did not exist.
+	type qPayload struct{ ID, Lane, Body string }
+	v16Hash := func(m ChatMessage, post ChatMessagePost) string {
+		post.QuestionIDs = uniqueSorted(post.QuestionIDs)
+		post.ProcessedQuestionIDs = uniqueSorted(post.ProcessedQuestionIDs)
+		qs := make([]qPayload, 0, len(post.Questions))
+		for _, q := range post.Questions {
+			qs = append(qs, qPayload{q.ID, q.Lane, q.Body})
+		}
+		payload, _ := json.Marshal(struct {
+			Author, Body                      string
+			Questions                         []qPayload
+			QuestionIDs, ProcessedQuestionIDs []string
+		}{m.Author, m.Body, qs, post.QuestionIDs, post.ProcessedQuestionIDs})
+		return fmt.Sprintf("%x", sha256.Sum256(payload))
+	}
+	seed := func(m ChatMessage, post ChatMessagePost) int64 {
+		t.Helper()
+		m.ConversationID = ChatConversationID
+		if m.Author == "desk" {
+			m.RelayState = "not_sent"
+		} else {
+			m.RelayState = "stored"
+		}
+		var id int64
+		if err := pool.QueryRow(ctx, `INSERT INTO chat_messages(conversation_id,author,body,source_channel,origin_event_id,origin_timestamp,semantic_hash,relay_state,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
+			m.ConversationID, m.Author, m.Body, m.SourceChannel, m.OriginEventID, m.OriginTimestamp, v16Hash(m, post), m.RelayState, time.Now().UTC()).Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		for _, qid := range post.QuestionIDs {
+			var body string
+			if err := pool.QueryRow(ctx, `SELECT body FROM chat_questions WHERE id=$1`, qid).Scan(&body); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := pool.Exec(ctx, `INSERT INTO chat_message_questions(message_id,question_id,relation_kind,question_text) VALUES($1,$2,'reply',$3)`, id, qid, body); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return id
+	}
+	// A web operator reply to a question, as v16 wrote it.
+	qid := fmt.Sprintf("Q-%s-22%06d", time.Now().UTC().Format("20060102"), time.Now().UnixNano()%1000000)
+	if _, _, err := s.UpsertChatQuestion(ctx, ChatQuestion{ID: qid, Lane: "desk-lane", Body: "before v17?"}); err != nil {
+		t.Fatal(err)
+	}
+	web := ChatMessage{Author: "operator", Body: "human reply before v17", SourceChannel: "web", OriginEventID: "v16-replay-web-1"}
+	webID := seed(web, ChatMessagePost{Message: web, QuestionIDs: []string{qid}})
+	got, created, err := s.PostChatMessage(ctx, ChatMessagePost{Message: web, QuestionIDs: []string{qid}})
+	if err != nil || created || got.ID != webID {
+		t.Fatalf("web replay id=%d created=%t err=%v", got.ID, created, err)
+	}
+	if len(got.QuestionRelations) != 1 || got.QuestionRelations[0].QuestionID != qid {
+		t.Fatalf("web replay relations=%+v", got.QuestionRelations)
+	}
+	// A desk claude_stop message, as v16 wrote it.
+	stop := ChatMessage{Author: "desk", Body: "stop notice before v17", SourceChannel: "claude_stop", OriginEventID: "v16-replay-stop-1"}
+	stopID := seed(stop, ChatMessagePost{Message: stop})
+	got, created, err = s.PostChatMessage(ctx, ChatMessagePost{Message: stop})
+	if err != nil || created || got.ID != stopID {
+		t.Fatalf("claude_stop replay id=%d created=%t err=%v", got.ID, created, err)
+	}
+}
+
+// Invariant: the chat-answer outbox row lives in the message transaction —
+// when one answer in a multi-answer post is stale, the earlier answers'
+// outbox rows roll back with the message instead of lingering unsent.
+func TestAssistantChatAnswerOutboxRollsBackWithMessage(t *testing.T) {
+	s, pool := searchTestStore(t)
+	ctx := context.Background()
+	suffix := time.Now().UnixNano() % 1000000
+	fresh := fmt.Sprintf("Q-%s-11%06d", time.Now().UTC().Format("20060102"), suffix)
+	stale := fmt.Sprintf("Q-%s-12%06d", time.Now().UTC().Format("20060102"), suffix)
+	for i, id := range []string{fresh, stale} {
+		if _, _, err := s.UpsertChatQuestion(ctx, ChatQuestion{ID: id, Lane: "desk-lane", Body: fmt.Sprintf("q%d", i)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Bump the second question's revision so the caller's rev 1 is stale.
+	if _, _, err := s.UpsertChatQuestion(ctx, ChatQuestion{ID: stale, Lane: "desk-lane", Body: "edited"}); err != nil {
+		t.Fatal(err)
+	}
+	// fresh sorts first, so its answer and outbox insert run before the
+	// stale answer fails the whole post.
+	_, _, err := s.PostChatMessage(ctx, ChatMessagePost{
+		Message: ChatMessage{Author: "operator", Body: "two answers", SourceChannel: "assistant", OriginEventID: "multi-ev-1"},
+		Answers: []ChatAnswerInput{{QuestionID: fresh, Revision: 1}, {QuestionID: stale, Revision: 1}},
+	})
+	if !errors.Is(err, ErrChatQuestionStale) {
+		t.Fatalf("multi-answer err=%v", err)
+	}
+	var messages int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM chat_messages WHERE origin_event_id='multi-ev-1'`).Scan(&messages); err != nil || messages != 0 {
+		t.Fatalf("rolled-back message left=%d err=%v", messages, err)
+	}
+	q, _, _ := s.GetChatQuestion(ctx, fresh)
+	if q.AnswerMessageID != nil {
+		t.Fatalf("rolled-back answer slot set: %+v", q)
+	}
+	var relations int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM chat_message_questions WHERE question_id=$1`, fresh).Scan(&relations); err != nil || relations != 0 {
+		t.Fatalf("rolled-back relations=%d err=%v", relations, err)
 	}
 	var outbox int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM notification_outbox`).Scan(&outbox); err != nil || outbox != 0 {

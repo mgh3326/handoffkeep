@@ -4,10 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/mgh3326/handoffkeep/internal/api"
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
@@ -107,6 +110,30 @@ func TestAssistantMethodsScrubRedirectErrors(t *testing.T) {
 	check("MarkNotificationSent", e)
 	_, e = c.AssistantResolve(ctx, store.DecisionAssistantResolveInput{RequestID: "dr-1-1", Option: "A"})
 	check("AssistantResolve", e)
+}
+
+// ListUnsentNotifications must work against the real handler too: a limit
+// under 1 omits the query parameter entirely (the handler rejects an
+// explicit 0) so the server default applies.
+func TestListUnsentNotificationsRealHandler(t *testing.T) {
+	url := os.Getenv("HANDOFFKEEP_TEST_DB_URL")
+	if url == "" {
+		t.Skip("HANDOFFKEEP_TEST_DB_URL is required for the real-handler check")
+	}
+	s, err := store.Open(context.Background(), url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	hk := httptest.NewServer(api.Server{Service: api.Service{Store: s}, Tokens: api.Tokens{"berry": "berry-token"}}.Handler())
+	defer hk.Close()
+	c := Client{URL: hk.URL, Token: "berry-token"}
+	ctx := context.Background()
+	for _, limit := range []int{0, -3, 5} {
+		if _, err := c.ListUnsentNotifications(ctx, limit); err != nil {
+			t.Fatalf("limit=%d against the real handler: %v", limit, err)
+		}
+	}
 }
 
 // The assistant resolve body carries no responder or by — only the request

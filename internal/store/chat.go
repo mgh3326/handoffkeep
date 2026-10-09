@@ -349,7 +349,7 @@ func (s *Store) PostChatMessage(ctx context.Context, post ChatMessagePost) (Chat
 		Author, Body                      string
 		Questions                         []questionPayload
 		QuestionIDs, ProcessedQuestionIDs []string
-		Answers                           []ChatAnswerInput
+		Answers                           []ChatAnswerInput `json:",omitempty"`
 	}{m.Author, m.Body, qs, post.QuestionIDs, post.ProcessedQuestionIDs, post.Answers})
 	hash := fmt.Sprintf("%x", sha256.Sum256(payload))
 	tx, err := s.pool.Begin(ctx)

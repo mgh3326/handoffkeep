@@ -814,12 +814,18 @@ func (c Client) AssistantResolve(ctx context.Context, in store.DecisionAssistant
 	return out, err
 }
 
-// ListUnsentNotifications reads the outbox rows still owed to the hub.
+// ListUnsentNotifications reads the outbox rows still owed to the hub. A
+// limit under 1 omits the parameter so the server's default applies — the
+// handler rejects an explicit 0.
 func (c Client) ListUnsentNotifications(ctx context.Context, limit int) ([]store.NotificationOutbox, error) {
 	var out struct {
 		Notifications []store.NotificationOutbox `json:"notifications"`
 	}
-	err := c.call(ctx, "GET", "/v1/assistant/outbox?limit="+strconv.Itoa(limit), nil, &out)
+	path := "/v1/assistant/outbox"
+	if limit >= 1 {
+		path += "?limit=" + strconv.Itoa(limit)
+	}
+	err := c.call(ctx, "GET", path, nil, &out)
 	return out.Notifications, err
 }
 

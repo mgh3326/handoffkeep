@@ -252,6 +252,28 @@ func TestAssistantDecisionResolveAPI(t *testing.T) {
 		t.Fatalf("disposition status=%d body=%v", status, body)
 	}
 
+	// A merged or dropped task refuses the assistant path — an open request
+	// left on it is uncleaned state, not answerable work.
+	for _, state := range []string{"merged", "dropped"} {
+		termTask := drTask(t, s, lane, "claimed", "in_progress")
+		termReq := drRecord(t, s, termTask.ID, drInput("terminal "+state))
+		if state == "merged" {
+			if _, err := s.TransitionTask(t.Context(), termTask.ID, "verifying", "term-test", "step", nil, ""); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := s.TransitionTask(t.Context(), termTask.ID, state, "term-test", "finish", nil, ""); err != nil {
+			t.Fatal(err)
+		}
+		status, body = post(termTask.ID, map[string]any{"request_id": termReq.ID, "option": "A"})
+		if status != http.StatusConflict || body["error"] != "task_terminal" {
+			t.Fatalf("state=%s status=%d body=%v", state, status, body)
+		}
+		if got, _, _ := s.GetTask(t.Context(), termTask.ID); got.Refs.DecisionRequest.Status != store.DecisionRequestOpen {
+			t.Fatalf("state=%s terminal resolve wrote: %+v", state, got.Refs.DecisionRequest)
+		}
+	}
+
 	// Forged responder/by fields are accepted-but-ignored: the recorded
 	// resolution is server-attributed.
 	task := drTask(t, s, lane, "claimed", "in_progress")
