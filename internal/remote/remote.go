@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"runtime/debug"
+	"strconv"
 	"strings"
 
 	"github.com/mgh3326/handoffkeep/internal/store"
@@ -86,7 +87,20 @@ func (c Client) newRequest(ctx context.Context, method, path string, body io.Rea
 // equal: lowercase with a trailing FQDN dot removed.
 func normalizeHost(h string) string {
 	if host, port, e := net.SplitHostPort(h); e == nil {
-		return strings.ToLower(strings.TrimSuffix(host, ".")) + ":" + port
+		return foldHostname(host) + ":" + port
+	}
+	return foldHostname(h)
+}
+
+// foldHostname folds one hostname. The zone of an IPv6 literal
+// (fe80::1%zone) names an interface, which Go resolves case-sensitively, so
+// only the address part is folded and the zone is kept byte-exact — a zone
+// that differs, even by case alone, is a different origin.
+func foldHostname(h string) string {
+	if strings.Contains(h, ":") {
+		if i := strings.IndexByte(h, '%'); i >= 0 {
+			return strings.ToLower(strings.TrimSuffix(h[:i], ".")) + h[i:]
+		}
 	}
 	return strings.ToLower(strings.TrimSuffix(h, "."))
 }
@@ -119,12 +133,17 @@ func (c Client) httpClient() *http.Client {
 			return inner(req, via)
 		}
 		if len(via) >= 10 {
-			return errors.New("stopped after 10 redirects")
+			return ErrTooManyRedirects
 		}
 		return nil
 	}
 	return &hc
 }
+
+// ErrTooManyRedirects is the wrapper's own redirect cap: a same-host loop
+// stops after Go's default ten hops. It is the only redirect-policy error
+// returned as is; callers recognize it with errors.Is.
+var ErrTooManyRedirects = errors.New("stopped after 10 redirects")
 
 // httpClientNoFollow never follows a redirect: the presign answer must surface
 // its Location to the caller rather than forward the CF Access headers — or
@@ -208,35 +227,125 @@ func (c Client) redirectError(resp *http.Response) error {
 // raw Location header into the url.Error URL when CheckRedirect fails, and
 // interpolates it verbatim when a Location fails to parse — both can carry a
 // signed login query or other response-controlled data, so they collapse to
-// named errors (or the bare policy text). Ordinary dial/TLS/timeout errors on
-// the configured URL surface unchanged.
+// named errors. What happened is recorded for this one request — the policy
+// refusal or followed hop by wrapping cl's policy, the redirect response by
+// wrapping its transport — never inferred from the error URL, which Go
+// rewrites (Location, redacted password). Only a caller client with a
+// positive Client.Timeout falls back to matching the parse-error text (see
+// isLocationParseError). Every other error, including a failure after a hop
+// back to the exact request URL, surfaces unchanged.
 func (c Client) do(cl *http.Client, r *http.Request) (*http.Response, error) {
-	resp, e := cl.Do(r)
+	hc := *cl
+	policy := hc.CheckRedirect
+	var refused error
+	var hop *url.URL
+	hc.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		var e error
+		switch {
+		case policy != nil:
+			e = policy(req, via)
+		case len(via) >= 10:
+			e = ErrTooManyRedirects
+		}
+		switch {
+		case e == nil:
+			hop = req.URL
+		case e != http.ErrUseLastResponse:
+			refused = e
+		}
+		return e
+	}
+	// A positive Client.Timeout treats a transport it does not know
+	// differently (legacy cancel channel, racy timeout detection), so the
+	// recording transport is installed only when the client has no deadline —
+	// Go ignores a nonpositive Timeout. Under a positive Timeout the Location
+	// parse error is matched by its canonical text instead.
+	var trace *redirectTrace
+	if hc.Timeout <= 0 {
+		trace = &redirectTrace{next: hc.Transport}
+		if trace.next == nil {
+			trace.next = http.DefaultTransport
+		}
+		hc.Transport = trace
+	}
+	resp, e := hc.Do(r)
 	if e == nil {
 		return resp, nil
 	}
-	var ue *url.Error
-	if !errors.As(e, &ue) {
-		return resp, e
-	}
 	switch {
-	case resp != nil:
-		// A redirect policy refusal returns the last response alongside the
-		// error; its url.Error URL is the response-controlled Location string.
-		// The Err itself carries only the policy text, e.g. the redirect cap.
-		return resp, ue.Err
-	case ue.URL != "" && ue.URL != r.URL.String():
-		// A redirect hop failed before any response; the error URL is derived
-		// from a response-controlled Location and must not surface.
-		if hu, pe := url.Parse(ue.URL); pe == nil && !c.sameOriginHost(hu.Host) {
+	case refused != nil:
+		// The refusal comes back with the last response; Go sets the url.Error
+		// URL to the raw Location, and a caller-supplied policy may wrap or
+		// quote it, so no part of that error surfaces — only the wrapper's own
+		// cap, recognized with errors.Is and returned as the bare sentinel.
+		if errors.Is(refused, ErrTooManyRedirects) {
+			return resp, ErrTooManyRedirects
+		}
+		status := 0
+		if resp != nil {
+			status = resp.StatusCode
+		}
+		return resp, &HTTPError{Status: status, Code: "redirect_refused", Reason: "the redirect policy refused to follow a redirect from the configured handoffkeep host"}
+	case hop != nil && hop.String() != r.URL.String():
+		// A followed redirect hop to another URL failed before a response; the
+		// error URL is derived from a response-controlled Location and must not
+		// surface. A hop back to the exact request URL names only the
+		// configured URL, so its error keeps Go's chain like any other.
+		if !c.sameOriginHost(hop.Host) {
 			return resp, &HTTPError{Code: "redirect_foreign_host", Reason: "a redirect hop failed away from the configured handoffkeep host"}
 		}
 		return resp, &HTTPError{Code: "redirect_location_invalid", Reason: "a redirect hop failed before a response was received"}
-	case strings.HasPrefix(ue.Err.Error(), "failed to parse Location header"):
-		return resp, &HTTPError{Code: "redirect_location_invalid", Reason: "the hk URL answered a redirect with an invalid Location header"}
-	default:
-		return resp, e
 	}
+	base := r.URL
+	if hop != nil {
+		base = hop
+	}
+	var ue *url.Error
+	if (trace == nil || trace.located) && errors.As(e, &ue) && isLocationParseError(ue.Err, base) {
+		return resp, &HTTPError{Code: "redirect_location_invalid", Reason: "the hk URL answered a redirect with an invalid Location header"}
+	}
+	return resp, e
+}
+
+// redirectTrace records whether the last round trip of one request answered
+// a followable redirect status with a Location — the only state after which
+// Go reports a Location parse error.
+type redirectTrace struct {
+	next    http.RoundTripper
+	located bool
+}
+
+func (t *redirectTrace) RoundTrip(r *http.Request) (*http.Response, error) {
+	resp, e := t.next.RoundTrip(r)
+	t.located = e == nil && resp != nil && isRedirectStatus(resp.StatusCode) && resp.Header.Get("Location") != ""
+	return resp, e
+}
+
+// isLocationParseError reports whether e has the canonical rendering of
+// Go's Location parse error for a request to base — "failed to parse Location
+// header " then the Location as fmt %q renders it (strconv.Quote; hex,
+// raw-string or rune quoting is rejected), then ": " and the error base.Parse
+// itself returns for that Location. Matching the text does not prove Go wrote
+// it: under a positive Client.Timeout, where no response is recorded, a
+// caller transport that forges this exact text for an unparseable Location is
+// classified redirect_location_invalid — a fixed, leak-free error. That
+// excluded case is unreachable from the CLI, stdio and configuredClient,
+// which never set a Timeout and always record the redirect response.
+func isLocationParseError(e error, base *url.URL) bool {
+	rest, ok := strings.CutPrefix(e.Error(), "failed to parse Location header ")
+	if !ok {
+		return false
+	}
+	q, qe := strconv.QuotedPrefix(rest)
+	if qe != nil {
+		return false
+	}
+	loc, ue := strconv.Unquote(q)
+	if ue != nil || q != strconv.Quote(loc) {
+		return false
+	}
+	_, pe := base.Parse(loc)
+	return pe != nil && rest == q+": "+pe.Error()
 }
 
 // htmlBodyError rejects a 2xx text/html answer on a JSON API call — the
