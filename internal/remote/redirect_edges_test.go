@@ -403,15 +403,20 @@ func forgedParseErrors() map[string]func(error) error {
 }
 
 // forgeTransport records each error it forges so the test can check the
-// returned chain carries that very error.
+// returned chain carries that very error, and the request it was asked to
+// send so the test can replay it through a plain client.
 type forgeTransport struct {
 	next    http.RoundTripper
 	rewrite func(error) error
 	mu      sync.Mutex
 	forged  []error
+	last    *http.Request
 }
 
 func (t *forgeTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	t.mu.Lock()
+	t.last = r.Clone(r.Context())
+	t.mu.Unlock()
 	resp, e := t.next.RoundTrip(r)
 	if e != nil {
 		e = t.rewrite(e)
@@ -423,9 +428,34 @@ func (t *forgeTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	return resp, nil
 }
 
+// directError sends the request the forging transport saw through a plain
+// http.Client with the same transport and Timeout: the error net/http itself
+// reports, whose text the production error must equal outside the excluded
+// case.
+func directError(t *testing.T, ft *forgeTransport, timeout time.Duration) error {
+	t.Helper()
+	ft.mu.Lock()
+	last := ft.last
+	ft.mu.Unlock()
+	if last == nil {
+		t.Fatal("forging transport was never invoked")
+	}
+	r, e := http.NewRequestWithContext(context.Background(), last.Method, last.URL.String(), nil)
+	if e != nil {
+		t.Fatalf("direct baseline request: %v", e)
+	}
+	r.Header = last.Header.Clone()
+	_, de := (&http.Client{Transport: ft, Timeout: timeout}).Do(r)
+	if de == nil {
+		t.Fatal("direct baseline against a closed listener unexpectedly succeeded")
+	}
+	return de
+}
+
 // runForged sends one request form to a closed listener through a forging
-// caller transport and returns the error with the error the transport forged.
-func runForged(t *testing.T, form string, rewrite func(error) error, timeout time.Duration, userinfo bool) (error, error) {
+// caller transport and returns the error, the error the transport forged and
+// the text a direct http.Client reports for the same request.
+func runForged(t *testing.T, form string, rewrite func(error) error, timeout time.Duration, userinfo bool) (error, error, error) {
 	t.Helper()
 	closed := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	base := closed.URL
@@ -441,17 +471,19 @@ func runForged(t *testing.T, form string, rewrite func(error) error, timeout tim
 	c := Client{URL: base, Token: "fixture-token", CFAccessClientID: cfFixtureID, CFAccessClientSecret: cfFixtureSecret, HTTP: &http.Client{Transport: ft, Timeout: timeout}}
 	e := allRequestForms(c)[form](context.Background())
 	ft.mu.Lock()
-	defer ft.mu.Unlock()
-	if len(ft.forged) != 1 {
-		t.Fatalf("transport forged %d errors; want 1", len(ft.forged))
+	forged := ft.forged
+	ft.mu.Unlock()
+	if len(forged) != 1 {
+		t.Fatalf("transport forged %d errors; want 1", len(forged))
 	}
-	return e, ft.forged[0]
+	return e, forged[0], directError(t, ft, timeout)
 }
 
 // assertPassedThrough checks an error on the configured URL kept Go's
-// url.Error around the transport's own error, as main returns an ordinary
-// error, and carries no password or credential.
-func assertPassedThrough(t *testing.T, e, forged error) {
+// url.Error around the transport's own error — including Go's exact outer
+// text, which must equal a direct http.Client error — as main returns an
+// ordinary error, and carries no password or credential.
+func assertPassedThrough(t *testing.T, e, forged, direct error) {
 	t.Helper()
 	var ue *url.Error
 	var he *HTTPError
@@ -460,6 +492,9 @@ func assertPassedThrough(t *testing.T, e, forged error) {
 	}
 	if ue.Err != forged {
 		t.Errorf("url.Error no longer wraps the transport's own error: %v", e)
+	}
+	if e.Error() != direct.Error() {
+		t.Errorf("text differs from a direct http.Client error:\n got: %v\nwant: %v", e, direct)
 	}
 	if leaks := errorLeaks(e, "userinfo-password.fixture", cfFixtureID, cfFixtureSecret, "fixture-token"); len(leaks) != 0 {
 		t.Errorf("error output carries %d credential values", len(leaks))
@@ -476,8 +511,8 @@ func TestForgedParseErrorWithoutDeadlinePassesThrough(t *testing.T) {
 			for _, userinfo := range []bool{false, true} {
 				for form := range allRequestForms(Client{}) {
 					t.Run(fmt.Sprintf("%s/timeout-%v/userinfo-%t/%s", fname, timeout, userinfo, form), func(t *testing.T) {
-						e, forged := runForged(t, form, rewrite, timeout, userinfo)
-						assertPassedThrough(t, e, forged)
+						e, forged, direct := runForged(t, form, rewrite, timeout, userinfo)
+						assertPassedThrough(t, e, forged, direct)
 					})
 				}
 			}
@@ -496,8 +531,8 @@ func TestNonCanonicalForgedParseErrorUnderTimeoutPassesThrough(t *testing.T) {
 		for _, userinfo := range []bool{false, true} {
 			for form := range allRequestForms(Client{}) {
 				t.Run(fmt.Sprintf("%s/userinfo-%t/%s", fname, userinfo, form), func(t *testing.T) {
-					e, forged := runForged(t, form, rewrite, 5*time.Second, userinfo)
-					assertPassedThrough(t, e, forged)
+					e, forged, direct := runForged(t, form, rewrite, 5*time.Second, userinfo)
+					assertPassedThrough(t, e, forged, direct)
 				})
 			}
 		}
@@ -514,7 +549,7 @@ func TestCanonicalForgedParseErrorUnderTimeoutIsExcludedCase(t *testing.T) {
 	for _, userinfo := range []bool{false, true} {
 		for form := range allRequestForms(Client{}) {
 			t.Run(fmt.Sprintf("userinfo-%t/%s", userinfo, form), func(t *testing.T) {
-				e, _ := runForged(t, form, rewrite, 5*time.Second, userinfo)
+				e, _, _ := runForged(t, form, rewrite, 5*time.Second, userinfo)
 				var he *HTTPError
 				if !errors.As(e, &he) || he.Code != "redirect_location_invalid" {
 					t.Fatalf("excluded case changed: err=%T want redirect_location_invalid", e)

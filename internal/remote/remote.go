@@ -259,7 +259,10 @@ func (c Client) do(cl *http.Client, r *http.Request) (*http.Response, error) {
 	// differently (legacy cancel channel, racy timeout detection), so the
 	// recording transport is installed only when the client has no deadline —
 	// Go ignores a nonpositive Timeout. Under a positive Timeout the Location
-	// parse error is matched by its canonical text instead.
+	// parse error is matched by its canonical text instead: noncanonical
+	// alternate escaping is not matched, though Go's own percent-q rendering
+	// can itself contain hex or unicode escapes for control characters, and
+	// those are accepted.
 	var trace *redirectTrace
 	if hc.Timeout <= 0 {
 		trace = &redirectTrace{next: hc.Transport}
@@ -323,14 +326,18 @@ func (t *redirectTrace) RoundTrip(r *http.Request) (*http.Response, error) {
 
 // isLocationParseError reports whether e has the canonical rendering of
 // Go's Location parse error for a request to base — "failed to parse Location
-// header " then the Location as fmt %q renders it (strconv.Quote; hex,
-// raw-string or rune quoting is rejected), then ": " and the error base.Parse
+// header " then the Location as fmt %q renders it (strconv.Quote; noncanonical
+// alternate escaping — raw-string or rune quoting, or a hand-written hex or
+// unicode escape strconv.Quote would not emit — is rejected, though Go's own
+// percent-q rendering can itself contain hex or unicode escapes for control
+// characters, and those are accepted), then ": " and the error base.Parse
 // itself returns for that Location. Matching the text does not prove Go wrote
 // it: under a positive Client.Timeout, where no response is recorded, a
 // caller transport that forges this exact text for an unparseable Location is
 // classified redirect_location_invalid — a fixed, leak-free error. That
-// excluded case is unreachable from the CLI, stdio and configuredClient,
-// which never set a Timeout and always record the redirect response.
+// excluded case is unreachable from the default or shipped CLI and stdio,
+// which never set a Timeout and always record the redirect response; a library
+// caller can pass its own positive-timeout client to NewStdio.
 func isLocationParseError(e error, base *url.URL) bool {
 	rest, ok := strings.CutPrefix(e.Error(), "failed to parse Location header ")
 	if !ok {

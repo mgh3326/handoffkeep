@@ -33,7 +33,13 @@ sent to a different host or under a different scheme — a redirect that
 switches `http`/`https` on the same host is refused as
 `redirect_scheme_downgrade`/`redirect_scheme_change`. Redirect Locations that
 cannot be parsed surface as `redirect_location_invalid`, never with the
-Location text. With the pair configured, an attachment download that answers
+Location text. Only Go's own canonical percent-q rendering of a bad Location is
+recognized; noncanonical alternate escaping is not, though Go's rendering can
+itself contain hex or unicode escapes for control characters, and those are
+accepted. The default or shipped CLI and stdio set no client timeout and always
+record the redirect response; a library caller that passes its own
+positive-timeout client to `NewStdio` instead falls back to matching that
+canonical text. With the pair configured, an attachment download that answers
 a `text/html` page without an attachment disposition is
 `unexpected_html_response` rather than saved bytes. A `text/html` body on a
 JSON API call is rejected the same way with or without the keys, and a
