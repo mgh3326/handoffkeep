@@ -205,7 +205,7 @@ func TestBenchSchemaV9IsAdditiveAndIdempotent(t *testing.T) {
 		}
 	}
 	var version int
-	if err := p.QueryRow(t.Context(), `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != 16 {
+	if err := p.QueryRow(t.Context(), `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != 17 {
 		t.Fatalf("max schema version=%d err=%v", version, err)
 	}
 	if got := benchCount(t, p, `SELECT count(*) FROM schema_version WHERE version=9`); got != 1 {

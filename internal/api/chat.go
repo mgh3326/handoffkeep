@@ -142,15 +142,16 @@ func (s Server) chatQuestionsList(w http.ResponseWriter, r *http.Request) {
 }
 
 type chatMessageInput struct {
-	ConversationID       string              `json:"conversation_id"`
-	Author               string              `json:"author"`
-	Body                 string              `json:"body"`
-	SourceChannel        string              `json:"source_channel"`
-	OriginEventID        string              `json:"origin_event_id"`
-	OriginTimestamp      *time.Time          `json:"origin_timestamp"`
-	Questions            []chatQuestionInput `json:"questions"`
-	QuestionIDs          []string            `json:"question_ids"`
-	ProcessedQuestionIDs []string            `json:"processed_question_ids"`
+	ConversationID       string                  `json:"conversation_id"`
+	Author               string                  `json:"author"`
+	Body                 string                  `json:"body"`
+	SourceChannel        string                  `json:"source_channel"`
+	OriginEventID        string                  `json:"origin_event_id"`
+	OriginTimestamp      *time.Time              `json:"origin_timestamp"`
+	Questions            []chatQuestionInput     `json:"questions"`
+	QuestionIDs          []string                `json:"question_ids"`
+	ProcessedQuestionIDs []string                `json:"processed_question_ids"`
+	Answers              []store.ChatAnswerInput `json:"answers"`
 }
 
 func (s Server) chatMessageCreate(w http.ResponseWriter, r *http.Request) {
@@ -170,7 +171,7 @@ func (s Server) chatMessageCreate(w http.ResponseWriter, r *http.Request) {
 	for _, q := range input.Questions {
 		questions = append(questions, store.ChatQuestion{ID: q.ID, ConversationID: q.ConversationID, Lane: q.Lane, Body: q.Body})
 	}
-	x, created, err := s.Service.PostChatMessage(r.Context(), store.ChatMessagePost{Message: store.ChatMessage{ConversationID: input.ConversationID, Author: input.Author, Body: input.Body, SourceChannel: input.SourceChannel, OriginEventID: input.OriginEventID, OriginTimestamp: input.OriginTimestamp}, Questions: questions, QuestionIDs: input.QuestionIDs, ProcessedQuestionIDs: input.ProcessedQuestionIDs})
+	x, created, err := s.Service.PostChatMessage(r.Context(), store.ChatMessagePost{Message: store.ChatMessage{ConversationID: input.ConversationID, Author: input.Author, Body: input.Body, SourceChannel: input.SourceChannel, OriginEventID: input.OriginEventID, OriginTimestamp: input.OriginTimestamp}, Questions: questions, QuestionIDs: input.QuestionIDs, ProcessedQuestionIDs: input.ProcessedQuestionIDs, Answers: input.Answers})
 	if err != nil {
 		appErr(w, err)
 		return
