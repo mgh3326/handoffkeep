@@ -80,6 +80,15 @@ content-vs-resend check is evaluated inside the `ON CONFLICT` row lock, so
 two transactions racing on one key cannot both write — identical payloads
 both keep the same id, different payloads let exactly one win.
 
+The same rule applies inside one batch: a repeated `(created_by, origin_id)`
+key is an idempotent resend only when the repeated rows are identical
+(each returns the same server id), and differing repeats reject the whole
+batch with `400 invalid_context` — the store error names the offending row
+positions. A deadlock or serialization failure (SQLSTATE 40P01/40001)
+inside the batch transaction aborts it instead: the loser of a lock cycle
+gets `503 bench_reps_retryable`, writes nothing, and may retry the
+identical batch.
+
 Every attempted insert still consumes one `BIGSERIAL` candidate — including
 attempts rejected by the conflict check — so gaps in `id` are expected,
 harmless, and are the visible trace of refused collisions, not lost rows.
@@ -204,16 +213,17 @@ omitted).
 
 | Status | Body | Meaning |
 |---|---|---|
-| 401 | `{"error":"unauthorized"}` | Missing or unknown bearer token |
-| 409 | `{"error":"bench_rep_conflict","conflicts":[{"index":I,"origin_id":N,"conflict_server_id":M}]}` | Rep write shares a `(created_by, origin_id)` key with a stored row whose content differs; the whole batch is rejected |
-| 403 | `{"error":"operator_required"}` | Catalog write without the operator token |
-| 400 | `{"error":"invalid_context"}` | Malformed body, invalid field, empty batch, or batch over 1000 |
+| 400 | `{"error":"invalid_context"}` | Malformed body, invalid field, empty batch, batch over 1000, or a `(created_by, origin_id)` key repeated inside one rep batch with different content |
 | 400 | `{"error":"deviation_ref_required"}` | Grade write has no usable deviation reference |
 | 400 | `{"error":"decided_by_required"}` | Catalog write has no usable `decided_by` |
 | 400 | `{"error":"bench_catalog_not_monotonic"}` | Catalog write would put a worse grade on a higher effort rung |
 | 400 | `{"error":"bench_catalog_sol_grade"}` | Sol profile graded other than `S+` |
 | 400 | `{"error":"secret_like_content","pattern":"<name>"}` | Secret guard rejected client text |
+| 401 | `{"error":"unauthorized"}` | Missing or unknown bearer token |
+| 403 | `{"error":"operator_required"}` | Catalog write without the operator token |
 | 404 | `{"error":"not_found"}` | Unknown path |
+| 409 | `{"error":"bench_rep_conflict","conflicts":[{"index":I,"origin_id":N,"conflict_server_id":M}]}` | Rep write shares a `(created_by, origin_id)` key with a stored row whose content differs; the whole batch is rejected |
+| 503 | `{"error":"bench_reps_retryable"}` | Rep batch aborted by a deadlock or serialization failure; nothing was written and the identical batch may be retried |
 
 Schema version 9 is intentional. Version 8 is reserved for another additive
 change, so this migration skips that number; schema-version rows are markers,

@@ -19,6 +19,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mgh3326/handoffkeep/internal/guard"
 )
@@ -96,6 +97,12 @@ var (
 	// task_projects vocabulary — wrong spellings would fragment the groups
 	// the field exists to provide.
 	ErrTaskProjectUnknown = errors.New("task_project_unknown")
+	// ErrBenchRepsRetryable marks a batch write Postgres aborted on its own:
+	// a deadlock victim (SQLSTATE 40P01) or a serialization failure (40001).
+	// The transaction rolled back, nothing was written, and the client may
+	// retry the identical batch — unlike a 409 conflict the failure says
+	// nothing about the rows.
+	ErrBenchRepsRetryable = errors.New("bench_reps_retryable")
 )
 
 // TaskRefs holds the durable links that let a captain resume work without
@@ -1097,6 +1104,54 @@ func (e *BenchRepConflictError) Error() string {
 	return fmt.Sprintf("bench_rep_conflict: %d row(s) share a (created_by, origin_id) key with different content", len(e.Conflicts))
 }
 
+// benchRepKey is the client-side row identity inside one batch.
+type benchRepKey struct {
+	createdBy string
+	originID  int64
+}
+
+// benchRepsBatchErr translates Postgres errors that abort the batch
+// transaction without writing anything into ErrBenchRepsRetryable so the
+// API can answer 503 instead of a 400 that wrongly blames the rows.
+func benchRepsBatchErr(err error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && (pgErr.Code == "40P01" || pgErr.Code == "40001") {
+		return fmt.Errorf("%w: %w", ErrBenchRepsRetryable, err)
+	}
+	return err
+}
+
+func benchRepPtrEq[T comparable](a, b *T) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
+}
+
+// sameBenchRepInput reports whether two input rows carry identical rep
+// content, so a repeated (created_by, origin_id) key inside one batch is the
+// same resend the ON CONFLICT gate already accepts. recorded_at compares
+// after microsecond truncation — that is the precision timestamptz keeps, so
+// two spellings of the same stored instant still count as identical. id and
+// created_at are server-stamped and are not inputs.
+func sameBenchRepInput(a, b BenchRep) bool {
+	return a.Profile == b.Profile &&
+		a.RecordedAt.Truncate(time.Microsecond).Equal(b.RecordedAt.Truncate(time.Microsecond)) &&
+		benchRepPtrEq(a.ModelID, b.ModelID) &&
+		benchRepPtrEq(a.TaskRef, b.TaskRef) &&
+		benchRepPtrEq(a.Tier, b.Tier) &&
+		benchRepPtrEq(a.Role, b.Role) &&
+		benchRepPtrEq(a.Rounds, b.Rounds) &&
+		benchRepPtrEq(a.BlockersFound, b.BlockersFound) &&
+		benchRepPtrEq(a.Completed, b.Completed) &&
+		benchRepPtrEq(a.InputTokens, b.InputTokens) &&
+		benchRepPtrEq(a.OutputTokens, b.OutputTokens) &&
+		benchRepPtrEq(a.Notes, b.Notes) &&
+		benchRepPtrEq(a.Effort, b.Effort) &&
+		benchRepPtrEq(a.Grade, b.Grade) &&
+		benchRepPtrEq(a.TableGrade, b.TableGrade)
+}
+
 // upsertBenchRepInsert is one race-free statement: insert, or — when the
 // (created_by, origin_id) key is taken — a no-op update gated on every
 // carried field being identical (IS NOT DISTINCT FROM is NULL-safe;
@@ -1121,7 +1176,8 @@ func (s *Store) UpsertBenchReps(ctx context.Context, xs []BenchRep) ([]int64, er
 	if len(xs) < 1 || len(xs) > benchBatchMax {
 		return nil, errors.New("invalid bench reps")
 	}
-	for _, x := range xs {
+	seen := make(map[benchRepKey]int, len(xs))
+	for i, x := range xs {
 		if !validBenchRep(x) {
 			return nil, errors.New("invalid bench rep")
 		}
@@ -1132,6 +1188,19 @@ func (s *Store) UpsertBenchReps(ctx context.Context, xs []BenchRep) ([]int64, er
 				}
 			}
 		}
+		// A key repeated inside one batch is an idempotent resend only when
+		// the rows are identical. Differing repeats are rejected up front:
+		// letting the second row hit ON CONFLICT against the first row's
+		// uncommitted insert would name a conflict_server_id that rolls back
+		// and never identifies a stored row.
+		k := benchRepKey{createdBy: x.CreatedBy, originID: x.OriginID}
+		if j, ok := seen[k]; ok {
+			if !sameBenchRepInput(xs[j], x) {
+				return nil, fmt.Errorf("invalid bench reps: rows %d and %d share created_by=%q origin_id=%d with different content", j, i, x.CreatedBy, x.OriginID)
+			}
+			continue
+		}
+		seen[k] = i
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -1149,18 +1218,21 @@ func (s *Store) UpsertBenchReps(ctx context.Context, xs []BenchRep) ([]int64, er
 			continue
 		}
 		if !errors.Is(err, pgx.ErrNoRows) {
-			return nil, err
+			return nil, benchRepsBatchErr(err)
 		}
 		var existing int64
 		if err = tx.QueryRow(ctx, `SELECT id FROM bench_reps WHERE created_by=$1 AND origin_id=$2`, x.CreatedBy, x.OriginID).Scan(&existing); err != nil {
-			return nil, err
+			return nil, benchRepsBatchErr(err)
 		}
 		conflicts = append(conflicts, BenchRepConflict{Index: i, OriginID: x.OriginID, ServerID: existing})
 	}
 	if len(conflicts) > 0 {
 		return nil, &BenchRepConflictError{Conflicts: conflicts}
 	}
-	return ids, tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return nil, benchRepsBatchErr(err)
+	}
+	return ids, nil
 }
 
 func (s *Store) ListBenchReps(ctx context.Context, profile, grade, effort string, limit int) ([]BenchRep, error) {

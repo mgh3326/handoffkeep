@@ -615,6 +615,9 @@ func appErr(w http.ResponseWriter, e error) {
 	case errors.As(e, &repConflict):
 		jsonOut(w, http.StatusConflict, map[string]any{"error": "bench_rep_conflict", "conflicts": repConflict.Conflicts})
 		return
+	case errors.Is(e, store.ErrBenchRepsRetryable):
+		jsonOut(w, http.StatusServiceUnavailable, map[string]string{"error": "bench_reps_retryable"})
+		return
 	case errors.Is(e, store.ErrQueueEmpty):
 		jsonOut(w, http.StatusNotFound, map[string]string{"error": "queue_empty"})
 		return
