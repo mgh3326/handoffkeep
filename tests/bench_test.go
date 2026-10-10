@@ -4,12 +4,18 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"log"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mgh3326/handoffkeep/internal/api"
@@ -176,6 +182,43 @@ func benchCount(t *testing.T, p *pgxpool.Pool, query string, args ...any) int {
 		t.Fatal(err)
 	}
 	return n
+}
+
+func benchRepRow(t *testing.T, p *pgxpool.Pool, originID int64, createdBy string) map[string]any {
+	t.Helper()
+	rows, err := p.Query(t.Context(), `SELECT id,origin_id,profile,model_id,task_ref,tier,role,rounds,blockers_found,completed,input_tokens,output_tokens,notes,recorded_at,effort,grade,table_grade,created_by,created_at FROM bench_reps WHERE origin_id=$1 AND created_by=$2`, originID, createdBy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return nil
+	}
+	values, err := rows.Values()
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := map[string]any{}
+	for i, field := range rows.FieldDescriptions() {
+		out[field.Name] = values[i]
+	}
+	if rows.Next() {
+		t.Fatalf("more than one bench_reps row for origin_id=%d created_by=%s", originID, createdBy)
+	}
+	return out
+}
+
+// sameRepRow compares two scanned bench_reps rows column-by-column, treating
+// timestamps as instants (the same instant may scan with different location
+// pointers across queries).
+func sameRepRow(a, b map[string]any) bool {
+	return maps.EqualFunc(a, b, func(x, y any) bool {
+		if xt, ok := x.(time.Time); ok {
+			yt, ok := y.(time.Time)
+			return ok && xt.Equal(yt)
+		}
+		return x == y
+	})
 }
 
 func benchClean(t *testing.T, p *pgxpool.Pool) {
@@ -406,10 +449,32 @@ func TestBenchCanonicalAPI(t *testing.T) {
 	updatedRep["model_id"] = "gpt-5.6-terra-updated"
 	updatedRep["created_by"] = "someone-else"
 	resp = benchRequest(t, h.Client(), http.MethodPut, h.URL+"/v1/bench/reps", "test-token", benchBody(t, "reps", updatedRep))
-	if resp.StatusCode != http.StatusOK || benchCount(t, p, `SELECT count(*) FROM bench_reps WHERE origin_id=568 AND created_by='bench-client'`) != 1 {
-		t.Fatalf("same-client rep upsert status=%d", resp.StatusCode)
+	// A same-key write with different content is a collision, not an update:
+	// 409, and the stored row keeps the original content byte-identical.
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("same-client rep overwrite status=%d want=409", resp.StatusCode)
 	}
-	resp.Body.Close()
+	conflictBody := benchJSON(t, resp)
+	if conflictBody["error"] != "bench_rep_conflict" {
+		t.Fatalf("same-client rep overwrite error=%v", conflictBody["error"])
+	}
+	conflicts, ok := conflictBody["conflicts"].([]any)
+	if !ok || len(conflicts) != 1 {
+		t.Fatalf("conflict body=%v", conflictBody)
+	}
+	first := conflicts[0].(map[string]any)
+	if first["index"] != float64(0) || first["origin_id"] != float64(568) || first["conflict_server_id"] != repRow["id"] {
+		t.Fatalf("conflict detail=%v want index=0 origin_id=568 conflict_server_id=%v", first, repRow["id"])
+	}
+	if row := benchRepRow(t, p, 568, "bench-client"); row["model_id"] != "gpt-5.6-terra" {
+		t.Fatalf("overwritten rep row changed: %v", row)
+	}
+	resp = benchRequest(t, h.Client(), http.MethodPut, h.URL+"/v1/bench/reps", "test-token", []byte(benchRepFixture))
+	resendBody := benchJSON(t, resp)
+	resendIDs, _ := resendBody["ids"].([]any)
+	if resp.StatusCode != http.StatusOK || resendBody["upserted"] != float64(1) || len(resendIDs) != 1 || resendIDs[0] != repRow["id"] || benchCount(t, p, `SELECT count(*) FROM bench_reps WHERE origin_id=568 AND created_by='bench-client'`) != 1 {
+		t.Fatalf("same-client rep resend status=%d body=%v", resp.StatusCode, resendBody)
+	}
 	resp = benchRequest(t, h.Client(), http.MethodPut, h.URL+"/v1/bench/reps", "peer-token", benchBody(t, "reps", updatedRep))
 	if resp.StatusCode != http.StatusOK || benchCount(t, p, `SELECT count(*) FROM bench_reps WHERE origin_id=568`) != 2 {
 		t.Fatalf("cross-client rep identity status=%d", resp.StatusCode)
@@ -1002,5 +1067,513 @@ func TestBenchCatalogScopefuelSeed(t *testing.T) {
 	resp = put([]byte(`{"catalog":[]}`))
 	if resp.StatusCode != http.StatusBadRequest || benchJSON(t, resp)["error"] != "invalid_context" {
 		t.Fatalf("empty batch status=%d", resp.StatusCode)
+	}
+}
+
+// Task hk#1384: shared-token hosts assign per-host origin ids, so
+// (created_by, origin_id) collisions are routine. The reps write path is
+// insert-only: a same-key write with identical content is an idempotent
+// resend and returns the stored server id; any differing field is a 409 that
+// rejects the whole batch without touching the stored row.
+func TestBenchRepsConflictContract(t *testing.T) {
+	s := benchStore(t)
+	p := benchPool(t)
+	benchClean(t, p)
+	h := benchServer(s)
+	defer h.Close()
+
+	putReps := func(items []map[string]any) *http.Response {
+		t.Helper()
+		body, err := json.Marshal(map[string]any{"reps": items})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return benchRequest(t, h.Client(), http.MethodPut, h.URL+"/v1/bench/reps", "test-token", body)
+	}
+	rep := func(origin int64) map[string]any {
+		item := benchItem(t, benchRepFixture, "reps")
+		item["origin_id"] = float64(origin)
+		return item
+	}
+	seqLast := func() int64 {
+		t.Helper()
+		var n int64
+		if err := p.QueryRow(t.Context(), `SELECT last_value FROM bench_reps_id_seq`).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+
+	// ids come back aligned to the input order.
+	batch := []map[string]any{rep(570), rep(571), rep(572)}
+	resp := putReps(batch)
+	body := benchJSON(t, resp)
+	ids, _ := body["ids"].([]any)
+	if resp.StatusCode != http.StatusOK || body["upserted"] != float64(3) || len(ids) != 3 {
+		t.Fatalf("batch put status=%d body=%v", resp.StatusCode, body)
+	}
+	seenIDs := map[float64]bool{}
+	for i, item := range batch {
+		row := benchRepRow(t, p, int64(item["origin_id"].(float64)), "bench-client")
+		if row == nil || row["id"].(int64) != int64(ids[i].(float64)) {
+			t.Fatalf("ids[%d]=%v does not name origin_id=%v row=%v", i, ids[i], item["origin_id"], row)
+		}
+		if seenIDs[ids[i].(float64)] {
+			t.Fatalf("duplicate id in ids=%v", ids)
+		}
+		seenIDs[ids[i].(float64)] = true
+	}
+	before := benchRepRow(t, p, 570, "bench-client")
+	beforeID := float64(before["id"].(int64))
+
+	// Idempotent resend: identical content returns the stored id. Also sent
+	// with recorded_at spelled in a different offset — same instant, same id.
+	resend := rep(570)
+	resend["recorded_at"] = "2026-09-01T12:00:00+02:00"
+	resp = putReps([]map[string]any{resend})
+	body = benchJSON(t, resp)
+	resendIDs, _ := body["ids"].([]any)
+	if resp.StatusCode != http.StatusOK || len(resendIDs) != 1 || resendIDs[0] != beforeID {
+		t.Fatalf("resend status=%d body=%v want id=%v", resp.StatusCode, body, beforeID)
+	}
+	if benchCount(t, p, `SELECT count(*) FROM bench_reps WHERE origin_id=570 AND created_by='bench-client'`) != 1 {
+		t.Fatal("resend inserted a duplicate row")
+	}
+
+	// Every carried field participates in the identity comparison: a write
+	// differing in exactly one field must still 409, and the stored row must
+	// stay byte-identical.
+	mutations := []struct {
+		name   string
+		mutate func(map[string]any)
+	}{
+		{"profile", func(m map[string]any) { m["profile"] = "codex-luna" }},
+		{"model_id", func(m map[string]any) { m["model_id"] = "gpt-5.6-luna" }},
+		{"task_ref", func(m map[string]any) { m["task_ref"] = "PR#43" }},
+		{"tier", func(m map[string]any) { m["tier"] = "T3" }},
+		{"role", func(m map[string]any) { m["role"] = "verify" }},
+		{"rounds", func(m map[string]any) { m["rounds"] = float64(2) }},
+		{"blockers_found", func(m map[string]any) { m["blockers_found"] = float64(1) }},
+		{"completed", func(m map[string]any) { m["completed"] = float64(0) }},
+		{"input_tokens", func(m map[string]any) { m["input_tokens"] = float64(1) }},
+		{"output_tokens", func(m map[string]any) { m["output_tokens"] = float64(1) }},
+		{"notes", func(m map[string]any) { m["notes"] = "different" }},
+		{"notes_null", func(m map[string]any) { delete(m, "notes") }},
+		{"recorded_at", func(m map[string]any) { m["recorded_at"] = "2026-09-01T10:00:01Z" }},
+		{"effort", func(m map[string]any) { m["effort"] = "high" }},
+		{"grade", func(m map[string]any) { m["grade"] = "A" }},
+		{"table_grade", func(m map[string]any) { m["table_grade"] = "B" }},
+		{"grade_null", func(m map[string]any) { delete(m, "grade") }},
+	}
+	for _, mutation := range mutations {
+		mutated := rep(570)
+		mutation.mutate(mutated)
+		resp = putReps([]map[string]any{mutated})
+		body = benchJSON(t, resp)
+		if resp.StatusCode != http.StatusConflict || body["error"] != "bench_rep_conflict" {
+			t.Fatalf("%s mutation status=%d body=%v want=409", mutation.name, resp.StatusCode, body)
+		}
+		list, _ := body["conflicts"].([]any)
+		if len(list) != 1 || list[0].(map[string]any)["index"] != float64(0) || list[0].(map[string]any)["origin_id"] != float64(570) || list[0].(map[string]any)["conflict_server_id"] != beforeID {
+			t.Fatalf("%s mutation conflicts=%v want index=0 origin_id=570 conflict_server_id=%v", mutation.name, body["conflicts"], beforeID)
+		}
+		if after := benchRepRow(t, p, 570, "bench-client"); !sameRepRow(after, before) {
+			t.Fatalf("%s mutation changed the stored row: %v -> %v", mutation.name, before, after)
+		}
+	}
+
+	// One conflicting row rejects the whole batch atomically: nothing new is
+	// written, and the response names every conflicting row.
+	beforeSeq := seqLast()
+	okRep := rep(573)
+	conflictA, conflictB := rep(570), rep(571)
+	conflictA["notes"] = "clobber A"
+	conflictB["notes"] = "clobber B"
+	resp = putReps([]map[string]any{okRep, conflictA, conflictB})
+	body = benchJSON(t, resp)
+	if resp.StatusCode != http.StatusConflict || body["error"] != "bench_rep_conflict" {
+		t.Fatalf("mixed batch status=%d body=%v want=409", resp.StatusCode, body)
+	}
+	list, _ := body["conflicts"].([]any)
+	if len(list) != 2 {
+		t.Fatalf("mixed batch conflicts=%v want two rows named", body["conflicts"])
+	}
+	gotOrigins := map[float64]float64{}
+	for _, c := range list {
+		e := c.(map[string]any)
+		gotOrigins[e["origin_id"].(float64)] = e["index"].(float64)
+	}
+	if gotOrigins[570] != 1 || gotOrigins[571] != 2 {
+		t.Fatalf("mixed batch conflicts=%v want origin 570 at index 1 and 571 at index 2", body["conflicts"])
+	}
+	if benchCount(t, p, `SELECT count(*) FROM bench_reps WHERE origin_id=573 AND created_by='bench-client'`) != 0 {
+		t.Fatal("rejected batch still wrote its non-conflicting row")
+	}
+	// Rejected inserts still consume BIGSERIAL candidates: id gaps are the
+	// visible trace of refused collisions, not lost rows.
+	if after := seqLast(); after-beforeSeq < 3 {
+		t.Fatalf("sequence did not advance past the rejected batch: %d -> %d", beforeSeq, after)
+	}
+
+	// An old client that reads only "upserted" is unaffected: the field is
+	// still present and counts accepted rows (including idempotent resends).
+	resp = putReps([]map[string]any{rep(570)})
+	body = benchJSON(t, resp)
+	if resp.StatusCode != http.StatusOK || body["upserted"] != float64(1) {
+		t.Fatalf("legacy upserted field status=%d body=%v", resp.StatusCode, body)
+	}
+}
+
+// Two transactions racing on the same (created_by, origin_id) key: identical
+// payloads both return the same server id; different payloads let exactly one
+// write win and the loser takes *BenchRepConflictError naming the winner's id.
+// The conflict check rides the ON CONFLICT row lock, so the loser's content
+// comparison is evaluated against the winner's committed row.
+func TestBenchRepsConcurrentSameKey(t *testing.T) {
+	s := benchStore(t)
+	p := benchPool(t)
+	benchClean(t, p)
+
+	recordedAt := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
+	raceRep := func(origin int64, notes string) store.BenchRep {
+		model, taskRef, tier, role, grade := "gpt-5.6-race", "hk:task/9999", "T2", "impl", "A"
+		rounds := 1
+		return store.BenchRep{
+			OriginID:   origin,
+			Profile:    "race-impl",
+			ModelID:    &model,
+			TaskRef:    &taskRef,
+			Tier:       &tier,
+			Role:       &role,
+			Rounds:     &rounds,
+			Notes:      &notes,
+			RecordedAt: recordedAt,
+			Grade:      &grade,
+			CreatedBy:  "race-client",
+		}
+	}
+	type outcome struct {
+		ids []int64
+		err error
+	}
+	race := func(a, b store.BenchRep) (outcome, outcome) {
+		t.Helper()
+		start := make(chan struct{})
+		out := make(chan outcome, 2)
+		var wg sync.WaitGroup
+		for _, rep := range []store.BenchRep{a, b} {
+			wg.Add(1)
+			go func(r store.BenchRep) {
+				defer wg.Done()
+				<-start
+				ids, err := s.UpsertBenchReps(context.Background(), []store.BenchRep{r})
+				out <- outcome{ids: ids, err: err}
+			}(rep)
+		}
+		close(start)
+		wg.Wait()
+		x, y := <-out, <-out
+		return x, y
+	}
+
+	// Identical payloads: both racers get the same id, one row total.
+	resA, resB := race(raceRep(580, "identical"), raceRep(580, "identical"))
+	if resA.err != nil || resB.err != nil {
+		t.Fatalf("identical race errors: %v / %v", resA.err, resB.err)
+	}
+	if len(resA.ids) != 1 || len(resB.ids) != 1 || resA.ids[0] != resB.ids[0] {
+		t.Fatalf("identical race ids: %v / %v", resA.ids, resB.ids)
+	}
+	if benchCount(t, p, `SELECT count(*) FROM bench_reps WHERE origin_id=580 AND created_by='race-client'`) != 1 {
+		t.Fatal("identical race wrote more than one row")
+	}
+
+	// Different payloads: exactly one wins; the loser gets a conflict naming
+	// the winner's server id, and the stored row holds the winner's content.
+	win, lose := race(raceRep(581, "alpha content"), raceRep(581, "beta content"))
+	var winner, loser outcome
+	switch {
+	case win.err == nil && lose.err != nil:
+		winner, loser = win, lose
+	case lose.err == nil && win.err != nil:
+		winner, loser = lose, win
+	default:
+		t.Fatalf("different-payload race: win=%v/%v lose=%v/%v", win.ids, win.err, lose.ids, lose.err)
+	}
+	var repErr *store.BenchRepConflictError
+	if !errors.As(loser.err, &repErr) || len(repErr.Conflicts) != 1 {
+		t.Fatalf("loser error %v is not one BenchRepConflict", loser.err)
+	}
+	if repErr.Conflicts[0].Index != 0 || repErr.Conflicts[0].OriginID != 581 || repErr.Conflicts[0].ServerID != winner.ids[0] {
+		t.Fatalf("loser conflict=%v want index=0 origin_id=581 conflict_server_id=%d", repErr.Conflicts[0], winner.ids[0])
+	}
+	row := benchRepRow(t, p, 581, "race-client")
+	if row == nil || row["id"].(int64) != winner.ids[0] {
+		t.Fatalf("winner row=%v want id=%d", row, winner.ids[0])
+	}
+}
+
+// A (created_by, origin_id) key repeated inside one batch is a resend only
+// when the repeated rows are identical: differing repeats are an invalid
+// batch rejected before the transaction opens, so no row lands and no
+// conflict_server_id is coined for an insert that rolls back with the batch.
+func TestBenchRepsIntraBatchDuplicateKey(t *testing.T) {
+	s := benchStore(t)
+	p := benchPool(t)
+	benchClean(t, p)
+	if _, err := p.Exec(t.Context(), `DELETE FROM bench_reps WHERE created_by IN ('bench-client','dup-client') AND origin_id BETWEEN 590 AND 599`); err != nil {
+		t.Fatal(err)
+	}
+	h := benchServer(s)
+	defer h.Close()
+
+	putReps := func(items []map[string]any) *http.Response {
+		t.Helper()
+		body, err := json.Marshal(map[string]any{"reps": items})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return benchRequest(t, h.Client(), http.MethodPut, h.URL+"/v1/bench/reps", "test-token", body)
+	}
+	rep := func(origin int64) map[string]any {
+		item := benchItem(t, benchRepFixture, "reps")
+		item["origin_id"] = float64(origin)
+		return item
+	}
+
+	// Identical repeats are resends: both rows return the stored id and
+	// exactly one row lands.
+	resp := putReps([]map[string]any{rep(595), rep(595)})
+	body := benchJSON(t, resp)
+	ids, _ := body["ids"].([]any)
+	if resp.StatusCode != http.StatusOK || len(ids) != 2 || ids[0] != ids[1] {
+		t.Fatalf("identical repeats status=%d body=%v", resp.StatusCode, body)
+	}
+	if benchCount(t, p, `SELECT count(*) FROM bench_reps WHERE origin_id=595 AND created_by='bench-client'`) != 1 {
+		t.Fatal("identical repeats inserted more than one row")
+	}
+
+	// Interleaved identical repeats keep ids aligned to the input order.
+	resp = putReps([]map[string]any{rep(596), rep(597), rep(596), rep(597)})
+	body = benchJSON(t, resp)
+	ids, _ = body["ids"].([]any)
+	if resp.StatusCode != http.StatusOK || len(ids) != 4 || ids[0] != ids[2] || ids[1] != ids[3] || ids[0] == ids[1] {
+		t.Fatalf("interleaved repeats status=%d body=%v", resp.StatusCode, body)
+	}
+
+	// Repeats that spell the same stored instant — a different offset, and
+	// sub-microsecond detail timestamptz drops — still dedup to one row.
+	a, b := rep(598), rep(598)
+	a["recorded_at"] = "2026-09-01T10:00:00.123456Z"
+	b["recorded_at"] = "2026-09-01T12:00:00.123456789+02:00"
+	resp = putReps([]map[string]any{a, b})
+	body = benchJSON(t, resp)
+	ids, _ = body["ids"].([]any)
+	if resp.StatusCode != http.StatusOK || len(ids) != 2 || ids[0] != ids[1] {
+		t.Fatalf("instant-equal repeats status=%d body=%v", resp.StatusCode, body)
+	}
+	if benchCount(t, p, `SELECT count(*) FROM bench_reps WHERE origin_id=598 AND created_by='bench-client'`) != 1 {
+		t.Fatal("instant-equal repeats inserted more than one row")
+	}
+
+	// Differing repeats are an invalid batch: 400, nothing written — not a
+	// 409 naming a conflict_server_id that rolls back with the batch.
+	x, y := rep(592), rep(592)
+	x["notes"], y["notes"] = "one", "two"
+	resp = putReps([]map[string]any{x, y})
+	body = benchJSON(t, resp)
+	if resp.StatusCode != http.StatusBadRequest || body["error"] != "invalid_context" {
+		t.Fatalf("differing repeats status=%d body=%v want=400 invalid_context", resp.StatusCode, body)
+	}
+	if benchCount(t, p, `SELECT count(*) FROM bench_reps WHERE origin_id=592 AND created_by='bench-client'`) != 0 {
+		t.Fatal("differing repeats wrote rows")
+	}
+
+	// The whole batch is rejected: the fresh row ahead of the differing
+	// pair does not land either.
+	c, d := rep(594), rep(594)
+	d["notes"] = "changed"
+	resp = putReps([]map[string]any{rep(593), c, d})
+	body = benchJSON(t, resp)
+	if resp.StatusCode != http.StatusBadRequest || body["error"] != "invalid_context" {
+		t.Fatalf("mixed differing batch status=%d body=%v want=400 invalid_context", resp.StatusCode, body)
+	}
+	if benchCount(t, p, `SELECT count(*) FROM bench_reps WHERE origin_id IN (593,594) AND created_by='bench-client'`) != 0 {
+		t.Fatal("rejected batch wrote its non-repeated row")
+	}
+
+	// The store error names both offending positions and is not the
+	// conflict path — a repeat differs from a row the batch itself wrote,
+	// never from a stored row.
+	notes := func(v string) *string { return &v }
+	repRow := func(origin int64, n *string) store.BenchRep {
+		return store.BenchRep{OriginID: origin, Profile: "dup-prof", Notes: n, RecordedAt: time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC), CreatedBy: "dup-client"}
+	}
+	_, err := s.UpsertBenchReps(t.Context(), []store.BenchRep{repRow(591, notes("a")), repRow(590, notes("a")), repRow(591, notes("b"))})
+	if err == nil || !strings.Contains(err.Error(), "rows 0 and 2") {
+		t.Fatalf("differing repeat error=%v want rows 0 and 2 named", err)
+	}
+	var conflictErr *store.BenchRepConflictError
+	if errors.As(err, &conflictErr) {
+		t.Fatalf("differing repeat surfaced as conflict error %v", err)
+	}
+}
+
+// Every rejected row of a 409 batch is logged exactly once, with the fields
+// needed to find the colliding stored row: created_by, the row's index in
+// the request, its origin_id, and conflict_server_id.
+func TestBenchRepsConflictLogged(t *testing.T) {
+	s := benchStore(t)
+	p := benchPool(t)
+	benchClean(t, p)
+	if _, err := p.Exec(t.Context(), `DELETE FROM bench_reps WHERE created_by='bench-client' AND origin_id BETWEEN 585 AND 589`); err != nil {
+		t.Fatal(err)
+	}
+	h := benchServer(s)
+	defer h.Close()
+
+	putReps := func(items []map[string]any) *http.Response {
+		t.Helper()
+		body, err := json.Marshal(map[string]any{"reps": items})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return benchRequest(t, h.Client(), http.MethodPut, h.URL+"/v1/bench/reps", "test-token", body)
+	}
+	rep := func(origin int64) map[string]any {
+		item := benchItem(t, benchRepFixture, "reps")
+		item["origin_id"] = float64(origin)
+		return item
+	}
+
+	resp := putReps([]map[string]any{rep(585), rep(586)})
+	body := benchJSON(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("seed status=%d body=%v", resp.StatusCode, body)
+	}
+	id585 := benchRepRow(t, p, 585, "bench-client")["id"].(int64)
+	id586 := benchRepRow(t, p, 586, "bench-client")["id"].(int64)
+
+	a, b := rep(585), rep(586)
+	a["notes"], b["notes"] = "clobber a", "clobber b"
+	var buf bytes.Buffer
+	old := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(old)
+	resp = putReps([]map[string]any{rep(587), a, b})
+	log.SetOutput(old)
+	body = benchJSON(t, resp)
+	if resp.StatusCode != http.StatusConflict || body["error"] != "bench_rep_conflict" {
+		t.Fatalf("conflict batch status=%d body=%v want=409", resp.StatusCode, body)
+	}
+	got := buf.String()
+	if n := strings.Count(got, "bench_rep_conflict"); n != 2 {
+		t.Fatalf("log lines for two conflicts=%d want 2:\n%s", n, got)
+	}
+	for _, want := range []string{
+		fmt.Sprintf("created_by=bench-client index=1 origin_id=585 conflict_server_id=%d", id585),
+		fmt.Sprintf("created_by=bench-client index=2 origin_id=586 conflict_server_id=%d", id586),
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("log missing %q in:\n%s", want, got)
+		}
+	}
+}
+
+// Two batches covering the same keys in opposite orders deadlock; the loser
+// is aborted by Postgres (SQLSTATE 40P01) and must surface as a retryable
+// 503 — not a 400 that wrongly blames the rows. The deadlocked batch writes
+// nothing, so resending the identical batch lands cleanly afterwards.
+func TestBenchRepsDeadlockRetryable(t *testing.T) {
+	s := benchStore(t)
+	p := benchPool(t)
+	benchClean(t, p)
+	if _, err := p.Exec(t.Context(), `DELETE FROM bench_reps WHERE created_by='bench-client' AND origin_id >= 30000`); err != nil {
+		t.Fatal(err)
+	}
+	h := benchServer(s)
+	defer h.Close()
+
+	rep := func(origin int64) map[string]any {
+		item := benchItem(t, benchRepFixture, "reps")
+		item["origin_id"] = float64(origin)
+		return item
+	}
+	type outcome struct {
+		status int
+		errMsg string
+		batch  []map[string]any
+	}
+	doPut := func(items []map[string]any) outcome {
+		body, err := json.Marshal(map[string]any{"reps": items})
+		if err != nil {
+			return outcome{status: -1, errMsg: err.Error(), batch: items}
+		}
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodPut, h.URL+"/v1/bench/reps", bytes.NewReader(body))
+		if err != nil {
+			return outcome{status: -1, errMsg: err.Error(), batch: items}
+		}
+		req.Header.Set("Authorization", "Bearer test-token")
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := h.Client().Do(req)
+		if err != nil {
+			return outcome{status: -1, errMsg: err.Error(), batch: items}
+		}
+		defer resp.Body.Close()
+		var parsed map[string]any
+		raw, _ := io.ReadAll(resp.Body)
+		_ = json.Unmarshal(raw, &parsed)
+		return outcome{status: resp.StatusCode, errMsg: fmt.Sprint(parsed["error"]), batch: items}
+	}
+
+	const batchSize = 300
+	saw503 := false
+	for attempt := 0; attempt < 8 && !saw503; attempt++ {
+		base := int64(30000 + attempt*batchSize)
+		asc := make([]map[string]any, 0, batchSize)
+		for i := 0; i < batchSize; i++ {
+			asc = append(asc, rep(base+int64(i)))
+		}
+		desc := make([]map[string]any, 0, batchSize)
+		for i := batchSize - 1; i >= 0; i-- {
+			desc = append(desc, asc[i])
+		}
+		start := make(chan struct{})
+		res := make(chan outcome, 2)
+		go func() { <-start; res <- doPut(asc) }()
+		go func() { <-start; res <- doPut(desc) }()
+		close(start)
+		first, second := <-res, <-res
+
+		var loser outcome
+		var ok bool
+		switch {
+		case first.status == http.StatusServiceUnavailable && second.status == http.StatusOK:
+			loser, ok = first, true
+		case second.status == http.StatusServiceUnavailable && first.status == http.StatusOK:
+			loser, ok = second, true
+		}
+		if !ok {
+			if first.status == http.StatusOK && second.status == http.StatusOK {
+				continue // the batches interleaved without a deadlock this round
+			}
+			t.Fatalf("attempt %d: unexpected outcomes %d(%q) / %d(%q)", attempt, first.status, first.errMsg, second.status, second.errMsg)
+		}
+		saw503 = true
+		if loser.errMsg != "bench_reps_retryable" {
+			t.Fatalf("deadlocked batch status=%d error=%q want 503 bench_reps_retryable", loser.status, loser.errMsg)
+		}
+		// Exactly the winner's batch is on disk: the deadlocked batch wrote
+		// nothing (its rows would have pushed the count to 2*batchSize).
+		if n := benchCount(t, p, `SELECT count(*) FROM bench_reps WHERE created_by='bench-client' AND origin_id >= $1 AND origin_id < $2`, base, base+batchSize); n != batchSize {
+			t.Fatalf("rows after deadlock=%d want %d (the winning batch only)", n, batchSize)
+		}
+		// The error is retryable: the identical batch lands on resend.
+		if retry := doPut(loser.batch); retry.status != http.StatusOK {
+			t.Fatalf("retry of deadlocked batch status=%d error=%q", retry.status, retry.errMsg)
+		}
+	}
+	if !saw503 {
+		t.Fatal("no deadlock observed in 8 opposite-order attempts")
 	}
 }

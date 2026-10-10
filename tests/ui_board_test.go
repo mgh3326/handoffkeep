@@ -36,7 +36,10 @@ func seedBenchRep(t *testing.T, s *store.Store, originID int64, taskRef, role, m
 		Profile:    "board-test",
 		TaskRef:    &taskRef,
 		RecordedAt: time.Now().UTC(),
-		CreatedBy:  "board-test",
+		// One creator per task_ref: reps are insert-only (hk#1384), so
+		// reseeding the same (created_by, origin_id) on a dirty test DB is a
+		// 409, not an overwrite.
+		CreatedBy: "board-test-" + taskRef,
 	}
 	if role != "" {
 		rep.Role = &role
