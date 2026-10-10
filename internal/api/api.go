@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"reflect"
@@ -1357,6 +1358,12 @@ func (s Server) benchRepsPut(w http.ResponseWriter, r *http.Request) {
 	}
 	ids, err := s.Service.UpsertBenchReps(r.Context(), client, input.Reps)
 	if err != nil {
+		var repConflict *store.BenchRepConflictError
+		if errors.As(err, &repConflict) {
+			for _, c := range repConflict.Conflicts {
+				log.Printf("bench_rep_conflict created_by=%s index=%d origin_id=%d conflict_server_id=%d", client, c.Index, c.OriginID, c.ServerID)
+			}
+		}
 		appErr(w, err)
 		return
 	}

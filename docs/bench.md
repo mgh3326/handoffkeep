@@ -70,14 +70,24 @@ that returns the existing server id. Any differing field (including a set
 field becoming `null` or vice versa, and `recorded_at` compared as an
 instant) rejects the **entire batch** with `409 bench_rep_conflict`; the
 response body names every colliding input row as
-`{"conflicts":[{"origin_id":…,"conflict_server_id":…},…]}`, where
-`conflict_server_id` is the id of the stored row that holds the key. No
-existing row is ever updated through this endpoint: `created_at` always marks
-the first accepted write of a key.
+`{"conflicts":[{"index":…,"origin_id":…,"conflict_server_id":…},…]}`, where
+`index` is the row's position in the request batch and `conflict_server_id`
+is the id of the stored row that holds the key. Every rejection is logged
+server-side with `created_by`, `index`, `origin_id`, and
+`conflict_server_id`. No existing row is ever updated through this endpoint:
+`created_at` always marks the first accepted write of a key, and the
+content-vs-resend check is evaluated inside the `ON CONFLICT` row lock, so
+two transactions racing on one key cannot both write — identical payloads
+both keep the same id, different payloads let exactly one win.
 
 Every attempted insert still consumes one `BIGSERIAL` candidate — including
-attempts rejected by the conflict check — so gaps in `id` are expected and
-are the visible trace of refused collisions, not lost rows.
+attempts rejected by the conflict check — so gaps in `id` are expected,
+harmless, and are the visible trace of refused collisions, not lost rows.
+Ids never move backwards: a returned `id` permanently names the rep that
+produced it and can never be reassigned to different content. Reps already
+lost to the pre-fix overwrite are not tombstoned; they are recovered after
+deploy by a one-time manifest re-add from the owning hosts (the server does
+not scan prod for them).
 
 The repetition wire row also includes the server-owned identity fields:
 
@@ -195,7 +205,7 @@ omitted).
 | Status | Body | Meaning |
 |---|---|---|
 | 401 | `{"error":"unauthorized"}` | Missing or unknown bearer token |
-| 409 | `{"error":"bench_rep_conflict","conflicts":[{"origin_id":N,"conflict_server_id":M}]}` | Rep write shares a `(created_by, origin_id)` key with a stored row whose content differs; the whole batch is rejected |
+| 409 | `{"error":"bench_rep_conflict","conflicts":[{"index":I,"origin_id":N,"conflict_server_id":M}]}` | Rep write shares a `(created_by, origin_id)` key with a stored row whose content differs; the whole batch is rejected |
 | 403 | `{"error":"operator_required"}` | Catalog write without the operator token |
 | 400 | `{"error":"invalid_context"}` | Malformed body, invalid field, empty batch, or batch over 1000 |
 | 400 | `{"error":"deviation_ref_required"}` | Grade write has no usable deviation reference |

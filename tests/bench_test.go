@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -459,8 +461,8 @@ func TestBenchCanonicalAPI(t *testing.T) {
 		t.Fatalf("conflict body=%v", conflictBody)
 	}
 	first := conflicts[0].(map[string]any)
-	if first["origin_id"] != float64(568) || first["conflict_server_id"] != repRow["id"] {
-		t.Fatalf("conflict detail=%v want origin_id=568 conflict_server_id=%v", first, repRow["id"])
+	if first["index"] != float64(0) || first["origin_id"] != float64(568) || first["conflict_server_id"] != repRow["id"] {
+		t.Fatalf("conflict detail=%v want index=0 origin_id=568 conflict_server_id=%v", first, repRow["id"])
 	}
 	if row := benchRepRow(t, p, 568, "bench-client"); row["model_id"] != "gpt-5.6-terra" {
 		t.Fatalf("overwritten rep row changed: %v", row)
@@ -1170,8 +1172,8 @@ func TestBenchRepsConflictContract(t *testing.T) {
 			t.Fatalf("%s mutation status=%d body=%v want=409", mutation.name, resp.StatusCode, body)
 		}
 		list, _ := body["conflicts"].([]any)
-		if len(list) != 1 || list[0].(map[string]any)["origin_id"] != float64(570) || list[0].(map[string]any)["conflict_server_id"] != beforeID {
-			t.Fatalf("%s mutation conflicts=%v want origin_id=570 conflict_server_id=%v", mutation.name, body["conflicts"], beforeID)
+		if len(list) != 1 || list[0].(map[string]any)["index"] != float64(0) || list[0].(map[string]any)["origin_id"] != float64(570) || list[0].(map[string]any)["conflict_server_id"] != beforeID {
+			t.Fatalf("%s mutation conflicts=%v want index=0 origin_id=570 conflict_server_id=%v", mutation.name, body["conflicts"], beforeID)
 		}
 		if after := benchRepRow(t, p, 570, "bench-client"); !sameRepRow(after, before) {
 			t.Fatalf("%s mutation changed the stored row: %v -> %v", mutation.name, before, after)
@@ -1194,12 +1196,13 @@ func TestBenchRepsConflictContract(t *testing.T) {
 	if len(list) != 2 {
 		t.Fatalf("mixed batch conflicts=%v want two rows named", body["conflicts"])
 	}
-	gotOrigins := map[float64]bool{}
+	gotOrigins := map[float64]float64{}
 	for _, c := range list {
-		gotOrigins[c.(map[string]any)["origin_id"].(float64)] = true
+		e := c.(map[string]any)
+		gotOrigins[e["origin_id"].(float64)] = e["index"].(float64)
 	}
-	if !gotOrigins[570] || !gotOrigins[571] {
-		t.Fatalf("mixed batch conflicts=%v want origins 570 and 571", body["conflicts"])
+	if gotOrigins[570] != 1 || gotOrigins[571] != 2 {
+		t.Fatalf("mixed batch conflicts=%v want origin 570 at index 1 and 571 at index 2", body["conflicts"])
 	}
 	if benchCount(t, p, `SELECT count(*) FROM bench_reps WHERE origin_id=573 AND created_by='bench-client'`) != 0 {
 		t.Fatal("rejected batch still wrote its non-conflicting row")
@@ -1211,10 +1214,99 @@ func TestBenchRepsConflictContract(t *testing.T) {
 	}
 
 	// An old client that reads only "upserted" is unaffected: the field is
-	// still present and counts accepted rows.
-	resp = putReps([]map[string]any{rep(573)})
+	// still present and counts accepted rows (including idempotent resends).
+	resp = putReps([]map[string]any{rep(570)})
 	body = benchJSON(t, resp)
 	if resp.StatusCode != http.StatusOK || body["upserted"] != float64(1) {
 		t.Fatalf("legacy upserted field status=%d body=%v", resp.StatusCode, body)
+	}
+}
+
+// Two transactions racing on the same (created_by, origin_id) key: identical
+// payloads both return the same server id; different payloads let exactly one
+// write win and the loser takes *BenchRepConflictError naming the winner's id.
+// The conflict check rides the ON CONFLICT row lock, so the loser's content
+// comparison is evaluated against the winner's committed row.
+func TestBenchRepsConcurrentSameKey(t *testing.T) {
+	s := benchStore(t)
+	p := benchPool(t)
+	benchClean(t, p)
+
+	recordedAt := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
+	raceRep := func(origin int64, notes string) store.BenchRep {
+		model, taskRef, tier, role, grade := "gpt-5.6-race", "hk:task/9999", "T2", "impl", "A"
+		rounds := 1
+		return store.BenchRep{
+			OriginID:   origin,
+			Profile:    "race-impl",
+			ModelID:    &model,
+			TaskRef:    &taskRef,
+			Tier:       &tier,
+			Role:       &role,
+			Rounds:     &rounds,
+			Notes:      &notes,
+			RecordedAt: recordedAt,
+			Grade:      &grade,
+			CreatedBy:  "race-client",
+		}
+	}
+	type outcome struct {
+		ids []int64
+		err error
+	}
+	race := func(a, b store.BenchRep) (outcome, outcome) {
+		t.Helper()
+		start := make(chan struct{})
+		out := make(chan outcome, 2)
+		var wg sync.WaitGroup
+		for _, rep := range []store.BenchRep{a, b} {
+			wg.Add(1)
+			go func(r store.BenchRep) {
+				defer wg.Done()
+				<-start
+				ids, err := s.UpsertBenchReps(context.Background(), []store.BenchRep{r})
+				out <- outcome{ids: ids, err: err}
+			}(rep)
+		}
+		close(start)
+		wg.Wait()
+		x, y := <-out, <-out
+		return x, y
+	}
+
+	// Identical payloads: both racers get the same id, one row total.
+	resA, resB := race(raceRep(580, "identical"), raceRep(580, "identical"))
+	if resA.err != nil || resB.err != nil {
+		t.Fatalf("identical race errors: %v / %v", resA.err, resB.err)
+	}
+	if len(resA.ids) != 1 || len(resB.ids) != 1 || resA.ids[0] != resB.ids[0] {
+		t.Fatalf("identical race ids: %v / %v", resA.ids, resB.ids)
+	}
+	if benchCount(t, p, `SELECT count(*) FROM bench_reps WHERE origin_id=580 AND created_by='race-client'`) != 1 {
+		t.Fatal("identical race wrote more than one row")
+	}
+
+	// Different payloads: exactly one wins; the loser gets a conflict naming
+	// the winner's server id, and the stored row holds the winner's content.
+	win, lose := race(raceRep(581, "alpha content"), raceRep(581, "beta content"))
+	var winner, loser outcome
+	switch {
+	case win.err == nil && lose.err != nil:
+		winner, loser = win, lose
+	case lose.err == nil && win.err != nil:
+		winner, loser = lose, win
+	default:
+		t.Fatalf("different-payload race: win=%v/%v lose=%v/%v", win.ids, win.err, lose.ids, lose.err)
+	}
+	var repErr *store.BenchRepConflictError
+	if !errors.As(loser.err, &repErr) || len(repErr.Conflicts) != 1 {
+		t.Fatalf("loser error %v is not one BenchRepConflict", loser.err)
+	}
+	if repErr.Conflicts[0].Index != 0 || repErr.Conflicts[0].OriginID != 581 || repErr.Conflicts[0].ServerID != winner.ids[0] {
+		t.Fatalf("loser conflict=%v want index=0 origin_id=581 conflict_server_id=%d", repErr.Conflicts[0], winner.ids[0])
+	}
+	row := benchRepRow(t, p, 581, "race-client")
+	if row == nil || row["id"].(int64) != winner.ids[0] {
+		t.Fatalf("winner row=%v want id=%d", row, winner.ids[0])
 	}
 }

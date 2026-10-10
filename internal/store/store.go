@@ -1075,9 +1075,10 @@ func (s *Store) ListBenchScores(ctx context.Context, modelID, source string, lim
 }
 
 // BenchRepConflict names one input row whose (created_by, origin_id) slot is
-// already held by a different rep: the client's key and the server id of the
-// row that holds it.
+// already held by a different rep: its position in the batch, the client's
+// key, and the server id of the row that holds it.
 type BenchRepConflict struct {
+	Index    int   `json:"index"`
 	OriginID int64 `json:"origin_id"`
 	ServerID int64 `json:"conflict_server_id"`
 }
@@ -1096,47 +1097,24 @@ func (e *BenchRepConflictError) Error() string {
 	return fmt.Sprintf("bench_rep_conflict: %d row(s) share a (created_by, origin_id) key with different content", len(e.Conflicts))
 }
 
-func benchPtrEq[T comparable](a, b *T) bool {
-	if a == nil || b == nil {
-		return a == b
-	}
-	return *a == *b
-}
-
-// sameBenchRepContent is the idempotent-resend test: every client-carried
-// field equal, with recorded_at compared as an instant and nullable fields
-// nil-aware. Identity columns (id, created_at) are excluded; created_by and
-// origin_id are equal by construction of the conflict lookup.
-func sameBenchRepContent(existing, x BenchRep) bool {
-	return existing.Profile == x.Profile &&
-		benchPtrEq(existing.ModelID, x.ModelID) &&
-		benchPtrEq(existing.TaskRef, x.TaskRef) &&
-		benchPtrEq(existing.Tier, x.Tier) &&
-		benchPtrEq(existing.Role, x.Role) &&
-		benchPtrEq(existing.Rounds, x.Rounds) &&
-		benchPtrEq(existing.BlockersFound, x.BlockersFound) &&
-		benchPtrEq(existing.Completed, x.Completed) &&
-		benchPtrEq(existing.InputTokens, x.InputTokens) &&
-		benchPtrEq(existing.OutputTokens, x.OutputTokens) &&
-		benchPtrEq(existing.Notes, x.Notes) &&
-		existing.RecordedAt.Equal(x.RecordedAt) &&
-		benchPtrEq(existing.Effort, x.Effort) &&
-		benchPtrEq(existing.Grade, x.Grade) &&
-		benchPtrEq(existing.TableGrade, x.TableGrade)
-}
-
-const benchRepSelectColumns = "id,origin_id,profile,model_id,task_ref,tier,role,rounds,blockers_found,completed,input_tokens,output_tokens,notes,recorded_at,effort,grade,table_grade,created_by,created_at"
-
-func scanBenchRep(row pgx.Row, x *BenchRep) error {
-	return row.Scan(&x.ID, &x.OriginID, &x.Profile, &x.ModelID, &x.TaskRef, &x.Tier, &x.Role, &x.Rounds, &x.BlockersFound, &x.Completed, &x.InputTokens, &x.OutputTokens, &x.Notes, &x.RecordedAt, &x.Effort, &x.Grade, &x.TableGrade, &x.CreatedBy, &x.CreatedAt)
-}
+// upsertBenchRepInsert is one race-free statement: insert, or — when the
+// (created_by, origin_id) key is taken — a no-op update gated on every
+// carried field being identical (IS NOT DISTINCT FROM is NULL-safe;
+// recorded_at is TIMESTAMPTZ so the comparison is by instant). The DO UPDATE
+// lock means a transaction racing on the same key waits for the winner and
+// then re-evaluates the WHERE against the committed row, so content
+// comparison cannot observe a torn or pre-commit state. A returned row is a
+// fresh insert or an identical resend; no row means a different rep holds
+// the key.
+const upsertBenchRepInsert = `INSERT INTO bench_reps(origin_id,profile,model_id,task_ref,tier,role,rounds,blockers_found,completed,input_tokens,output_tokens,notes,recorded_at,effort,grade,table_grade,created_by,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) ON CONFLICT (created_by,origin_id) DO UPDATE SET origin_id=EXCLUDED.origin_id WHERE bench_reps.profile IS NOT DISTINCT FROM EXCLUDED.profile AND bench_reps.model_id IS NOT DISTINCT FROM EXCLUDED.model_id AND bench_reps.task_ref IS NOT DISTINCT FROM EXCLUDED.task_ref AND bench_reps.tier IS NOT DISTINCT FROM EXCLUDED.tier AND bench_reps.role IS NOT DISTINCT FROM EXCLUDED.role AND bench_reps.rounds IS NOT DISTINCT FROM EXCLUDED.rounds AND bench_reps.blockers_found IS NOT DISTINCT FROM EXCLUDED.blockers_found AND bench_reps.completed IS NOT DISTINCT FROM EXCLUDED.completed AND bench_reps.input_tokens IS NOT DISTINCT FROM EXCLUDED.input_tokens AND bench_reps.output_tokens IS NOT DISTINCT FROM EXCLUDED.output_tokens AND bench_reps.notes IS NOT DISTINCT FROM EXCLUDED.notes AND bench_reps.recorded_at IS NOT DISTINCT FROM EXCLUDED.recorded_at AND bench_reps.effort IS NOT DISTINCT FROM EXCLUDED.effort AND bench_reps.grade IS NOT DISTINCT FROM EXCLUDED.grade AND bench_reps.table_grade IS NOT DISTINCT FROM EXCLUDED.table_grade RETURNING id`
 
 // UpsertBenchReps inserts one row per input rep and returns the server ids in
 // input order. A rep whose (created_by, origin_id) key is already taken is an
 // idempotent resend only when its content is field-for-field identical to the
 // stored row; any difference rejects the complete batch with
-// *BenchRepConflictError. Existing rows are never updated here — DO UPDATE
-// under a colliding key is what destroyed reps across shared-token hosts.
+// *BenchRepConflictError. Existing rows are never updated — DO UPDATE
+// carried under a colliding key is what destroyed reps across shared-token
+// hosts, and the WHERE gate above keeps the id without changing any column.
 // (Every attempted insert still consumes one BIGSERIAL candidate, conflict or
 // not, so rejected collisions remain visible as id gaps.)
 func (s *Store) UpsertBenchReps(ctx context.Context, xs []BenchRep) ([]int64, error) {
@@ -1163,9 +1141,9 @@ func (s *Store) UpsertBenchReps(ctx context.Context, xs []BenchRep) ([]int64, er
 	now := time.Now().UTC()
 	ids := make([]int64, 0, len(xs))
 	var conflicts []BenchRepConflict
-	for _, x := range xs {
+	for i, x := range xs {
 		var id int64
-		err = tx.QueryRow(ctx, `INSERT INTO bench_reps(origin_id,profile,model_id,task_ref,tier,role,rounds,blockers_found,completed,input_tokens,output_tokens,notes,recorded_at,effort,grade,table_grade,created_by,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) ON CONFLICT (created_by,origin_id) DO NOTHING RETURNING id`, x.OriginID, x.Profile, x.ModelID, x.TaskRef, x.Tier, x.Role, x.Rounds, x.BlockersFound, x.Completed, x.InputTokens, x.OutputTokens, x.Notes, x.RecordedAt, x.Effort, x.Grade, x.TableGrade, x.CreatedBy, now).Scan(&id)
+		err = tx.QueryRow(ctx, upsertBenchRepInsert, x.OriginID, x.Profile, x.ModelID, x.TaskRef, x.Tier, x.Role, x.Rounds, x.BlockersFound, x.Completed, x.InputTokens, x.OutputTokens, x.Notes, x.RecordedAt, x.Effort, x.Grade, x.TableGrade, x.CreatedBy, now).Scan(&id)
 		if err == nil {
 			ids = append(ids, id)
 			continue
@@ -1173,16 +1151,11 @@ func (s *Store) UpsertBenchReps(ctx context.Context, xs []BenchRep) ([]int64, er
 		if !errors.Is(err, pgx.ErrNoRows) {
 			return nil, err
 		}
-		var existing BenchRep
-		err = scanBenchRep(tx.QueryRow(ctx, `SELECT `+benchRepSelectColumns+` FROM bench_reps WHERE created_by=$1 AND origin_id=$2`, x.CreatedBy, x.OriginID), &existing)
-		if err != nil {
+		var existing int64
+		if err = tx.QueryRow(ctx, `SELECT id FROM bench_reps WHERE created_by=$1 AND origin_id=$2`, x.CreatedBy, x.OriginID).Scan(&existing); err != nil {
 			return nil, err
 		}
-		if !sameBenchRepContent(existing, x) {
-			conflicts = append(conflicts, BenchRepConflict{OriginID: x.OriginID, ServerID: existing.ID})
-			continue
-		}
-		ids = append(ids, existing.ID)
+		conflicts = append(conflicts, BenchRepConflict{Index: i, OriginID: x.OriginID, ServerID: existing})
 	}
 	if len(conflicts) > 0 {
 		return nil, &BenchRepConflictError{Conflicts: conflicts}
