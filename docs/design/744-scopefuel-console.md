@@ -324,8 +324,9 @@ Projection rules, enforced by the publisher and again by the hk parser:
 - `reps_watermark` is computed **by hk**, not by the publisher. A new
   `GET /v1/bench/reps/watermark` returns `{max_id, count, content_sha}`, where
   `content_sha` = sha256 over every `bench_reps` row's full column tuple in id
-  order, truncated to 16 hex. It therefore changes on the `ON CONFLICT … DO
-  UPDATE` path of `UpsertBenchReps`, which keeps the id. The publisher reads
+  order, truncated to 16 hex. Since hk#1384 the reps write path is insert-only
+  (`UpsertBenchReps` rejects same-key content changes with 409), so a
+  watermark change means rows were added. The publisher reads
   the watermark before and after `propose`, and publishes only when the two
   readings are equal. Otherwise it retries once, then gives up with a
   message.

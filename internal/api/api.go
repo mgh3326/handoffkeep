@@ -332,7 +332,7 @@ func (s Service) UpsertBenchScores(ctx context.Context, client string, xs []stor
 func (s Service) ListBenchReps(ctx context.Context, profile, grade, effort string, limit int) ([]store.BenchRep, error) {
 	return s.Store.ListBenchReps(ctx, profile, grade, effort, limit)
 }
-func (s Service) UpsertBenchReps(ctx context.Context, client string, xs []store.BenchRep) (int, error) {
+func (s Service) UpsertBenchReps(ctx context.Context, client string, xs []store.BenchRep) ([]int64, error) {
 	for i := range xs {
 		xs[i].CreatedBy = client
 	}
@@ -522,6 +522,7 @@ func jsonOut(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 func appErr(w http.ResponseWriter, e error) {
+	var repConflict *store.BenchRepConflictError
 	switch {
 	case errors.Is(e, attachments.ErrDisabled):
 		jsonOut(w, 503, map[string]string{"error": "attachments_disabled"})
@@ -609,6 +610,9 @@ func appErr(w http.ResponseWriter, e error) {
 		return
 	case errors.Is(e, store.ErrBenchCatalogSolGrade):
 		jsonOut(w, http.StatusBadRequest, map[string]string{"error": "bench_catalog_sol_grade"})
+		return
+	case errors.As(e, &repConflict):
+		jsonOut(w, http.StatusConflict, map[string]any{"error": "bench_rep_conflict", "conflicts": repConflict.Conflicts})
 		return
 	case errors.Is(e, store.ErrQueueEmpty):
 		jsonOut(w, http.StatusNotFound, map[string]string{"error": "queue_empty"})
@@ -1351,12 +1355,12 @@ func (s Server) benchRepsPut(w http.ResponseWriter, r *http.Request) {
 		appErr(w, err)
 		return
 	}
-	n, err := s.Service.UpsertBenchReps(r.Context(), client, input.Reps)
+	ids, err := s.Service.UpsertBenchReps(r.Context(), client, input.Reps)
 	if err != nil {
 		appErr(w, err)
 		return
 	}
-	jsonOut(w, http.StatusOK, map[string]int{"upserted": n})
+	jsonOut(w, http.StatusOK, map[string]any{"upserted": len(ids), "ids": ids})
 }
 
 func (s Server) benchGradesList(w http.ResponseWriter, r *http.Request) {

@@ -15,7 +15,7 @@ All requests and responses use `Content-Type: application/json`.
 | GET | `/v1/bench/scores?model_id=&source=&limit=` | `{"scores":[...]}`; exact optional filters, ordered by `source, metric, model_id, effort, harness` |
 | PUT | `/v1/bench/scores` | Body `{"scores":[...]}`; 1–1000 rows, response `{"upserted":N}` |
 | GET | `/v1/bench/reps?profile=&grade=&effort=&limit=` | `{"reps":[...]}`; ordered by `id DESC` |
-| PUT | `/v1/bench/reps` | Body `{"reps":[...]}`; 1–1000 rows, response `{"upserted":N}` |
+| PUT | `/v1/bench/reps` | Body `{"reps":[...]}`; 1–1000 rows, response `{"upserted":N,"ids":[...]}` — `ids` carries the server id of every accepted row aligned to the input order |
 | GET | `/v1/bench/grades` | `{"grades":[...]}`; ordered by `profile` |
 | PUT | `/v1/bench/grades` | Body `{"grades":[...]}`; 1–1000 rows, response `{"upserted":N}` |
 | GET | `/v1/bench/catalog?pool=&include_retired=` | `{"catalog":[...]}`; ordered by `pool`, grade (`S+`→`C`), `profile`, effort rung |
@@ -56,10 +56,28 @@ Repetitions retain the existing client columns unchanged in name and meaning:
 `completed`, `input_tokens`, `output_tokens`, `notes`, `recorded_at`, `effort`,
 `grade`, and `table_grade`. `id` is a server-assigned `BIGSERIAL`. The client
 row identity is carried separately as required `origin_id`, and the upsert key
-is `(created_by, origin_id)`. Local rowids are per-machine and can collide, so
-including the authenticated client identity keeps two machines' row 7 apart.
-`profile` and `recorded_at` are required; the other carried fields are nullable
-and are returned as JSON `null` when omitted.
+is `(created_by, origin_id)`. `profile` and `recorded_at` are required; the
+other carried fields are nullable and are returned as JSON `null` when
+omitted.
+
+Rep content is **insert-only**. Several hosts are expected to authenticate
+under the same token, and local `origin_id` values are per-machine counters
+that collide routinely, so `(created_by, origin_id)` alone cannot tell "the
+same rep sent twice" apart from "a different host's rep that drew the same
+number". A PUT row whose key is already taken is therefore accepted only when
+every carried field is identical to the stored row — an idempotent resend
+that returns the existing server id. Any differing field (including a set
+field becoming `null` or vice versa, and `recorded_at` compared as an
+instant) rejects the **entire batch** with `409 bench_rep_conflict`; the
+response body names every colliding input row as
+`{"conflicts":[{"origin_id":…,"conflict_server_id":…},…]}`, where
+`conflict_server_id` is the id of the stored row that holds the key. No
+existing row is ever updated through this endpoint: `created_at` always marks
+the first accepted write of a key.
+
+Every attempted insert still consumes one `BIGSERIAL` candidate — including
+attempts rejected by the conflict check — so gaps in `id` are expected and
+are the visible trace of refused collisions, not lost rows.
 
 The repetition wire row also includes the server-owned identity fields:
 
@@ -177,6 +195,7 @@ omitted).
 | Status | Body | Meaning |
 |---|---|---|
 | 401 | `{"error":"unauthorized"}` | Missing or unknown bearer token |
+| 409 | `{"error":"bench_rep_conflict","conflicts":[{"origin_id":N,"conflict_server_id":M}]}` | Rep write shares a `(created_by, origin_id)` key with a stored row whose content differs; the whole batch is rejected |
 | 403 | `{"error":"operator_required"}` | Catalog write without the operator token |
 | 400 | `{"error":"invalid_context"}` | Malformed body, invalid field, empty batch, or batch over 1000 |
 | 400 | `{"error":"deviation_ref_required"}` | Grade write has no usable deviation reference |
