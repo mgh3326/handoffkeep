@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -22,7 +23,12 @@ func assistantTask(t *testing.T, s *Store, state string) Task {
 
 func assistantRecord(t *testing.T, s *Store, id int64) DecisionRequest {
 	t.Helper()
-	got, err := s.RecordDecisionRequest(context.Background(), id, "panewire-test", decisionInput())
+	return assistantRecordWith(t, s, id, decisionInput())
+}
+
+func assistantRecordWith(t *testing.T, s *Store, id int64, in DecisionRequestInput) DecisionRequest {
+	t.Helper()
+	got, err := s.RecordDecisionRequest(context.Background(), id, "panewire-test", in)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,9 +157,10 @@ func TestAssistantResolveRefusesHumanOnly(t *testing.T) {
 	}
 }
 
-// Invariant: an assistant resolution records Responder=operator-via-berry and
-// By=<the caller identity the server was given> — caller input cannot carry
-// either, and exactly one deterministic outbox row exists per resolution.
+// Invariant: an assistant judgement resolution records
+// Responder=assistant-via-berry and By=<the caller identity the server was
+// given> — caller input cannot carry either, and exactly one deterministic
+// outbox row exists per resolution.
 func TestAssistantResolveAttributionAndOutbox(t *testing.T) {
 	s, pool := searchTestStore(t)
 	ctx := context.Background()
@@ -164,7 +171,7 @@ func TestAssistantResolveAttributionAndOutbox(t *testing.T) {
 		t.Fatal(err)
 	}
 	res := got.Request.Resolution
-	if res == nil || res.Kind != DecisionRequestAnswered || res.Option != "B" || res.Responder != DecisionAssistantResponder || res.By != "berry-mcp" {
+	if res == nil || res.Kind != DecisionRequestAnswered || res.Option != "B" || res.Responder != DecisionAssistantJudgementResponder || res.By != "berry-mcp" {
 		t.Fatalf("resolution=%+v", res)
 	}
 	eventID := "dr-" + strconv.FormatInt(task.ID, 10) + "-1-answered"
@@ -601,6 +608,513 @@ func TestPreV17ChatReplayReturnsStored(t *testing.T) {
 	got, created, err = s.PostChatMessage(ctx, ChatMessagePost{Message: stop})
 	if err != nil || created || got.ID != stopID {
 		t.Fatalf("claude_stop replay id=%d created=%t err=%v", got.ID, created, err)
+	}
+}
+
+// Invariant (hk 1459 / MGH-36 PR-4c): a body revision clears the answer slot
+// in the same statement that bumps the revision — the revised question is
+// answerable again at the new revision, a rev1 answer is stale forever, and
+// the rev1 answer row, relation and outbox row all survive as history.
+func TestChatQuestionRevisionClearsAnswer(t *testing.T) {
+	s, pool := searchTestStore(t)
+	ctx := context.Background()
+	qid := fmt.Sprintf("Q-%s-33%06d", time.Now().UTC().Format("20060102"), time.Now().UnixNano()%1000000)
+	if _, _, err := s.UpsertChatQuestion(ctx, ChatQuestion{ID: qid, Lane: "desk-lane", Body: "revise me"}); err != nil {
+		t.Fatal(err)
+	}
+	answer := func(event string, revision int) (ChatMessage, error) {
+		t.Helper()
+		m, _, err := s.PostChatMessage(ctx, ChatMessagePost{
+			Message: ChatMessage{Author: "operator", Body: "answer " + event, SourceChannel: "assistant", OriginEventID: event},
+			Answers: []ChatAnswerInput{{QuestionID: qid, Revision: revision}},
+		})
+		return m, err
+	}
+	rev1Answer, err := answer("rev-ev-1", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q, _, _ := s.GetChatQuestion(ctx, qid)
+	if q.AnswerMessageID == nil || *q.AnswerMessageID != rev1Answer.ID || q.Revision != 1 {
+		t.Fatalf("rev1 answered question=%+v", q)
+	}
+	// A real revision: new body bumps the revision and frees the slot.
+	revised, _, err := s.UpsertChatQuestion(ctx, ChatQuestion{ID: qid, Lane: "desk-lane", Body: "revised body"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if revised.Revision != 2 || revised.AnswerMessageID != nil {
+		t.Fatalf("revised question=%+v", revised)
+	}
+	// The rev1 answer row and its outbox row survive — history by revision.
+	var messages, relations, rev1Outbox int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM chat_messages WHERE id=$1`, rev1Answer.ID).Scan(&messages); err != nil || messages != 1 {
+		t.Fatalf("rev1 message left=%d err=%v", messages, err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM chat_message_questions WHERE message_id=$1 AND question_id=$2 AND relation_kind='reply'`, rev1Answer.ID, qid).Scan(&relations); err != nil || relations != 1 {
+		t.Fatalf("rev1 relation left=%d err=%v", relations, err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM notification_outbox WHERE event_id=$1`, qid+"-rev1-answered").Scan(&rev1Outbox); err != nil || rev1Outbox != 1 {
+		t.Fatalf("rev1 outbox=%d err=%v", rev1Outbox, err)
+	}
+	// An answer naming the old revision is stale; the new revision answers.
+	if _, err := answer("rev-ev-stale", 1); !errors.Is(err, ErrChatQuestionStale) {
+		t.Fatalf("rev1 answer after revision err=%v", err)
+	}
+	rev2Answer, err := answer("rev-ev-2", 2)
+	if err != nil {
+		t.Fatalf("rev2 answer err=%v", err)
+	}
+	q, _, _ = s.GetChatQuestion(ctx, qid)
+	if q.AnswerMessageID == nil || *q.AnswerMessageID != rev2Answer.ID || q.Revision != 2 {
+		t.Fatalf("rev2 answered question=%+v", q)
+	}
+	var rev2Outbox int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM notification_outbox WHERE event_id=$1`, qid+"-rev2-answered").Scan(&rev2Outbox); err != nil || rev2Outbox != 1 {
+		t.Fatalf("rev2 outbox=%d err=%v", rev2Outbox, err)
+	}
+}
+
+// Invariant: a lane change is a revision and clears the slot the same way,
+// while an identical re-upsert changes nothing — revision and
+// answer_message_id are kept. Kills the mutants "clear on any upsert" and
+// "clear without bumping".
+func TestChatQuestionLaneRevisionClearsAnswer(t *testing.T) {
+	s, _ := searchTestStore(t)
+	ctx := context.Background()
+	qid := fmt.Sprintf("Q-%s-34%06d", time.Now().UTC().Format("20060102"), time.Now().UnixNano()%1000000)
+	if _, _, err := s.UpsertChatQuestion(ctx, ChatQuestion{ID: qid, Lane: "desk-lane", Body: "which lane"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.PostChatMessage(ctx, ChatMessagePost{
+		Message: ChatMessage{Author: "operator", Body: "lane answer", SourceChannel: "assistant", OriginEventID: "lane-ev-1"},
+		Answers: []ChatAnswerInput{{QuestionID: qid, Revision: 1}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Identical re-upsert: not a revision, the slot stays filled.
+	same, _, err := s.UpsertChatQuestion(ctx, ChatQuestion{ID: qid, Lane: "desk-lane", Body: "which lane"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if same.Revision != 1 || same.AnswerMessageID == nil {
+		t.Fatalf("identical re-upsert mutated question=%+v", same)
+	}
+	// A lane change revises and clears exactly like a body change.
+	moved, _, err := s.UpsertChatQuestion(ctx, ChatQuestion{ID: qid, Lane: "other-lane", Body: "which lane"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if moved.Revision != 2 || moved.AnswerMessageID != nil {
+		t.Fatalf("lane-revised question=%+v", moved)
+	}
+	if _, _, err := s.PostChatMessage(ctx, ChatMessagePost{
+		Message: ChatMessage{Author: "operator", Body: "lane answer 2", SourceChannel: "assistant", OriginEventID: "lane-ev-2"},
+		Answers: []ChatAnswerInput{{QuestionID: qid, Revision: 2}},
+	}); err != nil {
+		t.Fatalf("rev2 lane answer err=%v", err)
+	}
+}
+
+// Invariant: an assistant answer racing a revision ends in exactly one of
+// two states — the answer committed under rev1 and the revision cleared the
+// slot, or the revision won and the answer is stale. The row never settles
+// with answer_message_id pointing at a message written for another
+// revision: a real revision always frees the slot it bumps.
+func TestAssistantChatAnswerRevisionRace(t *testing.T) {
+	s, _ := searchTestStore(t)
+	ctx := context.Background()
+	qid := fmt.Sprintf("Q-%s-35%06d", time.Now().UTC().Format("20060102"), time.Now().UnixNano()%1000000)
+	if _, _, err := s.UpsertChatQuestion(ctx, ChatQuestion{ID: qid, Lane: "desk-lane", Body: "race the edit"}); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	results := make([]error, 2)
+	start := make(chan struct{})
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		<-start
+		_, _, results[0] = s.PostChatMessage(ctx, ChatMessagePost{
+			Message: ChatMessage{Author: "operator", Body: "racing answer", SourceChannel: "assistant", OriginEventID: fmt.Sprintf("race-rev-ev-%d", time.Now().UnixNano())},
+			Answers: []ChatAnswerInput{{QuestionID: qid, Revision: 1}},
+		})
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		_, _, results[1] = s.UpsertChatQuestion(ctx, ChatQuestion{ID: qid, Lane: "desk-lane", Body: "edited body"})
+	}()
+	close(start)
+	wg.Wait()
+	if results[1] != nil {
+		t.Fatalf("revision err=%v", results[1])
+	}
+	switch {
+	case results[0] == nil:
+		// The answer committed under rev1; the revision then freed the slot.
+	case errors.Is(results[0], ErrChatQuestionStale):
+		// The revision won the lock first; the rev1 answer is stale.
+	default:
+		t.Fatalf("answer err=%v", results[0])
+	}
+	q, _, _ := s.GetChatQuestion(ctx, qid)
+	if q.Revision != 2 || q.AnswerMessageID != nil {
+		t.Fatalf("post-race question=%+v", q)
+	}
+}
+
+// Invariant (provenance contract): an operator_decided answer carrying the
+// operator's verbatim quote and this request's exact ref closes a human_only
+// request — recorded decided_by=operator with the quote and ref, the outbox
+// text names the operator quote, and the decision event note carries both.
+func TestAssistantResolveOperatorDecidedHumanOnly(t *testing.T) {
+	s, pool := searchTestStore(t)
+	ctx := context.Background()
+	task := assistantTask(t, s, "in_progress")
+	in := decisionInput()
+	in.HumanOnly = true
+	request := assistantRecordWith(t, s, task.ID, in)
+	got, err := s.ResolveDecisionRequestAssistant(ctx, task.ID, "berry-mcp", DecisionAssistantResolveInput{
+		RequestID: request.ID, Option: "A", Text: "operator said A",
+		Provenance: DecisionProvenanceOperatorDecided, OperatorQuote: "옵션 A로 진행해", DecisionRef: request.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := got.Request.Resolution
+	if res == nil || res.Provenance != DecisionProvenanceOperatorDecided || res.DecidedBy != DecisionDecidedByOperator ||
+		res.OperatorQuote != "옵션 A로 진행해" || res.DecisionRef != request.ID || res.Responder != DecisionAssistantResponder {
+		t.Fatalf("resolution=%+v", res)
+	}
+	rows := outboxRows(t, s)
+	if len(rows) != 1 || !strings.Contains(rows[0].Text, "(operator quote)") {
+		t.Fatalf("outbox=%+v", rows)
+	}
+	var note string
+	if err := pool.QueryRow(ctx, `SELECT note FROM task_events WHERE task_id=$1 AND kind='decision' ORDER BY id DESC LIMIT 1`, task.ID).Scan(&note); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(note, "(operator quote)") || !strings.Contains(note, "옵션 A로 진행해") {
+		t.Fatalf("event note=%q", note)
+	}
+}
+
+// Invariant: a human_only request refuses every assistant answer that is not
+// an operator_decided claim with the verbatim quote — a bare judgement is
+// refused outright, and a claim whose quote is blank collapses to a
+// judgement and is refused naming no_operator_quote.
+func TestAssistantResolveHumanOnlyProvenanceRefusals(t *testing.T) {
+	s, _ := searchTestStore(t)
+	ctx := context.Background()
+	in := decisionInput()
+	in.HumanOnly = true
+	// Bare and explicit judgements: plain human_only refusal.
+	for _, prov := range []string{"", DecisionProvenanceAssistantJudgement} {
+		task := assistantTask(t, s, "in_progress")
+		request := assistantRecordWith(t, s, task.ID, in)
+		_, err := s.ResolveDecisionRequestAssistant(ctx, task.ID, "berry-mcp", DecisionAssistantResolveInput{RequestID: request.ID, Option: "A", Provenance: prov})
+		if !errors.Is(err, ErrDecisionRequestHumanOnly) || strings.Contains(err.Error(), "no_operator_quote") {
+			t.Fatalf("prov=%q err=%v", prov, err)
+		}
+	}
+	// operator_decided without the quote is a judgement with a reason.
+	for _, quote := range []string{"", "   ", "\t\n "} {
+		task := assistantTask(t, s, "in_progress")
+		request := assistantRecordWith(t, s, task.ID, in)
+		_, err := s.ResolveDecisionRequestAssistant(ctx, task.ID, "berry-mcp", DecisionAssistantResolveInput{
+			RequestID: request.ID, Option: "A", Provenance: DecisionProvenanceOperatorDecided, OperatorQuote: quote, DecisionRef: request.ID,
+		})
+		if !errors.Is(err, ErrDecisionRequestHumanOnly) || !strings.Contains(err.Error(), "no_operator_quote") {
+			t.Fatalf("quote=%q err=%v", quote, err)
+		}
+		if n := len(outboxRows(t, s)); n != 0 {
+			t.Fatalf("quote=%q left %d outbox rows", quote, n)
+		}
+	}
+}
+
+// Invariant: an operator_decided answer whose decision_ref is missing or is
+// any id but this exact request id — another task's request, another
+// revision — is provenance_ref_mismatch and records nothing.
+func TestAssistantResolveProvenanceRefMismatch(t *testing.T) {
+	s, _ := searchTestStore(t)
+	ctx := context.Background()
+	task := assistantTask(t, s, "in_progress")
+	request := assistantRecord(t, s, task.ID)
+	other := assistantTask(t, s, "in_progress")
+	otherReq := assistantRecord(t, s, other.ID)
+	for _, ref := range []string{"", otherReq.ID, "dr-999999-1", strings.TrimSuffix(request.ID, "-1") + "-9", request.ID + "-answered"} {
+		_, err := s.ResolveDecisionRequestAssistant(ctx, task.ID, "berry-mcp", DecisionAssistantResolveInput{
+			RequestID: request.ID, Option: "A", Provenance: DecisionProvenanceOperatorDecided, OperatorQuote: "quoted words", DecisionRef: ref,
+		})
+		if !errors.Is(err, ErrProvenanceRefMismatch) {
+			t.Fatalf("ref=%q err=%v", ref, err)
+		}
+	}
+	got, _, _ := s.GetTask(ctx, task.ID)
+	if got.Refs.DecisionRequest.Status != DecisionRequestOpen || got.Refs.DecisionRequest.Resolution != nil {
+		t.Fatalf("mismatch recorded a resolution: %+v", got.Refs.DecisionRequest)
+	}
+	if n := len(outboxRows(t, s)); n != 0 {
+		t.Fatalf("mismatch left %d outbox rows", n)
+	}
+}
+
+// Invariant: a quote never bypasses the disposition refusal — the
+// disposition check stands ahead of provenance, so even a well-formed
+// operator_decided answer is refused on a disposition item.
+func TestAssistantResolveDispositionRefusesQuote(t *testing.T) {
+	s, pool := searchTestStore(t)
+	ctx := context.Background()
+	task := assistantTask(t, s, "in_progress")
+	request := assistantRecord(t, s, task.ID)
+	if _, err := pool.Exec(ctx, `UPDATE tasks SET refs=refs||'{"disposition":{"schema":"disposition/v1","facts":{"facts_source":"gh-pr-view","facts_as_of":"2026-10-09T00:00:00Z","install":{"state":"unknown"},"residual_n":0},"recommended":"E"}}'::jsonb WHERE id=$1`, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	_, err := s.ResolveDecisionRequestAssistant(ctx, task.ID, "berry-mcp", DecisionAssistantResolveInput{
+		RequestID: request.ID, Option: "A", Provenance: DecisionProvenanceOperatorDecided, OperatorQuote: "operator said so", DecisionRef: request.ID,
+	})
+	if !errors.Is(err, ErrDispositionOperatorOnly) {
+		t.Fatalf("disposition + quote err=%v", err)
+	}
+	if n := len(outboxRows(t, s)); n != 0 {
+		t.Fatalf("disposition + quote left %d outbox rows", n)
+	}
+}
+
+// Invariant: a non-human_only request answers under either provenance — a
+// judgement records decided_by=assistant, a responder that never names the
+// operator, and the (assistant judgement) marker on the outbox text; an
+// operator_decided answer on the same kind of request records the operator.
+func TestAssistantResolveProvenanceAttribution(t *testing.T) {
+	s, _ := searchTestStore(t)
+	ctx := context.Background()
+	judge := assistantTask(t, s, "in_progress")
+	judgeReq := assistantRecord(t, s, judge.ID)
+	got, err := s.ResolveDecisionRequestAssistant(ctx, judge.ID, "berry-mcp", DecisionAssistantResolveInput{RequestID: judgeReq.ID, Option: "B", Text: "my call"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := got.Request.Resolution
+	if res == nil || res.Provenance != DecisionProvenanceAssistantJudgement || res.DecidedBy != DecisionDecidedByAssistant ||
+		res.Responder != DecisionAssistantJudgementResponder || strings.Contains(res.Responder, "operator") ||
+		res.OperatorQuote != "" || res.DecisionRef != "" {
+		t.Fatalf("judgement resolution=%+v", res)
+	}
+	decided := assistantTask(t, s, "in_progress")
+	decidedReq := assistantRecord(t, s, decided.ID)
+	got, err = s.ResolveDecisionRequestAssistant(ctx, decided.ID, "berry-mcp", DecisionAssistantResolveInput{
+		RequestID: decidedReq.ID, Option: "A", Provenance: DecisionProvenanceOperatorDecided, OperatorQuote: "pick A", DecisionRef: decidedReq.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res = got.Request.Resolution
+	if res == nil || res.DecidedBy != DecisionDecidedByOperator || res.Responder != DecisionAssistantResponder {
+		t.Fatalf("operator_decided resolution=%+v", res)
+	}
+	rows := outboxRows(t, s)
+	var judgeText, decidedText string
+	for _, row := range rows {
+		switch row.EventID {
+		case judgeReq.ID + "-answered":
+			judgeText = row.Text
+		case decidedReq.ID + "-answered":
+			decidedText = row.Text
+		}
+	}
+	if !strings.Contains(judgeText, "(assistant judgement)") || !strings.Contains(decidedText, "(operator quote)") {
+		t.Fatalf("outbox texts judge=%q decided=%q", judgeText, decidedText)
+	}
+}
+
+// Invariant: provenance is part of the resolution's identity — an identical
+// re-send is a duplicate, but the same answer sent with a different quote or
+// a different claim is resolved-differently, never silently absorbed.
+func TestAssistantResolveProvenanceResend(t *testing.T) {
+	s, _ := searchTestStore(t)
+	ctx := context.Background()
+	task := assistantTask(t, s, "in_progress")
+	request := assistantRecord(t, s, task.ID)
+	answer := DecisionAssistantResolveInput{
+		RequestID: request.ID, Option: "A", Provenance: DecisionProvenanceOperatorDecided, OperatorQuote: "merge it", DecisionRef: request.ID,
+	}
+	if _, err := s.ResolveDecisionRequestAssistant(ctx, task.ID, "berry-mcp", answer); err != nil {
+		t.Fatal(err)
+	}
+	dup, err := s.ResolveDecisionRequestAssistant(ctx, task.ID, "berry-mcp", answer)
+	if err != nil || !dup.Duplicate {
+		t.Fatalf("identical re-send=%+v err=%v", dup, err)
+	}
+	other := answer
+	other.OperatorQuote = "ship it instead"
+	if _, err := s.ResolveDecisionRequestAssistant(ctx, task.ID, "berry-mcp", other); !errors.Is(err, ErrDecisionRequestResolved) {
+		t.Fatalf("different quote err=%v", err)
+	}
+	judgement := DecisionAssistantResolveInput{RequestID: request.ID, Option: "A"}
+	if _, err := s.ResolveDecisionRequestAssistant(ctx, task.ID, "berry-mcp", judgement); !errors.Is(err, ErrDecisionRequestResolved) {
+		t.Fatalf("different provenance err=%v", err)
+	}
+}
+
+// Invariant: a provenance value outside the vocabulary is invalid_provenance
+// and writes nothing; a supplied quote obeys the answer-text rules.
+func TestAssistantResolveInvalidProvenance(t *testing.T) {
+	s, _ := searchTestStore(t)
+	ctx := context.Background()
+	for _, prov := range []string{"operator", "OPERATOR_DECIDED", "human", " operator_decided "} {
+		task := assistantTask(t, s, "in_progress")
+		request := assistantRecord(t, s, task.ID)
+		_, err := s.ResolveDecisionRequestAssistant(ctx, task.ID, "berry-mcp", DecisionAssistantResolveInput{RequestID: request.ID, Option: "A", Provenance: prov})
+		if !errors.Is(err, ErrInvalidProvenance) {
+			t.Fatalf("prov=%q err=%v", prov, err)
+		}
+	}
+	task := assistantTask(t, s, "in_progress")
+	request := assistantRecord(t, s, task.ID)
+	for _, quote := range []string{"has\x00nul", strings.Repeat("q", DecisionOperatorQuoteMaxBytes+1)} {
+		_, err := s.ResolveDecisionRequestAssistant(ctx, task.ID, "berry-mcp", DecisionAssistantResolveInput{
+			RequestID: request.ID, Option: "A", Provenance: DecisionProvenanceOperatorDecided, OperatorQuote: quote, DecisionRef: request.ID,
+		})
+		if !errors.Is(err, ErrInvalidDecisionRequest) {
+			t.Fatalf("bad quote err=%v", err)
+		}
+	}
+	if n := len(outboxRows(t, s)); n != 0 {
+		t.Fatalf("invalid provenance left %d outbox rows", n)
+	}
+}
+
+// Invariant: a resolution recorded before the provenance fields existed
+// reads back unchanged, and an identical re-send of that old-shape answer is
+// still a duplicate — the fields normalize to assistant_judgement.
+func TestAssistantResolvePreProvenanceDuplicate(t *testing.T) {
+	s, pool := searchTestStore(t)
+	ctx := context.Background()
+	task := assistantTask(t, s, "in_progress")
+	request := assistantRecord(t, s, task.ID)
+	if _, err := s.ResolveDecisionRequestAssistant(ctx, task.ID, "berry-mcp", DecisionAssistantResolveInput{RequestID: request.ID, Option: "A"}); err != nil {
+		t.Fatal(err)
+	}
+	// Re-write the stored resolution in the pre-provenance shape: no
+	// provenance fields and the old responder.
+	if _, err := pool.Exec(ctx, `UPDATE tasks SET refs=jsonb_set(refs,'{decision_request,resolution}',((refs->'decision_request'->'resolution') - 'provenance' - 'operator_quote' - 'decision_ref' - 'decided_by') || '{"responder":"operator-via-berry"}'::jsonb) WHERE id=$1`, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, _, err := s.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := got.Refs.DecisionRequest.Resolution
+	if res == nil || res.Provenance != "" || res.DecidedBy != "" || res.Responder != DecisionAssistantResponder {
+		t.Fatalf("old-shape resolution=%+v", res)
+	}
+	dup, err := s.ResolveDecisionRequestAssistant(ctx, task.ID, "berry-mcp", DecisionAssistantResolveInput{RequestID: request.ID, Option: "A"})
+	if err != nil || !dup.Duplicate {
+		t.Fatalf("old-shape re-send=%+v err=%v", dup, err)
+	}
+}
+
+// Invariant (Amendment 1, A1): a quote made only of invisible runes —
+// whitespace, Cc, Cf, default-ignorable code points, variation selectors —
+// is no quote at all: it collapses an operator_decided claim to a
+// judgement, so a human_only request refuses it naming no_operator_quote.
+// A real quote wrapped in invisible runes still counts, and the recorded
+// quote keeps the caller's original text. Kills the mutant "normalization
+// dropped" (each invisible-only quote would close the human_only request).
+func TestAssistantResolveInvisibleQuote(t *testing.T) {
+	s, _ := searchTestStore(t)
+	ctx := context.Background()
+	in := decisionInput()
+	in.HumanOnly = true
+	for _, quote := range []string{
+		"\u200b",          // zero-width space
+		"\ufeff",          // byte order mark
+		"\u2060",          // word joiner
+		"\u00ad",          // soft hyphen
+		"\x01",            // Cc
+		"\x1b",            // Cc
+		"\ufe0f",          // variation selector
+		" \u200b\u00ad\t", // invisible mix
+	} {
+		task := assistantTask(t, s, "in_progress")
+		request := assistantRecordWith(t, s, task.ID, in)
+		_, err := s.ResolveDecisionRequestAssistant(ctx, task.ID, "berry-mcp", DecisionAssistantResolveInput{
+			RequestID: request.ID, Option: "A", Provenance: DecisionProvenanceOperatorDecided, OperatorQuote: quote, DecisionRef: request.ID,
+		})
+		if !errors.Is(err, ErrDecisionRequestHumanOnly) || !strings.Contains(err.Error(), "no_operator_quote") {
+			t.Fatalf("quote=%q err=%v", quote, err)
+		}
+	}
+	// A real quote wrapped in invisible runes is still the operator's
+	// words — recorded verbatim, wrapper and all.
+	task := assistantTask(t, s, "in_progress")
+	request := assistantRecordWith(t, s, task.ID, in)
+	wrapped := "\u200b\u00ad ship it \ufe0f\u200b"
+	got, err := s.ResolveDecisionRequestAssistant(ctx, task.ID, "berry-mcp", DecisionAssistantResolveInput{
+		RequestID: request.ID, Option: "A", Provenance: DecisionProvenanceOperatorDecided, OperatorQuote: wrapped, DecisionRef: request.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := got.Request.Resolution
+	if res == nil || res.Provenance != DecisionProvenanceOperatorDecided || res.DecidedBy != DecisionDecidedByOperator || res.OperatorQuote != wrapped {
+		t.Fatalf("wrapped resolution=%+v", res)
+	}
+	// On an ordinary request the invisible-only claim is a judgement —
+	// no quote and no ref recorded.
+	task = assistantTask(t, s, "in_progress")
+	request = assistantRecord(t, s, task.ID)
+	got, err = s.ResolveDecisionRequestAssistant(ctx, task.ID, "berry-mcp", DecisionAssistantResolveInput{
+		RequestID: request.ID, Option: "A", Provenance: DecisionProvenanceOperatorDecided, OperatorQuote: "\u200b\x1b", DecisionRef: request.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res = got.Request.Resolution
+	if res == nil || res.Provenance != DecisionProvenanceAssistantJudgement || res.DecidedBy != DecisionDecidedByAssistant || res.OperatorQuote != "" || res.DecisionRef != "" {
+		t.Fatalf("invisible judgement resolution=%+v", res)
+	}
+}
+
+// Invariant (Amendment 1, A2): provenance is judged before the
+// resolved/duplicate branch — an invalid value or an operator_decided ref
+// bound to another request on an already-resolved request is a 400/409,
+// never a duplicate and never resolved-differently. Kills the mutant
+// "validation moved back after the duplicate branch".
+func TestAssistantResolveProvenanceOnResolved(t *testing.T) {
+	s, _ := searchTestStore(t)
+	ctx := context.Background()
+	task := assistantTask(t, s, "in_progress")
+	request := assistantRecord(t, s, task.ID)
+	if _, err := s.ResolveDecisionRequestAssistant(ctx, task.ID, "berry-mcp", DecisionAssistantResolveInput{RequestID: request.ID, Option: "A"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, prov := range []string{"bogus", "Operator_Decided", "operator"} {
+		_, err := s.ResolveDecisionRequestAssistant(ctx, task.ID, "berry-mcp", DecisionAssistantResolveInput{RequestID: request.ID, Option: "A", Provenance: prov})
+		if !errors.Is(err, ErrInvalidProvenance) {
+			t.Fatalf("resolved + prov=%q err=%v", prov, err)
+		}
+	}
+	for _, ref := range []string{"", "dr-999999-1", request.ID + "-answered", request.ID + " "} {
+		_, err := s.ResolveDecisionRequestAssistant(ctx, task.ID, "berry-mcp", DecisionAssistantResolveInput{
+			RequestID: request.ID, Option: "A", Provenance: DecisionProvenanceOperatorDecided, OperatorQuote: "pick A", DecisionRef: ref,
+		})
+		if !errors.Is(err, ErrProvenanceRefMismatch) {
+			t.Fatalf("resolved + ref=%q err=%v", ref, err)
+		}
+	}
+	got, _, err := s.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := got.Refs.DecisionRequest.Resolution
+	if res == nil || res.Provenance != DecisionProvenanceAssistantJudgement || res.DecidedBy != DecisionDecidedByAssistant {
+		t.Fatalf("resolution after refused resends=%+v", res)
+	}
+	if n := len(outboxRows(t, s)); n != 1 {
+		t.Fatalf("outbox rows=%d", n)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -198,7 +199,7 @@ func TestOperatorReplyLeavesQuestionPendingHTTP(t *testing.T) {
 
 // AC6+AC8: the assistant resolve API refuses every kind but answered,
 // refuses a human_only request and a disposition item, and records
-// responder=operator-via-berry / by=<token client> regardless of forged
+// responder=assistant-via-berry / by=<token client> regardless of forged
 // body fields.
 func TestAssistantDecisionResolveAPI(t *testing.T) {
 	s := taskTestStore(t)
@@ -290,7 +291,7 @@ func TestAssistantDecisionResolveAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 	res := got.Refs.DecisionRequest.Resolution
-	if res == nil || res.Responder != store.DecisionAssistantResponder || res.By != "node" || res.Kind != store.DecisionRequestAnswered {
+	if res == nil || res.Responder != store.DecisionAssistantJudgementResponder || res.By != "node" || res.Kind != store.DecisionRequestAnswered {
 		t.Fatalf("attribution=%+v", res)
 	}
 	// Exactly one deterministic outbox row (the shared DB holds other tests'
@@ -333,6 +334,202 @@ func TestAssistantDecisionResolveAPI(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("unauthenticated status=%d", resp.StatusCode)
+	}
+}
+
+// PR-4c: a revised chat question is answerable again over HTTP — the PUT
+// bumps revision and clears answer_message_id, the old revision's answer is
+// 409 chat_question_stale, and the new revision's answer lands.
+func TestAssistantChatAnswerAfterRevisionHTTP(t *testing.T) {
+	s := taskTestStore(t)
+	h := taskHTTP(s)
+	defer h.Close()
+	lane := taskLane(t)
+	q := assistantQuestion(t, h.URL, "node-token", lane, "original body")
+	status, _ := postChatMessage(t, h.URL, "node-token",
+		assistantMessageBody(fmt.Sprintf("rev1-%d", time.Now().UnixNano()), []map[string]any{{"question_id": q.ID, "revision": 1}}))
+	if status != http.StatusCreated {
+		t.Fatalf("rev1 answer status=%d", status)
+	}
+	// A real revision clears the slot over the wire too.
+	status, revised := putChatQuestion(t, h.URL, "node-token", q.ID, lane, "revised body")
+	if status != http.StatusOK || revised.Revision != 2 || revised.AnswerMessageID != nil {
+		t.Fatalf("revised status=%d q=%+v", status, revised)
+	}
+	resp := request(t, h.Client(), http.MethodPost, h.URL+"/v1/chat/messages", "node-token",
+		assistantMessageBody(fmt.Sprintf("stale-%d", time.Now().UnixNano()), []map[string]any{{"question_id": q.ID, "revision": 1}}))
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("rev1 answer after revision status=%d", resp.StatusCode)
+	}
+	status, _ = postChatMessage(t, h.URL, "node-token",
+		assistantMessageBody(fmt.Sprintf("rev2-%d", time.Now().UnixNano()), []map[string]any{{"question_id": q.ID, "revision": 2}}))
+	if status != http.StatusCreated {
+		t.Fatalf("rev2 answer status=%d", status)
+	}
+	unsent, err := s.ListUnsentNotifications(t.Context(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rev1Row, rev2Row int
+	for _, row := range unsent {
+		if row.EventID == q.ID+"-rev1-answered" {
+			rev1Row++
+		}
+		if row.EventID == q.ID+"-rev2-answered" {
+			rev2Row++
+		}
+	}
+	if rev1Row != 1 || rev2Row != 1 {
+		t.Fatalf("outbox rev1=%d rev2=%d", rev1Row, rev2Row)
+	}
+}
+
+// PR-4c provenance contract over HTTP: operator_decided + verbatim quote +
+// this request's exact ref closes a human_only request with
+// decided_by=operator; every weaker claim is refused or downgraded.
+func TestAssistantDecisionResolveProvenanceAPI(t *testing.T) {
+	s := taskTestStore(t)
+	h := taskHTTP(s)
+	defer h.Close()
+	lane := taskLane(t)
+	post := func(body any) (int, map[string]any) {
+		t.Helper()
+		resp := request(t, h.Client(), http.MethodPost, h.URL+"/v1/assistant/decisions/resolve", "node-token", body)
+		defer resp.Body.Close()
+		out := map[string]any{}
+		_ = json.NewDecoder(resp.Body).Decode(&out)
+		return resp.StatusCode, out
+	}
+
+	// human_only + operator_decided + quote + matching ref: answered as the
+	// operator, quote and ref recorded.
+	humanTask := drTask(t, s, lane, "claimed", "in_progress")
+	human := drInput("deploy 하시겠습니까")
+	human.HumanOnly = true
+	humanReq := drRecord(t, s, humanTask.ID, human)
+	status, out := post(map[string]any{
+		"request_id": humanReq.ID, "option": "A", "text": "operator approved",
+		"provenance": "operator_decided", "operator_quote": "A로 진행", "decision_ref": humanReq.ID,
+	})
+	if status != http.StatusOK {
+		t.Fatalf("operator_decided status=%d body=%v", status, out)
+	}
+	gotTask, _, err := s.GetTask(t.Context(), humanTask.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := gotTask.Refs.DecisionRequest.Resolution
+	if res == nil || res.DecidedBy != "operator" || res.Provenance != "operator_decided" ||
+		res.OperatorQuote != "A로 진행" || res.DecisionRef != humanReq.ID || res.Responder != store.DecisionAssistantResponder {
+		t.Fatalf("operator_decided resolution=%+v", res)
+	}
+	unsent, err := s.ListUnsentNotifications(t.Context(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	quoteMarked := false
+	for _, row := range unsent {
+		if row.EventID == humanReq.ID+"-answered" && strings.Contains(row.Text, "(operator quote)") {
+			quoteMarked = true
+		}
+	}
+	if !quoteMarked {
+		t.Fatalf("outbox missing operator-quote marker")
+	}
+
+	// human_only + bare judgement: 409 without a reason.
+	judgeTask := drTask(t, s, lane, "claimed", "in_progress")
+	judgeHuman := drInput("judgement human_only")
+	judgeHuman.HumanOnly = true
+	judgeReq := drRecord(t, s, judgeTask.ID, judgeHuman)
+	status, out = post(map[string]any{"request_id": judgeReq.ID, "option": "A", "provenance": "assistant_judgement"})
+	if status != http.StatusConflict || out["error"] != "decision_request_human_only" || out["reason"] != nil {
+		t.Fatalf("judgement status=%d body=%v", status, out)
+	}
+
+	// human_only + claimed operator_decided with a blank quote: 409 naming
+	// no_operator_quote.
+	emptyTask := drTask(t, s, lane, "claimed", "in_progress")
+	emptyHuman := drInput("empty quote human_only")
+	emptyHuman.HumanOnly = true
+	emptyReq := drRecord(t, s, emptyTask.ID, emptyHuman)
+	status, out = post(map[string]any{
+		"request_id": emptyReq.ID, "option": "A",
+		"provenance": "operator_decided", "operator_quote": "  ", "decision_ref": emptyReq.ID,
+	})
+	if status != http.StatusConflict || out["error"] != "decision_request_human_only" || out["reason"] != "no_operator_quote" {
+		t.Fatalf("empty quote status=%d body=%v", status, out)
+	}
+
+	// A ref naming another request — here the other task's request id — is
+	// 409 provenance_ref_mismatch and records nothing.
+	refTask := drTask(t, s, lane, "claimed", "in_progress")
+	refReq := drRecord(t, s, refTask.ID, drInput("ref target"))
+	status, out = post(map[string]any{
+		"request_id": refReq.ID, "option": "A",
+		"provenance": "operator_decided", "operator_quote": "borrowed quote", "decision_ref": humanReq.ID,
+	})
+	if status != http.StatusConflict || out["error"] != "provenance_ref_mismatch" {
+		t.Fatalf("ref mismatch status=%d body=%v", status, out)
+	}
+	if got, _, _ := s.GetTask(t.Context(), refTask.ID); got.Refs.DecisionRequest.Status != store.DecisionRequestOpen {
+		t.Fatalf("mismatch closed request: %+v", got.Refs.DecisionRequest)
+	}
+
+	// An unknown provenance value is a 400.
+	badTask := drTask(t, s, lane, "claimed", "in_progress")
+	badReq := drRecord(t, s, badTask.ID, drInput("bad provenance"))
+	status, out = post(map[string]any{"request_id": badReq.ID, "option": "A", "provenance": "operator"})
+	if status != http.StatusBadRequest || out["error"] != "invalid_provenance" {
+		t.Fatalf("bogus provenance status=%d body=%v", status, out)
+	}
+
+	// human_only + claimed operator_decided with an invisible-only quote
+	// (Amendment 1, A1): the quote is no quote, so 409 no_operator_quote.
+	invTask := drTask(t, s, lane, "claimed", "in_progress")
+	invHuman := drInput("invisible quote human_only")
+	invHuman.HumanOnly = true
+	invReq := drRecord(t, s, invTask.ID, invHuman)
+	status, out = post(map[string]any{
+		"request_id": invReq.ID, "option": "A",
+		"provenance": "operator_decided", "operator_quote": "\u200b", "decision_ref": invReq.ID,
+	})
+	if status != http.StatusConflict || out["error"] != "decision_request_human_only" || out["reason"] != "no_operator_quote" {
+		t.Fatalf("invisible quote status=%d body=%v", status, out)
+	}
+
+	// On an already-resolved request provenance is still judged first
+	// (Amendment 1, A2): an invalid value is 400 invalid_provenance and a
+	// quote bound to another request id is 409 provenance_ref_mismatch —
+	// neither is a duplicate.
+	status, out = post(map[string]any{"request_id": humanReq.ID, "option": "A", "provenance": "operator"})
+	if status != http.StatusBadRequest || out["error"] != "invalid_provenance" {
+		t.Fatalf("resolved bogus provenance status=%d body=%v", status, out)
+	}
+	status, out = post(map[string]any{
+		"request_id": humanReq.ID, "option": "A",
+		"provenance": "operator_decided", "operator_quote": "A로 진행", "decision_ref": judgeReq.ID,
+	})
+	if status != http.StatusConflict || out["error"] != "provenance_ref_mismatch" {
+		t.Fatalf("resolved ref mismatch status=%d body=%v", status, out)
+	}
+
+	// A judgement on an ordinary request answers with decided_by=assistant
+	// and a responder that does not say operator.
+	freeTask := drTask(t, s, lane, "claimed", "in_progress")
+	freeReq := drRecord(t, s, freeTask.ID, drInput("free judgement"))
+	status, out = post(map[string]any{"request_id": freeReq.ID, "option": "A"})
+	if status != http.StatusOK {
+		t.Fatalf("judgement answer status=%d body=%v", status, out)
+	}
+	gotTask, _, err = s.GetTask(t.Context(), freeTask.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res = gotTask.Refs.DecisionRequest.Resolution
+	if res == nil || res.DecidedBy != "assistant" || strings.Contains(res.Responder, "operator") || res.Provenance != "assistant_judgement" {
+		t.Fatalf("judgement resolution=%+v", res)
 	}
 }
 

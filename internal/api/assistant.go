@@ -70,14 +70,20 @@ func (s Server) assistantOutboxSent(w http.ResponseWriter, r *http.Request) {
 // assistantResolveInput is the assistant resolve body. Responder and By are
 // declared so a caller echoing them is not a malformed request; the server
 // never reads them — By is the token's client id and the recorded responder
-// is always operator-via-berry.
+// is fixed by the answer's provenance. Provenance, OperatorQuote and
+// DecisionRef carry the provenance contract: operator_decided passes the
+// operator's verbatim words bound to this request id; anything else is the
+// assistant's own judgement.
 type assistantResolveInput struct {
-	RequestID string `json:"request_id"`
-	Kind      string `json:"kind,omitempty"`
-	Option    string `json:"option,omitempty"`
-	Text      string `json:"text,omitempty"`
-	Responder string `json:"responder,omitempty"`
-	By        string `json:"by,omitempty"`
+	RequestID     string `json:"request_id"`
+	Kind          string `json:"kind,omitempty"`
+	Option        string `json:"option,omitempty"`
+	Text          string `json:"text,omitempty"`
+	Provenance    string `json:"provenance,omitempty"`
+	OperatorQuote string `json:"operator_quote,omitempty"`
+	DecisionRef   string `json:"decision_ref,omitempty"`
+	Responder     string `json:"responder,omitempty"`
+	By            string `json:"by,omitempty"`
 }
 
 func (s Server) assistantDecisionResolve(w http.ResponseWriter, r *http.Request) {
@@ -96,7 +102,7 @@ func (s Server) assistantDecisionResolve(w http.ResponseWriter, r *http.Request)
 		appErr(w, store.ErrInvalidDecisionRequest)
 		return
 	}
-	x, err := s.Service.Store.ResolveDecisionRequestAssistant(r.Context(), taskID, client, store.DecisionAssistantResolveInput{RequestID: input.RequestID, Kind: input.Kind, Option: input.Option, Text: input.Text})
+	x, err := s.Service.Store.ResolveDecisionRequestAssistant(r.Context(), taskID, client, store.DecisionAssistantResolveInput{RequestID: input.RequestID, Kind: input.Kind, Option: input.Option, Text: input.Text, Provenance: input.Provenance, OperatorQuote: input.OperatorQuote, DecisionRef: input.DecisionRef})
 	if err != nil {
 		appErr(w, err)
 		return

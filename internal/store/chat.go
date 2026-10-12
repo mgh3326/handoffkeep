@@ -67,8 +67,10 @@ var (
 // ChatQuestion is a desk session's durable question for the operator. The id
 // is assigned by the producer (Q-YYYYMMDD-NN) and is the upsert key.
 // Revision rises by one only when the upsert actually changes body or lane;
-// AnswerMessageID points at the one accepted assistant-channel answer and is
-// NULL until then (a human reply never fills it — a reply is not an answer).
+// AnswerMessageID points at the one accepted assistant-channel answer for the
+// current revision and is NULL until then — a revision clears it (the old
+// answer answered a different question text), and a human reply never fills
+// it (a reply is not an answer).
 type ChatQuestion struct {
 	ID              string     `json:"id"`
 	ConversationID  string     `json:"conversation_id"`
@@ -128,8 +130,12 @@ const chatMessageColumns = `id,conversation_id,author,body,source_channel,origin
 // chatQuestionUpsert refreshes body/lane on the producer's id key. Revision
 // rises exactly when the stored body or lane differs — same-content re-sends
 // and transition-only touches never move it, so an assistant answer compares
-// against the revision it actually read.
-const chatQuestionUpsert = `INSERT INTO chat_questions(id,conversation_id,lane,body,state,created_at,updated_at) VALUES($1,$2,$3,$4,'pending',$5,$5) ON CONFLICT (id) DO UPDATE SET lane=EXCLUDED.lane,body=EXCLUDED.body,updated_at=EXCLUDED.updated_at,revision=chat_questions.revision+CASE WHEN chat_questions.body IS DISTINCT FROM EXCLUDED.body OR chat_questions.lane IS DISTINCT FROM EXCLUDED.lane THEN 1 ELSE 0 END WHERE chat_questions.conversation_id=EXCLUDED.conversation_id RETURNING ` + chatQuestionColumns
+// against the revision it actually read. The same CASE clears the answer
+// slot: an answer taken under revision N answered that revision's body and
+// lane, so a real revision must not let revision N+1 read as answered while
+// its own answers are refused as stale. The answer row itself, its reply
+// relation and its outbox row stay — revision N's history is not deleted.
+const chatQuestionUpsert = `INSERT INTO chat_questions(id,conversation_id,lane,body,state,created_at,updated_at) VALUES($1,$2,$3,$4,'pending',$5,$5) ON CONFLICT (id) DO UPDATE SET lane=EXCLUDED.lane,body=EXCLUDED.body,updated_at=EXCLUDED.updated_at,revision=chat_questions.revision+CASE WHEN chat_questions.body IS DISTINCT FROM EXCLUDED.body OR chat_questions.lane IS DISTINCT FROM EXCLUDED.lane THEN 1 ELSE 0 END,answer_message_id=CASE WHEN chat_questions.body IS DISTINCT FROM EXCLUDED.body OR chat_questions.lane IS DISTINCT FROM EXCLUDED.lane THEN NULL ELSE chat_questions.answer_message_id END WHERE chat_questions.conversation_id=EXCLUDED.conversation_id RETURNING ` + chatQuestionColumns
 
 func scanChatQuestion(row interface{ Scan(...any) error }, x *ChatQuestion) error {
 	return row.Scan(&x.ID, &x.ConversationID, &x.Lane, &x.Body, &x.State, &x.CreatedAt, &x.UpdatedAt, &x.ResolvedAt, &x.Revision, &x.AnswerMessageID)

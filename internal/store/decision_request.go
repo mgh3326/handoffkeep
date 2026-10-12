@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
@@ -77,12 +78,41 @@ var (
 	// ErrDecisionRequestHumanOnly refuses the assistant path on a request
 	// its producer marked for a human answer only (merge, deploy, spend).
 	ErrDecisionRequestHumanOnly = errors.New("decision_request_human_only")
+	// ErrInvalidProvenance refuses a provenance value outside the
+	// provenance vocabulary — absent means assistant_judgement, anything
+	// else must name it or operator_decided exactly.
+	ErrInvalidProvenance = errors.New("invalid_provenance")
+	// ErrProvenanceRefMismatch refuses an operator_decided answer whose
+	// decision_ref does not equal the request id being resolved — a quote
+	// recorded for one decision or revision can never answer another.
+	ErrProvenanceRefMismatch = errors.New("provenance_ref_mismatch")
 )
 
 // DecisionAssistantResponder is the resolution responder the server fixes on
-// the assistant path. Callers never supply it: the record must show the
-// answer came through the assistant relay, not pose as the human operator.
+// the assistant path for an operator_decided answer: the operator's own
+// words arrived through the assistant relay. Callers never supply it.
 const DecisionAssistantResponder = "operator-via-berry"
+
+// DecisionAssistantJudgementResponder is the responder the server fixes on
+// an assistant_judgement answer — the assistant's own judgement must not
+// read as the operator's, so this responder never says operator.
+const DecisionAssistantJudgementResponder = "assistant-via-berry"
+
+// Answer provenance (design/2026-10-12/mgh36-pr4-provenance-contract): an
+// assistant answer is either the operator's verbatim decision relayed by the
+// assistant (operator_decided — accepted even for human_only, recorded
+// decided_by=operator) or the assistant's own judgement (assistant_judgement
+// — refused for human_only, recorded decided_by=assistant). A missing or
+// invisible-only quote collapses every claim to assistant_judgement.
+const (
+	DecisionProvenanceOperatorDecided    = "operator_decided"
+	DecisionProvenanceAssistantJudgement = "assistant_judgement"
+	DecisionDecidedByOperator            = "operator"
+	DecisionDecidedByAssistant           = "assistant"
+)
+
+// DecisionOperatorQuoteMaxBytes bounds the operator's verbatim words.
+const DecisionOperatorQuoteMaxBytes = 2000
 
 // ErrInvalidDecisionRequest wraps every validation failure so the API can
 // return the specific reason while still classifying it as a bad request.
@@ -116,7 +146,12 @@ type DecisionRequest struct {
 
 // DecisionResolution closes a request. By is the authenticated recorder;
 // Responder optionally names who actually answered (e.g. "operator") when a
-// lane records an answer given elsewhere.
+// lane records an answer given elsewhere. The provenance fields record how
+// an assistant-path answer was reached: Provenance names the claim,
+// DecidedBy who actually decided (the operator's quote, or the assistant's
+// judgement), and OperatorQuote/DecisionRef carry the verbatim words bound
+// to this exact request id. Operator-path and pre-provenance resolutions
+// leave all four empty.
 type DecisionResolution struct {
 	Kind      string    `json:"kind"`
 	Option    string    `json:"option,omitempty"`
@@ -125,6 +160,11 @@ type DecisionResolution struct {
 	Responder string    `json:"responder,omitempty"`
 	By        string    `json:"by"`
 	At        time.Time `json:"at"`
+
+	Provenance    string `json:"provenance,omitempty"`
+	OperatorQuote string `json:"operator_quote,omitempty"`
+	DecisionRef   string `json:"decision_ref,omitempty"`
+	DecidedBy     string `json:"decided_by,omitempty"`
 }
 
 // DecisionRequestInput is the producer's request. Options carries the
@@ -160,12 +200,103 @@ type DecisionResolveInput struct {
 // DecisionAssistantResolveInput is what the assistant path accepts: the
 // request to answer and the answer. Kind is optional and may only be
 // "answered". Responder and By are not fields at all — the server fixes
-// Responder to operator-via-berry and By is the authenticated client.
+// Responder by provenance and By is the authenticated client.
+// Provenance names the answer's origin: "operator_decided" passes the
+// operator's verbatim words in OperatorQuote bound to this request id by
+// DecisionRef (which must equal RequestID exactly); absent or
+// "assistant_judgement" is the assistant's own answer. An operator_decided
+// claim with a blank or invisible-only quote is treated as
+// assistant_judgement — no quote, no operator decision.
 type DecisionAssistantResolveInput struct {
-	RequestID string `json:"request_id"`
-	Kind      string `json:"kind,omitempty"`
-	Option    string `json:"option,omitempty"`
-	Text      string `json:"text,omitempty"`
+	RequestID     string `json:"request_id"`
+	Kind          string `json:"kind,omitempty"`
+	Option        string `json:"option,omitempty"`
+	Text          string `json:"text,omitempty"`
+	Provenance    string `json:"provenance,omitempty"`
+	OperatorQuote string `json:"operator_quote,omitempty"`
+	DecisionRef   string `json:"decision_ref,omitempty"`
+}
+
+// assistantProvenance normalizes one assistant resolve's provenance claim.
+// claimed is the caller's value (absent folds to assistant_judgement); quote
+// and ref are the raw fields. effective() is what the record and every gate
+// use: only a quote with a visible rune under an operator_decided claim
+// counts as the operator's decision (see quoteVisible).
+type assistantProvenance struct {
+	claimed string
+	quote   string
+	ref     string
+}
+
+func normalizeAssistantProvenance(in DecisionAssistantResolveInput) assistantProvenance {
+	p := assistantProvenance{claimed: in.Provenance, quote: in.OperatorQuote, ref: in.DecisionRef}
+	if p.claimed == "" {
+		p.claimed = DecisionProvenanceAssistantJudgement
+	}
+	return p
+}
+
+func (p assistantProvenance) valid() bool {
+	return p.claimed == DecisionProvenanceOperatorDecided || p.claimed == DecisionProvenanceAssistantJudgement
+}
+
+// quoteVisible reports whether the quote carries any rune a reader can
+// see. Amendment 1 (A1): "non-empty" is judged after removing
+// whitespace, Unicode Cc and Cf, default-ignorable code points and
+// variation selectors — the same normalization as taskReasonText — so a
+// quote made only of invisible runes is no quote at all and folds to
+// assistant_judgement. The recorded quote keeps the caller's original
+// text; this test only gates the claim.
+func quoteVisible(q string) bool {
+	return strings.IndexFunc(q, func(r rune) bool {
+		return !(unicode.IsSpace(r) || unicode.Is(unicode.Cf, r) || unicode.Is(unicode.Cc, r) ||
+			unicode.Is(unicode.Variation_Selector, r) || unicode.Is(unicode.Other_Default_Ignorable_Code_Point, r))
+	}) >= 0
+}
+
+func (p assistantProvenance) effective() string {
+	if p.claimed == DecisionProvenanceOperatorDecided && quoteVisible(p.quote) {
+		return DecisionProvenanceOperatorDecided
+	}
+	return DecisionProvenanceAssistantJudgement
+}
+
+func (p assistantProvenance) decidedBy() string {
+	if p.effective() == DecisionProvenanceOperatorDecided {
+		return DecisionDecidedByOperator
+	}
+	return DecisionDecidedByAssistant
+}
+
+func (p assistantProvenance) responder() string {
+	if p.effective() == DecisionProvenanceOperatorDecided {
+		return DecisionAssistantResponder
+	}
+	return DecisionAssistantJudgementResponder
+}
+
+// recordedQuote and recordedRef are what the resolution keeps: the verbatim
+// words and their binding exist only for an operator_decided answer — a
+// judgement never stores a claim it did not act on.
+func (p assistantProvenance) recordedQuote() string {
+	if p.effective() == DecisionProvenanceOperatorDecided {
+		return p.quote
+	}
+	return ""
+}
+
+func (p assistantProvenance) recordedRef() string {
+	if p.effective() == DecisionProvenanceOperatorDecided {
+		return p.ref
+	}
+	return ""
+}
+
+func (p assistantProvenance) marker() string {
+	if p.effective() == DecisionProvenanceOperatorDecided {
+		return "(operator quote)"
+	}
+	return "(assistant judgement)"
 }
 
 // DecisionRequestResult is what a producer needs to notify: the recorded
@@ -513,8 +644,34 @@ func (s *Store) RecordDecisionRequest(ctx context.Context, taskID int64, by stri
 	return DecisionRequestResult{Task: x, Request: request}, nil
 }
 
-func sameResolution(r DecisionResolution, in DecisionResolveInput) bool {
-	return r.Kind == in.Kind && r.Option == in.Option && r.Text == in.Text && r.Receipt == in.Receipt && r.Responder == in.Responder
+// sameResolution compares a recorded resolution to a re-sent input. On the
+// assistant path it also compares provenance — a re-send that changes the
+// claim or the quote is a different answer, never a duplicate. A resolution
+// recorded before the provenance fields existed normalizes to
+// assistant_judgement decided_by the assistant with the (a) responder, so an
+// identical re-send of a pre-upgrade answer is still a duplicate.
+func sameResolution(r DecisionResolution, in DecisionResolveInput, prov *assistantProvenance) bool {
+	if r.Kind != in.Kind || r.Option != in.Option || r.Text != in.Text || r.Receipt != in.Receipt {
+		return false
+	}
+	if prov == nil {
+		return r.Responder == in.Responder
+	}
+	rec := r
+	if rec.Provenance == "" {
+		rec.Provenance = DecisionProvenanceAssistantJudgement
+	}
+	if rec.Provenance == DecisionProvenanceAssistantJudgement {
+		if rec.DecidedBy == "" {
+			rec.DecidedBy = DecisionDecidedByAssistant
+		}
+		if rec.Responder == DecisionAssistantResponder {
+			rec.Responder = DecisionAssistantJudgementResponder
+		}
+	}
+	return rec.Responder == in.Responder && rec.Provenance == prov.effective() &&
+		rec.OperatorQuote == prov.recordedQuote() && rec.DecisionRef == prov.recordedRef() &&
+		rec.DecidedBy == prov.decidedBy()
 }
 
 // ResolveDecisionRequest closes the task's current request as answered,
@@ -523,30 +680,34 @@ func sameResolution(r DecisionResolution, in DecisionResolveInput) bool {
 // request is closed. A request that is not the current one is stale; an
 // identical re-send of the recorded resolution is a duplicate.
 func (s *Store) ResolveDecisionRequest(ctx context.Context, taskID int64, by string, in DecisionResolveInput) (DecisionRequestResult, error) {
-	return s.resolveDecisionRequest(ctx, taskID, by, in, false)
+	return s.resolveDecisionRequest(ctx, taskID, by, in, nil)
 }
 
 // ResolveDecisionRequestAssistant is the assistant channel's resolve: the
-// kind is fixed to answered, Responder is fixed to operator-via-berry, By is
-// the authenticated client id — none come from caller input. A request on a
-// disposition item or marked human_only is refused, and the recorded
-// resolution carries one notification_outbox row in the same transaction so
-// the lane is owed a notification even if no drainer is up yet.
+// kind is fixed to answered, Responder and DecidedBy are fixed by the
+// answer's provenance, By is the authenticated client id — none come from
+// caller input. A request on a disposition item is always refused; a
+// human_only request answers only as operator_decided with the operator's
+// verbatim quote bound to this request id. The recorded resolution carries
+// one notification_outbox row in the same transaction so the lane is owed a
+// notification even if no drainer is up yet.
 func (s *Store) ResolveDecisionRequestAssistant(ctx context.Context, taskID int64, by string, in DecisionAssistantResolveInput) (DecisionRequestResult, error) {
 	if in.Kind != "" && in.Kind != DecisionRequestAnswered {
 		return DecisionRequestResult{}, ErrDecisionAssistantKind
 	}
+	prov := normalizeAssistantProvenance(in)
 	effective := DecisionResolveInput{
 		RequestID: in.RequestID,
 		Kind:      DecisionRequestAnswered,
 		Option:    in.Option,
 		Text:      in.Text,
-		Responder: DecisionAssistantResponder,
+		Responder: prov.responder(),
 	}
-	return s.resolveDecisionRequest(ctx, taskID, by, effective, true)
+	return s.resolveDecisionRequest(ctx, taskID, by, effective, &prov)
 }
 
-func (s *Store) resolveDecisionRequest(ctx context.Context, taskID int64, by string, in DecisionResolveInput, assistant bool) (DecisionRequestResult, error) {
+func (s *Store) resolveDecisionRequest(ctx context.Context, taskID int64, by string, in DecisionResolveInput, prov *assistantProvenance) (DecisionRequestResult, error) {
+	assistant := prov != nil
 	if taskID < 1 {
 		return DecisionRequestResult{}, invalidDecisionRequest("task id must be positive")
 	}
@@ -576,7 +737,20 @@ func (s *Store) resolveDecisionRequest(ctx context.Context, taskID int64, by str
 		return DecisionRequestResult{}, ErrDecisionRequestStale
 	}
 	if request.Status != DecisionRequestOpen {
-		if request.Resolution != nil && sameResolution(*request.Resolution, in) {
+		if assistant {
+			// Amendment 1 (A2): provenance validity and the
+			// operator_decided ref binding are judged before the
+			// duplicate comparison — an invalid claim or a quote
+			// bound to another request id on an already-resolved
+			// request is a 400/409, never a duplicate.
+			if !prov.valid() {
+				return DecisionRequestResult{}, ErrInvalidProvenance
+			}
+			if prov.effective() == DecisionProvenanceOperatorDecided && prov.ref != in.RequestID {
+				return DecisionRequestResult{}, ErrProvenanceRefMismatch
+			}
+		}
+		if request.Resolution != nil && sameResolution(*request.Resolution, in, prov) {
 			return DecisionRequestResult{Task: x, Request: *request, Duplicate: true}, nil
 		}
 		return DecisionRequestResult{}, ErrDecisionRequestResolved
@@ -589,12 +763,36 @@ func (s *Store) resolveDecisionRequest(ctx context.Context, taskID int64, by str
 			return DecisionRequestResult{}, ErrTaskTerminal
 		}
 		// A disposition item is answered only on the operator's
-		// Access-authenticated web route, and a human_only request names the
-		// boundary in the request itself. Neither may be closed here.
+		// Access-authenticated web route. Provenance never widens that: no
+		// quote closes it here.
 		if x.Refs.Disposition != nil {
 			return DecisionRequestResult{}, ErrDispositionOperatorOnly
 		}
-		if request.HumanOnly {
+		// Provenance validation: the claim must name a known value, a
+		// supplied quote obeys the answer-text rules, and an
+		// operator_decided answer's ref must bind this exact request id —
+		// a quote for one decision or revision never answers another.
+		if !prov.valid() {
+			return DecisionRequestResult{}, ErrInvalidProvenance
+		}
+		if quoteVisible(prov.quote) {
+			if !validText(prov.quote, DecisionOperatorQuoteMaxBytes) || !utf8.ValidString(prov.quote) {
+				return DecisionRequestResult{}, invalidDecisionRequest(fmt.Sprintf("operator_quote must be at most %d bytes of valid text", DecisionOperatorQuoteMaxBytes))
+			}
+			if err := guard.Reject(prov.quote); err != nil {
+				return DecisionRequestResult{}, err
+			}
+		}
+		if prov.effective() == DecisionProvenanceOperatorDecided && prov.ref != in.RequestID {
+			return DecisionRequestResult{}, ErrProvenanceRefMismatch
+		}
+		// A human_only request names the boundary in the request itself:
+		// only the operator's verbatim decision closes it here — a claim
+		// without the quote is a judgement, and a judgement never does.
+		if request.HumanOnly && prov.effective() != DecisionProvenanceOperatorDecided {
+			if prov.claimed == DecisionProvenanceOperatorDecided {
+				return DecisionRequestResult{}, fmt.Errorf("%w: no_operator_quote", ErrDecisionRequestHumanOnly)
+			}
 			return DecisionRequestResult{}, ErrDecisionRequestHumanOnly
 		}
 	}
@@ -610,6 +808,12 @@ func (s *Store) resolveDecisionRequest(ctx context.Context, taskID int64, by str
 	resolved := *request
 	resolved.Status = in.Kind
 	resolved.Resolution = &DecisionResolution{Kind: in.Kind, Option: in.Option, Text: in.Text, Receipt: in.Receipt, Responder: in.Responder, By: by, At: now}
+	if assistant {
+		resolved.Resolution.Provenance = prov.effective()
+		resolved.Resolution.OperatorQuote = prov.recordedQuote()
+		resolved.Resolution.DecisionRef = prov.recordedRef()
+		resolved.Resolution.DecidedBy = prov.decidedBy()
+	}
 	x.Refs.DecisionRequest = &resolved
 	encoded, err := json.Marshal(x.Refs)
 	if err != nil {
@@ -625,8 +829,14 @@ func (s *Store) resolveDecisionRequest(ctx context.Context, taskID int64, by str
 	if in.Receipt != "" {
 		note += " receipt " + in.Receipt
 	}
+	if assistant {
+		note += " " + prov.marker()
+	}
 	if in.Text != "" {
 		note += ": " + in.Text
+	}
+	if assistant && prov.effective() == DecisionProvenanceOperatorDecided {
+		note += " — " + prov.quote
 	}
 	if assistant {
 		// The notification is written before the decision event so a failure
@@ -635,6 +845,7 @@ func (s *Store) resolveDecisionRequest(ctx context.Context, taskID int64, by str
 		if in.Option != "" {
 			head += " " + in.Option
 		}
+		head += " " + prov.marker()
 		if in.Text != "" {
 			head += ": "
 		}

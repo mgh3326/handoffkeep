@@ -314,8 +314,8 @@ func TestUIWriteDecisionRoutes(t *testing.T) {
 	before := uiRowCounts(t)
 	cookie, csrf = uiCSRF(t, h.Client(), h.URL+"/ui/decisions", assertion)
 	response = uiPostForm(t, h.Client(), h.URL+"/ui/decisions/answer", assertion, cookie, decisionFields("escalation", escalation.ID, "continue", csrf), h.URL, true)
-	if response.StatusCode != http.StatusOK {
-		t.Fatalf("escalation status=%d", response.StatusCode)
+	if body = responseText(t, response); response.StatusCode != http.StatusOK {
+		t.Fatalf("escalation status=%d body=%q", response.StatusCode, body)
 	}
 	requests = hub.requests()
 	if requests[len(requests)-1].Lane != "lane-b" || before.Tasks != uiRowCounts(t).Tasks || before.TaskEvents != uiRowCounts(t).TaskEvents {
