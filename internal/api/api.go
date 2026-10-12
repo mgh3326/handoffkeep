@@ -633,8 +633,18 @@ func appErr(w http.ResponseWriter, e error) {
 	case errors.Is(e, store.ErrDecisionAssistantKind):
 		jsonOut(w, http.StatusBadRequest, map[string]string{"error": "decision_assistant_kind"})
 		return
+	case errors.Is(e, store.ErrInvalidProvenance):
+		jsonOut(w, http.StatusBadRequest, map[string]string{"error": "invalid_provenance"})
+		return
+	case errors.Is(e, store.ErrProvenanceRefMismatch):
+		jsonOut(w, http.StatusConflict, map[string]string{"error": "provenance_ref_mismatch"})
+		return
 	case errors.Is(e, store.ErrDecisionRequestHumanOnly):
-		jsonOut(w, http.StatusConflict, map[string]string{"error": "decision_request_human_only"})
+		body := map[string]string{"error": "decision_request_human_only"}
+		if reason, ok := strings.CutPrefix(e.Error(), "decision_request_human_only: "); ok && reason != "" {
+			body["reason"] = reason
+		}
+		jsonOut(w, http.StatusConflict, body)
 		return
 	case errors.Is(e, store.ErrOutboxEventNotFound):
 		jsonOut(w, http.StatusNotFound, map[string]string{"error": "not_found"})
