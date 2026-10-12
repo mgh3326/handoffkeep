@@ -20,6 +20,7 @@ const (
 	testVCSRevision = "0123456789abcdef0123456789abcdef01234567"
 	testVCSTime     = "2026-09-28T00:59:04Z"
 	testGoVersion   = "go1.27.0"
+	testReleaseTag  = "v1.2.3"
 )
 
 func stampedBuildInfo() *debug.BuildInfo {
@@ -34,7 +35,12 @@ func stampedBuildInfo() *debug.BuildInfo {
 	}
 }
 
-const wantVersionLine = "handoffkeep rev=" + testVCSRevision + " time=" + testVCSTime + " modified=false module=(devel) go=" + testGoVersion + "\n"
+func stubReleaseTag(t *testing.T, tag string) {
+	t.Helper()
+	previous := releaseTag
+	releaseTag = tag
+	t.Cleanup(func() { releaseTag = previous })
+}
 
 var wantVersionFields = map[string]string{
 	"rev":      testVCSRevision,
@@ -42,25 +48,29 @@ var wantVersionFields = map[string]string{
 	"modified": "false",
 	"module":   "(devel)",
 	"go":       testGoVersion,
+	"release":  testReleaseTag,
 }
 
 // TestVersionTextOutput pins the exact single-line text format of
 // handoffkeep version for a fully VCS-stamped build.
 func TestVersionTextOutput(t *testing.T) {
 	stubBuildInfo(t, stampedBuildInfo(), true)
+	stubReleaseTag(t, testReleaseTag)
 	var out bytes.Buffer
 	if err := run([]string{"version"}, &out, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
-	if out.String() != wantVersionLine {
-		t.Fatalf("got %q want %q", out.String(), wantVersionLine)
+	want := "handoffkeep rev=" + testVCSRevision + " time=" + testVCSTime + " modified=false module=(devel) go=" + testGoVersion + " release=" + testReleaseTag + "\n"
+	if out.String() != want {
+		t.Fatalf("got %q want %q", out.String(), want)
 	}
 }
 
-// TestVersionJSONOutput requires exactly the five keys, each equal to the
+// TestVersionJSONOutput requires exactly the six keys, each equal to the
 // stamped build-info value.
 func TestVersionJSONOutput(t *testing.T) {
 	stubBuildInfo(t, stampedBuildInfo(), true)
+	stubReleaseTag(t, testReleaseTag)
 	var out bytes.Buffer
 	if err := run([]string{"version", "--json"}, &out, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
@@ -74,15 +84,16 @@ func TestVersionJSONOutput(t *testing.T) {
 	}
 }
 
-// TestVersionNoBuildInfo covers ReadBuildInfo reporting ok=false: every
-// field is the literal "unknown" in both formats, with a nil error.
+// TestVersionNoBuildInfo covers ReadBuildInfo reporting ok=false: Go build
+// info fields are "unknown" while the separate release stamp remains present.
 func TestVersionNoBuildInfo(t *testing.T) {
 	stubBuildInfo(t, nil, false)
+	stubReleaseTag(t, testReleaseTag)
 	var out bytes.Buffer
 	if err := run([]string{"version"}, &out, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
-	want := "handoffkeep rev=unknown time=unknown modified=unknown module=unknown go=unknown\n"
+	want := "handoffkeep rev=unknown time=unknown modified=unknown module=unknown go=unknown release=" + testReleaseTag + "\n"
 	if out.String() != want {
 		t.Fatalf("got %q want %q", out.String(), want)
 	}
@@ -99,8 +110,37 @@ func TestVersionNoBuildInfo(t *testing.T) {
 			t.Fatalf("%s=%q want unknown (%v)", key, fields[key], fields)
 		}
 	}
-	if len(fields) != 5 {
+	if fields["release"] != testReleaseTag {
+		t.Fatalf("release=%q want %q (%v)", fields["release"], testReleaseTag, fields)
+	}
+	if len(fields) != 6 {
 		t.Fatalf("got %d keys: %v", len(fields), fields)
+	}
+}
+
+// TestVersionWithoutReleaseStamp keeps a build without the linker stamp
+// explicit: release is "unknown" even when Go build info is available.
+func TestVersionWithoutReleaseStamp(t *testing.T) {
+	stubBuildInfo(t, stampedBuildInfo(), true)
+	stubReleaseTag(t, "")
+	var out bytes.Buffer
+	if err := run([]string{"version"}, &out, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	want := "handoffkeep rev=" + testVCSRevision + " time=" + testVCSTime + " modified=false module=(devel) go=" + testGoVersion + " release=unknown\n"
+	if out.String() != want {
+		t.Fatalf("got %q want %q", out.String(), want)
+	}
+	out.Reset()
+	if err := run([]string{"version", "--json"}, &out, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]string
+	if err := json.Unmarshal(out.Bytes(), &fields); err != nil {
+		t.Fatal(err)
+	}
+	if fields["release"] != "unknown" || len(fields) != 6 {
+		t.Fatalf("release fields=%v want release=unknown and six keys", fields)
 	}
 }
 
@@ -113,11 +153,12 @@ func TestVersionWithoutVCSStamp(t *testing.T) {
 		GoVersion: testGoVersion,
 		Main:      debug.Module{Path: "github.com/mgh3326/handoffkeep", Version: pseudo},
 	}, true)
+	stubReleaseTag(t, testReleaseTag)
 	var out bytes.Buffer
 	if err := run([]string{"version"}, &out, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
-	want := "handoffkeep rev=unknown time=unknown modified=unknown module=" + pseudo + " go=" + testGoVersion + "\n"
+	want := "handoffkeep rev=unknown time=unknown modified=unknown module=" + pseudo + " go=" + testGoVersion + " release=" + testReleaseTag + "\n"
 	if out.String() != want {
 		t.Fatalf("got %q want %q", out.String(), want)
 	}
@@ -135,6 +176,7 @@ func TestVersionWithoutVCSStamp(t *testing.T) {
 		"modified": "unknown",
 		"module":   pseudo,
 		"go":       testGoVersion,
+		"release":  testReleaseTag,
 	}
 	if !reflect.DeepEqual(fields, wantFields) {
 		t.Fatalf("got %v want %v", fields, wantFields)
@@ -154,11 +196,12 @@ func TestVersionEmptyVCSValues(t *testing.T) {
 			{Key: "vcs.modified", Value: ""},
 		},
 	}, true)
+	stubReleaseTag(t, testReleaseTag)
 	var out bytes.Buffer
 	if err := run([]string{"version"}, &out, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
-	want := "handoffkeep rev=unknown time=unknown modified=unknown module=(devel) go=" + testGoVersion + "\n"
+	want := "handoffkeep rev=unknown time=unknown modified=unknown module=(devel) go=" + testGoVersion + " release=" + testReleaseTag + "\n"
 	if out.String() != want {
 		t.Fatalf("got %q want %q", out.String(), want)
 	}
@@ -176,6 +219,7 @@ func TestVersionEmptyVCSValues(t *testing.T) {
 		"modified": "unknown",
 		"module":   "(devel)",
 		"go":       testGoVersion,
+		"release":  testReleaseTag,
 	}
 	if !reflect.DeepEqual(fields, wantFields) {
 		t.Fatalf("got %v want %v", fields, wantFields)
@@ -186,6 +230,7 @@ func TestVersionEmptyVCSValues(t *testing.T) {
 // same output as handoffkeep version, arguments included.
 func TestVersionFlagAlias(t *testing.T) {
 	stubBuildInfo(t, stampedBuildInfo(), true)
+	stubReleaseTag(t, testReleaseTag)
 	for _, args := range [][]string{{}, {"--json"}} {
 		var sub, flagOut bytes.Buffer
 		if err := run(append([]string{"version"}, args...), &sub, &bytes.Buffer{}); err != nil {
@@ -213,12 +258,14 @@ func TestVersionIgnoresEnvironment(t *testing.T) {
 		t.Setenv(name, "")
 	}
 	stubBuildInfo(t, stampedBuildInfo(), true)
+	stubReleaseTag(t, testReleaseTag)
 	var out bytes.Buffer
 	if err := run([]string{"version"}, &out, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
-	if out.String() != wantVersionLine {
-		t.Fatalf("got %q want %q", out.String(), wantVersionLine)
+	want := "handoffkeep rev=" + testVCSRevision + " time=" + testVCSTime + " modified=false module=(devel) go=" + testGoVersion + " release=" + testReleaseTag + "\n"
+	if out.String() != want {
+		t.Fatalf("got %q want %q", out.String(), want)
 	}
 }
 
@@ -226,6 +273,7 @@ func TestVersionIgnoresEnvironment(t *testing.T) {
 // --json flag.
 func TestVersionRejectsArguments(t *testing.T) {
 	stubBuildInfo(t, stampedBuildInfo(), true)
+	stubReleaseTag(t, testReleaseTag)
 	if err := run([]string{"version", "extra"}, &bytes.Buffer{}, &bytes.Buffer{}); err == nil {
 		t.Fatal("expected error for positional argument")
 	}
