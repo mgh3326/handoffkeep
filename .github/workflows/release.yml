@@ -1,0 +1,77 @@
+name: release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: handoffkeep
+          POSTGRES_PASSWORD: handoffkeep
+          POSTGRES_DB: handoffkeep
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U handoffkeep" --health-interval 10s --health-timeout 5s --health-retries 5
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with:
+          go-version-file: go.mod
+      - name: Vet, test, and exercise release helper
+        run: |
+          set -euo pipefail
+          go vet ./...
+          go test ./...
+          bash scripts/test-build-release.sh
+        env:
+          HANDOFFKEEP_TEST_DB_URL: postgres://handoffkeep:handoffkeep@localhost:5432/handoffkeep?sslmode=disable
+      - name: Check release tag format
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            printf 'refusing invalid release tag: %s\n' "$RELEASE_TAG" >&2
+            exit 1
+          fi
+      - name: Build release assets
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          ./scripts/build-release.sh "$RELEASE_TAG" dist/release
+          {
+            printf '# Install with node-ops hk-cli-install\n\n'
+            printf 'Pass the release tag, the selected os_arch, and its sha256 from SHA256SUMS.\n\n'
+            printf 'Download path: https://github.com/%s/releases/download/%s/handoffkeep_<os>_<arch>\n\n' "$GITHUB_REPOSITORY" "$RELEASE_TAG"
+            printf '| tag | os_arch | sha256 |\n| --- | --- | --- |\n'
+            while read -r digest asset; do
+              os_arch=${asset#handoffkeep_}
+              printf '| %s | %s | %s |\n' "$RELEASE_TAG" "$os_arch" "$digest"
+            done < dist/release/SHA256SUMS
+          } > dist/release-notes.md
+      - name: Verify release asset metadata and checksums
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          version_output=$(dist/release/handoffkeep_linux_amd64 version)
+          printf '%s\n' "$version_output"
+          [[ "$version_output" == *"release=$RELEASE_TAG"* ]]
+          [[ "$version_output" == *"rev=$RELEASE_SHA"* ]]
+          [[ $(wc -l < dist/release/SHA256SUMS) -eq 4 ]]
+          (cd dist/release && sha256sum -c SHA256SUMS)
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: gh release create "$RELEASE_TAG" dist/release/* --verify-tag --title "$RELEASE_TAG" --notes-file dist/release-notes.md

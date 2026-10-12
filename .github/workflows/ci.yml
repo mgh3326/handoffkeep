@@ -38,6 +38,7 @@ jobs:
       - run: go test -race -timeout 30m ./...
         env:
           HANDOFFKEEP_TEST_DB_URL: postgres://handoffkeep:handoffkeep@localhost:5432/handoffkeep?sslmode=disable
+      - run: bash scripts/test-build-release.sh
       - uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
