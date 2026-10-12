@@ -1016,6 +1016,108 @@ func TestAssistantResolvePreProvenanceDuplicate(t *testing.T) {
 	}
 }
 
+// Invariant (Amendment 1, A1): a quote made only of invisible runes —
+// whitespace, Cc, Cf, default-ignorable code points, variation selectors —
+// is no quote at all: it collapses an operator_decided claim to a
+// judgement, so a human_only request refuses it naming no_operator_quote.
+// A real quote wrapped in invisible runes still counts, and the recorded
+// quote keeps the caller's original text. Kills the mutant "normalization
+// dropped" (each invisible-only quote would close the human_only request).
+func TestAssistantResolveInvisibleQuote(t *testing.T) {
+	s, _ := searchTestStore(t)
+	ctx := context.Background()
+	in := decisionInput()
+	in.HumanOnly = true
+	for _, quote := range []string{
+		"\u200b",          // zero-width space
+		"\ufeff",          // byte order mark
+		"\u2060",          // word joiner
+		"\u00ad",          // soft hyphen
+		"\x01",            // Cc
+		"\x1b",            // Cc
+		"\ufe0f",          // variation selector
+		" \u200b\u00ad\t", // invisible mix
+	} {
+		task := assistantTask(t, s, "in_progress")
+		request := assistantRecordWith(t, s, task.ID, in)
+		_, err := s.ResolveDecisionRequestAssistant(ctx, task.ID, "berry-mcp", DecisionAssistantResolveInput{
+			RequestID: request.ID, Option: "A", Provenance: DecisionProvenanceOperatorDecided, OperatorQuote: quote, DecisionRef: request.ID,
+		})
+		if !errors.Is(err, ErrDecisionRequestHumanOnly) || !strings.Contains(err.Error(), "no_operator_quote") {
+			t.Fatalf("quote=%q err=%v", quote, err)
+		}
+	}
+	// A real quote wrapped in invisible runes is still the operator's
+	// words — recorded verbatim, wrapper and all.
+	task := assistantTask(t, s, "in_progress")
+	request := assistantRecordWith(t, s, task.ID, in)
+	wrapped := "\u200b\u00ad ship it \ufe0f\u200b"
+	got, err := s.ResolveDecisionRequestAssistant(ctx, task.ID, "berry-mcp", DecisionAssistantResolveInput{
+		RequestID: request.ID, Option: "A", Provenance: DecisionProvenanceOperatorDecided, OperatorQuote: wrapped, DecisionRef: request.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := got.Request.Resolution
+	if res == nil || res.Provenance != DecisionProvenanceOperatorDecided || res.DecidedBy != DecisionDecidedByOperator || res.OperatorQuote != wrapped {
+		t.Fatalf("wrapped resolution=%+v", res)
+	}
+	// On an ordinary request the invisible-only claim is a judgement —
+	// no quote and no ref recorded.
+	task = assistantTask(t, s, "in_progress")
+	request = assistantRecord(t, s, task.ID)
+	got, err = s.ResolveDecisionRequestAssistant(ctx, task.ID, "berry-mcp", DecisionAssistantResolveInput{
+		RequestID: request.ID, Option: "A", Provenance: DecisionProvenanceOperatorDecided, OperatorQuote: "\u200b\x1b", DecisionRef: request.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res = got.Request.Resolution
+	if res == nil || res.Provenance != DecisionProvenanceAssistantJudgement || res.DecidedBy != DecisionDecidedByAssistant || res.OperatorQuote != "" || res.DecisionRef != "" {
+		t.Fatalf("invisible judgement resolution=%+v", res)
+	}
+}
+
+// Invariant (Amendment 1, A2): provenance is judged before the
+// resolved/duplicate branch — an invalid value or an operator_decided ref
+// bound to another request on an already-resolved request is a 400/409,
+// never a duplicate and never resolved-differently. Kills the mutant
+// "validation moved back after the duplicate branch".
+func TestAssistantResolveProvenanceOnResolved(t *testing.T) {
+	s, _ := searchTestStore(t)
+	ctx := context.Background()
+	task := assistantTask(t, s, "in_progress")
+	request := assistantRecord(t, s, task.ID)
+	if _, err := s.ResolveDecisionRequestAssistant(ctx, task.ID, "berry-mcp", DecisionAssistantResolveInput{RequestID: request.ID, Option: "A"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, prov := range []string{"bogus", "Operator_Decided", "operator"} {
+		_, err := s.ResolveDecisionRequestAssistant(ctx, task.ID, "berry-mcp", DecisionAssistantResolveInput{RequestID: request.ID, Option: "A", Provenance: prov})
+		if !errors.Is(err, ErrInvalidProvenance) {
+			t.Fatalf("resolved + prov=%q err=%v", prov, err)
+		}
+	}
+	for _, ref := range []string{"", "dr-999999-1", request.ID + "-answered", request.ID + " "} {
+		_, err := s.ResolveDecisionRequestAssistant(ctx, task.ID, "berry-mcp", DecisionAssistantResolveInput{
+			RequestID: request.ID, Option: "A", Provenance: DecisionProvenanceOperatorDecided, OperatorQuote: "pick A", DecisionRef: ref,
+		})
+		if !errors.Is(err, ErrProvenanceRefMismatch) {
+			t.Fatalf("resolved + ref=%q err=%v", ref, err)
+		}
+	}
+	got, _, err := s.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := got.Refs.DecisionRequest.Resolution
+	if res == nil || res.Provenance != DecisionProvenanceAssistantJudgement || res.DecidedBy != DecisionDecidedByAssistant {
+		t.Fatalf("resolution after refused resends=%+v", res)
+	}
+	if n := len(outboxRows(t, s)); n != 1 {
+		t.Fatalf("outbox rows=%d", n)
+	}
+}
+
 // Invariant: the chat-answer outbox row lives in the message transaction —
 // when one answer in a multi-answer post is stale, the earlier answers'
 // outbox rows roll back with the message instead of lingering unsent.

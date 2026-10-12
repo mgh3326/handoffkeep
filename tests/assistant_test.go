@@ -485,6 +485,36 @@ func TestAssistantDecisionResolveProvenanceAPI(t *testing.T) {
 		t.Fatalf("bogus provenance status=%d body=%v", status, out)
 	}
 
+	// human_only + claimed operator_decided with an invisible-only quote
+	// (Amendment 1, A1): the quote is no quote, so 409 no_operator_quote.
+	invTask := drTask(t, s, lane, "claimed", "in_progress")
+	invHuman := drInput("invisible quote human_only")
+	invHuman.HumanOnly = true
+	invReq := drRecord(t, s, invTask.ID, invHuman)
+	status, out = post(map[string]any{
+		"request_id": invReq.ID, "option": "A",
+		"provenance": "operator_decided", "operator_quote": "\u200b", "decision_ref": invReq.ID,
+	})
+	if status != http.StatusConflict || out["error"] != "decision_request_human_only" || out["reason"] != "no_operator_quote" {
+		t.Fatalf("invisible quote status=%d body=%v", status, out)
+	}
+
+	// On an already-resolved request provenance is still judged first
+	// (Amendment 1, A2): an invalid value is 400 invalid_provenance and a
+	// quote bound to another request id is 409 provenance_ref_mismatch —
+	// neither is a duplicate.
+	status, out = post(map[string]any{"request_id": humanReq.ID, "option": "A", "provenance": "operator"})
+	if status != http.StatusBadRequest || out["error"] != "invalid_provenance" {
+		t.Fatalf("resolved bogus provenance status=%d body=%v", status, out)
+	}
+	status, out = post(map[string]any{
+		"request_id": humanReq.ID, "option": "A",
+		"provenance": "operator_decided", "operator_quote": "A로 진행", "decision_ref": judgeReq.ID,
+	})
+	if status != http.StatusConflict || out["error"] != "provenance_ref_mismatch" {
+		t.Fatalf("resolved ref mismatch status=%d body=%v", status, out)
+	}
+
 	// A judgement on an ordinary request answers with decided_by=assistant
 	// and a responder that does not say operator.
 	freeTask := drTask(t, s, lane, "claimed", "in_progress")

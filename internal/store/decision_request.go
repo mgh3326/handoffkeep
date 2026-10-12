@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
@@ -102,7 +103,7 @@ const DecisionAssistantJudgementResponder = "assistant-via-berry"
 // assistant (operator_decided — accepted even for human_only, recorded
 // decided_by=operator) or the assistant's own judgement (assistant_judgement
 // — refused for human_only, recorded decided_by=assistant). A missing or
-// blank quote collapses every claim to assistant_judgement.
+// invisible-only quote collapses every claim to assistant_judgement.
 const (
 	DecisionProvenanceOperatorDecided    = "operator_decided"
 	DecisionProvenanceAssistantJudgement = "assistant_judgement"
@@ -204,8 +205,8 @@ type DecisionResolveInput struct {
 // operator's verbatim words in OperatorQuote bound to this request id by
 // DecisionRef (which must equal RequestID exactly); absent or
 // "assistant_judgement" is the assistant's own answer. An operator_decided
-// claim with a blank quote is treated as assistant_judgement — no quote, no
-// operator decision.
+// claim with a blank or invisible-only quote is treated as
+// assistant_judgement — no quote, no operator decision.
 type DecisionAssistantResolveInput struct {
 	RequestID     string `json:"request_id"`
 	Kind          string `json:"kind,omitempty"`
@@ -219,8 +220,8 @@ type DecisionAssistantResolveInput struct {
 // assistantProvenance normalizes one assistant resolve's provenance claim.
 // claimed is the caller's value (absent folds to assistant_judgement); quote
 // and ref are the raw fields. effective() is what the record and every gate
-// use: only a non-blank quote under an operator_decided claim counts as the
-// operator's decision.
+// use: only a quote with a visible rune under an operator_decided claim
+// counts as the operator's decision (see quoteVisible).
 type assistantProvenance struct {
 	claimed string
 	quote   string
@@ -239,8 +240,22 @@ func (p assistantProvenance) valid() bool {
 	return p.claimed == DecisionProvenanceOperatorDecided || p.claimed == DecisionProvenanceAssistantJudgement
 }
 
+// quoteVisible reports whether the quote carries any rune a reader can
+// see. Amendment 1 (A1): "non-empty" is judged after removing
+// whitespace, Unicode Cc and Cf, default-ignorable code points and
+// variation selectors — the same normalization as taskReasonText — so a
+// quote made only of invisible runes is no quote at all and folds to
+// assistant_judgement. The recorded quote keeps the caller's original
+// text; this test only gates the claim.
+func quoteVisible(q string) bool {
+	return strings.IndexFunc(q, func(r rune) bool {
+		return !(unicode.IsSpace(r) || unicode.Is(unicode.Cf, r) || unicode.Is(unicode.Cc, r) ||
+			unicode.Is(unicode.Variation_Selector, r) || unicode.Is(unicode.Other_Default_Ignorable_Code_Point, r))
+	}) >= 0
+}
+
 func (p assistantProvenance) effective() string {
-	if p.claimed == DecisionProvenanceOperatorDecided && strings.TrimSpace(p.quote) != "" {
+	if p.claimed == DecisionProvenanceOperatorDecided && quoteVisible(p.quote) {
 		return DecisionProvenanceOperatorDecided
 	}
 	return DecisionProvenanceAssistantJudgement
@@ -722,6 +737,19 @@ func (s *Store) resolveDecisionRequest(ctx context.Context, taskID int64, by str
 		return DecisionRequestResult{}, ErrDecisionRequestStale
 	}
 	if request.Status != DecisionRequestOpen {
+		if assistant {
+			// Amendment 1 (A2): provenance validity and the
+			// operator_decided ref binding are judged before the
+			// duplicate comparison — an invalid claim or a quote
+			// bound to another request id on an already-resolved
+			// request is a 400/409, never a duplicate.
+			if !prov.valid() {
+				return DecisionRequestResult{}, ErrInvalidProvenance
+			}
+			if prov.effective() == DecisionProvenanceOperatorDecided && prov.ref != in.RequestID {
+				return DecisionRequestResult{}, ErrProvenanceRefMismatch
+			}
+		}
 		if request.Resolution != nil && sameResolution(*request.Resolution, in, prov) {
 			return DecisionRequestResult{Task: x, Request: *request, Duplicate: true}, nil
 		}
@@ -747,7 +775,7 @@ func (s *Store) resolveDecisionRequest(ctx context.Context, taskID int64, by str
 		if !prov.valid() {
 			return DecisionRequestResult{}, ErrInvalidProvenance
 		}
-		if strings.TrimSpace(prov.quote) != "" {
+		if quoteVisible(prov.quote) {
 			if !validText(prov.quote, DecisionOperatorQuoteMaxBytes) || !utf8.ValidString(prov.quote) {
 				return DecisionRequestResult{}, invalidDecisionRequest(fmt.Sprintf("operator_quote must be at most %d bytes of valid text", DecisionOperatorQuoteMaxBytes))
 			}
