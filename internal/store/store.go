@@ -326,7 +326,18 @@ type TaskEvent struct {
 	// exemption was actually used; linked transitions leave it empty.
 	NoJob string    `json:"no_job,omitempty"`
 	Refs  *TaskRefs `json:"refs,omitempty"`
-	At    time.Time `json:"at"`
+	// Rebind records the old/new job link for a task-job takeover. It is
+	// encoded in the event refs snapshot, not in the task's current refs.
+	Rebind *TaskJobRebind `json:"rebind,omitempty"`
+	At     time.Time      `json:"at"`
+}
+
+// TaskJobRebind is the immutable audit payload for a task job-link rebind.
+type TaskJobRebind struct {
+	FromJob string `json:"from_job"`
+	ToJob   string `json:"to_job"`
+	By      string `json:"by"`
+	Reason  string `json:"reason"`
 }
 
 // Task.BodyDoc points at the hk document holding the task's body ("key" or
@@ -1879,6 +1890,77 @@ func (s *Store) ClaimTask(ctx context.Context, id int64, by, jobID, noJob string
 	return x, tx.Commit(ctx)
 }
 
+// RebindTaskJob atomically moves an active task's job link to a new job. The
+// current job and task state are checked under the row lock; a completed replay
+// of the same rebind is a no-op when its audit event is still the latest rebind.
+func (s *Store) RebindTaskJob(ctx context.Context, id int64, fromJob, toJob, by, reason string) (Task, error) {
+	reason = taskReasonText(reason)
+	if !validText(fromJob, 4096) || fromJob == "" || !validText(toJob, 4096) || toJob == "" || fromJob == toJob {
+		return Task{}, errors.New("invalid task rebind job ids")
+	}
+	if !validText(by, 128) || by == "" || !validText(reason, MaxBytes) || reason == "" {
+		return Task{}, errors.New("invalid task rebind claimant or reason")
+	}
+	for _, value := range []string{fromJob, toJob, reason} {
+		if err := guard.Reject(value); err != nil {
+			return Task{}, err
+		}
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Task{}, err
+	}
+	defer tx.Rollback(ctx)
+	var x Task
+	if err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, id), &x); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Task{}, ErrTaskNotFound
+		}
+		return Task{}, err
+	}
+
+	if (x.State == "claimed" || x.State == "in_progress") && x.Refs.JobID == toJob && x.ClaimedBy == by {
+		var replay bool
+		err = tx.QueryRow(ctx, `SELECT EXISTS (
+			SELECT 1 FROM task_events e
+			WHERE e.task_id=$1 AND e.refs->'job_rebind'->>'from_job'=$2
+			  AND e.refs->'job_rebind'->>'to_job'=$3 AND e.refs->'job_rebind'->>'by'=$4
+			  AND e.id=(SELECT MAX(e2.id) FROM task_events e2 WHERE e2.task_id=$1 AND e2.refs ? 'job_rebind')
+		)`, id, fromJob, toJob, by).Scan(&replay)
+		if err != nil {
+			return Task{}, err
+		}
+		if replay {
+			return x, tx.Commit(ctx)
+		}
+	}
+	if (x.State != "claimed" && x.State != "in_progress") || x.Refs.JobID != fromJob {
+		current := x.Refs.JobID
+		if current == "" {
+			current = "(none)"
+		}
+		return Task{}, fmt.Errorf("%w: cannot rebind from job %q to %q; current job_id is %q (state=%s)", ErrTaskConflict, fromJob, toJob, current, x.State)
+	}
+
+	now := time.Now().UTC()
+	if err = scanTask(tx.QueryRow(ctx, `UPDATE tasks SET refs=refs||jsonb_build_object('job_id',$2::text),claimed_by=$3,updated_at=$4 WHERE id=$1 RETURNING `+taskColumns, id, toJob, by, now), &x); err != nil {
+		return Task{}, err
+	}
+	rebind := &TaskJobRebind{FromJob: fromJob, ToJob: toJob, By: by, Reason: reason}
+	eventRefs, err := json.Marshal(struct {
+		TaskRefs
+		JobRebind *TaskJobRebind `json:"job_rebind,omitempty"`
+	}{TaskRefs: x.Refs, JobRebind: rebind})
+	if err != nil {
+		return Task{}, err
+	}
+	if _, err = tx.Exec(ctx, `INSERT INTO task_events(task_id,"from","to","by",note,refs,at,kind) VALUES($1,$2,$2,$3,$4,$5::jsonb,$6,'transition')`, id, x.State, by, reason, string(eventRefs), now); err != nil {
+		return Task{}, err
+	}
+	return x, tx.Commit(ctx)
+}
+
 // NextTask claims the oldest highest-priority runnable task in one
 // transaction. Like ClaimTask, the claim must carry jobID or a recorded
 // noJob reason; a bare pull is refused with ErrTaskJobRequired.
@@ -2359,10 +2441,15 @@ func (s *Store) GetTask(ctx context.Context, id int64) (Task, bool, error) {
 			return Task{}, false, err
 		}
 		if len(refs) != 0 {
-			e.Refs = &TaskRefs{}
-			if err := json.Unmarshal(refs, e.Refs); err != nil {
+			var snapshot struct {
+				TaskRefs
+				JobRebind *TaskJobRebind `json:"job_rebind,omitempty"`
+			}
+			if err := json.Unmarshal(refs, &snapshot); err != nil {
 				return Task{}, false, err
 			}
+			e.Refs = &snapshot.TaskRefs
+			e.Rebind = snapshot.JobRebind
 		}
 		x.Events = append(x.Events, e)
 	}

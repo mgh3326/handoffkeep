@@ -716,6 +716,28 @@ func (c Client) ClaimTask(ctx context.Context, id int64, claimedBy, jobID, noJob
 	}
 	return out, nil
 }
+
+// RebindTaskJob changes the job link on an active task during a builder
+// takeover. Older servers reject the route, so report that version skew with
+// the missing endpoint and the minimum feature version.
+func (c Client) RebindTaskJob(ctx context.Context, id int64, fromJob, toJob, by, reason string) (store.Task, error) {
+	var out store.Task
+	body := map[string]string{"from_job": fromJob, "to_job": toJob, "by": by, "reason": reason}
+	path := fmt.Sprintf("/v1/tasks/%d/rebind", id)
+	err := c.call(ctx, "POST", path, body, &out)
+	if err != nil {
+		var he *HTTPError
+		if errors.As(err, &he) && he.Code == "" && (he.Status == http.StatusNotFound || he.Status == http.StatusMethodNotAllowed) {
+			return out, fmt.Errorf("task_rebind_route_missing: server does not provide POST /v1/tasks/{id}/rebind; minimum server version is a handoffkeep build from PR 1751 or newer")
+		}
+		return out, err
+	}
+	if (out.State != "claimed" && out.State != "in_progress") || out.ClaimedBy != by || out.Refs.JobID != toJob {
+		return out, fmt.Errorf("task_rebind_not_recorded: server response has state=%q claimed_by=%q refs.job_id=%q; want an active task claimed by %q with job_id=%q", out.State, out.ClaimedBy, out.Refs.JobID, by, toJob)
+	}
+	return out, nil
+}
+
 func (c Client) NextTask(ctx context.Context, lane, claimedBy, jobID, noJob string) (store.Task, error) {
 	var out store.Task
 	body := map[string]string{"lane": lane, "claimed_by": claimedBy}
