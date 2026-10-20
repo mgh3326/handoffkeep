@@ -253,6 +253,11 @@ func (s Service) CreateTask(ctx context.Context, client string, x store.Task) (s
 func (s Service) ClaimTask(ctx context.Context, id int64, by, jobID, noJob string) (store.Task, error) {
 	return s.Store.ClaimTask(ctx, id, by, jobID, noJob)
 }
+
+func (s Service) RebindTaskJob(ctx context.Context, id int64, fromJob, toJob, by, reason string) (store.Task, error) {
+	return s.Store.RebindTaskJob(ctx, id, fromJob, toJob, by, reason)
+}
+
 func (s Service) NextTask(ctx context.Context, lane, by, jobID, noJob string) (store.Task, error) {
 	return s.Store.NextTask(ctx, lane, by, jobID, noJob)
 }
@@ -431,6 +436,7 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("POST /v1/tasks/projects", s.taskProjectsCreate)
 	m.HandleFunc("GET /v1/tasks/{id}", s.task)
 	m.HandleFunc("POST /v1/tasks/{id}/claim", s.taskClaim)
+	m.HandleFunc("POST /v1/tasks/{id}/rebind", s.taskRebind)
 	m.HandleFunc("POST /v1/tasks/{id}/transition", s.taskTransition)
 	m.HandleFunc("POST /v1/tasks/{id}/project", s.taskProject)
 	m.HandleFunc("POST /v1/tasks/relane", s.tasksRelane)
@@ -876,6 +882,36 @@ func (s Server) taskClaim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	x, err := s.Service.ClaimTask(r.Context(), id, input.ClaimedBy, input.JobID, input.NoJob)
+	if err != nil {
+		appErr(w, err)
+		return
+	}
+	jsonOut(w, http.StatusOK, x)
+}
+
+type taskRebindInput struct {
+	FromJob string `json:"from_job"`
+	ToJob   string `json:"to_job"`
+	By      string `json:"by"`
+	Reason  string `json:"reason"`
+}
+
+func (s Server) taskRebind(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.auth(w, r); !ok {
+		return
+	}
+	id, err := taskID(r)
+	if err != nil || id < 1 {
+		appErr(w, errors.New("task id"))
+		return
+	}
+	defer r.Body.Close()
+	var input taskRebindInput
+	if err := decode(r, &input, 4096); err != nil {
+		appErr(w, err)
+		return
+	}
+	x, err := s.Service.RebindTaskJob(r.Context(), id, input.FromJob, input.ToJob, input.By, input.Reason)
 	if err != nil {
 		appErr(w, err)
 		return

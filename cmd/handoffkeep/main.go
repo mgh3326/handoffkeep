@@ -271,7 +271,7 @@ func taskCreateRequirements() string {
 
 func tasksCmd(args []string, out io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: tasks add|list|export|claim|next|transition|relane|project|projects|decision-request|decision-resolve|show|comment|comments|disposition")
+		return errors.New("usage: tasks add|list|export|claim|next|transition|rebind|relane|project|projects|decision-request|decision-resolve|show|comment|comments|disposition")
 	}
 	if args[0] == "disposition" {
 		return dispositionCmd(args[1:], out)
@@ -281,6 +281,9 @@ func tasksCmd(args []string, out io.Writer) error {
 	}
 	if args[0] == "relane" {
 		return taskRelaneCmd(args, os.Stdin, out)
+	}
+	if args[0] == "rebind" {
+		return taskRebindCmd(args[1:], out)
 	}
 	if args[0] == "project" || args[0] == "projects" {
 		return taskProjectCmd(args, out)
@@ -548,7 +551,7 @@ func tasksCmd(args []string, out io.Writer) error {
 		}
 		return printJSON(out, x)
 	default:
-		return errors.New("usage: tasks add|list|export|claim|next|transition|relane|project|projects|decision-request|decision-resolve|show|comment|comments|disposition")
+		return errors.New("usage: tasks add|list|export|claim|next|transition|rebind|relane|project|projects|decision-request|decision-resolve|show|comment|comments|disposition")
 	}
 }
 

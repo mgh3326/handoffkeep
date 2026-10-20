@@ -52,6 +52,7 @@ handoffkeep tasks add --lane lane-a --title "add queue endpoint" --kind implemen
 handoffkeep tasks list --lane lane-a --state backlog
 handoffkeep tasks next --lane lane-a --by session-a  # exits 3 when empty
 handoffkeep tasks transition 42 --to in_progress --note "started"
+handoffkeep tasks rebind 42 --from-job old-job --to-job new-job --by new-builder --reason "builder takeover"
 handoffkeep tasks transition 42 --to needs_decision --question "Which interface should own this?"
 handoffkeep tasks relane 42 --to lane-b --note "triage follow-up"
 handoffkeep tasks list --parent-lane lane-a --state needs_decision
@@ -61,6 +62,10 @@ handoffkeep tasks export [--lane L --state S --parent-lane P --limit N]
 
 `add` accepts `--parent-lane`, `--pr`, `--head-sha`, `--report-path`, and
 `--job-id` as durable references. `transition` accepts the same reference flags.
+`tasks rebind` transfers an active task from one job id to another without
+changing its state. It requires a server that implements
+`POST /v1/tasks/{id}/rebind`; the minimum server revision is the handoffkeep
+PR 1 head revision recorded in that PR's description.
 `needs_decision` always requires `--question`. `add` also accepts the typed
 origin relations `--origin-pr <merged PR URL>` and `--origin-task <id>`
 (`refs.origin_pr` / `refs.origin_task`, "this row came from"; `closing_pr` is
