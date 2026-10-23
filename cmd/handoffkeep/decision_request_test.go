@@ -113,6 +113,74 @@ func TestTasksDecisionResolveCLI(t *testing.T) {
 	}
 }
 
+// staleResolveServer answers the resolve POST with decision_request_stale
+// and serves GET /v1/tasks/618 with the canned task body (or status).
+func staleResolveServer(t *testing.T, taskStatus int, taskBody string) *httptest.Server {
+	t.Helper()
+	h := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == "POST" && r.URL.Path == "/v1/tasks/618/decision-request/resolve":
+			w.WriteHeader(409)
+			_, _ = w.Write([]byte(`{"error":"decision_request_stale"}`))
+		case r.Method == "GET" && r.URL.Path == "/v1/tasks/618":
+			w.WriteHeader(taskStatus)
+			_, _ = w.Write([]byte(taskBody))
+		default:
+			w.WriteHeader(404)
+			_, _ = w.Write([]byte(`{"error":"not_found"}`))
+		}
+	}))
+	t.Cleanup(h.Close)
+	return h
+}
+
+// hk 1118: a legacy needs_decision task (decision_options, no dr- request)
+// returns decision_request_stale on resolve, but nothing went stale — the
+// CLI names the working route on stderr and still exits non-zero.
+func TestTasksDecisionResolveLegacyNeedsDecisionHint(t *testing.T) {
+	legacy := `{"id":618,"lane":"l","kind":"implement","title":"t","state":"needs_decision","created_by":"x","created_at":"2026-10-23T00:00:00Z","updated_at":"2026-10-23T00:00:00Z","project":null,"refs":{"decision_options":{"options":[{"key":"A","label":"x"}],"allow_free":true}}}`
+	h := staleResolveServer(t, 200, legacy)
+	var errout bytes.Buffer
+	err := run([]string{"tasks", "decision-resolve", "618", "--request", "dr-618-1", "--kind", "withdrawn", "--text", "x", "--url", h.URL, "--token", "tok"}, io.Discard, &errout)
+	if err == nil || !strings.Contains(err.Error(), "NOT recorded") {
+		t.Fatalf("err=%v", err)
+	}
+	if hint := errout.String(); !strings.Contains(hint, "needs_decision") || !strings.Contains(hint, "no structured decision request") ||
+		!strings.Contains(hint, "decisions resolve task 618") || !strings.Contains(hint, "--no-inject") {
+		t.Fatalf("stderr hint=%q", hint)
+	}
+}
+
+// A real stale request keeps today's message: a structured request exists
+// but was superseded, so no hint is printed.
+func TestTasksDecisionResolveRealStaleNoHint(t *testing.T) {
+	structured := `{"id":618,"lane":"l","kind":"implement","title":"t","state":"needs_decision","created_by":"x","created_at":"2026-10-23T00:00:00Z","updated_at":"2026-10-23T00:00:00Z","project":null,"refs":{"decision_request":{"id":"dr-618-2","revision":2,"status":"open","question":"q","default_action":"x","requested_by":"d","requested_at":"2026-10-23T00:00:00Z"}}}`
+	h := staleResolveServer(t, 200, structured)
+	var errout bytes.Buffer
+	err := run([]string{"tasks", "decision-resolve", "618", "--request", "dr-618-1", "--kind", "withdrawn", "--text", "x", "--url", h.URL, "--token", "tok"}, io.Discard, &errout)
+	if err == nil || !strings.Contains(err.Error(), "NOT recorded") || !strings.Contains(err.Error(), "decision_request_stale") {
+		t.Fatalf("err=%v", err)
+	}
+	if errout.String() != "" {
+		t.Fatalf("unexpected stderr: %q", errout.String())
+	}
+}
+
+// A failed task read must not crash or hide the original refusal: the CLI
+// falls back to today's message with no hint.
+func TestTasksDecisionResolveStaleReadFailureFallback(t *testing.T) {
+	h := staleResolveServer(t, 500, `{"error":"invalid_context"}`)
+	var errout bytes.Buffer
+	err := run([]string{"tasks", "decision-resolve", "618", "--request", "dr-618-1", "--kind", "withdrawn", "--text", "x", "--url", h.URL, "--token", "tok"}, io.Discard, &errout)
+	if err == nil || !strings.Contains(err.Error(), "NOT recorded") || !strings.Contains(err.Error(), "decision_request_stale") {
+		t.Fatalf("err=%v", err)
+	}
+	if errout.String() != "" {
+		t.Fatalf("unexpected stderr: %q", errout.String())
+	}
+}
+
 // M1 (CodeRabbit, #48): a value flag never swallows the next flag. With
 // "--reason --block" the old parser recorded reason="--block" and never set
 // Block, so the request was written without blocking the task. Text that

@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -196,7 +197,7 @@ func decisionRequestOutput(result store.DecisionRequestResult) map[string]any {
 
 // decisionResolveCmd records how a request closed. It never changes the
 // task state; default_applied needs the receipt of the application.
-func decisionResolveCmd(args []string, out io.Writer) error {
+func decisionResolveCmd(args []string, out, errout io.Writer) error {
 	fs := flag.NewFlagSet("tasks decision-resolve", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	c := remoteClient(fs)
@@ -236,6 +237,16 @@ func decisionResolveCmd(args []string, out io.Writer) error {
 	defer cancel()
 	result, err := c.ResolveDecisionRequest(ctx, id, input)
 	if err != nil {
+		var httpErr *remote.HTTPError
+		if errors.As(err, &httpErr) && httpErr.Status == http.StatusConflict && httpErr.Code == "decision_request_stale" {
+			// A legacy needs_decision task (decision_options from a
+			// --question/--option transition) holds no structured dr-
+			// request, so nothing went stale — name the working route.
+			if task, found, readErr := c.GetTask(ctx, id); readErr == nil && found &&
+				task.State == "needs_decision" && task.Refs.DecisionRequest == nil {
+				fmt.Fprintf(errout, "task %d is in needs_decision with no structured decision request (decision_request_stale is misleading: nothing went stale) — resolve it with: handoffkeep decisions resolve task %d --by LANE --answer TEXT --no-inject\n", id, id)
+			}
+		}
 		return writeFailed("decision resolution", id, err)
 	}
 	return printJSON(out, map[string]any{

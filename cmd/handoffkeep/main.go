@@ -64,7 +64,7 @@ func run(args []string, out, errout io.Writer) error {
 	case "r2usage":
 		return r2UsageCmd(args[1:], out)
 	case "tasks":
-		return tasksCmd(args[1:], out)
+		return tasksCmdE(args[1:], out, errout)
 	case "decisions":
 		return decisionsCmd(args[1:], out)
 	case "linear":
@@ -270,6 +270,10 @@ func taskCreateRequirements() string {
 }
 
 func tasksCmd(args []string, out io.Writer) error {
+	return tasksCmdE(args, out, os.Stderr)
+}
+
+func tasksCmdE(args []string, out, errout io.Writer) error {
 	if len(args) == 0 {
 		return errors.New("usage: tasks add|list|export|claim|next|transition|rebind|relane|project|projects|decision-request|decision-resolve|show|comment|comments|disposition")
 	}
@@ -292,7 +296,7 @@ func tasksCmd(args []string, out io.Writer) error {
 		return decisionRequestCmd(args, out)
 	}
 	if args[0] == "decision-resolve" {
-		return decisionResolveCmd(args, out)
+		return decisionResolveCmd(args, out, errout)
 	}
 	fs := flag.NewFlagSet("tasks "+args[0], flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
