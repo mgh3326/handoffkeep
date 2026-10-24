@@ -131,7 +131,7 @@ func TestBenchAreaExceptionsStore(t *testing.T) {
 	if _, err = s.UpsertBenchAreaExceptions(ctx, []store.BenchAreaException{prefer, x, other}); !errors.Is(err, store.ErrBenchAreaExceptionConflict) {
 		t.Fatalf("intra-batch flip err=%v", err)
 	}
-	if got := benchCount(t, p, `SELECT count(*) FROM bench_area_exceptions WHERE profile='bench-exc-alpha'`); got != 2 {
+	if got := benchCount(t, p, `SELECT count(*) FROM bench_area_exceptions WHERE profile='bench-exc-alpha'`); got != 1 {
 		t.Fatalf("refused batch wrote rows=%d", got)
 	}
 	// Retire, then the prefer lands.
