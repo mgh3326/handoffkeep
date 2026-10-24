@@ -1152,6 +1152,56 @@ func (c Client) ListTaskAreas(ctx context.Context) ([]string, error) {
 	return out.Areas, nil
 }
 
+// ListBenchAreaExceptions answers the routing exception list. The area
+// filter narrows to one vocabulary area; includeRetired asks for retired
+// rows too. A server that predates the route 404/405s it, surfaced as
+// bench_area_exceptions_unsupported.
+func (c Client) ListBenchAreaExceptions(ctx context.Context, area string, includeRetired bool) ([]store.BenchAreaException, error) {
+	q := url.Values{}
+	if area != "" {
+		q.Set("area", area)
+	}
+	if includeRetired {
+		q.Set("include_retired", "1")
+	}
+	path := "/v1/bench/area-exceptions"
+	if len(q) > 0 {
+		path += "?" + q.Encode()
+	}
+	var out struct {
+		Exceptions []store.BenchAreaException `json:"exceptions"`
+	}
+	err := c.call(ctx, "GET", path, nil, &out)
+	if err != nil {
+		var he *HTTPError
+		if errors.As(err, &he) && (he.Status == 404 || he.Status == 405) {
+			return nil, fmt.Errorf("bench_area_exceptions_unsupported: server predates the area exceptions endpoint")
+		}
+		return nil, err
+	}
+	return out.Exceptions, nil
+}
+
+// PutBenchAreaExceptions upserts exception rows under the operator
+// credential and returns the count written. A non-operator client fails
+// closed with the server's own operator_required 403. A server that
+// predates the route 404/405s it, surfaced as
+// bench_area_exceptions_unsupported.
+func (c Client) PutBenchAreaExceptions(ctx context.Context, xs []store.BenchAreaException) (int, error) {
+	var out struct {
+		Upserted int `json:"upserted"`
+	}
+	err := c.call(ctx, "PUT", "/v1/bench/area-exceptions", map[string]any{"exceptions": xs}, &out)
+	if err != nil {
+		var he *HTTPError
+		if errors.As(err, &he) && (he.Status == 404 || he.Status == 405) {
+			return 0, fmt.Errorf("bench_area_exceptions_unsupported: server predates the area exceptions endpoint")
+		}
+		return 0, err
+	}
+	return out.Upserted, nil
+}
+
 // ExportTasks fetches one consistent task snapshot and returns the exact
 // response body so callers print the evidence document byte-for-byte. A
 // limit below 1 omits the parameter so the server default applies.

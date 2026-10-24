@@ -366,6 +366,21 @@ func (s Service) ListBenchCatalog(ctx context.Context, pool string, includeRetir
 func (s Service) UpsertBenchCatalog(ctx context.Context, xs []store.BenchCatalogEntry) (int, error) {
 	return s.Store.UpsertBenchCatalog(ctx, xs)
 }
+func (s Service) ListBenchAreaExceptions(ctx context.Context, area string, includeRetired bool) ([]store.BenchAreaException, error) {
+	return s.Store.ListBenchAreaExceptions(ctx, area, includeRetired)
+}
+
+// UpsertBenchAreaExceptions stamps decided_by with the authenticated client
+// and decided_at with the server clock — unlike the catalog's caller-carried
+// provenance, an exception row's writer is always the operator client.
+func (s Service) UpsertBenchAreaExceptions(ctx context.Context, client string, xs []store.BenchAreaException) (int, error) {
+	now := time.Now().UTC()
+	for i := range xs {
+		xs[i].DecidedBy = client
+		xs[i].DecidedAt = now
+	}
+	return s.Store.UpsertBenchAreaExceptions(ctx, xs)
+}
 
 type Tokens map[string]string
 
@@ -465,6 +480,8 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("PUT /v1/bench/grades", s.benchGradesPut)
 	m.HandleFunc("GET /v1/bench/catalog", s.benchCatalogList)
 	m.HandleFunc("PUT /v1/bench/catalog", s.benchCatalogPut)
+	m.HandleFunc("GET /v1/bench/area-exceptions", s.benchAreaExceptionsList)
+	m.HandleFunc("PUT /v1/bench/area-exceptions", s.benchAreaExceptionsPut)
 	m.HandleFunc("PUT /v1/chat/questions/{id}", s.chatQuestionPut)
 	m.HandleFunc("GET /v1/chat/questions/{id}", s.chatQuestionGet)
 	m.HandleFunc("POST /v1/chat/questions", s.chatQuestionPost)
@@ -631,6 +648,15 @@ func appErr(w http.ResponseWriter, e error) {
 		return
 	case errors.Is(e, store.ErrBenchCatalogSolGrade):
 		jsonOut(w, http.StatusBadRequest, map[string]string{"error": "bench_catalog_sol_grade"})
+		return
+	case errors.Is(e, store.ErrDecisionRefRequired):
+		jsonOut(w, http.StatusBadRequest, map[string]string{"error": "decision_ref_required"})
+		return
+	case errors.Is(e, store.ErrBenchAreaExceptionProfileUnknown):
+		jsonOut(w, http.StatusBadRequest, map[string]string{"error": "bench_area_exception_profile_unknown"})
+		return
+	case errors.Is(e, store.ErrBenchAreaExceptionConflict):
+		jsonOut(w, http.StatusConflict, map[string]string{"error": "bench_area_exception_action_conflict"})
 		return
 	case errors.As(e, &repConflict):
 		jsonOut(w, http.StatusConflict, map[string]any{"error": "bench_rep_conflict", "conflicts": repConflict.Conflicts})
@@ -1606,10 +1632,81 @@ func (s Server) benchCatalogPut(w http.ResponseWriter, r *http.Request) {
 	jsonOut(w, http.StatusOK, map[string]int{"upserted": n})
 }
 
-// benchCatalogEntryFieldTypes maps each catalog row's JSON field name to its
-// Go type so a decode failure can be re-walked field by field.
-var benchCatalogEntryFieldTypes = func() map[string]reflect.Type {
-	t := reflect.TypeOf(store.BenchCatalogEntry{})
+type benchAreaExceptionsInput struct {
+	Exceptions []store.BenchAreaException `json:"exceptions"`
+}
+
+// benchAreaExceptionsList answers the routing exception list to any
+// authenticated client — hosts read it for routing, only the operator
+// client writes it.
+func (s Server) benchAreaExceptionsList(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.auth(w, r); !ok {
+		return
+	}
+	q := r.URL.Query()
+	includeRetired := q.Get("include_retired") == "1" || q.Get("include_retired") == "true"
+	xs, err := s.Service.ListBenchAreaExceptions(r.Context(), q.Get("area"), includeRetired)
+	if err != nil {
+		appErr(w, err)
+		return
+	}
+	jsonOut(w, http.StatusOK, map[string]any{"exceptions": xs})
+}
+
+// benchAreaExceptionsPut upserts exception rows under the same
+// operator-client rule and decode strictness as benchCatalogPut. Retiring a
+// row means sending retired_at; there is no DELETE.
+func (s Server) benchAreaExceptionsPut(w http.ResponseWriter, r *http.Request) {
+	client, ok := s.auth(w, r)
+	if !ok {
+		return
+	}
+	if client != operatorClientID {
+		jsonOut(w, http.StatusForbidden, map[string]string{"error": "operator_required"})
+		return
+	}
+	defer r.Body.Close()
+	// The body is buffered so a decode failure can be re-walked to name the
+	// field that failed, exactly like the catalog path. One byte past the
+	// limit is read on purpose: a body that fills the cap is refused as too
+	// large instead of silently decoding a truncated prefix.
+	body, err := io.ReadAll(io.LimitReader(r.Body, int64(benchRequestMaxBytes+4096)+1))
+	if err != nil {
+		appErr(w, err)
+		return
+	}
+	if len(body) > benchRequestMaxBytes+4096 {
+		jsonOut(w, http.StatusBadRequest, map[string]string{"error": "invalid_bench_area_exceptions_json", "detail": "body exceeds the request limit"})
+		return
+	}
+	var input benchAreaExceptionsInput
+	de := json.NewDecoder(bytes.NewReader(body))
+	de.DisallowUnknownFields()
+	if err := de.Decode(&input); err != nil {
+		jsonOut(w, http.StatusBadRequest, map[string]string{"error": "invalid_bench_area_exceptions_json", "detail": benchListDecodeDetail[store.BenchAreaException](body, "exceptions", benchAreaExceptionFieldTypes, err)})
+		return
+	}
+	var extra json.RawMessage
+	if err := de.Decode(&extra); err != io.EOF {
+		jsonOut(w, http.StatusBadRequest, map[string]string{"error": "invalid_bench_area_exceptions_json", "detail": "trailing data after the request object"})
+		return
+	}
+	if !benchBatchValid(len(input.Exceptions)) {
+		appErr(w, errors.New("invalid bench area exceptions"))
+		return
+	}
+	n, err := s.Service.UpsertBenchAreaExceptions(r.Context(), client, input.Exceptions)
+	if err != nil {
+		appErr(w, err)
+		return
+	}
+	jsonOut(w, http.StatusOK, map[string]int{"upserted": n})
+}
+
+// benchRowFieldTypes maps each JSON field name of T to its Go type so a
+// decode failure can be re-walked field by field.
+func benchRowFieldTypes[T any]() map[string]reflect.Type {
+	t := reflect.TypeOf(*new(T))
 	m := make(map[string]reflect.Type, t.NumField())
 	for i := 0; i < t.NumField(); i++ {
 		if name, _, _ := strings.Cut(t.Field(i).Tag.Get("json"), ","); name != "" && name != "-" {
@@ -1617,45 +1714,54 @@ var benchCatalogEntryFieldTypes = func() map[string]reflect.Type {
 		}
 	}
 	return m
-}()
+}
 
-// benchCatalogDecodeDetail renders a catalog PUT decode failure for the
+var (
+	benchCatalogEntryFieldTypes  = benchRowFieldTypes[store.BenchCatalogEntry]()
+	benchAreaExceptionFieldTypes = benchRowFieldTypes[store.BenchAreaException]()
+)
+
+// benchListDecodeDetail renders a bench-list PUT decode failure for the
 // operator. When the decoder's own message already names the field (unknown
 // fields, type mismatches) it is returned as-is; when it does not — for
 // example a time.ParseError from a non-RFC3339 decided_at — the buffered
 // body is re-walked to find the first field that fails. Only the field name
 // and the decoder's message are reported, never row contents.
-func benchCatalogDecodeDetail(body []byte, cause error) string {
+func benchListDecodeDetail[T any](body []byte, listKey string, fieldTypes map[string]reflect.Type, cause error) string {
 	var typeErr *json.UnmarshalTypeError
 	if errors.As(cause, &typeErr) || strings.HasPrefix(cause.Error(), "json: unknown field") {
 		return cause.Error()
 	}
-	var raw struct {
-		Catalog []json.RawMessage `json:"catalog"`
-	}
+	var raw map[string][]json.RawMessage
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return cause.Error()
 	}
-	for i, row := range raw.Catalog {
-		var entry store.BenchCatalogEntry
+	for i, row := range raw[listKey] {
+		var entry T
 		de := json.NewDecoder(bytes.NewReader(row))
 		de.DisallowUnknownFields()
 		if err := de.Decode(&entry); err != nil {
-			if field := benchCatalogRowErrorField(row); field != "" {
-				return fmt.Sprintf("catalog[%d] field %s", i, field)
+			if field := benchRowErrorField(row, fieldTypes); field != "" {
+				return fmt.Sprintf("%s[%d] field %s", listKey, i, field)
 			}
-			return fmt.Sprintf("catalog[%d]: %v", i, err)
+			return fmt.Sprintf("%s[%d]: %v", listKey, i, err)
 		}
 	}
 	return cause.Error()
 }
 
-// benchCatalogRowErrorField re-decodes one catalog row field by field, in
+// benchCatalogDecodeDetail renders a catalog PUT decode failure via
+// benchListDecodeDetail with the catalog envelope key.
+func benchCatalogDecodeDetail(body []byte, cause error) string {
+	return benchListDecodeDetail[store.BenchCatalogEntry](body, "catalog", benchCatalogEntryFieldTypes, cause)
+}
+
+// benchRowErrorField re-decodes one bench list row field by field, in
 // document order, and returns `"name": <decoder message>` for the first
-// field that fails against its BenchCatalogEntry type. It returns "" when no
+// field that fails against its Go type in fieldTypes. It returns "" when no
 // single field explains the failure — unknown fields and type errors are
 // already named by the decoder's own message.
-func benchCatalogRowErrorField(row []byte) string {
+func benchRowErrorField(row []byte, fieldTypes map[string]reflect.Type) string {
 	de := json.NewDecoder(bytes.NewReader(row))
 	tok, err := de.Token()
 	if err != nil {
@@ -1674,7 +1780,7 @@ func benchCatalogRowErrorField(row []byte) string {
 			return ""
 		}
 		name, _ := key.(string)
-		fieldType, ok := benchCatalogEntryFieldTypes[name]
+		fieldType, ok := fieldTypes[name]
 		if !ok {
 			continue
 		}
