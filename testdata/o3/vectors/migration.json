@@ -1,0 +1,3275 @@
+{
+  "pack": "hk1873.v1",
+  "section": "5",
+  "table": "Additional migration vectors",
+  "file": "migration.json",
+  "cases": [
+    {
+      "name": "claim-only-activate-baseline-0",
+      "source": {
+        "section": "5",
+        "table": "Additional migration vectors",
+        "table_name": "migration",
+        "row": 1,
+        "row_text": "| seq1 claim; activate with seal_seq=null | 201 baseline_used=0, active, used=0, next_round_no=1 |"
+      },
+      "given": {
+        "job_id": "job-s",
+        "policy": {
+          "version": "hk1873.policy.v1",
+          "clients": {
+            "desktop": {
+              "host_client_id": "desktop",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-dev": {
+              "host_client_id": "mac-dev",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-work": {
+              "host_client_id": "mac-work",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "rpi": {
+              "host_client_id": "rpi",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-personal": {
+              "host_client_id": "mac-personal",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "director-1": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "operator-desk": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "pa-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "at-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "pb-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "tt-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            }
+          },
+          "lanes": {
+            "director-1": null,
+            "pa-integrator": "director-1"
+          },
+          "features": {
+            "head_repeat_enabled": true,
+            "claim_lane_creation_enabled": true
+          }
+        },
+        "records": [
+          {
+            "job_id": "job-s",
+            "seq": 1,
+            "record_id": "00000000-0000-4000-8000-000000103813",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "director-1",
+            "idempotency_key": "00000000-0000-4000-8000-000000203813",
+            "request_sha256": "764545c99265011fe3da3afe25a18ff1adf3f2d8300fe62c5efa15508d940e19",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000093Z",
+            "previous_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+            "kind": "claim",
+            "payload": {
+              "job_id": "job-s",
+              "owner_lane": "b2402-s",
+              "parent_lane": "director-1",
+              "task_id": 2402,
+              "host_client_id": "desktop",
+              "role": "builder",
+              "tier": "T2",
+              "review_of": null,
+              "predecessor_job_id": null,
+              "supersedes": null,
+              "policy_sha256": "8de436a97778f975de840ffd0ec10539440059169fbc34c4a8eb0486f0ece5ce",
+              "created_at": "2026-10-24T00:00:00.000093Z"
+            },
+            "record_hash": "44c699ef7117e603f0f72216b37ec9fafaa04cefff01eb4b66df4482f65403b6"
+          }
+        ]
+      },
+      "request": {
+        "type": "http",
+        "actor": "director-1",
+        "method": "POST",
+        "path": "/v1/wrk/jobs/job-s/records",
+        "idempotency_key": "00000000-0000-4000-8000-000000000999",
+        "body": {
+          "kind": "activate",
+          "claim_seq": 1,
+          "expected_seq": 1,
+          "payload": {
+            "reason_code": "activation",
+            "seal_seq": null
+          }
+        }
+      },
+      "expect": {
+        "http_status": 201,
+        "created": true,
+        "record": {
+          "kind": "activate",
+          "payload": {
+            "baseline_used": 0,
+            "mode": "enforced",
+            "reason_code": "activation",
+            "seal_seq": null
+          }
+        },
+        "summary": {
+          "state": "active",
+          "baseline_used": 0,
+          "used": 0,
+          "next_round_no": 1
+        }
+      }
+    },
+    {
+      "name": "activate-with-evidence-no-seal-import-unsealed",
+      "source": {
+        "section": "5",
+        "table": "Additional migration vectors",
+        "table_name": "migration",
+        "row": 2,
+        "row_text": "| seq1 claim; seq2 shadow open 1/H; activate without seal | 409 import_unsealed |"
+      },
+      "given": {
+        "job_id": "job-s",
+        "policy": {
+          "version": "hk1873.policy.v1",
+          "clients": {
+            "desktop": {
+              "host_client_id": "desktop",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-dev": {
+              "host_client_id": "mac-dev",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-work": {
+              "host_client_id": "mac-work",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "rpi": {
+              "host_client_id": "rpi",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-personal": {
+              "host_client_id": "mac-personal",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "director-1": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "operator-desk": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "pa-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "at-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "pb-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "tt-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            }
+          },
+          "lanes": {
+            "director-1": null,
+            "pa-integrator": "director-1"
+          },
+          "features": {
+            "head_repeat_enabled": true,
+            "claim_lane_creation_enabled": true
+          }
+        },
+        "records": [
+          {
+            "job_id": "job-s",
+            "seq": 1,
+            "record_id": "00000000-0000-4000-8000-000000103854",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "director-1",
+            "idempotency_key": "00000000-0000-4000-8000-000000203854",
+            "request_sha256": "764545c99265011fe3da3afe25a18ff1adf3f2d8300fe62c5efa15508d940e19",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000094Z",
+            "previous_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+            "kind": "claim",
+            "payload": {
+              "job_id": "job-s",
+              "owner_lane": "b2402-s",
+              "parent_lane": "director-1",
+              "task_id": 2402,
+              "host_client_id": "desktop",
+              "role": "builder",
+              "tier": "T2",
+              "review_of": null,
+              "predecessor_job_id": null,
+              "supersedes": null,
+              "policy_sha256": "8de436a97778f975de840ffd0ec10539440059169fbc34c4a8eb0486f0ece5ce",
+              "created_at": "2026-10-24T00:00:00.000094Z"
+            },
+            "record_hash": "123cdfd05f117653b7e1487106baac203f9ebd4a30173dcae7e3b08a623e7128"
+          },
+          {
+            "job_id": "job-s",
+            "seq": 2,
+            "record_id": "00000000-0000-4000-8000-000000103895",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "desktop",
+            "idempotency_key": "00000000-0000-4000-8000-000000203895",
+            "request_sha256": "35e138e5ce828382d868219379dae0b77863bc741e31e1c68b65bbb572b4afe4",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000095Z",
+            "previous_hash": "123cdfd05f117653b7e1487106baac203f9ebd4a30173dcae7e3b08a623e7128",
+            "kind": "round_open",
+            "payload": {
+              "round_no": 1,
+              "head": "1111111111111111111111111111111111111111",
+              "tester_job_id": null,
+              "extension_grant_seq": null,
+              "repeat_grant_seq": null
+            },
+            "record_hash": "ed172c12853c78676776b41f4135170d18c91d9613e9a652c4ef2c561c9ab89a"
+          }
+        ]
+      },
+      "request": {
+        "type": "http",
+        "actor": "director-1",
+        "method": "POST",
+        "path": "/v1/wrk/jobs/job-s/records",
+        "idempotency_key": "00000000-0000-4000-8000-000000000999",
+        "body": {
+          "kind": "activate",
+          "claim_seq": 1,
+          "expected_seq": 2,
+          "payload": {
+            "reason_code": "activation",
+            "seal_seq": null
+          }
+        }
+      },
+      "expect": {
+        "http_status": 409,
+        "error": "import_unsealed"
+      }
+    },
+    {
+      "name": "host-verdict-after-begin-migration-frozen",
+      "source": {
+        "section": "5",
+        "table": "Additional migration vectors",
+        "table_name": "migration",
+        "row": 3,
+        "row_text": "| Same shadow history; begin at seq3; racing host verdict after begin | 409 migration_frozen after refresh; no verdict, old round in frozen snapshot |"
+      },
+      "given": {
+        "job_id": "job-s",
+        "policy": {
+          "version": "hk1873.policy.v1",
+          "clients": {
+            "desktop": {
+              "host_client_id": "desktop",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-dev": {
+              "host_client_id": "mac-dev",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-work": {
+              "host_client_id": "mac-work",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "rpi": {
+              "host_client_id": "rpi",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-personal": {
+              "host_client_id": "mac-personal",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "director-1": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "operator-desk": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "pa-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "at-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "pb-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "tt-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            }
+          },
+          "lanes": {
+            "director-1": null,
+            "pa-integrator": "director-1"
+          },
+          "features": {
+            "head_repeat_enabled": true,
+            "claim_lane_creation_enabled": true
+          }
+        },
+        "records": [
+          {
+            "job_id": "job-s",
+            "seq": 1,
+            "record_id": "00000000-0000-4000-8000-000000103936",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "director-1",
+            "idempotency_key": "00000000-0000-4000-8000-000000203936",
+            "request_sha256": "764545c99265011fe3da3afe25a18ff1adf3f2d8300fe62c5efa15508d940e19",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000096Z",
+            "previous_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+            "kind": "claim",
+            "payload": {
+              "job_id": "job-s",
+              "owner_lane": "b2402-s",
+              "parent_lane": "director-1",
+              "task_id": 2402,
+              "host_client_id": "desktop",
+              "role": "builder",
+              "tier": "T2",
+              "review_of": null,
+              "predecessor_job_id": null,
+              "supersedes": null,
+              "policy_sha256": "8de436a97778f975de840ffd0ec10539440059169fbc34c4a8eb0486f0ece5ce",
+              "created_at": "2026-10-24T00:00:00.000096Z"
+            },
+            "record_hash": "6da88ecb9b425cba8194dd7d610173c7fb1b466f24af20b7d97b54775addbb70"
+          },
+          {
+            "job_id": "job-s",
+            "seq": 2,
+            "record_id": "00000000-0000-4000-8000-000000103977",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "desktop",
+            "idempotency_key": "00000000-0000-4000-8000-000000203977",
+            "request_sha256": "35e138e5ce828382d868219379dae0b77863bc741e31e1c68b65bbb572b4afe4",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000097Z",
+            "previous_hash": "6da88ecb9b425cba8194dd7d610173c7fb1b466f24af20b7d97b54775addbb70",
+            "kind": "round_open",
+            "payload": {
+              "round_no": 1,
+              "head": "1111111111111111111111111111111111111111",
+              "tester_job_id": null,
+              "extension_grant_seq": null,
+              "repeat_grant_seq": null
+            },
+            "record_hash": "88f861a09b31f875ff6669fe0ab0d29a9e18859ee1c399e3f17938e3a535bdda"
+          },
+          {
+            "job_id": "job-s",
+            "seq": 3,
+            "record_id": "00000000-0000-4000-8000-000000104018",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "director-1",
+            "idempotency_key": "00000000-0000-4000-8000-000000204018",
+            "request_sha256": "dce92b705f0014eacf8a1e0ff7e5ad0a2542b3cf0a98ab4d5234b78723358195",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000098Z",
+            "previous_hash": "88f861a09b31f875ff6669fe0ab0d29a9e18859ee1c399e3f17938e3a535bdda",
+            "kind": "import_begin",
+            "payload": {
+              "reason_code": "import_freeze",
+              "shadow_cutoff_seq": 2
+            },
+            "record_hash": "a0273a2beb85c60acc6c48b0af5fa672cdd2026437bb0036f477f78751cfde68"
+          }
+        ]
+      },
+      "request": {
+        "type": "http",
+        "actor": "desktop",
+        "method": "POST",
+        "path": "/v1/wrk/jobs/job-s/records",
+        "idempotency_key": "00000000-0000-4000-8000-000000000999",
+        "body": {
+          "kind": "verdict",
+          "claim_seq": 1,
+          "expected_seq": 3,
+          "payload": {
+            "round_no": 1,
+            "head": "1111111111111111111111111111111111111111",
+            "verdict": "PASS",
+            "path": "/jobs/job-s/v.md",
+            "content_sha256": "e547281b1f351ac3152537f2f1859185af6515815f44acf1276091a9511969c1",
+            "content_b64": "VkVSRElDVDogUEFTUyBAMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMQpyZXZpZXcgbm90ZXMK",
+            "tester_job_id": null
+          }
+        }
+      },
+      "expect": {
+        "http_status": 409,
+        "error": "migration_frozen",
+        "note": "old round stays in the frozen snapshot"
+      }
+    },
+    {
+      "name": "zero-import-seal-activate-baseline-3",
+      "source": {
+        "section": "5",
+        "table": "Additional migration vectors",
+        "table_name": "migration",
+        "row": 4,
+        "row_text": "| Same history; seal with zero-import canonical [] manifest; activate exact seal | baseline_used=3, numbering_floor=3, active, used=3, open_rounds=[] |"
+      },
+      "given": {
+        "job_id": "job-s",
+        "policy": {
+          "version": "hk1873.policy.v1",
+          "clients": {
+            "desktop": {
+              "host_client_id": "desktop",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-dev": {
+              "host_client_id": "mac-dev",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-work": {
+              "host_client_id": "mac-work",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "rpi": {
+              "host_client_id": "rpi",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-personal": {
+              "host_client_id": "mac-personal",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "director-1": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "operator-desk": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "pa-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "at-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "pb-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "tt-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            }
+          },
+          "lanes": {
+            "director-1": null,
+            "pa-integrator": "director-1"
+          },
+          "features": {
+            "head_repeat_enabled": true,
+            "claim_lane_creation_enabled": true
+          }
+        },
+        "records": [
+          {
+            "job_id": "job-s",
+            "seq": 1,
+            "record_id": "00000000-0000-4000-8000-000000104059",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "director-1",
+            "idempotency_key": "00000000-0000-4000-8000-000000204059",
+            "request_sha256": "764545c99265011fe3da3afe25a18ff1adf3f2d8300fe62c5efa15508d940e19",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000099Z",
+            "previous_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+            "kind": "claim",
+            "payload": {
+              "job_id": "job-s",
+              "owner_lane": "b2402-s",
+              "parent_lane": "director-1",
+              "task_id": 2402,
+              "host_client_id": "desktop",
+              "role": "builder",
+              "tier": "T2",
+              "review_of": null,
+              "predecessor_job_id": null,
+              "supersedes": null,
+              "policy_sha256": "8de436a97778f975de840ffd0ec10539440059169fbc34c4a8eb0486f0ece5ce",
+              "created_at": "2026-10-24T00:00:00.000099Z"
+            },
+            "record_hash": "fd761f332f8aa9685de1481e8ed55d9213b02f3cfc386ab1b03a45fcffbc14c3"
+          },
+          {
+            "job_id": "job-s",
+            "seq": 2,
+            "record_id": "00000000-0000-4000-8000-000000104100",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "desktop",
+            "idempotency_key": "00000000-0000-4000-8000-000000204100",
+            "request_sha256": "35e138e5ce828382d868219379dae0b77863bc741e31e1c68b65bbb572b4afe4",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000100Z",
+            "previous_hash": "fd761f332f8aa9685de1481e8ed55d9213b02f3cfc386ab1b03a45fcffbc14c3",
+            "kind": "round_open",
+            "payload": {
+              "round_no": 1,
+              "head": "1111111111111111111111111111111111111111",
+              "tester_job_id": null,
+              "extension_grant_seq": null,
+              "repeat_grant_seq": null
+            },
+            "record_hash": "101fc802563e0d2c79689fd859d855b16929cbe4d61e16b950757449b09c8566"
+          },
+          {
+            "job_id": "job-s",
+            "seq": 3,
+            "record_id": "00000000-0000-4000-8000-000000104141",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "director-1",
+            "idempotency_key": "00000000-0000-4000-8000-000000204141",
+            "request_sha256": "dce92b705f0014eacf8a1e0ff7e5ad0a2542b3cf0a98ab4d5234b78723358195",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000101Z",
+            "previous_hash": "101fc802563e0d2c79689fd859d855b16929cbe4d61e16b950757449b09c8566",
+            "kind": "import_begin",
+            "payload": {
+              "reason_code": "import_freeze",
+              "shadow_cutoff_seq": 2
+            },
+            "record_hash": "763345baa3577fe1b3a3ddd976018bc082befe9627249b6b8c12aa1ad7c87e7e"
+          }
+        ]
+      },
+      "request": {
+        "type": "http",
+        "actor": "director-1",
+        "method": "POST",
+        "path": "/v1/wrk/jobs/job-s/records",
+        "idempotency_key": "00000000-0000-4000-8000-000000000999",
+        "body": {
+          "kind": "import_seal",
+          "claim_seq": 1,
+          "expected_seq": 3,
+          "payload": {
+            "begin_seq": 3,
+            "expected_import_count": 0,
+            "manifest_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+            "reason_code": "import_seal"
+          }
+        }
+      },
+      "expect": {
+        "http_status": 201,
+        "created": true,
+        "record": {
+          "kind": "import_seal",
+          "payload": {
+            "begin_seq": 3,
+            "expected_import_count": 0,
+            "manifest_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+            "reason_code": "import_seal",
+            "shadow_cutoff_seq": 2,
+            "baseline_used": 3,
+            "numbering_floor": 3
+          }
+        },
+        "summary": {
+          "state": "sealed"
+        }
+      }
+    },
+    {
+      "name": "activate-exact-seal-baseline-3",
+      "source": {
+        "section": "5",
+        "table": "Additional migration vectors",
+        "table_name": "migration",
+        "row": 4,
+        "row_text": "| Same history; seal with zero-import canonical [] manifest; activate exact seal | baseline_used=3, numbering_floor=3, active, used=3, open_rounds=[] |"
+      },
+      "given": {
+        "job_id": "job-s",
+        "policy": {
+          "version": "hk1873.policy.v1",
+          "clients": {
+            "desktop": {
+              "host_client_id": "desktop",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-dev": {
+              "host_client_id": "mac-dev",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-work": {
+              "host_client_id": "mac-work",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "rpi": {
+              "host_client_id": "rpi",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-personal": {
+              "host_client_id": "mac-personal",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "director-1": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "operator-desk": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "pa-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "at-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "pb-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "tt-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            }
+          },
+          "lanes": {
+            "director-1": null,
+            "pa-integrator": "director-1"
+          },
+          "features": {
+            "head_repeat_enabled": true,
+            "claim_lane_creation_enabled": true
+          }
+        },
+        "records": [
+          {
+            "job_id": "job-s",
+            "seq": 1,
+            "record_id": "00000000-0000-4000-8000-000000104182",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "director-1",
+            "idempotency_key": "00000000-0000-4000-8000-000000204182",
+            "request_sha256": "764545c99265011fe3da3afe25a18ff1adf3f2d8300fe62c5efa15508d940e19",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000102Z",
+            "previous_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+            "kind": "claim",
+            "payload": {
+              "job_id": "job-s",
+              "owner_lane": "b2402-s",
+              "parent_lane": "director-1",
+              "task_id": 2402,
+              "host_client_id": "desktop",
+              "role": "builder",
+              "tier": "T2",
+              "review_of": null,
+              "predecessor_job_id": null,
+              "supersedes": null,
+              "policy_sha256": "8de436a97778f975de840ffd0ec10539440059169fbc34c4a8eb0486f0ece5ce",
+              "created_at": "2026-10-24T00:00:00.000102Z"
+            },
+            "record_hash": "440b7860d5242d04905c09f221f2489c79977ec3d75ed39e7261be660c665abd"
+          },
+          {
+            "job_id": "job-s",
+            "seq": 2,
+            "record_id": "00000000-0000-4000-8000-000000104223",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "desktop",
+            "idempotency_key": "00000000-0000-4000-8000-000000204223",
+            "request_sha256": "35e138e5ce828382d868219379dae0b77863bc741e31e1c68b65bbb572b4afe4",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000103Z",
+            "previous_hash": "440b7860d5242d04905c09f221f2489c79977ec3d75ed39e7261be660c665abd",
+            "kind": "round_open",
+            "payload": {
+              "round_no": 1,
+              "head": "1111111111111111111111111111111111111111",
+              "tester_job_id": null,
+              "extension_grant_seq": null,
+              "repeat_grant_seq": null
+            },
+            "record_hash": "bc6354963d900b64a02064826e44f61423ab82653c21800914acdbf3c8fbabbc"
+          },
+          {
+            "job_id": "job-s",
+            "seq": 3,
+            "record_id": "00000000-0000-4000-8000-000000104264",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "director-1",
+            "idempotency_key": "00000000-0000-4000-8000-000000204264",
+            "request_sha256": "dce92b705f0014eacf8a1e0ff7e5ad0a2542b3cf0a98ab4d5234b78723358195",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000104Z",
+            "previous_hash": "bc6354963d900b64a02064826e44f61423ab82653c21800914acdbf3c8fbabbc",
+            "kind": "import_begin",
+            "payload": {
+              "reason_code": "import_freeze",
+              "shadow_cutoff_seq": 2
+            },
+            "record_hash": "b8eee5482edd9f6627291b271c8dc13a841a75b50e2673e357f032de3d7216c8"
+          },
+          {
+            "job_id": "job-s",
+            "seq": 4,
+            "record_id": "00000000-0000-4000-8000-000000104305",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "director-1",
+            "idempotency_key": "00000000-0000-4000-8000-000000204305",
+            "request_sha256": "416570a96405ead05ffe7d429d263cbadb0ae97e5b5a32e23b7b13369f1a8603",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000105Z",
+            "previous_hash": "b8eee5482edd9f6627291b271c8dc13a841a75b50e2673e357f032de3d7216c8",
+            "kind": "import_seal",
+            "payload": {
+              "begin_seq": 3,
+              "expected_import_count": 0,
+              "manifest_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+              "reason_code": "import_seal",
+              "shadow_cutoff_seq": 2,
+              "baseline_used": 3,
+              "numbering_floor": 3
+            },
+            "record_hash": "9078eefc6d935cbbe284e07f61f1843f58977576a9821c27e1a6fe8d1731c7c7"
+          }
+        ]
+      },
+      "request": {
+        "type": "http",
+        "actor": "director-1",
+        "method": "POST",
+        "path": "/v1/wrk/jobs/job-s/records",
+        "idempotency_key": "00000000-0000-4000-8000-000000000999",
+        "body": {
+          "kind": "activate",
+          "claim_seq": 1,
+          "expected_seq": 4,
+          "payload": {
+            "reason_code": "activation",
+            "seal_seq": 4
+          }
+        }
+      },
+      "expect": {
+        "http_status": 201,
+        "created": true,
+        "record": {
+          "kind": "activate",
+          "payload": {
+            "baseline_used": 3,
+            "mode": "enforced",
+            "reason_code": "activation",
+            "seal_seq": 4
+          }
+        },
+        "summary": {
+          "state": "active",
+          "baseline_used": 3,
+          "used": 3,
+          "next_round_no": 4,
+          "open_rounds": []
+        }
+      }
+    },
+    {
+      "name": "post-activate-verdict-old-round-not-open",
+      "source": {
+        "section": "5",
+        "table": "Additional migration vectors",
+        "table_name": "migration",
+        "row": 5,
+        "row_text": "| After that activate, submit verdict or void for old round 1 | 409 round_not_open; used remains 3, no grant consumed |"
+      },
+      "given": {
+        "job_id": "job-s",
+        "policy": {
+          "version": "hk1873.policy.v1",
+          "clients": {
+            "desktop": {
+              "host_client_id": "desktop",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-dev": {
+              "host_client_id": "mac-dev",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-work": {
+              "host_client_id": "mac-work",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "rpi": {
+              "host_client_id": "rpi",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-personal": {
+              "host_client_id": "mac-personal",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "director-1": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "operator-desk": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "pa-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "at-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "pb-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "tt-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            }
+          },
+          "lanes": {
+            "director-1": null,
+            "pa-integrator": "director-1"
+          },
+          "features": {
+            "head_repeat_enabled": true,
+            "claim_lane_creation_enabled": true
+          }
+        },
+        "records": [
+          {
+            "job_id": "job-s",
+            "seq": 1,
+            "record_id": "00000000-0000-4000-8000-000000104346",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "director-1",
+            "idempotency_key": "00000000-0000-4000-8000-000000204346",
+            "request_sha256": "764545c99265011fe3da3afe25a18ff1adf3f2d8300fe62c5efa15508d940e19",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000106Z",
+            "previous_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+            "kind": "claim",
+            "payload": {
+              "job_id": "job-s",
+              "owner_lane": "b2402-s",
+              "parent_lane": "director-1",
+              "task_id": 2402,
+              "host_client_id": "desktop",
+              "role": "builder",
+              "tier": "T2",
+              "review_of": null,
+              "predecessor_job_id": null,
+              "supersedes": null,
+              "policy_sha256": "8de436a97778f975de840ffd0ec10539440059169fbc34c4a8eb0486f0ece5ce",
+              "created_at": "2026-10-24T00:00:00.000106Z"
+            },
+            "record_hash": "3148ebc3d997e3a91e0cd1d847440918db2c4c589909a5349fa4a71b43c86919"
+          },
+          {
+            "job_id": "job-s",
+            "seq": 2,
+            "record_id": "00000000-0000-4000-8000-000000104387",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "desktop",
+            "idempotency_key": "00000000-0000-4000-8000-000000204387",
+            "request_sha256": "35e138e5ce828382d868219379dae0b77863bc741e31e1c68b65bbb572b4afe4",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000107Z",
+            "previous_hash": "3148ebc3d997e3a91e0cd1d847440918db2c4c589909a5349fa4a71b43c86919",
+            "kind": "round_open",
+            "payload": {
+              "round_no": 1,
+              "head": "1111111111111111111111111111111111111111",
+              "tester_job_id": null,
+              "extension_grant_seq": null,
+              "repeat_grant_seq": null
+            },
+            "record_hash": "85be444235d1b17bc36857fd3ce9eb11feb9f340b004a1c663336ae9a698b606"
+          },
+          {
+            "job_id": "job-s",
+            "seq": 3,
+            "record_id": "00000000-0000-4000-8000-000000104428",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "director-1",
+            "idempotency_key": "00000000-0000-4000-8000-000000204428",
+            "request_sha256": "dce92b705f0014eacf8a1e0ff7e5ad0a2542b3cf0a98ab4d5234b78723358195",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000108Z",
+            "previous_hash": "85be444235d1b17bc36857fd3ce9eb11feb9f340b004a1c663336ae9a698b606",
+            "kind": "import_begin",
+            "payload": {
+              "reason_code": "import_freeze",
+              "shadow_cutoff_seq": 2
+            },
+            "record_hash": "04f2fd25f280783a609dcb233dc271d7b518061ef0a3e6de7a88c1cfbfe08e68"
+          },
+          {
+            "job_id": "job-s",
+            "seq": 4,
+            "record_id": "00000000-0000-4000-8000-000000104469",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "director-1",
+            "idempotency_key": "00000000-0000-4000-8000-000000204469",
+            "request_sha256": "416570a96405ead05ffe7d429d263cbadb0ae97e5b5a32e23b7b13369f1a8603",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000109Z",
+            "previous_hash": "04f2fd25f280783a609dcb233dc271d7b518061ef0a3e6de7a88c1cfbfe08e68",
+            "kind": "import_seal",
+            "payload": {
+              "begin_seq": 3,
+              "expected_import_count": 0,
+              "manifest_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+              "reason_code": "import_seal",
+              "shadow_cutoff_seq": 2,
+              "baseline_used": 3,
+              "numbering_floor": 1
+            },
+            "record_hash": "5f9e0bfd2015482909c501f836271bdb554de331dbd831dacc96df77615429e0"
+          },
+          {
+            "job_id": "job-s",
+            "seq": 5,
+            "record_id": "00000000-0000-4000-8000-000000104510",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "director-1",
+            "idempotency_key": "00000000-0000-4000-8000-000000204510",
+            "request_sha256": "fcecdfee8d8e7b1164c43dee1b1b57efe019d4cd09e9e43705b6e32c72650ade",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000110Z",
+            "previous_hash": "5f9e0bfd2015482909c501f836271bdb554de331dbd831dacc96df77615429e0",
+            "kind": "activate",
+            "payload": {
+              "baseline_used": 3,
+              "mode": "enforced",
+              "reason_code": "activation",
+              "seal_seq": 4
+            },
+            "record_hash": "53bf8ba09d63583e0880716648b03e476ba975697544a849add263a770d58c85"
+          }
+        ]
+      },
+      "request": {
+        "type": "http",
+        "actor": "desktop",
+        "method": "POST",
+        "path": "/v1/wrk/jobs/job-s/records",
+        "idempotency_key": "00000000-0000-4000-8000-000000000999",
+        "body": {
+          "kind": "verdict",
+          "claim_seq": 1,
+          "expected_seq": 5,
+          "payload": {
+            "round_no": 1,
+            "head": "1111111111111111111111111111111111111111",
+            "verdict": "PASS",
+            "path": "/jobs/job-s/v.md",
+            "content_sha256": "e547281b1f351ac3152537f2f1859185af6515815f44acf1276091a9511969c1",
+            "content_b64": "VkVSRElDVDogUEFTUyBAMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMQpyZXZpZXcgbm90ZXMK",
+            "tester_job_id": null
+          }
+        }
+      },
+      "expect": {
+        "http_status": 409,
+        "error": "round_not_open",
+        "summary": {
+          "used": 3
+        },
+        "note": "no grant consumed"
+      }
+    },
+    {
+      "name": "post-activate-void-old-round-not-open",
+      "source": {
+        "section": "5",
+        "table": "Additional migration vectors",
+        "table_name": "migration",
+        "row": 5,
+        "row_text": "| After that activate, submit verdict or void for old round 1 | 409 round_not_open; used remains 3, no grant consumed |"
+      },
+      "given": {
+        "job_id": "job-s",
+        "policy": {
+          "version": "hk1873.policy.v1",
+          "clients": {
+            "desktop": {
+              "host_client_id": "desktop",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-dev": {
+              "host_client_id": "mac-dev",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-work": {
+              "host_client_id": "mac-work",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "rpi": {
+              "host_client_id": "rpi",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-personal": {
+              "host_client_id": "mac-personal",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "director-1": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "operator-desk": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "pa-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "at-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "pb-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "tt-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            }
+          },
+          "lanes": {
+            "director-1": null,
+            "pa-integrator": "director-1"
+          },
+          "features": {
+            "head_repeat_enabled": true,
+            "claim_lane_creation_enabled": true
+          }
+        },
+        "records": [
+          {
+            "job_id": "job-s",
+            "seq": 1,
+            "record_id": "00000000-0000-4000-8000-000000104551",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "director-1",
+            "idempotency_key": "00000000-0000-4000-8000-000000204551",
+            "request_sha256": "764545c99265011fe3da3afe25a18ff1adf3f2d8300fe62c5efa15508d940e19",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000111Z",
+            "previous_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+            "kind": "claim",
+            "payload": {
+              "job_id": "job-s",
+              "owner_lane": "b2402-s",
+              "parent_lane": "director-1",
+              "task_id": 2402,
+              "host_client_id": "desktop",
+              "role": "builder",
+              "tier": "T2",
+              "review_of": null,
+              "predecessor_job_id": null,
+              "supersedes": null,
+              "policy_sha256": "8de436a97778f975de840ffd0ec10539440059169fbc34c4a8eb0486f0ece5ce",
+              "created_at": "2026-10-24T00:00:00.000111Z"
+            },
+            "record_hash": "68bea7cca5247f6b544dba1d8cfafd4970cab9eefca359d7254b8279eeca90f8"
+          },
+          {
+            "job_id": "job-s",
+            "seq": 2,
+            "record_id": "00000000-0000-4000-8000-000000104592",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "desktop",
+            "idempotency_key": "00000000-0000-4000-8000-000000204592",
+            "request_sha256": "35e138e5ce828382d868219379dae0b77863bc741e31e1c68b65bbb572b4afe4",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000112Z",
+            "previous_hash": "68bea7cca5247f6b544dba1d8cfafd4970cab9eefca359d7254b8279eeca90f8",
+            "kind": "round_open",
+            "payload": {
+              "round_no": 1,
+              "head": "1111111111111111111111111111111111111111",
+              "tester_job_id": null,
+              "extension_grant_seq": null,
+              "repeat_grant_seq": null
+            },
+            "record_hash": "d7243894f3311ac46dfbff508176c95f6cf3d10ba9b5b93e03c053bca4d12da2"
+          },
+          {
+            "job_id": "job-s",
+            "seq": 3,
+            "record_id": "00000000-0000-4000-8000-000000104633",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "director-1",
+            "idempotency_key": "00000000-0000-4000-8000-000000204633",
+            "request_sha256": "dce92b705f0014eacf8a1e0ff7e5ad0a2542b3cf0a98ab4d5234b78723358195",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000113Z",
+            "previous_hash": "d7243894f3311ac46dfbff508176c95f6cf3d10ba9b5b93e03c053bca4d12da2",
+            "kind": "import_begin",
+            "payload": {
+              "reason_code": "import_freeze",
+              "shadow_cutoff_seq": 2
+            },
+            "record_hash": "f4216eb3c0760b7256bcc6e41e06fb2b577fbcc21b5411eb510f8c838c8079d9"
+          },
+          {
+            "job_id": "job-s",
+            "seq": 4,
+            "record_id": "00000000-0000-4000-8000-000000104674",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "director-1",
+            "idempotency_key": "00000000-0000-4000-8000-000000204674",
+            "request_sha256": "416570a96405ead05ffe7d429d263cbadb0ae97e5b5a32e23b7b13369f1a8603",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000114Z",
+            "previous_hash": "f4216eb3c0760b7256bcc6e41e06fb2b577fbcc21b5411eb510f8c838c8079d9",
+            "kind": "import_seal",
+            "payload": {
+              "begin_seq": 3,
+              "expected_import_count": 0,
+              "manifest_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+              "reason_code": "import_seal",
+              "shadow_cutoff_seq": 2,
+              "baseline_used": 3,
+              "numbering_floor": 1
+            },
+            "record_hash": "7eb40810d0341e3725fecaac5f5c835fc413f7345a478c1ae6a5d20926693864"
+          },
+          {
+            "job_id": "job-s",
+            "seq": 5,
+            "record_id": "00000000-0000-4000-8000-000000104715",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "director-1",
+            "idempotency_key": "00000000-0000-4000-8000-000000204715",
+            "request_sha256": "fcecdfee8d8e7b1164c43dee1b1b57efe019d4cd09e9e43705b6e32c72650ade",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000115Z",
+            "previous_hash": "7eb40810d0341e3725fecaac5f5c835fc413f7345a478c1ae6a5d20926693864",
+            "kind": "activate",
+            "payload": {
+              "baseline_used": 3,
+              "mode": "enforced",
+              "reason_code": "activation",
+              "seal_seq": 4
+            },
+            "record_hash": "e7b7ebf2c6b94fa012119f3c72c6c0ae94332aabd03da94890dd1180915069c7"
+          },
+          {
+            "job_id": "job-s",
+            "seq": 6,
+            "record_id": "00000000-0000-4000-8000-000000104756",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "director-1",
+            "idempotency_key": "00000000-0000-4000-8000-000000204756",
+            "request_sha256": "f3364b5e0452a7a2fde8e063ce8cf287a79bd60bdeb5d132dc8d4d24d503ba99",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000116Z",
+            "previous_hash": "e7b7ebf2c6b94fa012119f3c72c6c0ae94332aabd03da94890dd1180915069c7",
+            "kind": "grant",
+            "payload": {
+              "grant_type": "void",
+              "round_no": 1,
+              "head": null,
+              "extra": 0,
+              "earlier_round_no": null,
+              "tester_job_id": null,
+              "expires_at": "2026-10-31T00:00:00.000000Z",
+              "reason_code": "void_round"
+            },
+            "record_hash": "6404391bffb3d7d7961b33420363806020553c6bf430188bd8710e56a53bc4b1"
+          }
+        ]
+      },
+      "request": {
+        "type": "http",
+        "actor": "desktop",
+        "method": "POST",
+        "path": "/v1/wrk/jobs/job-s/records",
+        "idempotency_key": "00000000-0000-4000-8000-000000000999",
+        "body": {
+          "kind": "void",
+          "claim_seq": 1,
+          "expected_seq": 6,
+          "payload": {
+            "round_no": 1,
+            "grant_seq": 6,
+            "reason_code": "void_round"
+          }
+        }
+      },
+      "expect": {
+        "http_status": 409,
+        "error": "round_not_open"
+      }
+    },
+    {
+      "name": "post-activate-extension-open-round-4",
+      "source": {
+        "section": "5",
+        "table": "Additional migration vectors",
+        "table_name": "migration",
+        "row": 6,
+        "row_text": "| Same active job; central extension for next round 4/H, plus head_repeat if historical verdict reserved H; fresh round 4/PASS from assigned tester | used=4; fresh PASS can satisfy join; old round 1 is not pending |"
+      },
+      "given": {
+        "job_id": "job-s",
+        "policy": {
+          "version": "hk1873.policy.v1",
+          "clients": {
+            "desktop": {
+              "host_client_id": "desktop",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-dev": {
+              "host_client_id": "mac-dev",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-work": {
+              "host_client_id": "mac-work",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "rpi": {
+              "host_client_id": "rpi",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-personal": {
+              "host_client_id": "mac-personal",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "director-1": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "operator-desk": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "pa-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "at-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "pb-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "tt-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            }
+          },
+          "lanes": {
+            "director-1": null,
+            "pa-integrator": "director-1"
+          },
+          "features": {
+            "head_repeat_enabled": true,
+            "claim_lane_creation_enabled": true
+          }
+        },
+        "records": [
+          {
+            "job_id": "job-s",
+            "seq": 1,
+            "record_id": "00000000-0000-4000-8000-000000104797",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "director-1",
+            "idempotency_key": "00000000-0000-4000-8000-000000204797",
+            "request_sha256": "764545c99265011fe3da3afe25a18ff1adf3f2d8300fe62c5efa15508d940e19",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000117Z",
+            "previous_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+            "kind": "claim",
+            "payload": {
+              "job_id": "job-s",
+              "owner_lane": "b2402-s",
+              "parent_lane": "director-1",
+              "task_id": 2402,
+              "host_client_id": "desktop",
+              "role": "builder",
+              "tier": "T2",
+              "review_of": null,
+              "predecessor_job_id": null,
+              "supersedes": null,
+              "policy_sha256": "8de436a97778f975de840ffd0ec10539440059169fbc34c4a8eb0486f0ece5ce",
+              "created_at": "2026-10-24T00:00:00.000117Z"
+            },
+            "record_hash": "f1ce7a3f2e0f88637339a542e187c4938660896f139b1957335843546702e540"
+          },
+          {
+            "job_id": "job-s",
+            "seq": 2,
+            "record_id": "00000000-0000-4000-8000-000000104838",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "desktop",
+            "idempotency_key": "00000000-0000-4000-8000-000000204838",
+            "request_sha256": "35e138e5ce828382d868219379dae0b77863bc741e31e1c68b65bbb572b4afe4",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000118Z",
+            "previous_hash": "f1ce7a3f2e0f88637339a542e187c4938660896f139b1957335843546702e540",
+            "kind": "round_open",
+            "payload": {
+              "round_no": 1,
+              "head": "1111111111111111111111111111111111111111",
+              "tester_job_id": null,
+              "extension_grant_seq": null,
+              "repeat_grant_seq": null
+            },
+            "record_hash": "a84b2aa0bba288c33775977d2a56b9eb3b7fc4947803dee141b4268782220b2d"
+          },
+          {
+            "job_id": "job-s",
+            "seq": 3,
+            "record_id": "00000000-0000-4000-8000-000000104879",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "director-1",
+            "idempotency_key": "00000000-0000-4000-8000-000000204879",
+            "request_sha256": "dce92b705f0014eacf8a1e0ff7e5ad0a2542b3cf0a98ab4d5234b78723358195",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000119Z",
+            "previous_hash": "a84b2aa0bba288c33775977d2a56b9eb3b7fc4947803dee141b4268782220b2d",
+            "kind": "import_begin",
+            "payload": {
+              "reason_code": "import_freeze",
+              "shadow_cutoff_seq": 2
+            },
+            "record_hash": "bd96d2cd4d55cb1b3614377bc115e5cb329bf20e42531d6b98d61d58b66e1680"
+          },
+          {
+            "job_id": "job-s",
+            "seq": 4,
+            "record_id": "00000000-0000-4000-8000-000000104920",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "director-1",
+            "idempotency_key": "00000000-0000-4000-8000-000000204920",
+            "request_sha256": "416570a96405ead05ffe7d429d263cbadb0ae97e5b5a32e23b7b13369f1a8603",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000120Z",
+            "previous_hash": "bd96d2cd4d55cb1b3614377bc115e5cb329bf20e42531d6b98d61d58b66e1680",
+            "kind": "import_seal",
+            "payload": {
+              "begin_seq": 3,
+              "expected_import_count": 0,
+              "manifest_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+              "reason_code": "import_seal",
+              "shadow_cutoff_seq": 2,
+              "baseline_used": 3,
+              "numbering_floor": 1
+            },
+            "record_hash": "cfbe406d7b01fe0d5b7846e066170d80fb55a0183fa74c50517262e3d672205f"
+          },
+          {
+            "job_id": "job-s",
+            "seq": 5,
+            "record_id": "00000000-0000-4000-8000-000000104961",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "director-1",
+            "idempotency_key": "00000000-0000-4000-8000-000000204961",
+            "request_sha256": "fcecdfee8d8e7b1164c43dee1b1b57efe019d4cd09e9e43705b6e32c72650ade",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000121Z",
+            "previous_hash": "cfbe406d7b01fe0d5b7846e066170d80fb55a0183fa74c50517262e3d672205f",
+            "kind": "activate",
+            "payload": {
+              "baseline_used": 3,
+              "mode": "enforced",
+              "reason_code": "activation",
+              "seal_seq": 4
+            },
+            "record_hash": "4988371e86ae137925db1b4505978589feba801c18d3b15037cf8a60d5a75c6c"
+          },
+          {
+            "job_id": "job-s",
+            "seq": 6,
+            "record_id": "00000000-0000-4000-8000-000000105002",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "director-1",
+            "idempotency_key": "00000000-0000-4000-8000-000000205002",
+            "request_sha256": "69298bc07f15588d6a0213d106122f3847ff768d814469d4ac7911674d3df562",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000122Z",
+            "previous_hash": "4988371e86ae137925db1b4505978589feba801c18d3b15037cf8a60d5a75c6c",
+            "kind": "grant",
+            "payload": {
+              "grant_type": "extension",
+              "round_no": 4,
+              "head": "4444444444444444444444444444444444444444",
+              "extra": 1,
+              "earlier_round_no": null,
+              "tester_job_id": null,
+              "expires_at": "2026-10-31T00:00:00.000000Z",
+              "reason_code": "cap_extension"
+            },
+            "record_hash": "d73f4dfeeeefc6a9fa1e80b26cf42db315dc58c7b9be13f55903f67e68c9e93b"
+          },
+          {
+            "job_id": "job-a-t1",
+            "seq": 1,
+            "record_id": "00000000-0000-4000-8000-000000105043",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "desktop",
+            "idempotency_key": "00000000-0000-4000-8000-000000205043",
+            "request_sha256": "b51b2e4ff9215a50bb24b3f2bc33937951925c7aafd787c6edae9499eb0b0919",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000123Z",
+            "previous_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+            "kind": "claim",
+            "payload": {
+              "job_id": "job-a-t1",
+              "owner_lane": "b2400-a",
+              "parent_lane": "b2400-a",
+              "task_id": 2402,
+              "host_client_id": "desktop",
+              "role": "tester",
+              "tier": "T2",
+              "review_of": {
+                "job_id": "job-s",
+                "round_no": 4
+              },
+              "predecessor_job_id": null,
+              "supersedes": null,
+              "policy_sha256": "8de436a97778f975de840ffd0ec10539440059169fbc34c4a8eb0486f0ece5ce",
+              "created_at": "2026-10-24T00:00:00.000123Z"
+            },
+            "record_hash": "ad0f4f1e2a797180654f46b4dc2eb8102fe24ff49acd798dfafb51d37921e8e1"
+          }
+        ]
+      },
+      "request": {
+        "type": "http",
+        "actor": "desktop",
+        "method": "POST",
+        "path": "/v1/wrk/jobs/job-s/records",
+        "idempotency_key": "00000000-0000-4000-8000-000000000999",
+        "body": {
+          "kind": "round_open",
+          "claim_seq": 1,
+          "expected_seq": 6,
+          "payload": {
+            "head": "4444444444444444444444444444444444444444",
+            "tester_job_id": "job-a-t1",
+            "extension_grant_seq": 6,
+            "repeat_grant_seq": null
+          }
+        }
+      },
+      "expect": {
+        "http_status": 201,
+        "created": true,
+        "record": {
+          "kind": "round_open",
+          "payload": {
+            "round_no": 4,
+            "head": "4444444444444444444444444444444444444444",
+            "tester_job_id": "job-a-t1",
+            "extension_grant_seq": 6,
+            "repeat_grant_seq": null
+          }
+        },
+        "summary": {
+          "used": 4,
+          "open_rounds": [
+            4
+          ],
+          "next_round_no": 5
+        },
+        "note": "old round 1 is not pending; fresh PASS can satisfy join"
+      }
+    },
+    {
+      "name": "void-postactivate-round-4-used-3",
+      "source": {
+        "section": "5",
+        "table": "Additional migration vectors",
+        "table_name": "migration",
+        "row": 7,
+        "row_text": "| Void postactivate round 4 before verdict with valid grant | used=3, never 2; baseline remains 3 |"
+      },
+      "given": {
+        "job_id": "job-s",
+        "policy": {
+          "version": "hk1873.policy.v1",
+          "clients": {
+            "desktop": {
+              "host_client_id": "desktop",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-dev": {
+              "host_client_id": "mac-dev",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-work": {
+              "host_client_id": "mac-work",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "rpi": {
+              "host_client_id": "rpi",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-personal": {
+              "host_client_id": "mac-personal",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "director-1": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "operator-desk": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "pa-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "at-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "pb-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "tt-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            }
+          },
+          "lanes": {
+            "director-1": null,
+            "pa-integrator": "director-1"
+          },
+          "features": {
+            "head_repeat_enabled": true,
+            "claim_lane_creation_enabled": true
+          }
+        },
+        "records": [
+          {
+            "job_id": "job-s",
+            "seq": 1,
+            "record_id": "00000000-0000-4000-8000-000000105084",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "director-1",
+            "idempotency_key": "00000000-0000-4000-8000-000000205084",
+            "request_sha256": "764545c99265011fe3da3afe25a18ff1adf3f2d8300fe62c5efa15508d940e19",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000124Z",
+            "previous_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+            "kind": "claim",
+            "payload": {
+              "job_id": "job-s",
+              "owner_lane": "b2402-s",
+              "parent_lane": "director-1",
+              "task_id": 2402,
+              "host_client_id": "desktop",
+              "role": "builder",
+              "tier": "T2",
+              "review_of": null,
+              "predecessor_job_id": null,
+              "supersedes": null,
+              "policy_sha256": "8de436a97778f975de840ffd0ec10539440059169fbc34c4a8eb0486f0ece5ce",
+              "created_at": "2026-10-24T00:00:00.000124Z"
+            },
+            "record_hash": "61c4e01c2e7926c97e3da9ac088d3cebe3217259fc74ef9739f99d0cf9cb610b"
+          },
+          {
+            "job_id": "job-s",
+            "seq": 2,
+            "record_id": "00000000-0000-4000-8000-000000105125",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "desktop",
+            "idempotency_key": "00000000-0000-4000-8000-000000205125",
+            "request_sha256": "35e138e5ce828382d868219379dae0b77863bc741e31e1c68b65bbb572b4afe4",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000125Z",
+            "previous_hash": "61c4e01c2e7926c97e3da9ac088d3cebe3217259fc74ef9739f99d0cf9cb610b",
+            "kind": "round_open",
+            "payload": {
+              "round_no": 1,
+              "head": "1111111111111111111111111111111111111111",
+              "tester_job_id": null,
+              "extension_grant_seq": null,
+              "repeat_grant_seq": null
+            },
+            "record_hash": "adc1d6df00a473d49e9b367358fc85987889925ea760a80839d66001f9a9b5c0"
+          },
+          {
+            "job_id": "job-s",
+            "seq": 3,
+            "record_id": "00000000-0000-4000-8000-000000105166",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "director-1",
+            "idempotency_key": "00000000-0000-4000-8000-000000205166",
+            "request_sha256": "dce92b705f0014eacf8a1e0ff7e5ad0a2542b3cf0a98ab4d5234b78723358195",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000126Z",
+            "previous_hash": "adc1d6df00a473d49e9b367358fc85987889925ea760a80839d66001f9a9b5c0",
+            "kind": "import_begin",
+            "payload": {
+              "reason_code": "import_freeze",
+              "shadow_cutoff_seq": 2
+            },
+            "record_hash": "47d9e7c9a5ae7f6655957d90b2c2f6712004d4413047fa35726e6def63c44b60"
+          },
+          {
+            "job_id": "job-s",
+            "seq": 4,
+            "record_id": "00000000-0000-4000-8000-000000105207",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "director-1",
+            "idempotency_key": "00000000-0000-4000-8000-000000205207",
+            "request_sha256": "416570a96405ead05ffe7d429d263cbadb0ae97e5b5a32e23b7b13369f1a8603",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000127Z",
+            "previous_hash": "47d9e7c9a5ae7f6655957d90b2c2f6712004d4413047fa35726e6def63c44b60",
+            "kind": "import_seal",
+            "payload": {
+              "begin_seq": 3,
+              "expected_import_count": 0,
+              "manifest_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+              "reason_code": "import_seal",
+              "shadow_cutoff_seq": 2,
+              "baseline_used": 3,
+              "numbering_floor": 1
+            },
+            "record_hash": "afb14bdae0fc851d2b1e9c00d7713346e65d2aca75a843a5b3287486004ed640"
+          },
+          {
+            "job_id": "job-s",
+            "seq": 5,
+            "record_id": "00000000-0000-4000-8000-000000105248",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "director-1",
+            "idempotency_key": "00000000-0000-4000-8000-000000205248",
+            "request_sha256": "fcecdfee8d8e7b1164c43dee1b1b57efe019d4cd09e9e43705b6e32c72650ade",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000128Z",
+            "previous_hash": "afb14bdae0fc851d2b1e9c00d7713346e65d2aca75a843a5b3287486004ed640",
+            "kind": "activate",
+            "payload": {
+              "baseline_used": 3,
+              "mode": "enforced",
+              "reason_code": "activation",
+              "seal_seq": 4
+            },
+            "record_hash": "1605e29e6ea52fe0d8257993706933a8dff640df8b103dc3c3481e114d145bc0"
+          },
+          {
+            "job_id": "job-s",
+            "seq": 6,
+            "record_id": "00000000-0000-4000-8000-000000105289",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "director-1",
+            "idempotency_key": "00000000-0000-4000-8000-000000205289",
+            "request_sha256": "69298bc07f15588d6a0213d106122f3847ff768d814469d4ac7911674d3df562",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000129Z",
+            "previous_hash": "1605e29e6ea52fe0d8257993706933a8dff640df8b103dc3c3481e114d145bc0",
+            "kind": "grant",
+            "payload": {
+              "grant_type": "extension",
+              "round_no": 4,
+              "head": "4444444444444444444444444444444444444444",
+              "extra": 1,
+              "earlier_round_no": null,
+              "tester_job_id": null,
+              "expires_at": "2026-10-31T00:00:00.000000Z",
+              "reason_code": "cap_extension"
+            },
+            "record_hash": "e46d45362c52173253069fba5cb1c6ff86a045113e7d94665841e3fb44fb2cd3"
+          },
+          {
+            "job_id": "job-s",
+            "seq": 7,
+            "record_id": "00000000-0000-4000-8000-000000105330",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "desktop",
+            "idempotency_key": "00000000-0000-4000-8000-000000205330",
+            "request_sha256": "636359601b9647e17dd7b620d81b805502bc3ca0012d342ecfa7d3e395b19e05",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000130Z",
+            "previous_hash": "e46d45362c52173253069fba5cb1c6ff86a045113e7d94665841e3fb44fb2cd3",
+            "kind": "round_open",
+            "payload": {
+              "round_no": 4,
+              "head": "4444444444444444444444444444444444444444",
+              "tester_job_id": null,
+              "extension_grant_seq": 6,
+              "repeat_grant_seq": null
+            },
+            "record_hash": "074b4b2ecbe767c7ac38d2efe4e3258a1e9279eb09e88650a64a32a6e9c50d00"
+          },
+          {
+            "job_id": "job-s",
+            "seq": 8,
+            "record_id": "00000000-0000-4000-8000-000000105371",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "director-1",
+            "idempotency_key": "00000000-0000-4000-8000-000000205371",
+            "request_sha256": "59a65fb0204a8631013a6246be5467a7475d7d284715f3a610fef7a926286c01",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000131Z",
+            "previous_hash": "074b4b2ecbe767c7ac38d2efe4e3258a1e9279eb09e88650a64a32a6e9c50d00",
+            "kind": "grant",
+            "payload": {
+              "grant_type": "void",
+              "round_no": 4,
+              "head": null,
+              "extra": 0,
+              "earlier_round_no": null,
+              "tester_job_id": null,
+              "expires_at": "2026-10-31T00:00:00.000000Z",
+              "reason_code": "void_round"
+            },
+            "record_hash": "5ddc0f8198d90bf5bb4fe34b67ebd7a4725a96f088de1f78410cd3bb5c8c8654"
+          }
+        ]
+      },
+      "request": {
+        "type": "http",
+        "actor": "desktop",
+        "method": "POST",
+        "path": "/v1/wrk/jobs/job-s/records",
+        "idempotency_key": "00000000-0000-4000-8000-000000000999",
+        "body": {
+          "kind": "void",
+          "claim_seq": 1,
+          "expected_seq": 8,
+          "payload": {
+            "round_no": 4,
+            "grant_seq": 8,
+            "reason_code": "void_round"
+          }
+        }
+      },
+      "expect": {
+        "http_status": 201,
+        "created": true,
+        "record": {
+          "kind": "void",
+          "payload": {
+            "round_no": 4,
+            "grant_seq": 8,
+            "reason_code": "void_round"
+          }
+        },
+        "summary": {
+          "used": 3,
+          "baseline_used": 3,
+          "open_rounds": []
+        },
+        "note": "used never 2; baseline remains 3"
+      }
+    },
+    {
+      "name": "manifest-undercount-import-unsealed",
+      "source": {
+        "section": "5",
+        "table": "Additional migration vectors",
+        "table_name": "migration",
+        "row": 8,
+        "row_text": "| Manifest claims one import but server has two | import_unsealed; still importing; no activation |"
+      },
+      "given": {
+        "job_id": "job-s",
+        "policy": {
+          "version": "hk1873.policy.v1",
+          "clients": {
+            "desktop": {
+              "host_client_id": "desktop",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-dev": {
+              "host_client_id": "mac-dev",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-work": {
+              "host_client_id": "mac-work",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "rpi": {
+              "host_client_id": "rpi",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-personal": {
+              "host_client_id": "mac-personal",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "director-1": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "operator-desk": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "pa-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "at-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "pb-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "tt-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            }
+          },
+          "lanes": {
+            "director-1": null,
+            "pa-integrator": "director-1"
+          },
+          "features": {
+            "head_repeat_enabled": true,
+            "claim_lane_creation_enabled": true
+          }
+        },
+        "records": [
+          {
+            "job_id": "job-s",
+            "seq": 1,
+            "record_id": "00000000-0000-4000-8000-000000105412",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "director-1",
+            "idempotency_key": "00000000-0000-4000-8000-000000205412",
+            "request_sha256": "764545c99265011fe3da3afe25a18ff1adf3f2d8300fe62c5efa15508d940e19",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000132Z",
+            "previous_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+            "kind": "claim",
+            "payload": {
+              "job_id": "job-s",
+              "owner_lane": "b2402-s",
+              "parent_lane": "director-1",
+              "task_id": 2402,
+              "host_client_id": "desktop",
+              "role": "builder",
+              "tier": "T2",
+              "review_of": null,
+              "predecessor_job_id": null,
+              "supersedes": null,
+              "policy_sha256": "8de436a97778f975de840ffd0ec10539440059169fbc34c4a8eb0486f0ece5ce",
+              "created_at": "2026-10-24T00:00:00.000132Z"
+            },
+            "record_hash": "e73098657872e5eab0793c9460c220dc77481b461f2e346349272ba0828d956b"
+          },
+          {
+            "job_id": "job-s",
+            "seq": 2,
+            "record_id": "00000000-0000-4000-8000-000000105453",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "desktop",
+            "idempotency_key": "00000000-0000-4000-8000-000000205453",
+            "request_sha256": "35e138e5ce828382d868219379dae0b77863bc741e31e1c68b65bbb572b4afe4",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000133Z",
+            "previous_hash": "e73098657872e5eab0793c9460c220dc77481b461f2e346349272ba0828d956b",
+            "kind": "round_open",
+            "payload": {
+              "round_no": 1,
+              "head": "1111111111111111111111111111111111111111",
+              "tester_job_id": null,
+              "extension_grant_seq": null,
+              "repeat_grant_seq": null
+            },
+            "record_hash": "88986ca9514ddf8f409f7df498ea0208e89caf8fde320b3addaac0f70a3a4e83"
+          },
+          {
+            "job_id": "job-s",
+            "seq": 3,
+            "record_id": "00000000-0000-4000-8000-000000105494",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "director-1",
+            "idempotency_key": "00000000-0000-4000-8000-000000205494",
+            "request_sha256": "dce92b705f0014eacf8a1e0ff7e5ad0a2542b3cf0a98ab4d5234b78723358195",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000134Z",
+            "previous_hash": "88986ca9514ddf8f409f7df498ea0208e89caf8fde320b3addaac0f70a3a4e83",
+            "kind": "import_begin",
+            "payload": {
+              "reason_code": "import_freeze",
+              "shadow_cutoff_seq": 2
+            },
+            "record_hash": "74736634ff1cfb932b46b3f12e42a62b77b97d14ba15e66f2db9cb7c2e2e85f3"
+          },
+          {
+            "job_id": "job-s",
+            "seq": 4,
+            "record_id": "00000000-0000-4000-8000-000000105535",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "director-1",
+            "idempotency_key": "00000000-0000-4000-8000-000000205535",
+            "request_sha256": "f23c01a301705bfc4078057c7c8915bcdeb11cb129f7ff37237dd50d69406d98",
+            "imported": true,
+            "source": {
+              "source_locator": "testdata/o3/legacy/voided/events/00002-job.round.json",
+              "source_sha256": "724b8c233d9620cc063d676fe331d2f15e86bbeb5359b7595a29d7cad75e2d9c"
+            },
+            "received_at": "2026-10-24T00:00:00.000135Z",
+            "previous_hash": "74736634ff1cfb932b46b3f12e42a62b77b97d14ba15e66f2db9cb7c2e2e85f3",
+            "kind": "import",
+            "payload": {
+              "source_locator": "testdata/o3/legacy/voided/events/00002-job.round.json",
+              "source_sha256": "724b8c233d9620cc063d676fe331d2f15e86bbeb5359b7595a29d7cad75e2d9c",
+              "original_actor_client_id": "desktop",
+              "original_at": "2026-10-20T00:00:00.000000Z",
+              "legacy_kind": "job.round"
+            },
+            "record_hash": "70ff4496bf83d7ea43c86b8087d86230c81d802fdf3ed093faae4ea33dd8f5fc"
+          },
+          {
+            "job_id": "job-s",
+            "seq": 5,
+            "record_id": "00000000-0000-4000-8000-000000105576",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "director-1",
+            "idempotency_key": "00000000-0000-4000-8000-000000205576",
+            "request_sha256": "17c1d0620908bd98c3252a69c78e8d8ee5b4d960ccb4fb8894585bba38c92ce4",
+            "imported": true,
+            "source": {
+              "source_locator": "testdata/o3/legacy/voided/events/00004-job.round.json",
+              "source_sha256": "37a0af51e9377e1f67a7706e0b8fde70e37e939726ee452f5e5eac723cfe38d0"
+            },
+            "received_at": "2026-10-24T00:00:00.000136Z",
+            "previous_hash": "70ff4496bf83d7ea43c86b8087d86230c81d802fdf3ed093faae4ea33dd8f5fc",
+            "kind": "import",
+            "payload": {
+              "source_locator": "testdata/o3/legacy/voided/events/00004-job.round.json",
+              "source_sha256": "37a0af51e9377e1f67a7706e0b8fde70e37e939726ee452f5e5eac723cfe38d0",
+              "original_actor_client_id": "desktop",
+              "original_at": "2026-10-20T00:00:00.000000Z",
+              "legacy_kind": "job.round"
+            },
+            "record_hash": "3985d1676a6ea2185e0d11fc2bbf93e793264a7639809c6ed121e02159fc2774"
+          }
+        ]
+      },
+      "request": {
+        "type": "http",
+        "actor": "director-1",
+        "method": "POST",
+        "path": "/v1/wrk/jobs/job-s/records",
+        "idempotency_key": "00000000-0000-4000-8000-000000000999",
+        "body": {
+          "kind": "import_seal",
+          "claim_seq": 1,
+          "expected_seq": 5,
+          "payload": {
+            "begin_seq": 3,
+            "expected_import_count": 1,
+            "manifest_sha256": "2c021370bbd1f68982cc36f7385c7e611452419869aa54027a9023ca3741a59e",
+            "reason_code": "import_seal"
+          }
+        }
+      },
+      "expect": {
+        "http_status": 409,
+        "error": "import_unsealed",
+        "summary": {
+          "state": "importing"
+        },
+        "note": "still importing; no activation"
+      }
+    }
+  ]
+}

@@ -1,0 +1,3788 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:handoffkeep:hk1873:v1",
+  "contract": "hk1873.v1",
+  "request_max_bytes": 1048576,
+  "decoded_content_max_bytes": 262144,
+  "endpoints": [
+    {
+      "method": "GET",
+      "path": "/v1/wrk/capabilities",
+      "request": null,
+      "success": {
+        "200": {
+          "$ref": "#/$defs/Capabilities"
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/v1/wrk/jobs/{job_id}/records",
+      "headers": {
+        "Idempotency-Key": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^[0-9a-f-]{36}$"
+        },
+        "Content-Type": {
+          "const": "application/json"
+        }
+      },
+      "request": {
+        "$ref": "#/$defs/Request"
+      },
+      "success": {
+        "201": {
+          "$ref": "#/$defs/WriteResponse"
+        },
+        "200": {
+          "$ref": "#/$defs/WriteResponse"
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/v1/wrk/jobs/{job_id}",
+      "request": null,
+      "success": {
+        "200": {
+          "$ref": "#/$defs/JobResponse"
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/v1/wrk/jobs/{job_id}/records",
+      "query": {
+        "after_seq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991,
+          "default": 0
+        },
+        "snapshot_seq": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 500,
+          "default": 100
+        }
+      },
+      "request": null,
+      "success": {
+        "200": {
+          "$ref": "#/$defs/RecordsResponse"
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/v1/wrk/jobs/{job_id}/records/{seq}/content",
+      "request": null,
+      "success": {
+        "200": {
+          "$ref": "#/$defs/ContentResponse"
+        }
+      }
+    }
+  ],
+  "errors_by_status": {
+    "400": [
+      "invalid_request",
+      "invalid_cursor",
+      "invalid_verdict",
+      "invalid_path",
+      "grant_before_cap"
+    ],
+    "401": [
+      "unauthorized"
+    ],
+    "403": [
+      "scope_denied",
+      "host_mismatch"
+    ],
+    "404": [
+      "not_found"
+    ],
+    "409": [
+      "idempotency_conflict",
+      "sequence_conflict",
+      "claim_conflict",
+      "job_ended",
+      "review_sealed",
+      "round_cap",
+      "round_not_open",
+      "round_has_verdict",
+      "round_voided",
+      "head_mismatch",
+      "duplicate_path",
+      "duplicate_content",
+      "duplicate_head",
+      "grant_invalid",
+      "grant_consumed",
+      "grant_expired",
+      "zero_rounds",
+      "review_incomplete",
+      "blocker_unresolved",
+      "wrk_receipt_required",
+      "import_unsealed",
+      "import_sealed",
+      "migration_frozen"
+    ],
+    "413": [
+      "request_too_large"
+    ],
+    "415": [
+      "unsupported_media_type"
+    ],
+    "503": [
+      "wrk_unavailable",
+      "wrk_recovery_required"
+    ],
+    "405": [
+      "method_not_allowed"
+    ]
+  },
+  "$defs": {
+    "Request": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "claim"
+            },
+            "claim_seq": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "expected_seq": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "payload": {
+              "$ref": "#/$defs/Input_claim"
+            }
+          },
+          "required": [
+            "kind",
+            "claim_seq",
+            "expected_seq",
+            "payload"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "activate"
+            },
+            "claim_seq": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "expected_seq": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "payload": {
+              "$ref": "#/$defs/Input_activate"
+            }
+          },
+          "required": [
+            "kind",
+            "claim_seq",
+            "expected_seq",
+            "payload"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "round_open"
+            },
+            "claim_seq": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "expected_seq": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "payload": {
+              "$ref": "#/$defs/Input_round_open"
+            }
+          },
+          "required": [
+            "kind",
+            "claim_seq",
+            "expected_seq",
+            "payload"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "verdict"
+            },
+            "claim_seq": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "expected_seq": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "payload": {
+              "$ref": "#/$defs/Input_verdict"
+            }
+          },
+          "required": [
+            "kind",
+            "claim_seq",
+            "expected_seq",
+            "payload"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "void"
+            },
+            "claim_seq": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "expected_seq": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "payload": {
+              "$ref": "#/$defs/Input_void"
+            }
+          },
+          "required": [
+            "kind",
+            "claim_seq",
+            "expected_seq",
+            "payload"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "joined"
+            },
+            "claim_seq": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "expected_seq": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "payload": {
+              "$ref": "#/$defs/Input_joined"
+            }
+          },
+          "required": [
+            "kind",
+            "claim_seq",
+            "expected_seq",
+            "payload"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "completed"
+            },
+            "claim_seq": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "expected_seq": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "payload": {
+              "$ref": "#/$defs/Input_completed"
+            }
+          },
+          "required": [
+            "kind",
+            "claim_seq",
+            "expected_seq",
+            "payload"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "grant"
+            },
+            "claim_seq": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "expected_seq": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "payload": {
+              "$ref": "#/$defs/Input_grant"
+            }
+          },
+          "required": [
+            "kind",
+            "claim_seq",
+            "expected_seq",
+            "payload"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "grant_cancel"
+            },
+            "claim_seq": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "expected_seq": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "payload": {
+              "$ref": "#/$defs/Input_grant_cancel"
+            }
+          },
+          "required": [
+            "kind",
+            "claim_seq",
+            "expected_seq",
+            "payload"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "end"
+            },
+            "claim_seq": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "expected_seq": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "payload": {
+              "$ref": "#/$defs/Input_end"
+            }
+          },
+          "required": [
+            "kind",
+            "claim_seq",
+            "expected_seq",
+            "payload"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "import"
+            },
+            "claim_seq": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "expected_seq": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "payload": {
+              "$ref": "#/$defs/Input_import"
+            }
+          },
+          "required": [
+            "kind",
+            "claim_seq",
+            "expected_seq",
+            "payload"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "import_begin"
+            },
+            "claim_seq": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "expected_seq": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "payload": {
+              "$ref": "#/$defs/Input_import_begin"
+            }
+          },
+          "required": [
+            "kind",
+            "claim_seq",
+            "expected_seq",
+            "payload"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "import_seal"
+            },
+            "claim_seq": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "expected_seq": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "payload": {
+              "$ref": "#/$defs/Input_import_seal"
+            }
+          },
+          "required": [
+            "kind",
+            "claim_seq",
+            "expected_seq",
+            "payload"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "Input_claim": {
+      "type": "object",
+      "properties": {
+        "job_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+        },
+        "owner_lane": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]{0,63}$"
+        },
+        "parent_lane": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]{0,63}$"
+        },
+        "task_id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "host_client_id": {
+          "enum": [
+            "desktop",
+            "mac-dev",
+            "mac-work",
+            "rpi",
+            "mac-personal"
+          ]
+        },
+        "role": {
+          "enum": [
+            "builder",
+            "worker",
+            "tester",
+            "reviewer",
+            "counsel"
+          ]
+        },
+        "tier": {
+          "enum": [
+            "T0",
+            "T1",
+            "T2",
+            "T3"
+          ]
+        },
+        "review_of": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "job_id": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+                },
+                "round_no": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "job_id",
+                "round_no"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "predecessor_job_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "supersedes": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "job_id",
+        "owner_lane",
+        "parent_lane",
+        "task_id",
+        "host_client_id",
+        "role",
+        "tier",
+        "review_of",
+        "predecessor_job_id",
+        "supersedes"
+      ],
+      "additionalProperties": false
+    },
+    "Payload_claim": {
+      "type": "object",
+      "properties": {
+        "job_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+        },
+        "owner_lane": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]{0,63}$"
+        },
+        "parent_lane": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]{0,63}$"
+        },
+        "task_id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "host_client_id": {
+          "enum": [
+            "desktop",
+            "mac-dev",
+            "mac-work",
+            "rpi",
+            "mac-personal"
+          ]
+        },
+        "role": {
+          "enum": [
+            "builder",
+            "worker",
+            "tester",
+            "reviewer",
+            "counsel"
+          ]
+        },
+        "tier": {
+          "enum": [
+            "T0",
+            "T1",
+            "T2",
+            "T3"
+          ]
+        },
+        "review_of": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "job_id": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+                },
+                "round_no": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "job_id",
+                "round_no"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "predecessor_job_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "supersedes": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "policy_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "job_id",
+        "owner_lane",
+        "parent_lane",
+        "task_id",
+        "host_client_id",
+        "role",
+        "tier",
+        "review_of",
+        "predecessor_job_id",
+        "supersedes",
+        "policy_sha256",
+        "created_at"
+      ],
+      "additionalProperties": false
+    },
+    "Input_activate": {
+      "type": "object",
+      "properties": {
+        "reason_code": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,63}$"
+        },
+        "seal_seq": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "reason_code",
+        "seal_seq"
+      ],
+      "additionalProperties": false
+    },
+    "Payload_activate": {
+      "type": "object",
+      "properties": {
+        "baseline_used": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "mode": {
+          "enum": [
+            "enforced"
+          ]
+        },
+        "reason_code": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,63}$"
+        },
+        "seal_seq": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "baseline_used",
+        "mode",
+        "reason_code",
+        "seal_seq"
+      ],
+      "additionalProperties": false
+    },
+    "Input_round_open": {
+      "type": "object",
+      "properties": {
+        "head": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "tester_job_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "extension_grant_seq": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "repeat_grant_seq": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "head",
+        "tester_job_id",
+        "extension_grant_seq",
+        "repeat_grant_seq"
+      ],
+      "additionalProperties": false
+    },
+    "Payload_round_open": {
+      "type": "object",
+      "properties": {
+        "round_no": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "head": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "tester_job_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "extension_grant_seq": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "repeat_grant_seq": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "round_no",
+        "head",
+        "tester_job_id",
+        "extension_grant_seq",
+        "repeat_grant_seq"
+      ],
+      "additionalProperties": false
+    },
+    "Input_verdict": {
+      "type": "object",
+      "properties": {
+        "round_no": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "head": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "verdict": {
+          "enum": [
+            "PASS",
+            "BLOCKER"
+          ]
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "content_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "content_b64": {
+          "type": "string",
+          "contentEncoding": "base64",
+          "minLength": 4,
+          "maxLength": 349528
+        },
+        "tester_job_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "round_no",
+        "head",
+        "verdict",
+        "path",
+        "content_sha256",
+        "content_b64",
+        "tester_job_id"
+      ],
+      "additionalProperties": false
+    },
+    "Payload_verdict": {
+      "type": "object",
+      "properties": {
+        "round_no": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "head": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "verdict": {
+          "enum": [
+            "PASS",
+            "BLOCKER"
+          ]
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "content_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "tester_job_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "round_no",
+        "head",
+        "verdict",
+        "path",
+        "content_sha256",
+        "tester_job_id",
+        "size_bytes"
+      ],
+      "additionalProperties": false
+    },
+    "Input_void": {
+      "type": "object",
+      "properties": {
+        "round_no": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "grant_seq": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "reason_code": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,63}$"
+        }
+      },
+      "required": [
+        "round_no",
+        "grant_seq",
+        "reason_code"
+      ],
+      "additionalProperties": false
+    },
+    "Payload_void": {
+      "type": "object",
+      "properties": {
+        "round_no": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "grant_seq": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "reason_code": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,63}$"
+        }
+      },
+      "required": [
+        "round_no",
+        "grant_seq",
+        "reason_code"
+      ],
+      "additionalProperties": false
+    },
+    "Input_joined": {
+      "type": "object",
+      "properties": {
+        "head": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "pr": {
+          "type": "string",
+          "format": "uri",
+          "maxLength": 4096
+        },
+        "report_b64": {
+          "type": "string",
+          "contentEncoding": "base64",
+          "minLength": 4,
+          "maxLength": 349528
+        },
+        "report_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "waiver_grant_seq": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "head",
+        "pr",
+        "report_b64",
+        "report_sha256",
+        "waiver_grant_seq"
+      ],
+      "additionalProperties": false
+    },
+    "Payload_joined": {
+      "type": "object",
+      "properties": {
+        "head": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "pr": {
+          "type": "string",
+          "format": "uri",
+          "maxLength": 4096
+        },
+        "report_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "report_size_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "verdict_seqs": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          }
+        },
+        "waiver_grant_seq": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "head",
+        "pr",
+        "report_sha256",
+        "report_size_bytes",
+        "verdict_seqs",
+        "waiver_grant_seq"
+      ],
+      "additionalProperties": false
+    },
+    "Input_completed": {
+      "type": "object",
+      "properties": {
+        "report_b64": {
+          "type": "string",
+          "contentEncoding": "base64",
+          "minLength": 4,
+          "maxLength": 349528
+        },
+        "report_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "report_b64",
+        "report_sha256"
+      ],
+      "additionalProperties": false
+    },
+    "Payload_completed": {
+      "type": "object",
+      "properties": {
+        "report_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "report_size_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]{0,63}$"
+          }
+        }
+      },
+      "required": [
+        "report_sha256",
+        "report_size_bytes",
+        "warnings"
+      ],
+      "additionalProperties": false
+    },
+    "Input_grant": {
+      "type": "object",
+      "properties": {
+        "grant_type": {
+          "enum": [
+            "extension",
+            "void",
+            "head_repeat",
+            "join_waiver"
+          ]
+        },
+        "round_no": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "head": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "extra": {
+          "enum": [
+            0,
+            1
+          ]
+        },
+        "earlier_round_no": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tester_job_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "expires_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "reason_code": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,63}$"
+        }
+      },
+      "required": [
+        "grant_type",
+        "round_no",
+        "head",
+        "extra",
+        "earlier_round_no",
+        "tester_job_id",
+        "expires_at",
+        "reason_code"
+      ],
+      "additionalProperties": false
+    },
+    "Payload_grant": {
+      "type": "object",
+      "properties": {
+        "grant_type": {
+          "enum": [
+            "extension",
+            "void",
+            "head_repeat",
+            "join_waiver"
+          ]
+        },
+        "round_no": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "head": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "extra": {
+          "enum": [
+            0,
+            1
+          ]
+        },
+        "earlier_round_no": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tester_job_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "expires_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "reason_code": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,63}$"
+        }
+      },
+      "required": [
+        "grant_type",
+        "round_no",
+        "head",
+        "extra",
+        "earlier_round_no",
+        "tester_job_id",
+        "expires_at",
+        "reason_code"
+      ],
+      "additionalProperties": false
+    },
+    "Input_grant_cancel": {
+      "type": "object",
+      "properties": {
+        "grant_seq": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "reason_code": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,63}$"
+        }
+      },
+      "required": [
+        "grant_seq",
+        "reason_code"
+      ],
+      "additionalProperties": false
+    },
+    "Payload_grant_cancel": {
+      "type": "object",
+      "properties": {
+        "grant_seq": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "reason_code": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,63}$"
+        }
+      },
+      "required": [
+        "grant_seq",
+        "reason_code"
+      ],
+      "additionalProperties": false
+    },
+    "Input_end": {
+      "type": "object",
+      "properties": {
+        "end_type": {
+          "enum": [
+            "revoked",
+            "reaped",
+            "handed_off"
+          ]
+        },
+        "reason_code": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,63}$"
+        }
+      },
+      "required": [
+        "end_type",
+        "reason_code"
+      ],
+      "additionalProperties": false
+    },
+    "Payload_end": {
+      "type": "object",
+      "properties": {
+        "end_type": {
+          "enum": [
+            "revoked",
+            "reaped",
+            "handed_off"
+          ]
+        },
+        "reason_code": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,63}$"
+        }
+      },
+      "required": [
+        "end_type",
+        "reason_code"
+      ],
+      "additionalProperties": false
+    },
+    "Input_import": {
+      "type": "object",
+      "properties": {
+        "source_locator": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "source_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "original_actor_client_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "original_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "legacy_kind": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "content_b64": {
+          "type": "string",
+          "contentEncoding": "base64",
+          "minLength": 4,
+          "maxLength": 349528
+        }
+      },
+      "required": [
+        "source_locator",
+        "source_sha256",
+        "original_actor_client_id",
+        "original_at",
+        "legacy_kind",
+        "content_b64"
+      ],
+      "additionalProperties": false
+    },
+    "Payload_import": {
+      "type": "object",
+      "properties": {
+        "source_locator": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "source_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "original_actor_client_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "original_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "legacy_kind": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        }
+      },
+      "required": [
+        "source_locator",
+        "source_sha256",
+        "original_actor_client_id",
+        "original_at",
+        "legacy_kind"
+      ],
+      "additionalProperties": false
+    },
+    "Record": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "job_id": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+            },
+            "seq": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "record_id": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^[0-9a-f-]{36}$"
+            },
+            "store_generation": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^[0-9a-f-]{36}$"
+            },
+            "claim_seq": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "actor_client_id": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+            },
+            "idempotency_key": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^[0-9a-f-]{36}$"
+            },
+            "request_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "imported": {
+              "type": "boolean"
+            },
+            "source": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "source_locator": {
+                      "type": "string",
+                      "maxLength": 4096
+                    },
+                    "source_sha256": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    }
+                  },
+                  "required": [
+                    "source_locator",
+                    "source_sha256"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "received_at": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "previous_hash": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "record_hash": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "kind": {
+              "const": "claim"
+            },
+            "payload": {
+              "$ref": "#/$defs/Payload_claim"
+            }
+          },
+          "required": [
+            "job_id",
+            "seq",
+            "record_id",
+            "store_generation",
+            "claim_seq",
+            "actor_client_id",
+            "idempotency_key",
+            "request_sha256",
+            "imported",
+            "source",
+            "received_at",
+            "previous_hash",
+            "record_hash",
+            "kind",
+            "payload"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "job_id": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+            },
+            "seq": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "record_id": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^[0-9a-f-]{36}$"
+            },
+            "store_generation": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^[0-9a-f-]{36}$"
+            },
+            "claim_seq": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "actor_client_id": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+            },
+            "idempotency_key": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^[0-9a-f-]{36}$"
+            },
+            "request_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "imported": {
+              "type": "boolean"
+            },
+            "source": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "source_locator": {
+                      "type": "string",
+                      "maxLength": 4096
+                    },
+                    "source_sha256": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    }
+                  },
+                  "required": [
+                    "source_locator",
+                    "source_sha256"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "received_at": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "previous_hash": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "record_hash": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "kind": {
+              "const": "activate"
+            },
+            "payload": {
+              "$ref": "#/$defs/Payload_activate"
+            }
+          },
+          "required": [
+            "job_id",
+            "seq",
+            "record_id",
+            "store_generation",
+            "claim_seq",
+            "actor_client_id",
+            "idempotency_key",
+            "request_sha256",
+            "imported",
+            "source",
+            "received_at",
+            "previous_hash",
+            "record_hash",
+            "kind",
+            "payload"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "job_id": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+            },
+            "seq": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "record_id": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^[0-9a-f-]{36}$"
+            },
+            "store_generation": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^[0-9a-f-]{36}$"
+            },
+            "claim_seq": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "actor_client_id": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+            },
+            "idempotency_key": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^[0-9a-f-]{36}$"
+            },
+            "request_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "imported": {
+              "type": "boolean"
+            },
+            "source": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "source_locator": {
+                      "type": "string",
+                      "maxLength": 4096
+                    },
+                    "source_sha256": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    }
+                  },
+                  "required": [
+                    "source_locator",
+                    "source_sha256"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "received_at": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "previous_hash": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "record_hash": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "kind": {
+              "const": "round_open"
+            },
+            "payload": {
+              "$ref": "#/$defs/Payload_round_open"
+            }
+          },
+          "required": [
+            "job_id",
+            "seq",
+            "record_id",
+            "store_generation",
+            "claim_seq",
+            "actor_client_id",
+            "idempotency_key",
+            "request_sha256",
+            "imported",
+            "source",
+            "received_at",
+            "previous_hash",
+            "record_hash",
+            "kind",
+            "payload"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "job_id": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+            },
+            "seq": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "record_id": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^[0-9a-f-]{36}$"
+            },
+            "store_generation": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^[0-9a-f-]{36}$"
+            },
+            "claim_seq": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "actor_client_id": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+            },
+            "idempotency_key": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^[0-9a-f-]{36}$"
+            },
+            "request_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "imported": {
+              "type": "boolean"
+            },
+            "source": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "source_locator": {
+                      "type": "string",
+                      "maxLength": 4096
+                    },
+                    "source_sha256": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    }
+                  },
+                  "required": [
+                    "source_locator",
+                    "source_sha256"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "received_at": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "previous_hash": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "record_hash": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "kind": {
+              "const": "verdict"
+            },
+            "payload": {
+              "$ref": "#/$defs/Payload_verdict"
+            }
+          },
+          "required": [
+            "job_id",
+            "seq",
+            "record_id",
+            "store_generation",
+            "claim_seq",
+            "actor_client_id",
+            "idempotency_key",
+            "request_sha256",
+            "imported",
+            "source",
+            "received_at",
+            "previous_hash",
+            "record_hash",
+            "kind",
+            "payload"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "job_id": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+            },
+            "seq": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "record_id": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^[0-9a-f-]{36}$"
+            },
+            "store_generation": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^[0-9a-f-]{36}$"
+            },
+            "claim_seq": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "actor_client_id": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+            },
+            "idempotency_key": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^[0-9a-f-]{36}$"
+            },
+            "request_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "imported": {
+              "type": "boolean"
+            },
+            "source": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "source_locator": {
+                      "type": "string",
+                      "maxLength": 4096
+                    },
+                    "source_sha256": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    }
+                  },
+                  "required": [
+                    "source_locator",
+                    "source_sha256"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "received_at": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "previous_hash": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "record_hash": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "kind": {
+              "const": "void"
+            },
+            "payload": {
+              "$ref": "#/$defs/Payload_void"
+            }
+          },
+          "required": [
+            "job_id",
+            "seq",
+            "record_id",
+            "store_generation",
+            "claim_seq",
+            "actor_client_id",
+            "idempotency_key",
+            "request_sha256",
+            "imported",
+            "source",
+            "received_at",
+            "previous_hash",
+            "record_hash",
+            "kind",
+            "payload"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "job_id": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+            },
+            "seq": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "record_id": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^[0-9a-f-]{36}$"
+            },
+            "store_generation": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^[0-9a-f-]{36}$"
+            },
+            "claim_seq": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "actor_client_id": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+            },
+            "idempotency_key": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^[0-9a-f-]{36}$"
+            },
+            "request_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "imported": {
+              "type": "boolean"
+            },
+            "source": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "source_locator": {
+                      "type": "string",
+                      "maxLength": 4096
+                    },
+                    "source_sha256": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    }
+                  },
+                  "required": [
+                    "source_locator",
+                    "source_sha256"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "received_at": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "previous_hash": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "record_hash": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "kind": {
+              "const": "joined"
+            },
+            "payload": {
+              "$ref": "#/$defs/Payload_joined"
+            }
+          },
+          "required": [
+            "job_id",
+            "seq",
+            "record_id",
+            "store_generation",
+            "claim_seq",
+            "actor_client_id",
+            "idempotency_key",
+            "request_sha256",
+            "imported",
+            "source",
+            "received_at",
+            "previous_hash",
+            "record_hash",
+            "kind",
+            "payload"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "job_id": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+            },
+            "seq": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "record_id": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^[0-9a-f-]{36}$"
+            },
+            "store_generation": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^[0-9a-f-]{36}$"
+            },
+            "claim_seq": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "actor_client_id": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+            },
+            "idempotency_key": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^[0-9a-f-]{36}$"
+            },
+            "request_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "imported": {
+              "type": "boolean"
+            },
+            "source": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "source_locator": {
+                      "type": "string",
+                      "maxLength": 4096
+                    },
+                    "source_sha256": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    }
+                  },
+                  "required": [
+                    "source_locator",
+                    "source_sha256"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "received_at": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "previous_hash": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "record_hash": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "kind": {
+              "const": "completed"
+            },
+            "payload": {
+              "$ref": "#/$defs/Payload_completed"
+            }
+          },
+          "required": [
+            "job_id",
+            "seq",
+            "record_id",
+            "store_generation",
+            "claim_seq",
+            "actor_client_id",
+            "idempotency_key",
+            "request_sha256",
+            "imported",
+            "source",
+            "received_at",
+            "previous_hash",
+            "record_hash",
+            "kind",
+            "payload"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "job_id": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+            },
+            "seq": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "record_id": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^[0-9a-f-]{36}$"
+            },
+            "store_generation": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^[0-9a-f-]{36}$"
+            },
+            "claim_seq": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "actor_client_id": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+            },
+            "idempotency_key": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^[0-9a-f-]{36}$"
+            },
+            "request_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "imported": {
+              "type": "boolean"
+            },
+            "source": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "source_locator": {
+                      "type": "string",
+                      "maxLength": 4096
+                    },
+                    "source_sha256": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    }
+                  },
+                  "required": [
+                    "source_locator",
+                    "source_sha256"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "received_at": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "previous_hash": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "record_hash": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "kind": {
+              "const": "grant"
+            },
+            "payload": {
+              "$ref": "#/$defs/Payload_grant"
+            }
+          },
+          "required": [
+            "job_id",
+            "seq",
+            "record_id",
+            "store_generation",
+            "claim_seq",
+            "actor_client_id",
+            "idempotency_key",
+            "request_sha256",
+            "imported",
+            "source",
+            "received_at",
+            "previous_hash",
+            "record_hash",
+            "kind",
+            "payload"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "job_id": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+            },
+            "seq": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "record_id": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^[0-9a-f-]{36}$"
+            },
+            "store_generation": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^[0-9a-f-]{36}$"
+            },
+            "claim_seq": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "actor_client_id": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+            },
+            "idempotency_key": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^[0-9a-f-]{36}$"
+            },
+            "request_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "imported": {
+              "type": "boolean"
+            },
+            "source": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "source_locator": {
+                      "type": "string",
+                      "maxLength": 4096
+                    },
+                    "source_sha256": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    }
+                  },
+                  "required": [
+                    "source_locator",
+                    "source_sha256"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "received_at": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "previous_hash": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "record_hash": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "kind": {
+              "const": "grant_cancel"
+            },
+            "payload": {
+              "$ref": "#/$defs/Payload_grant_cancel"
+            }
+          },
+          "required": [
+            "job_id",
+            "seq",
+            "record_id",
+            "store_generation",
+            "claim_seq",
+            "actor_client_id",
+            "idempotency_key",
+            "request_sha256",
+            "imported",
+            "source",
+            "received_at",
+            "previous_hash",
+            "record_hash",
+            "kind",
+            "payload"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "job_id": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+            },
+            "seq": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "record_id": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^[0-9a-f-]{36}$"
+            },
+            "store_generation": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^[0-9a-f-]{36}$"
+            },
+            "claim_seq": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "actor_client_id": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+            },
+            "idempotency_key": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^[0-9a-f-]{36}$"
+            },
+            "request_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "imported": {
+              "type": "boolean"
+            },
+            "source": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "source_locator": {
+                      "type": "string",
+                      "maxLength": 4096
+                    },
+                    "source_sha256": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    }
+                  },
+                  "required": [
+                    "source_locator",
+                    "source_sha256"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "received_at": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "previous_hash": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "record_hash": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "kind": {
+              "const": "end"
+            },
+            "payload": {
+              "$ref": "#/$defs/Payload_end"
+            }
+          },
+          "required": [
+            "job_id",
+            "seq",
+            "record_id",
+            "store_generation",
+            "claim_seq",
+            "actor_client_id",
+            "idempotency_key",
+            "request_sha256",
+            "imported",
+            "source",
+            "received_at",
+            "previous_hash",
+            "record_hash",
+            "kind",
+            "payload"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "job_id": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+            },
+            "seq": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "record_id": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^[0-9a-f-]{36}$"
+            },
+            "store_generation": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^[0-9a-f-]{36}$"
+            },
+            "claim_seq": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "actor_client_id": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+            },
+            "idempotency_key": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^[0-9a-f-]{36}$"
+            },
+            "request_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "imported": {
+              "type": "boolean"
+            },
+            "source": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "source_locator": {
+                      "type": "string",
+                      "maxLength": 4096
+                    },
+                    "source_sha256": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    }
+                  },
+                  "required": [
+                    "source_locator",
+                    "source_sha256"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "received_at": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "previous_hash": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "record_hash": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "kind": {
+              "const": "import"
+            },
+            "payload": {
+              "$ref": "#/$defs/Payload_import"
+            }
+          },
+          "required": [
+            "job_id",
+            "seq",
+            "record_id",
+            "store_generation",
+            "claim_seq",
+            "actor_client_id",
+            "idempotency_key",
+            "request_sha256",
+            "imported",
+            "source",
+            "received_at",
+            "previous_hash",
+            "record_hash",
+            "kind",
+            "payload"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "job_id": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+            },
+            "seq": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "record_id": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^[0-9a-f-]{36}$"
+            },
+            "store_generation": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^[0-9a-f-]{36}$"
+            },
+            "claim_seq": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "actor_client_id": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+            },
+            "idempotency_key": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^[0-9a-f-]{36}$"
+            },
+            "request_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "imported": {
+              "type": "boolean"
+            },
+            "source": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "source_locator": {
+                      "type": "string",
+                      "maxLength": 4096
+                    },
+                    "source_sha256": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    }
+                  },
+                  "required": [
+                    "source_locator",
+                    "source_sha256"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "received_at": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "previous_hash": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "record_hash": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "kind": {
+              "const": "import_begin"
+            },
+            "payload": {
+              "$ref": "#/$defs/Payload_import_begin"
+            }
+          },
+          "required": [
+            "job_id",
+            "seq",
+            "record_id",
+            "store_generation",
+            "claim_seq",
+            "actor_client_id",
+            "idempotency_key",
+            "request_sha256",
+            "imported",
+            "source",
+            "received_at",
+            "previous_hash",
+            "record_hash",
+            "kind",
+            "payload"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "job_id": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+            },
+            "seq": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "record_id": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^[0-9a-f-]{36}$"
+            },
+            "store_generation": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^[0-9a-f-]{36}$"
+            },
+            "claim_seq": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "actor_client_id": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+            },
+            "idempotency_key": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^[0-9a-f-]{36}$"
+            },
+            "request_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "imported": {
+              "type": "boolean"
+            },
+            "source": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "source_locator": {
+                      "type": "string",
+                      "maxLength": 4096
+                    },
+                    "source_sha256": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    }
+                  },
+                  "required": [
+                    "source_locator",
+                    "source_sha256"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "received_at": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "previous_hash": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "record_hash": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "kind": {
+              "const": "import_seal"
+            },
+            "payload": {
+              "$ref": "#/$defs/Payload_import_seal"
+            }
+          },
+          "required": [
+            "job_id",
+            "seq",
+            "record_id",
+            "store_generation",
+            "claim_seq",
+            "actor_client_id",
+            "idempotency_key",
+            "request_sha256",
+            "imported",
+            "source",
+            "received_at",
+            "previous_hash",
+            "record_hash",
+            "kind",
+            "payload"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "Summary": {
+      "type": "object",
+      "properties": {
+        "job_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+        },
+        "claim_seq": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "snapshot_seq": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "state": {
+          "enum": [
+            "shadow",
+            "importing",
+            "sealed",
+            "active",
+            "joined",
+            "ended"
+          ]
+        },
+        "baseline_used": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "used": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "cap": {
+          "const": 3
+        },
+        "next_round_no": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "open_rounds": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          }
+        },
+        "last_verdict_seq": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "active_grants": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          }
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]{0,63}$"
+          }
+        },
+        "store_generation": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^[0-9a-f-]{36}$"
+        },
+        "tail_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "job_id",
+        "claim_seq",
+        "snapshot_seq",
+        "state",
+        "baseline_used",
+        "used",
+        "cap",
+        "next_round_no",
+        "open_rounds",
+        "last_verdict_seq",
+        "active_grants",
+        "warnings",
+        "store_generation",
+        "tail_hash"
+      ],
+      "additionalProperties": false
+    },
+    "WriteResponse": {
+      "type": "object",
+      "properties": {
+        "contract": {
+          "const": "hk1873.v1"
+        },
+        "created": {
+          "type": "boolean"
+        },
+        "record": {
+          "$ref": "#/$defs/Record"
+        },
+        "summary": {
+          "$ref": "#/$defs/Summary"
+        }
+      },
+      "required": [
+        "contract",
+        "created",
+        "record",
+        "summary"
+      ],
+      "additionalProperties": false
+    },
+    "JobResponse": {
+      "type": "object",
+      "properties": {
+        "contract": {
+          "const": "hk1873.v1"
+        },
+        "claim": {
+          "$ref": "#/$defs/Record"
+        },
+        "summary": {
+          "$ref": "#/$defs/Summary"
+        }
+      },
+      "required": [
+        "contract",
+        "claim",
+        "summary"
+      ],
+      "additionalProperties": false
+    },
+    "RecordsResponse": {
+      "type": "object",
+      "properties": {
+        "contract": {
+          "const": "hk1873.v1"
+        },
+        "snapshot_seq": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "next_after_seq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "has_more": {
+          "type": "boolean"
+        },
+        "records": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Record"
+          }
+        },
+        "summary": {
+          "$ref": "#/$defs/Summary"
+        }
+      },
+      "required": [
+        "contract",
+        "snapshot_seq",
+        "next_after_seq",
+        "has_more",
+        "records",
+        "summary"
+      ],
+      "additionalProperties": false
+    },
+    "ContentResponse": {
+      "type": "object",
+      "properties": {
+        "job_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "content_b64": {
+          "type": "string",
+          "contentEncoding": "base64",
+          "minLength": 4,
+          "maxLength": 349528
+        },
+        "content_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "job_id",
+        "seq",
+        "content_b64",
+        "content_sha256",
+        "size_bytes"
+      ],
+      "additionalProperties": false
+    },
+    "Capabilities": {
+      "type": "object",
+      "properties": {
+        "contract": {
+          "const": "hk1873.v1"
+        },
+        "store_generation": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^[0-9a-f-]{36}$"
+        },
+        "client_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+        },
+        "policy_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "writes_available": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "contract",
+        "store_generation",
+        "client_id",
+        "policy_sha256",
+        "writes_available"
+      ],
+      "additionalProperties": false
+    },
+    "Error": {
+      "type": "object",
+      "properties": {
+        "error": {
+          "enum": [
+            "invalid_request",
+            "invalid_cursor",
+            "invalid_verdict",
+            "invalid_path",
+            "grant_before_cap",
+            "unauthorized",
+            "scope_denied",
+            "host_mismatch",
+            "not_found",
+            "idempotency_conflict",
+            "sequence_conflict",
+            "claim_conflict",
+            "job_ended",
+            "review_sealed",
+            "round_cap",
+            "round_not_open",
+            "round_has_verdict",
+            "round_voided",
+            "head_mismatch",
+            "duplicate_path",
+            "duplicate_content",
+            "duplicate_head",
+            "grant_invalid",
+            "grant_consumed",
+            "grant_expired",
+            "zero_rounds",
+            "review_incomplete",
+            "blocker_unresolved",
+            "wrk_receipt_required",
+            "import_unsealed",
+            "request_too_large",
+            "unsupported_media_type",
+            "wrk_unavailable",
+            "wrk_recovery_required",
+            "method_not_allowed",
+            "import_sealed",
+            "migration_frozen"
+          ]
+        }
+      },
+      "required": [
+        "error"
+      ],
+      "additionalProperties": false
+    },
+    "Input_import_begin": {
+      "type": "object",
+      "properties": {
+        "reason_code": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,63}$"
+        }
+      },
+      "required": [
+        "reason_code"
+      ],
+      "additionalProperties": false
+    },
+    "Input_import_seal": {
+      "type": "object",
+      "properties": {
+        "begin_seq": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "expected_import_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "manifest_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "reason_code": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,63}$"
+        }
+      },
+      "required": [
+        "begin_seq",
+        "expected_import_count",
+        "manifest_sha256",
+        "reason_code"
+      ],
+      "additionalProperties": false
+    },
+    "Payload_import_begin": {
+      "type": "object",
+      "properties": {
+        "reason_code": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,63}$"
+        },
+        "shadow_cutoff_seq": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "reason_code",
+        "shadow_cutoff_seq"
+      ],
+      "additionalProperties": false
+    },
+    "Payload_import_seal": {
+      "type": "object",
+      "properties": {
+        "begin_seq": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "expected_import_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "manifest_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "reason_code": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,63}$"
+        },
+        "shadow_cutoff_seq": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "baseline_used": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "numbering_floor": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "begin_seq",
+        "expected_import_count",
+        "manifest_sha256",
+        "reason_code",
+        "shadow_cutoff_seq",
+        "baseline_used",
+        "numbering_floor"
+      ],
+      "additionalProperties": false
+    },
+    "Policy": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "const": "hk1873.policy.v1"
+        },
+        "clients": {
+          "type": "object",
+          "properties": {
+            "desktop": {
+              "type": "object",
+              "properties": {
+                "host_client_id": {
+                  "const": "desktop"
+                },
+                "permissions": {
+                  "type": "array",
+                  "items": {
+                    "enum": [
+                      "capabilities.read",
+                      "job.read",
+                      "records.read",
+                      "content.read",
+                      "round.open",
+                      "verdict.write",
+                      "void.write",
+                      "joined.write",
+                      "completed.write",
+                      "end.write",
+                      "relay.publish",
+                      "reviewer.claim.write"
+                    ]
+                  },
+                  "uniqueItems": true
+                }
+              },
+              "required": [
+                "host_client_id",
+                "permissions"
+              ],
+              "additionalProperties": false
+            },
+            "mac-dev": {
+              "type": "object",
+              "properties": {
+                "host_client_id": {
+                  "const": "mac-dev"
+                },
+                "permissions": {
+                  "type": "array",
+                  "items": {
+                    "enum": [
+                      "capabilities.read",
+                      "job.read",
+                      "records.read",
+                      "content.read",
+                      "round.open",
+                      "verdict.write",
+                      "void.write",
+                      "joined.write",
+                      "completed.write",
+                      "end.write",
+                      "relay.publish",
+                      "reviewer.claim.write"
+                    ]
+                  },
+                  "uniqueItems": true
+                }
+              },
+              "required": [
+                "host_client_id",
+                "permissions"
+              ],
+              "additionalProperties": false
+            },
+            "mac-work": {
+              "type": "object",
+              "properties": {
+                "host_client_id": {
+                  "const": "mac-work"
+                },
+                "permissions": {
+                  "type": "array",
+                  "items": {
+                    "enum": [
+                      "capabilities.read",
+                      "job.read",
+                      "records.read",
+                      "content.read",
+                      "round.open",
+                      "verdict.write",
+                      "void.write",
+                      "joined.write",
+                      "completed.write",
+                      "end.write",
+                      "relay.publish",
+                      "reviewer.claim.write"
+                    ]
+                  },
+                  "uniqueItems": true
+                }
+              },
+              "required": [
+                "host_client_id",
+                "permissions"
+              ],
+              "additionalProperties": false
+            },
+            "rpi": {
+              "type": "object",
+              "properties": {
+                "host_client_id": {
+                  "const": "rpi"
+                },
+                "permissions": {
+                  "type": "array",
+                  "items": {
+                    "enum": [
+                      "capabilities.read",
+                      "job.read",
+                      "records.read",
+                      "content.read",
+                      "round.open",
+                      "verdict.write",
+                      "void.write",
+                      "joined.write",
+                      "completed.write",
+                      "end.write",
+                      "relay.publish",
+                      "reviewer.claim.write"
+                    ]
+                  },
+                  "uniqueItems": true
+                }
+              },
+              "required": [
+                "host_client_id",
+                "permissions"
+              ],
+              "additionalProperties": false
+            },
+            "mac-personal": {
+              "type": "object",
+              "properties": {
+                "host_client_id": {
+                  "const": "mac-personal"
+                },
+                "permissions": {
+                  "type": "array",
+                  "items": {
+                    "enum": [
+                      "capabilities.read",
+                      "job.read",
+                      "records.read",
+                      "content.read",
+                      "round.open",
+                      "verdict.write",
+                      "void.write",
+                      "joined.write",
+                      "completed.write",
+                      "end.write",
+                      "relay.publish",
+                      "reviewer.claim.write"
+                    ]
+                  },
+                  "uniqueItems": true
+                }
+              },
+              "required": [
+                "host_client_id",
+                "permissions"
+              ],
+              "additionalProperties": false
+            },
+            "director-1": {
+              "type": "object",
+              "properties": {
+                "host_client_id": {
+                  "type": "null"
+                },
+                "permissions": {
+                  "type": "array",
+                  "items": {
+                    "enum": [
+                      "capabilities.read",
+                      "job.read",
+                      "records.read",
+                      "content.read",
+                      "claim.write",
+                      "activate.write",
+                      "grant.write",
+                      "grant.cancel",
+                      "end.write",
+                      "import.begin",
+                      "import.seal",
+                      "import.write",
+                      "task.state",
+                      "reviewer.claim.write"
+                    ]
+                  },
+                  "uniqueItems": true
+                }
+              },
+              "required": [
+                "host_client_id",
+                "permissions"
+              ],
+              "additionalProperties": false
+            },
+            "pa-integrator": {
+              "type": "object",
+              "properties": {
+                "host_client_id": {
+                  "type": "null"
+                },
+                "permissions": {
+                  "type": "array",
+                  "items": {
+                    "enum": [
+                      "capabilities.read",
+                      "job.read",
+                      "records.read",
+                      "content.read"
+                    ]
+                  },
+                  "uniqueItems": true
+                }
+              },
+              "required": [
+                "host_client_id",
+                "permissions"
+              ],
+              "additionalProperties": false
+            },
+            "operator-desk": {
+              "type": "object",
+              "properties": {
+                "host_client_id": {
+                  "type": "null"
+                },
+                "permissions": {
+                  "type": "array",
+                  "items": {
+                    "enum": [
+                      "capabilities.read",
+                      "job.read",
+                      "records.read",
+                      "content.read",
+                      "claim.write",
+                      "activate.write",
+                      "grant.write",
+                      "grant.cancel",
+                      "end.write",
+                      "import.begin",
+                      "import.seal",
+                      "import.write",
+                      "task.state",
+                      "reviewer.claim.write"
+                    ]
+                  },
+                  "uniqueItems": true
+                }
+              },
+              "required": [
+                "host_client_id",
+                "permissions"
+              ],
+              "additionalProperties": false
+            },
+            "at-integrator": {
+              "type": "object",
+              "properties": {
+                "host_client_id": {
+                  "type": "null"
+                },
+                "permissions": {
+                  "type": "array",
+                  "items": {
+                    "enum": [
+                      "capabilities.read",
+                      "job.read",
+                      "records.read",
+                      "content.read"
+                    ]
+                  },
+                  "uniqueItems": true
+                }
+              },
+              "required": [
+                "host_client_id",
+                "permissions"
+              ],
+              "additionalProperties": false
+            },
+            "pb-integrator": {
+              "type": "object",
+              "properties": {
+                "host_client_id": {
+                  "type": "null"
+                },
+                "permissions": {
+                  "type": "array",
+                  "items": {
+                    "enum": [
+                      "capabilities.read",
+                      "job.read",
+                      "records.read",
+                      "content.read"
+                    ]
+                  },
+                  "uniqueItems": true
+                }
+              },
+              "required": [
+                "host_client_id",
+                "permissions"
+              ],
+              "additionalProperties": false
+            },
+            "tt-integrator": {
+              "type": "object",
+              "properties": {
+                "host_client_id": {
+                  "type": "null"
+                },
+                "permissions": {
+                  "type": "array",
+                  "items": {
+                    "enum": [
+                      "capabilities.read",
+                      "job.read",
+                      "records.read",
+                      "content.read"
+                    ]
+                  },
+                  "uniqueItems": true
+                }
+              },
+              "required": [
+                "host_client_id",
+                "permissions"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "desktop",
+            "mac-dev",
+            "mac-work",
+            "rpi",
+            "mac-personal",
+            "director-1",
+            "pa-integrator",
+            "operator-desk",
+            "at-integrator",
+            "pb-integrator",
+            "tt-integrator"
+          ],
+          "additionalProperties": false
+        },
+        "lanes": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]{0,63}$"
+          },
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9-]{0,63}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "features": {
+          "type": "object",
+          "properties": {
+            "head_repeat_enabled": {
+              "const": true
+            },
+            "claim_lane_creation_enabled": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "head_repeat_enabled",
+            "claim_lane_creation_enabled"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "version",
+        "clients",
+        "lanes",
+        "features"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "policy_schema": {
+    "$ref": "#/$defs/Policy"
+  }
+}

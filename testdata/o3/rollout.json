@@ -1,0 +1,71 @@
+{
+  "section": "7",
+  "table": "Migration and rollout phases",
+  "phases": [
+    {
+      "row": 1,
+      "phase": "P0 schema/auth policy: server WRK_RECORDS_API=off",
+      "entry_check": "Install additive tables and policy parser; old auth grammar and existing endpoints remain compatible. No enrollment. Desk tests policy fixtures and duplicate-token/id rejection without exposing values.",
+      "rollback": "Disable API, keep new tables; previous binary safe because no enforced jobs exist.",
+      "source": {
+        "section": "7",
+        "table": "Migration and rollout phases",
+        "table_name": "phases",
+        "row": 1,
+        "row_text": "| P0 schema/auth policy: server WRK_RECORDS_API=off | Install additive tables and policy parser; old auth grammar and existing endpoints remain compatible. No enrollment. Desk tests policy fixtures and duplicate-token/id rejection without exposing values. | Disable API, keep new tables; previous binary safe because no enforced jobs exist. |"
+      }
+    },
+    {
+      "row": 2,
+      "phase": "P1 shadow: server WRK_RECORDS_API=shadow, wrk --records-mode=shadow",
+      "entry_check": "Centrally create shadow subject claims and P1 review assignments as \u00a76 specifies. Subjects dual-write with warnings; review-role own lifecycles are receipt-required from claim under \u00a72. Compare counts/identities/parent/coverage. Director still calls the subject/fleet bound O2 until Q12/P2.",
+      "rollback": "End any live canonical reviewer assignments through the server before stopping their transport; keep receipt fences for them. Subject shadow clients may return to O2; preserve records/projections, imports stay untrusted. No subject/fleet bound was claimed.",
+      "source": {
+        "section": "7",
+        "table": "Migration and rollout phases",
+        "table_name": "phases",
+        "row": 2,
+        "row_text": "| P1 shadow: server WRK_RECORDS_API=shadow, wrk --records-mode=shadow | Centrally create shadow subject claims and P1 review assignments as \u00a76 specifies. Subjects dual-write with warnings; review-role own lifecycles are receipt-required from claim under \u00a72. Compare counts/identities/parent/coverage. Director still calls the subject/fleet bound O2 until Q12/P2. | End any live canonical reviewer assignments through the server before stopping their transport; keep receipt fences for them. Subject shadow clients may return to O2; preserve records/projections, imports stay untrusted. No subject/fleet bound was claimed. |"
+      }
+    },
+    {
+      "row": 3,
+      "phase": "P2 host canary enforcement: server WRK_RECORDS_API=enforce, per-job activate record, client --records-mode=required",
+      "entry_check": "First desktop canary, then mac-dev, mac-work, rpi. Q12=a makes durable commits with synchronous_commit=on, desk backup/WAL restore drill, store-generation freeze fence and independently retained director receipts mandatory preconditions before P2. Activate only between rounds and after server, wrk, CLI, panewire/delegation, director gates and every quota consumer support receipts. Subject activation and canonical review-role enrollment are authoritative under \u00a72; flags cannot downgrade either.",
+      "rollback": "Pause enrolled jobs. Run earlier O3-capable binary/read-only mode if necessary. Keep protected-task/receipt gates active; finish or end through recovered server. Do not roll back to a pre-O3 server while any enforced job is active.",
+      "source": {
+        "section": "7",
+        "table": "Migration and rollout phases",
+        "table_name": "phases",
+        "row": 3,
+        "row_text": "| P2 host canary enforcement: server WRK_RECORDS_API=enforce, per-job activate record, client --records-mode=required | First desktop canary, then mac-dev, mac-work, rpi. Q12=a makes durable commits with synchronous_commit=on, desk backup/WAL restore drill, store-generation freeze fence and independently retained director receipts mandatory preconditions before P2. Activate only between rounds and after server, wrk, CLI, panewire/delegation, director gates and every quota consumer support receipts. Subject activation and canonical review-role enrollment are authoritative under \u00a72; flags cannot downgrade either. | Pause enrolled jobs. Run earlier O3-capable binary/read-only mode if necessary. Keep protected-task/receipt gates active; finish or end through recovered server. Do not roll back to a pre-O3 server while any enforced job is active. |"
+      }
+    },
+    {
+      "row": 4,
+      "phase": "P3 fleet default: central claim policy NEW_JOBS_RECORDS_REQUIRED=true",
+      "entry_check": "All new builder/worker subjects receive central claims and activation; review-role assignments follow Q13; imported in-flight jobs use conservative floor. Nonreceipt completions and unknown jobs are refused by director/quota consumers.",
+      "rollback": "Stop new enrollment; P2 rollback for active jobs. Legacy-only jobs remain explicitly marked O2.",
+      "source": {
+        "section": "7",
+        "table": "Migration and rollout phases",
+        "table_name": "phases",
+        "row": 4,
+        "row_text": "| P3 fleet default: central claim policy NEW_JOBS_RECORDS_REQUIRED=true | All new builder/worker subjects receive central claims and activation; review-role assignments follow Q13; imported in-flight jobs use conservative floor. Nonreceipt completions and unknown jobs are refused by director/quota consumers. | Stop new enrollment; P2 rollback for active jobs. Legacy-only jobs remain explicitly marked O2. |"
+      }
+    },
+    {
+      "row": 5,
+      "phase": "P4 mbp: same flags, host client mac-personal",
+      "entry_check": "Verify functionality and attribution while documenting the shared-user limitation. A1 installs at-integrator/pb-integrator/tt-integrator attribution before their P4 verification; no grant scope or mbp isolation claim.",
+      "rollback": "Same data-preserving rollback; no claim of mbp isolation before or after.",
+      "source": {
+        "section": "7",
+        "table": "Migration and rollout phases",
+        "table_name": "phases",
+        "row": 5,
+        "row_text": "| P4 mbp: same flags, host client mac-personal | Verify functionality and attribution while documenting the shared-user limitation. A1 installs at-integrator/pb-integrator/tt-integrator attribution before their P4 verification; no grant scope or mbp isolation claim. | Same data-preserving rollback; no claim of mbp isolation before or after. |"
+      }
+    }
+  ]
+}

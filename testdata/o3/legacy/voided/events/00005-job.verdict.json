@@ -1,0 +1,13 @@
+{
+  "epoch": 1,
+  "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "job_id": "legacy-voided",
+  "kind": "job.verdict",
+  "label": "b2393-vd",
+  "owner_lane": "b2393-vd",
+  "pane_id": "w0Q:pAA",
+  "parent_lane": "director-1",
+  "path": "/jobs/legacy-voided/verdict-r2.md",
+  "round": 2,
+  "verdict": "PASS"
+}

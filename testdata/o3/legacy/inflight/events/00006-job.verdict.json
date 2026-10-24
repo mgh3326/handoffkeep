@@ -1,0 +1,13 @@
+{
+  "epoch": 1,
+  "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "job_id": "legacy-inflight",
+  "kind": "job.verdict",
+  "label": "b2390-li",
+  "owner_lane": "b2390-li",
+  "pane_id": "w0Q:pAA",
+  "parent_lane": "director-1",
+  "path": "/jobs/legacy-inflight/verdict-r1.md",
+  "round": 1,
+  "verdict": "BLOCKER"
+}

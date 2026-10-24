@@ -1,0 +1,131 @@
+{
+  "section": "6",
+  "table": "Enforced/mixed/offline command matrix",
+  "mode_columns": [
+    "New wrk + new enforced server",
+    "Old wrk + new server",
+    "New wrk + old server or namespace missing",
+    "Offline/5xx for enforced jobs"
+  ],
+  "commands": [
+    {
+      "row": 1,
+      "command": "claim/spawn",
+      "modes": {
+        "New wrk + new enforced server": "GET precreated canonical claim, verify task/host/lanes, then local claim/pane. Central role creates server claim first.",
+        "Old wrk + new server": "Local claim alone is unaccepted; server protected-task mutation denied; director refuses absent receipt",
+        "New wrk + old server or namespace missing": "Refuse with O3 unsupported, no pane/claim. Explicit legacy mode only for never-enrolled O2 jobs during rollout",
+        "Offline/5xx for enforced jobs": "Fail closed before new pane/work; unstarted central claim remains visible"
+      },
+      "source": {
+        "section": "6",
+        "table": "Enforced/mixed/offline command matrix",
+        "table_name": "matrix",
+        "row": 1,
+        "row_text": "| claim/spawn | GET precreated canonical claim, verify task/host/lanes, then local claim/pane. Central role creates server claim first. | Local claim alone is unaccepted; server protected-task mutation denied; director refuses absent receipt | Refuse with O3 unsupported, no pane/claim. Explicit legacy mode only for never-enrolled O2 jobs during rollout | Fail closed before new pane/work; unstarted central claim remains visible |"
+      }
+    },
+    {
+      "row": 2,
+      "command": "round open",
+      "modes": {
+        "New wrk + new enforced server": "POST round_open with expected_seq and exact head; receipt then local event, then reviewer starts",
+        "Old wrk + new server": "Local file cannot open a server round; director ignores it; legacy protected completion denied",
+        "New wrk + old server or namespace missing": "Refuse, no local authoritative event",
+        "Offline/5xx for enforced jobs": "Fail closed; do not start another tester; retain/retry same intent/key"
+      },
+      "source": {
+        "section": "6",
+        "table": "Enforced/mixed/offline command matrix",
+        "table_name": "matrix",
+        "row": 2,
+        "row_text": "| round open | POST round_open with expected_seq and exact head; receipt then local event, then reviewer starts | Local file cannot open a server round; director ignores it; legacy protected completion denied | Refuse, no local authoritative event | Fail closed; do not start another tester; retain/retry same intent/key |"
+      }
+    },
+    {
+      "row": 3,
+      "command": "round verdict",
+      "modes": {
+        "New wrk + new enforced server": "Read bytes once; POST explicit round_no/head/bytes/digest; receipt then projection",
+        "Old wrk + new server": "Local verdict does not become trusted; server round remains pending",
+        "New wrk + old server or namespace missing": "Refuse; preserve reviewer file for later",
+        "Offline/5xx for enforced jobs": "Fail closed for acceptance; preserve bytes and pending intent, no accepted verdict"
+      },
+      "source": {
+        "section": "6",
+        "table": "Enforced/mixed/offline command matrix",
+        "table_name": "matrix",
+        "row": 3,
+        "row_text": "| round verdict | Read bytes once; POST explicit round_no/head/bytes/digest; receipt then projection | Local verdict does not become trusted; server round remains pending | Refuse; preserve reviewer file for later | Fail closed for acceptance; preserve bytes and pending intent, no accepted verdict |"
+      }
+    },
+    {
+      "row": 4,
+      "command": "round void",
+      "modes": {
+        "New wrk + new enforced server": "POST void referencing exact server grant; receipt then local event",
+        "Old wrk + new server": "Local void never reduces server count",
+        "New wrk + old server or namespace missing": "Refuse",
+        "Offline/5xx for enforced jobs": "Fail closed; count stays charged"
+      },
+      "source": {
+        "section": "6",
+        "table": "Enforced/mixed/offline command matrix",
+        "table_name": "matrix",
+        "row": 4,
+        "row_text": "| round void | POST void referencing exact server grant; receipt then local event | Local void never reduces server count | Refuse | Fail closed; count stays charged |"
+      }
+    },
+    {
+      "row": 5,
+      "command": "round status/audit",
+      "modes": {
+        "New wrk + new enforced server": "GET summary/full paginated snapshot; additionally scan local unmatched evidence as warning",
+        "Old wrk + new server": "Local result is labelled O2/unverified by director; not accepted as canonical status",
+        "New wrk + old server or namespace missing": "May print local status only with explicit O2 unsupported warning",
+        "Offline/5xx for enforced jobs": "May print cached snapshot with stale=true, generation/seq/time and recorded warning; never report it current or use it for decisions"
+      },
+      "source": {
+        "section": "6",
+        "table": "Enforced/mixed/offline command matrix",
+        "table_name": "matrix",
+        "row": 5,
+        "row_text": "| round status/audit | GET summary/full paginated snapshot; additionally scan local unmatched evidence as warning | Local result is labelled O2/unverified by director; not accepted as canonical status | May print local status only with explicit O2 unsupported warning | May print cached snapshot with stale=true, generation/seq/time and recorded warning; never report it current or use it for decisions |"
+      }
+    },
+    {
+      "row": 6,
+      "command": "joined",
+      "modes": {
+        "New wrk + new enforced server": "Upload bytes in journal POST, server gates and creates canonical receipt/relay atomically; local projection afterwards",
+        "Old wrk + new server": "Protected relay/task join denied without canonical receipt; local event cannot authorize join",
+        "New wrk + old server or namespace missing": "Refuse",
+        "Offline/5xx for enforced jobs": "Fail closed; no joined success or quota release"
+      },
+      "source": {
+        "section": "6",
+        "table": "Enforced/mixed/offline command matrix",
+        "table_name": "matrix",
+        "row": 6,
+        "row_text": "| joined | Upload bytes in journal POST, server gates and creates canonical receipt/relay atomically; local projection afterwards | Protected relay/task join denied without canonical receipt; local event cannot authorize join | Refuse | Fail closed; no joined success or quota release |"
+      }
+    },
+    {
+      "row": 7,
+      "command": "done",
+      "modes": {
+        "New wrk + new enforced server": "POST completed observation, warn if rounds incomplete, then local projection/housekeeping; completion is never join",
+        "Old wrk + new server": "Protected completed relay is denied without receipt; no quota release from local done",
+        "New wrk + old server or namespace missing": "Report may be saved locally with warning, command exits temporary-failure; no accepted completion",
+        "Offline/5xx for enforced jobs": "Preserve report and write pending warning; return temporary-failure (exit 75), no OK completion or quota release"
+      },
+      "source": {
+        "section": "6",
+        "table": "Enforced/mixed/offline command matrix",
+        "table_name": "matrix",
+        "row": 7,
+        "row_text": "| done | POST completed observation, warn if rounds incomplete, then local projection/housekeeping; completion is never join | Protected completed relay is denied without receipt; no quota release from local done | Report may be saved locally with warning, command exits temporary-failure; no accepted completion | Preserve report and write pending warning; return temporary-failure (exit 75), no OK completion or quota release |"
+      }
+    }
+  ]
+}

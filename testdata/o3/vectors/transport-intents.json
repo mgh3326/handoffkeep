@@ -1,0 +1,2933 @@
+{
+  "pack": "hk1873.v1",
+  "section": "6b",
+  "table": "CLI transport and intents vectors",
+  "file": "transport-intents.json",
+  "cases": [
+    {
+      "name": "path-fake-or-overridden-binary-refused",
+      "source": {
+        "section": "6b",
+        "table": "CLI transport and intents vectors",
+        "table_name": "transport",
+        "row": 1,
+        "row_text": "| PATH contains a fake handoffkeep; HANDOFFKEEP_BIN selects a different executable; replaced canonical binary is group/world writable or foreign-owned | PR242 guard refuses the invalid override/binary before exec (exit 2); fake tool sees zero calls. An innocuous fake PATH entry alone is ignored and canonical CLI runs. |"
+      },
+      "given": {
+        "job_id": "job-a",
+        "policy": {
+          "version": "hk1873.policy.v1",
+          "clients": {
+            "desktop": {
+              "host_client_id": "desktop",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-dev": {
+              "host_client_id": "mac-dev",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-work": {
+              "host_client_id": "mac-work",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "rpi": {
+              "host_client_id": "rpi",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-personal": {
+              "host_client_id": "mac-personal",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "director-1": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "operator-desk": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "pa-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "at-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "pb-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "tt-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            }
+          },
+          "lanes": {
+            "director-1": null,
+            "pa-integrator": "director-1"
+          },
+          "features": {
+            "head_repeat_enabled": true,
+            "claim_lane_creation_enabled": true
+          }
+        },
+        "records": []
+      },
+      "request": {
+        "type": "cli",
+        "argv": [
+          "job",
+          "job-b0debcafebabe00"
+        ],
+        "stdin": "",
+        "env": {
+          "PATH_with_fake": true,
+          "HANDOFFKEEP_BIN": "/evil/handoffkeep"
+        }
+      },
+      "expect": {
+        "exit_code": 2,
+        "stderr_code": "cli_usage",
+        "note": "PR242 guard refuses invalid override/binary before exec; fake tool sees zero calls; innocuous fake PATH entry alone is ignored"
+      }
+    },
+    {
+      "name": "unguarded-hk-bin-lookup-rejected",
+      "source": {
+        "section": "6b",
+        "table": "CLI transport and intents vectors",
+        "table_name": "transport",
+        "row": 2,
+        "row_text": "| Capability/job/records/content call attempts an unguarded hk_bin lookup | C1 test spy rejects it; every operation uses the same canonical resolver, including later cursor pages. |"
+      },
+      "given": {
+        "job_id": "job-a",
+        "policy": {
+          "version": "hk1873.policy.v1",
+          "clients": {
+            "desktop": {
+              "host_client_id": "desktop",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-dev": {
+              "host_client_id": "mac-dev",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-work": {
+              "host_client_id": "mac-work",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "rpi": {
+              "host_client_id": "rpi",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-personal": {
+              "host_client_id": "mac-personal",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "director-1": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "operator-desk": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "pa-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "at-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "pb-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "tt-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            }
+          },
+          "lanes": {
+            "director-1": null,
+            "pa-integrator": "director-1"
+          },
+          "features": {
+            "head_repeat_enabled": true,
+            "claim_lane_creation_enabled": true
+          }
+        },
+        "records": []
+      },
+      "request": {
+        "type": "cli",
+        "argv": [
+          "records",
+          "job-b0debcafebabe00",
+          "--after-seq",
+          "0"
+        ],
+        "stdin": ""
+      },
+      "expect": {
+        "outcome": "spy_rejects",
+        "note": "C1 test spy rejects unguarded hk_bin; every operation incl. later cursor pages uses the same canonical resolver"
+      }
+    },
+    {
+      "name": "env-token-with-cli-unavailable-no-fallback",
+      "source": {
+        "section": "6b",
+        "table": "CLI transport and intents vectors",
+        "table_name": "transport",
+        "row": 3,
+        "row_text": "| Token present only in caller environment while canonical CLI is unavailable | exit 75 or trust-path exit 2 as applicable; no HTTP/curl/env-token fallback and no local completion/quota success. |"
+      },
+      "given": {
+        "job_id": "job-a",
+        "policy": {
+          "version": "hk1873.policy.v1",
+          "clients": {
+            "desktop": {
+              "host_client_id": "desktop",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-dev": {
+              "host_client_id": "mac-dev",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-work": {
+              "host_client_id": "mac-work",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "rpi": {
+              "host_client_id": "rpi",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-personal": {
+              "host_client_id": "mac-personal",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "director-1": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "operator-desk": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "pa-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "at-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "pb-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "tt-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            }
+          },
+          "lanes": {
+            "director-1": null,
+            "pa-integrator": "director-1"
+          },
+          "features": {
+            "head_repeat_enabled": true,
+            "claim_lane_creation_enabled": true
+          }
+        },
+        "records": []
+      },
+      "request": {
+        "type": "cli",
+        "argv": [
+          "job",
+          "job-b0debcafebabe00"
+        ],
+        "stdin": "",
+        "stub": {
+          "response": "unavailable"
+        },
+        "env": {
+          "HANDOFFKEEP_TOKEN": "x",
+          "_cli_unavailable": true
+        }
+      },
+      "expect": {
+        "exit_code": 75,
+        "stderr_code": "transport_unavailable",
+        "note": "or trust-path exit 2; no HTTP/curl/env-token fallback, no local completion/quota success"
+      }
+    },
+    {
+      "name": "server-host-mismatch-exit-77",
+      "source": {
+        "section": "6b",
+        "table": "CLI transport and intents vectors",
+        "table_name": "transport",
+        "row": 4,
+        "row_text": "| Server returns {error:host_mismatch}, {error:round_cap}, {error:sequence_conflict} | Empty stdout; exact one-line stderr code; exits 77,78,73 respectively; no local fallback. |"
+      },
+      "given": {
+        "job_id": "job-a",
+        "policy": {
+          "version": "hk1873.policy.v1",
+          "clients": {
+            "desktop": {
+              "host_client_id": "desktop",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-dev": {
+              "host_client_id": "mac-dev",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-work": {
+              "host_client_id": "mac-work",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "rpi": {
+              "host_client_id": "rpi",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-personal": {
+              "host_client_id": "mac-personal",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "director-1": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "operator-desk": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "pa-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "at-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "pb-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "tt-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            }
+          },
+          "lanes": {
+            "director-1": null,
+            "pa-integrator": "director-1"
+          },
+          "features": {
+            "head_repeat_enabled": true,
+            "claim_lane_creation_enabled": true
+          }
+        },
+        "records": []
+      },
+      "request": {
+        "type": "cli",
+        "argv": [
+          "append",
+          "job-b0debcafebabe00",
+          "--kind",
+          "round_open",
+          "--idempotency-key",
+          "00000000-0000-4000-8000-000000555555",
+          "--expected-seq",
+          "1",
+          "--claim-seq",
+          "1"
+        ],
+        "stdin": {
+          "$b64": "eyJoZWFkIjogIjExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTEiLCAidGVzdGVyX2pvYl9pZCI6IG51bGwsICJleHRlbnNpb25fZ3JhbnRfc2VxIjogbnVsbCwgInJlcGVhdF9ncmFudF9zZXEiOiBudWxsfQ=="
+        },
+        "stub": {
+          "http_status": 403,
+          "error": "host_mismatch"
+        }
+      },
+      "expect": {
+        "exit_code": 77,
+        "stderr_code": "host_mismatch",
+        "stderr_format": "handoffkeep wrk: CODE",
+        "note": "empty stdout; exact one-line stderr; no local fallback"
+      }
+    },
+    {
+      "name": "server-round-cap-exit-78",
+      "source": {
+        "section": "6b",
+        "table": "CLI transport and intents vectors",
+        "table_name": "transport",
+        "row": 4,
+        "row_text": "| Server returns {error:host_mismatch}, {error:round_cap}, {error:sequence_conflict} | Empty stdout; exact one-line stderr code; exits 77,78,73 respectively; no local fallback. |"
+      },
+      "given": {
+        "job_id": "job-a",
+        "policy": {
+          "version": "hk1873.policy.v1",
+          "clients": {
+            "desktop": {
+              "host_client_id": "desktop",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-dev": {
+              "host_client_id": "mac-dev",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-work": {
+              "host_client_id": "mac-work",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "rpi": {
+              "host_client_id": "rpi",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-personal": {
+              "host_client_id": "mac-personal",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "director-1": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "operator-desk": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "pa-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "at-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "pb-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "tt-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            }
+          },
+          "lanes": {
+            "director-1": null,
+            "pa-integrator": "director-1"
+          },
+          "features": {
+            "head_repeat_enabled": true,
+            "claim_lane_creation_enabled": true
+          }
+        },
+        "records": []
+      },
+      "request": {
+        "type": "cli",
+        "argv": [
+          "append",
+          "job-b0debcafebabe00",
+          "--kind",
+          "round_open",
+          "--idempotency-key",
+          "00000000-0000-4000-8000-000000555555",
+          "--expected-seq",
+          "1",
+          "--claim-seq",
+          "1"
+        ],
+        "stdin": {
+          "$b64": "eyJoZWFkIjogIjExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTEiLCAidGVzdGVyX2pvYl9pZCI6IG51bGwsICJleHRlbnNpb25fZ3JhbnRfc2VxIjogbnVsbCwgInJlcGVhdF9ncmFudF9zZXEiOiBudWxsfQ=="
+        },
+        "stub": {
+          "http_status": 409,
+          "error": "round_cap"
+        }
+      },
+      "expect": {
+        "exit_code": 78,
+        "stderr_code": "round_cap",
+        "stderr_format": "handoffkeep wrk: CODE",
+        "note": "empty stdout; exact one-line stderr; no local fallback"
+      }
+    },
+    {
+      "name": "server-sequence-conflict-exit-73",
+      "source": {
+        "section": "6b",
+        "table": "CLI transport and intents vectors",
+        "table_name": "transport",
+        "row": 4,
+        "row_text": "| Server returns {error:host_mismatch}, {error:round_cap}, {error:sequence_conflict} | Empty stdout; exact one-line stderr code; exits 77,78,73 respectively; no local fallback. |"
+      },
+      "given": {
+        "job_id": "job-a",
+        "policy": {
+          "version": "hk1873.policy.v1",
+          "clients": {
+            "desktop": {
+              "host_client_id": "desktop",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-dev": {
+              "host_client_id": "mac-dev",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-work": {
+              "host_client_id": "mac-work",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "rpi": {
+              "host_client_id": "rpi",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-personal": {
+              "host_client_id": "mac-personal",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "director-1": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "operator-desk": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "pa-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "at-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "pb-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "tt-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            }
+          },
+          "lanes": {
+            "director-1": null,
+            "pa-integrator": "director-1"
+          },
+          "features": {
+            "head_repeat_enabled": true,
+            "claim_lane_creation_enabled": true
+          }
+        },
+        "records": []
+      },
+      "request": {
+        "type": "cli",
+        "argv": [
+          "append",
+          "job-b0debcafebabe00",
+          "--kind",
+          "round_open",
+          "--idempotency-key",
+          "00000000-0000-4000-8000-000000555555",
+          "--expected-seq",
+          "3",
+          "--claim-seq",
+          "1"
+        ],
+        "stdin": {
+          "$b64": "eyJoZWFkIjogIjExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTEiLCAidGVzdGVyX2pvYl9pZCI6IG51bGwsICJleHRlbnNpb25fZ3JhbnRfc2VxIjogbnVsbCwgInJlcGVhdF9ncmFudF9zZXEiOiBudWxsfQ=="
+        },
+        "stub": {
+          "http_status": 409,
+          "error": "sequence_conflict"
+        }
+      },
+      "expect": {
+        "exit_code": 73,
+        "stderr_code": "sequence_conflict",
+        "stderr_format": "handoffkeep wrk: CODE",
+        "note": "empty stdout; exact one-line stderr; no local fallback"
+      }
+    },
+    {
+      "name": "commit-then-response-lost-file-changed",
+      "source": {
+        "section": "6b",
+        "table": "CLI transport and intents vectors",
+        "table_name": "transport",
+        "row": 5,
+        "row_text": "| Server commits append, response is lost, reviewer file subsequently changes | Original pending base64/body/key/expected_seq is resent; 200 created=false with identical record/hash; exactly one charge, changed file ignored. |"
+      },
+      "given": {
+        "job_id": "job-a",
+        "policy": {
+          "version": "hk1873.policy.v1",
+          "clients": {
+            "desktop": {
+              "host_client_id": "desktop",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-dev": {
+              "host_client_id": "mac-dev",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-work": {
+              "host_client_id": "mac-work",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "rpi": {
+              "host_client_id": "rpi",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-personal": {
+              "host_client_id": "mac-personal",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "director-1": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "operator-desk": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "pa-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "at-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "pb-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "tt-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            }
+          },
+          "lanes": {
+            "director-1": null,
+            "pa-integrator": "director-1"
+          },
+          "features": {
+            "head_repeat_enabled": true,
+            "claim_lane_creation_enabled": true
+          }
+        },
+        "records": []
+      },
+      "request": {
+        "type": "cli",
+        "argv": [
+          "append",
+          "job-b0debcafebabe00",
+          "--kind",
+          "verdict",
+          "--idempotency-key",
+          "00000000-0000-4000-8000-000000555555",
+          "--expected-seq",
+          "3",
+          "--claim-seq",
+          "1"
+        ],
+        "stdin": {
+          "$b64": "eyJyb3VuZF9ubyI6IDEsICJoZWFkIjogIjExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTEiLCAidmVyZGljdCI6ICJQQVNTIiwgInBhdGgiOiAiL2pvYnMvam9iLWEvdi5tZCIsICJjb250ZW50X3NoYTI1NiI6ICJlNTQ3MjgxYjFmMzUxYWMzMTUyNTM3ZjJmMTg1OTE4NWFmNjUxNTgxNWY0NGFjZjEyNzYwOTFhOTUxMTk2OWMxIiwgImNvbnRlbnRfYjY0IjogIlZrVlNSRWxEVkRvZ1VFRlRVeUJBTVRFeE1URXhNVEV4TVRFeE1URXhNVEV4TVRFeE1URXhNVEV4TVRFeE1URXhNVEV4TVRFeE1RcHlaWFpwWlhjZ2JtOTBaWE1LIiwgInRlc3Rlcl9qb2JfaWQiOiBudWxsfQ=="
+        },
+        "stub": {
+          "replay": true
+        }
+      },
+      "expect": {
+        "exit_code": 0,
+        "note": "original pending base64/body/key/expected_seq resent; 200 created=false identical record/hash; exactly one charge; changed file ignored"
+      }
+    },
+    {
+      "name": "definitive-sequence-conflict-then-refresh",
+      "source": {
+        "section": "6b",
+        "table": "CLI transport and intents vectors",
+        "table_name": "transport",
+        "row": 6,
+        "row_text": "| Definitive sequence_conflict, then refresh | Keep rejected original intent, create a new key only after revalidation; do not change original immutable request. |"
+      },
+      "given": {
+        "job_id": "job-a",
+        "policy": {
+          "version": "hk1873.policy.v1",
+          "clients": {
+            "desktop": {
+              "host_client_id": "desktop",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-dev": {
+              "host_client_id": "mac-dev",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-work": {
+              "host_client_id": "mac-work",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "rpi": {
+              "host_client_id": "rpi",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-personal": {
+              "host_client_id": "mac-personal",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "director-1": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "operator-desk": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "pa-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "at-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "pb-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "tt-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            }
+          },
+          "lanes": {
+            "director-1": null,
+            "pa-integrator": "director-1"
+          },
+          "features": {
+            "head_repeat_enabled": true,
+            "claim_lane_creation_enabled": true
+          }
+        },
+        "records": []
+      },
+      "request": {
+        "type": "cli",
+        "argv": [
+          "append",
+          "job-b0debcafebabe00",
+          "--kind",
+          "round_open",
+          "--idempotency-key",
+          "00000000-0000-4000-8000-000000555555",
+          "--expected-seq",
+          "3",
+          "--claim-seq",
+          "1"
+        ],
+        "stdin": {
+          "$b64": "eyJoZWFkIjogIjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIiLCAidGVzdGVyX2pvYl9pZCI6IG51bGwsICJleHRlbnNpb25fZ3JhbnRfc2VxIjogbnVsbCwgInJlcGVhdF9ncmFudF9zZXEiOiBudWxsfQ=="
+        },
+        "stub": {
+          "http_status": 409,
+          "error": "sequence_conflict"
+        }
+      },
+      "expect": {
+        "exit_code": 73,
+        "stderr_code": "sequence_conflict",
+        "note": "keep rejected original intent; new key only after revalidation; original request immutable"
+      }
+    },
+    {
+      "name": "crash-before-send-after-commit-after-fsync",
+      "source": {
+        "section": "6b",
+        "table": "CLI transport and intents vectors",
+        "table_name": "transport",
+        "row": 7,
+        "row_text": "| Crash before send / after commit / after accepted-intent fsync but before projection | Saved intent retries once by key / successful replay / GET-based projection repair; no lost committed round, new key or double release. |"
+      },
+      "given": {
+        "job_id": "job-a",
+        "policy": {
+          "version": "hk1873.policy.v1",
+          "clients": {
+            "desktop": {
+              "host_client_id": "desktop",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-dev": {
+              "host_client_id": "mac-dev",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-work": {
+              "host_client_id": "mac-work",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "rpi": {
+              "host_client_id": "rpi",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-personal": {
+              "host_client_id": "mac-personal",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "director-1": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "operator-desk": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "pa-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "at-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "pb-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "tt-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            }
+          },
+          "lanes": {
+            "director-1": null,
+            "pa-integrator": "director-1"
+          },
+          "features": {
+            "head_repeat_enabled": true,
+            "claim_lane_creation_enabled": true
+          }
+        },
+        "records": []
+      },
+      "request": {
+        "type": "cli",
+        "argv": [
+          "append",
+          "job-b0debcafebabe00",
+          "--kind",
+          "round_open",
+          "--idempotency-key",
+          "00000000-0000-4000-8000-000000555555",
+          "--expected-seq",
+          "3",
+          "--claim-seq",
+          "1"
+        ],
+        "stdin": {
+          "$b64": "eyJoZWFkIjogIjMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMiLCAidGVzdGVyX2pvYl9pZCI6IG51bGwsICJleHRlbnNpb25fZ3JhbnRfc2VxIjogbnVsbCwgInJlcGVhdF9ncmFudF9zZXEiOiBudWxsfQ=="
+        },
+        "stub": {
+          "crash": "any"
+        }
+      },
+      "expect": {
+        "outcome": "intent_retry",
+        "note": "saved intent retries once by key / successful replay / GET-based projection repair; no lost committed round, new key or double release"
+      }
+    },
+    {
+      "name": "intent-symlink-mode-malformed-fsync-fails",
+      "source": {
+        "section": "6b",
+        "table": "CLI transport and intents vectors",
+        "table_name": "transport",
+        "row": 8,
+        "row_text": "| Intent is symlink, mode is not 0600, malformed JSON/digest or fsync fails | intent_invalid/intent_io exit 74 before send; no event or accepted completion. |"
+      },
+      "given": {
+        "job_id": "job-a",
+        "policy": {
+          "version": "hk1873.policy.v1",
+          "clients": {
+            "desktop": {
+              "host_client_id": "desktop",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-dev": {
+              "host_client_id": "mac-dev",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-work": {
+              "host_client_id": "mac-work",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "rpi": {
+              "host_client_id": "rpi",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-personal": {
+              "host_client_id": "mac-personal",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "director-1": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "operator-desk": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "pa-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "at-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "pb-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "tt-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            }
+          },
+          "lanes": {
+            "director-1": null,
+            "pa-integrator": "director-1"
+          },
+          "features": {
+            "head_repeat_enabled": true,
+            "claim_lane_creation_enabled": true
+          }
+        },
+        "records": []
+      },
+      "request": {
+        "type": "cli",
+        "argv": [
+          "append",
+          "job-b0debcafebabe00",
+          "--kind",
+          "round_open",
+          "--idempotency-key",
+          "00000000-0000-4000-8000-000000555555",
+          "--expected-seq",
+          "3",
+          "--claim-seq",
+          "1"
+        ],
+        "stdin": {
+          "$b64": "eyJoZWFkIjogIjQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQiLCAidGVzdGVyX2pvYl9pZCI6IG51bGwsICJleHRlbnNpb25fZ3JhbnRfc2VxIjogbnVsbCwgInJlcGVhdF9ncmFudF9zZXEiOiBudWxsfQ=="
+        },
+        "stub": {
+          "intent": "symlink"
+        }
+      },
+      "expect": {
+        "exit_code": 74,
+        "stderr_code": "intent_invalid",
+        "stderr_code_alt": "intent_io",
+        "note": "exit 74 before send; no event or accepted completion"
+      }
+    },
+    {
+      "name": "cursor-page-inconsistent-history-regressed",
+      "source": {
+        "section": "6b",
+        "table": "CLI transport and intents vectors",
+        "table_name": "transport",
+        "row": 9,
+        "row_text": "| Cursor page has different snapshot, missing seq, altered hash or generation | protocol_invalid/history_regressed exit 75; no decision based on partial pages. |"
+      },
+      "given": {
+        "job_id": "job-a",
+        "policy": {
+          "version": "hk1873.policy.v1",
+          "clients": {
+            "desktop": {
+              "host_client_id": "desktop",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-dev": {
+              "host_client_id": "mac-dev",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-work": {
+              "host_client_id": "mac-work",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "rpi": {
+              "host_client_id": "rpi",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-personal": {
+              "host_client_id": "mac-personal",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "director-1": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "operator-desk": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "pa-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "at-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "pb-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "tt-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            }
+          },
+          "lanes": {
+            "director-1": null,
+            "pa-integrator": "director-1"
+          },
+          "features": {
+            "head_repeat_enabled": true,
+            "claim_lane_creation_enabled": true
+          }
+        },
+        "records": []
+      },
+      "request": {
+        "type": "cli",
+        "argv": [
+          "records",
+          "job-b0debcafebabe00",
+          "--after-seq",
+          "3",
+          "--snapshot-seq",
+          "5"
+        ],
+        "stdin": "",
+        "stub": {
+          "response": "malformed_cursor"
+        }
+      },
+      "expect": {
+        "exit_code": 75,
+        "stderr_code": "protocol_invalid",
+        "stderr_code_alt": "history_regressed",
+        "note": "different snapshot, missing seq, altered hash or generation; no decision on partial pages"
+      }
+    },
+    {
+      "name": "redirect-html-namespace-unknown-code",
+      "source": {
+        "section": "6b",
+        "table": "CLI transport and intents vectors",
+        "table_name": "transport",
+        "row": 10,
+        "row_text": "| CLI gets redirect, HTML response, missing namespace or unknown stable code | protocol_invalid/o3_unsupported exit 75; one safe line, empty stdout, no body/Location/evidence echo. On append keep original intent pending and exact-key retry. |"
+      },
+      "given": {
+        "job_id": "job-a",
+        "policy": {
+          "version": "hk1873.policy.v1",
+          "clients": {
+            "desktop": {
+              "host_client_id": "desktop",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-dev": {
+              "host_client_id": "mac-dev",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-work": {
+              "host_client_id": "mac-work",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "rpi": {
+              "host_client_id": "rpi",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-personal": {
+              "host_client_id": "mac-personal",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "director-1": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "operator-desk": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "pa-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "at-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "pb-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "tt-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            }
+          },
+          "lanes": {
+            "director-1": null,
+            "pa-integrator": "director-1"
+          },
+          "features": {
+            "head_repeat_enabled": true,
+            "claim_lane_creation_enabled": true
+          }
+        },
+        "records": []
+      },
+      "request": {
+        "type": "cli",
+        "argv": [
+          "job",
+          "job-b0debcafebabe00"
+        ],
+        "stdin": "",
+        "stub": {
+          "response": "redirect"
+        }
+      },
+      "expect": {
+        "exit_code": 75,
+        "stderr_code": "protocol_invalid",
+        "stderr_code_alt": "o3_unsupported",
+        "note": "one safe line, empty stdout, no body/Location/evidence echo; on append keep intent pending, exact-key retry"
+      }
+    },
+    {
+      "name": "caller-env-overrides-scrubbed",
+      "source": {
+        "section": "6b",
+        "table": "CLI transport and intents vectors",
+        "table_name": "transport",
+        "row": 11,
+        "row_text": "| CLI available, but caller env endpoint/token/CF settings differ from installed config | C1 child has all four override keys absent, no values read/echoed; canonical CLI uses installed identity/endpoint; no request reaches the caller-selected fake endpoint. |"
+      },
+      "given": {
+        "job_id": "job-a",
+        "policy": {
+          "version": "hk1873.policy.v1",
+          "clients": {
+            "desktop": {
+              "host_client_id": "desktop",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-dev": {
+              "host_client_id": "mac-dev",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-work": {
+              "host_client_id": "mac-work",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "rpi": {
+              "host_client_id": "rpi",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-personal": {
+              "host_client_id": "mac-personal",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "director-1": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "operator-desk": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "pa-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "at-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "pb-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "tt-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            }
+          },
+          "lanes": {
+            "director-1": null,
+            "pa-integrator": "director-1"
+          },
+          "features": {
+            "head_repeat_enabled": true,
+            "claim_lane_creation_enabled": true
+          }
+        },
+        "records": []
+      },
+      "request": {
+        "type": "cli",
+        "argv": [
+          "job",
+          "job-b0debcafebabe00"
+        ],
+        "stdin": "",
+        "env": {
+          "HANDOFFKEEP_URL": "https://fake",
+          "HANDOFFKEEP_TOKEN": "x",
+          "HANDOFFKEEP_CF_ACCESS_CLIENT_ID": "x",
+          "HANDOFFKEEP_CF_ACCESS_CLIENT_SECRET": "x"
+        }
+      },
+      "expect": {
+        "outcome": "env_scrubbed",
+        "note": "child has all four override keys absent; no values read/echoed; canonical CLI uses installed identity; no request reaches fake endpoint"
+      }
+    },
+    {
+      "name": "commit-then-proxy-5xx-pending-intent",
+      "source": {
+        "section": "6b",
+        "table": "CLI transport and intents vectors",
+        "table_name": "transport",
+        "row": 12,
+        "row_text": "| Append commits but proxy returns HTML/non-contract 5xx or malformed success | protocol_invalid exit 75, pending intent unchanged; retry original key/body returns accepted replay, exactly one record/charge. Recognized 503 also stays pending. |"
+      },
+      "given": {
+        "job_id": "job-a",
+        "policy": {
+          "version": "hk1873.policy.v1",
+          "clients": {
+            "desktop": {
+              "host_client_id": "desktop",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-dev": {
+              "host_client_id": "mac-dev",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-work": {
+              "host_client_id": "mac-work",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "rpi": {
+              "host_client_id": "rpi",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-personal": {
+              "host_client_id": "mac-personal",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "director-1": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "operator-desk": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "pa-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "at-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "pb-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "tt-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            }
+          },
+          "lanes": {
+            "director-1": null,
+            "pa-integrator": "director-1"
+          },
+          "features": {
+            "head_repeat_enabled": true,
+            "claim_lane_creation_enabled": true
+          }
+        },
+        "records": []
+      },
+      "request": {
+        "type": "cli",
+        "argv": [
+          "append",
+          "job-b0debcafebabe00",
+          "--kind",
+          "round_open",
+          "--idempotency-key",
+          "00000000-0000-4000-8000-000000555555",
+          "--expected-seq",
+          "3",
+          "--claim-seq",
+          "1"
+        ],
+        "stdin": {
+          "$b64": "eyJoZWFkIjogIjU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTUiLCAidGVzdGVyX2pvYl9pZCI6IG51bGwsICJleHRlbnNpb25fZ3JhbnRfc2VxIjogbnVsbCwgInJlcGVhdF9ncmFudF9zZXEiOiBudWxsfQ=="
+        },
+        "stub": {
+          "response": "html_5xx"
+        }
+      },
+      "expect": {
+        "exit_code": 75,
+        "stderr_code": "protocol_invalid",
+        "note": "pending intent unchanged; retry original key/body returns accepted replay; recognized 503 also stays pending"
+      }
+    }
+  ]
+}

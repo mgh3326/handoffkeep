@@ -410,7 +410,20 @@ service; add `?presign=1` for a ten-minute private URL. `/v1/usage` and
 authenticated `/metrics` expose the local fuse counters. `r2usage` is optional
 and safely reports `skipped` when Cloudflare analytics credentials are absent.
 
+## O3 contract fixture pack
+
+`testdata/o3/` is the machine-readable contract pack for the O3 authority
+design (`hk:doc designs/hk1873/b1873a-sol-r4`, doc 44185, revision 4,
+amendment 1): the Draft 2020-12 schema bundle, every normative vector
+table as data, sanitized legacy event fixtures, the command matrix, CLI
+subcommand/exit maps, and a hashed manifest. It changes only with a new
+design revision. `go test ./internal/o3contract/...` verifies the pack
+against itself — schema validity, internal ref resolution, per-vector
+request/record conformance, error-code/exit-map consistency, manifest
+hashes, and per-table case counts. See `testdata/o3/README.md`.
+
 ## Container image
+
 
 CI builds `ghcr.io/mgh3326/handoffkeep` — a single static binary on distroless,
 running as nonroot — on every PR, and pushes it (tags: full commit SHA and
