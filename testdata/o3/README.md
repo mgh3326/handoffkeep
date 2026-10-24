@@ -8,8 +8,10 @@ single pinned design document:
 - body sha256: `ce4f6efbe39514bb0bced2d0a66510e646058a66d0d28bbb417af180f375c19d`
 
 The pack changes only when a new design revision exists; the manifest
-pins the design body sha so any edit to a fixture without a new design
-fails verification.
+pins the design body sha and the sha256 of every pack file, so any
+fixture edit without a matching manifest update fails verification.
+Manifest hash changes without a new design revision must be rejected
+in review.
 
 ## Files
 

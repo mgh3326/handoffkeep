@@ -291,6 +291,9 @@
         ],
         "stdin": {
           "$b64": "eyJyZXBvcnRfYjY0IjogImNHRmpheUJ5WlhCdmNuUWdZbmwwWlhNSyIsICJyZXBvcnRfc2hhMjU2IjogImQ2YjE3NGNiYjM0MDNmODlmODU0ZjZmNzg3MGUzY2JiYWJjZmZjZmFiY2NlYjdlOGY2MjA2MWI2ODExZDIyNTEifQ=="
+        },
+        "stub": {
+          "response": "unavailable"
         }
       },
       "expect": {

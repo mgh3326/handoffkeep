@@ -599,6 +599,9 @@
           "job-b0debcafebabe00"
         ],
         "stdin": "",
+        "stub": {
+          "response": "unavailable"
+        },
         "env": {
           "HANDOFFKEEP_TOKEN": "x",
           "_cli_unavailable": true
@@ -2295,7 +2298,10 @@
           "--snapshot-seq",
           "5"
         ],
-        "stdin": ""
+        "stdin": "",
+        "stub": {
+          "response": "malformed_cursor"
+        }
       },
       "expect": {
         "exit_code": 75,
