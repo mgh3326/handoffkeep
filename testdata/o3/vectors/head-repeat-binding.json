@@ -2000,7 +2000,7 @@
           "expected_seq": 5,
           "payload": {
             "head": "1111111111111111111111111111111111111111",
-            "pr": "https://github.com/mgh3326/handoffkeep/pull/2400",
+            "pr": "https://pr.invalid/handoffkeep/pull/2400",
             "report_b64": "cGFjayByZXBvcnQgYnl0ZXMK",
             "report_sha256": "d6b174cbb3403f89f854f6f7870e3cbbabcffcfabcceb7e8f62061b6811d2251",
             "waiver_grant_seq": null

@@ -1176,7 +1176,7 @@
             "claim_seq": 1,
             "actor_client_id": "desktop",
             "idempotency_key": "00000000-0000-4000-8000-000000210455",
-            "request_sha256": "c6b81acc6980a27be04ed2320cea9a1fa939c176906a0d3bdc94a5362f22368a",
+            "request_sha256": "0dbb853d91595cd60efdeaca1f03a58cf00e6cf5fe77a0c7e86db42e3e234270",
             "imported": false,
             "source": null,
             "received_at": "2026-10-24T00:00:00.000255Z",
@@ -1184,7 +1184,7 @@
             "kind": "joined",
             "payload": {
               "head": "1111111111111111111111111111111111111111",
-              "pr": "https://github.com/mgh3326/handoffkeep/pull/2400",
+              "pr": "https://pr.invalid/handoffkeep/pull/2400",
               "report_sha256": "d6b174cbb3403f89f854f6f7870e3cbbabcffcfabcceb7e8f62061b6811d2251",
               "report_size_bytes": 18,
               "verdict_seqs": [
@@ -1192,7 +1192,7 @@
               ],
               "waiver_grant_seq": null
             },
-            "record_hash": "a2ccc01a6ec5a167fd56e33a50c4369b4289665e3da35068badad3bb116670e7"
+            "record_hash": "e7c207697aeea2521a3b141500e999cb68aa1965c109d1afbb49cd1211c680a0"
           },
           {
             "job_id": "job-a-t1",

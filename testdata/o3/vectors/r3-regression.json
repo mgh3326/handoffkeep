@@ -355,7 +355,7 @@
           "expected_seq": 4,
           "payload": {
             "head": "1111111111111111111111111111111111111111",
-            "pr": "https://github.com/mgh3326/handoffkeep/pull/2400",
+            "pr": "https://pr.invalid/handoffkeep/pull/2400",
             "report_b64": "cGFjayByZXBvcnQgYnl0ZXMK",
             "report_sha256": "d6b174cbb3403f89f854f6f7870e3cbbabcffcfabcceb7e8f62061b6811d2251",
             "waiver_grant_seq": null
@@ -369,7 +369,7 @@
           "kind": "joined",
           "payload": {
             "head": "1111111111111111111111111111111111111111",
-            "pr": "https://github.com/mgh3326/handoffkeep/pull/2400",
+            "pr": "https://pr.invalid/handoffkeep/pull/2400",
             "report_sha256": "d6b174cbb3403f89f854f6f7870e3cbbabcffcfabcceb7e8f62061b6811d2251",
             "report_size_bytes": 18,
             "verdict_seqs": [
@@ -660,7 +660,7 @@
           "expected_seq": 3,
           "payload": {
             "head": "1111111111111111111111111111111111111111",
-            "pr": "https://github.com/mgh3326/handoffkeep/pull/2400",
+            "pr": "https://pr.invalid/handoffkeep/pull/2400",
             "report_b64": "cGFjayByZXBvcnQgYnl0ZXMK",
             "report_sha256": "d6b174cbb3403f89f854f6f7870e3cbbabcffcfabcceb7e8f62061b6811d2251",
             "waiver_grant_seq": 3
@@ -674,7 +674,7 @@
           "kind": "joined",
           "payload": {
             "head": "1111111111111111111111111111111111111111",
-            "pr": "https://github.com/mgh3326/handoffkeep/pull/2400",
+            "pr": "https://pr.invalid/handoffkeep/pull/2400",
             "report_sha256": "d6b174cbb3403f89f854f6f7870e3cbbabcffcfabcceb7e8f62061b6811d2251",
             "report_size_bytes": 18,
             "verdict_seqs": [],

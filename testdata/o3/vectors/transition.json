@@ -6640,23 +6640,23 @@
             "claim_seq": 1,
             "actor_client_id": "director-1",
             "idempotency_key": "00000000-0000-4000-8000-000000203034",
-            "request_sha256": "b075a307384069f93606760e92a1e65e0797f42044fc69ff17a16238f8a722cf",
+            "request_sha256": "952592611e70a1ea116ddb15667b866cce540ebba7c5d487cf6221227d53d33b",
             "imported": true,
             "source": {
               "source_locator": "testdata/o3/legacy/planted/events/00006-job.joined.json",
-              "source_sha256": "573bcc9e0819c5bb71ba9ae1e07f7280caa0dbb7aaea00494858bef37e8b8abf"
+              "source_sha256": "abb508de8396e2c71456bdab4f7b039dc981655e7192a00355c114abb24bc4d2"
             },
             "received_at": "2026-10-24T00:00:00.000074Z",
             "previous_hash": "176a45a033c16cd20c0b00ce9ba2ad0323b228fb97b6a2cd9a3e547ee62f3ba2",
             "kind": "import",
             "payload": {
               "source_locator": "testdata/o3/legacy/planted/events/00006-job.joined.json",
-              "source_sha256": "573bcc9e0819c5bb71ba9ae1e07f7280caa0dbb7aaea00494858bef37e8b8abf",
+              "source_sha256": "abb508de8396e2c71456bdab4f7b039dc981655e7192a00355c114abb24bc4d2",
               "original_actor_client_id": "desktop",
               "original_at": "2026-10-20T00:00:00.000000Z",
               "legacy_kind": "job.joined"
             },
-            "record_hash": "69adb38401a5bda9fdf543e70a45208be4d12ee76c0e58bcfe811549dab297b7"
+            "record_hash": "ee32e5916082f1d7bac91463871361215a3e2787eb26ff800a14b8d616bc854c"
           },
           {
             "job_id": "job-s",
@@ -6666,22 +6666,22 @@
             "claim_seq": 1,
             "actor_client_id": "director-1",
             "idempotency_key": "00000000-0000-4000-8000-000000203075",
-            "request_sha256": "d25a7f080cdc341db08a3c1be5a84cfa34f088bd7589e30b5c11e5d8b0e716c3",
+            "request_sha256": "65bad50f97dab4b3753233e6cc4299e4055d90049a9eb369774ac143b3183b40",
             "imported": false,
             "source": null,
             "received_at": "2026-10-24T00:00:00.000075Z",
-            "previous_hash": "69adb38401a5bda9fdf543e70a45208be4d12ee76c0e58bcfe811549dab297b7",
+            "previous_hash": "ee32e5916082f1d7bac91463871361215a3e2787eb26ff800a14b8d616bc854c",
             "kind": "import_seal",
             "payload": {
               "begin_seq": 3,
               "expected_import_count": 4,
-              "manifest_sha256": "766d4d92563966ad476d0e5acd559597d50b5f8b1221e068422a330d80e6a7d4",
+              "manifest_sha256": "7f27494bfe2d6130541d7c01cc857660af18789ce605f1588a9ce8ee79583752",
               "reason_code": "import_seal",
               "shadow_cutoff_seq": 2,
               "baseline_used": 3,
               "numbering_floor": 1
             },
-            "record_hash": "e549016b2176c996f20c2ba7b10722d97b8fef04e220ba538d5e0a93b8ffee63"
+            "record_hash": "19ee025af86167a56ad7339e633f88daa4d2f51f17f684e76a8a879588a5578f"
           },
           {
             "job_id": "job-s",
@@ -6695,7 +6695,7 @@
             "imported": false,
             "source": null,
             "received_at": "2026-10-24T00:00:00.000076Z",
-            "previous_hash": "e549016b2176c996f20c2ba7b10722d97b8fef04e220ba538d5e0a93b8ffee63",
+            "previous_hash": "19ee025af86167a56ad7339e633f88daa4d2f51f17f684e76a8a879588a5578f",
             "kind": "activate",
             "payload": {
               "baseline_used": 3,
@@ -6703,7 +6703,7 @@
               "reason_code": "activation",
               "seal_seq": 8
             },
-            "record_hash": "3739838c7b6cd38ab9027300efbf2fe823cc642178e7e952074e5ef403f2f068"
+            "record_hash": "1fa59b8be155b7eca671e88ea8e1fad8b37461baf6476a2218bbd09881845998"
           }
         ]
       },
@@ -6719,7 +6719,7 @@
           "expected_seq": 9,
           "payload": {
             "head": "1111111111111111111111111111111111111111",
-            "pr": "https://github.com/mgh3326/handoffkeep/pull/2400",
+            "pr": "https://pr.invalid/handoffkeep/pull/2400",
             "report_b64": "cGFjayByZXBvcnQgYnl0ZXMK",
             "report_sha256": "d6b174cbb3403f89f854f6f7870e3cbbabcffcfabcceb7e8f62061b6811d2251",
             "waiver_grant_seq": null
@@ -7075,23 +7075,23 @@
             "claim_seq": 1,
             "actor_client_id": "director-1",
             "idempotency_key": "00000000-0000-4000-8000-000000203034",
-            "request_sha256": "b075a307384069f93606760e92a1e65e0797f42044fc69ff17a16238f8a722cf",
+            "request_sha256": "952592611e70a1ea116ddb15667b866cce540ebba7c5d487cf6221227d53d33b",
             "imported": true,
             "source": {
               "source_locator": "testdata/o3/legacy/planted/events/00006-job.joined.json",
-              "source_sha256": "573bcc9e0819c5bb71ba9ae1e07f7280caa0dbb7aaea00494858bef37e8b8abf"
+              "source_sha256": "abb508de8396e2c71456bdab4f7b039dc981655e7192a00355c114abb24bc4d2"
             },
             "received_at": "2026-10-24T00:00:00.000074Z",
             "previous_hash": "176a45a033c16cd20c0b00ce9ba2ad0323b228fb97b6a2cd9a3e547ee62f3ba2",
             "kind": "import",
             "payload": {
               "source_locator": "testdata/o3/legacy/planted/events/00006-job.joined.json",
-              "source_sha256": "573bcc9e0819c5bb71ba9ae1e07f7280caa0dbb7aaea00494858bef37e8b8abf",
+              "source_sha256": "abb508de8396e2c71456bdab4f7b039dc981655e7192a00355c114abb24bc4d2",
               "original_actor_client_id": "desktop",
               "original_at": "2026-10-20T00:00:00.000000Z",
               "legacy_kind": "job.joined"
             },
-            "record_hash": "69adb38401a5bda9fdf543e70a45208be4d12ee76c0e58bcfe811549dab297b7"
+            "record_hash": "ee32e5916082f1d7bac91463871361215a3e2787eb26ff800a14b8d616bc854c"
           },
           {
             "job_id": "job-s",
@@ -7101,22 +7101,22 @@
             "claim_seq": 1,
             "actor_client_id": "director-1",
             "idempotency_key": "00000000-0000-4000-8000-000000203075",
-            "request_sha256": "d25a7f080cdc341db08a3c1be5a84cfa34f088bd7589e30b5c11e5d8b0e716c3",
+            "request_sha256": "65bad50f97dab4b3753233e6cc4299e4055d90049a9eb369774ac143b3183b40",
             "imported": false,
             "source": null,
             "received_at": "2026-10-24T00:00:00.000075Z",
-            "previous_hash": "69adb38401a5bda9fdf543e70a45208be4d12ee76c0e58bcfe811549dab297b7",
+            "previous_hash": "ee32e5916082f1d7bac91463871361215a3e2787eb26ff800a14b8d616bc854c",
             "kind": "import_seal",
             "payload": {
               "begin_seq": 3,
               "expected_import_count": 4,
-              "manifest_sha256": "766d4d92563966ad476d0e5acd559597d50b5f8b1221e068422a330d80e6a7d4",
+              "manifest_sha256": "7f27494bfe2d6130541d7c01cc857660af18789ce605f1588a9ce8ee79583752",
               "reason_code": "import_seal",
               "shadow_cutoff_seq": 2,
               "baseline_used": 3,
               "numbering_floor": 1
             },
-            "record_hash": "e549016b2176c996f20c2ba7b10722d97b8fef04e220ba538d5e0a93b8ffee63"
+            "record_hash": "19ee025af86167a56ad7339e633f88daa4d2f51f17f684e76a8a879588a5578f"
           },
           {
             "job_id": "job-s",
@@ -7130,7 +7130,7 @@
             "imported": false,
             "source": null,
             "received_at": "2026-10-24T00:00:00.000076Z",
-            "previous_hash": "e549016b2176c996f20c2ba7b10722d97b8fef04e220ba538d5e0a93b8ffee63",
+            "previous_hash": "19ee025af86167a56ad7339e633f88daa4d2f51f17f684e76a8a879588a5578f",
             "kind": "activate",
             "payload": {
               "baseline_used": 3,
@@ -7138,7 +7138,7 @@
               "reason_code": "activation",
               "seal_seq": 8
             },
-            "record_hash": "3739838c7b6cd38ab9027300efbf2fe823cc642178e7e952074e5ef403f2f068"
+            "record_hash": "1fa59b8be155b7eca671e88ea8e1fad8b37461baf6476a2218bbd09881845998"
           }
         ]
       },

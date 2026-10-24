@@ -100,8 +100,8 @@
       "bytes": 357
     },
     "legacy/planted/events/00006-job.joined.json": {
-      "sha256": "573bcc9e0819c5bb71ba9ae1e07f7280caa0dbb7aaea00494858bef37e8b8abf",
-      "bytes": 445
+      "sha256": "abb508de8396e2c71456bdab4f7b039dc981655e7192a00355c114abb24bc4d2",
+      "bytes": 437
     },
     "legacy/malformed/events/00001-job.claim.json": {
       "sha256": "d9b052a8ae1f32904f9d31327b55598911166f8c9f926e39e925bdd92ab01b71",
@@ -144,12 +144,12 @@
       "bytes": 245
     },
     "vectors/failure-abuse.json": {
-      "sha256": "070db19faedf0c25699e2e58d113f811f66067ec7a87738626392554e2fde632",
-      "bytes": 184251
+      "sha256": "07ecc5a6aa99a820d382a3487ab4ee38b038887f88235687661d52c541a9bad6",
+      "bytes": 184289
     },
     "vectors/head-repeat-binding.json": {
-      "sha256": "2d054f22d49a4218960aece77451cd11233f104191af086aaae4c87a11ab3fbe",
-      "bytes": 103816
+      "sha256": "12d828b5e7fef0dd828dd484640c81efdb1565a188575b4a893e1cb83d7f0e58",
+      "bytes": 103808
     },
     "vectors/legacy-route-fence.json": {
       "sha256": "a93dc4ca34a884d56ccc0c2891d67dcd125c95673cdc18cbca8811360770a25a",
@@ -160,24 +160,24 @@
       "bytes": 114678
     },
     "vectors/r3-regression.json": {
-      "sha256": "e79c2d276b3bd8121e05748d00c8f9353f1d89d4e15607f5b9bee93cf6c31b24",
-      "bytes": 146236
+      "sha256": "87b0930acd8c39c102f72e30daf1c075ec83eddd89c052a9af184df5d8c5e151",
+      "bytes": 146204
     },
     "vectors/r4-review-lifecycle.json": {
-      "sha256": "b01c1b5c47a5ca6ba9779a497a96e478b00c709bce3920a0e57f292305d83278",
-      "bytes": 94351
+      "sha256": "66852aedadeafe6471770bb06713973ebef380ca65b578cb1bba6c525a44b6b3",
+      "bytes": 94343
     },
     "vectors/r4-scoped-claim.json": {
-      "sha256": "dce37a9279446e7bbb8a6c961c7b6f7f7dca3ba6c49e1f93d23915b1fe52376d",
-      "bytes": 367462
+      "sha256": "38933589efa19d1a824d016ce1d1d3eb7fabff4797a8c6b268f21c63e5c7e138",
+      "bytes": 367446
     },
     "vectors/section4-rules.json": {
       "sha256": "65efcb7a89e022b2f01f5f7d308718fdf17fc211e49b1d03d6a936521260c9e7",
       "bytes": 268434
     },
     "vectors/transition.json": {
-      "sha256": "fb924bf1b5976439d41248ef01d4ac25927f36fda1882138a42e26cb5e3d37b6",
-      "bytes": 320957
+      "sha256": "ce4956060a3d590b616fef2b679b0e6d430437b8ca2973d2984cd06eca78079a",
+      "bytes": 320949
     },
     "vectors/transport-intents.json": {
       "sha256": "2be67c1cf3745a2f1ae9892be8d6e7a4c69fe96e3b72e1981349b8d621c6baaa",

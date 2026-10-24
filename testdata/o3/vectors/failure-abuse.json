@@ -324,7 +324,7 @@
       }
     },
     {
-      "name": "replay-old-verdict-fresh-key-path",
+      "name": "replay-old-verdict-fresh-key-same-path",
       "source": {
         "section": "8",
         "table": "Failure and abuse cases",
@@ -623,7 +623,7 @@
             "round_no": 1,
             "head": "1111111111111111111111111111111111111111",
             "verdict": "PASS",
-            "path": "/jobs/job-a/verdict-r2.md",
+            "path": "/jobs/job-a/verdict-r1.md",
             "content_sha256": "c716b4110c0eb89b2621aa725401d2bbd8aca5fc3b3b2680da883b07230debb0",
             "content_b64": "VkVSRElDVDogUEFTUyBAMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMgpyZXZpZXcgbm90ZXMK",
             "tester_job_id": null
@@ -632,8 +632,8 @@
       },
       "expect": {
         "http_status": 409,
-        "error": "duplicate_head",
-        "note": "fresh key+path hits duplicate_path or duplicate_content; changed bytes/path hit duplicate_head at round_open without exact head_repeat grant"
+        "error": "duplicate_path",
+        "note": "fresh key + already-used path = duplicate_path; the row's second clause covers changed-bytes-at-fresh-path (duplicate_content) and head reuse blocked at round_open by duplicate_head"
       }
     },
     {
@@ -3831,23 +3831,23 @@
             "claim_seq": 1,
             "actor_client_id": "director-1",
             "idempotency_key": "00000000-0000-4000-8000-000000213530",
-            "request_sha256": "b075a307384069f93606760e92a1e65e0797f42044fc69ff17a16238f8a722cf",
+            "request_sha256": "952592611e70a1ea116ddb15667b866cce540ebba7c5d487cf6221227d53d33b",
             "imported": true,
             "source": {
               "source_locator": "testdata/o3/legacy/planted/events/00006-job.joined.json",
-              "source_sha256": "573bcc9e0819c5bb71ba9ae1e07f7280caa0dbb7aaea00494858bef37e8b8abf"
+              "source_sha256": "abb508de8396e2c71456bdab4f7b039dc981655e7192a00355c114abb24bc4d2"
             },
             "received_at": "2026-10-24T00:00:00.000330Z",
             "previous_hash": "32633392b675d160a25a95bdd2fd289e84d7b370dc2400631dae5270ece34493",
             "kind": "import",
             "payload": {
               "source_locator": "testdata/o3/legacy/planted/events/00006-job.joined.json",
-              "source_sha256": "573bcc9e0819c5bb71ba9ae1e07f7280caa0dbb7aaea00494858bef37e8b8abf",
+              "source_sha256": "abb508de8396e2c71456bdab4f7b039dc981655e7192a00355c114abb24bc4d2",
               "original_actor_client_id": "desktop",
               "original_at": "2026-10-20T00:00:00.000000Z",
               "legacy_kind": "job.joined"
             },
-            "record_hash": "055f579b268dfa1f47fc795e850cb31aadccdd202abb33e41a36d88e6cb5ec6b"
+            "record_hash": "050fc47cfd9eccf08424ecd592c1c61793a4ab3553c1786955f394119dbffb2b"
           },
           {
             "job_id": "job-s",
@@ -3857,22 +3857,22 @@
             "claim_seq": 1,
             "actor_client_id": "director-1",
             "idempotency_key": "00000000-0000-4000-8000-000000213571",
-            "request_sha256": "d25a7f080cdc341db08a3c1be5a84cfa34f088bd7589e30b5c11e5d8b0e716c3",
+            "request_sha256": "65bad50f97dab4b3753233e6cc4299e4055d90049a9eb369774ac143b3183b40",
             "imported": false,
             "source": null,
             "received_at": "2026-10-24T00:00:00.000331Z",
-            "previous_hash": "055f579b268dfa1f47fc795e850cb31aadccdd202abb33e41a36d88e6cb5ec6b",
+            "previous_hash": "050fc47cfd9eccf08424ecd592c1c61793a4ab3553c1786955f394119dbffb2b",
             "kind": "import_seal",
             "payload": {
               "begin_seq": 3,
               "expected_import_count": 4,
-              "manifest_sha256": "766d4d92563966ad476d0e5acd559597d50b5f8b1221e068422a330d80e6a7d4",
+              "manifest_sha256": "7f27494bfe2d6130541d7c01cc857660af18789ce605f1588a9ce8ee79583752",
               "reason_code": "import_seal",
               "shadow_cutoff_seq": 2,
               "baseline_used": 3,
               "numbering_floor": 1
             },
-            "record_hash": "a8f9f3812be6140d314d7b71b6db2b02cc4d5253be08a82478bda601c9d2f056"
+            "record_hash": "f0a51be326c58757da3db0cc327d44bfc6e02e3a0fb95c6dd3008ee2be70309e"
           },
           {
             "job_id": "job-s",
@@ -3886,7 +3886,7 @@
             "imported": false,
             "source": null,
             "received_at": "2026-10-24T00:00:00.000332Z",
-            "previous_hash": "a8f9f3812be6140d314d7b71b6db2b02cc4d5253be08a82478bda601c9d2f056",
+            "previous_hash": "f0a51be326c58757da3db0cc327d44bfc6e02e3a0fb95c6dd3008ee2be70309e",
             "kind": "activate",
             "payload": {
               "baseline_used": 3,
@@ -3894,7 +3894,7 @@
               "reason_code": "activation",
               "seal_seq": 8
             },
-            "record_hash": "13c53c793288ea541f60e53f65e6dcd0d65c8e63ad71193fe093541641e97381"
+            "record_hash": "503e99fa6749f353edc09bdc7f6d6629ba1f00f8b2a49ff8cc76c96d4b974609"
           }
         ]
       },
@@ -3910,7 +3910,7 @@
           "expected_seq": 8,
           "payload": {
             "head": "1111111111111111111111111111111111111111",
-            "pr": "https://github.com/mgh3326/handoffkeep/pull/2400",
+            "pr": "https://pr.invalid/handoffkeep/pull/2400",
             "report_b64": "cGFjayByZXBvcnQgYnl0ZXMK",
             "report_sha256": "d6b174cbb3403f89f854f6f7870e3cbbabcffcfabcceb7e8f62061b6811d2251",
             "waiver_grant_seq": null

@@ -8,7 +8,7 @@
   "owner_lane": "b2391-pl",
   "pane_id": "w0Q:pAA",
   "parent_lane": "director-1",
-  "pr": "https://github.com/mgh3326/handoffkeep/pull/2399",
+  "pr": "https://pr.invalid/handoffkeep/pull/2399",
   "reason": "builder joined PR",
   "report_last_line": "DONE job=legacy-planted",
   "report_path": "/jobs/legacy-planted/report.md"

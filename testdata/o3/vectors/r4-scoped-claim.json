@@ -5219,7 +5219,7 @@
             "claim_seq": 1,
             "actor_client_id": "desktop",
             "idempotency_key": "00000000-0000-4000-8000-000000209061",
-            "request_sha256": "c6b81acc6980a27be04ed2320cea9a1fa939c176906a0d3bdc94a5362f22368a",
+            "request_sha256": "0dbb853d91595cd60efdeaca1f03a58cf00e6cf5fe77a0c7e86db42e3e234270",
             "imported": false,
             "source": null,
             "received_at": "2026-10-24T00:00:00.000221Z",
@@ -5227,7 +5227,7 @@
             "kind": "joined",
             "payload": {
               "head": "1111111111111111111111111111111111111111",
-              "pr": "https://github.com/mgh3326/handoffkeep/pull/2400",
+              "pr": "https://pr.invalid/handoffkeep/pull/2400",
               "report_sha256": "d6b174cbb3403f89f854f6f7870e3cbbabcffcfabcceb7e8f62061b6811d2251",
               "report_size_bytes": 18,
               "verdict_seqs": [
@@ -5235,7 +5235,7 @@
               ],
               "waiver_grant_seq": null
             },
-            "record_hash": "75811f30ab62c9644ff8815e6293c579c4ece7804517623c138dc7fada597131"
+            "record_hash": "d38d2f9aae07443bf9822728762a9dd775b3d15756e6882441e34aaa42a0e3af"
           }
         ]
       },
@@ -8948,7 +8948,7 @@
           "expected_seq": 1,
           "payload": {
             "head": "2222222222222222222222222222222222222222",
-            "pr": "https://github.com/mgh3326/handoffkeep/pull/2400",
+            "pr": "https://pr.invalid/handoffkeep/pull/2400",
             "report_b64": "cGFjayByZXBvcnQgYnl0ZXMK",
             "report_sha256": "d6b174cbb3403f89f854f6f7870e3cbbabcffcfabcceb7e8f62061b6811d2251",
             "waiver_grant_seq": null
