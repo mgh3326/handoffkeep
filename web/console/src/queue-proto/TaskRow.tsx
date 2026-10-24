@@ -127,6 +127,17 @@ function LiveChipSummary({ task, now, live }: { task: ProtoTask; now: string; li
   );
 }
 
+/** Plain read-only label for the task's routing area. Nothing renders for an
+ * unset area — a missing tag is not a value worth a placeholder on every
+ * row. It is text in a span: no control, no link, no edit path. */
+function AreaLabel({ task }: { task: ProtoTask }) {
+  return task.area ? (
+    <span className="qp-area" title="task area (routing tag, read-only)">
+      {task.area}
+    </span>
+  ) : null;
+}
+
 /** #618 row badge: only the fact that a recorded decision request is open
  * (the drawer carries the question and choices; answering is #580). Text,
  * not color alone, says which. */
@@ -196,6 +207,7 @@ export function RowFields({ task, now, showStateLabel = false, live }: RowFields
             <span className="qp-claimant">{task.claimant}</span>
           )}
         </span>
+        <AreaLabel task={task} />
         <DecisionBadge task={task} />
         <LiveChips task={task} now={now} live={live} />
         <span className="qp-meta-age">

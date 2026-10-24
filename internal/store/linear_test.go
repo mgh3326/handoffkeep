@@ -264,14 +264,14 @@ func TestListTasksPageUsesStableIDCursor(t *testing.T) {
 		}
 		created[index] = task
 	}
-	first, err := st.ListTasksPage(t.Context(), lane, "", "", nil, 0, 2)
+	first, err := st.ListTasksPage(t.Context(), lane, "", "", nil, nil, 0, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(first) != 2 || first[0].ID != created[0].ID || first[1].ID != created[1].ID {
 		t.Fatalf("first page=%+v", first)
 	}
-	second, err := st.ListTasksPage(t.Context(), lane, "", "", nil, first[1].ID, 2)
+	second, err := st.ListTasksPage(t.Context(), lane, "", "", nil, nil, first[1].ID, 2)
 	if err != nil {
 		t.Fatal(err)
 	}

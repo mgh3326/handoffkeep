@@ -63,7 +63,7 @@ func TestCreateTaskBodyDoc(t *testing.T) {
 	if err != nil || !found || got.BodyDoc != "design/not-written-yet#3" {
 		t.Fatalf("get body_doc=%q found=%t err=%v", got.BodyDoc, found, err)
 	}
-	page, err := s.ListTasksPage(ctx, "lane-a", "", "", nil, 0, 10)
+	page, err := s.ListTasksPage(ctx, "lane-a", "", "", nil, nil, 0, 10)
 	if err != nil || len(page) != 1 || page[0].BodyDoc != "design/not-written-yet#3" {
 		t.Fatalf("page=%+v err=%v", page, err)
 	}

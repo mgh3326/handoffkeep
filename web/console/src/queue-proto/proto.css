@@ -680,6 +680,14 @@ summary {
   color: var(--hk-text-muted);
   font-style: italic;
 }
+.qp-area {
+  padding: 0 var(--hk-space-1);
+  border: 1px solid var(--hk-border-subtle);
+  border-radius: var(--hk-radius-md);
+  font-size: var(--hk-font-meta);
+  color: var(--hk-text-muted);
+  white-space: nowrap;
+}
 .qp-stale {
   color: var(--hk-warning);
   font-weight: var(--hk-weight-medium);

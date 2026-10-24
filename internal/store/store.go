@@ -97,6 +97,10 @@ var (
 	// task_projects vocabulary — wrong spellings would fragment the groups
 	// the field exists to provide.
 	ErrTaskProjectUnknown = errors.New("task_project_unknown")
+	// ErrTaskAreaUnknown rejects an area outside the TaskAreas vocabulary.
+	// The text is the allowed set, so every surface that reports it names
+	// the values a caller may use.
+	ErrTaskAreaUnknown = errors.New("invalid_request")
 	// ErrBenchRepsRetryable marks a batch write Postgres aborted on its own:
 	// a deadlock victim (SQLSTATE 40P01) or a serialization failure (40001).
 	// The transaction rolled back, nothing was written, and the client may
@@ -311,7 +315,49 @@ const (
 	// Like relane rows they carry classification values, not states, in
 	// from/to — the same readers that filter kind must skip them.
 	TaskEventProject = "project"
+	// TaskEventArea marks task_events rows written by SetTaskArea. from/to
+	// carry area names ("" for unset), never states.
+	TaskEventArea = "area"
 )
+
+// TaskAreas is the closed task area vocabulary, in display order. It is a
+// code constant: changing the list is a code change, never a runtime write.
+// An area is routing metadata. It is not part of any claim or receipt and is
+// not an authority input.
+var TaskAreas = [...]string{"blender", "unity", "web-qa", "ui-design", "image", "web-frontend", "go-backend", "python", "trading", "shell-wrk", "docs", "research", "ops"}
+
+// ValidTaskArea reports whether v is exactly one of TaskAreas. There is no
+// case folding, trimming or normalisation: a near miss is not an area.
+func ValidTaskArea(v string) bool {
+	for _, a := range TaskAreas {
+		if v == a {
+			return true
+		}
+	}
+	return false
+}
+
+// checkTaskAreaFilter validates a list filter. It is tri-state like the
+// project filter: nil means no filter, "" selects tasks with no area, and any
+// other value must be in the vocabulary. An unknown value is an error, not an
+// empty result, so a misspelt filter cannot read as "no such tasks".
+func checkTaskAreaFilter(area *string) error {
+	if area == nil || *area == "" {
+		return nil
+	}
+	return ValidateTaskArea(area)
+}
+
+// ValidateTaskArea validates an optional area; the CLI and API call it so the
+// refusal text is the same everywhere. nil means unset and is always
+// valid; any non-nil value, the empty string included, must be in the
+// vocabulary.
+func ValidateTaskArea(area *string) error {
+	if area == nil || ValidTaskArea(*area) {
+		return nil
+	}
+	return fmt.Errorf("%w: area must be one of %s", ErrTaskAreaUnknown, strings.Join(TaskAreas[:], ", "))
+}
 
 type TaskEvent struct {
 	ID     int64  `json:"id"`
@@ -362,8 +408,12 @@ type Task struct {
 	// rows keep it (no backfill) and render as the "no project" bucket.
 	// The field is always emitted, so a null means an unset project rather
 	// than a server that predates the column.
-	Project *string     `json:"project"`
-	Events  []TaskEvent `json:"events,omitempty"`
+	Project *string `json:"project"`
+	// Area is the task's entry in the TaskAreas vocabulary. NULL on rows
+	// created before the field existed and on any task nobody has tagged;
+	// always emitted, so a null means unset.
+	Area   *string     `json:"area"`
+	Events []TaskEvent `json:"events,omitempty"`
 }
 
 // RelayEvent is a durable report from a worker to its owning lane.  Delivery
@@ -873,6 +923,30 @@ func (s *Store) migrate(ctx context.Context) error {
 			`INSERT INTO schema_version(version) VALUES (17)`,
 		}
 		for _, q := range v17 {
+			if _, err := tx.Exec(ctx, q); err != nil {
+				return err
+			}
+		}
+	}
+	var v18Applied bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_version WHERE version=18)`).Scan(&v18Applied); err != nil {
+		return err
+	}
+	if !v18Applied {
+		// Version 18 (hk 1940) adds the task area: tasks.area is a nullable
+		// column validated against the TaskAreas code constant, not a table
+		// and not a CHECK, because the vocabulary changes with the code and a
+		// CHECK would freeze a copy of it in the schema. Existing rows stay
+		// NULL; tagging them is an explicit later action, never a guess by
+		// migration. The kind CHECK swap admits 'area' events and follows
+		// the v14/v15 pattern: NOT VALID, lock-heavy DDL runs once behind
+		// the version gate, existing rows need no re-check.
+		v18 := []string{
+			`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS area TEXT`,
+			`ALTER TABLE task_events DROP CONSTRAINT IF EXISTS task_events_kind_check, ADD CONSTRAINT task_events_kind_check CHECK(kind IN ('transition','relane','decision','project','area')) NOT VALID`,
+			`INSERT INTO schema_version(version) VALUES (18)`,
+		}
+		for _, q := range v18 {
 			if _, err := tx.Exec(ctx, q); err != nil {
 				return err
 			}
@@ -1691,13 +1765,13 @@ func ValidBodyDoc(v string) bool {
 
 func scanTask(row interface{ Scan(...any) error }, x *Task) error {
 	var refs []byte
-	if err := row.Scan(&x.ID, &x.Lane, &x.ParentLane, &x.Title, &x.Kind, &x.State, &x.Priority, &refs, &x.ClaimedBy, &x.CreatedBy, &x.CreatedAt, &x.UpdatedAt, &x.BodyDoc, &x.Project); err != nil {
+	if err := row.Scan(&x.ID, &x.Lane, &x.ParentLane, &x.Title, &x.Kind, &x.State, &x.Priority, &refs, &x.ClaimedBy, &x.CreatedBy, &x.CreatedAt, &x.UpdatedAt, &x.BodyDoc, &x.Project, &x.Area); err != nil {
 		return err
 	}
 	return json.Unmarshal(refs, &x.Refs)
 }
 
-const taskColumns = `id,lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at,body_doc,project`
+const taskColumns = `id,lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at,body_doc,project,area`
 
 // taskProjectQuerier is the row-query seam requireTaskProject runs against:
 // the caller's transaction, so membership is judged in the same snapshot the
@@ -1745,6 +1819,9 @@ func (s *Store) CreateTask(ctx context.Context, x Task) (Task, error) {
 	if err := guard.Reject(x.Title); err != nil {
 		return x, err
 	}
+	if err := ValidateTaskArea(x.Area); err != nil {
+		return x, err
+	}
 	if err := rejectTaskRefs(x.Refs); err != nil {
 		return x, err
 	}
@@ -1763,7 +1840,7 @@ func (s *Store) CreateTask(ctx context.Context, x Task) (Task, error) {
 	if err = requireTaskProject(ctx, tx, x.Project); err != nil {
 		return x, err
 	}
-	if err = scanTask(tx.QueryRow(ctx, `INSERT INTO tasks(lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at,body_doc,project) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$12,$13) RETURNING `+taskColumns, x.Lane, x.ParentLane, x.Title, x.Kind, x.State, x.Priority, string(refs), x.ClaimedBy, x.CreatedBy, x.CreatedAt, x.UpdatedAt, x.BodyDoc, x.Project), &x); err != nil {
+	if err = scanTask(tx.QueryRow(ctx, `INSERT INTO tasks(lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at,body_doc,project,area) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$12,$13,$14) RETURNING `+taskColumns, x.Lane, x.ParentLane, x.Title, x.Kind, x.State, x.Priority, string(refs), x.ClaimedBy, x.CreatedBy, x.CreatedAt, x.UpdatedAt, x.BodyDoc, x.Project, x.Area), &x); err != nil {
 		return x, err
 	}
 	if s.LinearSyncEnabled() && x.Refs.Linear != nil && x.Refs.Linear.Sync {
@@ -2245,6 +2322,56 @@ func (s *Store) SetTaskProject(ctx context.Context, id int64, project, by, note 
 	return x, true, tx.Commit(ctx)
 }
 
+// SetTaskArea tags one task from the TaskAreas vocabulary; a nil area clears
+// the tag. It follows SetTaskProject's shape: row lock, append-only
+// kind='area' event whose from/to carry area names ("" for unset), and no
+// event when the value is unchanged. Like project it is allowed on terminal
+// rows: area is routing metadata, not lifecycle.
+func (s *Store) SetTaskArea(ctx context.Context, id int64, area *string, by, note string) (x Task, changed bool, err error) {
+	if err := ValidateTaskArea(area); err != nil {
+		return Task{}, false, err
+	}
+	if by == "" || !validText(by, 128) || !validText(note, MaxBytes) {
+		return Task{}, false, errors.New("invalid task area change")
+	}
+	if err := guard.Reject(note); err != nil {
+		return Task{}, false, err
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Task{}, false, err
+	}
+	defer tx.Rollback(ctx)
+	if err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, id), &x); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Task{}, false, ErrTaskNotFound
+		}
+		return Task{}, false, err
+	}
+	from, to := "", ""
+	if x.Area != nil {
+		from = *x.Area
+	}
+	if area != nil {
+		to = *area
+	}
+	if from == to {
+		return x, false, tx.Commit(ctx)
+	}
+	encoded, err := json.Marshal(x.Refs)
+	if err != nil {
+		return Task{}, false, err
+	}
+	x.UpdatedAt = time.Now().UTC()
+	if err = scanTask(tx.QueryRow(ctx, `UPDATE tasks SET area=$2,updated_at=$3 WHERE id=$1 RETURNING `+taskColumns, id, area, x.UpdatedAt), &x); err != nil {
+		return Task{}, false, err
+	}
+	if _, err = tx.Exec(ctx, `INSERT INTO task_events(task_id,"from","to","by",note,refs,at,kind) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,'area')`, id, from, to, by, note, string(encoded), x.UpdatedAt); err != nil {
+		return Task{}, false, err
+	}
+	return x, true, tx.Commit(ctx)
+}
+
 // ListTaskProjects returns the server-configured project vocabulary in
 // name order. This is the set tasks add --project accepts.
 func (s *Store) ListTaskProjects(ctx context.Context) ([]string, error) {
@@ -2277,9 +2404,12 @@ func (s *Store) AddTaskProject(ctx context.Context, name, by string) (bool, erro
 	return tag.RowsAffected() == 1, nil
 }
 
-func (s *Store) ListTasks(ctx context.Context, lane, state, parentLane string, project *string, limit int) ([]Task, error) {
+func (s *Store) ListTasks(ctx context.Context, lane, state, parentLane string, project, area *string, limit int) ([]Task, error) {
 	if !validTaskQuery(lane, state, parentLane, project) {
 		return nil, errors.New("invalid task query")
+	}
+	if err := checkTaskAreaFilter(area); err != nil {
+		return nil, err
 	}
 	if limit < 1 {
 		limit = 20
@@ -2308,6 +2438,14 @@ func (s *Store) ListTasks(ctx context.Context, lane, state, parentLane string, p
 			q += fmt.Sprintf(" AND project=$%d", len(args))
 		}
 	}
+	if area != nil {
+		if *area == "" {
+			q += " AND area IS NULL"
+		} else {
+			args = append(args, *area)
+			q += fmt.Sprintf(" AND area=$%d", len(args))
+		}
+	}
 	args = append(args, limit)
 	q += fmt.Sprintf(" ORDER BY priority DESC,created_at ASC,id ASC LIMIT $%d", len(args))
 	rows, err := s.pool.Query(ctx, q, args...)
@@ -2329,9 +2467,12 @@ func (s *Store) ListTasks(ctx context.Context, lane, state, parentLane string, p
 // ListTasksPage returns a stable ID-ordered page for callers that must visit
 // the complete task set. afterID is exclusive; ListTasks retains its queue
 // priority ordering for existing callers.
-func (s *Store) ListTasksPage(ctx context.Context, lane, state, parentLane string, project *string, afterID int64, limit int) ([]Task, error) {
+func (s *Store) ListTasksPage(ctx context.Context, lane, state, parentLane string, project, area *string, afterID int64, limit int) ([]Task, error) {
 	if !validTaskQuery(lane, state, parentLane, project) || afterID < 0 {
 		return nil, errors.New("invalid task query")
+	}
+	if err := checkTaskAreaFilter(area); err != nil {
+		return nil, err
 	}
 	if limit < 1 {
 		limit = 20
@@ -2358,6 +2499,14 @@ func (s *Store) ListTasksPage(ctx context.Context, lane, state, parentLane strin
 		} else {
 			args = append(args, *project)
 			q += fmt.Sprintf(" AND project=$%d", len(args))
+		}
+	}
+	if area != nil {
+		if *area == "" {
+			q += " AND area IS NULL"
+		} else {
+			args = append(args, *area)
+			q += fmt.Sprintf(" AND area=$%d", len(args))
 		}
 	}
 	args = append(args, limit)

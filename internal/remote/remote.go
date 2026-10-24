@@ -659,9 +659,18 @@ func (c Client) AttachmentUsage(ctx context.Context) (store.AttachmentUsage, err
 	return x.Usage, e
 }
 
+// createTaskBody is store.Task on the wire with area omitted when unset. The
+// server decodes with unknown fields refused, so a new client that always
+// sent "area":null would break against a server that predates the column.
+// The outer Area shadows the embedded one for encoding/json.
+type createTaskBody struct {
+	store.Task
+	Area *string `json:"area,omitempty"`
+}
+
 func (c Client) CreateTask(ctx context.Context, x store.Task) (store.Task, error) {
 	var out store.Task
-	err := c.call(ctx, "POST", "/v1/tasks", x, &out)
+	err := c.call(ctx, "POST", "/v1/tasks", createTaskBody{Task: x, Area: x.Area}, &out)
 	if err != nil {
 		// The server's code and reason surface unchanged — invalid_context on
 		// create is a validation failure (missing lane, unknown kind), not a
@@ -672,6 +681,9 @@ func (c Client) CreateTask(ctx context.Context, x store.Task) (store.Task, error
 	// silently dropping the field — same silent-drop defense as job_id.
 	if x.Project != nil && (out.Project == nil || *out.Project != *x.Project) {
 		return out, fmt.Errorf("create_project_not_recorded: server response has project unset — it likely predates the task project field")
+	}
+	if x.Area != nil && (out.Area == nil || *out.Area != *x.Area) {
+		return out, fmt.Errorf("create_area_not_recorded: server response has area unset — it likely predates the task area field")
 	}
 	return out, nil
 }
@@ -960,14 +972,42 @@ func taskProjectEchoOK(echo *string, project *string) error {
 	return nil
 }
 
-func (c Client) ListTasks(ctx context.Context, lane, state, parentLane string, project *string, limit int) ([]store.Task, error) {
+// taskAreaListOK is the area twin of the project echo and row checks. A
+// server that predates the area column drops ?area and answers unfiltered, so
+// the response must echo the requested filter and every row must match it.
+func taskAreaListOK(xs []store.Task, echo, area *string) error {
+	if area == nil {
+		return nil
+	}
+	if echo == nil || *echo != *area {
+		return fmt.Errorf("list_area_filter_ignored: server response lacks the area echo — it predates --area filtering")
+	}
+	for _, t := range xs {
+		if *area == "" {
+			if t.Area != nil {
+				return fmt.Errorf("list_area_filter_ignored: task %d has area %q — the server ignored the no-area filter", t.ID, *t.Area)
+			}
+			continue
+		}
+		if t.Area == nil || *t.Area != *area {
+			return fmt.Errorf("list_area_filter_ignored: task %d does not match area %q — the server ignored the filter", t.ID, *area)
+		}
+	}
+	return nil
+}
+
+func (c Client) ListTasks(ctx context.Context, lane, state, parentLane string, project, area *string, limit int) ([]store.Task, error) {
 	var out struct {
 		Tasks   []store.Task `json:"tasks"`
 		Project *string      `json:"project"`
+		Area    *string      `json:"area"`
 	}
 	q := url.Values{"lane": {lane}, "state": {state}, "parent_lane": {parentLane}, "limit": {fmt.Sprint(limit)}}
 	if project != nil {
 		q.Set("project", *project)
+	}
+	if area != nil {
+		q.Set("area", *area)
 	}
 	err := c.call(ctx, "GET", "/v1/tasks?"+q.Encode(), nil, &out)
 	if err != nil {
@@ -979,12 +1019,16 @@ func (c Client) ListTasks(ctx context.Context, lane, state, parentLane string, p
 	if err := taskProjectFilterOK(out.Tasks, project); err != nil {
 		return nil, err
 	}
+	if err := taskAreaListOK(out.Tasks, out.Area, area); err != nil {
+		return nil, err
+	}
 	return out.Tasks, nil
 }
-func (c Client) ListTasksPage(ctx context.Context, lane, state, parentLane string, project *string, afterID int64, limit int) ([]store.Task, error) {
+func (c Client) ListTasksPage(ctx context.Context, lane, state, parentLane string, project, area *string, afterID int64, limit int) ([]store.Task, error) {
 	var out struct {
 		Tasks   []store.Task `json:"tasks"`
 		Project *string      `json:"project"`
+		Area    *string      `json:"area"`
 	}
 	q := url.Values{
 		"lane":        {lane},
@@ -996,6 +1040,9 @@ func (c Client) ListTasksPage(ctx context.Context, lane, state, parentLane strin
 	if project != nil {
 		q.Set("project", *project)
 	}
+	if area != nil {
+		q.Set("area", *area)
+	}
 	err := c.call(ctx, "GET", "/v1/tasks?"+q.Encode(), nil, &out)
 	if err != nil {
 		return nil, err
@@ -1004,6 +1051,9 @@ func (c Client) ListTasksPage(ctx context.Context, lane, state, parentLane strin
 		return nil, err
 	}
 	if err := taskProjectFilterOK(out.Tasks, project); err != nil {
+		return nil, err
+	}
+	if err := taskAreaListOK(out.Tasks, out.Area, area); err != nil {
 		return nil, err
 	}
 	return out.Tasks, nil
@@ -1063,6 +1113,43 @@ func (c Client) SetTaskProject(ctx context.Context, id int64, project, note stri
 		return out, fmt.Errorf("project_not_applied: server response has project unset — it likely predates the task project field")
 	}
 	return out, nil
+}
+
+// SetTaskArea tags one task from the server's area vocabulary and returns the
+// updated row; a nil area clears the tag (the body carries an explicit null).
+// A server that predates the route answers 404/405, surfaced as
+// task_area_unsupported.
+func (c Client) SetTaskArea(ctx context.Context, id int64, area *string, note string) (store.Task, error) {
+	var out store.Task
+	err := c.call(ctx, "POST", fmt.Sprintf("/v1/tasks/%d/area", id), map[string]any{"area": area, "note": note}, &out)
+	if err != nil {
+		var he *HTTPError
+		if errors.As(err, &he) && (he.Status == 404 || he.Status == 405) {
+			return out, fmt.Errorf("task_area_unsupported: server predates the task area route")
+		}
+		return out, err
+	}
+	if (area == nil) != (out.Area == nil) || (area != nil && *out.Area != *area) {
+		return out, fmt.Errorf("area_not_applied: server response does not carry the requested area — it likely predates the task area field")
+	}
+	return out, nil
+}
+
+// ListTaskAreas answers the server's closed area vocabulary in order. A
+// server that predates the endpoint 404s it.
+func (c Client) ListTaskAreas(ctx context.Context) ([]string, error) {
+	var out struct {
+		Areas []string `json:"areas"`
+	}
+	err := c.call(ctx, "GET", "/v1/task-areas", nil, &out)
+	if err != nil {
+		var he *HTTPError
+		if errors.As(err, &he) && (he.Status == 404 || he.Status == 405) {
+			return nil, fmt.Errorf("task_areas_unsupported: server predates the task area vocabulary endpoint")
+		}
+		return nil, err
+	}
+	return out.Areas, nil
 }
 
 // ExportTasks fetches one consistent task snapshot and returns the exact

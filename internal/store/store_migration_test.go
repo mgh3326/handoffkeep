@@ -56,7 +56,7 @@ func TestRelayEventsV6ToV7Upgrade(t *testing.T) {
 		t.Fatal(err)
 	}
 	var version int
-	if err = pool.QueryRow(ctx, `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != 17 {
+	if err = pool.QueryRow(ctx, `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != 18 {
 		t.Fatalf("schema version=%d err=%v", version, err)
 	}
 	var constraintOID uint32

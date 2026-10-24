@@ -26,6 +26,7 @@ export function boardTaskToProto(task: BoardTask): ProtoTask {
     // Legacy rows carry JSON null; pre-field servers omit the key — both
     // land in the "no project" bucket.
     project: task.project ?? null,
+    area: task.area ?? null,
     refs: task.refs,
     ...(task.body_doc ? { body_doc: task.body_doc } : {}),
     events: [],
