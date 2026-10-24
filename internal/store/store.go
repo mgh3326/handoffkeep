@@ -73,6 +73,18 @@ var (
 	// with score null — for scopefuel #594's E6 measurement rungs; any real
 	// claim below S+ (a scored C, or an unscored A/B/S) still fails here.
 	ErrBenchCatalogSolGrade = errors.New("bench_catalog_sol_grade")
+	// ErrDecisionRefRequired rejects an area exception row without the
+	// decision record or task comment that approved it — an exception is
+	// never automatic.
+	ErrDecisionRefRequired = errors.New("decision_ref_required")
+	// ErrBenchAreaExceptionProfileUnknown rejects an exception whose
+	// (profile, effort) has no bench_catalog row, live or retired — no
+	// exception may name a profile the catalog does not know.
+	ErrBenchAreaExceptionProfileUnknown = errors.New("bench_area_exception_profile_unknown")
+	// ErrBenchAreaExceptionConflict rejects a write that would leave prefer
+	// and exclude live for one (profile, effort, area) key. Flipping a live
+	// row's action must go through retirement first.
+	ErrBenchAreaExceptionConflict = errors.New("bench_area_exception_action_conflict")
 	// ErrQueueEmpty is deliberately distinct from a missing task.  It lets
 	// queue consumers treat an empty lane as an expected terminal condition.
 	ErrQueueEmpty = errors.New("queue_empty")
@@ -583,6 +595,29 @@ type BenchCatalogEntry struct {
 	RetiredAt           *time.Time `json:"retired_at"`
 }
 
+// BenchAreaException is one row of the (profile, effort, area)-keyed routing
+// exception list (hk 1944, K5 of hk 1937). It sits next to the grade catalog
+// as canon but is deliberately not a grade row: a grade stays one axis, and
+// an exception only adjusts routing within or under it. Effort "" means
+// every effort of that profile; Action is the closed pair exclude|prefer.
+// DecidedBy and DecidedAt are server-set on write — unlike the catalog,
+// where the caller supplies provenance, the exception writer is always the
+// authenticated operator client. ExpiresWithModelID names the model id the
+// evidence was measured on; readers deactivate a row whose catalog model id
+// moved on.
+type BenchAreaException struct {
+	Profile            string     `json:"profile"`
+	Effort             string     `json:"effort"`
+	Area               string     `json:"area"`
+	Action             string     `json:"action"`
+	EvidenceRefs       []string   `json:"evidence_refs"`
+	DecisionRef        string     `json:"decision_ref"`
+	DecidedBy          string     `json:"decided_by"`
+	DecidedAt          time.Time  `json:"decided_at"`
+	ExpiresWithModelID string     `json:"expires_with_model_id"`
+	RetiredAt          *time.Time `json:"retired_at"`
+}
+
 // Attachment is immutable binary metadata. Object bytes are kept in R2; PostgreSQL
 // holds only the content address, provenance, and references.
 type Attachment struct {
@@ -960,6 +995,29 @@ func (s *Store) migrate(ctx context.Context) error {
 			}
 		}
 	}
+	var v19Applied bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_version WHERE version=19)`).Scan(&v19Applied); err != nil {
+		return err
+	}
+	if !v19Applied {
+		// Version 19 (hk 1944) adds the bench area exception list: per-area
+		// routing exceptions kept next to, but separate from, the grade
+		// catalog. The area column is validated in code against the TaskAreas
+		// constant (same reason as v18 — a CHECK would freeze a copy of the
+		// vocabulary), the action CHECK is closed, and evidence_refs carries
+		// at least one ref enforced by the write path. Retired rows stay in
+		// place; there is no DELETE.
+		v19 := []string{
+			`CREATE TABLE IF NOT EXISTS bench_area_exceptions (profile TEXT NOT NULL, effort TEXT NOT NULL DEFAULT '', area TEXT NOT NULL, action TEXT NOT NULL CHECK(action IN ('exclude','prefer')), evidence_refs TEXT[] NOT NULL, decision_ref TEXT NOT NULL, decided_by TEXT NOT NULL, decided_at TIMESTAMPTZ NOT NULL, expires_with_model_id TEXT NOT NULL, retired_at TIMESTAMPTZ, PRIMARY KEY(profile, effort, area))`,
+			`CREATE INDEX IF NOT EXISTS bench_area_exceptions_area ON bench_area_exceptions(area) WHERE retired_at IS NULL`,
+			`INSERT INTO schema_version(version) VALUES (19)`,
+		}
+		for _, q := range v19 {
+			if _, err := tx.Exec(ctx, q); err != nil {
+				return err
+			}
+		}
+	}
 	// Lane-knownness probes for relane run once per batch item. These
 	// indexes keep each probe an index lookup instead of a full scan —
 	// the existing relay_events index on owner_lane is partial and
@@ -1117,6 +1175,72 @@ func validBenchCatalogEntry(x BenchCatalogEntry) bool {
 		}
 	}
 	return true
+}
+
+var benchAreaExceptionActions = map[string]bool{"exclude": true, "prefer": true}
+
+// benchAreaExceptionMaxRefs bounds one exception's evidence list — the rows
+// are canon like catalog rows, not telemetry, so a handful of refs is the
+// expected shape.
+const benchAreaExceptionMaxRefs = 64
+
+var benchAreaExceptionTaskRefRE = regexp.MustCompile(`^hk:task/[0-9]+$`)
+var benchAreaExceptionSrvRefRE = regexp.MustCompile(`^srv:[0-9]+$`)
+
+// validBenchAreaExceptionRef accepts exactly the three evidence ref shapes:
+// hk:task/N, hk:doc/KEY (the document key validator is the store's own), and
+// srv:N. Anything else — whitespace, other schemes, bare numbers — is not
+// evidence.
+func validBenchAreaExceptionRef(ref string) bool {
+	switch {
+	case benchAreaExceptionTaskRefRE.MatchString(ref):
+		return true
+	case benchAreaExceptionSrvRefRE.MatchString(ref):
+		return true
+	case strings.HasPrefix(ref, "hk:doc/"):
+		return validDocKey(strings.TrimPrefix(ref, "hk:doc/"))
+	}
+	return false
+}
+
+// checkBenchAreaException validates one exception row against every rule the
+// write path enforces without consulting the database: required fields, the
+// closed action, the K1 area vocabulary, and the evidence ref shapes. The
+// (profile, effort) catalog lookup happens inside the upsert transaction.
+func checkBenchAreaException(x BenchAreaException) error {
+	if !validBenchRequiredText(x.Profile) {
+		return errors.New("invalid bench area exception profile")
+	}
+	if !validText(x.Effort, 200) {
+		return errors.New("invalid bench area exception effort")
+	}
+	if err := ValidateTaskArea(&x.Area); err != nil {
+		return err
+	}
+	if !benchAreaExceptionActions[x.Action] {
+		return errors.New("invalid bench area exception action")
+	}
+	if len(x.EvidenceRefs) < 1 || len(x.EvidenceRefs) > benchAreaExceptionMaxRefs {
+		return errors.New("invalid bench area exception evidence_refs")
+	}
+	for _, ref := range x.EvidenceRefs {
+		if !validBenchAreaExceptionRef(ref) {
+			return errors.New("invalid bench area exception evidence_refs")
+		}
+	}
+	if strings.TrimSpace(x.DecisionRef) == "" {
+		return ErrDecisionRefRequired
+	}
+	if !validBenchText(x.DecisionRef) {
+		return errors.New("invalid bench area exception decision_ref")
+	}
+	if !validBenchRequiredText(x.ExpiresWithModelID) {
+		return errors.New("invalid bench area exception expires_with_model_id")
+	}
+	if !validBenchClient(x.DecidedBy) {
+		return ErrDecidedByRequired
+	}
+	return nil
 }
 
 func (s *Store) UpsertBenchScores(ctx context.Context, xs []BenchScore) (int, error) {
@@ -1589,6 +1713,98 @@ func (s *Store) ListBenchCatalog(ctx context.Context, pool string, includeRetire
 	for rows.Next() {
 		var x BenchCatalogEntry
 		if err := rows.Scan(&x.Profile, &x.Effort, &x.ModelID, &x.Pool, &x.Grade, &x.Score, &x.Gate, &x.GateReason, &x.BenchmarkSource, &x.BenchmarkAnnotation, &x.BoundaryVersion, &x.DeviationRef, &x.DecidedAt, &x.DecidedBy, &x.RetiredAt); err != nil {
+			return nil, err
+		}
+		x.DecidedAt = x.DecidedAt.UTC()
+		if x.RetiredAt != nil {
+			t := x.RetiredAt.UTC()
+			x.RetiredAt = &t
+		}
+		out = append(out, x)
+	}
+	return out, rows.Err()
+}
+
+// upsertBenchAreaException is one race-free statement. The DO UPDATE lock
+// serializes writers on the key: a racer waits for the winner and then
+// re-evaluates the WHERE against the committed row. The WHERE admits the
+// write unless both sides would be live with different actions — an
+// unconditional update for a retired row or a retirement, a same-action
+// upsert otherwise. Nothing is written when prefer and exclude would both
+// be live; the empty RETURNING surfaces that as ErrBenchAreaExceptionConflict.
+const upsertBenchAreaException = `INSERT INTO bench_area_exceptions(profile,effort,area,action,evidence_refs,decision_ref,decided_by,decided_at,expires_with_model_id,retired_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (profile,effort,area) DO UPDATE SET action=EXCLUDED.action,evidence_refs=EXCLUDED.evidence_refs,decision_ref=EXCLUDED.decision_ref,decided_by=EXCLUDED.decided_by,decided_at=EXCLUDED.decided_at,expires_with_model_id=EXCLUDED.expires_with_model_id,retired_at=EXCLUDED.retired_at WHERE bench_area_exceptions.retired_at IS NOT NULL OR EXCLUDED.retired_at IS NOT NULL OR bench_area_exceptions.action = EXCLUDED.action RETURNING profile`
+
+// UpsertBenchAreaExceptions is the operator write path for the area
+// exception list, called only after the API has stamped DecidedBy and
+// DecidedAt. The batch is atomic: every row validates first, each
+// (profile, effort) must name a bench_catalog row — live or retired — and
+// prefer and exclude may never both be live for one key, whether the
+// conflict comes from the stored row or from another row in this batch.
+func (s *Store) UpsertBenchAreaExceptions(ctx context.Context, xs []BenchAreaException) (int, error) {
+	if len(xs) < 1 || len(xs) > benchBatchMax {
+		return 0, errors.New("invalid bench area exceptions")
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback(ctx)
+	now := time.Now().UTC()
+	for _, x := range xs {
+		if err := checkBenchAreaException(x); err != nil {
+			return 0, err
+		}
+		if err := guard.Reject(x.DecisionRef); err != nil {
+			return 0, err
+		}
+		if err := guard.Reject(x.ExpiresWithModelID); err != nil {
+			return 0, err
+		}
+		for _, ref := range x.EvidenceRefs {
+			if err := guard.Reject(ref); err != nil {
+				return 0, err
+			}
+		}
+		if x.DecidedAt.IsZero() {
+			x.DecidedAt = now
+		}
+		var known bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM bench_catalog WHERE profile=$1 AND effort=$2)`, x.Profile, x.Effort).Scan(&known); err != nil {
+			return 0, err
+		}
+		if !known {
+			return 0, fmt.Errorf("%w: %s effort %q", ErrBenchAreaExceptionProfileUnknown, x.Profile, x.Effort)
+		}
+		var key string
+		err = tx.QueryRow(ctx, upsertBenchAreaException, x.Profile, x.Effort, x.Area, x.Action, x.EvidenceRefs, x.DecisionRef, x.DecidedBy, x.DecidedAt, x.ExpiresWithModelID, x.RetiredAt).Scan(&key)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, fmt.Errorf("%w: %s effort %q area %s", ErrBenchAreaExceptionConflict, x.Profile, x.Effort, x.Area)
+		}
+		if err != nil {
+			return 0, err
+		}
+	}
+	return len(xs), tx.Commit(ctx)
+}
+
+// ListBenchAreaExceptions returns exception rows ordered by area, profile
+// and effort rung. Retired rows are hidden unless includeRetired is set; the
+// area filter is exact against the TaskAreas vocabulary.
+func (s *Store) ListBenchAreaExceptions(ctx context.Context, area string, includeRetired bool) ([]BenchAreaException, error) {
+	if area != "" {
+		if err := ValidateTaskArea(&area); err != nil {
+			return nil, err
+		}
+	}
+	rows, err := s.pool.Query(ctx, `SELECT profile,effort,area,action,evidence_refs,decision_ref,decided_by,decided_at,expires_with_model_id,retired_at FROM bench_area_exceptions WHERE ($1='' OR area=$1) AND ($2 OR retired_at IS NULL) ORDER BY area, profile, CASE effort WHEN '' THEN 0 WHEN 'low' THEN 1 WHEN 'medium' THEN 2 WHEN 'high' THEN 3 WHEN 'xhigh' THEN 4 WHEN 'max' THEN 5 ELSE 6 END, effort`, area, includeRetired)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []BenchAreaException{}
+	for rows.Next() {
+		var x BenchAreaException
+		if err := rows.Scan(&x.Profile, &x.Effort, &x.Area, &x.Action, &x.EvidenceRefs, &x.DecisionRef, &x.DecidedBy, &x.DecidedAt, &x.ExpiresWithModelID, &x.RetiredAt); err != nil {
 			return nil, err
 		}
 		x.DecidedAt = x.DecidedAt.UTC()
