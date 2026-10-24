@@ -64,6 +64,19 @@ func TestBenchAreaExceptionValidation(t *testing.T) {
 		{"unknown ref scheme", func(x *BenchAreaException) { x.EvidenceRefs = []string{"local:12"} }, "evidence", nil},
 		{"bare number ref", func(x *BenchAreaException) { x.EvidenceRefs = []string{"1031"} }, "evidence", nil},
 		{"ref with space", func(x *BenchAreaException) { x.EvidenceRefs = []string{"srv:1 2"} }, "evidence", nil},
+		{"doc ref with space", func(x *BenchAreaException) { x.EvidenceRefs = []string{"hk:doc/my key"} }, "evidence", nil},
+		{"doc ref with trailing space", func(x *BenchAreaException) { x.EvidenceRefs = []string{"hk:doc/key "} }, "evidence", nil},
+		{"doc ref with tab", func(x *BenchAreaException) { x.EvidenceRefs = []string{"hk:doc/a\tb"} }, "evidence", nil},
+		{"doc ref with newline", func(x *BenchAreaException) { x.EvidenceRefs = []string{"hk:doc/a\nb"} }, "evidence", nil},
+		{"doc ref with unicode", func(x *BenchAreaException) { x.EvidenceRefs = []string{"hk:doc/\u65e5\u672c\u8a9e"} }, "evidence", nil},
+		{"doc ref with unicode space", func(x *BenchAreaException) { x.EvidenceRefs = []string{"hk:doc/a\u00a0b"} }, "evidence", nil},
+		{"doc ref with zero-width space", func(x *BenchAreaException) { x.EvidenceRefs = []string{"hk:doc/a\u200bb"} }, "evidence", nil},
+		{"doc ref with DEL", func(x *BenchAreaException) { x.EvidenceRefs = []string{"hk:doc/a\x7fb"} }, "evidence", nil},
+		{"doc ref with control byte", func(x *BenchAreaException) { x.EvidenceRefs = []string{"hk:doc/a\x01b"} }, "evidence", nil},
+		{"task ref 19 digits", func(x *BenchAreaException) { x.EvidenceRefs = []string{"hk:task/1000000000000000000"} }, "evidence", nil},
+		{"task ref 10000 digits", func(x *BenchAreaException) { x.EvidenceRefs = []string{"hk:task/" + strings.Repeat("9", 10000)} }, "evidence", nil},
+		{"srv ref 19 digits", func(x *BenchAreaException) { x.EvidenceRefs = []string{"srv:1000000000000000000"} }, "evidence", nil},
+		{"srv ref 10000 digits", func(x *BenchAreaException) { x.EvidenceRefs = []string{"srv:" + strings.Repeat("9", 10000)} }, "evidence", nil},
 		{"empty decision_ref", func(x *BenchAreaException) { x.DecisionRef = "" }, "", ErrDecisionRefRequired},
 		{"blank decision_ref", func(x *BenchAreaException) { x.DecisionRef = "   " }, "", ErrDecisionRefRequired},
 		{"empty model id", func(x *BenchAreaException) { x.ExpiresWithModelID = "" }, "expires_with_model_id", nil},
@@ -93,6 +106,11 @@ func TestBenchAreaExceptionRefShapes(t *testing.T) {
 		"hk:task/1", "hk:task/1944",
 		"hk:doc/decision/2026-10-24/area-exceptions-1", "hk:doc/reports/b953/hk1938-kind-grading-packet",
 		"srv:1", "srv:1031",
+		// Boundaries: 18 digits is the widest numeric ref; a doc key may use
+		// any printable ASCII byte (0x21-0x7e) up to the 512-byte key limit.
+		"hk:task/999999999999999999", "srv:999999999999999999", "hk:task/000000000000000001",
+		"hk:doc/" + strings.Repeat("k", 512),
+		"hk:doc/!", "hk:doc/~", "hk:doc/a:b_c-d.e@f+g=h%20",
 	} {
 		x := validAreaException()
 		x.EvidenceRefs = []string{ref}

@@ -1184,13 +1184,15 @@ var benchAreaExceptionActions = map[string]bool{"exclude": true, "prefer": true}
 // expected shape.
 const benchAreaExceptionMaxRefs = 64
 
-var benchAreaExceptionTaskRefRE = regexp.MustCompile(`^hk:task/[0-9]+$`)
-var benchAreaExceptionSrvRefRE = regexp.MustCompile(`^srv:[0-9]+$`)
+// Numeric refs are capped at 18 digits so every value fits an int64.
+var benchAreaExceptionTaskRefRE = regexp.MustCompile(`^hk:task/[0-9]{1,18}$`)
+var benchAreaExceptionSrvRefRE = regexp.MustCompile(`^srv:[0-9]{1,18}$`)
 
 // validBenchAreaExceptionRef accepts exactly the three evidence ref shapes:
-// hk:task/N, hk:doc/KEY (the document key validator is the store's own), and
-// srv:N. Anything else — whitespace, other schemes, bare numbers — is not
-// evidence.
+// hk:task/N, hk:doc/KEY and srv:N. A document key must pass the store's own
+// document key validator and use printable ASCII only (0x21-0x7e): no
+// whitespace, control or non-ASCII bytes. Anything else — other schemes,
+// bare numbers — is not evidence.
 func validBenchAreaExceptionRef(ref string) bool {
 	switch {
 	case benchAreaExceptionTaskRefRE.MatchString(ref):
@@ -1198,7 +1200,13 @@ func validBenchAreaExceptionRef(ref string) bool {
 	case benchAreaExceptionSrvRefRE.MatchString(ref):
 		return true
 	case strings.HasPrefix(ref, "hk:doc/"):
-		return validDocKey(strings.TrimPrefix(ref, "hk:doc/"))
+		key := strings.TrimPrefix(ref, "hk:doc/")
+		for i := 0; i < len(key); i++ {
+			if key[i] < 0x21 || key[i] > 0x7e {
+				return false
+			}
+		}
+		return validDocKey(key)
 	}
 	return false
 }
