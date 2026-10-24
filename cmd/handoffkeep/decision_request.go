@@ -244,7 +244,11 @@ func decisionResolveCmd(args []string, out, errout io.Writer) error {
 			// request, so nothing went stale — name the working route.
 			if task, found, readErr := c.GetTask(ctx, id); readErr == nil && found &&
 				task.State == "needs_decision" && task.Refs.DecisionRequest == nil {
-				fmt.Fprintf(errout, "task %d is in needs_decision with no structured decision request (decision_request_stale is misleading: nothing went stale) — resolve it with: handoffkeep decisions resolve task %d --by LANE --answer TEXT --no-inject\n", id, id)
+				if task.Refs.Disposition != nil {
+					fmt.Fprintf(errout, "task %d is a disposition item in needs_decision; only the operator's web answer resolves it (decisions resolve is refused with disposition_operator_only)\n", id)
+				} else {
+					fmt.Fprintf(errout, "task %d is in needs_decision with no structured decision request (decision_request_stale is misleading: nothing went stale) — resolve it with: handoffkeep decisions resolve task %d --by LANE --answer TEXT --no-inject\n", id, id)
+				}
 			}
 		}
 		return writeFailed("decision resolution", id, err)
