@@ -1667,10 +1667,16 @@ func (s Server) benchAreaExceptionsPut(w http.ResponseWriter, r *http.Request) {
 	}
 	defer r.Body.Close()
 	// The body is buffered so a decode failure can be re-walked to name the
-	// field that failed, exactly like the catalog path.
-	body, err := io.ReadAll(io.LimitReader(r.Body, int64(benchRequestMaxBytes+4096)))
+	// field that failed, exactly like the catalog path. One byte past the
+	// limit is read on purpose: a body that fills the cap is refused as too
+	// large instead of silently decoding a truncated prefix.
+	body, err := io.ReadAll(io.LimitReader(r.Body, int64(benchRequestMaxBytes+4096)+1))
 	if err != nil {
 		appErr(w, err)
+		return
+	}
+	if len(body) > benchRequestMaxBytes+4096 {
+		jsonOut(w, http.StatusBadRequest, map[string]string{"error": "invalid_bench_area_exceptions_json", "detail": "body exceeds the request limit"})
 		return
 	}
 	var input benchAreaExceptionsInput
@@ -1678,6 +1684,11 @@ func (s Server) benchAreaExceptionsPut(w http.ResponseWriter, r *http.Request) {
 	de.DisallowUnknownFields()
 	if err := de.Decode(&input); err != nil {
 		jsonOut(w, http.StatusBadRequest, map[string]string{"error": "invalid_bench_area_exceptions_json", "detail": benchListDecodeDetail[store.BenchAreaException](body, "exceptions", benchAreaExceptionFieldTypes, err)})
+		return
+	}
+	var extra json.RawMessage
+	if err := de.Decode(&extra); err != io.EOF {
+		jsonOut(w, http.StatusBadRequest, map[string]string{"error": "invalid_bench_area_exceptions_json", "detail": "trailing data after the request object"})
 		return
 	}
 	if !benchBatchValid(len(input.Exceptions)) {
