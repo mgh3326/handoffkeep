@@ -22,20 +22,36 @@ func taskAreaLane(t *testing.T) string {
 // Changing the list is a code change, so this test is the pin.
 func TestTaskAreaVocabularyIsPinned(t *testing.T) {
 	want := []string{"blender", "unity", "web-qa", "ui-design", "image", "web-frontend", "go-backend", "python", "trading", "shell-wrk", "docs", "research", "ops"}
-	if len(TaskAreas) != len(want) {
-		t.Fatalf("TaskAreas has %d values, want %d: %v", len(TaskAreas), len(want), TaskAreas)
+	got := TaskAreas()
+	if len(got) != len(want) {
+		t.Fatalf("TaskAreas() has %d values, want %d: %v", len(got), len(want), got)
 	}
 	for i, v := range want {
-		if TaskAreas[i] != v {
-			t.Fatalf("TaskAreas[%d]=%q, want %q", i, TaskAreas[i], v)
+		if got[i] != v {
+			t.Fatalf("TaskAreas()[%d]=%q, want %q", i, got[i], v)
 		}
+	}
+}
+
+// The vocabulary cannot be changed at runtime: the accessor returns a copy,
+// so writing to it neither changes what is accepted nor what the next caller
+// sees.
+func TestTaskAreasReturnsACopy(t *testing.T) {
+	first := TaskAreas()
+	first[0] = "anything"
+	first[len(first)-1] = "blender"
+	if ValidTaskArea("anything") {
+		t.Fatal("writing to the returned slice changed the accepted vocabulary")
+	}
+	if again := TaskAreas(); again[0] != "blender" || again[len(again)-1] != "ops" {
+		t.Fatalf("writing to the returned slice changed the vocabulary: %v", again)
 	}
 }
 
 // Every vocabulary value is accepted and nothing near it is: validation is
 // an exact match, with no case folding, trimming or normalisation.
 func TestValidTaskAreaIsExactMatch(t *testing.T) {
-	for _, v := range TaskAreas {
+	for _, v := range TaskAreas() {
 		if !ValidTaskArea(v) {
 			t.Errorf("ValidTaskArea(%q)=false for a vocabulary value", v)
 		}
@@ -65,7 +81,7 @@ func TestTaskAreaErrorNamesAllowedSet(t *testing.T) {
 	if !errors.Is(err, ErrTaskAreaUnknown) {
 		t.Fatalf("ValidateTaskArea(Blender)=%v, want ErrTaskAreaUnknown", err)
 	}
-	if !strings.Contains(err.Error(), strings.Join(TaskAreas[:], ", ")) {
+	if !strings.Contains(err.Error(), strings.Join(TaskAreas(), ", ")) {
 		t.Fatalf("error %q does not list the allowed set in order", err)
 	}
 	if err := ValidateTaskArea(nil); err != nil {

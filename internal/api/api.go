@@ -909,7 +909,7 @@ func (s Server) taskAreasList(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.auth(w, r); !ok {
 		return
 	}
-	jsonOut(w, http.StatusOK, map[string]any{"areas": store.TaskAreas[:]})
+	jsonOut(w, http.StatusOK, map[string]any{"areas": store.TaskAreas()})
 }
 
 // taskArea tags or clears one task's area and records the change as a

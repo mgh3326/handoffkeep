@@ -27,7 +27,7 @@ func areaServer(t *testing.T) (*httptest.Server, *[]relaneRequest) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.URL.Path == "/v1/task-areas":
-			resp, _ := json.Marshal(map[string]any{"areas": store.TaskAreas[:]})
+			resp, _ := json.Marshal(map[string]any{"areas": store.TaskAreas()})
 			_, _ = w.Write(resp)
 		case strings.HasSuffix(r.URL.Path, "/area"):
 			// Echo what the client sent so the client's applied-check passes.
@@ -163,7 +163,7 @@ func TestTasksAreasListsVocabulary(t *testing.T) {
 	var got struct {
 		Areas []string `json:"areas"`
 	}
-	if err = json.Unmarshal([]byte(out), &got); err != nil || strings.Join(got.Areas, ",") != strings.Join(store.TaskAreas[:], ",") {
+	if err = json.Unmarshal([]byte(out), &got); err != nil || strings.Join(got.Areas, ",") != strings.Join(store.TaskAreas(), ",") {
 		t.Fatalf("areas output=%q err=%v", out, err)
 	}
 	if _, err = areaRun(t, h, "tasks", "areas", "extra"); err == nil {

@@ -320,16 +320,24 @@ const (
 	TaskEventArea = "area"
 )
 
-// TaskAreas is the closed task area vocabulary, in display order. It is a
-// code constant: changing the list is a code change, never a runtime write.
-// An area is routing metadata. It is not part of any claim or receipt and is
-// not an authority input.
-var TaskAreas = [...]string{"blender", "unity", "web-qa", "ui-design", "image", "web-frontend", "go-backend", "python", "trading", "shell-wrk", "docs", "research", "ops"}
+// taskAreas is the closed task area vocabulary, in display order. Go has no
+// constant arrays, so the list is unexported and TaskAreas hands out copies:
+// no importing package can change what is accepted or advertised, and
+// changing the list is a code change, never a runtime write. An area is
+// routing metadata. It is not part of any claim or receipt and is not an
+// authority input.
+var taskAreas = [...]string{"blender", "unity", "web-qa", "ui-design", "image", "web-frontend", "go-backend", "python", "trading", "shell-wrk", "docs", "research", "ops"}
 
-// ValidTaskArea reports whether v is exactly one of TaskAreas. There is no
+// TaskAreas returns the closed area vocabulary in display order. The slice is
+// a fresh copy on every call; writing to it changes nothing.
+func TaskAreas() []string {
+	return append([]string(nil), taskAreas[:]...)
+}
+
+// ValidTaskArea reports whether v is exactly one of the TaskAreas(). There is no
 // case folding, trimming or normalisation: a near miss is not an area.
 func ValidTaskArea(v string) bool {
-	for _, a := range TaskAreas {
+	for _, a := range taskAreas {
 		if v == a {
 			return true
 		}
@@ -356,7 +364,7 @@ func ValidateTaskArea(area *string) error {
 	if area == nil || ValidTaskArea(*area) {
 		return nil
 	}
-	return fmt.Errorf("%w: area must be one of %s", ErrTaskAreaUnknown, strings.Join(TaskAreas[:], ", "))
+	return fmt.Errorf("%w: area must be one of %s", ErrTaskAreaUnknown, strings.Join(taskAreas[:], ", "))
 }
 
 type TaskEvent struct {

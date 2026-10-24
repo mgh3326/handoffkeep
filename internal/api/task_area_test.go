@@ -24,7 +24,7 @@ func areaNoDBServer(t *testing.T) *httptest.Server {
 func reasonNamesAllowedSet(t *testing.T, out map[string]any) {
 	t.Helper()
 	reason, _ := out["reason"].(string)
-	if !strings.Contains(reason, strings.Join(store.TaskAreas[:], ", ")) {
+	if !strings.Contains(reason, strings.Join(store.TaskAreas(), ", ")) {
 		t.Fatalf("reason %q must name the allowed set in order", reason)
 	}
 }
@@ -93,10 +93,10 @@ func TestTaskAreasListAPI(t *testing.T) {
 		t.Fatalf("code=%d body=%v", code, out)
 	}
 	got, _ := out["areas"].([]any)
-	if len(got) != len(store.TaskAreas) {
+	if len(got) != len(store.TaskAreas()) {
 		t.Fatalf("areas=%v", got)
 	}
-	for i, want := range store.TaskAreas {
+	for i, want := range store.TaskAreas() {
 		if got[i] != want {
 			t.Fatalf("areas[%d]=%v, want %s", i, got[i], want)
 		}
