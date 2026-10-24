@@ -71,6 +71,20 @@ origin relations `--origin-pr <merged PR URL>` and `--origin-task <id>`
 (`refs.origin_pr` / `refs.origin_task`, "this row came from"; `closing_pr` is
 reserved for #494).
 
+Each task may carry an optional `area`, a routing tag from a closed list of 13
+values kept in code (`handoffkeep tasks areas`, `GET /v1/task-areas`):
+blender, unity, web-qa, ui-design, image, web-frontend, go-backend, python,
+trading, shell-wrk, docs, research, ops. `tasks add --area A` sets it at
+creation; `tasks set-area 42 docs --note why` and `tasks set-area 42 --clear`
+(`POST /v1/tasks/{id}/area`, body `{"area": "docs" | null, "note": "..."}`)
+change it, writing one `kind='area'` `task_events` row with the old and new
+value, and nothing when the value is unchanged. `tasks list --area A`
+(`GET /v1/tasks?area=A`) filters; `--area ""` selects tasks with no area. An
+unknown value is a 400 `invalid_request` naming the allowed set. The
+console only reads it, and the MCP server has no task tools. Area is routing
+metadata, not authority: it is not part of any claim or receipt and is not
+fenced like project or rebind.
+
 `add --doc <key>` attaches the task body: `tasks.body_doc` holds only the hk
 document key (or the transitional `key#section`, where the section is a scroll
 position), while the body text stays in `documents` (`doc put` / `doc get`).

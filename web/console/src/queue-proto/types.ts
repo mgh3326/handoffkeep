@@ -42,9 +42,12 @@ export type ProtoTask = {
   /** null → the task predates the project field (or has no project);
    * groups under the "no project" bucket, never under a fake name. */
   project: string | null;
+  /** Routing tag from the closed area vocabulary; null or absent → unset.
+   * Display only: the console has no way to change it. */
+  area?: string | null;
   /** no_job: the recorded reason a claimed/in_progress transition ran
    * without claimed_by + refs.job_id; absent unless that exemption was used. */
-  events: { id: number; kind?: "transition" | "relane" | "decision" | "project"; from: string; to: string; by: string; note?: string; no_job?: string; at: string }[];
+  events: { id: number; kind?: "transition" | "relane" | "decision" | "project" | "area"; from: string; to: string; by: string; note?: string; no_job?: string; at: string }[];
   dwell: { state: string; seconds: number; open: boolean }[];
   /** "collected" may carry an honest 0; "not_collected" renders as unknown. */
   coverage: { status: "collected" | "not_collected"; participants: number | null };

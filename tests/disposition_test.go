@@ -207,7 +207,7 @@ func TestDispositionSilenceIsInert(t *testing.T) {
 			t.Fatalf("NextTask err=%v", err)
 		}
 	}
-	if _, err := s.ListTasks(ctx, lane, "", "", nil, 100); err != nil {
+	if _, err := s.ListTasks(ctx, lane, "", "", nil, nil, 100); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.ListOpenTaskDecisions(ctx, 1000); err != nil {

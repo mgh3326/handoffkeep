@@ -280,17 +280,20 @@ func (s Service) RelaneTask(ctx context.Context, id int64, to, client, note stri
 func (s Service) SetTaskProject(ctx context.Context, id int64, project, client, note string) (store.Task, bool, error) {
 	return s.Store.SetTaskProject(ctx, id, project, client, note)
 }
+func (s Service) SetTaskArea(ctx context.Context, id int64, area *string, client, note string) (store.Task, bool, error) {
+	return s.Store.SetTaskArea(ctx, id, area, client, note)
+}
 func (s Service) ListTaskProjects(ctx context.Context) ([]string, error) {
 	return s.Store.ListTaskProjects(ctx)
 }
 func (s Service) AddTaskProject(ctx context.Context, client, name string) (bool, error) {
 	return s.Store.AddTaskProject(ctx, name, client)
 }
-func (s Service) ListTasks(ctx context.Context, lane, state, parentLane string, project *string, limit int) ([]store.Task, error) {
-	return s.Store.ListTasks(ctx, lane, state, parentLane, project, limit)
+func (s Service) ListTasks(ctx context.Context, lane, state, parentLane string, project, area *string, limit int) ([]store.Task, error) {
+	return s.Store.ListTasks(ctx, lane, state, parentLane, project, area, limit)
 }
-func (s Service) ListTasksPage(ctx context.Context, lane, state, parentLane string, project *string, afterID int64, limit int) ([]store.Task, error) {
-	return s.Store.ListTasksPage(ctx, lane, state, parentLane, project, afterID, limit)
+func (s Service) ListTasksPage(ctx context.Context, lane, state, parentLane string, project, area *string, afterID int64, limit int) ([]store.Task, error) {
+	return s.Store.ListTasksPage(ctx, lane, state, parentLane, project, area, afterID, limit)
 }
 
 // ExportTasks returns a consistent task snapshot and stamps the serving
@@ -439,6 +442,8 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("POST /v1/tasks/{id}/rebind", s.taskRebind)
 	m.HandleFunc("POST /v1/tasks/{id}/transition", s.taskTransition)
 	m.HandleFunc("POST /v1/tasks/{id}/project", s.taskProject)
+	m.HandleFunc("POST /v1/tasks/{id}/area", s.taskArea)
+	m.HandleFunc("GET /v1/task-areas", s.taskAreasList)
 	m.HandleFunc("POST /v1/tasks/relane", s.tasksRelane)
 	m.HandleFunc("POST /v1/tasks/{id}/decision-request", s.taskDecisionRequest)
 	m.HandleFunc("POST /v1/tasks/{id}/decision-request/resolve", s.taskDecisionResolve)
@@ -577,6 +582,15 @@ func appErr(w http.ResponseWriter, e error) {
 		}
 		jsonOut(w, http.StatusBadRequest, body)
 		return
+	case errors.Is(e, store.ErrTaskAreaUnknown):
+		// The reason is the store's own text naming the allowed set, never
+		// echoed input.
+		body := map[string]string{"error": "invalid_request"}
+		if reason, ok := strings.CutPrefix(e.Error(), "invalid_request: "); ok && reason != "" {
+			body["reason"] = reason
+		}
+		jsonOut(w, http.StatusBadRequest, body)
+		return
 	case errors.Is(e, store.ErrDispositionOperatorOnly):
 		jsonOut(w, http.StatusConflict, map[string]string{"error": "disposition_operator_only"})
 		return
@@ -687,6 +701,10 @@ func (s Server) tasksCreate(w http.ResponseWriter, r *http.Request) {
 		appErr(w, err)
 		return
 	}
+	if err := store.ValidateTaskArea(x.Area); err != nil {
+		appErr(w, err)
+		return
+	}
 	x, err := s.Service.CreateTask(r.Context(), client, x)
 	if err != nil {
 		appErr(w, err)
@@ -710,6 +728,19 @@ func (s Server) tasksList(w http.ResponseWriter, r *http.Request) {
 		v := r.URL.Query().Get("project")
 		project = &v
 	}
+	var area *string
+	if r.URL.Query().Has("area") {
+		v := r.URL.Query().Get("area")
+		area = &v
+	}
+	// Refuse an unknown area before the store is consulted, so the 400 does
+	// not depend on a database round trip.
+	if area != nil && *area != "" {
+		if err := store.ValidateTaskArea(area); err != nil {
+			appErr(w, err)
+			return
+		}
+	}
 	var xs []store.Task
 	if r.URL.Query().Has("after_id") {
 		afterID, parseErr := queryAfterID(r)
@@ -717,9 +748,9 @@ func (s Server) tasksList(w http.ResponseWriter, r *http.Request) {
 			appErr(w, parseErr)
 			return
 		}
-		xs, err = s.Service.ListTasksPage(r.Context(), lane, state, parentLane, project, afterID, limit)
+		xs, err = s.Service.ListTasksPage(r.Context(), lane, state, parentLane, project, area, afterID, limit)
 	} else {
-		xs, err = s.Service.ListTasks(r.Context(), lane, state, parentLane, project, limit)
+		xs, err = s.Service.ListTasks(r.Context(), lane, state, parentLane, project, area, limit)
 	}
 	if err != nil {
 		appErr(w, err)
@@ -730,6 +761,11 @@ func (s Server) tasksList(w http.ResponseWriter, r *http.Request) {
 		// Echo the requested filter so new clients can tell a filtered
 		// answer from an old server that silently dropped the parameter.
 		body["project"] = *project
+	}
+	if area != nil {
+		// Same echo as project: a server that predates the filter cannot
+		// echo it, which is how a client tells it from an empty result.
+		body["area"] = *area
 	}
 	jsonOut(w, http.StatusOK, body)
 }
@@ -859,6 +895,63 @@ func (s Server) taskProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	x, _, err := s.Service.SetTaskProject(r.Context(), id, input.Project, client, input.Note)
+	if err != nil {
+		appErr(w, err)
+		return
+	}
+	jsonOut(w, http.StatusOK, x)
+}
+
+// taskAreasList answers the closed area vocabulary in its code order — the
+// set tasks add --area accepts. It is read only: the list changes with the
+// code, never through a route.
+func (s Server) taskAreasList(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.auth(w, r); !ok {
+		return
+	}
+	jsonOut(w, http.StatusOK, map[string]any{"areas": store.TaskAreas()})
+}
+
+// taskArea tags or clears one task's area and records the change as a
+// kind='area' event. The body must carry the area key: an explicit null
+// clears, an absent key is a malformed request rather than a clear.
+func (s Server) taskArea(w http.ResponseWriter, r *http.Request) {
+	client, ok := s.auth(w, r)
+	if !ok {
+		return
+	}
+	id, err := taskID(r)
+	if err != nil || id < 1 {
+		appErr(w, errors.New("task id"))
+		return
+	}
+	defer r.Body.Close()
+	var input struct {
+		Area json.RawMessage `json:"area"`
+		Note string          `json:"note"`
+	}
+	if err := decode(r, &input, 4096); err != nil {
+		appErr(w, err)
+		return
+	}
+	var area *string
+	switch {
+	case len(input.Area) == 0:
+		appErr(w, errors.New("area key required"))
+		return
+	case string(input.Area) != "null":
+		var v string
+		if err := json.Unmarshal(input.Area, &v); err != nil {
+			appErr(w, errors.New("area must be a string or null"))
+			return
+		}
+		area = &v
+		if err := store.ValidateTaskArea(area); err != nil {
+			appErr(w, err)
+			return
+		}
+	}
+	x, _, err := s.Service.SetTaskArea(r.Context(), id, area, client, input.Note)
 	if err != nil {
 		appErr(w, err)
 		return
