@@ -152,6 +152,30 @@ func TestTasksDecisionResolveLegacyNeedsDecisionHint(t *testing.T) {
 	}
 }
 
+// hk 1871: a disposition item also sits in needs_decision with no dr-
+// request, but decisions resolve is refused for it with
+// disposition_operator_only — the legacy hint would name a dead route, so
+// the CLI prints the operator-only line instead.
+func TestTasksDecisionResolveDispositionNoLegacyHint(t *testing.T) {
+	disposition := `{"id":618,"lane":"l","kind":"implement","title":"t","state":"needs_decision","created_by":"x","created_at":"2026-10-23T00:00:00Z","updated_at":"2026-10-23T00:00:00Z","project":null,"refs":{"disposition":{"schema":"disposition/v1","facts":{"facts_source":"x","facts_as_of":"2026-10-23T00:00:00Z","install":{"state":"unknown"},"residual_n":0},"recommended":"D"}}}`
+	h := staleResolveServer(t, 200, disposition)
+	var errout bytes.Buffer
+	err := run([]string{"tasks", "decision-resolve", "618", "--request", "dr-618-1", "--kind", "withdrawn", "--text", "x", "--url", h.URL, "--token", "tok"}, io.Discard, &errout)
+	if err == nil || !strings.Contains(err.Error(), "NOT recorded") {
+		t.Fatalf("err=%v", err)
+	}
+	stderr := errout.String()
+	if strings.Contains(stderr, "decisions resolve task") {
+		t.Fatalf("legacy hint named a refused route: %q", stderr)
+	}
+	if !strings.Contains(stderr, "disposition item") || !strings.Contains(stderr, "disposition_operator_only") {
+		t.Fatalf("missing disposition line: %q", stderr)
+	}
+	if lines := strings.Count(strings.TrimRight(stderr, "\n"), "\n") + 1; lines != 1 || stderr == "" {
+		t.Fatalf("want exactly one stderr line, got %q", stderr)
+	}
+}
+
 // A real stale request keeps today's message: a structured request exists
 // but was superseded, so no hint is printed.
 func TestTasksDecisionResolveRealStaleNoHint(t *testing.T) {
