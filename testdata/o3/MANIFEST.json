@@ -144,11 +144,11 @@
       "bytes": 245
     },
     "vectors/failure-abuse.json": {
-      "sha256": "07ecc5a6aa99a820d382a3487ab4ee38b038887f88235687661d52c541a9bad6",
+      "sha256": "af3c704a2e54b6b48b820d91cdca0fb2df604b788dea0d6bbb8c96fb16b0a759",
       "bytes": 184289
     },
     "vectors/head-repeat-binding.json": {
-      "sha256": "12d828b5e7fef0dd828dd484640c81efdb1565a188575b4a893e1cb83d7f0e58",
+      "sha256": "574ee891bf732151ebe2ff334efbf476ba17082de3f1d17c30710f5fd2dd9e8c",
       "bytes": 103808
     },
     "vectors/legacy-route-fence.json": {
@@ -160,15 +160,15 @@
       "bytes": 114678
     },
     "vectors/r3-regression.json": {
-      "sha256": "87b0930acd8c39c102f72e30daf1c075ec83eddd89c052a9af184df5d8c5e151",
+      "sha256": "01559448dae71f1d17b528d590ef8fd2a4548483d14ef6c259a9f4ce8b96d64b",
       "bytes": 146204
     },
     "vectors/r4-review-lifecycle.json": {
-      "sha256": "66852aedadeafe6471770bb06713973ebef380ca65b578cb1bba6c525a44b6b3",
+      "sha256": "70c3f8878f314342cfd6edf99aee5a759e6db7e8ab96403e2ec2100ccdbe61d1",
       "bytes": 94343
     },
     "vectors/r4-scoped-claim.json": {
-      "sha256": "38933589efa19d1a824d016ce1d1d3eb7fabff4797a8c6b268f21c63e5c7e138",
+      "sha256": "6aed5641b350da10fdb1224462a186ed0059669b4311a4e4b2c24ce43f00d0a3",
       "bytes": 367446
     },
     "vectors/section4-rules.json": {
@@ -176,12 +176,12 @@
       "bytes": 268434
     },
     "vectors/transition.json": {
-      "sha256": "ce4956060a3d590b616fef2b679b0e6d430437b8ca2973d2984cd06eca78079a",
+      "sha256": "8c2c492e2fb081a5d449dc48d79df5c0071daa943ec51ae3ff3152d9e0945f32",
       "bytes": 320949
     },
     "vectors/transport-intents.json": {
-      "sha256": "2be67c1cf3745a2f1ae9892be8d6e7a4c69fe96e3b72e1981349b8d621c6baaa",
-      "bytes": 76555
+      "sha256": "6b0641dc1c6a5e8580c2cd702418a461a4a859209c04acd810fa3a025db83273",
+      "bytes": 89500
     }
   }
 }

@@ -44,7 +44,7 @@ var expectedVectors = map[string]struct {
 	"r4-scoped-claim.json":     {39, map[string]int{"r4claim": 19}},
 	"r4-review-lifecycle.json": {10, map[string]int{"r4life": 8}},
 	"head-repeat-binding.json": {7, map[string]int{"headrepeat": 7}},
-	"transport-intents.json":   {12, map[string]int{"transport": 12}},
+	"transport-intents.json":   {14, map[string]int{"transport": 12}},
 	"failure-abuse.json":       {16, map[string]int{"failure": 16}},
 }
 
@@ -258,15 +258,23 @@ func TestContractBundle(t *testing.T) {
 		t.Fatal(err)
 	}
 	byStatus, _ := raw["errors_by_status"].(map[string]any)
+	seenCodes := map[string]bool{}
 	for statusStr, codesAny := range byStatus {
 		status, _ := strconv.Atoi(statusStr)
 		for _, c := range codesAny.([]any) {
 			code := c.(string)
+			seenCodes[code] = true
 			if errorStatuses[code] != status {
 				t.Errorf("contract errors_by_status maps %q to %s; "+
 					"design map says %d", code, statusStr,
 					errorStatuses[code])
 			}
+		}
+	}
+	for code, status := range errorStatuses {
+		if !seenCodes[code] {
+			t.Errorf("section 4 code %q (status %d) missing from "+
+				"errors_by_status", code, status)
 		}
 	}
 }
@@ -366,8 +374,10 @@ func TestVectors(t *testing.T) {
 		t.Fatal(err)
 	}
 	sort.Strings(files)
+	seenFiles := map[string]bool{}
 	for _, path := range files {
 		base := filepath.Base(path)
+		seenFiles[base] = true
 		want, ok := expectedVectors[base]
 		if !ok {
 			t.Errorf("unlisted vector file %s", base)
@@ -402,14 +412,26 @@ func TestVectors(t *testing.T) {
 			}
 		}
 		for tn, n := range want.rows {
-			if len(gotRows[tn]) != n {
+			got := gotRows[tn]
+			if len(got) != n {
 				t.Errorf("%s table %s covers %d rows, want %d",
-					base, tn, len(gotRows[tn]), n)
+					base, tn, len(got), n)
+			}
+			for r := 1; r <= n; r++ {
+				if !got[r] {
+					t.Errorf("%s table %s missing design row %d",
+						base, tn, r)
+				}
 			}
 		}
 		for i := range vf.Cases {
 			checkCase(t, p, reqSchema, recSchema, polSchema, base,
 				&vf.Cases[i])
+		}
+	}
+	for base := range expectedVectors {
+		if !seenFiles[base] {
+			t.Errorf("expected vector file %s missing from pack", base)
 		}
 	}
 }
@@ -433,6 +455,40 @@ func checkCase(t *testing.T, p *pack, reqSchema, recSchema,
 			t.Fatalf("%s: given record %d (kind=%v) fails "+
 				"$defs/Record: %v", ctx, i, r["kind"], err)
 		}
+	}
+
+	// Reviewer binding: every round_open/verdict/grant record or request
+	// that names a tester_job_id must be preceded by that reviewer's
+	// claim (the assignment must exist when the open is accepted).
+	claimsSeen := map[string]bool{}
+	for i, r := range c.Given.Records {
+		if r["kind"] == "claim" {
+			if jid, _ := r["job_id"].(string); jid != "" {
+				claimsSeen[jid] = true
+			}
+			continue
+		}
+		pl, _ := r["payload"].(map[string]any)
+		tid, _ := pl["tester_job_id"].(string)
+		if tid != "" && !claimsSeen[tid] {
+			t.Errorf("%s: given record %d (kind=%v) names "+
+				"tester_job_id %q before any claim for it",
+				ctx, i, r["kind"], tid)
+		}
+	}
+	checkNamedTester := func(v any, where string) {
+		m, _ := v.(map[string]any)
+		tid, _ := m["tester_job_id"].(string)
+		if tid != "" && !claimsSeen[tid] {
+			t.Errorf("%s: %s names tester_job_id %q with no "+
+				"earlier-received claim in given", ctx, where, tid)
+		}
+	}
+	if body, ok := c.Request["body"].(map[string]any); ok {
+		checkNamedTester(body["payload"], "request payload")
+	}
+	if rec, ok := c.Expect["record"].(map[string]any); ok {
+		checkNamedTester(rec["payload"], "expect.record.payload")
 	}
 
 	reqType, _ := c.Request["type"].(string)

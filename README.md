@@ -416,7 +416,7 @@ and safely reports `skipped` when Cloudflare analytics credentials are absent.
 design (`hk:doc designs/hk1873/b1873a-sol-r4`, doc 44185, revision 4,
 amendment 1): the Draft 2020-12 schema bundle, every normative vector
 table as data, sanitized legacy event fixtures, the command matrix, CLI
-subcommand/exit maps, and a signed manifest. It changes only with a new
+subcommand/exit maps, and a hashed manifest. It changes only with a new
 design revision. `go test ./internal/o3contract/...` verifies the pack
 against itself — schema validity, internal ref resolution, per-vector
 request/record conformance, error-code/exit-map consistency, manifest

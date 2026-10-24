@@ -611,7 +611,7 @@
       }
     },
     {
-      "name": "server-error-codes-map-to-exits",
+      "name": "server-host-mismatch-exit-77",
       "source": {
         "section": "6b",
         "table": "CLI transport and intents vectors",
@@ -821,7 +821,435 @@
         "exit_code": 77,
         "stderr_code": "host_mismatch",
         "stderr_format": "handoffkeep wrk: CODE",
-        "note": "empty stdout; exact one-line stderr; {round_cap}->{78} and {sequence_conflict}->{73} map the same way; no local fallback"
+        "note": "empty stdout; exact one-line stderr; no local fallback"
+      }
+    },
+    {
+      "name": "server-round-cap-exit-78",
+      "source": {
+        "section": "6b",
+        "table": "CLI transport and intents vectors",
+        "table_name": "transport",
+        "row": 4,
+        "row_text": "| Server returns {error:host_mismatch}, {error:round_cap}, {error:sequence_conflict} | Empty stdout; exact one-line stderr code; exits 77,78,73 respectively; no local fallback. |"
+      },
+      "given": {
+        "job_id": "job-a",
+        "policy": {
+          "version": "hk1873.policy.v1",
+          "clients": {
+            "desktop": {
+              "host_client_id": "desktop",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-dev": {
+              "host_client_id": "mac-dev",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-work": {
+              "host_client_id": "mac-work",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "rpi": {
+              "host_client_id": "rpi",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-personal": {
+              "host_client_id": "mac-personal",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "director-1": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "operator-desk": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "pa-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "at-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "pb-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "tt-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            }
+          },
+          "lanes": {
+            "director-1": null,
+            "pa-integrator": "director-1"
+          },
+          "features": {
+            "head_repeat_enabled": true,
+            "claim_lane_creation_enabled": true
+          }
+        },
+        "records": []
+      },
+      "request": {
+        "type": "cli",
+        "argv": [
+          "append",
+          "job-b0debcafebabe00",
+          "--kind",
+          "round_open",
+          "--idempotency-key",
+          "00000000-0000-4000-8000-000000555555",
+          "--expected-seq",
+          "1",
+          "--claim-seq",
+          "1"
+        ],
+        "stdin": {
+          "$b64": "eyJoZWFkIjogIjExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTEiLCAidGVzdGVyX2pvYl9pZCI6IG51bGwsICJleHRlbnNpb25fZ3JhbnRfc2VxIjogbnVsbCwgInJlcGVhdF9ncmFudF9zZXEiOiBudWxsfQ=="
+        },
+        "stub": {
+          "http_status": 409,
+          "error": "round_cap"
+        }
+      },
+      "expect": {
+        "exit_code": 78,
+        "stderr_code": "round_cap",
+        "stderr_format": "handoffkeep wrk: CODE",
+        "note": "empty stdout; exact one-line stderr; no local fallback"
+      }
+    },
+    {
+      "name": "server-sequence-conflict-exit-73",
+      "source": {
+        "section": "6b",
+        "table": "CLI transport and intents vectors",
+        "table_name": "transport",
+        "row": 4,
+        "row_text": "| Server returns {error:host_mismatch}, {error:round_cap}, {error:sequence_conflict} | Empty stdout; exact one-line stderr code; exits 77,78,73 respectively; no local fallback. |"
+      },
+      "given": {
+        "job_id": "job-a",
+        "policy": {
+          "version": "hk1873.policy.v1",
+          "clients": {
+            "desktop": {
+              "host_client_id": "desktop",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-dev": {
+              "host_client_id": "mac-dev",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-work": {
+              "host_client_id": "mac-work",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "rpi": {
+              "host_client_id": "rpi",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-personal": {
+              "host_client_id": "mac-personal",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "director-1": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "operator-desk": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "pa-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "at-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "pb-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "tt-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            }
+          },
+          "lanes": {
+            "director-1": null,
+            "pa-integrator": "director-1"
+          },
+          "features": {
+            "head_repeat_enabled": true,
+            "claim_lane_creation_enabled": true
+          }
+        },
+        "records": []
+      },
+      "request": {
+        "type": "cli",
+        "argv": [
+          "append",
+          "job-b0debcafebabe00",
+          "--kind",
+          "round_open",
+          "--idempotency-key",
+          "00000000-0000-4000-8000-000000555555",
+          "--expected-seq",
+          "3",
+          "--claim-seq",
+          "1"
+        ],
+        "stdin": {
+          "$b64": "eyJoZWFkIjogIjExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTEiLCAidGVzdGVyX2pvYl9pZCI6IG51bGwsICJleHRlbnNpb25fZ3JhbnRfc2VxIjogbnVsbCwgInJlcGVhdF9ncmFudF9zZXEiOiBudWxsfQ=="
+        },
+        "stub": {
+          "http_status": 409,
+          "error": "sequence_conflict"
+        }
+      },
+      "expect": {
+        "exit_code": 73,
+        "stderr_code": "sequence_conflict",
+        "stderr_format": "handoffkeep wrk: CODE",
+        "note": "empty stdout; exact one-line stderr; no local fallback"
       }
     },
     {

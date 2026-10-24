@@ -3781,32 +3781,6 @@
             "record_hash": "546d555b29dfd50562f2ee184bf94b05af101fbb72f0d78d76174a9ca494fed8"
           },
           {
-            "job_id": "job-a",
-            "seq": 5,
-            "record_id": "00000000-0000-4000-8000-000000101476",
-            "store_generation": "00000000-0000-4000-8000-ffff00000001",
-            "claim_seq": 1,
-            "actor_client_id": "director-1",
-            "idempotency_key": "00000000-0000-4000-8000-000000201476",
-            "request_sha256": "a7574fef40941892a363305a6fb4ccb860af2e2309d2af75f6e1103aa5f4a127",
-            "imported": false,
-            "source": null,
-            "received_at": "2026-10-24T00:00:00.000036Z",
-            "previous_hash": "546d555b29dfd50562f2ee184bf94b05af101fbb72f0d78d76174a9ca494fed8",
-            "kind": "grant",
-            "payload": {
-              "grant_type": "head_repeat",
-              "round_no": 2,
-              "head": "1111111111111111111111111111111111111111",
-              "extra": 0,
-              "earlier_round_no": 1,
-              "tester_job_id": "job-a-t1",
-              "expires_at": "2026-10-31T00:00:00.000000Z",
-              "reason_code": "repeat_review"
-            },
-            "record_hash": "29b05b92e7321a4ea997a42025761a9524d96b70e6885d6683b2cdb8ba6a79b7"
-          },
-          {
             "job_id": "job-a-t1",
             "seq": 1,
             "record_id": "00000000-0000-4000-8000-000000101517",
@@ -3838,6 +3812,32 @@
               "created_at": "2026-10-24T00:00:00.000037Z"
             },
             "record_hash": "29a02d0b50dabc7a619fb8184e5b00e33250bc36a58b57b6b3971c569865eb75"
+          },
+          {
+            "job_id": "job-a",
+            "seq": 5,
+            "record_id": "00000000-0000-4000-8000-000000101476",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "director-1",
+            "idempotency_key": "00000000-0000-4000-8000-000000201476",
+            "request_sha256": "a7574fef40941892a363305a6fb4ccb860af2e2309d2af75f6e1103aa5f4a127",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000036Z",
+            "previous_hash": "546d555b29dfd50562f2ee184bf94b05af101fbb72f0d78d76174a9ca494fed8",
+            "kind": "grant",
+            "payload": {
+              "grant_type": "head_repeat",
+              "round_no": 2,
+              "head": "1111111111111111111111111111111111111111",
+              "extra": 0,
+              "earlier_round_no": 1,
+              "tester_job_id": "job-a-t1",
+              "expires_at": "2026-10-31T00:00:00.000000Z",
+              "reason_code": "repeat_review"
+            },
+            "record_hash": "29b05b92e7321a4ea997a42025761a9524d96b70e6885d6683b2cdb8ba6a79b7"
           }
         ]
       },
