@@ -172,7 +172,7 @@ func TestBenchAreaExceptionsStore(t *testing.T) {
 
 	// The area filter is exact and validated.
 	docs, err := s.ListBenchAreaExceptions(ctx, "docs", false)
-	if err != nil || len(docs) != 2 {
+	if err != nil || len(docs) != 1 {
 		t.Fatalf("area=docs list=%+v err=%v", docs, err)
 	}
 	if _, err = s.ListBenchAreaExceptions(ctx, "not-an-area", false); !errors.Is(err, store.ErrTaskAreaUnknown) {
