@@ -1,0 +1,2797 @@
+{
+  "pack": "hk1873.v1",
+  "section": "5",
+  "table": "R4 review-lifecycle and binding regression vectors",
+  "file": "r4-review-lifecycle.json",
+  "cases": [
+    {
+      "name": "r-done-5xx-intent-pending-exit-75",
+      "source": {
+        "section": "5",
+        "table": "R4 review-lifecycle and binding regression vectors",
+        "table_name": "r4life",
+        "row": 1,
+        "row_text": "| Active subject A; host-minted R whose own summary.state=shadow; R done gets 5xx or unavailable server | exit 75, original intent pending; zero local job.completed, terminal relay, housekeeping or quota release |"
+      },
+      "given": {
+        "job_id": "job-a",
+        "policy": {
+          "version": "hk1873.policy.v1",
+          "clients": {
+            "desktop": {
+              "host_client_id": "desktop",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-dev": {
+              "host_client_id": "mac-dev",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-work": {
+              "host_client_id": "mac-work",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "rpi": {
+              "host_client_id": "rpi",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-personal": {
+              "host_client_id": "mac-personal",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "director-1": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "operator-desk": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "pa-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "at-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "pb-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "tt-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            }
+          },
+          "lanes": {
+            "director-1": null,
+            "pa-integrator": "director-1"
+          },
+          "features": {
+            "head_repeat_enabled": true,
+            "claim_lane_creation_enabled": true
+          }
+        },
+        "records": [
+          {
+            "job_id": "job-a",
+            "seq": 1,
+            "record_id": "00000000-0000-4000-8000-000000110127",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "director-1",
+            "idempotency_key": "00000000-0000-4000-8000-000000210127",
+            "request_sha256": "e32c4274980a6ae89c986a96e0f55c4c932f3b0c0422420fb5ff3270ff34017a",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000247Z",
+            "previous_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+            "kind": "claim",
+            "payload": {
+              "job_id": "job-a",
+              "owner_lane": "b2400-a",
+              "parent_lane": "director-1",
+              "task_id": 2400,
+              "host_client_id": "desktop",
+              "role": "builder",
+              "tier": "T2",
+              "review_of": null,
+              "predecessor_job_id": null,
+              "supersedes": null,
+              "policy_sha256": "8de436a97778f975de840ffd0ec10539440059169fbc34c4a8eb0486f0ece5ce",
+              "created_at": "2026-10-24T00:00:00.000247Z"
+            },
+            "record_hash": "4d22cad6c412137eaf13b1bcfd8ab1f501292dd75a5a8be1d538723f8eca51c6"
+          },
+          {
+            "job_id": "job-a",
+            "seq": 2,
+            "record_id": "00000000-0000-4000-8000-000000110168",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "director-1",
+            "idempotency_key": "00000000-0000-4000-8000-000000210168",
+            "request_sha256": "265e16dcf1c0f8b52d277e50abf72760a57e622c72ab8844d1530d701ed04051",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000248Z",
+            "previous_hash": "4d22cad6c412137eaf13b1bcfd8ab1f501292dd75a5a8be1d538723f8eca51c6",
+            "kind": "activate",
+            "payload": {
+              "baseline_used": 0,
+              "mode": "enforced",
+              "reason_code": "initial_activation",
+              "seal_seq": null
+            },
+            "record_hash": "6ee7498f2d7bbfe8836d2c3e6891f8bda29d7b149db4c810e26de7ed1fce4b6b"
+          },
+          {
+            "job_id": "job-a-t1",
+            "seq": 1,
+            "record_id": "00000000-0000-4000-8000-000000110209",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "desktop",
+            "idempotency_key": "00000000-0000-4000-8000-000000210209",
+            "request_sha256": "892390d56ec39e31c124f641b5336bee441162aa3be3233925a09efda5d27a47",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000249Z",
+            "previous_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+            "kind": "claim",
+            "payload": {
+              "job_id": "job-a-t1",
+              "owner_lane": "b2400-a",
+              "parent_lane": "b2400-a",
+              "task_id": 2400,
+              "host_client_id": "desktop",
+              "role": "tester",
+              "tier": "T2",
+              "review_of": {
+                "job_id": "job-a",
+                "round_no": 1
+              },
+              "predecessor_job_id": null,
+              "supersedes": null,
+              "policy_sha256": "8de436a97778f975de840ffd0ec10539440059169fbc34c4a8eb0486f0ece5ce",
+              "created_at": "2026-10-24T00:00:00.000249Z"
+            },
+            "record_hash": "1308fc9a01cd2bc5e5b4822ce078287eecfd94ecffb11b8a0eb2356dd7bbbd1d"
+          }
+        ]
+      },
+      "request": {
+        "type": "cli",
+        "argv": [
+          "append",
+          "job-a-t1",
+          "--kind",
+          "completed",
+          "--idempotency-key",
+          "00000000-0000-4000-8000-000000777000",
+          "--expected-seq",
+          "1",
+          "--claim-seq",
+          "1"
+        ],
+        "stdin": {
+          "$b64": "eyJyZXBvcnRfYjY0IjogImNHRmpheUJ5WlhCdmNuUWdZbmwwWlhNSyIsICJyZXBvcnRfc2hhMjU2IjogImQ2YjE3NGNiYjM0MDNmODlmODU0ZjZmNzg3MGUzY2JiYWJjZmZjZmFiY2NlYjdlOGY2MjA2MWI2ODExZDIyNTEifQ=="
+        }
+      },
+      "expect": {
+        "exit_code": 75,
+        "stderr_code": "transport_unavailable",
+        "note": "5xx/unavailable: original intent pending; zero local job.completed, terminal relay, housekeeping or quota release"
+      }
+    },
+    {
+      "name": "r-legacy-receiptless-terminal-relay",
+      "source": {
+        "section": "5",
+        "table": "R4 review-lifecycle and binding regression vectors",
+        "table_name": "r4life",
+        "row": 2,
+        "row_text": "| Same R; legacy receipt-less job.completed/job.joined/end relay | wrk_receipt_required; no protected terminal publication/counting/release |"
+      },
+      "given": {
+        "job_id": "job-a",
+        "policy": {
+          "version": "hk1873.policy.v1",
+          "clients": {
+            "desktop": {
+              "host_client_id": "desktop",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-dev": {
+              "host_client_id": "mac-dev",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-work": {
+              "host_client_id": "mac-work",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "rpi": {
+              "host_client_id": "rpi",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-personal": {
+              "host_client_id": "mac-personal",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "director-1": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "operator-desk": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "pa-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "at-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "pb-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "tt-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            }
+          },
+          "lanes": {
+            "director-1": null,
+            "pa-integrator": "director-1"
+          },
+          "features": {
+            "head_repeat_enabled": true,
+            "claim_lane_creation_enabled": true
+          }
+        },
+        "records": [
+          {
+            "job_id": "job-a",
+            "seq": 1,
+            "record_id": "00000000-0000-4000-8000-000000110127",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "director-1",
+            "idempotency_key": "00000000-0000-4000-8000-000000210127",
+            "request_sha256": "e32c4274980a6ae89c986a96e0f55c4c932f3b0c0422420fb5ff3270ff34017a",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000247Z",
+            "previous_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+            "kind": "claim",
+            "payload": {
+              "job_id": "job-a",
+              "owner_lane": "b2400-a",
+              "parent_lane": "director-1",
+              "task_id": 2400,
+              "host_client_id": "desktop",
+              "role": "builder",
+              "tier": "T2",
+              "review_of": null,
+              "predecessor_job_id": null,
+              "supersedes": null,
+              "policy_sha256": "8de436a97778f975de840ffd0ec10539440059169fbc34c4a8eb0486f0ece5ce",
+              "created_at": "2026-10-24T00:00:00.000247Z"
+            },
+            "record_hash": "4d22cad6c412137eaf13b1bcfd8ab1f501292dd75a5a8be1d538723f8eca51c6"
+          },
+          {
+            "job_id": "job-a",
+            "seq": 2,
+            "record_id": "00000000-0000-4000-8000-000000110168",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "director-1",
+            "idempotency_key": "00000000-0000-4000-8000-000000210168",
+            "request_sha256": "265e16dcf1c0f8b52d277e50abf72760a57e622c72ab8844d1530d701ed04051",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000248Z",
+            "previous_hash": "4d22cad6c412137eaf13b1bcfd8ab1f501292dd75a5a8be1d538723f8eca51c6",
+            "kind": "activate",
+            "payload": {
+              "baseline_used": 0,
+              "mode": "enforced",
+              "reason_code": "initial_activation",
+              "seal_seq": null
+            },
+            "record_hash": "6ee7498f2d7bbfe8836d2c3e6891f8bda29d7b149db4c810e26de7ed1fce4b6b"
+          },
+          {
+            "job_id": "job-a-t1",
+            "seq": 1,
+            "record_id": "00000000-0000-4000-8000-000000110209",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "desktop",
+            "idempotency_key": "00000000-0000-4000-8000-000000210209",
+            "request_sha256": "892390d56ec39e31c124f641b5336bee441162aa3be3233925a09efda5d27a47",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000249Z",
+            "previous_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+            "kind": "claim",
+            "payload": {
+              "job_id": "job-a-t1",
+              "owner_lane": "b2400-a",
+              "parent_lane": "b2400-a",
+              "task_id": 2400,
+              "host_client_id": "desktop",
+              "role": "tester",
+              "tier": "T2",
+              "review_of": {
+                "job_id": "job-a",
+                "round_no": 1
+              },
+              "predecessor_job_id": null,
+              "supersedes": null,
+              "policy_sha256": "8de436a97778f975de840ffd0ec10539440059169fbc34c4a8eb0486f0ece5ce",
+              "created_at": "2026-10-24T00:00:00.000249Z"
+            },
+            "record_hash": "1308fc9a01cd2bc5e5b4822ce078287eecfd94ecffb11b8a0eb2356dd7bbbd1d"
+          }
+        ]
+      },
+      "request": {
+        "type": "legacy",
+        "actor": "desktop",
+        "method": "POST",
+        "path": "/v1/relay/events",
+        "body": {
+          "kind": "job.completed",
+          "job_id": "job-a-t1",
+          "head": "1111111111111111111111111111111111111111",
+          "report_sha256": "d6b174cbb3403f89f854f6f7870e3cbbabcffcfabcceb7e8f62061b6811d2251"
+        }
+      },
+      "expect": {
+        "http_status": 409,
+        "error": "wrk_receipt_required",
+        "note": "no protected terminal publication/counting/release"
+      }
+    },
+    {
+      "name": "r-canonical-completed-then-end-own-cleanup",
+      "source": {
+        "section": "5",
+        "table": "R4 review-lifecycle and binding regression vectors",
+        "table_name": "r4life",
+        "row": 3,
+        "row_text": "| Same R; server accepts canonical completed, later canonical end | Each accepted receipt authorizes only R's own eligible cleanup; end makes R unavailable for new target verdict; target used and PASS history unchanged |"
+      },
+      "given": {
+        "job_id": "job-a-t1",
+        "policy": {
+          "version": "hk1873.policy.v1",
+          "clients": {
+            "desktop": {
+              "host_client_id": "desktop",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-dev": {
+              "host_client_id": "mac-dev",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-work": {
+              "host_client_id": "mac-work",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "rpi": {
+              "host_client_id": "rpi",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-personal": {
+              "host_client_id": "mac-personal",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "director-1": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "operator-desk": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "pa-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "at-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "pb-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "tt-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            }
+          },
+          "lanes": {
+            "director-1": null,
+            "pa-integrator": "director-1"
+          },
+          "features": {
+            "head_repeat_enabled": true,
+            "claim_lane_creation_enabled": true
+          }
+        },
+        "records": [
+          {
+            "job_id": "job-a",
+            "seq": 1,
+            "record_id": "00000000-0000-4000-8000-000000110127",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "director-1",
+            "idempotency_key": "00000000-0000-4000-8000-000000210127",
+            "request_sha256": "e32c4274980a6ae89c986a96e0f55c4c932f3b0c0422420fb5ff3270ff34017a",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000247Z",
+            "previous_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+            "kind": "claim",
+            "payload": {
+              "job_id": "job-a",
+              "owner_lane": "b2400-a",
+              "parent_lane": "director-1",
+              "task_id": 2400,
+              "host_client_id": "desktop",
+              "role": "builder",
+              "tier": "T2",
+              "review_of": null,
+              "predecessor_job_id": null,
+              "supersedes": null,
+              "policy_sha256": "8de436a97778f975de840ffd0ec10539440059169fbc34c4a8eb0486f0ece5ce",
+              "created_at": "2026-10-24T00:00:00.000247Z"
+            },
+            "record_hash": "4d22cad6c412137eaf13b1bcfd8ab1f501292dd75a5a8be1d538723f8eca51c6"
+          },
+          {
+            "job_id": "job-a",
+            "seq": 2,
+            "record_id": "00000000-0000-4000-8000-000000110168",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "director-1",
+            "idempotency_key": "00000000-0000-4000-8000-000000210168",
+            "request_sha256": "265e16dcf1c0f8b52d277e50abf72760a57e622c72ab8844d1530d701ed04051",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000248Z",
+            "previous_hash": "4d22cad6c412137eaf13b1bcfd8ab1f501292dd75a5a8be1d538723f8eca51c6",
+            "kind": "activate",
+            "payload": {
+              "baseline_used": 0,
+              "mode": "enforced",
+              "reason_code": "initial_activation",
+              "seal_seq": null
+            },
+            "record_hash": "6ee7498f2d7bbfe8836d2c3e6891f8bda29d7b149db4c810e26de7ed1fce4b6b"
+          },
+          {
+            "job_id": "job-a-t1",
+            "seq": 1,
+            "record_id": "00000000-0000-4000-8000-000000110250",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "desktop",
+            "idempotency_key": "00000000-0000-4000-8000-000000210250",
+            "request_sha256": "892390d56ec39e31c124f641b5336bee441162aa3be3233925a09efda5d27a47",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000250Z",
+            "previous_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+            "kind": "claim",
+            "payload": {
+              "job_id": "job-a-t1",
+              "owner_lane": "b2400-a",
+              "parent_lane": "b2400-a",
+              "task_id": 2400,
+              "host_client_id": "desktop",
+              "role": "tester",
+              "tier": "T2",
+              "review_of": {
+                "job_id": "job-a",
+                "round_no": 1
+              },
+              "predecessor_job_id": null,
+              "supersedes": null,
+              "policy_sha256": "8de436a97778f975de840ffd0ec10539440059169fbc34c4a8eb0486f0ece5ce",
+              "created_at": "2026-10-24T00:00:00.000250Z"
+            },
+            "record_hash": "c4ed1a2081c31d2b6119fd96345dceaa685215b0492e7ac48e0477d7740ecbda"
+          }
+        ]
+      },
+      "request": {
+        "type": "http",
+        "actor": "desktop",
+        "method": "POST",
+        "path": "/v1/wrk/jobs/job-a-t1/records",
+        "idempotency_key": "00000000-0000-4000-8000-000000000999",
+        "body": {
+          "kind": "completed",
+          "claim_seq": 1,
+          "expected_seq": 1,
+          "payload": {
+            "report_b64": "cGFjayByZXBvcnQgYnl0ZXMK",
+            "report_sha256": "d6b174cbb3403f89f854f6f7870e3cbbabcffcfabcceb7e8f62061b6811d2251"
+          }
+        }
+      },
+      "expect": {
+        "http_status": 201,
+        "created": true,
+        "record": {
+          "kind": "completed"
+        },
+        "note": "authorizes only R's own eligible cleanup; later canonical end makes R unavailable for new target verdict; target used/PASS unchanged"
+      }
+    },
+    {
+      "name": "r-cleanup-after-subject-join-still-receipt-required",
+      "source": {
+        "section": "5",
+        "table": "R4 review-lifecycle and binding regression vectors",
+        "table_name": "r4life",
+        "row": 4,
+        "row_text": "| Subject A joins/ends after R was minted, then R cleanup runs | R remains receipt-required; no downgrade to O2, no receipt-less cleanup; earlier accepted PASS stays valid |"
+      },
+      "given": {
+        "job_id": "job-a-t1",
+        "policy": {
+          "version": "hk1873.policy.v1",
+          "clients": {
+            "desktop": {
+              "host_client_id": "desktop",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-dev": {
+              "host_client_id": "mac-dev",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-work": {
+              "host_client_id": "mac-work",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "rpi": {
+              "host_client_id": "rpi",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-personal": {
+              "host_client_id": "mac-personal",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "director-1": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "operator-desk": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "pa-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "at-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "pb-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "tt-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            }
+          },
+          "lanes": {
+            "director-1": null,
+            "pa-integrator": "director-1"
+          },
+          "features": {
+            "head_repeat_enabled": true,
+            "claim_lane_creation_enabled": true
+          }
+        },
+        "records": [
+          {
+            "job_id": "job-a",
+            "seq": 1,
+            "record_id": "00000000-0000-4000-8000-000000110291",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "director-1",
+            "idempotency_key": "00000000-0000-4000-8000-000000210291",
+            "request_sha256": "e32c4274980a6ae89c986a96e0f55c4c932f3b0c0422420fb5ff3270ff34017a",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000251Z",
+            "previous_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+            "kind": "claim",
+            "payload": {
+              "job_id": "job-a",
+              "owner_lane": "b2400-a",
+              "parent_lane": "director-1",
+              "task_id": 2400,
+              "host_client_id": "desktop",
+              "role": "builder",
+              "tier": "T2",
+              "review_of": null,
+              "predecessor_job_id": null,
+              "supersedes": null,
+              "policy_sha256": "8de436a97778f975de840ffd0ec10539440059169fbc34c4a8eb0486f0ece5ce",
+              "created_at": "2026-10-24T00:00:00.000251Z"
+            },
+            "record_hash": "9f9b94f188f504849349156453eb7c5781f1500c7a413f6beef7991eaff7fd45"
+          },
+          {
+            "job_id": "job-a",
+            "seq": 2,
+            "record_id": "00000000-0000-4000-8000-000000110332",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "director-1",
+            "idempotency_key": "00000000-0000-4000-8000-000000210332",
+            "request_sha256": "265e16dcf1c0f8b52d277e50abf72760a57e622c72ab8844d1530d701ed04051",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000252Z",
+            "previous_hash": "9f9b94f188f504849349156453eb7c5781f1500c7a413f6beef7991eaff7fd45",
+            "kind": "activate",
+            "payload": {
+              "baseline_used": 0,
+              "mode": "enforced",
+              "reason_code": "initial_activation",
+              "seal_seq": null
+            },
+            "record_hash": "7d703d1dde50cb4f6f41e2a24260599a084f016e02b24f902079aac8a7491fff"
+          },
+          {
+            "job_id": "job-a",
+            "seq": 3,
+            "record_id": "00000000-0000-4000-8000-000000110373",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "desktop",
+            "idempotency_key": "00000000-0000-4000-8000-000000210373",
+            "request_sha256": "7955b38de0d4797a2b76e30065e0ef72e6a02c404d8d4c606dfb5bbaaabd4a59",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000253Z",
+            "previous_hash": "7d703d1dde50cb4f6f41e2a24260599a084f016e02b24f902079aac8a7491fff",
+            "kind": "round_open",
+            "payload": {
+              "round_no": 1,
+              "head": "1111111111111111111111111111111111111111",
+              "tester_job_id": "job-a-t1",
+              "extension_grant_seq": null,
+              "repeat_grant_seq": null
+            },
+            "record_hash": "7e75986897e2dc275b5e9338df6f889c5c7d77aabb376e0ffef82b5dee25e74f"
+          },
+          {
+            "job_id": "job-a",
+            "seq": 4,
+            "record_id": "00000000-0000-4000-8000-000000110414",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "desktop",
+            "idempotency_key": "00000000-0000-4000-8000-000000210414",
+            "request_sha256": "f802d2316f1b00d143fd0321dbc76b573923dfe20375488c50f14f73e8051080",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000254Z",
+            "previous_hash": "7e75986897e2dc275b5e9338df6f889c5c7d77aabb376e0ffef82b5dee25e74f",
+            "kind": "verdict",
+            "payload": {
+              "round_no": 1,
+              "head": "1111111111111111111111111111111111111111",
+              "verdict": "PASS",
+              "path": "/jobs/job-a/verdict-r1.md",
+              "content_sha256": "e547281b1f351ac3152537f2f1859185af6515815f44acf1276091a9511969c1",
+              "size_bytes": 69,
+              "tester_job_id": null
+            },
+            "record_hash": "65e98f63fadbfdc442ed2fb76876bfff894e57d926842bf5d9885fb6e2296492"
+          },
+          {
+            "job_id": "job-a",
+            "seq": 5,
+            "record_id": "00000000-0000-4000-8000-000000110455",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "desktop",
+            "idempotency_key": "00000000-0000-4000-8000-000000210455",
+            "request_sha256": "c6b81acc6980a27be04ed2320cea9a1fa939c176906a0d3bdc94a5362f22368a",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000255Z",
+            "previous_hash": "65e98f63fadbfdc442ed2fb76876bfff894e57d926842bf5d9885fb6e2296492",
+            "kind": "joined",
+            "payload": {
+              "head": "1111111111111111111111111111111111111111",
+              "pr": "https://github.com/mgh3326/handoffkeep/pull/2400",
+              "report_sha256": "d6b174cbb3403f89f854f6f7870e3cbbabcffcfabcceb7e8f62061b6811d2251",
+              "report_size_bytes": 18,
+              "verdict_seqs": [
+                4
+              ],
+              "waiver_grant_seq": null
+            },
+            "record_hash": "a2ccc01a6ec5a167fd56e33a50c4369b4289665e3da35068badad3bb116670e7"
+          },
+          {
+            "job_id": "job-a-t1",
+            "seq": 1,
+            "record_id": "00000000-0000-4000-8000-000000110496",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "desktop",
+            "idempotency_key": "00000000-0000-4000-8000-000000210496",
+            "request_sha256": "892390d56ec39e31c124f641b5336bee441162aa3be3233925a09efda5d27a47",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000256Z",
+            "previous_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+            "kind": "claim",
+            "payload": {
+              "job_id": "job-a-t1",
+              "owner_lane": "b2400-a",
+              "parent_lane": "b2400-a",
+              "task_id": 2400,
+              "host_client_id": "desktop",
+              "role": "tester",
+              "tier": "T2",
+              "review_of": {
+                "job_id": "job-a",
+                "round_no": 1
+              },
+              "predecessor_job_id": null,
+              "supersedes": null,
+              "policy_sha256": "8de436a97778f975de840ffd0ec10539440059169fbc34c4a8eb0486f0ece5ce",
+              "created_at": "2026-10-24T00:00:00.000256Z"
+            },
+            "record_hash": "de0459e6e97d73463791eec7fafd59b45142c6f317f61cdee0284e7834572d13"
+          }
+        ]
+      },
+      "request": {
+        "type": "http",
+        "actor": "desktop",
+        "method": "POST",
+        "path": "/v1/wrk/jobs/job-a-t1/records",
+        "idempotency_key": "00000000-0000-4000-8000-000000000999",
+        "body": {
+          "kind": "end",
+          "claim_seq": 1,
+          "expected_seq": 1,
+          "payload": {
+            "end_type": "reaped",
+            "reason_code": "cleanup"
+          }
+        }
+      },
+      "expect": {
+        "http_status": 201,
+        "created": true,
+        "record": {
+          "kind": "end"
+        },
+        "note": "R remains receipt-required; no O2 downgrade; earlier accepted PASS stays valid"
+      }
+    },
+    {
+      "name": "p1-shadow-host-scoped-mint-claim-conflict",
+      "source": {
+        "section": "5",
+        "table": "R4 review-lifecycle and binding regression vectors",
+        "table_name": "r4life",
+        "row": 5,
+        "row_text": "| P1 shadow A; host tries scoped mint | claim_conflict, no fallback; C1 instead requires a central P1 assignment before starting the reviewer |"
+      },
+      "given": {
+        "job_id": "job-a-t1",
+        "policy": {
+          "version": "hk1873.policy.v1",
+          "clients": {
+            "desktop": {
+              "host_client_id": "desktop",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-dev": {
+              "host_client_id": "mac-dev",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-work": {
+              "host_client_id": "mac-work",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "rpi": {
+              "host_client_id": "rpi",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-personal": {
+              "host_client_id": "mac-personal",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "director-1": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "operator-desk": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "pa-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "at-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "pb-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "tt-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            }
+          },
+          "lanes": {
+            "director-1": null,
+            "pa-integrator": "director-1"
+          },
+          "features": {
+            "head_repeat_enabled": true,
+            "claim_lane_creation_enabled": true
+          }
+        },
+        "records": [
+          {
+            "job_id": "job-s",
+            "seq": 1,
+            "record_id": "00000000-0000-4000-8000-000000110537",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "director-1",
+            "idempotency_key": "00000000-0000-4000-8000-000000210537",
+            "request_sha256": "764545c99265011fe3da3afe25a18ff1adf3f2d8300fe62c5efa15508d940e19",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000257Z",
+            "previous_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+            "kind": "claim",
+            "payload": {
+              "job_id": "job-s",
+              "owner_lane": "b2402-s",
+              "parent_lane": "director-1",
+              "task_id": 2402,
+              "host_client_id": "desktop",
+              "role": "builder",
+              "tier": "T2",
+              "review_of": null,
+              "predecessor_job_id": null,
+              "supersedes": null,
+              "policy_sha256": "8de436a97778f975de840ffd0ec10539440059169fbc34c4a8eb0486f0ece5ce",
+              "created_at": "2026-10-24T00:00:00.000257Z"
+            },
+            "record_hash": "2879042ac38d3ca737fcbc0ba03cbb0cf04bcd23f801f3b34e694bb9793e70a1"
+          }
+        ]
+      },
+      "request": {
+        "type": "http",
+        "actor": "desktop",
+        "method": "POST",
+        "path": "/v1/wrk/jobs/job-a-t1/records",
+        "idempotency_key": "00000000-0000-4000-8000-000000000999",
+        "body": {
+          "kind": "claim",
+          "claim_seq": 0,
+          "expected_seq": 0,
+          "payload": {
+            "job_id": "job-a-t1",
+            "owner_lane": "b2402-s",
+            "parent_lane": "b2402-s",
+            "task_id": 2402,
+            "host_client_id": "desktop",
+            "role": "tester",
+            "tier": "T2",
+            "review_of": {
+              "job_id": "job-s",
+              "round_no": 1
+            },
+            "predecessor_job_id": null,
+            "supersedes": null
+          }
+        }
+      },
+      "expect": {
+        "http_status": 409,
+        "error": "claim_conflict",
+        "note": "no fallback; C1 requires a central P1 assignment before reviewer start"
+      }
+    },
+    {
+      "name": "p1-shadow-central-reviewer-claim-starts",
+      "source": {
+        "section": "5",
+        "table": "R4 review-lifecycle and binding regression vectors",
+        "table_name": "r4life",
+        "row": 6,
+        "row_text": "| P1 shadow A; central reviewer R claim then target shadow open receipt | R can start without activate; R's own done/end are fail-closed canonical lifecycle, target verdict still shadow/untrusted for future activation |"
+      },
+      "given": {
+        "job_id": "job-a-t1",
+        "policy": {
+          "version": "hk1873.policy.v1",
+          "clients": {
+            "desktop": {
+              "host_client_id": "desktop",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-dev": {
+              "host_client_id": "mac-dev",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-work": {
+              "host_client_id": "mac-work",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "rpi": {
+              "host_client_id": "rpi",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-personal": {
+              "host_client_id": "mac-personal",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "director-1": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "operator-desk": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "pa-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "at-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "pb-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "tt-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            }
+          },
+          "lanes": {
+            "director-1": null,
+            "pa-integrator": "director-1"
+          },
+          "features": {
+            "head_repeat_enabled": true,
+            "claim_lane_creation_enabled": true
+          }
+        },
+        "records": [
+          {
+            "job_id": "job-s",
+            "seq": 1,
+            "record_id": "00000000-0000-4000-8000-000000110537",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "director-1",
+            "idempotency_key": "00000000-0000-4000-8000-000000210537",
+            "request_sha256": "764545c99265011fe3da3afe25a18ff1adf3f2d8300fe62c5efa15508d940e19",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000257Z",
+            "previous_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+            "kind": "claim",
+            "payload": {
+              "job_id": "job-s",
+              "owner_lane": "b2402-s",
+              "parent_lane": "director-1",
+              "task_id": 2402,
+              "host_client_id": "desktop",
+              "role": "builder",
+              "tier": "T2",
+              "review_of": null,
+              "predecessor_job_id": null,
+              "supersedes": null,
+              "policy_sha256": "8de436a97778f975de840ffd0ec10539440059169fbc34c4a8eb0486f0ece5ce",
+              "created_at": "2026-10-24T00:00:00.000257Z"
+            },
+            "record_hash": "2879042ac38d3ca737fcbc0ba03cbb0cf04bcd23f801f3b34e694bb9793e70a1"
+          }
+        ]
+      },
+      "request": {
+        "type": "http",
+        "actor": "director-1",
+        "method": "POST",
+        "path": "/v1/wrk/jobs/job-a-t1/records",
+        "idempotency_key": "00000000-0000-4000-8000-000000000999",
+        "body": {
+          "kind": "claim",
+          "claim_seq": 0,
+          "expected_seq": 0,
+          "payload": {
+            "job_id": "job-a-t1",
+            "owner_lane": "b2402-s",
+            "parent_lane": "b2402-s",
+            "task_id": 2402,
+            "host_client_id": "desktop",
+            "role": "tester",
+            "tier": "T2",
+            "review_of": {
+              "job_id": "job-s",
+              "round_no": 1
+            },
+            "predecessor_job_id": null,
+            "supersedes": null
+          }
+        }
+      },
+      "expect": {
+        "http_status": 201,
+        "created": true,
+        "record": {
+          "kind": "claim"
+        },
+        "note": "R starts without activate; own done/end fail-closed; target verdict stays untrusted"
+      }
+    },
+    {
+      "name": "r-end-receipt-cannot-drop-subject-task",
+      "source": {
+        "section": "5",
+        "table": "R4 review-lifecycle and binding regression vectors",
+        "table_name": "r4life",
+        "row": 7,
+        "row_text": "| Central tool presents R end receipt to drop A's task, both have same task_id | wrk_receipt_required; require the current bound subject A/current-claim end receipt; no task change |"
+      },
+      "given": {
+        "job_id": "job-a",
+        "policy": {
+          "version": "hk1873.policy.v1",
+          "clients": {
+            "desktop": {
+              "host_client_id": "desktop",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-dev": {
+              "host_client_id": "mac-dev",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-work": {
+              "host_client_id": "mac-work",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "rpi": {
+              "host_client_id": "rpi",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-personal": {
+              "host_client_id": "mac-personal",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "director-1": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "operator-desk": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "pa-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "at-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "pb-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "tt-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            }
+          },
+          "lanes": {
+            "director-1": null,
+            "pa-integrator": "director-1"
+          },
+          "features": {
+            "head_repeat_enabled": true,
+            "claim_lane_creation_enabled": true
+          }
+        },
+        "records": [
+          {
+            "job_id": "job-a",
+            "seq": 1,
+            "record_id": "00000000-0000-4000-8000-000000110127",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "director-1",
+            "idempotency_key": "00000000-0000-4000-8000-000000210127",
+            "request_sha256": "e32c4274980a6ae89c986a96e0f55c4c932f3b0c0422420fb5ff3270ff34017a",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000247Z",
+            "previous_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+            "kind": "claim",
+            "payload": {
+              "job_id": "job-a",
+              "owner_lane": "b2400-a",
+              "parent_lane": "director-1",
+              "task_id": 2400,
+              "host_client_id": "desktop",
+              "role": "builder",
+              "tier": "T2",
+              "review_of": null,
+              "predecessor_job_id": null,
+              "supersedes": null,
+              "policy_sha256": "8de436a97778f975de840ffd0ec10539440059169fbc34c4a8eb0486f0ece5ce",
+              "created_at": "2026-10-24T00:00:00.000247Z"
+            },
+            "record_hash": "4d22cad6c412137eaf13b1bcfd8ab1f501292dd75a5a8be1d538723f8eca51c6"
+          },
+          {
+            "job_id": "job-a",
+            "seq": 2,
+            "record_id": "00000000-0000-4000-8000-000000110168",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "director-1",
+            "idempotency_key": "00000000-0000-4000-8000-000000210168",
+            "request_sha256": "265e16dcf1c0f8b52d277e50abf72760a57e622c72ab8844d1530d701ed04051",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000248Z",
+            "previous_hash": "4d22cad6c412137eaf13b1bcfd8ab1f501292dd75a5a8be1d538723f8eca51c6",
+            "kind": "activate",
+            "payload": {
+              "baseline_used": 0,
+              "mode": "enforced",
+              "reason_code": "initial_activation",
+              "seal_seq": null
+            },
+            "record_hash": "6ee7498f2d7bbfe8836d2c3e6891f8bda29d7b149db4c810e26de7ed1fce4b6b"
+          },
+          {
+            "job_id": "job-a-t1",
+            "seq": 1,
+            "record_id": "00000000-0000-4000-8000-000000110578",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "desktop",
+            "idempotency_key": "00000000-0000-4000-8000-000000210578",
+            "request_sha256": "892390d56ec39e31c124f641b5336bee441162aa3be3233925a09efda5d27a47",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000258Z",
+            "previous_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+            "kind": "claim",
+            "payload": {
+              "job_id": "job-a-t1",
+              "owner_lane": "b2400-a",
+              "parent_lane": "b2400-a",
+              "task_id": 2400,
+              "host_client_id": "desktop",
+              "role": "tester",
+              "tier": "T2",
+              "review_of": {
+                "job_id": "job-a",
+                "round_no": 1
+              },
+              "predecessor_job_id": null,
+              "supersedes": null,
+              "policy_sha256": "8de436a97778f975de840ffd0ec10539440059169fbc34c4a8eb0486f0ece5ce",
+              "created_at": "2026-10-24T00:00:00.000258Z"
+            },
+            "record_hash": "6c835d06cae2182b80b88c58a23810f9fdb53533b15b8d7eedc6e1e42b28394e"
+          },
+          {
+            "job_id": "job-a-t1",
+            "seq": 2,
+            "record_id": "00000000-0000-4000-8000-000000110619",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "desktop",
+            "idempotency_key": "00000000-0000-4000-8000-000000210619",
+            "request_sha256": "d6e514f501a6905b5eabbc2db559cdb149c6aeddcd69c2da6609846f9c484fc8",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000259Z",
+            "previous_hash": "6c835d06cae2182b80b88c58a23810f9fdb53533b15b8d7eedc6e1e42b28394e",
+            "kind": "end",
+            "payload": {
+              "end_type": "reaped",
+              "reason_code": "cleanup"
+            },
+            "record_hash": "d98835cfc648206ceae0e0c3eb6b55d0e971e39fad60ef1f34707c2d01e27ded"
+          }
+        ]
+      },
+      "request": {
+        "type": "legacy",
+        "actor": "director-1",
+        "method": "POST",
+        "path": "/v1/tasks/2400/transition",
+        "body": {
+          "to": "dropped",
+          "receipt": {
+            "job_id": "job-a-t1",
+            "seq": 2
+          }
+        }
+      },
+      "expect": {
+        "http_status": 409,
+        "error": "wrk_receipt_required",
+        "note": "requires the current bound subject A end receipt; shared task_id is insufficient"
+      }
+    },
+    {
+      "name": "r-import-begin-scope-denied",
+      "source": {
+        "section": "5",
+        "table": "R4 review-lifecycle and binding regression vectors",
+        "table_name": "r4life",
+        "row": 8,
+        "row_text": "| Same required-mode reviewer R tries import_begin/import/import_seal | scope_denied; never become an unprotected shadow-import job |"
+      },
+      "given": {
+        "job_id": "job-a-t1",
+        "policy": {
+          "version": "hk1873.policy.v1",
+          "clients": {
+            "desktop": {
+              "host_client_id": "desktop",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-dev": {
+              "host_client_id": "mac-dev",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-work": {
+              "host_client_id": "mac-work",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "rpi": {
+              "host_client_id": "rpi",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-personal": {
+              "host_client_id": "mac-personal",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "director-1": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "operator-desk": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "pa-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "at-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "pb-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "tt-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            }
+          },
+          "lanes": {
+            "director-1": null,
+            "pa-integrator": "director-1"
+          },
+          "features": {
+            "head_repeat_enabled": true,
+            "claim_lane_creation_enabled": true
+          }
+        },
+        "records": [
+          {
+            "job_id": "job-a-t1",
+            "seq": 1,
+            "record_id": "00000000-0000-4000-8000-000000110209",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "desktop",
+            "idempotency_key": "00000000-0000-4000-8000-000000210209",
+            "request_sha256": "892390d56ec39e31c124f641b5336bee441162aa3be3233925a09efda5d27a47",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000249Z",
+            "previous_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+            "kind": "claim",
+            "payload": {
+              "job_id": "job-a-t1",
+              "owner_lane": "b2400-a",
+              "parent_lane": "b2400-a",
+              "task_id": 2400,
+              "host_client_id": "desktop",
+              "role": "tester",
+              "tier": "T2",
+              "review_of": {
+                "job_id": "job-a",
+                "round_no": 1
+              },
+              "predecessor_job_id": null,
+              "supersedes": null,
+              "policy_sha256": "8de436a97778f975de840ffd0ec10539440059169fbc34c4a8eb0486f0ece5ce",
+              "created_at": "2026-10-24T00:00:00.000249Z"
+            },
+            "record_hash": "1308fc9a01cd2bc5e5b4822ce078287eecfd94ecffb11b8a0eb2356dd7bbbd1d"
+          }
+        ]
+      },
+      "request": {
+        "type": "http",
+        "actor": "desktop",
+        "method": "POST",
+        "path": "/v1/wrk/jobs/job-a-t1/records",
+        "idempotency_key": "00000000-0000-4000-8000-000000000999",
+        "body": {
+          "kind": "import_begin",
+          "claim_seq": 1,
+          "expected_seq": 1,
+          "payload": {
+            "reason_code": "import_freeze"
+          }
+        }
+      },
+      "expect": {
+        "http_status": 403,
+        "error": "scope_denied",
+        "note": "required-mode reviewer never becomes an unprotected shadow-import job"
+      }
+    },
+    {
+      "name": "r-import-scope-denied",
+      "source": {
+        "section": "5",
+        "table": "R4 review-lifecycle and binding regression vectors",
+        "table_name": "r4life",
+        "row": 8,
+        "row_text": "| Same required-mode reviewer R tries import_begin/import/import_seal | scope_denied; never become an unprotected shadow-import job |"
+      },
+      "given": {
+        "job_id": "job-a-t1",
+        "policy": {
+          "version": "hk1873.policy.v1",
+          "clients": {
+            "desktop": {
+              "host_client_id": "desktop",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-dev": {
+              "host_client_id": "mac-dev",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-work": {
+              "host_client_id": "mac-work",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "rpi": {
+              "host_client_id": "rpi",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-personal": {
+              "host_client_id": "mac-personal",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "director-1": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "operator-desk": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "pa-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "at-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "pb-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "tt-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            }
+          },
+          "lanes": {
+            "director-1": null,
+            "pa-integrator": "director-1"
+          },
+          "features": {
+            "head_repeat_enabled": true,
+            "claim_lane_creation_enabled": true
+          }
+        },
+        "records": [
+          {
+            "job_id": "job-a-t1",
+            "seq": 1,
+            "record_id": "00000000-0000-4000-8000-000000110209",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "desktop",
+            "idempotency_key": "00000000-0000-4000-8000-000000210209",
+            "request_sha256": "892390d56ec39e31c124f641b5336bee441162aa3be3233925a09efda5d27a47",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000249Z",
+            "previous_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+            "kind": "claim",
+            "payload": {
+              "job_id": "job-a-t1",
+              "owner_lane": "b2400-a",
+              "parent_lane": "b2400-a",
+              "task_id": 2400,
+              "host_client_id": "desktop",
+              "role": "tester",
+              "tier": "T2",
+              "review_of": {
+                "job_id": "job-a",
+                "round_no": 1
+              },
+              "predecessor_job_id": null,
+              "supersedes": null,
+              "policy_sha256": "8de436a97778f975de840ffd0ec10539440059169fbc34c4a8eb0486f0ece5ce",
+              "created_at": "2026-10-24T00:00:00.000249Z"
+            },
+            "record_hash": "1308fc9a01cd2bc5e5b4822ce078287eecfd94ecffb11b8a0eb2356dd7bbbd1d"
+          }
+        ]
+      },
+      "request": {
+        "type": "http",
+        "actor": "desktop",
+        "method": "POST",
+        "path": "/v1/wrk/jobs/job-a-t1/records",
+        "idempotency_key": "00000000-0000-4000-8000-000000000999",
+        "body": {
+          "kind": "import",
+          "claim_seq": 1,
+          "expected_seq": 1,
+          "payload": {
+            "source_locator": "x",
+            "source_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+            "original_actor_client_id": "a",
+            "original_at": "2026-10-20T00:00:00.000000Z",
+            "legacy_kind": "job.round",
+            "content_b64": "e30="
+          }
+        }
+      },
+      "expect": {
+        "http_status": 403,
+        "error": "scope_denied",
+        "note": "required-mode reviewer never becomes an unprotected shadow-import job"
+      }
+    },
+    {
+      "name": "r-import-seal-scope-denied",
+      "source": {
+        "section": "5",
+        "table": "R4 review-lifecycle and binding regression vectors",
+        "table_name": "r4life",
+        "row": 8,
+        "row_text": "| Same required-mode reviewer R tries import_begin/import/import_seal | scope_denied; never become an unprotected shadow-import job |"
+      },
+      "given": {
+        "job_id": "job-a-t1",
+        "policy": {
+          "version": "hk1873.policy.v1",
+          "clients": {
+            "desktop": {
+              "host_client_id": "desktop",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-dev": {
+              "host_client_id": "mac-dev",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-work": {
+              "host_client_id": "mac-work",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "rpi": {
+              "host_client_id": "rpi",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "mac-personal": {
+              "host_client_id": "mac-personal",
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "round.open",
+                "verdict.write",
+                "void.write",
+                "joined.write",
+                "completed.write",
+                "end.write",
+                "relay.publish",
+                "reviewer.claim.write"
+              ]
+            },
+            "director-1": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "operator-desk": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read",
+                "claim.write",
+                "activate.write",
+                "grant.write",
+                "grant.cancel",
+                "end.write",
+                "import.begin",
+                "import.seal",
+                "import.write",
+                "task.state",
+                "reviewer.claim.write"
+              ]
+            },
+            "pa-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "at-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "pb-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            },
+            "tt-integrator": {
+              "host_client_id": null,
+              "permissions": [
+                "capabilities.read",
+                "job.read",
+                "records.read",
+                "content.read"
+              ]
+            }
+          },
+          "lanes": {
+            "director-1": null,
+            "pa-integrator": "director-1"
+          },
+          "features": {
+            "head_repeat_enabled": true,
+            "claim_lane_creation_enabled": true
+          }
+        },
+        "records": [
+          {
+            "job_id": "job-a-t1",
+            "seq": 1,
+            "record_id": "00000000-0000-4000-8000-000000110209",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "desktop",
+            "idempotency_key": "00000000-0000-4000-8000-000000210209",
+            "request_sha256": "892390d56ec39e31c124f641b5336bee441162aa3be3233925a09efda5d27a47",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000249Z",
+            "previous_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+            "kind": "claim",
+            "payload": {
+              "job_id": "job-a-t1",
+              "owner_lane": "b2400-a",
+              "parent_lane": "b2400-a",
+              "task_id": 2400,
+              "host_client_id": "desktop",
+              "role": "tester",
+              "tier": "T2",
+              "review_of": {
+                "job_id": "job-a",
+                "round_no": 1
+              },
+              "predecessor_job_id": null,
+              "supersedes": null,
+              "policy_sha256": "8de436a97778f975de840ffd0ec10539440059169fbc34c4a8eb0486f0ece5ce",
+              "created_at": "2026-10-24T00:00:00.000249Z"
+            },
+            "record_hash": "1308fc9a01cd2bc5e5b4822ce078287eecfd94ecffb11b8a0eb2356dd7bbbd1d"
+          }
+        ]
+      },
+      "request": {
+        "type": "http",
+        "actor": "desktop",
+        "method": "POST",
+        "path": "/v1/wrk/jobs/job-a-t1/records",
+        "idempotency_key": "00000000-0000-4000-8000-000000000999",
+        "body": {
+          "kind": "import_seal",
+          "claim_seq": 1,
+          "expected_seq": 1,
+          "payload": {
+            "begin_seq": 2,
+            "expected_import_count": 0,
+            "manifest_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+            "reason_code": "import_seal"
+          }
+        }
+      },
+      "expect": {
+        "http_status": 403,
+        "error": "scope_denied",
+        "note": "required-mode reviewer never becomes an unprotected shadow-import job"
+      }
+    }
+  ]
+}
