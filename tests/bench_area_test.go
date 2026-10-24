@@ -37,7 +37,7 @@ func benchAreaSeedCatalog(t *testing.T, p *pgxpool.Pool, profiles ...string) {
 	t.Helper()
 	for _, profile := range profiles {
 		for _, effort := range []string{"", "high"} {
-			if _, err := p.Exec(t.Context(), `INSERT INTO bench_catalog(profile,effort,model_id,pool,grade,deviation_ref,decided_at,decided_by) VALUES($1,$2,'m-'+$1,'test','A','decision/2026-10-24/seed',now(),'ops') ON CONFLICT (profile,effort) DO UPDATE SET retired_at=NULL`, profile, effort); err != nil {
+			if _, err := p.Exec(t.Context(), `INSERT INTO bench_catalog(profile,effort,model_id,pool,grade,deviation_ref,decided_at,decided_by) VALUES($1,$2,'m-'||$1,'test','A','decision/2026-10-24/seed',now(),'ops') ON CONFLICT (profile,effort) DO UPDATE SET retired_at=NULL`, profile, effort); err != nil {
 				t.Fatal(err)
 			}
 		}
