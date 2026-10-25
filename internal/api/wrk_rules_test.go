@@ -381,3 +381,99 @@ func TestWrkGuardRejectsTokenShapedVerdict(t *testing.T) {
 		t.Fatal("attempt carries content")
 	}
 }
+
+// successor appends a central successor claim for pred on the same task,
+// host and lanes.
+func (s *scenario) successor(job, pred, lane string, task int64, tier string) packResponse {
+	p := claimPayload(job, lane, "director-1", task, "desktop", "builder", tier)
+	p["predecessor_job_id"] = pred
+	return s.post("director-1", job, "claim", p)
+}
+
+// Tester round 1 finding 1 (design §2/§4 successors): a lineage takes any
+// number of non-branching successors; each inherits the whole budget.
+func TestWrkSuccessorChain(t *testing.T) {
+	s := newScenario(t)
+	s.activeBuilder("job-c1", "b2400-c", 2400, "T1")
+	s.ok(s.post("desktop", "job-c1", "round_open", openPayload(head('1'), nil, nil, nil)), "open")
+	s.ok(s.post("director-1", "job-c1", "end", map[string]any{"end_type": "handed_off", "reason_code": "takeover"}), "end A")
+	s.ok(s.successor("job-c2", "job-c1", "b2400-c", 2400, "T1"), "successor B")
+	b := s.ok(s.post("director-1", "job-c2", "activate", map[string]any{"reason_code": "activation", "seal_seq": nil}), "activate B")
+	if num(summaryOf(b)["used"]) != 1 || num(summaryOf(b)["next_round_no"]) != 2 {
+		t.Fatalf("B summary %v", summaryOf(b))
+	}
+	s.ok(s.post("director-1", "job-c2", "end", map[string]any{"end_type": "handed_off", "reason_code": "takeover"}), "end B")
+	s.ok(s.successor("job-c3", "job-c2", "b2400-c", 2400, "T1"), "second successor C")
+	c := s.ok(s.post("director-1", "job-c3", "activate", map[string]any{"reason_code": "activation", "seal_seq": nil}), "activate C")
+	if num(summaryOf(c)["used"]) != 1 || num(summaryOf(c)["next_round_no"]) != 2 {
+		t.Fatalf("C summary %v", summaryOf(c))
+	}
+	if s.mem.TaskBinding(2400) != "job-c3" {
+		t.Fatalf("task bound to %q", s.mem.TaskBinding(2400))
+	}
+	s.refused(s.successor("job-c4", "job-c2", "b2400-c", 2400, "T1"), "claim_conflict", "branching successor")
+	s.refused(s.post("director-1", "job-c5", "claim", claimPayload("job-c5", "b2400-c", "director-1", 2400, "desktop", "builder", "T1")), "claim_conflict", "competing root claim on the task")
+}
+
+// Tester round 1 finding 2 (design §2/§4, esc-2 #18): a successor keeps the
+// inherited head identity and the explicit head_repeat route for it.
+func TestWrkSuccessorRepeatGrantOnInheritedHead(t *testing.T) {
+	s := newScenario(t)
+	s.activeBuilder("job-ia", "b2401-i", 2401, "T1")
+	s.ok(s.post("desktop", "job-ia", "round_open", openPayload(head('1'), nil, nil, nil)), "open")
+	s.ok(s.post("desktop", "job-ia", "verdict", verdictPayload(1, "PASS", head('1'), "/jobs/ia/v.md", nil, verdictBytes("PASS", head('1'), "a"))), "pass")
+	s.ok(s.post("director-1", "job-ia", "end", map[string]any{"end_type": "handed_off", "reason_code": "takeover"}), "end A")
+	s.ok(s.successor("job-ib", "job-ia", "b2401-i", 2401, "T1"), "successor")
+	s.ok(s.post("director-1", "job-ib", "activate", map[string]any{"reason_code": "activation", "seal_seq": nil}), "activate")
+	s.ok(s.post("desktop", "job-ib-t2", "claim", reviewPayload("job-ib-t2", "b2401-i", 2401, "desktop", "reviewer", "T1", "job-ib", 2)), "mint")
+	s.refused(s.post("desktop", "job-ib", "round_open", openPayload(head('1'), "job-ib-t2", nil, nil)), "duplicate_head", "inherited head")
+	g := s.ok(s.post("director-1", "job-ib", "grant", grantPayload("head_repeat", 2, head('1'), 0, 1, "job-ib-t2")), "repeat grant on inherited round 1")
+	o := s.ok(s.post("desktop", "job-ib", "round_open", openPayload(head('1'), "job-ib-t2", nil, num(g["record"].(map[string]any)["seq"]))), "repeat open")
+	if num(o["record"].(map[string]any)["payload"].(map[string]any)["round_no"]) != 2 {
+		t.Fatalf("round %v", o["record"])
+	}
+	s.refused(s.post("desktop", "job-ib", "verdict", verdictPayload(2, "PASS", head('1'), "/jobs/ia/v.md", "job-ib-t2", verdictBytes("PASS", head('1'), "b"))), "duplicate_path", "inherited path identity")
+}
+
+// Tester round 1 finding 4 (design §3/§5 attenuation): central identity is
+// the fixed role, and each operation checks its own permission.
+func TestWrkAttenuatedCentralKeepsOtherPermissions(t *testing.T) {
+	s := newScenario(t)
+	s.activeBuilder("job-at", "b2402-a", 2402, "T1")
+	var doc map[string]any
+	_ = json.Unmarshal(standardPolicy(t), &doc)
+	d := doc["clients"].(map[string]any)["director-1"].(map[string]any)
+	var kept []any
+	for _, p := range d["permissions"].([]any) {
+		if p != "claim.write" {
+			kept = append(kept, p)
+		}
+	}
+	d["permissions"] = kept
+	raw, _ := json.Marshal(doc)
+	policy, err := wrk.ParsePolicy(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.server.Wrk.Policy, s.server.Wrk.Engine.Policy = policy, policy
+	s.ok(s.post("director-1", "job-at", "grant", grantPayload("extension", 1, head('2'), 1, nil, nil)), "grant.write kept")
+	s.ok(s.post("director-1", "job-at", "end", map[string]any{"end_type": "revoked", "reason_code": "attenuated"}), "end.write kept")
+	s.refused(s.post("director-1", "job-at2", "claim", claimPayload("job-at2", "b2403-a", "director-1", 2403, "desktop", "builder", "T1")), "scope_denied", "claim.write removed")
+}
+
+// Tester round 1 finding 3 (RFC 8785 §3.2.2.2): an invalid Unicode escape is
+// refused, never repaired into a different string.
+func TestWrkLoneSurrogateRefused(t *testing.T) {
+	s := newScenario(t)
+	s.activeBuilder("job-ls", "b2403-l", 2403, "T1")
+	s.ok(s.post("desktop", "job-ls", "round_open", openPayload(head('1'), nil, nil, nil)), "open")
+	claim, tail := s.cas("job-ls")
+	content := verdictBytes("PASS", head('1'), "x")
+	body, _ := json.Marshal(map[string]any{"kind": "verdict", "claim_seq": claim, "expected_seq": tail, "payload": verdictPayload(1, "PASS", head('1'), "/PLACEHOLDER", nil, content)})
+	raw := strings.Replace(string(body), "/PLACEHOLDER", `/\ud800`, 1)
+	r := s.do("desktop", "POST", "/v1/wrk/jobs/job-ls/records", map[string]string{"Idempotency-Key": s.key()}, []byte(raw))
+	s.refused(r, "invalid_request", "lone surrogate in path")
+	if int64(len(s.records("job-ls"))) != tail {
+		t.Fatal("lone-surrogate verdict was stored")
+	}
+}

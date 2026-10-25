@@ -105,11 +105,15 @@ type state struct {
 	contents     map[string]bool
 	verdictHeads map[string]bool
 	legacyRounds map[int64]string // imported legacy round number -> head
-	legacy       []legacyEvent
-	workEvidence bool
-	historyBad   bool
-	receiptReq   bool
-	sealBroken   bool
+	// inheritedRounds maps every round number of the trusted predecessor
+	// lineage to its head: negative identity a head_repeat grant may cite,
+	// never positive evidence.
+	inheritedRounds map[int64]string
+	legacy          []legacyEvent
+	workEvidence    bool
+	historyBad      bool
+	receiptReq      bool
+	sealBroken      bool
 
 	// inherited from a trusted predecessor
 	inheritedUsed  int64
@@ -136,11 +140,20 @@ func reviewRole(role string) bool { return role == "tester" || role == "reviewer
 // buildState folds a journal. pred is the trusted predecessor's state (nil
 // for a root job); its budget, numbering and identity sets are inherited.
 func buildState(j *Journal, pred *state) *state {
-	s := &state{jobID: j.JobID, rounds: map[int64]*round{}, grants: map[int64]*grant{}, paths: map[string]bool{}, contents: map[string]bool{}, verdictHeads: map[string]bool{}, legacyRounds: map[int64]string{}}
+	s := &state{jobID: j.JobID, rounds: map[int64]*round{}, grants: map[int64]*grant{}, paths: map[string]bool{}, contents: map[string]bool{}, verdictHeads: map[string]bool{}, legacyRounds: map[int64]string{}, inheritedRounds: map[int64]string{}}
 	s.tail, s.tailHash = j.Tail()
 	if pred != nil {
 		s.inheritedUsed = pred.used()
 		s.inheritedFloor = pred.nextRoundNo() - 1
+		for no, h := range pred.inheritedRounds {
+			s.inheritedRounds[no] = h
+		}
+		for no, h := range pred.legacyRounds {
+			s.inheritedRounds[no] = h
+		}
+		for no, rd := range pred.rounds {
+			s.inheritedRounds[no] = rd.head
+		}
 		for k := range pred.paths {
 			s.paths[k] = true
 		}

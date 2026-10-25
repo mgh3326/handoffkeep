@@ -29,7 +29,7 @@ var errStrictJSON = errors.New("invalid strict json")
 // invalid_request, never last-key-wins). Objects decode to map[string]any,
 // arrays to []any and integers to int64.
 func DecodeStrict(b []byte) (any, error) {
-	if !utf8.Valid(b) {
+	if !utf8.Valid(b) || !validEscapes(b) {
 		return nil, errStrictJSON
 	}
 	dec := json.NewDecoder(bytes.NewReader(b))
@@ -97,6 +97,75 @@ func decodeValue(dec *json.Decoder) (any, error) {
 		return t, nil
 	}
 	return nil, errStrictJSON
+}
+
+// validEscapes refuses \u escapes that do not name a Unicode scalar value:
+// a lone or reversed surrogate (RFC 8785 §3.2.2.2 requires an error, and
+// encoding/json would silently substitute U+FFFD before hashing). It runs
+// on the raw bytes, so property names are covered too.
+func validEscapes(b []byte) bool {
+	inString := false
+	for i := 0; i < len(b); i++ {
+		c := b[i]
+		if !inString {
+			if c == '"' {
+				inString = true
+			}
+			continue
+		}
+		switch c {
+		case '"':
+			inString = false
+		case '\\':
+			if i+1 >= len(b) {
+				return false
+			}
+			if b[i+1] != 'u' {
+				i++
+				continue
+			}
+			r, ok := hex4(b, i+2)
+			if !ok {
+				return false
+			}
+			i += 5
+			switch {
+			case r >= 0xDC00 && r <= 0xDFFF:
+				return false
+			case r >= 0xD800 && r <= 0xDBFF:
+				if i+6 >= len(b) || b[i+1] != '\\' || b[i+2] != 'u' {
+					return false
+				}
+				lo, ok := hex4(b, i+3)
+				if !ok || lo < 0xDC00 || lo > 0xDFFF {
+					return false
+				}
+				i += 6
+			}
+		}
+	}
+	return true
+}
+
+func hex4(b []byte, at int) (rune, bool) {
+	if at+4 > len(b) {
+		return 0, false
+	}
+	var r rune
+	for _, c := range b[at : at+4] {
+		r <<= 4
+		switch {
+		case c >= '0' && c <= '9':
+			r |= rune(c - '0')
+		case c >= 'a' && c <= 'f':
+			r |= rune(c-'a') + 10
+		case c >= 'A' && c <= 'F':
+			r |= rune(c-'A') + 10
+		default:
+			return 0, false
+		}
+	}
+	return r, true
 }
 
 func strictInteger(s string) (int64, error) {

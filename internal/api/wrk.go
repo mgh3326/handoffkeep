@@ -87,15 +87,20 @@ func (s Server) wrk(w http.ResponseWriter, r *http.Request) {
 		wrkErr(w, wrk.ScopeDenied)
 		return
 	}
+	// Every refused POST leaves an attempt row, route refusals included.
+	fail := func(code wrk.Code) {
+		s.wrkAttempt(r, client, code)
+		wrkErr(w, code)
+	}
 	segs, ok := wrkPath(r)
 	if !ok {
-		wrkErr(w, wrk.NotFound)
+		fail(wrk.NotFound)
 		return
 	}
 	switch {
 	case len(segs) == 1 && segs[0] == "capabilities":
 		if r.Method != http.MethodGet {
-			wrkErr(w, wrk.MethodNotAllowed)
+			fail(wrk.MethodNotAllowed)
 			return
 		}
 		s.wrkCapabilities(w, r, client)
@@ -105,7 +110,7 @@ func (s Server) wrk(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case len(segs) == 2:
 			if r.Method != http.MethodGet {
-				wrkErr(w, wrk.MethodNotAllowed)
+				fail(wrk.MethodNotAllowed)
 				return
 			}
 			s.wrkRead(w, r, client, wrk.PermJobRead, func() { s.wrkJob(w, r, job) })
@@ -117,19 +122,19 @@ func (s Server) wrk(w http.ResponseWriter, r *http.Request) {
 			case http.MethodPost:
 				s.wrkAppend(w, r, client, job)
 			default:
-				wrkErr(w, wrk.MethodNotAllowed)
+				fail(wrk.MethodNotAllowed)
 			}
 			return
 		case len(segs) == 5 && segs[2] == "records" && segs[4] == "content":
 			if r.Method != http.MethodGet {
-				wrkErr(w, wrk.MethodNotAllowed)
+				fail(wrk.MethodNotAllowed)
 				return
 			}
 			s.wrkRead(w, r, client, wrk.PermContentRead, func() { s.wrkContent(w, r, job, segs[3]) })
 			return
 		}
 	}
-	wrkErr(w, wrk.NotFound)
+	fail(wrk.NotFound)
 }
 
 // wrkPath splits the raw path under /v1/wrk/. Percent-encoded aliases are

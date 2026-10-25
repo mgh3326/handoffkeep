@@ -159,11 +159,23 @@ func (p *Policy) Has(id, perm string) bool {
 // Host is the client's host_client_id ("" for the central and reader ids).
 func (p *Policy) Host(id string) string { return p.clients[id].host }
 
-// Central reports a director-1/operator-desk style client: no host mapping
-// and the central claim permission.
+// CentralClientIDs are the fixed central roles (design §3: only
+// director-1 and operator-desk hold central authority).
+var CentralClientIDs = []string{"director-1", "operator-desk"}
+
+// Central reports one of the fixed central roles. Identity never depends
+// on any one permission: each operation still checks its own permission,
+// so attenuating claim.write leaves grant.write and the rest intact.
 func (p *Policy) Central(id string) bool {
-	c, ok := p.clients[id]
-	return ok && c.host == "" && c.perms[PermClaimWrite]
+	if !p.Known(id) {
+		return false
+	}
+	for _, c := range CentralClientIDs {
+		if id == c {
+			return true
+		}
+	}
+	return false
 }
 
 // LaneParent returns a configured lane's parent; ok is false when the lane

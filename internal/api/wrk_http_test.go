@@ -194,3 +194,16 @@ func TestWrkHTTPRefusedWritesAreAudited(t *testing.T) {
 		t.Fatalf("media attempt %+v", atts[1])
 	}
 }
+
+// Tester round 1 finding 5: route-level POST refusals are audited too.
+func TestWrkHTTPRouteRefusalsAudited(t *testing.T) {
+	s := newScenario(t)
+	before := len(s.mem.Attempts())
+	s.raw("desktop", "POST", "/v1/wrk/unknown-route", map[string]string{"Content-Type": "application/json"}, []byte(`{}`))
+	s.raw("desktop", "POST", "/v1/wrk/capabilities", map[string]string{"Content-Type": "application/json"}, []byte(`{}`))
+	s.raw("desktop", "POST", "/v1/wrk/jobs/job-x", map[string]string{"Content-Type": "application/json"}, []byte(`{}`))
+	atts := s.mem.Attempts()[before:]
+	if len(atts) != 3 || atts[0].Code != "not_found" || atts[1].Code != "method_not_allowed" || atts[2].Code != "method_not_allowed" || atts[2].JobID != "job-x" {
+		t.Fatalf("route refusal attempts %+v", atts)
+	}
+}

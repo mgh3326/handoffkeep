@@ -9,7 +9,7 @@ under `testdata/o3/` are the specification; this page covers operation.
 
 | Setting | Meaning |
 |---|---|
-| `WRK_RECORDS_API` | `off` (default), `shadow` or `enforce`. Off: every `/v1/wrk` route answers `503 wrk_unavailable` after authentication and the legacy routes behave as before. Shadow: journal writes run as observations; `activate` needs `enforce`. |
+| `WRK_RECORDS_API` | `off` (default), `shadow` or `enforce`. Off: every `/v1/wrk` route answers `503 wrk_unavailable` after authentication; legacy routes behave as before for unenrolled tasks and jobs, but the legacy fences stay active for any task or job the journal already protects (off never restores legacy writes for them). Shadow: journal writes run as observations; `activate` needs `enforce`. |
 | `WRK_RECORDS_RECOVERY_REQUIRED` | `true` freezes the journal: every write answers `503 wrk_recovery_required`; only director-1/operator-desk reads stay available (operator answer dr-1925-1). |
 | `HANDOFFKEEP_WRK_POLICY_FILE` | The nonsecret policy file (below). Required when the API is enabled; a missing or invalid file stops startup. |
 | `WRK_STORE_GENERATION` | Canonical lowercase UUID of the current store history. Required when the API is enabled; set a fresh one after any point-in-time restore. Never generated at boot. |

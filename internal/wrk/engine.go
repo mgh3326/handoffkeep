@@ -511,10 +511,16 @@ func (e *Engine) subjectClaim(tx Tx, s *state, j *Journal, req *Request) error {
 	if err := e.checkLane(claims, req.JobID, role, pStr(p, "owner_lane"), pStr(p, "parent_lane")); err != nil {
 		return err
 	}
+	// The job's own successor lineage holds the task in turn; any other
+	// canonical subject on the same task is a competing claimant.
+	lineage, err := ancestors(tx, req.JobID, pred)
+	if err != nil {
+		return err
+	}
 	for _, c := range claims {
 		cp := c.Payload
 		ct, _ := pInt(cp, "task_id")
-		if c.JobID == req.JobID || c.JobID == pred || ct != task {
+		if c.JobID == req.JobID || lineage[c.JobID] || ct != task {
 			continue
 		}
 		if r := pStr(cp, "role"); r == "builder" || r == "worker" {
@@ -522,6 +528,21 @@ func (e *Engine) subjectClaim(tx Tx, s *state, j *Journal, req *Request) error {
 		}
 	}
 	return tx.BindTask(task, req.JobID, release, releaseTask)
+}
+
+// ancestors returns the predecessor chain starting at pred (the job's
+// trusted lineage), bounded like the state loader.
+func ancestors(tx Tx, jobID, pred string) (map[string]bool, error) {
+	out := map[string]bool{}
+	for cur, depth := pred, 0; cur != "" && cur != jobID && !out[cur] && depth < 64; depth++ {
+		out[cur] = true
+		j, err := tx.Journal(cur)
+		if err != nil {
+			return nil, err
+		}
+		cur = firstClaimPredecessor(j)
+	}
+	return out, nil
 }
 
 // checkLane applies the §5 lane graph algorithm against the policy roots and
@@ -1008,7 +1029,7 @@ func (e *Engine) ruleGrant(tx Tx, s *state, p map[string]any, now time.Time) (ma
 			if rd := s.rounds[*earlier]; rd != nil && rd.head == *head {
 				onHead = true
 			}
-			if s.legacyRounds[*earlier] == *head {
+			if s.legacyRounds[*earlier] == *head || s.inheritedRounds[*earlier] == *head {
 				onHead = true
 			}
 			bad = !onHead

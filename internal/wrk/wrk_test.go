@@ -36,6 +36,7 @@ func TestDecodeStrictRefusals(t *testing.T) {
 	for _, raw := range []string{
 		`{"a":1,"a":1}`, `{"a":1} x`, `{"a":1.0}`, `{"a":1e3}`, `{"a":-0}`, `{"a":01}`,
 		`{"a":9007199254740992}`, "{\"a\":\"\xff\"}", ``, `[`,
+		`{"a":"\ud800"}`, `{"a":"\udc00"}`, `{"a":"\ud800\u0041"}`, `{"\ud800":1}`, `{"a":"\ud800x"}`, `{"a":"\udbff\ud800"}`, `{"a":"\u12"}`,
 	} {
 		if _, err := DecodeStrict([]byte(raw)); err == nil {
 			t.Errorf("DecodeStrict(%q) accepted", raw)
@@ -43,6 +44,9 @@ func TestDecodeStrictRefusals(t *testing.T) {
 	}
 	if _, err := DecodeStrict([]byte(` {"a":[9007199254740991,-3]} `)); err != nil {
 		t.Fatal(err)
+	}
+	if v, err := DecodeStrict([]byte(`{"\\u":"\ud83d\ude00\\ud800"}`)); err != nil || v.(map[string]any)[`\u`] != "\U0001F600\\ud800" {
+		t.Fatalf("valid pair and escaped backslash: %v %v", v, err)
 	}
 }
 
