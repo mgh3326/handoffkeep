@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"mime"
+	"net"
 	"net/http"
 
 	"github.com/mgh3326/handoffkeep/internal/wrkrecords"
@@ -37,6 +39,10 @@ func (c Client) WrkCall(ctx context.Context, method, path string, body []byte, k
 	}
 	response, e := hc.Do(req)
 	if e != nil {
+		var op *net.OpError
+		if errors.As(e, &op) && op.Op == "dial" {
+			return nil, "transport_unavailable"
+		}
 		if method == "POST" {
 			return nil, "transport_indeterminate"
 		}
@@ -87,6 +93,9 @@ func (c Client) WrkCall(ctx context.Context, method, path string, body []byte, k
 		if x != nil || int64(len(data)) != wrkrecords.Num(m, "size_bytes") {
 			return nil, "protocol_invalid"
 		}
+	}
+	if !wrkResponseConsistent(method, path, key, def, body, v) {
+		return nil, "protocol_invalid"
 	}
 	// Never publish the unchecked server byte stream. Compact one validated JSON
 	// object; the CLI adds its sole terminating newline.

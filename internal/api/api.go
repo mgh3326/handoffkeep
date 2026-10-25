@@ -281,7 +281,11 @@ func (s Service) DispositionSummary(ctx context.Context, asOf time.Time) (store.
 	return s.Store.DispositionSummary(ctx, asOf)
 }
 func (s Service) ApplyDisposition(ctx context.Context, id int64, client, note string) (store.Task, error) {
-	if err := s.wrkTaskPrecheck(ctx, id, "merged", false); err != nil {
+	task, _, err := s.Store.GetTask(ctx, id)
+	if err != nil {
+		return store.Task{}, err
+	}
+	if err := s.wrkTaskPrecheck(ctx, id, store.DispositionTarget(task), false); err != nil {
 		return store.Task{}, err
 	}
 	return s.Store.ApplyDisposition(ctx, id, client, note)

@@ -172,6 +172,7 @@ func TestWrkConcurrentAppendAndCommitReplay(t *testing.T) {
 		t.Fatalf("used=%d err=%v", latest.Summary.Used, e)
 	}
 	req.ExpectedSeq = latest.Summary.SnapshotSeq
+	req.Payload = storeOpen(strings.Repeat("d", 40))
 	_, e = s.WrkAppend(t.Context(), "desktop", "job-a", wrkrecords.NewUUID(), req)
 	if wrkrecords.Code(e) != "round_cap" {
 		t.Fatalf("fourth ordinary round: %v", e)

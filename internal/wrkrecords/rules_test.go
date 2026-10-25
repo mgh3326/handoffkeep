@@ -1,8 +1,9 @@
-package wrkrecords
+package wrkrecords_test
 
 import (
 	"encoding/base64"
 	"encoding/json"
+	. "github.com/mgh3326/handoffkeep/internal/wrkrecords"
 	"strings"
 	"testing"
 	"time"
@@ -241,4 +242,60 @@ func TestDesignImportFloorAndNoPlantedTrust(t *testing.T) {
 	if Num(r.Payload, "round_no") != 4 {
 		t.Fatal("round 4 required")
 	}
+}
+
+func TestDesignStoredSealFailsClosed(t *testing.T) {
+	for _, active := range []bool{false, true} {
+		t.Run(map[bool]string{false: "sealed", true: "activated"}[active], func(t *testing.T) {
+			c := fresh(t)
+			claim := c.s.Jobs["subject"][0]
+			c.s.Jobs["subject"] = []Record{claim, {JobID: "subject", Seq: 2, Kind: "import_seal", Payload: Object{"baseline_used": 3, "numbering_floor": 1}}}
+			if active {
+				c.s.Jobs["subject"] = append(c.s.Jobs["subject"], Record{JobID: "subject", Seq: 3, Kind: "activate", Payload: Object{"baseline_used": 3}})
+			}
+			if _, e := c.s.Summary("subject", c.e.Now); Code(e) != "import_unsealed" {
+				t.Fatalf("corrupt seal read: %v", e)
+			}
+			before := len(c.s.Jobs["subject"])
+			c.want("desktop", "subject", "round_open", "import_unsealed", opening(h4, "", nil, nil))
+			if len(c.s.Jobs["subject"]) != before {
+				t.Fatal("allocated from corrupt seal")
+			}
+		})
+	}
+}
+
+func TestDesignReviewerMustExistBeforeNamedOpen(t *testing.T) {
+	c := fresh(t)
+	c.want("desktop", "subject", "round_open", "round_not_open", opening(h1, "late-reviewer", nil, nil))
+	if len(c.s.Jobs["subject"]) != 2 {
+		t.Fatal("open accepted before reviewer claim")
+	}
+	c.reviewer("late-reviewer", "desktop", 1)
+	c.must("desktop", "subject", "round_open", opening(h1, "late-reviewer", nil, nil))
+}
+
+func TestDesignP1AssignmentUsesSubjectPhase(t *testing.T) {
+	c := fresh(t)
+	c.s.Jobs["subject"] = c.s.Jobs["subject"][:1]
+	// Global enforce must still permit a central P1 assignment on a shadow subject.
+	c.reviewer("p1-reviewer", "desktop", 1)
+	c.must("desktop", "subject", "round_open", opening(h1, "p1-reviewer", nil, nil))
+	c.must("desktop", "subject", "verdict", evidence(1, h1, "/p1/review", "shadow observation", "p1-reviewer"))
+	if !c.s.ReceiptRequired("p1-reviewer") || c.s.ProtectedTask(9001) {
+		t.Fatal("P1 lifecycle/subject protection mismatch")
+	}
+}
+
+func TestDesignWaiverStrandedAtJoin(t *testing.T) {
+	c := fresh(t)
+	c.must("desktop", "subject", "round_open", opening(h1, "", nil, nil))
+	g := c.grant("join_waiver", nil, h1, nil, nil)
+	sum, e := c.s.Summary("subject", c.e.Now)
+	if e != nil || len(sum.Grants) != 0 || len(sum.Warnings) != 1 || sum.Warnings[0] != "grant_stranded" {
+		t.Fatalf("waiver summary: %+v %v", sum, e)
+	}
+	p := report(h1)
+	p["waiver_grant_seq"] = g.Seq
+	c.want("desktop", "subject", "joined", "review_incomplete", p)
 }

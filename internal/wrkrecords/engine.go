@@ -50,6 +50,9 @@ func (e Engine) time() time.Time {
 	return e.Now.UTC().Truncate(time.Microsecond)
 }
 
+// Time is the server clock used by both writes and read projections.
+func (e Engine) Time() time.Time { return e.time() }
+
 var permissions = map[string]string{"activate": "activate.write", "round_open": "round.open", "verdict": "verdict.write", "void": "void.write", "joined": "joined.write", "completed": "completed.write", "grant": "grant.write", "grant_cancel": "grant.cancel", "end": "end.write", "import_begin": "import.begin", "import_seal": "import.seal", "import": "import.write"}
 
 func (e Engine) Append(s Snapshot, actor, job, key string, r Request) (WriteResponse, []byte, error) {
@@ -496,6 +499,9 @@ func (e Engine) claim(s Snapshot, actor, job string, old *Record, sum Summary, p
 		if Review(subject) {
 			return fail()
 		}
+		if !Central(actor) && (Text(subject.Payload, "host_client_id") != e.Policy.Host(actor) || Text(p, "host_client_id") != e.Policy.Host(actor)) {
+			return Error("host_mismatch")
+		}
 		state, x := s.Summary(subject.JobID, e.time())
 		if x != nil {
 			return x
@@ -506,11 +512,14 @@ func (e Engine) claim(s Snapshot, actor, job string, old *Record, sum Summary, p
 		if state.State == "joined" {
 			return Error("review_sealed")
 		}
+		if state.State == "importing" {
+			return Error("migration_frozen")
+		}
+		if state.State == "sealed" {
+			return Error("import_sealed")
+		}
 		if state.State != "active" && !(Central(actor) && CentralReviewerP1UsesSubjectPhase && state.State == "shadow") {
 			return fail()
-		}
-		if !Central(actor) && (Text(subject.Payload, "host_client_id") != e.Policy.Host(actor) || Text(p, "host_client_id") != e.Policy.Host(actor)) {
-			return Error("host_mismatch")
 		}
 		for _, key := range []string{"task_id", "tier", "owner_lane"} {
 			if p[key] != subject.Payload[key] {
@@ -626,7 +635,9 @@ func (e Engine) assignment(s Snapshot, job string, round int64, id, actor string
 	if x != nil {
 		return x
 	}
-	if state.State != "active" && !(e.Mode == "shadow" && state.State == "shadow") {
+	// P1 is the subject's phase. Central provenance, rather than the server's
+	// global mode, permits a staged shadow assignment (dr-1925-1).
+	if state.State != "active" && !(CentralReviewerP1UsesSubjectPhase && Central(c.Actor) && state.State == "shadow") {
 		return Error("round_not_open")
 	}
 	if actor != "" && e.Policy.Host(actor) != Text(c.Payload, "host_client_id") {
@@ -796,7 +807,7 @@ func (e Engine) headReserved(s Snapshot, job, head string) bool {
 	return false
 }
 func (e Engine) accountImport(s Snapshot, job string) (int64, int64, error) {
-	count, inherited, floor := int64(0), int64(0), int64(0)
+	count, inherited, takeover, floor := int64(0), int64(0), int64(0), int64(0)
 	work := false
 	c := s.Claim(job)
 	if c != nil && Text(c.Payload, "predecessor_job_id") != "" {
@@ -834,8 +845,8 @@ func (e Engine) accountImport(s Snapshot, job string) (int64, int64, error) {
 				}
 			}
 			if kind == "job.takeover" {
-				if n, ok := p["rounds_used"].(float64); ok && n >= 0 && n == float64(int64(n)) && int64(n) > inherited {
-					inherited = int64(n)
+				if n, ok := p["rounds_used"].(float64); ok && n >= 0 && n <= MaxInt && n == float64(int64(n)) && int64(n) > takeover {
+					takeover = int64(n)
 				}
 			}
 			if kind == "job.round" || kind == "job.verdict" || kind == "job.round_void" {
@@ -858,10 +869,10 @@ func (e Engine) accountImport(s Snapshot, job string) (int64, int64, error) {
 			}
 		}
 	}
-	if count > MaxInt-inherited {
+	if takeover > MaxInt-inherited || count > MaxInt-inherited-takeover {
 		return 0, 0, Error("invalid_request")
 	}
-	baseline := count + inherited
+	baseline := count + inherited + takeover
 	if work && baseline < 3 {
 		baseline = 3
 	}

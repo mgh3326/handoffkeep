@@ -42,7 +42,9 @@ func (s Server) legacyWrkFence(next http.Handler) http.Handler {
 			appErr(w, wrkrecords.Error("invalid_request"))
 			return
 		}
-		r.Body = io.NopCloser(bytes.NewReader(raw))
+		// Preserve unread bytes for the existing route's own size/error contract.
+		// The fence must not turn an oversized legacy request into truncated JSON.
+		r.Body = io.NopCloser(io.MultiReader(bytes.NewReader(raw), r.Body))
 		var body wrkrecords.Object
 		if json.Unmarshal(raw, &body) != nil {
 			next.ServeHTTP(w, r)

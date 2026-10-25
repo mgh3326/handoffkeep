@@ -17,6 +17,14 @@ import (
 // ConfigureWrk publishes only a complete validated snapshot. An off server
 // retains durable legacy fences, but cannot enroll or append O3 records.
 func (s *Store) ConfigureWrk(ctx context.Context, mode string, policy *wrkrecords.Policy, generation string, recovery bool) error {
+	return s.ConfigureWrkEngine(ctx, wrkrecords.Engine{Policy: policy, Mode: mode, Recovery: recovery, Generation: generation})
+}
+
+// ConfigureWrkEngine publishes a complete immutable configuration, with an
+// optional fixed clock for deterministic contract execution. Runtime leaves
+// Now zero and uses the server UTC clock.
+func (s *Store) ConfigureWrkEngine(ctx context.Context, engine wrkrecords.Engine) error {
+	mode, policy, generation := engine.Mode, engine.Policy, engine.Generation
 	if mode == "" {
 		mode = "off"
 	}
@@ -30,8 +38,32 @@ func (s *Store) ConfigureWrk(ctx context.Context, mode string, policy *wrkrecord
 	if mode != "off" && (!installed || policy == nil || !wrkrecords.UUIDRE.MatchString(generation)) {
 		return wrkrecords.Error("wrk_unavailable")
 	}
-	s.wrk.Store(&wrkrecords.Engine{Policy: policy, Mode: mode, Recovery: recovery, Generation: generation})
-	return nil
+	engine.Mode = mode
+	if !installed {
+		s.wrk.Store(&engine)
+		return nil
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return wrkrecords.Error("wrk_unavailable")
+	}
+	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
+		return wrkrecords.Error("wrk_unavailable")
+	}
+	snapshot, err := loadWrkSnapshot(ctx, tx)
+	if err != nil {
+		return wrkrecords.Error("wrk_unavailable")
+	}
+	if policy != nil {
+		if err = policy.ValidateGraph(snapshot, s.WrkEngine().Policy); err != nil {
+			return err
+		}
+	}
+	// Keep the graph lock through atomic publication. Failed replacements never
+	// replace the previously validated engine.
+	s.wrk.Store(&engine)
+	return tx.Commit(ctx)
 }
 func (s *Store) validateWrkRuntime(ctx context.Context) (bool, error) {
 	var count int
@@ -158,11 +190,13 @@ func (s *Store) WrkAppend(ctx context.Context, actor, job, key string, r wrkreco
 		return out, wrkrecords.Error("wrk_unavailable")
 	}
 	defer tx.Rollback(ctx)
-	if r.Kind == "claim" {
+	if r.Kind == "claim" || r.Kind == "activate" {
 		if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
 			return out, err
 		}
 	}
+	// A policy publication may have completed while this append acquired locks.
+	engine = s.WrkEngine()
 	if _, err = tx.Exec(ctx, `SET LOCAL synchronous_commit=on`); err != nil {
 		return out, err
 	}
@@ -308,7 +342,7 @@ func (s *Store) WrkJob(ctx context.Context, actor, job string) (wrkrecords.JobRe
 	if c == nil {
 		return wrkrecords.JobResponse{}, wrkrecords.Error("not_found")
 	}
-	sum, e := snap.Summary(job, time.Now().UTC())
+	sum, e := snap.Summary(job, s.WrkEngine().Time())
 	return wrkrecords.JobResponse{Contract: wrkrecords.Contract, Claim: *c, Summary: sum}, e
 }
 func (s *Store) WrkRecords(ctx context.Context, actor, job string, after, snapshot int64, limit int) (wrkrecords.RecordsResponse, error) {
@@ -341,7 +375,7 @@ func (s *Store) WrkRecords(ctx context.Context, actor, job string, after, snapsh
 	snap.Jobs[job] = history
 	out.Snapshot = snapshot
 	out.More = out.Next < snapshot
-	out.Summary, e = snap.Summary(job, time.Now().UTC())
+	out.Summary, e = snap.Summary(job, s.WrkEngine().Time())
 	return out, e
 }
 func (s *Store) WrkContent(ctx context.Context, actor, job string, seq int64) (wrkrecords.ContentResponse, error) {

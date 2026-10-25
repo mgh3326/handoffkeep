@@ -223,6 +223,11 @@ func (s Snapshot) summary(job string, now time.Time, seen map[string]bool) (Summ
 		case "import_begin":
 			sum.State = "importing"
 		case "import_seal":
+			// A stored seal is an integrity boundary. Never repair corrupted
+			// accounting while reading it or allocate from its asserted floor.
+			if Num(r.Payload, "numbering_floor") < Num(r.Payload, "baseline_used") {
+				return sum, Error("import_unsealed")
+			}
 			sum.State = "sealed"
 			sum.Baseline = Num(r.Payload, "baseline_used")
 			sum.Next = Num(r.Payload, "numbering_floor") + 1
@@ -247,6 +252,15 @@ func (s Snapshot) summary(job string, now time.Time, seen map[string]bool) (Summ
 		}
 		if sum.Next < p.Next {
 			sum.Next = p.Next
+		}
+		// Successors inherit every predecessor number, including historical
+		// observations and voids that no longer consume a review slot.
+		for _, r := range s.Jobs[Text(c.Payload, "predecessor_job_id")] {
+			if r.Kind == "round_open" || r.Kind == "verdict" || r.Kind == "void" {
+				if n := Num(r.Payload, "round_no"); n >= sum.Next {
+					sum.Next = n + 1
+				}
+			}
 		}
 	}
 	sum.Used = sum.Baseline
