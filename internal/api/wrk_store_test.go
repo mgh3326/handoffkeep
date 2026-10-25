@@ -239,6 +239,8 @@ var legacyAdapters = map[string]func(e *packEnv, fx *pgFixture, c *packCase) pac
 	"legacy-route-fence.json/tasks-create-unrelated-legacy-compatible": func(e *packEnv, fx *pgFixture, c *packCase) packResponse {
 		return e.legacyPost("desktop", "/v1/tasks", map[string]any{"lane": "o3-lane", "title": "x", "kind": "implement", "project": "handoffkeep", "refs": map[string]any{}})
 	},
+	// Mapping: a real lane plus an explicit job_id naming the protected O3
+	// job, which is the explicit claim attempt (esc-2 inference 14).
 	"legacy-route-fence.json/tasks-next-claim-protected-denied": func(e *packEnv, fx *pgFixture, c *packCase) packResponse {
 		return e.legacyPost("desktop", "/v1/tasks/next", map[string]any{"lane": "o3-lane", "claimed_by": "desktop-pane", "job_id": "job-a"})
 	},
@@ -261,7 +263,12 @@ var legacyAdapters = map[string]func(e *packEnv, fx *pgFixture, c *packCase) pac
 	"legacy-route-fence.json/decision-request-resolve-protected-denied": func(e *packEnv, fx *pgFixture, c *packCase) packResponse {
 		return e.legacyPost("desktop", "/v1/tasks/2400/decision-request/resolve", map[string]any{"request_id": "dr-2400-1", "kind": "answered", "option": "A"})
 	},
+	// Mapping (director-1 ruling on schematic legacy bodies): task 2400, the
+	// protected subject, is seeded as a real answered disposition item, and
+	// the route's real body ({"note"}) is sent. Without the fence the apply
+	// would run its hops.
 	"legacy-route-fence.json/dispositions-apply-binding-denied": func(e *packEnv, fx *pgFixture, c *packCase) packResponse {
+		fx.seedAnsweredDisposition(2400)
 		return e.legacyPost("desktop", "/v1/tasks/dispositions/2400/apply", map[string]any{"note": "apply"})
 	},
 	"legacy-route-fence.json/decisions-resolve-protected-denied": func(e *packEnv, fx *pgFixture, c *packCase) packResponse {
@@ -289,6 +296,30 @@ var legacyAdapters = map[string]func(e *packEnv, fx *pgFixture, c *packCase) pac
 	"r4-review-lifecycle.json/r-end-receipt-cannot-drop-subject-task": func(e *packEnv, fx *pgFixture, c *packCase) packResponse {
 		return e.legacyPost("director-1", "/v1/tasks/2400/transition", map[string]any{"to": "dropped", "wrk_receipt": receiptOf(c, "job-a-t1", 2)})
 	},
+}
+
+// seedAnsweredDisposition turns task id into a claimed disposition item
+// carrying an operator answer (the state ApplyDisposition acts on), keeping
+// its O3 job binding.
+func (fx *pgFixture) seedAnsweredDisposition(id int64) {
+	fx.t.Helper()
+	now := time.Now().UTC()
+	var refs store.TaskRefs
+	var raw []byte
+	if err := fx.admin.QueryRow(context.Background(), `SELECT refs FROM tasks WHERE id=$1`, id).Scan(&raw); err != nil {
+		fx.t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, &refs); err != nil {
+		fx.t.Fatal(err)
+	}
+	refs.OriginTask = id - 1
+	refs.Disposition = &store.Disposition{Schema: store.DispositionSchema, Recommended: "A",
+		Facts:  store.DispositionFacts{FactsSource: "hk-task", FactsAsOf: now, Install: store.DispositionInstall{State: "unknown"}},
+		Answer: &store.DispositionAnswer{Key: "A", By: "operator:test", EventID: "web-disposition-test", Gen: 1, At: now}}
+	b, _ := json.Marshal(refs)
+	if _, err := fx.admin.Exec(context.Background(), `UPDATE tasks SET kind='decide', state='claimed', refs=$2::jsonb WHERE id=$1`, id, string(b)); err != nil {
+		fx.t.Fatal(err)
+	}
 }
 
 func (fx *pgFixture) setTaskState(id int64, state string) {
