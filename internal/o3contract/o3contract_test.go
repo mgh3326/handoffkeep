@@ -491,6 +491,39 @@ func checkCase(t *testing.T, p *pack, reqSchema, recSchema,
 		checkNamedTester(rec["payload"], "expect.record.payload")
 	}
 
+	// Hash chain: within each job journal, every record's previous_hash
+	// must equal the record_hash of the prior record of that job
+	// (genesis links to 64 zeroes). Reordering or rebuilding a record
+	// without relinking breaks the journal a server would replay.
+	zero := "0000000000000000000000000000000000000000000000000000000000000000"
+	tail := map[string]string{}
+	checkLink := func(rec map[string]any, i int, where string) {
+		prev, hasPrev := rec["previous_hash"].(string)
+		hash, _ := rec["record_hash"].(string)
+		jid, _ := rec["job_id"].(string)
+		if !hasPrev {
+			return
+		}
+		want, ok := tail[jid]
+		if !ok {
+			want = zero
+		}
+		if prev != want {
+			t.Errorf("%s: %s record %d (job=%s seq=%v) "+
+				"previous_hash %.12s; want %.12s",
+				ctx, where, i, jid, rec["seq"], prev, want)
+		}
+		if hash != "" {
+			tail[jid] = hash
+		}
+	}
+	for i, r := range c.Given.Records {
+		checkLink(r, i, "given")
+	}
+	if rec, ok := c.Expect["record"].(map[string]any); ok {
+		checkLink(rec, -1, "expect")
+	}
+
 	reqType, _ := c.Request["type"].(string)
 	switch reqType {
 	case "http", "http_raw":

@@ -144,11 +144,11 @@
       "bytes": 245
     },
     "vectors/failure-abuse.json": {
-      "sha256": "af3c704a2e54b6b48b820d91cdca0fb2df604b788dea0d6bbb8c96fb16b0a759",
+      "sha256": "c11674d7bcd896e627dcf79ff784fb9a5da4c151a73c4f3a9f25474fbee16e71",
       "bytes": 184289
     },
     "vectors/head-repeat-binding.json": {
-      "sha256": "574ee891bf732151ebe2ff334efbf476ba17082de3f1d17c30710f5fd2dd9e8c",
+      "sha256": "972773364ed1c03bd25df1467525b1cf7c4f8cf7f5e1171f8757e307dba42135",
       "bytes": 103808
     },
     "vectors/legacy-route-fence.json": {
