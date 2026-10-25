@@ -522,6 +522,10 @@ func (s *Store) ApplyDisposition(ctx context.Context, id int64, by, note string)
 		}
 		return Task{}, err
 	}
+
+	if err := s.wrkTaskFenceTx(ctx, tx, x, "merged", false); err != nil {
+		return Task{}, err
+	}
 	if x.Refs.Disposition == nil || x.Refs.Disposition.Answer == nil || x.State != "claimed" {
 		return Task{}, ErrTaskConflict
 	}

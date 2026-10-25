@@ -559,6 +559,10 @@ func (s *Store) RecordDecisionRequest(ctx context.Context, taskID int64, by stri
 		}
 		return DecisionRequestResult{}, err
 	}
+
+	if err := s.wrkTaskFenceTx(ctx, tx, x, "needs_decision", false); err != nil {
+		return DecisionRequestResult{}, err
+	}
 	// Disposition items have their own closed options and operator route.
 	if x.Refs.Disposition != nil {
 		return DecisionRequestResult{}, invalidDecisionRequest("disposition items take no decision requests")
@@ -730,6 +734,10 @@ func (s *Store) resolveDecisionRequest(ctx context.Context, taskID int64, by str
 		if errors.Is(err, pgx.ErrNoRows) {
 			return DecisionRequestResult{}, ErrTaskNotFound
 		}
+		return DecisionRequestResult{}, err
+	}
+
+	if err := s.wrkTaskFenceTx(ctx, tx, x, "claimed", false); err != nil {
 		return DecisionRequestResult{}, err
 	}
 	request := x.Refs.DecisionRequest

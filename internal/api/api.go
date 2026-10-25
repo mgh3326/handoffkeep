@@ -5,6 +5,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -22,6 +24,7 @@ import (
 
 	"github.com/mgh3326/handoffkeep/internal/attachments"
 	"github.com/mgh3326/handoffkeep/internal/store"
+	"github.com/mgh3326/handoffkeep/internal/wrkrecords"
 )
 
 type Service struct {
@@ -87,6 +90,9 @@ func (s Service) ResolveDecision(ctx context.Context, input DecisionResolveInput
 	lane := ""
 	noJob := ""
 	if input.Type == "task" {
+		if err := s.wrkTaskPrecheck(ctx, input.ID, "claimed", false); err != nil {
+			return store.RelayEvent{}, err
+		}
 		task, found, err := s.Store.GetTask(ctx, input.ID)
 		if err != nil {
 			return store.RelayEvent{}, err
@@ -251,10 +257,16 @@ func (s Service) CreateTask(ctx context.Context, client string, x store.Task) (s
 	return s.Store.CreateTask(ctx, x)
 }
 func (s Service) ClaimTask(ctx context.Context, id int64, by, jobID, noJob string) (store.Task, error) {
+	if err := s.wrkTaskPrecheck(ctx, id, "", true); err != nil {
+		return store.Task{}, err
+	}
 	return s.Store.ClaimTask(ctx, id, by, jobID, noJob)
 }
 
 func (s Service) RebindTaskJob(ctx context.Context, id int64, fromJob, toJob, by, reason string) (store.Task, error) {
+	if err := s.wrkTaskPrecheck(ctx, id, "", true); err != nil {
+		return store.Task{}, err
+	}
 	return s.Store.RebindTaskJob(ctx, id, fromJob, toJob, by, reason)
 }
 
@@ -269,15 +281,27 @@ func (s Service) DispositionSummary(ctx context.Context, asOf time.Time) (store.
 	return s.Store.DispositionSummary(ctx, asOf)
 }
 func (s Service) ApplyDisposition(ctx context.Context, id int64, client, note string) (store.Task, error) {
+	if err := s.wrkTaskPrecheck(ctx, id, "merged", false); err != nil {
+		return store.Task{}, err
+	}
 	return s.Store.ApplyDisposition(ctx, id, client, note)
 }
 func (s Service) TransitionTask(ctx context.Context, id int64, to, client, note string, refs *store.TaskRefs, noJob string) (store.Task, error) {
+	if err := s.wrkTaskPrecheck(ctx, id, to, refs != nil); err != nil {
+		return store.Task{}, err
+	}
 	return s.Store.TransitionTask(ctx, id, to, client, note, refs, noJob)
 }
 func (s Service) RelaneTask(ctx context.Context, id int64, to, client, note string, allowNewLane bool) (store.Task, bool, error) {
+	if err := s.wrkTaskPrecheck(ctx, id, "", true); err != nil {
+		return store.Task{}, false, err
+	}
 	return s.Store.RelaneTask(ctx, id, to, client, note, allowNewLane)
 }
 func (s Service) SetTaskProject(ctx context.Context, id int64, project, client, note string) (store.Task, bool, error) {
+	if err := s.wrkTaskPrecheck(ctx, id, "", true); err != nil {
+		return store.Task{}, false, err
+	}
 	return s.Store.SetTaskProject(ctx, id, project, client, note)
 }
 func (s Service) SetTaskArea(ctx context.Context, id int64, area *string, client, note string) (store.Task, bool, error) {
@@ -403,6 +427,16 @@ func LoadTokens(path string) (Tokens, error) {
 		if id == "" {
 			return nil, errors.New("invalid token client id")
 		}
+		if _, duplicate := out[id]; duplicate {
+			return nil, errors.New("ambiguous auth identity")
+		}
+		digest := sha256.Sum256([]byte(v))
+		for _, existing := range out {
+			other := sha256.Sum256([]byte(existing))
+			if subtle.ConstantTimeCompare(digest[:], other[:]) == 1 {
+				return nil, errors.New("ambiguous auth identity")
+			}
+		}
 		out[id] = v
 	}
 	if len(out) == 0 {
@@ -411,16 +445,19 @@ func LoadTokens(path string) (Tokens, error) {
 	return out, nil
 }
 func (t Tokens) Client(r *http.Request) (string, bool) {
-	raw := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if raw == "" {
+	header := r.Header.Get("Authorization")
+	if !strings.HasPrefix(header, "Bearer ") || len(header) == len("Bearer ") {
 		return "", false
 	}
+	digest := sha256.Sum256([]byte(strings.TrimPrefix(header, "Bearer ")))
+	client := ""
 	for id, want := range t {
-		if raw == want {
-			return id, true
+		other := sha256.Sum256([]byte(want))
+		if subtle.ConstantTimeCompare(digest[:], other[:]) == 1 {
+			client = id
 		}
 	}
-	return "", false
+	return client, client != ""
 }
 
 type Server struct {
@@ -434,6 +471,9 @@ type Server struct {
 
 func (s Server) Handler() http.Handler {
 	m := http.NewServeMux()
+	if s.Service.Store != nil && (s.Service.Store.WrkEngine().Mode != "off" || s.Service.Store.HasWrkEnrollment(context.Background())) {
+		m.HandleFunc("/v1/wrk/", s.wrk)
+	}
 	m.HandleFunc("GET /healthz", healthz)
 	m.HandleFunc("/v1/checkpoints", s.checkpoints)
 	m.HandleFunc("GET /v1/search", s.search)
@@ -499,7 +539,7 @@ func (s Server) Handler() http.Handler {
 		m.Handle("/ui", s.UI)
 		m.Handle("/ui/", s.UI)
 	}
-	return m
+	return s.legacyWrkFence(m)
 }
 
 // readBuildInfo is a variable so tests can stamp a VCS-tagged build info.
@@ -543,6 +583,10 @@ func (s Server) auth(w http.ResponseWriter, r *http.Request) (string, bool) {
 	if !ok {
 		jsonOut(w, 401, map[string]string{"error": "unauthorized"})
 	}
+	if ok {
+		_, receipt := store.WrkPrincipal(r.Context())
+		*r = *r.WithContext(store.WithWrkPrincipal(r.Context(), id, receipt))
+	}
 	return id, ok
 }
 func jsonOut(w http.ResponseWriter, status int, v any) {
@@ -551,6 +595,11 @@ func jsonOut(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 func appErr(w http.ResponseWriter, e error) {
+	var wrkErr wrkrecords.Error
+	if errors.As(e, &wrkErr) {
+		jsonOut(w, wrkrecords.Status(wrkErr), map[string]string{"error": wrkrecords.Code(wrkErr)})
+		return
+	}
 	var repConflict *store.BenchRepConflictError
 	switch {
 	case errors.Is(e, attachments.ErrDisabled):

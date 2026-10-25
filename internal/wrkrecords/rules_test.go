@@ -1,0 +1,244 @@
+package wrkrecords
+
+import (
+	"encoding/base64"
+	"encoding/json"
+	"strings"
+	"testing"
+	"time"
+)
+
+// These scenarios are constructed from design rules, independently of M1.
+func designPolicy(t *testing.T) *Policy {
+	t.Helper()
+	clients := Object{}
+	reads := []string{"capabilities.read", "job.read", "records.read", "content.read"}
+	for _, host := range []string{"desktop", "mac-dev", "mac-work", "rpi", "mac-personal"} {
+		permissions := append(append([]string{}, reads...), "reviewer.claim.write", "round.open", "verdict.write", "void.write", "joined.write", "completed.write", "end.write", "relay.publish")
+		clients[host] = Object{"host_client_id": host, "permissions": permissions}
+	}
+	for _, id := range []string{"director-1", "operator-desk"} {
+		permissions := append(append([]string{}, reads...), "reviewer.claim.write", "claim.write", "activate.write", "grant.write", "grant.cancel", "end.write", "import.begin", "import.seal", "import.write", "task.state")
+		clients[id] = Object{"host_client_id": nil, "permissions": permissions}
+	}
+	for _, id := range []string{"pa-integrator", "at-integrator", "pb-integrator", "tt-integrator"} {
+		clients[id] = Object{"host_client_id": nil, "permissions": reads}
+	}
+	raw, _ := json.Marshal(Object{"version": "hk1873.policy.v1", "clients": clients, "lanes": Object{"director-1": nil, "pa-integrator": "director-1"}, "features": Object{"head_repeat_enabled": true, "claim_lane_creation_enabled": true}})
+	p, e := ParsePolicy(raw)
+	if e != nil {
+		t.Fatal(e)
+	}
+	return p
+}
+
+type scenario struct {
+	t *testing.T
+	e Engine
+	s Snapshot
+}
+
+func fresh(t *testing.T) *scenario {
+	t.Helper()
+	c := &scenario{t: t, e: Engine{Policy: designPolicy(t), Mode: "enforce", Now: time.Date(2026, 10, 24, 2, 0, 0, 0, time.UTC), Generation: NewUUID()}, s: Snapshot{Jobs: map[string][]Record{}, Contents: map[string]map[int64][]byte{}}}
+	c.must("director-1", "subject", "claim", Object{"job_id": "subject", "owner_lane": "builder-a", "parent_lane": "director-1", "task_id": float64(9001), "host_client_id": "desktop", "role": "builder", "tier": "T3", "review_of": nil, "predecessor_job_id": nil, "supersedes": nil})
+	c.must("director-1", "subject", "activate", Object{"reason_code": "new_job", "seal_seq": nil})
+	return c
+}
+func (c *scenario) request(job, kind string, p Object) Request {
+	rs := c.s.Jobs[job]
+	seq, claim := int64(len(rs)), int64(0)
+	if x := c.s.Claim(job); x != nil {
+		claim = x.Seq
+	}
+	return Request{kind, claim, seq, p}
+}
+func (c *scenario) send(actor, job, key string, r Request) (WriteResponse, error) {
+	out, b, e := c.e.Append(c.s, actor, job, key, r)
+	if e == nil && out.Created {
+		c.s.Jobs[job] = append(c.s.Jobs[job], out.Record)
+		if len(b) > 0 {
+			if c.s.Contents[job] == nil {
+				c.s.Contents[job] = map[int64][]byte{}
+			}
+			c.s.Contents[job][out.Record.Seq] = b
+		}
+	}
+	return out, e
+}
+func (c *scenario) must(actor, job, kind string, p Object) Record {
+	c.t.Helper()
+	out, e := c.send(actor, job, NewUUID(), c.request(job, kind, p))
+	if e != nil {
+		c.t.Fatalf("%s %s: %v", job, kind, e)
+	}
+	return out.Record
+}
+func (c *scenario) want(actor, job, kind, code string, p Object) {
+	c.t.Helper()
+	_, e := c.send(actor, job, NewUUID(), c.request(job, kind, p))
+	if e == nil || Code(e) != code {
+		c.t.Fatalf("%s %s: got %v want %s", job, kind, e, code)
+	}
+}
+func (c *scenario) reviewer(id, host string, round int64) {
+	c.t.Helper()
+	c.must("director-1", id, "claim", Object{"job_id": id, "owner_lane": "builder-a", "parent_lane": "builder-a", "task_id": float64(9001), "host_client_id": host, "role": "tester", "tier": "T3", "review_of": Object{"job_id": "subject", "round_no": round}, "predecessor_job_id": nil, "supersedes": nil})
+}
+func opening(head, tester string, extension, repeat any) Object {
+	var id any
+	if tester != "" {
+		id = tester
+	}
+	return Object{"head": head, "tester_job_id": id, "extension_grant_seq": extension, "repeat_grant_seq": repeat}
+}
+func evidence(round int64, head, path, note string, tester any) Object {
+	b := []byte("VERDICT: PASS @" + head + "\n" + note + "\n")
+	return Object{"round_no": round, "head": head, "verdict": "PASS", "path": path, "content_b64": base64.StdEncoding.EncodeToString(b), "content_sha256": SHA(b), "tester_job_id": tester}
+}
+func report(head string) Object {
+	b := []byte("design report\n")
+	return Object{"head": head, "pr": "https://example.invalid/pull/1", "report_b64": base64.StdEncoding.EncodeToString(b), "report_sha256": SHA(b), "waiver_grant_seq": nil}
+}
+func (c *scenario) grant(kind string, round any, head any, earlier any, tester any) Record {
+	extra := 0
+	if kind == "extension" {
+		extra = 1
+	}
+	return c.must("director-1", "subject", "grant", Object{"grant_type": kind, "round_no": round, "head": head, "extra": extra, "earlier_round_no": earlier, "tester_job_id": tester, "expires_at": c.e.Now.Add(time.Hour).Format(time.RFC3339Nano), "reason_code": "design_case"})
+}
+
+const h1 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+const h2 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+const h3 = "cccccccccccccccccccccccccccccccccccccccc"
+const h4 = "dddddddddddddddddddddddddddddddddddddddd"
+
+func TestDesignReplayBeforeCASAndTerminal(t *testing.T) {
+	c := fresh(t)
+	c.must("desktop", "subject", "round_open", opening(h1, "", nil, nil))
+	r := c.request("subject", "verdict", evidence(1, h1, "/review/one", "first", nil))
+	key := NewUUID()
+	first, e := c.send("desktop", "subject", key, r)
+	if e != nil {
+		t.Fatal(e)
+	}
+	c.must("desktop", "subject", "end", Object{"end_type": "revoked", "reason_code": "done"})
+	before := len(c.s.Jobs["subject"])
+	replay, e := c.send("desktop", "subject", key, r)
+	if e != nil || replay.Created || replay.Record.RecordHash != first.Record.RecordHash || !reflectRecord(replay.Record, first.Record) || len(c.s.Jobs["subject"]) != before {
+		t.Fatalf("replay failed: %v", e)
+	}
+	changed := r
+	changed.Payload = Clone(r.Payload)
+	changed.Payload["path"] = "/review/two"
+	if _, e = c.send("desktop", "subject", key, changed); e == nil || Code(e) != "idempotency_conflict" {
+		t.Fatalf("changed-body replay: %v", e)
+	}
+}
+func reflectRecord(a, b Record) bool {
+	x, _ := Canonical(a)
+	y, _ := Canonical(b)
+	return string(x) == string(y)
+}
+func TestDesignReviewerEndAfterPASSAndIdentity(t *testing.T) {
+	c := fresh(t)
+	c.reviewer("tester-a", "desktop", 1)
+	c.must("desktop", "subject", "round_open", opening(h1, "tester-a", nil, nil))
+	c.must("desktop", "subject", "verdict", evidence(1, h1, "/review/frozen", "first", "tester-a"))
+	c.must("desktop", "tester-a", "end", Object{"end_type": "reaped", "reason_code": "cleanup"})
+	c.must("desktop", "subject", "joined", report(h1))
+	c.want("director-1", "subject", "joined", "scope_denied", report(h1))
+}
+func TestDesignDuplicatePathSurvivesVoid(t *testing.T) {
+	c := fresh(t)
+	c.must("desktop", "subject", "round_open", opening(h1, "", nil, nil))
+	c.must("desktop", "subject", "verdict", evidence(1, h1, "/review/preserved", "first", nil))
+	c.must("desktop", "subject", "round_open", opening(h2, "", nil, nil))
+	g := c.grant("void", int64(2), nil, nil, nil)
+	c.must("desktop", "subject", "void", Object{"round_no": 2, "grant_seq": g.Seq, "reason_code": "aborted"})
+	c.must("desktop", "subject", "round_open", opening(h3, "", nil, nil))
+	c.want("desktop", "subject", "verdict", "duplicate_path", evidence(3, h3, "/review/./preserved", "different", nil))
+}
+func TestDesignScopedClaimsNoEscalation(t *testing.T) {
+	c := fresh(t)
+	p := Object{"job_id": "review-host", "owner_lane": "builder-a", "parent_lane": "builder-a", "task_id": float64(9001), "host_client_id": "desktop", "role": "tester", "tier": "T3", "review_of": Object{"job_id": "subject", "round_no": 1}, "predecessor_job_id": nil, "supersedes": nil}
+	c.must("desktop", "review-host", "claim", p)
+	c.want("desktop", "review-host", "claim", "claim_conflict", p)
+	p = Clone(p)
+	p["job_id"] = "self"
+	p["review_of"] = Object{"job_id": "self", "round_no": 1}
+	c.want("desktop", "self", "claim", "claim_conflict", p)
+	p = Clone(p)
+	p["job_id"] = "builder-forged"
+	p["role"] = "builder"
+	p["review_of"] = nil
+	c.want("desktop", "builder-forged", "claim", "scope_denied", p)
+	c.must("director-1", "foreign", "claim", Object{"job_id": "foreign", "owner_lane": "builder-b", "parent_lane": "director-1", "task_id": float64(9002), "host_client_id": "mac-dev", "role": "builder", "tier": "T3", "review_of": nil, "predecessor_job_id": nil, "supersedes": nil})
+	c.must("director-1", "foreign", "activate", Object{"reason_code": "fresh", "seal_seq": nil})
+	p["job_id"] = "foreign-review"
+	p["role"] = "tester"
+	p["review_of"] = Object{"job_id": "foreign", "round_no": 1}
+	c.want("desktop", "foreign-review", "claim", "host_mismatch", p)
+	p["review_of"] = Object{"job_id": "missing", "round_no": 1}
+	c.want("desktop", "foreign-review", "claim", "not_found", p)
+}
+func TestDesignRepeatGrantAndAssignment(t *testing.T) {
+	c := fresh(t)
+	c.reviewer("tester-a", "desktop", 1)
+	c.must("desktop", "subject", "round_open", opening(h1, "tester-a", nil, nil))
+	c.must("desktop", "subject", "verdict", evidence(1, h1, "/review/a", "a", "tester-a"))
+	c.reviewer("tester-b", "desktop", 2)
+	g := c.grant("head_repeat", int64(2), h1, int64(1), "tester-b")
+	c.want("desktop", "subject", "round_open", "grant_invalid", opening(h1, "tester-b", nil, int64(1)))
+	c.must("desktop", "subject", "round_open", opening(h1, "tester-b", nil, g.Seq))
+	c.want("desktop", "subject", "verdict", "round_not_open", evidence(2, h1, "/review/b", "b", "tester-a"))
+	c.must("desktop", "tester-b", "end", Object{"end_type": "reaped", "reason_code": "cleanup"})
+	c.want("desktop", "subject", "verdict", "round_not_open", evidence(2, h1, "/review/b", "b", "tester-b"))
+}
+func TestDesignExtensionNotRefundedAndBeforeCap(t *testing.T) {
+	c := fresh(t)
+	g := c.grant("extension", int64(1), h1, nil, nil)
+	c.want("desktop", "subject", "round_open", "grant_before_cap", opening(h1, "", g.Seq, nil))
+	for _, h := range []string{h1, h2, h3} {
+		c.must("desktop", "subject", "round_open", opening(h, "", nil, nil))
+	}
+	g = c.grant("extension", int64(4), h4, nil, nil)
+	c.must("desktop", "subject", "round_open", opening(h4, "", g.Seq, nil))
+	v := c.grant("void", int64(4), nil, nil, nil)
+	c.must("desktop", "subject", "void", Object{"round_no": 4, "grant_seq": v.Seq, "reason_code": "abort"})
+	c.want("desktop", "subject", "round_open", "grant_consumed", opening(h4, "", g.Seq, nil))
+}
+func TestDesignJoinPendingAndGuard(t *testing.T) {
+	c := fresh(t)
+	c.reviewer("tester-a", "desktop", 1)
+	c.must("desktop", "subject", "round_open", opening(h1, "tester-a", nil, nil))
+	c.must("desktop", "subject", "verdict", evidence(1, h1, "/review/a", "pass", "tester-a"))
+	c.must("desktop", "subject", "round_open", opening(h2, "", nil, nil))
+	c.want("desktop", "subject", "joined", "review_incomplete", report(h1))
+	p := evidence(2, h2, "/review/b", "sk-"+strings.Repeat("X", 32), nil)
+	c.want("desktop", "subject", "verdict", "invalid_request", p)
+	if len(c.s.Contents["subject"]) != 1 {
+		t.Fatal("rejected evidence stored")
+	}
+}
+func TestDesignImportFloorAndNoPlantedTrust(t *testing.T) {
+	c := fresh(t)
+	delete(c.s.Jobs, "subject")
+	delete(c.s.Contents, "subject")
+	c.must("director-1", "subject", "claim", Object{"job_id": "subject", "owner_lane": "builder-a", "parent_lane": "director-1", "task_id": 9001, "host_client_id": "desktop", "role": "builder", "tier": "T3", "review_of": nil, "predecessor_job_id": nil, "supersedes": nil})
+	begin := c.must("director-1", "subject", "import_begin", Object{"reason_code": "archive"})
+	b := []byte(`{"kind":"job.round","round":1,"head":"` + h1 + `"}`)
+	imported := c.must("director-1", "subject", "import", Object{"source_locator": "fixture/events/one.json", "source_sha256": SHA(b), "original_actor_client_id": nil, "original_at": nil, "legacy_kind": "job.round", "content_b64": base64.StdEncoding.EncodeToString(b)})
+	manifest, _ := Digest([]Object{{"seq": imported.Seq, "source_locator": imported.Payload["source_locator"], "source_sha256": imported.Payload["source_sha256"]}})
+	seal := c.must("director-1", "subject", "import_seal", Object{"begin_seq": begin.Seq, "expected_import_count": 1, "manifest_sha256": manifest, "reason_code": "sealed"})
+	if Num(seal.Payload, "baseline_used") != 3 || Num(seal.Payload, "numbering_floor") != 3 {
+		t.Fatal("incorrect sealed floor")
+	}
+	c.must("director-1", "subject", "activate", Object{"seal_seq": seal.Seq, "reason_code": "enforce"})
+	c.want("desktop", "subject", "joined", "zero_rounds", report(h1))
+	g := c.grant("extension", int64(4), h4, nil, nil)
+	r := c.must("desktop", "subject", "round_open", opening(h4, "", g.Seq, nil))
+	if Num(r.Payload, "round_no") != 4 {
+		t.Fatal("round 4 required")
+	}
+}
