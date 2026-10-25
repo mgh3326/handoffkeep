@@ -1530,7 +1530,7 @@ func TestBenchRepsCallSitesRetryable(t *testing.T) {
 	}
 	for _, c := range []struct {
 		name, ddl string
-		id                int64
+		id        int64
 	}{
 		{"insert", `CREATE TRIGGER bench_reps_fault_row BEFORE INSERT ON bench_reps FOR EACH ROW WHEN (NEW.origin_id = 592) EXECUTE FUNCTION ` + fn + `()`, 592},
 		{"commit", `CREATE CONSTRAINT TRIGGER bench_reps_fault_commit AFTER INSERT ON bench_reps DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN (NEW.origin_id = 593) EXECUTE FUNCTION ` + fn + `()`, 593},
