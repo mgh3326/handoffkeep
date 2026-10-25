@@ -1,0 +1,249 @@
+{
+  "section": "6b",
+  "stderr_format": "handoffkeep wrk: CODE",
+  "stdout_contract": "exactly one newline-terminated JSON object on success; empty on failure",
+  "subcommands": [
+    {
+      "row": 1,
+      "subcommand": "wrk capabilities",
+      "stdin": "Empty",
+      "request_stdout": "GET /v1/wrk/capabilities -> Capabilities",
+      "source": {
+        "section": "6b",
+        "table": "Subcommand and exact arguments after handoffkeep",
+        "table_name": "cli_cmds",
+        "row": 1,
+        "row_text": "| wrk capabilities | Empty | GET /v1/wrk/capabilities -> Capabilities |"
+      }
+    },
+    {
+      "row": 2,
+      "subcommand": "wrk append JOB --kind K --idempotency-key U --expected-seq N --claim-seq C",
+      "stdin": "Exact Input_K payload object, including content_b64/report_b64 when K needs it",
+      "request_stdout": "POST /v1/wrk/jobs/JOB/records, Idempotency-Key U, body {kind:K,claim_seq:C,expected_seq:N,payload:stdin-object} -> WriteResponse. 201 is created=true; successful replay 200 is created=false. No implicit GET or seq/key rewrite.",
+      "source": {
+        "section": "6b",
+        "table": "Subcommand and exact arguments after handoffkeep",
+        "table_name": "cli_cmds",
+        "row": 2,
+        "row_text": "| wrk append JOB --kind K --idempotency-key U --expected-seq N --claim-seq C | Exact Input_K payload object, including content_b64/report_b64 when K needs it | POST /v1/wrk/jobs/JOB/records, Idempotency-Key U, body {kind:K,claim_seq:C,expected_seq:N,payload:stdin-object} -> WriteResponse. 201 is created=true; successful replay 200 is created=false. No implicit GET or seq/key rewrite. |"
+      }
+    },
+    {
+      "row": 3,
+      "subcommand": "wrk job JOB",
+      "stdin": "Empty",
+      "request_stdout": "GET /v1/wrk/jobs/JOB -> JobResponse",
+      "source": {
+        "section": "6b",
+        "table": "Subcommand and exact arguments after handoffkeep",
+        "table_name": "cli_cmds",
+        "row": 3,
+        "row_text": "| wrk job JOB | Empty | GET /v1/wrk/jobs/JOB -> JobResponse |"
+      }
+    },
+    {
+      "row": 4,
+      "subcommand": "wrk records JOB [--after-seq N] [--snapshot-seq S] [--limit L]",
+      "stdin": "Empty",
+      "request_stdout": "GET records with these exact numeric query keys; omitted after_seq=0, limit=100, snapshot chosen by server -> RecordsResponse. The returned pair snapshot_seq,next_after_seq is the cursor for the next call; C1 must keep snapshot fixed. No automatic partial-success pagination.",
+      "source": {
+        "section": "6b",
+        "table": "Subcommand and exact arguments after handoffkeep",
+        "table_name": "cli_cmds",
+        "row": 4,
+        "row_text": "| wrk records JOB [--after-seq N] [--snapshot-seq S] [--limit L] | Empty | GET records with these exact numeric query keys; omitted after_seq=0, limit=100, snapshot chosen by server -> RecordsResponse. The returned pair snapshot_seq,next_after_seq is the cursor for the next call; C1 must keep snapshot fixed. No automatic partial-success pagination. |"
+      }
+    },
+    {
+      "row": 5,
+      "subcommand": "wrk content JOB SEQ",
+      "stdin": "Empty",
+      "request_stdout": "GET /v1/wrk/jobs/JOB/records/SEQ/content -> ContentResponse, still JSON with exact base64, not decoded terminal text",
+      "source": {
+        "section": "6b",
+        "table": "Subcommand and exact arguments after handoffkeep",
+        "table_name": "cli_cmds",
+        "row": 5,
+        "row_text": "| wrk content JOB SEQ | Empty | GET /v1/wrk/jobs/JOB/records/SEQ/content -> ContentResponse, still JSON with exact base64, not decoded terminal text |"
+      }
+    }
+  ],
+  "exit_map": [
+    {
+      "row": 1,
+      "codes": [
+        "round_cap"
+      ],
+      "exit": 78,
+      "source": {
+        "section": "6b",
+        "table": "Stable code(s) -> CLI/adapter exit",
+        "table_name": "cli_exit",
+        "row": 1,
+        "row_text": "| round_cap | 78 |"
+      }
+    },
+    {
+      "row": 2,
+      "codes": [
+        "wrk_unavailable",
+        "wrk_recovery_required"
+      ],
+      "exit": 75,
+      "source": {
+        "section": "6b",
+        "table": "Stable code(s) -> CLI/adapter exit",
+        "table_name": "cli_exit",
+        "row": 2,
+        "row_text": "| wrk_unavailable, wrk_recovery_required | 75 |"
+      }
+    },
+    {
+      "row": 3,
+      "codes": [
+        "unauthorized",
+        "scope_denied",
+        "host_mismatch"
+      ],
+      "exit": 77,
+      "source": {
+        "section": "6b",
+        "table": "Stable code(s) -> CLI/adapter exit",
+        "table_name": "cli_exit",
+        "row": 3,
+        "row_text": "| unauthorized, scope_denied, host_mismatch | 77 |"
+      }
+    },
+    {
+      "row": 4,
+      "codes": [
+        "not_found"
+      ],
+      "exit": 66,
+      "source": {
+        "section": "6b",
+        "table": "Stable code(s) -> CLI/adapter exit",
+        "table_name": "cli_exit",
+        "row": 4,
+        "row_text": "| not_found | 66 |"
+      }
+    },
+    {
+      "row": 5,
+      "codes": [
+        "invalid_request",
+        "invalid_cursor",
+        "invalid_verdict",
+        "invalid_path",
+        "grant_before_cap",
+        "request_too_large",
+        "method_not_allowed",
+        "unsupported_media_type"
+      ],
+      "exit": 65,
+      "source": {
+        "section": "6b",
+        "table": "Stable code(s) -> CLI/adapter exit",
+        "table_name": "cli_exit",
+        "row": 5,
+        "row_text": "| invalid_request, invalid_cursor, invalid_verdict, invalid_path, grant_before_cap, request_too_large, method_not_allowed, unsupported_media_type | 65 |"
+      }
+    },
+    {
+      "row": 6,
+      "codes": [
+        "idempotency_conflict",
+        "sequence_conflict",
+        "claim_conflict",
+        "job_ended",
+        "review_sealed",
+        "round_not_open",
+        "round_has_verdict",
+        "round_voided",
+        "head_mismatch",
+        "duplicate_path",
+        "duplicate_content",
+        "duplicate_head",
+        "grant_invalid",
+        "grant_consumed",
+        "grant_expired",
+        "zero_rounds",
+        "review_incomplete",
+        "blocker_unresolved",
+        "wrk_receipt_required",
+        "import_unsealed",
+        "import_sealed",
+        "migration_frozen"
+      ],
+      "exit": 73,
+      "source": {
+        "section": "6b",
+        "table": "Stable code(s) -> CLI/adapter exit",
+        "table_name": "cli_exit",
+        "row": 6,
+        "row_text": "| idempotency_conflict, sequence_conflict, claim_conflict, job_ended, review_sealed, round_not_open, round_has_verdict, round_voided, head_mismatch, duplicate_path, duplicate_content, duplicate_head, grant_invalid, grant_consumed, grant_expired, zero_rounds, review_incomplete, blocker_unresolved, wrk_receipt_required, import_unsealed, import_sealed, migration_frozen | 73 |"
+      }
+    },
+    {
+      "row": 7,
+      "codes": [
+        "cli_usage"
+      ],
+      "exit": 2,
+      "source": {
+        "section": "6b",
+        "table": "Stable code(s) -> CLI/adapter exit",
+        "table_name": "cli_exit",
+        "row": 7,
+        "row_text": "| cli_usage (local argument error, before sending) | 2 |"
+      }
+    },
+    {
+      "row": 8,
+      "codes": [
+        "transport_unavailable",
+        "transport_indeterminate",
+        "protocol_invalid",
+        "o3_unsupported"
+      ],
+      "exit": 75,
+      "source": {
+        "section": "6b",
+        "table": "Stable code(s) -> CLI/adapter exit",
+        "table_name": "cli_exit",
+        "row": 8,
+        "row_text": "| transport_unavailable, transport_indeterminate (local network failure/timeout; the latter may have committed), protocol_invalid (malformed/unknown status/code/response, redirect, unsupported contract/old-server namespace), o3_unsupported | 75 |"
+      }
+    },
+    {
+      "row": 9,
+      "codes": [
+        "history_regressed"
+      ],
+      "exit": 75,
+      "source": {
+        "section": "6b",
+        "table": "Stable code(s) -> CLI/adapter exit",
+        "table_name": "cli_exit",
+        "row": 9,
+        "row_text": "| history_regressed (local retained-receipt comparison) | 75 |"
+      }
+    },
+    {
+      "row": 10,
+      "codes": [
+        "intent_invalid",
+        "intent_io"
+      ],
+      "exit": 74,
+      "source": {
+        "section": "6b",
+        "table": "Stable code(s) -> CLI/adapter exit",
+        "table_name": "cli_exit",
+        "row": 10,
+        "row_text": "| intent_invalid, intent_io (local durable intent validation/storage failure; no send if intent was not durably saved) | 74 |"
+      }
+    }
+  ]
+}

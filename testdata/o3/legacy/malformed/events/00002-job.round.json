@@ -1,0 +1,10 @@
+{
+  "epoch": 1,
+  "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "job_id": "legacy-malformed",
+  "kind": "job.round",
+  "label": "b2392-mf",
+  "owner_lane": "b2392-mf",
+  "parent_lane": "director-1",
+  "round": "not-an-integer"
+}

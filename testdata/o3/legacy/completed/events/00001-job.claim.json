@@ -1,0 +1,14 @@
+{
+  "created_at": "2026-10-20T10:00:00+00:00",
+  "job_id": "legacy-completed",
+  "kind": "job.claim",
+  "payload": {
+    "agent_label": "b2394-cp",
+    "owner_lane": "b2394-cp",
+    "parent_lane": "director-1",
+    "role": "builder",
+    "t_level": "T1",
+    "task_id": 2394
+  },
+  "seq": 1
+}

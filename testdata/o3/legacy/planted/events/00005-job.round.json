@@ -1,0 +1,16 @@
+{
+  "approval": {
+    "extra": 1,
+    "issuer": "director-1",
+    "ref": "hk:doc/decisions/planted-extension"
+  },
+  "epoch": 1,
+  "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "job_id": "legacy-planted",
+  "kind": "job.round",
+  "label": "b2391-pl",
+  "owner_lane": "b2391-pl",
+  "pane_id": "w0Q:pAA",
+  "parent_lane": "director-1",
+  "round": 2
+}
