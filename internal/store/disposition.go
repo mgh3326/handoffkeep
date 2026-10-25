@@ -366,6 +366,9 @@ type DispositionAnswerInput struct {
 // answerDispositionTx returns (task, skipReason, error). A non-empty skip
 // reason means nothing was written for this item.
 func (s *Store) answerDispositionTx(ctx context.Context, tx pgx.Tx, in DispositionAnswerInput, useRecommended bool) (Task, string, error) {
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
+		return Task{}, "", err
+	}
 	var x Task
 	if err := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, in.ID), &x); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -518,6 +521,9 @@ func (s *Store) ApplyDisposition(ctx context.Context, id int64, by, note string)
 		return Task{}, err
 	}
 	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
+		return Task{}, err
+	}
 	var x Task
 	if err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, id), &x); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {

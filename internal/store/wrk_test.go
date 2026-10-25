@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -122,7 +123,7 @@ func storeActivate(t *testing.T, s *Store, job, owner string, task int64) {
 }
 func TestWrkRuntimeCannotMutateHistory(t *testing.T) {
 	s := wrkCIStore(t)
-	for _, q := range []string{`UPDATE wrk_records SET seq=seq WHERE false`, `DELETE FROM wrk_records WHERE false`, `UPDATE wrk_contents SET size_bytes=size_bytes WHERE false`, `DELETE FROM wrk_contents WHERE false`} {
+	for _, q := range []string{`UPDATE wrk_records SET seq=seq WHERE false`, `DELETE FROM wrk_records WHERE false`, `TRUNCATE wrk_records CASCADE`, `UPDATE wrk_contents SET size_bytes=size_bytes WHERE false`, `DELETE FROM wrk_contents WHERE false`, `TRUNCATE wrk_contents`, `UPDATE wrk_attempts SET kind=kind WHERE false`, `DELETE FROM wrk_attempts WHERE false`, `TRUNCATE wrk_attempts`} {
 		if _, e := s.pool.Exec(t.Context(), q); e == nil {
 			t.Fatalf("runtime privilege permitted %s", q)
 		}
@@ -307,5 +308,191 @@ func TestWrkFourStartupCases(t *testing.T) {
 			bad.Close()
 			t.Fatal("enabled startup accepted missing distinct migration path/generation")
 		}
+	}
+}
+
+func wrkOwnerPool(t *testing.T, s *Store) *pgxpool.Pool {
+	t.Helper()
+	u, e := url.Parse(s.pool.Config().ConnString())
+	if e != nil {
+		t.Fatal("test owner URL")
+	}
+	q := u.Query()
+	q.Del("role")
+	u.RawQuery = q.Encode()
+	pool, e := pgxpool.New(t.Context(), u.String())
+	if e != nil {
+		t.Fatal(e)
+	}
+	t.Cleanup(pool.Close)
+	return pool
+}
+func TestWrkUnsafeRuntimeRolesRefused(t *testing.T) {
+	s := wrkCIStore(t)
+	owner := wrkOwnerPool(t, s)
+	var role, ownerRole string
+	if e := s.pool.QueryRow(t.Context(), `SELECT current_user`).Scan(&role); e != nil {
+		t.Fatal(e)
+	}
+	if e := owner.QueryRow(t.Context(), `SELECT current_user`).Scan(&ownerRole); e != nil {
+		t.Fatal(e)
+	}
+	original := s.WrkEngine()
+	deny := func(t *testing.T) {
+		t.Helper()
+		if e := s.ConfigureWrkEngine(t.Context(), original); wrkrecords.Code(e) != "wrk_unavailable" {
+			t.Fatalf("unsafe role accepted: %v", e)
+		}
+	}
+	for _, table := range []string{"wrk_records", "wrk_contents", "wrk_attempts"} {
+		for _, privilege := range []string{"UPDATE", "DELETE", "TRUNCATE"} {
+			t.Run(table+"/"+privilege, func(t *testing.T) {
+				if _, e := owner.Exec(t.Context(), `GRANT `+privilege+` ON `+table+` TO `+role); e != nil {
+					t.Fatal(e)
+				}
+				defer owner.Exec(t.Context(), `REVOKE `+privilege+` ON `+table+` FROM `+role)
+				deny(t)
+			})
+		}
+	}
+	for _, setting := range []string{"SUPERUSER", "BYPASSRLS"} {
+		t.Run(setting, func(t *testing.T) {
+			if _, e := owner.Exec(t.Context(), `ALTER ROLE `+role+` `+setting); e != nil {
+				t.Fatal(e)
+			}
+			defer owner.Exec(t.Context(), `ALTER ROLE `+role+` NO`+setting)
+			deny(t)
+		})
+	}
+	t.Run("owner_membership", func(t *testing.T) {
+		if _, e := owner.Exec(t.Context(), `GRANT `+ownerRole+` TO `+role); e != nil {
+			t.Fatal(e)
+		}
+		defer owner.Exec(t.Context(), `REVOKE `+ownerRole+` FROM `+role)
+		deny(t)
+	})
+	if e := s.ConfigureWrkEngine(t.Context(), original); e != nil {
+		t.Fatal("safe role not restored")
+	}
+}
+
+func TestWrkReviewerEndRacesVerdict(t *testing.T) {
+	s := wrkCIStore(t)
+	storeActivate(t, s, "subject", "builder-a", 9001)
+	wrkStoreAppend(t, s, "director-1", "reviewer", "claim", wrkrecords.Object{"job_id": "reviewer", "owner_lane": "builder-a", "parent_lane": "builder-a", "task_id": 9001, "host_client_id": "desktop", "role": "tester", "tier": "T3", "review_of": wrkrecords.Object{"job_id": "subject", "round_no": 1}, "predecessor_job_id": nil, "supersedes": nil})
+	head := strings.Repeat("a", 40)
+	p := storeOpen(head)
+	p["tester_job_id"] = "reviewer"
+	wrkStoreAppend(t, s, "desktop", "subject", "round_open", p)
+	content := []byte("VERDICT: PASS @" + head + "\nrace witness\n")
+	requests := []struct {
+		job     string
+		request wrkrecords.Request
+	}{
+		{"reviewer", wrkrecords.Request{Kind: "end", ClaimSeq: 1, ExpectedSeq: 1, Payload: wrkrecords.Object{"end_type": "reaped", "reason_code": "race"}}},
+		{"subject", wrkrecords.Request{Kind: "verdict", ClaimSeq: 1, ExpectedSeq: 3, Payload: wrkrecords.Object{"round_no": 1, "head": head, "verdict": "PASS", "path": "/race/verdict", "content_b64": base64.StdEncoding.EncodeToString(content), "content_sha256": wrkrecords.SHA(content), "tester_job_id": "reviewer"}}},
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	outs := make([]wrkrecords.WriteResponse, 2)
+	errs := make([]error, 2)
+	for i, r := range requests {
+		wg.Add(1)
+		go func(i int, job string, request wrkrecords.Request) {
+			defer wg.Done()
+			<-start
+			outs[i], errs[i] = s.WrkAppend(ctx, "desktop", job, wrkrecords.NewUUID(), request)
+		}(i, r.job, r.request)
+	}
+	close(start)
+	wg.Wait()
+	if errs[0] != nil {
+		t.Fatal(errs[0])
+	}
+	if errs[1] != nil && wrkrecords.Code(errs[1]) != "round_not_open" {
+		t.Fatal(errs[1])
+	}
+	if errs[1] == nil && outs[1].Record.ReceivedAt > outs[0].Record.ReceivedAt {
+		t.Fatal("accepted verdict after reviewer end")
+	}
+	if errs[1] == nil {
+		report := []byte("race report\n")
+		wrkStoreAppend(t, s, "desktop", "subject", "joined", wrkrecords.Object{"head": head, "pr": "https://example.invalid/pull/1", "report_b64": base64.StdEncoding.EncodeToString(report), "report_sha256": wrkrecords.SHA(report), "waiver_grant_seq": nil})
+	}
+}
+
+func TestWrkConcurrentLaneClaimsAndPolicyReplacement(t *testing.T) {
+	s := wrkCIStore(t)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	for i, parent := range []string{"director-1", "pa-integrator"} {
+		wg.Add(1)
+		go func(i int, parent string) {
+			defer wg.Done()
+			<-start
+			p := storeClaim(fmt.Sprintf("job-%d", i), "new-builder", int64(9001+i))
+			p["parent_lane"] = parent
+			_, errs[i] = s.WrkAppend(t.Context(), "director-1", fmt.Sprintf("job-%d", i), wrkrecords.NewUUID(), wrkrecords.Request{Kind: "claim", Payload: p})
+		}(i, parent)
+	}
+	close(start)
+	wg.Wait()
+	wins := 0
+	for _, e := range errs {
+		if e == nil {
+			wins++
+		} else if wrkrecords.Code(e) != "claim_conflict" {
+			t.Fatal(e)
+		}
+	}
+	if wins != 1 {
+		t.Fatalf("conflicting lane winners=%d", wins)
+	}
+	snapshot, e := s.WrkSnapshot(t.Context(), "director-1", "job.read")
+	if e != nil {
+		t.Fatal(e)
+	}
+	var parent string
+	for job := range snapshot.Jobs {
+		if c := snapshot.Claim(job); c != nil {
+			parent = wrkrecords.Text(c.Payload, "parent_lane")
+		}
+	}
+	b, e := os.ReadFile(filepath.Join("..", "..", "testdata", "o3", "vectors", "transition.json"))
+	if e != nil {
+		t.Fatal(e)
+	}
+	var pack struct {
+		Cases []struct {
+			Given struct {
+				Policy wrkrecords.Object `json:"policy"`
+			} `json:"given"`
+		} `json:"cases"`
+	}
+	if json.Unmarshal(b, &pack) != nil {
+		t.Fatal("policy fixture")
+	}
+	policy := pack.Cases[0].Given.Policy
+	other := "director-1"
+	if parent == other {
+		other = "pa-integrator"
+	}
+	wrkrecords.Obj(policy, "lanes")["new-builder"] = other
+	raw, _ := json.Marshal(policy)
+	replacement, e := wrkrecords.ParsePolicy(raw)
+	if e != nil {
+		t.Fatal(e)
+	}
+	engine := s.WrkEngine()
+	before := engine.Policy.Digest()
+	engine.Policy = replacement
+	if e = s.ConfigureWrkEngine(t.Context(), engine); wrkrecords.Code(e) != "claim_conflict" {
+		t.Fatalf("conflicting publication: %v", e)
+	}
+	if s.WrkEngine().Policy.Digest() != before {
+		t.Fatal("rejected replacement changed immutable policy")
 	}
 }

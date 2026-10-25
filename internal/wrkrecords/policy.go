@@ -45,6 +45,9 @@ func ParsePolicy(b []byte) (*Policy, error) {
 	if parent, ok := wire.Lanes["director-1"]; !ok || parent != nil {
 		return nil, Error("wrk_unavailable")
 	}
+	if parent, ok := wire.Lanes["pa-integrator"]; !ok || parent == nil || *parent != "director-1" {
+		return nil, Error("wrk_unavailable")
+	}
 	for lane := range wire.Lanes {
 		seen := map[string]bool{}
 		current := lane
@@ -85,6 +88,14 @@ func (p *Policy) Allows(actor, permission string) bool {
 		}
 	}
 	return false
+}
+
+func (p *Policy) Known(actor string) bool {
+	if p == nil {
+		return false
+	}
+	_, ok := p.clients[actor]
+	return ok
 }
 func (p *Policy) Host(actor string) string {
 	if p == nil {

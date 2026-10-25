@@ -404,3 +404,58 @@ func Evidence(encoded, digest string, filter bool) ([]byte, error) {
 	}
 	return b, nil
 }
+
+// The decoded limit has its own HTTP code. Check it before the schema's
+// encoded maxLength can collapse a size refusal into invalid_request.
+func evidenceSize(kind string, p Object) error {
+	field := ""
+	switch kind {
+	case "verdict", "import":
+		field = "content_b64"
+	case "completed", "joined":
+		field = "report_b64"
+	}
+	if field != "" {
+		if b, e := base64.StdEncoding.Strict().DecodeString(Text(p, field)); e == nil && len(b) > MaxContent {
+			return Error("request_too_large")
+		}
+	}
+	return nil
+}
+
+// ValidateInput is shared with the CLI's strict stdin validator.
+func ValidateInput(kind string, v any) error {
+	if p, ok := v.(map[string]any); ok {
+		if e := evidenceSize(kind, p); e != nil {
+			return e
+		}
+	}
+	return Validate("Input_"+kind, v)
+}
+
+func incompleteImport(b []byte) bool {
+	v, e := Decode(b)
+	if e != nil {
+		return true
+	}
+	m, ok := v.(map[string]any)
+	if !ok {
+		return true
+	}
+	kind := Text(m, "kind")
+	p := m
+	if payload := Obj(m, "payload"); payload != nil {
+		p = payload
+	}
+	switch kind {
+	case "job.round", "job.verdict", "job.round_void":
+		n, ok := p["round"].(float64)
+		return !ok || n <= 0 || n > MaxInt || n != math.Trunc(n)
+	case "job.takeover":
+		n, ok := p["rounds_used"].(float64)
+		return !ok || n < 0 || n > MaxInt || n != math.Trunc(n)
+	case "job.claim", "job.spawned", "job.task_link", "job.joined", "job.completed", "job.reaped", "job.revoked", "job.handed_off", "job.grant", "job.round_extension":
+		return false
+	}
+	return true
+}

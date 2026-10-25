@@ -66,10 +66,8 @@ func (e Engine) Append(s Snapshot, actor, job, key string, r Request) (WriteResp
 	permission := permissions[r.Kind]
 	if r.Kind == "claim" {
 		permission = "claim.write"
-		if !e.Policy.Allows(actor, permission) {
-			if Review(&Record{Payload: r.Payload}) || Text(r.Payload, "role") == "tester" || Text(r.Payload, "role") == "reviewer" || Text(r.Payload, "role") == "counsel" {
-				permission = "reviewer.claim.write"
-			}
+		if role := Text(r.Payload, "role"); role == "tester" || role == "reviewer" || role == "counsel" {
+			permission = "reviewer.claim.write"
 		}
 	}
 	if err := e.Check(actor, permission); err != nil {
@@ -394,7 +392,7 @@ func (e Engine) Append(s Snapshot, actor, job, key string, r Request) (WriteResp
 		if sum.State != "importing" {
 			return fail("import_unsealed")
 		}
-		content, err = Evidence(Text(p, "content_b64"), Text(p, "source_sha256"), false)
+		content, err = Evidence(Text(p, "content_b64"), Text(p, "source_sha256"), true)
 		if err != nil {
 			return WriteResponse{}, nil, err
 		}
@@ -463,6 +461,9 @@ func ValidateRequest(r Request) error {
 	}
 	v, err := Decode(b)
 	if err != nil {
+		return err
+	}
+	if err = evidenceSize(r.Kind, r.Payload); err != nil {
 		return err
 	}
 	return Validate("Request", v)
@@ -780,13 +781,8 @@ func (e Engine) identities(s Snapshot, job string) []Object {
 func (e Engine) headReserved(s Snapshot, job, head string) bool {
 	if claim := s.Claim(job); claim != nil {
 		if predecessor := Text(claim.Payload, "predecessor_job_id"); predecessor != "" {
-			for _, r := range s.LiveRecords(predecessor) {
-				if r.Kind == "round_open" && Text(r.Payload, "head") == head {
-					_, _, void := s.Round(predecessor, Num(r.Payload, "round_no"))
-					if void == nil {
-						return true
-					}
-				}
+			if e.headReserved(s, predecessor, head) {
+				return true
 			}
 		}
 	}

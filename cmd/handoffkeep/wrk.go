@@ -156,8 +156,8 @@ func wrkCmd(args []string, in io.Reader, out io.Writer) error {
 		if e != nil {
 			return fail(wrkrecords.Code(e))
 		}
-		if wrkrecords.Validate("Input_"+flags["kind"], value) != nil {
-			return fail("invalid_request")
+		if e := wrkrecords.ValidateInput(flags["kind"], value); e != nil {
+			return fail(wrkrecords.Code(e))
 		}
 		payload, ok := value.(map[string]any)
 		if !ok {

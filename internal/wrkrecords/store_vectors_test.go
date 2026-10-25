@@ -90,9 +90,6 @@ func contractStore(t *testing.T) contractDB {
 func (db contractDB) seed(t *testing.T, v vector, catalog map[string][]byte) {
 	t.Helper()
 	ctx := t.Context()
-	if _, e := db.owner.Exec(ctx, `TRUNCATE wrk_contents,wrk_records,wrk_attempts,wrk_job_locks,tasks,relay_events RESTART IDENTITY CASCADE`); e != nil {
-		t.Fatal(e)
-	}
 	snap, p := seedVector(t, v, catalog)
 	// Task bindings are genuine fixture prerequisites, derived only from given
 	// claims. The request and expected outcome never determine the seed.
@@ -162,7 +159,9 @@ func vectorBody(t *testing.T, v vector) []byte {
 }
 
 func TestStoreHTTPVectors(t *testing.T) {
-	db := contractStore(t)
+	if os.Getenv("HANDOFFKEEP_TEST_DB_URL") == "" {
+		contractStore(t)
+	}
 	vs := loadVectors(t)
 	catalog := contentCatalog(t, vs)
 	for _, v := range vs {
@@ -171,6 +170,9 @@ func TestStoreHTTPVectors(t *testing.T) {
 			continue
 		}
 		t.Run(strings.TrimSuffix(v.file, ".json")+"/"+v.Name, func(t *testing.T) {
+			// A fresh schema preserves the legacy append-only guards. Never
+			// disable a trigger or truncate immutable task history to reset a case.
+			db := contractStore(t)
 			db.seed(t, v, catalog)
 			actor := Text(v.Request, "actor")
 			tokens := api.Tokens{actor: NewUUID()}

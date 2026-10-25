@@ -14,21 +14,28 @@ import (
 func (s Server) wrk(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	actor, ok := s.Tokens.Client(r)
+	failResponse := func(err error) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(wrkrecords.Status(err))
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": wrkrecords.Code(err)})
+	}
 	fail := func(err error) {
 		if s.Service.Store != nil {
 			s.Service.Store.WrkAttempt(r.Context(), actor, "", "", err)
 		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(wrkrecords.Status(err))
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": wrkrecords.Code(err)})
+		failResponse(err)
 	}
 	if !ok {
 		fail(wrkrecords.Error("unauthorized"))
 		return
 	}
 	engine := s.Service.Store.WrkEngine()
-	if err := engine.Check(actor, "capabilities.read"); err != nil {
-		fail(err)
+	if engine.Policy == nil || engine.Mode == "off" || engine.Mode == "" {
+		fail(wrkrecords.Error("wrk_unavailable"))
+		return
+	}
+	if !engine.Policy.Known(actor) {
+		fail(wrkrecords.Error("scope_denied"))
 		return
 	}
 	if r.URL.RawPath != "" && r.URL.EscapedPath() != r.URL.Path {
@@ -62,6 +69,10 @@ func (s Server) wrk(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if len(p) == 1 && p[0] == "capabilities" {
+		if err := engine.Check(actor, "capabilities.read"); err != nil {
+			fail(err)
+			return
+		}
 		if r.Method != "GET" {
 			fail(wrkrecords.Error("method_not_allowed"))
 			return
@@ -124,7 +135,9 @@ func (s Server) wrk(w http.ResponseWriter, r *http.Request) {
 			}
 			v, e := s.Service.WrkAppend(r, actor, job, r.Header.Get("Idempotency-Key"), req)
 			if e != nil {
-				fail(e)
+				// Direct store callers also need an audit; WrkAppend has already
+				// appended this denial's attempt. Do not count it twice here.
+				failResponse(e)
 				return
 			}
 			status := 201

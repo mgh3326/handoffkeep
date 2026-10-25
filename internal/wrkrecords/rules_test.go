@@ -230,8 +230,17 @@ func TestDesignImportFloorAndNoPlantedTrust(t *testing.T) {
 	begin := c.must("director-1", "subject", "import_begin", Object{"reason_code": "archive"})
 	b := []byte(`{"kind":"job.round","round":1,"head":"` + h1 + `"}`)
 	imported := c.must("director-1", "subject", "import", Object{"source_locator": "fixture/events/one.json", "source_sha256": SHA(b), "original_actor_client_id": nil, "original_at": nil, "legacy_kind": "job.round", "content_b64": base64.StdEncoding.EncodeToString(b)})
-	manifest, _ := Digest([]Object{{"seq": imported.Seq, "source_locator": imported.Payload["source_locator"], "source_sha256": imported.Payload["source_sha256"]}})
-	seal := c.must("director-1", "subject", "import_seal", Object{"begin_seq": begin.Seq, "expected_import_count": 1, "manifest_sha256": manifest, "reason_code": "sealed"})
+	manifestRows := []Object{{"seq": imported.Seq, "source_locator": imported.Payload["source_locator"], "source_sha256": imported.Payload["source_sha256"]}}
+	for _, event := range []Object{
+		{"kind": "job.verdict", "round": 1, "head": h1, "verdict": "PASS", "path": "/planted/pass", "content_sha256": strings.Repeat("a", 64)},
+		{"kind": "job.grant", "grant_type": "join_waiver", "head": h1},
+	} {
+		bytes, _ := json.Marshal(event)
+		r := c.must("director-1", "subject", "import", Object{"source_locator": "fixture/" + Text(event, "kind"), "source_sha256": SHA(bytes), "original_actor_client_id": nil, "original_at": nil, "legacy_kind": Text(event, "kind"), "content_b64": base64.StdEncoding.EncodeToString(bytes)})
+		manifestRows = append(manifestRows, Object{"seq": r.Seq, "source_locator": r.Payload["source_locator"], "source_sha256": r.Payload["source_sha256"]})
+	}
+	manifest, _ := Digest(manifestRows)
+	seal := c.must("director-1", "subject", "import_seal", Object{"begin_seq": begin.Seq, "expected_import_count": len(manifestRows), "manifest_sha256": manifest, "reason_code": "sealed"})
 	if Num(seal.Payload, "baseline_used") != 3 || Num(seal.Payload, "numbering_floor") != 3 {
 		t.Fatal("incorrect sealed floor")
 	}
@@ -298,4 +307,147 @@ func TestDesignWaiverStrandedAtJoin(t *testing.T) {
 	p := report(h1)
 	p["waiver_grant_seq"] = g.Seq
 	c.want("desktop", "subject", "joined", "review_incomplete", p)
+}
+
+func TestDesignVerdictMustMatchOpenHead(t *testing.T) {
+	c := fresh(t)
+	c.must("desktop", "subject", "round_open", opening(h1, "", nil, nil))
+	c.want("desktop", "subject", "verdict", "head_mismatch", evidence(1, h2, "/review/wrong-head", "different head", nil))
+}
+func TestDesignLegacyRelayReceiptRequired(t *testing.T) {
+	c := fresh(t)
+	for _, kind := range []string{"job.completed", "job.joined", "job.revoked", "job.reaped", "job.handed_off", "job.takeover", "end"} {
+		if e := c.s.CheckLegacy(c.e.Policy, "desktop", LegacyIntent{JobID: "subject", Kind: kind}); Code(e) != "wrk_receipt_required" {
+			t.Fatalf("%s: %v", kind, e)
+		}
+	}
+	if e := c.s.CheckLegacy(c.e.Policy, "desktop", LegacyIntent{JobID: "subject", Kind: "job.lost"}); e != nil {
+		t.Fatalf("notification fenced: %v", e)
+	}
+	c.reviewer("review-role", "desktop", 1)
+	if e := c.s.CheckLegacy(c.e.Policy, "desktop", LegacyIntent{JobID: "review-role", Kind: "job.completed"}); Code(e) != "wrk_receipt_required" {
+		t.Fatal("claim-only reviewer bypass")
+	}
+}
+
+func TestDesignHostCannotMintBuilder(t *testing.T) {
+	c := fresh(t)
+	c.want("desktop", "forged-builder", "claim", "scope_denied", Object{"job_id": "forged-builder", "owner_lane": "forged-lane", "parent_lane": "director-1", "task_id": 9002, "host_client_id": "desktop", "role": "builder", "tier": "T3", "review_of": nil, "predecessor_job_id": nil, "supersedes": nil})
+}
+
+func TestDesignSuccessorInheritsNumbersAndIdentities(t *testing.T) {
+	c := fresh(t)
+	c.must("desktop", "subject", "round_open", opening(h1, "", nil, nil))
+	c.must("desktop", "subject", "verdict", evidence(1, h1, "/review/inherited", "original", nil))
+	c.must("desktop", "subject", "round_open", opening(h2, "", nil, nil))
+	g := c.grant("void", int64(2), nil, nil, nil)
+	c.must("desktop", "subject", "void", Object{"round_no": 2, "grant_seq": g.Seq, "reason_code": "abort"})
+	c.must("desktop", "subject", "end", Object{"end_type": "handed_off", "reason_code": "successor"})
+	successor := func(job, predecessor string) {
+		c.must("director-1", job, "claim", Object{"job_id": job, "owner_lane": "builder-a", "parent_lane": "director-1", "task_id": 9001, "host_client_id": "desktop", "role": "builder", "tier": "T3", "review_of": nil, "predecessor_job_id": predecessor, "supersedes": nil})
+		c.must("director-1", job, "activate", Object{"seal_seq": nil, "reason_code": "successor"})
+	}
+	successor("successor-one", "subject")
+	r := c.must("desktop", "successor-one", "round_open", opening(h3, "", nil, nil))
+	if Num(r.Payload, "round_no") != 3 {
+		t.Fatal("recycled predecessor void number")
+	}
+	c.must("desktop", "successor-one", "end", Object{"end_type": "handed_off", "reason_code": "successor"})
+	successor("successor-two", "successor-one")
+	c.want("desktop", "successor-two", "round_open", "duplicate_head", opening(h3, "", nil, nil))
+	c.want("desktop", "successor-two", "round_open", "duplicate_head", opening(h1, "", nil, nil))
+	r = c.must("desktop", "successor-two", "round_open", opening(h4, "", nil, nil))
+	if Num(r.Payload, "round_no") != 4 {
+		t.Fatal("successor numbering floor lost")
+	}
+	c.want("desktop", "successor-two", "verdict", "duplicate_path", evidence(4, h4, "/review/inherited", "changed bytes", nil))
+	c.want("desktop", "successor-two", "verdict", "duplicate_content", evidence(4, h1, "/review/unique", "original", nil))
+}
+
+func TestDesignReviewPermissionCannotUseCentralClaimPermission(t *testing.T) {
+	c := fresh(t)
+	var wire Object
+	for _, v := range loadVectors(t) {
+		if len(v.Given.Policy) > 0 {
+			if json.Unmarshal(v.Given.Policy, &wire) != nil {
+				t.Fatal("policy")
+			}
+			break
+		}
+	}
+	clients := Obj(wire, "clients")
+	director := Obj(clients, "director-1")
+	permissions := []any{}
+	for _, v := range director["permissions"].([]any) {
+		if v != "reviewer.claim.write" {
+			permissions = append(permissions, v)
+		}
+	}
+	director["permissions"] = permissions
+	raw, _ := json.Marshal(wire)
+	p, e := ParsePolicy(raw)
+	if e != nil {
+		t.Fatal(e)
+	}
+	c.e.Policy = p
+	c.want("director-1", "central-reviewer", "claim", "scope_denied", Object{"job_id": "central-reviewer", "owner_lane": "builder-a", "parent_lane": "builder-a", "task_id": 9001, "host_client_id": "desktop", "role": "tester", "tier": "T3", "review_of": Object{"job_id": "subject", "round_no": 1}, "predecessor_job_id": nil, "supersedes": nil})
+}
+
+func TestDesignImportGuardAndIncompleteHistory(t *testing.T) {
+	c := fresh(t)
+	c.s.Jobs["subject"] = c.s.Jobs["subject"][:1]
+	begin := c.must("director-1", "subject", "import_begin", Object{"reason_code": "archive"})
+	input := func(b []byte) Object {
+		return Object{"source_locator": "synthetic/event", "source_sha256": SHA(b), "original_actor_client_id": nil, "original_at": nil, "legacy_kind": "job.verdict", "content_b64": base64.StdEncoding.EncodeToString(b)}
+	}
+	c.want("director-1", "subject", "import", "invalid_request", input([]byte("sk-"+strings.Repeat("X", 32))))
+	r := c.must("director-1", "subject", "import", input([]byte("malformed legacy bytes")))
+	manifest, _ := Digest([]Object{{"seq": r.Seq, "source_locator": r.Payload["source_locator"], "source_sha256": r.Payload["source_sha256"]}})
+	seal := c.must("director-1", "subject", "import_seal", Object{"begin_seq": begin.Seq, "expected_import_count": 1, "manifest_sha256": manifest, "reason_code": "seal"})
+	if Num(seal.Payload, "baseline_used") != 3 || Num(seal.Payload, "numbering_floor") != 3 {
+		t.Fatal("incomplete history lowered floor")
+	}
+	sum, e := c.s.Summary("subject", c.e.Now)
+	if e != nil || len(sum.Warnings) != 1 || sum.Warnings[0] != "migration_history_incomplete" {
+		t.Fatalf("missing migration warning: %+v %v", sum, e)
+	}
+}
+
+func TestDesignPolicyGraphKeepsReferencedEdges(t *testing.T) {
+	c := fresh(t)
+	var wire Object
+	for _, v := range loadVectors(t) {
+		if len(v.Given.Policy) > 0 {
+			_ = json.Unmarshal(v.Given.Policy, &wire)
+			break
+		}
+	}
+	lanes := Obj(wire, "lanes")
+	lanes["builder-a"] = "director-1"
+	raw, _ := json.Marshal(wire)
+	old, e := ParsePolicy(raw)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e = old.ValidateGraph(c.s, nil); e != nil {
+		t.Fatal(e)
+	}
+	delete(lanes, "builder-a")
+	raw, _ = json.Marshal(wire)
+	replacement, e := ParsePolicy(raw)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e = replacement.ValidateGraph(c.s, old); Code(e) != "claim_conflict" {
+		t.Fatal("removed referenced policy edge")
+	}
+	lanes["builder-a"] = "pa-integrator"
+	raw, _ = json.Marshal(wire)
+	replacement, e = ParsePolicy(raw)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e = replacement.ValidateGraph(c.s, old); Code(e) != "claim_conflict" {
+		t.Fatal("changed referenced canonical parent")
+	}
 }

@@ -2377,10 +2377,8 @@ func (s *Store) TransitionTask(ctx context.Context, id int64, to, by, note strin
 		return Task{}, err
 	}
 	defer tx.Rollback(ctx)
-	if refs != nil {
-		if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
-			return Task{}, err
-		}
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
+		return Task{}, err
 	}
 
 	var x Task

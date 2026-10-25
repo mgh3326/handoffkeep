@@ -307,9 +307,6 @@ func (s *Store) WrkAppend(ctx context.Context, actor, job, key string, r wrkreco
 }
 func wrkPermission(kind string, p *wrkrecords.Policy, actor string, payload wrkrecords.Object) string {
 	if kind == "claim" {
-		if p.Allows(actor, "claim.write") {
-			return "claim.write"
-		}
 		if role := wrkrecords.Text(payload, "role"); role == "tester" || role == "reviewer" || role == "counsel" {
 			return "reviewer.claim.write"
 		}

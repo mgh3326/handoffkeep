@@ -40,6 +40,11 @@ func ParseRequest(raw []byte) (Request, error) {
 	if e != nil {
 		return Request{}, e
 	}
+	if m, ok := v.(map[string]any); ok {
+		if e = evidenceSize(Text(m, "kind"), Obj(m, "payload")); e != nil {
+			return Request{}, e
+		}
+	}
 	if e = Validate("Request", v); e != nil {
 		return Request{}, e
 	}
@@ -215,6 +220,10 @@ func (s Snapshot) summary(job string, now time.Time, seen map[string]bool) (Summ
 		switch r.Kind {
 		case "claim":
 			sum.ClaimSeq = r.Seq
+		case "import":
+			if incompleteImport(s.Contents[job][r.Seq]) {
+				sum.Warnings = appendWarning(sum.Warnings, "migration_history_incomplete")
+			}
 		case "activate":
 			sum.State = "active"
 			sum.Baseline = Num(r.Payload, "baseline_used")
