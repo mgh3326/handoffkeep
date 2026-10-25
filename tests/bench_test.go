@@ -1529,11 +1529,11 @@ func TestBenchRepsCallSitesRetryable(t *testing.T) {
 		return r
 	}
 	for _, c := range []struct {
-		name, origin, ddl string
+		name, ddl string
 		id                int64
 	}{
-		{"insert", "592", `CREATE TRIGGER bench_reps_fault_row BEFORE INSERT ON bench_reps FOR EACH ROW WHEN (NEW.origin_id = 592) EXECUTE FUNCTION ` + fn + `()`, 592},
-		{"commit", "593", `CREATE CONSTRAINT TRIGGER bench_reps_fault_commit AFTER INSERT ON bench_reps DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN (NEW.origin_id = 593) EXECUTE FUNCTION ` + fn + `()`, 593},
+		{"insert", `CREATE TRIGGER bench_reps_fault_row BEFORE INSERT ON bench_reps FOR EACH ROW WHEN (NEW.origin_id = 592) EXECUTE FUNCTION ` + fn + `()`, 592},
+		{"commit", `CREATE CONSTRAINT TRIGGER bench_reps_fault_commit AFTER INSERT ON bench_reps DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN (NEW.origin_id = 593) EXECUTE FUNCTION ` + fn + `()`, 593},
 	} {
 		if _, err := p.Exec(ctx, c.ddl); err != nil {
 			t.Fatal(err)
