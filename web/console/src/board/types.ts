@@ -84,6 +84,9 @@ export type BoardTask = {
    * predate the field; absent on pre-field servers — both render as
    * "no project", never as an empty string. */
   project?: string | null;
+  /** Routing tag from the server's closed area vocabulary. null when unset;
+   * absent on servers that predate the field. Read-only in the console. */
+  area?: string | null;
 };
 
 export type BoardTasksResponse = {
@@ -99,7 +102,7 @@ export type BoardEvent = {
   /** "transition" rows change state; "relane" rows move the task between
    * lanes and from/to carry lane names; "project" rows reclassify the task
    * and from/to carry project names. Absent on pre-relane servers. */
-  kind?: "transition" | "relane" | "decision" | "project";
+  kind?: "transition" | "relane" | "decision" | "project" | "area";
   from: string;
   to: string;
   by: string;

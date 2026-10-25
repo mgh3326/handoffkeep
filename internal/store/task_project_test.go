@@ -162,27 +162,27 @@ func TestListTasksProjectFilter(t *testing.T) {
 	if err = pool.QueryRow(ctx, `INSERT INTO tasks(lane,title,kind,state,created_by,created_at,updated_at) VALUES($1,'legacy','implement','backlog','proj-test',now(),now()) RETURNING id`, lane).Scan(&legacy); err != nil {
 		t.Fatal(err)
 	}
-	all, err := s.ListTasks(ctx, lane, "", "", nil, 10)
+	all, err := s.ListTasks(ctx, lane, "", "", nil, nil, 10)
 	if err != nil || len(all) != 3 {
 		t.Fatalf("unfiltered=%d err=%v", len(all), err)
 	}
-	only, err := s.ListTasks(ctx, lane, "", "", projectPtr("wrk"), 10)
+	only, err := s.ListTasks(ctx, lane, "", "", projectPtr("wrk"), nil, 10)
 	if err != nil || len(only) != 1 || only[0].ID != b.ID || only[0].Project == nil || *only[0].Project != "wrk" {
 		t.Fatalf("project=wrk filter=%+v err=%v", only, err)
 	}
-	none, err := s.ListTasks(ctx, lane, "", "", projectPtr(""), 10)
+	none, err := s.ListTasks(ctx, lane, "", "", projectPtr(""), nil, 10)
 	if err != nil || len(none) != 1 || none[0].ID != legacy || none[0].Project != nil {
 		t.Fatalf("project='' filter=%+v err=%v", none, err)
 	}
-	page, err := s.ListTasksPage(ctx, lane, "", "", projectPtr("herdr"), 0, 10)
+	page, err := s.ListTasksPage(ctx, lane, "", "", projectPtr("herdr"), nil, 0, 10)
 	if err != nil || len(page) != 1 || page[0].ID != a.ID {
 		t.Fatalf("paged project=herdr=%+v err=%v", page, err)
 	}
-	if _, err = s.ListTasks(ctx, lane, "", "", projectPtr("bad name!"), 10); err == nil {
+	if _, err = s.ListTasks(ctx, lane, "", "", projectPtr("bad name!"), nil, 10); err == nil {
 		t.Fatal("invalid project filter shape accepted")
 	}
 	// A valid but unused name is a legitimate filter returning zero rows.
-	empty, err := s.ListTasks(ctx, lane, "", "", projectPtr("admiral"), 10)
+	empty, err := s.ListTasks(ctx, lane, "", "", projectPtr("admiral"), nil, 10)
 	if err != nil || len(empty) != 0 {
 		t.Fatalf("unused project filter=%+v err=%v", empty, err)
 	}

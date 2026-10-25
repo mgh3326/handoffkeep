@@ -2,8 +2,10 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/mgh3326/handoffkeep/internal/api"
@@ -112,6 +114,41 @@ func TestPathUploadIsRegisteredOnlyForStdioTransport(t *testing.T) {
 			if !tc.want {
 				if _, e = cs.CallTool(t.Context(), &gmcp.CallToolParams{Name: "attachment_put_from_path", Arguments: map[string]any{"path": "/nope", "mime": "text/plain"}}); e == nil {
 					t.Fatal("HTTP-mode unknown tool call succeeded")
+				}
+			}
+		})
+	}
+}
+
+// The MCP surface has no task tools today, so there is no task row to carry
+// an area and no way to write one. This pins that: if a task or area tool is
+// added it must come with a read-only area contract, and this test is where
+// that decision becomes visible.
+func TestNoTaskOrAreaToolIsRegistered(t *testing.T) {
+	for name, server := range map[string]*gmcp.Server{"http": New(&spyBackend{}, "stdio"), "stdio": NewStdio(&spyBackend{}, "any-token-name")} {
+		t.Run(name, func(t *testing.T) {
+			a, b := gmcp.NewInMemoryTransports()
+			ss, e := server.Connect(t.Context(), a, nil)
+			if e != nil {
+				t.Fatal(e)
+			}
+			defer ss.Close()
+			client := gmcp.NewClient(&gmcp.Implementation{Name: "test", Version: "v0"}, nil)
+			cs, e := client.Connect(t.Context(), b, nil)
+			if e != nil {
+				t.Fatal(e)
+			}
+			defer cs.Close()
+			tools, e := cs.ListTools(t.Context(), nil)
+			if e != nil {
+				t.Fatal(e)
+			}
+			for _, tool := range tools.Tools {
+				schema, _ := json.Marshal(tool.InputSchema)
+				for _, word := range []string{"task", "area"} {
+					if strings.Contains(strings.ToLower(tool.Name), word) || strings.Contains(strings.ToLower(string(schema)), `"`+word) {
+						t.Errorf("tool %s mentions %q (schema %s): a task or area MCP surface needs a read-only area contract first", tool.Name, word, schema)
+					}
 				}
 			}
 		})

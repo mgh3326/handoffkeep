@@ -248,7 +248,7 @@ func TestBenchSchemaV9IsAdditiveAndIdempotent(t *testing.T) {
 		}
 	}
 	var version int
-	if err := p.QueryRow(t.Context(), `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != 17 {
+	if err := p.QueryRow(t.Context(), `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != 19 {
 		t.Fatalf("max schema version=%d err=%v", version, err)
 	}
 	if got := benchCount(t, p, `SELECT count(*) FROM schema_version WHERE version=9`); got != 1 {
@@ -1457,25 +1457,91 @@ func TestBenchRepsConflictLogged(t *testing.T) {
 	a, b := rep(585), rep(586)
 	a["notes"], b["notes"] = "clobber a", "clobber b"
 	var buf bytes.Buffer
-	old := log.Writer()
+	oldW, oldF := log.Writer(), log.Flags()
 	log.SetOutput(&buf)
-	defer log.SetOutput(old)
+	log.SetFlags(0)
+	restoreLog := func() { log.SetOutput(oldW); log.SetFlags(oldF) }
+	t.Cleanup(restoreLog)
 	resp = putReps([]map[string]any{rep(587), a, b})
-	log.SetOutput(old)
+	restoreLog()
 	body = benchJSON(t, resp)
 	if resp.StatusCode != http.StatusConflict || body["error"] != "bench_rep_conflict" {
 		t.Fatalf("conflict batch status=%d body=%v want=409", resp.StatusCode, body)
 	}
-	got := buf.String()
-	if n := strings.Count(got, "bench_rep_conflict"); n != 2 {
-		t.Fatalf("log lines for two conflicts=%d want 2:\n%s", n, got)
+	want := fmt.Sprintf("bench_rep_conflict created_by=bench-client index=1 origin_id=585 conflict_server_id=%d\n", id585) +
+		fmt.Sprintf("bench_rep_conflict created_by=bench-client index=2 origin_id=586 conflict_server_id=%d\n", id586)
+	if got := buf.String(); got != want {
+		t.Fatalf("conflict log mismatch:\ngot:\n%q\nwant:\n%q", got, want)
 	}
-	for _, want := range []string{
-		fmt.Sprintf("created_by=bench-client index=1 origin_id=585 conflict_server_id=%d", id585),
-		fmt.Sprintf("created_by=bench-client index=2 origin_id=586 conflict_server_id=%d", id586),
+}
+
+// A SQL error that is not a deadlock or serialization failure must keep its
+// ordinary status: a rounds value past INTEGER range is SQLSTATE 22003
+// inside the batch and answers 400 invalid_context, never the retryable 503.
+func TestBenchRepsNonRetryableErrorNot503(t *testing.T) {
+	s := benchStore(t)
+	p := benchPool(t)
+	benchClean(t, p)
+	if _, err := p.Exec(t.Context(), `DELETE FROM bench_reps WHERE created_by='bench-client' AND origin_id=591`); err != nil {
+		t.Fatal(err)
+	}
+	h := benchServer(s)
+	defer h.Close()
+	item := benchItem(t, benchRepFixture, "reps")
+	item["origin_id"] = float64(591)
+	item["rounds"] = float64(3000000000)
+	resp := benchRequest(t, h.Client(), http.MethodPut, h.URL+"/v1/bench/reps", "test-token", benchBody(t, "reps", item))
+	body := benchJSON(t, resp)
+	if resp.StatusCode == http.StatusServiceUnavailable || body["error"] == "bench_reps_retryable" {
+		t.Fatalf("non-retryable SQL error mapped to retryable: status=%d body=%v", resp.StatusCode, body)
+	}
+	if resp.StatusCode != http.StatusBadRequest || body["error"] != "invalid_context" {
+		t.Fatalf("status=%d body=%v want 400 invalid_context", resp.StatusCode, body)
+	}
+}
+
+// Each benchRepsBatchErr call site that a SQL fault can reach maps 40P01 to
+// ErrBenchRepsRetryable: the insert (row trigger) and Commit (deferred
+// constraint trigger). The conflict SELECT cannot be faulted from SQL
+// without production changes and is not covered here.
+func TestBenchRepsCallSitesRetryable(t *testing.T) {
+	s := benchStore(t)
+	p := benchPool(t)
+	benchClean(t, p)
+	ctx := t.Context()
+	const fn = "bench_reps_fault_40p01"
+	if _, err := p.Exec(ctx, `CREATE OR REPLACE FUNCTION `+fn+`() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected' USING ERRCODE='40P01'; END $$`); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = p.Exec(context.Background(), `DROP TRIGGER IF EXISTS bench_reps_fault_row ON bench_reps`)
+		_, _ = p.Exec(context.Background(), `DROP TRIGGER IF EXISTS bench_reps_fault_commit ON bench_reps`)
+		_, _ = p.Exec(context.Background(), `DROP FUNCTION IF EXISTS `+fn+`()`)
+		_, _ = p.Exec(context.Background(), `DELETE FROM bench_reps WHERE created_by='bench-client' AND origin_id IN (592,593)`)
+	})
+	rep := func(origin int64) store.BenchRep {
+		item := benchItem(t, benchRepFixture, "reps")
+		var r store.BenchRep
+		raw, _ := json.Marshal(item)
+		if err := json.Unmarshal(raw, &r); err != nil {
+			t.Fatal(err)
+		}
+		r.OriginID, r.CreatedBy = origin, "bench-client"
+		return r
+	}
+	for _, c := range []struct {
+		name, ddl string
+		id        int64
+	}{
+		{"insert", `CREATE TRIGGER bench_reps_fault_row BEFORE INSERT ON bench_reps FOR EACH ROW WHEN (NEW.origin_id = 592) EXECUTE FUNCTION ` + fn + `()`, 592},
+		{"commit", `CREATE CONSTRAINT TRIGGER bench_reps_fault_commit AFTER INSERT ON bench_reps DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN (NEW.origin_id = 593) EXECUTE FUNCTION ` + fn + `()`, 593},
 	} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("log missing %q in:\n%s", want, got)
+		if _, err := p.Exec(ctx, c.ddl); err != nil {
+			t.Fatal(err)
+		}
+		_, err := s.UpsertBenchReps(ctx, []store.BenchRep{rep(c.id)})
+		if !errors.Is(err, store.ErrBenchRepsRetryable) {
+			t.Fatalf("%s site: err=%v want ErrBenchRepsRetryable", c.name, err)
 		}
 	}
 }

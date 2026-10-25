@@ -74,7 +74,7 @@ func TestRunServerGracefulShutdown(t *testing.T) {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		close(requestStarted)
 		<-releaseRequest
-		if _, err := st.ListTasks(r.Context(), "", "", "", nil, 1); err != nil {
+		if _, err := st.ListTasks(r.Context(), "", "", "", nil, nil, 1); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}

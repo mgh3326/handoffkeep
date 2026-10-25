@@ -73,6 +73,18 @@ var (
 	// with score null — for scopefuel #594's E6 measurement rungs; any real
 	// claim below S+ (a scored C, or an unscored A/B/S) still fails here.
 	ErrBenchCatalogSolGrade = errors.New("bench_catalog_sol_grade")
+	// ErrDecisionRefRequired rejects an area exception row without the
+	// decision record or task comment that approved it — an exception is
+	// never automatic.
+	ErrDecisionRefRequired = errors.New("decision_ref_required")
+	// ErrBenchAreaExceptionProfileUnknown rejects an exception whose
+	// (profile, effort) has no bench_catalog row, live or retired — no
+	// exception may name a profile the catalog does not know.
+	ErrBenchAreaExceptionProfileUnknown = errors.New("bench_area_exception_profile_unknown")
+	// ErrBenchAreaExceptionConflict rejects a write that would leave prefer
+	// and exclude live for one (profile, effort, area) key. Flipping a live
+	// row's action must go through retirement first.
+	ErrBenchAreaExceptionConflict = errors.New("bench_area_exception_action_conflict")
 	// ErrQueueEmpty is deliberately distinct from a missing task.  It lets
 	// queue consumers treat an empty lane as an expected terminal condition.
 	ErrQueueEmpty = errors.New("queue_empty")
@@ -97,6 +109,10 @@ var (
 	// task_projects vocabulary — wrong spellings would fragment the groups
 	// the field exists to provide.
 	ErrTaskProjectUnknown = errors.New("task_project_unknown")
+	// ErrTaskAreaUnknown rejects an area outside the TaskAreas vocabulary.
+	// The text is the allowed set, so every surface that reports it names
+	// the values a caller may use.
+	ErrTaskAreaUnknown = errors.New("invalid_request")
 	// ErrBenchRepsRetryable marks a batch write Postgres aborted on its own:
 	// a deadlock victim (SQLSTATE 40P01) or a serialization failure (40001).
 	// The transaction rolled back, nothing was written, and the client may
@@ -311,7 +327,57 @@ const (
 	// Like relane rows they carry classification values, not states, in
 	// from/to — the same readers that filter kind must skip them.
 	TaskEventProject = "project"
+	// TaskEventArea marks task_events rows written by SetTaskArea. from/to
+	// carry area names ("" for unset), never states.
+	TaskEventArea = "area"
 )
+
+// taskAreas is the closed task area vocabulary, in display order. Go has no
+// constant arrays, so the list is unexported and TaskAreas hands out copies:
+// no importing package can change what is accepted or advertised, and
+// changing the list is a code change, never a runtime write. An area is
+// routing metadata. It is not part of any claim or receipt and is not an
+// authority input.
+var taskAreas = [...]string{"blender", "unity", "web-qa", "ui-design", "image", "web-frontend", "go-backend", "python", "trading", "shell-wrk", "docs", "research", "ops"}
+
+// TaskAreas returns the closed area vocabulary in display order. The slice is
+// a fresh copy on every call; writing to it changes nothing.
+func TaskAreas() []string {
+	return append([]string(nil), taskAreas[:]...)
+}
+
+// ValidTaskArea reports whether v is exactly one of the TaskAreas(). There is no
+// case folding, trimming or normalisation: a near miss is not an area.
+func ValidTaskArea(v string) bool {
+	for _, a := range taskAreas {
+		if v == a {
+			return true
+		}
+	}
+	return false
+}
+
+// checkTaskAreaFilter validates a list filter. It is tri-state like the
+// project filter: nil means no filter, "" selects tasks with no area, and any
+// other value must be in the vocabulary. An unknown value is an error, not an
+// empty result, so a misspelt filter cannot read as "no such tasks".
+func checkTaskAreaFilter(area *string) error {
+	if area == nil || *area == "" {
+		return nil
+	}
+	return ValidateTaskArea(area)
+}
+
+// ValidateTaskArea validates an optional area; the CLI and API call it so the
+// refusal text is the same everywhere. nil means unset and is always
+// valid; any non-nil value, the empty string included, must be in the
+// vocabulary.
+func ValidateTaskArea(area *string) error {
+	if area == nil || ValidTaskArea(*area) {
+		return nil
+	}
+	return fmt.Errorf("%w: area must be one of %s", ErrTaskAreaUnknown, strings.Join(taskAreas[:], ", "))
+}
 
 type TaskEvent struct {
 	ID     int64  `json:"id"`
@@ -362,8 +428,12 @@ type Task struct {
 	// rows keep it (no backfill) and render as the "no project" bucket.
 	// The field is always emitted, so a null means an unset project rather
 	// than a server that predates the column.
-	Project *string     `json:"project"`
-	Events  []TaskEvent `json:"events,omitempty"`
+	Project *string `json:"project"`
+	// Area is the task's entry in the TaskAreas vocabulary. NULL on rows
+	// created before the field existed and on any task nobody has tagged;
+	// always emitted, so a null means unset.
+	Area   *string     `json:"area"`
+	Events []TaskEvent `json:"events,omitempty"`
 }
 
 // RelayEvent is a durable report from a worker to its owning lane.  Delivery
@@ -523,6 +593,29 @@ type BenchCatalogEntry struct {
 	DecidedAt           time.Time  `json:"decided_at"`
 	DecidedBy           string     `json:"decided_by"`
 	RetiredAt           *time.Time `json:"retired_at"`
+}
+
+// BenchAreaException is one row of the (profile, effort, area)-keyed routing
+// exception list (hk 1944, K5 of hk 1937). It sits next to the grade catalog
+// as canon but is deliberately not a grade row: a grade stays one axis, and
+// an exception only adjusts routing within or under it. Effort "" means
+// every effort of that profile; Action is the closed pair exclude|prefer.
+// DecidedBy and DecidedAt are server-set on write — unlike the catalog,
+// where the caller supplies provenance, the exception writer is always the
+// authenticated operator client. ExpiresWithModelID names the model id the
+// evidence was measured on; readers deactivate a row whose catalog model id
+// moved on.
+type BenchAreaException struct {
+	Profile            string     `json:"profile"`
+	Effort             string     `json:"effort"`
+	Area               string     `json:"area"`
+	Action             string     `json:"action"`
+	EvidenceRefs       []string   `json:"evidence_refs"`
+	DecisionRef        string     `json:"decision_ref"`
+	DecidedBy          string     `json:"decided_by"`
+	DecidedAt          time.Time  `json:"decided_at"`
+	ExpiresWithModelID string     `json:"expires_with_model_id"`
+	RetiredAt          *time.Time `json:"retired_at"`
 }
 
 // Attachment is immutable binary metadata. Object bytes are kept in R2; PostgreSQL
@@ -878,6 +971,53 @@ func (s *Store) migrate(ctx context.Context) error {
 			}
 		}
 	}
+	var v18Applied bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_version WHERE version=18)`).Scan(&v18Applied); err != nil {
+		return err
+	}
+	if !v18Applied {
+		// Version 18 (hk 1940) adds the task area: tasks.area is a nullable
+		// column validated against the TaskAreas code constant, not a table
+		// and not a CHECK, because the vocabulary changes with the code and a
+		// CHECK would freeze a copy of it in the schema. Existing rows stay
+		// NULL; tagging them is an explicit later action, never a guess by
+		// migration. The kind CHECK swap admits 'area' events and follows
+		// the v14/v15 pattern: NOT VALID, lock-heavy DDL runs once behind
+		// the version gate, existing rows need no re-check.
+		v18 := []string{
+			`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS area TEXT`,
+			`ALTER TABLE task_events DROP CONSTRAINT IF EXISTS task_events_kind_check, ADD CONSTRAINT task_events_kind_check CHECK(kind IN ('transition','relane','decision','project','area')) NOT VALID`,
+			`INSERT INTO schema_version(version) VALUES (18)`,
+		}
+		for _, q := range v18 {
+			if _, err := tx.Exec(ctx, q); err != nil {
+				return err
+			}
+		}
+	}
+	var v19Applied bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_version WHERE version=19)`).Scan(&v19Applied); err != nil {
+		return err
+	}
+	if !v19Applied {
+		// Version 19 (hk 1944) adds the bench area exception list: per-area
+		// routing exceptions kept next to, but separate from, the grade
+		// catalog. The area column is validated in code against the TaskAreas
+		// constant (same reason as v18 — a CHECK would freeze a copy of the
+		// vocabulary), the action CHECK is closed, and evidence_refs carries
+		// at least one ref enforced by the write path. Retired rows stay in
+		// place; there is no DELETE.
+		v19 := []string{
+			`CREATE TABLE IF NOT EXISTS bench_area_exceptions (profile TEXT NOT NULL, effort TEXT NOT NULL DEFAULT '', area TEXT NOT NULL, action TEXT NOT NULL CHECK(action IN ('exclude','prefer')), evidence_refs TEXT[] NOT NULL, decision_ref TEXT NOT NULL, decided_by TEXT NOT NULL, decided_at TIMESTAMPTZ NOT NULL, expires_with_model_id TEXT NOT NULL, retired_at TIMESTAMPTZ, PRIMARY KEY(profile, effort, area))`,
+			`CREATE INDEX IF NOT EXISTS bench_area_exceptions_area ON bench_area_exceptions(area) WHERE retired_at IS NULL`,
+			`INSERT INTO schema_version(version) VALUES (19)`,
+		}
+		for _, q := range v19 {
+			if _, err := tx.Exec(ctx, q); err != nil {
+				return err
+			}
+		}
+	}
 	// Lane-knownness probes for relane run once per batch item. These
 	// indexes keep each probe an index lookup instead of a full scan —
 	// the existing relay_events index on owner_lane is partial and
@@ -1035,6 +1175,80 @@ func validBenchCatalogEntry(x BenchCatalogEntry) bool {
 		}
 	}
 	return true
+}
+
+var benchAreaExceptionActions = map[string]bool{"exclude": true, "prefer": true}
+
+// benchAreaExceptionMaxRefs bounds one exception's evidence list — the rows
+// are canon like catalog rows, not telemetry, so a handful of refs is the
+// expected shape.
+const benchAreaExceptionMaxRefs = 64
+
+// Numeric refs are capped at 18 digits so every value fits an int64.
+var benchAreaExceptionTaskRefRE = regexp.MustCompile(`^hk:task/[0-9]{1,18}$`)
+var benchAreaExceptionSrvRefRE = regexp.MustCompile(`^srv:[0-9]{1,18}$`)
+
+// validBenchAreaExceptionRef accepts exactly the three evidence ref shapes:
+// hk:task/N, hk:doc/KEY and srv:N. A document key must pass the store's own
+// document key validator and use printable ASCII only (0x21-0x7e): no
+// whitespace, control or non-ASCII bytes. Anything else — other schemes,
+// bare numbers — is not evidence.
+func validBenchAreaExceptionRef(ref string) bool {
+	switch {
+	case benchAreaExceptionTaskRefRE.MatchString(ref):
+		return true
+	case benchAreaExceptionSrvRefRE.MatchString(ref):
+		return true
+	case strings.HasPrefix(ref, "hk:doc/"):
+		key := strings.TrimPrefix(ref, "hk:doc/")
+		for i := 0; i < len(key); i++ {
+			if key[i] < 0x21 || key[i] > 0x7e {
+				return false
+			}
+		}
+		return validDocKey(key)
+	}
+	return false
+}
+
+// checkBenchAreaException validates one exception row against every rule the
+// write path enforces without consulting the database: required fields, the
+// closed action, the K1 area vocabulary, and the evidence ref shapes. The
+// (profile, effort) catalog lookup happens inside the upsert transaction.
+func checkBenchAreaException(x BenchAreaException) error {
+	if !validBenchRequiredText(x.Profile) {
+		return errors.New("invalid bench area exception profile")
+	}
+	if !validText(x.Effort, 200) {
+		return errors.New("invalid bench area exception effort")
+	}
+	if err := ValidateTaskArea(&x.Area); err != nil {
+		return err
+	}
+	if !benchAreaExceptionActions[x.Action] {
+		return errors.New("invalid bench area exception action")
+	}
+	if len(x.EvidenceRefs) < 1 || len(x.EvidenceRefs) > benchAreaExceptionMaxRefs {
+		return errors.New("invalid bench area exception evidence_refs")
+	}
+	for _, ref := range x.EvidenceRefs {
+		if !validBenchAreaExceptionRef(ref) {
+			return errors.New("invalid bench area exception evidence_refs")
+		}
+	}
+	if strings.TrimSpace(x.DecisionRef) == "" {
+		return ErrDecisionRefRequired
+	}
+	if !validBenchText(x.DecisionRef) {
+		return errors.New("invalid bench area exception decision_ref")
+	}
+	if !validBenchRequiredText(x.ExpiresWithModelID) {
+		return errors.New("invalid bench area exception expires_with_model_id")
+	}
+	if !validBenchClient(x.DecidedBy) {
+		return ErrDecidedByRequired
+	}
+	return nil
 }
 
 func (s *Store) UpsertBenchScores(ctx context.Context, xs []BenchScore) (int, error) {
@@ -1519,6 +1733,98 @@ func (s *Store) ListBenchCatalog(ctx context.Context, pool string, includeRetire
 	return out, rows.Err()
 }
 
+// upsertBenchAreaException is one race-free statement. The DO UPDATE lock
+// serializes writers on the key: a racer waits for the winner and then
+// re-evaluates the WHERE against the committed row. The WHERE admits the
+// write unless both sides would be live with different actions — an
+// unconditional update for a retired row or a retirement, a same-action
+// upsert otherwise. Nothing is written when prefer and exclude would both
+// be live; the empty RETURNING surfaces that as ErrBenchAreaExceptionConflict.
+const upsertBenchAreaException = `INSERT INTO bench_area_exceptions(profile,effort,area,action,evidence_refs,decision_ref,decided_by,decided_at,expires_with_model_id,retired_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (profile,effort,area) DO UPDATE SET action=EXCLUDED.action,evidence_refs=EXCLUDED.evidence_refs,decision_ref=EXCLUDED.decision_ref,decided_by=EXCLUDED.decided_by,decided_at=EXCLUDED.decided_at,expires_with_model_id=EXCLUDED.expires_with_model_id,retired_at=EXCLUDED.retired_at WHERE bench_area_exceptions.retired_at IS NOT NULL OR EXCLUDED.retired_at IS NOT NULL OR bench_area_exceptions.action = EXCLUDED.action RETURNING profile`
+
+// UpsertBenchAreaExceptions is the operator write path for the area
+// exception list, called only after the API has stamped DecidedBy and
+// DecidedAt. The batch is atomic: every row validates first, each
+// (profile, effort) must name a bench_catalog row — live or retired — and
+// prefer and exclude may never both be live for one key, whether the
+// conflict comes from the stored row or from another row in this batch.
+func (s *Store) UpsertBenchAreaExceptions(ctx context.Context, xs []BenchAreaException) (int, error) {
+	if len(xs) < 1 || len(xs) > benchBatchMax {
+		return 0, errors.New("invalid bench area exceptions")
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback(ctx)
+	now := time.Now().UTC()
+	for _, x := range xs {
+		if err := checkBenchAreaException(x); err != nil {
+			return 0, err
+		}
+		if err := guard.Reject(x.DecisionRef); err != nil {
+			return 0, err
+		}
+		if err := guard.Reject(x.ExpiresWithModelID); err != nil {
+			return 0, err
+		}
+		for _, ref := range x.EvidenceRefs {
+			if err := guard.Reject(ref); err != nil {
+				return 0, err
+			}
+		}
+		if x.DecidedAt.IsZero() {
+			x.DecidedAt = now
+		}
+		var known bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM bench_catalog WHERE profile=$1 AND effort=$2)`, x.Profile, x.Effort).Scan(&known); err != nil {
+			return 0, err
+		}
+		if !known {
+			return 0, fmt.Errorf("%w: %s effort %q", ErrBenchAreaExceptionProfileUnknown, x.Profile, x.Effort)
+		}
+		var key string
+		err = tx.QueryRow(ctx, upsertBenchAreaException, x.Profile, x.Effort, x.Area, x.Action, x.EvidenceRefs, x.DecisionRef, x.DecidedBy, x.DecidedAt, x.ExpiresWithModelID, x.RetiredAt).Scan(&key)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, fmt.Errorf("%w: %s effort %q area %s", ErrBenchAreaExceptionConflict, x.Profile, x.Effort, x.Area)
+		}
+		if err != nil {
+			return 0, err
+		}
+	}
+	return len(xs), tx.Commit(ctx)
+}
+
+// ListBenchAreaExceptions returns exception rows ordered by area, profile
+// and effort rung. Retired rows are hidden unless includeRetired is set; the
+// area filter is exact against the TaskAreas vocabulary.
+func (s *Store) ListBenchAreaExceptions(ctx context.Context, area string, includeRetired bool) ([]BenchAreaException, error) {
+	if area != "" {
+		if err := ValidateTaskArea(&area); err != nil {
+			return nil, err
+		}
+	}
+	rows, err := s.pool.Query(ctx, `SELECT profile,effort,area,action,evidence_refs,decision_ref,decided_by,decided_at,expires_with_model_id,retired_at FROM bench_area_exceptions WHERE ($1='' OR area=$1) AND ($2 OR retired_at IS NULL) ORDER BY area, profile, CASE effort WHEN '' THEN 0 WHEN 'low' THEN 1 WHEN 'medium' THEN 2 WHEN 'high' THEN 3 WHEN 'xhigh' THEN 4 WHEN 'max' THEN 5 ELSE 6 END, effort`, area, includeRetired)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []BenchAreaException{}
+	for rows.Next() {
+		var x BenchAreaException
+		if err := rows.Scan(&x.Profile, &x.Effort, &x.Area, &x.Action, &x.EvidenceRefs, &x.DecisionRef, &x.DecidedBy, &x.DecidedAt, &x.ExpiresWithModelID, &x.RetiredAt); err != nil {
+			return nil, err
+		}
+		x.DecidedAt = x.DecidedAt.UTC()
+		if x.RetiredAt != nil {
+			t := x.RetiredAt.UTC()
+			x.RetiredAt = &t
+		}
+		out = append(out, x)
+	}
+	return out, rows.Err()
+}
+
 func validTaskRefs(x TaskRefs) bool {
 	for _, v := range []string{x.PR, x.HeadSHA, x.ReportPath, x.JobID} {
 		if !validText(v, 4096) {
@@ -1691,13 +1997,13 @@ func ValidBodyDoc(v string) bool {
 
 func scanTask(row interface{ Scan(...any) error }, x *Task) error {
 	var refs []byte
-	if err := row.Scan(&x.ID, &x.Lane, &x.ParentLane, &x.Title, &x.Kind, &x.State, &x.Priority, &refs, &x.ClaimedBy, &x.CreatedBy, &x.CreatedAt, &x.UpdatedAt, &x.BodyDoc, &x.Project); err != nil {
+	if err := row.Scan(&x.ID, &x.Lane, &x.ParentLane, &x.Title, &x.Kind, &x.State, &x.Priority, &refs, &x.ClaimedBy, &x.CreatedBy, &x.CreatedAt, &x.UpdatedAt, &x.BodyDoc, &x.Project, &x.Area); err != nil {
 		return err
 	}
 	return json.Unmarshal(refs, &x.Refs)
 }
 
-const taskColumns = `id,lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at,body_doc,project`
+const taskColumns = `id,lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at,body_doc,project,area`
 
 // taskProjectQuerier is the row-query seam requireTaskProject runs against:
 // the caller's transaction, so membership is judged in the same snapshot the
@@ -1745,6 +2051,9 @@ func (s *Store) CreateTask(ctx context.Context, x Task) (Task, error) {
 	if err := guard.Reject(x.Title); err != nil {
 		return x, err
 	}
+	if err := ValidateTaskArea(x.Area); err != nil {
+		return x, err
+	}
 	if err := rejectTaskRefs(x.Refs); err != nil {
 		return x, err
 	}
@@ -1763,7 +2072,7 @@ func (s *Store) CreateTask(ctx context.Context, x Task) (Task, error) {
 	if err = requireTaskProject(ctx, tx, x.Project); err != nil {
 		return x, err
 	}
-	if err = scanTask(tx.QueryRow(ctx, `INSERT INTO tasks(lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at,body_doc,project) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$12,$13) RETURNING `+taskColumns, x.Lane, x.ParentLane, x.Title, x.Kind, x.State, x.Priority, string(refs), x.ClaimedBy, x.CreatedBy, x.CreatedAt, x.UpdatedAt, x.BodyDoc, x.Project), &x); err != nil {
+	if err = scanTask(tx.QueryRow(ctx, `INSERT INTO tasks(lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at,body_doc,project,area) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$12,$13,$14) RETURNING `+taskColumns, x.Lane, x.ParentLane, x.Title, x.Kind, x.State, x.Priority, string(refs), x.ClaimedBy, x.CreatedBy, x.CreatedAt, x.UpdatedAt, x.BodyDoc, x.Project, x.Area), &x); err != nil {
 		return x, err
 	}
 	if s.LinearSyncEnabled() && x.Refs.Linear != nil && x.Refs.Linear.Sync {
@@ -2245,6 +2554,56 @@ func (s *Store) SetTaskProject(ctx context.Context, id int64, project, by, note 
 	return x, true, tx.Commit(ctx)
 }
 
+// SetTaskArea tags one task from the TaskAreas vocabulary; a nil area clears
+// the tag. It follows SetTaskProject's shape: row lock, append-only
+// kind='area' event whose from/to carry area names ("" for unset), and no
+// event when the value is unchanged. Like project it is allowed on terminal
+// rows: area is routing metadata, not lifecycle.
+func (s *Store) SetTaskArea(ctx context.Context, id int64, area *string, by, note string) (x Task, changed bool, err error) {
+	if err := ValidateTaskArea(area); err != nil {
+		return Task{}, false, err
+	}
+	if by == "" || !validText(by, 128) || !validText(note, MaxBytes) {
+		return Task{}, false, errors.New("invalid task area change")
+	}
+	if err := guard.Reject(note); err != nil {
+		return Task{}, false, err
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Task{}, false, err
+	}
+	defer tx.Rollback(ctx)
+	if err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, id), &x); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Task{}, false, ErrTaskNotFound
+		}
+		return Task{}, false, err
+	}
+	from, to := "", ""
+	if x.Area != nil {
+		from = *x.Area
+	}
+	if area != nil {
+		to = *area
+	}
+	if from == to {
+		return x, false, tx.Commit(ctx)
+	}
+	encoded, err := json.Marshal(x.Refs)
+	if err != nil {
+		return Task{}, false, err
+	}
+	x.UpdatedAt = time.Now().UTC()
+	if err = scanTask(tx.QueryRow(ctx, `UPDATE tasks SET area=$2,updated_at=$3 WHERE id=$1 RETURNING `+taskColumns, id, area, x.UpdatedAt), &x); err != nil {
+		return Task{}, false, err
+	}
+	if _, err = tx.Exec(ctx, `INSERT INTO task_events(task_id,"from","to","by",note,refs,at,kind) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,'area')`, id, from, to, by, note, string(encoded), x.UpdatedAt); err != nil {
+		return Task{}, false, err
+	}
+	return x, true, tx.Commit(ctx)
+}
+
 // ListTaskProjects returns the server-configured project vocabulary in
 // name order. This is the set tasks add --project accepts.
 func (s *Store) ListTaskProjects(ctx context.Context) ([]string, error) {
@@ -2277,9 +2636,12 @@ func (s *Store) AddTaskProject(ctx context.Context, name, by string) (bool, erro
 	return tag.RowsAffected() == 1, nil
 }
 
-func (s *Store) ListTasks(ctx context.Context, lane, state, parentLane string, project *string, limit int) ([]Task, error) {
+func (s *Store) ListTasks(ctx context.Context, lane, state, parentLane string, project, area *string, limit int) ([]Task, error) {
 	if !validTaskQuery(lane, state, parentLane, project) {
 		return nil, errors.New("invalid task query")
+	}
+	if err := checkTaskAreaFilter(area); err != nil {
+		return nil, err
 	}
 	if limit < 1 {
 		limit = 20
@@ -2308,6 +2670,14 @@ func (s *Store) ListTasks(ctx context.Context, lane, state, parentLane string, p
 			q += fmt.Sprintf(" AND project=$%d", len(args))
 		}
 	}
+	if area != nil {
+		if *area == "" {
+			q += " AND area IS NULL"
+		} else {
+			args = append(args, *area)
+			q += fmt.Sprintf(" AND area=$%d", len(args))
+		}
+	}
 	args = append(args, limit)
 	q += fmt.Sprintf(" ORDER BY priority DESC,created_at ASC,id ASC LIMIT $%d", len(args))
 	rows, err := s.pool.Query(ctx, q, args...)
@@ -2329,9 +2699,12 @@ func (s *Store) ListTasks(ctx context.Context, lane, state, parentLane string, p
 // ListTasksPage returns a stable ID-ordered page for callers that must visit
 // the complete task set. afterID is exclusive; ListTasks retains its queue
 // priority ordering for existing callers.
-func (s *Store) ListTasksPage(ctx context.Context, lane, state, parentLane string, project *string, afterID int64, limit int) ([]Task, error) {
+func (s *Store) ListTasksPage(ctx context.Context, lane, state, parentLane string, project, area *string, afterID int64, limit int) ([]Task, error) {
 	if !validTaskQuery(lane, state, parentLane, project) || afterID < 0 {
 		return nil, errors.New("invalid task query")
+	}
+	if err := checkTaskAreaFilter(area); err != nil {
+		return nil, err
 	}
 	if limit < 1 {
 		limit = 20
@@ -2358,6 +2731,14 @@ func (s *Store) ListTasksPage(ctx context.Context, lane, state, parentLane strin
 		} else {
 			args = append(args, *project)
 			q += fmt.Sprintf(" AND project=$%d", len(args))
+		}
+	}
+	if area != nil {
+		if *area == "" {
+			q += " AND area IS NULL"
+		} else {
+			args = append(args, *area)
+			q += fmt.Sprintf(" AND area=$%d", len(args))
 		}
 	}
 	args = append(args, limit)
