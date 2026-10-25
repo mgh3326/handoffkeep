@@ -12,72 +12,6 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/wrk"
 )
 
-// packDivergenceEntry records one pack vector that contradicts the fixed
-// design r4 (sha ce4f6efb). Category design_result: the harness executes the
-// vector and asserts the design outcome (Status, Code). Category
-// fixture_invalid: the vector's seeded history is unreachable (an import
-// seal with numbering_floor below baseline_used, design §5), so the request
-// is not executed; the harness asserts the broken invariant statically.
-// Both categories are pinned: a listed case that stops diverging (the hk
-// 2049 pack revision) fails until its entry is removed, and an unlisted
-// divergent case fails. Rulings: director-1 on b1925-opus esc-1 (E1-E6
-// design_result; E7 fixture_invalid) and esc-2 (verdict order B,
-// provisional).
-type packDivergenceEntry struct {
-	Category string
-	Status   int
-	Code     string
-	Cite     string
-}
-
-const (
-	divDesignResult   = "design_result"
-	divFixtureInvalid = "fixture_invalid"
-)
-
-var packDivergence = map[string]packDivergenceEntry{
-	// E1: the seeded verdict's request_sha256 is not SHA256(RFC8785({method,path,body})) of the replayed body (design §5 L4048, §4 L125).
-	"failure-abuse.json/replay-old-verdict-identical-200":          {divDesignResult, 409, "idempotency_conflict", "E1 §5 request digest"},
-	"failure-abuse.json/committed-write-lost-reply-replay-repairs": {divDesignResult, 409, "idempotency_conflict", "E1 §5 request digest"},
-	"transition.json/replay-verdict-after-end-200":                 {divDesignResult, 409, "idempotency_conflict", "E1 §5 request digest"},
-	// E2: stale expected_seq; CAS precedes business rules (design §4 L125).
-	"failure-abuse.json/grant-consumer-race-void-reuse":                 {divDesignResult, 409, "sequence_conflict", "E2a §4 CAS (expected_seq 6, tail 9)"},
-	"head-repeat-binding.json/voided-open-verdict-cannot-copy-old-path": {divDesignResult, 409, "sequence_conflict", "E2c §4 CAS (expected_seq 5, tail 6)"},
-	"head-repeat-binding.json/reviewer-end-after-pass-join-unaffected":  {divDesignResult, 409, "sequence_conflict", "E2d §4 CAS (expected_seq 5, tail 4)"},
-	"r4-scoped-claim.json/scoped-mint-reused-job-id-claim-conflict":     {divDesignResult, 409, "sequence_conflict", "E2e §4 CAS (expected_seq 5, tail 2)"},
-	// E4: repeat_grant_seq names the verdict record, not the grant (design §4 L131).
-	"failure-abuse.json/two-testers-one-head-hk1901": {divDesignResult, 409, "grant_invalid", "E4 §4 grant validation"},
-	// E5: targets round 1, which already holds a verdict; under verdict order B the reused bytes are duplicate_content (§4 L79, esc-2 A).
-	"head-repeat-binding.json/exact-b-open-verdict-null-tester-fails-assignment": {divDesignResult, 409, "duplicate_content", "E5 §2 L79 content identity, esc-2 order B"},
-	// E6: the reviewed job is absent from given; R4 orders not_found first (design §5 L4088).
-	"r4-scoped-claim.json/scoped-mint-foreign-job-host-mismatch": {divDesignResult, 404, "not_found", "E6 R4 acceptance order"},
-	// E7: given seal numbering_floor 1 < baseline_used 3 (design §5 L4028).
-	"migration.json/post-activate-verdict-old-round-not-open":        {divFixtureInvalid, 0, "", "E7 §5 seal invariant"},
-	"migration.json/post-activate-void-old-round-not-open":           {divFixtureInvalid, 0, "", "E7 §5 seal invariant"},
-	"migration.json/post-activate-extension-open-round-4":            {divFixtureInvalid, 0, "", "E7 §5 seal invariant"},
-	"migration.json/void-postactivate-round-4-used-3":                {divFixtureInvalid, 0, "", "E7 §5 seal invariant"},
-	"r3-regression.json/postactivate-open-historical-head-no-repeat": {divFixtureInvalid, 0, "", "E7 §5 seal invariant"},
-	"transition.json/imported-activated-join-zero-rounds":            {divFixtureInvalid, 0, "", "E7 §5 seal invariant (also E3 actor)"},
-	"transition.json/imported-activated-open-needs-extension":        {divFixtureInvalid, 0, "", "E7 §5 seal invariant"},
-	"failure-abuse.json/planted-legacy-events-import-untrusted":      {divFixtureInvalid, 0, "", "E7 §5 seal invariant (also E2b CAS)"},
-}
-
-// sealInvariantBroken reports a seeded import_seal whose numbering_floor
-// is below its baseline_used: a history the design (§5) cannot produce.
-func sealInvariantBroken(c *packCase) bool {
-	for _, r := range c.Given.Records {
-		if r.Kind != "import_seal" {
-			continue
-		}
-		b, _ := r.Payload["baseline_used"].(int64)
-		f, _ := r.Payload["numbering_floor"].(int64)
-		if f < b {
-			return true
-		}
-	}
-	return false
-}
-
 // deskOwned lists vectors whose only observable is a desk operation
 // (design §9 D1/D2), not an S1 server or CLI behaviour.
 var deskOwned = map[string]string{
@@ -220,32 +154,13 @@ func pathJob(path string) string {
 	return rest
 }
 
-// checkHTTPVector applies the pinned divergence table to one executed (or
-// statically checked) http vector.
+// checkHTTPVector executes one http vector and requires every observable it
+// states. The M1 pack revision hk 2049 fixed every earlier pack defect, so
+// there is no divergence table: any mismatch is a failure.
 func checkHTTPVector(t *testing.T, c *packCase, newEnv func(t *testing.T, c *packCase) *packEnv) {
 	t.Helper()
-	div, listed := packDivergence[c.id()]
-	broken := sealInvariantBroken(c)
-	if listed && div.Category == divFixtureInvalid {
-		if !broken {
-			t.Fatalf("fixture_invalid entry is stale: the seeded seal now satisfies numbering_floor >= baseline_used; remove it")
-		}
-		return
-	}
-	if broken {
-		t.Fatalf("seeded seal breaks numbering_floor >= baseline_used but the case is not listed fixture_invalid")
-	}
 	env := newEnv(t, c)
-	status, code, miss := runHTTPVector(t, c, env)
-	switch {
-	case listed:
-		if miss == "" {
-			t.Fatalf("design_result entry is stale: the vector now matches the pack; remove it")
-		}
-		if status != div.Status || code != div.Code {
-			t.Fatalf("design result: got %d %q, want %d %q (%s)", status, code, div.Status, div.Code, div.Cite)
-		}
-	case miss != "":
+	if status, code, miss := runHTTPVector(t, c, env); miss != "" {
 		t.Fatalf("status=%d code=%q: %s", status, code, miss)
 	}
 }
@@ -263,34 +178,15 @@ func TestO3PackHTTPVectorsMemory(t *testing.T) {
 	}
 }
 
-// TestO3PackDivergenceTable pins every table entry to a real pack case of an
-// executable type.
-func TestO3PackDivergenceTable(t *testing.T) {
+// TestO3PackDeskOwned pins every desk-owned entry to a real pack case.
+func TestO3PackDeskOwned(t *testing.T) {
 	cases := map[string]*packCase{}
 	for _, c := range loadPackCases(t) {
 		cases[c.id()] = c
 	}
-	for id, d := range packDivergence {
-		c, ok := cases[id]
-		if !ok {
-			t.Errorf("pack_divergence names unknown case %s", id)
-			continue
-		}
-		if rt := c.reqType(); rt != "http" && rt != "http_raw" {
-			t.Errorf("pack_divergence %s has type %s", id, rt)
-		}
-		if d.Category != divDesignResult && d.Category != divFixtureInvalid {
-			t.Errorf("pack_divergence %s: unknown category %q", id, d.Category)
-		}
-		if d.Category == divDesignResult {
-			if st, ok := wrk.Status(wrk.Code(d.Code)); !ok || st != d.Status {
-				t.Errorf("pack_divergence %s: %d %q is not a §4 status/code pair", id, d.Status, d.Code)
-			}
-		}
-	}
 	for id := range deskOwned {
-		if _, ok := cases[id]; !ok {
-			t.Errorf("deskOwned names unknown case %s", id)
+		if c, ok := cases[id]; !ok || c.reqType() != "none" {
+			t.Errorf("deskOwned names %s, which is not a type-none pack case", id)
 		}
 	}
 }

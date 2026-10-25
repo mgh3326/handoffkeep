@@ -122,8 +122,12 @@ func (c *packCase) reqType() string { s, _ := c.Request["type"].(string); return
 // attests (the pack's report_b64).
 var packReportBytes = []byte("pack report bytes\n")
 
-func packVerdictBytes(verdict, head string) []byte {
-	return []byte(fmt.Sprintf("VERDICT: %s @%s\nreview notes\n", verdict, head))
+// packVerdictBodies are the verdict bodies the M1 generator
+// (scripts/o3gen) writes after the VERDICT line of seeded verdicts.
+var packVerdictBodies = []string{"review notes\n", "prior review\n", "assignment check\n"}
+
+func packVerdictBytes(verdict, head, body string) []byte {
+	return []byte(fmt.Sprintf("VERDICT: %s @%s\n%s", verdict, head, body))
 }
 
 // legacyBySHA maps archived legacy event digests to their exact bytes.
@@ -161,8 +165,12 @@ func seedContent(t *testing.T, legacy map[string][]byte, r wrk.Record) []byte {
 	var want string
 	switch r.Kind {
 	case "verdict":
-		b = packVerdictBytes(p["verdict"].(string), p["head"].(string))
 		want = p["content_sha256"].(string)
+		for _, body := range packVerdictBodies {
+			if b = packVerdictBytes(p["verdict"].(string), p["head"].(string), body); wrk.ContentSHA256(b) == want {
+				break
+			}
+		}
 	case "completed", "joined":
 		b, want = packReportBytes, p["report_sha256"].(string)
 	case "import":
