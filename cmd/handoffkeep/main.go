@@ -1814,17 +1814,9 @@ func serve(args []string, errout io.Writer) error {
 		return e
 	}
 	ctx := context.Background()
-	st, e := store.OpenWithOwner(ctx, dbURL, os.Getenv("HANDOFFKEEP_DB_MIGRATE_URL"))
+	st, e := openServeStore(ctx, dbURL, os.Getenv("HANDOFFKEEP_DB_MIGRATE_URL"))
 	if e != nil {
 		return e
-	}
-	// Once the O3 journal exists, no mode may run on a runtime role that
-	// could rewrite it (director-1 off-mode startup ruling, case 3).
-	if st.HasWrkTables() {
-		if e := st.CheckWrkRuntimeRole(ctx); e != nil {
-			st.Close()
-			return e
-		}
 	}
 	closeStore := true
 	defer func() {
@@ -1884,6 +1876,25 @@ func serve(args []string, errout io.Writer) error {
 	}
 	closeStore = false
 	return runServer(ctx, serveOptions{bindings: bindings, workers: workers, store: st})
+}
+
+// openServeStore opens the serving store. Without a migrate URL only the
+// legacy migrations run and no O3 table is created; the O3 schema comes
+// only from a separate owner URL. Once the journal tables exist, every
+// startup in every mode validates the runtime role (director-1 off-mode
+// startup ruling, cases 1 to 3).
+func openServeStore(ctx context.Context, dbURL, migrateURL string) (*store.Store, error) {
+	st, err := store.OpenWithOwner(ctx, dbURL, migrateURL)
+	if err != nil {
+		return nil, err
+	}
+	if st.HasWrkTables() {
+		if err := st.CheckWrkRuntimeRole(ctx); err != nil {
+			st.Close()
+			return nil, err
+		}
+	}
+	return st, nil
 }
 
 // wrkFirst sends /v1/wrk requests straight to the API handler: the outer

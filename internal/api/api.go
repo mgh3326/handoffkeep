@@ -1275,6 +1275,10 @@ func relaneErrorCode(err error) string {
 		return "unknown_lane"
 	case errors.Is(err, store.ErrTaskConflict):
 		return "task_conflict"
+	case errors.Is(err, store.ErrWrkReceiptRequired):
+		return "wrk_receipt_required"
+	case errors.Is(err, store.ErrWrkScopeDenied):
+		return "scope_denied"
 	}
 	if strings.HasPrefix(err.Error(), "secret_like_content") {
 		return "secret_like_content"

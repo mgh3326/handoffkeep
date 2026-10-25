@@ -70,6 +70,7 @@ type wrkCall struct {
 	body              []byte
 	def               string
 	append            bool
+	afterSeq          int64
 }
 
 // parseWrkArgs maps argv to one request. Unknown, missing or repeated flags
@@ -141,7 +142,8 @@ func parseWrkArgs(args []string) (wrkCall, []string, bool) {
 		if len(q) > 0 {
 			path += "?" + q.Encode()
 		}
-		return wrkCall{method: "GET", path: path, def: "RecordsResponse"}, nil, true
+		after, _ := safeInt(q.Get("after_seq"))
+		return wrkCall{method: "GET", path: path, def: "RecordsResponse", afterSeq: after}, nil, true
 	case "append":
 		if len(positional) != 1 || !wrk.ValidJobID(positional[0]) || len(flags) != 4 {
 			return wrkCall{}, nil, false
@@ -305,7 +307,7 @@ func checkWrkResponse(call wrkCall, resp remote.WrkResponse) ([]byte, wrk.Code) 
 	if err := wrk.ValidateDef(call.def, obj); err != nil {
 		return nil, wrk.ProtocolInvalid
 	}
-	if call.def == "RecordsResponse" && !recordsPageConsistent(obj) {
+	if call.def == "RecordsResponse" && !recordsPageConsistent(obj, call.afterSeq) {
 		return nil, wrk.ProtocolInvalid
 	}
 	canon, err := json.Marshal(obj)
@@ -315,11 +317,12 @@ func checkWrkResponse(call wrkCall, resp remote.WrkResponse) ([]byte, wrk.Code) 
 	return canon, ""
 }
 
-// recordsPageConsistent checks one page's own cursor arithmetic: ascending
-// seqs within the snapshot, next_after_seq at the last returned seq (or the
-// request cursor for an empty page) and has_more exactly when it falls
-// short of the snapshot.
-func recordsPageConsistent(obj map[string]any) bool {
+// recordsPageConsistent checks one page's cursor arithmetic against the
+// request: journal seqs are gap-free, so a page starts at after_seq+1 and is
+// consecutive within the snapshot, next_after_seq is the last returned seq
+// (after_seq for an empty page), an empty page only ends the snapshot, and
+// has_more holds exactly when the page falls short of it.
+func recordsPageConsistent(obj map[string]any, after int64) bool {
 	snap, _ := obj["snapshot_seq"].(int64)
 	next, _ := obj["next_after_seq"].(int64)
 	more, _ := obj["has_more"].(bool)
@@ -328,15 +331,15 @@ func recordsPageConsistent(obj map[string]any) bool {
 	if s, _ := sum["snapshot_seq"].(int64); s != snap {
 		return false
 	}
-	last := int64(-1)
+	last := after
 	for _, r := range recs {
 		seq, _ := r.(map[string]any)["seq"].(int64)
-		if seq <= last || seq > snap {
+		if seq != last+1 || seq > snap {
 			return false
 		}
 		last = seq
 	}
-	if len(recs) > 0 && last != next {
+	if last != next || (len(recs) == 0 && next != snap) {
 		return false
 	}
 	return more == (next < snap) && next <= snap
