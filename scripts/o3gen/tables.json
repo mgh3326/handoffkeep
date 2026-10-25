@@ -1,0 +1,261 @@
+{
+ "s4_errmap": {
+  "header": "| HTTP | Stable codes (one error field only) |",
+  "rows": [
+   "| 400 | invalid_request, invalid_cursor, invalid_verdict, invalid_path, grant_before_cap |",
+   "| 401 | unauthorized |",
+   "| 403 | scope_denied, host_mismatch |",
+   "| 404 | not_found |",
+   "| 409 | idempotency_conflict, sequence_conflict, claim_conflict, job_ended, review_sealed, round_cap, round_not_open, round_has_verdict, round_voided, head_mismatch, duplicate_path, duplicate_content, duplicate_head, grant_invalid, grant_consumed, grant_expired, zero_rounds, review_incomplete, blocker_unresolved, wrk_receipt_required, import_unsealed, import_sealed, migration_frozen |",
+   "| 413 | request_too_large |",
+   "| 405 | method_not_allowed |",
+   "| 415 | unsupported_media_type |",
+   "| 503 | wrk_unavailable, wrk_recovery_required |"
+  ]
+ },
+ "transition": {
+  "header": "| Vector | Expected result |",
+  "rows": [
+   "| Open H, submit PASS H bytes with asserted matching digest | 201 round_open round_no=1, 201 verdict bound to 1; used=1 |",
+   "| Retry that verdict with identical successful key/body after end | 200 created=false, identical record id/hash, no new seq |",
+   "| Same successful key, changed path | 409 idempotency_conflict, no new business record |",
+   "| Two simultaneous opens at used=2 with same expected_seq | One 201 used=3, other 409 sequence_conflict; refreshed retry without grant gets round_cap |",
+   "| PASS H2 submitted for open H1 | 409 head_mismatch; open remains pending |",
+   "| Same path with different bytes/head; same bytes at fresh path | duplicate_path; duplicate_content, respectively |",
+   "| Second open H with no repeat grant; with valid repeat grant for reviewer B | duplicate_head; 201, separate numbered round charged against cap |",
+   "| Open beyond cap with valid extension grant; reuse it for another open | 201 with grant receipt; grant_consumed (or sequence_conflict if caller uses a stale seq) |",
+   "| Void a verdict-bearing round | round_has_verdict, no consumed grant |",
+   "| Void an open with a valid void grant, then submit verdict for it | 201 void (used decremented), then round_voided |",
+   "| Submit to foreign-host job without central review assignment | host_mismatch, no business record |",
+   "| Import locally planted PASS/grant, activate, request joined | No trusted PASS/grant; baseline>=3; zero_rounds without waiver; a fresh review needs extension |",
+   "| Submit any new mutation after end | job_ended; successful prior-key replay remains 200 |",
+   "| Page limit=1 at snapshot S, append a new record during paging | Full seq 1..S exactly once across pages; new record excluded |",
+   "| forged legacy relay / task no-job bypass for an enforced job/task | wrk_receipt_required and no terminal projection |",
+   "| Assert content digest D while bytes hash to E | invalid_request, no verdict or consumed grant |"
+  ]
+ },
+ "permmap": {
+  "header": "| Permission name | Matrix operation |",
+  "rows": [
+   "| capabilities.read | Read capabilities |",
+   "| job.read | Read canonical claim/summary |",
+   "| records.read | Read paginated records, including import_begin/import_seal |",
+   "| content.read | Read immutable content |",
+   "| claim.write | Write root/builder/worker claim, correction or successor; only director-1/operator-desk |",
+   "| reviewer.claim.write | Write a review assignment claim; scoped H for hosts, A for director-1/operator-desk, \u00a72 exact role rule |",
+   "| activate.write | Write activate; only director-1/operator-desk |",
+   "| round.open | Write round_open; H rule |",
+   "| verdict.write | Write verdict; V rule |",
+   "| void.write | Write void; H rule |",
+   "| joined.write | Write joined; H rule |",
+   "| completed.write | Write completed; H rule |",
+   "| grant.write | Write grant; only director-1/operator-desk |",
+   "| grant.cancel | Write grant_cancel; only director-1/operator-desk |",
+   "| end.write | Write end; H rule or central A |",
+   "| import.begin | Write import_begin; only director-1/operator-desk |",
+   "| import.seal | Write import_seal; only director-1/operator-desk |",
+   "| import.write | Write import; only director-1/operator-desk |",
+   "| relay.publish | Publish a legacy relay with canonical receipt; H rule |",
+   "| task.state | State-only protected-task transition with matching receipt; central only |"
+  ]
+ },
+ "migration": {
+  "header": "| Initial history and request | Exact expected result |",
+  "rows": [
+   "| seq1 claim; activate with seal_seq=null | 201 baseline_used=0, active, used=0, next_round_no=1 |",
+   "| seq1 claim; seq2 shadow open 1/H; activate without seal | 409 import_unsealed |",
+   "| Same shadow history; begin at seq3; racing host verdict after begin | 409 migration_frozen after refresh; no verdict, old round in frozen snapshot |",
+   "| Same history; seal with zero-import canonical [] manifest; activate exact seal | baseline_used=3, numbering_floor=3, active, used=3, open_rounds=[] |",
+   "| After that activate, submit verdict or void for old round 1 | 409 round_not_open; used remains 3, no grant consumed |",
+   "| Same active job; central extension for next round 4/H, plus head_repeat if historical verdict reserved H; fresh round 4/PASS from assigned tester | used=4; fresh PASS can satisfy join; old round 1 is not pending |",
+   "| Void postactivate round 4 before verdict with valid grant | used=3, never 2; baseline remains 3 |",
+   "| Manifest claims one import but server has two | import_unsealed; still importing; no activation |"
+  ]
+ },
+ "fence": {
+  "header": "| Current route at HK internal/api/api.go:431\u2013475 | O3 classification |",
+  "rows": [
+   "| POST /v1/tasks | Creating an unrelated legacy task remains legacy-compatible. A supplied refs.job_id pointing to an O3 job or protected task association is rejected with wrk_receipt_required; this route cannot enroll or relink authority. |",
+   "| POST /v1/tasks/next | Protected tasks excluded from legacy claiming; explicit attempt to claim one is wrk_receipt_required. Central O3 claim transaction owns binding. |",
+   "| POST /v1/tasks/{id}/claim and /rebind | Every protected binding mutation refused, including central, no_job and retry variants. Use canonical claim/correction/successor transaction. |",
+   "| POST /v1/tasks/{id}/transition | Protected refs/claimed_by/job binding changes always refused. State-only changes require central task.state and receipt: canonical claim for nonterminal states, canonical joined for join/merged, canonical end for dropped; every receipt must name the task's current bound subject job/current claim. A reviewer end sharing task_id is insufficient. Host ids denied. |",
+   "| POST /v1/tasks/{id}/project and POST /v1/tasks/relane | Cannot change protected task's identity/binding/parent or project through legacy route; wrk_receipt_required. Parent/task for authority remains frozen in claim. Unrelated legacy tasks keep old behaviour. |",
+   "| POST /v1/tasks/{id}/decision-request/resolve | Protected state-only resumption requires central principal + current claim receipt; supplied refs/binding changes refused. |",
+   "| POST /v1/tasks/dispositions/{id}/apply | If protected, action that changes binding is refused; state-only action uses same central/receipt terminal rules. |",
+   "| POST /v1/decisions/resolve and /v1/assistant/decisions/resolve | Cannot bypass protected-task central/receipt transition rules, including no_job and resumed claimed state. Non-task textual lane notifications remain notifications. |",
+   "| POST /v1/relay/events | Every \u00a72 receipt_required job (including a review-role job in summary.state shadow) requires the exact canonical receipt for job.completed/job.joined/end; only matching projection/dedup is accepted. lane.event text never authorizes completion, routing authority or quota release. |"
+  ]
+ },
+ "r3": {
+  "header": "| History/request | Exact expected result |",
+  "rows": [
+   "| T2 A has matching assigned reviewer T; T is active at named round_open and PASS append; T then receives end reaped; A submits joined with all other gates met | 201 joined. Do not test current T activeness at join; accepted PASS remains evidence. No extra review/extension is needed for tester cleanup. |",
+   "| Zero authoritative rounds; exact-head one-use join_waiver; T2 join, all other gates met | 201 joined with waiver_grant_seq, no PASS/tester assignment fabricated; director explicitly accepts untested completion. |",
+   "| T ends before its named open or before verdict append | round_not_open for the unavailable assignment, no new verdict; this does not affect earlier accepted evidence. |",
+   "| Shadow open H without a verdict; import freeze/seal/activate; extension for new postactivation round H | New round on H allowed without head_repeat; old open is historical and has no head reservation. |",
+   "| Historical verdict on H; activation; no repeat grant; new open H | duplicate_head. Q2=a requires policy enabled; issue exact head_repeat (and extension at cap), or use a new commit. A policy setting the feature false is rejected before installation; no promotion of old PASS. |",
+   "| Two central claim transactions introduce lane X with different parents | Global lock serializes them: first valid parent commits, second sees it and returns claim_conflict. |",
+   "| PASS header then LF then body containing U+00A0/U+3000 or an embedded CR | Valid UTF-8 body accepted and hashed unchanged (unless rejected by the content guard or extra VERDICT prefix rule). |",
+   "| Header containing U+00A0 after SHA, or bare CR separating header from body | invalid_verdict. Header CRLF remains valid. |",
+   "| Policy desktop entry contains grant.write or host_client_id=mac-dev | Policy JSON Schema rejects it before runtime policy installation. |"
+  ]
+ },
+ "r4claim": {
+  "header": "| Input/history | Exact result |",
+  "rows": [
+   "| desktop mints fresh tester/reviewer/counsel claim for its active builder, exact derived fields, same task and next round | 201 claim for each allowed role; target used/next_round_no/tail unchanged; reviewer is a live assignment immediately, with no activate/grant; target open later charges exactly one slot |",
+   "| desktop mints reviewer claim for a mac-dev job | 403 host_mismatch |",
+   "| desktop mints reviewer claim for its ended job | 409 job_ended |",
+   "| desktop mints reviewer claim with different task | 409 claim_conflict |",
+   "| Host requests role builder/worker through scoped mint | 403 scope_denied; no root/builder/worker claim or task binding |",
+   "| Host changes parent_lane, owner_lane or tier from derived values | 409 claim_conflict for each; no graph edge or reparenting |",
+   "| Host supplies another host_client_id | 403 host_mismatch |",
+   "| Host supplies grant/grant_seq/extra or unknown field | 400 invalid_request; no grant or cap effect |",
+   "| Host supplies null review_of, self-reference or reviewer-as-target | 409 claim_conflict; no recursive assignment budget |",
+   "| Host reuses an existing job id with current CAS/fresh key, or requests supersedes/predecessor | 409 claim_conflict; stale zero CAS gives sequence_conflict first; successful original-key replay remains 200 |",
+   "| Host tries own minted review-role job's activate/round_open/void/joined | 403 scope_denied, including centrally attempted review-role activate; no extra budget or round |",
+   "| Target joined, target shadow, nonexistent target, conflicting tester on an existing open | review_sealed, claim_conflict, not_found, claim_conflict respectively |",
+   "| Same-host scoped assignment and centrally assigned cross-host assignment each provide matching T2/T3 PASS | Both satisfy Q9 if live at target open/verdict acceptance; host cannot mint the cross-host assignment |",
+   "| Same exact successful mint key/body replayed after target end | 200 original claim/summary, no new claim; permission is still rechecked |",
+   "| Canonical policy head_repeat_enabled=false | Policy schema validation fails before installation; installed policy requires true |",
+   "| at-integrator/pb-integrator/tt-integrator reads capabilities after A1 | Exact distinct authenticated client_id; reads allowed, grant/claim mint returns scope_denied |",
+   "| pa-integrator issues extension for a ParkingArcade job | scope_denied; only director-1/operator-desk may issue it under Q1=a |",
+   "| Verdict body contains a generated token-shaped string that guard.Match recognizes | 400 invalid_request; no content, business record or echo; audit has only allowed metadata/code. Construct a synthetic fixture at runtime, never copy a real token into a fixture/report |",
+   "| Durable commits, restore drill, generation fence or director-held receipts are unverified | D1/D2 gate refuses P2; remain P1/O2, no protection claim |"
+  ]
+ },
+ "r4life": {
+  "header": "| History/request | Exact result |",
+  "rows": [
+   "| Active subject A; host-minted R whose own summary.state=shadow; R done gets 5xx or unavailable server | exit 75, original intent pending; zero local job.completed, terminal relay, housekeeping or quota release |",
+   "| Same R; legacy receipt-less job.completed/job.joined/end relay | wrk_receipt_required; no protected terminal publication/counting/release |",
+   "| Same R; server accepts canonical completed, later canonical end | Each accepted receipt authorizes only R's own eligible cleanup; end makes R unavailable for new target verdict; target used and PASS history unchanged |",
+   "| Subject A joins/ends after R was minted, then R cleanup runs | R remains receipt-required; no downgrade to O2, no receipt-less cleanup; earlier accepted PASS stays valid |",
+   "| P1 shadow A; host tries scoped mint | claim_conflict, no fallback; C1 instead requires a central P1 assignment before starting the reviewer |",
+   "| P1 shadow A; central reviewer R claim then target shadow open receipt | R can start without activate; R's own done/end are fail-closed canonical lifecycle, target verdict still shadow/untrusted for future activation |",
+   "| Central tool presents R end receipt to drop A's task, both have same task_id | wrk_receipt_required; require the current bound subject A/current-claim end receipt; no task change |",
+   "| Same required-mode reviewer R tries import_begin/import/import_seal | scope_denied; never become an unprotected shadow-import job |"
+  ]
+ },
+ "matrix": {
+  "header": "| Command | New wrk + new enforced server | Old wrk + new server | New wrk + old server or namespace missing | Offline/5xx for enforced jobs |",
+  "rows": [
+   "| claim/spawn | GET precreated canonical claim, verify task/host/lanes, then local claim/pane. Central role creates server claim first. | Local claim alone is unaccepted; server protected-task mutation denied; director refuses absent receipt | Refuse with O3 unsupported, no pane/claim. Explicit legacy mode only for never-enrolled O2 jobs during rollout | Fail closed before new pane/work; unstarted central claim remains visible |",
+   "| round open | POST round_open with expected_seq and exact head; receipt then local event, then reviewer starts | Local file cannot open a server round; director ignores it; legacy protected completion denied | Refuse, no local authoritative event | Fail closed; do not start another tester; retain/retry same intent/key |",
+   "| round verdict | Read bytes once; POST explicit round_no/head/bytes/digest; receipt then projection | Local verdict does not become trusted; server round remains pending | Refuse; preserve reviewer file for later | Fail closed for acceptance; preserve bytes and pending intent, no accepted verdict |",
+   "| round void | POST void referencing exact server grant; receipt then local event | Local void never reduces server count | Refuse | Fail closed; count stays charged |",
+   "| round status/audit | GET summary/full paginated snapshot; additionally scan local unmatched evidence as warning | Local result is labelled O2/unverified by director; not accepted as canonical status | May print local status only with explicit O2 unsupported warning | May print cached snapshot with stale=true, generation/seq/time and recorded warning; never report it current or use it for decisions |",
+   "| joined | Upload bytes in journal POST, server gates and creates canonical receipt/relay atomically; local projection afterwards | Protected relay/task join denied without canonical receipt; local event cannot authorize join | Refuse | Fail closed; no joined success or quota release |",
+   "| done | POST completed observation, warn if rounds incomplete, then local projection/housekeeping; completion is never join | Protected completed relay is denied without receipt; no quota release from local done | Report may be saved locally with warning, command exits temporary-failure; no accepted completion | Preserve report and write pending warning; return temporary-failure (exit 75), no OK completion or quota release |"
+  ]
+ },
+ "inventory": {
+  "header": "| Repository, pinned file:function or documented process | Required change | Owner |",
+  "rows": [
+   "| agent-skills AS bin/wrk:5191 done_cmd, :4607 completion_event, :4740 note_duplicate_completion | Append completed via C1 before OK, duplicate suppression or housekeeping; compare exact report bytes/receipt even on local duplicate path. | C2 hk 1927, C1 adapter |",
+   "| agent-skills AS bin/wrk:5337 joined_cmd, :5266 builder_flat_event, :5041 wrk_join_blocks/:5092 wrk_joined_refuse_blocks | Resolve canonical joined and round/verdict chain; typed waiver only; local scan adds unmatched-file warning/refusal but never authorizes joining. | C2 hk 1927 |",
+   "| agent-skills AS bin/wrk:4969 delegate_job_cmd and :5239/:5373 delegated done/joined branches; :4828 emit_relay_event | Pass canonical receipt to the upgraded panewire implementation and verify its result; otherwise disable delegation for enrolled jobs. Never take a local or Go fallback after refusal/unknown outcome. | C2 hk 1927 |",
+   "| agent-skills AS bin/wrk:6456 job_events_scan, :6538 job_watch_current, :6581 job_end_record, :6692 quota_release_round_current, :6727 release_job_quota_pool | Local census is display/projection only for O3. Gate every release immediately before each arbiter release with fresh canonical completed/joined/end evidence for the current claim; retain existing live-sentinel/pane and stale-scan checks. No best-effort success from a missing receipt. | C2 hk 1927 |",
+   "| agent-skills AS bin/wrk:6957 job_end_housekeeping and completion sentinel paths :6940\u20137238 | Server acceptance precedes sentinel shutdown, terminal registry publication and quota release. Sentinel discovery of report bytes must use C1 completed; confirmed loss must append end or leave cleanup pending, not synthesize authority from local terminal JSON. | C2 hk 1927 |",
+   "| agent-skills AS bin/wrk:11129 reap_cmd, :11113 reap_event; :11529 prune_sentinel_row and :11634 prune_cmd passes 1\u20133 | Preserve dry-run and existing guards; successful O3 close/reap requires a canonical end/accepted completion reference before mutation and paired release. A candidate scan is not a receipt. | C2 hk 1927 |",
+   "| agent-skills AS bin/wrk:11732 prune_cmd pass 4 and :11774 ended-no-sentinel release call | Canonical recheck inside the shared release function covers the old-sentinel gap; no local ended flag, missing sentinel or arbiter row alone releases quota. Apply and dry-run describe the same canonical eligibility. | C2 hk 1927 |",
+   "| agent-skills AS bin/wrk:2971 arbiter_release_held, called by spawn failure EXIT traps :3361/:10396 | Direct release must use the shared canonical gate too. An admitted protected job gets canonical end before failed-spawn release; if no canonical job was ever admitted, only the exact locally acquired, never-started reservation from that failed spawn may be compensated, with recorded spawn identity and no completion/terminal authority. An unavailable/indeterminate claim outcome is reconciled first, never treated as absent. | C2 hk 1927 |",
+   "| agent-skills AS director/bin/quota-stale-report:57 read_events/:91 categorize/:110 main | Local completed_no_release/reaped/lost buckets remain observations. A protected cleanup candidate requires a fresh canonical completed/end and \u00a72 receipt_required lookup, including reviewers; report cannot authorize release from the local bucket. | C2 hk 1927 |",
+   "| agent-skills AS bin/wrk:10147 hk_task_takeover_rebind and :10178 old-job release; :10385 spawn_cmd and :10258 hk_task_link | Central successor/claim transaction replaces protected legacy rebind/link; old end and new claim receipts precede release/spawn. Scoped reviewer spawn follows \u00a76, never generic task claim. | C2 hk 1927, C1 handshake |",
+   "| agent-skills AS bin/arbiter:885 cmd_release and :645 cmd_claim; direct resource release API is a local projection | For O3, legitimate release callers require canonical evidence; direct local DB/event edits cannot make director/hub treat quota as canonically released or a task complete. Local admission alone never authorizes pane work. Preserve the explicit limitation that unmanaged local execution cost is unbounded (\u00a71). | C2 hk 1927 |",
+   "| agent-skills AS director/merge_precheck.py:134 parse_report, :240 check_reports, :465 check_hash, :494 evaluate, :586 gather_live, :684 audit | Fetch immutable server verdict/report and current claim/receipt, bind tested head/PR/task and store generation; local report hashes supplement canonical evidence. Persist director receipt/checkpoints and refuse stale/unknown/regressed data before merge readiness. Existing G3 CI/H/B/M checks remain. | C2 hk 1927 |",
+   "| agent-skills AS director/bin/tester-eligible:189 _report, :1401 _job_record, :1457 contributor_observations, :1491 evaluate, :1703 audit | Resolve canonical claim/reviewer assignment and accepted verdict; local job.spawned/pane aliases cannot establish authority or substitute for server content. Preserve family/effort observations as separate evidence. | C2 hk 1927 |",
+   "| panewire PW job.go:112 jobCLI.done, :239 jobCLI.joined, :660 completionEvent, :740 builderFlatEvent, :895 emit; job_close.go:104 close/:265 publishJobClose | Delegated CLI obeys the same C1 contract, receipt-before-event/cleanup and typed join gate; disable O3 mutation until upgraded. Close/revoke cleanup needs canonical end. No standalone Go completion bypass. | C2 hk 1927 |",
+   "| panewire PW emit.go:112 runEmitCLI/:239 writeEmitRecord; daemon.go:745 emitRelayEvent; hub_jobs_client.go:188 scanHubRelayEventsWithin/:356 scanHubJobCompletion/:472 scanHubJobEventDetails | Carry receipt across local emit, watcher/scanner and node outbox; receipt-less terminal events may warn but cannot publish completion, remove active work from canonical counts or create terminal job state. Replay revalidates, not just first delivery. | C2 hk 1927 |",
+   "| panewire PW hub_client.go:1793 relayEventWireForm/:1865 relayEventForSend; hub.go:1150 handleAgentMessage/:1403 handleRelayAck; relay.go:432 relayJobEventFrom/:866 persistRelayEventRecord | Verify journal job.completed/job.joined before persistent publication, routing, replay or acknowledgement; preserve receipt on every wire shape. Server must atomically project canonical completion, so hub uses exact dedup/retrieval rather than creating authority from a flat local event. | C2 hk 1927 |",
+   "| panewire PW relay.go:498 reacknowledgeRelayEvent/:894 markRelayEventDelivered/:947 recordLateRelayDelivery/:1230 replayRelayEvent; relay_dedupe.go:89 relayDeliveredIdentity | Revalidate the canonical receipt for protected terminal rows on duplicate/late/replayed delivery paths. Existing event-id/payload delivery identity remains necessary, never sufficient for completion authority. | C2 hk 1927 |",
+   "| panewire PW idle_wake.go:253 Observe/:586 tick/:671 materializeAssigned/:711 resolveIdleWakeOwner | Idle/done is a harvest wake only, not completion evidence. Resolve job/owner from canonical claims for O3 and fetch canonical completion before counting completed work or cleanup. Legitimate idle-wake lane.event needs no fabricated completed receipt and must remain explicitly non-authoritative. | C2 hk 1927 |",
+   "| panewire PW busy_relay.go:828 deliver/:1039 reconcileDeliveredHeld; relay_delivered_store.go:29 RecordRelayDelivered/:47 RelayDeliveredByKey; relay.go:894 markRelayEventDelivered | relay_delivered counts delivery only. Any completed/joined tally or quota/removal projection fed by it requires a verified canonical terminal receipt. Preserve existing notification/dedup counts for ordinary lane/idle-wake messages without calling them completed work. | C2 hk 1927 |",
+   "| panewire PW fleet_census.go:467 scanFleetCensusJobs/:639 fleetCensusJobVerdict/:903 buildFleetCensusResult | Distinguish local observations from canonical completion/end when presenting cleanup eligibility; no downstream automated release from a local terminal label. | C2 hk 1927 |",
+   "| handoffkeep HK internal/api/api.go:249 CreateTask/:253 ClaimTask/:257 RebindTaskJob/:261 NextTask/:274 TransitionTask/:277 RelaneTask/:280 SetTaskProject; HTTP handlers :679, :842, :869, :899, :922, :955, :1086 | Pass authenticated principal and receipt through one protected-task fence. Claim/rebind/ref/project/relane mutations are denied; unrelated legacy operations retain behaviour. State-only protected changes require central principal and matching canonical claim/joined/end. tasks next excludes protected tasks. | C2 hk 1927 inventory; S1 hk 1925 fence |",
+   "| handoffkeep HK internal/store/store.go:1730 CreateTask/:1793 claimTaskTx/:1880 ClaimTask/:1896 RebindTaskJob/:1967 NextTask/:1991 TransitionTask/:2148 RelaneTask/:2202 SetTaskProject | Enforce inside transactional storage boundary too, so direct service/UI/MCP/store calls and no_job cannot bypass; canonical claim is the only protected enrollment/rebind writer. Do not trust free by or refs.job_id. | C2 hk 1927; S1 implementation |",
+   "| handoffkeep HK internal/api/api.go:82 Service.ResolveDecision/:1012 taskDecisionResolve/:1200 decisionResolve; internal/store/decision_request.go:682 ResolveDecisionRequest/:694 ResolveDecisionRequestAssistant/:709 resolveDecisionRequest; internal/store/disposition.go:506 ApplyDisposition | Receipt-gate protected decision resumption/terminal mutation, including resolve->claimed and disposition actions. Binding changes use the canonical claim transaction only; merely recording an answer grants no completion authority. | C2 hk 1927; S1 implementation |",
+   "| handoffkeep HK internal/api/assistant.go:89 assistantDecisionResolve, internal/api/api.go:1174 dispositionApply; internal/mcp/server.go:39 newServer/:196 HTTPHandler | Current assistant route calls Store directly: move/invoke the same principal/receipt fence. MCP currently registers generic document/memory/attachment tools, not task mutation tools; keep generic writes non-authoritative, fence future task tools, and never promote a stdio client string or UI session to operator-desk. | C2 hk 1927; S1 implementation |",
+   "| handoffkeep HK internal/api/api.go:320 AppendRelayEvent/:323 MarkRelayEventDelivered/:1222 relayEventsCreate; internal/store/store.go:2516 AppendRelayEvent/:2545 MarkRelayEventDelivered | Require canonical receipt plus exact job/kind/head/report digest before storing or counting a protected completion; atomic journal relay projection wins over legacy insertion. Delivered status cannot manufacture a missing canonical completion. | C2 hk 1927; S1 implementation |",
+   "| handoffkeep HK cmd/handoffkeep/main.go:276 tasksCmdE/:623 decisionsCmd; internal/remote/remote.go client legacy methods | Carry explicit receipts/principal through canonical CLI transport; forbid implicit by-based promotion. New wrk namespace is S1's \u00a76b implementation. | C2 hk 1927 verifies compatibility; S1 implementation |",
+   "| agent-skills AS director/SKILL.md:40 builder placement, :238 merge gate, :266 gate 1, :276\u2013279 post-merge cleanup; AS builder/SKILL.md:154\u2013185,:276\u2013294,:407\u2013465 review-round/completion gate (process) | Before spawn verify canonical central subject claim/activation; before review start verify scoped/central assignment and round-open receipt; before READY/JOIN/merge fetch canonical exact-head PASS/joined/content and retain independent receipt. After terminal transition recheck canonical cleanup evidence. Preserve CI, family and other gates. | K1 hk 1929 |",
+   "| agent-skills AS checker/SKILL.md:24\u201337 G1/G8 and :108 inbox harvest (process) | READY requires canonical joined/PASS/content reads before acting on a local joined/completed relay. State change uses central authenticated subject-bound receipt; CHECKER_LANE/by alone is not task.state authority. Inbox wake asks for harvest, never proves completion. | K1 hk 1929 |",
+   "| agent-skills AS orchestrate/SKILL.md:99\u2013102 cleanup; spawn-worker/SKILL.md:486\u2013595 spawn/landing and :1044\u20131128 cleanup (process) | Replace direct arbiter terminal release with shared receipt gate, preserve unstarted reservation compensation rule above; include \u00a76 Q13/P1 assignment/open-before-pane order. | K1 hk 1929 |",
+   "| agent-skills AS director/panewire-events.md:26\u201335 completion/join/idle/claim signal table (process) | Mark terminal delivery as a receipt-verified observation and idle as harvest only; include canonical reviewer lifecycle and missing-signal handling, no implied local-event authority. | K1 hk 1929 |",
+   "| Private PLAYBOOK gate/deploy checklist (process; reference at agent-skills AS director/SKILL.md:10\u201312,:284\u2013289, not a repository code file) | Add canonical receipt lookup/retention to review harvest, merge readiness, task closure and quota/pane cleanup; P2 checklist requires full C2 inventory, PR242 reconciliation, between-round activation, grant batching, Q1 hand-off and Q12 desk restore drill. K1 locates the desk-owned live PLAYBOOK and records its document/version during implementation; this revision does not claim to have read private PLAYBOOK contents. | K1 hk 1929, desk maintains ops checklist |"
+  ]
+ },
+ "cli_cmds": {
+  "header": "| Subcommand and exact arguments after handoffkeep | Stdin | Request / stdout JSON |",
+  "rows": [
+   "| wrk capabilities | Empty | GET /v1/wrk/capabilities -> Capabilities |",
+   "| wrk append JOB --kind K --idempotency-key U --expected-seq N --claim-seq C | Exact Input_K payload object, including content_b64/report_b64 when K needs it | POST /v1/wrk/jobs/JOB/records, Idempotency-Key U, body {kind:K,claim_seq:C,expected_seq:N,payload:stdin-object} -> WriteResponse. 201 is created=true; successful replay 200 is created=false. No implicit GET or seq/key rewrite. |",
+   "| wrk job JOB | Empty | GET /v1/wrk/jobs/JOB -> JobResponse |",
+   "| wrk records JOB [--after-seq N] [--snapshot-seq S] [--limit L] | Empty | GET records with these exact numeric query keys; omitted after_seq=0, limit=100, snapshot chosen by server -> RecordsResponse. The returned pair snapshot_seq,next_after_seq is the cursor for the next call; C1 must keep snapshot fixed. No automatic partial-success pagination. |",
+   "| wrk content JOB SEQ | Empty | GET /v1/wrk/jobs/JOB/records/SEQ/content -> ContentResponse, still JSON with exact base64, not decoded terminal text |"
+  ]
+ },
+ "cli_exit": {
+  "header": "| Stable code(s) | CLI/adapter exit |",
+  "rows": [
+   "| round_cap | 78 |",
+   "| wrk_unavailable, wrk_recovery_required | 75 |",
+   "| unauthorized, scope_denied, host_mismatch | 77 |",
+   "| not_found | 66 |",
+   "| invalid_request, invalid_cursor, invalid_verdict, invalid_path, grant_before_cap, request_too_large, method_not_allowed, unsupported_media_type | 65 |",
+   "| idempotency_conflict, sequence_conflict, claim_conflict, job_ended, review_sealed, round_not_open, round_has_verdict, round_voided, head_mismatch, duplicate_path, duplicate_content, duplicate_head, grant_invalid, grant_consumed, grant_expired, zero_rounds, review_incomplete, blocker_unresolved, wrk_receipt_required, import_unsealed, import_sealed, migration_frozen | 73 |",
+   "| cli_usage (local argument error, before sending) | 2 |",
+   "| transport_unavailable, transport_indeterminate (local network failure/timeout; the latter may have committed), protocol_invalid (malformed/unknown status/code/response, redirect, unsupported contract/old-server namespace), o3_unsupported | 75 |",
+   "| history_regressed (local retained-receipt comparison) | 75 |",
+   "| intent_invalid, intent_io (local durable intent validation/storage failure; no send if intent was not durably saved) | 74 |"
+  ]
+ },
+ "cli_vectors": {
+  "header": "| Transport/intents vector | Required observation |",
+  "rows": [
+   "| PATH contains a fake handoffkeep; HANDOFFKEEP_BIN selects a different executable; replaced canonical binary is group/world writable or foreign-owned | PR242 guard refuses the invalid override/binary before exec (exit 2); fake tool sees zero calls. An innocuous fake PATH entry alone is ignored and canonical CLI runs. |",
+   "| Capability/job/records/content call attempts an unguarded hk_bin lookup | C1 test spy rejects it; every operation uses the same canonical resolver, including later cursor pages. |",
+   "| Token present only in caller environment while canonical CLI is unavailable | exit 75 or trust-path exit 2 as applicable; no HTTP/curl/env-token fallback and no local completion/quota success. |",
+   "| Server returns {error:host_mismatch}, {error:round_cap}, {error:sequence_conflict} | Empty stdout; exact one-line stderr code; exits 77,78,73 respectively; no local fallback. |",
+   "| Server commits append, response is lost, reviewer file subsequently changes | Original pending base64/body/key/expected_seq is resent; 200 created=false with identical record/hash; exactly one charge, changed file ignored. |",
+   "| Definitive sequence_conflict, then refresh | Keep rejected original intent, create a new key only after revalidation; do not change original immutable request. |",
+   "| Crash before send / after commit / after accepted-intent fsync but before projection | Saved intent retries once by key / successful replay / GET-based projection repair; no lost committed round, new key or double release. |",
+   "| Intent is symlink, mode is not 0600, malformed JSON/digest or fsync fails | intent_invalid/intent_io exit 74 before send; no event or accepted completion. |",
+   "| Cursor page has different snapshot, missing seq, altered hash or generation | protocol_invalid/history_regressed exit 75; no decision based on partial pages. |",
+   "| CLI gets redirect, HTML response, missing namespace or unknown stable code | protocol_invalid/o3_unsupported exit 75; one safe line, empty stdout, no body/Location/evidence echo. On append keep original intent pending and exact-key retry. |",
+   "| CLI available, but caller env endpoint/token/CF settings differ from installed config | C1 child has all four override keys absent, no values read/echoed; canonical CLI uses installed identity/endpoint; no request reaches the caller-selected fake endpoint. |",
+   "| Append commits but proxy returns HTML/non-contract 5xx or malformed success | protocol_invalid exit 75, pending intent unchanged; retry original key/body returns accepted replay, exactly one record/charge. Recognized 503 also stays pending. |"
+  ]
+ },
+ "phases": {
+  "header": "| Phase and controlling flag | Entry/check | Rollback |",
+  "rows": [
+   "| P0 schema/auth policy: server WRK_RECORDS_API=off | Install additive tables and policy parser; old auth grammar and existing endpoints remain compatible. No enrollment. Desk tests policy fixtures and duplicate-token/id rejection without exposing values. | Disable API, keep new tables; previous binary safe because no enforced jobs exist. |",
+   "| P1 shadow: server WRK_RECORDS_API=shadow, wrk --records-mode=shadow | Centrally create shadow subject claims and P1 review assignments as \u00a76 specifies. Subjects dual-write with warnings; review-role own lifecycles are receipt-required from claim under \u00a72. Compare counts/identities/parent/coverage. Director still calls the subject/fleet bound O2 until Q12/P2. | End any live canonical reviewer assignments through the server before stopping their transport; keep receipt fences for them. Subject shadow clients may return to O2; preserve records/projections, imports stay untrusted. No subject/fleet bound was claimed. |",
+   "| P2 host canary enforcement: server WRK_RECORDS_API=enforce, per-job activate record, client --records-mode=required | First desktop canary, then mac-dev, mac-work, rpi. Q12=a makes durable commits with synchronous_commit=on, desk backup/WAL restore drill, store-generation freeze fence and independently retained director receipts mandatory preconditions before P2. Activate only between rounds and after server, wrk, CLI, panewire/delegation, director gates and every quota consumer support receipts. Subject activation and canonical review-role enrollment are authoritative under \u00a72; flags cannot downgrade either. | Pause enrolled jobs. Run earlier O3-capable binary/read-only mode if necessary. Keep protected-task/receipt gates active; finish or end through recovered server. Do not roll back to a pre-O3 server while any enforced job is active. |",
+   "| P3 fleet default: central claim policy NEW_JOBS_RECORDS_REQUIRED=true | All new builder/worker subjects receive central claims and activation; review-role assignments follow Q13; imported in-flight jobs use conservative floor. Nonreceipt completions and unknown jobs are refused by director/quota consumers. | Stop new enrollment; P2 rollback for active jobs. Legacy-only jobs remain explicitly marked O2. |",
+   "| P4 mbp: same flags, host client mac-personal | Verify functionality and attribution while documenting the shared-user limitation. A1 installs at-integrator/pb-integrator/tt-integrator attribution before their P4 verification; no grant scope or mbp isolation claim. | Same data-preserving rollback; no claim of mbp isolation before or after. |"
+  ]
+ },
+ "failure": {
+  "header": "| Case | Decision and record that results |",
+  "rows": [
+   "| Replay old verdict, identical successful request/key | 200 with original verdict record/receipt, created=false; no extra cap count. |",
+   "| Replay old verdict with fresh key/path | duplicate_path or duplicate_content audit attempt, no new verdict; if bytes/path are changed, duplicate_head blocks at round_open without an exact head_repeat grant. A fabricated new textual review is still possible with the host token, but costs a legitimately opened round and is only host-attested. |",
+   "| Verdict for a job claimed on another host | host_mismatch attempt, no record. Exception only for a centrally minted cross-host tester claim with exact review_of and host, matching round/head/task; then a verdict records the submitting host and tester job id. |",
+   "| Grant for a different job/claim/action/round/head | grant_invalid attempt. Grant remains unconsumed on its own job. A key copied from another job does not cross its namespace. |",
+   "| Two testers on one head (hk 1901) | Separate numbered rounds and distinct tester claims; second requires a one-use head_repeat grant naming the earlier round and second tester. At cap also requires extension. Both verdicts persist; neither is overwritten or voided. BLOCKER after PASS prevents join until a further authorized PASS resolves it. This is the decided Q2=a resolution of hk 1901; installed policy enables it, while a missing exact grant still gives duplicate_head. |",
+   "| Builder forges content_sha256 | Server hashes exact bytes and rejects mismatch with invalid_request attempt. If builder submits invented bytes and their correct hash, the stored verdict accurately attests those bytes and host credential, not truthful review. O3 does not establish same-host reviewer authorship. |",
+   "| Server loses a write after acknowledging | Normal protection: content/journal/grant consumption/receipt relay commit in one PostgreSQL durable transaction, synchronous_commit=on, no 2xx before Commit. Client/director retains generation/seq/hash receipt. If a client/director observes a lower seq, changed generation, or a different hash at a retained seq, it locally emits history_regressed and refuses further authority use. This is a client/consumer code, not a server response or wrk_attempt record. It requests the operator recovery freeze; the server then returns wrk_recovery_required. A regressed server cannot detect its own missing history without an external witness; no lower count is accepted by a witnessing consumer. Lost receipt with surviving write is recovered by successful-key replay. Total destruction of both server history and independent receipts cannot be detected by a journal alone and is outside the actor bound. No false claim of solving Byzantine storage. |",
+   "| Clock skew between hosts | Host time is asserted metadata only; server seq orders all operations. Grant expiry uses server UTC at consumption. Result is a normal record with server received_at; skew cannot buy more slots or resurrect a grant. A bad server clock is deployment failure; freeze grants until corrected rather than using host time. |",
+   "| Leaked desktop/mac-dev/mac-work/rpi token | Attacker/agent can submit host-attested evidence and consume valid grants for jobs already assigned to that id, and read fleet evidence. It can mint only the \u00a72 scoped review assignment for its own active subject; it cannot mint root/builder/worker claims or grants, write another host's jobs without a central cross-host assignment, or exceed counters. Each accepted write records the leaked client id; denied operations create scope/host attempts. Operator rotates that host credential and pauses affected jobs. No proof of which pane leaked/used it. |",
+   "| Leaked director-1/operator-desk token, including shared-user mbp use | Valid privileged records can be minted within API checks. This breaks authority assumptions for the whole fleet, not just mbp jobs; revoke/rotate and audit central records. Per-host least privilege bounds builder-only host compromise, not privileged-token theft. |",
+   "| Two simultaneous grant consumers, or extension followed by void then reuse | Job lock and unique consumption constraints choose one winner; second is sequence_conflict until refresh, then grant_consumed. A void record never returns grant capacity. |",
+   "| Builder plants fake legacy events before import or erases real events | Only import records result; asserted authors remain untrusted. Activation reserves at least three used slots; no forged PASS, parent or grant is promoted. Incomplete history blocks evidentiary acceptance and produces migration warning; fresh review uses explicit extension. |",
+   "| Builder deletes all local events or selects another inbox/hk binary | Existing canonical records remain unchanged. Director rejects fake/missing receipts and reads server. Local fake OK and hidden review effort are possible; no accepted server transition results. |",
+   "| Server commits but reply/local projection is lost | Retried original key returns original record; GET repairs projections. No duplicated round/grant consumption. Local transport warning is not permission to proceed with a new tester. |",
+   "| Legacy client posts job.joined directly, or task refs are relinked | Receipt fence rejects with wrk_receipt_required; no terminal relay/task mutation. Canonical claim remains unchanged. Unknown task/job completion cannot release quota at the director. |",
+   "| End races open/verdict/grant | Serialized journal: if end wins, new mutation is job_ended; if mutation wins, its record precedes end. There is no ambiguous timestamp ordering. |"
+  ]
+ }
+}

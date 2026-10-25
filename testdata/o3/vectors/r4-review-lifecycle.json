@@ -1126,15 +1126,15 @@
           {
             "job_id": "job-a-t1",
             "seq": 1,
-            "record_id": "00000000-0000-4000-8000-000000110496",
+            "record_id": "00000000-0000-4000-8000-000000110373",
             "store_generation": "00000000-0000-4000-8000-ffff00000001",
             "claim_seq": 1,
             "actor_client_id": "desktop",
-            "idempotency_key": "00000000-0000-4000-8000-000000210496",
+            "idempotency_key": "00000000-0000-4000-8000-000000210373",
             "request_sha256": "892390d56ec39e31c124f641b5336bee441162aa3be3233925a09efda5d27a47",
             "imported": false,
             "source": null,
-            "received_at": "2026-10-24T00:00:00.000256Z",
+            "received_at": "2026-10-24T00:00:00.000253Z",
             "previous_hash": "0000000000000000000000000000000000000000000000000000000000000000",
             "kind": "claim",
             "payload": {
@@ -1152,22 +1152,22 @@
               "predecessor_job_id": null,
               "supersedes": null,
               "policy_sha256": "8de436a97778f975de840ffd0ec10539440059169fbc34c4a8eb0486f0ece5ce",
-              "created_at": "2026-10-24T00:00:00.000256Z"
+              "created_at": "2026-10-24T00:00:00.000253Z"
             },
-            "record_hash": "de0459e6e97d73463791eec7fafd59b45142c6f317f61cdee0284e7834572d13"
+            "record_hash": "0374762c22787b984f63ca1042847672cde24ff5c87fd4594f1d6970b9d662ad"
           },
           {
             "job_id": "job-a",
             "seq": 3,
-            "record_id": "00000000-0000-4000-8000-000000110373",
+            "record_id": "00000000-0000-4000-8000-000000110414",
             "store_generation": "00000000-0000-4000-8000-ffff00000001",
             "claim_seq": 1,
             "actor_client_id": "desktop",
-            "idempotency_key": "00000000-0000-4000-8000-000000210373",
-            "request_sha256": "7955b38de0d4797a2b76e30065e0ef72e6a02c404d8d4c606dfb5bbaaabd4a59",
+            "idempotency_key": "00000000-0000-4000-8000-000000210414",
+            "request_sha256": "888b4dbcdf0a34fd3cd15ce677d9ac5d5a1e61115ba6a1e81d39d1f8611a9560",
             "imported": false,
             "source": null,
-            "received_at": "2026-10-24T00:00:00.000253Z",
+            "received_at": "2026-10-24T00:00:00.000254Z",
             "previous_hash": "7d703d1dde50cb4f6f41e2a24260599a084f016e02b24f902079aac8a7491fff",
             "kind": "round_open",
             "payload": {
@@ -1177,21 +1177,21 @@
               "extension_grant_seq": null,
               "repeat_grant_seq": null
             },
-            "record_hash": "7e75986897e2dc275b5e9338df6f889c5c7d77aabb376e0ffef82b5dee25e74f"
+            "record_hash": "0a1a5c6fd8c12d3ea7971df4024058184fee4c83c38d8623e85eb3c63511f5cc"
           },
           {
             "job_id": "job-a",
             "seq": 4,
-            "record_id": "00000000-0000-4000-8000-000000110414",
+            "record_id": "00000000-0000-4000-8000-000000110455",
             "store_generation": "00000000-0000-4000-8000-ffff00000001",
             "claim_seq": 1,
             "actor_client_id": "desktop",
-            "idempotency_key": "00000000-0000-4000-8000-000000210414",
-            "request_sha256": "f802d2316f1b00d143fd0321dbc76b573923dfe20375488c50f14f73e8051080",
+            "idempotency_key": "00000000-0000-4000-8000-000000210455",
+            "request_sha256": "b85ffa24849b725b2520ea30b3c75c6b3ef50722e6402cd7a2c26d37b5a59e7c",
             "imported": false,
             "source": null,
-            "received_at": "2026-10-24T00:00:00.000254Z",
-            "previous_hash": "7e75986897e2dc275b5e9338df6f889c5c7d77aabb376e0ffef82b5dee25e74f",
+            "received_at": "2026-10-24T00:00:00.000255Z",
+            "previous_hash": "0a1a5c6fd8c12d3ea7971df4024058184fee4c83c38d8623e85eb3c63511f5cc",
             "kind": "verdict",
             "payload": {
               "round_no": 1,
@@ -1200,23 +1200,23 @@
               "path": "/jobs/job-a/verdict-r1.md",
               "content_sha256": "e547281b1f351ac3152537f2f1859185af6515815f44acf1276091a9511969c1",
               "size_bytes": 69,
-              "tester_job_id": null
+              "tester_job_id": "job-a-t1"
             },
-            "record_hash": "65e98f63fadbfdc442ed2fb76876bfff894e57d926842bf5d9885fb6e2296492"
+            "record_hash": "38c201c26dde769e5d4faae0baa6530cd1b3300233262eb8dcae85e03275e5bd"
           },
           {
             "job_id": "job-a",
             "seq": 5,
-            "record_id": "00000000-0000-4000-8000-000000110455",
+            "record_id": "00000000-0000-4000-8000-000000110496",
             "store_generation": "00000000-0000-4000-8000-ffff00000001",
             "claim_seq": 1,
             "actor_client_id": "desktop",
-            "idempotency_key": "00000000-0000-4000-8000-000000210455",
+            "idempotency_key": "00000000-0000-4000-8000-000000210496",
             "request_sha256": "0dbb853d91595cd60efdeaca1f03a58cf00e6cf5fe77a0c7e86db42e3e234270",
             "imported": false,
             "source": null,
-            "received_at": "2026-10-24T00:00:00.000255Z",
-            "previous_hash": "65e98f63fadbfdc442ed2fb76876bfff894e57d926842bf5d9885fb6e2296492",
+            "received_at": "2026-10-24T00:00:00.000256Z",
+            "previous_hash": "38c201c26dde769e5d4faae0baa6530cd1b3300233262eb8dcae85e03275e5bd",
             "kind": "joined",
             "payload": {
               "head": "1111111111111111111111111111111111111111",
@@ -1228,7 +1228,7 @@
               ],
               "waiver_grant_seq": null
             },
-            "record_hash": "e7c207697aeea2521a3b141500e999cb68aa1965c109d1afbb49cd1211c680a0"
+            "record_hash": "ad902cb703d933b0e7670aa643cde8f8c108ab79adfe310e69d832589c4d68a9"
           }
         ]
       },
