@@ -144,40 +144,40 @@
       "bytes": 245
     },
     "vectors/failure-abuse.json": {
-      "sha256": "c11674d7bcd896e627dcf79ff784fb9a5da4c151a73c4f3a9f25474fbee16e71",
+      "sha256": "104c04c0a4f0139dd1664959672d80b52252500025179b8f1f5e5afc15b920d4",
       "bytes": 184289
     },
     "vectors/head-repeat-binding.json": {
-      "sha256": "972773364ed1c03bd25df1467525b1cf7c4f8cf7f5e1171f8757e307dba42135",
-      "bytes": 103808
+      "sha256": "beb127f51eb06c82947e7e22d2e6c3acae587a9336f0fd2e5f07b2957a1b36f6",
+      "bytes": 106054
     },
     "vectors/legacy-route-fence.json": {
       "sha256": "a93dc4ca34a884d56ccc0c2891d67dcd125c95673cdc18cbca8811360770a25a",
       "bytes": 100807
     },
     "vectors/migration.json": {
-      "sha256": "ec06b4527d5877f61db5f40c14f7095932a2be0e6859778d2a5c6cfece77d6ff",
+      "sha256": "4cad8a30a42b42d21fbf2da040cf02d586434c3eebbaffaecfe0c5516cdc2d75",
       "bytes": 114678
     },
     "vectors/r3-regression.json": {
-      "sha256": "01559448dae71f1d17b528d590ef8fd2a4548483d14ef6c259a9f4ce8b96d64b",
+      "sha256": "9ba98c333f57fcb422707146056de9642f8dd41481bdeb268b12ffc993b33a29",
       "bytes": 146204
     },
     "vectors/r4-review-lifecycle.json": {
-      "sha256": "1748cd7927e901c87cdfdd0cf825b9bd6c3de6d84c7a2fb5d04ab14a9ffd19bf",
-      "bytes": 94408
+      "sha256": "be84acd0ef3b40d8a12ed052d9353ce878e1161e690eb6ab00a2d90fa1717538",
+      "bytes": 94414
     },
     "vectors/r4-scoped-claim.json": {
-      "sha256": "6aed5641b350da10fdb1224462a186ed0059669b4311a4e4b2c24ce43f00d0a3",
-      "bytes": 367446
+      "sha256": "109613240961b41cc306bfff51894af6ec7dc3efc71d1cf989ca37739dc38107",
+      "bytes": 369807
     },
     "vectors/section4-rules.json": {
       "sha256": "65efcb7a89e022b2f01f5f7d308718fdf17fc211e49b1d03d6a936521260c9e7",
       "bytes": 268434
     },
     "vectors/transition.json": {
-      "sha256": "8c2c492e2fb081a5d449dc48d79df5c0071daa943ec51ae3ff3152d9e0945f32",
-      "bytes": 320949
+      "sha256": "a88e906e604e341c6a9d5e427770cee014cc8c997617f2390b0c1f391613c97a",
+      "bytes": 320946
     },
     "vectors/transport-intents.json": {
       "sha256": "54021d442a76c1fb0cde28ef5e016c3b610357492206ca4b52e8a2270d57ac25",
