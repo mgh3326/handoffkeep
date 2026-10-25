@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"github.com/mgh3326/handoffkeep/internal/guard"
 	"net/url"
 	"sort"
 	"strings"
@@ -33,6 +34,9 @@ func NewUUID() string {
 func (e Engine) Check(actor, permission string) error {
 	if e.Policy == nil || e.Mode == "" || e.Mode == "off" {
 		return Error("wrk_unavailable")
+	}
+	if e.Recovery && RecoveryReadsCentralOnly && !(Central(actor) && strings.HasSuffix(permission, ".read")) {
+		return Error("wrk_recovery_required")
 	}
 	if !e.Policy.Allows(actor, permission) {
 		return Error("scope_denied")
@@ -239,13 +243,10 @@ func (e Engine) Append(s Snapshot, actor, job, key string, r Request) (WriteResp
 				return WriteResponse{}, nil, err
 			}
 		}
-		if v != nil {
-			return fail("round_has_verdict")
-		}
 		if !Central(actor) && e.Policy.Host(actor) != Text(claim.Payload, "host_client_id") && id == "" {
 			return fail("host_mismatch")
 		}
-		content, err = Evidence(Text(p, "content_b64"), Text(p, "content_sha256"), true)
+		content, err = Evidence(Text(p, "content_b64"), Text(p, "content_sha256"), false)
 		if err != nil {
 			return WriteResponse{}, nil, err
 		}
@@ -254,16 +255,16 @@ func (e Engine) Append(s Snapshot, actor, job, key string, r Request) (WriteResp
 			return WriteResponse{}, nil, xerr
 		}
 		if verdict != Text(p, "verdict") {
-			return fail("invalid_verdict")
-		}
-		if head != Text(p, "head") {
-			return fail("head_mismatch")
+			return fail("invalid_request")
 		}
 		normalized, xerr := NormalizePath(Text(p, "path"))
 		if xerr != nil {
 			return WriteResponse{}, nil, xerr
 		}
 		p["path"] = normalized
+		if guard.Reject(string(content)) != nil {
+			return fail("invalid_request")
+		}
 		for _, old := range e.identities(s, job) {
 			if Text(old, "path") == normalized {
 				return fail("duplicate_path")
@@ -274,8 +275,11 @@ func (e Engine) Append(s Snapshot, actor, job, key string, r Request) (WriteResp
 				return fail("duplicate_content")
 			}
 		}
-		if Text(o.Payload, "head") != head {
+		if Text(p, "head") != head || Text(o.Payload, "head") != head {
 			return fail("head_mismatch")
+		}
+		if v != nil {
+			return fail("round_has_verdict")
 		}
 		delete(p, "content_b64")
 		p["size_bytes"] = len(content)
@@ -502,7 +506,7 @@ func (e Engine) claim(s Snapshot, actor, job string, old *Record, sum Summary, p
 		if state.State == "joined" {
 			return Error("review_sealed")
 		}
-		if state.State != "active" && !(Central(actor) && e.Mode == "shadow" && state.State == "shadow") {
+		if state.State != "active" && !(Central(actor) && CentralReviewerP1UsesSubjectPhase && state.State == "shadow") {
 			return fail()
 		}
 		if !Central(actor) && (Text(subject.Payload, "host_client_id") != e.Policy.Host(actor) || Text(p, "host_client_id") != e.Policy.Host(actor)) {

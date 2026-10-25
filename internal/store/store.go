@@ -1040,9 +1040,6 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := migrateTaskComments(ctx, tx); err != nil {
 		return err
 	}
-	if err := migrateWrk(ctx, tx); err != nil {
-		return err
-	}
 	return tx.Commit(ctx)
 }
 func validName(x string) bool        { return nameRE.MatchString(x) }
@@ -2080,7 +2077,7 @@ func (s *Store) CreateTask(ctx context.Context, x Task) (Task, error) {
 		return x, err
 	}
 
-	if x.Refs.JobID != "" {
+	if x.Refs.JobID != "" && wrkTablesExist(ctx, tx) {
 		if _, err = tx.Exec(ctx, `INSERT INTO wrk_job_locks(job_id) VALUES($1) ON CONFLICT DO NOTHING`, x.Refs.JobID); err != nil {
 			return x, err
 		}
@@ -2332,7 +2329,12 @@ func (s *Store) NextTask(ctx context.Context, lane, by, jobID, noJob string) (Ta
 	}
 
 	var id int64
-	err = tx.QueryRow(ctx, `SELECT id FROM tasks WHERE lane=$1 AND state='backlog' AND NOT EXISTS(SELECT 1 FROM wrk_records wr WHERE wr.kind='claim' AND wr.payload->>'task_id'=tasks.id::text) ORDER BY priority DESC,created_at ASC,id ASC FOR UPDATE SKIP LOCKED LIMIT 1`, lane).Scan(&id)
+	selection := `SELECT id FROM tasks WHERE lane=$1 AND state='backlog'`
+	if wrkTablesExist(ctx, tx) {
+		selection += ` AND NOT EXISTS(SELECT 1 FROM wrk_records wr WHERE wr.kind='claim' AND wr.payload->>'task_id'=tasks.id::text AND EXISTS(SELECT 1 FROM wrk_records a WHERE a.job_id=wr.job_id AND a.kind='activate'))`
+	}
+	selection += ` ORDER BY priority DESC,created_at ASC,id ASC FOR UPDATE SKIP LOCKED LIMIT 1`
+	err = tx.QueryRow(ctx, selection, lane).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Task{}, ErrQueueEmpty
 	}
@@ -2980,7 +2982,7 @@ func (s *Store) AppendRelayEvent(ctx context.Context, x RelayEvent) (RelayEvent,
 		return x, false, err
 	}
 	defer tx.Rollback(ctx)
-	if x.JobID != "" {
+	if x.JobID != "" && wrkTablesExist(ctx, tx) {
 		if _, err = tx.Exec(ctx, `INSERT INTO wrk_job_locks(job_id) VALUES($1) ON CONFLICT DO NOTHING`, x.JobID); err != nil {
 			return x, false, err
 		}

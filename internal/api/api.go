@@ -345,6 +345,10 @@ func (s Service) LinearOutboxStatus(ctx context.Context) (store.LinearOutboxStat
 	return s.Store.GetLinearOutboxStatus(ctx)
 }
 func (s Service) AppendRelayEvent(ctx context.Context, x store.RelayEvent) (store.RelayEvent, bool, error) {
+	if err := s.Store.WrkFence(ctx, wrkrecords.LegacyIntent{JobID: x.JobID, Kind: x.Kind, Head: x.Head, Digest: x.ReportSHA, Receipt: x.WrkReceipt}); err != nil {
+		return store.RelayEvent{}, false, err
+	}
+
 	return s.Store.AppendRelayEvent(ctx, x)
 }
 func (s Service) MarkRelayEventDelivered(ctx context.Context, id int64, machine, pane string) (store.RelayEvent, error) {

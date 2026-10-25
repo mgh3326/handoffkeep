@@ -47,3 +47,20 @@ func migrateWrk(ctx context.Context, tx pgx.Tx) error {
 	}
 	return nil
 }
+
+// MigrateWrk is an explicit owner-only provisioning step. It is never called
+// by the legacy-only default startup path.
+func (s *Store) MigrateWrk(ctx context.Context) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(824180045)`); err != nil {
+		return err
+	}
+	if err = migrateWrk(ctx, tx); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}

@@ -10,21 +10,25 @@ type LegacyIntent struct {
 }
 
 func (s Snapshot) ProtectedTask(id int64) bool {
-	for _, rs := range s.Jobs {
+	for job, rs := range s.Jobs {
+		if ShadowSubjectProtectionStartsAtActivate && s.Activation(job) == 0 {
+			continue
+		}
 		for _, r := range rs {
-			if r.Kind == "claim" && Num(r.Payload, "task_id") == id {
+			if r.Kind == "claim" && !Review(&r) && Num(r.Payload, "task_id") == id {
 				return true
 			}
 		}
 	}
 	return false
 }
+
 func (s Snapshot) CheckLegacy(p *Policy, actor string, in LegacyIntent) error {
 	protected := in.TaskID > 0 && s.ProtectedTask(in.TaskID)
 	if in.JobID != "" && in.Kind == "" && s.Claim(in.JobID) != nil {
 		protected = true
 	}
-	terminal := in.Kind == "job.completed" || in.Kind == "job.joined" || in.Kind == "job.revoked" || in.Kind == "job.lost" || in.Kind == "end"
+	terminal := in.Kind == "job.completed" || in.Kind == "job.joined" || in.Kind == "job.revoked" || in.Kind == "job.reaped" || in.Kind == "job.handed_off" || in.Kind == "job.takeover" || in.Kind == "end"
 	if terminal && s.ReceiptRequired(in.JobID) {
 		protected = true
 	}

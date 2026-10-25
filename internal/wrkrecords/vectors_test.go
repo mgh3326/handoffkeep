@@ -135,9 +135,8 @@ type divergence struct {
 }
 
 var pack_divergence = map[string]divergence{
-	"head-repeat-binding.json/exact-b-open-verdict-null-tester-fails-assignment": {"design_result", "4,5", "round_before_identity", Object{"http_status": 409, "error": "round_has_verdict"}},
+	"head-repeat-binding.json/exact-b-open-verdict-null-tester-fails-assignment": {"design_result", "4,5; director-1 S1 esc-2 A", "round_before_identity", Object{"http_status": 409, "error": "duplicate_content"}},
 	"failure-abuse.json/replay-old-verdict-identical-200":                        {"design_result", "4,5", "request_digest", Object{"http_status": 409, "error": "idempotency_conflict"}},
-	"failure-abuse.json/replay-old-verdict-fresh-key-same-path":                  {"design_result", "4", "round_before_identity", Object{"http_status": 409, "error": "round_has_verdict"}},
 	"failure-abuse.json/two-testers-one-head-hk1901":                             {"design_result", "4,5", "grant_locator", Object{"http_status": 409, "error": "grant_invalid"}},
 	"failure-abuse.json/grant-consumer-race-void-reuse":                          {"design_result", "4,5", "cas", Object{"http_status": 409, "error": "sequence_conflict"}},
 	"failure-abuse.json/committed-write-lost-reply-replay-repairs":               {"design_result", "4,5", "request_digest", Object{"http_status": 409, "error": "idempotency_conflict"}},
@@ -146,7 +145,6 @@ var pack_divergence = map[string]divergence{
 	"r4-scoped-claim.json/scoped-mint-foreign-job-host-mismatch":                 {"design_result", "2,5", "missing_target", Object{"http_status": 404, "error": "not_found"}},
 	"r4-scoped-claim.json/scoped-mint-reused-job-id-claim-conflict":              {"design_result", "4,5", "cas", Object{"http_status": 409, "error": "sequence_conflict"}},
 	"transition.json/replay-verdict-after-end-200":                               {"design_result", "4,5", "request_digest", Object{"http_status": 409, "error": "idempotency_conflict"}},
-	"transition.json/same-bytes-fresh-path-duplicate-content":                    {"design_result", "2,4,5", "parsed_head", Object{"http_status": 409, "error": "head_mismatch"}},
 	"failure-abuse.json/planted-legacy-events-import-untrusted":                  {"fixture_invalid", "5", "seal_floor", nil},
 	"migration.json/post-activate-verdict-old-round-not-open":                    {"fixture_invalid", "5", "seal_floor", nil},
 	"migration.json/post-activate-void-old-round-not-open":                       {"fixture_invalid", "5", "seal_floor", nil},

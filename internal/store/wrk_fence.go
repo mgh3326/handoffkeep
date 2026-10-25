@@ -42,3 +42,10 @@ func (s *Store) WrkFence(ctx context.Context, in wrkrecords.LegacyIntent) error 
 func (s *Store) wrkTaskFenceTx(ctx context.Context, tx pgx.Tx, x Task, to string, binding bool) error {
 	return s.wrkFence(ctx, tx, wrkrecords.LegacyIntent{TaskID: x.ID, CurrentJob: x.Refs.JobID, To: to, Binding: binding})
 }
+
+func wrkTablesExist(ctx context.Context, q interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}) bool {
+	var exists bool
+	return q.QueryRow(ctx, `SELECT to_regclass('wrk_records') IS NOT NULL`).Scan(&exists) == nil && exists
+}

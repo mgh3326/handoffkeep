@@ -23,33 +23,36 @@ func (s *Store) ConfigureWrk(ctx context.Context, mode string, policy *wrkrecord
 	if mode != "off" && mode != "shadow" && mode != "enforce" {
 		return wrkrecords.Error("wrk_unavailable")
 	}
-	if mode != "off" {
-		if policy == nil || !wrkrecords.UUIDRE.MatchString(generation) {
-			return wrkrecords.Error("wrk_unavailable")
-		}
-		tx, e := s.pool.Begin(ctx)
-		if e != nil {
-			return e
-		}
-		defer tx.Rollback(ctx)
-		if _, e = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); e != nil {
-			return e
-		}
-		var safe bool
-		e = tx.QueryRow(ctx, `SELECT bool_and(pg_get_userbyid(c.relowner)<>current_user AND NOT has_table_privilege(current_user,c.oid,'UPDATE') AND NOT has_table_privilege(current_user,c.oid,'DELETE')) FROM pg_class c WHERE c.oid IN ('wrk_records'::regclass,'wrk_contents'::regclass)`).Scan(&safe)
-		if e != nil {
-			return e
-		}
-		if !safe {
-			return wrkrecords.Error("wrk_unavailable")
-		}
-		if e = tx.Commit(ctx); e != nil {
-			return e
-		}
+	installed, err := s.validateWrkRuntime(ctx)
+	if err != nil {
+		return err
+	}
+	if mode != "off" && (!installed || policy == nil || !wrkrecords.UUIDRE.MatchString(generation)) {
+		return wrkrecords.Error("wrk_unavailable")
 	}
 	s.wrk.Store(&wrkrecords.Engine{Policy: policy, Mode: mode, Recovery: recovery, Generation: generation})
 	return nil
 }
+func (s *Store) validateWrkRuntime(ctx context.Context) (bool, error) {
+	var count int
+	err := s.pool.QueryRow(ctx, `SELECT count(*) FROM unnest(ARRAY[to_regclass('wrk_records'),to_regclass('wrk_contents'),to_regclass('wrk_attempts'),to_regclass('wrk_job_locks')]) x WHERE x IS NOT NULL`).Scan(&count)
+	if err != nil {
+		return false, wrkrecords.Error("wrk_unavailable")
+	}
+	if count == 0 {
+		return false, nil
+	}
+	if count != 4 {
+		return true, wrkrecords.Error("wrk_unavailable")
+	}
+	var safe bool
+	err = s.pool.QueryRow(ctx, `SELECT bool_and(NOT r.rolsuper AND NOT r.rolbypassrls AND NOT pg_has_role(current_user,c.relowner,'MEMBER') AND NOT has_table_privilege(current_user,c.oid,'UPDATE') AND NOT has_table_privilege(current_user,c.oid,'DELETE') AND NOT has_table_privilege(current_user,c.oid,'TRUNCATE')) FROM pg_class c CROSS JOIN pg_roles r WHERE r.rolname=current_user AND c.oid IN ('wrk_records'::regclass,'wrk_contents'::regclass,'wrk_attempts'::regclass)`).Scan(&safe)
+	if err != nil || !safe {
+		return true, wrkrecords.Error("wrk_unavailable")
+	}
+	return true, nil
+}
+
 func (s *Store) WrkEngine() wrkrecords.Engine {
 	e := s.wrk.Load()
 	if e == nil {
@@ -59,11 +62,19 @@ func (s *Store) WrkEngine() wrkrecords.Engine {
 }
 
 type wrkQuerier interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
 	Query(context.Context, string, ...any) (pgx.Rows, error)
 }
 
 func loadWrkSnapshot(ctx context.Context, q wrkQuerier) (wrkrecords.Snapshot, error) {
 	s := wrkrecords.Snapshot{Jobs: map[string][]wrkrecords.Record{}, Contents: map[string]map[int64][]byte{}}
+	var installed bool
+	if e := q.QueryRow(ctx, `SELECT to_regclass('wrk_records') IS NOT NULL`).Scan(&installed); e != nil {
+		return s, e
+	}
+	if !installed {
+		return s, nil
+	}
 	rows, e := q.Query(ctx, `SELECT job_id,seq,record_id::text,store_generation::text,kind,claim_seq,actor_client_id,idempotency_key::text,request_sha256,payload,imported,source,received_at,previous_hash,record_hash FROM wrk_records ORDER BY job_id,seq`)
 	if e != nil {
 		return s, e
@@ -382,4 +393,56 @@ func (s *Store) HasWrkEnrollment(ctx context.Context) bool {
 	var yes bool
 	err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM wrk_records WHERE kind='activate' OR (kind='claim' AND payload->'review_of'<>'null'::jsonb))`).Scan(&yes)
 	return err == nil && yes
+}
+
+// OpenServer enforces the off-mode startup ruling and dr-1925-1. Both URLs
+// are passed as credentials only; errors never contain either value.
+func OpenServer(ctx context.Context, runtimeURL, migrationURL, mode string, policy *wrkrecords.Policy, generation string, recovery bool) (*Store, error) {
+	enabled := mode != "" && mode != "off"
+	if enabled && wrkrecords.DeskOwnedMigrationCredential && (migrationURL == "" || migrationURL == runtimeURL) {
+		return nil, wrkrecords.Error("wrk_unavailable")
+	}
+	if enabled && (policy == nil || !wrkrecords.UUIDRE.MatchString(generation)) {
+		return nil, wrkrecords.Error("wrk_unavailable")
+	}
+	if migrationURL != "" {
+		if migrationURL == runtimeURL {
+			return nil, wrkrecords.Error("wrk_unavailable")
+		}
+		owner, e := Open(ctx, migrationURL)
+		if e != nil {
+			return nil, wrkrecords.Error("wrk_unavailable")
+		}
+		e = owner.MigrateWrk(ctx)
+		owner.Close()
+		if e != nil {
+			return nil, wrkrecords.Error("wrk_unavailable")
+		}
+	}
+	// Inspect without DDL. An enrolled/runtime schema must never execute owner
+	// migrations with the runtime credential, even when the API has been disabled.
+	probe, e := pgxpool.New(ctx, runtimeURL)
+	if e != nil {
+		return nil, wrkrecords.Error("wrk_unavailable")
+	}
+	var exists bool
+	e = probe.QueryRow(ctx, `SELECT to_regclass('wrk_records') IS NOT NULL OR to_regclass('wrk_contents') IS NOT NULL OR to_regclass('wrk_attempts') IS NOT NULL OR to_regclass('wrk_job_locks') IS NOT NULL`).Scan(&exists)
+	probe.Close()
+	if e != nil {
+		return nil, wrkrecords.Error("wrk_unavailable")
+	}
+	var s *Store
+	if exists {
+		s, e = OpenRuntime(ctx, runtimeURL)
+	} else {
+		s, e = Open(ctx, runtimeURL)
+	}
+	if e != nil {
+		return nil, wrkrecords.Error("wrk_unavailable")
+	}
+	if e = s.ConfigureWrk(ctx, mode, policy, generation, recovery); e != nil {
+		s.Close()
+		return nil, e
+	}
+	return s, nil
 }

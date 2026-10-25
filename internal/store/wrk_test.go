@@ -46,10 +46,13 @@ func wrkCIStore(t *testing.T) *Store {
 	if e != nil {
 		t.Fatal(e)
 	}
+	if e = owner.MigrateWrk(ctx); e != nil {
+		t.Fatal(e)
+	}
 	if _, e = admin.Exec(ctx, `CREATE ROLE `+role+` NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT`); e != nil {
 		t.Fatal(e)
 	}
-	for _, sql := range []string{`GRANT USAGE ON SCHEMA ` + schema + ` TO ` + role, `GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA ` + schema + ` TO ` + role, `GRANT USAGE,SELECT ON ALL SEQUENCES IN SCHEMA ` + schema + ` TO ` + role, `REVOKE UPDATE,DELETE ON ` + schema + `.wrk_records,` + schema + `.wrk_contents FROM ` + role} {
+	for _, sql := range []string{`GRANT USAGE ON SCHEMA ` + schema + ` TO ` + role, `GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA ` + schema + ` TO ` + role, `GRANT USAGE,SELECT ON ALL SEQUENCES IN SCHEMA ` + schema + ` TO ` + role, `REVOKE UPDATE,DELETE,TRUNCATE ON ` + schema + `.wrk_records,` + schema + `.wrk_contents,` + schema + `.wrk_attempts FROM ` + role} {
 		if _, e = admin.Exec(ctx, sql); e != nil {
 			t.Fatal(e)
 		}
@@ -232,6 +235,76 @@ func TestWrkCrossJobOrderEndRace(t *testing.T) {
 	for _, e := range errs {
 		if e != nil {
 			t.Fatal(e)
+		}
+	}
+}
+
+func TestWrkFourStartupCases(t *testing.T) {
+	// Case 1: default off on a fresh legacy schema performs no O3 DDL.
+	s := wrkCIStore(t)
+	runtimeURL := s.pool.Config().ConnString()
+	u, e := url.Parse(runtimeURL)
+	if e != nil {
+		t.Fatal(e)
+	}
+	q := u.Query()
+	q.Del("role")
+	ownerSchema := strings.Split(q.Get("search_path"), ",")[0]
+	q.Set("search_path", ownerSchema+"_legacy,public")
+	u.RawQuery = q.Encode()
+	ownerURL := u.String()
+	admin, e := pgxpool.New(t.Context(), runtimeURL)
+	if e != nil {
+		t.Fatal(e)
+	}
+	admin.Close()
+	// Use the existing owner connection string, not the runtime role, for DDL.
+	original := q.Get("search_path")
+	q.Set("search_path", ownerSchema+",public")
+	u.RawQuery = q.Encode()
+	provision, e := pgxpool.New(t.Context(), u.String())
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer provision.Close()
+	legacySchema := strings.Split(original, ",")[0]
+	if _, e = provision.Exec(t.Context(), `CREATE SCHEMA `+legacySchema); e != nil {
+		t.Fatal(e)
+	}
+	defer provision.Exec(context.Background(), `DROP SCHEMA `+legacySchema+` CASCADE`)
+	off, e := OpenServer(t.Context(), ownerURL, "", "off", nil, "", false)
+	if e != nil {
+		t.Fatal(e)
+	}
+	var count int
+	if e = off.pool.QueryRow(t.Context(), `SELECT count(*) FROM pg_class WHERE relnamespace=current_schema()::regnamespace AND relname LIKE 'wrk_%'`).Scan(&count); e != nil || count != 0 {
+		t.Fatalf("off created O3 tables: count=%d err=%v", count, e)
+	}
+	off.Close()
+	// Case 2: explicit distinct migration path provisions the O3 schema.
+	q.Set("search_path", ownerSchema+",public")
+	u.RawQuery = q.Encode()
+	migrateURL := u.String()
+	enabled, e := OpenServer(t.Context(), runtimeURL, migrateURL, "enforce", s.WrkEngine().Policy, s.WrkEngine().Generation, false)
+	if e != nil {
+		t.Fatal(e)
+	}
+	enabled.Close()
+	// Case 3: installed tables enforce role safety even while API off.
+	off, e = OpenServer(t.Context(), runtimeURL, "", "off", nil, "", false)
+	if e != nil {
+		t.Fatal(e)
+	}
+	off.Close()
+	if bad, e := OpenServer(t.Context(), migrateURL, "", "off", nil, "", false); e == nil {
+		bad.Close()
+		t.Fatal("off accepted migration owner as runtime")
+	}
+	// Case 4: enabled startup never falls back to a single URL or boot UUID.
+	for _, setting := range []struct{ migration, generation string }{{"", s.WrkEngine().Generation}, {runtimeURL, s.WrkEngine().Generation}, {migrateURL, ""}} {
+		if bad, e := OpenServer(t.Context(), runtimeURL, setting.migration, "enforce", s.WrkEngine().Policy, setting.generation, false); e == nil {
+			bad.Close()
+			t.Fatal("enabled startup accepted missing distinct migration path/generation")
 		}
 	}
 }

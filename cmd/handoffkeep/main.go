@@ -1810,13 +1810,16 @@ func serve(args []string, errout io.Writer) error {
 		return errors.New("HANDOFFKEEP_DB_URL and HANDOFFKEEP_AUTH_FILE are required")
 	}
 	ctx := context.Background()
-	var st *store.Store
+	mode := os.Getenv("WRK_RECORDS_API")
+	var policy *wrkrecords.Policy
 	var e error
-	if os.Getenv("WRK_RECORDS_API") != "" {
-		st, e = store.OpenRuntime(ctx, dbURL)
-	} else {
-		st, e = store.Open(ctx, dbURL)
+	if mode != "" && mode != "off" {
+		policy, e = wrkrecords.LoadPolicy(os.Getenv("WRK_RECORDS_POLICY_FILE"))
+		if e != nil {
+			return e
+		}
 	}
+	st, e := store.OpenServer(ctx, dbURL, os.Getenv("HANDOFFKEEP_MIGRATE_DB_URL"), mode, policy, os.Getenv("WRK_RECORDS_STORE_GENERATION"), os.Getenv("WRK_RECORDS_RECOVERY_REQUIRED") == "true")
 	if e != nil {
 		return e
 	}
@@ -1826,17 +1829,6 @@ func serve(args []string, errout io.Writer) error {
 			st.Close()
 		}
 	}()
-	mode := os.Getenv("WRK_RECORDS_API")
-	var policy *wrkrecords.Policy
-	if mode != "" && mode != "off" {
-		policy, e = wrkrecords.LoadPolicy(os.Getenv("WRK_RECORDS_POLICY_FILE"))
-		if e != nil {
-			return e
-		}
-	}
-	if e = st.ConfigureWrk(ctx, mode, policy, os.Getenv("WRK_RECORDS_STORE_GENERATION"), os.Getenv("WRK_RECORDS_RECOVERY_REQUIRED") == "true"); e != nil {
-		return e
-	}
 	tokens, e := api.LoadTokens(auth)
 	if e != nil {
 		return e
