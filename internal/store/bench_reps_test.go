@@ -56,6 +56,54 @@ func TestSameBenchRepInput(t *testing.T) {
 	if sameBenchRepInput(base, b) {
 		t.Fatal("recorded_at +1us treated as identical")
 	}
+	// Every compared field, one pair differing only in that field. The table
+	// length is pinned to the compared-field count named above sameBenchRepInput
+	// (15: profile, recorded_at, 13 pointer fields).
+	type fieldCase struct {
+		name string
+		set  func(*BenchRep)
+		nilp func(*BenchRep) // nil for non-pointer fields
+	}
+	fields := []fieldCase{
+		{"profile", func(r *BenchRep) { r.Profile = "other" }, nil},
+		{"recorded_at", func(r *BenchRep) { r.RecordedAt = r.RecordedAt.Add(time.Microsecond) }, nil},
+		{"model_id", func(r *BenchRep) { r.ModelID = str("x") }, func(r *BenchRep) { r.ModelID = nil }},
+		{"task_ref", func(r *BenchRep) { r.TaskRef = str("x") }, func(r *BenchRep) { r.TaskRef = nil }},
+		{"tier", func(r *BenchRep) { r.Tier = str("T3") }, func(r *BenchRep) { r.Tier = nil }},
+		{"role", func(r *BenchRep) { r.Role = str("tester") }, func(r *BenchRep) { r.Role = nil }},
+		{"rounds", func(r *BenchRep) { r.Rounds = num(2) }, func(r *BenchRep) { r.Rounds = nil }},
+		{"blockers_found", func(r *BenchRep) { r.BlockersFound = num(1) }, func(r *BenchRep) { r.BlockersFound = nil }},
+		{"completed", func(r *BenchRep) { r.Completed = num(0) }, func(r *BenchRep) { r.Completed = nil }},
+		{"input_tokens", func(r *BenchRep) { r.InputTokens = big(11) }, func(r *BenchRep) { r.InputTokens = nil }},
+		{"output_tokens", func(r *BenchRep) { r.OutputTokens = big(21) }, func(r *BenchRep) { r.OutputTokens = nil }},
+		{"notes", func(r *BenchRep) { r.Notes = str("other") }, func(r *BenchRep) { r.Notes = nil }},
+		{"effort", func(r *BenchRep) { r.Effort = str("low") }, func(r *BenchRep) { r.Effort = nil }},
+		{"grade", func(r *BenchRep) { r.Grade = str("B") }, func(r *BenchRep) { r.Grade = nil }},
+		{"table_grade", func(r *BenchRep) { r.TableGrade = str("B") }, func(r *BenchRep) { r.TableGrade = nil }},
+	}
+	if len(fields) != 15 {
+		t.Fatalf("field table has %d rows want 15 compared fields", len(fields))
+	}
+	for _, f := range fields {
+		b := base
+		f.set(&b)
+		if sameBenchRepInput(base, b) || sameBenchRepInput(b, base) {
+			t.Errorf("%s differing treated as identical", f.name)
+		}
+		if f.nilp == nil {
+			continue
+		}
+		n := base
+		f.nilp(&n)
+		if sameBenchRepInput(base, n) || sameBenchRepInput(n, base) {
+			t.Errorf("%s nil vs set treated as identical", f.name)
+		}
+		m := base
+		f.nilp(&m)
+		if !sameBenchRepInput(n, m) {
+			t.Errorf("%s nil vs nil treated as differing", f.name)
+		}
+	}
 	// nil vs set differs; nil vs nil does not.
 	b = base
 	b.Notes = nil
