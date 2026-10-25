@@ -436,6 +436,14 @@ against itself — schema validity, internal ref resolution, per-vector
 request/record conformance, error-code/exit-map consistency, manifest
 hashes, and per-table case counts. See `testdata/o3/README.md`.
 
+## O3 wrk journal
+
+`/v1/wrk` and `handoffkeep wrk` are the server authority for wrk claims,
+review rounds, verdicts, grants and joins (hk 1873 S1). The namespace is off
+by default (`WRK_RECORDS_API=off`); flags, startup rules, the policy file and
+the CLI exit map are in `docs/o3-wrk.md`, with an example policy (client ids
+only) in `docs/o3-policy.example.json`.
+
 ## Container image
 
 
