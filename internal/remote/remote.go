@@ -1294,3 +1294,74 @@ func (c Client) ResolveDecision(ctx context.Context, kind string, id int64, by, 
 	}
 	return out.Event, err
 }
+
+// WrkResponse is one raw /v1/wrk reply. The wrk CLI validates it against the
+// §5 contract itself; nothing here interprets the body.
+type WrkResponse struct {
+	Status      int
+	ContentType string
+	Body        []byte
+	Redirect    bool
+}
+
+// WrkMaxResponseBytes bounds a /v1/wrk reply (a full records page plus
+// headroom).
+const WrkMaxResponseBytes = 16 << 20
+
+// Wrk sends one /v1/wrk request through the installed configuration. It
+// never follows a redirect, not even to the same host (design §6b: S1
+// overrides the shared redirect policy for this namespace and never resends
+// evidence); a 3xx comes back as Redirect with its body discarded. The
+// error, when any, carries no URL, header or body text.
+func (c Client) Wrk(ctx context.Context, method, path, idempotencyKey string, body []byte) (WrkResponse, error) {
+	var reader io.Reader
+	if body != nil {
+		reader = bytes.NewReader(body)
+	}
+	r, err := c.newRequest(ctx, method, path, reader)
+	if err != nil {
+		return WrkResponse{}, errWrkTransport
+	}
+	if body != nil {
+		r.Header.Set("Content-Type", "application/json")
+	}
+	if idempotencyKey != "" {
+		r.Header.Set("Idempotency-Key", idempotencyKey)
+	}
+	hc := c.httpClientNoFollow()
+	resp, err := hc.Do(r)
+	if err != nil {
+		// A failed dial never reached the server; anything later may have
+		// been received and committed.
+		var op *net.OpError
+		if errors.As(err, &op) && op.Op == "dial" {
+			return WrkResponse{}, errWrkTransport
+		}
+		return WrkResponse{}, ErrWrkIndeterminate
+	}
+	defer resp.Body.Close()
+	out := WrkResponse{Status: resp.StatusCode, ContentType: resp.Header.Get("Content-Type")}
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		out.Redirect = true
+		return out, nil
+	}
+	b, err := io.ReadAll(io.LimitReader(resp.Body, WrkMaxResponseBytes+1))
+	if err != nil {
+		return WrkResponse{}, ErrWrkIndeterminate
+	}
+	if len(b) > WrkMaxResponseBytes {
+		out.Body = nil
+		out.Status = 0
+		return out, nil
+	}
+	out.Body = b
+	return out, nil
+}
+
+var errWrkTransport = errors.New("wrk transport unavailable")
+
+// ErrWrkIndeterminate marks a reply lost after the request was sent.
+var ErrWrkIndeterminate = errors.New("wrk transport indeterminate")
+
+// IsWrkTransportError reports a request that failed before any reply.
+func IsWrkTransportError(err error) bool { return errors.Is(err, errWrkTransport) }

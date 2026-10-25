@@ -31,11 +31,17 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/remote"
 	"github.com/mgh3326/handoffkeep/internal/store"
 	"github.com/mgh3326/handoffkeep/internal/ui"
+	"github.com/mgh3326/handoffkeep/internal/wrk"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 func main() {
 	if err := run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
+		// The wrk namespace has already written its one-line stderr.
+		var we wrkExit
+		if errors.As(err, &we) {
+			os.Exit(we.code)
+		}
 		fmt.Fprintln(os.Stderr, "handoffkeep:", err)
 		var exit exitCodeError
 		if errors.As(err, &exit) {
@@ -46,7 +52,7 @@ func main() {
 }
 func run(args []string, out, errout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: handoffkeep serve|mcp|ctx|memory|doc|attach|r2usage|tasks|decisions|linear|fleet-metrics|bench|version")
+		return errors.New("usage: handoffkeep serve|mcp|ctx|memory|doc|attach|r2usage|tasks|decisions|linear|fleet-metrics|bench|wrk|version")
 	}
 	switch args[0] {
 	case "serve":
@@ -73,10 +79,12 @@ func run(args []string, out, errout io.Writer) error {
 		return fleetMetricsCmd(args[1:], out)
 	case "bench":
 		return benchCmd(args[1:], out)
+	case "wrk":
+		return wrkCmd(args[1:], os.Stdin, out, errout)
 	case "version", "--version":
 		return versionCmd(args[1:], out)
 	default:
-		return errors.New("usage: handoffkeep serve|mcp|ctx|memory|doc|attach|r2usage|tasks|decisions|linear|fleet-metrics|bench|version")
+		return errors.New("usage: handoffkeep serve|mcp|ctx|memory|doc|attach|r2usage|tasks|decisions|linear|fleet-metrics|bench|wrk|version")
 	}
 }
 
@@ -1801,10 +1809,22 @@ func serve(args []string, errout io.Writer) error {
 	if dbURL == "" || auth == "" {
 		return errors.New("HANDOFFKEEP_DB_URL and HANDOFFKEEP_AUTH_FILE are required")
 	}
-	ctx := context.Background()
-	st, e := store.Open(ctx, dbURL)
+	wrkMode, e := api.ParseWrkMode(os.Getenv("WRK_RECORDS_API"))
 	if e != nil {
 		return e
+	}
+	ctx := context.Background()
+	st, e := store.OpenWithOwner(ctx, dbURL, os.Getenv("HANDOFFKEEP_DB_MIGRATE_URL"))
+	if e != nil {
+		return e
+	}
+	// Once the O3 journal exists, no mode may run on a runtime role that
+	// could rewrite it (director-1 off-mode startup ruling, case 3).
+	if st.HasWrkTables() {
+		if e := st.CheckWrkRuntimeRole(ctx); e != nil {
+			st.Close()
+			return e
+		}
 	}
 	closeStore := true
 	defer func() {
@@ -1816,11 +1836,19 @@ func serve(args []string, errout io.Writer) error {
 	if e != nil {
 		return e
 	}
+	// Ambiguous attribution never starts a server (design §3 L85).
+	if e := api.CheckTokensDistinct(auth); e != nil {
+		return e
+	}
 	am, e := attachments.NewFromEnv(st)
 	if e != nil {
 		return e
 	}
 	svc := api.Service{Store: st, Attachments: am}
+	wrkCfg, e := wrkFromEnv(ctx, wrkMode, st)
+	if e != nil {
+		return e
+	}
 	workers, e := configureLinearWorkers(*linearSync, st, *linearAPIURL, *linearTeamID, func() string {
 		return strings.TrimSpace(os.Getenv("HK_LINEAR_API_KEY"))
 	})
@@ -1833,8 +1861,9 @@ func serve(args []string, errout io.Writer) error {
 		return e
 	}
 	mux := http.NewServeMux()
+	apiHandler := api.Server{Service: svc, Tokens: tokens, UI: uiHandler, Wrk: wrkCfg}.Handler()
 	mux.Handle("/mcp", hkmcp.HTTPHandler(svc, tokens))
-	mux.Handle("/", api.Server{Service: svc, Tokens: tokens, UI: uiHandler}.Handler())
+	mux.Handle("/", apiHandler)
 	addresses := []string{*listen}
 	if *tail != "" {
 		addresses = append(addresses, *tail)
@@ -1849,12 +1878,60 @@ func serve(args []string, errout io.Writer) error {
 			return err
 		}
 		bindings = append(bindings, serverBinding{
-			server:   &http.Server{Addr: address, Handler: mux},
+			server:   &http.Server{Addr: address, Handler: wrkFirst(apiHandler, mux)},
 			listener: listener,
 		})
 	}
 	closeStore = false
 	return runServer(ctx, serveOptions{bindings: bindings, workers: workers, store: st})
+}
+
+// wrkFirst sends /v1/wrk requests straight to the API handler: the outer
+// ServeMux would answer a non-canonical path with a redirect, and the O3
+// namespace never emits a Location.
+func wrkFirst(apiHandler, mux http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if api.IsWrkPath(r.URL.Path) {
+			apiHandler.ServeHTTP(w, r)
+			return
+		}
+		mux.ServeHTTP(w, r)
+	})
+}
+
+// wrkFromEnv builds the /v1/wrk configuration (design §7 flags). With
+// WRK_RECORDS_API off (the default) nothing else is read and the server
+// behaves as before. An enabled API refuses to start on a missing or
+// invalid policy, ambiguous auth attribution, a missing store generation or
+// a runtime database role that could rewrite the journal.
+func wrkFromEnv(ctx context.Context, mode api.WrkMode, st *store.Store) (*api.Wrk, error) {
+	recovery := false
+	switch os.Getenv("WRK_RECORDS_RECOVERY_REQUIRED") {
+	case "", "false":
+	case "true":
+		recovery = true
+	default:
+		return nil, errors.New("WRK_RECORDS_RECOVERY_REQUIRED must be true or false")
+	}
+	if mode == api.WrkOff {
+		return &api.Wrk{Mode: api.WrkOff, Recovery: recovery}, nil
+	}
+	policy, err := wrk.LoadPolicy(os.Getenv("HANDOFFKEEP_WRK_POLICY_FILE"))
+	if err != nil {
+		return nil, errors.New("WRK_RECORDS_API is enabled but HANDOFFKEEP_WRK_POLICY_FILE is missing or invalid")
+	}
+	if os.Getenv("HANDOFFKEEP_DB_MIGRATE_URL") == "" {
+		return nil, errors.New("WRK_RECORDS_API is enabled but HANDOFFKEEP_DB_MIGRATE_URL is unset: the journal owner and runtime roles must be distinct")
+	}
+	generation := os.Getenv("WRK_STORE_GENERATION")
+	if !wrk.ValidUUID(generation) {
+		return nil, errors.New("WRK_RECORDS_API is enabled but WRK_STORE_GENERATION is not a lowercase UUID")
+	}
+	if !st.HasWrkTables() {
+		return nil, errors.New("WRK_RECORDS_API is enabled but the O3 journal schema is missing")
+	}
+	engine := &wrk.Engine{Policy: policy, Generation: generation, Enforce: mode == api.WrkEnforce}
+	return &api.Wrk{Mode: mode, Recovery: recovery, Policy: policy, Engine: engine, Backend: st.WrkJournal()}, nil
 }
 
 // uiFromEnv intentionally treats incomplete Cloudflare Access configuration as
