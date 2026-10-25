@@ -1460,9 +1460,10 @@ func TestBenchRepsConflictLogged(t *testing.T) {
 	oldW, oldF := log.Writer(), log.Flags()
 	log.SetOutput(&buf)
 	log.SetFlags(0)
+	restoreLog := func() { log.SetOutput(oldW); log.SetFlags(oldF) }
+	t.Cleanup(restoreLog)
 	resp = putReps([]map[string]any{rep(587), a, b})
-	log.SetOutput(oldW)
-	log.SetFlags(oldF)
+	restoreLog()
 	body = benchJSON(t, resp)
 	if resp.StatusCode != http.StatusConflict || body["error"] != "bench_rep_conflict" {
 		t.Fatalf("conflict batch status=%d body=%v want=409", resp.StatusCode, body)
