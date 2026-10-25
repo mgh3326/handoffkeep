@@ -732,6 +732,11 @@ func (s *Store) resolveDecisionRequest(ctx context.Context, taskID int64, by str
 		}
 		return DecisionRequestResult{}, err
 	}
+	// Resuming a protected task needs the central principal and receipt
+	// the resolve route cannot carry: it is refused (design §5 fence table).
+	if err = s.wrkFenceState(ctx, tx, taskID, x.State, nil); err != nil {
+		return DecisionRequestResult{}, err
+	}
 	request := x.Refs.DecisionRequest
 	if request == nil || request.ID != in.RequestID {
 		return DecisionRequestResult{}, ErrDecisionRequestStale

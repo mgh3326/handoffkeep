@@ -459,11 +459,19 @@ type RelayEvent struct {
 	DeliveredAt    *time.Time `json:"delivered_at"`
 	DeliveredTo    string     `json:"delivered_to"`
 	Attempts       int        `json:"attempts"`
+	// WrkReceipt and ReportSHA256 are request-only: a legacy terminal relay
+	// for an O3 receipt_required job must name its canonical record (hk
+	// 1925 legacy fence). They are never stored.
+	WrkReceipt   *WrkReceipt `json:"wrk_receipt,omitempty"`
+	ReportSHA256 string      `json:"report_sha256,omitempty"`
 }
 
 type Store struct {
 	pool       *pgxpool.Pool
 	linearSync atomic.Bool
+	// wrk is true when the O3 journal tables exist. Without them every
+	// legacy fence has no enrolled record to act on and is skipped.
+	wrk bool
 }
 
 // Refs stores repeatable named references. Its decoder accepts legacy scalar
@@ -665,6 +673,10 @@ func Open(ctx context.Context, url string) (*Store, error) {
 	}
 	s := &Store{pool: p}
 	if err = s.migrate(ctx); err != nil {
+		p.Close()
+		return nil, err
+	}
+	if s.wrk, err = s.detectWrk(ctx); err != nil {
 		p.Close()
 		return nil, err
 	}
@@ -2072,6 +2084,10 @@ func (s *Store) CreateTask(ctx context.Context, x Task) (Task, error) {
 	if err = requireTaskProject(ctx, tx, x.Project); err != nil {
 		return x, err
 	}
+	// A legacy create cannot enroll or relink O3 authority.
+	if err = s.wrkFenceBinding(ctx, tx, 0, x.Refs.JobID); err != nil {
+		return x, err
+	}
 	if err = scanTask(tx.QueryRow(ctx, `INSERT INTO tasks(lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at,body_doc,project,area) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$12,$13,$14) RETURNING `+taskColumns, x.Lane, x.ParentLane, x.Title, x.Kind, x.State, x.Priority, string(refs), x.ClaimedBy, x.CreatedBy, x.CreatedAt, x.UpdatedAt, x.BodyDoc, x.Project, x.Area), &x); err != nil {
 		return x, err
 	}
@@ -2124,6 +2140,12 @@ func (s *Store) claimTaskTx(ctx context.Context, tx pgx.Tx, id int64, by, jobID,
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Task{}, ErrTaskConflict
 		}
+		return Task{}, err
+	}
+	// Protected bindings change only through the canonical claim
+	// transaction: every legacy claim of one is refused, including replay
+	// and no_job variants.
+	if err := s.wrkFenceBinding(ctx, tx, id, jobID); err != nil {
 		return Task{}, err
 	}
 	if x.State != "backlog" {
@@ -2228,6 +2250,9 @@ func (s *Store) RebindTaskJob(ctx context.Context, id int64, fromJob, toJob, by,
 		}
 		return Task{}, err
 	}
+	if err = s.wrkFenceBinding(ctx, tx, id, fromJob, toJob); err != nil {
+		return Task{}, err
+	}
 
 	if (x.State == "claimed" || x.State == "in_progress") && x.Refs.JobID == toJob && x.ClaimedBy == by {
 		var replay bool
@@ -2282,8 +2307,17 @@ func (s *Store) NextTask(ctx context.Context, lane, by, jobID, noJob string) (Ta
 		return Task{}, err
 	}
 	defer tx.Rollback(ctx)
+	// Naming an O3 job is an explicit attempt to bind a protected task.
+	if err = s.wrkFenceBinding(ctx, tx, 0, jobID); err != nil {
+		return Task{}, err
+	}
+	// Protected tasks are never handed out by the legacy queue.
 	var id int64
-	err = tx.QueryRow(ctx, `SELECT id FROM tasks WHERE lane=$1 AND state='backlog' ORDER BY priority DESC,created_at ASC,id ASC FOR UPDATE SKIP LOCKED LIMIT 1`, lane).Scan(&id)
+	if s.wrk {
+		err = tx.QueryRow(ctx, `SELECT id FROM tasks WHERE lane=$1 AND state='backlog' AND NOT EXISTS (SELECT 1 FROM wrk_records w WHERE w.kind='claim' AND (w.payload->>'task_id')::bigint=tasks.id AND (NOT $2 OR EXISTS(SELECT 1 FROM wrk_records a WHERE a.job_id=w.job_id AND a.kind='activate'))) ORDER BY priority DESC,created_at ASC,id ASC FOR UPDATE SKIP LOCKED LIMIT 1`, lane, WrkProtectAtActivate).Scan(&id)
+	} else {
+		err = tx.QueryRow(ctx, `SELECT id FROM tasks WHERE lane=$1 AND state='backlog' ORDER BY priority DESC,created_at ASC,id ASC FOR UPDATE SKIP LOCKED LIMIT 1`, lane).Scan(&id)
+	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Task{}, ErrQueueEmpty
 	}
@@ -2298,6 +2332,14 @@ func (s *Store) NextTask(ctx context.Context, lane, by, jobID, noJob string) (Ta
 }
 
 func (s *Store) TransitionTask(ctx context.Context, id int64, to, by, note string, refs *TaskRefs, noJob string) (Task, error) {
+	return s.TransitionTaskReceipt(ctx, id, to, by, note, refs, noJob, nil)
+}
+
+// TransitionTaskReceipt is TransitionTask carrying an optional canonical
+// O3 receipt. A protected task refuses every refs patch, and takes a
+// state-only change only from a central principal whose receipt names the
+// task's current bound subject (design §5 fence table).
+func (s *Store) TransitionTaskReceipt(ctx context.Context, id int64, to, by, note string, refs *TaskRefs, noJob string, receipt *WrkReceipt) (Task, error) {
 	noJob = taskReasonText(noJob)
 	if !taskStates[to] || !validText(by, 128) || by == "" || !validText(note, MaxBytes) || !validText(noJob, MaxBytes) || (refs != nil && !validTaskRefs(*refs)) {
 		return Task{}, errors.New("invalid task transition")
@@ -2331,6 +2373,14 @@ func (s *Store) TransitionTask(ctx context.Context, id int64, to, by, note strin
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Task{}, ErrTaskNotFound
 		}
+		return Task{}, err
+	}
+	if refs != nil {
+		if err = s.wrkFenceBinding(ctx, tx, id, refs.JobID); err != nil {
+			return Task{}, err
+		}
+	}
+	if err = s.wrkFenceState(ctx, tx, id, to, receipt); err != nil {
 		return Task{}, err
 	}
 	from := x.State
@@ -2472,6 +2522,9 @@ func (s *Store) RelaneTask(ctx context.Context, id int64, to, by, note string, a
 		}
 		return Task{}, false, err
 	}
+	if err = s.wrkFenceBinding(ctx, tx, id); err != nil {
+		return Task{}, false, err
+	}
 	if x.State == "merged" || x.State == "dropped" {
 		return Task{}, false, ErrTaskTerminal
 	}
@@ -2524,6 +2577,9 @@ func (s *Store) SetTaskProject(ctx context.Context, id int64, project, by, note 
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Task{}, false, ErrTaskNotFound
 		}
+		return Task{}, false, err
+	}
+	if err = s.wrkFenceBinding(ctx, tx, id); err != nil {
 		return Task{}, false, err
 	}
 	var known bool
@@ -2907,6 +2963,12 @@ func (s *Store) AppendRelayEvent(ctx context.Context, x RelayEvent) (RelayEvent,
 	// These fields are server-owned. Zero-value strings also normalize omitted
 	// request fields to the non-NULL defaults required by the idempotency key.
 	x.ID, x.ReceivedAt, x.DeliveredAt, x.DeliveredTo, x.Attempts = 0, time.Time{}, nil, "", 0
+	if x.ReportSHA256 != "" && !validWrkDigest(x.ReportSHA256) {
+		return x, false, errors.New("invalid relay event")
+	}
+	if _, terminal := wrkTerminalRelayKinds[x.Kind]; terminal && s.wrk {
+		return s.appendTerminalRelayEvent(ctx, x)
+	}
 	var created bool
 	query := `INSERT INTO relay_events(kind,job_id,epoch,owner_lane,machine,pane_id,report_path,report_last_line,question,pr,head,reason,event_id,text,event_time,received_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,now())`
 	if x.Kind == "lane.event" {
@@ -2919,6 +2981,48 @@ func (s *Store) AppendRelayEvent(ctx context.Context, x RelayEvent) (RelayEvent,
 		return x, false, err
 	}
 	return x, created, nil
+}
+
+// appendTerminalRelayEvent runs the O3 relay fence and the insert in one
+// transaction holding the job's journal lock (shared), so an activation or
+// canonical completion cannot interleave between the check and the insert.
+func (s *Store) appendTerminalRelayEvent(ctx context.Context, x RelayEvent) (RelayEvent, bool, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return x, false, err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SELECT job_id FROM wrk_job_locks WHERE job_id=$1 FOR SHARE`, x.JobID); err != nil {
+		return x, false, err
+	}
+	projection, err := s.wrkFenceRelay(ctx, tx, x)
+	if err != nil {
+		return x, false, err
+	}
+	receipt := x.WrkReceipt
+	if projection != nil {
+		projection.WrkReceipt = receipt
+		return *projection, false, tx.Commit(ctx)
+	}
+	var created bool
+	query := `INSERT INTO relay_events(kind,job_id,epoch,owner_lane,machine,pane_id,report_path,report_last_line,question,pr,head,reason,event_id,text,event_time,received_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,now()) ON CONFLICT (kind,job_id,epoch,report_path,reason) WHERE ` + relayJobConflictPredicate + ` DO UPDATE SET attempts=relay_events.attempts+1`
+	if err := scanRelayEventCreated(tx.QueryRow(ctx, query+` RETURNING `+relayEventColumns+`,(xmax=0) AS created`, x.Kind, x.JobID, x.Epoch, x.OwnerLane, x.Machine, x.PaneID, x.ReportPath, x.ReportLastLine, x.Question, x.PR, x.Head, x.Reason, x.EventID, x.Text, x.EventTime), &x, &created); err != nil {
+		return x, false, err
+	}
+	x.WrkReceipt = receipt
+	return x, created, tx.Commit(ctx)
+}
+
+func validWrkDigest(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for _, c := range s {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // MarkRelayEventDelivered records the first successful delivery. Subsequent

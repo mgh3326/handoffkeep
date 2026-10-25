@@ -365,12 +365,15 @@ type DispositionAnswerInput struct {
 
 // answerDispositionTx returns (task, skipReason, error). A non-empty skip
 // reason means nothing was written for this item.
-func answerDispositionTx(ctx context.Context, tx pgx.Tx, in DispositionAnswerInput, useRecommended bool) (Task, string, error) {
+func (s *Store) answerDispositionTx(ctx context.Context, tx pgx.Tx, in DispositionAnswerInput, useRecommended bool) (Task, string, error) {
 	var x Task
 	if err := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, in.ID), &x); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Task{}, "not_found", nil
 		}
+		return Task{}, "", err
+	}
+	if err := s.wrkFenceState(ctx, tx, in.ID, "claimed", nil); err != nil {
 		return Task{}, "", err
 	}
 	if x.Refs.Disposition == nil {
@@ -431,7 +434,7 @@ func (s *Store) AnswerDisposition(ctx context.Context, in DispositionAnswerInput
 		return Task{}, err
 	}
 	defer tx.Rollback(ctx)
-	x, skip, err := answerDispositionTx(ctx, tx, in, false)
+	x, skip, err := s.answerDispositionTx(ctx, tx, in, false)
 	if err != nil {
 		return Task{}, err
 	}
@@ -487,7 +490,7 @@ func (s *Store) AnswerDispositionBatch(ctx context.Context, refs []DispositionRe
 			}
 			return nil, nil, err
 		}
-		x, skip, err := answerDispositionTx(ctx, tx, DispositionAnswerInput{ID: ref.ID, Gen: ref.Gen, OperatorEmail: email, EventID: eventIDForLane(lane), BatchID: batchID}, true)
+		x, skip, err := s.answerDispositionTx(ctx, tx, DispositionAnswerInput{ID: ref.ID, Gen: ref.Gen, OperatorEmail: email, EventID: eventIDForLane(lane), BatchID: batchID}, true)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -520,6 +523,9 @@ func (s *Store) ApplyDisposition(ctx context.Context, id int64, by, note string)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Task{}, ErrTaskNotFound
 		}
+		return Task{}, err
+	}
+	if err = s.wrkFenceState(ctx, tx, id, "merged", nil); err != nil {
 		return Task{}, err
 	}
 	if x.Refs.Disposition == nil || x.Refs.Disposition.Answer == nil || x.State != "claimed" {
