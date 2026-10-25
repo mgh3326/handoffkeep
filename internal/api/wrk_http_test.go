@@ -173,3 +173,24 @@ func TestTokensDistinctAndDigestLookup(t *testing.T) {
 	}
 	_ = http.StatusOK
 }
+
+// Refused writes leave an attempt row with only the allowed metadata, the
+// unauthenticated ones with no client id (design §2 wrk_attempts).
+func TestWrkHTTPRefusedWritesAreAudited(t *testing.T) {
+	s := newScenario(t)
+	s.activeBuilder("job-au", "b2400-au", 2400, "T1")
+	before := len(s.mem.Attempts())
+	s.raw("", "POST", "/v1/wrk/jobs/job-au/records", map[string]string{"Content-Type": "application/json"}, []byte(`{"secret":"x"}`))
+	s.raw("desktop", "POST", "/v1/wrk/jobs/job-au/records", map[string]string{"Content-Type": "text/plain", "Idempotency-Key": s.key()}, []byte(`x`))
+	s.raw("desktop", "GET", "/v1/wrk/jobs/job-au", nil, []byte(`x`))
+	atts := s.mem.Attempts()[before:]
+	if len(atts) != 2 {
+		t.Fatalf("attempts %+v", atts)
+	}
+	if atts[0].ClientID != "" || atts[0].Code != "unauthorized" || atts[0].JobID != "job-au" {
+		t.Fatalf("unauthenticated attempt %+v", atts[0])
+	}
+	if atts[1].ClientID != "desktop" || atts[1].Code != "unsupported_media_type" {
+		t.Fatalf("media attempt %+v", atts[1])
+	}
+}

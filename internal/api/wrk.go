@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/mgh3326/handoffkeep/internal/wrk"
 )
@@ -72,6 +73,7 @@ func codeOf(err error) wrk.Code {
 func (s Server) wrk(w http.ResponseWriter, r *http.Request) {
 	client, ok := s.Tokens.Client(r)
 	if !ok {
+		s.wrkAttempt(r, "", wrk.Unauthorized)
 		wrkErr(w, wrk.Unauthorized)
 		return
 	}
@@ -81,6 +83,7 @@ func (s Server) wrk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !cfg.Policy.Known(client) {
+		s.wrkAttempt(r, client, wrk.ScopeDenied)
 		wrkErr(w, wrk.ScopeDenied)
 		return
 	}
@@ -369,36 +372,55 @@ func (s Server) wrkContent(w http.ResponseWriter, r *http.Request, job, seqText 
 	wrkOK(w, http.StatusOK, map[string]any{"job_id": job, "seq": seq, "content_b64": encodeB64(body), "content_sha256": wrk.ContentSHA256(body), "size_bytes": len(body)})
 }
 
+// wrkAttempt audits a write refused before the engine saw it: only the
+// authenticated id (if any), the path job id when valid and the stable code
+// are kept (design §2 wrk_attempts). Failures to audit never change the
+// refusal.
+func (s Server) wrkAttempt(r *http.Request, client string, code wrk.Code) {
+	if r.Method != http.MethodPost || s.Wrk == nil || s.Wrk.Backend == nil || s.Wrk.Mode == WrkOff {
+		return
+	}
+	job := ""
+	if segs, ok := wrkPath(r); ok && len(segs) >= 2 && segs[0] == "jobs" && wrk.ValidJobID(segs[1]) {
+		job = segs[1]
+	}
+	_ = s.Wrk.Backend.RecordAttempt(r.Context(), wrk.Attempt{AttemptID: wrk.NewUUID(), ClientID: client, JobID: job, Code: code, ReceivedAt: time.Now().UTC()})
+}
+
 func (s Server) wrkAppend(w http.ResponseWriter, r *http.Request, client, job string) {
+	refuse := func(code wrk.Code) {
+		s.wrkAttempt(r, client, code)
+		wrkErr(w, code)
+	}
 	if s.Wrk.Recovery {
-		wrkErr(w, wrk.RecoveryRequired)
+		refuse(wrk.RecoveryRequired)
 		return
 	}
 	mt, params, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || mt != "application/json" || (len(params) > 0 && !(len(params) == 1 && strings.EqualFold(params["charset"], "utf-8"))) {
-		wrkErr(w, wrk.UnsupportedMediaType)
+		refuse(wrk.UnsupportedMediaType)
 		return
 	}
 	if r.ContentLength > wrk.MaxRequestBytes {
-		wrkErr(w, wrk.RequestTooLarge)
+		refuse(wrk.RequestTooLarge)
 		return
 	}
 	raw, err := io.ReadAll(io.LimitReader(r.Body, wrk.MaxRequestBytes+1))
 	if err != nil {
-		wrkErr(w, wrk.InvalidRequest)
+		refuse(wrk.InvalidRequest)
 		return
 	}
 	if len(raw) > wrk.MaxRequestBytes {
-		wrkErr(w, wrk.RequestTooLarge)
+		refuse(wrk.RequestTooLarge)
 		return
 	}
 	if len(r.URL.Query()) > 0 || !wrk.ValidJobID(job) {
-		wrkErr(w, wrk.InvalidRequest)
+		refuse(wrk.InvalidRequest)
 		return
 	}
 	keys := r.Header.Values("Idempotency-Key")
 	if len(keys) != 1 || !wrk.ValidUUID(keys[0]) {
-		wrkErr(w, wrk.InvalidRequest)
+		refuse(wrk.InvalidRequest)
 		return
 	}
 	res, err := s.Wrk.Engine.Append(r.Context(), s.Wrk.Backend, client, job, keys[0], raw)
