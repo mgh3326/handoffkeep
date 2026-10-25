@@ -5,6 +5,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -22,6 +24,7 @@ import (
 
 	"github.com/mgh3326/handoffkeep/internal/attachments"
 	"github.com/mgh3326/handoffkeep/internal/store"
+	"github.com/mgh3326/handoffkeep/internal/wrk"
 )
 
 type Service struct {
@@ -102,6 +105,13 @@ func (s Service) ResolveDecision(ctx context.Context, input DecisionResolveInput
 		}
 		if task.State != "needs_decision" {
 			return store.RelayEvent{}, store.ErrTaskConflict
+		}
+		// A protected task cannot be resumed here; refuse before the lane
+		// event is written (the transition fence would refuse it after).
+		if protected, err := s.Store.WrkTaskProtected(ctx, input.ID); err != nil {
+			return store.RelayEvent{}, err
+		} else if protected {
+			return store.RelayEvent{}, store.ErrWrkReceiptRequired
 		}
 		// An open structured request is closed with tasks decision-resolve,
 		// which records the answer on that request_id. Resolving it here
@@ -274,6 +284,9 @@ func (s Service) ApplyDisposition(ctx context.Context, id int64, client, note st
 func (s Service) TransitionTask(ctx context.Context, id int64, to, client, note string, refs *store.TaskRefs, noJob string) (store.Task, error) {
 	return s.Store.TransitionTask(ctx, id, to, client, note, refs, noJob)
 }
+func (s Service) TransitionTaskReceipt(ctx context.Context, id int64, to, client, note string, refs *store.TaskRefs, noJob string, receipt *store.WrkReceipt) (store.Task, error) {
+	return s.Store.TransitionTaskReceipt(ctx, id, to, client, note, refs, noJob, receipt)
+}
 func (s Service) RelaneTask(ctx context.Context, id int64, to, client, note string, allowNewLane bool) (store.Task, bool, error) {
 	return s.Store.RelaneTask(ctx, id, to, client, note, allowNewLane)
 }
@@ -410,17 +423,55 @@ func LoadTokens(path string) (Tokens, error) {
 	}
 	return out, nil
 }
+
+// Client resolves the bearer token to its client id. Every configured token
+// is compared as a fixed-length SHA-256 digest in constant time, so neither
+// token length nor a matching prefix shortens the comparison.
 func (t Tokens) Client(r *http.Request) (string, bool) {
 	raw := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if raw == "" {
 		return "", false
 	}
+	got := sha256.Sum256([]byte(raw))
+	match := ""
 	for id, want := range t {
-		if raw == want {
-			return id, true
+		w := sha256.Sum256([]byte(want))
+		if subtle.ConstantTimeCompare(got[:], w[:]) == 1 {
+			match = id
 		}
 	}
-	return "", false
+	return match, match != ""
+}
+
+// CheckTokensDistinct re-reads the auth file (whose grammar is unchanged)
+// and refuses duplicate client ids and equal token values. The O3 API needs
+// unambiguous attribution, so an enabled server must not start otherwise
+// (design §3). Errors never name a value.
+func CheckTokensDistinct(path string) error {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	ids := map[string]bool{}
+	values := map[[32]byte]bool{}
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		k, v, _ := strings.Cut(line, "=")
+		id := strings.TrimPrefix(k, "HANDOFFKEEP_TOKEN_")
+		if ids[id] {
+			return errors.New("HANDOFFKEEP_AUTH_FILE repeats a client id")
+		}
+		ids[id] = true
+		sum := sha256.Sum256([]byte(v))
+		if values[sum] {
+			return errors.New("HANDOFFKEEP_AUTH_FILE gives two clients the same token")
+		}
+		values[sum] = true
+	}
+	return nil
 }
 
 type Server struct {
@@ -430,9 +481,36 @@ type Server struct {
 	// the route unregistered so deployments without complete Access settings
 	// fail closed with the standard ServeMux 404.
 	UI http.Handler
+	// Wrk configures the /v1/wrk namespace (nil: wrk_unavailable).
+	Wrk *Wrk
 }
 
 func (s Server) Handler() http.Handler {
+	m := s.legacyMux()
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if IsWrkPath(r.URL.Path) {
+			s.wrk(w, r)
+			return
+		}
+		m.ServeHTTP(w, r.WithContext(s.withPrincipal(r)))
+	})
+}
+
+// withPrincipal attaches the bearer-derived O3 principal for the legacy
+// fences. Handlers still authenticate with s.auth; a request without a
+// valid bearer simply carries no principal.
+func (s Server) withPrincipal(r *http.Request) context.Context {
+	ctx := r.Context()
+	if s.Wrk == nil || s.Wrk.Policy == nil {
+		return ctx
+	}
+	if id, ok := s.Tokens.Client(r); ok {
+		return store.WithWrkPrincipal(ctx, wrk.Principal{ClientID: id, Policy: s.Wrk.Policy})
+	}
+	return ctx
+}
+
+func (s Server) legacyMux() *http.ServeMux {
 	m := http.NewServeMux()
 	m.HandleFunc("GET /healthz", healthz)
 	m.HandleFunc("/v1/checkpoints", s.checkpoints)
@@ -553,6 +631,12 @@ func jsonOut(w http.ResponseWriter, status int, v any) {
 func appErr(w http.ResponseWriter, e error) {
 	var repConflict *store.BenchRepConflictError
 	switch {
+	case errors.Is(e, store.ErrWrkReceiptRequired):
+		jsonOut(w, http.StatusConflict, map[string]string{"error": "wrk_receipt_required"})
+		return
+	case errors.Is(e, store.ErrWrkScopeDenied):
+		jsonOut(w, http.StatusForbidden, map[string]string{"error": "scope_denied"})
+		return
 	case errors.Is(e, attachments.ErrDisabled):
 		jsonOut(w, 503, map[string]string{"error": "attachments_disabled"})
 		return
@@ -1069,6 +1153,9 @@ type taskTransitionInput struct {
 	// claimed/in_progress without claimed_by + refs.job_id. Without linkage
 	// an empty reason is refused with task_job_required.
 	NoJob string `json:"no_job,omitempty"`
+	// WrkReceipt is the canonical receipt a central state-only transition
+	// of an O3-protected task must carry (design §5 fence table).
+	WrkReceipt *store.WrkReceipt `json:"wrk_receipt,omitempty"`
 }
 
 func (s Server) taskTransition(w http.ResponseWriter, r *http.Request) {
@@ -1087,7 +1174,7 @@ func (s Server) taskTransition(w http.ResponseWriter, r *http.Request) {
 		appErr(w, err)
 		return
 	}
-	x, err := s.Service.TransitionTask(r.Context(), id, input.To, client, input.Note, input.Refs, input.NoJob)
+	x, err := s.Service.TransitionTaskReceipt(r.Context(), id, input.To, client, input.Note, input.Refs, input.NoJob, input.WrkReceipt)
 	if err != nil {
 		appErr(w, err)
 		return

@@ -231,6 +231,17 @@ func (h *Handler) answerDecision(w http.ResponseWriter, r *http.Request, email s
 			h.decisionResult(w, r, email, "Task has already been answered.", http.StatusConflict)
 			return
 		}
+		// An O3-protected task changes state only with a central bearer
+		// principal and canonical receipt; the console has neither. Refuse
+		// before the lane event (the store fence refuses the transition too).
+		if protected, perr := h.store.WrkTaskProtected(r.Context(), id); perr != nil {
+			h.decisionResult(w, r, email, "Fleet console unavailable.", http.StatusInternalServerError)
+			return
+		} else if protected {
+			outcome.result = "scope_denied"
+			h.decisionResult(w, r, email, "O3 보호 작업은 콘솔에서 답하지 않습니다.", http.StatusForbidden)
+			return
+		}
 		// A structured request (#618) is answered on its own request_id, not
 		// by this generic form — a form rendered before the request was
 		// recorded must not unblock the task and leave the request open.
@@ -531,6 +542,13 @@ func (h *Handler) openBatchDecision(r *http.Request, kind string, id int64) (dec
 		}
 		if task.Refs.Disposition != nil {
 			return decisionTarget{}, http.StatusConflict, "처분 항목은 처분 구획에서만 답합니다."
+		}
+		// Same O3 fence pre-check as answerDecision: no lane event for a
+		// protected task the console cannot transition.
+		if protected, err := h.store.WrkTaskProtected(r.Context(), id); err != nil {
+			return decisionTarget{}, http.StatusInternalServerError, "Fleet console unavailable."
+		} else if protected {
+			return decisionTarget{}, http.StatusForbidden, "O3 보호 작업은 콘솔에서 답하지 않습니다."
 		}
 		// Same guard as answerDecision: an open structured request is not
 		// answered by the generic batch (and never by "권고안 전부 답변").
