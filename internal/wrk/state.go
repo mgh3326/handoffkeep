@@ -544,14 +544,15 @@ func (s *state) conservative() (baseline, floor int64, ok bool) {
 func (s *state) effectiveBudget() (used, floor int64, ok bool) {
 	switch {
 	case s.activate != nil:
-		return s.used(), s.nextRoundNo() - 1, true
+		f := s.nextRoundNo() - 1
+		return s.used(), f, f < MaxSafeInteger
 	case s.seal != nil:
 		b, _ := pInt(s.seal.Payload, "baseline_used")
 		f, _ := pInt(s.seal.Payload, "numbering_floor")
 		if s.maxRoundNo > f {
 			f = s.maxRoundNo
 		}
-		return b, f, true
+		return b, f, f < MaxSafeInteger
 	case s.workEvidence:
 		return s.conservative()
 	}

@@ -692,6 +692,11 @@ func (e *Engine) ruleOpen(tx Tx, s *state, p map[string]any, now time.Time) (map
 	head := pStr(p, "head")
 	tester := pStr(p, "tester_job_id")
 	next := s.nextRoundNo()
+	// A round numbered at the wire bound would leave next_round_no outside
+	// it (design §2 L41, §5 L4028): overflow, never committed.
+	if next >= MaxSafeInteger {
+		return nil, Fail(InvalidRequest)
+	}
 	ext, rep := pIntPtr(p, "extension_grant_seq"), pIntPtr(p, "repeat_grant_seq")
 	if ext != nil {
 		g, err := s.grantCheck(*ext, "extension", now)

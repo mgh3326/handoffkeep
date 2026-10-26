@@ -631,3 +631,29 @@ func TestWrkSuccessorOfOverflowingBudgetCannotActivate(t *testing.T) {
 		s.refused(s.post("director-1", "job-oc", "activate", map[string]any{"reason_code": "activation", "seal_seq": nil}), "invalid_request", "overflow stays invalid down the chain")
 	}
 }
+
+// Tester round 4 finding B1 (design §2 L41, §5 L4028): an in-range sealed
+// and activated job cannot open the round whose number would make
+// next_round_no leave the wire range, so neither it nor its successors
+// ever carry an unsafe summary.
+func TestWrkRoundAtWireBoundaryRefused(t *testing.T) {
+	s := newScenario(t)
+	s.ok(s.post("director-1", "job-ma", "claim", claimPayload("job-ma", "b2428-m", "director-1", 2428, "desktop", "builder", "T1")), "claim A")
+	begin := s.ok(s.post("director-1", "job-ma", "import_begin", map[string]any{"reason_code": "import_freeze"}), "begin")
+	b := []byte(fmt.Sprintf(`{"job_id":"boundary-a","kind":"job.takeover","rounds_used":%d}`, wrk.MaxSafeInteger-1))
+	r := s.ok(s.post("director-1", "job-ma", "import", map[string]any{"source_locator": "generated/boundary.json", "source_sha256": wrk.ContentSHA256(b), "original_actor_client_id": "desktop", "original_at": "2026-10-20T00:00:00Z", "legacy_kind": "job.takeover", "content_b64": base64.StdEncoding.EncodeToString(b)}), "import takeover")
+	m := map[string]any{"seq": int64(num(r["record"].(map[string]any)["seq"])), "source_locator": "generated/boundary.json", "source_sha256": wrk.ContentSHA256(b)}
+	seal := s.ok(s.post("director-1", "job-ma", "import_seal", map[string]any{"begin_seq": num(begin["record"].(map[string]any)["seq"]), "expected_import_count": 1, "manifest_sha256": wrk.ContentSHA256(wrk.MustCanonical([]any{m})), "reason_code": "import_seal"}), "in-range seal")
+	a := s.ok(s.post("director-1", "job-ma", "activate", map[string]any{"reason_code": "activation", "seal_seq": num(seal["record"].(map[string]any)["seq"])}), "activate A")
+	if num(summaryOf(a)["next_round_no"]) != wrk.MaxSafeInteger {
+		t.Fatalf("A summary %v", summaryOf(a))
+	}
+	g := s.ok(s.post("director-1", "job-ma", "grant", grantPayload("extension", wrk.MaxSafeInteger, head('1'), 1, nil, nil)), "extension at the bound")
+	s.refused(s.post("desktop", "job-ma", "round_open", openPayload(head('1'), nil, num(g["record"].(map[string]any)["seq"]), nil)), "invalid_request", "round whose next number leaves the wire range")
+	endHandedOff(s, "job-ma")
+	s.ok(s.successor("job-mb", "job-ma", "b2428-m", 2428, "T1"), "successor B")
+	mb := s.ok(s.post("director-1", "job-mb", "activate", map[string]any{"reason_code": "activation", "seal_seq": nil}), "activate B in range")
+	if num(summaryOf(mb)["next_round_no"]) != wrk.MaxSafeInteger || num(summaryOf(mb)["used"]) != wrk.MaxSafeInteger-1 {
+		t.Fatalf("B summary %v", summaryOf(mb))
+	}
+}
