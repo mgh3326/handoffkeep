@@ -482,4 +482,6 @@ func TestO3StoreSuite(t *testing.T) {
 	t.Run("CrossJobLockOrder", func(t *testing.T) { testCrossJobLockOrder(t, fx) })
 	t.Run("LostReplyReplay", func(t *testing.T) { testLostReplyReplayPG(t, fx) })
 	t.Run("ShadowProtectionStartsAtActivate", func(t *testing.T) { testShadowProtectionStartsAtActivate(t, fx) })
+	t.Run("ProjectionUpsertAndHydration", func(t *testing.T) { testProjectionUpsertAndHydration(t, fx) })
+	t.Run("ReceiptPhaseBoundary", func(t *testing.T) { testReceiptPhaseBoundary(t, fx) })
 }

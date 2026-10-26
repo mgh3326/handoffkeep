@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"errors"
+	"regexp"
+	"strconv"
 
 	"github.com/jackc/pgx/v5"
 
@@ -180,6 +182,9 @@ func (s *Store) wrkFenceState(ctx context.Context, q wrkQuerier, taskID int64, t
 	if !found || rec.RecordHash != receipt.RecordHash || rec.StoreGeneration != receipt.StoreGeneration {
 		return ErrWrkReceiptRequired
 	}
+	if ok, err := wrkReceiptPhaseOK(ctx, q, rec); err != nil || !ok {
+		return firstErr(err, ErrWrkReceiptRequired)
+	}
 	switch to {
 	case "join", "merged":
 		if rec.Kind != "joined" {
@@ -253,6 +258,9 @@ func (s *Store) wrkFenceRelay(ctx context.Context, q wrkQuerier, x RelayEvent) (
 	if !found || r.JobID != x.JobID || rec.Kind != want || rec.RecordHash != r.RecordHash || rec.StoreGeneration != r.StoreGeneration {
 		return nil, ErrWrkReceiptRequired
 	}
+	if ok, err := wrkReceiptPhaseOK(ctx, q, rec); err != nil || !ok {
+		return nil, firstErr(err, ErrWrkReceiptRequired)
+	}
 	if head, _ := rec.Payload["head"].(string); rec.Kind == "joined" && head != x.Head {
 		return nil, ErrWrkReceiptRequired
 	}
@@ -271,4 +279,85 @@ func (s *Store) wrkFenceRelay(ctx context.Context, q wrkQuerier, x RelayEvent) (
 		return nil, err
 	}
 	return &out, nil
+}
+
+func firstErr(err, fallback error) error {
+	if err != nil {
+		return err
+	}
+	return fallback
+}
+
+// wrkReceiptPhaseOK applies design L3962 to a completed or joined receipt:
+// for a builder/worker subject, preactivation writes are observations only,
+// so the record must follow the subject's activate record. A review-role
+// job's own completed is receipt-required from its claim and always
+// eligible. Other kinds pass through.
+func wrkReceiptPhaseOK(ctx context.Context, q wrkQuerier, rec wrk.Record) (bool, error) {
+	if rec.Kind != "completed" && rec.Kind != "joined" {
+		return true, nil
+	}
+	var role string
+	var activateSeq *int64
+	err := q.QueryRow(ctx, `SELECT (SELECT payload->>'role' FROM wrk_records WHERE job_id=$1 AND kind='claim' ORDER BY seq DESC LIMIT 1),
+		(SELECT seq FROM wrk_records WHERE job_id=$1 AND kind='activate' LIMIT 1)`, rec.JobID).Scan(&role, &activateSeq)
+	if err != nil {
+		return false, err
+	}
+	if role == "tester" || role == "reviewer" || role == "counsel" {
+		return true, nil
+	}
+	return activateSeq != nil && rec.Seq > *activateSeq, nil
+}
+
+var wrkProjectionReasonRE = regexp.MustCompile(`^o3 receipt seq ([1-9][0-9]{0,15})$`)
+
+// hydrateWrkReceipts fills wrk_receipt and report_sha256 on canonical relay
+// projections (design L137, L4142; director-1 projection ruling). A row is
+// hydrated only when its canonical record exists, is the same kind, and
+// matches it exactly on job, head, PR, owner lane and phase; anything else
+// leaves the row without a receipt (consumers fail closed) and never drops
+// it. Errors are swallowed for the same reason.
+func (s *Store) hydrateWrkReceipts(ctx context.Context, xs []RelayEvent) {
+	for i := range xs {
+		x := &xs[i]
+		x.WrkReceipt, x.ReportSHA256 = nil, ""
+		if !s.wrk {
+			continue
+		}
+		want, ok := map[string]string{"job.completed": "completed", "job.joined": "joined"}[x.Kind]
+		m := wrkProjectionReasonRE.FindStringSubmatch(x.Reason)
+		if !ok || m == nil || x.Epoch != 0 || x.ReportPath != "" {
+			continue
+		}
+		seq, err := strconv.ParseInt(m[1], 10, 64)
+		if err != nil {
+			continue
+		}
+		rec, found, err := wrkRecordAt(ctx, s.pool, x.JobID, seq)
+		if err != nil || !found || rec.Kind != want {
+			continue
+		}
+		head, _ := rec.Payload["head"].(string)
+		pr, _ := rec.Payload["pr"].(string)
+		digest, _ := rec.Payload["report_sha256"].(string)
+		var owner string
+		if err := s.pool.QueryRow(ctx, `SELECT payload->>'owner_lane' FROM wrk_records WHERE job_id=$1 AND kind='claim' ORDER BY seq DESC LIMIT 1`, x.JobID).Scan(&owner); err != nil {
+			continue
+		}
+		if head != x.Head || pr != x.PR || owner != x.OwnerLane || x.EventID != "wrk:"+x.JobID+":"+m[1] {
+			continue
+		}
+		if ok, err := wrkReceiptPhaseOK(ctx, s.pool, rec); err != nil || !ok {
+			continue
+		}
+		x.WrkReceipt = &WrkReceipt{JobID: rec.JobID, Seq: rec.Seq, RecordHash: rec.RecordHash, StoreGeneration: rec.StoreGeneration}
+		x.ReportSHA256 = digest
+	}
+}
+
+func (s *Store) hydrateWrkReceipt(ctx context.Context, x RelayEvent) RelayEvent {
+	xs := []RelayEvent{x}
+	s.hydrateWrkReceipts(ctx, xs)
+	return xs[0]
 }

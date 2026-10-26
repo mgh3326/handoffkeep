@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -337,4 +338,114 @@ func testShadowProtectionStartsAtActivate(t *testing.T, fx *pgFixture) {
 	s.ok(s.post("desktop", "job-shp-t1", "claim", reviewPayload("job-shp-t1", "b2405-shp", 2405, "desktop", "tester", "T1", "job-shp", 1)), "reviewer mint")
 	refused(s.legacyPost("desktop", "/v1/tasks/2407/claim", map[string]any{"claimed_by": "pane", "job_id": "job-shp-t1"}), "claim naming a reviewer job")
 	refused(s.legacyPost("desktop", "/v1/relay/events", map[string]any{"kind": "job.completed", "job_id": "job-shp-t1", "owner_lane": "b2405-shp"}), "reviewer terminal relay")
+}
+
+func (s *scenario) completedPayload() map[string]any {
+	return map[string]any{"report_b64": reportPayload(head('1'), nil)["report_b64"], "report_sha256": wrk.ContentSHA256(packReportBytes)}
+}
+
+func relayRows(t *testing.T, fx *pgFixture, job string) []map[string]any {
+	t.Helper()
+	rows, err := fx.admin.Query(context.Background(), `SELECT id, owner_lane, head, pr, event_id, reason, delivered_at IS NULL, attempts FROM relay_events WHERE job_id=$1 ORDER BY id`, job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var out []map[string]any
+	for rows.Next() {
+		var id int64
+		var owner, h, pr, event, reason string
+		var undelivered bool
+		var attempts int
+		if err := rows.Scan(&id, &owner, &h, &pr, &event, &reason, &undelivered, &attempts); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, map[string]any{"id": id, "owner_lane": owner, "head": h, "pr": pr, "event_id": event, "reason": reason, "undelivered": undelivered, "attempts": attempts})
+	}
+	return out
+}
+
+// testProjectionUpsertAndHydration (director-1 projection ruling, design
+// L4195, L137, L4142): a legacy row planted at the projection key while the
+// subject is shadow is overwritten by the canonical completed and left
+// undelivered; reads hydrate wrk_receipt and report_sha256 only while the
+// row matches its canonical record exactly.
+func testProjectionUpsertAndHydration(t *testing.T, fx *pgFixture) {
+	s := pgScenario(t, fx)
+	s.ok(s.post("director-1", "job-pj", "claim", claimPayload("job-pj", "b2410-pj", "director-1", 2410, "desktop", "builder", "T1")), "shadow claim")
+	planted := s.legacyPost("desktop", "/v1/relay/events", map[string]any{"kind": "job.completed", "job_id": "job-pj", "owner_lane": "evil-lane", "head": head('e'), "pr": "https://pr.invalid/evil", "reason": store.WrkProjectionReason(3), "event_id": "planted"})
+	if planted.status != 201 {
+		t.Fatalf("plant while shadow: %d %s", planted.status, planted.raw)
+	}
+	if r := s.legacyPost("desktop", fmt.Sprintf("/v1/relay/events/%d/delivered", num(planted.body["id"])), map[string]any{"machine": "m", "pane": "p"}); r.status != 200 {
+		t.Fatalf("mark delivered: %d %s", r.status, r.raw)
+	}
+	s.ok(s.post("director-1", "job-pj", "activate", map[string]any{"reason_code": "activation", "seal_seq": nil}), "activate")
+	done := s.ok(s.post("desktop", "job-pj", "completed", s.completedPayload()), "canonical completed")
+	rec := done["record"].(map[string]any)
+	if num(rec["seq"]) != 3 {
+		t.Fatalf("completed seq %v", rec["seq"])
+	}
+	rows := relayRows(t, fx, "job-pj")
+	if len(rows) != 1 {
+		t.Fatalf("relay rows %v", rows)
+	}
+	want := map[string]any{"owner_lane": "b2410-pj", "head": "", "pr": "", "event_id": "wrk:job-pj:3", "reason": store.WrkProjectionReason(3), "undelivered": true, "attempts": 0}
+	for k, v := range want {
+		if rows[0][k] != v {
+			t.Fatalf("projection %s = %v, want %v (row %v)", k, rows[0][k], v, rows)
+		}
+	}
+	list := s.do("desktop", "GET", "/v1/relay/events?lane=b2410-pj", nil, nil)
+	var listed []map[string]any
+	_ = json.Unmarshal(list.raw, &listed)
+	if len(listed) != 1 {
+		t.Fatalf("listed %s", list.raw)
+	}
+	receipt, _ := listed[0]["wrk_receipt"].(map[string]any)
+	if receipt == nil || num(receipt["seq"]) != 3 || receipt["record_hash"] != rec["record_hash"] || listed[0]["report_sha256"] != wrk.ContentSHA256(packReportBytes) {
+		t.Fatalf("hydrated row %v", listed[0])
+	}
+	if _, err := fx.admin.Exec(context.Background(), `UPDATE relay_events SET head='tampered' WHERE job_id='job-pj'`); err != nil {
+		t.Fatal(err)
+	}
+	list = s.do("desktop", "GET", "/v1/relay/events?lane=b2410-pj", nil, nil)
+	listed = nil
+	_ = json.Unmarshal(list.raw, &listed)
+	if len(listed) != 1 || listed[0]["wrk_receipt"] != nil || listed[0]["report_sha256"] != nil {
+		t.Fatalf("tampered row must stay listed without a receipt: %s", list.raw)
+	}
+}
+
+// testReceiptPhaseBoundary (design L3962, L3982; director-1 projection
+// ruling): a subject's preactivation completed is never a protected
+// completion receipt after activate, while one committed after activate
+// is; a review-role job's own completed is eligible from its claim.
+func testReceiptPhaseBoundary(t *testing.T, fx *pgFixture) {
+	s := pgScenario(t, fx)
+	s.ok(s.post("director-1", "job-ph", "claim", claimPayload("job-ph", "b2411-ph", "director-1", 2411, "desktop", "builder", "T1")), "shadow claim")
+	pre := s.ok(s.post("desktop", "job-ph", "completed", s.completedPayload()), "shadow completed")["record"].(map[string]any)
+	if rows := relayRows(t, fx, "job-ph"); len(rows) != 0 {
+		t.Fatalf("a shadow completed wrote a projection: %v", rows)
+	}
+	begin := s.ok(s.post("director-1", "job-ph", "import_begin", map[string]any{"reason_code": "import_freeze"}), "begin")
+	seal := s.ok(s.post("director-1", "job-ph", "import_seal", map[string]any{"begin_seq": num(begin["record"].(map[string]any)["seq"]), "expected_import_count": 0, "manifest_sha256": wrk.ContentSHA256([]byte("[]")), "reason_code": "import_seal"}), "seal")
+	s.ok(s.post("director-1", "job-ph", "activate", map[string]any{"reason_code": "activation", "seal_seq": num(seal["record"].(map[string]any)["seq"])}), "activate")
+	relay := func(job string, r map[string]any) packResponse {
+		return s.legacyPost("desktop", "/v1/relay/events", map[string]any{"kind": "job.completed", "job_id": job, "owner_lane": "b2411-ph", "report_sha256": wrk.ContentSHA256(packReportBytes),
+			"wrk_receipt": map[string]any{"job_id": job, "seq": r["seq"], "record_hash": r["record_hash"], "store_generation": r["store_generation"]}})
+	}
+	s.refused(relay("job-ph", pre), "wrk_receipt_required", "preactivation completed as a receipt")
+	if rows := relayRows(t, fx, "job-ph"); len(rows) != 0 {
+		t.Fatalf("refused relay left a terminal row: %v", rows)
+	}
+	post := s.ok(s.post("desktop", "job-ph", "completed", s.completedPayload()), "post-activation completed")["record"].(map[string]any)
+	if r := relay("job-ph", post); r.status != 200 || r.body["wrk_receipt"] == nil {
+		t.Fatalf("post-activation receipt: %d %s", r.status, r.raw)
+	}
+	s.ok(s.post("desktop", "job-ph-t1", "claim", reviewPayload("job-ph-t1", "b2411-ph", 2411, "desktop", "tester", "T1", "job-ph", 4)), "reviewer mint")
+	rev := s.ok(s.post("desktop", "job-ph-t1", "completed", s.completedPayload()), "reviewer completed")["record"].(map[string]any)
+	if r := relay("job-ph-t1", rev); r.status != 200 || r.body["wrk_receipt"] == nil {
+		t.Fatalf("review-role completed receipt from claim: %d %s", r.status, r.raw)
+	}
 }

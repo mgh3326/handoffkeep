@@ -409,6 +409,12 @@ func (t *pgWrkTx) Append(rec wrk.Record, content []byte) error {
 		}
 	}
 	if rec.Kind == "completed" || rec.Kind == "joined" {
+		// The projection belongs to receipt_required jobs (design §4 L137):
+		// a shadow subject's completion stays an observation.
+		required, err := wrkReceiptRequiredJob(t.ctx, t.tx, rec.JobID)
+		if err != nil || !required {
+			return err
+		}
 		return t.project(rec)
 	}
 	return nil
@@ -424,8 +430,12 @@ func wrkInsertErr(err error) error {
 	return err
 }
 
-// project inserts the legacy relay row for a canonical completed/joined.
-// Its reason names the record so legacy dedup is per record.
+// project writes the legacy relay row for a canonical completed/joined. Its
+// reason names the record so legacy dedup is per record. The canonical
+// projection wins over any legacy insertion at that key (design L4195,
+// director-1 projection ruling): every derived field is overwritten from
+// the canonical record and delivery state is reset, in the canonical
+// transaction.
 func (t *pgWrkTx) project(rec wrk.Record) error {
 	var claimPayload []byte
 	if err := t.tx.QueryRow(t.ctx, `SELECT payload FROM wrk_records WHERE job_id=$1 AND kind='claim' ORDER BY seq DESC LIMIT 1`, rec.JobID).Scan(&claimPayload); err != nil {
@@ -440,7 +450,10 @@ func (t *pgWrkTx) project(rec wrk.Record) error {
 	kind := "job." + rec.Kind
 	head, _ := rec.Payload["head"].(string)
 	pr, _ := rec.Payload["pr"].(string)
-	_, err := t.tx.Exec(t.ctx, `INSERT INTO relay_events(kind,job_id,epoch,owner_lane,head,pr,reason,event_id,received_at) VALUES($1,$2,0,$3,$4,$5,$6,$7,now())`,
+	_, err := t.tx.Exec(t.ctx, `INSERT INTO relay_events(kind,job_id,epoch,owner_lane,head,pr,reason,event_id,received_at) VALUES($1,$2,0,$3,$4,$5,$6,$7,now())
+		ON CONFLICT (kind,job_id,epoch,report_path,reason) WHERE `+relayJobConflictPredicate+` DO UPDATE SET
+		owner_lane=EXCLUDED.owner_lane, machine='', pane_id='', report_last_line='', question='', pr=EXCLUDED.pr, head=EXCLUDED.head,
+		event_id=EXCLUDED.event_id, text='', event_time=NULL, received_at=now(), delivered_at=NULL, delivered_to='', attempts=0`,
 		kind, rec.JobID, claim.OwnerLane, head, pr, WrkProjectionReason(rec.Seq), "wrk:"+rec.JobID+":"+fmt.Sprint(rec.Seq))
 	return err
 }

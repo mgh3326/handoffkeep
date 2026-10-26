@@ -2980,7 +2980,7 @@ func (s *Store) AppendRelayEvent(ctx context.Context, x RelayEvent) (RelayEvent,
 	if err != nil {
 		return x, false, err
 	}
-	return x, created, nil
+	return s.hydrateWrkReceipt(ctx, x), created, nil
 }
 
 // appendTerminalRelayEvent runs the O3 relay fence and the insert in one
@@ -2999,18 +2999,21 @@ func (s *Store) appendTerminalRelayEvent(ctx context.Context, x RelayEvent) (Rel
 	if err != nil {
 		return x, false, err
 	}
-	receipt := x.WrkReceipt
 	if projection != nil {
-		projection.WrkReceipt = receipt
-		return *projection, false, tx.Commit(ctx)
+		if err := tx.Commit(ctx); err != nil {
+			return x, false, err
+		}
+		return s.hydrateWrkReceipt(ctx, *projection), false, nil
 	}
 	var created bool
 	query := `INSERT INTO relay_events(kind,job_id,epoch,owner_lane,machine,pane_id,report_path,report_last_line,question,pr,head,reason,event_id,text,event_time,received_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,now()) ON CONFLICT (kind,job_id,epoch,report_path,reason) WHERE ` + relayJobConflictPredicate + ` DO UPDATE SET attempts=relay_events.attempts+1`
 	if err := scanRelayEventCreated(tx.QueryRow(ctx, query+` RETURNING `+relayEventColumns+`,(xmax=0) AS created`, x.Kind, x.JobID, x.Epoch, x.OwnerLane, x.Machine, x.PaneID, x.ReportPath, x.ReportLastLine, x.Question, x.PR, x.Head, x.Reason, x.EventID, x.Text, x.EventTime), &x, &created); err != nil {
 		return x, false, err
 	}
-	x.WrkReceipt = receipt
-	return x, created, tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return x, false, err
+	}
+	return s.hydrateWrkReceipt(ctx, x), created, nil
 }
 
 func validWrkDigest(s string) bool {
@@ -3034,7 +3037,7 @@ func (s *Store) MarkRelayEventDelivered(ctx context.Context, id int64, machine, 
 	var x RelayEvent
 	err := scanRelayEvent(s.pool.QueryRow(ctx, `UPDATE relay_events SET delivered_at=now(),delivered_to=$2 WHERE id=$1 AND delivered_at IS NULL RETURNING `+relayEventColumns, id, machine+"/"+pane), &x)
 	if err == nil {
-		return x, nil
+		return s.hydrateWrkReceipt(ctx, x), nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return RelayEvent{}, err
@@ -3045,7 +3048,7 @@ func (s *Store) MarkRelayEventDelivered(ctx context.Context, id int64, machine, 
 		}
 		return RelayEvent{}, err
 	}
-	return x, nil
+	return s.hydrateWrkReceipt(ctx, x), nil
 }
 
 // ListRelayEvents returns relay records in durable insertion order.
@@ -3096,7 +3099,12 @@ func (s *Store) ListRelayEventsPage(ctx context.Context, lane, kind string, unde
 		}
 		out = append(out, x)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	s.hydrateWrkReceipts(ctx, out)
+	return out, nil
 }
 
 // ListRelayEventsTimeline returns newest relay events first. beforeID is an
@@ -3147,7 +3155,12 @@ func (s *Store) ListRelayEventsTimeline(ctx context.Context, lane, kind string, 
 		}
 		out = append(out, x)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	s.hydrateWrkReceipts(ctx, out)
+	return out, nil
 }
 
 // EventWatermarks returns the two durable IDs used by the UI's SSE poller.
