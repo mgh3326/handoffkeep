@@ -2047,7 +2047,21 @@
             },
             "record_hash": "d98835cfc648206ceae0e0c3eb6b55d0e971e39fad60ef1f34707c2d01e27ded"
           }
-        ]
+        ],
+        "legacy": {
+          "tasks": [
+            {
+              "id": 2400,
+              "project": "handoffkeep",
+              "state": "in_progress",
+              "lane": "b2400-a",
+              "parent_lane": "director-1",
+              "refs": {
+                "job_id": "job-a"
+              }
+            }
+          ]
+        }
       },
       "request": {
         "type": "legacy",
@@ -2252,6 +2266,58 @@
           }
         },
         "records": [
+          {
+            "job_id": "job-a",
+            "seq": 1,
+            "record_id": "00000000-0000-4000-8000-000000110127",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "director-1",
+            "idempotency_key": "00000000-0000-4000-8000-000000210127",
+            "request_sha256": "e32c4274980a6ae89c986a96e0f55c4c932f3b0c0422420fb5ff3270ff34017a",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000247Z",
+            "previous_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+            "kind": "claim",
+            "payload": {
+              "job_id": "job-a",
+              "owner_lane": "b2400-a",
+              "parent_lane": "director-1",
+              "task_id": 2400,
+              "host_client_id": "desktop",
+              "role": "builder",
+              "tier": "T2",
+              "review_of": null,
+              "predecessor_job_id": null,
+              "supersedes": null,
+              "policy_sha256": "8de436a97778f975de840ffd0ec10539440059169fbc34c4a8eb0486f0ece5ce",
+              "created_at": "2026-10-24T00:00:00.000247Z"
+            },
+            "record_hash": "4d22cad6c412137eaf13b1bcfd8ab1f501292dd75a5a8be1d538723f8eca51c6"
+          },
+          {
+            "job_id": "job-a",
+            "seq": 2,
+            "record_id": "00000000-0000-4000-8000-000000110168",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "director-1",
+            "idempotency_key": "00000000-0000-4000-8000-000000210168",
+            "request_sha256": "265e16dcf1c0f8b52d277e50abf72760a57e622c72ab8844d1530d701ed04051",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000248Z",
+            "previous_hash": "4d22cad6c412137eaf13b1bcfd8ab1f501292dd75a5a8be1d538723f8eca51c6",
+            "kind": "activate",
+            "payload": {
+              "baseline_used": 0,
+              "mode": "enforced",
+              "reason_code": "initial_activation",
+              "seal_seq": null
+            },
+            "record_hash": "6ee7498f2d7bbfe8836d2c3e6891f8bda29d7b149db4c810e26de7ed1fce4b6b"
+          },
           {
             "job_id": "job-a-t1",
             "seq": 1,
@@ -2492,6 +2558,58 @@
           }
         },
         "records": [
+          {
+            "job_id": "job-a",
+            "seq": 1,
+            "record_id": "00000000-0000-4000-8000-000000110127",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "director-1",
+            "idempotency_key": "00000000-0000-4000-8000-000000210127",
+            "request_sha256": "e32c4274980a6ae89c986a96e0f55c4c932f3b0c0422420fb5ff3270ff34017a",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000247Z",
+            "previous_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+            "kind": "claim",
+            "payload": {
+              "job_id": "job-a",
+              "owner_lane": "b2400-a",
+              "parent_lane": "director-1",
+              "task_id": 2400,
+              "host_client_id": "desktop",
+              "role": "builder",
+              "tier": "T2",
+              "review_of": null,
+              "predecessor_job_id": null,
+              "supersedes": null,
+              "policy_sha256": "8de436a97778f975de840ffd0ec10539440059169fbc34c4a8eb0486f0ece5ce",
+              "created_at": "2026-10-24T00:00:00.000247Z"
+            },
+            "record_hash": "4d22cad6c412137eaf13b1bcfd8ab1f501292dd75a5a8be1d538723f8eca51c6"
+          },
+          {
+            "job_id": "job-a",
+            "seq": 2,
+            "record_id": "00000000-0000-4000-8000-000000110168",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "director-1",
+            "idempotency_key": "00000000-0000-4000-8000-000000210168",
+            "request_sha256": "265e16dcf1c0f8b52d277e50abf72760a57e622c72ab8844d1530d701ed04051",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000248Z",
+            "previous_hash": "4d22cad6c412137eaf13b1bcfd8ab1f501292dd75a5a8be1d538723f8eca51c6",
+            "kind": "activate",
+            "payload": {
+              "baseline_used": 0,
+              "mode": "enforced",
+              "reason_code": "initial_activation",
+              "seal_seq": null
+            },
+            "record_hash": "6ee7498f2d7bbfe8836d2c3e6891f8bda29d7b149db4c810e26de7ed1fce4b6b"
+          },
           {
             "job_id": "job-a-t1",
             "seq": 1,
@@ -2737,6 +2855,58 @@
           }
         },
         "records": [
+          {
+            "job_id": "job-a",
+            "seq": 1,
+            "record_id": "00000000-0000-4000-8000-000000110127",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "director-1",
+            "idempotency_key": "00000000-0000-4000-8000-000000210127",
+            "request_sha256": "e32c4274980a6ae89c986a96e0f55c4c932f3b0c0422420fb5ff3270ff34017a",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000247Z",
+            "previous_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+            "kind": "claim",
+            "payload": {
+              "job_id": "job-a",
+              "owner_lane": "b2400-a",
+              "parent_lane": "director-1",
+              "task_id": 2400,
+              "host_client_id": "desktop",
+              "role": "builder",
+              "tier": "T2",
+              "review_of": null,
+              "predecessor_job_id": null,
+              "supersedes": null,
+              "policy_sha256": "8de436a97778f975de840ffd0ec10539440059169fbc34c4a8eb0486f0ece5ce",
+              "created_at": "2026-10-24T00:00:00.000247Z"
+            },
+            "record_hash": "4d22cad6c412137eaf13b1bcfd8ab1f501292dd75a5a8be1d538723f8eca51c6"
+          },
+          {
+            "job_id": "job-a",
+            "seq": 2,
+            "record_id": "00000000-0000-4000-8000-000000110168",
+            "store_generation": "00000000-0000-4000-8000-ffff00000001",
+            "claim_seq": 1,
+            "actor_client_id": "director-1",
+            "idempotency_key": "00000000-0000-4000-8000-000000210168",
+            "request_sha256": "265e16dcf1c0f8b52d277e50abf72760a57e622c72ab8844d1530d701ed04051",
+            "imported": false,
+            "source": null,
+            "received_at": "2026-10-24T00:00:00.000248Z",
+            "previous_hash": "4d22cad6c412137eaf13b1bcfd8ab1f501292dd75a5a8be1d538723f8eca51c6",
+            "kind": "activate",
+            "payload": {
+              "baseline_used": 0,
+              "mode": "enforced",
+              "reason_code": "initial_activation",
+              "seal_seq": null
+            },
+            "record_hash": "6ee7498f2d7bbfe8836d2c3e6891f8bda29d7b149db4c810e26de7ed1fce4b6b"
+          },
           {
             "job_id": "job-a-t1",
             "seq": 1,
