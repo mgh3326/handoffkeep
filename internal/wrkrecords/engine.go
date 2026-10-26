@@ -811,7 +811,7 @@ func (e Engine) identities(s Snapshot, job string) []Object {
 func (e Engine) headReserved(s Snapshot, job, head string) bool {
 	if claim := s.Claim(job); claim != nil {
 		if predecessor := Text(claim.Payload, "predecessor_job_id"); predecessor != "" {
-			if e.headReserved(s, predecessor, head) {
+			if e.predHeadReserved(s, predecessor, head) {
 				return true
 			}
 		}
@@ -828,6 +828,37 @@ func (e Engine) headReserved(s Snapshot, job, head string) bool {
 			if v == nil {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+// A job reached through predecessor_job_id reserves a head for the opening
+// job only through a live post-activate pending open: the job has an activate
+// record, the round_open's seq is after it, and the round has no verdict and
+// no void. A predecessor that never activated contributes no open
+// reservations; its verdicts still reach the opener through e.identities,
+// which already walks the whole chain. The walk itself continues through a
+// never-activated bridge to an activated ancestor.
+func (e Engine) predHeadReserved(s Snapshot, job, head string) bool {
+	if claim := s.Claim(job); claim != nil {
+		if predecessor := Text(claim.Payload, "predecessor_job_id"); predecessor != "" {
+			if e.predHeadReserved(s, predecessor, head) {
+				return true
+			}
+		}
+	}
+	activation := s.Activation(job)
+	for _, r := range s.LiveRecords(job) {
+		if r.Kind != "round_open" || Text(r.Payload, "head") != head {
+			continue
+		}
+		if activation == 0 || r.Seq <= activation {
+			continue // a predecessor open reserves only as a live post-activate open: o3-pred-open-postactivate-only
+		}
+		_, v, x := s.Round(job, Num(r.Payload, "round_no"))
+		if v == nil && x == nil {
+			return true
 		}
 	}
 	return false
