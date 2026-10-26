@@ -397,8 +397,7 @@ func testProjectionUpsertAndHydration(t *testing.T, fx *pgFixture) {
 		}
 	}
 	list := s.do("desktop", "GET", "/v1/relay/events?lane=b2410-pj", nil, nil)
-	var listed []map[string]any
-	_ = json.Unmarshal(list.raw, &listed)
+	listed := relayEventsOf(list)
 	if len(listed) != 1 {
 		t.Fatalf("listed %s", list.raw)
 	}
@@ -410,8 +409,7 @@ func testProjectionUpsertAndHydration(t *testing.T, fx *pgFixture) {
 		t.Fatal(err)
 	}
 	list = s.do("desktop", "GET", "/v1/relay/events?lane=b2410-pj", nil, nil)
-	listed = nil
-	_ = json.Unmarshal(list.raw, &listed)
+	listed = relayEventsOf(list)
 	if len(listed) != 1 || listed[0]["wrk_receipt"] != nil || listed[0]["report_sha256"] != nil {
 		t.Fatalf("tampered row must stay listed without a receipt: %s", list.raw)
 	}
@@ -448,4 +446,13 @@ func testReceiptPhaseBoundary(t *testing.T, fx *pgFixture) {
 	if r := relay("job-ph-t1", rev); r.status != 200 || r.body["wrk_receipt"] == nil {
 		t.Fatalf("review-role completed receipt from claim: %d %s", r.status, r.raw)
 	}
+}
+
+// relayEventsOf decodes a GET /v1/relay/events reply ({"events": [...]}).
+func relayEventsOf(r packResponse) []map[string]any {
+	var page struct {
+		Events []map[string]any `json:"events"`
+	}
+	_ = json.Unmarshal(r.raw, &page)
+	return page.Events
 }
