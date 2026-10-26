@@ -237,6 +237,7 @@ func newPackEnv(t *testing.T, c *packCase, legacy map[string][]byte, recovery bo
 	if err != nil {
 		t.Fatalf("%s: given policy invalid: %v", c.id(), err)
 	}
+	checkGivenHistory(t, c, policy)
 	mem := wrk.NewMemory()
 	for _, id := range packTaskIDs(c) {
 		mem.AddTask(id)
@@ -364,3 +365,95 @@ func normalizeAny(v any) any {
 }
 
 var _ = reflect.DeepEqual
+
+// validateGivenHistory is the harness's startup validation of a vector's
+// seeded history: per job a gap-free seq from 1 with an intact hash chain
+// that starts with a claim, and every claim consistent with the policy lane
+// graph and with earlier claims (design §2/§5: builder edges extend a policy
+// node or an existing builder lane; workers use their builder lane; review
+// assignments name an existing subject, its task and its owner lane).
+func validateGivenHistory(policy *wrk.Policy, records []wrk.Record) error {
+	tails := map[string]wrk.Record{}
+	builderParent := map[string]string{}
+	subjects := map[string]map[string]any{}
+	for _, r := range records {
+		prev, seen := tails[r.JobID]
+		switch {
+		case !seen && (r.Seq != 1 || r.PreviousHash != wrk.ZeroHash || r.Kind != "claim"):
+			return fmt.Errorf("%s: history does not start with a claim at seq 1", r.JobID)
+		case seen && (r.Seq != prev.Seq+1 || r.PreviousHash != prev.RecordHash):
+			return fmt.Errorf("%s#%d: broken seq or hash chain", r.JobID, r.Seq)
+		}
+		if h, err := r.ComputeHash(); err != nil || h != r.RecordHash {
+			return fmt.Errorf("%s#%d: record_hash mismatch", r.JobID, r.Seq)
+		}
+		tails[r.JobID] = r
+		if r.Kind != "claim" {
+			continue
+		}
+		p := r.Payload
+		owner, parent := p["owner_lane"].(string), p["parent_lane"].(string)
+		switch p["role"] {
+		case "builder":
+			if _, root := policy.LaneParent(owner); root {
+				return fmt.Errorf("%s: builder claims a policy lane", r.JobID)
+			}
+			_, policyParent := policy.LaneParent(parent)
+			_, builderLane := builderParent[parent]
+			if !policyParent && !builderLane {
+				return fmt.Errorf("%s: parent lane %s is not in the graph", r.JobID, parent)
+			}
+			if bp, ok := builderParent[owner]; ok && bp != parent {
+				return fmt.Errorf("%s: lane %s has two parents", r.JobID, owner)
+			}
+			builderParent[owner] = parent
+			subjects[r.JobID] = p
+		case "worker":
+			if bp, ok := builderParent[owner]; !ok || bp != parent {
+				return fmt.Errorf("%s: worker lane is not a builder lane", r.JobID)
+			}
+			subjects[r.JobID] = p
+		default:
+			ro, _ := p["review_of"].(map[string]any)
+			target := subjects[fmt.Sprint(ro["job_id"])]
+			if target == nil {
+				return fmt.Errorf("%s: reviewed job %v has no subject claim in the history", r.JobID, ro["job_id"])
+			}
+			if owner != target["owner_lane"] || parent != target["owner_lane"] || p["task_id"] != target["task_id"] {
+				return fmt.Errorf("%s: review assignment lanes or task differ from its subject", r.JobID)
+			}
+		}
+	}
+	return nil
+}
+
+// fixtureIncomplete lists the vectors whose given history fails the startup
+// validation through a confirmed M1 pack defect rather than an
+// implementation question (director-1 rulings): the three
+// r4-review-lifecycle import cases name a reviewer of job-a and lane
+// b2400-a, which their history lacks (their scope_denied precedes any target
+// lookup), and scoped-mint-reviewer-as-target seeds job-a-t1's review claim
+// before job-a's own claim exists (unreachable per §2 L68). They seed
+// without validation. hk 2059 fixes all four and empties this set; the pin
+// test then fails until the entries are removed.
+var fixtureIncomplete = map[string]bool{
+	"r4-review-lifecycle.json/r-import-begin-scope-denied":               true,
+	"r4-review-lifecycle.json/r-import-scope-denied":                     true,
+	"r4-review-lifecycle.json/r-import-seal-scope-denied":                true,
+	"r4-scoped-claim.json/scoped-mint-reviewer-as-target-claim-conflict": true,
+}
+
+// checkGivenHistory runs the startup validation for a case, honouring the
+// fixtureIncomplete set.
+func checkGivenHistory(t *testing.T, c *packCase, policy *wrk.Policy) {
+	t.Helper()
+	err := validateGivenHistory(policy, c.Given.Records)
+	switch {
+	case fixtureIncomplete[c.id()] && err == nil:
+		t.Fatalf("fixture_incomplete entry is stale: the given history now validates; remove it")
+	case fixtureIncomplete[c.id()]:
+		// Seeded without startup validation (director-1 ruling).
+	case err != nil:
+		t.Fatalf("given history fails startup validation: %v", err)
+	}
+}

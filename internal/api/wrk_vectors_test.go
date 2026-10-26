@@ -178,6 +178,39 @@ func TestO3PackHTTPVectorsMemory(t *testing.T) {
 	}
 }
 
+// TestO3PackFixtureIncompletePinned: the fixture_incomplete set is exactly
+// the four cases director-1 confirmed as pack defects, each still fails the
+// startup validation, and every other case with a given history passes it.
+func TestO3PackFixtureIncompletePinned(t *testing.T) {
+	want := []string{
+		"r4-review-lifecycle.json/r-import-begin-scope-denied",
+		"r4-review-lifecycle.json/r-import-scope-denied",
+		"r4-review-lifecycle.json/r-import-seal-scope-denied",
+		"r4-scoped-claim.json/scoped-mint-reviewer-as-target-claim-conflict",
+	}
+	if len(fixtureIncomplete) != len(want) {
+		t.Fatalf("fixture_incomplete has %d entries, want exactly %v", len(fixtureIncomplete), want)
+	}
+	for _, id := range want {
+		if !fixtureIncomplete[id] {
+			t.Errorf("fixture_incomplete lacks %s", id)
+		}
+	}
+	for _, c := range loadPackCases(t) {
+		if len(c.Given.Records) == 0 {
+			continue
+		}
+		policy, err := wrk.ParsePolicy(c.Given.Policy)
+		if err != nil {
+			t.Fatalf("%s: %v", c.id(), err)
+		}
+		err = validateGivenHistory(policy, c.Given.Records)
+		if fixtureIncomplete[c.id()] != (err != nil) {
+			t.Errorf("%s: listed=%v, validation error=%v", c.id(), fixtureIncomplete[c.id()], err)
+		}
+	}
+}
+
 // TestO3PackDeskOwned pins every desk-owned entry to a real pack case.
 func TestO3PackDeskOwned(t *testing.T) {
 	cases := map[string]*packCase{}

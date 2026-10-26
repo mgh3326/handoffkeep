@@ -182,6 +182,7 @@ func newPackEnvPG(t *testing.T, fx *pgFixture, c *packCase, legacy map[string][]
 	if err != nil {
 		t.Fatal(err)
 	}
+	checkGivenHistory(t, c, policy)
 	for _, id := range packTaskIDs(c) {
 		fx.addTask(id, "backlog")
 	}
