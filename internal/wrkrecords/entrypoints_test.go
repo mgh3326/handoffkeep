@@ -371,3 +371,41 @@ func TestWrkProtectedTaskCommentsRemainLegacyCompatible(t *testing.T) {
 		t.Fatal("comment changed authority journal")
 	}
 }
+
+func TestWrkCorrectedClaimOnlyEnrollsCurrentTask(t *testing.T) {
+	for _, method := range []string{"claim", "next"} {
+		t.Run(method, func(t *testing.T) {
+			db := shadowDB(t)
+			claim := Object{"job_id": "job-a", "owner_lane": "b2400-a", "parent_lane": "director-1", "task_id": 2401, "host_client_id": "desktop", "role": "builder", "tier": "T3", "review_of": nil, "predecessor_job_id": nil, "supersedes": 1}
+			appendDB(t, db, "director-1", "job-a", "claim", claim)
+			appendDB(t, db, "director-1", "job-a", "activate", Object{"seal_seq": nil, "reason_code": "enforce"})
+			ctx := store.WithWrkPrincipal(t.Context(), "desktop", nil)
+			if _, e := db.runtime.ClaimTask(ctx, 2401, "legacy", "forged", ""); Code(e) != "wrk_receipt_required" {
+				t.Fatalf("corrected current task unprotected: %v", e)
+			}
+			var old store.Task
+			var e error
+			if method == "claim" {
+				old, e = db.runtime.ClaimTask(ctx, 2400, "legacy", "legacy-old", "")
+			} else {
+				old, e = db.runtime.NextTask(ctx, "b2400-a", "legacy", "legacy-old", "")
+			}
+			if e != nil || old.ID != 2400 {
+				t.Fatalf("superseded task lost legacy %s: %v id=%d", method, e, old.ID)
+			}
+			if _, e = db.runtime.TransitionTask(ctx, 2400, "in_progress", "legacy", "detached task remains legacy", nil, ""); e != nil {
+				t.Fatalf("detached task transition: %v", e)
+			}
+			appendDB(t, db, "desktop", "job-a", "end", Object{"end_type": "handed_off", "reason_code": "successor"})
+			claim["job_id"], claim["predecessor_job_id"], claim["supersedes"] = "successor", "job-a", nil
+			appendDB(t, db, "director-1", "successor", "claim", claim)
+			if _, e = db.runtime.ClaimTask(ctx, 2401, "legacy", "forged", ""); Code(e) != "wrk_receipt_required" {
+				t.Fatalf("successor lost predecessor enrollment: %v", e)
+			}
+			appendDB(t, db, "director-1", "successor", "activate", Object{"seal_seq": nil, "reason_code": "enforce"})
+			if _, e = db.runtime.ClaimTask(ctx, 2401, "legacy", "forged", ""); Code(e) != "wrk_receipt_required" {
+				t.Fatalf("active successor task unprotected: %v", e)
+			}
+		})
+	}
+}

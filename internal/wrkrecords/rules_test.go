@@ -553,3 +553,51 @@ func TestDesignShadowCompletionReceiptBoundary(t *testing.T) {
 	fresh := c.must("desktop", "subject", "completed", p)
 	check(fresh, "job.completed", "")
 }
+
+func TestDesignOnlyCurrentClaimEnrollsTask(t *testing.T) {
+	c := fresh(t)
+	c.s.Jobs["subject"] = c.s.Jobs["subject"][:1]
+	claim := Clone(c.s.Claim("subject").Payload)
+	delete(claim, "created_at")
+	delete(claim, "policy_sha256")
+	claim["task_id"], claim["supersedes"] = 9002, int64(1)
+	c.must("director-1", "subject", "claim", claim)
+	c.must("director-1", "subject", "activate", Object{"seal_seq": nil, "reason_code": "enforce"})
+	assertTasks := func() {
+		t.Helper()
+		if c.s.ProtectedTask(9001) || !c.s.ProtectedTask(9002) {
+			t.Fatal("superseded claim enrolled the mistaken task")
+		}
+		if e := c.s.CheckLegacy(c.e.Policy, "desktop", LegacyIntent{TaskID: 9001, Binding: true}); e != nil {
+			t.Fatalf("detached task lost legacy compatibility: %v", e)
+		}
+		if e := c.s.CheckLegacy(c.e.Policy, "desktop", LegacyIntent{TaskID: 9002, Binding: true}); Code(e) != "wrk_receipt_required" {
+			t.Fatalf("current task was not fenced: %v", e)
+		}
+	}
+	assertTasks()
+	c.must("desktop", "subject", "end", Object{"end_type": "handed_off", "reason_code": "successor"})
+	claim["job_id"], claim["predecessor_job_id"], claim["supersedes"] = "successor", "subject", nil
+	c.must("director-1", "successor", "claim", claim)
+	assertTasks() // Durable predecessor enrollment also protects a shadow successor.
+	c.must("director-1", "successor", "activate", Object{"seal_seq": nil, "reason_code": "enforce"})
+	assertTasks()
+	claim["job_id"], claim["owner_lane"], claim["task_id"], claim["predecessor_job_id"] = "other", "builder-b", 9001, nil
+	c.must("director-1", "other", "claim", claim)
+	c.must("director-1", "other", "activate", Object{"seal_seq": nil, "reason_code": "enforce"})
+	if !c.s.ProtectedTask(9001) {
+		t.Fatal("other activated job did not enroll its current task")
+	}
+}
+
+func TestDesignReviewClaimEnrollsNoTask(t *testing.T) {
+	c := fresh(t)
+	c.s.Jobs["subject"] = c.s.Jobs["subject"][:1]
+	c.reviewer("p1-reviewer", "desktop", 1)
+	if !c.s.ReceiptRequired("p1-reviewer") || c.s.ProtectedTask(9001) {
+		t.Fatal("review assignment enrolled a subject task")
+	}
+	if e := c.s.CheckLegacy(c.e.Policy, "desktop", LegacyIntent{TaskID: 9001, CurrentJob: "subject", Binding: true}); e != nil {
+		t.Fatal("review claim changed shadow subject's task protection")
+	}
+}

@@ -36,6 +36,9 @@ central read-only recovery access, desk-owned migration credentials, subject
 protection starting at activate, and P1 reviewer eligibility based on the
 subject's phase. Reviewer lifecycle protection starts at its accepted claim.
 Existing receipt fences continue to deny bypass attempts while the API is off.
+Activation enrolls only the latest unsuperseded builder/worker claim's task;
+superseded mistaken task bindings remain history. Ended predecessors preserve
+their enrollment through succession. Review-role claims enroll no task.
 
 For receipt-required jobs, completed/joined and their relay projection commit
 together. The canonical upsert replaces any planted legacy tuple and resets

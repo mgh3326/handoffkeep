@@ -10,14 +10,16 @@ type LegacyIntent struct {
 }
 
 func (s Snapshot) ProtectedTask(id int64) bool {
-	for job, rs := range s.Jobs {
+	for job := range s.Jobs {
 		if ShadowSubjectProtectionStartsAtActivate && s.Activation(job) == 0 {
 			continue
 		}
-		for _, r := range rs {
-			if r.Kind == "claim" && !Review(&r) && Num(r.Payload, "task_id") == id {
-				return true
-			}
+		// Activation enrolls only the latest unsuperseded subject claim. A
+		// mistaken preactivation binding is history, never enrollment. Ended
+		// predecessors retain their activation and therefore durable enrollment.
+		c := s.Claim(job)
+		if c != nil && (Text(c.Payload, "role") == "builder" || Text(c.Payload, "role") == "worker") && Num(c.Payload, "task_id") == id {
+			return true
 		}
 	}
 	return false
