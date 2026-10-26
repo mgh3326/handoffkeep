@@ -2336,7 +2336,9 @@ func (s *Store) NextTask(ctx context.Context, lane, by, jobID, noJob string) (Ta
 	var id int64
 	selection := `SELECT id FROM tasks WHERE lane=$1 AND state='backlog'`
 	if wrkTablesExist(ctx, tx) {
-		selection += ` AND NOT EXISTS(SELECT 1 FROM wrk_records wr WHERE wr.kind='claim' AND wr.payload->>'task_id'=tasks.id::text AND EXISTS(SELECT 1 FROM wrk_records a WHERE a.job_id=wr.job_id AND a.kind='activate'))`
+		// Same enrollment predicate as Snapshot.ProtectedTask: only the latest
+		// subject claim at activation, including ended predecessor enrollment.
+		selection += ` AND NOT EXISTS(SELECT 1 FROM wrk_records wr WHERE wr.kind='claim' AND wr.payload->>'role' IN ('builder','worker') AND wr.payload->>'task_id'=tasks.id::text AND NOT EXISTS(SELECT 1 FROM wrk_records newer WHERE newer.job_id=wr.job_id AND newer.kind='claim' AND newer.seq>wr.seq) AND EXISTS(SELECT 1 FROM wrk_records a WHERE a.job_id=wr.job_id AND a.kind='activate'))`
 	}
 	selection += ` ORDER BY priority DESC,created_at ASC,id ASC FOR UPDATE SKIP LOCKED LIMIT 1`
 	err = tx.QueryRow(ctx, selection, lane).Scan(&id)
