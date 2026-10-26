@@ -46,7 +46,7 @@ func newScenario(t *testing.T) *scenario {
 	c := &packCase{File: "scenario", Name: t.Name()}
 	c.Given.Policy = standardPolicy(t)
 	env := newPackEnv(t, c, nil, false)
-	for id := int64(2400); id <= 2420; id++ {
+	for id := int64(2400); id <= 2430; id++ {
 		env.mem.AddTask(id)
 	}
 	return &scenario{packEnv: env}

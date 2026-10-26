@@ -477,3 +477,132 @@ func TestWrkLoneSurrogateRefused(t *testing.T) {
 		t.Fatal("lone-surrogate verdict was stored")
 	}
 }
+
+// importLegacyRound imports one generated legacy job.round numbered n into
+// an open import and returns its manifest entry.
+func (s *scenario) importLegacyRound(job string, n int64, h string) map[string]any {
+	s.t.Helper()
+	b, err := json.Marshal(map[string]any{"epoch": 1, "head": h, "job_id": "legacy-" + job, "kind": "job.round", "label": "legacy", "owner_lane": "legacy", "parent_lane": "director-1", "round": n})
+	if err != nil {
+		s.t.Fatal(err)
+	}
+	loc := fmt.Sprintf("generated/%s-round-%d.json", job, n)
+	r := s.ok(s.post("director-1", job, "import", map[string]any{"source_locator": loc, "source_sha256": wrk.ContentSHA256(b), "original_actor_client_id": "desktop", "original_at": "2026-10-20T00:00:00Z", "legacy_kind": "job.round", "content_b64": base64.StdEncoding.EncodeToString(b)}), "import round")
+	return map[string]any{"seq": int64(num(r["record"].(map[string]any)["seq"])), "source_locator": loc, "source_sha256": wrk.ContentSHA256(b)}
+}
+
+func endHandedOff(s *scenario, job string) {
+	s.t.Helper()
+	s.ok(s.post("director-1", job, "end", map[string]any{"end_type": "handed_off", "reason_code": "takeover"}), "end "+job)
+}
+
+// Tester round 2 finding B1 (design §2/§4/§5): a successor of an ended,
+// never-activated predecessor inherits its committed seal baseline and
+// numbering floor, or the conservative budget of its unsealed work; never a
+// fresh zero budget or recycled numbering.
+func TestWrkSuccessorOfSealedPredecessorKeepsBudget(t *testing.T) {
+	s := newScenario(t)
+	s.ok(s.post("director-1", "job-sa", "claim", claimPayload("job-sa", "b2420-s", "director-1", 2420, "desktop", "builder", "T1")), "claim A")
+	begin := s.ok(s.post("director-1", "job-sa", "import_begin", map[string]any{"reason_code": "import_freeze"}), "begin")
+	m := s.importLegacyRound("job-sa", 9, head('9'))
+	seal := s.ok(s.post("director-1", "job-sa", "import_seal", map[string]any{"begin_seq": num(begin["record"].(map[string]any)["seq"]), "expected_import_count": 1, "manifest_sha256": wrk.ContentSHA256(wrk.MustCanonical([]any{m})), "reason_code": "import_seal"}), "seal")
+	sp := seal["record"].(map[string]any)["payload"].(map[string]any)
+	if num(sp["baseline_used"]) != 3 || num(sp["numbering_floor"]) != 9 {
+		t.Fatalf("seal %v", sp)
+	}
+	endHandedOff(s, "job-sa")
+	s.ok(s.successor("job-sb", "job-sa", "b2420-s", 2420, "T1"), "successor B")
+	b := s.ok(s.post("director-1", "job-sb", "activate", map[string]any{"reason_code": "activation", "seal_seq": nil}), "activate B")
+	if num(summaryOf(b)["used"]) != 3 || num(summaryOf(b)["next_round_no"]) != 10 {
+		t.Fatalf("B summary %v", summaryOf(b))
+	}
+	s.refused(s.post("desktop", "job-sb", "round_open", openPayload(head('1'), nil, nil, nil)), "round_cap", "ordinary open over the inherited budget")
+	g := s.ok(s.post("director-1", "job-sb", "grant", grantPayload("extension", 10, head('1'), 1, nil, nil)), "extension")
+	o := s.ok(s.post("desktop", "job-sb", "round_open", openPayload(head('1'), nil, num(g["record"].(map[string]any)["seq"]), nil)), "round 10")
+	if num(o["record"].(map[string]any)["payload"].(map[string]any)["round_no"]) != 10 {
+		t.Fatalf("round %v", o["record"])
+	}
+
+	// Unsealed shadow work: the successor reserves the migration baseline.
+	w := newScenario(t)
+	w.ok(w.post("director-1", "job-wa", "claim", claimPayload("job-wa", "b2421-w", "director-1", 2421, "desktop", "builder", "T1")), "claim A")
+	w.ok(w.post("desktop", "job-wa", "round_open", openPayload(head('1'), nil, nil, nil)), "shadow open")
+	endHandedOff(w, "job-wa")
+	w.ok(w.successor("job-wb", "job-wa", "b2421-w", 2421, "T1"), "successor B")
+	wb := w.ok(w.post("director-1", "job-wb", "activate", map[string]any{"reason_code": "activation", "seal_seq": nil}), "activate B")
+	if num(summaryOf(wb)["used"]) != 3 || num(summaryOf(wb)["next_round_no"]) != 4 {
+		t.Fatalf("shadow successor summary %v", summaryOf(wb))
+	}
+	w.refused(w.post("desktop", "job-wb", "round_open", openPayload(head('2'), nil, nil, nil)), "round_cap", "ordinary open after shadow work")
+}
+
+// Tester round 2 finding B2 (design §2/§4): a predecessor's nonvoid
+// post-activation open keeps its head reserved across end and successor;
+// only the head_repeat route reuses it.
+func TestWrkSuccessorKeepsPendingHeadReservation(t *testing.T) {
+	s := newScenario(t)
+	s.activeBuilder("job-pa", "b2422-p", 2422, "T1")
+	s.ok(s.post("desktop", "job-pa", "round_open", openPayload(head('1'), nil, nil, nil)), "pending open")
+	endHandedOff(s, "job-pa")
+	s.ok(s.successor("job-pb", "job-pa", "b2422-p", 2422, "T1"), "successor")
+	s.ok(s.post("director-1", "job-pb", "activate", map[string]any{"reason_code": "activation", "seal_seq": nil}), "activate")
+	s.refused(s.post("desktop", "job-pb", "round_open", openPayload(head('1'), nil, nil, nil)), "duplicate_head", "inherited pending head")
+	s.ok(s.post("desktop", "job-pb-t2", "claim", reviewPayload("job-pb-t2", "b2422-p", 2422, "desktop", "reviewer", "T1", "job-pb", 2)), "mint")
+	g := s.ok(s.post("director-1", "job-pb", "grant", grantPayload("head_repeat", 2, head('1'), 0, 1, "job-pb-t2")), "repeat grant")
+	o := s.ok(s.post("desktop", "job-pb", "round_open", openPayload(head('1'), "job-pb-t2", nil, num(g["record"].(map[string]any)["seq"]))), "repeat open")
+	if num(o["record"].(map[string]any)["payload"].(map[string]any)["round_no"]) != 2 {
+		t.Fatalf("round %v", o["record"])
+	}
+}
+
+// Tester round 2 finding B3 (design §3/§4): a successor's claim correction
+// cannot change the lineage's task.
+func TestWrkSuccessorCorrectionCannotChangeTask(t *testing.T) {
+	s := newScenario(t)
+	s.activeBuilder("job-ka", "b2423-k", 2423, "T1")
+	endHandedOff(s, "job-ka")
+	s.ok(s.successor("job-kb", "job-ka", "b2423-k", 2423, "T1"), "successor")
+	corr := claimPayload("job-kb", "b2423-k", "director-1", 2424, "desktop", "builder", "T1")
+	corr["predecessor_job_id"] = "job-ka"
+	corr["supersedes"] = 1
+	s.refused(s.post("director-1", "job-kb", "claim", corr), "claim_conflict", "correction changes the lineage task")
+	if s.mem.TaskBinding(2423) != "job-kb" || s.mem.TaskBinding(2424) != "" {
+		t.Fatalf("bindings %q %q", s.mem.TaskBinding(2423), s.mem.TaskBinding(2424))
+	}
+}
+
+// Tester round 2 finding B4 (design §2/§4): a lineage has no length limit;
+// a long non-branching chain keeps the whole budget.
+func TestWrkLongSuccessorChain(t *testing.T) {
+	s := newScenario(t)
+	s.activeBuilder("job-l0", "b2425-l", 2425, "T1")
+	s.ok(s.post("desktop", "job-l0", "round_open", openPayload(head('1'), nil, nil, nil)), "open")
+	prev := "job-l0"
+	for i := 1; i <= 70; i++ {
+		job := fmt.Sprintf("job-l%d", i)
+		endHandedOff(s, prev)
+		s.ok(s.successor(job, prev, "b2425-l", 2425, "T1"), "successor "+job)
+		a := s.ok(s.post("director-1", job, "activate", map[string]any{"reason_code": "activation", "seal_seq": nil}), "activate "+job)
+		if num(summaryOf(a)["used"]) != 1 || num(summaryOf(a)["next_round_no"]) != 2 {
+			t.Fatalf("%s summary %v", job, summaryOf(a))
+		}
+		prev = job
+	}
+	if s.mem.TaskBinding(2425) != prev {
+		t.Fatalf("task bound to %q", s.mem.TaskBinding(2425))
+	}
+}
+
+// A broken seal anywhere in the lineage stays an integrity error for the
+// successor: it fails closed instead of inheriting a clamped budget.
+func TestWrkSuccessorOfBrokenSealFailsClosed(t *testing.T) {
+	s := newScenario(t)
+	s.ok(s.post("director-1", "job-xa", "claim", claimPayload("job-xa", "b2426-x", "director-1", 2426, "desktop", "builder", "T1")), "claim A")
+	s.ok(s.post("desktop", "job-xa", "round_open", openPayload(head('1'), nil, nil, nil)), "shadow open")
+	bb := s.ok(s.post("director-1", "job-xa", "import_begin", map[string]any{"reason_code": "import_freeze"}), "begin")
+	seedBrokenSeal(t, s.mem, "job-xa", int64(num(bb["record"].(map[string]any)["seq"])))
+	endHandedOff(s, "job-xa")
+	s.ok(s.successor("job-xb", "job-xa", "b2426-x", 2426, "T1"), "successor claim")
+	s.refused(s.post("director-1", "job-xb", "activate", map[string]any{"reason_code": "activation", "seal_seq": nil}), "import_unsealed", "activate over a broken lineage seal")
+	s.ok(s.post("director-1", "job-xb", "end", map[string]any{"end_type": "revoked", "reason_code": "broken_seal"}), "end stays allowed")
+}

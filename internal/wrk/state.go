@@ -109,11 +109,16 @@ type state struct {
 	// lineage to its head: negative identity a head_repeat grant may cite,
 	// never positive evidence.
 	inheritedRounds map[int64]string
-	legacy          []legacyEvent
-	workEvidence    bool
-	historyBad      bool
-	receiptReq      bool
-	sealBroken      bool
+	// inheritedReserved holds heads of the lineage's nonvoid
+	// post-activation opens: still reserved, since only a verdict-free void
+	// (never an end or a successor) releases a reservation.
+	inheritedReserved map[string]bool
+	predSealBroken    bool
+	legacy            []legacyEvent
+	workEvidence      bool
+	historyBad        bool
+	receiptReq        bool
+	sealBroken        bool
 
 	// inherited from a trusted predecessor
 	inheritedUsed  int64
@@ -140,11 +145,24 @@ func reviewRole(role string) bool { return role == "tester" || role == "reviewer
 // buildState folds a journal. pred is the trusted predecessor's state (nil
 // for a root job); its budget, numbering and identity sets are inherited.
 func buildState(j *Journal, pred *state) *state {
-	s := &state{jobID: j.JobID, rounds: map[int64]*round{}, grants: map[int64]*grant{}, paths: map[string]bool{}, contents: map[string]bool{}, verdictHeads: map[string]bool{}, legacyRounds: map[int64]string{}, inheritedRounds: map[int64]string{}}
+	s := &state{jobID: j.JobID, rounds: map[int64]*round{}, grants: map[int64]*grant{}, paths: map[string]bool{}, contents: map[string]bool{}, verdictHeads: map[string]bool{}, legacyRounds: map[int64]string{}, inheritedRounds: map[int64]string{}, inheritedReserved: map[string]bool{}}
 	s.tail, s.tailHash = j.Tail()
 	if pred != nil {
-		s.inheritedUsed = pred.used()
-		s.inheritedFloor = pred.nextRoundNo() - 1
+		// A successor inherits the predecessor's whole effective budget and
+		// numbering, including a committed seal or unsealed work evidence
+		// (design §2/§4/§5): never a fresh zero.
+		s.inheritedUsed, s.inheritedFloor = pred.effectiveBudget()
+		s.predSealBroken = pred.brokenSeal()
+		for h := range pred.inheritedReserved {
+			s.inheritedReserved[h] = true
+		}
+		if pred.activate != nil {
+			for _, rd := range pred.liveOpens() {
+				if rd.void == nil {
+					s.inheritedReserved[rd.head] = true
+				}
+			}
+		}
 		for no, h := range pred.inheritedRounds {
 			s.inheritedRounds[no] = h
 		}
@@ -434,7 +452,7 @@ func (s *state) pending() []int64 {
 // headReserved: a nonvoid live open on head, or any actual verdict on it
 // (live, historical, imported or inherited).
 func (s *state) headReserved(head string) bool {
-	if s.verdictHeads[head] {
+	if s.verdictHeads[head] || s.inheritedReserved[head] {
 		return true
 	}
 	for _, rd := range s.liveOpens() {
@@ -443,6 +461,92 @@ func (s *state) headReserved(head string) bool {
 		}
 	}
 	return false
+}
+
+// brokenSeal reports a seal in the job or its lineage whose numbering_floor
+// is below its baseline_used: an integrity error that fails closed.
+func (s *state) brokenSeal() bool {
+	return (s.seal != nil && s.sealBroken) || s.predSealBroken
+}
+
+// conservative computes the design §5 sealed budget and numbering floor
+// from the job's own history: L counts server shadow opens, unbound shadow
+// verdicts and imported legacy rounds and unbound legacy verdicts; I is the
+// inherited budget plus the largest archived takeover rounds_used. With
+// work evidence the baseline is max(3, L+I), otherwise I; the floor is the
+// largest round number seen, never below the baseline or the inherited
+// floor. ok is false on a safe-integer overflow.
+func (s *state) conservative() (baseline, floor int64, ok bool) {
+	var l, takeover int64
+	for _, rd := range s.opens {
+		l++
+		if rd.no > floor {
+			floor = rd.no
+		}
+	}
+	for _, v := range s.verdicts {
+		n, valid := pInt(v.Payload, "round_no")
+		if !valid || s.rounds[n] == nil {
+			l++
+		}
+		if valid && n > floor {
+			floor = n
+		}
+	}
+	for _, ev := range s.legacy {
+		if ev.kind == "job.round" || (ev.kind == "job.verdict" && ev.round == nil) {
+			l++
+		}
+		if ev.round != nil && (ev.kind == "job.round" || ev.kind == "job.verdict" || ev.kind == "job.round_void") && *ev.round > floor {
+			floor = *ev.round
+		}
+		if ev.kind == "job.takeover" && ev.roundsUsed != nil && *ev.roundsUsed > takeover {
+			takeover = *ev.roundsUsed
+		}
+	}
+	i := s.inheritedUsed + takeover
+	baseline = i
+	if s.workEvidence {
+		if l+i > MaxSafeInteger || l+i < 0 {
+			return 0, 0, false
+		}
+		baseline = l + i
+		if baseline < Cap {
+			baseline = Cap
+		}
+	}
+	if baseline > floor {
+		floor = baseline
+	}
+	if s.inheritedFloor > floor {
+		floor = s.inheritedFloor
+	}
+	return baseline, floor, true
+}
+
+// effectiveBudget is what a successor inherits: an activated job's live
+// used and numbering; a sealed job's committed baseline and floor; for
+// unsealed work evidence the same conservative computation a seal would
+// commit; for a claim-only job what it inherited itself.
+func (s *state) effectiveBudget() (used, floor int64) {
+	switch {
+	case s.activate != nil:
+		return s.used(), s.nextRoundNo() - 1
+	case s.seal != nil:
+		b, _ := pInt(s.seal.Payload, "baseline_used")
+		f, _ := pInt(s.seal.Payload, "numbering_floor")
+		if s.maxRoundNo > f {
+			f = s.maxRoundNo
+		}
+		return b, f
+	case s.workEvidence:
+		b, f, ok := s.conservative()
+		if !ok {
+			return MaxSafeInteger, MaxSafeInteger
+		}
+		return b, f
+	}
+	return s.inheritedUsed, s.inheritedFloor
 }
 
 func (s *state) lastVerdictSeq() any {

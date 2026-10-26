@@ -149,38 +149,42 @@ func (e *Engine) append(ctx context.Context, b Backend, client, jobID, key strin
 	return out, kind, nil
 }
 
-// load builds a job's state including its trusted predecessor chain.
+// load builds a job's state including its whole trusted predecessor
+// lineage. Predecessors are fixed by the first claim and ended, hence
+// immutable, so reading them needs no lock. The chain has no length limit
+// (design §2/§4 allow any number of non-branching successors); a visited
+// set stops a malformed cycle.
 func load(tx Tx, jobID string) (*state, *Journal, error) {
 	j, err := tx.Journal(jobID)
 	if err != nil {
 		return nil, nil, err
 	}
-	var pred *state
-	if len(j.Records) > 0 && j.Records[0].Kind == "claim" {
-		// The predecessor is fixed by the first claim; it is ended and
-		// therefore immutable, so reading it needs no lock.
-		if pid := firstClaimPredecessor(j); pid != "" && pid != jobID {
-			pred, _, err = loadDepth(tx, pid, 64)
-			if err != nil {
-				return nil, nil, err
-			}
-		}
+	pred, err := loadLineage(tx, jobID, firstClaimPredecessor(j))
+	if err != nil {
+		return nil, nil, err
 	}
 	return buildState(j, pred), j, nil
 }
 
-func loadDepth(tx Tx, jobID string, depth int) (*state, *Journal, error) {
-	j, err := tx.Journal(jobID)
-	if err != nil {
-		return nil, nil, err
-	}
-	var pred *state
-	if pid := firstClaimPredecessor(j); pid != "" && pid != jobID && depth > 0 {
-		if pred, _, err = loadDepth(tx, pid, depth-1); err != nil {
-			return nil, nil, err
+// loadLineage folds the predecessor chain starting at pred, root first, and
+// returns pred's state (nil when there is no predecessor).
+func loadLineage(tx Tx, jobID, pred string) (*state, error) {
+	var chain []*Journal
+	seen := map[string]bool{jobID: true}
+	for cur := pred; cur != "" && !seen[cur]; {
+		seen[cur] = true
+		pj, err := tx.Journal(cur)
+		if err != nil {
+			return nil, err
 		}
+		chain = append(chain, pj)
+		cur = firstClaimPredecessor(pj)
 	}
-	return buildState(j, pred), j, nil
+	var st *state
+	for k := len(chain) - 1; k >= 0; k-- {
+		st = buildState(chain[k], st)
+	}
+	return st, nil
 }
 
 func firstClaimPredecessor(j *Journal) string {
@@ -200,11 +204,9 @@ func (e *Engine) SummaryAt(tx Tx, jobID string, seq int64) (Summary, error) {
 		return Summary{}, err
 	}
 	pj := j.Prefix(seq)
-	var pred *state
-	if pid := firstClaimPredecessor(pj); pid != "" && pid != jobID {
-		if pred, _, err = loadDepth(tx, pid, 64); err != nil {
-			return Summary{}, err
-		}
+	pred, err := loadLineage(tx, jobID, firstClaimPredecessor(pj))
+	if err != nil {
+		return Summary{}, err
 	}
 	return buildState(pj, pred).summary(e.Generation, e.now()), nil
 }
@@ -253,7 +255,7 @@ func (e *Engine) decide(tx Tx, client, key string, req *Request) (WriteResult, e
 	// A stored seal whose numbering_floor is below its baseline_used breaks
 	// the §5 invariant: the job fails closed for every new mutation except
 	// end, no round is numbered from it and nothing recomputes the floor.
-	if s.seal != nil && s.sealBroken && req.Kind != "end" {
+	if s.brokenSeal() && req.Kind != "end" {
 		return WriteResult{}, Fail(BrokenSealCode)
 	}
 	now := e.now()
@@ -314,11 +316,9 @@ func (e *Engine) decide(tx Tx, client, key string, req *Request) (WriteResult, e
 		}
 		next.Imports[rec.Seq] = content
 	}
-	var pred *state
-	if pid := firstClaimPredecessor(next); pid != "" && pid != req.JobID {
-		if pred, _, err = loadDepth(tx, pid, 64); err != nil {
-			return WriteResult{}, err
-		}
+	pred, err := loadLineage(tx, req.JobID, firstClaimPredecessor(next))
+	if err != nil {
+		return WriteResult{}, err
 	}
 	return WriteResult{Created: true, Record: rec, Summary: buildState(next, pred).summary(e.Generation, now)}, nil
 }
@@ -488,6 +488,16 @@ func (e *Engine) subjectClaim(tx Tx, s *state, j *Journal, req *Request) error {
 		if pred != s.predecessor {
 			return Fail(ClaimConflict)
 		}
+		// A successor's lineage never changes task, corrections included.
+		if pred != "" {
+			ps, _, err := load(tx, pred)
+			if err != nil {
+				return err
+			}
+			if ps.taskID != task {
+				return Fail(ClaimConflict)
+			}
+		}
 		release, releaseTask = req.JobID, s.taskID
 	}
 	claims, err := tx.CanonicalClaims()
@@ -530,11 +540,11 @@ func (e *Engine) subjectClaim(tx Tx, s *state, j *Journal, req *Request) error {
 	return tx.BindTask(task, req.JobID, release, releaseTask)
 }
 
-// ancestors returns the predecessor chain starting at pred (the job's
-// trusted lineage), bounded like the state loader.
+// ancestors returns the whole predecessor chain starting at pred (the
+// job's trusted lineage), without a length limit.
 func ancestors(tx Tx, jobID, pred string) (map[string]bool, error) {
 	out := map[string]bool{}
-	for cur, depth := pred, 0; cur != "" && cur != jobID && !out[cur] && depth < 64; depth++ {
+	for cur := pred; cur != "" && cur != jobID && !out[cur]; {
 		out[cur] = true
 		j, err := tx.Journal(cur)
 		if err != nil {
@@ -1136,38 +1146,9 @@ func (e *Engine) ruleImportSeal(s *state, j *Journal, p map[string]any) (map[str
 		return nil, Fail(ImportUnsealed)
 	}
 	manifest := []any{}
-	var l, takeover int64
-	floor := int64(0)
 	for _, r := range j.Records {
-		switch r.Kind {
-		case "import":
-			if r.Seq > s.begin.Seq {
-				manifest = append(manifest, map[string]any{"seq": r.Seq, "source_locator": r.Source.SourceLocator, "source_sha256": r.Source.SourceSHA256})
-			}
-		case "round_open":
-			l++
-			if n, ok := pInt(r.Payload, "round_no"); ok && n > floor {
-				floor = n
-			}
-		case "verdict", "void":
-			n, ok := pInt(r.Payload, "round_no")
-			if r.Kind == "verdict" && (!ok || s.rounds[n] == nil) {
-				l++
-			}
-			if ok && n > floor {
-				floor = n
-			}
-		}
-	}
-	for _, ev := range s.legacy {
-		if ev.kind == "job.round" || (ev.kind == "job.verdict" && ev.round == nil) {
-			l++
-		}
-		if ev.round != nil && (ev.kind == "job.round" || ev.kind == "job.verdict" || ev.kind == "job.round_void") && *ev.round > floor {
-			floor = *ev.round
-		}
-		if ev.kind == "job.takeover" && ev.roundsUsed != nil && *ev.roundsUsed > takeover {
-			takeover = *ev.roundsUsed
+		if r.Kind == "import" && r.Seq > s.begin.Seq {
+			manifest = append(manifest, map[string]any{"seq": r.Seq, "source_locator": r.Source.SourceLocator, "source_sha256": r.Source.SourceSHA256})
 		}
 	}
 	if int64(len(manifest)) != count {
@@ -1176,22 +1157,9 @@ func (e *Engine) ruleImportSeal(s *state, j *Journal, p map[string]any) (map[str
 	if ContentSHA256(MustCanonical(manifest)) != pStr(p, "manifest_sha256") {
 		return nil, Fail(ImportUnsealed)
 	}
-	i := s.inheritedUsed + takeover
-	baseline := i
-	if s.workEvidence {
-		if l+i > MaxSafeInteger || l+i < 0 {
-			return nil, Fail(InvalidRequest)
-		}
-		baseline = l + i
-		if baseline < Cap {
-			baseline = Cap
-		}
-	}
-	if baseline > floor {
-		floor = baseline
-	}
-	if s.inheritedFloor > floor {
-		floor = s.inheritedFloor
+	baseline, floor, ok := s.conservative()
+	if !ok {
+		return nil, Fail(InvalidRequest)
 	}
 	return map[string]any{"begin_seq": beginSeq, "expected_import_count": count, "manifest_sha256": pStr(p, "manifest_sha256"), "reason_code": pStr(p, "reason_code"), "shadow_cutoff_seq": pIntOr(s.begin.Payload, "shadow_cutoff_seq"), "baseline_used": baseline, "numbering_floor": floor}, nil
 }
