@@ -125,6 +125,14 @@ type vectorFile struct {
 	Cases   []vectorCase `json:"cases"`
 }
 
+// legacyGiven is the optional given.legacy block: the legacy store rows
+// a case needs.  Task rows carry refs.job_id (the canonical subject job
+// that protects them); disposition rows carry the task_id they target.
+type legacyGiven struct {
+	Tasks        []map[string]any `json:"tasks"`
+	Dispositions []map[string]any `json:"dispositions"`
+}
+
 type vectorCase struct {
 	Name   string `json:"name"`
 	Source struct {
@@ -138,6 +146,7 @@ type vectorCase struct {
 		JobID   string           `json:"job_id"`
 		Policy  json.RawMessage  `json:"policy"`
 		Records []map[string]any `json:"records"`
+		Legacy  legacyGiven      `json:"legacy"`
 	} `json:"given"`
 	Request  map[string]any `json:"request"`
 	Expect   map[string]any `json:"expect"`
