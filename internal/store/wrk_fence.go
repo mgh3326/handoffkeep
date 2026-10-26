@@ -81,8 +81,12 @@ type wrkBinding struct {
 const WrkProtectAtActivate = true
 
 // wrkTaskBinding returns the canonical builder/worker subject bound to
-// taskID, or nil for an unprotected task. With a successor chain the live
-// (unended) subject is current; with none live, the latest claimed one.
+// taskID, or nil for an unprotected task (director-1 protected-task ruling,
+// design L81, L137, L3960). Only a job's latest claim enrolls, so a binding
+// a correction superseded never does; review-role claims never enroll;
+// enrollment needs the job's activate and survives its end, so a successor
+// keeps its predecessor's task. With a successor chain the live (unended)
+// subject is current; with none live, the latest claimed one.
 func wrkTaskBinding(ctx context.Context, q wrkQuerier, taskID int64) (*wrkBinding, error) {
 	rows, err := q.Query(ctx, `WITH jobs AS (SELECT DISTINCT job_id FROM wrk_records WHERE kind='claim' AND (payload->>'task_id')::bigint=$1),
 		latest AS (SELECT DISTINCT ON (r.job_id) r.job_id, r.seq, r.payload, r.received_at FROM wrk_records r JOIN jobs USING (job_id) WHERE r.kind='claim' ORDER BY r.job_id, r.seq DESC)

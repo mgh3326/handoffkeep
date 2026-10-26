@@ -484,4 +484,5 @@ func TestO3StoreSuite(t *testing.T) {
 	t.Run("ShadowProtectionStartsAtActivate", func(t *testing.T) { testShadowProtectionStartsAtActivate(t, fx) })
 	t.Run("ProjectionUpsertAndHydration", func(t *testing.T) { testProjectionUpsertAndHydration(t, fx) })
 	t.Run("ReceiptPhaseBoundary", func(t *testing.T) { testReceiptPhaseBoundary(t, fx) })
+	t.Run("EnrollmentFollowsCurrentClaim", func(t *testing.T) { testEnrollmentFollowsCurrentClaim(t, fx) })
 }

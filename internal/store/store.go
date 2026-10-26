@@ -2314,7 +2314,13 @@ func (s *Store) NextTask(ctx context.Context, lane, by, jobID, noJob string) (Ta
 	// Protected tasks are never handed out by the legacy queue.
 	var id int64
 	if s.wrk {
-		err = tx.QueryRow(ctx, `SELECT id FROM tasks WHERE lane=$1 AND state='backlog' AND NOT EXISTS (SELECT 1 FROM wrk_records w WHERE w.kind='claim' AND (w.payload->>'task_id')::bigint=tasks.id AND (NOT $2 OR EXISTS(SELECT 1 FROM wrk_records a WHERE a.job_id=w.job_id AND a.kind='activate'))) ORDER BY priority DESC,created_at ASC,id ASC FOR UPDATE SKIP LOCKED LIMIT 1`, lane, WrkProtectAtActivate).Scan(&id)
+		// Enrollment follows each job's latest claim only (director-1
+		// protected-task ruling): a superseded binding never enrolls.
+		err = tx.QueryRow(ctx, `SELECT id FROM tasks WHERE lane=$1 AND state='backlog' AND NOT EXISTS (
+			SELECT 1 FROM (SELECT DISTINCT ON (job_id) job_id, payload FROM wrk_records WHERE kind='claim' ORDER BY job_id, seq DESC) l
+			WHERE (l.payload->>'task_id')::bigint=tasks.id AND l.payload->>'role' IN ('builder','worker')
+			AND (NOT $2 OR EXISTS(SELECT 1 FROM wrk_records a WHERE a.job_id=l.job_id AND a.kind='activate')))
+			ORDER BY priority DESC,created_at ASC,id ASC FOR UPDATE SKIP LOCKED LIMIT 1`, lane, WrkProtectAtActivate).Scan(&id)
 	} else {
 		err = tx.QueryRow(ctx, `SELECT id FROM tasks WHERE lane=$1 AND state='backlog' ORDER BY priority DESC,created_at ASC,id ASC FOR UPDATE SKIP LOCKED LIMIT 1`, lane).Scan(&id)
 	}

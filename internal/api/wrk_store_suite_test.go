@@ -456,3 +456,58 @@ func relayEventsOf(r packResponse) []map[string]any {
 	_ = json.Unmarshal(r.raw, &page)
 	return page.Events
 }
+
+// testEnrollmentFollowsCurrentClaim (director-1 protected-task ruling,
+// design L81, L137, L3960): (a) after a correction from task 2412 to 2413
+// and activate, 2413 is fenced and 2412 accepts legacy calls; (b) a
+// successor keeps 2413 fenced; (c) a review-role claim enrolls nothing.
+func testEnrollmentFollowsCurrentClaim(t *testing.T, fx *pgFixture) {
+	s := pgScenario(t, fx)
+	ctx := context.Background()
+	s.ok(s.post("director-1", "job-en", "claim", claimPayload("job-en", "b2412-en", "director-1", 2412, "desktop", "builder", "T1")), "claim 2412")
+	corr := claimPayload("job-en", "b2412-en", "director-1", 2413, "desktop", "builder", "T1")
+	corr["supersedes"] = 1
+	s.ok(s.post("director-1", "job-en", "claim", corr), "correct to 2413")
+	s.ok(s.post("director-1", "job-en", "activate", map[string]any{"reason_code": "activation", "seal_seq": nil}), "activate")
+	protected := func(task int64) bool {
+		p, err := fx.st.WrkTaskProtected(ctx, task)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	if !protected(2413) || protected(2412) {
+		t.Fatalf("(a) protected 2413=%v 2412=%v", protected(2413), protected(2412))
+	}
+	s.refused(s.legacyPost("desktop", "/v1/tasks/2413/claim", map[string]any{"claimed_by": "pane", "job_id": "legacy-x"}), "wrk_receipt_required", "(a) current task claim")
+	if r := s.legacyPost("desktop", "/v1/tasks/2412/claim", map[string]any{"claimed_by": "pane", "job_id": "legacy-x"}); r.status != 200 {
+		t.Fatalf("(a) superseded task stays legacy: %d %s", r.status, r.raw)
+	}
+	if r := s.legacyPost("desktop", "/v1/tasks/2412/transition", map[string]any{"to": "in_progress"}); r.status != 200 {
+		t.Fatalf("(a) superseded task transition: %d %s", r.status, r.raw)
+	}
+	fx.setTaskState(2412, "backlog")
+	if _, err := fx.admin.Exec(ctx, `UPDATE tasks SET lane='en-lane' WHERE id IN (2412, 2413)`); err != nil {
+		t.Fatal(err)
+	}
+	if r := s.legacyPost("desktop", "/v1/tasks/next", map[string]any{"lane": "en-lane", "claimed_by": "pane", "job_id": "legacy-y"}); r.status != 200 || num(r.body["id"]) != 2412 {
+		t.Fatalf("(a) next must hand out 2412 and skip 2413: %d %s", r.status, r.raw)
+	}
+	// (b) a successor keeps the enrollment, before and after it activates.
+	s.ok(s.post("director-1", "job-en", "end", map[string]any{"end_type": "handed_off", "reason_code": "takeover"}), "end")
+	s.ok(s.successor("job-en2", "job-en", "b2412-en", 2413, "T1"), "successor")
+	if !protected(2413) {
+		t.Fatal("(b) the successor lost the enrollment before activate")
+	}
+	s.ok(s.post("director-1", "job-en2", "activate", map[string]any{"reason_code": "activation", "seal_seq": nil}), "activate successor")
+	s.refused(s.legacyPost("desktop", "/v1/tasks/2413/transition", map[string]any{"to": "hold"}), "wrk_receipt_required", "(b) successor task")
+	// (c) a review-role claim on a shadow subject's task enrolls nothing.
+	s.ok(s.post("director-1", "job-sx", "claim", claimPayload("job-sx", "b2414-sx", "director-1", 2414, "desktop", "builder", "T1")), "shadow subject")
+	s.ok(s.post("director-1", "job-sx-t1", "claim", reviewPayload("job-sx-t1", "b2414-sx", 2414, "mac-dev", "tester", "T1", "job-sx", 1)), "central P1 tester")
+	if protected(2414) {
+		t.Fatal("(c) a review-role claim enrolled its task")
+	}
+	if r := s.legacyPost("desktop", "/v1/tasks/2414/claim", map[string]any{"claimed_by": "pane", "job_id": "legacy-z"}); r.status != 200 {
+		t.Fatalf("(c) task stays legacy-compatible: %d %s", r.status, r.raw)
+	}
+}
