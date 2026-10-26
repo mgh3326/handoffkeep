@@ -2294,6 +2294,7 @@ def build_permmap():
             "permissions": perms}
 
 
+DESIGN_KEY = "designs/hk1873/b1873a-sol-r4"
 CONTRACT_SHA = "ce4f6efbe39514bb0bced2d0a66510e646058a66d0d28bbb417af180f375c19d"
 
 
@@ -2312,7 +2313,14 @@ def extract_contract():
 
 def check_design():
     """The pack pins one design body; refuse to generate from another."""
-    got = sha(open(DESIGN_MD, "rb").read())
+    try:
+        body = open(DESIGN_MD, "rb").read()
+    except OSError:
+        raise SystemExit(
+            "design body not found at %s; fetch hk:doc %s "
+            "(sha %s...) and pass --design FILE"
+            % (DESIGN_MD, DESIGN_KEY, CONTRACT_SHA[:8]))
+    got = sha(body)
     if got != CONTRACT_SHA:
         raise SystemExit("design body sha256 %s != pinned %s"
                          % (got, CONTRACT_SHA))
@@ -2344,19 +2352,21 @@ def main():
     emit("README.md", README_TMPL % {"sha": CONTRACT_SHA})
 
     # MANIFEST.json
-    man = {"design": {"key": "designs/hk1873/b1873a-sol-r4",
+    man = {"design": {"key": DESIGN_KEY,
                       "doc": 44185, "revision": 4, "amendment": 1,
                       "body_sha256": CONTRACT_SHA},
            "files": {}}
+    found = {}
     for root, _, names in os.walk(OUT):
-        for n in sorted(names):
+        for n in names:
             if n == "MANIFEST.json":
                 continue
             p = os.path.join(root, n)
-            rel = os.path.relpath(p, OUT)
-            man["files"][rel.replace(os.sep, "/")] = {
-                "sha256": sha(open(p, "rb").read()),
-                "bytes": os.path.getsize(p)}
+            found[os.path.relpath(p, OUT).replace(os.sep, "/")] = p
+    for rel in sorted(found):
+        p = found[rel]
+        man["files"][rel] = {"sha256": sha(open(p, "rb").read()),
+                             "bytes": os.path.getsize(p)}
     emit("MANIFEST.json", man)
     total = sum(len(f["cases"]) for f in files)
     print("wrote %d vector cases in %d files + data files to %s"
