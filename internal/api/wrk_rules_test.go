@@ -606,3 +606,28 @@ func TestWrkSuccessorOfBrokenSealFailsClosed(t *testing.T) {
 	s.refused(s.post("director-1", "job-xb", "activate", map[string]any{"reason_code": "activation", "seal_seq": nil}), "import_unsealed", "activate over a broken lineage seal")
 	s.ok(s.post("director-1", "job-xb", "end", map[string]any{"end_type": "revoked", "reason_code": "broken_seal"}), "end stays allowed")
 }
+
+// Tester round 3 finding B1 (design §5 L4028, §2 L41): an import budget that
+// overflows the safe-integer range is invalid_request for the seal and stays
+// invalid through successors: their activate is refused, never committed
+// with an unsafe baseline or next round number.
+func TestWrkSuccessorOfOverflowingBudgetCannotActivate(t *testing.T) {
+	for _, shadow := range []bool{true, false} {
+		s := newScenario(t)
+		s.ok(s.post("director-1", "job-oa", "claim", claimPayload("job-oa", "b2427-o", "director-1", 2427, "desktop", "builder", "T1")), "claim A")
+		if shadow {
+			s.ok(s.post("desktop", "job-oa", "round_open", openPayload(head('1'), nil, nil, nil)), "shadow open")
+		}
+		begin := s.ok(s.post("director-1", "job-oa", "import_begin", map[string]any{"reason_code": "import_freeze"}), "begin")
+		b := []byte(fmt.Sprintf(`{"job_id":"overflow-a","kind":"job.takeover","rounds_used":%d}`, wrk.MaxSafeInteger))
+		r := s.ok(s.post("director-1", "job-oa", "import", map[string]any{"source_locator": "generated/overflow.json", "source_sha256": wrk.ContentSHA256(b), "original_actor_client_id": "desktop", "original_at": "2026-10-20T00:00:00Z", "legacy_kind": "job.takeover", "content_b64": base64.StdEncoding.EncodeToString(b)}), "import takeover")
+		m := map[string]any{"seq": int64(num(r["record"].(map[string]any)["seq"])), "source_locator": "generated/overflow.json", "source_sha256": wrk.ContentSHA256(b)}
+		s.refused(s.post("director-1", "job-oa", "import_seal", map[string]any{"begin_seq": num(begin["record"].(map[string]any)["seq"]), "expected_import_count": 1, "manifest_sha256": wrk.ContentSHA256(wrk.MustCanonical([]any{m})), "reason_code": "import_seal"}), "invalid_request", fmt.Sprintf("overflowing seal (shadow=%v)", shadow))
+		endHandedOff(s, "job-oa")
+		s.ok(s.successor("job-ob", "job-oa", "b2427-o", 2427, "T1"), "successor B")
+		s.refused(s.post("director-1", "job-ob", "activate", map[string]any{"reason_code": "activation", "seal_seq": nil}), "invalid_request", fmt.Sprintf("activate over an overflowing lineage (shadow=%v)", shadow))
+		endHandedOff(s, "job-ob")
+		s.ok(s.successor("job-oc", "job-ob", "b2427-o", 2427, "T1"), "successor C")
+		s.refused(s.post("director-1", "job-oc", "activate", map[string]any{"reason_code": "activation", "seal_seq": nil}), "invalid_request", "overflow stays invalid down the chain")
+	}
+}

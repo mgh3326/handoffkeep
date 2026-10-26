@@ -114,6 +114,9 @@ type state struct {
 	// (never an end or a successor) releases a reservation.
 	inheritedReserved map[string]bool
 	predSealBroken    bool
+	// predBudgetInvalid marks a lineage whose effective budget overflows
+	// the safe-integer range: it stays invalid_request and never activates.
+	predBudgetInvalid bool
 	legacy            []legacyEvent
 	workEvidence      bool
 	historyBad        bool
@@ -151,7 +154,9 @@ func buildState(j *Journal, pred *state) *state {
 		// A successor inherits the predecessor's whole effective budget and
 		// numbering, including a committed seal or unsealed work evidence
 		// (design §2/§4/§5): never a fresh zero.
-		s.inheritedUsed, s.inheritedFloor = pred.effectiveBudget()
+		var ok bool
+		s.inheritedUsed, s.inheritedFloor, ok = pred.effectiveBudget()
+		s.predBudgetInvalid = !ok
 		s.predSealBroken = pred.brokenSeal()
 		for h := range pred.inheritedReserved {
 			s.inheritedReserved[h] = true
@@ -475,7 +480,8 @@ func (s *state) brokenSeal() bool {
 // inherited budget plus the largest archived takeover rounds_used. With
 // work evidence the baseline is max(3, L+I), otherwise I; the floor is the
 // largest round number seen, never below the baseline or the inherited
-// floor. ok is false on a safe-integer overflow.
+// floor. ok is false on a safe-integer overflow, including a floor whose
+// next round number would leave the wire range, and for an invalid lineage.
 func (s *state) conservative() (baseline, floor int64, ok bool) {
 	var l, takeover int64
 	for _, rd := range s.opens {
@@ -504,6 +510,9 @@ func (s *state) conservative() (baseline, floor int64, ok bool) {
 			takeover = *ev.roundsUsed
 		}
 	}
+	if s.predBudgetInvalid || s.inheritedUsed+takeover > MaxSafeInteger {
+		return 0, 0, false
+	}
 	i := s.inheritedUsed + takeover
 	baseline = i
 	if s.workEvidence {
@@ -521,32 +530,32 @@ func (s *state) conservative() (baseline, floor int64, ok bool) {
 	if s.inheritedFloor > floor {
 		floor = s.inheritedFloor
 	}
+	if floor >= MaxSafeInteger {
+		return 0, 0, false
+	}
 	return baseline, floor, true
 }
 
 // effectiveBudget is what a successor inherits: an activated job's live
 // used and numbering; a sealed job's committed baseline and floor; for
 // unsealed work evidence the same conservative computation a seal would
-// commit; for a claim-only job what it inherited itself.
-func (s *state) effectiveBudget() (used, floor int64) {
+// commit; for a claim-only job what it inherited itself. ok is false when
+// that budget overflows (design §5: invalid_request, blocks activation).
+func (s *state) effectiveBudget() (used, floor int64, ok bool) {
 	switch {
 	case s.activate != nil:
-		return s.used(), s.nextRoundNo() - 1
+		return s.used(), s.nextRoundNo() - 1, true
 	case s.seal != nil:
 		b, _ := pInt(s.seal.Payload, "baseline_used")
 		f, _ := pInt(s.seal.Payload, "numbering_floor")
 		if s.maxRoundNo > f {
 			f = s.maxRoundNo
 		}
-		return b, f
+		return b, f, true
 	case s.workEvidence:
-		b, f, ok := s.conservative()
-		if !ok {
-			return MaxSafeInteger, MaxSafeInteger
-		}
-		return b, f
+		return s.conservative()
 	}
-	return s.inheritedUsed, s.inheritedFloor
+	return s.inheritedUsed, s.inheritedFloor, !s.predBudgetInvalid
 }
 
 func (s *state) lastVerdictSeq() any {

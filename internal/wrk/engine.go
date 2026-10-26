@@ -641,6 +641,9 @@ func (e *Engine) ruleActivate(tx Tx, s *state, p map[string]any) (map[string]any
 		if seal != nil || s.workEvidence {
 			return nil, Fail(ImportUnsealed)
 		}
+		if s.predBudgetInvalid {
+			return nil, Fail(InvalidRequest)
+		}
 		baseline = s.inheritedUsed
 	}
 	return map[string]any{"baseline_used": baseline, "mode": "enforced", "reason_code": pStr(p, "reason_code"), "seal_seq": intOrNil(seal)}, nil
