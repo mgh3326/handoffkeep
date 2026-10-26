@@ -72,6 +72,12 @@ A successful replay returns the original record and committed summary, evaluated
 at that record's received_at even after a grant expires. Fetch the current job
 before the next decision. An unreadable stored timestamp fails closed.
 
+A successor of an ended shadow job inherits the whole conservative migration
+budget even if its predecessor never sealed: shadow/imported work and takeover
+counts use the same minimum-three and safe-integer checks as sealing. A stored
+seal pins that accounting. Ending an unsealed migration cannot lower the budget
+or recycle imported round numbers, and overflow refuses successor activation.
+
 ## Verification
 
 The unchanged M1 pack drives the pure transition engine, the real HTTP/store

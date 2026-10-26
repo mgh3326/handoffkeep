@@ -200,8 +200,12 @@ func (e Engine) Append(s Snapshot, actor, job, key string, r Request) (WriteResp
 			if x != nil {
 				return WriteResponse{}, nil, x
 			}
-			if baseline < previous.Used {
-				baseline = previous.Used
+			used, _, x := s.inheritedBudget(pred, previous, e.time())
+			if x != nil {
+				return WriteResponse{}, nil, x
+			}
+			if baseline < used {
+				baseline = used
 			}
 		}
 		p = Object{"baseline_used": baseline, "mode": "enforced", "seal_seq": p["seal_seq"], "reason_code": p["reason_code"]}
@@ -829,16 +833,39 @@ func (e Engine) headReserved(s Snapshot, job, head string) bool {
 	return false
 }
 func (e Engine) accountImport(s Snapshot, job string) (int64, int64, error) {
+	return s.accountImport(job, e.time())
+}
+
+// An abandoned shadow migration cannot discard work through a successor.
+// Sealed history uses its pinned accounting; unsealed history is charged by
+// the exact same conservative calculation as a seal, including overflow.
+// This is inheritance accounting, not trusted work or a synthetic seal.
+func (s Snapshot) inheritedBudget(job string, sum Summary, now time.Time) (int64, int64, error) {
+	if sum.State == "ended" && s.Activation(job) == 0 {
+		for _, r := range s.Jobs[job] {
+			if r.Kind == "import_seal" {
+				return Num(r.Payload, "baseline_used"), Num(r.Payload, "numbering_floor"), nil
+			}
+		}
+		return s.accountImport(job, now)
+	}
+	return sum.Used, sum.Next - 1, nil
+}
+
+func (s Snapshot) accountImport(job string, now time.Time) (int64, int64, error) {
 	count, inherited, takeover, floor := int64(0), int64(0), int64(0), int64(0)
 	work := false
 	c := s.Claim(job)
 	if c != nil && Text(c.Payload, "predecessor_job_id") != "" {
-		p, x := s.Summary(Text(c.Payload, "predecessor_job_id"), e.time())
+		pred := Text(c.Payload, "predecessor_job_id")
+		p, x := s.Summary(pred, now)
 		if x != nil {
 			return 0, 0, x
 		}
-		inherited = p.Used
-		floor = p.Next - 1
+		inherited, floor, x = s.inheritedBudget(pred, p, now)
+		if x != nil {
+			return 0, 0, x
+		}
 	}
 	for _, r := range s.Jobs[job] {
 		p, kind := r.Payload, r.Kind

@@ -227,7 +227,7 @@ func (s Snapshot) summary(job string, now time.Time, seen map[string]bool) (Summ
 		case "activate":
 			sum.State = "active"
 			sum.Baseline = Num(r.Payload, "baseline_used")
-			sum.Next = 1
+			sum.Next = sum.Baseline + 1
 			sum.LastVerdict = nil
 		case "import_begin":
 			sum.State = "importing"
@@ -261,6 +261,18 @@ func (s Snapshot) summary(job string, now time.Time, seen map[string]bool) (Summ
 		}
 		if sum.Next < p.Next {
 			sum.Next = p.Next
+		}
+		if s.Activation(job) > 0 {
+			// A successor also reserves the abandoned migration's imported
+			// ordinals. Claim-only successors remain observations; activation
+			// validates this effective budget before any authoritative write.
+			_, floor, e := s.inheritedBudget(Text(c.Payload, "predecessor_job_id"), p, now)
+			if e != nil {
+				return sum, e
+			}
+			if sum.Next <= floor {
+				sum.Next = floor + 1
+			}
 		}
 		// Successors inherit every predecessor number, including historical
 		// observations and voids that no longer consume a review slot.
