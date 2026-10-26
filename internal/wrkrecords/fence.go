@@ -64,6 +64,11 @@ func (s Snapshot) CheckLegacy(p *Policy, actor string, in LegacyIntent) error {
 	if record == nil || record.RecordHash != receipt.Hash || record.Generation != receipt.Generation || record.ClaimSeq != c.Seq {
 		return required()
 	}
+	// A shadow subject's observations never become protected completion
+	// receipts on activation. Review-role lifecycle is required from claim.
+	if !Review(c) && (record.Kind == "completed" || record.Kind == "joined") && record.Seq < s.Activation(job) {
+		return required()
+	}
 	if terminal {
 		if !p.Allows(actor, "relay.publish") {
 			return Error("scope_denied")

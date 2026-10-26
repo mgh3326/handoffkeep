@@ -3014,7 +3014,7 @@ func (s *Store) AppendRelayEvent(ctx context.Context, x RelayEvent) (RelayEvent,
 			if err != nil {
 				return x, false, wrkrecords.Error("wrk_unavailable")
 			}
-			x.WrkReceipt = receipt
+			hydrateWrkRelay(ctx, tx, &x)
 			return x, false, tx.Commit(ctx)
 		}
 	}
@@ -3042,6 +3042,7 @@ func (s *Store) AppendRelayEvent(ctx context.Context, x RelayEvent) (RelayEvent,
 	if err != nil {
 		return x, false, err
 	}
+	hydrateWrkRelay(ctx, tx, &x)
 	return x, created, tx.Commit(ctx)
 }
 
@@ -3054,6 +3055,7 @@ func (s *Store) MarkRelayEventDelivered(ctx context.Context, id int64, machine, 
 	var x RelayEvent
 	err := scanRelayEvent(s.pool.QueryRow(ctx, `UPDATE relay_events SET delivered_at=now(),delivered_to=$2 WHERE id=$1 AND delivered_at IS NULL RETURNING `+relayEventColumns, id, machine+"/"+pane), &x)
 	if err == nil {
+		hydrateWrkRelay(ctx, s.pool, &x)
 		return x, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
@@ -3065,6 +3067,7 @@ func (s *Store) MarkRelayEventDelivered(ctx context.Context, id int64, machine, 
 		}
 		return RelayEvent{}, err
 	}
+	hydrateWrkRelay(ctx, s.pool, &x)
 	return x, nil
 }
 
@@ -3116,7 +3119,13 @@ func (s *Store) ListRelayEventsPage(ctx context.Context, lane, kind string, unde
 		}
 		out = append(out, x)
 	}
-	return out, rows.Err()
+	err = rows.Err()
+	rows.Close() // Release the connection before canonical hydration reads.
+	if err != nil {
+		return nil, err
+	}
+	s.hydrateWrkRelays(ctx, out)
+	return out, nil
 }
 
 // ListRelayEventsTimeline returns newest relay events first. beforeID is an
@@ -3167,7 +3176,13 @@ func (s *Store) ListRelayEventsTimeline(ctx context.Context, lane, kind string, 
 		}
 		out = append(out, x)
 	}
-	return out, rows.Err()
+	err = rows.Err()
+	rows.Close() // Release the connection before canonical hydration reads.
+	if err != nil {
+		return nil, err
+	}
+	s.hydrateWrkRelays(ctx, out)
+	return out, nil
 }
 
 // EventWatermarks returns the two durable IDs used by the UI's SSE poller.
@@ -3277,7 +3292,13 @@ func (s *Store) ListOpenEscalations(ctx context.Context, limit int) ([]RelayEven
 		}
 		out = append(out, x)
 	}
-	return out, rows.Err()
+	err = rows.Err()
+	rows.Close() // Release the connection before canonical hydration reads.
+	if err != nil {
+		return nil, err
+	}
+	s.hydrateWrkRelays(ctx, out)
+	return out, nil
 }
 
 // ListOpenLaneDecisions implements the decision inbox lane.event definition.
@@ -3305,7 +3326,13 @@ func (s *Store) ListOpenLaneDecisions(ctx context.Context, limit int) ([]RelayEv
 		}
 		out = append(out, x)
 	}
-	return out, rows.Err()
+	err = rows.Err()
+	rows.Close() // Release the connection before canonical hydration reads.
+	if err != nil {
+		return nil, err
+	}
+	s.hydrateWrkRelays(ctx, out)
+	return out, nil
 }
 func (s *Store) CreateCheckpoint(ctx context.Context, x Checkpoint) (Checkpoint, error) {
 	if !validName(x.Session) || !kinds[x.Kind] || x.Title == "" || !validText(x.Title, MaxBytes) || !validText(x.Body, MaxBytes) || !validName(x.CreatedBy) {

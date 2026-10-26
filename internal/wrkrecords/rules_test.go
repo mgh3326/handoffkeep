@@ -522,3 +522,34 @@ func TestDesignCompletedRelayRequiresExactMetadata(t *testing.T) {
 		t.Fatal("noncanonical completion head accepted")
 	}
 }
+
+func TestDesignShadowCompletionReceiptBoundary(t *testing.T) {
+	c := fresh(t)
+	c.s.Jobs["subject"] = c.s.Jobs["subject"][:1]
+	c.reviewer("p1-reviewer", "desktop", 1)
+	b := []byte("P1 completion observation\n")
+	p := Object{"report_b64": base64.StdEncoding.EncodeToString(b), "report_sha256": SHA(b)}
+	old := c.must("desktop", "subject", "completed", p)
+	reviewer := c.must("desktop", "p1-reviewer", "completed", p)
+	ended := c.must("desktop", "p1-reviewer", "end", Object{"end_type": "reaped", "reason_code": "cleanup"})
+	check := func(r Record, kind, code string) {
+		t.Helper()
+		receipt := r.Receipt()
+		e := c.s.CheckLegacy(c.e.Policy, "desktop", LegacyIntent{JobID: r.JobID, Kind: kind, Digest: Text(r.Payload, "report_sha256"), Receipt: &receipt})
+		if (code == "" && e != nil) || (code != "" && Code(e) != code) {
+			t.Fatalf("%s seq %d receipt: %v want %s", r.JobID, r.Seq, e, code)
+		}
+	}
+	check(old, "job.completed", "") // Ordinary P1 legacy compatibility.
+	check(reviewer, "job.completed", "")
+	check(ended, "job.revoked", "")
+	begin := c.must("director-1", "subject", "import_begin", Object{"reason_code": "freeze"})
+	manifest, _ := Digest([]Object{})
+	seal := c.must("director-1", "subject", "import_seal", Object{"begin_seq": begin.Seq, "expected_import_count": 0, "manifest_sha256": manifest, "reason_code": "seal"})
+	c.must("director-1", "subject", "activate", Object{"seal_seq": seal.Seq, "reason_code": "enforce"})
+	check(old, "job.completed", "wrk_receipt_required")
+	check(reviewer, "job.completed", "") // Subject phase never downgrades reviewer lifecycle.
+	check(ended, "job.revoked", "")
+	fresh := c.must("desktop", "subject", "completed", p)
+	check(fresh, "job.completed", "")
+}

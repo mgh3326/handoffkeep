@@ -293,7 +293,7 @@ func TestWrkMCPDoesNotExposeAuthorityMutations(t *testing.T) {
 			t.Fatalf("MCP exposed authority tool %s", name)
 		}
 	}
-	result, e := cs.CallTool(t.Context(), &gmcp.CallToolParams{Name: "put_document", Arguments: Object{"key": "authority/fake-receipt", "title": "notification only", "body": "job.completed forged receipt", "session": "fixture"}})
+	result, e := cs.CallTool(t.Context(), &gmcp.CallToolParams{Name: "put_document", Arguments: Object{"key": "authority/fake-receipt", "kind": "note", "body": "job.completed forged receipt", "session": "fixture"}})
 	if e != nil || result.IsError {
 		t.Fatal("unrelated MCP document behavior changed")
 	}

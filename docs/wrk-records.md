@@ -37,6 +37,14 @@ protection starting at activate, and P1 reviewer eligibility based on the
 subject's phase. Reviewer lifecycle protection starts at its accepted claim.
 Existing receipt fences continue to deny bypass attempts while the API is off.
 
+For receipt-required jobs, completed/joined and their relay projection commit
+together. The canonical upsert replaces any planted legacy tuple and resets
+delivery. Every projection read derives its receipt and report digest from the
+matching immutable record and content; a mismatch leaves the notification
+visible without a receipt. A shadow subject's completion remains an observation
+and cannot become a protected completion receipt after activation. Review-role
+lifecycle remains receipt-required from claim.
+
 ## CLI
 
 The installed handoffkeep configuration supplies the authenticated transport.

@@ -291,13 +291,16 @@ func (s *Store) WrkAppend(ctx context.Context, actor, job, key string, r wrkreco
 			return out, err
 		}
 	}
-	if (rec.Kind == "completed" || rec.Kind == "joined") && (snapshot.ReceiptRequired(job) || out.Summary.State == "active") {
+	if (rec.Kind == "completed" || rec.Kind == "joined") && snapshot.ReceiptRequired(job) {
 		claim := snapshot.Claim(job)
 		if claim == nil {
 			return out, wrkrecords.Error("claim_conflict")
 		}
-		// Canonical projection has a deterministic identity and no caller path.
-		_, err = tx.Exec(ctx, `INSERT INTO relay_events(kind,job_id,epoch,owner_lane,report_path,reason,head,pr,received_at) VALUES($1,$2,0,$3,$4,'',$5,$6,now()) ON CONFLICT DO NOTHING`, "job."+rec.Kind, job, wrkrecords.Text(claim.Payload, "owner_lane"), "wrk:"+job+":"+intString(rec.Seq), wrkrecords.Text(rec.Payload, "head"), wrkrecords.Text(rec.Payload, "pr"))
+		// The canonical projection wins even if the deterministic legacy key
+		// was planted while this subject was shadow (§6a, director-1 ruling).
+		// Digest/receipt are hydrated from immutable journal content on reads;
+		// the legacy table keeps its existing schema.
+		_, err = tx.Exec(ctx, `INSERT INTO relay_events(kind,job_id,epoch,owner_lane,report_path,reason,head,pr,received_at) VALUES($1,$2,0,$3,$4,'',$5,$6,now()) ON CONFLICT (kind,job_id,epoch,report_path,reason) WHERE `+relayJobConflictPredicate+` DO UPDATE SET kind=EXCLUDED.kind,job_id=EXCLUDED.job_id,epoch=EXCLUDED.epoch,owner_lane=EXCLUDED.owner_lane,report_path=EXCLUDED.report_path,reason=EXCLUDED.reason,head=EXCLUDED.head,pr=EXCLUDED.pr,machine='',pane_id='',report_last_line='',question='',event_id='',text='',event_time=NULL,received_at=EXCLUDED.received_at,delivered_at=NULL,delivered_to='',attempts=0`, "job."+rec.Kind, job, wrkrecords.Text(claim.Payload, "owner_lane"), "wrk:"+job+":"+intString(rec.Seq), wrkrecords.Text(rec.Payload, "head"), wrkrecords.Text(rec.Payload, "pr"))
 		if err != nil {
 			return out, err
 		}
