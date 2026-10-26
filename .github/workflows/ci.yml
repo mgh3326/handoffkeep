@@ -43,6 +43,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITLEAKS_CONFIG: .gitleaks.toml
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
           # Pin the scanner to the version this config was verified with.
           # [[allowlists]]/targetRules/condition require gitleaks >= 8.25.0;
           # older versions silently drop unknown keys (allowlist = none).
@@ -74,6 +75,8 @@ jobs:
         with: {go-version: stable}
       - run: GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -o handoffkeep-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/handoffkeep
       - uses: actions/upload-artifact@v4
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         with:
           name: handoffkeep-${{ matrix.goos }}-${{ matrix.goarch }}
           path: handoffkeep-*
+          retention-days: 7
