@@ -302,3 +302,36 @@ func testLostReplyReplayPG(t *testing.T, fx *pgFixture) {
 		t.Fatalf("journal has %d records, want 4 (no duplicate charge)", n)
 	}
 }
+
+// testShadowProtectionStartsAtActivate (director-1 ruling on the legacy
+// fence JobID branch, dr-1925-1): the fence predicate is receipt_required.
+// A shadow builder claim leaves its task legacy-compatible; from activate
+// the same legacy calls are refused; a review-role claim is fenced at once.
+func testShadowProtectionStartsAtActivate(t *testing.T, fx *pgFixture) {
+	s := pgScenario(t, fx)
+	s.ok(s.post("director-1", "job-shp", "claim", claimPayload("job-shp", "b2405-shp", "director-1", 2405, "desktop", "builder", "T1")), "shadow claim")
+	allowed := func(r packResponse, what string) {
+		t.Helper()
+		if r.status >= 300 {
+			t.Fatalf("shadow %s: %d %s", what, r.status, r.raw)
+		}
+	}
+	refused := func(r packResponse, what string) {
+		t.Helper()
+		if r.body["error"] != "wrk_receipt_required" {
+			t.Fatalf("activated %s: %d %s, want wrk_receipt_required", what, r.status, r.raw)
+		}
+	}
+	allowed(s.legacyPost("desktop", "/v1/tasks/2405/claim", map[string]any{"claimed_by": "pane", "job_id": "job-shp"}), "claim with the shadow job id")
+	allowed(s.legacyPost("desktop", "/v1/tasks/2405/transition", map[string]any{"to": "in_progress"}), "transition")
+	allowed(s.legacyPost("desktop", "/v1/tasks/next", map[string]any{"lane": "o3-lane", "claimed_by": "pane", "job_id": "job-shp"}), "next naming the shadow job")
+	s.ok(s.post("director-1", "job-shp", "activate", map[string]any{"reason_code": "activation", "seal_seq": nil}), "activate")
+	refused(s.legacyPost("desktop", "/v1/tasks/2405/transition", map[string]any{"to": "verifying"}), "transition")
+	refused(s.legacyPost("desktop", "/v1/tasks/2405/rebind", map[string]any{"from_job": "job-shp", "to_job": "job-z", "by": "pane", "reason": "takeover"}), "rebind")
+	refused(s.legacyPost("desktop", "/v1/tasks/2406/claim", map[string]any{"claimed_by": "pane", "job_id": "job-shp"}), "claim of another task naming the job")
+	refused(s.legacyPost("desktop", "/v1/tasks/next", map[string]any{"lane": "o3-lane", "claimed_by": "pane", "job_id": "job-shp"}), "next naming the job")
+	// A review-role claim is receipt_required from its claim.
+	s.ok(s.post("desktop", "job-shp-t1", "claim", reviewPayload("job-shp-t1", "b2405-shp", 2405, "desktop", "tester", "T1", "job-shp", 1)), "reviewer mint")
+	refused(s.legacyPost("desktop", "/v1/tasks/2407/claim", map[string]any{"claimed_by": "pane", "job_id": "job-shp-t1"}), "claim naming a reviewer job")
+	refused(s.legacyPost("desktop", "/v1/relay/events", map[string]any{"kind": "job.completed", "job_id": "job-shp-t1", "owner_lane": "b2405-shp"}), "reviewer terminal relay")
+}

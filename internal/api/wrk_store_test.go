@@ -481,4 +481,5 @@ func TestO3StoreSuite(t *testing.T) {
 	t.Run("EndRacesVerdict", func(t *testing.T) { testEndRacesVerdict(t, fx) })
 	t.Run("CrossJobLockOrder", func(t *testing.T) { testCrossJobLockOrder(t, fx) })
 	t.Run("LostReplyReplay", func(t *testing.T) { testLostReplyReplayPG(t, fx) })
+	t.Run("ShadowProtectionStartsAtActivate", func(t *testing.T) { testShadowProtectionStartsAtActivate(t, fx) })
 }

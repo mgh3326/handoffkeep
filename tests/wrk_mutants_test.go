@@ -61,6 +61,12 @@ var wrkMutants = []wrkMutant{
 		pkg: "./internal/api", test: "^TestO3PackStore$/^meta/", db: true,
 	},
 	{
+		name: "fence a legacy job id by claim existence instead of receipt_required", file: "internal/store/wrk_fence.go",
+		old: "\tif WrkProtectAtActivate {\n\t\treturn wrkReceiptRequiredJob(ctx, q, jobID)\n\t}\n",
+		new: "",
+		pkg: "./internal/api", test: "^TestO3StoreSuite$/^ShadowProtectionStartsAtActivate$", db: true,
+	},
+	{
 		name: "follow one redirect in the wrk CLI client", file: "internal/remote/remote.go",
 		old: "\thc := c.httpClientNoFollow()\n\tresp, err := hc.Do(r)\n\tif err != nil {\n\t\t// A failed dial",
 		new: "\thc := c.httpClient()\n\tresp, err := hc.Do(r)\n\tif err != nil {\n\t\t// A failed dial",
