@@ -35,7 +35,8 @@ jobs:
       - run: git diff --exit-code -- internal/ui/static/console
       - run: test -z "$(gofmt -l .)"
       - run: go vet ./...
-      - run: go test -v -race -timeout 30m ./...
+      - name: go test -race
+        run: go test -v -race -timeout 30m ./...
         env:
           HANDOFFKEEP_TEST_DB_URL: postgres://handoffkeep:handoffkeep@localhost:5432/handoffkeep?sslmode=disable
       - run: bash scripts/test-build-release.sh
@@ -74,7 +75,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with: {go-version: stable}
-      - run: GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -o handoffkeep-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/handoffkeep
+      - name: go build
+        run: GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -o handoffkeep-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/handoffkeep
       - uses: actions/upload-artifact@v4
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         with:
