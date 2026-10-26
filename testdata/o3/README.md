@@ -22,11 +22,20 @@ in review.
 - `vectors/*.json` — every normative vector table converted to data,
   one file per table. Each case is `{name, source, given, request,
   expect}`; `source` names the design section, the design's own table
-  name, the table row number and the verbatim row text. `given` holds
-  prior journal records and policy as Record objects; `request` is a
-  Request object for HTTP cases, `{type:"cli"}` argv/stdin for section
+  name, the table row number and the verbatim row text, plus an optional
+  `note` when the case's setup needs explaining. `given` holds prior
+  journal records and policy as Record objects; `request` is a Request
+  object for HTTP cases, `{type:"cli"}` argv/stdin for section
   6b cases, `{type:"legacy"}` for fenced legacy routes, or
   `{type:"policy"|"meta"|"none"}` for non-HTTP expectations.
+- `given.legacy` (optional) — the legacy store rows a case needs.
+  `tasks` holds task rows `{id, project, state, lane, parent_lane,
+  refs}` whose `refs.job_id` names the canonical subject job that
+  protects the row; `dispositions` holds disposition rows
+  `{id, task_id, state}` whose `task_id` is the legacy task row the
+  disposition targets. A case carries exactly the rows its request
+  needs. A case whose point is the absence of a row carries none and
+  says so in `source.note`.
 - `legacy/` — sanitized legacy event fixtures for the import vectors:
   synthetic job dirs with `events/0000N-<kind>.json` in today's format.
   Every id, hash and path is synthetic; no real job dir, inbox, event

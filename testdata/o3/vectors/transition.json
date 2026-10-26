@@ -8692,7 +8692,21 @@
             },
             "record_hash": "3563604f40933318ad3f29d23bfed5cbf43fbd39393a9590f89977e01ad3c3b6"
           }
-        ]
+        ],
+        "legacy": {
+          "tasks": [
+            {
+              "id": 2400,
+              "project": "handoffkeep",
+              "state": "in_progress",
+              "lane": "b2400-a",
+              "parent_lane": "director-1",
+              "refs": {
+                "job_id": "job-a"
+              }
+            }
+          ]
+        }
       },
       "request": {
         "type": "legacy",
