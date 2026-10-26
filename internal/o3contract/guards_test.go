@@ -808,9 +808,19 @@ func legacyIDs(c *vectorCase) (tasks, disps []int64) {
 	return
 }
 
+// legacyNext reports whether the legacy request is the protected-task
+// claim attempt POST /v1/tasks/next, which names no task id.
+func legacyNext(c *vectorCase) bool {
+	parts := strings.Split(asString(c.Request["path"]), "/")
+	return len(parts) >= 4 && parts[1] == "v1" && parts[2] == "tasks" &&
+		parts[3] == "next"
+}
+
 // guardLegacy: every legacy task or disposition id a legacy request
 // targets is seeded in given.legacy, and a seeded disposition's task_id
-// is seeded too.  A case expecting not_found is the absence case.
+// is seeded too.  /v1/tasks/next names no id, but its whole point is a
+// protected task, so it needs a seeded row bound to the case's subject
+// job.  A case expecting not_found is the absence case.
 func guardLegacy(cases []namedCase) []string {
 	var out []string
 	for _, n := range cases {
@@ -850,6 +860,22 @@ func guardLegacy(cases []namedCase) []string {
 				out = append(out, fmt.Sprintf(
 					"%s: seeded disposition %v targets task %d, not "+
 						"in given.legacy.tasks", n.label(), r["id"], tid))
+			}
+		}
+		if legacyNext(n.c) {
+			job := asString(n.c.Given.JobID)
+			protected := false
+			for _, r := range n.c.Given.Legacy.Tasks {
+				if job != "" &&
+					asString(asMap(r["refs"])["job_id"]) == job {
+					protected = true
+				}
+			}
+			if !protected {
+				out = append(out, fmt.Sprintf(
+					"%s: legacy /v1/tasks/next targets a protected "+
+						"task but no given.legacy.tasks row is bound to "+
+						"subject job %q", n.label(), job))
 			}
 		}
 	}
@@ -1016,4 +1042,9 @@ func TestGuardMutants(t *testing.T) {
 		"tasks-claim-protected-denied", func(c *vectorCase) {
 			c.Given.Legacy = legacyGiven{}
 		}), "legacy task row removed")
+
+	requireRed(t, guardLegacy, mutateCase(t,
+		"tasks-next-claim-protected-denied", func(c *vectorCase) {
+			c.Given.Legacy = legacyGiven{}
+		}), "protected next-target row removed")
 }
