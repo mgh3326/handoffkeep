@@ -552,11 +552,18 @@ func (s *Store) RecordDecisionRequest(ctx context.Context, taskID int64, by stri
 		return DecisionRequestResult{}, err
 	}
 	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
+		return DecisionRequestResult{}, err
+	}
 	var x Task
 	if err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, taskID), &x); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return DecisionRequestResult{}, ErrTaskNotFound
 		}
+		return DecisionRequestResult{}, err
+	}
+
+	if err := s.wrkTaskFenceTx(ctx, tx, x, "needs_decision", false); err != nil {
 		return DecisionRequestResult{}, err
 	}
 	// Disposition items have their own closed options and operator route.
@@ -725,11 +732,18 @@ func (s *Store) resolveDecisionRequest(ctx context.Context, taskID int64, by str
 		return DecisionRequestResult{}, err
 	}
 	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
+		return DecisionRequestResult{}, err
+	}
 	var x Task
 	if err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, taskID), &x); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return DecisionRequestResult{}, ErrTaskNotFound
 		}
+		return DecisionRequestResult{}, err
+	}
+
+	if err := s.wrkTaskFenceTx(ctx, tx, x, "claimed", false); err != nil {
 		return DecisionRequestResult{}, err
 	}
 	request := x.Refs.DecisionRequest

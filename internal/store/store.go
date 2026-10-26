@@ -22,6 +22,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mgh3326/handoffkeep/internal/guard"
+	"github.com/mgh3326/handoffkeep/internal/wrkrecords"
 )
 
 const MaxBytes = 64 << 10
@@ -439,31 +440,34 @@ type Task struct {
 // RelayEvent is a durable report from a worker to its owning lane.  Delivery
 // state belongs here rather than in the relay hub so it survives restarts.
 type RelayEvent struct {
-	ID             int64      `json:"id"`
-	Kind           string     `json:"kind"`
-	JobID          string     `json:"job_id"`
-	Epoch          int        `json:"epoch"`
-	OwnerLane      string     `json:"owner_lane"`
-	Machine        string     `json:"machine"`
-	PaneID         string     `json:"pane_id"`
-	ReportPath     string     `json:"report_path"`
-	ReportLastLine string     `json:"report_last_line"`
-	Question       string     `json:"question"`
-	PR             string     `json:"pr"`
-	Head           string     `json:"head"`
-	Reason         string     `json:"reason"`
-	EventID        string     `json:"event_id"`
-	Text           string     `json:"text"`
-	EventTime      *time.Time `json:"event_time"`
-	ReceivedAt     time.Time  `json:"received_at"`
-	DeliveredAt    *time.Time `json:"delivered_at"`
-	DeliveredTo    string     `json:"delivered_to"`
-	Attempts       int        `json:"attempts"`
+	WrkReceipt     *wrkrecords.Receipt `json:"wrk_receipt,omitempty"`
+	ReportSHA      string              `json:"report_sha256,omitempty"`
+	ID             int64               `json:"id"`
+	Kind           string              `json:"kind"`
+	JobID          string              `json:"job_id"`
+	Epoch          int                 `json:"epoch"`
+	OwnerLane      string              `json:"owner_lane"`
+	Machine        string              `json:"machine"`
+	PaneID         string              `json:"pane_id"`
+	ReportPath     string              `json:"report_path"`
+	ReportLastLine string              `json:"report_last_line"`
+	Question       string              `json:"question"`
+	PR             string              `json:"pr"`
+	Head           string              `json:"head"`
+	Reason         string              `json:"reason"`
+	EventID        string              `json:"event_id"`
+	Text           string              `json:"text"`
+	EventTime      *time.Time          `json:"event_time"`
+	ReceivedAt     time.Time           `json:"received_at"`
+	DeliveredAt    *time.Time          `json:"delivered_at"`
+	DeliveredTo    string              `json:"delivered_to"`
+	Attempts       int                 `json:"attempts"`
 }
 
 type Store struct {
 	pool       *pgxpool.Pool
 	linearSync atomic.Bool
+	wrk        atomic.Pointer[wrkrecords.Engine]
 }
 
 // Refs stores repeatable named references. Its decoder accepts legacy scalar
@@ -2069,6 +2073,22 @@ func (s *Store) CreateTask(ctx context.Context, x Task) (Task, error) {
 		return x, err
 	}
 	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
+		return x, err
+	}
+
+	if x.Refs.JobID != "" && wrkTablesExist(ctx, tx) {
+		if _, err = tx.Exec(ctx, `INSERT INTO wrk_job_locks(job_id) VALUES($1) ON CONFLICT DO NOTHING`, x.Refs.JobID); err != nil {
+			return x, err
+		}
+		var locked string
+		if err = tx.QueryRow(ctx, `SELECT job_id FROM wrk_job_locks WHERE job_id=$1 FOR UPDATE`, x.Refs.JobID).Scan(&locked); err != nil {
+			return x, err
+		}
+		if err = s.wrkFence(ctx, tx, wrkrecords.LegacyIntent{JobID: x.Refs.JobID, Binding: true}); err != nil {
+			return x, err
+		}
+	}
 	if err = requireTaskProject(ctx, tx, x.Project); err != nil {
 		return x, err
 	}
@@ -2124,6 +2144,13 @@ func (s *Store) claimTaskTx(ctx context.Context, tx pgx.Tx, id int64, by, jobID,
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Task{}, ErrTaskConflict
 		}
+		return Task{}, err
+	}
+
+	if err := s.wrkTaskFenceTx(ctx, tx, x, "", true); err != nil {
+		return Task{}, err
+	}
+	if err := s.wrkFence(ctx, tx, wrkrecords.LegacyIntent{JobID: jobID, Binding: true}); err != nil {
 		return Task{}, err
 	}
 	if x.State != "backlog" {
@@ -2192,6 +2219,10 @@ func (s *Store) ClaimTask(ctx context.Context, id int64, by, jobID, noJob string
 		return Task{}, err
 	}
 	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
+		return Task{}, err
+	}
+
 	x, err := s.claimTaskTx(ctx, tx, id, by, jobID, noJob)
 	if err != nil {
 		return Task{}, err
@@ -2221,11 +2252,22 @@ func (s *Store) RebindTaskJob(ctx context.Context, id int64, fromJob, toJob, by,
 		return Task{}, err
 	}
 	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
+		return Task{}, err
+	}
+
 	var x Task
 	if err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, id), &x); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Task{}, ErrTaskNotFound
 		}
+		return Task{}, err
+	}
+
+	if err := s.wrkTaskFenceTx(ctx, tx, x, "", true); err != nil {
+		return Task{}, err
+	}
+	if err := s.wrkFence(ctx, tx, wrkrecords.LegacyIntent{JobID: toJob, Binding: true}); err != nil {
 		return Task{}, err
 	}
 
@@ -2282,8 +2324,24 @@ func (s *Store) NextTask(ctx context.Context, lane, by, jobID, noJob string) (Ta
 		return Task{}, err
 	}
 	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
+		return Task{}, err
+	}
+	// Naming an enrolled job is an explicit protected claim attempt, even
+	// when selection would otherwise exclude every protected task (S1 #14).
+	if err = s.wrkFence(ctx, tx, wrkrecords.LegacyIntent{JobID: jobID, Binding: true}); err != nil {
+		return Task{}, err
+	}
+
 	var id int64
-	err = tx.QueryRow(ctx, `SELECT id FROM tasks WHERE lane=$1 AND state='backlog' ORDER BY priority DESC,created_at ASC,id ASC FOR UPDATE SKIP LOCKED LIMIT 1`, lane).Scan(&id)
+	selection := `SELECT id FROM tasks WHERE lane=$1 AND state='backlog'`
+	if wrkTablesExist(ctx, tx) {
+		// Same enrollment predicate as Snapshot.ProtectedTask: only the latest
+		// subject claim at activation, including ended predecessor enrollment.
+		selection += ` AND NOT EXISTS(SELECT 1 FROM wrk_records wr WHERE wr.kind='claim' AND wr.payload->>'role' IN ('builder','worker') AND wr.payload->>'task_id'=tasks.id::text AND NOT EXISTS(SELECT 1 FROM wrk_records newer WHERE newer.job_id=wr.job_id AND newer.kind='claim' AND newer.seq>wr.seq) AND EXISTS(SELECT 1 FROM wrk_records a WHERE a.job_id=wr.job_id AND a.kind='activate'))`
+	}
+	selection += ` ORDER BY priority DESC,created_at ASC,id ASC FOR UPDATE SKIP LOCKED LIMIT 1`
+	err = tx.QueryRow(ctx, selection, lane).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Task{}, ErrQueueEmpty
 	}
@@ -2326,12 +2384,25 @@ func (s *Store) TransitionTask(ctx context.Context, id int64, to, by, note strin
 		return Task{}, err
 	}
 	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
+		return Task{}, err
+	}
+
 	var x Task
 	if err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, id), &x); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Task{}, ErrTaskNotFound
 		}
 		return Task{}, err
+	}
+
+	if err := s.wrkTaskFenceTx(ctx, tx, x, to, refs != nil); err != nil {
+		return Task{}, err
+	}
+	if refs != nil && refs.JobID != "" {
+		if err := s.wrkFence(ctx, tx, wrkrecords.LegacyIntent{JobID: refs.JobID, Binding: true}); err != nil {
+			return Task{}, err
+		}
 	}
 	from := x.State
 	// Placed after the row lock and before the transition-table check so every
@@ -2466,10 +2537,18 @@ func (s *Store) RelaneTask(ctx context.Context, id int64, to, by, note string, a
 		return Task{}, false, err
 	}
 	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
+		return Task{}, false, err
+	}
+
 	if err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, id), &x); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Task{}, false, ErrTaskNotFound
 		}
+		return Task{}, false, err
+	}
+
+	if err := s.wrkTaskFenceTx(ctx, tx, x, "", true); err != nil {
 		return Task{}, false, err
 	}
 	if x.State == "merged" || x.State == "dropped" {
@@ -2520,10 +2599,18 @@ func (s *Store) SetTaskProject(ctx context.Context, id int64, project, by, note 
 		return Task{}, false, err
 	}
 	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
+		return Task{}, false, err
+	}
+
 	if err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, id), &x); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Task{}, false, ErrTaskNotFound
 		}
+		return Task{}, false, err
+	}
+
+	if err := s.wrkTaskFenceTx(ctx, tx, x, "", true); err != nil {
 		return Task{}, false, err
 	}
 	var known bool
@@ -2895,6 +2982,45 @@ func validLaneEventText(value string) bool {
 // AppendRelayEvent inserts a durable relay event. Its conflict update is part
 // of the same statement so concurrent duplicate submissions share one row.
 func (s *Store) AppendRelayEvent(ctx context.Context, x RelayEvent) (RelayEvent, bool, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return x, false, err
+	}
+	defer tx.Rollback(ctx)
+	if x.JobID != "" && wrkTablesExist(ctx, tx) {
+		if _, err = tx.Exec(ctx, `INSERT INTO wrk_job_locks(job_id) VALUES($1) ON CONFLICT DO NOTHING`, x.JobID); err != nil {
+			return x, false, err
+		}
+		var locked string
+		if err = tx.QueryRow(ctx, `SELECT job_id FROM wrk_job_locks WHERE job_id=$1 FOR UPDATE`, x.JobID).Scan(&locked); err != nil {
+			return x, false, err
+		}
+	}
+	if err = s.wrkFence(ctx, tx, wrkrecords.LegacyIntent{JobID: x.JobID, Kind: x.Kind, Head: x.Head, Digest: x.ReportSHA, Receipt: x.WrkReceipt}); err != nil {
+		return x, false, err
+	}
+	if x.Kind == "job.completed" || x.Kind == "job.joined" {
+		snapshot, e := loadWrkSnapshot(ctx, tx)
+		if e != nil {
+			return x, false, e
+		}
+		if snapshot.ReceiptRequired(x.JobID) {
+			receipt := x.WrkReceipt
+			if receipt == nil {
+				_, receipt = WrkPrincipal(ctx)
+			}
+			if receipt == nil {
+				return x, false, wrkrecords.Error("wrk_receipt_required")
+			}
+			err = scanRelayEvent(tx.QueryRow(ctx, `SELECT `+relayEventColumns+` FROM relay_events WHERE kind=$1 AND job_id=$2 AND report_path=$3 AND epoch=0 AND reason=''`, x.Kind, x.JobID, "wrk:"+x.JobID+":"+intString(receipt.Seq)), &x)
+			if err != nil {
+				return x, false, wrkrecords.Error("wrk_unavailable")
+			}
+			hydrateWrkRelay(ctx, tx, &x)
+			return x, false, tx.Commit(ctx)
+		}
+	}
+
 	if !validRelayEvent(x) {
 		return x, false, errors.New("invalid relay event")
 	}
@@ -2914,11 +3040,12 @@ func (s *Store) AppendRelayEvent(ctx context.Context, x RelayEvent) (RelayEvent,
 	} else {
 		query += ` ON CONFLICT (kind,job_id,epoch,report_path,reason) WHERE ` + relayJobConflictPredicate + ` DO UPDATE SET attempts=relay_events.attempts+1`
 	}
-	err := scanRelayEventCreated(s.pool.QueryRow(ctx, query+` RETURNING `+relayEventColumns+`,(xmax=0) AS created`, x.Kind, x.JobID, x.Epoch, x.OwnerLane, x.Machine, x.PaneID, x.ReportPath, x.ReportLastLine, x.Question, x.PR, x.Head, x.Reason, x.EventID, x.Text, x.EventTime), &x, &created)
+	err = scanRelayEventCreated(tx.QueryRow(ctx, query+` RETURNING `+relayEventColumns+`,(xmax=0) AS created`, x.Kind, x.JobID, x.Epoch, x.OwnerLane, x.Machine, x.PaneID, x.ReportPath, x.ReportLastLine, x.Question, x.PR, x.Head, x.Reason, x.EventID, x.Text, x.EventTime), &x, &created)
 	if err != nil {
 		return x, false, err
 	}
-	return x, created, nil
+	hydrateWrkRelay(ctx, tx, &x)
+	return x, created, tx.Commit(ctx)
 }
 
 // MarkRelayEventDelivered records the first successful delivery. Subsequent
@@ -2930,6 +3057,7 @@ func (s *Store) MarkRelayEventDelivered(ctx context.Context, id int64, machine, 
 	var x RelayEvent
 	err := scanRelayEvent(s.pool.QueryRow(ctx, `UPDATE relay_events SET delivered_at=now(),delivered_to=$2 WHERE id=$1 AND delivered_at IS NULL RETURNING `+relayEventColumns, id, machine+"/"+pane), &x)
 	if err == nil {
+		hydrateWrkRelay(ctx, s.pool, &x)
 		return x, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
@@ -2941,6 +3069,7 @@ func (s *Store) MarkRelayEventDelivered(ctx context.Context, id int64, machine, 
 		}
 		return RelayEvent{}, err
 	}
+	hydrateWrkRelay(ctx, s.pool, &x)
 	return x, nil
 }
 
@@ -2992,7 +3121,13 @@ func (s *Store) ListRelayEventsPage(ctx context.Context, lane, kind string, unde
 		}
 		out = append(out, x)
 	}
-	return out, rows.Err()
+	err = rows.Err()
+	rows.Close() // Release the connection before canonical hydration reads.
+	if err != nil {
+		return nil, err
+	}
+	s.hydrateWrkRelays(ctx, out)
+	return out, nil
 }
 
 // ListRelayEventsTimeline returns newest relay events first. beforeID is an
@@ -3043,7 +3178,13 @@ func (s *Store) ListRelayEventsTimeline(ctx context.Context, lane, kind string, 
 		}
 		out = append(out, x)
 	}
-	return out, rows.Err()
+	err = rows.Err()
+	rows.Close() // Release the connection before canonical hydration reads.
+	if err != nil {
+		return nil, err
+	}
+	s.hydrateWrkRelays(ctx, out)
+	return out, nil
 }
 
 // EventWatermarks returns the two durable IDs used by the UI's SSE poller.
@@ -3153,7 +3294,13 @@ func (s *Store) ListOpenEscalations(ctx context.Context, limit int) ([]RelayEven
 		}
 		out = append(out, x)
 	}
-	return out, rows.Err()
+	err = rows.Err()
+	rows.Close() // Release the connection before canonical hydration reads.
+	if err != nil {
+		return nil, err
+	}
+	s.hydrateWrkRelays(ctx, out)
+	return out, nil
 }
 
 // ListOpenLaneDecisions implements the decision inbox lane.event definition.
@@ -3181,7 +3328,13 @@ func (s *Store) ListOpenLaneDecisions(ctx context.Context, limit int) ([]RelayEv
 		}
 		out = append(out, x)
 	}
-	return out, rows.Err()
+	err = rows.Err()
+	rows.Close() // Release the connection before canonical hydration reads.
+	if err != nil {
+		return nil, err
+	}
+	s.hydrateWrkRelays(ctx, out)
+	return out, nil
 }
 func (s *Store) CreateCheckpoint(ctx context.Context, x Checkpoint) (Checkpoint, error) {
 	if !validName(x.Session) || !kinds[x.Kind] || x.Title == "" || !validText(x.Title, MaxBytes) || !validText(x.Body, MaxBytes) || !validName(x.CreatedBy) {

@@ -31,11 +31,17 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/remote"
 	"github.com/mgh3326/handoffkeep/internal/store"
 	"github.com/mgh3326/handoffkeep/internal/ui"
+	"github.com/mgh3326/handoffkeep/internal/wrkrecords"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 func main() {
 	if err := run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
+		var wrkErr wrkCLIError
+		if errors.As(err, &wrkErr) {
+			fmt.Fprintln(os.Stderr, "handoffkeep wrk: "+wrkErr.code)
+			os.Exit(wrkrecords.Exit(wrkErr.code))
+		}
 		fmt.Fprintln(os.Stderr, "handoffkeep:", err)
 		var exit exitCodeError
 		if errors.As(err, &exit) {
@@ -49,6 +55,8 @@ func run(args []string, out, errout io.Writer) error {
 		return errors.New("usage: handoffkeep serve|mcp|ctx|memory|doc|attach|r2usage|tasks|decisions|linear|fleet-metrics|bench|version")
 	}
 	switch args[0] {
+	case "wrk":
+		return wrkCmd(args[1:], os.Stdin, out)
 	case "serve":
 		return serve(args[1:], errout)
 	case "mcp":
@@ -1802,7 +1810,16 @@ func serve(args []string, errout io.Writer) error {
 		return errors.New("HANDOFFKEEP_DB_URL and HANDOFFKEEP_AUTH_FILE are required")
 	}
 	ctx := context.Background()
-	st, e := store.Open(ctx, dbURL)
+	mode := os.Getenv("WRK_RECORDS_API")
+	var policy *wrkrecords.Policy
+	var e error
+	if mode != "" && mode != "off" {
+		policy, e = wrkrecords.LoadPolicy(os.Getenv("WRK_RECORDS_POLICY_FILE"))
+		if e != nil {
+			return e
+		}
+	}
+	st, e := store.OpenServer(ctx, dbURL, os.Getenv("HANDOFFKEEP_MIGRATE_DB_URL"), mode, policy, os.Getenv("WRK_RECORDS_STORE_GENERATION"), os.Getenv("WRK_RECORDS_RECOVERY_REQUIRED") == "true")
 	if e != nil {
 		return e
 	}

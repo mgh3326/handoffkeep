@@ -202,6 +202,8 @@ func HTTPHandler(service api.Service, tokens api.Tokens) http.Handler {
 			_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
 			return
 		}
+		client, _ := tokens.Client(r)
+		r = r.WithContext(store.WithWrkPrincipal(r.Context(), client, nil))
 		h.ServeHTTP(w, r)
 	})
 }
