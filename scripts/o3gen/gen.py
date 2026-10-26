@@ -398,7 +398,8 @@ def build_transition():
                   15, j.records,
                   legacy("desktop", "POST", "/v1/tasks/2400/transition",
                          {"to": "dropped", "no_job": True}),
-                  {"http_status": 409, "error": "wrk_receipt_required"}))
+                  {"http_status": 409, "error": "wrk_receipt_required"},
+                  legacy=legacy_given(tasks=[legacy_task()])))
 
     # row 16: asserted digest mismatch
     c.append(case("verdict-asserted-digest-mismatch", S, T, "transition", 16,
@@ -616,64 +617,84 @@ def build_fence():
     S = "5"
     c = []
     j = activated()
+    task_row = legacy_task()
+    tasks_only = legacy_given(tasks=[task_row])
     spec = [
         (1, "tasks-create-with-o3-refs-denied",
          legacy("desktop", "POST", "/v1/tasks",
                 {"title": "x", "refs": {"job_id": "job-a"}}),
-         {"http_status": 409, "error": "wrk_receipt_required"}),
+         {"http_status": 409, "error": "wrk_receipt_required"}, None,
+         "no legacy row: the route rejects the O3 ref before any task "
+         "lookup, so absence is the point"),
         (1, "tasks-create-unrelated-legacy-compatible",
          legacy("desktop", "POST", "/v1/tasks",
                 {"title": "x", "refs": {}}),
          {"outcome": "legacy_compatible",
-          "detail": "unrelated legacy task creation keeps old behaviour"}),
+          "detail": "unrelated legacy task creation keeps old behaviour"},
+         None,
+         "no legacy row: unrelated creation keeps old behaviour, so "
+         "absence is the point"),
         (2, "tasks-next-claim-protected-denied",
          legacy("desktop", "POST", "/v1/tasks/next", {}),
          {"http_status": 409, "error": "wrk_receipt_required",
-          "note": "explicit claim attempt on a protected task"}),
+          "note": "explicit claim attempt on a protected task"},
+         tasks_only, None),
         (3, "tasks-claim-protected-denied",
          legacy("desktop", "POST", "/v1/tasks/2400/claim",
                 {"by": "director-1"}),
          {"http_status": 409, "error": "wrk_receipt_required",
-          "note": "refused for central and host, no_job and retry"}),
+          "note": "refused for central and host, no_job and retry"},
+         tasks_only, None),
         (3, "tasks-rebind-protected-denied",
          legacy("desktop", "POST", "/v1/tasks/2400/rebind",
                 {"job_id": "job-z"}),
-         {"http_status": 409, "error": "wrk_receipt_required"}),
+         {"http_status": 409, "error": "wrk_receipt_required"},
+         tasks_only, None),
         (4, "tasks-transition-binding-change-denied",
          legacy("desktop", "POST", "/v1/tasks/2400/transition",
                 {"to": "claimed", "refs": {"job_id": "job-z"}}),
-         {"http_status": 409, "error": "wrk_receipt_required"}),
+         {"http_status": 409, "error": "wrk_receipt_required"},
+         tasks_only, None),
         (4, "tasks-transition-state-only-without-receipt-denied",
          legacy("director-1", "POST", "/v1/tasks/2400/transition",
                 {"to": "merged"}),
          {"http_status": 409, "error": "wrk_receipt_required",
           "note": "state-only changes need central principal + receipt "
-                  "naming the current bound subject job"}),
+                  "naming the current bound subject job"},
+         tasks_only, None),
         (5, "tasks-project-or-relane-protected-denied",
          legacy("desktop", "POST", "/v1/tasks/2400/relane",
                 {"lane": "other"}),
-         {"http_status": 409, "error": "wrk_receipt_required"}),
+         {"http_status": 409, "error": "wrk_receipt_required"},
+         tasks_only, None),
         (6, "decision-request-resolve-protected-denied",
          legacy("desktop", "POST",
                 "/v1/tasks/2400/decision-request/resolve",
                 {"answer": "a"}),
-         {"http_status": 409, "error": "wrk_receipt_required"}),
+         {"http_status": 409, "error": "wrk_receipt_required"},
+         tasks_only, None),
         (7, "dispositions-apply-binding-denied",
          legacy("desktop", "POST", "/v1/tasks/dispositions/77/apply",
                 {"action": "relink"}),
-         {"http_status": 409, "error": "wrk_receipt_required"}),
+         {"http_status": 409, "error": "wrk_receipt_required"},
+         legacy_given(tasks=[task_row],
+                      dispositions=[legacy_disposition()]), None),
         (8, "decisions-resolve-protected-denied",
          legacy("desktop", "POST", "/v1/decisions/resolve",
                 {"task_id": 2400, "answer": "a"}),
-         {"http_status": 409, "error": "wrk_receipt_required"}),
+         {"http_status": 409, "error": "wrk_receipt_required"},
+         tasks_only, None),
         (9, "relay-terminal-without-receipt-denied",
          legacy("desktop", "POST", "/v1/relay/events",
                 {"kind": "job.joined", "job_id": "job-a", "head": H}),
          {"http_status": 409, "error": "wrk_receipt_required",
-          "note": "lane.event text never authorizes completion"}),
+          "note": "lane.event text never authorizes completion"}, None,
+         "no legacy row: the fence reads job-a's canonical claim, not a "
+         "legacy task row"),
     ]
-    for rw, name, req, exp in spec:
-        c.append(case(name, S, T, "fence", rw, j.records, req, exp))
+    for rw, name, req, exp, lg, note in spec:
+        c.append(case(name, S, T, "fence", rw, j.records, req, exp,
+                      legacy=lg, source_note=note))
     return wrap(T, S, c)
 
 
@@ -1155,8 +1176,8 @@ def r4_given(mode):
         restore()
         return recs
     if mode == "reviewer_target":
-        return reviewer_journal(REV, JOB, 1).records + \
-            activated(tier="T2").records
+        return activated(tier="T2").records + \
+            reviewer_journal(REV, JOB, 1).records
     if mode == "frozen_tester":
         j = activated(tier="T2")
         rev = reviewer_journal("job-a-t9", JOB, 1)
@@ -1813,7 +1834,8 @@ def build_r4life():
                           "receipt": {"job_id": REV, "seq": 2}}),
                   {"http_status": 409, "error": "wrk_receipt_required",
                    "note": "requires the current bound subject A end "
-                           "receipt; shared task_id is insufficient"}))
+                           "receipt; shared task_id is insufficient"},
+                  legacy=legacy_given(tasks=[legacy_task()])))
     for kind, pl in [("import_begin", {"reason_code": "import_freeze"}),
                      ("import", {"source_locator": "x",
                                  "source_sha256": ZERO64,
@@ -1827,7 +1849,7 @@ def build_r4life():
                                       "manifest_sha256": sha([]),
                                       "reason_code": "import_seal"})]:
         c.append(case("r-%s-scope-denied" % kind.replace("_", "-"),
-                      S, T, "r4life", 8, rev.records,
+                      S, T, "r4life", 8, base.records + rev.records,
                       http("desktop", REV, kind, 1, 1, pl),
                       {"http_status": 403, "error": "scope_denied",
                        "note": "required-mode reviewer never becomes an "
@@ -2294,6 +2316,7 @@ def build_permmap():
             "permissions": perms}
 
 
+DESIGN_KEY = "designs/hk1873/b1873a-sol-r4"
 CONTRACT_SHA = "ce4f6efbe39514bb0bced2d0a66510e646058a66d0d28bbb417af180f375c19d"
 
 
@@ -2312,7 +2335,14 @@ def extract_contract():
 
 def check_design():
     """The pack pins one design body; refuse to generate from another."""
-    got = sha(open(DESIGN_MD, "rb").read())
+    try:
+        body = open(DESIGN_MD, "rb").read()
+    except OSError:
+        raise SystemExit(
+            "design body not found at %s; fetch hk:doc %s "
+            "(sha %s...) and pass --design FILE"
+            % (DESIGN_MD, DESIGN_KEY, CONTRACT_SHA[:8]))
+    got = sha(body)
     if got != CONTRACT_SHA:
         raise SystemExit("design body sha256 %s != pinned %s"
                          % (got, CONTRACT_SHA))
@@ -2344,19 +2374,21 @@ def main():
     emit("README.md", README_TMPL % {"sha": CONTRACT_SHA})
 
     # MANIFEST.json
-    man = {"design": {"key": "designs/hk1873/b1873a-sol-r4",
+    man = {"design": {"key": DESIGN_KEY,
                       "doc": 44185, "revision": 4, "amendment": 1,
                       "body_sha256": CONTRACT_SHA},
            "files": {}}
+    found = {}
     for root, _, names in os.walk(OUT):
-        for n in sorted(names):
+        for n in names:
             if n == "MANIFEST.json":
                 continue
             p = os.path.join(root, n)
-            rel = os.path.relpath(p, OUT)
-            man["files"][rel.replace(os.sep, "/")] = {
-                "sha256": sha(open(p, "rb").read()),
-                "bytes": os.path.getsize(p)}
+            found[os.path.relpath(p, OUT).replace(os.sep, "/")] = p
+    for rel in sorted(found):
+        p = found[rel]
+        man["files"][rel] = {"sha256": sha(open(p, "rb").read()),
+                             "bytes": os.path.getsize(p)}
     emit("MANIFEST.json", man)
     total = sum(len(f["cases"]) for f in files)
     print("wrote %d vector cases in %d files + data files to %s"
@@ -2387,11 +2419,20 @@ in review.
 - `vectors/*.json` — every normative vector table converted to data,
   one file per table. Each case is `{name, source, given, request,
   expect}`; `source` names the design section, the design's own table
-  name, the table row number and the verbatim row text. `given` holds
-  prior journal records and policy as Record objects; `request` is a
-  Request object for HTTP cases, `{type:"cli"}` argv/stdin for section
+  name, the table row number and the verbatim row text, plus an optional
+  `note` when the case's setup needs explaining. `given` holds prior
+  journal records and policy as Record objects; `request` is a Request
+  object for HTTP cases, `{type:"cli"}` argv/stdin for section
   6b cases, `{type:"legacy"}` for fenced legacy routes, or
   `{type:"policy"|"meta"|"none"}` for non-HTTP expectations.
+- `given.legacy` (optional) — the legacy store rows a case needs.
+  `tasks` holds task rows `{id, project, state, lane, parent_lane,
+  refs}` whose `refs.job_id` names the canonical subject job that
+  protects the row; `dispositions` holds disposition rows
+  `{id, task_id, state}` whose `task_id` is the legacy task row the
+  disposition targets. A case carries exactly the rows its request
+  needs. A case whose point is the absence of a row carries none and
+  says so in `source.note`.
 - `legacy/` — sanitized legacy event fixtures for the import vectors:
   synthetic job dirs with `events/0000N-<kind>.json` in today's format.
   Every id, hash and path is synthetic; no real job dir, inbox, event

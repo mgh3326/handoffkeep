@@ -376,11 +376,17 @@ def reviewer_journal(job, target, round_no, host="desktop", role="tester",
 
 
 def case(name, section, table, tabkey, row, given, request, expect,
-         job=JOB, inferred=None, tags=None):
+         job=JOB, inferred=None, tags=None, legacy=None, source_note=None):
+    source = {"section": section, "table": table,
+              "table_name": tabkey, "row": row}
+    if source_note:
+        source["note"] = source_note
+    g = {"job_id": job, "policy": POLICY, "records": given}
+    if legacy is not None:
+        g["legacy"] = legacy
     c = {"name": name,
-         "source": {"section": section, "table": table,
-                    "table_name": tabkey, "row": row},
-         "given": {"job_id": job, "policy": POLICY, "records": given},
+         "source": source,
+         "given": g,
          "request": request,
          "expect": expect}
     if inferred:
@@ -388,6 +394,31 @@ def case(name, section, table, tabkey, row, given, request, expect,
     if tags:
         c["tags"] = tags
     return c
+
+
+# ------------------------------------------------------- legacy store rows
+LEGACY_PROJECT = "handoffkeep"
+
+
+def legacy_task(tid=TASK, state="in_progress", project=LEGACY_PROJECT,
+                job=JOB, lane=OWNER):
+    """A protected legacy task row bound to a canonical subject job."""
+    return {"id": tid, "project": project, "state": state, "lane": lane,
+            "parent_lane": "director-1", "refs": {"job_id": job}}
+
+
+def legacy_disposition(did=77, task=TASK, state="claimed"):
+    """A legacy disposition row targeting a legacy task row."""
+    return {"id": did, "task_id": task, "state": state}
+
+
+def legacy_given(tasks=None, dispositions=None):
+    d = {}
+    if tasks is not None:
+        d["tasks"] = tasks
+    if dispositions is not None:
+        d["dispositions"] = dispositions
+    return d
 
 
 def summary(state="active", baseline=0, used=0, next_round=1, opens=None,

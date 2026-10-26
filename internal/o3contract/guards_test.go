@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -558,6 +559,329 @@ func guardGrantPointers(cases []namedCase) []string {
 	return out
 }
 
+// guardJobRefs: every job id a request path, a review_of, a grant pointer
+// or a seeded record names exists in that case's given records.  A claim
+// request creates its own job, and a case expecting not_found is the
+// absence case.  A legacy task row's refs.job_id names the canonical
+// subject job that protects it, so it is a seeded-record reference too.
+func guardJobRefs(cases []namedCase) []string {
+	var out []string
+	for _, n := range cases {
+		if expectError(n.c) == "not_found" {
+			continue
+		}
+		jobs := map[string]bool{}
+		for _, r := range n.c.Given.Records {
+			if j := asString(r["job_id"]); j != "" {
+				jobs[j] = true
+			}
+		}
+		flag := func(where, job string) {
+			out = append(out, fmt.Sprintf(
+				"%s: %s names job %q with no record in given",
+				n.label(), where, job))
+		}
+		job := requestJob(n.c)
+		kind := asString(postBody(n.c)["kind"])
+		creates := isPOST(n.c) && kind == "claim"
+		if job != "" && !jobs[job] && !creates {
+			flag("request path", job)
+		}
+		for _, r := range n.c.Given.Records {
+			if asString(r["kind"]) != "claim" {
+				continue
+			}
+			ro := asMap(asMap(r["payload"])["review_of"])
+			if ro == nil {
+				continue
+			}
+			if t := asString(ro["job_id"]); t != "" && !jobs[t] {
+				flag("review_of of claim "+asString(r["job_id"]), t)
+			}
+		}
+		if creates {
+			ro := asMap(asMap(postBody(n.c)["payload"])["review_of"])
+			// A self-reference is claim_conflict before target lookup.
+			if t := asString(ro["job_id"]); t != "" && t != job &&
+				!jobs[t] {
+				flag("request review_of", t)
+			}
+		}
+		for _, r := range n.c.Given.Records {
+			if asString(r["kind"]) != "grant" {
+				continue
+			}
+			t := asString(asMap(r["payload"])["tester_job_id"])
+			if t != "" && !jobs[t] {
+				flag("grant tester_job_id", t)
+			}
+		}
+		for _, r := range n.c.Given.Legacy.Tasks {
+			refs := asMap(r["refs"])
+			if t := asString(refs["job_id"]); t != "" && !jobs[t] {
+				flag(fmt.Sprintf("legacy task %v refs.job_id", r["id"]), t)
+			}
+		}
+	}
+	return out
+}
+
+// guardClaimOrder: a claim naming review_of may not precede the claim of
+// the job it reviews.  A reviewed claim that is wholly absent is
+// guardJobRefs' finding, not an ordering one.
+func guardClaimOrder(cases []namedCase) []string {
+	var out []string
+	for _, n := range cases {
+		seen := map[string]bool{}
+		for i, r := range n.c.Given.Records {
+			if asString(r["kind"]) != "claim" {
+				continue
+			}
+			job := asString(r["job_id"])
+			ro := asMap(asMap(r["payload"])["review_of"])
+			if t := asString(ro["job_id"]); t != "" && !seen[t] {
+				later := false
+				for _, c := range n.c.Given.Records[i+1:] {
+					if asString(c["kind"]) == "claim" &&
+						asString(c["job_id"]) == t {
+						later = true
+					}
+				}
+				if later {
+					out = append(out, fmt.Sprintf(
+						"%s: claim %q (record %d) reviews %q "+
+							"before its claim", n.label(), job, i, t))
+				}
+			}
+			seen[job] = true
+		}
+	}
+	return out
+}
+
+func laneNames(lanes map[string]string) []string {
+	names := make([]string, 0, len(lanes))
+	for n := range lanes {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func laneCycle(lanes map[string]string) string {
+	for _, start := range laneNames(lanes) {
+		seen := map[string]bool{}
+		for n := start; n != ""; n = lanes[n] {
+			if seen[n] {
+				return n
+			}
+			seen[n] = true
+			if _, ok := lanes[n]; !ok {
+				break
+			}
+		}
+	}
+	return ""
+}
+
+// guardLaneGraph: every owner and parent lane in a seeded claim resolves
+// in the case's lane graph — policy lanes plus the lanes canonical
+// builder claims introduce when claim_lane_creation_enabled is true
+// (design L4018).  Review claims are routing data, not graph edges, but
+// their owner/parent pair must still resolve.  Missing parents,
+// conflicting parent edges and cycles are failures.
+func guardLaneGraph(cases []namedCase) []string {
+	var out []string
+	for _, n := range cases {
+		var pol map[string]any
+		if len(n.c.Given.Policy) > 0 {
+			if err := json.Unmarshal(n.c.Given.Policy, &pol); err != nil {
+				out = append(out, fmt.Sprintf("%s: given.policy: %v",
+					n.label(), err))
+				continue
+			}
+		}
+		lanes := map[string]string{}
+		for name, parent := range asMap(pol["lanes"]) {
+			lanes[name] = asString(parent)
+		}
+		flag := func(format string, args ...any) {
+			out = append(out, n.label()+": "+fmt.Sprintf(format, args...))
+		}
+		if _, ok := lanes["director-1"]; !ok {
+			flag("lane graph has no director-1 root")
+		}
+		for _, name := range laneNames(lanes) {
+			parent := lanes[name]
+			if parent == "" {
+				continue
+			}
+			if _, ok := lanes[parent]; !ok {
+				flag("policy lane %q has missing parent %q", name, parent)
+			}
+		}
+		if c := laneCycle(lanes); c != "" {
+			flag("policy lane graph has a cycle through %q", c)
+		}
+		feature := false
+		if f := asMap(pol["features"]); f != nil {
+			feature, _ = f["claim_lane_creation_enabled"].(bool)
+		}
+		for _, r := range n.c.Given.Records {
+			if asString(r["kind"]) != "claim" {
+				continue
+			}
+			pl := asMap(r["payload"])
+			job := asString(r["job_id"])
+			owner := asString(pl["owner_lane"])
+			parent := asString(pl["parent_lane"])
+			role := asString(pl["role"])
+			actor := asString(r["actor_client_id"])
+			switch {
+			case isReviewRole(role):
+				if owner != parent {
+					flag("review claim %q owner %q != parent %q",
+						job, owner, parent)
+				}
+				if _, ok := lanes[owner]; !ok {
+					flag("review claim %q lane %q is neither a "+
+						"configured lane nor a canonical builder lane",
+						job, owner)
+				}
+				if _, ok := lanes[parent]; !ok {
+					flag("review claim %q parent %q is neither a "+
+						"configured lane nor a canonical builder lane",
+						job, parent)
+				}
+			case role == "builder" && central[actor]:
+				if have, ok := lanes[owner]; ok {
+					if have != parent {
+						flag("builder claim %q lane %q already has "+
+							"parent %q, claim says %q",
+							job, owner, have, parent)
+					}
+				} else if !feature {
+					flag("builder claim %q introduces lane %q with "+
+						"claim_lane_creation_enabled=false", job, owner)
+				} else if _, ok := lanes[parent]; !ok {
+					flag("builder claim %q lane %q has missing "+
+						"parent %q", job, owner, parent)
+				} else {
+					lanes[owner] = parent
+				}
+			default:
+				if have, ok := lanes[owner]; !ok {
+					flag("%s claim %q lane %q is neither a "+
+						"configured lane nor a canonical builder lane",
+						role, job, owner)
+				} else if have != parent {
+					flag("%s claim %q lane %q has parent %q, claim "+
+						"says %q", role, job, owner, have, parent)
+				}
+			}
+		}
+	}
+	return out
+}
+
+// legacyIDs returns the legacy task and disposition ids a legacy request
+// path or body targets.
+func legacyIDs(c *vectorCase) (tasks, disps []int64) {
+	parts := strings.Split(asString(c.Request["path"]), "/")
+	switch {
+	case len(parts) >= 6 && parts[1] == "v1" && parts[2] == "tasks" &&
+		parts[3] == "dispositions":
+		if id, err := strconv.ParseInt(parts[4], 10, 64); err == nil {
+			disps = append(disps, id)
+		}
+	case len(parts) >= 5 && parts[1] == "v1" && parts[2] == "tasks":
+		if id, err := strconv.ParseInt(parts[3], 10, 64); err == nil {
+			tasks = append(tasks, id)
+		}
+	}
+	if len(parts) >= 3 && parts[1] == "v1" &&
+		(parts[2] == "decisions" || parts[2] == "assistant") {
+		if id, ok := asInt(asMap(c.Request["body"])["task_id"]); ok {
+			tasks = append(tasks, id)
+		}
+	}
+	return
+}
+
+// legacyNext reports whether the legacy request is the protected-task
+// claim attempt POST /v1/tasks/next, which names no task id.
+func legacyNext(c *vectorCase) bool {
+	parts := strings.Split(asString(c.Request["path"]), "/")
+	return len(parts) >= 4 && parts[1] == "v1" && parts[2] == "tasks" &&
+		parts[3] == "next"
+}
+
+// guardLegacy: every legacy task or disposition id a legacy request
+// targets is seeded in given.legacy, and a seeded disposition's task_id
+// is seeded too.  /v1/tasks/next names no id, but its whole point is a
+// protected task, so it needs a seeded row bound to the case's subject
+// job.  A case expecting not_found is the absence case.
+func guardLegacy(cases []namedCase) []string {
+	var out []string
+	for _, n := range cases {
+		if asString(n.c.Request["type"]) != "legacy" ||
+			expectError(n.c) == "not_found" {
+			continue
+		}
+		tasks, disps := legacyIDs(n.c)
+		seededT := map[int64]bool{}
+		seededD := map[int64]bool{}
+		for _, r := range n.c.Given.Legacy.Tasks {
+			if id, ok := asInt(r["id"]); ok {
+				seededT[id] = true
+			}
+		}
+		for _, r := range n.c.Given.Legacy.Dispositions {
+			if id, ok := asInt(r["id"]); ok {
+				seededD[id] = true
+			}
+		}
+		for _, id := range tasks {
+			if !seededT[id] {
+				out = append(out, fmt.Sprintf(
+					"%s: legacy request targets task %d, not in "+
+						"given.legacy.tasks", n.label(), id))
+			}
+		}
+		for _, id := range disps {
+			if !seededD[id] {
+				out = append(out, fmt.Sprintf(
+					"%s: legacy request targets disposition %d, not "+
+						"in given.legacy.dispositions", n.label(), id))
+			}
+		}
+		for _, r := range n.c.Given.Legacy.Dispositions {
+			if tid, ok := asInt(r["task_id"]); ok && !seededT[tid] {
+				out = append(out, fmt.Sprintf(
+					"%s: seeded disposition %v targets task %d, not "+
+						"in given.legacy.tasks", n.label(), r["id"], tid))
+			}
+		}
+		if legacyNext(n.c) {
+			job := asString(n.c.Given.JobID)
+			protected := false
+			for _, r := range n.c.Given.Legacy.Tasks {
+				if job != "" &&
+					asString(asMap(r["refs"])["job_id"]) == job {
+					protected = true
+				}
+			}
+			if !protected {
+				out = append(out, fmt.Sprintf(
+					"%s: legacy /v1/tasks/next targets a protected "+
+						"task but no given.legacy.tasks row is bound to "+
+						"subject job %q", n.label(), job))
+			}
+		}
+	}
+	return out
+}
+
 // ---------------------------------------------------------------- tests
 
 type guardFn struct {
@@ -572,6 +896,10 @@ var guards = []guardFn{
 	{"digest", guardDigest},
 	{"permission", guardPermission},
 	{"grant_pointer", guardGrantPointers},
+	{"job_ref", guardJobRefs},
+	{"claim_order", guardClaimOrder},
+	{"lane_graph", guardLaneGraph},
+	{"legacy", guardLegacy},
 }
 
 func TestPackGuards(t *testing.T) {
@@ -671,4 +999,52 @@ func TestGuardMutants(t *testing.T) {
 			asMap(asMap(c.Request["body"])["payload"])["repeat_grant_seq"] =
 				float64(4)
 		}), "repeat grant pointing at the verdict")
+
+	requireRed(t, guardJobRefs, mutateCase(t,
+		"r-cleanup-after-subject-join-still-receipt-required",
+		func(c *vectorCase) {
+			for _, r := range c.Given.Records {
+				if asString(r["kind"]) != "claim" {
+					continue
+				}
+				if ro := asMap(asMap(r["payload"])["review_of"]); ro != nil {
+					ro["job_id"] = "job-missing"
+				}
+			}
+		}), "review_of naming an absent job")
+
+	requireRed(t, guardClaimOrder, mutateCase(t,
+		"scoped-mint-reviewer-as-target-claim-conflict",
+		func(c *vectorCase) {
+			recs := c.Given.Records
+			for i, r := range recs {
+				if asString(r["kind"]) == "claim" &&
+					asMap(asMap(r["payload"])["review_of"]) != nil {
+					reordered := []map[string]any{r}
+					reordered = append(reordered, recs[:i]...)
+					c.Given.Records = append(reordered, recs[i+1:]...)
+					break
+				}
+			}
+		}), "review claim before its subject claim")
+
+	requireRed(t, guardLaneGraph, mutateCase(t,
+		"r-import-begin-scope-denied", func(c *vectorCase) {
+			for _, r := range c.Given.Records {
+				if asString(r["kind"]) == "claim" &&
+					asString(r["job_id"]) == "job-a" {
+					asMap(r["payload"])["parent_lane"] = "b2400-missing"
+				}
+			}
+		}), "builder lane with a missing parent")
+
+	requireRed(t, guardLegacy, mutateCase(t,
+		"tasks-claim-protected-denied", func(c *vectorCase) {
+			c.Given.Legacy = legacyGiven{}
+		}), "legacy task row removed")
+
+	requireRed(t, guardLegacy, mutateCase(t,
+		"tasks-next-claim-protected-denied", func(c *vectorCase) {
+			c.Given.Legacy = legacyGiven{}
+		}), "protected next-target row removed")
 }

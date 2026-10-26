@@ -11,6 +11,7 @@
         "table": "Legacy route fence coverage",
         "table_name": "fence",
         "row": 1,
+        "note": "no legacy row: the route rejects the O3 ref before any task lookup, so absence is the point",
         "row_text": "| POST /v1/tasks | Creating an unrelated legacy task remains legacy-compatible. A supplied refs.job_id pointing to an O3 job or protected task association is rejected with wrk_receipt_required; this route cannot enroll or relink authority. |"
       },
       "given": {
@@ -266,6 +267,7 @@
         "table": "Legacy route fence coverage",
         "table_name": "fence",
         "row": 1,
+        "note": "no legacy row: unrelated creation keeps old behaviour, so absence is the point",
         "row_text": "| POST /v1/tasks | Creating an unrelated legacy task remains legacy-compatible. A supplied refs.job_id pointing to an O3 job or protected task association is rejected with wrk_receipt_required; this route cannot enroll or relink authority. |"
       },
       "given": {
@@ -748,7 +750,21 @@
             },
             "record_hash": "d69cb03197dcb2099aec2280f5cb6ca84bafe8eee8b372e5acb7040c59d91dfb"
           }
-        ]
+        ],
+        "legacy": {
+          "tasks": [
+            {
+              "id": 2400,
+              "project": "handoffkeep",
+              "state": "in_progress",
+              "lane": "b2400-a",
+              "parent_lane": "director-1",
+              "refs": {
+                "job_id": "job-a"
+              }
+            }
+          ]
+        }
       },
       "request": {
         "type": "legacy",
@@ -999,7 +1015,21 @@
             },
             "record_hash": "d69cb03197dcb2099aec2280f5cb6ca84bafe8eee8b372e5acb7040c59d91dfb"
           }
-        ]
+        ],
+        "legacy": {
+          "tasks": [
+            {
+              "id": 2400,
+              "project": "handoffkeep",
+              "state": "in_progress",
+              "lane": "b2400-a",
+              "parent_lane": "director-1",
+              "refs": {
+                "job_id": "job-a"
+              }
+            }
+          ]
+        }
       },
       "request": {
         "type": "legacy",
@@ -1252,7 +1282,21 @@
             },
             "record_hash": "d69cb03197dcb2099aec2280f5cb6ca84bafe8eee8b372e5acb7040c59d91dfb"
           }
-        ]
+        ],
+        "legacy": {
+          "tasks": [
+            {
+              "id": 2400,
+              "project": "handoffkeep",
+              "state": "in_progress",
+              "lane": "b2400-a",
+              "parent_lane": "director-1",
+              "refs": {
+                "job_id": "job-a"
+              }
+            }
+          ]
+        }
       },
       "request": {
         "type": "legacy",
@@ -1504,7 +1548,21 @@
             },
             "record_hash": "d69cb03197dcb2099aec2280f5cb6ca84bafe8eee8b372e5acb7040c59d91dfb"
           }
-        ]
+        ],
+        "legacy": {
+          "tasks": [
+            {
+              "id": 2400,
+              "project": "handoffkeep",
+              "state": "in_progress",
+              "lane": "b2400-a",
+              "parent_lane": "director-1",
+              "refs": {
+                "job_id": "job-a"
+              }
+            }
+          ]
+        }
       },
       "request": {
         "type": "legacy",
@@ -1759,7 +1817,21 @@
             },
             "record_hash": "d69cb03197dcb2099aec2280f5cb6ca84bafe8eee8b372e5acb7040c59d91dfb"
           }
-        ]
+        ],
+        "legacy": {
+          "tasks": [
+            {
+              "id": 2400,
+              "project": "handoffkeep",
+              "state": "in_progress",
+              "lane": "b2400-a",
+              "parent_lane": "director-1",
+              "refs": {
+                "job_id": "job-a"
+              }
+            }
+          ]
+        }
       },
       "request": {
         "type": "legacy",
@@ -2012,7 +2084,21 @@
             },
             "record_hash": "d69cb03197dcb2099aec2280f5cb6ca84bafe8eee8b372e5acb7040c59d91dfb"
           }
-        ]
+        ],
+        "legacy": {
+          "tasks": [
+            {
+              "id": 2400,
+              "project": "handoffkeep",
+              "state": "in_progress",
+              "lane": "b2400-a",
+              "parent_lane": "director-1",
+              "refs": {
+                "job_id": "job-a"
+              }
+            }
+          ]
+        }
       },
       "request": {
         "type": "legacy",
@@ -2264,7 +2350,21 @@
             },
             "record_hash": "d69cb03197dcb2099aec2280f5cb6ca84bafe8eee8b372e5acb7040c59d91dfb"
           }
-        ]
+        ],
+        "legacy": {
+          "tasks": [
+            {
+              "id": 2400,
+              "project": "handoffkeep",
+              "state": "in_progress",
+              "lane": "b2400-a",
+              "parent_lane": "director-1",
+              "refs": {
+                "job_id": "job-a"
+              }
+            }
+          ]
+        }
       },
       "request": {
         "type": "legacy",
@@ -2516,7 +2616,28 @@
             },
             "record_hash": "d69cb03197dcb2099aec2280f5cb6ca84bafe8eee8b372e5acb7040c59d91dfb"
           }
-        ]
+        ],
+        "legacy": {
+          "tasks": [
+            {
+              "id": 2400,
+              "project": "handoffkeep",
+              "state": "in_progress",
+              "lane": "b2400-a",
+              "parent_lane": "director-1",
+              "refs": {
+                "job_id": "job-a"
+              }
+            }
+          ],
+          "dispositions": [
+            {
+              "id": 77,
+              "task_id": 2400,
+              "state": "claimed"
+            }
+          ]
+        }
       },
       "request": {
         "type": "legacy",
@@ -2768,7 +2889,21 @@
             },
             "record_hash": "d69cb03197dcb2099aec2280f5cb6ca84bafe8eee8b372e5acb7040c59d91dfb"
           }
-        ]
+        ],
+        "legacy": {
+          "tasks": [
+            {
+              "id": 2400,
+              "project": "handoffkeep",
+              "state": "in_progress",
+              "lane": "b2400-a",
+              "parent_lane": "director-1",
+              "refs": {
+                "job_id": "job-a"
+              }
+            }
+          ]
+        }
       },
       "request": {
         "type": "legacy",
@@ -2792,6 +2927,7 @@
         "table": "Legacy route fence coverage",
         "table_name": "fence",
         "row": 9,
+        "note": "no legacy row: the fence reads job-a's canonical claim, not a legacy task row",
         "row_text": "| POST /v1/relay/events | Every \u00a72 receipt_required job (including a review-role job in summary.state shadow) requires the exact canonical receipt for job.completed/job.joined/end; only matching projection/dedup is accepted. lane.event text never authorizes completion, routing authority or quota release. |"
       },
       "given": {
