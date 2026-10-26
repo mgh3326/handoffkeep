@@ -2327,6 +2327,11 @@ func (s *Store) NextTask(ctx context.Context, lane, by, jobID, noJob string) (Ta
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
 		return Task{}, err
 	}
+	// Naming an enrolled job is an explicit protected claim attempt, even
+	// when selection would otherwise exclude every protected task (S1 #14).
+	if err = s.wrkFence(ctx, tx, wrkrecords.LegacyIntent{JobID: jobID, Binding: true}); err != nil {
+		return Task{}, err
+	}
 
 	var id int64
 	selection := `SELECT id FROM tasks WHERE lane=$1 AND state='backlog'`

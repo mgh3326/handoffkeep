@@ -105,6 +105,13 @@ func seedVector(t *testing.T, v vector, catalog map[string][]byte) (Snapshot, *P
 			}
 			s.Contents[r.JobID][r.Seq] = b
 		}
+		if r.Kind == "completed" || r.Kind == "joined" {
+			b, ok := catalog[Text(r.Payload, "report_sha256")]
+			if !ok || int64(len(b)) != Num(r.Payload, "report_size_bytes") {
+				t.Fatal("missing exact report fixture bytes")
+			}
+			s.Contents[r.JobID][r.Seq] = b
+		}
 		if r.Kind == "import" {
 			b, e := os.ReadFile(filepath.Join("../..", Text(r.Payload, "source_locator")))
 			if e != nil {
@@ -166,9 +173,6 @@ func TestEngineAppendVectors(t *testing.T) {
 			var resp WriteResponse
 			if e == nil {
 				mode := "enforce"
-				if v.Name == "p1-shadow-central-reviewer-claim-starts" {
-					mode = "shadow"
-				}
 				engine := Engine{Policy: p, Mode: mode, Now: time.Date(2026, 10, 24, 1, 0, 0, 0, time.UTC), Generation: "00000000-0000-4000-8000-ffff00000001"}
 				parts := strings.Split(Text(v.Request, "path"), "/")
 				resp, _, e = engine.Append(s, Text(v.Request, "actor"), parts[4], Text(v.Request, "idempotency_key"), r)

@@ -20,6 +20,7 @@ import (
 	"unicode"
 
 	"github.com/mgh3326/handoffkeep/internal/store"
+	"github.com/mgh3326/handoffkeep/internal/wrkrecords"
 )
 
 const csrfCookie = "hk_ui_csrf"
@@ -218,6 +219,12 @@ func (h *Handler) answerDecision(w http.ResponseWriter, r *http.Request, email s
 		}
 		if !found {
 			h.decisionResult(w, r, email, "Task not found.", http.StatusBadRequest)
+			return
+		}
+		if err := h.wrkTaskCheck(r.Context(), task, "claimed"); err != nil {
+			if !uiWrkError(w, err) {
+				h.decisionResult(w, r, email, "Fleet console unavailable.", http.StatusInternalServerError)
+			}
 			return
 		}
 		// Disposition items have their own operator route; refusing here keeps
@@ -528,6 +535,9 @@ func (h *Handler) openBatchDecision(r *http.Request, kind string, id int64) (dec
 		}
 		if !found || task.State != "needs_decision" {
 			return decisionTarget{}, http.StatusConflict, "이미 답변됨"
+		}
+		if err := h.wrkTaskCheck(r.Context(), task, "claimed"); err != nil {
+			return decisionTarget{}, wrkrecords.Status(err), wrkrecords.Code(err)
 		}
 		if task.Refs.Disposition != nil {
 			return decisionTarget{}, http.StatusConflict, "처분 항목은 처분 구획에서만 답합니다."

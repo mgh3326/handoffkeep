@@ -13,6 +13,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -158,13 +159,16 @@ func TestWrkCLIVectors(t *testing.T) {
 			c := cliScenario(t, job)
 			stub := Obj(v.Request, "stub")
 			var calls, forwarded atomic.Int32
+			var stateMu sync.Mutex
 			handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				stateMu.Lock()
+				defer stateMu.Unlock()
 				if r.URL.Path == "/redirect-target" {
 					forwarded.Add(1)
 					w.WriteHeader(500)
 					return
 				}
-				calls.Add(1)
+				attempt := calls.Add(1)
 				w.Header().Set("Content-Type", "application/json")
 				if n := Num(stub, "http_status"); n != 0 {
 					w.WriteHeader(int(n))
@@ -174,11 +178,6 @@ func TestWrkCLIVectors(t *testing.T) {
 				switch Text(stub, "response") {
 				case "redirect":
 					http.Redirect(w, r, "/redirect-target", 307)
-					return
-				case "html_5xx":
-					w.Header().Set("Content-Type", "text/html")
-					w.WriteHeader(502)
-					_, _ = io.WriteString(w, "synthetic proxy body")
 					return
 				case "malformed_cursor":
 					_, _ = io.WriteString(w, `{"contract":"hk1873.v1","snapshot_seq":4,"records":[]}`)
@@ -209,6 +208,21 @@ func TestWrkCLIVectors(t *testing.T) {
 						_ = json.NewEncoder(w).Encode(Object{"error": Code(e)})
 						return
 					}
+					if attempt == 1 && Text(stub, "response") == "html_5xx" {
+						w.Header().Set("Content-Type", "text/html")
+						w.WriteHeader(502)
+						_, _ = io.WriteString(w, "synthetic proxy body after commit")
+						return
+					}
+					if attempt == 1 && Text(stub, "crash") == "any" {
+						conn, _, e := w.(http.Hijacker).Hijack()
+						if e != nil {
+							t.Error(e)
+							return
+						}
+						_ = conn.Close()
+						return
+					}
 					status := 201
 					if !out.Created {
 						status = 200
@@ -233,6 +247,12 @@ func TestWrkCLIVectors(t *testing.T) {
 			if Text(stub, "response") == "unavailable" {
 				server.Close()
 			}
+			if Text(stub, "crash") == "any" {
+				code, out, errout := runWrkCLI(t, binary, server.URL, argv, input)
+				if code != 75 || out != "" || errout != "handoffkeep wrk: transport_indeterminate\n" {
+					t.Fatal("lost committed reply did not remain indeterminate")
+				}
+			}
 			code, out, errout := runWrkCLI(t, binary, server.URL, argv, input)
 			clientOnly := v.Source.Table == "transport" && (v.Source.Row == 1 || v.Source.Row == 2 || v.Source.Row == 8 || v.Source.Row == 11)
 			success := clientOnly || Text(v.Expect, "outcome") == "intent_retry" || (v.Expect["exit_code"] != nil && Num(v.Expect, "exit_code") == 0)
@@ -240,9 +260,12 @@ func TestWrkCLIVectors(t *testing.T) {
 				if code != 0 || errout != "" || !strings.HasSuffix(out, "\n") || strings.Count(out, "\n") != 1 || !json.Valid([]byte(out)) {
 					t.Fatalf("CLI success contract: exit=%d stderr=%q", code, errout)
 				}
-				if stub["replay"] == true {
+				if stub["replay"] == true || Text(stub, "crash") == "any" {
 					var got WriteResponse
-					if json.Unmarshal([]byte(out), &got) != nil || got.Created || len(c.s.Jobs[job]) != 4 {
+					stateMu.Lock()
+					count := len(c.s.Jobs[job])
+					stateMu.Unlock()
+					if json.Unmarshal([]byte(out), &got) != nil || got.Created || count != 4 {
 						t.Fatal("successful-key replay charged again")
 					}
 				}
@@ -251,7 +274,20 @@ func TestWrkCLIVectors(t *testing.T) {
 					t.Fatalf("CLI failure contract: exit=%d stdout_len=%d stderr=%q", code, len(out), errout)
 				}
 			}
+			if Text(stub, "response") == "html_5xx" {
+				recovered, reply, diagnostic := runWrkCLI(t, binary, server.URL, argv, input)
+				var replay WriteResponse
+				stateMu.Lock()
+				count := len(c.s.Jobs[job])
+				stateMu.Unlock()
+				if recovered != 0 || diagnostic != "" || json.Unmarshal([]byte(reply), &replay) != nil || replay.Created || count != 4 {
+					t.Fatal("proxy-lost acceptance did not replay the original write exactly once")
+				}
+			}
 			wantCalls := int32(1)
+			if Text(stub, "crash") == "any" || Text(stub, "response") == "html_5xx" {
+				wantCalls = 2
+			}
 			if Text(stub, "response") == "unavailable" {
 				wantCalls = 0
 			}
@@ -259,5 +295,118 @@ func TestWrkCLIVectors(t *testing.T) {
 				t.Fatalf("network attempts=%d forwarded=%d", calls.Load(), forwarded.Load())
 			}
 		})
+	}
+}
+
+func TestWrkCLICommandsAndArguments(t *testing.T) {
+	binary := buildWrkCLI(t)
+	c := fresh(t)
+	c.must("desktop", "subject", "round_open", opening(h1, "", nil, nil))
+	record := c.must("desktop", "subject", "verdict", evidence(1, h1, "/cli/content", "immutable bytes", nil))
+	var calls atomic.Int32
+	var stateMu sync.Mutex
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		stateMu.Lock()
+		defer stateMu.Unlock()
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
+			t.Error("installed authentication missing")
+		}
+		if r.Method == "POST" {
+			raw, e := io.ReadAll(r.Body)
+			if e != nil {
+				t.Error(e)
+				return
+			}
+			request, e := ParseRequest(raw)
+			if e != nil {
+				t.Error(e)
+				return
+			}
+			out, e := c.send("desktop", "subject", r.Header.Get("Idempotency-Key"), request)
+			if e != nil {
+				t.Error(e)
+				return
+			}
+			w.WriteHeader(201)
+			_ = json.NewEncoder(w).Encode(out)
+			return
+		}
+		sum, e := c.s.Summary("subject", c.e.Now)
+		if e != nil {
+			t.Error(e)
+			return
+		}
+		switch {
+		case r.URL.Path == "/v1/wrk/capabilities":
+			_ = json.NewEncoder(w).Encode(Capabilities{Contract: Contract, Generation: c.e.Generation, ClientID: "desktop", PolicySHA: c.e.Policy.Digest(), Writes: true})
+		case r.URL.Path == "/v1/wrk/jobs/subject":
+			_ = json.NewEncoder(w).Encode(JobResponse{Contract: Contract, Claim: *c.s.Claim("subject"), Summary: sum})
+		case strings.HasSuffix(r.URL.Path, "/content"):
+			b := c.s.Contents["subject"][record.Seq]
+			_ = json.NewEncoder(w).Encode(ContentResponse{JobID: "subject", Seq: record.Seq, Base64: base64.StdEncoding.EncodeToString(b), SHA: SHA(b), Size: len(b)})
+		case strings.HasSuffix(r.URL.Path, "/records"):
+			after, _ := strconv.ParseInt(r.URL.Query().Get("after_seq"), 10, 64)
+			limit := int64(100)
+			if q := r.URL.Query().Get("limit"); q != "" {
+				limit, _ = strconv.ParseInt(q, 10, 64)
+			}
+			rs := []Record{}
+			next := after
+			for _, rec := range c.s.Jobs["subject"] {
+				if rec.Seq > after && int64(len(rs)) < limit {
+					rs = append(rs, rec)
+					next = rec.Seq
+				}
+			}
+			_ = json.NewEncoder(w).Encode(RecordsResponse{Contract: Contract, Snapshot: sum.SnapshotSeq, Next: next, More: next < sum.SnapshotSeq, Records: rs, Summary: sum})
+		default:
+			t.Error("unexpected CLI request path")
+			w.WriteHeader(404)
+		}
+	}))
+	defer server.Close()
+	for _, args := range [][]string{{"capabilities"}, {"job", "subject"}, {"records", "subject"}, {"records", "subject", "--after-seq", "2", "--snapshot-seq", "4", "--limit", "1"}, {"content", "subject", "4"}} {
+		before := calls.Load()
+		code, out, stderr := runWrkCLI(t, binary, server.URL, args, nil)
+		if code != 0 || stderr != "" || !json.Valid([]byte(out)) || strings.Count(out, "\n") != 1 || calls.Load() != before+1 {
+			t.Fatalf("%s success binding failed: exit=%d", args[0], code)
+		}
+	}
+	key := NewUUID()
+	args := []string{"append", "subject", "--kind", "round_open", "--idempotency-key", key, "--expected-seq", "4", "--claim-seq", "1"}
+	input, _ := json.Marshal(opening(h2, "", nil, nil))
+	code, out, stderr := runWrkCLI(t, binary, server.URL, args, input)
+	if code != 0 || stderr != "" {
+		t.Fatalf("append binding: %d", code)
+	}
+	var written WriteResponse
+	if json.Unmarshal([]byte(out), &written) != nil || !written.Created || written.Record.Key != key || written.Record.Seq != 5 {
+		t.Fatal("append request changed key/CAS/body")
+	}
+	invalid := []struct {
+		args  []string
+		input string
+		code  string
+	}{
+		{[]string{"job", "subject", "extra"}, "", "cli_usage"},
+		{[]string{"job", "subject", "--url", "https://example.invalid"}, "", "cli_usage"},
+		{[]string{"job", "subject", "--token", "synthetic"}, "", "cli_usage"},
+		{[]string{"job", "subject", "--token-path", "/synthetic"}, "", "cli_usage"},
+		{[]string{"job", "subject", "--transport", "alternate"}, "", "cli_usage"},
+		{[]string{"records", "subject", "--limit", "1", "--limit", "2"}, "", "cli_usage"},
+		{[]string{"records", "subject", "--after-seq", "-1"}, "", "cli_usage"},
+		{[]string{"content", "subject", "0"}, "", "cli_usage"},
+		{[]string{"capabilities"}, "\n", "invalid_request"},
+		{args, `{"head":"` + h2 + `","head":"` + h3 + `"}`, "invalid_request"},
+		{args, `{"head":"` + h2 + `","tester_job_id":null,"extension_grant_seq":null,"repeat_grant_seq":null,"extra":true}`, "invalid_request"},
+	}
+	for _, bad := range invalid {
+		before := calls.Load()
+		code, out, stderr := runWrkCLI(t, binary, server.URL, bad.args, []byte(bad.input))
+		if code != Exit(bad.code) || out != "" || stderr != "handoffkeep wrk: "+bad.code+"\n" || calls.Load() != before {
+			t.Fatalf("local argument/payload refusal: %s exit=%d", bad.code, code)
+		}
 	}
 }

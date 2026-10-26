@@ -451,3 +451,74 @@ func TestDesignPolicyGraphKeepsReferencedEdges(t *testing.T) {
 		t.Fatal("changed referenced canonical parent")
 	}
 }
+
+func TestDesignImportedVerdictKeepsNegativeIdentity(t *testing.T) {
+	c := fresh(t)
+	c.s.Jobs["subject"] = c.s.Jobs["subject"][:1]
+	begin := c.must("director-1", "subject", "import_begin", Object{"reason_code": "archive"})
+	original := []byte("VERDICT: PASS @" + h1 + "\narchived PASS\n")
+	bytes, _ := json.Marshal(Object{"kind": "job.verdict", "payload": Object{"round": 1, "head": strings.ToUpper(h1), "path": "/review/../negative/path", "content_sha256": strings.ToUpper(SHA(original)), "verdict": "PASS"}})
+	imported := c.must("director-1", "subject", "import", Object{"source_locator": "synthetic/verdict", "source_sha256": SHA(bytes), "original_actor_client_id": nil, "original_at": nil, "legacy_kind": "job.verdict", "content_b64": base64.StdEncoding.EncodeToString(bytes)})
+	manifest, _ := Digest([]Object{{"seq": imported.Seq, "source_locator": imported.Payload["source_locator"], "source_sha256": imported.Payload["source_sha256"]}})
+	seal := c.must("director-1", "subject", "import_seal", Object{"begin_seq": begin.Seq, "expected_import_count": 1, "manifest_sha256": manifest, "reason_code": "seal"})
+	c.must("director-1", "subject", "activate", Object{"seal_seq": seal.Seq, "reason_code": "activate"})
+	c.want("desktop", "subject", "round_open", "duplicate_head", opening(h1, "", nil, nil))
+	grant := c.grant("extension", int64(4), h2, nil, nil)
+	c.must("desktop", "subject", "round_open", opening(h2, "", grant.Seq, nil))
+	c.want("desktop", "subject", "verdict", "duplicate_path", evidence(4, h2, "/negative/path", "fresh bytes", nil))
+	p := evidence(4, h2, "/negative/unique", "fresh bytes", nil)
+	p["content_b64"], p["content_sha256"] = base64.StdEncoding.EncodeToString(original), SHA(original)
+	c.want("desktop", "subject", "verdict", "duplicate_content", p)
+	c.want("desktop", "subject", "joined", "review_incomplete", report(h2))
+}
+
+func TestDesignShadowLegacyFenceStartsAtActivate(t *testing.T) {
+	c := fresh(t)
+	c.s.Jobs["subject"] = c.s.Jobs["subject"][:1]
+	binding := LegacyIntent{TaskID: 9001, CurrentJob: "subject", JobID: "subject", Binding: true}
+	state := LegacyIntent{TaskID: 9001, CurrentJob: "subject", To: "claimed"}
+	for _, in := range []LegacyIntent{binding, state} {
+		if e := c.s.CheckLegacy(c.e.Policy, "desktop", in); e != nil {
+			t.Fatalf("P1 legacy operation fenced: %v", e)
+		}
+	}
+	c.reviewer("p1-reviewer", "desktop", 1)
+	if e := c.s.CheckLegacy(c.e.Policy, "desktop", LegacyIntent{JobID: "p1-reviewer", Binding: true}); Code(e) != "wrk_receipt_required" {
+		t.Fatal("review role was not protected immediately")
+	}
+	c.must("director-1", "subject", "activate", Object{"seal_seq": nil, "reason_code": "enforce"})
+	for _, in := range []LegacyIntent{binding, state} {
+		if e := c.s.CheckLegacy(c.e.Policy, "desktop", in); Code(e) != "wrk_receipt_required" {
+			t.Fatalf("activated operation escaped: %v", e)
+		}
+	}
+}
+
+func TestDesignImportNumberingOverflowIsRefused(t *testing.T) {
+	c := fresh(t)
+	c.s.Jobs["subject"] = c.s.Jobs["subject"][:1]
+	begin := c.must("director-1", "subject", "import_begin", Object{"reason_code": "archive"})
+	b, _ := json.Marshal(Object{"kind": "job.round", "round": MaxInt})
+	r := c.must("director-1", "subject", "import", Object{"source_locator": "synthetic/overflow", "source_sha256": SHA(b), "original_actor_client_id": nil, "original_at": nil, "legacy_kind": "job.round", "content_b64": base64.StdEncoding.EncodeToString(b)})
+	manifest, _ := Digest([]Object{{"seq": r.Seq, "source_locator": r.Payload["source_locator"], "source_sha256": r.Payload["source_sha256"]}})
+	c.want("director-1", "subject", "import_seal", "invalid_request", Object{"begin_seq": begin.Seq, "expected_import_count": 1, "manifest_sha256": manifest, "reason_code": "seal"})
+	sum, e := c.s.Summary("subject", c.e.Now)
+	if e != nil || sum.State != "importing" {
+		t.Fatal("overflow committed a seal")
+	}
+}
+
+func TestDesignCompletedRelayRequiresExactMetadata(t *testing.T) {
+	c := fresh(t)
+	b := []byte("report metadata\n")
+	r := c.must("desktop", "subject", "completed", Object{"report_b64": base64.StdEncoding.EncodeToString(b), "report_sha256": SHA(b)})
+	receipt := r.Receipt()
+	in := LegacyIntent{JobID: "subject", Kind: "job.completed", Digest: SHA(b), Receipt: &receipt}
+	if e := c.s.CheckLegacy(c.e.Policy, "desktop", in); e != nil {
+		t.Fatal(e)
+	}
+	in.Head = h1
+	if e := c.s.CheckLegacy(c.e.Policy, "desktop", in); Code(e) != "wrk_receipt_required" {
+		t.Fatal("noncanonical completion head accepted")
+	}
+}

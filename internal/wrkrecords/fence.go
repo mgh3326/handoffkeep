@@ -25,7 +25,7 @@ func (s Snapshot) ProtectedTask(id int64) bool {
 
 func (s Snapshot) CheckLegacy(p *Policy, actor string, in LegacyIntent) error {
 	protected := in.TaskID > 0 && s.ProtectedTask(in.TaskID)
-	if in.JobID != "" && in.Kind == "" && s.Claim(in.JobID) != nil {
+	if in.JobID != "" && in.Kind == "" && s.ReceiptRequired(in.JobID) {
 		protected = true
 	}
 	terminal := in.Kind == "job.completed" || in.Kind == "job.joined" || in.Kind == "job.revoked" || in.Kind == "job.reaped" || in.Kind == "job.handed_off" || in.Kind == "job.takeover" || in.Kind == "end"
@@ -82,7 +82,7 @@ func (s Snapshot) CheckLegacy(p *Policy, actor string, in LegacyIntent) error {
 		if record.Kind != kind {
 			return required()
 		}
-		if (kind == "joined" && in.Head != Text(record.Payload, "head")) || ((kind == "completed" || kind == "joined") && in.Digest != Text(record.Payload, "report_sha256")) {
+		if ((kind == "joined" || kind == "completed") && in.Head != Text(record.Payload, "head")) || ((kind == "completed" || kind == "joined") && in.Digest != Text(record.Payload, "report_sha256")) {
 			return required()
 		}
 		return nil

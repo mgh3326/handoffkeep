@@ -38,6 +38,10 @@ func (s Server) wrk(w http.ResponseWriter, r *http.Request) {
 		fail(wrkrecords.Error("scope_denied"))
 		return
 	}
+	if engine.Recovery && !(wrkrecords.Central(actor) && r.Method == "GET") {
+		fail(wrkrecords.Error("wrk_recovery_required"))
+		return
+	}
 	if r.URL.RawPath != "" && r.URL.EscapedPath() != r.URL.Path {
 		fail(wrkrecords.Error("invalid_request"))
 		return

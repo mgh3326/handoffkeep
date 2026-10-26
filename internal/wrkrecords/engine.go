@@ -222,7 +222,7 @@ func (e Engine) Append(s Snapshot, actor, job, key string, r Request) (WriteResp
 		if sum.Used >= 3 && p["extension_grant_seq"] == nil {
 			return fail("round_cap")
 		}
-		if sum.Next > MaxInt {
+		if sum.Next >= MaxInt {
 			return fail("invalid_request")
 		}
 		p["round_no"] = sum.Next
@@ -424,6 +424,9 @@ func (e Engine) Append(s Snapshot, actor, job, key string, r Request) (WriteResp
 		p["numbering_floor"] = floor
 		p["shadow_cutoff_seq"] = begin.Payload["shadow_cutoff_seq"]
 	default:
+		return fail("invalid_request")
+	}
+	if tail >= MaxInt {
 		return fail("invalid_request")
 	}
 	previous := strings.Repeat("0", 64)
@@ -763,14 +766,25 @@ func (e Engine) identities(s Snapshot, job string) []Object {
 		if r.Kind == "verdict" {
 			out = append(out, r.Payload)
 		}
-		if r.Kind == "import" && Text(r.Payload, "legacy_kind") == "job.verdict" {
+		if r.Kind == "import" {
 			v, x := Decode(s.Contents[r.JobID][r.Seq])
 			if x == nil {
 				m, _ := v.(map[string]any)
 				if m != nil {
+					if Text(m, "kind") != "job.verdict" {
+						continue
+					}
 					if payload := Obj(m, "payload"); payload != nil {
 						m = payload
 					}
+					m = Clone(m)
+					if path, err := NormalizePath(Text(m, "path")); err == nil {
+						m["path"] = path
+					} else {
+						delete(m, "path")
+					}
+					m["head"] = strings.ToLower(Text(m, "head"))
+					m["content_sha256"] = strings.ToLower(Text(m, "content_sha256"))
 					out = append(out, m)
 				}
 			}
@@ -841,11 +855,17 @@ func (e Engine) accountImport(s Snapshot, job string) (int64, int64, error) {
 				}
 			}
 			if kind == "job.takeover" {
+				if n, ok := p["rounds_used"].(float64); ok && n > MaxInt {
+					return 0, 0, Error("invalid_request")
+				}
 				if n, ok := p["rounds_used"].(float64); ok && n >= 0 && n <= MaxInt && n == float64(int64(n)) && int64(n) > takeover {
 					takeover = int64(n)
 				}
 			}
 			if kind == "job.round" || kind == "job.verdict" || kind == "job.round_void" {
+				if n, ok := p["round"].(float64); ok && n > MaxInt {
+					return 0, 0, Error("invalid_request")
+				}
 				if n, ok := p["round"].(float64); ok && n > 0 && n == float64(int64(n)) && int64(n) > floor {
 					floor = int64(n)
 				}
@@ -874,6 +894,9 @@ func (e Engine) accountImport(s Snapshot, job string) (int64, int64, error) {
 	}
 	if floor < baseline {
 		floor = baseline
+	}
+	if floor >= MaxInt {
+		return 0, 0, Error("invalid_request")
 	}
 	return baseline, floor, nil
 }

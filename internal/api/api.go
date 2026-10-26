@@ -271,6 +271,9 @@ func (s Service) RebindTaskJob(ctx context.Context, id int64, fromJob, toJob, by
 }
 
 func (s Service) NextTask(ctx context.Context, lane, by, jobID, noJob string) (store.Task, error) {
+	if err := s.Store.WrkFence(ctx, wrkrecords.LegacyIntent{JobID: jobID, Binding: true}); err != nil {
+		return store.Task{}, err
+	}
 	return s.Store.NextTask(ctx, lane, by, jobID, noJob)
 }
 func (s Service) CreateDisposition(ctx context.Context, client string, x store.DispositionInput) (store.Task, bool, error) {
@@ -479,7 +482,8 @@ type Server struct {
 
 func (s Server) Handler() http.Handler {
 	m := http.NewServeMux()
-	if s.Service.Store != nil && (s.Service.Store.WrkEngine().Mode != "off" || s.Service.Store.HasWrkEnrollment(context.Background())) {
+	wrkRegistered := s.Service.Store != nil && (s.Service.Store.WrkEngine().Mode != "off" || s.Service.Store.HasWrkEnrollment(context.Background()))
+	if wrkRegistered {
 		m.HandleFunc("/v1/wrk/", s.wrk)
 	}
 	m.HandleFunc("GET /healthz", healthz)
@@ -547,7 +551,16 @@ func (s Server) Handler() http.Handler {
 		m.Handle("/ui", s.UI)
 		m.Handle("/ui/", s.UI)
 	}
-	return s.legacyWrkFence(m)
+	legacy := s.legacyWrkFence(m)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// ServeMux cleans dot/slash paths with redirects before dispatch. O3
+		// must authenticate and reject those paths without ever sending Location.
+		if wrkRegistered && (r.URL.Path == "/v1/wrk" || strings.HasPrefix(r.URL.Path, "/v1/wrk/")) {
+			s.wrk(w, r)
+			return
+		}
+		legacy.ServeHTTP(w, r)
+	})
 }
 
 // readBuildInfo is a variable so tests can stamp a VCS-tagged build info.
@@ -1236,6 +1249,10 @@ type taskRelaneResult struct {
 // errors (driver faults, cancelled contexts) report internal_error rather
 // than leaking internals or posing as a retry-safe validation failure.
 func relaneErrorCode(err error) string {
+	var denied wrkrecords.Error
+	if errors.As(err, &denied) {
+		return wrkrecords.Code(denied)
+	}
 	switch {
 	case errors.Is(err, store.ErrTaskNotFound):
 		return "not_found"

@@ -91,6 +91,14 @@ func (db contractDB) seed(t *testing.T, v vector, catalog map[string][]byte) {
 	t.Helper()
 	ctx := t.Context()
 	snap, p := seedVector(t, v, catalog)
+	engine := Engine{Policy: p, Mode: "enforce", Generation: "00000000-0000-4000-8000-ffff00000001", Now: time.Date(2026, 10, 24, 1, 0, 0, 0, time.UTC)}
+	incomplete := fixture_incomplete[v.file+"/"+v.Name]
+	if incomplete {
+		if e := db.runtime.ConfigureWrkEngine(ctx, engine); e != nil {
+			t.Fatal(e)
+		}
+	}
+
 	// Task bindings are genuine fixture prerequisites, derived only from given
 	// claims. The request and expected outcome never determine the seed.
 	tasks := map[int64]Record{}
@@ -100,7 +108,7 @@ func (db contractDB) seed(t *testing.T, v vector, catalog map[string][]byte) {
 		}
 	}
 	// Fresh claims in the pack refer to an existing unbound task.
-	for _, id := range []int64{2400, 2401, 9001, 9002} {
+	for _, id := range []int64{2400, 2401, 2403, 9001, 9002} {
 		if _, ok := tasks[id]; !ok {
 			tasks[id] = Record{Payload: Object{"owner_lane": "director-1", "parent_lane": "director-1"}}
 		}
@@ -137,9 +145,12 @@ func (db contractDB) seed(t *testing.T, v vector, catalog map[string][]byte) {
 			}
 		}
 	}
-	if e := db.runtime.ConfigureWrkEngine(ctx, Engine{Policy: p, Mode: "enforce", Generation: "00000000-0000-4000-8000-ffff00000001", Now: time.Date(2026, 10, 24, 1, 0, 0, 0, time.UTC)}); e != nil {
-		t.Fatal(e)
+	if !incomplete {
+		if e := db.runtime.ConfigureWrkEngine(ctx, engine); e != nil {
+			t.Fatal(e)
+		}
 	}
+	db.seedLegacyMapping(t, v)
 }
 
 func vectorBody(t *testing.T, v vector) []byte {
@@ -188,6 +199,9 @@ func TestStoreHTTPVectors(t *testing.T) {
 			var body []byte
 			if Text(v.Request, "method") == "POST" {
 				body = vectorBody(t, v)
+				if kind == "legacy" {
+					target, body = legacyVectorRequest(t, v)
+				}
 			}
 			req := httptest.NewRequest(Text(v.Request, "method"), target, bytes.NewReader(body))
 			req.Header.Set("Authorization", "Bearer "+tokens[actor])
@@ -199,10 +213,9 @@ func TestStoreHTTPVectors(t *testing.T) {
 			handler.ServeHTTP(out, req)
 			expect := v.Expect
 			if Text(expect, "outcome") == "legacy_compatible" {
-				// This deliberately incomplete legacy request must retain its old error
-				// contract as well as valid unrelated requests retaining their success.
-				if out.Code != 400 {
-					t.Fatalf("legacy baseline status changed: %d", out.Code)
+				// Real unrelated task creation retains its existing 201 behavior.
+				if out.Code != 201 {
+					t.Fatalf("legacy creation behavior changed: %d", out.Code)
 				}
 				return
 			}

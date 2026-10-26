@@ -240,6 +240,9 @@ func (h *Handler) answerDisposition(w http.ResponseWriter, r *http.Request, iden
 	// answer in the director's lane (ESC-5).
 	task, err := h.store.AnswerDisposition(r.Context(), store.DispositionAnswerInput{ID: id, Gen: gen, Key: key, OperatorEmail: email, EventID: eventID})
 	if err != nil {
+		if uiWrkError(w, err) {
+			return
+		}
 		switch {
 		case errors.Is(err, store.ErrDispositionStale):
 			h.audit(email, "disposition", target, eventID, "stale")
@@ -292,6 +295,9 @@ func (h *Handler) acceptDispositionBatch(w http.ResponseWriter, r *http.Request,
 	eventFor := func(lane string) string { return "web-disposition-batch-" + batchID + "-" + lane }
 	answered, skipped, err := h.store.AnswerDispositionBatch(r.Context(), refs, email, batchID, eventFor)
 	if err != nil {
+		if uiWrkError(w, err) {
+			return
+		}
 		h.audit(email, "disposition-batch", "-", "-", "error")
 		http.Error(w, "fleet console unavailable", http.StatusInternalServerError)
 		return
