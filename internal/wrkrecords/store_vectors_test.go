@@ -92,13 +92,6 @@ func (db contractDB) seed(t *testing.T, v vector, catalog map[string][]byte) {
 	ctx := t.Context()
 	snap, p := seedVector(t, v, catalog)
 	engine := Engine{Policy: p, Mode: "enforce", Generation: "00000000-0000-4000-8000-ffff00000001", Now: time.Date(2026, 10, 24, 1, 0, 0, 0, time.UTC)}
-	incomplete := fixture_incomplete[v.file+"/"+v.Name]
-	if incomplete {
-		if e := db.runtime.ConfigureWrkEngine(ctx, engine); e != nil {
-			t.Fatal(e)
-		}
-	}
-
 	// Task bindings are genuine fixture prerequisites, derived only from given
 	// claims. The request and expected outcome never determine the seed.
 	tasks := map[int64]Record{}
@@ -113,13 +106,26 @@ func (db contractDB) seed(t *testing.T, v vector, catalog map[string][]byte) {
 			tasks[id] = Record{Payload: Object{"owner_lane": "director-1", "parent_lane": "director-1"}}
 		}
 	}
+	for _, task := range v.Given.Legacy.Tasks {
+		if _, ok := tasks[task.ID]; !ok {
+			tasks[task.ID] = Record{Payload: Object{}}
+		}
+	}
 	for id, c := range tasks {
 		refs, _ := json.Marshal(Object{"job_id": c.JobID})
+		lane, parent, state := Text(c.Payload, "owner_lane"), Text(c.Payload, "parent_lane"), "backlog"
+		var project any
+		for _, task := range v.Given.Legacy.Tasks {
+			if task.ID == id {
+				lane, parent, state, project = task.Lane, task.ParentLane, task.State, task.Project
+				refs, _ = json.Marshal(task.Refs)
+			}
+		}
 		claimedBy := ""
 		if c.JobID != "" {
 			claimedBy = Text(c.Payload, "owner_lane") // Canonical claim's task-binding projection.
 		}
-		if _, e := db.owner.Exec(ctx, `INSERT INTO tasks(id,lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at) VALUES($1,$2,$3,'contract task','implement','backlog',0,$4::jsonb,$5,'fixture',now(),now())`, id, Text(c.Payload, "owner_lane"), Text(c.Payload, "parent_lane"), string(refs), claimedBy); e != nil {
+		if _, e := db.owner.Exec(ctx, `INSERT INTO tasks(id,lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at,project) VALUES($1,$2,$3,'contract task','implement',$6,0,$4::jsonb,$5,'fixture',now(),now(),$7)`, id, lane, parent, string(refs), claimedBy, state, project); e != nil {
 			t.Fatal(e)
 		}
 	}
@@ -149,10 +155,8 @@ func (db contractDB) seed(t *testing.T, v vector, catalog map[string][]byte) {
 			}
 		}
 	}
-	if !incomplete {
-		if e := db.runtime.ConfigureWrkEngine(ctx, engine); e != nil {
-			t.Fatal(e)
-		}
+	if e := db.runtime.ConfigureWrkEngine(ctx, engine); e != nil {
+		t.Fatal(e)
 	}
 	db.seedLegacyMapping(t, v)
 }

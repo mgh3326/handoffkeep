@@ -2,7 +2,7 @@ package wrkrecords_test
 
 import (
 	"encoding/json"
-	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -42,7 +42,10 @@ func legacyVectorRequest(t *testing.T, v vector) (string, []byte) {
 		body = Object{"request_id": "dr-2400-1", "kind": "answered", "option": "A"}
 		mapping = "real structured decision resolve fields"
 	case "legacy-route-fence.json/dispositions-apply-binding-denied":
-		path = "/v1/tasks/dispositions/2400/apply"
+		if len(v.Given.Legacy.Dispositions) != 1 {
+			t.Fatal("M1r2 disposition prerequisite missing")
+		}
+		path = "/v1/tasks/dispositions/" + strconv.FormatInt(v.Given.Legacy.Dispositions[0].TaskID, 10) + "/apply"
 		body = Object{"note": "apply fixture disposition"}
 		mapping = "real disposition on protected subject task 2400; real note field"
 	case "legacy-route-fence.json/decisions-resolve-protected-denied":
@@ -83,6 +86,10 @@ func (db contractDB) seedLegacyMapping(t *testing.T, v vector) {
 	if v.file+"/"+v.Name != "legacy-route-fence.json/dispositions-apply-binding-denied" {
 		return
 	}
+	if len(v.Given.Legacy.Dispositions) != 1 || v.Given.Legacy.Dispositions[0].ID != 77 || v.Given.Legacy.Dispositions[0].TaskID != 2400 {
+		t.Fatal("M1r2 logical disposition mapping changed")
+	}
+	disposition := v.Given.Legacy.Dispositions[0]
 	at := time.Date(2026, 10, 24, 0, 0, 0, 0, time.UTC)
 	options := append([]store.DecisionOption{}, store.DispositionOptionLabels...)
 	options[0].Recommended = true
@@ -91,70 +98,40 @@ func (db contractDB) seedLegacyMapping(t *testing.T, v vector) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if _, e = db.owner.Exec(t.Context(), `UPDATE tasks SET kind='decide',state='claimed',refs=$1::jsonb WHERE id=2400`, string(raw)); e != nil {
+	if _, e = db.owner.Exec(t.Context(), `UPDATE tasks SET kind='decide',state=$2,refs=$1::jsonb WHERE id=$3`, string(raw), disposition.State, disposition.TaskID); e != nil {
 		t.Fatal(e)
 	}
 }
 
-// Only these four incomplete M1 histories may bypass startup graph validation
-// in test setup. Every request still executes the actual API and asserts the
-// pack's static refusal. The set must become empty after M1 adds its references.
-var fixture_incomplete = map[string]bool{
-	"r4-scoped-claim.json/scoped-mint-reviewer-as-target-claim-conflict": true,
-	"r4-review-lifecycle.json/r-import-begin-scope-denied":               true,
-	"r4-review-lifecycle.json/r-import-scope-denied":                     true,
-	"r4-review-lifecycle.json/r-import-seal-scope-denied":                true,
-}
+// M1r2 repaired all four fixtures. No setup bypass remains: every policy graph
+// is validated after its given records are inserted, exactly as normal startup.
+var fixture_incomplete = map[string]bool{}
 
 func TestFixtureIncompletePermissionCases(t *testing.T) {
-	want := map[string]bool{
+	if len(fixture_incomplete) != 0 {
+		t.Fatal("M1r2 fixture_incomplete must stay empty")
+	}
+	repaired := map[string]bool{
 		"r4-review-lifecycle.json/r-import-begin-scope-denied":               true,
 		"r4-review-lifecycle.json/r-import-scope-denied":                     true,
 		"r4-review-lifecycle.json/r-import-seal-scope-denied":                true,
 		"r4-scoped-claim.json/scoped-mint-reviewer-as-target-claim-conflict": true,
 	}
-	if !reflect.DeepEqual(fixture_incomplete, want) {
-		t.Fatal("fixture_incomplete must be exactly the four director-ruled cases until M1 repairs them")
-	}
 	seen := map[string]bool{}
 	for _, v := range loadVectors(t) {
 		key := v.file + "/" + v.Name
-		if !fixture_incomplete[key] {
+		if !repaired[key] {
 			continue
 		}
 		seen[key] = true
 		t.Run(v.Name, func(t *testing.T) {
 			snap, p := seedVector(t, v, contentCatalog(t, loadVectors(t)))
-			if v.file == "r4-scoped-claim.json" {
-				target := snap.Claim(Text(Obj(Obj(Obj(v.Request, "body"), "payload"), "review_of"), "job_id"))
-				if !Review(target) || Num(v.Expect, "http_status") != 409 || Text(v.Expect, "error") != "claim_conflict" {
-					t.Fatal("review-role target static refusal changed")
-				}
-				root := snap.Claim(Text(Obj(target.Payload, "review_of"), "job_id"))
-				if root == nil || root.ReceivedAt <= target.ReceivedAt {
-					t.Fatal("M1 repaired review-before-subject history; empty fixture_incomplete entry")
-				}
-				return
-			}
-			claim := snap.Claim(v.Given.Job)
-			if !Review(claim) || snap.Claim(Text(Obj(claim.Payload, "review_of"), "job_id")) != nil {
-				t.Fatal("M1 repaired subject reference; empty fixture_incomplete entry")
-			}
-			var wire Object
-			_ = json.Unmarshal(v.Given.Policy, &wire)
-			if _, ok := Obj(wire, "lanes")[Text(claim.Payload, "owner_lane")]; ok {
-				t.Fatal("M1 repaired lane reference; empty fixture_incomplete entry")
-			}
-			if Num(v.Expect, "http_status") != 403 || Text(v.Expect, "error") != "scope_denied" {
-				t.Fatal("incomplete lifecycle exemption is permission-only")
-			}
-			permission := map[string]string{"import_begin": "import.begin", "import": "import.write", "import_seal": "import.seal"}[Text(Obj(v.Request, "body"), "kind")]
-			if permission == "" || p.Allows(Text(v.Request, "actor"), permission) {
-				t.Fatal("request can reach target lookup; no incomplete fixture exemption")
+			if e := p.ValidateGraph(snap, nil); e != nil {
+				t.Fatalf("repaired fixture failed normal startup graph validation: %v", e)
 			}
 		})
 	}
-	if len(seen) != len(fixture_incomplete) {
-		t.Fatal("stale/unknown fixture_incomplete entry")
+	if len(seen) != len(repaired) {
+		t.Fatal("missing repaired fixture")
 	}
 }

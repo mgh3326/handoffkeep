@@ -23,6 +23,21 @@ type vector struct {
 		Job     string          `json:"job_id"`
 		Policy  json.RawMessage `json:"policy"`
 		Records []Record        `json:"records"`
+		Legacy  struct {
+			Tasks []struct {
+				ID         int64  `json:"id"`
+				Project    string `json:"project"`
+				State      string `json:"state"`
+				Lane       string `json:"lane"`
+				ParentLane string `json:"parent_lane"`
+				Refs       Object `json:"refs"`
+			} `json:"tasks"`
+			Dispositions []struct {
+				ID     int64  `json:"id"`
+				TaskID int64  `json:"task_id"`
+				State  string `json:"state"`
+			} `json:"dispositions"`
+		} `json:"legacy"`
 	} `json:"given"`
 	Request Object `json:"request"`
 	Expect  Object `json:"expect"`
