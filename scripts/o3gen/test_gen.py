@@ -116,6 +116,22 @@ class DesignGateTest(unittest.TestCase):
                     gb = f.read()
                 self.assertEqual(wb, gb, rel)
 
+    def test_default_design_uses_committed_copy_byte_exact(self):
+        self.need_fixture()
+        with tempfile.TemporaryDirectory() as td:
+            out = os.path.join(td, "o3")
+            p = run_gen("--out", out)
+            self.assertEqual(0, p.returncode, p.stderr)
+            want = tree_files(PACK)
+            got = tree_files(out)
+            self.assertEqual(sorted(want), sorted(got))
+            for rel, wp in sorted(want.items()):
+                with open(wp, "rb") as f:
+                    wb = f.read()
+                with open(got[rel], "rb") as f:
+                    gb = f.read()
+                self.assertEqual(wb, gb, rel)
+
     def test_output_identical_under_reversed_readdir(self):
         self.need_fixture()
         with tempfile.TemporaryDirectory() as td:
