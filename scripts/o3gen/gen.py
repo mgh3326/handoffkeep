@@ -4,9 +4,10 @@
 Usage: gen.py [--out DIR] [--design FILE]
 
 --out defaults to testdata/o3.  --design names the pinned design body
-(plain markdown, revision 4); it defaults to design.md next to this
-script.  The design body sha256 is checked against the pinned value
-before anything is written.
+(plain markdown, revision 4); it defaults to the committed copy at
+testdata/b1873a-sol-r4.md next to this script.  The design body
+sha256 is checked against the pinned value before anything is
+written.
 """
 import argparse
 import json
@@ -20,7 +21,8 @@ import gen_legacy
 
 _ap = argparse.ArgumentParser()
 _ap.add_argument("--out", default="testdata/o3")
-_ap.add_argument("--design", default=os.path.join(HERE, "design.md"))
+_ap.add_argument("--design",
+                default=os.path.join(HERE, "testdata", "b1873a-sol-r4.md"))
 _args = _ap.parse_args()
 OUT = _args.out
 DESIGN_MD = _args.design

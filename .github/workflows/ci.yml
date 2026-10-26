@@ -39,6 +39,7 @@ jobs:
         env:
           HANDOFFKEEP_TEST_DB_URL: postgres://handoffkeep:handoffkeep@localhost:5432/handoffkeep?sslmode=disable
       - run: bash scripts/test-build-release.sh
+      - run: python3 scripts/o3gen/test_gen.py
       - uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
