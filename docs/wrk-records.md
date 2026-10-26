@@ -68,6 +68,10 @@ key and body after an uncertain outcome. C1 owns canonical binary selection,
 environment scrubbing, durable intents, retained-receipt comparisons, retries,
 and local event/cleanup projection; this server does not implement them.
 
+A successful replay returns the original record and committed summary, evaluated
+at that record's received_at even after a grant expires. Fetch the current job
+before the next decision. An unreadable stored timestamp fails closed.
+
 ## Verification
 
 The unchanged M1 pack drives the pure transition engine, the real HTTP/store

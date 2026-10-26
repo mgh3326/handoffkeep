@@ -91,7 +91,13 @@ func (e Engine) Append(s Snapshot, actor, job, key string, r Request) (WriteResp
 			saved := s
 			saved.Jobs = copyJobs(s.Jobs)
 			saved.Jobs[job] = rs[:i+1]
-			summary, x := saved.Summary(job, e.time())
+			receivedAt, x := time.Parse(time.RFC3339Nano, old.ReceivedAt)
+			if x != nil {
+				return fail("wrk_unavailable")
+			}
+			// Replay returns the original committed summary, including grants
+			// that were unexpired at acceptance. Current state requires a GET.
+			summary, x := saved.Summary(job, receivedAt)
 			if x != nil {
 				return WriteResponse{}, nil, x
 			}
@@ -155,7 +161,6 @@ func (e Engine) Append(s Snapshot, actor, job, key string, r Request) (WriteResp
 			return WriteResponse{}, nil, err
 		}
 		p["policy_sha256"] = e.Policy.Digest()
-		p["created_at"] = e.time().Format("2006-01-02T15:04:05.000000Z")
 	case "activate":
 		if e.Mode != "enforce" {
 			return fail("wrk_unavailable")
@@ -433,7 +438,14 @@ func (e Engine) Append(s Snapshot, actor, job, key string, r Request) (WriteResp
 	if tail > 0 {
 		previous = rs[len(rs)-1].RecordHash
 	}
-	rec := Record{JobID: job, Seq: tail + 1, RecordID: NewUUID(), Generation: e.Generation, ClaimSeq: claimSeq, Actor: actor, Key: key, RequestSHA: digest, Imported: r.Kind == "import", ReceivedAt: e.time().Format("2006-01-02T15:04:05.000000Z"), PreviousHash: previous, Kind: r.Kind, Payload: p}
+	// Capture once so the record and its original response use the same clock.
+	// Live permission/expiry validation above continues using the current time.
+	receivedAt := e.time()
+	stamp := receivedAt.Format("2006-01-02T15:04:05.000000Z")
+	if r.Kind == "claim" {
+		p["created_at"] = stamp
+	}
+	rec := Record{JobID: job, Seq: tail + 1, RecordID: NewUUID(), Generation: e.Generation, ClaimSeq: claimSeq, Actor: actor, Key: key, RequestSHA: digest, Imported: r.Kind == "import", ReceivedAt: stamp, PreviousHash: previous, Kind: r.Kind, Payload: p}
 	if r.Kind == "claim" {
 		rec.ClaimSeq = rec.Seq
 	}
@@ -451,7 +463,7 @@ func (e Engine) Append(s Snapshot, actor, job, key string, r Request) (WriteResp
 	updated := s
 	updated.Jobs = copyJobs(s.Jobs)
 	updated.Jobs[job] = append(append([]Record{}, rs...), rec)
-	summary, err := updated.Summary(job, e.time())
+	summary, err := updated.Summary(job, receivedAt)
 	if err != nil {
 		return WriteResponse{}, nil, err
 	}

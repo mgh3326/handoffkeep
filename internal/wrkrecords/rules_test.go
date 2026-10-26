@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	. "github.com/mgh3326/handoffkeep/internal/wrkrecords"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -134,6 +135,51 @@ func TestDesignReplayBeforeCASAndTerminal(t *testing.T) {
 	changed.Payload["path"] = "/review/two"
 	if _, e = c.send("desktop", "subject", key, changed); e == nil || Code(e) != "idempotency_conflict" {
 		t.Fatalf("changed-body replay: %v", e)
+	}
+}
+
+func TestDesignReplaySummaryUsesCommittedClock(t *testing.T) {
+	c := fresh(t)
+	key := NewUUID()
+	request := c.request("subject", "grant", Object{"grant_type": "join_waiver", "round_no": nil, "head": h1, "extra": 0, "earlier_round_no": nil, "tester_job_id": nil, "expires_at": c.e.Now.Add(time.Hour).Format(time.RFC3339Nano), "reason_code": "replay_clock"})
+	original, err := c.send("director-1", "subject", key, request)
+	if err != nil || !original.Created || !reflect.DeepEqual(original.Summary.Grants, []int64{original.Record.Seq}) {
+		t.Fatalf("initial grant response: %v %+v", err, original.Summary)
+	}
+	c.e.Now = c.e.Now.Add(2 * time.Hour)
+	assertReplay := func(stage string) {
+		t.Helper()
+		replayed, err := c.send("director-1", "subject", key, request)
+		if err != nil || replayed.Created || !reflect.DeepEqual(replayed.Record, original.Record) {
+			t.Fatalf("exact record replay %s: %v", stage, err)
+		}
+		if !reflect.DeepEqual(replayed.Summary, original.Summary) {
+			t.Errorf("replay changed original committed summary %s: got %+v want %+v", stage, replayed.Summary, original.Summary)
+		}
+	}
+	assertReplay("after expiry")
+	join := report(h1)
+	join["waiver_grant_seq"] = original.Record.Seq
+	c.want("desktop", "subject", "joined", "grant_expired", join)
+	b := []byte("later completion\n")
+	c.must("desktop", "subject", "completed", Object{"report_b64": base64.StdEncoding.EncodeToString(b), "report_sha256": SHA(b)})
+	c.must("desktop", "subject", "end", Object{"end_type": "reaped", "reason_code": "later_end"})
+	assertReplay("after later end and stale CAS")
+	current, err := c.s.Summary("subject", c.e.Time())
+	if err != nil || current.State != "ended" || len(current.Grants) != 0 || current.SnapshotSeq <= original.Summary.SnapshotSeq {
+		t.Fatal("fresh read lost current state/expiry")
+	}
+	c.s.Jobs["subject"][original.Record.Seq-1].ReceivedAt = "invalid"
+	if _, err := c.send("director-1", "subject", key, request); err == nil || Code(err) != "wrk_unavailable" {
+		t.Fatal("invalid stored replay timestamp did not fail closed")
+	}
+}
+
+func TestDesignLiveClaimTimestampMatchesRecord(t *testing.T) {
+	c := &scenario{t: t, e: Engine{Policy: designPolicy(t), Mode: "enforce", Generation: NewUUID()}, s: Snapshot{Jobs: map[string][]Record{}, Contents: map[string]map[int64][]byte{}}}
+	r := c.must("director-1", "live-clock", "claim", Object{"job_id": "live-clock", "owner_lane": "builder-a", "parent_lane": "director-1", "task_id": 9001, "host_client_id": "desktop", "role": "builder", "tier": "T3", "review_of": nil, "predecessor_job_id": nil, "supersedes": nil})
+	if Text(r.Payload, "created_at") != r.ReceivedAt {
+		t.Fatal("claim created_at differs from its accepted record timestamp")
 	}
 }
 func reflectRecord(a, b Record) bool {
@@ -344,8 +390,16 @@ func TestDesignSuccessorInheritsNumbersAndIdentities(t *testing.T) {
 	c.must("desktop", "subject", "void", Object{"round_no": 2, "grant_seq": g.Seq, "reason_code": "abort"})
 	c.must("desktop", "subject", "end", Object{"end_type": "handed_off", "reason_code": "successor"})
 	successor := func(job, predecessor string) {
+		previous, err := c.s.Summary(predecessor, c.e.Time())
+		if err != nil {
+			t.Fatal(err)
+		}
 		c.must("director-1", job, "claim", Object{"job_id": job, "owner_lane": "builder-a", "parent_lane": "director-1", "task_id": 9001, "host_client_id": "desktop", "role": "builder", "tier": "T3", "review_of": nil, "predecessor_job_id": predecessor, "supersedes": nil})
-		c.must("director-1", job, "activate", Object{"seal_seq": nil, "reason_code": "successor"})
+		activated := c.must("director-1", job, "activate", Object{"seal_seq": nil, "reason_code": "successor"})
+		current, err := c.s.Summary(job, c.e.Time())
+		if err != nil || Num(activated.Payload, "baseline_used") != previous.Used || current.Baseline != previous.Used || current.Used != previous.Used {
+			t.Fatalf("successor activation lost predecessor used: got %+v want %d (%v)", current, previous.Used, err)
+		}
 	}
 	successor("successor-one", "subject")
 	r := c.must("desktop", "successor-one", "round_open", opening(h3, "", nil, nil))
