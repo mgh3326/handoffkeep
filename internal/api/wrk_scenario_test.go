@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 // design-derived tests that do not come from the M1 pack.
 type scenario struct {
 	*packEnv
+	mu   sync.Mutex
 	keys int
 }
 
@@ -50,7 +52,10 @@ func newScenario(t *testing.T) *scenario {
 	return &scenario{packEnv: env}
 }
 
+// key returns a fresh Idempotency-Key; racing goroutines may call it.
 func (s *scenario) key() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.keys++
 	return fmt.Sprintf("00000000-0000-4000-8000-%012d", s.keys)
 }

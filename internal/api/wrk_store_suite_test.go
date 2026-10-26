@@ -168,16 +168,19 @@ func testConcurrentAppends(t *testing.T, fx *pgFixture) {
 	claim, tail := s.cas("job-cc")
 	race := func(payloads ...map[string]any) []packResponse {
 		out := make([]packResponse, len(payloads))
+		keys := make([]string, len(payloads))
+		for i := range keys {
+			keys[i] = s.key()
+		}
 		var wg sync.WaitGroup
 		for i, p := range payloads {
 			wg.Add(1)
 			go func(i int, p map[string]any) {
 				defer wg.Done()
-				out[i] = s.postBody("desktop", "job-cc", fmt.Sprintf("00000000-0000-4000-a000-%012d", s.keys*10+i+1), map[string]any{"kind": "round_open", "claim_seq": claim, "expected_seq": tail, "payload": p})
+				out[i] = s.postBody("desktop", "job-cc", keys[i], map[string]any{"kind": "round_open", "claim_seq": claim, "expected_seq": tail, "payload": p})
 			}(i, p)
 		}
 		wg.Wait()
-		s.keys++
 		return out
 	}
 	rs := race(openPayload(head('1'), nil, nil, nil), openPayload(head('2'), nil, nil, nil))
