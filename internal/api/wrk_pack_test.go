@@ -427,33 +427,12 @@ func validateGivenHistory(policy *wrk.Policy, records []wrk.Record) error {
 	return nil
 }
 
-// fixtureIncomplete lists the vectors whose given history fails the startup
-// validation through a confirmed M1 pack defect rather than an
-// implementation question (director-1 rulings): the three
-// r4-review-lifecycle import cases name a reviewer of job-a and lane
-// b2400-a, which their history lacks (their scope_denied precedes any target
-// lookup), and scoped-mint-reviewer-as-target seeds job-a-t1's review claim
-// before job-a's own claim exists (unreachable per §2 L68). They seed
-// without validation. hk 2059 fixes all four and empties this set; the pin
-// test then fails until the entries are removed.
-var fixtureIncomplete = map[string]bool{
-	"r4-review-lifecycle.json/r-import-begin-scope-denied":               true,
-	"r4-review-lifecycle.json/r-import-scope-denied":                     true,
-	"r4-review-lifecycle.json/r-import-seal-scope-denied":                true,
-	"r4-scoped-claim.json/scoped-mint-reviewer-as-target-claim-conflict": true,
-}
-
-// checkGivenHistory runs the startup validation for a case, honouring the
-// fixtureIncomplete set.
+// checkGivenHistory runs the startup validation for a case. Since the hk
+// 2059 pack revision every given history must validate; nothing seeds
+// without it.
 func checkGivenHistory(t *testing.T, c *packCase, policy *wrk.Policy) {
 	t.Helper()
-	err := validateGivenHistory(policy, c.Given.Records)
-	switch {
-	case fixtureIncomplete[c.id()] && err == nil:
-		t.Fatalf("fixture_incomplete entry is stale: the given history now validates; remove it")
-	case fixtureIncomplete[c.id()]:
-		// Seeded without startup validation (director-1 ruling).
-	case err != nil:
+	if err := validateGivenHistory(policy, c.Given.Records); err != nil {
 		t.Fatalf("given history fails startup validation: %v", err)
 	}
 }

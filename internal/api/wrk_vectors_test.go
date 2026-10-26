@@ -178,24 +178,10 @@ func TestO3PackHTTPVectorsMemory(t *testing.T) {
 	}
 }
 
-// TestO3PackFixtureIncompletePinned: the fixture_incomplete set is exactly
-// the four cases director-1 confirmed as pack defects, each still fails the
-// startup validation, and every other case with a given history passes it.
-func TestO3PackFixtureIncompletePinned(t *testing.T) {
-	want := []string{
-		"r4-review-lifecycle.json/r-import-begin-scope-denied",
-		"r4-review-lifecycle.json/r-import-scope-denied",
-		"r4-review-lifecycle.json/r-import-seal-scope-denied",
-		"r4-scoped-claim.json/scoped-mint-reviewer-as-target-claim-conflict",
-	}
-	if len(fixtureIncomplete) != len(want) {
-		t.Fatalf("fixture_incomplete has %d entries, want exactly %v", len(fixtureIncomplete), want)
-	}
-	for _, id := range want {
-		if !fixtureIncomplete[id] {
-			t.Errorf("fixture_incomplete lacks %s", id)
-		}
-	}
+// TestO3PackGivenHistoriesValidate: every case with a given history passes
+// the startup validation (the fixture_incomplete set was emptied when the hk
+// 2059 pack revision landed).
+func TestO3PackGivenHistoriesValidate(t *testing.T) {
 	for _, c := range loadPackCases(t) {
 		if len(c.Given.Records) == 0 {
 			continue
@@ -204,9 +190,8 @@ func TestO3PackFixtureIncompletePinned(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", c.id(), err)
 		}
-		err = validateGivenHistory(policy, c.Given.Records)
-		if fixtureIncomplete[c.id()] != (err != nil) {
-			t.Errorf("%s: listed=%v, validation error=%v", c.id(), fixtureIncomplete[c.id()], err)
+		if err := validateGivenHistory(policy, c.Given.Records); err != nil {
+			t.Errorf("%s: %v", c.id(), err)
 		}
 	}
 }
