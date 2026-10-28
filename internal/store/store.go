@@ -1064,6 +1064,9 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := migrateTaskComments(ctx, tx); err != nil {
 		return err
 	}
+	if err := migrateQuota(ctx, tx); err != nil {
+		return err
+	}
 	return tx.Commit(ctx)
 }
 func validName(x string) bool        { return nameRE.MatchString(x) }
