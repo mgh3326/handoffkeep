@@ -44,6 +44,17 @@ MUTANTS = [
         "TestQuotaPostgres", "idempotent migration",
     ),
     (
+        "retention-deletes-referenced", "store/quota.go", True,
+        "AND id NOT IN (SELECT observation_id FROM quota_latest)", "",
+        "TestQuotaRetentionPostgres", "retention",
+    ),
+    (
+        "trigger-allows-arbitrary-delete", "store/quota.go", True,
+        "IF TG_OP = 'DELETE' AND current_setting('handoffkeep.quota_prune', true) = 'on' THEN",
+        "IF TG_OP = 'DELETE' THEN",
+        "TestQuotaRetentionPostgres", "retention arbitrary delete allowed",
+    ),
+    (
         "scope-put-removed", "api/quota.go", False,
         'func (s Server) quotaPut(w http.ResponseWriter, r *http.Request) {\n'
         '\tclient, ok := s.quotaAuth(w, r)\n'
