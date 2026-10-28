@@ -28,5 +28,17 @@ func TestTaskReopenAPI(t *testing.T) {
 		if resp.StatusCode != tc.status {
 			t.Fatalf("%s: status %d want %d", tc.body, resp.StatusCode, tc.status)
 		}
+		if tc.status == 200 {
+			// v86-pi mutant 2: the reopen event must record the token's
+			// client and the caller's reason, not a constant.
+			got, ok, err := st.GetTask(context.Background(), x.ID)
+			if err != nil || !ok || len(got.Events) == 0 {
+				t.Fatalf("reread task: ok=%v err=%v", ok, err)
+			}
+			last := got.Events[len(got.Events)-1]
+			if last.To != "reopened" || last.By != "tester" || last.Note != "reverted" {
+				t.Fatalf("reopen caller binding: to=%q by=%q note=%q, want reopened/tester/reverted", last.To, last.By, last.Note)
+			}
+		}
 	}
 }

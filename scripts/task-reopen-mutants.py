@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Kill reopen regression mutants with narrow tests and Go source overlays.
 
-The three store mutants require CI's PostgreSQL service. --no-db runs only
+The store and API mutants require CI's PostgreSQL service. --no-db runs only
 the fleetmetrics mutant. No source file in the checkout is modified.
 """
 
@@ -39,11 +39,22 @@ MUTANTS = [
         "prs := ix.leadTimePRs(t)", "prs := ix.taskPRs[id]",
         "TestLeadTimeReopenedCycleLinks", "current cycle lead time=",
     ),
+    (
+        "lead-time-first-reopen", "fleetmetrics/linkage.go", False,
+        '\t\t\tstart = i + 1\n', '\t\t\tstart = i + 1\n\t\t\tbreak\n',
+        "TestLeadTimeTwiceReopenedUsesLatestCycle", "twice-reopened lead time=",
+    ),
+    (
+        "reopen-ignores-caller", "api/api.go", True,
+        "s.Service.ReopenTask(r.Context(), id, client, input.Reason)",
+        's.Service.ReopenTask(r.Context(), id, "api", input.Reason)',
+        "TestTaskReopenAPI", "reopen caller binding",
+    ),
 ]
 
 
 def run_test(package, test, overlay=None):
-    command = ["go", "test", "-p", "1", "-count=1", "-timeout=2m"]
+    command = ["go", "test", "-p", "1", "-count=1", "-timeout=2m"]  # bounded by go test
     if overlay:
         command += ["-overlay", str(overlay)]
     command += ["./internal/" + package, "-run", "^" + test + "$"]

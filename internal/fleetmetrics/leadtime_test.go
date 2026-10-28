@@ -208,3 +208,28 @@ func TestLeadTimeReopenedCycleLinks(t *testing.T) {
 		})
 	}
 }
+
+// A task reopened twice: the lead time and PR link come from the LATEST
+// cycle only. A cycle start taken from the first reopen would leak PR #12
+// from the middle cycle and double the lead time (v86-pi, mutant 1).
+func TestLeadTimeTwiceReopenedUsesLatestCycle(t *testing.T) {
+	s := snap(0, 24)
+	first := store.TaskRefs{PR: hk10, JobID: "82-first"}
+	middle := store.TaskRefs{PR: hk12, JobID: "82-middle"}
+	current := store.TaskRefs{PR: hk11}
+	events := mergedChain(0.1, 0.5, 1, &first)
+	events = append(events, ev(2, "merged", "reopened", nil, "first reopen"))
+	events = append(events, ev(3, "reopened", "claimed", &middle), ev(3.5, "claimed", "verifying", &middle), ev(4, "verifying", "merged", &middle))
+	events = append(events, ev(5, "merged", "reopened", nil, "second reopen"))
+	events = append(events, ev(6, "reopened", "claimed", &current), ev(7, "claimed", "verifying", &current), ev(8, "verifying", "merged", &current))
+	s.Tasks = []store.Task{task(82, "merged", 0, current, events...)}
+	s.PRs = map[string]PRFact{hk10: pr(hk10, "aaaaaaa10", 1), hk12: pr(hk12, "aaaaaaa12", 4), hk11: pr(hk11, "aaaaaaa11", 8)}
+	s.Deploys = []DeployRecord{
+		{Service: "handoffkeep", Result: "success", DeployedAt: atp(4.5), IncludedPRs: []string{"handoffkeep#12"}, Format: "json"},
+		{Service: "handoffkeep", Result: "success", DeployedAt: atp(9), IncludedPRs: []string{"handoffkeep#11"}, Format: "json"},
+	}
+	got := leadTime(buildIndex(&s))
+	if got.Deploy == nil || got.Deploy.N != 1 || got.Deploy.P50 != 3 {
+		t.Fatalf("twice-reopened lead time=%+v, want the latest cycle 6h→9h (3h)", got.Deploy)
+	}
+}
