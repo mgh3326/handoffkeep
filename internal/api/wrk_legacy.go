@@ -39,7 +39,7 @@ func wrkLegacyRoute(route string) bool {
 	}
 	if len(p) == 4 {
 		switch p[3] {
-		case "claim", "rebind", "transition", "project", "decision-request":
+		case "claim", "rebind", "transition", "reopen", "project", "decision-request":
 			return true
 		}
 	}

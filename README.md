@@ -127,6 +127,12 @@ from `task_events`, so `--as-of` reproduces a past header. Bearer routes:
 ```mermaid
 stateDiagram-v2
     [*] --> backlog
+    merged --> reopened: reopen (reason required)
+    dropped --> reopened: reopen (reason required)
+    reopened --> claimed: claim / next
+    reopened --> in_progress
+    reopened --> hold
+    reopened --> dropped
     backlog --> claimed: claim / next
     backlog --> hold
     backlog --> dropped
@@ -445,3 +451,15 @@ running as nonroot — on every PR, and pushes it (tags: full commit SHA and
 verification command, and the environment-variable name list live in
 [docs/image.md](docs/image.md). This pipeline produces the image only; the
 deployment path is unchanged.
+
+### Reopening a task
+
+`handoffkeep tasks reopen <id> --reason "reverted after failed smoke"` calls
+`POST /v1/tasks/{id}/reopen` with `{"reason":"reverted after failed smoke"}`.
+Only merged or dropped tasks can enter the distinct `reopened` state. The
+operation requires a non-empty reason, records the authenticated caller and
+reason as an append-only transition audit event, and clears stale job ownership.
+Generic transitions cannot leave a terminal state. Reopened tasks appear in the
+queue as `reopened` and are eligible for claim/next, in_progress (with normal job
+linkage or an explicit no-job reason), hold, or dropped. Historical merges remain
+in the event log; deploy views use the latest merge of currently merged tasks.

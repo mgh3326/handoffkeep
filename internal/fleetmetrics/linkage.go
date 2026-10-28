@@ -208,7 +208,15 @@ func stateEvent(e store.TaskEvent) bool {
 // firstTo returns the first transition event into state (at or after
 // notBefore when non-zero).
 func firstTo(t *store.Task, state string) *store.TaskEvent {
-	for i := range t.Events {
+	// A reopened task starts a new work cycle. Old claims and verification
+	// entries cannot describe the lead time of its new completion.
+	start := 0
+	for i, e := range t.Events {
+		if stateEvent(e) && e.To == "reopened" {
+			start = i + 1
+		}
+	}
+	for i := start; i < len(t.Events); i++ {
 		e := &t.Events[i]
 		if stateEvent(*e) && e.To == state {
 			return e

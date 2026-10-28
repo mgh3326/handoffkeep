@@ -84,6 +84,7 @@
   --hk-warning: #f7ce75;
   --hk-danger: #ffa4a4;
   --hk-success: #a0d6a6;
+  --hk-state-reopened: #b87926;
   --hk-state-backlog: #a6aebb;
   --hk-state-claimed: #a9c7ff;
   --hk-state-in-progress: #90d2e8;
@@ -114,6 +115,7 @@
   --hk-warning: #805b0c;
   --hk-danger: #a1232f;
   --hk-success: #286437;
+  --hk-state-reopened: #b87926;
   --hk-state-backlog: #596579;
   --hk-state-claimed: #245bc2;
   --hk-state-in-progress: #00677d;

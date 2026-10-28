@@ -574,7 +574,7 @@ func readyMinutes(ix *index, start time.Time, minutes int) []int {
 	for _, t := range ix.tasks {
 		for m := 0; m < minutes; m++ {
 			switch stateAt(t, start.Add(time.Duration(m)*time.Minute)) {
-			case "backlog":
+			case "backlog", "reopened":
 				out[m]++
 			case "?":
 				unknown[m] = true
