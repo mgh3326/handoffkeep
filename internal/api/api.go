@@ -450,20 +450,29 @@ func LoadTokens(path string) (Tokens, QuotaAccounts, error) {
 			return nil, nil, errors.New("invalid HANDOFFKEEP_AUTH_FILE")
 		}
 		if id, isQuota := strings.CutPrefix(k, "HANDOFFKEEP_QUOTA_"); isQuota {
-			if id == "" {
-				return nil, nil, errors.New("invalid quota grant client id")
-			}
-			keys := grants[id]
-			if keys == nil {
-				keys = map[string]bool{}
-				grants[id] = keys
-			}
+			// A bad quota line is loud but never fatal: an auth-file typo
+			// must not stop the server. Token lines stay strict.
+			var keys []string
+			valid := id != ""
 			for _, key := range strings.Split(v, ",") {
 				key = strings.TrimSpace(key)
-				if !store.ValidQuotaKey(key) || keys[key] {
-					return nil, nil, errors.New("invalid HANDOFFKEEP_AUTH_FILE quota grant")
+				if !store.ValidQuotaKey(key) {
+					valid = false
+					break
 				}
-				keys[key] = true
+				keys = append(keys, key)
+			}
+			if !valid {
+				fmt.Fprintf(os.Stderr, "handoffkeep: ignoring invalid quota grant line %q\n", line)
+				continue
+			}
+			set := grants[id]
+			if set == nil {
+				set = map[string]bool{}
+				grants[id] = set
+			}
+			for _, key := range keys {
+				set[key] = true
 			}
 			continue
 		}
@@ -491,7 +500,8 @@ func LoadTokens(path string) (Tokens, QuotaAccounts, error) {
 	}
 	for id := range grants {
 		if _, ok := out[id]; !ok {
-			return nil, nil, errors.New("quota grant for unknown client")
+			fmt.Fprintf(os.Stderr, "handoffkeep: ignoring HANDOFFKEEP_QUOTA_ grants for unknown client %q\n", id)
+			delete(grants, id)
 		}
 	}
 	return out, grants, nil

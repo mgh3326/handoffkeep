@@ -6,7 +6,10 @@ SHA-256 prefix of the account identity. Send no raw identity, tokens or host dat
 
 - `GET /v1/quota/accounts/{key}/latest` returns `{observation, manual: []}`.
   An unseen account returns 200 with a null automatic observation. Reads are
-  open: every authenticated client may read any account's latest.
+  open: every authenticated client may read any account's latest. Each
+  observation carries `confirmed_at`: the newest `measured_at` at which the
+  latest value was republished (null on rows written before the column
+  existed).
 - `POST .../lease` accepts `{holder, ttl_s}`. Use a new random 32-hex holder
   per acquisition attempt. TTL defaults to 120 seconds, maximum 120. A 200
   response includes `acquired`, `holder`, `expires_at`; contention is not an
@@ -19,19 +22,24 @@ SHA-256 prefix of the account identity. Send no raw identity, tokens or host dat
   empty bucket list clears it. Readers enforce manual expiry. Automatic
   freshness is reader policy (default five minutes in pacelever). A new
   observation returns 201. Republishing a value identical to the current
-  latest for the same `(account_key, kind, window_key)` appends nothing and
-  returns the existing row with 200; the lease-row lock serializes
-  publishers, so concurrent identical publishes cannot double-append.
+  latest for the same `(account_key, kind, window_key)` — compared without
+  `measured_at`, so kind, window, plan, expires_at and the full bucket set
+  must match — appends nothing and returns the existing row with 200 while
+  advancing that pointer's `confirmed_at` to the new `measured_at` (never
+  backward). The lease-row lock serializes publishers, so concurrent
+  identical publishes cannot double-append.
 - `DELETE .../lease` accepts `{holder}`; releasing a previous holder cannot
   remove a successor's lease. It returns 204, including when already released.
 
 Write paths (observation PUT, lease POST, lease DELETE) are scoped to the
 client's own account keys. The client-to-accounts mapping lives in the server
 auth file next to the tokens: each `HANDOFFKEEP_QUOTA_<CLIENT>` line grants
-that client a comma-separated list of account keys, and a grant for a client
-with no `HANDOFFKEEP_TOKEN_<CLIENT>` line fails startup. A write to an
-unlisted or foreign `account_key` returns 403 `quota_account_forbidden`;
-clients with no grant lines may not write at all.
+that client a comma-separated list of account keys. A bad quota line — an
+invalid key, an empty client id, or a client with no
+`HANDOFFKEEP_TOKEN_<CLIENT>` — is logged to stderr and skipped, never a
+startup error; the client simply has no quota scope. Token-line validation
+is unchanged. A write to an unlisted or foreign `account_key` returns 403
+`quota_account_forbidden`; clients with no grant lines may not write at all.
 
 A write without a live lease belonging to both the authenticated client and the
 holder returns 409. Acquisition and renewal use the database clock. Publishing
