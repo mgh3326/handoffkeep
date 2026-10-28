@@ -348,9 +348,6 @@ func (s Service) ExportTasks(ctx context.Context, lane, state, parentLane string
 func (s Service) GetTask(ctx context.Context, id int64) (store.Task, bool, error) {
 	return s.Store.GetTask(ctx, id)
 }
-func (s Service) LinearOutboxStatus(ctx context.Context) (store.LinearOutboxStatus, error) {
-	return s.Store.GetLinearOutboxStatus(ctx)
-}
 func (s Service) AppendRelayEvent(ctx context.Context, x store.RelayEvent) (store.RelayEvent, bool, error) {
 	if err := s.Store.WrkFence(ctx, wrkrecords.LegacyIntent{JobID: x.JobID, Kind: x.Kind, Head: x.Head, Digest: x.ReportSHA, Receipt: x.WrkReceipt}); err != nil {
 		return store.RelayEvent{}, false, err
@@ -519,7 +516,6 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("POST /v1/tasks/dispositions/{id}/apply", s.dispositionApply)
 	m.HandleFunc("GET /v1/tasks/{id}/comments", s.taskCommentsList)
 	m.HandleFunc("POST /v1/tasks/{id}/comments", s.taskCommentCreate)
-	m.HandleFunc("GET /v1/linear/status", s.linearStatus)
 	m.HandleFunc("POST /v1/decisions/resolve", s.decisionResolve)
 	m.HandleFunc("POST /v1/relay/events", s.relayEventsCreate)
 	m.HandleFunc("POST /v1/relay/events/{id}/delivered", s.relayEventDelivered)
@@ -588,17 +584,6 @@ func healthz(w http.ResponseWriter, r *http.Request) {
 	jsonOut(w, 200, out)
 }
 
-func (s Server) linearStatus(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.auth(w, r); !ok {
-		return
-	}
-	status, err := s.Service.LinearOutboxStatus(r.Context())
-	if err != nil {
-		appErr(w, err)
-		return
-	}
-	jsonOut(w, http.StatusOK, status)
-}
 func (s Server) auth(w http.ResponseWriter, r *http.Request) (string, bool) {
 	id, ok := s.Tokens.Client(r)
 	if !ok {

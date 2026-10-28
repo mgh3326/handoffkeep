@@ -270,33 +270,6 @@ id order (limit default 100, max 500). Errors are distinct: 401
 `unauthorized`, 400 `comment_empty`, 413 `comment_too_long` (body over 64 KiB),
 404 `not_found` (no such task), 400 `secret_like_content`.
 
-### Optional hk → Linear synchronization
-
-`serve --linear-sync` is off by default. The `handoffkeep-work(:8801)`
-instance must not be given `--linear-sync`; only the explicitly designated
-serving instance may drain the connector outbox. Enabling it requires
-`HK_LINEAR_API_KEY` and `HK_LINEAR_TEAM_ID`; `HK_LINEAR_API_URL` is optional
-and exists so tests can inject a local fake server. API keys are not accepted
-through CLI flags.
-
-Individual builder tasks opt in independently with `tasks add --linear-sync`.
-The task flags `--tier`, `--grade`, `--brief-key`, and repeatable `--label`
-populate explicit `refs.linear` metadata; task titles and lane names are never
-used to infer eligibility. A task without `refs.linear.sync: true` creates no
-Linear outbox work even on a sync-enabled server. Requested labels must already
-exist in Linear; missing labels are reported and are never created.
-
-Delivery is at-least-once with marker-based duplicate suppression, not external
-exactly-once delivery. Before retrying after an ambiguous response loss, the
-connector searches for the task/comment marker or reads the issue's current
-state. A residual duplicate window remains when Linear accepted a request but
-the response was lost and its newly written marker is not yet visible to the
-next search because of indexing delay. Terminal tasks receive a marker-bearing
-comment and are archived; the connector has no delete operation. Use
-`handoffkeep linear reconcile --dry-run` for read-only drift inspection. Without
-`--dry-run`, the command writes the generated handoffkeep drift report. Use
-`GET /v1/linear/status` to see pending/failed outbox work and its latest error.
-
 ## Documents and search
 
 `doc get <key>` fetches a document by key; `doc get --id <n>` fetches one by
