@@ -177,7 +177,7 @@ func taskRefs(pr, headSHA, reportPath, jobID string, linear *store.TaskLinear) (
 }
 
 func normalizeTaskArgs(args []string) ([]string, error) {
-	valueFlags := map[string]bool{"--url": true, "--token": true, "--lane": true, "--parent-lane": true, "--state": true, "--title": true, "--kind": true, "--priority": true, "--by": true, "--to": true, "--note": true, "--question": true, "--limit": true, "--pr": true, "--head-sha": true, "--report-path": true, "--job-id": true, "--no-job": true, "--option": true, "--recommended": true, "--tier": true, "--grade": true, "--brief-key": true, "--label": true, "--linear-report-key": true, "--linear-verify-key": true, "--linear-decision-key": true, "--deploy-sha": true, "--origin-pr": true, "--origin-task": true, "--doc": true, "--project": true, "--area": true}
+	valueFlags := map[string]bool{"--url": true, "--token": true, "--lane": true, "--parent-lane": true, "--state": true, "--title": true, "--kind": true, "--priority": true, "--by": true, "--to": true, "--note": true, "--reason": true, "--question": true, "--limit": true, "--pr": true, "--head-sha": true, "--report-path": true, "--job-id": true, "--no-job": true, "--option": true, "--recommended": true, "--tier": true, "--grade": true, "--brief-key": true, "--label": true, "--linear-report-key": true, "--linear-verify-key": true, "--linear-decision-key": true, "--deploy-sha": true, "--origin-pr": true, "--origin-task": true, "--doc": true, "--project": true, "--area": true}
 	flags, positional := []string{}, []string{}
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -210,7 +210,7 @@ func tasksCmd(args []string, out io.Writer) error {
 
 func tasksCmdE(args []string, out, errout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: tasks add|list|export|claim|next|transition|rebind|relane|project|projects|set-area|areas|decision-request|decision-resolve|show|comment|comments|disposition")
+		return errors.New("usage: tasks add|list|export|claim|next|transition|reopen|rebind|relane|project|projects|set-area|areas|decision-request|decision-resolve|show|comment|comments|disposition")
 	}
 	if args[0] == "disposition" {
 		return dispositionCmd(args[1:], out)
@@ -250,6 +250,7 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 	by := fs.String("by", "", "session label")
 	to := fs.String("to", "", "target state")
 	note := fs.String("note", "", "transition note")
+	reason := fs.String("reason", "", "reason required for reopen")
 	question := fs.String("question", "", "question required for needs_decision")
 	limit := fs.Int("limit", 20, "maximum results")
 	pr := fs.String("pr", "", "pull request reference")
@@ -461,6 +462,19 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 			return err
 		}
 		return printJSON(out, x)
+	case "reopen":
+		id, err := parseID()
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(*reason) == "" {
+			return errors.New("tasks reopen requires --reason")
+		}
+		x, err := c.ReopenTask(ctx, id, *reason)
+		if err != nil {
+			return err
+		}
+		return printJSON(out, x)
 	case "transition":
 		id, err := parseID()
 		if err != nil {
@@ -515,7 +529,7 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 		}
 		return printJSON(out, x)
 	default:
-		return errors.New("usage: tasks add|list|export|claim|next|transition|rebind|relane|project|projects|set-area|areas|decision-request|decision-resolve|show|comment|comments|disposition")
+		return errors.New("usage: tasks add|list|export|claim|next|transition|reopen|rebind|relane|project|projects|set-area|areas|decision-request|decision-resolve|show|comment|comments|disposition")
 	}
 }
 

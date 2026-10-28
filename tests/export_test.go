@@ -46,7 +46,7 @@ type exportResponse struct {
 	Tasks        []json.RawMessage `json:"tasks"`
 }
 
-var canonicalStates = []string{"backlog", "claimed", "in_progress", "verifying", "join", "hold", "needs_decision", "merged", "dropped"}
+var canonicalStates = []string{"backlog", "reopened", "claimed", "in_progress", "verifying", "join", "hold", "needs_decision", "merged", "dropped"}
 
 func exportGet(t *testing.T, h *httptest.Server, token, query string) *http.Response {
 	t.Helper()

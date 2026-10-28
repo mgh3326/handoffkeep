@@ -204,7 +204,7 @@ func leadTime(ix *index) LeadTime {
 			pop.Total++
 			prLink.Total++
 			order := firstTo(t, "claimed")
-			prs := ix.taskPRs[id]
+			prs := ix.leadTimePRs(t)
 			if len(prs) > 0 {
 				prLink.Linked++
 				prLink.Detail[bestTier(prs)]++
@@ -283,7 +283,7 @@ func leadTime(ix *index) LeadTime {
 				phases["install"] = append(phases["install"], hours(usable.Sub(*merged)))
 			}
 		}
-		if t.State != "merged" && t.State != "dropped" && t.State != "backlog" {
+		if t.State != "merged" && t.State != "dropped" && t.State != "backlog" && t.State != "reopened" {
 			if order := firstTo(t, "claimed"); order != nil {
 				out.OpenCount++
 				open = append(open, hours(ix.snap.Until.Sub(order.At)))
@@ -574,7 +574,7 @@ func readyMinutes(ix *index, start time.Time, minutes int) []int {
 	for _, t := range ix.tasks {
 		for m := 0; m < minutes; m++ {
 			switch stateAt(t, start.Add(time.Duration(m)*time.Minute)) {
-			case "backlog":
+			case "backlog", "reopened":
 				out[m]++
 			case "?":
 				unknown[m] = true
@@ -1035,7 +1035,7 @@ func normalPath(ix *index) Normal {
 		t := ix.tasks[id]
 		term := terminalAt(t)
 		if term == nil || !inWindow(*term, ix.snap) {
-			if term == nil && t.State != "backlog" {
+			if term == nil && t.State != "backlog" && t.State != "reopened" {
 				if sig, _ := ix.repairSignals(id); len(sig) > 0 {
 					out.OpenRepaired++
 					if order := firstTo(t, "claimed"); order != nil {

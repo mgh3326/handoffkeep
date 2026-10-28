@@ -62,7 +62,7 @@ describe("board columns are bounded", () => {
   it("never renders all nine state columns by default", () => {
     const visible = applyView(sample.tasks, { view: "backlog", filters: EMPTY_FILTERS });
     const cols = boardColumns(visible, "backlog", []);
-    expect(cols.length).toBeLessThanOrEqual(2); // backlog + hold only
+    expect(cols.length).toBeLessThanOrEqual(3); // backlog + reopened + hold
     for (const col of cols) {
       expect(col.tasks.length).toBeGreaterThan(0);
     }
@@ -162,4 +162,15 @@ describe("status line", () => {
     expect(statusLine(datasets.perf5000)).toContain("completeness: complete");
     expect(statusLine(sample)).toContain("synthetic");
   });
+});
+
+
+describe("reopened tasks", () => {
+ it("shows reopened separately in backlog list and board", () => {
+  const row = { ...sample.tasks[0], id: 9001, state: "reopened" };
+  const visible = applyView([row], { view: "backlog", filters: EMPTY_FILTERS });
+  expect(visible.map(t => t.id)).toEqual([9001]);
+  const columns = boardColumns(visible, "backlog", []);
+  expect(columns.some(c => c.state === "reopened" && c.tasks[0]?.id === 9001)).toBe(true);
+ });
 });

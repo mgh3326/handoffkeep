@@ -108,6 +108,10 @@ func allRefs(t *store.Task) []store.TaskRefs {
 }
 
 func (ix *index) linkJobs(t *store.Task) map[string]string {
+	return ix.linkJobsSince(t, time.Time{})
+}
+
+func (ix *index) linkJobsSince(t *store.Task, since time.Time) map[string]string {
 	out := map[string]string{}
 	for _, r := range allRefs(t) {
 		if r.JobID != "" {
@@ -125,12 +129,39 @@ func (ix *index) linkJobs(t *store.Task) map[string]string {
 		}
 	}
 	for _, job := range ix.nameJobs[strconv.FormatInt(t.ID, 10)] {
+		if !since.IsZero() {
+			// A task-number prefix alone cannot assign an old job to a new
+			// cycle. Require its first observed activity in this cycle.
+			var first time.Time
+			observe := func(at time.Time) {
+				if !at.IsZero() && (first.IsZero() || at.Before(first)) {
+					first = at
+				}
+			}
+			if j := ix.jobs[job]; j != nil {
+				for _, e := range j.Events {
+					if e.At != nil {
+						observe(*e.At)
+					}
+				}
+			}
+			for _, e := range ix.relayJobs[job] {
+				observe(relayAt(e))
+			}
+			if first.IsZero() || first.Before(since) {
+				continue
+			}
+		}
 		better(out, job, LinkName)
 	}
 	return out
 }
 
 func (ix *index) linkPRs(t *store.Task, jobs map[string]string) map[string]string {
+	return ix.linkPRsSince(t, jobs, time.Time{})
+}
+
+func (ix *index) linkPRsSince(t *store.Task, jobs map[string]string, since time.Time) map[string]string {
 	out := map[string]string{}
 	for _, r := range allRefs(t) {
 		if u, _, _ := CanonicalPR(r.PR); u != "" {
@@ -139,12 +170,18 @@ func (ix *index) linkPRs(t *store.Task, jobs map[string]string) map[string]strin
 	}
 	for job := range jobs {
 		for _, e := range ix.relayJobs[job] {
+			if !since.IsZero() && relayAt(e).Before(since) {
+				continue
+			}
 			if u, _, _ := CanonicalPR(e.PR); u != "" {
 				better(out, u, LinkRelay)
 			}
 		}
 		if j := ix.jobs[job]; j != nil {
 			for _, e := range j.Events {
+				if !since.IsZero() && (e.At == nil || e.At.Before(since)) {
+					continue
+				}
 				if u, _, _ := CanonicalPR(e.PR); u != "" {
 					better(out, u, LinkRelay)
 				}
@@ -158,6 +195,26 @@ func (ix *index) linkPRs(t *store.Task, jobs map[string]string) map[string]strin
 		}
 	}
 	return out
+}
+
+func relayAt(e store.RelayEvent) time.Time {
+	if e.EventTime != nil {
+		return *e.EventTime
+	}
+	return e.ReceivedAt
+}
+
+// leadTimePRs uses only the current work cycle. The full taskJobs/taskPRs
+// indexes remain available to metrics that need historical linkage.
+func (ix *index) leadTimePRs(t *store.Task) map[string]string {
+	start := cycleStart(t)
+	if start == 0 {
+		return ix.taskPRs[t.ID]
+	}
+	cycle := *t
+	cycle.Events = t.Events[start:]
+	since := t.Events[start-1].At
+	return ix.linkPRsSince(&cycle, ix.linkJobsSince(&cycle, since), since)
 }
 
 func (ix *index) buildLineage() {
@@ -205,10 +262,20 @@ func stateEvent(e store.TaskEvent) bool {
 	return e.Kind == "" || e.Kind == store.TaskEventTransition
 }
 
-// firstTo returns the first transition event into state (at or after
-// notBefore when non-zero).
+// cycleStart is the first event after the most recent reopen transition.
+func cycleStart(t *store.Task) int {
+	start := 0
+	for i, e := range t.Events {
+		if stateEvent(e) && e.To == "reopened" {
+			start = i + 1
+		}
+	}
+	return start
+}
+
+// firstTo returns the first transition into state in the current work cycle.
 func firstTo(t *store.Task, state string) *store.TaskEvent {
-	for i := range t.Events {
+	for i := cycleStart(t); i < len(t.Events); i++ {
 		e := &t.Events[i]
 		if stateEvent(*e) && e.To == state {
 			return e

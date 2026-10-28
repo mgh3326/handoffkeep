@@ -190,3 +190,14 @@ func TestProjectReapReportShape(t *testing.T) {
 		t.Fatalf("grace 0 held the builder: %+v", candidates)
 	}
 }
+
+func TestReapHoldsReopenedTask(t *testing.T) {
+	tasks := []store.Task{reapTask(599, reapMergedBuilderJob, "reopened", reapNow.Add(-time.Hour))}
+	candidates, held, _ := projectReap(reapFixtureNodes(t), tasks, false, reapNow)
+	if _, ok := reapByPane(candidates)["w2:p32"]; ok {
+		t.Fatal("reopened builder reaped")
+	}
+	if reapByPane(held)["w2:p32"].Reason != "task-open" {
+		t.Fatal("reopened task not held as open")
+	}
+}

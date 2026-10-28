@@ -421,11 +421,11 @@ describe("project grouping on the live queue", () => {
 // ---- (e) state shapes: shape + label, never color alone -----------------
 
 describe("state shapes", () => {
-  it("nine canonical states plus unknown each have a distinct outline", () => {
+  it("ten canonical states plus unknown each have a distinct outline", () => {
     const keys = [...STATE_GROUP_ORDER, "unknown"];
-    expect(new Set(keys).size).toBe(10);
+    expect(new Set(keys).size).toBe(11);
     const markup = keys.map((k) => renderToStaticMarkup(<svg>{STATE_SHAPES[k]}</svg>));
-    expect(new Set(markup).size).toBe(10);
+    expect(new Set(markup).size).toBe(11);
     for (const s of KNOWN_STATES) {
       expect(STATE_LABEL[s], s).toBeTruthy();
     }

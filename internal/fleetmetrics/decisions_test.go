@@ -128,3 +128,18 @@ func TestDecisionRowsAreNotStateEvents(t *testing.T) {
 		t.Fatalf("stateAt = %q", st)
 	}
 }
+
+func TestReopenedTerminalTime(t *testing.T) {
+	x := task(80, "reopened", 0, store.TaskRefs{}, ev(1, "verifying", "merged", nil), ev(2, "merged", "reopened", nil))
+	if terminalAt(&x) != nil {
+		t.Fatal("reopened task has terminal time")
+	}
+	if stateAt(&x, t0.Add(150*time.Minute)) != "reopened" {
+		t.Fatal("reopened state lost")
+	}
+	x.State = "merged"
+	x.Events = append(x.Events, ev(3, "reopened", "in_progress", nil), ev(4, "in_progress", "verifying", nil), ev(5, "verifying", "merged", nil))
+	if at := terminalAt(&x); at == nil || !at.Equal(t0.Add(5*time.Hour)) {
+		t.Fatalf("terminal time %v", at)
+	}
+}

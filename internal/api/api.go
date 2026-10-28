@@ -293,6 +293,12 @@ func (s Service) ApplyDisposition(ctx context.Context, id int64, client, note st
 	}
 	return s.Store.ApplyDisposition(ctx, id, client, note)
 }
+func (s Service) ReopenTask(ctx context.Context, id int64, client, reason string) (store.Task, error) {
+	if err := s.wrkTaskPrecheck(ctx, id, "reopened", true); err != nil {
+		return store.Task{}, err
+	}
+	return s.Store.ReopenTask(ctx, id, client, reason)
+}
 func (s Service) TransitionTask(ctx context.Context, id int64, to, client, note string, refs *store.TaskRefs, noJob string) (store.Task, error) {
 	if err := s.wrkTaskPrecheck(ctx, id, to, refs != nil); err != nil {
 		return store.Task{}, err
@@ -505,6 +511,7 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("POST /v1/tasks/{id}/claim", s.taskClaim)
 	m.HandleFunc("POST /v1/tasks/{id}/rebind", s.taskRebind)
 	m.HandleFunc("POST /v1/tasks/{id}/transition", s.taskTransition)
+	m.HandleFunc("POST /v1/tasks/{id}/reopen", s.taskReopen)
 	m.HandleFunc("POST /v1/tasks/{id}/project", s.taskProject)
 	m.HandleFunc("POST /v1/tasks/{id}/area", s.taskArea)
 	m.HandleFunc("GET /v1/task-areas", s.taskAreasList)
@@ -520,6 +527,10 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("POST /v1/relay/events", s.relayEventsCreate)
 	m.HandleFunc("POST /v1/relay/events/{id}/delivered", s.relayEventDelivered)
 	m.HandleFunc("GET /v1/relay/events", s.relayEventsList)
+	m.HandleFunc("GET /v1/quota/accounts/{key}/latest", s.quotaLatest)
+	m.HandleFunc("PUT /v1/quota/accounts/{key}/observation", s.quotaPut)
+	m.HandleFunc("POST /v1/quota/accounts/{key}/lease", s.quotaLease)
+	m.HandleFunc("DELETE /v1/quota/accounts/{key}/lease", s.quotaRelease)
 	m.HandleFunc("GET /v1/bench/scores", s.benchScoresList)
 	m.HandleFunc("PUT /v1/bench/scores", s.benchScoresPut)
 	m.HandleFunc("GET /v1/bench/reps", s.benchRepsList)
@@ -2146,4 +2157,31 @@ func (s Server) metrics(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 	fmt.Fprintf(w, "handoffkeep_attach_bytes_total %d\nhandoffkeep_attach_objects %d\nhandoffkeep_attach_puts_month %d\nhandoffkeep_attach_gets_month %d\nhandoffkeep_attach_cap_bytes %d\nhandoffkeep_attach_cap_ratio %.8f\n", u.TotalBytes, objects, u.Puts, u.Gets, c.StorageCap, float64(u.TotalBytes)/float64(c.StorageCap))
+}
+
+// taskReopen preserves the reason and authenticated identity in task history.
+func (s Server) taskReopen(w http.ResponseWriter, r *http.Request) {
+	client, ok := s.auth(w, r)
+	if !ok {
+		return
+	}
+	id, err := taskID(r)
+	if err != nil || id < 1 {
+		appErr(w, errors.New("task id"))
+		return
+	}
+	defer r.Body.Close()
+	var input struct {
+		Reason string `json:"reason"`
+	}
+	if err := decode(r, &input, store.MaxBytes); err != nil {
+		appErr(w, err)
+		return
+	}
+	x, err := s.Service.ReopenTask(r.Context(), id, client, input.Reason)
+	if err != nil {
+		appErr(w, err)
+		return
+	}
+	jsonOut(w, http.StatusOK, x)
 }

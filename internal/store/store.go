@@ -48,7 +48,16 @@ func TaskKinds() []string {
 	return xs
 }
 
-var taskStates = map[string]bool{"backlog": true, "claimed": true, "in_progress": true, "verifying": true, "join": true, "hold": true, "needs_decision": true, "merged": true, "dropped": true}
+var taskStates = func() map[string]bool {
+	states := map[string]bool{}
+	for from, targets := range TaskTransitions {
+		states[from] = true
+		for to := range targets {
+			states[to] = true
+		}
+	}
+	return states
+}()
 var relayEventKinds = map[string]bool{"job.completed": true, "job.escalate": true, "job.joined": true, "job.lost": true, "job.revoked": true, "lane.event": true}
 
 // PostgreSQL can infer a broader partial index from a narrower ON CONFLICT
@@ -1022,6 +1031,21 @@ func (s *Store) migrate(ctx context.Context) error {
 			}
 		}
 	}
+	var v21Applied bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_version WHERE version=21)`).Scan(&v21Applied); err != nil {
+		return err
+	}
+	if !v21Applied {
+		for _, q := range []string{
+			`ALTER TABLE tasks DROP CONSTRAINT tasks_state_check, ADD CONSTRAINT tasks_state_check CHECK(state IN ('backlog','reopened','claimed','in_progress','verifying','join','hold','needs_decision','merged','dropped'))`,
+			`INSERT INTO schema_version(version) VALUES (21)`,
+		} {
+			if _, err := tx.Exec(ctx, q); err != nil {
+				return err
+			}
+		}
+	}
+
 	// Lane-knownness probes for relane run once per batch item. These
 	// indexes keep each probe an index lookup instead of a full scan —
 	// the existing relay_events index on owner_lane is partial and
@@ -1038,6 +1062,9 @@ func (s *Store) migrate(ctx context.Context) error {
 		}
 	}
 	if err := migrateTaskComments(ctx, tx); err != nil {
+		return err
+	}
+	if err := migrateQuota(ctx, tx); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -1999,9 +2026,10 @@ func ValidBodyDoc(v string) bool {
 	return true
 }
 
-func scanTask(row interface{ Scan(...any) error }, x *Task) error {
+func scanTask(row interface{ Scan(...any) error }, x *Task, extra ...any) error {
 	var refs []byte
-	if err := row.Scan(&x.ID, &x.Lane, &x.ParentLane, &x.Title, &x.Kind, &x.State, &x.Priority, &refs, &x.ClaimedBy, &x.CreatedBy, &x.CreatedAt, &x.UpdatedAt, &x.BodyDoc, &x.Project, &x.Area); err != nil {
+	dest := []any{&x.ID, &x.Lane, &x.ParentLane, &x.Title, &x.Kind, &x.State, &x.Priority, &refs, &x.ClaimedBy, &x.CreatedBy, &x.CreatedAt, &x.UpdatedAt, &x.BodyDoc, &x.Project, &x.Area}
+	if err := row.Scan(append(dest, extra...)...); err != nil {
 		return err
 	}
 	return json.Unmarshal(refs, &x.Refs)
@@ -2107,6 +2135,9 @@ func (s *Store) CreateTask(ctx context.Context, x Task) (Task, error) {
 // checked against this table by TestTaskTransitionDocumentation.
 var TaskTransitions = map[string]map[string]bool{
 	"backlog":        {"claimed": true, "hold": true, "dropped": true},
+	"merged":         {"reopened": true},
+	"dropped":        {"reopened": true},
+	"reopened":       {"claimed": true, "in_progress": true, "hold": true, "dropped": true},
 	"claimed":        {"in_progress": true, "hold": true, "needs_decision": true, "dropped": true},
 	"in_progress":    {"verifying": true, "join": true, "hold": true, "needs_decision": true, "dropped": true},
 	"verifying":      {"in_progress": true, "merged": true, "hold": true, "needs_decision": true, "dropped": true},
@@ -2140,11 +2171,16 @@ func (s *Store) claimTaskTx(ctx context.Context, tx pgx.Tx, id int64, by, jobID,
 		return Task{}, err
 	}
 	var x Task
-	if err := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, id), &x); err != nil {
+	var hasDisposition bool
+	if err := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+`,refs ? 'disposition' FROM tasks WHERE id=$1 FOR UPDATE`, id), &x, &hasDisposition); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Task{}, ErrTaskConflict
 		}
 		return Task{}, err
+	}
+	// Match NextTask's key-presence exclusion, including malformed/null refs.
+	if hasDisposition {
+		return Task{}, fmt.Errorf("%w: disposition items cannot be claimed directly", ErrTaskConflict)
 	}
 
 	if err := s.wrkTaskFenceTx(ctx, tx, x, "", true); err != nil {
@@ -2153,7 +2189,7 @@ func (s *Store) claimTaskTx(ctx context.Context, tx pgx.Tx, id int64, by, jobID,
 	if err := s.wrkFence(ctx, tx, wrkrecords.LegacyIntent{JobID: jobID, Binding: true}); err != nil {
 		return Task{}, err
 	}
-	if x.State != "backlog" {
+	if x.State != "backlog" && x.State != "reopened" {
 		// A replayed claim — same claimant, same non-empty job id — is a
 		// no-op: the row is returned as recorded and no second event is
 		// written. A jobless claim replays only for the same claimant on a
@@ -2174,6 +2210,7 @@ func (s *Store) claimTaskTx(ctx context.Context, tx pgx.Tx, id int64, by, jobID,
 	if jobID == "" && noJob == "" {
 		return Task{}, fmt.Errorf("%w: claim requires job_id or a no-job reason", ErrTaskJobRequired)
 	}
+	from := x.State
 	if err := scanTask(tx.QueryRow(ctx, `UPDATE tasks SET state='claimed', claimed_by=$2, refs=CASE WHEN $3<>'' THEN refs||jsonb_build_object('job_id',$3::text) ELSE refs END, updated_at=$4 WHERE id=$1 RETURNING `+taskColumns, id, by, jobID, time.Now().UTC()), &x); err != nil {
 		return Task{}, err
 	}
@@ -2181,7 +2218,7 @@ func (s *Store) claimTaskTx(ctx context.Context, tx pgx.Tx, id int64, by, jobID,
 	if err != nil {
 		return Task{}, err
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO task_events(task_id,"from","to","by",note,refs,at,no_job) VALUES($1,'backlog','claimed',$2,'',$3::jsonb,$4,$5)`, id, by, string(refs), x.UpdatedAt, noJob); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO task_events(task_id,"from","to","by",note,refs,at,no_job) VALUES($1,$6,'claimed',$2,'',$3::jsonb,$4,$5)`, id, by, string(refs), x.UpdatedAt, noJob, from); err != nil {
 		return Task{}, err
 	}
 	if s.LinearSyncEnabled() && x.Refs.Linear != nil && x.Refs.Linear.Sync {
@@ -2334,7 +2371,7 @@ func (s *Store) NextTask(ctx context.Context, lane, by, jobID, noJob string) (Ta
 	}
 
 	var id int64
-	selection := `SELECT id FROM tasks WHERE lane=$1 AND state='backlog'`
+	selection := `SELECT id FROM tasks WHERE lane=$1 AND state IN ('backlog','reopened') AND NOT (refs ? 'disposition')`
 	if wrkTablesExist(ctx, tx) {
 		// Same enrollment predicate as Snapshot.ProtectedTask: only the latest
 		// subject claim at activation, including ended predecessor enrollment.
@@ -2356,6 +2393,23 @@ func (s *Store) NextTask(ctx context.Context, lane, by, jobID, noJob string) (Ta
 }
 
 func (s *Store) TransitionTask(ctx context.Context, id int64, to, by, note string, refs *TaskRefs, noJob string) (Task, error) {
+	if to == "reopened" {
+		return Task{}, errors.New("reopened requires the explicit reopen operation")
+	}
+	return s.transitionTask(ctx, id, to, by, note, refs, noJob, false)
+}
+
+// ReopenTask is the only exit from a terminal state. The reason is persisted
+// as the note of an append-only transition event in the same transaction.
+func (s *Store) ReopenTask(ctx context.Context, id int64, by, reason string) (Task, error) {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return Task{}, errors.New("reopen requires a non-empty reason")
+	}
+	return s.transitionTask(ctx, id, "reopened", by, reason, nil, "", true)
+}
+
+func (s *Store) transitionTask(ctx context.Context, id int64, to, by, note string, refs *TaskRefs, noJob string, reopen bool) (Task, error) {
 	noJob = taskReasonText(noJob)
 	if !taskStates[to] || !validText(by, 128) || by == "" || !validText(note, MaxBytes) || !validText(noJob, MaxBytes) || (refs != nil && !validTaskRefs(*refs)) {
 		return Task{}, errors.New("invalid task transition")
@@ -2389,14 +2443,15 @@ func (s *Store) TransitionTask(ctx context.Context, id int64, to, by, note strin
 	}
 
 	var x Task
-	if err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, id), &x); err != nil {
+	var hasDisposition bool
+	if err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+`,refs ? 'disposition' FROM tasks WHERE id=$1 FOR UPDATE`, id), &x, &hasDisposition); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Task{}, ErrTaskNotFound
 		}
 		return Task{}, err
 	}
 
-	if err := s.wrkTaskFenceTx(ctx, tx, x, to, refs != nil); err != nil {
+	if err := s.wrkTaskFenceTx(ctx, tx, x, to, refs != nil || reopen); err != nil {
 		return Task{}, err
 	}
 	if refs != nil && refs.JobID != "" {
@@ -2405,11 +2460,20 @@ func (s *Store) TransitionTask(ctx context.Context, id int64, to, by, note strin
 		}
 	}
 	from := x.State
+	if (from == "merged" || from == "dropped") && !reopen {
+		return Task{}, ErrTaskConflict
+	}
+	if reopen && (to != "reopened" || strings.TrimSpace(note) == "") {
+		return Task{}, errors.New("reopen requires a non-empty reason")
+	}
 	// Placed after the row lock and before the transition-table check so every
 	// generic caller (API, MCP, CLI, UI generic decision forms) is refused while
 	// a disposition item awaits the operator, whatever edge it asks for. The
 	// operator's answer uses AnswerDisposition, which does not come through here.
-	if x.Refs.Disposition != nil {
+	if hasDisposition {
+		if to == "reopened" {
+			return Task{}, fmt.Errorf("%w: disposition items cannot be reopened", ErrTaskConflict)
+		}
 		if from == "needs_decision" {
 			return Task{}, ErrDispositionOperatorOnly
 		}
@@ -2481,12 +2545,19 @@ func (s *Store) TransitionTask(ctx context.Context, id int64, to, by, note strin
 			recordedNoJob = noJob
 		}
 	}
+	if reopen {
+		x.ClaimedBy = ""
+		x.Refs.JobID = ""
+		x.Refs.PR = ""
+		x.Refs.HeadSHA = ""
+		x.Refs.ReportPath = ""
+	}
 	encoded, err := json.Marshal(x.Refs)
 	if err != nil {
 		return Task{}, err
 	}
 	x.UpdatedAt = time.Now().UTC()
-	if err = scanTask(tx.QueryRow(ctx, `UPDATE tasks SET state=$2,refs=$3::jsonb,updated_at=$4 WHERE id=$1 RETURNING `+taskColumns, id, to, string(encoded), x.UpdatedAt), &x); err != nil {
+	if err = scanTask(tx.QueryRow(ctx, `UPDATE tasks SET state=$2,refs=$3::jsonb,updated_at=$4,claimed_by=$5 WHERE id=$1 RETURNING `+taskColumns, id, to, string(encoded), x.UpdatedAt, x.ClaimedBy), &x); err != nil {
 		return Task{}, err
 	}
 	if _, err = tx.Exec(ctx, `INSERT INTO task_events(task_id,"from","to","by",note,refs,at,no_job) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,$8)`, id, from, to, by, note, string(encoded), x.UpdatedAt, recordedNoJob); err != nil {

@@ -1288,3 +1288,11 @@ func (c Client) ResolveDecision(ctx context.Context, kind string, id int64, by, 
 	}
 	return out.Event, err
 }
+
+func (c Client) ReopenTask(ctx context.Context, id int64, reason string) (store.Task, error) {
+	var out store.Task
+	err := c.call(ctx, "POST", fmt.Sprintf("/v1/tasks/%d/reopen", id), struct {
+		Reason string `json:"reason"`
+	}{reason}, &out)
+	return out, err
+}
