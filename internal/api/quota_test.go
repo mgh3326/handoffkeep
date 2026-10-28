@@ -71,20 +71,25 @@ func TestQuotaWriteScope(t *testing.T) {
 	}
 }
 
+// Quota grant lines never refuse startup: an unknown client, a bad key or an
+// empty client id is logged to stderr and skipped, leaving no scope.
 func TestQuotaGrantFile(t *testing.T) {
 	for name, body := range map[string]string{
-		"bad key":         "HANDOFFKEEP_TOKEN_a=x\nHANDOFFKEEP_QUOTA_a=invalid\n",
-		"duplicate grant": "HANDOFFKEEP_TOKEN_a=x\nHANDOFFKEEP_QUOTA_a=codex:0123456789abcdef,codex:0123456789abcdef\n",
-		"unknown client":  "HANDOFFKEEP_TOKEN_a=x\nHANDOFFKEEP_QUOTA_b=codex:0123456789abcdef\n",
-		"empty client":    "HANDOFFKEEP_TOKEN_a=x\nHANDOFFKEEP_QUOTA_=codex:0123456789abcdef\n",
+		"bad key":        "HANDOFFKEEP_TOKEN_a=x\nHANDOFFKEEP_QUOTA_a=invalid\n",
+		"unknown client": "HANDOFFKEEP_TOKEN_a=x\nHANDOFFKEEP_QUOTA_b=codex:0123456789abcdef\n",
+		"empty client":   "HANDOFFKEEP_TOKEN_a=x\nHANDOFFKEEP_QUOTA_=codex:0123456789abcdef\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			p := filepath.Join(t.TempDir(), "auth.env")
 			if err := os.WriteFile(p, []byte(body), 0600); err != nil {
 				t.Fatal(err)
 			}
-			if _, _, err := LoadTokens(p); err == nil {
-				t.Fatal("invalid quota grant accepted")
+			_, grants, err := LoadTokens(p)
+			if err != nil {
+				t.Fatalf("quota grant refused startup: %v", err)
+			}
+			if len(grants) != 0 {
+				t.Fatalf("skipped grant left scope: %v", grants)
 			}
 		})
 	}

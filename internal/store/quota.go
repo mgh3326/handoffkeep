@@ -28,13 +28,16 @@ type QuotaBucket struct {
 	Model    string     `json:"model,omitempty"`
 }
 type QuotaObservation struct {
-	ID         int64         `json:"id"`
-	Kind       string        `json:"kind"`
-	Window     string        `json:"window,omitempty"`
-	MeasuredAt time.Time     `json:"measured_at"`
-	ExpiresAt  *time.Time    `json:"expires_at,omitempty"`
-	Plan       string        `json:"plan,omitempty"`
-	Buckets    []QuotaBucket `json:"buckets"`
+	ID         int64     `json:"id"`
+	Kind       string    `json:"kind"`
+	Window     string    `json:"window,omitempty"`
+	MeasuredAt time.Time `json:"measured_at"`
+	// ConfirmedAt is server-side: the newest measured_at at which the latest
+	// value was republished. Never decoded from request bodies.
+	ConfirmedAt *time.Time    `json:"confirmed_at,omitempty"`
+	ExpiresAt   *time.Time    `json:"expires_at,omitempty"`
+	Plan        string        `json:"plan,omitempty"`
+	Buckets     []QuotaBucket `json:"buckets"`
 }
 type QuotaLatest struct {
 	Observation *QuotaObservation  `json:"observation"`
@@ -75,6 +78,9 @@ func migrateQuota(ctx context.Context, tx pgx.Tx) error {
 	for _, q := range []string{
 		`CREATE TABLE IF NOT EXISTS quota_observations (id BIGSERIAL PRIMARY KEY, account_key TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('auto','manual')), window_key TEXT NOT NULL, measured_at TIMESTAMPTZ NOT NULL, value JSONB NOT NULL, received_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp())`,
 		`CREATE TABLE IF NOT EXISTS quota_latest (account_key TEXT NOT NULL, kind TEXT NOT NULL, window_key TEXT NOT NULL, observation_id BIGINT NOT NULL REFERENCES quota_observations(id), measured_at TIMESTAMPTZ NOT NULL, PRIMARY KEY(account_key,kind,window_key))`,
+		// confirmed_at is the newest measured_at that republished the latest
+		// value; NULL on rows written before the column existed.
+		`ALTER TABLE quota_latest ADD COLUMN IF NOT EXISTS confirmed_at TIMESTAMPTZ`,
 		`CREATE TABLE IF NOT EXISTS quota_leases (account_key TEXT PRIMARY KEY, owner TEXT NOT NULL, holder TEXT NOT NULL, expires_at TIMESTAMPTZ NOT NULL)`,
 		`CREATE OR REPLACE FUNCTION quota_history_immutable() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'quota observations are append-only'; RETURN NULL; END; $$`,
 		`DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='quota_history_immutable' AND tgrelid='quota_observations'::regclass) THEN CREATE TRIGGER quota_history_immutable BEFORE UPDATE OR DELETE OR TRUNCATE ON quota_observations FOR EACH STATEMENT EXECUTE FUNCTION quota_history_immutable(); END IF; END $$`,
@@ -91,7 +97,7 @@ func migrateQuota(ctx context.Context, tx pgx.Tx) error {
 }
 func (s *Store) LatestQuota(ctx context.Context, key string) (QuotaLatest, error) {
 	out := QuotaLatest{Manual: []QuotaObservation{}}
-	rows, err := s.pool.Query(ctx, `SELECT o.id,o.value FROM quota_latest l JOIN quota_observations o ON o.id=l.observation_id WHERE l.account_key=$1 ORDER BY l.kind,l.window_key`, key)
+	rows, err := s.pool.Query(ctx, `SELECT o.id,o.value,l.confirmed_at FROM quota_latest l JOIN quota_observations o ON o.id=l.observation_id WHERE l.account_key=$1 ORDER BY l.kind,l.window_key`, key)
 	if err != nil {
 		return out, err
 	}
@@ -100,7 +106,7 @@ func (s *Store) LatestQuota(ctx context.Context, key string) (QuotaLatest, error
 		var x QuotaObservation
 		var data []byte
 		var id int64
-		if err = rows.Scan(&id, &data); err != nil {
+		if err = rows.Scan(&id, &data, &x.ConfirmedAt); err != nil {
 			return out, err
 		}
 		if err = json.Unmarshal(data, &x); err != nil {
@@ -168,16 +174,20 @@ func (s *Store) PutQuota(ctx context.Context, key, owner, holder string, x Quota
 	}
 	// The lease row lock above serializes publishers for this account, so a
 	// concurrent identical publish observes the committed row here instead of
-	// double-appending.
+	// double-appending. The comparison ignores measured_at: republishing the
+	// same value only advances freshness on the latest pointer.
 	var dupID int64
 	var dupValue []byte
-	err = tx.QueryRow(ctx, `SELECT o.id,o.value FROM quota_latest l JOIN quota_observations o ON o.id=l.observation_id WHERE l.account_key=$1 AND l.kind=$2 AND l.window_key=$3 AND o.value=$4`, key, x.Kind, x.Window, data).Scan(&dupID, &dupValue)
+	err = tx.QueryRow(ctx, `SELECT o.id,o.value FROM quota_latest l JOIN quota_observations o ON o.id=l.observation_id WHERE l.account_key=$1 AND l.kind=$2 AND l.window_key=$3 AND (o.value - 'measured_at') = ($4::jsonb - 'measured_at')`, key, x.Kind, x.Window, data).Scan(&dupID, &dupValue)
 	if err == nil {
 		var existing QuotaObservation
 		if err = json.Unmarshal(dupValue, &existing); err != nil {
 			return x, false, err
 		}
 		existing.ID = dupID
+		if err = tx.QueryRow(ctx, `UPDATE quota_latest SET confirmed_at=GREATEST(confirmed_at,$4) WHERE account_key=$1 AND kind=$2 AND window_key=$3 RETURNING confirmed_at`, key, x.Kind, x.Window, x.MeasuredAt).Scan(&existing.ConfirmedAt); err != nil {
+			return x, false, err
+		}
 		return existing, true, tx.Commit(ctx)
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
@@ -187,7 +197,7 @@ func (s *Store) PutQuota(ctx context.Context, key, owner, holder string, x Quota
 	if err != nil {
 		return x, false, err
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO quota_latest(account_key,kind,window_key,observation_id,measured_at) VALUES($1,$2,$3,$4,$5) ON CONFLICT(account_key,kind,window_key) DO UPDATE SET observation_id=EXCLUDED.observation_id,measured_at=EXCLUDED.measured_at WHERE quota_latest.measured_at<=EXCLUDED.measured_at`, key, x.Kind, x.Window, x.ID, x.MeasuredAt)
+	_, err = tx.Exec(ctx, `INSERT INTO quota_latest(account_key,kind,window_key,observation_id,measured_at,confirmed_at) VALUES($1,$2,$3,$4,$5,$5) ON CONFLICT(account_key,kind,window_key) DO UPDATE SET observation_id=EXCLUDED.observation_id,measured_at=EXCLUDED.measured_at,confirmed_at=EXCLUDED.measured_at WHERE quota_latest.measured_at<=EXCLUDED.measured_at`, key, x.Kind, x.Window, x.ID, x.MeasuredAt)
 	if err != nil {
 		return x, false, err
 	}

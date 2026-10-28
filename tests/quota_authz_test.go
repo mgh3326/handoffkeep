@@ -93,6 +93,14 @@ func TestQuotaWriteScopePostgres(t *testing.T) {
 		t.Fatalf("dedupe publish: %d id=%d want=%d %v", res.StatusCode, again.ID, first.ID, err)
 	}
 	res.Body.Close()
+	res = request(t, c, "GET", h.URL+"/v1/quota/accounts/"+quotaE2EKey+"/latest", "peer-token", nil)
+	var latest struct {
+		Observation *store.QuotaObservation `json:"observation"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&latest); err != nil || res.StatusCode != 200 || latest.Observation == nil || latest.Observation.ConfirmedAt == nil {
+		t.Fatalf("latest confirmed_at: %d %+v %v", res.StatusCode, latest.Observation, err)
+	}
+	res.Body.Close()
 	res = request(t, c, "DELETE", h.URL+"/v1/quota/accounts/"+quotaE2EKey+"/lease", "writer-token", map[string]any{"holder": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"})
 	if res.StatusCode != 204 {
 		t.Fatalf("release: %d", res.StatusCode)

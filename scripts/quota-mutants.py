@@ -20,22 +20,46 @@ MUTANTS = [
         "dedupe-removed", "store/quota.go", True,
         '\t// The lease row lock above serializes publishers for this account, so a\n'
         '\t// concurrent identical publish observes the committed row here instead of\n'
-        '\t// double-appending.\n'
+        '\t// double-appending. The comparison ignores measured_at: republishing the\n'
+        '\t// same value only advances freshness on the latest pointer.\n'
         '\tvar dupID int64\n'
         '\tvar dupValue []byte\n'
-        '\terr = tx.QueryRow(ctx, `SELECT o.id,o.value FROM quota_latest l JOIN quota_observations o ON o.id=l.observation_id WHERE l.account_key=$1 AND l.kind=$2 AND l.window_key=$3 AND o.value=$4`, key, x.Kind, x.Window, data).Scan(&dupID, &dupValue)\n'
+        '\terr = tx.QueryRow(ctx, `SELECT o.id,o.value FROM quota_latest l JOIN quota_observations o ON o.id=l.observation_id WHERE l.account_key=$1 AND l.kind=$2 AND l.window_key=$3 AND (o.value - \'measured_at\') = ($4::jsonb - \'measured_at\')`, key, x.Kind, x.Window, data).Scan(&dupID, &dupValue)\n'
         '\tif err == nil {\n'
         '\t\tvar existing QuotaObservation\n'
         '\t\tif err = json.Unmarshal(dupValue, &existing); err != nil {\n'
         '\t\t\treturn x, false, err\n'
         '\t\t}\n'
         '\t\texisting.ID = dupID\n'
+        '\t\tif err = tx.QueryRow(ctx, `UPDATE quota_latest SET confirmed_at=GREATEST(confirmed_at,$4) WHERE account_key=$1 AND kind=$2 AND window_key=$3 RETURNING confirmed_at`, key, x.Kind, x.Window, x.MeasuredAt).Scan(&existing.ConfirmedAt); err != nil {\n'
+        '\t\t\treturn x, false, err\n'
+        '\t\t}\n'
         '\t\treturn existing, true, tx.Commit(ctx)\n'
         '\t}\n'
         '\tif !errors.Is(err, pgx.ErrNoRows) {\n'
         '\t\treturn x, false, err\n'
         '\t}\n', "",
         "TestQuotaDedupePostgres", "dedupe",
+    ),
+    (
+        "dedupe-includes-measured-at", "store/quota.go", True,
+        "(o.value - 'measured_at') = ($4::jsonb - 'measured_at')",
+        "o.value = $4::jsonb",
+        "TestQuotaDedupePostgres", "dedupe freshness",
+    ),
+    (
+        "grant-unknown-client-refuses", "api/api.go", False,
+        '\t\t\tfmt.Fprintf(os.Stderr, "handoffkeep: ignoring HANDOFFKEEP_QUOTA_ grants for unknown client %q\\n", id)\n'
+        '\t\t\tdelete(grants, id)',
+        '\t\t\treturn nil, nil, errors.New("quota grant for unknown client")',
+        "TestQuotaGrantFile", "quota grant refused startup",
+    ),
+    (
+        "grant-malformed-refuses", "api/api.go", False,
+        '\t\t\t\tfmt.Fprintf(os.Stderr, "handoffkeep: ignoring invalid quota grant line %q\\n", line)\n'
+        '\t\t\t\tcontinue',
+        '\t\t\t\treturn nil, nil, errors.New("invalid quota grant line")',
+        "TestQuotaGrantFile", "quota grant refused startup",
     ),
     (
         "schema-version-not-idempotent", "store/quota.go", True,

@@ -159,6 +159,26 @@ func TestQuotaDedupePostgres(t *testing.T) {
 	if err != nil || !deduped || again.ID != first.ID {
 		t.Fatalf("dedupe: id=%d want=%d deduped=%v err=%v", again.ID, first.ID, deduped, err)
 	}
+	// A newer measured_at on the same value dedupes and advances confirmed_at.
+	newer := x
+	newer.MeasuredAt = x.MeasuredAt.Add(time.Minute)
+	confirmed, deduped, err := s.PutQuota(ctx, key, "client", holderA, newer)
+	if err != nil || !deduped || confirmed.ID != first.ID {
+		t.Fatalf("dedupe freshness: id=%d deduped=%v %v", confirmed.ID, deduped, err)
+	}
+	if confirmed.ConfirmedAt == nil || !confirmed.ConfirmedAt.Equal(newer.MeasuredAt) {
+		t.Fatalf("dedupe freshness confirmed_at=%v want=%v", confirmed.ConfirmedAt, newer.MeasuredAt)
+	}
+	latestQ, err := s.LatestQuota(ctx, key)
+	if err != nil || latestQ.Observation == nil || latestQ.Observation.ConfirmedAt == nil || !latestQ.Observation.ConfirmedAt.Equal(newer.MeasuredAt) {
+		t.Fatalf("dedupe freshness latest=%+v %v", latestQ.Observation, err)
+	}
+	// An older measured_at on the same value dedupes without moving confirmed_at.
+	older := x
+	older.MeasuredAt = x.MeasuredAt.Add(-time.Minute)
+	if got, deduped, err := s.PutQuota(ctx, key, "client", holderA, older); err != nil || !deduped || !got.ConfirmedAt.Equal(newer.MeasuredAt) {
+		t.Fatalf("dedupe freshness older: confirmed_at=%v deduped=%v %v", got.ConfirmedAt, deduped, err)
+	}
 	var count int
 	if err = pool.QueryRow(ctx, `SELECT count(*) FROM quota_observations`).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("dedupe history=%d %v", count, err)
