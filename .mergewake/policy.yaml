@@ -1,0 +1,22 @@
+version: 1
+enabled: false
+required_checks:
+  - 'test'
+  - 'vitest'
+  - 'build (linux, amd64)'
+  - 'build (linux, arm64)'
+  - 'build (darwin, arm64)'
+  - 'image'
+blocking:
+  - paths: ['deploy/**', 'Dockerfile', 'scripts/**']
+    reason: Deployment, service units and SQL installation can alter persistent state before a revert.
+  - paths: ['internal/store/store.go', 'internal/store/*migration*.go']
+    reason: Schema migration logic can rewrite stored data before a revert.
+  - paths: ['internal/api/api.go', 'internal/api/wrk.go', 'internal/api/wrk_legacy.go', 'internal/cfaccess/**', 'internal/remote/**', 'internal/guard/**', 'internal/linear/client.go', 'internal/ui/hub.go']
+    reason: API authentication and token forwarding can grant unauthorized access before a revert.
+  - paths: ['internal/ui/reap.go', 'internal/attachments/**']
+    reason: Reaping and attachment deletion can remove stored evidence before a revert.
+  - paths: ['.github/workflows/**']
+    reason: Workflow changes can execute privileged automation before a revert.
+  - paths: ['.mergewake/**']
+    reason: Policy changes can authorize irreversible automation before a revert.
