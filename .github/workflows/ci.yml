@@ -4,11 +4,24 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
-concurrency: {group: "ci-${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}", cancel-in-progress: true}
+  workflow_call:
+    inputs:
+      ref:
+        description: Exact ref (sha) to check out; empty means the event default
+        required: false
+        default: ''
+        type: string
+      suite:
+        description: Which suites to run (all, test, vitest, build)
+        required: false
+        default: all
+        type: string
+concurrency: {group: "ci-${{ github.workflow }}-${{ (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call') && github.run_id || github.ref }}", cancel-in-progress: true}
 permissions:
   contents: read
 jobs:
   test:
+    if: ${{ contains(fromJSON('["all","test"]'), inputs.suite || 'all') }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     services:
@@ -24,6 +37,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.ref }}
           fetch-depth: 0
       - uses: actions/setup-go@v5
         with: {go-version: stable}
@@ -56,10 +70,13 @@ jobs:
           # older versions silently drop unknown keys (allowlist = none).
           GITLEAKS_VERSION: "8.30.1"
   vitest:
+    if: ${{ contains(fromJSON('["all","vitest"]'), inputs.suite || 'all') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
       - uses: actions/setup-node@v4
         with: {node-version: "22", cache: npm, cache-dependency-path: web/console/package-lock.json}
       - run: npm ci
@@ -69,6 +86,7 @@ jobs:
         env:
           TZ: Asia/Seoul
   build:
+    if: ${{ contains(fromJSON('["all","build"]'), inputs.suite || 'all') }}
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -78,6 +96,8 @@ jobs:
           - {goos: darwin, goarch: arm64}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
       - uses: actions/setup-go@v5
         with: {go-version: stable}
       - name: go build
