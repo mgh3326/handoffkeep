@@ -275,6 +275,14 @@ func TestUIP3GlanceTaskAggregation(t *testing.T) {
 	if _, err := s.TransitionTask(t.Context(), hold.ID, "hold", "p3-worker", "hold", nil, ""); err != nil {
 		t.Fatal(err)
 	}
+	reopened := createUITask(t, s, lane, "reopened recovery")
+	if _, err := s.TransitionTask(t.Context(), reopened.ID, "dropped", "p3-worker", "closed", nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ReopenTask(t.Context(), reopened.ID, "p3-worker", "reverted"); err != nil {
+		t.Fatal(err)
+	}
+
 	for i := 0; i < 21; i++ {
 		task := createUITask(t, s, lane, "active task")
 		if _, err := s.ClaimTask(t.Context(), task.ID, "p3-worker", "job-1", ""); err != nil {
@@ -286,10 +294,10 @@ func TestUIP3GlanceTaskAggregation(t *testing.T) {
 	_, after := p3Glance(t, h, assertion)
 	tasks := after["tasks"].(map[string]any)
 	states := tasks["by_state"].(map[string]any)
-	if len(states) != 7 {
+	if len(states) != 8 {
 		t.Fatalf("by_state keys=%v", states)
 	}
-	for state, delta := range map[string]int{"backlog": 1, "claimed": 22, "in_progress": 1, "verifying": 1, "join": 1, "needs_decision": 1, "hold": 1} {
+	for state, delta := range map[string]int{"backlog": 1, "reopened": 1, "claimed": 22, "in_progress": 1, "verifying": 1, "join": 1, "needs_decision": 1, "hold": 1} {
 		if got, want := int(states[state].(float64)), int(beforeStates[state].(float64))+delta; got != want {
 			t.Fatalf("state %s got=%d want=%d", state, got, want)
 		}

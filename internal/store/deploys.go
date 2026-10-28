@@ -60,8 +60,8 @@ func (s *Store) listDocumentsByPrefix(ctx context.Context, prefix, before string
 }
 
 // MergedTaskEvent is one task's merge transition with the refs snapshot the
-// transition recorded. merged is terminal in TaskTransitions, so a task has
-// at most one of these; pre-v5 events may carry a NULL refs snapshot.
+// transition recorded. Only the latest merge of a currently merged task is
+// returned; pre-v5 events may carry a NULL refs snapshot.
 type MergedTaskEvent struct {
 	TaskID int64
 	Title  string
@@ -76,7 +76,7 @@ func (s *Store) ListMergedTaskEvents(ctx context.Context, limit int) ([]MergedTa
 	if limit > 2000 {
 		limit = 2000
 	}
-	rows, err := s.pool.Query(ctx, `SELECT e.task_id, t.title, e.at, e.refs FROM task_events e JOIN tasks t ON t.id = e.task_id WHERE e.kind='transition' AND e."to"='merged' ORDER BY e.at DESC, e.id DESC LIMIT $1`, limit)
+	rows, err := s.pool.Query(ctx, `SELECT e.task_id, t.title, e.at, e.refs FROM tasks t JOIN LATERAL (SELECT task_id, at, refs, id FROM task_events WHERE task_id=t.id AND kind='transition' AND "to"='merged' ORDER BY at DESC, id DESC LIMIT 1) e ON true WHERE t.state='merged' ORDER BY e.at DESC, e.id DESC LIMIT $1`, limit)
 	if err != nil {
 		return nil, err
 	}

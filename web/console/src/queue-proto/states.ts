@@ -6,6 +6,7 @@
  * written until the operator confirms a translation; it never means "done". */
 export const STATE_LABEL: Record<string, string> = {
   backlog: "대기",
+  reopened: "재개됨",
   claimed: "인수됨",
   in_progress: "진행 중",
   verifying: "검증 중",
@@ -25,6 +26,7 @@ export const STATE_GROUP_ORDER = [
   "claimed",
   "hold",
   "backlog",
+  "reopened",
   "merged",
   "dropped",
 ] as const;

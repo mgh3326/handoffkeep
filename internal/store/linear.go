@@ -31,6 +31,7 @@ type LinearStateMapping struct {
 // LinearTaskStateMapping is the sole hk-to-Linear state mapping table.
 var LinearTaskStateMapping = map[string]LinearStateMapping{
 	"backlog":        {Name: "Backlog", Mutate: true},
+	"reopened":       {Name: "Backlog", Mutate: true},
 	"claimed":        {Name: "In Progress", Mutate: true},
 	"in_progress":    {Name: "In Progress", Mutate: true},
 	"verifying":      {Name: "In Review", Mutate: true},
