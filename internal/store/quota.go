@@ -173,11 +173,12 @@ func (s *Store) PutQuota(ctx context.Context, key, owner, holder string, x Quota
 	var dupValue []byte
 	err = tx.QueryRow(ctx, `SELECT o.id,o.value FROM quota_latest l JOIN quota_observations o ON o.id=l.observation_id WHERE l.account_key=$1 AND l.kind=$2 AND l.window_key=$3 AND o.value=$4`, key, x.Kind, x.Window, data).Scan(&dupID, &dupValue)
 	if err == nil {
-		if err = json.Unmarshal(dupValue, &x); err != nil {
+		var existing QuotaObservation
+		if err = json.Unmarshal(dupValue, &existing); err != nil {
 			return x, false, err
 		}
-		x.ID = dupID
-		return x, true, tx.Commit(ctx)
+		existing.ID = dupID
+		return existing, true, tx.Commit(ctx)
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return x, false, err
