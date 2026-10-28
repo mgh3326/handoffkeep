@@ -234,7 +234,7 @@ func TestQuotaRetentionPostgres(t *testing.T) {
 	}
 	n, err := s.PruneQuotaHistory(ctx)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("retention prune: %v", err)
 	}
 	if n != 1 {
 		t.Fatalf("retention pruned=%d want=1", n)
