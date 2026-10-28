@@ -1843,7 +1843,7 @@ func serve(args []string, errout io.Writer) error {
 			st.Close()
 		}
 	}()
-	tokens, e := api.LoadTokens(auth)
+	tokens, quotaAccounts, e := api.LoadTokens(auth)
 	if e != nil {
 		return e
 	}
@@ -1865,7 +1865,7 @@ func serve(args []string, errout io.Writer) error {
 	}
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", hkmcp.HTTPHandler(svc, tokens))
-	mux.Handle("/", api.Server{Service: svc, Tokens: tokens, UI: uiHandler}.Handler())
+	mux.Handle("/", api.Server{Service: svc, Tokens: tokens, QuotaAccounts: quotaAccounts, UI: uiHandler}.Handler())
 	addresses := []string{*listen}
 	if *tail != "" {
 		addresses = append(addresses, *tail)

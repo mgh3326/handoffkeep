@@ -425,41 +425,76 @@ func (s Service) UpsertBenchAreaExceptions(ctx context.Context, client string, x
 
 type Tokens map[string]string
 
-func LoadTokens(path string) (Tokens, error) {
+// QuotaAccounts maps an authenticated client id to the quota account keys it
+// may write: publish observations, lease and release. A client absent from
+// the map, or a key absent from its set, is refused with 403. The mapping
+// lives in the server auth file: optional HANDOFFKEEP_QUOTA_<CLIENT> lines
+// hold a comma-separated account key list granted next to the client's
+// HANDOFFKEEP_TOKEN_<CLIENT> credential. Reads are not scoped by it.
+type QuotaAccounts map[string]map[string]bool
+
+func LoadTokens(path string) (Tokens, QuotaAccounts, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	out := Tokens{}
+	grants := QuotaAccounts{}
 	for _, line := range strings.Split(string(b), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
 		k, v, ok := strings.Cut(line, "=")
-		if !ok || !strings.HasPrefix(k, "HANDOFFKEEP_TOKEN_") || v == "" {
-			return nil, errors.New("invalid HANDOFFKEEP_AUTH_FILE")
+		if !ok || v == "" {
+			return nil, nil, errors.New("invalid HANDOFFKEEP_AUTH_FILE")
 		}
-		id := strings.TrimPrefix(k, "HANDOFFKEEP_TOKEN_")
+		if id, isQuota := strings.CutPrefix(k, "HANDOFFKEEP_QUOTA_"); isQuota {
+			if id == "" {
+				return nil, nil, errors.New("invalid quota grant client id")
+			}
+			keys := grants[id]
+			if keys == nil {
+				keys = map[string]bool{}
+				grants[id] = keys
+			}
+			for _, key := range strings.Split(v, ",") {
+				key = strings.TrimSpace(key)
+				if !store.ValidQuotaKey(key) || keys[key] {
+					return nil, nil, errors.New("invalid HANDOFFKEEP_AUTH_FILE quota grant")
+				}
+				keys[key] = true
+			}
+			continue
+		}
+		id, isToken := strings.CutPrefix(k, "HANDOFFKEEP_TOKEN_")
+		if !isToken {
+			return nil, nil, errors.New("invalid HANDOFFKEEP_AUTH_FILE")
+		}
 		if id == "" {
-			return nil, errors.New("invalid token client id")
+			return nil, nil, errors.New("invalid token client id")
 		}
 		if _, duplicate := out[id]; duplicate {
-			return nil, errors.New("ambiguous auth identity")
+			return nil, nil, errors.New("ambiguous auth identity")
 		}
 		digest := sha256.Sum256([]byte(v))
 		for _, existing := range out {
 			other := sha256.Sum256([]byte(existing))
 			if subtle.ConstantTimeCompare(digest[:], other[:]) == 1 {
-				return nil, errors.New("ambiguous auth identity")
+				return nil, nil, errors.New("ambiguous auth identity")
 			}
 		}
 		out[id] = v
 	}
 	if len(out) == 0 {
-		return nil, errors.New("HANDOFFKEEP_AUTH_FILE contains no tokens")
+		return nil, nil, errors.New("HANDOFFKEEP_AUTH_FILE contains no tokens")
 	}
-	return out, nil
+	for id := range grants {
+		if _, ok := out[id]; !ok {
+			return nil, nil, errors.New("quota grant for unknown client")
+		}
+	}
+	return out, grants, nil
 }
 func (t Tokens) Client(r *http.Request) (string, bool) {
 	header := r.Header.Get("Authorization")
@@ -480,6 +515,8 @@ func (t Tokens) Client(r *http.Request) (string, bool) {
 type Server struct {
 	Service Service
 	Tokens  Tokens
+	// QuotaAccounts scopes quota writes; a nil map refuses every account.
+	QuotaAccounts QuotaAccounts
 	// UI is independently authenticated by Cloudflare Access. A nil UI leaves
 	// the route unregistered so deployments without complete Access settings
 	// fail closed with the standard ServeMux 404.

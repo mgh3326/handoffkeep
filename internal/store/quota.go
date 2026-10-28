@@ -78,6 +78,10 @@ func migrateQuota(ctx context.Context, tx pgx.Tx) error {
 		`CREATE TABLE IF NOT EXISTS quota_leases (account_key TEXT PRIMARY KEY, owner TEXT NOT NULL, holder TEXT NOT NULL, expires_at TIMESTAMPTZ NOT NULL)`,
 		`CREATE OR REPLACE FUNCTION quota_history_immutable() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'quota observations are append-only'; RETURN NULL; END; $$`,
 		`DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='quota_history_immutable' AND tgrelid='quota_observations'::regclass) THEN CREATE TRIGGER quota_history_immutable BEFORE UPDATE OR DELETE OR TRUNCATE ON quota_observations FOR EACH STATEMENT EXECUTE FUNCTION quota_history_immutable(); END IF; END $$`,
+		// Version 22 records the quota migration retroactively. The CREATEs
+		// above stay ungated IF NOT EXISTS so servers that already ran
+		// migrateQuota only insert the marker row.
+		`INSERT INTO schema_version(version) VALUES (22) ON CONFLICT DO NOTHING`,
 	} {
 		if _, err := tx.Exec(ctx, q); err != nil {
 			return err
@@ -134,13 +138,17 @@ func (s *Store) ReleaseQuota(ctx context.Context, key, owner, holder string) err
 	_, err := s.pool.Exec(ctx, `DELETE FROM quota_leases WHERE account_key=$1 AND owner=$2 AND holder=$3`, key, owner, holder)
 	return err
 }
-func (s *Store) PutQuota(ctx context.Context, key, owner, holder string, x QuotaObservation) (QuotaObservation, error) {
+
+// PutQuota appends an observation and moves the latest pointer. When the
+// value is identical to the current latest for (key, kind, window) it appends
+// nothing and returns the existing row with deduped=true.
+func (s *Store) PutQuota(ctx context.Context, key, owner, holder string, x QuotaObservation) (QuotaObservation, bool, error) {
 	if !ValidQuotaKey(key) || !ValidQuotaHolder(holder) || !ValidQuotaObservation(x, time.Now()) {
-		return x, errors.New("invalid quota observation")
+		return x, false, errors.New("invalid quota observation")
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return x, err
+		return x, false, err
 	}
 	defer tx.Rollback(ctx)
 	var valid bool
@@ -148,23 +156,39 @@ func (s *Store) PutQuota(ctx context.Context, key, owner, holder string, x Quota
 	// probe cannot publish after another holder has taken over, even with one token.
 	err = tx.QueryRow(ctx, `SELECT owner=$2 AND holder=$3 AND expires_at>clock_timestamp() FROM quota_leases WHERE account_key=$1 FOR UPDATE`, key, owner, holder).Scan(&valid)
 	if errors.Is(err, pgx.ErrNoRows) || err == nil && !valid {
-		return x, ErrQuotaLease
+		return x, false, ErrQuotaLease
 	}
 	if err != nil {
-		return x, err
+		return x, false, err
 	}
 	x.ID = 0
 	data, err := json.Marshal(x)
 	if err != nil {
-		return x, err
+		return x, false, err
+	}
+	// The lease row lock above serializes publishers for this account, so a
+	// concurrent identical publish observes the committed row here instead of
+	// double-appending.
+	var dupID int64
+	var dupValue []byte
+	err = tx.QueryRow(ctx, `SELECT o.id,o.value FROM quota_latest l JOIN quota_observations o ON o.id=l.observation_id WHERE l.account_key=$1 AND l.kind=$2 AND l.window_key=$3 AND o.value=$4`, key, x.Kind, x.Window, data).Scan(&dupID, &dupValue)
+	if err == nil {
+		if err = json.Unmarshal(dupValue, &x); err != nil {
+			return x, false, err
+		}
+		x.ID = dupID
+		return x, true, tx.Commit(ctx)
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return x, false, err
 	}
 	err = tx.QueryRow(ctx, `INSERT INTO quota_observations(account_key,kind,window_key,measured_at,value) VALUES($1,$2,$3,$4,$5) RETURNING id`, key, x.Kind, x.Window, x.MeasuredAt, data).Scan(&x.ID)
 	if err != nil {
-		return x, err
+		return x, false, err
 	}
 	_, err = tx.Exec(ctx, `INSERT INTO quota_latest(account_key,kind,window_key,observation_id,measured_at) VALUES($1,$2,$3,$4,$5) ON CONFLICT(account_key,kind,window_key) DO UPDATE SET observation_id=EXCLUDED.observation_id,measured_at=EXCLUDED.measured_at WHERE quota_latest.measured_at<=EXCLUDED.measured_at`, key, x.Kind, x.Window, x.ID, x.MeasuredAt)
 	if err != nil {
-		return x, err
+		return x, false, err
 	}
-	return x, tx.Commit(ctx)
+	return x, false, tx.Commit(ctx)
 }
