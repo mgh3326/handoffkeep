@@ -459,7 +459,9 @@ deployment path is unchanged.
 Only merged or dropped tasks can enter the distinct `reopened` state. The
 operation requires a non-empty reason, records the authenticated caller and
 reason as an append-only transition audit event, and clears stale job ownership.
-Generic transitions cannot leave a terminal state. Reopened tasks appear in the
+Generic transitions cannot leave a terminal state. Existing protected task/job
+authority fences also apply to reopen, which clears bindings; the operation does
+not bypass protected enrollment. Reopened tasks appear in the
 queue as `reopened` and are eligible for claim/next, in_progress (with normal job
 linkage or an explicit no-job reason), hold, or dropped. Historical merges remain
 in the event log; deploy views use the latest merge of currently merged tasks.

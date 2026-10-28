@@ -283,7 +283,7 @@ func leadTime(ix *index) LeadTime {
 				phases["install"] = append(phases["install"], hours(usable.Sub(*merged)))
 			}
 		}
-		if t.State != "merged" && t.State != "dropped" && t.State != "backlog" {
+		if t.State != "merged" && t.State != "dropped" && t.State != "backlog" && t.State != "reopened" {
 			if order := firstTo(t, "claimed"); order != nil {
 				out.OpenCount++
 				open = append(open, hours(ix.snap.Until.Sub(order.At)))
@@ -1035,7 +1035,7 @@ func normalPath(ix *index) Normal {
 		t := ix.tasks[id]
 		term := terminalAt(t)
 		if term == nil || !inWindow(*term, ix.snap) {
-			if term == nil && t.State != "backlog" {
+			if term == nil && t.State != "backlog" && t.State != "reopened" {
 				if sig, _ := ix.repairSignals(id); len(sig) > 0 {
 					out.OpenRepaired++
 					if order := firstTo(t, "claimed"); order != nil {

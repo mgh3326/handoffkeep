@@ -110,7 +110,7 @@ Percentiles are nearest-rank over observed values (hours unless noted).
    merge); without sentinel samples the job events decide (after
    joined/completed/escalate → held). A held-idle builder is never an empty
    slot. Empty = capacity − working − held-idle. Ready = at least one task in
-   `backlog` that minute (replayed from task events). Eligibility
+   `backlog` or `reopened` that minute (replayed from task events). Eligibility
    (quota/account/profile/verifier) is recorded by no source, so the share is
    an **upper bound**. A unit whose end was not observed (no terminal record,
    pane not live, task open or unlinked) may or may not hold its slot: those

@@ -1031,14 +1031,14 @@ func (s *Store) migrate(ctx context.Context) error {
 			}
 		}
 	}
-	var v20Applied bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_version WHERE version=20)`).Scan(&v20Applied); err != nil {
+	var v21Applied bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_version WHERE version=21)`).Scan(&v21Applied); err != nil {
 		return err
 	}
-	if !v20Applied {
+	if !v21Applied {
 		for _, q := range []string{
 			`ALTER TABLE tasks DROP CONSTRAINT tasks_state_check, ADD CONSTRAINT tasks_state_check CHECK(state IN ('backlog','reopened','claimed','in_progress','verifying','join','hold','needs_decision','merged','dropped'))`,
-			`INSERT INTO schema_version(version) VALUES (20)`,
+			`INSERT INTO schema_version(version) VALUES (21)`,
 		} {
 			if _, err := tx.Exec(ctx, q); err != nil {
 				return err
