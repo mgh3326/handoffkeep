@@ -47,7 +47,9 @@ MUTANTS = [
     (
         "reopen-ignores-caller", "api/api.go", True,
         "s.Service.ReopenTask(r.Context(), id, client, input.Reason)",
-        's.Service.ReopenTask(r.Context(), id, "api", input.Reason)',
+        # Keep client referenced so the mutant compiles; only the caller passed
+        # to ReopenTask changes.
+        's.Service.ReopenTask(r.Context(), id, func() string { _ = client; return "api" }(), input.Reason)',
         "TestTaskReopenAPI", "reopen caller binding",
     ),
 ]
