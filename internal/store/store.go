@@ -2023,9 +2023,10 @@ func ValidBodyDoc(v string) bool {
 	return true
 }
 
-func scanTask(row interface{ Scan(...any) error }, x *Task) error {
+func scanTask(row interface{ Scan(...any) error }, x *Task, extra ...any) error {
 	var refs []byte
-	if err := row.Scan(&x.ID, &x.Lane, &x.ParentLane, &x.Title, &x.Kind, &x.State, &x.Priority, &refs, &x.ClaimedBy, &x.CreatedBy, &x.CreatedAt, &x.UpdatedAt, &x.BodyDoc, &x.Project, &x.Area); err != nil {
+	dest := []any{&x.ID, &x.Lane, &x.ParentLane, &x.Title, &x.Kind, &x.State, &x.Priority, &refs, &x.ClaimedBy, &x.CreatedBy, &x.CreatedAt, &x.UpdatedAt, &x.BodyDoc, &x.Project, &x.Area}
+	if err := row.Scan(append(dest, extra...)...); err != nil {
 		return err
 	}
 	return json.Unmarshal(refs, &x.Refs)
@@ -2167,11 +2168,16 @@ func (s *Store) claimTaskTx(ctx context.Context, tx pgx.Tx, id int64, by, jobID,
 		return Task{}, err
 	}
 	var x Task
-	if err := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, id), &x); err != nil {
+	var hasDisposition bool
+	if err := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+`,refs ? 'disposition' FROM tasks WHERE id=$1 FOR UPDATE`, id), &x, &hasDisposition); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Task{}, ErrTaskConflict
 		}
 		return Task{}, err
+	}
+	// Match NextTask's key-presence exclusion, including malformed/null refs.
+	if hasDisposition {
+		return Task{}, fmt.Errorf("%w: disposition items cannot be claimed directly", ErrTaskConflict)
 	}
 
 	if err := s.wrkTaskFenceTx(ctx, tx, x, "", true); err != nil {
@@ -2434,7 +2440,8 @@ func (s *Store) transitionTask(ctx context.Context, id int64, to, by, note strin
 	}
 
 	var x Task
-	if err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, id), &x); err != nil {
+	var hasDisposition bool
+	if err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+`,refs ? 'disposition' FROM tasks WHERE id=$1 FOR UPDATE`, id), &x, &hasDisposition); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Task{}, ErrTaskNotFound
 		}
@@ -2460,7 +2467,10 @@ func (s *Store) transitionTask(ctx context.Context, id int64, to, by, note strin
 	// generic caller (API, MCP, CLI, UI generic decision forms) is refused while
 	// a disposition item awaits the operator, whatever edge it asks for. The
 	// operator's answer uses AnswerDisposition, which does not come through here.
-	if x.Refs.Disposition != nil {
+	if hasDisposition {
+		if to == "reopened" {
+			return Task{}, fmt.Errorf("%w: disposition items cannot be reopened", ErrTaskConflict)
+		}
 		if from == "needs_decision" {
 			return Task{}, ErrDispositionOperatorOnly
 		}
@@ -2535,6 +2545,9 @@ func (s *Store) transitionTask(ctx context.Context, id int64, to, by, note strin
 	if reopen {
 		x.ClaimedBy = ""
 		x.Refs.JobID = ""
+		x.Refs.PR = ""
+		x.Refs.HeadSHA = ""
+		x.Refs.ReportPath = ""
 	}
 	encoded, err := json.Marshal(x.Refs)
 	if err != nil {

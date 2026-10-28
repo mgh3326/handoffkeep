@@ -204,7 +204,7 @@ func leadTime(ix *index) LeadTime {
 			pop.Total++
 			prLink.Total++
 			order := firstTo(t, "claimed")
-			prs := ix.taskPRs[id]
+			prs := ix.leadTimePRs(t)
 			if len(prs) > 0 {
 				prLink.Linked++
 				prLink.Detail[bestTier(prs)]++

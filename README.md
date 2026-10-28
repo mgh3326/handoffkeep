@@ -458,7 +458,9 @@ deployment path is unchanged.
 `POST /v1/tasks/{id}/reopen` with `{"reason":"reverted after failed smoke"}`.
 Only merged or dropped tasks can enter the distinct `reopened` state. The
 operation requires a non-empty reason, records the authenticated caller and
-reason as an append-only transition audit event, and clears stale job ownership.
+reason as an append-only transition audit event, and clears the claimant and
+per-cycle `job_id`, `pr`, `head_sha`, and `report_path` refs. Previous values stay
+in `task_events`. Disposition items cannot be reopened or claimed directly.
 Generic transitions cannot leave a terminal state. Existing protected task/job
 authority fences also apply to reopen, which clears bindings; the operation does
 not bypass protected enrollment. Reopened tasks appear in the
