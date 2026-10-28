@@ -13,7 +13,7 @@ const holderA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 const holderB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
 func TestQuotaValidation(t *testing.T) {
-	for _, key := range []string{"codex:user@example.test", "codex:token", "codex:0123456789abcdef/path", ""} {
+	for _, key := range []string{"codex:raw-account-identity", "codex:token", "codex:0123456789abcdef/path", ""} {
 		if ValidQuotaKey(key) {
 			t.Fatalf("accepted %q", key)
 		}
@@ -95,7 +95,7 @@ func TestQuotaPostgres(t *testing.T) {
 	if err = pool.QueryRow(ctx, `SELECT count(*) FROM quota_observations`).Scan(&count); err != nil || count != 3 {
 		t.Fatalf("history=%d %v", count, err)
 	}
-	if _, err = pool.Exec(ctx, `UPDATE quota_observations SET window=window`); err == nil {
+	if _, err = pool.Exec(ctx, `UPDATE quota_observations SET window_key=window_key`); err == nil {
 		t.Fatal("history mutable")
 	}
 	renewed, err := s.LeaseQuota(ctx, quotaTestKey, "client", holder, 120)

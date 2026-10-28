@@ -73,8 +73,8 @@ func ValidQuotaObservation(x QuotaObservation, now time.Time) bool {
 }
 func migrateQuota(ctx context.Context, tx pgx.Tx) error {
 	for _, q := range []string{
-		`CREATE TABLE IF NOT EXISTS quota_observations (id BIGSERIAL PRIMARY KEY, account_key TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('auto','manual')), window TEXT NOT NULL, measured_at TIMESTAMPTZ NOT NULL, value JSONB NOT NULL, received_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp())`,
-		`CREATE TABLE IF NOT EXISTS quota_latest (account_key TEXT NOT NULL, kind TEXT NOT NULL, window TEXT NOT NULL, observation_id BIGINT NOT NULL REFERENCES quota_observations(id), measured_at TIMESTAMPTZ NOT NULL, PRIMARY KEY(account_key,kind,window))`,
+		`CREATE TABLE IF NOT EXISTS quota_observations (id BIGSERIAL PRIMARY KEY, account_key TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('auto','manual')), window_key TEXT NOT NULL, measured_at TIMESTAMPTZ NOT NULL, value JSONB NOT NULL, received_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp())`,
+		`CREATE TABLE IF NOT EXISTS quota_latest (account_key TEXT NOT NULL, kind TEXT NOT NULL, window_key TEXT NOT NULL, observation_id BIGINT NOT NULL REFERENCES quota_observations(id), measured_at TIMESTAMPTZ NOT NULL, PRIMARY KEY(account_key,kind,window_key))`,
 		`CREATE TABLE IF NOT EXISTS quota_leases (account_key TEXT PRIMARY KEY, owner TEXT NOT NULL, holder TEXT NOT NULL, expires_at TIMESTAMPTZ NOT NULL)`,
 		`CREATE OR REPLACE FUNCTION quota_history_immutable() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'quota observations are append-only'; RETURN NULL; END; $$`,
 		`DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='quota_history_immutable' AND tgrelid='quota_observations'::regclass) THEN CREATE TRIGGER quota_history_immutable BEFORE UPDATE OR DELETE OR TRUNCATE ON quota_observations FOR EACH STATEMENT EXECUTE FUNCTION quota_history_immutable(); END IF; END $$`,
@@ -87,7 +87,7 @@ func migrateQuota(ctx context.Context, tx pgx.Tx) error {
 }
 func (s *Store) LatestQuota(ctx context.Context, key string) (QuotaLatest, error) {
 	out := QuotaLatest{Manual: []QuotaObservation{}}
-	rows, err := s.pool.Query(ctx, `SELECT o.id,o.value FROM quota_latest l JOIN quota_observations o ON o.id=l.observation_id WHERE l.account_key=$1 ORDER BY l.kind,l.window`, key)
+	rows, err := s.pool.Query(ctx, `SELECT o.id,o.value FROM quota_latest l JOIN quota_observations o ON o.id=l.observation_id WHERE l.account_key=$1 ORDER BY l.kind,l.window_key`, key)
 	if err != nil {
 		return out, err
 	}
@@ -158,11 +158,11 @@ func (s *Store) PutQuota(ctx context.Context, key, owner, holder string, x Quota
 	if err != nil {
 		return x, err
 	}
-	err = tx.QueryRow(ctx, `INSERT INTO quota_observations(account_key,kind,window,measured_at,value) VALUES($1,$2,$3,$4,$5) RETURNING id`, key, x.Kind, x.Window, x.MeasuredAt, data).Scan(&x.ID)
+	err = tx.QueryRow(ctx, `INSERT INTO quota_observations(account_key,kind,window_key,measured_at,value) VALUES($1,$2,$3,$4,$5) RETURNING id`, key, x.Kind, x.Window, x.MeasuredAt, data).Scan(&x.ID)
 	if err != nil {
 		return x, err
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO quota_latest(account_key,kind,window,observation_id,measured_at) VALUES($1,$2,$3,$4,$5) ON CONFLICT(account_key,kind,window) DO UPDATE SET observation_id=EXCLUDED.observation_id,measured_at=EXCLUDED.measured_at WHERE quota_latest.measured_at<=EXCLUDED.measured_at`, key, x.Kind, x.Window, x.ID, x.MeasuredAt)
+	_, err = tx.Exec(ctx, `INSERT INTO quota_latest(account_key,kind,window_key,observation_id,measured_at) VALUES($1,$2,$3,$4,$5) ON CONFLICT(account_key,kind,window_key) DO UPDATE SET observation_id=EXCLUDED.observation_id,measured_at=EXCLUDED.measured_at WHERE quota_latest.measured_at<=EXCLUDED.measured_at`, key, x.Kind, x.Window, x.ID, x.MeasuredAt)
 	if err != nil {
 		return x, err
 	}
