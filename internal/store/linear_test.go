@@ -53,7 +53,7 @@ func TestLinearStateMappingIsCompleteAndSafe(t *testing.T) {
 			t.Errorf("missing mapping for %s", state)
 		}
 	}
-	nonterminal := []string{"backlog", "claimed", "in_progress", "verifying", "join", "hold", "needs_decision"}
+	nonterminal := []string{"backlog", "reopened", "claimed", "in_progress", "verifying", "join", "hold", "needs_decision"}
 	for _, state := range nonterminal {
 		mapping := LinearTaskStateMapping[state]
 		if mapping.Terminal || mapping.Name == "Done" || mapping.Name == "Canceled" {

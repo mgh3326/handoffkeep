@@ -12,7 +12,7 @@ export const VIEW_STATES: Record<ProtoView, string[]> = {
   // chips (claimed · in_progress · verifying).
   live: ["claimed", "in_progress", "verifying"],
   active: ["claimed", "in_progress", "verifying", "join", "needs_decision"],
-  backlog: ["backlog", "hold"],
+  backlog: ["backlog", "reopened", "hold"],
   all: [...KNOWN_STATES],
 };
 
@@ -31,6 +31,7 @@ export function viewPredicate(view: ProtoView, states: readonly string[] = KNOWN
     // Operator view: anything waiting on an operator decision plus backlog.
     return (task) =>
       task.state === "backlog" ||
+      task.state === "reopened" ||
       task.state === "needs_decision" ||
       decisionMark(task) === "pending" ||
       (task.kind === "decide" && task.state !== "merged" && task.state !== "dropped");

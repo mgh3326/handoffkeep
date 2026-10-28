@@ -20,7 +20,7 @@ const glanceBodyLimit = 256 * 1024
 
 var acceptingMachineRE = regexp.MustCompile(`^[a-z0-9-]{1,32}$`)
 
-var glanceStates = []string{"backlog", "claimed", "in_progress", "verifying", "join", "needs_decision", "hold"}
+var glanceStates = []string{"backlog", "reopened", "claimed", "in_progress", "verifying", "join", "needs_decision", "hold"}
 
 type glanceHub struct {
 	OK    bool   `json:"ok"`

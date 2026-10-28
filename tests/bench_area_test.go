@@ -237,10 +237,17 @@ func TestBenchAreaExceptionConcurrentKey(t *testing.T) {
 
 	// A retire racing a same-action upsert: both are valid writes; whichever
 	// lands last decides retired_at, and neither errors.
-	retire := exc
+	// Either action can win the first race. The second race must use that
+	// winning action, otherwise a prefer winner makes the exclude upsert
+	// an action change rather than the same-action update this case tests.
+	same := exc
+	if err := p.QueryRow(ctx, `SELECT action FROM bench_area_exceptions WHERE profile='bench-exc-race'`).Scan(&same.Action); err != nil {
+		t.Fatal(err)
+	}
+	retire := same
 	ts := time.Now().UTC()
 	retire.RetiredAt = &ts
-	errA, errB = race(exc, retire)
+	errA, errB = race(same, retire)
 	if errA != nil || errB != nil {
 		t.Fatalf("retire-vs-upsert race errors: %v / %v", errA, errB)
 	}

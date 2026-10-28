@@ -12,6 +12,7 @@ export { STATE_GROUP_ORDER, STATE_LABEL, isKnownState, stateLabel, stateToken } 
 
 // Stroke geometry on a 24-unit grid. Exported for the distinctness test.
 export const STATE_SHAPES: Record<string, ReactNode> = {
+  reopened: <path d="M4 11a8 8 0 1 1 2 7M4 4v7h7" />,
   backlog: <circle cx="12" cy="12" r="8" strokeDasharray="3 3" />,
   claimed: (
     <>
