@@ -5,6 +5,7 @@ import { PolicyPanel } from "./PolicyPanel";
 
 const FALLBACK_STATES = [
   "backlog",
+  "reopened",
   "claimed",
   "in_progress",
   "verifying",

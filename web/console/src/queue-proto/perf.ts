@@ -14,6 +14,7 @@ const PERF_QUERIES = [
   "20999",
   "hold",
   "backlog",
+  "reopened",
   "chore",
   "research",
   "adapter",

@@ -4,6 +4,7 @@
 
 export const KNOWN_STATES = [
   "backlog",
+  "reopened",
   "claimed",
   "in_progress",
   "verifying",

@@ -145,3 +145,91 @@ func TestLeadTimeUndatedDeployStreamIsNotPreStream(t *testing.T) {
 		t.Fatalf("coverage = %+v, want the undated-stream reason, not the pre-stream one", pop)
 	}
 }
+
+func TestLeadTimeReopenedCycleLinks(t *testing.T) {
+	for _, tier := range []string{"refs", "job", "report_path", "note_pr", "note_job", "name", "reused_job", "no_current_link"} {
+		t.Run(tier, func(t *testing.T) {
+			s := snap(0, 24)
+			old := store.TaskRefs{PR: hk10, JobID: "81-old-job", ReportPath: "/jobs/81-old-job/report.md"}
+			current := store.TaskRefs{}
+			note := ""
+			switch tier {
+			case "refs":
+				current.PR = hk11
+			case "job", "reused_job":
+				current.JobID = "current-job"
+			case "report_path":
+				current.ReportPath = "/jobs/current-job/report.md"
+			case "note_pr":
+				note = hk11
+			case "note_job":
+				note = "current-job"
+			}
+			events := mergedChain(0.1, 0.5, 1, &old)
+			// The reopen reason may describe the previous PR/job. It is not
+			// linkage for the new completion.
+			events = append(events, ev(4, "merged", "reopened", nil, hk10+" 81-old-job"))
+			events = append(events, ev(6, "reopened", "claimed", &current, note), ev(7, "claimed", "verifying", &current), ev(8, "verifying", "merged", &current))
+			s.Tasks = []store.Task{task(81, "merged", 0, current, events...)}
+			s.Relay = []store.RelayEvent{{JobID: "81-old-job", PR: hk10, ReceivedAt: at(1)}}
+			s.Jobs = []Job{{JobID: "81-old-job", Events: []JobEvent{{Kind: "start", At: atp(0.1)}, {Kind: "end", At: atp(7), PR: hk10}}}}
+			if tier != "refs" && tier != "note_pr" && tier != "no_current_link" {
+				job := "current-job"
+				if tier == "name" {
+					job = "81-new-job"
+				}
+				s.Relay = append(s.Relay, store.RelayEvent{JobID: job, PR: hk11, ReceivedAt: at(8)})
+				s.Jobs = append(s.Jobs, Job{JobID: job, Events: []JobEvent{{Kind: "start", At: atp(6)}, {Kind: "end", At: atp(8), PR: hk11}}})
+				if tier == "reused_job" {
+					// A current explicit job link must not inherit that job's
+					// PR evidence from before the cycle, in either source.
+					s.Relay = append(s.Relay, store.RelayEvent{JobID: job, PR: hk10, EventTime: atp(1), ReceivedAt: at(7)})
+					s.Jobs[1].Events = append(s.Jobs[1].Events, JobEvent{At: atp(1), PR: hk10}, JobEvent{PR: hk10})
+				}
+			}
+			s.PRs = map[string]PRFact{hk10: pr(hk10, "aaaaaaa10", 1), hk11: pr(hk11, "aaaaaaa11", 8)}
+			s.Deploys = []DeployRecord{
+				{Service: "handoffkeep", Result: "success", DeployedAt: atp(2), Format: "json"},
+				{Service: "handoffkeep", Result: "success", DeployedAt: atp(9), IncludedPRs: []string{"handoffkeep#11"}, Format: "json"},
+			}
+			ix := buildIndex(&s)
+			if _, ok := ix.taskPRs[81][hk10]; !ok {
+				t.Fatal("historical linkage was removed from the full index")
+			}
+			got := leadTime(ix)
+			coverage := findCoverage(got.Coverage, "tasks merged in window")
+			if tier == "no_current_link" {
+				if got.Deploy != nil || coverage.Detail["no PR link"] != 1 {
+					t.Fatalf("old PR inherited without current evidence: %+v coverage=%+v", got.Deploy, coverage)
+				}
+			} else if got.Deploy == nil || got.Deploy.N != 1 || got.Deploy.P50 != 3 || coverage.Linked != 1 {
+				t.Fatalf("current cycle lead time=%+v coverage=%+v, want 6h→9h", got.Deploy, coverage)
+			}
+		})
+	}
+}
+
+// A task reopened twice: the lead time and PR link come from the LATEST
+// cycle only. A cycle start taken from the first reopen would leak PR #12
+// from the middle cycle and double the lead time (v86-pi, mutant 1).
+func TestLeadTimeTwiceReopenedUsesLatestCycle(t *testing.T) {
+	s := snap(0, 24)
+	first := store.TaskRefs{PR: hk10, JobID: "82-first"}
+	middle := store.TaskRefs{PR: hk12, JobID: "82-middle"}
+	current := store.TaskRefs{PR: hk11}
+	events := mergedChain(0.1, 0.5, 1, &first)
+	events = append(events, ev(2, "merged", "reopened", nil, "first reopen"))
+	events = append(events, ev(3, "reopened", "claimed", &middle), ev(3.5, "claimed", "verifying", &middle), ev(4, "verifying", "merged", &middle))
+	events = append(events, ev(5, "merged", "reopened", nil, "second reopen"))
+	events = append(events, ev(6, "reopened", "claimed", &current), ev(7, "claimed", "verifying", &current), ev(8, "verifying", "merged", &current))
+	s.Tasks = []store.Task{task(82, "merged", 0, current, events...)}
+	s.PRs = map[string]PRFact{hk10: pr(hk10, "aaaaaaa10", 1), hk12: pr(hk12, "aaaaaaa12", 4), hk11: pr(hk11, "aaaaaaa11", 8)}
+	s.Deploys = []DeployRecord{
+		{Service: "handoffkeep", Result: "success", DeployedAt: atp(4.5), IncludedPRs: []string{"handoffkeep#12"}, Format: "json"},
+		{Service: "handoffkeep", Result: "success", DeployedAt: atp(9), IncludedPRs: []string{"handoffkeep#11"}, Format: "json"},
+	}
+	got := leadTime(buildIndex(&s))
+	if got.Deploy == nil || got.Deploy.N != 1 || got.Deploy.P50 != 3 {
+		t.Fatalf("twice-reopened lead time=%+v, want the latest cycle 6h→9h (3h)", got.Deploy)
+	}
+}

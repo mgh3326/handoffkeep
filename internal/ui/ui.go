@@ -26,7 +26,7 @@ import (
 //go:embed templates/*.html static
 var assets embed.FS
 
-var taskStates = []string{"backlog", "claimed", "in_progress", "verifying", "join", "hold", "needs_decision", "merged", "dropped"}
+var taskStates = []string{"backlog", "reopened", "claimed", "in_progress", "verifying", "join", "hold", "needs_decision", "merged", "dropped"}
 
 // Config supplies only server-side dependencies. HubToken is intentionally not
 // represented in any template model.

@@ -91,7 +91,7 @@ func Collect(ctx context.Context, cfg CollectConfig) (Snapshot, error) {
 			x.Events = []store.TaskEvent{}
 		}
 		s.Tasks[i] = x
-		if x.State != "backlog" {
+		if x.State != "backlog" && x.State != "reopened" {
 			cs, err := cfg.HK.ListTaskComments(ctx, x.ID, 0, store.TaskCommentListMax)
 			if err == nil && len(cs) > 0 {
 				mu.Lock()

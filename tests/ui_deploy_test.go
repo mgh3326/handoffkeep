@@ -92,31 +92,31 @@ func wipeDeployDocs(t *testing.T, db *pgx.Conn) {
 func seedMergedEvent(t *testing.T, db *pgx.Conn, s *store.Store, title, pr string, at time.Time) int64 {
 	t.Helper()
 	task := createUITask(t, s, uiLane(t, "deploy"), title)
-	var refs []byte
-	var err error
-	if pr != "" {
-		refs, err = json.Marshal(map[string]string{"pr": pr})
-	} else {
-		refs, err = json.Marshal(map[string]string{})
-	}
+	refs, err := json.Marshal(map[string]string{"pr": pr})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(t.Context(), `INSERT INTO task_events(task_id,"from","to","by",note,refs,at) VALUES($1,'join','merged','deploy-test','',$2::jsonb,$3)`, task.ID, string(refs), at); err != nil {
+	if _, err = db.Exec(t.Context(), `UPDATE tasks SET state='merged', refs=$2::jsonb, updated_at=$3 WHERE id=$1`, task.ID, string(refs), at); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(t.Context(), `INSERT INTO task_events(task_id,"from","to","by",note,refs,at) VALUES($1,'join','merged','deploy-test','',$2::jsonb,$3)`, task.ID, string(refs), at); err != nil {
 		t.Fatal(err)
 	}
 	return task.ID
 }
 
-// seedMergedEventsBulk inserts n merged events on one task in a single
-// statement — used to fill the handler's scan window without n store calls.
+// Each task contributes only its latest merge. Fill the bounded scan with
+// distinct merged tasks rather than repeated historical merges of one task.
 func seedMergedEventsBulk(t *testing.T, db *pgx.Conn, s *store.Store, n int, at time.Time) {
 	t.Helper()
-	task := createUITask(t, s, uiLane(t, "deploy"), "bulk merged")
-	if _, err := db.Exec(t.Context(),
-		`INSERT INTO task_events(task_id,"from","to","by",note,refs,at)
-		 SELECT $1,'join','merged','deploy-test','','{}'::jsonb,$2 FROM generate_series(1,$3)`,
-		task.ID, at, n); err != nil {
+	lane := uiLane(t, "deploy-bulk")
+	_, err := db.Exec(t.Context(), `WITH inserted AS (
+ INSERT INTO tasks(lane,title,kind,state,created_by,created_at,updated_at)
+ SELECT $1,'bulk merged','implement','merged','deploy-test',$2,$2 FROM generate_series(1,$3)
+ RETURNING id)
+ INSERT INTO task_events(task_id,"from","to","by",note,refs,at)
+ SELECT id,'join','merged','deploy-test','','{}'::jsonb,$2 FROM inserted`, lane, at, n)
+	if err != nil {
 		t.Fatal(err)
 	}
 }

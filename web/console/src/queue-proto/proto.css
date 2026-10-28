@@ -1300,3 +1300,5 @@ summary {
   font-size: var(--hk-font-meta);
   color: var(--hk-text-muted);
 }
+
+.hk-state-reopened { color: var(--hk-state-reopened); }
