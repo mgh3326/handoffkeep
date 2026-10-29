@@ -442,8 +442,9 @@ type Task struct {
 	// Area is the task's entry in the TaskAreas vocabulary. NULL on rows
 	// created before the field existed and on any task nobody has tagged;
 	// always emitted, so a null means unset.
-	Area   *string     `json:"area"`
-	Events []TaskEvent `json:"events,omitempty"`
+	Expected *string     `json:"expected"`
+	Area     *string     `json:"area"`
+	Events   []TaskEvent `json:"events,omitempty"`
 }
 
 // RelayEvent is a durable report from a worker to its owning lane.  Delivery
@@ -1040,6 +1041,18 @@ func (s *Store) migrate(ctx context.Context) error {
 			`ALTER TABLE tasks DROP CONSTRAINT tasks_state_check, ADD CONSTRAINT tasks_state_check CHECK(state IN ('backlog','reopened','claimed','in_progress','verifying','join','hold','needs_decision','merged','dropped'))`,
 			`INSERT INTO schema_version(version) VALUES (21)`,
 		} {
+			if _, err := tx.Exec(ctx, q); err != nil {
+				return err
+			}
+		}
+	}
+
+	var v22Applied bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_version WHERE version=22)`).Scan(&v22Applied); err != nil {
+		return err
+	}
+	if !v22Applied {
+		for _, q := range []string{`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS expected TEXT`, `INSERT INTO schema_version(version) VALUES (22)`} {
 			if _, err := tx.Exec(ctx, q); err != nil {
 				return err
 			}
@@ -2028,14 +2041,14 @@ func ValidBodyDoc(v string) bool {
 
 func scanTask(row interface{ Scan(...any) error }, x *Task, extra ...any) error {
 	var refs []byte
-	dest := []any{&x.ID, &x.Lane, &x.ParentLane, &x.Title, &x.Kind, &x.State, &x.Priority, &refs, &x.ClaimedBy, &x.CreatedBy, &x.CreatedAt, &x.UpdatedAt, &x.BodyDoc, &x.Project, &x.Area}
+	dest := []any{&x.ID, &x.Lane, &x.ParentLane, &x.Title, &x.Kind, &x.State, &x.Priority, &refs, &x.ClaimedBy, &x.CreatedBy, &x.CreatedAt, &x.UpdatedAt, &x.BodyDoc, &x.Project, &x.Area, &x.Expected}
 	if err := row.Scan(append(dest, extra...)...); err != nil {
 		return err
 	}
 	return json.Unmarshal(refs, &x.Refs)
 }
 
-const taskColumns = `id,lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at,body_doc,project,area`
+const taskColumns = `id,lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at,body_doc,project,area,expected`
 
 // taskProjectQuerier is the row-query seam requireTaskProject runs against:
 // the caller's transaction, so membership is judged in the same snapshot the
@@ -2065,7 +2078,29 @@ func requireTaskProject(ctx context.Context, q taskProjectQuerier, project *stri
 	return nil
 }
 
+// ValidExpected accepts a positive Go duration or a whole number of days.
+func ValidExpected(value string) bool {
+	if strings.HasSuffix(value, "d") {
+		value = strings.TrimSuffix(value, "d")
+		if value == "" {
+			return false
+		}
+		for _, c := range value {
+			if c < '0' || c > '9' {
+				return false
+			}
+		}
+		n, err := strconv.ParseUint(value, 10, 31)
+		return err == nil && n > 0 && n <= uint64((1<<63-1)/int64(24*time.Hour))
+	}
+	d, err := time.ParseDuration(value)
+	return err == nil && d > 0
+}
+
 func (s *Store) CreateTask(ctx context.Context, x Task) (Task, error) {
+	if x.Expected != nil && !ValidExpected(*x.Expected) {
+		return x, errors.New("invalid task: expected must be a positive duration")
+	}
 	if x.BodyDoc != "" && !ValidBodyDoc(x.BodyDoc) {
 		return x, errors.New("invalid task: body_doc must be a document key or key#section")
 	}
@@ -2120,7 +2155,7 @@ func (s *Store) CreateTask(ctx context.Context, x Task) (Task, error) {
 	if err = requireTaskProject(ctx, tx, x.Project); err != nil {
 		return x, err
 	}
-	if err = scanTask(tx.QueryRow(ctx, `INSERT INTO tasks(lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at,body_doc,project,area) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$12,$13,$14) RETURNING `+taskColumns, x.Lane, x.ParentLane, x.Title, x.Kind, x.State, x.Priority, string(refs), x.ClaimedBy, x.CreatedBy, x.CreatedAt, x.UpdatedAt, x.BodyDoc, x.Project, x.Area), &x); err != nil {
+	if err = scanTask(tx.QueryRow(ctx, `INSERT INTO tasks(lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at,body_doc,project,area,expected) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING `+taskColumns, x.Lane, x.ParentLane, x.Title, x.Kind, x.State, x.Priority, string(refs), x.ClaimedBy, x.CreatedBy, x.CreatedAt, x.UpdatedAt, x.BodyDoc, x.Project, x.Area, x.Expected), &x); err != nil {
 		return x, err
 	}
 	if s.LinearSyncEnabled() && x.Refs.Linear != nil && x.Refs.Linear.Sync {

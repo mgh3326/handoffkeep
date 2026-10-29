@@ -177,7 +177,7 @@ func taskRefs(pr, headSHA, reportPath, jobID string, linear *store.TaskLinear) (
 }
 
 func normalizeTaskArgs(args []string) ([]string, error) {
-	valueFlags := map[string]bool{"--url": true, "--token": true, "--lane": true, "--parent-lane": true, "--state": true, "--title": true, "--kind": true, "--priority": true, "--by": true, "--to": true, "--note": true, "--reason": true, "--question": true, "--limit": true, "--pr": true, "--head-sha": true, "--report-path": true, "--job-id": true, "--no-job": true, "--option": true, "--recommended": true, "--tier": true, "--grade": true, "--brief-key": true, "--label": true, "--linear-report-key": true, "--linear-verify-key": true, "--linear-decision-key": true, "--deploy-sha": true, "--origin-pr": true, "--origin-task": true, "--doc": true, "--project": true, "--area": true}
+	valueFlags := map[string]bool{"--url": true, "--token": true, "--lane": true, "--parent-lane": true, "--state": true, "--title": true, "--kind": true, "--priority": true, "--expected": true, "--by": true, "--to": true, "--note": true, "--reason": true, "--question": true, "--limit": true, "--pr": true, "--head-sha": true, "--report-path": true, "--job-id": true, "--no-job": true, "--option": true, "--recommended": true, "--tier": true, "--grade": true, "--brief-key": true, "--label": true, "--linear-report-key": true, "--linear-verify-key": true, "--linear-decision-key": true, "--deploy-sha": true, "--origin-pr": true, "--origin-task": true, "--doc": true, "--project": true, "--area": true}
 	flags, positional := []string{}, []string{}
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -247,6 +247,7 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 	title := fs.String("title", "", "task title")
 	kind := fs.String("kind", "implement", "task kind")
 	priority := fs.Int("priority", 0, "higher is first")
+	expected := fs.String("expected", "", "expected task duration (for example 4h or 1d; tasks add only)")
 	by := fs.String("by", "", "session label")
 	to := fs.String("to", "", "target state")
 	note := fs.String("note", "", "transition note")
@@ -282,8 +283,11 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 	if err := fs.Parse(parseArgs); err != nil {
 		return err
 	}
-	linearFlagsUsed, docFlagUsed, noJobSet, projectSet, areaSet := false, false, false, false, false
+	linearFlagsUsed, docFlagUsed, noJobSet, projectSet, areaSet, expectedSet := false, false, false, false, false, false
 	fs.Visit(func(item *flag.Flag) {
+		if item.Name == "expected" {
+			expectedSet = true
+		}
 		if item.Name == "doc" {
 			docFlagUsed = true
 		}
@@ -331,6 +335,9 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 	}
 	// A task body is attached only when the task is filed; no other
 	// subcommand writes body_doc, so the flag must not be silently ignored.
+	if expectedSet && (args[0] != "add" || !store.ValidExpected(*expected)) {
+		return errors.New("--expected requires a positive duration and is accepted only by tasks add")
+	}
 	if docFlagUsed && args[0] != "add" {
 		return errors.New("--doc is accepted only by tasks add")
 	}
@@ -377,7 +384,11 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 		if areaSet {
 			areaTag = area
 		}
-		x, err := c.CreateTask(ctx, store.Task{Lane: *lane, ParentLane: *parentLane, Title: *title, Kind: *kind, Priority: *priority, Refs: *refs, BodyDoc: *bodyDoc, Project: project, Area: areaTag})
+		var expectedDuration *string
+		if expectedSet {
+			expectedDuration = expected
+		}
+		x, err := c.CreateTask(ctx, store.Task{Expected: expectedDuration, Lane: *lane, ParentLane: *parentLane, Title: *title, Kind: *kind, Priority: *priority, Refs: *refs, BodyDoc: *bodyDoc, Project: project, Area: areaTag})
 		if err != nil {
 			// invalid_context on create is a validation failure; append the
 			// add requirements rather than leave a bare code to diagnose.

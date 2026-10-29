@@ -24,6 +24,8 @@ jobs:
     if: ${{ contains(fromJSON('["all","test"]'), inputs.suite || 'all') }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      HANDOFFKEEP_TEST_DB_URL: postgres://handoffkeep:handoffkeep@localhost:5432/handoffkeep?sslmode=disable
     services:
       postgres:
         image: postgres:17
@@ -54,6 +56,8 @@ jobs:
         run: go test -v -race -timeout 30m ./...
         env:
           HANDOFFKEEP_TEST_DB_URL: postgres://handoffkeep:handoffkeep@localhost:5432/handoffkeep?sslmode=disable
+      - name: Task expected migration and server startup
+        run: bash scripts/test-task-expected-migration.sh
       - name: Reopen regression mutants
         run: python3 scripts/task-reopen-mutants.py
         env:
