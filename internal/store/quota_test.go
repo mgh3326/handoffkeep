@@ -277,3 +277,67 @@ func TestQuotaDedupePostgres(t *testing.T) {
 		t.Fatalf("dedupe concurrent history=%d %v", count, err)
 	}
 }
+func TestQuotaRetentionPostgres(t *testing.T) {
+	s, pool := searchTestStore(t)
+	ctx := context.Background()
+	const key = "claude:fedcba9876543210"
+	insert := func(measured time.Time, old bool) int64 {
+		var id int64
+		received := `clock_timestamp()`
+		if old {
+			received = `clock_timestamp()-interval '100 days'`
+		}
+		err := pool.QueryRow(ctx, `INSERT INTO quota_observations(account_key,kind,window_key,measured_at,value,received_at) VALUES($1,'auto','',$2,'{}'::jsonb,`+received+`) RETURNING id`, key, measured).Scan(&id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	oldReferenced := insert(time.Now(), true)
+	oldFree := insert(time.Now(), true)
+	freshFree := insert(time.Now(), false)
+	if _, err := pool.Exec(ctx, `INSERT INTO quota_latest(account_key,kind,window_key,observation_id,measured_at) VALUES($1,'auto','',$2,$3)`, key, oldReferenced, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	// No delete outside the retention function: an arbitrary DELETE, every
+	// UPDATE and TRUNCATE all stay blocked.
+	if _, err := pool.Exec(ctx, `DELETE FROM quota_observations WHERE id=$1`, oldFree); err == nil {
+		t.Fatal("retention arbitrary delete allowed")
+	}
+	if _, err := pool.Exec(ctx, `UPDATE quota_observations SET value='{}'`); err == nil {
+		t.Fatal("retention update allowed")
+	}
+	if _, err := pool.Exec(ctx, `TRUNCATE quota_observations`); err == nil {
+		t.Fatal("retention truncate allowed")
+	}
+	n, err := s.PruneQuotaHistory(ctx)
+	if err != nil {
+		t.Fatalf("retention prune: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("retention pruned=%d want=1", n)
+	}
+	for id, want := range map[int64]bool{oldReferenced: true, oldFree: false, freshFree: true} {
+		var exists bool
+		if err := pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM quota_observations WHERE id=$1)`, id).Scan(&exists); err != nil || exists != want {
+			t.Fatalf("retention referenced guard id=%d exists=%v want=%v %v", id, exists, want, err)
+		}
+	}
+	// A second prune deletes nothing new and stays idempotent.
+	if n, err = s.PruneQuotaHistory(ctx); err != nil || n != 0 {
+		t.Fatalf("retention second prune=%d %v", n, err)
+	}
+	// The prune flag must not outlive the function inside a larger
+	// transaction: a later arbitrary DELETE in the same transaction stays blocked.
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SELECT quota_prune_history()`); err != nil {
+		t.Fatalf("retention prune in tx: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM quota_observations WHERE id=$1`, freshFree); err == nil {
+		t.Fatal("retention prune flag leaked into the enclosing transaction")
+	}
+}

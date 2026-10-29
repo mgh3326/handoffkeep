@@ -59,5 +59,16 @@ now need a `HANDOFFKEEP_QUOTA_<CLIENT>` grant. Add those lines when the shared
 clients are enabled, not in the same restart as the deploy, so a binary
 rollback stays possible. A malformed grant line is logged and skipped.
 
+## Retention
+
+`quota_observations` rows age out after 90 days (by `received_at`, the server
+clock). The only delete path is the `quota_prune_history()` SQL function —
+`store.PruneQuotaHistory` wraps it — which sets a transaction-local flag the
+`quota_history_immutable` trigger checks before allowing its own DELETE. The
+prune never deletes a row that `quota_latest` points to, even when old.
+Every other UPDATE, DELETE and TRUNCATE stays blocked. No scheduler or cron
+is registered: cadence needs separate approval, so the function is called
+manually or by a later approved job.
+
 `TestQuotaPostgres` uses `HANDOFFKEEP_TEST_DB_URL` and the CI Postgres service;
 it skips without that variable. Do not start a database locally for these tests.

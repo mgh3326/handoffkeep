@@ -82,8 +82,15 @@ func migrateQuota(ctx context.Context, tx pgx.Tx) error {
 		// value; NULL on rows written before the column existed.
 		`ALTER TABLE quota_latest ADD COLUMN IF NOT EXISTS confirmed_at TIMESTAMPTZ`,
 		`CREATE TABLE IF NOT EXISTS quota_leases (account_key TEXT PRIMARY KEY, owner TEXT NOT NULL, holder TEXT NOT NULL, expires_at TIMESTAMPTZ NOT NULL)`,
-		`CREATE OR REPLACE FUNCTION quota_history_immutable() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'quota observations are append-only'; RETURN NULL; END; $$`,
+		// The trigger still blocks every UPDATE, DELETE and TRUNCATE; a DELETE
+		// passes only while the session flag quota_prune_history sets inside
+		// its own transaction is on.
+		`CREATE OR REPLACE FUNCTION quota_history_immutable() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF TG_OP = 'DELETE' AND current_setting('handoffkeep.quota_prune', true) = 'on' THEN RETURN NULL; END IF; RAISE EXCEPTION 'quota observations are append-only'; RETURN NULL; END; $$`,
 		`DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='quota_history_immutable' AND tgrelid='quota_observations'::regclass) THEN CREATE TRIGGER quota_history_immutable BEFORE UPDATE OR DELETE OR TRUNCATE ON quota_observations FOR EACH STATEMENT EXECUTE FUNCTION quota_history_immutable(); END IF; END $$`,
+		// The only defined delete path: rows whose received_at is 90+ days old
+		// and which no quota_latest row points to. Called manually or by a
+		// later approved job; no scheduler is registered here.
+		`CREATE OR REPLACE FUNCTION quota_prune_history() RETURNS bigint LANGUAGE plpgsql AS $$ DECLARE n bigint; BEGIN PERFORM set_config('handoffkeep.quota_prune', 'on', true); DELETE FROM quota_observations WHERE received_at < clock_timestamp() - interval '90 days' AND id NOT IN (SELECT observation_id FROM quota_latest); GET DIAGNOSTICS n = ROW_COUNT; PERFORM set_config('handoffkeep.quota_prune', 'off', true); RETURN n; END; $$`,
 		// Version 23 records the quota migration retroactively. The CREATEs
 		// above stay ungated IF NOT EXISTS so servers that already ran
 		// migrateQuota only insert the marker row.
@@ -141,6 +148,15 @@ func (s *Store) LeaseQuota(ctx context.Context, key, owner, holder string, ttl i
 		return x, err
 	}
 	return x, tx.Commit(ctx)
+}
+
+// PruneQuotaHistory runs the guarded 90-day retention function. It is the
+// only path allowed to delete quota_observations rows; cadence is a separate
+// operator decision, so nothing here schedules it.
+func (s *Store) PruneQuotaHistory(ctx context.Context) (int64, error) {
+	var n int64
+	err := s.pool.QueryRow(ctx, `SELECT quota_prune_history()`).Scan(&n)
+	return n, err
 }
 func (s *Store) ReleaseQuota(ctx context.Context, key, owner, holder string) error {
 	_, err := s.pool.Exec(ctx, `DELETE FROM quota_leases WHERE account_key=$1 AND owner=$2 AND holder=$3`, key, owner, holder)
