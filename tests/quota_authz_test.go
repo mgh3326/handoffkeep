@@ -17,7 +17,10 @@ const quotaE2EPeerKey = "claude:0123456789abcdef"
 
 // Write paths are scoped to the client's granted account keys; reads stay open.
 func TestQuotaWriteScopePostgres(t *testing.T) {
-	url := testdb.URL(t)
+	// Own schema: the account keys are fixed and identical observations
+	// dedupe, so rows left in a reused database would turn the first publish
+	// into a 200 replay.
+	_, url := testdb.Schema(t, "quota_authz")
 	s, err := store.Open(context.Background(), url)
 	if err != nil {
 		t.Fatal(err)
