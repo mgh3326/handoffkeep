@@ -14,6 +14,43 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
+// Every case fails before the store, so these need no database. The accepted
+// contract bodies are exercised end to end by TestQuotaFreeBucketPostgres.
+func TestQuotaFreeBucketRejections(t *testing.T) {
+	const devin, codex = "devin:0123456789abcdef", "codex:0123456789abcdef"
+	h := Server{Tokens: Tokens{"client": "test-token"}, QuotaAccounts: QuotaAccounts{"client": {devin: true, codex: true}}}.Handler()
+	const holder = `"holder":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"`
+	obs := func(rest string) string {
+		return `{` + holder + `,"observation":{"id":0,"kind":"auto","measured_at":"2026-10-30T00:00:00Z",` + rest + `}}`
+	}
+	for _, tc := range []struct{ name, key, body string }{
+		{"free-only without free_bucket", devin, obs(`"buckets":[]`)},
+		{"missing buckets and free_bucket", devin, obs(`"x":1`)},
+		{"null free_bucket free-only", devin, obs(`"buckets":[],"free_bucket":null`)},
+		{"empty free_bucket", devin, obs(`"buckets":[],"free_bucket":{}`)},
+		{"bad state", devin, obs(`"buckets":[],"free_bucket":{"state":"full"}`)},
+		{"exhausted without resets_at", devin, obs(`"buckets":[],"free_bucket":{"state":"exhausted"}`)},
+		{"exhausted zero resets_at", devin, obs(`"buckets":[],"free_bucket":{"state":"exhausted","resets_at":"0001-01-01T00:00:00Z"}`)},
+		{"exhausted bad resets_at", devin, obs(`"buckets":[],"free_bucket":{"state":"exhausted","resets_at":"tomorrow"}`)},
+		{"available with resets_at", devin, obs(`"buckets":[],"free_bucket":{"state":"available","resets_at":"2026-10-30T01:00:00Z"}`)},
+		{"unknown with resets_at", devin, obs(`"buckets":[],"free_bucket":{"state":"unknown","resets_at":"2026-10-30T01:00:00Z"}`)},
+		{"unknown free_bucket field", devin, obs(`"buckets":[],"free_bucket":{"state":"available","used_pct":1}`)},
+		{"unknown observation field", devin, obs(`"buckets":[],"free_bucket":{"state":"available"},"extra":1`)},
+		{"non-devin account", codex, obs(`"buckets":[],"free_bucket":{"state":"available"}`)},
+		{"manual kind", devin, `{` + holder + `,"observation":{"kind":"manual","window":"7d","measured_at":"2026-10-30T00:00:00Z","expires_at":"2026-10-31T00:00:00Z","buckets":[],"free_bucket":{"state":"available"}}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := httptest.NewRequest("PUT", "/v1/quota/accounts/"+tc.key+"/observation", strings.NewReader(tc.body))
+			r.Header.Set("Authorization", "Bearer test-token")
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, r)
+			if w.Code != 400 {
+				t.Fatalf("%d %s", w.Code, w.Body)
+			}
+		})
+	}
+}
+
 func TestQuotaRequestGuards(t *testing.T) {
 	h := Server{Tokens: Tokens{"client": "test-token"}, QuotaAccounts: QuotaAccounts{"client": {"codex:0123456789abcdef": true}}}.Handler()
 	for _, tc := range []struct {
