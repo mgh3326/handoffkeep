@@ -66,7 +66,7 @@ func TestQuotaPostgres(t *testing.T) {
 	if holder == holderA {
 		other = holderB
 	}
-	x := QuotaObservation{Kind: "auto", MeasuredAt: time.Now().UTC(), Buckets: []QuotaBucket{{Window: "5h", UsedPct: 25, Scope: "account"}}}
+	x := QuotaObservation{Kind: "auto", MeasuredAt: time.Now().UTC().Truncate(time.Microsecond), Buckets: []QuotaBucket{{Window: "5h", UsedPct: 25, Scope: "account"}}}
 	if _, _, err = s.PutQuota(ctx, quotaTestKey, "client", other, x); !errors.Is(err, ErrQuotaLease) {
 		t.Fatalf("nonholder: %v", err)
 	}
@@ -184,7 +184,7 @@ func TestQuotaDedupePostgres(t *testing.T) {
 	if _, err := s.LeaseQuota(ctx, key, "client", holderA, 120); err != nil {
 		t.Fatal(err)
 	}
-	x := QuotaObservation{Kind: "auto", MeasuredAt: time.Now().UTC(), Buckets: []QuotaBucket{{Window: "5h", UsedPct: 30, Scope: "account"}}}
+	x := QuotaObservation{Kind: "auto", MeasuredAt: time.Now().UTC().Truncate(time.Microsecond), Buckets: []QuotaBucket{{Window: "5h", UsedPct: 30, Scope: "account"}}}
 	first, deduped, err := s.PutQuota(ctx, key, "client", holderA, x)
 	if err != nil || deduped {
 		t.Fatalf("first publish deduped=%v %v", deduped, err)
