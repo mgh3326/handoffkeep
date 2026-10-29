@@ -21,7 +21,8 @@ MUTANTS = [
         '\t// The lease row lock above serializes publishers for this account, so a\n'
         '\t// concurrent identical publish observes the committed row here instead of\n'
         '\t// double-appending. The comparison ignores measured_at: republishing the\n'
-        '\t// same value only advances freshness on the latest pointer.\n'
+        '\t// same value only advances freshness on the latest pointer. The pointer\'s\n'
+        '\t// own measured_at is the floor: GREATEST ignores a NULL (legacy) confirmed_at.\n'
         '\tvar dupID int64\n'
         '\tvar dupValue []byte\n'
         '\terr = tx.QueryRow(ctx, `SELECT o.id,o.value FROM quota_latest l JOIN quota_observations o ON o.id=l.observation_id WHERE l.account_key=$1 AND l.kind=$2 AND l.window_key=$3 AND (o.value - \'measured_at\') = ($4::jsonb - \'measured_at\')`, key, x.Kind, x.Window, data).Scan(&dupID, &dupValue)\n'
@@ -31,7 +32,7 @@ MUTANTS = [
         '\t\t\treturn x, false, err\n'
         '\t\t}\n'
         '\t\texisting.ID = dupID\n'
-        '\t\tif err = tx.QueryRow(ctx, `UPDATE quota_latest SET confirmed_at=GREATEST(confirmed_at,$4) WHERE account_key=$1 AND kind=$2 AND window_key=$3 RETURNING confirmed_at`, key, x.Kind, x.Window, x.MeasuredAt).Scan(&existing.ConfirmedAt); err != nil {\n'
+        '\t\tif err = tx.QueryRow(ctx, `UPDATE quota_latest SET confirmed_at=GREATEST(confirmed_at,measured_at,$4) WHERE account_key=$1 AND kind=$2 AND window_key=$3 RETURNING confirmed_at`, key, x.Kind, x.Window, x.MeasuredAt).Scan(&existing.ConfirmedAt); err != nil {\n'
         '\t\t\treturn x, false, err\n'
         '\t\t}\n'
         '\t\treturn existing, true, tx.Commit(ctx)\n'
@@ -53,6 +54,21 @@ MUTANTS = [
         "(o.value - 'measured_at') = ($4::jsonb - 'measured_at')",
         "o.value = $4::jsonb",
         "TestQuotaDedupePostgres", "dedupe freshness",
+    ),
+    (
+        "confirmed-at-legacy-floor-removed", "store/quota.go", True,
+        "GREATEST(confirmed_at,measured_at,$4)",
+        "GREATEST(confirmed_at,$4)",
+        "TestQuotaDedupePostgres", "dedupe legacy floor",
+    ),
+    (
+        "grant-generic-guard-first", "api/api.go", False,
+        '\t\tk, v, ok := strings.Cut(line, "=")\n',
+        '\t\tk, v, ok := strings.Cut(line, "=")\n'
+        '\t\tif !ok || v == "" {\n'
+        '\t\t\treturn nil, nil, errors.New("invalid HANDOFFKEEP_AUTH_FILE")\n'
+        '\t\t}\n',
+        "TestQuotaGrantFile", "quota grant refused startup",
     ),
     (
         "grant-unknown-client-refuses", "api/api.go", False,

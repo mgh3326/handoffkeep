@@ -215,6 +215,14 @@ func TestQuotaDedupePostgres(t *testing.T) {
 	if got, deduped, err := s.PutQuota(ctx, key, "client", holderA, older); err != nil || !deduped || !got.ConfirmedAt.Equal(newer.MeasuredAt) {
 		t.Fatalf("dedupe freshness older: confirmed_at=%v deduped=%v %v", got.ConfirmedAt, deduped, err)
 	}
+	// A legacy pointer (confirmed_at NULL) never confirms below its own
+	// measured_at, even when the identical republish is older.
+	if _, err = pool.Exec(ctx, `UPDATE quota_latest SET confirmed_at=NULL WHERE account_key=$1`, key); err != nil {
+		t.Fatal(err)
+	}
+	if got, deduped, err := s.PutQuota(ctx, key, "client", holderA, older); err != nil || !deduped || got.ConfirmedAt == nil || !got.ConfirmedAt.Equal(x.MeasuredAt) {
+		t.Fatalf("dedupe legacy floor: confirmed_at=%v want=%v deduped=%v %v", got.ConfirmedAt, x.MeasuredAt, deduped, err)
+	}
 	var count int
 	if err = pool.QueryRow(ctx, `SELECT count(*) FROM quota_observations`).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("dedupe history=%d %v", count, err)
