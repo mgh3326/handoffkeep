@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -339,5 +340,146 @@ func TestQuotaRetentionPostgres(t *testing.T) {
 	}
 	if _, err := tx.Exec(ctx, `DELETE FROM quota_observations WHERE id=$1`, freshFree); err == nil {
 		t.Fatal("retention prune flag leaked into the enclosing transaction")
+	}
+}
+func TestQuotaPresenceValidation(t *testing.T) {
+	now := time.Now()
+	ok := QuotaPresence{HostID: "host-0123456789abcdef", AccountKey: quotaTestKey, LastSeen: now}
+	if !ValidQuotaPresence(ok, now) {
+		t.Fatal("valid presence refused")
+	}
+	long := ok
+	long.HostID = strings.Repeat("a", 64)
+	if !ValidQuotaPresence(long, now) {
+		t.Fatal("64-char host refused")
+	}
+	for name, mutate := range map[string]func(*QuotaPresence){
+		"empty host":     func(x *QuotaPresence) { x.HostID = "" },
+		"long host":      func(x *QuotaPresence) { x.HostID = strings.Repeat("a", 65) },
+		"host slash":     func(x *QuotaPresence) { x.HostID = "host/x" },
+		"host space":     func(x *QuotaPresence) { x.HostID = "host x" },
+		"leading dot":    func(x *QuotaPresence) { x.HostID = ".host" },
+		"raw identity":   func(x *QuotaPresence) { x.AccountKey = "codex:raw-account-identity" },
+		"empty key":      func(x *QuotaPresence) { x.AccountKey = "" },
+		"zero last_seen": func(x *QuotaPresence) { x.LastSeen = time.Time{} },
+		"future skew":    func(x *QuotaPresence) { x.LastSeen = now.Add(2 * time.Minute) },
+	} {
+		x := ok
+		mutate(&x)
+		if ValidQuotaPresence(x, now) {
+			t.Fatalf("%s accepted", name)
+		}
+	}
+}
+func TestQuotaPresencePostgres(t *testing.T) {
+	s, pool := searchTestStore(t)
+	ctx := context.Background()
+	if err := s.migrate(ctx); err != nil {
+		t.Fatal("idempotent migration", err)
+	}
+	empty, truncated, err := s.QuotaPresence(ctx, "", "", 10)
+	if err != nil || empty == nil || len(empty) != 0 || truncated {
+		t.Fatalf("empty presence=%v truncated=%v %v", empty, truncated, err)
+	}
+	base := time.Now().UTC().Add(-10 * time.Minute).Truncate(time.Microsecond)
+	a := QuotaPresence{HostID: "host-a", AccountKey: quotaTestKey, LastSeen: base}
+	got, err := s.PutQuotaPresence(ctx, a)
+	if err != nil || !got.LastSeen.Equal(base) {
+		t.Fatalf("first presence %+v %v", got, err)
+	}
+	// An older last_seen never moves the row backward; the stored value returns.
+	older := a
+	older.LastSeen = base.Add(-time.Minute)
+	if got, err = s.PutQuotaPresence(ctx, older); err != nil || !got.LastSeen.Equal(base) {
+		t.Fatalf("older presence %+v %v", got, err)
+	}
+	newer := a
+	newer.LastSeen = base.Add(time.Minute)
+	if got, err = s.PutQuotaPresence(ctx, newer); err != nil || !got.LastSeen.Equal(newer.LastSeen) {
+		t.Fatalf("newer presence %+v %v", got, err)
+	}
+	// Within the one-minute tolerance a fast host is clamped to the database
+	// clock, so the stored row never sits in the future.
+	fast := QuotaPresence{HostID: "host-b", AccountKey: quotaTestKey, LastSeen: time.Now().Add(30 * time.Second)}
+	if got, err = s.PutQuotaPresence(ctx, fast); err != nil || !got.LastSeen.Before(fast.LastSeen) || got.LastSeen.After(time.Now().Add(time.Second)) {
+		t.Fatalf("future clamp %+v %v", got, err)
+	}
+	if _, err = s.PutQuotaPresence(ctx, QuotaPresence{HostID: "host-b", AccountKey: quotaTestKey, LastSeen: time.Now().Add(5 * time.Minute)}); err == nil {
+		t.Fatal("future presence beyond skew accepted")
+	}
+	if _, err = s.PutQuotaPresence(ctx, QuotaPresence{HostID: "host/b", AccountKey: quotaTestKey, LastSeen: base}); err == nil {
+		t.Fatal("invalid host stored")
+	}
+	const otherKey = "claude:fedcba9876543210"
+	if _, err = s.PutQuotaPresence(ctx, QuotaPresence{HostID: "host-a", AccountKey: otherKey, LastSeen: base}); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM quota_presence`).Scan(&count); err != nil || count != 3 {
+		t.Fatalf("presence rows=%d %v", count, err)
+	}
+	all, truncated, err := s.QuotaPresence(ctx, "", "", 10)
+	if err != nil || len(all) != 3 || truncated || all[0].HostID != "host-b" {
+		t.Fatalf("all presence=%+v truncated=%v %v", all, truncated, err)
+	}
+	byHost, _, err := s.QuotaPresence(ctx, "host-a", "", 10)
+	if err != nil || len(byHost) != 2 || byHost[0].AccountKey != quotaTestKey {
+		t.Fatalf("host filter=%+v %v", byHost, err)
+	}
+	byKey, _, err := s.QuotaPresence(ctx, "", otherKey, 10)
+	if err != nil || len(byKey) != 1 || byKey[0].HostID != "host-a" {
+		t.Fatalf("account filter=%+v %v", byKey, err)
+	}
+	both, _, err := s.QuotaPresence(ctx, "host-b", otherKey, 10)
+	if err != nil || len(both) != 0 {
+		t.Fatalf("combined filter=%+v %v", both, err)
+	}
+	capped, truncated, err := s.QuotaPresence(ctx, "", "", 2)
+	if err != nil || len(capped) != 2 || !truncated {
+		t.Fatalf("limit presence=%+v truncated=%v %v", capped, truncated, err)
+	}
+	// Concurrent upserts for one row keep the newest value, whatever the order.
+	var wg sync.WaitGroup
+	for i := 1; i <= 8; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			x := a
+			x.LastSeen = newer.LastSeen.Add(time.Duration(i) * time.Second)
+			if _, e := s.PutQuotaPresence(ctx, x); e != nil {
+				t.Error(e)
+			}
+		}(i)
+	}
+	wg.Wait()
+	byKey, _, err = s.QuotaPresence(ctx, "host-a", quotaTestKey, 10)
+	if err != nil || len(byKey) != 1 || !byKey[0].LastSeen.Equal(newer.LastSeen.Add(8*time.Second)) {
+		t.Fatalf("concurrent newest=%+v %v", byKey, err)
+	}
+	var v24 bool
+	if err = pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_version WHERE version=24)`).Scan(&v24); err != nil || !v24 {
+		t.Fatalf("presence schema_version row missing: %v", err)
+	}
+	// Replay a v23 database: no presence table, no v24 row. Restart restores
+	// both, and a second restart over existing rows keeps them.
+	for _, q := range []string{`DROP TABLE quota_presence`, `DELETE FROM schema_version WHERE version=24`} {
+		if _, err = pool.Exec(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err = s.migrate(ctx); err != nil {
+		t.Fatal("migrate on v23 state", err)
+	}
+	if _, err = s.PutQuotaPresence(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.migrate(ctx); err != nil {
+		t.Fatal("re-migrate with presence rows", err)
+	}
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM quota_presence`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("presence rows after re-migrate=%d %v", count, err)
+	}
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM schema_version WHERE version=24`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("v24 rows after re-migrate=%d %v", count, err)
 	}
 }

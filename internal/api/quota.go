@@ -133,3 +133,52 @@ func (s Server) quotaRelease(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(204)
 }
+
+// quotaPresenceLimit caps one presence listing; the response says when rows
+// were left out.
+const quotaPresenceLimit = 1000
+
+func (s Server) quotaPresencePut(w http.ResponseWriter, r *http.Request) {
+	client, ok := s.auth(w, r)
+	if !ok {
+		return
+	}
+	var input store.QuotaPresence
+	if !quotaDecode(w, r, &input) {
+		return
+	}
+	if !store.ValidQuotaPresence(input, time.Now()) {
+		jsonOut(w, 400, map[string]string{"error": "invalid_quota_presence"})
+		return
+	}
+	// The account key arrives in the body, so the observation PUT's grant
+	// check runs here, after validation and before the store.
+	if !s.quotaScope(w, client, input.AccountKey) {
+		return
+	}
+	x, err := s.Service.Store.PutQuotaPresence(r.Context(), input)
+	if err != nil {
+		quotaError(w, err)
+		return
+	}
+	jsonOut(w, 200, x)
+}
+
+// quotaPresenceList is open to every authenticated client, like latest.
+func (s Server) quotaPresenceList(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.auth(w, r); !ok {
+		return
+	}
+	q := r.URL.Query()
+	host, key := q.Get("host_id"), q.Get("account_key")
+	if host != "" && !store.ValidQuotaHost(host) || key != "" && !store.ValidQuotaKey(key) {
+		jsonOut(w, 400, map[string]string{"error": "invalid_quota_presence_filter"})
+		return
+	}
+	records, truncated, err := s.Service.Store.QuotaPresence(r.Context(), host, key, quotaPresenceLimit)
+	if err != nil {
+		quotaError(w, err)
+		return
+	}
+	jsonOut(w, 200, map[string]any{"records": records, "truncated": truncated})
+}

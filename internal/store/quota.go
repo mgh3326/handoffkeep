@@ -16,8 +16,13 @@ var quotaKeyRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}:[0-9a-f]{16}$`)
 var quotaHolderRE = regexp.MustCompile(`^[0-9a-f]{32}$`)
 var quotaWindowRE = regexp.MustCompile(`^(credit|[1-9][0-9]{0,5}[smhdw])$`)
 
+// Host ids are opaque placement labels (pacelever sends "host-<hash>" or an
+// operator-set id); the pattern matches runtug's machine-id rule capped at 64.
+var quotaHostRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+
 func ValidQuotaKey(key string) bool       { return quotaKeyRE.MatchString(key) }
 func ValidQuotaHolder(holder string) bool { return quotaHolderRE.MatchString(holder) }
+func ValidQuotaHost(host string) bool     { return quotaHostRE.MatchString(host) }
 
 // Only measurement fields cross this API; no credential or host identity fields.
 type QuotaBucket struct {
@@ -42,6 +47,14 @@ type QuotaObservation struct {
 type QuotaLatest struct {
 	Observation *QuotaObservation  `json:"observation"`
 	Manual      []QuotaObservation `json:"manual"`
+}
+
+// QuotaPresence records which host last measured an account. It is kept apart
+// from observations, which carry no host identity.
+type QuotaPresence struct {
+	HostID     string    `json:"host_id"`
+	AccountKey string    `json:"account_key"`
+	LastSeen   time.Time `json:"last_seen"`
 }
 type QuotaLease struct {
 	Holder    string    `json:"holder"`
@@ -74,6 +87,12 @@ func ValidQuotaObservation(x QuotaObservation, now time.Time) bool {
 	}
 	return true
 }
+
+// ValidQuotaPresence uses the observation skew rule: last_seen may lead the
+// server clock by at most one minute.
+func ValidQuotaPresence(x QuotaPresence, now time.Time) bool {
+	return ValidQuotaHost(x.HostID) && ValidQuotaKey(x.AccountKey) && !x.LastSeen.IsZero() && !x.LastSeen.After(now.Add(time.Minute))
+}
 func migrateQuota(ctx context.Context, tx pgx.Tx) error {
 	for _, q := range []string{
 		`CREATE TABLE IF NOT EXISTS quota_observations (id BIGSERIAL PRIMARY KEY, account_key TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('auto','manual')), window_key TEXT NOT NULL, measured_at TIMESTAMPTZ NOT NULL, value JSONB NOT NULL, received_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp())`,
@@ -95,6 +114,12 @@ func migrateQuota(ctx context.Context, tx pgx.Tx) error {
 		// above stay ungated IF NOT EXISTS so servers that already ran
 		// migrateQuota only insert the marker row.
 		`INSERT INTO schema_version(version) VALUES (23) ON CONFLICT DO NOTHING`,
+		// Version 24 adds host presence: one row per (host, account), newest
+		// last_seen wins. Additive and IF NOT EXISTS, so a restart or an
+		// older binary sharing the database is unaffected.
+		`CREATE TABLE IF NOT EXISTS quota_presence (host_id TEXT NOT NULL CHECK(length(host_id) BETWEEN 1 AND 64), account_key TEXT NOT NULL CHECK(length(account_key) BETWEEN 1 AND 64), last_seen TIMESTAMPTZ NOT NULL, PRIMARY KEY(host_id,account_key))`,
+		`CREATE INDEX IF NOT EXISTS quota_presence_account ON quota_presence(account_key)`,
+		`INSERT INTO schema_version(version) VALUES (24) ON CONFLICT DO NOTHING`,
 	} {
 		if _, err := tx.Exec(ctx, q); err != nil {
 			return err
@@ -223,4 +248,44 @@ func (s *Store) PutQuota(ctx context.Context, key, owner, holder string, x Quota
 		return x, false, err
 	}
 	return x, false, tx.Commit(ctx)
+}
+
+// PutQuotaPresence upserts one (host, account) row and returns the stored
+// value. last_seen is clamped to the database clock so a slightly fast host
+// cannot pin a future value; an older last_seen leaves the row unchanged.
+func (s *Store) PutQuotaPresence(ctx context.Context, x QuotaPresence) (QuotaPresence, error) {
+	if !ValidQuotaPresence(x, time.Now()) {
+		return x, errors.New("invalid quota presence")
+	}
+	err := s.pool.QueryRow(ctx, `INSERT INTO quota_presence(host_id,account_key,last_seen) VALUES($1,$2,LEAST($3::timestamptz,clock_timestamp())) ON CONFLICT(host_id,account_key) DO UPDATE SET last_seen=EXCLUDED.last_seen WHERE quota_presence.last_seen<EXCLUDED.last_seen RETURNING last_seen`, x.HostID, x.AccountKey, x.LastSeen).Scan(&x.LastSeen)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// The stored row is newer; rows are never deleted, so it still exists.
+		err = s.pool.QueryRow(ctx, `SELECT last_seen FROM quota_presence WHERE host_id=$1 AND account_key=$2`, x.HostID, x.AccountKey).Scan(&x.LastSeen)
+	}
+	return x, err
+}
+
+// QuotaPresence lists presence rows, newest first, optionally filtered by host
+// and account. It returns at most limit rows and reports whether more exist.
+func (s *Store) QuotaPresence(ctx context.Context, host, key string, limit int) ([]QuotaPresence, bool, error) {
+	out := []QuotaPresence{}
+	rows, err := s.pool.Query(ctx, `SELECT host_id,account_key,last_seen FROM quota_presence WHERE ($1='' OR host_id=$1) AND ($2='' OR account_key=$2) ORDER BY last_seen DESC,host_id,account_key LIMIT $3`, host, key, limit+1)
+	if err != nil {
+		return out, false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var x QuotaPresence
+		if err = rows.Scan(&x.HostID, &x.AccountKey, &x.LastSeen); err != nil {
+			return out, false, err
+		}
+		out = append(out, x)
+	}
+	if err = rows.Err(); err != nil {
+		return out, false, err
+	}
+	if len(out) > limit {
+		return out[:limit], true, nil
+	}
+	return out, false, nil
 }
