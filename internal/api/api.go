@@ -583,6 +583,8 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("PUT /v1/quota/accounts/{key}/observation", s.quotaPut)
 	m.HandleFunc("POST /v1/quota/accounts/{key}/lease", s.quotaLease)
 	m.HandleFunc("DELETE /v1/quota/accounts/{key}/lease", s.quotaRelease)
+	m.HandleFunc("GET /v1/quota/presence", s.quotaPresenceList)
+	m.HandleFunc("PUT /v1/quota/presence", s.quotaPresencePut)
 	m.HandleFunc("GET /v1/bench/scores", s.benchScoresList)
 	m.HandleFunc("PUT /v1/bench/scores", s.benchScoresPut)
 	m.HandleFunc("GET /v1/bench/reps", s.benchRepsList)

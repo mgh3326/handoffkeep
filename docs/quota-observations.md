@@ -59,6 +59,54 @@ now need a `HANDOFFKEEP_QUOTA_<CLIENT>` grant. Add those lines when the shared
 clients are enabled, not in the same restart as the deploy, so a binary
 rollback stays possible. A malformed grant line is logged and skipped.
 
+## Host presence
+
+Presence records which host last measured an account, so placement (runtug)
+can prefer a host that already holds it. It is a separate table from the
+observations, which still carry no host identity.
+
+- `PUT /v1/quota/presence` accepts exactly
+  `{"host_id":"host-<stable-id>","account_key":"<pool>:<fingerprint>","last_seen":"<RFC3339>"}`
+  (pacelever publishes it after a successful shared measurement, best-effort).
+  `host_id` is an opaque label of 1–64 characters `[A-Za-z0-9._-]` starting
+  with a letter or digit — never a raw hostname; `account_key` uses the
+  observation key format. Unknown fields, a second JSON value or a body over
+  32 KiB return 400 `invalid_quota_request`; a bad field, a missing
+  `last_seen`, one more than a minute ahead of the server clock or one older
+  than the 30-day retention returns 400 `invalid_quota_presence`. The write
+  uses the observation PUT's grant: an `account_key` not listed in the
+  client's `HANDOFFKEEP_QUOTA_<CLIENT>` lines returns 403
+  `quota_account_forbidden`. No lease is needed.
+- One row is kept per `(host_id, account_key)`; the newest `last_seen` wins and
+  an older one leaves the row unchanged. A `last_seen` inside the one-minute
+  tolerance is clamped to the database clock, so no row sits in the future.
+  The response is 200 with the stored record, which may be newer than the
+  request.
+- Presence is bounded per account: at most 64 hosts, each kept for 30 days
+  after its `last_seen`. Every write first prunes that account's rows past
+  retention. A host new to an account that already has 64 rows gets 409
+  `quota_presence_full`; hosts already present keep updating, so invented
+  host ids cannot evict them.
+- `host_id` is not bound to the client. A granted client is trusted for the
+  whole account, as it already is for that account's observations. It may
+  write any host's row, and the host's own next publish moves it forward
+  again (a spoofed `last_seen` can be at most the server clock).
+- `GET /v1/quota/presence` returns `{"records":[...],"truncated":false}`,
+  newest `last_seen` first. `records` is always a list (`[]` when empty),
+  never null. Optional `?host_id=` and `?account_key=` filters must be valid
+  values (else 400 `invalid_quota_presence_filter`) and combine with AND. One
+  response holds at most 1000 records; `truncated` is true when more exist.
+  Rows past retention are never listed, even before a write prunes them, so
+  one account contributes at most 64 records and an `account_key` filter is
+  always complete. Reads are open to every authenticated client, like
+  `latest`. Readers apply their own freshness TTL on top.
+
+The startup migration adds `quota_presence` and records `schema_version` 24
+with `IF NOT EXISTS` and `ON CONFLICT DO NOTHING`, so a restart is a no-op
+and an older binary on the same database simply ignores the table. Presence
+writes need the same grant lines as observation writes; no new auth-file
+entries are required.
+
 ## Retention
 
 `quota_observations` rows age out after 90 days (by `received_at`, the server
@@ -70,5 +118,6 @@ Every other UPDATE, DELETE and TRUNCATE stays blocked. No scheduler or cron
 is registered: cadence needs separate approval, so the function is called
 manually or by a later approved job.
 
-`TestQuotaPostgres` uses `HANDOFFKEEP_TEST_DB_URL` and the CI Postgres service;
-it skips without that variable. Do not start a database locally for these tests.
+`TestQuotaPostgres`, `TestQuotaPresencePostgres` and
+`TestQuotaPresenceAPIPostgres` use `HANDOFFKEEP_TEST_DB_URL` and the CI
+Postgres service; they skip without that variable. Do not start a database locally for these tests.
