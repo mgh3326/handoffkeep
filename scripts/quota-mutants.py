@@ -42,6 +42,13 @@ MUTANTS = [
         "TestQuotaDedupePostgres", "dedupe",
     ),
     (
+        "confirmed-at-client-supplied", "store/quota.go", True,
+        "\t// confirmed_at is server-owned: never store a client-supplied value.\n"
+        "\tx.ConfirmedAt = nil\n",
+        "",
+        "TestQuotaDedupePostgres", "confirmed_at",
+    ),
+    (
         "dedupe-includes-measured-at", "store/quota.go", True,
         "(o.value - 'measured_at') = ($4::jsonb - 'measured_at')",
         "o.value = $4::jsonb",
@@ -63,8 +70,8 @@ MUTANTS = [
     ),
     (
         "schema-version-not-idempotent", "store/quota.go", True,
-        '`INSERT INTO schema_version(version) VALUES (22) ON CONFLICT DO NOTHING`',
-        '`INSERT INTO schema_version(version) VALUES (22)`',
+        '`INSERT INTO schema_version(version) VALUES (23) ON CONFLICT DO NOTHING`',
+        '`INSERT INTO schema_version(version) VALUES (23)`',
         "TestQuotaPostgres", "idempotent migration",
     ),
     (

@@ -84,10 +84,10 @@ func migrateQuota(ctx context.Context, tx pgx.Tx) error {
 		`CREATE TABLE IF NOT EXISTS quota_leases (account_key TEXT PRIMARY KEY, owner TEXT NOT NULL, holder TEXT NOT NULL, expires_at TIMESTAMPTZ NOT NULL)`,
 		`CREATE OR REPLACE FUNCTION quota_history_immutable() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'quota observations are append-only'; RETURN NULL; END; $$`,
 		`DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='quota_history_immutable' AND tgrelid='quota_observations'::regclass) THEN CREATE TRIGGER quota_history_immutable BEFORE UPDATE OR DELETE OR TRUNCATE ON quota_observations FOR EACH STATEMENT EXECUTE FUNCTION quota_history_immutable(); END IF; END $$`,
-		// Version 22 records the quota migration retroactively. The CREATEs
+		// Version 23 records the quota migration retroactively. The CREATEs
 		// above stay ungated IF NOT EXISTS so servers that already ran
 		// migrateQuota only insert the marker row.
-		`INSERT INTO schema_version(version) VALUES (22) ON CONFLICT DO NOTHING`,
+		`INSERT INTO schema_version(version) VALUES (23) ON CONFLICT DO NOTHING`,
 	} {
 		if _, err := tx.Exec(ctx, q); err != nil {
 			return err
@@ -106,13 +106,15 @@ func (s *Store) LatestQuota(ctx context.Context, key string) (QuotaLatest, error
 		var x QuotaObservation
 		var data []byte
 		var id int64
-		if err = rows.Scan(&id, &data, &x.ConfirmedAt); err != nil {
+		var confirmedAt *time.Time
+		if err = rows.Scan(&id, &data, &confirmedAt); err != nil {
 			return out, err
 		}
 		if err = json.Unmarshal(data, &x); err != nil {
 			return out, err
 		}
 		x.ID = id
+		x.ConfirmedAt = confirmedAt
 		if x.Kind == "auto" {
 			out.Observation = &x
 		} else {
@@ -168,6 +170,8 @@ func (s *Store) PutQuota(ctx context.Context, key, owner, holder string, x Quota
 		return x, false, err
 	}
 	x.ID = 0
+	// confirmed_at is server-owned: never store a client-supplied value.
+	x.ConfirmedAt = nil
 	data, err := json.Marshal(x)
 	if err != nil {
 		return x, false, err
