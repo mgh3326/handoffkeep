@@ -6,14 +6,23 @@ import (
 )
 
 func TestExpectedDurationValidation(t *testing.T) {
-	for _, v := range []string{"4h", "1d", "30m", "2h30m"} {
+	for _, v := range []string{"4h", "1d", "1m", "90d", "30m", "2h30m"} {
 		if !ValidExpected(v) {
 			t.Errorf("rejected %q", v)
 		}
 	}
-	for _, v := range []string{"", "0d", "-1h", "1.5d", "999999999999999999d", "garbage"} {
+	for _, v := range []string{"", "0d", "59s", "91d", "2160h1m", "-1h", "1.5d", "999999999999999999d", "garbage"} {
 		if ValidExpected(v) {
 			t.Errorf("accepted %q", v)
+		}
+	}
+}
+
+func TestExpectedDurationNormalization(t *testing.T) {
+	for _, tc := range []struct{ input, want string }{{"1d", "24h0m0s"}, {"60m", "1h0m0s"}, {"90d", "2160h0m0s"}} {
+		got, ok := normalizeExpected(tc.input)
+		if !ok || got != tc.want {
+			t.Errorf("normalize(%q)=%q,%t want %q", tc.input, got, ok, tc.want)
 		}
 	}
 }
@@ -42,7 +51,7 @@ func TestTaskExpectedMigrationAndRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, found, err := s.GetTask(ctx, created.ID)
-	if err != nil || !found || got.Expected == nil || *got.Expected != value {
+	if err != nil || !found || got.Expected == nil || *got.Expected != "24h0m0s" {
 		t.Fatalf("got=%+v found=%v err=%v", got, found, err)
 	}
 	if err := s.migrate(ctx); err != nil {

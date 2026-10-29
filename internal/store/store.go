@@ -1052,10 +1052,20 @@ func (s *Store) migrate(ctx context.Context) error {
 		return err
 	}
 	if !v22Applied {
+		var priorLockTimeout string
+		if err := tx.QueryRow(ctx, `SELECT current_setting('lock_timeout')`).Scan(&priorLockTimeout); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `SET LOCAL lock_timeout = '3s'`); err != nil {
+			return err
+		}
 		for _, q := range []string{`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS expected TEXT`, `INSERT INTO schema_version(version) VALUES (22)`} {
 			if _, err := tx.Exec(ctx, q); err != nil {
 				return err
 			}
+		}
+		if _, err := tx.Exec(ctx, `SELECT set_config('lock_timeout', $1, true)`, priorLockTimeout); err != nil {
+			return err
 		}
 	}
 
@@ -2078,28 +2088,46 @@ func requireTaskProject(ctx context.Context, q taskProjectQuerier, project *stri
 	return nil
 }
 
-// ValidExpected accepts a positive Go duration or a whole number of days.
-func ValidExpected(value string) bool {
+// normalizeExpected accepts a Go duration or whole days in the range 1m..90d.
+func normalizeExpected(value string) (string, bool) {
+	var d time.Duration
 	if strings.HasSuffix(value, "d") {
-		value = strings.TrimSuffix(value, "d")
-		if value == "" {
-			return false
+		day := strings.TrimSuffix(value, "d")
+		if day == "" {
+			return "", false
 		}
-		for _, c := range value {
+		for _, c := range day {
 			if c < '0' || c > '9' {
-				return false
+				return "", false
 			}
 		}
-		n, err := strconv.ParseUint(value, 10, 31)
-		return err == nil && n > 0 && n <= uint64((1<<63-1)/int64(24*time.Hour))
+		n, err := strconv.ParseUint(day, 10, 32)
+		if err != nil || n > 90 {
+			return "", false
+		}
+		d = time.Duration(n) * 24 * time.Hour
+	} else {
+		var err error
+		d, err = time.ParseDuration(value)
+		if err != nil {
+			return "", false
+		}
 	}
-	d, err := time.ParseDuration(value)
-	return err == nil && d > 0
+	if d < time.Minute || d > 90*24*time.Hour {
+		return "", false
+	}
+	return d.String(), true
 }
 
+func ValidExpected(value string) bool { _, ok := normalizeExpected(value); return ok }
+
 func (s *Store) CreateTask(ctx context.Context, x Task) (Task, error) {
-	if x.Expected != nil && !ValidExpected(*x.Expected) {
-		return x, errors.New("invalid task: expected must be a positive duration")
+	if x.Expected != nil {
+		normalized, ok := normalizeExpected(*x.Expected)
+		if !ok {
+			return x, errors.New("invalid task: expected must be between 1m and 90d")
+		}
+		x.Expected = &normalized
 	}
 	if x.BodyDoc != "" && !ValidBodyDoc(x.BodyDoc) {
 		return x, errors.New("invalid task: body_doc must be a document key or key#section")
@@ -3349,7 +3377,7 @@ func (s *Store) ListOpenTaskDecisions(ctx context.Context, limit int) ([]TaskDec
 	if limit > 1000 {
 		limit = 1000
 	}
-	rows, err := s.pool.Query(ctx, `SELECT t.id,t.lane,t.parent_lane,t.title,t.kind,t.state,t.priority,t.refs,t.claimed_by,t.created_by,t.created_at,t.updated_at,
+	rows, err := s.pool.Query(ctx, `SELECT `+prefixedTaskColumns("t")+`,
 		COALESCE((SELECT note FROM task_events WHERE task_id=t.id AND kind='transition' AND "to"='needs_decision' ORDER BY at DESC,id DESC LIMIT 1),'')
 		FROM tasks t WHERE t.state='needs_decision' AND NOT (t.refs ? 'disposition') AND COALESCE(t.refs->'decision_request'->>'status','')<>'open' ORDER BY t.updated_at DESC,t.id DESC LIMIT $1`, limit)
 	if err != nil {
@@ -3359,11 +3387,7 @@ func (s *Store) ListOpenTaskDecisions(ctx context.Context, limit int) ([]TaskDec
 	out := []TaskDecision{}
 	for rows.Next() {
 		var x TaskDecision
-		var refs []byte
-		if err := rows.Scan(&x.Task.ID, &x.Task.Lane, &x.Task.ParentLane, &x.Task.Title, &x.Task.Kind, &x.Task.State, &x.Task.Priority, &refs, &x.Task.ClaimedBy, &x.Task.CreatedBy, &x.Task.CreatedAt, &x.Task.UpdatedAt, &x.Question); err != nil {
-			return nil, err
-		}
-		if err := json.Unmarshal(refs, &x.Task.Refs); err != nil {
+		if err := scanTask(rows, &x.Task, &x.Question); err != nil {
 			return nil, err
 		}
 		out = append(out, x)

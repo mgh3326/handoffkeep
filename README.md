@@ -12,7 +12,7 @@ complete and uses a separate Access assertion from the API bearer token. See
 [docs/ui.md](docs/ui.md) for configuration, security boundaries, hub behavior,
 and the SSE contract.
 
-Tasks may specify an optional expected duration at creation, for example `tasks add --expected 4h` or `--expected 1d`. The task API returns `expected` as a string, or `null` when unset.
+Tasks may specify an optional expected duration at creation, for example `tasks add --expected 4h` or `--expected 1d`. Durations must be between 1 minute and 90 days; the server stores a normalized Go duration. The task API returns `expected` as a string, or `null` when unset.
 
 ## Fleet metrics
 
