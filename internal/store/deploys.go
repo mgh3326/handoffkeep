@@ -59,12 +59,13 @@ func (s *Store) listDocumentsByPrefix(ctx context.Context, prefix, before string
 	return out, rows.Err()
 }
 
-// documentSummaryHeadBytes bounds the body bytes a listing query reads: enough
-// for a front-matter block plus the first heading, never the whole body.
-const documentSummaryHeadBytes = 8 * 1024
+// documentSummaryHeadChars bounds the leading characters a listing read
+// carries for title extraction. Postgres counts characters, so the byte size
+// stays bounded at 4x this for UTF-8 — never the whole body.
+const documentSummaryHeadChars = 8 * 1024
 
 // DocumentSummary is one listing row for the console's document browser. Head
-// carries only the leading body bytes (title extraction); Body is never
+// carries only the leading body characters (title extraction); Body is never
 // listed, so a prefix scan cannot pull whole reports into memory.
 type DocumentSummary struct {
 	Key       string    `json:"key"`
@@ -100,7 +101,7 @@ func (s *Store) ListDocumentSummariesByPrefix(ctx context.Context, prefix, befor
 	if limit > 1000 {
 		limit = 1000
 	}
-	rows, err := s.pool.Query(ctx, `SELECT key,kind,session,octet_length(body),substr(body,1,$4),updated_at FROM documents WHERE ($1='' OR strpos(key,$1)=1) AND ($2='' OR key<$2) ORDER BY key DESC LIMIT $3`, prefix, before, limit, documentSummaryHeadBytes)
+	rows, err := s.pool.Query(ctx, `SELECT key,kind,session,octet_length(body),substr(body,1,$4),updated_at FROM documents WHERE ($1='' OR strpos(key,$1)=1) AND ($2='' OR key<$2) ORDER BY key DESC LIMIT $3`, prefix, before, limit, documentSummaryHeadChars)
 	if err != nil {
 		return nil, err
 	}

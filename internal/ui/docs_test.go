@@ -9,29 +9,33 @@ import (
 
 func TestDocumentTitle(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		head string
-		want string
+		name      string
+		head      string
+		truncated bool
+		want      string
 	}{
-		{"first heading", "# Alpha\n\nbody", "Alpha"},
-		{"deep heading", "intro\n\n### Third level\n", "Third level"},
-		{"front matter skipped", "---\ntask: 1\n---\n# Beta\n", "Beta"},
-		{"closing hashes", "# Title ###\n", "Title"},
-		{"hash is part of the name", "# C#\n", "C#"},
-		{"no heading", "plain text\n", ""},
-		{"empty", "", ""},
-		{"bom before heading", "\ufeff# BOM title\n", "BOM title"},
-		{"unterminated front matter is scanned as content", "---\ntask: 1\n# Not hidden\n", "Not hidden"},
-		{"heading without space is not a heading", "#nope\n# Yes\n", "Yes"},
+		{"first heading", "# Alpha\n\nbody", false, "Alpha"},
+		{"deep heading", "intro\n\n### Third level\n", false, "Third level"},
+		{"front matter skipped", "---\ntask: 1\n---\n# Beta\n", false, "Beta"},
+		{"closing hashes", "# Title ###\n", false, "Title"},
+		{"hash is part of the name", "# C#\n", false, "C#"},
+		{"no heading", "plain text\n", false, ""},
+		{"empty", "", false, ""},
+		{"bom before heading", "\ufeff# BOM title\n", false, "BOM title"},
+		{"unterminated front matter is scanned as content", "---\ntask: 1\n# Not hidden\n", false, "Not hidden"},
+		{"heading without space is not a heading", "#nope\n# Yes\n", false, "Yes"},
+		{"untruncated last line without newline is a heading", "# Real", false, "Real"},
+		{"truncated partial heading is no title", "# Re", true, ""},
+		{"truncated mid-body keeps earlier headings", "# Real\nmore", true, "Real"},
 	} {
-		if got := documentTitle(tc.head); got != tc.want {
-			t.Fatalf("%s: documentTitle(%q)=%q, want %q", tc.name, tc.head, got, tc.want)
+		if got := documentTitle(tc.head, tc.truncated); got != tc.want {
+			t.Fatalf("%s: documentTitle(%q, %v)=%q, want %q", tc.name, tc.head, tc.truncated, got, tc.want)
 		}
 	}
 }
 
 func TestDocumentTitleTruncatesLongHeadings(t *testing.T) {
-	title := documentTitle("# " + strings.Repeat("가", 300))
+	title := documentTitle("# "+strings.Repeat("가", 300), false)
 	if len([]rune(title)) != 201 || !strings.HasSuffix(title, "…") {
 		t.Fatalf("truncated title has %d runes: %q", len([]rune(title)), title)
 	}

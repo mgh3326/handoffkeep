@@ -86,15 +86,17 @@ func (h *Handler) docsList(w http.ResponseWriter, r *http.Request) {
 	for _, summary := range summaries {
 		response.Documents = append(response.Documents, docsItem{
 			Key:       strings.ToValidUTF8(summary.Key, "\uFFFD"),
-			Title:     documentTitle(summary.Head),
+			Title:     documentTitle(summary.Head, summary.Size > int64(len(summary.Head))),
 			Kind:      strings.ToValidUTF8(summary.Kind, "\uFFFD"),
 			Session:   strings.ToValidUTF8(summary.Session, "\uFFFD"),
 			Size:      summary.Size,
 			UpdatedAt: summary.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z07:00"),
 		})
 	}
-	if response.HasMore && len(response.Documents) > 0 {
-		response.NextBefore = response.Documents[len(response.Documents)-1].Key
+	if response.HasMore && len(summaries) > 0 {
+		// The cursor must be the stored key, not the display key: the store
+		// compares it against the raw column value.
+		response.NextBefore = summaries[len(summaries)-1].Key
 	}
 	writeBoardJSON(w, response)
 }
@@ -128,11 +130,15 @@ func validDocsText(value string) bool {
 }
 
 // documentTitle returns the first ATX heading in a body head, skipping a YAML
-// front-matter block. The head is all a listing read carries, so a body whose
-// heading lives past the head simply has no title — the key still names it.
-func documentTitle(head string) string {
+// front-matter block. truncated means the head is only the body's leading
+// characters, so the final line may be cut: a heading without its terminating
+// newline is then not a title. The key still names such a document.
+func documentTitle(head string, truncated bool) string {
 	head = strings.TrimPrefix(strings.ToValidUTF8(head, "\uFFFD"), "\ufeff")
 	lines := strings.Split(head, "\n")
+	if truncated && !strings.HasSuffix(head, "\n") && len(lines) > 0 {
+		lines = lines[:len(lines)-1]
+	}
 	start := 0
 	if len(lines) > 0 && strings.TrimSpace(strings.TrimRight(lines[0], "\r")) == "---" {
 		for i := 1; i < len(lines); i++ {
