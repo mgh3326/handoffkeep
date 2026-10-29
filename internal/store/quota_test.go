@@ -98,9 +98,43 @@ func TestQuotaPostgres(t *testing.T) {
 	if err = pool.QueryRow(ctx, `SELECT count(*) FROM quota_observations`).Scan(&count); err != nil || count != 3 {
 		t.Fatalf("history=%d %v", count, err)
 	}
-	var v22 bool
-	if err = pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_version WHERE version=22)`).Scan(&v22); err != nil || !v22 {
+	var v23 bool
+	if err = pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_version WHERE version=23)`).Scan(&v23); err != nil || !v23 {
 		t.Fatalf("quota schema_version row missing: %v", err)
+	}
+	colExists := func(table, col string) bool {
+		var ok bool
+		if err := pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid=$1::regclass AND attname=$2 AND NOT attisdropped)`, table, col).Scan(&ok); err != nil {
+			t.Fatal(err)
+		}
+		return ok
+	}
+	if !colExists("tasks", "expected") {
+		t.Fatal("v22-gated tasks.expected missing after migrate")
+	}
+	if !colExists("quota_latest", "confirmed_at") {
+		t.Fatal("quota_latest.confirmed_at missing after migrate")
+	}
+	// Replay the pre-90 state: #92's v22 row and the PR 89 quota tables exist,
+	// without v23 or confirmed_at — migrate must restore both idempotently.
+	for _, q := range []string{
+		`DELETE FROM schema_version WHERE version IN (22,23)`,
+		`ALTER TABLE tasks DROP COLUMN expected`,
+		`ALTER TABLE quota_latest DROP COLUMN confirmed_at`,
+	} {
+		if _, err = pool.Exec(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err = s.migrate(ctx); err != nil {
+		t.Fatal("migrate on v22+PR89 state", err)
+	}
+	if !colExists("tasks", "expected") || !colExists("quota_latest", "confirmed_at") {
+		t.Fatal("re-migrate did not restore expected or confirmed_at")
+	}
+	var rows int
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM schema_version WHERE version IN (22,23)`).Scan(&rows); err != nil || rows != 2 {
+		t.Fatalf("version rows after re-migrate=%d %v", rows, err)
 	}
 	if _, err = pool.Exec(ctx, `UPDATE quota_observations SET window_key=window_key`); err == nil {
 		t.Fatal("history mutable")
@@ -185,8 +219,21 @@ func TestQuotaDedupePostgres(t *testing.T) {
 	}
 	changed := x
 	changed.Buckets[0].UsedPct = 31
-	if next, deduped, err := s.PutQuota(ctx, key, "client", holderA, changed); err != nil || deduped || next.ID == first.ID {
+	changed.MeasuredAt = newer.MeasuredAt.Add(time.Minute)
+	// A client-supplied confirmed_at is never stored nor trusted.
+	forgedAt := x.MeasuredAt.Add(-time.Hour)
+	changed.ConfirmedAt = &forgedAt
+	next, deduped, err := s.PutQuota(ctx, key, "client", holderA, changed)
+	if err != nil || deduped || next.ID == first.ID {
 		t.Fatalf("dedupe change: %+v deduped=%v %v", next, deduped, err)
+	}
+	var storedCA *string
+	if err = pool.QueryRow(ctx, `SELECT value->>'confirmed_at' FROM quota_observations WHERE id=$1`, next.ID).Scan(&storedCA); err != nil || storedCA != nil {
+		t.Fatalf("confirmed_at stored: %v %v", storedCA, err)
+	}
+	latestQ, err = s.LatestQuota(ctx, key)
+	if err != nil || latestQ.Observation.ConfirmedAt == nil || !latestQ.Observation.ConfirmedAt.Equal(changed.MeasuredAt) {
+		t.Fatalf("confirmed_at not server-owned: %+v %v", latestQ.Observation, err)
 	}
 	if err = pool.QueryRow(ctx, `SELECT count(*) FROM quota_observations`).Scan(&count); err != nil || count != 2 {
 		t.Fatalf("dedupe history=%d %v", count, err)

@@ -51,7 +51,7 @@ Postgres was chosen over Redis so fencing, append and pointer updates share one
 transaction and one recovery domain. No extra service or Redis configuration is
 needed. The additive startup migration creates `quota_observations`,
 `quota_latest` and `quota_leases`, plus a trigger forbidding history mutation,
-and records `schema_version` 22 — idempotent on servers that already ran the
+and records `schema_version` 23 — idempotent on servers that already ran the
 unversioned quota migration. Deploy hk first: normal `store.Open` applies the
 idempotent migration before serving requests. Then enable pacelever clients.
 Existing routes are unchanged.

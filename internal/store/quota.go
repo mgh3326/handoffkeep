@@ -91,10 +91,10 @@ func migrateQuota(ctx context.Context, tx pgx.Tx) error {
 		// and which no quota_latest row points to. Called manually or by a
 		// later approved job; no scheduler is registered here.
 		`CREATE OR REPLACE FUNCTION quota_prune_history() RETURNS bigint LANGUAGE plpgsql AS $$ DECLARE n bigint; BEGIN PERFORM set_config('handoffkeep.quota_prune', 'on', true); DELETE FROM quota_observations WHERE received_at < clock_timestamp() - interval '90 days' AND id NOT IN (SELECT observation_id FROM quota_latest); GET DIAGNOSTICS n = ROW_COUNT; RETURN n; END; $$`,
-		// Version 22 records the quota migration retroactively. The CREATEs
+		// Version 23 records the quota migration retroactively. The CREATEs
 		// above stay ungated IF NOT EXISTS so servers that already ran
 		// migrateQuota only insert the marker row.
-		`INSERT INTO schema_version(version) VALUES (22) ON CONFLICT DO NOTHING`,
+		`INSERT INTO schema_version(version) VALUES (23) ON CONFLICT DO NOTHING`,
 	} {
 		if _, err := tx.Exec(ctx, q); err != nil {
 			return err
@@ -113,13 +113,15 @@ func (s *Store) LatestQuota(ctx context.Context, key string) (QuotaLatest, error
 		var x QuotaObservation
 		var data []byte
 		var id int64
-		if err = rows.Scan(&id, &data, &x.ConfirmedAt); err != nil {
+		var confirmedAt *time.Time
+		if err = rows.Scan(&id, &data, &confirmedAt); err != nil {
 			return out, err
 		}
 		if err = json.Unmarshal(data, &x); err != nil {
 			return out, err
 		}
 		x.ID = id
+		x.ConfirmedAt = confirmedAt
 		if x.Kind == "auto" {
 			out.Observation = &x
 		} else {
@@ -184,6 +186,8 @@ func (s *Store) PutQuota(ctx context.Context, key, owner, holder string, x Quota
 		return x, false, err
 	}
 	x.ID = 0
+	// confirmed_at is server-owned: never store a client-supplied value.
+	x.ConfirmedAt = nil
 	data, err := json.Marshal(x)
 	if err != nil {
 		return x, false, err

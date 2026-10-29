@@ -442,8 +442,9 @@ type Task struct {
 	// Area is the task's entry in the TaskAreas vocabulary. NULL on rows
 	// created before the field existed and on any task nobody has tagged;
 	// always emitted, so a null means unset.
-	Area   *string     `json:"area"`
-	Events []TaskEvent `json:"events,omitempty"`
+	Expected *string     `json:"expected"`
+	Area     *string     `json:"area"`
+	Events   []TaskEvent `json:"events,omitempty"`
 }
 
 // RelayEvent is a durable report from a worker to its owning lane.  Delivery
@@ -1043,6 +1044,28 @@ func (s *Store) migrate(ctx context.Context) error {
 			if _, err := tx.Exec(ctx, q); err != nil {
 				return err
 			}
+		}
+	}
+
+	var v22Applied bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_version WHERE version=22)`).Scan(&v22Applied); err != nil {
+		return err
+	}
+	if !v22Applied {
+		var priorLockTimeout string
+		if err := tx.QueryRow(ctx, `SELECT current_setting('lock_timeout')`).Scan(&priorLockTimeout); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `SET LOCAL lock_timeout = '3s'`); err != nil {
+			return err
+		}
+		for _, q := range []string{`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS expected TEXT`, `INSERT INTO schema_version(version) VALUES (22)`} {
+			if _, err := tx.Exec(ctx, q); err != nil {
+				return err
+			}
+		}
+		if _, err := tx.Exec(ctx, `SELECT set_config('lock_timeout', $1, true)`, priorLockTimeout); err != nil {
+			return err
 		}
 	}
 
@@ -2028,14 +2051,14 @@ func ValidBodyDoc(v string) bool {
 
 func scanTask(row interface{ Scan(...any) error }, x *Task, extra ...any) error {
 	var refs []byte
-	dest := []any{&x.ID, &x.Lane, &x.ParentLane, &x.Title, &x.Kind, &x.State, &x.Priority, &refs, &x.ClaimedBy, &x.CreatedBy, &x.CreatedAt, &x.UpdatedAt, &x.BodyDoc, &x.Project, &x.Area}
+	dest := []any{&x.ID, &x.Lane, &x.ParentLane, &x.Title, &x.Kind, &x.State, &x.Priority, &refs, &x.ClaimedBy, &x.CreatedBy, &x.CreatedAt, &x.UpdatedAt, &x.BodyDoc, &x.Project, &x.Area, &x.Expected}
 	if err := row.Scan(append(dest, extra...)...); err != nil {
 		return err
 	}
 	return json.Unmarshal(refs, &x.Refs)
 }
 
-const taskColumns = `id,lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at,body_doc,project,area`
+const taskColumns = `id,lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at,body_doc,project,area,expected`
 
 // taskProjectQuerier is the row-query seam requireTaskProject runs against:
 // the caller's transaction, so membership is judged in the same snapshot the
@@ -2065,7 +2088,47 @@ func requireTaskProject(ctx context.Context, q taskProjectQuerier, project *stri
 	return nil
 }
 
+// normalizeExpected accepts a Go duration or whole days in the range 1m..90d.
+func normalizeExpected(value string) (string, bool) {
+	var d time.Duration
+	if strings.HasSuffix(value, "d") {
+		day := strings.TrimSuffix(value, "d")
+		if day == "" {
+			return "", false
+		}
+		for _, c := range day {
+			if c < '0' || c > '9' {
+				return "", false
+			}
+		}
+		n, err := strconv.ParseUint(day, 10, 32)
+		if err != nil || n > 90 {
+			return "", false
+		}
+		d = time.Duration(n) * 24 * time.Hour
+	} else {
+		var err error
+		d, err = time.ParseDuration(value)
+		if err != nil {
+			return "", false
+		}
+	}
+	if d < time.Minute || d > 90*24*time.Hour {
+		return "", false
+	}
+	return d.String(), true
+}
+
+func ValidExpected(value string) bool { _, ok := normalizeExpected(value); return ok }
+
 func (s *Store) CreateTask(ctx context.Context, x Task) (Task, error) {
+	if x.Expected != nil {
+		normalized, ok := normalizeExpected(*x.Expected)
+		if !ok {
+			return x, errors.New("invalid task: expected must be between 1m and 90d")
+		}
+		x.Expected = &normalized
+	}
 	if x.BodyDoc != "" && !ValidBodyDoc(x.BodyDoc) {
 		return x, errors.New("invalid task: body_doc must be a document key or key#section")
 	}
@@ -2120,7 +2183,7 @@ func (s *Store) CreateTask(ctx context.Context, x Task) (Task, error) {
 	if err = requireTaskProject(ctx, tx, x.Project); err != nil {
 		return x, err
 	}
-	if err = scanTask(tx.QueryRow(ctx, `INSERT INTO tasks(lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at,body_doc,project,area) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$12,$13,$14) RETURNING `+taskColumns, x.Lane, x.ParentLane, x.Title, x.Kind, x.State, x.Priority, string(refs), x.ClaimedBy, x.CreatedBy, x.CreatedAt, x.UpdatedAt, x.BodyDoc, x.Project, x.Area), &x); err != nil {
+	if err = scanTask(tx.QueryRow(ctx, `INSERT INTO tasks(lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at,body_doc,project,area,expected) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING `+taskColumns, x.Lane, x.ParentLane, x.Title, x.Kind, x.State, x.Priority, string(refs), x.ClaimedBy, x.CreatedBy, x.CreatedAt, x.UpdatedAt, x.BodyDoc, x.Project, x.Area, x.Expected), &x); err != nil {
 		return x, err
 	}
 	if s.LinearSyncEnabled() && x.Refs.Linear != nil && x.Refs.Linear.Sync {
@@ -3314,7 +3377,7 @@ func (s *Store) ListOpenTaskDecisions(ctx context.Context, limit int) ([]TaskDec
 	if limit > 1000 {
 		limit = 1000
 	}
-	rows, err := s.pool.Query(ctx, `SELECT t.id,t.lane,t.parent_lane,t.title,t.kind,t.state,t.priority,t.refs,t.claimed_by,t.created_by,t.created_at,t.updated_at,
+	rows, err := s.pool.Query(ctx, `SELECT `+prefixedTaskColumns("t")+`,
 		COALESCE((SELECT note FROM task_events WHERE task_id=t.id AND kind='transition' AND "to"='needs_decision' ORDER BY at DESC,id DESC LIMIT 1),'')
 		FROM tasks t WHERE t.state='needs_decision' AND NOT (t.refs ? 'disposition') AND COALESCE(t.refs->'decision_request'->>'status','')<>'open' ORDER BY t.updated_at DESC,t.id DESC LIMIT $1`, limit)
 	if err != nil {
@@ -3324,11 +3387,7 @@ func (s *Store) ListOpenTaskDecisions(ctx context.Context, limit int) ([]TaskDec
 	out := []TaskDecision{}
 	for rows.Next() {
 		var x TaskDecision
-		var refs []byte
-		if err := rows.Scan(&x.Task.ID, &x.Task.Lane, &x.Task.ParentLane, &x.Task.Title, &x.Task.Kind, &x.Task.State, &x.Task.Priority, &refs, &x.Task.ClaimedBy, &x.Task.CreatedBy, &x.Task.CreatedAt, &x.Task.UpdatedAt, &x.Question); err != nil {
-			return nil, err
-		}
-		if err := json.Unmarshal(refs, &x.Task.Refs); err != nil {
+		if err := scanTask(rows, &x.Task, &x.Question); err != nil {
 			return nil, err
 		}
 		out = append(out, x)

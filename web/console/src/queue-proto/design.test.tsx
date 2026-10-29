@@ -333,6 +333,7 @@ describe("state-grouped list structure", () => {
     expect([...global.querySelectorAll("a")].map((a) => a.getAttribute("href"))).toEqual([
       "/ui/queue",
       "/ui/deploys",
+      "/ui/docs",
       "/ui/decisions",
       "/ui/fleet",
       "/ui/grades",
