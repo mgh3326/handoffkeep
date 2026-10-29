@@ -94,7 +94,7 @@ func TestUIDashboard(t *testing.T) {
 
 	lane := uiLane(t, "dashboard")
 	repo := fmt.Sprintf("dash-%d/repo", time.Now().UnixNano())
-	running, err := s.CreateTask(ctx, store.Task{Lane: lane, Title: "running task", Kind: "implement", CreatedBy: "test-node",
+	running, err := s.CreateTask(ctx, store.Task{Lane: lane, Title: "running task", Kind: "implement", CreatedBy: "test-node", Project: projectRef("experiment"),
 		Refs: store.TaskRefs{PR: "https://github.com/" + repo + "/pull/3"}})
 	if err != nil {
 		t.Fatal(err)
@@ -105,7 +105,7 @@ func TestUIDashboard(t *testing.T) {
 	if _, err := s.TransitionTask(ctx, running.ID, "in_progress", "worker-a", "started", nil, ""); err != nil {
 		t.Fatal(err)
 	}
-	landed, err := s.CreateTask(ctx, store.Task{Lane: lane, Title: "landed task", Kind: "implement", CreatedBy: "test-node",
+	landed, err := s.CreateTask(ctx, store.Task{Lane: lane, Title: "landed task", Kind: "implement", CreatedBy: "test-node", Project: projectRef("experiment"),
 		Refs: store.TaskRefs{PR: "https://github.com/" + repo + "/pull/2"}})
 	if err != nil {
 		t.Fatal(err)
