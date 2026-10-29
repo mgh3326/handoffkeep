@@ -331,6 +331,7 @@ describe("state-grouped list structure", () => {
     const global = screen.getByRole("navigation", { name: "전역 탐색" });
     expect(global.querySelector('[aria-current="page"]')!.textContent).toBe("Queue");
     expect([...global.querySelectorAll("a")].map((a) => a.getAttribute("href"))).toEqual([
+      "/ui/home",
       "/ui/queue",
       "/ui/deploys",
       "/ui/docs",
@@ -340,8 +341,8 @@ describe("state-grouped list structure", () => {
       "/ui/timeline",
       "/ui/compose",
     ]);
-    // home does not exist yet — shown, but not as a link that leads nowhere
-    expect(global.textContent).toContain("준비 중");
+    // home is the read-only dashboard (hk 2280), no longer a placeholder
+    expect(global.textContent).not.toContain("준비 중");
     expect(screen.getByRole("navigation", { name: "queue views" })).toBeTruthy();
     expect(screen.getByRole("navigation", { name: "saved views" })).toBeTruthy();
     expect(screen.getByRole("navigation", { name: "위치" }).textContent).toContain("Queue");
