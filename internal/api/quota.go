@@ -73,7 +73,7 @@ func (s Server) quotaPut(w http.ResponseWriter, r *http.Request) {
 	if !quotaDecode(w, r, &input) {
 		return
 	}
-	if !store.ValidQuotaHolder(input.Holder) || !store.ValidQuotaObservation(input.Observation, time.Now()) {
+	if !store.ValidQuotaHolder(input.Holder) || !store.ValidQuotaObservationFor(r.PathValue("key"), input.Observation, time.Now()) {
 		jsonOut(w, 400, map[string]string{"error": "invalid_quota_observation"})
 		return
 	}
