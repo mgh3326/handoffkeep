@@ -2,7 +2,6 @@ package ui
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 
@@ -21,8 +20,6 @@ func uiWrkError(w http.ResponseWriter, err error) bool {
 	if !errors.As(err, &denied) {
 		return false
 	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(wrkrecords.Status(denied))
-	_ = json.NewEncoder(w).Encode(map[string]string{"error": wrkrecords.Code(denied)})
+	writeJSONError(w, wrkrecords.Status(denied), wrkrecords.Code(denied))
 	return true
 }

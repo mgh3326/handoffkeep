@@ -467,7 +467,7 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 		}
 		x, err := c.NextTask(ctx, *lane, *by, *jobID, noJobReason)
 		if err != nil {
-			if err.Error() == "queue_empty" {
+			if remote.ErrorCode(err) == "queue_empty" {
 				return exitCodeError{code: 3, err: errors.New("no backlog task")}
 			}
 			return err

@@ -328,9 +328,7 @@ func (h *Handler) setAccepting(w http.ResponseWriter, r *http.Request, identity 
 	status, body, contentType, err := h.hub.setAccepting(r.Context(), machine, *input.Accepting, input.Reason)
 	if err != nil {
 		outcome.result = "hub_error"
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		w.WriteHeader(http.StatusBadGateway)
-		_, _ = w.Write([]byte(`{"error":"hub_unavailable"}`))
+		writeJSONError(w, http.StatusBadGateway, "hub_unavailable")
 		return
 	}
 	outcome.result = "ok"

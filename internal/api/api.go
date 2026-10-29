@@ -646,13 +646,13 @@ func healthz(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	jsonOut(w, 200, out)
+	jsonOut(w, http.StatusOK, out)
 }
 
 func (s Server) auth(w http.ResponseWriter, r *http.Request) (string, bool) {
 	id, ok := s.Tokens.Client(r)
 	if !ok {
-		jsonOut(w, 401, map[string]string{"error": "unauthorized"})
+		writeError(w, http.StatusUnauthorized, "unauthorized")
 	}
 	if ok {
 		_, receipt := store.WrkPrincipal(r.Context())
@@ -660,178 +660,6 @@ func (s Server) auth(w http.ResponseWriter, r *http.Request) (string, bool) {
 	}
 	return id, ok
 }
-func jsonOut(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
-}
-func appErr(w http.ResponseWriter, e error) {
-	var wrkErr wrkrecords.Error
-	if errors.As(e, &wrkErr) {
-		jsonOut(w, wrkrecords.Status(wrkErr), map[string]string{"error": wrkrecords.Code(wrkErr)})
-		return
-	}
-	var repConflict *store.BenchRepConflictError
-	switch {
-	case errors.Is(e, attachments.ErrDisabled):
-		jsonOut(w, 503, map[string]string{"error": "attachments_disabled"})
-		return
-	case errors.Is(e, attachments.ErrTooLarge):
-		jsonOut(w, 413, map[string]string{"error": "attachment_too_large"})
-		return
-	case errors.Is(e, attachments.ErrMIME), errors.Is(e, attachments.ErrExtension):
-		jsonOut(w, 400, map[string]string{"error": e.Error()})
-		return
-	case errors.Is(e, store.ErrAttachmentStorageCap):
-		jsonOut(w, 507, map[string]string{"error": "attachment_storage_cap"})
-		return
-	case errors.Is(e, store.ErrAttachmentPutCap):
-		jsonOut(w, 429, map[string]string{"error": "attachment_put_cap"})
-		return
-	case errors.Is(e, attachments.ErrR2):
-		jsonOut(w, 502, map[string]string{"error": "attachment_r2_unavailable"})
-		return
-	case errors.Is(e, store.ErrTaskConflict):
-		body := map[string]string{"error": "task_conflict"}
-		if reason, ok := strings.CutPrefix(e.Error(), "task_conflict: "); ok && reason != "" {
-			body["reason"] = reason
-		}
-		jsonOut(w, http.StatusConflict, body)
-		return
-	case errors.Is(e, store.ErrTaskJobRequired):
-		body := map[string]string{"error": "task_job_required"}
-		if reason, ok := strings.CutPrefix(e.Error(), "task_job_required: "); ok && reason != "" {
-			body["reason"] = reason
-		}
-		jsonOut(w, http.StatusConflict, body)
-		return
-	case errors.Is(e, store.ErrTaskProjectRequired):
-		body := map[string]string{"error": "task_project_required"}
-		if reason, ok := strings.CutPrefix(e.Error(), "task_project_required: "); ok && reason != "" {
-			body["reason"] = reason
-		}
-		jsonOut(w, http.StatusBadRequest, body)
-		return
-	case errors.Is(e, store.ErrTaskProjectUnknown):
-		body := map[string]string{"error": "task_project_unknown"}
-		if reason, ok := strings.CutPrefix(e.Error(), "task_project_unknown: "); ok && reason != "" {
-			body["reason"] = reason
-		}
-		jsonOut(w, http.StatusBadRequest, body)
-		return
-	case errors.Is(e, store.ErrTaskAreaUnknown):
-		// The reason is the store's own text naming the allowed set, never
-		// echoed input.
-		body := map[string]string{"error": "invalid_request"}
-		if reason, ok := strings.CutPrefix(e.Error(), "invalid_request: "); ok && reason != "" {
-			body["reason"] = reason
-		}
-		jsonOut(w, http.StatusBadRequest, body)
-		return
-	case errors.Is(e, store.ErrDispositionOperatorOnly):
-		jsonOut(w, http.StatusConflict, map[string]string{"error": "disposition_operator_only"})
-		return
-	case errors.Is(e, store.ErrDispositionStale):
-		jsonOut(w, http.StatusConflict, map[string]string{"error": "disposition_stale"})
-		return
-	case errors.Is(e, store.ErrTaskNotFound):
-		jsonOut(w, http.StatusNotFound, map[string]string{"error": "not_found"})
-		return
-	case errors.Is(e, store.ErrTaskTerminal):
-		jsonOut(w, http.StatusConflict, map[string]string{"error": "task_terminal"})
-		return
-	case errors.Is(e, store.ErrDecisionRequestOpen):
-		jsonOut(w, http.StatusConflict, map[string]string{"error": "decision_request_open"})
-		return
-	case errors.Is(e, store.ErrDecisionRequestStale):
-		jsonOut(w, http.StatusConflict, map[string]string{"error": "decision_request_stale"})
-		return
-	case errors.Is(e, store.ErrDecisionRequestResolved):
-		jsonOut(w, http.StatusConflict, map[string]string{"error": "decision_request_resolved"})
-		return
-	case errors.Is(e, store.ErrInvalidDecisionRequest):
-		// The reason is produced by the store's own validators (limits and
-		// field names), never echoed input, so it is safe to return.
-		jsonOut(w, http.StatusBadRequest, map[string]string{"error": e.Error()})
-		return
-	case errors.Is(e, store.ErrRelayEventNotFound):
-		jsonOut(w, http.StatusNotFound, map[string]string{"error": "not_found"})
-		return
-	case errors.Is(e, store.ErrDeviationRefRequired):
-		jsonOut(w, http.StatusBadRequest, map[string]string{"error": "deviation_ref_required"})
-		return
-	case errors.Is(e, store.ErrDecidedByRequired):
-		jsonOut(w, http.StatusBadRequest, map[string]string{"error": "decided_by_required"})
-		return
-	case errors.Is(e, store.ErrBenchCatalogMonotonicity):
-		jsonOut(w, http.StatusBadRequest, map[string]string{"error": "bench_catalog_not_monotonic"})
-		return
-	case errors.Is(e, store.ErrBenchCatalogSolGrade):
-		jsonOut(w, http.StatusBadRequest, map[string]string{"error": "bench_catalog_sol_grade"})
-		return
-	case errors.Is(e, store.ErrDecisionRefRequired):
-		jsonOut(w, http.StatusBadRequest, map[string]string{"error": "decision_ref_required"})
-		return
-	case errors.Is(e, store.ErrBenchAreaExceptionProfileUnknown):
-		jsonOut(w, http.StatusBadRequest, map[string]string{"error": "bench_area_exception_profile_unknown"})
-		return
-	case errors.Is(e, store.ErrBenchAreaExceptionConflict):
-		jsonOut(w, http.StatusConflict, map[string]string{"error": "bench_area_exception_action_conflict"})
-		return
-	case errors.As(e, &repConflict):
-		jsonOut(w, http.StatusConflict, map[string]any{"error": "bench_rep_conflict", "conflicts": repConflict.Conflicts})
-		return
-	case errors.Is(e, store.ErrBenchRepsRetryable):
-		jsonOut(w, http.StatusServiceUnavailable, map[string]string{"error": "bench_reps_retryable"})
-		return
-	case errors.Is(e, store.ErrQueueEmpty):
-		jsonOut(w, http.StatusNotFound, map[string]string{"error": "queue_empty"})
-		return
-	case errors.Is(e, store.ErrChatQuestionNotFound), errors.Is(e, store.ErrChatMessageNotFound):
-		jsonOut(w, http.StatusNotFound, map[string]string{"error": "not_found"})
-		return
-	case errors.Is(e, store.ErrChatQuestionConflict):
-		jsonOut(w, http.StatusConflict, map[string]string{"error": "chat_question_conflict"})
-		return
-	case errors.Is(e, store.ErrChatQuestionStale):
-		jsonOut(w, http.StatusConflict, map[string]string{"error": "chat_question_stale"})
-		return
-	case errors.Is(e, store.ErrDecisionAssistantKind):
-		jsonOut(w, http.StatusBadRequest, map[string]string{"error": "decision_assistant_kind"})
-		return
-	case errors.Is(e, store.ErrInvalidProvenance):
-		jsonOut(w, http.StatusBadRequest, map[string]string{"error": "invalid_provenance"})
-		return
-	case errors.Is(e, store.ErrProvenanceRefMismatch):
-		jsonOut(w, http.StatusConflict, map[string]string{"error": "provenance_ref_mismatch"})
-		return
-	case errors.Is(e, store.ErrDecisionRequestHumanOnly):
-		body := map[string]string{"error": "decision_request_human_only"}
-		if reason, ok := strings.CutPrefix(e.Error(), "decision_request_human_only: "); ok && reason != "" {
-			body["reason"] = reason
-		}
-		jsonOut(w, http.StatusConflict, body)
-		return
-	case errors.Is(e, store.ErrOutboxEventNotFound):
-		jsonOut(w, http.StatusNotFound, map[string]string{"error": "not_found"})
-		return
-	case errors.Is(e, store.ErrOutboxConflict):
-		jsonOut(w, http.StatusConflict, map[string]string{"error": "notification_outbox_conflict"})
-		return
-	case errors.Is(e, store.ErrChatConversation):
-		jsonOut(w, http.StatusConflict, map[string]string{"error": "chat_conversation_conflict"})
-		return
-	case errors.Is(e, store.ErrChatMessageConflict):
-		jsonOut(w, http.StatusConflict, map[string]string{"error": "chat_message_conflict"})
-		return
-	}
-	if p, ok := strings.CutPrefix(e.Error(), "secret_like_content:"); ok {
-		jsonOut(w, 400, map[string]string{"error": "secret_like_content", "pattern": p})
-		return
-	}
-	jsonOut(w, 400, map[string]string{"error": "invalid_context"})
-}
-
 func taskID(r *http.Request) (int64, error) {
 	return strconv.ParseInt(r.PathValue("id"), 10, 64)
 }
@@ -926,7 +754,7 @@ func (s Server) tasksExport(w http.ResponseWriter, r *http.Request) {
 	}
 	limit, err := queryLimit(r, 1000, store.ExportLimitMax)
 	if err != nil {
-		jsonOut(w, http.StatusBadRequest, map[string]string{"error": "invalid_export_query"})
+		writeError(w, http.StatusBadRequest, "invalid_export_query")
 		return
 	}
 	lane, state, parentLane := r.URL.Query().Get("lane"), r.URL.Query().Get("state"), r.URL.Query().Get("parent_lane")
@@ -938,10 +766,10 @@ func (s Server) tasksExport(w http.ResponseWriter, r *http.Request) {
 	out, err := s.Service.ExportTasks(r.Context(), lane, state, parentLane, project, limit)
 	if err != nil {
 		if errors.Is(err, store.ErrInvalidExportQuery) {
-			jsonOut(w, http.StatusBadRequest, map[string]string{"error": "invalid_export_query"})
+			writeError(w, http.StatusBadRequest, "invalid_export_query")
 			return
 		}
-		jsonOut(w, http.StatusInternalServerError, map[string]string{"error": "export_unavailable"})
+		writeError(w, http.StatusInternalServerError, "export_unavailable")
 		return
 	}
 	jsonOut(w, http.StatusOK, out)
@@ -953,7 +781,7 @@ func (s Server) task(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := taskID(r)
 	if err != nil || id < 1 {
-		appErr(w, errors.New("task id"))
+		writeError(w, http.StatusBadRequest, "invalid_context")
 		return
 	}
 	x, found, err := s.Service.GetTask(r.Context(), id)
@@ -962,7 +790,7 @@ func (s Server) task(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !found {
-		jsonOut(w, http.StatusNotFound, map[string]string{"error": "not_found"})
+		writeError(w, http.StatusNotFound, "not_found")
 		return
 	}
 	jsonOut(w, http.StatusOK, x)
@@ -1028,7 +856,7 @@ func (s Server) taskProject(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := taskID(r)
 	if err != nil || id < 1 {
-		appErr(w, errors.New("task id"))
+		writeError(w, http.StatusBadRequest, "invalid_context")
 		return
 	}
 	defer r.Body.Close()
@@ -1068,7 +896,7 @@ func (s Server) taskArea(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := taskID(r)
 	if err != nil || id < 1 {
-		appErr(w, errors.New("task id"))
+		writeError(w, http.StatusBadRequest, "invalid_context")
 		return
 	}
 	defer r.Body.Close()
@@ -1083,12 +911,12 @@ func (s Server) taskArea(w http.ResponseWriter, r *http.Request) {
 	var area *string
 	switch {
 	case len(input.Area) == 0:
-		appErr(w, errors.New("area key required"))
+		writeError(w, http.StatusBadRequest, "invalid_context")
 		return
 	case string(input.Area) != "null":
 		var v string
 		if err := json.Unmarshal(input.Area, &v); err != nil {
-			appErr(w, errors.New("area must be a string or null"))
+			writeError(w, http.StatusBadRequest, "invalid_context")
 			return
 		}
 		area = &v
@@ -1111,7 +939,7 @@ func (s Server) taskClaim(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := taskID(r)
 	if err != nil || id < 1 {
-		appErr(w, errors.New("task id"))
+		writeError(w, http.StatusBadRequest, "invalid_context")
 		return
 	}
 	defer r.Body.Close()
@@ -1141,7 +969,7 @@ func (s Server) taskRebind(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := taskID(r)
 	if err != nil || id < 1 {
-		appErr(w, errors.New("task id"))
+		writeError(w, http.StatusBadRequest, "invalid_context")
 		return
 	}
 	defer r.Body.Close()
@@ -1198,7 +1026,7 @@ func (s Server) taskTransition(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := taskID(r)
 	if err != nil || id < 1 {
-		appErr(w, errors.New("task id"))
+		writeError(w, http.StatusBadRequest, "invalid_context")
 		return
 	}
 	defer r.Body.Close()
@@ -1225,7 +1053,7 @@ func (s Server) taskDecisionRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := taskID(r)
 	if err != nil || id < 1 {
-		appErr(w, errors.New("task id"))
+		writeError(w, http.StatusBadRequest, "invalid_context")
 		return
 	}
 	defer r.Body.Close()
@@ -1255,7 +1083,7 @@ func (s Server) taskDecisionResolve(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := taskID(r)
 	if err != nil || id < 1 {
-		appErr(w, errors.New("task id"))
+		writeError(w, http.StatusBadRequest, "invalid_context")
 		return
 	}
 	defer r.Body.Close()
@@ -1338,12 +1166,12 @@ func (s Server) tasksRelane(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(input.IDs) < 1 || len(input.IDs) > TaskRelaneBatchMax || strings.TrimSpace(input.To) == "" || strings.TrimSpace(input.Note) == "" {
-		jsonOut(w, http.StatusBadRequest, map[string]string{"error": "invalid_task_relane"})
+		writeError(w, http.StatusBadRequest, "invalid_task_relane")
 		return
 	}
 	for _, id := range input.IDs {
 		if id < 1 {
-			jsonOut(w, http.StatusBadRequest, map[string]string{"error": "invalid_task_relane"})
+			writeError(w, http.StatusBadRequest, "invalid_task_relane")
 			return
 		}
 	}
@@ -1401,7 +1229,7 @@ func (s Server) dispositionSummary(w http.ResponseWriter, r *http.Request) {
 	if raw := strings.TrimSpace(r.URL.Query().Get("as_of")); raw != "" {
 		parsed, err := time.Parse(time.RFC3339, raw)
 		if err != nil {
-			jsonOut(w, http.StatusBadRequest, map[string]string{"error": "invalid as_of"})
+			writeError(w, http.StatusBadRequest, "invalid as_of")
 			return
 		}
 		asOf = parsed
@@ -1421,7 +1249,7 @@ func (s Server) dispositionApply(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil || id < 1 {
-		jsonOut(w, http.StatusBadRequest, map[string]string{"error": "invalid id"})
+		writeError(w, http.StatusBadRequest, "invalid id")
 		return
 	}
 	defer r.Body.Close()
@@ -1495,7 +1323,7 @@ func (s Server) relayEventDelivered(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := relayEventID(r)
 	if err != nil || id < 1 {
-		appErr(w, errors.New("relay event id"))
+		writeError(w, http.StatusBadRequest, "invalid_context")
 		return
 	}
 	defer r.Body.Close()
@@ -1726,7 +1554,7 @@ func (s Server) benchCatalogPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if client != operatorClientID {
-		jsonOut(w, http.StatusForbidden, map[string]string{"error": "operator_required"})
+		writeError(w, http.StatusForbidden, "operator_required")
 		return
 	}
 	defer r.Body.Close()
@@ -1745,7 +1573,7 @@ func (s Server) benchCatalogPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !benchBatchValid(len(input.Catalog)) {
-		appErr(w, errors.New("invalid bench catalog"))
+		writeError(w, http.StatusBadRequest, "invalid_context")
 		return
 	}
 	n, err := s.Service.UpsertBenchCatalog(r.Context(), input.Catalog)
@@ -1786,7 +1614,7 @@ func (s Server) benchAreaExceptionsPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if client != operatorClientID {
-		jsonOut(w, http.StatusForbidden, map[string]string{"error": "operator_required"})
+		writeError(w, http.StatusForbidden, "operator_required")
 		return
 	}
 	defer r.Body.Close()
@@ -1816,7 +1644,7 @@ func (s Server) benchAreaExceptionsPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !benchBatchValid(len(input.Exceptions)) {
-		appErr(w, errors.New("invalid bench area exceptions"))
+		writeError(w, http.StatusBadRequest, "invalid_context")
 		return
 	}
 	n, err := s.Service.UpsertBenchAreaExceptions(r.Context(), client, input.Exceptions)
@@ -1915,10 +1743,24 @@ func benchRowErrorField(row []byte, fieldTypes map[string]reflect.Type) string {
 	return ""
 }
 
+// decode reads one JSON request body into v. max is the payload's own byte
+// cap; 4 KiB of slack covers the envelope keys around it.
 func decode(r *http.Request, v any, max int) error {
-	de := json.NewDecoder(io.LimitReader(r.Body, int64(max+4096)))
+	return decodeLimited(r.Body, v, int64(max+4096))
+}
+
+// decodeLimited is the one JSON body decoder: at most limit bytes, unknown
+// fields rejected, and exactly one value with nothing after it.
+func decodeLimited(body io.ReadCloser, v any, limit int64) error {
+	de := json.NewDecoder(http.MaxBytesReader(nil, body, limit))
 	de.DisallowUnknownFields()
-	return de.Decode(v)
+	if err := de.Decode(v); err != nil {
+		return err
+	}
+	if de.Decode(new(json.RawMessage)) != io.EOF {
+		return errors.New("trailing data after JSON body")
+	}
+	return nil
 }
 func queryLimit(r *http.Request, def, max int) (int, error) {
 	x := def
@@ -1948,11 +1790,11 @@ func (s Server) checkpoints(w http.ResponseWriter, r *http.Request) {
 			appErr(w, e)
 			return
 		}
-		jsonOut(w, 201, x)
+		jsonOut(w, http.StatusCreated, x)
 		return
 	}
 	if r.Method != http.MethodGet {
-		jsonOut(w, 405, map[string]string{"error": "method_not_allowed"})
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
 		return
 	}
 	n, e := queryLimit(r, 3, store.CheckpointKeep)
@@ -1965,7 +1807,7 @@ func (s Server) checkpoints(w http.ResponseWriter, r *http.Request) {
 		appErr(w, e)
 		return
 	}
-	jsonOut(w, 200, map[string]any{"checkpoints": xs})
+	jsonOut(w, http.StatusOK, map[string]any{"checkpoints": xs})
 }
 func (s Server) search(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.auth(w, r); !ok {
@@ -1981,7 +1823,7 @@ func (s Server) search(w http.ResponseWriter, r *http.Request) {
 		appErr(w, e)
 		return
 	}
-	jsonOut(w, 200, map[string]any{"results": xs})
+	jsonOut(w, http.StatusOK, map[string]any{"results": xs})
 }
 func (s Server) documents(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.auth(w, r); !ok {
@@ -1994,7 +1836,7 @@ func (s Server) documents(w http.ResponseWriter, r *http.Request) {
 		raw := r.URL.Query().Get("id")
 		id, e := strconv.ParseInt(raw, 10, 64)
 		if e != nil || id < 1 {
-			jsonOut(w, 400, map[string]string{"error": "invalid_document_id"})
+			writeError(w, http.StatusBadRequest, "invalid_document_id")
 			return
 		}
 		x, found, e := s.Service.GetDocumentByID(r.Context(), id)
@@ -2003,10 +1845,10 @@ func (s Server) documents(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if !found {
-			jsonOut(w, 404, map[string]string{"error": "not_found"})
+			writeError(w, http.StatusNotFound, "not_found")
 			return
 		}
-		jsonOut(w, 200, x)
+		jsonOut(w, http.StatusOK, x)
 		return
 	}
 	n, e := queryLimit(r, 100, 1000)
@@ -2019,7 +1861,7 @@ func (s Server) documents(w http.ResponseWriter, r *http.Request) {
 		appErr(w, e)
 		return
 	}
-	jsonOut(w, 200, map[string]any{"documents": xs})
+	jsonOut(w, http.StatusOK, map[string]any{"documents": xs})
 }
 func (s Server) document(w http.ResponseWriter, r *http.Request) {
 	client, ok := s.auth(w, r)
@@ -2034,10 +1876,10 @@ func (s Server) document(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if !found {
-			jsonOut(w, 404, map[string]string{"error": "not_found"})
+			writeError(w, http.StatusNotFound, "not_found")
 			return
 		}
-		jsonOut(w, 200, x)
+		jsonOut(w, http.StatusOK, x)
 		return
 	}
 	if r.Method == http.MethodPut {
@@ -2053,10 +1895,10 @@ func (s Server) document(w http.ResponseWriter, r *http.Request) {
 			appErr(w, e)
 			return
 		}
-		jsonOut(w, 200, map[string]any{"document": x, "changed": changed})
+		jsonOut(w, http.StatusOK, map[string]any{"document": x, "changed": changed})
 		return
 	}
-	jsonOut(w, 405, map[string]string{"error": "method_not_allowed"})
+	writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
 }
 func (s Server) memoryList(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.auth(w, r); !ok {
@@ -2067,7 +1909,7 @@ func (s Server) memoryList(w http.ResponseWriter, r *http.Request) {
 		appErr(w, e)
 		return
 	}
-	jsonOut(w, 200, map[string]any{"memory": xs})
+	jsonOut(w, http.StatusOK, map[string]any{"memory": xs})
 }
 func (s Server) memory(w http.ResponseWriter, r *http.Request) {
 	client, ok := s.auth(w, r)
@@ -2082,10 +1924,10 @@ func (s Server) memory(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if !found {
-			jsonOut(w, 404, map[string]string{"error": "not_found"})
+			writeError(w, http.StatusNotFound, "not_found")
 			return
 		}
-		jsonOut(w, 200, x)
+		jsonOut(w, http.StatusOK, x)
 		return
 	}
 	if r.Method == http.MethodPut {
@@ -2101,10 +1943,10 @@ func (s Server) memory(w http.ResponseWriter, r *http.Request) {
 			appErr(w, e)
 			return
 		}
-		jsonOut(w, 200, x)
+		jsonOut(w, http.StatusOK, x)
 		return
 	}
-	jsonOut(w, 405, map[string]string{"error": "method_not_allowed"})
+	writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
 }
 func defaultString(x, d string) string {
 	if x == "" {
@@ -2133,7 +1975,7 @@ func (s Server) attachmentPut(w http.ResponseWriter, r *http.Request) {
 		appErr(w, e)
 		return
 	}
-	jsonOut(w, 201, map[string]any{"attachment": x, "created": new, "url": "/v1/attachments/" + x.SHA256})
+	jsonOut(w, http.StatusCreated, map[string]any{"attachment": x, "created": new, "url": "/v1/attachments/" + x.SHA256})
 }
 func (s Server) attachments(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.auth(w, r); !ok {
@@ -2144,7 +1986,7 @@ func (s Server) attachments(w http.ResponseWriter, r *http.Request) {
 		appErr(w, e)
 		return
 	}
-	jsonOut(w, 200, map[string]any{"attachments": xs})
+	jsonOut(w, http.StatusOK, map[string]any{"attachments": xs})
 }
 func (s Server) attachment(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.auth(w, r); !ok {
@@ -2163,7 +2005,7 @@ func (s Server) attachment(w http.ResponseWriter, r *http.Request) {
 	x, body, e := s.Service.GetAttachment(r.Context(), sha)
 	if e != nil {
 		if e.Error() == "attachment_not_found" {
-			jsonOut(w, 404, map[string]string{"error": "not_found"})
+			writeError(w, http.StatusNotFound, "not_found")
 		} else {
 			appErr(w, e)
 		}
@@ -2179,7 +2021,7 @@ func (s Server) usage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.Service.Attachments == nil || !s.Service.Attachments.Enabled {
-		jsonOut(w, 200, map[string]any{"attachments": "disabled"})
+		jsonOut(w, http.StatusOK, map[string]any{"attachments": "disabled"})
 		return
 	}
 	u, e := s.Service.AttachmentUsage(r.Context())
@@ -2187,7 +2029,7 @@ func (s Server) usage(w http.ResponseWriter, r *http.Request) {
 		appErr(w, e)
 		return
 	}
-	jsonOut(w, 200, map[string]any{"attachments": "enabled", "usage": u, "cap_bytes": s.Service.Attachments.Config.StorageCap, "cap_ratio": float64(u.TotalBytes) / float64(s.Service.Attachments.Config.StorageCap)})
+	jsonOut(w, http.StatusOK, map[string]any{"attachments": "enabled", "usage": u, "cap_bytes": s.Service.Attachments.Config.StorageCap, "cap_ratio": float64(u.TotalBytes) / float64(s.Service.Attachments.Config.StorageCap)})
 }
 func (s Server) metrics(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.auth(w, r); !ok {
@@ -2221,7 +2063,7 @@ func (s Server) taskReopen(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := taskID(r)
 	if err != nil || id < 1 {
-		appErr(w, errors.New("task id"))
+		writeError(w, http.StatusBadRequest, "invalid_context")
 		return
 	}
 	defer r.Body.Close()

@@ -1,9 +1,7 @@
 package api
 
 import (
-	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"time"
 
@@ -12,10 +10,8 @@ import (
 
 func quotaDecode(w http.ResponseWriter, r *http.Request, out any) bool {
 	defer r.Body.Close()
-	d := json.NewDecoder(http.MaxBytesReader(w, r.Body, 32<<10))
-	d.DisallowUnknownFields()
-	if d.Decode(out) != nil || d.Decode(new(any)) != io.EOF {
-		jsonOut(w, 400, map[string]string{"error": "invalid_quota_request"})
+	if decodeLimited(r.Body, out, 32<<10) != nil {
+		writeError(w, http.StatusBadRequest, "invalid_quota_request")
 		return false
 	}
 	return true
@@ -26,18 +22,18 @@ func (s Server) quotaAuth(w http.ResponseWriter, r *http.Request) (string, bool)
 		return "", false
 	}
 	if !store.ValidQuotaKey(r.PathValue("key")) {
-		jsonOut(w, 400, map[string]string{"error": "invalid_account_key"})
+		writeError(w, http.StatusBadRequest, "invalid_account_key")
 		return "", false
 	}
 	return client, true
 }
 func quotaError(w http.ResponseWriter, err error) {
 	if errors.Is(err, store.ErrQuotaLease) {
-		jsonOut(w, 409, map[string]string{"error": "quota_lease_conflict"})
+		writeError(w, http.StatusConflict, "quota_lease_conflict")
 	} else if errors.Is(err, store.ErrQuotaPresenceFull) {
-		jsonOut(w, 409, map[string]string{"error": "quota_presence_full"})
+		writeError(w, http.StatusConflict, "quota_presence_full")
 	} else {
-		jsonOut(w, 500, map[string]string{"error": "quota_store_unavailable"})
+		writeError(w, http.StatusInternalServerError, "quota_store_unavailable")
 	}
 }
 
@@ -45,7 +41,7 @@ func quotaError(w http.ResponseWriter, err error) {
 // (latest) deliberately stay open to every authenticated client.
 func (s Server) quotaScope(w http.ResponseWriter, client, key string) bool {
 	if !s.QuotaAccounts[client][key] {
-		jsonOut(w, 403, map[string]string{"error": "quota_account_forbidden"})
+		writeError(w, http.StatusForbidden, "quota_account_forbidden")
 		return false
 	}
 	return true
@@ -59,7 +55,7 @@ func (s Server) quotaLatest(w http.ResponseWriter, r *http.Request) {
 		quotaError(w, err)
 		return
 	}
-	jsonOut(w, 200, x)
+	jsonOut(w, http.StatusOK, x)
 }
 func (s Server) quotaPut(w http.ResponseWriter, r *http.Request) {
 	client, ok := s.quotaAuth(w, r)
@@ -74,7 +70,7 @@ func (s Server) quotaPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !store.ValidQuotaHolder(input.Holder) || !store.ValidQuotaObservation(input.Observation, time.Now()) {
-		jsonOut(w, 400, map[string]string{"error": "invalid_quota_observation"})
+		writeError(w, http.StatusBadRequest, "invalid_quota_observation")
 		return
 	}
 	x, deduped, err := s.Service.Store.PutQuota(r.Context(), r.PathValue("key"), client, input.Holder, input.Observation)
@@ -83,10 +79,10 @@ func (s Server) quotaPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if deduped {
-		jsonOut(w, 200, x)
+		jsonOut(w, http.StatusOK, x)
 		return
 	}
-	jsonOut(w, 201, x)
+	jsonOut(w, http.StatusCreated, x)
 }
 func (s Server) quotaLease(w http.ResponseWriter, r *http.Request) {
 	client, ok := s.quotaAuth(w, r)
@@ -104,7 +100,7 @@ func (s Server) quotaLease(w http.ResponseWriter, r *http.Request) {
 		input.TTLS = 120
 	}
 	if !store.ValidQuotaHolder(input.Holder) || input.TTLS < 1 || input.TTLS > 120 {
-		jsonOut(w, 400, map[string]string{"error": "invalid_quota_lease"})
+		writeError(w, http.StatusBadRequest, "invalid_quota_lease")
 		return
 	}
 	x, err := s.Service.Store.LeaseQuota(r.Context(), r.PathValue("key"), client, input.Holder, input.TTLS)
@@ -112,7 +108,7 @@ func (s Server) quotaLease(w http.ResponseWriter, r *http.Request) {
 		quotaError(w, err)
 		return
 	}
-	jsonOut(w, 200, x)
+	jsonOut(w, http.StatusOK, x)
 }
 func (s Server) quotaRelease(w http.ResponseWriter, r *http.Request) {
 	client, ok := s.quotaAuth(w, r)
@@ -126,7 +122,7 @@ func (s Server) quotaRelease(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !store.ValidQuotaHolder(input.Holder) {
-		jsonOut(w, 400, map[string]string{"error": "invalid_quota_lease"})
+		writeError(w, http.StatusBadRequest, "invalid_quota_lease")
 		return
 	}
 	if err := s.Service.Store.ReleaseQuota(r.Context(), r.PathValue("key"), client, input.Holder); err != nil {
@@ -150,7 +146,7 @@ func (s Server) quotaPresencePut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !store.ValidQuotaPresence(input, time.Now()) {
-		jsonOut(w, 400, map[string]string{"error": "invalid_quota_presence"})
+		writeError(w, http.StatusBadRequest, "invalid_quota_presence")
 		return
 	}
 	// The account key arrives in the body, so the observation PUT's grant
@@ -165,7 +161,7 @@ func (s Server) quotaPresencePut(w http.ResponseWriter, r *http.Request) {
 		quotaError(w, err)
 		return
 	}
-	jsonOut(w, 200, x)
+	jsonOut(w, http.StatusOK, x)
 }
 
 // quotaPresenceList is open to every authenticated client, like latest.
@@ -176,7 +172,7 @@ func (s Server) quotaPresenceList(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	host, key := q.Get("host_id"), q.Get("account_key")
 	if host != "" && !store.ValidQuotaHost(host) || key != "" && !store.ValidQuotaKey(key) {
-		jsonOut(w, 400, map[string]string{"error": "invalid_quota_presence_filter"})
+		writeError(w, http.StatusBadRequest, "invalid_quota_presence_filter")
 		return
 	}
 	records, truncated, err := s.Service.Store.QuotaPresence(r.Context(), host, key, quotaPresenceLimit)
@@ -184,5 +180,5 @@ func (s Server) quotaPresenceList(w http.ResponseWriter, r *http.Request) {
 		quotaError(w, err)
 		return
 	}
-	jsonOut(w, 200, map[string]any{"records": records, "truncated": truncated})
+	jsonOut(w, http.StatusOK, map[string]any{"records": records, "truncated": truncated})
 }

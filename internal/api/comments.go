@@ -34,11 +34,11 @@ const taskCommentRequestMax = 6*store.TaskCommentMaxBytes + 4096
 func taskCommentErr(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, store.ErrTaskCommentEmpty):
-		jsonOut(w, http.StatusBadRequest, map[string]string{"error": "comment_empty"})
+		writeError(w, http.StatusBadRequest, "comment_empty")
 	case errors.Is(err, store.ErrTaskCommentTooLong):
-		jsonOut(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "comment_too_long"})
+		writeError(w, http.StatusRequestEntityTooLarge, "comment_too_long")
 	case errors.Is(err, store.ErrTaskNotFound):
-		jsonOut(w, http.StatusNotFound, map[string]string{"error": "not_found"})
+		writeError(w, http.StatusNotFound, "not_found")
 	default:
 		appErr(w, err)
 	}
@@ -51,7 +51,7 @@ func (s Server) taskCommentCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := taskID(r)
 	if err != nil || id < 1 {
-		appErr(w, errors.New("task id"))
+		writeError(w, http.StatusBadRequest, "invalid_context")
 		return
 	}
 	defer r.Body.Close()
@@ -69,7 +69,7 @@ func (s Server) taskCommentCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(input.Author) != 0 || len(input.CreatedBy) != 0 {
-		jsonOut(w, http.StatusBadRequest, map[string]string{"error": "author_not_accepted"})
+		writeError(w, http.StatusBadRequest, "author_not_accepted")
 		return
 	}
 	x, err := s.Service.CreateTaskComment(r.Context(), client, id, input.Body)
@@ -86,7 +86,7 @@ func (s Server) taskCommentsList(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := taskID(r)
 	if err != nil || id < 1 {
-		appErr(w, errors.New("task id"))
+		writeError(w, http.StatusBadRequest, "invalid_context")
 		return
 	}
 	limit, err := queryLimit(r, 100, store.TaskCommentListMax)

@@ -88,10 +88,6 @@ func (h *Handler) boardTaskComments(w http.ResponseWriter, r *http.Request, task
 	writeBoardJSON(w, response)
 }
 
-func commentError(w http.ResponseWriter, status int, code string) {
-	writeBoardJSONStatus(w, status, map[string]string{"error": code})
-}
-
 // createTaskComment is the console's comment write. It takes the same
 // authentication, origin, and CSRF path as /ui/decisions/answer: ServeHTTP
 // has already required a verified operator email (service principals are
@@ -103,7 +99,7 @@ func (h *Handler) createTaskComment(w http.ResponseWriter, r *http.Request, emai
 	defer func() { h.audit(email, outcome.action, outcome.target, outcome.eventID, outcome.result) }()
 	if !sameOrigin(r) {
 		outcome.result = "origin_reject"
-		commentError(w, http.StatusForbidden, "origin_rejected")
+		writeJSONError(w, http.StatusForbidden, "origin_rejected")
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, uiCommentFormMax)
@@ -111,34 +107,34 @@ func (h *Handler) createTaskComment(w http.ResponseWriter, r *http.Request, emai
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
 			outcome.result = "too_long"
-			commentError(w, http.StatusRequestEntityTooLarge, "comment_too_long")
+			writeJSONError(w, http.StatusRequestEntityTooLarge, "comment_too_long")
 			return
 		}
-		commentError(w, http.StatusBadRequest, "invalid_form")
+		writeJSONError(w, http.StatusBadRequest, "invalid_form")
 		return
 	}
 	if !h.validCSRF(r, email) {
 		outcome.result = "csrf_reject"
-		commentError(w, http.StatusForbidden, "csrf_rejected")
+		writeJSONError(w, http.StatusForbidden, "csrf_rejected")
 		return
 	}
 	if r.URL.RawQuery != "" {
-		commentError(w, http.StatusBadRequest, "unknown_field")
+		writeJSONError(w, http.StatusBadRequest, "unknown_field")
 		return
 	}
 	for key, values := range r.PostForm {
 		switch key {
 		case "csrf", "body":
 			if len(values) != 1 {
-				commentError(w, http.StatusBadRequest, "invalid_form")
+				writeJSONError(w, http.StatusBadRequest, "invalid_form")
 				return
 			}
 		case "author", "created_by":
 			outcome.result = "author_reject"
-			commentError(w, http.StatusBadRequest, "author_not_accepted")
+			writeJSONError(w, http.StatusBadRequest, "author_not_accepted")
 			return
 		default:
-			commentError(w, http.StatusBadRequest, "unknown_field")
+			writeJSONError(w, http.StatusBadRequest, "unknown_field")
 			return
 		}
 	}
@@ -146,26 +142,26 @@ func (h *Handler) createTaskComment(w http.ResponseWriter, r *http.Request, emai
 	switch {
 	case err == nil:
 	case errors.Is(err, store.ErrTaskCommentEmpty):
-		commentError(w, http.StatusBadRequest, "comment_empty")
+		writeJSONError(w, http.StatusBadRequest, "comment_empty")
 		return
 	case errors.Is(err, store.ErrTaskCommentTooLong):
 		outcome.result = "too_long"
-		commentError(w, http.StatusRequestEntityTooLarge, "comment_too_long")
+		writeJSONError(w, http.StatusRequestEntityTooLarge, "comment_too_long")
 		return
 	case errors.Is(err, store.ErrTaskNotFound):
 		outcome.result = "not_found"
-		commentError(w, http.StatusNotFound, "not_found")
+		writeJSONError(w, http.StatusNotFound, "not_found")
 		return
 	case errors.Is(err, store.ErrTaskCommentInvalid):
-		commentError(w, http.StatusBadRequest, "comment_invalid")
+		writeJSONError(w, http.StatusBadRequest, "comment_invalid")
 		return
 	case strings.HasPrefix(err.Error(), "secret_like_content:"):
 		outcome.result = "secret_reject"
-		commentError(w, http.StatusBadRequest, "comment_secret_like")
+		writeJSONError(w, http.StatusBadRequest, "comment_secret_like")
 		return
 	default:
 		outcome.result = "store_error"
-		commentError(w, http.StatusInternalServerError, "unavailable")
+		writeJSONError(w, http.StatusInternalServerError, "unavailable")
 		return
 	}
 	outcome.result = "ok"

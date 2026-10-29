@@ -519,6 +519,13 @@ func writeBoardJSON(w http.ResponseWriter, response any) {
 	writeBoardJSONStatus(w, http.StatusOK, response)
 }
 
+// writeJSONError writes the console's JSON error body, {"error": code}, the
+// same shape the /v1 API uses.
+func writeJSONError(w http.ResponseWriter, status int, code string) {
+	writeBoardJSONStatus(w, status, map[string]string{"error": code})
+}
+
+// writeBoardJSONStatus is the one JSON writer for console API responses.
 func writeBoardJSONStatus(w http.ResponseWriter, status int, response any) {
 	body, err := json.Marshal(response)
 	if err != nil {
