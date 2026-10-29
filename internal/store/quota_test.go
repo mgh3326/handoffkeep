@@ -184,7 +184,9 @@ func TestQuotaDedupePostgres(t *testing.T) {
 	if _, err := s.LeaseQuota(ctx, key, "client", holderA, 120); err != nil {
 		t.Fatal(err)
 	}
-	x := QuotaObservation{Kind: "auto", MeasuredAt: time.Now().UTC().Truncate(time.Microsecond), Buckets: []QuotaBucket{{Window: "5h", UsedPct: 30, Scope: "account"}}}
+	// Base 10 min in the past so later +1/+2 min observations stay within the
+	// 1-minute future-skew limit enforced by ValidQuotaObservation.
+	x := QuotaObservation{Kind: "auto", MeasuredAt: time.Now().UTC().Add(-10 * time.Minute).Truncate(time.Microsecond), Buckets: []QuotaBucket{{Window: "5h", UsedPct: 30, Scope: "account"}}}
 	first, deduped, err := s.PutQuota(ctx, key, "client", holderA, x)
 	if err != nil || deduped {
 		t.Fatalf("first publish deduped=%v %v", deduped, err)
@@ -218,6 +220,7 @@ func TestQuotaDedupePostgres(t *testing.T) {
 		t.Fatalf("dedupe history=%d %v", count, err)
 	}
 	changed := x
+	changed.Buckets = append([]QuotaBucket(nil), x.Buckets...) // deep copy: x shares the slice
 	changed.Buckets[0].UsedPct = 31
 	changed.MeasuredAt = newer.MeasuredAt.Add(time.Minute)
 	// A client-supplied confirmed_at is never stored nor trusted.
