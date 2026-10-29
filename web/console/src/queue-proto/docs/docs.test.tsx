@@ -30,7 +30,7 @@ function json(body: unknown, status = 200): Promise<Response> {
   return Promise.resolve(new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } }));
 }
 
-function stubFetch(options: { failDocs?: boolean } = {}) {
+function stubFetch(options: { failDocs?: boolean; paginatePinned?: boolean; failLoadMore?: boolean } = {}) {
   const fetchMock = vi.fn((input: RequestInfo | URL) => {
     const url = new URL(String(input), "http://localhost");
     if (url.pathname === "/ui/api/docs/prefixes") {
@@ -46,13 +46,26 @@ function stubFetch(options: { failDocs?: boolean } = {}) {
         return Promise.reject(new Error("boom"));
       }
       const prefix = url.searchParams.get("prefix") ?? "";
+      const before = url.searchParams.get("before") ?? "";
       if (prefix === "policy/") {
+        if (options.paginatePinned) {
+          return before === ""
+            ? json(page("policy/", [PINNED[0]], true, PINNED[0].key))
+            : json(page("policy/", [PINNED[1]]));
+        }
         return json(page("policy/", PINNED));
       }
       if (prefix === "reports/") {
         return json(page("reports/", MAIN.filter((doc) => doc.key.startsWith("reports/"))));
       }
-      return json(page(prefix, MAIN));
+      if (before !== "") {
+        if (options.failLoadMore) {
+          return Promise.reject(new Error("boom"));
+        }
+        return json(page(prefix, []));
+      }
+      const next = options.failLoadMore ? MAIN[MAIN.length - 1].key : undefined;
+      return json(page(prefix, MAIN, options.failLoadMore === true, next));
     }
     if (url.pathname === "/ui/api/board/doc") {
       const key = url.searchParams.get("key") ?? "";
@@ -101,6 +114,25 @@ describe("DocsApp layout (#2245)", () => {
     await waitFor(() => expect(screen.getByText("Report Beta")).toBeTruthy());
     // pinned keys are not repeated in the prefix group
     expect(document.querySelectorAll('[data-doc-key="policy/active"]')).toHaveLength(1);
+  });
+
+  it("follows the pinned policy cursor so every policy document is pinned", async () => {
+    stubFetch({ paginatePinned: true });
+    render(<DocsApp />);
+    await waitFor(() =>
+      expect(document.querySelectorAll('[data-group="pinned"] [data-doc-key]')).toHaveLength(2),
+    );
+  });
+
+  it("a failed load-more is stated and the button stays for retry", async () => {
+    stubFetch({ failLoadMore: true });
+    render(<DocsApp />);
+    await waitFor(() => expect(screen.getByText("Report Beta")).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "더 보기" }));
+    await waitFor(() =>
+      expect(screen.getByRole("alert").textContent).toContain("다음 페이지를 불러오지 못했습니다"),
+    );
+    expect(screen.getByRole("button", { name: "더 보기" })).toBeTruthy();
   });
 
   it("filters the loaded page by key or title", async () => {

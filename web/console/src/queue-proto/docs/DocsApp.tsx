@@ -21,7 +21,9 @@ import type { DocPrefix, DocSummary } from "./types";
 const DocMarkdown = lazy(() => import("../DocMarkdown"));
 
 const PINNED_PREFIX = "policy/";
-const PINNED_LIMIT = 20;
+/** Safety bound on the pinned scan: policy sets are small, but a loop must
+ * always terminate even if a cursor fails to advance. */
+const PINNED_MAX = 500;
 const PAGE_LIMIT = 100;
 
 export type DocsLocation = { prefix: string; key: string | null };
@@ -292,18 +294,36 @@ export function DocsApp() {
 
   useEffect(() => {
     let cancelled = false;
-    fetchDocs(PINNED_PREFIX, undefined, PINNED_LIMIT).then(
-      (page) => {
-        if (!cancelled) {
-          setPinned(page.documents);
+    // Follow the cursor: the pinned group must show every policy document,
+    // not just the first page.
+    const loadPinned = async () => {
+      const documents: DocSummary[] = [];
+      let before: string | undefined;
+      try {
+        for (;;) {
+          const page = await fetchDocs(PINNED_PREFIX, before, PAGE_LIMIT);
+          if (cancelled) {
+            return;
+          }
+          documents.push(...page.documents);
+          if (
+            !page.has_more ||
+            page.next_before === undefined ||
+            page.next_before === before ||
+            documents.length >= PINNED_MAX
+          ) {
+            break;
+          }
+          before = page.next_before;
         }
-      },
-      () => {
+        setPinned(documents);
+      } catch {
         if (!cancelled) {
           setPinnedFailed(true);
         }
-      },
-    );
+      }
+    };
+    void loadPinned();
     return () => {
       cancelled = true;
     };
@@ -450,9 +470,11 @@ export function DocsApp() {
             {listLoading ? "불러오는 중…" : `${pinnedKeys.size + listVisible.length}건`}
           </span>
         </div>
-        {listFailed && currentItems.length === 0 ? (
+        {listFailed ? (
           <p className="dx-error" role="alert">
-            문서 목록을 불러오지 못했습니다 — 다시 시도해 주세요.
+            {currentItems.length === 0
+              ? "문서 목록을 불러오지 못했습니다 — 다시 시도해 주세요."
+              : "다음 페이지를 불러오지 못했습니다 — '더 보기'로 다시 시도해 주세요."}
           </p>
         ) : null}
         {showPinned ? (
