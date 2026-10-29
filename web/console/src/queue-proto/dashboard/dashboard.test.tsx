@@ -41,6 +41,7 @@ function dashboard(): DashboardResponse {
         merged: [{ pr: "https://github.com/mgh3326/handoffkeep/pull/93", number: 93, task_id: 9, title: "landed", state: "merged", at: NOW, merged_at: NOW }],
       },
       { repo: "mgh3326/panewire", open: [], merged: [] },
+      { repo: "", open: [{ pr: "#12", task_id: 13, title: "odd ref", state: "hold", at: NOW }], merged: [] },
     ],
     missing: [
       { section: "prs", source: "PR review / CI / mergeability state", note: "not recorded" },
@@ -108,6 +109,9 @@ describe("DashboardApp (hk 2280)", () => {
     expect(within(prs).getByText("abcdef0")).toBeTruthy();
     expect(within(prs).getByText("mgh3326/panewire")).toBeTruthy();
     expect(within(prs).getByText("최근 머지 1")).toBeTruthy();
+    // A refs.pr that is not a GitHub pull URL is text, never a link.
+    expect(within(prs).getByText("#94").closest("a")!.getAttribute("href")).toBe("https://github.com/mgh3326/handoffkeep/pull/94");
+    expect(within(prs).getByText("#12").closest("a")).toBeNull();
 
     const stops = screen.getByRole("region", { name: "쿼터 정지 결정" });
     expect(stops.textContent).toContain("hk에 기록 없음");

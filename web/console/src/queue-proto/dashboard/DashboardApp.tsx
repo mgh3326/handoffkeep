@@ -348,9 +348,15 @@ function PRRow({ pr, now, merged }: { pr: DashboardRepo["open"][number]; now: nu
   return (
     <li>
       {merged ? null : <StateIcon state={pr.state} />}
-      <a href={pr.pr} className="hd-mono" rel="noreferrer" target="_blank">
-        {pr.number ? `#${pr.number}` : pr.pr}
-      </a>
+      {/* The server sets number only for an exact https://github.com/<owner>/<repo>/pull/<n>
+          ref; any other refs.pr value is shown as text, never as a link. */}
+      {pr.number ? (
+        <a href={pr.pr} className="hd-mono" rel="noreferrer" target="_blank">
+          #{pr.number}
+        </a>
+      ) : (
+        <span className="hd-mono">{pr.pr}</span>
+      )}
       <TaskLink task={{ id: pr.task_id, title: pr.title }} />
       <span className="hd-meta">{merged ? `머지 ${relativeLabel(now, pr.merged_at) ?? ""}` : stateLabel(pr.state)}</span>
       {pr.head_sha ? <span className="hd-meta hd-mono">{pr.head_sha.slice(0, 7)}</span> : null}
