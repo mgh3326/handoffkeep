@@ -31,22 +31,22 @@ start() {
   cat "$tmp/server.log"
   return 1
 }
-stop() { kill "$pid"; wait "$pid"; pid=''; }
+stop() { kill "$pid"; wait "$pid" 2>/dev/null || true; pid=''; }
 # First start exercises the fresh database, second the idempotent restart.
 start "$tmp/new" "$MIGRATION_TEST_LISTEN"
 stop
 start "$tmp/new" "$MIGRATION_TEST_LISTEN"
 stop
-# Rewind only this additive change to reproduce the immediately previous
-# schema, preserving a legacy task. The old binary starts that schema first.
+# Recreate the database, then let the previous binary establish its actual
+# schema before inserting a legacy task and starting the new binary.
+dropdb --maintenance-db="$admin_url" "$db_name"
+createdb --maintenance-db="$admin_url" "$db_name"
+start "$tmp/old" "$MIGRATION_TEST_LISTEN"
+stop
 psql "$HANDOFFKEEP_TEST_DB_URL" -v ON_ERROR_STOP=1 <<'SQL'
-DELETE FROM schema_version WHERE version=22;
-ALTER TABLE tasks DROP COLUMN expected;
 INSERT INTO tasks(lane,title,kind,state,created_by,created_at,updated_at)
 VALUES('migration-test','legacy','implement','backlog','test',now(),now());
 SQL
-start "$tmp/old" "$MIGRATION_TEST_LISTEN"
-stop
 start "$tmp/new" "$MIGRATION_TEST_LISTEN"
 psql "$HANDOFFKEEP_TEST_DB_URL" -v ON_ERROR_STOP=1 -tAc "SELECT 1/(CASE WHEN EXISTS (SELECT 1 FROM tasks WHERE title='legacy' AND expected IS NULL) AND EXISTS (SELECT 1 FROM schema_version WHERE version=22) THEN 1 ELSE 0 END)"
 stop
