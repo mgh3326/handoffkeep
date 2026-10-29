@@ -250,7 +250,7 @@ func TestVersionFlagAlias(t *testing.T) {
 // command reads no environment, config file, or remote server.
 func TestVersionIgnoresEnvironment(t *testing.T) {
 	for _, name := range []string{
-		"HK_LINEAR_API_URL", "HK_LINEAR_TEAM_ID", "HK_LINEAR_API_KEY", "HK_ALERT_DISCORD_WEBHOOK",
+		"HK_ALERT_DISCORD_WEBHOOK",
 		"HANDOFFKEEP_URL", "HANDOFFKEEP_TOKEN", "HANDOFFKEEP_DB_URL", "HANDOFFKEEP_AUTH_FILE",
 		"HANDOFFKEEP_UI_CF_TEAM_DOMAIN", "HANDOFFKEEP_UI_CF_AUD", "HANDOFFKEEP_UI_ALLOWED_EMAILS",
 		"HANDOFFKEEP_UI_ALLOWED_SERVICE_NAMES", "HANDOFFKEEP_HUB_URL", "HANDOFFKEEP_HUB_TOKEN",

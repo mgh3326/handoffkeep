@@ -1,0 +1,331 @@
+/* hk 2245 document browser — tokens only, no color literals (same rule as
+ * proto.css / grades.css / deploys.css). The shared shell rules come from
+ * board.css; this file owns the three-pane browser and its phone layout. */
+
+.dx-root {
+  display: grid;
+  grid-template-columns: 13rem minmax(14rem, 20rem) minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
+  height: calc(100vh - 3.0625rem);
+  min-height: 24rem;
+}
+
+.dx-head {
+  grid-column: 1 / -1;
+  padding: var(--hk-space-3) var(--hk-space-4) var(--hk-space-2);
+  border-bottom: 1px solid var(--hk-border-subtle);
+}
+
+.dx-head h1 {
+  margin: 0;
+  font-size: var(--hk-font-page);
+  line-height: var(--hk-leading-page);
+  color: var(--hk-text-primary);
+}
+
+.dx-sub {
+  margin: var(--hk-space-1) 0 0;
+  font-size: var(--hk-font-meta);
+  line-height: var(--hk-leading-meta);
+  color: var(--hk-text-secondary);
+}
+
+.dx-rail,
+.dx-list,
+.dx-reader {
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--hk-space-3);
+}
+
+.dx-rail {
+  border-right: 1px solid var(--hk-border-subtle);
+  background: var(--hk-surface-1);
+}
+
+.dx-list {
+  border-right: 1px solid var(--hk-border-subtle);
+}
+
+.dx-rail-h,
+.dx-group-h {
+  margin: 0 0 var(--hk-space-1);
+  padding: 0 var(--hk-space-2);
+  font-size: var(--hk-font-meta);
+  line-height: var(--hk-leading-meta);
+  font-weight: var(--hk-weight-medium);
+  color: var(--hk-text-muted);
+}
+
+.dx-rail-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--hk-space-2);
+  width: 100%;
+  min-height: var(--hk-control-height);
+  padding: 0 var(--hk-space-2);
+  border: 0;
+  border-radius: var(--hk-radius-md);
+  background: transparent;
+  color: var(--hk-text-secondary);
+  text-align: left;
+  cursor: pointer;
+}
+
+.dx-rail-item:hover {
+  background: var(--hk-surface-2);
+}
+
+.dx-rail-item.on {
+  background: var(--hk-surface-selected);
+  box-shadow: inset 3px 0 0 var(--hk-accent);
+  color: var(--hk-text-primary);
+  font-weight: var(--hk-weight-medium);
+}
+
+.dx-rail-item.pinned .dx-rail-name {
+  color: var(--hk-accent);
+}
+
+.dx-rail-name,
+.dx-mono {
+  font-family: var(--hk-font-mono);
+}
+
+.dx-count {
+  font-size: var(--hk-font-meta);
+  color: var(--hk-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.dx-list-head {
+  display: flex;
+  align-items: center;
+  gap: var(--hk-space-2);
+  margin-bottom: var(--hk-space-2);
+}
+
+.dx-search {
+  flex: 1;
+  min-width: 0;
+  height: var(--hk-control-height);
+  padding: 0 var(--hk-space-2);
+  border: 1px solid var(--hk-border-control);
+  border-radius: var(--hk-radius-md);
+  background: var(--hk-surface-1);
+  color: var(--hk-text-primary);
+}
+
+.dx-list-count {
+  flex: none;
+  font-size: var(--hk-font-meta);
+  color: var(--hk-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.dx-group {
+  margin-bottom: var(--hk-space-3);
+}
+
+.dx-row {
+  display: block;
+  padding: var(--hk-space-2);
+  border-radius: var(--hk-radius-md);
+  color: var(--hk-text-primary);
+  text-decoration: none;
+}
+
+.dx-row:hover {
+  background: var(--hk-surface-2);
+}
+
+.dx-row.on {
+  background: var(--hk-surface-selected);
+  box-shadow: inset 3px 0 0 var(--hk-accent);
+}
+
+.dx-row-title {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  font-weight: var(--hk-weight-medium);
+  overflow-wrap: anywhere;
+}
+
+.dx-row-key {
+  display: block;
+  margin-top: var(--hk-space-half);
+  font-family: var(--hk-font-mono);
+  font-size: var(--hk-font-meta);
+  color: var(--hk-text-muted);
+  overflow-wrap: anywhere;
+}
+
+.dx-row-meta,
+.dx-reader-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--hk-space-1) var(--hk-space-2);
+  margin-top: var(--hk-space-1);
+  font-size: var(--hk-font-meta);
+  line-height: var(--hk-leading-meta);
+  color: var(--hk-text-muted);
+}
+
+.dx-more {
+  margin: 0 var(--hk-space-2);
+}
+
+.dx-reader {
+  padding: var(--hk-space-3) var(--hk-space-4);
+}
+
+.dx-reader-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: var(--hk-space-2);
+  justify-content: space-between;
+}
+
+.dx-reader-head h2 {
+  margin: 0;
+  font-size: var(--hk-font-title);
+  line-height: var(--hk-leading-title);
+  overflow-wrap: anywhere;
+}
+
+.dx-reader-actions {
+  display: flex;
+  gap: var(--hk-space-2);
+}
+
+.dx-reader-actions .hk-btn {
+  text-decoration: none;
+}
+
+.dx-empty,
+.dx-error,
+.dx-warn {
+  margin: var(--hk-space-2) 0;
+  padding: 0 var(--hk-space-2);
+  font-size: var(--hk-font-meta);
+  line-height: var(--hk-leading-meta);
+}
+
+.dx-empty {
+  color: var(--hk-text-muted);
+}
+
+.dx-error {
+  color: var(--hk-danger);
+}
+
+.dx-warn {
+  color: var(--hk-warning);
+}
+
+/* Tablet: the prefix tree keeps its column, list and reader stack. */
+@media (max-width: 1024px) {
+  .dx-root {
+    grid-template-columns: 12rem minmax(0, 1fr);
+    grid-template-rows: auto minmax(10rem, 40%) minmax(0, 1fr);
+    height: auto;
+  }
+  .dx-rail {
+    grid-row: 2 / span 2;
+    grid-column: 1;
+  }
+  .dx-list {
+    grid-column: 2;
+    grid-row: 2;
+    border-right: 0;
+    border-bottom: 1px solid var(--hk-border-subtle);
+  }
+  .dx-reader {
+    grid-column: 2;
+    grid-row: 3;
+  }
+}
+
+/* Phone: one column; the shell nav and the prefix tree become horizontal
+ * strips so the document keeps the full width. */
+@media (max-width: 640px) {
+  .hk-page {
+    flex-direction: column;
+  }
+  .hk-page > .hk-side {
+    position: static;
+    flex: 0 0 auto;
+    flex-direction: row;
+    align-items: center;
+    width: 100%;
+    height: auto;
+    padding: var(--hk-space-2);
+    overflow-x: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--hk-border-subtle);
+  }
+  .hk-page > .hk-side .hk-side-nav {
+    flex-direction: row;
+    flex: 1;
+    overflow-x: auto;
+  }
+  .hk-page > .hk-side .hk-side-nav .hk-side-item {
+    width: auto;
+    height: auto;
+    padding: var(--hk-space-1) var(--hk-space-2);
+    white-space: nowrap;
+  }
+  .hk-page > .hk-side .hk-side-foot {
+    display: none;
+  }
+  .dx-root {
+    display: flex;
+    flex-direction: column;
+    height: auto;
+  }
+  .dx-head {
+    order: 0;
+  }
+  .dx-rail {
+    order: 1;
+    display: flex;
+    align-items: center;
+    gap: var(--hk-space-2);
+    padding: var(--hk-space-2);
+    overflow-x: auto;
+    overflow-y: hidden;
+    border-right: 0;
+    border-bottom: 1px solid var(--hk-border-subtle);
+  }
+  .dx-rail-h {
+    margin: 0;
+    padding: 0;
+    white-space: nowrap;
+  }
+  .dx-rail-item {
+    width: auto;
+    padding: 0 var(--hk-space-2);
+    white-space: nowrap;
+  }
+  .dx-warn {
+    margin: 0;
+    padding: 0;
+    white-space: nowrap;
+  }
+  .dx-list {
+    order: 2;
+    max-height: 42vh;
+    border-right: 0;
+    border-bottom: 1px solid var(--hk-border-subtle);
+  }
+  .dx-reader {
+    order: 3;
+    padding: var(--hk-space-3);
+  }
+}

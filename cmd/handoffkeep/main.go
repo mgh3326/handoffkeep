@@ -26,7 +26,6 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/api"
 	"github.com/mgh3326/handoffkeep/internal/attachments"
 	"github.com/mgh3326/handoffkeep/internal/cfaccess"
-	"github.com/mgh3326/handoffkeep/internal/linear"
 	hkmcp "github.com/mgh3326/handoffkeep/internal/mcp"
 	"github.com/mgh3326/handoffkeep/internal/remote"
 	"github.com/mgh3326/handoffkeep/internal/store"
@@ -52,7 +51,7 @@ func main() {
 }
 func run(args []string, out, errout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: handoffkeep serve|mcp|ctx|memory|doc|attach|r2usage|tasks|decisions|linear|fleet-metrics|bench|version")
+		return errors.New("usage: handoffkeep serve|mcp|ctx|memory|doc|attach|r2usage|tasks|decisions|fleet-metrics|bench|version")
 	}
 	switch args[0] {
 	case "wrk":
@@ -75,8 +74,6 @@ func run(args []string, out, errout io.Writer) error {
 		return tasksCmdE(args[1:], out, errout)
 	case "decisions":
 		return decisionsCmd(args[1:], out)
-	case "linear":
-		return linearCmd(args[1:], out)
 	case "fleet-metrics":
 		return fleetMetricsCmd(args[1:], out)
 	case "bench":
@@ -84,79 +81,7 @@ func run(args []string, out, errout io.Writer) error {
 	case "version", "--version":
 		return versionCmd(args[1:], out)
 	default:
-		return errors.New("usage: handoffkeep serve|mcp|ctx|memory|doc|attach|r2usage|tasks|decisions|linear|fleet-metrics|bench|version")
-	}
-}
-
-func linearCmd(args []string, out io.Writer) error {
-	if len(args) == 0 || args[0] != "reconcile" {
-		return errors.New("usage: handoffkeep linear reconcile [--dry-run]")
-	}
-	fs := flag.NewFlagSet("linear reconcile", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	hkClient := remoteClient(fs)
-	dryRun := fs.Bool("dry-run", false, "print drift without writing the handoffkeep report")
-	apiURL := fs.String("linear-api-url", strings.TrimSpace(os.Getenv("HK_LINEAR_API_URL")), "Linear GraphQL URL (defaults to the official endpoint)")
-	teamID := fs.String("linear-team-id", strings.TrimSpace(os.Getenv("HK_LINEAR_TEAM_ID")), "Linear team ID")
-	if err := fs.Parse(args[1:]); err != nil {
-		return err
-	}
-	if err := mustClient(hkClient); err != nil {
-		return err
-	}
-	linearClient, err := linear.NewClient(linear.Config{
-		APIURL: *apiURL,
-		APIKey: strings.TrimSpace(os.Getenv("HK_LINEAR_API_KEY")),
-		TeamID: *teamID,
-	})
-	if err != nil {
-		return err
-	}
-	reconciler := &linear.Reconciler{
-		Client: linearClient,
-		ListTasks: func(ctx context.Context) ([]store.Task, error) {
-			return listAllReconcileTasks(ctx, func(ctx context.Context, afterID int64, limit int) ([]store.Task, error) {
-				return hkClient.ListTasksPage(ctx, "", "", "", nil, nil, afterID, limit)
-			})
-		},
-		OutboxStatus: hkClient.LinearOutboxStatus,
-		WriteDocument: func(ctx context.Context, document store.Document) (store.Document, bool, error) {
-			return hkClient.PutDocument(ctx, "", document)
-		},
-		DryRun: *dryRun,
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), linear.ReconcilePassBudget)
-	defer cancel()
-	report, err := reconciler.RunOnce(ctx)
-	if err != nil {
-		return err
-	}
-	report.Body = ""
-	return printJSON(out, report)
-}
-
-const reconcileTaskPageSize = 1000
-
-func listAllReconcileTasks(ctx context.Context, fetch func(context.Context, int64, int) ([]store.Task, error)) ([]store.Task, error) {
-	var tasks []store.Task
-	var afterID int64
-	for {
-		page, err := fetch(ctx, afterID, reconcileTaskPageSize)
-		if err != nil {
-			return nil, err
-		}
-		previousID := afterID
-		for _, task := range page {
-			if task.ID <= previousID {
-				return nil, fmt.Errorf("task cursor did not advance after %d", previousID)
-			}
-			previousID = task.ID
-		}
-		tasks = append(tasks, page...)
-		if len(page) < reconcileTaskPageSize {
-			return tasks, nil
-		}
-		afterID = previousID
+		return errors.New("usage: handoffkeep serve|mcp|ctx|memory|doc|attach|r2usage|tasks|decisions|fleet-metrics|bench|version")
 	}
 }
 
@@ -252,7 +177,7 @@ func taskRefs(pr, headSHA, reportPath, jobID string, linear *store.TaskLinear) (
 }
 
 func normalizeTaskArgs(args []string) ([]string, error) {
-	valueFlags := map[string]bool{"--url": true, "--token": true, "--lane": true, "--parent-lane": true, "--state": true, "--title": true, "--kind": true, "--priority": true, "--by": true, "--to": true, "--note": true, "--reason": true, "--question": true, "--limit": true, "--pr": true, "--head-sha": true, "--report-path": true, "--job-id": true, "--no-job": true, "--option": true, "--recommended": true, "--tier": true, "--grade": true, "--brief-key": true, "--label": true, "--linear-report-key": true, "--linear-verify-key": true, "--linear-decision-key": true, "--deploy-sha": true, "--origin-pr": true, "--origin-task": true, "--doc": true, "--project": true, "--area": true}
+	valueFlags := map[string]bool{"--url": true, "--token": true, "--lane": true, "--parent-lane": true, "--state": true, "--title": true, "--kind": true, "--priority": true, "--expected": true, "--by": true, "--to": true, "--note": true, "--reason": true, "--question": true, "--limit": true, "--pr": true, "--head-sha": true, "--report-path": true, "--job-id": true, "--no-job": true, "--option": true, "--recommended": true, "--tier": true, "--grade": true, "--brief-key": true, "--label": true, "--linear-report-key": true, "--linear-verify-key": true, "--linear-decision-key": true, "--deploy-sha": true, "--origin-pr": true, "--origin-task": true, "--doc": true, "--project": true, "--area": true}
 	flags, positional := []string{}, []string{}
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -322,6 +247,7 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 	title := fs.String("title", "", "task title")
 	kind := fs.String("kind", "implement", "task kind")
 	priority := fs.Int("priority", 0, "higher is first")
+	expected := fs.String("expected", "", "expected task duration (for example 4h or 1d; tasks add only)")
 	by := fs.String("by", "", "session label")
 	to := fs.String("to", "", "target state")
 	note := fs.String("note", "", "transition note")
@@ -336,10 +262,10 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 	originPR := fs.String("origin-pr", "", "merged pull request this task came from")
 	originTask := fs.Int64("origin-task", 0, "task this task came from (a disposition item for an ordered follow-up)")
 	bodyDoc := fs.String("doc", "", "hk document key holding the task body: key or key#section (tasks add only)")
-	linearSync := fs.Bool("linear-sync", false, "mirror this builder task when the serving instance also enables Linear sync")
 	tier := fs.String("tier", "", "Linear task tier metadata (T0..T3)")
 	grade := fs.String("grade", "", "Linear task grade metadata (S+..C)")
 	briefKey := fs.String("brief-key", "", "handoffkeep brief document key for the Linear issue")
+	linearSync := fs.Bool("linear-sync", false, "retain legacy Linear task metadata (sync connector retired)")
 	linearReportKey := fs.String("linear-report-key", "", "handoffkeep report document key for a terminal Linear comment")
 	linearVerifyKey := fs.String("linear-verify-key", "", "independent verification report key for a terminal Linear comment")
 	linearDecisionKey := fs.String("linear-decision-key", "", "decision document key for a terminal Linear comment")
@@ -357,8 +283,11 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 	if err := fs.Parse(parseArgs); err != nil {
 		return err
 	}
-	linearFlagsUsed, docFlagUsed, noJobSet, projectSet, areaSet := false, false, false, false, false
+	linearFlagsUsed, docFlagUsed, noJobSet, projectSet, areaSet, expectedSet := false, false, false, false, false, false
 	fs.Visit(func(item *flag.Flag) {
+		if item.Name == "expected" {
+			expectedSet = true
+		}
 		if item.Name == "doc" {
 			docFlagUsed = true
 		}
@@ -406,6 +335,9 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 	}
 	// A task body is attached only when the task is filed; no other
 	// subcommand writes body_doc, so the flag must not be silently ignored.
+	if expectedSet && (args[0] != "add" || !store.ValidExpected(*expected)) {
+		return errors.New("--expected requires a positive duration and is accepted only by tasks add")
+	}
 	if docFlagUsed && args[0] != "add" {
 		return errors.New("--doc is accepted only by tasks add")
 	}
@@ -452,7 +384,11 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 		if areaSet {
 			areaTag = area
 		}
-		x, err := c.CreateTask(ctx, store.Task{Lane: *lane, ParentLane: *parentLane, Title: *title, Kind: *kind, Priority: *priority, Refs: *refs, BodyDoc: *bodyDoc, Project: project, Area: areaTag})
+		var expectedDuration *string
+		if expectedSet {
+			expectedDuration = expected
+		}
+		x, err := c.CreateTask(ctx, store.Task{Expected: expectedDuration, Lane: *lane, ParentLane: *parentLane, Title: *title, Kind: *kind, Priority: *priority, Refs: *refs, BodyDoc: *bodyDoc, Project: project, Area: areaTag})
 		if err != nil {
 			// invalid_context on create is a validation failure; append the
 			// add requirements rather than leave a bare code to diagnose.
@@ -1670,37 +1606,6 @@ type serveOptions struct {
 	workerStopBudget time.Duration
 }
 
-func configureLinearWorkers(enabled bool, st *store.Store, apiURL, teamID string, apiKey func() string) ([]backgroundWorker, error) {
-	if !enabled {
-		return nil, nil
-	}
-	key := ""
-	if apiKey != nil {
-		key = apiKey()
-	}
-	linearClient, err := linear.NewClient(linear.Config{APIURL: apiURL, APIKey: key, TeamID: teamID})
-	if err != nil {
-		return nil, err
-	}
-	st.EnableLinearSync()
-	return []backgroundWorker{
-		&linear.Drain{Store: st, Client: linearClient},
-		&linear.Reconciler{
-			Client: linearClient,
-			ListTasks: func(ctx context.Context) ([]store.Task, error) {
-				return listAllReconcileTasks(ctx, func(ctx context.Context, afterID int64, limit int) ([]store.Task, error) {
-					return st.ListTasksPage(ctx, "", "", "", nil, nil, afterID, limit)
-				})
-			},
-			OutboxStatus: st.GetLinearOutboxStatus,
-			WriteDocument: func(ctx context.Context, document store.Document) (store.Document, bool, error) {
-				document.CreatedBy = "linear-reconcile"
-				return st.PutDocument(ctx, document)
-			},
-		},
-	}, nil
-}
-
 // runServer owns the serving lifecycle. HTTP listeners stop accepting new
 // connections first, active requests receive their drain budget, background
 // workers are canceled only after that drain, and the store closes last.
@@ -1805,9 +1710,6 @@ func serve(args []string, errout io.Writer) error {
 	fs.SetOutput(errout)
 	listen := fs.String("listen", "127.0.0.1:8800", "loopback address")
 	tail := fs.String("listen-tailnet", "", "optional tailnet address")
-	linearSync := fs.Bool("linear-sync", false, "enable hk-to-Linear outbox drain and reconciliation (default off)")
-	linearAPIURL := fs.String("linear-api-url", strings.TrimSpace(os.Getenv("HK_LINEAR_API_URL")), "Linear GraphQL URL")
-	linearTeamID := fs.String("linear-team-id", strings.TrimSpace(os.Getenv("HK_LINEAR_TEAM_ID")), "Linear team ID")
 	if e := fs.Parse(args); e != nil {
 		return e
 	}
@@ -1852,13 +1754,7 @@ func serve(args []string, errout io.Writer) error {
 		return e
 	}
 	svc := api.Service{Store: st, Attachments: am}
-	workers, e := configureLinearWorkers(*linearSync, st, *linearAPIURL, *linearTeamID, func() string {
-		return strings.TrimSpace(os.Getenv("HK_LINEAR_API_KEY"))
-	})
-	if e != nil {
-		return e
-	}
-	workers = append(workers, chatRetentionWorker{store: st})
+	workers := []backgroundWorker{chatRetentionWorker{store: st}}
 	uiHandler, e := uiFromEnv(st)
 	if e != nil {
 		return e
