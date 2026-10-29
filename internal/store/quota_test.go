@@ -327,4 +327,17 @@ func TestQuotaRetentionPostgres(t *testing.T) {
 	if n, err = s.PruneQuotaHistory(ctx); err != nil || n != 0 {
 		t.Fatalf("retention second prune=%d %v", n, err)
 	}
+	// The prune flag must not outlive the function inside a larger
+	// transaction: a later arbitrary DELETE in the same transaction stays blocked.
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SELECT quota_prune_history()`); err != nil {
+		t.Fatalf("retention prune in tx: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM quota_observations WHERE id=$1`, freshFree); err == nil {
+		t.Fatal("retention prune flag leaked into the enclosing transaction")
+	}
 }

@@ -90,7 +90,7 @@ func migrateQuota(ctx context.Context, tx pgx.Tx) error {
 		// The only defined delete path: rows whose received_at is 90+ days old
 		// and which no quota_latest row points to. Called manually or by a
 		// later approved job; no scheduler is registered here.
-		`CREATE OR REPLACE FUNCTION quota_prune_history() RETURNS bigint LANGUAGE plpgsql AS $$ DECLARE n bigint; BEGIN PERFORM set_config('handoffkeep.quota_prune', 'on', true); DELETE FROM quota_observations WHERE received_at < clock_timestamp() - interval '90 days' AND id NOT IN (SELECT observation_id FROM quota_latest); GET DIAGNOSTICS n = ROW_COUNT; RETURN n; END; $$`,
+		`CREATE OR REPLACE FUNCTION quota_prune_history() RETURNS bigint LANGUAGE plpgsql AS $$ DECLARE n bigint; BEGIN PERFORM set_config('handoffkeep.quota_prune', 'on', true); DELETE FROM quota_observations WHERE received_at < clock_timestamp() - interval '90 days' AND id NOT IN (SELECT observation_id FROM quota_latest); GET DIAGNOSTICS n = ROW_COUNT; PERFORM set_config('handoffkeep.quota_prune', 'off', true); RETURN n; END; $$`,
 		// Version 23 records the quota migration retroactively. The CREATEs
 		// above stay ungated IF NOT EXISTS so servers that already ran
 		// migrateQuota only insert the marker row.

@@ -71,6 +71,12 @@ MUTANTS = [
         "TestQuotaGrantFile", "quota grant refused startup",
     ),
     (
+        "prune-flag-not-reset", "store/quota.go", True,
+        " PERFORM set_config('handoffkeep.quota_prune', 'off', true);",
+        "",
+        "TestQuotaRetentionPostgres", "prune flag leaked",
+    ),
+    (
         "grant-unknown-client-refuses", "api/api.go", False,
         '\t\t\tfmt.Fprintf(os.Stderr, "handoffkeep: ignoring HANDOFFKEEP_QUOTA_ grants for unknown client %q\\n", id)\n'
         '\t\t\tdelete(grants, id)',
