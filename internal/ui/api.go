@@ -100,6 +100,14 @@ func (h *Handler) serveAPI(w http.ResponseWriter, r *http.Request, identity cfac
 			return
 		}
 		h.docsPrefixes(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/ui/api/dashboard":
+		// The home dashboard aggregates task titles and quota state for the
+		// operator's browser; service principals have no page that reads it.
+		if identity.ServiceName != "" {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		h.dashboardAPI(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/ui/api/bench/catalog":
 		// The grade catalog is the same operator-only reading material as
 		// /ui/api/board/doc — provenance fields are not for service tokens.

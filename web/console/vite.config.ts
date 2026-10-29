@@ -33,6 +33,9 @@ export default defineConfig({
         // /ui/docs loads the document browser built from src/queue-proto/docs
         // — its own entry so browsing costs the queue nothing (hk 2245).
         docs: resolve(root, "src/queue-proto/docs/main.tsx"),
+        // /ui/home loads the read-only operator dashboard built from
+        // src/queue-proto/dashboard — its own entry, same constraint (hk 2280).
+        dashboard: resolve(root, "src/queue-proto/dashboard/main.tsx"),
         // The --hk-* design tokens ship as their own static stylesheet so the
         // React entries and the Go templates link one and the same file.
         tokens: resolve(root, "src/design/tokens.css"),

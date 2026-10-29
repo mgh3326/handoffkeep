@@ -36,11 +36,11 @@ export function applyTheme(theme: Theme, storage?: Pick<Storage, "setItem">): vo
   }
 }
 
-export type NavKey = "queue" | "deploys" | "docs" | "decisions" | "fleet" | "grades" | "timeline" | "compose";
+export type NavKey = "home" | "queue" | "deploys" | "docs" | "decisions" | "fleet" | "grades" | "timeline" | "compose";
 
-/** Global destinations. Home (#500) does not exist yet, so it is listed as
- * not-yet-available text instead of a link that leads nowhere. */
+/** Global destinations. Home is the read-only operator dashboard (hk 2280). */
 const NAV_LINKS: { key: NavKey; label: string; href: string }[] = [
+  { key: "home", label: "홈", href: "/ui/home" },
   { key: "queue", label: "Queue", href: "/ui/queue" },
   { key: "deploys", label: "Deploys", href: "/ui/deploys" },
   { key: "docs", label: "Documents", href: "/ui/docs" },
@@ -56,10 +56,6 @@ export function GlobalNav({ current }: { current: NavKey }) {
     <>
       <div className="hk-brand">Fleet console</div>
       <nav className="hk-side-nav" aria-label="전역 탐색">
-        <span className="hk-side-item hk-side-soon">
-          <span>홈</span>
-          <span className="hk-side-n">준비 중</span>
-        </span>
         {NAV_LINKS.map((link) => (
           <a
             key={link.key}
