@@ -13,6 +13,25 @@ import (
 // The document browser lists key/title/kind/session/updated_at/size (never
 // bodies) with a key cursor, and groups top-level prefixes with whole-key-space
 // counts. Both routes are operator-only, like /ui/api/board/doc.
+type docsPageItem struct {
+	Key       string          `json:"key"`
+	Title     string          `json:"title"`
+	Kind      string          `json:"kind"`
+	Session   string          `json:"session"`
+	Size      int64           `json:"size"`
+	UpdatedAt string          `json:"updated_at"`
+	Body      json.RawMessage `json:"body"`
+	SHA256    json.RawMessage `json:"sha256"`
+}
+
+type docsPagePayload struct {
+	Prefix     string         `json:"prefix"`
+	Limit      int            `json:"limit"`
+	Documents  []docsPageItem `json:"documents"`
+	HasMore    bool           `json:"has_more"`
+	NextBefore string         `json:"next_before"`
+}
+
 func TestUIDocsListAndPrefixes(t *testing.T) {
 	s := uiStore(t)
 	fixture := newUIJWTFixture(t)
@@ -24,22 +43,7 @@ func TestUIDocsListAndPrefixes(t *testing.T) {
 	seedPolicyDoc(t, s, base+"/b", "---\ntask: 1\n---\n# Beta\n\nsecond body\n")
 	seedPolicyDoc(t, s, base+"/c", "no heading here\n")
 
-	var page struct {
-		Prefix    string `json:"prefix"`
-		Limit     int    `json:"limit"`
-		Documents []struct {
-			Key       string          `json:"key"`
-			Title     string          `json:"title"`
-			Kind      string          `json:"kind"`
-			Session   string          `json:"session"`
-			Size      int64           `json:"size"`
-			UpdatedAt string          `json:"updated_at"`
-			Body      json.RawMessage `json:"body"`
-			SHA256    json.RawMessage `json:"sha256"`
-		} `json:"documents"`
-		HasMore    bool   `json:"has_more"`
-		NextBefore string `json:"next_before"`
-	}
+	var page docsPagePayload
 	listURL := func(query string) string { return h.URL + "/ui/api/docs?" + query }
 	if status := boardJSON(t, h.Client(), listURL("prefix="+url.QueryEscape(base+"/")+"&limit=2"), assertion, &page); status != http.StatusOK {
 		t.Fatalf("list status=%d", status)
@@ -66,12 +70,12 @@ func TestUIDocsListAndPrefixes(t *testing.T) {
 			t.Fatalf("row metadata=%+v", doc)
 		}
 	}
-	page.Documents = nil
-	if status := boardJSON(t, h.Client(), listURL("prefix="+url.QueryEscape(base+"/")+"&limit=2&before="+url.QueryEscape(base+"/b")), assertion, &page); status != http.StatusOK {
+	var second docsPagePayload
+	if status := boardJSON(t, h.Client(), listURL("prefix="+url.QueryEscape(base+"/")+"&limit=2&before="+url.QueryEscape(base+"/b")), assertion, &second); status != http.StatusOK {
 		t.Fatalf("second page status=%d", status)
 	}
-	if len(page.Documents) != 1 || page.Documents[0].Key != base+"/a" || page.Documents[0].Title != "Alpha" || page.HasMore || page.NextBefore != "" {
-		t.Fatalf("second page=%+v", page)
+	if len(second.Documents) != 1 || second.Documents[0].Key != base+"/a" || second.Documents[0].Title != "Alpha" || second.HasMore || second.NextBefore != "" {
+		t.Fatalf("second page=%+v", second)
 	}
 
 	var prefixes struct {
@@ -98,9 +102,9 @@ func TestUIDocsListAndPrefixes(t *testing.T) {
 
 	// An empty prefix lists every document; an unknown one is an empty array,
 	// never null.
-	page.Documents = nil
-	if status := boardJSON(t, h.Client(), listURL("limit=1"), assertion, &page); status != http.StatusOK || len(page.Documents) != 1 {
-		t.Fatalf("all-documents status=%d rows=%d", status, len(page.Documents))
+	var all docsPagePayload
+	if status := boardJSON(t, h.Client(), listURL("limit=1"), assertion, &all); status != http.StatusOK || len(all.Documents) != 1 {
+		t.Fatalf("all-documents status=%d rows=%d", status, len(all.Documents))
 	}
 	response := uiRequest(t, h.Client(), http.MethodGet, listURL("prefix="+url.QueryEscape(base+"/missing")), assertion, "")
 	body := responseText(t, response)
