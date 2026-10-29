@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"reflect"
 	"sync"
 	"testing"
@@ -16,14 +15,12 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/api"
 	"github.com/mgh3326/handoffkeep/internal/remote"
 	"github.com/mgh3326/handoffkeep/internal/store"
+	"github.com/mgh3326/handoffkeep/internal/testdb"
 )
 
 func taskTestStore(t *testing.T) *store.Store {
 	t.Helper()
-	url := os.Getenv("HANDOFFKEEP_TEST_DB_URL")
-	if url == "" {
-		t.Skip("HANDOFFKEEP_TEST_DB_URL is required for PostgreSQL task tests")
-	}
+	url := testdb.URL(t)
 	s, err := store.Open(t.Context(), url)
 	if err != nil {
 		t.Fatal(err)
@@ -246,7 +243,7 @@ func TestTaskEventsDatabaseAppendOnly(t *testing.T) {
 	if err != nil || !found || len(got.Events) != 1 {
 		t.Fatalf("task=%+v found=%v err=%v", got, found, err)
 	}
-	db, err := pgx.Connect(t.Context(), os.Getenv("HANDOFFKEEP_TEST_DB_URL"))
+	db, err := pgx.Connect(t.Context(), testdb.URL(t))
 	if err != nil {
 		t.Fatal(err)
 	}

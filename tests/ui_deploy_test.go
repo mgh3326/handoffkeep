@@ -13,12 +13,12 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/mgh3326/handoffkeep/internal/store"
+	"github.com/mgh3326/handoffkeep/internal/testdb"
 )
 
 type deployRecordFixture struct {
@@ -74,7 +74,7 @@ func seedDeployDoc(t *testing.T, s *store.Store, key, body string) {
 // task_event at a controlled timestamp with a controlled refs snapshot.
 func deployDB(t *testing.T) *pgx.Conn {
 	t.Helper()
-	db, err := pgx.Connect(t.Context(), os.Getenv("HANDOFFKEEP_TEST_DB_URL"))
+	db, err := pgx.Connect(t.Context(), testdb.URL(t))
 	if err != nil {
 		t.Fatal(err)
 	}

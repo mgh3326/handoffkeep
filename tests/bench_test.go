@@ -20,6 +20,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mgh3326/handoffkeep/internal/api"
 	"github.com/mgh3326/handoffkeep/internal/store"
+	"github.com/mgh3326/handoffkeep/internal/testdb"
 )
 
 const benchScoresFixture = `{
@@ -98,10 +99,7 @@ const benchGradeFixture = `{
 
 func benchStore(t *testing.T) *store.Store {
 	t.Helper()
-	url := os.Getenv("HANDOFFKEEP_TEST_DB_URL")
-	if url == "" {
-		t.Skip("HANDOFFKEEP_TEST_DB_URL is required for PostgreSQL benchmark tests")
-	}
+	url := testdb.URL(t)
 	s, err := store.Open(t.Context(), url)
 	if err != nil {
 		t.Fatal(err)
@@ -112,10 +110,7 @@ func benchStore(t *testing.T) *store.Store {
 
 func benchPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	url := os.Getenv("HANDOFFKEEP_TEST_DB_URL")
-	if url == "" {
-		t.Skip("HANDOFFKEEP_TEST_DB_URL is required for PostgreSQL benchmark tests")
-	}
+	url := testdb.URL(t)
 	p, err := pgxpool.New(t.Context(), url)
 	if err != nil {
 		t.Fatal(err)
@@ -248,14 +243,14 @@ func TestBenchSchemaV9IsAdditiveAndIdempotent(t *testing.T) {
 		}
 	}
 	var version int
-	if err := p.QueryRow(t.Context(), `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != 24 {
+	if err := p.QueryRow(t.Context(), `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != store.SchemaVersion {
 		t.Fatalf("max schema version=%d err=%v", version, err)
 	}
 	if got := benchCount(t, p, `SELECT count(*) FROM schema_version WHERE version=9`); got != 1 {
 		t.Fatalf("version 9 rows=%d", got)
 	}
 	s.Close()
-	s2, err := store.Open(t.Context(), os.Getenv("HANDOFFKEEP_TEST_DB_URL"))
+	s2, err := store.Open(t.Context(), testdb.URL(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -267,7 +262,7 @@ func TestBenchSchemaV9IsAdditiveAndIdempotent(t *testing.T) {
 		if _, err := p.Exec(t.Context(), `DELETE FROM schema_version WHERE version=$1`, v); err != nil {
 			t.Fatal(err)
 		}
-		s3, err := store.Open(t.Context(), os.Getenv("HANDOFFKEEP_TEST_DB_URL"))
+		s3, err := store.Open(t.Context(), testdb.URL(t))
 		if err != nil {
 			t.Fatal(err)
 		}

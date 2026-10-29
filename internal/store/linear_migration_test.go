@@ -2,41 +2,15 @@ package store
 
 import (
 	"context"
-	"fmt"
-	"os"
 	"testing"
-	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/mgh3326/handoffkeep/internal/testdb"
 )
 
 func TestLinearV10AdditiveAndIdempotent(t *testing.T) {
-	url := os.Getenv("HANDOFFKEEP_TEST_DB_URL")
-	if url == "" {
-		t.Skip("HANDOFFKEEP_TEST_DB_URL is required for PostgreSQL migration tests")
-	}
 	ctx := context.Background()
-	admin, err := pgxpool.New(ctx, url)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer admin.Close()
-	schema := fmt.Sprintf("linear_v10_%d", time.Now().UnixNano())
-	if _, err = admin.Exec(ctx, "CREATE SCHEMA "+schema); err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _, _ = admin.Exec(ctx, "DROP SCHEMA "+schema+" CASCADE") }()
-
-	config, err := pgxpool.ParseConfig(url)
-	if err != nil {
-		t.Fatal(err)
-	}
-	config.ConnConfig.RuntimeParams["search_path"] = schema + ",public"
-	pool, err := pgxpool.NewWithConfig(ctx, config)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer pool.Close()
+	pool, _ := testdb.SchemaPool(t, "linear_v10")
+	var err error
 	if _, err = pool.Exec(ctx, `CREATE TABLE schema_version (version INTEGER PRIMARY KEY)`); err != nil {
 		t.Fatal(err)
 	}

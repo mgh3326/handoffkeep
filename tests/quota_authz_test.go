@@ -4,12 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"net/http/httptest"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/mgh3326/handoffkeep/internal/api"
 	"github.com/mgh3326/handoffkeep/internal/store"
+	"github.com/mgh3326/handoffkeep/internal/testdb"
 )
 
 const quotaE2EKey = "codex:0123456789abcdef"
@@ -17,10 +17,7 @@ const quotaE2EPeerKey = "claude:0123456789abcdef"
 
 // Write paths are scoped to the client's granted account keys; reads stay open.
 func TestQuotaWriteScopePostgres(t *testing.T) {
-	url := os.Getenv("HANDOFFKEEP_TEST_DB_URL")
-	if url == "" {
-		t.Skip("HANDOFFKEEP_TEST_DB_URL is required for PostgreSQL integration tests")
-	}
+	url := testdb.URL(t)
 	s, err := store.Open(context.Background(), url)
 	if err != nil {
 		t.Fatal(err)

@@ -4,21 +4,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mgh3326/handoffkeep/internal/store"
+	"github.com/mgh3326/handoffkeep/internal/testdb"
 )
 
 func chatPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	url := os.Getenv("HANDOFFKEEP_TEST_DB_URL")
-	if url == "" {
-		t.Skip("HANDOFFKEEP_TEST_DB_URL is required for PostgreSQL chat tests")
-	}
+	url := testdb.URL(t)
 	p, err := pgxpool.New(t.Context(), url)
 	if err != nil {
 		t.Fatal(err)

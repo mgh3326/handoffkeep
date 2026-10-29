@@ -8,13 +8,13 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/mgh3326/handoffkeep/internal/store"
+	"github.com/mgh3326/handoffkeep/internal/testdb"
 )
 
 type exportResponse struct {
@@ -65,7 +65,7 @@ func exportDecode(t *testing.T, resp *http.Response) exportResponse {
 
 func exportRecount(t *testing.T, where string, args ...any) (int, map[string]int, map[string]int) {
 	t.Helper()
-	db, err := pgx.Connect(t.Context(), os.Getenv("HANDOFFKEEP_TEST_DB_URL"))
+	db, err := pgx.Connect(t.Context(), testdb.URL(t))
 	if err != nil {
 		t.Fatal(err)
 	}

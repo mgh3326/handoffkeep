@@ -16,14 +16,12 @@ import (
 	"time"
 
 	"github.com/mgh3326/handoffkeep/internal/store"
+	"github.com/mgh3326/handoffkeep/internal/testdb"
 )
 
 func shutdownTestStore(t *testing.T) *store.Store {
 	t.Helper()
-	url := os.Getenv("HANDOFFKEEP_TEST_DB_URL")
-	if url == "" {
-		t.Skip("HANDOFFKEEP_TEST_DB_URL is required for shutdown tests")
-	}
+	url := testdb.URL(t)
 	st, err := store.Open(t.Context(), url)
 	if err != nil {
 		t.Fatal(err)

@@ -3,12 +3,11 @@ package store
 import (
 	"context"
 	"fmt"
-	"os"
 	"strconv"
 	"testing"
-	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/mgh3326/handoffkeep/internal/testdb"
 )
 
 // searchTestStore returns a Store migrated inside a fresh throwaway schema so
@@ -16,39 +15,10 @@ import (
 // database.
 func searchTestStore(t *testing.T) (*Store, *pgxpool.Pool) {
 	t.Helper()
-	url := os.Getenv("HANDOFFKEEP_TEST_DB_URL")
-	if url == "" {
-		t.Skip("HANDOFFKEEP_TEST_DB_URL is required for PostgreSQL task search tests")
-	}
 	ctx := context.Background()
-	admin, err := pgxpool.New(ctx, url)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer admin.Close()
-	schema := fmt.Sprintf("search_tasks_%d", time.Now().UnixNano())
-	if _, err = admin.Exec(ctx, "CREATE SCHEMA "+schema); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		c, e := pgxpool.New(context.Background(), url)
-		if e == nil {
-			_, _ = c.Exec(context.Background(), "DROP SCHEMA "+schema+" CASCADE")
-			c.Close()
-		}
-	})
-	config, err := pgxpool.ParseConfig(url)
-	if err != nil {
-		t.Fatal(err)
-	}
-	config.ConnConfig.RuntimeParams["search_path"] = schema + ",public"
-	pool, err := pgxpool.NewWithConfig(ctx, config)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(pool.Close)
+	pool, _ := testdb.SchemaPool(t, "search_tasks")
 	s := &Store{pool: pool}
-	if err = s.migrate(ctx); err != nil {
+	if err := s.migrate(ctx); err != nil {
 		t.Fatal(err)
 	}
 	return s, pool

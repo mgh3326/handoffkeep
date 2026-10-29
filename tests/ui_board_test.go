@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -12,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/mgh3326/handoffkeep/internal/store"
+	"github.com/mgh3326/handoffkeep/internal/testdb"
 	"github.com/mgh3326/handoffkeep/internal/ui"
 )
 
@@ -395,7 +395,7 @@ func TestUIBoardTaskDetail(t *testing.T) {
 	}
 
 	// Linear issue projection is included only when the join row exists.
-	db, err := pgx.Connect(t.Context(), os.Getenv("HANDOFFKEEP_TEST_DB_URL"))
+	db, err := pgx.Connect(t.Context(), testdb.URL(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -494,7 +494,7 @@ func TestUIBoardPolicyActive(t *testing.T) {
 	// policy/active is a single fixed key in a shared database: remove any
 	// pointer a previous run left behind so each status is exercised from a
 	// known state.
-	db, err := pgx.Connect(t.Context(), os.Getenv("HANDOFFKEEP_TEST_DB_URL"))
+	db, err := pgx.Connect(t.Context(), testdb.URL(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -598,10 +598,7 @@ func TestUIBoardPolicyActive(t *testing.T) {
 // A closed pool makes every store call fail; the BFF must surface the
 // unavailable state as a bounded 500, not a partial payload.
 func TestUIBoardStoreFailure(t *testing.T) {
-	url := os.Getenv("HANDOFFKEEP_TEST_DB_URL")
-	if url == "" {
-		t.Skip("HANDOFFKEEP_TEST_DB_URL is required for UI tests")
-	}
+	url := testdb.URL(t)
 	s, err := store.Open(t.Context(), url)
 	if err != nil {
 		t.Fatal(err)

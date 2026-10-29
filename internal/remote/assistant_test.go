@@ -5,13 +5,13 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/mgh3326/handoffkeep/internal/api"
 	"github.com/mgh3326/handoffkeep/internal/store"
+	"github.com/mgh3326/handoffkeep/internal/testdb"
 )
 
 // MGH-36 PR-1: the assistant methods must behave like every other client
@@ -116,10 +116,7 @@ func TestAssistantMethodsScrubRedirectErrors(t *testing.T) {
 // under 1 omits the query parameter entirely (the handler rejects an
 // explicit 0) so the server default applies.
 func TestListUnsentNotificationsRealHandler(t *testing.T) {
-	url := os.Getenv("HANDOFFKEEP_TEST_DB_URL")
-	if url == "" {
-		t.Skip("HANDOFFKEEP_TEST_DB_URL is required for the real-handler check")
-	}
+	url := testdb.URL(t)
 	s, err := store.Open(context.Background(), url)
 	if err != nil {
 		t.Fatal(err)

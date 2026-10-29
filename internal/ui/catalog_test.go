@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/mgh3326/handoffkeep/internal/cfaccess"
 	"github.com/mgh3326/handoffkeep/internal/store"
+	"github.com/mgh3326/handoffkeep/internal/testdb"
 )
 
 // The console fixture was produced by marshaling store.BenchCatalogEntry — the
@@ -91,10 +92,7 @@ func TestBenchCatalogBFFHasNoWriteRoute(t *testing.T) {
 
 func testCatalogStore(t *testing.T) *store.Store {
 	t.Helper()
-	url := os.Getenv("HANDOFFKEEP_TEST_DB_URL")
-	if url == "" {
-		t.Skip("HANDOFFKEEP_TEST_DB_URL is required for PostgreSQL catalog tests")
-	}
+	url := testdb.URL(t)
 	s, err := store.Open(t.Context(), url)
 	if err != nil {
 		t.Fatal(err)
@@ -127,7 +125,7 @@ func TestBenchCatalogBFFReadOnly(t *testing.T) {
 		t.Fatalf("seed: n=%d err=%v", n, err)
 	}
 	t.Cleanup(func() {
-		db, err := pgx.Connect(context.Background(), os.Getenv("HANDOFFKEEP_TEST_DB_URL"))
+		db, err := pgx.Connect(context.Background(), testdb.URL(t))
 		if err != nil {
 			return
 		}

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -17,6 +16,7 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/api"
 	"github.com/mgh3326/handoffkeep/internal/remote"
 	"github.com/mgh3326/handoffkeep/internal/store"
+	"github.com/mgh3326/handoffkeep/internal/testdb"
 )
 
 // #769 (decision/2026-09-27/task-job-linkage item 2): a transition that lands
@@ -155,7 +155,7 @@ func TestTaskJobIDRefsPatchAloneCannotEnterActive(t *testing.T) {
 
 func taskDB(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	db, err := pgxpool.New(t.Context(), os.Getenv("HANDOFFKEEP_TEST_DB_URL"))
+	db, err := pgxpool.New(t.Context(), testdb.URL(t))
 	if err != nil {
 		t.Fatal(err)
 	}

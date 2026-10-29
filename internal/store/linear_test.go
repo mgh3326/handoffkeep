@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"reflect"
 	"sort"
 	"strings"
@@ -12,14 +11,12 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/mgh3326/handoffkeep/internal/testdb"
 )
 
 func linearTestStore(t *testing.T) *Store {
 	t.Helper()
-	url := os.Getenv("HANDOFFKEEP_TEST_DB_URL")
-	if url == "" {
-		t.Skip("HANDOFFKEEP_TEST_DB_URL is required for Linear store tests")
-	}
+	url := testdb.URL(t)
 	st, err := Open(t.Context(), url)
 	if err != nil {
 		t.Fatal(err)
@@ -91,7 +88,7 @@ func TestLinearOutboxMutationAtomicity(t *testing.T) {
 		t.Fatalf("before task found=%t err=%v", found, err)
 	}
 
-	connection, err := pgx.Connect(t.Context(), os.Getenv("HANDOFFKEEP_TEST_DB_URL"))
+	connection, err := pgx.Connect(t.Context(), testdb.URL(t))
 	if err != nil {
 		t.Fatal(err)
 	}
