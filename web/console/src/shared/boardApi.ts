@@ -1,28 +1,12 @@
-import type { BoardComment, BoardCommentsResponse, BoardDetail, BoardDoc, BoardTask, BoardTasksResponse, PolicyResponse } from "./types";
+import type { BoardComment, BoardCommentsResponse, BoardDetail, BoardDoc, BoardTask, BoardTasksResponse } from "./boardTypes";
 import type { LiveResponse } from "../live";
+import { getJSON } from "./http";
+
+export { HttpError } from "./http";
 
 const PAGE_LIMIT = 500;
 const MAX_TASKS = 5000;
 const MAX_COMMENTS = 2000;
-
-/** HTTP failure with the status preserved — callers distinguish a missing
- * task (404 → "없음") from a transient error without parsing the message. */
-export class HttpError extends Error {
-  readonly status: number;
-  constructor(status: number) {
-    super(`request failed: ${status}`);
-    this.name = "HttpError";
-    this.status = status;
-  }
-}
-
-async function getJSON<T>(path: string): Promise<T> {
-  const response = await fetch(path);
-  if (!response.ok) {
-    throw new HttpError(response.status);
-  }
-  return (await response.json()) as T;
-}
 
 export type BoardData = {
   tasks: BoardTask[];
@@ -78,10 +62,6 @@ export function fetchLive(): Promise<LiveResponse> {
  * body_doc before "#"; the section suffix never leaves the browser. */
 export function fetchBoardDoc(key: string): Promise<BoardDoc> {
   return getJSON<BoardDoc>(`/ui/api/board/doc?key=${encodeURIComponent(key)}`);
-}
-
-export function fetchPolicyActive(): Promise<PolicyResponse> {
-  return getJSON<PolicyResponse>("/ui/api/policy/active");
 }
 
 export type TaskComments = { comments: BoardComment[]; truncated: boolean };

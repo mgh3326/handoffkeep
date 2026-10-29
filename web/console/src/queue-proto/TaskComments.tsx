@@ -11,8 +11,8 @@
 //   whoever the server authenticated.
 
 import { Suspense, useCallback, useEffect, useState, type FormEvent, type KeyboardEvent } from "react";
-import { CommentWriteError, fetchTaskComments, postTaskComment, readCsrfToken, type TaskComments as TaskCommentsData } from "../board/api";
-import type { BoardComment } from "../board/types";
+import { CommentWriteError, fetchTaskComments, postTaskComment, readCsrfToken, type TaskComments as TaskCommentsData } from "../shared/boardApi";
+import type { BoardComment } from "../shared/boardTypes";
 import { DocMarkdown } from "./DocInline";
 import { RendererBoundary } from "./RendererBoundary";
 

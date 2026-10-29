@@ -4,7 +4,7 @@
 // here ever turns either into markup — highlightParts only splits on the two
 // exact marker strings and every part is rendered as a React text node.
 
-import { HttpError } from "../board/api";
+import { getJSON } from "../shared/http";
 
 export type SearchHit = {
   id: number;
@@ -38,11 +38,7 @@ type SearchResponse = {
 /** Live search: rejects with HttpError on a non-2xx answer so the caller can
  * tell "no permission" and "bad query" from a failed lookup. */
 export const fetchTaskSearch: SearchFn = async (query, signal) => {
-  const response = await fetch(`/ui/api/search?scope=tasks&q=${encodeURIComponent(query)}`, { signal });
-  if (!response.ok) {
-    throw new HttpError(response.status);
-  }
-  const body = (await response.json()) as SearchResponse;
+  const body = await getJSON<SearchResponse>(`/ui/api/search?scope=tasks&q=${encodeURIComponent(query)}`, { signal });
   if (!Array.isArray(body.results) || typeof body.has_more !== "boolean") {
     throw new Error("malformed search response");
   }

@@ -3,8 +3,8 @@
 // page works for tasks outside any current filter or list page.
 
 import { useEffect, useState } from "react";
-import { fetchTaskDetail } from "../board/api";
-import type { BoardDetail } from "../board/types";
+import { fetchTaskDetail } from "../shared/boardApi";
+import type { BoardDetail } from "../shared/boardTypes";
 import { boardTaskToProto } from "./boardtask";
 import { CopyTaskLink, DetailBody } from "./DetailDrawer";
 import type { FetchDoc } from "./DocInline";

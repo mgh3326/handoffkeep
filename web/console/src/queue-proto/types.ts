@@ -36,7 +36,7 @@ export type ProtoTask = {
   updated_at: string | null;
   /** null → no parent lane recorded, rendered as unknown. */
   parent_lane: string | null;
-  refs: import("../board/types").TaskRefs;
+  refs: import("../shared/boardTypes").TaskRefs;
   /** hk document key of the task body ("key" or "key#section"). Absent or
    * empty → no body document; the overview says so instead of going blank. */
   body_doc?: string;

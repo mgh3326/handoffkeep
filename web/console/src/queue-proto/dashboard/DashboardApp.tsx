@@ -4,8 +4,8 @@
 // jobs). A failed refresh keeps the last good payload and says so; a section
 // that never loaded says it failed — never an empty "all clear".
 
-import { useEffect, useState, type ReactNode } from "react";
-import { fetchLive } from "../../board/api";
+import type { ReactNode } from "react";
+import { fetchLive } from "../../shared/boardApi";
 import {
   liveAgeLabel,
   liveRequestFailed,
@@ -19,45 +19,10 @@ import {
 } from "../../live";
 import { StateIcon, stateLabel } from "../StateIcon";
 import { fetchDashboard } from "./api";
+import { usePoll } from "../../shared/usePoll";
 import type { DashboardAccount, DashboardBucket, DashboardMissing, DashboardRepo, DashboardResponse, DashboardTask } from "./types";
 
 export const DASHBOARD_POLL_MS = 60_000;
-
-/** Polls one read on a fixed cadence. The next request is scheduled only after
- * the in-flight one settles, so requests never overlap. */
-export function usePoll<T>(load: () => Promise<T>, pollMs: number) {
-  const [data, setData] = useState<T | null>(null);
-  const [failed, setFailed] = useState(false);
-  const [at, setAt] = useState<number | null>(null);
-  useEffect(() => {
-    let cancelled = false;
-    let timer = 0;
-    const run = async () => {
-      try {
-        const next = await load();
-        if (!cancelled) {
-          setData(next);
-          setFailed(false);
-          setAt(Date.now());
-        }
-      } catch {
-        if (!cancelled) {
-          setFailed(true);
-        }
-      } finally {
-        if (!cancelled) {
-          timer = window.setTimeout(() => void run(), pollMs);
-        }
-      }
-    };
-    void run();
-    return () => {
-      cancelled = true;
-      window.clearTimeout(timer);
-    };
-  }, [load, pollMs]);
-  return { data, failed, at };
-}
 
 /** "2시간 5분 후" / "3분 전" relative to now; null for absent timestamps. */
 export function relativeLabel(nowMs: number, iso: string | undefined | null): string | null {

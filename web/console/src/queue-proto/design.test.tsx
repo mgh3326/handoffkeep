@@ -9,7 +9,7 @@ import { gzipSync } from "node:zlib";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
-import type { BoardTask } from "../board/types";
+import type { BoardTask } from "../shared/boardTypes";
 import { applyTheme, loadTheme } from "./AppShell";
 import { boardTaskToProto } from "./boardtask";
 import { QueueProtoApp } from "./QueueProtoApp";

@@ -3,7 +3,7 @@ import { render } from "@testing-library/react";
 import { DetailBody } from "./DetailDrawer";
 import { RowFields } from "./TaskRow";
 import { boardTaskToProto } from "./boardtask";
-import type { BoardTask } from "../board/types";
+import type { BoardTask } from "../shared/boardTypes";
 import { KNOWN_STATES, type Dataset, type ProtoTask } from "./types";
 
 function mkBoardTask(over: Partial<BoardTask>): BoardTask {

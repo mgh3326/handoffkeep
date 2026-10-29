@@ -1,4 +1,4 @@
-import { HttpError } from "../../board/api";
+import { getJSON } from "../../shared/http";
 import type { CatalogResponse } from "./types";
 
 export type CatalogQuery = { pool?: string; includeRetired?: boolean };
@@ -17,11 +17,7 @@ export async function fetchCatalog(query: CatalogQuery = {}): Promise<CatalogRes
     params.set("include_retired", "1");
   }
   const suffix = params.toString();
-  const response = await fetch(`/ui/api/bench/catalog${suffix === "" ? "" : `?${suffix}`}`);
-  if (!response.ok) {
-    throw new HttpError(response.status);
-  }
-  const body = (await response.json()) as CatalogResponse;
+  const body = await getJSON<CatalogResponse>(`/ui/api/bench/catalog${suffix === "" ? "" : `?${suffix}`}`);
   // A malformed payload must fail loudly — rendering a partial shape as a
   // complete catalog would present missing rows as "no assignments".
   if (typeof body !== "object" || body === null || !Array.isArray(body.catalog)) {

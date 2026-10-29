@@ -11,7 +11,7 @@ import { QueueProtoApp } from "./QueueProtoApp";
 import { boardTaskToProto } from "./boardtask";
 import { decisionMark } from "./adapter";
 import type { FetchDoc } from "./DocInline";
-import type { BoardDetail, BoardTask, DecisionRequestView } from "../board/types";
+import type { BoardDetail, BoardTask, DecisionRequestView } from "../shared/boardTypes";
 import { KNOWN_STATES, type Dataset } from "./types";
 
 const here = dirname(fileURLToPath(import.meta.url));

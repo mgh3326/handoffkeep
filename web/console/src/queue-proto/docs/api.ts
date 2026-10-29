@@ -2,16 +2,8 @@
 // server (service principals get 403); a refusal surfaces as HttpError like
 // every other console read.
 
-import { HttpError } from "../../board/api";
+import { getJSON } from "../../shared/http";
 import type { DocsPrefixesResponse, DocsResponse } from "./types";
-
-async function getJSON<T>(path: string): Promise<T> {
-  const response = await fetch(path);
-  if (!response.ok) {
-    throw new HttpError(response.status);
-  }
-  return (await response.json()) as T;
-}
 
 /** One page of document summaries, newest key first. An empty prefix lists
  * every document; before is the cursor from the previous page. */

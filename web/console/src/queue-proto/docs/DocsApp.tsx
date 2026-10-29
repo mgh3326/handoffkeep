@@ -9,8 +9,8 @@
 // reports just because their keys sort earlier.
 
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { fetchBoardDoc } from "../../board/api";
-import type { BoardDoc } from "../../board/types";
+import { fetchBoardDoc } from "../../shared/boardApi";
+import type { BoardDoc } from "../../shared/boardTypes";
 import { RendererBoundary } from "../RendererBoundary";
 import { fetchDocPrefixes, fetchDocs } from "./api";
 import type { DocPrefix, DocSummary } from "./types";

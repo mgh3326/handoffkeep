@@ -77,6 +77,6 @@ describe("production isolation", () => {
     const leaked = reachable.filter((f) => /fixtures\.ts$|rng\.ts$|preview\.tsx$/.test(f));
     expect(leaked).toEqual([]);
     // and it really is wired to the board BFF
-    expect(reachable.some((f) => f.endsWith(join("src", "board", "api.ts")))).toBe(true);
+    expect(reachable.some((f) => f.endsWith(join("src", "shared", "boardApi.ts")))).toBe(true);
   });
 });

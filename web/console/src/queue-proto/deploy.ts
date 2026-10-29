@@ -4,6 +4,8 @@
 // renders exactly what it is given — "기록 없음" stays "기록 없음", never a
 // fabricated "latest" (hk:doc design/2026-09-21/deploy-pending-surface §4).
 
+import { getJSON } from "../shared/http";
+
 export type DeployRecordView = {
   record_key: string;
   result: string;
@@ -144,11 +146,7 @@ export function isDeployPendingResponse(body: unknown): body is DeployPendingRes
 }
 
 export async function fetchDeployPending(): Promise<DeployPendingResponse> {
-  const response = await fetch("/ui/api/deploy-pending");
-  if (!response.ok) {
-    throw new Error(`deploy-pending ${response.status}`);
-  }
-  const body: unknown = await response.json();
+  const body = await getJSON<unknown>("/ui/api/deploy-pending");
   if (!isDeployPendingResponse(body)) {
     throw new Error("deploy-pending: malformed payload");
   }

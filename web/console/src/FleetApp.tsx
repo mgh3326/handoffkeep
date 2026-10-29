@@ -1,4 +1,3 @@
-import { useEffect, useState } from "react";
 import {
   jobForPane,
   liveSectionLabel,
@@ -12,9 +11,13 @@ import {
   type LiveSession,
 } from "./live";
 import { ReapPanel } from "./ReapPanel";
+import { getJSON } from "./shared/http";
+import { usePoll } from "./shared/usePoll";
 
 const LIVE_API = "/ui/api/live";
 const POLL_MS = 10_000;
+
+const loadLive = () => getJSON<LiveResponse>(LIVE_API);
 
 /** Session-list message for a node whose snapshot is not a plain session
  * list. Every non-ok state names itself — a stale or failed collection is
@@ -146,46 +149,9 @@ function MachineBlock({ node, live }: { node: LiveNode; live: LiveResponse }) {
  * backlinks. Hub section failures are named, never rendered as an empty or
  * idle fleet. Read-only — no write controls. */
 export function FleetApp() {
-  const [data, setData] = useState<LiveResponse | null>(null);
-  const [firstLoad, setFirstLoad] = useState(true);
-  const [refreshFailed, setRefreshFailed] = useState(false);
+  const { data, failed: refreshFailed } = usePoll(loadLive, POLL_MS);
 
-  useEffect(() => {
-    let cancelled = false;
-    const load = async () => {
-      try {
-        const response = await fetch(LIVE_API);
-        if (!response.ok) {
-          throw new Error("live request failed");
-        }
-        const next = (await response.json()) as LiveResponse;
-        if (!cancelled) {
-          setData(next);
-          setRefreshFailed(false);
-        }
-      } catch {
-        // Keep the last successful payload — but mark the refresh failure
-        // so old load numbers never pass for "now".
-        if (!cancelled) {
-          setRefreshFailed(true);
-        }
-      } finally {
-        if (!cancelled) {
-          setFirstLoad(false);
-        }
-      }
-    };
-    void load();
-    const timer = window.setInterval(() => {
-      void load();
-    }, POLL_MS);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
-  }, []);
-
-  if (firstLoad && data === null) {
+  if (data === null && !refreshFailed) {
     return <p className="muted">불러오는 중</p>;
   }
   if (data === null) {
