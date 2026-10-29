@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -363,6 +364,7 @@ func TestQuotaPresenceValidation(t *testing.T) {
 		"empty key":      func(x *QuotaPresence) { x.AccountKey = "" },
 		"zero last_seen": func(x *QuotaPresence) { x.LastSeen = time.Time{} },
 		"future skew":    func(x *QuotaPresence) { x.LastSeen = now.Add(2 * time.Minute) },
+		"past retention": func(x *QuotaPresence) { x.LastSeen = now.Add(-QuotaPresenceRetention - time.Minute) },
 	} {
 		x := ok
 		mutate(&x)
@@ -481,5 +483,66 @@ func TestQuotaPresencePostgres(t *testing.T) {
 	}
 	if err = pool.QueryRow(ctx, `SELECT count(*) FROM schema_version WHERE version=24`).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("v24 rows after re-migrate=%d %v", count, err)
+	}
+}
+
+// A granted client inventing host ids cannot grow an account past the cap or
+// evict hosts already present; rows past retention are hidden and pruned.
+func TestQuotaPresenceBoundsPostgres(t *testing.T) {
+	s, pool := searchTestStore(t)
+	ctx := context.Background()
+	seen := time.Now().UTC().Add(-time.Hour).Truncate(time.Microsecond)
+	for i := 0; i < QuotaPresenceHosts; i++ {
+		if _, err := s.PutQuotaPresence(ctx, QuotaPresence{HostID: fmt.Sprintf("host-%02d", i), AccountKey: quotaTestKey, LastSeen: seen}); err != nil {
+			t.Fatal(i, err)
+		}
+	}
+	flood := QuotaPresence{HostID: "host-flood", AccountKey: quotaTestKey, LastSeen: seen.Add(time.Minute)}
+	if _, err := s.PutQuotaPresence(ctx, flood); !errors.Is(err, ErrQuotaPresenceFull) {
+		t.Fatalf("cap: %v", err)
+	}
+	// A host already present still updates at the cap.
+	present := QuotaPresence{HostID: "host-00", AccountKey: quotaTestKey, LastSeen: seen.Add(time.Minute)}
+	if got, err := s.PutQuotaPresence(ctx, present); err != nil || !got.LastSeen.Equal(present.LastSeen) {
+		t.Fatalf("present host at cap %+v %v", got, err)
+	}
+	// The cap is per account: another account is unaffected.
+	if _, err := s.PutQuotaPresence(ctx, QuotaPresence{HostID: "host-flood", AccountKey: "claude:fedcba9876543210", LastSeen: seen}); err != nil {
+		t.Fatal("other account", err)
+	}
+	// Concurrent new hosts at the cap all refuse; none slips past the count.
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			if _, e := s.PutQuotaPresence(ctx, QuotaPresence{HostID: fmt.Sprintf("host-race-%d", i), AccountKey: quotaTestKey, LastSeen: seen}); !errors.Is(e, ErrQuotaPresenceFull) {
+				t.Errorf("race %d: %v", i, e)
+			}
+		}(i)
+	}
+	wg.Wait()
+	var count int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM quota_presence WHERE account_key=$1`, quotaTestKey).Scan(&count); err != nil || count != QuotaPresenceHosts {
+		t.Fatalf("rows at cap=%d %v", count, err)
+	}
+	// Age one row past retention: listings hide it at once, and the next
+	// write for the account prunes it, freeing the slot for a new host.
+	if _, err := pool.Exec(ctx, `UPDATE quota_presence SET last_seen=clock_timestamp()-interval '31 days' WHERE host_id='host-63' AND account_key=$1`, quotaTestKey); err != nil {
+		t.Fatal(err)
+	}
+	rows, _, err := s.QuotaPresence(ctx, "host-63", "", 10)
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("stale row listed %+v %v", rows, err)
+	}
+	if _, err = s.PutQuotaPresence(ctx, flood); err != nil {
+		t.Fatalf("slot after prune: %v", err)
+	}
+	var stale bool
+	if err = pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM quota_presence WHERE host_id='host-63')`).Scan(&stale); err != nil || stale {
+		t.Fatalf("stale row not pruned %v %v", stale, err)
+	}
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM quota_presence WHERE account_key=$1`, quotaTestKey).Scan(&count); err != nil || count != QuotaPresenceHosts {
+		t.Fatalf("rows after prune=%d %v", count, err)
 	}
 }

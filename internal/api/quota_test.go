@@ -139,6 +139,7 @@ func TestQuotaPresenceGuards(t *testing.T) {
 		{"put long host", "PUT", "/v1/quota/presence", body(strings.Repeat("h", 65), "codex:0123456789abcdef", now), "token-a", "invalid_quota_presence", 400},
 		{"put bad key", "PUT", "/v1/quota/presence", body("host-a", "codex:raw-identity", now), "token-a", "invalid_quota_presence", 400},
 		{"put future", "PUT", "/v1/quota/presence", body("host-a", "codex:0123456789abcdef", time.Now().Add(time.Hour).UTC().Format(time.RFC3339)), "token-a", "invalid_quota_presence", 400},
+		{"put past retention", "PUT", "/v1/quota/presence", body("host-a", "codex:0123456789abcdef", time.Now().Add(-31*24*time.Hour).UTC().Format(time.RFC3339)), "token-a", "invalid_quota_presence", 400},
 		{"put missing last_seen", "PUT", "/v1/quota/presence", `{"host_id":"host-a","account_key":"codex:0123456789abcdef"}`, "token-a", "invalid_quota_presence", 400},
 		{"put unknown field", "PUT", "/v1/quota/presence", `{"host_id":"host-a","account_key":"codex:0123456789abcdef","last_seen":"` + now + `","hostname":"x"}`, "token-a", "invalid_quota_request", 400},
 		{"put trailing", "PUT", "/v1/quota/presence", body("host-a", "codex:0123456789abcdef", now) + ` {}`, "token-a", "invalid_quota_request", 400},

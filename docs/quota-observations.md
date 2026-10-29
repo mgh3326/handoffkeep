@@ -72,23 +72,34 @@ observations, which still carry no host identity.
   with a letter or digit — never a raw hostname; `account_key` uses the
   observation key format. Unknown fields, a second JSON value or a body over
   32 KiB return 400 `invalid_quota_request`; a bad field, a missing
-  `last_seen` or one more than a minute ahead of the server clock returns 400
-  `invalid_quota_presence`. The write uses the observation PUT's grant: an
-  `account_key` not listed in the client's `HANDOFFKEEP_QUOTA_<CLIENT>` lines
-  returns 403 `quota_account_forbidden`. No lease is needed.
+  `last_seen`, one more than a minute ahead of the server clock or one older
+  than the 30-day retention returns 400 `invalid_quota_presence`. The write
+  uses the observation PUT's grant: an `account_key` not listed in the
+  client's `HANDOFFKEEP_QUOTA_<CLIENT>` lines returns 403
+  `quota_account_forbidden`. No lease is needed.
 - One row is kept per `(host_id, account_key)`; the newest `last_seen` wins and
   an older one leaves the row unchanged. A `last_seen` inside the one-minute
   tolerance is clamped to the database clock, so no row sits in the future.
   The response is 200 with the stored record, which may be newer than the
   request.
+- Presence is bounded per account: at most 64 hosts, each kept for 30 days
+  after its `last_seen`. Every write first prunes that account's rows past
+  retention. A host new to an account that already has 64 rows gets 409
+  `quota_presence_full`; hosts already present keep updating, so invented
+  host ids cannot evict them.
+- `host_id` is not bound to the client. A granted client is trusted for the
+  whole account, as it already is for that account's observations. It may
+  write any host's row, and the host's own next publish moves it forward
+  again (a spoofed `last_seen` can be at most the server clock).
 - `GET /v1/quota/presence` returns `{"records":[...],"truncated":false}`,
   newest `last_seen` first. `records` is always a list (`[]` when empty),
   never null. Optional `?host_id=` and `?account_key=` filters must be valid
   values (else 400 `invalid_quota_presence_filter`) and combine with AND. One
   response holds at most 1000 records; `truncated` is true when more exist.
-  Reads are open to every authenticated client, like `latest`. Readers apply
-  their own freshness TTL; the server keeps rows until a later retention
-  decision.
+  Rows past retention are never listed, even before a write prunes them, so
+  one account contributes at most 64 records and an `account_key` filter is
+  always complete. Reads are open to every authenticated client, like
+  `latest`. Readers apply their own freshness TTL on top.
 
 The startup migration adds `quota_presence` and records `schema_version` 24
 with `IF NOT EXISTS` and `ON CONFLICT DO NOTHING`, so a restart is a no-op

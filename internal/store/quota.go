@@ -88,10 +88,18 @@ func ValidQuotaObservation(x QuotaObservation, now time.Time) bool {
 	return true
 }
 
+// Presence is bounded per account: at most QuotaPresenceHosts rows, each kept
+// for QuotaPresenceRetention after its last_seen.
+const QuotaPresenceHosts = 64
+const QuotaPresenceRetention = 30 * 24 * time.Hour
+
+var ErrQuotaPresenceFull = errors.New("quota_presence_full")
+
 // ValidQuotaPresence uses the observation skew rule: last_seen may lead the
-// server clock by at most one minute.
+// server clock by at most one minute. A last_seen already past retention is
+// refused rather than stored for the next prune.
 func ValidQuotaPresence(x QuotaPresence, now time.Time) bool {
-	return ValidQuotaHost(x.HostID) && ValidQuotaKey(x.AccountKey) && !x.LastSeen.IsZero() && !x.LastSeen.After(now.Add(time.Minute))
+	return ValidQuotaHost(x.HostID) && ValidQuotaKey(x.AccountKey) && x.LastSeen.After(now.Add(-QuotaPresenceRetention)) && !x.LastSeen.After(now.Add(time.Minute))
 }
 func migrateQuota(ctx context.Context, tx pgx.Tx) error {
 	for _, q := range []string{
@@ -253,23 +261,53 @@ func (s *Store) PutQuota(ctx context.Context, key, owner, holder string, x Quota
 // PutQuotaPresence upserts one (host, account) row and returns the stored
 // value. last_seen is clamped to the database clock so a slightly fast host
 // cannot pin a future value; an older last_seen leaves the row unchanged.
+// Each write first prunes the account's rows past retention. A host new to an
+// account that already holds QuotaPresenceHosts rows gets
+// ErrQuotaPresenceFull: hosts already present keep updating, so a flood of
+// invented host ids cannot evict them.
 func (s *Store) PutQuotaPresence(ctx context.Context, x QuotaPresence) (QuotaPresence, error) {
 	if !ValidQuotaPresence(x, time.Now()) {
 		return x, errors.New("invalid quota presence")
 	}
-	err := s.pool.QueryRow(ctx, `INSERT INTO quota_presence(host_id,account_key,last_seen) VALUES($1,$2,LEAST($3::timestamptz,clock_timestamp())) ON CONFLICT(host_id,account_key) DO UPDATE SET last_seen=EXCLUDED.last_seen WHERE quota_presence.last_seen<EXCLUDED.last_seen RETURNING last_seen`, x.HostID, x.AccountKey, x.LastSeen).Scan(&x.LastSeen)
-	if errors.Is(err, pgx.ErrNoRows) {
-		// The stored row is newer; rows are never deleted, so it still exists.
-		err = s.pool.QueryRow(ctx, `SELECT last_seen FROM quota_presence WHERE host_id=$1 AND account_key=$2`, x.HostID, x.AccountKey).Scan(&x.LastSeen)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return x, err
 	}
-	return x, err
+	defer tx.Rollback(ctx)
+	// The per-account transaction lock makes the count and insert atomic
+	// against concurrent new hosts for the same account.
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('quota_presence:'||$1, 0))`, x.AccountKey); err != nil {
+		return x, err
+	}
+	if _, err = tx.Exec(ctx, `DELETE FROM quota_presence WHERE account_key=$1 AND last_seen < clock_timestamp()-$2*interval '1 second'`, x.AccountKey, int64(QuotaPresenceRetention/time.Second)); err != nil {
+		return x, err
+	}
+	var exists bool
+	var hosts int
+	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM quota_presence WHERE host_id=$1 AND account_key=$2), (SELECT count(*) FROM quota_presence WHERE account_key=$2)`, x.HostID, x.AccountKey).Scan(&exists, &hosts); err != nil {
+		return x, err
+	}
+	if !exists && hosts >= QuotaPresenceHosts {
+		return x, ErrQuotaPresenceFull
+	}
+	err = tx.QueryRow(ctx, `INSERT INTO quota_presence(host_id,account_key,last_seen) VALUES($1,$2,LEAST($3::timestamptz,clock_timestamp())) ON CONFLICT(host_id,account_key) DO UPDATE SET last_seen=EXCLUDED.last_seen WHERE quota_presence.last_seen<EXCLUDED.last_seen RETURNING last_seen`, x.HostID, x.AccountKey, x.LastSeen).Scan(&x.LastSeen)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// The stored row is newer; the account lock keeps it in place.
+		err = tx.QueryRow(ctx, `SELECT last_seen FROM quota_presence WHERE host_id=$1 AND account_key=$2`, x.HostID, x.AccountKey).Scan(&x.LastSeen)
+	}
+	if err != nil {
+		return x, err
+	}
+	return x, tx.Commit(ctx)
 }
 
-// QuotaPresence lists presence rows, newest first, optionally filtered by host
-// and account. It returns at most limit rows and reports whether more exist.
+// QuotaPresence lists presence rows within retention, newest first, optionally
+// filtered by host and account. It returns at most limit rows and reports
+// whether more exist. Rows of an account nobody writes any more are hidden
+// once past retention, even before a write prunes them.
 func (s *Store) QuotaPresence(ctx context.Context, host, key string, limit int) ([]QuotaPresence, bool, error) {
 	out := []QuotaPresence{}
-	rows, err := s.pool.Query(ctx, `SELECT host_id,account_key,last_seen FROM quota_presence WHERE ($1='' OR host_id=$1) AND ($2='' OR account_key=$2) ORDER BY last_seen DESC,host_id,account_key LIMIT $3`, host, key, limit+1)
+	rows, err := s.pool.Query(ctx, `SELECT host_id,account_key,last_seen FROM quota_presence WHERE ($1='' OR host_id=$1) AND ($2='' OR account_key=$2) AND last_seen >= clock_timestamp()-$4*interval '1 second' ORDER BY last_seen DESC,host_id,account_key LIMIT $3`, host, key, limit+1, int64(QuotaPresenceRetention/time.Second))
 	if err != nil {
 		return out, false, err
 	}

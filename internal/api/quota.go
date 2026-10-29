@@ -34,6 +34,8 @@ func (s Server) quotaAuth(w http.ResponseWriter, r *http.Request) (string, bool)
 func quotaError(w http.ResponseWriter, err error) {
 	if errors.Is(err, store.ErrQuotaLease) {
 		jsonOut(w, 409, map[string]string{"error": "quota_lease_conflict"})
+	} else if errors.Is(err, store.ErrQuotaPresenceFull) {
+		jsonOut(w, 409, map[string]string{"error": "quota_presence_full"})
 	} else {
 		jsonOut(w, 500, map[string]string{"error": "quota_store_unavailable"})
 	}
@@ -152,7 +154,9 @@ func (s Server) quotaPresencePut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The account key arrives in the body, so the observation PUT's grant
-	// check runs here, after validation and before the store.
+	// check runs here, after validation and before the store. host_id is not
+	// bound to the client: a granted client is trusted for the whole account,
+	// as it already is for that account's observations.
 	if !s.quotaScope(w, client, input.AccountKey) {
 		return
 	}
