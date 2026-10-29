@@ -12,7 +12,7 @@ func TestTokenFileAndBearerIdentity(t *testing.T) {
 	if err := os.WriteFile(p, []byte("HANDOFFKEEP_TOKEN_mac-personal=one\nHANDOFFKEEP_TOKEN_oci=two\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	tokens, err := LoadTokens(p)
+	tokens, _, err := LoadTokens(p)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -38,6 +38,16 @@ func quotaError(w http.ResponseWriter, err error) {
 		jsonOut(w, 500, map[string]string{"error": "quota_store_unavailable"})
 	}
 }
+
+// quotaScope limits writes to the client's granted account keys. Reads
+// (latest) deliberately stay open to every authenticated client.
+func (s Server) quotaScope(w http.ResponseWriter, client, key string) bool {
+	if !s.QuotaAccounts[client][key] {
+		jsonOut(w, 403, map[string]string{"error": "quota_account_forbidden"})
+		return false
+	}
+	return true
+}
 func (s Server) quotaLatest(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.quotaAuth(w, r); !ok {
 		return
@@ -51,7 +61,7 @@ func (s Server) quotaLatest(w http.ResponseWriter, r *http.Request) {
 }
 func (s Server) quotaPut(w http.ResponseWriter, r *http.Request) {
 	client, ok := s.quotaAuth(w, r)
-	if !ok {
+	if !ok || !s.quotaScope(w, client, r.PathValue("key")) {
 		return
 	}
 	var input struct {
@@ -65,16 +75,20 @@ func (s Server) quotaPut(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 400, map[string]string{"error": "invalid_quota_observation"})
 		return
 	}
-	x, err := s.Service.Store.PutQuota(r.Context(), r.PathValue("key"), client, input.Holder, input.Observation)
+	x, deduped, err := s.Service.Store.PutQuota(r.Context(), r.PathValue("key"), client, input.Holder, input.Observation)
 	if err != nil {
 		quotaError(w, err)
+		return
+	}
+	if deduped {
+		jsonOut(w, 200, x)
 		return
 	}
 	jsonOut(w, 201, x)
 }
 func (s Server) quotaLease(w http.ResponseWriter, r *http.Request) {
 	client, ok := s.quotaAuth(w, r)
-	if !ok {
+	if !ok || !s.quotaScope(w, client, r.PathValue("key")) {
 		return
 	}
 	var input struct {
@@ -100,7 +114,7 @@ func (s Server) quotaLease(w http.ResponseWriter, r *http.Request) {
 }
 func (s Server) quotaRelease(w http.ResponseWriter, r *http.Request) {
 	client, ok := s.quotaAuth(w, r)
-	if !ok {
+	if !ok || !s.quotaScope(w, client, r.PathValue("key")) {
 		return
 	}
 	var input struct {

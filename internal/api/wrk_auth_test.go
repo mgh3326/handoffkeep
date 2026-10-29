@@ -26,7 +26,7 @@ func TestWrkAuthRejectsAmbiguousIdentity(t *testing.T) {
 			if err := os.WriteFile(p, []byte(body), 0600); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := LoadTokens(p); err == nil {
+			if _, _, err := LoadTokens(p); err == nil {
 				t.Fatal("ambiguous authenticated identity accepted")
 			}
 		})

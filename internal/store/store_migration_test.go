@@ -56,7 +56,7 @@ func TestRelayEventsV6ToV7Upgrade(t *testing.T) {
 		t.Fatal(err)
 	}
 	var version int
-	if err = pool.QueryRow(ctx, `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != 22 {
+	if err = pool.QueryRow(ctx, `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != 23 {
 		t.Fatalf("schema version=%d err=%v", version, err)
 	}
 	var constraintOID uint32
@@ -295,7 +295,7 @@ func TestTaskCommentsMigrationIsAdditiveAndIdempotent(t *testing.T) {
 	if err = pool.QueryRow(ctx, `SELECT count(*) FROM pg_trigger WHERE tgname='task_comments_append_only' AND tgrelid='task_comments'::regclass`).Scan(&triggers); err != nil || triggers != 1 {
 		t.Fatalf("triggers=%d err=%v", triggers, err)
 	}
-	if err = pool.QueryRow(ctx, `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != 22 {
+	if err = pool.QueryRow(ctx, `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != 23 {
 		t.Fatalf("schema version=%d err=%v", version, err)
 	}
 	xs, err := s.ListTaskComments(ctx, task.ID, 0, 10)
@@ -359,7 +359,7 @@ func TestBenchCatalogV11ToV12Upgrade(t *testing.T) {
 		t.Fatal(err)
 	}
 	var version, rows, modelRows int
-	if err = pool.QueryRow(ctx, `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != 22 {
+	if err = pool.QueryRow(ctx, `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != 23 {
 		t.Fatalf("schema version=%d err=%v", version, err)
 	}
 	if err = pool.QueryRow(ctx, `SELECT count(*) FROM schema_version WHERE version=12`).Scan(&version); err != nil || version != 1 {
@@ -565,7 +565,7 @@ func TestChatV16ToV17Upgrade(t *testing.T) {
 		t.Fatal(err)
 	}
 	var version int
-	if err := pool.QueryRow(ctx, `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != 22 {
+	if err := pool.QueryRow(ctx, `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != 23 {
 		t.Fatalf("schema version=%d err=%v", version, err)
 	}
 	var revision int
