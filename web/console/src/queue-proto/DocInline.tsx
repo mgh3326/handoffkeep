@@ -4,10 +4,11 @@
 // handed to the renderer, which is loaded lazily on first use; everything
 // else is shown as escaped raw text. Nothing here writes anywhere.
 
-import { Component, lazy, Suspense, useEffect, useState, type ReactNode } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { fetchBoardDoc } from "../board/api";
 import type { BoardDoc } from "../board/types";
 import { docPageHref, parseBodyDoc } from "./bodydoc";
+import { RendererBoundary } from "./RendererBoundary";
 import { stripTaskFrontMatter } from "./taskmeta";
 
 // The dynamic import is the list/renderer split point: this module is in the
@@ -34,28 +35,6 @@ const REASON_TEXT: Record<string, string> = {
 
 function RawText({ body }: { body: string }) {
   return <pre className="qp-doc-raw">{body}</pre>;
-}
-
-/** Catches a failed renderer chunk load or a render error and falls back to
- * the raw text — the document stays readable, the reason is stated. */
-export class RendererBoundary extends Component<{ body: string; children: ReactNode }, { failed: boolean }> {
-  state = { failed: false };
-  static getDerivedStateFromError() {
-    return { failed: true };
-  }
-  render() {
-    if (this.state.failed) {
-      return (
-        <>
-          <p className="qp-unknown" role="note">
-            오류 — 렌더러를 불러오지 못해 원문 텍스트로 보입니다.
-          </p>
-          <RawText body={this.props.body} />
-        </>
-      );
-    }
-    return this.props.children;
-  }
 }
 
 function statusOf(err: unknown): number | undefined {

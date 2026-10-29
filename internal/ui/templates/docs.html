@@ -1,0 +1,36 @@
+{{define "docs_page"}}
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Documents · Fleet console</title>
+  <link rel="stylesheet" href="{{assetURL "/ui/static/console/tokens.css"}}">
+  <!-- The shared shell rules (PageShell: .hk-page, .hk-side, .hk-btn, body)
+       live in the queue stylesheet; the docs entry ships only its own layout. -->
+  <link rel="stylesheet" href="{{assetURL "/ui/static/console/board.css"}}">
+  <link rel="stylesheet" href="{{assetURL "/ui/static/console/docs.css"}}">
+</head>
+<body>
+  <div id="docs-root">
+    <!-- Replaced by the documents app on mount (PageShell brings its own main
+         landmark and sidebar nav), so the page never shows two navigation
+         blocks. Without JavaScript this fallback remains the way out. -->
+    <main>
+      <h1>문서 — Documents</h1>
+      <nav aria-label="Fleet console pages">
+        <a href="/ui/timeline">Timeline</a>
+        <a href="/ui/queue">Queue</a>
+        <a href="/ui/deploys">Deploys</a>
+        <a href="/ui/decisions">Decisions</a>
+        <a href="/ui/docs">Documents</a>
+        <a href="/ui/compose">Compose</a>
+        <a href="/ui/fleet">Fleet</a>
+        <a href="/ui/grades">Grades</a>
+      </nav>
+    </main>
+  </div>
+  <script type="module" src="{{assetURL "/ui/static/console/docs.js"}}"></script>
+</body>
+</html>
+{{end}}
