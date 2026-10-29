@@ -179,7 +179,8 @@ func (s *Store) PutQuota(ctx context.Context, key, owner, holder string, x Quota
 	// The lease row lock above serializes publishers for this account, so a
 	// concurrent identical publish observes the committed row here instead of
 	// double-appending. The comparison ignores measured_at: republishing the
-	// same value only advances freshness on the latest pointer.
+	// same value only advances freshness on the latest pointer. The pointer's
+	// own measured_at is the floor: GREATEST ignores a NULL (legacy) confirmed_at.
 	var dupID int64
 	var dupValue []byte
 	err = tx.QueryRow(ctx, `SELECT o.id,o.value FROM quota_latest l JOIN quota_observations o ON o.id=l.observation_id WHERE l.account_key=$1 AND l.kind=$2 AND l.window_key=$3 AND (o.value - 'measured_at') = ($4::jsonb - 'measured_at')`, key, x.Kind, x.Window, data).Scan(&dupID, &dupValue)
@@ -189,7 +190,7 @@ func (s *Store) PutQuota(ctx context.Context, key, owner, holder string, x Quota
 			return x, false, err
 		}
 		existing.ID = dupID
-		if err = tx.QueryRow(ctx, `UPDATE quota_latest SET confirmed_at=GREATEST(confirmed_at,$4) WHERE account_key=$1 AND kind=$2 AND window_key=$3 RETURNING confirmed_at`, key, x.Kind, x.Window, x.MeasuredAt).Scan(&existing.ConfirmedAt); err != nil {
+		if err = tx.QueryRow(ctx, `UPDATE quota_latest SET confirmed_at=GREATEST(confirmed_at,measured_at,$4) WHERE account_key=$1 AND kind=$2 AND window_key=$3 RETURNING confirmed_at`, key, x.Kind, x.Window, x.MeasuredAt).Scan(&existing.ConfirmedAt); err != nil {
 			return x, false, err
 		}
 		return existing, true, tx.Commit(ctx)

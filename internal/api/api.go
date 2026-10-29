@@ -443,15 +443,17 @@ func LoadTokens(path string) (Tokens, QuotaAccounts, error) {
 			continue
 		}
 		k, v, ok := strings.Cut(line, "=")
-		if !ok || v == "" {
-			return nil, nil, errors.New("invalid HANDOFFKEEP_AUTH_FILE")
-		}
 		if id, isQuota := strings.CutPrefix(k, "HANDOFFKEEP_QUOTA_"); isQuota {
 			// A bad quota line is loud but never fatal: an auth-file typo
-			// must not stop the server. Token lines stay strict.
+			// must not stop the server. Token lines stay strict. This runs
+			// before the generic guard so an empty value or a missing '='
+			// is also a skipped grant, not a startup failure.
 			var keys []string
-			valid := id != ""
+			valid := ok && v != "" && id != ""
 			for _, key := range strings.Split(v, ",") {
+				if !valid {
+					break
+				}
 				key = strings.TrimSpace(key)
 				if !store.ValidQuotaKey(key) {
 					valid = false
@@ -472,6 +474,9 @@ func LoadTokens(path string) (Tokens, QuotaAccounts, error) {
 				set[key] = true
 			}
 			continue
+		}
+		if !ok || v == "" {
+			return nil, nil, errors.New("invalid HANDOFFKEEP_AUTH_FILE")
 		}
 		id, isToken := strings.CutPrefix(k, "HANDOFFKEEP_TOKEN_")
 		if !isToken {

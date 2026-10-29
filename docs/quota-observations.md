@@ -54,7 +54,10 @@ needed. The additive startup migration creates `quota_observations`,
 and records `schema_version` 23 — idempotent on servers that already ran the
 unversioned quota migration. Deploy hk first: normal `store.Open` applies the
 idempotent migration before serving requests. Then enable pacelever clients.
-Existing routes are unchanged.
+Read routes are unchanged; the quota write routes (publish, lease, release)
+now need a `HANDOFFKEEP_QUOTA_<CLIENT>` grant. Add those lines when the shared
+clients are enabled, not in the same restart as the deploy, so a binary
+rollback stays possible. A malformed grant line is logged and skipped.
 
 `TestQuotaPostgres` uses `HANDOFFKEEP_TEST_DB_URL` and the CI Postgres service;
 it skips without that variable. Do not start a database locally for these tests.
