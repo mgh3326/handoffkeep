@@ -28,6 +28,22 @@ SHA-256 prefix of the account identity. Send no raw identity, tokens or host dat
   advancing that pointer's `confirmed_at` to the new `measured_at` (never
   backward). The lease-row lock serializes publishers, so concurrent
   identical publishes cannot double-append.
+- Free bucket (Devin SWE-2 free profiles). `PUT .../observation` also accepts
+  an optional `observation.free_bucket` of exactly `{"state","resets_at"}`.
+  It is valid only on an `auto` observation of a `devin:` account key; any
+  other key or kind returns 400 `invalid_quota_observation`. `state` is
+  `available`, `exhausted` or `unknown`. `exhausted` requires a nonzero
+  RFC3339 `resets_at`; `available` and `unknown` must omit it (an unreadable
+  limit record is `{"state":"unknown"}`). Unknown fields inside it are
+  refused like any other. A valid free-only automatic observation may send
+  `"buckets": []` (or omit `buckets`); it is stored and returned as `[]`.
+  Without `free_bucket`, an automatic observation still needs at least one
+  percentage bucket, and manual observations are unchanged. The field is
+  stored with the observation, returned unchanged by `latest`, and counts in
+  the identical-republish comparison (a different `state` or `resets_at` is a
+  new value). The server does not interpret it: expiry (an elapsed
+  `resets_at` reads as available) and freshness stay reader policy, and it
+  says nothing about paid credits.
 - `DELETE .../lease` accepts `{holder}`; releasing a previous holder cannot
   remove a successor's lease. It returns 204, including when already released.
 
@@ -106,6 +122,14 @@ with `IF NOT EXISTS` and `ON CONFLICT DO NOTHING`, so a restart is a no-op
 and an older binary on the same database simply ignores the table. Presence
 writes need the same grant lines as observation writes; no new auth-file
 entries are required.
+
+No schema change: `free_bucket` lives in the observation's existing JSONB
+value, so there is no migration and no `schema_version` bump, and existing rows
+are untouched. Rollout dependency: until this server is deployed, a client that
+sends `free_bucket` is refused with 400 (unknown field), which pacelever treats
+as a publish failure and falls back to its stale/degraded path; an older client
+is unaffected after the deploy. `TestQuotaFreeBucketPostgres` covers the
+accepted bodies, dedup and rejections.
 
 ## Retention
 

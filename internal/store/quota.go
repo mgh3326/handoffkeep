@@ -6,6 +6,7 @@ import (
 	"errors"
 	"math"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -32,6 +33,15 @@ type QuotaBucket struct {
 	Scope    string     `json:"scope"`
 	Model    string     `json:"model,omitempty"`
 }
+
+// QuotaFreeBucket is the free-profile state of a Devin account. It carries no
+// usage percentage: state is available, exhausted (with a nonzero resets_at) or
+// unknown (resets_at omitted). The server stores it as given; readers apply
+// expiry and freshness.
+type QuotaFreeBucket struct {
+	State    string     `json:"state"`
+	ResetsAt *time.Time `json:"resets_at,omitempty"`
+}
 type QuotaObservation struct {
 	ID         int64     `json:"id"`
 	Kind       string    `json:"kind"`
@@ -43,6 +53,8 @@ type QuotaObservation struct {
 	ExpiresAt   *time.Time    `json:"expires_at,omitempty"`
 	Plan        string        `json:"plan,omitempty"`
 	Buckets     []QuotaBucket `json:"buckets"`
+	// FreeBucket is optional and valid only on automatic devin observations.
+	FreeBucket *QuotaFreeBucket `json:"free_bucket,omitempty"`
 }
 type QuotaLatest struct {
 	Observation *QuotaObservation  `json:"observation"`
@@ -62,12 +74,39 @@ type QuotaLease struct {
 	Acquired  bool      `json:"acquired"`
 }
 
+// ValidQuotaObservation validates an observation without an account key, so it
+// refuses free_bucket, which is only valid for a devin account. Publishing
+// paths use ValidQuotaObservationFor.
 func ValidQuotaObservation(x QuotaObservation, now time.Time) bool {
+	return x.FreeBucket == nil && validQuotaObservation(x, now)
+}
+
+// ValidQuotaObservationFor additionally checks free_bucket against the account
+// key: it is accepted only on an automatic observation of a devin account.
+func ValidQuotaObservationFor(key string, x QuotaObservation, now time.Time) bool {
+	if !ValidQuotaKey(key) || !validQuotaObservation(x, now) {
+		return false
+	}
+	return x.FreeBucket == nil || x.Kind == "auto" && strings.HasPrefix(key, "devin:")
+}
+func validQuotaFreeBucket(f QuotaFreeBucket) bool {
+	switch f.State {
+	case "available", "unknown":
+		return f.ResetsAt == nil
+	case "exhausted":
+		return f.ResetsAt != nil && !f.ResetsAt.IsZero()
+	}
+	return false
+}
+func validQuotaObservation(x QuotaObservation, now time.Time) bool {
+	if x.FreeBucket != nil && !validQuotaFreeBucket(*x.FreeBucket) {
+		return false
+	}
 	if x.MeasuredAt.IsZero() || x.MeasuredAt.After(now.Add(time.Minute)) || len(x.Plan) > 64 || len(x.Buckets) > 32 {
 		return false
 	}
 	if x.Kind == "auto" {
-		if x.Window != "" || len(x.Buckets) == 0 || x.ExpiresAt != nil {
+		if x.Window != "" || len(x.Buckets) == 0 && x.FreeBucket == nil || x.ExpiresAt != nil {
 			return false
 		}
 	} else if x.Kind == "manual" {
@@ -198,7 +237,7 @@ func (s *Store) ReleaseQuota(ctx context.Context, key, owner, holder string) err
 // value is identical to the current latest for (key, kind, window) it appends
 // nothing and returns the existing row with deduped=true.
 func (s *Store) PutQuota(ctx context.Context, key, owner, holder string, x QuotaObservation) (QuotaObservation, bool, error) {
-	if !ValidQuotaKey(key) || !ValidQuotaHolder(holder) || !ValidQuotaObservation(x, time.Now()) {
+	if !ValidQuotaKey(key) || !ValidQuotaHolder(holder) || !ValidQuotaObservationFor(key, x, time.Now()) {
 		return x, false, errors.New("invalid quota observation")
 	}
 	tx, err := s.pool.Begin(ctx)
@@ -219,6 +258,11 @@ func (s *Store) PutQuota(ctx context.Context, key, owner, holder string, x Quota
 	x.ID = 0
 	// confirmed_at is server-owned: never store a client-supplied value.
 	x.ConfirmedAt = nil
+	// A free-only observation is stored and returned with "buckets":[] whether
+	// the client sent [] or omitted the field.
+	if x.FreeBucket != nil && x.Buckets == nil {
+		x.Buckets = []QuotaBucket{}
+	}
 	data, err := json.Marshal(x)
 	if err != nil {
 		return x, false, err

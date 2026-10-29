@@ -546,3 +546,47 @@ func TestQuotaPresenceBoundsPostgres(t *testing.T) {
 		t.Fatalf("rows after prune=%d %v", count, err)
 	}
 }
+
+func TestQuotaFreeBucketValidation(t *testing.T) {
+	now := time.Now().UTC()
+	reset := now.Add(time.Hour)
+	zero := time.Time{}
+	const devin = "devin:0123456789abcdef"
+	free := func(f *QuotaFreeBucket) QuotaObservation {
+		return QuotaObservation{Kind: "auto", MeasuredAt: now, Buckets: []QuotaBucket{}, FreeBucket: f}
+	}
+	for _, tc := range []struct {
+		name string
+		key  string
+		x    QuotaObservation
+		want bool
+	}{
+		{"available", devin, free(&QuotaFreeBucket{State: "available"}), true},
+		{"unknown", devin, free(&QuotaFreeBucket{State: "unknown"}), true},
+		{"exhausted", devin, free(&QuotaFreeBucket{State: "exhausted", ResetsAt: &reset}), true},
+		{"nil buckets", devin, QuotaObservation{Kind: "auto", MeasuredAt: now, FreeBucket: &QuotaFreeBucket{State: "available"}}, true},
+		{"with percentage bucket", devin, QuotaObservation{Kind: "auto", MeasuredAt: now, Buckets: []QuotaBucket{{Window: "5h", UsedPct: 10, Scope: "account"}}, FreeBucket: &QuotaFreeBucket{State: "available"}}, true},
+		{"empty state", devin, free(&QuotaFreeBucket{}), false},
+		{"bad state", devin, free(&QuotaFreeBucket{State: "full"}), false},
+		{"exhausted without reset", devin, free(&QuotaFreeBucket{State: "exhausted"}), false},
+		{"exhausted zero reset", devin, free(&QuotaFreeBucket{State: "exhausted", ResetsAt: &zero}), false},
+		{"available with reset", devin, free(&QuotaFreeBucket{State: "available", ResetsAt: &reset}), false},
+		{"unknown with reset", devin, free(&QuotaFreeBucket{State: "unknown", ResetsAt: &reset}), false},
+		{"non-devin account", "codex:0123456789abcdef", free(&QuotaFreeBucket{State: "available"}), false},
+		{"manual", devin, QuotaObservation{Kind: "manual", Window: "7d", MeasuredAt: now, ExpiresAt: &reset, FreeBucket: &QuotaFreeBucket{State: "available"}}, false},
+		{"empty buckets without free_bucket", devin, QuotaObservation{Kind: "auto", MeasuredAt: now, Buckets: []QuotaBucket{}}, false},
+		{"devin percentage only", devin, QuotaObservation{Kind: "auto", MeasuredAt: now, Buckets: []QuotaBucket{{Window: "5h", UsedPct: 10, Scope: "account"}}}, true},
+		{"invalid key", "devin:short", free(&QuotaFreeBucket{State: "available"}), false},
+	} {
+		if got := ValidQuotaObservationFor(tc.key, tc.x, now); got != tc.want {
+			t.Errorf("%s: got %v want %v", tc.name, got, tc.want)
+		}
+	}
+	// The key-less validator keeps today's rules and refuses free_bucket.
+	if ValidQuotaObservation(free(&QuotaFreeBucket{State: "available"}), now) {
+		t.Error("key-less validator accepted free_bucket")
+	}
+	if ValidQuotaObservation(QuotaObservation{Kind: "auto", MeasuredAt: now, Buckets: []QuotaBucket{}}, now) {
+		t.Error("empty auto buckets accepted without free_bucket")
+	}
+}
