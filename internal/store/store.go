@@ -694,7 +694,7 @@ func (s *Store) migrate(ctx context.Context) error {
 		return err
 	}
 	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(824180045)`); err != nil {
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, migrationLockID); err != nil {
 		return err
 	}
 	stmts := []string{
@@ -752,11 +752,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			return err
 		}
 	}
-	var v7Applied bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_version WHERE version=7)`).Scan(&v7Applied); err != nil {
-		return err
-	}
-	if !v7Applied {
+	if err := migrateOnce(ctx, tx, 7, func() error {
 		// Version 7 extends relay_events without changing historic job.* rows.
 		// This is deliberately schema-version gated: dropping a constraint or
 		// rebuilding an index takes an ACCESS EXCLUSIVE lock, so repeating it
@@ -772,17 +768,11 @@ func (s *Store) migrate(ctx context.Context) error {
 			`CREATE INDEX relay_events_undelivered_kind_id ON relay_events(kind, id ASC) WHERE delivered_at IS NULL`,
 			`INSERT INTO schema_version(version) VALUES (7)`,
 		}
-		for _, q := range v7 {
-			if _, err := tx.Exec(ctx, q); err != nil {
-				return err
-			}
-		}
-	}
-	var v9Applied bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_version WHERE version=9)`).Scan(&v9Applied); err != nil {
+		return execAll(ctx, tx, v7)
+	}); err != nil {
 		return err
 	}
-	if !v9Applied {
+	if err := migrateOnce(ctx, tx, 9, func() error {
 		v9 := []string{
 			`CREATE TABLE IF NOT EXISTS bench_scores (model_id TEXT NOT NULL, effort TEXT NOT NULL DEFAULT '', harness TEXT NOT NULL DEFAULT '', source TEXT NOT NULL, metric TEXT NOT NULL, score DOUBLE PRECISION, rank INTEGER, captured_at TIMESTAMPTZ NOT NULL, time_per_task_min DOUBLE PRECISION, cost_per_task_usd DOUBLE PRECISION, provenance TEXT NOT NULL DEFAULT '', updated_by TEXT NOT NULL, updated_at TIMESTAMPTZ NOT NULL, UNIQUE(model_id, effort, harness, source, metric))`,
 			`CREATE INDEX IF NOT EXISTS bench_scores_model_source ON bench_scores(model_id, source)`,
@@ -794,11 +784,9 @@ func (s *Store) migrate(ctx context.Context) error {
 			`CREATE INDEX IF NOT EXISTS bench_grades_profile ON bench_grades(profile)`,
 			`INSERT INTO schema_version(version) VALUES (9)`,
 		}
-		for _, q := range v9 {
-			if _, err := tx.Exec(ctx, q); err != nil {
-				return err
-			}
-		}
+		return execAll(ctx, tx, v9)
+	}); err != nil {
+		return err
 	}
 	v10 := []string{
 		`CREATE TABLE IF NOT EXISTS linear_issues (task_id BIGINT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE, issue_id TEXT NOT NULL, identifier TEXT NOT NULL DEFAULT '', created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL)`,
@@ -806,10 +794,8 @@ func (s *Store) migrate(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS linear_outbox_pending ON linear_outbox(next_attempt_at,task_id,seq) WHERE state='pending'`,
 		`INSERT INTO schema_version(version) VALUES (10) ON CONFLICT DO NOTHING`,
 	}
-	for _, q := range v10 {
-		if _, err := tx.Exec(ctx, q); err != nil {
-			return err
-		}
+	if err := execAll(ctx, tx, v10); err != nil {
+		return err
 	}
 	v11 := []string{
 		`CREATE TABLE IF NOT EXISTS chat_questions (id TEXT PRIMARY KEY CHECK(id ~ '^Q-[0-9]{8}-[0-9]{2,}$'), lane TEXT NOT NULL, body TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('pending','resolved','withdrawn')), created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL, resolved_at TIMESTAMPTZ)`,
@@ -820,33 +806,21 @@ func (s *Store) migrate(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS chat_messages_undelivered ON chat_messages(id ASC) WHERE delivered_at IS NULL`,
 		`INSERT INTO schema_version(version) VALUES (11) ON CONFLICT DO NOTHING`,
 	}
-	for _, q := range v11 {
-		if _, err := tx.Exec(ctx, q); err != nil {
-			return err
-		}
-	}
-	var v12Applied bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_version WHERE version=12)`).Scan(&v12Applied); err != nil {
+	if err := execAll(ctx, tx, v11); err != nil {
 		return err
 	}
-	if !v12Applied {
+	if err := migrateOnce(ctx, tx, 12, func() error {
 		v12 := []string{
 			`CREATE TABLE IF NOT EXISTS bench_catalog (profile TEXT, effort TEXT NOT NULL DEFAULT '', model_id TEXT NOT NULL, pool TEXT NOT NULL, grade TEXT NOT NULL CHECK(grade IN ('S+','S','A+','A','B','C')), score DOUBLE PRECISION, gate TEXT NOT NULL DEFAULT 'default' CHECK(gate IN ('default','escalation','consult_only')), gate_reason TEXT, benchmark_source TEXT, benchmark_annotation TEXT, boundary_version TEXT NOT NULL DEFAULT '', deviation_ref TEXT NOT NULL, decided_at TIMESTAMPTZ NOT NULL, decided_by TEXT NOT NULL, retired_at TIMESTAMPTZ, PRIMARY KEY(profile, effort))`,
 			`CREATE INDEX IF NOT EXISTS bench_catalog_pool ON bench_catalog(pool) WHERE retired_at IS NULL`,
 			`INSERT INTO bench_catalog(profile, effort, model_id, pool, grade, boundary_version, deviation_ref, decided_at, decided_by) SELECT profile, '', '', '', grade, boundary_version, deviation_ref, decided_at, decided_by FROM bench_grades ON CONFLICT (profile, effort) DO NOTHING`,
 			`INSERT INTO schema_version(version) VALUES (12)`,
 		}
-		for _, q := range v12 {
-			if _, err := tx.Exec(ctx, q); err != nil {
-				return err
-			}
-		}
-	}
-	var v13Applied bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_version WHERE version=13)`).Scan(&v13Applied); err != nil {
+		return execAll(ctx, tx, v12)
+	}); err != nil {
 		return err
 	}
-	if !v13Applied {
+	if err := migrateOnce(ctx, tx, 13, func() error {
 		// Version 13 admits the two hub terminal signals. Rebuild the partial
 		// index in the same transaction as the CHECK so a newly accepted kind
 		// always has the same five-field idempotency key as older job events.
@@ -857,17 +831,11 @@ func (s *Store) migrate(ctx context.Context) error {
 			`CREATE UNIQUE INDEX relay_events_idempotency ON relay_events(kind, job_id, epoch, report_path, reason) WHERE ` + relayJobIndexPredicate,
 			`INSERT INTO schema_version(version) VALUES (13)`,
 		}
-		for _, q := range v13 {
-			if _, err := tx.Exec(ctx, q); err != nil {
-				return err
-			}
-		}
-	}
-	var v14Applied bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_version WHERE version=14)`).Scan(&v14Applied); err != nil {
+		return execAll(ctx, tx, v13)
+	}); err != nil {
 		return err
 	}
-	if !v14Applied {
+	if err := migrateOnce(ctx, tx, 14, func() error {
 		// Version 14 (#618) admits kind='decision' task_events: a decision
 		// request or its resolution recorded without a state change. They
 		// cannot be 'transition' rows — readers of "to"='merged' (deploys,
@@ -893,17 +861,11 @@ func (s *Store) migrate(ctx context.Context) error {
 			`ALTER TABLE task_events DROP CONSTRAINT IF EXISTS task_events_kind_check, ADD CONSTRAINT task_events_kind_check CHECK(kind IN ('transition','relane','decision')) NOT VALID`,
 			`INSERT INTO schema_version(version) VALUES (14)`,
 		}
-		for _, q := range v14 {
-			if _, err := tx.Exec(ctx, q); err != nil {
-				return err
-			}
-		}
-	}
-	var v15Applied bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_version WHERE version=15)`).Scan(&v15Applied); err != nil {
+		return execAll(ctx, tx, v14)
+	}); err != nil {
 		return err
 	}
-	if !v15Applied {
+	if err := migrateOnce(ctx, tx, 15, func() error {
 		// Version 15 (#763) adds the task project: tasks.project is a
 		// nullable column classified against task_projects, the
 		// server-configured closed vocabulary. Existing rows stay NULL —
@@ -922,17 +884,11 @@ func (s *Store) migrate(ctx context.Context) error {
 			`ALTER TABLE task_events DROP CONSTRAINT IF EXISTS task_events_kind_check, ADD CONSTRAINT task_events_kind_check CHECK(kind IN ('transition','relane','decision','project')) NOT VALID`,
 			`INSERT INTO schema_version(version) VALUES (15)`,
 		}
-		for _, q := range v15 {
-			if _, err := tx.Exec(ctx, q); err != nil {
-				return err
-			}
-		}
-	}
-	var v16Applied bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_version WHERE version=16)`).Scan(&v16Applied); err != nil {
+		return execAll(ctx, tx, v15)
+	}); err != nil {
 		return err
 	}
-	if !v16Applied {
+	if err := migrateOnce(ctx, tx, 16, func() error {
 		v16 := []string{
 			`ALTER TABLE chat_questions ADD COLUMN conversation_id TEXT NOT NULL DEFAULT 'operator-desk'`,
 			`ALTER TABLE chat_messages ADD COLUMN conversation_id TEXT NOT NULL DEFAULT 'operator-desk'`,
@@ -953,17 +909,11 @@ func (s *Store) migrate(ctx context.Context) error {
 			`DO $$ BEGIN IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='relay_events' AND column_name='event_id') THEN INSERT INTO chat_message_questions(message_id,question_id,relation_kind,question_text) SELECT m.id,q.id,'reply',q.body FROM relay_events e JOIN chat_messages m ON m.id=CASE WHEN e.event_id ~ '^chat-[0-9]{1,18}(-[0-9a-f]{8})?$' THEN substring(e.event_id FROM '^chat-([0-9]+)')::bigint END AND m.author='operator' JOIN chat_questions q ON q.id=e.question WHERE e.kind='lane.event' AND e.reason='operator_chat' AND e.question<>'' ON CONFLICT DO NOTHING; END IF; END $$`,
 			`INSERT INTO schema_version(version) VALUES (16)`,
 		}
-		for _, q := range v16 {
-			if _, err := tx.Exec(ctx, q); err != nil {
-				return err
-			}
-		}
-	}
-	var v17Applied bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_version WHERE version=17)`).Scan(&v17Applied); err != nil {
+		return execAll(ctx, tx, v16)
+	}); err != nil {
 		return err
 	}
-	if !v17Applied {
+	if err := migrateOnce(ctx, tx, 17, func() error {
 		// Version 17 (MGH-36 PR-1) gives chat questions a monotonic revision
 		// the assistant answer path compares against, and the single-answer
 		// pointer answer_message_id. The notification outbox is hk's durable
@@ -979,17 +929,11 @@ func (s *Store) migrate(ctx context.Context) error {
 			`CREATE INDEX notification_outbox_unsent ON notification_outbox(id) WHERE sent_at IS NULL`,
 			`INSERT INTO schema_version(version) VALUES (17)`,
 		}
-		for _, q := range v17 {
-			if _, err := tx.Exec(ctx, q); err != nil {
-				return err
-			}
-		}
-	}
-	var v18Applied bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_version WHERE version=18)`).Scan(&v18Applied); err != nil {
+		return execAll(ctx, tx, v17)
+	}); err != nil {
 		return err
 	}
-	if !v18Applied {
+	if err := migrateOnce(ctx, tx, 18, func() error {
 		// Version 18 (hk 1940) adds the task area: tasks.area is a nullable
 		// column validated against the TaskAreas code constant, not a table
 		// and not a CHECK, because the vocabulary changes with the code and a
@@ -1003,17 +947,11 @@ func (s *Store) migrate(ctx context.Context) error {
 			`ALTER TABLE task_events DROP CONSTRAINT IF EXISTS task_events_kind_check, ADD CONSTRAINT task_events_kind_check CHECK(kind IN ('transition','relane','decision','project','area')) NOT VALID`,
 			`INSERT INTO schema_version(version) VALUES (18)`,
 		}
-		for _, q := range v18 {
-			if _, err := tx.Exec(ctx, q); err != nil {
-				return err
-			}
-		}
-	}
-	var v19Applied bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_version WHERE version=19)`).Scan(&v19Applied); err != nil {
+		return execAll(ctx, tx, v18)
+	}); err != nil {
 		return err
 	}
-	if !v19Applied {
+	if err := migrateOnce(ctx, tx, 19, func() error {
 		// Version 19 (hk 1944) adds the bench area exception list: per-area
 		// routing exceptions kept next to, but separate from, the grade
 		// catalog. The area column is validated in code against the TaskAreas
@@ -1026,32 +964,20 @@ func (s *Store) migrate(ctx context.Context) error {
 			`CREATE INDEX IF NOT EXISTS bench_area_exceptions_area ON bench_area_exceptions(area) WHERE retired_at IS NULL`,
 			`INSERT INTO schema_version(version) VALUES (19)`,
 		}
-		for _, q := range v19 {
-			if _, err := tx.Exec(ctx, q); err != nil {
-				return err
-			}
-		}
-	}
-	var v21Applied bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_version WHERE version=21)`).Scan(&v21Applied); err != nil {
+		return execAll(ctx, tx, v19)
+	}); err != nil {
 		return err
 	}
-	if !v21Applied {
-		for _, q := range []string{
+	if err := migrateOnce(ctx, tx, 21, func() error {
+		return execAll(ctx, tx, []string{
 			`ALTER TABLE tasks DROP CONSTRAINT tasks_state_check, ADD CONSTRAINT tasks_state_check CHECK(state IN ('backlog','reopened','claimed','in_progress','verifying','join','hold','needs_decision','merged','dropped'))`,
 			`INSERT INTO schema_version(version) VALUES (21)`,
-		} {
-			if _, err := tx.Exec(ctx, q); err != nil {
-				return err
-			}
-		}
-	}
-
-	var v22Applied bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_version WHERE version=22)`).Scan(&v22Applied); err != nil {
+		})
+	}); err != nil {
 		return err
 	}
-	if !v22Applied {
+
+	if err := migrateOnce(ctx, tx, 22, func() error {
 		var priorLockTimeout string
 		if err := tx.QueryRow(ctx, `SELECT current_setting('lock_timeout')`).Scan(&priorLockTimeout); err != nil {
 			return err
@@ -1059,14 +985,15 @@ func (s *Store) migrate(ctx context.Context) error {
 		if _, err := tx.Exec(ctx, `SET LOCAL lock_timeout = '3s'`); err != nil {
 			return err
 		}
-		for _, q := range []string{`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS expected TEXT`, `INSERT INTO schema_version(version) VALUES (22)`} {
-			if _, err := tx.Exec(ctx, q); err != nil {
-				return err
-			}
+		if err := execAll(ctx, tx, []string{`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS expected TEXT`, `INSERT INTO schema_version(version) VALUES (22)`}); err != nil {
+			return err
 		}
 		if _, err := tx.Exec(ctx, `SELECT set_config('lock_timeout', $1, true)`, priorLockTimeout); err != nil {
 			return err
 		}
+		return nil
+	}); err != nil {
+		return err
 	}
 
 	// Lane-knownness probes for relane run once per batch item. These
@@ -1076,13 +1003,11 @@ func (s *Store) migrate(ctx context.Context) error {
 	// relay_events and chat_questions CREATE TABLEs above: under a
 	// test-only search_path an earlier statement would resolve to the
 	// public table (or fail where no table exists yet).
-	for _, q := range []string{
+	if err := execAll(ctx, tx, []string{
 		`CREATE INDEX IF NOT EXISTS relay_events_owner_lane ON relay_events(owner_lane)`,
 		`CREATE INDEX IF NOT EXISTS chat_questions_lane ON chat_questions(lane)`,
-	} {
-		if _, err := tx.Exec(ctx, q); err != nil {
-			return err
-		}
+	}); err != nil {
+		return err
 	}
 	if err := migrateTaskComments(ctx, tx); err != nil {
 		return err
@@ -3835,10 +3760,10 @@ func (s *Store) ListAttachments(ctx context.Context, refKind, refID string, limi
 	q := `SELECT a.sha256,a.size_bytes,a.mime,a.original_name,a.created_by,a.created_at,r.ref_kind,r.ref_id FROM attachments a JOIN attachment_refs r ON r.sha256=a.sha256`
 	args := []any{limit}
 	if refKind != "" {
-		q += ` WHERE r.ref_kind=$1 AND r.ref_id=$2 ORDER BY a.created_at DESC LIMIT $3`
+		q += ` WHERE r.ref_kind=$1 AND r.ref_id=$2 ORDER BY a.created_at DESC,a.sha256,r.ref_kind,r.ref_id LIMIT $3`
 		args = []any{refKind, refID, limit}
 	} else {
-		q += ` ORDER BY a.created_at DESC LIMIT $1`
+		q += ` ORDER BY a.created_at DESC,a.sha256,r.ref_kind,r.ref_id LIMIT $1`
 	}
 	rows, e := s.pool.Query(ctx, q, args...)
 	if e != nil {
@@ -3920,7 +3845,7 @@ func (s *Store) Search(ctx context.Context, q, scope, session string, limit int)
 	if scope == "all" || scope == "docs" {
 		parts = append(parts, `SELECT 'docs' scope,key,session,kind,key title,ts_headline('simple',body,plainto_tsquery('simple',$2),'MaxWords=24,MinWords=8') snippet,'{}'::jsonb refs,created_at FROM documents WHERE ($1='' OR session=$1) AND (to_tsvector('simple',key || ' ' || body) @@ plainto_tsquery('simple',$2) OR key || ' ' || body ILIKE '%' || $2 || '%')`)
 	}
-	rows, e := s.pool.Query(ctx, `SELECT scope,key,session,kind,title,snippet,refs,created_at FROM (`+strings.Join(parts, " UNION ALL ")+") r ORDER BY created_at DESC LIMIT $3", session, q, limit+1)
+	rows, e := s.pool.Query(ctx, `SELECT scope,key,session,kind,title,snippet,refs,created_at FROM (`+strings.Join(parts, " UNION ALL ")+") r ORDER BY created_at DESC,scope,key,session,title LIMIT $3", session, q, limit+1)
 	if e != nil {
 		return nil, fmt.Errorf("search: %w", e)
 	}

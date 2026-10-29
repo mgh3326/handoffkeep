@@ -56,12 +56,7 @@ var taskCommentMigrations = []string{
 }
 
 func migrateTaskComments(ctx context.Context, tx pgx.Tx) error {
-	for _, q := range taskCommentMigrations {
-		if _, err := tx.Exec(ctx, q); err != nil {
-			return err
-		}
-	}
-	return nil
+	return execAll(ctx, tx, taskCommentMigrations)
 }
 
 func scanTaskComment(row interface{ Scan(...any) error }, x *TaskComment) error {

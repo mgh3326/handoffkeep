@@ -102,7 +102,7 @@ func ValidQuotaPresence(x QuotaPresence, now time.Time) bool {
 	return ValidQuotaHost(x.HostID) && ValidQuotaKey(x.AccountKey) && x.LastSeen.After(now.Add(-QuotaPresenceRetention)) && !x.LastSeen.After(now.Add(time.Minute))
 }
 func migrateQuota(ctx context.Context, tx pgx.Tx) error {
-	for _, q := range []string{
+	if err := execAll(ctx, tx, []string{
 		`CREATE TABLE IF NOT EXISTS quota_observations (id BIGSERIAL PRIMARY KEY, account_key TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('auto','manual')), window_key TEXT NOT NULL, measured_at TIMESTAMPTZ NOT NULL, value JSONB NOT NULL, received_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp())`,
 		`CREATE TABLE IF NOT EXISTS quota_latest (account_key TEXT NOT NULL, kind TEXT NOT NULL, window_key TEXT NOT NULL, observation_id BIGINT NOT NULL REFERENCES quota_observations(id), measured_at TIMESTAMPTZ NOT NULL, PRIMARY KEY(account_key,kind,window_key))`,
 		// confirmed_at is the newest measured_at that republished the latest
@@ -128,10 +128,8 @@ func migrateQuota(ctx context.Context, tx pgx.Tx) error {
 		`CREATE TABLE IF NOT EXISTS quota_presence (host_id TEXT NOT NULL CHECK(length(host_id) BETWEEN 1 AND 64), account_key TEXT NOT NULL CHECK(length(account_key) BETWEEN 1 AND 64), last_seen TIMESTAMPTZ NOT NULL, PRIMARY KEY(host_id,account_key))`,
 		`CREATE INDEX IF NOT EXISTS quota_presence_account ON quota_presence(account_key)`,
 		`INSERT INTO schema_version(version) VALUES (24) ON CONFLICT DO NOTHING`,
-	} {
-		if _, err := tx.Exec(ctx, q); err != nil {
-			return err
-		}
+	}); err != nil {
+		return err
 	}
 	return nil
 }
