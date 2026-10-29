@@ -30,6 +30,9 @@ export default defineConfig({
         // /ui/deploys loads the deploy status screen built from
         // src/queue-proto/deploys — same separate-entry constraint (#620).
         deploys: resolve(root, "src/queue-proto/deploys/main.tsx"),
+        // /ui/docs loads the document browser built from src/queue-proto/docs
+        // — its own entry so browsing costs the queue nothing (hk 2245).
+        docs: resolve(root, "src/queue-proto/docs/main.tsx"),
         // The --hk-* design tokens ship as their own static stylesheet so the
         // React entries and the Go templates link one and the same file.
         tokens: resolve(root, "src/design/tokens.css"),

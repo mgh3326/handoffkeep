@@ -13,7 +13,8 @@
 import { Suspense, useCallback, useEffect, useState, type FormEvent, type KeyboardEvent } from "react";
 import { CommentWriteError, fetchTaskComments, postTaskComment, readCsrfToken, type TaskComments as TaskCommentsData } from "../board/api";
 import type { BoardComment } from "../board/types";
-import { DocMarkdown, RendererBoundary } from "./DocInline";
+import { DocMarkdown } from "./DocInline";
+import { RendererBoundary } from "./RendererBoundary";
 
 /** Server-side comment body limit (store.TaskCommentMaxBytes). */
 export const COMMENT_MAX_BYTES = 64 * 1024;

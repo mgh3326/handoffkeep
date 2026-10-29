@@ -86,6 +86,20 @@ func (h *Handler) serveAPI(w http.ResponseWriter, r *http.Request, identity cfac
 			return
 		}
 		h.boardDoc(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/ui/api/docs":
+		// The browse listing is the same operator-only reading material as
+		// /ui/api/board/doc.
+		if identity.ServiceName != "" {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		h.docsList(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/ui/api/docs/prefixes":
+		if identity.ServiceName != "" {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		h.docsPrefixes(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/ui/api/bench/catalog":
 		// The grade catalog is the same operator-only reading material as
 		// /ui/api/board/doc — provenance fields are not for service tokens.
