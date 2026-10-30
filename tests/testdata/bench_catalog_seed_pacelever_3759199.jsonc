@@ -686,7 +686,7 @@
       "score": null
     },
     {
-      "benchmark_annotation": "추정(외삽·harness-이식)",
+      "benchmark_annotation": "추정(내삽·harness-이식)",
       "benchmark_source": null,
       "boundary_version": null,
       "decided_at": null,
