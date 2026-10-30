@@ -1,9 +1,8 @@
-// Golden copy of the scopefuel bench catalog seed at scopefuel rev 3759199
-// (59 rows), generated on this host with:
-//   scopefuel bench push-catalog --emit-seed --decided-by operator-desk --deviation-ref hk:task/955
+// Golden copy of the bench catalog seed at rev 3759199
+// (59 rows), the handoffkeep #955 step-2 activation body, emitted with:
+//   pacelever bench push-catalog --emit-seed --decided-by operator-desk --deviation-ref hk:task/955
 // The one date-only decided_at (devin-swe2-medium) is normalized to
 // 2026-09-27T00:00:00Z here; the raw emit keeps date-only on purpose.
-// scopefuel #1028 adds the mirror test on its side.
 {
   "catalog": [
     {
@@ -687,7 +686,7 @@
       "score": null
     },
     {
-      "benchmark_annotation": "추정(내삽·harness-이식)",
+      "benchmark_annotation": "추정(외삽·harness-이식)",
       "benchmark_source": null,
       "boundary_version": null,
       "decided_at": null,

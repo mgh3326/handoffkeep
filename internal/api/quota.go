@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/mgh3326/handoffkeep/internal/store"
@@ -37,10 +38,13 @@ func quotaError(w http.ResponseWriter, err error) {
 	}
 }
 
-// quotaScope limits writes to the client's granted account keys. Reads
-// (latest) deliberately stay open to every authenticated client.
+// quotaScope limits writes to the client's granted account keys. A grant may
+// be the exact key, the key's bare pool name, or "*" for every account.
+// Reads (latest) deliberately stay open to every authenticated client.
 func (s Server) quotaScope(w http.ResponseWriter, client, key string) bool {
-	if !s.QuotaAccounts[client][key] {
+	grants := s.QuotaAccounts[client]
+	pool, _, _ := strings.Cut(key, ":")
+	if !grants["*"] && !grants[key] && !grants[pool] {
 		writeError(w, http.StatusForbidden, "quota_account_forbidden")
 		return false
 	}

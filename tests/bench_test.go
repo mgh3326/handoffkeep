@@ -938,12 +938,12 @@ func TestBenchCatalogAPI(t *testing.T) {
 	}
 }
 
-// benchSeedGolden loads the golden copy of the scopefuel catalog seed,
+// benchSeedGolden loads the golden copy of the catalog seed,
 // stripping the // header comment the file carries (JSON has no comment
 // syntax, so the rev and provenance note live in comment lines).
 func benchSeedGolden(t *testing.T) []byte {
 	t.Helper()
-	raw, err := os.ReadFile("testdata/bench_catalog_seed_scopefuel_3759199.jsonc")
+	raw, err := os.ReadFile("testdata/bench_catalog_seed_pacelever_3759199.jsonc")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -954,14 +954,14 @@ func benchSeedGolden(t *testing.T) []byte {
 	return []byte(strings.Join(lines, "\n"))
 }
 
-// TestBenchCatalogScopefuelSeed replays the operator-approved scopefuel
+// TestBenchCatalogSeed replays the operator-approved
 // catalog seed (rev 3759199, the handoffkeep #955 step-2 activation body)
 // through the real PUT handler. Its two codex-sol E6 measurement rungs ride
 // the placeholder exception — grade C with score null makes no grade claim —
 // while every Sol row that does claim a grade below S+ still fails, and a
 // date-only decided_at fails decode with the named catalog error rather than
 // invalid_context.
-func TestBenchCatalogScopefuelSeed(t *testing.T) {
+func TestBenchCatalogSeed(t *testing.T) {
 	s := benchStore(t)
 	p := benchPool(t)
 	benchClean(t, p)
@@ -1006,7 +1006,7 @@ func TestBenchCatalogScopefuelSeed(t *testing.T) {
 	// The whole seed is accepted as one batch.
 	resp := put(golden)
 	if resp.StatusCode != http.StatusOK || benchJSON(t, resp)["upserted"] != float64(len(seed.Catalog)) {
-		t.Fatalf("scopefuel seed put status=%d", resp.StatusCode)
+		t.Fatalf("seed put status=%d", resp.StatusCode)
 	}
 	// A read-back lists the two codex-sol placeholder rungs unchanged: grade C
 	// with score null at the medium and high efforts, alongside the scored S+

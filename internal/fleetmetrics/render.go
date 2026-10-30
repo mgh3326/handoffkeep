@@ -99,7 +99,7 @@ func RenderMarkdown(w io.Writer, r Report) {
 	p("- rounds per lineage (count of → verifying): %s", fmtDist(rd.PerLineage, ""))
 	p("- share over 3 rounds: %s", fmtShare(rd.OverThree, rd.Lineages))
 	p("- fix rounds (verifying → in_progress): %d · cause: %s", rd.FixRounds, fmtCounts(rd.Cause))
-	p("- scopefuel impl reps rounds per lineage: %s · agree with hk %d · disagree %d", fmtDist(rd.RepsRounds, ""), rd.RepsAgree, rd.RepsDisagree)
+	p("- pacelever impl reps rounds per lineage: %s · agree with hk %d · disagree %d", fmtDist(rd.RepsRounds, ""), rd.RepsAgree, rd.RepsDisagree)
 	cov(rd.Coverage)
 	p("")
 	p("## 3. empty task-slot minutes while ready work existed")

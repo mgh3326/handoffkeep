@@ -181,7 +181,7 @@ func TestProjectReapReportShape(t *testing.T) {
 	if _, promoted := reapByPane(candidates)["w2:p32"]; promoted || reapByPane(held)["w2:p32"].Reason != "report-shape" {
 		t.Fatalf("negative grace promoted the builder: %+v", candidates)
 	}
-	// Zero is a valid operator choice (wrk reap --grace 0): a merged task
+	// Zero is a valid operator choice (reap --grace 0): a merged task
 	// promotes its builder at once.
 	zero := reapFixtureNodes(t)
 	zero[0].Report.GraceSeconds = 0

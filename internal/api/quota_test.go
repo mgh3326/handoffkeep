@@ -81,8 +81,13 @@ func TestQuotaRequestGuards(t *testing.T) {
 // so these guards need no database.
 func TestQuotaWriteScope(t *testing.T) {
 	h := Server{
-		Tokens:        Tokens{"granted": "token-a", "peer": "token-b", "none": "token-c"},
-		QuotaAccounts: QuotaAccounts{"granted": {"codex:0123456789abcdef": true}, "peer": {"codex:aaaaaaaabbbbbbbb": true}},
+		Tokens: Tokens{"granted": "token-a", "peer": "token-b", "none": "token-c", "pool": "token-pool", "all": "token-all"},
+		QuotaAccounts: QuotaAccounts{
+			"granted": {"codex:0123456789abcdef": true},
+			"peer":    {"codex:aaaaaaaabbbbbbbb": true},
+			"pool":    {"codex": true},
+			"all":     {"*": true},
+		},
 	}.Handler()
 	for _, tc := range []struct {
 		name, method, path, body, token string
@@ -98,6 +103,10 @@ func TestQuotaWriteScope(t *testing.T) {
 		{"lease granted", "POST", "/v1/quota/accounts/codex:0123456789abcdef/lease", `{}`, "token-a", 400},
 		{"release granted", "DELETE", "/v1/quota/accounts/codex:0123456789abcdef/lease", `{}`, "token-a", 400},
 		{"put bad key", "PUT", "/v1/quota/accounts/invalid/observation", `{}`, "token-a", 400},
+		// Pool grants cover every account key of the pool, nothing outside it.
+		{"pool grant own pool", "POST", "/v1/quota/accounts/codex:bbbbbbbb11111111/lease", `{}`, "token-pool", 400},
+		{"pool grant other pool", "POST", "/v1/quota/accounts/claude:bbbbbbbb11111111/lease", `{}`, "token-pool", 403},
+		{"wildcard grant any pool", "POST", "/v1/quota/accounts/claude:bbbbbbbb11111111/lease", `{}`, "token-all", 400},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
@@ -118,7 +127,7 @@ func TestQuotaWriteScope(t *testing.T) {
 // empty client id is logged to stderr and skipped, leaving no scope.
 func TestQuotaGrantFile(t *testing.T) {
 	for name, body := range map[string]string{
-		"bad key":        "HANDOFFKEEP_TOKEN_a=x\nHANDOFFKEEP_QUOTA_a=invalid\n",
+		"bad key":        "HANDOFFKEEP_TOKEN_a=x\nHANDOFFKEEP_QUOTA_a=codex:nothex\n",
 		"unknown client": "HANDOFFKEEP_TOKEN_a=x\nHANDOFFKEEP_QUOTA_b=codex:0123456789abcdef\n",
 		"empty client":   "HANDOFFKEEP_TOKEN_a=x\nHANDOFFKEEP_QUOTA_=codex:0123456789abcdef\n",
 		"empty value":    "HANDOFFKEEP_TOKEN_a=x\nHANDOFFKEEP_QUOTA_a=\n",
@@ -139,7 +148,7 @@ func TestQuotaGrantFile(t *testing.T) {
 		})
 	}
 	p := filepath.Join(t.TempDir(), "auth.env")
-	body := "HANDOFFKEEP_TOKEN_a=x\nHANDOFFKEEP_QUOTA_a=codex:0123456789abcdef\nHANDOFFKEEP_QUOTA_a=claude:0123456789abcdef\nHANDOFFKEEP_TOKEN_b=y\n"
+	body := "HANDOFFKEEP_TOKEN_a=x\nHANDOFFKEEP_QUOTA_a=codex:0123456789abcdef\nHANDOFFKEEP_QUOTA_a=claude:0123456789abcdef\nHANDOFFKEEP_TOKEN_b=y\nHANDOFFKEEP_QUOTA_b=claude,devin,*\n"
 	if err := os.WriteFile(p, []byte(body), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -147,7 +156,11 @@ func TestQuotaGrantFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !grants["a"]["codex:0123456789abcdef"] || !grants["a"]["claude:0123456789abcdef"] || len(grants["a"]) != 2 || len(grants["b"]) != 0 {
+	if !grants["a"]["codex:0123456789abcdef"] || !grants["a"]["claude:0123456789abcdef"] || len(grants["a"]) != 2 {
+		t.Fatalf("grants=%v", grants)
+	}
+	// Pool and wildcard entries parse alongside exact keys.
+	if !grants["b"]["claude"] || !grants["b"]["devin"] || !grants["b"]["*"] || len(grants["b"]) != 3 {
 		t.Fatalf("grants=%v", grants)
 	}
 }

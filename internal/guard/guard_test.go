@@ -27,7 +27,7 @@ func TestRejectsSecretsWithoutValue(t *testing.T) {
 func TestAllowsJobIdentifiersThatResembleTokenPrefixes(t *testing.T) {
 	for _, input := range []string{
 		"sk-captain-verify10-20260904-1710",
-		"sk-wrkinbox-20260904-1230",
+		"sk-jobinbox-20260904-1230",
 		"task-sk-2026",
 		"risk-20260904-1230",
 		"desk-captain-20260904-1230",
