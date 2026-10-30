@@ -82,8 +82,9 @@ Percentiles are nearest-rank over observed values (hours unless noted).
    `refs.pr` (task or any event), a linked job's relay/job event PR, or a PR URL
    in an event note. Merge = GitHub `merged_at` (falls back to the hk `merged`
    transition time, reported in coverage). Usable = for a repo with a
-   deploy-record stream (`handoffkeep`, `auto_trader`, `panewire`,
-   `brewdial`), the first `result=success` deploy record at or after the merge
+   deploy-record stream (`handoffkeep`, `auto_trader`, `panewire`, `pacelever`,
+   `brewdial`; `scopefuel` remains as a historical alias to `pacelever` for
+   pre-rename records only), the first `result=success` deploy record at or after the merge
    that lists the PR in `included_prs` (`<repo>#<n>`), has `deployed_ref` equal
    to the merge commit, or whose ref GitHub `compare` says contains it; for any
    other repo, the merge. A merge older than the service's first deploy record
