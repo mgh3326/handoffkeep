@@ -19,6 +19,9 @@ var DeployRepos = deployRepoMap([]struct{ Service, Repo string }{
 	{Service: "panewire-hub", Repo: "mgh3326/panewire"},
 	{Service: "panewire-node", Repo: "mgh3326/panewire"},
 	{Service: "pacelever", Repo: "mgh3326/pacelever"},
+	// Historical alias for old deploy/<service> records written before the
+	// rename; no new records are produced under this name.
+	{Service: "scopefuel", Repo: "mgh3326/pacelever"},
 	{Service: "brewdial-api", Repo: "mgh3326/brewdial"},
 	{Service: "brewdial-db", Repo: "mgh3326/brewdial"},
 	{Service: "brewdial-data", Repo: "mgh3326/brewdial"},
