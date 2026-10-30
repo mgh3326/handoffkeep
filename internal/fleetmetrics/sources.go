@@ -223,8 +223,8 @@ func ParseRepsList(data []byte, source string) []Rep {
 		Profile       string `json:"profile"`
 		TaskRef       string `json:"task_ref"`
 		Role          string `json:"role"`
-		Rounds        int    `json:"rounds"`
-		BlockersFound int    `json:"blockers_found"`
+		Rounds        *int   `json:"rounds"`
+		BlockersFound *int   `json:"blockers_found"`
 		Completed     *int   `json:"completed"`
 		RecordedAt    string `json:"recorded_at"`
 	}
@@ -250,7 +250,7 @@ func ParseRepsList(data []byte, source string) []Rep {
 		if id == 0 {
 			continue
 		}
-		r := Rep{ID: id, Source: source, Profile: w.Profile, Task: w.TaskRef, Role: w.Role, Rounds: &w.Rounds, BlockersFound: &w.BlockersFound, Completed: w.Completed}
+		r := Rep{ID: id, Source: source, Profile: w.Profile, Task: w.TaskRef, Role: w.Role, Rounds: w.Rounds, BlockersFound: w.BlockersFound, Completed: w.Completed}
 		if t := parseTime(w.RecordedAt); t != nil {
 			r.RecordedAt = *t
 		}

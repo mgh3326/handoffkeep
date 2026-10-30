@@ -59,6 +59,11 @@ or a client with no
 startup error; the client simply has no quota scope. Token-line validation
 is unchanged. A write to an unlisted or foreign `account_key` returns 403
 `quota_account_forbidden`; clients with no grant lines may not write at all.
+Ordering matters for the new forms: a server running a binary that predates
+pool grants skips a grant line that contains a pool name or `*` — including
+any exact keys on the same line — so every server must run the new binary
+before pool or wildcard grants are added, and a rollback first restores
+exact-key-only grant lines.
 
 A write without a live lease belonging to both the authenticated client and the
 holder returns 409. Acquisition and renewal use the database clock. Publishing
