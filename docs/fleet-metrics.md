@@ -19,9 +19,9 @@ observed is not an empty slot. A distribution with no observation prints
 Chosen: one hk document per day, `report/<date>/fleet-metrics-baseline`
 (the day's run appended), produced by a manual command. Why:
 
-- **Sources live off the server.** Metric 3 and 5 read wrk/panewire job
+- **Sources live off the server.** Metric 3 and 5 read runtug/panewire job
   directories and completion-sentinel logs on the machine that spawned the
-  jobs, and metric 2 reads `scopefuel reps`, which are per-machine. The
+  jobs, and metric 2 reads `pacelever reps`, which are per-machine. The
   handoffkeep server (NCP) has none of these; a console page would need new
   agents or secrets on the server and a deploy — both out of scope.
 - **A baseline is a frozen series.** Seven daily values must stay as they
@@ -47,9 +47,9 @@ handoffkeep fleet-metrics --from-snapshot ~/work/herdr-inbox/fleet-metrics/2026-
 | `--machine ID` | hub machine id of the machine running the command (owns the default job root and `[local]` slots). Required for a live run. |
 | `--since 7d\|36h\|RFC3339`, `--until RFC3339` | window; default the 7 days ending now |
 | `--jobs-root PATH[=MACHINE]` | job-directory root, repeatable; default `~/work/herdr-inbox/jobs=<machine>` |
-| `--reps-file PATH[=SOURCE]` | a saved `scopefuel reps list` from another machine, repeatable |
-| `--no-reps-local` | skip `scopefuel reps list` on this machine |
-| `--hosts-config PATH` | wrk `hosts.toml` for slot capacity (`[local] max_active`, `[hosts.X] capacity`) |
+| `--reps-file PATH[=SOURCE]` | a saved `pacelever reps list --json` from another machine, repeatable |
+| `--no-reps-local` | skip `pacelever reps list` on this machine |
+| `--hosts-config PATH` | fleet `hosts.toml` for slot capacity (`[local] max_active`, `[hosts.X] capacity`; default `~/.config/fleet/hosts.toml`) |
 | `--slots MACHINE=N[@RFC3339]` | slot capacity; a dated list is a timeline and replaces `hosts.toml` for that machine. Minutes before the first dated entry have no declared capacity and leave the denominator |
 | `--no-github`, `--no-herdr` | skip `gh api` PR facts / `herdr agent list` liveness |
 | `--snapshot-out FILE`, `--from-snapshot FILE` | save the collected input / compute from a saved input only |
@@ -59,7 +59,7 @@ Reads, all read-only: `GET /v1/tasks/export`, `GET /v1/tasks/{id}` (events),
 `GET /v1/tasks/{id}/comments`, `GET /v1/relay/events` (paged by `after_id`),
 `GET /v1/documents?prefix=deploy/` + `GET /v1/documents/{key}`; job
 directories and `completion-sentinel.log` under each job root;
-`scopefuel reps list`; `gh api repos/{repo}/pulls/{n}` and
+`pacelever reps list --json`; `gh api repos/{repo}/pulls/{n}` and
 `gh api repos/{repo}/compare/{merge}...{deployed}`; `herdr agent list`. The
 command writes nothing except the `--snapshot-out` file.
 
@@ -82,8 +82,9 @@ Percentiles are nearest-rank over observed values (hours unless noted).
    `refs.pr` (task or any event), a linked job's relay/job event PR, or a PR URL
    in an event note. Merge = GitHub `merged_at` (falls back to the hk `merged`
    transition time, reported in coverage). Usable = for a repo with a
-   deploy-record stream (`handoffkeep`, `auto_trader`, `panewire`, `scopefuel`,
-   `brewdial`), the first `result=success` deploy record at or after the merge
+   deploy-record stream (`handoffkeep`, `auto_trader`, `panewire`, `pacelever`,
+   `brewdial`; `scopefuel` remains as a historical alias to `pacelever` for
+   pre-rename records only), the first `result=success` deploy record at or after the merge
    that lists the PR in `included_prs` (`<repo>#<n>`), has `deployed_ref` equal
    to the merge commit, or whose ref GitHub `compare` says contains it; for any
    other repo, the merge. A merge older than the service's first deploy record
@@ -97,7 +98,7 @@ Percentiles are nearest-rank over observed values (hours unless noted).
    `→ verifying` transitions across the lineage; share over 3. Fix rounds are
    `verifying → in_progress`; their cause is read only from an explicit tag in
    the transition note: `cause:regression` or `cause:requirement`. The latest
-   scopefuel `role=impl` rep per task is compared as a second source.
+   pacelever `role=impl` rep per task is compared as a second source.
 3. **Empty task slots while ready work existed.** A task slot holds one task
    unit — a builder job plus the worker/tester jobs whose `owner_lane` is the
    builder's lane (hk:doc task/2026-09-23/hub-placement-task-slots). A unit
@@ -143,7 +144,7 @@ Percentiles are nearest-rank over observed values (hours unless noted).
 | job_id | `refs.job_id` on the task or an event; job directory name; relay `job_id`; hub `/v1/jobs` | task ↔ job | about 40% of merged tasks carry no `refs.job_id`; the report falls back to `refs.report_path` (`…/jobs/<job_id>/…`), an exact known job id in an event note, and the `<task>-…` / `t<task>-…` naming convention, and prints which tier linked each task. Jobs spawned on other machines have no local job directory. |
 | attempt | job `epoch` in flat job events and relay events; `job.reclaim` | re-inject detection | epoch is on terminal and outcome records (`job.completed` 397/399, `job.lost`, `job.reaped`, `job.joined`, `job.escalate` all) and absent on `job.claim`, `job.spawned`, `job.reclaim` and `job.revoked` (day-1 snapshot). There is no hk attempt id. |
 | contract revision | — | lineage | **no source**: `tasks.body_doc` names a document but documents keep only the current sha256, and briefs are not versioned. Lineage uses `refs.origin_task` instead. |
-| PR / PR SHA | `refs.pr`, `refs.head_sha`; relay `pr`/`head`; GitHub merge commit | task ↔ PR ↔ deploy | about 30% of merged tasks have no PR link of any tier; `refs.head_sha` is the reviewed head, not the merge commit — GitHub supplies the merge SHA. Deploy records name PRs as free text (`handoffkeep#45 (…)`) or a ref; the pre-2026-09-23 deploys were never recorded. Of the 20 records in the day-1 snapshot only 10 are usable: 4 do not parse (all three `brewdial-*` records and the first `scopefuel` one; the brewdial bodies carry an unescaped nested quote), 3 `scopefuel` records are YAML without a `result`, and 3 JSON records have no `deployed_at`. A deploy-group repo with no dated record at all (brewdial today) is reported as `no dated deploy record for the repo's services`, not as merged before the stream. |
+| PR / PR SHA | `refs.pr`, `refs.head_sha`; relay `pr`/`head`; GitHub merge commit | task ↔ PR ↔ deploy | about 30% of merged tasks have no PR link of any tier; `refs.head_sha` is the reviewed head, not the merge commit — GitHub supplies the merge SHA. Deploy records name PRs as free text (`handoffkeep#45 (…)`) or a ref; the pre-2026-09-23 deploys were never recorded. Of the 20 records in the day-1 snapshot only 10 are usable: 4 do not parse (all three `brewdial-*` records and one retired-service record; the brewdial bodies carry an unescaped nested quote), 3 records for a retired service are YAML without a `result`, and 3 JSON records have no `deployed_at`. A deploy-group repo with no dated record at all (brewdial today) is reported as `no dated deploy record for the repo's services`, not as merged before the stream. |
 | event_id | `task_events.id`, `relay_events.id` / `event_id`, job event `seq` | decision request ↔ answer ↔ delivery | task decisions answered with a plain `tasks transition` leave no lane event, so delivery is unobservable for them; flat job completion records carry no timestamp (the file mtime is used and labelled). |
 
 ## Tests and mutants
@@ -151,7 +152,7 @@ Percentiles are nearest-rank over observed values (hours unless noted).
 `go test ./internal/fleetmetrics` runs one fixture test per metric, each with a
 missing-identifier variant that must lower coverage while leaving the value
 unchanged. The parsers are tested on verbatim copies of a job directory,
-`scopefuel reps list` output and two deploy-record bodies. Mutants live on disk
+`pacelever reps list --json` output and two deploy-record bodies. Mutants live on disk
 in `internal/fleetmetrics/testdata/mutants/*.json`;
 `scripts/fleetmetrics-mutants.sh` applies each to a throwaway copy and requires
 an assertion failure (a panic or build error does not count).

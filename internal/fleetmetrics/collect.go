@@ -24,7 +24,7 @@ type HK interface {
 	ListTaskComments(ctx context.Context, taskID, afterID int64, limit int) ([]store.TaskComment, error)
 }
 
-// Runner executes a read-only local command (scopefuel, gh, herdr).
+// Runner executes a read-only local command (pacelever, gh, herdr).
 type Runner func(ctx context.Context, name string, args ...string) ([]byte, error)
 
 type CollectConfig struct {
@@ -33,10 +33,10 @@ type CollectConfig struct {
 	Since, Until time.Time
 	Now          time.Time
 	JobRoots     []JobRoot
-	// RepsLocal runs `scopefuel reps list` on this machine as one source.
+	// RepsLocal runs `pacelever reps list --json` on this machine as one source.
 	RepsLocal    bool
 	LocalMachine string
-	// RepsFiles are saved `scopefuel reps list` outputs, "path" or "path=source".
+	// RepsFiles are saved `pacelever reps list --json` outputs, "path" or "path=source".
 	RepsFiles     []string
 	HostsConfig   string
 	SlotOverrides []SlotCapacity
@@ -213,13 +213,18 @@ func collectJobs(ctx context.Context, cfg CollectConfig, s *Snapshot) {
 
 func collectReps(ctx context.Context, cfg CollectConfig, s *Snapshot) {
 	if cfg.RepsLocal && cfg.Run != nil {
-		out, err := cfg.Run(ctx, "scopefuel", "reps", "list", "--limit", "100000")
+		out, err := cfg.Run(ctx, "pacelever", "reps", "list", "--json", "--limit", "100000")
 		if err != nil {
-			s.Notes = append(s.Notes, "scopefuel reps list (local): "+err.Error())
+			s.Notes = append(s.Notes, "pacelever reps list (local): "+err.Error())
 		} else {
-			src := "scopefuel reps list @" + cfg.LocalMachine
-			s.Reps = append(s.Reps, ParseRepsList(string(out), src)...)
-			s.RepSources = append(s.RepSources, src)
+			src := "pacelever reps list @" + cfg.LocalMachine
+			reps := ParseRepsList(out, src)
+			if reps == nil {
+				s.Notes = append(s.Notes, src+": output did not parse as pacelever reps list --json")
+			} else {
+				s.Reps = append(s.Reps, reps...)
+				s.RepSources = append(s.RepSources, src)
+			}
 		}
 	}
 	for _, spec := range cfg.RepsFiles {
@@ -232,8 +237,13 @@ func collectReps(ctx context.Context, cfg CollectConfig, s *Snapshot) {
 			s.Notes = append(s.Notes, "reps file "+path+": "+err.Error())
 			continue
 		}
-		s.Reps = append(s.Reps, ParseRepsList(string(b), src)...)
-		s.RepSources = append(s.RepSources, src)
+		reps := ParseRepsList(b, src)
+		if reps == nil {
+			s.Notes = append(s.Notes, "reps file "+path+": did not parse as pacelever reps list --json")
+		} else {
+			s.Reps = append(s.Reps, reps...)
+			s.RepSources = append(s.RepSources, src)
+		}
 	}
 }
 

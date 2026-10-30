@@ -14,6 +14,12 @@ import (
 
 var ErrQuotaLease = errors.New("quota_lease_conflict")
 var quotaKeyRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}:[0-9a-f]{16}$`)
+
+// A bare pool name grants every account key with that pool prefix. A token
+// carrying a 16-hex run reads as a mangled account key (a lost colon), so
+// it is refused — the bad grant line keeps its stderr diagnostic.
+var quotaPoolRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
+var quotaHexRunRE = regexp.MustCompile(`[0-9a-f]{16}`)
 var quotaHolderRE = regexp.MustCompile(`^[0-9a-f]{32}$`)
 var quotaWindowRE = regexp.MustCompile(`^(credit|[1-9][0-9]{0,5}[smhdw])$`)
 
@@ -21,7 +27,10 @@ var quotaWindowRE = regexp.MustCompile(`^(credit|[1-9][0-9]{0,5}[smhdw])$`)
 // operator-set id); the pattern matches runtug's machine-id rule capped at 64.
 var quotaHostRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 
-func ValidQuotaKey(key string) bool       { return quotaKeyRE.MatchString(key) }
+func ValidQuotaKey(key string) bool { return quotaKeyRE.MatchString(key) }
+func ValidQuotaPool(pool string) bool {
+	return quotaPoolRE.MatchString(pool) && !quotaHexRunRE.MatchString(pool)
+}
 func ValidQuotaHolder(holder string) bool { return quotaHolderRE.MatchString(holder) }
 func ValidQuotaHost(host string) bool     { return quotaHostRE.MatchString(host) }
 

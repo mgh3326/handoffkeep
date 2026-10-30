@@ -77,10 +77,10 @@ var (
 	// a profile whose grade falls as effort rises (higher effort must not
 	// degrade to a worse grade).
 	ErrBenchCatalogMonotonicity = errors.New("bench_catalog_not_monotonic")
-	// ErrBenchCatalogSolGrade enforces the scopefuel _SOL_PROFILES rule on the
+	// ErrBenchCatalogSolGrade enforces the Sol-profile rule on the
 	// server: Sol profiles may only ever be graded S+. The catalog write path
 	// alone admits one placeholder shape that makes no grade claim — grade C
-	// with score null — for scopefuel #594's E6 measurement rungs; any real
+	// with score null — for the #594 E6 measurement rungs; any real
 	// claim below S+ (a scored C, or an unscored A/B/S) still fails here.
 	ErrBenchCatalogSolGrade = errors.New("bench_catalog_sol_grade")
 	// ErrDecisionRefRequired rejects an area exception row without the
@@ -1100,22 +1100,22 @@ func validBenchGrade(x BenchGrade) bool {
 
 var benchGateValues = map[string]bool{"default": true, "escalation": true, "consult_only": true}
 
-// benchEffortRanks orders the effort ladder scopefuel publishes
+// benchEffortRanks orders the effort ladder pacelever publishes
 // (low<medium<high<xhigh<max). The profile-default row ("") and unknown effort
 // strings are exempt from the monotonicity rule — effort is an open column on
 // purpose. In ladder views "" leads the profile's rows and unknown efforts
 // sort after the known rungs.
 var benchEffortRanks = map[string]int{"low": 0, "medium": 1, "high": 2, "xhigh": 3, "max": 4}
 
-// benchSolProfiles mirrors scopefuel's _SOL_PROFILES: Sol profiles are S+
+// benchSolProfiles is the Sol profile set: Sol profiles are S+
 // only. The catalog write path alone admits one placeholder shape that makes
-// no grade claim — grade C with score null — because scopefuel #594 emits the
-// E6 measurement rungs that way on purpose: never recommended, marker-gated,
+// no grade claim — grade C with score null — because the #594 E6 measurement
+// rungs are emitted that way on purpose: never recommended, marker-gated,
 // and carrying no measurement. The legacy grades path stays strict.
 var benchSolProfiles = map[string]bool{"codex-sol": true, "kiro-sol": true}
 
 // benchSolPlaceholder reports whether a Sol row makes no grade claim: grade
-// C with score null is exactly the shape scopefuel uses for a measurement
+// C with score null is exactly the shape pacelever uses for a measurement
 // rung that does not assert a grade. A scored C, or any unscored grade that
 // is not C, is a claim and stays subject to the S+ rule.
 func benchSolPlaceholder(x BenchCatalogEntry) bool {

@@ -18,7 +18,10 @@ var DeployRepos = deployRepoMap([]struct{ Service, Repo string }{
 	{Service: "auto_trader", Repo: "mgh3326/auto_trader"},
 	{Service: "panewire-hub", Repo: "mgh3326/panewire"},
 	{Service: "panewire-node", Repo: "mgh3326/panewire"},
-	{Service: "scopefuel", Repo: "mgh3326/scopefuel"},
+	{Service: "pacelever", Repo: "mgh3326/pacelever"},
+	// Historical alias for old deploy/<service> records written before the
+	// rename; no new records are produced under this name.
+	{Service: "scopefuel", Repo: "mgh3326/pacelever"},
 	{Service: "brewdial-api", Repo: "mgh3326/brewdial"},
 	{Service: "brewdial-db", Repo: "mgh3326/brewdial"},
 	{Service: "brewdial-data", Repo: "mgh3326/brewdial"},
@@ -50,7 +53,7 @@ func sources(s *Snapshot) []string {
 		fmt.Sprintf("hk tasks: %d rows (%d with event history)", len(s.Tasks), countEvents(s.Tasks)),
 		fmt.Sprintf("hk relay events: %d", len(s.Relay)),
 		fmt.Sprintf("job directories: %d jobs from %d root(s)", len(s.Jobs), len(s.JobRoots)),
-		fmt.Sprintf("scopefuel reps: %d rows from %d source(s)", len(s.Reps), len(s.RepSources)),
+		fmt.Sprintf("pacelever reps: %d rows from %d source(s)", len(s.Reps), len(s.RepSources)),
 		fmt.Sprintf("deploy records: %d", len(s.Deploys)),
 		fmt.Sprintf("GitHub PR facts: %d", len(s.PRs)),
 	}
@@ -360,7 +363,7 @@ func rounds(ix *index) Rounds {
 	sort.Slice(roots, func(i, j int) bool { return roots[i] < roots[j] })
 	cov := Coverage{What: "lineages (task + origin_task chain) terminal in window with ≥1 verify transition", Total: len(roots), Detail: map[string]int{}}
 	causeCov := Coverage{What: "fix rounds (verifying→in_progress) with an explicit cause tag", Detail: map[string]int{}}
-	repsCov := Coverage{What: "lineages with a scopefuel impl rep carrying rounds", Total: len(roots), Detail: map[string]int{}}
+	repsCov := Coverage{What: "lineages with a pacelever impl rep carrying rounds", Total: len(roots), Detail: map[string]int{}}
 	latestRep := map[string]Rep{}
 	for _, rep := range ix.snap.Reps {
 		if rep.Role != "impl" || rep.Rounds == nil {

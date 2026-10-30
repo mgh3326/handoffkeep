@@ -50,12 +50,20 @@ SHA-256 prefix of the account identity. Send no raw identity, tokens or host dat
 Write paths (observation PUT, lease POST, lease DELETE) are scoped to the
 client's own account keys. The client-to-accounts mapping lives in the server
 auth file next to the tokens: each `HANDOFFKEEP_QUOTA_<CLIENT>` line grants
-that client a comma-separated list of account keys. A bad quota line — an
-invalid key, an empty client id, or a client with no
+that client a comma-separated list of account keys, bare pool names, or `*`.
+An exact key (`claude:0123…`) scopes the one account; a bare pool name
+(`claude,codex,devin`) scopes every account key of that pool; `*` scopes
+every account. A bad quota line — an invalid key or pool, an empty client id,
+or a client with no
 `HANDOFFKEEP_TOKEN_<CLIENT>` — is logged to stderr and skipped, never a
 startup error; the client simply has no quota scope. Token-line validation
 is unchanged. A write to an unlisted or foreign `account_key` returns 403
 `quota_account_forbidden`; clients with no grant lines may not write at all.
+Ordering matters for the new forms: a server running a binary that predates
+pool grants skips a grant line that contains a pool name or `*` — including
+any exact keys on the same line — so every server must run the new binary
+before pool or wildcard grants are added, and a rollback first restores
+exact-key-only grant lines.
 
 A write without a live lease belonging to both the authenticated client and the
 holder returns 409. Acquisition and renewal use the database clock. Publishing
