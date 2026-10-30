@@ -1,5 +1,4 @@
 import {
-  isLiveResponse,
   jobForPane,
   liveSectionLabel,
   loadLabel,
@@ -17,6 +16,45 @@ import { usePoll } from "./shared/usePoll";
 
 const LIVE_API = "/ui/api/live";
 const POLL_MS = 10_000;
+
+/** Runtime shape check for /ui/api/live. A 200 with a malformed body is a
+ * failure, never published as a snapshot — the loader throws before usePoll
+ * can replace the last good data. Lives here, not in live.ts: that module is
+ * shared with the queue bundle, while this check is fleet-only. Checks the
+ * fields the console reads: section envelopes, links, the mismatch lists and
+ * each node's identity. */
+function isLiveResponse(value: unknown): value is LiveResponse {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const x = value as Record<string, unknown>;
+  const section = (v: unknown): boolean => {
+    if (typeof v !== "object" || v === null) {
+      return false;
+    }
+    const s = v as Record<string, unknown>;
+    return typeof s.status === "string" && typeof s.fetched_at === "string" && Array.isArray(s.items);
+  };
+  const node = (v: unknown): boolean => {
+    if (typeof v !== "object" || v === null) {
+      return false;
+    }
+    const n = v as Record<string, unknown>;
+    return typeof n.machine_id === "string" && typeof n.display_state === "string";
+  };
+  const mismatch = x.mismatch;
+  return (
+    typeof x.generated_at === "string" &&
+    section(x.jobs) &&
+    section(x.nodes) &&
+    (x.nodes as { items: unknown[] }).items.every(node) &&
+    Array.isArray(x.links) &&
+    typeof mismatch === "object" &&
+    mismatch !== null &&
+    Array.isArray((mismatch as Record<string, unknown>).tasks_without_job) &&
+    Array.isArray((mismatch as Record<string, unknown>).jobs_without_task)
+  );
+}
 
 const loadLive = async () => {
   const body = await getJSON<LiveResponse>(LIVE_API);
