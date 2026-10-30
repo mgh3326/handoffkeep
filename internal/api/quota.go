@@ -154,10 +154,17 @@ func (s Server) quotaPresencePut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The account key arrives in the body, so the observation PUT's grant
-	// check runs here, after validation and before the store. host_id is not
-	// bound to the client: a granted client is trusted for the whole account,
-	// as it already is for that account's observations.
+	// check runs here, after validation and before the store.
 	if !s.quotaScope(w, client, input.AccountKey) {
+		return
+	}
+	// A client with a HANDOFFKEEP_HOSTS_ line may only publish for the hosts
+	// it lists. Without a line the write is accepted and logged, until every
+	// client has one.
+	if allowed, listed := s.HostGrants.Allows(client, input.HostID); !listed {
+		warnNoHostLine(client, "quota_presence", input.HostID)
+	} else if !allowed {
+		writeError(w, http.StatusForbidden, "quota_host_forbidden")
 		return
 	}
 	x, err := s.Service.Store.PutQuotaPresence(r.Context(), input)

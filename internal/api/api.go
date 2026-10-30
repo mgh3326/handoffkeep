@@ -477,6 +477,11 @@ func LoadTokens(path string) (Tokens, QuotaAccounts, error) {
 			}
 			continue
 		}
+		// Host grant lines are parsed by LoadHostGrants, which logs and
+		// skips a bad one; they are never a token and never fatal here.
+		if strings.HasPrefix(k, hostGrantPrefix) {
+			continue
+		}
 		if !ok || v == "" {
 			return nil, nil, errors.New("invalid HANDOFFKEEP_AUTH_FILE")
 		}
@@ -531,6 +536,9 @@ type Server struct {
 	Tokens  Tokens
 	// QuotaAccounts scopes quota writes; a nil map refuses every account.
 	QuotaAccounts QuotaAccounts
+	// HostGrants binds a client to the host ids it may act for. A client with
+	// no entry keeps today's behavior and is logged (see HostGrants.Allows).
+	HostGrants HostGrants
 	// UI is independently authenticated by Cloudflare Access. A nil UI leaves
 	// the route unregistered so deployments without complete Access settings
 	// fail closed with the standard ServeMux 404.
