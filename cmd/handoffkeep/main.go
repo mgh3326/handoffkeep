@@ -1749,6 +1749,10 @@ func serve(args []string, errout io.Writer) error {
 	if e != nil {
 		return e
 	}
+	hostGrants, e := api.LoadHostGrants(auth, tokens)
+	if e != nil {
+		return e
+	}
 	am, e := attachments.NewFromEnv(st)
 	if e != nil {
 		return e
@@ -1761,7 +1765,7 @@ func serve(args []string, errout io.Writer) error {
 	}
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", hkmcp.HTTPHandler(svc, tokens))
-	mux.Handle("/", api.Server{Service: svc, Tokens: tokens, QuotaAccounts: quotaAccounts, UI: uiHandler}.Handler())
+	mux.Handle("/", api.Server{Service: svc, Tokens: tokens, QuotaAccounts: quotaAccounts, HostGrants: hostGrants, UI: uiHandler}.Handler())
 	addresses := []string{*listen}
 	if *tail != "" {
 		addresses = append(addresses, *tail)
