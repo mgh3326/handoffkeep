@@ -231,8 +231,20 @@ func benchClean(t *testing.T, p *pgxpool.Pool) {
 }
 
 func TestBenchSchemaV9IsAdditiveAndIdempotent(t *testing.T) {
-	s := benchStore(t)
-	p := benchPool(t)
+	// Own schema: the version-12 replay backfills bench_catalog from whatever
+	// bench_grades rows exist, so a shared database would both feed the
+	// replay unrelated rows and leak the backfill to other packages.
+	_, url := testdb.Schema(t, "bench_v9_replay")
+	s, err := store.Open(t.Context(), url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Close)
+	p, err := pgxpool.New(t.Context(), url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(p.Close)
 	for _, table := range []string{"bench_scores", "bench_reps", "bench_grades", "bench_catalog"} {
 		var name *string
 		if err := p.QueryRow(t.Context(), `SELECT to_regclass($1)`, table).Scan(&name); err != nil {
@@ -250,7 +262,7 @@ func TestBenchSchemaV9IsAdditiveAndIdempotent(t *testing.T) {
 		t.Fatalf("version 9 rows=%d", got)
 	}
 	s.Close()
-	s2, err := store.Open(t.Context(), testdb.URL(t))
+	s2, err := store.Open(t.Context(), url)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -262,7 +274,7 @@ func TestBenchSchemaV9IsAdditiveAndIdempotent(t *testing.T) {
 		if _, err := p.Exec(t.Context(), `DELETE FROM schema_version WHERE version=$1`, v); err != nil {
 			t.Fatal(err)
 		}
-		s3, err := store.Open(t.Context(), testdb.URL(t))
+		s3, err := store.Open(t.Context(), url)
 		if err != nil {
 			t.Fatal(err)
 		}
