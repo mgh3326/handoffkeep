@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# Runs the same gates as .github/workflows/ci.yml, in the same order, so a
+# change that passes here passes CI. CI additionally runs the reopen/quota
+# mutant suites, the migration smoke script, release-build and o3gen checks,
+# and gitleaks.
+#
+#   scripts/check          # go + web
+#   scripts/check go       # gofmt, vet, mod tidy, go test -race
+#   scripts/check web      # npm ci, typecheck, build + bundle drift, vitest
+#
+# DB-backed Go tests need HANDOFFKEEP_TEST_DB_URL (see AGENTS.md); without it
+# they skip locally (and fail under CI).
+set -euo pipefail
+
+repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+cd "$repo_root"
+target=${1:-all}
+
+step() { printf '\n==> %s\n' "$*"; }
+
+check_web() {
+	step "web: npm ci"
+	(cd web/console && npm ci --no-audit --no-fund)
+	step "web: typecheck"
+	(cd web/console && npm run typecheck)
+	step "web: build"
+	(cd web/console && npm run build)
+	step "web: committed bundle matches the build"
+	git diff --exit-code -- internal/ui/static/console
+	step "web: vitest"
+	(cd web/console && npm test)
+}
+
+check_go() {
+	step "go: gofmt"
+	unformatted=$(gofmt -l .)
+	if [[ -n "$unformatted" ]]; then
+		printf 'gofmt needed:\n%s\n' "$unformatted" >&2
+		exit 1
+	fi
+	step "go: vet"
+	go vet ./...
+	step "go: mod tidy"
+	go mod tidy -diff
+	if [[ -z "${HANDOFFKEEP_TEST_DB_URL:-}" ]]; then
+		printf 'note: HANDOFFKEEP_TEST_DB_URL is unset; PostgreSQL tests will skip\n' >&2
+	fi
+	step "go: test -race"
+	go test -race -timeout 30m ./...
+}
+
+case "$target" in
+all) check_web; check_go ;;
+go) check_go ;;
+web) check_web ;;
+*)
+	printf 'usage: %s [all|go|web]\n' "$0" >&2
+	exit 2
+	;;
+esac
+printf '\nall %s checks passed\n' "$target"

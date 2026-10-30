@@ -56,18 +56,18 @@ func (h *Handler) docsList(w http.ResponseWriter, r *http.Request) {
 	prefix := q.Get("prefix")
 	before := q.Get("before")
 	if !validDocsText(prefix) {
-		commentError(w, http.StatusBadRequest, "invalid_prefix")
+		writeJSONError(w, http.StatusBadRequest, "invalid_prefix")
 		return
 	}
 	if before != "" && !validDocsText(before) {
-		commentError(w, http.StatusBadRequest, "invalid_cursor")
+		writeJSONError(w, http.StatusBadRequest, "invalid_cursor")
 		return
 	}
 	limit := docsDefaultLimit
 	if raw := q.Get("limit"); raw != "" {
 		parsed, err := strconv.Atoi(raw)
 		if err != nil || parsed < 1 || parsed > docsMaxLimit {
-			commentError(w, http.StatusBadRequest, "invalid_limit")
+			writeJSONError(w, http.StatusBadRequest, "invalid_limit")
 			return
 		}
 		limit = parsed

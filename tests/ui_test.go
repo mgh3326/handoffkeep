@@ -23,6 +23,7 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/api"
 	"github.com/mgh3326/handoffkeep/internal/cfaccess"
 	"github.com/mgh3326/handoffkeep/internal/store"
+	"github.com/mgh3326/handoffkeep/internal/testdb"
 	"github.com/mgh3326/handoffkeep/internal/ui"
 )
 
@@ -146,10 +147,7 @@ func responseText(t *testing.T, response *http.Response) string {
 
 func uiStore(t *testing.T) *store.Store {
 	t.Helper()
-	url := os.Getenv("HANDOFFKEEP_TEST_DB_URL")
-	if url == "" {
-		t.Skip("HANDOFFKEEP_TEST_DB_URL is required for UI tests")
-	}
+	url := testdb.URL(t)
 	s, err := store.Open(t.Context(), url)
 	if err != nil {
 		t.Fatal(err)
@@ -306,7 +304,7 @@ type rowCounts struct{ Relay, Tasks, TaskEvents int64 }
 
 func uiRowCounts(t *testing.T) rowCounts {
 	t.Helper()
-	db, err := pgx.Connect(t.Context(), os.Getenv("HANDOFFKEEP_TEST_DB_URL"))
+	db, err := pgx.Connect(t.Context(), testdb.URL(t))
 	if err != nil {
 		t.Fatal(err)
 	}

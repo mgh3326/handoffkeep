@@ -5,8 +5,8 @@ import { TaskPage } from "./TaskPage";
 import { DetailBody } from "./DetailDrawer";
 import { boardTaskToProto } from "./boardtask";
 import type { FetchDoc } from "./DocInline";
-import { HttpError } from "../board/api";
-import type { BoardDetail, BoardDoc, BoardTask } from "../board/types";
+import { HttpError } from "../shared/boardApi";
+import type { BoardDetail, BoardDoc, BoardTask } from "../shared/boardTypes";
 import { KNOWN_STATES, type Dataset, type ProtoTask } from "./types";
 
 function mkBoardTask(over: Partial<BoardTask>): BoardTask {

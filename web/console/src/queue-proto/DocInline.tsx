@@ -5,8 +5,8 @@
 // else is shown as escaped raw text. Nothing here writes anywhere.
 
 import { lazy, Suspense, useEffect, useState } from "react";
-import { fetchBoardDoc } from "../board/api";
-import type { BoardDoc } from "../board/types";
+import { fetchBoardDoc } from "../shared/boardApi";
+import type { BoardDoc } from "../shared/boardTypes";
 import { docPageHref, parseBodyDoc } from "./bodydoc";
 import { RendererBoundary } from "./RendererBoundary";
 import { stripTaskFrontMatter } from "./taskmeta";

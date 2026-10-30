@@ -49,7 +49,7 @@ type searchResponse struct {
 // operator reading material.
 func (h *Handler) search(w http.ResponseWriter, r *http.Request, identity cfaccess.Identity) {
 	if identity.ServiceName != "" {
-		commentError(w, http.StatusForbidden, "forbidden")
+		writeJSONError(w, http.StatusForbidden, "forbidden")
 		return
 	}
 	query := r.URL.Query()
@@ -58,26 +58,26 @@ func (h *Handler) search(w http.ResponseWriter, r *http.Request, identity cfacce
 		scope = "tasks"
 	}
 	if scope != "tasks" {
-		commentError(w, http.StatusBadRequest, "invalid_scope")
+		writeJSONError(w, http.StatusBadRequest, "invalid_scope")
 		return
 	}
 	q := query.Get("q")
 	if strings.TrimSpace(q) == "" || len(q) > searchQueryMax || !utf8.ValidString(q) {
-		commentError(w, http.StatusBadRequest, "invalid_query")
+		writeJSONError(w, http.StatusBadRequest, "invalid_query")
 		return
 	}
 	limit := 20
 	if raw := query.Get("limit"); raw != "" {
 		parsed, err := strconv.Atoi(raw)
 		if err != nil || parsed < 1 || parsed > 50 {
-			commentError(w, http.StatusBadRequest, "invalid_limit")
+			writeJSONError(w, http.StatusBadRequest, "invalid_limit")
 			return
 		}
 		limit = parsed
 	}
 	xs, err := h.store.Search(r.Context(), q, "tasks", "", limit)
 	if err != nil {
-		commentError(w, http.StatusInternalServerError, "unavailable")
+		writeJSONError(w, http.StatusInternalServerError, "unavailable")
 		return
 	}
 	exactID := int64(-1)

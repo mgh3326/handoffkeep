@@ -3,17 +3,15 @@ package store
 import (
 	"context"
 	"fmt"
-	"os"
 	"sync"
 	"testing"
+
+	"github.com/mgh3326/handoffkeep/internal/testdb"
 )
 
 func testAttachmentStore(t *testing.T) *Store {
 	t.Helper()
-	url := os.Getenv("HANDOFFKEEP_TEST_DB_URL")
-	if url == "" {
-		t.Skip("HANDOFFKEEP_TEST_DB_URL is required for PostgreSQL attachment tests")
-	}
+	url := testdb.URL(t)
 	s, e := Open(t.Context(), url)
 	if e != nil {
 		t.Fatal(e)

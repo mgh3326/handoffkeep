@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -15,6 +14,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/mgh3326/handoffkeep/internal/store"
+	"github.com/mgh3326/handoffkeep/internal/testdb"
 )
 
 func relayPayload(lane, job string) map[string]any {
@@ -60,7 +60,7 @@ func postRelayEvent(t *testing.T, hURL, token string, body map[string]any) (int,
 // escalations exist; this query always reaches the target row.
 func relayEscalationOpen(t *testing.T, id int64) bool {
 	t.Helper()
-	db, err := pgx.Connect(t.Context(), os.Getenv("HANDOFFKEEP_TEST_DB_URL"))
+	db, err := pgx.Connect(t.Context(), testdb.URL(t))
 	if err != nil {
 		t.Fatal(err)
 	}

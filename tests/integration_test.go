@@ -6,20 +6,17 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/mgh3326/handoffkeep/internal/api"
 	"github.com/mgh3326/handoffkeep/internal/store"
+	"github.com/mgh3326/handoffkeep/internal/testdb"
 )
 
 func TestPostgresMigrationAndCoreRoundTrip(t *testing.T) {
-	url := os.Getenv("HANDOFFKEEP_TEST_DB_URL")
-	if url == "" {
-		t.Skip("HANDOFFKEEP_TEST_DB_URL is required for PostgreSQL integration tests")
-	}
+	url := testdb.URL(t)
 	s, err := store.Open(context.Background(), url)
 	if err != nil {
 		t.Fatal(err)
@@ -69,10 +66,7 @@ func request(t *testing.T, c *http.Client, method, url, token string, body any) 
 }
 
 func TestHTTPPersistenceSearchAndRetention(t *testing.T) {
-	url := os.Getenv("HANDOFFKEEP_TEST_DB_URL")
-	if url == "" {
-		t.Skip("HANDOFFKEEP_TEST_DB_URL is required for PostgreSQL integration tests")
-	}
+	url := testdb.URL(t)
 	s, err := store.Open(context.Background(), url)
 	if err != nil {
 		t.Fatal(err)

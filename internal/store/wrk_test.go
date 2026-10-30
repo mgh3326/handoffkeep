@@ -14,18 +14,13 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/mgh3326/handoffkeep/internal/testdb"
 	"github.com/mgh3326/handoffkeep/internal/wrkrecords"
 )
 
 func wrkCIStore(t *testing.T) *Store {
 	t.Helper()
-	database := os.Getenv("HANDOFFKEEP_TEST_DB_URL")
-	if database == "" {
-		if os.Getenv("CI") == "true" || os.Getenv("GITHUB_ACTIONS") == "true" {
-			t.Fatal("CI must run PostgreSQL authority tests")
-		}
-		t.Skip("PostgreSQL authority tests run only in CI")
-	}
+	database := testdb.URL(t)
 	ctx := t.Context()
 	admin, e := pgxpool.New(ctx, database)
 	if e != nil {

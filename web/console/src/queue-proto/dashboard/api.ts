@@ -2,15 +2,11 @@
 // server (service principals get 403); a refusal surfaces as HttpError like
 // every other console read.
 
-import { HttpError } from "../../board/api";
+import { getJSON } from "../../shared/http";
 import type { DashboardResponse } from "./types";
 
 export async function fetchDashboard(): Promise<DashboardResponse> {
-  const response = await fetch("/ui/api/dashboard");
-  if (!response.ok) {
-    throw new HttpError(response.status);
-  }
-  const body = (await response.json()) as DashboardResponse;
+  const body = await getJSON<DashboardResponse>("/ui/api/dashboard");
   // A payload missing a section is a failure, never an empty dashboard.
   if (
     typeof body !== "object" ||

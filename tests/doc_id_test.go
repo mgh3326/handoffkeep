@@ -6,22 +6,19 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/mgh3326/handoffkeep/internal/api"
 	"github.com/mgh3326/handoffkeep/internal/store"
+	"github.com/mgh3326/handoffkeep/internal/testdb"
 )
 
 // GET /v1/documents?id=<n> fetches one document by numeric id behind the
 // existing bearer auth; it is a read-only extension of the collection route
 // and never a write path (#551).
 func TestDocumentGetByIDRoute(t *testing.T) {
-	url := os.Getenv("HANDOFFKEEP_TEST_DB_URL")
-	if url == "" {
-		t.Skip("HANDOFFKEEP_TEST_DB_URL is required for PostgreSQL integration tests")
-	}
+	url := testdb.URL(t)
 	s, err := store.Open(context.Background(), url)
 	if err != nil {
 		t.Fatal(err)

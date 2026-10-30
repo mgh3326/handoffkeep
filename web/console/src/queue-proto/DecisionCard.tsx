@@ -7,7 +7,7 @@
 // Imports are type-only or react: a value import of a module that lives in
 // the entry would make this chunk import board.js (loaded twice under ?v=).
 
-import type { DecisionOption, DecisionRequestView, LegacyDecisionView } from "../board/types";
+import type { DecisionOption, DecisionRequestView, LegacyDecisionView } from "../shared/boardTypes";
 import type { DetailFetchState } from "./DetailDrawer";
 import type { ProtoTask } from "./types";
 

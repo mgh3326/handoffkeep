@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
 	"reflect"
 	"regexp"
 	"sort"
@@ -20,6 +19,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/mgh3326/handoffkeep/internal/store"
+	"github.com/mgh3326/handoffkeep/internal/testdb"
 	"golang.org/x/net/html"
 )
 
@@ -331,7 +331,7 @@ func p4StructuredDecisionTasks(t *testing.T, _ *store.Store, lane, prefix string
 	for index := 0; index < count; index++ {
 		titles = append(titles, prefix+" "+strconv.Itoa(index))
 	}
-	db, err := pgx.Connect(t.Context(), os.Getenv("HANDOFFKEEP_TEST_DB_URL"))
+	db, err := pgx.Connect(t.Context(), testdb.URL(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -370,7 +370,7 @@ func p4StructuredDecisionTasks(t *testing.T, _ *store.Store, lane, prefix string
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		db, err := pgx.Connect(context.Background(), os.Getenv("HANDOFFKEEP_TEST_DB_URL"))
+		db, err := pgx.Connect(context.Background(), testdb.URL(t))
 		if err != nil {
 			t.Logf("decision task cleanup connection: %v", err)
 			return
@@ -402,7 +402,7 @@ type p4OwnedDecisionCounter struct {
 
 func newP4OwnedDecisionCounter(t *testing.T, taskIDs, escalationIDs, laneIDs []int64) p4OwnedDecisionCounter {
 	t.Helper()
-	db, err := pgx.Connect(t.Context(), os.Getenv("HANDOFFKEEP_TEST_DB_URL"))
+	db, err := pgx.Connect(t.Context(), testdb.URL(t))
 	if err != nil {
 		t.Fatal(err)
 	}

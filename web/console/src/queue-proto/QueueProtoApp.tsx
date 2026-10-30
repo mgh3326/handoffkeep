@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import type { BoardDetail } from "../board/types";
+import type { BoardDetail } from "../shared/boardTypes";
 import { applyView, boardColumns, countByView, decisionMark, EMPTY_FILTERS, groupByArea, groupByProject, groupByState } from "./adapter";
 import { boardTaskToProto } from "./boardtask";
 import { flattenGrouped } from "./ListView";

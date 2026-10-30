@@ -1,45 +1,24 @@
-import { useEffect, useState } from "react";
+import { getJSON } from "./shared/http";
+import { usePoll } from "./shared/usePoll";
 import { heldByReason, isReapResponse, reapReasonLabel, reapStatusLabel, type ReapResponse } from "./reap";
 
 const REAP_API = "/ui/api/reap";
 const POLL_MS = 10_000;
+
+async function loadReap(): Promise<ReapResponse> {
+  const body = await getJSON<unknown>(REAP_API);
+  if (!isReapResponse(body)) {
+    throw new Error("malformed reap response");
+  }
+  return body;
+}
 
 /** 정리 후보 (#603 stage 1): panes a future cleanup step could close, as
  * judged by each node and joined with task state. Report only — there is no
  * close control, and a failed or unsupported lookup names itself instead of
  * reading as "no candidates". */
 export function ReapPanel() {
-  const [data, setData] = useState<ReapResponse | null>(null);
-  const [failed, setFailed] = useState(false);
-
-  useEffect(() => {
-    let cancelled = false;
-    const load = async () => {
-      try {
-        const response = await fetch(REAP_API);
-        const body: unknown = response.ok ? await response.json() : null;
-        if (!isReapResponse(body)) {
-          throw new Error("reap request failed");
-        }
-        if (!cancelled) {
-          setData(body);
-          setFailed(false);
-        }
-      } catch {
-        if (!cancelled) {
-          setFailed(true);
-        }
-      }
-    };
-    void load();
-    const timer = window.setInterval(() => {
-      void load();
-    }, POLL_MS);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
-  }, []);
+  const { data, failed } = usePoll(loadReap, POLL_MS);
 
   return (
     <section className="fleet-reap">

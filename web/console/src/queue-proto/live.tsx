@@ -5,7 +5,7 @@
 // per open drawer via BoardDetail, never per list row.
 
 import { useEffect, useRef, useState } from "react";
-import { fetchBoardTasks, fetchLive, fetchTaskDetail } from "../board/api";
+import { fetchBoardTasks, fetchLive, fetchTaskDetail } from "../shared/boardApi";
 import { liveRequestFailed } from "../live";
 import { boardTaskToProto } from "./boardtask";
 import { QueueProtoApp } from "./QueueProtoApp";

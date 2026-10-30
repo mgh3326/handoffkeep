@@ -7,13 +7,11 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"strings"
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mgh3326/handoffkeep/internal/store"
+	"github.com/mgh3326/handoffkeep/internal/testdb"
 )
 
 // apiTestProject is a member of the seeded task_projects vocabulary — the
@@ -26,32 +24,9 @@ var apiTestProject = "experiment"
 // EXCLUSIVE and can wedge behind another suite's open snapshot transaction.
 func relaneAPIServer(t *testing.T) (*httptest.Server, *store.Store) {
 	t.Helper()
-	dbURL := os.Getenv("HANDOFFKEEP_TEST_DB_URL")
-	if dbURL == "" {
-		t.Skip("HANDOFFKEEP_TEST_DB_URL is required for PostgreSQL relane API tests")
-	}
 	ctx := context.Background()
-	admin, err := pgxpool.New(ctx, dbURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer admin.Close()
-	schema := fmt.Sprintf("relane_api_%d", time.Now().UnixNano())
-	if _, err = admin.Exec(ctx, "CREATE SCHEMA "+schema); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		c, e := pgxpool.New(context.Background(), dbURL)
-		if e == nil {
-			_, _ = c.Exec(context.Background(), "DROP SCHEMA "+schema+" CASCADE")
-			c.Close()
-		}
-	})
-	sep := "?"
-	if strings.Contains(dbURL, "?") {
-		sep = "&"
-	}
-	st, err := store.Open(ctx, dbURL+sep+"search_path="+schema+",public")
+	_, dbURL := testdb.Schema(t, "relane_api")
+	st, err := store.Open(ctx, dbURL)
 	if err != nil {
 		t.Fatal(err)
 	}

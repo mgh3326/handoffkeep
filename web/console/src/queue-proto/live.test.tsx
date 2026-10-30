@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueueProtoApp } from "./QueueProtoApp";
 import { boardTaskToProto, fetchLiveDataset, LiveQueue } from "./live";
-import type { BoardDetail, BoardTask, BoardTasksResponse } from "../board/types";
+import type { BoardDetail, BoardTask, BoardTasksResponse } from "../shared/boardTypes";
 import { KNOWN_STATES, type Dataset } from "./types";
 
 function mkBoardTask(over: Partial<BoardTask>): BoardTask {

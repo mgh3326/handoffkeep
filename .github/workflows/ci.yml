@@ -37,14 +37,14 @@ jobs:
         options: >-
           --health-cmd "pg_isready -U handoffkeep" --health-interval 10s --health-timeout 5s --health-retries 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ inputs.ref }}
           fetch-depth: 0
-      - uses: actions/setup-go@v5
-        with: {go-version: stable}
-      - uses: actions/setup-node@v4
-        with: {node-version: "22", cache: npm, cache-dependency-path: web/console/package-lock.json}
+      - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with: {go-version-file: go.mod}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with: {node-version-file: web/console/.nvmrc, cache: npm, cache-dependency-path: web/console/package-lock.json}
       - run: npm ci
         working-directory: web/console
       - run: npm run build
@@ -52,23 +52,18 @@ jobs:
       - run: git diff --exit-code -- internal/ui/static/console
       - run: test -z "$(gofmt -l .)"
       - run: go vet ./...
+      - run: go mod tidy -diff
       - name: Task expected migration and server startup
         run: bash scripts/test-task-expected-migration.sh
       - name: go test -race
         run: go test -v -race -timeout 30m ./...
-        env:
-          HANDOFFKEEP_TEST_DB_URL: postgres://handoffkeep:handoffkeep@localhost:5432/handoffkeep?sslmode=disable
       - name: Reopen regression mutants
         run: python3 scripts/task-reopen-mutants.py
-        env:
-          HANDOFFKEEP_TEST_DB_URL: postgres://handoffkeep:handoffkeep@localhost:5432/handoffkeep?sslmode=disable
       - name: Quota regression mutants
         run: python3 scripts/quota-mutants.py
-        env:
-          HANDOFFKEEP_TEST_DB_URL: postgres://handoffkeep:handoffkeep@localhost:5432/handoffkeep?sslmode=disable
       - run: bash scripts/test-build-release.sh
       - run: python3 scripts/o3gen/test_gen.py
-      - uses: gitleaks/gitleaks-action@v2
+      - uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITLEAKS_CONFIG: .gitleaks.toml
@@ -82,17 +77,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ inputs.ref }}
-      - uses: actions/setup-node@v4
-        with: {node-version: "22", cache: npm, cache-dependency-path: web/console/package-lock.json}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with: {node-version-file: web/console/.nvmrc, cache: npm, cache-dependency-path: web/console/package-lock.json}
       - run: npm ci
+        working-directory: web/console
+      - run: npm run typecheck
         working-directory: web/console
       - run: npm test
         working-directory: web/console
-        env:
-          TZ: Asia/Seoul
   build:
     if: ${{ contains(fromJSON('["all","build"]'), inputs.suite || 'all') }}
     runs-on: ubuntu-latest
@@ -101,16 +96,17 @@ jobs:
         include:
           - {goos: linux, goarch: amd64}
           - {goos: linux, goarch: arm64}
+          - {goos: darwin, goarch: amd64}
           - {goos: darwin, goarch: arm64}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ inputs.ref }}
-      - uses: actions/setup-go@v5
-        with: {go-version: stable}
+      - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with: {go-version-file: go.mod}
       - name: go build
-        run: GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -o handoffkeep-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/handoffkeep
-      - uses: actions/upload-artifact@v4
+        run: CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -trimpath -o handoffkeep-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/handoffkeep
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         with:
           name: handoffkeep-${{ matrix.goos }}-${{ matrix.goarch }}

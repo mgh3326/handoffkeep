@@ -4,8 +4,8 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
-import { HttpError } from "../board/api";
-import type { BoardDetail } from "../board/types";
+import { HttpError } from "../shared/boardApi";
+import type { BoardDetail } from "../shared/boardTypes";
 import { navigate, PageShell } from "./AppShell";
 import { GlobalSearch } from "./GlobalSearch";
 import { QueueProtoApp } from "./QueueProtoApp";

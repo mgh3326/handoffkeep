@@ -431,6 +431,17 @@ func (e *HTTPError) Error() string {
 	return e.Code
 }
 
+// ErrorCode returns the server's error code ("not_found", "queue_empty", ...)
+// when err is an *HTTPError, and "" otherwise. Match codes with it, never by
+// comparing err.Error() text.
+func ErrorCode(err error) string {
+	var h *HTTPError
+	if errors.As(err, &h) {
+		return h.Code
+	}
+	return ""
+}
+
 func esc(x string) string { return url.PathEscape(x) }
 func (c Client) Checkpoint(ctx context.Context, _ string, x store.Checkpoint) (store.Checkpoint, error) {
 	var out store.Checkpoint
@@ -452,7 +463,7 @@ func (c Client) PutMemory(ctx context.Context, _ string, x store.Memory) (store.
 func (c Client) GetMemory(ctx context.Context, agent, name string) (store.Memory, bool, error) {
 	var out store.Memory
 	e := c.call(ctx, "GET", "/v1/memory/"+esc(agent)+"/"+esc(name), nil, &out)
-	if e != nil && e.Error() == "not_found" {
+	if ErrorCode(e) == "not_found" {
 		return out, false, nil
 	}
 	return out, e == nil, e
@@ -488,7 +499,7 @@ func (c Client) PutDocument(ctx context.Context, _ string, x store.Document) (st
 func (c Client) GetDocument(ctx context.Context, key string) (store.Document, bool, error) {
 	var out store.Document
 	e := c.call(ctx, "GET", "/v1/documents/"+esc(key), nil, &out)
-	if e != nil && e.Error() == "not_found" {
+	if ErrorCode(e) == "not_found" {
 		return out, false, nil
 	}
 	return out, e == nil, e
@@ -496,7 +507,7 @@ func (c Client) GetDocument(ctx context.Context, key string) (store.Document, bo
 func (c Client) GetDocumentByID(ctx context.Context, id int64) (store.Document, bool, error) {
 	var out store.Document
 	e := c.call(ctx, "GET", "/v1/documents?id="+fmt.Sprint(id), nil, &out)
-	if e != nil && e.Error() == "not_found" {
+	if ErrorCode(e) == "not_found" {
 		return out, false, nil
 	}
 	if e != nil {
@@ -571,7 +582,7 @@ func (c Client) PutAttachment(ctx context.Context, _ string, name, mime, ref str
 			Error string `json:"error"`
 		}
 		_ = json.NewDecoder(resp.Body).Decode(&x)
-		return store.Attachment{}, false, errors.New(x.Error)
+		return store.Attachment{}, false, &HTTPError{Status: resp.StatusCode, Code: x.Error}
 	}
 	if e := htmlBodyError(resp); e != nil {
 		return store.Attachment{}, false, e
@@ -633,7 +644,7 @@ func (c Client) GetAttachment(ctx context.Context, sha string) (store.Attachment
 		defer resp.Body.Close()
 		var x struct{ Error string }
 		_ = json.NewDecoder(resp.Body).Decode(&x)
-		return store.Attachment{}, nil, errors.New(x.Error)
+		return store.Attachment{}, nil, &HTTPError{Status: resp.StatusCode, Code: x.Error}
 	}
 	// With the pair configured a 200 text/html that lacks an attachment
 	// disposition is an Access login page, not file bytes — the real server
@@ -1230,7 +1241,7 @@ func (c Client) ExportTasks(ctx context.Context, lane, state, parentLane string,
 			Error string `json:"error"`
 		}
 		_ = json.NewDecoder(resp.Body).Decode(&x)
-		return nil, errors.New(x.Error)
+		return nil, &HTTPError{Status: resp.StatusCode, Code: x.Error}
 	}
 	if e := htmlBodyError(resp); e != nil {
 		return nil, e
@@ -1260,7 +1271,7 @@ func (c Client) ExportTasks(ctx context.Context, lane, state, parentLane string,
 func (c Client) GetTask(ctx context.Context, id int64) (store.Task, bool, error) {
 	var out store.Task
 	err := c.call(ctx, "GET", fmt.Sprintf("/v1/tasks/%d", id), nil, &out)
-	if err != nil && err.Error() == "not_found" {
+	if ErrorCode(err) == "not_found" {
 		return out, false, nil
 	}
 	return out, err == nil, err

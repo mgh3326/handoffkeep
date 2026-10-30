@@ -1,6 +1,6 @@
 import { Fragment, lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
-import { fetchBoardDoc } from "../board/api";
-import type { BoardDetail, BoardDoc, ParticipantSegment } from "../board/types";
+import { fetchBoardDoc } from "../shared/boardApi";
+import type { BoardDetail, BoardDoc, ParticipantSegment } from "../shared/boardTypes";
 import { ActivityTabs } from "./ActivityTabs";
 import { ageDays, isStale, STALE_MIN_AGE_DAYS } from "./adapter";
 import { docPageHref, scanTitleDocs } from "./bodydoc";

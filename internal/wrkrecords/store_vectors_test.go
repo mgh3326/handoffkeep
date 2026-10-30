@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net/http/httptest"
 	"net/url"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -18,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mgh3326/handoffkeep/internal/api"
 	"github.com/mgh3326/handoffkeep/internal/store"
+	"github.com/mgh3326/handoffkeep/internal/testdb"
 	. "github.com/mgh3326/handoffkeep/internal/wrkrecords"
 )
 
@@ -30,13 +30,7 @@ type contractDB struct {
 // shell server startup exists in the harness.
 func contractStore(t *testing.T) contractDB {
 	t.Helper()
-	database := os.Getenv("HANDOFFKEEP_TEST_DB_URL")
-	if database == "" {
-		if os.Getenv("CI") == "true" || os.Getenv("GITHUB_ACTIONS") == "true" {
-			t.Fatal("CI must execute every PostgreSQL vector")
-		}
-		t.Skip("PostgreSQL contract vectors run only in CI")
-	}
+	database := testdb.URL(t)
 	ctx := t.Context()
 	admin, e := pgxpool.New(ctx, database)
 	if e != nil {
@@ -178,9 +172,7 @@ func vectorBody(t *testing.T, v vector) []byte {
 }
 
 func TestStoreHTTPVectors(t *testing.T) {
-	if os.Getenv("HANDOFFKEEP_TEST_DB_URL") == "" {
-		contractStore(t)
-	}
+	testdb.URL(t)
 	vs := loadVectors(t)
 	catalog := contentCatalog(t, vs)
 	for _, v := range vs {

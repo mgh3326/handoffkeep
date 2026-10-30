@@ -8,7 +8,7 @@
 // renderer, and parsed values are rendered as text nodes only.
 
 import { useEffect, useState } from "react";
-import type { BoardDoc } from "../board/types";
+import type { BoardDoc } from "../shared/boardTypes";
 import { parseBodyDoc } from "./bodydoc";
 import type { FetchDoc } from "./DocInline";
 

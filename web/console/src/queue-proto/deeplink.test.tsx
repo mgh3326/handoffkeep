@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
-import { HttpError } from "../board/api";
-import type { BoardDetail } from "../board/types";
+import { HttpError } from "../shared/boardApi";
+import type { BoardDetail } from "../shared/boardTypes";
 import { QueueProtoApp } from "./QueueProtoApp";
 import { TaskPage } from "./TaskPage";
 import { buildDatasets } from "./fixtures";

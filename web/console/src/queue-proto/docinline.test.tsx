@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, render, screen, waitFor } from "@testing-library/react";
 import { DocInline, type FetchDoc } from "./DocInline";
-import { HttpError } from "../board/api";
-import type { BoardDoc } from "../board/types";
+import { HttpError } from "../shared/boardApi";
+import type { BoardDoc } from "../shared/boardTypes";
 
 function mkDoc(body: string, over: Partial<BoardDoc> = {}): BoardDoc {
   return {

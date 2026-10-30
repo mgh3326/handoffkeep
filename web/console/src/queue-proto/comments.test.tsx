@@ -5,8 +5,8 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { CommentWriteError, HttpError, postTaskComment, readCsrfToken, type TaskComments as TaskCommentsData } from "../board/api";
-import type { BoardComment, BoardTask } from "../board/types";
+import { CommentWriteError, HttpError, postTaskComment, readCsrfToken, type TaskComments as TaskCommentsData } from "../shared/boardApi";
+import type { BoardComment, BoardTask } from "../shared/boardTypes";
 import { boardTaskToProto } from "./boardtask";
 import { QueueProtoApp } from "./QueueProtoApp";
 import { TaskComments, writeRefusal, type CommentsClient } from "./TaskComments";

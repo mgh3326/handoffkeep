@@ -2,7 +2,7 @@
 // deep-link paths (?task= and /ui/tasks/<id>) where the task may not be in
 // the list dataset.
 
-import type { BoardTask } from "../board/types";
+import type { BoardTask } from "../shared/boardTypes";
 import type { ProtoTask } from "./types";
 
 /** The five fields the list API does not expose enter as the type contract

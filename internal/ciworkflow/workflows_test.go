@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -34,8 +35,32 @@ type step struct {
 
 type workflowFile struct {
 	Jobs map[string]struct {
+		Uses  string `yaml:"uses"`
 		Steps []step `yaml:"steps"`
 	} `yaml:"jobs"`
+}
+
+// workflowFiles returns the sorted *.yml/*.yaml names in the workflow dir.
+func workflowFiles(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read %s: %v", dir, err)
+	}
+	var files []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		if strings.HasSuffix(e.Name(), ".yml") || strings.HasSuffix(e.Name(), ".yaml") {
+			files = append(files, e.Name())
+		}
+	}
+	if len(files) == 0 {
+		t.Fatalf("%s has no workflow files", dir)
+	}
+	sort.Strings(files)
+	return files
 }
 
 func hasAction(uses, name string) bool {
@@ -69,23 +94,7 @@ func envString(env map[string]any, key string) (string, bool) {
 
 func TestWorkflowArtifactUploads(t *testing.T) {
 	dir := filepath.Join("..", "..", ".github", "workflows")
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("read %s: %v", dir, err)
-	}
-	var files []string
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		if strings.HasSuffix(e.Name(), ".yml") || strings.HasSuffix(e.Name(), ".yaml") {
-			files = append(files, e.Name())
-		}
-	}
-	if len(files) == 0 {
-		t.Fatalf("%s has no workflow files", dir)
-	}
-	sort.Strings(files)
+	files := workflowFiles(t, dir)
 
 	var uploads, gitleaks, buildpush int
 
@@ -162,6 +171,63 @@ func TestWorkflowArtifactUploads(t *testing.T) {
 	} {
 		if kind.found == 0 {
 			t.Errorf("no %s step found in %s; the guard must match at least one step", kind.name, dir)
+		}
+	}
+}
+
+var pinnedUses = regexp.MustCompile(`^([^@]+)@([0-9a-f]{40})$`)
+
+// TestWorkflowPinning keeps CI reproducible: every external action is pinned
+// to a full commit SHA, each action resolves to the same SHA in every
+// workflow, and the Go and Node toolchains come from the repo's version files
+// (go.mod, web/console/.nvmrc) rather than floating labels like "stable".
+func TestWorkflowPinning(t *testing.T) {
+	dir := filepath.Join("..", "..", ".github", "workflows")
+	shas := map[string]string{} // action -> "sha (file)"
+	for _, fname := range workflowFiles(t, dir) {
+		body, err := os.ReadFile(filepath.Join(dir, fname))
+		if err != nil {
+			t.Fatalf("read %s: %v", fname, err)
+		}
+		var wf workflowFile
+		if err := yaml.Unmarshal(body, &wf); err != nil {
+			t.Fatalf("parse %s: %v", fname, err)
+		}
+		jobs := make([]string, 0, len(wf.Jobs))
+		for j := range wf.Jobs {
+			jobs = append(jobs, j)
+		}
+		sort.Strings(jobs)
+		for _, job := range jobs {
+			uses := []string{wf.Jobs[job].Uses}
+			for _, s := range wf.Jobs[job].Steps {
+				uses = append(uses, s.Uses)
+				switch {
+				case hasAction(s.Uses, "actions/setup-go"):
+					if v, _ := s.With["go-version-file"].(string); v != "go.mod" || s.With["go-version"] != nil {
+						t.Errorf("%s job %q: setup-go must use go-version-file: go.mod, got %v", fname, job, s.With)
+					}
+				case hasAction(s.Uses, "actions/setup-node"):
+					if v, _ := s.With["node-version-file"].(string); v != "web/console/.nvmrc" || s.With["node-version"] != nil {
+						t.Errorf("%s job %q: setup-node must use node-version-file: web/console/.nvmrc, got %v", fname, job, s.With)
+					}
+				}
+			}
+			for _, u := range uses {
+				if u == "" || strings.HasPrefix(u, "./") || strings.HasPrefix(u, "docker://") {
+					continue
+				}
+				m := pinnedUses.FindStringSubmatch(u)
+				if m == nil {
+					t.Errorf("%s job %q: action %q is not pinned to a full commit SHA", fname, job, u)
+					continue
+				}
+				where := m[2] + " (" + fname + ")"
+				if prev, ok := shas[m[1]]; ok && !strings.HasPrefix(prev, m[2]) {
+					t.Errorf("%s pinned to %s and %s; use one version everywhere", m[1], prev, where)
+				}
+				shas[m[1]] = where
+			}
 		}
 	}
 }

@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"strconv"
 	"time"
@@ -57,7 +56,7 @@ func (s Server) chatQuestionUpsert(w http.ResponseWriter, r *http.Request, id st
 	}
 	if input.ID != "" {
 		if id != "" && input.ID != id {
-			jsonOut(w, http.StatusBadRequest, map[string]string{"error": "invalid_context"})
+			writeError(w, http.StatusBadRequest, "invalid_context")
 			return
 		}
 		id = input.ID
@@ -92,7 +91,7 @@ func (s Server) chatQuestionGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !found {
-		jsonOut(w, http.StatusNotFound, map[string]string{"error": "chat_question_not_found"})
+		writeError(w, http.StatusNotFound, "chat_question_not_found")
 		return
 	}
 	jsonOut(w, http.StatusOK, x)
@@ -221,7 +220,7 @@ func (s Server) chatMessageDelivered(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := chatMessageID(r)
 	if err != nil || id < 1 {
-		appErr(w, errors.New("chat message id"))
+		writeError(w, http.StatusBadRequest, "invalid_context")
 		return
 	}
 	x, err := s.Service.MarkChatMessageDelivered(r.Context(), id)
@@ -238,7 +237,7 @@ func (s Server) chatMessageFailed(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := chatMessageID(r)
 	if err != nil || id < 1 {
-		appErr(w, errors.New("chat message id"))
+		writeError(w, http.StatusBadRequest, "invalid_context")
 		return
 	}
 	x, err := s.Service.MarkChatMessageFailed(r.Context(), id)

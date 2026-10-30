@@ -149,24 +149,6 @@ export type BoardDetail = {
   decision_legacy?: LegacyDecisionView | null;
 };
 
-export type PolicyItem = {
-  key: string;
-  title?: string;
-  doc_url: string;
-  exists: boolean;
-};
-
-export type PolicyResponse = {
-  status: "ok" | "not_configured" | "invalid_pointer" | "manifest_missing" | "invalid_manifest";
-  pointer_key: string;
-  pointer_doc_url: string;
-  manifest_key?: string;
-  manifest_doc_url?: string;
-  release?: string;
-  items: PolicyItem[];
-  truncated?: boolean;
-};
-
 /** GET /ui/api/board/doc — one hk document by exact key. Only "markdown"
  * may reach the renderer; "unsupported" is shown as raw text only. */
 export type BoardDoc = {

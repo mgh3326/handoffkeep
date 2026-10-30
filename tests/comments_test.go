@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
 	"reflect"
 	"sort"
 	"strconv"
@@ -16,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/mgh3326/handoffkeep/internal/remote"
 	"github.com/mgh3326/handoffkeep/internal/store"
+	"github.com/mgh3326/handoffkeep/internal/testdb"
 )
 
 func commentURL(base string, id int64) string {
@@ -144,7 +144,7 @@ func TestTaskCommentNeverMovesTaskOrDecisions(t *testing.T) {
 		_, _, _ = s.AppendRelayEvent(ctx, store.RelayEvent{Kind: "lane.event", OwnerLane: lane, EventID: "comment-q-cleanup-" + lane, Text: "[decision-answered] #" + strconv.FormatInt(question.ID, 10) + ": cleanup"})
 		_, _ = s.TransitionTask(ctx, task.ID, "dropped", "cleanup", "", nil, "")
 	})
-	db, err := pgx.Connect(t.Context(), os.Getenv("HANDOFFKEEP_TEST_DB_URL"))
+	db, err := pgx.Connect(t.Context(), testdb.URL(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -242,7 +242,7 @@ func TestTaskCommentsDatabaseAppendOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	db, err := pgx.Connect(t.Context(), os.Getenv("HANDOFFKEEP_TEST_DB_URL"))
+	db, err := pgx.Connect(t.Context(), testdb.URL(t))
 	if err != nil {
 		t.Fatal(err)
 	}
