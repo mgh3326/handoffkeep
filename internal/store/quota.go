@@ -27,7 +27,7 @@ var quotaWindowRE = regexp.MustCompile(`^(credit|[1-9][0-9]{0,5}[smhdw])$`)
 // operator-set id); the pattern matches runtug's machine-id rule capped at 64.
 var quotaHostRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 
-func ValidQuotaKey(key string) bool       { return quotaKeyRE.MatchString(key) }
+func ValidQuotaKey(key string) bool { return quotaKeyRE.MatchString(key) }
 func ValidQuotaPool(pool string) bool {
 	return quotaPoolRE.MatchString(pool) && !quotaHexRunRE.MatchString(pool)
 }

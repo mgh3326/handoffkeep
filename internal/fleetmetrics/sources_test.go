@@ -119,6 +119,16 @@ func TestCollectRepsParseFailureIsNotASource(t *testing.T) {
 	if !strings.Contains(strings.Join(s.Notes, "\n"), "did not parse") {
 		t.Fatalf("no failure note: %v", s.Notes)
 	}
+	// Empty output fails too: a working reps list never prints nothing.
+	empty := filepath.Join(t.TempDir(), "empty.json")
+	if err := os.WriteFile(empty, []byte("  \n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var se Snapshot
+	collectReps(context.Background(), CollectConfig{RepsFiles: []string{empty}}, &se)
+	if len(se.RepSources) != 0 || !strings.Contains(strings.Join(se.Notes, "\n"), "did not parse") {
+		t.Fatalf("empty input: sources=%v notes=%v", se.RepSources, se.Notes)
+	}
 	var ok Snapshot
 	collectReps(context.Background(), CollectConfig{RepsFiles: []string{"testdata/reps-list.json"}}, &ok)
 	if len(ok.RepSources) != 1 || len(ok.Reps) != 3 {

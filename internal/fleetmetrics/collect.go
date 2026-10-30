@@ -219,7 +219,7 @@ func collectReps(ctx context.Context, cfg CollectConfig, s *Snapshot) {
 		} else {
 			src := "pacelever reps list @" + cfg.LocalMachine
 			reps := ParseRepsList(out, src)
-			if reps == nil && len(strings.TrimSpace(string(out))) > 0 {
+			if reps == nil {
 				s.Notes = append(s.Notes, src+": output did not parse as pacelever reps list --json")
 			} else {
 				s.Reps = append(s.Reps, reps...)
@@ -238,7 +238,7 @@ func collectReps(ctx context.Context, cfg CollectConfig, s *Snapshot) {
 			continue
 		}
 		reps := ParseRepsList(b, src)
-		if reps == nil && len(strings.TrimSpace(string(b))) > 0 {
+		if reps == nil {
 			s.Notes = append(s.Notes, "reps file "+path+": did not parse as pacelever reps list --json")
 		} else {
 			s.Reps = append(s.Reps, reps...)
