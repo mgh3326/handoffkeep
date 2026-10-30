@@ -128,6 +128,7 @@ func TestQuotaWriteScope(t *testing.T) {
 func TestQuotaGrantFile(t *testing.T) {
 	for name, body := range map[string]string{
 		"bad key":        "HANDOFFKEEP_TOKEN_a=x\nHANDOFFKEEP_QUOTA_a=codex:nothex\n",
+		"colonless key":  "HANDOFFKEEP_TOKEN_a=x\nHANDOFFKEEP_QUOTA_a=codex0123456789abcdef\n",
 		"unknown client": "HANDOFFKEEP_TOKEN_a=x\nHANDOFFKEEP_QUOTA_b=codex:0123456789abcdef\n",
 		"empty client":   "HANDOFFKEEP_TOKEN_a=x\nHANDOFFKEEP_QUOTA_=codex:0123456789abcdef\n",
 		"empty value":    "HANDOFFKEEP_TOKEN_a=x\nHANDOFFKEEP_QUOTA_a=\n",
