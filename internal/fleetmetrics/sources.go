@@ -1,13 +1,11 @@
 package fleetmetrics
 
 import (
-	"bufio"
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -59,7 +57,7 @@ func parseTime(s string) *time.Time {
 }
 
 // ParseJobDir reads <dir>/events/*.json. The flat completion records written
-// by wrk done/joined/escalate carry no timestamp; for those the file's
+// by done/joined/escalate carry no timestamp; for those the file's
 // modification time is used and marked AtSource="mtime". A job without a
 // job.claim record is returned with Role "" (its role is unknown).
 func ParseJobDir(dir, machine string) (Job, error) {
@@ -215,39 +213,45 @@ func ReadJobRoot(root, machine string, notBefore time.Time) ([]Job, int, error) 
 
 // ---------------------------------------------------------------- reps
 
-// ParseRepsList parses `scopefuel reps list` output: one row per line of
-// space-separated key=value pairs, with notes= running to end of line.
-func ParseRepsList(text, source string) []Rep {
-	var out []Rep
-	sc := bufio.NewScanner(strings.NewReader(text))
-	sc.Buffer(make([]byte, 1<<20), 1<<20)
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if !strings.HasPrefix(line, "id=") {
+// ParseRepsList parses `pacelever reps list --json` output: an object with a
+// "reps" array. A bare array is also accepted so a saved slice still reads.
+func ParseRepsList(data []byte, source string) []Rep {
+	var rows []struct {
+		ID            int64  `json:"id"`
+		OriginID      int64  `json:"origin_id"`
+		LocalID       int64  `json:"local_id"`
+		Profile       string `json:"profile"`
+		TaskRef       string `json:"task_ref"`
+		Role          string `json:"role"`
+		Rounds        int    `json:"rounds"`
+		BlockersFound int    `json:"blockers_found"`
+		Completed     *int   `json:"completed"`
+		RecordedAt    string `json:"recorded_at"`
+	}
+	var envelope struct {
+		Reps json.RawMessage `json:"reps"`
+	}
+	body := data
+	if err := json.Unmarshal(data, &envelope); err == nil && len(envelope.Reps) > 0 {
+		body = envelope.Reps
+	}
+	if err := json.Unmarshal(body, &rows); err != nil {
+		return nil
+	}
+	out := make([]Rep, 0, len(rows))
+	for _, w := range rows {
+		id := w.ID
+		if id == 0 {
+			id = w.OriginID
+		}
+		if id == 0 {
+			id = w.LocalID
+		}
+		if id == 0 {
 			continue
 		}
-		if i := strings.Index(line, " notes="); i >= 0 {
-			line = line[:i]
-		}
-		kv := map[string]string{}
-		for _, f := range strings.Fields(line) {
-			k, v, ok := strings.Cut(f, "=")
-			if ok {
-				kv[k] = v
-			}
-		}
-		id, err := strconv.ParseInt(kv["id"], 10, 64)
-		if err != nil {
-			continue
-		}
-		num := func(k string) *int {
-			if v, err := strconv.Atoi(kv[k]); err == nil {
-				return &v
-			}
-			return nil
-		}
-		r := Rep{ID: id, Source: source, Profile: kv["profile"], Task: kv["task"], Role: kv["role"], Rounds: num("rounds"), BlockersFound: num("blockers-found"), Completed: num("completed")}
-		if t := parseTime(kv["recorded_at"]); t != nil {
+		r := Rep{ID: id, Source: source, Profile: w.Profile, Task: w.TaskRef, Role: w.Role, Rounds: &w.Rounds, BlockersFound: &w.BlockersFound, Completed: w.Completed}
+		if t := parseTime(w.RecordedAt); t != nil {
 			r.RecordedAt = *t
 		}
 		out = append(out, r)
@@ -306,7 +310,7 @@ func ParseDeployDoc(key, body string) DeployRecord {
 
 // ---------------------------------------------------------------- slots
 
-// ParseHostsSlots reads wrk's hosts.toml: [local] max_active is the local
+// ParseHostsSlots reads the fleet hosts.toml: [local] max_active is the local
 // machine's slot count, [hosts.<id>] capacity the others'.
 func ParseHostsSlots(data []byte, localMachine, source string) ([]SlotCapacity, error) {
 	var cfg struct {

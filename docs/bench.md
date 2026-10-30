@@ -190,7 +190,7 @@ Catalog rows have this shape:
   value is a 400. The server does not overwrite it because the caller is
   always the operator.
 - Validation: `deviation_ref` non-blank (as with grades); Sol profiles
-  (`codex-sol`, `kiro-sol` — the scopefuel `_SOL_PROFILES` set) accept only
+  (`codex-sol`, `kiro-sol` — the Sol profile set) accept only
   `S+`; and within one profile the merged post-write state must be monotonic —
   a higher known effort rung may not carry a worse grade. Violations roll back
   the whole batch.
@@ -205,7 +205,7 @@ Catalog rows have this shape:
   the entry fail closed.
 
 The `catalog` array in the PUT body is the JSON input format that
-`scopefuel bench push-catalog` consumes: one object per row with the fields
+`pacelever bench push-catalog` consumes: one object per row with the fields
 above (`retired_at` may be an RFC 3339 timestamp to retire, otherwise null or
 omitted).
 

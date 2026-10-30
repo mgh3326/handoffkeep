@@ -424,10 +424,12 @@ type Tokens map[string]string
 
 // QuotaAccounts maps an authenticated client id to the quota account keys it
 // may write: publish observations, lease and release. A client absent from
-// the map, or a key absent from its set, is refused with 403. The mapping
+// the map, or a key absent from its scope, is refused with 403. The mapping
 // lives in the server auth file: optional HANDOFFKEEP_QUOTA_<CLIENT> lines
-// hold a comma-separated account key list granted next to the client's
-// HANDOFFKEEP_TOKEN_<CLIENT> credential. Reads are not scoped by it.
+// hold a comma-separated grant list next to the client's
+// HANDOFFKEEP_TOKEN_<CLIENT> credential. Each entry is an exact account key
+// ("pool:fingerprint"), a bare pool name granting every account key of that
+// pool, or "*" granting every account key. Reads are not scoped by it.
 type QuotaAccounts map[string]map[string]bool
 
 func LoadTokens(path string) (Tokens, QuotaAccounts, error) {
@@ -455,7 +457,7 @@ func LoadTokens(path string) (Tokens, QuotaAccounts, error) {
 					break
 				}
 				key = strings.TrimSpace(key)
-				if !store.ValidQuotaKey(key) {
+				if key != "*" && !store.ValidQuotaKey(key) && !store.ValidQuotaPool(key) {
 					valid = false
 					break
 				}

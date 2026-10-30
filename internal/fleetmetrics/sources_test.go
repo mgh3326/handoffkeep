@@ -7,9 +7,9 @@ import (
 )
 
 // Real-shape fixtures: testdata/jobs/627-… is a verbatim copy of a job
-// directory (events + completion-sentinel.log), reps-list.txt is verbatim
-// `scopefuel reps list --limit 3` output, deploy-*.{json,yaml} are verbatim
-// deploy-record bodies from hk.
+// directory (events + completion-sentinel.log), reps-list.json is
+// `pacelever reps list --json --limit 3` output, deploy-*.{json,yaml} are
+// verbatim deploy-record bodies from hk.
 
 func TestParseJobDirRealShape(t *testing.T) {
 	j, err := ParseJobDir("testdata/jobs/627-relay-lost-revoked-20260924-1540", "mac-personal")
@@ -59,7 +59,7 @@ func TestParseSentinelLogRuns(t *testing.T) {
 		"2026-09-24T00:00:30Z status=working transient=0 action=none\n" +
 		"2026-09-24T00:01:00Z status=done transient=0 action=completed\n" +
 		"2026-09-24T00:01:30Z status=blocked transient=0 action=none\n" +
-		"wrk: warning: job.completed already recorded\n" +
+		"warning: job.completed already recorded\n" +
 		"2026-09-24T00:10:00Z status=err:parse transient=1 action=none\n")
 	want := []StatusRun{
 		{From: time.Date(2026, 9, 24, 0, 0, 0, 0, time.UTC), To: time.Date(2026, 9, 24, 0, 1, 0, 0, time.UTC), Status: "working"},
@@ -81,11 +81,11 @@ func TestParseSentinelLogRuns(t *testing.T) {
 }
 
 func TestParseRepsListRealShape(t *testing.T) {
-	b, err := os.ReadFile("testdata/reps-list.txt")
+	b, err := os.ReadFile("testdata/reps-list.json")
 	if err != nil {
 		t.Fatal(err)
 	}
-	reps := ParseRepsList(string(b), "fixture")
+	reps := ParseRepsList(b, "fixture")
 	if len(reps) != 3 {
 		t.Fatalf("reps = %d, want 3", len(reps))
 	}
@@ -106,10 +106,10 @@ func TestParseDeployDocs(t *testing.T) {
 	if d.Format != "json" || d.Service != "handoffkeep" || d.Result != "success" || d.DeployedRef != "dbbcc7b92384a19769fbe65f2cb66f2020320726" || len(d.IncludedPRs) != 3 || d.DeployedAt == nil || !d.DeployedAt.Equal(time.Date(2026, 9, 24, 7, 9, 58, 0, time.UTC)) {
 		t.Fatalf("json record = %+v", d)
 	}
-	b, _ = os.ReadFile("testdata/deploy-scopefuel.yaml")
-	d = ParseDeployDoc("deploy/scopefuel/20260924T080817Z", string(b))
+	b, _ = os.ReadFile("testdata/deploy-pacelever.yaml")
+	d = ParseDeployDoc("deploy/pacelever/20260924T080817Z", string(b))
 	// The YAML record has no result field: unknown, never "success".
-	if d.Format != "yaml" || d.Service != "scopefuel" || d.Result != "" || d.DeployedRef != "40d901c10c32380a99ac2a8a409b62d34e567df7" || d.DeployedAt == nil {
+	if d.Format != "yaml" || d.Service != "pacelever" || d.Result != "" || d.DeployedRef != "40d901c10c32380a99ac2a8a409b62d34e567df7" || d.DeployedAt == nil {
 		t.Fatalf("yaml record = %+v", d)
 	}
 	if d := ParseDeployDoc("deploy/x/y", "not a record: [unbalanced"); d.Format != "invalid" || d.Result != "" {

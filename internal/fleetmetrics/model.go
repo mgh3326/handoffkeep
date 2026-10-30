@@ -1,6 +1,6 @@
 // Package fleetmetrics computes the five fleet operating metrics of
 // hk:doc advice/2026-09-24/fleet-structure-astra Q6 from a read-only
-// snapshot of hk tasks, relay events, panewire job records, scopefuel reps,
+// snapshot of hk tasks, relay events, panewire job records, pacelever reps,
 // deploy records and GitHub PR facts (#644).
 //
 // The package is pure: Compute takes a Snapshot and returns a Report. Every
@@ -38,12 +38,12 @@ type Snapshot struct {
 	TaskComments map[int64][]Comment `json:"task_comments,omitempty"`
 	// Relay is the hk relay_events stream (job.* and lane.event).
 	Relay []store.RelayEvent `json:"relay"`
-	// Jobs are panewire/wrk job records reconstructed from job directories.
+	// Jobs are runtug/panewire job records reconstructed from job directories.
 	Jobs []Job `json:"jobs"`
 	// JobRoots names every job-directory root that was read and the machine
 	// it belongs to; a machine without a root has no slot history.
 	JobRoots []JobRoot `json:"job_roots"`
-	// Reps are scopefuel representative-run rows, from every machine supplied.
+	// Reps are pacelever representative-run rows, from every machine supplied.
 	Reps []Rep `json:"reps"`
 	// RepSources names each reps source read (one per machine).
 	RepSources []string `json:"rep_sources"`
@@ -84,7 +84,7 @@ type JobEvent struct {
 	Head     string     `json:"head,omitempty"`
 }
 
-// Job is one wrk/panewire job directory.
+// Job is one runtug/panewire job directory.
 type Job struct {
 	JobID      string `json:"job_id"`
 	Machine    string `json:"machine"`
@@ -112,7 +112,7 @@ type StatusRun struct {
 	Status string    `json:"status"`
 }
 
-// Rep is one scopefuel reps row.
+// Rep is one pacelever reps row.
 type Rep struct {
 	ID            int64     `json:"id"`
 	Source        string    `json:"source"`

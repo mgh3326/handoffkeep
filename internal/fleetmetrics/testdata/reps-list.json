@@ -1,0 +1,5 @@
+{"reps": [
+  {"id": 922, "origin_id": 922, "profile": "opus", "model_id": "opus", "task_ref": "627", "tier": "T2", "role": "verify", "grade": "A+", "effort": "xhigh", "rounds": 1, "blockers_found": 0, "completed": 1, "recorded_at": "2026-09-24T08:00:06.680686+00:00", "notes": "exp=none verdict=PASS"},
+  {"id": 921, "origin_id": 921, "profile": "builder-opus", "model_id": "claude-opus-5-5", "task_ref": "646", "tier": "T2", "role": "impl", "grade": "A+", "effort": "-", "rounds": 3, "blockers_found": 4, "completed": 1, "recorded_at": "2026-09-24T07:48:41.016105+00:00", "notes": "exp=none; 16/16 mutants"},
+  {"id": 920, "origin_id": 920, "profile": "devin-swe2", "model_id": "swe-2-high", "task_ref": "646", "tier": "T2", "role": "verify", "grade": "A+", "effort": "-", "rounds": 1, "blockers_found": 0, "completed": 1, "recorded_at": "2026-09-24T07:46:16.587555+00:00", "notes": "exp=none r3 head confirm"}
+], "source": "local cache"}

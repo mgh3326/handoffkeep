@@ -167,7 +167,7 @@ func projectReap(nodes []hubReapNode, tasks []store.Task, tasksTruncated bool, n
 				}
 			case report.GraceSeconds < 0:
 				// A negative grace would make every merged task look old
-				// enough. Zero is a valid operator choice (wrk reap --grace 0).
+				// enough. Zero is a valid operator choice (reap --grace 0).
 				class, row.Reason = reapClassHeld, "report-shape"
 			default:
 				class, row.Reason = reapBuilderTaskGate(&row, byJob[source.JobID], tasksTruncated, grace, now)

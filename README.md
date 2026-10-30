@@ -20,7 +20,7 @@ Tasks may specify an optional expected duration at creation, for example `tasks 
 operating metrics (order → usable time, verify rounds, empty task slots,
 decision dwell, normal-path share), each with the coverage of the identifiers
 it needs; a missing identifier lowers coverage and is never counted as 0. It
-only reads (hk GETs, local job directories, `scopefuel reps list`, `gh api`).
+only reads (hk GETs, local job directories, `pacelever reps list`, `gh api`).
 See [docs/fleet-metrics.md](docs/fleet-metrics.md).
 
 ## Version
