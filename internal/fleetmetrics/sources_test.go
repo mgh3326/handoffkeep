@@ -1,7 +1,10 @@
 package fleetmetrics
 
 import (
+	"context"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -97,6 +100,29 @@ func TestParseRepsListRealShape(t *testing.T) {
 	}
 	if impl == nil || impl.Task != "646" || impl.Rounds == nil || *impl.Rounds != 3 || *impl.BlockersFound != 4 || impl.Profile != "builder-opus" || impl.RecordedAt.IsZero() {
 		t.Fatalf("impl rep = %+v", impl)
+	}
+}
+
+// A non-empty input that does not parse is a failed source: noted, and not
+// counted in RepSources (otherwise the report claims "0 rows from N
+// sources" for a source it never read).
+func TestCollectRepsParseFailureIsNotASource(t *testing.T) {
+	bad := filepath.Join(t.TempDir(), "reps.txt")
+	if err := os.WriteFile(bad, []byte("id=1 profile=x task=1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var s Snapshot
+	collectReps(context.Background(), CollectConfig{RepsFiles: []string{bad}}, &s)
+	if len(s.RepSources) != 0 || len(s.Reps) != 0 {
+		t.Fatalf("failed source counted: sources=%v reps=%d", s.RepSources, len(s.Reps))
+	}
+	if !strings.Contains(strings.Join(s.Notes, "\n"), "did not parse") {
+		t.Fatalf("no failure note: %v", s.Notes)
+	}
+	var ok Snapshot
+	collectReps(context.Background(), CollectConfig{RepsFiles: []string{"testdata/reps-list.json"}}, &ok)
+	if len(ok.RepSources) != 1 || len(ok.Reps) != 3 {
+		t.Fatalf("good file: sources=%v reps=%d", ok.RepSources, len(ok.Reps))
 	}
 }
 
