@@ -30,24 +30,29 @@ func writeAuthFile(t *testing.T, body string) string {
 }
 
 // A bad host line is logged and skipped like a quota grant: it never refuses
-// startup, and the client is left with no line.
+// startup. Unlike a quota grant it fails closed: the line's client stays under
+// host grants, so a typo cannot lift a restriction.
 func TestHostGrantFile(t *testing.T) {
-	for name, line := range map[string]string{
-		"uppercase id":   "HANDOFFKEEP_HOSTS_a=Host-A",
-		"underscore id":  "HANDOFFKEEP_HOSTS_a=host_a",
-		"long id":        "HANDOFFKEEP_HOSTS_a=" + strings.Repeat("h", 33),
-		"empty entry":    "HANDOFFKEEP_HOSTS_a=host-a,,host-b",
-		"trailing comma": "HANDOFFKEEP_HOSTS_a=host-a,",
-		"one bad entry":  "HANDOFFKEEP_HOSTS_a=host-a,host/b",
-		"wildcard":       "HANDOFFKEEP_HOSTS_a=*",
-		"empty value":    "HANDOFFKEEP_HOSTS_a=",
-		"no equals":      "HANDOFFKEEP_HOSTS_a",
-		"empty client":   "HANDOFFKEEP_HOSTS_=host-a",
-		"unknown client": "HANDOFFKEEP_HOSTS_b=host-a",
+	for name, tc := range map[string]struct {
+		line      string
+		restrict  bool // the client is left with a line that lists no hosts
+		logReason string
+	}{
+		"uppercase id":   {"HANDOFFKEEP_HOSTS_a=Host-A", true, "invalid_line"},
+		"underscore id":  {"HANDOFFKEEP_HOSTS_a=host_a", true, "invalid_line"},
+		"long id":        {"HANDOFFKEEP_HOSTS_a=" + strings.Repeat("h", 33), true, "invalid_line"},
+		"empty entry":    {"HANDOFFKEEP_HOSTS_a=host-a,,host-b", true, "invalid_line"},
+		"trailing comma": {"HANDOFFKEEP_HOSTS_a=host-a,", true, "invalid_line"},
+		"one bad entry":  {"HANDOFFKEEP_HOSTS_a=host-a,host/b", true, "invalid_line"},
+		"wildcard":       {"HANDOFFKEEP_HOSTS_a=*", true, "invalid_line"},
+		"empty value":    {"HANDOFFKEEP_HOSTS_a=", true, "invalid_line"},
+		"no equals":      {"HANDOFFKEEP_HOSTS_a", true, "invalid_line"},
+		"empty client":   {"HANDOFFKEEP_HOSTS_=host-a", false, "invalid_line"},
+		"unknown client": {"HANDOFFKEEP_HOSTS_b=host-a", false, "unknown_client"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			logs := captureLog(t)
-			p := writeAuthFile(t, "HANDOFFKEEP_TOKEN_a=x\n"+line+"\n")
+			p := writeAuthFile(t, "HANDOFFKEEP_TOKEN_a=x\n"+tc.line+"\n")
 			tokens, _, err := LoadTokens(p)
 			if err != nil {
 				t.Fatalf("host line refused startup: %v", err)
@@ -56,25 +61,47 @@ func TestHostGrantFile(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(grants) != 0 {
-				t.Fatalf("skipped line left grants: %v", grants)
+			allowed, listed := grants.Allows("a", "host-a")
+			if tc.restrict && (allowed || !listed) {
+				t.Fatalf("Allows = %v, %v; a bad line must leave the client listed with no hosts", allowed, listed)
 			}
-			if allowed, listed := grants.Allows("a", "host-a"); !allowed || listed {
-				t.Fatalf("Allows = %v, %v; a skipped line must leave the client with no line", allowed, listed)
+			if !tc.restrict && (!allowed || listed) {
+				t.Fatalf("Allows = %v, %v; a dropped line must leave the client with no line", allowed, listed)
 			}
-			if !strings.Contains(logs.String(), "api.host_grants_skipped") {
+			if !strings.Contains(logs.String(), "api.host_grants_skipped") || !strings.Contains(logs.String(), "reason="+tc.logReason) {
 				t.Fatalf("skip not logged: %q", logs)
 			}
 		})
 	}
 
+	// A bad line next to a good one drops only the bad line.
 	logs := captureLog(t)
-	p := writeAuthFile(t, "# HANDOFFKEEP_HOSTS_a=ignored\nHANDOFFKEEP_TOKEN_a=x\nHANDOFFKEEP_HOSTS_a=host-a, host-b\nHANDOFFKEEP_HOSTS_a=host-c\nHANDOFFKEEP_TOKEN_b=y\nHANDOFFKEEP_HOSTS_b=host-d\nHANDOFFKEEP_TOKEN_c=z\n")
+	p := writeAuthFile(t, "HANDOFFKEEP_TOKEN_a=x\nHANDOFFKEEP_HOSTS_a=host-a\nHANDOFFKEEP_HOSTS_a=host-b,Bad\n")
 	tokens, _, err := LoadTokens(p)
 	if err != nil {
 		t.Fatal(err)
 	}
 	grants, err := LoadHostGrants(p, tokens)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if allowed, listed := grants.Allows("a", "host-a"); !allowed || !listed {
+		t.Errorf("good line lost: %v, %v", allowed, listed)
+	}
+	if allowed, listed := grants.Allows("a", "host-b"); allowed || !listed {
+		t.Errorf("bad line granted a host: %v, %v", allowed, listed)
+	}
+	if !strings.Contains(logs.String(), "api.host_grants_skipped") {
+		t.Errorf("bad line not logged: %q", logs)
+	}
+
+	logs = captureLog(t)
+	p = writeAuthFile(t, "# HANDOFFKEEP_HOSTS_a=ignored\nHANDOFFKEEP_TOKEN_a=x\nHANDOFFKEEP_HOSTS_a=host-a, host-b\nHANDOFFKEEP_HOSTS_a=host-c\nHANDOFFKEEP_TOKEN_b=y\nHANDOFFKEEP_HOSTS_b =host-d\nHANDOFFKEEP_TOKEN_c=z\n")
+	tokens, _, err = LoadTokens(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	grants, err = LoadHostGrants(p, tokens)
 	if err != nil {
 		t.Fatal(err)
 	}

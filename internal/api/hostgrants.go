@@ -35,9 +35,11 @@ func (g HostGrants) Allows(client, host string) (allowed, listed bool) {
 
 // LoadHostGrants reads the HANDOFFKEEP_HOSTS_<CLIENT> lines of the auth file.
 // Like quota grants, a bad line is logged and skipped, never a startup error,
-// so an auth-file typo cannot stop the server. A skipped line leaves its
-// client with no line. Several lines for one client add up. A line for a
-// client without a token is dropped. Token and quota lines are LoadTokens'
+// so an auth-file typo cannot stop the server. Unlike a quota grant, a
+// skipped line fails closed: its client still counts as having a line, with
+// whatever hosts its good lines list (none, if all are bad). Several lines
+// for one client add up. A line with no client id, or for a client without a
+// token, is dropped. Token and quota lines are LoadTokens'
 // business and are ignored here.
 func LoadHostGrants(path string, tokens Tokens) (HostGrants, error) {
 	b, err := os.ReadFile(path)
@@ -56,8 +58,8 @@ func parseHostGrants(data string, tokens Tokens) HostGrants {
 		if !isHosts {
 			continue
 		}
-		hosts, valid := parseHostList(v)
-		if !ok || id == "" || !valid {
+		id = strings.TrimSpace(id)
+		if id == "" {
 			log.Printf("api.host_grants_skipped reason=invalid_line line=%q", line)
 			continue
 		}
@@ -65,10 +67,19 @@ func parseHostGrants(data string, tokens Tokens) HostGrants {
 			log.Printf("api.host_grants_skipped reason=unknown_client client=%q", id)
 			continue
 		}
+		// Any line for a known client puts it under host grants, even a bad
+		// one: a typo in a line meant to restrict the client must not lift
+		// the restriction. A bad line adds no hosts, so a client left with
+		// only bad lines is refused every host until the line is fixed.
 		set := grants[id]
 		if set == nil {
 			set = map[string]bool{}
 			grants[id] = set
+		}
+		hosts, valid := parseHostList(v)
+		if !ok || !valid {
+			log.Printf("api.host_grants_skipped reason=invalid_line client=%q line=%q", id, line)
+			continue
 		}
 		for _, host := range hosts {
 			set[host] = true

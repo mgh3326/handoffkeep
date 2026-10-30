@@ -118,10 +118,12 @@ observations, which still carry no host identity.
   403 `quota_host_forbidden`, after the `account_key` grant is checked. A
   client with no line is still accepted, as before, and the server logs
   `api.host_grants_missing` once per client per process. Several lines for
-  one client add up. A malformed line (a bad id, an empty entry, an empty
-  client id, a client with no token) is logged as `api.host_grants_skipped`
-  and skipped, never a startup error, which leaves that client with no line
-  and so unrestricted: check the log after editing the auth file. Without a
+  one client add up. A malformed line (a bad id, an empty entry, a missing `=`) is logged as
+  `api.host_grants_skipped` and skipped, never a startup error, but it fails
+  closed: its client still counts as having a line, with only the hosts its
+  good lines list, so a client whose only line is bad is refused every host
+  until the line is fixed. A line with no client id, or for a client with no
+  token, is logged and dropped. Without a
   line, a granted client is trusted for the whole account and may write any
   host's row; the host's own next publish moves it forward again (a spoofed
   `last_seen` can be at most the server clock). Enforcement for clients
