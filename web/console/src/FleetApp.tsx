@@ -1,4 +1,5 @@
 import {
+  isLiveResponse,
   jobForPane,
   liveSectionLabel,
   loadLabel,
@@ -17,7 +18,13 @@ import { usePoll } from "./shared/usePoll";
 const LIVE_API = "/ui/api/live";
 const POLL_MS = 10_000;
 
-const loadLive = () => getJSON<LiveResponse>(LIVE_API);
+const loadLive = async () => {
+  const body = await getJSON<LiveResponse>(LIVE_API);
+  if (!isLiveResponse(body)) {
+    throw new Error("malformed live response");
+  }
+  return body;
+};
 
 /** Session-list message for a node whose snapshot is not a plain session
  * list. Every non-ok state names itself — a stale or failed collection is
