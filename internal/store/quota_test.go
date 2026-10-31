@@ -30,6 +30,11 @@ func TestQuotaValidation(t *testing.T) {
 	if !ValidQuotaObservation(x, time.Now()) {
 		t.Fatal("group-scoped bucket refused")
 	}
+	x.Buckets[1].Model = ""
+	if ValidQuotaObservation(x, time.Now()) {
+		t.Fatal("group bucket without a group name accepted")
+	}
+	x.Buckets[1].Model = "3p-weekly"
 	x.Buckets[1].Scope = "team"
 	if ValidQuotaObservation(x, time.Now()) {
 		t.Fatal("unknown scope accepted")

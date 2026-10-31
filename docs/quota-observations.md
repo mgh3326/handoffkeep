@@ -18,7 +18,8 @@ SHA-256 prefix of the account identity. Send no raw identity, tokens or host dat
   `kind` (`auto` or `manual`), `measured_at` (RFC3339), optional `plan`, `buckets`.
   Each bucket contains `window`, `used_pct` (0–100), `scope` (`account`,
   `model`, or `group` for a provider metering group such as Antigravity's
-  `gemini-5h`/`3p-weekly`, named in `model`), optional `model` and `resets_at`. Manual entries also require
+  `gemini-5h`/`3p-weekly`), `model` (the model or group name: required and
+  non-empty for `group`, optional otherwise) and optional `resets_at`. Manual entries also require
   `window` and `expires_at`; one account-scoped bucket sets that window, an
   empty bucket list clears it. Readers enforce manual expiry. Automatic
   freshness is reader policy (default five minutes in pacelever). A new

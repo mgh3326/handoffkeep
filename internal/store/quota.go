@@ -129,7 +129,7 @@ func validQuotaObservation(x QuotaObservation, now time.Time) bool {
 		return false
 	}
 	for _, b := range x.Buckets {
-		if !quotaWindowRE.MatchString(b.Window) || math.IsNaN(b.UsedPct) || math.IsInf(b.UsedPct, 0) || b.UsedPct < 0 || b.UsedPct > 100 || (b.Scope != "account" && b.Scope != "model" && b.Scope != "group") || len(b.Model) > 128 {
+		if !quotaWindowRE.MatchString(b.Window) || math.IsNaN(b.UsedPct) || math.IsInf(b.UsedPct, 0) || b.UsedPct < 0 || b.UsedPct > 100 || (b.Scope != "account" && b.Scope != "model" && b.Scope != "group") || b.Scope == "group" && b.Model == "" || len(b.Model) > 128 {
 			return false
 		}
 	}
