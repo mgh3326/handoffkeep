@@ -142,6 +142,22 @@ func TestJobsUpdateMerge(t *testing.T) {
 		t.Fatalf("detached worktree must keep an explicit null branch: %v", wt)
 	}
 
+	// Secret-shaped or credential-embedding field values are refused.
+	code, body = jobsRequest(t, "PUT", url, "tok-a", `{"label":"AKIAIOSFODNN7EXAMPLE"}`)
+	if code != http.StatusBadRequest || body["error"] != "secret_like_content" {
+		t.Fatalf("secret label: %d %v", code, body)
+	}
+	code, _ = jobsRequest(t, "PUT", url, "tok-a",
+		`{"worktree":{"origin":"https://user:hunter2@example.invalid/repo","branch":null,"head":"abc123"}}`)
+	if code != http.StatusBadRequest {
+		t.Fatalf("userinfo origin: %d", code)
+	}
+	code, _ = jobsRequest(t, "PUT", url, "tok-a",
+		`{"worktree":{"origin":"/abs/path/repo","branch":null,"head":"abc123"}}`)
+	if code != http.StatusBadRequest {
+		t.Fatalf("path origin: %d", code)
+	}
+
 	// A second client granted the same host may write.
 	code, _ = jobsRequest(t, "PUT", url, "tok-b", `{"label":"b-wrote"}`)
 	if code != http.StatusOK {
@@ -227,12 +243,25 @@ func TestJobsResultRules(t *testing.T) {
 	}
 
 	// A secret-shaped value inside the result is refused like a text
-	// attachment.
+	// attachment — including one hidden behind a JSON unicode escape.
 	url = claim("b")
 	code, body := jobsRequest(t, "PUT", url, "tok-a",
 		`{"state":"completed","result":{"finding":"AKIAIOSFODNN7EXAMPLE"}}`)
 	if code != http.StatusBadRequest || body["error"] != "secret_like_content" {
 		t.Fatalf("secret result: %d %v", code, body)
+	}
+	url = claim("b2")
+	code, body = jobsRequest(t, "PUT", url, "tok-a",
+		`{"state":"completed","result":{"finding":"AKIAIOSFODNN7EXAMPL\u0045"}}`)
+	if code != http.StatusBadRequest || body["error"] != "secret_like_content" {
+		t.Fatalf("escaped secret result: %d %v", code, body)
+	}
+	// A NUL escape is a 400, not a database error.
+	url = claim("b3")
+	code, _ = jobsRequest(t, "PUT", url, "tok-a",
+		`{"state":"completed","result":{"finding":"a\u0000b"}}`)
+	if code != http.StatusBadRequest {
+		t.Fatalf("nul result: %d", code)
 	}
 
 	// One completed write with a result succeeds; a second write conflicts.

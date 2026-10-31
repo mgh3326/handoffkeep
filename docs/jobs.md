@@ -42,9 +42,14 @@ Reads are open to every authenticated client.
   lost`. A backward move, or any write to a terminal record, returns 409
   `job_state_conflict`.
 - `result` is a JSON object of at most 64 KiB, secret-scanned like a text
-  attachment (a secret-shaped value returns 400 `secret_like_content`),
-  accepted only in the same request as `state:"completed"`, and
-  write-once — the record is terminal afterwards.
+  attachment (a secret-shaped value returns 400 `secret_like_content`,
+  including behind `\uXXXX` escapes), accepted only in the same request as
+  `state:"completed"`, and write-once — the record is terminal
+  afterwards.
+- Every stored free-text field is scanned the same way: a secret-shaped
+  value in `label`, `role`, `worktree` and friends returns 400
+  `secret_like_content`. `worktree.origin` must be a remote name or URL —
+  an absolute local path or a URL with userinfo returns 400.
 
 ## Error codes
 

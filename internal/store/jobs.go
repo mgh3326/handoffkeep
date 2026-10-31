@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -113,6 +114,75 @@ func stringContainsNUL(s string) bool {
 	return false
 }
 
+// checkJobField scans one stored free-text field like a text attachment:
+// secret-shaped content (a credential in a remote, a token pasted into a
+// label) is refused before it becomes fleet-readable.
+func checkJobField(s string) error {
+	if !validJobField(s) {
+		return errors.New("invalid job field")
+	}
+	return guard.Reject(s)
+}
+
+// checkJobWorktree rejects remote forms that smuggle data the record must
+// not hold: a URL userinfo (user:token@host) and an absolute local path.
+// An ssh remote (git@host:repo) carries no credential and stays legal.
+func checkJobWorktree(w *JobWorktree) error {
+	for _, s := range []string{w.Origin, w.Head} {
+		if err := checkJobField(s); err != nil {
+			return err
+		}
+	}
+	if w.Branch != nil {
+		if err := checkJobField(*w.Branch); err != nil {
+			return err
+		}
+	}
+	if w.Origin == "" || w.Head == "" {
+		return errors.New("invalid worktree")
+	}
+	if strings.HasPrefix(w.Origin, "/") {
+		return errors.New("worktree origin must be a remote, not a local path")
+	}
+	if rest, ok := strings.CutPrefix(w.Origin, "https://"); ok && strings.Contains(strings.SplitN(rest, "/", 2)[0], "@") {
+		return errors.New("worktree origin must not embed credentials")
+	}
+	return nil
+}
+
+// checkJobResult scans a decoded result value: every map key and string
+// value is checked for NUL (Postgres refuses it in jsonb) and scanned like
+// a text attachment. Decoding first means a \\uXXXX escape cannot hide a
+// secret-shaped string from the scan.
+func checkJobResult(v any) error {
+	switch x := v.(type) {
+	case string:
+		if stringContainsNUL(x) {
+			return errors.New("job result contains NUL")
+		}
+		return guard.Reject(x)
+	case []any:
+		for _, e := range x {
+			if err := checkJobResult(e); err != nil {
+				return err
+			}
+		}
+	case map[string]any:
+		for k, e := range x {
+			if stringContainsNUL(k) {
+				return errors.New("job result contains NUL")
+			}
+			if err := guard.Reject(k); err != nil {
+				return err
+			}
+			if err := checkJobResult(e); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // checkJobUpdate validates an update before it reaches the row. Result is
 // checked here because it is request-shaped: object type, size and content.
 func checkJobUpdate(u JobUpdate) error {
@@ -123,34 +193,37 @@ func checkJobUpdate(u JobUpdate) error {
 		u.Role, u.Label, u.Family, u.Profile, u.Model, u.Pool,
 		u.OwnerLane, u.ParentLane, u.PaneID, u.ReportDoc,
 	} {
-		if f != nil && !validJobField(*f) {
-			return fmt.Errorf("invalid job field")
+		if f != nil {
+			if err := checkJobField(*f); err != nil {
+				return err
+			}
 		}
 	}
 	if u.ParentJob != nil && *u.ParentJob != "" && !ValidJobID(*u.ParentJob) {
 		return fmt.Errorf("invalid parent_job")
 	}
 	if u.Worktree != nil {
-		if !validJobField(u.Worktree.Origin) || u.Worktree.Origin == "" ||
-			!validJobField(u.Worktree.Head) || u.Worktree.Head == "" ||
-			(u.Worktree.Branch != nil && !validJobField(*u.Worktree.Branch)) {
-			return fmt.Errorf("invalid worktree")
+		if err := checkJobWorktree(u.Worktree); err != nil {
+			return err
 		}
 	}
 	if len(u.Result) > 0 {
 		if len(u.Result) > JobResultMaxBytes {
 			return fmt.Errorf("job result too large")
 		}
-		var obj map[string]json.RawMessage
-		if err := json.Unmarshal(u.Result, &obj); err != nil || obj == nil {
+		var obj any
+		de := json.NewDecoder(strings.NewReader(string(u.Result)))
+		de.UseNumber()
+		if err := de.Decode(&obj); err != nil {
+			return fmt.Errorf("job result must be a JSON object")
+		}
+		if _, isObj := obj.(map[string]any); !isObj {
 			return fmt.Errorf("job result must be a JSON object")
 		}
 		if u.State == nil || *u.State != "completed" {
 			return fmt.Errorf("job result requires state completed")
 		}
-		// The serialized object is scanned like a text attachment, so a
-		// secret-shaped value anywhere in it is refused.
-		if err := guard.Reject(string(u.Result)); err != nil {
+		if err := checkJobResult(obj); err != nil {
 			return err
 		}
 	}
