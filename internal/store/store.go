@@ -996,6 +996,21 @@ func (s *Store) migrate(ctx context.Context) error {
 		return err
 	}
 
+	if err := migrateOnce(ctx, tx, 25, func() error {
+		// Version 25 (HK-2) adds the cross-host job record: runtug claims a
+		// job_id on the executing host and merges metadata as the job moves
+		// claimed -> spawned -> a terminal state. CREATE TABLE/INDEX take no
+		// lock beyond the catalog; both are additive and IF NOT EXISTS.
+		v25 := []string{
+			`CREATE TABLE IF NOT EXISTS jobs (job_id TEXT PRIMARY KEY CHECK(job_id ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'), task_id BIGINT NOT NULL, host TEXT NOT NULL CHECK(host ~ '^[a-z0-9-]{1,32}$'), state TEXT NOT NULL CHECK(state IN ('claimed','spawned','completed','escalated','lost')), role TEXT NOT NULL DEFAULT '', label TEXT NOT NULL DEFAULT '', family TEXT NOT NULL DEFAULT '', profile TEXT NOT NULL DEFAULT '', model TEXT NOT NULL DEFAULT '', pool TEXT NOT NULL DEFAULT '', owner_lane TEXT NOT NULL DEFAULT '', parent_lane TEXT NOT NULL DEFAULT '', parent_job TEXT NOT NULL DEFAULT '', pane_id TEXT NOT NULL DEFAULT '', worktree JSONB, report_doc TEXT NOT NULL DEFAULT '', result JSONB, created_by TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL)`,
+			`CREATE INDEX IF NOT EXISTS jobs_task ON jobs(task_id, created_at ASC, job_id ASC)`,
+			`INSERT INTO schema_version(version) VALUES (25)`,
+		}
+		return execAll(ctx, tx, v25)
+	}); err != nil {
+		return err
+	}
+
 	// Lane-knownness probes for relane run once per batch item. These
 	// indexes keep each probe an index lookup instead of a full scan —
 	// the existing relay_events index on owner_lane is partial and
