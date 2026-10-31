@@ -48,8 +48,12 @@ Reads are open to every authenticated client.
   afterwards.
 - Every stored free-text field is scanned the same way: a secret-shaped
   value in `label`, `role`, `worktree` and friends returns 400
-  `secret_like_content`. `worktree.origin` must be a remote name or URL —
-  an absolute local path or a URL with userinfo returns 400.
+  `secret_like_content`. `worktree.origin` must be an `http`, `https`,
+  `ssh` or `git` URL (any scheme casing) with no userinfo, or the scp-style
+  form `git@host:owner/repo`. Any other user part, a `file://` URL or a local
+  path (`/…`, `~/…`, `./…`, `C:\…`) returns 400. `parent_job` and a claimed
+  `job_id` are secret-scanned too. A `result` string with NUL or an unpaired
+  surrogate escape returns 400 instead of reaching Postgres.
 
 ## Error codes
 

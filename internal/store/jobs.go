@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -141,10 +142,33 @@ func checkJobWorktree(w *JobWorktree) error {
 	if w.Origin == "" || w.Head == "" {
 		return errors.New("invalid worktree")
 	}
-	if strings.HasPrefix(w.Origin, "/") {
+	return checkJobOrigin(w.Origin)
+}
+
+// checkJobOrigin admits only remote forms that cannot carry a credential or
+// a local path: an http(s)/ssh/git URL (any scheme casing) with no userinfo,
+// or the scp-style ssh form whose user is exactly "git".
+func checkJobOrigin(o string) error {
+	if i := strings.Index(o, "://"); i >= 0 {
+		u, err := url.Parse(o)
+		if err != nil || u.Host == "" {
+			return errors.New("worktree origin must be a remote URL")
+		}
+		switch strings.ToLower(u.Scheme) {
+		case "http", "https", "ssh", "git":
+		default:
+			return errors.New("worktree origin must be a remote, not a local path")
+		}
+		if u.User != nil {
+			return errors.New("worktree origin must not embed credentials")
+		}
+		return nil
+	}
+	host, path, ok := strings.Cut(o, ":")
+	if !ok || path == "" || strings.ContainsAny(host, "/\\") || strings.HasPrefix(path, "/") || strings.HasPrefix(path, "\\") {
 		return errors.New("worktree origin must be a remote, not a local path")
 	}
-	if rest, ok := strings.CutPrefix(w.Origin, "https://"); ok && strings.Contains(strings.SplitN(rest, "/", 2)[0], "@") {
+	if user, h, hasUser := strings.Cut(host, "@"); hasUser && (user != "git" || h == "") {
 		return errors.New("worktree origin must not embed credentials")
 	}
 	return nil
@@ -159,6 +183,11 @@ func checkJobResult(v any) error {
 	case string:
 		if stringContainsNUL(x) {
 			return errors.New("job result contains NUL")
+		}
+		// encoding/json turns an unpaired surrogate escape into U+FFFD;
+		// Postgres refuses the escape in jsonb, so it is a 400, not a 500.
+		if strings.ContainsRune(x, '\uFFFD') {
+			return errors.New("job result contains an invalid unicode escape")
 		}
 		return guard.Reject(x)
 	case []any:
@@ -199,8 +228,13 @@ func checkJobUpdate(u JobUpdate) error {
 			}
 		}
 	}
-	if u.ParentJob != nil && *u.ParentJob != "" && !ValidJobID(*u.ParentJob) {
-		return fmt.Errorf("invalid parent_job")
+	if u.ParentJob != nil && *u.ParentJob != "" {
+		if !ValidJobID(*u.ParentJob) {
+			return fmt.Errorf("invalid parent_job")
+		}
+		if err := guard.Reject(*u.ParentJob); err != nil {
+			return err
+		}
 	}
 	if u.Worktree != nil {
 		if err := checkJobWorktree(u.Worktree); err != nil {
@@ -258,6 +292,9 @@ func scanJob(row pgx.Row) (Job, error) {
 func (s *Store) ClaimJob(ctx context.Context, j Job) (Job, bool, error) {
 	if !ValidJobID(j.JobID) || !ValidJobHost(j.Host) || j.TaskID < 1 || j.CreatedBy == "" || !validJobField(j.CreatedBy) {
 		return j, false, errors.New("invalid job claim")
+	}
+	if err := guard.Reject(j.JobID); err != nil {
+		return j, false, err
 	}
 	j.State = "claimed"
 	now := time.Now().UTC()
