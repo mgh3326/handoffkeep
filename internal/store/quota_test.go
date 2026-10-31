@@ -24,6 +24,22 @@ func TestQuotaValidation(t *testing.T) {
 	if !ValidQuotaObservation(x, time.Now()) {
 		t.Fatal("valid refused")
 	}
+	// Antigravity meters by provider group (gemini-5h, 3p-weekly, ...);
+	// pacelever publishes those buckets with scope "group".
+	x.Buckets = append(x.Buckets, QuotaBucket{Window: "7d", UsedPct: 2, Scope: "group", Model: "3p-weekly"})
+	if !ValidQuotaObservation(x, time.Now()) {
+		t.Fatal("group-scoped bucket refused")
+	}
+	x.Buckets[1].Model = ""
+	if ValidQuotaObservation(x, time.Now()) {
+		t.Fatal("group bucket without a group name accepted")
+	}
+	x.Buckets[1].Model = "3p-weekly"
+	x.Buckets[1].Scope = "team"
+	if ValidQuotaObservation(x, time.Now()) {
+		t.Fatal("unknown scope accepted")
+	}
+	x.Buckets = x.Buckets[:1]
 	x.Buckets[0].UsedPct = 101
 	if ValidQuotaObservation(x, time.Now()) {
 		t.Fatal("invalid percent accepted")
