@@ -27,6 +27,8 @@ func TestCheckJobOrigin(t *testing.T) {
 		"git://u:p@host/x",
 		"ssh://git@host/owner/repo.git",
 		"tok@github.com:owner/repo.git",
+		"user:hunter2@github.com:owner/repo",
+		"git@github.com:owner@x/repo",
 		"file:///srv/repo",
 		"/srv/repo",
 		"~/repo",
@@ -47,6 +49,7 @@ func TestCheckJobUpdateResultEscapes(t *testing.T) {
 	for name, raw := range map[string]string{
 		"lone surrogate": `{"s":"\ud800"}`,
 		"NUL":            `{"s":"\u0000"}`,
+		"surrogate key":  `{"\ud800":1}`,
 	} {
 		if err := checkJobUpdate(JobUpdate{State: &done, Result: json.RawMessage(raw)}); err == nil {
 			t.Fatalf("%s: accepted", name)

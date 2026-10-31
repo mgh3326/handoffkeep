@@ -39,8 +39,9 @@ Reads are open to every authenticated client.
 ## Write rules
 
 - States only move forward: `claimed → spawned → completed | escalated |
-  lost`. A backward move, or any write to a terminal record, returns 409
-  `job_state_conflict`.
+  lost`. `completed` needs a recorded `spawned`; `escalated` and `lost` may
+  end a claim that never spawned. A backward move, a skip to `completed`, or
+  any write to a terminal record returns 409 `job_state_conflict`.
 - `result` is a JSON object of at most 64 KiB, secret-scanned like a text
   attachment (a secret-shaped value returns 400 `secret_like_content`,
   including behind `\uXXXX` escapes), accepted only in the same request as

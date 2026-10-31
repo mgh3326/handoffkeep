@@ -186,6 +186,10 @@ func TestJobsStateMoves(t *testing.T) {
 		t.Fatalf("claim: %d", code)
 	}
 	url := srv.URL + "/v1/jobs/" + id
+	// completed needs a recorded spawn.
+	if code, body := jobsRequest(t, "PUT", url, "tok-a", `{"state":"completed"}`); code != http.StatusConflict || body["error"] != "job_state_conflict" {
+		t.Fatalf("claimed->completed: %d %v", code, body)
+	}
 	if code, _ := jobsRequest(t, "PUT", url, "tok-a", `{"state":"spawned"}`); code != http.StatusOK {
 		t.Fatalf("spawned: %d", code)
 	}
@@ -225,7 +229,11 @@ func TestJobsResultRules(t *testing.T) {
 		if code, _ := jobsClaim(t, srv, "tok-a", id, "host-a", 8); code != http.StatusCreated {
 			t.Fatalf("claim %s: %d", suffix, code)
 		}
-		return srv.URL + "/v1/jobs/" + id
+		u := srv.URL + "/v1/jobs/" + id
+		if code, _ := jobsRequest(t, "PUT", u, "tok-a", `{"state":"spawned"}`); code != http.StatusOK {
+			t.Fatalf("spawn %s: %d", suffix, code)
+		}
+		return u
 	}
 
 	// Result without state=completed is refused.

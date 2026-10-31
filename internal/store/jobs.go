@@ -171,6 +171,11 @@ func checkJobOrigin(o string) error {
 		return nil
 	}
 	host, path, ok := strings.Cut(o, ":")
+	// A credential can hide in any part of a scheme-less origin
+	// (user:secret@host:path), so the only '@' allowed is git@ on the host.
+	if strings.Contains(path, "@") {
+		return errors.New("worktree origin must not embed credentials")
+	}
 	if !ok || path == "" || strings.ContainsAny(host, "/\\") || strings.HasPrefix(path, "/") || strings.HasPrefix(path, "\\") {
 		return errors.New("worktree origin must be a remote, not a local path")
 	}
@@ -206,6 +211,9 @@ func checkJobResult(v any) error {
 		for k, e := range x {
 			if stringContainsNUL(k) {
 				return errors.New("job result contains NUL")
+			}
+			if strings.ContainsRune(k, '\uFFFD') {
+				return errors.New("job result contains an invalid unicode escape")
 			}
 			if err := guard.Reject(k); err != nil {
 				return err
@@ -387,6 +395,11 @@ func (s *Store) UpdateJob(ctx context.Context, id string, u JobUpdate) (Job, err
 	}
 	if u.State != nil && jobRank[*u.State] < jobRank[j.State] {
 		return j, fmt.Errorf("%w: %s cannot move to %s", ErrJobStateConflict, j.State, *u.State)
+	}
+	// completed reports work the pane did, so it needs a recorded spawn;
+	// escalated and lost may end a claim that never spawned.
+	if u.State != nil && *u.State == "completed" && j.State != "spawned" {
+		return j, fmt.Errorf("%w: %s cannot move to completed", ErrJobStateConflict, j.State)
 	}
 	// The update is valid; merge the present fields over the record.
 	if u.State != nil {
