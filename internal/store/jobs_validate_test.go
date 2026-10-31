@@ -11,6 +11,8 @@ func TestCheckJobOrigin(t *testing.T) {
 		"HTTPS://github.com/owner/repo.git",
 		"ssh://github.com/owner/repo.git",
 		"git@github.com:owner/repo.git",
+		"origin",
+		"repo",
 	}
 	for _, o := range ok {
 		if err := checkJobOrigin(o); err != nil {
@@ -29,6 +31,8 @@ func TestCheckJobOrigin(t *testing.T) {
 		"/srv/repo",
 		"~/repo",
 		"./repo",
+		"..",
+		"repo.git",
 		`C:\repo`,
 	}
 	for _, o := range bad {

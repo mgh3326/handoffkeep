@@ -47,6 +47,8 @@ var jobRank = map[string]int{"claimed": 0, "spawned": 1, "completed": 2, "escala
 
 // ValidJobID reports whether id is a legal job id (runtug's validID, minus
 // the "." and ".." corner cases the length range already excludes).
+var jobRemoteNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`)
+
 func ValidJobID(id string) bool { return jobIDRE.MatchString(id) }
 
 // ValidJobHost reports whether host is a legal fleet host id.
@@ -162,6 +164,10 @@ func checkJobOrigin(o string) error {
 		if u.User != nil {
 			return errors.New("worktree origin must not embed credentials")
 		}
+		return nil
+	}
+	if jobRemoteNameRE.MatchString(o) {
+		// A bare remote name ("origin") names no host, path or credential.
 		return nil
 	}
 	host, path, ok := strings.Cut(o, ":")
