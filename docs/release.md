@@ -11,8 +11,10 @@ The release notes list the `node-ops hk-cli-install` inputs: `tag`, `os_arch`, a
 Every pull request and manual run of the release workflow builds the same
 four assets for the tag `v0.0.0`. It checks that `SHA256SUMS` has four
 matching lines and that `handoffkeep version` reports `release=v0.0.0` and
-the checked-out revision. It publishes nothing. Only a pushed `v*` tag runs
-the Postgres-backed test job and the publish job.
+the checked-out revision. It publishes nothing. Pushing the test tag `v0.0.0`
+runs the same build and checks on a real tag and also publishes nothing. Only
+a pushed `v*` release tag runs the Postgres-backed test job and the publish
+job, and publish first checks that the tag still points at the built commit.
 
 ## How hosts get it
 
@@ -30,5 +32,15 @@ service. If the version or service check fails, it restores
 - **Roll back the fleet:** pin the previous good tag. Alternatively, mark the
   bad release as a pre-release or delete it, so that `latest` points to the
   previous release on the next run.
-- **Roll back one host now:** copy `handoffkeep.prev` over `handoffkeep`, then
-  pin the tag so that the next run does not reinstall the bad release.
+- **Roll back one host now:** copy the previous binary to a temporary file in
+  the same directory and rename it over `handoffkeep`. A rename works while
+  the service still runs the old file, whereas copying onto a running
+  executable fails on Linux with `ETXTBSY`:
+  ```sh
+  cp -p ~/.local/bin/handoffkeep.prev ~/.local/bin/handoffkeep.new
+  mv -f ~/.local/bin/handoffkeep.new ~/.local/bin/handoffkeep
+  ```
+  Restart the owning service, if there is one, and check two things: that it
+  is active, and that `handoffkeep version` reports the old `release=` tag.
+  Then pin that tag, so that the next run does not reinstall the bad
+  release.
