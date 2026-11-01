@@ -1,0 +1,193 @@
+package store
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"regexp"
+	"strings"
+	"time"
+
+	"github.com/mgh3326/handoffkeep/internal/guard"
+)
+
+// dots is an external research AI that answers on Linear issues labelled
+// "dots" with comments starting "[dots] <KIND>". These records are written by
+// two independent paths, the Linear webhook and an hourly reconciling poller
+// that keeps its own seen-set. The key, the body and the event ids below must
+// stay byte-identical to the poller's: the document key is what makes a second
+// write a no-op, and the shared event id is what lets the hub dedupe the lane
+// notification.
+
+const (
+	// DotsLabel is the Linear label that puts an issue in dots' scope.
+	DotsLabel = "dots"
+	// DotsLane is the lane owed every dots notification.
+	DotsLane = "operator-desk"
+
+	dotsCreatedBy = "linear-webhook"
+)
+
+// dotsResultKinds maps a comment kind that is recorded to the outbox kind that
+// notifies about it. Everything else ("START", unknown words) is not recorded.
+var dotsResultKinds = map[string]string{
+	"RESULT":   OutboxKindDotsReport,
+	"BLOCKED":  OutboxKindDotsDecision,
+	"QUESTION": OutboxKindDotsDecision,
+}
+
+var (
+	dotsIdentifierRE = regexp.MustCompile(`^[A-Za-z0-9_]+-[0-9]+$`)
+	dotsCommentIDRE  = regexp.MustCompile(`^[0-9A-Za-z-]{8,64}$`)
+)
+
+// DotsIssue is the part of a Linear issue a dots record quotes.
+type DotsIssue struct {
+	Identifier string
+	Title      string
+	URL        string
+}
+
+// DotsComment is one Linear comment. CreatedAt keeps Linear's own ISO-8601
+// text: the document key takes its date from that text, not from a parsed and
+// re-rendered time.
+type DotsComment struct {
+	ID        string
+	CreatedAt string
+	Body      string
+}
+
+// DotsKind classifies a comment. dots is false when the comment does not start
+// with "[dots]"; a bare "[dots]" heading is kind "?", which is never recorded.
+func DotsKind(body string) (kind string, dots bool) {
+	head, _, _ := strings.Cut(strings.TrimSpace(body), "\n")
+	rest, ok := strings.CutPrefix(head, "[dots]")
+	if !ok {
+		return "", false
+	}
+	words := strings.Fields(rest)
+	if len(words) == 0 {
+		return "?", true
+	}
+	return strings.ToUpper(words[0]), true
+}
+
+// DotsKindRecorded reports whether a comment of this kind becomes a document.
+func DotsKindRecorded(kind string) bool {
+	_, ok := dotsResultKinds[kind]
+	return ok
+}
+
+// firstRunes is Python's s[:n]: n code points, not n bytes.
+func firstRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n])
+}
+
+// dotsSummaryLine is the first substantive line after the heading, skipping a
+// "결론" heading and table rows.
+func dotsSummaryLine(body string) string {
+	lines := strings.Split(strings.TrimSpace(body), "\n")
+	for _, line := range lines[1:] {
+		s := strings.TrimSpace(strings.TrimLeft(strings.TrimSpace(line), "#"))
+		if s != "" && s != "결론" && !strings.HasPrefix(s, "|") {
+			return firstRunes(s, 220)
+		}
+	}
+	return ""
+}
+
+func dotsResultKey(issue DotsIssue, c DotsComment) string {
+	return "dots/results/" + issue.Identifier + "/" + c.CreatedAt[:10] + "-" + c.ID[:8]
+}
+
+func dotsResultBody(kind string, issue DotsIssue, c DotsComment) string {
+	return "# [dots] " + kind + " " + issue.Identifier + " — " + issue.Title + "\n\n" + issue.URL + "\n\n" + c.Body + "\n"
+}
+
+// dotsLaneText makes a notification drainable: the hub rejects C0/C1 control
+// characters and text over the lane-event byte cap.
+func dotsLaneText(text string) string {
+	return assistantLaneText("", strings.Map(func(r rune) rune {
+		if r <= 0x1f || (r >= 0x7f && r <= 0x9f) {
+			return ' '
+		}
+		return r
+	}, text))
+}
+
+func dotsResultText(kind, key string, issue DotsIssue, c DotsComment) string {
+	return dotsLaneText("[dots] " + kind + " " + issue.Identifier + " " + firstRunes(issue.Title, 60) + " :: " + dotsSummaryLine(c.Body) + " → hk:doc " + key + " · " + issue.URL)
+}
+
+func dotsFollowupText(issue DotsIssue) string {
+	return dotsLaneText("[dots-watch] " + issue.Identifier + " is closed but got a new comment after closing; dots will not pick it up. Reopen it if it is a request. " + issue.URL)
+}
+
+func validDotsIssue(issue DotsIssue, commentID string) bool {
+	return dotsIdentifierRE.MatchString(issue.Identifier) && dotsCommentIDRE.MatchString(commentID)
+}
+
+// RecordDotsResult writes the document for one dots answer and the lane
+// notification owed for it, in one transaction. The first writer of a key wins:
+// a redelivery, or a poller that got there first, changes nothing and queues
+// nothing (that poller notified on its own). created reports whether this call
+// wrote the document.
+func (s *Store) RecordDotsResult(ctx context.Context, kind string, issue DotsIssue, c DotsComment) (key string, created bool, err error) {
+	outboxKind, recorded := dotsResultKinds[kind]
+	if !recorded || !validDotsIssue(issue, c.ID) {
+		return "", false, errors.New("invalid dots result")
+	}
+	if _, err := time.Parse(time.RFC3339, c.CreatedAt); err != nil {
+		return "", false, errors.New("invalid dots result")
+	}
+	key = dotsResultKey(issue, c)
+	body := dotsResultBody(kind, issue, c)
+	if !validDocKey(key) || !validText(body, DocumentMaxBytes) {
+		return "", false, errors.New("invalid dots result")
+	}
+	if err := guard.Reject(key + "\n" + body); err != nil {
+		return "", false, err
+	}
+	sum := sha256.Sum256([]byte(body))
+	now := time.Now().UTC()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return "", false, err
+	}
+	defer tx.Rollback(ctx)
+	tag, err := tx.Exec(ctx, `INSERT INTO documents(key,kind,session,job,body,sha256,created_by,created_at,updated_at) VALUES($1,'note',$2,'',$3,$4,$5,$6,$6) ON CONFLICT(key) DO NOTHING`, key, DotsLane, body, hex.EncodeToString(sum[:]), dotsCreatedBy, now)
+	if err != nil {
+		return "", false, err
+	}
+	if tag.RowsAffected() == 0 {
+		return key, false, nil
+	}
+	if err := insertNotificationOutbox(ctx, tx, outboxKind, DotsLane, "dots-"+c.ID, dotsResultText(kind, key, issue, c), now); err != nil {
+		return "", false, err
+	}
+	return key, true, tx.Commit(ctx)
+}
+
+// RecordDotsFollowup records the flag for a non-dots comment added after an
+// issue closed: dots ignores closed issues, so the comment would otherwise be
+// lost. created is false when this comment was already flagged.
+func (s *Store) RecordDotsFollowup(ctx context.Context, issue DotsIssue, commentID string) (created bool, err error) {
+	if !validDotsIssue(issue, commentID) {
+		return false, errors.New("invalid dots followup")
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx)
+	created, err = insertNotificationOutboxOnce(ctx, tx, OutboxKindDotsFollowup, DotsLane, "dots-followup-"+commentID, dotsFollowupText(issue), time.Now().UTC())
+	if err != nil {
+		return false, err
+	}
+	return created, tx.Commit(ctx)
+}
