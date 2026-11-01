@@ -200,9 +200,12 @@ Catalog rows have this shape:
   ordered grade-descending, then `profile`, then effort rung.
 - `PUT /v1/bench/catalog` requires the operator credential — the bearer token
   whose auth-file client id is `operator` (`HANDOFFKEEP_TOKEN_operator`), the
-  same hardened-boundary convention as panewire #68's `HUB_TOKEN_operator`.
-  Other tokens get 403 `{"error":"operator_required"}`; deployments without
-  the entry fail closed.
+  same hardened-boundary convention as panewire #68's `HUB_TOKEN_operator`,
+  or the operator-desk session's client id `operator-desk`, which records the
+  operator's catalog decisions on the operator's behalf. The area-exceptions
+  PUT follows the same rule. Other tokens get 403
+  `{"error":"operator_required"}`; deployments without either entry fail
+  closed.
 
 The `catalog` array in the PUT body is the JSON input format that
 `pacelever bench push-catalog` consumes: one object per row with the fields
@@ -220,7 +223,7 @@ omitted).
 | 400 | `{"error":"bench_catalog_sol_grade"}` | Sol profile graded other than `S+` |
 | 400 | `{"error":"secret_like_content","pattern":"<name>"}` | Secret guard rejected client text |
 | 401 | `{"error":"unauthorized"}` | Missing or unknown bearer token |
-| 403 | `{"error":"operator_required"}` | Catalog write without the operator token |
+| 403 | `{"error":"operator_required"}` | Catalog write without the operator or operator-desk token |
 | 404 | `{"error":"not_found"}` | Unknown path |
 | 409 | `{"error":"bench_rep_conflict","conflicts":[{"index":I,"origin_id":N,"conflict_server_id":M}]}` | Rep write shares a `(created_by, origin_id)` key with a stored row whose content differs; the whole batch is rejected |
 | 503 | `{"error":"bench_reps_retryable"}` | Rep batch aborted by a deadlock or serialization failure; nothing was written and the identical batch may be retried |

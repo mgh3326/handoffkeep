@@ -1544,6 +1544,18 @@ func (s Server) benchGradesPut(w http.ResponseWriter, r *http.Request) {
 // closed: every PUT /v1/bench/catalog gets 403.
 const operatorClientID = "operator"
 
+// operatorDeskClientID is the operator-desk session's client id. It records
+// the operator's catalog decisions on the operator's behalf, so it may write
+// the bench catalog and area exceptions too (operator 2026-11-01). Every other
+// client still gets operator_required.
+const operatorDeskClientID = "operator-desk"
+
+// benchCatalogWriter reports whether client may write the bench catalog and
+// the area exceptions.
+func benchCatalogWriter(client string) bool {
+	return client == operatorClientID || client == operatorDeskClientID
+}
+
 type benchCatalogInput struct {
 	Catalog []store.BenchCatalogEntry `json:"catalog"`
 }
@@ -1567,7 +1579,7 @@ func (s Server) benchCatalogPut(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if client != operatorClientID {
+	if !benchCatalogWriter(client) {
 		writeError(w, http.StatusForbidden, "operator_required")
 		return
 	}
@@ -1627,7 +1639,7 @@ func (s Server) benchAreaExceptionsPut(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if client != operatorClientID {
+	if !benchCatalogWriter(client) {
 		writeError(w, http.StatusForbidden, "operator_required")
 		return
 	}
