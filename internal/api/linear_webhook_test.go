@@ -122,6 +122,11 @@ func TestLinearWebhookRouting(t *testing.T) {
 	closedLater.StateType, closedLater.CompletedAt = "completed", "2026-11-03T00:00:00.000Z"
 	unlabelled := closed
 	unlabelled.Labels = []string{"other"}
+	// An issue completed, reopened and later canceled can carry both times.
+	canceledLater := canceled
+	canceledLater.CompletedAt, canceledLater.CanceledAt = "2026-11-01T00:00:00.000Z", "2026-11-03T00:00:00.000Z"
+	canceledAfterCompletion := canceled
+	canceledAfterCompletion.CompletedAt, canceledAfterCompletion.CanceledAt = "2026-10-30T00:00:00.000Z", "2026-11-01T00:00:00.000Z"
 	cases := []struct {
 		name      string
 		comment   string
@@ -142,6 +147,8 @@ func TestLinearWebhookRouting(t *testing.T) {
 		{"human comment on a completed issue", "hello", closed, "flagged", 0, 1, 1},
 		{"human comment on a canceled issue", "hello", canceled, "flagged", 0, 1, 1},
 		{"human comment from before the close", "hello", closedLater, "ignored", 0, 0, 1},
+		{"human comment between an old completion and the cancel", "hello", canceledLater, "ignored", 0, 0, 1},
+		{"human comment after the cancel of a once completed issue", "hello", canceledAfterCompletion, "flagged", 0, 1, 1},
 		{"human comment on a closed unlabelled issue", "hello", unlabelled, "ignored", 0, 0, 1},
 		{"dots start on a closed issue is not a followup", "[dots] START", closed, "ignored", 0, 0, 0},
 	}

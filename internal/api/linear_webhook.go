@@ -204,11 +204,11 @@ func (h LinearWebhook) handle(ctx context.Context, payload linearWebhookPayload)
 // commentAfterClose compares Linear's ISO-8601 UTC timestamps as text, which
 // orders them because Linear renders every one in the same format.
 func commentAfterClose(issue LinearIssue, createdAt string) bool {
-	if issue.StateType != "completed" && issue.StateType != "canceled" {
-		return false
-	}
-	closedAt := issue.CompletedAt
-	if closedAt == "" {
+	var closedAt string
+	switch issue.StateType {
+	case "completed":
+		closedAt = issue.CompletedAt
+	case "canceled":
 		closedAt = issue.CanceledAt
 	}
 	return closedAt != "" && createdAt > closedAt
