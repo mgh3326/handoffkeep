@@ -1,8 +1,8 @@
 name: release
 # A v* tag builds the four CGO-disabled CLI binaries (linux/darwin x
 # amd64/arm64) stamped with the tag, plus SHA256SUMS, and publishes them to the
-# tag's GitHub Release with GITHUB_TOKEN. The test tag v0.0.0 runs the same
-# build and checks on the tag but is never published.
+# tag's GitHub Release with GITHUB_TOKEN. The test tag v0.0.0 (exactly) runs
+# the same build and checks on the tag but is never published.
 # Pull requests and manual runs build and verify the
 # same assets for the dry-run tag v0.0.0 without publishing. Hosts pull
 # published assets themselves; this workflow never reaches a host.
@@ -70,7 +70,7 @@ jobs:
           [[ $(wc -l < dist/release/SHA256SUMS) -eq 4 ]]
           (cd dist/release && sha256sum -c SHA256SUMS)
       - name: Keep assets for publish
-        if: github.event_name == 'push' && github.ref_type == 'tag' && !startsWith(github.ref_name, 'v0.0.0')
+        if: github.event_name == 'push' && github.ref_type == 'tag' && github.ref_name != 'v0.0.0'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-assets
@@ -81,7 +81,7 @@ jobs:
           retention-days: 7
 
   test:
-    if: github.event_name == 'push' && github.ref_type == 'tag' && !startsWith(github.ref_name, 'v0.0.0')
+    if: github.event_name == 'push' && github.ref_type == 'tag' && github.ref_name != 'v0.0.0'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     services:
@@ -116,7 +116,7 @@ jobs:
 
   publish:
     needs: [build, test]
-    if: github.event_name == 'push' && github.ref_type == 'tag' && !startsWith(github.ref_name, 'v0.0.0')
+    if: github.event_name == 'push' && github.ref_type == 'tag' && github.ref_name != 'v0.0.0'
     runs-on: ubuntu-latest
     permissions:
       contents: write
