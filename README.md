@@ -41,6 +41,35 @@ the requested version, a tag or a pseudo-version). The command reads no
 environment, config, or server. The server reports the same stamp at
 `/healthz`.
 
+## Sentry errors and tracing
+
+`handoffkeep serve` optionally sends errors and request performance to Sentry:
+
+| Variable | Behavior |
+| --- | --- |
+| `HANDOFFKEEP_SENTRY_DSN` | Enables Sentry when set; unset disables it completely. |
+| `HANDOFFKEEP_SENTRY_ENV` | Environment name; defaults to `production`. |
+| `HANDOFFKEEP_SENTRY_TRACES_SAMPLE_RATE` | Request sampling rate from `0` to `1`; defaults to `0.2`. Invalid values fail startup. `0` keeps error reporting enabled. |
+
+Release is the binary's `vcs.revision` build stamp (`unknown` if unstamped).
+The operator provisions the project and injects the DSN at deployment.
+
+Each sampled HTTP request sends one transaction named by its route template,
+including API, MCP, webhook, and console requests. It includes HTTP method,
+status, duration, and a generated request id also returned in `X-Request-ID`.
+DB spans include normalized SQL, PostgreSQL operation status, rows affected,
+and duration. Bind arguments, SQL literals, comments, and quoted identifiers
+are removed. Transactions retain at most 999 child spans. `/healthz` emits no
+telemetry. Pending events flush for up to two seconds after shutdown drains.
+
+All handler 5xx responses and panics are reported, even for unsampled
+requests. Panic stack frames are retained; error and panic messages use
+generic text. The scrub list removes headers (including Authorization and
+cookies), URLs and query strings, request/response bodies, document content,
+user identities, hostnames, breadcrumbs, arbitrary tags/contexts/extras,
+attachments, and stack locals/source text. No query arguments, returned DB
+values, or database error text are attached.
+
 ## Tasks
 
 `tasks` is the durable, Postgres-backed work queue for captains. A task belongs

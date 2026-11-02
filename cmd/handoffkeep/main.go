@@ -30,6 +30,7 @@ import (
 	hkmcp "github.com/mgh3326/handoffkeep/internal/mcp"
 	"github.com/mgh3326/handoffkeep/internal/remote"
 	"github.com/mgh3326/handoffkeep/internal/store"
+	"github.com/mgh3326/handoffkeep/internal/telemetry"
 	"github.com/mgh3326/handoffkeep/internal/ui"
 	"github.com/mgh3326/handoffkeep/internal/wrkrecords"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -1730,6 +1731,11 @@ func serve(args []string, errout io.Writer) error {
 		return errors.New("HANDOFFKEEP_DB_URL and HANDOFFKEEP_AUTH_FILE are required")
 	}
 	ctx := context.Background()
+	monitor, err := telemetry.FromEnv(buildVersion().Rev)
+	if err != nil {
+		return err
+	}
+	defer monitor.Close()
 	mode := os.Getenv("WRK_RECORDS_API")
 	var policy *wrkrecords.Policy
 	var e error
@@ -1774,9 +1780,7 @@ func serve(args []string, errout io.Writer) error {
 	if e != nil {
 		return e
 	}
-	mux := http.NewServeMux()
-	mux.Handle("/mcp", hkmcp.HTTPHandler(svc, tokens))
-	mux.Handle("/", api.Server{Service: svc, Tokens: tokens, QuotaAccounts: quotaAccounts, HostGrants: hostGrants, UI: uiHandler, LinearWebhook: linear.webhook, LinearDecisions: linear.decisions}.Handler())
+	handler := serverHandler(api.Server{Service: svc, Tokens: tokens, QuotaAccounts: quotaAccounts, HostGrants: hostGrants, UI: uiHandler, LinearWebhook: linear.webhook, LinearDecisions: linear.decisions}, monitor)
 	addresses := []string{*listen}
 	if *tail != "" {
 		addresses = append(addresses, *tail)
@@ -1791,12 +1795,19 @@ func serve(args []string, errout io.Writer) error {
 			return err
 		}
 		bindings = append(bindings, serverBinding{
-			server:   &http.Server{Addr: address, Handler: mux},
+			server:   &http.Server{Addr: address, Handler: handler},
 			listener: listener,
 		})
 	}
 	closeStore = false
 	return runServer(ctx, serveOptions{bindings: bindings, workers: workers, store: st})
+}
+
+func serverHandler(server api.Server, monitor *telemetry.Monitor) http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("/mcp", hkmcp.HTTPHandler(server.Service, server.Tokens))
+	mux.Handle("/", server.Handler())
+	return monitor.Handler(mux)
 }
 
 // uiFromEnv intentionally treats incomplete Cloudflare Access configuration as

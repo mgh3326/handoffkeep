@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mgh3326/handoffkeep/internal/wrkrecords"
 )
 
@@ -409,7 +408,7 @@ func OpenRuntime(ctx context.Context, url string) (*Store, error) {
 	if !strings.HasPrefix(url, "postgres://") && !strings.HasPrefix(url, "postgresql://") {
 		return nil, wrkrecords.Error("wrk_unavailable")
 	}
-	p, e := pgxpool.New(ctx, url)
+	p, e := newPool(ctx, url)
 	if e != nil {
 		return nil, wrkrecords.Error("wrk_unavailable")
 	}
@@ -455,7 +454,7 @@ func OpenServer(ctx context.Context, runtimeURL, migrationURL, mode string, poli
 	}
 	// Inspect without DDL. An enrolled/runtime schema must never execute owner
 	// migrations with the runtime credential, even when the API has been disabled.
-	probe, e := pgxpool.New(ctx, runtimeURL)
+	probe, e := newPool(ctx, runtimeURL)
 	if e != nil {
 		return nil, wrkrecords.Error("wrk_unavailable")
 	}

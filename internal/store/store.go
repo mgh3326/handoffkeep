@@ -669,7 +669,7 @@ func Open(ctx context.Context, url string) (*Store, error) {
 	if !strings.HasPrefix(url, "postgres://") && !strings.HasPrefix(url, "postgresql://") {
 		return nil, errors.New("HANDOFFKEEP_DB_URL must be a PostgreSQL URL")
 	}
-	p, err := pgxpool.New(ctx, url)
+	p, err := newPool(ctx, url)
 	if err != nil {
 		return nil, err
 	}
