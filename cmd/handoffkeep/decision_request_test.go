@@ -275,3 +275,61 @@ func TestTasksDecisionWriteOutcomeUnknown(t *testing.T) {
 		t.Fatalf("409 refusal: err=%v", err)
 	}
 }
+
+const decisionAskOKBody = `{"task":{"id":618,"state":"in_progress"},"request":{"id":"dr-618-1","revision":1,"status":"open","question":"q","default_action":"보류","requested_by":"desk","requested_at":"2026-09-24T01:00:00Z"},"decision_ref":"D-618-1","ver":"ab12cd3e","issue":{"request_id":"dr-618-1","task_id":618,"ver":"ab12cd3e","issue_id":"i-1","identifier":"ROB-9","url":"https://linear.example/ROB-9"},"duplicate":false,"issue_created":true}`
+
+func TestDecisionsAskCLI(t *testing.T) {
+	h, seen := relaneServer(t, 201, decisionAskOKBody)
+	var out bytes.Buffer
+	args := []string{"decisions", "ask", "618", "--question", "ship?", "--option", "A|ship", "--option", "B|hold", "--default-action", "보류", "--ref", "handoffkeep#107", "--ref", "report/x", "--url", h.URL, "--token", "tok"}
+	if err := run(args, &out, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	var printed map[string]any
+	if err := json.Unmarshal(out.Bytes(), &printed); err != nil {
+		t.Fatalf("out=%s", out.String())
+	}
+	issue, _ := printed["issue"].(map[string]any)
+	if printed["recorded"] != true || printed["issue_created"] != true || printed["decision_ref"] != "D-618-1" || printed["ver"] != "ab12cd3e" || issue["identifier"] != "ROB-9" {
+		t.Fatalf("printed=%v", printed)
+	}
+	req := (*seen)[0]
+	if req.Method != "POST" || req.Path != "/v1/tasks/618/decision-request/ask" || req.Auth != "Bearer tok" {
+		t.Fatalf("request=%+v", req)
+	}
+	refs, _ := req.Body["refs"].([]any)
+	if len(refs) != 2 || refs[0] != "handoffkeep#107" {
+		t.Fatalf("body=%v", req.Body)
+	}
+}
+
+func TestDecisionsAskCLIFailures(t *testing.T) {
+	base := []string{"decisions", "ask", "618", "--question", "q", "--option", "A|x", "--default-action", "보류", "--token", "tok"}
+	for name, tc := range map[string]struct {
+		status   int
+		body     string
+		want     string
+		exitCode int
+	}{
+		"label missing is a refusal":  {409, `{"error":"linear_decision_target_missing"}`, "NOT recorded", 0},
+		"not configured is a refusal": {503, `{"error":"linear_decisions_disabled"}`, "NOT recorded", 0},
+		"linear down is unknown":      {503, `{"error":"linear_unavailable"}`, "UNKNOWN", exitWriteUnknown},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h, _ := relaneServer(t, tc.status, tc.body)
+			err := run(append(append([]string{}, base...), "--url", h.URL), io.Discard, io.Discard)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err=%v", err)
+			}
+			var exit exitCodeError
+			if errors.As(err, &exit) != (tc.exitCode != 0) || exit.code != tc.exitCode {
+				t.Fatalf("exit=%+v", exit)
+			}
+		})
+	}
+	h, seen := relaneServer(t, 201, decisionAskOKBody)
+	err := run([]string{"decisions", "ask", "618", "--question", "q", "--default-action", "보류", "--url", h.URL, "--token", "tok"}, io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "NOT recorded") || len(*seen) != 0 {
+		t.Fatalf("err=%v seen=%d", err, len(*seen))
+	}
+}

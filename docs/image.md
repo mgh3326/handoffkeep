@@ -48,6 +48,13 @@ Optional server configuration:
 - Hub proxy: `HANDOFFKEEP_HUB_URL`, `HANDOFFKEEP_HUB_TOKEN`
 - Linear webhook (all-or-none, see [linear-webhook.md](linear-webhook.md)):
   `HANDOFFKEEP_LINEAR_WEBHOOK_SECRET`, `HANDOFFKEEP_LINEAR_API_KEY`
+- Operator decisions through Linear (see
+  [linear-decisions.md](linear-decisions.md)):
+  `HANDOFFKEEP_LINEAR_OPERATOR_USER_ID`, `HANDOFFKEEP_LINEAR_DECISION_TEAM`,
+  `HANDOFFKEEP_LINEAR_DECISION_STATES`,
+  `HANDOFFKEEP_DISCORD_DECISIONS_WEBHOOK_URL`
+- Outbox forwarding to the hub: `HANDOFFKEEP_NOTIFICATION_FORWARD=on`, with the
+  hub proxy variables above
 - Attachments / R2 (all-or-none): `HK_S3_ENDPOINT`, `HK_S3_BUCKET`,
   `HK_S3_ACCESS_KEY_ID`, `HK_S3_SECRET_ACCESS_KEY`; limits:
   `HK_ATTACH_MAX_BYTES`, `HK_ATTACH_STORAGE_CAP_BYTES`,

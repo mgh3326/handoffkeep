@@ -15,7 +15,9 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
-const decisionRequestUsage = "usage: tasks decision-request <id> --question <text> --option 'A|label' [--option ...] [--recommended A] [--reason <text>] --default-action <text> [--default-option B] [--default-trigger <text>] [--due <RFC3339>] [--doc <key>] [--supersedes dr-<id>-<rev>] [--block] [--no-free-answer] [--human-only]"
+const decisionRequestUsage = "usage: tasks decision-request <id> --question <text> --option 'A|label' [--option ...] [--recommended A] [--reason <text>] --default-action <text> [--default-option B] [--default-trigger <text>] [--due <RFC3339>] [--doc <key>] [--ref <text> ...] [--supersedes dr-<id>-<rev>] [--block] [--no-free-answer] [--human-only]"
+
+const decisionAskUsage = "usage: decisions ask <task-id> --question <text> --option 'A|label' [--option ...] [--recommended A] [--reason <text>] --default-action <text> [--default-option B] [--default-trigger <text>] [--due <RFC3339>] [--doc <key>] [--ref <text> ...] [--supersedes dr-<id>-<rev>] [--block] [--no-free-answer] [--human-only]"
 
 const decisionResolveUsage = "usage: tasks decision-resolve <id> --request dr-<id>-<rev> --kind answered|default_applied|withdrawn [--option A] [--text <text>] [--receipt <ref>] [--responder <who>]"
 
@@ -76,6 +78,9 @@ func serverRefused(err error) bool {
 		return true
 	case 400:
 		return httpErr.Code != "" && httpErr.Code != "invalid_context"
+	case 503:
+		// The ask route answers this before it writes anything.
+		return httpErr.Code == "linear_decisions_disabled"
 	}
 	return false
 }
@@ -101,16 +106,16 @@ func notRecorded(err error) error {
 	return fmt.Errorf("decision request NOT recorded: %v — do not notify that it is visible in the console", err)
 }
 
-// decisionRequestCmd records a structured decision request (#618). The
-// request is recorded in hk first; the printed request_id is what the pane
-// notification carries.
-func decisionRequestCmd(args []string, out io.Writer) error {
-	fs := flag.NewFlagSet("tasks decision-request", flag.ContinueOnError)
+// decisionRequestFlags parses the flags a decision request is made of. The caller
+// says "NOT recorded" on any error: nothing has left the process yet.
+func decisionRequestFlags(name, usage string, args []string) (*remote.Client, int64, store.DecisionRequestInput, error) {
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	c := remoteClient(fs)
 	question := fs.String("question", "", "the question put to the operator")
-	var optionValues refFlags
+	var optionValues, refValues refFlags
 	fs.Var(&optionValues, "option", "decision option A|label (repeatable, 1-6, label at most 120 bytes)")
+	fs.Var(&refValues, "ref", "short pointer the question depends on (repeatable, counts toward ver)")
 	recommended := fs.String("recommended", "", "recommended option key")
 	reason := fs.String("reason", "", "why the recommendation")
 	defaultAction := fs.String("default-action", "", "what happens if nobody answers (\"자동 적용 없음\" when nothing is applied)")
@@ -122,17 +127,17 @@ func decisionRequestCmd(args []string, out io.Writer) error {
 	block := fs.Bool("block", false, "also move the task to needs_decision")
 	noFreeAnswer := fs.Bool("no-free-answer", false, "disallow a free-form answer")
 	humanOnly := fs.Bool("human-only", false, "reserve the request for the human operator; the assistant path refuses it")
-	valueFlags := map[string]bool{"--url": true, "--token": true, "--question": true, "--option": true, "--recommended": true, "--reason": true, "--default-action": true, "--default-option": true, "--default-trigger": true, "--due": true, "--doc": true, "--supersedes": true}
-	parseArgs, err := splitSubcommandArgs(args[1:], valueFlags)
+	valueFlags := map[string]bool{"--url": true, "--token": true, "--question": true, "--option": true, "--ref": true, "--recommended": true, "--reason": true, "--default-action": true, "--default-option": true, "--default-trigger": true, "--due": true, "--doc": true, "--supersedes": true}
+	parseArgs, err := splitSubcommandArgs(args, valueFlags)
 	if err != nil {
-		return notRecorded(err)
+		return nil, 0, store.DecisionRequestInput{}, err
 	}
 	if err := fs.Parse(parseArgs); err != nil {
-		return notRecorded(err)
+		return nil, 0, store.DecisionRequestInput{}, err
 	}
-	id, err := parseSubcommandTaskID(fs, decisionRequestUsage)
+	id, err := parseSubcommandTaskID(fs, usage)
 	if err != nil {
-		return notRecorded(err)
+		return nil, 0, store.DecisionRequestInput{}, err
 	}
 	input := store.DecisionRequestInput{
 		Question:       strings.TrimSpace(*question),
@@ -141,28 +146,40 @@ func decisionRequestCmd(args []string, out io.Writer) error {
 		DefaultOption:  strings.TrimSpace(*defaultOption),
 		DefaultTrigger: strings.TrimSpace(*defaultTrigger),
 		Doc:            strings.TrimSpace(*doc),
+		Refs:           refValues,
 		Supersedes:     strings.TrimSpace(*supersedes),
 		Block:          *block,
 		HumanOnly:      *humanOnly,
 	}
 	if len(optionValues) == 0 {
-		return notRecorded(errors.New("at least one --option is required"))
+		return nil, 0, store.DecisionRequestInput{}, errors.New("at least one --option is required")
 	}
 	input.Options, err = parseTaskDecisionOptions(optionValues, *recommended, *noFreeAnswer)
 	if err != nil {
-		return notRecorded(err)
+		return nil, 0, store.DecisionRequestInput{}, err
 	}
 	if strings.TrimSpace(*due) != "" {
 		at, err := time.Parse(time.RFC3339, strings.TrimSpace(*due))
 		if err != nil {
-			return notRecorded(errors.New("--due must be RFC3339 with a timezone offset, e.g. 2026-09-25T18:00:00+09:00"))
+			return nil, 0, store.DecisionRequestInput{}, errors.New("--due must be RFC3339 with a timezone offset, e.g. 2026-09-25T18:00:00+09:00")
 		}
 		input.DueAt = &at
 	}
 	if err := store.ValidateDecisionRequestInput(input); err != nil {
-		return notRecorded(err)
+		return nil, 0, store.DecisionRequestInput{}, err
 	}
 	if err := mustClient(c); err != nil {
+		return nil, 0, store.DecisionRequestInput{}, err
+	}
+	return c, id, input, nil
+}
+
+// decisionRequestCmd records a structured decision request (#618). The
+// request is recorded in hk first; the printed request_id is what the pane
+// notification carries.
+func decisionRequestCmd(args []string, out io.Writer) error {
+	c, id, input, err := decisionRequestFlags("tasks decision-request", decisionRequestUsage, args[1:])
+	if err != nil {
 		return notRecorded(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -172,6 +189,36 @@ func decisionRequestCmd(args []string, out io.Writer) error {
 		return writeFailed("decision request", id, err)
 	}
 	return printJSON(out, decisionRequestOutput(result))
+}
+
+// decisionAskCmd asks the operator through Linear: one request, one issue. The
+// server calls Linear, so it gets a longer budget than a plain record. Re-sending
+// the same command after any failure creates nothing twice.
+func decisionAskCmd(args []string, out io.Writer) error {
+	c, id, input, err := decisionRequestFlags("decisions ask", decisionAskUsage, args)
+	if err != nil {
+		return notRecorded(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	result, err := c.AskDecision(ctx, id, input)
+	if err != nil {
+		return writeFailed("decision ask", id, err)
+	}
+	output := map[string]any{
+		"recorded":      true,
+		"duplicate":     result.Duplicate,
+		"issue_created": result.IssueCreated,
+		"task_id":       result.Task.ID,
+		"request_id":    result.Request.ID,
+		"decision_ref":  result.DecisionRef,
+		"ver":           result.Ver,
+		"status":        result.Request.Status,
+	}
+	if result.Issue != nil {
+		output["issue"] = result.Issue
+	}
+	return printJSON(out, output)
 }
 
 // decisionRequestOutput is the CLI's answer after the record exists. notify

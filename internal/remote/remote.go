@@ -840,6 +840,13 @@ func (c Client) ResolveDecisionRequest(ctx context.Context, id int64, in store.D
 	return out, err
 }
 
+// AskDecision records a decision request and gives it its Linear issue.
+func (c Client) AskDecision(ctx context.Context, id int64, in store.DecisionRequestInput) (store.DecisionAskResult, error) {
+	var out store.DecisionAskResult
+	err := c.call(ctx, "POST", fmt.Sprintf("/v1/tasks/%d/decision-request/ask", id), in, &out)
+	return out, err
+}
+
 // AssistantPending fetches the assistant surface's pending work list
 // (MGH-36): open decision requests on live tasks, pending chat questions
 // with their revision, and the server's clock.
