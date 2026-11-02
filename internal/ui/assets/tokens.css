@@ -1,0 +1,170 @@
+/* Console design proposal, hk 2638. Not loaded by the production console yet.
+ * Source: hk:doc design/fleet-web/linear-style-tokens, revision c42825803424.
+ * Dark values come from the supplied marketing system. App density is adapted.
+ * Light is DERIVED for review, not an observed Linear theme.
+ * Keep scoped utilities opt-in. See docs/console-design.md for pipeline adoption.
+ */
+:root {
+  color-scheme: dark;
+  --hk-void: #08090a;
+  --hk-carbon: #0f1011;
+  --hk-obsidian: #161718;
+  --hk-graphite: #23252a;
+  --hk-smoke: #383b3f;
+  --hk-ash: #62666d;
+  --hk-fog: #8a8f98;
+  --hk-mist: #d0d6e0;
+  --hk-bone: #e5e5e6;
+  --hk-paper: #ffffff;
+  --hk-lime: #e4f222;
+  --hk-green: #27a644;
+  --hk-coral: #eb5757;
+  --hk-teal: #02b8cc;
+  --hk-iris: #6366f1;
+  --hk-lavender: #8b5cf6;
+
+  --hk-surface-0: var(--hk-void);
+  --hk-surface-1: var(--hk-carbon);
+  --hk-surface-2: var(--hk-obsidian);
+  --hk-surface-selected: #202124;
+  --hk-border-subtle: var(--hk-graphite);
+  --hk-border-strong: var(--hk-smoke);
+  --hk-border-control: rgb(255 255 255 / 8%);
+  --hk-text-primary: var(--hk-bone);
+  --hk-text-heading: var(--hk-paper);
+  --hk-text-secondary: var(--hk-mist);
+  --hk-text-muted: var(--hk-fog);
+  --hk-text-disabled: var(--hk-ash);
+  --hk-action-bg: var(--hk-lime);
+  --hk-action-fg: var(--hk-void);
+  --hk-input-fill: rgb(255 255 255 / 2%);
+  --hk-badge-fill: rgb(255 255 255 / 5%);
+  --hk-focus: var(--hk-mist);
+  --hk-success: var(--hk-green);
+  --hk-danger: var(--hk-coral);
+  --hk-info: var(--hk-teal);
+  --hk-review: #a99bff; /* Derived, for readable small text on dark surfaces. */
+  --hk-warning: #e5bb70; /* Derived semantic warning role, absent in the source. */
+  --hk-scrim: rgb(0 0 0 / 64%);
+
+  --hk-font-ui: "Inter Variable", Inter, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+  --hk-font-mono: "Berkeley Mono", "JetBrains Mono", "IBM Plex Mono", ui-monospace,
+    SFMono-Regular, Menlo, Consolas, monospace;
+  --hk-weight-light: 300;
+  --hk-weight-normal: 400;
+  --hk-weight-medium: 510;
+  --hk-weight-strong: 590;
+  --hk-type-body: 16px;
+  --hk-type-body-sm: 15px;
+  --hk-type-caption: 13px;
+  --hk-type-label: 12px;
+  --hk-type-micro: 10px;
+  --hk-type-subheading: 24px;
+  --hk-type-heading-sm: 32px;
+  --hk-type-row: 13px; /* App adaptation; marketing body remains 16px. */
+  --hk-leading-body: 1.5;
+  --hk-leading-body-sm: 1.6;
+  --hk-leading-caption: 1.2;
+  --hk-leading-label: 1.4;
+  --hk-leading-subheading: 1.33;
+  --hk-tracking: -0.01em;
+
+  --hk-space-0: 0;
+  --hk-space-1: 4px;
+  --hk-space-2: 8px;
+  --hk-space-3: 12px;
+  --hk-space-4: 16px;
+  --hk-space-5: 20px;
+  --hk-space-6: 24px;
+  --hk-space-7: 28px;
+  --hk-space-8: 32px;
+  --hk-space-9: 36px;
+  --hk-space-10: 40px;
+  --hk-space-12: 48px;
+  --hk-space-14: 56px;
+  --hk-space-16: 64px;
+  --hk-space-20: 80px;
+  --hk-space-24: 96px;
+  --hk-space-32: 128px;
+  --hk-radius-sm: 2px;
+  --hk-radius-badge: 4px;
+  --hk-radius-control: 6px;
+  --hk-radius-card: 12px;
+  --hk-radius-pill: 9999px;
+  --hk-hairline: 0.5px;
+  --hk-border-width: 1px;
+  --hk-control-height: 32px;
+  --hk-button-type: 14px;
+  --hk-button-pad-y: 10px;
+  --hk-button-pad-x: 16px;
+  --hk-row-height: 48px;
+  --hk-touch-height: 44px;
+  --hk-sidebar-width: 216px;
+  --hk-properties-width: 248px;
+  --hk-reading-width: 660px;
+}
+
+/* Derived light palette. Same roles, darker state ink, lime action retained. */
+:root[data-theme="light"] {
+  color-scheme: light;
+  --hk-surface-0: #ffffff;
+  --hk-surface-1: #f7f7f8;
+  --hk-surface-2: #efeff1;
+  --hk-surface-selected: #e8e8ec;
+  --hk-border-subtle: #e2e2e6;
+  --hk-border-strong: #cacbd1;
+  --hk-border-control: rgb(8 9 10 / 14%);
+  --hk-text-primary: #23252a;
+  --hk-text-heading: #08090a;
+  --hk-text-secondary: #474b52;
+  --hk-text-muted: #62666d;
+  --hk-text-disabled: #8a8f98;
+  --hk-input-fill: rgb(8 9 10 / 2%);
+  --hk-badge-fill: rgb(8 9 10 / 5%);
+  --hk-focus: #474b52;
+  --hk-success: #18772f;
+  --hk-danger: #bd3030;
+  --hk-info: #007887;
+  --hk-review: #6250bc;
+  --hk-warning: #8a5b0e;
+  --hk-scrim: rgb(35 37 42 / 28%);
+}
+
+:root {
+  --hk-state-backlog: var(--hk-text-muted);
+  --hk-state-reopened: var(--hk-warning);
+  --hk-state-claimed: var(--hk-info);
+  --hk-state-in-progress: var(--hk-warning);
+  --hk-state-verifying: var(--hk-review);
+  --hk-state-join: var(--hk-info);
+  --hk-state-hold: var(--hk-warning);
+  --hk-state-needs-decision: var(--hk-danger);
+  --hk-state-merged: var(--hk-success);
+  --hk-state-dropped: var(--hk-text-muted);
+}
+
+.hk-type-body { font: var(--hk-weight-normal) var(--hk-type-body)/var(--hk-leading-body) var(--hk-font-ui); }
+.hk-type-body-sm { font: var(--hk-weight-normal) var(--hk-type-body-sm)/var(--hk-leading-body-sm) var(--hk-font-ui); }
+.hk-type-caption { font: var(--hk-weight-normal) var(--hk-type-caption)/var(--hk-leading-caption) var(--hk-font-ui); }
+.hk-type-label { font: var(--hk-weight-normal) var(--hk-type-label)/var(--hk-leading-label) var(--hk-font-ui); }
+.hk-type-micro { font: var(--hk-weight-medium) var(--hk-type-micro)/1.5 var(--hk-font-ui); }
+.hk-type-subheading { font: var(--hk-weight-normal) var(--hk-type-subheading)/var(--hk-leading-subheading) var(--hk-font-ui); }
+.hk-type-heading-sm { font: var(--hk-weight-normal) var(--hk-type-heading-sm)/1.13 var(--hk-font-ui); }
+.hk-type-mono { font-family: var(--hk-font-mono); font-variant-numeric: tabular-nums; }
+.hk-type-body, .hk-type-body-sm, .hk-type-caption { letter-spacing: var(--hk-tracking); font-feature-settings: "cv01", "ss03", "zero"; }
+.hk-stack { display: flex; flex-direction: column; gap: var(--hk-space-4); }
+.hk-inline { display: flex; align-items: center; gap: var(--hk-space-2); }
+.hk-gap-1 { gap: var(--hk-space-1); }
+.hk-gap-3 { gap: var(--hk-space-3); }
+.hk-gap-6 { gap: var(--hk-space-6); }
+.hk-pad-4 { padding: var(--hk-space-4); }
+.hk-pad-6 { padding: var(--hk-space-6); }
+.hk-muted { color: var(--hk-text-muted); }
+.hk-button { display: inline-flex; align-items: center; justify-content: center; gap: var(--hk-space-2); min-height: var(--hk-control-height); padding: var(--hk-button-pad-y) var(--hk-button-pad-x); border: var(--hk-border-width) solid var(--hk-border-subtle); border-radius: var(--hk-radius-control); background: transparent; color: var(--hk-text-primary); font: var(--hk-weight-medium) var(--hk-button-type)/1.4 var(--hk-font-ui); cursor: pointer; }
+.hk-button--primary { background: var(--hk-action-bg); color: var(--hk-action-fg); border-color: var(--hk-action-bg); }
+.hk-button--pill { border-radius: var(--hk-radius-pill); background: var(--hk-badge-fill); }
+.hk-button:focus-visible, .hk-input:focus-visible { outline: 2px solid var(--hk-focus); outline-offset: 2px; }
+.hk-badge { display: inline-flex; align-items: center; gap: var(--hk-space-1); padding: var(--hk-space-1) var(--hk-space-2); border-radius: var(--hk-radius-badge); background: var(--hk-badge-fill); color: var(--hk-text-muted); font: var(--hk-weight-normal) var(--hk-type-label)/var(--hk-leading-label) var(--hk-font-ui); }
+.hk-input { padding: var(--hk-space-2) var(--hk-space-3); border: var(--hk-border-width) solid var(--hk-border-control); border-radius: var(--hk-radius-control); background: var(--hk-input-fill); color: var(--hk-text-primary); font-family: var(--hk-font-ui); }
+.hk-sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
