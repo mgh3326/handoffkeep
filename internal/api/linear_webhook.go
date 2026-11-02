@@ -323,6 +323,13 @@ func (a LinearAPI) LinearIssue(ctx context.Context, issueID string) (LinearIssue
 	return result, nil
 }
 
+// A received rejection differs from a transport/5xx acceptance ambiguity.
+// Creation still reads its stable id before releasing a reservation.
+type linearRejectionError struct{ err error }
+
+func (e linearRejectionError) Error() string { return e.err.Error() }
+func (e linearRejectionError) Unwrap() error { return e.err }
+
 // graphql runs one request against Linear and decodes its data into out.
 func (a LinearAPI) graphql(ctx context.Context, timeout time.Duration, query string, variables map[string]any, out any) error {
 	endpoint := a.URL
@@ -371,7 +378,11 @@ func (a LinearAPI) graphql(ctx context.Context, timeout time.Duration, query str
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("linear api status %d", resp.StatusCode)
+		err := fmt.Errorf("linear api status %d", resp.StatusCode)
+		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+			return linearRejectionError{err}
+		}
+		return err
 	}
 	var envelope struct {
 		Data   json.RawMessage `json:"data"`
@@ -383,7 +394,7 @@ func (a LinearAPI) graphql(ctx context.Context, timeout time.Duration, query str
 		return fmt.Errorf("linear api response: %w", err)
 	}
 	if len(envelope.Errors) > 0 {
-		return fmt.Errorf("linear api error: %s", envelope.Errors[0].Message)
+		return linearRejectionError{fmt.Errorf("linear api error: %s", envelope.Errors[0].Message)}
 	}
 	if err := json.Unmarshal(envelope.Data, out); err != nil {
 		return fmt.Errorf("linear api response: %w", err)

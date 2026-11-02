@@ -138,6 +138,27 @@ func TestLinearMirrorAdmissionSerializesAndRetainsReservations(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if err = st.SerializeLinearCreate(t.Context(), func(lease LinearCreateLease) error {
+		if err := lease.Reserve(t.Context(), "rejected"); err != nil {
+			return err
+		}
+		return lease.Reject(t.Context(), "rejected")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err = second.SerializeLinearCreate(t.Context(), func(lease LinearCreateLease) error {
+		known, err := lease.RejectionKnown(t.Context(), "rejected")
+		if err != nil {
+			return err
+		}
+		if !known {
+			return fmt.Errorf("definite rejection was not durable")
+		}
+		return lease.Complete(t.Context(), "rejected")
+	}); err != nil {
+		t.Fatal(err)
+	}
+
 }
 
 func TestLinearMirrorAdmissionSkipsLegacyArchive(t *testing.T) {
@@ -179,7 +200,7 @@ func TestLinearMirrorAdmissionMigrationFromVersion30(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(st.Close)
-	if _, err = st.pool.Exec(t.Context(), `DROP TABLE linear_create_admissions; DELETE FROM schema_version WHERE version=31`); err != nil {
+	if _, err = st.pool.Exec(t.Context(), `DROP TABLE linear_create_admissions,linear_board_owners; DELETE FROM schema_version WHERE version=31`); err != nil {
 		t.Fatal(err)
 	}
 	for range 2 {
@@ -193,5 +214,56 @@ func TestLinearMirrorAdmissionMigrationFromVersion30(t *testing.T) {
 	var version int
 	if err = st.pool.QueryRow(t.Context(), `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != SchemaVersion {
 		t.Fatal(version, err)
+	}
+}
+
+func TestLinearMirrorAdmissionOwnershipAndVersions(t *testing.T) {
+	_, url := testdb.Schema(t, "mirror_ownership")
+	st, err := Open(t.Context(), url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(st.Close)
+	owner, other := linearTask(t, st, TaskRefs{}), linearTask(t, st, TaskRefs{})
+	if err = st.EnsureLinearBoardOwnership(t.Context(), owner.ID, "owned-issue", "ROB-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err = st.EnsureLinearBoardOwnership(t.Context(), owner.ID, "owned-issue", "ROB-1"); err != nil {
+		t.Fatal("idempotent ownership", err)
+	}
+	if err = st.EnsureLinearBoardOwnership(t.Context(), other.ID, "owned-issue", "ROB-1"); !errors.Is(err, ErrLinearIssueOwnership) {
+		t.Fatal("reassigned issue", err)
+	}
+	if err = st.EnsureLinearBoardOwnership(t.Context(), owner.ID, "another-issue", "ROB-2"); !errors.Is(err, ErrLinearIssueOwnership) {
+		t.Fatal("reassigned task", err)
+	}
+	st.EnableLinearBoard()
+	if _, err = st.ClaimTask(t.Context(), owner.ID, "test", "owner-job", ""); err != nil {
+		t.Fatal(err)
+	}
+	for _, state := range []string{"in_progress", "verifying"} {
+		if _, err = st.TransitionTask(t.Context(), owner.ID, state, "test", "", nil, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, err := st.ListLinearOutbox(t.Context(), owner.ID)
+	if err != nil || len(rows) != 3 {
+		t.Fatal(rows, err)
+	}
+	for i, row := range rows {
+		if row.Payload.Board.Version != int64(i+1) {
+			t.Fatalf("version %d: %+v", i, row)
+		}
+	}
+	latest, found, err := st.GetLinearBoard(t.Context(), owner.ID)
+	if err != nil || !found || latest.Version != 3 || latest.State != "In Review" {
+		t.Fatal(latest, found, err)
+	}
+	// Preserve old duplicate mappings as evidence, but refuse using either owner.
+	if _, err = st.pool.Exec(t.Context(), `INSERT INTO linear_issues VALUES($1,'owned-issue','ROB-1',now(),now())`, other.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err = st.EnsureLinearBoardOwnership(t.Context(), owner.ID, "owned-issue", "ROB-1"); !errors.Is(err, ErrLinearIssueOwnership) {
+		t.Fatal("legacy duplicate accepted", err)
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
@@ -45,21 +46,31 @@ func (f *admissionFake) Pending(context.Context) ([]string, error) {
 	return out, nil
 }
 func (f *admissionFake) Reserve(_ context.Context, id string) error { f.pending[id] = true; return nil }
+func (f *admissionFake) Reject(_ context.Context, id string) error  { f.pending[id] = false; return nil }
+func (f *admissionFake) RejectionKnown(_ context.Context, id string) (bool, error) {
+	uncertain, found := f.pending[id]
+	return found && !uncertain, nil
+}
+
 func (f *admissionFake) Complete(_ context.Context, id string) error {
 	delete(f.pending, id)
 	return nil
 }
 
 type admissionRemote struct {
-	mu            sync.Mutex
-	count         int
-	creates       int
-	requests      int
-	countReply    string
-	existingReply string
-	loseResponse  bool
-	rejectCreate  bool
-	issues        map[string]bool
+	mu                  sync.Mutex
+	count               int
+	creates             int
+	requests            int
+	countReply          string
+	existingReply       string
+	loseResponse        bool
+	rejectCreate        bool
+	rejectStatus        int
+	rejectGraphQL       bool
+	acceptThenReject    bool
+	rejectThenReadFails bool
+	issues              map[string]bool
 }
 
 func (f *admissionRemote) serve(w http.ResponseWriter, r *http.Request) {
@@ -93,20 +104,36 @@ func (f *admissionRemote) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		nodes := []map[string]string{}
-		for i := 0; i < min(f.count, 230); i++ {
+		for i := 0; i < min(f.count, 245); i++ {
 			nodes = append(nodes, map[string]string{"id": fmt.Sprint(i)})
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"issues": map[string]any{"nodes": nodes, "pageInfo": map[string]bool{"hasNextPage": f.count > 230}}}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"issues": map[string]any{"nodes": nodes, "pageInfo": map[string]bool{"hasNextPage": f.count > 245}}}})
 	case strings.Contains(in.Query, "issueCreate"):
 		f.creates++
 		if f.rejectCreate {
-			w.WriteHeader(503)
+			if f.rejectThenReadFails {
+				f.existingReply = `{"errors":[{"message":"read unavailable"}]}`
+			}
+			if f.rejectGraphQL {
+				fmt.Fprint(w, `{"errors":[{"message":"argument rejected"}]}`)
+				return
+			}
+			status := f.rejectStatus
+			if status == 0 {
+				status = 503
+			}
+			w.WriteHeader(status)
 			return
 		}
 		var input struct{ ID string }
 		_ = json.Unmarshal(in.Variables["input"], &input)
 		f.issues[input.ID] = true
 		f.count++
+		if f.acceptThenReject {
+			f.acceptThenReject = false
+			fmt.Fprint(w, `{"errors":[{"message":"response field failed"}]}`)
+			return
+		}
 		if f.loseResponse {
 			f.loseResponse = false
 			w.WriteHeader(503)
@@ -133,7 +160,7 @@ func TestLinearAdmissionCountAndScopeFailClosed(t *testing.T) {
 		name, reply string
 		count       int
 	}{
-		{name: "below", count: 229}, {name: "at watermark", count: 230}, {name: "above", count: 250},
+		{name: "below", count: 244}, {name: "at watermark", count: 245}, {name: "above", count: 250},
 		{name: "null count", reply: `{"data":{"issues":null}}`},
 		{name: "missing page info", reply: `{"data":{"issues":{"nodes":[]}}}`},
 		{name: "duplicate ids", reply: `{"data":{"issues":{"nodes":[{"id":"x"},{"id":"x"}],"pageInfo":{"hasNextPage":false}}}}`},
@@ -166,7 +193,7 @@ func TestLinearAdmissionCountAndScopeFailClosed(t *testing.T) {
 }
 
 func TestLinearAdmissionConcurrentLastSlot(t *testing.T) {
-	remote := &admissionRemote{count: 229}
+	remote := &admissionRemote{count: 244}
 	api, _ := admissionClient(t, remote)
 	results := make(chan error, 2)
 	for _, id := range []string{"a", "b"} {
@@ -186,13 +213,13 @@ func TestLinearAdmissionConcurrentLastSlot(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if admitted != 1 || pending != 1 || remote.creates != 1 || remote.count != 230 {
+	if admitted != 1 || pending != 1 || remote.creates != 1 || remote.count != 245 {
 		t.Fatal(admitted, pending, remote.creates, remote.count)
 	}
 }
 
 func TestLinearAdmissionRecoversLostResponseAtWatermark(t *testing.T) {
-	remote := &admissionRemote{count: 229, loseResponse: true}
+	remote := &admissionRemote{count: 244, loseResponse: true}
 	api, gate := admissionClient(t, remote)
 	if _, err := api.CreateLinearIssue(t.Context(), LinearDecisionIssue{TaskID: 1, ID: "stable"}); err == nil || !gate.pending["stable"] {
 		t.Fatal(gate.pending, err)
@@ -303,5 +330,110 @@ func TestLinearAdmissionDecisionIdentityMustStillBeOpen(t *testing.T) {
 		} else if !errors.Is(err, ErrLinearMirrorExcluded) || remote.creates != 0 {
 			t.Fatal(remote.creates, err)
 		}
+	}
+}
+
+func TestWorkBoardMirrorOwnershipBeforeROBReuse(t *testing.T) {
+	remote := newBoardFake()
+	issue := BoardIssue{ID: "shared", Identifier: "ROB-77"}
+	issue.Team.ID = "team"
+	remote.issues["ROB-77"] = issue
+	remote.issues["shared"] = issue
+	q := &boardQueue{links: map[int64]store.LinearIssue{99: {TaskID: 99, IssueID: "shared", Identifier: "ROB-77"}}}
+	b := boardFixture()
+	b.Task.Title = "Operate ROB-77"
+	q.add(b, store.LinearBoardEvent{})
+	LinearBoardWorker{Store: q, Linear: remote}.Drain(t.Context())
+	if remote.creates != 0 || remote.updates != 0 || q.rows[0].State != "failed" || q.links[99].IssueID != "shared" {
+		t.Fatal(remote.creates, remote.updates, q.rows, q.links)
+	}
+}
+
+func TestWorkBoardMirrorOldSnapshotsUseCurrentVersion(t *testing.T) {
+	remote := newBoardFake()
+	q := &boardQueue{links: map[int64]store.LinearIssue{}}
+	old := boardFixture()
+	q.add(old, store.LinearBoardEvent{ID: "old", Kind: "READY", At: time.Now()})
+	newer := old
+	newer.State = "In Review"
+	newer.Task.Title = "Current title"
+	q.add(newer, store.LinearBoardEvent{ID: "new", Kind: "READY", At: time.Now()})
+	// This task was already mirrored before completion.
+	issue := BoardIssue{ID: "owned", Identifier: "ROB-1"}
+	issue.Team.ID = "team"
+	remote.issues["owned"] = issue
+	q.links[42] = store.LinearIssue{IssueID: "owned"}
+	LinearBoardWorker{Store: q, Linear: remote}.Drain(t.Context())
+	// Redeliver the oldest snapshot after the newer version was delivered.
+	late := q.rows[0]
+	late.State = "pending"
+	q.rows = append(q.rows, late)
+	LinearBoardWorker{Store: q, Linear: remote}.Drain(t.Context())
+	for _, state := range remote.states {
+		if state != "In Review" {
+			t.Fatalf("old version rolled state back: %v", remote.states)
+		}
+	}
+	if len(remote.states) != 3 || len(remote.comments) != 2 || q.boards[42].Version != 2 {
+		t.Fatal(remote.states, remote.comments, q.boards)
+	}
+}
+
+func TestLinearAdmissionDefiniteRejectionReleasesOnlyAfterReadback(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		status  int
+		graphql bool
+	}{{"validation", 400, false}, {"rate limit", 429, false}, {"graphql", 0, true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			remote := &admissionRemote{rejectCreate: true, rejectStatus: tc.status, rejectGraphQL: tc.graphql}
+			api, gate := admissionClient(t, remote)
+			if _, err := api.CreateLinearIssue(t.Context(), LinearDecisionIssue{TaskID: 1, ID: "retry"}); err == nil || len(gate.pending) != 0 {
+				t.Fatal("rejected reservation stuck", gate.pending, err)
+			}
+			remote.mu.Lock()
+			remote.rejectCreate = false
+			remote.mu.Unlock()
+			if _, err := api.CreateLinearIssue(t.Context(), LinearDecisionIssue{TaskID: 1, ID: "retry"}); err != nil || remote.count != 1 || remote.creates != 2 {
+				t.Fatal(remote.count, remote.creates, err)
+			}
+		})
+	}
+	remote := &admissionRemote{rejectCreate: true, rejectStatus: 429, rejectThenReadFails: true}
+	api, gate := admissionClient(t, remote)
+	if _, err := api.CreateLinearIssue(t.Context(), LinearDecisionIssue{TaskID: 1, ID: "uncertain"}); err == nil || len(gate.pending) != 1 {
+		t.Fatal("failed read dropped rejection record", gate.pending, err)
+	}
+	remote.mu.Lock()
+	remote.rejectCreate = false
+	remote.existingReply = ""
+	remote.mu.Unlock()
+	if _, err := api.CreateLinearIssue(t.Context(), LinearDecisionIssue{TaskID: 1, ID: "uncertain"}); err != nil || len(gate.pending) != 0 || remote.count != 1 {
+		t.Fatal("known rejection failed to recover", gate.pending, err)
+	}
+}
+
+func TestLinearAdmissionGraphQLResponseErrorRecoversAcceptedCreate(t *testing.T) {
+	remote := &admissionRemote{acceptThenReject: true}
+	api, gate := admissionClient(t, remote)
+	result, err := api.CreateLinearIssue(t.Context(), LinearDecisionIssue{TaskID: 1, ID: "accepted"})
+	if err != nil || result.Identifier != "ROB-1" || remote.creates != 1 || len(gate.pending) != 0 {
+		t.Fatal(result, remote.creates, gate.pending, err)
+	}
+}
+
+func TestWorkBoardMirrorRecoversAcceptedCreateAfterTerminalTransition(t *testing.T) {
+	remote := newBoardFake()
+	stable := store.LinearDecisionUUID("work-board:task:42")
+	issue := BoardIssue{ID: stable, Identifier: "ROB-42"}
+	issue.Team.ID = "team"
+	remote.issues[stable] = issue
+	q := &boardQueue{links: map[int64]store.LinearIssue{}}
+	b := boardFixture()
+	b.ApplyTask(store.Task{ID: 42, State: "merged", Priority: 2})
+	q.add(b, store.LinearBoardEvent{ID: "final", Kind: "MERGED", At: time.Now()})
+	LinearBoardWorker{Store: q, Linear: remote}.Drain(t.Context())
+	if remote.creates != 0 || remote.updates != 1 || q.links[42].IssueID != stable || q.rows[0].State != "sent" || remote.states[0] != "Done" {
+		t.Fatal(remote.creates, remote.updates, q.links, q.rows, remote.states)
 	}
 }

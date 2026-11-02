@@ -15,6 +15,8 @@ type LinearCreateLease interface {
 	Task(context.Context, int64) (Task, bool, error)
 	Pending(context.Context) ([]string, error)
 	Reserve(context.Context, string) error
+	Reject(context.Context, string) error
+	RejectionKnown(context.Context, string) (bool, error)
 	Complete(context.Context, string) error
 }
 
@@ -80,4 +82,14 @@ func (s *Store) SerializeLinearCreate(ctx context.Context, run func(LinearCreate
 		}
 	}()
 	return run(linearCreateLease{conn: conn})
+}
+
+func (l linearCreateLease) Reject(ctx context.Context, id string) error {
+	_, err := l.conn.Exec(ctx, `UPDATE linear_create_admissions SET uncertain=false WHERE issue_id=$1`, id)
+	return err
+}
+func (l linearCreateLease) RejectionKnown(ctx context.Context, id string) (bool, error) {
+	var rejected bool
+	err := l.conn.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM linear_create_admissions WHERE issue_id=$1 AND NOT uncertain)`, id).Scan(&rejected)
+	return rejected, err
 }

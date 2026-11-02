@@ -37,10 +37,9 @@ This assertion is necessary because an API-visible issue list cannot prove that
 no inaccessible private issues exist. Do not set it for a team-restricted token.
 
 The client holds a PostgreSQL session advisory lock across identity recovery,
-current hk policy checks, counting and creation. The reservation table is added
-by migration 31. A count requests up to 230 non-archived issues, without a
-workflow-state filter: closed issues count too. Fewer than 230 plus a complete
-page permits a create. At 230, unknown scope, failed reads, malformed responses,
+current hk policy checks, counting and creation. Migration 31 adds reservations and the board ownership registry. A count requests up to 245 non-archived issues, without a
+workflow-state filter: closed issues count too. Fewer than 245 plus a complete
+page permits a create. At 245, unknown scope, failed reads, malformed responses,
 or an incomplete count, creation stays pending. hk is the sole writer for this
 serialization guarantee; independent external creates cannot share its lock.
 
@@ -49,14 +48,32 @@ Successful creation clears it. Ambiguous failure leaves it durable, including
 across process restarts. Later admission first reads that exact id: an existing
 issue recovers the lost response, even when the watermark has since been
 reached. An unresolved reservation blocks new identities instead of assuming
-the previous request did not reach Linear. An explicitly rejected create is
-also conservative until reconciled; there is no automatic destructive repair.
+the previous request did not reach Linear. A received 4xx or GraphQL rejection gets exact-id readback: absence clears the
+reservation and permits retry, while an existing issue recovers the accepted
+write. A failed rejection readback preserves a durable known-rejection record, so
+a later successful absent read clears it automatically. Transport errors and 5xx retain
+the reservation. There is no automatic destructive repair.
 
 Board outbox failures remain pending with the existing backoff and `last_error`.
 An old outbox payload is checked against current task policy at send time and
-again inside capacity admission. Ineligible unsent projections settle as
-`skipped`. Asking a decision through the API retains its existing retry contract;
+again inside capacity admission. Before skipping an ineligible unlinked task,
+read-only recovery checks its deterministic issue id; an accepted issue is
+linked and receives its current/final state, without fresh creation. A confirmed
+missing issue settles as skipped only when no uncertain reservation remains. Asking a decision through the API retains its existing retry contract;
 capacity failure returns unavailable without discarding the hk request.
+
+## Ownership and projection versions
+
+Before any board issue mutation, hk reserves one task-to-issue ownership pair.
+Reusing a ROB title cannot take an issue owned by another task or a decision
+request. Rebinding a task to a different issue is refused. Historical duplicate
+links are retained for inspection and refused; they are not silently rewritten.
+Ownership conflict suspends the outbox row as failed.
+
+Each saved board projection increments its version under the task/projection
+locks. Delivery uses the latest committed projection's fields, even for a late
+old snapshot. Old event comments retain their own deterministic identity. The
+existing per-task outbox order also serializes remote issue updates.
 
 ## Archive boundary
 
@@ -64,6 +81,10 @@ Terminal transitions enqueue the state and final comment. They do not enqueue
 an immediate archive. Previously queued `terminal_archive` operations settle as
 `skipped` before any remote callback executes. Keep closed issues until the
 watermark owner admits archival.
+
+The Free plan has 250 non-archived issues and two teams ([pricing](https://linear.app/pricing)).
+The create ceiling is 245, retaining five slots of safety margin. The archive
+watermarks are 210 to start and 180 as the target.
 
 The separate hk watermark archiver will implement copy-before-archive and
 protect links to open work, decisions and ongoing assistant requests, recent

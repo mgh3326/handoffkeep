@@ -133,3 +133,28 @@ func (a LinearAPI) BoardCommentExists(ctx context.Context, id, issueID, body str
 	}
 	return out.Comment != nil && out.Comment.ID == id && out.Comment.Body == body && out.Comment.Issue.ID == issueID, nil
 }
+
+const boardRecoveryQuery = `query FleetBoardRecovery($id:ID!){issues(first:2,includeArchived:true,filter:{id:{eq:$id}}){nodes{id identifier description team{id}labels(first:100){nodes{id name}pageInfo{hasNextPage}}}pageInfo{hasNextPage}}}`
+
+func (a LinearAPI) FindBoardIssue(ctx context.Context, id string) (BoardIssue, bool, error) {
+	var out struct {
+		Issues *struct {
+			Nodes    []BoardIssue
+			PageInfo *struct{ HasNextPage *bool }
+		}
+	}
+	if err := a.graphql(ctx, linearWriteTimeout, boardRecoveryQuery, map[string]any{"id": id}, &out); err != nil {
+		return BoardIssue{}, false, err
+	}
+	if out.Issues == nil || out.Issues.Nodes == nil || out.Issues.PageInfo == nil || out.Issues.PageInfo.HasNextPage == nil || *out.Issues.PageInfo.HasNextPage || len(out.Issues.Nodes) > 1 {
+		return BoardIssue{}, false, errors.New("incomplete board recovery")
+	}
+	if len(out.Issues.Nodes) == 0 {
+		return BoardIssue{}, false, nil
+	}
+	issue := out.Issues.Nodes[0]
+	if issue.ID != id {
+		return BoardIssue{}, false, errors.New("board recovery identity mismatch")
+	}
+	return issue, true, nil
+}

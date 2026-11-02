@@ -9,7 +9,8 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
-const LinearIssueHighWatermark = 230
+const LinearIssueHighWatermark = 210
+const LinearIssueCreateCeiling = 245
 
 var ErrLinearCapacity = errors.New("linear_capacity_pending")
 var ErrLinearMirrorExcluded = errors.New("linear_mirror_excluded")
@@ -21,7 +22,7 @@ type LinearCreateAdmission interface {
 }
 
 const admissionExistingQuery = `query HkAdmissionExisting($id:ID!){issues(first:2,includeArchived:true,filter:{id:{eq:$id}}){nodes{id identifier url} pageInfo{hasNextPage}}}`
-const admissionCountQuery = `query HkAdmissionCount{issues(first:230,includeArchived:false){nodes{id} pageInfo{hasNextPage}}}`
+const admissionCountQuery = `query HkAdmissionCount{issues(first:245,includeArchived:false){nodes{id} pageInfo{hasNextPage}}}`
 
 func (a LinearAPI) admittedCreate(ctx context.Context, in LinearDecisionIssue) (LinearIssue, error) {
 	if a.Admission == nil || !a.CapacityScopeVerified {
@@ -50,8 +51,17 @@ func (a LinearAPI) admittedCreate(ctx context.Context, in LinearDecisionIssue) (
 		}
 		for _, id := range pending {
 			_, found, err := a.admissionExisting(ctx, id)
-			if err != nil || !found {
-				return fmt.Errorf("%w: uncertain earlier create requires reconciliation", ErrLinearCapacity)
+			if err != nil {
+				return fmt.Errorf("%w: earlier create readback unavailable", ErrLinearCapacity)
+			}
+			if !found {
+				rejected, err := lease.RejectionKnown(ctx, id)
+				if err != nil {
+					return err
+				}
+				if !rejected {
+					return fmt.Errorf("%w: uncertain earlier create requires reconciliation", ErrLinearCapacity)
+				}
 			}
 			if err := lease.Complete(ctx, id); err != nil {
 				return err
@@ -77,8 +87,22 @@ func (a LinearAPI) admittedCreate(ctx context.Context, in LinearDecisionIssue) (
 		}
 		result, err = a.createLinearIssue(ctx, in)
 		if err != nil {
+			var rejection linearRejectionError
+			if errors.As(err, &rejection) {
+				if recordErr := lease.Reject(ctx, in.ID); recordErr != nil {
+					return errors.Join(err, recordErr)
+				}
+				recovered, found, readErr := a.admissionExisting(ctx, in.ID)
+				if readErr == nil {
+					if found {
+						result = recovered
+						return lease.Complete(ctx, in.ID)
+					}
+					return errors.Join(err, lease.Complete(ctx, in.ID))
+				}
+			}
 			return err
-		} // durable reservation survives ambiguity
+		} // durable reservation survives transport/5xx or failed readback
 		return lease.Complete(ctx, in.ID)
 	})
 	return result, err
@@ -127,7 +151,7 @@ func (a LinearAPI) admissionCapacity(ctx context.Context) error {
 		}
 		seen[issue.ID] = true
 	}
-	if len(seen) >= LinearIssueHighWatermark || *out.Issues.PageInfo.HasNextPage {
+	if len(seen) >= LinearIssueCreateCeiling || *out.Issues.PageInfo.HasNextPage {
 		return fmt.Errorf("%w: watermark reached", ErrLinearCapacity)
 	}
 	return nil

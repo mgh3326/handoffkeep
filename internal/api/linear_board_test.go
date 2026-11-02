@@ -26,6 +26,11 @@ type boardFake struct {
 func newBoardFake() *boardFake {
 	return &boardFake{issues: map[string]BoardIssue{}, comments: map[string]string{}}
 }
+func (f *boardFake) FindBoardIssue(_ context.Context, id string) (BoardIssue, bool, error) {
+	v, ok := f.issues[id]
+	return v, ok, nil
+}
+
 func (f *boardFake) BoardTarget(context.Context) (BoardTarget, error) {
 	return BoardTarget{TeamID: "team", States: map[string]string{"Backlog": "Backlog", "In Progress": "In Progress", "In Review": "In Review", "Done": "Done", "Canceled": "Canceled"}}, nil
 }
@@ -79,11 +84,30 @@ func (f *boardFake) BoardCommentExists(_ context.Context, id, issue, body string
 }
 
 type boardQueue struct {
+	boards     map[int64]store.LinearBoard
 	tasks      map[int64]store.Task
 	taskErr    error
 	rows       []store.LinearOutbox
 	links      map[int64]store.LinearIssue
 	reconciles int
+}
+
+func (q *boardQueue) HasLinearCreateReservation(context.Context, string) (bool, error) {
+	return false, nil
+}
+
+func (q *boardQueue) GetLinearBoard(_ context.Context, id int64) (store.LinearBoard, bool, error) {
+	b, ok := q.boards[id]
+	return b, ok, nil
+}
+func (q *boardQueue) EnsureLinearBoardOwnership(_ context.Context, taskID int64, id, identifier string) error {
+	for owner, link := range q.links {
+		if (link.IssueID == id && owner != taskID) || (owner == taskID && link.IssueID != id) {
+			return store.ErrLinearIssueOwnership
+		}
+	}
+	q.links[taskID] = store.LinearIssue{TaskID: taskID, IssueID: id, Identifier: identifier}
+	return nil
 }
 
 func (q *boardQueue) GetTask(_ context.Context, id int64) (store.Task, bool, error) {
@@ -115,6 +139,11 @@ func (q *boardQueue) ProcessNextLinearBoardOutbox(ctx context.Context, process f
 	return false, nil
 }
 func (q *boardQueue) add(b store.LinearBoard, e store.LinearBoardEvent) {
+	if q.boards == nil {
+		q.boards = map[int64]store.LinearBoard{}
+	}
+	b.Version = q.boards[b.Task.ID].Version + 1
+	q.boards[b.Task.ID] = b
 	copy := b
 	if q.tasks == nil {
 		q.tasks = map[int64]store.Task{}

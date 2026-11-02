@@ -1089,11 +1089,14 @@ func (s *Store) migrate(ctx context.Context) error {
 		return err
 	}
 
-	// Version 31 adds durable create reservations. Only a new table is
-	// locked; no existing task or projection data is rewritten.
+	// Version 31 adds durable create reservations and board ownership.
+	// The new ownership FK takes SHARE ROW EXCLUSIVE on tasks; existing
+	// task/projection rows are not rewritten. Conflicting old links remain.
 	if err := migrateOnce(ctx, tx, 31, func() error {
 		return execAll(ctx, tx, []string{
-			`CREATE TABLE linear_create_admissions(issue_id TEXT PRIMARY KEY, created_at TIMESTAMPTZ NOT NULL)`,
+			`CREATE TABLE linear_create_admissions(issue_id TEXT PRIMARY KEY, created_at TIMESTAMPTZ NOT NULL, uncertain BOOLEAN NOT NULL DEFAULT true)`,
+			`CREATE TABLE linear_board_owners(issue_id TEXT PRIMARY KEY, task_id BIGINT NOT NULL UNIQUE REFERENCES tasks(id))`,
+			`INSERT INTO linear_board_owners SELECT issue_id,min(task_id) FROM linear_issues GROUP BY issue_id HAVING count(*)=1`,
 			`INSERT INTO schema_version(version) VALUES (31)`,
 		})
 	}); err != nil {

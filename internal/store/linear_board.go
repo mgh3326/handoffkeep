@@ -42,6 +42,7 @@ type LinearBoardEvent struct {
 // LinearBoard is the durable projection. Only event writers update it; the
 // hourly reconciler resends it without inventing events or comments.
 type LinearBoard struct {
+	Version  int64                `json:"version"`
 	Task     Task                 `json:"task"`
 	State    string               `json:"state"`
 	Sessions []LinearBoardSession `json:"sessions"`
@@ -219,6 +220,7 @@ func loadLinearBoardTx(ctx context.Context, tx pgx.Tx, task Task) (LinearBoard, 
 }
 
 func saveLinearBoardTx(ctx context.Context, tx pgx.Tx, b LinearBoard, event LinearBoardEvent) error {
+	b.Version++
 	raw, err := json.Marshal(b)
 	if err != nil {
 		return err
