@@ -32,6 +32,10 @@ provides the transactional work-board outbox and reconciler, and
 [#117](https://github.com/mgh3326/handoffkeep/pull/117) provides the console shell
 and task views. [#115](https://github.com/mgh3326/handoffkeep/pull/115) has since merged:
 reuse its change feed; do not create a second feed.
+Before each implementation unit's console work, inspect the separately delivered
+design documents. Follow an available design; otherwise reuse existing tokens
+and mark the PR `design pending ROB-1484`, without blocking work.
+
 Task creation with `--linear` and `dots request` is separately in progress.
 The existing decision webhook, operator checks and decision request identity
 must be reused.
@@ -112,20 +116,23 @@ never creates endpoint issues.
 hk is to be the sole Linear writer and own limit management. Before each issue
 create, and after board or state changes, hk compares the non-archived issue
 count with the configured watermark. The existing daily Dagu archival job stays
-as a backstop. Unit 1b implements mirror admission now; it does not implement
-archive selection or invoke archival.
+as a backstop. Unit 1b is a PR series: admission (eligibility plus serialized capacity checks,
+with unknown counts pending) ships first. The following PR implements archival
+behind a disabled flag; enabling it awaits the confirmation below.
 
 The operator's budget is approximately 275 issues on the current plan; that
 number is context, not a verified vendor guarantee. The operational watermarks
 are 230 and 200. Count the non-archived issues in the plan's applicable scope,
-including closed issues and issues created outside hk. Do not interpret
+including closed issues. hk is to be the sole writer; any out-of-band writes
+are outside the serialization guarantee. Do not interpret
 “active” as only unfinished workflow states. If scope/count cannot be established,
 leave new creates pending and report uncertainty. Serialize capacity admission
 across writers and recover ambiguous creates by stable id before releasing a
 reservation when this later limit-management unit is implemented.
 
 An early archive candidate must satisfy **all** of these: it is closed, has no
-link from open hk tasks, decisions or assistant threads, has no recent activity,
+link from open hk tasks, open decisions or ongoing dots requests/assistant threads,
+has no recent activity,
 and has a verified durable copy in hk. Keep issues linked to open work, recently
 referenced issues, and issues with a `keep` label. Retain original identifiers,
 content and timestamps in the copy; copy failure cannot authorize archival.
@@ -139,9 +146,9 @@ remain configuration decisions to confirm before implementation.
 
 **Open question: are archived Linear issues still searchable/openable by the
 operator and dots?** The separate plan/archival investigation is checking this.
-Archive implementation waits for the coordinating desk's confirmation after
-that answer. Existing watermark automation is already live and copies to hk
-first; this effort must not rebuild it while the question is pending.
+The hk archiver is implemented behind a flag that defaults off; enabling it
+waits for the coordinating desk's confirmation after that answer. Existing daily
+watermark automation is already live and copies to hk first; it remains a backstop.
 
 The retired immediate-archive path is
 `internal/store/linear.go:enqueueLinearTaskTransition`: terminal transitions
@@ -150,17 +157,16 @@ append `LinearOpTerminalArchive` after state/comment operations.
 legacy queue only with `LinearSyncEnabled()` and `refs.linear.sync`.
 `EnableLinearSync` and `ProcessNextLinearOutbox` have no production caller in
 the inspected tree; the live work-board worker drains only `work_board`.
-**Proposal:** remove the retired terminal-archive enqueue/operation path in a
-separate approved change, leaving archival exclusively to hk's eventual
-watermark owner and the daily backstop. Do not align a per-task terminal hook by
-archiving immediately: terminal status alone is insufficient under the new
-eligibility rule. No legacy archive code changes until the desk answers.
+**Approved disposition:** unit 1b stops enqueueing immediate terminal archives
+and settles old queued terminal-archive operations as skipped, leaving archival
+exclusively to the watermark owner and daily backstop. Terminal status alone is
+insufficient under the new eligibility rule.
 
 Urgent unit 1b applies admission to the live board before unit 2, with tests
 that ineligible tasks create no issue. Unit 2 is relation-only between existing
 mirrored endpoints and never creates endpoint issues. Unit 7 moves the
 shared policy's configurable selections into labels; it must not delay the
-bounded-create guard until the end of the rollout. Archive implementation is gated on the confirmation described below.
+bounded-create guard until the end of the rollout. Archival activation is gated on the confirmation above.
 
 ## Data and ownership contracts
 
