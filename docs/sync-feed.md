@@ -23,7 +23,9 @@ Actions are insert (`I`), update (`U`) and delete (`D`). Timestamps are RFC3339
 numeric database IDs encoded as strings. Decision IDs are
 `tasks.refs.decision_request.id`. A request revision or resolution emits `U`;
 replacement emits `D` for the previous ID and `I` for the replacement. Removing
-the request or deleting its task emits `D`. The decision bootstrap describes
+the current request emits `D`. Tasks have no production hard-delete path: their
+append-only event history prevents deletion. Closing a task with `merged` or
+`dropped` retains the task and emits `task:U`. The decision bootstrap describes
 current structured requests, including resolved requests; historical task event
 snapshots, chat questions and the composite decision inbox are separate data.
 Comments retain their existing append-only rule, so their current supported

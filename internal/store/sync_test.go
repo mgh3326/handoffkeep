@@ -3,6 +3,7 @@ package store
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -10,7 +11,7 @@ import (
 func TestSyncMutationJournal(t *testing.T) {
 	s, pool := searchTestStore(t)
 	ctx := t.Context()
-	task, err := s.CreateTask(ctx, Task{Lane: "sync-test", Title: "sync", Kind: "implement", CreatedBy: "test"})
+	task, err := s.CreateTask(ctx, Task{Lane: "sync-test", Title: "sync", Kind: "implement", CreatedBy: "test", Project: projectPtr(testProjectName)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -276,10 +277,14 @@ func TestSyncPrunePendingRows(t *testing.T) {
 	}
 }
 
-func TestSyncModelDeleteAndDecisionRollback(t *testing.T) {
+func TestSyncDecisionDeleteAndTaskRetention(t *testing.T) {
 	s, pool := searchTestStore(t)
 	ctx := t.Context()
-	id := seedTaskRow(t, pool, "sync-delete", "delete", "backlog")
+	task, err := s.CreateTask(ctx, Task{Lane: "sync-delete", Title: "retained task", Kind: "implement", CreatedBy: "test", Project: projectPtr(testProjectName)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := task.ID
 	if _, err := pool.Exec(ctx, `UPDATE tasks SET refs='{"decision_request":{"id":"delete-request","status":"open"}}' WHERE id=$1`, id); err != nil {
 		t.Fatal(err)
 	}
@@ -302,25 +307,50 @@ func TestSyncModelDeleteAndDecisionRollback(t *testing.T) {
 	if err != nil || len(page.Rows) != 1 || page.Rows[0].ID != "delete-request" {
 		t.Fatalf("projection rollback=%+v err=%v", page, err)
 	}
-	if _, err = pool.Exec(ctx, `DELETE FROM tasks WHERE id=$1`, id); err != nil {
-		t.Fatal(err)
+	// Task history is append-only: the cascading task delete must fail and
+	// roll back both source and journal changes. Production closes tasks with
+	// terminal transitions rather than hard deletion.
+	if _, err = pool.Exec(ctx, `DELETE FROM tasks WHERE id=$1`, id); err == nil || !strings.Contains(err.Error(), "task_events is append-only") {
+		t.Fatalf("task delete err=%v, want append-only refusal", err)
 	}
 	changes, _, err := s.SyncDelta(ctx, before.MaxSyncID, 100)
+	if err != nil || len(changes) != 0 {
+		t.Fatalf("refused delete leaked journal rows: %v %v", changes, err)
+	}
+	if _, found, err := s.GetSyncRow(ctx, "decision", "delete-request"); err != nil || !found {
+		t.Fatalf("refused delete lost decision: found=%v err=%v", found, err)
+	}
+	// Removing the current request deletes only its decision projection.
+	if _, err = pool.Exec(ctx, `UPDATE tasks SET refs='{}' WHERE id=$1`, id); err != nil {
+		t.Fatal(err)
+	}
+	changes, afterDelete, err := s.SyncDelta(ctx, before.MaxSyncID, 100)
 	if err != nil || len(changes) != 2 {
-		t.Fatalf("delete changes=%v err=%v", changes, err)
+		t.Fatalf("decision deletion changes=%v err=%v", changes, err)
 	}
-	seen := map[string]bool{}
+	seen := map[string]string{}
 	for _, c := range changes {
-		if c.Action != "D" || seen[c.Model] {
-			t.Fatalf("unexpected delete %+v", c)
+		if seen[c.Model] != "" {
+			t.Fatalf("duplicate change %+v", c)
 		}
-		seen[c.Model] = true
+		seen[c.Model] = c.Action
 	}
-	if !seen["task"] || !seen["decision"] {
-		t.Fatal(seen)
+	if seen["task"] != "U" || seen["decision"] != "D" {
+		t.Fatalf("changes=%v", changes)
 	}
 	page, err = s.SyncBootstrap(ctx, "decision", "", 100)
 	if err != nil || len(page.Rows) != 0 {
 		t.Fatalf("deleted projection=%+v err=%v", page, err)
+	}
+	dropped, err := s.TransitionTask(ctx, id, "dropped", "test", "no longer needed", nil, "")
+	if err != nil || dropped.State != "dropped" {
+		t.Fatalf("terminal task=%+v err=%v", dropped, err)
+	}
+	changes, _, err = s.SyncDelta(ctx, afterDelete.MaxSyncID, 100)
+	if err != nil || len(changes) != 1 || changes[0].Model != "task" || changes[0].Action != "U" {
+		t.Fatalf("terminal changes=%v err=%v", changes, err)
+	}
+	if _, found, err := s.GetSyncRow(ctx, "task", fmt.Sprint(id)); err != nil || !found {
+		t.Fatalf("terminal task not readable: found=%v err=%v", found, err)
 	}
 }

@@ -108,7 +108,7 @@ func TestSyncRowsResolveDeltaIDs(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	task, err := st.CreateTask(ctx, store.Task{Lane: "sync-rows", Title: "raw task title", Kind: "implement", CreatedBy: "test"})
+	task, err := st.CreateTask(ctx, store.Task{Lane: "sync-rows", Title: "raw task title", Kind: "implement", CreatedBy: "test", Project: projectStr("experiment")})
 	if err != nil {
 		t.Fatal(err)
 	}
