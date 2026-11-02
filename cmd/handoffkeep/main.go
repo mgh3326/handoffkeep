@@ -1877,7 +1877,7 @@ func linearFromEnv(st *store.Store) linearServer {
 	// field, never as a placeholder in the key slot.
 	credential := key != "" || app != nil
 	operator := strings.TrimSpace(os.Getenv("HANDOFFKEEP_LINEAR_OPERATOR_USER_ID"))
-	linearAPI := api.LinearAPI{Key: key, App: app}
+	linearAPI := api.LinearAPI{Key: key, App: app, Admission: st, CapacityScopeVerified: strings.TrimSpace(os.Getenv("HANDOFFKEEP_LINEAR_CAPACITY_SCOPE")) == "workspace"}
 	out := linearServer{boardWorker: linearBoardFromEnv(st, linearAPI)}
 	if secret == "" || !credential {
 		if secret != "" || operator != "" {

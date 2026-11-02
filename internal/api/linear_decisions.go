@@ -45,6 +45,8 @@ type LinearDecisionTarget struct {
 
 // LinearDecisionIssue is the input for creating an issue.
 type LinearDecisionIssue struct {
+	TaskID      int64
+	RequestID   string
 	ID          string
 	TeamID      string
 	LabelID     string
@@ -109,7 +111,7 @@ func (l LinearDecisions) Ask(ctx context.Context, st decisionAskStore, taskID in
 	}
 	issueID := store.LinearDecisionUUID("issue:" + request.ID)
 	issue, err := l.Linear.CreateLinearIssue(ctx, LinearDecisionIssue{
-		ID: issueID, TeamID: target.TeamID, LabelID: target.LabelID,
+		ID: issueID, TaskID: taskID, RequestID: request.ID, TeamID: target.TeamID, LabelID: target.LabelID,
 		Title: linearDecisionTitle(request), Description: linearDecisionBody(request, options, ver),
 	})
 	if err != nil {
@@ -581,6 +583,10 @@ func (a LinearAPI) LinearDecisionTarget(ctx context.Context, teamKey, label stri
 
 // CreateLinearIssue creates an issue under a client-supplied id.
 func (a LinearAPI) CreateLinearIssue(ctx context.Context, in LinearDecisionIssue) (LinearIssue, error) {
+	return a.admittedCreate(ctx, in)
+}
+
+func (a LinearAPI) createLinearIssue(ctx context.Context, in LinearDecisionIssue) (LinearIssue, error) {
 	var out struct {
 		IssueCreate struct {
 			Success bool `json:"success"`

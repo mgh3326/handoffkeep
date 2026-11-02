@@ -54,6 +54,7 @@ type LinearBoardAPI interface {
 }
 
 type LinearBoardStore interface {
+	GetTask(context.Context, int64) (store.Task, bool, error)
 	ProcessNextLinearBoardOutbox(context.Context, func(context.Context, store.LinearOutbox) (store.LinearOutboxResult, error)) (bool, error)
 	GetLinearIssue(context.Context, int64) (store.LinearIssue, bool, error)
 	ReconcileLinearBoard(context.Context) error
@@ -106,12 +107,16 @@ func (w LinearBoardWorker) Drain(ctx context.Context) {
 	}
 }
 
+var errBoardMirrorSkipped = errors.New("linear mirror not eligible")
+
 var boardROB = regexp.MustCompile(`\bROB-[1-9][0-9]*\b`)
 
 func (w LinearBoardWorker) send(ctx context.Context, op store.LinearOutbox) (store.LinearOutboxResult, error) {
 	result := store.LinearOutboxResult{State: "sent"}
 	err := w.sync(ctx, op, &result)
-	if err != nil {
+	if errors.Is(err, errBoardMirrorSkipped) || errors.Is(err, ErrLinearMirrorExcluded) {
+		result.State = "skipped"
+	} else if err != nil {
 		result.State = "pending"
 		result.RetryAt = time.Now().UTC().Add(min(time.Hour, time.Duration(1<<min(op.Attempts, 10))*5*time.Second))
 		result.LastError = err.Error()
@@ -125,6 +130,26 @@ func (w LinearBoardWorker) sync(ctx context.Context, op store.LinearOutbox, resu
 	if b == nil || b.Task.ID != op.TaskID {
 		return errors.New("invalid work board outbox payload")
 	}
+	// Re-read admission immediately before any remote work: pending payloads
+	// may predate this policy or a later task edit. Missing tasks fail closed.
+	task, found, err := w.Store.GetTask(ctx, op.TaskID)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return errBoardMirrorSkipped
+	}
+	link, linked, err := w.Store.GetLinearIssue(ctx, op.TaskID)
+	if err != nil {
+		return err
+	}
+	if !linked && store.LinearMirrorReason(task) == "" {
+		return errBoardMirrorSkipped
+	}
+	// Use current fields without discarding durable session/review history.
+	current := *b
+	current.ApplyTask(task)
+	b = &current
 	target, err := w.Linear.BoardTarget(ctx)
 	if err != nil {
 		return err
@@ -137,18 +162,16 @@ func (w LinearBoardWorker) sync(ctx context.Context, op store.LinearOutbox, resu
 	if err != nil {
 		return err
 	}
-	link, linked, err := w.Store.GetLinearIssue(ctx, op.TaskID)
-	if err != nil {
-		return err
-	}
 	var issue BoardIssue
 	if linked {
 		issue, err = w.Linear.BoardIssue(ctx, link.IssueID)
+	} else if b.Task.Refs.Linear != nil && b.Task.Refs.Linear.MirrorReason == store.LinearMirrorOpened && b.Task.Refs.Linear.IssueID != "" {
+		issue, err = w.Linear.BoardIssue(ctx, b.Task.Refs.Linear.IssueID)
 	} else if identifier := boardROB.FindString(b.Task.Title); identifier != "" {
 		issue, err = w.Linear.BoardIssue(ctx, identifier)
 	} else {
 		id := store.LinearDecisionUUID("work-board:task:" + strconv.FormatInt(op.TaskID, 10))
-		_, createErr := w.Linear.CreateLinearIssue(ctx, LinearDecisionIssue{ID: id, TeamID: target.TeamID, LabelID: fleet, Title: shortBoardText(strings.SplitN(b.Task.Title, "\n", 2)[0], linearTitleMaxRunes), Description: fmt.Sprintf("[hk-task:%d]", op.TaskID)})
+		_, createErr := w.Linear.CreateLinearIssue(ctx, LinearDecisionIssue{ID: id, TaskID: op.TaskID, TeamID: target.TeamID, LabelID: fleet, Title: shortBoardText(strings.SplitN(b.Task.Title, "\n", 2)[0], linearTitleMaxRunes), Description: fmt.Sprintf("[hk-task:%d]", op.TaskID)})
 		// Read after both success and failure. The deterministic id recovers a
 		// lost create response without ever creating a second issue.
 		issue, err = w.Linear.BoardIssue(ctx, id)

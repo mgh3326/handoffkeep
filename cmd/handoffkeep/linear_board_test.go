@@ -9,7 +9,7 @@ import (
 
 func clearLinearConfig(t *testing.T) {
 	t.Helper()
-	for _, name := range []string{"HANDOFFKEEP_LINEAR_WORK_BOARD", "HANDOFFKEEP_LINEAR_WORK_BOARD_BASE_URL", "HANDOFFKEEP_LINEAR_API_KEY", "HANDOFFKEEP_LINEAR_CLIENT_ID", "HANDOFFKEEP_LINEAR_CLIENT_SECRET", "HANDOFFKEEP_LINEAR_WEBHOOK_SECRET", "HANDOFFKEEP_LINEAR_OPERATOR_USER_ID", "HANDOFFKEEP_LINEAR_DECISION_STATES", "HANDOFFKEEP_LINEAR_DECISION_TEAM", "HANDOFFKEEP_DISCORD_DECISIONS_WEBHOOK_URL"} {
+	for _, name := range []string{"HANDOFFKEEP_LINEAR_CAPACITY_SCOPE", "HANDOFFKEEP_LINEAR_WORK_BOARD", "HANDOFFKEEP_LINEAR_WORK_BOARD_BASE_URL", "HANDOFFKEEP_LINEAR_API_KEY", "HANDOFFKEEP_LINEAR_CLIENT_ID", "HANDOFFKEEP_LINEAR_CLIENT_SECRET", "HANDOFFKEEP_LINEAR_WEBHOOK_SECRET", "HANDOFFKEEP_LINEAR_OPERATOR_USER_ID", "HANDOFFKEEP_LINEAR_DECISION_STATES", "HANDOFFKEEP_LINEAR_DECISION_TEAM", "HANDOFFKEEP_DISCORD_DECISIONS_WEBHOOK_URL"} {
 		t.Setenv(name, "")
 	}
 }
@@ -54,5 +54,21 @@ func TestWorkBoardConfigOffAndNoCredential(t *testing.T) {
 	t.Setenv("HANDOFFKEEP_LINEAR_API_KEY", "test-key")
 	if linearFromEnv(st).boardWorker == nil || !st.LinearBoardEnabled() {
 		t.Fatal("key fallback disabled")
+	}
+}
+
+func TestLinearAdmissionConfigRequiresVerifiedWorkspaceScope(t *testing.T) {
+	clearLinearConfig(t)
+	t.Setenv("HANDOFFKEEP_LINEAR_WORK_BOARD", "on")
+	t.Setenv("HANDOFFKEEP_LINEAR_API_KEY", "fake-key")
+	st := &store.Store{}
+	client := linearFromEnv(st).boardWorker.(api.LinearBoardWorker).Linear.(api.LinearAPI)
+	if client.Admission != st || client.CapacityScopeVerified {
+		t.Fatal("unverified scope admitted")
+	}
+	t.Setenv("HANDOFFKEEP_LINEAR_CAPACITY_SCOPE", "workspace")
+	client = linearFromEnv(st).boardWorker.(api.LinearBoardWorker).Linear.(api.LinearAPI)
+	if !client.CapacityScopeVerified {
+		t.Fatal("verified scope ignored")
 	}
 }
