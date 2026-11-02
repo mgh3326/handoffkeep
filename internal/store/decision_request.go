@@ -664,6 +664,9 @@ func (s *Store) RecordDecisionRequest(ctx context.Context, taskID int64, by stri
 	} else if err = insertDecisionEvent(ctx, tx, taskID, x.State, by, note, x.Refs, now); err != nil {
 		return DecisionRequestResult{}, err
 	}
+	if err = s.recordLinearBoardTaskTx(ctx, tx, x, note); err != nil {
+		return DecisionRequestResult{}, err
+	}
 	if err = tx.Commit(ctx); err != nil {
 		return DecisionRequestResult{}, err
 	}
@@ -891,6 +894,9 @@ func (s *Store) resolveDecisionRequest(ctx context.Context, taskID int64, by str
 		return DecisionRequestResult{}, err
 	}
 	if err = queueDecisionClosedPost(ctx, tx, resolved, x.Refs.DecisionOptions, now); err != nil {
+		return DecisionRequestResult{}, err
+	}
+	if err = s.recordLinearBoardTaskTx(ctx, tx, x, note); err != nil {
 		return DecisionRequestResult{}, err
 	}
 	if err = tx.Commit(ctx); err != nil {

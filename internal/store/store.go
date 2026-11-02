@@ -155,15 +155,17 @@ type TaskRefs struct {
 }
 
 type TaskLinear struct {
-	Sync      bool     `json:"sync"`
-	Tier      string   `json:"tier,omitempty"`
-	Grade     string   `json:"grade,omitempty"`
-	Brief     string   `json:"brief,omitempty"`
-	Labels    []string `json:"labels,omitempty"`
-	Report    string   `json:"report,omitempty"`
-	Verify    string   `json:"verify,omitempty"`
-	Decision  string   `json:"decision,omitempty"`
-	DeploySHA string   `json:"deploy_sha,omitempty"`
+	IssueID    string   `json:"issue_id,omitempty"`
+	Identifier string   `json:"identifier,omitempty"`
+	Sync       bool     `json:"sync"`
+	Tier       string   `json:"tier,omitempty"`
+	Grade      string   `json:"grade,omitempty"`
+	Brief      string   `json:"brief,omitempty"`
+	Labels     []string `json:"labels,omitempty"`
+	Report     string   `json:"report,omitempty"`
+	Verify     string   `json:"verify,omitempty"`
+	Decision   string   `json:"decision,omitempty"`
+	DeploySHA  string   `json:"deploy_sha,omitempty"`
 }
 
 // DecisionOption is one bounded, operator-visible answer for a decision.
@@ -475,9 +477,10 @@ type RelayEvent struct {
 }
 
 type Store struct {
-	pool       *pgxpool.Pool
-	linearSync atomic.Bool
-	wrk        atomic.Pointer[wrkrecords.Engine]
+	pool        *pgxpool.Pool
+	linearSync  atomic.Bool
+	linearBoard atomic.Bool
+	wrk         atomic.Pointer[wrkrecords.Engine]
 }
 
 // Refs stores repeatable named references. Its decoder accepts legacy scalar
@@ -1073,14 +1076,18 @@ func (s *Store) migrate(ctx context.Context) error {
 	}); err != nil {
 		return err
 	}
-	if err := migrateOnce(ctx, tx, 29, func() error {
-		// Version 29 adds the transactional change feed. CREATE TRIGGER takes
+	if err := migrateOnce(ctx, tx, 29, func() error { return execAll(ctx, tx, linearBoardV29) }); err != nil {
+		return err
+	}
+	if err := migrateOnce(ctx, tx, 30, func() error {
+		// Version 30 adds the transactional change feed. CREATE TRIGGER takes
 		// SHARE ROW EXCLUSIVE on the four source tables; new tables are private
 		// to this migration until commit. Existing rows enter through bootstrap.
 		return execAll(ctx, tx, syncMigrations)
 	}); err != nil {
 		return err
 	}
+
 	return tx.Commit(ctx)
 }
 func validName(x string) bool        { return nameRE.MatchString(x) }
@@ -1900,6 +1907,9 @@ func validTaskRefs(x TaskRefs) bool {
 }
 
 func validTaskLinear(x TaskLinear) bool {
+	if !validText(x.IssueID, 256) || !validText(x.Identifier, 256) {
+		return false
+	}
 	if x.Tier != "" && x.Tier != "T0" && x.Tier != "T1" && x.Tier != "T2" && x.Tier != "T3" {
 		return false
 	}
@@ -1933,7 +1943,7 @@ func rejectTaskRefs(x TaskRefs) error {
 		}
 	}
 	if x.Linear != nil {
-		values = append(values, x.Linear.Tier, x.Linear.Grade, x.Linear.Brief, x.Linear.Report, x.Linear.Verify, x.Linear.Decision, x.Linear.DeploySHA)
+		values = append(values, x.Linear.IssueID, x.Linear.Identifier, x.Linear.Tier, x.Linear.Grade, x.Linear.Brief, x.Linear.Report, x.Linear.Verify, x.Linear.Decision, x.Linear.DeploySHA)
 		values = append(values, x.Linear.Labels...)
 	}
 	values = append(values, x.OriginPR)
@@ -2285,6 +2295,9 @@ func (s *Store) claimTaskTx(ctx context.Context, tx pgx.Tx, id int64, by, jobID,
 			return Task{}, err
 		}
 	}
+	if err := s.recordLinearBoardTaskTx(ctx, tx, x, ""); err != nil {
+		return Task{}, err
+	}
 	return x, nil
 }
 
@@ -2403,6 +2416,9 @@ func (s *Store) RebindTaskJob(ctx context.Context, id int64, fromJob, toJob, by,
 		return Task{}, err
 	}
 	if _, err = tx.Exec(ctx, `INSERT INTO task_events(task_id,"from","to","by",note,refs,at,kind) VALUES($1,$2,$2,$3,$4,$5::jsonb,$6,'transition')`, id, x.State, by, reason, string(eventRefs), now); err != nil {
+		return Task{}, err
+	}
+	if err := s.recordLinearBoardTaskTx(ctx, tx, x, reason); err != nil {
 		return Task{}, err
 	}
 	return x, tx.Commit(ctx)
@@ -2627,6 +2643,9 @@ func (s *Store) transitionTask(ctx context.Context, id int64, to, by, note strin
 			return Task{}, err
 		}
 	}
+	if err := s.recordLinearBoardTaskTx(ctx, tx, x, note); err != nil {
+		return Task{}, err
+	}
 	return x, tx.Commit(ctx)
 }
 
@@ -2708,6 +2727,9 @@ func (s *Store) RelaneTask(ctx context.Context, id int64, to, by, note string, a
 	if _, err = tx.Exec(ctx, `INSERT INTO task_events(task_id,"from","to","by",note,refs,at,kind) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,'relane')`, id, from, to, by, note, string(encoded), x.UpdatedAt); err != nil {
 		return Task{}, false, err
 	}
+	if err := s.recordLinearBoardTaskTx(ctx, tx, x, note); err != nil {
+		return Task{}, false, err
+	}
 	return x, true, tx.Commit(ctx)
 }
 
@@ -2768,6 +2790,9 @@ func (s *Store) SetTaskProject(ctx context.Context, id int64, project, by, note 
 	if _, err = tx.Exec(ctx, `INSERT INTO task_events(task_id,"from","to","by",note,refs,at,kind) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,'project')`, id, from, project, by, note, string(encoded), x.UpdatedAt); err != nil {
 		return Task{}, false, err
 	}
+	if err := s.recordLinearBoardTaskTx(ctx, tx, x, note); err != nil {
+		return Task{}, false, err
+	}
 	return x, true, tx.Commit(ctx)
 }
 
@@ -2816,6 +2841,9 @@ func (s *Store) SetTaskArea(ctx context.Context, id int64, area *string, by, not
 		return Task{}, false, err
 	}
 	if _, err = tx.Exec(ctx, `INSERT INTO task_events(task_id,"from","to","by",note,refs,at,kind) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,'area')`, id, from, to, by, note, string(encoded), x.UpdatedAt); err != nil {
+		return Task{}, false, err
+	}
+	if err := s.recordLinearBoardTaskTx(ctx, tx, x, note); err != nil {
 		return Task{}, false, err
 	}
 	return x, true, tx.Commit(ctx)
@@ -3173,6 +3201,11 @@ func (s *Store) AppendRelayEvent(ctx context.Context, x RelayEvent) (RelayEvent,
 	err = scanRelayEventCreated(tx.QueryRow(ctx, query+` RETURNING `+relayEventColumns+`,(xmax=0) AS created`, x.Kind, x.JobID, x.Epoch, x.OwnerLane, x.Machine, x.PaneID, x.ReportPath, x.ReportLastLine, x.Question, x.PR, x.Head, x.Reason, x.EventID, x.Text, x.EventTime), &x, &created)
 	if err != nil {
 		return x, false, err
+	}
+	if created {
+		if err = s.recordLinearBoardRelayTx(ctx, tx, x); err != nil {
+			return x, false, err
+		}
 	}
 	hydrateWrkRelay(ctx, tx, &x)
 	return x, created, tx.Commit(ctx)

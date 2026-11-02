@@ -55,5 +55,5 @@ var syncMigrations = []string{
    RETURN NULL;
  END $$`,
 	`CREATE TRIGGER sync_task_decision AFTER INSERT OR UPDATE OR DELETE ON tasks FOR EACH ROW EXECUTE FUNCTION handoffkeep_sync_decision()`,
-	`INSERT INTO schema_version(version) VALUES (29)`,
+	`INSERT INTO schema_version(version) VALUES (30)`,
 }

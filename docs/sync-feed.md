@@ -15,7 +15,7 @@ The response is `application/x-ndjson`, with ascending sync IDs:
 ```json
 {"sync_id":1,"model":"document","model_id":"42","action":"I","at":"2026-11-02T00:00:00Z"}
 {"sync_id":2,"model":"document","model_id":"42","action":"D","at":"2026-11-02T00:00:01Z"}
-{"_metadata_":{"last_sync_id":2,"max_sync_id":2,"schema_version":29}}
+{"_metadata_":{"last_sync_id":2,"max_sync_id":2,"schema_version":30}}
 ```
 
 Actions are insert (`I`), update (`U`) and delete (`D`). Timestamps are RFC3339
@@ -60,7 +60,7 @@ Models: `document`, `task`, `task_comment`, `decision`. Limits match delta.
 The response is JSON:
 
 ```json
-{"rows":[{"id":"42","updated_at":"2026-11-02T00:00:00Z","key":"notes/example"}],"cursor":"opaque-next-page","max_sync_id":100,"schema_version":29}
+{"rows":[{"id":"42","updated_at":"2026-11-02T00:00:00Z","key":"notes/example"}],"cursor":"opaque-next-page","max_sync_id":100,"schema_version":30}
 ```
 
 Only documents have `key`. Comments expose their creation time as `updated_at`.

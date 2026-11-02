@@ -12,7 +12,7 @@ import (
 
 func TestSyncDeltaProtocol(t *testing.T) {
 	change := `{"sync_id":1,"model":"document","model_id":"42","action":"D","at":"2026-01-01T00:00:00Z"}` + "\n"
-	trailer := `{"_metadata_":{"last_sync_id":1,"max_sync_id":2,"schema_version":29}}` + "\n"
+	trailer := `{"_metadata_":{"last_sync_id":1,"max_sync_id":2,"schema_version":30}}` + "\n"
 	for _, tc := range []struct {
 		name, body string
 		status     int

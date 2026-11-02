@@ -15,7 +15,7 @@ func TestSyncCLI(t *testing.T) {
 			t.Errorf("request=%v", r)
 		}
 		w.Header().Set("Content-Type", "application/x-ndjson")
-		_, _ = io.WriteString(w, `{"_metadata_":{"last_sync_id":7,"max_sync_id":7,"schema_version":29}}`+"\n")
+		_, _ = io.WriteString(w, `{"_metadata_":{"last_sync_id":7,"max_sync_id":7,"schema_version":30}}`+"\n")
 	}))
 	defer h.Close()
 	var out bytes.Buffer

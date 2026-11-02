@@ -83,6 +83,7 @@ var errorRules = []errorRule{
 	{store.ErrInvalidProvenance, http.StatusBadRequest, "invalid_provenance", false},
 	{store.ErrProvenanceRefMismatch, http.StatusConflict, "provenance_ref_mismatch", false},
 	{store.ErrDecisionRequestHumanOnly, http.StatusConflict, "decision_request_human_only", true},
+	{store.ErrPlacementConflict, http.StatusConflict, "placement_conflict", false},
 	{store.ErrJobNotFound, http.StatusNotFound, "not_found", false},
 	{store.ErrJobIDTaken, http.StatusConflict, "job_id_taken", false},
 	{store.ErrJobStateConflict, http.StatusConflict, "job_state_conflict", true},

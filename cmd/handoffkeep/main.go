@@ -1774,8 +1774,11 @@ func serve(args []string, errout io.Writer) error {
 		return e
 	}
 	svc := api.Service{Store: st, Attachments: am}
-	workers := []backgroundWorker{chatRetentionWorker{store: st}, syncRetentionWorker{store: st, retention: retention}}
+	workers := []backgroundWorker{chatRetentionWorker{store: st}, placementRetentionWorker{store: st}, syncRetentionWorker{store: st, retention: retention}}
 	linear := linearFromEnv(st)
+	if linear.boardWorker != nil {
+		workers = append(workers, linear.boardWorker)
+	}
 	if linear.opsWorker != nil {
 		workers = append(workers, linear.opsWorker)
 	}
@@ -1844,9 +1847,10 @@ func uiFromEnv(st *store.Store) (http.Handler, error) {
 
 // linearServer is what the Linear configuration turns on. Any field may be nil.
 type linearServer struct {
-	webhook   http.Handler
-	decisions *api.LinearDecisions
-	opsWorker backgroundWorker
+	webhook     http.Handler
+	decisions   *api.LinearDecisions
+	opsWorker   backgroundWorker
+	boardWorker backgroundWorker
 }
 
 // linearFromEnv follows uiFromEnv: incomplete configuration disables the route
@@ -1873,20 +1877,18 @@ func linearFromEnv(st *store.Store) linearServer {
 	// field, never as a placeholder in the key slot.
 	credential := key != "" || app != nil
 	operator := strings.TrimSpace(os.Getenv("HANDOFFKEEP_LINEAR_OPERATOR_USER_ID"))
-	if secret == "" && !credential {
-		if operator != "" {
-			log.Printf("linear_decisions.disabled reason=no_webhook")
-		}
-		return linearServer{}
-	}
-	if secret == "" || !credential {
-		log.Printf("linear_webhook.disabled reason=incomplete_config")
-		return linearServer{}
-	}
 	linearAPI := api.LinearAPI{Key: key, App: app}
+	out := linearServer{boardWorker: linearBoardFromEnv(st, linearAPI)}
+	if secret == "" || !credential {
+		if secret != "" || operator != "" {
+			log.Printf("linear_webhook.disabled reason=incomplete_config")
+		}
+		return out
+	}
 	webhook := api.LinearWebhook{Secret: secret, Issues: linearAPI, Store: st}
 	if operator == "" {
-		return linearServer{webhook: webhook}
+		out.webhook = webhook
+		return out
 	}
 	states, err := api.ParseLinearDecisionStates(os.Getenv("HANDOFFKEEP_LINEAR_DECISION_STATES"))
 	if err != nil {
@@ -1899,11 +1901,10 @@ func linearFromEnv(st *store.Store) linearServer {
 	if team == "" {
 		team = "ROB"
 	}
-	return linearServer{
-		webhook:   webhook,
-		decisions: &api.LinearDecisions{Team: team, Linear: linearAPI},
-		opsWorker: api.LinearDecisionOpsWorker{Store: st, Linear: linearAPI, Discord: discordDecisionsFromEnv()},
-	}
+	out.webhook = webhook
+	out.decisions = &api.LinearDecisions{Team: team, Linear: linearAPI}
+	out.opsWorker = api.LinearDecisionOpsWorker{Store: st, Linear: linearAPI, Discord: discordDecisionsFromEnv()}
+	return out
 }
 
 // discordDecisionsFromEnv returns nil when the channel is not configured, which
