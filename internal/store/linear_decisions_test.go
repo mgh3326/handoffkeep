@@ -172,6 +172,24 @@ func TestDecideLinearAnswer(t *testing.T) {
 	}
 }
 
+func TestLinearAnswerReplyKey(t *testing.T) {
+	comment := LinearDecisionAnswer{Source: LinearDecisionSourceComment, IssueID: "i", CommentID: "c1"}
+	state := LinearDecisionAnswer{Source: LinearDecisionSourceState, IssueID: "i", EventAt: "t1"}
+	for name, in := range map[string]LinearDecisionAnswer{"comment": comment, "state": state} {
+		if linearAnswerReplyKey(in, LinearDecisionRejected) != linearAnswerReplyKey(in, LinearDecisionRejected) {
+			t.Errorf("%s: same outcome must share a key", name)
+		}
+		if linearAnswerReplyKey(in, LinearDecisionRejected) == linearAnswerReplyKey(in, LinearDecisionRecorded) {
+			t.Errorf("%s: a changed outcome must get its own key", name)
+		}
+	}
+	other := comment
+	other.CommentID = "c2"
+	if linearAnswerReplyKey(comment, LinearDecisionRecorded) == linearAnswerReplyKey(other, LinearDecisionRecorded) {
+		t.Error("two comments must not share a key")
+	}
+}
+
 func TestLinearDecisionOpRetriesForAboutTwoDays(t *testing.T) {
 	var total time.Duration
 	for attempts := 0; attempts < linearDecisionOpMaxAttempts-1; attempts++ {
