@@ -124,11 +124,12 @@ The repetition wire row also includes the server-owned identity fields:
 }
 ```
 
-Grades use the closed ladder `S+`, `S`, `A+`, `A`, `B`, `C`. Every write must
+Grades accept the ladder `S+`, `S`, `A+`, `A`, `B`, `C`, plus `unrated` for
+rungs without a measured or operator-set grade. Every write must
 include a non-blank `deviation_ref`; a missing, empty, or whitespace-only
 reference rejects the whole batch. `decided_by` is server-set, and `decided_at`
-is set to the server time when omitted. `codex-sol` and `kiro-sol` accept only
-`S+`; any other grade is rejected with `400 bench_catalog_sol_grade`, matching
+is set to the server time when omitted. `codex-sol` and `kiro-sol` accept
+`S+` or `unrated`; any other grade is rejected with `400 bench_catalog_sol_grade`, matching
 the catalog invariant. Client text in `provenance`, `notes`,
 `task_ref`, `boundary_version`, and `deviation_ref` passes through the secret
 guard before storage.
@@ -181,7 +182,7 @@ Catalog rows have this shape:
 - `profile` and `effort` form the row key. `effort=""` is the profile-default
   row; known rungs are `low < medium < high < xhigh < max`. Unknown effort
   strings are allowed but exempt from the monotonicity rule below.
-- `grade` uses the same closed ladder as grades. `gate` is one of `default`,
+- `grade` uses the same values as grades. `gate` is one of `default`,
   `escalation`, `consult_only`.
 - `score`, `gate_reason`, `benchmark_source`, `benchmark_annotation`, and
   `retired_at` are nullable. `score` must be a finite 0–100.
@@ -189,11 +190,11 @@ Catalog rows have this shape:
   provenance** (who or which decision produced the row) — a missing or blank
   value is a 400. The server does not overwrite it because the caller is
   always the operator.
-- Validation: `deviation_ref` non-blank (as with grades); Sol profiles
-  (`codex-sol`, `kiro-sol` — the Sol profile set) accept only
-  `S+`; and within one profile the merged post-write state must be monotonic —
-  a higher known effort rung may not carry a worse grade. Violations roll back
-  the whole batch.
+- Validation requires a non-blank `deviation_ref`. Measured Sol placements
+  (`codex-sol`, `kiro-sol`) require `S+`. Unscored `unrated` rows and legacy
+  C/null placeholders are also accepted. Within one profile, a higher known
+  effort rung may not carry a worse grade. Unrated rows do not participate in
+  this comparison. Violations roll back the whole batch.
 - `GET /v1/bench/catalog` returns non-retired rows including `consult_only`.
   `?include_retired=1` also returns retired rows. `?pool=<pool>` returns the
   subscription ladder: that pool's non-retired, non-`consult_only` rows,
@@ -220,7 +221,7 @@ omitted).
 | 400 | `{"error":"deviation_ref_required"}` | Grade write has no usable deviation reference |
 | 400 | `{"error":"decided_by_required"}` | Catalog write has no usable `decided_by` |
 | 400 | `{"error":"bench_catalog_not_monotonic"}` | Catalog write would put a worse grade on a higher effort rung |
-| 400 | `{"error":"bench_catalog_sol_grade"}` | Sol profile graded other than `S+` |
+| 400 | `{"error":"bench_catalog_sol_grade"}` | Sol row violates the measured `S+` or unscored-placeholder rule |
 | 400 | `{"error":"secret_like_content","pattern":"<name>"}` | Secret guard rejected client text |
 | 401 | `{"error":"unauthorized"}` | Missing or unknown bearer token |
 | 403 | `{"error":"operator_required"}` | Catalog write without the operator or operator-desk token |
