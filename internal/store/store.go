@@ -1073,6 +1073,14 @@ func (s *Store) migrate(ctx context.Context) error {
 	}); err != nil {
 		return err
 	}
+	if err := migrateOnce(ctx, tx, 29, func() error {
+		// Version 29 adds the transactional change feed. CREATE TRIGGER takes
+		// SHARE ROW EXCLUSIVE on the four source tables; new tables are private
+		// to this migration until commit. Existing rows enter through bootstrap.
+		return execAll(ctx, tx, syncMigrations)
+	}); err != nil {
+		return err
+	}
 	return tx.Commit(ctx)
 }
 func validName(x string) bool        { return nameRE.MatchString(x) }
