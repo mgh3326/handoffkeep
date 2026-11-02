@@ -873,10 +873,8 @@ func TestDecisionStateChangeAgainstStore(t *testing.T) {
 		data["id"], data["updatedAt"] = asked.Issue.IssueID, updatedAt
 		return out
 	}
-	for want, at := range map[string]string{store.LinearDecisionRecorded: "2026-11-02T02:00:00.000Z"} {
-		if _, out := signedPost(t, h, envelope(at)); out["status"] != want {
-			t.Fatalf("out=%v", out)
-		}
+	if _, out := signedPost(t, h, envelope("2026-11-02T02:00:00.000Z")); out["status"] != store.LinearDecisionRecorded {
+		t.Fatalf("first out=%v", out)
 	}
 	if _, out := signedPost(t, h, envelope("2026-11-02T02:00:00.000Z")); out["status"] != store.LinearDecisionDuplicate {
 		t.Fatalf("redelivery out=%v", out)

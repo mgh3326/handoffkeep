@@ -45,8 +45,11 @@ const (
 	LinearDecisionSourceComment = "comment"
 	LinearDecisionSourceState   = "state"
 
-	linearDecisionOpMaxAttempts = 8
+	// With these, an op keeps trying for about two days, which outlasts a Linear
+	// or Discord outage. What still fails then needs a person.
+	linearDecisionOpMaxAttempts = 56
 	linearDecisionOpBaseBackoff = 30 * time.Second
+	linearDecisionOpMaxBackoff  = time.Hour
 	linearDecisionErrorMaxBytes = 500
 )
 
@@ -54,6 +57,16 @@ const (
 // not to send. The row is settled, so turning the sender on later does not replay
 // old messages.
 var ErrLinearDecisionOpSkipped = errors.New("linear_decision_op_skipped")
+
+// ErrLinearDecisionOpGaveUp marks the failure that used an op's last attempt, so
+// the worker can log it apart from a failure that will be retried.
+var ErrLinearDecisionOpGaveUp = errors.New("linear_decision_op_gave_up")
+
+// linearDecisionOpBackoff is the wait after a failed attempt, given the attempts
+// made before it.
+func linearDecisionOpBackoff(attempts int) time.Duration {
+	return min(linearDecisionOpBaseBackoff<<min(attempts, 8), linearDecisionOpMaxBackoff)
+}
 
 // DecisionLinearAudit is the record of one answer given on Linear. DeliveryID is
 // Linear's id for the webhook delivery that carried it.
@@ -446,7 +459,10 @@ func linearDecisionAnsweredText(link LinearDecisionLink, v linearDecisionVerdict
 // means the issue carries no request.
 func (s *Store) AnswerLinearDecision(ctx context.Context, in LinearDecisionAnswer) (string, error) {
 	if in.IssueID == "" || in.UserID == "" || (in.Source != LinearDecisionSourceComment && in.Source != LinearDecisionSourceState) ||
-		(in.Source == LinearDecisionSourceComment && in.CommentID == "") {
+		(in.Source == LinearDecisionSourceComment && in.CommentID == "") ||
+		// EventAt identifies a state event: without it, every later move on the
+		// issue would read as a repeat of the first.
+		(in.Source == LinearDecisionSourceState && in.EventAt == "") {
 		return "", errors.New("invalid linear decision answer")
 	}
 	raw := firstBytes(in.RawText, DecisionOperatorQuoteMaxBytes)
@@ -560,9 +576,10 @@ func (s *Store) ProcessNextLinearDecisionOp(ctx context.Context, process func(co
 	if opErr != nil {
 		lastError = firstBytes(opErr.Error(), linearDecisionErrorMaxBytes)
 		state = "pending"
-		next = now.Add(linearDecisionOpBaseBackoff << min(op.Attempts, linearDecisionOpMaxAttempts))
+		next = now.Add(linearDecisionOpBackoff(op.Attempts))
 		if attempts >= linearDecisionOpMaxAttempts {
 			state = "failed"
+			opErr = fmt.Errorf("%w: %s %s: %w", ErrLinearDecisionOpGaveUp, op.Op, op.DedupeKey, opErr)
 		}
 	}
 	if _, err = tx.Exec(ctx, `UPDATE linear_decision_ops SET state=$2,attempts=$3,next_attempt_at=$4,last_error=$5,updated_at=$6 WHERE id=$1`, op.ID, state, attempts, next, lastError, now); err != nil {

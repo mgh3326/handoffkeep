@@ -118,10 +118,16 @@ An answer after the deadline still counts while the request is open: a passed
 deadline changes nothing in hk until someone records that the default was
 applied.
 
-Replies are queued in the same transaction as the answer and retried with
-backoff, so a Linear outage delays a reply but does not lose it. After 8 failed
-attempts the row stays in `linear_decision_ops` with state `failed` and its
-`last_error`.
+Replies are queued in the same transaction as the answer, so a Linear outage
+delays a reply but does not lose it. The same queue carries closes and Discord
+posts. A failed write is retried with backoff, from 30 seconds up to 1 hour, for
+about two days. After that the server logs `linear_decisions.op_gave_up` and the
+row stays in `linear_decision_ops` with state `failed` and its `last_error`. To
+retry such a row after fixing the cause:
+
+```sql
+UPDATE linear_decision_ops SET state='pending', attempts=0, next_attempt_at=now() WHERE id=<id>;
+```
 
 ### Who counts as the operator
 

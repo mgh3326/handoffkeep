@@ -4,6 +4,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
 
 func twoOptions() *DecisionOptions {
@@ -168,6 +169,39 @@ func TestDecideLinearAnswer(t *testing.T) {
 				t.Fatalf("reply %q would parse as an answer and could loop", v.reply)
 			}
 		})
+	}
+}
+
+func TestLinearDecisionOpRetriesForAboutTwoDays(t *testing.T) {
+	var total time.Duration
+	for attempts := 0; attempts < linearDecisionOpMaxAttempts-1; attempts++ {
+		wait := linearDecisionOpBackoff(attempts)
+		if wait <= 0 || wait > linearDecisionOpMaxBackoff {
+			t.Fatalf("attempt %d waits %s", attempts, wait)
+		}
+		total += wait
+	}
+	if total < 48*time.Hour || total > 72*time.Hour {
+		t.Fatalf("retries span %s", total)
+	}
+	if linearDecisionOpBackoff(0) != linearDecisionOpBaseBackoff || linearDecisionOpBackoff(1) != 2*linearDecisionOpBaseBackoff {
+		t.Fatalf("first waits %s, %s", linearDecisionOpBackoff(0), linearDecisionOpBackoff(1))
+	}
+}
+
+// Refused before any database call, so a Store with no pool is enough.
+func TestAnswerLinearDecisionRequiresTheEventIdentity(t *testing.T) {
+	s := &Store{}
+	for name, in := range map[string]LinearDecisionAnswer{
+		"state without a time":  {IssueID: "i", UserID: "op", Source: LinearDecisionSourceState, Choice: "1"},
+		"comment without an id": {IssueID: "i", UserID: "op", Source: LinearDecisionSourceComment, Choice: "1"},
+		"no issue":              {UserID: "op", Source: LinearDecisionSourceComment, CommentID: "c"},
+		"no user":               {IssueID: "i", Source: LinearDecisionSourceComment, CommentID: "c"},
+		"unknown source":        {IssueID: "i", UserID: "op", Source: "other", CommentID: "c"},
+	} {
+		if _, err := s.AnswerLinearDecision(t.Context(), in); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
 	}
 }
 

@@ -431,7 +431,10 @@ func (w LinearDecisionOpsWorker) Run(ctx context.Context) {
 func (w LinearDecisionOpsWorker) Drain(ctx context.Context) {
 	for ctx.Err() == nil {
 		found, opErr, err := w.Store.ProcessNextLinearDecisionOp(ctx, w.send)
-		if opErr != nil {
+		switch {
+		case errors.Is(opErr, store.ErrLinearDecisionOpGaveUp):
+			log.Printf("linear_decisions.op_gave_up err=%q", opErr.Error())
+		case opErr != nil:
 			log.Printf("linear_decisions.op_failed err=%q", opErr.Error())
 		}
 		if err != nil {
