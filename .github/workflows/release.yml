@@ -131,6 +131,7 @@ jobs:
       - run: npm run build
         working-directory: web/console
       - run: git diff --exit-code -- internal/ui/static/console
+      - run: test -z "$(git status --porcelain --untracked-files=all -- internal/ui/static/console)"
       - name: Vet, test, and exercise release helper
         run: |
           set -euo pipefail
