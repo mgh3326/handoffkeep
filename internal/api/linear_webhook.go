@@ -277,7 +277,10 @@ func (e linearFetchError) Unwrap() error { return e.err }
 
 // LinearAPI reads issues from Linear's GraphQL API.
 type LinearAPI struct {
-	Key  string
+	Key string
+	// App, when set, replaces Key: requests carry a Bearer token minted for the
+	// OAuth application, so hk's writes show as the app, not as a member.
+	App  *LinearAppToken
 	URL  string // empty means Linear's production endpoint
 	HTTP *http.Client
 }
@@ -336,7 +339,15 @@ func (a LinearAPI) graphql(ctx context.Context, timeout time.Duration, query str
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", a.Key)
+	auth := a.Key
+	if a.App != nil {
+		token, err := a.App.Token(ctx)
+		if err != nil {
+			return err
+		}
+		auth = "Bearer " + token
+	}
+	req.Header.Set("Authorization", auth)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := client.Do(req)
 	if err != nil {

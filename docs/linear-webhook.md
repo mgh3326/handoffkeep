@@ -20,6 +20,7 @@ Set both variables on the server, or the route stays unregistered and answers
 |---|---|
 | `HANDOFFKEEP_LINEAR_WEBHOOK_SECRET` | The signing secret Linear shows for the webhook |
 | `HANDOFFKEEP_LINEAR_API_KEY` | A Linear API key that can read the issues |
+| `HANDOFFKEEP_LINEAR_CLIENT_ID`, `HANDOFFKEEP_LINEAR_CLIENT_SECRET` | Optional. A Linear OAuth application with **Client credentials** enabled. When both are set they replace the API key: hk mints an `actor=app` token (30 days) and renews it a day before expiry, so its comments and issues show as the application and can never count as the operator's answer. |
 
 The API key is needed because Linear's `Comment` payload documents no labels or
 issue state, so the handler reads them from Linear's API. It skips that call

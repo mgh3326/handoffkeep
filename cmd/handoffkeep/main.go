@@ -1839,6 +1839,15 @@ type linearServer struct {
 func linearFromEnv(st *store.Store) linearServer {
 	secret := strings.TrimSpace(os.Getenv("HANDOFFKEEP_LINEAR_WEBHOOK_SECRET"))
 	key := strings.TrimSpace(os.Getenv("HANDOFFKEEP_LINEAR_API_KEY"))
+	clientID := strings.TrimSpace(os.Getenv("HANDOFFKEEP_LINEAR_CLIENT_ID"))
+	clientSecret := strings.TrimSpace(os.Getenv("HANDOFFKEEP_LINEAR_CLIENT_SECRET"))
+	var app *api.LinearAppToken
+	if clientID != "" && clientSecret != "" {
+		// An OAuth application wins over a personal key: its writes show as the
+		// app, so nothing hk posts can be read as the operator's answer.
+		app = &api.LinearAppToken{ClientID: clientID, ClientSecret: clientSecret}
+		key = "app"
+	}
 	operator := strings.TrimSpace(os.Getenv("HANDOFFKEEP_LINEAR_OPERATOR_USER_ID"))
 	if secret == "" && key == "" {
 		if operator != "" {
@@ -1850,7 +1859,7 @@ func linearFromEnv(st *store.Store) linearServer {
 		log.Printf("linear_webhook.disabled reason=incomplete_config")
 		return linearServer{}
 	}
-	linearAPI := api.LinearAPI{Key: key}
+	linearAPI := api.LinearAPI{Key: key, App: app}
 	webhook := api.LinearWebhook{Secret: secret, Issues: linearAPI, Store: st}
 	if operator == "" {
 		return linearServer{webhook: webhook}
