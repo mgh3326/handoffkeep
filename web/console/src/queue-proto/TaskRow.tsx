@@ -1,7 +1,7 @@
 import { ageDays, decisionMark, isStale } from "./adapter";
 import { LIVE_TASK_STATES, liveAgeLabel, liveSectionLabel, taskLiveJobs, type LiveJob, type LiveResponse } from "../live";
-import { StateIcon } from "./StateIcon";
-import { stateLabel } from "./states";
+import { StateIcon } from "../shared/StateIcon";
+import { stateLabel } from "../shared/states";
 import type { ProtoTask } from "./types";
 
 /** Whole days since a timestamp, as the board card shows it. */

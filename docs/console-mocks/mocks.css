@@ -1,4 +1,4 @@
-@import url("../../internal/ui/assets/tokens.css");
+@import url("../../web/console/src/design/tokens.css");
 
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--hk-surface-0); color: var(--hk-text-primary); font: var(--hk-weight-normal) var(--hk-type-row)/1.5 var(--hk-font-ui); letter-spacing: var(--hk-tracking); font-feature-settings: "cv01", "ss03", "zero"; }

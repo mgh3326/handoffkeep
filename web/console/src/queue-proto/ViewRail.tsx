@@ -1,5 +1,6 @@
+import { DensityChoice } from "./DensityChoice";
 import { statusLine } from "./adapter";
-import { DensityChoice, GlobalNav, ThemeChoice } from "./AppShell";
+import { GlobalNav, ThemeChoice } from "../shared/AppShell";
 import type { SavedView } from "./storage";
 import type { Dataset, Density, ProtoView } from "./types";
 

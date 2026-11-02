@@ -64,7 +64,25 @@ export type LegacyDecisionView = {
   allow_free: boolean;
 };
 
+export type BoardWorkSession = {
+  job_id: string;
+  host: string;
+  family: string;
+  model: string;
+  role: string;
+  active: boolean;
+  at: string;
+};
+export type BoardWorkBoard = {
+  primary_job_id: string;
+  pr: string;
+  head_sha: string;
+  sessions: BoardWorkSession[];
+};
 export type BoardTask = {
+  /** Console-safe projection of the durable board and recorded placements.
+   * Absent on old servers and when no execution/PR data is recorded. */
+  work_board?: BoardWorkBoard;
   id: number;
   lane: string;
   parent_lane?: string;

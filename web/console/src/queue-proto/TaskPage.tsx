@@ -82,7 +82,7 @@ export function TaskPage({
       ) : null}
       {state === "error" ? <p className="qp-unknown">unavailable — detail fetch failed</p> : null}
       {state === "loaded" && detail !== null && dataset !== null ? (
-        <DetailBody dataset={dataset} task={boardTaskToProto(detail.task)} detail={{ status: "loaded", data: detail }} fetchDoc={fetchDoc} comments={comments} />
+        <div className="hk-detail-layout"><div><DetailBody dataset={dataset} task={boardTaskToProto(detail.task)} detail={{ status: "loaded", data: detail }} fetchDoc={fetchDoc} comments={comments} /></div><aside className="hk-properties"><h2>Properties</h2><dl><dt>State</dt><dd>{detail.task.state}</dd><dt>Priority</dt><dd>p{detail.task.priority}</dd><dt>Lane</dt><dd>{detail.task.lane}</dd><dt>Claimant</dt><dd>{detail.task.claimed_by || "Unclaimed"}</dd><dt>Project</dt><dd>{detail.task.project || "Not collected"}</dd><dt>Area</dt><dd>{detail.task.area || "Not collected"}</dd></dl><a href={`/ui/timeline?lane=${encodeURIComponent(detail.task.lane)}`}>Timeline / events</a></aside></div>
       ) : null}
     </div>
   );

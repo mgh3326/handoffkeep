@@ -180,10 +180,10 @@ describe("fetchLiveDataset", () => {
     // server sends an empty list → fallback, not an empty filter enumeration
     vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(jsonResponse(page([mkBoardTask({ id: 1 })], false, undefined, [])))));
     expect((await fetchLiveDataset()).states).toEqual([...KNOWN_STATES]);
-    // server omits the field entirely → same fallback
+    // A missing required field is malformed and must not render as empty.
     const noStates = { generated_at: "2026-09-21T09:00:00+09:00", tasks: [mkBoardTask({ id: 1 })], truncated: false };
     vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(jsonResponse(noStates))));
-    expect((await fetchLiveDataset()).states).toEqual([...KNOWN_STATES]);
+    await expect(fetchLiveDataset()).rejects.toThrow("malformed board response");
   });
 });
 

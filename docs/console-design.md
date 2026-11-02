@@ -1,12 +1,14 @@
 # Console design proposal
 
+Implementation status: the console now uses the canonical [tokens](../web/console/src/design/tokens.css) and shared shell. Production-bundle captures with fictional data are in [console-shots](console-shots/capture.json). The proposal below records the approved design and its original review limits.
+
 This proposal makes `/ui` a compact workspace for following tasks, answering
 decisions, and checking fleet capacity. The default is a state-grouped task list.
 The operator can scan task, host, role, model, and PR without opening each task.
 
 The deliverables are static review artifacts. Existing Go handlers, templates,
 React sources, and the committed console bundle are unchanged. The new
-[token layer](../internal/ui/assets/tokens.css) is not loaded in production.
+[token layer](../web/console/src/design/tokens.css) is not loaded in production.
 View implementation follows operator review in a later PR. Nothing is deployed.
 
 ## Review screens
@@ -245,19 +247,19 @@ enough visual evidence to claim a pixel-exact Linear app clone.
 ## Capture and validation
 
 Each mock has dark and light screenshots at 1280px and 390px under
-[`console-mocks/shots/`](console-mocks/shots/). PNGs use one device pixel per CSS
+[`console-shots/`](console-shots/). PNGs use one device pixel per CSS
 pixel and capture the whole page, except the palette overlay, which captures
 the viewport. The filenames encode page, theme, and width.
-The [capture manifest](console-mocks/shots/capture.json) records Chrome version,
+The [capture manifest](console-shots/capture.json) records Chrome version,
 viewport checks, and the preview interactions exercised.
 
 | Screen | Dark, 1280 | Light, 1280 | Dark, 390 | Light, 390 |
 | --- | --- | --- | --- | --- |
-| Board | [PNG](console-mocks/shots/board-dark-1280.png) | [PNG](console-mocks/shots/board-light-1280.png) | [PNG](console-mocks/shots/board-dark-390.png) | [PNG](console-mocks/shots/board-light-390.png) |
-| Task detail | [PNG](console-mocks/shots/task-detail-dark-1280.png) | [PNG](console-mocks/shots/task-detail-light-1280.png) | [PNG](console-mocks/shots/task-detail-dark-390.png) | [PNG](console-mocks/shots/task-detail-light-390.png) |
-| Decisions | [PNG](console-mocks/shots/decisions-dark-1280.png) | [PNG](console-mocks/shots/decisions-light-1280.png) | [PNG](console-mocks/shots/decisions-dark-390.png) | [PNG](console-mocks/shots/decisions-light-390.png) |
-| Fleet hosts | [PNG](console-mocks/shots/fleet-hosts-dark-1280.png) | [PNG](console-mocks/shots/fleet-hosts-light-1280.png) | [PNG](console-mocks/shots/fleet-hosts-dark-390.png) | [PNG](console-mocks/shots/fleet-hosts-light-390.png) |
-| Palette | [PNG](console-mocks/shots/command-palette-dark-1280.png) | [PNG](console-mocks/shots/command-palette-light-1280.png) | [PNG](console-mocks/shots/command-palette-dark-390.png) | [PNG](console-mocks/shots/command-palette-light-390.png) |
+| Board | [PNG](console-shots/board-dark-1280.png) | [PNG](console-shots/board-light-1280.png) | [PNG](console-shots/board-dark-390.png) | [PNG](console-shots/board-light-390.png) |
+| Task detail | [PNG](console-shots/task-dark-1280.png) | [PNG](console-shots/task-light-1280.png) | [PNG](console-shots/task-dark-390.png) | [PNG](console-shots/task-light-390.png) |
+| Decisions | [PNG](console-shots/decisions-dark-1280.png) | [PNG](console-shots/decisions-light-1280.png) | [PNG](console-shots/decisions-dark-390.png) | [PNG](console-shots/decisions-light-390.png) |
+| Fleet hosts | [PNG](console-shots/fleet-dark-1280.png) | [PNG](console-shots/fleet-light-1280.png) | [PNG](console-shots/fleet-dark-390.png) | [PNG](console-shots/fleet-light-390.png) |
+| Palette | [PNG](console-shots/palette-dark-1280.png) | [PNG](console-shots/palette-light-1280.png) | [PNG](console-shots/palette-dark-390.png) | [PNG](console-shots/palette-light-390.png) |
 
 Capture with a local Chrome installation and an isolated Playwright dependency:
 

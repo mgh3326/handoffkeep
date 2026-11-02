@@ -152,7 +152,7 @@ summary {
 }
 
 /* left sidebar — global destinations, views, saved views */
-.hk-side {
+.qp-root .hk-side {
   flex: 0 0 var(--hk-sidebar-width);
   width: var(--hk-sidebar-width);
   display: flex;
@@ -167,13 +167,13 @@ summary {
 .rail-collapsed .qp-rail {
   display: none;
 }
-.hk-brand {
+.qp-root .hk-brand {
   padding: var(--hk-space-1) var(--hk-space-2);
   font-size: var(--hk-font-section);
   line-height: var(--hk-leading-section);
   font-weight: var(--hk-weight-strong);
 }
-.hk-side-nav,
+.qp-root .hk-side-nav,
 .qp-rail-nav {
   display: flex;
   flex-direction: column;
@@ -186,7 +186,7 @@ summary {
   font-weight: var(--hk-weight-medium);
   color: var(--hk-text-muted);
 }
-.hk-side-item {
+.qp-root .hk-side-item {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -202,29 +202,29 @@ summary {
   text-decoration: none;
   cursor: pointer;
 }
-.hk-side-item:hover {
+.qp-root .hk-side-item:hover {
   background: var(--hk-surface-2);
 }
-.hk-side-item[aria-current="page"] {
+.qp-root .hk-side-item[aria-current="page"] {
   background: var(--hk-surface-selected);
   box-shadow: inset 3px 0 0 var(--hk-accent);
   color: var(--hk-text-primary);
   font-weight: var(--hk-weight-medium);
 }
-.hk-side-soon,
-.hk-side-soon:hover {
+.qp-root .hk-side-soon,
+.qp-root .hk-side-soon:hover {
   cursor: default;
   background: transparent;
   color: var(--hk-text-muted);
 }
-.hk-side-n {
+.qp-root .hk-side-n {
   font-size: var(--hk-font-meta);
   line-height: 1;
   font-weight: var(--hk-weight-normal);
   color: var(--hk-text-muted);
   font-variant-numeric: tabular-nums;
 }
-.hk-side-foot {
+.qp-root .hk-side-foot {
   display: flex;
   flex-direction: column;
   gap: var(--hk-space-2);
@@ -235,7 +235,7 @@ summary {
   color: var(--hk-text-muted);
   overflow-wrap: anywhere;
 }
-.hk-side-foot p {
+.qp-root .hk-side-foot p {
   margin: 0;
 }
 .hk-prefs {
@@ -856,16 +856,16 @@ summary {
   font-family: var(--hk-font-ui);
 }
 /* full-page deep link /ui/tasks/<id> — same detail sections, page width */
-.hk-page {
+.qp-root .hk-page {
   display: flex;
   min-height: 100vh;
 }
-.hk-page > .hk-side {
+.qp-root .hk-page > .hk-side {
   position: sticky;
   top: 0;
   height: 100vh;
 }
-.hk-page-main {
+.qp-root .hk-page-main {
   flex: 1;
   min-width: 0;
 }
