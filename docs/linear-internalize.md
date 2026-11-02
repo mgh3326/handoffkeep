@@ -1,7 +1,7 @@
 # hk as the tracker; Linear as a bounded projection
 
 Status: proposed design, 2026-11-03. This note changes no runtime behavior.
-Implementation follows seven separately reviewed units. Unit 3 starts only after
+Implementation follows seven separately reviewed units plus urgent unit 1b. Unit 3 starts only after
 this note is merged and the coordinating desk gives the go-ahead.
 
 ## Evidence and current boundaries
@@ -30,14 +30,14 @@ Required reference reading, pinned to `linear-ref-analysis` commit
 At hk base `7f92db1`, [#114](https://github.com/mgh3326/handoffkeep/pull/114)
 provides the transactional work-board outbox and reconciler, and
 [#117](https://github.com/mgh3326/handoffkeep/pull/117) provides the console shell
-and task views. [#115](https://github.com/mgh3326/handoffkeep/pull/115) is still
-open: reuse its change feed when merged; do not create a second feed.
+and task views. [#115](https://github.com/mgh3326/handoffkeep/pull/115) has since merged:
+reuse its change feed; do not create a second feed.
 Task creation with `--linear` and `dots request` is separately in progress.
 The existing decision webhook, operator checks and decision request identity
 must be reused.
 
 There are two current policy gaps: the board can create an issue for every
-claimed/placed task, and the legacy terminal outbox enqueues immediate
+claimed/placed task, and the retired legacy terminal outbox can enqueue immediate
 archival. Neither behavior establishes the target projection or retention
 policy below. This note does not claim those gaps are already fixed.
 
@@ -107,31 +107,60 @@ not bypass a later exclusion. A duplicate delivery uses the existing task/issue
 link and stable id; it does not consume another issue slot. A relations writer
 never creates endpoint issues.
 
+### hk-owned limit management (implementation awaits confirmation)
+
+hk is to be the sole Linear writer and own limit management. Before each issue
+create, and after board or state changes, hk compares the non-archived issue
+count with the configured watermark. The existing daily Dagu archival job stays
+as a backstop. Unit 1b implements mirror admission now; it does not implement
+archive selection or invoke archival.
+
 The operator's budget is approximately 275 issues on the current plan; that
 number is context, not a verified vendor guarantee. The operational watermarks
 are 230 and 200. Count the non-archived issues in the plan's applicable scope,
 including closed issues and issues created outside hk. Do not interpret
 “active” as only unfinished workflow states. If scope/count cannot be established,
-leave new creates pending and report the uncertainty rather than assume space.
-Serialize admission across writers and recover ambiguous creates by stable id
-before releasing their reservation.
+leave new creates pending and report uncertainty. Serialize capacity admission
+across writers and recover ambiguous creates by stable id before releasing a
+reservation when this later limit-management unit is implemented.
 
-Keep closed issues until the count reaches 230. At that watermark, copy the
-oldest closed issues into hk and archive them until the count is at most 200,
-then resume admitted creates. Order by closure time, then issue id; paginate the
-whole candidate scope. Copy issue content, comments/relations needed for history,
-original identifiers and timestamps, and verify durable receipt before archiving.
-A failed copy cannot archive its issue. Never archive open decisions or ongoing
-assistant requests to meet the budget. If insufficient closed issues exist,
-keep creates pending and notify the operator. Re-running archival must converge
-without duplicate copies. Retain task/issue links after archival.
+An early archive candidate must satisfy **all** of these: it is closed, has no
+link from open hk tasks, decisions or assistant threads, has no recent activity,
+and has a verified durable copy in hk. Keep issues linked to open work, recently
+referenced issues, and issues with a `keep` label. Retain original identifiers,
+content and timestamps in the copy; copy failure cannot authorize archival.
 
-Unit 2 must apply eligibility to any board creation path it changes, with tests
-that a relation cannot create an unqualified endpoint issue. Unit 7 moves the
+At 230, archive eligible closed issues oldest first until at most 200 remain,
+using closure time then issue id as deterministic ordering and paging the whole
+scope. If protected/recent issues prevent reaching 200, keep creates pending and
+notify the operator. Re-running must converge without duplicate copies. Retain
+hk links after archival. Recent-activity/reference windows and full plan scope
+remain configuration decisions to confirm before implementation.
+
+**Open question: are archived Linear issues still searchable/openable by the
+operator and dots?** The separate plan/archival investigation is checking this.
+Archive implementation waits for the coordinating desk's confirmation after
+that answer. Existing watermark automation is already live and copies to hk
+first; this effort must not rebuild it while the question is pending.
+
+The retired immediate-archive path is
+`internal/store/linear.go:enqueueLinearTaskTransition`: terminal transitions
+append `LinearOpTerminalArchive` after state/comment operations.
+`Store.CreateTask`, `Store.claimTaskTx` and `Store.transitionTask` use that
+legacy queue only with `LinearSyncEnabled()` and `refs.linear.sync`.
+`EnableLinearSync` and `ProcessNextLinearOutbox` have no production caller in
+the inspected tree; the live work-board worker drains only `work_board`.
+**Proposal:** remove the retired terminal-archive enqueue/operation path in a
+separate approved change, leaving archival exclusively to hk's eventual
+watermark owner and the daily backstop. Do not align a per-task terminal hook by
+archiving immediately: terminal status alone is insufficient under the new
+eligibility rule. No legacy archive code changes until the desk answers.
+
+Urgent unit 1b applies admission to the live board before unit 2, with tests
+that ineligible tasks create no issue. Unit 2 is relation-only between existing
+mirrored endpoints and never creates endpoint issues. Unit 7 moves the
 shared policy's configurable selections into labels; it must not delay the
-bounded-create guard until the end of the rollout. The global archive/capacity
-changes need an explicit implementation disposition from the desk because the
-seven units do not otherwise assign them a dedicated PR.
+bounded-create guard until the end of the rollout. Archive implementation is gated on the confirmation described below.
 
 ## Data and ownership contracts
 
@@ -211,8 +240,8 @@ fails closed for new creates; labels never bypass human approval or job guards.
 
 ## Delivery and verification
 
-One PR per numbered unit, in order. Unit 1 is this document alone. Relations may
-proceed next; unit 3 waits for merged unit 1 and an explicit coordinating go.
+One PR per numbered unit, in order. Unit 1 is this document alone. Unit 1b
+implements mirror admission next, followed by relations; unit 3 waits for merged unit 1 and an explicit coordinating go.
 No merge, deployment or production migration is part of these PRs.
 
 For units 2–7, exercise store/API/remote/CLI behavior with the test DB and fake
