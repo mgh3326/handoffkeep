@@ -303,3 +303,108 @@ func TestWorkBoardMigrationAfterExistingVersion28(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestWorkBoardMergewakeEventsDoNotCreateSessions(t *testing.T) {
+	for _, kind := range []string{"FINDINGS", "READY", "BLOCKED", "MERGED"} {
+		t.Run(kind, func(t *testing.T) {
+			at := time.Now().UTC()
+			var board LinearBoard
+			board.ApplyTask(Task{ID: 1, State: "claimed"})
+			placement := validPlacementFixture()
+			placement.JobID = "review-job"
+			placement.Role = "review"
+			placement.DecidedAt = at
+			board.ApplyPlacement(placement)
+			event, job, ok := BoardRelayEvent(RelayEvent{Kind: "lane.event", Text: "[mergewake] " + kind + " handoffkeep#12 head=abc1234 | 2 findings", ReceivedAt: at.Add(time.Second)})
+			if !ok {
+				t.Fatal("mergewake line not recognized")
+			}
+			board.ApplyEvent(event, job, event.PR, event.Head)
+			if len(board.Sessions) != 1 || board.Sessions[0].JobID != "review-job" {
+				t.Fatalf("non-job sender created a session: %+v", board.Sessions)
+			}
+			if kind == "FINDINGS" && (board.Sessions[0].Active || board.Sessions[0].Verdict != event.Text) {
+				t.Fatalf("review verdict lost: %+v", board.Sessions[0])
+			}
+			if board.Last.Kind != kind {
+				t.Fatalf("last event=%q want=%q", board.Last.Kind, kind)
+			}
+		})
+	}
+}
+
+func TestWorkBoardReconcileSkipsUnchangedTerminalTasks(t *testing.T) {
+	_, url := testdb.Schema(t, "board_terminal_reconcile")
+	st, err := Open(t.Context(), url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(st.Close)
+	st.EnableLinearBoard()
+	active := linearTask(t, st, TaskRefs{})
+	if _, err = st.ClaimTask(t.Context(), active.ID, "lead", "active-job", ""); err != nil {
+		t.Fatal(err)
+	}
+	terminal := []Task{}
+	for _, state := range []string{"merged", "dropped"} {
+		task := linearTask(t, st, TaskRefs{})
+		if _, err = st.ClaimTask(t.Context(), task.ID, "lead", state+"-job", ""); err != nil {
+			t.Fatal(err)
+		}
+		if state == "merged" {
+			if _, err = st.TransitionTask(t.Context(), task.ID, "in_progress", "lead", "started", nil, ""); err != nil {
+				t.Fatal(err)
+			}
+			if _, err = st.TransitionTask(t.Context(), task.ID, "verifying", "lead", "ready", nil, ""); err != nil {
+				t.Fatal(err)
+			}
+		}
+		task, err = st.TransitionTask(t.Context(), task.ID, state, "lead", "finished", nil, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		terminal = append(terminal, task)
+	}
+	count := func(taskID int64) int {
+		t.Helper()
+		rows, err := st.ListLinearOutbox(t.Context(), taskID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(rows)
+	}
+	before := map[int64]int{active.ID: count(active.ID)}
+	for _, task := range terminal {
+		before[task.ID] = count(task.ID)
+	}
+	for range 2 {
+		if err = st.ReconcileLinearBoard(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := count(active.ID); got != before[active.ID]+2 {
+		t.Fatalf("active task syncs=%d want=%d", got, before[active.ID]+2)
+	}
+	for _, task := range terminal {
+		if got := count(task.ID); got != before[task.ID] {
+			t.Errorf("unchanged %s task queued %d extra syncs", task.State, got-before[task.ID])
+		}
+	}
+	// A terminal task changed while the board was off still repairs once.
+	changed := terminal[0]
+	if _, err = st.pool.Exec(t.Context(), `UPDATE tasks SET title='Updated terminal task',updated_at=updated_at+interval '1 second' WHERE id=$1`, changed.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err = st.ReconcileLinearBoard(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if got := count(changed.ID); got != before[changed.ID]+1 {
+		t.Fatalf("changed terminal task syncs=%d want=%d", got, before[changed.ID]+1)
+	}
+	if err = st.ReconcileLinearBoard(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if got := count(changed.ID); got != before[changed.ID]+1 {
+		t.Fatalf("settled terminal task requeued: %d", got)
+	}
+}

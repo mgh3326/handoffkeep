@@ -84,7 +84,9 @@ The outbox worker checks due writes every five seconds. It does not scan tasks
 or placement sources to discover changes. An hourly reconciler resends the
 projection, current task fields, placement records, and job completion details.
 It also recovers placements recorded while the board was disabled. It adds no
-comments. Unrelated issue text and labels remain in place.
+comments. Merged and dropped tasks need another repair only when their projected
+state or update time differs from the task. Unrelated issue text and labels
+remain in place.
 
 The managed description boundaries are `<!-- hk-work-board:start -->` and
 `<!-- hk-work-board:end -->`. Keep both boundaries when editing the issue.

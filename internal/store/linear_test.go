@@ -276,3 +276,66 @@ func TestListTasksPageUsesStableIDCursor(t *testing.T) {
 		t.Fatalf("second page=%+v", second)
 	}
 }
+
+func TestLinearOutboxWorkersOnlyDrainOwnedOps(t *testing.T) {
+	_, url := testdb.Schema(t, "linear_worker_ops")
+	st, err := Open(t.Context(), url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(st.Close)
+	type processor func(context.Context, func(context.Context, LinearOutbox) (LinearOutboxResult, error)) (bool, error)
+	for _, boardFirst := range []bool{false, true} {
+		t.Run(fmt.Sprintf("board_first=%t", boardFirst), func(t *testing.T) {
+			task := linearTask(t, st, TaskRefs{})
+			legacy := []string{LinearOpIssueCreate, LinearOpIssueState, LinearOpTerminalComment, LinearOpTerminalArchive}
+			ops := append(append([]string{}, legacy...), LinearOpWorkBoard)
+			if boardFirst {
+				ops = append([]string{LinearOpWorkBoard}, legacy...)
+			}
+			tx, err := st.pool.Begin(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer tx.Rollback(t.Context())
+			for _, op := range ops {
+				if err = enqueueLinearOutboxTx(t.Context(), tx, task.ID, op, LinearOutboxPayload{}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err = tx.Commit(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			drain := func(next processor, want []string) {
+				t.Helper()
+				for _, wantOp := range want {
+					called := false
+					found, err := next(t.Context(), func(_ context.Context, item LinearOutbox) (LinearOutboxResult, error) {
+						called = true
+						if item.TaskID != task.ID || item.Op != wantOp {
+							t.Errorf("worker dequeued task=%d op=%q; want task=%d op=%q", item.TaskID, item.Op, task.ID, wantOp)
+						}
+						return LinearOutboxResult{State: "sent"}, nil
+					})
+					if err != nil || !found || !called {
+						t.Fatalf("owned op %q blocked by other worker: found=%t called=%t err=%v", wantOp, found, called, err)
+					}
+				}
+				found, err := next(t.Context(), func(_ context.Context, item LinearOutbox) (LinearOutboxResult, error) {
+					t.Errorf("worker took foreign op %q", item.Op)
+					return LinearOutboxResult{State: "sent"}, nil
+				})
+				if err != nil || found {
+					t.Fatalf("worker selected a foreign row: found=%t err=%v", found, err)
+				}
+			}
+			if boardFirst {
+				drain(st.ProcessNextLinearOutbox, legacy)
+				drain(st.ProcessNextLinearBoardOutbox, []string{LinearOpWorkBoard})
+			} else {
+				drain(st.ProcessNextLinearBoardOutbox, []string{LinearOpWorkBoard})
+				drain(st.ProcessNextLinearOutbox, legacy)
+			}
+		})
+	}
+}

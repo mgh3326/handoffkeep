@@ -225,14 +225,14 @@ const linearOutboxColumns = `id,task_id,seq,op,payload,state,attempts,next_attem
 // single advisory-lock owner normally calls it, while SKIP LOCKED keeps the
 // database boundary safe if a second caller is accidentally introduced.
 func (s *Store) ProcessNextLinearOutbox(ctx context.Context, process func(context.Context, LinearOutbox) (LinearOutboxResult, error)) (bool, error) {
-	return s.processNextLinearOutbox(ctx, "", process)
+	return s.processNextLinearOutbox(ctx, []string{LinearOpIssueCreate, LinearOpIssueState, LinearOpTerminalComment, LinearOpTerminalArchive}, process)
 }
 
 func (s *Store) ProcessNextLinearBoardOutbox(ctx context.Context, process func(context.Context, LinearOutbox) (LinearOutboxResult, error)) (bool, error) {
-	return s.processNextLinearOutbox(ctx, LinearOpWorkBoard, process)
+	return s.processNextLinearOutbox(ctx, []string{LinearOpWorkBoard}, process)
 }
 
-func (s *Store) processNextLinearOutbox(ctx context.Context, op string, process func(context.Context, LinearOutbox) (LinearOutboxResult, error)) (bool, error) {
+func (s *Store) processNextLinearOutbox(ctx context.Context, ops []string, process func(context.Context, LinearOutbox) (LinearOutboxResult, error)) (bool, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return false, err
@@ -240,14 +240,14 @@ func (s *Store) processNextLinearOutbox(ctx context.Context, op string, process 
 	defer tx.Rollback(ctx)
 	var item LinearOutbox
 	err = scanLinearOutbox(tx.QueryRow(ctx, `SELECT `+linearOutboxColumns+` FROM linear_outbox current
-		WHERE state='pending' AND next_attempt_at<=now() AND ($1='' OR op=$1)
+		WHERE state='pending' AND next_attempt_at<=now() AND op=ANY($1::text[])
 		AND NOT EXISTS (
 			SELECT 1 FROM linear_outbox earlier
 			WHERE earlier.task_id=current.task_id AND earlier.seq<current.seq
-			AND ($1='' OR earlier.op=$1)
+			AND earlier.op=ANY($1::text[])
 			AND earlier.state NOT IN ('sent','skipped')
 		)
-		ORDER BY task_id ASC,seq ASC,id ASC FOR UPDATE SKIP LOCKED LIMIT 1`, op), &item)
+		ORDER BY task_id ASC,seq ASC,id ASC FOR UPDATE SKIP LOCKED LIMIT 1`, ops), &item)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}

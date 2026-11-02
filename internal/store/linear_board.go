@@ -127,7 +127,8 @@ func (b *LinearBoard) ApplyEvent(event LinearBoardEvent, jobID, pr, head string)
 			}
 		}
 	}
-	if terminal && jobID != "" {
+	// mergewake is a lane sender; only real job ids own sessions.
+	if terminal && jobID != "" && jobID != "mergewake" {
 		i := b.sessionIndex(jobID)
 		session := &b.Sessions[i]
 		if !event.At.Before(session.At) && !event.At.Before(session.EndedAt) {
@@ -407,9 +408,18 @@ func (s *Store) recordLinearBoardJobTx(ctx context.Context, tx pgx.Tx, job Job) 
 	return saveLinearBoardTx(ctx, tx, b, LinearBoardEvent{})
 }
 
+// Terminal tasks need one repair when their stored projection is stale, then
+// stop generating hourly outbox rows. Recheck under the task lock as well.
+const linearBoardReconcileFilter = `(id IN (SELECT task_id FROM linear_board_tasks)
+ OR COALESCE(refs->>'job_id','')<>''
+ OR id IN (SELECT task_id FROM placement_decisions WHERE outcome='placed' AND task_id IS NOT NULL))
+ AND (state NOT IN ('merged','dropped') OR EXISTS (
+ SELECT 1 FROM linear_board_tasks b WHERE b.task_id=tasks.id
+ AND (b.status->'task'->>'state' IS DISTINCT FROM tasks.state
+ OR (b.status->'task'->>'updated_at')::timestamptz IS DISTINCT FROM tasks.updated_at)))`
+
 func (s *Store) ReconcileLinearBoard(ctx context.Context) error {
-	rows, err := s.pool.Query(ctx, `SELECT id FROM tasks WHERE id IN (SELECT task_id FROM linear_board_tasks)
- OR (state NOT IN ('merged','dropped') AND (COALESCE(refs->>'job_id','')<>'' OR id IN (SELECT task_id FROM placement_decisions WHERE outcome='placed' AND task_id IS NOT NULL))) ORDER BY id`)
+	rows, err := s.pool.Query(ctx, `SELECT id FROM tasks WHERE `+linearBoardReconcileFilter+` ORDER BY id`)
 	if err != nil {
 		return err
 	}
@@ -442,7 +452,10 @@ func (s *Store) reconcileLinearBoardTask(ctx context.Context, id int64) error {
 	}
 	defer tx.Rollback(ctx)
 	var task Task
-	if err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, id), &task); err != nil {
+	if err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 AND (`+linearBoardReconcileFilter+`) FOR UPDATE`, id), &task); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
 		return err
 	}
 	b, err := loadLinearBoardTx(ctx, tx, task)
