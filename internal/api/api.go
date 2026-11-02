@@ -639,9 +639,12 @@ func (s Server) Handler() http.Handler {
 	}
 	legacy := s.legacyWrkFence(m)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The legacy fence may return before ServeMux dispatches the request.
+		_, r.Pattern = m.Handler(r)
 		// ServeMux cleans dot/slash paths with redirects before dispatch. O3
 		// must authenticate and reject those paths without ever sending Location.
 		if wrkRegistered && (r.URL.Path == "/v1/wrk" || strings.HasPrefix(r.URL.Path, "/v1/wrk/")) {
+			r.Pattern = "/v1/wrk/{path...}"
 			s.wrk(w, r)
 			return
 		}

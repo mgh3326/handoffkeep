@@ -152,6 +152,7 @@ func (h *Handler) assetURL(p string) string {
 // existing bearer-token API. Only the explicit UI write routes can reach a
 // mutating operation.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	r.Pattern = routePattern(r.URL.Path)
 	if r.URL.Path == "/ui/fleet" || r.URL.Path == "/ui/queue" || r.URL.Path == "/ui/grades" || r.URL.Path == "/ui/deploys" || r.URL.Path == "/ui/docs" || r.URL.Path == "/ui/home" || strings.HasPrefix(r.URL.Path, "/ui/tasks/") || strings.HasPrefix(r.URL.Path, "/ui/api/") {
 		setConsoleCSP(w)
 	}
