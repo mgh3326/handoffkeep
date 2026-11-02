@@ -367,6 +367,12 @@ func (s *Store) RecordLinearDecisionIssue(ctx context.Context, link LinearDecisi
 		return LinearDecisionLink{}, false, err
 	}
 	defer tx.Rollback(ctx)
+	// The insert's foreign key check locks the task row and the supersede below
+	// locks the old link, the reverse of AnswerLinearDecision. This lock, taken
+	// first by every decision writer, keeps the two from deadlocking.
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
+		return LinearDecisionLink{}, false, err
+	}
 	tag, err := tx.Exec(ctx, `INSERT INTO linear_decision_issues(request_id,task_id,ver,issue_id,identifier,url,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$7) ON CONFLICT(request_id) DO NOTHING`, link.RequestID, link.TaskID, link.Ver, link.IssueID, link.Identifier, link.URL, now)
 	if err != nil {
 		return LinearDecisionLink{}, false, err
