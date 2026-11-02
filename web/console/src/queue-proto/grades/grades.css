@@ -210,3 +210,13 @@
 .gr-bv {
   color: var(--hk-text-secondary);
 }
+@media(max-width:700px) {
+ .gr-table,.gr-table tbody,.gr-table tr,.gr-table td { display:block; width:100%; min-width:0; }
+ .gr-table thead { display:none; }
+ .gr-table td { white-space:normal; overflow-wrap:anywhere; }
+ .gr-table tr { padding:12px; border-bottom:1px solid var(--hk-border-subtle); }
+ .gr-table td::before { color:var(--hk-text-muted); margin-right:12px; }
+ .gr-profile::before { content:"Profile"; } .gr-effort::before { content:"Effort"; }
+ .gr-model::before { content:"Model"; } .gr-pool::before { content:"Pool"; }
+ .gr-score::before { content:"Score"; } .gr-bench::before { content:"Benchmark"; } .gr-decided::before { content:"Decision"; }
+}

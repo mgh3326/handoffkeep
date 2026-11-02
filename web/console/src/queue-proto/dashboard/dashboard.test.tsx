@@ -87,7 +87,7 @@ const failed = () => Promise.reject(new Error("boom"));
 describe("DashboardApp (hk 2280)", () => {
   it("renders quota, hosts, jobs, PRs and the missing sources", async () => {
     render(<DashboardApp loadDashboard={okDashboard} loadLive={okLive} />);
-    expect(screen.getByRole("heading", { level: 1 }).textContent).toContain("홈");
+    expect(screen.getByRole("heading", { level: 1 }).textContent).toContain("Inbox");
 
     const quota = await screen.findByRole("region", { name: "쿼터" });
     expect(within(quota).getByText("claude")).toBeTruthy();

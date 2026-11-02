@@ -1,0 +1,164 @@
+{{define "page"}}
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{{.Title}} · handoffkeep</title>
+<link rel="stylesheet" href="{{assetURL "/ui/static/console/tokens.css"}}"><link rel="stylesheet" href="{{assetURL "/ui/static/console/AppShell.css"}}">
+<script src="{{assetURL "/ui/static/htmx.min.js"}}"></script></head><body>
+<div id="server-root" data-page="{{.Page}}"></div><div id="server-content" class="hk-server-content">
+{{if eq .Page "timeline"}}{{template "timeline_content" .Body}}{{end}}
+{{if eq .Page "decisions"}}{{template "decisions_content" .Body}}{{end}}
+{{if eq .Page "compose"}}{{template "compose_content" .Body}}{{end}}
+{{if eq .Page "document"}}{{template "document_content" .Body}}{{end}}
+</div><script type="module" src="{{assetURL "/ui/static/console/server.js"}}"></script></body></html>{{end}}
+{{define "timeline_content"}}
+<section id="ui-content" data-ui-fragment="timeline">
+  <h2>Timeline</h2>
+  <form method="get" action="/ui/timeline">
+    <label>Lane <input name="lane" value="{{.Lane}}"></label>
+    <label>Kind <input name="kind" value="{{.Kind}}"></label>
+    <label>Since <input type="date" name="since" value="{{.Since}}"></label>
+    <label>Until <input type="date" name="until" value="{{.Until}}"></label>
+    <button type="submit">Filter</button>
+  </form>
+  {{range .Events}}
+  <article class="timeline-event">
+    <div class="timeline-meta"><strong>{{.OwnerLane}}</strong><span class="badge">{{.Kind}}</span><span>#{{.ID}}</span><time>{{formatTime .ReceivedAt}}</time>
+      {{if .DeliveredAt}}<span class="delivered" title="{{.DeliveredTo}}">✓ delivered</span>{{else}}<span class="undelivered">미배달</span>{{end}}
+    </div>
+    <pre>{{range message .}}{{if .DocKey}}<a href="/ui/doc/{{.DocKey}}">doc:{{.DocKey}}</a>{{else}}{{.Text}}{{end}}{{end}}</pre>
+    {{with ingressLabel .}}<span class="badge">sender {{.}}</span>{{end}}
+    <div class="refs">
+      {{with githubLink .PR}}{{if .Valid}}<a href="{{.Value}}">PR</a>{{else if .Value}}<span>PR {{.Value}}</span>{{end}}{{end}}
+      {{if .Head}}<span>head {{shortHead .Head}}</span>{{end}}
+    </div>
+  </article>
+  {{else}}<p class="muted">No relay events.</p>{{end}}
+  {{if .MoreURL}}<p><a href="{{.MoreURL}}">더보기</a></p>{{end}}
+  <section>
+    <h2>Latest session checkpoints</h2>
+    {{range .Checkpoints}}<article class="session"><strong>{{.Session}}</strong> · {{.Title}} · <time>{{formatTime .CreatedAt}}</time></article>{{else}}<p class="muted">No checkpoints.</p>{{end}}
+  </section>
+</section>
+{{end}}
+
+{{define "decisions_content"}}
+<section id="ui-content" data-ui-fragment="decisions">
+  <h2>Decision inbox</h2>
+  {{if .Notice}}<p class="badge">{{.Notice}}</p>{{end}}
+  {{if not .CanWrite}}<p class="muted">{{.WriteReason}}</p>{{end}}
+  {{if .RenderNotice}}<p class="badge" data-render-notice>{{.RenderNotice}}</p>{{end}}
+  {{if .Results}}<section><h3>Answer results</h3><ul>{{range .Results}}<li data-item-status="{{.Status}}">{{.Message}}</li>{{end}}</ul></section>{{end}}
+  {{with .Disposition}}{{template "disposition_section" .}}{{end}}
+  {{template "decision_request_section" .Requests}}
+  <form method="post" action="/ui/decisions/answer-batch">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <p><button name="mode" value="selected" {{if not .CanWrite}}disabled{{end}}>선택한 항목 답변</button> <button name="mode" value="recommended" {{if not .CanWrite}}disabled{{end}}>권고안 전부 답변</button></p>
+  {{if .HasApproval}}<section><h3>Awaiting your approval</h3>
+  {{range .ApprovalTasks}}{{template "task_decision" .}}{{else}}<p class="muted">No awaiting approvals.</p>{{end}}
+  </section>{{end}}
+  <section><h3>Tasks needing decisions</h3>
+  {{range .Tasks}}{{template "task_decision" .}}{{else}}<p class="muted">No unresolved task decisions.</p>{{end}}
+  </section>
+  <section><h3>Open job escalations</h3>
+  {{range .Escalations}}{{template "event_decision" .}}{{else}}<p class="muted">No open job escalations.</p>{{end}}
+  </section>
+  <section><h3>Open lane decisions</h3>
+  {{range .LaneEvents}}{{template "event_decision" .}}{{else}}<p class="muted">No open lane decisions.</p>{{end}}
+  </section>
+  <details><summary>signals</summary>{{range .Signals}}<article class="decision"><strong>{{.OwnerLane}}</strong> · job {{.JobID}}<pre>{{range message .}}{{if .DocKey}}<a href="/ui/doc/{{.DocKey}}">doc:{{.DocKey}}</a>{{else}}{{.Text}}{{end}}{{end}}</pre></article>{{else}}<p class="muted">No signals.</p>{{end}}</details>
+  </form>
+</section>
+{{end}}
+
+{{define "decision_request_section"}}
+<section id="decision-requests" data-decision-requests><h3>결정 요청</h3>
+  <p class="badge" data-decision-request-count data-pending="{{.Pending}}" data-uncleaned="{{.Uncleaned}}">내 결정 대기 {{.Pending}}건{{if .Truncated}}+{{end}}{{if .Uncleaned}} · 미정리 요청 {{.Uncleaned}}건{{end}}</p>
+  <p class="muted">Recorded requests are read-only in this console version. A passed deadline does not mean a default was applied. Use the available answer forms below for legacy requests.</p>
+  {{range .Items}}
+  <article class="decision decision-card" data-decision-request="{{.View.ID}}" data-state="{{.View.State}}"><strong>#{{.Task.ID}} {{.Task.Title}}</strong> · {{.Task.Lane}} · {{.Task.State}} <span class="badge">{{.View.StateLabel}}</span>
+    <pre>{{.View.Question}}</pre>
+    <ul>{{range .View.Options}}<li>{{.Key}}. {{.Label}}{{if .Recommended}} <span class="badge">권고</span>{{end}}</li>{{end}}{{if .View.AllowFree}}<li class="muted">직접 답변 허용</li>{{end}}</ul>
+    {{if .View.Reason}}<p>권고 이유: {{.View.Reason}}</p>{{end}}
+    <p>무응답 시: {{.View.DefaultAction}}{{if .View.DefaultOption}} (선택지 {{.View.DefaultOption}}){{end}} · 발동: {{if .View.DefaultTrigger}}{{.View.DefaultTrigger}}{{else}}발동 시점 미기록{{end}} · 기한: {{if .View.DueAt}}<time>{{formatTimePtr .View.DueAt}}</time>{{else}}기한 미지정{{end}}</p>
+    <p class="muted">{{.View.ID}} · r{{.View.Revision}}{{if .View.Supersedes}} (대체: {{.View.Supersedes}}){{end}} · {{.View.RequestedBy}} · <time>{{formatTime .View.RequestedAt}}</time>{{if .View.Doc}} · <a href="/ui/doc/{{.View.Doc}}">요청 문서</a>{{end}} · <a href="/ui/queue?task={{.Task.ID}}">drawer</a></p>
+  </article>
+  {{else}}<p class="muted">열린 결정 요청 없음.</p>{{end}}
+</section>
+{{end}}
+
+{{define "disposition_section"}}
+<section id="dispositions" data-dispositions><h3>처분 대기</h3>
+  <p class="badge" data-disposition-head>{{.Head}}</p>
+  <p class="muted" data-disposition-detail>{{.Detail}}</p>
+  {{if .Items}}
+  <form method="post" action="/ui/dispositions/accept-batch">
+    <input type="hidden" name="csrf" value="{{.CSRF}}"><input type="hidden" name="batch_id" value="{{.BatchID}}"><input type="hidden" name="issued_at" value="{{.IssuedAt}}"><input type="hidden" name="snapshot" value="{{.Snapshot}}"><input type="hidden" name="token" value="{{.Token}}">
+    <p><button type="submit" data-disposition-batch {{if not .CanWrite}}disabled{{end}}>권고 일괄 수락 {{.BatchN}}건 ({{.Counts}})</button>{{if .NextBatch}} <span class="badge" data-next-batch>다음 묶음 {{.NextBatch}}건</span>{{end}}</p>
+  </form>
+  {{range .Items}}
+  <article class="decision decision-card" data-disposition-id="{{.Task.ID}}"><strong>#{{.Task.ID}} {{.Task.Title}}</strong> · {{.Task.Lane}} · {{.AgeDays}}일<pre>{{.Question}}</pre>
+    <form method="post" action="/ui/dispositions/answer"><input type="hidden" name="csrf" value="{{.CSRF}}"><input type="hidden" name="id" value="{{.Task.ID}}"><input type="hidden" name="gen" value="{{.Gen}}">
+      <fieldset {{if not .CanWrite}}disabled{{end}}><legend>처분</legend>
+      {{range .Options}}<label><input type="radio" name="key" value="{{.Key}}" {{if .Recommended}}checked{{end}}> {{.Key}}. {{.Label}} {{if .Recommended}}<span class="badge">권고</span>{{end}}</label>{{end}}
+      <button type="submit">이 항목 처분</button></fieldset>
+    </form>
+  </article>
+  {{end}}
+  {{else}}<p class="muted">미처분 항목 없음.</p>{{end}}
+  {{if .Unnotified}}<h4>통지 대기</h4>
+  {{range .Unnotified}}<form method="post" action="/ui/dispositions/renotify" data-disposition-unnotified="{{.EventID}}"><input type="hidden" name="csrf" value="{{.CSRF}}"><input type="hidden" name="event_id" value="{{.EventID}}"><span>{{.IDs}} · {{.EventID}}</span> <button type="submit">재통지</button></form>{{end}}
+  {{end}}
+</section>
+{{end}}
+
+{{define "task_decision"}}
+<article class="decision decision-card"><strong>#{{.Task.ID}} {{.Task.Title}}</strong> · {{.Task.Lane}}<pre>{{.Question}}</pre>
+  <div class="refs">{{with githubLink .Task.Refs.PR}}{{if .Valid}}<a href="{{.Value}}">PR</a>{{else if .Value}}<span>PR {{.Value}}</span>{{end}}{{end}}{{if .Task.Refs.HeadSHA}}<span>head {{shortHead .Task.Refs.HeadSHA}}</span>{{end}}{{if .Task.Refs.ReportPath}}<span>Report unavailable in console · {{.Task.Refs.ReportPath}}</span>{{end}}{{if .Task.Refs.JobID}}<span>job {{.Task.Refs.JobID}}</span>{{end}}</div>
+  {{template "decision_controls" .}}
+</article>
+{{end}}
+
+{{define "event_decision"}}
+<article class="decision"><strong>{{.Event.OwnerLane}}</strong> · {{if eq .Type "escalation"}}job {{.Event.JobID}}{{else}}#{{.Event.ID}}{{end}}<pre>{{.Question}}</pre>{{with ingressLabel .Event}}<span class="badge">sender {{.}}</span>{{end}}
+  {{template "decision_controls" .}}
+</article>
+{{end}}
+
+{{define "decision_controls"}}
+  <input type="hidden" name="items.{{.Index}}.type" value="{{.Type}}"><input type="hidden" name="items.{{.Index}}.id" value="{{.ID}}">
+  <fieldset {{if not .CanWrite}}disabled{{end}}><legend>Answer</legend>
+    <label><input type="checkbox" name="items.{{.Index}}.select" value="1"> Select</label>
+    {{if .Structured}}
+      {{range .Structured.Options}}<label><input type="radio" name="items.{{$.Index}}.answer" value="{{.Key}}: {{.Label}}" {{if .Recommended}}checked{{end}}> {{.Key}}. {{.Label}} {{if .Recommended}}<span class="badge">권고</span>{{end}}</label>{{end}}
+      {{if .Structured.AllowFree}}<label><input type="radio" name="items.{{.Index}}.answer" value=""> 직접 답변 <input name="items.{{.Index}}.custom"></label>{{end}}
+      <button type="submit" name="only" value="{{.Index}}">이 항목만 답변</button>
+    {{else if .Options}}
+      {{range .Options}}<label><input type="radio" name="items.{{$.Index}}.answer" value="{{.}}"> {{.}}</label>{{end}}
+      <button type="submit" name="only" value="{{.Index}}">이 항목만 답변</button>
+    {{else}}<label>Answer <input name="items.{{.Index}}.custom"></label>
+      <button type="submit" name="only" value="{{.Index}}">이 항목만 답변</button>
+    {{end}}
+    <label>Note <input name="items.{{.Index}}.note"></label>
+  </fieldset>
+{{end}}
+
+{{define "compose_content"}}
+<section id="ui-content" data-ui-fragment="compose">
+  <h2>Compose lane event</h2>{{if .Notice}}<p class="badge">{{.Notice}}</p>{{end}}{{if .WriteReason}}<p class="muted">{{.WriteReason}}</p>{{end}}
+  <form method="post" action="/ui/compose" hx-post="/ui/compose" hx-target="#ui-content" hx-swap="outerHTML" data-compose data-operator-email="{{.Email}}">
+    <input type="hidden" name="csrf" value="{{.CSRF}}"><fieldset {{if not .CanCompose}}disabled{{end}}><label>Destination <select name="lane">{{range .Lanes}}<option value="{{.}}">{{.}}</option>{{end}}</select></label><label>Message <input name="text" required data-compose-text></label><output data-compose-count></output><button type="submit">Send</button></fieldset>
+  </form>
+  <p class="muted">Delivered status is shown by Timeline's ✓ marker.</p>
+</section>
+<script>
+  (function () { const form = document.querySelector('[data-compose]'); if (!form || !window.TextEncoder) return; const input = form.querySelector('[data-compose-text]'); const count = form.querySelector('[data-compose-count]'); const update = function () { const bytes = new TextEncoder().encode('[event] ' + input.value + ' (from operator(web) ' + form.dataset.operatorEmail + ')').length; count.textContent = bytes + '/2048 bytes'; input.setCustomValidity(bytes > 2048 ? 'Message is too long.' : ''); }; input.addEventListener('input', update); update(); }());
+</script>
+{{end}}
+
+{{define "document_content"}}
+<section id="ui-content"><h2>{{.Key}}</h2><pre>{{.Body}}</pre></section>
+{{end}}
+
+{{define "fleet_content"}}
+<section id="ui-content">
+  <div id="fleet-root"></div>
+</section>
+{{end}}

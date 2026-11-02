@@ -456,10 +456,15 @@ describe("FleetApp machine/session view", () => {
   });
 
   it("a refresh failure keeps last-good data but flags it (S-6)", async () => {
-    const fetchSpy = vi
-      .fn()
-      .mockResolvedValueOnce(new Response(JSON.stringify(livePayload()), { status: 200 }))
-      .mockRejectedValueOnce(new Error("down"));
+    let liveReads = 0;
+    const fetchSpy = vi.fn(async (input: string) => {
+      if (input === "/ui/api/live") {
+        if (++liveReads > 1) throw new Error("down");
+        return new Response(JSON.stringify(livePayload()), { status: 200 });
+      }
+      if (input === "/ui/api/dashboard") return new Response(JSON.stringify({ generated_at: "", quota: [], work: [], prs: [], missing: [] }));
+      return new Response(JSON.stringify({ generated_at: "", status: "ok", candidates: [], held: [], nodes: [] }));
+    });
     vi.stubGlobal("fetch", fetchSpy);
     vi.useFakeTimers();
     try {

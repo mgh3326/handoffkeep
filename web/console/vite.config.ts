@@ -18,6 +18,7 @@ export default defineConfig({
     emptyOutDir: true,
     rollupOptions: {
       input: {
+        server: resolve(root, "src/server.tsx"),
         fleet: resolve(root, "src/main.tsx"),
         // /ui/queue loads the queue app built from src/queue-proto: board.js/
         // board.css are what the page actually serves. The entry fetches the

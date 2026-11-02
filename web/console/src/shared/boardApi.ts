@@ -29,6 +29,7 @@ export async function fetchBoardTasks(): Promise<BoardData> {
       params.set("after_id", String(afterID));
     }
     const page = await getJSON<BoardTasksResponse>(`/ui/api/board/tasks?${params.toString()}`);
+    if (!page || !Array.isArray(page.states) || !page.states.every(s => typeof s === "string") || !Array.isArray(page.tasks) || !page.tasks.every(validBoardTask) || typeof page.generated_at !== "string" || typeof page.truncated !== "boolean") throw new Error("malformed board response");
     states = page.states;
     generatedAt = page.generated_at;
     tasks.push(...page.tasks);
@@ -48,14 +49,18 @@ export async function fetchBoardTasks(): Promise<BoardData> {
   }
 }
 
-export function fetchTaskDetail(id: number): Promise<BoardDetail> {
-  return getJSON<BoardDetail>(`/ui/api/board/tasks/${id}`);
+export async function fetchTaskDetail(id: number): Promise<BoardDetail> {
+  const data = await getJSON<BoardDetail>(`/ui/api/board/tasks/${id}`);
+  if (!data || !validBoardTask(data.task) || !Array.isArray(data.events) || !Array.isArray(data.dwell)) throw new Error("malformed task detail");
+  return data;
 }
 
 /** The live jobs/machine aggregation (#598). Read-only; section statuses
  * inside the payload carry hub failures explicitly. */
-export function fetchLive(): Promise<LiveResponse> {
-  return getJSON<LiveResponse>("/ui/api/live");
+export async function fetchLive(): Promise<LiveResponse> {
+  const data = await getJSON<LiveResponse>("/ui/api/live");
+  if (!data || !data.jobs || !data.nodes || !Array.isArray(data.jobs.items) || !Array.isArray(data.nodes.items) || !Array.isArray(data.links) || typeof data.jobs.status !== "string" || typeof data.nodes.status !== "string") throw new Error("malformed live response");
+  return data;
 }
 
 /** Reads one hk document by key for the task overview. The key is the part of
@@ -134,4 +139,14 @@ export async function postTaskComment(id: number, body: string, csrf: string): P
     // an auth gate answers with an empty body; the status still says why
   }
   throw new CommentWriteError(response.status, code);
+}
+
+function validBoardTask(value: unknown): value is BoardTask {
+  if (typeof value !== "object" || value === null) return false;
+  return "id" in value && typeof value.id === "number" && Number.isSafeInteger(value.id) && value.id > 0 &&
+    "title" in value && typeof value.title === "string" && "lane" in value && typeof value.lane === "string" &&
+    "state" in value && typeof value.state === "string" && "priority" in value && typeof value.priority === "number" &&
+    "kind" in value && typeof value.kind === "string" && "created_by" in value && typeof value.created_by === "string" &&
+    "created_at" in value && typeof value.created_at === "string" && "updated_at" in value && typeof value.updated_at === "string" &&
+    "refs" in value && typeof value.refs === "object" && value.refs !== null;
 }

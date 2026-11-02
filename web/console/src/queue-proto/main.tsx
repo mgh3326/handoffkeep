@@ -1,5 +1,5 @@
 import { createRoot } from "react-dom/client";
-import { LiveQueue } from "./live";
+import { ConsoleBoard } from "./ConsoleBoard";
 import { TaskPage } from "./TaskPage";
 import { loadTheme, PageShell } from "./AppShell";
 import "./proto.css";
@@ -29,6 +29,6 @@ if (root) {
       </PageShell>,
     );
   } else {
-    createRoot(root).render(<LiveQueue />);
+    createRoot(root).render(<ConsoleBoard />);
   }
 }

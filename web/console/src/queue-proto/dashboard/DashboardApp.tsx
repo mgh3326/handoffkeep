@@ -1,3 +1,4 @@
+import { Attention } from "./Attention";
 // hk 2280 home dashboard — one read-only page with quota, hosts, running jobs,
 // the PR pipeline, and the sources hk does not record. Two independent polls:
 // /ui/api/dashboard (quota, tasks, PR refs) and /ui/api/live (hub hosts and
@@ -159,7 +160,7 @@ function QuotaAccount({ account, now }: { account: DashboardAccount; now: number
   );
 }
 
-function QuotaCard({ data, now }: { data: DashboardResponse; now: number }) {
+export function QuotaCard({ data, now }: { data: DashboardResponse; now: number }) {
   return (
     <Card title="쿼터" aside={`${data.quota.length}개 계정`} wide>
       {data.quota.length === 0 ? <Note>hk 공유 쿼터 저장소에 기록된 계정이 없습니다.</Note> : null}
@@ -399,7 +400,7 @@ export function DashboardApp({
   return (
     <div className="hd-root">
       <header className="hd-head">
-        <h1>홈 — Home</h1>
+        <h1>Inbox</h1>
         <p className="hd-sub">
           읽기 전용 · 60초마다 갱신{updated ? ` · 마지막 갱신 ${updated}` : ""}
           {dashboard.failed || live.failed ? <span className="hd-warn"> · 갱신 실패, 마지막 데이터 표시 중</span> : null}
@@ -412,6 +413,7 @@ export function DashboardApp({
           <Note>불러오는 중…</Note>
         )
       ) : null}
+      <Attention />
       <div className="hd-grid">
         {dashboard.data ? <QuotaCard data={dashboard.data} now={now} /> : null}
         <HostsCard live={live.data ?? (live.failed ? liveRequestFailed() : null)} now={now} />

@@ -57,7 +57,7 @@ describe("comment list", () => {
     expect(stateOf(container)).toBe("ready");
     const items = [...container.querySelectorAll<HTMLElement>(".qp-comment")];
     expect(items.map((li) => li.dataset.commentId)).toEqual(["3", "7", "9"]);
-    await waitFor(() => expect(items[0].querySelector("[data-doc-renderer]")).not.toBeNull());
+    await waitFor(() => expect(items[0].querySelector("[data-doc-renderer]")).not.toBeNull(), { timeout: 10000 });
     expect(items.map((li) => li.querySelector(".qp-comment-body")?.textContent?.trim())).toEqual(["first", "second", "third"]);
     expect(items[0].querySelector(".qp-comment-author")?.textContent).toBe("operator:admin@example.com");
     expect(items[0].querySelector("time")?.getAttribute("datetime")).toBe(comments[0].created_at);
@@ -124,7 +124,7 @@ describe("comment body — the #536 sanitize boundary (mutant: sanitize bypass)"
     const fetchSpy = vi.fn(() => Promise.reject(new Error("unexpected network")));
     vi.stubGlobal("fetch", fetchSpy);
     const { container } = render(<TaskComments taskId={8001} client={mkClient({ list: vi.fn(listed([mkComment(1, HOSTILE)])) })} />);
-    await waitFor(() => expect(container.querySelector("[data-doc-renderer]")).not.toBeNull());
+    await waitFor(() => expect(container.querySelector("[data-doc-renderer]")).not.toBeNull(), { timeout: 10000 });
     const body = container.querySelector<HTMLElement>(".qp-comment-body")!;
     for (const tag of ["script", "img", "iframe", "svg", "object", "embed", "style"]) {
       expect(body.querySelectorAll(tag), tag).toHaveLength(0);

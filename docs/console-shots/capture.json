@@ -1,0 +1,390 @@
+{
+  "browser": "156.0.8078.74",
+  "fixtures": "Fictional data; embedded production templates and committed bundles",
+  "views": [
+    {
+      "file": "inbox-dark-1280.png",
+      "url": "/ui/home",
+      "theme": "dark",
+      "width": 1280,
+      "overflow": false,
+      "errors": []
+    },
+    {
+      "file": "board-dark-1280.png",
+      "url": "/ui/queue",
+      "theme": "dark",
+      "width": 1280,
+      "overflow": false,
+      "errors": []
+    },
+    {
+      "file": "task-dark-1280.png",
+      "url": "/ui/tasks/101",
+      "theme": "dark",
+      "width": 1280,
+      "overflow": false,
+      "errors": []
+    },
+    {
+      "file": "decisions-dark-1280.png",
+      "url": "/ui/decisions",
+      "theme": "dark",
+      "width": 1280,
+      "overflow": false,
+      "errors": []
+    },
+    {
+      "file": "deploys-dark-1280.png",
+      "url": "/ui/deploys",
+      "theme": "dark",
+      "width": 1280,
+      "overflow": false,
+      "errors": []
+    },
+    {
+      "file": "fleet-dark-1280.png",
+      "url": "/ui/fleet",
+      "theme": "dark",
+      "width": 1280,
+      "overflow": false,
+      "errors": []
+    },
+    {
+      "file": "docs-dark-1280.png",
+      "url": "/ui/docs?key=guide%2Fconsole",
+      "theme": "dark",
+      "width": 1280,
+      "overflow": false,
+      "errors": []
+    },
+    {
+      "file": "grades-dark-1280.png",
+      "url": "/ui/grades",
+      "theme": "dark",
+      "width": 1280,
+      "overflow": false,
+      "errors": []
+    },
+    {
+      "file": "timeline-dark-1280.png",
+      "url": "/ui/timeline",
+      "theme": "dark",
+      "width": 1280,
+      "overflow": false,
+      "errors": []
+    },
+    {
+      "file": "compose-dark-1280.png",
+      "url": "/ui/compose",
+      "theme": "dark",
+      "width": 1280,
+      "overflow": false,
+      "errors": []
+    },
+    {
+      "file": "document-dark-1280.png",
+      "url": "/ui/doc/guide/console",
+      "theme": "dark",
+      "width": 1280,
+      "overflow": false,
+      "errors": []
+    },
+    {
+      "file": "palette-dark-1280.png",
+      "url": "/ui/queue",
+      "theme": "dark",
+      "width": 1280,
+      "overflow": false,
+      "errors": []
+    },
+    {
+      "file": "inbox-light-1280.png",
+      "url": "/ui/home",
+      "theme": "light",
+      "width": 1280,
+      "overflow": false,
+      "errors": []
+    },
+    {
+      "file": "board-light-1280.png",
+      "url": "/ui/queue",
+      "theme": "light",
+      "width": 1280,
+      "overflow": false,
+      "errors": []
+    },
+    {
+      "file": "task-light-1280.png",
+      "url": "/ui/tasks/101",
+      "theme": "light",
+      "width": 1280,
+      "overflow": false,
+      "errors": []
+    },
+    {
+      "file": "decisions-light-1280.png",
+      "url": "/ui/decisions",
+      "theme": "light",
+      "width": 1280,
+      "overflow": false,
+      "errors": []
+    },
+    {
+      "file": "deploys-light-1280.png",
+      "url": "/ui/deploys",
+      "theme": "light",
+      "width": 1280,
+      "overflow": false,
+      "errors": []
+    },
+    {
+      "file": "fleet-light-1280.png",
+      "url": "/ui/fleet",
+      "theme": "light",
+      "width": 1280,
+      "overflow": false,
+      "errors": []
+    },
+    {
+      "file": "docs-light-1280.png",
+      "url": "/ui/docs?key=guide%2Fconsole",
+      "theme": "light",
+      "width": 1280,
+      "overflow": false,
+      "errors": []
+    },
+    {
+      "file": "grades-light-1280.png",
+      "url": "/ui/grades",
+      "theme": "light",
+      "width": 1280,
+      "overflow": false,
+      "errors": []
+    },
+    {
+      "file": "timeline-light-1280.png",
+      "url": "/ui/timeline",
+      "theme": "light",
+      "width": 1280,
+      "overflow": false,
+      "errors": []
+    },
+    {
+      "file": "compose-light-1280.png",
+      "url": "/ui/compose",
+      "theme": "light",
+      "width": 1280,
+      "overflow": false,
+      "errors": []
+    },
+    {
+      "file": "document-light-1280.png",
+      "url": "/ui/doc/guide/console",
+      "theme": "light",
+      "width": 1280,
+      "overflow": false,
+      "errors": []
+    },
+    {
+      "file": "palette-light-1280.png",
+      "url": "/ui/queue",
+      "theme": "light",
+      "width": 1280,
+      "overflow": false,
+      "errors": []
+    },
+    {
+      "file": "inbox-dark-390.png",
+      "url": "/ui/home",
+      "theme": "dark",
+      "width": 390,
+      "overflow": false,
+      "errors": []
+    },
+    {
+      "file": "board-dark-390.png",
+      "url": "/ui/queue",
+      "theme": "dark",
+      "width": 390,
+      "overflow": false,
+      "errors": []
+    },
+    {
+      "file": "task-dark-390.png",
+      "url": "/ui/tasks/101",
+      "theme": "dark",
+      "width": 390,
+      "overflow": false,
+      "errors": []
+    },
+    {
+      "file": "decisions-dark-390.png",
+      "url": "/ui/decisions",
+      "theme": "dark",
+      "width": 390,
+      "overflow": false,
+      "errors": []
+    },
+    {
+      "file": "deploys-dark-390.png",
+      "url": "/ui/deploys",
+      "theme": "dark",
+      "width": 390,
+      "overflow": false,
+      "errors": []
+    },
+    {
+      "file": "fleet-dark-390.png",
+      "url": "/ui/fleet",
+      "theme": "dark",
+      "width": 390,
+      "overflow": false,
+      "errors": []
+    },
+    {
+      "file": "docs-dark-390.png",
+      "url": "/ui/docs?key=guide%2Fconsole",
+      "theme": "dark",
+      "width": 390,
+      "overflow": false,
+      "errors": []
+    },
+    {
+      "file": "grades-dark-390.png",
+      "url": "/ui/grades",
+      "theme": "dark",
+      "width": 390,
+      "overflow": false,
+      "errors": []
+    },
+    {
+      "file": "timeline-dark-390.png",
+      "url": "/ui/timeline",
+      "theme": "dark",
+      "width": 390,
+      "overflow": false,
+      "errors": []
+    },
+    {
+      "file": "compose-dark-390.png",
+      "url": "/ui/compose",
+      "theme": "dark",
+      "width": 390,
+      "overflow": false,
+      "errors": []
+    },
+    {
+      "file": "document-dark-390.png",
+      "url": "/ui/doc/guide/console",
+      "theme": "dark",
+      "width": 390,
+      "overflow": false,
+      "errors": []
+    },
+    {
+      "file": "palette-dark-390.png",
+      "url": "/ui/queue",
+      "theme": "dark",
+      "width": 390,
+      "overflow": false,
+      "errors": []
+    },
+    {
+      "file": "inbox-light-390.png",
+      "url": "/ui/home",
+      "theme": "light",
+      "width": 390,
+      "overflow": false,
+      "errors": []
+    },
+    {
+      "file": "board-light-390.png",
+      "url": "/ui/queue",
+      "theme": "light",
+      "width": 390,
+      "overflow": false,
+      "errors": []
+    },
+    {
+      "file": "task-light-390.png",
+      "url": "/ui/tasks/101",
+      "theme": "light",
+      "width": 390,
+      "overflow": false,
+      "errors": []
+    },
+    {
+      "file": "decisions-light-390.png",
+      "url": "/ui/decisions",
+      "theme": "light",
+      "width": 390,
+      "overflow": false,
+      "errors": []
+    },
+    {
+      "file": "deploys-light-390.png",
+      "url": "/ui/deploys",
+      "theme": "light",
+      "width": 390,
+      "overflow": false,
+      "errors": []
+    },
+    {
+      "file": "fleet-light-390.png",
+      "url": "/ui/fleet",
+      "theme": "light",
+      "width": 390,
+      "overflow": false,
+      "errors": []
+    },
+    {
+      "file": "docs-light-390.png",
+      "url": "/ui/docs?key=guide%2Fconsole",
+      "theme": "light",
+      "width": 390,
+      "overflow": false,
+      "errors": []
+    },
+    {
+      "file": "grades-light-390.png",
+      "url": "/ui/grades",
+      "theme": "light",
+      "width": 390,
+      "overflow": false,
+      "errors": []
+    },
+    {
+      "file": "timeline-light-390.png",
+      "url": "/ui/timeline",
+      "theme": "light",
+      "width": 390,
+      "overflow": false,
+      "errors": []
+    },
+    {
+      "file": "compose-light-390.png",
+      "url": "/ui/compose",
+      "theme": "light",
+      "width": 390,
+      "overflow": false,
+      "errors": []
+    },
+    {
+      "file": "document-light-390.png",
+      "url": "/ui/doc/guide/console",
+      "theme": "light",
+      "width": 390,
+      "overflow": false,
+      "errors": []
+    },
+    {
+      "file": "palette-light-390.png",
+      "url": "/ui/queue",
+      "theme": "light",
+      "width": 390,
+      "overflow": false,
+      "errors": []
+    }
+  ]
+}
