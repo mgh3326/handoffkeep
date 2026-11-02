@@ -107,8 +107,13 @@ its historical priority qualifies; reuse an existing issue for its final update.
 Use a pure eligibility result with reason, plus a separate capacity admission:
 `mirror eligibility -> reuse link or admit creation -> durable outbox -> receipt`.
 Recheck current policy immediately before a queued create: an old payload must
-not bypass a later exclusion. A duplicate delivery uses the existing task/issue
-link and stable id; it does not consume another issue slot. A relations writer
+not bypass a later exclusion. Before reusing a ROB id, reserve one-to-one task/issue ownership; refuse
+another task's issue or a decision issue, and retain historical conflicts for
+explicit repair. Each saved projection advances its version. Late snapshots
+use the newest committed fields while retaining their event/comment identity;
+per-task outbox ordering serializes delivery.
+
+A duplicate delivery uses the existing task/issue link and stable id; it does not consume another issue slot. A relations writer
 never creates endpoint issues.
 
 ### hk-owned limit management (implementation awaits confirmation)
@@ -120,9 +125,10 @@ as a backstop. Unit 1b is a PR series: admission (eligibility plus serialized ca
 with unknown counts pending) ships first. The following PR implements archival
 behind a disabled flag; enabling it awaits the confirmation below.
 
-The operator's budget is approximately 275 issues on the current plan; that
-number is context, not a verified vendor guarantee. The operational watermarks
-are 230 and 200. Count the non-archived issues in the plan's applicable scope,
+The [official Free plan](https://linear.app/pricing) supports **250 issues and
+two teams** (verified 2026-11-03); archived issues are outside that active quota
+and unlimited, as reported by the separate plan investigation. The operational archive watermarks are 210 and 180. New creation refuses at
+245, preserving five slots below the vendor ceiling; unknown counts stay pending. Count the non-archived issues in the plan's applicable scope,
 including closed issues. hk is to be the sole writer; any out-of-band writes
 are outside the serialization guarantee. Do not interpret
 “active” as only unfinished workflow states. If scope/count cannot be established,
@@ -137,9 +143,9 @@ and has a verified durable copy in hk. Keep issues linked to open work, recently
 referenced issues, and issues with a `keep` label. Retain original identifiers,
 content and timestamps in the copy; copy failure cannot authorize archival.
 
-At 230, archive eligible closed issues oldest first until at most 200 remain,
+At 210, archive eligible closed issues oldest first until at most 180 remain,
 using closure time then issue id as deterministic ordering and paging the whole
-scope. If protected/recent issues prevent reaching 200, keep creates pending and
+scope. If protected/recent issues prevent reaching 180, keep creates pending and
 notify the operator. Re-running must converge without duplicate copies. Retain
 hk links after archival. Recent-activity/reference windows and full plan scope
 remain configuration decisions to confirm before implementation.
@@ -207,9 +213,9 @@ to its source and shipped tasks. Do not run deployments from this view.
 A weekly digest uses a stable project/week key and explicit interval/time zone,
 source links and generation timestamp. Page all sources; mark missing or partial
 inputs instead of treating absence as zero. Re-generation updates the same hk
-document. A Linear project update is optional and idempotent. Linear release
-mirroring remains off unless plan support is confirmed by the separate check;
-unknown or unsupported means hk-only releases, without blocking unit 4.
+document. A Linear project update is optional and idempotent. The plan investigation and [official pricing](https://linear.app/pricing)
+confirm Releases are excluded from Free. Unit 4 therefore ships hk-only releases,
+without Linear release mirroring. Plan changes would require a separate check.
 
 ### Intake and policy labels (units 6–7)
 
