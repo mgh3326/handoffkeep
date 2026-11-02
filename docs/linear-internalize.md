@@ -32,9 +32,14 @@ provides the transactional work-board outbox and reconciler, and
 [#117](https://github.com/mgh3326/handoffkeep/pull/117) provides the console shell
 and task views. [#115](https://github.com/mgh3326/handoffkeep/pull/115) has since merged:
 reuse its change feed; do not create a second feed.
-Before each implementation unit's console work, inspect the separately delivered
-design documents. Follow an available design; otherwise reuse existing tokens
-and mark the PR `design pending ROB-1484`, without blocking work.
+The ROB-1484 screen design is now available for relations, triage/deadlines,
+releases, weekly digests and label policy at desktop 1280 and mobile 390. Follow
+the saved layouts plus the revised draft's corrections: established priority
+names without invented numeric mapping, separate task/PR state, PR number and
+exact due time. Mark console PRs `design: ROB-1484`. Where touched, keep a visible
+priority name in mobile rows and accessible row labels, and add a compact
+status/priority summary under the task-detail title. The design review's source
+findings do not substitute for rendering the implemented console.
 
 Task creation with `--linear` and `dots request` is separately in progress.
 The existing decision webhook, operator checks and decision request identity
@@ -116,7 +121,7 @@ per-task outbox ordering serializes delivery.
 A duplicate delivery uses the existing task/issue link and stable id; it does not consume another issue slot. A relations writer
 never creates endpoint issues.
 
-### hk-owned limit management (implementation awaits confirmation)
+### hk-owned limit management (archival activation awaits confirmation)
 
 hk is to be the sole Linear writer and own limit management. Before each issue
 create, and after board or state changes, hk compares the non-archived issue
@@ -147,8 +152,8 @@ At 210, archive eligible closed issues oldest first until at most 180 remain,
 using closure time then issue id as deterministic ordering and paging the whole
 scope. If protected/recent issues prevent reaching 180, keep creates pending and
 notify the operator. Re-running must converge without duplicate copies. Retain
-hk links after archival. Recent-activity/reference windows and full plan scope
-remain configuration decisions to confirm before implementation.
+hk links after archival. The disabled implementation proposes a seven-day recent-activity/reference
+window; confirm that window and full plan scope before archival activation.
 
 **Open question: are archived Linear issues still searchable/openable by the
 operator and dots?** The separate plan/archival investigation is checking this.
