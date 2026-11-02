@@ -79,10 +79,18 @@ func normalizeSQL(sql string) string {
 			out.WriteByte(' ')
 		case sql[i] == '\'' || sql[i] == '"':
 			quote := sql[i]
+			// Backslash escapes a quote only inside E'...' strings. In any other
+			// string its meaning depends on the session's
+			// standard_conforming_strings and on U&'...' escapes, so a backslash
+			// there filters the whole statement rather than guess a boundary.
+			escapes := quote == '\'' && i > 0 && (sql[i-1] == 'E' || sql[i-1] == 'e') && (i < 2 || !identByte(sql[i-2]))
 			i++
 			closed := false
 			for i < len(sql) {
-				if sql[i] == '\\' && quote == '\'' {
+				if sql[i] == '\\' && !escapes {
+					return "[filtered statement]"
+				}
+				if sql[i] == '\\' && escapes {
 					i += 2
 				} else if sql[i] == quote {
 					i++
@@ -137,4 +145,8 @@ func normalizeSQL(sql string) string {
 		}
 	}
 	return strings.Join(strings.Fields(out.String()), " ")
+}
+
+func identByte(c byte) bool {
+	return c == '_' || c == '$' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c >= 128
 }
