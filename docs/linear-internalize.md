@@ -121,7 +121,7 @@ per-task outbox ordering serializes delivery.
 A duplicate delivery uses the existing task/issue link and stable id; it does not consume another issue slot. A relations writer
 never creates endpoint issues.
 
-### hk-owned limit management (archival activation awaits confirmation)
+### hk-owned limit management (ships flag-off; desk enables after merge)
 
 hk is to be the sole Linear writer and own limit management. Before each issue
 create, and after board or state changes, hk compares the non-archived issue
@@ -130,10 +130,17 @@ as a backstop. Unit 1b is a PR series: admission (eligibility plus serialized ca
 with unknown counts pending) ships first. The following PR implements archival
 behind a disabled flag; enabling it awaits the confirmation below.
 
-The [official Free plan](https://linear.app/pricing) supports **250 issues and
-two teams** (verified 2026-11-03); archived issues are outside that active quota
-and unlimited, as reported by the separate plan investigation. The operational archive watermarks are 210 and 180. New creation refuses at
-245, preserving five slots below the vendor ceiling; unknown counts stay pending. Count the non-archived issues in the plan's applicable scope,
+The [published Free plan](https://linear.app/pricing) lists **250 issues and two
+teams**. The operator tested this workspace and confirmed **275 active issues**;
+use that observed entitlement as the configurable hard limit. Archived issues
+are outside the active quota and unlimited. Defaults are **270** for creation
+(five-slot margin) and **230→200** for the watermark backstop. The issue limit
+and both watermarks are environment/policy configuration; lowering the hard limit
+to 250 yields a 245 create ceiling. A vendor capacity rejection must persist an
+at-limit hold even when a prior visible count appeared below the configured
+ceiling; unknown scope/counts stay pending.
+
+Count the non-archived issues in the plan's applicable scope,
 including closed issues. hk is to be the sole writer; any out-of-band writes
 are outside the serialization guarantee. Do not interpret
 “active” as only unfinished workflow states. If scope/count cannot be established,
@@ -148,18 +155,28 @@ and has a verified durable copy in hk. Keep issues linked to open work, recently
 referenced issues, and issues with a `keep` label. Retain original identifiers,
 content and timestamps in the copy; copy failure cannot authorize archival.
 
-At 210, archive eligible closed issues oldest first until at most 180 remain,
+At 230, archive eligible closed issues oldest first until at most 200 remain,
 using closure time then issue id as deterministic ordering and paging the whole
-scope. If protected/recent issues prevent reaching 180, keep creates pending and
+scope. If protected/recent issues prevent reaching 200, keep creates pending and
 notify the operator. Re-running must converge without duplicate copies. Retain
-hk links after archival. The disabled implementation proposes a seven-day recent-activity/reference
-window; confirm that window and full plan scope before archival activation.
+hk links after archival. The idle/recent-reference window is configurable; enabling archival and
+verifying the deployed credential scope belong to the desk.
 
-**Open question: are archived Linear issues still searchable/openable by the
-operator and dots?** The separate plan/archival investigation is checking this.
-The hk archiver is implemented behind a flag that defaults off; enabling it
-waits for the coordinating desk's confirmation after that answer. Existing daily
-watermark automation is already live and copies to hk first; it remains a backstop.
+**Resolved archive-access question:** archived issues remain in full search and
+their links work; paginated GraphQL reads hide them unless
+`includeArchived:true`. Editing needs unarchive. These are the separate
+investigation's findings; exact search-function defaults, every external view,
+restore-at-capacity behavior and relation visibility remain unverified. Preserve
+relation types/endpoints and parent data in the hk copy rather than infer loss
+from a filtered view.
+
+The desk confirmed the archive design. Implement early archival after a short,
+configurable idle period when every protection above passes, with the 230→200
+watermark as the hard backstop. Ship flag-off; only the desk enables it after
+merge. Historical paginated reads must include archived resources; quota and
+candidate inventory reads intentionally count/select non-archived issues. The
+existing daily archival job remains a backstop. No automatic unarchive or
+replacement issue creation is implied by opening a history link.
 
 The retired immediate-archive path is
 `internal/store/linear.go:enqueueLinearTaskTransition`: terminal transitions
