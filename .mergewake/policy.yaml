@@ -25,3 +25,7 @@ review_gate:
   land: graded
 fast_lane:
   max_changed_lines: 50
+
+deploy_approval:
+  - paths: ['internal/store/*migration*.go', 'internal/store/migration.go', 'internal/store/store.go', 'deploy/**', 'internal/guard/**', 'internal/cfaccess/**', 'internal/api/api.go', 'internal/api/wrk*.go']
+    reason: Production schema, installation or access authority changes
