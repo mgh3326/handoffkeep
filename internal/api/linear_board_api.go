@@ -116,6 +116,7 @@ func (a LinearAPI) UpdateBoardIssue(ctx context.Context, id, state, description 
 	if !out.IssueUpdate.Success {
 		return errors.New("linear board issue update refused")
 	}
+	a.checkCapacityAfterChange(ctx)
 	return nil
 }
 

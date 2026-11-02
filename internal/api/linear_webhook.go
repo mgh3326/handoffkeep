@@ -280,8 +280,9 @@ type LinearAPI struct {
 	Admission LinearCreateAdmission
 	// Set only after deployment verifies this credential sees the workspace
 	// issue scope used by the plan limit, including private teams.
-	CapacityScopeVerified bool
-	Key                   string
+	CapacityScopeVerified   bool
+	WatermarkArchiveEnabled bool
+	Key                     string
 	// App, when set, replaces Key: requests carry a Bearer token minted for the
 	// OAuth application, so hk's writes show as the app, not as a member.
 	App  *LinearAppToken

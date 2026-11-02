@@ -1100,6 +1100,18 @@ func (s *Store) migrate(ctx context.Context) error {
 		return err
 	}
 
+	// Version 32 adds a persistent watermark drain latch. Only a new table
+	// is locked; interrupted drain cycles resume even below the high mark.
+	if err := migrateOnce(ctx, tx, 32, func() error {
+		return execAll(ctx, tx, []string{
+			`CREATE TABLE linear_archive_state(singleton BOOLEAN PRIMARY KEY DEFAULT true CHECK(singleton),draining BOOLEAN NOT NULL DEFAULT false)`,
+			`INSERT INTO linear_archive_state(singleton) VALUES(true)`,
+			`INSERT INTO schema_version(version) VALUES(32)`,
+		})
+	}); err != nil {
+		return err
+	}
+
 	return tx.Commit(ctx)
 }
 func validName(x string) bool        { return nameRE.MatchString(x) }

@@ -69,7 +69,7 @@ func (a LinearAPI) admittedCreate(ctx context.Context, in LinearDecisionIssue) (
 		if in.RequestID != "" && (task.Refs.DecisionRequest == nil || task.Refs.DecisionRequest.ID != in.RequestID || task.Refs.DecisionRequest.Status != store.DecisionRequestOpen) {
 			return ErrLinearMirrorExcluded
 		}
-		if err := a.admissionCapacity(ctx); err != nil {
+		if err := a.ensureLinearCapacity(ctx, lease); err != nil {
 			return err
 		}
 		if err := lease.Reserve(ctx, in.ID); err != nil {
@@ -107,7 +107,7 @@ func (a LinearAPI) admissionExisting(ctx context.Context, id string) (LinearIssu
 	return LinearIssue{Identifier: issue.Identifier, URL: issue.URL}, true, nil
 }
 
-func (a LinearAPI) admissionCapacity(ctx context.Context) error {
+func (a LinearAPI) activeIssueCount(ctx context.Context) (int, error) {
 	var out struct {
 		Issues *struct {
 			Nodes    []struct{ ID string }
@@ -115,20 +115,20 @@ func (a LinearAPI) admissionCapacity(ctx context.Context) error {
 		}
 	}
 	if err := a.graphql(ctx, linearWriteTimeout, admissionCountQuery, nil, &out); err != nil {
-		return fmt.Errorf("%w: count unavailable: %v", ErrLinearCapacity, err)
+		return 0, fmt.Errorf("%w: count unavailable: %v", ErrLinearCapacity, err)
 	}
 	if out.Issues == nil || out.Issues.Nodes == nil || out.Issues.PageInfo == nil || out.Issues.PageInfo.HasNextPage == nil {
-		return fmt.Errorf("%w: incomplete count", ErrLinearCapacity)
+		return 0, fmt.Errorf("%w: incomplete count", ErrLinearCapacity)
 	}
 	seen := map[string]bool{}
 	for _, issue := range out.Issues.Nodes {
 		if issue.ID == "" || seen[issue.ID] {
-			return fmt.Errorf("%w: invalid count", ErrLinearCapacity)
+			return 0, fmt.Errorf("%w: invalid count", ErrLinearCapacity)
 		}
 		seen[issue.ID] = true
 	}
-	if len(seen) >= LinearIssueHighWatermark || *out.Issues.PageInfo.HasNextPage {
-		return fmt.Errorf("%w: watermark reached", ErrLinearCapacity)
+	if *out.Issues.PageInfo.HasNextPage && len(seen) < LinearIssueHighWatermark {
+		return 0, fmt.Errorf("%w: incomplete count page", ErrLinearCapacity)
 	}
-	return nil
+	return min(len(seen), LinearIssueHighWatermark), nil
 }

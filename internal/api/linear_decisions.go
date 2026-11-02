@@ -637,5 +637,6 @@ func (a LinearAPI) UpdateLinearIssueState(ctx context.Context, issueID, stateID 
 	if !out.IssueUpdate.Success {
 		return errors.New("linear api did not update the issue")
 	}
+	a.checkCapacityAfterChange(ctx)
 	return nil
 }
