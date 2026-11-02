@@ -26,6 +26,11 @@ type boardFake struct {
 func newBoardFake() *boardFake {
 	return &boardFake{issues: map[string]BoardIssue{}, comments: map[string]string{}}
 }
+func (f *boardFake) FindBoardIssue(_ context.Context, id string) (BoardIssue, bool, error) {
+	v, ok := f.issues[id]
+	return v, ok, nil
+}
+
 func (f *boardFake) BoardTarget(context.Context) (BoardTarget, error) {
 	return BoardTarget{TeamID: "team", States: map[string]string{"Backlog": "Backlog", "In Progress": "In Progress", "In Review": "In Review", "Done": "Done", "Canceled": "Canceled"}}, nil
 }
@@ -79,9 +84,35 @@ func (f *boardFake) BoardCommentExists(_ context.Context, id, issue, body string
 }
 
 type boardQueue struct {
+	boards     map[int64]store.LinearBoard
+	tasks      map[int64]store.Task
+	taskErr    error
 	rows       []store.LinearOutbox
 	links      map[int64]store.LinearIssue
 	reconciles int
+}
+
+func (q *boardQueue) HasLinearCreateReservation(context.Context, string) (bool, error) {
+	return false, nil
+}
+
+func (q *boardQueue) GetLinearBoard(_ context.Context, id int64) (store.LinearBoard, bool, error) {
+	b, ok := q.boards[id]
+	return b, ok, nil
+}
+func (q *boardQueue) EnsureLinearBoardOwnership(_ context.Context, taskID int64, id, identifier string) error {
+	for owner, link := range q.links {
+		if (link.IssueID == id && owner != taskID) || (owner == taskID && link.IssueID != id) {
+			return store.ErrLinearIssueOwnership
+		}
+	}
+	q.links[taskID] = store.LinearIssue{TaskID: taskID, IssueID: id, Identifier: identifier}
+	return nil
+}
+
+func (q *boardQueue) GetTask(_ context.Context, id int64) (store.Task, bool, error) {
+	t, ok := q.tasks[id]
+	return t, ok, q.taskErr
 }
 
 func (q *boardQueue) GetLinearIssue(_ context.Context, id int64) (store.LinearIssue, bool, error) {
@@ -108,12 +139,21 @@ func (q *boardQueue) ProcessNextLinearBoardOutbox(ctx context.Context, process f
 	return false, nil
 }
 func (q *boardQueue) add(b store.LinearBoard, e store.LinearBoardEvent) {
+	if q.boards == nil {
+		q.boards = map[int64]store.LinearBoard{}
+	}
+	b.Version = q.boards[b.Task.ID].Version + 1
+	q.boards[b.Task.ID] = b
 	copy := b
+	if q.tasks == nil {
+		q.tasks = map[int64]store.Task{}
+	}
+	q.tasks[b.Task.ID] = b.Task
 	q.rows = append(q.rows, store.LinearOutbox{ID: int64(len(q.rows) + 1), TaskID: b.Task.ID, Op: store.LinearOpWorkBoard, State: "pending", Payload: store.LinearOutboxPayload{Board: &copy, Event: &e}})
 }
 func boardFixture() store.LinearBoard {
 	var b store.LinearBoard
-	b.ApplyTask(store.Task{ID: 42, Title: "Fleet change", State: "claimed", Refs: store.TaskRefs{JobID: "lead-job"}, UpdatedAt: time.Now().UTC()})
+	b.ApplyTask(store.Task{ID: 42, Title: "Fleet change", Priority: 2, State: "claimed", Refs: store.TaskRefs{JobID: "lead-job"}, UpdatedAt: time.Now().UTC()})
 	return b
 }
 
@@ -161,13 +201,19 @@ func TestWorkBoardStateTransitions(t *testing.T) {
 	for _, tc := range []struct{ state, pr, event, want string }{{"backlog", "", "", "Backlog"}, {"claimed", "", "", "In Progress"}, {"in_progress", "", "", "In Progress"}, {"claimed", "https://github.com/example/repo/pull/1", "", "In Review"}, {"verifying", "", "", "In Review"}, {"claimed", "", "READY", "In Review"}, {"merged", "", "", "Done"}, {"claimed", "", "MERGED", "Done"}, {"dropped", "", "", "Canceled"}} {
 		t.Run(tc.state+tc.event+tc.pr, func(t *testing.T) {
 			var b store.LinearBoard
-			b.ApplyTask(store.Task{ID: 42, Title: "State", State: tc.state, Refs: store.TaskRefs{PR: tc.pr}})
+			b.ApplyTask(store.Task{ID: 42, Title: "State", Priority: 2, State: tc.state, Refs: store.TaskRefs{PR: tc.pr}})
 			if tc.event != "" {
 				b.ApplyEvent(store.LinearBoardEvent{Kind: tc.event, At: time.Now().UTC()}, "", "", "")
 			}
 			q := &boardQueue{links: map[int64]store.LinearIssue{}}
 			q.add(b, store.LinearBoardEvent{})
 			linear := newBoardFake()
+			if tc.state == "merged" || tc.state == "dropped" {
+				issue := BoardIssue{ID: "prior", Identifier: "ROB-1"}
+				issue.Team.ID = "team"
+				linear.issues["prior"] = issue
+				q.links[42] = store.LinearIssue{IssueID: "prior"}
+			}
 			LinearBoardWorker{Store: q, Linear: linear}.Drain(t.Context())
 			if len(linear.states) != 1 || linear.states[0] != tc.want {
 				t.Fatalf("states=%v want=%s", linear.states, tc.want)

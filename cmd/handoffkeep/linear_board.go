@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -41,4 +43,21 @@ func (w placementRetentionWorker) Run(ctx context.Context) {
 		case <-ticker.C:
 		}
 	}
+}
+
+func linearCapacityPolicyFromEnv() (api.LinearCapacityPolicy, error) {
+	values := []struct {
+		name  string
+		value int
+	}{{"HANDOFFKEEP_LINEAR_ISSUE_LIMIT", 275}, {"HANDOFFKEEP_LINEAR_ARCHIVE_HIGH_WATERMARK", 230}, {"HANDOFFKEEP_LINEAR_ARCHIVE_LOW_WATERMARK", 200}}
+	for i := range values {
+		if raw := strings.TrimSpace(os.Getenv(values[i].name)); raw != "" {
+			value, err := strconv.Atoi(raw)
+			if err != nil {
+				return api.LinearCapacityPolicy{}, fmt.Errorf("invalid %s", values[i].name)
+			}
+			values[i].value = value
+		}
+	}
+	return api.NewLinearCapacityPolicy(values[0].value, values[1].value, values[2].value)
 }

@@ -42,6 +42,7 @@ type LinearBoardEvent struct {
 // LinearBoard is the durable projection. Only event writers update it; the
 // hourly reconciler resends it without inventing events or comments.
 type LinearBoard struct {
+	Version  int64                `json:"version"`
 	Task     Task                 `json:"task"`
 	State    string               `json:"state"`
 	Sessions []LinearBoardSession `json:"sessions"`
@@ -219,12 +220,23 @@ func loadLinearBoardTx(ctx context.Context, tx pgx.Tx, task Task) (LinearBoard, 
 }
 
 func saveLinearBoardTx(ctx context.Context, tx pgx.Tx, b LinearBoard, event LinearBoardEvent) error {
+	b.Version++
 	raw, err := json.Marshal(b)
 	if err != nil {
 		return err
 	}
 	if _, err = tx.Exec(ctx, `INSERT INTO linear_board_tasks(task_id,status) VALUES($1,$2::jsonb) ON CONFLICT(task_id) DO UPDATE SET status=EXCLUDED.status`, b.Task.ID, string(raw)); err != nil {
 		return err
+	}
+	// Always persist the console projection; eligibility gates only delivery.
+	if LinearMirrorReason(b.Task) == "" {
+		var linked bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM linear_issues WHERE task_id=$1)`, b.Task.ID).Scan(&linked); err != nil {
+			return err
+		}
+		if !linked {
+			return nil
+		}
 	}
 	return enqueueLinearOutboxTx(ctx, tx, b.Task.ID, LinearOpWorkBoard, LinearOutboxPayload{Board: &b, Event: &event})
 }

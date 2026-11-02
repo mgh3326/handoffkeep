@@ -44,6 +44,7 @@ type BoardTarget struct {
 }
 
 type LinearBoardAPI interface {
+	FindBoardIssue(context.Context, string) (BoardIssue, bool, error)
 	BoardTarget(context.Context) (BoardTarget, error)
 	BoardIssue(context.Context, string) (BoardIssue, error)
 	CreateLinearIssue(context.Context, LinearDecisionIssue) (LinearIssue, error)
@@ -54,6 +55,10 @@ type LinearBoardAPI interface {
 }
 
 type LinearBoardStore interface {
+	HasLinearCreateReservation(context.Context, string) (bool, error)
+	GetLinearBoard(context.Context, int64) (store.LinearBoard, bool, error)
+	EnsureLinearBoardOwnership(context.Context, int64, string, string) error
+	GetTask(context.Context, int64) (store.Task, bool, error)
 	ProcessNextLinearBoardOutbox(context.Context, func(context.Context, store.LinearOutbox) (store.LinearOutboxResult, error)) (bool, error)
 	GetLinearIssue(context.Context, int64) (store.LinearIssue, bool, error)
 	ReconcileLinearBoard(context.Context) error
@@ -106,12 +111,19 @@ func (w LinearBoardWorker) Drain(ctx context.Context) {
 	}
 }
 
+var errBoardMirrorSkipped = errors.New("linear mirror not eligible")
+
 var boardROB = regexp.MustCompile(`\bROB-[1-9][0-9]*\b`)
 
 func (w LinearBoardWorker) send(ctx context.Context, op store.LinearOutbox) (store.LinearOutboxResult, error) {
 	result := store.LinearOutboxResult{State: "sent"}
 	err := w.sync(ctx, op, &result)
-	if err != nil {
+	if errors.Is(err, errBoardMirrorSkipped) || errors.Is(err, ErrLinearMirrorExcluded) {
+		result.State = "skipped"
+	} else if errors.Is(err, store.ErrLinearIssueOwnership) {
+		result.State = "failed"
+		result.LastError = err.Error()
+	} else if err != nil {
 		result.State = "pending"
 		result.RetryAt = time.Now().UTC().Add(min(time.Hour, time.Duration(1<<min(op.Attempts, 10))*5*time.Second))
 		result.LastError = err.Error()
@@ -125,6 +137,51 @@ func (w LinearBoardWorker) sync(ctx context.Context, op store.LinearOutbox, resu
 	if b == nil || b.Task.ID != op.TaskID {
 		return errors.New("invalid work board outbox payload")
 	}
+	// Re-read admission immediately before any remote work: pending payloads
+	// may predate this policy or a later task edit. Missing tasks fail closed.
+	task, found, err := w.Store.GetTask(ctx, op.TaskID)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return errBoardMirrorSkipped
+	}
+	link, linked, err := w.Store.GetLinearIssue(ctx, op.TaskID)
+	if err != nil {
+		return err
+	}
+	var recovered *BoardIssue
+	if !linked && store.LinearMirrorReason(task) == "" {
+		stableID := store.LinearDecisionUUID("work-board:task:" + strconv.FormatInt(op.TaskID, 10))
+		existing, found, err := w.Linear.FindBoardIssue(ctx, stableID)
+		if err != nil {
+			return err
+		}
+		if !found {
+			uncertain, err := w.Store.HasLinearCreateReservation(ctx, stableID)
+			if err != nil {
+				return err
+			}
+			if uncertain {
+				return fmt.Errorf("%w: unlinked create remains uncertain", ErrLinearCapacity)
+			}
+			return errBoardMirrorSkipped
+		}
+		recovered = &existing
+	}
+
+	// Old deliveries retain their own event/comment identity, but issue fields
+	// always come from the latest committed projection version.
+	latest, found, err := w.Store.GetLinearBoard(ctx, op.TaskID)
+	if err != nil {
+		return err
+	}
+	if !found || latest.Task.ID != op.TaskID || latest.Version < 0 || b.Version > latest.Version {
+		return errors.New("invalid current board version")
+	}
+	current := latest
+	current.ApplyTask(task)
+	b = &current
 	target, err := w.Linear.BoardTarget(ctx)
 	if err != nil {
 		return err
@@ -137,18 +194,18 @@ func (w LinearBoardWorker) sync(ctx context.Context, op store.LinearOutbox, resu
 	if err != nil {
 		return err
 	}
-	link, linked, err := w.Store.GetLinearIssue(ctx, op.TaskID)
-	if err != nil {
-		return err
-	}
 	var issue BoardIssue
-	if linked {
+	if recovered != nil {
+		issue = *recovered
+	} else if linked {
 		issue, err = w.Linear.BoardIssue(ctx, link.IssueID)
+	} else if b.Task.Refs.Linear != nil && b.Task.Refs.Linear.MirrorReason == store.LinearMirrorOpened && b.Task.Refs.Linear.IssueID != "" {
+		issue, err = w.Linear.BoardIssue(ctx, b.Task.Refs.Linear.IssueID)
 	} else if identifier := boardROB.FindString(b.Task.Title); identifier != "" {
 		issue, err = w.Linear.BoardIssue(ctx, identifier)
 	} else {
 		id := store.LinearDecisionUUID("work-board:task:" + strconv.FormatInt(op.TaskID, 10))
-		_, createErr := w.Linear.CreateLinearIssue(ctx, LinearDecisionIssue{ID: id, TeamID: target.TeamID, LabelID: fleet, Title: shortBoardText(strings.SplitN(b.Task.Title, "\n", 2)[0], linearTitleMaxRunes), Description: fmt.Sprintf("[hk-task:%d]", op.TaskID)})
+		_, createErr := w.Linear.CreateLinearIssue(ctx, LinearDecisionIssue{ID: id, TaskID: op.TaskID, TeamID: target.TeamID, LabelID: fleet, Title: shortBoardText(strings.SplitN(b.Task.Title, "\n", 2)[0], linearTitleMaxRunes), Description: fmt.Sprintf("[hk-task:%d]", op.TaskID)})
 		// Read after both success and failure. The deterministic id recovers a
 		// lost create response without ever creating a second issue.
 		issue, err = w.Linear.BoardIssue(ctx, id)
@@ -161,6 +218,9 @@ func (w LinearBoardWorker) sync(ctx context.Context, op store.LinearOutbox, resu
 	}
 	if issue.ID == "" || issue.Team.ID != target.TeamID || issue.Labels.PageInfo.HasNextPage {
 		return errors.New("linear board issue team or labels incomplete")
+	}
+	if err := w.Store.EnsureLinearBoardOwnership(ctx, op.TaskID, issue.ID, issue.Identifier); err != nil {
+		return err
 	}
 	result.RemoteID, result.Identifier = issue.ID, issue.Identifier
 	section := renderBoard(*b)

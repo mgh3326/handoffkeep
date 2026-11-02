@@ -155,17 +155,18 @@ type TaskRefs struct {
 }
 
 type TaskLinear struct {
-	IssueID    string   `json:"issue_id,omitempty"`
-	Identifier string   `json:"identifier,omitempty"`
-	Sync       bool     `json:"sync"`
-	Tier       string   `json:"tier,omitempty"`
-	Grade      string   `json:"grade,omitempty"`
-	Brief      string   `json:"brief,omitempty"`
-	Labels     []string `json:"labels,omitempty"`
-	Report     string   `json:"report,omitempty"`
-	Verify     string   `json:"verify,omitempty"`
-	Decision   string   `json:"decision,omitempty"`
-	DeploySHA  string   `json:"deploy_sha,omitempty"`
+	MirrorReason string   `json:"mirror_reason,omitempty"`
+	IssueID      string   `json:"issue_id,omitempty"`
+	Identifier   string   `json:"identifier,omitempty"`
+	Sync         bool     `json:"sync"`
+	Tier         string   `json:"tier,omitempty"`
+	Grade        string   `json:"grade,omitempty"`
+	Brief        string   `json:"brief,omitempty"`
+	Labels       []string `json:"labels,omitempty"`
+	Report       string   `json:"report,omitempty"`
+	Verify       string   `json:"verify,omitempty"`
+	Decision     string   `json:"decision,omitempty"`
+	DeploySHA    string   `json:"deploy_sha,omitempty"`
 }
 
 // DecisionOption is one bounded, operator-visible answer for a decision.
@@ -1088,6 +1089,10 @@ func (s *Store) migrate(ctx context.Context) error {
 		return err
 	}
 
+	if err := migrateOnce(ctx, tx, 31, func() error { return execAll(ctx, tx, linearAdmissionV31) }); err != nil {
+		return err
+	}
+
 	return tx.Commit(ctx)
 }
 func validName(x string) bool        { return nameRE.MatchString(x) }
@@ -1907,6 +1912,9 @@ func validTaskRefs(x TaskRefs) bool {
 }
 
 func validTaskLinear(x TaskLinear) bool {
+	if !validLinearMirrorReason(x.MirrorReason) {
+		return false
+	}
 	if !validText(x.IssueID, 256) || !validText(x.Identifier, 256) {
 		return false
 	}
@@ -1986,6 +1994,9 @@ func mergeTaskRefs(old, patch TaskRefs) TaskRefs {
 		// TaskLinear is also used as a partial transition patch. The connector
 		// can be opted in here, while an omitted/default false value must not
 		// silently disable an already opted-in task.
+		if patch.Linear.MirrorReason != "" {
+			merged.MirrorReason = patch.Linear.MirrorReason
+		}
 		if patch.Linear.Sync {
 			merged.Sync = true
 		}
