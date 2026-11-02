@@ -53,11 +53,13 @@ func main() {
 }
 func run(args []string, out, errout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: handoffkeep serve|mcp|ctx|memory|doc|attach|r2usage|tasks|decisions|fleet-metrics|bench|version")
+		return errors.New("usage: handoffkeep serve|sync|mcp|ctx|memory|doc|attach|r2usage|tasks|decisions|fleet-metrics|bench|version")
 	}
 	switch args[0] {
 	case "wrk":
 		return wrkCmd(args[1:], os.Stdin, out)
+	case "sync":
+		return syncCmd(args[1:], out)
 	case "serve":
 		return serve(args[1:], errout)
 	case "mcp":
@@ -83,7 +85,7 @@ func run(args []string, out, errout io.Writer) error {
 	case "version", "--version":
 		return versionCmd(args[1:], out)
 	default:
-		return errors.New("usage: handoffkeep serve|mcp|ctx|memory|doc|attach|r2usage|tasks|decisions|fleet-metrics|bench|version")
+		return errors.New("usage: handoffkeep serve|sync|mcp|ctx|memory|doc|attach|r2usage|tasks|decisions|fleet-metrics|bench|version")
 	}
 }
 
@@ -1730,6 +1732,10 @@ func serve(args []string, errout io.Writer) error {
 	if dbURL == "" || auth == "" {
 		return errors.New("HANDOFFKEEP_DB_URL and HANDOFFKEEP_AUTH_FILE are required")
 	}
+	retention, err := syncRetentionFromEnv()
+	if err != nil {
+		return err
+	}
 	ctx := context.Background()
 	monitor, err := telemetry.FromEnv(buildVersion().Rev)
 	if err != nil {
@@ -1768,7 +1774,7 @@ func serve(args []string, errout io.Writer) error {
 		return e
 	}
 	svc := api.Service{Store: st, Attachments: am}
-	workers := []backgroundWorker{chatRetentionWorker{store: st}, placementRetentionWorker{store: st}}
+	workers := []backgroundWorker{chatRetentionWorker{store: st}, placementRetentionWorker{store: st}, syncRetentionWorker{store: st, retention: retention}}
 	linear := linearFromEnv(st)
 	if linear.boardWorker != nil {
 		workers = append(workers, linear.boardWorker)

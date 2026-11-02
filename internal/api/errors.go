@@ -47,6 +47,7 @@ type errorRule struct {
 // errorRules is the one table from sentinel to response. Order matters only
 // where one error could match two rules; the first match wins.
 var errorRules = []errorRule{
+	{store.ErrInvalidSync, http.StatusBadRequest, "invalid_context", false},
 	{attachments.ErrDisabled, http.StatusServiceUnavailable, "attachments_disabled", false},
 	{attachments.ErrTooLarge, http.StatusRequestEntityTooLarge, "attachment_too_large", false},
 	{store.ErrAttachmentStorageCap, http.StatusInsufficientStorage, "attachment_storage_cap", false},
