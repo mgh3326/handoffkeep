@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -493,5 +495,38 @@ func TestWorkBoardReconcileRecoversTerminalTasksWithoutProjection(t *testing.T) 
 				t.Fatalf("incomplete terminal recovery: %+v", board)
 			}
 		}
+	}
+}
+
+func TestWorkBoardReconcileContinuesPastCorruptProjection(t *testing.T) {
+	_, url := testdb.Schema(t, "board_reconcile_failure")
+	st, err := Open(t.Context(), url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(st.Close)
+	st.EnableLinearBoard()
+	broken := linearTask(t, st, TaskRefs{})
+	if _, err = st.ClaimTask(t.Context(), broken.ID, "lead", "broken-board-job", ""); err != nil {
+		t.Fatal(err)
+	}
+	healthy := linearTask(t, st, TaskRefs{})
+	if _, err = st.ClaimTask(t.Context(), healthy.ID, "lead", "healthy-board-job", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = st.pool.Exec(t.Context(), `UPDATE linear_board_tasks SET status='{"task":"corrupt"}'::jsonb WHERE task_id=$1`, broken.ID); err != nil {
+		t.Fatal(err)
+	}
+	err = st.ReconcileLinearBoard(t.Context())
+	var decodeErr *json.UnmarshalTypeError
+	if !errors.As(err, &decodeErr) {
+		t.Fatalf("corrupt projection failure not preserved: %v", err)
+	}
+	rows, readErr := st.ListLinearOutbox(t.Context(), healthy.ID)
+	if readErr != nil || len(rows) != 2 {
+		t.Fatalf("later healthy task was not repaired: syncs=%d want=2 err=%v", len(rows), readErr)
+	}
+	if !strings.Contains(err.Error(), fmt.Sprintf("task %d", broken.ID)) {
+		t.Fatalf("failure omits broken task id: %v", err)
 	}
 }

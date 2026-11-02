@@ -442,12 +442,13 @@ func (s *Store) ReconcileLinearBoard(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	var reconcileErrors []error
 	for _, id := range ids {
 		if err := s.reconcileLinearBoardTask(ctx, id); err != nil {
-			return err
+			reconcileErrors = append(reconcileErrors, fmt.Errorf("linear board task %d: %w", id, err))
 		}
 	}
-	return nil
+	return errors.Join(reconcileErrors...)
 }
 
 func (s *Store) reconcileLinearBoardTask(ctx context.Context, id int64) error {
