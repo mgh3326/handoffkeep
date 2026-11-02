@@ -799,6 +799,46 @@ func TestDecisionFlowAgainstStore(t *testing.T) {
 	}
 }
 
+// Linear retries a delivery it saw fail even if hk committed it. If the verdict
+// changed in between, the operator must get the new reply, not only the old one.
+func TestDecisionRedeliveryWithAChangedVerdictRepliesAgain(t *testing.T) {
+	st, task := decisionStoreFixture(t)
+	linear := newFakeLinear()
+	asked, err := LinearDecisions{Team: "ROB", Linear: linear}.Ask(t.Context(), st, task.ID, "desk", askInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := decisionWebhook(st, linear, &fakeDots{})
+	deliver := func(state string) string {
+		t.Helper()
+		envelope := commentEnvelope("1", fakeOperator, operatorActor())
+		data := envelope["data"].(map[string]any)
+		data["id"], data["issueId"] = "c-1", asked.Issue.IssueID
+		data["issue"] = map[string]any{"labels": []map[string]any{{"name": store.LinearDecisionLabel}}, "state": map[string]any{"type": state}, "completedAt": "2026-11-01T00:00:00.000Z"}
+		status, out := signedPost(t, h, envelope)
+		if status != http.StatusOK {
+			t.Fatalf("status=%d out=%v", status, out)
+		}
+		return out["status"]
+	}
+	if got := deliver("completed"); got != store.LinearDecisionRejected {
+		t.Fatalf("closed issue=%q", got)
+	}
+	if got := deliver("completed"); got != store.LinearDecisionRejected {
+		t.Fatalf("closed issue again=%q", got)
+	}
+	if replies := opsOf(t, st, asked.Issue.IssueID, store.LinearDecisionOpComment); len(replies) != 1 {
+		t.Fatalf("a repeat with the same verdict replied again: %+v", replies)
+	}
+	if got := deliver("started"); got != store.LinearDecisionRecorded {
+		t.Fatalf("reopened issue=%q", got)
+	}
+	replies := opsOf(t, st, asked.Issue.IssueID, store.LinearDecisionOpComment)
+	if len(replies) != 2 || !strings.HasPrefix(replies[1].Body, "✅ recorded") {
+		t.Fatalf("replies=%+v", replies)
+	}
+}
+
 func TestDecisionSupersedeAgainstStore(t *testing.T) {
 	st, task := decisionStoreFixture(t)
 	linear := newFakeLinear()

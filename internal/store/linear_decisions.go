@@ -316,11 +316,14 @@ func decideLinearAnswer(link LinearDecisionLink, taskState string, request *Deci
 	return linearDecisionVerdict{outcome: LinearDecisionRecorded, option: option, number: number, reply: fmt.Sprintf("✅ recorded: %s = %d (%s: %s), ver=%s", ref, number, option.Key, option.Label, link.Ver)}
 }
 
-func linearAnswerReplyKey(in LinearDecisionAnswer) string {
+// linearAnswerReplyKey allows one reply per event and outcome. A repeated delivery
+// with the same outcome queues nothing, but one whose outcome changed, say refused
+// on a closed issue and then recorded after a reopen, still gets its own reply.
+func linearAnswerReplyKey(in LinearDecisionAnswer, outcome string) string {
 	if in.Source == LinearDecisionSourceComment {
-		return "reply:comment:" + in.CommentID
+		return "reply:comment:" + in.CommentID + ":" + outcome
 	}
-	return "reply:state:" + in.IssueID + ":" + in.EventAt
+	return "reply:state:" + in.IssueID + ":" + in.EventAt + ":" + outcome
 }
 
 // firstBytes cuts s to at most max bytes on a rune boundary.
@@ -454,8 +457,8 @@ func linearDecisionAnsweredText(link LinearDecisionLink, v linearDecisionVerdict
 // AnswerLinearDecision applies one authenticated answer to the issue's request.
 // The first valid answer wins. It resolves the request, queues the desk
 // notification and queues the reply in one transaction; every other outcome
-// changes the request not at all. A repeated delivery queues nothing new, since
-// each reply has one key per comment or state event. Outcome LinearDecisionNotLinked
+// changes the request not at all. A repeated delivery with the same outcome queues
+// no second reply. Outcome LinearDecisionNotLinked
 // means the issue carries no request.
 func (s *Store) AnswerLinearDecision(ctx context.Context, in LinearDecisionAnswer) (string, error) {
 	if in.IssueID == "" || in.UserID == "" || (in.Source != LinearDecisionSourceComment && in.Source != LinearDecisionSourceState) ||
@@ -532,7 +535,7 @@ func (s *Store) AnswerLinearDecision(ctx context.Context, in LinearDecisionAnswe
 		}
 	}
 	if v.reply != "" {
-		if err = insertLinearDecisionOp(ctx, tx, linearAnswerReplyKey(in), LinearDecisionOpComment, in.IssueID, v.reply, "", now); err != nil {
+		if err = insertLinearDecisionOp(ctx, tx, linearAnswerReplyKey(in, v.outcome), LinearDecisionOpComment, in.IssueID, v.reply, "", now); err != nil {
 			return "", err
 		}
 	}
