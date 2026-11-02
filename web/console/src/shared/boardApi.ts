@@ -1,4 +1,13 @@
-import type { BoardComment, BoardCommentsResponse, BoardDetail, BoardDoc, BoardTask, BoardTasksResponse } from "./boardTypes";
+import type {
+  BoardWorkBoard,
+  BoardWorkSession,
+  BoardComment,
+  BoardCommentsResponse,
+  BoardDetail,
+  BoardDoc,
+  BoardTask,
+  BoardTasksResponse,
+} from "./boardTypes";
 import type { LiveResponse } from "../live";
 import { getJSON } from "./http";
 
@@ -28,8 +37,19 @@ export async function fetchBoardTasks(): Promise<BoardData> {
     if (afterID > 0) {
       params.set("after_id", String(afterID));
     }
-    const page = await getJSON<BoardTasksResponse>(`/ui/api/board/tasks?${params.toString()}`);
-    if (!page || !Array.isArray(page.states) || !page.states.every(s => typeof s === "string") || !Array.isArray(page.tasks) || !page.tasks.every(validBoardTask) || typeof page.generated_at !== "string" || typeof page.truncated !== "boolean") throw new Error("malformed board response");
+    const page = await getJSON<BoardTasksResponse>(
+      `/ui/api/board/tasks?${params.toString()}`,
+    );
+    if (
+      !page ||
+      !Array.isArray(page.states) ||
+      !page.states.every((s) => typeof s === "string") ||
+      !Array.isArray(page.tasks) ||
+      !page.tasks.every(validBoardTask) ||
+      typeof page.generated_at !== "string" ||
+      typeof page.truncated !== "boolean"
+    )
+      throw new Error("malformed board response");
     states = page.states;
     generatedAt = page.generated_at;
     tasks.push(...page.tasks);
@@ -43,7 +63,9 @@ export async function fetchBoardTasks(): Promise<BoardData> {
     if (next <= afterID) {
       // A cursor that does not advance would re-request the same page until
       // the cap — reject loudly instead of looping on a server violation.
-      throw new Error(`non-advancing board cursor: after_id=${afterID} next_after_id=${next}`);
+      throw new Error(
+        `non-advancing board cursor: after_id=${afterID} next_after_id=${next}`,
+      );
     }
     afterID = next;
   }
@@ -51,7 +73,13 @@ export async function fetchBoardTasks(): Promise<BoardData> {
 
 export async function fetchTaskDetail(id: number): Promise<BoardDetail> {
   const data = await getJSON<BoardDetail>(`/ui/api/board/tasks/${id}`);
-  if (!data || !validBoardTask(data.task) || !Array.isArray(data.events) || !Array.isArray(data.dwell)) throw new Error("malformed task detail");
+  if (
+    !data ||
+    !validBoardTask(data.task) ||
+    !Array.isArray(data.events) ||
+    !Array.isArray(data.dwell)
+  )
+    throw new Error("malformed task detail");
   return data;
 }
 
@@ -59,7 +87,17 @@ export async function fetchTaskDetail(id: number): Promise<BoardDetail> {
  * inside the payload carry hub failures explicitly. */
 export async function fetchLive(): Promise<LiveResponse> {
   const data = await getJSON<LiveResponse>("/ui/api/live");
-  if (!data || !data.jobs || !data.nodes || !Array.isArray(data.jobs.items) || !Array.isArray(data.nodes.items) || !Array.isArray(data.links) || typeof data.jobs.status !== "string" || typeof data.nodes.status !== "string") throw new Error("malformed live response");
+  if (
+    !data ||
+    !data.jobs ||
+    !data.nodes ||
+    !Array.isArray(data.jobs.items) ||
+    !Array.isArray(data.nodes.items) ||
+    !Array.isArray(data.links) ||
+    typeof data.jobs.status !== "string" ||
+    typeof data.nodes.status !== "string"
+  )
+    throw new Error("malformed live response");
   return data;
 }
 
@@ -79,7 +117,9 @@ export async function fetchTaskComments(id: number): Promise<TaskComments> {
   let afterID = 0;
   for (;;) {
     const query = afterID > 0 ? `?after_id=${afterID}` : "";
-    const page = await getJSON<BoardCommentsResponse>(`/ui/api/board/tasks/${id}/comments${query}`);
+    const page = await getJSON<BoardCommentsResponse>(
+      `/ui/api/board/tasks/${id}/comments${query}`,
+    );
     comments.push(...page.comments);
     if (!page.truncated) {
       return { comments, truncated: false };
@@ -109,14 +149,20 @@ export class CommentWriteError extends Error {
  * cookie it pairs with is HttpOnly, so the page hands the token over in a
  * meta tag; null when the page has none. */
 export function readCsrfToken(): string | null {
-  const value = document.querySelector<HTMLMetaElement>('meta[name="hk-csrf"]')?.content ?? "";
+  const value =
+    document.querySelector<HTMLMetaElement>('meta[name="hk-csrf"]')?.content ??
+    "";
   return value === "" ? null : value;
 }
 
 /** Appends a comment through the console's form-write path — the same
  * authentication, origin and CSRF checks as the decision answers. Only the
  * body and the CSRF token are sent: the author is whoever is signed in. */
-export async function postTaskComment(id: number, body: string, csrf: string): Promise<BoardComment> {
+export async function postTaskComment(
+  id: number,
+  body: string,
+  csrf: string,
+): Promise<BoardComment> {
   let response: Response;
   try {
     response = await fetch(`/ui/tasks/${id}/comments`, {
@@ -143,10 +189,64 @@ export async function postTaskComment(id: number, body: string, csrf: string): P
 
 function validBoardTask(value: unknown): value is BoardTask {
   if (typeof value !== "object" || value === null) return false;
-  return "id" in value && typeof value.id === "number" && Number.isSafeInteger(value.id) && value.id > 0 &&
-    "title" in value && typeof value.title === "string" && "lane" in value && typeof value.lane === "string" &&
-    "state" in value && typeof value.state === "string" && "priority" in value && typeof value.priority === "number" &&
-    "kind" in value && typeof value.kind === "string" && "created_by" in value && typeof value.created_by === "string" &&
-    "created_at" in value && typeof value.created_at === "string" && "updated_at" in value && typeof value.updated_at === "string" &&
-    "refs" in value && typeof value.refs === "object" && value.refs !== null;
+  return (
+    "id" in value &&
+    typeof value.id === "number" &&
+    Number.isSafeInteger(value.id) &&
+    value.id > 0 &&
+    "title" in value &&
+    typeof value.title === "string" &&
+    "lane" in value &&
+    typeof value.lane === "string" &&
+    "state" in value &&
+    typeof value.state === "string" &&
+    "priority" in value &&
+    typeof value.priority === "number" &&
+    "kind" in value &&
+    typeof value.kind === "string" &&
+    "created_by" in value &&
+    typeof value.created_by === "string" &&
+    "created_at" in value &&
+    typeof value.created_at === "string" &&
+    "updated_at" in value &&
+    typeof value.updated_at === "string" &&
+    "refs" in value &&
+    typeof value.refs === "object" &&
+    value.refs !== null &&
+    (!("work_board" in value) || validWorkBoard(value.work_board))
+  );
+}
+
+function validWorkBoard(value: unknown): value is BoardWorkBoard {
+  if (typeof value !== "object" || value === null) return false;
+  return (
+    "primary_job_id" in value &&
+    typeof value.primary_job_id === "string" &&
+    "pr" in value &&
+    typeof value.pr === "string" &&
+    "head_sha" in value &&
+    typeof value.head_sha === "string" &&
+    "sessions" in value &&
+    Array.isArray(value.sessions) &&
+    value.sessions.every(validWorkSession)
+  );
+}
+function validWorkSession(value: unknown): value is BoardWorkSession {
+  if (typeof value !== "object" || value === null) return false;
+  return (
+    "job_id" in value &&
+    typeof value.job_id === "string" &&
+    "host" in value &&
+    typeof value.host === "string" &&
+    "family" in value &&
+    typeof value.family === "string" &&
+    "model" in value &&
+    typeof value.model === "string" &&
+    "role" in value &&
+    typeof value.role === "string" &&
+    "active" in value &&
+    typeof value.active === "boolean" &&
+    "at" in value &&
+    typeof value.at === "string"
+  );
 }

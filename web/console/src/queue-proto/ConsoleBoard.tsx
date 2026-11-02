@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchBoardTasks, fetchLive } from "../shared/boardApi";
 import { usePoll } from "../shared/usePoll";
-import { liveRequestFailed, taskLiveJobs } from "../live";
+import { liveRequestFailed } from "../live";
+import { ExecutionChips } from "./ExecutionChips";
 import { TaskPage } from "./TaskPage";
 import { PageShell } from "./AppShell";
 import { DeploySummary } from "./DeploySummary";
@@ -172,15 +173,6 @@ export function ConsoleBoard() {
                   {stateLabel(s)} <small>{rows.length}</small>
                 </h2>
                 {rows.map((t) => {
-                  const jobs = data ? taskLiveJobs(data.live, t.id) : null;
-                  const primary = jobs?.primary;
-                  const role = primary?.role;
-                  const roles: Record<string, string> = {
-                    lead: "Builder",
-                    worker: "Worker",
-                    review: "Reviewer",
-                    consult: "Consultant",
-                  };
                   return (
                     <article
                       data-console-row
@@ -212,38 +204,7 @@ export function ConsoleBoard() {
                         <strong>{t.title}</strong>
                       </a>
                       <span className="hk-row-meta">
-                        <span className="hk-chip">
-                          {primary?.machine || "Host not collected"}
-                        </span>
-                        <span className="hk-chip" title={role}>
-                          {role ? (roles[role] ?? role) : "Role not collected"}
-                        </span>
-                        <span className="hk-chip">Model not collected</span>
-                        {jobs?.children.length ? (
-                          <details className="hk-chip">
-                            <summary>+{jobs.children.length} sessions</summary>
-                            <ul>
-                              {jobs.children.map((job) => (
-                                <li key={job.job_id}>
-                                  {job.role || "Unknown role"} ·{" "}
-                                  {job.machine || "Host not collected"} · Model
-                                  not collected
-                                </li>
-                              ))}
-                            </ul>
-                          </details>
-                        ) : null}
-                        {t.refs.pr ? (
-                          /^https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/\d+$/.test(
-                            t.refs.pr,
-                          ) ? (
-                            <a className="hk-chip" href={t.refs.pr}>
-                              PR {t.refs.pr.split("/").pop()}
-                            </a>
-                          ) : (
-                            <span className="hk-chip">PR {t.refs.pr}</span>
-                          )
-                        ) : null}
+                        {data ? <ExecutionChips task={t} live={data.live} /> : null}
                         <span>
                           {t.lane} · {t.claimed_by || "Unclaimed"}
                         </span>

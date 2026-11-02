@@ -170,7 +170,7 @@ small {
 }
 .hk-task-row {
   display: grid;
-  grid-template-columns: 64px minmax(100px, 1fr) minmax(180px, auto);
+  grid-template-columns: 64px minmax(0, 1fr) minmax(180px, 48%);
   gap: 12px;
   align-items: center;
   min-height: 48px;
@@ -183,6 +183,8 @@ small {
   background: var(--hk-surface-selected);
 }
 .hk-row-meta {
+  min-width: 0;
+  align-items: center;
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
@@ -191,6 +193,9 @@ small {
 }
 .hk-chip,
 .badge {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
   border: 1px solid var(--hk-border-strong);
   padding: 1px 6px;
   border-radius: 4px;

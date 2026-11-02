@@ -16,7 +16,8 @@
       "theme": "dark",
       "width": 1280,
       "overflow": false,
-      "errors": []
+      "errors": [],
+      "captured_at": "2026-11-02T15:29:14.396Z"
     },
     {
       "file": "task-dark-1280.png",
@@ -96,7 +97,8 @@
       "theme": "dark",
       "width": 1280,
       "overflow": false,
-      "errors": []
+      "errors": [],
+      "captured_at": "2026-11-02T15:29:16.428Z"
     },
     {
       "file": "inbox-light-1280.png",
@@ -112,7 +114,8 @@
       "theme": "light",
       "width": 1280,
       "overflow": false,
-      "errors": []
+      "errors": [],
+      "captured_at": "2026-11-02T15:29:21.892Z"
     },
     {
       "file": "task-light-1280.png",
@@ -192,7 +195,8 @@
       "theme": "light",
       "width": 1280,
       "overflow": false,
-      "errors": []
+      "errors": [],
+      "captured_at": "2026-11-02T15:29:24.092Z"
     },
     {
       "file": "inbox-dark-390.png",
@@ -208,7 +212,8 @@
       "theme": "dark",
       "width": 390,
       "overflow": false,
-      "errors": []
+      "errors": [],
+      "captured_at": "2026-11-02T15:29:28.647Z"
     },
     {
       "file": "task-dark-390.png",
@@ -288,7 +293,8 @@
       "theme": "dark",
       "width": 390,
       "overflow": false,
-      "errors": []
+      "errors": [],
+      "captured_at": "2026-11-02T15:29:30.372Z"
     },
     {
       "file": "inbox-light-390.png",
@@ -304,7 +310,8 @@
       "theme": "light",
       "width": 390,
       "overflow": false,
-      "errors": []
+      "errors": [],
+      "captured_at": "2026-11-02T15:29:34.901Z"
     },
     {
       "file": "task-light-390.png",
@@ -384,7 +391,8 @@
       "theme": "light",
       "width": 390,
       "overflow": false,
-      "errors": []
+      "errors": [],
+      "captured_at": "2026-11-02T15:29:36.485Z"
     }
   ]
 }
