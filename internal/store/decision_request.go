@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -53,6 +54,7 @@ const (
 	DecisionRequestReceiptMaxBytes = 512
 	DecisionRequestTextMaxBytes    = 1000
 	DecisionOptionLabelMaxBytes    = 120
+	DecisionRequestMaxRefs         = 10
 )
 
 // TaskEventDecision marks task_events rows that record a decision request or
@@ -136,8 +138,10 @@ type DecisionRequest struct {
 	DefaultTrigger string     `json:"default_trigger,omitempty"`
 	DueAt          *time.Time `json:"due_at,omitempty"`
 	Doc            string     `json:"doc,omitempty"`
-	RequestedBy    string     `json:"requested_by"`
-	RequestedAt    time.Time  `json:"requested_at"`
+	// Refs are short pointers the question depends on. They count toward ver.
+	Refs        []string  `json:"refs,omitempty"`
+	RequestedBy string    `json:"requested_by"`
+	RequestedAt time.Time `json:"requested_at"`
 	// HumanOnly marks a request the assistant path must not answer — the
 	// producer's structural "a human decides this" (merge, deploy, spend).
 	HumanOnly  bool                `json:"human_only,omitempty"`
@@ -165,6 +169,10 @@ type DecisionResolution struct {
 	OperatorQuote string `json:"operator_quote,omitempty"`
 	DecisionRef   string `json:"decision_ref,omitempty"`
 	DecidedBy     string `json:"decided_by,omitempty"`
+
+	// Linear is the audit record of an answer given on the request's Linear
+	// issue. Every other path leaves it nil.
+	Linear *DecisionLinearAudit `json:"linear,omitempty"`
 }
 
 // DecisionRequestInput is the producer's request. Options carries the
@@ -178,6 +186,7 @@ type DecisionRequestInput struct {
 	DefaultTrigger string          `json:"default_trigger,omitempty"`
 	DueAt          *time.Time      `json:"due_at,omitempty"`
 	Doc            string          `json:"doc,omitempty"`
+	Refs           []string        `json:"refs,omitempty"`
 	Supersedes     string          `json:"supersedes,omitempty"`
 	// Block also moves the task to needs_decision in the same transaction
 	// (a request that stops the work). Without it the state is unchanged.
@@ -422,6 +431,14 @@ func ValidateDecisionRequestInput(in DecisionRequestInput) error {
 	if in.Doc != "" && !ValidBodyDoc(in.Doc) {
 		return invalidDecisionRequest("doc must be a document key or key#section")
 	}
+	if len(in.Refs) > DecisionRequestMaxRefs {
+		return invalidDecisionRequest(fmt.Sprintf("at most %d refs are allowed", DecisionRequestMaxRefs))
+	}
+	for _, ref := range in.Refs {
+		if !validDecisionLine(ref, DecisionRequestActionMaxBytes) {
+			return invalidDecisionRequest(fmt.Sprintf("each ref must be one line of at most %d bytes", DecisionRequestActionMaxBytes))
+		}
+	}
 	if in.Supersedes != "" && !strings.HasPrefix(in.Supersedes, "dr-") {
 		return invalidDecisionRequest("supersedes must be a request id (dr-<task>-<revision>)")
 	}
@@ -500,11 +517,12 @@ func sameDecisionRequest(current DecisionRequest, currentOptions *DecisionOption
 	return current.Question == in.Question && sameDecisionOptions(currentOptions, &in.Options) && current.Reason == in.Reason &&
 		current.DefaultAction == in.DefaultAction && current.DefaultOption == in.DefaultOption &&
 		current.DefaultTrigger == in.DefaultTrigger && sameDue(current.DueAt, in.DueAt) && current.Doc == in.Doc &&
-		current.HumanOnly == in.HumanOnly
+		slices.Equal(current.Refs, in.Refs) && current.HumanOnly == in.HumanOnly
 }
 
 func rejectDecisionRequestSecrets(in DecisionRequestInput) error {
 	values := []string{in.Question, in.Reason, in.DefaultAction, in.DefaultTrigger, in.Doc}
+	values = append(values, in.Refs...)
 	for _, option := range in.Options.Options {
 		values = append(values, option.Label)
 	}
@@ -606,6 +624,7 @@ func (s *Store) RecordDecisionRequest(ctx context.Context, taskID int64, by stri
 		DefaultTrigger: in.DefaultTrigger,
 		DueAt:          in.DueAt,
 		Doc:            in.Doc,
+		Refs:           in.Refs,
 		HumanOnly:      in.HumanOnly,
 		RequestedBy:    by,
 		RequestedAt:    now,
@@ -869,6 +888,9 @@ func (s *Store) resolveDecisionRequest(ctx context.Context, taskID int64, by str
 		}
 	}
 	if err = insertDecisionEvent(ctx, tx, taskID, x.State, by, note, x.Refs, now); err != nil {
+		return DecisionRequestResult{}, err
+	}
+	if err = queueDecisionClosedPost(ctx, tx, resolved, x.Refs.DecisionOptions, now); err != nil {
 		return DecisionRequestResult{}, err
 	}
 	if err = tx.Commit(ctx); err != nil {

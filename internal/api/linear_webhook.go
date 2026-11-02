@@ -18,7 +18,7 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
-// POST /hooks/linear receives Linear's Comment webhooks. It carries no bearer
+// POST /hooks/linear receives Linear's Comment and Issue webhooks. It carries no bearer
 // token: the signature over the raw body is the authentication.
 // https://linear.app/developers/webhooks
 
@@ -57,31 +57,59 @@ type LinearWebhook struct {
 	Secret string
 	Issues LinearIssueFetcher
 	Store  DotsRecorder
+	// Decisions turns on the decision path. Nil leaves it off, and Operator (the
+	// Linear user id allowed to answer) and StateOptions are unused.
+	Decisions    LinearDecisionRecorder
+	Operator     string
+	StateOptions map[string]int
 }
 
 type linearWebhookPayload struct {
 	Action           string `json:"action"`
 	Type             string `json:"type"`
 	WebhookTimestamp int64  `json:"webhookTimestamp"`
-	Data             struct {
+	Actor            *struct {
+		ID   string `json:"id"`
+		Type string `json:"type"`
+	} `json:"actor"`
+	UpdatedFrom map[string]json.RawMessage `json:"updatedFrom"`
+	Data        struct {
 		ID        string          `json:"id"`
 		Body      string          `json:"body"`
 		CreatedAt string          `json:"createdAt"`
+		UpdatedAt string          `json:"updatedAt"`
 		IssueID   string          `json:"issueId"`
 		Issue     json.RawMessage `json:"issue"`
+		UserID    string          `json:"userId"`
+		User      *struct {
+			ID string `json:"id"`
+		} `json:"user"`
+		BotActor json.RawMessage `json:"botActor"`
+		State    struct {
+			Name string `json:"name"`
+		} `json:"state"`
+		Labels []linearPayloadLabel `json:"labels"`
 	} `json:"data"`
+}
+
+type linearPayloadLabel struct {
+	Name string `json:"name"`
+}
+
+// movedState reports whether this update changed the issue's state.
+func (p linearWebhookPayload) movedState() bool {
+	_, moved := p.UpdatedFrom["stateId"]
+	return moved
 }
 
 // linearPayloadIssue is data.issue. Linear's documented Comment example has no
 // labels, so Labels stays nil on the usual delivery and the issue is fetched.
 type linearPayloadIssue struct {
-	Identifier string `json:"identifier"`
-	Title      string `json:"title"`
-	URL        string `json:"url"`
-	Labels     []struct {
-		Name string `json:"name"`
-	} `json:"labels"`
-	State struct {
+	Identifier string               `json:"identifier"`
+	Title      string               `json:"title"`
+	URL        string               `json:"url"`
+	Labels     []linearPayloadLabel `json:"labels"`
+	State      struct {
 		Type string `json:"type"`
 	} `json:"state"`
 	CompletedAt string `json:"completedAt"`
@@ -142,7 +170,7 @@ func (h LinearWebhook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "stale_timestamp")
 		return
 	}
-	status, err := h.handle(r.Context(), payload)
+	status, err := h.handle(r.Context(), payload, r.Header.Get("Linear-Delivery"))
 	if err != nil {
 		var fetch linearFetchError
 		if errors.As(err, &fetch) {
@@ -158,11 +186,23 @@ func (h LinearWebhook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	jsonOut(w, http.StatusOK, map[string]string{"status": status})
 }
 
-func (h LinearWebhook) handle(ctx context.Context, payload linearWebhookPayload) (string, error) {
+func (h LinearWebhook) handle(ctx context.Context, payload linearWebhookPayload, delivery string) (string, error) {
 	const ignored = "ignored"
 	data := payload.Data
+	if h.Decisions != nil && payload.Type == "Issue" && payload.Action == "update" {
+		return h.handleDecisionIssue(ctx, payload, delivery)
+	}
 	if payload.Type != "Comment" || payload.Action != "create" || data.IssueID == "" {
 		return ignored, nil
+	}
+	if h.Decisions != nil {
+		_, linked, err := h.Decisions.LinearDecisionLinkByIssue(ctx, data.IssueID)
+		if err != nil {
+			return "", err
+		}
+		if linked {
+			return h.handleDecisionComment(ctx, payload, delivery)
+		}
 	}
 	kind, dots := store.DotsKind(data.Body)
 	recorded := dots && store.DotsKindRecorded(kind)
@@ -245,6 +285,39 @@ type LinearAPI struct {
 const linearIssueQuery = `query($id:String!){issue(id:$id){identifier title url completedAt canceledAt state{type} labels(first:100){nodes{name}}}}`
 
 func (a LinearAPI) LinearIssue(ctx context.Context, issueID string) (LinearIssue, error) {
+	var out struct {
+		Issue *struct {
+			Identifier string `json:"identifier"`
+			Title      string `json:"title"`
+			URL        string `json:"url"`
+			State      struct {
+				Type string `json:"type"`
+			} `json:"state"`
+			CompletedAt string `json:"completedAt"`
+			CanceledAt  string `json:"canceledAt"`
+			Labels      struct {
+				Nodes []struct {
+					Name string `json:"name"`
+				} `json:"nodes"`
+			} `json:"labels"`
+		} `json:"issue"`
+	}
+	if err := a.graphql(ctx, linearAPITimeout, linearIssueQuery, map[string]any{"id": issueID}, &out); err != nil {
+		return LinearIssue{}, err
+	}
+	if out.Issue == nil {
+		return LinearIssue{}, errors.New("linear api returned no issue")
+	}
+	issue := out.Issue
+	result := LinearIssue{Identifier: issue.Identifier, Title: issue.Title, URL: issue.URL, Labels: []string{}, StateType: issue.State.Type, CompletedAt: issue.CompletedAt, CanceledAt: issue.CanceledAt}
+	for _, label := range issue.Labels.Nodes {
+		result.Labels = append(result.Labels, label.Name)
+	}
+	return result, nil
+}
+
+// graphql runs one request against Linear and decodes its data into out.
+func (a LinearAPI) graphql(ctx context.Context, timeout time.Duration, query string, variables map[string]any, out any) error {
 	endpoint := a.URL
 	if endpoint == "" {
 		endpoint = linearAPIURL
@@ -253,61 +326,40 @@ func (a LinearAPI) LinearIssue(ctx context.Context, issueID string) (LinearIssue
 	if client == nil {
 		client = http.DefaultClient
 	}
-	body, err := json.Marshal(map[string]any{"query": linearIssueQuery, "variables": map[string]string{"id": issueID}})
+	body, err := json.Marshal(map[string]any{"query": query, "variables": variables})
 	if err != nil {
-		return LinearIssue{}, err
+		return err
 	}
-	ctx, cancel := context.WithTimeout(ctx, linearAPITimeout)
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return LinearIssue{}, err
+		return err
 	}
 	req.Header.Set("Authorization", a.Key)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := client.Do(req)
 	if err != nil {
-		return LinearIssue{}, err
+		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return LinearIssue{}, fmt.Errorf("linear api status %d", resp.StatusCode)
+		return fmt.Errorf("linear api status %d", resp.StatusCode)
 	}
-	var out struct {
-		Data struct {
-			Issue *struct {
-				Identifier string `json:"identifier"`
-				Title      string `json:"title"`
-				URL        string `json:"url"`
-				State      struct {
-					Type string `json:"type"`
-				} `json:"state"`
-				CompletedAt string `json:"completedAt"`
-				CanceledAt  string `json:"canceledAt"`
-				Labels      struct {
-					Nodes []struct {
-						Name string `json:"name"`
-					} `json:"nodes"`
-				} `json:"labels"`
-			} `json:"issue"`
-		} `json:"data"`
+	var envelope struct {
+		Data   json.RawMessage `json:"data"`
 		Errors []struct {
 			Message string `json:"message"`
 		} `json:"errors"`
 	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, store.MaxBytes)).Decode(&out); err != nil {
-		return LinearIssue{}, fmt.Errorf("linear api response: %w", err)
+	if err := json.NewDecoder(io.LimitReader(resp.Body, store.MaxBytes)).Decode(&envelope); err != nil {
+		return fmt.Errorf("linear api response: %w", err)
 	}
-	if len(out.Errors) > 0 {
-		return LinearIssue{}, fmt.Errorf("linear api error: %s", out.Errors[0].Message)
+	if len(envelope.Errors) > 0 {
+		return fmt.Errorf("linear api error: %s", envelope.Errors[0].Message)
 	}
-	if out.Data.Issue == nil {
-		return LinearIssue{}, errors.New("linear api returned no issue")
+	if err := json.Unmarshal(envelope.Data, out); err != nil {
+		return fmt.Errorf("linear api response: %w", err)
 	}
-	issue := out.Data.Issue
-	result := LinearIssue{Identifier: issue.Identifier, Title: issue.Title, URL: issue.URL, Labels: []string{}, StateType: issue.State.Type, CompletedAt: issue.CompletedAt, CanceledAt: issue.CanceledAt}
-	for _, label := range issue.Labels.Nodes {
-		result.Labels = append(result.Labels, label.Name)
-	}
-	return result, nil
+	return nil
 }

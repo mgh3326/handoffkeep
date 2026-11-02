@@ -9,7 +9,7 @@ import (
 // Schema versions are recorded in schema_version and claimed in one place
 // each; the next free number is one past the highest below.
 //
-//	1-7, 9-19, 21, 22, 25, 26  Store.migrate (store.go); 8 was never used
+//	1-7, 9-19, 21, 22, 25-27  Store.migrate (store.go); 8 was never used
 //	20                         migrateWrk (wrk_migration.go), owner-only via MigrateWrk
 //	23, 24                     migrateQuota (quota.go)
 //
@@ -18,7 +18,7 @@ import (
 
 // SchemaVersion is the highest version a fully migrated database records.
 // Bump it with every new version; tests assert max(version) against it.
-const SchemaVersion = 26
+const SchemaVersion = 27
 
 // migrationLockID serializes migrations across processes (one
 // pg_advisory_xact_lock per migrating transaction).

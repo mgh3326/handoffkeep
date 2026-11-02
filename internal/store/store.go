@@ -1026,6 +1026,22 @@ func (s *Store) migrate(ctx context.Context) error {
 		return err
 	}
 
+	if err := migrateOnce(ctx, tx, 27, func() error {
+		// Version 27 (hk 2615) adds the tables for operator decisions through
+		// Linear: which issue carries which request, and the comments, closes and Discord
+		// posts still owed. Creating the foreign key takes a brief SHARE ROW
+		// EXCLUSIVE lock on tasks; nothing else existing is touched.
+		v27 := []string{
+			`CREATE TABLE linear_decision_issues (request_id TEXT PRIMARY KEY, task_id BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE, ver TEXT NOT NULL CHECK(ver ~ '^[0-9a-f]{8}$'), issue_id TEXT NOT NULL UNIQUE, identifier TEXT NOT NULL, url TEXT NOT NULL, superseded_by TEXT NOT NULL DEFAULT '', created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL)`,
+			`CREATE TABLE linear_decision_ops (id BIGSERIAL PRIMARY KEY, dedupe_key TEXT NOT NULL UNIQUE, op TEXT NOT NULL CHECK(op IN ('comment','close','discord')), issue_id TEXT NOT NULL, body TEXT NOT NULL DEFAULT '', state_id TEXT NOT NULL DEFAULT '', state TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('pending','sent','failed','skipped')), attempts INT NOT NULL DEFAULT 0, next_attempt_at TIMESTAMPTZ NOT NULL, last_error TEXT NOT NULL DEFAULT '', created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL)`,
+			`CREATE INDEX linear_decision_ops_pending ON linear_decision_ops(next_attempt_at, id) WHERE state='pending'`,
+			`INSERT INTO schema_version(version) VALUES (27)`,
+		}
+		return execAll(ctx, tx, v27)
+	}); err != nil {
+		return err
+	}
+
 	// Lane-knownness probes for relane run once per batch item. These
 	// indexes keep each probe an index lookup instead of a full scan —
 	// the existing relay_events index on owner_lane is partial and

@@ -1,6 +1,9 @@
 # Linear webhook for dots answers
 
-`POST /hooks/linear` receives Linear `Comment` webhooks. dots answers on issues
+The same endpoint also records operator decisions, on issues that carry a
+decision request. See [linear-decisions.md](linear-decisions.md).
+
+`POST /hooks/linear` receives Linear `Comment` and `Issue` webhooks. dots answers on issues
 labelled `dots` with comments that start `[dots] <KIND>`, and this endpoint
 records those answers as they arrive. A poller stays on as a reconciler; both
 paths write the same document key, body and event id, so whichever runs second
@@ -32,7 +35,8 @@ Every request is authenticated first:
 - `webhookTimestamp` must be within 60 seconds of the server clock. Otherwise
   the request gets `401 stale_timestamp`.
 
-An authenticated `Comment` `create` event is then handled by its first line:
+An authenticated `Comment` `create` event on an issue with no decision request is
+then handled by its first line:
 
 | Comment | Issue | Result | `status` |
 |---|---|---|---|
@@ -55,7 +59,8 @@ session `operator-desk`. The first writer of a key wins.
 Each notification is one `notification_outbox` row for lane `operator-desk`,
 written in the same transaction as its document. Read unsent rows with
 `GET /v1/assistant/outbox`, and record a hub receipt with
-`POST /v1/assistant/outbox/sent`.
+`POST /v1/assistant/outbox/sent`. The server can do both itself: see
+[Desk notification](linear-decisions.md#desk-notification).
 
 | `kind` | Lane-event type | `event_id` |
 |---|---|---|
@@ -78,7 +83,7 @@ live at step 5.
    signature check authenticates the request.
 3. In Linear, go to **Settings > API > Webhooks** and create a webhook with the
    URL `https://<hk origin>/hooks/linear`.
-4. Select teams `ROB` and `MGH`, and resource type **Comment**.
+4. Select teams `ROB` and `MGH`, and resource types **Comment** and **Issue**.
 5. Copy the signing secret into `HANDOFFKEEP_LINEAR_WEBHOOK_SECRET` and restart
    the server.
 6. Post a plain comment on a test issue. Linear's webhook page should show a 200

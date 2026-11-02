@@ -26,6 +26,7 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/api"
 	"github.com/mgh3326/handoffkeep/internal/attachments"
 	"github.com/mgh3326/handoffkeep/internal/cfaccess"
+	"github.com/mgh3326/handoffkeep/internal/hubforward"
 	hkmcp "github.com/mgh3326/handoffkeep/internal/mcp"
 	"github.com/mgh3326/handoffkeep/internal/remote"
 	"github.com/mgh3326/handoffkeep/internal/store"
@@ -606,8 +607,11 @@ func normalizeDecisionArgs(args []string) ([]string, error) {
 }
 
 func decisionsCmd(args []string, out io.Writer) error {
+	if len(args) > 0 && args[0] == "ask" {
+		return decisionAskCmd(args[1:], out)
+	}
 	if len(args) == 0 || args[0] != "resolve" {
-		return errors.New("usage: decisions resolve <task|escalation|lane> <id> --by <lane> --answer <answer> [--note <note>] [--no-inject]")
+		return errors.New("usage: decisions resolve <task|escalation|lane> <id> --by <lane> --answer <answer> [--note <note>] [--no-inject]\n       " + decisionAskUsage)
 	}
 	fs := flag.NewFlagSet("decisions resolve", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -1759,13 +1763,20 @@ func serve(args []string, errout io.Writer) error {
 	}
 	svc := api.Service{Store: st, Attachments: am}
 	workers := []backgroundWorker{chatRetentionWorker{store: st}}
+	linear := linearFromEnv(st)
+	if linear.opsWorker != nil {
+		workers = append(workers, linear.opsWorker)
+	}
+	if forwarder := notificationForwarderFromEnv(st); forwarder != nil {
+		workers = append(workers, forwarder)
+	}
 	uiHandler, e := uiFromEnv(st)
 	if e != nil {
 		return e
 	}
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", hkmcp.HTTPHandler(svc, tokens))
-	mux.Handle("/", api.Server{Service: svc, Tokens: tokens, QuotaAccounts: quotaAccounts, HostGrants: hostGrants, UI: uiHandler, LinearWebhook: linearWebhookFromEnv(st)}.Handler())
+	mux.Handle("/", api.Server{Service: svc, Tokens: tokens, QuotaAccounts: quotaAccounts, HostGrants: hostGrants, UI: uiHandler, LinearWebhook: linear.webhook, LinearDecisions: linear.decisions}.Handler())
 	addresses := []string{*listen}
 	if *tail != "" {
 		addresses = append(addresses, *tail)
@@ -1814,20 +1825,82 @@ func uiFromEnv(st *store.Store) (http.Handler, error) {
 	})
 }
 
-// linearWebhookFromEnv follows uiFromEnv: incomplete configuration disables the
-// route and leaves the rest of the server running. Linear's Comment payload has
-// no labels, so the webhook cannot work on the secret alone.
-func linearWebhookFromEnv(st *store.Store) http.Handler {
+// linearServer is what the Linear configuration turns on. Any field may be nil.
+type linearServer struct {
+	webhook   http.Handler
+	decisions *api.LinearDecisions
+	opsWorker backgroundWorker
+}
+
+// linearFromEnv follows uiFromEnv: incomplete configuration disables the route
+// and leaves the rest of the server running. Linear's Comment payload has no
+// labels, so the webhook cannot work on the secret alone. Decisions need the
+// webhook, since that is how answers arrive, plus the operator's user id.
+func linearFromEnv(st *store.Store) linearServer {
 	secret := strings.TrimSpace(os.Getenv("HANDOFFKEEP_LINEAR_WEBHOOK_SECRET"))
 	key := strings.TrimSpace(os.Getenv("HANDOFFKEEP_LINEAR_API_KEY"))
+	operator := strings.TrimSpace(os.Getenv("HANDOFFKEEP_LINEAR_OPERATOR_USER_ID"))
 	if secret == "" && key == "" {
-		return nil
+		if operator != "" {
+			log.Printf("linear_decisions.disabled reason=no_webhook")
+		}
+		return linearServer{}
 	}
 	if secret == "" || key == "" {
 		log.Printf("linear_webhook.disabled reason=incomplete_config")
+		return linearServer{}
+	}
+	linearAPI := api.LinearAPI{Key: key}
+	webhook := api.LinearWebhook{Secret: secret, Issues: linearAPI, Store: st}
+	if operator == "" {
+		return linearServer{webhook: webhook}
+	}
+	states, err := api.ParseLinearDecisionStates(os.Getenv("HANDOFFKEEP_LINEAR_DECISION_STATES"))
+	if err != nil {
+		// Comments still answer; only moving an issue to a state stops counting.
+		log.Printf("linear_decisions.state_mapping_ignored err=%q", err.Error())
+		states = nil
+	}
+	webhook.Decisions, webhook.Operator, webhook.StateOptions = st, operator, states
+	team := strings.TrimSpace(os.Getenv("HANDOFFKEEP_LINEAR_DECISION_TEAM"))
+	if team == "" {
+		team = "ROB"
+	}
+	return linearServer{
+		webhook:   webhook,
+		decisions: &api.LinearDecisions{Team: team, Linear: linearAPI},
+		opsWorker: api.LinearDecisionOpsWorker{Store: st, Linear: linearAPI, Discord: discordDecisionsFromEnv()},
+	}
+}
+
+// discordDecisionsFromEnv returns nil when the channel is not configured, which
+// leaves the Linear flow working without channel posts.
+func discordDecisionsFromEnv() *api.DiscordWebhook {
+	raw := strings.TrimSpace(os.Getenv("HANDOFFKEEP_DISCORD_DECISIONS_WEBHOOK_URL"))
+	if raw == "" {
 		return nil
 	}
-	return api.LinearWebhook{Secret: secret, Issues: api.LinearAPI{Key: key}, Store: st}
+	webhook, err := api.ParseDiscordWebhookURL(raw)
+	if err != nil {
+		log.Printf("linear_decisions.discord_disabled err=%q", err.Error())
+		return nil
+	}
+	return &api.DiscordWebhook{URL: webhook}
+}
+
+// notificationForwarderFromEnv is opt-in, separately from the hub settings the
+// console already uses: turning it on sends every row still unsent, however old.
+func notificationForwarderFromEnv(st *store.Store) backgroundWorker {
+	if strings.TrimSpace(os.Getenv("HANDOFFKEEP_NOTIFICATION_FORWARD")) != "on" {
+		return nil
+	}
+	url := strings.TrimSpace(os.Getenv("HANDOFFKEEP_HUB_URL"))
+	token := strings.TrimSpace(os.Getenv("HANDOFFKEEP_HUB_TOKEN"))
+	if url == "" || token == "" {
+		log.Printf("notification_forward.disabled reason=no_hub")
+		return nil
+	}
+	return &hubforward.Forwarder{Store: st, URL: url, Token: token}
 }
 
 func runMCP() error {

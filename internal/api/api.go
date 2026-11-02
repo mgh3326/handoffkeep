@@ -547,6 +547,9 @@ type Server struct {
 	// leaves POST /hooks/linear unregistered, so an unconfigured deployment
 	// answers it with the standard ServeMux 404.
 	LinearWebhook http.Handler
+	// LinearDecisions backs POST /v1/tasks/{id}/decision-request/ask. Nil answers
+	// that route 503 linear_decisions_disabled.
+	LinearDecisions *LinearDecisions
 }
 
 func (s Server) Handler() http.Handler {
@@ -584,6 +587,7 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("POST /v1/tasks/relane", s.tasksRelane)
 	m.HandleFunc("POST /v1/tasks/{id}/decision-request", s.taskDecisionRequest)
 	m.HandleFunc("POST /v1/tasks/{id}/decision-request/resolve", s.taskDecisionResolve)
+	m.HandleFunc("POST /v1/tasks/{id}/decision-request/ask", s.taskDecisionAsk)
 	m.HandleFunc("POST /v1/tasks/dispositions", s.dispositionCreate)
 	m.HandleFunc("GET /v1/tasks/dispositions/summary", s.dispositionSummary)
 	m.HandleFunc("POST /v1/tasks/dispositions/{id}/apply", s.dispositionApply)
