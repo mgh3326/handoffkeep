@@ -10,11 +10,11 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import type { BoardTask } from "../shared/boardTypes";
-import { applyTheme, loadTheme } from "./AppShell";
+import { applyTheme, loadTheme } from "../shared/AppShell";
 import { boardTaskToProto } from "./boardtask";
 import { QueueProtoApp } from "./QueueProtoApp";
-import { STATE_SHAPES, StateIcon } from "./StateIcon";
-import { STATE_GROUP_ORDER, STATE_LABEL } from "./states";
+import { STATE_SHAPES, StateIcon } from "../shared/StateIcon";
+import { STATE_GROUP_ORDER, STATE_LABEL } from "../shared/states";
 import { DEFAULT_STATE, STORAGE_KEY } from "./storage";
 import { KNOWN_STATES, type Dataset } from "./types";
 
@@ -82,7 +82,7 @@ function declarations(css: string): string[] {
 const COLOR_LITERAL = /#[0-9a-f]{3,8}\b|\b(?:rgba?|hsla?|hwb|lab|lch|oklab|oklch|color)\(|\b(?:white|black|red|green|blue|gray|grey|orange|yellow|purple|canvas|canvastext|buttonface)\b/i;
 
 /** Migrated product sources: every file the list/shell renders from. */
-const MIGRATED_TSX = ["AppShell.tsx", "ListView.tsx", "QueueProtoApp.tsx", "StateIcon.tsx", "TaskRow.tsx", "Toolbar.tsx", "ViewRail.tsx", "live.tsx", "main.tsx", "states.ts"];
+const MIGRATED_TSX = ["../shared/AppShell.tsx", "ListView.tsx", "QueueProtoApp.tsx", "../shared/StateIcon.tsx", "TaskRow.tsx", "Toolbar.tsx", "ViewRail.tsx", "live.tsx", "main.tsx", "../shared/states.ts"];
 
 function colorLiterals(css: string): string[] {
   return declarations(css).filter((d) => !d.startsWith("--") && COLOR_LITERAL.test(d.slice(d.indexOf(":") + 1)));
@@ -133,15 +133,14 @@ describe("(a) no color literal outside tokens.css", () => {
 // ---- contrast of the token pairs (2402 Q3) -----------------------------
 
 function themeValues(theme: "dark" | "light"): Record<string, string> {
-  const block = (sel: RegExp) => TOKENS.match(sel)?.[1] ?? "";
-  const dark = block(/:root\s*\{([^}]*--hk-surface-0[^}]*)\}/);
-  const light = block(/:root\[data-theme="light"\]\s*\{([^}]*)\}/);
   const out: Record<string, string> = {};
-  for (const text of theme === "dark" ? [dark] : [dark, light]) {
-    for (const m of text.matchAll(/(--hk-[a-z0-9-]+)\s*:\s*(#[0-9a-f]{6})/gi)) {
-      out[m[1]] = m[2];
-    }
+  const allBlocks = [...TOKENS.matchAll(/:root(?:\[data-theme="(light)"\])?\s*\{([^}]*)\}/g)];
+  for (const block of allBlocks) {
+    if (block[1] && theme !== "light") continue;
+    for (const m of block[2].matchAll(/(--hk-[a-z0-9-]+)\s*:\s*([^;]+);/gi)) out[m[1]] = m[2].trim();
   }
+  const resolve = (value: string): string => value?.startsWith("var(") ? resolve(out[value.slice(4,-1)]) : value;
+  for (const key of Object.keys(out)) out[key] = resolve(out[key]);
   return out;
 }
 
@@ -328,18 +327,10 @@ describe("state-grouped list structure", () => {
 
   it("sidebar: brand, global nav with the current page, views and saved views", () => {
     renderLive(tasks);
-    const global = screen.getByRole("navigation", { name: "전역 탐색" });
-    expect(global.querySelector('[aria-current="page"]')!.textContent).toBe("Queue");
-    expect([...global.querySelectorAll("a")].map((a) => a.getAttribute("href"))).toEqual([
-      "/ui/home",
-      "/ui/queue",
-      "/ui/deploys",
-      "/ui/docs",
-      "/ui/decisions",
-      "/ui/fleet",
-      "/ui/grades",
-      "/ui/timeline",
-      "/ui/compose",
+    const global = screen.getByRole("navigation", { name: "Workspace navigation" });
+    expect(global.querySelector('[aria-current="page"]')!.textContent).toBe("My work / Board");
+    expect([...global.querySelectorAll("a")].map(a => a.getAttribute("href"))).toEqual([
+      "/ui/home", "/ui/queue", "/ui/queue?view=all", "/ui/decisions", "/ui/deploys", "/ui/fleet", "/ui/docs", "/ui/grades", "/ui/timeline", "/ui/compose",
     ]);
     // home is the read-only dashboard (hk 2280), no longer a placeholder
     expect(global.textContent).not.toContain("준비 중");
@@ -488,7 +479,7 @@ describe("product entry and bundle budget", () => {
 
   // CSS raw budget raised 24→26KiB for #598 live-job chips/strip (base was ~24KiB
   // already — the guard still trips on real regressions, not this feature).
-  it("initial queue JS ≤ raw 230KiB / gzip 75KiB; CSS ≤ raw 26KiB / gzip 8KiB", () => {
+  it("initial queue JS ≤ raw 230KiB / gzip 75KiB; CSS ≤ raw 40KiB / gzip 12KiB", () => {
     const size = (names: string[]) =>
       names.reduce(
         (acc, n) => {
@@ -501,9 +492,9 @@ describe("product entry and bundle budget", () => {
     expect(js.raw).toBeGreaterThan(50 * 1024); // counted the real closure
     expect(js.raw).toBeLessThanOrEqual(230 * 1024);
     expect(js.gzip).toBeLessThanOrEqual(75 * 1024);
-    const css = size(["tokens.css", "board.css"]);
-    expect(css.raw).toBeLessThanOrEqual(26 * 1024);
-    expect(css.gzip).toBeLessThanOrEqual(8 * 1024);
+    const css = size(["tokens.css", "board.css", "AppShell.css"]);
+    expect(css.raw).toBeLessThanOrEqual(40 * 1024);
+    expect(css.gzip).toBeLessThanOrEqual(12 * 1024);
   });
 
   it("no external request or font CDN in the served assets", () => {

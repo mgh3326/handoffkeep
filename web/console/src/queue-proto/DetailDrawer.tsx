@@ -291,9 +291,9 @@ export function DetailBody({ dataset, task, detail, fetchDoc, comments: comments
       </section>
       <TaskBodySection task={task} fetchDoc={sharedFetchDoc} />
       <section className="qp-drawer-sec">
-        <h4>refs</h4>
+        <h4>Links</h4><a href={`/ui/timeline?lane=${encodeURIComponent(task.lane)}`}>Lane timeline / events</a>
         <ul className="qp-drawer-refs">
-          {task.refs.report_path ? <li>report: {task.refs.report_path}</li> : null}
+          {task.refs.report_path ? <li>Report unavailable in console: {task.refs.report_path}</li> : null}
           {task.refs.job_id ? <li>job: {task.refs.job_id}</li> : null}
           {task.refs.pr ? (
             <li>

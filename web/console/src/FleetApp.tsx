@@ -14,6 +14,10 @@ import { ReapPanel } from "./ReapPanel";
 import { getJSON } from "./shared/http";
 import { usePoll } from "./shared/usePoll";
 
+import { QuotaCard } from "./dashboard/DashboardApp";
+import { fetchDashboard } from "./dashboard/api";
+import "./dashboard/dashboard.css";
+
 const LIVE_API = "/ui/api/live";
 const POLL_MS = 10_000;
 
@@ -173,7 +177,7 @@ function MachineBlock({ node, live }: { node: LiveNode; live: LiveResponse }) {
   const notConnected = node.state !== "" && node.state !== "connected";
   const stale = notConnected || (node.session_snapshot?.stale ?? false);
   return (
-    <section className="fleet-node">
+    <section className="fleet-node hk-host" tabIndex={0}>
       <h3 className="fleet-node-head">
         {node.machine_id} <span className="muted">{node.state}</span>
         {stale ? <span className="badge stale">{notConnected ? node.state : "stale"}</span> : null}
@@ -183,6 +187,7 @@ function MachineBlock({ node, live }: { node: LiveNode; live: LiveResponse }) {
         부하 {loadLabel(node.load)} · 메모리 {memoryLabel(node.memory)} · 활성 잡{" "}
         {node.active_jobs === null ? "미상" : node.active_jobs} · 마지막 핑 {pingAgeLabel(node.last_ping_ms)}
       </p>
+      <p className="muted">Power: Unavailable · current telemetry does not collect watts. Load / cores is a load ratio, not CPU utilization.</p>
       <MachineJobs jobs={jobs} live={live} />
       <SessionTable node={node} live={live} />
     </section>
@@ -194,6 +199,7 @@ function MachineBlock({ node, live }: { node: LiveNode; live: LiveResponse }) {
  * backlinks. Hub section failures are named, never rendered as an empty or
  * idle fleet. Read-only — no write controls. */
 export function FleetApp() {
+  const quota = usePoll(fetchDashboard, 60000);
   const { data, failed: refreshFailed } = usePoll(loadLive, POLL_MS);
 
   if (data === null && !refreshFailed) {
@@ -205,8 +211,8 @@ export function FleetApp() {
 
   const nodes = data.nodes.items;
   return (
-    <section>
-      <h2>Machines · sessions</h2>
+    <section className="hk-view">
+      <h1>Fleet hosts</h1><p><a href="/ui/grades">Grades / catalog</a></p>
       <div className="fleet-status">
         {refreshFailed ? (
           <span className="badge stale">갱신 실패 · 마지막 성공 {data.generated_at || "없음"}</span>
@@ -230,6 +236,7 @@ export function FleetApp() {
       ) : (
         nodes.map((node) => <MachineBlock key={node.machine_id} node={node} live={data} />)
       )}
+      <h2>Shared quota pools</h2><p className="muted">Account pools are shared; no host allocation is inferred.</p>{quota.failed ? <p role="alert">Quota refresh failed · last good data retained</p> : null}{quota.data ? <QuotaCard data={quota.data} now={quota.at ?? Date.now()} /> : <p>Quota unavailable</p>}
       <ReapPanel />
     </section>
   );

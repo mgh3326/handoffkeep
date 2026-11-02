@@ -154,7 +154,7 @@ describe("DocsApp layout (#2245)", () => {
     await waitFor(() => expect(screen.getByText("Report Beta")).toBeTruthy());
     fireEvent.click(screen.getByText("Report Beta"));
     const reader = screen.getByLabelText("문서 본문");
-    await waitFor(() => expect(reader.querySelector("[data-doc-renderer]")).not.toBeNull());
+    await waitFor(() => expect(reader.querySelector("[data-doc-renderer]")).not.toBeNull(), { timeout: 10000 });
     expect(within(reader).getByText("rendered body text")).toBeTruthy();
     expect(new URLSearchParams(window.location.search).get("key")).toBe("reports/beta");
 

@@ -12,7 +12,7 @@ import { DeploySummary } from "./DeploySummary";
 import { LiveStrip } from "./LiveStrip";
 import { Toolbar } from "./Toolbar";
 import { GlobalSearch } from "./GlobalSearch";
-import type { SearchFn } from "./search";
+import type { SearchFn } from "../shared/search";
 import { ViewRail } from "./ViewRail";
 import { DEFAULT_STATE, loadPresentation, PREVIEW_DEFAULT_STATE, savePresentation, type SavedView } from "./storage";
 import { runDiag } from "./diag";

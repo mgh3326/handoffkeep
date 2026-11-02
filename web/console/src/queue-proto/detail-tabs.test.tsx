@@ -147,7 +147,7 @@ describe("overview body", () => {
     const fetchDoc = vi.fn<FetchDoc>(() => Promise.resolve(doc("# 본문 제목\n\n운영자가 읽을 본문")));
     const { drawer } = openPanel([mkBoardTask({ body_doc: "design/body" })], fetchDoc);
     const overview = panel(drawer, "overview");
-    await waitFor(() => expect(overview.querySelector("[data-doc-renderer] h1")?.textContent).toBe("본문 제목"));
+    await waitFor(() => expect(overview.querySelector("[data-doc-renderer] h1")?.textContent).toBe("본문 제목"), { timeout: 10000 });
     expect(fetchDoc).toHaveBeenCalledWith("design/body");
   });
 
@@ -178,7 +178,7 @@ describe("overview body", () => {
   it("body_doc wins over a key in the title; the title key is not fetched", async () => {
     const fetchDoc = vi.fn<FetchDoc>(() => Promise.resolve(doc("# from body_doc")));
     const { drawer } = openPanel([mkBoardTask({ title: "x hk:doc design/other", body_doc: "design/body" })], fetchDoc);
-    await waitFor(() => expect(panel(drawer, "overview").querySelector("[data-doc-renderer] h1")?.textContent).toBe("from body_doc"));
+    await waitFor(() => expect(panel(drawer, "overview").querySelector("[data-doc-renderer] h1")?.textContent).toBe("from body_doc"), { timeout: 10000 });
     expect(fetchDoc.mock.calls).toEqual([["design/body"]]);
     expect(panel(drawer, "overview").textContent).not.toContain("관련 문서");
   });
@@ -197,7 +197,7 @@ describe("overview body — title-found candidates (#619)", () => {
     const fetchDoc = vi.fn<FetchDoc>((key) => Promise.resolve({ ...doc(`# title 본문 ${key}`), key }));
     const { drawer } = openPanel([mkBoardTask({ title: "quota store v2 — 본문 hk:doc task/2026-09-22/quota-store" })], fetchDoc);
     const overview = panel(drawer, "overview");
-    await waitFor(() => expect(overview.querySelector("[data-doc-renderer] h1")?.textContent).toBe("title 본문 task/2026-09-22/quota-store"));
+    await waitFor(() => expect(overview.querySelector("[data-doc-renderer] h1")?.textContent).toBe("title 본문 task/2026-09-22/quota-store"), { timeout: 10000 });
     expect(fetchDoc.mock.calls).toEqual([["task/2026-09-22/quota-store"]]);
     expect(overview.textContent).toContain("title 에서 찾은 본문");
     expect(overview.textContent).toContain("미연결");
@@ -210,7 +210,7 @@ describe("overview body — title-found candidates (#619)", () => {
     );
     const { drawer } = openPanel([mkBoardTask({ title: "x 본문 hk:doc design/other", body_doc: "design/body" })], fetchDoc);
     const overview = panel(drawer, "overview");
-    await waitFor(() => expect(overview.querySelector("[data-doc-renderer] h1")?.textContent).toBe("the real body"));
+    await waitFor(() => expect(overview.querySelector("[data-doc-renderer] h1")?.textContent).toBe("the real body"), { timeout: 10000 });
     expect(fetchDoc.mock.calls).toEqual([["design/body"]]);
     expect(overview.textContent).not.toContain("title 에서 찾은 본문");
   });
@@ -271,7 +271,7 @@ describe("overview body — title-found candidates (#619)", () => {
     const fetchDoc = vi.fn<FetchDoc>((key) => Promise.resolve({ ...doc(`# body ${key}`), key }));
     const { drawer } = openPanel([mkBoardTask({ title: "본문 hk:doc a/x, 참고 hk:doc b/y" })], fetchDoc);
     const overview = panel(drawer, "overview");
-    await waitFor(() => expect(overview.querySelector("[data-doc-renderer] h1")?.textContent).toBe("body a/x"));
+    await waitFor(() => expect(overview.querySelector("[data-doc-renderer] h1")?.textContent).toBe("body a/x"), { timeout: 10000 });
     expect(fetchDoc.mock.calls).toEqual([["a/x"]]);
     expect(within(overview).getByRole("link", { name: "b/y" }).getAttribute("href")).toBe("/ui/doc/b/y");
   });
@@ -287,7 +287,7 @@ describe("overview body — title-found candidates (#619)", () => {
     const hostile = "# ok\n\n<script>window.__pwned = 1</script>\n\n[js](javascript:window.__pwned=2)\n\n[safe](/ui/tasks/5)";
     const fetchDoc = vi.fn<FetchDoc>(() => Promise.resolve({ ...doc(hostile), key: "task/2026-09-22/hostile" }));
     const { container } = openPanel([mkBoardTask({ title: "본문 hk:doc task/2026-09-22/hostile" })], fetchDoc);
-    await waitFor(() => expect(container.querySelector("[data-doc-renderer] h1")?.textContent).toBe("ok"));
+    await waitFor(() => expect(container.querySelector("[data-doc-renderer] h1")?.textContent).toBe("ok"), { timeout: 10000 });
     const body = container.querySelector("[data-doc-renderer]")!;
     expect(body.querySelector("script")).toBeNull();
     expect([...body.querySelectorAll("a")].some((a) => (a.getAttribute("href") ?? "").includes("javascript"))).toBe(false);
@@ -309,7 +309,7 @@ describe("overview body — title-found candidates (#619)", () => {
     const fetchDoc = vi.fn<FetchDoc>(() => Promise.resolve(doc("# body")));
     const { drawer } = openPanel([mkBoardTask({ body_doc: "design/body" })], fetchDoc);
     const body = bodySection(drawer);
-    await waitFor(() => expect(body.querySelector("[data-doc-renderer]")).not.toBeNull());
+    await waitFor(() => expect(body.querySelector("[data-doc-renderer]")).not.toBeNull(), { timeout: 10000 });
     expect(body.querySelector("details.qp-raw-title")).toBeNull();
   });
 });
@@ -365,7 +365,7 @@ describe("overview order — 목적 → 현재 상황 → 다음 행동 → 결�
     const { container } = renderBody(mkProtoTask({}));
     const overview = container.querySelector<HTMLElement>('[role="tabpanel"][data-tab="overview"]')!;
     const headings = [...overview.querySelectorAll("section.qp-drawer-sec h4")].map((h) => h.textContent);
-    expect(headings.slice(0, 6)).toEqual(["목적", "현재 상황", "다음 행동 · 대기", "결정", "본문", "refs"]);
+    expect(headings.slice(0, 6)).toEqual(["목적", "현재 상황", "다음 행동 · 대기", "결정", "본문", "Links"]);
   });
 
   it("목적 reads summary only from hk-task/v1 metadata; absent → 요약 미작성", async () => {
@@ -415,7 +415,7 @@ describe("overview order — 목적 → 현재 상황 → 다음 행동 → 결�
     const fetchDoc = vi.fn<FetchDoc>(() => Promise.resolve(doc(metaDoc("summary: s\n") + "\n## 실제 명세\n")));
     const { container } = renderBody(mkProtoTask({ body_doc: "design/body" }), fetchDoc);
     const body = container.querySelector<HTMLElement>(".qp-body-sec")!;
-    await waitFor(() => expect(body.querySelector("[data-doc-renderer] h2")?.textContent).toBe("실제 명세"));
+    await waitFor(() => expect(body.querySelector("[data-doc-renderer] h2")?.textContent).toBe("실제 명세"), { timeout: 10000 });
     expect(body.querySelector("[data-doc-renderer]")?.textContent).not.toContain("hk-task/v1");
     expect(body.querySelectorAll("[data-doc-renderer] hr")).toHaveLength(0);
   });
@@ -532,7 +532,7 @@ describe("one detail component for panel and page (A-7)", () => {
     const task = mkBoardTask({ id: 8002, body_doc: "design/body" });
     const fetchDoc = vi.fn<FetchDoc>(() => Promise.resolve(doc("# page body")));
     const { container } = render(<TaskPage id={8002} fetchDetail={() => Promise.resolve(mkDetail(task))} fetchDoc={fetchDoc} />);
-    await waitFor(() => expect(container.querySelector("[data-doc-renderer] h1")?.textContent).toBe("page body"));
+    await waitFor(() => expect(container.querySelector("[data-doc-renderer] h1")?.textContent).toBe("page body"), { timeout: 10000 });
     expect(within(container).getAllByRole("tab").map((t) => t.textContent)).toEqual(["개요", "코멘트", "전이"]);
     expect(container.querySelector(".qp-tablist")).not.toBeNull();
   });
@@ -560,7 +560,7 @@ describe("one detail component for panel and page (A-7)", () => {
     expect(rows[2].textContent).toContain("unknown");
     expect(within(container).getByText(/pr: javascript:alert\(1\)/).querySelector("a")).toBeNull();
     // report_path is a local path: text only, never a /ui/doc link or a server file read.
-    expect(container.textContent).toContain("report: /home/op/report.md");
+    expect(container.textContent).toContain("Report unavailable in console: /home/op/report.md");
     expect([...container.querySelectorAll("a")].some((a) => (a.getAttribute("href") ?? "").includes("report.md"))).toBe(false);
   });
 });

@@ -18,6 +18,7 @@ export default defineConfig({
     emptyOutDir: true,
     rollupOptions: {
       input: {
+        server: resolve(root, "src/server.tsx"),
         fleet: resolve(root, "src/main.tsx"),
         // /ui/queue loads the queue app built from src/queue-proto: board.js/
         // board.css are what the page actually serves. The entry fetches the
@@ -35,7 +36,7 @@ export default defineConfig({
         docs: resolve(root, "src/queue-proto/docs/main.tsx"),
         // /ui/home loads the read-only operator dashboard built from
         // src/queue-proto/dashboard — its own entry, same constraint (hk 2280).
-        dashboard: resolve(root, "src/queue-proto/dashboard/main.tsx"),
+        dashboard: resolve(root, "src/dashboard/main.tsx"),
         // The --hk-* design tokens ship as their own static stylesheet so the
         // React entries and the Go templates link one and the same file.
         tokens: resolve(root, "src/design/tokens.css"),

@@ -205,7 +205,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.URL.Path {
 	case "/ui":
-		http.Redirect(w, r, "/ui/timeline", http.StatusFound)
+		http.Redirect(w, r, "/ui/home", http.StatusFound)
 	case "/ui/timeline":
 		h.timeline(w, r, false)
 	case "/ui/queue":

@@ -38,20 +38,53 @@ const (
 	boardDocRenderMaxBytes = 256 << 10
 )
 
+// Work-board fields are an allowlist: placement account keys, candidate
+// telemetry, pane identifiers and raw verdict text never enter the browser.
+type boardWorkSession struct {
+	JobID  string    `json:"job_id"`
+	Host   string    `json:"host"`
+	Family string    `json:"family"`
+	Model  string    `json:"model"`
+	Role   string    `json:"role"`
+	Active bool      `json:"active"`
+	At     time.Time `json:"at"`
+}
+type boardWorkBoard struct {
+	PrimaryJobID string             `json:"primary_job_id"`
+	PR           string             `json:"pr"`
+	HeadSHA      string             `json:"head_sha"`
+	Sessions     []boardWorkSession `json:"sessions"`
+}
+
+func projectWorkBoard(board store.LinearBoard) *boardWorkBoard {
+	if len(board.Sessions) == 0 && board.Task.Refs.PR == "" && board.Task.Refs.HeadSHA == "" {
+		return nil
+	}
+	view := &boardWorkBoard{PrimaryJobID: board.PrimaryJob(), PR: board.Task.Refs.PR, HeadSHA: board.Task.Refs.HeadSHA, Sessions: make([]boardWorkSession, 0, len(board.Sessions))}
+	for _, session := range board.Sessions {
+		if !session.Active && session.JobID != view.PrimaryJobID {
+			continue
+		}
+		view.Sessions = append(view.Sessions, boardWorkSession{JobID: session.JobID, Host: session.Host, Family: session.Family, Model: session.Model, Role: session.Role, Active: session.Active, At: session.At.UTC()})
+	}
+	return view
+}
+
 type boardTask struct {
-	ID         int64          `json:"id"`
-	Lane       string         `json:"lane"`
-	ParentLane string         `json:"parent_lane,omitempty"`
-	Title      string         `json:"title"`
-	Kind       string         `json:"kind"`
-	State      string         `json:"state"`
-	Priority   int            `json:"priority"`
-	ClaimedBy  string         `json:"claimed_by,omitempty"`
-	CreatedBy  string         `json:"created_by"`
-	CreatedAt  time.Time      `json:"created_at"`
-	UpdatedAt  time.Time      `json:"updated_at"`
-	Refs       store.TaskRefs `json:"refs"`
-	BodyDoc    string         `json:"body_doc,omitempty"`
+	WorkBoard  *boardWorkBoard `json:"work_board,omitempty"`
+	ID         int64           `json:"id"`
+	Lane       string          `json:"lane"`
+	ParentLane string          `json:"parent_lane,omitempty"`
+	Title      string          `json:"title"`
+	Kind       string          `json:"kind"`
+	State      string          `json:"state"`
+	Priority   int             `json:"priority"`
+	ClaimedBy  string          `json:"claimed_by,omitempty"`
+	CreatedBy  string          `json:"created_by"`
+	CreatedAt  time.Time       `json:"created_at"`
+	UpdatedAt  time.Time       `json:"updated_at"`
+	Refs       store.TaskRefs  `json:"refs"`
+	BodyDoc    string          `json:"body_doc,omitempty"`
 	// Project is null for legacy rows predating the field and for the
 	// (rare) unclassified row — the console groups them as "no project".
 	Project *string `json:"project"`
@@ -134,8 +167,15 @@ func (h *Handler) boardTasks(w http.ResponseWriter, r *http.Request) {
 		Tasks:       make([]boardTask, 0, len(tasks)),
 		Truncated:   truncated,
 	}
+	workBoards, err := h.store.ReadTaskWorkBoards(r.Context(), tasks)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "internal_error")
+		return
+	}
 	for _, task := range tasks {
-		response.Tasks = append(response.Tasks, projectBoardTask(task))
+		row := projectBoardTask(task)
+		row.WorkBoard = projectWorkBoard(workBoards[task.ID])
+		response.Tasks = append(response.Tasks, row)
 		response.NextAfterID = task.ID
 	}
 	writeBoardJSON(w, response)
@@ -330,6 +370,12 @@ func (h *Handler) boardTaskDetail(w http.ResponseWriter, r *http.Request) {
 		Dwell:  taskDwell(task, now),
 		Linear: nil,
 	}
+	workBoards, err := h.store.ReadTaskWorkBoards(r.Context(), []store.Task{task})
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "internal_error")
+		return
+	}
+	response.Task.WorkBoard = projectWorkBoard(workBoards[task.ID])
 	response.DecisionRequests, response.DecisionLegacy = taskDecisionViews(task, now)
 	for _, event := range task.Events {
 		response.Events = append(response.Events, boardEvent{
