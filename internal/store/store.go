@@ -1079,6 +1079,14 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := migrateOnce(ctx, tx, 29, func() error { return execAll(ctx, tx, linearBoardV29) }); err != nil {
 		return err
 	}
+	if err := migrateOnce(ctx, tx, 30, func() error {
+		// Version 30 adds the transactional change feed. CREATE TRIGGER takes
+		// SHARE ROW EXCLUSIVE on the four source tables; new tables are private
+		// to this migration until commit. Existing rows enter through bootstrap.
+		return execAll(ctx, tx, syncMigrations)
+	}); err != nil {
+		return err
+	}
 
 	return tx.Commit(ctx)
 }
