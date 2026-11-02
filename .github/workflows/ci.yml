@@ -117,4 +117,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ inputs.ref }}
       - run: python3 scripts/test-auto-tag.py
+      - run: python3 scripts/test-repair-release.py
