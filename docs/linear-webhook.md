@@ -20,9 +20,10 @@ Set both variables on the server, or the route stays unregistered and answers
 |---|---|
 | `HANDOFFKEEP_LINEAR_WEBHOOK_SECRET` | The signing secret Linear shows for the webhook |
 | `HANDOFFKEEP_LINEAR_API_KEY` | A Linear API key that can read the issues |
-| `HANDOFFKEEP_LINEAR_CLIENT_ID`, `HANDOFFKEEP_LINEAR_CLIENT_SECRET` | Optional. A Linear OAuth application with **Client credentials** enabled. When both are set they replace the API key: hk mints an `actor=app` token (30 days) and renews it a day before expiry, so its comments and issues show as the application and can never count as the operator's answer. |
+| `HANDOFFKEEP_LINEAR_CLIENT_ID`, `HANDOFFKEEP_LINEAR_CLIENT_SECRET` | Optional. A Linear OAuth application with **Client credentials** enabled. When both are set they replace the API key: hk mints an `actor=app` token (30 days) and renews it a day before expiry, so its comments and issues show as the application and can never count as the operator's answer. An app token reaches only the workspace's public teams unless the app is granted access to a private team on its details page. Setting only one of the two variables logs `linear_oauth.disabled reason=incomplete_config` and keeps the API key. |
 
-The API key is needed because Linear's `Comment` payload documents no labels or
+One credential is needed (the API key, or the OAuth application, which wins
+when both are set) because Linear's `Comment` payload documents no labels or
 issue state, so the handler reads them from Linear's API. It skips that call
 when `data.issue` has labels without `dots`, or has `dots` along with the
 identifier, title, URL, state and any close time.

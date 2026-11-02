@@ -1842,6 +1842,10 @@ func linearFromEnv(st *store.Store) linearServer {
 	clientID := strings.TrimSpace(os.Getenv("HANDOFFKEEP_LINEAR_CLIENT_ID"))
 	clientSecret := strings.TrimSpace(os.Getenv("HANDOFFKEEP_LINEAR_CLIENT_SECRET"))
 	var app *api.LinearAppToken
+	if (clientID == "") != (clientSecret == "") {
+		// Half a pair would fall back to the personal key silently.
+		log.Printf("linear_oauth.disabled reason=incomplete_config")
+	}
 	if clientID != "" && clientSecret != "" {
 		// An OAuth application wins over a personal key: its writes show as the
 		// app, so nothing hk posts can be read as the operator's answer.

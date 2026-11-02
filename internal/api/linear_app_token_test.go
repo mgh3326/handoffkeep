@@ -65,3 +65,29 @@ func TestLinearAppTokenRefusalReportsStatusOnly(t *testing.T) {
 		t.Fatalf("error %v", err)
 	}
 }
+
+func TestLinearAPIRemintsOnceAfter401(t *testing.T) {
+	var mints atomic.Int32
+	tokens := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := mints.Add(1)
+		_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "tok" + string(rune('0'+n)), "expires_in": 30 * 24 * 3600})
+	}))
+	defer tokens.Close()
+	var seen []string
+	gql := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Header.Get("Authorization"))
+		if r.Header.Get("Authorization") == "Bearer tok1" {
+			http.Error(w, "revoked", http.StatusUnauthorized)
+			return
+		}
+		_, _ = w.Write([]byte(`{"data":{"issue":{"identifier":"ROB-1","title":"t","url":"u","state":{"type":"started"},"labels":{"nodes":[]}}}}`))
+	}))
+	defer gql.Close()
+	a := LinearAPI{App: &LinearAppToken{ClientID: "id", ClientSecret: "s", URL: tokens.URL}, URL: gql.URL}
+	if _, err := a.LinearIssue(t.Context(), "i"); err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != 2 || seen[1] != "Bearer tok2" || mints.Load() != 2 {
+		t.Fatalf("auth headers %v after %d mints, want a re-mint and one retry", seen, mints.Load())
+	}
+}

@@ -86,3 +86,10 @@ func (t *LinearAppToken) Token(ctx context.Context) (string, error) {
 	t.expires = now.Add(time.Duration(out.ExpiresIn) * time.Second)
 	return t.token, nil
 }
+
+// Invalidate drops the cached token so the next call mints a new one.
+func (t *LinearAppToken) Invalidate() {
+	t.mu.Lock()
+	t.token = ""
+	t.mu.Unlock()
+}

@@ -335,23 +335,35 @@ func (a LinearAPI) graphql(ctx context.Context, timeout time.Duration, query str
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	auth := a.Key
-	if a.App != nil {
-		token, err := a.App.Token(ctx)
+	var resp *http.Response
+	// An app token can be revoked before it expires (secret rotation, a new
+	// token with other scopes); Linear then answers 401 and asks for a new
+	// token, so the cached one is dropped and the request is sent once more.
+	for attempt := 0; ; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 		if err != nil {
 			return err
 		}
-		auth = "Bearer " + token
-	}
-	req.Header.Set("Authorization", auth)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
+		auth := a.Key
+		if a.App != nil {
+			token, err := a.App.Token(ctx)
+			if err != nil {
+				return err
+			}
+			auth = "Bearer " + token
+		}
+		req.Header.Set("Authorization", auth)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err = client.Do(req)
+		if err != nil {
+			return err
+		}
+		if resp.StatusCode == http.StatusUnauthorized && a.App != nil && attempt == 0 {
+			resp.Body.Close()
+			a.App.Invalidate()
+			continue
+		}
+		break
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
