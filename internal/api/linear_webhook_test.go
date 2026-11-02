@@ -186,25 +186,43 @@ func TestLinearWebhookIgnoresOtherEvents(t *testing.T) {
 }
 
 func TestLinearWebhookUsesLabelsInThePayload(t *testing.T) {
-	build := func(issue string) []byte {
-		return []byte(fmt.Sprintf(`{"action":"create","type":"Comment","webhookTimestamp":%d,"data":{"id":"0a1b2c3d-0000","body":"[dots] RESULT x","createdAt":"2026-11-02T01:02:03.000Z","issueId":"i","issue":%s}}`, time.Now().UnixMilli(), issue))
+	build := func(comment, issue string) []byte {
+		return []byte(fmt.Sprintf(`{"action":"create","type":"Comment","webhookTimestamp":%d,"data":{"id":"0a1b2c3d-0000","body":%q,"createdAt":"2026-11-02T01:02:03.000Z","issueId":"i","issue":%s}}`, time.Now().UnixMilli(), comment, issue))
 	}
+	const (
+		named  = `"identifier":"ZZZ-2","title":"t","url":"u"`
+		dots   = `"labels":[{"name":"dots"}]`
+		result = "[dots] RESULT x"
+		human  = "hello"
+	)
 	cases := []struct {
 		name    string
+		comment string
 		issue   string
 		status  string
 		fetches int
 	}{
-		{"labels present", `{"identifier":"ZZZ-2","title":"t","url":"u","labels":[{"name":"dots"}]}`, "recorded", 0},
-		{"labels present without dots", `{"identifier":"ZZZ-2","labels":[{"name":"other"}]}`, "ignored", 0},
-		{"labels empty", `{"identifier":"ZZZ-2","labels":[]}`, "ignored", 0},
-		{"labels absent", `{"identifier":"ZZZ-2","title":"t"}`, "recorded", 1},
-		{"labels in an unknown shape", `{"identifier":"ZZZ-2","labels":["dots"]}`, "recorded", 1},
+		{"complete and open", result, `{` + named + `,` + dots + `,"state":{"type":"started"}}`, "recorded", 0},
+		{"complete and open, human comment", human, `{` + named + `,` + dots + `,"state":{"type":"started"}}`, "ignored", 0},
+		{"complete and closed, human comment", human, `{` + named + `,` + dots + `,"state":{"type":"completed"},"completedAt":"2026-11-01T00:00:00.000Z"}`, "flagged", 0},
+		{"labels without dots settle it", result, `{"identifier":"ZZZ-2","labels":[{"name":"other"}]}`, "ignored", 0},
+		{"labels empty settle it", human, `{"identifier":"ZZZ-2","labels":[]}`, "ignored", 0},
+		{"labels absent", result, `{"identifier":"ZZZ-2","title":"t"}`, "recorded", 1},
+		{"labels in an unknown shape", result, `{"identifier":"ZZZ-2","labels":["dots"]}`, "recorded", 1},
+		{"dots without state, human comment", human, `{` + named + `,` + dots + `}`, "flagged", 1},
+		{"closed without a close time, human comment", human, `{` + named + `,` + dots + `,"state":{"type":"completed"}}`, "flagged", 1},
+		{"dots without a title", result, `{"identifier":"ZZZ-2","url":"u",` + dots + `,"state":{"type":"started"}}`, "recorded", 1},
+		{"dots without a url", result, `{"identifier":"ZZZ-2","title":"t",` + dots + `,"state":{"type":"started"}}`, "recorded", 1},
+		{"dots without an identifier", result, `{"title":"t","url":"u",` + dots + `,"state":{"type":"started"}}`, "recorded", 1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			issues := &fakeIssues{issue: dotsLinearIssue()}
-			body := build(tc.issue)
+			// The fetched issue is closed, so a followup can only come from it
+			// or from a payload that says so itself.
+			fetched := dotsLinearIssue()
+			fetched.StateType, fetched.CompletedAt = "completed", "2026-11-01T00:00:00.000Z"
+			issues := &fakeIssues{issue: fetched}
+			body := build(tc.comment, tc.issue)
 			status, out := postLinear(t, LinearWebhook{Secret: fakeLinearSigningValue, Issues: issues, Store: &fakeDots{}}, body, linearSign(fakeLinearSigningValue, body))
 			if status != http.StatusOK || out["status"] != tc.status || issues.calls != tc.fetches {
 				t.Fatalf("status=%d out=%v fetches=%d", status, out, issues.calls)

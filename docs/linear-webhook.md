@@ -19,8 +19,9 @@ Set both variables on the server, or the route stays unregistered and answers
 | `HANDOFFKEEP_LINEAR_API_KEY` | A Linear API key that can read the issues |
 
 The API key is needed because Linear's `Comment` payload documents no labels or
-issue state, so the handler reads them from Linear's API. It makes that call
-only when `data.issue.labels` is absent.
+issue state, so the handler reads them from Linear's API. It skips that call
+when `data.issue` has labels without `dots`, or has `dots` along with the
+identifier, title, URL, state and any close time.
 
 ## What a delivery does
 

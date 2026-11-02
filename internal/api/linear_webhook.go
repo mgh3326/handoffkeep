@@ -89,7 +89,9 @@ type linearPayloadIssue struct {
 }
 
 // issueFromPayload returns the issue the payload describes, or false when it
-// lacks labels. A shape this code does not know counts as lacking them.
+// must be fetched instead. Labels without "dots" settle the delivery on their
+// own; a dots issue must also carry what its records quote and what the close
+// check reads. A shape this code does not know counts as lacking labels.
 func issueFromPayload(raw json.RawMessage) (LinearIssue, bool) {
 	var in linearPayloadIssue
 	if len(raw) == 0 || json.Unmarshal(raw, &in) != nil || in.Labels == nil {
@@ -99,7 +101,7 @@ func issueFromPayload(raw json.RawMessage) (LinearIssue, bool) {
 	for _, label := range in.Labels {
 		out.Labels = append(out.Labels, label.Name)
 	}
-	return out, true
+	return out, !slices.Contains(out.Labels, store.DotsLabel) || out.complete()
 }
 
 // verifyLinearSignature checks the header, a hex HMAC-SHA256 of the raw body.
@@ -204,14 +206,26 @@ func (h LinearWebhook) handle(ctx context.Context, payload linearWebhookPayload)
 // commentAfterClose compares Linear's ISO-8601 UTC timestamps as text, which
 // orders them because Linear renders every one in the same format.
 func commentAfterClose(issue LinearIssue, createdAt string) bool {
-	var closedAt string
-	switch issue.StateType {
-	case "completed":
-		closedAt = issue.CompletedAt
-	case "canceled":
-		closedAt = issue.CanceledAt
-	}
+	closedAt, _ := issue.closedAt()
 	return closedAt != "" && createdAt > closedAt
+}
+
+// closedAt returns the close time of the issue's current state, and whether
+// that state is a closed one.
+func (i LinearIssue) closedAt() (string, bool) {
+	switch i.StateType {
+	case "completed":
+		return i.CompletedAt, true
+	case "canceled":
+		return i.CanceledAt, true
+	}
+	return "", false
+}
+
+// complete reports whether the issue has everything a dots record needs.
+func (i LinearIssue) complete() bool {
+	closedAt, closed := i.closedAt()
+	return i.Identifier != "" && i.Title != "" && i.URL != "" && i.StateType != "" && (!closed || closedAt != "")
 }
 
 // linearFetchError marks a failed read of Linear's API, as opposed to a record
