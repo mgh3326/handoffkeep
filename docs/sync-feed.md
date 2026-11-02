@@ -34,8 +34,9 @@ last returned ID, or the supplied `after` on an empty page. `max_sync_id` is the
 committed feed watermark in the page's read snapshot. Continue from
 `last_sync_id` until it equals `max_sync_id`. IDs may have gaps after rollback.
 Never advance a cursor after receiving a partial response without its trailer.
-Fetch current model content through the existing APIs; a missing model means
-it was deleted after the change. Applying changes must be idempotent.
+Fetch current model content through `/v1/sync/rows/{model}/{model_id}`.
+A missing row means it was deleted after the change. Applying changes must be
+idempotent.
 
 An expired cursor returns HTTP 410 and JSON:
 
@@ -81,14 +82,45 @@ all four models, replaying all models from there. Rows already seen during
 bootstrap may appear again in delta. Re-fetch and upsert them. A delete removes
 the ID whether or not it appeared in bootstrap. Restart on 410.
 
+## Current raw rows
+
+`GET /v1/sync/rows/{model}/{model_id}`
+
+The endpoint uses the same bearer read authentication as delta and bootstrap.
+All delta `model_id` values resolve through it while the model exists. Responses
+are JSON objects, with no envelope:
+
+- `document`: complete document database row, including `key` and `body`.
+- `task`: complete task database row, including `title` and raw `refs`.
+- `task_comment`: complete comment database row, including `body` and `author`.
+- `decision`: complete current structured request, including `question` and
+  `resolution` content when resolved, plus `task_id`, `updated_at`, and `options`.
+
+A deleted, superseded, or unknown ID returns HTTP 404 with `{"deleted":true}`.
+Unknown models and malformed numeric IDs return 400 `invalid_context`. Responses
+use `Cache-Control: no-store`. A returned row reflects current state, so several
+feed events for one ID may resolve to the same latest content. Decision document
+references remain references; the inline question and resolution are included.
+
 ## Durability and retention
 
 Row triggers write `sync_log` in the same transaction as each source row
 mutation, covering all store writers and explicit deletes. Rollback removes both
-the mutation and journal rows. A singleton row lock serializes allocation until
-commit, preventing a later ID from committing before an earlier one. This adds
-a shared lock to writing transactions; readers do not take that lock. Existing
-rows are discovered by bootstrap when the migration first installs the feed.
+the mutation and journal rows. Each journal row starts with a NULL `sync_id`,
+a top-level `txid` (`pg_current_xact_id()`), and a unique `entry_id` that preserves
+insertion order within its transaction. A deferred constraint trigger runs at
+commit: it takes advisory transaction lock `824180067`, assigns sequence IDs to
+all pending rows of that transaction in `entry_id` order, and updates the
+watermark. Remaining trigger firings find no pending rows and return immediately.
+The lock is released at commit. Ordinary source writes never acquire this lock;
+a long transaction with pending rows allows unrelated writers to commit.
+Readers return only assigned IDs. Bootstrap captures the committed watermark
+from the same snapshot as its first page; pruning ignores unassigned rows.
+
+Keep the `sync_allocate` constraint deferred; forcing it immediate with
+`SET CONSTRAINTS` would acquire the allocation lock before the commit boundary.
+The store does not change constraint timing. Existing rows are discovered by
+bootstrap when the migration first installs the feed.
 
 The server prunes on startup and hourly, in transactions of at most 10,000
 rows. The default retention is 30 days. Configure a positive Go duration using

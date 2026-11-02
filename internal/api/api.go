@@ -563,6 +563,7 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("GET /v1/search", s.search)
 	m.HandleFunc("GET /v1/sync/delta", s.syncDelta)
 	m.HandleFunc("GET /v1/sync/bootstrap", s.syncBootstrap)
+	m.HandleFunc("GET /v1/sync/rows/{model}/{model_id}", s.syncRow)
 	m.HandleFunc("GET /v1/documents", s.documents)
 	m.HandleFunc("/v1/documents/{key...}", s.document)
 	m.HandleFunc("GET /v1/memory/{agent}", s.memoryList)

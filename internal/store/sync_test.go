@@ -194,41 +194,85 @@ func TestSyncPruneReset(t *testing.T) {
 func TestSyncCommitOrder(t *testing.T) {
 	s, pool := searchTestStore(t)
 	ctx := t.Context()
+	long, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer long.Rollback(ctx)
+	insert := `INSERT INTO documents(key,kind,body,sha256,created_by,created_at,updated_at) VALUES($1,'note','body','hash','test',now(),now()) RETURNING id`
+	var firstID, secondID, lastID int64
+	if err = long.QueryRow(ctx, insert, "sync/long-first").Scan(&firstID); err != nil {
+		t.Fatal(err)
+	}
+	var pending int
+	if err = long.QueryRow(ctx, `SELECT count(*) FROM sync_log WHERE txid=pg_current_xact_id() AND sync_id IS NULL`).Scan(&pending); err != nil || pending != 1 {
+		t.Fatalf("pending=%d err=%v", pending, err)
+	}
+	// The older transaction has already written a source row and its journal.
+	// A second writer must finish, including commit-time allocation, while it
+	// remains open. Timeouts make an accidental early global lock fail fast.
+	short, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer short.Rollback(ctx)
+	if _, err = short.Exec(ctx, `SET LOCAL lock_timeout='1s'; SET LOCAL statement_timeout='5s'`); err != nil {
+		t.Fatal(err)
+	}
+	if err = short.QueryRow(ctx, insert, "sync/short").Scan(&secondID); err != nil {
+		t.Fatal(err)
+	}
+	if err = short.Commit(ctx); err != nil {
+		t.Fatalf("long transaction blocked unrelated commit: %v", err)
+	}
+	changes, meta, err := s.SyncDelta(ctx, 0, 100)
+	if err != nil || len(changes) != 1 || changes[0].ModelID != fmt.Sprint(secondID) || meta.LastSyncID != meta.MaxSyncID {
+		t.Fatalf("before long commit: %v %+v %v", changes, meta, err)
+	}
+	bootstrap, err := s.SyncBootstrap(ctx, "document", "", 100)
+	if err != nil || bootstrap.MaxSyncID != meta.MaxSyncID || len(bootstrap.Rows) != 1 {
+		t.Fatalf("bootstrap=%+v err=%v", bootstrap, err)
+	}
+	if err = long.QueryRow(ctx, insert, "sync/long-last").Scan(&lastID); err != nil {
+		t.Fatal(err)
+	}
+	if err = long.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// Resume from the earlier trailer: neither pending row may be skipped.
+	changes, final, err := s.SyncDelta(ctx, meta.LastSyncID, 100)
+	if err != nil || len(changes) != 2 || changes[0].ModelID != fmt.Sprint(firstID) || changes[1].ModelID != fmt.Sprint(lastID) || changes[0].SyncID <= meta.MaxSyncID || changes[1].SyncID <= changes[0].SyncID || final.LastSyncID != final.MaxSyncID {
+		t.Fatalf("after long commit: %v %+v %v", changes, final, err)
+	}
+	var nullCount int
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM sync_log WHERE sync_id IS NULL`).Scan(&nullCount); err != nil || nullCount != 0 {
+		t.Fatalf("committed pending rows=%d err=%v", nullCount, err)
+	}
+}
+
+func TestSyncPrunePendingRows(t *testing.T) {
+	s, pool := searchTestStore(t)
+	ctx := t.Context()
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer tx.Rollback(ctx)
-	insert := `INSERT INTO documents(key,kind,body,sha256,created_by,created_at,updated_at) VALUES($1,'note','body','hash','test',now(),now())`
-	if _, err = tx.Exec(ctx, insert, "sync/first"); err != nil {
+	if _, err = tx.Exec(ctx, `INSERT INTO documents(key,kind,body,sha256,created_by,created_at,updated_at) VALUES('sync/pending','note','body','hash','test',now(),now())`); err != nil {
 		t.Fatal(err)
 	}
-	// A competing writer cannot allocate a higher committed ID while the
-	// first transaction holds the journal lock. A short lock timeout gives
-	// deterministic evidence without depending on goroutine scheduling.
-	other, err := pool.Begin(ctx)
-	if err != nil {
+	if _, err = tx.Exec(ctx, `UPDATE sync_log SET at=now()-interval '31 days' WHERE txid=pg_current_xact_id()`); err != nil {
 		t.Fatal(err)
 	}
-	defer other.Rollback(ctx)
-	if _, err = other.Exec(ctx, `SET LOCAL lock_timeout='50ms'`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err = other.Exec(ctx, insert, "sync/second"); err == nil {
-		t.Fatal("writer overtook uncommitted ID")
-	}
-	if err = other.Rollback(ctx); err != nil {
-		t.Fatal(err)
+	if n, err := s.PruneSync(ctx, time.Nanosecond); err != nil || n != 0 {
+		t.Fatalf("prune pending=%d err=%v", n, err)
 	}
 	if err = tx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = pool.Exec(ctx, insert, "sync/second"); err != nil {
-		t.Fatal(err)
-	}
-	changes, _, err := s.SyncDelta(ctx, 0, 100)
-	if err != nil || len(changes) != 2 || changes[0].ModelID == changes[1].ModelID || changes[0].SyncID >= changes[1].SyncID {
-		t.Fatalf("changes=%v err=%v", changes, err)
+	changes, meta, err := s.SyncDelta(ctx, 0, 100)
+	if err != nil || len(changes) != 1 || meta.LastSyncID != meta.MaxSyncID {
+		t.Fatalf("pending lost: %v %+v %v", changes, meta, err)
 	}
 }
 

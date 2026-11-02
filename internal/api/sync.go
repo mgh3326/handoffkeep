@@ -67,3 +67,20 @@ func (s Server) syncBootstrap(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	jsonOut(w, http.StatusOK, result)
 }
+
+func (s Server) syncRow(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.auth(w, r); !ok {
+		return
+	}
+	row, found, err := s.Service.Store.GetSyncRow(r.Context(), r.PathValue("model"), r.PathValue("model_id"))
+	if err != nil {
+		syncError(w, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	if !found {
+		jsonOut(w, http.StatusNotFound, map[string]bool{"deleted": true})
+		return
+	}
+	jsonOut(w, http.StatusOK, row)
+}

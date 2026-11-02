@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -55,7 +56,7 @@ func (s *Store) SyncDelta(ctx context.Context, after int64, limit int) ([]SyncCh
 	if after > meta.MaxSyncID {
 		return nil, meta, ErrInvalidSync
 	}
-	rows, err := tx.Query(ctx, `SELECT sync_id,model,model_id,action,at FROM sync_log WHERE sync_id>$1 ORDER BY sync_id LIMIT $2`, after, limit)
+	rows, err := tx.Query(ctx, `SELECT sync_id,model,model_id,action,at FROM sync_log WHERE sync_id IS NOT NULL AND sync_id>$1 ORDER BY sync_id LIMIT $2`, after, limit)
 	if err != nil {
 		return nil, meta, err
 	}
@@ -166,7 +167,8 @@ func (s *Store) SyncBootstrap(ctx context.Context, model, cursor string, limit i
 }
 
 // PruneSync removes a bounded prefix, retaining a durable reset boundary even
-// when the log becomes empty. It shares the writers' lock through commit.
+// when the log becomes empty. Pending rows have no assigned ID and are never
+// eligible for pruning.
 func (s *Store) PruneSync(ctx context.Context, retention time.Duration) (int64, error) {
 	if retention <= 0 {
 		return 0, fmt.Errorf("%w: retention must be positive", ErrInvalidSync)
@@ -193,4 +195,34 @@ func (s *Store) PruneSync(ctx context.Context, retention time.Duration) (int64, 
 		return 0, err
 	}
 	return tag.RowsAffected(), tx.Commit(ctx)
+}
+
+// GetSyncRow returns the current raw model row for a delta model_id. Decisions
+// expose the complete request (including question and resolution) and options.
+func (s *Store) GetSyncRow(ctx context.Context, model, id string) (json.RawMessage, bool, error) {
+	if id == "" || !validText(id, 512) {
+		return nil, false, ErrInvalidSync
+	}
+	var query string
+	var arg any = id
+	switch model {
+	case "document", "task", "task_comment":
+		number, err := strconv.ParseInt(id, 10, 64)
+		if err != nil || number < 1 {
+			return nil, false, ErrInvalidSync
+		}
+		arg = number
+		table := map[string]string{"document": "documents", "task": "tasks", "task_comment": "task_comments"}[model]
+		query = `SELECT to_jsonb(source) FROM ` + table + ` source WHERE id=$1`
+	case "decision":
+		query = `SELECT (t.refs->'decision_request') || jsonb_build_object('task_id',t.id,'updated_at',d.updated_at,'options',t.refs->'decision_options') FROM sync_decisions d JOIN tasks t ON t.id=d.task_id WHERE d.id=$1`
+	default:
+		return nil, false, ErrInvalidSync
+	}
+	var raw json.RawMessage
+	err := s.pool.QueryRow(ctx, query, arg).Scan(&raw)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, false, nil
+	}
+	return raw, err == nil, err
 }
