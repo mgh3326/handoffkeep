@@ -601,7 +601,7 @@ func (a LinearAPI) createLinearIssue(ctx context.Context, in LinearDecisionIssue
 		return LinearIssue{}, err
 	}
 	if !out.IssueCreate.Success || out.IssueCreate.Issue == nil {
-		return LinearIssue{}, linearRejectionError{errors.New("linear api did not create the issue")}
+		return LinearIssue{}, linearRejectionError{err: errors.New("linear api did not create the issue")}
 	}
 	return LinearIssue{Identifier: out.IssueCreate.Issue.Identifier, URL: out.IssueCreate.Issue.URL}, nil
 }

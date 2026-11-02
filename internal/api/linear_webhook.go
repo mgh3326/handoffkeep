@@ -13,6 +13,7 @@ import (
 	"log"
 	"net/http"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/mgh3326/handoffkeep/internal/store"
@@ -277,7 +278,8 @@ func (e linearFetchError) Unwrap() error { return e.err }
 
 // LinearAPI reads issues from Linear's GraphQL API.
 type LinearAPI struct {
-	Admission LinearCreateAdmission
+	Admission      LinearCreateAdmission
+	CapacityPolicy LinearCapacityPolicy
 	// Set only after deployment verifies this credential sees the workspace
 	// issue scope used by the plan limit, including private teams.
 	CapacityScopeVerified bool
@@ -289,7 +291,7 @@ type LinearAPI struct {
 	HTTP *http.Client
 }
 
-const linearIssueQuery = `query($id:String!){issue(id:$id){identifier title url completedAt canceledAt state{type} labels(first:100){nodes{name}}}}`
+const linearIssueQuery = `query($id:String!){issue(id:$id){identifier title url completedAt canceledAt state{type} labels(first:100,includeArchived:true){nodes{name}}}}`
 
 func (a LinearAPI) LinearIssue(ctx context.Context, issueID string) (LinearIssue, error) {
 	var out struct {
@@ -325,7 +327,10 @@ func (a LinearAPI) LinearIssue(ctx context.Context, issueID string) (LinearIssue
 
 // A received rejection differs from a transport/5xx acceptance ambiguity.
 // Creation still reads its stable id before releasing a reservation.
-type linearRejectionError struct{ err error }
+type linearRejectionError struct {
+	err      error
+	capacity bool
+}
 
 func (e linearRejectionError) Error() string { return e.err.Error() }
 func (e linearRejectionError) Unwrap() error { return e.err }
@@ -380,24 +385,50 @@ func (a LinearAPI) graphql(ctx context.Context, timeout time.Duration, query str
 	if resp.StatusCode != http.StatusOK {
 		err := fmt.Errorf("linear api status %d", resp.StatusCode)
 		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
-			return linearRejectionError{err}
+			return linearRejectionError{err: err, capacity: resp.StatusCode == http.StatusPaymentRequired}
 		}
 		return err
 	}
 	var envelope struct {
 		Data   json.RawMessage `json:"data"`
 		Errors []struct {
-			Message string `json:"message"`
+			Message    string `json:"message"`
+			Extensions struct {
+				Type string `json:"type"`
+				Code string `json:"code"`
+			} `json:"extensions"`
 		} `json:"errors"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, store.MaxBytes)).Decode(&envelope); err != nil {
 		return fmt.Errorf("linear api response: %w", err)
 	}
 	if len(envelope.Errors) > 0 {
-		return linearRejectionError{fmt.Errorf("linear api error: %s", envelope.Errors[0].Message)}
+		capacity := false
+		for _, entry := range envelope.Errors {
+			if linearCapacityRejected(entry.Message, entry.Extensions.Type, entry.Extensions.Code) {
+				capacity = true
+			}
+		}
+		return linearRejectionError{err: fmt.Errorf("linear api error: %s", envelope.Errors[0].Message), capacity: capacity}
 	}
 	if err := json.Unmarshal(envelope.Data, out); err != nil {
 		return fmt.Errorf("linear api response: %w", err)
 	}
 	return nil
+}
+
+func linearCapacityRejected(message, kind, code string) bool {
+	value := strings.ToLower(message + " " + kind + " " + code)
+	if strings.Contains(value, "rate limit") || strings.Contains(value, "rate_limit") || strings.Contains(value, "ratelimited") {
+		return false
+	}
+	for _, known := range []string{"issue_limit_exceeded", "issue_limit_reached", "max_issues_reached", "plan_limit_exceeded", "issue_count_limit"} {
+		if strings.EqualFold(kind, known) || strings.EqualFold(code, known) {
+			return true
+		}
+	}
+	if strings.Contains(value, "title") || strings.Contains(value, "description") || strings.Contains(value, "character") || strings.Contains(value, "length") {
+		return false
+	}
+	return strings.Contains(value, "issue") && (strings.Contains(value, "issue limit") || strings.Contains(value, "issues limit") || strings.Contains(value, "too many issues") || strings.Contains(value, "maximum number of issues") || strings.Contains(value, "at most"))
 }

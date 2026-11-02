@@ -37,11 +37,31 @@ This assertion is necessary because an API-visible issue list cannot prove that
 no inaccessible private issues exist. Do not set it for a team-restricted token.
 
 The client holds a PostgreSQL session advisory lock across identity recovery,
-current hk policy checks, counting and creation. Migration 31 adds reservations and the board ownership registry. A count requests up to 245 non-archived issues, without a
-workflow-state filter: closed issues count too. Fewer than 245 plus a complete
-page permits a create. At 245, unknown scope, failed reads, malformed responses,
-or an incomplete count, creation stays pending. hk is the sole writer for this
-serialization guarantee; independent external creates cannot share its lock.
+current hk policy checks, counting and creation. Migration 31 adds reservation,
+capacity-hold and board-ownership records. Count pages contain 100 non-archived
+issues and advance to the creation ceiling; no workflow state is excluded.
+Closed, backlog, triage and sub-issues therefore count too. Unknown scope, failed
+reads, malformed/non-advancing pages, and the configured ceiling leave creates
+pending. hk is the sole writer for this serialization guarantee.
+
+Defaults follow the operator-tested workspace entitlement: limit **275**, create
+ceiling **270**, archive start **230**, archive target **200**. The published
+[Free plan](https://linear.app/pricing) still lists 250 issues / two teams; that
+published number and the observed workspace entitlement are separate evidence.
+The creation margin is five slots. Configure limits without a code change:
+
+| Variable | Default |
+|---|---|
+| `HANDOFFKEEP_LINEAR_ISSUE_LIMIT` | `275` |
+| `HANDOFFKEEP_LINEAR_ARCHIVE_HIGH_WATERMARK` | `230` |
+| `HANDOFFKEEP_LINEAR_ARCHIVE_LOW_WATERMARK` | `200` |
+
+Setting the issue limit to 250 changes the create ceiling to 245. Invalid policy
+or inconsistent thresholds pause new creates. A vendor capacity rejection records
+a durable hold even if the visible count appears below the configured ceiling.
+It releases when count reaches the archive target, or after an explicitly lower
+configured entitlement plus a verified count below that new ceiling. Rate limits
+and ordinary field validation do not become capacity holds.
 
 Before the HTTP create, hk commits a reservation for its stable issue id.
 Successful creation clears it. Ambiguous failure leaves it durable, including
@@ -82,16 +102,18 @@ an immediate archive. Previously queued `terminal_archive` operations settle as
 `skipped` before any remote callback executes. Keep closed issues until the
 watermark owner admits archival.
 
-The Free plan has 250 non-archived issues and two teams ([pricing](https://linear.app/pricing)).
-The create ceiling is 245, retaining five slots of safety margin. The archive
-watermarks are 210 to start and 180 as the target.
+The following archive PR implements copy-before-archive and protects links to
+open work, decisions and ongoing assistant requests, recent activity/references,
+and `keep` labels. The desk confirmed the archive design after the archived-read
+investigation; it still ships flag-off and is enabled by the desk after merge.
+It uses a short idle period for eligible closed issues and 230→200 as the hard
+watermark backstop. The daily archival job remains a backstop.
 
-The separate hk watermark archiver will implement copy-before-archive and
-protect links to open work, decisions and ongoing assistant requests, recent
-activity/references, and `keep` labels. It will default off pending confirmation
-that archived issues remain usable by the operator and assistant. The existing
-daily archival job remains the backstop. This admission change does not invoke
-that job or archive issues.
+Historical paginated reads explicitly request `includeArchived:true`. Exact-id
+issue/comment reads have no such argument in the schema; their nested history
+collections include archived resources. Active quota counting and candidate
+selection deliberately request non-archived inventory. Copies retain relation
+endpoints/types and parent identity; view filtering does not prove relation loss.
 
 ## Rollout, verification and rollback
 

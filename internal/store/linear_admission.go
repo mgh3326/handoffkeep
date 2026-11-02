@@ -17,6 +17,9 @@ type LinearCreateLease interface {
 	Reserve(context.Context, string) error
 	Reject(context.Context, string) error
 	RejectionKnown(context.Context, string) (bool, error)
+	CapacityHold(context.Context) (int, bool, error)
+	HoldCapacity(context.Context, int) error
+	ClearCapacityHold(context.Context) error
 	Complete(context.Context, string) error
 }
 
@@ -92,4 +95,19 @@ func (l linearCreateLease) RejectionKnown(ctx context.Context, id string) (bool,
 	var rejected bool
 	err := l.conn.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM linear_create_admissions WHERE issue_id=$1 AND NOT uncertain)`, id).Scan(&rejected)
 	return rejected, err
+}
+
+func (l linearCreateLease) CapacityHold(ctx context.Context) (int, bool, error) {
+	var limit int
+	var held bool
+	err := l.conn.QueryRow(ctx, `SELECT policy_limit,held FROM linear_capacity_state WHERE singleton`).Scan(&limit, &held)
+	return limit, held, err
+}
+func (l linearCreateLease) HoldCapacity(ctx context.Context, limit int) error {
+	_, err := l.conn.Exec(ctx, `UPDATE linear_capacity_state SET held=true,policy_limit=$1 WHERE singleton`, limit)
+	return err
+}
+func (l linearCreateLease) ClearCapacityHold(ctx context.Context) error {
+	_, err := l.conn.Exec(ctx, `UPDATE linear_capacity_state SET held=false WHERE singleton`)
+	return err
 }

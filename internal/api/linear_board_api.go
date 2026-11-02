@@ -36,7 +36,7 @@ func (a LinearAPI) BoardTarget(ctx context.Context) (BoardTarget, error) {
 	return result, nil
 }
 
-const boardIssueQuery = `query FleetBoardIssue($id:String!){issue(id:$id){id identifier description team{id} labels(first:100){nodes{id name} pageInfo{hasNextPage}}}}`
+const boardIssueQuery = `query FleetBoardIssue($id:String!){issue(id:$id){id identifier description team{id} labels(first:100,includeArchived:true){nodes{id name} pageInfo{hasNextPage}}}}`
 
 func (a LinearAPI) BoardIssue(ctx context.Context, id string) (BoardIssue, error) {
 	var out struct {
@@ -134,7 +134,7 @@ func (a LinearAPI) BoardCommentExists(ctx context.Context, id, issueID, body str
 	return out.Comment != nil && out.Comment.ID == id && out.Comment.Body == body && out.Comment.Issue.ID == issueID, nil
 }
 
-const boardRecoveryQuery = `query FleetBoardRecovery($id:ID!){issues(first:2,includeArchived:true,filter:{id:{eq:$id}}){nodes{id identifier description team{id}labels(first:100){nodes{id name}pageInfo{hasNextPage}}}pageInfo{hasNextPage}}}`
+const boardRecoveryQuery = `query FleetBoardRecovery($id:ID!){issues(first:2,includeArchived:true,filter:{id:{eq:$id}}){nodes{id identifier description team{id}labels(first:100,includeArchived:true){nodes{id name}pageInfo{hasNextPage}}}pageInfo{hasNextPage}}}`
 
 func (a LinearAPI) FindBoardIssue(ctx context.Context, id string) (BoardIssue, bool, error) {
 	var out struct {

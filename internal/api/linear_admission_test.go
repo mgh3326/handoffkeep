@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -16,10 +17,12 @@ import (
 )
 
 type admissionFake struct {
-	mu       sync.Mutex
-	pending  map[string]bool
-	excluded bool
-	task     *store.Task
+	mu        sync.Mutex
+	pending   map[string]bool
+	excluded  bool
+	task      *store.Task
+	holdLimit int
+	held      bool
 }
 
 func newAdmissionFake() *admissionFake { return &admissionFake{pending: map[string]bool{}} }
@@ -52,6 +55,16 @@ func (f *admissionFake) RejectionKnown(_ context.Context, id string) (bool, erro
 	return found && !uncertain, nil
 }
 
+func (f *admissionFake) CapacityHold(context.Context) (int, bool, error) {
+	return f.holdLimit, f.held, nil
+}
+func (f *admissionFake) HoldCapacity(_ context.Context, limit int) error {
+	f.holdLimit = limit
+	f.held = true
+	return nil
+}
+func (f *admissionFake) ClearCapacityHold(context.Context) error { f.held = false; return nil }
+
 func (f *admissionFake) Complete(_ context.Context, id string) error {
 	delete(f.pending, id)
 	return nil
@@ -68,6 +81,7 @@ type admissionRemote struct {
 	rejectCreate        bool
 	rejectStatus        int
 	rejectGraphQL       bool
+	rejectMessage       string
 	acceptThenReject    bool
 	rejectThenReadFails bool
 	issues              map[string]bool
@@ -103,11 +117,17 @@ func (f *admissionRemote) serve(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprint(w, f.countReply)
 			return
 		}
+
+		var after string
+		_ = json.Unmarshal(in.Variables["after"], &after)
+		offset, _ := strconv.Atoi(after)
 		nodes := []map[string]string{}
-		for i := 0; i < min(f.count, 245); i++ {
+		end := min(offset+100, f.count)
+		for i := offset; i < end; i++ {
 			nodes = append(nodes, map[string]string{"id": fmt.Sprint(i)})
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"issues": map[string]any{"nodes": nodes, "pageInfo": map[string]bool{"hasNextPage": f.count > 245}}}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"issues": map[string]any{"nodes": nodes, "pageInfo": map[string]any{"hasNextPage": end < f.count, "endCursor": strconv.Itoa(end)}}}})
+
 	case strings.Contains(in.Query, "issueCreate"):
 		f.creates++
 		if f.rejectCreate {
@@ -115,7 +135,11 @@ func (f *admissionRemote) serve(w http.ResponseWriter, r *http.Request) {
 				f.existingReply = `{"errors":[{"message":"read unavailable"}]}`
 			}
 			if f.rejectGraphQL {
-				fmt.Fprint(w, `{"errors":[{"message":"argument rejected"}]}`)
+				message := f.rejectMessage
+				if message == "" {
+					message = "argument rejected"
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"errors": []map[string]string{{"message": message}}})
 				return
 			}
 			status := f.rejectStatus
@@ -160,11 +184,13 @@ func TestLinearAdmissionCountAndScopeFailClosed(t *testing.T) {
 		name, reply string
 		count       int
 	}{
-		{name: "below", count: 244}, {name: "at watermark", count: 245}, {name: "above", count: 250},
+		{name: "below", count: 269}, {name: "at watermark", count: 270}, {name: "above", count: 275},
 		{name: "null count", reply: `{"data":{"issues":null}}`},
 		{name: "missing page info", reply: `{"data":{"issues":{"nodes":[]}}}`},
 		{name: "duplicate ids", reply: `{"data":{"issues":{"nodes":[{"id":"x"},{"id":"x"}],"pageInfo":{"hasNextPage":false}}}}`},
 		{name: "unknown", reply: `{"errors":[{"message":"unavailable"}]}`},
+		{name: "missing count cursor", reply: `{"data":{"issues":{"nodes":[{"id":"one"}],"pageInfo":{"hasNextPage":true}}}}`},
+		{name: "empty partial page", reply: `{"data":{"issues":{"nodes":[],"pageInfo":{"hasNextPage":true,"endCursor":"next"}}}}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			remote := &admissionRemote{count: tc.count, countReply: tc.reply}
@@ -193,7 +219,7 @@ func TestLinearAdmissionCountAndScopeFailClosed(t *testing.T) {
 }
 
 func TestLinearAdmissionConcurrentLastSlot(t *testing.T) {
-	remote := &admissionRemote{count: 244}
+	remote := &admissionRemote{count: 269}
 	api, _ := admissionClient(t, remote)
 	results := make(chan error, 2)
 	for _, id := range []string{"a", "b"} {
@@ -213,13 +239,13 @@ func TestLinearAdmissionConcurrentLastSlot(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if admitted != 1 || pending != 1 || remote.creates != 1 || remote.count != 245 {
+	if admitted != 1 || pending != 1 || remote.creates != 1 || remote.count != 270 {
 		t.Fatal(admitted, pending, remote.creates, remote.count)
 	}
 }
 
 func TestLinearAdmissionRecoversLostResponseAtWatermark(t *testing.T) {
-	remote := &admissionRemote{count: 244, loseResponse: true}
+	remote := &admissionRemote{count: 269, loseResponse: true}
 	api, gate := admissionClient(t, remote)
 	if _, err := api.CreateLinearIssue(t.Context(), LinearDecisionIssue{TaskID: 1, ID: "stable"}); err == nil || !gate.pending["stable"] {
 		t.Fatal(gate.pending, err)
@@ -435,5 +461,59 @@ func TestWorkBoardMirrorRecoversAcceptedCreateAfterTerminalTransition(t *testing
 	LinearBoardWorker{Store: q, Linear: remote}.Drain(t.Context())
 	if remote.creates != 0 || remote.updates != 1 || q.links[42].IssueID != stable || q.rows[0].State != "sent" || remote.states[0] != "Done" {
 		t.Fatal(remote.creates, remote.updates, q.links, q.rows, remote.states)
+	}
+}
+
+func TestLinearAdmissionCapacityRejectionHoldsUntilKnownSpace(t *testing.T) {
+	remote := &admissionRemote{count: 250, rejectCreate: true, rejectGraphQL: true, rejectMessage: "Workspace issue limit reached"}
+	api, gate := admissionClient(t, remote)
+	if _, err := api.CreateLinearIssue(t.Context(), LinearDecisionIssue{TaskID: 1, ID: "at-limit"}); err == nil || !gate.held || len(gate.pending) != 0 {
+		t.Fatal(gate.held, gate.pending, err)
+	}
+	remote.mu.Lock()
+	remote.rejectCreate = false
+	remote.mu.Unlock()
+	if _, err := api.CreateLinearIssue(t.Context(), LinearDecisionIssue{TaskID: 1, ID: "different"}); !errors.Is(err, ErrLinearCapacity) || remote.creates != 1 {
+		t.Fatal("vendor hold bypassed", remote.creates, err)
+	}
+	policy, err := NewLinearCapacityPolicy(250, 230, 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api.CapacityPolicy = policy
+	remote.mu.Lock()
+	remote.count = 244
+	remote.mu.Unlock()
+	if _, err := api.CreateLinearIssue(t.Context(), LinearDecisionIssue{TaskID: 1, ID: "same-policy-lower"}); err != nil || gate.held || remote.count != 245 {
+		t.Fatal("lower configured limit failed to release known space", gate.held, remote.count, err)
+	}
+}
+
+func TestLinearCapacityPolicyValidation(t *testing.T) {
+	for _, values := range [][3]int{{275, 230, 200}, {250, 230, 200}, {250, 210, 180}} {
+		p, err := NewLinearCapacityPolicy(values[0], values[1], values[2])
+		if err != nil || p.CreateCeiling() != values[0]-5 {
+			t.Fatal(p, err)
+		}
+	}
+	for _, values := range [][3]int{{5, 3, 1}, {250, 245, 200}, {250, 200, 200}, {250, 230, -1}} {
+		if _, err := NewLinearCapacityPolicy(values[0], values[1], values[2]); err == nil {
+			t.Fatal("invalid policy accepted", values)
+		}
+	}
+}
+
+func TestLinearCapacityRejectionClassification(t *testing.T) {
+	for _, tc := range []struct {
+		message, kind, code string
+		want                bool
+	}{
+		{"Workspace issue limit reached", "", "", true}, {"", "ISSUE_LIMIT_EXCEEDED", "", true}, {"", "", "PLAN_LIMIT_EXCEEDED", true},
+		{"Maximum number of issues reached", "", "", true}, {"Issue request rate limit exceeded", "", "", false}, {"", "RATELIMITED", "", false},
+		{"Issue title character limit exceeded", "", "", false}, {"permission denied", "", "", false},
+	} {
+		if got := linearCapacityRejected(tc.message, tc.kind, tc.code); got != tc.want {
+			t.Fatal(tc, got)
+		}
 	}
 }

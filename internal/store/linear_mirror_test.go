@@ -146,7 +146,17 @@ func TestLinearMirrorAdmissionSerializesAndRetainsReservations(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if err = st.SerializeLinearCreate(t.Context(), func(lease LinearCreateLease) error { return lease.HoldCapacity(t.Context(), 275) }); err != nil {
+		t.Fatal(err)
+	}
 	if err = second.SerializeLinearCreate(t.Context(), func(lease LinearCreateLease) error {
+		limit, held, err := lease.CapacityHold(t.Context())
+		if err != nil || !held || limit != 275 {
+			return fmt.Errorf("capacity hold lost: %d %t %v", limit, held, err)
+		}
+		if err := lease.ClearCapacityHold(t.Context()); err != nil {
+			return err
+		}
 		known, err := lease.RejectionKnown(t.Context(), "rejected")
 		if err != nil {
 			return err
@@ -200,7 +210,7 @@ func TestLinearMirrorAdmissionMigrationFromVersion30(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(st.Close)
-	if _, err = st.pool.Exec(t.Context(), `DROP TABLE linear_create_admissions,linear_board_owners; DELETE FROM schema_version WHERE version=31`); err != nil {
+	if _, err = st.pool.Exec(t.Context(), `DROP TABLE linear_create_admissions,linear_board_owners,linear_capacity_state; DELETE FROM schema_version WHERE version=31`); err != nil {
 		t.Fatal(err)
 	}
 	for range 2 {

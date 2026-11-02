@@ -9,7 +9,7 @@ import (
 
 func clearLinearConfig(t *testing.T) {
 	t.Helper()
-	for _, name := range []string{"HANDOFFKEEP_LINEAR_CAPACITY_SCOPE", "HANDOFFKEEP_LINEAR_WORK_BOARD", "HANDOFFKEEP_LINEAR_WORK_BOARD_BASE_URL", "HANDOFFKEEP_LINEAR_API_KEY", "HANDOFFKEEP_LINEAR_CLIENT_ID", "HANDOFFKEEP_LINEAR_CLIENT_SECRET", "HANDOFFKEEP_LINEAR_WEBHOOK_SECRET", "HANDOFFKEEP_LINEAR_OPERATOR_USER_ID", "HANDOFFKEEP_LINEAR_DECISION_STATES", "HANDOFFKEEP_LINEAR_DECISION_TEAM", "HANDOFFKEEP_DISCORD_DECISIONS_WEBHOOK_URL"} {
+	for _, name := range []string{"HANDOFFKEEP_LINEAR_ISSUE_LIMIT", "HANDOFFKEEP_LINEAR_ARCHIVE_HIGH_WATERMARK", "HANDOFFKEEP_LINEAR_ARCHIVE_LOW_WATERMARK", "HANDOFFKEEP_LINEAR_CAPACITY_SCOPE", "HANDOFFKEEP_LINEAR_WORK_BOARD", "HANDOFFKEEP_LINEAR_WORK_BOARD_BASE_URL", "HANDOFFKEEP_LINEAR_API_KEY", "HANDOFFKEEP_LINEAR_CLIENT_ID", "HANDOFFKEEP_LINEAR_CLIENT_SECRET", "HANDOFFKEEP_LINEAR_WEBHOOK_SECRET", "HANDOFFKEEP_LINEAR_OPERATOR_USER_ID", "HANDOFFKEEP_LINEAR_DECISION_STATES", "HANDOFFKEEP_LINEAR_DECISION_TEAM", "HANDOFFKEEP_DISCORD_DECISIONS_WEBHOOK_URL"} {
 		t.Setenv(name, "")
 	}
 }
@@ -70,5 +70,34 @@ func TestLinearAdmissionConfigRequiresVerifiedWorkspaceScope(t *testing.T) {
 	client = linearFromEnv(st).boardWorker.(api.LinearBoardWorker).Linear.(api.LinearAPI)
 	if !client.CapacityScopeVerified {
 		t.Fatal("verified scope ignored")
+	}
+}
+
+func TestLinearCapacityConfigObservedLimitAndDowngrade(t *testing.T) {
+	clearLinearConfig(t)
+	t.Setenv("HANDOFFKEEP_LINEAR_WORK_BOARD", "on")
+	t.Setenv("HANDOFFKEEP_LINEAR_API_KEY", "fake-key")
+	t.Setenv("HANDOFFKEEP_LINEAR_CAPACITY_SCOPE", "workspace")
+	get := func() api.LinearAPI {
+		return linearFromEnv(&store.Store{}).boardWorker.(api.LinearBoardWorker).Linear.(api.LinearAPI)
+	}
+	client := get()
+	if client.CapacityPolicy.Limit() != 275 || client.CapacityPolicy.CreateCeiling() != 270 || !client.CapacityScopeVerified {
+		t.Fatal(client.CapacityPolicy)
+	}
+	t.Setenv("HANDOFFKEEP_LINEAR_ISSUE_LIMIT", "250")
+	client = get()
+	if client.CapacityPolicy.Limit() != 250 || client.CapacityPolicy.CreateCeiling() != 245 || !client.CapacityScopeVerified {
+		t.Fatal(client.CapacityPolicy)
+	}
+	t.Setenv("HANDOFFKEEP_LINEAR_ARCHIVE_HIGH_WATERMARK", "210")
+	t.Setenv("HANDOFFKEEP_LINEAR_ARCHIVE_LOW_WATERMARK", "180")
+	client = get()
+	if client.CapacityPolicy.ArchiveHigh() != 210 || client.CapacityPolicy.ArchiveLow() != 180 {
+		t.Fatal(client.CapacityPolicy)
+	}
+	t.Setenv("HANDOFFKEEP_LINEAR_ISSUE_LIMIT", "bad")
+	if get().CapacityScopeVerified {
+		t.Fatal("invalid limit enabled creation")
 	}
 }

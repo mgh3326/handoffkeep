@@ -1096,6 +1096,8 @@ func (s *Store) migrate(ctx context.Context) error {
 		return execAll(ctx, tx, []string{
 			`CREATE TABLE linear_create_admissions(issue_id TEXT PRIMARY KEY, created_at TIMESTAMPTZ NOT NULL, uncertain BOOLEAN NOT NULL DEFAULT true)`,
 			`CREATE TABLE linear_board_owners(issue_id TEXT PRIMARY KEY, task_id BIGINT NOT NULL UNIQUE REFERENCES tasks(id))`,
+			`CREATE TABLE linear_capacity_state(singleton BOOLEAN PRIMARY KEY DEFAULT true CHECK(singleton),held BOOLEAN NOT NULL DEFAULT false,policy_limit INT NOT NULL DEFAULT 275)`,
+			`INSERT INTO linear_capacity_state(singleton) VALUES(true)`,
 			`INSERT INTO linear_board_owners SELECT issue_id,min(task_id) FROM linear_issues GROUP BY issue_id HAVING count(*)=1`,
 			`INSERT INTO schema_version(version) VALUES (31)`,
 		})

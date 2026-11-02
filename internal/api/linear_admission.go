@@ -9,8 +9,8 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
-const LinearIssueHighWatermark = 210
-const LinearIssueCreateCeiling = 245
+const LinearIssueHighWatermark = 230
+const LinearIssueCreateCeiling = 270
 
 var ErrLinearCapacity = errors.New("linear_capacity_pending")
 var ErrLinearMirrorExcluded = errors.New("linear_mirror_excluded")
@@ -22,7 +22,7 @@ type LinearCreateAdmission interface {
 }
 
 const admissionExistingQuery = `query HkAdmissionExisting($id:ID!){issues(first:2,includeArchived:true,filter:{id:{eq:$id}}){nodes{id identifier url} pageInfo{hasNextPage}}}`
-const admissionCountQuery = `query HkAdmissionCount{issues(first:245,includeArchived:false){nodes{id} pageInfo{hasNextPage}}}`
+const admissionCountQuery = `query HkAdmissionCount($after:String){issues(first:100,after:$after,includeArchived:false){nodes{id} pageInfo{hasNextPage endCursor}}}`
 
 func (a LinearAPI) admittedCreate(ctx context.Context, in LinearDecisionIssue) (LinearIssue, error) {
 	if a.Admission == nil || !a.CapacityScopeVerified {
@@ -79,7 +79,7 @@ func (a LinearAPI) admittedCreate(ctx context.Context, in LinearDecisionIssue) (
 		if in.RequestID != "" && (task.Refs.DecisionRequest == nil || task.Refs.DecisionRequest.ID != in.RequestID || task.Refs.DecisionRequest.Status != store.DecisionRequestOpen) {
 			return ErrLinearMirrorExcluded
 		}
-		if err := a.admissionCapacity(ctx); err != nil {
+		if err := a.admissionCapacity(ctx, lease); err != nil {
 			return err
 		}
 		if err := lease.Reserve(ctx, in.ID); err != nil {
@@ -89,6 +89,11 @@ func (a LinearAPI) admittedCreate(ctx context.Context, in LinearDecisionIssue) (
 		if err != nil {
 			var rejection linearRejectionError
 			if errors.As(err, &rejection) {
+				if rejection.capacity {
+					if holdErr := lease.HoldCapacity(ctx, a.CapacityPolicy.Limit()); holdErr != nil {
+						return errors.Join(err, holdErr)
+					}
+				}
 				if recordErr := lease.Reject(ctx, in.ID); recordErr != nil {
 					return errors.Join(err, recordErr)
 				}
@@ -131,28 +136,73 @@ func (a LinearAPI) admissionExisting(ctx context.Context, id string) (LinearIssu
 	return LinearIssue{Identifier: issue.Identifier, URL: issue.URL}, true, nil
 }
 
-func (a LinearAPI) admissionCapacity(ctx context.Context) error {
-	var out struct {
-		Issues *struct {
-			Nodes    []struct{ ID string }
-			PageInfo *struct{ HasNextPage *bool }
-		}
-	}
-	if err := a.graphql(ctx, linearWriteTimeout, admissionCountQuery, nil, &out); err != nil {
-		return fmt.Errorf("%w: count unavailable: %v", ErrLinearCapacity, err)
-	}
-	if out.Issues == nil || out.Issues.Nodes == nil || out.Issues.PageInfo == nil || out.Issues.PageInfo.HasNextPage == nil {
-		return fmt.Errorf("%w: incomplete count", ErrLinearCapacity)
-	}
+func (a LinearAPI) activeIssueCount(ctx context.Context) (int, error) {
 	seen := map[string]bool{}
-	for _, issue := range out.Issues.Nodes {
-		if issue.ID == "" || seen[issue.ID] {
-			return fmt.Errorf("%w: invalid count", ErrLinearCapacity)
+	after := ""
+	for {
+		var out struct {
+			Issues *struct {
+				Nodes    []struct{ ID string }
+				PageInfo *struct {
+					HasNextPage *bool
+					EndCursor   string
+				}
+			}
 		}
-		seen[issue.ID] = true
+		var cursor any
+		if after != "" {
+			cursor = after
+		}
+		if err := a.graphql(ctx, linearWriteTimeout, admissionCountQuery, map[string]any{"after": cursor}, &out); err != nil {
+			return 0, fmt.Errorf("%w: count unavailable: %v", ErrLinearCapacity, err)
+		}
+		if out.Issues == nil || out.Issues.Nodes == nil || out.Issues.PageInfo == nil || out.Issues.PageInfo.HasNextPage == nil {
+			return 0, fmt.Errorf("%w: incomplete count", ErrLinearCapacity)
+		}
+		for _, issue := range out.Issues.Nodes {
+			if issue.ID == "" || seen[issue.ID] {
+				return 0, fmt.Errorf("%w: invalid count", ErrLinearCapacity)
+			}
+			seen[issue.ID] = true
+		}
+		if len(seen) >= a.CapacityPolicy.CreateCeiling() {
+			return a.CapacityPolicy.CreateCeiling(), nil
+		}
+		page := out.Issues.PageInfo
+		if !*page.HasNextPage {
+			return len(seen), nil
+		}
+		if page.EndCursor == "" || page.EndCursor == after || len(out.Issues.Nodes) == 0 {
+			return 0, fmt.Errorf("%w: non-advancing count cursor", ErrLinearCapacity)
+		}
+		after = page.EndCursor
 	}
-	if len(seen) >= LinearIssueCreateCeiling || *out.Issues.PageInfo.HasNextPage {
-		return fmt.Errorf("%w: watermark reached", ErrLinearCapacity)
+}
+
+func (a LinearAPI) checkCapacityHold(ctx context.Context, lease store.LinearCreateLease, count int) error {
+	priorLimit, held, err := lease.CapacityHold(ctx)
+	if err != nil {
+		return err
+	}
+	if !held {
+		return nil
+	}
+	policy := a.CapacityPolicy
+	if count <= policy.ArchiveLow() || (policy.Limit() < priorLimit && count < policy.CreateCeiling()) {
+		return lease.ClearCapacityHold(ctx)
+	}
+	return fmt.Errorf("%w: vendor rejected issue capacity", ErrLinearCapacity)
+}
+func (a LinearAPI) admissionCapacity(ctx context.Context, lease store.LinearCreateLease) error {
+	count, err := a.activeIssueCount(ctx)
+	if err != nil {
+		return err
+	}
+	if err := a.checkCapacityHold(ctx, lease, count); err != nil {
+		return err
+	}
+	if count >= a.CapacityPolicy.CreateCeiling() {
+		return fmt.Errorf("%w: create ceiling reached", ErrLinearCapacity)
 	}
 	return nil
 }
