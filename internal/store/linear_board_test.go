@@ -364,6 +364,10 @@ func TestWorkBoardReconcileSkipsUnchangedTerminalTasks(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
+		// Terminal repair applies to issues already mirrored before closure.
+		if err = st.EnsureLinearBoardOwnership(t.Context(), task.ID, fmt.Sprintf("terminal-%d", task.ID), fmt.Sprintf("ROB-%d", task.ID)); err != nil {
+			t.Fatal(err)
+		}
 		task, err = st.TransitionTask(t.Context(), task.ID, state, "lead", "finished", nil, "")
 		if err != nil {
 			t.Fatal(err)
@@ -472,6 +476,11 @@ func TestWorkBoardReconcileRecoversTerminalTasksWithoutProjection(t *testing.T) 
 					t.Fatal(err)
 				}
 			}
+		}
+		// This test exercises maintenance of an already mirrored issue.
+		// An unlinked terminal task must not gain a fresh issue.
+		if err = st.EnsureLinearBoardOwnership(t.Context(), task.ID, fmt.Sprintf("terminal-%d", task.ID), fmt.Sprintf("ROB-%d", task.ID)); err != nil {
+			t.Fatal(err)
 		}
 		task, err = st.TransitionTask(t.Context(), task.ID, state, "lead", "finished while off", nil, "")
 		if err != nil {

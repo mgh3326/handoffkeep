@@ -88,6 +88,11 @@ Before any board issue mutation, hk reserves one task-to-issue ownership pair.
 Reusing a ROB title cannot take an issue owned by another task or a decision
 request. Rebinding a task to a different issue is refused. Historical duplicate
 links are retained for inspection and refused; they are not silently rewritten.
+Backfill reserves the latest unambiguous issue per task by updated time, created
+time, then issue id. An issue shared by tasks stays unclaimed. Every skipped
+distinct pair is recorded in `linear_board_ownership_conflicts`; inspect these
+rows before enabling affected writers. Existing conflicting links require
+explicit repair even when the registry selected one candidate.
 Ownership conflict suspends the outbox row as failed.
 
 Each saved board projection increments its version under the task/projection

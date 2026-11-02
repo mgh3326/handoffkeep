@@ -210,7 +210,7 @@ func TestLinearMirrorAdmissionMigrationFromVersion30(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(st.Close)
-	if _, err = st.pool.Exec(t.Context(), `DROP TABLE linear_create_admissions,linear_board_owners,linear_capacity_state; DELETE FROM schema_version WHERE version=31`); err != nil {
+	if _, err = st.pool.Exec(t.Context(), `DROP TABLE linear_create_admissions,linear_board_owners,linear_board_ownership_conflicts,linear_capacity_state; DELETE FROM schema_version WHERE version=31`); err != nil {
 		t.Fatal(err)
 	}
 	for range 2 {
@@ -275,5 +275,76 @@ func TestLinearMirrorAdmissionOwnershipAndVersions(t *testing.T) {
 	}
 	if err = st.EnsureLinearBoardOwnership(t.Context(), owner.ID, "owned-issue", "ROB-1"); !errors.Is(err, ErrLinearIssueOwnership) {
 		t.Fatal("legacy duplicate accepted", err)
+	}
+}
+
+func TestLinearMirrorAdmissionLegacyReboundBackfill(t *testing.T) {
+	_, url := testdb.Schema(t, "legacy_rebound")
+	st, err := Open(t.Context(), url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(st.Close)
+	a, b, c := linearTask(t, st, TaskRefs{}), linearTask(t, st, TaskRefs{}), linearTask(t, st, TaskRefs{})
+	// Model a legacy import that predates the task primary key. Fresh schemas
+	// already prohibit this shape, but CREATE IF NOT EXISTS cannot repair it.
+	for _, sql := range []string{`DROP TABLE linear_create_admissions,linear_board_owners,linear_board_ownership_conflicts,linear_capacity_state`, `DELETE FROM schema_version WHERE version=31`, `ALTER TABLE linear_issues DROP CONSTRAINT linear_issues_pkey`} {
+		if _, err = st.pool.Exec(t.Context(), sql); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := time.Now().UTC().Add(-time.Hour)
+	if _, err = st.pool.Exec(t.Context(), `INSERT INTO linear_issues(task_id,issue_id,identifier,created_at,updated_at) VALUES($1,'old','ROB-1',$4,$4),($1,'new','ROB-2',$4,$4+interval '1 minute'),($2,'shared','ROB-3',$4,$4),($3,'shared','ROB-3',$4,$4)`, a.ID, b.ID, c.ID, old); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err = st.migrate(t.Context()); err != nil {
+			t.Fatal("legacy backfill aborted startup", err)
+		}
+	}
+	var chosen string
+	if err = st.pool.QueryRow(t.Context(), `SELECT issue_id FROM linear_board_owners WHERE task_id=$1`, a.ID).Scan(&chosen); err != nil || chosen != "new" {
+		t.Fatal(chosen, err)
+	}
+	var owners, skipped, legacy int
+	if err = st.pool.QueryRow(t.Context(), `SELECT (SELECT count(*) FROM linear_board_owners),(SELECT count(*) FROM linear_board_ownership_conflicts),(SELECT count(*) FROM linear_issues)`).Scan(&owners, &skipped, &legacy); err != nil || owners != 1 || skipped != 3 || legacy != 4 {
+		t.Fatal(owners, skipped, legacy, err)
+	}
+	var reason string
+	if err = st.pool.QueryRow(t.Context(), `SELECT reason FROM linear_board_ownership_conflicts WHERE task_id=$1 AND issue_id='old'`, a.ID).Scan(&reason); err != nil || reason != "additional_task_issue" {
+		t.Fatal(reason, err)
+	}
+}
+
+func TestLinearMirrorAdmissionReconcileNeverCreatesTerminalMirror(t *testing.T) {
+	_, url := testdb.Schema(t, "terminal_no_mirror")
+	st, err := Open(t.Context(), url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(st.Close)
+	task := linearTask(t, st, TaskRefs{})
+	if _, err = st.ClaimTask(t.Context(), task.ID, "test", "unmirrored-job", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = st.TransitionTask(t.Context(), task.ID, "dropped", "test", "closed before board", nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	st.EnableLinearBoard()
+	for range 2 {
+		if err = st.ReconcileLinearBoard(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, err := st.ListLinearOutbox(t.Context(), task.ID)
+	if err != nil || len(rows) != 0 {
+		t.Fatal("new terminal mirror enqueued", rows, err)
+	}
+	board, found, err := st.GetLinearBoard(t.Context(), task.ID)
+	if err != nil || !found || board.State != "Canceled" {
+		t.Fatal("canonical projection missing", board, found, err)
+	}
+	if _, linked, err := st.GetLinearIssue(t.Context(), task.ID); err != nil || linked {
+		t.Fatal("unlinked task gained issue", linked, err)
 	}
 }
