@@ -1594,9 +1594,14 @@ func (s *Store) UpsertBenchGrades(ctx context.Context, xs []BenchGrade) (int, er
 		// Mirror into the catalog's profile-default row so the canonical store
 		// sees legacy writes; catalog-only columns (model_id, pool, gate, ...)
 		// are preserved on conflict. A legacy grade write un-retires the row.
-		_, err = tx.Exec(ctx, `INSERT INTO bench_catalog(profile,effort,model_id,pool,grade,boundary_version,deviation_ref,decided_at,decided_by) VALUES($1,'','','',$2,$3,$4,$5,$6) ON CONFLICT (profile,effort) DO UPDATE SET grade=EXCLUDED.grade,boundary_version=EXCLUDED.boundary_version,deviation_ref=EXCLUDED.deviation_ref,decided_at=EXCLUDED.decided_at,decided_by=EXCLUDED.decided_by,retired_at=NULL`, x.Profile, x.Grade, x.BoundaryVersion, x.DeviationRef, x.DecidedAt, x.DecidedBy)
+		// Refuse a scored Sol transition atomically, including when a catalog
+		// writer created the default row after this transaction began.
+		tag, err := tx.Exec(ctx, `INSERT INTO bench_catalog(profile,effort,model_id,pool,grade,boundary_version,deviation_ref,decided_at,decided_by) VALUES($1,'','','',$2,$3,$4,$5,$6) ON CONFLICT (profile,effort) DO UPDATE SET grade=EXCLUDED.grade,boundary_version=EXCLUDED.boundary_version,deviation_ref=EXCLUDED.deviation_ref,decided_at=EXCLUDED.decided_at,decided_by=EXCLUDED.decided_by,retired_at=NULL WHERE NOT ($7 AND EXCLUDED.grade='unrated' AND bench_catalog.score IS NOT NULL)`, x.Profile, x.Grade, x.BoundaryVersion, x.DeviationRef, x.DecidedAt, x.DecidedBy, benchSolProfiles[x.Profile])
 		if err != nil {
 			return 0, err
+		}
+		if tag.RowsAffected() == 0 {
+			return 0, ErrBenchCatalogSolGrade
 		}
 	}
 	return len(xs), tx.Commit(ctx)

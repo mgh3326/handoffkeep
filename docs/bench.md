@@ -134,6 +134,11 @@ the catalog invariant. Client text in `provenance`, `notes`,
 `task_ref`, `boundary_version`, and `deviation_ref` passes through the secret
 guard before storage.
 
+A grade write cannot change a scored Sol default catalog row to `unrated`.
+It rejects the entire batch with `400 bench_catalog_sol_grade`, preserving the
+score and both grade stores. To make that transition, an operator must explicitly
+remove the score through the catalog write path first.
+
 Grade rows have this shape:
 
 ```json
@@ -212,6 +217,21 @@ The `catalog` array in the PUT body is the JSON input format that
 `pacelever bench push-catalog` consumes: one object per row with the fields
 above (`retired_at` may be an RFC 3339 timestamp to retire, otherwise null or
 omitted).
+
+### Rollback compatibility
+
+Migration v28 widens the grade constraints without changing existing rows.
+Before the first `unrated` write, the previous binary can still read that data.
+After publishing unrated grades, keep the v28-capable binary installed until an
+operator restores reviewed pre-publication catalog and grade data with no
+`unrated` rows and verifies the previous binary's Sol and monotonicity rules.
+Restore data while the new binary is still running, then downgrade the binary.
+The widened constraints can remain in place.
+
+Do not mechanically convert `unrated` to C. A ladder of B, unrated, A is valid
+here but B, C, A violates the previous monotonicity rule. Such rows require an
+operator-reviewed restoration or removal. Schema migration has no automatic
+data rollback because it cannot reconstruct the previous grade decisions.
 
 ## Errors
 
