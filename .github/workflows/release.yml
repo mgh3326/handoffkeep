@@ -122,6 +122,15 @@ jobs:
       - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
         with:
           go-version-file: go.mod
+      # Full Go tests rebuild and mutate the console bundle. Match ci.yml's
+      # pinned toolchain and locked dependencies before invoking that suite.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with: {node-version-file: web/console/.nvmrc, cache: npm, cache-dependency-path: web/console/package-lock.json}
+      - run: npm ci
+        working-directory: web/console
+      - run: npm run build
+        working-directory: web/console
+      - run: git diff --exit-code -- internal/ui/static/console
       - name: Vet, test, and exercise release helper
         run: |
           set -euo pipefail

@@ -27,10 +27,12 @@ import (
 // by matching nothing.
 
 type step struct {
-	Name string         `yaml:"name"`
-	Uses string         `yaml:"uses"`
-	With map[string]any `yaml:"with"`
-	Env  map[string]any `yaml:"env"`
+	Run              string         `yaml:"run"`
+	WorkingDirectory string         `yaml:"working-directory"`
+	Name             string         `yaml:"name"`
+	Uses             string         `yaml:"uses"`
+	With             map[string]any `yaml:"with"`
+	Env              map[string]any `yaml:"env"`
 }
 
 type workflowFile struct {
@@ -229,5 +231,48 @@ func TestWorkflowPinning(t *testing.T) {
 				shas[m[1]] = where
 			}
 		}
+	}
+}
+
+// Full Go suites execute console bundle rebuild and drift tests, so their job
+// must provision the same locked frontend toolchain before invoking them.
+func TestFullGoSuitesProvisionConsole(t *testing.T) {
+	dir := filepath.Join("..", "..", ".github", "workflows")
+	suites := 0
+	for _, fname := range workflowFiles(t, dir) {
+		body, err := os.ReadFile(filepath.Join(dir, fname))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var wf workflowFile
+		if err := yaml.Unmarshal(body, &wf); err != nil {
+			t.Fatal(err)
+		}
+		for job, spec := range wf.Jobs {
+			node, dependencies, build, drift := false, false, false, false
+			for _, s := range spec.Steps {
+				if hasAction(s.Uses, "actions/setup-node") {
+					node = true
+				}
+				if s.WorkingDirectory == "web/console" && strings.TrimSpace(s.Run) == "npm ci" {
+					dependencies = node
+				}
+				if s.WorkingDirectory == "web/console" && strings.TrimSpace(s.Run) == "npm run build" {
+					build = dependencies
+				}
+				if strings.TrimSpace(s.Run) == "git diff --exit-code -- internal/ui/static/console" {
+					drift = build
+				}
+				if strings.Contains(s.Run, "go test ") && strings.Contains(s.Run, "./...") {
+					suites++
+					if !node || !dependencies || !build || !drift {
+						t.Errorf("%s job %s: full Go suite requires setup-node, npm ci, console build and committed-bundle check first", fname, job)
+					}
+				}
+			}
+		}
+	}
+	if suites < 2 {
+		t.Fatal("expected CI and release full Go suites")
 	}
 }
