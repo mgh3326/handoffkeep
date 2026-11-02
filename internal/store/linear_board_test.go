@@ -408,3 +408,90 @@ func TestWorkBoardReconcileSkipsUnchangedTerminalTasks(t *testing.T) {
 		t.Fatalf("settled terminal task requeued: %d", got)
 	}
 }
+
+func TestWorkBoardFindingsPreserveCompletedReviewPass(t *testing.T) {
+	at := time.Now().UTC()
+	var board LinearBoard
+	board.ApplyTask(Task{ID: 1, State: "claimed"})
+	first := validPlacementFixture()
+	first.JobID = "review-first"
+	first.Role = "review"
+	first.DecidedAt = at
+	board.ApplyPlacement(first)
+	completedAt := at.Add(time.Minute)
+	board.ApplyEvent(LinearBoardEvent{Kind: "READY", Text: "approved, 0 findings", At: completedAt}, first.JobID, "", "")
+	second := first
+	second.JobID = "review-second"
+	second.DecidedAt = at.Add(2 * time.Minute)
+	board.ApplyPlacement(second)
+	event := LinearBoardEvent{Kind: "FINDINGS", Text: "2 findings, changes requested", At: at.Add(3 * time.Minute)}
+	board.ApplyEvent(event, "mergewake", "", "")
+	if got := board.Sessions[0]; got.Verdict != "approved, 0 findings" || !got.EndedAt.Equal(completedAt) {
+		t.Fatalf("completed review changed: verdict=%q ended_at=%s; want approved, 0 findings at %s", got.Verdict, got.EndedAt, completedAt)
+	}
+	if got := board.Sessions[1]; got.Active || got.Verdict != event.Text || !got.EndedAt.Equal(event.At) {
+		t.Fatalf("active review not closed: %+v", got)
+	}
+}
+
+func TestWorkBoardDisabledPlacementRecorderDoesNotTouchTransaction(t *testing.T) {
+	st := &Store{}
+	if err := st.recordLinearBoardPlacementTx(t.Context(), nil, PlacementDecision{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWorkBoardReconcileRecoversTerminalTasksWithoutProjection(t *testing.T) {
+	_, url := testdb.Schema(t, "board_terminal_recovery")
+	st, err := Open(t.Context(), url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(st.Close)
+	terminal := []Task{}
+	for _, state := range []string{"merged", "dropped"} {
+		task := linearTask(t, st, TaskRefs{})
+		job := state + "-before-board"
+		if _, err = st.ClaimTask(t.Context(), task.ID, "lead", job, ""); err != nil {
+			t.Fatal(err)
+		}
+		placement := validPlacementFixture()
+		placement.JobID = job
+		placement.TaskID = &task.ID
+		if _, _, err = st.RecordPlacement(t.Context(), placement); err != nil {
+			t.Fatal(err)
+		}
+		if state == "merged" {
+			for _, next := range []string{"in_progress", "verifying"} {
+				if _, err = st.TransitionTask(t.Context(), task.ID, next, "lead", "advance", nil, ""); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		task, err = st.TransitionTask(t.Context(), task.ID, state, "lead", "finished while off", nil, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		rows, err := st.ListLinearOutbox(t.Context(), task.ID)
+		if err != nil || len(rows) != 0 {
+			t.Fatalf("disabled board queued rows: %v err=%v", rows, err)
+		}
+		terminal = append(terminal, task)
+	}
+	st.EnableLinearBoard()
+	for round := range 2 {
+		if err = st.ReconcileLinearBoard(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		for _, task := range terminal {
+			rows, err := st.ListLinearOutbox(t.Context(), task.ID)
+			if err != nil || len(rows) != 1 {
+				t.Fatalf("round=%d state=%s syncs=%d want=1 err=%v", round, task.State, len(rows), err)
+			}
+			board := rows[0].Payload.Board
+			if board.Task.State != task.State || board.State != LinearTaskStateMapping[task.State].Name || len(board.Sessions) != 1 {
+				t.Fatalf("incomplete terminal recovery: %+v", board)
+			}
+		}
+	}
+}

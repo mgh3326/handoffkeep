@@ -163,7 +163,7 @@ func (s *Store) RecordPlacement(ctx context.Context, d PlacementDecision) (Place
 	if err != nil {
 		return d, false, err
 	}
-	if created && d.TaskID != nil && d.Outcome == "placed" && s.LinearBoardEnabled() {
+	if created && d.TaskID != nil && d.Outcome == "placed" {
 		if err = s.recordLinearBoardPlacementTx(ctx, tx, stored); err != nil {
 			return d, false, err
 		}

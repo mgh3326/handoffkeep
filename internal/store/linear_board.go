@@ -114,7 +114,7 @@ func (b *LinearBoard) ApplyEvent(event LinearBoardEvent, jobID, pr, head string)
 	if event.Kind == "FINDINGS" && jobID == "mergewake" {
 		for i := range b.Sessions {
 			session := &b.Sessions[i]
-			if session.Role == "review" && !event.At.Before(session.At) && !event.At.Before(session.EndedAt) {
+			if session.Active && session.Role == "review" && !event.At.Before(session.At) && !event.At.Before(session.EndedAt) {
 				session.Active, session.EndedAt, session.Verdict = false, event.At, event.Text
 			}
 		}
@@ -252,6 +252,9 @@ func (s *Store) recordLinearBoardTaskTx(ctx context.Context, tx pgx.Tx, task Tas
 }
 
 func (s *Store) recordLinearBoardPlacementTx(ctx context.Context, tx pgx.Tx, d PlacementDecision) error {
+	if !s.LinearBoardEnabled() {
+		return nil
+	}
 	var task Task
 	if err := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, *d.TaskID), &task); err != nil {
 		return err
@@ -408,12 +411,14 @@ func (s *Store) recordLinearBoardJobTx(ctx context.Context, tx pgx.Tx, job Job) 
 	return saveLinearBoardTx(ctx, tx, b, LinearBoardEvent{})
 }
 
-// Terminal tasks need one repair when their stored projection is stale, then
+// Terminal tasks need one repair when their projection is missing or stale, then
 // stop generating hourly outbox rows. Recheck under the task lock as well.
 const linearBoardReconcileFilter = `(id IN (SELECT task_id FROM linear_board_tasks)
  OR COALESCE(refs->>'job_id','')<>''
  OR id IN (SELECT task_id FROM placement_decisions WHERE outcome='placed' AND task_id IS NOT NULL))
- AND (state NOT IN ('merged','dropped') OR EXISTS (
+ AND (state NOT IN ('merged','dropped')
+ OR NOT EXISTS (SELECT 1 FROM linear_board_tasks b WHERE b.task_id=tasks.id)
+ OR EXISTS (
  SELECT 1 FROM linear_board_tasks b WHERE b.task_id=tasks.id
  AND (b.status->'task'->>'state' IS DISTINCT FROM tasks.state
  OR (b.status->'task'->>'updated_at')::timestamptz IS DISTINCT FROM tasks.updated_at)))`
