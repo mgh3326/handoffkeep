@@ -30,6 +30,7 @@ func linearTask(t *testing.T, st *Store, refs TaskRefs) Task {
 	task, err := st.CreateTask(t.Context(), Task{
 		Lane:      fmt.Sprintf("linear-%d", time.Now().UnixNano()),
 		Title:     "Mirror connector contract",
+		Priority:  2,
 		Kind:      "implement",
 		Refs:      refs,
 		CreatedBy: "linear-test",
@@ -206,12 +207,12 @@ func TestLinearCreateAndTerminalPayloads(t *testing.T) {
 		}
 	}
 	rows, err = st.ListLinearOutbox(t.Context(), task.ID)
-	if err != nil || len(rows) != 7 {
+	if err != nil || len(rows) != 6 {
 		t.Fatalf("terminal rows=%+v err=%v", rows, err)
 	}
-	last := rows[len(rows)-3:]
-	if last[0].Op != LinearOpIssueState || last[1].Op != LinearOpTerminalComment || last[2].Op != LinearOpTerminalArchive {
-		t.Fatalf("terminal order=%v,%v,%v", last[0].Op, last[1].Op, last[2].Op)
+	last := rows[len(rows)-2:]
+	if last[0].Op != LinearOpIssueState || last[1].Op != LinearOpTerminalComment {
+		t.Fatalf("terminal order=%v,%v", last[0].Op, last[1].Op)
 	}
 	for _, fragment := range []string{"terminal summary", refs.Linear.Report, refs.Linear.Verify, refs.Linear.Decision, refs.Linear.DeploySHA} {
 		if !strings.Contains(last[1].Payload.Comment, fragment) {
@@ -288,7 +289,7 @@ func TestLinearOutboxWorkersOnlyDrainOwnedOps(t *testing.T) {
 	for _, boardFirst := range []bool{false, true} {
 		t.Run(fmt.Sprintf("board_first=%t", boardFirst), func(t *testing.T) {
 			task := linearTask(t, st, TaskRefs{})
-			legacy := []string{LinearOpIssueCreate, LinearOpIssueState, LinearOpTerminalComment, LinearOpTerminalArchive}
+			legacy := []string{LinearOpIssueCreate, LinearOpIssueState, LinearOpTerminalComment}
 			ops := append(append([]string{}, legacy...), LinearOpWorkBoard)
 			if boardFirst {
 				ops = append([]string{LinearOpWorkBoard}, legacy...)

@@ -529,7 +529,7 @@ func TestLinearAPIWrites(t *testing.T) {
 	}))
 	defer srv.Close()
 	a := LinearAPI{Key: "fake-key-value", URL: srv.URL}
-	issue, err := a.CreateLinearIssue(t.Context(), LinearDecisionIssue{ID: "id-1", TeamID: "team", LabelID: "label", Title: "t", Description: "d"})
+	issue, err := a.createLinearIssue(t.Context(), LinearDecisionIssue{ID: "id-1", TeamID: "team", LabelID: "label", Title: "t", Description: "d"})
 	if err != nil || issue.Identifier != "ROB-9" || issue.URL != "https://l/9" {
 		t.Fatalf("issue=%+v err=%v", issue, err)
 	}
@@ -552,7 +552,7 @@ func TestLinearAPIWrites(t *testing.T) {
 		t.Fatalf("vars=%v", vars)
 	}
 	reply = `{"data":{"issueCreate":{"success":false},"commentCreate":{"success":false},"issueUpdate":{"success":false}}}`
-	if _, err := a.CreateLinearIssue(t.Context(), LinearDecisionIssue{}); err == nil {
+	if _, err := a.createLinearIssue(t.Context(), LinearDecisionIssue{}); err == nil {
 		t.Error("issue success=false accepted")
 	}
 	if err := a.CreateLinearComment(t.Context(), "c", "i", "b"); err == nil {
