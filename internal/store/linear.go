@@ -51,11 +51,13 @@ func TaskStateNames() []string {
 }
 
 type LinearOutboxPayload struct {
-	Title       string   `json:"title,omitempty"`
-	Description string   `json:"description,omitempty"`
-	Labels      []string `json:"labels,omitempty"`
-	State       string   `json:"state,omitempty"`
-	Comment     string   `json:"comment,omitempty"`
+	Board       *LinearBoard      `json:"board,omitempty"`
+	Event       *LinearBoardEvent `json:"event,omitempty"`
+	Title       string            `json:"title,omitempty"`
+	Description string            `json:"description,omitempty"`
+	Labels      []string          `json:"labels,omitempty"`
+	State       string            `json:"state,omitempty"`
+	Comment     string            `json:"comment,omitempty"`
 }
 
 type LinearOutbox struct {
@@ -101,7 +103,7 @@ func (s *Store) LinearSyncEnabled() bool { return s.linearSync.Load() }
 
 func validLinearOp(op string) bool {
 	switch op {
-	case LinearOpIssueCreate, LinearOpIssueState, LinearOpTerminalComment, LinearOpTerminalArchive:
+	case LinearOpIssueCreate, LinearOpIssueState, LinearOpTerminalComment, LinearOpTerminalArchive, LinearOpWorkBoard:
 		return true
 	default:
 		return false
@@ -223,6 +225,14 @@ const linearOutboxColumns = `id,task_id,seq,op,payload,state,attempts,next_attem
 // single advisory-lock owner normally calls it, while SKIP LOCKED keeps the
 // database boundary safe if a second caller is accidentally introduced.
 func (s *Store) ProcessNextLinearOutbox(ctx context.Context, process func(context.Context, LinearOutbox) (LinearOutboxResult, error)) (bool, error) {
+	return s.processNextLinearOutbox(ctx, []string{LinearOpIssueCreate, LinearOpIssueState, LinearOpTerminalComment, LinearOpTerminalArchive}, process)
+}
+
+func (s *Store) ProcessNextLinearBoardOutbox(ctx context.Context, process func(context.Context, LinearOutbox) (LinearOutboxResult, error)) (bool, error) {
+	return s.processNextLinearOutbox(ctx, []string{LinearOpWorkBoard}, process)
+}
+
+func (s *Store) processNextLinearOutbox(ctx context.Context, ops []string, process func(context.Context, LinearOutbox) (LinearOutboxResult, error)) (bool, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return false, err
@@ -230,13 +240,14 @@ func (s *Store) ProcessNextLinearOutbox(ctx context.Context, process func(contex
 	defer tx.Rollback(ctx)
 	var item LinearOutbox
 	err = scanLinearOutbox(tx.QueryRow(ctx, `SELECT `+linearOutboxColumns+` FROM linear_outbox current
-		WHERE state='pending' AND next_attempt_at<=now()
+		WHERE state='pending' AND next_attempt_at<=now() AND op=ANY($1::text[])
 		AND NOT EXISTS (
 			SELECT 1 FROM linear_outbox earlier
 			WHERE earlier.task_id=current.task_id AND earlier.seq<current.seq
+			AND earlier.op=ANY($1::text[])
 			AND earlier.state NOT IN ('sent','skipped')
 		)
-		ORDER BY task_id ASC,seq ASC FOR UPDATE SKIP LOCKED LIMIT 1`), &item)
+		ORDER BY task_id ASC,seq ASC,id ASC FOR UPDATE SKIP LOCKED LIMIT 1`, ops), &item)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
@@ -262,6 +273,11 @@ func (s *Store) ProcessNextLinearOutbox(ctx context.Context, process func(contex
 		if _, err = tx.Exec(ctx, `INSERT INTO linear_issues(task_id,issue_id,identifier,created_at,updated_at) VALUES($1,$2,$3,$4,$4)
 			ON CONFLICT(task_id) DO UPDATE SET issue_id=EXCLUDED.issue_id,identifier=EXCLUDED.identifier,updated_at=EXCLUDED.updated_at`, item.TaskID, result.RemoteID, result.Identifier, created); err != nil {
 			return false, err
+		}
+		if item.Op == LinearOpWorkBoard {
+			if _, err = tx.Exec(ctx, `UPDATE tasks SET refs=jsonb_set(refs,'{linear}',COALESCE(NULLIF(refs->'linear','null'::jsonb),'{}'::jsonb)||jsonb_build_object('issue_id',$2::text,'identifier',$3::text)) WHERE id=$1`, item.TaskID, result.RemoteID, result.Identifier); err != nil {
+				return false, err
+			}
 		}
 	}
 	remoteID := result.RemoteID

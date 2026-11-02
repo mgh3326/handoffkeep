@@ -1,0 +1,305 @@
+package api
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log"
+	"regexp"
+	"slices"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/mgh3326/handoffkeep/internal/store"
+)
+
+const LinearBoardReconcileInterval = time.Hour
+const boardStart = "<!-- hk-work-board:start -->"
+const boardEnd = "<!-- hk-work-board:end -->"
+
+// BoardIssue includes the operator-owned text and labels that a rewrite must
+// preserve. The issue's team is checked even when reusing a title's ROB id.
+type BoardIssue struct {
+	ID          string `json:"id"`
+	Identifier  string `json:"identifier"`
+	Description string `json:"description"`
+	Team        struct {
+		ID string `json:"id"`
+	} `json:"team"`
+	Labels struct {
+		Nodes []struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		} `json:"nodes"`
+		PageInfo struct {
+			HasNextPage bool `json:"hasNextPage"`
+		} `json:"pageInfo"`
+	} `json:"labels"`
+}
+
+type BoardTarget struct {
+	TeamID string
+	States map[string]string
+}
+
+type LinearBoardAPI interface {
+	BoardTarget(context.Context) (BoardTarget, error)
+	BoardIssue(context.Context, string) (BoardIssue, error)
+	CreateLinearIssue(context.Context, LinearDecisionIssue) (LinearIssue, error)
+	BoardLabel(context.Context, string, string) (string, error)
+	UpdateBoardIssue(context.Context, string, string, string, []string) error
+	CreateLinearComment(context.Context, string, string, string) error
+	BoardCommentExists(context.Context, string, string, string) (bool, error)
+}
+
+type LinearBoardStore interface {
+	ProcessNextLinearBoardOutbox(context.Context, func(context.Context, store.LinearOutbox) (store.LinearOutboxResult, error)) (bool, error)
+	GetLinearIssue(context.Context, int64) (store.LinearIssue, bool, error)
+	ReconcileLinearBoard(context.Context) error
+}
+
+type LinearBoardWorker struct {
+	Store             LinearBoardStore
+	Linear            LinearBoardAPI
+	ReconcileInterval time.Duration
+	TaskBaseURL       string
+}
+
+func (w LinearBoardWorker) reconcileInterval() time.Duration {
+	return max(LinearBoardReconcileInterval, w.ReconcileInterval)
+}
+
+func (w LinearBoardWorker) Run(ctx context.Context) {
+	drain := time.NewTicker(5 * time.Second)
+	reconcile := time.NewTicker(w.reconcileInterval())
+	defer drain.Stop()
+	defer reconcile.Stop()
+	w.Drain(ctx)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-reconcile.C:
+			if err := w.Store.ReconcileLinearBoard(ctx); err != nil && ctx.Err() == nil {
+				log.Printf("linear_board.reconcile_failed err=%q", err)
+			}
+			w.Drain(ctx)
+		case <-drain.C:
+			w.Drain(ctx)
+		}
+	}
+}
+
+func (w LinearBoardWorker) Drain(ctx context.Context) {
+	for ctx.Err() == nil {
+		found, err := w.Store.ProcessNextLinearBoardOutbox(ctx, w.send)
+		if err != nil {
+			if ctx.Err() == nil {
+				log.Printf("linear_board.drain_failed err=%q", err)
+			}
+			return
+		}
+		if !found {
+			return
+		}
+	}
+}
+
+var boardROB = regexp.MustCompile(`\bROB-[1-9][0-9]*\b`)
+
+func (w LinearBoardWorker) send(ctx context.Context, op store.LinearOutbox) (store.LinearOutboxResult, error) {
+	result := store.LinearOutboxResult{State: "sent"}
+	err := w.sync(ctx, op, &result)
+	if err != nil {
+		result.State = "pending"
+		result.RetryAt = time.Now().UTC().Add(min(time.Hour, time.Duration(1<<min(op.Attempts, 10))*5*time.Second))
+		result.LastError = err.Error()
+		log.Printf("linear_board.sync_failed task_id=%d err=%q", op.TaskID, err)
+	}
+	return result, nil
+}
+
+func (w LinearBoardWorker) sync(ctx context.Context, op store.LinearOutbox, result *store.LinearOutboxResult) error {
+	b := op.Payload.Board
+	if b == nil || b.Task.ID != op.TaskID {
+		return errors.New("invalid work board outbox payload")
+	}
+	target, err := w.Linear.BoardTarget(ctx)
+	if err != nil {
+		return err
+	}
+	stateID := target.States[b.State]
+	if stateID == "" {
+		return fmt.Errorf("linear board state %q missing", b.State)
+	}
+	fleet, err := w.Linear.BoardLabel(ctx, target.TeamID, "fleet")
+	if err != nil {
+		return err
+	}
+	link, linked, err := w.Store.GetLinearIssue(ctx, op.TaskID)
+	if err != nil {
+		return err
+	}
+	var issue BoardIssue
+	if linked {
+		issue, err = w.Linear.BoardIssue(ctx, link.IssueID)
+	} else if identifier := boardROB.FindString(b.Task.Title); identifier != "" {
+		issue, err = w.Linear.BoardIssue(ctx, identifier)
+	} else {
+		id := store.LinearDecisionUUID("work-board:task:" + strconv.FormatInt(op.TaskID, 10))
+		_, createErr := w.Linear.CreateLinearIssue(ctx, LinearDecisionIssue{ID: id, TeamID: target.TeamID, LabelID: fleet, Title: shortBoardText(strings.SplitN(b.Task.Title, "\n", 2)[0], linearTitleMaxRunes), Description: fmt.Sprintf("[hk-task:%d]", op.TaskID)})
+		// Read after both success and failure. The deterministic id recovers a
+		// lost create response without ever creating a second issue.
+		issue, err = w.Linear.BoardIssue(ctx, id)
+		if err != nil && createErr != nil {
+			return fmt.Errorf("create work board issue: %w", createErr)
+		}
+	}
+	if err != nil {
+		return err
+	}
+	if issue.ID == "" || issue.Team.ID != target.TeamID || issue.Labels.PageInfo.HasNextPage {
+		return errors.New("linear board issue team or labels incomplete")
+	}
+	result.RemoteID, result.Identifier = issue.ID, issue.Identifier
+	section := renderBoard(*b)
+	if w.TaskBaseURL != "" {
+		section = strings.Replace(section, fmt.Sprintf("[hk-task:%d]", op.TaskID), fmt.Sprintf("[hk-task:%d](%s/ui/tasks/%d)", op.TaskID, strings.TrimRight(w.TaskBaseURL, "/"), op.TaskID), 1)
+	}
+	description, err := replaceBoardSection(issue.Description, section)
+	if err != nil {
+		return err
+	}
+	names := boardLabelNames(*b)
+	labels := []string{fleet}
+	for _, name := range names {
+		id, err := w.Linear.BoardLabel(ctx, target.TeamID, name)
+		if err != nil {
+			return err
+		}
+		labels = append(labels, id)
+	}
+	for _, label := range issue.Labels.Nodes {
+		if label.Name != "fleet" && !managedBoardLabel(label.Name) {
+			labels = append(labels, label.ID)
+		}
+	}
+	slices.Sort(labels)
+	labels = slices.Compact(labels)
+	if err = w.Linear.UpdateBoardIssue(ctx, issue.ID, stateID, description, labels); err != nil {
+		return err
+	}
+	if event := op.Payload.Event; event != nil && boardCommentKind(event.Kind) {
+		body := strings.ToUpper(event.Kind) + " · " + event.At.UTC().Format(time.RFC3339)
+		if event.Text != "" {
+			body += " | " + shortBoardText(event.Text, 1800)
+		}
+		id := store.LinearDecisionUUID(fmt.Sprintf("work-board:comment:%d:%s", op.TaskID, event.ID))
+		if err = w.Linear.CreateLinearComment(ctx, id, issue.ID, body); err != nil {
+			// A duplicate-id response alone is not proof: read back this exact
+			// comment, issue and body before acknowledging the outbox row.
+			exists, readErr := w.Linear.BoardCommentExists(ctx, id, issue.ID, body)
+			if readErr != nil || !exists {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func boardCommentKind(kind string) bool {
+	switch strings.ToUpper(kind) {
+	case "READY", "ESC", "BLOCKED", "FINDINGS", "MERGED":
+		return true
+	}
+	return false
+}
+
+func managedBoardLabel(name string) bool {
+	for _, prefix := range []string{"host:", "role:", "model:", "repo:"} {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func boardLabelNames(b store.LinearBoard) []string {
+	names := []string{}
+	for _, s := range b.Sessions {
+		if !s.Active && s.JobID != b.PrimaryJob() {
+			continue
+		}
+		for _, label := range []struct{ prefix, value string }{{"host:", s.Host}, {"role:", s.Role}, {"model:", s.Family}, {"repo:", s.Repo}} {
+			if label.value != "" {
+				names = append(names, label.prefix+label.value)
+			}
+		}
+	}
+	slices.Sort(names)
+	return slices.Compact(names)
+}
+
+func replaceBoardSection(description, section string) (string, error) {
+	start := strings.Index(description, boardStart)
+	if start < 0 {
+		if strings.Contains(description, boardEnd) {
+			return "", errors.New("work board section has no start marker")
+		}
+		return description + "\n\n" + boardStart + "\n" + section + "\n" + boardEnd, nil
+	}
+	end := strings.Index(description[start:], boardEnd)
+	if end < 0 {
+		return "", errors.New("work board section has no end marker")
+	}
+	tail := description[start+end+len(boardEnd):]
+	// Refuse ambiguous markers instead of deleting operator text.
+	if strings.Contains(tail, boardStart) || strings.Contains(tail, boardEnd) {
+		return "", errors.New("multiple work board sections")
+	}
+	return description[:start] + boardStart + "\n" + section + "\n" + boardEnd + tail, nil
+}
+
+func renderBoard(b store.LinearBoard) string {
+	var out strings.Builder
+	fmt.Fprintf(&out, "## Fleet work\n\n[hk-task:%d] · `handoffkeep tasks show %d`\n\n", b.Task.ID, b.Task.ID)
+	fmt.Fprintf(&out, "State: **%s**\n\n", b.State)
+	for _, s := range b.Sessions {
+		if s.Role == "review" {
+			continue
+		}
+		if s.JobID != b.PrimaryJob() && !s.Active {
+			continue
+		}
+		fmt.Fprintf(&out, "- %s: `%s` · host `%s` · pane `%s` · model `%s` (%s / %s)\n", s.Role, s.JobID, s.Host, s.Pane, s.Family, s.Model, s.Profile)
+	}
+	if b.Task.Refs.PR != "" {
+		fmt.Fprintf(&out, "\nPR: %s · head `%s`\n", b.Task.Refs.PR, b.Task.Refs.HeadSHA)
+	}
+	out.WriteString("\n### Review passes\n\n")
+	for _, s := range b.Sessions {
+		if s.Role != "review" {
+			continue
+		}
+		verdict := s.Verdict
+		if verdict == "" {
+			if s.Active {
+				verdict = "running"
+			} else {
+				verdict = "ended"
+			}
+		}
+		fmt.Fprintf(&out, "- `%s`: host `%s` · pane `%s` · model `%s` (%s / %s) · %s\n", s.JobID, s.Host, s.Pane, s.Family, s.Model, s.Profile, shortBoardText(verdict, 1000))
+	}
+	fmt.Fprintf(&out, "\nLast event: **%s** · %s\n\n%s", b.Last.Kind, b.Last.At.UTC().Format(time.RFC3339), shortBoardText(b.Last.Text, 2000))
+	return strings.NewReplacer(boardStart, "&lt;!-- hk-work-board:start --&gt;", boardEnd, "&lt;!-- hk-work-board:end --&gt;").Replace(out.String())
+}
+
+func shortBoardText(text string, limit int) string {
+	runes := []rune(text)
+	if len(runes) > limit {
+		return string(runes[:limit]) + "…"
+	}
+	return text
+}
