@@ -443,5 +443,8 @@ func (s *Store) UpdateJob(ctx context.Context, id string, u JobUpdate) (Job, err
 	if err != nil {
 		return j, err
 	}
+	if err = s.recordLinearBoardJobTx(ctx, tx, j); err != nil {
+		return j, err
+	}
 	return j, tx.Commit(ctx)
 }

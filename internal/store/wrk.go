@@ -271,7 +271,10 @@ func (s *Store) WrkAppend(ctx context.Context, actor, job, key string, r wrkreco
 				return out, err
 			}
 		}
-		if _, err = tx.Exec(ctx, `UPDATE tasks SET refs=jsonb_set(refs,'{job_id}',to_jsonb($2::text)),claimed_by=$3,updated_at=now() WHERE id=$1`, id, job, wrkrecords.Text(rec.Payload, "owner_lane")); err != nil {
+		if err = scanTask(tx.QueryRow(ctx, `UPDATE tasks SET refs=jsonb_set(refs,'{job_id}',to_jsonb($2::text)),claimed_by=$3,updated_at=now() WHERE id=$1 RETURNING `+taskColumns, id, job, wrkrecords.Text(rec.Payload, "owner_lane")), &task); err != nil {
+			return out, err
+		}
+		if err = s.recordLinearBoardTaskTx(ctx, tx, task, "wrk claim"); err != nil {
 			return out, err
 		}
 	}
@@ -302,6 +305,15 @@ func (s *Store) WrkAppend(ctx context.Context, actor, job, key string, r wrkreco
 		_, err = tx.Exec(ctx, `INSERT INTO relay_events(kind,job_id,epoch,owner_lane,report_path,reason,head,pr,received_at) VALUES($1,$2,0,$3,$4,'',$5,$6,now()) ON CONFLICT (kind,job_id,epoch,report_path,reason) WHERE `+relayJobConflictPredicate+` DO UPDATE SET kind=EXCLUDED.kind,job_id=EXCLUDED.job_id,epoch=EXCLUDED.epoch,owner_lane=EXCLUDED.owner_lane,report_path=EXCLUDED.report_path,reason=EXCLUDED.reason,head=EXCLUDED.head,pr=EXCLUDED.pr,machine='',pane_id='',report_last_line='',question='',event_id='',text='',event_time=NULL,received_at=EXCLUDED.received_at,delivered_at=NULL,delivered_to='',attempts=0`, "job."+rec.Kind, job, wrkrecords.Text(claim.Payload, "owner_lane"), "wrk:"+job+":"+intString(rec.Seq), wrkrecords.Text(rec.Payload, "head"), wrkrecords.Text(rec.Payload, "pr"))
 		if err != nil {
 			return out, err
+		}
+		if s.LinearBoardEnabled() {
+			var event RelayEvent
+			if err = scanRelayEvent(tx.QueryRow(ctx, `SELECT `+relayEventColumns+` FROM relay_events WHERE kind=$1 AND job_id=$2 AND report_path=$3 AND epoch=0 AND reason=''`, "job."+rec.Kind, job, "wrk:"+job+":"+intString(rec.Seq)), &event); err != nil {
+				return out, err
+			}
+			if err = s.recordLinearBoardRelayTx(ctx, tx, event); err != nil {
+				return out, err
+			}
 		}
 	}
 	err = tx.Commit(ctx)
