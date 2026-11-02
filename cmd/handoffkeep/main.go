@@ -1839,18 +1839,34 @@ type linearServer struct {
 func linearFromEnv(st *store.Store) linearServer {
 	secret := strings.TrimSpace(os.Getenv("HANDOFFKEEP_LINEAR_WEBHOOK_SECRET"))
 	key := strings.TrimSpace(os.Getenv("HANDOFFKEEP_LINEAR_API_KEY"))
+	clientID := strings.TrimSpace(os.Getenv("HANDOFFKEEP_LINEAR_CLIENT_ID"))
+	clientSecret := strings.TrimSpace(os.Getenv("HANDOFFKEEP_LINEAR_CLIENT_SECRET"))
+	var app *api.LinearAppToken
+	if (clientID == "") != (clientSecret == "") {
+		// Half a pair would fall back to the personal key silently.
+		log.Printf("linear_oauth.disabled reason=incomplete_config")
+	}
+	if clientID != "" && clientSecret != "" {
+		// An OAuth application wins over a personal key: its writes show as the
+		// app, so nothing hk posts can be read as the operator's answer.
+		app = &api.LinearAppToken{ClientID: clientID, ClientSecret: clientSecret}
+		key = ""
+	}
+	// Either credential lets hk read Linear; the app is carried on its own
+	// field, never as a placeholder in the key slot.
+	credential := key != "" || app != nil
 	operator := strings.TrimSpace(os.Getenv("HANDOFFKEEP_LINEAR_OPERATOR_USER_ID"))
-	if secret == "" && key == "" {
+	if secret == "" && !credential {
 		if operator != "" {
 			log.Printf("linear_decisions.disabled reason=no_webhook")
 		}
 		return linearServer{}
 	}
-	if secret == "" || key == "" {
+	if secret == "" || !credential {
 		log.Printf("linear_webhook.disabled reason=incomplete_config")
 		return linearServer{}
 	}
-	linearAPI := api.LinearAPI{Key: key}
+	linearAPI := api.LinearAPI{Key: key, App: app}
 	webhook := api.LinearWebhook{Secret: secret, Issues: linearAPI, Store: st}
 	if operator == "" {
 		return linearServer{webhook: webhook}
