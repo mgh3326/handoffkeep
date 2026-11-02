@@ -354,3 +354,95 @@ func TestSyncDecisionDeleteAndTaskRetention(t *testing.T) {
 		t.Fatalf("terminal task not readable: found=%v err=%v", found, err)
 	}
 }
+
+func TestSyncAllocationFollowsEntryOrder(t *testing.T) {
+	s, pool := searchTestStore(t)
+	ctx := t.Context()
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `INSERT INTO documents(key,kind,body,sha256,created_by,created_at,updated_at) SELECT 'sync/order/'||n,'note','body','hash','test',now(),now() FROM generate_series(1,32) AS n`); err != nil {
+		t.Fatal(err)
+	}
+	// Reverse the physical tuple order before allocation so a heap scan and
+	// entry_id ordering disagree. All entries remain in this transaction.
+	if _, err = tx.Exec(ctx, `DO $$ DECLARE pending RECORD; BEGIN FOR pending IN SELECT entry_id FROM sync_log WHERE txid=pg_current_xact_id() ORDER BY entry_id DESC LOOP UPDATE sync_log SET at=at WHERE entry_id=pending.entry_id; END LOOP; END $$`); err != nil {
+		t.Fatal(err)
+	}
+	if err = tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := pool.Query(ctx, `SELECT entry_id,sync_id FROM sync_log ORDER BY entry_id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var previous int64
+	count := 0
+	for rows.Next() {
+		var entryID, syncID int64
+		if err = rows.Scan(&entryID, &syncID); err != nil {
+			t.Fatal(err)
+		}
+		if syncID <= previous {
+			t.Fatalf("entry_id=%d sync_id=%d follows sync_id=%d", entryID, syncID, previous)
+		}
+		previous = syncID
+		count++
+	}
+	if err = rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if count != 32 {
+		t.Fatalf("journal rows=%d want=32", count)
+	}
+	changes, meta, err := s.SyncDelta(ctx, 0, 100)
+	if err != nil || len(changes) != count || meta.LastSyncID != previous {
+		t.Fatalf("delta=%v metadata=%+v err=%v", changes, meta, err)
+	}
+}
+
+func TestSyncBackfillDuplicateDecisionIDs(t *testing.T) {
+	s, pool := searchTestStore(t)
+	ctx := t.Context()
+	// Recreate the pre-sync database state in this isolated schema so the
+	// real migration sees duplicate legacy IDs before any sync triggers exist.
+	for _, query := range []string{
+		`DROP FUNCTION handoffkeep_sync_emit(),handoffkeep_sync_allocate(),handoffkeep_sync_decision() CASCADE`,
+		`DROP TABLE sync_log,sync_state,sync_decisions`,
+		`DROP SEQUENCE sync_log_sync_id_seq`,
+		`DELETE FROM schema_version WHERE version=30`,
+	} {
+		if _, err := pool.Exec(ctx, query); err != nil {
+			t.Fatal(err)
+		}
+	}
+	at := time.Now().UTC().Add(-time.Hour)
+	var newest int64
+	for i := 0; i < 3; i++ {
+		id := seedTaskRow(t, pool, fmt.Sprintf("sync-legacy-%d", i), "legacy decision", "backlog")
+		updated := at
+		if i == 0 {
+			updated = at.Add(-time.Hour)
+		}
+		if _, err := pool.Exec(ctx, `UPDATE tasks SET refs='{"decision_request":{"id":"shared/request","question":"legacy question"}}',updated_at=$2 WHERE id=$1`, id, updated); err != nil {
+			t.Fatal(err)
+		}
+		newest = id
+	}
+	if err := s.migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var chosen int64
+	if err := pool.QueryRow(ctx, `SELECT task_id FROM sync_decisions WHERE id='shared/request'`).Scan(&chosen); err != nil || chosen != newest {
+		t.Fatalf("chosen task=%d want=%d err=%v", chosen, newest, err)
+	}
+	if err := s.migrate(ctx); err != nil {
+		t.Fatalf("repeat migration: %v", err)
+	}
+	if _, found, err := s.GetSyncRow(ctx, "decision", "shared/request"); err != nil || !found {
+		t.Fatalf("backfilled row found=%v err=%v", found, err)
+	}
+}

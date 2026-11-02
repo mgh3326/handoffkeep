@@ -16,7 +16,7 @@ import (
 
 func TestSyncAuthAndQueryGuards(t *testing.T) {
 	h := Server{Tokens: Tokens{"reader": "secret"}}.Handler()
-	for _, path := range []string{"/v1/sync/delta", "/v1/sync/bootstrap?model=document", "/v1/sync/rows/document/1", "/v1/sync/rows/decision/request-one"} {
+	for _, path := range []string{"/v1/sync/delta", "/v1/sync/bootstrap?model=document", "/v1/sync/rows/document/1", "/v1/sync/rows/decision/request-one", "/v1/sync/rows/decision/row/request"} {
 		for _, token := range []string{"", "wrong"} {
 			r := httptest.NewRequest(http.MethodGet, path, nil)
 			r.Header.Set("Authorization", "Bearer "+token)
@@ -126,7 +126,7 @@ func TestSyncRowsResolveDeltaIDs(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pool.Close()
-	if _, err = pool.Exec(ctx, `UPDATE tasks SET refs='{"decision_request":{"id":"row-request","status":"answered","question":"raw question","resolution":{"kind":"answered","text":"raw resolution"}},"decision_options":{"options":[]}}' WHERE id=$1`, task.ID); err != nil {
+	if _, err = pool.Exec(ctx, `UPDATE tasks SET refs='{"decision_request":{"id":"row/request","status":"answered","question":"raw question","resolution":{"kind":"answered","text":"raw resolution"}},"decision_options":{"options":[]}}' WHERE id=$1`, task.ID); err != nil {
 		t.Fatal(err)
 	}
 	h := Server{Service: Service{Store: st}, Tokens: Tokens{"reader": "secret"}}.Handler()
@@ -181,7 +181,7 @@ func TestSyncRowsResolveDeltaIDs(t *testing.T) {
 	if _, err = pool.Exec(ctx, `UPDATE tasks SET refs='{}' WHERE id=$1`, task.ID); err != nil {
 		t.Fatal(err)
 	}
-	for _, path := range []string{fmt.Sprintf("/v1/sync/rows/document/%d", doc.ID), "/v1/sync/rows/decision/row-request", "/v1/sync/rows/task/9223372036854775807", "/v1/sync/rows/task_comment/9223372036854775807"} {
+	for _, path := range []string{fmt.Sprintf("/v1/sync/rows/document/%d", doc.ID), "/v1/sync/rows/decision/row/request", "/v1/sync/rows/task/9223372036854775807", "/v1/sync/rows/task_comment/9223372036854775807"} {
 		w := get(path)
 		if w.Code != http.StatusNotFound || strings.TrimSpace(w.Body.String()) != `{"deleted":true}` {
 			t.Fatalf("%s: %d %s", path, w.Code, w.Body)

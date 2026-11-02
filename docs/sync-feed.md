@@ -86,9 +86,10 @@ the ID whether or not it appeared in bootstrap. Restart on 410.
 
 ## Current raw rows
 
-`GET /v1/sync/rows/{model}/{model_id}`
+`GET /v1/sync/rows/{model}/{model_id...}`
 
 The endpoint uses the same bearer read authentication as delta and bootstrap.
+The model ID consumes the rest of the path, including slashes in decision IDs.
 All delta `model_id` values resolve through it while the model exists. Responses
 are JSON objects, with no envelope:
 
@@ -112,8 +113,8 @@ the mutation and journal rows. Each journal row starts with a NULL `sync_id`,
 a top-level `txid` (`pg_current_xact_id()`), and a unique `entry_id` that preserves
 insertion order within its transaction. A deferred constraint trigger runs at
 commit: it takes advisory transaction lock `824180067`, assigns sequence IDs to
-all pending rows of that transaction in `entry_id` order, and updates the
-watermark. Remaining trigger firings find no pending rows and return immediately.
+all pending rows of that transaction in `entry_id` order using a PL/pgSQL loop,
+and updates the watermark. Remaining trigger firings find no pending rows and return immediately.
 The lock is released at commit. Ordinary source writes never acquire this lock;
 a long transaction with pending rows allows unrelated writers to commit.
 Readers return only assigned IDs. Bootstrap captures the committed watermark
@@ -122,7 +123,9 @@ from the same snapshot as its first page; pruning ignores unassigned rows.
 Keep the `sync_allocate` constraint deferred; forcing it immediate with
 `SET CONSTRAINTS` would acquire the allocation lock before the commit boundary.
 The store does not change constraint timing. Existing rows are discovered by
-bootstrap when the migration first installs the feed.
+bootstrap when the migration first installs the feed. If legacy tasks share a
+decision request ID, backfill selects the newest `updated_at`, breaking ties by
+the highest task ID.
 
 The server prunes on startup and hourly, in transactions of at most 10,000
 rows. The default retention is 30 days. Configure a positive Go duration using

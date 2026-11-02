@@ -13,7 +13,7 @@ var syncMigrations = []string{
 	`CREATE TABLE sync_state (singleton BOOLEAN PRIMARY KEY DEFAULT true CHECK(singleton), max_sync_id BIGINT NOT NULL DEFAULT 0, pruned_through BIGINT NOT NULL DEFAULT 0)`,
 	`INSERT INTO sync_state(singleton) VALUES(true)`,
 	`CREATE TABLE sync_decisions (id TEXT PRIMARY KEY, task_id BIGINT NOT NULL UNIQUE, updated_at TIMESTAMPTZ NOT NULL)`,
-	`INSERT INTO sync_decisions SELECT refs->'decision_request'->>'id',id,updated_at FROM tasks WHERE COALESCE(refs->'decision_request'->>'id','')<>''`,
+	`INSERT INTO sync_decisions SELECT DISTINCT ON (refs->'decision_request'->>'id') refs->'decision_request'->>'id',id,updated_at FROM tasks WHERE COALESCE(refs->'decision_request'->>'id','')<>'' ORDER BY refs->'decision_request'->>'id',updated_at DESC,id DESC`,
 	`CREATE FUNCTION handoffkeep_sync_emit() RETURNS trigger LANGUAGE plpgsql AS $$
  DECLARE row_id TEXT;
  BEGIN
@@ -22,17 +22,13 @@ var syncMigrations = []string{
    RETURN NULL;
  END $$`,
 	`CREATE FUNCTION handoffkeep_sync_allocate() RETURNS trigger LANGUAGE plpgsql AS $$
- DECLARE last_id BIGINT;
+ DECLARE pending RECORD; last_id BIGINT;
  BEGIN
    IF NOT EXISTS (SELECT 1 FROM sync_log WHERE txid=pg_current_xact_id() AND sync_id IS NULL) THEN RETURN NULL; END IF;
    PERFORM pg_advisory_xact_lock(824180067);
-   WITH allocated AS MATERIALIZED (
-     SELECT entry_id,nextval('sync_log_sync_id_seq') AS assigned_id
-     FROM sync_log WHERE txid=pg_current_xact_id() AND sync_id IS NULL ORDER BY entry_id
-   ), assigned AS (
-     UPDATE sync_log AS log SET sync_id=allocated.assigned_id FROM allocated
-     WHERE log.entry_id=allocated.entry_id RETURNING log.sync_id
-   ) SELECT max(sync_id) INTO last_id FROM assigned;
+   FOR pending IN SELECT entry_id FROM sync_log WHERE txid=pg_current_xact_id() AND sync_id IS NULL ORDER BY entry_id LOOP
+     UPDATE sync_log SET sync_id=nextval('sync_log_sync_id_seq') WHERE entry_id=pending.entry_id RETURNING sync_id INTO last_id;
+   END LOOP;
    UPDATE sync_state SET max_sync_id=last_id WHERE singleton;
    RETURN NULL;
  END $$`,
