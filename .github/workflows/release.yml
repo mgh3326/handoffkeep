@@ -163,4 +163,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
-        run: gh release create "$RELEASE_TAG" dist/release/* --repo "$GITHUB_REPOSITORY" --verify-tag --title "$RELEASE_TAG" --notes-file dist/release-notes.md
+        run: |
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            sh scripts/repair-release-assets.sh "$RELEASE_TAG" dist/release
+            exit 0
+          fi
+          gh release create "$RELEASE_TAG" dist/release/* --repo "$GITHUB_REPOSITORY" --verify-tag --title "$RELEASE_TAG" --notes-file dist/release-notes.md
