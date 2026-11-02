@@ -226,6 +226,31 @@ func TestErrorsAndPanicsScrubContent(t *testing.T) {
 	}
 }
 
+func TestAbortHandlerIsNotAnError(t *testing.T) {
+	monitor, transport := testMonitor(t)
+	func() {
+		defer func() {
+			if got := recover(); got != http.ErrAbortHandler {
+				t.Fatalf("abort not re-panicked: %v", got)
+			}
+		}()
+		monitor.Handler(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { panic(http.ErrAbortHandler) })).ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/v1/events", nil))
+	}()
+	if len(transport.events) != 1 || transport.events[0].Type != "transaction" || transport.events[0].Extra["http.response.status_code"] == http.StatusInternalServerError {
+		t.Fatalf("abort produced an error event or a 500: %d events", len(transport.events))
+	}
+}
+
+func TestHeadOnGetPatternNamesByRealMethod(t *testing.T) {
+	monitor, transport := testMonitor(t)
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/tasks/{id}", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	monitor.Handler(mux).ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodHead, "/v1/tasks/1", nil))
+	if len(transport.events) != 1 || transport.events[0].Transaction != "HEAD /v1/tasks/{id}" {
+		t.Fatalf("got %d events, name %q", len(transport.events), transport.events[0].Transaction)
+	}
+}
+
 func TestHTTPStatusSemantics(t *testing.T) {
 	for name, write := range map[string]func(http.ResponseWriter){
 		"informational": func(w http.ResponseWriter) { w.WriteHeader(http.StatusEarlyHints); w.WriteHeader(http.StatusOK) },

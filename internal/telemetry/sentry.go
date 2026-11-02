@@ -111,7 +111,10 @@ func (m *Monitor) Handler(next http.Handler) http.Handler {
 		})
 		defer func() {
 			panicked := recover()
-			if panicked != nil {
+			// http.ErrAbortHandler is net/http's deliberate abort (e.g. a
+			// streaming client went away), not a server error.
+			aborted := panicked == http.ErrAbortHandler
+			if panicked != nil && !aborted {
 				status = http.StatusInternalServerError
 			}
 			name := r.Pattern
@@ -119,14 +122,16 @@ func (m *Monitor) Handler(next http.Handler) http.Handler {
 				name = "<unmatched>"
 			}
 			method := safeMethod(r.Method)
-			if !strings.HasPrefix(name, method+" ") {
-				name = method + " " + name
+			// A "GET /x" pattern also serves HEAD; name by the real method.
+			if verb, rest, ok := strings.Cut(name, " "); ok && verb != "" && !strings.ContainsAny(verb, "/{") {
+				name = rest
 			}
+			name = method + " " + name
 			tx.Name = name
 			tx.Status = sentry.HTTPtoSpanStatus(status)
 			tx.SetData("http.request.method", method)
 			tx.SetData("http.response.status_code", status)
-			if panicked != nil || status >= http.StatusInternalServerError {
+			if !aborted && (panicked != nil || status >= http.StatusInternalServerError) {
 				event := sentry.NewEvent()
 				event.Level, event.Transaction = sentry.LevelError, name
 				event.Extra = map[string]any{"http.request.method": method, "http.response.status_code": status}

@@ -78,6 +78,10 @@ func TestNormalizeSQL(t *testing.T) {
 		{"SELECT 42, -1.5e+20, .2, 0xFF, 0o77, 0b11, column1", "SELECT ?, -?, ?, ?, ?, ?, column1"},
 		{"SELECT /* private /* nested */ content */ 1 -- private\n FROM tasks", "SELECT ? FROM tasks"},
 		{"SELECT \"private\"\"identifier\" FROM tasks", "SELECT ? FROM tasks"},
+		// standard_conforming_strings: a backslash does not escape outside E'...'.
+		{"SELECT 'a\\', 'private', 'b\\'", "[filtered statement]"},
+		{"SELECT 'secret\\'PAYLOAD\\'END'", "[filtered statement]"},
+		{"SELECT U&'x\\', 'secret'", "[filtered statement]"},
 		{"SELECT 'unterminated private", "[filtered statement]"},
 		{"SELECT $tag$unterminated private", "[filtered statement]"},
 		{"SELECT /*unterminated private", "[filtered statement]"},
