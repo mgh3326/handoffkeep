@@ -152,6 +152,9 @@ func recorded(value, prefix string) string {
 }
 
 func enqueueLinearTaskCreate(ctx context.Context, tx pgx.Tx, task Task) error {
+	if LinearMirrorReason(task) == "" {
+		return nil
+	}
 	mapping := LinearTaskStateMapping["backlog"]
 	metadata := task.Refs.Linear
 	description := strings.Join([]string{
@@ -208,7 +211,8 @@ func enqueueLinearTaskTransition(ctx context.Context, tx pgx.Tx, task Task, note
 	if err := enqueueLinearOutboxTx(ctx, tx, task.ID, LinearOpTerminalComment, LinearOutboxPayload{Comment: linearTerminalComment(task, note)}); err != nil {
 		return err
 	}
-	return enqueueLinearOutboxTx(ctx, tx, task.ID, LinearOpTerminalArchive, LinearOutboxPayload{})
+	// Closed issues are retained until the watermark archiver admits them.
+	return nil
 }
 
 func scanLinearOutbox(row interface{ Scan(...any) error }, item *LinearOutbox) error {
@@ -254,7 +258,13 @@ func (s *Store) processNextLinearOutbox(ctx context.Context, ops []string, proce
 	if err != nil {
 		return false, err
 	}
-	result, err := process(ctx, item)
+	var result LinearOutboxResult
+	if item.Op == LinearOpTerminalArchive {
+		// Old queued terminal rows must never reach a remote archive callback.
+		result = LinearOutboxResult{State: "skipped", LastError: "archival is watermark-owned"}
+	} else {
+		result, err = process(ctx, item)
+	}
 	if err != nil {
 		return false, err
 	}
