@@ -1061,6 +1061,18 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := migrateQuota(ctx, tx); err != nil {
 		return err
 	}
+	if err := migrateOnce(ctx, tx, 28, func() error {
+		// Version 28 (hk 2639) admits explicit unrated catalog and grade rows.
+		// Each CHECK swap takes ACCESS EXCLUSIVE once; NOT VALID avoids a
+		// scan under that lock because every existing grade remains allowed.
+		return execAll(ctx, tx, []string{
+			`ALTER TABLE bench_grades DROP CONSTRAINT bench_grades_grade_check, ADD CONSTRAINT bench_grades_grade_check CHECK(grade IN ('S+','S','A+','A','B','C','unrated')) NOT VALID`,
+			`ALTER TABLE bench_catalog DROP CONSTRAINT bench_catalog_grade_check, ADD CONSTRAINT bench_catalog_grade_check CHECK(grade IN ('S+','S','A+','A','B','C','unrated')) NOT VALID`,
+			`INSERT INTO schema_version(version) VALUES (28)`,
+		})
+	}); err != nil {
+		return err
+	}
 	return tx.Commit(ctx)
 }
 func validName(x string) bool        { return nameRE.MatchString(x) }
@@ -1095,7 +1107,7 @@ func CheckTaskNoJob(noJob string) (string, error) {
 
 const benchBatchMax = 1000
 
-var benchGradeValues = map[string]bool{"S+": true, "S": true, "A+": true, "A": true, "B": true, "C": true}
+var benchGradeValues = map[string]bool{"S+": true, "S": true, "A+": true, "A": true, "B": true, "C": true, "unrated": true}
 
 func validBenchRequiredText(x string) bool {
 	return x != "" && len(x) <= 200 && validText(x, 200)
@@ -1153,19 +1165,15 @@ var benchGateValues = map[string]bool{"default": true, "escalation": true, "cons
 // sort after the known rungs.
 var benchEffortRanks = map[string]int{"low": 0, "medium": 1, "high": 2, "xhigh": 3, "max": 4}
 
-// benchSolProfiles is the Sol profile set: Sol profiles are S+
-// only. The catalog write path alone admits one placeholder shape that makes
-// no grade claim — grade C with score null — because the #594 E6 measurement
-// rungs are emitted that way on purpose: never recommended, marker-gated,
-// and carrying no measurement. The legacy grades path stays strict.
+// benchSolProfiles restricts measured Sol placements to S+. Unrated rows
+// make no grade claim. Catalog writes also accept the legacy C/null seed
+// shape during the transition to explicit unrated placeholders.
 var benchSolProfiles = map[string]bool{"codex-sol": true, "kiro-sol": true}
 
-// benchSolPlaceholder reports whether a Sol row makes no grade claim: grade
-// C with score null is exactly the shape pacelever uses for a measurement
-// rung that does not assert a grade. A scored C, or any unscored grade that
-// is not C, is a claim and stays subject to the S+ rule.
+// benchSolPlaceholder accepts an unscored unrated row or the legacy C/null
+// placeholder. A scored row stays subject to the S+ rule.
 func benchSolPlaceholder(x BenchCatalogEntry) bool {
-	return x.Grade == "C" && x.Score == nil
+	return (x.Grade == "unrated" || x.Grade == "C") && x.Score == nil
 }
 
 func benchGradeRank(grade string) int {
@@ -1180,8 +1188,12 @@ func benchGradeRank(grade string) int {
 		return 3
 	case "B":
 		return 4
-	default:
+	case "C":
 		return 5
+	case "unrated":
+		return 6
+	default:
+		return 7
 	}
 }
 
@@ -1563,7 +1575,7 @@ func (s *Store) UpsertBenchGrades(ctx context.Context, xs []BenchGrade) (int, er
 		}
 		// The legacy path mirrors into the catalog, so it must not admit rows
 		// the catalog itself would reject — the Sol rule applies here too.
-		if benchSolProfiles[x.Profile] && x.Grade != "S+" {
+		if benchSolProfiles[x.Profile] && x.Grade != "S+" && x.Grade != "unrated" {
 			return 0, ErrBenchCatalogSolGrade
 		}
 		if err := guard.Reject(x.BoundaryVersion); err != nil {
@@ -1582,9 +1594,14 @@ func (s *Store) UpsertBenchGrades(ctx context.Context, xs []BenchGrade) (int, er
 		// Mirror into the catalog's profile-default row so the canonical store
 		// sees legacy writes; catalog-only columns (model_id, pool, gate, ...)
 		// are preserved on conflict. A legacy grade write un-retires the row.
-		_, err = tx.Exec(ctx, `INSERT INTO bench_catalog(profile,effort,model_id,pool,grade,boundary_version,deviation_ref,decided_at,decided_by) VALUES($1,'','','',$2,$3,$4,$5,$6) ON CONFLICT (profile,effort) DO UPDATE SET grade=EXCLUDED.grade,boundary_version=EXCLUDED.boundary_version,deviation_ref=EXCLUDED.deviation_ref,decided_at=EXCLUDED.decided_at,decided_by=EXCLUDED.decided_by,retired_at=NULL`, x.Profile, x.Grade, x.BoundaryVersion, x.DeviationRef, x.DecidedAt, x.DecidedBy)
+		// Refuse a scored Sol transition atomically, including when a catalog
+		// writer created the default row after this transaction began.
+		tag, err := tx.Exec(ctx, `INSERT INTO bench_catalog(profile,effort,model_id,pool,grade,boundary_version,deviation_ref,decided_at,decided_by) VALUES($1,'','','',$2,$3,$4,$5,$6) ON CONFLICT (profile,effort) DO UPDATE SET grade=EXCLUDED.grade,boundary_version=EXCLUDED.boundary_version,deviation_ref=EXCLUDED.deviation_ref,decided_at=EXCLUDED.decided_at,decided_by=EXCLUDED.decided_by,retired_at=NULL WHERE NOT ($7 AND EXCLUDED.grade='unrated' AND bench_catalog.score IS NOT NULL)`, x.Profile, x.Grade, x.BoundaryVersion, x.DeviationRef, x.DecidedAt, x.DecidedBy, benchSolProfiles[x.Profile])
 		if err != nil {
 			return 0, err
+		}
+		if tag.RowsAffected() == 0 {
+			return 0, ErrBenchCatalogSolGrade
 		}
 	}
 	return len(xs), tx.Commit(ctx)
@@ -1689,7 +1706,7 @@ func (s *Store) UpsertBenchCatalog(ctx context.Context, xs []BenchCatalogEntry) 
 // checkBenchCatalogMonotonicity rejects a merged catalog state where a known
 // higher-effort rung carries a worse grade than a lower rung of the same
 // profile. Retired rows, the profile-default row (effort=”) and unknown
-// effort strings do not participate.
+// effort strings and unrated rows do not participate.
 func checkBenchCatalogMonotonicity(ctx context.Context, tx pgx.Tx, profiles map[string]bool) error {
 	list := make([]string, 0, len(profiles))
 	for p := range profiles {
@@ -1706,7 +1723,7 @@ func checkBenchCatalogMonotonicity(ctx context.Context, tx pgx.Tx, profiles map[
 		if err := rows.Scan(&x.Profile, &x.Effort, &x.Grade); err != nil {
 			return err
 		}
-		if _, ok := benchEffortRanks[x.Effort]; !ok {
+		if _, ok := benchEffortRanks[x.Effort]; !ok || x.Grade == "unrated" {
 			continue
 		}
 		byProfile[x.Profile] = append(byProfile[x.Profile], x)
@@ -1737,7 +1754,7 @@ func (s *Store) ListBenchCatalog(ctx context.Context, pool string, includeRetire
 	if !validText(pool, 200) {
 		return nil, errors.New("invalid bench catalog query")
 	}
-	rows, err := s.pool.Query(ctx, `SELECT profile,effort,model_id,pool,grade,score,gate,gate_reason,benchmark_source,benchmark_annotation,boundary_version,deviation_ref,decided_at,decided_by,retired_at FROM bench_catalog WHERE ($1='' OR pool=$1) AND ($1='' OR gate<>'consult_only') AND ($2 OR retired_at IS NULL) ORDER BY pool, CASE grade WHEN 'S+' THEN 0 WHEN 'S' THEN 1 WHEN 'A+' THEN 2 WHEN 'A' THEN 3 WHEN 'B' THEN 4 ELSE 5 END, profile, CASE effort WHEN '' THEN 0 WHEN 'low' THEN 1 WHEN 'medium' THEN 2 WHEN 'high' THEN 3 WHEN 'xhigh' THEN 4 WHEN 'max' THEN 5 ELSE 6 END, effort`, pool, includeRetired)
+	rows, err := s.pool.Query(ctx, `SELECT profile,effort,model_id,pool,grade,score,gate,gate_reason,benchmark_source,benchmark_annotation,boundary_version,deviation_ref,decided_at,decided_by,retired_at FROM bench_catalog WHERE ($1='' OR pool=$1) AND ($1='' OR gate<>'consult_only') AND ($2 OR retired_at IS NULL) ORDER BY pool, CASE grade WHEN 'S+' THEN 0 WHEN 'S' THEN 1 WHEN 'A+' THEN 2 WHEN 'A' THEN 3 WHEN 'B' THEN 4 WHEN 'C' THEN 5 ELSE 6 END, profile, CASE effort WHEN '' THEN 0 WHEN 'low' THEN 1 WHEN 'medium' THEN 2 WHEN 'high' THEN 3 WHEN 'xhigh' THEN 4 WHEN 'max' THEN 5 ELSE 6 END, effort`, pool, includeRetired)
 	if err != nil {
 		return nil, err
 	}
