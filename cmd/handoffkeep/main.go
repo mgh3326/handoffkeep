@@ -1765,7 +1765,7 @@ func serve(args []string, errout io.Writer) error {
 	}
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", hkmcp.HTTPHandler(svc, tokens))
-	mux.Handle("/", api.Server{Service: svc, Tokens: tokens, QuotaAccounts: quotaAccounts, HostGrants: hostGrants, UI: uiHandler}.Handler())
+	mux.Handle("/", api.Server{Service: svc, Tokens: tokens, QuotaAccounts: quotaAccounts, HostGrants: hostGrants, UI: uiHandler, LinearWebhook: linearWebhookFromEnv(st)}.Handler())
 	addresses := []string{*listen}
 	if *tail != "" {
 		addresses = append(addresses, *tail)
@@ -1813,6 +1813,23 @@ func uiFromEnv(st *store.Store) (http.Handler, error) {
 		HubToken: strings.TrimSpace(os.Getenv("HANDOFFKEEP_HUB_TOKEN")),
 	})
 }
+
+// linearWebhookFromEnv follows uiFromEnv: incomplete configuration disables the
+// route and leaves the rest of the server running. Linear's Comment payload has
+// no labels, so the webhook cannot work on the secret alone.
+func linearWebhookFromEnv(st *store.Store) http.Handler {
+	secret := strings.TrimSpace(os.Getenv("HANDOFFKEEP_LINEAR_WEBHOOK_SECRET"))
+	key := strings.TrimSpace(os.Getenv("HANDOFFKEEP_LINEAR_API_KEY"))
+	if secret == "" && key == "" {
+		return nil
+	}
+	if secret == "" || key == "" {
+		log.Printf("linear_webhook.disabled reason=incomplete_config")
+		return nil
+	}
+	return api.LinearWebhook{Secret: secret, Issues: api.LinearAPI{Key: key}, Store: st}
+}
+
 func runMCP() error {
 	c := configuredClient()
 	if c.URL == "" || c.Token == "" {

@@ -543,6 +543,10 @@ type Server struct {
 	// the route unregistered so deployments without complete Access settings
 	// fail closed with the standard ServeMux 404.
 	UI http.Handler
+	// LinearWebhook authenticates by signature, not bearer token. A nil handler
+	// leaves POST /hooks/linear unregistered, so an unconfigured deployment
+	// answers it with the standard ServeMux 404.
+	LinearWebhook http.Handler
 }
 
 func (s Server) Handler() http.Handler {
@@ -625,6 +629,9 @@ func (s Server) Handler() http.Handler {
 	if s.UI != nil {
 		m.Handle("/ui", s.UI)
 		m.Handle("/ui/", s.UI)
+	}
+	if s.LinearWebhook != nil {
+		m.Handle("POST /hooks/linear", s.LinearWebhook)
 	}
 	legacy := s.legacyWrkFence(m)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

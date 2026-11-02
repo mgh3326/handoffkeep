@@ -46,6 +46,8 @@ Optional server configuration:
   `HANDOFFKEEP_UI_LANES`, `HANDOFFKEEP_UI_ADMIRAL_LANES`,
   `HANDOFFKEEP_UI_DIRECTOR_LANES`
 - Hub proxy: `HANDOFFKEEP_HUB_URL`, `HANDOFFKEEP_HUB_TOKEN`
+- Linear webhook (all-or-none, see [linear-webhook.md](linear-webhook.md)):
+  `HANDOFFKEEP_LINEAR_WEBHOOK_SECRET`, `HANDOFFKEEP_LINEAR_API_KEY`
 - Attachments / R2 (all-or-none): `HK_S3_ENDPOINT`, `HK_S3_BUCKET`,
   `HK_S3_ACCESS_KEY_ID`, `HK_S3_SECRET_ACCESS_KEY`; limits:
   `HK_ATTACH_MAX_BYTES`, `HK_ATTACH_STORAGE_CAP_BYTES`,

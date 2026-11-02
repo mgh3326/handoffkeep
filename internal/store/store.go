@@ -1011,6 +1011,21 @@ func (s *Store) migrate(ctx context.Context) error {
 		return err
 	}
 
+	if err := migrateOnce(ctx, tx, 26, func() error {
+		// Version 26 (hk 2572) admits the dots notification kinds so the Linear
+		// webhook can queue lane notifications on the existing outbox. The CHECK
+		// swap takes a brief ACCESS EXCLUSIVE lock on notification_outbox; NOT
+		// VALID skips re-checking existing rows, which all hold older kinds.
+		v26 := []string{
+			`ALTER TABLE notification_outbox DROP CONSTRAINT notification_outbox_kind_check`,
+			`ALTER TABLE notification_outbox ADD CONSTRAINT notification_outbox_kind_check CHECK(kind IN ('decision_answered','chat_answer','dots_report','dots_decision','dots_followup')) NOT VALID`,
+			`INSERT INTO schema_version(version) VALUES (26)`,
+		}
+		return execAll(ctx, tx, v26)
+	}); err != nil {
+		return err
+	}
+
 	// Lane-knownness probes for relane run once per batch item. These
 	// indexes keep each probe an index lookup instead of a full scan —
 	// the existing relay_events index on owner_lane is partial and

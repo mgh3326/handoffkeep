@@ -19,6 +19,11 @@ import (
 const (
 	OutboxKindDecisionAnswered = "decision_answered"
 	OutboxKindChatAnswer       = "chat_answer"
+	// The dots kinds name the lane-event type a drainer sends them with:
+	// report, decision and info.
+	OutboxKindDotsReport   = "dots_report"
+	OutboxKindDotsDecision = "dots_decision"
+	OutboxKindDotsFollowup = "dots_followup"
 )
 
 var (
@@ -87,8 +92,18 @@ func assistantLaneText(prefix, body string) string {
 // writer's transaction. ON CONFLICT DO NOTHING keeps a replayed resolution
 // from queueing a second notification for the same event.
 func insertNotificationOutbox(ctx context.Context, tx pgx.Tx, kind, lane, eventID, text string, at time.Time) error {
-	_, err := tx.Exec(ctx, `INSERT INTO notification_outbox(kind,target_lane,event_id,text,created_at) VALUES($1,$2,$3,$4,$5) ON CONFLICT (event_id) DO NOTHING`, kind, lane, eventID, text, at)
+	_, err := insertNotificationOutboxOnce(ctx, tx, kind, lane, eventID, text, at)
 	return err
+}
+
+// insertNotificationOutboxOnce is insertNotificationOutbox reporting whether
+// this call wrote the row.
+func insertNotificationOutboxOnce(ctx context.Context, tx pgx.Tx, kind, lane, eventID, text string, at time.Time) (bool, error) {
+	tag, err := tx.Exec(ctx, `INSERT INTO notification_outbox(kind,target_lane,event_id,text,created_at) VALUES($1,$2,$3,$4,$5) ON CONFLICT (event_id) DO NOTHING`, kind, lane, eventID, text, at)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
 }
 
 // AssistantPendingDecision is one open decision request with the task it
