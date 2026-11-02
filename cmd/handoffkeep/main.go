@@ -1850,16 +1850,19 @@ func linearFromEnv(st *store.Store) linearServer {
 		// An OAuth application wins over a personal key: its writes show as the
 		// app, so nothing hk posts can be read as the operator's answer.
 		app = &api.LinearAppToken{ClientID: clientID, ClientSecret: clientSecret}
-		key = "app"
+		key = ""
 	}
+	// Either credential lets hk read Linear; the app is carried on its own
+	// field, never as a placeholder in the key slot.
+	credential := key != "" || app != nil
 	operator := strings.TrimSpace(os.Getenv("HANDOFFKEEP_LINEAR_OPERATOR_USER_ID"))
-	if secret == "" && key == "" {
+	if secret == "" && !credential {
 		if operator != "" {
 			log.Printf("linear_decisions.disabled reason=no_webhook")
 		}
 		return linearServer{}
 	}
-	if secret == "" || key == "" {
+	if secret == "" || !credential {
 		log.Printf("linear_webhook.disabled reason=incomplete_config")
 		return linearServer{}
 	}
