@@ -112,3 +112,9 @@ jobs:
           name: handoffkeep-${{ matrix.goos }}-${{ matrix.goarch }}
           path: handoffkeep-*
           retention-days: 7
+
+  auto-tag-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - run: python3 scripts/test-auto-tag.py

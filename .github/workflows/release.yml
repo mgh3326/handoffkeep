@@ -11,6 +11,14 @@ on:
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish assets for the selected tag
+        type: boolean
+        default: false
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 permissions:
   contents: read
 jobs:
@@ -32,7 +40,7 @@ jobs:
           REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
         run: |
-          if [ "$EVENT" = push ] && [ "$REF_TYPE" = tag ]; then
+          if [ "$REF_TYPE" = tag ]; then
             echo "RELEASE_TAG=$REF_NAME" >> "$GITHUB_ENV"
           else
             echo "RELEASE_TAG=v0.0.0" >> "$GITHUB_ENV"
@@ -70,7 +78,7 @@ jobs:
           [[ $(wc -l < dist/release/SHA256SUMS) -eq 4 ]]
           (cd dist/release && sha256sum -c SHA256SUMS)
       - name: Keep assets for publish
-        if: github.event_name == 'push' && github.ref_type == 'tag' && github.ref_name != 'v0.0.0'
+        if: (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish)) && github.ref_type == 'tag' && github.ref_name != 'v0.0.0'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-assets
@@ -81,7 +89,7 @@ jobs:
           retention-days: 7
 
   test:
-    if: github.event_name == 'push' && github.ref_type == 'tag' && github.ref_name != 'v0.0.0'
+    if: (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish)) && github.ref_type == 'tag' && github.ref_name != 'v0.0.0'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     services:
@@ -116,7 +124,7 @@ jobs:
 
   publish:
     needs: [build, test]
-    if: github.event_name == 'push' && github.ref_type == 'tag' && github.ref_name != 'v0.0.0'
+    if: (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish)) && github.ref_type == 'tag' && github.ref_name != 'v0.0.0'
     runs-on: ubuntu-latest
     permissions:
       contents: write
