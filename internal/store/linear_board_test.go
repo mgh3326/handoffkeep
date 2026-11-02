@@ -297,9 +297,12 @@ func TestWorkBoardMigrationAfterExistingVersion28(t *testing.T) {
 	if err = st.migrate(t.Context()); err != nil {
 		t.Fatal("repeated migration", err)
 	}
-	var versions int
-	if err = st.pool.QueryRow(t.Context(), `SELECT count(*) FROM schema_version WHERE version IN (28,29)`).Scan(&versions); err != nil || versions != 2 || SchemaVersion != 29 {
-		t.Fatal(versions, SchemaVersion, err)
+	var versions, maxVersion int
+	if err = st.pool.QueryRow(t.Context(), `SELECT count(*) FILTER (WHERE version IN (28,29)),max(version) FROM schema_version`).Scan(&versions, &maxVersion); err != nil {
+		t.Fatal(err)
+	}
+	if versions != 2 || maxVersion != SchemaVersion {
+		t.Fatalf("versions 28/29 present=%d, max version=%d, want %d", versions, maxVersion, SchemaVersion)
 	}
 	if _, err = st.pool.Exec(t.Context(), `SELECT job_id FROM placement_decisions LIMIT 1`); err != nil {
 		t.Fatal(err)
