@@ -1,0 +1,176 @@
+{
+  "browser": "156.0.8078.76",
+  "deviceScaleFactor": 1,
+  "scheme": "file:",
+  "checks": [
+    {
+      "page": "board",
+      "width": 1280,
+      "theme": "dark",
+      "fullPage": true,
+      "horizontalOverflow": false,
+      "scriptErrors": 0
+    },
+    {
+      "page": "task-detail",
+      "width": 1280,
+      "theme": "dark",
+      "fullPage": true,
+      "horizontalOverflow": false,
+      "scriptErrors": 0
+    },
+    {
+      "page": "decisions",
+      "width": 1280,
+      "theme": "dark",
+      "fullPage": true,
+      "horizontalOverflow": false,
+      "scriptErrors": 0
+    },
+    {
+      "page": "fleet-hosts",
+      "width": 1280,
+      "theme": "dark",
+      "fullPage": true,
+      "horizontalOverflow": false,
+      "scriptErrors": 0
+    },
+    {
+      "page": "command-palette",
+      "width": 1280,
+      "theme": "dark",
+      "fullPage": false,
+      "horizontalOverflow": false,
+      "scriptErrors": 0
+    },
+    {
+      "page": "board",
+      "width": 1280,
+      "theme": "light",
+      "fullPage": true,
+      "horizontalOverflow": false,
+      "scriptErrors": 0
+    },
+    {
+      "page": "task-detail",
+      "width": 1280,
+      "theme": "light",
+      "fullPage": true,
+      "horizontalOverflow": false,
+      "scriptErrors": 0
+    },
+    {
+      "page": "decisions",
+      "width": 1280,
+      "theme": "light",
+      "fullPage": true,
+      "horizontalOverflow": false,
+      "scriptErrors": 0
+    },
+    {
+      "page": "fleet-hosts",
+      "width": 1280,
+      "theme": "light",
+      "fullPage": true,
+      "horizontalOverflow": false,
+      "scriptErrors": 0
+    },
+    {
+      "page": "command-palette",
+      "width": 1280,
+      "theme": "light",
+      "fullPage": false,
+      "horizontalOverflow": false,
+      "scriptErrors": 0
+    },
+    {
+      "page": "board",
+      "width": 390,
+      "theme": "dark",
+      "fullPage": true,
+      "horizontalOverflow": false,
+      "scriptErrors": 0
+    },
+    {
+      "page": "task-detail",
+      "width": 390,
+      "theme": "dark",
+      "fullPage": true,
+      "horizontalOverflow": false,
+      "scriptErrors": 0
+    },
+    {
+      "page": "decisions",
+      "width": 390,
+      "theme": "dark",
+      "fullPage": true,
+      "horizontalOverflow": false,
+      "scriptErrors": 0
+    },
+    {
+      "page": "fleet-hosts",
+      "width": 390,
+      "theme": "dark",
+      "fullPage": true,
+      "horizontalOverflow": false,
+      "scriptErrors": 0
+    },
+    {
+      "page": "command-palette",
+      "width": 390,
+      "theme": "dark",
+      "fullPage": false,
+      "horizontalOverflow": false,
+      "scriptErrors": 0
+    },
+    {
+      "page": "board",
+      "width": 390,
+      "theme": "light",
+      "fullPage": true,
+      "horizontalOverflow": false,
+      "scriptErrors": 0
+    },
+    {
+      "page": "task-detail",
+      "width": 390,
+      "theme": "light",
+      "fullPage": true,
+      "horizontalOverflow": false,
+      "scriptErrors": 0
+    },
+    {
+      "page": "decisions",
+      "width": 390,
+      "theme": "light",
+      "fullPage": true,
+      "horizontalOverflow": false,
+      "scriptErrors": 0
+    },
+    {
+      "page": "fleet-hosts",
+      "width": 390,
+      "theme": "light",
+      "fullPage": true,
+      "horizontalOverflow": false,
+      "scriptErrors": 0
+    },
+    {
+      "page": "command-palette",
+      "width": 390,
+      "theme": "light",
+      "fullPage": false,
+      "horizontalOverflow": false,
+      "scriptErrors": 0
+    }
+  ],
+  "interactions": [
+    "row keyboard focus",
+    "palette focus",
+    "empty search",
+    "escape focus restoration",
+    "theme toggle",
+    "local answer preview",
+    "mobile menu"
+  ]
+}
