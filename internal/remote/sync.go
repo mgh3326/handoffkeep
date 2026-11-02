@@ -1,6 +1,7 @@
 package remote
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -11,6 +12,8 @@ import (
 
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
+
+const syncDeltaMaxBytes = 2 << 20
 
 // SyncDelta validates a complete bounded NDJSON page, including its trailer.
 func (c Client) SyncDelta(ctx context.Context, after int64, limit int) ([]store.SyncChange, store.SyncMetadata, error) {
@@ -49,7 +52,14 @@ func (c Client) SyncDelta(ctx context.Context, after int64, limit int) ([]store.
 	if err != nil || kind != "application/x-ndjson" {
 		return nil, meta, fmt.Errorf("unexpected sync content type")
 	}
-	dec := json.NewDecoder(io.LimitReader(resp.Body, 2<<20))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, syncDeltaMaxBytes+1))
+	if err != nil {
+		return nil, meta, fmt.Errorf("read sync page: %w", err)
+	}
+	if len(body) > syncDeltaMaxBytes {
+		return nil, meta, fmt.Errorf("sync page exceeds %d bytes", syncDeltaMaxBytes)
+	}
+	dec := json.NewDecoder(bytes.NewReader(body))
 	changes := make([]store.SyncChange, 0)
 	last := after
 	for {

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -444,5 +445,72 @@ func TestSyncBackfillDuplicateDecisionIDs(t *testing.T) {
 	}
 	if _, found, err := s.GetSyncRow(ctx, "decision", "shared/request"); err != nil || !found {
 		t.Fatalf("backfilled row found=%v err=%v", found, err)
+	}
+}
+
+func TestSyncDecisionOwnershipMovesBetweenTasks(t *testing.T) {
+	s, pool := searchTestStore(t)
+	ctx := t.Context()
+	first, err := s.CreateTask(ctx, Task{Lane: "sync-owner-first", Title: "first owner", Kind: "implement", CreatedBy: "test", Project: projectPtr(testProjectName)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := s.CreateTask(ctx, Task{Lane: "sync-owner-second", Title: "second owner", Kind: "implement", CreatedBy: "test", Project: projectPtr(testProjectName)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim := func(taskID int64, requestID, question string) {
+		t.Helper()
+		if _, err := pool.Exec(ctx, `UPDATE tasks SET refs=jsonb_build_object('decision_request',jsonb_build_object('id',$2::text,'question',$3::text)),updated_at=$4 WHERE id=$1`, taskID, requestID, question, time.Now().UTC()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	claim(first.ID, "shared/request", "first question")
+	// The second task already owns a different projection. Replacing it must
+	// clear that row before transferring the shared ID's unique task_id.
+	claim(second.ID, "second/request", "previous second question")
+	claim(second.ID, "shared/request", "second question")
+	assertOwner := func() {
+		t.Helper()
+		raw, found, err := s.GetSyncRow(ctx, "decision", "shared/request")
+		if err != nil || !found {
+			t.Fatalf("decision found=%v err=%v", found, err)
+		}
+		var row struct {
+			TaskID   int64  `json:"task_id"`
+			Question string `json:"question"`
+		}
+		if err := json.Unmarshal(raw, &row); err != nil {
+			t.Fatal(err)
+		}
+		if row.TaskID != second.ID || row.Question != "second question" {
+			t.Fatalf("wrong decision owner: %+v", row)
+		}
+	}
+	assertOwner()
+	if _, found, err := s.GetSyncRow(ctx, "decision", "second/request"); err != nil || found {
+		t.Fatalf("previous projection found=%v err=%v", found, err)
+	}
+	_, before, err := s.SyncDelta(ctx, 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE tasks SET refs='{}' WHERE id=$1`, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	assertOwner()
+	changes, after, err := s.SyncDelta(ctx, before.LastSyncID, 100)
+	if err != nil || len(changes) != 1 || changes[0].Model != "task" || changes[0].Action != "U" {
+		t.Fatalf("old owner removal affected shared decision: %v err=%v", changes, err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE tasks SET refs='{}' WHERE id=$1`, second.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := s.GetSyncRow(ctx, "decision", "shared/request"); err != nil || found {
+		t.Fatalf("removed owner decision found=%v err=%v", found, err)
+	}
+	changes, _, err = s.SyncDelta(ctx, after.LastSyncID, 100)
+	if err != nil || len(changes) != 2 || changes[0].Model != "decision" || changes[0].ModelID != "shared/request" || changes[0].Action != "D" || changes[1].Model != "task" || changes[1].Action != "U" {
+		t.Fatalf("new owner removal changes=%v err=%v", changes, err)
 	}
 }

@@ -46,7 +46,7 @@ var syncMigrations = []string{
    DELETE FROM sync_decisions WHERE task_id=NEW.id AND id IS DISTINCT FROM request_id;
    IF COALESCE(request_id,'')<>'' THEN
      INSERT INTO sync_decisions(id,task_id,updated_at) VALUES(request_id,NEW.id,NEW.updated_at)
-     ON CONFLICT(id) DO UPDATE SET updated_at=EXCLUDED.updated_at;
+     ON CONFLICT(id) DO UPDATE SET task_id=EXCLUDED.task_id,updated_at=EXCLUDED.updated_at;
    END IF;
    RETURN NULL;
  END $$`,

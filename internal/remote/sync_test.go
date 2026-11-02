@@ -51,3 +51,34 @@ func TestSyncDeltaProtocol(t *testing.T) {
 		})
 	}
 }
+
+func TestSyncDeltaResponseSizeLimit(t *testing.T) {
+	trailer := `{"_metadata_":{"last_sync_id":0,"max_sync_id":0,"schema_version":30}}` + "\n"
+	atLimit := trailer + strings.Repeat(" ", syncDeltaMaxBytes-len(trailer))
+	for _, tc := range []struct {
+		name, body string
+		ok         bool
+	}{
+		{"at limit", atLimit, true},
+		{"one extra whitespace byte", atLimit + " ", false},
+		{"record beyond limit", atLimit + `{"sync_id":1}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/x-ndjson")
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer h.Close()
+			changes, _, err := (Client{URL: h.URL, Token: "secret"}).SyncDelta(t.Context(), 0, 100)
+			if tc.ok {
+				if err != nil || len(changes) != 0 {
+					t.Fatalf("changes=%v err=%v", changes, err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "exceeds") {
+				t.Fatalf("oversized response err=%v", err)
+			}
+		})
+	}
+}
