@@ -2,7 +2,7 @@
 // server (service principals get 403); a refusal surfaces as HttpError like
 // every other console read.
 
-import { getJSON } from "../../shared/http";
+import { getJSON } from "../shared/http";
 import type { DashboardResponse } from "./types";
 
 export async function fetchDashboard(): Promise<DashboardResponse> {

@@ -1,7 +1,7 @@
 import { createRoot } from "react-dom/client";
 import { ConsoleBoard } from "./ConsoleBoard";
 import { TaskPage } from "./TaskPage";
-import { loadTheme, PageShell } from "./AppShell";
+import { loadTheme, PageShell } from "../shared/AppShell";
 import "./proto.css";
 
 // The --hk-* tokens arrive as their own stylesheet (/ui/static/console/

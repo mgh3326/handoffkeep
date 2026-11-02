@@ -14,9 +14,9 @@ import { ReapPanel } from "./ReapPanel";
 import { getJSON } from "./shared/http";
 import { usePoll } from "./shared/usePoll";
 
-import { QuotaCard } from "./queue-proto/dashboard/DashboardApp";
-import { fetchDashboard } from "./queue-proto/dashboard/api";
-import "./queue-proto/dashboard/dashboard.css";
+import { QuotaCard } from "./dashboard/DashboardApp";
+import { fetchDashboard } from "./dashboard/api";
+import "./dashboard/dashboard.css";
 
 const LIVE_API = "/ui/api/live";
 const POLL_MS = 10_000;

@@ -4,9 +4,9 @@ import { usePoll } from "../shared/usePoll";
 import { liveRequestFailed } from "../live";
 import { ExecutionChips } from "./ExecutionChips";
 import { TaskPage } from "./TaskPage";
-import { PageShell } from "./AppShell";
+import { PageShell } from "../shared/AppShell";
 import { DeploySummary } from "./DeploySummary";
-import { stateLabel } from "./states";
+import { stateLabel } from "../shared/states";
 
 async function load() {
   const [board, live] = await Promise.all([

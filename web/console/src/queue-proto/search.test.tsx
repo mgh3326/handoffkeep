@@ -6,12 +6,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { HttpError } from "../shared/boardApi";
 import type { BoardDetail } from "../shared/boardTypes";
-import { navigate, PageShell } from "./AppShell";
+import { navigate, PageShell } from "../shared/AppShell";
 import { GlobalSearch } from "./GlobalSearch";
 import { QueueProtoApp } from "./QueueProtoApp";
 import { buildDatasets } from "./fixtures";
 import type { CommentsClient } from "./TaskComments";
-import { highlightParts, isTypingTarget, type SearchFn, type SearchHit, type SearchPage } from "./search";
+import { highlightParts, isTypingTarget, type SearchFn, type SearchHit, type SearchPage } from "../shared/search";
 
 const datasets = buildDatasets();
 
@@ -66,6 +66,8 @@ function detailFor(id: number, title: string, state = "merged"): BoardDetail {
 }
 
 beforeEach(() => {
+  HTMLDialogElement.prototype.showModal = function () { this.setAttribute("open", ""); };
+  HTMLDialogElement.prototype.close = function () { this.removeAttribute("open"); };
   vi.useFakeTimers({ shouldAdvanceTime: true });
   localStorage.clear();
   window.history.replaceState(null, "", "/ui/queue");
@@ -368,9 +370,13 @@ describe("app shell placement", () => {
         <p>page body</p>
       </PageShell>,
     );
-    expect(container.querySelectorAll("#qp-global-search")).toHaveLength(1);
-    await type("#42");
-    fireEvent.keyDown(box(), { key: "Enter" });
+    expect(container.querySelectorAll(".hk-topbar")).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: /Search/ }));
+    const input = screen.getByLabelText("Search commands and tasks");
+    fireEvent.change(input, { target: { value: "#42" } });
+    await act(async () => { vi.advanceTimersByTime(200); });
+    expect(screen.getByRole("link", { name: /#42 task 42/ })).toBeTruthy();
+    fireEvent.keyDown(input, { key: "Enter" });
     expect(to).toHaveBeenCalledWith("/ui/tasks/42");
   });
 
@@ -381,10 +387,14 @@ describe("app shell placement", () => {
         <p>body</p>
       </PageShell>,
     );
-    await type("q");
-    fireEvent.keyDown(box(), { key: "Enter" });
-    fireEvent.keyDown(box(), { key: "ArrowDown" });
-    fireEvent.keyDown(box(), { key: "Enter" });
+    fireEvent.click(screen.getByRole("button", { name: /Search/ }));
+    const input = screen.getByLabelText("Search commands and tasks");
+    fireEvent.change(input, { target: { value: "q" } });
+    await act(async () => { vi.advanceTimersByTime(200); });
+    expect(screen.queryByRole("link", { name: /task [12]/ })).toBeNull();
+    fireEvent.keyDown(input, { key: "Enter" });
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    fireEvent.keyDown(input, { key: "Enter" });
     expect(to).not.toHaveBeenCalled();
   });
 });

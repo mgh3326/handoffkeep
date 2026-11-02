@@ -1,7 +1,7 @@
 // Single shared adapter. List and board both consume applyView() output, so
 // switching layouts can never change the visible unique task-ID set.
 
-import { STATE_GROUP_ORDER } from "./states";
+import { STATE_GROUP_ORDER } from "../shared/states";
 import { KNOWN_STATES, type Dataset, type Enrichment, type FilterState, type ProtoState, type ProtoTask, type ProtoView } from "./types";
 
 export const EMPTY_FILTERS: FilterState = { query: "", lane: "", kind: "", hiddenStates: [], minPriority: null };

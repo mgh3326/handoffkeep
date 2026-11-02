@@ -4,20 +4,22 @@ Every existing HTML console route now uses the shared workspace shell and canoni
 
 | Old outer template / route | Replacement |
 | --- | --- |
-| `board.html`: `/ui/queue`, `/ui/tasks/{id}` | `console.html`, ConsoleBoard, shared TaskPage/detail renderer |
+| `board.html`: `/ui/queue`, `/ui/tasks/{id}` | `board.html`, ConsoleBoard, shared TaskPage/detail renderer |
 | `dashboard.html`: `/ui/home` | `console.html`, Inbox attention queue and DashboardApp |
-| `fleet.html`: `/ui/fleet` | `console.html`, FleetApp with shared quota pools |
+| `fleet.html`: `/ui/fleet` | `fleet.html`, FleetApp with shared quota pools |
 | `docs.html`: `/ui/docs` | `console.html`, DocsApp and document reader |
 | `grades.html`: `/ui/grades` | `console.html`, catalog under Fleet hosts; mobile rows |
-| `deploys.html`: `/ui/deploys` | `console.html`, DeploysApp and recorded-deployment comparison |
+| `deploys.html`: `/ui/deploys` | `deploys.html`, DeploysApp and recorded-deployment comparison |
 | `ui.html`: `/ui/decisions`, `/ui/timeline`, `/ui/compose`, `/ui/doc/{key}` | `server.html` content mounted inside the same React shell |
 | `/ui` | Redirects to Inbox at `/ui/home` |
 
-Existing form and fragment URLs remain compatible. The old queue prototype is retained for its isolated preview and existing behavior tests; the production entry serves ConsoleBoard. Vite replaces the committed bundle in one build. The duplicate proposal token file and old mock screenshots have been removed.
+Existing form and fragment URLs remain compatible. The board, fleet, and deploy entry-template filenames are retained for the artifact contract, with the new shell markup. Dashboard, document, and grade mounts share `console.html`. Shared production shell/search/state modules live in `src/shared`, dashboard components live in `src/dashboard`, and fixture/mock sources stay isolated. The old queue prototype is retained for its isolated preview and existing behavior tests; the production entry serves ConsoleBoard. Vite replaces the committed bundle in one build. The duplicate proposal token file and old mock screenshots have been removed.
 
 The board exhausts cursor pages up to its existing 5,000-row safety cap and labels partial counts. State, lane, claimant and title filters are recorded in the URL. My work uses an explicit operator-selected scope. The same-origin board API now batches the #114 durable work-board, immutable placement, and terminal-job reads. It supplies recorded host, canonical role, model, family, PR, and all active sessions while retaining the primary lead after completion. Live job observations stay separate from recorded placement, including when their hosts differ. Missing fields remain explicit. All child sessions are available through the sessions disclosure. PR chips link only validated HTTPS GitHub pull URLs.
 
 Task detail retains body documents, comments, request history, task events, and benchmark coverage. The properties panel follows content on mobile. Report paths remain text with “Report unavailable in console”; document links use the document API.
+
+Inbox labels its task/lane decision count as partial and explicitly excludes answerable escalations, linking to Decisions for the full queue.
 
 Decisions retain server aggregation and the existing write gates. Confirmation happens in-page. A failed or timed-out write retains the form and its selection, and requires checking history before retrying. Stream updates do not replace an edited form. Structured request records remain read-only because the current server deliberately does not provide their answer transport; legacy request and disposition forms use their existing endpoints. Resolved structured history is available on task detail.
 

@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { ConsoleBoard } from "./ConsoleBoard";
-import { PageShell, navigate } from "./AppShell";
+import { PageShell, navigate } from "../shared/AppShell";
 import { fetchBoardTasks } from "../shared/boardApi";
 
 const task = {

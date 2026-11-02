@@ -1,5 +1,5 @@
 import { createRoot } from "react-dom/client";
-import { loadTheme, PageShell } from "../AppShell";
+import { loadTheme, PageShell } from "../shared/AppShell";
 import { DashboardApp } from "./DashboardApp";
 import "./dashboard.css";
 

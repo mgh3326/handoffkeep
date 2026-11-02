@@ -1,7 +1,7 @@
 import { useCallback, useMemo } from "react";
 import { groupByArea, groupByProject, groupByState, type AreaGroup, type GroupSignals, type ProjectGroup, type StateGroup } from "./adapter";
-import { StateIcon } from "./StateIcon";
-import { stateLabel } from "./states";
+import { StateIcon } from "../shared/StateIcon";
+import { stateLabel } from "../shared/states";
 import { VirtualList } from "./VirtualList";
 import { RowFields } from "./TaskRow";
 import type { Dataset, Density, ProtoState, ProtoTask } from "./types";

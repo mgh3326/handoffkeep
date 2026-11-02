@@ -6,7 +6,7 @@ import { Attention } from "./Attention";
 // that never loaded says it failed — never an empty "all clear".
 
 import type { ReactNode } from "react";
-import { fetchLive } from "../../shared/boardApi";
+import { fetchLive } from "../shared/boardApi";
 import {
   liveAgeLabel,
   liveRequestFailed,
@@ -17,10 +17,10 @@ import {
   taskIdForJob,
   type LiveJob,
   type LiveResponse,
-} from "../../live";
-import { StateIcon, stateLabel } from "../StateIcon";
+} from "../live";
+import { StateIcon, stateLabel } from "../shared/StateIcon";
 import { fetchDashboard } from "./api";
-import { usePoll } from "../../shared/usePoll";
+import { usePoll } from "../shared/usePoll";
 import type { DashboardAccount, DashboardBucket, DashboardMissing, DashboardRepo, DashboardResponse, DashboardTask } from "./types";
 
 export const DASHBOARD_POLL_MS = 60_000;

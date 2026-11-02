@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { SearchFn } from "./search";
-import { fetchTaskSearch } from "./search";
-import type { Density } from "./types";
+import { fetchTaskSearch, safeTaskId } from "./search";
 import "../design/shell.css";
 
 export type Theme = "dark" | "light";
@@ -94,28 +93,6 @@ export function ThemeChoice() {
     </button>
   );
 }
-export function DensityChoice({
-  density,
-  onChange,
-}: {
-  density: Density;
-  onChange: (d: Density) => void;
-}) {
-  return (
-    <div role="group" aria-label="행 밀도">
-      {(["compact", "comfortable"] satisfies Density[]).map((d) => (
-        <button
-          className="hk-btn"
-          key={d}
-          aria-pressed={density === d}
-          onClick={() => onChange(d)}
-        >
-          {d === "compact" ? "행 40px · 1줄" : "행 56px · 2줄"}
-        </button>
-      ))}
-    </div>
-  );
-}
 function typing(target: EventTarget | null) {
   return (
     target instanceof HTMLElement &&
@@ -191,7 +168,7 @@ function Palette({
           if (!cancelled) {
             setMore(response.hasMore);
             setResults(
-              response.results.map((r) => ({
+              response.results.filter(r => safeTaskId(r.id) !== null).map((r) => ({
                 label: `#${r.id} ${r.title}`,
                 href: `/ui/tasks/${r.id}`,
               })),

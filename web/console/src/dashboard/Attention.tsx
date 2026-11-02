@@ -1,5 +1,5 @@
-import { getJSON } from "../../shared/http";
-import { usePoll } from "../../shared/usePoll";
+import { getJSON } from "../shared/http";
+import { usePoll } from "../shared/usePoll";
 type AttentionData = {
   tasks: { decisions_pending: number; dispositions_open: number };
 };
@@ -27,10 +27,11 @@ export function Attention() {
       <p>
         <a href="/ui/decisions">
           {data
-            ? `${data.tasks.decisions_pending} decisions · ${data.tasks.dispositions_open} dispositions`
+            ? `${data.tasks.decisions_pending} task/lane decisions · ${data.tasks.dispositions_open} dispositions`
             : "Decision counts unavailable"}
         </a>
       </p>
+      <p>Partial count: answerable escalations are not included. Open Decisions for the full queue.</p>
       <p>
         <a href="/ui/queue?state=verifying">Work awaiting review →</a>
       </p>

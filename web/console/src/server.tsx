@@ -1,6 +1,6 @@
 import { useLayoutEffect, useRef } from "react";
 import { createRoot } from "react-dom/client";
-import { PageShell, type NavKey } from "./queue-proto/AppShell";
+import { PageShell, type NavKey } from "./shared/AppShell";
 
 function ServerContent({ content }: { content: HTMLElement }) {
   const slot = useRef<HTMLDivElement>(null);

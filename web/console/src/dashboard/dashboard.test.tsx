@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import { DashboardApp, paceTone, relativeLabel } from "./DashboardApp";
 import type { DashboardResponse } from "./types";
-import type { LiveResponse } from "../../live";
+import type { LiveResponse } from "../live";
 
 afterEach(cleanup);
 

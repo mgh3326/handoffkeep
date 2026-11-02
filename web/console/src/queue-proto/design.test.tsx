@@ -10,11 +10,11 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import type { BoardTask } from "../shared/boardTypes";
-import { applyTheme, loadTheme } from "./AppShell";
+import { applyTheme, loadTheme } from "../shared/AppShell";
 import { boardTaskToProto } from "./boardtask";
 import { QueueProtoApp } from "./QueueProtoApp";
-import { STATE_SHAPES, StateIcon } from "./StateIcon";
-import { STATE_GROUP_ORDER, STATE_LABEL } from "./states";
+import { STATE_SHAPES, StateIcon } from "../shared/StateIcon";
+import { STATE_GROUP_ORDER, STATE_LABEL } from "../shared/states";
 import { DEFAULT_STATE, STORAGE_KEY } from "./storage";
 import { KNOWN_STATES, type Dataset } from "./types";
 
@@ -82,7 +82,7 @@ function declarations(css: string): string[] {
 const COLOR_LITERAL = /#[0-9a-f]{3,8}\b|\b(?:rgba?|hsla?|hwb|lab|lch|oklab|oklch|color)\(|\b(?:white|black|red|green|blue|gray|grey|orange|yellow|purple|canvas|canvastext|buttonface)\b/i;
 
 /** Migrated product sources: every file the list/shell renders from. */
-const MIGRATED_TSX = ["AppShell.tsx", "ListView.tsx", "QueueProtoApp.tsx", "StateIcon.tsx", "TaskRow.tsx", "Toolbar.tsx", "ViewRail.tsx", "live.tsx", "main.tsx", "states.ts"];
+const MIGRATED_TSX = ["../shared/AppShell.tsx", "ListView.tsx", "QueueProtoApp.tsx", "../shared/StateIcon.tsx", "TaskRow.tsx", "Toolbar.tsx", "ViewRail.tsx", "live.tsx", "main.tsx", "../shared/states.ts"];
 
 function colorLiterals(css: string): string[] {
   return declarations(css).filter((d) => !d.startsWith("--") && COLOR_LITERAL.test(d.slice(d.indexOf(":") + 1)));
@@ -119,7 +119,7 @@ describe("(a) no color literal outside tokens.css", () => {
   });
 
   it("the board page links the one token stylesheet before the app styles", () => {
-    const tpl = read(consoleRoot, "..", "..", "internal", "ui", "templates", "console.html");
+    const tpl = read(consoleRoot, "..", "..", "internal", "ui", "templates", "board.html");
     const tokens = tpl.indexOf("/ui/static/console/tokens.css");
     const board = tpl.indexOf("/ui/static/console/board.css");
     expect(tokens).toBeGreaterThan(0);

@@ -8,7 +8,8 @@
       "theme": "dark",
       "width": 1280,
       "overflow": false,
-      "errors": []
+      "errors": [],
+      "captured_at": "2026-11-02T16:18:17.610Z"
     },
     {
       "file": "board-dark-1280.png",
@@ -106,7 +107,8 @@
       "theme": "light",
       "width": 1280,
       "overflow": false,
-      "errors": []
+      "errors": [],
+      "captured_at": "2026-11-02T16:18:25.330Z"
     },
     {
       "file": "board-light-1280.png",
@@ -204,7 +206,8 @@
       "theme": "dark",
       "width": 390,
       "overflow": false,
-      "errors": []
+      "errors": [],
+      "captured_at": "2026-11-02T16:18:29.994Z"
     },
     {
       "file": "board-dark-390.png",
@@ -302,7 +305,8 @@
       "theme": "light",
       "width": 390,
       "overflow": false,
-      "errors": []
+      "errors": [],
+      "captured_at": "2026-11-02T16:18:32.721Z"
     },
     {
       "file": "board-light-390.png",

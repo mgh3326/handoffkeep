@@ -4,7 +4,7 @@
 // here ever turns either into markup — highlightParts only splits on the two
 // exact marker strings and every part is rendered as a React text node.
 
-import { getJSON } from "../shared/http";
+import { getJSON } from "./http";
 
 export type SearchHit = {
   id: number;

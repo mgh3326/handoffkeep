@@ -1,4 +1,4 @@
-import { PageShell } from "./queue-proto/AppShell";
+import { PageShell } from "./shared/AppShell";
 import { createRoot } from "react-dom/client";
 import { FleetApp } from "./FleetApp";
 import "./fleet.css";
