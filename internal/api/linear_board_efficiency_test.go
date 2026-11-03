@@ -269,6 +269,11 @@ func TestLinearBoardSignedWebhookOwnsLinksAndNestedMetadata(t *testing.T) {
 	if status != http.StatusOK || len(spy.metadata) != 3 || control.blocked() {
 		t.Fatal(status, spy, control)
 	}
+	labelRemove := []byte(fmt.Sprintf(`{"type":"IssueLabel","action":"remove","createdAt":"2026-11-03T01:10:00Z","webhookTimestamp":%d,"data":{"id":"label","updatedAt":"2026-11-03T01:00:00Z"}}`, time.Now().UnixMilli()))
+	status, _ = postLinear(t, h, labelRemove, linearSign(fakeLinearSigningValue, labelRemove))
+	if status != http.StatusOK || len(spy.metadata) != 4 || !spy.metadata[3].Deleted || spy.metadata[3].UpdatedAt.Format(time.RFC3339) != "2026-11-03T01:10:00Z" {
+		t.Fatal("removal lost to stale entity time", status, spy)
+	}
 	archive := []byte(fmt.Sprintf(`{"type":"Issue","action":"remove","webhookTimestamp":%d,"data":{"id":"issue"}}`, time.Now().UnixMilli()))
 	status, _ = postLinear(t, h, archive, linearSign(fakeLinearSigningValue, archive))
 	if status != http.StatusOK || len(spy.events) != 2 || !spy.events[1].Inactive {
