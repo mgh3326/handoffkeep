@@ -1,21 +1,20 @@
 # hk as the tracker; Linear as a bounded projection
 
-Status: approved direction, 2026-11-03, with operator Amendment 1 folded in; the
-state table and migration map below await desk confirmation. This note changes no
-runtime behavior. No schema work starts until the desk confirms it, including the
-open questions in the next section.
+Status: approved direction, 2026-11-03, with operator Amendment 1 folded in. The
+operator answered the questions below on 2026-11-04, which confirms the state table
+and migration map. This note changes no runtime behavior.
 
 hk tracks work the way Linear does, adapted to a fleet where agents do the work
 and events move the state. Two failures motivate this: work silently falls
 through, and "open" does not mean "in progress". **Open now means `started` and
 nothing else.** Backlog is not open.
 
-## Questions for the desk
+## Decisions
 
-Each item is a choice the approved direction leaves open. S1 implements the
-default unless the desk answers otherwise.
+Each item is a choice the approved direction left open. The operator took the
+proposed answer for every item except Q11, where the alternative stands.
 
-| # | Question | Default | Alternative |
+| # | Question | Decision | Not chosen |
 |---|---|---|---|
 | Q1 | The approved states have no paused state. Where does `hold` go? | `icebox`: unclaimable, not open, revivable | `backlog` plus a new not-claimable flag |
 | Q2 | Where does `needs_decision` go? | An `awaiting_decision` flag on the task, which keeps its work state | Keep `needs_decision` as a twelfth state, contradicting "fixed sub-states" |
@@ -27,7 +26,7 @@ default unless the desk answers otherwise.
 | Q8 | S2 needs mergewake to send events to hk. Who owns that change? | A separate mergewake PR, tracked as its own task; S2 ships only the hk endpoint | The lead widens S2 to a second repository |
 | Q9 | Should desk promises and follow-ups be lightweight checklist items that never count as open? | No checklist type: they are sub-tasks in `triage` or `backlog`, which are not open | A checklist on the task, as an earlier task title proposed |
 | Q10 | Model additions need a slice. Where do they go? | A new slice, S1b, after S1; it needs its own task | Fold them into S1, which is already the largest migration |
-| Q11 | mergewake merges on review pass and CI runs afterward. Do schema PRs under blocking paths still need CI before merge? | Yes for S1 and S1b, because a revert does not undo a migration that has already run in production | Same post-merge flow as other PRs; the deploy gate is the only check |
+| Q11 | mergewake merges on review pass and CI runs afterward. Do schema PRs under blocking paths still need CI before merge? | No: S1 and S1b follow the same post-merge flow as other PRs, and the deploy gate carries migration safety | CI before merge for S1 and S1b |
 | Q12 | A repo session re-emits a ticket set with changed content. What happens? | The call is refused with a conflict and changes nothing | hk adds the new children and leaves existing ones unchanged |
 
 ## State model
@@ -436,6 +435,13 @@ command as part of the rollout.
 Each schema PR carries this runbook in its body. Production migrations run only at
 deploy, by the desk, with the operator's approval.
 
+Schema PRs get no CI before merge (Q11), so this runbook is where migration safety
+sits. A migration first runs in production at deploy, so reverting a schema PR before
+then undoes it completely. After deploy, only the rollback below undoes it.
+
+0. **Confirm CI on the merged commit.** The migration and rollback round-trip tests
+   need a database, so CI on main is the first place they are certain to have run.
+   Do not deploy until they pass there.
 1. **Update clients first (Q4).** The S1 CLI accepts old and new names in responses.
    Install it on every host and confirm the version. Until then, an old CLI reports
    failure on a claim that the server has already applied.
@@ -475,8 +481,8 @@ this table.
 
 ## Slices
 
-One PR per slice, in order. mergewake merges on review pass, subject to Q11, and the
-desk deploys. There is no coordinator lane: READY and ESC go to the desk.
+One PR per slice, in order. mergewake merges on review pass (Q11), and the desk
+deploys. There is no coordinator lane: READY and ESC go to the desk.
 
 | Slice | Tier | Scope |
 |---|---|---|
