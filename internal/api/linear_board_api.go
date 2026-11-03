@@ -3,40 +3,16 @@ package api
 import (
 	"context"
 	"errors"
-	"fmt"
+	"time"
 
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
-const boardTargetQuery = `query FleetBoardTarget {teams(first:2,filter:{key:{eq:"ROB"}}){nodes{id states(first:100){nodes{id name} pageInfo{hasNextPage}}}}}`
-
 func (a LinearAPI) BoardTarget(ctx context.Context) (BoardTarget, error) {
-	var out struct {
-		Teams struct {
-			Nodes []struct {
-				ID     string
-				States struct {
-					Nodes    []struct{ ID, Name string }
-					PageInfo struct{ HasNextPage bool }
-				}
-			}
-		}
-	}
-	if err := a.graphql(ctx, linearWriteTimeout, boardTargetQuery, nil, &out); err != nil {
-		return BoardTarget{}, err
-	}
-	if len(out.Teams.Nodes) != 1 || out.Teams.Nodes[0].States.PageInfo.HasNextPage {
-		return BoardTarget{}, errors.New("ROB team or states incomplete")
-	}
-	team := out.Teams.Nodes[0]
-	result := BoardTarget{TeamID: team.ID, States: map[string]string{}}
-	for _, s := range team.States.Nodes {
-		result.States[s.Name] = s.ID
-	}
-	return result, nil
+	return a.localBoardTarget(ctx)
 }
 
-const boardIssueQuery = `query FleetBoardIssue($id:String!){issue(id:$id){id identifier description team{id} labels(first:100,includeArchived:true){nodes{id name} pageInfo{hasNextPage}}}}`
+const boardIssueQuery = `query FleetBoardIssue($id:String!){issue(id:$id){id identifier archivedAt description team{id} labels(first:100,includeArchived:true){nodes{id name} pageInfo{hasNextPage}}}}`
 
 func (a LinearAPI) BoardIssue(ctx context.Context, id string) (BoardIssue, error) {
 	var out struct {
@@ -51,60 +27,66 @@ func (a LinearAPI) BoardIssue(ctx context.Context, id string) (BoardIssue, error
 	return *out.Issue, nil
 }
 
-const boardLabelsQuery = `query FleetBoardLabels($name:String!){issueLabels(first:100,filter:{name:{eq:$name}}){nodes{id team{id}} pageInfo{hasNextPage}}}`
-
-func (a LinearAPI) findBoardLabel(ctx context.Context, teamID, name string) (string, error) {
-	var out struct {
-		IssueLabels struct {
-			Nodes []struct {
-				ID   string
-				Team *struct{ ID string }
-			}
-			PageInfo struct{ HasNextPage bool }
-		}
-	}
-	if err := a.graphql(ctx, linearWriteTimeout, boardLabelsQuery, map[string]any{"name": name}, &out); err != nil {
-		return "", err
-	}
-	if out.IssueLabels.PageInfo.HasNextPage {
-		return "", errors.New("linear board labels incomplete")
-	}
-	workspace := ""
-	for _, label := range out.IssueLabels.Nodes {
-		if label.Team != nil && label.Team.ID == teamID {
-			return label.ID, nil
-		}
-		if label.Team == nil {
-			workspace = label.ID
-		}
-	}
-	return workspace, nil
-}
-
-const boardLabelCreateMutation = `mutation FleetBoardLabel($input:IssueLabelCreateInput!){issueLabelCreate(input:$input){success issueLabel{id}}}`
+const boardLabelCreateMutation = `mutation FleetBoardLabel($input:IssueLabelCreateInput!){issueLabelCreate(input:$input){success issueLabel{id updatedAt}}}`
+const boardLabelByIDQuery = `query HkBoardLabelByID($id:String!){issueLabel(id:$id){id name updatedAt team{id}}}`
 
 func (a LinearAPI) BoardLabel(ctx context.Context, teamID, name string) (string, error) {
-	id, err := a.findBoardLabel(ctx, teamID, name)
-	if err != nil || id != "" {
-		return id, err
+	if a.Metadata == nil {
+		return "", errors.New("linear metadata store unavailable")
 	}
-	var out struct {
-		IssueLabelCreate struct {
-			Success    bool
-			IssueLabel *struct{ ID string }
+	id, err := a.Metadata.ResolveLinearBoardLabel(ctx, teamID, name, func(ctx context.Context) (store.LinearMetadata, error) {
+		stable := store.LinearDecisionUUID("work-board:label:" + teamID + ":" + name)
+		var out struct {
+			IssueLabelCreate struct {
+				Success    bool
+				IssueLabel *struct {
+					ID        string
+					UpdatedAt time.Time
+				}
+			}
 		}
+		createErr := a.graphql(ctx, linearWriteTimeout, boardLabelCreateMutation, map[string]any{"input": map[string]any{"id": stable, "teamId": teamID, "name": name}}, &out)
+		if createErr == nil && out.IssueLabelCreate.Success && out.IssueLabelCreate.IssueLabel != nil && out.IssueLabelCreate.IssueLabel.ID == stable {
+			return store.LinearMetadata{Kind: "label", ID: stable, TeamID: teamID, Name: name, UpdatedAt: out.IssueLabelCreate.IssueLabel.UpdatedAt}, nil
+		}
+		var rate linearRateLimitError
+		if errors.As(createErr, &rate) {
+			return store.LinearMetadata{}, createErr
+		}
+		// Exact id recovery after an uncertain create; never a content scan.
+		var read struct {
+			IssueLabel *struct {
+				ID, Name  string
+				UpdatedAt time.Time
+				Team      *struct{ ID string }
+			}
+		}
+		if err := a.graphql(ctx, linearWriteTimeout, boardLabelByIDQuery, map[string]any{"id": stable}, &read); err != nil {
+			var rate linearRateLimitError
+			if errors.As(err, &rate) {
+				return store.LinearMetadata{}, err
+			}
+			var rejected linearRejectionError
+			if errors.As(err, &rejected) {
+				return store.LinearMetadata{}, store.ErrLinearBoardLabelUnavailable
+			}
+			return store.LinearMetadata{}, err
+		}
+		if label := read.IssueLabel; label != nil && label.ID == stable && label.Name == name && label.Team != nil && label.Team.ID == teamID {
+			return store.LinearMetadata{Kind: "label", ID: stable, TeamID: teamID, Name: name, UpdatedAt: label.UpdatedAt}, nil
+		}
+		if createErr != nil {
+			var rejected linearRejectionError
+			if !errors.As(createErr, &rejected) {
+				return store.LinearMetadata{}, createErr
+			}
+		}
+		return store.LinearMetadata{}, store.ErrLinearBoardLabelUnavailable
+	})
+	if errors.Is(err, store.ErrLinearBoardLabelUnavailable) {
+		return "", linearBoardLabelUnavailableError{Name: name}
 	}
-	input := map[string]any{"id": store.LinearDecisionUUID("work-board:label:" + teamID + ":" + name), "teamId": teamID, "name": name}
-	err = a.graphql(ctx, linearWriteTimeout, boardLabelCreateMutation, map[string]any{"input": input}, &out)
-	if err == nil && out.IssueLabelCreate.Success && out.IssueLabelCreate.IssueLabel != nil {
-		return out.IssueLabelCreate.IssueLabel.ID, nil
-	}
-	// Another task may have created the same label, or the response was lost.
-	id, readErr := a.findBoardLabel(ctx, teamID, name)
-	if readErr == nil && id != "" {
-		return id, nil
-	}
-	return "", fmt.Errorf("linear board label %q unavailable", name)
+	return id, err
 }
 
 func (a LinearAPI) UpdateBoardIssue(ctx context.Context, id, state, description string, labels []string) error {
@@ -132,29 +114,4 @@ func (a LinearAPI) BoardCommentExists(ctx context.Context, id, issueID, body str
 		return false, err
 	}
 	return out.Comment != nil && out.Comment.ID == id && out.Comment.Body == body && out.Comment.Issue.ID == issueID, nil
-}
-
-const boardRecoveryQuery = `query FleetBoardRecovery($id:ID!){issues(first:2,includeArchived:true,filter:{id:{eq:$id}}){nodes{id identifier description team{id}labels(first:100,includeArchived:true){nodes{id name}pageInfo{hasNextPage}}}pageInfo{hasNextPage}}}`
-
-func (a LinearAPI) FindBoardIssue(ctx context.Context, id string) (BoardIssue, bool, error) {
-	var out struct {
-		Issues *struct {
-			Nodes    []BoardIssue
-			PageInfo *struct{ HasNextPage *bool }
-		}
-	}
-	if err := a.graphql(ctx, linearWriteTimeout, boardRecoveryQuery, map[string]any{"id": id}, &out); err != nil {
-		return BoardIssue{}, false, err
-	}
-	if out.Issues == nil || out.Issues.Nodes == nil || out.Issues.PageInfo == nil || out.Issues.PageInfo.HasNextPage == nil || *out.Issues.PageInfo.HasNextPage || len(out.Issues.Nodes) > 1 {
-		return BoardIssue{}, false, errors.New("incomplete board recovery")
-	}
-	if len(out.Issues.Nodes) == 0 {
-		return BoardIssue{}, false, nil
-	}
-	issue := out.Issues.Nodes[0]
-	if issue.ID != id {
-		return BoardIssue{}, false, errors.New("board recovery identity mismatch")
-	}
-	return issue, true, nil
 }

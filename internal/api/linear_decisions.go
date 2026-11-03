@@ -45,6 +45,7 @@ type LinearDecisionTarget struct {
 
 // LinearDecisionIssue is the input for creating an issue.
 type LinearDecisionIssue struct {
+	Board       bool
 	TaskID      int64
 	RequestID   string
 	ID          string

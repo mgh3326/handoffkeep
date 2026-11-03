@@ -53,11 +53,13 @@ func main() {
 }
 func run(args []string, out, errout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: handoffkeep serve|sync|mcp|ctx|memory|doc|attach|r2usage|tasks|decisions|fleet-metrics|bench|version")
+		return errors.New("usage: handoffkeep serve|sync|linear|mcp|ctx|memory|doc|attach|r2usage|tasks|decisions|fleet-metrics|bench|version")
 	}
 	switch args[0] {
 	case "wrk":
 		return wrkCmd(args[1:], os.Stdin, out)
+	case "linear":
+		return linearCmd(args[1:], out)
 	case "sync":
 		return syncCmd(args[1:], out)
 	case "serve":
@@ -85,7 +87,7 @@ func run(args []string, out, errout io.Writer) error {
 	case "version", "--version":
 		return versionCmd(args[1:], out)
 	default:
-		return errors.New("usage: handoffkeep serve|sync|mcp|ctx|memory|doc|attach|r2usage|tasks|decisions|fleet-metrics|bench|version")
+		return errors.New("usage: handoffkeep serve|sync|linear|mcp|ctx|memory|doc|attach|r2usage|tasks|decisions|fleet-metrics|bench|version")
 	}
 }
 
@@ -1789,7 +1791,7 @@ func serve(args []string, errout io.Writer) error {
 	if e != nil {
 		return e
 	}
-	handler := serverHandler(api.Server{Service: svc, Tokens: tokens, QuotaAccounts: quotaAccounts, HostGrants: hostGrants, UI: uiHandler, LinearWebhook: linear.webhook, LinearDecisions: linear.decisions}, monitor)
+	handler := serverHandler(api.Server{Service: svc, Tokens: tokens, QuotaAccounts: quotaAccounts, HostGrants: hostGrants, UI: uiHandler, LinearWebhook: linear.webhook, LinearDecisions: linear.decisions, LinearMetadata: linear.metadata, LinearBoard: linear.metadata}, monitor)
 	addresses := []string{*listen}
 	if *tail != "" {
 		addresses = append(addresses, *tail)
@@ -1847,6 +1849,7 @@ func uiFromEnv(st *store.Store) (http.Handler, error) {
 
 // linearServer is what the Linear configuration turns on. Any field may be nil.
 type linearServer struct {
+	metadata    *api.LinearAPI
 	webhook     http.Handler
 	decisions   *api.LinearDecisions
 	opsWorker   backgroundWorker
@@ -1881,15 +1884,18 @@ func linearFromEnv(st *store.Store) linearServer {
 	if capacityErr != nil {
 		log.Printf("linear_capacity.disabled reason=invalid_policy err=%q", capacityErr)
 	}
-	linearAPI := api.LinearAPI{Key: key, App: app, Admission: st, CapacityPolicy: capacityPolicy, CapacityScopeVerified: capacityErr == nil && strings.TrimSpace(os.Getenv("HANDOFFKEEP_LINEAR_CAPACITY_SCOPE")) == "workspace"}
+	linearAPI := api.LinearAPI{Metadata: st, BoardControl: &api.LinearBoardControl{}, Key: key, App: app, Admission: st, CapacityPolicy: capacityPolicy, CapacityScopeVerified: capacityErr == nil && strings.TrimSpace(os.Getenv("HANDOFFKEEP_LINEAR_CAPACITY_SCOPE")) == "workspace"}
 	out := linearServer{boardWorker: linearBoardFromEnv(st, linearAPI)}
+	if credential {
+		out.metadata = &linearAPI
+	}
 	if secret == "" || !credential {
 		if secret != "" || operator != "" {
 			log.Printf("linear_webhook.disabled reason=incomplete_config")
 		}
 		return out
 	}
-	webhook := api.LinearWebhook{Secret: secret, Issues: linearAPI, Store: st}
+	webhook := api.LinearWebhook{Secret: secret, Issues: linearAPI, Store: st, BoardControl: linearAPI.BoardControl, Board: st}
 	if operator == "" {
 		out.webhook = webhook
 		return out

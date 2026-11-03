@@ -38,13 +38,27 @@ func (s *Store) EnsureLinearBoardOwnership(ctx context.Context, taskID int64, is
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if err = reserveLinearBoardOwnershipTx(ctx, tx, taskID, issueID, identifier); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func (s *Store) HasLinearCreateReservation(ctx context.Context, id string) (bool, error) {
+	var pending bool
+	err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM linear_create_admissions WHERE issue_id=$1)`, id).Scan(&pending)
+	return pending, err
+}
+
+func reserveLinearBoardOwnershipTx(ctx context.Context, tx pgx.Tx, taskID int64, issueID, identifier string) error {
+	var err error
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(824180176)`); err != nil {
 		return err
 	}
 	var conflict bool
-	err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM linear_issues WHERE (issue_id=$2 AND task_id<>$1) OR (task_id=$1 AND issue_id<>$2))
+	err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM linear_issues WHERE (issue_id=$2 AND task_id<>$1) OR (task_id=$1 AND issue_id<>$2) OR (identifier=$3 AND (task_id<>$1 OR issue_id<>$2)))
  OR EXISTS(SELECT 1 FROM linear_decision_issues WHERE issue_id=$2)
- OR EXISTS(SELECT 1 FROM linear_board_owners WHERE (issue_id=$2 AND task_id<>$1) OR (task_id=$1 AND issue_id<>$2))`, taskID, issueID).Scan(&conflict)
+ OR EXISTS(SELECT 1 FROM linear_board_owners WHERE (issue_id=$2 AND task_id<>$1) OR (task_id=$1 AND issue_id<>$2))`, taskID, issueID, identifier).Scan(&conflict)
 	if err != nil {
 		return err
 	}
@@ -54,18 +68,12 @@ func (s *Store) EnsureLinearBoardOwnership(ctx context.Context, taskID int64, is
 	if _, err = tx.Exec(ctx, `INSERT INTO linear_board_owners(issue_id,task_id) VALUES($2,$1) ON CONFLICT DO NOTHING`, taskID, issueID); err != nil {
 		return err
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO linear_issues(task_id,issue_id,identifier,created_at,updated_at) VALUES($1,$2,$3,now(),now()) ON CONFLICT(task_id) DO NOTHING`, taskID, issueID, identifier); err != nil {
-		return err
-	}
-	// A read-back issue and committed ownership resolve an ambiguous create.
-	if _, err = tx.Exec(ctx, `DELETE FROM linear_create_admissions WHERE issue_id=$1`, issueID); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
+	// Outbound work reserves ownership only. The signed Issue webhook is the
+	// sole writer of the active task/issue mapping and reservation completion.
+	return nil
 }
-
-func (s *Store) HasLinearCreateReservation(ctx context.Context, id string) (bool, error) {
-	var pending bool
-	err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM linear_create_admissions WHERE issue_id=$1 AND uncertain)`, id).Scan(&pending)
-	return pending, err
+func (s *Store) LinearBoardDeliveryStopped(ctx context.Context, taskID int64) (bool, error) {
+	var stopped bool
+	err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM linear_board_stopped_tasks WHERE task_id=$1)`, taskID).Scan(&stopped)
+	return stopped, err
 }

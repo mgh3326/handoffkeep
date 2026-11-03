@@ -532,8 +532,10 @@ func (t Tokens) Client(r *http.Request) (string, bool) {
 }
 
 type Server struct {
-	Service Service
-	Tokens  Tokens
+	LinearBoard    *LinearAPI
+	LinearMetadata interface{ RefreshLinearMetadata(context.Context) error }
+	Service        Service
+	Tokens         Tokens
 	// QuotaAccounts scopes quota writes; a nil map refuses every account.
 	QuotaAccounts QuotaAccounts
 	// HostGrants binds a client to the host ids it may act for. A client with
@@ -562,6 +564,8 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("/v1/checkpoints", s.checkpoints)
 	m.HandleFunc("GET /v1/search", s.search)
 	m.HandleFunc("GET /v1/sync/delta", s.syncDelta)
+	m.HandleFunc("POST /v1/linear/metadata/refresh", s.linearMetadataRefresh)
+	m.HandleFunc("POST /v1/linear/board/reconcile", s.linearBoardReconcile)
 	m.HandleFunc("GET /v1/sync/bootstrap", s.syncBootstrap)
 	m.HandleFunc("GET /v1/sync/rows/{model}/{model_id...}", s.syncRow)
 	m.HandleFunc("GET /v1/documents", s.documents)

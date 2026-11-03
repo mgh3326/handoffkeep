@@ -171,6 +171,15 @@ func TestWorkBoardCommittedEventsAndPlacementRetention(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if _, found, err := st.GetLinearIssue(t.Context(), task.ID); err != nil || found {
+		t.Fatal("outbound populated mapping", found, err)
+	}
+	if err = st.EnsureLinearBoardOwnership(t.Context(), task.ID, "remote", "ROB-1234"); err != nil {
+		t.Fatal(err)
+	}
+	if err = st.RecordLinearBoardIssue(t.Context(), LinearBoardIssueEvent{IssueID: "remote", Identifier: "ROB-1234", At: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
 	linked, found, err := st.GetTask(t.Context(), task.ID)
 	if err != nil || !found || linked.Refs.Linear.IssueID != "remote" {
 		t.Fatal(linked, found, err)
@@ -368,6 +377,9 @@ func TestWorkBoardReconcileSkipsUnchangedTerminalTasks(t *testing.T) {
 		if err = st.EnsureLinearBoardOwnership(t.Context(), task.ID, fmt.Sprintf("terminal-%d", task.ID), fmt.Sprintf("ROB-%d", task.ID)); err != nil {
 			t.Fatal(err)
 		}
+		if err = st.RecordLinearBoardIssue(t.Context(), LinearBoardIssueEvent{IssueID: fmt.Sprintf("terminal-%d", task.ID), Identifier: fmt.Sprintf("ROB-%d", task.ID), At: time.Now().UTC()}); err != nil {
+			t.Fatal(err)
+		}
 		task, err = st.TransitionTask(t.Context(), task.ID, state, "lead", "finished", nil, "")
 		if err != nil {
 			t.Fatal(err)
@@ -480,6 +492,9 @@ func TestWorkBoardReconcileRecoversTerminalTasksWithoutProjection(t *testing.T) 
 		// This test exercises maintenance of an already mirrored issue.
 		// An unlinked terminal task must not gain a fresh issue.
 		if err = st.EnsureLinearBoardOwnership(t.Context(), task.ID, fmt.Sprintf("terminal-%d", task.ID), fmt.Sprintf("ROB-%d", task.ID)); err != nil {
+			t.Fatal(err)
+		}
+		if err = st.RecordLinearBoardIssue(t.Context(), LinearBoardIssueEvent{IssueID: fmt.Sprintf("terminal-%d", task.ID), Identifier: fmt.Sprintf("ROB-%d", task.ID), At: time.Now().UTC()}); err != nil {
 			t.Fatal(err)
 		}
 		task, err = st.TransitionTask(t.Context(), task.ID, state, "lead", "finished while off", nil, "")

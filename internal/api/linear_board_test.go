@@ -84,16 +84,23 @@ func (f *boardFake) BoardCommentExists(_ context.Context, id, issue, body string
 }
 
 type boardQueue struct {
-	boards     map[int64]store.LinearBoard
-	tasks      map[int64]store.Task
-	taskErr    error
-	rows       []store.LinearOutbox
-	links      map[int64]store.LinearIssue
-	reconciles int
+	processed    int
+	owners       map[int64]store.LinearIssue
+	reservations map[string]bool
+	stopped      map[int64]bool
+	boards       map[int64]store.LinearBoard
+	tasks        map[int64]store.Task
+	taskErr      error
+	rows         []store.LinearOutbox
+	links        map[int64]store.LinearIssue
+	reconciles   int
 }
 
-func (q *boardQueue) HasLinearCreateReservation(context.Context, string) (bool, error) {
-	return false, nil
+func (q *boardQueue) HasLinearCreateReservation(_ context.Context, id string) (bool, error) {
+	return q.reservations[id], nil
+}
+func (q *boardQueue) LinearBoardDeliveryStopped(_ context.Context, id int64) (bool, error) {
+	return q.stopped[id], nil
 }
 
 func (q *boardQueue) GetLinearBoard(_ context.Context, id int64) (store.LinearBoard, bool, error) {
@@ -106,7 +113,15 @@ func (q *boardQueue) EnsureLinearBoardOwnership(_ context.Context, taskID int64,
 			return store.ErrLinearIssueOwnership
 		}
 	}
-	q.links[taskID] = store.LinearIssue{TaskID: taskID, IssueID: id, Identifier: identifier}
+	for owner, link := range q.owners {
+		if (link.IssueID == id && owner != taskID) || (owner == taskID && link.IssueID != id) {
+			return store.ErrLinearIssueOwnership
+		}
+	}
+	if q.owners == nil {
+		q.owners = map[int64]store.LinearIssue{}
+	}
+	q.owners[taskID] = store.LinearIssue{TaskID: taskID, IssueID: id, Identifier: identifier}
 	return nil
 }
 
@@ -125,15 +140,14 @@ func (q *boardQueue) ProcessNextLinearBoardOutbox(ctx context.Context, process f
 		if op.State != "pending" || op.NextAttemptAt.After(time.Now()) {
 			continue
 		}
+		q.processed++
 		result, err := process(ctx, op)
 		if err != nil {
 			return false, err
 		}
 		q.rows[i].State = result.State
 		q.rows[i].NextAttemptAt = result.RetryAt
-		if result.RemoteID != "" {
-			q.links[op.TaskID] = store.LinearIssue{IssueID: result.RemoteID, Identifier: result.Identifier}
-		}
+
 		return true, nil
 	}
 	return false, nil
@@ -168,6 +182,10 @@ func TestWorkBoardFirstClaimAndRedelivery(t *testing.T) {
 			q.add(b, e)
 			w := LinearBoardWorker{Store: q, Linear: linear}
 			w.Drain(t.Context())
+			if len(q.links) != 0 || q.rows[0].State != "pending" {
+				t.Fatal("outbound mapped before webhook", q.rows, q.links)
+			}
+			q.createdWebhook(linear)
 			q.add(b, e)
 			w.Drain(t.Context())
 			if linear.creates != 1 || len(q.links) != 1 {
@@ -192,7 +210,7 @@ func TestWorkBoardReusesROBTitleAndPreservesOtherText(t *testing.T) {
 	if linear.creates != 0 || !strings.HasPrefix(got, "Operator notes\n\n") || !strings.HasSuffix(got, "\nKeep this") || strings.Contains(got, "\nold\n") || strings.Count(got, boardStart) != 1 {
 		t.Fatalf("creates=%d description=%q", linear.creates, got)
 	}
-	if q.links[42].IssueID != "existing" {
+	if q.owners[42].IssueID != "existing" {
 		t.Fatal(q.links)
 	}
 }
@@ -208,7 +226,7 @@ func TestWorkBoardStateTransitions(t *testing.T) {
 			q := &boardQueue{links: map[int64]store.LinearIssue{}}
 			q.add(b, store.LinearBoardEvent{})
 			linear := newBoardFake()
-			if tc.state == "merged" || tc.state == "dropped" {
+			if true {
 				issue := BoardIssue{ID: "prior", Identifier: "ROB-1"}
 				issue.Team.ID = "team"
 				linear.issues["prior"] = issue
@@ -232,6 +250,7 @@ func TestWorkBoardPlacementReviewAndComments(t *testing.T) {
 	q := &boardQueue{links: map[int64]store.LinearIssue{}}
 	q.add(b, store.LinearBoardEvent{})
 	linear := newBoardFake()
+	seedBoardLink(q, linear)
 	w := LinearBoardWorker{Store: q, Linear: linear}
 	w.Drain(t.Context())
 	labels := strings.Join(linear.labels, ",")
@@ -262,12 +281,14 @@ func TestWorkBoardPlacementReviewAndComments(t *testing.T) {
 	}
 }
 
-func TestWorkBoardRetryKeepsIssueAndHourlyReconciler(t *testing.T) {
+func TestWorkBoardRetryKeepsIssueWithoutPeriodicReconcile(t *testing.T) {
 	q := &boardQueue{links: map[int64]store.LinearIssue{}}
 	q.add(boardFixture(), store.LinearBoardEvent{})
 	linear := newBoardFake()
 	linear.failUpdate = true
-	w := LinearBoardWorker{Store: q, Linear: linear, ReconcileInterval: time.Second}
+	w := LinearBoardWorker{Store: q, Linear: linear}
+	w.Drain(t.Context())
+	q.createdWebhook(linear)
 	w.Drain(t.Context())
 	if linear.creates != 1 || q.rows[0].State != "pending" || len(q.links) != 1 {
 		t.Fatal(q.rows, q.links)
@@ -277,9 +298,6 @@ func TestWorkBoardRetryKeepsIssueAndHourlyReconciler(t *testing.T) {
 	w.Drain(t.Context())
 	if linear.creates != 1 || q.rows[0].State != "sent" {
 		t.Fatal(q.rows)
-	}
-	if w.reconcileInterval() < time.Hour {
-		t.Fatal("reconciler runs too often")
 	}
 	if q.reconciles != 0 {
 		t.Fatal("event drain invoked source reconciliation")
@@ -313,13 +331,33 @@ func TestWorkBoardLongTextStaysBounded(t *testing.T) {
 	q := &boardQueue{links: map[int64]store.LinearIssue{}}
 	q.add(b, store.LinearBoardEvent{ID: "long-esc", Kind: "ESC", Text: strings.Repeat("긴", 5000), At: time.Now().UTC()})
 	linear := newBoardFake()
+	seedBoardLink(q, linear)
 	LinearBoardWorker{Store: q, Linear: linear}.Drain(t.Context())
 	for _, comment := range linear.comments {
 		if len([]rune(comment)) > 1900 {
 			t.Fatal("comment exceeds short-event limit")
 		}
 	}
-	if linear.creates != 1 || q.rows[0].State != "sent" {
+	if linear.creates != 0 || q.rows[0].State != "sent" {
 		t.Fatal(q.rows)
 	}
+}
+
+func (q *boardQueue) createdWebhook(f *boardFake) {
+	for id := range q.tasks {
+		stable := store.LinearDecisionUUID(fmt.Sprintf("work-board:task:%d", id))
+		if issue, ok := f.issues[stable]; ok {
+			q.links[id] = store.LinearIssue{IssueID: issue.ID, Identifier: issue.Identifier}
+			delete(q.reservations, stable)
+		}
+	}
+	for i := range q.rows {
+		q.rows[i].NextAttemptAt = time.Time{}
+	}
+}
+func seedBoardLink(q *boardQueue, f *boardFake) {
+	issue := BoardIssue{ID: "prior", Identifier: "ROB-1"}
+	issue.Team.ID = "team"
+	f.issues["prior"] = issue
+	q.links[42] = store.LinearIssue{IssueID: "prior"}
 }

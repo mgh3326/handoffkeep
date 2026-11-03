@@ -33,6 +33,16 @@ func TestWorkBoardGraphQLAdapter(t *testing.T) {
 			fmt.Fprint(w, `{"data":{"teams":{"nodes":[{"id":"team","states":{"nodes":[{"id":"progress","name":"In Progress"}],"pageInfo":{"hasNextPage":false}}}]}}}`)
 		case strings.Contains(in.Query, "FleetBoardIssue"):
 			fmt.Fprint(w, `{"data":{"issue":{"id":"issue","identifier":"ROB-1234","description":"Human notes","team":{"id":"team"},"labels":{"nodes":[{"id":"custom","name":"custom"},{"id":"old-host","name":"host:old"}],"pageInfo":{"hasNextPage":false}}}}}`)
+		case strings.Contains(in.Query, "HkBoardLabelByID"):
+			var id string
+			json.Unmarshal(in.Variables["id"], &id)
+			for name, labelID := range labels {
+				if id == labelID {
+					fmt.Fprintf(w, `{"data":{"issueLabel":{"id":%q,"name":%q,"updatedAt":"2026-01-01T00:00:00Z","team":{"id":"team"}}}}`, id, name)
+					return
+				}
+			}
+			fmt.Fprint(w, `{"data":{"issueLabel":null}}`)
 		case strings.Contains(in.Query, "FleetBoardLabels"):
 			var name string
 			json.Unmarshal(in.Variables["name"], &name)
@@ -53,7 +63,7 @@ func TestWorkBoardGraphQLAdapter(t *testing.T) {
 				fmt.Fprint(w, `{"errors":[{"message":"response lost"}]}`)
 				return
 			}
-			fmt.Fprintf(w, `{"data":{"issueLabelCreate":{"success":true,"issueLabel":{"id":%q}}}}`, input.ID)
+			fmt.Fprintf(w, `{"data":{"issueLabelCreate":{"success":true,"issueLabel":{"id":%q,"updatedAt":"2026-01-01T00:00:00Z"}}}}`, input.ID)
 		case strings.Contains(in.Query, "issueUpdate"):
 			var input struct {
 				StateID, Description string
@@ -73,7 +83,7 @@ func TestWorkBoardGraphQLAdapter(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
-	client := LinearAPI{Key: "test-key", URL: srv.URL, HTTP: srv.Client()}
+	client := LinearAPI{Metadata: boardMetadataFixture(), Key: "test-key", URL: srv.URL, HTTP: srv.Client()}
 	q := &boardQueue{links: map[int64]store.LinearIssue{42: {IssueID: "issue"}}}
 	q.add(boardFixture(), store.LinearBoardEvent{})
 	LinearBoardWorker{Store: q, Linear: client}.Drain(t.Context())

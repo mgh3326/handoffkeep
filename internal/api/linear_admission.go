@@ -25,6 +25,9 @@ const admissionExistingQuery = `query HkAdmissionExisting($id:ID!){issues(first:
 const admissionCountQuery = `query HkAdmissionCount($after:String){issues(first:100,after:$after,includeArchived:false){nodes{id} pageInfo{hasNextPage endCursor}}}`
 
 func (a LinearAPI) admittedCreate(ctx context.Context, in LinearDecisionIssue) (LinearIssue, error) {
+	if in.Board {
+		return a.admittedBoardCreate(ctx, in)
+	}
 	if a.Admission == nil || !a.CapacityScopeVerified {
 		return LinearIssue{}, fmt.Errorf("%w: admission unavailable", ErrLinearCapacity)
 	}
@@ -50,6 +53,13 @@ func (a LinearAPI) admittedCreate(ctx context.Context, in LinearDecisionIssue) (
 			return err
 		}
 		for _, id := range pending {
+			board, err := lease.IsBoardReservation(ctx, id)
+			if err != nil {
+				return err
+			}
+			if board {
+				return fmt.Errorf("%w: board create awaits webhook or manual recovery", ErrLinearCapacity)
+			}
 			_, found, err := a.admissionExisting(ctx, id)
 			if err != nil {
 				return fmt.Errorf("%w: earlier create readback unavailable", ErrLinearCapacity)
@@ -205,4 +215,67 @@ func (a LinearAPI) admissionCapacity(ctx context.Context, lease store.LinearCrea
 		return fmt.Errorf("%w: create ceiling reached", ErrLinearCapacity)
 	}
 	return nil
+}
+
+// Board creates never search/read back an issue. Acceptance is linked only by
+// the signed webhook. An ambiguous create remains pending for manual recovery.
+func (a LinearAPI) admittedBoardCreate(ctx context.Context, in LinearDecisionIssue) (LinearIssue, error) {
+	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	defer cancel()
+	if a.Admission == nil || !a.CapacityScopeVerified {
+		return LinearIssue{}, ErrLinearCapacity
+	}
+	if in.TaskID < 1 || in.ID != store.LinearDecisionUUID(fmt.Sprintf("work-board:task:%d", in.TaskID)) {
+		return LinearIssue{}, errors.New("invalid board create identity")
+	}
+	var result LinearIssue
+	err := a.Admission.SerializeLinearCreate(ctx, func(lease store.LinearCreateLease) error {
+		task, found, err := lease.Task(ctx, in.TaskID)
+		if err != nil {
+			return err
+		}
+		if !found || store.LinearMirrorReason(task) == "" {
+			return ErrLinearMirrorExcluded
+		}
+		reservedBefore, err := lease.IsBoardReservation(ctx, in.ID)
+		if err != nil {
+			return err
+		}
+		if reservedBefore {
+			return errBoardAwaitWebhook
+		}
+		pending, err := lease.Pending(ctx)
+		if err != nil {
+			return err
+		}
+		if len(pending) > 0 {
+			return fmt.Errorf("%w: uncertain create awaits webhook or manual recovery", ErrLinearCapacity)
+		}
+		if err = a.admissionCapacity(ctx, lease); err != nil {
+			return err
+		}
+		reserved, err := lease.ReserveBoard(ctx, in.ID, in.TaskID)
+		if err != nil {
+			return err
+		}
+		if !reserved {
+			return errBoardAwaitWebhook
+		}
+		result, err = a.createLinearIssue(ctx, in)
+		if err != nil {
+			var rejection linearRejectionError
+			if errors.As(err, &rejection) && rejection.capacity {
+				if holdErr := lease.HoldCapacity(ctx, a.CapacityPolicy.Limit()); holdErr != nil {
+					return errors.Join(err, holdErr)
+				}
+			}
+			var rate linearRateLimitError
+			if errors.As(err, &rate) {
+				return errors.Join(err, lease.Complete(ctx, in.ID))
+			}
+			return err
+		}
+		return lease.AwaitBoardWebhook(ctx, in.ID)
+	})
+	return result, err
 }

@@ -64,30 +64,28 @@ configured entitlement plus a verified count below that new ceiling. Rate limits
 and ordinary field validation do not become capacity holds.
 
 Before the HTTP create, hk commits a reservation for its stable issue id.
-Successful creation clears it. Ambiguous failure leaves it durable, including
-across process restarts. Later admission first reads that exact id: an existing
-issue recovers the lost response, even when the watermark has since been
-reached. An unresolved reservation blocks new identities instead of assuming
-the previous request did not reach Linear. A received 4xx or GraphQL rejection gets exact-id readback: absence clears the
-reservation and permits retry, while an existing issue recovers the accepted
-write. A failed rejection readback preserves a durable known-rejection record, so
-a later successful absent read clears it automatically. Transport errors and 5xx retain
-the reservation. There is no automatic destructive repair.
+Board creates retain it until the signed Issue webhook establishes the active
+mapping. They make no automatic identity search/readback. An ambiguous create
+waits for webhook redelivery or explicit one-task repair. Other issue producers
+retain their exact-id rejection/recovery contract. See
+[the event-driven board runbook](linear-board-efficiency.md) for webhook setup,
+manual metadata refresh, missed-webhook repair and shared rate-limit handling.
 
-Board outbox failures remain pending with the existing backoff and `last_error`.
-An old outbox payload is checked against current task policy at send time and
-again inside capacity admission. Before skipping an ineligible unlinked task,
-read-only recovery checks its deterministic issue id; an accepted issue is
-linked and receives its current/final state, without fresh creation. A confirmed
-missing issue settles as skipped only when no uncertain reservation remains. Asking a decision through the API retains its existing retry contract;
-capacity failure returns unavailable without discarding the hk request.
+Old outbox payloads are checked against current task policy at send time and
+again inside capacity admission. An excluded, unlinked task with no reservation
+settles as skipped without a Linear call. A board create reservation waits for
+the webhook even after task eligibility changes. Existing linked issues retain
+maintenance updates; archive/remove webhooks stop delivery and drop active links.
+Asking a decision retains its existing retry contract; capacity failure returns
+unavailable without discarding the hk request.
 
 ## Ownership and projection versions
 
 Before any board issue mutation, hk reserves one task-to-issue ownership pair.
 Reusing a ROB title cannot take an issue owned by another task or a decision
-request. Rebinding a task to a different issue is refused. Historical duplicate
-links are retained for inspection and refused; they are not silently rewritten.
+request. Rebinding a task to a different issue is refused. Migration 32 quarantines conflicting legacy active links before adding unique
+reverse indexes; every removed row is retained intact in
+`linear_issue_link_conflicts` for inspection.
 Backfill reserves the latest unambiguous issue per task by updated time, created
 time, then issue id. An issue shared by tasks stays unclaimed. Every skipped
 distinct pair is recorded in `linear_board_ownership_conflicts`; inspect these

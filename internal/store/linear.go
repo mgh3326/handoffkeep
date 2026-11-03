@@ -278,18 +278,9 @@ func (s *Store) processNextLinearOutbox(ctx context.Context, ops []string, proce
 		result.RetryAt = item.NextAttemptAt
 	}
 	now := time.Now().UTC()
-	if result.RemoteID != "" {
-		created := now
-		if _, err = tx.Exec(ctx, `INSERT INTO linear_issues(task_id,issue_id,identifier,created_at,updated_at) VALUES($1,$2,$3,$4,$4)
-			ON CONFLICT(task_id) DO UPDATE SET issue_id=EXCLUDED.issue_id,identifier=EXCLUDED.identifier,updated_at=EXCLUDED.updated_at`, item.TaskID, result.RemoteID, result.Identifier, created); err != nil {
-			return false, err
-		}
-		if item.Op == LinearOpWorkBoard {
-			if _, err = tx.Exec(ctx, `UPDATE tasks SET refs=jsonb_set(refs,'{linear}',COALESCE(NULLIF(refs->'linear','null'::jsonb),'{}'::jsonb)||jsonb_build_object('issue_id',$2::text,'identifier',$3::text)) WHERE id=$1`, item.TaskID, result.RemoteID, result.Identifier); err != nil {
-				return false, err
-			}
-		}
-	}
+	// Remote identity is an outbox receipt, not an active issue mapping.
+	// Only the signed Issue webhook writes linear_issues.
+
 	remoteID := result.RemoteID
 	if remoteID == "" {
 		remoteID = item.RemoteID

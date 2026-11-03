@@ -17,6 +17,8 @@ import (
 )
 
 type admissionFake struct {
+	board     map[string]bool
+	awaiting  map[string]bool
 	mu        sync.Mutex
 	pending   map[string]bool
 	excluded  bool
@@ -44,6 +46,9 @@ func (f *admissionFake) Task(_ context.Context, id int64) (store.Task, bool, err
 func (f *admissionFake) Pending(context.Context) ([]string, error) {
 	out := []string{}
 	for id := range f.pending {
+		if f.awaiting[id] {
+			continue
+		}
 		out = append(out, id)
 	}
 	return out, nil
@@ -279,10 +284,10 @@ func TestWorkBoardMirrorAdmissionRechecksCurrentTask(t *testing.T) {
 		wantState                 string
 	}{
 		{name: "old eligible payload now excluded", priority: 3, wantState: "skipped"},
-		{name: "priority now eligible", priority: 2, wantCreates: 1, wantUpdates: 1, wantState: "sent"},
+		{name: "priority now eligible", priority: 2, wantCreates: 1, wantState: "pending"},
 		{name: "unset", priority: 0, wantState: "skipped"},
-		{name: "dots", priority: 3, reason: store.LinearMirrorDots, wantCreates: 1, wantUpdates: 1, wantState: "sent"},
-		{name: "operator visible", priority: 3, reason: store.LinearMirrorOperatorVisible, wantCreates: 1, wantUpdates: 1, wantState: "sent"},
+		{name: "dots", priority: 3, reason: store.LinearMirrorDots, wantCreates: 1, wantState: "pending"},
+		{name: "operator visible", priority: 3, reason: store.LinearMirrorOperatorVisible, wantCreates: 1, wantState: "pending"},
 		{name: "terminal never freshly mirrored", priority: 1, terminal: true, wantState: "skipped"},
 		{name: "existing ineligible link maintained", priority: 3, linked: true, wantUpdates: 1, wantState: "sent"},
 		{name: "missing task", missing: true, wantState: "skipped"},
@@ -327,7 +332,7 @@ func TestWorkBoardMirrorOpenedIssueReusesExactLink(t *testing.T) {
 	b.Task.Refs.Linear = &store.TaskLinear{MirrorReason: store.LinearMirrorOpened, IssueID: "original"}
 	q.add(b, store.LinearBoardEvent{})
 	LinearBoardWorker{Store: q, Linear: remote}.Drain(t.Context())
-	if remote.creates != 0 || q.links[42].IssueID != "original" || q.rows[0].State != "sent" {
+	if remote.creates != 0 || q.owners[42].IssueID != "original" || q.rows[0].State != "sent" {
 		t.Fatal(remote.creates, q.links, q.rows)
 	}
 }
@@ -448,19 +453,16 @@ func TestLinearAdmissionGraphQLResponseErrorRecoversAcceptedCreate(t *testing.T)
 	}
 }
 
-func TestWorkBoardMirrorRecoversAcceptedCreateAfterTerminalTransition(t *testing.T) {
+func TestWorkBoardMirrorWaitsForWebhookAfterTerminalTransition(t *testing.T) {
 	remote := newBoardFake()
 	stable := store.LinearDecisionUUID("work-board:task:42")
-	issue := BoardIssue{ID: stable, Identifier: "ROB-42"}
-	issue.Team.ID = "team"
-	remote.issues[stable] = issue
-	q := &boardQueue{links: map[int64]store.LinearIssue{}}
+	q := &boardQueue{links: map[int64]store.LinearIssue{}, reservations: map[string]bool{stable: true}}
 	b := boardFixture()
 	b.ApplyTask(store.Task{ID: 42, State: "merged", Priority: 2})
-	q.add(b, store.LinearBoardEvent{ID: "final", Kind: "MERGED", At: time.Now()})
+	q.add(b, store.LinearBoardEvent{})
 	LinearBoardWorker{Store: q, Linear: remote}.Drain(t.Context())
-	if remote.creates != 0 || remote.updates != 1 || q.links[42].IssueID != stable || q.rows[0].State != "sent" || remote.states[0] != "Done" {
-		t.Fatal(remote.creates, remote.updates, q.links, q.rows, remote.states)
+	if remote.creates != 0 || remote.updates != 0 || len(q.links) != 0 || q.rows[0].State != "pending" {
+		t.Fatal(remote, q.rows)
 	}
 }
 
@@ -516,4 +518,27 @@ func TestLinearCapacityRejectionClassification(t *testing.T) {
 			t.Fatal(tc, got)
 		}
 	}
+}
+
+func (f *admissionFake) ReserveBoard(ctx context.Context, id string, taskID int64) (bool, error) {
+	for pending := range f.pending {
+		if pending == id {
+			return false, nil
+		}
+	}
+	if f.board == nil {
+		f.board = map[string]bool{}
+	}
+	f.board[id] = true
+	return true, f.Reserve(ctx, id)
+}
+func (f *admissionFake) AwaitBoardWebhook(_ context.Context, id string) error {
+	if f.awaiting == nil {
+		f.awaiting = map[string]bool{}
+	}
+	f.awaiting[id] = true
+	return nil
+}
+func (f *admissionFake) IsBoardReservation(_ context.Context, id string) (bool, error) {
+	return f.board[id], nil
 }

@@ -7,14 +7,12 @@ import (
 	"log"
 	"regexp"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
-const LinearBoardReconcileInterval = time.Hour
 const boardStart = "<!-- hk-work-board:start -->"
 const boardEnd = "<!-- hk-work-board:end -->"
 
@@ -23,6 +21,7 @@ const boardEnd = "<!-- hk-work-board:end -->"
 type BoardIssue struct {
 	ID          string `json:"id"`
 	Identifier  string `json:"identifier"`
+	ArchivedAt  string `json:"archivedAt"`
 	Description string `json:"description"`
 	Team        struct {
 		ID string `json:"id"`
@@ -44,7 +43,6 @@ type BoardTarget struct {
 }
 
 type LinearBoardAPI interface {
-	FindBoardIssue(context.Context, string) (BoardIssue, bool, error)
 	BoardTarget(context.Context) (BoardTarget, error)
 	BoardIssue(context.Context, string) (BoardIssue, error)
 	CreateLinearIssue(context.Context, LinearDecisionIssue) (LinearIssue, error)
@@ -55,49 +53,58 @@ type LinearBoardAPI interface {
 }
 
 type LinearBoardStore interface {
+	LinearBoardDeliveryStopped(context.Context, int64) (bool, error)
 	HasLinearCreateReservation(context.Context, string) (bool, error)
 	GetLinearBoard(context.Context, int64) (store.LinearBoard, bool, error)
 	EnsureLinearBoardOwnership(context.Context, int64, string, string) error
 	GetTask(context.Context, int64) (store.Task, bool, error)
 	ProcessNextLinearBoardOutbox(context.Context, func(context.Context, store.LinearOutbox) (store.LinearOutboxResult, error)) (bool, error)
 	GetLinearIssue(context.Context, int64) (store.LinearIssue, bool, error)
-	ReconcileLinearBoard(context.Context) error
 }
 
 type LinearBoardWorker struct {
-	Store             LinearBoardStore
-	Linear            LinearBoardAPI
-	ReconcileInterval time.Duration
-	TaskBaseURL       string
+	Control     *LinearBoardControl
+	Store       LinearBoardStore
+	Linear      LinearBoardAPI
+	TaskBaseURL string
 }
 
-func (w LinearBoardWorker) reconcileInterval() time.Duration {
-	return max(LinearBoardReconcileInterval, w.ReconcileInterval)
-}
-
+// Run is event-driven: hk writes enqueue the outbox; Linear changes arrive via
+// the signed webhook. ReconcileLinearBoard remains an explicit one-shot repair.
 func (w LinearBoardWorker) Run(ctx context.Context) {
+	if w.Control == nil {
+		w.Control = &LinearBoardControl{}
+	}
 	drain := time.NewTicker(5 * time.Second)
-	reconcile := time.NewTicker(w.reconcileInterval())
+	stats := time.NewTicker(time.Hour)
 	defer drain.Stop()
-	defer reconcile.Stop()
+	defer stats.Stop()
+	started, calls := time.Now(), w.Control.CallCount()
 	w.Drain(ctx)
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-reconcile.C:
-			if err := w.Store.ReconcileLinearBoard(ctx); err != nil && ctx.Err() == nil {
-				log.Printf("linear_board.reconcile_failed err=%q", err)
-			}
-			w.Drain(ctx)
 		case <-drain.C:
 			w.Drain(ctx)
+		case <-stats.C:
+			current := w.Control.CallCount()
+			elapsed := time.Since(started).Seconds()
+			log.Printf("linear_board.calls elapsed_seconds=%.0f calls=%d calls_per_hour=%.2f", elapsed, current-calls, float64(current-calls)*3600/elapsed)
+			started, calls = time.Now(), current
 		}
 	}
 }
 
 func (w LinearBoardWorker) Drain(ctx context.Context) {
-	for ctx.Err() == nil {
+	if w.Control == nil {
+		if a, ok := w.Linear.(LinearAPI); ok && a.BoardControl != nil {
+			w.Control = a.BoardControl
+		} else {
+			w.Control = &LinearBoardControl{}
+		}
+	}
+	for ctx.Err() == nil && !w.Control.blocked() {
 		found, err := w.Store.ProcessNextLinearBoardOutbox(ctx, w.send)
 		if err != nil {
 			if ctx.Err() == nil {
@@ -110,6 +117,8 @@ func (w LinearBoardWorker) Drain(ctx context.Context) {
 		}
 	}
 }
+
+var errBoardAwaitWebhook = errors.New("linear board awaiting issue webhook")
 
 var errBoardMirrorSkipped = errors.New("linear mirror not eligible")
 
@@ -124,10 +133,20 @@ func (w LinearBoardWorker) send(ctx context.Context, op store.LinearOutbox) (sto
 		result.State = "failed"
 		result.LastError = err.Error()
 	} else if err != nil {
+		var label linearBoardLabelUnavailableError
+		var rate linearRateLimitError
+		if errors.As(err, &label) {
+			w.Control.breakLabel(label.Name)
+		}
 		result.State = "pending"
 		result.RetryAt = time.Now().UTC().Add(min(time.Hour, time.Duration(1<<min(op.Attempts, 10))*5*time.Second))
 		result.LastError = err.Error()
-		log.Printf("linear_board.sync_failed task_id=%d err=%q", op.TaskID, err)
+		if errors.As(err, &rate) {
+			result.RetryAt = rate.Until
+		}
+		if !w.Control.blocked() && !errors.Is(err, errBoardAwaitWebhook) {
+			log.Printf("linear_board.sync_failed task_id=%d err=%q", op.TaskID, err)
+		}
 	}
 	return result, nil
 }
@@ -146,28 +165,29 @@ func (w LinearBoardWorker) sync(ctx context.Context, op store.LinearOutbox, resu
 	if !found {
 		return errBoardMirrorSkipped
 	}
+	stopped, err := w.Store.LinearBoardDeliveryStopped(ctx, op.TaskID)
+	if err != nil {
+		return err
+	}
+	if stopped {
+		return errBoardMirrorSkipped
+	}
 	link, linked, err := w.Store.GetLinearIssue(ctx, op.TaskID)
 	if err != nil {
 		return err
 	}
-	var recovered *BoardIssue
-	if !linked && store.LinearMirrorReason(task) == "" {
-		stableID := store.LinearDecisionUUID("work-board:task:" + strconv.FormatInt(op.TaskID, 10))
-		existing, found, err := w.Linear.FindBoardIssue(ctx, stableID)
+	if !linked {
+		stableID := store.LinearDecisionUUID(fmt.Sprintf("work-board:task:%d", op.TaskID))
+		pending, err := w.Store.HasLinearCreateReservation(ctx, stableID)
 		if err != nil {
 			return err
 		}
-		if !found {
-			uncertain, err := w.Store.HasLinearCreateReservation(ctx, stableID)
-			if err != nil {
-				return err
-			}
-			if uncertain {
-				return fmt.Errorf("%w: unlinked create remains uncertain", ErrLinearCapacity)
-			}
+		if pending {
+			return errBoardAwaitWebhook
+		}
+		if store.LinearMirrorReason(task) == "" {
 			return errBoardMirrorSkipped
 		}
-		recovered = &existing
 	}
 
 	// Old deliveries retain their own event/comment identity, but issue fields
@@ -195,26 +215,25 @@ func (w LinearBoardWorker) sync(ctx context.Context, op store.LinearOutbox, resu
 		return err
 	}
 	var issue BoardIssue
-	if recovered != nil {
-		issue = *recovered
-	} else if linked {
+	if linked {
 		issue, err = w.Linear.BoardIssue(ctx, link.IssueID)
 	} else if b.Task.Refs.Linear != nil && b.Task.Refs.Linear.MirrorReason == store.LinearMirrorOpened && b.Task.Refs.Linear.IssueID != "" {
 		issue, err = w.Linear.BoardIssue(ctx, b.Task.Refs.Linear.IssueID)
 	} else if identifier := boardROB.FindString(b.Task.Title); identifier != "" {
 		issue, err = w.Linear.BoardIssue(ctx, identifier)
 	} else {
-		id := store.LinearDecisionUUID("work-board:task:" + strconv.FormatInt(op.TaskID, 10))
-		_, createErr := w.Linear.CreateLinearIssue(ctx, LinearDecisionIssue{ID: id, TaskID: op.TaskID, TeamID: target.TeamID, LabelID: fleet, Title: shortBoardText(strings.SplitN(b.Task.Title, "\n", 2)[0], linearTitleMaxRunes), Description: fmt.Sprintf("[hk-task:%d]", op.TaskID)})
-		// Read after both success and failure. The deterministic id recovers a
-		// lost create response without ever creating a second issue.
-		issue, err = w.Linear.BoardIssue(ctx, id)
-		if err != nil && createErr != nil {
-			return fmt.Errorf("create work board issue: %w", createErr)
+		id := store.LinearDecisionUUID(fmt.Sprintf("work-board:task:%d", op.TaskID))
+		_, err := w.Linear.CreateLinearIssue(ctx, LinearDecisionIssue{Board: true, ID: id, TaskID: op.TaskID, TeamID: target.TeamID, LabelID: fleet, Title: shortBoardText(strings.SplitN(b.Task.Title, "\n", 2)[0], linearTitleMaxRunes), Description: fmt.Sprintf("[hk-task:%d] <!-- work-board:task:%d -->", op.TaskID, op.TaskID)})
+		if err != nil {
+			return err
 		}
+		return errBoardAwaitWebhook
 	}
 	if err != nil {
 		return err
+	}
+	if issue.ArchivedAt != "" {
+		return errBoardMirrorSkipped
 	}
 	if issue.ID == "" || issue.Team.ID != target.TeamID || issue.Labels.PageInfo.HasNextPage {
 		return errors.New("linear board issue team or labels incomplete")
@@ -224,6 +243,7 @@ func (w LinearBoardWorker) sync(ctx context.Context, op store.LinearOutbox, resu
 	}
 	result.RemoteID, result.Identifier = issue.ID, issue.Identifier
 	section := renderBoard(*b)
+	section = fmt.Sprintf("<!-- work-board:task:%d -->\n", op.TaskID) + section
 	if w.TaskBaseURL != "" {
 		section = strings.Replace(section, fmt.Sprintf("[hk-task:%d]", op.TaskID), fmt.Sprintf("[hk-task:%d](%s/ui/tasks/%d)", op.TaskID, strings.TrimRight(w.TaskBaseURL, "/"), op.TaskID), 1)
 	}

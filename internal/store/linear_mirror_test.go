@@ -269,12 +269,13 @@ func TestLinearMirrorAdmissionOwnershipAndVersions(t *testing.T) {
 	if err != nil || !found || latest.Version != 3 || latest.State != "In Review" {
 		t.Fatal(latest, found, err)
 	}
-	// Preserve old duplicate mappings as evidence, but refuse using either owner.
-	if _, err = st.pool.Exec(t.Context(), `INSERT INTO linear_issues VALUES($1,'owned-issue','ROB-1',now(),now())`, other.ID); err != nil {
+	// The webhook is the sole link writer; unique reverse indexes prevent
+	// duplicate active mappings even outside the guarded application path.
+	if err = st.RecordLinearBoardIssue(t.Context(), LinearBoardIssueEvent{IssueID: "owned-issue", Identifier: "ROB-1", At: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
-	if err = st.EnsureLinearBoardOwnership(t.Context(), owner.ID, "owned-issue", "ROB-1"); !errors.Is(err, ErrLinearIssueOwnership) {
-		t.Fatal("legacy duplicate accepted", err)
+	if _, err = st.pool.Exec(t.Context(), `INSERT INTO linear_issues VALUES($1,'owned-issue','ROB-1',now(),now())`, other.ID); err == nil {
+		t.Fatal("duplicate webhook reverse mapping accepted")
 	}
 }
 
@@ -288,7 +289,7 @@ func TestLinearMirrorAdmissionLegacyReboundBackfill(t *testing.T) {
 	a, b, c := linearTask(t, st, TaskRefs{}), linearTask(t, st, TaskRefs{}), linearTask(t, st, TaskRefs{})
 	// Model a legacy import that predates the task primary key. Fresh schemas
 	// already prohibit this shape, but CREATE IF NOT EXISTS cannot repair it.
-	for _, sql := range []string{`DROP TABLE linear_create_admissions,linear_board_owners,linear_board_ownership_conflicts,linear_capacity_state`, `DELETE FROM schema_version WHERE version=31`, `ALTER TABLE linear_issues DROP CONSTRAINT linear_issues_pkey`} {
+	for _, sql := range []string{`DROP TABLE linear_create_admissions,linear_board_owners,linear_board_ownership_conflicts,linear_capacity_state`, `DELETE FROM schema_version WHERE version=31`, `DROP INDEX linear_issues_issue_id,linear_issues_identifier`, `ALTER TABLE linear_issues DROP CONSTRAINT linear_issues_pkey`} {
 		if _, err = st.pool.Exec(t.Context(), sql); err != nil {
 			t.Fatal(err)
 		}

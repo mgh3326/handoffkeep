@@ -54,10 +54,17 @@ type DotsRecorder interface {
 }
 
 // LinearWebhook is the handler for POST /hooks/linear.
+type LinearBoardWebhookStore interface {
+	ApplyLinearMetadata(context.Context, []store.LinearMetadata) error
+	RecordLinearBoardIssue(context.Context, store.LinearBoardIssueEvent) error
+}
+
 type LinearWebhook struct {
-	Secret string
-	Issues LinearIssueFetcher
-	Store  DotsRecorder
+	BoardControl *LinearBoardControl
+	Board        LinearBoardWebhookStore
+	Secret       string
+	Issues       LinearIssueFetcher
+	Store        DotsRecorder
 	// Decisions turns on the decision path. Nil leaves it off, and Operator (the
 	// Linear user id allowed to answer) and StateOptions are unused.
 	Decisions    LinearDecisionRecorder
@@ -67,6 +74,7 @@ type LinearWebhook struct {
 
 type linearWebhookPayload struct {
 	Action           string `json:"action"`
+	CreatedAt        string `json:"createdAt"`
 	Type             string `json:"type"`
 	WebhookTimestamp int64  `json:"webhookTimestamp"`
 	Actor            *struct {
@@ -75,19 +83,32 @@ type linearWebhookPayload struct {
 	} `json:"actor"`
 	UpdatedFrom map[string]json.RawMessage `json:"updatedFrom"`
 	Data        struct {
-		ID        string          `json:"id"`
-		Body      string          `json:"body"`
-		CreatedAt string          `json:"createdAt"`
-		UpdatedAt string          `json:"updatedAt"`
-		IssueID   string          `json:"issueId"`
-		Issue     json.RawMessage `json:"issue"`
-		UserID    string          `json:"userId"`
-		User      *struct {
+		Name        string `json:"name"`
+		Key         string `json:"key"`
+		Identifier  string `json:"identifier"`
+		Description string `json:"description"`
+		TeamID      string `json:"teamId"`
+		Team        *struct {
+			ID        string `json:"id"`
+			Key       string `json:"key"`
+			UpdatedAt string `json:"updatedAt"`
+		} `json:"team"`
+		ArchivedAt *string         `json:"archivedAt"`
+		ID         string          `json:"id"`
+		Body       string          `json:"body"`
+		CreatedAt  string          `json:"createdAt"`
+		UpdatedAt  string          `json:"updatedAt"`
+		IssueID    string          `json:"issueId"`
+		Issue      json.RawMessage `json:"issue"`
+		UserID     string          `json:"userId"`
+		User       *struct {
 			ID string `json:"id"`
 		} `json:"user"`
 		BotActor json.RawMessage `json:"botActor"`
 		State    struct {
-			Name string `json:"name"`
+			ID        string `json:"id"`
+			Name      string `json:"name"`
+			UpdatedAt string `json:"updatedAt"`
 		} `json:"state"`
 		Labels []linearPayloadLabel `json:"labels"`
 	} `json:"data"`
@@ -171,11 +192,15 @@ func (h LinearWebhook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "stale_timestamp")
 		return
 	}
+	if err := h.handleBoardWebhook(r.Context(), payload); err != nil {
+		appErr(w, err)
+		return
+	}
 	status, err := h.handle(r.Context(), payload, r.Header.Get("Linear-Delivery"))
 	if err != nil {
 		var fetch linearFetchError
 		if errors.As(err, &fetch) {
-			// 503 makes Linear retry; the reconciling poller catches the rest.
+			// 503 asks Linear to retry; inbound changes have no polling rescan.
 			log.Printf("linear_webhook.fetch_failed comment=%q err=%q", payload.Data.ID, err.Error())
 			writeError(w, http.StatusServiceUnavailable, "linear_unavailable")
 			return
@@ -278,6 +303,8 @@ func (e linearFetchError) Unwrap() error { return e.err }
 
 // LinearAPI reads issues from Linear's GraphQL API.
 type LinearAPI struct {
+	Metadata       LinearBoardMetadataStore
+	BoardControl   *LinearBoardControl
 	Admission      LinearCreateAdmission
 	CapacityPolicy LinearCapacityPolicy
 	// Set only after deployment verifies this credential sees the workspace
@@ -337,6 +364,9 @@ func (e linearRejectionError) Unwrap() error { return e.err }
 
 // graphql runs one request against Linear and decodes its data into out.
 func (a LinearAPI) graphql(ctx context.Context, timeout time.Duration, query string, variables map[string]any, out any) error {
+	if err := a.BoardControl.rateError(); err != nil {
+		return err
+	}
 	endpoint := a.URL
 	if endpoint == "" {
 		endpoint = linearAPIURL
@@ -370,6 +400,7 @@ func (a LinearAPI) graphql(ctx context.Context, timeout time.Duration, query str
 		}
 		req.Header.Set("Authorization", auth)
 		req.Header.Set("Content-Type", "application/json")
+		a.BoardControl.countCall()
 		resp, err = client.Do(req)
 		if err != nil {
 			return err
@@ -382,6 +413,9 @@ func (a LinearAPI) graphql(ctx context.Context, timeout time.Duration, query str
 		break
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return a.BoardControl.rateLimited(resp.Header.Get("Retry-After"))
+	}
 	if resp.StatusCode != http.StatusOK {
 		err := fmt.Errorf("linear api status %d", resp.StatusCode)
 		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
@@ -405,6 +439,10 @@ func (a LinearAPI) graphql(ctx context.Context, timeout time.Duration, query str
 	if len(envelope.Errors) > 0 {
 		capacity := false
 		for _, entry := range envelope.Errors {
+			rate := strings.ToUpper(entry.Extensions.Type + " " + entry.Extensions.Code)
+			if strings.Contains(rate, "RATELIMIT") || strings.Contains(rate, "RATE_LIMIT") {
+				return a.BoardControl.rateLimited(resp.Header.Get("Retry-After"))
+			}
 			if linearCapacityRejected(entry.Message, entry.Extensions.Type, entry.Extensions.Code) {
 				capacity = true
 			}
@@ -431,4 +469,77 @@ func linearCapacityRejected(message, kind, code string) bool {
 		return false
 	}
 	return strings.Contains(value, "issue") && (strings.Contains(value, "issue limit") || strings.Contains(value, "issues limit") || strings.Contains(value, "too many issues") || strings.Contains(value, "maximum number of issues") || strings.Contains(value, "at most"))
+}
+
+func (h LinearWebhook) handleBoardWebhook(ctx context.Context, p linearWebhookPayload) error {
+	switch p.Action {
+	case "create", "update", "remove":
+	default:
+		return nil
+	}
+	if h.Board == nil {
+		return nil
+	}
+	team := p.Data.TeamID
+	if team == "" && p.Data.Team != nil {
+		team = p.Data.Team.ID
+	}
+	inactive := p.Action == "remove" || (p.Data.ArchivedAt != nil && *p.Data.ArchivedAt != "")
+	if p.Type == "Issue" {
+		at, err := time.Parse(time.RFC3339Nano, p.Data.UpdatedAt)
+		if err != nil {
+			at = time.UnixMilli(p.WebhookTimestamp).UTC()
+		}
+		if inactive {
+			if created, err := time.Parse(time.RFC3339Nano, p.CreatedAt); err == nil && created.After(at) {
+				at = created
+			}
+		}
+		items := []store.LinearMetadata{}
+		if p.Data.State.ID != "" && p.Data.State.Name != "" && team != "" {
+			stateAt, err := time.Parse(time.RFC3339Nano, p.Data.State.UpdatedAt)
+			if err != nil {
+				stateAt = at
+			}
+			items = append(items, store.LinearMetadata{Kind: "state", ID: p.Data.State.ID, TeamID: team, Name: p.Data.State.Name, UpdatedAt: stateAt})
+		}
+		if p.Data.Team != nil && p.Data.Team.ID != "" && p.Data.Team.Key != "" {
+			teamAt, err := time.Parse(time.RFC3339Nano, p.Data.Team.UpdatedAt)
+			if err != nil {
+				teamAt = at
+			}
+			items = append(items, store.LinearMetadata{Kind: "team", ID: p.Data.Team.ID, Name: p.Data.Team.Key, UpdatedAt: teamAt})
+		}
+		if len(items) > 0 {
+			if err := h.Board.ApplyLinearMetadata(ctx, items); err != nil {
+				return err
+			}
+		}
+		return h.Board.RecordLinearBoardIssue(ctx, store.LinearBoardIssueEvent{IssueID: p.Data.ID, Identifier: p.Data.Identifier, Description: p.Data.Description, TeamID: team, Inactive: inactive, At: at})
+	}
+	kind := ""
+	name := p.Data.Name
+	switch p.Type {
+	case "Team":
+		kind = "team"
+		name = p.Data.Key
+	case "WorkflowState":
+		kind = "state"
+	case "IssueLabel":
+		kind = "label"
+	default:
+		return nil
+	}
+	if p.Data.ID == "" {
+		return nil
+	}
+	at, err := time.Parse(time.RFC3339Nano, p.Data.UpdatedAt)
+	if err != nil {
+		at = time.UnixMilli(p.WebhookTimestamp).UTC()
+	}
+	if err = h.Board.ApplyLinearMetadata(ctx, []store.LinearMetadata{{Kind: kind, ID: p.Data.ID, TeamID: team, Name: name, UpdatedAt: at, Deleted: inactive}}); err != nil {
+		return err
+	}
+	h.BoardControl.metadataChanged()
+	return nil
 }

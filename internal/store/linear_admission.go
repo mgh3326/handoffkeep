@@ -21,6 +21,9 @@ type LinearCreateLease interface {
 	HoldCapacity(context.Context, int) error
 	ClearCapacityHold(context.Context) error
 	Complete(context.Context, string) error
+	ReserveBoard(context.Context, string, int64) (bool, error)
+	AwaitBoardWebhook(context.Context, string) error
+	IsBoardReservation(context.Context, string) (bool, error)
 }
 
 type linearCreateLease struct{ conn *pgxpool.Conn }
@@ -35,7 +38,7 @@ func (l linearCreateLease) Task(ctx context.Context, id int64) (Task, bool, erro
 }
 
 func (l linearCreateLease) Pending(ctx context.Context) ([]string, error) {
-	rows, err := l.conn.Query(ctx, `SELECT issue_id FROM linear_create_admissions ORDER BY issue_id`)
+	rows, err := l.conn.Query(ctx, `SELECT issue_id FROM linear_create_admissions WHERE NOT awaiting_webhook ORDER BY issue_id`)
 	if err != nil {
 		return nil, err
 	}
@@ -110,4 +113,19 @@ func (l linearCreateLease) HoldCapacity(ctx context.Context, limit int) error {
 func (l linearCreateLease) ClearCapacityHold(ctx context.Context) error {
 	_, err := l.conn.Exec(ctx, `UPDATE linear_capacity_state SET held=false WHERE singleton`)
 	return err
+}
+
+func (l linearCreateLease) ReserveBoard(ctx context.Context, id string, taskID int64) (bool, error) {
+	tag, err := l.conn.Exec(ctx, `INSERT INTO linear_create_admissions(issue_id,created_at,board_task_id) VALUES($1,now(),$2) ON CONFLICT DO NOTHING`, id, taskID)
+	return tag.RowsAffected() == 1, err
+}
+func (l linearCreateLease) AwaitBoardWebhook(ctx context.Context, id string) error {
+	_, err := l.conn.Exec(ctx, `UPDATE linear_create_admissions SET awaiting_webhook=true WHERE issue_id=$1`, id)
+	return err
+}
+
+func (l linearCreateLease) IsBoardReservation(ctx context.Context, id string) (bool, error) {
+	var board bool
+	err := l.conn.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM linear_create_admissions WHERE issue_id=$1 AND board_task_id IS NOT NULL)`, id).Scan(&board)
+	return board, err
 }
