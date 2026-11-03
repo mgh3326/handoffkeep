@@ -155,11 +155,11 @@ func (a LinearAPI) ReconcileLinearReservation(ctx context.Context, id string) (s
 		if !found {
 			return lease.ReleaseAbsent(ctx, id)
 		}
-		board, err := lease.IsBoardReservation(ctx, id)
+		board, err := lease.LinearBoardReservation(ctx, id)
 		if err != nil {
 			return err
 		}
-		if board {
+		if board != store.LinearBoardReservationNone {
 			return errors.New("existing board issue requires linear board reconcile --task")
 		}
 		status = "completed"

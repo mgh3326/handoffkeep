@@ -58,6 +58,11 @@ Definite HTTP/user-validation refusals and explicit `success:false` release the
 reservation; a capacity hold is retained independently. Normal board delivery
 never triggers an identity search.
 
+Accepted creates awaiting a webhook stay silent. A retained, unconfirmed create
+has a distinct unresolved error. After three attempts the worker logs
+`linear_board.create_unresolved`, with the task id and its exact repair command.
+Subsequent unresolved retries retain that signal under normal outbox backoff.
+
 For a missed webhook, prefer redelivery of the original signed event. To repair
 one deterministic board issue explicitly:
 
@@ -71,7 +76,9 @@ and changes only hk's description marker. The resulting signed Issue webhook
 establishes the mapping. The command does not create an issue or write the link. If an exact read,
 including archived issues, confirms absence, it instead releases the reservation
 and returns `released`. This requires verified workspace visibility and a
-two-minute grace period beyond local request processing. A failed, incomplete or
+two-minute grace period beyond local request processing. Every board reservation
+gets this grace, including legacy rows with `uncertain=false`, whether accepted
+or unconfirmed. Only known non-board refusals can bypass it. A failed, incomplete or
 unauthorized read never releases anything. The shared create lock serializes
 read/release with in-flight creates.
 It refuses an archived issue or a task suspended by archive/remove.
@@ -113,8 +120,12 @@ The previously added ownership-conflict audit also remains available.
 Existing label lookup is lock-free. A miss takes a short per-label advisory
 lock, rechecks metadata and commits an attempt claim, then releases the connection
 before Linear create/readback. A crashed attempt expires after two minutes;
-a token prevents a late creator from removing a newer claim. A definitive
-create/readback failure is durable, opens one board circuit and logs one error.
+a token prevents a late creator from removing a newer claim. Only GraphQL
+input/validation errors or explicit `success:false`, followed by an exact
+readback confirming absence, make a label failure durable. HTTP authentication,
+permission, timeout and conflict statuses remain retryable, including 401, 403,
+408, 409 and 425. A failed readback remains retryable as well. A durable refusal
+opens one board circuit and logs one error.
 Other task rows are left pending. Only an active, matching label webhook whose stored metadata actually resolves
 the missing name/team, or explicit metadata refresh, clears the circuit; an explicit successful refresh permits another
 creation attempt. Transport failures retain normal backoff instead of being

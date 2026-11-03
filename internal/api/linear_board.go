@@ -54,7 +54,7 @@ type LinearBoardAPI interface {
 
 type LinearBoardStore interface {
 	LinearBoardDeliveryStopped(context.Context, int64) (bool, error)
-	HasLinearCreateReservation(context.Context, string) (bool, error)
+	LinearBoardReservation(context.Context, string) (store.LinearBoardReservationState, error)
 	GetLinearBoard(context.Context, int64) (store.LinearBoard, bool, error)
 	EnsureLinearBoardOwnership(context.Context, int64, string, string) error
 	GetTask(context.Context, int64) (store.Task, bool, error)
@@ -112,6 +112,14 @@ func (w LinearBoardWorker) Drain(ctx context.Context) {
 }
 
 var errBoardAwaitWebhook = errors.New("linear board awaiting issue webhook")
+var errBoardCreateUnresolved = errors.New("linear board create outcome unresolved; explicit repair required")
+
+func boardReservationError(state store.LinearBoardReservationState) error {
+	if state == store.LinearBoardReservationAwaitingWebhook {
+		return errBoardAwaitWebhook
+	}
+	return errBoardCreateUnresolved
+}
 
 var errBoardMirrorSkipped = errors.New("linear mirror not eligible")
 
@@ -140,8 +148,14 @@ func (w LinearBoardWorker) send(ctx context.Context, op store.LinearOutbox) (sto
 		if w.RateGate.Paused() {
 			result.RetryAt = w.RateGate.ResumeAt()
 		}
-		if !w.Control.blocked() && !w.RateGate.Paused() && !errors.Is(err, errBoardAwaitWebhook) {
-			log.Printf("linear_board.sync_failed task_id=%d err=%q", op.TaskID, err)
+		if !w.Control.blocked() && !w.RateGate.Paused() {
+			if errors.Is(err, errBoardCreateUnresolved) {
+				if op.Attempts >= 3 {
+					log.Printf("linear_board.create_unresolved task_id=%d attempts=%d repair_command=%q", op.TaskID, op.Attempts, fmt.Sprintf("handoffkeep linear board reconcile --task %d", op.TaskID))
+				}
+			} else if !errors.Is(err, errBoardAwaitWebhook) {
+				log.Printf("linear_board.sync_failed task_id=%d err=%q", op.TaskID, err)
+			}
 		}
 	}
 	return result, nil
@@ -174,12 +188,12 @@ func (w LinearBoardWorker) sync(ctx context.Context, op store.LinearOutbox, resu
 	}
 	if !linked {
 		stableID := store.LinearDecisionUUID(fmt.Sprintf("work-board:task:%d", op.TaskID))
-		pending, err := w.Store.HasLinearCreateReservation(ctx, stableID)
+		pending, err := w.Store.LinearBoardReservation(ctx, stableID)
 		if err != nil {
 			return err
 		}
-		if pending {
-			return errBoardAwaitWebhook
+		if pending != store.LinearBoardReservationNone {
+			return boardReservationError(pending)
 		}
 		if store.LinearMirrorReason(task) == "" {
 			return errBoardMirrorSkipped

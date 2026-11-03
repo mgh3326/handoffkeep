@@ -156,6 +156,54 @@ func TestR2AuthFailuresDoNotPersistLabelFailures(t *testing.T) {
 	}
 }
 
+func TestR2OnlyMutationRefusalsProducePermanentLabelFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		body       string
+		readStatus int
+		permanent  bool
+	}{
+		{"validation", `{"errors":[{"message":"invalid label name","extensions":{"code":"BAD_USER_INPUT"}}]}`, http.StatusOK, true},
+		{"explicit refusal", `{"data":{"issueLabelCreate":{"success":false}}}`, http.StatusOK, true},
+		{"validation then auth failure", `{"errors":[{"message":"invalid name","extensions":{"code":"BAD_USER_INPUT"}}]}`, http.StatusUnauthorized, false},
+		{"validation then permission failure", `{"errors":[{"message":"invalid name","extensions":{"code":"BAD_USER_INPUT"}}]}`, http.StatusForbidden, false},
+		{"permission error", `{"errors":[{"message":"permission denied","extensions":{"code":"FORBIDDEN"}}]}`, http.StatusOK, false},
+		{"internal error", `{"errors":[{"message":"unavailable","extensions":{"code":"INTERNAL_SERVER_ERROR"}}]}`, http.StatusOK, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			meta := boardMetadataFixture()
+			calls := 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				var in struct{ Query string }
+				if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+					t.Error(err)
+				}
+				if strings.Contains(in.Query, "HkBoardLabelByID") {
+					w.WriteHeader(tc.readStatus)
+					fmt.Fprint(w, `{"data":{"issueLabel":null}}`)
+				} else {
+					fmt.Fprint(w, tc.body)
+				}
+			}))
+			defer srv.Close()
+			client := LinearAPI{Key: "fake", URL: srv.URL, HTTP: srv.Client(), Metadata: meta}
+			for range 2 {
+				if _, err := client.BoardLabel(t.Context(), "team", "fleet"); err == nil {
+					t.Fatal("expected label failure")
+				}
+			}
+			wantCalls := 4
+			if tc.permanent {
+				wantCalls = 2
+			}
+			if meta.failed["fleet"] != tc.permanent || calls != wantCalls {
+				t.Fatal(meta.failed, calls)
+			}
+		})
+	}
+}
+
 func TestR2RetainedCreateIsDistinctFromWebhookWait(t *testing.T) {
 	for _, awaiting := range []bool{false, true} {
 		t.Run(fmt.Sprintf("awaiting=%t", awaiting), func(t *testing.T) {

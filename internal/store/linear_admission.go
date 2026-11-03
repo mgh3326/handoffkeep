@@ -24,7 +24,7 @@ type LinearCreateLease interface {
 	Complete(context.Context, string) error
 	ReserveBoard(context.Context, string, int64) (bool, error)
 	AwaitBoardWebhook(context.Context, string) error
-	IsBoardReservation(context.Context, string) (bool, error)
+	LinearBoardReservation(context.Context, string) (LinearBoardReservationState, error)
 	ReservedCreates(context.Context) (int, error)
 	ReleaseAbsent(context.Context, string) error
 }
@@ -130,10 +130,37 @@ func (l linearCreateLease) AwaitBoardWebhook(ctx context.Context, id string) err
 	return err
 }
 
-func (l linearCreateLease) IsBoardReservation(ctx context.Context, id string) (bool, error) {
-	var board bool
-	err := l.conn.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM linear_create_admissions WHERE issue_id=$1 AND board_task_id IS NOT NULL)`, id).Scan(&board)
-	return board, err
+// Pending is an unresolved create outcome; AwaitingWebhook is an accepted
+// create. Both book capacity, but only the former needs an operator signal.
+type LinearBoardReservationState int
+
+const (
+	LinearBoardReservationNone LinearBoardReservationState = iota
+	LinearBoardReservationPending
+	LinearBoardReservationAwaitingWebhook
+)
+
+const linearBoardReservationQuery = `SELECT awaiting_webhook FROM linear_create_admissions WHERE issue_id=$1 AND board_task_id IS NOT NULL`
+
+func scanLinearBoardReservation(row pgx.Row) (LinearBoardReservationState, error) {
+	var awaiting bool
+	if err := row.Scan(&awaiting); errors.Is(err, pgx.ErrNoRows) {
+		return LinearBoardReservationNone, nil
+	} else if err != nil {
+		return LinearBoardReservationNone, err
+	}
+	if awaiting {
+		return LinearBoardReservationAwaitingWebhook, nil
+	}
+	return LinearBoardReservationPending, nil
+}
+
+func (l linearCreateLease) LinearBoardReservation(ctx context.Context, id string) (LinearBoardReservationState, error) {
+	return scanLinearBoardReservation(l.conn.QueryRow(ctx, linearBoardReservationQuery, id))
+}
+
+func (s *Store) LinearBoardReservation(ctx context.Context, id string) (LinearBoardReservationState, error) {
+	return scanLinearBoardReservation(s.pool.QueryRow(ctx, linearBoardReservationQuery, id))
 }
 
 func (l linearCreateLease) ReservedCreates(ctx context.Context) (int, error) {
@@ -144,12 +171,13 @@ func (l linearCreateLease) ReservedCreates(ctx context.Context) (int, error) {
 
 // A confirmed exact-id absence releases an old ambiguous reservation. The
 // grace period exceeds the HTTP/create deadline; the create lock excludes an
-// in-flight local writer. A known rejection needs no grace period.
+// in-flight local writer. Every board reservation gets this grace, including
+// legacy known-rejection rows; only non-board known rejections bypass it.
 var ErrLinearReservationTooRecent = errors.New("linear_reservation_too_recent")
 
 func (l linearCreateLease) ReleaseAbsent(ctx context.Context, id string) error {
 	var recent bool
-	if err := l.conn.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM linear_create_admissions WHERE issue_id=$1 AND uncertain AND created_at>clock_timestamp()-interval '2 minutes')`, id).Scan(&recent); err != nil {
+	if err := l.conn.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM linear_create_admissions WHERE issue_id=$1 AND (board_task_id IS NOT NULL OR uncertain) AND created_at>clock_timestamp()-interval '2 minutes')`, id).Scan(&recent); err != nil {
 		return err
 	}
 	if recent {

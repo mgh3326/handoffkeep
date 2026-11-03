@@ -541,8 +541,14 @@ func (f *admissionFake) AwaitBoardWebhook(_ context.Context, id string) error {
 	f.awaiting[id] = true
 	return nil
 }
-func (f *admissionFake) IsBoardReservation(_ context.Context, id string) (bool, error) {
-	return f.board[id], nil
+func (f *admissionFake) LinearBoardReservation(_ context.Context, id string) (store.LinearBoardReservationState, error) {
+	if !f.board[id] {
+		return store.LinearBoardReservationNone, nil
+	}
+	if f.awaiting[id] {
+		return store.LinearBoardReservationAwaitingWebhook, nil
+	}
+	return store.LinearBoardReservationPending, nil
 }
 
 func (f *admissionFake) ReservedCreates(context.Context) (int, error) { return len(f.pending), nil }

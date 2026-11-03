@@ -51,7 +51,7 @@ func (a LinearAPI) BoardLabel(ctx context.Context, teamID, name string) (string,
 		}
 		if createErr == nil {
 			if out.IssueLabelCreate.Success != nil && !*out.IssueLabelCreate.Success {
-				createErr = linearRejectionError{err: errors.New("linear label create refused"), definite: true}
+				createErr = linearRejectionError{err: errors.New("linear label create refused"), definite: true, mutationRefused: true}
 			} else {
 				createErr = errors.New("linear label create response incomplete")
 			}
@@ -73,18 +73,13 @@ func (a LinearAPI) BoardLabel(ctx context.Context, teamID, name string) (string,
 			if errors.As(err, &rate) || errors.Is(err, ErrLinearRateLimited) {
 				return store.LinearMetadata{}, err
 			}
-			var rejected linearRejectionError
-			var createRejection linearRejectionError
-			if errors.As(createErr, &createRejection) && createRejection.definite && errors.As(err, &rejected) && rejected.definite {
-				return store.LinearMetadata{}, store.ErrLinearBoardLabelUnavailable
-			}
 			return store.LinearMetadata{}, err
 		}
 		if label := read.IssueLabel; label != nil && label.ID == stable && label.Name == name && label.Team != nil && label.Team.ID == teamID {
 			return store.LinearMetadata{Kind: "label", ID: stable, TeamID: teamID, Name: name, UpdatedAt: label.UpdatedAt}, nil
 		}
 		var rejected linearRejectionError
-		if !errors.As(createErr, &rejected) || !rejected.definite {
+		if !errors.As(createErr, &rejected) || !rejected.mutationRefused {
 			return store.LinearMetadata{}, createErr
 		}
 		return store.LinearMetadata{}, store.ErrLinearBoardLabelUnavailable

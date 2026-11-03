@@ -96,8 +96,15 @@ type boardQueue struct {
 	reconciles   int
 }
 
-func (q *boardQueue) HasLinearCreateReservation(_ context.Context, id string) (bool, error) {
-	return q.reservations[id], nil
+func (q *boardQueue) LinearBoardReservation(_ context.Context, id string) (store.LinearBoardReservationState, error) {
+	awaiting, found := q.reservations[id]
+	if !found {
+		return store.LinearBoardReservationNone, nil
+	}
+	if awaiting {
+		return store.LinearBoardReservationAwaitingWebhook, nil
+	}
+	return store.LinearBoardReservationPending, nil
 }
 func (q *boardQueue) LinearBoardDeliveryStopped(_ context.Context, id int64) (bool, error) {
 	return q.stopped[id], nil

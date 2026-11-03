@@ -608,7 +608,7 @@ func (a LinearAPI) createLinearIssue(ctx context.Context, in LinearDecisionIssue
 		return LinearIssue{}, errors.New("linear issue create response incomplete")
 	}
 	if !*out.IssueCreate.Success {
-		return LinearIssue{}, linearRejectionError{err: errors.New("linear api did not create the issue"), definite: true}
+		return LinearIssue{}, linearRejectionError{err: errors.New("linear api did not create the issue"), definite: true, mutationRefused: true}
 	}
 	if out.IssueCreate.Issue == nil {
 		return LinearIssue{}, errors.New("linear accepted issue response incomplete")

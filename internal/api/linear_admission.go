@@ -53,11 +53,11 @@ func (a LinearAPI) admittedCreate(ctx context.Context, in LinearDecisionIssue) (
 			return err
 		}
 		for _, id := range pending {
-			board, err := lease.IsBoardReservation(ctx, id)
+			board, err := lease.LinearBoardReservation(ctx, id)
 			if err != nil {
 				return err
 			}
-			if board {
+			if board != store.LinearBoardReservationNone {
 				continue
 			} // its slot is booked until webhook/manual repair
 
@@ -247,12 +247,12 @@ func (a LinearAPI) admittedBoardCreate(ctx context.Context, in LinearDecisionIss
 		if !found || store.LinearMirrorReason(task) == "" {
 			return ErrLinearMirrorExcluded
 		}
-		reservedBefore, err := lease.IsBoardReservation(ctx, in.ID)
+		reservedBefore, err := lease.LinearBoardReservation(ctx, in.ID)
 		if err != nil {
 			return err
 		}
-		if reservedBefore {
-			return errBoardAwaitWebhook
+		if reservedBefore != store.LinearBoardReservationNone {
+			return boardReservationError(reservedBefore)
 		}
 		if err = a.admissionCapacity(ctx, lease); err != nil {
 			return err
@@ -262,7 +262,11 @@ func (a LinearAPI) admittedBoardCreate(ctx context.Context, in LinearDecisionIss
 			return err
 		}
 		if !reserved {
-			return errBoardAwaitWebhook
+			state, err := lease.LinearBoardReservation(ctx, in.ID)
+			if err != nil {
+				return err
+			}
+			return boardReservationError(state)
 		}
 		result, err = a.createLinearIssue(ctx, in)
 		if err != nil {

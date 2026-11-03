@@ -353,12 +353,15 @@ func (a LinearAPI) LinearIssue(ctx context.Context, issueID string) (LinearIssue
 	return result, nil
 }
 
-// A received rejection differs from a transport/5xx acceptance ambiguity.
-// Creation still reads its stable id before releasing a reservation.
+// Definite refusal permits reservation cleanup. Only a GraphQL mutation
+// refusal, rather than an HTTP status, can also justify a durable label failure.
 type linearRejectionError struct {
 	err      error
 	capacity bool
 	definite bool
+	// mutationRefused marks GraphQL input/validation errors or explicit
+	// success:false. HTTP statuses alone cannot make a label permanent.
+	mutationRefused bool
 }
 
 func (e linearRejectionError) Error() string { return e.err.Error() }
@@ -444,18 +447,21 @@ func (a LinearAPI) graphql(ctx context.Context, timeout time.Duration, query str
 	if len(envelope.Errors) > 0 {
 		capacity := false
 		definite := true
+		validation := true
 		for _, entry := range envelope.Errors {
 			rate := strings.ToUpper(entry.Extensions.Type + " " + entry.Extensions.Code)
 			if strings.Contains(rate, "RATELIMIT") || strings.Contains(rate, "RATE_LIMIT") {
 				return a.RateGate.rejection(resp.Header)
 			}
 			entryCapacity := linearCapacityRejected(entry.Message, entry.Extensions.Type, entry.Extensions.Code)
+			entryValidation := linearInputRejected(entry.Message, entry.Extensions.Type, entry.Extensions.Code)
 			capacity = capacity || entryCapacity
-			if !entryCapacity && !linearInputRejected(entry.Message, entry.Extensions.Type, entry.Extensions.Code) {
+			validation = validation && entryValidation
+			if !entryCapacity && !entryValidation {
 				definite = false
 			}
 		}
-		return linearRejectionError{err: fmt.Errorf("linear api error: %s", envelope.Errors[0].Message), capacity: capacity, definite: definite}
+		return linearRejectionError{err: fmt.Errorf("linear api error: %s", envelope.Errors[0].Message), capacity: capacity, definite: definite, mutationRefused: validation}
 	}
 	if err := json.Unmarshal(envelope.Data, out); err != nil {
 		return fmt.Errorf("linear api response: %w", err)
