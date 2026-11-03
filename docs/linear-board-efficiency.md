@@ -121,8 +121,10 @@ creation attempt. Transport failures retain normal backoff instead of being
 misclassified as a missing label.
 
 HTTP 429 and GraphQL rate-limit errors pause the whole worker and shared Linear
-client. `Retry-After` seconds or HTTP-date is honored. Without a valid value the
-pause backs off from one minute to one hour. The current row retains its retry
+client. `Retry-After` seconds or HTTP-date is honored. The shared LinearRateGate from main owns the only rate pause. Without a valid
+header it starts a fresh one-minute pause, bounded to one second through one hour;
+there is no lifetime failure counter. It honors HTTP-date Retry-After and waits
+for the later of Retry-After and the requests-reset header. The current row retains its retry
 deadline; no other row is attempted during the pause. No sleep holds a DB lock.
 
 ## Verification and rollback

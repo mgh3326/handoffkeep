@@ -1885,7 +1885,7 @@ func linearFromEnv(st *store.Store) linearServer {
 	if capacityErr != nil {
 		log.Printf("linear_capacity.disabled reason=invalid_policy err=%q", capacityErr)
 	}
-	linearAPI := api.LinearAPI{Metadata: st, BoardControl: &api.LinearBoardControl{}, Key: key, App: app, Admission: st, CapacityPolicy: capacityPolicy, CapacityScopeVerified: capacityErr == nil && strings.TrimSpace(os.Getenv("HANDOFFKEEP_LINEAR_CAPACITY_SCOPE")) == "workspace"}
+	linearAPI := api.LinearAPI{Metadata: st, BoardControl: &api.LinearBoardControl{}, RateGate: &api.LinearRateGate{}, Key: key, App: app, Admission: st, CapacityPolicy: capacityPolicy, CapacityScopeVerified: capacityErr == nil && strings.TrimSpace(os.Getenv("HANDOFFKEEP_LINEAR_CAPACITY_SCOPE")) == "workspace"}
 	out := linearServer{}
 	if credential {
 		out.metadata = &linearAPI
@@ -1919,7 +1919,7 @@ func linearFromEnv(st *store.Store) linearServer {
 	}
 	out.webhook = webhook
 	out.decisions = &api.LinearDecisions{Team: team, Linear: linearAPI}
-	out.opsWorker = api.LinearDecisionOpsWorker{Store: st, Linear: linearAPI, Discord: discordDecisionsFromEnv()}
+	out.opsWorker = api.LinearDecisionOpsWorker{Store: st, Linear: linearAPI, RateGate: linearAPI.RateGate, Discord: discordDecisionsFromEnv()}
 	return out
 }
 

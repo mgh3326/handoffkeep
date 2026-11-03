@@ -148,7 +148,8 @@ func TestLinearBoardRetryAfterPausesAllCalls(t *testing.T) {
 	for _, header := range []string{"120", time.Date(2026, 11, 3, 0, 2, 0, 0, time.UTC).Format(http.TimeFormat)} {
 		t.Run(header, func(t *testing.T) {
 			now := time.Date(2026, 11, 3, 0, 0, 0, 0, time.UTC)
-			control := &LinearBoardControl{now: func() time.Time { return now }}
+			control := &LinearBoardControl{}
+			gate := &LinearRateGate{now: func() time.Time { return now }}
 			calls := 0
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				calls++
@@ -156,7 +157,7 @@ func TestLinearBoardRetryAfterPausesAllCalls(t *testing.T) {
 				w.WriteHeader(http.StatusTooManyRequests)
 			}))
 			defer srv.Close()
-			api := LinearAPI{Key: "fake", URL: srv.URL, HTTP: srv.Client(), Metadata: boardMetadataFixture(), BoardControl: control}
+			api := LinearAPI{Key: "fake", URL: srv.URL, HTTP: srv.Client(), Metadata: boardMetadataFixture(), BoardControl: control, RateGate: gate}
 			q := &boardQueue{links: map[int64]store.LinearIssue{}}
 			for i := int64(1); i <= 20; i++ {
 				b := boardFixture()
@@ -165,7 +166,7 @@ func TestLinearBoardRetryAfterPausesAllCalls(t *testing.T) {
 			}
 			worker := LinearBoardWorker{Store: q, Linear: api, Control: control}
 			worker.Drain(t.Context())
-			if calls != 1 || !control.blocked() {
+			if calls != 1 || !gate.Paused() {
 				t.Fatal(calls, control)
 			}
 			for range 50 {
@@ -177,7 +178,7 @@ func TestLinearBoardRetryAfterPausesAllCalls(t *testing.T) {
 				t.Fatal("requests during Retry-After", calls)
 			}
 			now = now.Add(121 * time.Second)
-			if control.blocked() {
+			if gate.Paused() {
 				t.Fatal("pause never expired")
 			}
 			var result any

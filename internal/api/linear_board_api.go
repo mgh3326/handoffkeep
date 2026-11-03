@@ -57,7 +57,7 @@ func (a LinearAPI) BoardLabel(ctx context.Context, teamID, name string) (string,
 			}
 		}
 		var rate linearRateLimitError
-		if errors.As(createErr, &rate) {
+		if errors.As(createErr, &rate) || errors.Is(createErr, ErrLinearRateLimited) {
 			return store.LinearMetadata{}, createErr
 		}
 		// Exact id recovery after an uncertain create; never a content scan.
@@ -70,7 +70,7 @@ func (a LinearAPI) BoardLabel(ctx context.Context, teamID, name string) (string,
 		}
 		if err := a.graphql(ctx, linearWriteTimeout, boardLabelByIDQuery, map[string]any{"id": stable}, &read); err != nil {
 			var rate linearRateLimitError
-			if errors.As(err, &rate) {
+			if errors.As(err, &rate) || errors.Is(err, ErrLinearRateLimited) {
 				return store.LinearMetadata{}, err
 			}
 			var rejected linearRejectionError

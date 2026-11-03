@@ -303,6 +303,7 @@ func (e linearFetchError) Unwrap() error { return e.err }
 
 // LinearAPI reads issues from Linear's GraphQL API.
 type LinearAPI struct {
+	RateGate       *LinearRateGate
 	Metadata       LinearBoardMetadataStore
 	BoardControl   *LinearBoardControl
 	Admission      LinearCreateAdmission
@@ -365,8 +366,8 @@ func (e linearRejectionError) Unwrap() error { return e.err }
 
 // graphql runs one request against Linear and decodes its data into out.
 func (a LinearAPI) graphql(ctx context.Context, timeout time.Duration, query string, variables map[string]any, out any) error {
-	if err := a.BoardControl.rateError(); err != nil {
-		return err
+	if a.RateGate.Paused() {
+		return ErrLinearRateLimited
 	}
 	endpoint := a.URL
 	if endpoint == "" {
@@ -401,6 +402,9 @@ func (a LinearAPI) graphql(ctx context.Context, timeout time.Duration, query str
 		}
 		req.Header.Set("Authorization", auth)
 		req.Header.Set("Content-Type", "application/json")
+		if a.RateGate.Paused() {
+			return ErrLinearRateLimited
+		}
 		a.BoardControl.countCall()
 		resp, err = client.Do(req)
 		if err != nil {
@@ -415,7 +419,7 @@ func (a LinearAPI) graphql(ctx context.Context, timeout time.Duration, query str
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusTooManyRequests {
-		return a.BoardControl.rateLimited(resp.Header.Get("Retry-After"))
+		return a.RateGate.rejection(resp.Header)
 	}
 	if resp.StatusCode != http.StatusOK {
 		err := fmt.Errorf("linear api status %d", resp.StatusCode)
@@ -443,7 +447,7 @@ func (a LinearAPI) graphql(ctx context.Context, timeout time.Duration, query str
 		for _, entry := range envelope.Errors {
 			rate := strings.ToUpper(entry.Extensions.Type + " " + entry.Extensions.Code)
 			if strings.Contains(rate, "RATELIMIT") || strings.Contains(rate, "RATE_LIMIT") {
-				return a.BoardControl.rateLimited(resp.Header.Get("Retry-After"))
+				return a.RateGate.rejection(resp.Header)
 			}
 			entryCapacity := linearCapacityRejected(entry.Message, entry.Extensions.Type, entry.Extensions.Code)
 			capacity = capacity || entryCapacity
@@ -456,7 +460,6 @@ func (a LinearAPI) graphql(ctx context.Context, timeout time.Duration, query str
 	if err := json.Unmarshal(envelope.Data, out); err != nil {
 		return fmt.Errorf("linear api response: %w", err)
 	}
-	a.BoardControl.requestSucceeded()
 	return nil
 }
 

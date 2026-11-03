@@ -107,7 +107,7 @@ func (a LinearAPI) admittedCreate(ctx context.Context, in LinearDecisionIssue) (
 				holdErr = lease.HoldCapacity(ctx, a.CapacityPolicy.Limit())
 			}
 			var rate linearRateLimitError
-			if (errors.As(err, &rejection) && rejection.definite) || errors.As(err, &rate) {
+			if (errors.As(err, &rejection) && rejection.definite) || errors.As(err, &rate) || errors.Is(err, ErrLinearRateLimited) {
 				return errors.Join(err, holdErr, lease.Complete(ctx, in.ID))
 			}
 			// Non-board producers already use exact-id readback. Only a known
@@ -210,14 +210,14 @@ func (a LinearAPI) admissionCapacity(ctx context.Context, lease store.LinearCrea
 	if err != nil {
 		return err
 	}
-	// Until the webhook acknowledges an accepted board create, reserve its
-	// slot even if the next inventory page has not exposed it yet. Counting a
-	// visible issue twice briefly is conservative; undercounting is unsafe.
-	awaiting, err := lease.ReservedCreates(ctx)
+	// Every unresolved outcome books a slot. This includes ambiguity and
+	// accepted board issues awaiting webhooks; unrelated creates can continue
+	// while verified capacity remains. Double-counting briefly is conservative.
+	reserved, err := lease.ReservedCreates(ctx)
 	if err != nil {
 		return err
 	}
-	count += awaiting
+	count += reserved
 	if err := a.checkCapacityHold(ctx, lease, count); err != nil {
 		return err
 	}
@@ -278,7 +278,7 @@ func (a LinearAPI) admittedBoardCreate(ctx context.Context, in LinearDecisionIss
 				return errors.Join(err, holdErr, lease.Complete(ctx, in.ID))
 			}
 			var rate linearRateLimitError
-			if errors.As(err, &rate) {
+			if errors.As(err, &rate) || errors.Is(err, ErrLinearRateLimited) {
 				return errors.Join(err, lease.Complete(ctx, in.ID))
 			}
 			return errors.Join(err, holdErr)

@@ -37,8 +37,14 @@ func TestWorkBoardConfigUsesSharedAppToken(t *testing.T) {
 	config = linearFromEnv(st)
 	boardClient := config.boardWorker.(api.LinearBoardWorker).Linear.(api.LinearAPI)
 	decisionClient := config.decisions.Linear.(api.LinearAPI)
-	if boardClient.App != decisionClient.App || boardClient.App == nil {
+	if boardClient.App != decisionClient.App || boardClient.App == nil || boardClient.RateGate == nil || boardClient.RateGate != decisionClient.RateGate {
 		t.Fatal("board and decisions do not share the token cache")
+	}
+	worker = config.boardWorker.(api.LinearBoardWorker)
+	ops := config.opsWorker.(api.LinearDecisionOpsWorker)
+	hookClient := config.webhook.(api.LinearWebhook).Issues.(api.LinearAPI)
+	if worker.RateGate != boardClient.RateGate || ops.RateGate != boardClient.RateGate || hookClient.RateGate != boardClient.RateGate {
+		t.Fatal("Linear entry points do not share one rate gate")
 	}
 }
 

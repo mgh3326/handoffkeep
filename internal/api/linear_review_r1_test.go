@@ -108,21 +108,20 @@ func TestR1ManualRepairReleasesConfirmedAbsentReservation(t *testing.T) {
 }
 func TestR1RateBackoffResetsAfterSuccess(t *testing.T) {
 	now := time.Now().UTC()
-	c := &LinearBoardControl{now: func() time.Time { return now }}
+	gate := &LinearRateGate{now: func() time.Time { return now }}
 	for range 8 {
-		c.rateLimited("")
+		gate.limited(http.Header{})
 	}
 	now = now.Add(2 * time.Hour)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, `{"data":{"ok":true}}`) }))
 	defer srv.Close()
-	client := LinearAPI{Key: "fake", URL: srv.URL, HTTP: srv.Client(), BoardControl: c}
+	client := LinearAPI{Key: "fake", URL: srv.URL, HTTP: srv.Client(), RateGate: gate}
 	var out struct{ OK bool }
 	if err := client.graphql(t.Context(), time.Second, "query{ok}", nil, &out); err != nil {
 		t.Fatal(err)
 	}
-	var rate linearRateLimitError
-	if !errors.As(c.rateLimited(""), &rate) || rate.Until.Sub(now) != time.Minute {
-		t.Fatal("isolated failure retained old backoff", rate.Until.Sub(now))
+	if delay := gate.limited(http.Header{}).Sub(now); delay != time.Minute {
+		t.Fatal("isolated failure retained old backoff", delay)
 	}
 }
 func TestR1AmbiguousLabelFailureIsRetryable(t *testing.T) {

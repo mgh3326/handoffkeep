@@ -22,7 +22,7 @@ func linearBoardFromEnv(st *store.Store, linear api.LinearAPI) backgroundWorker 
 		return nil
 	}
 	st.EnableLinearBoard()
-	return api.LinearBoardWorker{Control: linear.BoardControl, Store: st, Linear: linear, TaskBaseURL: strings.TrimSpace(os.Getenv("HANDOFFKEEP_LINEAR_WORK_BOARD_BASE_URL"))}
+	return api.LinearBoardWorker{Control: linear.BoardControl, RateGate: linear.RateGate, Store: st, Linear: linear, TaskBaseURL: strings.TrimSpace(os.Getenv("HANDOFFKEEP_LINEAR_WORK_BOARD_BASE_URL"))}
 }
 
 type placementRetentionWorker struct{ store *store.Store }

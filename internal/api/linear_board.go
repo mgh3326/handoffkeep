@@ -63,6 +63,7 @@ type LinearBoardStore interface {
 }
 
 type LinearBoardWorker struct {
+	RateGate    *LinearRateGate
 	Control     *LinearBoardControl
 	Store       LinearBoardStore
 	Linear      LinearBoardAPI
@@ -72,9 +73,7 @@ type LinearBoardWorker struct {
 // Run is event-driven: hk writes enqueue the outbox; Linear changes arrive via
 // the signed webhook. ReconcileLinearBoard remains an explicit one-shot repair.
 func (w LinearBoardWorker) Run(ctx context.Context) {
-	if w.Control == nil {
-		w.Control = &LinearBoardControl{}
-	}
+	w = w.configured()
 	drain := time.NewTicker(5 * time.Second)
 	stats := time.NewTicker(time.Hour)
 	defer drain.Stop()
@@ -97,14 +96,8 @@ func (w LinearBoardWorker) Run(ctx context.Context) {
 }
 
 func (w LinearBoardWorker) Drain(ctx context.Context) {
-	if w.Control == nil {
-		if a, ok := w.Linear.(LinearAPI); ok && a.BoardControl != nil {
-			w.Control = a.BoardControl
-		} else {
-			w.Control = &LinearBoardControl{}
-		}
-	}
-	for ctx.Err() == nil && !w.Control.blocked() {
+	w = w.configured()
+	for ctx.Err() == nil && !w.Control.blocked() && !w.RateGate.Paused() {
 		found, err := w.Store.ProcessNextLinearBoardOutbox(ctx, w.send)
 		if err != nil {
 			if ctx.Err() == nil {
@@ -144,7 +137,10 @@ func (w LinearBoardWorker) send(ctx context.Context, op store.LinearOutbox) (sto
 		if errors.As(err, &rate) {
 			result.RetryAt = rate.Until
 		}
-		if !w.Control.blocked() && !errors.Is(err, errBoardAwaitWebhook) {
+		if w.RateGate.Paused() {
+			result.RetryAt = w.RateGate.ResumeAt()
+		}
+		if !w.Control.blocked() && !w.RateGate.Paused() && !errors.Is(err, errBoardAwaitWebhook) {
 			log.Printf("linear_board.sync_failed task_id=%d err=%q", op.TaskID, err)
 		}
 	}
@@ -382,4 +378,19 @@ func shortBoardText(text string, limit int) string {
 		return string(runes[:limit]) + "…"
 	}
 	return text
+}
+
+func (w LinearBoardWorker) configured() LinearBoardWorker {
+	if a, ok := w.Linear.(LinearAPI); ok {
+		if w.Control == nil {
+			w.Control = a.BoardControl
+		}
+		if w.RateGate == nil {
+			w.RateGate = a.RateGate
+		}
+	}
+	if w.Control == nil {
+		w.Control = &LinearBoardControl{}
+	}
+	return w
 }
