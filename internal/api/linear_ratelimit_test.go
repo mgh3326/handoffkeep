@@ -49,10 +49,12 @@ func TestLinearRateGateBoundsPause(t *testing.T) {
 		header http.Header
 		want   time.Duration
 	}{
-		"no headers":       {http.Header{}, linearRatePauseDefault},
-		"retry-after":      {http.Header{"Retry-After": {"90"}}, 90 * time.Second},
-		"reset beyond max": {http.Header{"X-Ratelimit-Requests-Reset": {strconv.FormatInt(now.Add(3*time.Hour).UnixMilli(), 10)}}, linearRatePauseMax},
-		"reset in past":    {http.Header{"X-Ratelimit-Requests-Reset": {strconv.FormatInt(now.Add(-time.Hour).UnixMilli(), 10)}}, time.Second},
+		"no headers":        {http.Header{}, linearRatePauseDefault},
+		"retry-after":       {http.Header{"Retry-After": {"90"}}, 90 * time.Second},
+		"reset beyond max":  {http.Header{"X-Ratelimit-Requests-Reset": {strconv.FormatInt(now.Add(3*time.Hour).UnixMilli(), 10)}}, linearRatePauseMax},
+		"reset in past":     {http.Header{"X-Ratelimit-Requests-Reset": {strconv.FormatInt(now.Add(-time.Hour).UnixMilli(), 10)}}, time.Second},
+		"both, reset later": {http.Header{"Retry-After": {"30"}, "X-Ratelimit-Requests-Reset": {strconv.FormatInt(now.Add(20*time.Minute).UnixMilli(), 10)}}, 20 * time.Minute},
+		"both, retry later": {http.Header{"Retry-After": {"600"}, "X-Ratelimit-Requests-Reset": {strconv.FormatInt(now.Add(time.Minute).UnixMilli(), 10)}}, 10 * time.Minute},
 	} {
 		t.Run(name, func(t *testing.T) {
 			g := &LinearRateGate{now: func() time.Time { return now }}
@@ -63,13 +65,21 @@ func TestLinearRateGateBoundsPause(t *testing.T) {
 	}
 }
 
-func TestLinearBoardDrainStopsWhilePaused(t *testing.T) {
-	gate := &LinearRateGate{}
+func TestLinearBoardDrainStopsWhilePausedAndResumes(t *testing.T) {
+	now := time.Date(2026, 11, 3, 4, 0, 0, 0, time.UTC)
+	gate := &LinearRateGate{now: func() time.Time { return now }}
 	gate.limited(http.Header{})
 	boards := &countingBoardStore{}
-	LinearBoardWorker{Store: boards, RateGate: gate}.Drain(context.Background())
+	w := LinearBoardWorker{Store: boards, RateGate: gate}
+	w.Drain(context.Background())
 	if boards.calls != 0 {
 		t.Fatalf("drain processed %d outbox rows while paused, want 0", boards.calls)
+	}
+	// Run calls Drain on every tick, so the next tick after the reset resumes.
+	now = now.Add(linearRatePauseDefault + time.Second)
+	w.Drain(context.Background())
+	if boards.calls != 1 {
+		t.Fatalf("drain processed %d outbox rows after the reset, want 1", boards.calls)
 	}
 }
 
