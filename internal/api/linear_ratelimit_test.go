@@ -92,3 +92,27 @@ func (s *countingBoardStore) ProcessNextLinearBoardOutbox(context.Context, func(
 	s.calls++
 	return false, nil
 }
+
+func TestLinearDecisionOpsDrainKeepsAttemptsWhilePaused(t *testing.T) {
+	now := time.Date(2026, 11, 3, 4, 0, 0, 0, time.UTC)
+	gate := &LinearRateGate{now: func() time.Time { return now }}
+	gate.limited(http.Header{})
+	ops := &countingDecisionOps{}
+	w := LinearDecisionOpsWorker{Store: ops, RateGate: gate}
+	w.Drain(context.Background())
+	if ops.calls != 0 {
+		t.Fatalf("drain claimed %d decision ops while paused, want 0", ops.calls)
+	}
+	now = now.Add(linearRatePauseDefault + time.Second)
+	w.Drain(context.Background())
+	if ops.calls != 1 {
+		t.Fatalf("drain claimed %d decision ops after the reset, want 1", ops.calls)
+	}
+}
+
+type countingDecisionOps struct{ calls int }
+
+func (s *countingDecisionOps) ProcessNextLinearDecisionOp(context.Context, func(context.Context, store.LinearDecisionOp) error) (bool, error, error) {
+	s.calls++
+	return false, nil, nil
+}

@@ -1907,7 +1907,7 @@ func linearFromEnv(st *store.Store) linearServer {
 	}
 	out.webhook = webhook
 	out.decisions = &api.LinearDecisions{Team: team, Linear: linearAPI}
-	out.opsWorker = api.LinearDecisionOpsWorker{Store: st, Linear: linearAPI, Discord: discordDecisionsFromEnv()}
+	out.opsWorker = api.LinearDecisionOpsWorker{Store: st, Linear: linearAPI, RateGate: linearAPI.RateGate, Discord: discordDecisionsFromEnv()}
 	return out
 }
 
