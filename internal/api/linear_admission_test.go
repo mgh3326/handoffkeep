@@ -72,6 +72,8 @@ func (f *admissionFake) ClearCapacityHold(context.Context) error { f.held = fals
 
 func (f *admissionFake) Complete(_ context.Context, id string) error {
 	delete(f.pending, id)
+	delete(f.board, id)
+	delete(f.awaiting, id)
 	return nil
 }
 

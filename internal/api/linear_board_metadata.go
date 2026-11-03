@@ -49,6 +49,9 @@ func (a LinearAPI) fetchBoardMetadata(ctx context.Context) ([]store.LinearMetada
 	}
 	items := []store.LinearMetadata{{Kind: "team", ID: t.ID, Name: t.Key, UpdatedAt: t.UpdatedAt}}
 	for _, state := range t.States.Nodes {
+		if state.ArchivedAt != nil && state.ArchivedAt.After(state.UpdatedAt) {
+			state.UpdatedAt = *state.ArchivedAt
+		}
 		items = append(items, store.LinearMetadata{Kind: "state", ID: state.ID, TeamID: t.ID, Name: state.Name, UpdatedAt: state.UpdatedAt, Deleted: state.ArchivedAt != nil})
 	}
 	after := ""
@@ -79,6 +82,9 @@ func (a LinearAPI) fetchBoardMetadata(ctx context.Context) ([]store.LinearMetada
 				return nil, errors.New("linear metadata duplicate label")
 			}
 			seen[label.ID] = true
+			if label.ArchivedAt != nil && label.ArchivedAt.After(label.UpdatedAt) {
+				label.UpdatedAt = *label.ArchivedAt
+			}
 			m := store.LinearMetadata{Kind: "label", ID: label.ID, Name: label.Name, UpdatedAt: label.UpdatedAt, Deleted: label.ArchivedAt != nil}
 			if label.Team != nil {
 				m.TeamID = label.Team.ID

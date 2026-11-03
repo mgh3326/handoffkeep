@@ -357,6 +357,7 @@ func (a LinearAPI) LinearIssue(ctx context.Context, issueID string) (LinearIssue
 type linearRejectionError struct {
 	err      error
 	capacity bool
+	definite bool
 }
 
 func (e linearRejectionError) Error() string { return e.err.Error() }
@@ -419,7 +420,7 @@ func (a LinearAPI) graphql(ctx context.Context, timeout time.Duration, query str
 	if resp.StatusCode != http.StatusOK {
 		err := fmt.Errorf("linear api status %d", resp.StatusCode)
 		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
-			return linearRejectionError{err: err, capacity: resp.StatusCode == http.StatusPaymentRequired}
+			return linearRejectionError{err: err, capacity: resp.StatusCode == http.StatusPaymentRequired, definite: true}
 		}
 		return err
 	}
@@ -447,7 +448,7 @@ func (a LinearAPI) graphql(ctx context.Context, timeout time.Duration, query str
 				capacity = true
 			}
 		}
-		return linearRejectionError{err: fmt.Errorf("linear api error: %s", envelope.Errors[0].Message), capacity: capacity}
+		return linearRejectionError{err: fmt.Errorf("linear api error: %s", envelope.Errors[0].Message), capacity: capacity, definite: capacity}
 	}
 	if err := json.Unmarshal(envelope.Data, out); err != nil {
 		return fmt.Errorf("linear api response: %w", err)
@@ -536,6 +537,15 @@ func (h LinearWebhook) handleBoardWebhook(ctx context.Context, p linearWebhookPa
 	at, err := time.Parse(time.RFC3339Nano, p.Data.UpdatedAt)
 	if err != nil {
 		at = time.UnixMilli(p.WebhookTimestamp).UTC()
+	}
+	if inactive {
+		eventAt, err := time.Parse(time.RFC3339Nano, p.CreatedAt)
+		if err != nil {
+			eventAt = time.UnixMilli(p.WebhookTimestamp).UTC()
+		}
+		if eventAt.After(at) {
+			at = eventAt
+		}
 	}
 	if err = h.Board.ApplyLinearMetadata(ctx, []store.LinearMetadata{{Kind: kind, ID: p.Data.ID, TeamID: team, Name: name, UpdatedAt: at, Deleted: inactive}}); err != nil {
 		return err

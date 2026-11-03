@@ -269,6 +269,12 @@ func (a LinearAPI) admittedBoardCreate(ctx context.Context, in LinearDecisionIss
 					return errors.Join(err, holdErr)
 				}
 			}
+			// A received HTTP 4xx, explicit refused mutation or capacity
+			// rejection did not create an issue. Release only that known
+			// rejection; transport/5xx/ambiguous GraphQL retains identity.
+			if errors.As(err, &rejection) && rejection.definite {
+				return errors.Join(err, lease.Complete(ctx, in.ID))
+			}
 			var rate linearRateLimitError
 			if errors.As(err, &rate) {
 				return errors.Join(err, lease.Complete(ctx, in.ID))

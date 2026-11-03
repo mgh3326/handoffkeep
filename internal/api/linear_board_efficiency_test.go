@@ -368,3 +368,43 @@ func TestLinearBoardManualRepairOnlyStampsIssueForWebhook(t *testing.T) {
 		t.Fatal(calls, q.links, gate)
 	}
 }
+
+func TestLinearBoardCreateRejectionReleasesOnlyDefiniteReservation(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		status     int
+		response   string
+		keep, held bool
+	}{
+		{"http field rejection", http.StatusBadRequest, "", false, false},
+		{"capacity", http.StatusOK, `{"errors":[{"message":"Workspace issue limit reached"}]}`, false, true},
+		{"ambiguous graphql", http.StatusOK, `{"errors":[{"message":"response lost"}]}`, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gate := newAdmissionFake()
+			calls := 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				var in struct{ Query string }
+				json.NewDecoder(r.Body).Decode(&in)
+				if strings.Contains(in.Query, "HkAdmissionCount") {
+					fmt.Fprint(w, `{"data":{"issues":{"nodes":[],"pageInfo":{"hasNextPage":false}}}}`)
+					return
+				}
+				if !strings.Contains(in.Query, "issueCreate") {
+					t.Error("rejection caused identity lookup", in.Query)
+				}
+				w.WriteHeader(tc.status)
+				fmt.Fprint(w, tc.response)
+			}))
+			defer srv.Close()
+			api := LinearAPI{Key: "fake", URL: srv.URL, HTTP: srv.Client(), Admission: gate, CapacityScopeVerified: true}
+			id := store.LinearDecisionUUID("work-board:task:42")
+			_, err := api.CreateLinearIssue(t.Context(), LinearDecisionIssue{Board: true, TaskID: 42, ID: id, TeamID: "team", LabelID: "fleet"})
+			_, kept := gate.pending[id]
+			if err == nil || kept != tc.keep || gate.held != tc.held || calls != 2 {
+				t.Fatal(kept, gate.held, calls, err)
+			}
+		})
+	}
+}
