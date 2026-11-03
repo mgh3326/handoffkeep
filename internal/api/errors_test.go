@@ -89,6 +89,62 @@ func TestInternalErrorCarriesRequestID(t *testing.T) {
 	}
 }
 
+// The quota routes keep quota_store_unavailable, but a database or network
+// failure is now logged as api.internal_error with its request_id. A
+// non-infrastructure error keeps today's silent 500.
+func TestQuotaErrorLogsInternalFailures(t *testing.T) {
+	t.Setenv("HANDOFFKEEP_SENTRY_DSN", "")
+	monitor, err := telemetry.FromEnv("test-revision")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	var fail error
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/quota/accounts/{key}/latest", func(w http.ResponseWriter, r *http.Request) { quotaError(w, r, fail) })
+	for _, tc := range []struct {
+		name   string
+		err    error
+		logged bool
+	}{
+		{"internal", fmt.Errorf("latest quota: %w", context.DeadlineExceeded), true},
+		{"unmapped", errors.New("unexpected quota row"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logs.Reset()
+			fail = tc.err
+			w := httptest.NewRecorder()
+			monitor.Handler(mux).ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/v1/quota/accounts/pool:a/latest", nil))
+			id := w.Header().Get("X-Request-ID")
+			var body map[string]string
+			if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+				t.Fatal(err)
+			}
+			want := map[string]string{"error": "quota_store_unavailable"}
+			if tc.logged {
+				want["request_id"] = id
+			}
+			if w.Code != http.StatusInternalServerError || !reflect.DeepEqual(body, want) {
+				t.Fatalf("status=%d body=%v want %v", w.Code, body, want)
+			}
+			line := logs.String()
+			if !tc.logged {
+				if line != "" {
+					t.Fatalf("unexpected log %q", line)
+				}
+				return
+			}
+			for _, part := range []string{"api.internal_error ", "request_id=" + id + " ", `route="GET /v1/quota/accounts/{key}/latest"`, "code=quota_store_unavailable", `err="latest quota: context deadline exceeded"`} {
+				if !strings.Contains(line, part) {
+					t.Fatalf("log line %q lacks %q", line, part)
+				}
+			}
+		})
+	}
+}
+
 // Every rule must name a distinct sentinel: a duplicate would make the second
 // row dead and hide which status is meant.
 func TestErrorRulesDistinct(t *testing.T) {

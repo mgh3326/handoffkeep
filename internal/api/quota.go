@@ -28,12 +28,19 @@ func (s Server) quotaAuth(w http.ResponseWriter, r *http.Request) (string, bool)
 	}
 	return client, true
 }
-func quotaError(w http.ResponseWriter, err error) {
-	if errors.Is(err, store.ErrQuotaLease) {
+
+// quotaError keeps the quota routes' own 500 code, quota_store_unavailable,
+// which clients already branch on. A database or network failure is logged
+// like appErr's internal_error and carries the request_id.
+func quotaError(w http.ResponseWriter, r *http.Request, err error) {
+	switch {
+	case errors.Is(err, store.ErrQuotaLease):
 		writeError(w, http.StatusConflict, "quota_lease_conflict")
-	} else if errors.Is(err, store.ErrQuotaPresenceFull) {
+	case errors.Is(err, store.ErrQuotaPresenceFull):
 		writeError(w, http.StatusConflict, "quota_presence_full")
-	} else {
+	case isInternal(err):
+		writeInternal(w, r, "quota_store_unavailable", err)
+	default:
 		writeError(w, http.StatusInternalServerError, "quota_store_unavailable")
 	}
 }
@@ -56,7 +63,7 @@ func (s Server) quotaLatest(w http.ResponseWriter, r *http.Request) {
 	}
 	x, err := s.Service.Store.LatestQuota(r.Context(), r.PathValue("key"))
 	if err != nil {
-		quotaError(w, err)
+		quotaError(w, r, err)
 		return
 	}
 	jsonOut(w, http.StatusOK, x)
@@ -79,7 +86,7 @@ func (s Server) quotaPut(w http.ResponseWriter, r *http.Request) {
 	}
 	x, deduped, err := s.Service.Store.PutQuota(r.Context(), r.PathValue("key"), client, input.Holder, input.Observation)
 	if err != nil {
-		quotaError(w, err)
+		quotaError(w, r, err)
 		return
 	}
 	if deduped {
@@ -109,7 +116,7 @@ func (s Server) quotaLease(w http.ResponseWriter, r *http.Request) {
 	}
 	x, err := s.Service.Store.LeaseQuota(r.Context(), r.PathValue("key"), client, input.Holder, input.TTLS)
 	if err != nil {
-		quotaError(w, err)
+		quotaError(w, r, err)
 		return
 	}
 	jsonOut(w, http.StatusOK, x)
@@ -130,7 +137,7 @@ func (s Server) quotaRelease(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.Service.Store.ReleaseQuota(r.Context(), r.PathValue("key"), client, input.Holder); err != nil {
-		quotaError(w, err)
+		quotaError(w, r, err)
 		return
 	}
 	w.WriteHeader(204)
@@ -169,7 +176,7 @@ func (s Server) quotaPresencePut(w http.ResponseWriter, r *http.Request) {
 	}
 	x, err := s.Service.Store.PutQuotaPresence(r.Context(), input)
 	if err != nil {
-		quotaError(w, err)
+		quotaError(w, r, err)
 		return
 	}
 	jsonOut(w, http.StatusOK, x)
@@ -188,7 +195,7 @@ func (s Server) quotaPresenceList(w http.ResponseWriter, r *http.Request) {
 	}
 	records, truncated, err := s.Service.Store.QuotaPresence(r.Context(), host, key, quotaPresenceLimit)
 	if err != nil {
-		quotaError(w, err)
+		quotaError(w, r, err)
 		return
 	}
 	jsonOut(w, http.StatusOK, map[string]any{"records": records, "truncated": truncated})
