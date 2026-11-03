@@ -173,6 +173,16 @@ func (s *Store) ResolveLinearBoardLabel(ctx context.Context, team, name string, 
 	if err != nil {
 		return "", err
 	}
+	// A matching webhook may have won the race while HTTP was in flight.
+	// Prefer current stored metadata to persisting an obsolete refusal.
+	var currentID string
+	lookupErr := finish.QueryRow(ctx, linearLabelLookup, name, team).Scan(&currentID)
+	if lookupErr == nil {
+		return currentID, finish.Commit(ctx)
+	}
+	if !errors.Is(lookupErr, pgx.ErrNoRows) {
+		return "", lookupErr
+	}
 	if tag.RowsAffected() == 0 {
 		return "", ErrLinearLabelPending
 	}
@@ -193,5 +203,16 @@ func (s *Store) ResolveLinearBoardLabel(ctx context.Context, team, name string, 
 	if err = applyLinearMetadata(ctx, finish, []LinearMetadata{m}); err != nil {
 		return "", err
 	}
-	return m.ID, finish.Commit(ctx)
+	// Do not return a stale created id if a newer webhook tombstoned it.
+	err = finish.QueryRow(ctx, linearLabelLookup, name, team).Scan(&currentID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		if err = finish.Commit(ctx); err != nil {
+			return "", err
+		}
+		return "", ErrLinearLabelPending
+	}
+	if err != nil {
+		return "", err
+	}
+	return currentID, finish.Commit(ctx)
 }

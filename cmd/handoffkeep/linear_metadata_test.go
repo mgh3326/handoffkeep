@@ -31,6 +31,11 @@ func TestLinearManualCommandsUseAuthenticatedEndpoints(t *testing.T) {
 				t.Error(body)
 			}
 			fmt.Fprint(w, `{"status":"awaiting_webhook"}`)
+		case "/v1/linear/reservations/reconcile":
+			if body["issue_id"] != "00000000-0000-4000-8000-000000000001" {
+				t.Error(body)
+			}
+			fmt.Fprint(w, `{"status":"released"}`)
 		default:
 			t.Error(r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
@@ -41,7 +46,7 @@ func TestLinearManualCommandsUseAuthenticatedEndpoints(t *testing.T) {
 	t.Setenv("HANDOFFKEEP_TOKEN", "fake-token")
 	t.Setenv("HANDOFFKEEP_CF_ACCESS_CLIENT_ID", "fake-id")
 	t.Setenv("HANDOFFKEEP_CF_ACCESS_CLIENT_SECRET", "fake-secret")
-	for _, args := range [][]string{{"metadata", "refresh"}, {"board", "reconcile", "--task", "42"}} {
+	for _, args := range [][]string{{"metadata", "refresh"}, {"board", "reconcile", "--task", "42"}, {"reservations", "reconcile", "--issue", "00000000-0000-4000-8000-000000000001"}} {
 		var out bytes.Buffer
 		if err := linearCmd(args, &out); err != nil {
 			t.Fatal(err)
@@ -51,7 +56,7 @@ func TestLinearManualCommandsUseAuthenticatedEndpoints(t *testing.T) {
 			t.Fatal(out.String(), err)
 		}
 	}
-	if calls != 2 {
+	if calls != 3 {
 		t.Fatal(calls)
 	}
 }

@@ -10,7 +10,7 @@ import (
 
 func linearCmd(args []string, out io.Writer) error {
 	if len(args) < 2 {
-		return errors.New("usage: handoffkeep linear metadata refresh | linear board reconcile --task ID")
+		return errors.New("usage: handoffkeep linear metadata refresh | linear board reconcile --task ID | linear reservations reconcile --issue UUID")
 	}
 	metadata := args[0] == "metadata" && args[1] == "refresh"
 	reconcile := args[0] == "board" && args[1] == "reconcile"

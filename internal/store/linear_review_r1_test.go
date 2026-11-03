@@ -138,3 +138,27 @@ func TestR1AbsentReservationReleaseHasGraceAndBooksUnknownSlots(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestR1StoredLabelWinsRaceWithCreateRefusal(t *testing.T) {
+	_, url := testdb.Schema(t, "r1_label_webhook_race")
+	st, err := Open(t.Context(), url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	id, err := st.ResolveLinearBoardLabel(t.Context(), "team", "fleet", func(ctx context.Context) (LinearMetadata, error) {
+		// A human creates the label and its webhook arrives before our failed
+		// create/readback returns. There must be no stale permanent circuit.
+		if err := st.ApplyLinearMetadata(ctx, []LinearMetadata{{Kind: "label", ID: "from-webhook", TeamID: "team", Name: "fleet", UpdatedAt: time.Now().UTC()}}); err != nil {
+			return LinearMetadata{}, err
+		}
+		return LinearMetadata{}, ErrLinearBoardLabelUnavailable
+	})
+	if err != nil || id != "from-webhook" {
+		t.Fatal("stored resolving label lost to obsolete refusal", id, err)
+	}
+	var failures int
+	if err = st.pool.QueryRow(t.Context(), `SELECT count(*) FROM linear_label_failures`).Scan(&failures); err != nil || failures != 0 {
+		t.Fatal(failures, err)
+	}
+}
