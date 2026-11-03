@@ -51,7 +51,7 @@ func (s Server) chatQuestionUpsert(w http.ResponseWriter, r *http.Request, id st
 	defer r.Body.Close()
 	var input chatQuestionInput
 	if err := decode(r, &input, store.MaxBytes); err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	if input.ID != "" {
@@ -63,7 +63,7 @@ func (s Server) chatQuestionUpsert(w http.ResponseWriter, r *http.Request, id st
 	}
 	x, created, err := s.Service.UpsertChatQuestion(r.Context(), store.ChatQuestion{ID: id, ConversationID: input.ConversationID, Lane: input.Lane, Body: input.Body})
 	if err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	status := http.StatusOK
@@ -87,7 +87,7 @@ func (s Server) chatQuestionGet(w http.ResponseWriter, r *http.Request) {
 	}
 	x, found, err := s.Service.GetChatQuestion(r.Context(), r.PathValue("id"))
 	if err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	if !found {
@@ -108,12 +108,12 @@ func (s Server) chatQuestionTransition(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 	var input chatQuestionTransitionInput
 	if err := decode(r, &input, store.MaxBytes); err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	x, err := s.Service.TransitionChatQuestion(r.Context(), r.PathValue("id"), input.To)
 	if err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	jsonOut(w, http.StatusOK, x)
@@ -124,17 +124,17 @@ func (s Server) chatQuestionsList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if id := r.URL.Query().Get("conversation_id"); id != "" && id != store.ChatConversationID {
-		appErr(w, store.ErrChatConversation)
+		appErr(w, r, store.ErrChatConversation)
 		return
 	}
 	limit, err := queryLimit(r, 20, 1000)
 	if err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	xs, err := s.Service.ListChatQuestions(r.Context(), r.URL.Query().Get("lane"), r.URL.Query().Get("state"), r.URL.Query().Get("after_id"), limit)
 	if err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	jsonOut(w, http.StatusOK, map[string]any{"questions": xs})
@@ -160,7 +160,7 @@ func (s Server) chatMessageCreate(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 	var input chatMessageInput
 	if err := decode(r, &input, store.MaxBytes); err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	if input.Author == "" {
@@ -172,7 +172,7 @@ func (s Server) chatMessageCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	x, created, err := s.Service.PostChatMessage(r.Context(), store.ChatMessagePost{Message: store.ChatMessage{ConversationID: input.ConversationID, Author: input.Author, Body: input.Body, SourceChannel: input.SourceChannel, OriginEventID: input.OriginEventID, OriginTimestamp: input.OriginTimestamp}, Questions: questions, QuestionIDs: input.QuestionIDs, ProcessedQuestionIDs: input.ProcessedQuestionIDs, Answers: input.Answers})
 	if err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	status := http.StatusCreated
@@ -187,24 +187,24 @@ func (s Server) chatMessagesList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if id := r.URL.Query().Get("conversation_id"); id != "" && id != store.ChatConversationID {
-		appErr(w, store.ErrChatConversation)
+		appErr(w, r, store.ErrChatConversation)
 		return
 	}
 	limit, err := queryLimit(r, 200, 1000)
 	if err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	afterID, err := queryAfterID(r)
 	if err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	undeliveredValue := r.URL.Query().Get("undelivered")
 	undelivered := undeliveredValue == "1" || undeliveredValue == "true"
 	xs, err := s.Service.ListChatMessages(r.Context(), r.URL.Query().Get("author"), undelivered, afterID, limit)
 	if err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	jsonOut(w, http.StatusOK, map[string]any{"messages": xs})
@@ -225,7 +225,7 @@ func (s Server) chatMessageDelivered(w http.ResponseWriter, r *http.Request) {
 	}
 	x, err := s.Service.MarkChatMessageDelivered(r.Context(), id)
 	if err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	jsonOut(w, http.StatusOK, x)
@@ -242,7 +242,7 @@ func (s Server) chatMessageFailed(w http.ResponseWriter, r *http.Request) {
 	}
 	x, err := s.Service.MarkChatMessageFailed(r.Context(), id)
 	if err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	jsonOut(w, http.StatusOK, x)

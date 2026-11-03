@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 
 	"github.com/mgh3326/handoffkeep/internal/api"
+	"github.com/mgh3326/handoffkeep/internal/buildinfo"
 	"github.com/mgh3326/handoffkeep/internal/store"
 	gmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -37,7 +38,7 @@ func NewStdio(service Backend, client string) *gmcp.Server {
 	return newServer(service, client, true)
 }
 func newServer(service Backend, client string, allowPathUpload bool) *gmcp.Server {
-	s := gmcp.NewServer(&gmcp.Implementation{Name: "handoffkeep", Version: "v0"}, nil)
+	s := gmcp.NewServer(&gmcp.Implementation{Name: "handoffkeep", Version: buildinfo.Revision()}, nil)
 	result := func(v any) (*gmcp.CallToolResult, any, error) {
 		b, e := json.Marshal(v)
 		if e != nil {

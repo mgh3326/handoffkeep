@@ -12,28 +12,17 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"runtime/debug"
 	"strconv"
 	"strings"
 
+	"github.com/mgh3326/handoffkeep/internal/buildinfo"
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
 // UserAgent is stamped on every hk request: Cloudflare Access can be
 // configured to block the default Go user agent before a request reaches the
 // service, and a distinct UA keeps hk calls identifiable in Access logs.
-var UserAgent = "handoffkeep/" + buildRevision()
-
-func buildRevision() string {
-	if info, ok := debug.ReadBuildInfo(); ok {
-		for _, s := range info.Settings {
-			if s.Key == "vcs.revision" && s.Value != "" {
-				return s.Value
-			}
-		}
-	}
-	return "unknown"
-}
+var UserAgent = "handoffkeep/" + buildinfo.Revision()
 
 type Client struct {
 	URL, Token string

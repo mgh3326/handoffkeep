@@ -58,11 +58,45 @@ func TestFromEnvDisabled(t *testing.T) {
 	if err != nil || monitor.client != nil {
 		t.Fatalf("disabled monitor=%+v err=%v", monitor, err)
 	}
-	handler := http.NewServeMux()
-	if monitor.Handler(handler) != http.Handler(handler) {
-		t.Fatal("disabled middleware must return the original handler")
-	}
+	assertRequestIDs(t, monitor)
 	monitor.Close()
+}
+
+// assertRequestIDs checks the request id contract that holds with Sentry on
+// or off: each non-health request gets a fresh id in its context and in
+// X-Request-ID, a client-sent X-Request-ID is ignored, and /healthz gets none.
+func assertRequestIDs(t *testing.T, monitor *Monitor) {
+	t.Helper()
+	var seen string
+	handler := monitor.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = RequestID(r.Context())
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	ids := map[string]bool{}
+	for range 2 {
+		request := httptest.NewRequest(http.MethodGet, "/v1/tasks/1", nil)
+		request.Header.Set("X-Request-ID", "client-chosen")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		got := response.Header().Get("X-Request-ID")
+		if got == "" || got == "client-chosen" || got != seen {
+			t.Fatalf("X-Request-ID=%q context=%q", got, seen)
+		}
+		ids[got] = true
+	}
+	if len(ids) != 2 {
+		t.Fatal("request ids must be unique per request")
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if response.Header().Get("X-Request-ID") != "" || seen != "" {
+		t.Fatalf("healthz got request id header=%q context=%q", response.Header().Get("X-Request-ID"), seen)
+	}
+}
+
+func TestRequestIDsWithSentry(t *testing.T) {
+	monitor, _ := testMonitor(t)
+	assertRequestIDs(t, monitor)
 }
 
 func TestFromEnvOptionsAndFlush(t *testing.T) {

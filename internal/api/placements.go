@@ -33,13 +33,13 @@ func (s Server) placementCreate(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 	var input store.PlacementDecision
 	if err := decode(r, &input, 64<<10); err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	input.ID, input.DecidedOn = 0, host
 	result, created, err := s.Service.Store.RecordPlacement(r.Context(), input)
 	if err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	status := http.StatusOK
@@ -68,7 +68,7 @@ func (s Server) placementsList(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, err := s.Service.Store.ListPlacements(r.Context(), r.URL.Query().Get("job"), r.URL.Query().Get("host"), since, limit)
 	if err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	jsonOut(w, http.StatusOK, map[string]any{"placements": rows})

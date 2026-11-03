@@ -1,18 +1,22 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/mgh3326/handoffkeep/internal/store"
+	"github.com/mgh3326/handoffkeep/internal/telemetry"
 )
 
 func TestAppErrMapping(t *testing.T) {
@@ -34,7 +38,8 @@ func TestAppErrMapping(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w := httptest.NewRecorder()
-			appErr(w, tc.err)
+			r := httptest.NewRequest(http.MethodGet, "/v1/tasks/1", nil)
+			appErr(w, r, tc.err)
 			if w.Code != tc.status {
 				t.Fatalf("status=%d want %d", w.Code, tc.status)
 			}
@@ -46,6 +51,41 @@ func TestAppErrMapping(t *testing.T) {
 				t.Fatalf("body=%v want %v", got, tc.body)
 			}
 		})
+	}
+}
+
+// A 500 carries the request's id in the body and in the one log line, next
+// to the route pattern and the authenticated client, so an operator can go
+// from a client's error to the server log and the Sentry event.
+func TestInternalErrorCarriesRequestID(t *testing.T) {
+	t.Setenv("HANDOFFKEEP_SENTRY_DSN", "")
+	monitor, err := telemetry.FromEnv("test-revision")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/tasks/{id}", func(w http.ResponseWriter, r *http.Request) {
+		*r = *r.WithContext(store.WithWrkPrincipal(r.Context(), "node-a", nil))
+		appErr(w, r, fmt.Errorf("query: %w", context.DeadlineExceeded))
+	})
+	w := httptest.NewRecorder()
+	monitor.Handler(mux).ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/v1/tasks/7", nil))
+	id := w.Header().Get("X-Request-ID")
+	var body map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if w.Code != http.StatusInternalServerError || id == "" || !reflect.DeepEqual(body, map[string]string{"error": "internal_error", "request_id": id}) {
+		t.Fatalf("status=%d header=%q body=%v", w.Code, id, body)
+	}
+	line := logs.String()
+	for _, want := range []string{"api.internal_error ", "request_id=" + id + " ", `route="GET /v1/tasks/{id}"`, `client="node-a"`, `err="query: context deadline exceeded"`} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("log line %q lacks %q", line, want)
+		}
 	}
 }
 

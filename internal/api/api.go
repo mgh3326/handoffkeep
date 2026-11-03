@@ -550,6 +550,9 @@ type Server struct {
 	// LinearDecisions backs POST /v1/tasks/{id}/decision-request/ask. Nil answers
 	// that route 503 linear_decisions_disabled.
 	LinearDecisions *LinearDecisions
+	// ClientRevisions records each authenticated client's CLI revision from
+	// its User-Agent and reports it on GET /metrics. Nil records nothing.
+	ClientRevisions *ClientRevisions
 }
 
 func (s Server) Handler() http.Handler {
@@ -690,6 +693,7 @@ func (s Server) auth(w http.ResponseWriter, r *http.Request) (string, bool) {
 	if ok {
 		_, receipt := store.WrkPrincipal(r.Context())
 		*r = *r.WithContext(store.WithWrkPrincipal(r.Context(), id, receipt))
+		s.ClientRevisions.observe(id, r.UserAgent())
 	}
 	return id, ok
 }
@@ -705,16 +709,16 @@ func (s Server) tasksCreate(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 	var x store.Task
 	if err := decode(r, &x, store.MaxBytes); err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	if err := store.ValidateTaskArea(x.Area); err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	x, err := s.Service.CreateTask(r.Context(), client, x)
 	if err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	jsonOut(w, http.StatusCreated, x)
@@ -726,7 +730,7 @@ func (s Server) tasksList(w http.ResponseWriter, r *http.Request) {
 	}
 	limit, err := queryLimit(r, 20, 1000)
 	if err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	lane, state, parentLane := r.URL.Query().Get("lane"), r.URL.Query().Get("state"), r.URL.Query().Get("parent_lane")
@@ -744,7 +748,7 @@ func (s Server) tasksList(w http.ResponseWriter, r *http.Request) {
 	// not depend on a database round trip.
 	if area != nil && *area != "" {
 		if err := store.ValidateTaskArea(area); err != nil {
-			appErr(w, err)
+			appErr(w, r, err)
 			return
 		}
 	}
@@ -752,7 +756,7 @@ func (s Server) tasksList(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Has("after_id") {
 		afterID, parseErr := queryAfterID(r)
 		if parseErr != nil {
-			appErr(w, parseErr)
+			appErr(w, r, parseErr)
 			return
 		}
 		xs, err = s.Service.ListTasksPage(r.Context(), lane, state, parentLane, project, area, afterID, limit)
@@ -760,7 +764,7 @@ func (s Server) tasksList(w http.ResponseWriter, r *http.Request) {
 		xs, err = s.Service.ListTasks(r.Context(), lane, state, parentLane, project, area, limit)
 	}
 	if err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	body := map[string]any{"tasks": xs}
@@ -819,7 +823,7 @@ func (s Server) task(w http.ResponseWriter, r *http.Request) {
 	}
 	x, found, err := s.Service.GetTask(r.Context(), id)
 	if err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	if !found {
@@ -846,7 +850,7 @@ func (s Server) taskProjectsList(w http.ResponseWriter, r *http.Request) {
 	}
 	names, err := s.Service.ListTaskProjects(r.Context())
 	if err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	jsonOut(w, http.StatusOK, map[string]any{"projects": names})
@@ -864,12 +868,12 @@ func (s Server) taskProjectsCreate(w http.ResponseWriter, r *http.Request) {
 		Name string `json:"name"`
 	}
 	if err := decode(r, &input, 4096); err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	created, err := s.Service.AddTaskProject(r.Context(), client, input.Name)
 	if err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	status := http.StatusOK
@@ -898,12 +902,12 @@ func (s Server) taskProject(w http.ResponseWriter, r *http.Request) {
 		Note    string `json:"note"`
 	}
 	if err := decode(r, &input, 4096); err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	x, _, err := s.Service.SetTaskProject(r.Context(), id, input.Project, client, input.Note)
 	if err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	jsonOut(w, http.StatusOK, x)
@@ -938,7 +942,7 @@ func (s Server) taskArea(w http.ResponseWriter, r *http.Request) {
 		Note string          `json:"note"`
 	}
 	if err := decode(r, &input, 4096); err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	var area *string
@@ -954,13 +958,13 @@ func (s Server) taskArea(w http.ResponseWriter, r *http.Request) {
 		}
 		area = &v
 		if err := store.ValidateTaskArea(area); err != nil {
-			appErr(w, err)
+			appErr(w, r, err)
 			return
 		}
 	}
 	x, _, err := s.Service.SetTaskArea(r.Context(), id, area, client, input.Note)
 	if err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	jsonOut(w, http.StatusOK, x)
@@ -978,12 +982,12 @@ func (s Server) taskClaim(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 	var input taskClaimInput
 	if err := decode(r, &input, 4096); err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	x, err := s.Service.ClaimTask(r.Context(), id, input.ClaimedBy, input.JobID, input.NoJob)
 	if err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	jsonOut(w, http.StatusOK, x)
@@ -1008,12 +1012,12 @@ func (s Server) taskRebind(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 	var input taskRebindInput
 	if err := decode(r, &input, 4096); err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	x, err := s.Service.RebindTaskJob(r.Context(), id, input.FromJob, input.ToJob, input.By, input.Reason)
 	if err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	jsonOut(w, http.StatusOK, x)
@@ -1031,12 +1035,12 @@ func (s Server) tasksNext(w http.ResponseWriter, r *http.Request) {
 		NoJob     string `json:"no_job,omitempty"`
 	}
 	if err := decode(r, &input, 4096); err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	x, err := s.Service.NextTask(r.Context(), input.Lane, input.ClaimedBy, input.JobID, input.NoJob)
 	if err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	jsonOut(w, http.StatusOK, x)
@@ -1065,12 +1069,12 @@ func (s Server) taskTransition(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 	var input taskTransitionInput
 	if err := decode(r, &input, store.MaxBytes); err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	x, err := s.Service.TransitionTask(r.Context(), id, input.To, client, input.Note, input.Refs, input.NoJob)
 	if err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	jsonOut(w, http.StatusOK, x)
@@ -1092,12 +1096,12 @@ func (s Server) taskDecisionRequest(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 	var input store.DecisionRequestInput
 	if err := decode(r, &input, store.MaxBytes); err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	x, err := s.Service.Store.RecordDecisionRequest(r.Context(), id, client, input)
 	if err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	status := http.StatusCreated
@@ -1122,12 +1126,12 @@ func (s Server) taskDecisionResolve(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 	var input store.DecisionResolveInput
 	if err := decode(r, &input, store.MaxBytes); err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	x, err := s.Service.Store.ResolveDecisionRequest(r.Context(), id, client, input)
 	if err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	jsonOut(w, http.StatusOK, x)
@@ -1195,7 +1199,7 @@ func (s Server) tasksRelane(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 	var input taskRelaneInput
 	if err := decode(r, &input, store.MaxBytes); err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	if len(input.IDs) < 1 || len(input.IDs) > TaskRelaneBatchMax || strings.TrimSpace(input.To) == "" || strings.TrimSpace(input.Note) == "" {
@@ -1239,12 +1243,12 @@ func (s Server) dispositionCreate(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 	var input store.DispositionInput
 	if err := decode(r, &input, store.MaxBytes); err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	x, created, err := s.Service.CreateDisposition(r.Context(), client, input)
 	if err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	status := http.StatusOK
@@ -1269,7 +1273,7 @@ func (s Server) dispositionSummary(w http.ResponseWriter, r *http.Request) {
 	}
 	summary, err := s.Service.DispositionSummary(r.Context(), asOf)
 	if err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	jsonOut(w, http.StatusOK, summary)
@@ -1290,12 +1294,12 @@ func (s Server) dispositionApply(w http.ResponseWriter, r *http.Request) {
 		Note string `json:"note"`
 	}
 	if err := decode(r, &input, store.MaxBytes); err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	x, err := s.Service.ApplyDisposition(r.Context(), id, client, input.Note)
 	if err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	jsonOut(w, http.StatusOK, x)
@@ -1308,12 +1312,12 @@ func (s Server) decisionResolve(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 	var input DecisionResolveInput
 	if err := decode(r, &input, store.MaxBytes); err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	event, err := s.Service.ResolveDecision(r.Context(), input)
 	if err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	jsonOut(w, http.StatusOK, map[string]any{"event": event})
@@ -1330,12 +1334,12 @@ func (s Server) relayEventsCreate(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 	var x store.RelayEvent
 	if err := decode(r, &x, store.MaxBytes); err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	x, created, err := s.Service.AppendRelayEvent(r.Context(), x)
 	if err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	status := http.StatusOK
@@ -1362,12 +1366,12 @@ func (s Server) relayEventDelivered(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 	var input relayEventDeliveryInput
 	if err := decode(r, &input, store.MaxBytes); err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	x, err := s.Service.MarkRelayEventDelivered(r.Context(), id, input.Machine, input.Pane)
 	if err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	jsonOut(w, http.StatusOK, x)
@@ -1403,19 +1407,19 @@ func (s Server) relayEventsList(w http.ResponseWriter, r *http.Request) {
 	}
 	limit, err := relayEventsLimit(r)
 	if err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	afterID, err := queryAfterID(r)
 	if err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	undeliveredValue := r.URL.Query().Get("undelivered")
 	undelivered := undeliveredValue == "1" || undeliveredValue == "true"
 	xs, err := s.Service.ListRelayEvents(r.Context(), r.URL.Query().Get("lane"), r.URL.Query().Get("kind"), undelivered, afterID, limit)
 	if err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	jsonOut(w, http.StatusOK, map[string]any{"events": xs})
@@ -1445,12 +1449,12 @@ func (s Server) benchScoresList(w http.ResponseWriter, r *http.Request) {
 	}
 	limit, err := queryLimit(r, 1000, 5000)
 	if err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	xs, err := s.Service.ListBenchScores(r.Context(), r.URL.Query().Get("model_id"), r.URL.Query().Get("source"), limit)
 	if err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	jsonOut(w, http.StatusOK, map[string]any{"scores": xs})
@@ -1467,12 +1471,12 @@ func (s Server) benchScoresPut(w http.ResponseWriter, r *http.Request) {
 		if err == nil {
 			err = errors.New("invalid bench scores")
 		}
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	n, err := s.Service.UpsertBenchScores(r.Context(), client, input.Scores)
 	if err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	jsonOut(w, http.StatusOK, map[string]int{"upserted": n})
@@ -1484,12 +1488,12 @@ func (s Server) benchRepsList(w http.ResponseWriter, r *http.Request) {
 	}
 	limit, err := queryLimit(r, 1000, 5000)
 	if err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	xs, err := s.Service.ListBenchReps(r.Context(), r.URL.Query().Get("profile"), r.URL.Query().Get("grade"), r.URL.Query().Get("effort"), limit)
 	if err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	jsonOut(w, http.StatusOK, map[string]any{"reps": xs})
@@ -1506,7 +1510,7 @@ func (s Server) benchRepsPut(w http.ResponseWriter, r *http.Request) {
 		if err == nil {
 			err = errors.New("invalid bench reps")
 		}
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	ids, err := s.Service.UpsertBenchReps(r.Context(), client, input.Reps)
@@ -1517,7 +1521,7 @@ func (s Server) benchRepsPut(w http.ResponseWriter, r *http.Request) {
 				log.Printf("bench_rep_conflict created_by=%s index=%d origin_id=%d conflict_server_id=%d", client, c.Index, c.OriginID, c.ServerID)
 			}
 		}
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	jsonOut(w, http.StatusOK, map[string]any{"upserted": len(ids), "ids": ids})
@@ -1529,7 +1533,7 @@ func (s Server) benchGradesList(w http.ResponseWriter, r *http.Request) {
 	}
 	xs, err := s.Service.ListBenchGrades(r.Context())
 	if err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	jsonOut(w, http.StatusOK, map[string]any{"grades": xs})
@@ -1546,12 +1550,12 @@ func (s Server) benchGradesPut(w http.ResponseWriter, r *http.Request) {
 		if err == nil {
 			err = errors.New("invalid bench grades")
 		}
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	n, err := s.Service.UpsertBenchGrades(r.Context(), client, input.Grades)
 	if err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	jsonOut(w, http.StatusOK, map[string]int{"upserted": n})
@@ -1587,7 +1591,7 @@ func (s Server) benchCatalogList(w http.ResponseWriter, r *http.Request) {
 	includeRetired := q.Get("include_retired") == "1" || q.Get("include_retired") == "true"
 	xs, err := s.Service.ListBenchCatalog(r.Context(), q.Get("pool"), includeRetired)
 	if err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	jsonOut(w, http.StatusOK, map[string]any{"catalog": xs})
@@ -1607,7 +1611,7 @@ func (s Server) benchCatalogPut(w http.ResponseWriter, r *http.Request) {
 	// field that failed (benchCatalogDecodeDetail); the limit matches decode().
 	body, err := io.ReadAll(io.LimitReader(r.Body, int64(benchRequestMaxBytes+4096)))
 	if err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	var input benchCatalogInput
@@ -1623,7 +1627,7 @@ func (s Server) benchCatalogPut(w http.ResponseWriter, r *http.Request) {
 	}
 	n, err := s.Service.UpsertBenchCatalog(r.Context(), input.Catalog)
 	if err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	jsonOut(w, http.StatusOK, map[string]int{"upserted": n})
@@ -1644,7 +1648,7 @@ func (s Server) benchAreaExceptionsList(w http.ResponseWriter, r *http.Request) 
 	includeRetired := q.Get("include_retired") == "1" || q.Get("include_retired") == "true"
 	xs, err := s.Service.ListBenchAreaExceptions(r.Context(), q.Get("area"), includeRetired)
 	if err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	jsonOut(w, http.StatusOK, map[string]any{"exceptions": xs})
@@ -1669,7 +1673,7 @@ func (s Server) benchAreaExceptionsPut(w http.ResponseWriter, r *http.Request) {
 	// large instead of silently decoding a truncated prefix.
 	body, err := io.ReadAll(io.LimitReader(r.Body, int64(benchRequestMaxBytes+4096)+1))
 	if err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	if len(body) > benchRequestMaxBytes+4096 {
@@ -1694,7 +1698,7 @@ func (s Server) benchAreaExceptionsPut(w http.ResponseWriter, r *http.Request) {
 	}
 	n, err := s.Service.UpsertBenchAreaExceptions(r.Context(), client, input.Exceptions)
 	if err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	jsonOut(w, http.StatusOK, map[string]int{"upserted": n})
@@ -1827,12 +1831,12 @@ func (s Server) checkpoints(w http.ResponseWriter, r *http.Request) {
 		defer r.Body.Close()
 		var x store.Checkpoint
 		if e := decode(r, &x, store.MaxBytes); e != nil {
-			appErr(w, e)
+			appErr(w, r, e)
 			return
 		}
 		x, e := s.Service.Checkpoint(r.Context(), client, x)
 		if e != nil {
-			appErr(w, e)
+			appErr(w, r, e)
 			return
 		}
 		jsonOut(w, http.StatusCreated, x)
@@ -1844,12 +1848,12 @@ func (s Server) checkpoints(w http.ResponseWriter, r *http.Request) {
 	}
 	n, e := queryLimit(r, 3, store.CheckpointKeep)
 	if e != nil {
-		appErr(w, e)
+		appErr(w, r, e)
 		return
 	}
 	xs, e := s.Service.Recent(r.Context(), r.URL.Query().Get("session"), r.URL.Query().Get("kind"), n)
 	if e != nil {
-		appErr(w, e)
+		appErr(w, r, e)
 		return
 	}
 	jsonOut(w, http.StatusOK, map[string]any{"checkpoints": xs})
@@ -1860,12 +1864,12 @@ func (s Server) search(w http.ResponseWriter, r *http.Request) {
 	}
 	n, e := queryLimit(r, 20, 100)
 	if e != nil {
-		appErr(w, e)
+		appErr(w, r, e)
 		return
 	}
 	xs, e := s.Service.Search(r.Context(), r.URL.Query().Get("q"), defaultString(r.URL.Query().Get("scope"), "all"), r.URL.Query().Get("session"), n)
 	if e != nil {
-		appErr(w, e)
+		appErr(w, r, e)
 		return
 	}
 	jsonOut(w, http.StatusOK, map[string]any{"results": xs})
@@ -1886,7 +1890,7 @@ func (s Server) documents(w http.ResponseWriter, r *http.Request) {
 		}
 		x, found, e := s.Service.GetDocumentByID(r.Context(), id)
 		if e != nil {
-			appErr(w, e)
+			appErr(w, r, e)
 			return
 		}
 		if !found {
@@ -1898,12 +1902,12 @@ func (s Server) documents(w http.ResponseWriter, r *http.Request) {
 	}
 	n, e := queryLimit(r, 100, 1000)
 	if e != nil {
-		appErr(w, e)
+		appErr(w, r, e)
 		return
 	}
 	xs, e := s.Service.ListDocuments(r.Context(), r.URL.Query().Get("prefix"), r.URL.Query().Get("kind"), r.URL.Query().Get("session"), n)
 	if e != nil {
-		appErr(w, e)
+		appErr(w, r, e)
 		return
 	}
 	jsonOut(w, http.StatusOK, map[string]any{"documents": xs})
@@ -1917,7 +1921,7 @@ func (s Server) document(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		x, found, e := s.Service.GetDocument(r.Context(), key)
 		if e != nil {
-			appErr(w, e)
+			appErr(w, r, e)
 			return
 		}
 		if !found {
@@ -1931,13 +1935,13 @@ func (s Server) document(w http.ResponseWriter, r *http.Request) {
 		defer r.Body.Close()
 		var x store.Document
 		if e := decode(r, &x, store.DocumentMaxBytes); e != nil {
-			appErr(w, e)
+			appErr(w, r, e)
 			return
 		}
 		x.Key = key
 		x, changed, e := s.Service.PutDocument(r.Context(), client, x)
 		if e != nil {
-			appErr(w, e)
+			appErr(w, r, e)
 			return
 		}
 		jsonOut(w, http.StatusOK, map[string]any{"document": x, "changed": changed})
@@ -1951,7 +1955,7 @@ func (s Server) memoryList(w http.ResponseWriter, r *http.Request) {
 	}
 	xs, e := s.Service.ListMemory(r.Context(), r.PathValue("agent"), false)
 	if e != nil {
-		appErr(w, e)
+		appErr(w, r, e)
 		return
 	}
 	jsonOut(w, http.StatusOK, map[string]any{"memory": xs})
@@ -1965,7 +1969,7 @@ func (s Server) memory(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		x, found, e := s.Service.GetMemory(r.Context(), agent, name)
 		if e != nil {
-			appErr(w, e)
+			appErr(w, r, e)
 			return
 		}
 		if !found {
@@ -1979,13 +1983,13 @@ func (s Server) memory(w http.ResponseWriter, r *http.Request) {
 		defer r.Body.Close()
 		var x store.Memory
 		if e := decode(r, &x, store.MaxBytes); e != nil {
-			appErr(w, e)
+			appErr(w, r, e)
 			return
 		}
 		x.Agent, x.Name = agent, name
 		x, e := s.Service.PutMemory(r.Context(), client, x)
 		if e != nil {
-			appErr(w, e)
+			appErr(w, r, e)
 			return
 		}
 		jsonOut(w, http.StatusOK, x)
@@ -2006,18 +2010,18 @@ func (s Server) attachmentPut(w http.ResponseWriter, r *http.Request) {
 	}
 	defer r.Body.Close()
 	if s.Service.Attachments == nil || !s.Service.Attachments.Enabled {
-		appErr(w, attachments.ErrDisabled)
+		appErr(w, r, attachments.ErrDisabled)
 		return
 	}
 	max := s.Service.Attachments.Config.MaxBytes
 	b, e := io.ReadAll(http.MaxBytesReader(w, r.Body, max))
 	if e != nil {
-		appErr(w, attachments.ErrTooLarge)
+		appErr(w, r, attachments.ErrTooLarge)
 		return
 	}
 	x, new, e := s.Service.PutAttachment(r.Context(), client, r.Header.Get("X-HK-Name"), r.Header.Get("Content-Type"), r.Header.Get("X-HK-Ref"), b)
 	if e != nil {
-		appErr(w, e)
+		appErr(w, r, e)
 		return
 	}
 	jsonOut(w, http.StatusCreated, map[string]any{"attachment": x, "created": new, "url": "/v1/attachments/" + x.SHA256})
@@ -2028,7 +2032,7 @@ func (s Server) attachments(w http.ResponseWriter, r *http.Request) {
 	}
 	xs, e := s.Service.ListAttachments(r.Context(), r.URL.Query().Get("ref"), 100)
 	if e != nil {
-		appErr(w, e)
+		appErr(w, r, e)
 		return
 	}
 	jsonOut(w, http.StatusOK, map[string]any{"attachments": xs})
@@ -2041,7 +2045,7 @@ func (s Server) attachment(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Get("presign") == "1" {
 		u, e := s.Service.AttachmentURL(r.Context(), sha)
 		if e != nil {
-			appErr(w, e)
+			appErr(w, r, e)
 			return
 		}
 		http.Redirect(w, r, u, http.StatusFound)
@@ -2052,7 +2056,7 @@ func (s Server) attachment(w http.ResponseWriter, r *http.Request) {
 		if e.Error() == "attachment_not_found" {
 			writeError(w, http.StatusNotFound, "not_found")
 		} else {
-			appErr(w, e)
+			appErr(w, r, e)
 		}
 		return
 	}
@@ -2071,7 +2075,7 @@ func (s Server) usage(w http.ResponseWriter, r *http.Request) {
 	}
 	u, e := s.Service.AttachmentUsage(r.Context())
 	if e != nil {
-		appErr(w, e)
+		appErr(w, r, e)
 		return
 	}
 	jsonOut(w, http.StatusOK, map[string]any{"attachments": "enabled", "usage": u, "cap_bytes": s.Service.Attachments.Config.StorageCap, "cap_ratio": float64(u.TotalBytes) / float64(s.Service.Attachments.Config.StorageCap)})
@@ -2083,21 +2087,23 @@ func (s Server) metrics(w http.ResponseWriter, r *http.Request) {
 	if s.Service.Attachments == nil || !s.Service.Attachments.Enabled {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 		_, _ = w.Write([]byte("handoffkeep_attach_enabled 0\n"))
+		s.ClientRevisions.writeMetrics(w)
 		return
 	}
 	u, e := s.Service.AttachmentUsage(r.Context())
 	if e != nil {
-		appErr(w, e)
+		appErr(w, r, e)
 		return
 	}
 	c := s.Service.Attachments.Config
 	objects, e := s.Service.Store.AttachmentObjectCount(r.Context())
 	if e != nil {
-		appErr(w, e)
+		appErr(w, r, e)
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 	fmt.Fprintf(w, "handoffkeep_attach_bytes_total %d\nhandoffkeep_attach_objects %d\nhandoffkeep_attach_puts_month %d\nhandoffkeep_attach_gets_month %d\nhandoffkeep_attach_cap_bytes %d\nhandoffkeep_attach_cap_ratio %.8f\n", u.TotalBytes, objects, u.Puts, u.Gets, c.StorageCap, float64(u.TotalBytes)/float64(c.StorageCap))
+	s.ClientRevisions.writeMetrics(w)
 }
 
 // taskReopen preserves the reason and authenticated identity in task history.
@@ -2116,12 +2122,12 @@ func (s Server) taskReopen(w http.ResponseWriter, r *http.Request) {
 		Reason string `json:"reason"`
 	}
 	if err := decode(r, &input, store.MaxBytes); err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	x, err := s.Service.ReopenTask(r.Context(), id, client, input.Reason)
 	if err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	jsonOut(w, http.StatusOK, x)

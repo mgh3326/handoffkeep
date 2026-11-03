@@ -31,7 +31,7 @@ type taskCommentInput struct {
 // body byte) so an oversized body is reported as too long, not as malformed.
 const taskCommentRequestMax = 6*store.TaskCommentMaxBytes + 4096
 
-func taskCommentErr(w http.ResponseWriter, err error) {
+func taskCommentErr(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, store.ErrTaskCommentEmpty):
 		writeError(w, http.StatusBadRequest, "comment_empty")
@@ -40,7 +40,7 @@ func taskCommentErr(w http.ResponseWriter, err error) {
 	case errors.Is(err, store.ErrTaskNotFound):
 		writeError(w, http.StatusNotFound, "not_found")
 	default:
-		appErr(w, err)
+		appErr(w, r, err)
 	}
 }
 
@@ -62,10 +62,10 @@ func (s Server) taskCommentCreate(w http.ResponseWriter, r *http.Request) {
 	if err := de.Decode(&input); err != nil {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
-			taskCommentErr(w, store.ErrTaskCommentTooLong)
+			taskCommentErr(w, r, store.ErrTaskCommentTooLong)
 			return
 		}
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	if len(input.Author) != 0 || len(input.CreatedBy) != 0 {
@@ -74,7 +74,7 @@ func (s Server) taskCommentCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	x, err := s.Service.CreateTaskComment(r.Context(), client, id, input.Body)
 	if err != nil {
-		taskCommentErr(w, err)
+		taskCommentErr(w, r, err)
 		return
 	}
 	jsonOut(w, http.StatusCreated, x)
@@ -91,19 +91,19 @@ func (s Server) taskCommentsList(w http.ResponseWriter, r *http.Request) {
 	}
 	limit, err := queryLimit(r, 100, store.TaskCommentListMax)
 	if err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	var afterID int64
 	if r.URL.Query().Has("after_id") {
 		if afterID, err = queryAfterID(r); err != nil {
-			appErr(w, err)
+			appErr(w, r, err)
 			return
 		}
 	}
 	xs, err := s.Service.ListTaskComments(r.Context(), id, afterID, limit)
 	if err != nil {
-		taskCommentErr(w, err)
+		taskCommentErr(w, r, err)
 		return
 	}
 	jsonOut(w, http.StatusOK, map[string]any{"comments": xs})

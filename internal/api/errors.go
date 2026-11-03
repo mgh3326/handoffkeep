@@ -13,13 +13,14 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/mgh3326/handoffkeep/internal/attachments"
 	"github.com/mgh3326/handoffkeep/internal/store"
+	"github.com/mgh3326/handoffkeep/internal/telemetry"
 	"github.com/mgh3326/handoffkeep/internal/wrkrecords"
 )
 
 // Every JSON error body is {"error": "<snake_code>"}, optionally with extra
-// detail keys ("reason", "pattern", "conflicts"). Handlers write a known
-// failure with writeError and hand anything returned by the store or a
-// service to appErr, which maps it through errorRules.
+// detail keys ("reason", "pattern", "conflicts", "request_id"). Handlers
+// write a known failure with writeError and hand anything returned by the
+// store or a service to appErr, which maps it through errorRules.
 
 func jsonOut(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
@@ -97,7 +98,7 @@ var errorRules = []errorRule{
 // service. Sentinels go through errorRules. An infrastructure failure (the
 // database or network, not the request) is logged and answered 500
 // internal_error. Anything else is a rejected request: 400 invalid_context.
-func appErr(w http.ResponseWriter, e error) {
+func appErr(w http.ResponseWriter, r *http.Request, e error) {
 	var wrkErr wrkrecords.Error
 	if errors.As(e, &wrkErr) {
 		writeError(w, wrkrecords.Status(wrkErr), wrkrecords.Code(wrkErr))
@@ -132,8 +133,15 @@ func appErr(w http.ResponseWriter, e error) {
 		return
 	}
 	if isInternal(e) {
-		log.Printf("api.internal_error err=%q", e.Error())
-		writeError(w, http.StatusInternalServerError, "internal_error")
+		// request_id ties the client's error to this log line and to Sentry.
+		requestID := telemetry.RequestID(r.Context())
+		client, _ := store.WrkPrincipal(r.Context())
+		log.Printf("api.internal_error request_id=%s route=%q client=%q err=%q", requestID, r.Pattern, client, e.Error())
+		body := map[string]string{"error": "internal_error"}
+		if requestID != "" {
+			body["request_id"] = requestID
+		}
+		jsonOut(w, http.StatusInternalServerError, body)
 		return
 	}
 	writeError(w, http.StatusBadRequest, "invalid_context")
