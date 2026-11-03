@@ -253,7 +253,7 @@ func (b *boardWebhookSpy) ApplyLinearMetadata(_ context.Context, m []store.Linea
 }
 func TestLinearBoardSignedWebhookOwnsLinksAndNestedMetadata(t *testing.T) {
 	spy := &boardWebhookSpy{}
-	control := &LinearBoardControl{missingLabel: "fleet"}
+	control := &LinearBoardControl{missingLabel: "fleet", missingTeam: "team"}
 	h := LinearWebhook{Secret: fakeLinearSigningValue, Board: spy, BoardControl: control, Store: &fakeDots{}, Issues: &fakeIssues{}}
 	body := []byte(fmt.Sprintf(`{"type":"Issue","action":"create","webhookTimestamp":%d,"data":{"id":"issue","identifier":"ROB-1","description":"<!-- work-board:task:42 -->","updatedAt":"2026-11-03T01:00:00Z","team":{"id":"team","key":"ROB"},"state":{"id":"s","name":"In Progress"}}}`, time.Now().UnixMilli()))
 	status, _ := postLinear(t, h, body, "invalid")
@@ -350,8 +350,8 @@ func TestLinearBoardManualRepairOnlyStampsIssueForWebhook(t *testing.T) {
 			Variables map[string]json.RawMessage
 		}
 		json.NewDecoder(r.Body).Decode(&in)
-		if strings.Contains(in.Query, "FleetBoardIssue") {
-			fmt.Fprintf(w, `{"data":{"issue":{"id":%q,"identifier":"ROB-42","description":"human notes","team":{"id":"team"}}}}`, id)
+		if strings.Contains(in.Query, "HkBoardRepair") {
+			fmt.Fprintf(w, `{"data":{"issues":{"nodes":[{"id":%q,"identifier":"ROB-42","description":"human notes","team":{"id":"team"}}],"pageInfo":{"hasNextPage":false}}}}`, id)
 		} else if strings.Contains(in.Query, "issueUpdate") {
 			var input struct{ Description string }
 			json.Unmarshal(in.Variables["input"], &input)
@@ -366,7 +366,7 @@ func TestLinearBoardManualRepairOnlyStampsIssueForWebhook(t *testing.T) {
 	}))
 	defer srv.Close()
 	api := LinearAPI{Key: "fake", URL: srv.URL, HTTP: srv.Client(), Metadata: boardMetadataFixture(), Admission: gate}
-	if err := api.ReconcileLinearBoardIssue(t.Context(), q, 42); err != nil {
+	if _, err := api.ReconcileLinearBoardIssue(t.Context(), q, 42); err != nil {
 		t.Fatal(err)
 	}
 	if calls != 2 || len(q.links) != 0 || !gate.awaiting[id] {
@@ -427,4 +427,13 @@ func TestLinearBoardAwaitingWebhookBooksCapacitySlot(t *testing.T) {
 	if !errors.Is(err, ErrLinearCapacity) || remote.creates != 0 {
 		t.Fatal("unacknowledged acceptance lost its slot", remote.creates, err)
 	}
+}
+
+func (b *boardWebhookSpy) LinearBoardLabelAvailable(_ context.Context, team, name string) (bool, error) {
+	for _, m := range b.metadata {
+		if m.Kind == "label" && m.Name == name && !m.Deleted && (m.TeamID == team || m.TeamID == "") {
+			return true, nil
+		}
+	}
+	return false, nil
 }

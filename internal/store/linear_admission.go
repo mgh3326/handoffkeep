@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"github.com/jackc/pgx/v5"
 	"time"
 
@@ -24,7 +25,8 @@ type LinearCreateLease interface {
 	ReserveBoard(context.Context, string, int64) (bool, error)
 	AwaitBoardWebhook(context.Context, string) error
 	IsBoardReservation(context.Context, string) (bool, error)
-	AwaitingBoardCreates(context.Context) (int, error)
+	ReservedCreates(context.Context) (int, error)
+	ReleaseAbsent(context.Context, string) error
 }
 
 type linearCreateLease struct{ conn *pgxpool.Conn }
@@ -117,6 +119,9 @@ func (l linearCreateLease) ClearCapacityHold(ctx context.Context) error {
 }
 
 func (l linearCreateLease) ReserveBoard(ctx context.Context, id string, taskID int64) (bool, error) {
+	if taskID < 1 || id != LinearDecisionUUID(fmt.Sprintf("work-board:task:%d", taskID)) {
+		return false, ErrLinearIssueOwnership
+	}
 	tag, err := l.conn.Exec(ctx, `INSERT INTO linear_create_admissions(issue_id,created_at,board_task_id) VALUES($1,now(),$2) ON CONFLICT DO NOTHING`, id, taskID)
 	return tag.RowsAffected() == 1, err
 }
@@ -131,8 +136,24 @@ func (l linearCreateLease) IsBoardReservation(ctx context.Context, id string) (b
 	return board, err
 }
 
-func (l linearCreateLease) AwaitingBoardCreates(ctx context.Context) (int, error) {
+func (l linearCreateLease) ReservedCreates(ctx context.Context) (int, error) {
 	var count int
-	err := l.conn.QueryRow(ctx, `SELECT count(*) FROM linear_create_admissions WHERE awaiting_webhook`).Scan(&count)
+	err := l.conn.QueryRow(ctx, `SELECT count(*) FROM linear_create_admissions`).Scan(&count)
 	return count, err
+}
+
+// A confirmed exact-id absence releases an old ambiguous reservation. The
+// grace period exceeds the HTTP/create deadline; the create lock excludes an
+// in-flight local writer. A known rejection needs no grace period.
+var ErrLinearReservationTooRecent = errors.New("linear_reservation_too_recent")
+
+func (l linearCreateLease) ReleaseAbsent(ctx context.Context, id string) error {
+	var recent bool
+	if err := l.conn.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM linear_create_admissions WHERE issue_id=$1 AND uncertain AND created_at>clock_timestamp()-interval '2 minutes')`, id).Scan(&recent); err != nil {
+		return err
+	}
+	if recent {
+		return ErrLinearReservationTooRecent
+	}
+	return l.Complete(ctx, id)
 }

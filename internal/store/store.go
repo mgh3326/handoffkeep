@@ -1093,7 +1093,12 @@ func (s *Store) migrate(ctx context.Context) error {
 		return err
 	}
 
-	if err := migrateOnce(ctx, tx, 32, func() error { return execAll(ctx, tx, linearBoardEfficiencyV32) }); err != nil {
+	if err := migrateOnce(ctx, tx, 32, func() error {
+		if err := execAll(ctx, tx, linearBoardEfficiencyV32); err != nil {
+			return err
+		}
+		return backfillLinearBoardReservations(ctx, tx)
+	}); err != nil {
 		return err
 	}
 

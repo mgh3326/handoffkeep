@@ -1791,7 +1791,7 @@ func serve(args []string, errout io.Writer) error {
 	if e != nil {
 		return e
 	}
-	handler := serverHandler(api.Server{Service: svc, Tokens: tokens, QuotaAccounts: quotaAccounts, HostGrants: hostGrants, UI: uiHandler, LinearWebhook: linear.webhook, LinearDecisions: linear.decisions, LinearMetadata: linear.metadata, LinearBoard: linear.metadata}, monitor)
+	handler := serverHandler(api.Server{Service: svc, Tokens: tokens, QuotaAccounts: quotaAccounts, HostGrants: hostGrants, UI: uiHandler, LinearWebhook: linear.webhook, LinearDecisions: linear.decisions, LinearMetadata: linear.metadata, LinearBoard: linear.boardAPI}, monitor)
 	addresses := []string{*listen}
 	if *tail != "" {
 		addresses = append(addresses, *tail)
@@ -1849,7 +1849,8 @@ func uiFromEnv(st *store.Store) (http.Handler, error) {
 
 // linearServer is what the Linear configuration turns on. Any field may be nil.
 type linearServer struct {
-	metadata    *api.LinearAPI
+	metadata    interface{ RefreshLinearMetadata(context.Context) error }
+	boardAPI    *api.LinearAPI
 	webhook     http.Handler
 	decisions   *api.LinearDecisions
 	opsWorker   backgroundWorker
@@ -1885,16 +1886,21 @@ func linearFromEnv(st *store.Store) linearServer {
 		log.Printf("linear_capacity.disabled reason=invalid_policy err=%q", capacityErr)
 	}
 	linearAPI := api.LinearAPI{Metadata: st, BoardControl: &api.LinearBoardControl{}, Key: key, App: app, Admission: st, CapacityPolicy: capacityPolicy, CapacityScopeVerified: capacityErr == nil && strings.TrimSpace(os.Getenv("HANDOFFKEEP_LINEAR_CAPACITY_SCOPE")) == "workspace"}
-	out := linearServer{boardWorker: linearBoardFromEnv(st, linearAPI)}
+	out := linearServer{}
 	if credential {
 		out.metadata = &linearAPI
+		out.boardAPI = &linearAPI
 	}
 	if secret == "" || !credential {
+		if credential && strings.TrimSpace(os.Getenv("HANDOFFKEEP_LINEAR_WORK_BOARD")) == "on" {
+			log.Printf("linear_board.disabled reason=issue_webhook_unconfigured")
+		}
 		if secret != "" || operator != "" {
 			log.Printf("linear_webhook.disabled reason=incomplete_config")
 		}
 		return out
 	}
+	out.boardWorker = linearBoardFromEnv(st, linearAPI)
 	webhook := api.LinearWebhook{Secret: secret, Issues: linearAPI, Store: st, BoardControl: linearAPI.BoardControl, Board: st}
 	if operator == "" {
 		out.webhook = webhook

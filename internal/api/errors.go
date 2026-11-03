@@ -47,6 +47,7 @@ type errorRule struct {
 // errorRules is the one table from sentinel to response. Order matters only
 // where one error could match two rules; the first match wins.
 var errorRules = []errorRule{
+	{store.ErrLinearReservationTooRecent, http.StatusConflict, "linear_reservation_too_recent", false},
 	{store.ErrInvalidSync, http.StatusBadRequest, "invalid_context", false},
 	{attachments.ErrDisabled, http.StatusServiceUnavailable, "attachments_disabled", false},
 	{attachments.ErrTooLarge, http.StatusRequestEntityTooLarge, "attachment_too_large", false},

@@ -136,7 +136,7 @@ func (w LinearBoardWorker) send(ctx context.Context, op store.LinearOutbox) (sto
 		var label linearBoardLabelUnavailableError
 		var rate linearRateLimitError
 		if errors.As(err, &label) {
-			w.Control.breakLabel(label.Name)
+			w.Control.breakLabel(label.Name, label.TeamID)
 		}
 		result.State = "pending"
 		result.RetryAt = time.Now().UTC().Add(min(time.Hour, time.Duration(1<<min(op.Attempts, 10))*5*time.Second))

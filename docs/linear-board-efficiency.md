@@ -49,12 +49,14 @@ before mutation, but ownership is separate from the active webhook mapping.
 
 Task lookup reads hk's mapping. A known Linear id or identifier uses one issue
 fetch; the board does not use content search. Creation still uses serialized
-capacity admission. Accepted creates awaiting webhooks also reserve capacity
-slots until acknowledgement, so delayed inventory visibility cannot undercount
-new issues; a visible issue may be conservatively counted twice briefly. A successful create waits for its webhook; a transport or
-ambiguous GraphQL failure retains the reservation without retrying a duplicate
-create. An unresolved ambiguous reservation holds new creates conservatively.
-It never triggers an automatic issue search.
+capacity admission. Unresolved creates, including those awaiting webhooks, reserve capacity
+slots until acknowledgement or explicit repair, so delayed inventory visibility cannot undercount
+new issues; a visible issue may be conservatively counted twice briefly. A successful board create waits for its webhook; a transport or ambiguous
+GraphQL failure retains its reservation. Every unresolved reservation books one
+capacity slot, so it does not stop unrelated creates while headroom remains.
+Definite HTTP/user-validation refusals and explicit `success:false` release the
+reservation; a capacity hold is retained independently. Normal board delivery
+never triggers an identity search.
 
 For a missed webhook, prefer redelivery of the original signed event. To repair
 one deterministic board issue explicitly:
@@ -66,8 +68,25 @@ handoffkeep linear board reconcile --task 123
 Authenticated `POST /v1/linear/board/reconcile` takes `{"task_id":123}`. It reads
 that single issue, verifies the active issue/team/ownership, retains a reservation
 and changes only hk's description marker. The resulting signed Issue webhook
-establishes the mapping. The command does not create an issue or write the link.
-It refuses an archived issue or a task suspended by archive/remove. Never infer
+establishes the mapping. The command does not create an issue or write the link. If an exact read,
+including archived issues, confirms absence, it instead releases the reservation
+and returns `released`. This requires verified workspace visibility and a
+two-minute grace period beyond local request processing. A failed, incomplete or
+unauthorized read never releases anything. The shared create lock serializes
+read/release with in-flight creates.
+It refuses an archived issue or a task suspended by archive/remove.
+
+For an ambiguous non-board reservation (or a known stable UUID), explicitly run:
+
+```sh
+handoffkeep linear reservations reconcile --issue <uuid>
+```
+
+Authenticated `POST /v1/linear/reservations/reconcile` accepts `{"issue_id":"<uuid>"}`.
+It completes a known non-board issue or releases a confirmed-absent reservation
+after the same grace period. A found board issue uses the task repair command so
+its actual signed webhook still establishes the link. These are bounded,
+one-id administrative repairs, not periodic scans. Never infer
 that an issue was deleted from its absence in a list, timeout or failed fetch.
 
 Only non-archived issues are mapped and synced. An archive/remove webhook drops
@@ -91,10 +110,13 @@ live-link rows are copied intact into `linear_issue_link_conflicts`; inspect tha
 audit before operating affected tasks. No issue is changed by this repair.
 The previously added ownership-conflict audit also remains available.
 
-A missing required label is created once under a database lock. A definitive
+Existing label lookup is lock-free. A miss takes a short per-label advisory
+lock, rechecks metadata and commits an attempt claim, then releases the connection
+before Linear create/readback. A crashed attempt expires after two minutes;
+a token prevents a late creator from removing a newer claim. A definitive
 create/readback failure is durable, opens one board circuit and logs one error.
-Other task rows are left pending. A matching label webhook or explicit metadata
-refresh supplies a recovery path; an explicit successful refresh permits another
+Other task rows are left pending. Only an active, matching label webhook whose stored metadata actually resolves
+the missing name/team, or explicit metadata refresh, clears the circuit; an explicit successful refresh permits another
 creation attempt. Transport failures retain normal backoff instead of being
 misclassified as a missing label.
 
@@ -105,7 +127,9 @@ deadline; no other row is attempted during the pause. No sleep holds a DB lock.
 
 ## Verification and rollback
 
-Deploy the current writer and webhook handler together; stop old writer instances
+The board worker starts only when the credential and local signed Issue
+webhook receiver are configured; otherwise it logs one startup configuration
+error and performs no creates. Deploy the current writer and webhook handler together; stop old writer instances
 so their hourly sweep cannot continue. Migration 32 locks `linear_issues` while
 quarantining conflicts and creating indexes, locks superseded outbox rows, and
 adds a nullable task reference on create reservations. It performs no Linear

@@ -16,6 +16,7 @@ func clearLinearConfig(t *testing.T) {
 
 func TestWorkBoardConfigUsesSharedAppToken(t *testing.T) {
 	clearLinearConfig(t)
+	t.Setenv("HANDOFFKEEP_LINEAR_WEBHOOK_SECRET", "fake-signing-secret")
 	t.Setenv("HANDOFFKEEP_LINEAR_WORK_BOARD", "on")
 	t.Setenv("HANDOFFKEEP_LINEAR_CLIENT_ID", "test-app")
 	t.Setenv("HANDOFFKEEP_LINEAR_CLIENT_SECRET", "test-secret")
@@ -24,7 +25,7 @@ func TestWorkBoardConfigUsesSharedAppToken(t *testing.T) {
 	st := &store.Store{}
 	config := linearFromEnv(st)
 	worker, ok := config.boardWorker.(api.LinearBoardWorker)
-	if !ok || !st.LinearBoardEnabled() || config.webhook != nil {
+	if !ok || !st.LinearBoardEnabled() || config.webhook == nil {
 		t.Fatalf("config=%+v", config)
 	}
 	client := worker.Linear.(api.LinearAPI)
@@ -52,6 +53,7 @@ func TestWorkBoardConfigOffAndNoCredential(t *testing.T) {
 		t.Fatal("enabled without a credential")
 	}
 	t.Setenv("HANDOFFKEEP_LINEAR_API_KEY", "test-key")
+	t.Setenv("HANDOFFKEEP_LINEAR_WEBHOOK_SECRET", "fake-signing-secret")
 	if linearFromEnv(st).boardWorker == nil || !st.LinearBoardEnabled() {
 		t.Fatal("key fallback disabled")
 	}
@@ -59,6 +61,7 @@ func TestWorkBoardConfigOffAndNoCredential(t *testing.T) {
 
 func TestLinearAdmissionConfigRequiresVerifiedWorkspaceScope(t *testing.T) {
 	clearLinearConfig(t)
+	t.Setenv("HANDOFFKEEP_LINEAR_WEBHOOK_SECRET", "fake-signing-secret")
 	t.Setenv("HANDOFFKEEP_LINEAR_WORK_BOARD", "on")
 	t.Setenv("HANDOFFKEEP_LINEAR_API_KEY", "fake-key")
 	st := &store.Store{}
@@ -75,6 +78,7 @@ func TestLinearAdmissionConfigRequiresVerifiedWorkspaceScope(t *testing.T) {
 
 func TestLinearCapacityConfigObservedLimitAndDowngrade(t *testing.T) {
 	clearLinearConfig(t)
+	t.Setenv("HANDOFFKEEP_LINEAR_WEBHOOK_SECRET", "fake-signing-secret")
 	t.Setenv("HANDOFFKEEP_LINEAR_WORK_BOARD", "on")
 	t.Setenv("HANDOFFKEEP_LINEAR_API_KEY", "fake-key")
 	t.Setenv("HANDOFFKEEP_LINEAR_CAPACITY_SCOPE", "workspace")

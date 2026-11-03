@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"github.com/jackc/pgx/v5"
 	"time"
@@ -97,19 +99,39 @@ func (s *Store) LinearBoardMetadata(ctx context.Context) ([]LinearMetadata, erro
 	}
 	return items, rows.Err()
 }
+
+const linearLabelLookup = `SELECT id FROM linear_metadata WHERE kind='label' AND name=$1 AND team_id IN ('',$2) AND NOT deleted ORDER BY (team_id=$2) DESC,id LIMIT 1`
+
+var ErrLinearLabelPending = errors.New("linear_label_creation_pending")
+
+func (s *Store) LinearBoardLabelAvailable(ctx context.Context, team, name string) (bool, error) {
+	var id string
+	err := s.pool.QueryRow(ctx, linearLabelLookup, name, team).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
+}
 func (s *Store) ResolveLinearBoardLabel(ctx context.Context, team, name string, create func(context.Context) (LinearMetadata, error)) (string, error) {
+	// Hits never take an advisory lock or wait for another label's HTTP call.
+	var id string
+	err := s.pool.QueryRow(ctx, linearLabelLookup, name, team).Scan(&id)
+	if err == nil {
+		return id, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return "", err
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return "", err
 	}
 	defer tx.Rollback(ctx)
-	// One label creation attempt, even with multiple workers. Failures are durable
-	// configuration faults; a later label webhook supplies the missing entity.
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(824180177)`); err != nil {
+	// Serialize only the short claim, per team/name, and re-check after locking.
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,824180177))`, team+":"+name); err != nil {
 		return "", err
 	}
-	var id string
-	err = tx.QueryRow(ctx, `SELECT id FROM linear_metadata WHERE kind='label' AND name=$1 AND team_id IN ('',$2) AND NOT deleted ORDER BY (team_id=$2) DESC,id LIMIT 1`, name, team).Scan(&id)
+	err = tx.QueryRow(ctx, linearLabelLookup, name, team).Scan(&id)
 	if err == nil {
 		return id, tx.Commit(ctx)
 	}
@@ -123,23 +145,53 @@ func (s *Store) ResolveLinearBoardLabel(ctx context.Context, team, name string, 
 	if failed {
 		return "", ErrLinearBoardLabelUnavailable
 	}
-	m, err := create(ctx)
+	var nonce [16]byte
+	if _, err = rand.Read(nonce[:]); err != nil {
+		return "", err
+	}
+	token := hex.EncodeToString(nonce[:])
+	tag, err := tx.Exec(ctx, `INSERT INTO linear_label_attempts(team_id,name,token,started_at) VALUES($1,$2,$3,clock_timestamp())
+ ON CONFLICT(team_id,name) DO UPDATE SET token=EXCLUDED.token,started_at=EXCLUDED.started_at
+ WHERE linear_label_attempts.started_at<clock_timestamp()-interval '2 minutes'`, team, name, token)
 	if err != nil {
-		if errors.Is(err, ErrLinearBoardLabelUnavailable) {
-			if _, saveErr := tx.Exec(ctx, `INSERT INTO linear_label_failures(team_id,name) VALUES($1,$2) ON CONFLICT DO NOTHING`, team, name); saveErr != nil {
-				return "", saveErr
-			}
-			if saveErr := tx.Commit(ctx); saveErr != nil {
-				return "", saveErr
+		return "", err
+	}
+	if tag.RowsAffected() == 0 {
+		return "", ErrLinearLabelPending
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return "", err
+	}
+	// No DB lock or pooled connection is held across remote create/readback.
+	m, createErr := create(ctx)
+	finish, err := s.pool.Begin(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer finish.Rollback(ctx)
+	tag, err = finish.Exec(ctx, `DELETE FROM linear_label_attempts WHERE team_id=$1 AND name=$2 AND token=$3`, team, name, token)
+	if err != nil {
+		return "", err
+	}
+	if tag.RowsAffected() == 0 {
+		return "", ErrLinearLabelPending
+	}
+	if createErr != nil {
+		if errors.Is(createErr, ErrLinearBoardLabelUnavailable) {
+			if _, err = finish.Exec(ctx, `INSERT INTO linear_label_failures(team_id,name) VALUES($1,$2) ON CONFLICT DO NOTHING`, team, name); err != nil {
+				return "", err
 			}
 		}
-		return "", err
+		if err = finish.Commit(ctx); err != nil {
+			return "", err
+		}
+		return "", createErr
 	}
-	if m.Kind != "label" || m.Name != name || m.TeamID != team || m.Deleted {
+	if m.Kind != "label" || m.ID == "" || m.Name != name || m.TeamID != team || m.Deleted {
 		return "", errors.New("invalid created linear label")
 	}
-	if err = applyLinearMetadata(ctx, tx, []LinearMetadata{m}); err != nil {
+	if err = applyLinearMetadata(ctx, finish, []LinearMetadata{m}); err != nil {
 		return "", err
 	}
-	return m.ID, tx.Commit(ctx)
+	return m.ID, finish.Commit(ctx)
 }

@@ -590,7 +590,7 @@ func (a LinearAPI) CreateLinearIssue(ctx context.Context, in LinearDecisionIssue
 func (a LinearAPI) createLinearIssue(ctx context.Context, in LinearDecisionIssue) (LinearIssue, error) {
 	var out struct {
 		IssueCreate struct {
-			Success bool `json:"success"`
+			Success *bool `json:"success"`
 			Issue   *struct {
 				Identifier string `json:"identifier"`
 				URL        string `json:"url"`
@@ -601,8 +601,14 @@ func (a LinearAPI) createLinearIssue(ctx context.Context, in LinearDecisionIssue
 	if err := a.graphql(ctx, linearWriteTimeout, linearIssueCreateMutation, map[string]any{"input": input}, &out); err != nil {
 		return LinearIssue{}, err
 	}
-	if !out.IssueCreate.Success || out.IssueCreate.Issue == nil {
+	if out.IssueCreate.Success == nil {
+		return LinearIssue{}, errors.New("linear issue create response incomplete")
+	}
+	if !*out.IssueCreate.Success {
 		return LinearIssue{}, linearRejectionError{err: errors.New("linear api did not create the issue"), definite: true}
+	}
+	if out.IssueCreate.Issue == nil {
+		return LinearIssue{}, errors.New("linear accepted issue response incomplete")
 	}
 	return LinearIssue{Identifier: out.IssueCreate.Issue.Identifier, URL: out.IssueCreate.Issue.URL}, nil
 }

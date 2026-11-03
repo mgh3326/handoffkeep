@@ -439,21 +439,52 @@ func (a LinearAPI) graphql(ctx context.Context, timeout time.Duration, query str
 	}
 	if len(envelope.Errors) > 0 {
 		capacity := false
+		definite := true
 		for _, entry := range envelope.Errors {
 			rate := strings.ToUpper(entry.Extensions.Type + " " + entry.Extensions.Code)
 			if strings.Contains(rate, "RATELIMIT") || strings.Contains(rate, "RATE_LIMIT") {
 				return a.BoardControl.rateLimited(resp.Header.Get("Retry-After"))
 			}
-			if linearCapacityRejected(entry.Message, entry.Extensions.Type, entry.Extensions.Code) {
-				capacity = true
+			entryCapacity := linearCapacityRejected(entry.Message, entry.Extensions.Type, entry.Extensions.Code)
+			capacity = capacity || entryCapacity
+			if !entryCapacity && !linearInputRejected(entry.Message, entry.Extensions.Type, entry.Extensions.Code) {
+				definite = false
 			}
 		}
-		return linearRejectionError{err: fmt.Errorf("linear api error: %s", envelope.Errors[0].Message), capacity: capacity, definite: capacity}
+		return linearRejectionError{err: fmt.Errorf("linear api error: %s", envelope.Errors[0].Message), capacity: capacity, definite: definite}
 	}
 	if err := json.Unmarshal(envelope.Data, out); err != nil {
 		return fmt.Errorf("linear api response: %w", err)
 	}
+	a.BoardControl.requestSucceeded()
 	return nil
+}
+
+// Only documented user/validation categories and unambiguous GraphQL
+// validation messages prove refusal. Internal/unknown errors remain ambiguous.
+func linearInputRejected(message, kind, code string) bool {
+	normalize := func(v string) string {
+		return strings.NewReplacer("_", "", "-", "", " ", "").Replace(strings.ToLower(v))
+	}
+	for _, v := range []string{normalize(kind), normalize(code)} {
+		switch v {
+		case "usererror", "userinputerror", "baduserinput", "inputerror", "invalidinput", "invalidargument", "validationerror", "validationfailed", "graphqlvalidationfailed", "graphqlvalidationerror", "graphqlparsefailed":
+			return true
+		}
+	}
+	lower := strings.ToLower(message)
+	if strings.HasPrefix(lower, "cannot query field ") || strings.HasPrefix(lower, "unknown argument ") {
+		return true
+	}
+	if strings.HasPrefix(lower, "variable ") && (strings.Contains(lower, "got invalid value") || strings.Contains(lower, "of required type")) {
+		return true
+	}
+	for _, field := range []string{"labelid", "stateid", "teamid", "assigneeid"} {
+		if strings.Contains(lower, "invalid "+field) {
+			return true
+		}
+	}
+	return false
 }
 
 func linearCapacityRejected(message, kind, code string) bool {
@@ -550,6 +581,19 @@ func (h LinearWebhook) handleBoardWebhook(ctx context.Context, p linearWebhookPa
 	if err = h.Board.ApplyLinearMetadata(ctx, []store.LinearMetadata{{Kind: kind, ID: p.Data.ID, TeamID: team, Name: name, UpdatedAt: at, Deleted: inactive}}); err != nil {
 		return err
 	}
-	h.BoardControl.metadataChanged()
+	missingTeam, missingName := h.BoardControl.missingLabelKey()
+	if kind == "label" && !inactive && name == missingName && missingName != "" && (team == missingTeam || team == "") {
+		if checker, ok := h.Board.(interface {
+			LinearBoardLabelAvailable(context.Context, string, string) (bool, error)
+		}); ok {
+			available, err := checker.LinearBoardLabelAvailable(ctx, missingTeam, missingName)
+			if err != nil {
+				return err
+			}
+			if available {
+				h.BoardControl.labelResolved(missingTeam, missingName)
+			}
+		}
+	}
 	return nil
 }

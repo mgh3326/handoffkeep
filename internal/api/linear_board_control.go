@@ -15,6 +15,7 @@ import (
 type LinearBoardControl struct {
 	mu           sync.Mutex
 	missingLabel string
+	missingTeam  string
 	pausedUntil  time.Time
 	rateFailures int
 	calls        uint64
@@ -61,7 +62,7 @@ func (c *LinearBoardControl) CallCount() uint64 {
 	defer c.mu.Unlock()
 	return c.calls
 }
-func (c *LinearBoardControl) breakLabel(name string) {
+func (c *LinearBoardControl) breakLabel(name string, team ...string) {
 	if c == nil {
 		return
 	}
@@ -69,6 +70,9 @@ func (c *LinearBoardControl) breakLabel(name string) {
 	defer c.mu.Unlock()
 	if c.missingLabel == "" {
 		c.missingLabel = name
+		if len(team) > 0 {
+			c.missingTeam = team[0]
+		}
 		log.Printf("linear_board.circuit_open reason=label_unavailable label=%q", name)
 	}
 }
@@ -76,6 +80,7 @@ func (c *LinearBoardControl) metadataChanged() {
 	if c != nil {
 		c.mu.Lock()
 		c.missingLabel = ""
+		c.missingTeam = ""
 		c.mu.Unlock()
 	}
 }
@@ -116,8 +121,36 @@ func (c *LinearBoardControl) rateLimited(header string) error {
 	return linearRejectionError{err: linearRateLimitError{Until: until}}
 }
 
-type linearBoardLabelUnavailableError struct{ Name string }
+type linearBoardLabelUnavailableError struct{ Name, TeamID string }
 
 func (e linearBoardLabelUnavailableError) Error() string {
 	return fmt.Sprintf("linear board label %q unavailable", e.Name)
+}
+
+func (c *LinearBoardControl) requestSucceeded() {
+	if c != nil {
+		c.mu.Lock()
+		c.rateFailures = 0
+		c.mu.Unlock()
+	}
+}
+
+func (c *LinearBoardControl) missingLabelKey() (string, string) {
+	if c == nil {
+		return "", ""
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.missingTeam, c.missingLabel
+}
+func (c *LinearBoardControl) labelResolved(team, name string) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.missingLabel == name && c.missingTeam == team {
+		c.missingLabel = ""
+		c.missingTeam = ""
+	}
 }

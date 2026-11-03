@@ -65,8 +65,9 @@ and ordinary field validation do not become capacity holds.
 
 Before the HTTP create, hk commits a reservation for its stable issue id.
 Board creates retain it until the signed Issue webhook establishes the active
-mapping. They make no automatic identity search/readback. An ambiguous create
-waits for webhook redelivery or explicit one-task repair. Other issue producers
+mapping. They make no automatic identity search/readback. An ambiguous create books its slot without blocking unrelated creates and
+waits for webhook redelivery or explicit exact-id repair, which can release a
+confirmed-absent reservation after two minutes. Other issue producers
 retain their exact-id rejection/recovery contract. See
 [the event-driven board runbook](linear-board-efficiency.md) for webhook setup,
 manual metadata refresh, missed-webhook repair and shared rate-limit handling.

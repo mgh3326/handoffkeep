@@ -149,7 +149,7 @@ func TestLinearBoardEfficiencyMigrationCollapsesOnceAndIndexesBothKeys(t *testin
 	defer st.Close()
 	tasks := []Task{linearTask(t, st, TaskRefs{}), linearTask(t, st, TaskRefs{}), linearTask(t, st, TaskRefs{})}
 	for _, sql := range []string{
-		`DROP TABLE linear_metadata,linear_metadata_state,linear_label_failures,linear_issue_link_conflicts,linear_issue_webhook_versions,linear_board_stopped_tasks`,
+		`DROP TABLE linear_metadata,linear_metadata_state,linear_label_attempts,linear_label_failures,linear_issue_link_conflicts,linear_issue_webhook_versions,linear_board_stopped_tasks`,
 		`DROP INDEX linear_issues_issue_id,linear_issues_identifier`,
 		`ALTER TABLE linear_create_admissions DROP COLUMN board_task_id,DROP COLUMN awaiting_webhook`,
 		`DELETE FROM schema_version WHERE version=32`,

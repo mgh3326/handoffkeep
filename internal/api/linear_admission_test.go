@@ -146,7 +146,7 @@ func (f *admissionRemote) serve(w http.ResponseWriter, r *http.Request) {
 				if message == "" {
 					message = "argument rejected"
 				}
-				_ = json.NewEncoder(w).Encode(map[string]any{"errors": []map[string]string{{"message": message}}})
+				_ = json.NewEncoder(w).Encode(map[string]any{"errors": []map[string]any{{"message": message, "extensions": map[string]string{"type": "UserError"}}}})
 				return
 			}
 			status := f.rejectStatus
@@ -254,7 +254,7 @@ func TestLinearAdmissionConcurrentLastSlot(t *testing.T) {
 func TestLinearAdmissionRecoversLostResponseAtWatermark(t *testing.T) {
 	remote := &admissionRemote{count: 269, loseResponse: true}
 	api, gate := admissionClient(t, remote)
-	if _, err := api.CreateLinearIssue(t.Context(), LinearDecisionIssue{TaskID: 1, ID: "stable"}); err == nil || !gate.pending["stable"] {
+	if _, err := api.CreateLinearIssue(t.Context(), LinearDecisionIssue{TaskID: 1, ID: "stable"}); err != nil || len(gate.pending) != 0 {
 		t.Fatal(gate.pending, err)
 	}
 	issue, err := api.CreateLinearIssue(t.Context(), LinearDecisionIssue{TaskID: 1, ID: "stable"})
@@ -263,7 +263,7 @@ func TestLinearAdmissionRecoversLostResponseAtWatermark(t *testing.T) {
 	}
 }
 
-func TestLinearAdmissionUncertainCreateBlocksNewIdentity(t *testing.T) {
+func TestLinearAdmissionUncertainCreateBooksSlotForNewIdentity(t *testing.T) {
 	remote := &admissionRemote{rejectCreate: true}
 	api, gate := admissionClient(t, remote)
 	if _, err := api.CreateLinearIssue(t.Context(), LinearDecisionIssue{TaskID: 1, ID: "uncertain"}); err == nil {
@@ -271,7 +271,7 @@ func TestLinearAdmissionUncertainCreateBlocksNewIdentity(t *testing.T) {
 	}
 	remote.rejectCreate = false
 	_, err := api.CreateLinearIssue(t.Context(), LinearDecisionIssue{TaskID: 1, ID: "different"})
-	if !errors.Is(err, ErrLinearCapacity) || remote.creates != 1 || !gate.pending["uncertain"] {
+	if err != nil || remote.creates != 2 || !gate.pending["uncertain"] {
 		t.Fatal(remote.creates, gate.pending, err)
 	}
 }
@@ -412,7 +412,7 @@ func TestWorkBoardMirrorOldSnapshotsUseCurrentVersion(t *testing.T) {
 	}
 }
 
-func TestLinearAdmissionDefiniteRejectionReleasesOnlyAfterReadback(t *testing.T) {
+func TestLinearAdmissionDefiniteRejectionReleasesWithoutReadback(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		status  int
@@ -434,8 +434,8 @@ func TestLinearAdmissionDefiniteRejectionReleasesOnlyAfterReadback(t *testing.T)
 	}
 	remote := &admissionRemote{rejectCreate: true, rejectStatus: 429, rejectThenReadFails: true}
 	api, gate := admissionClient(t, remote)
-	if _, err := api.CreateLinearIssue(t.Context(), LinearDecisionIssue{TaskID: 1, ID: "uncertain"}); err == nil || len(gate.pending) != 1 {
-		t.Fatal("failed read dropped rejection record", gate.pending, err)
+	if _, err := api.CreateLinearIssue(t.Context(), LinearDecisionIssue{TaskID: 1, ID: "uncertain"}); err == nil || len(gate.pending) != 0 {
+		t.Fatal("known rate rejection retained reservation", gate.pending, err)
 	}
 	remote.mu.Lock()
 	remote.rejectCreate = false
@@ -545,12 +545,7 @@ func (f *admissionFake) IsBoardReservation(_ context.Context, id string) (bool, 
 	return f.board[id], nil
 }
 
-func (f *admissionFake) AwaitingBoardCreates(context.Context) (int, error) {
-	count := 0
-	for id := range f.awaiting {
-		if f.pending[id] {
-			count++
-		}
-	}
-	return count, nil
+func (f *admissionFake) ReservedCreates(context.Context) (int, error) { return len(f.pending), nil }
+func (f *admissionFake) ReleaseAbsent(ctx context.Context, id string) error {
+	return f.Complete(ctx, id)
 }

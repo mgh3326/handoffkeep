@@ -1,5 +1,11 @@
 package store
 
+import (
+	"context"
+	"fmt"
+	"github.com/jackc/pgx/v5"
+)
+
 // Version 32 mirrors metadata locally and collapses the old board backlog.
 // CREATE UNIQUE INDEX and duplicate quarantine lock linear_issues; UPDATE locks
 // superseded pending board rows. The new reservation FK takes SHARE ROW
@@ -9,6 +15,7 @@ var linearBoardEfficiencyV32 = []string{
 	`INSERT INTO linear_metadata_state(singleton) VALUES(true)`,
 	`CREATE TABLE linear_metadata(kind TEXT NOT NULL CHECK(kind IN ('team','state','label')),id TEXT NOT NULL,team_id TEXT NOT NULL,name TEXT NOT NULL,updated_at TIMESTAMPTZ NOT NULL,deleted BOOLEAN NOT NULL DEFAULT false,PRIMARY KEY(kind,id))`,
 	`CREATE INDEX linear_metadata_lookup ON linear_metadata(kind,team_id,name) WHERE NOT deleted`,
+	`CREATE TABLE linear_label_attempts(team_id TEXT NOT NULL,name TEXT NOT NULL,token TEXT NOT NULL,started_at TIMESTAMPTZ NOT NULL,PRIMARY KEY(team_id,name))`,
 	`CREATE TABLE linear_label_failures(team_id TEXT NOT NULL,name TEXT NOT NULL,PRIMARY KEY(team_id,name))`,
 	`CREATE TABLE linear_issue_link_conflicts(snapshot JSONB NOT NULL,quarantined_at TIMESTAMPTZ NOT NULL DEFAULT now())`,
 	// Preserve every conflicting row before removing it from the live reverse
@@ -30,4 +37,54 @@ var linearBoardEfficiencyV32 = []string{
 	`CREATE TABLE linear_board_stopped_tasks(task_id BIGINT PRIMARY KEY REFERENCES tasks(id))`,
 	`UPDATE linear_outbox SET attempts=0,next_attempt_at=now(),last_error='' WHERE op='work_board' AND state='pending'`,
 	`INSERT INTO schema_version(version) VALUES(32)`,
+}
+
+// Match old stable board ids in Go; no database crypto extension or title
+// inference is required. Unknown non-board reservations stay recoverable by id.
+func backfillLinearBoardReservations(ctx context.Context, tx pgx.Tx) error {
+	rows, err := tx.Query(ctx, `SELECT issue_id FROM linear_create_admissions WHERE board_task_id IS NULL`)
+	if err != nil {
+		return err
+	}
+	pending := map[string]bool{}
+	for rows.Next() {
+		var id string
+		if err = rows.Scan(&id); err != nil {
+			rows.Close()
+			return err
+		}
+		pending[id] = true
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil || len(pending) == 0 {
+		return err
+	}
+	rows, err = tx.Query(ctx, `SELECT id FROM tasks ORDER BY id`)
+	if err != nil {
+		return err
+	}
+	matches := map[string]int64{}
+	for rows.Next() {
+		var taskID int64
+		if err = rows.Scan(&taskID); err != nil {
+			rows.Close()
+			return err
+		}
+		id := LinearDecisionUUID(fmt.Sprintf("work-board:task:%d", taskID))
+		if pending[id] {
+			matches[id] = taskID
+		}
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	for id, taskID := range matches {
+		if _, err = tx.Exec(ctx, `UPDATE linear_create_admissions SET board_task_id=$2 WHERE issue_id=$1 AND board_task_id IS NULL`, id, taskID); err != nil {
+			return err
+		}
+	}
+	return nil
 }

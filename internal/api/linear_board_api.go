@@ -38,7 +38,7 @@ func (a LinearAPI) BoardLabel(ctx context.Context, teamID, name string) (string,
 		stable := store.LinearDecisionUUID("work-board:label:" + teamID + ":" + name)
 		var out struct {
 			IssueLabelCreate struct {
-				Success    bool
+				Success    *bool
 				IssueLabel *struct {
 					ID        string
 					UpdatedAt time.Time
@@ -46,8 +46,15 @@ func (a LinearAPI) BoardLabel(ctx context.Context, teamID, name string) (string,
 			}
 		}
 		createErr := a.graphql(ctx, linearWriteTimeout, boardLabelCreateMutation, map[string]any{"input": map[string]any{"id": stable, "teamId": teamID, "name": name}}, &out)
-		if createErr == nil && out.IssueLabelCreate.Success && out.IssueLabelCreate.IssueLabel != nil && out.IssueLabelCreate.IssueLabel.ID == stable {
+		if createErr == nil && out.IssueLabelCreate.Success != nil && *out.IssueLabelCreate.Success && out.IssueLabelCreate.IssueLabel != nil && out.IssueLabelCreate.IssueLabel.ID == stable {
 			return store.LinearMetadata{Kind: "label", ID: stable, TeamID: teamID, Name: name, UpdatedAt: out.IssueLabelCreate.IssueLabel.UpdatedAt}, nil
+		}
+		if createErr == nil {
+			if out.IssueLabelCreate.Success != nil && !*out.IssueLabelCreate.Success {
+				createErr = linearRejectionError{err: errors.New("linear label create refused"), definite: true}
+			} else {
+				createErr = errors.New("linear label create response incomplete")
+			}
 		}
 		var rate linearRateLimitError
 		if errors.As(createErr, &rate) {
@@ -67,7 +74,8 @@ func (a LinearAPI) BoardLabel(ctx context.Context, teamID, name string) (string,
 				return store.LinearMetadata{}, err
 			}
 			var rejected linearRejectionError
-			if errors.As(err, &rejected) {
+			var createRejection linearRejectionError
+			if errors.As(createErr, &createRejection) && createRejection.definite && errors.As(err, &rejected) && rejected.definite {
 				return store.LinearMetadata{}, store.ErrLinearBoardLabelUnavailable
 			}
 			return store.LinearMetadata{}, err
@@ -75,16 +83,14 @@ func (a LinearAPI) BoardLabel(ctx context.Context, teamID, name string) (string,
 		if label := read.IssueLabel; label != nil && label.ID == stable && label.Name == name && label.Team != nil && label.Team.ID == teamID {
 			return store.LinearMetadata{Kind: "label", ID: stable, TeamID: teamID, Name: name, UpdatedAt: label.UpdatedAt}, nil
 		}
-		if createErr != nil {
-			var rejected linearRejectionError
-			if !errors.As(createErr, &rejected) {
-				return store.LinearMetadata{}, createErr
-			}
+		var rejected linearRejectionError
+		if !errors.As(createErr, &rejected) || !rejected.definite {
+			return store.LinearMetadata{}, createErr
 		}
 		return store.LinearMetadata{}, store.ErrLinearBoardLabelUnavailable
 	})
 	if errors.Is(err, store.ErrLinearBoardLabelUnavailable) {
-		return "", linearBoardLabelUnavailableError{Name: name}
+		return "", linearBoardLabelUnavailableError{Name: name, TeamID: teamID}
 	}
 	return id, err
 }

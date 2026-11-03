@@ -14,12 +14,17 @@ func linearCmd(args []string, out io.Writer) error {
 	}
 	metadata := args[0] == "metadata" && args[1] == "refresh"
 	reconcile := args[0] == "board" && args[1] == "reconcile"
-	if !metadata && !reconcile {
+	reservation := args[0] == "reservations" && args[1] == "reconcile"
+	if !metadata && !reconcile && !reservation {
 		return errors.New("unknown linear command")
 	}
 	fs := flag.NewFlagSet("linear", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	client := remoteClient(fs)
+	var issueID *string
+	if reservation {
+		issueID = fs.String("issue", "", "one stable issue UUID to repair")
+	}
 	var taskID *int64
 	if reconcile {
 		taskID = fs.Int64("task", 0, "one task whose issue webhook was missed")
@@ -27,7 +32,7 @@ func linearCmd(args []string, out io.Writer) error {
 	if err := fs.Parse(args[2:]); err != nil {
 		return err
 	}
-	if fs.NArg() != 0 || (reconcile && *taskID < 1) {
+	if fs.NArg() != 0 || (reconcile && *taskID < 1) || (reservation && *issueID == "") {
 		return errors.New("invalid linear command arguments")
 	}
 	if err := mustClient(client); err != nil {
@@ -41,10 +46,15 @@ func linearCmd(args []string, out io.Writer) error {
 			return err
 		}
 	} else {
-		if err := client.ReconcileLinearBoard(ctx, *taskID); err != nil {
+		var err error
+		if reconcile {
+			status, err = client.ReconcileLinearBoard(ctx, *taskID)
+		} else {
+			status, err = client.ReconcileLinearReservation(ctx, *issueID)
+		}
+		if err != nil {
 			return err
 		}
-		status = "awaiting_webhook"
 	}
 	return printJSON(out, map[string]string{"status": status})
 }

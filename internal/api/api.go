@@ -566,6 +566,7 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("GET /v1/sync/delta", s.syncDelta)
 	m.HandleFunc("POST /v1/linear/metadata/refresh", s.linearMetadataRefresh)
 	m.HandleFunc("POST /v1/linear/board/reconcile", s.linearBoardReconcile)
+	m.HandleFunc("POST /v1/linear/reservations/reconcile", s.linearReservationReconcile)
 	m.HandleFunc("GET /v1/sync/bootstrap", s.syncBootstrap)
 	m.HandleFunc("GET /v1/sync/rows/{model}/{model_id...}", s.syncRow)
 	m.HandleFunc("GET /v1/documents", s.documents)

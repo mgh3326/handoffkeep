@@ -34,7 +34,7 @@ func (s *Store) RecordLinearBoardIssue(ctx context.Context, event LinearBoardIss
 		return err
 	}
 	var taskID int64
-	err = tx.QueryRow(ctx, `SELECT task_id FROM linear_issues WHERE issue_id=$1 UNION SELECT task_id FROM linear_board_owners WHERE issue_id=$1 LIMIT 1`, event.IssueID).Scan(&taskID)
+	err = tx.QueryRow(ctx, `SELECT task_id FROM linear_issues WHERE issue_id=$1 UNION SELECT task_id FROM linear_board_owners WHERE issue_id=$1 UNION SELECT board_task_id FROM linear_create_admissions WHERE issue_id=$1 AND board_task_id IS NOT NULL LIMIT 1`, event.IssueID).Scan(&taskID)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return err
 	}
@@ -53,7 +53,7 @@ func (s *Store) RecordLinearBoardIssue(ctx context.Context, event LinearBoardIss
 			return nil
 		}
 		var reserved bool
-		if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM linear_create_admissions WHERE issue_id=$1 AND board_task_id=$2)`, event.IssueID, taskID).Scan(&reserved); err != nil {
+		if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM linear_create_admissions WHERE issue_id=$1 AND (board_task_id=$2 OR board_task_id IS NULL))`, event.IssueID, taskID).Scan(&reserved); err != nil {
 			return err
 		}
 		if !reserved {

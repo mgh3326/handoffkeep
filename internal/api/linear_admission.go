@@ -58,8 +58,9 @@ func (a LinearAPI) admittedCreate(ctx context.Context, in LinearDecisionIssue) (
 				return err
 			}
 			if board {
-				return fmt.Errorf("%w: board create awaits webhook or manual recovery", ErrLinearCapacity)
-			}
+				continue
+			} // its slot is booked until webhook/manual repair
+
 			_, found, err := a.admissionExisting(ctx, id)
 			if err != nil {
 				return fmt.Errorf("%w: earlier create readback unavailable", ErrLinearCapacity)
@@ -70,7 +71,10 @@ func (a LinearAPI) admittedCreate(ctx context.Context, in LinearDecisionIssue) (
 					return err
 				}
 				if !rejected {
-					return fmt.Errorf("%w: uncertain earlier create requires reconciliation", ErrLinearCapacity)
+					if id == in.ID {
+						return fmt.Errorf("%w: repair this ambiguous reservation before retry", ErrLinearCapacity)
+					}
+					continue // book the unknown outcome; do not stop unrelated creates
 				}
 			}
 			if err := lease.Complete(ctx, id); err != nil {
@@ -98,26 +102,24 @@ func (a LinearAPI) admittedCreate(ctx context.Context, in LinearDecisionIssue) (
 		result, err = a.createLinearIssue(ctx, in)
 		if err != nil {
 			var rejection linearRejectionError
-			if errors.As(err, &rejection) {
-				if rejection.capacity {
-					if holdErr := lease.HoldCapacity(ctx, a.CapacityPolicy.Limit()); holdErr != nil {
-						return errors.Join(err, holdErr)
-					}
-				}
-				if recordErr := lease.Reject(ctx, in.ID); recordErr != nil {
-					return errors.Join(err, recordErr)
-				}
-				recovered, found, readErr := a.admissionExisting(ctx, in.ID)
-				if readErr == nil {
-					if found {
-						result = recovered
-						return lease.Complete(ctx, in.ID)
-					}
-					return errors.Join(err, lease.Complete(ctx, in.ID))
-				}
+			var holdErr error
+			if errors.As(err, &rejection) && rejection.capacity {
+				holdErr = lease.HoldCapacity(ctx, a.CapacityPolicy.Limit())
 			}
-			return err
-		} // durable reservation survives transport/5xx or failed readback
+			var rate linearRateLimitError
+			if (errors.As(err, &rejection) && rejection.definite) || errors.As(err, &rate) {
+				return errors.Join(err, holdErr, lease.Complete(ctx, in.ID))
+			}
+			// Non-board producers already use exact-id readback. Only a known
+			// issue completes ambiguity; absence retains its booked slot and
+			// can be released by explicit, grace-bounded reservation repair.
+			recovered, found, readErr := a.admissionExisting(ctx, in.ID)
+			if readErr == nil && found {
+				result = recovered
+				return errors.Join(holdErr, lease.Complete(ctx, in.ID))
+			}
+			return errors.Join(err, holdErr)
+		}
 		return lease.Complete(ctx, in.ID)
 	})
 	return result, err
@@ -211,7 +213,7 @@ func (a LinearAPI) admissionCapacity(ctx context.Context, lease store.LinearCrea
 	// Until the webhook acknowledges an accepted board create, reserve its
 	// slot even if the next inventory page has not exposed it yet. Counting a
 	// visible issue twice briefly is conservative; undercounting is unsafe.
-	awaiting, err := lease.AwaitingBoardCreates(ctx)
+	awaiting, err := lease.ReservedCreates(ctx)
 	if err != nil {
 		return err
 	}
@@ -225,8 +227,8 @@ func (a LinearAPI) admissionCapacity(ctx context.Context, lease store.LinearCrea
 	return nil
 }
 
-// Board creates never search/read back an issue. Acceptance is linked only by
-// the signed webhook. An ambiguous create remains pending for manual recovery.
+// Normal board delivery never reads back an issue. Acceptance is linked by
+// the signed webhook. Ambiguous outcomes book slots and have explicit repair.
 func (a LinearAPI) admittedBoardCreate(ctx context.Context, in LinearDecisionIssue) (LinearIssue, error) {
 	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
@@ -252,13 +254,6 @@ func (a LinearAPI) admittedBoardCreate(ctx context.Context, in LinearDecisionIss
 		if reservedBefore {
 			return errBoardAwaitWebhook
 		}
-		pending, err := lease.Pending(ctx)
-		if err != nil {
-			return err
-		}
-		if len(pending) > 0 {
-			return fmt.Errorf("%w: uncertain create awaits webhook or manual recovery", ErrLinearCapacity)
-		}
 		if err = a.admissionCapacity(ctx, lease); err != nil {
 			return err
 		}
@@ -272,22 +267,21 @@ func (a LinearAPI) admittedBoardCreate(ctx context.Context, in LinearDecisionIss
 		result, err = a.createLinearIssue(ctx, in)
 		if err != nil {
 			var rejection linearRejectionError
+			var holdErr error
 			if errors.As(err, &rejection) && rejection.capacity {
-				if holdErr := lease.HoldCapacity(ctx, a.CapacityPolicy.Limit()); holdErr != nil {
-					return errors.Join(err, holdErr)
-				}
+				holdErr = lease.HoldCapacity(ctx, a.CapacityPolicy.Limit())
 			}
 			// A received HTTP 4xx, explicit refused mutation or capacity
 			// rejection did not create an issue. Release only that known
 			// rejection; transport/5xx/ambiguous GraphQL retains identity.
 			if errors.As(err, &rejection) && rejection.definite {
-				return errors.Join(err, lease.Complete(ctx, in.ID))
+				return errors.Join(err, holdErr, lease.Complete(ctx, in.ID))
 			}
 			var rate linearRateLimitError
 			if errors.As(err, &rate) {
 				return errors.Join(err, lease.Complete(ctx, in.ID))
 			}
-			return err
+			return errors.Join(err, holdErr)
 		}
 		return lease.AwaitBoardWebhook(ctx, in.ID)
 	})

@@ -226,12 +226,9 @@ func TestWorkBoardStateTransitions(t *testing.T) {
 			q := &boardQueue{links: map[int64]store.LinearIssue{}}
 			q.add(b, store.LinearBoardEvent{})
 			linear := newBoardFake()
-			if true {
-				issue := BoardIssue{ID: "prior", Identifier: "ROB-1"}
-				issue.Team.ID = "team"
-				linear.issues["prior"] = issue
-				q.links[42] = store.LinearIssue{IssueID: "prior"}
-			}
+			// These cases test maintenance of an already webhook-linked issue;
+			// creation and pre-webhook pending behavior are covered separately.
+			seedBoardLink(q, linear)
 			LinearBoardWorker{Store: q, Linear: linear}.Drain(t.Context())
 			if len(linear.states) != 1 || linear.states[0] != tc.want {
 				t.Fatalf("states=%v want=%s", linear.states, tc.want)
