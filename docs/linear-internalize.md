@@ -117,6 +117,8 @@ treated as overdue.
 2. It only moves forward. The order is `researching`, `developing`, `reviewing`,
    `merged`, `deployed`. A late or out-of-order event is recorded with
    `applied=false` and leaves the state alone. Only a person moves a task backward.
+   `hk.sweep` is the one exception: `icebox` is outside this order, and the sweep
+   applies only to idle `backlog` tasks.
 3. It does not bypass triage. An event for a `triage` task is recorded and shown
    in the triage queue.
 4. It does not revive canceled work. A merge event for a canceled task is recorded
@@ -124,6 +126,14 @@ treated as overdue.
 5. A job that ends does not move the task. A `started` task with no live job
    reaches the stalled flag instead.
 6. A closed PR that was not merged moves nothing.
+7. It satisfies the guard on entering `started`. An event that moves an unclaimed
+   task sets `claimed_by` to its source and records `source_ref` as the no-job
+   reason. An existing claim and job binding stay as they are.
+8. A deploy can arrive before its merge event. Whenever a task enters `merged`, in
+   the same transaction, hk looks for a successful deploy record that lists the
+   task's PR. If it finds one, the task moves on to `deployed` and any `hk.deploy`
+   row recorded with `applied=false` for that record is updated to `applied=true`.
+   A merge event also sets `refs.pr` when it is empty, so the match has a PR to use.
 
 Moving a task out of `started` by event or sweep does not resolve an open decision
 on it. S3 defines when a decision is superseded.
@@ -143,11 +153,13 @@ on it. S3 defines when a decision is superseded.
   not gate a claim and no relation edit transitions a task, except `duplicate_of`.
 
 **Auto-close** (`auto_close_parent`, default on; Linear's `autoCloseParentIssues`)
-runs in the transaction of the child's transition, once every child is settled:
+runs in the transaction of the child's transition, once every child is settled. A
+child is settled when it is `merged`, `deployed`, `dropped` or `duplicate`. Any child
+in `triage`, `backlog`, `unstarted`, a `started` state or `icebox` blocks auto-close.
 
 | Children | Parent result |
 |---|---|
-| Any still open, or any in `icebox` (Q6) | No change |
+| Any not settled, including `icebox` (Q6) | No change |
 | At least one completed, all completed ones `deployed` | `deployed` |
 | At least one completed, some only `merged` | `merged`; a later deploy event can advance it |
 | All `dropped` or `duplicate` (Q5) | No change; a `hk.auto_close` event is recorded with `applied=false` |
@@ -161,8 +173,10 @@ does not close child tasks when a parent closes.
 
 Worker follow-ups, review findings deferred to a task, dots requests and Linear
 app mentions land in `triage`. Intake is idempotent on `UNIQUE(source, source_ref)`:
-a repeat returns the existing task. A task leaves triage only with a priority
-above 0, a project and a kind, and `triaged_at` and `triaged_by` are recorded.
+a repeat returns the existing task. A task leaves triage for `backlog` or
+`unstarted` only with a priority above 0, a project and a kind. Declining to
+`dropped` or `duplicate` needs only a reason. Every exit records `triaged_at` and
+`triaged_by`.
 `tasks.kind` is required today, so S5 adds an unset value that is valid only in
 `triage`.
 
@@ -330,12 +344,34 @@ deploy, by the desk, with the operator's approval.
 4. **Verify:** counts by state match the dry-run, a claim succeeds on each host, and
    no task holds an old state name.
 
-**Rollback.** A rollback script restores `state` and `claimed_by` from
-`task_state_migration`, maps later tasks and transitions back by the inverse table,
-restores the old constraint, and removes the new schema version's row. It then
-restores the previous binary. Anything recorded only in the new model is lost:
-sub-state precision, `deployed`, and a `duplicate` or `icebox` distinction collapse
-to `merged` and `dropped` or `hold`. The S1 PR tests the round trip.
+**Rollback.** A rollback script does the following, then the previous binary is
+restored:
+
+1. Restores `state` and `claimed_by` from `task_state_migration` for each task whose
+   state has not changed since the migration.
+2. Maps every other task, including tasks created after the migration, by the table
+   below.
+3. Restores the old constraint and removes the new schema version's row.
+
+| New state | Legacy state |
+|---|---|
+| Any state with `awaiting_decision` set | `needs_decision` |
+| `triage`, `backlog` | `backlog` |
+| `unstarted` | `reopened` |
+| `researching`, `developing` | `in_progress` |
+| `reviewing` | `verifying` |
+| `merged`, `deployed` | `merged` |
+| `dropped`, `duplicate` | `dropped` |
+| `icebox` | `hold` |
+
+The script appends one `state_migration` event per changed task and does not rewrite
+earlier `task_events`. Events written under the new model keep their new names, so
+old metrics do not count transitions from that window. The added columns and tables
+stay in place unused; the previous binary names its columns and ignores them.
+
+Anything recorded only in the new model is lost: sub-state precision, `triage`,
+`deployed`, and the `duplicate` distinction. The S1 PR tests the round trip against
+this table.
 
 ## Slices
 
