@@ -145,10 +145,16 @@ treated as overdue.
 9. A revert undoes a merge. The event names the reverted PR and the revert PR. hk
    moves the task to `developing`, records the revert PR in `refs.revert_pr`, and
    applies rule 7's claim provenance when the task has no live job. The task then
-   reaches the stalled flag unless someone picks it up. If the revert arrives before
-   its merge event, the merge is recorded with `applied=false`, so the task does not
-   end at `merged`. A later deploy record listing only the reverted PR moves nothing.
-   A parent that auto-closed stays closed, and the event is recorded on it.
+   reaches the stalled flag unless someone picks it up. A later deploy record listing
+   only the reverted PR moves nothing. A parent that auto-closed stays closed, and the
+   event is recorded on it.
+10. A reverted PR cannot merge the task again. The `source_ref` of a merge event is
+    the PR URL, and that of a revert event is the revert PR URL. A revert event always
+    records the reverted PR, even when it arrives early and has `applied=false`. Before
+    applying a merge event, hk checks for a revert row naming that PR. If one exists,
+    the merge is recorded with `applied=false`. This covers a revert that arrives
+    before its merge and a merge event redelivered after a revert. Relanding the change
+    takes a new PR.
 
 When the merge event moves a task to `merged`, that says the change merged, not that
 CI passed. CI runs after the merge, and failure arrives as a revert. How mergewake
