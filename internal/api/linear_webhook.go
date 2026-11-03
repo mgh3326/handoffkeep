@@ -289,6 +289,8 @@ type LinearAPI struct {
 	App  *LinearAppToken
 	URL  string // empty means Linear's production endpoint
 	HTTP *http.Client
+	// RateGate, when set, pauses every request after a 429 until Linear's reset.
+	RateGate *LinearRateGate
 }
 
 const linearIssueQuery = `query($id:String!){issue(id:$id){identifier title url completedAt canceledAt state{type} labels(first:100,includeArchived:true){nodes{name}}}}`
@@ -337,6 +339,9 @@ func (e linearRejectionError) Unwrap() error { return e.err }
 
 // graphql runs one request against Linear and decodes its data into out.
 func (a LinearAPI) graphql(ctx context.Context, timeout time.Duration, query string, variables map[string]any, out any) error {
+	if a.RateGate.Paused() {
+		return ErrLinearRateLimited
+	}
 	endpoint := a.URL
 	if endpoint == "" {
 		endpoint = linearAPIURL
@@ -384,6 +389,9 @@ func (a LinearAPI) graphql(ctx context.Context, timeout time.Duration, query str
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		err := fmt.Errorf("linear api status %d", resp.StatusCode)
+		if resp.StatusCode == http.StatusTooManyRequests && a.RateGate != nil {
+			log.Printf("linear_api.rate_limited resume_at=%s", a.RateGate.limited(resp.Header).UTC().Format(time.RFC3339))
+		}
 		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
 			return linearRejectionError{err: err, capacity: resp.StatusCode == http.StatusPaymentRequired}
 		}

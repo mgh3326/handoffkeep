@@ -69,6 +69,8 @@ type LinearBoardWorker struct {
 	Linear            LinearBoardAPI
 	ReconcileInterval time.Duration
 	TaskBaseURL       string
+	// RateGate is the Linear client's gate; a paused budget stops the drain.
+	RateGate *LinearRateGate
 }
 
 func (w LinearBoardWorker) reconcileInterval() time.Duration {
@@ -97,7 +99,7 @@ func (w LinearBoardWorker) Run(ctx context.Context) {
 }
 
 func (w LinearBoardWorker) Drain(ctx context.Context) {
-	for ctx.Err() == nil {
+	for ctx.Err() == nil && !w.RateGate.Paused() {
 		found, err := w.Store.ProcessNextLinearBoardOutbox(ctx, w.send)
 		if err != nil {
 			if ctx.Err() == nil {

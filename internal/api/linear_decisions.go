@@ -409,6 +409,9 @@ type LinearDecisionOpsWorker struct {
 	// Discord posts to the decisions channel. Nil settles its ops unsent.
 	Discord  *DiscordWebhook
 	Interval time.Duration
+	// RateGate is the Linear client's gate. While it is paused the drain
+	// stops, so suppressed requests never spend an op's retry attempts.
+	RateGate *LinearRateGate
 }
 
 // Run drains due ops every interval until ctx ends.
@@ -431,7 +434,7 @@ func (w LinearDecisionOpsWorker) Run(ctx context.Context) {
 
 // Drain sends every op now due.
 func (w LinearDecisionOpsWorker) Drain(ctx context.Context) {
-	for ctx.Err() == nil {
+	for ctx.Err() == nil && !w.RateGate.Paused() {
 		found, opErr, err := w.Store.ProcessNextLinearDecisionOp(ctx, w.send)
 		switch {
 		case errors.Is(opErr, store.ErrLinearDecisionOpGaveUp):
