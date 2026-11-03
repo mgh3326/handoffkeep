@@ -419,7 +419,7 @@ func TestLinearBoardAwaitingWebhookBooksCapacitySlot(t *testing.T) {
 	gate.pending["prior"] = true
 	gate.awaiting = map[string]bool{"prior": true}
 	gate.board = map[string]bool{"prior": true}
-	remote := &admissionRemote{count:269,issues:map[string]bool{}}
+	remote := &admissionRemote{count: 269, issues: map[string]bool{}}
 	srv := httptest.NewServer(http.HandlerFunc(remote.serve))
 	defer srv.Close()
 	api := LinearAPI{Key: "fake", URL: srv.URL, HTTP: srv.Client(), Admission: gate, CapacityScopeVerified: true}
