@@ -125,8 +125,19 @@ func TestLinearBoardMetadataDurableBootstrapAndLabelFailure(t *testing.T) {
 	}
 	if id, err := st.ResolveLinearBoardLabel(t.Context(), "t", "fleet", create); err != nil || id != "label" {
 		t.Fatal(id, err)
-	}    if err=st.ApplyLinearMetadata(t.Context(),[]LinearMetadata{{Kind:"label",ID:"label",TeamID:"t",Name:"fleet",UpdatedAt:at.Add(2*time.Second),Deleted:true},{Kind:"label",ID:"label",TeamID:"t",Name:"fleet",UpdatedAt:at,Deleted:false}});err!=nil{t.Fatal(err)}
-    items,err=st.LinearBoardMetadata(t.Context());if err!=nil{t.Fatal(err)};for _,item:=range items{if item.Kind=="label" && item.ID=="label"{t.Fatal("old event resurrected label tombstone",item)}}
+	}
+	if err = st.ApplyLinearMetadata(t.Context(), []LinearMetadata{{Kind: "label", ID: "label", TeamID: "t", Name: "fleet", UpdatedAt: at.Add(2 * time.Second), Deleted: true}, {Kind: "label", ID: "label", TeamID: "t", Name: "fleet", UpdatedAt: at, Deleted: false}}); err != nil {
+		t.Fatal(err)
+	}
+	items, err = st.LinearBoardMetadata(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range items {
+		if item.Kind == "label" && item.ID == "label" {
+			t.Fatal("old event resurrected label tombstone", item)
+		}
+	}
 }
 
 func TestLinearBoardEfficiencyMigrationCollapsesOnceAndIndexesBothKeys(t *testing.T) {
