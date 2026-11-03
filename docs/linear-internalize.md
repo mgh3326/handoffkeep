@@ -1,9 +1,9 @@
 # hk as the tracker; Linear as a bounded projection
 
-Status: approved direction, 2026-11-03; the state table and migration map below
-await desk confirmation. This note changes no runtime behavior. No schema work
-starts until the desk confirms it, including the open questions in the next
-section.
+Status: approved direction, 2026-11-03, with operator Amendment 1 folded in; the
+state table and migration map below await desk confirmation. This note changes no
+runtime behavior. No schema work starts until the desk confirms it, including the
+open questions in the next section.
 
 hk tracks work the way Linear does, adapted to a fleet where agents do the work
 and events move the state. Two failures motivate this: work silently falls
@@ -26,6 +26,9 @@ default unless the desk answers otherwise.
 | Q7 | Does the stale-backlog sweep run as soon as it deploys? | No: it stays off until the desk reviews a dry-run count and enables it | It runs at deploy with the 14-day default |
 | Q8 | S2 needs mergewake to send events to hk. Who owns that change? | A separate mergewake PR, tracked as its own task; S2 ships only the hk endpoint | The lead widens S2 to a second repository |
 | Q9 | Should desk promises and follow-ups be lightweight checklist items that never count as open? | No checklist type: they are sub-tasks in `triage` or `backlog`, which are not open | A checklist on the task, as an earlier task title proposed |
+| Q10 | Model additions need a slice. Where do they go? | A new slice, S1b, after S1; it needs its own task | Fold them into S1, which is already the largest migration |
+| Q11 | mergewake merges on review pass and CI runs afterward. Do schema PRs under blocking paths still need CI before merge? | Yes for S1 and S1b, because a revert does not undo a migration that has already run in production | Same post-merge flow as other PRs; the deploy gate is the only check |
+| Q12 | A repo session re-emits a ticket set with changed content. What happens? | The call is refused with a conflict and changes nothing | hk adds the new children and leaves existing ones unchanged |
 
 ## State model
 
@@ -41,8 +44,8 @@ disagree. API rows add a read-only `category` field.
 | `started` | `researching` | A job is investigating; no change is expected yet | **Yes** | No | Event, manual move |
 | `started` | `developing` | A job is producing a change | **Yes** | No | Event, manual move |
 | `started` | `reviewing` | A PR is open or under review | **Yes** | No | Merge event, manual move |
-| `completed` | `merged` | Merged. Final for a repository with no deploy stream | No | No | Deploy event, reopen |
-| `completed` | `deployed` | A deploy record includes the merge | No | No | Reopen |
+| `completed` | `merged` | Merged. Final for a repository with no deploy stream | No | No | Deploy event, revert event, reopen |
+| `completed` | `deployed` | A deploy record includes the merge | No | No | Revert event, reopen |
 | `canceled` | `dropped` | Will not be done | No | No | Reopen |
 | `canceled` | `duplicate` | Another task covers it; requires a `duplicate_of` relation | No | No | Reopen |
 | `canceled` | `icebox` | Parked; can be revived | No | No | Revive, reopen |
@@ -73,14 +76,16 @@ does not belong on the same axis (Q2). S1 adds `tasks.awaiting_decision`:
 | `researching` | `developing`, `reviewing`, `unstarted`, `icebox`, `dropped`, `duplicate` |
 | `developing` | `researching`, `reviewing`, `unstarted`, `icebox`, `dropped`, `duplicate` |
 | `reviewing` | `developing` (fix needed), `merged`, `unstarted`, `icebox`, `dropped`, `duplicate` |
-| `merged` | `deployed`, `unstarted` (reopen) |
+| `merged` | `unstarted` (reopen) |
 | `deployed`, `dropped`, `duplicate` | `unstarted` (reopen) |
 | `icebox` | `backlog` (revive), `unstarted` (reopen) |
 
 There is no edge from `triage` to `started`. Moving into `started` still needs
 `claimed_by` plus `refs.job_id` or a recorded no-job reason, as `claimed` and
 `in_progress` require today. A task cannot enter `merged` from `researching` or
-`developing` by hand; only a merge event can skip `reviewing`.
+`developing` by hand; only a merge event can skip `reviewing`. No manual edge enters
+`deployed`: deploy records are the strict gate for that state. The `reviewing` to
+`merged` edge stays for repositories mergewake does not merge.
 
 ## Event-driven transitions
 
@@ -92,7 +97,8 @@ forward or is recorded with no effect.
 | `panewire.job` | Spawn bound to the task | `researching` or `developing`, see below | `backlog`, `unstarted` |
 | `mergewake.pr` | PR opened carrying `Mergewake-Task: <id>` | `reviewing` | `backlog`, `unstarted`, `researching`, `developing` |
 | `mergewake.review` | Review started | `reviewing` | Same as above |
-| `mergewake.merge` | PR merged | `merged` | Any `backlog`, `unstarted` or `started` state |
+| `mergewake.merge` | mergewake merged the PR after its review passed | `merged` | Any `backlog`, `unstarted` or `started` state |
+| `mergewake.revert` | Revert PR merged, for example after post-merge CI failed | `developing` | `merged`, `deployed` |
 | `hk.deploy` | Successful deploy record lists the PR | `deployed` | `merged` |
 | `hk.auto_close` | Last child closed | `merged` or `deployed`, see Hierarchy | Any non-terminal state except `triage` |
 | `hk.sweep` | Backlog idle past the setting | `icebox` | `backlog` |
@@ -117,8 +123,9 @@ treated as overdue.
 2. It only moves forward. The order is `researching`, `developing`, `reviewing`,
    `merged`, `deployed`. A late or out-of-order event is recorded with
    `applied=false` and leaves the state alone. Only a person moves a task backward.
-   `hk.sweep` is the one exception: `icebox` is outside this order, and the sweep
-   applies only to idle `backlog` tasks.
+   There are two exceptions. `hk.sweep` applies only to idle `backlog` tasks, and
+   `icebox` is outside this order. `mergewake.revert` moves a completed task back,
+   by rule 9.
 3. It does not bypass triage. An event for a `triage` task is recorded and shown
    in the triage queue.
 4. It does not revive canceled work. A merge event for a canceled task is recorded
@@ -133,7 +140,19 @@ treated as overdue.
    the same transaction, hk looks for a successful deploy record that lists the
    task's PR. If it finds one, the task moves on to `deployed` and any `hk.deploy`
    row recorded with `applied=false` for that record is updated to `applied=true`.
-   A merge event also sets `refs.pr` when it is empty, so the match has a PR to use.
+   A merge event sets `refs.pr` to the merged PR, so the match uses the PR that
+   actually merged.
+9. A revert undoes a merge. The event names the reverted PR and the revert PR. hk
+   moves the task to `developing`, records the revert PR in `refs.revert_pr`, and
+   applies rule 7's claim provenance when the task has no live job. The task then
+   reaches the stalled flag unless someone picks it up. If the revert arrives before
+   its merge event, the merge is recorded with `applied=false`, so the task does not
+   end at `merged`. A later deploy record listing only the reverted PR moves nothing.
+   A parent that auto-closed stays closed, and the event is recorded on it.
+
+When the merge event moves a task to `merged`, that says the change merged, not that
+CI passed. CI runs after the merge, and failure arrives as a revert. How mergewake
+decides to revert is its own contract; hk only receives the event.
 
 Moving a task out of `started` by event or sweep does not resolve an open decision
 on it. S3 defines when a decision is superseded.
@@ -160,7 +179,7 @@ in `triage`, `backlog`, `unstarted`, a `started` state or `icebox` blocks auto-c
 | Children | Parent result |
 |---|---|
 | Any not settled, including `icebox` (Q6) | No change |
-| At least one completed, all completed ones `deployed` | `deployed` |
+| At least one completed, all completed ones `deployed` | `deployed`, which each such child reached through a deploy record |
 | At least one completed, some only `merged` | `merged`; a later deploy event can advance it |
 | All `dropped` or `duplicate` (Q5) | No change; a `hk.auto_close` event is recorded with `applied=false` |
 
@@ -183,6 +202,79 @@ a repeat returns the existing task. A task leaves triage for `backlog` or
 `tasks add` checks for near-duplicates among `started`, `unstarted` and `backlog`
 tasks using Postgres trigram or full-text matching, and recallbeam once it is
 deployed. When it finds any, it shows them and requires `--link <id>` or `--new`.
+
+### Ticket sets
+
+Repo-session tickets are the main intake. The operator researches and decides in a
+disposable repo session, which emits tickets into hk and is then thrown away, in the
+style of `to-tickets`: tracer-bullet vertical slices with blocking edges. Because the
+session is gone afterward, hk must hold everything the work needs, and one call must
+either land the whole set or nothing.
+
+`POST /v1/ticket-sets` and `handoffkeep tickets emit` take one JSON document:
+
+```json
+{
+  "source": "repo-session",
+  "source_ref": "<set id chosen by the session>",
+  "parent": {"title": "...", "body": "..."},
+  "children": [
+    {"ref": "a", "title": "...", "body": "..."},
+    {"ref": "b", "title": "...", "body": "...", "blocked_by": ["a"]}
+  ]
+}
+```
+
+- **Sections.** Each ticket body must have the headings `Current`, `Desired`,
+  `Key interfaces`, `Out of scope` and `Acceptance`. A ticket missing one is refused.
+  The body is stored as the task's `body_doc`. mergewake already reads `Acceptance`
+  from a linked task's body as the closed contract when a PR has none.
+- **Atomic.** One transaction creates the parent, the children, their parent links
+  and their `blocks` edges. A `blocked_by` entry names a `ref` in the set or an
+  existing task id. An unknown reference or a cycle refuses the whole call.
+- **Idempotent.** The parent uses `(source, source_ref)` and each child uses
+  `(source, source_ref + "/" + ref)`. hk stores a hash of the payload. Repeating the
+  same payload returns the same ids. A changed payload is refused with
+  `ticket_set_conflict` and changes nothing (Q12).
+- **One triage item.** The parent and children all start in `triage`. The triage
+  queue and the ledger show the set as one row: the parent's title, its child count
+  and its age. A child appears on its own only after it leaves triage.
+- **Accepting a set.** The triage gate on the parent can apply to the whole set in
+  one transaction. Children inherit priority, project and kind unless they set their
+  own. Declining the parent declines every child still in `triage`.
+- **Duplicate check.** A ticket set does not stop for `--link` or `--new`, since no
+  one is left to answer. Similar tasks are listed on the triage row instead.
+
+## Model additions
+
+The operator's direction is to grow hk's model from the reference projects: add what
+serves the fleet now and prune it later if it proves unnecessary. Each addition below
+records its source, and each lands in the slice shown. Paths are relative to each
+reference repository, at the commits listed under Evidence.
+
+| Addition | hk shape | Source | Slice |
+|---|---|---|---|
+| Relations with soft-delete | `task_relations.archived_at`; removing an edge sets it and adding the edge again clears it | Linear `IssueRelation.archivedAt`, `clients/web/notes/schema.graphql` L10370 | S1 |
+| Activity history | `task_events` gains `field`, `from_value`, `to_value` and `auto`. It already has Linear's from/to shape, so it stays the one history table | Linear `IssueHistory`, `schema.graphql` L9791–L9870 | S1 for state; S1b for other fields |
+| Lifecycle timestamps | `tasks.started_at`, `completed_at`, `canceled_at`, `triaged_at`, `started_triage_at` | Linear `Issue`, `schema.graphql` L9138–L9150 | S1 |
+| Projects | `task_projects` gains `status`, `start_at` and `target_at` | Linear `Issue.project`, `schema.graphql` L9188; Asana `/project_set_start_and_due_date`, `extracted/lunadb-mutation-paths.txt` L894 | S1b |
+| Milestones | `project_milestones(project, name, description, target_at, status, sort_order)`, `tasks.milestone_id` | Linear `ProjectMilestone`, `schema.graphql` L15752; `ProjectMilestoneStatus` L15935 | S1b |
+| Labels | `labels(name, color, parent_id, is_group, retired_at, edit_level)`, `task_labels` | Linear `IssueLabel`, `schema.graphql` L10101. See the note on `edit_level` | S1b |
+| Due dates and SLA | `tasks.due_at`, `sla_started_at`, `sla_medium_risk_at`, `sla_high_risk_at`, `sla_breaches_at`. Risk is a comparison at read time, and passing a time changes visibility only | Linear `Issue`, `schema.graphql` L9152–L9160; `SlaStatus` L19042; Slack `saved.*`, `extracted/web-api-methods.txt` L266–L273 | S1b |
+| Subscribers | `task_subscribers(task_id, subscriber, source, created_at, archived_at)` | Linear `Issue.subscribers`, `schema.graphql` L9240; Asana `/conversation_add_follower`, `lunadb-mutation-paths.txt` L186; Slack `subscriptions.thread.add`, `web-api-methods.txt` L312 | S1b |
+| Status updates with health | `status_updates(project, health, body, snapshot, diff, created_by, created_at)`; health is `on_track`, `at_risk` or `off_track`, set by a person; staleness is computed at read time | Linear `ProjectUpdate`, `schema.graphql` L16588–L16629; `ProjectUpdateHealthType` L16697; Asana `/status_update_conversation_set_color_status`, `lunadb-mutation-paths.txt` L1067 | S4 |
+| Ticket sets | See Ticket sets | `mattpocock/skills` `skills/engineering/to-tickets/SKILL.md` | S5 |
+
+**`edit_level` has no reference source.** It comes from the operator's list. A search
+of all four reference repositories for `edit level` and `editLevel` found nothing, and
+the nearest material is Notion's permission groups
+(`extracted/api-endpoints.txt` L59). hk defines it as a closed set: `anyone`, `desk`
+or `operator`, the lowest level allowed to attach or remove the label. Label policy
+actions stay a later unit.
+
+**Notion adds little.** Its extracted surface here is mostly endpoint names, and a
+search of `extracted/api-endpoints.txt` and `comparison/` found no task history,
+follower or comment model to adopt. No addition depends on it beyond the note above.
 
 ## Declarative automation
 
@@ -234,7 +326,7 @@ sections and their order are fixed:
 2. **Waiting on operator:** open decision requests.
 3. **Stalled:** `started` tasks past the setting, plus recorded events that need a
    look (rule 4 above).
-4. **Triage:** the queue and its oldest item.
+4. **Triage:** the queue and its oldest item, with each ticket set as one row.
 5. **Changed since the last ack:** the feed delta from this consumer's cursor.
 
 A task appears in one of the first three sections: a task waiting on a decision is
@@ -375,23 +467,25 @@ this table.
 
 ## Slices
 
-One PR per slice, in order. The lead's PRs are gated independently; the desk merges
-and deploys.
+One PR per slice, in order. mergewake merges on review pass, subject to Q11, and the
+desk deploys. There is no coordinator lane: READY and ESC go to the desk.
 
 | Slice | Tier | Scope |
 |---|---|---|
 | S0 | T1 | This document |
 | S1 | T2 | State categories and sub-states, parent and sub-tasks, relations, auto-close, migration of existing rows |
-| S2 | T2 | Event-driven transitions, stalled flag, auto-icebox setting (Q8) |
+| S1b | T2 | Model additions: projects, milestones, labels, due dates and SLA, subscribers, other-field history (Q10) |
+| S2 | T2 | Event-driven transitions including merge and revert from mergewake, stalled flag, auto-icebox setting (Q8) |
 | S3 | T1 | Decision requests; dry-run classification of the 118 asks, report only |
-| S4 | T1 | Ledger view, consumer cursor, `handoffkeep ledger` |
-| S5 | T1 | Triage intake API; duplicate check at `tasks add` |
+| S4 | T1 | Ledger view, consumer cursor, `handoffkeep ledger`, status updates with health |
+| S5 | T1 | Triage intake API, ticket sets, duplicate check at `tasks add` |
 | S6 | T2 | Discord answer path: a console link, then buttons. The design goes to the desk before any code |
 
 The earlier seven-unit plan maps onto this as follows: unit 1b's admission has
 shipped (#120), and its archival PR stays as planned under Projection policy. Unit 2
-(relations) moves to S1, and intake from unit 3 and unit 6 moves to S5. Due dates,
-releases, weekly digests and label policy are outside S0–S6 and remain planned as
+(relations) moves to S1, and intake from unit 3 and unit 6 moves to S5. Due dates and
+label storage move to S1b, and status updates to S4. Deadline projection, releases,
+weekly digests and label policy actions are outside these slices and remain planned as
 written below; they need their own go-ahead.
 
 ## Evidence and current boundaries
@@ -408,6 +502,10 @@ State and automation semantics come from `linear-ref-analysis` commit
 (L10433). hk leaves out Linear's `similar` relation. Typed requests and
 server-computed views come from `asana-ref-analysis` commit
 `a452fbe153d2d351a4c17ffa90647307603f1eff` (`ActionRequest`, `ConfirmedQuery`).
+Model additions also use `slack-ref-analysis` commit
+`1527e86406904d4329f52d3968044ccc334ae493`, `notion-ref-analysis` commit
+`944de3f78d515ac7f261ef292372c3c0c52c21e2`, and `mattpocock/skills` commit
+`4ae2317ddb22b046e26455e4f9c9b3aaaf62212d`.
 
 Required reference reading, pinned to `linear-ref-analysis` commit
 `800c44bad3b1ed1df6036a01b46c5f2d6879dd59`:
@@ -458,11 +556,14 @@ this effort.
 | Blocks, blocked by, duplicate, related issues | hk `task_relations` | S1 |
 | Auto-close parent; auto-close and auto-archive periods | `auto_close_parent`, `backlog_icebox_days`, `started_stalled_hours` | S1, S2 |
 | Triage | hk `triage` state and intake API | S5 |
-| Due dates and overdue lists | Task `due_at`; reuse decision `DueAt`; console overdue view | Planned, outside S0–S6; decision deadline projected |
+| Due dates, SLA and overdue lists | Task `due_at` and SLA timestamps; reuse decision `DueAt`; console overdue view | S1b; Linear projection planned separately |
+| Project milestones | `project_milestones`, `tasks.milestone_id` | S1b |
+| Subscribers | `task_subscribers` | S1b |
 | Releases / issue-to-release links | Release rows derived from `deploy/<service>/<timestamp>` documents, with task/PR links | Planned, outside S0–S6; hk-only |
-| Project status updates | Weekly hk document from merged PRs, deploys, open decisions and assistant results | Planned, outside S0–S6; optional Linear update |
+| Project status updates | `status_updates` with health; weekly hk document from merged PRs, deploys, open decisions and assistant results | Status updates in S4; weekly digest planned, with optional Linear update |
 | App mentions / assignment | Keep Linear entry point; authenticated operator action links or creates hk triage task | S5 |
-| Labels and policy | hk labels for mirror, archive and priority rules, editable in console | Planned, outside S0–S6; enforce policy in writers |
+| Bulk ticket creation with blocking edges | Ticket sets from repo sessions | S5 |
+| Labels and policy | hk labels with edit level; later, mirror, archive and priority rules editable in console | Storage in S1b; policy actions planned; enforce policy in writers |
 | Assignee, delegate, agent activity | hk responsible owner distinct from executing identity, using existing task/placement/job provenance | Preserve now; do not invent a user-directory service |
 | Human decision issue and comment answer | hk decision request and notification outbox; keep Linear phone interaction | S3; existing [decision contract](linear-decisions.md) |
 | Assistant request and result | hk task/document/notification history; keep Linear assistant interaction | Existing webhook + separately owned request work |
@@ -602,9 +703,9 @@ project it. Deletions remove only relations managed by hk, preserving external
 relations. A retry uses stable relation identity and verifies ambiguous writes.
 Relation mutations keep the existing protected-job write authorization.
 
-### Deadlines
+### Deadline projection
 
-Store task `due_at` as a nullable UTC timestamp with a field-scoped set/clear
+S1b stores task `due_at` as a nullable UTC timestamp with a field-scoped set/clear
 operation. Decisions already have `DecisionRequest.DueAt`; reuse it and the existing
 overdue classifier. Passing a deadline changes visibility, not approval, resolution
 or default action. Map mirrored decision timestamps to Linear calendar dates in a
