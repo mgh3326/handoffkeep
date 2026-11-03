@@ -1881,7 +1881,7 @@ func linearFromEnv(st *store.Store) linearServer {
 	if capacityErr != nil {
 		log.Printf("linear_capacity.disabled reason=invalid_policy err=%q", capacityErr)
 	}
-	linearAPI := api.LinearAPI{Key: key, App: app, Admission: st, CapacityPolicy: capacityPolicy, CapacityScopeVerified: capacityErr == nil && strings.TrimSpace(os.Getenv("HANDOFFKEEP_LINEAR_CAPACITY_SCOPE")) == "workspace"}
+	linearAPI := api.LinearAPI{Key: key, App: app, RateGate: &api.LinearRateGate{}, Admission: st, CapacityPolicy: capacityPolicy, CapacityScopeVerified: capacityErr == nil && strings.TrimSpace(os.Getenv("HANDOFFKEEP_LINEAR_CAPACITY_SCOPE")) == "workspace"}
 	out := linearServer{boardWorker: linearBoardFromEnv(st, linearAPI)}
 	if secret == "" || !credential {
 		if secret != "" || operator != "" {
