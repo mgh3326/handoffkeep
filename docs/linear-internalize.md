@@ -85,7 +85,9 @@ There is no edge from `triage` to `started`. Moving into `started` still needs
 `in_progress` require today. A task cannot enter `merged` from `researching` or
 `developing` by hand; only a merge event can skip `reviewing`. No manual edge enters
 `deployed`: deploy records are the strict gate for that state. The `reviewing` to
-`merged` edge stays for repositories mergewake does not merge.
+`merged` edge stays for repositories mergewake does not merge. That move takes the PR
+through the existing reference flag and stores it in `refs.pr`, so a deploy record can
+match it. A task with no PR can still complete, and stays at `merged`.
 
 ## Event-driven transitions
 
