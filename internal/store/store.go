@@ -3361,10 +3361,21 @@ func (s *Store) ListRelayEventsTimeline(ctx context.Context, lane, kind string, 
 	return out, nil
 }
 
-// EventWatermarks returns the two durable IDs used by the UI's SSE poller.
-func (s *Store) EventWatermarks(ctx context.Context) (relayMaxID, taskEventMaxID int64, err error) {
-	err = s.pool.QueryRow(ctx, `SELECT COALESCE((SELECT MAX(id) FROM relay_events),0),COALESCE((SELECT MAX(id) FROM task_events),0)`).Scan(&relayMaxID, &taskEventMaxID)
-	return relayMaxID, taskEventMaxID, err
+// EventWatermarks are the durable high-water marks the UI's SSE poller
+// compares. SyncMaxID is the change feed's committed watermark
+// (sync_state.max_sync_id, docs/sync-feed.md): it moves on document, task,
+// task comment and decision request writes, which leave the other two alone.
+type EventWatermarks struct {
+	RelayMaxID     int64 `json:"relay_max_id"`
+	TaskEventMaxID int64 `json:"task_event_max_id"`
+	SyncMaxID      int64 `json:"sync_max_id"`
+}
+
+// EventWatermarks reads the current watermarks in one snapshot.
+func (s *Store) EventWatermarks(ctx context.Context) (EventWatermarks, error) {
+	var w EventWatermarks
+	err := s.pool.QueryRow(ctx, `SELECT COALESCE((SELECT MAX(id) FROM relay_events),0),COALESCE((SELECT MAX(id) FROM task_events),0),COALESCE((SELECT max_sync_id FROM sync_state WHERE singleton),0)`).Scan(&w.RelayMaxID, &w.TaskEventMaxID, &w.SyncMaxID)
+	return w, err
 }
 
 // LatestCheckpointsBySession returns one newest checkpoint for every session.

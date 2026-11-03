@@ -219,7 +219,7 @@ func TestDispositionSilenceIsInert(t *testing.T) {
 	if _, err := s.ListUnnotifiedDispositions(ctx, 1000); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := s.EventWatermarks(ctx); err != nil {
+	if _, err := s.EventWatermarks(ctx); err != nil {
 		t.Fatal(err)
 	}
 	later := time.Now().UTC().Add(30 * 24 * time.Hour)
