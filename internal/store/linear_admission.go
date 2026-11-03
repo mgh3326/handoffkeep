@@ -24,6 +24,7 @@ type LinearCreateLease interface {
 	ReserveBoard(context.Context, string, int64) (bool, error)
 	AwaitBoardWebhook(context.Context, string) error
 	IsBoardReservation(context.Context, string) (bool, error)
+	AwaitingBoardCreates(context.Context) (int, error)
 }
 
 type linearCreateLease struct{ conn *pgxpool.Conn }
@@ -128,4 +129,10 @@ func (l linearCreateLease) IsBoardReservation(ctx context.Context, id string) (b
 	var board bool
 	err := l.conn.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM linear_create_admissions WHERE issue_id=$1 AND board_task_id IS NOT NULL)`, id).Scan(&board)
 	return board, err
+}
+
+func (l linearCreateLease) AwaitingBoardCreates(ctx context.Context) (int, error) {
+	var count int
+	err := l.conn.QueryRow(ctx, `SELECT count(*) FROM linear_create_admissions WHERE awaiting_webhook`).Scan(&count)
+	return count, err
 }

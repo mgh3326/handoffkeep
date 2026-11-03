@@ -208,6 +208,14 @@ func (a LinearAPI) admissionCapacity(ctx context.Context, lease store.LinearCrea
 	if err != nil {
 		return err
 	}
+	// Until the webhook acknowledges an accepted board create, reserve its
+	// slot even if the next inventory page has not exposed it yet. Counting a
+	// visible issue twice briefly is conservative; undercounting is unsafe.
+	awaiting, err := lease.AwaitingBoardCreates(ctx)
+	if err != nil {
+		return err
+	}
+	count += awaiting
 	if err := a.checkCapacityHold(ctx, lease, count); err != nil {
 		return err
 	}

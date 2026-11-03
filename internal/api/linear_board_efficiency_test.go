@@ -413,3 +413,18 @@ func TestLinearBoardCreateRejectionReleasesOnlyDefiniteReservation(t *testing.T)
 		})
 	}
 }
+
+func TestLinearBoardAwaitingWebhookBooksCapacitySlot(t *testing.T) {
+	gate := newAdmissionFake()
+	gate.pending["prior"] = true
+	gate.awaiting = map[string]bool{"prior": true}
+	gate.board = map[string]bool{"prior": true}
+	remote := &admissionRemote{count:269,issues:map[string]bool{}}
+	srv := httptest.NewServer(http.HandlerFunc(remote.serve))
+	defer srv.Close()
+	api := LinearAPI{Key: "fake", URL: srv.URL, HTTP: srv.Client(), Admission: gate, CapacityScopeVerified: true}
+	_, err := api.CreateLinearIssue(t.Context(), LinearDecisionIssue{Board: true, TaskID: 42, ID: store.LinearDecisionUUID("work-board:task:42"), TeamID: "team", LabelID: "fleet"})
+	if !errors.Is(err, ErrLinearCapacity) || remote.creates != 0 {
+		t.Fatal("unacknowledged acceptance lost its slot", remote.creates, err)
+	}
+}

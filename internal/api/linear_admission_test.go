@@ -544,3 +544,13 @@ func (f *admissionFake) AwaitBoardWebhook(_ context.Context, id string) error {
 func (f *admissionFake) IsBoardReservation(_ context.Context, id string) (bool, error) {
 	return f.board[id], nil
 }
+
+func (f *admissionFake) AwaitingBoardCreates(context.Context) (int, error) {
+	count := 0
+	for id := range f.awaiting {
+		if f.pending[id] {
+			count++
+		}
+	}
+	return count, nil
+}

@@ -49,7 +49,9 @@ before mutation, but ownership is separate from the active webhook mapping.
 
 Task lookup reads hk's mapping. A known Linear id or identifier uses one issue
 fetch; the board does not use content search. Creation still uses serialized
-capacity admission. A successful create waits for its webhook; a transport or
+capacity admission. Accepted creates awaiting webhooks also reserve capacity
+slots until acknowledgement, so delayed inventory visibility cannot undercount
+new issues; a visible issue may be conservatively counted twice briefly. A successful create waits for its webhook; a transport or
 ambiguous GraphQL failure retains the reservation without retrying a duplicate
 create. An unresolved ambiguous reservation holds new creates conservatively.
 It never triggers an automatic issue search.
