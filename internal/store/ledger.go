@@ -181,7 +181,8 @@ type Ledger struct {
 }
 
 // ledgerStartedRow is a started task as read, before it is placed.
-// Flagged is the awaiting_decision flag or any open decision request.
+// Flagged is the awaiting_decision flag or any open, unexpired decision
+// request.
 type ledgerStartedRow struct {
 	LedgerStartedTask
 	Flagged bool
@@ -210,9 +211,9 @@ func ledgerNextTrigger(state, pr string) (trigger, source string) {
 
 // ledgerSections places started tasks, decision requests and flagged events
 // into the first three sections. records are open, not snoozed requests,
-// oldest first; tasks names the tasks they point at. A task with any open
-// request (snoozed included) or the awaiting_decision flag is in neither In
-// flight nor Stalled; one with a listed request is under Waiting.
+// oldest first; tasks names the tasks they point at. A task with any open,
+// unexpired request (snoozed included) or the awaiting_decision flag is in
+// neither In flight nor Stalled; one with a listed request is under Waiting.
 func ledgerSections(started []ledgerStartedRow, records []DecisionRecord, tasks map[int64]LedgerTask, events []LedgerFlaggedEvent, now time.Time, stalledAfter time.Duration) (LedgerInFlight, LedgerWaiting, LedgerStalled) {
 	inFlight := LedgerInFlight{Projects: []LedgerProjectStatus{}, Tasks: []LedgerStartedTask{}}
 	waiting := LedgerWaiting{Count: len(records), Groups: []LedgerDecisionGroup{}}
@@ -337,11 +338,13 @@ func (s *Store) Ledger(ctx context.Context, consumer string, now time.Time) (Led
 	if out.ChangedSinceAck, err = ledgerChangesTx(ctx, tx, consumer); err != nil {
 		return Ledger{}, err
 	}
-	started, err := ledgerStartedTx(ctx, tx)
+	started, err := ledgerStartedTx(ctx, tx, now)
 	if err != nil {
 		return Ledger{}, err
 	}
-	records, err := listDecisionRecords(ctx, tx, DecisionRecordFilter{Status: DecisionStatusOpen}, now)
+	// Every open request, not the API's first 1000: a task tied only to an
+	// omitted request would be in no section.
+	records, err := listDecisionRecords(ctx, tx, DecisionRecordFilter{Status: DecisionStatusOpen, unbounded: true}, now)
 	if err != nil {
 		return Ledger{}, err
 	}
@@ -382,15 +385,18 @@ func (s *Store) Ledger(ctx context.Context, consumer string, now time.Time) (Led
 }
 
 // ledgerStartedTx reads every started task with its activity, its newest
-// event and whether it waits on a decision.
-func ledgerStartedTx(ctx context.Context, tx pgx.Tx) ([]ledgerStartedRow, error) {
+// event and whether it waits on a decision at now. A request counts while it
+// is open and not expired, the cutoff the Waiting list uses; snoozed requests
+// count too.
+func ledgerStartedTx(ctx context.Context, tx pgx.Tx, now time.Time) ([]ledgerStartedRow, error) {
 	rows, err := tx.Query(ctx, `SELECT `+ledgerTaskColumns("tasks")+`,
-		tasks.awaiting_decision OR EXISTS(SELECT 1 FROM decision_requests d WHERE d.task_id=tasks.id AND d.status='open'),
+		tasks.awaiting_decision OR EXISTS(SELECT 1 FROM decision_requests d WHERE d.task_id=tasks.id AND d.status='open'
+			AND (d.expires_at IS NULL OR d.expires_at>$1::timestamptz)),
 		`+taskActivitySQL+`,
 		le.kind,le.source,le.at
 		FROM tasks LEFT JOIN LATERAL (SELECT e.kind,e.source,e.at FROM task_events e WHERE e.task_id=tasks.id ORDER BY e.at DESC,e.id DESC LIMIT 1) le ON true
 		WHERE tasks.state IN (`+startedStatesSQL+`)
-		ORDER BY tasks.id`)
+		ORDER BY tasks.id`, now)
 	if err != nil {
 		return nil, err
 	}

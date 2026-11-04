@@ -573,3 +573,78 @@ func TestStatusUpdates(t *testing.T) {
 		t.Fatalf("unknown project list err=%v", err)
 	}
 }
+
+// ledgerRequest stores an open linear request for task (nil for none),
+// created at created and expiring at expires (nil for never).
+func ledgerRequest(t *testing.T, s *Store, ref string, task *int64, created time.Time, expires *time.Time) {
+	t.Helper()
+	if _, err := s.pool.Exec(t.Context(), `INSERT INTO decision_requests(source,source_ref,task_id,question,expires_at,created_at,updated_at)
+		VALUES ('linear',$1,$2,'q '||$1::text,$3,$4,$4)`, ref, task, expires, created); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// onlySection fails unless task id is in exactly the section want.
+func onlySection(t *testing.T, l Ledger, id int64, want string) {
+	t.Helper()
+	got := sectionsOf(l.InFlight, l.WaitingOnOperator, l.Stalled)[id]
+	if len(got) != 1 || got[0] != want {
+		t.Fatalf("task %d in %v, want [%s]", id, got, want)
+	}
+}
+
+// An expired request is listed as expired, not under Waiting, so it must not
+// hide its task from In flight and Stalled either.
+func TestLedgerExpiredRequestDoesNotHideTask(t *testing.T) {
+	s := ledgerStore(t)
+	s.SetStartedStalledHours(24)
+	pool := s.pool
+	now := time.Now().UTC()
+
+	fresh := flowTask(t, s, pool, "implement", StateDeveloping, true)
+	old := flowTask(t, s, pool, "implement", StateDeveloping, true)
+	ageTask(t, s, old.ID, now.Add(-72*time.Hour))
+	expired := now.Add(-time.Minute)
+	ledgerRequest(t, s, "expired-fresh", &fresh.ID, now.Add(-time.Hour), &expired)
+	ledgerRequest(t, s, "expired-old", &old.ID, now.Add(-time.Hour), &expired)
+
+	l, err := s.Ledger(t.Context(), "desk-ledger-test", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l.WaitingOnOperator.Count != 0 {
+		t.Fatalf("waiting %+v, want no open request", l.WaitingOnOperator)
+	}
+	onlySection(t, l, fresh.ID, "in_flight")
+	onlySection(t, l, old.ID, "stalled")
+}
+
+// The ledger reads every open request, past the list API's 1000 cap.
+func TestLedgerWaitingPastListCap(t *testing.T) {
+	s := ledgerStore(t)
+	ctx := t.Context()
+	now := time.Now().UTC()
+	if _, err := s.pool.Exec(ctx, `INSERT INTO decision_requests(source,source_ref,question,created_at,updated_at)
+		SELECT 'linear','bulk-'||g,'q',$1::timestamptz+g*interval '1 second',$1::timestamptz+g*interval '1 second'
+		FROM generate_series(1,1000) g`, now.Add(-2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	task := flowTask(t, s, s.pool, "implement", StateDeveloping, true)
+	ledgerRequest(t, s, "last", &task.ID, now.Add(-time.Minute), nil)
+
+	capped, err := s.ListDecisionRecords(ctx, DecisionRecordFilter{}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(capped) != 1000 {
+		t.Fatalf("list API returned %d, want its 1000 cap", len(capped))
+	}
+	l, err := s.Ledger(ctx, "desk-ledger-test", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l.WaitingOnOperator.Count != 1001 {
+		t.Fatalf("waiting count %d, want 1001", l.WaitingOnOperator.Count)
+	}
+	onlySection(t, l, task.ID, "waiting")
+}
