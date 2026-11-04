@@ -60,13 +60,43 @@ func TestStartedStalledHoursSetting(t *testing.T) {
 	if s.StartedStalledHours() != 24*time.Hour {
 		t.Fatalf("default %v", s.StartedStalledHours())
 	}
-	s.SetStartedStalledHours(6)
-	if s.StartedStalledHours() != 6*time.Hour {
-		t.Fatalf("set %v", s.StartedStalledHours())
+	if err := s.SetStartedStalledHours(6); err != nil || s.StartedStalledHours() != 6*time.Hour {
+		t.Fatalf("set %v err=%v", s.StartedStalledHours(), err)
 	}
-	s.SetStartedStalledHours(0)
-	if s.StartedStalledHours() != 24*time.Hour {
-		t.Fatalf("reset %v", s.StartedStalledHours())
+	if err := s.SetStartedStalledHours(0); err != nil || s.StartedStalledHours() != 24*time.Hour {
+		t.Fatalf("reset %v err=%v", s.StartedStalledHours(), err)
+	}
+	// The upper bound is accepted; past it the value is refused and the
+	// setting stays as it was, so it can never wrap into a negative duration.
+	if err := s.SetStartedStalledHours(MaxStartedStalledHours); err != nil || s.StartedStalledHours() != 8760*time.Hour {
+		t.Fatalf("max %v err=%v", s.StartedStalledHours(), err)
+	}
+	for _, h := range []int{MaxStartedStalledHours + 1, 2562048} {
+		if err := s.SetStartedStalledHours(h); err == nil {
+			t.Fatalf("started_stalled_hours %d accepted", h)
+		}
+		if s.StartedStalledHours() != 8760*time.Hour {
+			t.Fatalf("refused %d changed the setting to %v", h, s.StartedStalledHours())
+		}
+	}
+	if ValidStartedStalledHours(8760) != nil || ValidStartedStalledHours(8761) == nil || ValidStartedStalledHours(0) == nil {
+		t.Fatal("ValidStartedStalledHours bounds")
+	}
+}
+
+func TestSweepBacklogRefusesOutOfRangeDays(t *testing.T) {
+	// A zero Store has no pool: a refused value must return before any read,
+	// and a read would panic.
+	var s Store
+	for _, days := range []int{-1, MaxBacklogIceboxDays + 1, 106752} {
+		for _, dryRun := range []bool{true, false} {
+			if moved, err := s.SweepBacklog(t.Context(), days, dryRun); err == nil || moved != nil {
+				t.Fatalf("days=%d dry_run=%t: moved=%v err=%v", days, dryRun, moved, err)
+			}
+		}
+	}
+	if ValidBacklogIceboxDays(0) != nil || ValidBacklogIceboxDays(3650) != nil || ValidBacklogIceboxDays(3651) == nil {
+		t.Fatal("ValidBacklogIceboxDays bounds")
 	}
 }
 
@@ -222,6 +252,22 @@ func TestBacklogSweep(t *testing.T) {
 		t.Fatalf("off: moved=%v err=%v", moved, err)
 	}
 	unchanged("off", idle.ID, flagged.ID, parent.ID, unstarted.ID, fresh.ID)
+
+	// The bound: 3650 days is accepted (nothing here is that idle); 3651 and
+	// 106752, where days*24h would overflow into a future cutoff, are refused
+	// and move nothing.
+	for _, tc := range []struct {
+		days int
+		ok   bool
+	}{{MaxBacklogIceboxDays, true}, {MaxBacklogIceboxDays + 1, false}, {106752, false}} {
+		for _, dryRun := range []bool{true, false} {
+			moved, err := s.SweepBacklog(ctx, tc.days, dryRun)
+			if (err == nil) != tc.ok || len(moved) != 0 {
+				t.Fatalf("days=%d dry_run=%t: moved=%v err=%v", tc.days, dryRun, moved, err)
+			}
+		}
+	}
+	unchanged("bounds", idle.ID, flagged.ID, parent.ID, unstarted.ID, fresh.ID)
 
 	// The dry run names the idle task and writes nothing.
 	preview, err := s.SweepBacklog(ctx, 14, true)

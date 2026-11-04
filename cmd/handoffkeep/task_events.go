@@ -104,8 +104,8 @@ func taskSweepCmd(args []string, out io.Writer) error {
 	if !*dryRun {
 		return errors.New("tasks sweep runs only with --dry-run; the sweep itself runs in serve with --backlog-icebox-days")
 	}
-	if *days < 1 {
-		return errors.New("tasks sweep requires --days N with N of at least 1")
+	if *days < 1 || *days > store.MaxBacklogIceboxDays {
+		return fmt.Errorf("tasks sweep requires --days N with N in 1..%d", store.MaxBacklogIceboxDays)
 	}
 	if err := mustClient(c); err != nil {
 		return err
@@ -117,6 +117,18 @@ func taskSweepCmd(args []string, out io.Writer) error {
 		return err
 	}
 	return printJSON(out, map[string]any{"dry_run": true, "days": *days, "count": len(xs), "tasks": xs})
+}
+
+// validAutomationFlags checks serve's --started-stalled-hours (1..8760) and
+// --backlog-icebox-days (0 for off, or 1..3650) against the store's bounds.
+func validAutomationFlags(stalledHours, iceboxDays int) error {
+	if err := store.ValidStartedStalledHours(stalledHours); err != nil {
+		return fmt.Errorf("--started-stalled-hours: %w", err)
+	}
+	if err := store.ValidBacklogIceboxDays(iceboxDays); err != nil {
+		return fmt.Errorf("--backlog-icebox-days: %w", err)
+	}
+	return nil
 }
 
 // backlogSweepWorker runs the backlog sweep when backlog_icebox_days is set.

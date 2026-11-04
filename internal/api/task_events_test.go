@@ -94,9 +94,29 @@ func TestTasksStalledFilterAndSweepPreviewAPI(t *testing.T) {
 	if status, body := get("/v1/tasks/sweep?days=14"); status != http.StatusOK || body["dry_run"] != true || body["days"] != float64(14) {
 		t.Fatalf("sweep preview: %d %v", status, body)
 	}
-	for _, q := range []string{"", "?days=0", "?days=x"} {
+	for _, q := range []string{"", "?days=0", "?days=x", "?days=3651", "?days=106752"} {
 		if status, body := get("/v1/tasks/sweep" + q); status != http.StatusBadRequest || body["error"] != "invalid_context" {
 			t.Fatalf("sweep %q: %d %v", q, status, body)
+		}
+	}
+}
+
+func TestSweepPreviewRefusesOutOfRangeDaysAPI(t *testing.T) {
+	// No store behind the server: each request must be refused before the
+	// service reads anything.
+	h := areaNoDBServer(t)
+	for _, q := range []string{"?days=-1", "?days=0", "?days=3651", "?days=106752"} {
+		req, _ := http.NewRequest(http.MethodGet, h.URL+"/v1/tasks/sweep"+q, nil)
+		req.Header.Set("Authorization", "Bearer tok")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := map[string]any{}
+		_ = json.NewDecoder(resp.Body).Decode(&out)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest || out["error"] != "invalid_context" {
+			t.Fatalf("%s: %d %v", q, resp.StatusCode, out)
 		}
 	}
 }

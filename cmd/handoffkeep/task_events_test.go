@@ -150,3 +150,48 @@ func TestBacklogSweepWorkerOffByDefault(t *testing.T) {
 		t.Fatal("the sweep worker runs with backlog_icebox_days unset")
 	}
 }
+
+func TestServeAutomationFlagBounds(t *testing.T) {
+	for _, tc := range []struct {
+		hours, days int
+		ok          bool
+	}{
+		{1, 0, true}, {8760, 3650, true}, {24, 1, true},
+		{0, 0, false}, {8761, 0, false}, {2562048, 0, false},
+		{24, -1, false}, {24, 3651, false}, {24, 106752, false},
+	} {
+		if err := validAutomationFlags(tc.hours, tc.days); (err == nil) != tc.ok {
+			t.Fatalf("hours=%d days=%d: err=%v", tc.hours, tc.days, err)
+		}
+	}
+	// serve refuses out-of-range values at startup, before it reads any
+	// environment or opens the store.
+	for _, tc := range []struct{ args []string }{
+		{[]string{"--started-stalled-hours", "8761"}},
+		{[]string{"--started-stalled-hours", "0"}},
+		{[]string{"--backlog-icebox-days", "3651"}},
+		{[]string{"--backlog-icebox-days", "106752"}},
+		{[]string{"--backlog-icebox-days", "-1"}},
+	} {
+		err := serve(tc.args, io.Discard)
+		if err == nil || !strings.Contains(err.Error(), tc.args[0]) {
+			t.Fatalf("serve %v: err=%v", tc.args, err)
+		}
+	}
+}
+
+func TestTasksSweepCLIRefusesOutOfRangeDays(t *testing.T) {
+	cliEnv(t)
+	hits := 0
+	h := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits++ }))
+	defer h.Close()
+	for _, days := range []string{"0", "3651", "106752"} {
+		err := run([]string{"tasks", "sweep", "--dry-run", "--days", days, "--url", h.URL, "--token", "tok"}, io.Discard, io.Discard)
+		if err == nil || !strings.Contains(err.Error(), "1..3650") {
+			t.Fatalf("days=%s: err=%v", days, err)
+		}
+	}
+	if hits != 0 {
+		t.Fatalf("the CLI called the server %d times for refused days", hits)
+	}
+}

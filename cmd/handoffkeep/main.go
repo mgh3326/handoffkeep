@@ -1771,11 +1771,8 @@ func serve(args []string, errout io.Writer) error {
 	if e := fs.Parse(args); e != nil {
 		return e
 	}
-	if *stalledHours < 1 {
-		return errors.New("--started-stalled-hours must be at least 1")
-	}
-	if *iceboxDays < 0 {
-		return errors.New("--backlog-icebox-days must be 0 (off) or more")
+	if e := validAutomationFlags(*stalledHours, *iceboxDays); e != nil {
+		return e
 	}
 	if e := validListen(*listen, false); e != nil {
 		return e
@@ -1818,7 +1815,9 @@ func serve(args []string, errout io.Writer) error {
 			st.Close()
 		}
 	}()
-	st.SetStartedStalledHours(*stalledHours)
+	if e := st.SetStartedStalledHours(*stalledHours); e != nil {
+		return e
+	}
 	tokens, quotaAccounts, e := api.LoadTokens(auth)
 	if e != nil {
 		return e

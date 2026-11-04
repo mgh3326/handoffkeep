@@ -14,6 +14,33 @@ import (
 // parks idle backlog and is off until the desk enables it (Q7).
 const DefaultStartedStalledHours = 24
 
+// Bounds on the two settings. Both become a time.Duration, which overflows
+// past about 292 years: an unbounded backlog_icebox_days would wrap the
+// sweep cutoff into the future and park every backlog task, and an unbounded
+// started_stalled_hours would wrap negative and flag every started task.
+const (
+	MaxStartedStalledHours = 8760 // one year
+	MaxBacklogIceboxDays   = 3650 // ten years
+)
+
+// ValidStartedStalledHours reports whether hours is a usable
+// started_stalled_hours: 1..MaxStartedStalledHours.
+func ValidStartedStalledHours(hours int) error {
+	if hours < 1 || hours > MaxStartedStalledHours {
+		return fmt.Errorf("started_stalled_hours must be 1..%d, got %d", MaxStartedStalledHours, hours)
+	}
+	return nil
+}
+
+// ValidBacklogIceboxDays reports whether days is a usable
+// backlog_icebox_days: 0 (off) or 1..MaxBacklogIceboxDays.
+func ValidBacklogIceboxDays(days int) error {
+	if days < 0 || days > MaxBacklogIceboxDays {
+		return fmt.Errorf("backlog_icebox_days must be 0 (off) or 1..%d, got %d", MaxBacklogIceboxDays, days)
+	}
+	return nil
+}
+
 // taskActivitySQL is a task's newest activity: a task_events row, a comment,
 // or an update to the job bound to it in refs.job_id. A late update to an
 // earlier job of the task no longer counts once another job is bound.
@@ -25,12 +52,17 @@ const taskActivitySQL = `GREATEST(tasks.created_at,
 	(SELECT max(j.updated_at) FROM jobs j WHERE j.job_id=tasks.refs->>'job_id' AND j.task_id=tasks.id))`
 
 // SetStartedStalledHours sets started_stalled_hours; a value below 1 restores
-// the default.
-func (s *Store) SetStartedStalledHours(hours int) {
+// the default. A value above MaxStartedStalledHours is refused and the
+// setting is left as it was.
+func (s *Store) SetStartedStalledHours(hours int) error {
+	if hours > MaxStartedStalledHours {
+		return ValidStartedStalledHours(hours)
+	}
 	if hours < 1 {
 		hours = 0
 	}
 	s.stalledHours.Store(int64(hours))
+	return nil
 }
 
 // StartedStalledHours is the started_stalled_hours setting as a duration.
@@ -103,11 +135,15 @@ const sweepSQL = `SELECT id,lane,title,` + taskActivitySQL + ` FROM tasks
 
 // SweepBacklog parks backlog tasks idle for more than days in icebox,
 // recording hk.sweep on each, and returns what it moved. With dryRun it
-// returns what it would move and writes nothing. days below 1 is the off
-// setting and moves nothing.
+// returns what it would move and writes nothing. days 0 is the off setting
+// and moves nothing; days outside ValidBacklogIceboxDays is refused before
+// any read.
 func (s *Store) SweepBacklog(ctx context.Context, days int, dryRun bool) ([]SweepCandidate, error) {
+	if err := ValidBacklogIceboxDays(days); err != nil {
+		return nil, err
+	}
 	out := []SweepCandidate{}
-	if days < 1 {
+	if days == 0 {
 		return out, nil
 	}
 	now := time.Now().UTC()

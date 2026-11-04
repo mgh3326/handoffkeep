@@ -54,7 +54,7 @@ func (s Server) tasksSweepPreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	days, err := strconv.Atoi(r.URL.Query().Get("days"))
-	if err != nil || days < 1 || days > 3650 {
+	if err != nil || days < 1 || store.ValidBacklogIceboxDays(days) != nil {
 		writeError(w, http.StatusBadRequest, "invalid_context")
 		return
 	}

@@ -283,7 +283,10 @@ job update is older than `serve --started-stalled-hours` (default 24).
 `icebox` with an `hk.sweep` event, skipping flagged tasks and parents with
 started sub-tasks; the default 0 keeps the sweep off. `handoffkeep tasks sweep
 --dry-run --days N` (`GET /v1/tasks/sweep?days=N`) prints what it would move
-and writes nothing. Schema version 34 adds the `source_event` kind for events
+and writes nothing. `--started-stalled-hours` takes 1..8760 and
+`--backlog-icebox-days` takes 0 or 1..3650; serve refuses anything else at
+startup, and the preview answers `400 invalid_context` outside 1..3650.
+Schema version 34 adds the `source_event` kind for events
 recorded with `applied=false`, so they never read as transitions.
 
 The schema migration to this model (version 32) moves existing rows by the
