@@ -66,7 +66,8 @@ func TestRelaneTaskMovesLaneAndRecordsEvent(t *testing.T) {
 	}
 	last := got.Events[1]
 	if last.Kind != TaskEventRelane || last.From != from || last.To != to ||
-		last.By != "tester-1" || last.Note != "triage migration" {
+		last.By != "tester-1" || last.Note != "triage migration" ||
+		last.Field != "lane" || last.FromValue != from || last.ToValue != to {
 		t.Fatalf("relane event=%+v", last)
 	}
 	if last.Refs == nil || last.Refs.PR != "org/repo#123" || last.Refs.JobID != "job-9" {

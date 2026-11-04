@@ -74,11 +74,11 @@ func TestSetTaskProjectEvent(t *testing.T) {
 	if err != nil || !changed || x.Project == nil || *x.Project != "wrk" {
 		t.Fatalf("SetTaskProject=%+v changed=%t err=%v", x, changed, err)
 	}
-	var kind, from, to, note string
-	if err = pool.QueryRow(ctx, `SELECT kind,"from","to",note FROM task_events WHERE task_id=$1 AND kind='project'`, x.ID).Scan(&kind, &from, &to, &note); err != nil {
+	var kind, from, to, note, field, fromValue, toValue string
+	if err = pool.QueryRow(ctx, `SELECT kind,"from","to",note,field,from_value,to_value FROM task_events WHERE task_id=$1 AND kind='project'`, x.ID).Scan(&kind, &from, &to, &note, &field, &fromValue, &toValue); err != nil {
 		t.Fatalf("project event missing: %v", err)
 	}
-	if kind != "project" || from != "handoffkeep" || to != "wrk" || !strings.Contains(note, "wrk") {
+	if kind != "project" || from != "handoffkeep" || to != "wrk" || !strings.Contains(note, "wrk") || field != "project" || fromValue != from || toValue != to {
 		t.Fatalf("event=(%s,%s,%s,%s)", kind, from, to, note)
 	}
 	x, changed, err = s.SetTaskProject(ctx, x.ID, "wrk", "proj-test", "already there")
@@ -238,9 +238,13 @@ func TestTaskProjectMigrationIsAdditive(t *testing.T) {
 	s, pool := searchTestStore(t)
 	ctx := context.Background()
 	lane := taskProjectLane(t)
-	// Rewind to the pre-v15 shape: drop the column, the table, the marker,
-	// and narrow the event CHECK back to v14.
+	// Remove v33's dependent objects so it can be reapplied after v15, then
+	// rewind the project column, table, marker and event CHECK to v14.
 	for _, q := range []string{
+		`DROP TABLE task_subscribers, task_labels`,
+		`ALTER TABLE tasks DROP COLUMN milestone_id, DROP COLUMN due_at, DROP COLUMN sla_started_at, DROP COLUMN sla_medium_risk_at, DROP COLUMN sla_high_risk_at, DROP COLUMN sla_breaches_at`,
+		`DROP TABLE labels, project_milestones`,
+		`DELETE FROM schema_version WHERE version=33`,
 		`DELETE FROM schema_version WHERE version=15`,
 		`ALTER TABLE tasks DROP COLUMN project`,
 		`DROP TABLE task_projects`,

@@ -214,7 +214,7 @@ func tasksCmd(args []string, out io.Writer) error {
 
 func tasksCmdE(args []string, out, errout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: tasks add|list|export|claim|next|transition|reopen|rebind|relane|project|projects|set-area|areas|parent|relate|unrelate|migrate-states|decision-request|decision-resolve|show|comment|comments|disposition")
+		return errors.New("usage: tasks add|list|export|claim|next|transition|reopen|rebind|relane|project|projects|milestone|label|labels|due|subscribe|unsubscribe|set-area|areas|parent|relate|unrelate|migrate-states|decision-request|decision-resolve|show|comment|comments|disposition")
 	}
 	if args[0] == "disposition" {
 		return dispositionCmd(args[1:], out)
@@ -239,6 +239,9 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 	}
 	if args[0] == "project" || args[0] == "projects" {
 		return taskProjectCmd(args, out)
+	}
+	if args[0] == "milestone" || args[0] == "label" || args[0] == "labels" || args[0] == "due" || args[0] == "subscribe" || args[0] == "unsubscribe" {
+		return taskModelCmd(args, out)
 	}
 	if args[0] == "set-area" || args[0] == "areas" {
 		return taskAreaCmd(args, out)

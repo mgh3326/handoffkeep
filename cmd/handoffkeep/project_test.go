@@ -281,3 +281,20 @@ func TestTasksAddInvalidContextNamesRequirements(t *testing.T) {
 		})
 	}
 }
+
+func TestTasksProjectMetadataFlags(t *testing.T) {
+	h, seen := projectServer(t, 200)
+	var out bytes.Buffer
+	err := run([]string{"tasks", "project", "7", "wrk", "--status", "active", "--target", "2026-01-02T00:00:00Z", "--url", h.URL, "--token", "tok"}, &out, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(*seen) != 1 {
+		t.Fatalf("requests=%+v", *seen)
+	}
+	req := (*seen)[0]
+	metadata, ok := req.Body["metadata"].(map[string]any)
+	if !ok || req.Method != "POST" || req.Path != "/v1/tasks/7/project" || metadata["status"] != "active" || metadata["set_target"] != true || metadata["set_start"] != false {
+		t.Fatalf("metadata request=%+v", req)
+	}
+}

@@ -486,6 +486,14 @@ type Task struct {
 	CanceledAt      *time.Time     `json:"canceled_at"`
 	TriagedAt       *time.Time     `json:"triaged_at"`
 	StartedTriageAt *time.Time     `json:"started_triage_at"`
+	MilestoneID     *int64         `json:"milestone_id"`
+	Labels          []int64        `json:"labels"`
+	DueAt           *time.Time     `json:"due_at"`
+	SLAStartedAt    *time.Time     `json:"sla_started_at"`
+	SLAMediumRiskAt *time.Time     `json:"sla_medium_risk_at"`
+	SLAHighRiskAt   *time.Time     `json:"sla_high_risk_at"`
+	SLABreachesAt   *time.Time     `json:"sla_breaches_at"`
+	SLARisk         string         `json:"sla_risk"`
 	Children        []TaskChild    `json:"children,omitempty"`
 	Relations       []TaskRelation `json:"relations,omitempty"`
 	Events          []TaskEvent    `json:"events,omitempty"`
@@ -1140,6 +1148,9 @@ func (s *Store) migrate(ctx context.Context) error {
 	// Version 32 moves tasks.state to the eleven-state model; see
 	// migrateStatesV32 for the steps, the locks and their cost.
 	if err := migrateOnce(ctx, tx, stateMigrationVersion, func() error { return migrateStatesV32(ctx, tx) }); err != nil {
+		return err
+	}
+	if err := migrateOnce(ctx, tx, 33, func() error { return execAll(ctx, tx, modelV33) }); err != nil {
 		return err
 	}
 
@@ -2118,15 +2129,17 @@ func ValidBodyDoc(v string) bool {
 
 func scanTask(row interface{ Scan(...any) error }, x *Task, extra ...any) error {
 	var refs []byte
-	dest := []any{&x.ID, &x.Lane, &x.ParentLane, &x.Title, &x.Kind, &x.State, &x.Priority, &refs, &x.ClaimedBy, &x.CreatedBy, &x.CreatedAt, &x.UpdatedAt, &x.BodyDoc, &x.Project, &x.Area, &x.Expected, &x.AwaitingDecision, &x.ParentID, &x.StartedAt, &x.CompletedAt, &x.CanceledAt, &x.TriagedAt, &x.StartedTriageAt}
+	dest := []any{&x.ID, &x.Lane, &x.ParentLane, &x.Title, &x.Kind, &x.State, &x.Priority, &refs, &x.ClaimedBy, &x.CreatedBy, &x.CreatedAt, &x.UpdatedAt, &x.BodyDoc, &x.Project, &x.Area, &x.Expected, &x.AwaitingDecision, &x.ParentID, &x.StartedAt, &x.CompletedAt, &x.CanceledAt, &x.TriagedAt, &x.StartedTriageAt, &x.MilestoneID, &x.DueAt, &x.SLAStartedAt, &x.SLAMediumRiskAt, &x.SLAHighRiskAt, &x.SLABreachesAt, &x.Labels}
 	if err := row.Scan(append(dest, extra...)...); err != nil {
 		return err
 	}
 	x.Category = TaskCategory(x.State)
+	x.SLARisk = slaRisk(time.Now().UTC(), x.SLAStartedAt, x.SLAMediumRiskAt, x.SLAHighRiskAt, x.SLABreachesAt)
 	return json.Unmarshal(refs, &x.Refs)
 }
 
-const taskColumns = `id,lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at,body_doc,project,area,expected,awaiting_decision,parent_id,started_at,completed_at,canceled_at,triaged_at,started_triage_at`
+const taskBaseColumns = `id,lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at,body_doc,project,area,expected,awaiting_decision,parent_id,started_at,completed_at,canceled_at,triaged_at,started_triage_at,milestone_id,due_at,sla_started_at,sla_medium_risk_at,sla_high_risk_at,sla_breaches_at`
+const taskColumns = taskBaseColumns + `,ARRAY(SELECT label_id FROM task_labels WHERE task_id=tasks.id ORDER BY label_id)`
 
 // taskProjectQuerier is the row-query seam requireTaskProject runs against:
 // the caller's transaction, so membership is judged in the same snapshot the
@@ -2480,15 +2493,11 @@ func (s *Store) RelaneTask(ctx context.Context, id int64, to, by, note string, a
 		}
 	}
 	from := x.Lane
-	encoded, err := json.Marshal(x.Refs)
-	if err != nil {
-		return Task{}, false, err
-	}
 	x.UpdatedAt = time.Now().UTC()
 	if err = scanTask(tx.QueryRow(ctx, `UPDATE tasks SET lane=$2,updated_at=$3 WHERE id=$1 RETURNING `+taskColumns, id, to, x.UpdatedAt), &x); err != nil {
 		return Task{}, false, err
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO task_events(task_id,"from","to","by",note,refs,at,kind) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,'relane')`, id, from, to, by, note, string(encoded), x.UpdatedAt); err != nil {
+	if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: id, Kind: "relane", From: from, To: to, By: by, Note: note, Refs: x.Refs, At: x.UpdatedAt, Field: "lane", FromValue: from, ToValue: to}); err != nil {
 		return Task{}, false, err
 	}
 	if err := s.recordLinearBoardTaskTx(ctx, tx, x, note); err != nil {
@@ -2504,6 +2513,10 @@ func (s *Store) RelaneTask(ctx context.Context, id int64, to, by, note string, a
 // classification metadata, so legacy history can still be bucketed without
 // falsifying lane-level reports. A no-op change records no event.
 func (s *Store) SetTaskProject(ctx context.Context, id int64, project, by, note string) (x Task, changed bool, err error) {
+	return s.SetTaskProjectWithMetadata(ctx, id, project, by, note, nil)
+}
+
+func (s *Store) SetTaskProjectWithMetadata(ctx context.Context, id int64, project, by, note string, patch *ProjectMetadataPatch) (x Task, changed bool, err error) {
 	if !validName(project) || by == "" || !validText(by, 128) || !validText(note, MaxBytes) {
 		return Task{}, false, errors.New("invalid task project change")
 	}
@@ -2540,18 +2553,22 @@ func (s *Store) SetTaskProject(ctx context.Context, id int64, project, by, note 
 	if x.Project != nil {
 		from = *x.Project
 	}
+	if from != project && x.MilestoneID != nil {
+		return Task{}, false, ErrMilestoneProject
+	}
+	if patch != nil {
+		if _, err = patchProjectMetadataTx(ctx, tx, project, *patch); err != nil {
+			return Task{}, false, err
+		}
+	}
 	if from == project {
 		return x, false, tx.Commit(ctx)
-	}
-	encoded, err := json.Marshal(x.Refs)
-	if err != nil {
-		return Task{}, false, err
 	}
 	x.UpdatedAt = time.Now().UTC()
 	if err = scanTask(tx.QueryRow(ctx, `UPDATE tasks SET project=$2,updated_at=$3 WHERE id=$1 RETURNING `+taskColumns, id, project, x.UpdatedAt), &x); err != nil {
 		return Task{}, false, err
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO task_events(task_id,"from","to","by",note,refs,at,kind) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,'project')`, id, from, project, by, note, string(encoded), x.UpdatedAt); err != nil {
+	if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: id, Kind: "project", From: from, To: project, By: by, Note: note, Refs: x.Refs, At: x.UpdatedAt, Field: "project", FromValue: from, ToValue: project}); err != nil {
 		return Task{}, false, err
 	}
 	if err := s.recordLinearBoardTaskTx(ctx, tx, x, note); err != nil {
@@ -2596,15 +2613,11 @@ func (s *Store) SetTaskArea(ctx context.Context, id int64, area *string, by, not
 	if from == to {
 		return x, false, tx.Commit(ctx)
 	}
-	encoded, err := json.Marshal(x.Refs)
-	if err != nil {
-		return Task{}, false, err
-	}
 	x.UpdatedAt = time.Now().UTC()
 	if err = scanTask(tx.QueryRow(ctx, `UPDATE tasks SET area=$2,updated_at=$3 WHERE id=$1 RETURNING `+taskColumns, id, area, x.UpdatedAt), &x); err != nil {
 		return Task{}, false, err
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO task_events(task_id,"from","to","by",note,refs,at,kind) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,'area')`, id, from, to, by, note, string(encoded), x.UpdatedAt); err != nil {
+	if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: id, Kind: "area", From: from, To: to, By: by, Note: note, Refs: x.Refs, At: x.UpdatedAt, Field: "area", FromValue: from, ToValue: to}); err != nil {
 		return Task{}, false, err
 	}
 	if err := s.recordLinearBoardTaskTx(ctx, tx, x, note); err != nil {

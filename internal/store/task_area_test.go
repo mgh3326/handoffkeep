@@ -171,11 +171,11 @@ func TestSetTaskAreaEvent(t *testing.T) {
 	if err != nil || !changed || x.Area == nil || *x.Area != "blender" {
 		t.Fatalf("SetTaskArea=%+v changed=%t err=%v", x, changed, err)
 	}
-	var kind, from, to, by, note string
-	if err = pool.QueryRow(ctx, `SELECT kind,"from","to","by",note FROM task_events WHERE task_id=$1 AND kind='area'`, x.ID).Scan(&kind, &from, &to, &by, &note); err != nil {
+	var kind, from, to, by, note, field, fromValue, toValue string
+	if err = pool.QueryRow(ctx, `SELECT kind,"from","to","by",note,field,from_value,to_value FROM task_events WHERE task_id=$1 AND kind='area'`, x.ID).Scan(&kind, &from, &to, &by, &note, &field, &fromValue, &toValue); err != nil {
 		t.Fatalf("area event missing: %v", err)
 	}
-	if kind != "area" || from != "" || to != "blender" || by != "area-test" || note != "modelling work" {
+	if kind != "area" || from != "" || to != "blender" || by != "area-test" || note != "modelling work" || field != "area" || fromValue != from || toValue != to {
 		t.Fatalf("event=(%s,%q,%q,%s,%s)", kind, from, to, by, note)
 	}
 	// Unchanged: changed=false and no event.
