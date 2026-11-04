@@ -152,8 +152,13 @@ func tableDigests(t *testing.T, pool *pgxpool.Pool) map[string]string {
 // changes no row of any source table; without --dry-run it exits non-zero
 // and changes nothing either.
 func TestDecisionsBackfillDryRunWritesNothing(t *testing.T) {
-	pool, dbURL := testdb.SchemaPool(t, "decision_backfill")
+	_, dbURL := testdb.Schema(t, "decision_backfill")
 	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dbURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
 	st, err := store.Open(ctx, dbURL)
 	if err != nil {
 		t.Fatal(err)
