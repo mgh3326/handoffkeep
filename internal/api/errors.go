@@ -133,18 +133,24 @@ func appErr(w http.ResponseWriter, r *http.Request, e error) {
 		return
 	}
 	if isInternal(e) {
-		// request_id ties the client's error to this log line and to Sentry.
-		requestID := telemetry.RequestID(r.Context())
-		client, _ := store.WrkPrincipal(r.Context())
-		log.Printf("api.internal_error request_id=%s route=%q client=%q err=%q", requestID, r.Pattern, client, e.Error())
-		body := map[string]string{"error": "internal_error"}
-		if requestID != "" {
-			body["request_id"] = requestID
-		}
-		jsonOut(w, http.StatusInternalServerError, body)
+		writeInternal(w, r, "internal_error", e)
 		return
 	}
 	writeError(w, http.StatusBadRequest, "invalid_context")
+}
+
+// writeInternal logs an infrastructure failure as one api.internal_error line
+// and answers 500 with code. request_id ties the client's error to this log
+// line and to Sentry.
+func writeInternal(w http.ResponseWriter, r *http.Request, code string, e error) {
+	requestID := telemetry.RequestID(r.Context())
+	client, _ := store.WrkPrincipal(r.Context())
+	log.Printf("api.internal_error request_id=%s route=%q client=%q code=%s err=%q", requestID, r.Pattern, client, code, e.Error())
+	body := map[string]string{"error": code}
+	if requestID != "" {
+		body["request_id"] = requestID
+	}
+	jsonOut(w, http.StatusInternalServerError, body)
 }
 
 // isInternal reports whether e is a failure of the server's dependencies

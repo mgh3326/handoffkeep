@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -355,5 +356,71 @@ func assertNoContent(t *testing.T, events []*sentry.Event, forbidden ...string) 
 		if strings.Contains(string(raw), value) {
 			t.Fatalf("captured event leaked %q", value)
 		}
+	}
+}
+
+// Each 5xx groups by route template and status, never by content, and carries
+// the API's closed-vocabulary error code as a tag. Bodies that are not a
+// snake_case JSON code yield no tag.
+func TestServerErrorsGroupByRouteAndStatus(t *testing.T) {
+	monitor, transport := testMonitor(t)
+	mux := http.NewServeMux()
+	jsonError := func(status int, body string) http.HandlerFunc {
+		return func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(status)
+			_, _ = w.Write([]byte(body))
+		}
+	}
+	mux.HandleFunc("GET /v1/quota/accounts/{key}/latest", jsonError(http.StatusInternalServerError, `{"error":"quota_store_unavailable","request_id":"x"}`+"\n"))
+	mux.HandleFunc("POST /hooks/linear", jsonError(http.StatusServiceUnavailable, `{"error":"internal_error"}`))
+	mux.HandleFunc("GET /v1/free-text", jsonError(http.StatusInternalServerError, `{"error":"private detail text"}`))
+	mux.HandleFunc("GET /v1/plain", func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "internal_error", http.StatusInternalServerError)
+	})
+	for _, request := range []struct{ method, path string }{
+		{http.MethodGet, "/v1/quota/accounts/private-key/latest"},
+		{http.MethodPost, "/hooks/linear"},
+		{http.MethodGet, "/v1/free-text"},
+		{http.MethodGet, "/v1/plain"},
+	} {
+		monitor.Handler(mux).ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(request.method, request.path, nil))
+	}
+	type grouped struct {
+		fingerprint string
+		code        string
+	}
+	got := map[string]grouped{}
+	for _, event := range transport.events {
+		if event.Type == "transaction" {
+			continue
+		}
+		got[event.Transaction] = grouped{strings.Join(event.Fingerprint, "|"), event.Tags["error_code"]}
+	}
+	want := map[string]grouped{
+		"GET /v1/quota/accounts/{key}/latest": {"http-5xx|GET /v1/quota/accounts/{key}/latest|500", "quota_store_unavailable"},
+		"POST /hooks/linear":                  {"http-5xx|POST /hooks/linear|503", "internal_error"},
+		"GET /v1/free-text":                   {"http-5xx|GET /v1/free-text|500", ""},
+		"GET /v1/plain":                       {"http-5xx|GET /v1/plain|500", ""},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("error events=%v\nwant %v", got, want)
+	}
+	assertNoContent(t, transport.events, "private-key", "private detail")
+}
+
+// A request whose client went away (context.Canceled) still gets its
+// transaction, but the 5xx its cancelled work produced is not an error event.
+func TestClientGoneIsNotAnError(t *testing.T) {
+	monitor, transport := testMonitor(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	monitor.Handler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		cancel() // the client disconnects mid-request
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"internal_error"}`))
+	})).ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/v1/tasks/1", nil).WithContext(ctx))
+	if len(transport.events) != 1 || transport.events[0].Type != "transaction" {
+		t.Fatalf("got %d events, want only the transaction", len(transport.events))
 	}
 }
