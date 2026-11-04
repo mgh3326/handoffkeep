@@ -1201,6 +1201,9 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := migrateOnce(ctx, tx, 35, func() error { return execAll(ctx, tx, decisionsV35) }); err != nil {
 		return err
 	}
+	if err := migrateOnce(ctx, tx, 36, func() error { return execAll(ctx, tx, ledgerV36) }); err != nil {
+		return err
+	}
 
 	return tx.Commit(ctx)
 }
