@@ -383,6 +383,12 @@ func (s *Store) UpdateJob(ctx context.Context, id string, u JobUpdate) (Job, err
 		return j, err
 	}
 	defer tx.Rollback(ctx)
+	// The work board (recordLinearBoardJobTx) and a new role (applyJobRoleTx)
+	// lock the job's task row below: the task-mutation lock comes first,
+	// before the job row (lock order, lockorder.go).
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
+		return j, err
+	}
 	j, err = scanJob(tx.QueryRow(ctx, `SELECT `+jobColumns+` FROM jobs WHERE job_id=$1 FOR UPDATE`, id))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return j, ErrJobNotFound

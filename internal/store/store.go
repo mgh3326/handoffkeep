@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"regexp"
 	"sort"
@@ -742,11 +743,33 @@ func Open(ctx context.Context, url string) (*Store, error) {
 		return nil, err
 	}
 	s := &Store{pool: p}
-	if err = s.migrate(ctx); err != nil {
+	if err = retryDeadlock(ctx, migrateAttempts, s.migrate); err != nil {
 		p.Close()
 		return nil, err
 	}
 	return s, nil
+}
+
+// migrateAttempts bounds retryDeadlock around Store.migrate. A migration that
+// has DDL to run takes table locks in statement order, which no row-level
+// lock order can match, so while another process writes it can be chosen as
+// a deadlock victim (lockorder.go, level 1). Its transaction is idempotent and
+// rolled back whole, so running it again is safe.
+const migrateAttempts = 3
+
+// retryDeadlock runs f up to attempts times while it fails with a deadlock
+// (SQLSTATE 40P01). It is the fallback for a transaction that cannot follow
+// the lock order, not a substitute for it.
+func retryDeadlock(ctx context.Context, attempts int, f func(context.Context) error) error {
+	var err error
+	for i := 0; i < attempts; i++ {
+		var pgErr *pgconn.PgError
+		if err = f(ctx); !errors.As(err, &pgErr) || pgErr.Code != "40P01" {
+			return err
+		}
+		log.Printf("store.deadlock_retry attempt=%d err=%q", i+1, err.Error())
+	}
+	return err
 }
 func (s *Store) Close() { s.pool.Close() }
 func (s *Store) migrate(ctx context.Context) error {
@@ -760,6 +783,15 @@ func (s *Store) migrate(ctx context.Context) error {
 	defer tx.Rollback(ctx)
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, migrationLockID); err != nil {
 		return err
+	}
+	// A current schema needs no DDL; return before the first table lock
+	// (lock order, lockorder.go, level 1).
+	current, err := migrateCurrent(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if current {
+		return tx.Commit(ctx)
 	}
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY)`, `INSERT INTO schema_version(version) VALUES (1) ON CONFLICT DO NOTHING`,
@@ -2934,6 +2966,14 @@ func (s *Store) AppendRelayEvent(ctx context.Context, x RelayEvent) (RelayEvent,
 		return x, false, err
 	}
 	defer tx.Rollback(ctx)
+	// With the work board on, recordLinearBoardRelayTx below locks every task
+	// the event matches: the task-mutation lock comes first, before the job
+	// lock (lock order, lockorder.go).
+	if s.LinearBoardEnabled() {
+		if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
+			return x, false, err
+		}
+	}
 	if x.JobID != "" && wrkTablesExist(ctx, tx) {
 		if _, err = tx.Exec(ctx, `INSERT INTO wrk_job_locks(job_id) VALUES($1) ON CONFLICT DO NOTHING`, x.JobID); err != nil {
 			return x, false, err
@@ -3461,6 +3501,13 @@ func (s *Store) PutDocument(ctx context.Context, x Document) (Document, bool, er
 		return x, false, e
 	}
 	defer tx.Rollback(ctx)
+	// applyDeployRecordTx locks the listed tasks: the task-mutation lock comes
+	// before the document row (lock order, lockorder.go).
+	if IsDeployRecordKey(x.Key) {
+		if _, e = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); e != nil {
+			return x, false, e
+		}
+	}
 	e = tx.QueryRow(ctx, `INSERT INTO documents(key,kind,session,job,body,sha256,created_by,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$8) ON CONFLICT(key) DO UPDATE SET kind=EXCLUDED.kind,session=EXCLUDED.session,job=EXCLUDED.job,body=EXCLUDED.body,sha256=EXCLUDED.sha256,created_by=EXCLUDED.created_by,updated_at=EXCLUDED.updated_at RETURNING id,created_at,updated_at`, x.Key, x.Kind, x.Session, x.Job, x.Body, x.SHA256, x.CreatedBy, now).Scan(&x.ID, &x.CreatedAt, &x.UpdatedAt)
 	if e != nil {
 		return x, true, e

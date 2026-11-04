@@ -189,7 +189,11 @@ func (s *Store) WrkAppend(ctx context.Context, actor, job, key string, r wrkreco
 		return out, wrkrecords.Error("wrk_unavailable")
 	}
 	defer tx.Rollback(ctx)
-	if r.Kind == "claim" || r.Kind == "activate" {
+	// A claim locks its task row; a completed or joined record with the work
+	// board on locks every task its relay event matches. Either takes the
+	// task-mutation lock before the job locks below (lock order, lockorder.go).
+	boardRelay := s.LinearBoardEnabled() && (r.Kind == "completed" || r.Kind == "joined")
+	if r.Kind == "claim" || r.Kind == "activate" || boardRelay {
 		if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
 			return out, err
 		}

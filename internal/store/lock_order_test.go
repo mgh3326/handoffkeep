@@ -285,3 +285,69 @@ func TestLockOrderRelayBoardVersusAutoClose(t *testing.T) {
 	}
 	finishLockActors(t, ctx, appendRelay, drop)
 }
+
+// TestMigrateVersionsMatchFreshSchema keeps migrateCurrent honest: a fresh
+// schema records exactly the versions it waits for, so a version added to
+// Store.migrate without updating migrateVersions fails here instead of
+// making every later start re-run DDL (or skip it).
+func TestMigrateVersionsMatchFreshSchema(t *testing.T) {
+	_, dbURL := testdb.Schema(t, "lockver")
+	s, err := Open(t.Context(), dbURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	var got []int32
+	if err = s.pool.QueryRow(t.Context(), `SELECT array_agg(version ORDER BY version) FROM schema_version`).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	want := migrateVersions()
+	if len(got) != len(want) {
+		t.Fatalf("recorded versions %v, migrateVersions %v", got, want)
+	}
+	for i := range want {
+		if int(got[i]) != want[i] {
+			t.Fatalf("recorded versions %v, migrateVersions %v", got, want)
+		}
+	}
+	tx, err := s.pool.Begin(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(t.Context())
+	if current, err := migrateCurrent(t.Context(), tx); err != nil || !current {
+		t.Fatalf("fresh schema current=%v err=%v", current, err)
+	}
+	if _, err = tx.Exec(t.Context(), `DELETE FROM schema_version WHERE version=$1`, SchemaVersion); err != nil {
+		t.Fatal(err)
+	}
+	if current, err := migrateCurrent(t.Context(), tx); err != nil || current {
+		t.Fatalf("schema without v%d current=%v err=%v", SchemaVersion, current, err)
+	}
+}
+
+func TestRetryDeadlockIsBounded(t *testing.T) {
+	deadlock := &pgconn.PgError{Code: "40P01", Message: "deadlock detected"}
+	calls := 0
+	err := retryDeadlock(t.Context(), 3, func(context.Context) error { calls++; return deadlock })
+	if !errors.Is(err, deadlock) || calls != 3 {
+		t.Fatalf("always deadlocking: calls=%d err=%v", calls, err)
+	}
+	calls = 0
+	err = retryDeadlock(t.Context(), 3, func(context.Context) error {
+		calls++
+		if calls == 1 {
+			return deadlock
+		}
+		return nil
+	})
+	if err != nil || calls != 2 {
+		t.Fatalf("deadlock then success: calls=%d err=%v", calls, err)
+	}
+	other := &pgconn.PgError{Code: "40001"}
+	calls = 0
+	err = retryDeadlock(t.Context(), 3, func(context.Context) error { calls++; return other })
+	if !errors.Is(err, other) || calls != 1 {
+		t.Fatalf("other error retried: calls=%d err=%v", calls, err)
+	}
+}
