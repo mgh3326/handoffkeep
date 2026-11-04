@@ -498,6 +498,11 @@ type Task struct {
 	SLAHighRiskAt   *time.Time `json:"sla_high_risk_at"`
 	SLABreachesAt   *time.Time `json:"sla_breaches_at"`
 	SLARisk         string     `json:"sla_risk"`
+	// Source and SourceRef name the producer of a task that came in through
+	// triage intake or a ticket set; (source, source_ref) is unique. Tasks
+	// filed with tasks add leave both empty.
+	Source    string `json:"source,omitempty"`
+	SourceRef string `json:"source_ref,omitempty"`
 	// Stalled is computed at read time: a started task with no
 	// awaiting_decision and no activity within started_stalled_hours.
 	Stalled   bool           `json:"stalled"`
@@ -1199,6 +1204,9 @@ func (s *Store) migrate(ctx context.Context) error {
 		return err
 	}
 	if err := migrateOnce(ctx, tx, 35, func() error { return execAll(ctx, tx, decisionsV35) }); err != nil {
+		return err
+	}
+	if err := migrateOnce(ctx, tx, 36, func() error { return execAll(ctx, tx, intakeV36) }); err != nil {
 		return err
 	}
 
@@ -2180,7 +2188,7 @@ func ValidBodyDoc(v string) bool {
 
 func scanTask(row interface{ Scan(...any) error }, x *Task, extra ...any) error {
 	var refs []byte
-	dest := []any{&x.ID, &x.Lane, &x.ParentLane, &x.Title, &x.Kind, &x.State, &x.Priority, &refs, &x.ClaimedBy, &x.CreatedBy, &x.CreatedAt, &x.UpdatedAt, &x.BodyDoc, &x.Project, &x.Area, &x.Expected, &x.AwaitingDecision, &x.ParentID, &x.StartedAt, &x.CompletedAt, &x.CanceledAt, &x.TriagedAt, &x.StartedTriageAt, &x.MilestoneID, &x.DueAt, &x.SLAStartedAt, &x.SLAMediumRiskAt, &x.SLAHighRiskAt, &x.SLABreachesAt, &x.Labels}
+	dest := []any{&x.ID, &x.Lane, &x.ParentLane, &x.Title, &x.Kind, &x.State, &x.Priority, &refs, &x.ClaimedBy, &x.CreatedBy, &x.CreatedAt, &x.UpdatedAt, &x.BodyDoc, &x.Project, &x.Area, &x.Expected, &x.AwaitingDecision, &x.ParentID, &x.StartedAt, &x.CompletedAt, &x.CanceledAt, &x.TriagedAt, &x.StartedTriageAt, &x.MilestoneID, &x.DueAt, &x.SLAStartedAt, &x.SLAMediumRiskAt, &x.SLAHighRiskAt, &x.SLABreachesAt, &x.Source, &x.SourceRef, &x.Labels}
 	if err := row.Scan(append(dest, extra...)...); err != nil {
 		return err
 	}
@@ -2189,7 +2197,7 @@ func scanTask(row interface{ Scan(...any) error }, x *Task, extra ...any) error 
 	return json.Unmarshal(refs, &x.Refs)
 }
 
-const taskBaseColumns = `id,lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at,body_doc,project,area,expected,awaiting_decision,parent_id,started_at,completed_at,canceled_at,triaged_at,started_triage_at,milestone_id,due_at,sla_started_at,sla_medium_risk_at,sla_high_risk_at,sla_breaches_at`
+const taskBaseColumns = `id,lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at,body_doc,project,area,expected,awaiting_decision,parent_id,started_at,completed_at,canceled_at,triaged_at,started_triage_at,milestone_id,due_at,sla_started_at,sla_medium_risk_at,sla_high_risk_at,sla_breaches_at,source,source_ref`
 const taskColumns = taskBaseColumns + `,ARRAY(SELECT label_id FROM task_labels WHERE task_id=tasks.id ORDER BY label_id)`
 
 // taskProjectQuerier is the row-query seam requireTaskProject runs against:
@@ -2253,7 +2261,31 @@ func normalizeExpected(value string) (string, bool) {
 
 func ValidExpected(value string) bool { _, ok := normalizeExpected(value); return ok }
 
+// CreateTask files a task in backlog without the duplicate check; tasks add
+// and POST /v1/tasks go through CreateTaskChecked.
 func (s *Store) CreateTask(ctx context.Context, x Task) (Task, error) {
+	return s.createTask(ctx, x, nil)
+}
+
+// DuplicateCheck is what a caller of CreateTaskChecked answers to the
+// duplicate check: Link relates the new task to an existing one as related,
+// New files it without looking. The zero value runs the check.
+type DuplicateCheck struct {
+	Link int64
+	New  bool
+}
+
+// CreateTaskChecked is CreateTask behind the duplicate check: when a started,
+// unstarted or backlog task has a similar title, the create is refused with a
+// *SimilarTasksError listing them, unless check carries Link or New.
+func (s *Store) CreateTaskChecked(ctx context.Context, x Task, check DuplicateCheck) (Task, error) {
+	if check.Link < 0 || (check.Link != 0 && check.New) {
+		return x, errors.New("invalid task: link and new are exclusive")
+	}
+	return s.createTask(ctx, x, &check)
+}
+
+func (s *Store) createTask(ctx context.Context, x Task, check *DuplicateCheck) (Task, error) {
 	if x.Expected != nil {
 		normalized, ok := normalizeExpected(*x.Expected)
 		if !ok {
@@ -2274,6 +2306,9 @@ func (s *Store) CreateTask(ctx context.Context, x Task) (Task, error) {
 	}
 	if x.Refs.DecisionRequest != nil {
 		return x, errors.New("invalid task: decision requests use tasks decision-request")
+	}
+	if x.Source != "" || x.SourceRef != "" {
+		return x, errors.New("invalid task: source and source_ref are set by intake and ticket sets")
 	}
 	if err := guard.Reject(x.Title); err != nil {
 		return x, err
@@ -2320,9 +2355,32 @@ func (s *Store) CreateTask(ctx context.Context, x Task) (Task, error) {
 			return x, err
 		}
 	}
+	if check != nil && check.Link != 0 {
+		var exists bool
+		if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM tasks WHERE id=$1)`, check.Link).Scan(&exists); err != nil {
+			return x, err
+		}
+		if !exists {
+			return x, fmt.Errorf("invalid task: link %d does not exist", check.Link)
+		}
+	}
+	if check != nil && check.Link == 0 && !check.New {
+		similar, err := similarOpenTasks(ctx, tx, []string{x.Title})
+		if err != nil {
+			return x, err
+		}
+		if len(similar) > 0 {
+			return x, &SimilarTasksError{Tasks: similar}
+		}
+	}
 	parentID := x.ParentID
 	if err = scanTask(tx.QueryRow(ctx, `INSERT INTO tasks(lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at,body_doc,project,area,expected,parent_id) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING `+taskColumns, x.Lane, x.ParentLane, x.Title, x.Kind, x.State, x.Priority, string(refs), x.ClaimedBy, x.CreatedBy, x.CreatedAt, x.UpdatedAt, x.BodyDoc, x.Project, x.Area, x.Expected, parentID), &x); err != nil {
 		return x, err
+	}
+	if check != nil && check.Link != 0 {
+		if _, err = addRelationTx(ctx, tx, x.ID, RelationRelated, check.Link, x.CreatedBy, x.CreatedAt); err != nil {
+			return x, err
+		}
 	}
 	if s.LinearSyncEnabled() && x.Refs.Linear != nil && x.Refs.Linear.Sync {
 		if err = enqueueLinearTaskCreate(ctx, tx, x); err != nil {
