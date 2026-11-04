@@ -15,7 +15,7 @@ import (
 // lets the browser capture the exact same fictional fixtures without a DB.
 func TestConsoleRouteDocuments(t *testing.T) {
 	h := newAssetTestHandler(t, "capture")
-	task := store.Task{ID: 101, Lane: "example-project", Title: "Ship a clear operator console", State: "needs_decision"}
+	task := store.Task{ID: 101, Lane: "example-project", Title: "Ship a clear operator console", State: "developing", AwaitingDecision: true}
 	decision := decisionData{CSRF: "fixture-token", CanWrite: true, Tasks: []taskDecisionView{{Type: "task", ID: 101, Task: task, Question: "Keep the compact list as the default?", Options: []string{"Yes, keep the list", "Use the board"}, Index: 0, CanWrite: true}}}
 	pages := []struct {
 		name, template string

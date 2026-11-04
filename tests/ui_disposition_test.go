@@ -97,7 +97,7 @@ func TestUIDispositionSingleAnswerRecordsThenNotifies(t *testing.T) {
 		t.Fatalf("hub requests=%+v", requests)
 	}
 	got, _, _ := s.GetTask(t.Context(), x.ID)
-	if got.State != "claimed" || got.Refs.Disposition.Answer == nil || got.Refs.Disposition.Answer.Key != "B" || got.Refs.Disposition.Answer.By != "operator:admin@example.com" {
+	if got.State != "researching" || got.Refs.Disposition.Answer == nil || got.Refs.Disposition.Answer.Key != "B" || got.Refs.Disposition.Answer.By != "operator:admin@example.com" {
 		t.Fatalf("answered item=%+v", got.Refs.Disposition)
 	}
 	// A second submission of the same form is a conflict and emits nothing.
@@ -131,7 +131,7 @@ func TestUIDispositionEmitFailureStaysRecordedAndRenotifies(t *testing.T) {
 	if response.StatusCode != http.StatusOK || !strings.Contains(body, "처분 기록됨 · 레인 통지 실패") || !strings.Contains(body, `data-disposition-unnotified="`+eventID+`"`) {
 		t.Fatalf("emit failure status=%d body=%q", response.StatusCode, body)
 	}
-	if got, _, _ := s.GetTask(t.Context(), x.ID); got.State != "claimed" || got.Refs.Disposition.Answer.EventID != eventID {
+	if got, _, _ := s.GetTask(t.Context(), x.ID); got.State != "researching" || got.Refs.Disposition.Answer.EventID != eventID {
 		t.Fatalf("failed emit must keep the recorded answer: %+v", got)
 	}
 	first := hub.requests()[0]
@@ -196,11 +196,11 @@ func TestUIDispositionBatchIsOneActionOverTheSnapshot(t *testing.T) {
 	}
 	for _, item := range items {
 		got, _, _ := s.GetTask(t.Context(), item.ID)
-		if got.State != "claimed" || got.Refs.Disposition.Answer == nil || got.Refs.Disposition.Answer.Key != got.Refs.Disposition.Recommended || got.Refs.Disposition.Answer.BatchID == "" {
+		if got.State != "researching" || got.Refs.Disposition.Answer == nil || got.Refs.Disposition.Answer.Key != got.Refs.Disposition.Recommended || got.Refs.Disposition.Answer.BatchID == "" {
 			t.Fatalf("#%d after batch: state=%s answer=%+v", item.ID, got.State, got.Refs.Disposition.Answer)
 		}
 	}
-	if got, _, _ := s.GetTask(t.Context(), late.ID); got.State != "needs_decision" {
+	if got, _, _ := s.GetTask(t.Context(), late.ID); got.State != "backlog" {
 		t.Fatalf("item created after the snapshot was answered: %s", got.State)
 	}
 	requests := hub.requests()
@@ -262,7 +262,7 @@ func TestUIDispositionRefusesNonOperatorPaths(t *testing.T) {
 	before := uiRowCounts(t)
 	unchanged := func(label string) {
 		t.Helper()
-		if got, _, _ := s.GetTask(t.Context(), x.ID); got.State != "needs_decision" {
+		if got, _, _ := s.GetTask(t.Context(), x.ID); got.State != "backlog" {
 			t.Fatalf("%s moved the item to %s", label, got.State)
 		}
 		if after := uiRowCounts(t); after.TaskEvents != before.TaskEvents || after.Tasks != before.Tasks {
@@ -334,7 +334,7 @@ func TestUIDispositionRefusesNonOperatorPaths(t *testing.T) {
 	// The operator's own route still works afterwards.
 	response = uiPostForm(t, h.Client(), h.URL+"/ui/dispositions/answer", assertion, cookie, answer, h.URL, true)
 	responseText(t, response)
-	if got, _, _ := s.GetTask(t.Context(), x.ID); response.StatusCode != http.StatusOK || got.State != "claimed" {
+	if got, _, _ := s.GetTask(t.Context(), x.ID); response.StatusCode != http.StatusOK || got.State != "researching" {
 		t.Fatalf("operator answer status=%d state=%s", response.StatusCode, got.State)
 	}
 }
@@ -360,7 +360,7 @@ func TestUIGlanceReportsDispositionsSeparately(t *testing.T) {
 	if delta("dispositions_open") != 2 || delta("decisions_pending") != 1 {
 		t.Fatalf("glance: dispositions_open +%d decisions_pending +%d, want +2 and +1", delta("dispositions_open"), delta("decisions_pending"))
 	}
-	if int(a["by_state"].(map[string]any)["needs_decision"].(float64))-int(b["by_state"].(map[string]any)["needs_decision"].(float64)) != 3 {
-		t.Fatal("by_state.needs_decision must stay the raw state tally")
+	if int(a["by_state"].(map[string]any)["awaiting_decision"].(float64))-int(b["by_state"].(map[string]any)["awaiting_decision"].(float64)) != 3 {
+		t.Fatal("by_state.awaiting_decision must stay the raw awaiting tally")
 	}
 }

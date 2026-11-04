@@ -210,7 +210,7 @@ func reapBuilderTaskGate(row *reapRow, linked []store.Task, tasksTruncated bool,
 	task := linked[0]
 	id := task.ID
 	row.TaskID, row.TaskState = &id, task.State
-	if task.State != "merged" && task.State != "dropped" {
+	if !store.IsSettledState(task.State) {
 		return reapClassHeld, "task-open"
 	}
 	if task.UpdatedAt.IsZero() || now.Sub(task.UpdatedAt) < grace {

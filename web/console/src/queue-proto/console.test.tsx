@@ -9,7 +9,7 @@ const task = {
   title: "Example task",
   lane: "example-project",
   kind: "build",
-  state: "hold",
+  state: "icebox",
   priority: 70,
   created_by: "example",
   created_at: "2026-11-01T00:00:00Z",
@@ -19,7 +19,7 @@ const task = {
 const page = {
   generated_at: "2026-11-01T00:00:00Z",
   tasks: [task],
-  states: ["hold", "needs_decision"],
+  states: ["icebox", "unstarted"],
   truncated: false,
 };
 const live = {
@@ -135,7 +135,7 @@ it("opens the modal palette, searches real task results, and restores its trigge
       {
         id: 101,
         title: "Example task",
-        state: "hold",
+        state: "icebox",
         lane: "example-project",
         kind: "build",
         snippet: "",

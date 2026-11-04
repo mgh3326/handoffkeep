@@ -134,7 +134,7 @@ func (s *Store) ListAssistantPending(ctx context.Context) (AssistantPending, err
 	if err := s.pool.QueryRow(ctx, `SELECT now()`).Scan(&out.ServerTime); err != nil {
 		return out, err
 	}
-	tasks, err := s.pool.Query(ctx, `SELECT `+taskColumns+` FROM tasks WHERE refs->'decision_request'->>'status'='open' AND state NOT IN ('merged','dropped') ORDER BY id ASC`)
+	tasks, err := s.pool.Query(ctx, `SELECT `+taskColumns+` FROM tasks WHERE refs->'decision_request'->>'status'='open' AND state NOT IN (`+settledStatesSQL+`) ORDER BY id ASC`)
 	if err != nil {
 		return out, err
 	}

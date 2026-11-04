@@ -26,11 +26,10 @@ export const SAMPLE200_DISTRIBUTION = {
   kinds: { fix: 103, implement: 41, verify: 20, decide: 16, research: 12, chore: 8 },
   states: {
     backlog: 140,
-    hold: 20,
-    claimed: 10,
-    in_progress: 12,
-    verifying: 5,
-    needs_decision: 8,
+    icebox: 20,
+    researching: 10,
+    developing: 20,
+    reviewing: 5,
     merged: 3,
     dropped: 2,
   },
@@ -188,7 +187,7 @@ export function buildSample200(seed = 7): Dataset {
     if (id === 1150) {
       task.title = `preview clamp 경계 뒤 텍스트 — ${"tail ".repeat(30)}CLAMPED-TAIL-MARKER-1150 끝`;
     }
-    if (task.state === "needs_decision" || task.kind === "decide") {
+    if (task.kind === "decide") {
       task.decision = {
         question: `합성 결정 질문 #${id}: 어느 접근을 선택해야 하는가?`,
         evidence: `synth/reports/task-${id}.md`,
@@ -255,7 +254,7 @@ export function buildEdge(): Dataset {
     ...over,
   });
   const tasks: ProtoTask[] = [
-    mk(5001, { state_entered_at: null, title: "edge: current-state age unknown", state: "in_progress" }),
+    mk(5001, { state_entered_at: null, title: "edge: current-state age unknown", state: "developing" }),
     mk(5002, { coverage: { status: "not_collected", participants: null }, title: "edge: participation coverage missing" }),
     mk(5003, { due_at: null, blocker: null, title: "edge: due and blocker unavailable" }),
     mk(5004, {
@@ -330,7 +329,7 @@ export function buildPerf5000(seed = 7): Dataset {
   const laneWeights = [0.76, 0.1, 0.06, 0.05, 0.03];
   const kindNames = ["fix", "implement", "verify", "decide", "research", "chore"];
   const kindWeights = [0.515, 0.2, 0.1, 0.08, 0.06, 0.045];
-  const stateNames = ["backlog", "hold", "claimed", "in_progress", "verifying", "needs_decision", "merged", "dropped"];
+  const stateNames = ["backlog", "icebox", "researching", "developing", "reviewing", "unstarted", "merged", "dropped"];
   const stateWeights = [0.6, 0.12, 0.06, 0.08, 0.04, 0.04, 0.04, 0.02];
   const weighted = (weights: number[]) => {
     const roll = rand();
@@ -352,7 +351,7 @@ export function buildPerf5000(seed = 7): Dataset {
     task.kind = kindNames[weighted(kindWeights)];
     task.state = stateNames[weighted(stateWeights)];
     task.title = synthTitle(rand, id, 97);
-    if (task.state === "needs_decision" || task.kind === "decide") {
+    if (task.kind === "decide") {
       task.decision = {
         question: `합성 결정 질문 #${id}`,
         evidence: `synth/reports/task-${id}.md`,
@@ -410,7 +409,7 @@ export function buildStale63(): Dataset {
     }
     return 200 + (i % 150); // 200–349h → 8–14d
   };
-  const states = ["backlog", "backlog", "hold", "claimed", "in_progress", "needs_decision", "verifying"] as const;
+  const states = ["backlog", "backlog", "icebox", "researching", "developing", "unstarted", "reviewing"] as const;
   const tasks: ProtoTask[] = [];
   const enrichment: Record<number, Enrichment> = {};
   let seq = 0;
@@ -435,9 +434,6 @@ export function buildStale63(): Dataset {
       task.events = [
         { id: id * 10 + 1, from: "backlog", to: task.state, by: "synth-claim-1", at: task.state_entered_at },
       ];
-      if (task.state === "needs_decision") {
-        task.decision = { question: `합성 결정 질문 #${id}`, evidence: `synth/reports/task-${id}.md` };
-      }
       tasks.push(task);
       const area = seq % 3 === 0 ? "synth-area-beta" : "synth-area-alpha";
       enrichment[id] = {
@@ -455,21 +451,21 @@ export function buildStale63(): Dataset {
   urgent.priority = 95;
   urgent.title = "stale63 anchor: urgent candidate (p95)";
   const blocked = tasks.find((t) => t.id === 6150)!; // ≥7d bucket: stale + blocked
-  blocked.state = "hold";
+  blocked.state = "icebox";
   blocked.blocker = "synth blocker: awaiting external review verdict";
   blocked.title = "stale63 anchor: blocked task with evidence";
   blocked.events = [
-    { id: 615001, from: "backlog", to: "hold", by: "synth-claim-1", note: "synthetic block", at: blocked.state_entered_at ?? blocked.created_at },
+    { id: 615001, from: "backlog", to: "icebox", by: "synth-claim-1", note: "synthetic block", at: blocked.state_entered_at ?? blocked.created_at },
   ];
   const handoff = tasks.find((t) => t.id === 6140)!; // ≥7d bucket start: ownership flow
-  handoff.state = "in_progress";
+  handoff.state = "developing";
   handoff.claimant = "synth-claim-3";
   handoff.title = "stale63 anchor: ownership handoff chain";
   const handoffAt = handoff.state_entered_at ?? handoff.created_at;
   handoff.events = [
-    { id: 614001, from: "backlog", to: "claimed", by: "synth-claim-1", note: "synthetic claim", at: handoffAt },
-    { id: 614002, from: "claimed", to: "in_progress", by: "synth-claim-2", note: "synthetic handoff", at: handoffAt },
-    { id: 614003, from: "in_progress", to: "in_progress", by: "synth-claim-3", note: "synthetic re-claim", at: handoffAt },
+    { id: 614001, from: "backlog", to: "researching", by: "synth-claim-1", note: "synthetic claim", at: handoffAt },
+    { id: 614002, from: "researching", to: "developing", by: "synth-claim-2", note: "synthetic handoff", at: handoffAt },
+    { id: 614003, from: "developing", to: "developing", by: "synth-claim-3", note: "synthetic re-claim", at: handoffAt },
   ];
 
   // 6162/6163: the remainder of the 63 — non-terminal tasks with absent

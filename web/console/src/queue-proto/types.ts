@@ -3,16 +3,17 @@
 // (hk:doc 2199); `Dataset.source` marks which records are generated locally.
 
 export const KNOWN_STATES = [
+  "triage",
   "backlog",
-  "reopened",
-  "claimed",
-  "in_progress",
-  "verifying",
-  "join",
-  "hold",
-  "needs_decision",
+  "unstarted",
+  "researching",
+  "developing",
+  "reviewing",
   "merged",
+  "deployed",
   "dropped",
+  "duplicate",
+  "icebox",
 ] as const;
 
 export type ProtoTask = {
@@ -46,9 +47,29 @@ export type ProtoTask = {
   /** Routing tag from the closed area vocabulary; null or absent → unset.
    * Display only: the console has no way to change it. */
   area?: string | null;
-  /** no_job: the recorded reason a claimed/in_progress transition ran
+  /** true when the task is waiting for an operator decision — orthogonal to
+   * the work state. Absent/false → no active decision request. */
+  awaiting_decision?: boolean;
+  /** no_job: the recorded reason a researching/developing transition ran
    * without claimed_by + refs.job_id; absent unless that exemption was used. */
-  events: { id: number; kind?: "transition" | "relane" | "decision" | "project" | "area"; from: string; to: string; by: string; note?: string; no_job?: string; at: string }[];
+  events: {
+    id: number;
+    kind?: "transition" | "relane" | "decision" | "project" | "area"
+         | "state_migration" | "awaiting_decision" | "parent" | "relation" | "auto_close";
+    from: string;
+    to: string;
+    by: string;
+    note?: string;
+    no_job?: string;
+    source?: string;
+    source_ref?: string;
+    field?: string;
+    from_value?: string;
+    to_value?: string;
+    auto?: boolean;
+    applied?: boolean;
+    at: string;
+  }[];
   dwell: { state: string; seconds: number; open: boolean }[];
   /** "collected" may carry an honest 0; "not_collected" renders as unknown. */
   coverage: { status: "collected" | "not_collected"; participants: number | null };

@@ -112,8 +112,8 @@ export type LiveResponse = {
   tasks_truncated?: boolean;
 };
 
-/** Task states that display live chips: claimed · in_progress · verifying. */
-export const LIVE_TASK_STATES: ReadonlySet<string> = new Set(["claimed", "in_progress", "verifying"]);
+/** Task states that display live chips: researching · developing · reviewing. */
+export const LIVE_TASK_STATES: ReadonlySet<string> = new Set(["researching", "developing", "reviewing"]);
 
 /** A whole-request failure synthesizes failed sections — distinct from every
  * server-reported status and never an empty "ok". */

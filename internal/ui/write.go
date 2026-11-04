@@ -33,11 +33,6 @@ const decisionBatchProcessLimit = 50
 
 var docKeyRE = regexp.MustCompile(`^[A-Za-z0-9._\-/]{1,512}$`)
 
-// noJobReasonWebAnswer is the recorded no-job reason when an operator's web
-// answer lands a jobless task back in claimed; the answered decision is the
-// explicit exception, named by the path that used it.
-const noJobReasonWebAnswer = "decision answered via web; task has no job link"
-
 var decisionBatchFieldRE = regexp.MustCompile(`^items\.([0-9]+)\.(type|id|select|answer|custom|note)$`)
 
 type writeOutcome struct {
@@ -234,7 +229,7 @@ func (h *Handler) answerDecision(w http.ResponseWriter, r *http.Request, email s
 			h.decisionResult(w, r, email, "처분 항목은 처분 구획에서만 답합니다.", http.StatusConflict)
 			return
 		}
-		if task.State != "needs_decision" {
+		if !task.AwaitingDecision {
 			h.decisionResult(w, r, email, "Task has already been answered.", http.StatusConflict)
 			return
 		}
@@ -300,7 +295,7 @@ func (h *Handler) answerDecision(w http.ResponseWriter, r *http.Request, email s
 		transitionNote += " — " + note
 	}
 	transitionNote += " — via web by " + email
-	if _, err = h.store.TransitionTask(r.Context(), id, "claimed", "operator:"+email, transitionNote, nil, noJobReasonWebAnswer); err != nil {
+	if _, err = h.store.ClearAwaitingDecision(r.Context(), id, "operator:"+email, transitionNote); err != nil {
 		if errors.Is(err, store.ErrTaskConflict) {
 			outcome.result = "task_conflict"
 			h.decisionResult(w, r, email, "이미 답변됨", http.StatusOK)
@@ -533,7 +528,7 @@ func (h *Handler) openBatchDecision(r *http.Request, kind string, id int64) (dec
 		if err != nil {
 			return decisionTarget{}, http.StatusInternalServerError, "Fleet console unavailable."
 		}
-		if !found || task.State != "needs_decision" {
+		if !found || !task.AwaitingDecision {
 			return decisionTarget{}, http.StatusConflict, "이미 답변됨"
 		}
 		if err := h.wrkTaskCheck(r.Context(), task, "claimed"); err != nil {
@@ -684,7 +679,7 @@ func (h *Handler) emitBatchDecision(r *http.Request, email string, item decision
 			note += " — " + item.Note
 		}
 		note += " — via web by " + email
-		if _, err := h.store.TransitionTask(r.Context(), item.ID, "claimed", "operator:"+email, note, nil, noJobReasonWebAnswer); err != nil {
+		if _, err := h.store.ClearAwaitingDecision(r.Context(), item.ID, "operator:"+email, note); err != nil {
 			if errors.Is(err, store.ErrTaskConflict) {
 				outcome.Status, outcome.Message, outcome.Result = http.StatusConflict, "이미 답변됨", "task_conflict"
 				return outcome, true

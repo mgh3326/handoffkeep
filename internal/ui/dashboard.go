@@ -31,7 +31,7 @@ const (
 )
 
 // dashboardActiveStates are the task states shown as running work.
-var dashboardActiveStates = map[string]bool{"claimed": true, "in_progress": true, "verifying": true, "join": true}
+var dashboardActiveStates = map[string]bool{store.StateResearching: true, store.StateDeveloping: true, store.StateReviewing: true}
 
 type dashboardResponse struct {
 	GeneratedAt    string             `json:"generated_at"`
@@ -194,7 +194,7 @@ func buildDashboard(now time.Time, quota []store.QuotaAccountLatest, tasks []sto
 			}
 			out.Work = append(out.Work, item)
 		}
-		if task.Refs.PR == "" || task.State == "merged" || task.State == "dropped" {
+		if task.Refs.PR == "" || store.IsSettledState(task.State) {
 			continue
 		}
 		name, number := dashboardPRRepo(task.Refs.PR)

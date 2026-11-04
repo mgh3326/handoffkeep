@@ -286,15 +286,17 @@ func decisionResolveCmd(args []string, out, errout io.Writer) error {
 	if err != nil {
 		var httpErr *remote.HTTPError
 		if errors.As(err, &httpErr) && httpErr.Status == http.StatusConflict && httpErr.Code == "decision_request_stale" {
-			// A legacy needs_decision task (decision_options from a
+			// A legacy decision task (decision_options from a
 			// --question/--option transition) holds no structured dr-
-			// request, so nothing went stale — name the working route.
+			// request, so nothing went stale — name the working route. A
+			// server that predates the awaiting_decision flag reports the
+			// old needs_decision state instead.
 			if task, found, readErr := c.GetTask(ctx, id); readErr == nil && found &&
-				task.State == "needs_decision" && task.Refs.DecisionRequest == nil {
+				(task.AwaitingDecision || task.State == "needs_decision") && task.Refs.DecisionRequest == nil {
 				if task.Refs.Disposition != nil {
-					fmt.Fprintf(errout, "task %d is a disposition item in needs_decision; only the operator's web answer resolves it (decisions resolve is refused with disposition_operator_only)\n", id)
+					fmt.Fprintf(errout, "task %d is a disposition item waiting on a decision; only the operator's web answer resolves it (decisions resolve is refused with disposition_operator_only)\n", id)
 				} else {
-					fmt.Fprintf(errout, "task %d is in needs_decision with no structured decision request (decision_request_stale is misleading: nothing went stale) — resolve it with: handoffkeep decisions resolve task %d --by LANE --answer TEXT --no-inject\n", id, id)
+					fmt.Fprintf(errout, "task %d is waiting on a decision with no structured decision request (decision_request_stale is misleading: nothing went stale) — resolve it with: handoffkeep decisions resolve task %d --by LANE --answer TEXT --no-inject\n", id, id)
 				}
 			}
 		}

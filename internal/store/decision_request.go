@@ -35,8 +35,8 @@ import (
 //     "deadline passed, not applied" until a default_applied resolution
 //     carrying a receipt is recorded;
 //   - the request's status is independent of the task state: requests may be
-//     open on backlog or in_progress tasks, and an open request left on a
-//     merged or dropped task stays open (shown as uncleaned) until resolved.
+//     open on backlog or started tasks, and an open request left on a
+//     settled task stays open (shown as uncleaned) until resolved.
 
 const (
 	DecisionRequestOpen           = "open"
@@ -188,8 +188,8 @@ type DecisionRequestInput struct {
 	Doc            string          `json:"doc,omitempty"`
 	Refs           []string        `json:"refs,omitempty"`
 	Supersedes     string          `json:"supersedes,omitempty"`
-	// Block also moves the task to needs_decision in the same transaction
-	// (a request that stops the work). Without it the state is unchanged.
+	// Block also sets the task's awaiting_decision flag in the same
+	// transaction (a request that stops the work). Without it the state is unchanged.
 	Block bool `json:"block,omitempty"`
 	// HumanOnly marks the request as answerable only by the human operator's
 	// own paths; the assistant resolve path refuses it. Producers asking
@@ -539,7 +539,7 @@ func insertDecisionEvent(ctx context.Context, tx pgx.Tx, id int64, state, by, no
 }
 
 func isTerminalTaskState(state string) bool {
-	return state == "merged" || state == "dropped"
+	return IsSettledState(state)
 }
 
 // RecordDecisionRequest records a request on a task. A byte-identical
@@ -631,18 +631,14 @@ func (s *Store) RecordDecisionRequest(ctx context.Context, taskID int64, by stri
 	}
 	x.Refs.DecisionRequest = &request
 	x.Refs.DecisionOptions = &options
-	from, to := x.State, x.State
-	if in.Block && x.State != "needs_decision" {
-		if !taskTransitionAllowed(x.State, "needs_decision") {
-			return DecisionRequestResult{}, ErrTaskConflict
-		}
-		to = "needs_decision"
+	// A blocking request is also the task's old needs_decision transition: it
+	// sets the awaiting_decision flag, and the task keeps its work state.
+	setFlag := in.Block && !x.AwaitingDecision
+	if setFlag {
+		x.AwaitingDecision = true
 	}
-	encoded, err := json.Marshal(x.Refs)
-	if err != nil {
-		return DecisionRequestResult{}, err
-	}
-	if err = scanTask(tx.QueryRow(ctx, `UPDATE tasks SET state=$2,refs=$3::jsonb,updated_at=$4 WHERE id=$1 RETURNING `+taskColumns, taskID, to, string(encoded), now), &x); err != nil {
+	x.UpdatedAt = now
+	if x, err = writeTaskTx(ctx, tx, x); err != nil {
 		return DecisionRequestResult{}, err
 	}
 	note := "decision-request " + request.ID
@@ -650,10 +646,9 @@ func (s *Store) RecordDecisionRequest(ctx context.Context, taskID int64, by stri
 		note += " (supersedes " + request.Supersedes + ")"
 	}
 	note += ": " + request.Question
-	if from != to {
-		// A blocking request is also the task's needs_decision transition;
-		// its note keeps the question readers of that transition expect.
-		if _, err = tx.Exec(ctx, `INSERT INTO task_events(task_id,"from","to","by",note,refs,at) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7)`, taskID, from, to, by, request.Question, string(encoded), now); err != nil {
+	if setFlag {
+		// The event's note keeps the question readers of the flag expect.
+		if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: taskID, Kind: TaskEventAwaiting, From: x.State, To: x.State, By: by, Note: request.Question, Refs: x.Refs, At: now, Field: "awaiting_decision", FromValue: "false", ToValue: "true"}); err != nil {
 			return DecisionRequestResult{}, err
 		}
 		if s.LinearSyncEnabled() && x.Refs.Linear != nil && x.Refs.Linear.Sync {

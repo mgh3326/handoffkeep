@@ -56,7 +56,11 @@ func (b *LinearBoard) ApplyTask(task Task) {
 	previous := b.Task
 	task.Events = nil
 	newJob := previous.Refs.JobID != "" && previous.Refs.JobID != task.Refs.JobID
-	if task.State != "reopened" && !newJob {
+	// A reopen is a task leaving a settled or parked state for unstarted; it
+	// replaces the old reopened state as the signal that the previous PR and
+	// head no longer describe the work.
+	reopened := task.State == StateUnstarted && (IsSettledState(previous.State) || previous.State == StateIcebox)
+	if !reopened && !newJob {
 		if task.Refs.PR == "" {
 			task.Refs.PR = previous.Refs.PR
 		}
@@ -65,12 +69,12 @@ func (b *LinearBoard) ApplyTask(task Task) {
 		}
 	}
 	b.Task = task
-	if (b.State != "Done" && b.State != "Canceled") || task.State == "merged" || task.State == "dropped" || task.State == "reopened" || newJob {
+	if (b.State != "Done" && b.State != "Canceled") || LinearTaskStateMapping[task.State].Terminal || reopened || newJob {
 		if b.State == "" || previous.State != task.State || previous.Refs.PR != task.Refs.PR || newJob {
-			if mapping := LinearTaskStateMapping[task.State]; mapping.Mutate {
+			if mapping := LinearTaskStateMapping[task.State]; mapping.Mutate && !task.AwaitingDecision {
 				b.State = mapping.Name
 			}
-			if task.Refs.PR != "" && (task.State == "claimed" || task.State == "in_progress") {
+			if task.Refs.PR != "" && (task.State == StateResearching || task.State == StateDeveloping) {
 				b.State = "In Review"
 			}
 		}
@@ -150,7 +154,7 @@ func (b *LinearBoard) ApplyEvent(event LinearBoardEvent, jobID, pr, head string)
 		if head != "" {
 			b.Task.Refs.HeadSHA = head
 		}
-		if b.Task.State != "merged" && b.Task.State != "dropped" {
+		if !IsSettledState(b.Task.State) {
 			switch event.Kind {
 			case "READY":
 				if b.State != "Done" && b.State != "Canceled" {
@@ -249,7 +253,7 @@ func (s *Store) recordLinearBoardTaskTx(ctx context.Context, tx pgx.Tx, task Tas
 	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM linear_board_tasks WHERE task_id=$1)`, task.ID).Scan(&exists); err != nil {
 		return err
 	}
-	if !exists && task.State != "claimed" && task.State != "in_progress" && task.Refs.JobID == "" {
+	if !exists && !IsStartedState(task.State) && task.Refs.JobID == "" {
 		return nil
 	}
 	b, err := loadLinearBoardTx(ctx, tx, task)
@@ -428,7 +432,7 @@ func (s *Store) recordLinearBoardJobTx(ctx context.Context, tx pgx.Tx, job Job) 
 const linearBoardReconcileFilter = `(id IN (SELECT task_id FROM linear_board_tasks)
  OR COALESCE(refs->>'job_id','')<>''
  OR id IN (SELECT task_id FROM placement_decisions WHERE outcome='placed' AND task_id IS NOT NULL))
- AND (state NOT IN ('merged','dropped')
+ AND (state NOT IN (` + settledStatesSQL + `)
  OR NOT EXISTS (SELECT 1 FROM linear_board_tasks b WHERE b.task_id=tasks.id)
  OR EXISTS (
  SELECT 1 FROM linear_board_tasks b WHERE b.task_id=tasks.id

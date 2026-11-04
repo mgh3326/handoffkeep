@@ -93,11 +93,11 @@ recorded in `task_events`.
 handoffkeep tasks add --lane lane-a --title "add queue endpoint" --kind implement --priority 10
 handoffkeep tasks list --lane lane-a --state backlog
 handoffkeep tasks next --lane lane-a --by session-a  # exits 3 when empty
-handoffkeep tasks transition 42 --to in_progress --note "started"
+handoffkeep tasks transition 42 --to reviewing --pr https://github.com/org/repo/pull/7 --note "PR open"
 handoffkeep tasks rebind 42 --from-job old-job --to-job new-job --by new-builder --reason "builder takeover"
-handoffkeep tasks transition 42 --to needs_decision --question "Which interface should own this?"
+handoffkeep tasks transition 42 --to needs_decision --question "Which interface should own this?"  # sets the awaiting_decision flag
 handoffkeep tasks relane 42 --to lane-b --note "triage follow-up"
-handoffkeep tasks list --parent-lane lane-a --state needs_decision
+handoffkeep tasks list --parent-lane lane-a --state needs_decision  # tasks with the awaiting_decision flag
 handoffkeep tasks show 42
 handoffkeep tasks export [--lane L --state S --parent-lane P --limit N]
 ```
@@ -141,7 +141,7 @@ source (exactly one of `origin_pr` or `origin_task`), facts copied from tools
 (merge SHA and time from `gh pr view --json url,state,mergeCommit,mergedAt`,
 install state with a witness doc or `unknown`, residual count from a list), a
 closed choice set (A 배포 · B 후속 발주 · C 잔여 수용 · D 보류 · E 조치 없음)
-and one recommendation. It is created directly in `needs_decision` inside one
+and one recommendation. It is created directly with the `awaiting_decision` flag set inside one
 transaction, so it is never claimable; at most one item per source is open.
 
 ```bash
@@ -157,7 +157,7 @@ Only the operator's Access-authenticated web route answers an item
 transitions, `decisions resolve`, and compose are refused with
 `disposition_operator_only`. Silence changes nothing: no code path answers,
 demotes, or claims an open item. `apply` records the director's application of
-the operator's answer with legal edges only (A/B/C → `merged`, D → `hold`,
+the operator's answer with legal edges only (A/B/C → `merged`, D → `icebox`,
 E → `dropped`); an item never returns to `backlog`. An "A 배포" answer is
 consent to order a deploy; deploy windows and the installer procedure are
 unchanged. `summary` is the one definition of the digest header
@@ -169,43 +169,98 @@ from `task_events`, so `--as-of` reproduces a past header. Bearer routes:
 ```mermaid
 stateDiagram-v2
     [*] --> backlog
-    merged --> reopened: reopen (reason required)
-    dropped --> reopened: reopen (reason required)
-    reopened --> claimed: claim / next
-    reopened --> in_progress
-    reopened --> hold
-    reopened --> dropped
-    backlog --> claimed: claim / next
-    backlog --> hold
+    triage --> backlog: triage gate
+    triage --> unstarted: triage gate
+    triage --> dropped
+    triage --> duplicate: requires a duplicate_of relation
+    backlog --> unstarted
+    backlog --> researching: claim / next (verify, decide)
+    backlog --> developing: claim / next (implement, fix, ops)
+    backlog --> icebox
     backlog --> dropped
-    claimed --> in_progress
-    claimed --> hold
-    claimed --> needs_decision
-    claimed --> dropped
-    in_progress --> verifying
-    in_progress --> join
-    in_progress --> hold
-    in_progress --> needs_decision
-    in_progress --> dropped
-    verifying --> in_progress: fix needed
-    verifying --> merged
-    verifying --> hold
-    verifying --> needs_decision
-    verifying --> dropped
-    join --> in_progress
-    join --> merged
-    join --> needs_decision
-    join --> dropped
-    hold --> backlog
-    hold --> needs_decision
-    hold --> dropped
-    needs_decision --> backlog
-    needs_decision --> claimed
-    needs_decision --> hold
-    needs_decision --> dropped
-    state merged
-    state dropped
+    backlog --> duplicate: requires a duplicate_of relation
+    unstarted --> backlog
+    unstarted --> researching: claim / next (verify, decide)
+    unstarted --> developing: claim / next (implement, fix, ops)
+    unstarted --> icebox
+    unstarted --> dropped
+    unstarted --> duplicate
+    researching --> developing
+    researching --> reviewing
+    researching --> unstarted
+    researching --> icebox
+    researching --> dropped
+    researching --> duplicate
+    developing --> researching
+    developing --> reviewing
+    developing --> unstarted
+    developing --> icebox
+    developing --> dropped
+    developing --> duplicate
+    reviewing --> developing: fix needed
+    reviewing --> merged: reference flag stores refs.pr
+    reviewing --> unstarted
+    reviewing --> icebox
+    reviewing --> dropped
+    reviewing --> duplicate
+    merged --> unstarted: reopen (reason required)
+    deployed --> unstarted: reopen (reason required)
+    dropped --> unstarted: reopen (reason required)
+    duplicate --> unstarted: reopen (reason required)
+    icebox --> backlog: revive
+    icebox --> unstarted: reopen (reason required)
 ```
+
+### State model, hierarchy and relations
+
+`tasks.state` holds one of eleven states; the category is derived from it and
+is never stored (API rows carry it read-only as `category`):
+
+| Category | States |
+|---|---|
+| `triage` | `triage` |
+| `backlog` | `backlog` (claimable) |
+| `unstarted` | `unstarted` (claimable) |
+| `started` (open) | `researching`, `developing`, `reviewing` |
+| `completed` | `merged`, `deployed` |
+| `canceled` | `dropped`, `duplicate`, `icebox` |
+
+Open means `started` and nothing else. A claim (`tasks claim`, `tasks next`)
+serves `backlog` and `unstarted` and sets the sub-state from the task kind:
+`implement`, `fix` and `ops` give `developing`; `verify` and `decide` give
+`researching`. Entering a started state needs `claimed_by` plus `refs.job_id`
+or a no-job reason. Waiting on the operator is the `awaiting_decision` flag,
+not a state: the task keeps its work state, cannot be claimed while flagged,
+and the answer paths clear the flag. A task leaves `triage` for `backlog` or
+`unstarted` only with a priority above 0, a project and a kind. No manual edge
+enters `deployed`, and a task cannot enter `merged` from `researching` or
+`developing` by hand.
+
+Old state names still work as input and in `--state` filters (`in_progress` →
+the claim's sub-state, `verifying` and `join` → `reviewing`, `hold` →
+`icebox`, `needs_decision` → set `awaiting_decision`, `claimed` → the claim
+path, `reopened` → the reopen path); responses use only the current names.
+
+`tasks.parent_id` is a single, acyclic parent (`tasks add --parent <id>`,
+`tasks parent <id> --to <parent>|--clear`). `task_relations` holds `blocks`,
+`duplicate_of` and `related` edges (`tasks relate|unrelate <id> --kind K
+--other <id>`): self-links and `blocks` or `duplicate_of` cycles are refused,
+removing an edge archives it (`archived_at`) and adding it again revives it.
+`duplicate_of` and the `duplicate` state are written in one transaction
+(`tasks transition <id> --to duplicate --duplicate-of <other>` does the same
+thing). `blocks` is informational. With `auto_close_parent` on (the default),
+a parent closes when its last sub-task settles: `deployed` if every completed
+sub-task is `deployed`, otherwise `merged`; a sub-task in `icebox` or any open
+state blocks the close, and a parent whose sub-tasks are all `dropped` or
+`duplicate` stays where it is, with the skip recorded as an `auto_close`
+event. Reopening a sub-task records an event on a completed parent and does
+not reopen it.
+
+The schema migration to this model (version 32) moves existing rows by the
+map in `docs/linear-internalize.md` and is reversible with
+`scripts/rollback-state-migration.sql`; `handoffkeep tasks migrate-states
+--dry-run` (reads `HANDOFFKEEP_DB_URL`, writes nothing) prints the counts per
+`(legacy_state, rule, new_state)` before the server is upgraded.
 
 The HTTP API uses the usual bearer token: `POST /v1/tasks`, `GET /v1/tasks`,
 `GET /v1/tasks/{id}`, `POST /v1/tasks/{id}/claim`, and
@@ -276,16 +331,15 @@ applied) and the deadline are separate fields. Option labels are at most 120
 bytes (not characters); longer outcome text goes in `--doc`. A byte-identical
 re-send returns the recorded request (`duplicate`); a different request while
 one is open is refused (`decision_request_open`) unless `--supersedes` names
-it, and the new revision starts with no answer. `--block` also moves the task
-to `needs_decision`; without it the state is unchanged. Nothing is applied on
+it, and the new revision starts with no answer. `--block` also sets the task's
+`awaiting_decision` flag; without it the flag is unchanged. Nothing is applied on
 a timer: a passed deadline is shown as "deadline passed, not applied" until a
 `default_applied` resolution with a receipt is recorded. Open requests left on
 merged/dropped tasks are listed as uncleaned and closed with
 `decision-resolve`. Once a task has a request, generic `transition --to
 needs_decision` and option patches on it are refused, and while the request
-is open a blocked task cannot leave `needs_decision` for `claimed` (the
-generic answer paths): record the answer with `decision-resolve` first, then
-resume. The console (queue row
+is open the flag cannot be cleared by the generic answer paths: record the
+answer with `decision-resolve` first, then resume. The console (queue row
 badge and count, drawer card, Decisions) reads these records only; answering
 from the console is #580.
 
@@ -478,14 +532,14 @@ deployment path is unchanged.
 
 `handoffkeep tasks reopen <id> --reason "reverted after failed smoke"` calls
 `POST /v1/tasks/{id}/reopen` with `{"reason":"reverted after failed smoke"}`.
-Only merged or dropped tasks can enter the distinct `reopened` state. The
+Only a settled task (`merged`, `deployed`, `dropped` or `duplicate`) or an `icebox` task can be reopened, and it returns to `unstarted`. The
 operation requires a non-empty reason, records the authenticated caller and
 reason as an append-only transition audit event, and clears the claimant and
 per-cycle `job_id`, `pr`, `head_sha`, and `report_path` refs. Previous values stay
 in `task_events`. Disposition items cannot be reopened or claimed directly.
-Generic transitions cannot leave a terminal state. Existing protected task/job
+Generic transitions cannot leave a settled state. Existing protected task/job
 authority fences also apply to reopen, which clears bindings; the operation does
 not bypass protected enrollment. Reopened tasks appear in the
-queue as `reopened` and are eligible for claim/next, in_progress (with normal job
-linkage or an explicit no-job reason), hold, or dropped. Historical merges remain
+queue as `unstarted` and are eligible for claim/next, `researching` or `developing`
+(with normal job linkage or an explicit no-job reason), `icebox`, `dropped` or `duplicate`. Historical merges remain
 in the event log; deploy views use the latest merge of currently merged tasks.

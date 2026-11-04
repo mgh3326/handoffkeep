@@ -22,7 +22,7 @@ function mkTask(over: Partial<BoardTask>): BoardTask {
     lane: "b618",
     title: "decision task",
     kind: "implement",
-    state: "in_progress",
+    state: "developing",
     priority: 10,
     created_by: "director-1",
     created_at: "2026-09-21T10:00:00Z",
@@ -96,10 +96,10 @@ describe("queue row badge and one-line count", () => {
   it("badges only open requests; the count line splits pending and uncleaned", () => {
     const tasks = [
       mkTask({ id: 1, state: "backlog", refs: { decision_request: { id: "dr-1-1", revision: 1, status: "open" } } }),
-      mkTask({ id: 2, state: "in_progress", refs: { decision_request: { id: "dr-2-1", revision: 1, status: "open" } } }),
+      mkTask({ id: 2, state: "developing", refs: { decision_request: { id: "dr-2-1", revision: 1, status: "open" } } }),
       mkTask({ id: 3, state: "merged", refs: { decision_request: { id: "dr-3-1", revision: 1, status: "open" } } }),
       mkTask({ id: 4, state: "in_progress", refs: { decision_request: { id: "dr-4-1", revision: 1, status: "answered" } } }),
-      mkTask({ id: 5, state: "needs_decision", refs: {} }),
+      mkTask({ id: 5, state: "developing", awaiting_decision: true, refs: {} }),
     ];
     const view = render(<QueueProtoApp datasets={{ live: dataset(tasks) }} initialSet="live" />);
     fireEvent.click(screen.getByRole("link", { name: "All" }));
@@ -209,7 +209,7 @@ describe("drawer decision card (lazy chunk)", () => {
   });
 
   it("a detail failure is not 'no request'; an older server is 'not provided'; needs_decision without a record is 미기록", async () => {
-    const task = mkTask({ state: "needs_decision" });
+    const task = mkTask({ state: "developing", awaiting_decision: true });
     const failed = openDrawer(task, () => Promise.reject(new Error("boom")));
     await waitFor(() => expect(failed.slot().querySelector("[data-decision-error]")).not.toBeNull());
     expect(failed.slot().textContent).toContain('"요청 없음"이 아닙니다');
@@ -236,7 +236,7 @@ describe("drawer decision card (lazy chunk)", () => {
     expect(legacy.slot().textContent).toContain("권고·무응답 동작·기한은 알 수 없습니다");
     legacy.unmount();
 
-    const none = openDrawer(mkTask({ state: "in_progress" }), () => Promise.resolve(detailOf(mkTask({}), {})));
+    const none = openDrawer(mkTask({ state: "developing" }), () => Promise.resolve(detailOf(mkTask({}), {})));
     await waitFor(() => expect(none.slot().textContent).toContain("기록된 결정 요청 없음"));
   });
 });

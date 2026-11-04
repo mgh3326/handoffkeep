@@ -181,7 +181,7 @@ func taskRefs(pr, headSHA, reportPath, jobID string, linear *store.TaskLinear) (
 }
 
 func normalizeTaskArgs(args []string) ([]string, error) {
-	valueFlags := map[string]bool{"--url": true, "--token": true, "--lane": true, "--parent-lane": true, "--state": true, "--title": true, "--kind": true, "--priority": true, "--expected": true, "--by": true, "--to": true, "--note": true, "--reason": true, "--question": true, "--limit": true, "--pr": true, "--head-sha": true, "--report-path": true, "--job-id": true, "--no-job": true, "--option": true, "--recommended": true, "--tier": true, "--grade": true, "--brief-key": true, "--label": true, "--linear-report-key": true, "--linear-verify-key": true, "--linear-decision-key": true, "--deploy-sha": true, "--origin-pr": true, "--origin-task": true, "--doc": true, "--project": true, "--area": true}
+	valueFlags := map[string]bool{"--url": true, "--token": true, "--lane": true, "--parent-lane": true, "--state": true, "--title": true, "--kind": true, "--priority": true, "--expected": true, "--by": true, "--to": true, "--note": true, "--reason": true, "--question": true, "--limit": true, "--pr": true, "--head-sha": true, "--report-path": true, "--job-id": true, "--no-job": true, "--option": true, "--recommended": true, "--tier": true, "--grade": true, "--brief-key": true, "--label": true, "--linear-report-key": true, "--linear-verify-key": true, "--linear-decision-key": true, "--deploy-sha": true, "--origin-pr": true, "--origin-task": true, "--doc": true, "--project": true, "--area": true, "--parent": true, "--duplicate-of": true}
 	flags, positional := []string{}, []string{}
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -214,7 +214,7 @@ func tasksCmd(args []string, out io.Writer) error {
 
 func tasksCmdE(args []string, out, errout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: tasks add|list|export|claim|next|transition|reopen|rebind|relane|project|projects|set-area|areas|decision-request|decision-resolve|show|comment|comments|disposition")
+		return errors.New("usage: tasks add|list|export|claim|next|transition|reopen|rebind|relane|project|projects|set-area|areas|parent|relate|unrelate|migrate-states|decision-request|decision-resolve|show|comment|comments|disposition")
 	}
 	if args[0] == "disposition" {
 		return dispositionCmd(args[1:], out)
@@ -227,6 +227,15 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 	}
 	if args[0] == "rebind" {
 		return taskRebindCmd(args[1:], out)
+	}
+	if args[0] == "parent" {
+		return taskParentCmd(args[1:], out)
+	}
+	if args[0] == "relate" || args[0] == "unrelate" {
+		return taskRelationCmd(args, out)
+	}
+	if args[0] == "migrate-states" {
+		return taskMigrateStatesCmd(args[1:], out)
 	}
 	if args[0] == "project" || args[0] == "projects" {
 		return taskProjectCmd(args, out)
@@ -245,7 +254,9 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 	c := remoteClient(fs)
 	lane := fs.String("lane", "", "task lane")
 	parentLane := fs.String("parent-lane", "", "parent lane")
-	state := fs.String("state", "", "task state")
+	state := fs.String("state", "", "task state (triage, backlog, unstarted, researching, developing, reviewing, merged, deployed, dropped, duplicate, icebox; old names such as in_progress or hold are still accepted)")
+	parentID := fs.Int64("parent", 0, "parent task id (tasks add only)")
+	duplicateOf := fs.Int64("duplicate-of", 0, "task a duplicate transition points at (tasks transition --to duplicate)")
 	project := fs.String("project", "", "task project (required on add; an explicit empty value lists legacy no-project rows on list/export)")
 	area := fs.String("area", "", "task area from the closed vocabulary listed by tasks areas (optional on add; an explicit empty value lists no-area rows on list)")
 	title := fs.String("title", "", "task title")
@@ -262,7 +273,7 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 	headSHA := fs.String("head-sha", "", "head revision reference")
 	reportPath := fs.String("report-path", "", "report path reference")
 	jobID := fs.String("job-id", "", "job reference")
-	noJob := fs.String("no-job", "", "recorded reason a claimed/in_progress transition may run without refs.job_id (exclusive with --job-id)")
+	noJob := fs.String("no-job", "", "recorded reason a transition into a started state may run without refs.job_id (exclusive with --job-id)")
 	originPR := fs.String("origin-pr", "", "merged pull request this task came from")
 	originTask := fs.Int64("origin-task", 0, "task this task came from (a disposition item for an ordered follow-up)")
 	bodyDoc := fs.String("doc", "", "hk document key holding the task body: key or key#section (tasks add only)")
@@ -288,7 +299,14 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 		return err
 	}
 	linearFlagsUsed, docFlagUsed, noJobSet, projectSet, areaSet, expectedSet := false, false, false, false, false, false
+	parentSet, duplicateOfSet := false, false
 	fs.Visit(func(item *flag.Flag) {
+		if item.Name == "parent" {
+			parentSet = true
+		}
+		if item.Name == "duplicate-of" {
+			duplicateOfSet = true
+		}
 		if item.Name == "expected" {
 			expectedSet = true
 		}
@@ -342,6 +360,12 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 	if expectedSet && (args[0] != "add" || !store.ValidExpected(*expected)) {
 		return errors.New("--expected requires a positive duration and is accepted only by tasks add")
 	}
+	if parentSet && (args[0] != "add" || *parentID < 1) {
+		return errors.New("--parent requires a positive task id and is accepted only by tasks add (tasks parent changes an existing task)")
+	}
+	if duplicateOfSet && (args[0] != "transition" || *duplicateOf < 1) {
+		return errors.New("--duplicate-of requires a positive task id and is accepted only by tasks transition")
+	}
 	if docFlagUsed && args[0] != "add" {
 		return errors.New("--doc is accepted only by tasks add")
 	}
@@ -392,7 +416,11 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 		if expectedSet {
 			expectedDuration = expected
 		}
-		x, err := c.CreateTask(ctx, store.Task{Expected: expectedDuration, Lane: *lane, ParentLane: *parentLane, Title: *title, Kind: *kind, Priority: *priority, Refs: *refs, BodyDoc: *bodyDoc, Project: project, Area: areaTag})
+		var parent *int64
+		if *parentID > 0 {
+			parent = parentID
+		}
+		x, err := c.CreateTask(ctx, store.Task{ParentID: parent, Expected: expectedDuration, Lane: *lane, ParentLane: *parentLane, Title: *title, Kind: *kind, Priority: *priority, Refs: *refs, BodyDoc: *bodyDoc, Project: project, Area: areaTag})
 		if err != nil {
 			// invalid_context on create is a validation failure; append the
 			// add requirements rather than leave a bare code to diagnose.
@@ -525,7 +553,7 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 		if !hasRefs {
 			refs = nil
 		}
-		x, err := c.TransitionTask(ctx, id, *to, *note, refs, noJobReason)
+		x, err := c.TransitionTaskWith(ctx, id, store.TransitionInput{To: *to, Note: *note, Refs: refs, NoJob: noJobReason, DuplicateOf: *duplicateOf})
 		if err != nil {
 			return err
 		}
@@ -544,7 +572,7 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 		}
 		return printJSON(out, x)
 	default:
-		return errors.New("usage: tasks add|list|export|claim|next|transition|reopen|rebind|relane|project|projects|set-area|areas|decision-request|decision-resolve|show|comment|comments|disposition")
+		return errors.New("usage: tasks add|list|export|claim|next|transition|reopen|rebind|relane|project|projects|set-area|areas|parent|relate|unrelate|migrate-states|decision-request|decision-resolve|show|comment|comments|disposition")
 	}
 }
 
@@ -623,7 +651,7 @@ func decisionsCmd(args []string, out io.Writer) error {
 	answer := fs.String("answer", "", "decision answer")
 	note := fs.String("note", "", "optional decision note")
 	noInject := fs.Bool("no-inject", false, "mark the event delivered without injection")
-	noJob := fs.String("no-job", "", "recorded reason when the resolved task re-enters claimed without a job link")
+	noJob := fs.String("no-job", "", "recorded reason for the resolved task (kept for old servers; the answer enters no started state)")
 	parseArgs, err := normalizeDecisionArgs(args[1:])
 	if err != nil {
 		return err

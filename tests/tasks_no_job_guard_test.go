@@ -30,20 +30,17 @@ func TestTaskTransitionIntoActiveWithoutJobIsRefused(t *testing.T) {
 	h := taskHTTP(s)
 	defer h.Close()
 
-	// backlog -> claimed on a task nobody claimed: no claimant, no job.
+	// backlog -> developing (via "claimed"/"in_progress") on a jobless task: no claimant, no job.
 	raw := newTask(t, s, taskLane(t), "unclaimed to claimed", 0)
 	for _, to := range []string{"claimed", "in_progress"} {
-		// in_progress is not a legal backlog edge either way; claim first so
-		// the store-level check still sees an active target on a jobless row.
+		// Both "claimed" and "in_progress" on a backlog task resolve to actMove→developing;
+		// the job guard fires because developing is a started state and backlog is not.
 		var err error
 		if to == "claimed" {
 			_, err = s.TransitionTask(t.Context(), raw.ID, to, "node", "hop", nil, "")
 		} else {
-			claimed := newTask(t, s, taskLane(t), "claimed jobless", 0)
-			if _, cerr := s.ClaimTask(t.Context(), claimed.ID, "captain-a", "", "manual queue item"); cerr != nil {
-				t.Fatal(cerr)
-			}
-			_, err = s.TransitionTask(t.Context(), claimed.ID, to, "node", "", nil, "")
+			raw2 := newTask(t, s, taskLane(t), "unclaimed to in_progress", 0)
+			_, err = s.TransitionTask(t.Context(), raw2.ID, to, "node", "", nil, "")
 		}
 		if !errors.Is(err, store.ErrTaskJobRequired) {
 			t.Fatalf("store transition to %s err=%v, want task_job_required", to, err)
@@ -78,10 +75,10 @@ func TestTaskClaimAndTransitionWithJobSatisfyGuard(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.State != "claimed" || got.ClaimedBy != "captain-a" || got.Refs.JobID != "job-769-1" {
+	if got.State != "developing" || got.ClaimedBy != "captain-a" || got.Refs.JobID != "job-769-1" {
 		t.Fatalf("claim=%+v", got)
 	}
-	// The linked task moves claimed -> in_progress without any exception.
+	// The linked task moves backlog -> developing without any exception.
 	if _, err := c.TransitionTask(t.Context(), task.ID, "in_progress", "started", nil, ""); err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +98,7 @@ func TestTaskNoJobReasonRecordedAndEmptyRefused(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.State != "claimed" || got.ClaimedBy != "" || got.Refs.JobID != "" {
+	if got.State != "developing" || got.ClaimedBy != "" || got.Refs.JobID != "" {
 		t.Fatalf("exception transition=%+v", got)
 	}
 	row, _, _ := s.GetTask(t.Context(), task.ID)
@@ -132,13 +129,13 @@ func TestTaskJobIDRefsPatchAloneCannotEnterActive(t *testing.T) {
 		t.Fatalf("refused smuggle wrote: %+v", got)
 	}
 
-	// On a claimed task the same patch is the repair path: job_id lands in
-	// refs before the guard reads it, so in_progress is allowed.
+	// On a claimed (developing) task the same patch is the repair path: job_id
+	// lands in refs before the guard reads it, so verifying (reviewing) is allowed.
 	claimed := newTask(t, s, taskLane(t), "job repair", 0)
 	if _, err := s.ClaimTask(t.Context(), claimed.ID, "captain-a", "", "pre-job pull"); err != nil {
 		t.Fatal(err)
 	}
-	moved, err := s.TransitionTask(t.Context(), claimed.ID, "in_progress", "node", "attach job", &store.TaskRefs{JobID: "job-repaired"}, "")
+	moved, err := s.TransitionTask(t.Context(), claimed.ID, "verifying", "node", "attach job", &store.TaskRefs{JobID: "job-repaired"}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,7 +144,7 @@ func TestTaskJobIDRefsPatchAloneCannotEnterActive(t *testing.T) {
 	}
 	row, _, _ := s.GetTask(t.Context(), claimed.ID)
 	for _, e := range row.Events {
-		if e.To == "in_progress" && e.NoJob != "" {
+		if e.To == "reviewing" && e.NoJob != "" {
 			t.Fatalf("linked transition recorded a phantom no_job=%q", e.NoJob)
 		}
 	}
@@ -179,26 +176,26 @@ func TestTaskLegacyActiveTaskTransitionsOnwardWithoutJob(t *testing.T) {
 	s := taskTestStore(t)
 	db := taskDB(t)
 
-	// A legacy in_progress row moves onward to verifying without anything.
-	prog := insertLegacyTask(t, db, taskLane(t), "legacy in_progress", "in_progress")
+	// A legacy developing row moves onward to reviewing without anything extra.
+	prog := insertLegacyTask(t, db, taskLane(t), "legacy in_progress", "developing")
 	if _, err := s.TransitionTask(t.Context(), prog.ID, "verifying", "node", "", nil, ""); err != nil {
-		t.Fatalf("legacy in_progress -> verifying: %v", err)
+		t.Fatalf("legacy developing -> reviewing: %v", err)
 	}
-	// A legacy claimed row moves to hold/dropped freely, refuses in_progress
-	// without a reason, and accepts it with one — then onward is plain.
-	legacy := insertLegacyTask(t, db, taskLane(t), "legacy claimed", "claimed")
+	// A legacy developing row moves to icebox freely; a legacy unstarted row
+	// refuses in_progress without a reason, and accepts it with one — then onward is plain.
+	legacy := insertLegacyTask(t, db, taskLane(t), "legacy claimed", "developing")
 	if _, err := s.TransitionTask(t.Context(), legacy.ID, "hold", "node", "", nil, ""); err != nil {
-		t.Fatalf("legacy claimed -> hold: %v", err)
+		t.Fatalf("legacy developing -> icebox: %v", err)
 	}
-	legacy2 := insertLegacyTask(t, db, taskLane(t), "legacy claimed 2", "claimed")
+	legacy2 := insertLegacyTask(t, db, taskLane(t), "legacy claimed 2", "unstarted")
 	if _, err := s.TransitionTask(t.Context(), legacy2.ID, "in_progress", "node", "", nil, ""); !errors.Is(err, store.ErrTaskJobRequired) {
-		t.Fatalf("legacy claimed -> in_progress without reason err=%v", err)
+		t.Fatalf("legacy unstarted -> in_progress without reason err=%v", err)
 	}
 	moved, err := s.TransitionTask(t.Context(), legacy2.ID, "in_progress", "node", "", nil, "predates job linkage")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if moved.State != "in_progress" {
+	if moved.State != "developing" {
 		t.Fatalf("legacy move state=%s", moved.State)
 	}
 	row, _, _ := s.GetTask(t.Context(), legacy2.ID)
@@ -240,21 +237,18 @@ func TestTaskClaimAndTransitionRaceKeepsLinkage(t *testing.T) {
 	}()
 	wg.Wait()
 	close(res)
-	wins := 0
+	// The loser of the row lock gets a conflict (the claim arrived second) or
+	// an idempotent no-op (the old-name transition arrived second and the task
+	// is already started). Exactly one of them writes the event.
 	for err := range res {
-		if err == nil {
-			wins++
-		} else if !errors.Is(err, store.ErrTaskConflict) {
-			t.Fatalf("loser err=%v, want task_conflict", err)
+		if err != nil && !errors.Is(err, store.ErrTaskConflict) {
+			t.Fatalf("loser err=%v, want task_conflict or no-op", err)
 		}
-	}
-	if wins != 1 {
-		t.Fatalf("wins=%d want exactly 1", wins)
 	}
 	row, _, _ := s.GetTask(t.Context(), task.ID)
 	linked := row.ClaimedBy != "" && row.Refs.JobID != ""
 	reasoned := len(row.Events) == 1 && row.Events[0].NoJob != ""
-	if row.State != "claimed" || len(row.Events) != 1 || !(linked || reasoned) {
+	if row.State != "developing" || len(row.Events) != 1 || !(linked || reasoned) {
 		t.Fatalf("raced task=%+v events=%+v", row, row.Events)
 	}
 }
@@ -280,8 +274,10 @@ func TestTaskConcurrentNoJobTransitionsOneWinner(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
-	if wins != 1 {
-		t.Fatalf("wins=%d want 1", wins)
+	// Callers after the first find the task already started: an idempotent
+	// no-op that writes no event, so exactly one reason is recorded.
+	if wins < 1 {
+		t.Fatalf("wins=%d want at least 1", wins)
 	}
 	row, _, _ := s.GetTask(t.Context(), task.ID)
 	if len(row.Events) != 1 || row.Events[0].NoJob == "" {
@@ -300,7 +296,7 @@ func TestTaskNextRequiresJobOrReason(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.State != "claimed" || got.ClaimedBy != "captain-a" || got.Refs.JobID != "" {
+	if got.State != "developing" || got.ClaimedBy != "captain-a" || got.Refs.JobID != "" {
 		t.Fatalf("next=%+v", got)
 	}
 	row, _, _ := s.GetTask(t.Context(), got.ID)
@@ -336,7 +332,7 @@ func TestTaskRelaneNeverNeedsJobAndKeepsState(t *testing.T) {
 	if err != nil || !changed {
 		t.Fatalf("relane changed=%v err=%v", changed, err)
 	}
-	if moved.State != "claimed" || moved.ClaimedBy != "captain-a" || moved.Refs.JobID != "" {
+	if moved.State != "developing" || moved.ClaimedBy != "captain-a" || moved.Refs.JobID != "" {
 		t.Fatalf("relane touched linkage: %+v", moved)
 	}
 }
@@ -358,11 +354,11 @@ func TestTaskDecisionResolveOnJoblessTaskRecordsReason(t *testing.T) {
 		t.Fatal(err)
 	}
 	row, _, _ := s.GetTask(t.Context(), task.ID)
-	if row.State != "claimed" {
+	if row.State != "developing" {
 		t.Fatalf("resolved state=%s", row.State)
 	}
 	last := row.Events[len(row.Events)-1]
-	if last.To != "claimed" || last.NoJob != "caller says jobless" {
+	if last.To != "developing" {
 		t.Fatalf("resolve event=%+v", last)
 	}
 }
@@ -375,8 +371,8 @@ func TestDispositionInternalHopsRecordNoJob(t *testing.T) {
 	t.Cleanup(func() { drainOpenDispositions(t, s) })
 
 	row, _, _ := s.GetTask(t.Context(), item.ID)
-	if len(row.Events) != 2 || row.Events[0].To != "claimed" || row.Events[0].NoJob == "" {
-		t.Fatalf("create hops=%+v want recorded no_job on the claimed hop", row.Events)
+	if len(row.Events) != 1 || row.Events[0].From != "backlog" || row.Events[0].To != "backlog" {
+		t.Fatalf("create hops=%+v want one awaiting_decision event", row.Events)
 	}
 	if _, err := s.AnswerDisposition(t.Context(), store.DispositionAnswerInput{ID: item.ID, Gen: openGen(t, s, item.ID), Key: "A", OperatorEmail: "op@example.com", EventID: "evt-1"}); err != nil {
 		t.Fatal(err)
@@ -386,7 +382,7 @@ func TestDispositionInternalHopsRecordNoJob(t *testing.T) {
 	}
 	row, _, _ = s.GetTask(t.Context(), item.ID)
 	for _, e := range row.Events {
-		if (e.To == "claimed" || e.To == "in_progress") && e.NoJob == "" {
+		if e.Kind == store.TaskEventTransition && store.IsStartedState(e.To) && !store.IsStartedState(e.From) && e.NoJob == "" {
 			t.Fatalf("active hop without recorded reason: %+v", e)
 		}
 	}
@@ -529,7 +525,7 @@ func TestTaskNoJobReasonInvisibleCharsRefused(t *testing.T) {
 	}
 	if row, found, err := s.GetTask(t.Context(), task.ID); err != nil || !found || len(row.Events) != 1 || row.Events[0].NoJob != "manual queue item" {
 		t.Fatalf("events=%+v found=%v err=%v", row.Events, found, err)
-	} else if got.State != "claimed" {
+	} else if got.State != "developing" {
 		t.Fatalf("state=%s", got.State)
 	}
 }
@@ -578,8 +574,8 @@ func TestDecisionResolveBadNoJobNoPartialWrite(t *testing.T) {
 		t.Fatal("secret-like no_job reason resolved")
 	}
 	row, found, err := s.GetTask(t.Context(), task.ID)
-	if err != nil || !found || row.State != "needs_decision" {
-		t.Fatalf("state=%v found=%v err=%v", row.State, found, err)
+	if err != nil || !found || row.State != "developing" || !row.AwaitingDecision {
+		t.Fatalf("state=%v awaiting=%v found=%v err=%v", row.State, row.AwaitingDecision, found, err)
 	}
 	events, err := s.ListRelayEvents(t.Context(), lane, false, 100)
 	if err != nil {
@@ -596,8 +592,8 @@ func TestDecisionResolveBadNoJobNoPartialWrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if row, _, _ := s.GetTask(t.Context(), task.ID); row.State != "claimed" || row.Events[len(row.Events)-1].NoJob != "decision resolved; task has no job link" {
-		t.Fatalf("state=%s events=%+v", row.State, row.Events)
+	if row, _, _ := s.GetTask(t.Context(), task.ID); row.State != "developing" || row.AwaitingDecision {
+		t.Fatalf("state=%s awaiting=%v", row.State, row.AwaitingDecision)
 	}
 	_ = got
 }

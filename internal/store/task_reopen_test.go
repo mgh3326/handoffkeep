@@ -131,7 +131,7 @@ func assertDispositionReopenRefused(t *testing.T, s *Store, id int64) {
 func TestClaimRefusesDisposition(t *testing.T) {
 	s, pool := searchTestStore(t)
 	ctx := t.Context()
-	for _, state := range []string{"backlog", "reopened", "claimed"} {
+	for _, state := range []string{"backlog", "unstarted", "developing"} {
 		for _, disposition := range []string{`{"schema":"disposition/v1"}`, `null`} {
 			id := seedTaskRow(t, pool, "claim-disposition", "defensive claim guard", state)
 			// claimed also exercises the replay path: it must refuse before
@@ -171,7 +171,7 @@ func TestReopenTerminalAuditAndRemerge(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		for _, to := range []string{"backlog", "claimed", "in_progress", "reopened"} {
+		for _, to := range []string{"backlog", "claimed", "in_progress"} {
 			if _, err := s.TransitionTask(ctx, x.ID, to, "tester", "bypass", nil, "recovery"); err == nil {
 				t.Fatalf("generic terminal exit to %s accepted", to)
 			}
@@ -190,12 +190,12 @@ func TestReopenTerminalAuditAndRemerge(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got.State != "reopened" || got.ClaimedBy != "" || got.Refs.JobID != "" {
+		if got.State != "unstarted" || got.ClaimedBy != "" || got.Refs.JobID != "" {
 			t.Fatalf("reopened=%+v", got)
 		}
 		got, _, _ = s.GetTask(ctx, x.ID)
 		event := got.Events[len(got.Events)-1]
-		if event.Kind != TaskEventTransition || event.From != terminal || event.To != "reopened" || event.By != "tester" || event.Note != "reverted after failed smoke" {
+		if event.Kind != TaskEventTransition || event.From != terminal || event.To != "unstarted" || event.By != "tester" || event.Note != "reverted after failed smoke" {
 			t.Fatalf("audit=%+v", event)
 		}
 		if _, err := s.ReopenTask(ctx, x.ID, "tester", "again"); err == nil {
@@ -215,7 +215,7 @@ func TestReopenTerminalAuditAndRemerge(t *testing.T) {
 			t.Fatalf("next=%+v err=%v", next, err)
 		}
 		got, _, _ = s.GetTask(ctx, x.ID)
-		if got.Events[len(got.Events)-1].From != "reopened" {
+		if got.Events[len(got.Events)-1].From != "unstarted" {
 			t.Fatal("claim lost reopened source")
 		}
 		for _, to := range []string{"in_progress", "join", "merged"} {

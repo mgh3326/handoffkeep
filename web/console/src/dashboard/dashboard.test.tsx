@@ -31,17 +31,17 @@ function dashboard(): DashboardResponse {
       },
     ],
     work: [
-      { id: 11, title: "running task", lane: "lane-a", state: "in_progress", job_id: "job-1", updated_at: NOW },
-      { id: 12, title: "lost task", lane: "lane-b", state: "claimed", updated_at: NOW },
+      { id: 11, title: "running task", lane: "lane-a", state: "developing", job_id: "job-1", updated_at: NOW },
+      { id: 12, title: "lost task", lane: "lane-b", state: "developing", updated_at: NOW },
     ],
     prs: [
       {
         repo: "mgh3326/handoffkeep",
-        open: [{ pr: "https://github.com/mgh3326/handoffkeep/pull/94", number: 94, task_id: 11, title: "running task", state: "verifying", head_sha: "abcdef0123", at: NOW }],
+        open: [{ pr: "https://github.com/mgh3326/handoffkeep/pull/94", number: 94, task_id: 11, title: "running task", state: "reviewing", head_sha: "abcdef0123", at: NOW }],
         merged: [{ pr: "https://github.com/mgh3326/handoffkeep/pull/93", number: 93, task_id: 9, title: "landed", state: "merged", at: NOW, merged_at: NOW }],
       },
       { repo: "mgh3326/panewire", open: [], merged: [] },
-      { repo: "", open: [{ pr: "#12", task_id: 13, title: "odd ref", state: "hold", at: NOW }], merged: [] },
+      { repo: "", open: [{ pr: "#12", task_id: 13, title: "odd ref", state: "icebox", at: NOW }], merged: [] },
     ],
     missing: [
       { section: "prs", source: "PR review / CI / mergeability state", note: "not recorded" },

@@ -9,32 +9,33 @@ export const EMPTY_FILTERS: FilterState = { query: "", lane: "", kind: "", hidde
 export const VIEW_STATES: Record<ProtoView, string[]> = {
   operator: [...KNOWN_STATES],
   // "live" is the currently-working set — the states that show live hub-job
-  // chips (claimed · in_progress · verifying).
-  live: ["claimed", "in_progress", "verifying"],
-  active: ["claimed", "in_progress", "verifying", "join", "needs_decision"],
-  backlog: ["backlog", "reopened", "hold"],
+  // chips (researching · developing · reviewing).
+  live: ["researching", "developing", "reviewing"],
+  active: ["researching", "developing", "reviewing"],
+  backlog: ["backlog", "unstarted", "icebox"],
   all: [...KNOWN_STATES],
 };
 
 /** #618 queue mark from the list refs: an open request is "pending" on a
- * live task and "uncleaned" on a merged/dropped one — the same split as the
- * server's DecisionRequestCounts, so queue, drawer and Decisions agree. */
+ * live task and "uncleaned" on a completed/canceled one — the same split as
+ * the server's DecisionRequestCounts, so queue, drawer and Decisions agree. */
 export function decisionMark(task: ProtoTask): "pending" | "uncleaned" | null {
   if (task.refs.decision_request?.status !== "open") {
     return null;
   }
-  return task.state === "merged" || task.state === "dropped" ? "uncleaned" : "pending";
+  return (TERMINAL_STATES as readonly string[]).includes(task.state) ? "uncleaned" : "pending";
 }
 
 export function viewPredicate(view: ProtoView, states: readonly string[] = KNOWN_STATES): (task: ProtoTask) => boolean {
   if (view === "operator") {
-    // Operator view: anything waiting on an operator decision plus backlog.
+    // Operator view: backlog/unstarted tasks, tasks awaiting a decision, and
+    // decide-kind tasks that are not yet completed/canceled.
     return (task) =>
       task.state === "backlog" ||
-      task.state === "reopened" ||
-      task.state === "needs_decision" ||
+      task.state === "unstarted" ||
+      task.awaiting_decision === true ||
       decisionMark(task) === "pending" ||
-      (task.kind === "decide" && task.state !== "merged" && task.state !== "dropped");
+      (task.kind === "decide" && !(TERMINAL_STATES as readonly string[]).includes(task.state));
   }
   // "all" enumerates the dataset's own states (server-provided when live);
   // "active"/"backlog" are semantic subsets and stay fixed.
@@ -113,7 +114,7 @@ export function countByView(tasks: ProtoTask[], filters: FilterState, states: re
  * reaches STALE_MIN_AGE_DAYS is marked stale. Age says nothing about
  * execution readiness — the marker only flags that the premise may be old. */
 export const STALE_MIN_AGE_DAYS = 7;
-export const TERMINAL_STATES = ["merged", "dropped"] as const;
+export const TERMINAL_STATES = ["merged", "deployed", "dropped", "duplicate"] as const;
 
 export function isStale(task: ProtoTask, now: string): boolean {
   if ((TERMINAL_STATES as readonly string[]).includes(task.state)) {
@@ -144,8 +145,8 @@ export function taskSignals(task: ProtoTask, now: string): { decision: boolean; 
     task.coverage.status === "not_collected" ||
     (task.due_at === null && task.blocker === null);
   return {
-    decision: task.state === "needs_decision" || task.kind === "decide" || task.decision !== undefined || decisionMark(task) === "pending",
-    hold: task.state === "hold",
+    decision: task.awaiting_decision === true || task.kind === "decide" || task.decision !== undefined || decisionMark(task) === "pending",
+    hold: task.state === "icebox",
     unknown,
     urgent: task.priority >= 90,
     stale: isStale(task, now),
@@ -282,21 +283,29 @@ export function groupByProject(tasks: ProtoTask[], now: string): ProjectGroup[] 
 export type StateGroup = { key: string; state: string; tasks: ProtoTask[] };
 
 /** One group per task state in STATE_GROUP_ORDER (operator-facing first,
- * terminal last); states outside the canonical nine — a server-only enum —
+ * terminal last); states outside the canonical eleven — a server-only enum —
  * follow in first-seen order, each in its own group so the raw value is
- * kept. Empty states produce no group. Task order inside a group is the
- * input order (applyView already sorted by priority, largest first). */
+ * kept. Tasks with awaiting_decision=true form a leading virtual group keyed
+ * "awaiting_decision" and do NOT appear in their state group. Empty states
+ * produce no group. Task order inside a group is the input order (applyView
+ * already sorted by priority, largest first). */
 export function groupByState(tasks: ProtoTask[]): StateGroup[] {
   const byState = new Map<string, ProtoTask[]>();
   for (const task of tasks) {
-    const list = byState.get(task.state);
+    // awaiting_decision tasks surface in their own virtual group only.
+    const key = task.awaiting_decision ? "awaiting_decision" : task.state;
+    const list = byState.get(key);
     if (list) {
       list.push(task);
     } else {
-      byState.set(task.state, [task]);
+      byState.set(key, [task]);
     }
   }
+  // Canonical order, prepend awaiting_decision virtual group when present.
   const order: string[] = STATE_GROUP_ORDER.filter((s) => byState.has(s));
+  if (byState.has("awaiting_decision")) {
+    order.unshift("awaiting_decision");
+  }
   for (const state of byState.keys()) {
     if (!order.includes(state)) {
       order.push(state);

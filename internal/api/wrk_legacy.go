@@ -39,11 +39,11 @@ func wrkLegacyRoute(route string) bool {
 	}
 	if len(p) == 4 {
 		switch p[3] {
-		case "claim", "rebind", "transition", "reopen", "project", "decision-request":
+		case "claim", "rebind", "transition", "reopen", "project", "parent", "relations", "decision-request":
 			return true
 		}
 	}
-	return len(p) == 5 && p[3] == "decision-request" && p[4] == "resolve"
+	return len(p) == 5 && ((p[3] == "decision-request" && p[4] == "resolve") || (p[3] == "relations" && p[4] == "remove"))
 }
 func (s Server) legacyWrkFence(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -112,7 +112,7 @@ func (s Server) legacyWrkFence(next http.Handler) http.Handler {
 				intent.Binding = true
 				if len(parts) > 3 && parts[3] == "transition" {
 					intent.Binding = body["refs"] != nil || body["claimed_by"] != nil
-					intent.To = wrkrecords.Text(body, "to")
+					intent.To = store.FenceTarget(wrkrecords.Text(body, "to"))
 				}
 				if len(parts) > 3 && parts[3] == "decision-request" {
 					intent.Binding = false

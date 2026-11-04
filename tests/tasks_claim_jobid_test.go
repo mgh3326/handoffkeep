@@ -28,7 +28,7 @@ func TestTaskClaimWithJobIDRecordsBothAtomically(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.State != "claimed" || got.ClaimedBy != "captain-a" || got.Refs.JobID != "job-782-1" {
+	if got.State != "developing" || got.ClaimedBy != "captain-a" || got.Refs.JobID != "job-782-1" {
 		t.Fatalf("claim response=%+v", got)
 	}
 
@@ -36,10 +36,10 @@ func TestTaskClaimWithJobIDRecordsBothAtomically(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("get: found=%v err=%v", found, err)
 	}
-	if row.State != "claimed" || row.ClaimedBy != "captain-a" || row.Refs.JobID != "job-782-1" {
+	if row.State != "developing" || row.ClaimedBy != "captain-a" || row.Refs.JobID != "job-782-1" {
 		t.Fatalf("stored task=%+v", row)
 	}
-	if len(row.Events) != 1 || row.Events[0].From != "backlog" || row.Events[0].To != "claimed" {
+	if len(row.Events) != 1 || row.Events[0].From != "backlog" || row.Events[0].To != "developing" {
 		t.Fatalf("events=%+v", row.Events)
 	}
 	if row.Events[0].Refs == nil || row.Events[0].Refs.JobID != "job-782-1" {
@@ -74,7 +74,7 @@ func TestTaskClaimWithoutJobIDRequiresNoJobReason(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.State != "claimed" || got.ClaimedBy != "captain-a" || got.Refs.JobID != "" {
+	if got.State != "developing" || got.ClaimedBy != "captain-a" || got.Refs.JobID != "" {
 		t.Fatalf("claim response=%+v", got)
 	}
 	row, _, _ = s.GetTask(t.Context(), task.ID)
@@ -116,7 +116,7 @@ func TestTaskClaimSameLaneSameJobIsIdempotentNoOp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("re-claim: %v", err)
 	}
-	if second.ID != first.ID || second.State != "claimed" || second.ClaimedBy != "captain-a" || second.Refs.JobID != "job-1" {
+	if second.ID != first.ID || second.State != "developing" || second.ClaimedBy != "captain-a" || second.Refs.JobID != "job-1" {
 		t.Fatalf("re-claim response=%+v", second)
 	}
 	if !second.UpdatedAt.Equal(first.UpdatedAt) {
@@ -127,7 +127,7 @@ func TestTaskClaimSameLaneSameJobIsIdempotentNoOp(t *testing.T) {
 		t.Fatalf("no-op must not add events, got %+v", row.Events)
 	}
 
-	// The same replay is still a no-op after the task moved on.
+	// The same replay is still a no-op after the task moved on (in_progress from developing is a noop).
 	if _, err := s.TransitionTask(t.Context(), task.ID, "in_progress", "captain-a", "", nil, ""); err != nil {
 		t.Fatal(err)
 	}
@@ -135,11 +135,11 @@ func TestTaskClaimSameLaneSameJobIsIdempotentNoOp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("replay on in_progress: %v", err)
 	}
-	if again.State != "in_progress" || again.ClaimedBy != "captain-a" || again.Refs.JobID != "job-1" {
+	if again.State != "developing" || again.ClaimedBy != "captain-a" || again.Refs.JobID != "job-1" {
 		t.Fatalf("replay response=%+v", again)
 	}
 	row, _, _ = s.GetTask(t.Context(), task.ID)
-	if len(row.Events) != 2 {
+	if len(row.Events) != 1 {
 		t.Fatalf("replay must not add events, got %+v", row.Events)
 	}
 }
@@ -171,7 +171,7 @@ func TestTaskClaimConflictsCarryReasonAndWriteNothing(t *testing.T) {
 	}
 	// Every failure path is read-only: the row keeps its first claim.
 	row, _, _ := s.GetTask(t.Context(), task.ID)
-	if row.State != "claimed" || row.ClaimedBy != "captain-a" || row.Refs.JobID != "job-1" || len(row.Events) != 1 {
+	if row.State != "developing" || row.ClaimedBy != "captain-a" || row.Refs.JobID != "job-1" || len(row.Events) != 1 {
 		t.Fatalf("task after failed claims=%+v", row)
 	}
 

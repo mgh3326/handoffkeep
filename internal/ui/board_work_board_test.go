@@ -15,7 +15,7 @@ import (
 
 func TestWorkBoardConsoleProjection(t *testing.T) {
 	at := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
-	board := store.LinearBoard{Task: store.Task{ID: 101, State: "in_progress", Refs: store.TaskRefs{JobID: "example-lead", PR: "https://github.com/example/project/pull/42", HeadSHA: "example-head"}}, Sessions: []store.LinearBoardSession{
+	board := store.LinearBoard{Task: store.Task{ID: 101, State: "developing", Refs: store.TaskRefs{JobID: "example-lead", PR: "https://github.com/example/project/pull/42", HeadSHA: "example-head"}}, Sessions: []store.LinearBoardSession{
 		{JobID: "example-lead", Host: "example-a", Role: "lead", Family: "openai", Model: "example-builder", At: at, Active: false, Pane: "private-pane", Profile: "private-profile", Verdict: "private-verdict"},
 		{JobID: "example-review", Host: "example-b", Role: "review", Family: "anthropic", Model: "example-reviewer", At: at, Active: true},
 		{JobID: "example-consult", Host: "example-c", Role: "consult", Model: "example-consultant", At: at, Active: true},

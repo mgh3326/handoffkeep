@@ -33,7 +33,7 @@ export function Attention() {
       </p>
       <p>Partial count: answerable escalations are not included. Open Decisions for the full queue.</p>
       <p>
-        <a href="/ui/queue?state=verifying">Work awaiting review →</a>
+        <a href="/ui/queue?state=reviewing">Work awaiting review →</a>
       </p>
     </section>
   );

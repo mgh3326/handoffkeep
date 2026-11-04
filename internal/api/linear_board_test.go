@@ -153,7 +153,7 @@ func (q *boardQueue) add(b store.LinearBoard, e store.LinearBoardEvent) {
 }
 func boardFixture() store.LinearBoard {
 	var b store.LinearBoard
-	b.ApplyTask(store.Task{ID: 42, Title: "Fleet change", Priority: 2, State: "claimed", Refs: store.TaskRefs{JobID: "lead-job"}, UpdatedAt: time.Now().UTC()})
+	b.ApplyTask(store.Task{ID: 42, Title: "Fleet change", Priority: 2, State: "developing", Refs: store.TaskRefs{JobID: "lead-job"}, UpdatedAt: time.Now().UTC()})
 	return b
 }
 
@@ -198,7 +198,7 @@ func TestWorkBoardReusesROBTitleAndPreservesOtherText(t *testing.T) {
 }
 
 func TestWorkBoardStateTransitions(t *testing.T) {
-	for _, tc := range []struct{ state, pr, event, want string }{{"backlog", "", "", "Backlog"}, {"claimed", "", "", "In Progress"}, {"in_progress", "", "", "In Progress"}, {"claimed", "https://github.com/example/repo/pull/1", "", "In Review"}, {"verifying", "", "", "In Review"}, {"claimed", "", "READY", "In Review"}, {"merged", "", "", "Done"}, {"claimed", "", "MERGED", "Done"}, {"dropped", "", "", "Canceled"}} {
+	for _, tc := range []struct{ state, pr, event, want string }{{"backlog", "", "", "Backlog"}, {"developing", "", "", "In Progress"}, {"researching", "", "", "In Progress"}, {"developing", "https://github.com/example/repo/pull/1", "", "In Review"}, {"reviewing", "", "", "In Review"}, {"developing", "", "READY", "In Review"}, {"merged", "", "", "Done"}, {"developing", "", "MERGED", "Done"}, {"dropped", "", "", "Canceled"}} {
 		t.Run(tc.state+tc.event+tc.pr, func(t *testing.T) {
 			var b store.LinearBoard
 			b.ApplyTask(store.Task{ID: 42, Title: "State", Priority: 2, State: tc.state, Refs: store.TaskRefs{PR: tc.pr}})

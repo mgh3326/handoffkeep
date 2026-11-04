@@ -226,7 +226,7 @@ func TestCreateDispositionRequiresProject(t *testing.T) {
 	in := base
 	in.Project = "herdr"
 	x, created, err := s.CreateDisposition(ctx, in)
-	if err != nil || !created || x.Project == nil || *x.Project != "herdr" || x.Kind != "decide" || x.State != "needs_decision" {
+	if err != nil || !created || x.Project == nil || *x.Project != "herdr" || x.Kind != "decide" || x.State != "backlog" || !x.AwaitingDecision {
 		t.Fatalf("CreateDisposition=%+v created=%t err=%v", x, created, err)
 	}
 }

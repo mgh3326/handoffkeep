@@ -78,13 +78,23 @@ type boardTask struct {
 	Title      string          `json:"title"`
 	Kind       string          `json:"kind"`
 	State      string          `json:"state"`
-	Priority   int             `json:"priority"`
-	ClaimedBy  string          `json:"claimed_by,omitempty"`
-	CreatedBy  string          `json:"created_by"`
-	CreatedAt  time.Time       `json:"created_at"`
-	UpdatedAt  time.Time       `json:"updated_at"`
-	Refs       store.TaskRefs  `json:"refs"`
-	BodyDoc    string          `json:"body_doc,omitempty"`
+	// Category is derived from State; AwaitingDecision is the flag that
+	// replaced the needs_decision state. Both feed the console's views.
+	Category         string `json:"category"`
+	AwaitingDecision bool   `json:"awaiting_decision"`
+	ParentID         *int64 `json:"parent_id"`
+	// Lifecycle timestamps, null until the task first reaches the stage.
+	StartedAt   *time.Time     `json:"started_at"`
+	CompletedAt *time.Time     `json:"completed_at"`
+	CanceledAt  *time.Time     `json:"canceled_at"`
+	TriagedAt   *time.Time     `json:"triaged_at"`
+	Priority    int            `json:"priority"`
+	ClaimedBy   string         `json:"claimed_by,omitempty"`
+	CreatedBy   string         `json:"created_by"`
+	CreatedAt   time.Time      `json:"created_at"`
+	UpdatedAt   time.Time      `json:"updated_at"`
+	Refs        store.TaskRefs `json:"refs"`
+	BodyDoc     string         `json:"body_doc,omitempty"`
 	// Project is null for legacy rows predating the field and for the
 	// (rare) unclassified row — the console groups them as "no project".
 	Project *string `json:"project"`
@@ -103,21 +113,28 @@ type boardTasksResponse struct {
 
 func projectBoardTask(task store.Task) boardTask {
 	return boardTask{
-		ID:         task.ID,
-		Lane:       task.Lane,
-		ParentLane: task.ParentLane,
-		Title:      task.Title,
-		Kind:       task.Kind,
-		State:      task.State,
-		Priority:   task.Priority,
-		ClaimedBy:  task.ClaimedBy,
-		CreatedBy:  task.CreatedBy,
-		CreatedAt:  task.CreatedAt.UTC(),
-		UpdatedAt:  task.UpdatedAt.UTC(),
-		Refs:       task.Refs,
-		BodyDoc:    task.BodyDoc,
-		Project:    task.Project,
-		Area:       task.Area,
+		ID:               task.ID,
+		Lane:             task.Lane,
+		ParentLane:       task.ParentLane,
+		Title:            task.Title,
+		Kind:             task.Kind,
+		State:            task.State,
+		Category:         task.Category,
+		AwaitingDecision: task.AwaitingDecision,
+		ParentID:         task.ParentID,
+		StartedAt:        task.StartedAt,
+		CompletedAt:      task.CompletedAt,
+		CanceledAt:       task.CanceledAt,
+		TriagedAt:        task.TriagedAt,
+		Priority:         task.Priority,
+		ClaimedBy:        task.ClaimedBy,
+		CreatedBy:        task.CreatedBy,
+		CreatedAt:        task.CreatedAt.UTC(),
+		UpdatedAt:        task.UpdatedAt.UTC(),
+		Refs:             task.Refs,
+		BodyDoc:          task.BodyDoc,
+		Project:          task.Project,
+		Area:             task.Area,
 	}
 }
 
@@ -239,6 +256,9 @@ type boardDetailResponse struct {
 	// empty) so a client can tell "none recorded" from an older server.
 	DecisionRequests []decisionRequestView `json:"decision_requests"`
 	DecisionLegacy   *legacyDecisionView   `json:"decision_legacy,omitempty"`
+	// Children and Relations come from GetTask; absent when none.
+	Children  []store.TaskChild    `json:"children,omitempty"`
+	Relations []store.TaskRelation `json:"relations,omitempty"`
 }
 
 func taskRef(id int64) string {
@@ -254,7 +274,7 @@ func taskDwell(task store.Task, now time.Time) []dwellSegment {
 	totals := map[string]int64{}
 	current, start := "backlog", task.CreatedAt
 	for _, event := range task.Events {
-		if event.Kind == store.TaskEventRelane || event.Kind == store.TaskEventDecision || event.Kind == store.TaskEventProject || event.Kind == store.TaskEventArea {
+		if event.Kind != store.TaskEventTransition && event.Kind != store.TaskEventStateMigration {
 			continue
 		}
 		if event.At.After(start) {
@@ -266,7 +286,7 @@ func taskDwell(task store.Task, now time.Time) []dwellSegment {
 		totals[current] += int64(now.Sub(start).Seconds())
 	}
 	out := make([]dwellSegment, 0, len(totals))
-	for _, state := range taskStates {
+	for _, state := range dwellStates {
 		seconds, ok := totals[state]
 		if !ok {
 			continue
@@ -365,10 +385,12 @@ func (h *Handler) boardTaskDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	now := time.Now().UTC()
 	response := boardDetailResponse{
-		Task:   projectBoardTask(task),
-		Events: make([]boardEvent, 0, len(task.Events)),
-		Dwell:  taskDwell(task, now),
-		Linear: nil,
+		Task:      projectBoardTask(task),
+		Events:    make([]boardEvent, 0, len(task.Events)),
+		Dwell:     taskDwell(task, now),
+		Linear:    nil,
+		Children:  task.Children,
+		Relations: task.Relations,
 	}
 	workBoards, err := h.store.ReadTaskWorkBoards(r.Context(), []store.Task{task})
 	if err != nil {

@@ -34,11 +34,6 @@ type Service struct {
 
 var decisionResolverRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 
-// noJobReasonDecisionResolve is the recorded no-job reason when a task
-// decision resolve lands a task back in claimed without job linkage; the
-// answer itself is the explicit exception, named by the path that used it.
-const noJobReasonDecisionResolve = "decision resolved; task has no job link"
-
 // DecisionResolveInput records an answer made outside the web console and
 // closes the matching open decision. It is shared by the HTTP route and the
 // authenticated remote client payload.
@@ -88,7 +83,6 @@ func (s Service) ResolveDecision(ctx context.Context, input DecisionResolveInput
 	}
 
 	lane := ""
-	noJob := ""
 	if input.Type == "task" {
 		if err := s.wrkTaskPrecheck(ctx, input.ID, "claimed", false); err != nil {
 			return store.RelayEvent{}, err
@@ -106,7 +100,7 @@ func (s Service) ResolveDecision(ctx context.Context, input DecisionResolveInput
 		if task.Refs.Disposition != nil {
 			return store.RelayEvent{}, store.ErrDispositionOperatorOnly
 		}
-		if task.State != "needs_decision" {
+		if !task.AwaitingDecision {
 			return store.RelayEvent{}, store.ErrTaskConflict
 		}
 		// An open structured request is closed with tasks decision-resolve,
@@ -118,7 +112,7 @@ func (s Service) ResolveDecision(ctx context.Context, input DecisionResolveInput
 		// Validate the no-job reason before the lane event below commits:
 		// a reason the transition would reject (secret-looking content)
 		// must not leave a resolved answer queued behind a refused task.
-		if noJob, err = store.CheckTaskNoJob(input.NoJob); err != nil {
+		if _, err = store.CheckTaskNoJob(input.NoJob); err != nil {
 			return store.RelayEvent{}, err
 		}
 		lane = task.Lane
@@ -175,14 +169,10 @@ func (s Service) ResolveDecision(ctx context.Context, input DecisionResolveInput
 			note += " — " + input.Note
 		}
 		note += " — resolved by " + input.By
-		// A jobless task resumed by an answered decision needs its no-job
-		// reason recorded on the transition event; a caller-supplied reason
-		// wins over the path-identifying fallback. noJob was already
-		// normalized and validated before the lane event was written.
-		if noJob == "" {
-			noJob = noJobReasonDecisionResolve
-		}
-		if _, err := s.Store.TransitionTask(ctx, input.ID, "claimed", input.By, note, nil, noJob); err != nil {
+		// The answer clears the awaiting_decision flag and keeps the work
+		// state, so resuming enters no started state and needs no job link.
+		// noJob was already validated before the lane event was written.
+		if _, err := s.Store.ClearAwaitingDecision(ctx, input.ID, input.By, note); err != nil {
 			return store.RelayEvent{}, err
 		}
 	}
@@ -300,10 +290,41 @@ func (s Service) ReopenTask(ctx context.Context, id int64, client, reason string
 	return s.Store.ReopenTask(ctx, id, client, reason)
 }
 func (s Service) TransitionTask(ctx context.Context, id int64, to, client, note string, refs *store.TaskRefs, noJob string) (store.Task, error) {
-	if err := s.wrkTaskPrecheck(ctx, id, to, refs != nil); err != nil {
+	return s.TransitionTaskWith(ctx, id, client, store.TransitionInput{To: to, Note: note, Refs: refs, NoJob: noJob})
+}
+
+// TransitionTaskWith is TransitionTask with the options a plain call cannot
+// carry, such as the duplicate_of target.
+func (s Service) TransitionTaskWith(ctx context.Context, id int64, client string, in store.TransitionInput) (store.Task, error) {
+	if err := s.wrkTaskPrecheck(ctx, id, store.FenceTarget(in.To), in.Refs != nil); err != nil {
 		return store.Task{}, err
 	}
-	return s.Store.TransitionTask(ctx, id, to, client, note, refs, noJob)
+	in.By = client
+	return s.Store.TransitionTaskWith(ctx, id, in)
+}
+
+// SetTaskParent sets or clears a task's parent.
+func (s Service) SetTaskParent(ctx context.Context, id int64, parent *int64, client string) (store.Task, bool, error) {
+	if err := s.wrkTaskPrecheck(ctx, id, "", true); err != nil {
+		return store.Task{}, false, err
+	}
+	return s.Store.SetTaskParent(ctx, id, parent, client)
+}
+
+// AddTaskRelation adds an edge from the task to another.
+func (s Service) AddTaskRelation(ctx context.Context, id int64, kind string, other int64, client string) (bool, error) {
+	if err := s.wrkTaskPrecheck(ctx, id, "", true); err != nil {
+		return false, err
+	}
+	return s.Store.AddTaskRelation(ctx, id, kind, other, client)
+}
+
+// RemoveTaskRelation archives an edge.
+func (s Service) RemoveTaskRelation(ctx context.Context, id int64, kind string, other int64, client string) (bool, error) {
+	if err := s.wrkTaskPrecheck(ctx, id, "", true); err != nil {
+		return false, err
+	}
+	return s.Store.RemoveTaskRelation(ctx, id, kind, other, client)
 }
 func (s Service) RelaneTask(ctx context.Context, id int64, to, client, note string, allowNewLane bool) (store.Task, bool, error) {
 	if err := s.wrkTaskPrecheck(ctx, id, "", true); err != nil {
@@ -586,6 +607,9 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("POST /v1/tasks/{id}/claim", s.taskClaim)
 	m.HandleFunc("POST /v1/tasks/{id}/rebind", s.taskRebind)
 	m.HandleFunc("POST /v1/tasks/{id}/transition", s.taskTransition)
+	m.HandleFunc("POST /v1/tasks/{id}/parent", s.taskParent)
+	m.HandleFunc("POST /v1/tasks/{id}/relations", s.taskRelationAdd)
+	m.HandleFunc("POST /v1/tasks/{id}/relations/remove", s.taskRelationRemove)
 	m.HandleFunc("POST /v1/tasks/{id}/reopen", s.taskReopen)
 	m.HandleFunc("POST /v1/tasks/{id}/project", s.taskProject)
 	m.HandleFunc("POST /v1/tasks/{id}/area", s.taskArea)
@@ -1054,6 +1078,9 @@ type taskTransitionInput struct {
 	// claimed/in_progress without claimed_by + refs.job_id. Without linkage
 	// an empty reason is refused with task_job_required.
 	NoJob string `json:"no_job,omitempty"`
+	// DuplicateOf names the task a duplicate transition points at. The
+	// duplicate_of relation and the duplicate state are written together.
+	DuplicateOf int64 `json:"duplicate_of,omitempty"`
 }
 
 func (s Server) taskTransition(w http.ResponseWriter, r *http.Request) {
@@ -1072,12 +1099,97 @@ func (s Server) taskTransition(w http.ResponseWriter, r *http.Request) {
 		appErr(w, r, err)
 		return
 	}
-	x, err := s.Service.TransitionTask(r.Context(), id, input.To, client, input.Note, input.Refs, input.NoJob)
+	x, err := s.Service.TransitionTaskWith(r.Context(), id, client, store.TransitionInput{To: input.To, Note: input.Note, Refs: input.Refs, NoJob: input.NoJob, DuplicateOf: input.DuplicateOf})
 	if err != nil {
 		appErr(w, r, err)
 		return
 	}
 	jsonOut(w, http.StatusOK, x)
+}
+
+// taskParent sets (parent_id) or clears (null) a task's single parent. The
+// link is acyclic; setting the current value changes nothing.
+func (s Server) taskParent(w http.ResponseWriter, r *http.Request) {
+	client, ok := s.auth(w, r)
+	if !ok {
+		return
+	}
+	id, err := taskID(r)
+	if err != nil || id < 1 {
+		writeError(w, http.StatusBadRequest, "invalid_context")
+		return
+	}
+	defer r.Body.Close()
+	var input struct {
+		ParentID *int64 `json:"parent_id"`
+	}
+	if err := decode(r, &input, 4096); err != nil {
+		appErr(w, r, err)
+		return
+	}
+	x, _, err := s.Service.SetTaskParent(r.Context(), id, input.ParentID, client)
+	if err != nil {
+		appErr(w, r, err)
+		return
+	}
+	jsonOut(w, http.StatusOK, x)
+}
+
+type taskRelationInput struct {
+	Kind string `json:"kind"`
+	// Other is the task at the other end: the one this task blocks, is a
+	// duplicate of, or relates to.
+	Other int64 `json:"other"`
+}
+
+// taskRelationAdd adds a relation edge. Adding a live edge again changes
+// nothing, and adding a duplicate_of edge also moves the task to duplicate.
+func (s Server) taskRelationAdd(w http.ResponseWriter, r *http.Request) {
+	s.taskRelationWrite(w, r, true)
+}
+
+// taskRelationRemove archives a relation edge; removing an absent one changes
+// nothing.
+func (s Server) taskRelationRemove(w http.ResponseWriter, r *http.Request) {
+	s.taskRelationWrite(w, r, false)
+}
+
+func (s Server) taskRelationWrite(w http.ResponseWriter, r *http.Request, add bool) {
+	client, ok := s.auth(w, r)
+	if !ok {
+		return
+	}
+	id, err := taskID(r)
+	if err != nil || id < 1 {
+		writeError(w, http.StatusBadRequest, "invalid_context")
+		return
+	}
+	defer r.Body.Close()
+	var input taskRelationInput
+	if err := decode(r, &input, 4096); err != nil {
+		appErr(w, r, err)
+		return
+	}
+	var changed bool
+	if add {
+		changed, err = s.Service.AddTaskRelation(r.Context(), id, input.Kind, input.Other, client)
+	} else {
+		changed, err = s.Service.RemoveTaskRelation(r.Context(), id, input.Kind, input.Other, client)
+	}
+	if err != nil {
+		appErr(w, r, err)
+		return
+	}
+	x, found, err := s.Service.GetTask(r.Context(), id)
+	if err != nil {
+		appErr(w, r, err)
+		return
+	}
+	if !found {
+		writeError(w, http.StatusNotFound, "not_found")
+		return
+	}
+	jsonOut(w, http.StatusOK, map[string]any{"changed": changed, "task": x})
 }
 
 // taskDecisionRequest records a structured decision request (#618). The

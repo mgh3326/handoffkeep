@@ -152,7 +152,7 @@ func TestUIDashboard(t *testing.T) {
 			t.Fatal("merged task listed as running work")
 		}
 		if task.ID == running.ID {
-			foundWork = task.State == "in_progress" && task.JobID == "job-dash-1"
+			foundWork = task.State == "developing" && task.JobID == "job-dash-1"
 		}
 	}
 	if !foundWork {
@@ -165,7 +165,7 @@ func TestUIDashboard(t *testing.T) {
 			continue
 		}
 		foundRepo = true
-		if len(r.Open) != 1 || r.Open[0].TaskID != running.ID || r.Open[0].Number != 3 || r.Open[0].State != "in_progress" {
+		if len(r.Open) != 1 || r.Open[0].TaskID != running.ID || r.Open[0].Number != 3 || r.Open[0].State != "developing" {
 			t.Fatalf("open=%+v", r.Open)
 		}
 		if len(r.Merged) != 1 || r.Merged[0].TaskID != landed.ID {

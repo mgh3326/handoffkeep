@@ -146,7 +146,7 @@ func TestTasksDecisionResolveLegacyNeedsDecisionHint(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "NOT recorded") {
 		t.Fatalf("err=%v", err)
 	}
-	if hint := errout.String(); !strings.Contains(hint, "needs_decision") || !strings.Contains(hint, "no structured decision request") ||
+	if hint := errout.String(); !strings.Contains(hint, "waiting on a decision") || !strings.Contains(hint, "no structured decision request") ||
 		!strings.Contains(hint, "decisions resolve task 618") || !strings.Contains(hint, "--no-inject") {
 		t.Fatalf("stderr hint=%q", hint)
 	}

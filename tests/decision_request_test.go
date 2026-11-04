@@ -276,8 +276,8 @@ func TestDecisionRequestLegacyAnswerPathsRefuseOpenRequest(t *testing.T) {
 		t.Fatalf("decisions resolve err=%v", err)
 	}
 	got, _, _ := s.GetTask(t.Context(), x.ID)
-	if got.State != "needs_decision" || got.Refs.DecisionRequest.ID != request.ID || got.Refs.DecisionRequest.Status != "open" {
-		t.Fatalf("task changed: %s %+v", got.State, got.Refs.DecisionRequest)
+	if got.State != "developing" || !got.AwaitingDecision || got.Refs.DecisionRequest.ID != request.ID || got.Refs.DecisionRequest.Status != "open" {
+		t.Fatalf("task changed: %s awaiting=%v %+v", got.State, got.AwaitingDecision, got.Refs.DecisionRequest)
 	}
 }
 
@@ -360,7 +360,7 @@ func TestUIDecisionFormsRefuseOpenRequest(t *testing.T) {
 		t.Fatalf("hub received %d events for an open request", n)
 	}
 	got, _, _ := s.GetTask(t.Context(), x.ID)
-	if got.State != "needs_decision" || got.Refs.DecisionRequest.Status != store.DecisionRequestOpen {
-		t.Fatalf("task changed: %s %+v", got.State, got.Refs.DecisionRequest)
+	if got.State != "developing" || !got.AwaitingDecision || got.Refs.DecisionRequest.Status != store.DecisionRequestOpen {
+		t.Fatalf("task changed: %s awaiting=%v %+v", got.State, got.AwaitingDecision, got.Refs.DecisionRequest)
 	}
 }

@@ -37,7 +37,12 @@ transaction and serialized in UTC, `watermark.task_event_max_id` and
 `relay_events` (an empty table yields `0`), and `counts.total`,
 `counts.by_state`, and `counts.by_lane` are authoritative counts for the
 filtered scope inside the same snapshot. `by_state` carries an entry for every
-canonical state, including `merged` and `dropped`; `by_lane` carries an entry
+canonical state: `triage`, `backlog`, `unstarted`, `researching`, `developing`,
+`reviewing`, `merged`, `deployed`, `dropped`, `duplicate` and `icebox`. The
+`state` filter also accepts the old names (`in_progress`, `claimed`,
+`verifying`, `join`, `hold`, `reopened`, `needs_decision`), which select what
+they map to; responses use only the current names, and each task row carries
+the derived read-only `category` and the `awaiting_decision` flag. `by_lane` carries an entry
 for every lane present in the filtered set. `tasks` are the filtered rows in
 ascending numeric ID order with the same projected fields as `/v1/tasks`
 rows; task events are never embedded — the two watermarks bound the event

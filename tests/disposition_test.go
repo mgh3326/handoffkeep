@@ -118,7 +118,7 @@ func TestDispositionCreateIsOnePerOrigin(t *testing.T) {
 	lane := uiLane(t, "director")
 	pr := dispositionPR(t)
 	x := mustCreateDisposition(t, s, dispositionInput(lane, pr, 4, "C"))
-	if x.State != "needs_decision" || x.Kind != "decide" || x.Refs.OriginPR != pr || x.Refs.Disposition.Facts.ResidualN != 4 || x.Refs.Disposition.Facts.FactsSource != "gh-pr-view" {
+	if x.State != "backlog" || !x.AwaitingDecision || x.Kind != "decide" || x.Refs.OriginPR != pr || x.Refs.Disposition.Facts.ResidualN != 4 || x.Refs.Disposition.Facts.FactsSource != "gh-pr-view" {
 		t.Fatalf("created item = %+v", x)
 	}
 	again, created, err := s.CreateDisposition(t.Context(), dispositionInput(lane, pr, 1, "E"))
@@ -133,11 +133,11 @@ func TestDispositionCreateIsOnePerOrigin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got.Events) != 2 || got.Events[0].From != "backlog" || got.Events[0].To != "claimed" || got.Events[1].From != "claimed" || got.Events[1].To != "needs_decision" {
-		t.Fatalf("creation must record only legal edges, got %+v", got.Events)
+	if len(got.Events) != 1 || got.Events[0].From != "backlog" || got.Events[0].To != "backlog" {
+		t.Fatalf("creation must record one awaiting_decision event, got %+v", got.Events)
 	}
-	if !strings.Contains(got.Events[1].Note, "잔여 4") || !strings.Contains(got.Events[1].Note, "권고 C 잔여 수용") || !strings.Contains(got.Events[1].Note, "설치 unknown") {
-		t.Fatalf("question must carry the recorded facts, got %q", got.Events[1].Note)
+	if !strings.Contains(got.Events[0].Note, "잔여 4") || !strings.Contains(got.Events[0].Note, "권고 C 잔여 수용") || !strings.Contains(got.Events[0].Note, "설치 unknown") {
+		t.Fatalf("question must carry the recorded facts, got %q", got.Events[0].Note)
 	}
 }
 
@@ -231,7 +231,7 @@ func TestDispositionSilenceIsInert(t *testing.T) {
 		t.Fatal(err)
 	}
 	after := dispositionRowCounts(t, lane, x.ID)
-	if after.ItemState != "needs_decision" || after.ItemEvents != before.ItemEvents || after.Backlog != before.Backlog {
+	if after.ItemState != "backlog" || after.ItemEvents != before.ItemEvents || after.Backlog != before.Backlog {
 		t.Fatalf("silence changed the item: before=%+v after=%+v", before, after)
 	}
 	if after.Tasks != before.Tasks || after.Relay != before.Relay || after.TaskEvents != before.TaskEvents {
@@ -260,7 +260,7 @@ func TestDispositionOnlyOperatorLeavesNeedsDecision(t *testing.T) {
 	after := dispositionRowCounts(t, lane, x.ID)
 	// Relay rows too: an answer event reaching the director's lane without a
 	// recorded answer is exactly the fail-open this guard exists to stop.
-	if after.ItemState != "needs_decision" || after.ItemEvents != 2 || after.Relay != before.Relay {
+	if after.ItemState != "backlog" || after.ItemEvents != 1 || after.Relay != before.Relay {
 		t.Fatalf("refused paths wrote: before=%+v after=%+v", before, after)
 	}
 	// The disposition object is not patchable through a transition either.
@@ -314,7 +314,7 @@ func TestDispositionAnswerBindsGenerationAndKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	a := got.Refs.Disposition.Answer
-	if got.State != "claimed" || a == nil || a.Key != "B" || a.By != "operator:admin@example.com" || a.Gen != gen || a.EventID != "web-disposition-x" {
+	if got.State != "researching" || a == nil || a.Key != "B" || a.By != "operator:admin@example.com" || a.Gen != gen || a.EventID != "web-disposition-x" {
 		t.Fatalf("answer = %+v state=%s", a, got.State)
 	}
 	if _, err := s.AnswerDisposition(t.Context(), store.DispositionAnswerInput{ID: x.ID, Gen: gen, Key: "A", OperatorEmail: "admin@example.com", EventID: "e2"}); !errors.Is(err, store.ErrTaskConflict) {
@@ -322,7 +322,7 @@ func TestDispositionAnswerBindsGenerationAndKey(t *testing.T) {
 	}
 	full, _, _ := s.GetTask(t.Context(), x.ID)
 	last := full.Events[len(full.Events)-1]
-	if last.By != "operator:admin@example.com" || last.From != "needs_decision" || last.To != "claimed" {
+	if last.By != "operator:admin@example.com" || last.From != "researching" || last.To != "researching" {
 		t.Fatalf("answer event = %+v", last)
 	}
 }
@@ -356,12 +356,12 @@ func TestDispositionBatchIsScopedToSnapshot(t *testing.T) {
 	}
 	for _, x := range answered {
 		ans := x.Refs.Disposition.Answer
-		if ans.Key != x.Refs.Disposition.Recommended || ans.BatchID != "batch0001" || x.State != "claimed" {
+		if ans.Key != x.Refs.Disposition.Recommended || ans.BatchID != "batch0001" || x.State != "researching" {
 			t.Fatalf("batch answer = %+v", ans)
 		}
 	}
 	for _, id := range []int64{late.ID, stale.ID} {
-		if got := dispositionRowCounts(t, lane, id); got.ItemState != "needs_decision" {
+		if got := dispositionRowCounts(t, lane, id); got.ItemState != "backlog" {
 			t.Fatalf("#%d outside the snapshot changed to %s", id, got.ItemState)
 		}
 	}
@@ -378,7 +378,7 @@ func TestDispositionBatchIsScopedToSnapshot(t *testing.T) {
 func TestDispositionApplyUsesLegalEdges(t *testing.T) {
 	s := uiStore(t)
 	lane := uiLane(t, "director")
-	want := map[string]string{"A": "merged", "B": "merged", "C": "merged", "D": "hold", "E": "dropped"}
+	want := map[string]string{"A": "merged", "B": "merged", "C": "merged", "D": "icebox", "E": "dropped"}
 	for key, final := range want {
 		x := mustCreateDisposition(t, s, dispositionInput(lane, dispositionPR(t), 0, "E"))
 		if _, err := s.ApplyDisposition(t.Context(), x.ID, "director-node", ""); !errors.Is(err, store.ErrTaskConflict) {
@@ -393,6 +393,9 @@ func TestDispositionApplyUsesLegalEdges(t *testing.T) {
 		}
 		full, _, _ := s.GetTask(t.Context(), x.ID)
 		for _, e := range full.Events {
+			if e.Kind != store.TaskEventTransition {
+				continue
+			}
 			if !store.TaskTransitions[e.From][e.To] {
 				t.Fatalf("illegal recorded edge %s->%s", e.From, e.To)
 			}
@@ -543,7 +546,7 @@ func TestDispositionBearerAPIRoutes(t *testing.T) {
 	}
 	task := out["task"].(map[string]any)
 	id := int64(task["id"].(float64))
-	if task["created_by"] != "director-node" || task["state"] != "needs_decision" {
+	if task["created_by"] != "director-node" || task["state"] != "backlog" {
 		t.Fatalf("created task=%v", task)
 	}
 	if status, out = call(http.MethodPost, "/v1/tasks/dispositions", in); status != http.StatusOK || out["created"] != false {
@@ -589,14 +592,14 @@ func TestDispositionGuardLeavesOtherDecisionsUnchanged(t *testing.T) {
 	if !seen[viaTransition.ID] || !seen[viaResolve.ID] {
 		t.Fatalf("builder questions missing from the generic inbox: %v", seen)
 	}
-	if got, err := s.TransitionTask(t.Context(), viaTransition.ID, "claimed", "director-node", "answered in chat", nil, ""); err != nil || got.State != "claimed" {
+	if got, err := s.TransitionTask(t.Context(), viaTransition.ID, "claimed", "director-node", "answered in chat", nil, ""); err != nil || got.State != "developing" {
 		t.Fatalf("generic transition of a builder question: state=%s err=%v", got.State, err)
 	}
 	svc := api.Service{Store: s}
 	if _, err := svc.ResolveDecision(t.Context(), api.DecisionResolveInput{Type: "task", ID: viaResolve.ID, By: "operator-desk", Answer: "A", NoInject: true}); err != nil {
 		t.Fatalf("decisions resolve of a builder question: %v", err)
 	}
-	if got, _, _ := s.GetTask(t.Context(), viaResolve.ID); got.State != "claimed" {
+	if got, _, _ := s.GetTask(t.Context(), viaResolve.ID); got.State != "developing" {
 		t.Fatalf("resolved builder question state=%s", got.State)
 	}
 	// A task that merely carries origin refs is not a disposition item.
@@ -622,7 +625,7 @@ func TestDispositionCommentIsNotAnAnswer(t *testing.T) {
 		t.Fatal(err)
 	}
 	after := dispositionRowCounts(t, lane, x.ID)
-	if after.ItemState != "needs_decision" || after.ItemEvents != before.ItemEvents || after.Relay != before.Relay {
+	if after.ItemState != "backlog" || after.ItemEvents != before.ItemEvents || after.Relay != before.Relay {
 		t.Fatalf("a comment acted as a disposition answer: before=%+v after=%+v", before, after)
 	}
 	if got, _, _ := s.GetTask(t.Context(), x.ID); got.Refs.Disposition.Answer != nil {
@@ -661,15 +664,15 @@ func TestDispositionOriginIsFixedAfterCreation(t *testing.T) {
 			t.Fatalf("%s: origin moved: state=%s origin_pr=%s origin_task=%d", state, got.State, got.Refs.OriginPR, got.Refs.OriginTask)
 		}
 	}
-	try("needs_decision") // refused by the operator-only guard
+	try("backlog") // refused by the operator-only guard
 	if _, err := s.AnswerDisposition(t.Context(), store.DispositionAnswerInput{ID: x.ID, Gen: openGen(t, s, x.ID), Key: "D", OperatorEmail: "admin@example.com", EventID: "e-o"}); err != nil {
 		t.Fatal(err)
 	}
-	try("claimed")
+	try("researching")
 	if _, err := s.ApplyDisposition(t.Context(), x.ID, "director-node", ""); err != nil {
 		t.Fatal(err)
 	}
-	try("hold")
+	try("icebox")
 	// The bearer transition route is refused the same way.
 	server := httptest.NewServer(api.Server{Service: api.Service{Store: s}, Tokens: api.Tokens{"director-node": "node-token"}}.Handler())
 	defer server.Close()

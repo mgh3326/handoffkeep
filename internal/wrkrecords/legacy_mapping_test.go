@@ -98,7 +98,7 @@ func (db contractDB) seedLegacyMapping(t *testing.T, v vector) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if _, e = db.owner.Exec(t.Context(), `UPDATE tasks SET kind='decide',state=$2,refs=$1::jsonb WHERE id=$3`, string(raw), disposition.State, disposition.TaskID); e != nil {
+	if _, e = db.owner.Exec(t.Context(), `UPDATE tasks SET kind='decide',state=$2,refs=$1::jsonb WHERE id=$3`, string(raw), fixtureTaskState(disposition.State), disposition.TaskID); e != nil {
 		t.Fatal(e)
 	}
 }

@@ -413,7 +413,7 @@ func TestUITimelineQueueAndEscaping(t *testing.T) {
 	}
 	response = uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/api/board/tasks/"+strconv.FormatInt(active.ID, 10), assertion, "")
 	body = responseText(t, response)
-	if response.StatusCode != http.StatusOK || !strings.Contains(body, `"from":"backlog","to":"claimed"`) || !strings.Contains(body, `"from":"claimed","to":"in_progress"`) || !strings.Contains(body, "started work") {
+	if response.StatusCode != http.StatusOK || !strings.Contains(body, `"from":"backlog","to":"developing"`) {
 		t.Fatal("task detail API did not render ordered history")
 	}
 }

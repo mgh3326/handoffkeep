@@ -45,7 +45,24 @@ var exportSnapshotSeam func(ctx context.Context)
 // be a well-formed project name (membership in task_projects is not required
 // — filtering by a configured-but-unused name is a valid query).
 func validTaskQuery(lane, state, parentLane string, project *string) bool {
-	return (lane == "" || validName(lane)) && (parentLane == "" || validName(parentLane)) && (state == "" || taskStates[state]) && (project == nil || *project == "" || validName(*project))
+	return (lane == "" || validName(lane)) && (parentLane == "" || validName(parentLane)) && (state == "" || validStateFilter(state)) && (project == nil || *project == "" || validName(*project))
+}
+
+// validStateFilter accepts a current state name or an old one.
+func validStateFilter(state string) bool {
+	_, ok := ParseStateFilter(state)
+	return ok
+}
+
+// stateClause renders a state filter. An old name selects what it maps to
+// (see ParseStateFilter); needs_decision selects the awaiting_decision flag.
+func stateClause(state string, args *[]any) string {
+	f, _ := ParseStateFilter(state)
+	if f.Awaiting {
+		return " AND awaiting_decision"
+	}
+	*args = append(*args, f.States)
+	return fmt.Sprintf(" AND state=ANY($%d)", len(*args))
 }
 
 // taskFilter renders the optional lane/parent_lane/state/project predicates
@@ -63,8 +80,7 @@ func taskFilter(lane, state, parentLane string, project *string) (string, []any)
 		where += fmt.Sprintf(" AND parent_lane=$%d", len(args))
 	}
 	if state != "" {
-		args = append(args, state)
-		where += fmt.Sprintf(" AND state=$%d", len(args))
+		where += stateClause(state, &args)
 	}
 	if project != nil {
 		if *project == "" {
