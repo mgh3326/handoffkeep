@@ -137,11 +137,15 @@ treated as overdue.
 7. It satisfies the guard on entering `started`. An event that moves an unclaimed
    task sets `claimed_by` to its source and records `source_ref` as the no-job
    reason. An existing claim and job binding stay as they are.
-8. A deploy can arrive before its merge event. Whenever a task enters `merged`, in
-   the same transaction, hk looks for a successful deploy record that lists the
-   task's PR. If it finds one, the task moves on to `deployed` and any `hk.deploy`
-   row recorded with `applied=false` for that record is updated to `applied=true`.
-   A merge event sets `refs.pr` to the merged PR, so the match uses the PR that
+8. A deploy can arrive before its merge event. A deploy record applies `hk.deploy`
+   only to tasks already in `merged` and records nothing for a listed PR whose task
+   is not merged yet, because `task_events` is append-only and an early
+   `applied=false` row would hold the `(task_id, source, source_ref)` key. Whenever a
+   task enters `merged`, in the same transaction, hk looks for a successful deploy
+   record that lists the task's PR. If it finds one, the task moves on to `deployed`
+   and one applied `hk.deploy` row is recorded with the source_ref the deploy path
+   would use (record key and PR URL), so either arrival order ends with one row. A
+   merge event sets `refs.pr` to the merged PR, so the match uses the PR that
    actually merged.
 9. A revert undoes a merge. The event names the reverted PR and the revert PR. hk
    moves the task to `developing`, records the revert PR in `refs.revert_pr`, and

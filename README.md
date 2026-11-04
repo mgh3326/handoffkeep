@@ -256,6 +256,39 @@ state blocks the close, and a parent whose sub-tasks are all `dropped` or
 event. Reopening a sub-task records an event on a completed parent and does
 not reopen it.
 
+### Event-driven transitions, stalled and the backlog sweep
+
+Integration events move tasks forward under the rules in
+`docs/linear-internalize.md` ("Event-driven transitions").
+`POST /v1/task-events` takes `{source, source_ref, task_id, pr, reverted_pr,
+revert_pr, at}` for `mergewake.pr`, `mergewake.review`, `mergewake.merge` and
+`mergewake.revert`; `source_ref` is the PR URL, and for a revert the revert PR
+URL with `reverted_pr` naming the PR it undoes. Every event is recorded in
+`task_events` with its source, applied or not, and the answer carries
+`applied`, `redelivered`, `state` and, when nothing moved, `reason`. The same
+`(task, source, source_ref)` again changes nothing. `handoffkeep tasks event
+<id> --source S --source-ref URL [--reverted-pr URL]` posts one by hand.
+Storing a `deploy/<service>/<YYYYMMDDTHHMMSSZ>` document whose record has
+`result` `success` and a non-null `included_prs` moves each `merged` task whose
+`refs.pr` is listed to `deployed` (`hk.deploy`); a task that enters `merged`
+later finds the record then. A job record that gains a role moves its bound
+task from `researching` to `developing` when the role and kind say so, never
+back.
+
+A task is `stalled` (a read-time field on task rows) when it is in a started
+state, not `awaiting_decision`, and its newest task event, comment or bound
+job update is older than `serve --started-stalled-hours` (default 24).
+`tasks list --stalled` (`GET /v1/tasks?stalled=true`) lists only those.
+`serve --backlog-icebox-days N` parks `backlog` tasks idle for N days in
+`icebox` with an `hk.sweep` event, skipping flagged tasks and parents with
+started sub-tasks; the default 0 keeps the sweep off. `handoffkeep tasks sweep
+--dry-run --days N` (`GET /v1/tasks/sweep?days=N`) prints what it would move
+and writes nothing. `--started-stalled-hours` takes 1..8760 and
+`--backlog-icebox-days` takes 0 or 1..3650; serve refuses anything else at
+startup, and the preview answers `400 invalid_context` outside 1..3650.
+Schema version 34 adds the `source_event` kind for events
+recorded with `applied=false`, so they never read as transitions.
+
 The schema migration to this model (version 32) moves existing rows by the
 map in `docs/linear-internalize.md` and is reversible with
 `scripts/rollback-state-migration.sql`; `handoffkeep tasks migrate-states

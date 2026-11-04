@@ -402,6 +402,7 @@ func (s *Store) UpdateJob(ctx context.Context, id string, u JobUpdate) (Job, err
 		return j, fmt.Errorf("%w: %s cannot move to completed", ErrJobStateConflict, j.State)
 	}
 	// The update is valid; merge the present fields over the record.
+	previousRole := j.Role
 	if u.State != nil {
 		j.State = *u.State
 	}
@@ -445,6 +446,12 @@ func (s *Store) UpdateJob(ctx context.Context, id string, u JobUpdate) (Job, err
 	}
 	if err = s.recordLinearBoardJobTx(ctx, tx, j); err != nil {
 		return j, err
+	}
+	// A job that gains a role can move its task forward (panewire.job).
+	if u.Role != nil && *u.Role != "" && *u.Role != previousRole {
+		if err = s.applyJobRoleTx(ctx, tx, j, j.UpdatedAt); err != nil {
+			return j, err
+		}
 	}
 	return j, tx.Commit(ctx)
 }

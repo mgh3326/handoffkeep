@@ -1,0 +1,302 @@
+package store
+
+import (
+	"fmt"
+	"testing"
+	"time"
+)
+
+// ageTask moves a task's activity back to at. task_events and task_comments
+// are append-only, so it is used only on tasks that have neither yet: their
+// activity is created_at and the jobs bound to them.
+func ageTask(t *testing.T, s *Store, id int64, at time.Time) {
+	t.Helper()
+	ctx := t.Context()
+	var events, comments int
+	if err := s.pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM task_events WHERE task_id=$1),(SELECT count(*) FROM task_comments WHERE task_id=$1)`, id).Scan(&events, &comments); err != nil {
+		t.Fatal(err)
+	}
+	if events != 0 || comments != 0 {
+		t.Fatalf("ageTask: task %d already has %d events and %d comments", id, events, comments)
+	}
+	for _, q := range []string{
+		`UPDATE tasks SET created_at=$2 WHERE id=$1`,
+		`UPDATE jobs SET updated_at=$2 WHERE task_id=$1`,
+	} {
+		if _, err := s.pool.Exec(ctx, q, id, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestIsStalledAtFixedTimes(t *testing.T) {
+	now := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
+	after := 24 * time.Hour
+	for _, tc := range []struct {
+		name     string
+		state    string
+		awaiting bool
+		activity time.Time
+		want     bool
+	}{
+		{"just inside", StateDeveloping, false, now.Add(-after + time.Second), false},
+		{"exactly at the setting", StateDeveloping, false, now.Add(-after), false},
+		{"just past", StateDeveloping, false, now.Add(-after - time.Second), true},
+		{"reviewing past", StateReviewing, false, now.Add(-48 * time.Hour), true},
+		{"awaiting decision", StateResearching, true, now.Add(-48 * time.Hour), false},
+		{"backlog", StateBacklog, false, now.Add(-48 * time.Hour), false},
+		{"unstarted", StateUnstarted, false, now.Add(-48 * time.Hour), false},
+		{"merged", StateMerged, false, now.Add(-48 * time.Hour), false},
+		{"icebox", StateIcebox, false, now.Add(-48 * time.Hour), false},
+	} {
+		if got := isStalled(tc.state, tc.awaiting, tc.activity, now, after); got != tc.want {
+			t.Errorf("%s: stalled=%t, want %t", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestStartedStalledHoursSetting(t *testing.T) {
+	var s Store
+	if s.StartedStalledHours() != 24*time.Hour {
+		t.Fatalf("default %v", s.StartedStalledHours())
+	}
+	if err := s.SetStartedStalledHours(6); err != nil || s.StartedStalledHours() != 6*time.Hour {
+		t.Fatalf("set %v err=%v", s.StartedStalledHours(), err)
+	}
+	if err := s.SetStartedStalledHours(0); err != nil || s.StartedStalledHours() != 24*time.Hour {
+		t.Fatalf("reset %v err=%v", s.StartedStalledHours(), err)
+	}
+	// The upper bound is accepted; past it the value is refused and the
+	// setting stays as it was, so it can never wrap into a negative duration.
+	if err := s.SetStartedStalledHours(MaxStartedStalledHours); err != nil || s.StartedStalledHours() != 8760*time.Hour {
+		t.Fatalf("max %v err=%v", s.StartedStalledHours(), err)
+	}
+	for _, h := range []int{MaxStartedStalledHours + 1, 2562048} {
+		if err := s.SetStartedStalledHours(h); err == nil {
+			t.Fatalf("started_stalled_hours %d accepted", h)
+		}
+		if s.StartedStalledHours() != 8760*time.Hour {
+			t.Fatalf("refused %d changed the setting to %v", h, s.StartedStalledHours())
+		}
+	}
+	if ValidStartedStalledHours(8760) != nil || ValidStartedStalledHours(8761) == nil || ValidStartedStalledHours(0) == nil {
+		t.Fatal("ValidStartedStalledHours bounds")
+	}
+}
+
+func TestSweepBacklogRefusesOutOfRangeDays(t *testing.T) {
+	// A zero Store has no pool: a refused value must return before any read,
+	// and a read would panic.
+	var s Store
+	for _, days := range []int{-1, MaxBacklogIceboxDays + 1, 106752} {
+		for _, dryRun := range []bool{true, false} {
+			if moved, err := s.SweepBacklog(t.Context(), days, dryRun); err == nil || moved != nil {
+				t.Fatalf("days=%d dry_run=%t: moved=%v err=%v", days, dryRun, moved, err)
+			}
+		}
+	}
+	if ValidBacklogIceboxDays(0) != nil || ValidBacklogIceboxDays(3650) != nil || ValidBacklogIceboxDays(3651) == nil {
+		t.Fatal("ValidBacklogIceboxDays bounds")
+	}
+}
+
+func TestStalledFlagAtReadTime(t *testing.T) {
+	s, pool := searchTestStore(t)
+	ctx := t.Context()
+	s.SetStartedStalledHours(24)
+	now := time.Now().UTC()
+	old := now.Add(-72 * time.Hour)
+
+	inside := flowTask(t, s, pool, "implement", StateDeveloping, true)
+	ageTask(t, s, inside.ID, now.Add(-24*time.Hour+time.Minute))
+	past := flowTask(t, s, pool, "implement", StateDeveloping, true)
+	ageTask(t, s, past.ID, now.Add(-24*time.Hour-time.Minute))
+	if stateOf(t, s, inside.ID).Stalled {
+		t.Fatal("a task just inside the setting is stalled")
+	}
+	if !stateOf(t, s, past.ID).Stalled {
+		t.Fatal("a task just past the setting is not stalled")
+	}
+
+	awaiting := flowTask(t, s, pool, "implement", StateReviewing, true)
+	if _, err := pool.Exec(ctx, `UPDATE tasks SET awaiting_decision=true WHERE id=$1`, awaiting.ID); err != nil {
+		t.Fatal(err)
+	}
+	ageTask(t, s, awaiting.ID, old)
+	if stateOf(t, s, awaiting.ID).Stalled {
+		t.Fatal("a task awaiting a decision is stalled")
+	}
+
+	commented := flowTask(t, s, pool, "implement", StateResearching, true)
+	ageTask(t, s, commented.ID, old)
+	if !stateOf(t, s, commented.ID).Stalled {
+		t.Fatal("aged task is not stalled")
+	}
+	if _, err := s.CreateTaskComment(ctx, commented.ID, "tester", "still on it"); err != nil {
+		t.Fatal(err)
+	}
+	if stateOf(t, s, commented.ID).Stalled {
+		t.Fatal("a comment did not reset stalled")
+	}
+
+	// Only the job bound in refs.job_id counts as activity: a late update to
+	// an earlier job of the task does not reset the stalled clock.
+	jobbed := flowTask(t, s, pool, "implement", StateDeveloping, true)
+	unboundJob := fmt.Sprintf("job-stalled-old-%d", jobbed.ID)
+	jobID := fmt.Sprintf("job-stalled-%d", jobbed.ID)
+	for _, id := range []string{unboundJob, jobID} {
+		if _, _, err := s.ClaimJob(ctx, Job{JobID: id, TaskID: jobbed.ID, Host: "test-host", CreatedBy: "tester"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := pool.Exec(ctx, `UPDATE tasks SET refs=refs||jsonb_build_object('job_id',$2::text) WHERE id=$1`, jobbed.ID, jobID); err != nil {
+		t.Fatal(err)
+	}
+	ageTask(t, s, jobbed.ID, old)
+	if !stateOf(t, s, jobbed.ID).Stalled {
+		t.Fatal("aged task with aged jobs is not stalled")
+	}
+	label := "progress"
+	if _, err := s.UpdateJob(ctx, unboundJob, JobUpdate{Label: &label}); err != nil {
+		t.Fatal(err)
+	}
+	if !stateOf(t, s, jobbed.ID).Stalled {
+		t.Fatal("an update to a job no longer bound to the task reset stalled")
+	}
+	if _, err := s.UpdateJob(ctx, jobID, JobUpdate{Label: &label}); err != nil {
+		t.Fatal(err)
+	}
+	if stateOf(t, s, jobbed.ID).Stalled {
+		t.Fatal("an update to the bound job did not reset stalled")
+	}
+
+	var notStarted []int64
+	for _, state := range []string{StateTriage, StateBacklog, StateUnstarted, StateMerged, StateDeployed, StateDropped, StateDuplicate, StateIcebox} {
+		x := flowTask(t, s, pool, "implement", state, true)
+		ageTask(t, s, x.ID, old)
+		notStarted = append(notStarted, x.ID)
+		if stateOf(t, s, x.ID).Stalled {
+			t.Fatalf("%s task is stalled", state)
+		}
+	}
+
+	xs, err := s.ListTasksFiltered(ctx, TaskQuery{Stalled: true, Limit: 1000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[int64]bool{}
+	for _, x := range xs {
+		if !x.Stalled {
+			t.Fatalf("stalled filter returned a row not marked stalled: %d", x.ID)
+		}
+		got[x.ID] = true
+	}
+	if !got[past.ID] || got[inside.ID] || got[awaiting.ID] || got[commented.ID] || got[jobbed.ID] {
+		t.Fatalf("stalled list %v", got)
+	}
+	for _, id := range notStarted {
+		if got[id] {
+			t.Fatalf("stalled list has non-started task %d", id)
+		}
+	}
+	// The unfiltered list marks the same rows.
+	all, err := s.ListTasks(ctx, "", "", "", nil, nil, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, x := range all {
+		if x.Stalled != got[x.ID] {
+			t.Fatalf("list stalled=%t for %d, filter says %t", x.Stalled, x.ID, got[x.ID])
+		}
+	}
+}
+
+func TestBacklogSweep(t *testing.T) {
+	s, pool := searchTestStore(t)
+	ctx := t.Context()
+	old := time.Now().UTC().Add(-15 * 24 * time.Hour)
+
+	idle := flowTask(t, s, pool, "implement", StateBacklog, false)
+	flagged := flowTask(t, s, pool, "implement", StateBacklog, false)
+	if _, err := pool.Exec(ctx, `UPDATE tasks SET awaiting_decision=true WHERE id=$1`, flagged.ID); err != nil {
+		t.Fatal(err)
+	}
+	parent := flowTask(t, s, pool, "implement", StateBacklog, false)
+	child := flowTask(t, s, pool, "implement", StateDeveloping, true)
+	setParent(t, s, child, parent)
+	unstarted := flowTask(t, s, pool, "implement", StateUnstarted, false)
+	fresh := flowTask(t, s, pool, "implement", StateBacklog, false)
+	for _, x := range []Task{idle, flagged, parent, unstarted} {
+		ageTask(t, s, x.ID, old)
+	}
+	snapshot := func() map[int64]Task {
+		out := map[int64]Task{}
+		for _, x := range []Task{idle, flagged, parent, child, unstarted, fresh} {
+			out[x.ID] = stateOf(t, s, x.ID)
+		}
+		return out
+	}
+	before := snapshot()
+	unchanged := func(label string, ids ...int64) {
+		t.Helper()
+		now := snapshot()
+		for _, id := range ids {
+			if now[id].State != before[id].State || len(now[id].Events) != len(before[id].Events) {
+				t.Fatalf("%s: task %d changed %s -> %s", label, id, before[id].State, now[id].State)
+			}
+		}
+	}
+
+	// Off by default: days 0 moves nothing.
+	if moved, err := s.SweepBacklog(ctx, 0, false); err != nil || len(moved) != 0 {
+		t.Fatalf("off: moved=%v err=%v", moved, err)
+	}
+	unchanged("off", idle.ID, flagged.ID, parent.ID, unstarted.ID, fresh.ID)
+
+	// The bound: 3650 days is accepted (nothing here is that idle); 3651 and
+	// 106752, where days*24h would overflow into a future cutoff, are refused
+	// and move nothing.
+	for _, tc := range []struct {
+		days int
+		ok   bool
+	}{{MaxBacklogIceboxDays, true}, {MaxBacklogIceboxDays + 1, false}, {106752, false}} {
+		for _, dryRun := range []bool{true, false} {
+			moved, err := s.SweepBacklog(ctx, tc.days, dryRun)
+			if (err == nil) != tc.ok || len(moved) != 0 {
+				t.Fatalf("days=%d dry_run=%t: moved=%v err=%v", tc.days, dryRun, moved, err)
+			}
+		}
+	}
+	unchanged("bounds", idle.ID, flagged.ID, parent.ID, unstarted.ID, fresh.ID)
+
+	// The dry run names the idle task and writes nothing.
+	preview, err := s.SweepBacklog(ctx, 14, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(preview) != 1 || preview[0].ID != idle.ID {
+		t.Fatalf("dry run %+v", preview)
+	}
+	unchanged("dry run", idle.ID, flagged.ID, parent.ID, unstarted.ID, fresh.ID)
+
+	moved, err := s.SweepBacklog(ctx, 14, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(moved) != 1 || moved[0].ID != idle.ID {
+		t.Fatalf("moved %+v", moved)
+	}
+	if got := stateOf(t, s, idle.ID).State; got != StateIcebox {
+		t.Fatalf("idle backlog -> %s", got)
+	}
+	rows := sourceRows(t, s, idle.ID, SourceSweep)
+	if len(rows) != 1 || !rows[0].Applied || rows[0].From != StateBacklog || rows[0].To != StateIcebox {
+		t.Fatalf("sweep rows %+v", rows)
+	}
+	unchanged("skips", flagged.ID, parent.ID, child.ID, unstarted.ID, fresh.ID)
+
+	// A second run finds nothing.
+	if again, err := s.SweepBacklog(ctx, 14, false); err != nil || len(again) != 0 {
+		t.Fatalf("second run moved=%v err=%v", again, err)
+	}
+}

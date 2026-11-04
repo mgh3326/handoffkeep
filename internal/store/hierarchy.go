@@ -488,6 +488,10 @@ func (s *Store) autoCloseTx(ctx context.Context, tx pgx.Tx, child Task, by strin
 		if err = s.recordLinearBoardTaskTx(ctx, tx, p, ""); err != nil {
 			return err
 		}
+		// Rule 8 holds on every path into merged, auto-close included.
+		if p, err = s.deployOnMergedTx(ctx, tx, p, now); err != nil {
+			return err
+		}
 		child = p
 	}
 	return nil
