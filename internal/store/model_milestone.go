@@ -143,11 +143,43 @@ func (p *MilestonePatch) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &fields); err != nil {
 		return err
 	}
-	if _, ok := fields["target_at"]; ok && !decoded.SetTarget {
+	_, hasTarget := fields["target_at"]
+	if hasTarget && !decoded.SetTarget {
 		return errors.New("target_at requires set_target")
+	}
+	// set_target without target_at would clear the date silently; a clear is
+	// an explicit "target_at": null.
+	if decoded.SetTarget && !hasTarget {
+		return errors.New("set_target requires target_at")
+	}
+	// null is not "unchanged" for these fields: refuse it so a client that
+	// means to clear one gets an error instead of a silent no-op.
+	for _, key := range []string{"project", "name", "description", "status", "sort_order"} {
+		if raw, ok := fields[key]; ok && bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+			return fmt.Errorf("%s must not be null", key)
+		}
 	}
 	*p = MilestonePatch(decoded)
 	return nil
+}
+
+// MarshalJSON sends "target_at": null when SetTarget clears the date, which
+// the omitempty tag would otherwise drop.
+func (p MilestonePatch) MarshalJSON() ([]byte, error) {
+	type patchAlias MilestonePatch
+	if !p.SetTarget || p.TargetAt != nil {
+		return json.Marshal(patchAlias(p))
+	}
+	encoded, err := json.Marshal(patchAlias(p))
+	if err != nil {
+		return nil, err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &fields); err != nil {
+		return nil, err
+	}
+	fields["target_at"] = json.RawMessage("null")
+	return json.Marshal(fields)
 }
 
 func (s *Store) PatchMilestone(ctx context.Context, id int64, p MilestonePatch) (ProjectMilestone, error) {
