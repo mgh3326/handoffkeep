@@ -199,7 +199,7 @@ describe("staleness — explicit threshold, deterministic buckets", () => {
     expect(stale.tasks.find((t) => t.priority >= 90)!.id).toBe(6130);
     const blocked = stale.tasks.filter((t) => t.blocker !== null);
     expect(blocked.map((t) => t.id)).toEqual([6150]);
-    expect(blocked[0].state).toBe("hold");
+    expect(blocked[0].state).toBe("icebox");
     const handoff = stale.tasks.find((t) => t.id === 6140)!;
     expect(handoff.events.map((e) => e.by)).toEqual(["synth-claim-1", "synth-claim-2", "synth-claim-3"]);
     expect(handoff.claimant).toBe("synth-claim-3");

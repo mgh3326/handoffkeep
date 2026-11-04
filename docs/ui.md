@@ -92,8 +92,10 @@ starts with `https://github.com/`; other values are rendered as text.
   `not_configured`, `invalid_pointer`, `manifest_missing`,
   `invalid_manifest`, or `ok`; beyond 200 items `truncated` is set.
 - `/ui/decisions` shows only unresolved items. The definitions are exact:
-  1. A task is shown when `state='needs_decision'`; its question is the `note`
-     from that task's latest `task_events` row with `to='needs_decision'`.
+  1. A task is shown when its `awaiting_decision` flag is set; its question is
+     the `note` from that task's latest `awaiting_decision` event that set the
+     flag (history written before the flag, a transition `to='needs_decision'`,
+     counts the same).
   2. A `job.escalate` relay event is *open* when no later-ID event with the
      same `job_id` has kind `job.joined`, `job.completed`, `job.lost`, or
      `job.revoked`, and no later
@@ -206,7 +208,7 @@ The hub returns `201` for an accepted event and `409` with
 `duplicate_event_id` for a duplicate; both are successful UI sends, while `409`
 is displayed as “already sent”. A `400`, `401`, `502`, timeout, or network
 failure is a lane-send failure. For a task answer only, a `201` or `409` is
-followed by `TransitionTask(..., "claimed", "operator:<email>", ...)`.
+followed by `ClearAwaitingDecision(..., "operator:<email>", ...)`.
 Therefore a failed emit never transitions the task. A conflict is shown as
 “already answered”; any other transition failure names the emitted event ID and
 asks for manual transition. Lane answers use `[decision-answered]` as described
@@ -232,12 +234,12 @@ producer label as a sender badge; other `reason` values remain hidden.
 
 `GET /ui/api/glance` is a `no-store` JSON snapshot for service clients. It
 contains the UTC generation time, sanitized hub health, raw hub `nodes`,
-`lanes`, and `jobs` data (with only per-node `active_jobs` added), seven task
-state totals, unresolved decisions, the newest 20 active tasks, and fixed
-console paths. `tasks.decisions_pending` counts generic `needs_decision` tasks
+`lanes`, and `jobs` data (with only per-node `active_jobs` added), task
+state totals (the eleven states plus `awaiting_decision`), unresolved decisions, the newest 20 active tasks, and fixed
+console paths. `tasks.decisions_pending` counts generic tasks with `awaiting_decision` set
 plus open `[decision-needed]` lane events; open disposition items are reported
 separately as `tasks.dispositions_open` and are not part of that sum.
-`tasks.by_state.needs_decision` remains the raw state tally and includes both. Hub setup, transport, decoding, and non-200 failures retain a
+`tasks.by_state.awaiting_decision` is the raw tally of flagged tasks and includes both. Hub setup, transport, decoding, and non-200 failures retain a
 200 response with empty hub arrays and only `unconfigured`, `unreachable`, or
 `status_<code>` as the health error. The body is capped at 256 KiB by dropping
 oldest entries from `tasks.active` and marking `truncated`.
@@ -261,10 +263,10 @@ the generic task cards or `mode=recommended`; glance reports them as
 routes refuse them before any hub emit. Origins and options are fixed at
 creation (transition refs patches touching `origin_pr`, `origin_task`, or
 `decision_options` are refused in every state), and re-asking
-(`→ needs_decision`) clears the previous answer.
+(setting the `awaiting_decision` flag again) clears the previous answer.
 
 - `POST /ui/dispositions/answer` (`id`, `gen`, `key`) records the answer first
-  (`needs_decision → claimed`, `by=operator:<email>`, `refs.disposition.answer`)
+  (flag cleared and state `researching`, `by=operator:<email>`, `refs.disposition.answer`)
   and then emits `[decision] #<id>: <key>: <label> (from operator(web) <email>)`
   with event ID `web-disposition-<id>-g<gen>`. A changed question generation is
   409; a second answer is 409 and emits nothing.
@@ -326,12 +328,12 @@ CSRF values.
 
 Use `handoffkeep decisions resolve <task|escalation|lane> <id> --by <lane>
 --answer <answer>` to close an answer made outside the console. It records a
-`cli-decision-<type>-<id>-<8 hex>` lane event and transitions a task to
-`claimed`. `--no-inject` marks that new event delivered as `resolve/<lane>`;
+`cli-decision-<type>-<id>-<8 hex>` lane event and, for a task, clears its
+`awaiting_decision` flag (the work state is unchanged). `--no-inject` marks that new event delivered as `resolve/<lane>`;
 without it, normal node injection sees the event as undelivered.
 
 The board's **운영자 필요만** preset mirrors the retired htmx operator view as a
 client-side filter only: the backlog column collapses to a count and other
-columns show nonterminal `decide` and `needs_decision` work. It narrows the
+columns show non-settled `decide` work and tasks with `awaiting_decision` set. It narrows the
 rendered cards, never the API response — `GET /ui/api/board/tasks` always
 returns the complete task set for the requested lane.

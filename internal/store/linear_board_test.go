@@ -48,7 +48,7 @@ func TestPlacementValidation(t *testing.T) {
 func TestWorkBoardEventOrderingAndPlacement(t *testing.T) {
 	at := time.Now().UTC()
 	var b LinearBoard
-	task := Task{ID: 1, State: "claimed", Refs: TaskRefs{JobID: "board-job"}}
+	task := Task{ID: 1, State: "developing", Refs: TaskRefs{JobID: "board-job"}}
 	b.ApplyTask(task)
 	d := validPlacementFixture()
 	b.ApplyPlacement(d)
@@ -180,7 +180,7 @@ func TestWorkBoardCommittedEventsAndPlacementRetention(t *testing.T) {
 func TestWorkBoardTerminalBeforePlacementAndLateJob(t *testing.T) {
 	at := time.Now().UTC()
 	var b LinearBoard
-	b.ApplyTask(Task{ID: 1, State: "claimed", UpdatedAt: at})
+	b.ApplyTask(Task{ID: 1, State: "developing", UpdatedAt: at})
 	b.ApplyEvent(LinearBoardEvent{Kind: "FINDINGS", Text: "2 findings: changes requested", At: at.Add(time.Minute)}, "review-job", "", "")
 	d := validPlacementFixture()
 	d.JobID = "review-job"
@@ -213,7 +213,7 @@ func TestWorkBoardMergewakeProtocolAndPRReferences(t *testing.T) {
 		t.Fatal(event, job, ok)
 	}
 	var b LinearBoard
-	b.ApplyTask(Task{ID: 1, State: "claimed", Refs: TaskRefs{PR: "https://github.com/owner/handoffkeep/pull/12"}})
+	b.ApplyTask(Task{ID: 1, State: "developing", Refs: TaskRefs{PR: "https://github.com/owner/handoffkeep/pull/12"}})
 	d := validPlacementFixture()
 	d.Role = "review"
 	b.ApplyPlacement(d)
@@ -223,7 +223,7 @@ func TestWorkBoardMergewakeProtocolAndPRReferences(t *testing.T) {
 		t.Fatal(b)
 	}
 	b.ApplyEvent(LinearBoardEvent{Kind: "MERGED", At: event.At.Add(time.Minute)}, job, event.PR, "")
-	b.ApplyTask(Task{ID: 1, State: "in_progress", Refs: b.Task.Refs})
+	b.ApplyTask(Task{ID: 1, State: "developing", Refs: b.Task.Refs})
 	if b.State != "Done" {
 		t.Fatal("task metadata reopened merged issue", b)
 	}
@@ -314,7 +314,7 @@ func TestWorkBoardMergewakeEventsDoNotCreateSessions(t *testing.T) {
 		t.Run(kind, func(t *testing.T) {
 			at := time.Now().UTC()
 			var board LinearBoard
-			board.ApplyTask(Task{ID: 1, State: "claimed"})
+			board.ApplyTask(Task{ID: 1, State: "developing"})
 			placement := validPlacementFixture()
 			placement.JobID = "review-job"
 			placement.Role = "review"
@@ -421,7 +421,7 @@ func TestWorkBoardReconcileSkipsUnchangedTerminalTasks(t *testing.T) {
 func TestWorkBoardFindingsPreserveCompletedReviewPass(t *testing.T) {
 	at := time.Now().UTC()
 	var board LinearBoard
-	board.ApplyTask(Task{ID: 1, State: "claimed"})
+	board.ApplyTask(Task{ID: 1, State: "developing"})
 	first := validPlacementFixture()
 	first.JobID = "review-first"
 	first.Role = "review"

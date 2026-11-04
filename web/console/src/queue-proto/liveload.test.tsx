@@ -511,11 +511,11 @@ describe("FleetApp machine/session view", () => {
 });
 
 describe("live view = the working set only (N-5)", () => {
-  it("claimed · in_progress · verifying pass; everything else is filtered", () => {
-    const states = ["claimed", "in_progress", "verifying", "backlog", "hold", "join", "needs_decision", "merged", "dropped"];
+  it("researching · developing · reviewing pass; everything else is filtered", () => {
+    const states = ["researching", "developing", "reviewing", "backlog", "icebox", "unstarted", "merged", "dropped"];
     const tasks = states.map((state, i) => mkTask({ id: 100 + i, state }));
     const visible = applyView(tasks, { view: "live", filters: EMPTY_FILTERS });
-    expect(visible.map((t) => t.state).sort()).toEqual(["claimed", "in_progress", "verifying"]);
+    expect(visible.map((t) => t.state).sort()).toEqual(["developing", "researching", "reviewing"]);
   });
 });
 

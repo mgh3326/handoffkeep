@@ -238,24 +238,19 @@ func DispositionQuestion(refs TaskRefs, note string) string {
 	return text
 }
 
-// dispositionNoJobReason marks the claimed/in_progress hops a disposition
-// item makes. These items are operator-only decide tasks that never carry a
+// dispositionNoJobReason marks the entry into a started state that a
+// disposition item makes when the operator answers. These items are operator-only decide tasks that never carry a
 // job, so the recorded reason is fixed to the path itself.
 const dispositionNoJobReason = "disposition item; no job link"
 
 func insertTaskEvent(ctx context.Context, tx pgx.Tx, id int64, from, to, by, note string, refs TaskRefs, at time.Time, noJob string) (int64, error) {
-	encoded, err := json.Marshal(refs)
-	if err != nil {
-		return 0, err
-	}
-	var eventID int64
-	err = tx.QueryRow(ctx, `INSERT INTO task_events(task_id,"from","to","by",note,refs,at,no_job) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,$8) RETURNING id`, id, from, to, by, note, string(encoded), at, noJob).Scan(&eventID)
+	eventID, _, err := insertEvent(ctx, tx, taskEventInput{TaskID: id, From: from, To: to, By: by, Note: note, Refs: refs, At: at, NoJob: noJob})
 	return eventID, err
 }
 
-// CreateDisposition creates at most one open (needs_decision) item per origin.
-// The row passes backlog -> claimed -> needs_decision inside one transaction,
-// so it is never observable in backlog and NextTask can never claim it.
+// CreateDisposition creates at most one open (awaiting_decision) item per
+// origin. The row is born in backlog with the awaiting_decision flag set, so
+// it is never observable unflagged and NextTask can never claim it.
 // created=false returns the already open item for the same origin.
 func (s *Store) CreateDisposition(ctx context.Context, in DispositionInput) (Task, bool, error) {
 	if !validName(in.Lane) || strings.TrimSpace(in.Title) == "" || !validText(in.Title, MaxBytes) || in.CreatedBy == "" || !validText(in.CreatedBy, 128) || !validText(in.Note, 512) {
@@ -308,12 +303,12 @@ func (s *Store) CreateDisposition(ctx context.Context, in DispositionInput) (Tas
 			}
 			return Task{}, false, err
 		}
-		if parentState != "merged" && parentState != "dropped" {
+		if !IsSettledState(parentState) {
 			return Task{}, false, errors.New("invalid disposition: origin task is not terminal")
 		}
 	}
 	var existing Task
-	err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE state='needs_decision' AND refs ? 'disposition'
+	err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE awaiting_decision AND refs ? 'disposition'
 		AND (($1 <> '' AND refs->>'origin_pr' = $1) OR ($2 > 0 AND refs->>'origin_task' = $2::text)) ORDER BY id LIMIT 1`, in.OriginPR, in.OriginTask), &existing)
 	if err == nil {
 		return existing, false, tx.Commit(ctx)
@@ -326,15 +321,12 @@ func (s *Store) CreateDisposition(ctx context.Context, in DispositionInput) (Tas
 		return Task{}, false, err
 	}
 	var x Task
-	if err = scanTask(tx.QueryRow(ctx, `INSERT INTO tasks(lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at,project) VALUES($1,'',$2,'decide','needs_decision',0,$3::jsonb,$4,$4,$5,$5,$6) RETURNING `+taskColumns, in.Lane, in.Title, string(encoded), in.CreatedBy, now, in.Project), &x); err != nil {
+	if err = scanTask(tx.QueryRow(ctx, `INSERT INTO tasks(lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at,project,awaiting_decision) VALUES($1,'',$2,'decide','backlog',0,$3::jsonb,$4,$4,$5,$5,$6,true) RETURNING `+taskColumns, in.Lane, in.Title, string(encoded), in.CreatedBy, now, in.Project), &x); err != nil {
 		return Task{}, false, err
 	}
-	// The legal path is recorded explicitly so the event history never shows
-	// an edge the transition table does not allow.
-	if _, err = insertTaskEvent(ctx, tx, x.ID, "backlog", "claimed", in.CreatedBy, "disposition:create", refs, now, dispositionNoJobReason); err != nil {
-		return Task{}, false, err
-	}
-	if _, err = insertTaskEvent(ctx, tx, x.ID, "claimed", "needs_decision", in.CreatedBy, question, refs, now, ""); err != nil {
+	// The awaiting event carries the question; its id is the item's
+	// generation, which an operator answer must quote.
+	if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: x.ID, Kind: TaskEventAwaiting, From: StateBacklog, To: StateBacklog, By: in.CreatedBy, Note: question, Refs: refs, At: now, Field: "awaiting_decision", FromValue: "false", ToValue: "true"}); err != nil {
 		return Task{}, false, err
 	}
 	return x, true, tx.Commit(ctx)
@@ -344,7 +336,7 @@ func dispositionGen(ctx context.Context, q interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
 }, id int64) (int64, error) {
 	var gen int64
-	err := q.QueryRow(ctx, `SELECT id FROM task_events WHERE task_id=$1 AND kind='transition' AND "to"='needs_decision' ORDER BY at DESC,id DESC LIMIT 1`, id).Scan(&gen)
+	err := q.QueryRow(ctx, `SELECT id FROM task_events WHERE task_id=$1 AND `+awaitingEventSQL+` ORDER BY at DESC,id DESC LIMIT 1`, id).Scan(&gen)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, nil
 	}
@@ -382,7 +374,7 @@ func (s *Store) answerDispositionTx(ctx context.Context, tx pgx.Tx, in Dispositi
 	if x.Refs.Disposition == nil {
 		return x, "not_disposition", nil
 	}
-	if x.State != "needs_decision" {
+	if !x.AwaitingDecision {
 		return x, "already_answered", nil
 	}
 	gen, err := dispositionGen(ctx, tx, in.ID)
@@ -402,18 +394,22 @@ func (s *Store) answerDispositionTx(ctx context.Context, tx pgx.Tx, in Dispositi
 	}
 	now := time.Now().UTC()
 	x.Refs.Disposition.Answer = &DispositionAnswer{Key: key, By: "operator:" + in.OperatorEmail, EventID: in.EventID, BatchID: in.BatchID, Gen: gen, At: now}
-	encoded, err := json.Marshal(x.Refs)
-	if err != nil {
-		return Task{}, "", err
-	}
-	if err = scanTask(tx.QueryRow(ctx, `UPDATE tasks SET state='claimed',refs=$2::jsonb,updated_at=$3 WHERE id=$1 RETURNING `+taskColumns, in.ID, string(encoded), now), &x); err != nil {
+	// An answered item is started work waiting for the director to apply it:
+	// researching, the decide kind's sub-state.
+	from := x.State
+	x.State, x.AwaitingDecision, x.UpdatedAt = StateResearching, false, now
+	applyLifecycle(&x, from, StateResearching, now)
+	if x, err = writeTaskTx(ctx, tx, x); err != nil {
 		return Task{}, "", err
 	}
 	note := fmt.Sprintf("disposition-answer %s: %s gen=%d", key, label, gen)
 	if in.BatchID != "" {
 		note += " batch=" + in.BatchID
 	}
-	if _, err = insertTaskEvent(ctx, tx, in.ID, "needs_decision", "claimed", "operator:"+in.OperatorEmail, note, x.Refs, now, dispositionNoJobReason); err != nil {
+	if _, err = insertTaskEvent(ctx, tx, in.ID, from, StateResearching, "operator:"+in.OperatorEmail, note, x.Refs, now, dispositionNoJobReason); err != nil {
+		return Task{}, "", err
+	}
+	if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: in.ID, Kind: TaskEventAwaiting, From: StateResearching, To: StateResearching, By: "operator:" + in.OperatorEmail, Note: note, Refs: x.Refs, At: now, Field: "awaiting_decision", FromValue: "true", ToValue: "false"}); err != nil {
 		return Task{}, "", err
 	}
 	return x, "", nil
@@ -424,7 +420,7 @@ func validAnswerIdentity(email, eventID, batchID string) bool {
 }
 
 // AnswerDisposition records one operator answer. It is the only single-item
-// path out of needs_decision for a disposition item.
+// path out of the awaiting_decision flag for a disposition item.
 func (s *Store) AnswerDisposition(ctx context.Context, in DispositionAnswerInput) (Task, error) {
 	if in.ID < 1 || in.Gen < 1 || !validAnswerIdentity(in.OperatorEmail, in.EventID, in.BatchID) {
 		return Task{}, errors.New("invalid disposition answer")
@@ -508,7 +504,8 @@ func (s *Store) AnswerDispositionBatch(ctx context.Context, refs []DispositionRe
 
 // ApplyDisposition records that the director applied the operator's answer.
 // It uses only legal transition-table edges, in one transaction:
-// A/B/C claimed->in_progress->join->merged, D claimed->hold, E claimed->dropped.
+// A/B/C researching->reviewing->merged, D researching->icebox, E
+// researching->dropped.
 func (s *Store) ApplyDisposition(ctx context.Context, id int64, by, note string) (Task, error) {
 	if id < 1 || by == "" || !validText(by, 128) || !validText(note, 512) {
 		return Task{}, errors.New("invalid disposition apply")
@@ -535,17 +532,17 @@ func (s *Store) ApplyDisposition(ctx context.Context, id int64, by, note string)
 	if err := s.wrkTaskFenceTx(ctx, tx, x, DispositionTarget(x), false); err != nil {
 		return Task{}, err
 	}
-	if x.Refs.Disposition == nil || x.Refs.Disposition.Answer == nil || x.State != "claimed" {
+	if x.Refs.Disposition == nil || x.Refs.Disposition.Answer == nil || x.State != StateResearching || x.AwaitingDecision {
 		return Task{}, ErrTaskConflict
 	}
 	var hops []string
 	switch x.Refs.Disposition.Answer.Key {
 	case "A", "B", "C":
-		hops = []string{"in_progress", "join", "merged"}
+		hops = []string{StateReviewing, StateMerged}
 	case "D":
-		hops = []string{"hold"}
+		hops = []string{StateIcebox}
 	default:
-		hops = []string{"dropped"}
+		hops = []string{StateDropped}
 	}
 	text := "disposition:apply " + x.Refs.Disposition.Answer.Key
 	if strings.TrimSpace(note) != "" {
@@ -557,16 +554,15 @@ func (s *Store) ApplyDisposition(ctx context.Context, id int64, by, note string)
 		if !taskTransitionAllowed(from, to) {
 			return Task{}, ErrTaskConflict
 		}
-		hopNoJob := ""
-		if to == "claimed" || to == "in_progress" {
-			hopNoJob = dispositionNoJobReason
-		}
-		if _, err = insertTaskEvent(ctx, tx, id, from, to, by, text, x.Refs, now, hopNoJob); err != nil {
+		if _, err = insertTaskEvent(ctx, tx, id, from, to, by, text, x.Refs, now, ""); err != nil {
 			return Task{}, err
 		}
 		from = to
 	}
-	if err = scanTask(tx.QueryRow(ctx, `UPDATE tasks SET state=$2,updated_at=$3 WHERE id=$1 RETURNING `+taskColumns, id, from, now), &x); err != nil {
+	start := x.State
+	x.State, x.UpdatedAt = from, now
+	applyLifecycle(&x, start, from, now)
+	if x, err = writeTaskTx(ctx, tx, x); err != nil {
 		return Task{}, err
 	}
 	return x, tx.Commit(ctx)
@@ -578,14 +574,14 @@ func DispositionTarget(x Task) string {
 	if x.Refs.Disposition != nil && x.Refs.Disposition.Answer != nil {
 		switch x.Refs.Disposition.Answer.Key {
 		case "A", "B", "C":
-			return "merged"
+			return StateMerged
 		case "D":
-			return "hold"
+			return StateIcebox
 		default:
-			return "dropped"
+			return StateDropped
 		}
 	}
-	return "merged"
+	return StateMerged
 }
 
 type OpenDisposition struct {
@@ -600,9 +596,9 @@ func (s *Store) ListOpenDispositions(ctx context.Context, limit int) ([]OpenDisp
 		limit = 1000
 	}
 	rows, err := s.pool.Query(ctx, `SELECT `+prefixedTaskColumns("t")+`,
-		COALESCE((SELECT id FROM task_events WHERE task_id=t.id AND kind='transition' AND "to"='needs_decision' ORDER BY at DESC,id DESC LIMIT 1),0),
-		COALESCE((SELECT note FROM task_events WHERE task_id=t.id AND kind='transition' AND "to"='needs_decision' ORDER BY at DESC,id DESC LIMIT 1),'')
-		FROM tasks t WHERE t.state='needs_decision' AND t.refs ? 'disposition' ORDER BY t.created_at ASC,t.id ASC LIMIT $1`, limit)
+		COALESCE((SELECT id FROM task_events WHERE task_id=t.id AND `+awaitingEventSQL+` ORDER BY at DESC,id DESC LIMIT 1),0),
+		COALESCE((SELECT note FROM task_events WHERE task_id=t.id AND `+awaitingEventSQL+` ORDER BY at DESC,id DESC LIMIT 1),'')
+		FROM tasks t WHERE t.awaiting_decision AND t.refs ? 'disposition' ORDER BY t.created_at ASC,t.id ASC LIMIT $1`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -629,16 +625,16 @@ func prefixedTaskColumns(alias string) string {
 // CountNeedsDecision splits pending decisions, in one statement, into
 // generic decisions and disposition items. The two are reported side by side,
 // never summed. Generic decisions are the Decisions page's two task sources:
-// needs_decision tasks without an open structured request, plus open
+// awaiting_decision tasks without an open structured request, plus open
 // structured requests on non-terminal tasks in any state (#618) — the same
 // pending figure the queue shows. Uncleaned requests on merged/dropped tasks
 // are not pending decisions and are not counted here.
 func (s *Store) CountNeedsDecision(ctx context.Context) (decisions, dispositions int, err error) {
 	err = s.pool.QueryRow(ctx, `SELECT
-		COUNT(*) FILTER (WHERE state='needs_decision' AND NOT (refs ? 'disposition') AND COALESCE(refs->'decision_request'->>'status','')<>'open')
-		+ COUNT(*) FILTER (WHERE refs->'decision_request'->>'status'='open' AND state NOT IN ('merged','dropped')),
-		COUNT(*) FILTER (WHERE state='needs_decision' AND refs ? 'disposition')
-		FROM tasks WHERE state='needs_decision' OR refs->'decision_request'->>'status'='open'`).Scan(&decisions, &dispositions)
+		COUNT(*) FILTER (WHERE awaiting_decision AND NOT (refs ? 'disposition') AND COALESCE(refs->'decision_request'->>'status','')<>'open')
+		+ COUNT(*) FILTER (WHERE refs->'decision_request'->>'status'='open' AND state NOT IN (`+settledStatesSQL+`)),
+		COUNT(*) FILTER (WHERE awaiting_decision AND refs ? 'disposition')
+		FROM tasks WHERE awaiting_decision OR refs->'decision_request'->>'status'='open'`).Scan(&decisions, &dispositions)
 	return decisions, dispositions, err
 }
 
@@ -715,7 +711,8 @@ func (s *Store) DispositionSummary(ctx context.Context, asOf time.Time) (Disposi
 	out := DispositionSummary{AsOf: asOf, OldestOpenDays: -1, OldestPendingApplyDay: -1}
 	rows, err := s.pool.Query(ctx, `SELECT t.id, t.created_at, t.refs,
 		(SELECT e."to" FROM task_events e WHERE e.task_id=t.id AND e.kind='transition' AND e.at<=$1 ORDER BY e.at DESC, e.id DESC LIMIT 1),
-		(SELECT e.at FROM task_events e WHERE e.task_id=t.id AND e.kind='transition' AND e.at<=$1 ORDER BY e.at DESC, e.id DESC LIMIT 1)
+		(SELECT e.at FROM task_events e WHERE e.task_id=t.id AND e.kind='transition' AND e.at<=$1 ORDER BY e.at DESC, e.id DESC LIMIT 1),
+		(SELECT e.to_value FROM task_events e WHERE e.task_id=t.id AND e.kind='awaiting_decision' AND e.at<=$1 ORDER BY e.at DESC, e.id DESC LIMIT 1)
 		FROM tasks t WHERE t.refs ? 'disposition' AND t.created_at<=$1 ORDER BY t.created_at ASC, t.id ASC`, asOf)
 	if err != nil {
 		return out, err
@@ -726,9 +723,9 @@ func (s *Store) DispositionSummary(ctx context.Context, asOf time.Time) (Disposi
 		var id int64
 		var created time.Time
 		var rawRefs []byte
-		var state *string
+		var state, awaiting *string
 		var at *time.Time
-		if err := rows.Scan(&id, &created, &rawRefs, &state, &at); err != nil {
+		if err := rows.Scan(&id, &created, &rawRefs, &state, &at, &awaiting); err != nil {
 			return out, err
 		}
 		if out.CoverageEpoch == nil {
@@ -738,18 +735,22 @@ func (s *Store) DispositionSummary(ctx context.Context, asOf time.Time) (Disposi
 		if state == nil {
 			continue
 		}
-		switch *state {
-		case "needs_decision":
+		// History keeps both vocabularies: a task is open when its newest
+		// awaiting event set the flag or its newest transition entered the old
+		// needs_decision state.
+		open := (awaiting != nil && *awaiting == "true") || *state == legacyNeedsDecision
+		switch {
+		case open:
 			out.Open++
 			if days := int(asOf.Sub(created) / (24 * time.Hour)); days > out.OldestOpenDays || (days == out.OldestOpenDays && created.Before(*out.OldestOpenSince)) {
 				out.OldestOpenDays, out.OldestOpenID, out.OldestOpenSince = days, id, &created
 			}
-		case "claimed", "in_progress", "join":
+		case *state == legacyClaimed || *state == legacyInProgress || *state == legacyJoin || *state == StateResearching || *state == StateDeveloping || *state == StateReviewing:
 			out.PendingApply++
 			if days := int(asOf.Sub(*at) / (24 * time.Hour)); days > out.OldestPendingApplyDay {
 				out.OldestPendingApplyDay = days
 			}
-		case "hold":
+		case *state == legacyHold || *state == StateIcebox:
 			out.Held++
 		}
 		var refs TaskRefs

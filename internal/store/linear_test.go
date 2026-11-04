@@ -51,15 +51,12 @@ func TestLinearStateMappingIsCompleteAndSafe(t *testing.T) {
 			t.Errorf("missing mapping for %s", state)
 		}
 	}
-	nonterminal := []string{"backlog", "reopened", "claimed", "in_progress", "verifying", "join", "hold", "needs_decision"}
+	nonterminal := []string{"triage", "backlog", "unstarted", "researching", "developing", "reviewing"}
 	for _, state := range nonterminal {
 		mapping := LinearTaskStateMapping[state]
 		if mapping.Terminal || mapping.Name == "Done" || mapping.Name == "Canceled" {
 			t.Errorf("nonterminal %s maps to terminal %+v", state, mapping)
 		}
-	}
-	if mapping := LinearTaskStateMapping["needs_decision"]; mapping.Mutate || mapping.Name != "" {
-		t.Fatalf("needs_decision must not mutate Linear: %+v", mapping)
 	}
 }
 
@@ -116,7 +113,7 @@ func TestLinearOutboxMutationAtomicity(t *testing.T) {
 		t.Fatalf("task mutation escaped rollback: before=%+v after=%+v", before, after)
 	}
 	rows, err = st.ListLinearOutbox(t.Context(), task.ID)
-	if err != nil || len(rows) != 3 {
+	if err != nil || len(rows) != 2 {
 		t.Fatalf("outbox escaped rollback: rows=%+v err=%v", rows, err)
 	}
 	if _, err = connection.Exec(t.Context(), "DROP TRIGGER "+triggerName+" ON linear_outbox"); err != nil {
@@ -207,7 +204,7 @@ func TestLinearCreateAndTerminalPayloads(t *testing.T) {
 		}
 	}
 	rows, err = st.ListLinearOutbox(t.Context(), task.ID)
-	if err != nil || len(rows) != 6 {
+	if err != nil || len(rows) != 5 {
 		t.Fatalf("terminal rows=%+v err=%v", rows, err)
 	}
 	last := rows[len(rows)-2:]
@@ -233,7 +230,7 @@ func TestLinearTransitionMergesNestedRefs(t *testing.T) {
 	if _, err := st.ClaimTask(t.Context(), task.ID, "builder", "job-1", ""); err != nil {
 		t.Fatal(err)
 	}
-	updated, err := st.TransitionTask(t.Context(), task.ID, "in_progress", "builder", "partial metadata", &TaskRefs{
+	updated, err := st.TransitionTask(t.Context(), task.ID, "reviewing", "builder", "partial metadata", &TaskRefs{
 		Linear: &TaskLinear{Report: "report/updated"},
 	}, "")
 	if err != nil {

@@ -202,11 +202,11 @@ func leadTime(ix *index) LeadTime {
 	for _, id := range sortedIDs(ix) {
 		t := ix.tasks[id]
 		term := terminalAt(t)
-		if t.State == "merged" && term != nil && inWindow(*term, ix.snap) {
+		if isMerged(t.State) && term != nil && inWindow(*term, ix.snap) {
 			out.Completed++
 			pop.Total++
 			prLink.Total++
-			order := firstTo(t, "claimed")
+			order := firstStart(t)
 			prs := ix.leadTimePRs(t)
 			if len(prs) > 0 {
 				prLink.Linked++
@@ -277,17 +277,17 @@ func leadTime(ix *index) LeadTime {
 			} else {
 				mergeOnly = append(mergeOnly, hours(d))
 			}
-			if v := firstTo(t, "verifying"); v != nil && !v.At.Before(order.At) && !merged.Before(v.At) {
+			if v := firstReview(t); v != nil && !v.At.Before(order.At) && !merged.Before(v.At) {
 				phases["implement"] = append(phases["implement"], hours(v.At.Sub(order.At)))
 				phases["verify_fix"] = append(phases["verify_fix"], hours(merged.Sub(v.At)))
 			}
-			phases["decision_wait"] = append(phases["decision_wait"], hours(timeIn(t, "needs_decision", order.At, *merged)))
+			phases["decision_wait"] = append(phases["decision_wait"], hours(waitTime(t, order.At, *merged)))
 			if group == "deploy" {
 				phases["install"] = append(phases["install"], hours(usable.Sub(*merged)))
 			}
 		}
-		if t.State != "merged" && t.State != "dropped" && t.State != "backlog" && t.State != "reopened" {
-			if order := firstTo(t, "claimed"); order != nil {
+		if isOpenWork(t.State) {
+			if order := firstStart(t); order != nil {
 				out.OpenCount++
 				open = append(open, hours(ix.snap.Until.Sub(order.At)))
 			} else {
@@ -316,6 +316,28 @@ func timeIn(t *store.Task, state string, from, to time.Time) time.Duration {
 			at := e.At
 			enter = &at
 		} else if e.From == state && e.To != state && enter != nil {
+			total += overlap(*enter, e.At, from, to)
+			enter = nil
+		}
+	}
+	if enter != nil {
+		total += overlap(*enter, to, from, to)
+	}
+	return total
+}
+
+// waitTime is the time a task spent waiting on a decision inside [from, to],
+// across both vocabularies: the awaiting_decision flag and, in history, the
+// old needs_decision state.
+func waitTime(t *store.Task, from, to time.Time) time.Duration {
+	var total time.Duration
+	var enter *time.Time
+	for _, e := range t.Events {
+		switch {
+		case startsWait(e) && enter == nil:
+			at := e.At
+			enter = &at
+		case endsWait(e) && enter != nil:
 			total += overlap(*enter, e.At, from, to)
 			enter = nil
 		}
@@ -383,10 +405,10 @@ func rounds(ix *index) Rounds {
 				if !stateEvent(e) {
 					continue
 				}
-				if e.To == "verifying" {
+				if isReview(e.To) {
 					n++
 				}
-				if e.From == "verifying" && e.To == "in_progress" {
+				if isReview(e.From) && isRework(e.To) {
 					out.FixRounds++
 					causeCov.Total++
 					tagged := ""
@@ -577,7 +599,7 @@ func readyMinutes(ix *index, start time.Time, minutes int) []int {
 	for _, t := range ix.tasks {
 		for m := 0; m < minutes; m++ {
 			switch stateAt(t, start.Add(time.Duration(m)*time.Minute)) {
-			case "backlog", "reopened":
+			case store.StateBacklog, store.StateUnstarted, oldReopened:
 				out[m]++
 			case "?":
 				unknown[m] = true
@@ -818,11 +840,13 @@ func decisionAnswerEvent(ix *index, kind string, id int64, lane string, after ti
 func decisions(ix *index) Decisions {
 	out := Decisions{ByKind: map[string]int{}, AnsweredBy: map[string]int{}, PerKind: map[string]*Dist{}}
 	var reqs []decisionReq
-	// (a) task decisions: every entry into needs_decision.
+	// (a) task decisions: every wait on a decision, whether it began as the
+	// awaiting_decision flag or, in history, as a transition into the old
+	// needs_decision state.
 	for _, id := range sortedIDs(ix) {
 		t := ix.tasks[id]
 		for i, e := range t.Events {
-			if !stateEvent(e) || e.To != "needs_decision" {
+			if !startsWait(e) {
 				continue
 			}
 			q := decisionReq{kind: "task", ref: "task#" + strconv.FormatInt(id, 10), at: e.At}
@@ -831,7 +855,7 @@ func decisions(ix *index) Decisions {
 			}
 			for k := i + 1; k < len(t.Events); k++ {
 				a := t.Events[k]
-				if !stateEvent(a) || a.From != "needs_decision" {
+				if !endsWait(a) {
 					continue
 				}
 				at := a.At
@@ -1038,10 +1062,10 @@ func normalPath(ix *index) Normal {
 		t := ix.tasks[id]
 		term := terminalAt(t)
 		if term == nil || !inWindow(*term, ix.snap) {
-			if term == nil && t.State != "backlog" && t.State != "reopened" {
+			if term == nil && isOpenWork(t.State) {
 				if sig, _ := ix.repairSignals(id); len(sig) > 0 {
 					out.OpenRepaired++
-					if order := firstTo(t, "claimed"); order != nil {
+					if order := firstStart(t); order != nil {
 						age := round2(hours(ix.snap.Until.Sub(order.At)))
 						if out.OpenOldest == nil || age > *out.OpenOldest {
 							out.OpenOldest = &age
@@ -1053,7 +1077,7 @@ func normalPath(ix *index) Normal {
 		}
 		out.Terminal++
 		cov.Total++
-		if t.State == "dropped" {
+		if isDropped(t.State) {
 			out.Dropped++
 		}
 		sig, history := ix.repairSignals(id)
@@ -1075,7 +1099,7 @@ func normalPath(ix *index) Normal {
 			}
 			continue
 		}
-		if t.State == "merged" {
+		if isMerged(t.State) {
 			out.NormalPath++
 		}
 	}

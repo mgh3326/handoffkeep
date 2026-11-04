@@ -36,8 +36,8 @@ func TestTaskReopenAPI(t *testing.T) {
 				t.Fatalf("reread task: ok=%v err=%v", ok, err)
 			}
 			last := got.Events[len(got.Events)-1]
-			if last.To != "reopened" || last.By != "tester" || last.Note != "reverted" {
-				t.Fatalf("reopen caller binding: to=%q by=%q note=%q, want reopened/tester/reverted", last.To, last.By, last.Note)
+			if last.To != "unstarted" || last.By != "tester" || last.Note != "reverted" {
+				t.Fatalf("reopen caller binding: to=%q by=%q note=%q, want unstarted/tester/reverted", last.To, last.By, last.Note)
 			}
 		}
 	}

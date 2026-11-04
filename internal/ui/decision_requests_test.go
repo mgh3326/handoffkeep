@@ -46,9 +46,9 @@ func TestDecisionViewStates(t *testing.T) {
 		taskState string
 		want      string
 	}{
-		{"no deadline", open, "in_progress", store.DecisionViewOpen},
+		{"no deadline", open, "developing", store.DecisionViewOpen},
 		{"future deadline", func() store.DecisionRequest { r := open; r.DueAt = &future; return r }(), "backlog", store.DecisionViewOpen},
-		{"past deadline", func() store.DecisionRequest { r := open; r.DueAt = &past; return r }(), "in_progress", store.DecisionViewOverdue},
+		{"past deadline", func() store.DecisionRequest { r := open; r.DueAt = &past; return r }(), "developing", store.DecisionViewOverdue},
 		{"merged open", open, "merged", store.DecisionViewUncleaned},
 		{"dropped past deadline", func() store.DecisionRequest { r := open; r.DueAt = &past; return r }(), "dropped", store.DecisionViewUncleaned},
 		{"applied with receipt", func() store.DecisionRequest {
@@ -56,7 +56,7 @@ func TestDecisionViewStates(t *testing.T) {
 			r.Status = store.DecisionRequestDefaultApplied
 			r.Resolution = &store.DecisionResolution{Kind: store.DecisionRequestDefaultApplied, Receipt: "hk:doc r"}
 			return r
-		}(), "in_progress", store.DecisionViewDefaultApplied},
+		}(), "developing", store.DecisionViewDefaultApplied},
 		{"answered on merged", func() store.DecisionRequest {
 			r := open
 			r.Status = store.DecisionRequestAnswered

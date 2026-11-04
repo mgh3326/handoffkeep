@@ -66,8 +66,8 @@ func (s *Store) ListLatestQuota(ctx context.Context, limit int) ([]QuotaAccountL
 // reports that more rows exist.
 func (s *Store) ListDashboardTasks(ctx context.Context, limit int) ([]Task, bool, error) {
 	rows, err := s.pool.Query(ctx, `SELECT `+taskColumns+` FROM tasks
-		WHERE state IN ('claimed','in_progress','verifying','join')
-		   OR (state NOT IN ('merged','dropped') AND COALESCE(refs->>'pr','') <> '')
+		WHERE state IN (`+startedStatesSQL+`)
+		   OR (state NOT IN (`+settledStatesSQL+`) AND COALESCE(refs->>'pr','') <> '')
 		ORDER BY updated_at DESC,id DESC LIMIT $1`, limit+1)
 	if err != nil {
 		return nil, false, err

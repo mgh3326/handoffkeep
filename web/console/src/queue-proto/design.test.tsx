@@ -50,7 +50,7 @@ function liveDataset(tasks: BoardTask[], completeness: Dataset["completeness"] =
     generatedAt: "2026-09-21T14:20:00+09:00",
     completeness,
     completenessNote: "live",
-    // server-provided enumeration: the canonical nine plus any server-only state
+    // server-provided enumeration: the canonical eleven plus any server-only state
     states: [...new Set([...KNOWN_STATES, ...tasks.map((t) => t.state)])],
     tasks: tasks.map(boardTaskToProto),
     enrichment: {},
@@ -157,7 +157,7 @@ function contrast(a: string, b: string): number {
 describe("token contrast — text 4.5:1, required non-text 3:1", () => {
   const surfaces = ["--hk-surface-0", "--hk-surface-1", "--hk-surface-2", "--hk-surface-selected"];
   const text = ["--hk-text-primary", "--hk-text-secondary", "--hk-text-muted", "--hk-accent", "--hk-warning", "--hk-danger", "--hk-success"];
-  const states = ["backlog", "claimed", "in-progress", "verifying", "join", "hold", "needs-decision", "merged", "dropped"].map((s) => `--hk-state-${s}`);
+  const states = ["triage", "backlog", "unstarted", "researching", "developing", "reviewing", "merged", "deployed", "dropped", "duplicate", "icebox"].map((s) => `--hk-state-${s}`);
   for (const theme of ["dark", "light"] as const) {
     it(`${theme}: every text and state color clears 4.5:1 on every surface`, () => {
       const v = themeValues(theme);
@@ -284,16 +284,16 @@ describe("(d) default row density is 40px · 1 line", () => {
 describe("state-grouped list structure", () => {
   const tasks = [
     mkBoardTask({ id: 1, state: "backlog", priority: 5 }),
-    mkBoardTask({ id: 2, state: "needs_decision", priority: 94 }),
-    mkBoardTask({ id: 3, state: "needs_decision", priority: 10 }),
-    mkBoardTask({ id: 4, state: "in_progress", priority: 50 }),
+    mkBoardTask({ id: 2, state: "developing", awaiting_decision: true, priority: 94 }),
+    mkBoardTask({ id: 3, state: "developing", awaiting_decision: true, priority: 10 }),
+    mkBoardTask({ id: 4, state: "developing", priority: 50 }),
     mkBoardTask({ id: 5, state: "parked", priority: 50 }),
   ];
 
   it("groups by state in operator order with shape, Korean name and count", () => {
     const { container } = renderLive(tasks);
     const headers = [...container.querySelectorAll<HTMLElement>(".qp-group-state")];
-    expect(headers.map((h) => h.querySelector(".qp-group-name")!.textContent)).toEqual(["결정 필요", "진행 중", "대기", "알 수 없는 상태 (parked)"]);
+    expect(headers.map((h) => h.querySelector(".qp-group-name")!.textContent)).toEqual(["결정 필요", "개발 중", "대기", "알 수 없는 상태 (parked)"]);
     expect(headers.map((h) => h.querySelector(".qp-group-count")!.textContent)).toEqual(["2", "1", "1", "1"]);
     expect(headers.every((h) => h.querySelector("svg[data-state-shape]") !== null)).toBe(true);
     expect(headers.every((h) => h.closest("h2") !== null && h.hasAttribute("aria-expanded"))).toBe(true);
@@ -304,11 +304,11 @@ describe("state-grouped list structure", () => {
 
   it("collapsing a group hides its rows but keeps its count", () => {
     const { container } = renderLive(tasks);
-    const decision = container.querySelector<HTMLElement>('[data-group="state:needs_decision"]')!;
+    const decision = container.querySelector<HTMLElement>('[data-group="state:awaiting_decision"]')!;
     fireEvent.click(decision);
     expect(container.querySelector('[data-task-id="2"]')).toBeNull();
-    expect(container.querySelector('[data-group="state:needs_decision"]')!.getAttribute("aria-expanded")).toBe("false");
-    expect(container.querySelector('[data-group="state:needs_decision"] .qp-group-count')!.textContent).toBe("2");
+    expect(container.querySelector('[data-group="state:awaiting_decision"]')!.getAttribute("aria-expanded")).toBe("false");
+    expect(container.querySelector('[data-group="state:awaiting_decision"] .qp-group-count')!.textContent).toBe("2");
   });
 
   it("a row is a real link to the task, and the selected row is marked", () => {
@@ -414,11 +414,11 @@ describe("project grouping on the live queue", () => {
 // ---- (e) state shapes: shape + label, never color alone -----------------
 
 describe("state shapes", () => {
-  it("ten canonical states plus unknown each have a distinct outline", () => {
+  it("eleven canonical states plus unknown each have a distinct outline", () => {
     const keys = [...STATE_GROUP_ORDER, "unknown"];
-    expect(new Set(keys).size).toBe(11);
+    expect(new Set(keys).size).toBe(12);
     const markup = keys.map((k) => renderToStaticMarkup(<svg>{STATE_SHAPES[k]}</svg>));
-    expect(new Set(markup).size).toBe(11);
+    expect(new Set(markup).size).toBe(12);
     for (const s of KNOWN_STATES) {
       expect(STATE_LABEL[s], s).toBeTruthy();
     }

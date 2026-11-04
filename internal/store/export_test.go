@@ -121,7 +121,7 @@ func TestExportTasksSingleSnapshot(t *testing.T) {
 	if len(out.Tasks) != 1 || out.Tasks[0].ID != task.ID || out.Tasks[0].State != "backlog" {
 		t.Fatalf("tasks=%+v", out.Tasks)
 	}
-	if out.Counts.Total != 1 || out.Counts.ByState["backlog"] != 1 || out.Counts.ByState["claimed"] != 0 {
+	if out.Counts.Total != 1 || out.Counts.ByState["backlog"] != 1 || out.Counts.ByState["developing"] != 0 {
 		t.Fatalf("counts=%+v", out.Counts)
 	}
 	if out.Watermark.TaskEventMaxID != baseTaskEventMax || out.Watermark.TaskEventMaxID >= claimEventID {
@@ -133,7 +133,7 @@ func TestExportTasksSingleSnapshot(t *testing.T) {
 	// The claim's row update and task_event are one atomic commit; the row
 	// state and the event watermark can only be observed together.
 	rowState, watermark := out.Tasks[0].State, out.Watermark.TaskEventMaxID
-	consistent := (rowState == "backlog" && watermark < claimEventID) || (rowState == "claimed" && watermark >= claimEventID)
+	consistent := (rowState == "backlog" && watermark < claimEventID) || (rowState == "developing" && watermark >= claimEventID)
 	if !consistent {
 		t.Fatalf("row-state/event-watermark mixture: state=%s watermark=%d claimEvent=%d", rowState, watermark, claimEventID)
 	}
@@ -144,21 +144,21 @@ func TestExportTasksSingleSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(after.Tasks) != 2 || after.Tasks[0].ID != task.ID || after.Tasks[0].State != "claimed" || after.Tasks[1].ID != extra.ID || after.Tasks[1].State != "backlog" {
+	if len(after.Tasks) != 2 || after.Tasks[0].ID != task.ID || after.Tasks[0].State != "developing" || after.Tasks[1].ID != extra.ID || after.Tasks[1].State != "backlog" {
 		t.Fatalf("after tasks=%+v", after.Tasks)
 	}
-	if after.Counts.Total != 2 || after.Counts.ByState["backlog"] != 1 || after.Counts.ByState["claimed"] != 1 {
+	if after.Counts.Total != 2 || after.Counts.ByState["backlog"] != 1 || after.Counts.ByState["developing"] != 1 {
 		t.Fatalf("after counts=%+v", after.Counts)
 	}
 	if after.Watermark.TaskEventMaxID < claimEventID {
 		t.Fatalf("after watermark=%+v claimEvent=%d", after.Watermark, claimEventID)
 	}
 	rowState, watermark = after.Tasks[0].State, after.Watermark.TaskEventMaxID
-	consistent = (rowState == "backlog" && watermark < claimEventID) || (rowState == "claimed" && watermark >= claimEventID)
+	consistent = (rowState == "backlog" && watermark < claimEventID) || (rowState == "developing" && watermark >= claimEventID)
 	if !consistent {
 		t.Fatalf("row-state/event-watermark mixture: state=%s watermark=%d claimEvent=%d", rowState, watermark, claimEventID)
 	}
-	if claimed.State != "claimed" {
+	if claimed.State != "developing" {
 		t.Fatalf("claimed=%+v", claimed)
 	}
 }
@@ -231,8 +231,8 @@ func TestExportTasksSnapshotFixedBeforeCounts(t *testing.T) {
 	if out.Counts.Total != 1 {
 		t.Fatalf("counts.total=%d want pre-commit 1", out.Counts.Total)
 	}
-	if out.Counts.ByState["backlog"] != 1 || out.Counts.ByState["claimed"] != 0 {
-		t.Fatalf("by_state=%+v want backlog=1 claimed=0", out.Counts.ByState)
+	if out.Counts.ByState["backlog"] != 1 || out.Counts.ByState["developing"] != 0 {
+		t.Fatalf("by_state=%+v want backlog=1 developing=0", out.Counts.ByState)
 	}
 	if out.Counts.ByLane[lane] != 1 || len(out.Counts.ByLane) != 1 {
 		t.Fatalf("by_lane=%+v want {%s:1}", out.Counts.ByLane, lane)

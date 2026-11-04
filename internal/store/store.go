@@ -48,16 +48,6 @@ func TaskKinds() []string {
 	return xs
 }
 
-var taskStates = func() map[string]bool {
-	states := map[string]bool{}
-	for from, targets := range TaskTransitions {
-		states[from] = true
-		for to := range targets {
-			states[to] = true
-		}
-	}
-	return states
-}()
 var relayEventKinds = map[string]bool{"job.completed": true, "job.escalate": true, "job.joined": true, "job.lost": true, "job.revoked": true, "lane.event": true}
 
 // PostgreSQL can infer a broader partial index from a narrower ON CONFLICT
@@ -343,6 +333,20 @@ const (
 	// TaskEventArea marks task_events rows written by SetTaskArea. from/to
 	// carry area names ("" for unset), never states.
 	TaskEventArea = "area"
+	// TaskEventStateMigration marks rows written by the state migration and
+	// its rollback; from/to carry state names of the old and new vocabulary.
+	TaskEventStateMigration = "state_migration"
+	// TaskEventAwaiting marks a change to the awaiting_decision flag. The
+	// state does not change, so the row is not a transition.
+	TaskEventAwaiting = "awaiting_decision"
+	// TaskEventParent marks a parent_id change.
+	TaskEventParent = "parent"
+	// TaskEventRelation marks a relation added or removed.
+	TaskEventRelation = "relation"
+	// TaskEventAutoClose marks an auto-close evaluation that changed nothing:
+	// the skip when every child was canceled, and a child reopened under a
+	// completed parent.
+	TaskEventAutoClose = "auto_close"
 )
 
 // taskAreas is the closed task area vocabulary, in display order. Go has no
@@ -392,6 +396,13 @@ func ValidateTaskArea(area *string) error {
 	return fmt.Errorf("%w: area must be one of %s", ErrTaskAreaUnknown, strings.Join(taskAreas[:], ", "))
 }
 
+// SetsAwaiting reports whether the event began a wait on a decision: an
+// awaiting_decision event that set the flag, or, in history written before the
+// flag, a transition into the old needs_decision state.
+func (e TaskEvent) SetsAwaiting() bool {
+	return (e.Kind == TaskEventAwaiting && e.ToValue == "true") || (e.Kind == TaskEventTransition && e.To == legacyNeedsDecision)
+}
+
 type TaskEvent struct {
 	ID     int64  `json:"id"`
 	TaskID int64  `json:"task_id"`
@@ -409,6 +420,18 @@ type TaskEvent struct {
 	// encoded in the event refs snapshot, not in the task's current refs.
 	Rebind *TaskJobRebind `json:"rebind,omitempty"`
 	At     time.Time      `json:"at"`
+	// Source and SourceRef name the automatic producer of an event (for
+	// example migration or hk.auto_close). A redelivered (source, source_ref)
+	// pair changes nothing. Field, FromValue and ToValue describe a change to
+	// a field other than the state; Auto marks events hk wrote on its own;
+	// Applied is false for an event recorded without effect.
+	Source    string `json:"source,omitempty"`
+	SourceRef string `json:"source_ref,omitempty"`
+	Field     string `json:"field,omitempty"`
+	FromValue string `json:"from_value,omitempty"`
+	ToValue   string `json:"to_value,omitempty"`
+	Auto      bool   `json:"auto,omitempty"`
+	Applied   bool   `json:"applied"`
 }
 
 // TaskJobRebind is the immutable audit payload for a task job-link rebind.
@@ -445,9 +468,27 @@ type Task struct {
 	// Area is the task's entry in the TaskAreas vocabulary. NULL on rows
 	// created before the field existed and on any task nobody has tagged;
 	// always emitted, so a null means unset.
-	Expected *string     `json:"expected"`
-	Area     *string     `json:"area"`
-	Events   []TaskEvent `json:"events,omitempty"`
+	Expected *string `json:"expected"`
+	Area     *string `json:"area"`
+	// Category is derived from State by the fixed table in states.go and is
+	// never stored; API rows carry it read-only.
+	Category string `json:"category"`
+	// AwaitingDecision is the flag that replaced the needs_decision state: the
+	// task keeps its work state while it waits on the operator.
+	AwaitingDecision bool `json:"awaiting_decision"`
+	// ParentID is the single, acyclic parent link. It is unrelated to
+	// ParentLane and Refs.OriginTask.
+	ParentID *int64 `json:"parent_id"`
+	// Lifecycle timestamps, set when the task first enters the matching
+	// category; NULL on rows that predate them (no backfill).
+	StartedAt       *time.Time     `json:"started_at"`
+	CompletedAt     *time.Time     `json:"completed_at"`
+	CanceledAt      *time.Time     `json:"canceled_at"`
+	TriagedAt       *time.Time     `json:"triaged_at"`
+	StartedTriageAt *time.Time     `json:"started_triage_at"`
+	Children        []TaskChild    `json:"children,omitempty"`
+	Relations       []TaskRelation `json:"relations,omitempty"`
+	Events          []TaskEvent    `json:"events,omitempty"`
 }
 
 // RelayEvent is a durable report from a worker to its owning lane.  Delivery
@@ -482,6 +523,9 @@ type Store struct {
 	linearSync  atomic.Bool
 	linearBoard atomic.Bool
 	wrk         atomic.Pointer[wrkrecords.Engine]
+	// autoCloseOff inverts the auto_close_parent setting so the zero Store has
+	// it on, the default.
+	autoCloseOff atomic.Bool
 }
 
 // Refs stores repeatable named references. Its decoder accepts legacy scalar
@@ -1090,6 +1134,12 @@ func (s *Store) migrate(ctx context.Context) error {
 	}
 
 	if err := migrateOnce(ctx, tx, 31, func() error { return execAll(ctx, tx, linearAdmissionV31) }); err != nil {
+		return err
+	}
+
+	// Version 32 moves tasks.state to the eleven-state model; see
+	// migrateStatesV32 for the steps, the locks and their cost.
+	if err := migrateOnce(ctx, tx, stateMigrationVersion, func() error { return migrateStatesV32(ctx, tx) }); err != nil {
 		return err
 	}
 
@@ -2068,14 +2118,15 @@ func ValidBodyDoc(v string) bool {
 
 func scanTask(row interface{ Scan(...any) error }, x *Task, extra ...any) error {
 	var refs []byte
-	dest := []any{&x.ID, &x.Lane, &x.ParentLane, &x.Title, &x.Kind, &x.State, &x.Priority, &refs, &x.ClaimedBy, &x.CreatedBy, &x.CreatedAt, &x.UpdatedAt, &x.BodyDoc, &x.Project, &x.Area, &x.Expected}
+	dest := []any{&x.ID, &x.Lane, &x.ParentLane, &x.Title, &x.Kind, &x.State, &x.Priority, &refs, &x.ClaimedBy, &x.CreatedBy, &x.CreatedAt, &x.UpdatedAt, &x.BodyDoc, &x.Project, &x.Area, &x.Expected, &x.AwaitingDecision, &x.ParentID, &x.StartedAt, &x.CompletedAt, &x.CanceledAt, &x.TriagedAt, &x.StartedTriageAt}
 	if err := row.Scan(append(dest, extra...)...); err != nil {
 		return err
 	}
+	x.Category = TaskCategory(x.State)
 	return json.Unmarshal(refs, &x.Refs)
 }
 
-const taskColumns = `id,lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at,body_doc,project,area,expected`
+const taskColumns = `id,lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at,body_doc,project,area,expected,awaiting_decision,parent_id,started_at,completed_at,canceled_at,triaged_at,started_triage_at`
 
 // taskProjectQuerier is the row-query seam requireTaskProject runs against:
 // the caller's transaction, so membership is judged in the same snapshot the
@@ -2173,7 +2224,7 @@ func (s *Store) CreateTask(ctx context.Context, x Task) (Task, error) {
 	if err != nil {
 		return x, errors.New("invalid task refs")
 	}
-	x.State, x.ClaimedBy = "backlog", ""
+	x.State, x.ClaimedBy = StateBacklog, ""
 	x.CreatedAt = time.Now().UTC()
 	x.UpdatedAt = x.CreatedAt
 	tx, err := s.pool.Begin(ctx)
@@ -2200,7 +2251,13 @@ func (s *Store) CreateTask(ctx context.Context, x Task) (Task, error) {
 	if err = requireTaskProject(ctx, tx, x.Project); err != nil {
 		return x, err
 	}
-	if err = scanTask(tx.QueryRow(ctx, `INSERT INTO tasks(lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at,body_doc,project,area,expected) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING `+taskColumns, x.Lane, x.ParentLane, x.Title, x.Kind, x.State, x.Priority, string(refs), x.ClaimedBy, x.CreatedBy, x.CreatedAt, x.UpdatedAt, x.BodyDoc, x.Project, x.Area, x.Expected), &x); err != nil {
+	if x.ParentID != nil {
+		if err = checkParentTx(ctx, tx, 0, *x.ParentID); err != nil {
+			return x, err
+		}
+	}
+	parentID := x.ParentID
+	if err = scanTask(tx.QueryRow(ctx, `INSERT INTO tasks(lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at,body_doc,project,area,expected,parent_id) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING `+taskColumns, x.Lane, x.ParentLane, x.Title, x.Kind, x.State, x.Priority, string(refs), x.ClaimedBy, x.CreatedBy, x.CreatedAt, x.UpdatedAt, x.BodyDoc, x.Project, x.Area, x.Expected, parentID), &x); err != nil {
 		return x, err
 	}
 	if s.LinearSyncEnabled() && x.Refs.Linear != nil && x.Refs.Linear.Sync {
@@ -2209,128 +2266,6 @@ func (s *Store) CreateTask(ctx context.Context, x Task) (Task, error) {
 		}
 	}
 	return x, tx.Commit(ctx)
-}
-
-// TaskTransitions is the single authoritative task state graph. README.md is
-// checked against this table by TestTaskTransitionDocumentation.
-var TaskTransitions = map[string]map[string]bool{
-	"backlog":        {"claimed": true, "hold": true, "dropped": true},
-	"merged":         {"reopened": true},
-	"dropped":        {"reopened": true},
-	"reopened":       {"claimed": true, "in_progress": true, "hold": true, "dropped": true},
-	"claimed":        {"in_progress": true, "hold": true, "needs_decision": true, "dropped": true},
-	"in_progress":    {"verifying": true, "join": true, "hold": true, "needs_decision": true, "dropped": true},
-	"verifying":      {"in_progress": true, "merged": true, "hold": true, "needs_decision": true, "dropped": true},
-	"join":           {"in_progress": true, "merged": true, "needs_decision": true, "dropped": true},
-	"hold":           {"backlog": true, "needs_decision": true, "dropped": true},
-	"needs_decision": {"backlog": true, "claimed": true, "hold": true, "dropped": true},
-}
-
-func taskTransitionAllowed(from, to string) bool {
-	return TaskTransitions[from][to]
-}
-
-func (s *Store) claimTaskTx(ctx context.Context, tx pgx.Tx, id int64, by, jobID, noJob string) (Task, error) {
-	if !validText(by, 128) || by == "" {
-		return Task{}, errors.New("invalid task claimant")
-	}
-	if !validText(jobID, 4096) {
-		return Task{}, errors.New("invalid task claim job_id")
-	}
-	noJob = taskReasonText(noJob)
-	if !validText(noJob, MaxBytes) {
-		return Task{}, errors.New("invalid task claim no_job")
-	}
-	if jobID != "" && noJob != "" {
-		return Task{}, errors.New("invalid task claim: job_id and no_job are exclusive")
-	}
-	if err := guard.Reject(jobID); err != nil {
-		return Task{}, err
-	}
-	if err := guard.Reject(noJob); err != nil {
-		return Task{}, err
-	}
-	var x Task
-	var hasDisposition bool
-	if err := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+`,refs ? 'disposition' FROM tasks WHERE id=$1 FOR UPDATE`, id), &x, &hasDisposition); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return Task{}, ErrTaskConflict
-		}
-		return Task{}, err
-	}
-	// Match NextTask's key-presence exclusion, including malformed/null refs.
-	if hasDisposition {
-		return Task{}, fmt.Errorf("%w: disposition items cannot be claimed directly", ErrTaskConflict)
-	}
-
-	if err := s.wrkTaskFenceTx(ctx, tx, x, "", true); err != nil {
-		return Task{}, err
-	}
-	if err := s.wrkFence(ctx, tx, wrkrecords.LegacyIntent{JobID: jobID, Binding: true}); err != nil {
-		return Task{}, err
-	}
-	if x.State != "backlog" && x.State != "reopened" {
-		// A replayed claim — same claimant, same non-empty job id — is a
-		// no-op: the row is returned as recorded and no second event is
-		// written. A jobless claim replays only for the same claimant on a
-		// row still carrying no job_id, and only when the caller again
-		// supplies its no-job reason. Every other claim of a task that is
-		// not in backlog is a conflict, with the reason wrapped on the
-		// sentinel so HTTP callers can surface it.
-		replay := x.ClaimedBy == by && x.Refs.JobID == jobID && (jobID != "" || noJob != "")
-		if replay {
-			return x, nil
-		}
-		return Task{}, claimConflict(x, by, jobID)
-	}
-	// A claim lands the task in claimed, so it must establish the task/job
-	// link itself: either job_id binds the claimant's job or a recorded
-	// no-job reason marks the deliberate exception. Bare claims stay
-	// refused so claimed rows always carry accountable linkage.
-	if jobID == "" && noJob == "" {
-		return Task{}, fmt.Errorf("%w: claim requires job_id or a no-job reason", ErrTaskJobRequired)
-	}
-	from := x.State
-	if err := scanTask(tx.QueryRow(ctx, `UPDATE tasks SET state='claimed', claimed_by=$2, refs=CASE WHEN $3<>'' THEN refs||jsonb_build_object('job_id',$3::text) ELSE refs END, updated_at=$4 WHERE id=$1 RETURNING `+taskColumns, id, by, jobID, time.Now().UTC()), &x); err != nil {
-		return Task{}, err
-	}
-	refs, err := json.Marshal(x.Refs)
-	if err != nil {
-		return Task{}, err
-	}
-	if _, err := tx.Exec(ctx, `INSERT INTO task_events(task_id,"from","to","by",note,refs,at,no_job) VALUES($1,$6,'claimed',$2,'',$3::jsonb,$4,$5)`, id, by, string(refs), x.UpdatedAt, noJob, from); err != nil {
-		return Task{}, err
-	}
-	if s.LinearSyncEnabled() && x.Refs.Linear != nil && x.Refs.Linear.Sync {
-		if err := enqueueLinearTaskTransition(ctx, tx, x, ""); err != nil {
-			return Task{}, err
-		}
-	}
-	if err := s.recordLinearBoardTaskTx(ctx, tx, x, ""); err != nil {
-		return Task{}, err
-	}
-	return x, nil
-}
-
-// claimConflict names why a non-backlog task refused a claim. The sentinel
-// stays ErrTaskConflict so errors.Is and the HTTP 409 mapping are unchanged;
-// the wrapped reason is what the API copies into the response body.
-func claimConflict(x Task, by, jobID string) error {
-	switch {
-	case x.ClaimedBy == "":
-		return fmt.Errorf("%w: task state %s cannot be claimed", ErrTaskConflict, x.State)
-	case x.ClaimedBy != by:
-		return fmt.Errorf("%w: already claimed by %s", ErrTaskConflict, x.ClaimedBy)
-	case jobID != "" && x.Refs.JobID != jobID:
-		if x.Refs.JobID == "" {
-			return fmt.Errorf("%w: already claimed without job_id", ErrTaskConflict)
-		}
-		return fmt.Errorf("%w: already claimed with job_id %s", ErrTaskConflict, x.Refs.JobID)
-	case x.State == "claimed":
-		return fmt.Errorf("%w: already claimed", ErrTaskConflict)
-	default:
-		return fmt.Errorf("%w: task state %s cannot be claimed", ErrTaskConflict, x.State)
-	}
 }
 
 func (s *Store) ClaimTask(ctx context.Context, id int64, by, jobID, noJob string) (Task, error) {
@@ -2391,7 +2326,7 @@ func (s *Store) RebindTaskJob(ctx context.Context, id int64, fromJob, toJob, by,
 		return Task{}, err
 	}
 
-	if (x.State == "claimed" || x.State == "in_progress") && x.Refs.JobID == toJob && x.ClaimedBy == by {
+	if (x.State == StateResearching || x.State == StateDeveloping) && x.Refs.JobID == toJob && x.ClaimedBy == by {
 		var replay bool
 		err = tx.QueryRow(ctx, `SELECT EXISTS (
 			SELECT 1 FROM task_events e
@@ -2406,7 +2341,7 @@ func (s *Store) RebindTaskJob(ctx context.Context, id int64, fromJob, toJob, by,
 			return x, tx.Commit(ctx)
 		}
 	}
-	if (x.State != "claimed" && x.State != "in_progress") || x.Refs.JobID != fromJob {
+	if (x.State != StateResearching && x.State != StateDeveloping) || x.Refs.JobID != fromJob {
 		current := x.Refs.JobID
 		if current == "" {
 			current = "(none)"
@@ -2457,7 +2392,7 @@ func (s *Store) NextTask(ctx context.Context, lane, by, jobID, noJob string) (Ta
 	}
 
 	var id int64
-	selection := `SELECT id FROM tasks WHERE lane=$1 AND state IN ('backlog','reopened') AND NOT (refs ? 'disposition')`
+	selection := `SELECT id FROM tasks WHERE lane=$1 AND state IN ('backlog','unstarted') AND NOT awaiting_decision AND NOT (refs ? 'disposition')`
 	if wrkTablesExist(ctx, tx) {
 		// Same enrollment predicate as Snapshot.ProtectedTask: only the latest
 		// subject claim at activation, including ended predecessor enrollment.
@@ -2473,188 +2408,6 @@ func (s *Store) NextTask(ctx context.Context, lane, by, jobID, noJob string) (Ta
 	}
 	x, err := s.claimTaskTx(ctx, tx, id, by, jobID, noJob)
 	if err != nil {
-		return Task{}, err
-	}
-	return x, tx.Commit(ctx)
-}
-
-func (s *Store) TransitionTask(ctx context.Context, id int64, to, by, note string, refs *TaskRefs, noJob string) (Task, error) {
-	if to == "reopened" {
-		return Task{}, errors.New("reopened requires the explicit reopen operation")
-	}
-	return s.transitionTask(ctx, id, to, by, note, refs, noJob, false)
-}
-
-// ReopenTask is the only exit from a terminal state. The reason is persisted
-// as the note of an append-only transition event in the same transaction.
-func (s *Store) ReopenTask(ctx context.Context, id int64, by, reason string) (Task, error) {
-	reason = strings.TrimSpace(reason)
-	if reason == "" {
-		return Task{}, errors.New("reopen requires a non-empty reason")
-	}
-	return s.transitionTask(ctx, id, "reopened", by, reason, nil, "", true)
-}
-
-func (s *Store) transitionTask(ctx context.Context, id int64, to, by, note string, refs *TaskRefs, noJob string, reopen bool) (Task, error) {
-	noJob = taskReasonText(noJob)
-	if !taskStates[to] || !validText(by, 128) || by == "" || !validText(note, MaxBytes) || !validText(noJob, MaxBytes) || (refs != nil && !validTaskRefs(*refs)) {
-		return Task{}, errors.New("invalid task transition")
-	}
-	if err := guard.Reject(note); err != nil {
-		return Task{}, err
-	}
-	if err := guard.Reject(noJob); err != nil {
-		return Task{}, err
-	}
-	if refs != nil {
-		if err := rejectTaskRefs(*refs); err != nil {
-			return Task{}, err
-		}
-		// The disposition object (and its answer) is written only by
-		// CreateDisposition and AnswerDisposition(Batch).
-		if refs.Disposition != nil {
-			return Task{}, errors.New("invalid task transition: disposition refs are not patchable")
-		}
-		if refs.DecisionRequest != nil {
-			return Task{}, errors.New("invalid task transition: decision_request is written by tasks decision-request only")
-		}
-	}
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return Task{}, err
-	}
-	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
-		return Task{}, err
-	}
-
-	var x Task
-	var hasDisposition bool
-	if err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+`,refs ? 'disposition' FROM tasks WHERE id=$1 FOR UPDATE`, id), &x, &hasDisposition); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return Task{}, ErrTaskNotFound
-		}
-		return Task{}, err
-	}
-
-	if err := s.wrkTaskFenceTx(ctx, tx, x, to, refs != nil || reopen); err != nil {
-		return Task{}, err
-	}
-	if refs != nil && refs.JobID != "" {
-		if err := s.wrkFence(ctx, tx, wrkrecords.LegacyIntent{JobID: refs.JobID, Binding: true}); err != nil {
-			return Task{}, err
-		}
-	}
-	from := x.State
-	if (from == "merged" || from == "dropped") && !reopen {
-		return Task{}, ErrTaskConflict
-	}
-	if reopen && (to != "reopened" || strings.TrimSpace(note) == "") {
-		return Task{}, errors.New("reopen requires a non-empty reason")
-	}
-	// Placed after the row lock and before the transition-table check so every
-	// generic caller (API, MCP, CLI, UI generic decision forms) is refused while
-	// a disposition item awaits the operator, whatever edge it asks for. The
-	// operator's answer uses AnswerDisposition, which does not come through here.
-	if hasDisposition {
-		if to == "reopened" {
-			return Task{}, fmt.Errorf("%w: disposition items cannot be reopened", ErrTaskConflict)
-		}
-		if from == "needs_decision" {
-			return Task{}, ErrDispositionOperatorOnly
-		}
-		// A disposition item never returns to backlog: NextTask would claim it.
-		// Its closed options and its origin are fixed at creation, in every
-		// state: re-pointing origin_pr/origin_task would detach the recorded
-		// facts from their source and let one origin own two items over time.
-		if to == "backlog" || (refs != nil && (refs.DecisionOptions != nil || refs.OriginPR != "" || refs.OriginTask != 0)) {
-			return Task{}, ErrTaskConflict
-		}
-	}
-	if !taskTransitionAllowed(from, to) {
-		return Task{}, ErrTaskConflict
-	}
-	// Once a task carries a structured request, its question and choices
-	// change only through a new request revision: a generic needs_decision
-	// question or option patch would pair new text with the recorded
-	// request's id (or an old request's choices with a new question).
-	if x.Refs.DecisionRequest != nil && (to == "needs_decision" || (refs != nil && refs.DecisionOptions != nil)) {
-		if x.Refs.DecisionRequest.Status == DecisionRequestOpen {
-			return Task{}, ErrDecisionRequestOpen
-		}
-		return Task{}, invalidDecisionRequest("this task's decisions are recorded with tasks decision-request; record a new request instead")
-	}
-	// Leaving needs_decision for claimed is how every generic answer path
-	// resumes a task. Checked here, under the row lock, so a request recorded
-	// after a caller's pre-check still cannot be left open behind a resumed
-	// task: resolve it with tasks decision-resolve first. Parking (hold),
-	// dropping and returning to backlog stay allowed.
-	if from == "needs_decision" && to == "claimed" && x.Refs.DecisionRequest != nil && x.Refs.DecisionRequest.Status == DecisionRequestOpen {
-		return Task{}, ErrDecisionRequestOpen
-	}
-	if to == "needs_decision" && strings.TrimSpace(note) == "" {
-		return Task{}, errors.New("needs_decision requires question")
-	}
-	if refs != nil {
-		x.Refs = mergeTaskRefs(x.Refs, *refs)
-		// A patch is validated alone above; a disposition item's merged refs
-		// must still be a valid disposition (one origin, closed options).
-		if x.Refs.Disposition != nil && !validTaskRefs(x.Refs) {
-			return Task{}, errors.New("invalid task transition: disposition refs")
-		}
-	}
-	// Re-asking reopens the question: the previous answer no longer describes
-	// the item and must not count as an answer, pending application, or a
-	// pending notice. The old answer stays in the task_events refs snapshots.
-	if x.Refs.Disposition != nil && to == "needs_decision" {
-		x.Refs.Disposition.Answer = nil
-	}
-	if to == "needs_decision" && x.Refs.DecisionOptions != nil {
-		finalText := note + "\n" + FormatDecisionOptions(*x.Refs.DecisionOptions)
-		if len([]byte(finalText)) > RelayLaneEventMaxBytes {
-			return Task{}, errors.New("decision question and options exceed 2048 bytes")
-		}
-	}
-	// The task/job-linkage guard (decision/2026-09-27/task-job-linkage item
-	// 2): landing in claimed or in_progress without both claimed_by and
-	// refs.job_id is refused unless the caller records a no-job reason,
-	// which the event below persists. Runs under the row lock, after the
-	// refs merge, so a concurrent claim cannot interleave between the check
-	// and the write. Tasks already in claimed/in_progress keep moving to
-	// non-active states freely — the guard only watches the two entries.
-	recordedNoJob := ""
-	if to == "claimed" || to == "in_progress" {
-		if x.ClaimedBy == "" || x.Refs.JobID == "" {
-			if noJob == "" {
-				return Task{}, fmt.Errorf("%w: transition to %s requires claimed_by and refs.job_id, or a no-job reason", ErrTaskJobRequired, to)
-			}
-			recordedNoJob = noJob
-		}
-	}
-	if reopen {
-		x.ClaimedBy = ""
-		x.Refs.JobID = ""
-		x.Refs.PR = ""
-		x.Refs.HeadSHA = ""
-		x.Refs.ReportPath = ""
-	}
-	encoded, err := json.Marshal(x.Refs)
-	if err != nil {
-		return Task{}, err
-	}
-	x.UpdatedAt = time.Now().UTC()
-	if err = scanTask(tx.QueryRow(ctx, `UPDATE tasks SET state=$2,refs=$3::jsonb,updated_at=$4,claimed_by=$5 WHERE id=$1 RETURNING `+taskColumns, id, to, string(encoded), x.UpdatedAt, x.ClaimedBy), &x); err != nil {
-		return Task{}, err
-	}
-	if _, err = tx.Exec(ctx, `INSERT INTO task_events(task_id,"from","to","by",note,refs,at,no_job) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,$8)`, id, from, to, by, note, string(encoded), x.UpdatedAt, recordedNoJob); err != nil {
-		return Task{}, err
-	}
-	if s.LinearSyncEnabled() && x.Refs.Linear != nil && x.Refs.Linear.Sync {
-		if err = enqueueLinearTaskTransition(ctx, tx, x, note); err != nil {
-			return Task{}, err
-		}
-	}
-	if err := s.recordLinearBoardTaskTx(ctx, tx, x, note); err != nil {
 		return Task{}, err
 	}
 	return x, tx.Commit(ctx)
@@ -2711,7 +2464,7 @@ func (s *Store) RelaneTask(ctx context.Context, id int64, to, by, note string, a
 	if err := s.wrkTaskFenceTx(ctx, tx, x, "", true); err != nil {
 		return Task{}, false, err
 	}
-	if x.State == "merged" || x.State == "dropped" {
+	if IsSettledState(x.State) {
 		return Task{}, false, ErrTaskTerminal
 	}
 	if x.Lane == to {
@@ -2915,8 +2668,7 @@ func (s *Store) ListTasks(ctx context.Context, lane, state, parentLane string, p
 		q += fmt.Sprintf(" AND parent_lane=$%d", len(args))
 	}
 	if state != "" {
-		args = append(args, state)
-		q += fmt.Sprintf(" AND state=$%d", len(args))
+		q += stateClause(state, &args)
 	}
 	if project != nil {
 		if *project == "" {
@@ -2978,8 +2730,7 @@ func (s *Store) ListTasksPage(ctx context.Context, lane, state, parentLane strin
 		q += fmt.Sprintf(" AND parent_lane=$%d", len(args))
 	}
 	if state != "" {
-		args = append(args, state)
-		q += fmt.Sprintf(" AND state=$%d", len(args))
+		q += stateClause(state, &args)
 	}
 	if project != nil {
 		if *project == "" {
@@ -3037,8 +2788,15 @@ func (s *Store) GlanceTasks(ctx context.Context) (map[string]int, []Task, error)
 		return nil, nil, err
 	}
 
+	// The flag that replaced needs_decision is not a state; it is reported
+	// beside the states under its own key.
+	var awaiting int
+	if err = s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM tasks WHERE awaiting_decision`).Scan(&awaiting); err != nil {
+		return nil, nil, err
+	}
+	counts[AwaitingDecisionKey] = awaiting
 	rows, err = s.pool.Query(ctx, `SELECT `+taskColumns+` FROM tasks
-		WHERE state IN ('claimed','in_progress','verifying','join')
+		WHERE state IN ('researching','developing','reviewing')
 		ORDER BY updated_at DESC,id DESC LIMIT 20`)
 	if err != nil {
 		return nil, nil, err
@@ -3066,7 +2824,7 @@ func (s *Store) GetTask(ctx context.Context, id int64) (Task, bool, error) {
 		}
 		return Task{}, false, err
 	}
-	rows, err := s.pool.Query(ctx, `SELECT id,task_id,"from","to","by",note,refs,at,kind,no_job FROM task_events WHERE task_id=$1 ORDER BY at,id`, id)
+	rows, err := s.pool.Query(ctx, `SELECT id,task_id,"from","to","by",note,refs,at,kind,no_job,source,source_ref,field,from_value,to_value,auto,applied FROM task_events WHERE task_id=$1 ORDER BY at,id`, id)
 	if err != nil {
 		return Task{}, false, err
 	}
@@ -3074,7 +2832,7 @@ func (s *Store) GetTask(ctx context.Context, id int64) (Task, bool, error) {
 	for rows.Next() {
 		var e TaskEvent
 		var refs []byte
-		if err := rows.Scan(&e.ID, &e.TaskID, &e.From, &e.To, &e.By, &e.Note, &refs, &e.At, &e.Kind, &e.NoJob); err != nil {
+		if err := rows.Scan(&e.ID, &e.TaskID, &e.From, &e.To, &e.By, &e.Note, &refs, &e.At, &e.Kind, &e.NoJob, &e.Source, &e.SourceRef, &e.Field, &e.FromValue, &e.ToValue, &e.Auto, &e.Applied); err != nil {
 			return Task{}, false, err
 		}
 		if len(refs) != 0 {
@@ -3090,7 +2848,17 @@ func (s *Store) GetTask(ctx context.Context, id int64) (Task, bool, error) {
 		}
 		x.Events = append(x.Events, e)
 	}
-	return x, true, rows.Err()
+	if err := rows.Err(); err != nil {
+		return Task{}, false, err
+	}
+	rows.Close()
+	if x.Children, err = s.ListTaskChildren(ctx, id); err != nil {
+		return Task{}, false, err
+	}
+	if x.Relations, err = s.ListTaskRelations(ctx, id); err != nil {
+		return Task{}, false, err
+	}
+	return x, true, nil
 }
 
 const relayEventColumns = `id,kind,job_id,epoch,owner_lane,machine,pane_id,report_path,report_last_line,question,pr,head,reason,event_id,text,event_time,received_at,delivered_at,delivered_to,attempts`
@@ -3409,8 +3177,13 @@ func (s *Store) LatestCheckpointsBySession(ctx context.Context, limit int) ([]Ch
 	return out, rows.Err()
 }
 
+// awaitingEventSQL selects the events that set the awaiting_decision flag: the
+// current awaiting_decision rows and, for history, the transitions into the
+// old needs_decision state. History keeps the old vocabulary as written.
+const awaitingEventSQL = `((kind='awaiting_decision' AND to_value='true') OR (kind='transition' AND "to"='needs_decision'))`
+
 // TaskDecision is an unresolved task together with the original question
-// recorded on its latest transition into needs_decision.
+// recorded when the task last began waiting on a decision.
 type TaskDecision struct {
 	Task     Task
 	Question string
@@ -3429,8 +3202,8 @@ func (s *Store) ListOpenTaskDecisions(ctx context.Context, limit int) ([]TaskDec
 		limit = 1000
 	}
 	rows, err := s.pool.Query(ctx, `SELECT `+prefixedTaskColumns("t")+`,
-		COALESCE((SELECT note FROM task_events WHERE task_id=t.id AND kind='transition' AND "to"='needs_decision' ORDER BY at DESC,id DESC LIMIT 1),'')
-		FROM tasks t WHERE t.state='needs_decision' AND NOT (t.refs ? 'disposition') AND COALESCE(t.refs->'decision_request'->>'status','')<>'open' ORDER BY t.updated_at DESC,t.id DESC LIMIT $1`, limit)
+		COALESCE((SELECT note FROM task_events WHERE task_id=t.id AND `+awaitingEventSQL+` ORDER BY at DESC,id DESC LIMIT 1),'')
+		FROM tasks t WHERE t.awaiting_decision AND NOT (t.refs ? 'disposition') AND COALESCE(t.refs->'decision_request'->>'status','')<>'open' ORDER BY t.updated_at DESC,t.id DESC LIMIT $1`, limit)
 	if err != nil {
 		return nil, err
 	}

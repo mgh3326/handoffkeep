@@ -66,7 +66,7 @@ func TestDecisionRequestRecommendationAndDefaultAreSeparate(t *testing.T) {
 	if r.DefaultAction != "보류하고 다음 태스크로 이동" || r.DefaultOption != "" || r.DueAt != nil || r.RequestedBy != "director-1" {
 		t.Fatalf("default fields=%+v", r)
 	}
-	if got.Task.State != "in_progress" {
+	if got.Task.State != "developing" {
 		t.Fatalf("a non-blocking request changed the state: %s", got.Task.State)
 	}
 	rec := ""
@@ -88,7 +88,7 @@ func TestDecisionRequestRecommendationAndDefaultAreSeparate(t *testing.T) {
 		t.Fatal(err)
 	}
 	last := full.Events[len(full.Events)-1]
-	if last.Kind != TaskEventDecision || last.From != "in_progress" || last.To != "in_progress" || last.Refs == nil || last.Refs.DecisionRequest == nil || last.Refs.DecisionRequest.ID != r.ID {
+	if last.Kind != TaskEventDecision || last.From != "developing" || last.To != "developing" || last.Refs == nil || last.Refs.DecisionRequest == nil || last.Refs.DecisionRequest.ID != r.ID {
 		t.Fatalf("event=%+v", last)
 	}
 }
@@ -108,7 +108,7 @@ func TestDecisionRequestDeadlinePassedIsNotApplied(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now()
-	if state := DecisionRequestState(got.Request, "in_progress", false, now); state != DecisionViewOverdue {
+	if state := DecisionRequestState(got.Request, "developing", false, now); state != DecisionViewOverdue {
 		t.Fatalf("state=%s", state)
 	}
 	// Reading does not write: the record is still open with no resolution.
@@ -131,13 +131,13 @@ func TestDecisionRequestDeadlinePassedIsNotApplied(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if state := DecisionRequestState(applied.Request, "in_progress", false, now); state != DecisionViewDefaultApplied {
+	if state := DecisionRequestState(applied.Request, "developing", false, now); state != DecisionViewDefaultApplied {
 		t.Fatalf("applied state=%s", state)
 	}
 	// A status forged without a receipt still does not read as applied.
 	forged := applied.Request
 	forged.Resolution = &DecisionResolution{Kind: DecisionRequestDefaultApplied}
-	if state := DecisionRequestState(forged, "in_progress", false, now); state == DecisionViewDefaultApplied {
+	if state := DecisionRequestState(forged, "developing", false, now); state == DecisionViewDefaultApplied {
 		t.Fatalf("receipt-less resolution read as applied")
 	}
 }
@@ -360,12 +360,12 @@ func TestDecisionRequestBlockListsOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Task.State != "needs_decision" {
-		t.Fatalf("state=%s", got.Task.State)
+	if got.Task.State != "developing" || !got.Task.AwaitingDecision {
+		t.Fatalf("state=%s awaiting=%v", got.Task.State, got.Task.AwaitingDecision)
 	}
 	full, _, _ := s.GetTask(ctx, task.ID)
 	last := full.Events[len(full.Events)-1]
-	if last.Kind != TaskEventTransition || last.From != "in_progress" || last.To != "needs_decision" || last.Note != in.Question || last.Refs.DecisionRequest.ID != got.Request.ID {
+	if last.Kind != TaskEventAwaiting || last.From != "developing" || last.To != "developing" || last.Note != in.Question || last.Refs.DecisionRequest.ID != got.Request.ID {
 		t.Fatalf("block event=%+v", last)
 	}
 	legacy, err := s.ListOpenTaskDecisions(ctx, 0)
@@ -489,7 +489,7 @@ func TestDecisionRequestResolveThenResume(t *testing.T) {
 		t.Fatal(err)
 	}
 	resumed, err := s.TransitionTask(ctx, task.ID, "claimed", "director-1", "A 로 진행", nil, "")
-	if err != nil || resumed.State != "claimed" || resumed.Refs.DecisionRequest.Status != DecisionRequestAnswered {
+	if err != nil || resumed.State != "developing" || resumed.Refs.DecisionRequest.Status != DecisionRequestAnswered {
 		t.Fatalf("resume after answer: %+v %v", resumed.Refs.DecisionRequest, err)
 	}
 }

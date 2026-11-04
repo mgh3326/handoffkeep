@@ -116,7 +116,7 @@ export default function DecisionCard({ task, detail }: { task: ProtoTask; detail
   if (detail === undefined) {
     // No detail fetch behind this screen (synthetic preview, tests): fixture
     // rows carry their own question; otherwise the data is "not connected",
-    // never "no request" — and needs_decision still names itself.
+    // never "no request" — and awaiting_decision still names itself.
     return task.decision ? (
       <>
         <p>{task.decision.question}</p>
@@ -124,7 +124,7 @@ export default function DecisionCard({ task, detail }: { task: ProtoTask; detail
       </>
     ) : (
       <p className="muted">
-        {task.state === "needs_decision" ? "상태는 결정 필요 — " : ""}결정 요청 정보 미연결(상세 미조회)
+        {task.awaiting_decision ? "결정 대기 중 — " : ""}결정 요청 정보 미연결(상세 미조회)
       </p>
     );
   }

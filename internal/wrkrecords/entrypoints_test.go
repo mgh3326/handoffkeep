@@ -232,7 +232,7 @@ func uiAuthorityFixture(t *testing.T, db contractDB, emits *atomic.Int32) (http.
 func TestWrkAuthenticatedUIHasNoImplicitCentralPrincipal(t *testing.T) {
 	db := contractStore(t)
 	db.seed(t, activeFixture(t), contentCatalog(t, loadVectors(t)))
-	if _, e := db.owner.Exec(t.Context(), `UPDATE tasks SET state='needs_decision' WHERE id=2400`); e != nil {
+	if _, e := db.owner.Exec(t.Context(), `UPDATE tasks SET awaiting_decision=true WHERE id=2400`); e != nil {
 		t.Fatal(e)
 	}
 	var emits atomic.Int32
@@ -267,7 +267,7 @@ func TestWrkAuthenticatedUIHasNoImplicitCentralPrincipal(t *testing.T) {
 		t.Fatal("protected UI decision emitted before refusal")
 	}
 	task, _, e := db.runtime.GetTask(t.Context(), 2400)
-	if e != nil || task.State != "needs_decision" {
+	if e != nil || !task.AwaitingDecision {
 		t.Fatal("protected UI changed task")
 	}
 }

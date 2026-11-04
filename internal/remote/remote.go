@@ -716,9 +716,11 @@ func (c Client) ClaimTask(ctx context.Context, id int64, claimedBy, jobID, noJob
 	// claimed but unlinked, and reporting success here would falsify the
 	// job link.
 	// A same-claimant replay on an already-active row answers with that
-	// row's state (claimed or in_progress), so both are honest responses.
-	if out.State != "claimed" && out.State != "in_progress" {
-		return out, fmt.Errorf("claim_not_applied: server response has state=%q, want claimed", out.State)
+	// row's state, so every active state is an honest response. A server that
+	// predates the eleven-state model answers claimed or in_progress; a current
+	// one answers researching or developing (reviewing on a replay).
+	if !activeTaskState(out.State) {
+		return out, fmt.Errorf("claim_not_applied: server response has state=%q, want a started state (developing or researching; old servers: claimed)", out.State)
 	}
 	if out.ClaimedBy != claimedBy {
 		return out, fmt.Errorf("claim_claimant_not_recorded: server response has claimed_by=%q, want %q", out.ClaimedBy, claimedBy)
@@ -744,7 +746,7 @@ func (c Client) RebindTaskJob(ctx context.Context, id int64, fromJob, toJob, by,
 		}
 		return out, err
 	}
-	if (out.State != "claimed" && out.State != "in_progress") || out.ClaimedBy != by || out.Refs.JobID != toJob {
+	if !activeTaskState(out.State) || out.ClaimedBy != by || out.Refs.JobID != toJob {
 		return out, fmt.Errorf("task_rebind_not_recorded: server response has state=%q claimed_by=%q refs.job_id=%q; want an active task claimed by %q with job_id=%q", out.State, out.ClaimedBy, out.Refs.JobID, by, toJob)
 	}
 	return out, nil
@@ -767,8 +769,8 @@ func (c Client) NextTask(ctx context.Context, lane, claimedBy, jobID, noJob stri
 		}
 		return out, err
 	}
-	if out.State != "claimed" {
-		return out, fmt.Errorf("next_not_applied: server response has state=%q, want claimed", out.State)
+	if !activeTaskState(out.State) {
+		return out, fmt.Errorf("next_not_applied: server response has state=%q, want a started state (developing or researching; old servers: claimed)", out.State)
 	}
 	if out.ClaimedBy != claimedBy {
 		return out, fmt.Errorf("next_claimant_not_recorded: server response has claimed_by=%q, want %q", out.ClaimedBy, claimedBy)
@@ -779,13 +781,21 @@ func (c Client) NextTask(ctx context.Context, lane, claimedBy, jobID, noJob stri
 	return out, nil
 }
 func (c Client) TransitionTask(ctx context.Context, id int64, to, note string, refs *store.TaskRefs, noJob string) (store.Task, error) {
+	return c.TransitionTaskWith(ctx, id, store.TransitionInput{To: to, Note: note, Refs: refs, NoJob: noJob})
+}
+
+// TransitionTaskWith is TransitionTask with the options a plain call cannot
+// carry: DuplicateOf names the task a duplicate transition points at.
+func (c Client) TransitionTaskWith(ctx context.Context, id int64, in store.TransitionInput) (store.Task, error) {
+	to, note, refs, noJob := in.To, in.Note, in.Refs, in.NoJob
 	var out store.Task
 	err := c.call(ctx, "POST", fmt.Sprintf("/v1/tasks/%d/transition", id), struct {
-		To    string          `json:"to"`
-		Note  string          `json:"note"`
-		Refs  *store.TaskRefs `json:"refs,omitempty"`
-		NoJob string          `json:"no_job,omitempty"`
-	}{to, note, refs, noJob}, &out)
+		To          string          `json:"to"`
+		Note        string          `json:"note"`
+		Refs        *store.TaskRefs `json:"refs,omitempty"`
+		NoJob       string          `json:"no_job,omitempty"`
+		DuplicateOf int64           `json:"duplicate_of,omitempty"`
+	}{to, note, refs, noJob, in.DuplicateOf}, &out)
 	if err != nil && noJob != "" {
 		// Same strict-decoder translation as claims: a server that predates
 		// the no_job field answers invalid_context rather than naming it.
@@ -800,19 +810,123 @@ func (c Client) TransitionTask(ctx context.Context, id int64, to, note string, r
 	// A 200 that does not reflect the request is a lie, not a success: the
 	// state must be the one asked for, and a job_id sent for linkage must be
 	// recorded (same silent-drop defense as claims).
-	if out.State != to {
-		return out, fmt.Errorf("transition_not_applied: server response has state=%q, want %q", out.State, to)
+	if !transitionApplied(to, out) {
+		return out, fmt.Errorf("transition_not_applied: server response has state=%q awaiting_decision=%t, want %q", out.State, out.AwaitingDecision, to)
 	}
 	// Landing in an active state without the exception means the response
 	// must show the accountable pair — a pre-guard or lying server can 200
 	// while leaving the row unlinked.
-	if noJob == "" && (to == "claimed" || to == "in_progress") && (out.ClaimedBy == "" || out.Refs.JobID == "") {
+	if noJob == "" && enteringActive(to) && activeTaskState(out.State) && (out.ClaimedBy == "" || out.Refs.JobID == "") {
 		return out, fmt.Errorf("transition_linkage_missing: server response has claimed_by=%q refs.job_id=%q for an active transition", out.ClaimedBy, out.Refs.JobID)
 	}
 	if refs != nil && refs.JobID != "" && out.Refs.JobID != refs.JobID {
 		return out, fmt.Errorf("transition_job_id_not_recorded: server response has refs.job_id=%q, want %q", out.Refs.JobID, refs.JobID)
 	}
 	return out, nil
+}
+
+// SetTaskParent sets (parent non-nil) or clears a task's single parent.
+func (c Client) SetTaskParent(ctx context.Context, id int64, parent *int64) (store.Task, error) {
+	var out store.Task
+	err := c.call(ctx, "POST", fmt.Sprintf("/v1/tasks/%d/parent", id), struct {
+		ParentID *int64 `json:"parent_id"`
+	}{parent}, &out)
+	if err != nil {
+		return out, unsupportedRoute(err, "task_parent_unsupported", "the task parent route")
+	}
+	if (parent == nil) != (out.ParentID == nil) || (parent != nil && out.ParentID != nil && *parent != *out.ParentID) {
+		return out, fmt.Errorf("parent_not_applied: server response has parent_id unchanged — it likely predates task hierarchy")
+	}
+	return out, nil
+}
+
+// TaskRelationResult is the answer to a relation edit: whether the edge
+// changed, and the task as it reads afterwards.
+type TaskRelationResult struct {
+	Changed bool       `json:"changed"`
+	Task    store.Task `json:"task"`
+}
+
+// AddTaskRelation adds a blocks, duplicate_of or related edge from the task
+// to other. Repeating it changes nothing.
+func (c Client) AddTaskRelation(ctx context.Context, id int64, kind string, other int64) (TaskRelationResult, error) {
+	return c.taskRelation(ctx, id, "relations", kind, other)
+}
+
+// RemoveTaskRelation archives an edge; removing an absent one changes nothing.
+func (c Client) RemoveTaskRelation(ctx context.Context, id int64, kind string, other int64) (TaskRelationResult, error) {
+	return c.taskRelation(ctx, id, "relations/remove", kind, other)
+}
+
+func (c Client) taskRelation(ctx context.Context, id int64, route, kind string, other int64) (TaskRelationResult, error) {
+	var out TaskRelationResult
+	err := c.call(ctx, "POST", fmt.Sprintf("/v1/tasks/%d/%s", id, route), struct {
+		Kind  string `json:"kind"`
+		Other int64  `json:"other"`
+	}{kind, other}, &out)
+	if err != nil {
+		return out, unsupportedRoute(err, "task_relation_unsupported", "the task relations route")
+	}
+	return out, nil
+}
+
+// unsupportedRoute names a missing route as version skew; other errors pass
+// through unchanged.
+func unsupportedRoute(err error, code, what string) error {
+	var he *HTTPError
+	if errors.As(err, &he) && he.Code == "" && (he.Status == http.StatusNotFound || he.Status == http.StatusMethodNotAllowed) {
+		return fmt.Errorf("%s: server does not provide %s", code, what)
+	}
+	return err
+}
+
+// activeTaskState reports whether state is an active (started) task state in
+// either vocabulary: claimed and in_progress from a server that predates the
+// eleven-state model, researching, developing and reviewing from a current one.
+func activeTaskState(state string) bool {
+	switch state {
+	case "claimed", "in_progress", store.StateResearching, store.StateDeveloping, store.StateReviewing:
+		return true
+	}
+	return false
+}
+
+// enteringActive reports whether a transition target is one a task enters
+// with the claimed_by plus job_id linkage: the old claimed and in_progress
+// names or a started sub-state a worker picks up.
+func enteringActive(to string) bool {
+	switch to {
+	case "claimed", "in_progress", store.StateResearching, store.StateDeveloping:
+		return true
+	}
+	return false
+}
+
+// transitionApplied judges a transition response against the target the
+// caller asked for, in either vocabulary. An old name maps the way the
+// server maps it: in_progress and claimed ask for an active task (or, on a
+// flagged task, the cleared flag), verifying and join for reviewing, hold for
+// icebox, and needs_decision for the awaiting_decision flag. A response
+// without a category comes from a server that predates the model, which
+// answers with the old name itself.
+func transitionApplied(to string, out store.Task) bool {
+	if out.State == to {
+		return true
+	}
+	newServer := out.Category != ""
+	switch to {
+	case "claimed", "in_progress":
+		return activeTaskState(out.State) || (newServer && !out.AwaitingDecision)
+	case "verifying", "join":
+		return out.State == store.StateReviewing
+	case "hold":
+		return out.State == store.StateIcebox
+	case "needs_decision":
+		return newServer && out.AwaitingDecision
+	case "reopened":
+		return out.State == store.StateUnstarted
+	}
+	return false
 }
 
 // RecordDecisionRequest records a structured decision request on a task.

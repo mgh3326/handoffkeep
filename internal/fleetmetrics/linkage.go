@@ -266,7 +266,7 @@ func stateEvent(e store.TaskEvent) bool {
 func cycleStart(t *store.Task) int {
 	start := 0
 	for i, e := range t.Events {
-		if stateEvent(e) && e.To == "reopened" {
+		if isReopen(e) {
 			start = i + 1
 		}
 	}
@@ -297,7 +297,7 @@ func lastTo(t *store.Task, state string) *store.TaskEvent {
 
 // terminalAt is when the task reached its terminal state, or nil.
 func terminalAt(t *store.Task) *time.Time {
-	if t.State != "merged" && t.State != "dropped" {
+	if !isSettled(t.State) {
 		return nil
 	}
 	if e := lastTo(t, t.State); e != nil {

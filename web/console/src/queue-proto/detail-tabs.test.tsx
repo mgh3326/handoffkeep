@@ -447,7 +447,7 @@ describe("overview order — 목적 → 현재 상황 → 다음 행동 → 결�
     expect(next.textContent).not.toContain("자유 문장");
   });
 
-  it("결정 자리: 데이터 미연결은 '없음'이 아니라 '미연결' — needs_decision 은 스스로를 말한다", async () => {
+  it("결정 자리: 데이터 미연결은 '없음'이 아니라 '미연결' — awaiting_decision 은 스스로를 말한다", async () => {
     // The card is a lazy chunk (#618): wait for it instead of relying on an
     // earlier test in this file having loaded it.
     const noDecision = renderBody(mkProtoTask({}));
@@ -456,11 +456,11 @@ describe("overview order — 목적 → 현재 상황 → 다음 행동 → 결�
     expect(slot.textContent).not.toContain("없습니다");
     noDecision.unmount();
 
-    // A live needs_decision task must never read as "no open request" —
-    // the state names the need even while the card data is unwired (#618).
-    const needs = renderBody(mkProtoTask({ state: "needs_decision" }));
+    // A live awaiting_decision task must never read as "no open request" —
+    // the flag names the need even while the card data is unwired (#618).
+    const needs = renderBody(mkProtoTask({ awaiting_decision: true }));
     const needsSlot = needs.container.querySelector<HTMLElement>(".qp-decision")!;
-    await waitFor(() => expect(needsSlot.textContent).toContain("결정 필요"));
+    await waitFor(() => expect(needsSlot.textContent).toContain("결정 대기 중"));
     expect(needsSlot.textContent).not.toContain("없습니다");
     needs.unmount();
 

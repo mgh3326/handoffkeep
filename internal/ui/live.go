@@ -31,8 +31,8 @@ const liveFailCacheTTL = 2 * time.Second
 const liveTaskScanMax = 20000
 
 // liveStates are the task states that show live chips and participate in the
-// "task without an active job" mismatch: claimed, in_progress, verifying.
-var liveStates = map[string]bool{"claimed": true, "in_progress": true, "verifying": true}
+// "task without an active job" mismatch: the started states.
+var liveStates = map[string]bool{store.StateResearching: true, store.StateDeveloping: true, store.StateReviewing: true}
 
 type liveResponse struct {
 	GeneratedAt    string           `json:"generated_at"`

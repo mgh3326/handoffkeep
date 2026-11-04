@@ -77,7 +77,7 @@ func TestLinearMirrorAdmissionPersistsProjectionWithoutDelivery(t *testing.T) {
 	if _, err = st.pool.Exec(t.Context(), `INSERT INTO linear_issues VALUES($1,'existing','ROB-123',now(),now())`, task.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = st.TransitionTask(t.Context(), task.ID, "in_progress", "test", "continue", nil, ""); err != nil {
+	if _, err = st.TransitionTask(t.Context(), task.ID, "reviewing", "test", "continue", nil, ""); err != nil {
 		t.Fatal(err)
 	}
 	rows, err = st.ListLinearOutbox(t.Context(), task.ID)
@@ -251,7 +251,7 @@ func TestLinearMirrorAdmissionOwnershipAndVersions(t *testing.T) {
 	if _, err = st.ClaimTask(t.Context(), owner.ID, "test", "owner-job", ""); err != nil {
 		t.Fatal(err)
 	}
-	for _, state := range []string{"in_progress", "verifying"} {
+	for _, state := range []string{"researching", "verifying"} {
 		if _, err = st.TransitionTask(t.Context(), owner.ID, state, "test", "", nil, ""); err != nil {
 			t.Fatal(err)
 		}

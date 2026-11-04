@@ -91,12 +91,12 @@ func taskDecisionViews(task store.Task, now time.Time) ([]decisionRequestView, *
 	for _, entry := range entries {
 		views = append(views, projectDecisionRequest(entry, task.State, now))
 	}
-	if task.State != "needs_decision" || task.Refs.Disposition != nil || (task.Refs.DecisionRequest != nil && task.Refs.DecisionRequest.Status == store.DecisionRequestOpen) {
+	if !task.AwaitingDecision || task.Refs.Disposition != nil || (task.Refs.DecisionRequest != nil && task.Refs.DecisionRequest.Status == store.DecisionRequestOpen) {
 		return views, nil
 	}
 	legacy := &legacyDecisionView{State: decisionViewUnrecorded, StateLabel: decisionStateLabels[decisionViewUnrecorded], Options: []store.DecisionOption{}}
 	for _, event := range task.Events {
-		if event.Kind == store.TaskEventTransition && event.To == "needs_decision" {
+		if event.SetsAwaiting() {
 			legacy.Question = event.Note
 		}
 	}

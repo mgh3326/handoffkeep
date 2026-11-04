@@ -254,7 +254,7 @@ func taskDwell(task store.Task, now time.Time) []dwellSegment {
 	totals := map[string]int64{}
 	current, start := "backlog", task.CreatedAt
 	for _, event := range task.Events {
-		if event.Kind == store.TaskEventRelane || event.Kind == store.TaskEventDecision || event.Kind == store.TaskEventProject || event.Kind == store.TaskEventArea {
+		if event.Kind != store.TaskEventTransition && event.Kind != store.TaskEventStateMigration {
 			continue
 		}
 		if event.At.After(start) {
@@ -266,7 +266,7 @@ func taskDwell(task store.Task, now time.Time) []dwellSegment {
 		totals[current] += int64(now.Sub(start).Seconds())
 	}
 	out := make([]dwellSegment, 0, len(totals))
-	for _, state := range taskStates {
+	for _, state := range dwellStates {
 		seconds, ok := totals[state]
 		if !ok {
 			continue

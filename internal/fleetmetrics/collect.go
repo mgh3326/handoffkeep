@@ -71,7 +71,7 @@ func Collect(ctx context.Context, cfg CollectConfig) (Snapshot, error) {
 	// terminal task keeps Events == nil and its current state for the window.
 	var need []int
 	for i, t := range s.Tasks {
-		terminal := t.State == "merged" || t.State == "dropped"
+		terminal := isSettled(t.State)
 		if !terminal || !t.UpdatedAt.Before(s.Since) {
 			need = append(need, i)
 		}
@@ -91,7 +91,7 @@ func Collect(ctx context.Context, cfg CollectConfig) (Snapshot, error) {
 			x.Events = []store.TaskEvent{}
 		}
 		s.Tasks[i] = x
-		if x.State != "backlog" && x.State != "reopened" {
+		if !isReady(x.State) && x.State != store.StateTriage {
 			cs, err := cfg.HK.ListTaskComments(ctx, x.ID, 0, store.TaskCommentListMax)
 			if err == nil && len(cs) > 0 {
 				mu.Lock()
@@ -281,7 +281,7 @@ func collectGitHub(ctx context.Context, cfg CollectConfig, s *Snapshot) {
 	ix := buildIndex(s)
 	urls := map[string]bool{}
 	for id, t := range ix.tasks {
-		if t.State != "merged" {
+		if !isMerged(t.State) {
 			continue
 		}
 		if at := terminalAt(t); at == nil || !inWindow(*at, s) {

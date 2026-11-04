@@ -57,7 +57,7 @@ func TestProjectReapFixture(t *testing.T) {
 	nodes := reapFixtureNodes(t)
 	tasks := []store.Task{
 		reapTask(599, reapMergedBuilderJob, "merged", reapNow.Add(-time.Hour)),
-		reapTask(529, reapOpenBuilderJob, "in_progress", reapNow.Add(-time.Hour)),
+		reapTask(529, reapOpenBuilderJob, "developing", reapNow.Add(-time.Hour)),
 		// Prefix trap: never joins job "601-verify-20260923-1100".
 		reapTask(601, "601-verify", "merged", reapNow.Add(-time.Hour)),
 	}
@@ -102,8 +102,8 @@ func TestProjectReapBuilderTaskGate(t *testing.T) {
 	}{
 		{"no linked task", nil, false, "task-unlinked"},
 		{"prefix is not a link", []store.Task{reapTask(1, "599-merged-builder", "merged", reapNow.Add(-time.Hour))}, false, "task-unlinked"},
-		{"task still open", []store.Task{reapTask(1, reapMergedBuilderJob, "verifying", reapNow.Add(-time.Hour))}, false, "task-open"},
-		{"task on hold", []store.Task{reapTask(1, reapMergedBuilderJob, "join", reapNow.Add(-time.Hour))}, false, "task-open"},
+		{"task still open", []store.Task{reapTask(1, reapMergedBuilderJob, "reviewing", reapNow.Add(-time.Hour))}, false, "task-open"},
+		{"task on hold", []store.Task{reapTask(1, reapMergedBuilderJob, "icebox", reapNow.Add(-time.Hour))}, false, "task-open"},
 		{"merged one second short of grace", []store.Task{reapTask(1, reapMergedBuilderJob, "merged", reapNow.Add(-10*time.Minute+time.Second))}, false, "task-within-grace"},
 		{"merged exactly at grace", []store.Task{reapTask(1, reapMergedBuilderJob, "merged", reapNow.Add(-10*time.Minute))}, false, ""},
 		{"dropped past grace", []store.Task{reapTask(1, reapMergedBuilderJob, "dropped", reapNow.Add(-time.Hour))}, false, ""},
@@ -192,7 +192,7 @@ func TestProjectReapReportShape(t *testing.T) {
 }
 
 func TestReapHoldsReopenedTask(t *testing.T) {
-	tasks := []store.Task{reapTask(599, reapMergedBuilderJob, "reopened", reapNow.Add(-time.Hour))}
+	tasks := []store.Task{reapTask(599, reapMergedBuilderJob, "unstarted", reapNow.Add(-time.Hour))}
 	candidates, held, _ := projectReap(reapFixtureNodes(t), tasks, false, reapNow)
 	if _, ok := reapByPane(candidates)["w2:p32"]; ok {
 		t.Fatal("reopened builder reaped")

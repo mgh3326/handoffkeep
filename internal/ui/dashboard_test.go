@@ -75,9 +75,9 @@ func TestBuildDashboard(t *testing.T) {
 		QuotaLatest: store.QuotaLatest{Manual: []store.QuotaObservation{}},
 	}}
 	tasks := []store.Task{
-		{ID: 1, Title: "running", Lane: "lane-a", State: "in_progress", Refs: store.TaskRefs{JobID: "job-1", Linear: &store.TaskLinear{Tier: "opus"}}},
-		{ID: 2, Title: "review", Lane: "lane-a", State: "verifying", Refs: store.TaskRefs{PR: "https://github.com/mgh3326/handoffkeep/pull/94", HeadSHA: "abc"}},
-		{ID: 3, Title: "parked", Lane: "lane-b", State: "hold", Refs: store.TaskRefs{PR: "https://github.com/acme/widgets/pull/7"}},
+		{ID: 1, Title: "running", Lane: "lane-a", State: "developing", Refs: store.TaskRefs{JobID: "job-1", Linear: &store.TaskLinear{Tier: "opus"}}},
+		{ID: 2, Title: "review", Lane: "lane-a", State: "reviewing", Refs: store.TaskRefs{PR: "https://github.com/mgh3326/handoffkeep/pull/94", HeadSHA: "abc"}},
+		{ID: 3, Title: "parked", Lane: "lane-b", State: "icebox", Refs: store.TaskRefs{PR: "https://github.com/acme/widgets/pull/7"}},
 		{ID: 4, Title: "odd ref", Lane: "lane-b", State: "backlog", Refs: store.TaskRefs{PR: "#12"}},
 	}
 	merged := []store.MergedTaskEvent{
@@ -106,7 +106,7 @@ func TestBuildDashboard(t *testing.T) {
 		repos[r.Repo] = r
 	}
 	hk := repos["mgh3326/handoffkeep"]
-	if len(hk.Open) != 1 || hk.Open[0].Number != 94 || hk.Open[0].State != "verifying" || hk.Open[0].HeadSHA != "abc" {
+	if len(hk.Open) != 1 || hk.Open[0].Number != 94 || hk.Open[0].State != "reviewing" || hk.Open[0].HeadSHA != "abc" {
 		t.Fatalf("handoffkeep=%+v", hk)
 	}
 	if pw := repos["mgh3326/panewire"]; len(pw.Merged) != 1 || pw.Merged[0].TaskID != 9 || pw.Merged[0].MergedAt == nil {
@@ -115,7 +115,7 @@ func TestBuildDashboard(t *testing.T) {
 	if at, ok := repos["mgh3326/auto_trader"]; !ok || len(at.Open) != 0 || at.Merged == nil {
 		t.Fatalf("fleet repo without PRs is absent: %+v", got.PRs)
 	}
-	if w := repos["acme/widgets"]; len(w.Open) != 1 || w.Open[0].State != "hold" {
+	if w := repos["acme/widgets"]; len(w.Open) != 1 || w.Open[0].State != "icebox" {
 		t.Fatalf("widgets=%+v", w)
 	}
 	if odd := repos[""]; len(odd.Open) != 1 || odd.Open[0].PR != "#12" || odd.Open[0].Number != 0 {

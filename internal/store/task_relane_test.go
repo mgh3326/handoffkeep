@@ -48,7 +48,7 @@ func TestRelaneTaskMovesLaneAndRecordsEvent(t *testing.T) {
 	if err != nil || !changed {
 		t.Fatalf("relane changed=%v err=%v", changed, err)
 	}
-	if moved.Lane != to || moved.State != "claimed" || moved.ClaimedBy != "captain" ||
+	if moved.Lane != to || moved.State != "developing" || moved.ClaimedBy != "captain" ||
 		moved.Priority != 7 || moved.ParentLane != "director-1" || moved.Title != "moving task" ||
 		moved.Kind != "fix" || moved.BodyDoc != "doc/keep-me" || moved.CreatedBy != "relane-test" ||
 		moved.Refs.PR != "org/repo#123" || moved.Refs.JobID != "job-9" {
@@ -61,7 +61,7 @@ func TestRelaneTaskMovesLaneAndRecordsEvent(t *testing.T) {
 	if err != nil || !found || len(got.Events) != 2 {
 		t.Fatalf("events=%v found=%v err=%v", got.Events, found, err)
 	}
-	if got.Events[0].Kind != TaskEventTransition || got.Events[0].To != "claimed" {
+	if got.Events[0].Kind != TaskEventTransition || got.Events[0].To != "developing" {
 		t.Fatalf("transition event rewritten: %+v", got.Events[0])
 	}
 	last := got.Events[1]
@@ -260,7 +260,7 @@ func TestRelaneTaskConcurrentTransition(t *testing.T) {
 		if err != nil || !found {
 			t.Fatalf("task %d: found=%v err=%v", id, found, err)
 		}
-		if got.Lane != targets[id] || got.State != "in_progress" || got.ClaimedBy != "captain" {
+		if got.Lane != targets[id] || got.State != "developing" || got.ClaimedBy != "captain" {
 			t.Fatalf("task %d: %+v", id, got)
 		}
 		kinds := map[string]int{}
@@ -270,7 +270,7 @@ func TestRelaneTaskConcurrentTransition(t *testing.T) {
 				t.Fatalf("task %d relane event=%+v", id, e)
 			}
 		}
-		if kinds[TaskEventTransition] != 2 || kinds[TaskEventRelane] != 1 || len(got.Events) != 3 {
+		if kinds[TaskEventTransition] != 1 || kinds[TaskEventRelane] != 1 || len(got.Events) != 2 {
 			t.Fatalf("task %d events=%+v", id, got.Events)
 		}
 	}

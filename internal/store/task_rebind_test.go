@@ -40,7 +40,7 @@ func TestRebindTaskJobChangesActiveLinkAndRecordsEvent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.State != "claimed" || first.Refs.JobID != "job-new" || first.ClaimedBy != "new-builder" {
+	if first.State != "developing" || first.Refs.JobID != "job-new" || first.ClaimedBy != "new-builder" {
 		t.Fatalf("rebound task=%+v", first)
 	}
 	got, found, err := s.GetTask(ctx, task.ID)
@@ -51,7 +51,7 @@ func TestRebindTaskJobChangesActiveLinkAndRecordsEvent(t *testing.T) {
 		t.Fatalf("events=%+v, want claim plus one rebind", got.Events)
 	}
 	event := got.Events[1]
-	if event.Kind != TaskEventTransition || event.From != "claimed" || event.To != "claimed" ||
+	if event.Kind != TaskEventTransition || event.From != "developing" || event.To != "developing" ||
 		event.By != "new-builder" || event.Note != "builder takeover" || event.Rebind == nil ||
 		event.Rebind.FromJob != "job-old" || event.Rebind.ToJob != "job-new" ||
 		event.Rebind.By != "new-builder" || event.Rebind.Reason != "builder takeover" ||
@@ -73,7 +73,7 @@ func TestRebindTaskJobAllowsInProgressAndRejectsMismatches(t *testing.T) {
 	s, task := taskRebindFixture(t, "in_progress")
 	ctx := context.Background()
 	got, err := s.RebindTaskJob(ctx, task.ID, "job-old", "job-new", "new-builder", "takeover")
-	if err != nil || got.State != "in_progress" {
+	if err != nil || got.State != "developing" {
 		t.Fatalf("in-progress rebind=%+v err=%v", got, err)
 	}
 	if _, err := s.RebindTaskJob(ctx, task.ID, "job-old", "job-next", "third-builder", "stale"); !errors.Is(err, ErrTaskConflict) || !strings.Contains(err.Error(), `current job_id is "job-new"`) {
@@ -83,7 +83,7 @@ func TestRebindTaskJobAllowsInProgressAndRejectsMismatches(t *testing.T) {
 		t.Fatalf("wrong-source replay err=%v, want conflict naming current job", err)
 	}
 	after, _, err := s.GetTask(ctx, task.ID)
-	if err != nil || after.Refs.JobID != "job-new" || after.ClaimedBy != "new-builder" || len(after.Events) != 3 {
+	if err != nil || after.Refs.JobID != "job-new" || after.ClaimedBy != "new-builder" || len(after.Events) != 2 {
 		t.Fatalf("refused rebind changed task: task=%+v err=%v", after, err)
 	}
 }
@@ -94,7 +94,6 @@ func TestRebindTaskJobRejectsNonActiveStates(t *testing.T) {
 		path  []string
 	}{
 		{state: "hold", path: []string{"hold"}},
-		{state: "needs_decision", path: []string{"needs_decision"}},
 		{state: "dropped", path: []string{"dropped"}},
 		{state: "verifying", path: []string{"in_progress", "verifying"}},
 		{state: "join", path: []string{"in_progress", "join"}},
@@ -104,11 +103,7 @@ func TestRebindTaskJobRejectsNonActiveStates(t *testing.T) {
 			s, task := taskRebindFixture(t, "claimed")
 			ctx := context.Background()
 			for _, state := range tc.path {
-				note := ""
-				if state == "needs_decision" {
-					note = "operator decision needed"
-				}
-				if _, err := s.TransitionTask(ctx, task.ID, state, "old-builder", note, nil, ""); err != nil {
+				if _, err := s.TransitionTask(ctx, task.ID, state, "old-builder", "", nil, ""); err != nil {
 					t.Fatalf("transition to %s: %v", state, err)
 				}
 			}

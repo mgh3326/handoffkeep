@@ -132,7 +132,21 @@
 }
 
 :root {
+  /* Current states (eleven post-hierarchy) */
+  --hk-state-triage: var(--hk-info);
   --hk-state-backlog: var(--hk-text-muted);
+  --hk-state-unstarted: var(--hk-text-secondary);
+  --hk-state-researching: var(--hk-info);
+  --hk-state-developing: var(--hk-warning);
+  --hk-state-reviewing: var(--hk-review);
+  --hk-state-merged: var(--hk-success);
+  --hk-state-deployed: var(--hk-success);
+  --hk-state-dropped: var(--hk-text-muted);
+  --hk-state-duplicate: var(--hk-text-muted);
+  --hk-state-icebox: var(--hk-text-muted);
+  /* Virtual awaiting_decision group */
+  --hk-state-awaiting-decision: var(--hk-danger);
+  /* Legacy state tokens — kept for event history rendering */
   --hk-state-reopened: var(--hk-warning);
   --hk-state-claimed: var(--hk-info);
   --hk-state-in-progress: var(--hk-warning);
@@ -140,8 +154,6 @@
   --hk-state-join: var(--hk-info);
   --hk-state-hold: var(--hk-warning);
   --hk-state-needs-decision: var(--hk-danger);
-  --hk-state-merged: var(--hk-success);
-  --hk-state-dropped: var(--hk-text-muted);
 }
 
 .hk-type-body { font: var(--hk-weight-normal) var(--hk-type-body)/var(--hk-leading-body) var(--hk-font-ui); }

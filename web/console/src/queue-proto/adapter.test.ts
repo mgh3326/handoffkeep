@@ -62,7 +62,7 @@ describe("board columns are bounded", () => {
   it("never renders all nine state columns by default", () => {
     const visible = applyView(sample.tasks, { view: "backlog", filters: EMPTY_FILTERS });
     const cols = boardColumns(visible, "backlog", []);
-    expect(cols.length).toBeLessThanOrEqual(3); // backlog + reopened + hold
+    expect(cols.length).toBeLessThanOrEqual(3); // backlog + unstarted + icebox
     for (const col of cols) {
       expect(col.tasks.length).toBeGreaterThan(0);
     }
@@ -165,12 +165,12 @@ describe("status line", () => {
 });
 
 
-describe("reopened tasks", () => {
- it("shows reopened separately in backlog list and board", () => {
-  const row = { ...sample.tasks[0], id: 9001, state: "reopened" };
+describe("unstarted tasks", () => {
+ it("shows unstarted separately in backlog list and board", () => {
+  const row = { ...sample.tasks[0], id: 9001, state: "unstarted" };
   const visible = applyView([row], { view: "backlog", filters: EMPTY_FILTERS });
   expect(visible.map(t => t.id)).toEqual([9001]);
   const columns = boardColumns(visible, "backlog", []);
-  expect(columns.some(c => c.state === "reopened" && c.tasks[0]?.id === 9001)).toBe(true);
+  expect(columns.some(c => c.state === "unstarted" && c.tasks[0]?.id === 9001)).toBe(true);
  });
 });

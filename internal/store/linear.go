@@ -28,18 +28,21 @@ type LinearStateMapping struct {
 	Terminal bool
 }
 
-// LinearTaskStateMapping is the sole hk-to-Linear state mapping table.
+// LinearTaskStateMapping is the sole hk-to-Linear state mapping table. A task
+// with the awaiting_decision flag sends no state update, as needs_decision
+// did.
 var LinearTaskStateMapping = map[string]LinearStateMapping{
-	"backlog":        {Name: "Backlog", Mutate: true},
-	"reopened":       {Name: "Backlog", Mutate: true},
-	"claimed":        {Name: "In Progress", Mutate: true},
-	"in_progress":    {Name: "In Progress", Mutate: true},
-	"verifying":      {Name: "In Review", Mutate: true},
-	"join":           {Name: "In Review", Mutate: true},
-	"merged":         {Name: "Done", Mutate: true, Terminal: true},
-	"dropped":        {Name: "Canceled", Mutate: true, Terminal: true},
-	"hold":           {Name: "Backlog", Mutate: true},
-	"needs_decision": {Mutate: false},
+	StateTriage:      {Name: "Backlog", Mutate: true},
+	StateBacklog:     {Name: "Backlog", Mutate: true},
+	StateUnstarted:   {Name: "Backlog", Mutate: true},
+	StateResearching: {Name: "In Progress", Mutate: true},
+	StateDeveloping:  {Name: "In Progress", Mutate: true},
+	StateReviewing:   {Name: "In Review", Mutate: true},
+	StateMerged:      {Name: "Done", Mutate: true, Terminal: true},
+	StateDeployed:    {Name: "Done", Mutate: true, Terminal: true},
+	StateDropped:     {Name: "Canceled", Mutate: true, Terminal: true},
+	StateDuplicate:   {Name: "Canceled", Mutate: true, Terminal: true},
+	StateIcebox:      {Name: "Canceled", Mutate: true, Terminal: true},
 }
 
 func TaskStateNames() []string {
@@ -199,7 +202,7 @@ func enqueueLinearTaskTransition(ctx context.Context, tx pgx.Tx, task Task, note
 	if !known {
 		return fmt.Errorf("missing Linear mapping for task state %q", task.State)
 	}
-	if !mapping.Mutate {
+	if !mapping.Mutate || task.AwaitingDecision {
 		return nil
 	}
 	if err := enqueueLinearOutboxTx(ctx, tx, task.ID, LinearOpIssueState, LinearOutboxPayload{State: mapping.Name}); err != nil {
