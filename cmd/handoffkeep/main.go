@@ -659,11 +659,20 @@ func normalizeDecisionArgs(args []string) ([]string, error) {
 }
 
 func decisionsCmd(args []string, out io.Writer) error {
-	if len(args) > 0 && args[0] == "ask" {
-		return decisionAskCmd(args[1:], out)
+	if len(args) > 0 {
+		switch args[0] {
+		case "ask":
+			return decisionAskCmd(args[1:], out)
+		case "list":
+			return decisionListCmd(args[1:], out)
+		case "snooze":
+			return decisionSnoozeCmd(args[1:], out)
+		case "backfill":
+			return decisionBackfillCmd(args[1:], out)
+		}
 	}
 	if len(args) == 0 || args[0] != "resolve" {
-		return errors.New("usage: decisions resolve <task|escalation|lane> <id> --by <lane> --answer <answer> [--note <note>] [--no-inject]\n       " + decisionAskUsage)
+		return errors.New("usage: decisions resolve <task|escalation|lane> <id> --by <lane> --answer <answer> [--note <note>] [--no-inject]\n       " + decisionAskUsage + "\n       " + decisionListUsage + "\n       " + decisionSnoozeUsage + "\n       " + decisionBackfillUsage)
 	}
 	fs := flag.NewFlagSet("decisions resolve", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
