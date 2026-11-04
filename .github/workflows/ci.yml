@@ -24,9 +24,11 @@ on:
 #   T-POST every event except pull_request (main push, dispatch, and the
 #          ci-any-ref call): the post-* jobs add -race with PostgreSQL, the
 #          migration smoke, the mutant suites, the release dry run and macOS.
-#          Their runner comes from a repository variable
-#          (HANDOFFKEEP_POST_LINUX_RUNNER / HANDOFFKEEP_POST_MAC_RUNNER, one
-#          runs-on label) and falls back to a hosted runner when it is unset.
+#          On a main push only, their runner comes from a repository
+#          variable (HANDOFFKEEP_POST_LINUX_RUNNER / HANDOFFKEEP_POST_MAC_RUNNER,
+#          one runs-on label); every other event, and an unset variable, uses a
+#          hosted runner. A dispatch checks out an arbitrary ref, so it never
+#          reaches our machines: only reviewed, merged code does.
 # A main push cancels the run of the previous main head, so only the newest
 # head finishes; ci-ok then reports skipped (unknown), never failure.
 concurrency: {group: "ci-${{ github.workflow }}-${{ (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call') && github.run_id || github.ref }}", cancel-in-progress: true}
@@ -126,7 +128,7 @@ jobs:
     # runner named by HANDOFFKEEP_POST_LINUX_RUNNER must provide it.
     if: ${{ github.event_name != 'pull_request' && contains(fromJSON('["all","test"]'), inputs.suite || 'all') }}
     name: 'post: race + postgres'
-    runs-on: ${{ vars.HANDOFFKEEP_POST_LINUX_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.HANDOFFKEEP_POST_LINUX_RUNNER) || 'ubuntu-latest' }}
     timeout-minutes: 45
     env:
       HANDOFFKEEP_TEST_DB_URL: postgres://handoffkeep:handoffkeep@localhost:5432/handoffkeep?sslmode=disable
@@ -137,7 +139,9 @@ jobs:
           POSTGRES_USER: handoffkeep
           POSTGRES_PASSWORD: handoffkeep
           POSTGRES_DB: handoffkeep
-        ports: ["5432:5432"]
+        # Loopback only: on a self-hosted runner the fixed test password
+        # must not be reachable from the network.
+        ports: ["127.0.0.1:5432:5432"]
         options: >-
           --health-cmd "pg_isready -U handoffkeep" --health-interval 10s --health-timeout 5s --health-retries 5
     steps:
@@ -171,7 +175,7 @@ jobs:
     # post-linux.
     if: ${{ github.event_name != 'pull_request' && contains(fromJSON('["all","test"]'), inputs.suite || 'all') }}
     name: 'post: macos'
-    runs-on: ${{ vars.HANDOFFKEEP_POST_MAC_RUNNER || 'macos-latest' }}
+    runs-on: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.HANDOFFKEEP_POST_MAC_RUNNER) || 'macos-latest' }}
     timeout-minutes: 45
     env:
       HANDOFFKEEP_TEST_NO_DB: "1"

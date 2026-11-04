@@ -19,6 +19,11 @@ import (
 
 const postGuard = "github.event_name != 'pull_request'"
 
+// mainPush gates every runner variable: only reviewed, merged code on a main
+// push may reach a self-hosted runner. A dispatch (ci-any-ref) checks out an
+// arbitrary ref, so it stays hosted.
+const mainPush = "github.event_name == 'push' && github.ref == 'refs/heads/main'"
+
 // ciOkIf is the hk 2924 condition: a run whose only non-success is cancelled
 // skips ci-ok (unknown) instead of failing it.
 const ciOkIf = "always() && (contains(needs.*.result, 'failure') || !contains(needs.*.result, 'cancelled'))"
@@ -73,6 +78,19 @@ func hasRace(j tierJob) bool {
 		}
 	}
 	return false
+}
+
+// selfHostedProblems reports, in any workflow, a job whose runner may be
+// self-hosted without the main-push gate in its runs-on expression.
+func selfHostedProblems(file string, wf tierWorkflow) []string {
+	var out []string
+	for name, j := range wf.Jobs {
+		ro := runsOnText(j.RunsOn)
+		if (strings.Contains(ro, "vars.") || strings.Contains(ro, "self-hosted")) && !strings.Contains(ro, "("+mainPush+" && vars.") {
+			out = append(out, fmt.Sprintf("%s job %s: runs-on %q may be self-hosted outside a main push", file, name, ro))
+		}
+	}
+	return out
 }
 
 // prRunnerProblems reports jobs a pull request reaches that could run on a
@@ -150,8 +168,8 @@ func tierProblems(ci, anyRef []byte) []string {
 		if strings.Contains(ro, "macos-latest") {
 			macos = true
 		}
-		if !strings.Contains(ro, "vars.HANDOFFKEEP_POST_") || !strings.Contains(ro, "|| '") {
-			add("job %s: runs-on %q must read a HANDOFFKEEP_POST_* variable with a hosted fallback", name, ro)
+		if !strings.Contains(ro, "("+mainPush+" && vars.HANDOFFKEEP_POST_") || !strings.Contains(ro, ") || '") {
+			add("job %s: runs-on %q must read a HANDOFFKEEP_POST_* variable on a main push only, with a hosted fallback", name, ro)
 		}
 	}
 	if !race || !postgres || !macos {
@@ -212,7 +230,8 @@ func TestCITiers(t *testing.T) {
 }
 
 // No job a pull request reaches, in any workflow, may name a runner variable
-// or a self-hosted label.
+// or a self-hosted label, and no job anywhere may reach one outside a main
+// push.
 func TestPullRequestsStayOnHostedRunners(t *testing.T) {
 	dir := filepath.Join("..", "..", ".github", "workflows")
 	for _, name := range workflowFiles(t, dir) {
@@ -220,7 +239,7 @@ func TestPullRequestsStayOnHostedRunners(t *testing.T) {
 		if err := yaml.Unmarshal(readWorkflow(t, name), &wf); err != nil {
 			t.Fatal(err)
 		}
-		for _, p := range prRunnerProblems(name, wf) {
+		for _, p := range append(prRunnerProblems(name, wf), selfHostedProblems(name, wf)...) {
 			t.Error(p)
 		}
 	}
@@ -238,7 +257,8 @@ func TestCITierMutantsTurnRed(t *testing.T) {
 		{"no-cancel-in-progress", "cancel-in-progress: true}", "cancel-in-progress: false}"},
 		{"post-linux-unguarded", "if: ${{ github.event_name != 'pull_request' && contains(fromJSON('[\"all\",\"test\"]'), inputs.suite || 'all') }}\n    name: 'post: race + postgres'", "if: ${{ contains(fromJSON('[\"all\",\"test\"]'), inputs.suite || 'all') }}\n    name: 'post: race + postgres'"},
 		{"ci-ok-always", "if: ${{ " + ciOkIf + " }}", "if: ${{ always() }}"},
-		{"no-macos", "vars.HANDOFFKEEP_POST_MAC_RUNNER || 'macos-latest'", "vars.HANDOFFKEEP_POST_MAC_RUNNER || 'ubuntu-latest'"},
+		{"no-macos", "vars.HANDOFFKEEP_POST_MAC_RUNNER) || 'macos-latest'", "vars.HANDOFFKEEP_POST_MAC_RUNNER) || 'ubuntu-latest'"},
+		{"self-hosted-on-dispatch", "runs-on: ${{ (" + mainPush + " && vars.HANDOFFKEEP_POST_LINUX_RUNNER) || 'ubuntu-latest' }}", "runs-on: ${{ vars.HANDOFFKEEP_POST_LINUX_RUNNER || 'ubuntu-latest' }}"},
 	} {
 		t.Run(m.name, func(t *testing.T) {
 			if strings.Count(ci, m.old) != 1 {
@@ -249,6 +269,7 @@ func TestCITierMutantsTurnRed(t *testing.T) {
 			var wf tierWorkflow
 			if err := yaml.Unmarshal([]byte(mutant), &wf); err == nil {
 				problems = append(problems, prRunnerProblems("ci.yml", wf)...)
+				problems = append(problems, selfHostedProblems("ci.yml", wf)...)
 			}
 			if len(problems) == 0 {
 				t.Fatal("mutant passed the tier checks")

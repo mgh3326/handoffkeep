@@ -11,7 +11,13 @@ cleanup() { if [[ -n "$pid" ]]; then kill "$pid" 2>/dev/null || true; wait "$pid
 trap cleanup EXIT
 printf 'HANDOFFKEEP_TOKEN_test=test-token\n' > "$tmp/auth"
 # Build the actual previous schema from the PR base, not a hand-maintained copy.
+# After merge (main push, or a dispatch on a main commit) HEAD is already on
+# main, so the merge base is HEAD itself; use its first parent, the previous
+# main state, so the old binary still predates the change.
 base=$(git merge-base HEAD origin/main)
+if [[ "$base" == "$(git rev-parse HEAD)" ]]; then
+  base=$(git rev-parse HEAD^1)
+fi
 mkdir "$tmp/base"
 git archive "$base" | tar -x -C "$tmp/base"
 (cd "$tmp/base" && go build -o "$tmp/old" ./cmd/handoffkeep)
