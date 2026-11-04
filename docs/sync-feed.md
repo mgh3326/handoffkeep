@@ -142,3 +142,11 @@ Uses the usual URL/token configuration and optional `--url` and `--token` flags.
 It validates the NDJSON page and prints one JSON object containing `changes`
 and `_metadata_`. It fetches one page; it does not persist a cursor. HTTP 410
 returns an error requiring bootstrap.
+
+## Desk ledger
+
+`GET /v1/ledger?consumer=<name>` reads this feed for its "changed since last
+ack" section; it is not a second feed. The consumer's cursor is stored in
+`ledger_cursors` and moves only on `POST /v1/ledger/ack`. A cursor older than
+the reset boundary gets the same 410 `{"reset":true,"min_sync_id":N}` as
+delta. See README, "Desk ledger and project status updates".
