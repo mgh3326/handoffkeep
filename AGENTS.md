@@ -84,8 +84,8 @@ function owns each schema version. A new version:
 3. says in a comment why it is needed and what lock it takes.
 
 Every schema change needs a new version, even an additive `IF NOT EXISTS`
-statement: `Store.migrate` runs no DDL and takes no table lock on a schema that
-already records every version (`migrateCurrent`). Store locks follow the
+statement: `Open` runs no DDL and takes no table lock on a schema that
+already records every version (`migrateIfBehind`). Store locks follow the
 order in `internal/store/lockorder.go`.
 
 **Remote client.** Branch on server error codes with

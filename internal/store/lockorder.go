@@ -10,9 +10,9 @@ package store
 //
 //  1. Schema locks. DDL runs only in Store.migrate, MigrateWrk and their
 //     version-gated steps, under pg_advisory_xact_lock(migrationLockID).
-//     Store.migrate returns before its first table lock when the schema
-//     already records every version it writes (migrateCurrent), so opening
-//     a store beside live writers takes no table lock. Each start used to
+//     Open runs Store.migrate only when the schema is missing a version it
+//     writes (migrateIfBehind, migrateCurrent), so opening a store beside
+//     live writers takes no table lock. Each start used to
 //     re-run CREATE INDEX IF NOT EXISTS (SHARE on tasks, then on task_events)
 //     and ALTER TABLE ... IF NOT EXISTS (ACCESS EXCLUSIVE on task_events),
 //     which deadlocked with any writer that touched task_events before it

@@ -743,11 +743,22 @@ func Open(ctx context.Context, url string) (*Store, error) {
 		return nil, err
 	}
 	s := &Store{pool: p}
-	if err = retryDeadlock(ctx, migrateAttempts, s.migrate); err != nil {
+	if err = retryDeadlock(ctx, migrateAttempts, s.migrateIfBehind); err != nil {
 		p.Close()
 		return nil, err
 	}
 	return s, nil
+}
+
+// migrateIfBehind runs Store.migrate only when the schema is missing a version
+// it writes. On a current schema it takes no table lock, so opening a store
+// beside live writers cannot deadlock with them (lockorder.go, level 1).
+func (s *Store) migrateIfBehind(ctx context.Context) error {
+	current, err := migrateCurrent(ctx, s.pool)
+	if err != nil || current {
+		return err
+	}
+	return s.migrate(ctx)
 }
 
 // migrateAttempts bounds retryDeadlock around Store.migrate. A migration that
@@ -783,15 +794,6 @@ func (s *Store) migrate(ctx context.Context) error {
 	defer tx.Rollback(ctx)
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, migrationLockID); err != nil {
 		return err
-	}
-	// A current schema needs no DDL; return before the first table lock
-	// (lock order, lockorder.go, level 1).
-	current, err := migrateCurrent(ctx, tx)
-	if err != nil {
-		return err
-	}
-	if current {
-		return tx.Commit(ctx)
 	}
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY)`, `INSERT INTO schema_version(version) VALUES (1) ON CONFLICT DO NOTHING`,
