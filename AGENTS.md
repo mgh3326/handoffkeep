@@ -83,6 +83,11 @@ function owns each schema version. A new version:
    as its last statement;
 3. says in a comment why it is needed and what lock it takes.
 
+Every schema change needs a new version, even an additive `IF NOT EXISTS`
+statement: `Open` runs no DDL and takes no table lock on a schema that
+already records every version (`migrateIfBehind`). Store locks follow the
+order in `internal/store/lockorder.go`.
+
 **Remote client.** Branch on server error codes with
 `remote.ErrorCode(err) == "not_found"`, never by comparing `err.Error()`.
 
