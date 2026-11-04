@@ -63,6 +63,14 @@ func TestTasksEventCLI(t *testing.T) {
 	if got[0].Source != "mergewake.merge" || got[0].SourceRef != pr || got[0].TaskID != 1 || got[0].At == nil || !got[0].At.Equal(time.Date(2026, 11, 5, 1, 2, 3, 0, time.UTC)) {
 		t.Fatalf("request %+v", got[0])
 	}
+	// Single-dash flags after the task id keep their values.
+	if out, err := cli("1", "-source", "mergewake.merge", "-source-ref", pr); err != nil || !strings.Contains(out, `"applied":true`) {
+		t.Fatalf("single dash: %s %v", out, err)
+	}
+	if last := got[len(got)-1]; last.Source != "mergewake.merge" || last.SourceRef != pr || last.TaskID != 1 {
+		t.Fatalf("single dash request %+v", last)
+	}
+	got = got[:1]
 	if out, err = cli("2", "--source", "mergewake.merge", "--source-ref", pr); err != nil || !strings.Contains(out, `"applied":false`) || !strings.Contains(out, "canceled") {
 		t.Fatalf("not applied: %s %v", out, err)
 	}
@@ -193,5 +201,25 @@ func TestTasksSweepCLIRefusesOutOfRangeDays(t *testing.T) {
 	}
 	if hits != 0 {
 		t.Fatalf("the CLI called the server %d times for refused days", hits)
+	}
+}
+
+func TestSplitTaskArgsSingleDashValueFlags(t *testing.T) {
+	valueFlags := map[string]bool{"--source": true, "--source-ref": true}
+	for _, tc := range []struct {
+		args []string
+		want []string
+	}{
+		{[]string{"7", "-source", "mergewake.merge", "-source-ref", "u"}, []string{"-source", "mergewake.merge", "-source-ref", "u", "7"}},
+		{[]string{"7", "--source", "mergewake.merge", "--source-ref=u"}, []string{"--source", "mergewake.merge", "--source-ref=u", "7"}},
+		{[]string{"-source=mergewake.merge", "7", "-source-ref", "u"}, []string{"-source=mergewake.merge", "-source-ref", "u", "7"}},
+	} {
+		got, err := splitTaskArgs(tc.args, valueFlags)
+		if err != nil || strings.Join(got, " ") != strings.Join(tc.want, " ") {
+			t.Fatalf("%v -> %v err=%v, want %v", tc.args, got, err, tc.want)
+		}
+	}
+	if _, err := splitTaskArgs([]string{"7", "-source"}, valueFlags); err == nil {
+		t.Fatal("a trailing -source without a value was accepted")
 	}
 }
