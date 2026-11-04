@@ -16,19 +16,19 @@ import tempfile
 ROOT = Path(__file__).resolve().parent.parent
 MUTANTS = [
     (
-        "reopen-keeps-previous-pr", "store/store.go", True,
+        "reopen-keeps-previous-pr", "store/task_flow.go", True,
         '\t\tx.Refs.PR = ""\n', "",
         "TestReopenClearsCycleRefs", "stale cycle refs after reopen",
     ),
     (
-        "disposition-can-reopen", "store/store.go", True,
-        '\t\tif to == "reopened" {\n'
+        "disposition-can-reopen", "store/task_flow.go", True,
+        '\t\tif reopen {\n'
         '\t\t\treturn Task{}, fmt.Errorf("%w: disposition items cannot be reopened", ErrTaskConflict)\n'
         '\t\t}\n', "",
         "TestReopenRefusesDisposition", "disposition reopen refusal",
     ),
     (
-        "disposition-can-claim", "store/store.go", True,
+        "disposition-can-claim", "store/task_flow.go", True,
         '\tif hasDisposition {\n'
         '\t\treturn Task{}, fmt.Errorf("%w: disposition items cannot be claimed directly", ErrTaskConflict)\n'
         '\t}\n', "",

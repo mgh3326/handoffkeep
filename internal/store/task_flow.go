@@ -189,7 +189,15 @@ func (s *Store) claimTaskTx(ctx context.Context, tx pgx.Tx, id int64, by, jobID,
 		return Task{}, fmt.Errorf("%w: claim requires job_id or a no-job reason", ErrTaskJobRequired)
 	}
 	from := x.State
-	to := substateForKind(x.Kind)
+	// A job already registered for this task with a consult or research role
+	// refines the spawn rule; a job not yet registered leaves the kind alone.
+	var jobRole string
+	if jobID != "" {
+		if err := tx.QueryRow(ctx, `SELECT role FROM jobs WHERE job_id=$1 AND task_id=$2`, jobID, id).Scan(&jobRole); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return Task{}, err
+		}
+	}
+	to := substateForJobRole(jobRole, x.Kind)
 	now := time.Now().UTC()
 	x.State, x.ClaimedBy, x.UpdatedAt = to, by, now
 	if jobID != "" {
@@ -413,6 +421,9 @@ func (s *Store) transitionTask(ctx context.Context, id int64, in TransitionInput
 		}
 	}
 	from := x.State
+	if in.DuplicateOf != 0 && (action != actMove || to != StateDuplicate) {
+		return Task{}, errors.New("invalid task transition: duplicate_of applies only to a duplicate transition")
+	}
 	// An old-name transition on a task that is already there changes no state,
 	// but a caller's refs patch (PR, head, report) still lands and is recorded.
 	if action == actNoop && refs == nil {
@@ -426,9 +437,6 @@ func (s *Store) transitionTask(ctx context.Context, id int64, in TransitionInput
 	}
 	if reopen && strings.TrimSpace(note) == "" {
 		return Task{}, errors.New("reopen requires a non-empty reason")
-	}
-	if in.DuplicateOf != 0 && (action != actMove || to != StateDuplicate) {
-		return Task{}, errors.New("invalid task transition: duplicate_of applies only to a duplicate transition")
 	}
 	// Placed after the row lock and before the transition-table check so every
 	// generic caller (API, MCP, CLI, UI generic decision forms) is refused while
