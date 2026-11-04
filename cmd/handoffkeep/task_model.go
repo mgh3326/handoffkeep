@@ -63,17 +63,44 @@ func taskModelCmd(args []string, out io.Writer) error {
 			if e != nil || id < 1 {
 				return errors.New("milestone id must be positive")
 			}
-			m.ID = id
-			m.Name = fs.Arg(2)
-		} else {
-			m.Name = fs.Arg(1)
-		}
-		if *target != "" {
-			t, e := time.Parse(time.RFC3339, *target)
+			m, e = c.GetMilestone(ctx, id)
 			if e != nil {
 				return e
 			}
-			m.TargetAt = &t
+			present := map[string]bool{}
+			fs.Visit(func(f *flag.Flag) { present[f.Name] = true })
+			if present["project"] && *project != m.Project {
+				return errors.New("milestone project cannot be changed")
+			}
+			m.Name = fs.Arg(2)
+			if present["description"] {
+				m.Description = *description
+			}
+			if present["status"] {
+				m.Status = *status
+			}
+			if present["order"] {
+				m.SortOrder = *order
+			}
+			if present["target"] {
+				m.TargetAt = nil
+				if *target != "" {
+					t, e := time.Parse(time.RFC3339, *target)
+					if e != nil {
+						return e
+					}
+					m.TargetAt = &t
+				}
+			}
+		} else {
+			m.Name = fs.Arg(1)
+			if *target != "" {
+				t, e := time.Parse(time.RFC3339, *target)
+				if e != nil {
+					return e
+				}
+				m.TargetAt = &t
+			}
 		}
 		result, e := c.SaveMilestone(ctx, m)
 		if e != nil {

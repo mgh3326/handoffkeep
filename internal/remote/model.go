@@ -80,3 +80,15 @@ func (c Client) PatchProjectMetadata(ctx context.Context, name string, p store.P
 	err := c.call(ctx, "PATCH", "/v1/tasks/projects/"+url.PathEscape(name)+"/metadata", p, &out)
 	return out, err
 }
+
+func (c Client) GetMilestone(ctx context.Context, id int64) (store.ProjectMilestone, error) {
+	var out store.ProjectMilestone
+	err := c.call(ctx, "GET", fmt.Sprintf("/v1/milestones/%d", id), nil, &out)
+	return out, err
+}
+
+func (c Client) SetTaskProjectWithMetadata(ctx context.Context, id int64, project, note string, patch store.ProjectMetadataPatch) (store.Task, error) {
+	var out store.Task
+	err := c.call(ctx, "POST", fmt.Sprintf("/v1/tasks/%d/project", id), map[string]any{"project": project, "note": note, "metadata": patch}, &out)
+	return out, err
+}

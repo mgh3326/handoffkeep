@@ -106,3 +106,15 @@ func (s *Store) SetTaskMilestone(ctx context.Context, id int64, milestone *int64
 	}
 	return x, true, tx.Commit(ctx)
 }
+
+func (s *Store) GetMilestone(ctx context.Context, id int64) (ProjectMilestone, error) {
+	if id < 1 {
+		return ProjectMilestone{}, errors.New("invalid milestone")
+	}
+	var m ProjectMilestone
+	err := s.pool.QueryRow(ctx, `SELECT id,project,name,description,target_at,status,sort_order FROM project_milestones WHERE id=$1`, id).Scan(&m.ID, &m.Project, &m.Name, &m.Description, &m.TargetAt, &m.Status, &m.SortOrder)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ProjectMilestone{}, ErrMilestoneNotFound
+	}
+	return m, err
+}

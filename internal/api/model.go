@@ -261,3 +261,20 @@ func (s Server) taskSubscriber(w http.ResponseWriter, r *http.Request) {
 	}
 	jsonOut(w, http.StatusOK, x)
 }
+
+func (s Server) milestoneGet(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.auth(w, r); !ok {
+		return
+	}
+	id, err := modelID(r, "milestone")
+	if err != nil || id < 1 {
+		writeError(w, http.StatusBadRequest, "invalid_context")
+		return
+	}
+	m, err := s.Service.Store.GetMilestone(r.Context(), id)
+	if err != nil {
+		appErr(w, r, err)
+		return
+	}
+	jsonOut(w, http.StatusOK, m)
+}

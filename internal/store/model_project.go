@@ -1,7 +1,9 @@
 package store
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -50,22 +52,52 @@ func (s *Store) GetProjectMetadata(ctx context.Context, name string) (ProjectMet
 type ProjectMetadataPatch struct {
 	Status    *string    `json:"status"`
 	SetStart  bool       `json:"set_start"`
-	StartAt   *time.Time `json:"start_at"`
+	StartAt   *time.Time `json:"start_at,omitempty"`
 	SetTarget bool       `json:"set_target"`
-	TargetAt  *time.Time `json:"target_at"`
+	TargetAt  *time.Time `json:"target_at,omitempty"`
+}
+
+func (p *ProjectMetadataPatch) UnmarshalJSON(data []byte) error {
+	type patchAlias ProjectMetadataPatch
+	var decoded patchAlias
+	d := json.NewDecoder(bytes.NewReader(data))
+	d.DisallowUnknownFields()
+	if err := d.Decode(&decoded); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	if _, ok := fields["start_at"]; ok && !decoded.SetStart {
+		return errors.New("start_at requires set_start")
+	}
+	if _, ok := fields["target_at"]; ok && !decoded.SetTarget {
+		return errors.New("target_at requires set_target")
+	}
+	*p = ProjectMetadataPatch(decoded)
+	return nil
 }
 
 func (s *Store) PatchProjectMetadata(ctx context.Context, name string, patch ProjectMetadataPatch) (ProjectMetadata, error) {
-	if !validName(name) || (patch.Status != nil && !validText(*patch.Status, 128)) {
-		return ProjectMetadata{}, errors.New("invalid project metadata")
-	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return ProjectMetadata{}, err
 	}
 	defer tx.Rollback(ctx)
+	p, err := patchProjectMetadataTx(ctx, tx, name, patch)
+	if err != nil {
+		return ProjectMetadata{}, err
+	}
+	return p, tx.Commit(ctx)
+}
+
+func patchProjectMetadataTx(ctx context.Context, tx pgx.Tx, name string, patch ProjectMetadataPatch) (ProjectMetadata, error) {
+	if !validName(name) || (patch.Status != nil && !validText(*patch.Status, 128)) || (!patch.SetStart && patch.StartAt != nil) || (!patch.SetTarget && patch.TargetAt != nil) {
+		return ProjectMetadata{}, errors.New("invalid project metadata")
+	}
 	var p ProjectMetadata
-	err = tx.QueryRow(ctx, `SELECT name,status,start_at,target_at FROM task_projects WHERE name=$1 FOR UPDATE`, name).Scan(&p.Name, &p.Status, &p.StartAt, &p.TargetAt)
+	err := tx.QueryRow(ctx, `SELECT name,status,start_at,target_at FROM task_projects WHERE name=$1 FOR UPDATE`, name).Scan(&p.Name, &p.Status, &p.StartAt, &p.TargetAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ProjectMetadata{}, ErrProjectNotFound
 	}
@@ -87,5 +119,5 @@ func (s *Store) PatchProjectMetadata(ctx context.Context, name string, patch Pro
 	if _, err = tx.Exec(ctx, `UPDATE task_projects SET status=$2,start_at=$3,target_at=$4 WHERE name=$1`, name, p.Status, p.StartAt, p.TargetAt); err != nil {
 		return ProjectMetadata{}, err
 	}
-	return p, tx.Commit(ctx)
+	return p, nil
 }

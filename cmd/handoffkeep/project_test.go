@@ -289,14 +289,12 @@ func TestTasksProjectMetadataFlags(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(*seen) != 2 {
+	if len(*seen) != 1 {
 		t.Fatalf("requests=%+v", *seen)
 	}
 	req := (*seen)[0]
-	if req.Method != "PATCH" || req.Path != "/v1/tasks/projects/wrk/metadata" || req.Body["status"] != "active" || req.Body["set_target"] != true || req.Body["set_start"] != false {
+	metadata, ok := req.Body["metadata"].(map[string]any)
+	if !ok || req.Method != "POST" || req.Path != "/v1/tasks/7/project" || metadata["status"] != "active" || metadata["set_target"] != true || metadata["set_start"] != false {
 		t.Fatalf("metadata request=%+v", req)
-	}
-	if (*seen)[1].Path != "/v1/tasks/7/project" {
-		t.Fatalf("project request=%+v", (*seen)[1])
 	}
 }

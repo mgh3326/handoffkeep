@@ -89,9 +89,11 @@ func taskProjectCmd(args []string, out io.Writer) error {
 					*entry.dest = &t
 				}
 			}
-			if _, err := c.PatchProjectMetadata(ctx, fs.Arg(1), p); err != nil {
+			x, err := c.SetTaskProjectWithMetadata(ctx, id, fs.Arg(1), *note, p)
+			if err != nil {
 				return err
 			}
+			return printJSON(out, x)
 		}
 		x, err := c.SetTaskProject(ctx, id, fs.Arg(1), *note)
 		if err != nil {

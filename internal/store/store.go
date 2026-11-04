@@ -2513,6 +2513,10 @@ func (s *Store) RelaneTask(ctx context.Context, id int64, to, by, note string, a
 // classification metadata, so legacy history can still be bucketed without
 // falsifying lane-level reports. A no-op change records no event.
 func (s *Store) SetTaskProject(ctx context.Context, id int64, project, by, note string) (x Task, changed bool, err error) {
+	return s.SetTaskProjectWithMetadata(ctx, id, project, by, note, nil)
+}
+
+func (s *Store) SetTaskProjectWithMetadata(ctx context.Context, id int64, project, by, note string, patch *ProjectMetadataPatch) (x Task, changed bool, err error) {
 	if !validName(project) || by == "" || !validText(by, 128) || !validText(note, MaxBytes) {
 		return Task{}, false, errors.New("invalid task project change")
 	}
@@ -2549,11 +2553,16 @@ func (s *Store) SetTaskProject(ctx context.Context, id int64, project, by, note 
 	if x.Project != nil {
 		from = *x.Project
 	}
+	if from != project && x.MilestoneID != nil {
+		return Task{}, false, ErrMilestoneProject
+	}
+	if patch != nil {
+		if _, err = patchProjectMetadataTx(ctx, tx, project, *patch); err != nil {
+			return Task{}, false, err
+		}
+	}
 	if from == project {
 		return x, false, tx.Commit(ctx)
-	}
-	if x.MilestoneID != nil {
-		return Task{}, false, ErrMilestoneProject
 	}
 	x.UpdatedAt = time.Now().UTC()
 	if err = scanTask(tx.QueryRow(ctx, `UPDATE tasks SET project=$2,updated_at=$3 WHERE id=$1 RETURNING `+taskColumns, id, project, x.UpdatedAt), &x); err != nil {

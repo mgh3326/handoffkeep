@@ -608,6 +608,7 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("PATCH /v1/tasks/projects/{project}/metadata", s.projectMetadata)
 	m.HandleFunc("POST /v1/milestones", s.milestoneSave)
 	m.HandleFunc("PUT /v1/milestones/{milestone}", s.milestoneSave)
+	m.HandleFunc("GET /v1/milestones/{milestone}", s.milestoneGet)
 	m.HandleFunc("GET /v1/labels", s.labelsList)
 	m.HandleFunc("POST /v1/labels", s.labelSave)
 	m.HandleFunc("PUT /v1/labels/{label}", s.labelSave)
@@ -936,14 +937,19 @@ func (s Server) taskProject(w http.ResponseWriter, r *http.Request) {
 	}
 	defer r.Body.Close()
 	var input struct {
-		Project string `json:"project"`
-		Note    string `json:"note"`
+		Project  string                      `json:"project"`
+		Note     string                      `json:"note"`
+		Metadata *store.ProjectMetadataPatch `json:"metadata,omitempty"`
 	}
 	if err := decode(r, &input, 4096); err != nil {
 		appErr(w, r, err)
 		return
 	}
-	x, _, err := s.Service.SetTaskProject(r.Context(), id, input.Project, client, input.Note)
+	if err := s.Service.wrkTaskPrecheck(r.Context(), id, "", true); err != nil {
+		appErr(w, r, err)
+		return
+	}
+	x, _, err := s.Service.Store.SetTaskProjectWithMetadata(r.Context(), id, input.Project, client, input.Note, input.Metadata)
 	if err != nil {
 		appErr(w, r, err)
 		return

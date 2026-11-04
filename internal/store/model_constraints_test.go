@@ -43,6 +43,25 @@ func TestModelConstraintsAndHistory(t *testing.T) {
 	if _, changed, err := s.SetTaskMilestone(ctx, x.ID, &m.ID, "test"); err != nil || changed {
 		t.Fatalf("repeat milestone changed=%t err=%v", changed, err)
 	}
+	status := "changed"
+	before, err := s.GetProjectMetadata(ctx, "wrk")
+	if err != nil {
+		t.Fatal(err)
+	}
+	patch := &ProjectMetadataPatch{Status: &status}
+	if _, _, err = s.SetTaskProjectWithMetadata(ctx, x.ID, "wrk", "test", "", patch); !errors.Is(err, ErrMilestoneProject) {
+		t.Fatalf("move with milestone: %v", err)
+	}
+	if _, _, err = s.SetTaskProjectWithMetadata(ctx, x.ID+999999, "wrk", "test", "", patch); !errors.Is(err, ErrTaskNotFound) {
+		t.Fatalf("move missing: %v", err)
+	}
+	after, err := s.GetProjectMetadata(ctx, "wrk")
+	if err != nil || after.Status != before.Status {
+		t.Fatalf("refused move changed project: before=%+v after=%+v err=%v", before, after, err)
+	}
+	if _, err = s.PatchProjectMetadata(ctx, "wrk", ProjectMetadataPatch{StartAt: &start}); err == nil {
+		t.Fatal("accepted start without set_start")
+	}
 	plain, err := s.SaveLabel(ctx, Label{Name: "plain", EditLevel: "anyone"})
 	if err != nil {
 		t.Fatal(err)
