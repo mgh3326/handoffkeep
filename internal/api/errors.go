@@ -18,7 +18,8 @@ import (
 )
 
 // Every JSON error body is {"error": "<snake_code>"}, optionally with extra
-// detail keys ("reason", "pattern", "conflicts", "request_id"). Handlers
+// detail keys ("reason", "pattern", "conflicts", "similar_tasks",
+// "request_id"). Handlers
 // write a known failure with writeError and hand anything returned by the
 // store or a service to appErr, which maps it through errorRules.
 
@@ -57,6 +58,8 @@ var errorRules = []errorRule{
 	{store.ErrTaskConflict, http.StatusConflict, "task_conflict", true},
 	{store.ErrTaskJobRequired, http.StatusConflict, "task_job_required", true},
 	{store.ErrTriageGate, http.StatusConflict, "triage_gate", true},
+	{store.ErrTicketSetConflict, http.StatusConflict, "ticket_set_conflict", true},
+	{store.ErrTicketSetInvalid, http.StatusBadRequest, "ticket_set_invalid", true},
 	{store.ErrDuplicateOfRequired, http.StatusBadRequest, "duplicate_of_required", true},
 	{store.ErrTaskParentCycle, http.StatusConflict, "parent_cycle", true},
 	{store.ErrTaskParentInvalid, http.StatusBadRequest, "parent_invalid", true},
@@ -127,6 +130,11 @@ func appErr(w http.ResponseWriter, r *http.Request, e error) {
 	var repConflict *store.BenchRepConflictError
 	if errors.As(e, &repConflict) {
 		jsonOut(w, http.StatusConflict, map[string]any{"error": "bench_rep_conflict", "conflicts": repConflict.Conflicts})
+		return
+	}
+	var similar *store.SimilarTasksError
+	if errors.As(e, &similar) {
+		jsonOut(w, http.StatusConflict, map[string]any{"error": "similar_tasks", "similar_tasks": similar.Tasks})
 		return
 	}
 	for _, rule := range errorRules {

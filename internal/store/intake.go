@@ -371,19 +371,6 @@ func checkTicketSet(in TicketSetInput) error {
 	if len(in.Children) == 0 || len(in.Children) > TicketSetMaxChildren {
 		return ticketSetInvalid("a set has 1-%d children", TicketSetMaxChildren)
 	}
-	tickets := append([]Ticket{in.Parent}, in.Children...)
-	for i, t := range tickets {
-		name := "parent"
-		if i > 0 {
-			name = "child " + t.Ref
-		}
-		if err := checkTriageItem(t.item()); err != nil {
-			return fmt.Errorf("%s: %w", name, err)
-		}
-		if missing := missingTicketSections(t.Body); len(missing) > 0 {
-			return ticketSetInvalid("%s body lacks the heading %s", name, strings.Join(missing, ", "))
-		}
-	}
 	refs := map[string]int{}
 	for i, c := range in.Children {
 		if !validName(c.Ref) {
@@ -397,13 +384,27 @@ func checkTicketSet(in TicketSetInput) error {
 		}
 		refs[c.Ref] = i
 	}
+	// Refs are checked above, so the reasons below name only checked refs.
+	tickets := append([]Ticket{in.Parent}, in.Children...)
+	for i, t := range tickets {
+		name := "parent"
+		if i > 0 {
+			name = "child " + t.Ref
+		}
+		if err := checkTriageItem(t.item()); err != nil {
+			return fmt.Errorf("%s: %w", name, err)
+		}
+		if missing := missingTicketSections(t.Body); len(missing) > 0 {
+			return ticketSetInvalid("%s body lacks the heading %s", name, strings.Join(missing, ", "))
+		}
+	}
 	for _, c := range in.Children {
 		for _, b := range c.BlockedBy {
 			if b.TaskID != 0 {
 				continue
 			}
 			if _, ok := refs[b.Ref]; !ok {
-				return ticketSetInvalid("child %s is blocked by unknown ref %q", c.Ref, b.Ref)
+				return ticketSetInvalid("child %s is blocked by a ref that is not in the set", c.Ref)
 			}
 			if b.Ref == c.Ref {
 				return fmt.Errorf("%w: child %s blocks itself", ErrRelationCycle, c.Ref)
@@ -492,7 +493,7 @@ func (s *Store) EmitTicketSet(ctx context.Context, in TicketSetInput) (TicketSet
 	switch {
 	case err == nil:
 		if recorded != hash {
-			return TicketSet{}, false, fmt.Errorf("%w: %s/%s was emitted with a different payload", ErrTicketSetConflict, in.Source, in.SourceRef)
+			return TicketSet{}, false, fmt.Errorf("%w: this source_ref was emitted with a different payload", ErrTicketSetConflict)
 		}
 		for _, c := range in.Children {
 			var id int64

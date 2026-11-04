@@ -43,8 +43,8 @@ package store
 //
 //  5. Rows that belong to a locked task: task_events (its foreign key takes
 //     KEY SHARE on the task row), task_labels, task_relations,
-//     task_subscribers, linear_board_tasks, linear_outbox, sync_decisions;
-//     shared rows read FOR SHARE (labels). decision_requests rows that name a
+//     task_subscribers, linear_board_tasks, linear_outbox, sync_decisions,
+//     ticket_sets; shared rows read FOR SHARE (labels). decision_requests rows that name a
 //     task or a job are updated only under the level-2 lock, several at a
 //     time in id order (decision_records.go); the table has no foreign key.
 //
@@ -55,6 +55,9 @@ package store
 // Exceptions, none of which can close a cycle:
 //
 //   - PruneSync locks sync_state first, but takes no lock from levels 2-5.
+//   - IntakeTask and EmitTicketSet insert each body as the document
+//     task-body/<id>, named after a task created in the same transaction
+//     under the level-2 lock: a new key that no other writer holds.
 //   - processNextLinearOutbox and ProcessNextLinearDecisionOp lock their
 //     queue row before the task row; only the processor locks an existing
 //     queue row, so no task writer waits on it.
