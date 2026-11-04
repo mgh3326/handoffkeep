@@ -398,6 +398,7 @@ func (s *Store) transitionTask(ctx context.Context, id int64, in TransitionInput
 		}
 		return Task{}, err
 	}
+	decisionBefore := decisionBeforeOf(x)
 	action, to, err := resolveTransitionTarget(x, in.To)
 	if err != nil {
 		return Task{}, err
@@ -603,11 +604,15 @@ func (s *Store) transitionTask(ctx context.Context, id int64, in TransitionInput
 			return Task{}, err
 		}
 	}
+	var flagEvent int64
 	if x.AwaitingDecision != flagWas {
 		ev := taskEventInput{TaskID: id, Kind: TaskEventAwaiting, From: x.State, To: x.State, By: by, Note: note, Refs: x.Refs, At: now, Field: "awaiting_decision", FromValue: fmt.Sprint(flagWas), ToValue: fmt.Sprint(x.AwaitingDecision)}
-		if _, _, err = insertEvent(ctx, tx, ev); err != nil {
+		if flagEvent, _, err = insertEvent(ctx, tx, ev); err != nil {
 			return Task{}, err
 		}
+	}
+	if err = mirrorTaskDecisionsTx(ctx, tx, decisionBefore, x, by, note, flagEvent, now); err != nil {
+		return Task{}, err
 	}
 	if action == actMove && from == StateDuplicate {
 		// Leaving duplicate (reopen) archives its relation: the state and the

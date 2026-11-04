@@ -173,15 +173,43 @@ func (s *Store) UpsertChatQuestion(ctx context.Context, x ChatQuestion) (ChatQue
 	}
 	x.ConversationID = ChatConversationID
 	now := time.Now().UTC()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return x, false, err
+	}
+	defer tx.Rollback(ctx)
 	var created bool
-	err := scanChatQuestionCreated(s.pool.QueryRow(ctx, chatQuestionUpsert+`,(xmax=0) AS created`, x.ID, x.ConversationID, x.Lane, x.Body, now), &x, &created)
+	err = scanChatQuestionCreated(tx.QueryRow(ctx, chatQuestionUpsert+`,(xmax=0) AS created`, x.ID, x.ConversationID, x.Lane, x.Body, now), &x, &created)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return x, false, ErrChatConversation
 	}
 	if err != nil {
 		return x, false, err
 	}
-	return x, created, nil
+	if err = mirrorChatQuestionTx(ctx, tx, x, created, now); err != nil {
+		return x, false, err
+	}
+	return x, created, tx.Commit(ctx)
+}
+
+// mirrorChatQuestionTx keeps a question's decision record in step with an
+// upsert: a new question opens one, and a revised body or lane is copied to
+// the open row. A redelivered upsert changes nothing.
+func mirrorChatQuestionTx(ctx context.Context, tx pgx.Tx, q ChatQuestion, created bool, at time.Time) error {
+	if created {
+		return openDecisionTx(ctx, tx, decisionOpen{Source: DecisionSourceChat, SourceRef: q.ID, Lane: q.Lane, Question: q.Body, At: at})
+	}
+	_, err := tx.Exec(ctx, `UPDATE decision_requests SET question=$2,lane=$3,updated_at=$4 WHERE source='chat' AND source_ref=$1 AND status='open' AND (question<>$2 OR lane<>$3)`, q.ID, q.Body, q.Lane, at)
+	return err
+}
+
+// closeChatDecisionTx mirrors a pending question leaving pending: resolved
+// is an answer, withdrawn supersedes the row.
+func closeChatDecisionTx(ctx context.Context, tx pgx.Tx, id, to, answer, by string, at time.Time) error {
+	if to == "withdrawn" {
+		return supersedeDecisionTx(ctx, tx, []string{DecisionSourceChat}, id, "withdrawn", at)
+	}
+	return answerDecisionTx(ctx, tx, []string{DecisionSourceChat}, id, answer, by, at)
 }
 
 func (s *Store) GetChatQuestion(ctx context.Context, id string) (ChatQuestion, bool, error) {
@@ -201,15 +229,24 @@ func (s *Store) GetChatQuestion(ctx context.Context, id string) (ChatQuestion, b
 
 // TransitionChatQuestion moves a pending question to resolved or withdrawn.
 // resolved_at records only an actual resolution; withdrawal leaves it NULL.
-func (s *Store) TransitionChatQuestion(ctx context.Context, id, to string) (ChatQuestion, error) {
+// by is the authenticated caller, recorded as the decision record's answerer.
+func (s *Store) TransitionChatQuestion(ctx context.Context, id, to, by string) (ChatQuestion, error) {
 	if !chatQuestionIDRE.MatchString(id) || (to != "resolved" && to != "withdrawn") {
 		return ChatQuestion{}, errors.New("invalid chat question transition")
 	}
 	now := time.Now().UTC()
 	var x ChatQuestion
-	err := scanChatQuestion(s.pool.QueryRow(ctx, `UPDATE chat_questions SET state=$2,resolved_at=CASE WHEN $2='resolved' THEN $3 ELSE resolved_at END,updated_at=$3 WHERE id=$1 AND state='pending' RETURNING `+chatQuestionColumns, id, to, now), &x)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return ChatQuestion{}, err
+	}
+	defer tx.Rollback(ctx)
+	err = scanChatQuestion(tx.QueryRow(ctx, `UPDATE chat_questions SET state=$2,resolved_at=CASE WHEN $2='resolved' THEN $3 ELSE resolved_at END,updated_at=$3 WHERE id=$1 AND state='pending' RETURNING `+chatQuestionColumns, id, to, now), &x)
 	if err == nil {
-		return x, nil
+		if err = closeChatDecisionTx(ctx, tx, id, to, "", by, now); err != nil {
+			return ChatQuestion{}, err
+		}
+		return x, tx.Commit(ctx)
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return ChatQuestion{}, err
@@ -398,12 +435,16 @@ func (s *Store) PostChatMessage(ctx context.Context, post ChatMessagePost) (Chat
 		return ChatMessage{}, false, err
 	}
 	for _, q := range post.Questions {
-		var ignored ChatQuestion
-		err := scanChatQuestion(tx.QueryRow(ctx, chatQuestionUpsert, q.ID, m.ConversationID, q.Lane, q.Body, now), &ignored)
+		var stored ChatQuestion
+		var created bool
+		err := scanChatQuestionCreated(tx.QueryRow(ctx, chatQuestionUpsert+`,(xmax=0) AS created`, q.ID, m.ConversationID, q.Lane, q.Body, now), &stored, &created)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ChatMessage{}, false, ErrChatConversation
 		}
 		if err != nil {
+			return ChatMessage{}, false, err
+		}
+		if err := mirrorChatQuestionTx(ctx, tx, stored, created, now); err != nil {
 			return ChatMessage{}, false, err
 		}
 	}
@@ -443,8 +484,12 @@ func (s *Store) PostChatMessage(ctx context.Context, post ChatMessagePost) (Chat
 		if state == "withdrawn" {
 			return ChatMessage{}, false, ErrChatQuestionConflict
 		}
-		if _, err := tx.Exec(ctx, `UPDATE chat_questions SET state='resolved',resolved_at=COALESCE(resolved_at,$2),updated_at=$2 WHERE id=$1 AND state='pending'`, id, now); err != nil {
+		if tag, err := tx.Exec(ctx, `UPDATE chat_questions SET state='resolved',resolved_at=COALESCE(resolved_at,$2),updated_at=$2 WHERE id=$1 AND state='pending'`, id, now); err != nil {
 			return ChatMessage{}, false, err
+		} else if tag.RowsAffected() == 1 {
+			if err := closeChatDecisionTx(ctx, tx, id, "resolved", m.Body, m.Author, now); err != nil {
+				return ChatMessage{}, false, err
+			}
 		}
 	}
 	// Assistant-channel answers: each takes the question's one answer slot

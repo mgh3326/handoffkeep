@@ -104,6 +104,8 @@ var errorRules = []errorRule{
 	{store.ErrOutboxConflict, http.StatusConflict, "notification_outbox_conflict", false},
 	{store.ErrChatConversation, http.StatusConflict, "chat_conversation_conflict", false},
 	{store.ErrChatMessageConflict, http.StatusConflict, "chat_message_conflict", false},
+	{store.ErrDecisionRecordNotFound, http.StatusNotFound, "not_found", false},
+	{store.ErrDecisionRecordNotOpen, http.StatusConflict, "decision_request_not_open", false},
 }
 
 // appErr writes the response for an error returned by the store or a

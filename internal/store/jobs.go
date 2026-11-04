@@ -408,7 +408,7 @@ func (s *Store) UpdateJob(ctx context.Context, id string, u JobUpdate) (Job, err
 		return j, fmt.Errorf("%w: %s cannot move to completed", ErrJobStateConflict, j.State)
 	}
 	// The update is valid; merge the present fields over the record.
-	previousRole := j.Role
+	previousRole, previousState := j.Role, j.State
 	if u.State != nil {
 		j.State = *u.State
 	}
@@ -452,6 +452,13 @@ func (s *Store) UpdateJob(ctx context.Context, id string, u JobUpdate) (Job, err
 	}
 	if err = s.recordLinearBoardJobTx(ctx, tx, j); err != nil {
 		return j, err
+	}
+	// A job that ends supersedes its open decision records; the
+	// task-mutation lock above covers them (decision_records.go).
+	if j.State != previousState && DecisionEndsJob(j.State) {
+		if err = supersedeJobDecisionsTx(ctx, tx, j.JobID, j.State, j.UpdatedAt); err != nil {
+			return j, err
+		}
 	}
 	// A job that gains a role can move its task forward (panewire.job).
 	if u.Role != nil && *u.Role != "" && *u.Role != previousRole {

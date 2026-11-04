@@ -305,27 +305,54 @@ park every backlog task older than 14 days at once.
 
 ## Decision requests
 
-One object replaces the five places that hold a question for the operator:
+One object, a `decision_requests` row, mirrors each question held for the operator
+in six places. The `source` column names the place and `source_ref` the record:
 
-1. Tasks in `needs_decision`.
-2. `job.escalate` events beginning `[decision-needed]`.
-3. `lane.event` events beginning `[decision-needed]`. These close only on an exact
-   `[decision-answered] #<id>:` reply from the same owner lane
+1. `task_flag`: the `awaiting_decision` flag set without a structured request
+   (the old `needs_decision`). `source_ref` is `<task id>/<awaiting event id>`,
+   so asking again after an answer is a new row.
+2. `job_escalate`: a `job.escalate` event.
+3. `lane_event`: a `lane.event` beginning `[decision-needed]`. It closes only on an
+   exact `[decision-answered] #<id>:` reply from the same owner lane
    (`ListOpenLaneDecisions`).
-4. The structured `refs.decision_request`.
-5. `chat_questions`.
+4. `task_request`: the structured `refs.decision_request`; `source_ref` is the
+   request id.
+5. `chat`: a `chat_questions` row.
+6. `linear`: a request posted as a Linear issue. Once the issue exists, it is where
+   the request is answered, so its `task_request` row is superseded by the
+   `linear` row (`superseded_by` `linear:<request id>`): one question, one open row.
 
 Disposition items are the subset of the first source that only the operator's web
 answer can resolve; they keep that rule.
 
-A decision request has an answer, a snooze and an expiry. It is superseded when its
-task or job goes terminal. Passing a deadline changes visibility only: nothing
-applies a default on its own, which is the existing invariant in
-`internal/store/decision_request.go`. Writers keep writing their current records,
-and each adapter upserts a request keyed by source.
+Each writer upserts its row in its own transaction, keyed by `(source,
+source_ref)`, so a redelivery adds nothing. Each existing answer path marks the row
+answered, with who and when, in the same transaction, and only when the source
+itself stops counting the question open. The source's record stays the authority.
 
-**The 118 open lane asks are not closed by this work.** S3 produces a dry-run
-classification as a report. Closing any of them waits for an explicit operator OK.
+A row is superseded when its task reaches a completed or canceled state (`icebox`
+included), when its job reaches `completed` or `lost`, or when a `job.completed`,
+`job.joined`, `job.lost` or `job.revoked` event arrives for its job (the events that
+close an escalation). A new request revision supersedes the one it names, and a
+withdrawn request or chat question is superseded as `withdrawn`. Nothing else closes
+a row, and superseding a row never changes its source.
+
+A row has a snooze and an expiry. `POST /v1/decision-requests/{id}/snooze {until}`
+hides an open row from the default list until that time. Passing `due_at` or
+`expires_at` changes how a row is listed (`overdue`, or status `expired`), never its
+stored status or its source: nothing applies a default on its own, which is the
+existing invariant in `internal/store/decision_request.go`. No source sets
+`expires_at` yet. `GET /v1/decision-requests` and `handoffkeep decisions list` read
+the rows, oldest first.
+
+Questions already open when this ships get no row. **The 118 open lane asks are not
+closed by this work.** `handoffkeep decisions backfill --dry-run` reads every
+question each source counts as open (`GET /v1/decision-requests/sources`, read
+only) and classifies it, first rule first: `orphan` (names no task or job hk knows),
+`superseded_candidate` (its task is completed or canceled, or its job completed or
+lost), `live` (its task is started, or its job claimed or spawned),
+`stale_candidate` (older than 14 days), else `live`. It prints a report and writes
+nothing. Closing any item waits for an explicit operator OK.
 
 ## Desk ledger
 

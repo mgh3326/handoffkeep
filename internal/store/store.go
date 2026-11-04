@@ -1198,6 +1198,9 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := migrateOnce(ctx, tx, 34, func() error { return execAll(ctx, tx, eventsV34) }); err != nil {
 		return err
 	}
+	if err := migrateOnce(ctx, tx, 35, func() error { return execAll(ctx, tx, decisionsV35) }); err != nil {
+		return err
+	}
 
 	return tx.Commit(ctx)
 }
@@ -2971,7 +2974,9 @@ func (s *Store) AppendRelayEvent(ctx context.Context, x RelayEvent) (RelayEvent,
 	// With the work board on, recordLinearBoardRelayTx below locks every task
 	// the event matches: the task-mutation lock comes first, before the job
 	// lock (lock order, lockorder.go).
-	if s.LinearBoardEnabled() {
+	// Mirroring an answer or a job's end updates decision records that name a
+	// task or a job, which needs the same lock (decision_records.go).
+	if s.LinearBoardEnabled() || relayTouchesDecisions(x) {
 		if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
 			return x, false, err
 		}
@@ -3035,6 +3040,9 @@ func (s *Store) AppendRelayEvent(ctx context.Context, x RelayEvent) (RelayEvent,
 	}
 	if created {
 		if err = s.recordLinearBoardRelayTx(ctx, tx, x); err != nil {
+			return x, false, err
+		}
+		if err = mirrorRelayDecisionsTx(ctx, tx, x); err != nil {
 			return x, false, err
 		}
 	}

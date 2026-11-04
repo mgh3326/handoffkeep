@@ -13,6 +13,7 @@ import (
 //	32                         migrateStatesV32 (migration_states.go), called from Store.migrate
 //	33                         modelV33 (migration_model.go), called from Store.migrate
 //	34                         eventsV34 (migration_events.go), called from Store.migrate
+//	35                         decisionsV35 (migration_decisions.go), called from Store.migrate
 //	20                         migrateWrk (wrk_migration.go), owner-only via MigrateWrk
 //	23, 24                     migrateQuota (quota.go)
 //
@@ -28,7 +29,7 @@ import (
 
 // SchemaVersion is the highest version a fully migrated database records.
 // Bump it with every new version; tests assert max(version) against it.
-const SchemaVersion = 34
+const SchemaVersion = 35
 
 // migrationLockID serializes migrations across processes (one
 // pg_advisory_xact_lock per migrating transaction).

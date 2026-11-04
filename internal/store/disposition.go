@@ -326,7 +326,13 @@ func (s *Store) CreateDisposition(ctx context.Context, in DispositionInput) (Tas
 	}
 	// The awaiting event carries the question; its id is the item's
 	// generation, which an operator answer must quote.
-	if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: x.ID, Kind: TaskEventAwaiting, From: StateBacklog, To: StateBacklog, By: in.CreatedBy, Note: question, Refs: refs, At: now, Field: "awaiting_decision", FromValue: "false", ToValue: "true"}); err != nil {
+	gen, _, err := insertEvent(ctx, tx, taskEventInput{TaskID: x.ID, Kind: TaskEventAwaiting, From: StateBacklog, To: StateBacklog, By: in.CreatedBy, Note: question, Refs: refs, At: now, Field: "awaiting_decision", FromValue: "false", ToValue: "true"})
+	if err != nil {
+		return Task{}, false, err
+	}
+	// The new row's decision record is an insert of a new key: it needs no
+	// task-mutation lock (decision_records.go).
+	if err = mirrorTaskDecisionsTx(ctx, tx, taskDecisionBefore{}, x, in.CreatedBy, question, gen, now); err != nil {
 		return Task{}, false, err
 	}
 	return x, true, tx.Commit(ctx)
@@ -377,6 +383,7 @@ func (s *Store) answerDispositionTx(ctx context.Context, tx pgx.Tx, in Dispositi
 	if !x.AwaitingDecision {
 		return x, "already_answered", nil
 	}
+	decisionBefore := decisionBeforeOf(x)
 	gen, err := dispositionGen(ctx, tx, in.ID)
 	if err != nil {
 		return Task{}, "", err
@@ -410,6 +417,9 @@ func (s *Store) answerDispositionTx(ctx context.Context, tx pgx.Tx, in Dispositi
 		return Task{}, "", err
 	}
 	if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: in.ID, Kind: TaskEventAwaiting, From: StateResearching, To: StateResearching, By: "operator:" + in.OperatorEmail, Note: note, Refs: x.Refs, At: now, Field: "awaiting_decision", FromValue: "true", ToValue: "false"}); err != nil {
+		return Task{}, "", err
+	}
+	if err = mirrorTaskDecisionsTx(ctx, tx, decisionBefore, x, "operator:"+in.OperatorEmail, note, 0, now); err != nil {
 		return Task{}, "", err
 	}
 	return x, "", nil
@@ -560,9 +570,13 @@ func (s *Store) ApplyDisposition(ctx context.Context, id int64, by, note string)
 		from = to
 	}
 	start := x.State
+	decisionBefore := decisionBeforeOf(x)
 	x.State, x.UpdatedAt = from, now
 	applyLifecycle(&x, start, from, now)
 	if x, err = writeTaskTx(ctx, tx, x); err != nil {
+		return Task{}, err
+	}
+	if err = mirrorTaskDecisionsTx(ctx, tx, decisionBefore, x, by, text, 0, now); err != nil {
 		return Task{}, err
 	}
 	return x, tx.Commit(ctx)

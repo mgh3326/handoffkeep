@@ -468,9 +468,13 @@ func (s *Store) autoCloseTx(ctx context.Context, tx pgx.Tx, child Task, by strin
 			to = StateDeployed
 		}
 		from := p.State
+		decisionBefore := decisionBeforeOf(p)
 		p.State, p.UpdatedAt = to, now
 		applyLifecycle(&p, from, to, now)
 		if p, err = writeTaskTx(ctx, tx, p); err != nil {
+			return err
+		}
+		if err = mirrorTaskDecisionsTx(ctx, tx, decisionBefore, p, "hk", "", 0, now); err != nil {
 			return err
 		}
 		if _, _, err = insertEvent(ctx, tx, taskEventInput{
