@@ -11,8 +11,9 @@ package store
 //   - ticket_sets records one emitted set per (source, source_ref) with the
 //     hash of its payload, so the same payload returns the same ids and a
 //     changed one is refused (Q12).
-//   - kind '' is the unset kind, valid only while the task is in triage; the
-//     triage gate refuses an exit without a kind, and the constraint backs it.
+//   - the empty kind is the unset kind, valid only while the task is in
+//     triage; the triage gate refuses an exit without a kind, and the
+//     constraint backs it.
 //
 // ADD COLUMN with a constant default and the constraint swap take a brief
 // ACCESS EXCLUSIVE lock on tasks; the constraint is replaced NOT VALID, so
