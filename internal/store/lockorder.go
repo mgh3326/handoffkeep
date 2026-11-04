@@ -66,6 +66,13 @@ package store
 //     relay ask); chat rows are written only by the chat writers, after their
 //     chat_questions row, and no task or job writer touches them; a snooze
 //     locks one row and nothing else.
+//   - AckLedger locks one ledger_cursors row and reads sync_state without a
+//     lock; nothing else writes ledger_cursors (ledger.go).
+//   - CreateStatusUpdate locks its task_projects row FOR NO KEY UPDATE
+//     first, then only reads tasks and status_updates and inserts a new
+//     status_updates row. The project metadata writers lock that row and
+//     nothing else, and the KEY SHARE a task or milestone write takes on it
+//     does not conflict with FOR NO KEY UPDATE (status_updates.go).
 //   - Other advisory locks (disposition origin, task comment insert, labels,
 //     Linear board ownership, quota presence) are each the first lock of
 //     their transaction, and no transaction requests one while it holds a

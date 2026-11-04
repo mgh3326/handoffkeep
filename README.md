@@ -327,6 +327,45 @@ startup, and the preview answers `400 invalid_context` outside 1..3650.
 Schema version 34 adds the `source_event` kind for events
 recorded with `applied=false`, so they never read as transitions.
 
+### Desk ledger and project status updates
+
+`GET /v1/ledger?consumer=<name>` (`handoffkeep ledger [--consumer desk]
+[--json]`) returns the desk's view in five sections, always in this order:
+
+1. `in_flight`: started tasks that are not waiting on a decision and not
+   stalled, each with its newest event and `next_trigger` (`review`, `merge`
+   or `deploy`, with the source that sends it). The header lists every project
+   with started tasks, its latest status update and `stale` when that update
+   is older than 7 days or missing.
+2. `waiting_on_operator`: open, not snoozed decision requests, grouped by
+   task in the order of each task's oldest request; requests with no task last.
+3. `stalled`: stalled started tasks, oldest activity first, and `mergewake.merge`
+   events from the last 7 days recorded `applied=false` for a task that is
+   still canceled.
+4. `triage`: tasks in `triage`, oldest first, with the oldest item's age.
+5. `changed_since_ack`: the change-feed delta after the consumer's cursor,
+   counted per model and action, with the first 100 rows.
+
+A task appears in at most one of the first three: one with the
+`awaiting_decision` flag or any open decision request is only under Waiting,
+and a stalled task only under Stalled. Reading never moves the cursor.
+`POST /v1/ledger/ack {consumer, sync_id}` (`handoffkeep ledger ack [--consumer
+desk] <sync_id>`) moves it forward; a lower `sync_id` is refused with `409
+ledger_ack_backward`. Before its first ack a consumer has no cursor and an
+empty delta, and the first ack starts the cursor at the feed's current
+`max_sync_id`. A cursor older than the feed's reset boundary answers `410
+{"reset":true,"min_sync_id":N}`, as the feed does; ack a current `sync_id` to
+continue. `handoffkeep since [--consumer desk] [--json]` prints section 5 with
+its rows.
+
+`POST /v1/projects/{name}/status-updates {health, body}` (`handoffkeep tasks
+project-status <name> --health on_track|at_risk|off_track --body <text>`)
+records a project's health. The server stores the project's task counts by
+category as `snapshot` and the change from the previous update as `diff`.
+`GET` on the same path (`handoffkeep tasks project-status <name> [--limit
+N]`) lists updates newest first with the project's `stale` flag. Schema
+version 36 adds `ledger_cursors` and `status_updates`.
+
 The schema migration to this model (version 32) moves existing rows by the
 map in `docs/linear-internalize.md` and is reversible with
 `scripts/rollback-state-migration.sql`; `handoffkeep tasks migrate-states

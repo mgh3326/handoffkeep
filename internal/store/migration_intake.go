@@ -1,6 +1,6 @@
 package store
 
-// Version 36 adds triage intake (docs/linear-internalize.md, "Triage
+// Version 37 adds triage intake (docs/linear-internalize.md, "Triage
 // intake"):
 //
 //   - tasks.source and tasks.source_ref name the producer of a task that came
@@ -20,7 +20,7 @@ package store
 // ACCESS EXCLUSIVE lock on tasks; the constraint is replaced NOT VALID, so
 // existing rows (all of which carry a kind) are not scanned. CREATE INDEX
 // takes a SHARE lock on tasks while it builds. ticket_sets is a new table.
-var intakeV36 = []string{
+var intakeV37 = []string{
 	`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT '', ADD COLUMN IF NOT EXISTS source_ref TEXT NOT NULL DEFAULT ''`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS tasks_source_ref ON tasks(source, source_ref) WHERE source<>'' AND source_ref<>''`,
 	`ALTER TABLE tasks DROP CONSTRAINT IF EXISTS tasks_kind_check, ADD CONSTRAINT tasks_kind_check CHECK(kind IN ('implement','verify','fix','decide','ops') OR (kind='' AND state IN ('triage','dropped','duplicate'))) NOT VALID`,
@@ -33,5 +33,5 @@ var intakeV36 = []string{
 		created_at TIMESTAMPTZ NOT NULL,
 		UNIQUE(source, source_ref)
 	)`,
-	`INSERT INTO schema_version(version) VALUES (36)`,
+	`INSERT INTO schema_version(version) VALUES (37)`,
 }

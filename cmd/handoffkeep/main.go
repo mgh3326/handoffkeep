@@ -53,13 +53,17 @@ func main() {
 }
 func run(args []string, out, errout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: handoffkeep serve|sync|mcp|ctx|memory|doc|attach|r2usage|tasks|tickets|decisions|fleet-metrics|bench|version")
+		return errors.New("usage: handoffkeep serve|sync|ledger|since|mcp|ctx|memory|doc|attach|r2usage|tasks|tickets|decisions|fleet-metrics|bench|version")
 	}
 	switch args[0] {
 	case "wrk":
 		return wrkCmd(args[1:], os.Stdin, out)
 	case "sync":
 		return syncCmd(args[1:], out)
+	case "ledger":
+		return ledgerCmd(args[1:], out)
+	case "since":
+		return sinceCmd(args[1:], out)
 	case "serve":
 		return serve(args[1:], errout)
 	case "mcp":
@@ -87,7 +91,7 @@ func run(args []string, out, errout io.Writer) error {
 	case "version", "--version":
 		return versionCmd(args[1:], out)
 	default:
-		return errors.New("usage: handoffkeep serve|sync|mcp|ctx|memory|doc|attach|r2usage|tasks|tickets|decisions|fleet-metrics|bench|version")
+		return errors.New("usage: handoffkeep serve|sync|ledger|since|mcp|ctx|memory|doc|attach|r2usage|tasks|tickets|decisions|fleet-metrics|bench|version")
 	}
 }
 
@@ -216,7 +220,7 @@ func tasksCmd(args []string, out io.Writer) error {
 
 func tasksCmdE(args []string, out, errout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: tasks add|list|export|claim|next|transition|reopen|rebind|relane|project|projects|milestone|label|labels|due|subscribe|unsubscribe|set-area|areas|parent|relate|unrelate|migrate-states|decision-request|decision-resolve|show|comment|comments|disposition|event|sweep|intake|triage")
+		return errors.New("usage: tasks add|list|export|claim|next|transition|reopen|rebind|relane|project|projects|milestone|label|labels|due|subscribe|unsubscribe|set-area|areas|parent|relate|unrelate|migrate-states|decision-request|decision-resolve|show|comment|comments|disposition|event|sweep|project-status|intake|triage")
 	}
 	if args[0] == "disposition" {
 		return dispositionCmd(args[1:], out)
@@ -238,6 +242,9 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 	}
 	if args[0] == "migrate-states" {
 		return taskMigrateStatesCmd(args[1:], out)
+	}
+	if args[0] == "project-status" {
+		return projectStatusCmd(args[1:], out)
 	}
 	if args[0] == "project" || args[0] == "projects" {
 		return taskProjectCmd(args, out)

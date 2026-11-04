@@ -445,6 +445,12 @@ type DecisionRecordFilter struct {
 // ListDecisionRecords returns rows oldest first (created_at, then id). now is
 // the clock snooze, expiry and due dates are judged against.
 func (s *Store) ListDecisionRecords(ctx context.Context, f DecisionRecordFilter, now time.Time) ([]DecisionRecord, error) {
+	return listDecisionRecords(ctx, s.pool, f, now)
+}
+
+// listDecisionRecords is ListDecisionRecords on q: the pool, or the ledger's
+// read snapshot.
+func listDecisionRecords(ctx context.Context, pq poolQuerier, f DecisionRecordFilter, now time.Time) ([]DecisionRecord, error) {
 	if f.Status == "" {
 		f.Status = DecisionStatusOpen
 	}
@@ -487,7 +493,7 @@ func (s *Store) ListDecisionRecords(ctx context.Context, f DecisionRecordFilter,
 	}
 	args = append(args, f.Limit)
 	q += fmt.Sprintf(` ORDER BY created_at ASC,id ASC LIMIT $%d`, len(args))
-	rows, err := s.pool.Query(ctx, q, args...)
+	rows, err := pq.Query(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}

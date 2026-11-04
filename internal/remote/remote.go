@@ -384,8 +384,15 @@ func (c Client) call(ctx context.Context, method, path string, input, output any
 		var x struct {
 			Error, Pattern, Reason string
 			SimilarTasks           []store.SimilarTask `json:"similar_tasks"`
+			Reset                  bool
+			MinSyncID              int64 `json:"min_sync_id"`
 		}
 		_ = json.NewDecoder(resp.Body).Decode(&x)
+		// A change-feed reader (the ledger) answers an expired cursor as
+		// the feed does: 410 {"reset":true,"min_sync_id":N}.
+		if resp.StatusCode == http.StatusGone && x.Reset {
+			return &store.SyncReset{MinSyncID: x.MinSyncID}
+		}
 		return &HTTPError{Status: resp.StatusCode, Code: x.Error, Pattern: x.Pattern, Reason: x.Reason, SimilarTasks: x.SimilarTasks}
 	}
 	if e := htmlBodyError(resp); e != nil {
