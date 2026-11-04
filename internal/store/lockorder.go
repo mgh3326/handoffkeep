@@ -26,9 +26,10 @@ package store
 //     one at a time, so the order in which a holder locks task rows (a child
 //     before its parent in autoCloseTx and applySourceEventTx, ascending id
 //     in applyDeployRecordTx and recordLinearBoardRelayTx) cannot form a
-//     cycle with another holder. UpdateJob, AppendRelayEvent (work board on),
-//     WrkAppend (completed or joined records, work board on) and PutDocument
-//     (deploy records) take it first for that reason. Taking it again in the
+//     cycle with another holder. UpdateJob, AppendRelayEvent (work board on,
+//     or an event that answers or ends a decision: relayTouchesDecisions),
+//     WrkAppend (completed or joined records) and PutDocument (deploy
+//     records) take it first for that reason. Taking it again in the
 //     same transaction (applyJobRoleTx, applyDeployRecordTx) is a no-op:
 //     advisory locks are re-entrant.
 //
@@ -43,7 +44,9 @@ package store
 //  5. Rows that belong to a locked task: task_events (its foreign key takes
 //     KEY SHARE on the task row), task_labels, task_relations,
 //     task_subscribers, linear_board_tasks, linear_outbox, sync_decisions;
-//     shared rows read FOR SHARE (labels).
+//     shared rows read FOR SHARE (labels). decision_requests rows that name a
+//     task or a job are updated only under the level-2 lock, several at a
+//     time in id order (decision_records.go); the table has no foreign key.
 //
 //  6. At commit: the deferred sync allocator (handoffkeep_sync_allocate)
 //     takes pg_advisory_xact_lock(824180067) and then the sync_state row,
@@ -55,6 +58,11 @@ package store
 //   - processNextLinearOutbox and ProcessNextLinearDecisionOp lock their
 //     queue row before the task row; only the processor locks an existing
 //     queue row, so no task writer waits on it.
+//   - decision_requests rows outside level 2: an INSERT takes a new key and
+//     waits on no existing row (CreateDisposition, a new chat question or
+//     relay ask); chat rows are written only by the chat writers, after their
+//     chat_questions row, and no task or job writer touches them; a snooze
+//     locks one row and nothing else.
 //   - Other advisory locks (disposition origin, task comment insert, labels,
 //     Linear board ownership, quota presence) are each the first lock of
 //     their transaction, and no transaction requests one while it holds a
