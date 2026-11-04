@@ -98,6 +98,13 @@ func newUITestServer(t *testing.T, s *store.Store, fixture *uiJWTFixture, hubURL
 
 func newUITestServerWithClient(t *testing.T, s *store.Store, fixture *uiJWTFixture, hubURL, hubToken string, poll time.Duration, hubClient *http.Client) *httptest.Server {
 	t.Helper()
+	return newUITestServerConfig(t, fixture, ui.Config{Store: s, HubURL: hubURL, HubToken: hubToken, HubHTTPClient: hubClient, PollInterval: poll})
+}
+
+// newUITestServerConfig serves config (with the fixture's Access verifier)
+// behind the API handler, as `serve` does.
+func newUITestServerConfig(t *testing.T, fixture *uiJWTFixture, config ui.Config) *httptest.Server {
+	t.Helper()
 	access, err := cfaccess.New(cfaccess.Config{
 		TeamDomain:    "example.cloudflareaccess.com",
 		AUD:           "ui-audience",
@@ -109,11 +116,12 @@ func newUITestServerWithClient(t *testing.T, s *store.Store, fixture *uiJWTFixtu
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler, err := ui.New(ui.Config{Store: s, Access: access, HubURL: hubURL, HubToken: hubToken, HubHTTPClient: hubClient, PollInterval: poll})
+	config.Access = access
+	handler, err := ui.New(config)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return httptest.NewServer(api.Server{Service: api.Service{Store: s}, Tokens: api.Tokens{"node": "node-token"}, UI: handler}.Handler())
+	return httptest.NewServer(api.Server{Service: api.Service{Store: config.Store}, Tokens: api.Tokens{"node": "node-token"}, UI: handler}.Handler())
 }
 
 func uiRequest(t *testing.T, client *http.Client, method, rawURL, assertion, bearer string) *http.Response {
@@ -596,6 +604,9 @@ func TestUIEvents(t *testing.T) {
 		t.Fatalf("SSE status=%d content-type=%q", response.StatusCode, response.Header.Get("Content-Type"))
 	}
 	reader := bufio.NewReader(response.Body)
+	if line, _ := reader.ReadString('\n'); line != "retry: 5000\n" {
+		t.Fatalf("initial retry=%q", line)
+	}
 	if line, _ := reader.ReadString('\n'); line != "event: delta\n" {
 		t.Fatalf("initial event=%q", line)
 	}

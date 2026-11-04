@@ -4,7 +4,6 @@ package ui
 import (
 	"crypto/rand"
 	"embed"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"html/template"
@@ -38,6 +37,9 @@ type Config struct {
 	HubHTTPClient *http.Client
 	PollInterval  time.Duration
 	HubCacheTTL   time.Duration
+	// SSEHeartbeat is how often /ui/events writes a comment line to an idle
+	// stream; zero means 25 seconds.
+	SSEHeartbeat time.Duration
 }
 
 // Handler is a Cloudflare Access-authenticated UI handler.
@@ -47,6 +49,7 @@ type Handler struct {
 	templates     *template.Template
 	hub           *hubProxy
 	pollInterval  time.Duration
+	sseHeartbeat  time.Duration
 	static        fs.FS
 	csrfKey       []byte
 	lanes         []string
@@ -87,6 +90,10 @@ func New(config Config) (*Handler, error) {
 	if poll <= 0 {
 		poll = 10 * time.Second
 	}
+	heartbeat := config.SSEHeartbeat
+	if heartbeat <= 0 {
+		heartbeat = 25 * time.Second
+	}
 	csrfKey := make([]byte, 32)
 	if _, err := rand.Read(csrfKey); err != nil {
 		return nil, fmt.Errorf("generate UI CSRF key: %w", err)
@@ -113,6 +120,7 @@ func New(config Config) (*Handler, error) {
 		access:        config.Access,
 		hub:           hub,
 		pollInterval:  poll,
+		sseHeartbeat:  heartbeat,
 		static:        static,
 		csrfKey:       csrfKey,
 		lanes:         lanes,
@@ -694,15 +702,4 @@ func formatTimePtr(value *time.Time) string {
 		return ""
 	}
 	return formatTime(*value)
-}
-
-func writeSSE(w http.ResponseWriter, relayMaxID, taskEventMaxID int64) {
-	payload, _ := json.Marshal(struct {
-		RelayMaxID     int64 `json:"relay_max_id"`
-		TaskEventMaxID int64 `json:"task_event_max_id"`
-	}{relayMaxID, taskEventMaxID})
-	fmt.Fprintf(w, "event: delta\ndata: %s\n\n", payload)
-	if flush, ok := w.(http.Flusher); ok {
-		flush.Flush()
-	}
 }
