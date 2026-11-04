@@ -85,3 +85,21 @@ func TestMilestoneRenamePreservesOtherFields(t *testing.T) {
 		t.Fatalf("saved=%v", saved)
 	}
 }
+
+func TestMilestoneUpdateEmptyTargetSendsNull(t *testing.T) {
+	var patch map[string]json.RawMessage
+	h := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
+			t.Error(err)
+		}
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer h.Close()
+	if err := run([]string{"tasks", "milestone", "update", "5", "new", "--project", "experiment", "--target", "", "--url", h.URL, "--token", "tok"}, io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if string(patch["set_target"]) != "true" || string(patch["target_at"]) != "null" {
+		t.Fatalf("patch=%v", patch)
+	}
+}
