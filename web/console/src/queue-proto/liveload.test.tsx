@@ -79,7 +79,7 @@ function mkTask(over: Partial<ProtoTask>): ProtoTask {
     id: 598,
     title: "live load view",
     kind: "implement",
-    state: "in_progress",
+    state: "developing",
     lane: "director-1",
     claimant: null,
     priority: 90,

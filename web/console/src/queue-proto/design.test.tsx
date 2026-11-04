@@ -32,7 +32,7 @@ function mkBoardTask(over: Partial<BoardTask>): BoardTask {
     lane: "live-lane",
     title: "live task alpha",
     kind: "fix",
-    state: "claimed",
+    state: "developing",
     priority: 40,
     created_by: "live-op",
     created_at: "2026-09-19T09:00:00+09:00",
@@ -293,13 +293,13 @@ describe("state-grouped list structure", () => {
   it("groups by state in operator order with shape, Korean name and count", () => {
     const { container } = renderLive(tasks);
     const headers = [...container.querySelectorAll<HTMLElement>(".qp-group-state")];
-    expect(headers.map((h) => h.querySelector(".qp-group-name")!.textContent)).toEqual(["결정 필요", "개발 중", "대기", "알 수 없는 상태 (parked)"]);
+    expect(headers.map((h) => h.querySelector(".qp-group-name")!.textContent)).toEqual(["결정 필요", "대기", "개발 중", "알 수 없는 상태 (parked)"]);
     expect(headers.map((h) => h.querySelector(".qp-group-count")!.textContent)).toEqual(["2", "1", "1", "1"]);
     expect(headers.every((h) => h.querySelector("svg[data-state-shape]") !== null)).toBe(true);
     expect(headers.every((h) => h.closest("h2") !== null && h.hasAttribute("aria-expanded"))).toBe(true);
     // rows under a group keep priority order, largest first
     const ids = [...container.querySelectorAll<HTMLElement>(".qp-row")].map((r) => Number(r.dataset.taskId));
-    expect(ids).toEqual([2, 3, 4, 1, 5]);
+    expect(ids).toEqual([2, 3, 1, 4, 5]);
   });
 
   it("collapsing a group hides its rows but keeps its count", () => {
@@ -378,7 +378,7 @@ describe("area→bundle draft grouping is local-preview only", () => {
 describe("project grouping on the live queue", () => {
   const tasks = [
     mkBoardTask({ id: 1, state: "backlog", project: "handoffkeep" }),
-    mkBoardTask({ id: 2, state: "claimed", project: "wrk" }),
+    mkBoardTask({ id: 2, state: "developing", project: "wrk" }),
     mkBoardTask({ id: 3, state: "backlog", project: "handoffkeep" }),
     mkBoardTask({ id: 4, state: "backlog", project: null }),
     mkBoardTask({ id: 5, state: "backlog" }),

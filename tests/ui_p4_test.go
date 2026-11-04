@@ -560,7 +560,7 @@ func TestUIP4BatchAnswersAndAudit(t *testing.T) {
 		}
 	}
 	updated, found, err := s.GetTask(t.Context(), task)
-	if err != nil || !found || updated.State != "claimed" {
+	if err != nil || !found || updated.State != "developing" {
 		t.Fatalf("task after batch=%+v found=%t err=%v", updated, found, err)
 	}
 	lines := strings.Split(strings.TrimSpace(audit.String()), "\n")
@@ -830,8 +830,8 @@ func TestUIP4BatchSelectionBoundsAndHubFailure(t *testing.T) {
 		t.Fatalf("hub failure status=%d body=%q", response.StatusCode, body)
 	}
 	updated, _, _ := s.GetTask(t.Context(), task)
-	if updated.State != "needs_decision" {
-		t.Fatalf("hub failure transitioned task=%s", updated.State)
+	if updated.State != "developing" || !updated.AwaitingDecision {
+		t.Fatalf("hub failure transitioned task=%s awaiting=%v", updated.State, updated.AwaitingDecision)
 	}
 }
 
@@ -960,7 +960,7 @@ func TestUIP4LegacyDecisionControlsAndAnswer(t *testing.T) {
 		t.Fatalf("legacy hub requests=%+v", requests)
 	}
 	updated, found, err := s.GetTask(t.Context(), legacy)
-	if err != nil || !found || updated.State != "claimed" {
+	if err != nil || !found || updated.State != "developing" {
 		t.Fatalf("legacy task=%+v found=%t err=%v", updated, found, err)
 	}
 }
@@ -989,7 +989,7 @@ func TestUIP4LegacyDecisionOnlyAndWhitelist(t *testing.T) {
 			t.Fatalf("legacy only status=%d", response.StatusCode)
 		}
 		updated, found, err := s.GetTask(t.Context(), other)
-		if err != nil || !found || updated.State != "needs_decision" {
+		if err != nil || !found || updated.State != "developing" || !updated.AwaitingDecision {
 			t.Fatalf("only submission changed other task=%+v found=%t err=%v", updated, found, err)
 		}
 		requests := hub.requests()
@@ -1017,7 +1017,7 @@ func TestUIP4LegacyDecisionOnlyAndWhitelist(t *testing.T) {
 			t.Fatalf("whitelist status=%d body=%q hub=%d", response.StatusCode, responseBody, len(hub.requests()))
 		}
 		updated, found, err := s.GetTask(t.Context(), legacy)
-		if err != nil || !found || updated.State != "needs_decision" {
+		if err != nil || !found || updated.State != "developing" || !updated.AwaitingDecision {
 			t.Fatalf("whitelist changed task=%+v found=%t err=%v", updated, found, err)
 		}
 	})
@@ -1063,7 +1063,7 @@ func TestUIP4QueueOperatorViewExcludesInProgressImplement(t *testing.T) {
 	if response.StatusCode != http.StatusOK || !strings.Contains(body, implement.Title) || !strings.Contains(body, decision.Title) {
 		t.Fatalf("board API status=%d body=%q", response.StatusCode, body)
 	}
-	if !strings.Contains(body, `"state":"in_progress"`) || !strings.Contains(body, `"state":"needs_decision"`) {
+	if !strings.Contains(body, `"state":"developing"`) || !strings.Contains(body, `"awaiting_decision":true`) {
 		t.Fatalf("board API dropped canonical states: %q", body)
 	}
 }
@@ -1089,12 +1089,9 @@ func TestUIP4RenderedDecisionFormOnlyOverFifty(t *testing.T) {
 	}
 	for _, id := range tasks {
 		updated, found, err := s.GetTask(t.Context(), id)
-		want := "needs_decision"
-		if id == target {
-			want = "claimed"
-		}
-		if err != nil || !found || updated.State != want {
-			t.Fatalf("GT1 task=%d state=%q want=%q found=%t err=%v", id, updated.State, want, found, err)
+		wantAwaiting := id != target
+		if err != nil || !found || updated.State != "developing" || updated.AwaitingDecision != wantAwaiting {
+			t.Fatalf("GT1 task=%d state=%q awaiting=%v wantAwaiting=%v found=%t err=%v", id, updated.State, updated.AwaitingDecision, wantAwaiting, found, err)
 		}
 	}
 }
@@ -1118,7 +1115,7 @@ func TestUIP4RenderedDecisionFormOnlyThreshold(t *testing.T) {
 			response, rendered := submitRenderedDecisionForm(t, h, assertion, cookie, body, extra)
 			responseBody := responseText(t, response)
 			updated, found, err := s.GetTask(t.Context(), target)
-			if rendered < count || response.StatusCode != http.StatusOK || strings.Count(responseBody, `data-item-status="200"`) != 1 || len(hub.requests()) != 1 || err != nil || !found || updated.State != "claimed" {
+			if rendered < count || response.StatusCode != http.StatusOK || strings.Count(responseBody, `data-item-status="200"`) != 1 || len(hub.requests()) != 1 || err != nil || !found || updated.State != "developing" || updated.AwaitingDecision {
 				t.Fatalf("GT2 count=%d rendered=%d status=%d results=%d hub=%d task=%+v found=%t err=%v body=%q", count, rendered, response.StatusCode, strings.Count(responseBody, `data-item-status="200"`), len(hub.requests()), updated, found, err, responseBody)
 			}
 		})
@@ -1149,12 +1146,9 @@ func TestUIP4SelectedDecisionBatchAdvancesOverFifty(t *testing.T) {
 	}
 	for position, id := range ordered {
 		updated, found, err := s.GetTask(t.Context(), id)
-		want := "needs_decision"
-		if position < 50 {
-			want = "claimed"
-		}
-		if err != nil || !found || updated.State != want {
-			t.Fatalf("GT3 first submit task=%d position=%d state=%q want=%q found=%t err=%v", id, position, updated.State, want, found, err)
+		wantAwaiting := position >= 50
+		if err != nil || !found || updated.State != "developing" || updated.AwaitingDecision != wantAwaiting {
+			t.Fatalf("GT3 first submit task=%d position=%d state=%q awaiting=%t wantAwaiting=%t found=%t err=%v", id, position, updated.State, updated.AwaitingDecision, wantAwaiting, found, err)
 		}
 	}
 
@@ -1166,7 +1160,7 @@ func TestUIP4SelectedDecisionBatchAdvancesOverFifty(t *testing.T) {
 	response, _ = submitRenderedDecisionForm(t, h, assertion, cookie, responseBody, extra)
 	responseBody = responseText(t, response)
 	updated, found, err := s.GetTask(t.Context(), remaining)
-	if response.StatusCode != http.StatusOK || strings.Count(responseBody, `data-item-status="200"`) != 1 || len(hub.requests()) != 51 || err != nil || !found || updated.State != "claimed" {
+	if response.StatusCode != http.StatusOK || strings.Count(responseBody, `data-item-status="200"`) != 1 || len(hub.requests()) != 51 || err != nil || !found || updated.State != "developing" || updated.AwaitingDecision {
 		t.Fatalf("GT3 retry status=%d results=%d hub=%d task=%+v found=%t err=%v body=%q", response.StatusCode, strings.Count(responseBody, `data-item-status="200"`), len(hub.requests()), updated, found, err, responseBody)
 	}
 }
@@ -1193,7 +1187,7 @@ func TestUIP4RecommendedDecisionBatchAdvancesOverFifty(t *testing.T) {
 			if err != nil || !found {
 				t.Fatalf("GT4 task=%d found=%t err=%v", id, found, err)
 			}
-			if updated.State != "claimed" {
+			if updated.State != "developing" || updated.AwaitingDecision {
 				allClaimed = false
 				break
 			}
@@ -1209,8 +1203,8 @@ func TestUIP4RecommendedDecisionBatchAdvancesOverFifty(t *testing.T) {
 	}
 	for _, id := range tasks {
 		updated, found, err := s.GetTask(t.Context(), id)
-		if err != nil || !found || updated.State != "claimed" {
-			t.Fatalf("GT4 task=%d state=%q found=%t err=%v", id, updated.State, found, err)
+		if err != nil || !found || updated.State != "developing" || updated.AwaitingDecision {
+			t.Fatalf("GT4 task=%d state=%q awaiting=%t found=%t err=%v", id, updated.State, updated.AwaitingDecision, found, err)
 		}
 	}
 }

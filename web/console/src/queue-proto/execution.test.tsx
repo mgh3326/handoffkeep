@@ -29,7 +29,7 @@ const task: BoardTask = {
   title: "Example work",
   lane: "example-project",
   kind: "implement",
-  state: "in_progress",
+  state: "developing",
   priority: 70,
   created_by: "example-operator",
   created_at: at,
@@ -137,7 +137,7 @@ it("does not turn an unsafe projected PR into a link", () => {
 it("accepts the new BFF fields and rejects malformed sessions at the read boundary", async () => {
   const response = {
     generated_at: at,
-    states: ["in_progress"],
+    states: ["developing"],
     tasks: [task],
     truncated: false,
   };

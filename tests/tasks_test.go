@@ -81,7 +81,7 @@ func TestTaskConcurrentClaimHasExactlyOneWinner(t *testing.T) {
 		t.Fatalf("wins=%d conflicts=%d", wins, conflicts)
 	}
 	got, found, err := s.GetTask(t.Context(), task.ID)
-	if err != nil || !found || got.State != "claimed" || len(got.Events) != 1 {
+	if err != nil || !found || got.State != "developing" || len(got.Events) != 1 {
 		t.Fatalf("task=%+v found=%v err=%v", got, found, err)
 	}
 }
@@ -110,7 +110,7 @@ func TestTaskEveryTransitionWritesOneEvent(t *testing.T) {
 		}
 	}
 	got, found, err := s.GetTask(t.Context(), task.ID)
-	if err != nil || !found || got.State != "merged" || len(got.Events) != 6 {
+	if err != nil || !found || got.State != "merged" || len(got.Events) != 5 {
 		t.Fatalf("task=%+v found=%v err=%v", got, found, err)
 	}
 	for i, event := range got.Events {
@@ -128,7 +128,7 @@ func TestTaskNextClaimsPriorityThenCreationOrder(t *testing.T) {
 	highSecond := newTask(t, s, lane, "high second", 9)
 	for _, want := range []int64{highFirst.ID, highSecond.ID, low.ID} {
 		got, err := s.NextTask(t.Context(), lane, "captain-a", "job-1", "")
-		if err != nil || got.ID != want || got.State != "claimed" {
+		if err != nil || got.ID != want || got.State != "developing" {
 			t.Fatalf("got=%+v err=%v want=%d", got, err, want)
 		}
 	}
@@ -159,7 +159,7 @@ func TestTaskNextEmptyIsExplicitQueueEmptyAndCLIExitThree(t *testing.T) {
 
 func TestTaskTransitionGraphAndRefsSnapshots(t *testing.T) {
 	s := taskTestStore(t)
-	// join -> hold is forbidden; needs_decision -> claimed is the canonical
+	// join (reviewing) -> researching is forbidden; needs_decision -> claimed is the canonical
 	// decision-resume path (backlog remains an allowed alternative).
 	join := newTask(t, s, taskLane(t), "joined", 0)
 	if _, err := s.ClaimTask(t.Context(), join.ID, "captain", "job-1", ""); err != nil {
@@ -170,8 +170,8 @@ func TestTaskTransitionGraphAndRefsSnapshots(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := s.TransitionTask(t.Context(), join.ID, "hold", "node", "", nil, ""); !errors.Is(err, store.ErrTaskConflict) {
-		t.Fatalf("join->hold error=%v", err)
+	if _, err := s.TransitionTask(t.Context(), join.ID, "researching", "node", "", nil, ""); !errors.Is(err, store.ErrTaskConflict) {
+		t.Fatalf("join->researching error=%v", err)
 	}
 	decision := newTask(t, s, taskLane(t), "decision", 0)
 	if _, err := s.ClaimTask(t.Context(), decision.ID, "captain", "job-1", ""); err != nil {
@@ -192,7 +192,7 @@ func TestTaskTransitionGraphAndRefsSnapshots(t *testing.T) {
 	if _, err = s.ClaimTask(t.Context(), task.ID, "captain", "job-4", ""); err != nil {
 		t.Fatal(err)
 	}
-	got, err := s.TransitionTask(t.Context(), task.ID, "in_progress", "node", "started", &store.TaskRefs{PR: "5"}, "")
+	got, err := s.TransitionTask(t.Context(), task.ID, "verifying", "node", "started", &store.TaskRefs{PR: "5"}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,7 +228,7 @@ func TestTaskRejectsSecretNoteQuestionAndRefsWithoutStorage(t *testing.T) {
 		resp.Body.Close()
 	}
 	got, found, err := s.GetTask(t.Context(), task.ID)
-	if err != nil || !found || got.State != "claimed" || len(got.Events) != 1 {
+	if err != nil || !found || got.State != "developing" || len(got.Events) != 1 {
 		t.Fatalf("task=%+v found=%v err=%v", got, found, err)
 	}
 }

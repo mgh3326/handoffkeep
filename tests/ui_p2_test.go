@@ -188,7 +188,7 @@ func TestUIWriteDecisionRoutes(t *testing.T) {
 		t.Fatalf("hub request=%+v", got)
 	}
 	updated, found, err := s.GetTask(t.Context(), task.ID)
-	if err != nil || !found || updated.State != "claimed" {
+	if err != nil || !found || updated.State != "developing" {
 		t.Fatalf("task after answer=%+v found=%t err=%v", updated, found, err)
 	}
 	latest := updated.Events[len(updated.Events)-1]
@@ -212,7 +212,7 @@ func TestUIWriteDecisionRoutes(t *testing.T) {
 		t.Fatalf("duplicate response=%q", body)
 	}
 	updated, _, _ = s.GetTask(t.Context(), duplicateTask.ID)
-	if updated.State != "claimed" {
+	if updated.State != "developing" {
 		t.Fatalf("duplicate did not transition task: %s", updated.State)
 	}
 
@@ -228,8 +228,8 @@ func TestUIWriteDecisionRoutes(t *testing.T) {
 		t.Fatalf("failure response=%q", body)
 	}
 	updated, _, _ = s.GetTask(t.Context(), failedTask.ID)
-	if updated.State != "needs_decision" {
-		t.Fatalf("failed emit transitioned task: %s", updated.State)
+	if updated.State != "developing" || !updated.AwaitingDecision {
+		t.Fatalf("failed emit transitioned task: %s awaiting=%v", updated.State, updated.AwaitingDecision)
 	}
 
 	// A concurrent transition after a 201 is distinguished from a hub failure.
@@ -262,8 +262,8 @@ func TestUIWriteDecisionRoutes(t *testing.T) {
 		t.Fatalf("transition error response=%q", body)
 	}
 	updated, _, _ = s.GetTask(t.Context(), errorTask.ID)
-	if updated.State != "needs_decision" {
-		t.Fatalf("task error changed state: %s", updated.State)
+	if updated.State != "developing" || !updated.AwaitingDecision {
+		t.Fatalf("task error changed state: %s awaiting=%v", updated.State, updated.AwaitingDecision)
 	}
 
 	// Invalid hub input is also surfaced as a lane-send failure and cannot
@@ -279,8 +279,8 @@ func TestUIWriteDecisionRoutes(t *testing.T) {
 		t.Fatalf("bad hub response=%q", body)
 	}
 	updated, _, _ = s.GetTask(t.Context(), badTask.ID)
-	if updated.State != "needs_decision" {
-		t.Fatalf("bad hub transitioned task: %s", updated.State)
+	if updated.State != "developing" || !updated.AwaitingDecision {
+		t.Fatalf("bad hub transitioned task: %s awaiting=%v", updated.State, updated.AwaitingDecision)
 	}
 
 	// A lane decision receives the mandatory closing prefix and hub persistence
@@ -469,8 +469,8 @@ func TestUIWriteHubTimeoutLeavesTaskUnchanged(t *testing.T) {
 		t.Fatalf("timeout response status=%d body=%q", response.StatusCode, body)
 	}
 	updated, _, _ := s.GetTask(t.Context(), task.ID)
-	if updated.State != "needs_decision" || len(hub.requests()) != 1 {
-		t.Fatalf("timeout changed task or did not make one hub request: task=%s hub=%d", updated.State, len(hub.requests()))
+	if updated.State != "developing" || !updated.AwaitingDecision || len(hub.requests()) != 1 {
+		t.Fatalf("timeout changed task or did not make one hub request: task=%s awaiting=%v hub=%d", updated.State, updated.AwaitingDecision, len(hub.requests()))
 	}
 }
 

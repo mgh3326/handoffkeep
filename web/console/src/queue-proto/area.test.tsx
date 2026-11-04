@@ -12,7 +12,7 @@ function mkBoardTask(over: Partial<BoardTask>): BoardTask {
     lane: "area-lane",
     title: "area test task",
     kind: "implement",
-    state: "claimed",
+    state: "developing",
     priority: 10,
     created_by: "director",
     created_at: "2026-09-21T10:00:00Z",

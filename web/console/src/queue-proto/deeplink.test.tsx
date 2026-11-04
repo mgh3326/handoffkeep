@@ -15,7 +15,7 @@ function detailFor(id: number, title: string): BoardDetail {
       lane: "ops",
       title,
       kind: "work",
-      state: "claimed",
+      state: "developing",
       priority: 1,
       created_by: "tester",
       created_at: "2026-09-20T00:00:00Z",

@@ -30,14 +30,14 @@ func TestTaskRebindRouteChangesJobAndReturnsAuditEvent(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&rebound); err != nil {
 		t.Fatal(err)
 	}
-	if rebound.State != "claimed" || rebound.ClaimedBy != "new-builder" || rebound.Refs.JobID != "job-new" {
+	if rebound.State != "developing" || rebound.ClaimedBy != "new-builder" || rebound.Refs.JobID != "job-new" {
 		t.Fatalf("rebind response=%+v", rebound)
 	}
 	row, found, err := s.GetTask(t.Context(), task.ID)
 	if err != nil || !found || len(row.Events) != 2 {
 		t.Fatalf("task events=%+v found=%v err=%v", row.Events, found, err)
 	}
-	if event := row.Events[1]; event.From != "claimed" || event.To != "claimed" || event.By != "new-builder" ||
+	if event := row.Events[1]; event.From != "developing" || event.To != "developing" || event.By != "new-builder" ||
 		event.Note != "builder takeover" || event.Rebind == nil || event.Rebind.FromJob != "job-old" ||
 		event.Rebind.ToJob != "job-new" || event.Rebind.By != "new-builder" || event.Rebind.Reason != "builder takeover" {
 		t.Fatalf("rebind event=%+v", event)

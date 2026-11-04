@@ -337,12 +337,12 @@ func TestUIBoardTaskDetail(t *testing.T) {
 	if got.Task.Refs.PR != "https://github.com/x/y/pull/1" || got.Task.Refs.HeadSHA != "abcdef1234567890" || got.Task.Refs.ReportPath != "report/x.md" || got.Task.Refs.JobID != "job-1" {
 		t.Fatalf("refs not preserved: %+v", got.Task.Refs)
 	}
-	if len(got.Events) != 2 || got.Events[0].From != "backlog" || got.Events[0].To != "claimed" || got.Events[1].From != "claimed" || got.Events[1].To != "in_progress" || got.Events[1].Note != "started" {
+	if len(got.Events) != 1 || got.Events[0].From != "backlog" || got.Events[0].To != "developing" {
 		t.Fatalf("events=%+v", got.Events)
 	}
 	open := 0
 	for _, segment := range got.Dwell {
-		if segment.State == "in_progress" && segment.Open {
+		if segment.State == "developing" && segment.Open {
 			open++
 		}
 	}

@@ -150,7 +150,7 @@ func TestTaskCommentNeverMovesTaskOrDecisions(t *testing.T) {
 	}
 	defer db.Close(t.Context())
 	before := snapshotTask(t, s, db, task.ID, lane, question.ID)
-	if !before.OpenLane || !before.OpenTask || before.Task.State != "needs_decision" {
+	if !before.OpenLane || !before.OpenTask || before.Task.State != "developing" || !before.Task.AwaitingDecision {
 		t.Fatalf("fixture not open: %+v", before)
 	}
 	h := taskHTTP(s)

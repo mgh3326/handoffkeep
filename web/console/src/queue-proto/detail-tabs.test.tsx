@@ -15,7 +15,7 @@ function mkBoardTask(over: Partial<BoardTask>): BoardTask {
     lane: "body-lane",
     title: "one operator line",
     kind: "implement",
-    state: "claimed",
+    state: "developing",
     priority: 10,
     created_by: "director",
     created_at: "2026-09-21T10:00:00Z",
