@@ -394,10 +394,10 @@ func TestAssistantChatAnswerStaleWritesNothing(t *testing.T) {
 	if _, _, err := s.UpsertChatQuestion(ctx, ChatQuestion{ID: stale, Lane: "desk-lane", Body: "edited"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.TransitionChatQuestion(ctx, resolved, "resolved"); err != nil {
+	if _, err := s.TransitionChatQuestion(ctx, resolved, "resolved", "desk"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.TransitionChatQuestion(ctx, withdrawn, "withdrawn"); err != nil {
+	if _, err := s.TransitionChatQuestion(ctx, withdrawn, "withdrawn", "desk"); err != nil {
 		t.Fatal(err)
 	}
 	for i, tc := range []struct {

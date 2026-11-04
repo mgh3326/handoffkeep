@@ -420,6 +420,11 @@ func (s *Store) RecordLinearDecisionIssue(ctx context.Context, link LinearDecisi
 			}
 		}
 	}
+	if created {
+		if err := mirrorLinearDecisionTx(ctx, tx, link, now); err != nil {
+			return LinearDecisionLink{}, false, err
+		}
+	}
 	var out LinearDecisionLink
 	if err := scanLinearDecisionLink(tx.QueryRow(ctx, `SELECT `+linearDecisionLinkColumns+` FROM linear_decision_issues WHERE request_id=$1`, link.RequestID), &out); err != nil {
 		return LinearDecisionLink{}, false, err
@@ -491,6 +496,7 @@ func (s *Store) AnswerLinearDecision(ctx context.Context, in LinearDecisionAnswe
 	if err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, link.TaskID), &x); err != nil {
 		return "", err
 	}
+	decisionBefore := decisionBeforeOf(x)
 	v := decideLinearAnswer(link, x.State, x.Refs.DecisionRequest, x.Refs.DecisionOptions, in)
 	now := time.Now().UTC()
 	if v.outcome == LinearDecisionRecorded {
@@ -528,6 +534,9 @@ func (s *Store) AnswerLinearDecision(ctx context.Context, in LinearDecisionAnswe
 		}
 		note := "decision-answered " + resolved.ID + " " + v.option.Key + " (operator on Linear " + link.Identifier + ", ver=" + link.Ver + ")"
 		if err = insertDecisionEvent(ctx, tx, x.ID, x.State, linearDecisionRecorder, note, x.Refs, now); err != nil {
+			return "", err
+		}
+		if err = mirrorTaskDecisionsTx(ctx, tx, decisionBefore, x, linearDecisionRecorder, note, 0, now); err != nil {
 			return "", err
 		}
 		if err = queueDecisionClosedPost(ctx, tx, resolved, x.Refs.DecisionOptions, now); err != nil {

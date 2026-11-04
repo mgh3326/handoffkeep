@@ -12,8 +12,8 @@ import (
 func (s Service) UpsertChatQuestion(ctx context.Context, x store.ChatQuestion) (store.ChatQuestion, bool, error) {
 	return s.Store.UpsertChatQuestion(ctx, x)
 }
-func (s Service) TransitionChatQuestion(ctx context.Context, id, to string) (store.ChatQuestion, error) {
-	return s.Store.TransitionChatQuestion(ctx, id, to)
+func (s Service) TransitionChatQuestion(ctx context.Context, id, to, by string) (store.ChatQuestion, error) {
+	return s.Store.TransitionChatQuestion(ctx, id, to, by)
 }
 func (s Service) ListChatQuestions(ctx context.Context, lane, state, afterID string, limit int) ([]store.ChatQuestion, error) {
 	return s.Store.ListChatQuestions(ctx, lane, state, afterID, limit)
@@ -102,7 +102,8 @@ type chatQuestionTransitionInput struct {
 }
 
 func (s Server) chatQuestionTransition(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.auth(w, r); !ok {
+	client, ok := s.auth(w, r)
+	if !ok {
 		return
 	}
 	defer r.Body.Close()
@@ -111,7 +112,7 @@ func (s Server) chatQuestionTransition(w http.ResponseWriter, r *http.Request) {
 		appErr(w, r, err)
 		return
 	}
-	x, err := s.Service.TransitionChatQuestion(r.Context(), r.PathValue("id"), input.To)
+	x, err := s.Service.TransitionChatQuestion(r.Context(), r.PathValue("id"), input.To, client)
 	if err != nil {
 		appErr(w, r, err)
 		return

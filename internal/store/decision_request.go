@@ -584,6 +584,7 @@ func (s *Store) RecordDecisionRequest(ctx context.Context, taskID int64, by stri
 	if err := s.wrkTaskFenceTx(ctx, tx, x, "needs_decision", false); err != nil {
 		return DecisionRequestResult{}, err
 	}
+	decisionBefore := decisionBeforeOf(x)
 	// Disposition items have their own closed options and operator route.
 	if x.Refs.Disposition != nil {
 		return DecisionRequestResult{}, invalidDecisionRequest("disposition items take no decision requests")
@@ -657,6 +658,9 @@ func (s *Store) RecordDecisionRequest(ctx context.Context, taskID int64, by stri
 			}
 		}
 	} else if err = insertDecisionEvent(ctx, tx, taskID, x.State, by, note, x.Refs, now); err != nil {
+		return DecisionRequestResult{}, err
+	}
+	if err = mirrorTaskDecisionsTx(ctx, tx, decisionBefore, x, by, request.Question, 0, now); err != nil {
 		return DecisionRequestResult{}, err
 	}
 	if err = s.recordLinearBoardTaskTx(ctx, tx, x, note); err != nil {
@@ -763,6 +767,7 @@ func (s *Store) resolveDecisionRequest(ctx context.Context, taskID int64, by str
 	if err := s.wrkTaskFenceTx(ctx, tx, x, "claimed", false); err != nil {
 		return DecisionRequestResult{}, err
 	}
+	decisionBefore := decisionBeforeOf(x)
 	request := x.Refs.DecisionRequest
 	if request == nil || request.ID != in.RequestID {
 		return DecisionRequestResult{}, ErrDecisionRequestStale
@@ -886,6 +891,9 @@ func (s *Store) resolveDecisionRequest(ctx context.Context, taskID int64, by str
 		}
 	}
 	if err = insertDecisionEvent(ctx, tx, taskID, x.State, by, note, x.Refs, now); err != nil {
+		return DecisionRequestResult{}, err
+	}
+	if err = mirrorTaskDecisionsTx(ctx, tx, decisionBefore, x, by, note, 0, now); err != nil {
 		return DecisionRequestResult{}, err
 	}
 	if err = queueDecisionClosedPost(ctx, tx, resolved, x.Refs.DecisionOptions, now); err != nil {

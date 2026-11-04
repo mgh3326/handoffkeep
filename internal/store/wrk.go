@@ -189,11 +189,12 @@ func (s *Store) WrkAppend(ctx context.Context, actor, job, key string, r wrkreco
 		return out, wrkrecords.Error("wrk_unavailable")
 	}
 	defer tx.Rollback(ctx)
-	// A claim locks its task row; a completed or joined record with the work
-	// board on locks every task its relay event matches. Either takes the
-	// task-mutation lock before the job locks below (lock order, lockorder.go).
-	boardRelay := s.LinearBoardEnabled() && (r.Kind == "completed" || r.Kind == "joined")
-	if r.Kind == "claim" || r.Kind == "activate" || boardRelay {
+	// A claim locks its task row; a completed or joined record locks every
+	// task its relay event matches (work board on) and supersedes the job's
+	// open decision records. Either takes the task-mutation lock before the
+	// job locks below (lock order, lockorder.go).
+	endRelay := r.Kind == "completed" || r.Kind == "joined"
+	if r.Kind == "claim" || r.Kind == "activate" || endRelay {
 		if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
 			return out, err
 		}
@@ -308,6 +309,10 @@ func (s *Store) WrkAppend(ctx context.Context, actor, job, key string, r wrkreco
 		// the legacy table keeps its existing schema.
 		_, err = tx.Exec(ctx, `INSERT INTO relay_events(kind,job_id,epoch,owner_lane,report_path,reason,head,pr,received_at) VALUES($1,$2,0,$3,$4,'',$5,$6,now()) ON CONFLICT (kind,job_id,epoch,report_path,reason) WHERE `+relayJobConflictPredicate+` DO UPDATE SET kind=EXCLUDED.kind,job_id=EXCLUDED.job_id,epoch=EXCLUDED.epoch,owner_lane=EXCLUDED.owner_lane,report_path=EXCLUDED.report_path,reason=EXCLUDED.reason,head=EXCLUDED.head,pr=EXCLUDED.pr,machine='',pane_id='',report_last_line='',question='',event_id='',text='',event_time=NULL,received_at=EXCLUDED.received_at,delivered_at=NULL,delivered_to='',attempts=0`, "job."+rec.Kind, job, wrkrecords.Text(claim.Payload, "owner_lane"), "wrk:"+job+":"+intString(rec.Seq), wrkrecords.Text(rec.Payload, "head"), wrkrecords.Text(rec.Payload, "pr"))
 		if err != nil {
+			return out, err
+		}
+		// The relay row closes the job's escalations (ListOpenEscalations).
+		if err = supersedeJobDecisionsTx(ctx, tx, job, rec.Kind, time.Now().UTC()); err != nil {
 			return out, err
 		}
 		if s.LinearBoardEnabled() {

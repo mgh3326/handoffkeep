@@ -270,6 +270,7 @@ func (s *Store) applySourceEventTx(ctx context.Context, tx pgx.Tx, x Task, ev so
 	case SourceMergewakeRevert:
 		x.Refs.RevertPR = ev.RevertPR
 	}
+	decisionBefore := decisionBeforeOf(x)
 	x.State, x.UpdatedAt = to, now
 	applyLifecycle(&x, from, to, now)
 	if x, err = writeTaskTx(ctx, tx, x); err != nil {
@@ -279,6 +280,9 @@ func (s *Store) applySourceEventTx(ctx context.Context, tx pgx.Tx, x Task, ev so
 		TaskID: x.ID, From: from, To: to, By: ev.Source, Note: ev.Note, Refs: x.Refs, At: ev.At, NoJob: noJob,
 		Source: ev.Source, SourceRef: ev.SourceRef, Field: field, ToValue: revertedPR, Auto: true,
 	}); err != nil {
+		return TaskEventResult{}, err
+	}
+	if err = mirrorTaskDecisionsTx(ctx, tx, decisionBefore, x, ev.Source, ev.Note, 0, now); err != nil {
 		return TaskEventResult{}, err
 	}
 	if err = s.afterSourceMoveTx(ctx, tx, x, from, ev.Source, now); err != nil {
