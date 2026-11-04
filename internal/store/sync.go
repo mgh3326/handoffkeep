@@ -42,13 +42,28 @@ func (s *Store) SyncDelta(ctx context.Context, after int64, limit int) ([]SyncCh
 		return nil, meta, err
 	}
 	defer tx.Rollback(ctx)
+	changes, meta, err := syncDeltaTx(ctx, tx, after, limit)
+	if err != nil {
+		return nil, meta, err
+	}
+	return changes, meta, tx.Commit(ctx)
+}
+
+// syncDeltaTx reads one delta page in the caller's snapshot. The desk ledger
+// reads its "changed since last ack" section through it, so the ledger and
+// the feed share one reset and watermark rule.
+func syncDeltaTx(ctx context.Context, tx pgx.Tx, after int64, limit int) ([]SyncChange, SyncMetadata, error) {
+	meta := SyncMetadata{LastSyncID: after, SchemaVersion: SchemaVersion}
+	if after < 0 || limit < 1 || limit > SyncLimit {
+		return nil, meta, ErrInvalidSync
+	}
 	var floor int64
-	if err = tx.QueryRow(ctx, `SELECT max_sync_id,pruned_through FROM sync_state WHERE singleton`).Scan(&meta.MaxSyncID, &floor); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT max_sync_id,pruned_through FROM sync_state WHERE singleton`).Scan(&meta.MaxSyncID, &floor); err != nil {
 		return nil, meta, err
 	}
 	if after < floor {
 		minID := meta.MaxSyncID + 1
-		if err = tx.QueryRow(ctx, `SELECT COALESCE(min(sync_id),$1) FROM sync_log`, minID).Scan(&minID); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT COALESCE(min(sync_id),$1) FROM sync_log`, minID).Scan(&minID); err != nil {
 			return nil, meta, err
 		}
 		return nil, meta, &SyncReset{MinSyncID: minID}
@@ -70,10 +85,7 @@ func (s *Store) SyncDelta(ctx context.Context, after int64, limit int) ([]SyncCh
 		changes = append(changes, c)
 		meta.LastSyncID = c.SyncID
 	}
-	if err = rows.Err(); err != nil {
-		return nil, meta, err
-	}
-	return changes, meta, tx.Commit(ctx)
+	return changes, meta, rows.Err()
 }
 
 type SyncRow struct {
