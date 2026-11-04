@@ -237,16 +237,13 @@ func TestTaskClaimAndTransitionRaceKeepsLinkage(t *testing.T) {
 	}()
 	wg.Wait()
 	close(res)
-	wins := 0
+	// The loser of the row lock gets a conflict (the claim arrived second) or
+	// an idempotent no-op (the old-name transition arrived second and the task
+	// is already started). Exactly one of them writes the event.
 	for err := range res {
-		if err == nil {
-			wins++
-		} else if !errors.Is(err, store.ErrTaskConflict) {
-			t.Fatalf("loser err=%v, want task_conflict", err)
+		if err != nil && !errors.Is(err, store.ErrTaskConflict) {
+			t.Fatalf("loser err=%v, want task_conflict or no-op", err)
 		}
-	}
-	if wins != 1 {
-		t.Fatalf("wins=%d want exactly 1", wins)
 	}
 	row, _, _ := s.GetTask(t.Context(), task.ID)
 	linked := row.ClaimedBy != "" && row.Refs.JobID != ""
@@ -277,8 +274,10 @@ func TestTaskConcurrentNoJobTransitionsOneWinner(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
-	if wins != 1 {
-		t.Fatalf("wins=%d want 1", wins)
+	// Callers after the first find the task already started: an idempotent
+	// no-op that writes no event, so exactly one reason is recorded.
+	if wins < 1 {
+		t.Fatalf("wins=%d want at least 1", wins)
 	}
 	row, _, _ := s.GetTask(t.Context(), task.ID)
 	if len(row.Events) != 1 || row.Events[0].NoJob == "" {

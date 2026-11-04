@@ -732,13 +732,20 @@ func (s *Store) DispositionSummary(ctx context.Context, asOf time.Time) (Disposi
 			epoch := created
 			out.CoverageEpoch = &epoch
 		}
+		// A disposition item born under the eleven-state model has no
+		// transition row, only its awaiting_decision event, so openness is
+		// decided before the state is known. History keeps both vocabularies: a
+		// task is open when its newest awaiting event set the flag or its newest
+		// transition entered the old needs_decision state.
+		open := awaiting != nil && *awaiting == "true"
 		if state == nil {
-			continue
+			if !open {
+				continue
+			}
+			st := StateBacklog
+			state = &st
 		}
-		// History keeps both vocabularies: a task is open when its newest
-		// awaiting event set the flag or its newest transition entered the old
-		// needs_decision state.
-		open := (awaiting != nil && *awaiting == "true") || *state == legacyNeedsDecision
+		open = open || *state == legacyNeedsDecision
 		switch {
 		case open:
 			out.Open++

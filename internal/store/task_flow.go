@@ -413,7 +413,9 @@ func (s *Store) transitionTask(ctx context.Context, id int64, in TransitionInput
 		}
 	}
 	from := x.State
-	if action == actNoop {
+	// An old-name transition on a task that is already there changes no state,
+	// but a caller's refs patch (PR, head, report) still lands and is recorded.
+	if action == actNoop && refs == nil {
 		return x, tx.Commit(ctx)
 	}
 	if reopen && !(IsSettledState(from) || from == StateIcebox) {
@@ -453,9 +455,12 @@ func (s *Store) transitionTask(ctx context.Context, id int64, in TransitionInput
 		if x.AwaitingDecision || IsSettledState(from) {
 			return Task{}, ErrTaskConflict
 		}
-	case actClearFlag:
+	case actClearFlag, actNoop:
 	default:
-		if !taskTransitionAllowed(from, to) {
+		// A flagged task may also go back to backlog, the way the old
+		// needs_decision state did; the flag is cleared by the move.
+		backToBacklog := x.AwaitingDecision && to == StateBacklog && !IsSettledState(from)
+		if !backToBacklog && !taskTransitionAllowed(from, to) {
 			return Task{}, ErrTaskConflict
 		}
 		// A task waiting on a decision leaves only the way the old
@@ -560,11 +565,19 @@ func (s *Store) transitionTask(ctx context.Context, id int64, in TransitionInput
 		x.Refs.ReportPath = ""
 	}
 	flagWas := x.AwaitingDecision
+	// Asking a question of a parked task brings it back to backlog, as the old
+	// hold -> needs_decision edge did.
+	unpark := action == actSetFlag && from == StateIcebox
 	switch action {
 	case actSetFlag:
 		x.AwaitingDecision = true
+		if unpark {
+			x.State = StateBacklog
+			applyLifecycle(&x, from, StateBacklog, now)
+		}
 	case actClearFlag:
 		x.AwaitingDecision = false
+	case actNoop:
 	default:
 		x.AwaitingDecision = false
 		x.State = to
@@ -574,7 +587,10 @@ func (s *Store) transitionTask(ctx context.Context, id int64, in TransitionInput
 	if x, err = writeTaskTx(ctx, tx, x); err != nil {
 		return Task{}, err
 	}
-	if action == actMove {
+	if action == actMove || action == actNoop || unpark {
+		if unpark {
+			to = StateBacklog
+		}
 		if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: id, From: from, To: to, By: by, Note: note, Refs: x.Refs, At: now, NoJob: recordedNoJob}); err != nil {
 			return Task{}, err
 		}
@@ -592,7 +608,7 @@ func (s *Store) transitionTask(ctx context.Context, id int64, in TransitionInput
 			return Task{}, err
 		}
 	}
-	if action == actMove {
+	if action == actMove || unpark {
 		if err = s.afterStateChangeTx(ctx, tx, x, from, by, now); err != nil {
 			return Task{}, err
 		}

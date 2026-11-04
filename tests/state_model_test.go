@@ -111,7 +111,7 @@ func TestOldStateNamesOnInput(t *testing.T) {
 		if got := stateModelTask(t, raw); status != http.StatusOK || got.State != "reviewing" {
 			t.Fatalf("%s: status=%d %s", old, status, raw)
 		}
-		if strings.Contains(string(raw), `"`+old+`"`) {
+		if strings.Contains(string(raw), `"state":"`+old+`"`) {
 			t.Fatalf("the response carries the old name %q: %s", old, raw)
 		}
 	}

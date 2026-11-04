@@ -29,6 +29,8 @@ func TestLinearMirrorAdmissionPolicy(t *testing.T) {
 		{"open decision", Task{Refs: TaskRefs{DecisionRequest: &DecisionRequest{Status: DecisionRequestOpen}}}, "decision"},
 		{"closed decision", Task{Refs: TaskRefs{DecisionRequest: &DecisionRequest{Status: "answered"}}}, ""},
 		{"terminal priority", Task{Priority: 1, State: "merged"}, ""},
+		{"deployed priority", Task{Priority: 1, State: "deployed"}, ""},
+		{"duplicate priority", Task{Priority: 1, State: "duplicate"}, ""},
 		{"terminal request", Task{State: "dropped", Refs: TaskRefs{Linear: &TaskLinear{MirrorReason: LinearMirrorDots}}}, ""},
 		{"unknown reason", Task{Refs: TaskRefs{Linear: &TaskLinear{MirrorReason: "from title"}}}, ""},
 	} {

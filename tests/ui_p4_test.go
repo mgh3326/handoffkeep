@@ -342,8 +342,8 @@ func p4StructuredDecisionTasks(t *testing.T, _ *store.Store, lane, prefix string
 	}
 	defer tx.Rollback(context.Background())
 	now := time.Now().UTC()
-	rows, err := tx.Query(t.Context(), `INSERT INTO tasks(lane,title,kind,state,refs,claimed_by,created_by,created_at,updated_at)
-		SELECT $1,title,'implement','needs_decision',$2::jsonb,'worker-a','worker-a',$3,$3
+	rows, err := tx.Query(t.Context(), `INSERT INTO tasks(lane,title,kind,state,awaiting_decision,refs,claimed_by,created_by,created_at,updated_at)
+		SELECT $1,title,'implement','developing',true,$2::jsonb,'worker-a','worker-a',$3,$3
 		FROM unnest($4::text[]) AS title RETURNING id`, lane, string(refs), now, titles)
 	if err != nil {
 		t.Fatal(err)
@@ -414,7 +414,7 @@ func (counter p4OwnedDecisionCounter) counts(t *testing.T) p4OpenDecisionCounts 
 	t.Helper()
 	counts := p4OpenDecisionCounts{}
 	err := counter.db.QueryRow(t.Context(), `SELECT
-		(SELECT COUNT(*) FROM tasks WHERE id = ANY($1) AND state='needs_decision'),
+		(SELECT COUNT(*) FROM tasks WHERE id = ANY($1) AND awaiting_decision),
 		(SELECT COUNT(*) FROM relay_events e WHERE e.id = ANY($2) AND e.kind='job.escalate' AND NOT EXISTS (
 			SELECT 1 FROM relay_events resolved WHERE resolved.job_id=e.job_id
 			AND resolved.kind IN ('job.joined','job.completed','job.lost','job.revoked') AND resolved.id>e.id
@@ -701,7 +701,7 @@ func TestUIP4ResolveClosesOnlyItsDecision(t *testing.T) {
 		t.Fatalf("resolve task status=%d body=%q", response.StatusCode, body)
 	}
 	updated, _, _ := s.GetTask(t.Context(), task)
-	if updated.State != "claimed" {
+	if updated.State != "developing" {
 		t.Fatalf("resolved task state=%s", updated.State)
 	}
 	before := uiRowCounts(t).Relay
@@ -1378,7 +1378,7 @@ func TestUIP4RenderedDecisionFormSuccessfulControls(t *testing.T) {
 	response := uiPostForm(t, h.Client(), h.URL+"/ui/decisions/answer-batch", assertion, cookie, values, h.URL, false)
 	responseBody := responseText(t, response)
 	updated, found, err := s.GetTask(t.Context(), task)
-	if response.StatusCode != http.StatusOK || strings.Count(responseBody, `data-item-status="200"`) != 1 || len(hub.requests()) != 1 || err != nil || !found || updated.State != "claimed" {
+	if response.StatusCode != http.StatusOK || strings.Count(responseBody, `data-item-status="200"`) != 1 || len(hub.requests()) != 1 || err != nil || !found || updated.State != "developing" {
 		t.Fatalf("AC3 status=%d results=%d hub=%d task=%+v found=%t err=%v body=%q", response.StatusCode, strings.Count(responseBody, `data-item-status="200"`), len(hub.requests()), updated, found, err, responseBody)
 	}
 	if values.Get("items."+strconv.Itoa(index)+".answer") != "A: 노드 로컬 저장" || values.Get("items."+strconv.Itoa(index)+".select") != "1" {
