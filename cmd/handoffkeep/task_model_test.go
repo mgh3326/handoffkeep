@@ -59,17 +59,21 @@ func TestTaskModelCommands(t *testing.T) {
 }
 
 func TestMilestoneRenamePreservesOtherFields(t *testing.T) {
-	var saved map[string]any
+	saved := map[string]any{"name": "old", "description": "concurrent edit", "target_at": "2026-02-01T00:00:00Z", "status": "active", "sort_order": float64(3)}
 	h := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		if r.Method == http.MethodGet {
-			_, _ = w.Write([]byte(`{"id":5,"project":"experiment","name":"old","description":"keep","target_at":"2026-02-01T00:00:00Z","status":"active","sort_order":3}`))
-			return
-		}
-		if r.Method != http.MethodPut || r.URL.Path != "/v1/milestones/5" {
+		if r.Method != http.MethodPatch || r.URL.Path != "/v1/milestones/5" {
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 		}
-		_ = json.NewDecoder(r.Body).Decode(&saved)
+		var patch map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
+			t.Error(err)
+		}
+		for _, key := range []string{"name", "description", "target_at", "status", "sort_order"} {
+			if v, ok := patch[key]; ok {
+				saved[key] = v
+			}
+		}
 		_, _ = w.Write([]byte(`{}`))
 	}))
 	defer h.Close()
@@ -77,7 +81,7 @@ func TestMilestoneRenamePreservesOtherFields(t *testing.T) {
 	if err := run([]string{"tasks", "milestone", "update", "5", "new", "--project", "experiment", "--url", h.URL, "--token", "tok"}, &out, io.Discard); err != nil {
 		t.Fatal(err)
 	}
-	if saved["name"] != "new" || saved["description"] != "keep" || saved["target_at"] != "2026-02-01T00:00:00Z" || saved["status"] != "active" || saved["sort_order"] != float64(3) {
+	if saved["name"] != "new" || saved["description"] != "concurrent edit" || saved["target_at"] != "2026-02-01T00:00:00Z" || saved["status"] != "active" || saved["sort_order"] != float64(3) {
 		t.Fatalf("saved=%v", saved)
 	}
 }
