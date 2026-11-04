@@ -21,6 +21,12 @@ and leave the old code as is unless the change already touches it.
 `scripts/check` runs CI's gates in CI's order (`scripts/check go`,
 `scripts/check web` for one half). Run it before pushing.
 
+CI has two tiers (`.github/workflows/ci.yml`). A pull request runs the light
+jobs only: no `-race`, no PostgreSQL, hosted runners. The `post-*` jobs (race
+with PostgreSQL, mutants, release dry run, macOS) run on main pushes and
+`ci-any-ref` dispatches, after merge; a red main is bisected and reverted.
+`scripts/check go` runs the heavy half locally.
+
 DB-backed tests need Postgres 17 and `HANDOFFKEEP_TEST_DB_URL`, e.g.
 
 ```bash
@@ -103,7 +109,8 @@ constants.
 - Reach Postgres only through `internal/testdb`: `testdb.URL(t)`,
   `testdb.Conn(t)`, or `testdb.Schema(t, prefix)` / `testdb.SchemaPool(t,
   prefix)`. Never read `HANDOFFKEEP_TEST_DB_URL` directly. Without it a test
-  skips locally and fails in CI.
+  skips locally and fails in CI, except in a CI job that sets
+  `HANDOFFKEEP_TEST_NO_DB=1` (the PR tier and macOS).
 - Tests that count whole tables or run migration DDL use a throwaway schema
   (`testdb.Schema`). Tests in the shared schema scope their data with unique
   lane/key names and never assert global counts.
