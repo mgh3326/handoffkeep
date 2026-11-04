@@ -268,6 +268,7 @@ func TestDecisionRecordLaneEvent(t *testing.T) {
 	onlyDecision(t, decisionRowsOf(t, s, DecisionSourceLaneEvent, ref), DecisionStatusOpen)
 
 	for i, reply := range []RelayEvent{
+		// The exact reply text, but from another lane: neither closes.
 		{OwnerLane: "other-lane", Text: fmt.Sprintf("[decision-answered] #%d: yes", q.ID)},
 		{OwnerLane: "ask-lane", Text: fmt.Sprintf("[decision-answered] #%d yes", q.ID)},
 		{OwnerLane: "ask-lane", Text: fmt.Sprintf("[decision-answered] #%d: yes", q.ID+1000)},
@@ -282,6 +283,7 @@ func TestDecisionRecordLaneEvent(t *testing.T) {
 		onlyDecision(t, decisionRowsOf(t, s, DecisionSourceLaneEvent, ref), DecisionStatusOpen)
 	}
 
+	// The same text from the ask's own lane answers both.
 	answer, _ := decisionRelay(t, s, RelayEvent{Kind: "lane.event", OwnerLane: "ask-lane", EventID: "answer-1", Text: fmt.Sprintf("[decision-answered] #%d: yes", q.ID)})
 	if laneDecisionOpen(t, s, q.ID) {
 		t.Fatal("exact reply left the source open")

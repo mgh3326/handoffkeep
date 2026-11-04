@@ -412,11 +412,13 @@ func mirrorRelayDecisionsTx(ctx context.Context, tx pgx.Tx, x RelayEvent) error 
 		}
 	}
 	by := fmt.Sprintf("lane.event #%d", x.ID)
-	if id, ok := laneAnsweredID(x.Text); ok && id < x.ID {
+	// ListOpenLaneDecisions' rule: the reply (this event) closes the ask the
+	// row mirrors only when the ask is in the reply's lane and is older.
+	if id, ok := laneAnsweredID(x.Text); ok {
 		if _, err := tx.Exec(ctx, `UPDATE decision_requests d SET status='answered',answer=$4,answered_by=$5,answered_at=$6,updated_at=$6
-			FROM relay_events e WHERE d.source='lane_event' AND d.source_ref=$1 AND d.status='open'
-			AND e.id=$2 AND e.kind='lane.event' AND e.owner_lane=$3`,
-			strconv.FormatInt(id, 10), id, x.OwnerLane, x.Text, by, at); err != nil {
+			FROM relay_events ask WHERE d.source='lane_event' AND d.status='open' AND d.source_ref=ask.id::text
+			AND ask.id=$1 AND ask.kind='lane.event' AND ask.owner_lane=$2 AND ask.id<$3`,
+			id, x.OwnerLane, x.ID, x.Text, by, at); err != nil {
 			return err
 		}
 	}
