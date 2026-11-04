@@ -1,7 +1,9 @@
 package store
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -117,4 +119,74 @@ func (s *Store) GetMilestone(ctx context.Context, id int64) (ProjectMilestone, e
 		return ProjectMilestone{}, ErrMilestoneNotFound
 	}
 	return m, err
+}
+
+type MilestonePatch struct {
+	Project     *string    `json:"project,omitempty"`
+	Name        *string    `json:"name,omitempty"`
+	Description *string    `json:"description,omitempty"`
+	Status      *string    `json:"status,omitempty"`
+	SortOrder   *int       `json:"sort_order,omitempty"`
+	SetTarget   bool       `json:"set_target"`
+	TargetAt    *time.Time `json:"target_at,omitempty"`
+}
+
+func (p *MilestonePatch) UnmarshalJSON(data []byte) error {
+	type patchAlias MilestonePatch
+	var decoded patchAlias
+	d := json.NewDecoder(bytes.NewReader(data))
+	d.DisallowUnknownFields()
+	if err := d.Decode(&decoded); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	if _, ok := fields["target_at"]; ok && !decoded.SetTarget {
+		return errors.New("target_at requires set_target")
+	}
+	*p = MilestonePatch(decoded)
+	return nil
+}
+
+func (s *Store) PatchMilestone(ctx context.Context, id int64, p MilestonePatch) (ProjectMilestone, error) {
+	if id < 1 || (!p.SetTarget && p.TargetAt != nil) || (p.Project != nil && !validName(*p.Project)) || (p.Name != nil && (*p.Name == "" || !validText(*p.Name, 256))) || (p.Description != nil && !validText(*p.Description, MaxBytes)) || (p.Status != nil && !validText(*p.Status, 128)) {
+		return ProjectMilestone{}, errors.New("invalid milestone")
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return ProjectMilestone{}, err
+	}
+	defer tx.Rollback(ctx)
+	var m ProjectMilestone
+	err = tx.QueryRow(ctx, `SELECT id,project,name,description,target_at,status,sort_order FROM project_milestones WHERE id=$1 FOR UPDATE`, id).Scan(&m.ID, &m.Project, &m.Name, &m.Description, &m.TargetAt, &m.Status, &m.SortOrder)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ProjectMilestone{}, ErrMilestoneNotFound
+	}
+	if err != nil {
+		return ProjectMilestone{}, err
+	}
+	if p.Project != nil && *p.Project != m.Project {
+		return ProjectMilestone{}, ErrMilestoneProject
+	}
+	if p.Name != nil {
+		m.Name = *p.Name
+	}
+	if p.Description != nil {
+		m.Description = *p.Description
+	}
+	if p.Status != nil {
+		m.Status = *p.Status
+	}
+	if p.SortOrder != nil {
+		m.SortOrder = *p.SortOrder
+	}
+	if p.SetTarget {
+		m.TargetAt = p.TargetAt
+	}
+	if _, err = tx.Exec(ctx, `UPDATE project_milestones SET name=$2,description=$3,target_at=$4,status=$5,sort_order=$6 WHERE id=$1`, id, m.Name, m.Description, m.TargetAt, m.Status, m.SortOrder); err != nil {
+		return ProjectMilestone{}, err
+	}
+	return m, tx.Commit(ctx)
 }

@@ -610,6 +610,7 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("PATCH /v1/tasks/projects/{project}/metadata", s.projectMetadata)
 	m.HandleFunc("POST /v1/milestones", s.milestoneSave)
 	m.HandleFunc("PUT /v1/milestones/{milestone}", s.milestoneSave)
+	m.HandleFunc("PATCH /v1/milestones/{milestone}", s.milestonePatch)
 	m.HandleFunc("GET /v1/milestones/{milestone}", s.milestoneGet)
 	m.HandleFunc("GET /v1/labels", s.labelsList)
 	m.HandleFunc("POST /v1/labels", s.labelSave)

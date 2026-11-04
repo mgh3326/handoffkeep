@@ -278,3 +278,25 @@ func (s Server) milestoneGet(w http.ResponseWriter, r *http.Request) {
 	}
 	jsonOut(w, http.StatusOK, m)
 }
+
+func (s Server) milestonePatch(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.auth(w, r); !ok {
+		return
+	}
+	id, err := modelID(r, "milestone")
+	if err != nil || id < 1 {
+		writeError(w, http.StatusBadRequest, "invalid_context")
+		return
+	}
+	var p store.MilestonePatch
+	if err = decode(r, &p, 65536); err != nil {
+		appErr(w, r, err)
+		return
+	}
+	m, err := s.Service.Store.PatchMilestone(r.Context(), id, p)
+	if err != nil {
+		appErr(w, r, err)
+		return
+	}
+	jsonOut(w, http.StatusOK, m)
+}
