@@ -181,7 +181,7 @@ func (h LinearWebhook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		log.Printf("linear_webhook.rejected comment=%q err=%q", payload.Data.ID, err.Error())
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	jsonOut(w, http.StatusOK, map[string]string{"status": status})

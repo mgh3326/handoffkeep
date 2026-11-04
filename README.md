@@ -54,9 +54,15 @@ environment, config, or server. The server reports the same stamp at
 Release is the binary's `vcs.revision` build stamp (`unknown` if unstamped).
 The operator provisions the project and injects the DSN at deployment.
 
+Every request except `/healthz` gets a server-generated request id, returned
+in `X-Request-ID` whether or not Sentry is enabled; a client-sent
+`X-Request-ID` is ignored. A `/v1` `500 internal_error` body carries the same
+id as `request_id`, and so does its `api.internal_error` log line (with the
+route template and authenticated client).
+
 Each sampled HTTP request sends one transaction named by its route template,
 including API, MCP, webhook, and console requests. It includes HTTP method,
-status, duration, and a generated request id also returned in `X-Request-ID`.
+status, duration, and the request id as the `request_id` tag.
 DB spans include normalized SQL, PostgreSQL operation status, rows affected,
 and duration. Bind arguments, SQL literals, comments, and quoted identifiers
 are removed. Transactions retain at most 999 child spans. `/healthz` emits no
@@ -431,7 +437,14 @@ HTTP clients use raw `PUT /v1/attachments` with `X-HK-Name`, `Content-Type`,
 and optional `X-HK-Ref` (`checkpoint:<id>`, `document:<key>`, or
 `memory:<agent>/<name>`). `GET /v1/attachments/{sha}` streams through the
 service; add `?presign=1` for a ten-minute private URL. `/v1/usage` and
-authenticated `/metrics` expose the local fuse counters. `r2usage` is optional
+authenticated `/metrics` expose the local fuse counters. `/metrics` also
+reports, per authenticated client, the CLI revision from its last
+`User-Agent: handoffkeep/<rev>` request
+(`handoffkeep_client_revision_info{client,rev} 1` and
+`handoffkeep_client_last_seen_seconds{client}`). This is process memory: a
+restart forgets it until each client calls again. The server logs
+`api.client_revision client=... rev=... prev=...` when a client's revision
+changes (including its first request after a restart). `r2usage` is optional
 and safely reports `skipped` when Cloudflare analytics credentials are absent.
 
 ## O3 contract fixture pack

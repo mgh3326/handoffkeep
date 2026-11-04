@@ -1789,7 +1789,7 @@ func serve(args []string, errout io.Writer) error {
 	if e != nil {
 		return e
 	}
-	handler := serverHandler(api.Server{Service: svc, Tokens: tokens, QuotaAccounts: quotaAccounts, HostGrants: hostGrants, UI: uiHandler, LinearWebhook: linear.webhook, LinearDecisions: linear.decisions}, monitor)
+	handler := serverHandler(api.Server{Service: svc, Tokens: tokens, QuotaAccounts: quotaAccounts, HostGrants: hostGrants, UI: uiHandler, LinearWebhook: linear.webhook, LinearDecisions: linear.decisions, ClientRevisions: api.NewClientRevisions()}, monitor)
 	addresses := []string{*listen}
 	if *tail != "" {
 		addresses = append(addresses, *tail)

@@ -9,13 +9,13 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
-func syncError(w http.ResponseWriter, err error) {
+func syncError(w http.ResponseWriter, r *http.Request, err error) {
 	var reset *store.SyncReset
 	if errors.As(err, &reset) {
 		jsonOut(w, http.StatusGone, map[string]any{"reset": true, "min_sync_id": reset.MinSyncID})
 		return
 	}
-	appErr(w, err)
+	appErr(w, r, err)
 }
 func (s Server) syncDelta(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.auth(w, r); !ok {
@@ -37,7 +37,7 @@ func (s Server) syncDelta(w http.ResponseWriter, r *http.Request) {
 	}
 	changes, meta, err := s.Service.Store.SyncDelta(r.Context(), after, limit)
 	if err != nil {
-		syncError(w, err)
+		syncError(w, r, err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/x-ndjson")
@@ -61,7 +61,7 @@ func (s Server) syncBootstrap(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := s.Service.Store.SyncBootstrap(r.Context(), r.URL.Query().Get("model"), r.URL.Query().Get("cursor"), limit)
 	if err != nil {
-		syncError(w, err)
+		syncError(w, r, err)
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
@@ -74,7 +74,7 @@ func (s Server) syncRow(w http.ResponseWriter, r *http.Request) {
 	}
 	row, found, err := s.Service.Store.GetSyncRow(r.Context(), r.PathValue("model"), r.PathValue("model_id"))
 	if err != nil {
-		syncError(w, err)
+		syncError(w, r, err)
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")

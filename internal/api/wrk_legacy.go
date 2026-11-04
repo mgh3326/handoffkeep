@@ -64,7 +64,7 @@ func (s Server) legacyWrkFence(next http.Handler) http.Handler {
 		}
 		raw, e := io.ReadAll(io.LimitReader(r.Body, store.MaxBytes+4097))
 		if e != nil {
-			appErr(w, wrkrecords.Error("invalid_request"))
+			appErr(w, r, wrkrecords.Error("invalid_request"))
 			return
 		}
 		// Preserve unread bytes for the existing route's own size/error contract.
@@ -87,7 +87,7 @@ func (s Server) legacyWrkFence(next http.Handler) http.Handler {
 			decodeErr := json.Unmarshal(b, &v)
 			_, hashErr := hex.DecodeString(v.Hash)
 			if !ok || len(m) != 4 || decodeErr != nil || !wrkrecords.JobRE.MatchString(v.JobID) || v.Seq < 1 || v.Seq > wrkrecords.MaxInt || !wrkrecords.UUIDRE.MatchString(v.Generation) || len(v.Hash) != 64 || hashErr != nil || strings.ToLower(v.Hash) != v.Hash {
-				appErr(w, wrkrecords.Error("invalid_request"))
+				appErr(w, r, wrkrecords.Error("invalid_request"))
 				return
 			}
 			receipt = &v
@@ -145,7 +145,7 @@ func (s Server) legacyWrkFence(next http.Handler) http.Handler {
 		if intent.TaskID > 0 {
 			task, found, err := s.Service.Store.GetTask(r.Context(), intent.TaskID)
 			if err != nil {
-				appErr(w, err)
+				appErr(w, r, err)
 				return
 			}
 			if found {
@@ -156,7 +156,7 @@ func (s Server) legacyWrkFence(next http.Handler) http.Handler {
 			}
 		}
 		if err := s.Service.Store.WrkFence(r.Context(), intent); err != nil {
-			appErr(w, err)
+			appErr(w, r, err)
 			return
 		}
 		next.ServeHTTP(w, r)

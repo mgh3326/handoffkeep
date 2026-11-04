@@ -39,7 +39,8 @@ across all workflows; `internal/ciworkflow` enforces both.
 - A failure the handler detects itself: `writeError(w, http.StatusX, "code")`.
   Malformed ids and query values are `writeError(w, http.StatusBadRequest,
   "invalid_context")`; never `appErr(w, errors.New(...))`.
-- An error returned by the store or a service: `appErr(w, err)`.
+- An error returned by the store or a service: `appErr(w, r, err)`. The
+  request lets a 500 carry its `request_id` and log the route.
 - A new store sentinel the client must tell apart: declare
   `ErrX = errors.New("x_code")` in the store and add one row to `errorRules`.
   Set `reason: true` only when the text after `"x_code: "` is store-authored.

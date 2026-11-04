@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/mgh3326/handoffkeep/internal/api"
+	"github.com/mgh3326/handoffkeep/internal/buildinfo"
 	"github.com/mgh3326/handoffkeep/internal/store"
 	"github.com/mgh3326/handoffkeep/internal/testdb"
 	gmcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -73,6 +74,24 @@ func TestPutCheckpointUsesBackendCore(t *testing.T) {
 	}
 	if backend.checkpoints != 1 {
 		t.Fatalf("checkpoint core calls=%d", backend.checkpoints)
+	}
+}
+
+// The MCP server reports the binary's build stamp, the rev `version` prints.
+func TestServerVersionIsBuildRevision(t *testing.T) {
+	a, b := gmcp.NewInMemoryTransports()
+	ss, err := New(&spyBackend{}, "mcp-test").Connect(t.Context(), a, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ss.Close()
+	cs, err := gmcp.NewClient(&gmcp.Implementation{Name: "test", Version: "v0"}, nil).Connect(t.Context(), b, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	if got := cs.InitializeResult().ServerInfo.Version; got != buildinfo.Revision() || got == "v0" {
+		t.Fatalf("server version=%q want %q", got, buildinfo.Revision())
 	}
 }
 

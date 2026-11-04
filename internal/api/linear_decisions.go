@@ -239,7 +239,7 @@ func (s Server) taskDecisionAsk(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 	var input store.DecisionRequestInput
 	if err := decode(r, &input, store.MaxBytes); err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	out, err := s.LinearDecisions.Ask(r.Context(), s.Service.Store, id, client, input)
@@ -253,7 +253,7 @@ func (s Server) taskDecisionAsk(w http.ResponseWriter, r *http.Request) {
 			log.Printf("linear_decisions.unavailable task=%d err=%q", id, err.Error())
 			writeError(w, http.StatusServiceUnavailable, "linear_unavailable")
 		default:
-			appErr(w, err)
+			appErr(w, r, err)
 		}
 		return
 	}

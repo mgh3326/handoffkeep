@@ -2,7 +2,6 @@
 package telemetry
 
 import (
-	"crypto/rand"
 	"errors"
 	"io"
 	"math"
@@ -70,21 +69,25 @@ func (m *Monitor) Close() {
 	})
 }
 
-// Handler wraps the complete server once. Dispatchers must set Request.Pattern
-// to a static template (ServeMux does this automatically). No URL is attached.
+// Handler wraps the complete server once. Every request except /healthz gets
+// a request id (see withRequestID) whether or not Sentry is enabled. With
+// Sentry enabled, dispatchers must set Request.Pattern to a static template
+// (ServeMux does this automatically). No URL is attached.
 func (m *Monitor) Handler(next http.Handler) http.Handler {
-	if m.client == nil {
-		return next
+	if m.client != nil {
+		next = m.trace(next)
 	}
+	return withRequestID(next)
+}
+
+func (m *Monitor) trace(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/healthz" {
 			next.ServeHTTP(w, r)
 			return
 		}
 		hub := sentry.NewHub(m.client, sentry.NewScope())
-		requestID := rand.Text()
-		hub.Scope().SetTag("request_id", requestID)
-		w.Header().Set("X-Request-ID", requestID)
+		hub.Scope().SetTag("request_id", RequestID(r.Context()))
 		tx := sentry.StartTransaction(sentry.SetHubOnContext(r.Context(), hub), "<unmatched>",
 			sentry.WithOpName("http.server"), sentry.WithTransactionSource(sentry.SourceRoute))
 		r = r.WithContext(tx.Context())

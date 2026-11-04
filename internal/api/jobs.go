@@ -30,7 +30,7 @@ func (s Server) jobClaim(w http.ResponseWriter, r *http.Request) {
 		Host   string `json:"host"`
 	}
 	if err := decode(r, &input, store.MaxBytes); err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	if !store.ValidJobID(input.JobID) || !store.ValidJobHost(input.Host) || input.TaskID < 1 {
@@ -45,7 +45,7 @@ func (s Server) jobClaim(w http.ResponseWriter, r *http.Request) {
 		JobID: input.JobID, TaskID: input.TaskID, Host: input.Host, CreatedBy: client,
 	})
 	if err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	status := http.StatusOK
@@ -71,14 +71,14 @@ func (s Server) jobUpdate(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 	var input store.JobUpdate
 	if err := decode(r, &input, store.JobResultMaxBytes); err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	// The record's host decides which clients may write it; the row is
 	// fetched here so a forbidden write never reaches the store.
 	j, found, err := s.Service.Store.GetJob(r.Context(), id)
 	if err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	if !found {
@@ -91,7 +91,7 @@ func (s Server) jobUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	j, err = s.Service.Store.UpdateJob(r.Context(), id, input)
 	if err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	jsonOut(w, http.StatusOK, j)
@@ -109,7 +109,7 @@ func (s Server) jobGet(w http.ResponseWriter, r *http.Request) {
 	}
 	j, found, err := s.Service.Store.GetJob(r.Context(), id)
 	if err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	if !found {
@@ -136,7 +136,7 @@ func (s Server) jobsList(w http.ResponseWriter, r *http.Request) {
 	}
 	jobs, err := s.Service.Store.ListJobsByTask(r.Context(), taskID, limit)
 	if err != nil {
-		appErr(w, err)
+		appErr(w, r, err)
 		return
 	}
 	jsonOut(w, http.StatusOK, map[string]any{"jobs": jobs})
