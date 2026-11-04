@@ -179,12 +179,13 @@ func TestDecisionsBackfillDryRunWritesNothing(t *testing.T) {
 	if _, err := st.TransitionTask(ctx, live.ID, "needs_decision", "backfill-lane", "keep going?", nil, ""); err != nil {
 		t.Fatal(err)
 	}
-	// stale_candidate: a flagged backlog task asked 20 days ago.
-	stale := newTask("stale flag")
-	if _, err := st.TransitionTask(ctx, stale.ID, "needs_decision", "backfill-lane", "still wanted?", nil, ""); err != nil {
+	// stale_candidate: a backlog task flagged 20 days ago. task_events is
+	// append-only, so the old ask is seeded as it would have been written.
+	var stale store.Task
+	if err := pool.QueryRow(ctx, `INSERT INTO tasks(lane,title,kind,state,created_by,created_at,updated_at,awaiting_decision) VALUES('backfill-lane','stale flag','implement','backlog','backfill-test',now()-interval '20 days',now()-interval '20 days',true) RETURNING id`).Scan(&stale.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pool.Exec(ctx, `UPDATE task_events SET at=now()-interval '20 days' WHERE task_id=$1`, stale.ID); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO task_events(task_id,"from","to","by",note,at,kind,field,from_value,to_value) VALUES($1,'backlog','backlog','backfill-test','still wanted?',now()-interval '20 days','awaiting_decision','awaiting_decision','false','true')`, stale.ID); err != nil {
 		t.Fatal(err)
 	}
 	// superseded_candidate: an open request left on a dropped task.
