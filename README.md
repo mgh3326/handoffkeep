@@ -69,7 +69,12 @@ are removed. Transactions retain at most 999 child spans. `/healthz` emits no
 telemetry. Pending events flush for up to two seconds after shutdown drains.
 
 All handler 5xx responses and panics are reported, even for unsampled
-requests. Panic stack frames are retained; error and panic messages use
+requests, except a 5xx whose client already disconnected (request context
+cancelled), which only finishes its transaction. A 5xx event is grouped by
+`["http-5xx", <method + route template>, <status>]`, so each route and status
+is its own issue; panics keep stack-based grouping. When the body is a JSON
+error with a snake_case code (`internal_error`, `quota_store_unavailable`),
+that code is the `error_code` tag. Panic stack frames are retained; error and panic messages use
 generic text. The scrub list removes headers (including Authorization and
 cookies), URLs and query strings, request/response bodies, document content,
 user identities, hostnames, breadcrumbs, arbitrary tags/contexts/extras,

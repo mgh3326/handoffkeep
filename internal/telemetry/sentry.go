@@ -2,6 +2,8 @@
 package telemetry
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"math"
@@ -92,7 +94,8 @@ func (m *Monitor) trace(next http.Handler) http.Handler {
 			sentry.WithOpName("http.server"), sentry.WithTransactionSource(sentry.SourceRoute))
 		r = r.WithContext(tx.Context())
 		status := http.StatusOK
-		wroteHeader := false
+		wroteHeader, sniffed := false, false
+		errorCode := ""
 		writer := httpsnoop.Wrap(w, httpsnoop.Hooks{
 			WriteHeader: func(next httpsnoop.WriteHeaderFunc) httpsnoop.WriteHeaderFunc {
 				return func(code int) {
@@ -103,7 +106,16 @@ func (m *Monitor) trace(next http.Handler) http.Handler {
 				}
 			},
 			Write: func(next httpsnoop.WriteFunc) httpsnoop.WriteFunc {
-				return func(b []byte) (int, error) { wroteHeader = true; return next(b) }
+				return func(b []byte) (int, error) {
+					wroteHeader = true
+					if !sniffed {
+						sniffed = true
+						if status >= http.StatusInternalServerError {
+							errorCode = apiErrorCode(w.Header().Get("Content-Type"), b)
+						}
+					}
+					return next(b)
+				}
 			},
 			Flush: func(next httpsnoop.FlushFunc) httpsnoop.FlushFunc {
 				return func() { wroteHeader = true; next() }
@@ -134,10 +146,17 @@ func (m *Monitor) trace(next http.Handler) http.Handler {
 			tx.Status = sentry.HTTPtoSpanStatus(status)
 			tx.SetData("http.request.method", method)
 			tx.SetData("http.response.status_code", status)
-			if !aborted && (panicked != nil || status >= http.StatusInternalServerError) {
+			// A client that disconnected (context.Canceled) cannot receive the
+			// 5xx its cancelled queries produce; that is not a server error.
+			// Panics are still reported.
+			clientGone := errors.Is(r.Context().Err(), context.Canceled)
+			if !aborted && (panicked != nil || (status >= http.StatusInternalServerError && !clientGone)) {
 				event := sentry.NewEvent()
 				event.Level, event.Transaction = sentry.LevelError, name
 				event.Extra = map[string]any{"http.request.method": method, "http.response.status_code": status}
+				if errorCode != "" {
+					event.Tags = map[string]string{"error_code": errorCode}
+				}
 				exception := sentry.Exception{Type: "HTTPError", Value: "HTTP " + strconv.Itoa(status)}
 				if panicked != nil {
 					exception.Type, exception.Value = "panic", "HTTP handler panicked"
@@ -153,6 +172,22 @@ func (m *Monitor) trace(next http.Handler) http.Handler {
 		}()
 		next.ServeHTTP(writer, r)
 	})
+}
+
+// apiErrorCode reads the code of a {"error":"<snake_code>"} JSON error body
+// from a 5xx response's first write. Only a closed-vocabulary code survives
+// (see validErrorCode); any other body yields "".
+func apiErrorCode(contentType string, body []byte) string {
+	if !strings.HasPrefix(contentType, "application/json") || len(body) > 4096 {
+		return ""
+	}
+	var v struct {
+		Error string `json:"error"`
+	}
+	if json.Unmarshal(body, &v) != nil || !validErrorCode(v.Error) {
+		return ""
+	}
+	return v.Error
 }
 
 func safeMethod(method string) string {
