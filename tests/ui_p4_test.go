@@ -376,7 +376,7 @@ func p4StructuredDecisionTasks(t *testing.T, _ *store.Store, lane, prefix string
 			return
 		}
 		defer db.Close(context.Background())
-		if _, err := db.Exec(context.Background(), `UPDATE tasks SET state='dropped', priority=-2147483648 WHERE id = ANY($1)`, tasks); err != nil {
+		if _, err := db.Exec(context.Background(), `UPDATE tasks SET state='dropped', awaiting_decision=false, priority=-2147483648 WHERE id = ANY($1)`, tasks); err != nil {
 			t.Logf("decision task cleanup: %v", err)
 		}
 	})
