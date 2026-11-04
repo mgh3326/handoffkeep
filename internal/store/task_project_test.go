@@ -74,11 +74,11 @@ func TestSetTaskProjectEvent(t *testing.T) {
 	if err != nil || !changed || x.Project == nil || *x.Project != "wrk" {
 		t.Fatalf("SetTaskProject=%+v changed=%t err=%v", x, changed, err)
 	}
-	var kind, from, to, note string
-	if err = pool.QueryRow(ctx, `SELECT kind,"from","to",note FROM task_events WHERE task_id=$1 AND kind='project'`, x.ID).Scan(&kind, &from, &to, &note); err != nil {
+	var kind, from, to, note, field, fromValue, toValue string
+	if err = pool.QueryRow(ctx, `SELECT kind,"from","to",note,field,from_value,to_value FROM task_events WHERE task_id=$1 AND kind='project'`, x.ID).Scan(&kind, &from, &to, &note, &field, &fromValue, &toValue); err != nil {
 		t.Fatalf("project event missing: %v", err)
 	}
-	if kind != "project" || from != "handoffkeep" || to != "wrk" || !strings.Contains(note, "wrk") {
+	if kind != "project" || from != "handoffkeep" || to != "wrk" || !strings.Contains(note, "wrk") || field != "project" || fromValue != from || toValue != to {
 		t.Fatalf("event=(%s,%s,%s,%s)", kind, from, to, note)
 	}
 	x, changed, err = s.SetTaskProject(ctx, x.ID, "wrk", "proj-test", "already there")

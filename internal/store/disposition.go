@@ -615,11 +615,11 @@ func (s *Store) ListOpenDispositions(ctx context.Context, limit int) ([]OpenDisp
 }
 
 func prefixedTaskColumns(alias string) string {
-	cols := strings.Split(taskColumns, ",")
+	cols := strings.Split(taskBaseColumns, ",")
 	for i := range cols {
 		cols[i] = alias + "." + cols[i]
 	}
-	return strings.Join(cols, ",")
+	return strings.Join(cols, ",") + ",ARRAY(SELECT label_id FROM task_labels WHERE task_id=" + alias + ".id ORDER BY label_id)"
 }
 
 // CountNeedsDecision splits pending decisions, in one statement, into

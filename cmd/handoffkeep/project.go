@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
 const (
@@ -26,7 +28,10 @@ func taskProjectCmd(args []string, out io.Writer) error {
 	fs.SetOutput(io.Discard)
 	c := remoteClient(fs)
 	note := fs.String("note", "", "reason recorded on the project event")
-	valueFlags := map[string]bool{"--url": true, "--token": true, "--note": true}
+	status := fs.String("status", "", "project status")
+	start := fs.String("start", "", "project start time (RFC3339, or empty to clear)")
+	target := fs.String("target", "", "project target time (RFC3339, or empty to clear)")
+	valueFlags := map[string]bool{"--url": true, "--token": true, "--note": true, "--status": true, "--start": true, "--target": true}
 	flags, positional := []string{}, []string{}
 	rest := args[1:]
 	for i := 0; i < len(rest); i++ {
@@ -60,6 +65,33 @@ func taskProjectCmd(args []string, out io.Writer) error {
 		id, err := strconv.ParseInt(fs.Arg(0), 10, 64)
 		if err != nil || id < 1 {
 			return errors.New("task id must be positive")
+		}
+		present := map[string]bool{}
+		fs.Visit(func(f *flag.Flag) { present[f.Name] = true })
+		if present["status"] || present["start"] || present["target"] {
+			p := store.ProjectMetadataPatch{SetStart: present["start"], SetTarget: present["target"]}
+			if present["status"] {
+				p.Status = status
+			}
+			for _, entry := range []struct {
+				name, value string
+				dest        **time.Time
+			}{{"start", *start, &p.StartAt}, {"target", *target, &p.TargetAt}} {
+				if !present[entry.name] {
+					continue
+				}
+				*entry.dest = nil
+				if entry.value != "" {
+					t, err := time.Parse(time.RFC3339, entry.value)
+					if err != nil {
+						return err
+					}
+					*entry.dest = &t
+				}
+			}
+			if _, err := c.PatchProjectMetadata(ctx, fs.Arg(1), p); err != nil {
+				return err
+			}
 		}
 		x, err := c.SetTaskProject(ctx, id, fs.Arg(1), *note)
 		if err != nil {
