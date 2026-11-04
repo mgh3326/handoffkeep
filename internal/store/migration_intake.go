@@ -11,9 +11,10 @@ package store
 //   - ticket_sets records one emitted set per (source, source_ref) with the
 //     hash of its payload, so the same payload returns the same ids and a
 //     changed one is refused (Q12).
-//   - the empty kind is the unset kind, valid only while the task is in
-//     triage; the triage gate refuses an exit without a kind, and the
-//     constraint backs it.
+//   - the empty kind is the unset kind. A task holds it in triage, and keeps
+//     it when it is declined from triage (dropped or duplicate); the triage
+//     gate refuses an accept without a kind, the constraint backs it, and a
+//     kind-less declined task cannot be reopened.
 //
 // ADD COLUMN with a constant default and the constraint swap take a brief
 // ACCESS EXCLUSIVE lock on tasks; the constraint is replaced NOT VALID, so
@@ -22,7 +23,7 @@ package store
 var intakeV36 = []string{
 	`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT '', ADD COLUMN IF NOT EXISTS source_ref TEXT NOT NULL DEFAULT ''`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS tasks_source_ref ON tasks(source, source_ref) WHERE source<>'' AND source_ref<>''`,
-	`ALTER TABLE tasks DROP CONSTRAINT IF EXISTS tasks_kind_check, ADD CONSTRAINT tasks_kind_check CHECK(kind IN ('implement','verify','fix','decide','ops') OR (kind='' AND state='triage')) NOT VALID`,
+	`ALTER TABLE tasks DROP CONSTRAINT IF EXISTS tasks_kind_check, ADD CONSTRAINT tasks_kind_check CHECK(kind IN ('implement','verify','fix','decide','ops') OR (kind='' AND state IN ('triage','dropped','duplicate'))) NOT VALID`,
 	`CREATE TABLE IF NOT EXISTS ticket_sets (
 		id BIGSERIAL PRIMARY KEY,
 		source TEXT NOT NULL CHECK(source <> ''),

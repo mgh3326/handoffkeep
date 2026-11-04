@@ -38,7 +38,7 @@ func liveRelations(t *testing.T, s *Store, id int64) []TaskRelation {
 	return xs
 }
 
-func TestIntakeCreatesOnceAndKeepsKindUnsetInTriageOnly(t *testing.T) {
+func TestIntakeCreatesOnceAndAllowsUnsetKindOnlyInTriageOrDeclined(t *testing.T) {
 	s, pool := searchTestStore(t)
 	ctx := t.Context()
 	in := IntakeInput{Source: "dots", SourceRef: "issue-7/comment-3", Title: "follow up on the release notes", Body: "the body", CreatedBy: "tester"}
@@ -180,6 +180,13 @@ func TestTriageGateOnIntakeTask(t *testing.T) {
 		}
 		if ev := lastEvent(t, s, d.ID); ev.By != "desk" || ev.Note != "not ours" {
 			t.Fatalf("decline event=%+v", ev)
+		}
+		// The unset kind survives the decline, so the task cannot be reopened.
+		if declined.Kind != "" {
+			t.Fatalf("declined kind=%q", declined.Kind)
+		}
+		if _, err := s.ReopenTask(ctx, d.ID, "desk", "changed our mind"); !errors.Is(err, ErrTaskConflict) {
+			t.Fatalf("reopen kind-less %s err=%v, want ErrTaskConflict", to, err)
 		}
 	}
 	d := intake(IntakeInput{})

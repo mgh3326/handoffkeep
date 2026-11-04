@@ -262,7 +262,8 @@ Integrations put work into `triage` with `POST /v1/intake` (`tasks intake
 --source S --source-ref R --title T [--body B|--body-file F] [--project P]
 [--kind K] [--priority N] [--lane L]`). A repeated `(source, source_ref)`
 returns the recorded task with `created:false`. Project, kind and priority may
-be left unset; an unset kind is valid only in `triage`. A body is stored as
+be left unset; an unset kind is valid only in `triage`, and on a task declined
+from it (which then cannot be reopened). A body is stored as
 the document `task-body/<id>` and linked by `body_doc`.
 
 A repo session emits a whole ticket set with `POST /v1/ticket-sets` (`tickets

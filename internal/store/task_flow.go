@@ -448,6 +448,11 @@ func (s *Store) transitionTask(ctx context.Context, id int64, in TransitionInput
 	if reopen && !(IsSettledState(from) || from == StateIcebox) {
 		return Task{}, ErrTaskConflict
 	}
+	// The unset kind survives only a decline from triage; a reopen would put
+	// it in unstarted, which the kind constraint refuses.
+	if reopen && x.Kind == "" {
+		return Task{}, fmt.Errorf("%w: this task was declined in triage without a kind; file it again instead", ErrTaskConflict)
+	}
 	if IsSettledState(from) && !reopen {
 		return Task{}, ErrTaskConflict
 	}

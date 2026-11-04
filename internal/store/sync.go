@@ -213,7 +213,9 @@ func (s *Store) GetSyncRow(ctx context.Context, model, id string) (json.RawMessa
 		}
 		arg = number
 		table := map[string]string{"document": "documents", "task": "tasks", "task_comment": "task_comments"}[model]
-		query = `SELECT to_jsonb(source) FROM ` + table + ` source WHERE id=$1`
+		// model_row.* is the whole row even where the table has a column named
+		// like the alias (tasks.source).
+		query = `SELECT to_jsonb(model_row.*) FROM ` + table + ` model_row WHERE id=$1`
 	case "decision":
 		query = `SELECT (t.refs->'decision_request') || jsonb_build_object('task_id',t.id,'updated_at',d.updated_at,'options',t.refs->'decision_options') FROM sync_decisions d JOIN tasks t ON t.id=d.task_id WHERE d.id=$1`
 	default:
