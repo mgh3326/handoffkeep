@@ -15,7 +15,9 @@ import (
 )
 
 // splitTaskArgs moves value flags ahead of positional arguments so a task id
-// may come first, as in the other task subcommands.
+// may come first, as in the other task subcommands. valueFlags names flags in
+// their "--name" form; the flag package also takes "-name", so both spellings
+// keep their value.
 func splitTaskArgs(args []string, valueFlags map[string]bool) ([]string, error) {
 	flags, positional := []string{}, []string{}
 	for i := 0; i < len(args); i++ {
@@ -25,7 +27,8 @@ func splitTaskArgs(args []string, valueFlags map[string]bool) ([]string, error) 
 			continue
 		}
 		flags = append(flags, arg)
-		if valueFlags[arg] && !strings.Contains(arg, "=") {
+		name := "--" + strings.TrimPrefix(strings.TrimPrefix(arg, "-"), "-")
+		if valueFlags[name] && !strings.Contains(arg, "=") {
 			i++
 			if i >= len(args) {
 				return nil, fmt.Errorf("%s requires a value", arg)
