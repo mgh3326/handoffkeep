@@ -109,21 +109,35 @@ func TestStalledFlagAtReadTime(t *testing.T) {
 		t.Fatal("a comment did not reset stalled")
 	}
 
+	// Only the job bound in refs.job_id counts as activity: a late update to
+	// an earlier job of the task does not reset the stalled clock.
 	jobbed := flowTask(t, s, pool, "implement", StateDeveloping, true)
+	unboundJob := fmt.Sprintf("job-stalled-old-%d", jobbed.ID)
 	jobID := fmt.Sprintf("job-stalled-%d", jobbed.ID)
-	if _, _, err := s.ClaimJob(ctx, Job{JobID: jobID, TaskID: jobbed.ID, Host: "test-host", CreatedBy: "tester"}); err != nil {
+	for _, id := range []string{unboundJob, jobID} {
+		if _, _, err := s.ClaimJob(ctx, Job{JobID: id, TaskID: jobbed.ID, Host: "test-host", CreatedBy: "tester"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := pool.Exec(ctx, `UPDATE tasks SET refs=refs||jsonb_build_object('job_id',$2::text) WHERE id=$1`, jobbed.ID, jobID); err != nil {
 		t.Fatal(err)
 	}
 	ageTask(t, s, jobbed.ID, old)
 	if !stateOf(t, s, jobbed.ID).Stalled {
-		t.Fatal("aged task with an aged job is not stalled")
+		t.Fatal("aged task with aged jobs is not stalled")
 	}
 	label := "progress"
+	if _, err := s.UpdateJob(ctx, unboundJob, JobUpdate{Label: &label}); err != nil {
+		t.Fatal(err)
+	}
+	if !stateOf(t, s, jobbed.ID).Stalled {
+		t.Fatal("an update to a job no longer bound to the task reset stalled")
+	}
 	if _, err := s.UpdateJob(ctx, jobID, JobUpdate{Label: &label}); err != nil {
 		t.Fatal(err)
 	}
 	if stateOf(t, s, jobbed.ID).Stalled {
-		t.Fatal("a job update did not reset stalled")
+		t.Fatal("an update to the bound job did not reset stalled")
 	}
 
 	var notStarted []int64

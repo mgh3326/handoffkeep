@@ -15,12 +15,14 @@ import (
 const DefaultStartedStalledHours = 24
 
 // taskActivitySQL is a task's newest activity: a task_events row, a comment,
-// or an update to a job bound to it. created_at is the floor, so a task
-// nobody touched is idle since it was filed. It reads the row as "tasks".
+// or an update to the job bound to it in refs.job_id. A late update to an
+// earlier job of the task no longer counts once another job is bound.
+// created_at is the floor, so a task nobody touched is idle since it was
+// filed. It reads the row as "tasks".
 const taskActivitySQL = `GREATEST(tasks.created_at,
 	(SELECT max(e.at) FROM task_events e WHERE e.task_id=tasks.id),
 	(SELECT max(c.created_at) FROM task_comments c WHERE c.task_id=tasks.id),
-	(SELECT max(j.updated_at) FROM jobs j WHERE j.task_id=tasks.id))`
+	(SELECT max(j.updated_at) FROM jobs j WHERE j.job_id=tasks.refs->>'job_id' AND j.task_id=tasks.id))`
 
 // SetStartedStalledHours sets started_stalled_hours; a value below 1 restores
 // the default.
