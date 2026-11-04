@@ -701,7 +701,7 @@ func triageGate(x Task, to, note string) error {
 		}
 	default:
 		if strings.TrimSpace(note) == "" {
-			return errors.New("declining a triage task requires a reason")
+			return fmt.Errorf("%w: declining a triage task requires a reason", ErrTriageGate)
 		}
 	}
 	return nil

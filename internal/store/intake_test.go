@@ -170,7 +170,7 @@ func TestTriageGateOnIntakeTask(t *testing.T) {
 		if to == StateDuplicate {
 			in.DuplicateOf = other.ID
 		}
-		if _, err := s.TransitionTaskWith(ctx, d.ID, in); err == nil || !strings.Contains(err.Error(), "reason") {
+		if _, err := s.TransitionTaskWith(ctx, d.ID, in); !errors.Is(err, ErrTriageGate) || !strings.Contains(err.Error(), "reason") {
 			t.Fatalf("decline to %s without reason err=%v", to, err)
 		}
 		in.Note = "not ours"
