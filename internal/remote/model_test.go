@@ -34,7 +34,6 @@ func TestModelMethods(t *testing.T) {
 		{"PATCH", "/v1/tasks/projects/p/metadata", func() error { _, e := c.PatchProjectMetadata(ctx, "p", store.ProjectMetadataPatch{}); return e }},
 		{"POST", "/v1/milestones", func() error { _, e := c.SaveMilestone(ctx, store.ProjectMilestone{}); return e }},
 		{"GET", "/v1/milestones/2", func() error { _, e := c.GetMilestone(ctx, 2); return e }},
-		{"PATCH", "/v1/milestones/2", func() error { _, e := c.PatchMilestone(ctx, 2, store.MilestonePatch{}); return e }},
 		{"PUT", "/v1/milestones/2", func() error { _, e := c.SaveMilestone(ctx, store.ProjectMilestone{ID: 2}); return e }},
 		{"GET", "/v1/labels", func() error { _, e := c.ListLabels(ctx); return e }},
 		{"POST", "/v1/labels", func() error { _, e := c.SaveLabel(ctx, store.Label{}); return e }},

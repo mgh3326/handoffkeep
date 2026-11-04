@@ -214,7 +214,7 @@ func tasksCmd(args []string, out io.Writer) error {
 
 func tasksCmdE(args []string, out, errout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: tasks add|list|export|claim|next|transition|reopen|rebind|relane|project|projects|milestone|label|labels|due|subscribe|unsubscribe|set-area|areas|parent|relate|unrelate|migrate-states|decision-request|decision-resolve|show|comment|comments|disposition")
+		return errors.New("usage: tasks add|list|export|claim|next|transition|reopen|rebind|relane|project|projects|milestone|label|labels|due|subscribe|unsubscribe|set-area|areas|parent|relate|unrelate|migrate-states|decision-request|decision-resolve|show|comment|comments|disposition|event|sweep")
 	}
 	if args[0] == "disposition" {
 		return dispositionCmd(args[1:], out)
@@ -252,6 +252,12 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 	if args[0] == "decision-resolve" {
 		return decisionResolveCmd(args, out, errout)
 	}
+	if args[0] == "event" {
+		return taskEventCmd(args[1:], out)
+	}
+	if args[0] == "sweep" {
+		return taskSweepCmd(args[1:], out)
+	}
 	fs := flag.NewFlagSet("tasks "+args[0], flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	c := remoteClient(fs)
@@ -272,6 +278,7 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 	reason := fs.String("reason", "", "reason required for reopen")
 	question := fs.String("question", "", "question required for needs_decision")
 	limit := fs.Int("limit", 20, "maximum results")
+	stalled := fs.Bool("stalled", false, "list only stalled tasks: started, not awaiting a decision, no activity within the server's started_stalled_hours (tasks list only)")
 	pr := fs.String("pr", "", "pull request reference")
 	headSHA := fs.String("head-sha", "", "head revision reference")
 	reportPath := fs.String("report-path", "", "report path reference")
@@ -302,8 +309,11 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 		return err
 	}
 	linearFlagsUsed, docFlagUsed, noJobSet, projectSet, areaSet, expectedSet := false, false, false, false, false, false
-	parentSet, duplicateOfSet := false, false
+	parentSet, duplicateOfSet, stalledSet := false, false, false
 	fs.Visit(func(item *flag.Flag) {
+		if item.Name == "stalled" {
+			stalledSet = true
+		}
 		if item.Name == "parent" {
 			parentSet = true
 		}
@@ -368,6 +378,9 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 	}
 	if duplicateOfSet && (args[0] != "transition" || *duplicateOf < 1) {
 		return errors.New("--duplicate-of requires a positive task id and is accepted only by tasks transition")
+	}
+	if stalledSet && args[0] != "list" {
+		return errors.New("--stalled is accepted only by tasks list")
 	}
 	if docFlagUsed && args[0] != "add" {
 		return errors.New("--doc is accepted only by tasks add")
@@ -446,7 +459,12 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 		if areaSet {
 			areaFilter = area
 		}
-		xs, err := c.ListTasks(ctx, *lane, *state, *parentLane, projectFilter, areaFilter, *limit)
+		var xs []store.Task
+		if *stalled {
+			xs, err = c.ListTasksFiltered(ctx, store.TaskQuery{Lane: *lane, State: *state, ParentLane: *parentLane, Project: projectFilter, Area: areaFilter, Stalled: true, Limit: *limit})
+		} else {
+			xs, err = c.ListTasks(ctx, *lane, *state, *parentLane, projectFilter, areaFilter, *limit)
+		}
 		if err != nil {
 			return err
 		}
@@ -1748,8 +1766,16 @@ func serve(args []string, errout io.Writer) error {
 	fs.SetOutput(errout)
 	listen := fs.String("listen", "127.0.0.1:8800", "loopback address")
 	tail := fs.String("listen-tailnet", "", "optional tailnet address")
+	stalledHours := fs.Int("started-stalled-hours", store.DefaultStartedStalledHours, "flag a started task stalled after this many hours without activity")
+	iceboxDays := fs.Int("backlog-icebox-days", 0, "park backlog tasks idle this many days in icebox; 0 keeps the sweep off")
 	if e := fs.Parse(args); e != nil {
 		return e
+	}
+	if *stalledHours < 1 {
+		return errors.New("--started-stalled-hours must be at least 1")
+	}
+	if *iceboxDays < 0 {
+		return errors.New("--backlog-icebox-days must be 0 (off) or more")
 	}
 	if e := validListen(*listen, false); e != nil {
 		return e
@@ -1792,6 +1818,7 @@ func serve(args []string, errout io.Writer) error {
 			st.Close()
 		}
 	}()
+	st.SetStartedStalledHours(*stalledHours)
 	tokens, quotaAccounts, e := api.LoadTokens(auth)
 	if e != nil {
 		return e
@@ -1806,6 +1833,9 @@ func serve(args []string, errout io.Writer) error {
 	}
 	svc := api.Service{Store: st, Attachments: am}
 	workers := []backgroundWorker{chatRetentionWorker{store: st}, placementRetentionWorker{store: st}, syncRetentionWorker{store: st, retention: retention}}
+	if *iceboxDays > 0 {
+		workers = append(workers, backlogSweepWorker{store: st, days: *iceboxDays})
+	}
 	linear := linearFromEnv(st)
 	if linear.boardWorker != nil {
 		workers = append(workers, linear.boardWorker)

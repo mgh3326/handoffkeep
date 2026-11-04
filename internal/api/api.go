@@ -600,6 +600,8 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("POST /v1/tasks", s.tasksCreate)
 	m.HandleFunc("GET /v1/tasks", s.tasksList)
 	m.HandleFunc("GET /v1/tasks/export", s.tasksExport)
+	m.HandleFunc("GET /v1/tasks/sweep", s.tasksSweepPreview)
+	m.HandleFunc("POST /v1/task-events", s.taskEvents)
 	m.HandleFunc("POST /v1/tasks/next", s.tasksNext)
 	m.HandleFunc("GET /v1/tasks/projects", s.taskProjectsList)
 	m.HandleFunc("POST /v1/tasks/projects", s.taskProjectsCreate)
@@ -608,7 +610,6 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("PATCH /v1/tasks/projects/{project}/metadata", s.projectMetadata)
 	m.HandleFunc("POST /v1/milestones", s.milestoneSave)
 	m.HandleFunc("PUT /v1/milestones/{milestone}", s.milestoneSave)
-	m.HandleFunc("PATCH /v1/milestones/{milestone}", s.milestonePatch)
 	m.HandleFunc("GET /v1/milestones/{milestone}", s.milestoneGet)
 	m.HandleFunc("GET /v1/labels", s.labelsList)
 	m.HandleFunc("POST /v1/labels", s.labelSave)
@@ -792,15 +793,34 @@ func (s Server) tasksList(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	stalled := false
+	if r.URL.Query().Has("stalled") {
+		if stalled, err = strconv.ParseBool(r.URL.Query().Get("stalled")); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_context")
+			return
+		}
+	}
 	var xs []store.Task
-	if r.URL.Query().Has("after_id") {
+	switch {
+	case stalled:
+		q := store.TaskQuery{Lane: lane, State: state, ParentLane: parentLane, Project: project, Area: area, Stalled: true, Limit: limit}
+		if r.URL.Query().Has("after_id") {
+			afterID, parseErr := queryAfterID(r)
+			if parseErr != nil {
+				appErr(w, r, parseErr)
+				return
+			}
+			q.AfterID = &afterID
+		}
+		xs, err = s.Service.ListTasksFiltered(r.Context(), q)
+	case r.URL.Query().Has("after_id"):
 		afterID, parseErr := queryAfterID(r)
 		if parseErr != nil {
 			appErr(w, r, parseErr)
 			return
 		}
 		xs, err = s.Service.ListTasksPage(r.Context(), lane, state, parentLane, project, area, afterID, limit)
-	} else {
+	default:
 		xs, err = s.Service.ListTasks(r.Context(), lane, state, parentLane, project, area, limit)
 	}
 	if err != nil {
@@ -817,6 +837,11 @@ func (s Server) tasksList(w http.ResponseWriter, r *http.Request) {
 		// Same echo as project: a server that predates the filter cannot
 		// echo it, which is how a client tells it from an empty result.
 		body["area"] = *area
+	}
+	if stalled {
+		// Same echo again: an old server ignores stalled=true and would
+		// answer with every task.
+		body["stalled"] = true
 	}
 	jsonOut(w, http.StatusOK, body)
 }

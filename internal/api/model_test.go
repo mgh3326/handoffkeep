@@ -34,10 +34,6 @@ func TestModelRoutes(t *testing.T) {
 	request(http.MethodGet, mpath, nil, http.StatusOK)
 	request(http.MethodGet, "/v1/milestones/999999", nil, http.StatusNotFound)
 	request(http.MethodGet, "/v1/milestones/bad", nil, http.StatusBadRequest)
-	request(http.MethodPatch, mpath, map[string]any{"name": "patched"}, http.StatusOK)
-	request(http.MethodPatch, "/v1/milestones/999999", map[string]any{"name": "patched"}, http.StatusNotFound)
-	request(http.MethodPatch, mpath, map[string]any{"name": ""}, http.StatusBadRequest)
-
 	request(http.MethodPut, mpath, map[string]any{"project": "experiment", "name": "changed"}, http.StatusOK)
 	request(http.MethodPut, "/v1/milestones/999999", map[string]any{"project": "experiment", "name": "changed"}, http.StatusNotFound)
 	request(http.MethodPut, mpath, map[string]any{"project": "experiment"}, http.StatusBadRequest)

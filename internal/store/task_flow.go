@@ -629,5 +629,12 @@ func (s *Store) transitionTask(ctx context.Context, id int64, in TransitionInput
 	if err := s.recordLinearBoardTaskTx(ctx, tx, x, note); err != nil {
 		return Task{}, err
 	}
+	// Rule 8: entering merged by hand also looks for a deploy record that
+	// already lists the task's PR.
+	if action == actMove && to == StateMerged {
+		if x, err = s.deployOnMergedTx(ctx, tx, x, now); err != nil {
+			return Task{}, err
+		}
+	}
 	return x, tx.Commit(ctx)
 }

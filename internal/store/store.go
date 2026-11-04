@@ -142,6 +142,9 @@ type TaskRefs struct {
 	OriginPR    string       `json:"origin_pr,omitempty"`
 	OriginTask  int64        `json:"origin_task,omitempty"`
 	Disposition *Disposition `json:"disposition,omitempty"`
+	// RevertPR is the PR that reverted this task's merge. Only a
+	// mergewake.revert event writes it (rule 9).
+	RevertPR string `json:"revert_pr,omitempty"`
 }
 
 type TaskLinear struct {
@@ -481,22 +484,25 @@ type Task struct {
 	ParentID *int64 `json:"parent_id"`
 	// Lifecycle timestamps, set when the task first enters the matching
 	// category; NULL on rows that predate them (no backfill).
-	StartedAt       *time.Time     `json:"started_at"`
-	CompletedAt     *time.Time     `json:"completed_at"`
-	CanceledAt      *time.Time     `json:"canceled_at"`
-	TriagedAt       *time.Time     `json:"triaged_at"`
-	StartedTriageAt *time.Time     `json:"started_triage_at"`
-	MilestoneID     *int64         `json:"milestone_id"`
-	Labels          []int64        `json:"labels"`
-	DueAt           *time.Time     `json:"due_at"`
-	SLAStartedAt    *time.Time     `json:"sla_started_at"`
-	SLAMediumRiskAt *time.Time     `json:"sla_medium_risk_at"`
-	SLAHighRiskAt   *time.Time     `json:"sla_high_risk_at"`
-	SLABreachesAt   *time.Time     `json:"sla_breaches_at"`
-	SLARisk         string         `json:"sla_risk"`
-	Children        []TaskChild    `json:"children,omitempty"`
-	Relations       []TaskRelation `json:"relations,omitempty"`
-	Events          []TaskEvent    `json:"events,omitempty"`
+	StartedAt       *time.Time `json:"started_at"`
+	CompletedAt     *time.Time `json:"completed_at"`
+	CanceledAt      *time.Time `json:"canceled_at"`
+	TriagedAt       *time.Time `json:"triaged_at"`
+	StartedTriageAt *time.Time `json:"started_triage_at"`
+	MilestoneID     *int64     `json:"milestone_id"`
+	Labels          []int64    `json:"labels"`
+	DueAt           *time.Time `json:"due_at"`
+	SLAStartedAt    *time.Time `json:"sla_started_at"`
+	SLAMediumRiskAt *time.Time `json:"sla_medium_risk_at"`
+	SLAHighRiskAt   *time.Time `json:"sla_high_risk_at"`
+	SLABreachesAt   *time.Time `json:"sla_breaches_at"`
+	SLARisk         string     `json:"sla_risk"`
+	// Stalled is computed at read time: a started task with no
+	// awaiting_decision and no activity within started_stalled_hours.
+	Stalled   bool           `json:"stalled"`
+	Children  []TaskChild    `json:"children,omitempty"`
+	Relations []TaskRelation `json:"relations,omitempty"`
+	Events    []TaskEvent    `json:"events,omitempty"`
 }
 
 // RelayEvent is a durable report from a worker to its owning lane.  Delivery
@@ -534,6 +540,8 @@ type Store struct {
 	// autoCloseOff inverts the auto_close_parent setting so the zero Store has
 	// it on, the default.
 	autoCloseOff atomic.Bool
+	// stalledHours is started_stalled_hours; zero means the default.
+	stalledHours atomic.Int64
 }
 
 // Refs stores repeatable named references. Its decoder accepts legacy scalar
@@ -1151,6 +1159,9 @@ func (s *Store) migrate(ctx context.Context) error {
 		return err
 	}
 	if err := migrateOnce(ctx, tx, 33, func() error { return execAll(ctx, tx, modelV33) }); err != nil {
+		return err
+	}
+	if err := migrateOnce(ctx, tx, 34, func() error { return execAll(ctx, tx, eventsV34) }); err != nil {
 		return err
 	}
 
@@ -1966,6 +1977,9 @@ func validTaskRefs(x TaskRefs) bool {
 	if x.OriginTask < 0 {
 		return false
 	}
+	if x.RevertPR != "" && !taskEventPRRE.MatchString(x.RevertPR) {
+		return false
+	}
 	if x.Disposition != nil && !validDisposition(x) {
 		return false
 	}
@@ -2659,12 +2673,35 @@ func (s *Store) AddTaskProject(ctx context.Context, name, by string) (bool, erro
 }
 
 func (s *Store) ListTasks(ctx context.Context, lane, state, parentLane string, project, area *string, limit int) ([]Task, error) {
-	if !validTaskQuery(lane, state, parentLane, project) {
+	return s.ListTasksFiltered(ctx, TaskQuery{Lane: lane, State: state, ParentLane: parentLane, Project: project, Area: area, Limit: limit})
+}
+
+// ListTasksPage returns a stable ID-ordered page for callers that must visit
+// the complete task set. afterID is exclusive; ListTasks retains its queue
+// priority ordering for existing callers.
+func (s *Store) ListTasksPage(ctx context.Context, lane, state, parentLane string, project, area *string, afterID int64, limit int) ([]Task, error) {
+	return s.ListTasksFiltered(ctx, TaskQuery{Lane: lane, State: state, ParentLane: parentLane, Project: project, Area: area, AfterID: &afterID, Limit: limit})
+}
+
+// TaskQuery is a task list filter. A nil AfterID keeps the queue's priority
+// order; a set one pages by id. Stalled keeps only stalled tasks.
+type TaskQuery struct {
+	Lane, State, ParentLane string
+	Project, Area           *string
+	Stalled                 bool
+	AfterID                 *int64
+	Limit                   int
+}
+
+// ListTasksFiltered lists tasks matching q and marks stalled rows.
+func (s *Store) ListTasksFiltered(ctx context.Context, tq TaskQuery) ([]Task, error) {
+	if !validTaskQuery(tq.Lane, tq.State, tq.ParentLane, tq.Project) || (tq.AfterID != nil && *tq.AfterID < 0) {
 		return nil, errors.New("invalid task query")
 	}
-	if err := checkTaskAreaFilter(area); err != nil {
+	if err := checkTaskAreaFilter(tq.Area); err != nil {
 		return nil, err
 	}
+	limit := tq.Limit
 	if limit < 1 {
 		limit = 20
 	}
@@ -2672,35 +2709,48 @@ func (s *Store) ListTasks(ctx context.Context, lane, state, parentLane string, p
 		limit = 1000
 	}
 	q, args := `SELECT `+taskColumns+` FROM tasks WHERE 1=1`, []any{}
-	if lane != "" {
-		args = append(args, lane)
+	if tq.AfterID != nil {
+		args = append(args, *tq.AfterID)
+		q += fmt.Sprintf(" AND id>$%d", len(args))
+	}
+	if tq.Lane != "" {
+		args = append(args, tq.Lane)
 		q += fmt.Sprintf(" AND lane=$%d", len(args))
 	}
-	if parentLane != "" {
-		args = append(args, parentLane)
+	if tq.ParentLane != "" {
+		args = append(args, tq.ParentLane)
 		q += fmt.Sprintf(" AND parent_lane=$%d", len(args))
 	}
-	if state != "" {
-		q += stateClause(state, &args)
+	if tq.State != "" {
+		q += stateClause(tq.State, &args)
 	}
-	if project != nil {
-		if *project == "" {
+	if tq.Project != nil {
+		if *tq.Project == "" {
 			q += " AND project IS NULL"
 		} else {
-			args = append(args, *project)
+			args = append(args, *tq.Project)
 			q += fmt.Sprintf(" AND project=$%d", len(args))
 		}
 	}
-	if area != nil {
-		if *area == "" {
+	if tq.Area != nil {
+		if *tq.Area == "" {
 			q += " AND area IS NULL"
 		} else {
-			args = append(args, *area)
+			args = append(args, *tq.Area)
 			q += fmt.Sprintf(" AND area=$%d", len(args))
 		}
 	}
+	now := time.Now().UTC()
+	if tq.Stalled {
+		args = append(args, now.Add(-s.StartedStalledHours()))
+		q += fmt.Sprintf(" AND state IN ("+startedStatesSQL+") AND NOT awaiting_decision AND "+taskActivitySQL+" < $%d", len(args))
+	}
 	args = append(args, limit)
-	q += fmt.Sprintf(" ORDER BY priority DESC,created_at ASC,id ASC LIMIT $%d", len(args))
+	if tq.AfterID != nil {
+		q += fmt.Sprintf(" ORDER BY id ASC LIMIT $%d", len(args))
+	} else {
+		q += fmt.Sprintf(" ORDER BY priority DESC,created_at ASC,id ASC LIMIT $%d", len(args))
+	}
 	rows, err := s.pool.Query(ctx, q, args...)
 	if err != nil {
 		return nil, err
@@ -2714,69 +2764,11 @@ func (s *Store) ListTasks(ctx context.Context, lane, state, parentLane string, p
 		}
 		out = append(out, x)
 	}
-	return out, rows.Err()
-}
-
-// ListTasksPage returns a stable ID-ordered page for callers that must visit
-// the complete task set. afterID is exclusive; ListTasks retains its queue
-// priority ordering for existing callers.
-func (s *Store) ListTasksPage(ctx context.Context, lane, state, parentLane string, project, area *string, afterID int64, limit int) ([]Task, error) {
-	if !validTaskQuery(lane, state, parentLane, project) || afterID < 0 {
-		return nil, errors.New("invalid task query")
-	}
-	if err := checkTaskAreaFilter(area); err != nil {
+	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	if limit < 1 {
-		limit = 20
-	}
-	if limit > 1000 {
-		limit = 1000
-	}
-	q, args := `SELECT `+taskColumns+` FROM tasks WHERE id>$1`, []any{afterID}
-	if lane != "" {
-		args = append(args, lane)
-		q += fmt.Sprintf(" AND lane=$%d", len(args))
-	}
-	if parentLane != "" {
-		args = append(args, parentLane)
-		q += fmt.Sprintf(" AND parent_lane=$%d", len(args))
-	}
-	if state != "" {
-		q += stateClause(state, &args)
-	}
-	if project != nil {
-		if *project == "" {
-			q += " AND project IS NULL"
-		} else {
-			args = append(args, *project)
-			q += fmt.Sprintf(" AND project=$%d", len(args))
-		}
-	}
-	if area != nil {
-		if *area == "" {
-			q += " AND area IS NULL"
-		} else {
-			args = append(args, *area)
-			q += fmt.Sprintf(" AND area=$%d", len(args))
-		}
-	}
-	args = append(args, limit)
-	q += fmt.Sprintf(" ORDER BY id ASC LIMIT $%d", len(args))
-	rows, err := s.pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := []Task{}
-	for rows.Next() {
-		var x Task
-		if err := scanTask(rows, &x); err != nil {
-			return nil, err
-		}
-		out = append(out, x)
-	}
-	return out, rows.Err()
+	rows.Close()
+	return out, s.markStalled(ctx, s.pool, out, now)
 }
 
 // GlanceTasks returns the counts and active task slice needed by the compact UI
@@ -2837,6 +2829,11 @@ func (s *Store) GetTask(ctx context.Context, id int64) (Task, bool, error) {
 		}
 		return Task{}, false, err
 	}
+	one := []Task{x}
+	if err := s.markStalled(ctx, s.pool, one, time.Now().UTC()); err != nil {
+		return Task{}, false, err
+	}
+	x = one[0]
 	rows, err := s.pool.Query(ctx, `SELECT id,task_id,"from","to","by",note,refs,at,kind,no_job,source,source_ref,field,from_value,to_value,auto,applied FROM task_events WHERE task_id=$1 ORDER BY at,id`, id)
 	if err != nil {
 		return Task{}, false, err
@@ -3457,8 +3454,23 @@ func (s *Store) PutDocument(ctx context.Context, x Document) (Document, bool, er
 	if e != nil && !strings.Contains(e.Error(), "no rows") {
 		return x, false, e
 	}
-	e = s.pool.QueryRow(ctx, `INSERT INTO documents(key,kind,session,job,body,sha256,created_by,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$8) ON CONFLICT(key) DO UPDATE SET kind=EXCLUDED.kind,session=EXCLUDED.session,job=EXCLUDED.job,body=EXCLUDED.body,sha256=EXCLUDED.sha256,created_by=EXCLUDED.created_by,updated_at=EXCLUDED.updated_at RETURNING id,created_at,updated_at`, x.Key, x.Kind, x.Session, x.Job, x.Body, x.SHA256, x.CreatedBy, now).Scan(&x.ID, &x.CreatedAt, &x.UpdatedAt)
-	return x, true, e
+	// A deploy record moves the merged tasks it lists in the same transaction
+	// (hk.deploy); any other document is a plain upsert.
+	tx, e := s.pool.Begin(ctx)
+	if e != nil {
+		return x, false, e
+	}
+	defer tx.Rollback(ctx)
+	e = tx.QueryRow(ctx, `INSERT INTO documents(key,kind,session,job,body,sha256,created_by,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$8) ON CONFLICT(key) DO UPDATE SET kind=EXCLUDED.kind,session=EXCLUDED.session,job=EXCLUDED.job,body=EXCLUDED.body,sha256=EXCLUDED.sha256,created_by=EXCLUDED.created_by,updated_at=EXCLUDED.updated_at RETURNING id,created_at,updated_at`, x.Key, x.Kind, x.Session, x.Job, x.Body, x.SHA256, x.CreatedBy, now).Scan(&x.ID, &x.CreatedAt, &x.UpdatedAt)
+	if e != nil {
+		return x, true, e
+	}
+	if IsDeployRecordKey(x.Key) {
+		if e = s.applyDeployRecordTx(ctx, tx, x.Key, x.Body, now); e != nil {
+			return x, true, e
+		}
+	}
+	return x, true, tx.Commit(ctx)
 }
 func (s *Store) GetDocument(ctx context.Context, key string) (Document, bool, error) {
 	if !validDocKey(key) {

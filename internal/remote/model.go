@@ -92,9 +92,3 @@ func (c Client) SetTaskProjectWithMetadata(ctx context.Context, id int64, projec
 	err := c.call(ctx, "POST", fmt.Sprintf("/v1/tasks/%d/project", id), map[string]any{"project": project, "note": note, "metadata": patch}, &out)
 	return out, err
 }
-
-func (c Client) PatchMilestone(ctx context.Context, id int64, p store.MilestonePatch) (store.ProjectMilestone, error) {
-	var out store.ProjectMilestone
-	err := c.call(ctx, "PATCH", fmt.Sprintf("/v1/milestones/%d", id), p, &out)
-	return out, err
-}

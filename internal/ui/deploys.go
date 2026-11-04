@@ -1,10 +1,8 @@
 package ui
 
 import (
-	"encoding/json"
 	"net/http"
 	"regexp"
-	"strings"
 	"time"
 
 	"github.com/mgh3326/handoffkeep/internal/store"
@@ -17,8 +15,7 @@ import (
 // §배포 기록(hk). The heading must stay "마지막 배포 이후 머지됨" — never
 // "미배포 확정" (design/2026-09-21/deploy-pending-surface §2 advisory).
 const (
-	deployRecordSchema = "deploy-record/v0"
-	deployDocsPerSvc   = 200
+	deployDocsPerSvc = 200
 	// deployDocsHardCap bounds the scan when the first window comes back
 	// full — deployed_at can reorder against record keys, so every document
 	// up to this bound is compared before current is asserted.
@@ -38,75 +35,6 @@ var deployServices = []struct {
 }
 
 var deployPRRepoRE = regexp.MustCompile(`^https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/pull/[0-9]+$`)
-
-// deployRecord mirrors the installer R12 body. Unknown fields are ignored;
-// fields the writer did not know arrive as JSON null.
-type deployRecord struct {
-	Schema      string   `json:"schema"`
-	Service     string   `json:"service"`
-	Target      string   `json:"target"`
-	HeadSHA     *string  `json:"head_sha"`
-	DeployedRef *string  `json:"deployed_ref"`
-	PreviousRef *string  `json:"previous_ref"`
-	DeployedAt  *string  `json:"deployed_at"`
-	Result      string   `json:"result"`
-	FailedStep  *int     `json:"failed_step"`
-	JobID       *string  `json:"job_id"`
-	ApprovalRef *string  `json:"approval_ref"`
-	IncludedPRs []string `json:"included_prs"`
-	Source      string   `json:"source"`
-}
-
-// deployRecordKeyTime extracts the UTC timestamp embedded in a
-// deploy/<service>/<YYYYMMDDTHHMMSSZ> record key. It orders records when a
-// record's own deployed_at is absent.
-func deployRecordKeyTime(key string) (time.Time, bool) {
-	stamp := key[strings.LastIndex(key, "/")+1:]
-	t, err := time.Parse("20060102T150405Z", stamp)
-	return t, err == nil
-}
-
-// classifyDeployRecord validates one document as a deploy record for the
-// expected service and reports every contract violation it can determine:
-// "key" (the key's timestamp is not the contract YYYYMMDDTHHMMSSZ — the
-// 09-24 operator record deploy/handoffkeep/20260923T1456Z had no seconds),
-// "schema" (unparseable JSON, wrong schema/service, or result outside the
-// enum), "deployed_at" (present but not RFC3339). A document carrying any
-// reason is not a deploy record for this view — it lands in InvalidCount and
-// the Invalid list instead of competing for current/latest. Before #620 a
-// malformed key was silently ignored; it is a format error now so the
-// operator can see and fix it.
-func classifyDeployRecord(key, service, body string) (*deployRecord, *time.Time, []string) {
-	var reasons []string
-	if _, ok := deployRecordKeyTime(key); !ok {
-		reasons = append(reasons, "key")
-	}
-	var rec deployRecord
-	if err := json.Unmarshal([]byte(body), &rec); err != nil {
-		return nil, nil, append(reasons, "schema")
-	}
-	if rec.Schema != deployRecordSchema || rec.Service != service {
-		return nil, nil, append(reasons, "schema")
-	}
-	switch rec.Result {
-	case "success", "failed", "rolled_back":
-	default:
-		return nil, nil, append(reasons, "schema")
-	}
-	var deployedAt *time.Time
-	if rec.DeployedAt != nil {
-		parsed, err := time.Parse(time.RFC3339, *rec.DeployedAt)
-		if err != nil {
-			reasons = append(reasons, "deployed_at")
-		} else {
-			deployedAt = &parsed
-		}
-	}
-	if len(reasons) > 0 {
-		return nil, nil, reasons
-	}
-	return &rec, deployedAt, nil
-}
 
 // deployRepoOfPR returns the "owner/repo" a refs.pr GitHub URL points at.
 // Exact match only — any other shape returns "".
@@ -227,7 +155,7 @@ func (h *Handler) deployPending(w http.ResponseWriter, r *http.Request) {
 // valid deploy-record/v0 body for that service.
 type deployParsedDoc struct {
 	key        string
-	rec        *deployRecord
+	rec        *store.DeployRecord
 	deployedAt *time.Time
 	keyTime    time.Time
 	recordedAt time.Time
@@ -261,13 +189,13 @@ func (h *Handler) deployServiceView(r *http.Request, service, repo string, event
 	parseDocs := func(page []store.Document) []deployParsedDoc {
 		out := []deployParsedDoc{}
 		for _, doc := range page {
-			rec, deployedAt, reasons := classifyDeployRecord(doc.Key, service, doc.Body)
+			rec, deployedAt, reasons := store.ClassifyDeployRecord(doc.Key, service, doc.Body)
 			if len(reasons) > 0 {
 				view.InvalidCount++
 				view.Invalid = append(view.Invalid, deployInvalidRecord{Key: doc.Key, Reasons: reasons})
 				continue
 			}
-			keyTime, _ := deployRecordKeyTime(doc.Key)
+			keyTime, _ := store.DeployRecordKeyTime(doc.Key)
 			out = append(out, deployParsedDoc{key: doc.Key, rec: rec, deployedAt: deployedAt, keyTime: keyTime, recordedAt: doc.CreatedAt})
 		}
 		return out

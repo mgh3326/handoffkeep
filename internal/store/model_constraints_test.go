@@ -3,7 +3,6 @@ package store
 import (
 	"errors"
 	"fmt"
-	"sync"
 	"testing"
 	"time"
 )
@@ -37,33 +36,6 @@ func TestModelConstraintsAndHistory(t *testing.T) {
 	m, err = s.SaveMilestone(ctx, ProjectMilestone{Project: "handoffkeep", Name: "same"})
 	if err != nil {
 		t.Fatal(err)
-	}
-	updatedDescription := "independent change"
-	if _, err = s.PatchMilestone(ctx, m.ID, MilestonePatch{Description: &updatedDescription}); err != nil {
-		t.Fatal(err)
-	}
-	newName := "renamed"
-	patched, err := s.PatchMilestone(ctx, m.ID, MilestonePatch{Name: &newName})
-	if err != nil || patched.Description != updatedDescription || patched.Name != newName {
-		t.Fatalf("partial milestone update=%+v err=%v", patched, err)
-	}
-	var wg sync.WaitGroup
-	errs := make(chan error, 2)
-	concurrentName, concurrentStatus := "concurrent-name", "concurrent-status"
-	for _, patch := range []MilestonePatch{{Name: &concurrentName}, {Status: &concurrentStatus}} {
-		wg.Add(1)
-		go func(p MilestonePatch) { defer wg.Done(); _, err := s.PatchMilestone(ctx, m.ID, p); errs <- err }(patch)
-	}
-	wg.Wait()
-	close(errs)
-	for err := range errs {
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-	patched, err = s.GetMilestone(ctx, m.ID)
-	if err != nil || patched.Name != concurrentName || patched.Status != concurrentStatus {
-		t.Fatalf("concurrent updates=%+v err=%v", patched, err)
 	}
 	if _, changed, err := s.SetTaskMilestone(ctx, x.ID, &m.ID, "test"); err != nil || !changed {
 		t.Fatalf("set milestone changed=%t err=%v", changed, err)

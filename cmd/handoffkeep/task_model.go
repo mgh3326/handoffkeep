@@ -57,47 +57,50 @@ func taskModelCmd(args []string, out io.Writer) error {
 		if (!update && fs.NArg() != 2) || (update && fs.NArg() != 3) {
 			return errors.New("usage: tasks milestone create <name> --project <project> | update <id> <name> --project <project>")
 		}
+		m := store.ProjectMilestone{Project: *project, Description: *description, Status: *status, SortOrder: *order}
 		if update {
 			id, e := strconv.ParseInt(fs.Arg(1), 10, 64)
 			if e != nil || id < 1 {
 				return errors.New("milestone id must be positive")
 			}
+			m, e = c.GetMilestone(ctx, id)
+			if e != nil {
+				return e
+			}
 			present := map[string]bool{}
 			fs.Visit(func(f *flag.Flag) { present[f.Name] = true })
-			name := fs.Arg(2)
-			p := store.MilestonePatch{Name: &name, SetTarget: present["target"]}
-			if present["project"] {
-				p.Project = project
+			if present["project"] && *project != m.Project {
+				return errors.New("milestone project cannot be changed")
 			}
+			m.Name = fs.Arg(2)
 			if present["description"] {
-				p.Description = description
+				m.Description = *description
 			}
 			if present["status"] {
-				p.Status = status
+				m.Status = *status
 			}
 			if present["order"] {
-				p.SortOrder = order
+				m.SortOrder = *order
 			}
-			if p.SetTarget && *target != "" {
+			if present["target"] {
+				m.TargetAt = nil
+				if *target != "" {
+					t, e := time.Parse(time.RFC3339, *target)
+					if e != nil {
+						return e
+					}
+					m.TargetAt = &t
+				}
+			}
+		} else {
+			m.Name = fs.Arg(1)
+			if *target != "" {
 				t, e := time.Parse(time.RFC3339, *target)
 				if e != nil {
 					return e
 				}
-				p.TargetAt = &t
+				m.TargetAt = &t
 			}
-			result, e := c.PatchMilestone(ctx, id, p)
-			if e != nil {
-				return e
-			}
-			return printJSON(out, result)
-		}
-		m := store.ProjectMilestone{Project: *project, Name: fs.Arg(1), Description: *description, Status: *status, SortOrder: *order}
-		if *target != "" {
-			t, e := time.Parse(time.RFC3339, *target)
-			if e != nil {
-				return e
-			}
-			m.TargetAt = &t
 		}
 		result, e := c.SaveMilestone(ctx, m)
 		if e != nil {
