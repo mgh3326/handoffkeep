@@ -141,14 +141,28 @@ starts with `https://github.com/`; other values are rendered as text.
 ## Live refresh and vendored assets
 
 `GET /ui/events` is an SSE stream with `Content-Type: text/event-stream` and
-`Cache-Control: no-cache`. It sends an initial `delta` event then polls the
-maximum `relay_events.id` and `task_events.id` every ten seconds. Changed IDs
-produce:
+`Cache-Control: no-cache`. It sends an initial `delta` event then polls three
+watermarks every ten seconds: the maximum `relay_events.id`, the maximum
+`task_events.id`, and the change feed's committed `sync_state.max_sync_id`
+([sync-feed.md](sync-feed.md)). The sync watermark moves on document, task,
+task comment and decision request writes, so those refresh the page too. A
+change to any watermark produces:
 
 ```text
 event: delta
-data: {"relay_max_id":123,"task_event_max_id":456}
+data: {"relay_max_id":123,"task_event_max_id":456,"sync_max_id":789}
 ```
+
+The first block also carries `retry: 5000`, so a browser reconnects five
+seconds after the stream drops (a deploy restart or a proxy closing it). An
+idle stream gets a `: ping` comment every 25 seconds, well inside Cloudflare's
+100-second proxy idle timeout; `EventSource` ignores comments. The stream sends
+no `id:`: every (re)connection starts with a fresh `delta`, which already
+makes the page catch up. Readers must ignore unknown `data` keys; `sync_max_id`
+was added after the first two.
+
+React console views poll through `usePoll`, which skips ticks while the tab
+is hidden and reads once as soon as it becomes visible again.
 
 The page uses that event to have htmx fetch its current `/ui/fragments/...`
 view. It uses vendored htmx 2.0.4 from `internal/ui/static/htmx.min.js`; the
