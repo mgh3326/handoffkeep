@@ -400,13 +400,15 @@ func (s *Store) afterStateChangeTx(ctx context.Context, tx pgx.Tx, x Task, from,
 }
 
 // autoCloseTx runs auto_close_parent in the transaction of a child's
-// transition. A child is settled when it is merged, deployed, dropped or
+// transition. A child is settled when it is merged, deployed, completed, dropped or
 // duplicate; a child in triage, backlog, unstarted, a started state or icebox
 // blocks the close (icebox is parked work, not finished work).
 //
 //	any child not settled             -> no change
 //	some completed, all deployed      -> parent deployed
-//	some completed, some only merged  -> parent merged
+//	some completed, some merged       -> parent merged
+//	all done children completed       -> completed for decide, ops, verify;
+//	                                     otherwise no change; skip recorded
 //	all dropped or duplicate          -> no change; the skip is recorded
 //
 // The close applies to a parent in backlog, unstarted or a started state; it
@@ -473,6 +475,14 @@ func (s *Store) autoCloseTx(ctx context.Context, tx pgx.Tx, child Task, by strin
 		}
 		if deployed == completed {
 			to = StateDeployed
+		}
+		if to == StateCompleted && !canCompleteKind(p.Kind) {
+			_, _, err = insertEvent(ctx, tx, taskEventInput{
+				TaskID: p.ID, Kind: TaskEventAutoClose, From: p.State, To: p.State, By: "hk", At: now, Refs: p.Refs,
+				Note:   fmt.Sprintf("sub-task #%d completed; this parent kind remains open", child.ID),
+				Source: "hk.auto_close", SourceRef: ref, Auto: true, NotApplied: true,
+			})
+			return err
 		}
 		if err := s.wrkTaskFenceTx(ctx, tx, p, FenceTarget(to), false); err != nil {
 			switch wrkrecords.Code(err) {

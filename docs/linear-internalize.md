@@ -105,7 +105,7 @@ forward or is recorded with no effect.
 | `mergewake.merge` | mergewake merged the PR after its review passed | `merged` | Any `backlog`, `unstarted` or `started` state |
 | `mergewake.revert` | Revert PR merged, for example after post-merge CI failed | `developing` | `merged`, `deployed` |
 | `hk.deploy` | Successful deploy record lists the PR | `deployed` | `merged` |
-| `hk.auto_close` | Last child closed | `merged` or `deployed`, see Hierarchy | Any non-terminal state except `triage` |
+| `hk.auto_close` | Last child closed | `completed`, `merged` or `deployed`, see Hierarchy | Any non-terminal state except `triage` |
 | `hk.sweep` | Backlog idle past the setting | `icebox` | `backlog` |
 
 **Choosing the sub-state on spawn.** A spawn reaches hk first as a claim with a job
@@ -225,14 +225,15 @@ on it. S3 defines when a decision is superseded.
 
 **Auto-close** (`auto_close_parent`, default on; Linear's `autoCloseParentIssues`)
 runs in the transaction of the child's transition, once every child is settled. A
-child is settled when it is `merged`, `deployed`, `dropped` or `duplicate`. Any child
+child is settled when it is `merged`, `deployed`, `completed`, `dropped` or `duplicate`. Any child
 in `triage`, `backlog`, `unstarted`, a `started` state or `icebox` blocks auto-close.
 
 | Children | Parent result |
 |---|---|
 | Any not settled, including `icebox` (Q6) | No change |
 | At least one completed, all completed ones `deployed` | `deployed`, which each such child reached through a deploy record |
-| At least one completed, some only `merged` | `merged`; a later deploy event can advance it |
+| At least one done child is `merged` or `deployed`, but not all done children are `deployed` | `merged`; a later deploy event can advance it |
+| All done children are `completed` | `completed` for a `decide`, `ops` or `verify` parent; an `implement` or `fix` parent stays open with an unapplied `hk.auto_close` event |
 | All `dropped` or `duplicate` (Q5) | No change; a `hk.auto_close` event is recorded with `applied=false` |
 
 The Linear schema says only that the parent closes when its sub-issues are closed,

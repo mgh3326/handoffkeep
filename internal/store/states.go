@@ -51,6 +51,11 @@ func TaskStates() []string {
 	return []string{StateTriage, StateBacklog, StateUnstarted, StateResearching, StateDeveloping, StateReviewing, StateMerged, StateDeployed, StateCompleted, StateDropped, StateDuplicate, StateIcebox}
 }
 
+// canCompleteKind reports which task kinds can close without a change.
+func canCompleteKind(kind string) bool {
+	return kind == "decide" || kind == "ops" || kind == "verify"
+}
+
 // TaskCategory derives the category of a state; "" for an unknown state.
 func TaskCategory(state string) string { return taskCategories[state] }
 

@@ -250,3 +250,48 @@ func TestEveryCloseRecordsClosure(t *testing.T) {
 		}
 	})
 }
+
+func TestAutoCloseCompletedParentKinds(t *testing.T) {
+	s := schemaStore(t, "auto_close_completed_kind")
+	for _, kind := range []string{"decide", "ops", "verify", "implement", "fix"} {
+		t.Run(kind, func(t *testing.T) {
+			parent := flowTask(t, s, s.pool, kind, StateBacklog, false)
+			child := flowTask(t, s, s.pool, "decide", StateBacklog, false)
+			setParent(t, s, child, parent)
+			closed, err := s.TransitionTaskWith(t.Context(), child.ID, TransitionInput{To: StateCompleted, By: "tester", Evidence: "hk:doc research/x"})
+			if err != nil || closed.State != StateCompleted {
+				t.Fatalf("child state=%s err=%v", closed.State, err)
+			}
+			got := stateOf(t, s, parent.ID)
+			if kind == "implement" || kind == "fix" {
+				if got.State != StateBacklog || got.Refs.Closure != nil {
+					t.Fatalf("parent changed: state=%s closure=%+v", got.State, got.Refs.Closure)
+				}
+				events := eventsOfKind(got, TaskEventAutoClose)
+				if len(events) != 1 || events[0].Applied || events[0].From != StateBacklog || events[0].To != StateBacklog {
+					t.Fatalf("skip event=%+v", events)
+				}
+				return
+			}
+			if got.State != StateCompleted || got.Refs.Closure == nil || got.Refs.Closure.Type != "resolved" {
+				t.Fatalf("parent state=%s closure=%+v", got.State, got.Refs.Closure)
+			}
+		})
+	}
+	t.Run("implement with merged child", func(t *testing.T) {
+		parent := flowTask(t, s, s.pool, "implement", StateBacklog, false)
+		a := flowTask(t, s, s.pool, "decide", StateBacklog, false)
+		b := flowTask(t, s, s.pool, "implement", StateReviewing, true)
+		setParent(t, s, a, parent)
+		setParent(t, s, b, parent)
+		if _, err := s.TransitionTaskWith(t.Context(), a.ID, TransitionInput{To: StateCompleted, By: "tester", Evidence: "hk:doc research/x"}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.TransitionTaskWith(t.Context(), b.ID, TransitionInput{To: StateMerged, By: "tester", Evidence: "merged change"}); err != nil {
+			t.Fatal(err)
+		}
+		if got := stateOf(t, s, parent.ID); got.State != StateMerged {
+			t.Fatalf("parent state=%s, want merged", got.State)
+		}
+	})
+}

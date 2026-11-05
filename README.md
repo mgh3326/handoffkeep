@@ -270,12 +270,14 @@ removing an edge archives it (`archived_at`) and adding it again revives it.
 `duplicate_of` and the `duplicate` state are written in one transaction
 (`tasks transition <id> --to duplicate --duplicate-of <other>` does the same
 thing). `blocks` is informational. With `auto_close_parent` on (the default),
-a parent closes when its last sub-task settles: `deployed` if every completed
-sub-task is `deployed`, otherwise `merged`; a sub-task in `icebox` or any open
-state blocks the close, and a parent whose sub-tasks are all `dropped` or
-`duplicate` stays where it is, with the skip recorded as an `auto_close`
-event. Reopening a sub-task records an event on a completed parent and does
-not reopen it.
+a parent closes when its last sub-task settles: `deployed` if every done
+sub-task is `deployed`, otherwise `merged` if any is `merged` or `deployed`, or
+`completed` if all done sub-tasks are `completed` and the parent is `decide`,
+`ops` or `verify`. An `implement` or `fix` parent stays open in the last case,
+with an `auto_close` event. A sub-task in `icebox` or any open state blocks the
+close, and a parent whose sub-tasks are all `dropped` or `duplicate` stays where
+it is, with the skip recorded as an `auto_close` event. Reopening a sub-task
+records an event on a completed parent and does not reopen it.
 
 ### Triage intake, ticket sets and the duplicate check
 

@@ -529,7 +529,7 @@ func (s *Store) transitionTask(ctx context.Context, id int64, in TransitionInput
 		if !backToBacklog && !taskTransitionAllowed(from, to) {
 			return Task{}, ErrTaskConflict
 		}
-		if to == StateCompleted && x.Kind != "decide" && x.Kind != "ops" && x.Kind != "verify" {
+		if to == StateCompleted && !canCompleteKind(x.Kind) {
 			return Task{}, fmt.Errorf("%w: completed applies to decide, ops and verify tasks", ErrTaskConflict)
 		}
 		// A task waiting on a decision leaves only the way the old
