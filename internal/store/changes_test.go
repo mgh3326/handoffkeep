@@ -360,6 +360,19 @@ func TestChangeFromEvents(t *testing.T) {
 			t.Fatalf("reverted links %v", got)
 		}
 	})
+	t.Run("revert PR already announced by its own pr event", func(t *testing.T) {
+		repo, x := changeRepo("revertpr"), task(t, StateBacklog)
+		pr, revert := repoPR(repo, 12), repoPR(repo, 13)
+		send(t, s, TaskSourceEvent{Source: SourceMergewakeMerge, SourceRef: pr, TaskID: x.ID})
+		send(t, s, TaskSourceEvent{Source: SourceMergewakePR, SourceRef: revert, TaskID: x.ID})
+		if got := changeLinks(t, s, mustChange(t, s, repo, 13).ID); got[x.ID] != ChangeImplements {
+			t.Fatalf("before the revert event: %v", got)
+		}
+		send(t, s, TaskSourceEvent{Source: SourceMergewakeRevert, SourceRef: revert, RevertedPR: pr, TaskID: x.ID})
+		if got := changeLinks(t, s, mustChange(t, s, repo, 13).ID); !reflect.DeepEqual(got, map[int64]string{x.ID: ChangeReferences}) {
+			t.Fatalf("revert links %v, want references", got)
+		}
+	})
 	t.Run("an event for a missing task", func(t *testing.T) {
 		repo := changeRepo("missing")
 		_, err := s.ApplyTaskSourceEvent(t.Context(), TaskSourceEvent{Source: SourceMergewakePR, SourceRef: repoPR(repo, 9), TaskID: 987654321})

@@ -175,8 +175,16 @@ RETURNING id`, w.repo, w.number, w.state, nullStr(w.head), nullStr(w.base), null
 	return id, err
 }
 
-func linkChangeTaskTx(ctx context.Context, tx pgx.Tx, changeID, taskID int64, relation string, now time.Time) error {
-	_, err := tx.Exec(ctx, `INSERT INTO change_tasks(change_id,task_id,relation,created_at) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING`, changeID, taskID, relation, now)
+// linkChangeTaskTx links a task to a change. An existing link stays as it is
+// (the first relation wins) unless reclassify is set, which makes the new
+// relation replace it: the revert PR's own mergewake.pr event may have linked
+// it as implements before the revert event names it.
+func linkChangeTaskTx(ctx context.Context, tx pgx.Tx, changeID, taskID int64, relation string, reclassify bool, now time.Time) error {
+	conflict := `DO NOTHING`
+	if reclassify {
+		conflict = `(change_id,task_id) DO UPDATE SET relation=EXCLUDED.relation`
+	}
+	_, err := tx.Exec(ctx, `INSERT INTO change_tasks(change_id,task_id,relation,created_at) VALUES($1,$2,$3,$4) ON CONFLICT `+conflict, changeID, taskID, relation, now)
 	return err
 }
 
@@ -205,7 +213,7 @@ func recordChangeTx(ctx context.Context, tx pgx.Tx, x Task, in TaskSourceEvent, 
 	if err != nil {
 		return err
 	}
-	if err = linkChangeTaskTx(ctx, tx, id, x.ID, ChangeImplements, now); err != nil {
+	if err = linkChangeTaskTx(ctx, tx, id, x.ID, ChangeImplements, false, now); err != nil {
 		return err
 	}
 	switch in.Source {
@@ -224,10 +232,10 @@ func recordChangeTx(ctx context.Context, tx pgx.Tx, x Task, in TaskSourceEvent, 
 		if err != nil {
 			return err
 		}
-		if err = linkChangeTaskTx(ctx, tx, revID, x.ID, ChangeReferences, now); err != nil {
-			return err
-		}
 		if revID != id {
+			if err = linkChangeTaskTx(ctx, tx, revID, x.ID, ChangeReferences, true, now); err != nil {
+				return err
+			}
 			// The first revert recorded stays; a later one does not replace it.
 			if _, err = tx.Exec(ctx, `UPDATE changes SET reverted_by_change_id=$2, updated_at=$3 WHERE id=$1 AND reverted_by_change_id IS NULL`, id, revID, now); err != nil {
 				return err
