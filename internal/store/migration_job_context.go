@@ -1,11 +1,11 @@
 package store
 
-// Version 44 records job context and permits jobs without a task. Each ALTER
+// Version 45 records job context and permits jobs without a task. Each ALTER
 // takes ACCESS EXCLUSIVE on jobs until commit. The nullable ADD COLUMNs and
 // DROP NOT NULL are catalog-only and rewrite no row. Column CHECKs validate
 // existing rows in one scan under that lock; NULL passes each check. ClaimJob
 // and UpdateJob wait for the duration.
-var jobContextV44 = []string{
+var jobContextV45 = []string{
 	`ALTER TABLE jobs
 		ADD COLUMN harness TEXT,
 		ADD COLUMN effort TEXT,
@@ -25,5 +25,5 @@ var jobContextV44 = []string{
 		ADD COLUMN diff_insertions INT CHECK(diff_insertions >= 0),
 		ADD COLUMN diff_deletions INT CHECK(diff_deletions >= 0)`,
 	`ALTER TABLE jobs ALTER COLUMN task_id DROP NOT NULL`,
-	`INSERT INTO schema_version(version) VALUES (44)`,
+	`INSERT INTO schema_version(version) VALUES (45)`,
 }

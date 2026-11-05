@@ -165,7 +165,7 @@ func taskDB(t *testing.T) *pgxpool.Pool {
 func insertLegacyTask(t *testing.T, db *pgxpool.Pool, lane, title, state string) store.Task {
 	t.Helper()
 	var id int64
-	err := db.QueryRow(t.Context(), `INSERT INTO tasks(lane,title,kind,state,refs,claimed_by,created_by,created_at,updated_at) VALUES($1,$2,'implement',$3,'{}'::jsonb,'','legacy',now(),now()) RETURNING id`, lane, title, state).Scan(&id)
+	err := db.QueryRow(t.Context(), `INSERT INTO tasks(lane,title,kind,state,refs,claimed_by,created_by,created_at,updated_at,last_activity_at) VALUES($1,$2,'implement',$3,'{}'::jsonb,'','legacy',now(),now(),now()) RETURNING id`, lane, title, state).Scan(&id)
 	if err != nil {
 		t.Fatal(err)
 	}

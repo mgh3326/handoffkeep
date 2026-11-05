@@ -187,7 +187,7 @@ func TestDecisionsBackfillDryRunWritesNothing(t *testing.T) {
 	// stale_candidate: a backlog task flagged 20 days ago. task_events is
 	// append-only, so the old ask is seeded as it would have been written.
 	var stale store.Task
-	if err := pool.QueryRow(ctx, `INSERT INTO tasks(lane,title,kind,state,created_by,created_at,updated_at,awaiting_decision) VALUES('backfill-lane','stale flag','implement','backlog','backfill-test',now()-interval '20 days',now()-interval '20 days',true) RETURNING id`).Scan(&stale.ID); err != nil {
+	if err := pool.QueryRow(ctx, `INSERT INTO tasks(lane,title,kind,state,created_by,created_at,updated_at,last_activity_at,awaiting_decision) VALUES('backfill-lane','stale flag','implement','backlog','backfill-test',now()-interval '20 days',now()-interval '20 days',now()-interval '20 days',true) RETURNING id`).Scan(&stale.ID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pool.Exec(ctx, `INSERT INTO task_events(task_id,"from","to","by",note,at,kind,field,from_value,to_value) VALUES($1,'backlog','backlog','backfill-test','still wanted?',now()-interval '20 days','awaiting_decision','awaiting_decision','false','true')`, stale.ID); err != nil {

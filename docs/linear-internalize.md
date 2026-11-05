@@ -32,6 +32,11 @@ proposed answer for every item except Q11, where the alternative stands.
 
 ## State model
 
+**Two clocks.** `updated_at` is the search sync clock and moves on every write.
+`last_activity_at` moves only on task events with `auto=false` or
+`source=panewire.job`. Version 44 backfilled it from those events, with
+`created_at` as the floor.
+
 `tasks.state` holds one of eleven leaf states. The category is derived from the
 leaf by a fixed table and is never stored, so a category and sub-state cannot
 disagree. API rows add a read-only `category` field.

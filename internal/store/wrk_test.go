@@ -87,7 +87,7 @@ func wrkCIStore(t *testing.T) *Store {
 	if e = runtime.ConfigureWrk(ctx, "enforce", policy, wrkrecords.NewUUID(), false); e != nil {
 		t.Fatal(e)
 	}
-	_, e = owner.pool.Exec(ctx, `INSERT INTO tasks(id,lane,parent_lane,title,kind,state,claimed_by,created_by,created_at,updated_at) VALUES(9001,'builder-a','director-1','authority test','implement','backlog','','test',now(),now()),(9002,'builder-b','director-1','second task','implement','backlog','','test',now(),now())`)
+	_, e = owner.pool.Exec(ctx, `INSERT INTO tasks(id,lane,parent_lane,title,kind,state,claimed_by,created_by,created_at,updated_at,last_activity_at) VALUES(9001,'builder-a','director-1','authority test','implement','backlog','','test',now(),now(),now()),(9002,'builder-b','director-1','second task','implement','backlog','','test',now(),now(),now())`)
 	if e != nil {
 		t.Fatal(e)
 	}

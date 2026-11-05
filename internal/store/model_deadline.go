@@ -94,7 +94,7 @@ func (s *Store) setTaskDeadlines(ctx context.Context, id int64, d TaskDeadlines,
 		if from == to {
 			continue
 		}
-		if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: id, Kind: "metadata", From: x.State, To: x.State, By: by, Refs: x.Refs, At: now, Field: name, FromValue: from, ToValue: to}); err != nil {
+		if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: id, Kind: "metadata", From: x.State, To: x.State, By: by, Refs: x.Refs, Into: &x, At: now, Field: name, FromValue: from, ToValue: to}); err != nil {
 			return Task{}, false, err
 		}
 	}

@@ -111,8 +111,8 @@ func seedMergedEventsBulk(t *testing.T, db *pgx.Conn, s *store.Store, n int, at 
 	t.Helper()
 	lane := uiLane(t, "deploy-bulk")
 	_, err := db.Exec(t.Context(), `WITH inserted AS (
- INSERT INTO tasks(lane,title,kind,state,created_by,created_at,updated_at)
- SELECT $1,'bulk merged','implement','merged','deploy-test',$2,$2 FROM generate_series(1,$3)
+ INSERT INTO tasks(lane,title,kind,state,created_by,created_at,updated_at,last_activity_at)
+ SELECT $1,'bulk merged','implement','merged','deploy-test',$2,$2,$2 FROM generate_series(1,$3)
  RETURNING id)
  INSERT INTO task_events(task_id,"from","to","by",note,refs,at)
  SELECT id,'join','merged','deploy-test','','{}'::jsonb,$2 FROM inserted`, lane, at, n)

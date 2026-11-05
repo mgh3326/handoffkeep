@@ -91,7 +91,7 @@ func seedLegacyTasks(t *testing.T, pool *pgxpool.Pool) {
 		if refs == "" {
 			refs = "{}"
 		}
-		if err := pool.QueryRow(ctx, `INSERT INTO tasks(lane,title,kind,state,claimed_by,refs,created_by,created_at,updated_at) VALUES('mig-lane',$1,$2,$3,$4,$5::jsonb,'seed',now(),now()) RETURNING id`,
+		if err := pool.QueryRow(ctx, `INSERT INTO tasks(lane,title,kind,state,claimed_by,refs,created_by,created_at,updated_at,last_activity_at) VALUES('mig-lane',$1,$2,$3,$4,$5::jsonb,'seed',now(),now(),now()) RETURNING id`,
 			sd.name, sd.kind, sd.legacy, sd.claimedBy, refs).Scan(&sd.id); err != nil {
 			t.Fatalf("seed %q: %v", sd.name, err)
 		}

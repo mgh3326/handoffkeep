@@ -41,11 +41,17 @@ func CheckBacklogIceboxDays(days int) error {
 	return nil
 }
 
+// Design v1.1 §13.6 defines activity as human or job events.
+func isActivityEvent(auto bool, source string) bool { return !auto || source == SourcePanewireJob }
+
+const activityEventSQL = "(NOT auto OR source = 'panewire.job')"
+
 // taskActivitySQL is a task's newest activity: a task_events row, a comment,
 // or an update to the job bound to it in refs.job_id. A late update to an
 // earlier job of the task no longer counts once another job is bound.
 // created_at is the floor, so a task nobody touched is idle since it was
 // filed. It reads the row as "tasks".
+// last_activity_at is the narrower human/job clock; this function deliberately still counts every event.
 const taskActivitySQL = `GREATEST(tasks.created_at,
 	(SELECT max(e.at) FROM task_events e WHERE e.task_id=tasks.id),
 	(SELECT max(c.created_at) FROM task_comments c WHERE c.task_id=tasks.id),

@@ -193,7 +193,7 @@ func insertTriageTaskTx(ctx context.Context, tx pgx.Tx, item triageItem, source,
 		lane = IntakeLane
 	}
 	var x Task
-	if err := scanTask(tx.QueryRow(ctx, `INSERT INTO tasks(lane,title,kind,state,priority,created_by,created_at,updated_at,started_triage_at,project,parent_id,source,source_ref) VALUES($1,$2,$3,$4,$5,$6,$7,$7,$7,$8,$9,$10,$11) RETURNING `+taskColumns,
+	if err := scanTask(tx.QueryRow(ctx, `INSERT INTO tasks(lane,title,kind,state,priority,created_by,created_at,updated_at,last_activity_at,started_triage_at,project,parent_id,source,source_ref) VALUES($1,$2,$3,$4,$5,$6,$7,$7,$7,$7,$8,$9,$10,$11) RETURNING `+taskColumns,
 		lane, item.Title, item.Kind, StateTriage, item.Priority, by, now, item.Project, parent, source, sourceRef), &x); err != nil {
 		return Task{}, err
 	}

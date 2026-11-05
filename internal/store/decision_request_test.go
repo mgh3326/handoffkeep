@@ -87,6 +87,9 @@ func TestDecisionRequestRecommendationAndDefaultAreSeparate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if !got.Task.LastActivityAt.After(task.LastActivityAt) || !got.Task.LastActivityAt.Equal(full.LastActivityAt) {
+		t.Fatalf("decision activity before=%v returned=%v stored=%v", task.LastActivityAt, got.Task.LastActivityAt, full.LastActivityAt)
+	}
 	last := full.Events[len(full.Events)-1]
 	if last.Kind != TaskEventDecision || last.From != "developing" || last.To != "developing" || last.Refs == nil || last.Refs.DecisionRequest == nil || last.Refs.DecisionRequest.ID != r.ID {
 		t.Fatalf("event=%+v", last)
@@ -177,6 +180,10 @@ func TestDecisionRequestSupersedeNeverInheritsAnswer(t *testing.T) {
 	answered, err := s.ResolveDecisionRequest(ctx, task.ID, "director-1", DecisionResolveInput{RequestID: replaced.Request.ID, Kind: DecisionRequestAnswered, Option: "B", Responder: "operator"})
 	if err != nil {
 		t.Fatal(err)
+	}
+	stored := stateOf(t, s, task.ID)
+	if !answered.Task.LastActivityAt.After(replaced.Task.LastActivityAt) || !answered.Task.LastActivityAt.Equal(stored.LastActivityAt) {
+		t.Fatalf("answer activity before=%v returned=%v stored=%v", replaced.Task.LastActivityAt, answered.Task.LastActivityAt, stored.LastActivityAt)
 	}
 	// A third request after the answer starts clean.
 	third := decisionInput()
@@ -364,6 +371,9 @@ func TestDecisionRequestBlockListsOnce(t *testing.T) {
 		t.Fatalf("state=%s awaiting=%v", got.Task.State, got.Task.AwaitingDecision)
 	}
 	full, _, _ := s.GetTask(ctx, task.ID)
+	if !got.Task.LastActivityAt.After(task.LastActivityAt) || !got.Task.LastActivityAt.Equal(full.LastActivityAt) {
+		t.Fatalf("blocking activity before=%v returned=%v stored=%v", task.LastActivityAt, got.Task.LastActivityAt, full.LastActivityAt)
+	}
 	last := full.Events[len(full.Events)-1]
 	if last.Kind != TaskEventAwaiting || last.From != "developing" || last.To != "developing" || last.Note != in.Question || last.Refs.DecisionRequest.ID != got.Request.ID {
 		t.Fatalf("block event=%+v", last)
