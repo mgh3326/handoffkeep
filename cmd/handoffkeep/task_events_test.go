@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -220,5 +223,48 @@ func TestSplitArgsSingleDashValueFlags(t *testing.T) {
 	}
 	if _, err := splitArgs([]string{"7", "-source"}, "source", "source-ref"); err == nil {
 		t.Fatal("a trailing -source without a value was accepted")
+	}
+}
+
+type fakeRepairer struct {
+	batches []int
+	calls   int
+	cancel  context.CancelFunc
+}
+
+func (f *fakeRepairer) RepairLastActivity(ctx context.Context, limit int) (int, error) {
+	if limit != lastActivityRepairBatch {
+		return 0, fmt.Errorf("limit=%d", limit)
+	}
+	f.calls++
+	if f.calls > len(f.batches) {
+		return 0, nil
+	}
+	if f.cancel != nil && f.calls == len(f.batches) {
+		f.cancel()
+	}
+	return f.batches[f.calls-1], nil
+}
+
+func TestLastActivityRepairWorker(t *testing.T) {
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	f := &fakeRepairer{batches: []int{500, 500, 7}}
+	lastActivityRepairWorker{store: f}.Run(t.Context())
+	if f.calls != 4 {
+		t.Fatalf("calls=%d", f.calls)
+	}
+	if got := strings.Count(buf.String(), "tasks.last_activity_repair"); got != 1 || !strings.Contains(buf.String(), "tasks.last_activity_repair repaired=1007\n") {
+		t.Fatalf("log=%q", buf.String())
+	}
+
+	buf.Reset()
+	ctx, cancel := context.WithCancel(t.Context())
+	f = &fakeRepairer{batches: []int{500, 500}, cancel: cancel}
+	lastActivityRepairWorker{store: f}.Run(ctx)
+	if f.calls != 2 || buf.Len() != 0 {
+		t.Fatalf("calls=%d log=%q", f.calls, buf.String())
 	}
 }
