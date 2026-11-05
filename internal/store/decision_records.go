@@ -467,6 +467,16 @@ func (s *Store) ListDecisionRecords(ctx context.Context, f DecisionRecordFilter,
 	return listDecisionRecords(ctx, s.pool, f, now)
 }
 
+// The open predicate of decision_requests, with the read time as $1: a row is
+// open while its status is open and it has not expired (decisionLiveSQL), and
+// shows in the inbox while it is not snoozed (decisionAwakeSQL).
+// decisionOpenSQL is both. listDecisionRecords and Attention read it from here.
+const (
+	decisionLiveSQL  = `status='open' AND (expires_at IS NULL OR expires_at>$1::timestamptz)`
+	decisionAwakeSQL = `(snoozed_until IS NULL OR snoozed_until<=$1::timestamptz)`
+	decisionOpenSQL  = decisionLiveSQL + ` AND ` + decisionAwakeSQL
+)
+
 // listDecisionRecords is ListDecisionRecords on q: the pool, or the ledger's
 // read snapshot.
 func listDecisionRecords(ctx context.Context, pq poolQuerier, f DecisionRecordFilter, now time.Time) ([]DecisionRecord, error) {
@@ -492,7 +502,7 @@ func listDecisionRecords(ctx context.Context, pq poolQuerier, f DecisionRecordFi
 	q := `SELECT ` + decisionRecordColumns + ` FROM decision_requests WHERE `
 	switch f.Status {
 	case DecisionStatusOpen:
-		q += `status='open' AND (expires_at IS NULL OR expires_at>$1::timestamptz)`
+		q += decisionLiveSQL
 	case DecisionStatusExpired:
 		q += `status='open' AND expires_at<=$1::timestamptz`
 	default:
@@ -500,7 +510,7 @@ func listDecisionRecords(ctx context.Context, pq poolQuerier, f DecisionRecordFi
 		q += fmt.Sprintf(`$1::timestamptz IS NOT NULL AND status=$%d`, len(args))
 	}
 	if !f.IncludeSnoozed && (f.Status == DecisionStatusOpen || f.Status == DecisionStatusExpired) {
-		q += ` AND (snoozed_until IS NULL OR snoozed_until<=$1::timestamptz)`
+		q += ` AND ` + decisionAwakeSQL
 	}
 	if f.Lane != "" {
 		args = append(args, f.Lane)
