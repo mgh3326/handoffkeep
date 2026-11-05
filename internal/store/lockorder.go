@@ -44,11 +44,13 @@ package store
 //  5. Rows that belong to a locked task: task_events (its foreign key takes
 //     KEY SHARE on the task row), task_labels, task_relations,
 //     task_subscribers, task_origins, linear_board_tasks, linear_outbox,
-//     sync_decisions, ticket_sets, and the work record: changes, change_tasks
-//     and reviews. ApplyTaskSourceEvent writes the work record under the
-//     level-2 lock after its task row (recordChangeTx); a revert locks two
-//     changes rows, the reverted PR's first. Shared rows read FOR SHARE
-//     (labels).
+//     sync_decisions, ticket_sets, decision_answer_attempts and
+//     decision_resolutions (inserted by ResolveDecision after its task row,
+//     under the level-2 lock; append-only and never locked by a reader), and
+//     the work record: changes, change_tasks and reviews. ApplyTaskSourceEvent
+//     writes the work record under the level-2 lock after its task row
+//     (recordChangeTx); a revert locks two changes rows, the reverted PR's
+//     first. Shared rows read FOR SHARE (labels).
 //     A documents insert or update that sets task_id takes KEY SHARE on that
 //     one task row through the foreign key (PutDocument). That is the level-4
 //     single-task case and needs no level-2 lock: no task writer locks a

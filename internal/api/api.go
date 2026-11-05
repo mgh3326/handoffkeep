@@ -1329,8 +1329,40 @@ func (s Server) taskDecisionRequest(w http.ResponseWriter, r *http.Request) {
 	jsonOut(w, status, x)
 }
 
+// DecisionResolveResponse maps one ResolveDecision outcome to the HTTP status
+// and body every answer route shares (hk 3061; R2 result enum):
+//
+//	answered              200 (a re-send also carries duplicate:true)
+//	pending_confirmation  202, the request stays open
+//	stale_revision        409 decision_request_stale
+//	superseded            409 decision_request_stale, or decision_request_resolved
+//	                      for a withdrawn request
+//	conflict, expired     409 decision_request_resolved
+//
+// A 200 or 202 body is the DecisionRequestResult with its result key; a 409
+// body is {"error": code, "result": result}.
+func DecisionResolveResponse(out store.ResolveDecisionOutcome) (int, any) {
+	switch {
+	case out.Refusal != nil:
+		code := "decision_request_resolved"
+		if errors.Is(out.Refusal, store.ErrDecisionRequestStale) {
+			code = "decision_request_stale"
+		}
+		return http.StatusConflict, map[string]string{"error": code, "result": out.Result}
+	case out.Result == store.DecisionResultPendingConfirmation:
+		return http.StatusAccepted, decisionRequestResult(out)
+	}
+	return http.StatusOK, decisionRequestResult(out)
+}
+
+func decisionRequestResult(out store.ResolveDecisionOutcome) store.DecisionRequestResult {
+	return store.DecisionRequestResult{Task: out.Task, Request: out.Request, Duplicate: out.Duplicate, Result: out.Result, ResolutionID: out.ResolutionID, AttemptID: out.AttemptID}
+}
+
 // taskDecisionResolve closes the current request (answered, default_applied
-// with a receipt, or withdrawn). It never changes the task state.
+// with a receipt, or withdrawn). It never changes the task state. Only the
+// bearer client "operator" is a verified operator path; every other client
+// is a relay (R1).
 func (s Server) taskDecisionResolve(w http.ResponseWriter, r *http.Request) {
 	client, ok := s.auth(w, r)
 	if !ok {
@@ -1347,12 +1379,17 @@ func (s Server) taskDecisionResolve(w http.ResponseWriter, r *http.Request) {
 		appErr(w, r, err)
 		return
 	}
-	x, err := s.Service.Store.ResolveDecisionRequest(r.Context(), id, client, input)
+	out, err := s.Service.Store.ResolveDecision(r.Context(), store.ResolveDecisionInput{
+		TaskID: id, RequestID: input.RequestID, Kind: input.Kind, Option: input.Option, Text: input.Text,
+		Receipt: input.Receipt, Responder: input.Responder, EventKey: input.EventKey,
+		Channel: store.DecisionChannelCLI, Actor: client, Verified: client == operatorClientID,
+	})
 	if err != nil {
 		appErr(w, r, err)
 		return
 	}
-	jsonOut(w, http.StatusOK, x)
+	status, body := DecisionResolveResponse(out)
+	jsonOut(w, status, body)
 }
 
 // TaskRelaneBatchMax bounds one relane request. It comfortably covers the
