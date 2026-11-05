@@ -541,10 +541,10 @@ restored:
 |---|---|
 | Any state with `awaiting_decision` set | `needs_decision` |
 | `triage`, `backlog` | `backlog` |
-| `unstarted` | `reopened`, `completed` (decide, ops, verify; result link required) |
+| `unstarted` | `reopened` |
 | `researching`, `developing` | `in_progress` |
-| `reviewing` | `verifying`, `completed` (decide, ops, verify; result link required) |
-| `merged`, `deployed` | `merged` |
+| `reviewing` | `verifying` |
+| `merged`, `deployed`, `completed` | `merged` |
 | `dropped`, `duplicate` | `dropped` |
 | `icebox` | `hold` |
 
