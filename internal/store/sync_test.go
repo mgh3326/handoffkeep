@@ -348,6 +348,7 @@ func TestSyncDecisionDeleteAndTaskRetention(t *testing.T) {
 		t.Fatalf("terminal task=%+v err=%v", dropped, err)
 	}
 	changes, _, err = s.SyncDelta(ctx, afterDelete.MaxSyncID, 100)
+	// The state update and subsequent activity-clock update each emit a task row.
 	if err != nil || len(changes) != 2 {
 		t.Fatalf("terminal changes=%v err=%v", changes, err)
 	}
