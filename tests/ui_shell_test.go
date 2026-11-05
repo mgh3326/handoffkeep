@@ -1,6 +1,8 @@
 package tests
 
 import (
+	"fmt"
+	"github.com/mgh3326/handoffkeep/internal/store"
 	"net/http"
 	"strings"
 	"testing"
@@ -56,8 +58,14 @@ func TestUIShellRoutes(t *testing.T) {
 	defer h.Close()
 	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
 	client := noRedirectClient(h.Client())
+	// The document page looks the key up (a missing one is a 404), so the
+	// viewer route needs a real document; the key is unique to this test.
+	docKey := fmt.Sprintf("decision/2026-11-05/shell-route-%d", time.Now().UnixNano())
+	if _, _, err := s.PutDocument(t.Context(), store.Document{Key: docKey, Kind: "note", Body: "shell route", CreatedBy: "shell-test"}); err != nil {
+		t.Fatal(err)
+	}
 
-	for _, path := range []string{"/ui/home", "/ui/work", "/ui/queue", "/ui/fleet", "/ui/grades", "/ui/docs", "/ui/doc/decision/2026-11-05/example", "/ui/tasks/42"} {
+	for _, path := range []string{"/ui/home", "/ui/work", "/ui/queue", "/ui/fleet", "/ui/grades", "/ui/docs", "/ui/doc/" + docKey, "/ui/tasks/42"} {
 		response := uiRequest(t, client, http.MethodGet, h.URL+path, assertion, "")
 		csp := response.Header.Get("Content-Security-Policy")
 		body := responseText(t, response)
@@ -68,6 +76,11 @@ func TestUIShellRoutes(t *testing.T) {
 			t.Fatalf("%s csp=%q", path, csp)
 		}
 	}
+	missing := uiRequest(t, client, http.MethodGet, h.URL+"/ui/doc/"+docKey+"-missing", assertion, "")
+	if missing.StatusCode != http.StatusNotFound {
+		t.Fatalf("missing document page status=%d, want 404", missing.StatusCode)
+	}
+	missing.Body.Close()
 	// A missing document is the viewer's "document not found", not a server 404:
 	// the page is the same shell and the JSON route answers 404.
 	response := uiRequest(t, client, http.MethodGet, h.URL+"/ui/api/board/doc?key=missing.md", assertion, "")
