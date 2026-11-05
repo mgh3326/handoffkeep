@@ -535,12 +535,29 @@ func (c Client) GetDocumentByID(ctx context.Context, id int64) (store.Document, 
 	}
 	return out, true, nil
 }
-func (c Client) ListDocuments(ctx context.Context, prefix, kind, session string, limit int) ([]store.Document, error) {
+
+// ListDocuments lists documents; task above zero keeps only the documents
+// that name that task. A server older than the task filter ignores it.
+func (c Client) ListDocuments(ctx context.Context, prefix, kind, session string, task int64, limit int) ([]store.Document, error) {
 	var out struct {
 		Documents []store.Document `json:"documents"`
 	}
 	p := url.Values{"prefix": {prefix}, "kind": {kind}, "session": {session}, "limit": {fmt.Sprint(limit)}}
+	if task > 0 {
+		p.Set("task", fmt.Sprint(task))
+	}
 	e := c.call(ctx, "GET", "/v1/documents?"+p.Encode(), nil, &out)
+	if e == nil && task > 0 {
+		// A server older than the filter returns every document; keep the
+		// ones that name the task so the answer is never wider than asked.
+		kept := out.Documents[:0]
+		for _, d := range out.Documents {
+			if d.TaskID != nil && *d.TaskID == task {
+				kept = append(kept, d)
+			}
+		}
+		out.Documents = kept
+	}
 	return out.Documents, e
 }
 
@@ -1459,4 +1476,49 @@ func (c Client) ReopenTask(ctx context.Context, id int64, reason string) (store.
 		Reason string `json:"reason"`
 	}{reason}, &out)
 	return out, err
+}
+
+// TaskOriginResult is the answer to AddTaskOrigin: the stored origin and
+// whether this call created it (false: the task already had it).
+type TaskOriginResult struct {
+	Origin  store.TaskOrigin `json:"origin"`
+	Created bool             `json:"created"`
+}
+
+// AddTaskOrigin records where a task came from, keyed by the provider's
+// durable id. Repeating it refreshes the display number and title and makes
+// no second row.
+func (c Client) AddTaskOrigin(ctx context.Context, id int64, in store.TaskOriginInput) (TaskOriginResult, error) {
+	var out TaskOriginResult
+	err := c.call(ctx, "POST", fmt.Sprintf("/v1/tasks/%d/origins", id), in, &out)
+	if err != nil {
+		return out, unsupportedRoute(err, "task_origin_unsupported", "the task origins route")
+	}
+	return out, nil
+}
+
+// ListTaskOrigins lists a task's origins.
+func (c Client) ListTaskOrigins(ctx context.Context, id int64) ([]store.TaskOrigin, error) {
+	var out struct {
+		Origins []store.TaskOrigin `json:"origins"`
+	}
+	err := c.call(ctx, "GET", fmt.Sprintf("/v1/tasks/%d/origins", id), nil, &out)
+	if err != nil {
+		return nil, unsupportedRoute(err, "task_origin_unsupported", "the task origins route")
+	}
+	return out.Origins, nil
+}
+
+// FindTaskOrigins looks origins up by provider and durable external id; each
+// item names its task.
+func (c Client) FindTaskOrigins(ctx context.Context, provider, externalID string) ([]store.TaskOrigin, error) {
+	var out struct {
+		Origins []store.TaskOrigin `json:"origins"`
+	}
+	p := url.Values{"provider": {provider}, "external_id": {externalID}}
+	err := c.call(ctx, "GET", "/v1/task-origins?"+p.Encode(), nil, &out)
+	if err != nil {
+		return nil, unsupportedRoute(err, "task_origin_unsupported", "the task origins route")
+	}
+	return out.Origins, nil
 }

@@ -35,7 +35,8 @@ var ErrTrigramUnavailable = errors.New("PostgreSQL pg_trgm extension unavailable
 var nameRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
 var kinds = map[string]bool{"checkpoint": true, "handoff": true, "decision": true, "open_question": true, "next_action": true}
 var memoryTypes = map[string]bool{"user": true, "feedback": true, "project": true, "reference": true}
-var documentKinds = map[string]bool{"brief": true, "report": true, "answer": true, "handoff": true, "note": true, "other": true}
+var documentKinds = map[string]bool{"brief": true, "report": true, "answer": true, "handoff": true, "note": true, "other": true, "decision": true, "research": true, "design": true, "policy": true, "evidence": true}
+var documentOriginClasses = map[string]bool{"authored": true, "job": true, "import": true}
 var taskKinds = map[string]bool{"implement": true, "verify": true, "fix": true, "decide": true, "ops": true}
 
 // TaskKinds is the server's task kind vocabulary — the single source of truth
@@ -612,6 +613,10 @@ type Document struct {
 	CreatedBy string    `json:"created_by"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
+	// TaskID names the task the document belongs to; nil is unknown or none.
+	TaskID *int64 `json:"task_id,omitempty"`
+	// OriginClass is authored, job or import; empty is unknown (NULL).
+	OriginClass string `json:"origin_class,omitempty"`
 }
 
 type BenchScore struct {
@@ -1228,6 +1233,9 @@ func (s *Store) migrate(ctx context.Context) error {
 		return err
 	}
 	if err := migrateOnce(ctx, tx, 40, func() error { return execAll(ctx, tx, benchOutcomesV40) }); err != nil {
+		return err
+	}
+	if err := migrateOnce(ctx, tx, 41, func() error { return execAll(ctx, tx, originsV41) }); err != nil {
 		return err
 	}
 
@@ -3587,6 +3595,9 @@ func (s *Store) PutDocument(ctx context.Context, x Document) (Document, bool, er
 	if !validDocKey(x.Key) || !documentKinds[x.Kind] || !validText(x.Session, 128) || !validText(x.Job, 128) || !validText(x.Body, DocumentMaxBytes) || !validName(x.CreatedBy) {
 		return x, false, errors.New("invalid document")
 	}
+	if (x.OriginClass != "" && !documentOriginClasses[x.OriginClass]) || (x.TaskID != nil && *x.TaskID < 1) {
+		return x, false, errors.New("invalid document")
+	}
 	if e := guard.Reject(x.Key + "\n" + x.Body); e != nil {
 		return x, false, e
 	}
@@ -3594,8 +3605,20 @@ func (s *Store) PutDocument(ctx context.Context, x Document) (Document, bool, er
 	x.SHA256 = hex.EncodeToString(sum[:])
 	now := time.Now().UTC()
 	var existing string
-	e := s.pool.QueryRow(ctx, "SELECT sha256 FROM documents WHERE key=$1", x.Key).Scan(&existing)
-	if e == nil && existing == x.SHA256 {
+	var existingTask *int64
+	var existingClass *string
+	e := s.pool.QueryRow(ctx, "SELECT sha256,task_id,origin_class FROM documents WHERE key=$1", x.Key).Scan(&existing, &existingTask, &existingClass)
+	// Unchanged only when the body and every supplied new field already match;
+	// a field left out never counts as a change and keeps its stored value.
+	if e == nil && existing == x.SHA256 &&
+		(x.TaskID == nil || (existingTask != nil && *existingTask == *x.TaskID)) &&
+		(x.OriginClass == "" || (existingClass != nil && *existingClass == x.OriginClass)) {
+		// Answer with what is stored, not with the omitted input fields.
+		x.TaskID = existingTask
+		x.OriginClass = ""
+		if existingClass != nil {
+			x.OriginClass = *existingClass
+		}
 		return x, false, nil
 	}
 	if e != nil && !errors.Is(e, pgx.ErrNoRows) {
@@ -3615,7 +3638,18 @@ func (s *Store) PutDocument(ctx context.Context, x Document) (Document, bool, er
 			return x, false, e
 		}
 	}
-	e = tx.QueryRow(ctx, `INSERT INTO documents(key,kind,session,job,body,sha256,created_by,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$8) ON CONFLICT(key) DO UPDATE SET kind=EXCLUDED.kind,session=EXCLUDED.session,job=EXCLUDED.job,body=EXCLUDED.body,sha256=EXCLUDED.sha256,created_by=EXCLUDED.created_by,updated_at=EXCLUDED.updated_at RETURNING id,created_at,updated_at`, x.Key, x.Kind, x.Session, x.Job, x.Body, x.SHA256, x.CreatedBy, now).Scan(&x.ID, &x.CreatedAt, &x.UpdatedAt)
+	if x.TaskID != nil {
+		var taskExists bool
+		if e = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM tasks WHERE id=$1)`, *x.TaskID).Scan(&taskExists); e != nil {
+			return x, false, e
+		}
+		if !taskExists {
+			return x, false, ErrTaskNotFound
+		}
+	}
+	// task_id and origin_class keep the stored value when the caller omits
+	// them; the foreign key takes KEY SHARE on one task row (lockorder.go).
+	e = tx.QueryRow(ctx, `INSERT INTO documents(key,kind,session,job,body,sha256,created_by,created_at,updated_at,task_id,origin_class) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$8,$9,$10) ON CONFLICT(key) DO UPDATE SET kind=EXCLUDED.kind,session=EXCLUDED.session,job=EXCLUDED.job,body=EXCLUDED.body,sha256=EXCLUDED.sha256,created_by=EXCLUDED.created_by,updated_at=EXCLUDED.updated_at,task_id=COALESCE(EXCLUDED.task_id,documents.task_id),origin_class=COALESCE(EXCLUDED.origin_class,documents.origin_class) RETURNING id,created_at,updated_at,task_id,COALESCE(origin_class,'')`, x.Key, x.Kind, x.Session, x.Job, x.Body, x.SHA256, x.CreatedBy, now, x.TaskID, nullIfEmpty(x.OriginClass)).Scan(&x.ID, &x.CreatedAt, &x.UpdatedAt, &x.TaskID, &x.OriginClass)
 	if e != nil {
 		return x, true, e
 	}
@@ -3631,7 +3665,7 @@ func (s *Store) GetDocument(ctx context.Context, key string) (Document, bool, er
 		return Document{}, false, errors.New("invalid document key")
 	}
 	var x Document
-	e := s.pool.QueryRow(ctx, `SELECT id,key,kind,session,job,body,sha256,created_by,created_at,updated_at FROM documents WHERE key=$1`, key).Scan(&x.ID, &x.Key, &x.Kind, &x.Session, &x.Job, &x.Body, &x.SHA256, &x.CreatedBy, &x.CreatedAt, &x.UpdatedAt)
+	e := s.pool.QueryRow(ctx, `SELECT id,key,kind,session,job,body,sha256,created_by,created_at,updated_at,task_id,COALESCE(origin_class,'') FROM documents WHERE key=$1`, key).Scan(&x.ID, &x.Key, &x.Kind, &x.Session, &x.Job, &x.Body, &x.SHA256, &x.CreatedBy, &x.CreatedAt, &x.UpdatedAt, &x.TaskID, &x.OriginClass)
 	if e != nil {
 		if errors.Is(e, pgx.ErrNoRows) {
 			return x, false, nil
@@ -3645,7 +3679,7 @@ func (s *Store) GetDocumentByID(ctx context.Context, id int64) (Document, bool, 
 		return Document{}, false, errors.New("invalid document id")
 	}
 	var x Document
-	e := s.pool.QueryRow(ctx, `SELECT id,key,kind,session,job,body,sha256,created_by,created_at,updated_at FROM documents WHERE id=$1`, id).Scan(&x.ID, &x.Key, &x.Kind, &x.Session, &x.Job, &x.Body, &x.SHA256, &x.CreatedBy, &x.CreatedAt, &x.UpdatedAt)
+	e := s.pool.QueryRow(ctx, `SELECT id,key,kind,session,job,body,sha256,created_by,created_at,updated_at,task_id,COALESCE(origin_class,'') FROM documents WHERE id=$1`, id).Scan(&x.ID, &x.Key, &x.Kind, &x.Session, &x.Job, &x.Body, &x.SHA256, &x.CreatedBy, &x.CreatedAt, &x.UpdatedAt, &x.TaskID, &x.OriginClass)
 	if e != nil {
 		if errors.Is(e, pgx.ErrNoRows) {
 			return x, false, nil
@@ -3654,8 +3688,11 @@ func (s *Store) GetDocumentByID(ctx context.Context, id int64) (Document, bool, 
 	}
 	return x, true, nil
 }
-func (s *Store) ListDocuments(ctx context.Context, prefix, kind, session string, limit int) ([]Document, error) {
-	if !validText(prefix, 512) || !validText(session, 128) || (kind != "" && !documentKinds[kind]) {
+
+// ListDocuments lists documents without bodies. task, when above zero, keeps
+// only the documents that name that task.
+func (s *Store) ListDocuments(ctx context.Context, prefix, kind, session string, task int64, limit int) ([]Document, error) {
+	if !validText(prefix, 512) || !validText(session, 128) || (kind != "" && !documentKinds[kind]) || task < 0 {
 		return nil, errors.New("invalid document query")
 	}
 	if limit < 1 {
@@ -3664,7 +3701,7 @@ func (s *Store) ListDocuments(ctx context.Context, prefix, kind, session string,
 	if limit > 1000 {
 		limit = 1000
 	}
-	rows, e := s.pool.Query(ctx, `SELECT id,key,kind,session,job,sha256,created_by,created_at,updated_at FROM documents WHERE ($1='' OR key LIKE $1 || '%') AND ($2='' OR kind=$2) AND ($3='' OR session=$3) ORDER BY key LIMIT $4`, prefix, kind, session, limit)
+	rows, e := s.pool.Query(ctx, `SELECT id,key,kind,session,job,sha256,created_by,created_at,updated_at,task_id,COALESCE(origin_class,'') FROM documents WHERE ($1='' OR key LIKE $1 || '%') AND ($2='' OR kind=$2) AND ($3='' OR session=$3) AND ($4::bigint=0 OR task_id=$4::bigint) ORDER BY key LIMIT $5`, prefix, kind, session, task, limit)
 	if e != nil {
 		return nil, e
 	}
@@ -3672,7 +3709,7 @@ func (s *Store) ListDocuments(ctx context.Context, prefix, kind, session string,
 	out := []Document{}
 	for rows.Next() {
 		var x Document
-		if e = rows.Scan(&x.ID, &x.Key, &x.Kind, &x.Session, &x.Job, &x.SHA256, &x.CreatedBy, &x.CreatedAt, &x.UpdatedAt); e != nil {
+		if e = rows.Scan(&x.ID, &x.Key, &x.Kind, &x.Session, &x.Job, &x.SHA256, &x.CreatedBy, &x.CreatedAt, &x.UpdatedAt, &x.TaskID, &x.OriginClass); e != nil {
 			return nil, e
 		}
 		out = append(out, x)
