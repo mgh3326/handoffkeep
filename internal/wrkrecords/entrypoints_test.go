@@ -73,6 +73,10 @@ func TestWrkLegacyDirectStoreAndServiceFences(t *testing.T) {
 			_, e := db.runtime.ResolveDecisionRequest(ctx, 2400, "director-1", store.DecisionResolveInput{RequestID: "dr-2400-1", Kind: "answered", Option: "A"})
 			return e
 		},
+		"store-resolve-decision": func() error {
+			_, e := db.runtime.ResolveDecision(ctx, store.ResolveDecisionInput{RequestID: "dr-2400-1", Kind: "answered", Option: "A", Channel: store.DecisionChannelCLI, Actor: "director-1"})
+			return e
+		},
 		"assistant-resolve": func() error {
 			_, e := db.runtime.ResolveDecisionRequestAssistant(ctx, 2400, "director-1", store.DecisionAssistantResolveInput{RequestID: "dr-2400-1", Option: "A"})
 			return e
@@ -263,6 +267,19 @@ func TestWrkAuthenticatedUIHasNoImplicitCentralPrincipal(t *testing.T) {
 		if out.Code != 403 || strings.TrimSpace(out.Body.String()) != `{"error":"scope_denied"}` {
 			t.Fatalf("UI scope refusal %s: status=%d", path, out.Code)
 		}
+	}
+	// The console's structured-decision route repeats the same refusal: the
+	// Access identity is not a central principal, so the store fence stops it.
+	console := httptest.NewRequest("POST", "http://example.com/ui/api/decision-requests/resolve", strings.NewReader(`{"request_id":"dr-2400-1","option":"A","event_key":"fence-1"}`))
+	console.Header.Set("Content-Type", "application/json")
+	console.Header.Set("Origin", "http://example.com")
+	console.Header.Set("X-CSRF-Token", cookie.Value)
+	console.Header.Set("Cf-Access-Jwt-Assertion", assertion)
+	console.AddCookie(cookie)
+	consoleOut := httptest.NewRecorder()
+	handler.ServeHTTP(consoleOut, console)
+	if consoleOut.Code != 403 || strings.TrimSpace(consoleOut.Body.String()) != `{"error":"scope_denied"}` {
+		t.Fatalf("console decision route fence: status=%d body=%s", consoleOut.Code, consoleOut.Body.String())
 	}
 	if emits.Load() != 0 {
 		t.Fatal("protected UI decision emitted before refusal")

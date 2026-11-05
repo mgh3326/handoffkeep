@@ -82,6 +82,7 @@ type assistantResolveInput struct {
 	Provenance    string `json:"provenance,omitempty"`
 	OperatorQuote string `json:"operator_quote,omitempty"`
 	DecisionRef   string `json:"decision_ref,omitempty"`
+	EventKey      string `json:"event_key,omitempty"`
 	Responder     string `json:"responder,omitempty"`
 	By            string `json:"by,omitempty"`
 }
@@ -102,10 +103,15 @@ func (s Server) assistantDecisionResolve(w http.ResponseWriter, r *http.Request)
 		appErr(w, r, store.ErrInvalidDecisionRequest)
 		return
 	}
-	x, err := s.Service.Store.ResolveDecisionRequestAssistant(r.Context(), taskID, client, store.DecisionAssistantResolveInput{RequestID: input.RequestID, Kind: input.Kind, Option: input.Option, Text: input.Text, Provenance: input.Provenance, OperatorQuote: input.OperatorQuote, DecisionRef: input.DecisionRef})
+	out, err := s.Service.Store.ResolveDecision(r.Context(), store.ResolveDecisionInput{
+		TaskID: taskID, RequestID: input.RequestID, Kind: input.Kind, Option: input.Option, Text: input.Text,
+		EventKey: input.EventKey, Channel: store.DecisionChannelAssistant, Actor: client,
+		Provenance: input.Provenance, OperatorQuote: input.OperatorQuote, DecisionRef: input.DecisionRef,
+	})
 	if err != nil {
 		appErr(w, r, err)
 		return
 	}
-	jsonOut(w, http.StatusOK, x)
+	status, body := DecisionResolveResponse(out)
+	jsonOut(w, status, body)
 }

@@ -81,7 +81,7 @@ does not belong on the same axis (Q2). S1 adds `tasks.awaiting_decision`:
 | `deployed`, `completed`, `dropped`, `duplicate` | `unstarted` (reopen) |
 | `icebox` | `backlog` (revive), `unstarted` (reopen) |
 
-**Closure.** Each new settled transition records a type and evidence in `refs.closure`. `merged`, `deployed` and `completed` accept `resolved`; `dropped` accepts `cancelled`, `obsolete` or `superseded`; `duplicate` accepts `superseded`. Evidence must be 1–1024 bytes after trimming and contain no secrets. Completed requires an HTTP(S) result link or `hk:doc` reference. A closure absent on rows closed before v43 means unknown. Reopening clears it from the task while its event retains the snapshot.
+**Closure.** Each new settled transition records a type and evidence in `refs.closure`. `merged`, `deployed` and `completed` accept `resolved`; `dropped` accepts `cancelled`, `obsolete` or `superseded`; `duplicate` accepts `superseded`. Evidence must be 1–1024 bytes after trimming and contain no secrets. Completed requires an HTTP(S) result link or `hk:doc` reference. A closure absent on rows closed before v44 means unknown. Reopening clears it from the task while its event retains the snapshot.
 
 There is no edge from `triage` to `started`. Moving into `started` still needs
 `claimed_by` plus `refs.job_id` or a recorded no-job reason, as `claimed` and

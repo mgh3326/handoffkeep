@@ -19,7 +19,7 @@ const decisionRequestUsage = "usage: tasks decision-request <id> --question <tex
 
 const decisionAskUsage = "usage: decisions ask <task-id> --question <text> --option 'A|label' [--option ...] [--recommended A] [--reason <text>] --default-action <text> [--default-option B] [--default-trigger <text>] [--due <RFC3339>] [--doc <key>] [--ref <text> ...] [--supersedes dr-<id>-<rev>] [--block] [--no-free-answer] [--human-only]"
 
-const decisionResolveUsage = "usage: tasks decision-resolve <id> --request dr-<id>-<rev> --kind answered|default_applied|withdrawn [--option A] [--text <text>] [--receipt <ref>] [--responder <who>]"
+const decisionResolveUsage = "usage: tasks decision-resolve <id> --request dr-<id>-<rev> --kind answered|default_applied|withdrawn [--option A] [--text <text>] [--receipt <ref>] [--responder <who>] [--event-key <key>]"
 
 func parseSubcommandTaskID(fs *flag.FlagSet, usage string) (int64, error) {
 	if fs.NArg() != 1 {
@@ -225,7 +225,8 @@ func decisionResolveCmd(args []string, out, errout io.Writer) error {
 	text := fs.String("text", "", "answer text, application note, or withdrawal reason")
 	receipt := fs.String("receipt", "", "evidence the default was applied (event id, PR, or document)")
 	responder := fs.String("responder", "", "who answered, when recording an answer given elsewhere")
-	parseArgs, err := splitArgs(args[1:], "request", "kind", "option", "text", "receipt", "responder")
+	eventKey := fs.String("event-key", "", "delivery key: re-sending the same key and answer replays the first result")
+	parseArgs, err := splitArgs(args[1:], "request", "kind", "option", "text", "receipt", "responder", "event-key")
 	if err != nil {
 		return fmt.Errorf("decision resolution NOT recorded: %v", err)
 	}
@@ -243,6 +244,7 @@ func decisionResolveCmd(args []string, out, errout io.Writer) error {
 		Text:      strings.TrimSpace(*text),
 		Receipt:   strings.TrimSpace(*receipt),
 		Responder: strings.TrimSpace(*responder),
+		EventKey:  strings.TrimSpace(*eventKey),
 	}
 	if err := store.CheckDecisionResolveInput(input); err != nil {
 		return fmt.Errorf("decision resolution NOT recorded: %v", err)
@@ -272,13 +274,23 @@ func decisionResolveCmd(args []string, out, errout io.Writer) error {
 		}
 		return writeFailed("decision resolution", id, err)
 	}
-	return printJSON(out, map[string]any{
-		"recorded":   true,
+	// A human_only answer from a session waits for the operator: the server
+	// answers 202 pending_confirmation, the request stays open, and nothing
+	// failed, so the command prints the result and exits 0.
+	printed := map[string]any{
+		"recorded":   result.Result != store.DecisionResultPendingConfirmation,
 		"duplicate":  result.Duplicate,
 		"task_id":    result.Task.ID,
 		"state":      result.Task.State,
 		"request_id": result.Request.ID,
 		"status":     result.Request.Status,
 		"request":    result.Request,
-	})
+	}
+	if result.Result != "" {
+		printed["result"] = result.Result
+	}
+	if result.ResolutionID != 0 {
+		printed["resolution_id"] = result.ResolutionID
+	}
+	return printJSON(out, printed)
 }

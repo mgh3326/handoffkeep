@@ -83,6 +83,7 @@ var errorRules = []errorRule{
 	{store.ErrDecisionRequestOpen, http.StatusConflict, "decision_request_open", false},
 	{store.ErrDecisionRequestStale, http.StatusConflict, "decision_request_stale", false},
 	{store.ErrDecisionRequestResolved, http.StatusConflict, "decision_request_resolved", false},
+	{store.ErrDecisionEventKeyConflict, http.StatusConflict, "decision_event_key_conflict", false},
 	{store.ErrRelayEventNotFound, http.StatusNotFound, "not_found", false},
 	{store.ErrDeviationRefRequired, http.StatusBadRequest, "deviation_ref_required", false},
 	{store.ErrDecidedByRequired, http.StatusBadRequest, "decided_by_required", false},

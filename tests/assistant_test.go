@@ -402,8 +402,9 @@ func TestAssistantDecisionResolveProvenanceAPI(t *testing.T) {
 		return resp.StatusCode, out
 	}
 
-	// human_only + operator_decided + quote + matching ref: answered as the
-	// operator, quote and ref recorded.
+	// human_only + operator_decided + quote + matching ref is a relay (R1): it
+	// waits as 202 pending_confirmation, the request stays open and no
+	// notification is queued.
 	humanTask := drTask(t, s, lane, "claimed", "in_progress")
 	human := drInput("deploy 하시겠습니까")
 	human.HumanOnly = true
@@ -412,30 +413,29 @@ func TestAssistantDecisionResolveProvenanceAPI(t *testing.T) {
 		"request_id": humanReq.ID, "option": "A", "text": "operator approved",
 		"provenance": "operator_decided", "operator_quote": "A로 진행", "decision_ref": humanReq.ID,
 	})
-	if status != http.StatusOK {
+	if status != http.StatusAccepted || out["result"] != "pending_confirmation" {
 		t.Fatalf("operator_decided status=%d body=%v", status, out)
 	}
 	gotTask, _, err := s.GetTask(t.Context(), humanTask.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	res := gotTask.Refs.DecisionRequest.Resolution
-	if res == nil || res.DecidedBy != "operator" || res.Provenance != "operator_decided" ||
-		res.OperatorQuote != "A로 진행" || res.DecisionRef != humanReq.ID || res.Responder != store.DecisionAssistantResponder {
-		t.Fatalf("operator_decided resolution=%+v", res)
+	if gotTask.Refs.DecisionRequest.Status != store.DecisionRequestOpen || gotTask.Refs.DecisionRequest.Resolution != nil {
+		t.Fatalf("a relay closed the human_only request: %+v", gotTask.Refs.DecisionRequest)
 	}
 	unsent, err := s.ListUnsentNotifications(t.Context(), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	quoteMarked := false
 	for _, row := range unsent {
-		if row.EventID == humanReq.ID+"-answered" && strings.Contains(row.Text, "(operator quote)") {
-			quoteMarked = true
+		if row.EventID == humanReq.ID+"-answered" {
+			t.Fatalf("pending answer queued %+v", row)
 		}
 	}
-	if !quoteMarked {
-		t.Fatalf("outbox missing operator-quote marker")
+	// The verified operator path closes it; the checks below need it resolved.
+	closed, err := s.ResolveDecision(t.Context(), store.ResolveDecisionInput{RequestID: humanReq.ID, Kind: store.DecisionRequestAnswered, Option: "A", Channel: store.DecisionChannelCLI, Actor: "operator", Verified: true})
+	if err != nil || closed.Result != store.DecisionResultAnswered {
+		t.Fatalf("verified answer=%+v err=%v", closed, err)
 	}
 
 	// human_only + bare judgement: 409 without a reason.
@@ -527,7 +527,7 @@ func TestAssistantDecisionResolveProvenanceAPI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	res = gotTask.Refs.DecisionRequest.Resolution
+	res := gotTask.Refs.DecisionRequest.Resolution
 	if res == nil || res.DecidedBy != "assistant" || strings.Contains(res.Responder, "operator") || res.Provenance != "assistant_judgement" {
 		t.Fatalf("judgement resolution=%+v", res)
 	}

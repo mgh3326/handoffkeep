@@ -16,7 +16,7 @@ func TestTaskClosureMigration(t *testing.T) {
 	if err := s.pool.QueryRow(t.Context(), `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != SchemaVersion {
 		t.Fatalf("version=%d err=%v", version, err)
 	}
-	for _, table := range []string{"task_origins", "changes"} {
+	for _, table := range []string{"task_origins", "changes", "decision_resolutions"} {
 		var exists bool
 		if err := s.pool.QueryRow(t.Context(), `SELECT to_regclass($1) IS NOT NULL`, table).Scan(&exists); err != nil || !exists {
 			t.Fatalf("preceding table %s exists=%t err=%v", table, exists, err)

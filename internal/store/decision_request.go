@@ -88,6 +88,13 @@ var (
 	// decision_ref does not equal the request id being resolved — a quote
 	// recorded for one decision or revision can never answer another.
 	ErrProvenanceRefMismatch = errors.New("provenance_ref_mismatch")
+	// ErrDecisionPendingConfirmation is what the one-call adapters return for
+	// the pending_confirmation result: a human_only answer that no verified
+	// operator path gave. The request stays open (ResolveDecision, R1).
+	ErrDecisionPendingConfirmation = errors.New("decision_pending_confirmation")
+	// ErrDecisionEventKeyConflict refuses an event key that an earlier
+	// attempt on the same channel used with a different payload.
+	ErrDecisionEventKeyConflict = errors.New("decision_event_key_conflict")
 )
 
 // DecisionAssistantResponder is the resolution responder the server fixes on
@@ -128,8 +135,13 @@ type DecisionRequest struct {
 	ID         string `json:"id"`
 	Revision   int    `json:"revision"`
 	Supersedes string `json:"supersedes,omitempty"`
-	Status     string `json:"status"`
-	Question   string `json:"question"`
+	// Root is the id of the first revision of this logical request: a request
+	// that supersedes nothing is its own root, a superseding one inherits the
+	// current root. A request recorded before Root existed has none; RootID
+	// reads it as the request's own id.
+	Root     string `json:"root,omitempty"`
+	Status   string `json:"status"`
+	Question string `json:"question"`
 	// Reason explains the recommendation; the recommended key itself is the
 	// existing DecisionOption.Recommended flag.
 	Reason         string     `json:"reason,omitempty"`
@@ -146,6 +158,15 @@ type DecisionRequest struct {
 	// producer's structural "a human decides this" (merge, deploy, spend).
 	HumanOnly  bool                `json:"human_only,omitempty"`
 	Resolution *DecisionResolution `json:"resolution,omitempty"`
+}
+
+// RootID is the logical request this revision belongs to: the Root field, or
+// the request's own id when it predates Root.
+func (r DecisionRequest) RootID() string {
+	if r.Root != "" {
+		return r.Root
+	}
+	return r.ID
 }
 
 // DecisionResolution closes a request. By is the authenticated recorder;
@@ -204,6 +225,9 @@ type DecisionResolveInput struct {
 	Text      string `json:"text,omitempty"`
 	Receipt   string `json:"receipt,omitempty"`
 	Responder string `json:"responder,omitempty"`
+	// EventKey makes a re-sent answer replay the first delivery's result (see
+	// ResolveDecisionInput.EventKey). Optional.
+	EventKey string `json:"event_key,omitempty"`
 }
 
 // DecisionAssistantResolveInput is what the assistant path accepts: the
@@ -224,6 +248,7 @@ type DecisionAssistantResolveInput struct {
 	Provenance    string `json:"provenance,omitempty"`
 	OperatorQuote string `json:"operator_quote,omitempty"`
 	DecisionRef   string `json:"decision_ref,omitempty"`
+	EventKey      string `json:"event_key,omitempty"`
 }
 
 // assistantProvenance normalizes one assistant resolve's provenance claim.
@@ -237,7 +262,7 @@ type assistantProvenance struct {
 	ref     string
 }
 
-func normalizeAssistantProvenance(in DecisionAssistantResolveInput) assistantProvenance {
+func normalizeAssistantProvenance(in ResolveDecisionInput) assistantProvenance {
 	p := assistantProvenance{claimed: in.Provenance, quote: in.OperatorQuote, ref: in.DecisionRef}
 	if p.claimed == "" {
 		p.claimed = DecisionProvenanceAssistantJudgement
@@ -315,6 +340,11 @@ type DecisionRequestResult struct {
 	Task      Task            `json:"task"`
 	Request   DecisionRequest `json:"request"`
 	Duplicate bool            `json:"duplicate"`
+	// Result, ResolutionID and AttemptID are set by an answer (ResolveDecision);
+	// a recorded request leaves them empty.
+	Result       string `json:"result,omitempty"`
+	ResolutionID int64  `json:"resolution_id,omitempty"`
+	AttemptID    int64  `json:"attempt_id,omitempty"`
 }
 
 func decisionRequestID(taskID int64, revision int) string {
@@ -617,6 +647,7 @@ func (s *Store) RecordDecisionRequest(ctx context.Context, taskID int64, by stri
 		ID:             decisionRequestID(taskID, revision),
 		Revision:       revision,
 		Supersedes:     in.Supersedes,
+		Root:           decisionRequestID(taskID, revision),
 		Status:         DecisionRequestOpen,
 		Question:       in.Question,
 		Reason:         in.Reason,
@@ -629,6 +660,9 @@ func (s *Store) RecordDecisionRequest(ctx context.Context, taskID int64, by stri
 		HumanOnly:      in.HumanOnly,
 		RequestedBy:    by,
 		RequestedAt:    now,
+	}
+	if current != nil && in.Supersedes != "" {
+		request.Root = current.RootID()
 	}
 	x.Refs.DecisionRequest = &request
 	x.Refs.DecisionOptions = &options
@@ -703,209 +737,35 @@ func sameResolution(r DecisionResolution, in DecisionResolveInput, prov *assista
 }
 
 // ResolveDecisionRequest closes the task's current request as answered,
-// default_applied (receipt required) or withdrawn. It never changes the task
-// state and is allowed on merged/dropped tasks, which is how an uncleaned
-// request is closed. A request that is not the current one is stale; an
-// identical re-send of the recorded resolution is a duplicate.
+// default_applied (receipt required) or withdrawn. It is a one-call adapter
+// over ResolveDecision for the cli channel: it maps the input and the outcome
+// and decides nothing. Its caller is not a verified operator path, so a
+// human_only answer waits for confirmation (ErrDecisionPendingConfirmation).
 func (s *Store) ResolveDecisionRequest(ctx context.Context, taskID int64, by string, in DecisionResolveInput) (DecisionRequestResult, error) {
-	return s.resolveDecisionRequest(ctx, taskID, by, in, nil)
-}
-
-// ResolveDecisionRequestAssistant is the assistant channel's resolve: the
-// kind is fixed to answered, Responder and DecidedBy are fixed by the
-// answer's provenance, By is the authenticated client id — none come from
-// caller input. A request on a disposition item is always refused; a
-// human_only request answers only as operator_decided with the operator's
-// verbatim quote bound to this request id. The recorded resolution carries
-// one notification_outbox row in the same transaction so the lane is owed a
-// notification even if no drainer is up yet.
-func (s *Store) ResolveDecisionRequestAssistant(ctx context.Context, taskID int64, by string, in DecisionAssistantResolveInput) (DecisionRequestResult, error) {
-	if in.Kind != "" && in.Kind != DecisionRequestAnswered {
-		return DecisionRequestResult{}, ErrDecisionAssistantKind
-	}
-	prov := normalizeAssistantProvenance(in)
-	effective := DecisionResolveInput{
-		RequestID: in.RequestID,
-		Kind:      DecisionRequestAnswered,
-		Option:    in.Option,
-		Text:      in.Text,
-		Responder: prov.responder(),
-	}
-	return s.resolveDecisionRequest(ctx, taskID, by, effective, &prov)
-}
-
-func (s *Store) resolveDecisionRequest(ctx context.Context, taskID int64, by string, in DecisionResolveInput, prov *assistantProvenance) (DecisionRequestResult, error) {
-	assistant := prov != nil
 	if taskID < 1 {
 		return DecisionRequestResult{}, invalidDecisionRequest("task id must be positive")
 	}
-	if by == "" || !validText(by, 128) {
-		return DecisionRequestResult{}, invalidDecisionRequest("recorder is required")
-	}
-	if err := CheckDecisionResolveInput(in); err != nil {
-		return DecisionRequestResult{}, err
-	}
-	if err := guard.Reject(strings.Join([]string{in.Text, in.Receipt, in.Responder}, "\n")); err != nil {
-		return DecisionRequestResult{}, err
-	}
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return DecisionRequestResult{}, err
-	}
-	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
-		return DecisionRequestResult{}, err
-	}
-	var x Task
-	if err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, taskID), &x); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return DecisionRequestResult{}, ErrTaskNotFound
-		}
-		return DecisionRequestResult{}, err
-	}
+	out, err := s.ResolveDecision(ctx, ResolveDecisionInput{
+		TaskID: taskID, RequestID: in.RequestID, Kind: in.Kind, Option: in.Option, Text: in.Text,
+		Receipt: in.Receipt, Responder: in.Responder, EventKey: in.EventKey,
+		Channel: DecisionChannelCLI, Actor: by,
+	})
+	return out.legacyResult(err)
+}
 
-	if err := s.wrkTaskFenceTx(ctx, tx, x, "claimed", false); err != nil {
-		return DecisionRequestResult{}, err
+// ResolveDecisionRequestAssistant is the assistant channel's one-call adapter
+// over ResolveDecision: the kind is fixed to answered, and Responder and
+// DecidedBy are fixed by the answer's provenance inside ResolveDecision.
+func (s *Store) ResolveDecisionRequestAssistant(ctx context.Context, taskID int64, by string, in DecisionAssistantResolveInput) (DecisionRequestResult, error) {
+	if taskID < 1 {
+		return DecisionRequestResult{}, invalidDecisionRequest("task id must be positive")
 	}
-	decisionBefore := decisionBeforeOf(x)
-	request := x.Refs.DecisionRequest
-	if request == nil || request.ID != in.RequestID {
-		return DecisionRequestResult{}, ErrDecisionRequestStale
-	}
-	if request.Status != DecisionRequestOpen {
-		if assistant {
-			// Amendment 1 (A2): provenance validity and the
-			// operator_decided ref binding are judged before the
-			// duplicate comparison — an invalid claim or a quote
-			// bound to another request id on an already-resolved
-			// request is a 400/409, never a duplicate.
-			if !prov.valid() {
-				return DecisionRequestResult{}, ErrInvalidProvenance
-			}
-			if prov.effective() == DecisionProvenanceOperatorDecided && prov.ref != in.RequestID {
-				return DecisionRequestResult{}, ErrProvenanceRefMismatch
-			}
-		}
-		if request.Resolution != nil && sameResolution(*request.Resolution, in, prov) {
-			return DecisionRequestResult{Task: x, Request: *request, Duplicate: true}, nil
-		}
-		return DecisionRequestResult{}, ErrDecisionRequestResolved
-	}
-	if assistant {
-		// An open request left on a merged or dropped task is uncleaned
-		// state, not answerable work — the pending list already excludes it.
-		// Only the operator path closes it, as request cleanup.
-		if isTerminalTaskState(x.State) {
-			return DecisionRequestResult{}, ErrTaskTerminal
-		}
-		// A disposition item is answered only on the operator's
-		// Access-authenticated web route. Provenance never widens that: no
-		// quote closes it here.
-		if x.Refs.Disposition != nil {
-			return DecisionRequestResult{}, ErrDispositionOperatorOnly
-		}
-		// Provenance validation: the claim must name a known value, a
-		// supplied quote obeys the answer-text rules, and an
-		// operator_decided answer's ref must bind this exact request id —
-		// a quote for one decision or revision never answers another.
-		if !prov.valid() {
-			return DecisionRequestResult{}, ErrInvalidProvenance
-		}
-		if quoteVisible(prov.quote) {
-			if !validText(prov.quote, DecisionOperatorQuoteMaxBytes) || !utf8.ValidString(prov.quote) {
-				return DecisionRequestResult{}, invalidDecisionRequest(fmt.Sprintf("operator_quote must be at most %d bytes of valid text", DecisionOperatorQuoteMaxBytes))
-			}
-			if err := guard.Reject(prov.quote); err != nil {
-				return DecisionRequestResult{}, err
-			}
-		}
-		if prov.effective() == DecisionProvenanceOperatorDecided && prov.ref != in.RequestID {
-			return DecisionRequestResult{}, ErrProvenanceRefMismatch
-		}
-		// A human_only request names the boundary in the request itself:
-		// only the operator's verbatim decision closes it here — a claim
-		// without the quote is a judgement, and a judgement never does.
-		if request.HumanOnly && prov.effective() != DecisionProvenanceOperatorDecided {
-			if prov.claimed == DecisionProvenanceOperatorDecided {
-				return DecisionRequestResult{}, fmt.Errorf("%w: no_operator_quote", ErrDecisionRequestHumanOnly)
-			}
-			return DecisionRequestResult{}, ErrDecisionRequestHumanOnly
-		}
-	}
-	if in.Option != "" {
-		if x.Refs.DecisionOptions == nil || !optionKeys(*x.Refs.DecisionOptions)[in.Option] {
-			return DecisionRequestResult{}, invalidDecisionRequest("option " + in.Option + " is not one of the request's options")
-		}
-	}
-	if in.Kind == DecisionRequestAnswered && in.Option == "" && (x.Refs.DecisionOptions == nil || !x.Refs.DecisionOptions.AllowFree) {
-		return DecisionRequestResult{}, invalidDecisionRequest("this request does not allow a free answer; name an option")
-	}
-	now := time.Now().UTC()
-	resolved := *request
-	resolved.Status = in.Kind
-	resolved.Resolution = &DecisionResolution{Kind: in.Kind, Option: in.Option, Text: in.Text, Receipt: in.Receipt, Responder: in.Responder, By: by, At: now}
-	if assistant {
-		resolved.Resolution.Provenance = prov.effective()
-		resolved.Resolution.OperatorQuote = prov.recordedQuote()
-		resolved.Resolution.DecisionRef = prov.recordedRef()
-		resolved.Resolution.DecidedBy = prov.decidedBy()
-	}
-	x.Refs.DecisionRequest = &resolved
-	encoded, err := json.Marshal(x.Refs)
-	if err != nil {
-		return DecisionRequestResult{}, err
-	}
-	if err = scanTask(tx.QueryRow(ctx, `UPDATE tasks SET refs=$2::jsonb,updated_at=$3 WHERE id=$1 RETURNING `+taskColumns, taskID, string(encoded), now), &x); err != nil {
-		return DecisionRequestResult{}, err
-	}
-	note := "decision-" + in.Kind + " " + resolved.ID
-	if in.Option != "" {
-		note += " " + in.Option
-	}
-	if in.Receipt != "" {
-		note += " receipt " + in.Receipt
-	}
-	if assistant {
-		note += " " + prov.marker()
-	}
-	if in.Text != "" {
-		note += ": " + in.Text
-	}
-	if assistant && prov.effective() == DecisionProvenanceOperatorDecided {
-		note += " — " + prov.quote
-	}
-	if assistant {
-		// The notification is written before the decision event so a failure
-		// anywhere later in the transaction still rolls both back together.
-		head := "[via berry] " + resolved.ID + " answered"
-		if in.Option != "" {
-			head += " " + in.Option
-		}
-		head += " " + prov.marker()
-		if in.Text != "" {
-			head += ": "
-		}
-		text := assistantLaneText(head, in.Text)
-		if err = insertNotificationOutbox(ctx, tx, OutboxKindDecisionAnswered, x.Lane, decisionAnsweredEventID(resolved.ID), text, now); err != nil {
-			return DecisionRequestResult{}, err
-		}
-	}
-	if err = insertDecisionEvent(ctx, tx, taskID, x.State, by, note, x.Refs, now); err != nil {
-		return DecisionRequestResult{}, err
-	}
-	if err = mirrorTaskDecisionsTx(ctx, tx, decisionBefore, x, by, note, 0, now); err != nil {
-		return DecisionRequestResult{}, err
-	}
-	if err = queueDecisionClosedPost(ctx, tx, resolved, x.Refs.DecisionOptions, now); err != nil {
-		return DecisionRequestResult{}, err
-	}
-	if err = s.recordLinearBoardTaskTx(ctx, tx, x, note); err != nil {
-		return DecisionRequestResult{}, err
-	}
-	if err = tx.Commit(ctx); err != nil {
-		return DecisionRequestResult{}, err
-	}
-	return DecisionRequestResult{Task: x, Request: resolved}, nil
+	out, err := s.ResolveDecision(ctx, ResolveDecisionInput{
+		TaskID: taskID, RequestID: in.RequestID, Kind: in.Kind, Option: in.Option, Text: in.Text,
+		EventKey: in.EventKey, Channel: DecisionChannelAssistant, Actor: by,
+		Provenance: in.Provenance, OperatorQuote: in.OperatorQuote, DecisionRef: in.DecisionRef,
+	})
+	return out.legacyResult(err)
 }
 
 // Display states. They are derived for reading only and never stored:
