@@ -3,13 +3,16 @@ name: release
 # amd64/arm64) stamped with the tag, plus SHA256SUMS, and publishes them to the
 # tag's GitHub Release with GITHUB_TOKEN. The test tag v0.0.0 (exactly) runs
 # the same build and checks on the tag but is never published.
-# Pull requests and manual runs build and verify the
-# same assets for the dry-run tag v0.0.0 without publishing. Hosts pull
-# published assets themselves; this workflow never reaches a host.
+# Manual runs without publish build and verify the same assets for the
+# dry-run tag v0.0.0. Pull requests do not run this workflow: ci.yml's
+# post-linux job already exercises scripts/test-build-release.sh after merge.
+# Publication does not rerun the test suite (T-DEPLOY in hk:doc
+# decision/2026-11-05/fleet-ci-three-tiers): ci-green waits for ci.yml's
+# ci-ok on the tagged commit. Hosts pull published assets themselves; this
+# workflow never reaches a host.
 on:
   push:
     tags: ["v*"]
-  pull_request:
   workflow_dispatch:
     inputs:
       publish:
@@ -99,53 +102,93 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  test:
+  ci-green:
+    # Publish only a commit whose main CI passed. The verdict is the ci-ok job
+    # of ci.yml's main push run for this SHA; a dispatch or any-ref run of the
+    # same SHA cannot override it. The tag is cut right after the merge, so
+    # this waits for that run to finish. When a newer main push superseded the
+    # run (cancelled, ci-ok skipped), a ci-any-ref ci-ok status decides; with
+    # none the commit is not published and the next tag carries its change.
     if: (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish)) && github.ref_type == 'tag' && github.ref_name != 'v0.0.0'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
-    services:
-      postgres:
-        image: postgres:17
-        env:
-          POSTGRES_USER: handoffkeep
-          POSTGRES_PASSWORD: handoffkeep
-          POSTGRES_DB: handoffkeep
-        ports: ["5432:5432"]
-        options: >-
-          --health-cmd "pg_isready -U handoffkeep" --health-interval 10s --health-timeout 5s --health-retries 5
+    timeout-minutes: 130
+    permissions:
+      contents: read
+      actions: read
+      statuses: read
+    outputs:
+      green: ${{ steps.wait.outputs.green }}
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-        with:
-          ref: ${{ github.sha }}
-          fetch-depth: 0
-          persist-credentials: false
-      - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
-        with:
-          go-version-file: go.mod
-      # Full Go tests rebuild and mutate the console bundle. Match ci.yml's
-      # pinned toolchain and locked dependencies before invoking that suite.
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with: {node-version-file: web/console/.nvmrc, cache: npm, cache-dependency-path: web/console/package-lock.json}
-      - run: npm ci
-        working-directory: web/console
-      - run: npm run build
-        working-directory: web/console
-      - run: git diff --exit-code -- internal/ui/static/console
-      - run: test -z "$(git status --porcelain --untracked-files=all -- internal/ui/static/console)"
-      - name: Vet, test, and exercise release helper
+      - id: wait
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          test -z "$(gofmt -l .)"
-          go vet ./...
-          go mod tidy -diff
-          go test -race -timeout 30m ./...
-          bash scripts/test-build-release.sh
-        env:
-          HANDOFFKEEP_TEST_DB_URL: postgres://handoffkeep:handoffkeep@localhost:5432/handoffkeep?sslmode=disable
+          # Longer than ci.yml's slowest job (45 min) plus runner queue and the
+          # wait for the run to start; TestReleaseGateOutlastsCI pins it.
+          deadline=$(( $(date +%s) + 120*60 ))
+          green() { echo "green=$1" >> "$GITHUB_OUTPUT"; exit 0; }
+          block() { echo "$1; not publishing" >&2; exit 1; }
+          while :; do
+            superseded=no
+            # A failed API call is "no verdict yet": the deadline ends the wait.
+            if main=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&event=push&branch=main&per_page=1" -q '.workflow_runs | first // {} | "\(.id // 0) \(.status // "none") \(.created_at // "none") \(.conclusion // "")"'); then
+              read -r mid ms mt mc <<<"$main"
+              echo "ci.yml main push run: $mid $ms $mt $mc"
+              if [ "$ms" = completed ]; then
+                if job=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$mid/jobs?filter=latest&per_page=100" -q '[.jobs[] | select(.name == "ci-ok")] | first // {} | .conclusion // "none"'); then
+                  echo "ci-ok job: $job"
+                  case "$job" in
+                    success) green true ;;
+                    skipped|cancelled|none)
+                      case "$mc" in
+                        cancelled|skipped) superseded=check ;;
+                        *) block "main CI on $GITHUB_SHA ended $mc with ci-ok $job" ;;
+                      esac ;;
+                    *) block "main CI ci-ok on $GITHUB_SHA ended $job" ;;
+                  esac
+                  # A cancelled run counts as superseded only when a newer main
+                  # push run exists for another commit; a manual or other
+                  # cancellation fails closed (review on #151, release.yml:126).
+                  if newest=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?event=push&branch=main&per_page=1" -q '.workflow_runs | first // {} | "\(.head_sha // "none") \(.created_at // "none")"'); then
+                    read -r nsha nt <<<"$newest"
+                    echo "newest ci.yml main push run: $nsha $nt"
+                    if [ "$nsha" != "$GITHUB_SHA" ] && [ "$nsha" != none ] && [[ "$nt" > "$mt" ]]; then
+                      superseded=yes
+                    else
+                      block "main CI on $GITHUB_SHA ended $mc with no newer main push"
+                    fi
+                  else
+                    echo "::warning::reading newest main push run failed; retrying"
+                  fi
+                  if [ "$superseded" = yes ] && status=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/statuses" -q '[.[] | select(.context == "ci-ok")] | first | .state // "none"'); then
+                    echo "main CI superseded; ci-any-ref ci-ok status: $status"
+                    case "$status" in
+                      success) green true ;;
+                      failure|error) block "ci-any-ref ci-ok status on $GITHUB_SHA is $status" ;;
+                      pending) ;;
+                      *) echo "::notice::main CI on $GITHUB_SHA was superseded and has no ci-any-ref verdict; not publishing, the next tag carries this change"
+                         green false ;;
+                    esac
+                  else
+                    echo "::warning::reading ci-ok statuses failed; retrying"
+                  fi
+                else
+                  echo "::warning::reading main run jobs failed; retrying"
+                fi
+              fi
+            else
+              echo "::warning::reading ci.yml main push runs failed; retrying"
+            fi
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "no ci-ok verdict on $GITHUB_SHA within 120 minutes" >&2; exit 1
+            fi
+            sleep 30
+          done
 
   publish:
-    needs: [build, test]
-    if: (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish)) && github.ref_type == 'tag' && github.ref_name != 'v0.0.0'
+    needs: [build, ci-green]
+    if: (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish)) && github.ref_type == 'tag' && github.ref_name != 'v0.0.0' && needs.ci-green.outputs.green == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
