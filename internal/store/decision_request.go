@@ -529,8 +529,8 @@ func rejectDecisionRequestSecrets(in DecisionRequestInput) error {
 	return guard.Reject(strings.Join(values, "\n"))
 }
 
-func insertDecisionEvent(ctx context.Context, tx pgx.Tx, id int64, state, by, note string, refs TaskRefs, at time.Time) error {
-	_, _, err := insertEvent(ctx, tx, taskEventInput{TaskID: id, Kind: "decision", From: state, To: state, By: by, Note: note, Refs: refs, At: at})
+func insertDecisionEvent(ctx context.Context, tx pgx.Tx, x *Task, by, note string, at time.Time) error {
+	_, _, err := insertEvent(ctx, tx, taskEventInput{TaskID: x.ID, Kind: "decision", From: x.State, To: x.State, By: by, Note: note, Refs: x.Refs, Into: x, At: at})
 	return err
 }
 
@@ -645,7 +645,7 @@ func (s *Store) RecordDecisionRequest(ctx context.Context, taskID int64, by stri
 	note += ": " + request.Question
 	if setFlag {
 		// The event's note keeps the question readers of the flag expect.
-		if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: taskID, Kind: TaskEventAwaiting, From: x.State, To: x.State, By: by, Note: request.Question, Refs: x.Refs, At: now, Field: "awaiting_decision", FromValue: "false", ToValue: "true"}); err != nil {
+		if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: taskID, Kind: TaskEventAwaiting, From: x.State, To: x.State, By: by, Note: request.Question, Refs: x.Refs, Into: &x, At: now, Field: "awaiting_decision", FromValue: "false", ToValue: "true"}); err != nil {
 			return DecisionRequestResult{}, err
 		}
 		if s.LinearSyncEnabled() && x.Refs.Linear != nil && x.Refs.Linear.Sync {
@@ -653,7 +653,7 @@ func (s *Store) RecordDecisionRequest(ctx context.Context, taskID int64, by stri
 				return DecisionRequestResult{}, err
 			}
 		}
-	} else if err = insertDecisionEvent(ctx, tx, taskID, x.State, by, note, x.Refs, now); err != nil {
+	} else if err = insertDecisionEvent(ctx, tx, &x, by, note, now); err != nil {
 		return DecisionRequestResult{}, err
 	}
 	if err = mirrorTaskDecisionsTx(ctx, tx, decisionBefore, x, by, request.Question, 0, now); err != nil {
@@ -886,7 +886,7 @@ func (s *Store) resolveDecisionRequest(ctx context.Context, taskID int64, by str
 			return DecisionRequestResult{}, err
 		}
 	}
-	if err = insertDecisionEvent(ctx, tx, taskID, x.State, by, note, x.Refs, now); err != nil {
+	if err = insertDecisionEvent(ctx, tx, &x, by, note, now); err != nil {
 		return DecisionRequestResult{}, err
 	}
 	if err = mirrorTaskDecisionsTx(ctx, tx, decisionBefore, x, by, note, 0, now); err != nil {
