@@ -187,7 +187,7 @@ func (s *Store) RecordDotsResult(ctx context.Context, kind string, issue DotsIss
 		return "", false, err
 	}
 	defer tx.Rollback(ctx)
-	tag, err := tx.Exec(ctx, `INSERT INTO documents(key,kind,session,job,body,sha256,created_by,created_at,updated_at) VALUES($1,'note',$2,'',$3,$4,$5,$6,$6) ON CONFLICT(key) DO NOTHING`, key, DotsLane, body, hex.EncodeToString(sum[:]), dotsCreatedBy, now)
+	tag, err := tx.Exec(ctx, `INSERT INTO documents(key,kind,session,job,body,sha256,created_by,created_at,updated_at,origin_class) VALUES($1,'note',$2,'',$3,$4,$5,$6,$6,'import') ON CONFLICT(key) DO NOTHING`, key, DotsLane, body, hex.EncodeToString(sum[:]), dotsCreatedBy, now)
 	if err != nil {
 		return "", false, err
 	}
