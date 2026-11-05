@@ -34,12 +34,15 @@ var (
 // taskEventInput is one task_events row. Kind defaults to transition and
 // Applied to true; NotApplied records an event with no effect.
 type taskEventInput struct {
-	TaskID     int64
-	Kind       string
-	From, To   string
-	By, Note   string
-	Refs       TaskRefs
-	Rebind     *TaskJobRebind
+	TaskID   int64
+	Kind     string
+	From, To string
+	By, Note string
+	Refs     TaskRefs
+	Rebind   *TaskJobRebind
+	// Into, when set, receives the moved activity clock so the Task a caller
+	// returns agrees with the row.
+	Into       *Task
 	At         time.Time
 	NoJob      string
 	Source     string
@@ -83,6 +86,9 @@ func insertEvent(ctx context.Context, q rowQuerier, e taskEventInput) (id int64,
 	err = q.QueryRow(ctx, `UPDATE tasks SET last_activity_at = GREATEST(last_activity_at, $2) WHERE id = $1 AND last_activity_at < $2 RETURNING id`, e.TaskID, e.At).Scan(&taskID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return id, false, nil
+	}
+	if err == nil && e.Into != nil {
+		e.Into.LastActivityAt = e.At.UTC().Truncate(time.Microsecond)
 	}
 	return id, err == nil, err
 }

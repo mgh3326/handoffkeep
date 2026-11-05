@@ -166,3 +166,78 @@ func TestLastActivityMoves(t *testing.T) {
 		}
 	})
 }
+
+// TestLastActivityMigrationKeepsPreviousBinaryInserts: hk deploys the CLI
+// first and the server after, and a rollback runs the previous binary. Its
+// INSERT INTO tasks (copied from origin/main createTask, IntakeTask and
+// CreateDisposition) does not name last_activity_at, so the column must
+// default instead of refusing the row.
+func TestLastActivityMigrationKeepsPreviousBinaryInserts(t *testing.T) {
+	s := schemaStore(t, "activity_prev_binary")
+	ctx := t.Context()
+	now := time.Now().UTC()
+	inserts := []struct {
+		name string
+		sql  string
+		args []any
+	}{
+		{"create", `INSERT INTO tasks(lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at,body_doc,project,area,expected,parent_id) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING id`,
+			[]any{"prev-binary", "", "create", "implement", "backlog", 0, "{}", "", "test", now, now, "", nil, nil, "", nil}},
+		{"intake", `INSERT INTO tasks(lane,title,kind,state,priority,created_by,created_at,updated_at,started_triage_at,project,parent_id,source,source_ref) VALUES($1,$2,$3,$4,$5,$6,$7,$7,$7,$8,$9,$10,$11) RETURNING id`,
+			[]any{"prev-binary", "intake", "implement", StateTriage, 0, "test", now, nil, nil, "", ""}},
+		{"disposition", `INSERT INTO tasks(lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at,project,awaiting_decision) VALUES($1,'',$2,'decide','backlog',0,$3::jsonb,$4,$4,$5,$5,$6,true) RETURNING id`,
+			[]any{"prev-binary", "disposition", "{}", "test", now, nil}},
+	}
+	for _, in := range inserts {
+		var id int64
+		if err := s.pool.QueryRow(ctx, in.sql, in.args...).Scan(&id); err != nil {
+			t.Fatalf("%s: previous binary insert failed after v%d: %v", in.name, SchemaVersion, err)
+		}
+		var activity time.Time
+		if err := s.pool.QueryRow(ctx, `SELECT last_activity_at FROM tasks WHERE id=$1`, id).Scan(&activity); err != nil {
+			t.Fatal(err)
+		}
+		if d := activity.Sub(now); d < -time.Minute || d > time.Minute {
+			t.Errorf("%s: default last_activity_at=%v, want about %v", in.name, activity, now)
+		}
+	}
+}
+
+// TestLastActivityReturnedTaskMatchesRow: a human edit moves the activity
+// clock in the row, and the Task the store returns must say so too.
+func TestLastActivityReturnedTaskMatchesRow(t *testing.T) {
+	s, pool := searchTestStore(t)
+	ctx := t.Context()
+	due := time.Now().UTC().Add(48 * time.Hour)
+	edits := map[string]func(id int64) (Task, error){
+		"relane": func(id int64) (Task, error) {
+			x, _, err := s.RelaneTask(ctx, id, "activity-returned-2", "tester", "move", true)
+			return x, err
+		},
+		"project": func(id int64) (Task, error) {
+			x, _, err := s.SetTaskProject(ctx, id, "wrk", "tester", "move")
+			return x, err
+		},
+		"area": func(id int64) (Task, error) {
+			x, _, err := s.SetTaskArea(ctx, id, areaPtr("blender"), "tester", "move")
+			return x, err
+		},
+		"due": func(id int64) (Task, error) {
+			x, _, err := s.SetTaskDue(ctx, id, &due, "tester")
+			return x, err
+		},
+	}
+	for name, edit := range edits {
+		t.Run(name, func(t *testing.T) {
+			x := flowTask(t, s, pool, "implement", StateBacklog, false)
+			got, err := edit(x.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			stored := stateOf(t, s, x.ID)
+			if !stored.LastActivityAt.After(x.LastActivityAt) || !got.LastActivityAt.Equal(stored.LastActivityAt) {
+				t.Fatalf("before=%v returned=%v stored=%v", x.LastActivityAt, got.LastActivityAt, stored.LastActivityAt)
+			}
+		})
+	}
+}

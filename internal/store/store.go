@@ -2633,7 +2633,7 @@ func (s *Store) RelaneTask(ctx context.Context, id int64, to, by, note string, a
 	if err = scanTask(tx.QueryRow(ctx, `UPDATE tasks SET lane=$2,updated_at=$3 WHERE id=$1 RETURNING `+taskColumns, id, to, x.UpdatedAt), &x); err != nil {
 		return Task{}, false, err
 	}
-	if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: id, Kind: "relane", From: from, To: to, By: by, Note: note, Refs: x.Refs, At: x.UpdatedAt, Field: "lane", FromValue: from, ToValue: to}); err != nil {
+	if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: id, Kind: "relane", From: from, To: to, By: by, Note: note, Refs: x.Refs, Into: &x, At: x.UpdatedAt, Field: "lane", FromValue: from, ToValue: to}); err != nil {
 		return Task{}, false, err
 	}
 	if err := s.recordLinearBoardTaskTx(ctx, tx, x, note); err != nil {
@@ -2704,7 +2704,7 @@ func (s *Store) SetTaskProjectWithMetadata(ctx context.Context, id int64, projec
 	if err = scanTask(tx.QueryRow(ctx, `UPDATE tasks SET project=$2,updated_at=$3 WHERE id=$1 RETURNING `+taskColumns, id, project, x.UpdatedAt), &x); err != nil {
 		return Task{}, false, err
 	}
-	if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: id, Kind: "project", From: from, To: project, By: by, Note: note, Refs: x.Refs, At: x.UpdatedAt, Field: "project", FromValue: from, ToValue: project}); err != nil {
+	if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: id, Kind: "project", From: from, To: project, By: by, Note: note, Refs: x.Refs, Into: &x, At: x.UpdatedAt, Field: "project", FromValue: from, ToValue: project}); err != nil {
 		return Task{}, false, err
 	}
 	if err := s.recordLinearBoardTaskTx(ctx, tx, x, note); err != nil {
@@ -2753,7 +2753,7 @@ func (s *Store) SetTaskArea(ctx context.Context, id int64, area *string, by, not
 	if err = scanTask(tx.QueryRow(ctx, `UPDATE tasks SET area=$2,updated_at=$3 WHERE id=$1 RETURNING `+taskColumns, id, area, x.UpdatedAt), &x); err != nil {
 		return Task{}, false, err
 	}
-	if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: id, Kind: "area", From: from, To: to, By: by, Note: note, Refs: x.Refs, At: x.UpdatedAt, Field: "area", FromValue: from, ToValue: to}); err != nil {
+	if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: id, Kind: "area", From: from, To: to, By: by, Note: note, Refs: x.Refs, Into: &x, At: x.UpdatedAt, Field: "area", FromValue: from, ToValue: to}); err != nil {
 		return Task{}, false, err
 	}
 	if err := s.recordLinearBoardTaskTx(ctx, tx, x, note); err != nil {
