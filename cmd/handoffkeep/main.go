@@ -1861,6 +1861,11 @@ func serve(args []string, errout io.Writer) error {
 	if forwarder := notificationForwarderFromEnv(st); forwarder != nil {
 		workers = append(workers, forwarder)
 	}
+	notifier, e := decisionNotifierFromEnv(st)
+	if e != nil {
+		return e
+	}
+	workers = append(workers, notifier)
 	uiHandler, e := uiFromEnv(st)
 	if e != nil {
 		return e
@@ -2000,6 +2005,22 @@ func discordDecisionsFromEnv() *api.DiscordWebhook {
 		return nil
 	}
 	return &api.DiscordWebhook{URL: webhook}
+}
+
+// decisionNotifierFromEnv always runs the decision request messages: without
+// the webhook, what falls due settles unsent. HANDOFFKEEP_CONSOLE_URL is
+// optional, but a value that is not an https URL stops the server, so a typo
+// cannot silently drop every link.
+func decisionNotifierFromEnv(st *store.Store) (backgroundWorker, error) {
+	console := ""
+	if raw := strings.TrimSpace(os.Getenv("HANDOFFKEEP_CONSOLE_URL")); raw != "" {
+		parsed, err := api.ParseConsoleURL(raw)
+		if err != nil {
+			return nil, err
+		}
+		console = parsed
+	}
+	return api.DecisionNotifier{Store: st, Discord: discordDecisionsFromEnv(), ConsoleURL: console}, nil
 }
 
 // notificationForwarderFromEnv is opt-in, separately from the hub settings the

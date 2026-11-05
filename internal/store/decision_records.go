@@ -143,8 +143,9 @@ type decisionOpen struct {
 	At                time.Time
 }
 
-// openDecisionTx creates the row for a new question. A redelivered write
-// finds its key taken and changes nothing.
+// openDecisionTx creates the row for a new question and queues its channel
+// message (decision_notify.go). A redelivered write finds its key taken and
+// changes nothing, so it queues no second message.
 func openDecisionTx(ctx context.Context, tx pgx.Tx, d decisionOpen) error {
 	var options any
 	if d.Options != nil {
@@ -158,10 +159,17 @@ func openDecisionTx(ctx context.Context, tx pgx.Tx, d decisionOpen) error {
 	if d.TaskID > 0 {
 		taskID = d.TaskID
 	}
-	_, err := tx.Exec(ctx, `INSERT INTO decision_requests(source,source_ref,task_id,job_id,lane,question,options,recommended,default_action,due_at,status,created_at,updated_at)
-		VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,'open',$11,$11) ON CONFLICT (source,source_ref) DO NOTHING`,
-		d.Source, d.SourceRef, taskID, d.JobID, d.Lane, d.Question, options, d.Recommended, d.DefaultAction, d.DueAt, d.At)
-	return err
+	var id int64
+	err := tx.QueryRow(ctx, `INSERT INTO decision_requests(source,source_ref,task_id,job_id,lane,question,options,recommended,default_action,due_at,status,created_at,updated_at)
+		VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,'open',$11,$11) ON CONFLICT (source,source_ref) DO NOTHING RETURNING id`,
+		d.Source, d.SourceRef, taskID, d.JobID, d.Lane, d.Question, options, d.Recommended, d.DefaultAction, d.DueAt, d.At).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return queueDecisionNoticeTx(ctx, tx, id, d.Source, d.At)
 }
 
 // answerDecisionTx marks the open row of one source record answered. A row
