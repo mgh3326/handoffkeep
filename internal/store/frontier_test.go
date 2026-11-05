@@ -50,6 +50,25 @@ func TestProjectFrontierClasses(t *testing.T) {
 	if _, err := s.pool.Exec(ctx, `UPDATE tasks SET state='merged' WHERE id=$1`, xs[6].ID); err != nil {
 		t.Fatal(err)
 	}
+	// Closed and deployed changes are excluded; another project's change is isolated.
+	closedTask, deployedTask := task(), task()
+	send(t, s, TaskSourceEvent{Source: SourceMergewakePR, SourceRef: repoPR(repo, 8), TaskID: closedTask.ID})
+	send(t, s, TaskSourceEvent{Source: SourceMergewakeMerge, SourceRef: repoPR(repo, 9), TaskID: deployedTask.ID})
+	if _, err := s.pool.Exec(ctx, `UPDATE changes SET state='closed' WHERE repo=$1 AND pr_number=8`, repo); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pool.Exec(ctx, `UPDATE tasks SET state='deployed' WHERE id=$1`, deployedTask.ID); err != nil {
+		t.Fatal(err)
+	}
+	other := project + "-other"
+	if _, err := s.AddTaskProject(ctx, other, "tester"); err != nil {
+		t.Fatal(err)
+	}
+	otherTask, err := s.CreateTask(ctx, Task{Lane: other, Title: "other", Kind: "implement", CreatedBy: "tester", Project: &other})
+	if err != nil {
+		t.Fatal(err)
+	}
+	send(t, s, TaskSourceEvent{Source: SourceMergewakePR, SourceRef: repoPR(repo, 10), TaskID: otherTask.ID})
 	now := time.Now().UTC()
 	f, err := s.ProjectFrontier(ctx, project, now.Add(-time.Hour), now)
 	if err != nil {
@@ -130,6 +149,8 @@ func TestProjectFrontierReviewSince(t *testing.T) {
 	repo := changeRepo("since")
 	pr := repoPR(repo, 1)
 	send(t, s, TaskSourceEvent{Source: SourceMergewakePR, SourceRef: pr, TaskID: x.ID, HeadSHA: testSHA1})
+	untouched := repoPR(repo, 2)
+	send(t, s, TaskSourceEvent{Source: SourceMergewakePR, SourceRef: untouched, TaskID: x.ID, HeadSHA: testSHA1})
 	since := time.Now().UTC()
 	zero := 0
 	send(t, s, TaskSourceEvent{Source: SourceMergewakeReview, SourceRef: pr, TaskID: x.ID, HeadSHA: testSHA1, Reviews: []TaskEventReview{{ReviewedHead: testSHA1, Round: 1, Pass: 1, Lens: "correctness", Critical: &zero, High: &zero}}})
