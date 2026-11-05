@@ -213,7 +213,8 @@ func ReadJobRoot(root, machine string, notBefore time.Time) ([]Job, int, error) 
 
 // ---------------------------------------------------------------- reps
 
-// ParseRepsList parses `pacelever reps list --json` output: an object with a
+// ParseRepsList parses a reps list (`GET /v1/bench/reps`, or the same shape
+// from `pacelever reps list --json`): an object with a
 // "reps" array. A bare array is also accepted so a saved slice still reads.
 func ParseRepsList(data []byte, source string) []Rep {
 	var rows []struct {
