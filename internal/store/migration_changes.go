@@ -1,6 +1,6 @@
 package store
 
-// Version 41 adds the work record's change tables (hk 3037; design
+// Version 42 adds the work record's change tables (hk 3037; design
 // hk:doc design/2026-11-05/hk-work-record-design-v1.1 §2 and §13.7). A change
 // is one pull request, identified by (repo, pr_number) and shared by every
 // task that names it; change_tasks links the two; reviews holds one row per
@@ -15,7 +15,7 @@ package store
 // migration touches is tasks: the change_tasks foreign key takes a short
 // SHARE ROW EXCLUSIVE lock on it while the constraint is added, and the new
 // table is empty, so the validation scan is instant.
-var changesV41 = []string{
+var changesV42 = []string{
 	`CREATE TABLE IF NOT EXISTS changes (
 		id BIGSERIAL PRIMARY KEY,
 		repo TEXT NOT NULL,
@@ -74,5 +74,5 @@ var changesV41 = []string{
 		recorded_at TIMESTAMPTZ NOT NULL,
 		UNIQUE(change_id, reviewed_head, lens, round, pass)
 	)`,
-	`INSERT INTO schema_version(version) VALUES (41)`,
+	`INSERT INTO schema_version(version) VALUES (42)`,
 }

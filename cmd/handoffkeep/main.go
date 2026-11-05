@@ -220,7 +220,7 @@ func tasksCmd(args []string, out io.Writer) error {
 
 func tasksCmdE(args []string, out, errout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: tasks add|list|export|claim|next|transition|reopen|rebind|relane|project|projects|milestone|label|labels|due|subscribe|unsubscribe|set-area|areas|parent|relate|unrelate|migrate-states|decision-request|decision-resolve|show|comment|comments|disposition|event|sweep|project-status|intake|triage")
+		return errors.New("usage: tasks add|list|export|claim|next|transition|reopen|rebind|relane|project|projects|milestone|label|labels|due|subscribe|unsubscribe|set-area|areas|parent|relate|unrelate|origin|migrate-states|decision-request|decision-resolve|show|comment|comments|disposition|event|sweep|project-status|intake|triage")
 	}
 	if args[0] == "disposition" {
 		return dispositionCmd(args[1:], out)
@@ -239,6 +239,9 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 	}
 	if args[0] == "relate" || args[0] == "unrelate" {
 		return taskRelationCmd(args, out)
+	}
+	if args[0] == "origin" {
+		return taskOriginCmd(args[1:], out)
 	}
 	if args[0] == "migrate-states" {
 		return taskMigrateStatesCmd(args[1:], out)
@@ -1019,6 +1022,8 @@ func docCmd(args []string, out io.Writer) error {
 	kind := fs.String("kind", "", "kind")
 	session := fs.String("session", "", "session")
 	job := fs.String("job", "", "job")
+	task := fs.Int64("task", 0, "task id the document belongs to (put) or to filter by (list)")
+	originClass := fs.String("origin-class", "", "how the document came to be: authored, job or import (put)")
 	file := fs.String("file", "", "file")
 	prefix := fs.String("prefix", "", "prefix")
 	dir := fs.String("dir", "", "directory")
@@ -1028,6 +1033,18 @@ func docCmd(args []string, out io.Writer) error {
 	apply := fs.Bool("apply", false, "apply changes")
 	if e := fs.Parse(args[1:]); e != nil {
 		return e
+	}
+	taskSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "task" {
+			taskSet = true
+		}
+	})
+	if taskSet && *task < 1 {
+		return errors.New("--task must be a positive task id")
+	}
+	if (taskSet && args[0] != "put" && args[0] != "list") || (*originClass != "" && args[0] != "put") {
+		return errors.New("--task applies to doc put and doc list, --origin-class to doc put")
 	}
 	ctx := context.Background()
 	if args[0] == "import" && *manifestOut != "" {
@@ -1048,7 +1065,11 @@ func docCmd(args []string, out io.Writer) error {
 		if e != nil {
 			return e
 		}
-		v, changed, e := c.PutDocument(ctx, "", store.Document{Key: *key, Kind: *kind, Session: *session, Job: *job, Body: string(b)})
+		doc := store.Document{Key: *key, Kind: *kind, Session: *session, Job: *job, Body: string(b), OriginClass: *originClass}
+		if taskSet {
+			doc.TaskID = task
+		}
+		v, changed, e := c.PutDocument(ctx, "", doc)
 		if e != nil {
 			return e
 		}
@@ -1089,7 +1110,7 @@ func docCmd(args []string, out io.Writer) error {
 		}
 		return printJSON(out, v)
 	case "list":
-		v, e := c.ListDocuments(ctx, *prefix, *kind, *session, 100)
+		v, e := c.ListDocuments(ctx, *prefix, *kind, *session, *task, 100)
 		if e != nil {
 			return e
 		}
