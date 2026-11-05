@@ -24,7 +24,7 @@ func TestActivityEventRule(t *testing.T) {
 func TestLastActivityMigration(t *testing.T) {
 	s := schemaStore(t, "activity_migration")
 	ctx := t.Context()
-	for _, q := range []string{`ALTER TABLE tasks DROP COLUMN last_activity_at`, `DELETE FROM schema_version WHERE version=43`} {
+	for _, q := range []string{`ALTER TABLE tasks DROP COLUMN last_activity_at`, `DELETE FROM schema_version WHERE version=44`} {
 		if _, err := s.pool.Exec(ctx, q); err != nil {
 			t.Fatal(err)
 		}
@@ -52,7 +52,7 @@ func TestLastActivityMigration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer tx.Rollback(ctx)
-	if err := execAll(ctx, tx, lastActivityV43); err != nil {
+	if err := execAll(ctx, tx, lastActivityV44); err != nil {
 		t.Fatal(err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -209,7 +209,12 @@ func TestLastActivityReturnedTaskMatchesRow(t *testing.T) {
 	s, pool := searchTestStore(t)
 	ctx := t.Context()
 	due := time.Now().UTC().Add(48 * time.Hour)
+	parent := flowTask(t, s, pool, "implement", StateBacklog, false)
 	edits := map[string]func(id int64) (Task, error){
+		"parent": func(id int64) (Task, error) {
+			x, _, err := s.SetTaskParent(ctx, id, &parent.ID, "tester")
+			return x, err
+		},
 		"relane": func(id int64) (Task, error) {
 			x, _, err := s.RelaneTask(ctx, id, "activity-returned-2", "tester", "move", true)
 			return x, err

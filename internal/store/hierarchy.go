@@ -370,7 +370,7 @@ func (s *Store) SetTaskParent(ctx context.Context, id int64, parent *int64, by s
 	if err = scanTask(tx.QueryRow(ctx, `UPDATE tasks SET parent_id=$2,updated_at=$3 WHERE id=$1 RETURNING `+taskColumns, id, parent, now), &x); err != nil {
 		return Task{}, false, err
 	}
-	if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: id, Kind: TaskEventParent, From: x.State, To: x.State, By: by, At: now, Refs: x.Refs, Field: "parent_id", FromValue: from, ToValue: to}); err != nil {
+	if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: id, Kind: TaskEventParent, From: x.State, To: x.State, By: by, At: now, Refs: x.Refs, Into: &x, Field: "parent_id", FromValue: from, ToValue: to}); err != nil {
 		return Task{}, false, err
 	}
 	if err := s.recordLinearBoardTaskTx(ctx, tx, x, ""); err != nil {
