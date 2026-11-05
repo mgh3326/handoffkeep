@@ -4,7 +4,9 @@ The same endpoint also records operator decisions, on issues that carry a
 decision request. See [linear-decisions.md](linear-decisions.md).
 
 `POST /hooks/linear` receives Linear `Comment` and `Issue` webhooks. dots answers on issues
-labelled `dots` with comments that start `[dots] <KIND>`, and this endpoint
+labelled `dots` with comments that start `[dots] <KIND>` (the kind word ends at a colon, so
+`[dots] RESULT: <verdict>` is a RESULT whose verdict is the notification
+summary), and this endpoint
 records those answers as they arrive. A poller stays on as a reconciler; both
 paths write the same document key, body and event id, so whichever runs second
 changes nothing.

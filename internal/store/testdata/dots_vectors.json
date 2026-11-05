@@ -176,5 +176,72 @@
   "key": "dots/results/ZZZ-14/2026-11-02-0a1b2c3d",
   "docBody": "# [dots] RESULT ZZZ-14 — Fake issue\n\nhttps://linear.example/zzz/14\n\n[dots] RESULT\n# \n##\n|t|\n결론\n  ## 결론 뒤 요약 ##\n\n",
   "text": "[dots] RESULT ZZZ-14 Fake issue :: 결론 뒤 요약 ## → hk:doc dots/results/ZZZ-14/2026-11-02-0a1b2c3d · https://linear.example/zzz/14"
+ },
+ {
+  "id": "1fb637af-0000-4000-8000-000000000021",
+  "createdAt": "2026-11-05T10:37:49.615Z",
+  "body": "[dots] RESULT: 제목 섹션을 먼저 도입하기를 권고합니다.\n\n## 0. 조사 범위\n본문",
+  "identifier": "ZZZ-21",
+  "title": "Colon heading",
+  "url": "https://linear.example/zzz/21",
+  "kind": "RESULT",
+  "summary": "제목 섹션을 먼저 도입하기를 권고합니다.",
+  "follow": "[dots-watch] ZZZ-21 is closed but got a new comment after closing; dots will not pick it up. Reopen it if it is a request. https://linear.example/zzz/21",
+  "key": "dots/results/ZZZ-21/2026-11-05-1fb637af",
+  "docBody": "# [dots] RESULT ZZZ-21 — Colon heading\n\nhttps://linear.example/zzz/21\n\n[dots] RESULT: 제목 섹션을 먼저 도입하기를 권고합니다.\n\n## 0. 조사 범위\n본문\n",
+  "text": "[dots] RESULT ZZZ-21 Colon heading :: 제목 섹션을 먼저 도입하기를 권고합니다. → hk:doc dots/results/ZZZ-21/2026-11-05-1fb637af · https://linear.example/zzz/21"
+ },
+ {
+  "id": "1fb637af-0000-4000-8000-000000000022",
+  "createdAt": "2026-11-05T10:37:49.615Z",
+  "body": "[dots] blocked：Drive 파일 권한이 필요합니다\n\n자세히",
+  "identifier": "ZZZ-22",
+  "title": "Colon heading",
+  "url": "https://linear.example/zzz/22",
+  "kind": "BLOCKED",
+  "summary": "Drive 파일 권한이 필요합니다",
+  "follow": "[dots-watch] ZZZ-22 is closed but got a new comment after closing; dots will not pick it up. Reopen it if it is a request. https://linear.example/zzz/22",
+  "key": "dots/results/ZZZ-22/2026-11-05-1fb637af",
+  "docBody": "# [dots] BLOCKED ZZZ-22 — Colon heading\n\nhttps://linear.example/zzz/22\n\n[dots] blocked：Drive 파일 권한이 필요합니다\n\n자세히\n",
+  "text": "[dots] BLOCKED ZZZ-22 Colon heading :: Drive 파일 권한이 필요합니다 → hk:doc dots/results/ZZZ-22/2026-11-05-1fb637af · https://linear.example/zzz/22"
+ },
+ {
+  "id": "1fb637af-0000-4000-8000-000000000023",
+  "createdAt": "2026-11-05T10:37:49.615Z",
+  "body": "[dots] RESULT:붙여 쓴 결론\n\n본문",
+  "identifier": "ZZZ-23",
+  "title": "Colon heading",
+  "url": "https://linear.example/zzz/23",
+  "kind": "RESULT",
+  "summary": "붙여 쓴 결론",
+  "follow": "[dots-watch] ZZZ-23 is closed but got a new comment after closing; dots will not pick it up. Reopen it if it is a request. https://linear.example/zzz/23",
+  "key": "dots/results/ZZZ-23/2026-11-05-1fb637af",
+  "docBody": "# [dots] RESULT ZZZ-23 — Colon heading\n\nhttps://linear.example/zzz/23\n\n[dots] RESULT:붙여 쓴 결론\n\n본문\n",
+  "text": "[dots] RESULT ZZZ-23 Colon heading :: 붙여 쓴 결론 → hk:doc dots/results/ZZZ-23/2026-11-05-1fb637af · https://linear.example/zzz/23"
+ },
+ {
+  "id": "1fb637af-0000-4000-8000-000000000024",
+  "createdAt": "2026-11-05T10:37:49.615Z",
+  "body": "[dots] RESULT:\n\n## 결론\n\n다음 줄 결론",
+  "identifier": "ZZZ-24",
+  "title": "Colon heading",
+  "url": "https://linear.example/zzz/24",
+  "kind": "RESULT",
+  "summary": "다음 줄 결론",
+  "follow": "[dots-watch] ZZZ-24 is closed but got a new comment after closing; dots will not pick it up. Reopen it if it is a request. https://linear.example/zzz/24",
+  "key": "dots/results/ZZZ-24/2026-11-05-1fb637af",
+  "docBody": "# [dots] RESULT ZZZ-24 — Colon heading\n\nhttps://linear.example/zzz/24\n\n[dots] RESULT:\n\n## 결론\n\n다음 줄 결론\n",
+  "text": "[dots] RESULT ZZZ-24 Colon heading :: 다음 줄 결론 → hk:doc dots/results/ZZZ-24/2026-11-05-1fb637af · https://linear.example/zzz/24"
+ },
+ {
+  "id": "1fb637af-0000-4000-8000-000000000025",
+  "createdAt": "2026-11-05T10:37:49.615Z",
+  "body": "[dots] START: 시작합니다\n\n계획",
+  "identifier": "ZZZ-25",
+  "title": "Colon heading",
+  "url": "https://linear.example/zzz/25",
+  "kind": "START",
+  "summary": "시작합니다",
+  "follow": "[dots-watch] ZZZ-25 is closed but got a new comment after closing; dots will not pick it up. Reopen it if it is a request. https://linear.example/zzz/25"
  }
 ]

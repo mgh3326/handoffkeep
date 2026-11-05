@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/mgh3326/handoffkeep/internal/guard"
 )
@@ -60,17 +61,39 @@ type DotsComment struct {
 
 // DotsKind classifies a comment. dots is false when the comment does not start
 // with "[dots]"; a bare "[dots]" heading is kind "?", which is never recorded.
+// The kind word ends at a colon, so "[dots] RESULT: <verdict>" is a RESULT
+// (ROB-1497 on 2026-11-05 was dropped as kind "RESULT:").
 func DotsKind(body string) (kind string, dots bool) {
+	word, _, dots := dotsHeading(body)
+	if !dots {
+		return "", false
+	}
+	if word == "" {
+		return "?", true
+	}
+	return strings.ToUpper(word), true
+}
+
+// dotsHeading splits the first line after "[dots]" into the kind word and,
+// when that word ends at a colon, the verdict that follows it on the line.
+func dotsHeading(body string) (word, verdict string, dots bool) {
 	head, _, _ := strings.Cut(strings.TrimSpace(body), "\n")
 	rest, ok := strings.CutPrefix(head, "[dots]")
 	if !ok {
-		return "", false
+		return "", "", false
 	}
+	rest = strings.TrimSpace(rest)
 	words := strings.Fields(rest)
 	if len(words) == 0 {
-		return "?", true
+		return "", "", true
 	}
-	return strings.ToUpper(words[0]), true
+	word = words[0]
+	if i := strings.IndexAny(word, ":："); i >= 0 {
+		_, size := utf8.DecodeRuneInString(word[i:])
+		verdict = strings.TrimSpace(rest[i+size:])
+		word = word[:i]
+	}
+	return word, verdict, true
 }
 
 // DotsKindRecorded reports whether a comment of this kind becomes a document.
@@ -88,9 +111,13 @@ func firstRunes(s string, n int) string {
 	return string(r[:n])
 }
 
-// dotsSummaryLine is the first substantive line after the heading, skipping a
-// "결론" heading and table rows.
+// dotsSummaryLine is the verdict on a "[dots] KIND: <verdict>" heading, else
+// the first substantive line after the heading, skipping a "결론" heading and
+// table rows.
 func dotsSummaryLine(body string) string {
+	if _, verdict, _ := dotsHeading(body); verdict != "" {
+		return firstRunes(verdict, 220)
+	}
 	lines := strings.Split(strings.TrimSpace(body), "\n")
 	for _, line := range lines[1:] {
 		s := strings.TrimSpace(strings.TrimLeft(strings.TrimSpace(line), "#"))
