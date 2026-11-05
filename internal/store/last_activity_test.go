@@ -143,7 +143,8 @@ func TestLastActivityMoves(t *testing.T) {
 	})
 	t.Run("decision and rebind", func(t *testing.T) {
 		x := flowTask(t, s, pool, "implement", StateDeveloping, true)
-		if _, err := s.RecordDecisionRequest(ctx, x.ID, "tester", decisionInput()); err != nil {
+		result, err := s.RecordDecisionRequest(ctx, x.ID, "tester", decisionInput())
+		if err != nil {
 			t.Fatal(err)
 		}
 		got := stateOf(t, s, x.ID)
@@ -151,7 +152,7 @@ func TestLastActivityMoves(t *testing.T) {
 			t.Fatal("decision did not move activity")
 		}
 		event := got.Events[len(got.Events)-1]
-		if event.Kind != TaskEventDecision || event.Refs == nil || event.Refs.DecisionRequest == nil || event.Note == "" {
+		if event.Kind != TaskEventDecision || event.Refs == nil || event.Refs.DecisionRequest == nil || event.Refs.DecisionRequest.ID != result.Request.ID || event.From != x.State || event.To != x.State || event.Note != "decision-request "+result.Request.ID+": "+decisionInput().Question {
 			t.Fatalf("decision event=%+v", event)
 		}
 		rebound, err := s.RebindTaskJob(ctx, x.ID, "seed-job", "new-job", "tester", "replacement")
@@ -160,7 +161,7 @@ func TestLastActivityMoves(t *testing.T) {
 		}
 		after := stateOf(t, s, x.ID)
 		event = after.Events[len(after.Events)-1]
-		if !after.LastActivityAt.After(got.LastActivityAt) || !rebound.LastActivityAt.Equal(after.LastActivityAt) || event.Kind != TaskEventTransition || event.Note != "replacement" || event.Rebind == nil || event.Rebind.FromJob != "seed-job" || event.Rebind.ToJob != "new-job" {
+		if !after.LastActivityAt.After(got.LastActivityAt) || !rebound.LastActivityAt.Equal(after.LastActivityAt) || event.Kind != TaskEventTransition || event.From != x.State || event.To != x.State || event.Refs == nil || event.Refs.JobID != "new-job" || event.Note != "replacement" || event.Rebind == nil || event.Rebind.FromJob != "seed-job" || event.Rebind.ToJob != "new-job" {
 			t.Fatalf("rebind event=%+v after=%v returned=%v", event, after.LastActivityAt, rebound.LastActivityAt)
 		}
 	})
