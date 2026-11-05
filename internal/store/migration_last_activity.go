@@ -9,7 +9,9 @@ package store
 // CLI first and the server after, and a rollback runs the previous binary,
 // whose INSERT INTO tasks does not name the column. SET DEFAULT is a catalog
 // change and takes no table rewrite; it runs under the same ACCESS EXCLUSIVE
-// lock as the ADD COLUMN.
+// lock as the ADD COLUMN. A binary older than v44 writes task_events without
+// moving the column, so a rollback window leaves it stale. The upgraded
+// server's start repairs it (RepairLastActivity, run by serve).
 var lastActivityV44 = []string{
 	`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS last_activity_at TIMESTAMPTZ`,
 	`UPDATE tasks t SET last_activity_at = GREATEST(t.created_at, a.at) FROM (SELECT task_id, max(at) AS at FROM task_events WHERE ` + activityEventSQL + ` GROUP BY task_id) a WHERE a.task_id = t.id`,
