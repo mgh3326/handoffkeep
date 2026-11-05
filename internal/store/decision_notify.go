@@ -137,10 +137,12 @@ const decisionEffectiveStatusSQL = `CASE WHEN d.status='open' AND d.expires_at<=
 // decisionMentionSQL is DecisionNotice.Mention for the delivery aliased n,
 // request d and task t, with the near-due cutoff in $2: a first post of a
 // request whose task awaits a decision, whose task's current structured
-// request is this one and human_only, or that is due by the cutoff.
-const decisionMentionSQL = `(n.applied_version='' AND (coalesce(t.awaiting_decision,false)
+// request is this one and human_only, or that is due by the cutoff. A request
+// without a task or due time reads NULL in those terms, so the whole is
+// coalesced to false.
+const decisionMentionSQL = `coalesce(n.applied_version='' AND (coalesce(t.awaiting_decision,false)
 		OR (d.source='` + DecisionSourceTaskRequest + `' AND t.refs->'decision_request'->>'id'=d.source_ref AND t.refs->'decision_request'->'human_only'='true'::jsonb)
-		OR d.due_at<=$2::timestamptz))`
+		OR d.due_at<=$2::timestamptz),false)`
 
 var decisionRecordColumnsD = "d." + strings.ReplaceAll(decisionRecordColumns, ",", ",d.")
 
