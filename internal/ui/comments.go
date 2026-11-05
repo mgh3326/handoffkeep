@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mgh3326/handoffkeep/internal/guard"
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
@@ -155,7 +156,7 @@ func (h *Handler) createTaskComment(w http.ResponseWriter, r *http.Request, emai
 	case errors.Is(err, store.ErrTaskCommentInvalid):
 		writeJSONError(w, http.StatusBadRequest, "comment_invalid")
 		return
-	case strings.HasPrefix(err.Error(), "secret_like_content:"):
+	case isSecretReject(err):
 		outcome.result = "secret_reject"
 		writeJSONError(w, http.StatusBadRequest, "comment_secret_like")
 		return
@@ -167,4 +168,9 @@ func (h *Handler) createTaskComment(w http.ResponseWriter, r *http.Request, emai
 	outcome.result = "ok"
 	outcome.eventID = "comment-" + strconv.FormatInt(comment.ID, 10)
 	writeBoardJSONStatus(w, http.StatusCreated, projectBoardComment(comment))
+}
+
+func isSecretReject(err error) bool {
+	_, ok := guard.SecretPattern(err)
+	return ok
 }

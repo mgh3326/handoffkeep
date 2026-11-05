@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/mgh3326/handoffkeep/internal/attachments"
+	"github.com/mgh3326/handoffkeep/internal/guard"
 	"github.com/mgh3326/handoffkeep/internal/store"
 	"github.com/mgh3326/handoffkeep/internal/telemetry"
 	"github.com/mgh3326/handoffkeep/internal/wrkrecords"
@@ -152,7 +153,7 @@ func appErr(w http.ResponseWriter, r *http.Request, e error) {
 		jsonOut(w, rule.status, body)
 		return
 	}
-	if p, ok := strings.CutPrefix(e.Error(), "secret_like_content:"); ok {
+	if p, ok := guard.SecretPattern(e); ok {
 		jsonOut(w, http.StatusBadRequest, map[string]string{"error": "secret_like_content", "pattern": p})
 		return
 	}
