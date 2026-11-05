@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/mgh3326/handoffkeep/internal/wrkrecords"
 )
 
 // Relation kinds. blocks and duplicate_of point from Src to Dst (Src blocks
@@ -472,6 +473,19 @@ func (s *Store) autoCloseTx(ctx context.Context, tx pgx.Tx, child Task, by strin
 		}
 		if deployed == completed {
 			to = StateDeployed
+		}
+		if err := s.wrkTaskFenceTx(ctx, tx, p, FenceTarget(to), false); err != nil {
+			switch wrkrecords.Code(err) {
+			case "scope_denied", "wrk_receipt_required":
+				_, _, err = insertEvent(ctx, tx, taskEventInput{
+					TaskID: p.ID, Kind: TaskEventAutoClose, From: p.State, To: p.State, By: "hk", At: now, Refs: p.Refs,
+					Note:   "parent needs a work receipt; the parent stays where it is",
+					Source: "hk.auto_close", SourceRef: ref, Auto: true, NotApplied: true,
+				})
+				return err
+			default:
+				return err
+			}
 		}
 		from := p.State
 		decisionBefore := decisionBeforeOf(p)

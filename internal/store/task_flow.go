@@ -388,12 +388,14 @@ func fenceTarget(requested, canonical string) string {
 }
 
 // FenceTarget maps a requested state name to the target the wrk receipt fence
-// understands: a duplicate counts as dropped and reviewing as verifying, so a
-// new name carries the same receipt requirement its old name did.
+// understands: a duplicate counts as dropped, deployed as merged, and
+// reviewing as verifying, so terminal moves retain a terminal receipt gate.
 func FenceTarget(to string) string {
 	switch to {
 	case StateDuplicate:
 		return StateDropped
+	case StateDeployed:
+		return StateMerged
 	case StateReviewing:
 		return legacyVerifying
 	}

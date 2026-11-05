@@ -462,3 +462,51 @@ func TestWrkProtectedCompletedTransition(t *testing.T) {
 		t.Fatalf("HTTP completion receipt: status=%d task=%+v", out.Code, x)
 	}
 }
+
+func TestWrkProtectedParentAutoClose(t *testing.T) {
+	for _, withReceipt := range []bool{false, true} {
+		t.Run(map[bool]string{false: "no parent receipt", true: "parent completion receipt"}[withReceipt], func(t *testing.T) {
+			db := contractStore(t)
+			db.seed(t, activeFixture(t), contentCatalog(t, loadVectors(t)))
+			if _, err := db.owner.Exec(t.Context(), `UPDATE tasks SET kind='decide' WHERE id=2400`); err != nil {
+				t.Fatal(err)
+			}
+			project := "experiment"
+			parentID := int64(2400)
+			child, err := db.runtime.CreateTask(t.Context(), store.Task{Lane: "director-1", Title: "unprotected child", Kind: "decide", CreatedBy: "tester", Project: &project, ParentID: &parentID})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := t.Context()
+			if withReceipt {
+				b := []byte("parent result\n")
+				done := appendDB(t, db, "desktop", "job-a", "completed", Object{"report_b64": base64.StdEncoding.EncodeToString(b), "report_sha256": SHA(b)})
+				receipt := done.Receipt()
+				ctx = store.WithWrkPrincipal(ctx, "director-1", &receipt)
+			}
+			got, err := db.runtime.TransitionTaskWith(ctx, child.ID, store.TransitionInput{To: store.StateCompleted, By: "tester", Evidence: "https://example.com/result"})
+			if err != nil || got.State != store.StateCompleted {
+				t.Fatalf("child close: state=%s err=%v", got.State, err)
+			}
+			parent, found, err := db.runtime.GetTask(t.Context(), parentID)
+			if err != nil || !found {
+				t.Fatalf("parent found=%t err=%v", found, err)
+			}
+			if withReceipt {
+				if parent.State != store.StateCompleted || parent.Refs.Closure == nil {
+					t.Fatalf("authorized parent: %+v", parent)
+				}
+				return
+			}
+			if store.IsSettledState(parent.State) || parent.Refs.Closure != nil {
+				t.Fatalf("protected parent closed without receipt: %+v", parent)
+			}
+			for _, ev := range parent.Events {
+				if ev.Source == "hk.auto_close" && !ev.Applied {
+					return
+				}
+			}
+			t.Fatal("missing skipped auto-close event")
+		})
+	}
+}

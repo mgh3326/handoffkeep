@@ -3,6 +3,7 @@ package wrkrecords_test
 import (
 	"encoding/base64"
 	"encoding/json"
+	"github.com/mgh3326/handoffkeep/internal/store"
 	. "github.com/mgh3326/handoffkeep/internal/wrkrecords"
 	"reflect"
 	"strings"
@@ -680,5 +681,14 @@ func TestCompletedTaskRequiresCompletionReceipt(t *testing.T) {
 	in.To, in.Receipt = "developing", &claim
 	if err := c.s.CheckLegacy(c.e.Policy, "director-1", in); err != nil {
 		t.Fatalf("claim receipt rejected for nonterminal move: %v", err)
+	}
+}
+
+func TestDeployedTaskRequiresJoinedReceipt(t *testing.T) {
+	c := fresh(t)
+	claim := c.s.Claim("subject").Receipt()
+	in := LegacyIntent{TaskID: 9001, CurrentJob: "subject", To: store.FenceTarget(store.StateDeployed), Receipt: &claim}
+	if err := c.s.CheckLegacy(c.e.Policy, "director-1", in); Code(err) != "wrk_receipt_required" {
+		t.Fatalf("claim receipt authorized deployed task: %v", err)
 	}
 }
