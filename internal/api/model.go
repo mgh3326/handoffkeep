@@ -20,7 +20,7 @@ func (s Server) taskDue(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		DueAt *time.Time `json:"due_at"`
 	}
-	if err = decode(r, &in, 4096); err != nil {
+	if err = decode(r, &in, bodySmall); err != nil {
 		appErr(w, r, err)
 		return
 	}
@@ -48,7 +48,7 @@ func (s Server) projectMetadata(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method == http.MethodPatch {
 		var patch store.ProjectMetadataPatch
-		if err := decode(r, &patch, 4096); err != nil {
+		if err := decode(r, &patch, bodySmall); err != nil {
 			appErr(w, r, err)
 			return
 		}
@@ -61,7 +61,7 @@ func (s Server) projectMetadata(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var p store.ProjectMetadata
-	if err := decode(r, &p, 4096); err != nil {
+	if err := decode(r, &p, bodySmall); err != nil {
 		appErr(w, r, err)
 		return
 	}
@@ -78,7 +78,7 @@ func (s Server) milestoneSave(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var m store.ProjectMilestone
-	if err := decode(r, &m, 65536); err != nil {
+	if err := decode(r, &m, bodyLarge); err != nil {
 		appErr(w, r, err)
 		return
 	}
@@ -115,7 +115,7 @@ func (s Server) labelSave(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var l store.Label
-	if err := decode(r, &l, 4096); err != nil {
+	if err := decode(r, &l, bodySmall); err != nil {
 		appErr(w, r, err)
 		return
 	}
@@ -164,7 +164,7 @@ func (s Server) taskMilestone(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		MilestoneID *int64 `json:"milestone_id"`
 	}
-	if err = decode(r, &in, 4096); err != nil {
+	if err = decode(r, &in, bodySmall); err != nil {
 		appErr(w, r, err)
 		return
 	}
@@ -189,7 +189,7 @@ func (s Server) taskLabel(w http.ResponseWriter, r *http.Request) {
 		LabelID int64 `json:"label_id"`
 		Attach  *bool `json:"attach"`
 	}
-	if err = decode(r, &in, 4096); err != nil {
+	if err = decode(r, &in, bodySmall); err != nil {
 		appErr(w, r, err)
 		return
 	}
@@ -215,7 +215,7 @@ func (s Server) taskDeadlines(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var d store.TaskDeadlines
-	if err = decode(r, &d, 4096); err != nil {
+	if err = decode(r, &d, bodySmall); err != nil {
 		appErr(w, r, err)
 		return
 	}
@@ -241,7 +241,7 @@ func (s Server) taskSubscriber(w http.ResponseWriter, r *http.Request) {
 		Source     string `json:"source"`
 		Active     *bool  `json:"active"`
 	}
-	if err = decode(r, &in, 4096); err != nil {
+	if err = decode(r, &in, bodySmall); err != nil {
 		appErr(w, r, err)
 		return
 	}
@@ -284,7 +284,7 @@ func (s Server) milestonePatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var p store.MilestonePatch
-	if err = decode(r, &p, 65536); err != nil {
+	if err = decode(r, &p, bodyLarge); err != nil {
 		appErr(w, r, err)
 		return
 	}

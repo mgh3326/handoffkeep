@@ -40,7 +40,7 @@ func resolveSetArea(positional []string, clearArea bool) (int64, *string, error)
 		return id, nil, nil
 	}
 	area := positional[1]
-	if err := store.ValidateTaskArea(&area); err != nil {
+	if err := store.CheckTaskArea(&area); err != nil {
 		return 0, nil, err
 	}
 	return id, &area, nil

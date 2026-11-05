@@ -23,18 +23,18 @@ const (
 	MaxBacklogIceboxDays   = 3650 // ten years
 )
 
-// ValidStartedStalledHours reports whether hours is a usable
+// CheckStartedStalledHours reports whether hours is a usable
 // started_stalled_hours: 1..MaxStartedStalledHours.
-func ValidStartedStalledHours(hours int) error {
+func CheckStartedStalledHours(hours int) error {
 	if hours < 1 || hours > MaxStartedStalledHours {
 		return fmt.Errorf("started_stalled_hours must be 1..%d, got %d", MaxStartedStalledHours, hours)
 	}
 	return nil
 }
 
-// ValidBacklogIceboxDays reports whether days is a usable
+// CheckBacklogIceboxDays reports whether days is a usable
 // backlog_icebox_days: 0 (off) or 1..MaxBacklogIceboxDays.
-func ValidBacklogIceboxDays(days int) error {
+func CheckBacklogIceboxDays(days int) error {
 	if days < 0 || days > MaxBacklogIceboxDays {
 		return fmt.Errorf("backlog_icebox_days must be 0 (off) or 1..%d, got %d", MaxBacklogIceboxDays, days)
 	}
@@ -56,7 +56,7 @@ const taskActivitySQL = `GREATEST(tasks.created_at,
 // setting is left as it was.
 func (s *Store) SetStartedStalledHours(hours int) error {
 	if hours > MaxStartedStalledHours {
-		return ValidStartedStalledHours(hours)
+		return CheckStartedStalledHours(hours)
 	}
 	if hours < 1 {
 		hours = 0
@@ -136,10 +136,10 @@ const sweepSQL = `SELECT id,lane,title,` + taskActivitySQL + ` FROM tasks
 // SweepBacklog parks backlog tasks idle for more than days in icebox,
 // recording hk.sweep on each, and returns what it moved. With dryRun it
 // returns what it would move and writes nothing. days 0 is the off setting
-// and moves nothing; days outside ValidBacklogIceboxDays is refused before
+// and moves nothing; days outside CheckBacklogIceboxDays is refused before
 // any read.
 func (s *Store) SweepBacklog(ctx context.Context, days int, dryRun bool) ([]SweepCandidate, error) {
-	if err := ValidBacklogIceboxDays(days); err != nil {
+	if err := CheckBacklogIceboxDays(days); err != nil {
 		return nil, err
 	}
 	out := []SweepCandidate{}

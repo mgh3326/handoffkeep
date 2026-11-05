@@ -62,7 +62,7 @@ type PlacementCandidate struct {
 	Power        *float64 `json:"power,omitempty"`
 }
 
-func validatePlacement(d PlacementDecision) error {
+func checkPlacement(d PlacementDecision) error {
 	if !ValidJobID(d.JobID) || d.Attempt < 1 || d.Attempt > 1000000 || !ValidJobHost(d.DecidedOn) || d.DecidedAt.IsZero() || d.DecidedAt.After(time.Now().UTC().Add(5*time.Minute)) || d.DecidedAt.Before(time.Now().UTC().Add(-PlacementRetention)) {
 		return errors.New("invalid placement identity or time")
 	}
@@ -124,7 +124,7 @@ func scanPlacement(row interface{ Scan(...any) error }) (PlacementDecision, erro
 }
 
 func (s *Store) RecordPlacement(ctx context.Context, d PlacementDecision) (PlacementDecision, bool, error) {
-	if err := validatePlacement(d); err != nil {
+	if err := checkPlacement(d); err != nil {
 		return d, false, err
 	}
 	d.ID = 0

@@ -53,6 +53,8 @@ across all workflows; `internal/ciworkflow` enforces both.
   the shared `not_found`); `TestErrorRuleCodesMatchSentinels` enforces it.
   Set `reason: true` only when the text after `"x_code: "` is store-authored.
 - Path ids are parsed with `pathID(r, "id")`; the handler checks the range.
+  Cursor query parameters (`after_id`, `after`) go through `queryCursor`,
+  limits through `queryLimit`.
 - Unmapped database/network failures become `500 internal_error` and are
   logged; plain validation errors become `400 invalid_context`. Do not add a
   catch-all that hides a 500 as a 400.
@@ -64,6 +66,8 @@ keep `http.Error` with a short text message.
 
 **Request bodies.** Decode JSON with `decode(r, &v, max)` (or
 `decodeLimited`): size-capped, unknown fields and trailing data rejected.
+`max` is one of the named caps (`bodyTiny`, `bodySmall`, `bodyEvent`,
+`bodyLarge`) or a store-owned limit, never a bare number.
 
 **Store.** Validation lives in the store; handlers do not re-validate.
 Transactions use the existing idiom:
@@ -86,7 +90,9 @@ Every `ORDER BY` that feeds a `LIMIT` ends in a unique column (usually `id`)
 so pages are deterministic. A jsonb column is scanned into `[]byte` and read
 with `scanJSONB` (SQL NULL and JSON null leave the target unset). Shared
 validators live in the store and are exported once (`ValidHostID`,
-`validText`); other packages call them instead of copying the regex.
+`validText`); other packages call them instead of copying the regex. A
+validator that answers yes/no is `validX` and returns `bool`; one that
+explains a refusal is `checkX` and returns `error`.
 
 **Time.** Go-side timestamps are `time.Now().UTC()`, and an injectable clock
 (`Now func() time.Time`) returns `.UTC()` too. One table or worker uses one
@@ -131,11 +137,14 @@ at run time; a failure event ends in `_failed`; ids use the column name
   prefix)`. Never read `HANDOFFKEEP_TEST_DB_URL` directly. Without it a test
   skips locally and fails in CI, except in a CI job that sets
   `HANDOFFKEEP_TEST_NO_DB=1` (the PR tier and macOS).
-- Tests that count whole tables or run migration DDL use a throwaway schema
-  (`testdb.Schema`). Tests in the shared schema scope their data with unique
-  lane/key names and never assert global counts.
+- Tests that count whole tables, truncate, seed fixed keys or run migration
+  DDL use a throwaway schema (`testdb.Schema`; in `internal/store`,
+  `schemaStore(t, prefix)`). Tests in the shared schema scope their data with
+  unique lane/key names and never assert global counts or truncate.
 - Do not rely on test order across files, and prefer polling a condition to
-  `time.Sleep`.
+  `time.Sleep`. A console test that depends on `Date.now` stubs it with a
+  variable it advances (`mockImplementation(() => clock)`), never with a
+  queue of `mockReturnValueOnce` values that React may consume.
 
 ## Web console (`web/console`)
 
@@ -149,6 +158,10 @@ at run time; a failure event ends in `_failed`; ids use the column name
 - localStorage goes through `readStored` / `writeStored` in
   `src/shared/storage.ts`; console-wide keys are in `STORAGE_KEYS`.
 - Every entry calls `bootTheme()` before its first render.
+- Navigation entries are data: a new page is one row in `destinations`
+  (`aux`, `heading`, `alias` describe its place), never an index check.
+- Keyboard shortcuts skip typing targets via `isTypingTarget`
+  (`src/shared/search.ts`).
 - Task states come from `src/shared/states.ts` (`STATE_GROUP_ORDER`,
   `stateLabel`); dates are formatted with `src/shared/time.ts`.
 - Colors, spacing, type sizes, radii and fixed widths come from

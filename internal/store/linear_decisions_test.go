@@ -225,7 +225,7 @@ func TestAnswerLinearDecisionRequiresTheEventIdentity(t *testing.T) {
 
 func TestDecisionRequestRefsValidation(t *testing.T) {
 	base := DecisionRequestInput{Question: "q", Options: *twoOptions(), DefaultAction: "hold"}
-	if err := ValidateDecisionRequestInput(base); err != nil {
+	if err := CheckDecisionRequestInput(base); err != nil {
 		t.Fatal(err)
 	}
 	for name, refs := range map[string][]string{
@@ -236,7 +236,7 @@ func TestDecisionRequestRefsValidation(t *testing.T) {
 	} {
 		in := base
 		in.Refs = refs
-		if err := ValidateDecisionRequestInput(in); err == nil {
+		if err := CheckDecisionRequestInput(in); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
 	}

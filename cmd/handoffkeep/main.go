@@ -430,7 +430,7 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 	// The vocabulary is a code constant shared with the server, so a bad
 	// value is refused here and no request is sent.
 	if areaSet && (args[0] != "list" || *area != "") {
-		if err := store.ValidateTaskArea(area); err != nil {
+		if err := store.CheckTaskArea(area); err != nil {
 			return err
 		}
 	}
@@ -685,7 +685,7 @@ func parseTaskDecisionOptions(values []string, recommended string, noFreeAnswer 
 	}
 	// The detailed validator names the failing rule, e.g. a label over the
 	// 120-byte limit (bytes, not characters).
-	if err := store.ValidateDecisionOptionsDetailed(options); err != nil {
+	if err := store.CheckDecisionOptionsDetailed(options); err != nil {
 		return store.DecisionOptions{}, err
 	}
 	return options, nil

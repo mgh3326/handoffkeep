@@ -7,21 +7,11 @@ import (
 	"strconv"
 	"testing"
 	"time"
-
-	"github.com/mgh3326/handoffkeep/internal/testdb"
 )
 
 // ledgerStore runs each ledger test in a throwaway schema: the ledger reads
 // every task, decision and feed row, so its sections are exact there.
-func ledgerStore(t *testing.T) *Store {
-	t.Helper()
-	pool, _ := testdb.SchemaPool(t, "ledger")
-	s := &Store{pool: pool}
-	if err := s.migrate(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	return s
-}
+func ledgerStore(t *testing.T) *Store { return schemaStore(t, "ledger") }
 
 func ledgerIDs(xs []LedgerStartedTask) []int64 {
 	out := []int64{}
@@ -233,7 +223,7 @@ func TestStatusDiff(t *testing.T) {
 }
 
 func TestValidateStatusUpdate(t *testing.T) {
-	if err := validateStatusUpdate("experiment", HealthOffTrack, "slipping", "tester"); err != nil {
+	if err := checkStatusUpdate("experiment", HealthOffTrack, "slipping", "tester"); err != nil {
 		t.Fatal(err)
 	}
 	for name, args := range map[string][4]string{
@@ -244,7 +234,7 @@ func TestValidateStatusUpdate(t *testing.T) {
 		"author":       {"experiment", HealthAtRisk, "body", ""},
 		"nul":          {"experiment", HealthAtRisk, "a\x00b", "tester"},
 	} {
-		if err := validateStatusUpdate(args[0], args[1], args[2], args[3]); !errors.Is(err, ErrStatusUpdateInvalid) {
+		if err := checkStatusUpdate(args[0], args[1], args[2], args[3]); !errors.Is(err, ErrStatusUpdateInvalid) {
 			t.Errorf("%s: err=%v", name, err)
 		}
 	}

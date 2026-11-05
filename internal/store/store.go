@@ -316,8 +316,8 @@ func validDecisionOptions(x DecisionOptions) bool {
 	return recommended <= 1
 }
 
-// ValidateDecisionOptions is exported for local producers such as the CLI.
-func ValidateDecisionOptions(x DecisionOptions) error {
+// CheckDecisionOptions is exported for local producers such as the CLI.
+func CheckDecisionOptions(x DecisionOptions) error {
 	if !validDecisionOptions(x) {
 		return errors.New("invalid decision options")
 	}
@@ -386,14 +386,14 @@ func checkTaskAreaFilter(area *string) error {
 	if area == nil || *area == "" {
 		return nil
 	}
-	return ValidateTaskArea(area)
+	return CheckTaskArea(area)
 }
 
-// ValidateTaskArea validates an optional area; the CLI and API call it so the
+// CheckTaskArea validates an optional area; the CLI and API call it so the
 // refusal text is the same everywhere. nil means unset and is always
 // valid; any non-nil value, the empty string included, must be in the
 // vocabulary.
-func ValidateTaskArea(area *string) error {
+func CheckTaskArea(area *string) error {
 	if area == nil || ValidTaskArea(*area) {
 		return nil
 	}
@@ -1411,7 +1411,7 @@ func checkBenchAreaException(x BenchAreaException) error {
 	if !validText(x.Effort, 200) {
 		return errors.New("invalid bench area exception effort")
 	}
-	if err := ValidateTaskArea(&x.Area); err != nil {
+	if err := CheckTaskArea(&x.Area); err != nil {
 		return err
 	}
 	if !benchAreaExceptionActions[x.Action] {
@@ -2006,7 +2006,7 @@ func (s *Store) UpsertBenchAreaExceptions(ctx context.Context, xs []BenchAreaExc
 // area filter is exact against the TaskAreas vocabulary.
 func (s *Store) ListBenchAreaExceptions(ctx context.Context, area string, includeRetired bool) ([]BenchAreaException, error) {
 	if area != "" {
-		if err := ValidateTaskArea(&area); err != nil {
+		if err := CheckTaskArea(&area); err != nil {
 			return nil, err
 		}
 	}
@@ -2340,7 +2340,7 @@ func (s *Store) createTask(ctx context.Context, x Task, check *DuplicateCheck) (
 	if err := guard.Reject(x.Title); err != nil {
 		return x, err
 	}
-	if err := ValidateTaskArea(x.Area); err != nil {
+	if err := CheckTaskArea(x.Area); err != nil {
 		return x, err
 	}
 	if err := rejectTaskRefs(x.Refs); err != nil {
@@ -2719,7 +2719,7 @@ func (s *Store) SetTaskProjectWithMetadata(ctx context.Context, id int64, projec
 // event when the value is unchanged. Like project it is allowed on terminal
 // rows: area is routing metadata, not lifecycle.
 func (s *Store) SetTaskArea(ctx context.Context, id int64, area *string, by, note string) (x Task, changed bool, err error) {
-	if err := ValidateTaskArea(area); err != nil {
+	if err := CheckTaskArea(area); err != nil {
 		return Task{}, false, err
 	}
 	if by == "" || !validText(by, 128) || !validText(note, MaxBytes) {

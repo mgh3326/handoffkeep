@@ -32,7 +32,7 @@ func (s Server) placementCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	defer r.Body.Close()
 	var input store.PlacementDecision
-	if err := decode(r, &input, 64<<10); err != nil {
+	if err := decode(r, &input, bodyLarge); err != nil {
 		appErr(w, r, err)
 		return
 	}

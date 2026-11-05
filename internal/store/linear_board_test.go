@@ -19,7 +19,7 @@ func validPlacementFixture() PlacementDecision {
 }
 
 func TestPlacementValidation(t *testing.T) {
-	if err := validatePlacement(validPlacementFixture()); err != nil {
+	if err := checkPlacement(validPlacementFixture()); err != nil {
 		t.Fatal(err)
 	}
 	for _, tc := range []struct {
@@ -38,7 +38,7 @@ func TestPlacementValidation(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			d := validPlacementFixture()
 			tc.change(&d)
-			if err := validatePlacement(d); err == nil {
+			if err := checkPlacement(d); err == nil {
 				t.Fatal("accepted invalid placement")
 			}
 		})

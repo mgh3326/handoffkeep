@@ -136,7 +136,7 @@ func decisionRequestFlags(name, usage string, args []string) (*remote.Client, in
 		}
 		input.DueAt = &at
 	}
-	if err := store.ValidateDecisionRequestInput(input); err != nil {
+	if err := store.CheckDecisionRequestInput(input); err != nil {
 		return nil, 0, store.DecisionRequestInput{}, err
 	}
 	if err := mustClient(c); err != nil {
@@ -244,7 +244,7 @@ func decisionResolveCmd(args []string, out, errout io.Writer) error {
 		Receipt:   strings.TrimSpace(*receipt),
 		Responder: strings.TrimSpace(*responder),
 	}
-	if err := store.ValidateDecisionResolveInput(input); err != nil {
+	if err := store.CheckDecisionResolveInput(input); err != nil {
 		return fmt.Errorf("decision resolution NOT recorded: %v", err)
 	}
 	if err := mustClient(c); err != nil {

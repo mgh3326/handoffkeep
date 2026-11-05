@@ -82,7 +82,7 @@ func taskCommentsCmd(args []string, in io.Reader, out io.Writer) error {
 			}
 			text = string(b)
 		}
-		if err := store.ValidateTaskCommentBody(text); err != nil {
+		if err := store.CheckTaskCommentBody(text); err != nil {
 			return err
 		}
 		if err := mustClient(c); err != nil {

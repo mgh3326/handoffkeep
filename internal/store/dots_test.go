@@ -5,8 +5,6 @@ import (
 	"os"
 	"strings"
 	"testing"
-
-	"github.com/mgh3326/handoffkeep/internal/testdb"
 )
 
 // dotsVector is one row of testdata/dots_vectors.json: a fake comment and what
@@ -114,16 +112,7 @@ func TestRecordDotsRejectsMalformedInput(t *testing.T) {
 	}
 }
 
-func dotsStore(t *testing.T) *Store {
-	t.Helper()
-	_, url := testdb.Schema(t, "hkdots")
-	s, err := Open(t.Context(), url)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(s.Close)
-	return s
-}
+func dotsStore(t *testing.T) *Store { return schemaStore(t, "hkdots") }
 
 func TestRecordDotsResultWritesOnce(t *testing.T) {
 	s := dotsStore(t)

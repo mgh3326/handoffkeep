@@ -33,7 +33,7 @@ func (s Server) taskEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	defer r.Body.Close()
 	var input store.TaskSourceEvent
-	if err := decode(r, &input, 8192); err != nil {
+	if err := decode(r, &input, bodyEvent); err != nil {
 		appErr(w, r, err)
 		return
 	}
@@ -54,7 +54,7 @@ func (s Server) tasksSweepPreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	days, err := strconv.Atoi(r.URL.Query().Get("days"))
-	if err != nil || days < 1 || store.ValidBacklogIceboxDays(days) != nil {
+	if err != nil || days < 1 || store.CheckBacklogIceboxDays(days) != nil {
 		writeError(w, http.StatusBadRequest, "invalid_context")
 		return
 	}

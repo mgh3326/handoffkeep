@@ -79,8 +79,8 @@ func TestStartedStalledHoursSetting(t *testing.T) {
 			t.Fatalf("refused %d changed the setting to %v", h, s.StartedStalledHours())
 		}
 	}
-	if ValidStartedStalledHours(8760) != nil || ValidStartedStalledHours(8761) == nil || ValidStartedStalledHours(0) == nil {
-		t.Fatal("ValidStartedStalledHours bounds")
+	if CheckStartedStalledHours(8760) != nil || CheckStartedStalledHours(8761) == nil || CheckStartedStalledHours(0) == nil {
+		t.Fatal("CheckStartedStalledHours bounds")
 	}
 }
 
@@ -95,8 +95,8 @@ func TestSweepBacklogRefusesOutOfRangeDays(t *testing.T) {
 			}
 		}
 	}
-	if ValidBacklogIceboxDays(0) != nil || ValidBacklogIceboxDays(3650) != nil || ValidBacklogIceboxDays(3651) == nil {
-		t.Fatal("ValidBacklogIceboxDays bounds")
+	if CheckBacklogIceboxDays(0) != nil || CheckBacklogIceboxDays(3650) != nil || CheckBacklogIceboxDays(3651) == nil {
+		t.Fatal("CheckBacklogIceboxDays bounds")
 	}
 }
 

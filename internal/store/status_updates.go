@@ -126,7 +126,7 @@ func statusDiff(prev *StatusUpdate, health string, snapshot StatusCounts) Status
 	return d
 }
 
-func validateStatusUpdate(project, health, body, by string) error {
+func checkStatusUpdate(project, health, body, by string) error {
 	switch {
 	case !validName(project):
 		return fmt.Errorf("%w: project must be a project name", ErrStatusUpdateInvalid)
@@ -166,7 +166,7 @@ func scanStatusUpdate(row pgx.Row, x *StatusUpdate) error {
 // task_projects row FOR NO KEY UPDATE, so two updates of one project diff in
 // order; it then only reads tasks and status_updates and inserts one new row.
 func (s *Store) CreateStatusUpdate(ctx context.Context, project, health, body, by string, now time.Time) (StatusUpdate, error) {
-	if err := validateStatusUpdate(project, health, body, by); err != nil {
+	if err := checkStatusUpdate(project, health, body, by); err != nil {
 		return StatusUpdate{}, err
 	}
 	now = now.UTC()

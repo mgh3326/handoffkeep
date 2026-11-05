@@ -63,9 +63,9 @@ func scanTaskComment(row interface{ Scan(...any) error }, x *TaskComment) error 
 	return row.Scan(&x.ID, &x.TaskID, &x.Body, &x.Author, &x.CreatedAt)
 }
 
-// ValidateTaskCommentBody reports the specific reason a body is unacceptable
+// CheckTaskCommentBody reports the specific reason a body is unacceptable
 // so callers can answer empty and oversized bodies with distinct responses.
-func ValidateTaskCommentBody(body string) error {
+func CheckTaskCommentBody(body string) error {
 	if strings.TrimSpace(body) == "" {
 		return ErrTaskCommentEmpty
 	}
@@ -84,7 +84,7 @@ func (s *Store) CreateTaskComment(ctx context.Context, taskID int64, author, bod
 	if taskID < 1 || author == "" || !validText(author, 128) {
 		return TaskComment{}, ErrTaskCommentInvalid
 	}
-	if err := ValidateTaskCommentBody(body); err != nil {
+	if err := CheckTaskCommentBody(body); err != nil {
 		return TaskComment{}, err
 	}
 	tx, err := s.pool.Begin(ctx)

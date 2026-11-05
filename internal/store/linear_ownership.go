@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -53,7 +54,8 @@ func (s *Store) EnsureLinearBoardOwnership(ctx context.Context, taskID int64, is
 	if _, err = tx.Exec(ctx, `INSERT INTO linear_board_owners(issue_id,task_id) VALUES($2,$1) ON CONFLICT DO NOTHING`, taskID, issueID); err != nil {
 		return err
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO linear_issues(task_id,issue_id,identifier,created_at,updated_at) VALUES($1,$2,$3,now(),now()) ON CONFLICT(task_id) DO NOTHING`, taskID, issueID, identifier); err != nil {
+	// Go time, like every other linear_issues writer (linear.go).
+	if _, err = tx.Exec(ctx, `INSERT INTO linear_issues(task_id,issue_id,identifier,created_at,updated_at) VALUES($1,$2,$3,$4,$4) ON CONFLICT(task_id) DO NOTHING`, taskID, issueID, identifier, time.Now().UTC()); err != nil {
 		return err
 	}
 	// A read-back issue and committed ownership resolve an ambiguous create.

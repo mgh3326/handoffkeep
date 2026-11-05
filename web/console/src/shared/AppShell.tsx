@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { SearchFn } from "./search";
-import { fetchTaskSearch, safeTaskId } from "./search";
+import { fetchTaskSearch, isTypingTarget, safeTaskId } from "./search";
 import { readStored, STORAGE_KEYS, writeStored } from "./storage";
 import "../design/shell.css";
 
@@ -38,10 +38,16 @@ export const destinations: {
   label: string;
   href: string;
   shortcut?: string;
+  /** Secondary item, styled smaller below the primary list. */
+  aux?: boolean;
+  /** Group heading rendered above this item. */
+  heading?: string;
+  /** A second entry for the same page: never marked as the current page. */
+  alias?: boolean;
 }[] = [
   { key: "home", label: "Inbox", href: "/ui/home", shortcut: "i" },
   { key: "queue", label: "My work / Board", href: "/ui/queue", shortcut: "b" },
-  { key: "queue", label: "Tasks", href: "/ui/queue?view=all", shortcut: "t" },
+  { key: "queue", label: "Tasks", href: "/ui/queue?view=all", shortcut: "t", alias: true },
   {
     key: "decisions",
     label: "Decisions",
@@ -51,9 +57,9 @@ export const destinations: {
   { key: "deploys", label: "Deploys", href: "/ui/deploys", shortcut: "e" },
   { key: "fleet", label: "Fleet hosts", href: "/ui/fleet", shortcut: "h" },
   { key: "docs", label: "Docs / Search", href: "/ui/docs", shortcut: "s" },
-  { key: "grades", label: "Grades / catalog", href: "/ui/grades" },
-  { key: "timeline", label: "Timeline / events", href: "/ui/timeline" },
-  { key: "compose", label: "Compose", href: "/ui/compose" },
+  { key: "grades", label: "Grades / catalog", href: "/ui/grades", aux: true, heading: "Workspace" },
+  { key: "timeline", label: "Timeline / events", href: "/ui/timeline", aux: true },
+  { key: "compose", label: "Compose", href: "/ui/compose", aux: true },
 ];
 export const navigate = { to: (href: string) => window.location.assign(href) };
 export function GlobalNav({ current }: { current: NavKey }) {
@@ -63,14 +69,14 @@ export function GlobalNav({ current }: { current: NavKey }) {
         handoffkeep <small>Workspace</small>
       </div>
       <nav className="hk-side-nav" aria-label="Workspace navigation">
-        {destinations.map((d, i) => (
+        {destinations.map((d) => (
           <a
             key={d.label}
             href={d.href}
-            className={`hk-side-item ${i > 6 ? "hk-side-aux" : ""}`}
-            aria-current={d.key === current && i !== 2 ? "page" : undefined}
+            className={`hk-side-item ${d.aux ? "hk-side-aux" : ""}`}
+            aria-current={d.key === current && !d.alias ? "page" : undefined}
           >
-            {i === 7 ? <small>Workspace</small> : null}
+            {d.heading ? <small>{d.heading}</small> : null}
             <span>{d.label}</span>
           </a>
         ))}
@@ -89,14 +95,6 @@ export function ThemeChoice() {
       {" "}
       {theme === "dark" ? "Light" : "Dark"} theme
     </button>
-  );
-}
-function typing(target: EventTarget | null) {
-  return (
-    target instanceof HTMLElement &&
-    !!target.closest(
-      "input,textarea,select,[contenteditable]:not([contenteditable=false])",
-    )
   );
 }
 type Recent = { label: string; href: string };
@@ -153,6 +151,8 @@ function Palette({
   }, []);
   useEffect(() => {
     let cancelled = false;
+    // A newer query (or closing the palette) aborts the request in flight.
+    const controller = new AbortController();
     setActive(0);
     setError(false);
     setMore(false);
@@ -161,7 +161,7 @@ function Palette({
       return;
     }
     const timer = window.setTimeout(() => {
-      search(query, new AbortController().signal).then(
+      search(query, controller.signal).then(
         (response) => {
           if (!cancelled) {
             setMore(response.hasMore);
@@ -184,6 +184,7 @@ function Palette({
     return () => {
       cancelled = true;
       window.clearTimeout(timer);
+      controller.abort();
     };
   }, [query, search]);
   const items = [
@@ -312,7 +313,7 @@ export function PageShell({
         else open();
         return;
       }
-      if (palette || typing(e.target) || e.metaKey || e.ctrlKey || e.altKey)
+      if (palette || isTypingTarget(e.target) || e.metaKey || e.ctrlKey || e.altKey)
         return;
       if (e.key === "Escape") {
         setHelp(false);

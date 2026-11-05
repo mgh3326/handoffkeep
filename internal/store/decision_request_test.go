@@ -431,7 +431,7 @@ func TestDecisionRequestRejections(t *testing.T) {
 	}
 	in := decisionInput()
 	in.Options.Options[0].Label = strings.Repeat("가", 41)
-	if err := ValidateDecisionRequestInput(in); err == nil || !strings.Contains(err.Error(), "123 bytes") || !strings.Contains(err.Error(), "120 bytes (not characters)") {
+	if err := CheckDecisionRequestInput(in); err == nil || !strings.Contains(err.Error(), "123 bytes") || !strings.Contains(err.Error(), "120 bytes (not characters)") {
 		t.Fatalf("byte-limit message=%v", err)
 	}
 	if _, err := s.RecordDecisionRequest(ctx, 987654321, "director-1", decisionInput()); !errors.Is(err, ErrTaskNotFound) {
@@ -447,7 +447,7 @@ func TestDecisionRequestRejections(t *testing.T) {
 		if len(label) != 120 {
 			t.Fatalf("fixture is %d bytes", len(label))
 		}
-		if err := ValidateDecisionRequestInput(in); err != nil {
+		if err := CheckDecisionRequestInput(in); err != nil {
 			t.Fatalf("120-byte label refused: %v", err)
 		}
 	}

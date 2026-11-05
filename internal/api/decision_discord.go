@@ -143,7 +143,7 @@ func (n DecisionNotifier) Drain(ctx context.Context) {
 		found, sendErr, err := n.Store.ProcessNextDecisionNotice(ctx, now, func(ctx context.Context, x store.DecisionNotice) (string, error) {
 			return n.sendNotice(ctx, x, now)
 		})
-		logDecisionNotify("decision_notify", sendErr)
+		logDecisionNotify(sendErr, "decision_notify.gave_up", "decision_notify.failed")
 		if err != nil {
 			if ctx.Err() == nil {
 				log.Printf("decision_notify.drain_error err=%q", err.Error())
@@ -164,18 +164,20 @@ func (n DecisionNotifier) Drain(ctx context.Context) {
 		id, err := n.Discord.PostMessage(ctx, decisionDigestText(d, n.ConsoleURL, now))
 		return id, decisionPostError(err)
 	})
-	logDecisionNotify("decision_notify.digest", sendErr)
+	logDecisionNotify(sendErr, "decision_notify.digest.gave_up", "decision_notify.digest.failed")
 	if err != nil && ctx.Err() == nil {
 		log.Printf("decision_notify.digest_error err=%q", err.Error())
 	}
 }
 
-func logDecisionNotify(event string, sendErr error) {
+// logDecisionNotify logs a send that gave up or failed. The callers spell
+// both event names out so each stays greppable.
+func logDecisionNotify(sendErr error, gaveUpEvent, failedEvent string) {
 	switch {
 	case errors.Is(sendErr, store.ErrDecisionNoticeGaveUp):
-		log.Printf("%s.gave_up err=%q", event, sendErr.Error())
+		log.Printf("%s err=%q", gaveUpEvent, sendErr.Error())
 	case sendErr != nil:
-		log.Printf("%s.failed err=%q", event, sendErr.Error())
+		log.Printf("%s err=%q", failedEvent, sendErr.Error())
 	}
 }
 

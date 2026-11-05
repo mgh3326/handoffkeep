@@ -195,7 +195,7 @@ func (s Server) chatMessagesList(w http.ResponseWriter, r *http.Request) {
 		appErr(w, r, err)
 		return
 	}
-	afterID, err := queryAfterID(r)
+	afterID, err := queryCursor(r, "after_id")
 	if err != nil {
 		appErr(w, r, err)
 		return

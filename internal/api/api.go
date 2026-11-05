@@ -777,7 +777,7 @@ func (s Server) tasksCreate(w http.ResponseWriter, r *http.Request) {
 		appErr(w, r, err)
 		return
 	}
-	if err := store.ValidateTaskArea(input.Area); err != nil {
+	if err := store.CheckTaskArea(input.Area); err != nil {
 		appErr(w, r, err)
 		return
 	}
@@ -812,7 +812,7 @@ func (s Server) tasksList(w http.ResponseWriter, r *http.Request) {
 	// Refuse an unknown area before the store is consulted, so the 400 does
 	// not depend on a database round trip.
 	if area != nil && *area != "" {
-		if err := store.ValidateTaskArea(area); err != nil {
+		if err := store.CheckTaskArea(area); err != nil {
 			appErr(w, r, err)
 			return
 		}
@@ -829,7 +829,7 @@ func (s Server) tasksList(w http.ResponseWriter, r *http.Request) {
 	case stalled:
 		q := store.TaskQuery{Lane: lane, State: state, ParentLane: parentLane, Project: project, Area: area, Stalled: true, Limit: limit}
 		if r.URL.Query().Has("after_id") {
-			afterID, parseErr := queryAfterID(r)
+			afterID, parseErr := queryCursor(r, "after_id")
 			if parseErr != nil {
 				appErr(w, r, parseErr)
 				return
@@ -838,7 +838,7 @@ func (s Server) tasksList(w http.ResponseWriter, r *http.Request) {
 		}
 		xs, err = s.Service.ListTasksFiltered(r.Context(), q)
 	case r.URL.Query().Has("after_id"):
-		afterID, parseErr := queryAfterID(r)
+		afterID, parseErr := queryCursor(r, "after_id")
 		if parseErr != nil {
 			appErr(w, r, parseErr)
 			return
@@ -956,7 +956,7 @@ func (s Server) taskProjectsCreate(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		Name string `json:"name"`
 	}
-	if err := decode(r, &input, 4096); err != nil {
+	if err := decode(r, &input, bodySmall); err != nil {
 		appErr(w, r, err)
 		return
 	}
@@ -991,7 +991,7 @@ func (s Server) taskProject(w http.ResponseWriter, r *http.Request) {
 		Note     string                      `json:"note"`
 		Metadata *store.ProjectMetadataPatch `json:"metadata,omitempty"`
 	}
-	if err := decode(r, &input, 4096); err != nil {
+	if err := decode(r, &input, bodySmall); err != nil {
 		appErr(w, r, err)
 		return
 	}
@@ -1035,7 +1035,7 @@ func (s Server) taskArea(w http.ResponseWriter, r *http.Request) {
 		Area json.RawMessage `json:"area"`
 		Note string          `json:"note"`
 	}
-	if err := decode(r, &input, 4096); err != nil {
+	if err := decode(r, &input, bodySmall); err != nil {
 		appErr(w, r, err)
 		return
 	}
@@ -1051,7 +1051,7 @@ func (s Server) taskArea(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		area = &v
-		if err := store.ValidateTaskArea(area); err != nil {
+		if err := store.CheckTaskArea(area); err != nil {
 			appErr(w, r, err)
 			return
 		}
@@ -1075,7 +1075,7 @@ func (s Server) taskClaim(w http.ResponseWriter, r *http.Request) {
 	}
 	defer r.Body.Close()
 	var input taskClaimInput
-	if err := decode(r, &input, 4096); err != nil {
+	if err := decode(r, &input, bodySmall); err != nil {
 		appErr(w, r, err)
 		return
 	}
@@ -1105,7 +1105,7 @@ func (s Server) taskRebind(w http.ResponseWriter, r *http.Request) {
 	}
 	defer r.Body.Close()
 	var input taskRebindInput
-	if err := decode(r, &input, 4096); err != nil {
+	if err := decode(r, &input, bodySmall); err != nil {
 		appErr(w, r, err)
 		return
 	}
@@ -1128,7 +1128,7 @@ func (s Server) tasksNext(w http.ResponseWriter, r *http.Request) {
 		JobID     string `json:"job_id"`
 		NoJob     string `json:"no_job,omitempty"`
 	}
-	if err := decode(r, &input, 4096); err != nil {
+	if err := decode(r, &input, bodySmall); err != nil {
 		appErr(w, r, err)
 		return
 	}
@@ -1199,7 +1199,7 @@ func (s Server) taskParent(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		ParentID *int64 `json:"parent_id"`
 	}
-	if err := decode(r, &input, 4096); err != nil {
+	if err := decode(r, &input, bodySmall); err != nil {
 		appErr(w, r, err)
 		return
 	}
@@ -1242,7 +1242,7 @@ func (s Server) taskRelationWrite(w http.ResponseWriter, r *http.Request, add bo
 	}
 	defer r.Body.Close()
 	var input taskRelationInput
-	if err := decode(r, &input, 4096); err != nil {
+	if err := decode(r, &input, bodySmall); err != nil {
 		appErr(w, r, err)
 		return
 	}
@@ -1573,16 +1573,18 @@ func relayEventsLimit(r *http.Request) (int, error) {
 	return limit, nil
 }
 
-func queryAfterID(r *http.Request) (int64, error) {
-	v := r.URL.Query().Get("after_id")
+// queryCursor parses the non-negative int64 cursor query parameter name
+// ("after_id", "after"); absent is 0. It is the one cursor parser.
+func queryCursor(r *http.Request, name string) (int64, error) {
+	v := r.URL.Query().Get(name)
 	if v == "" {
 		return 0, nil
 	}
-	afterID, err := strconv.ParseInt(v, 10, 64)
-	if err != nil || afterID < 0 {
-		return 0, errors.New("after_id")
+	cursor, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || cursor < 0 {
+		return 0, errors.New(name)
 	}
-	return afterID, nil
+	return cursor, nil
 }
 
 func (s Server) relayEventsList(w http.ResponseWriter, r *http.Request) {
@@ -1594,7 +1596,7 @@ func (s Server) relayEventsList(w http.ResponseWriter, r *http.Request) {
 		appErr(w, r, err)
 		return
 	}
-	afterID, err := queryAfterID(r)
+	afterID, err := queryCursor(r, "after_id")
 	if err != nil {
 		appErr(w, r, err)
 		return
@@ -2000,6 +2002,15 @@ func benchRowErrorField(row []byte, fieldTypes map[string]reflect.Type) string {
 	}
 	return ""
 }
+
+// Payload caps for decode, by what the body carries. A route picks one of
+// these or a store-owned limit (store.MaxBytes, benchRequestMaxBytes, ...).
+const (
+	bodyTiny  = 1 << 10  // an id or two and a short reason
+	bodySmall = 4 << 10  // one entity's short fields
+	bodyEvent = 8 << 10  // one external event with its references
+	bodyLarge = 64 << 10 // free text or a list: descriptions, candidates
+)
 
 // decode reads one JSON request body into v. max is the payload's own byte
 // cap; 4 KiB of slack covers the envelope keys around it.
