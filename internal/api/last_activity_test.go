@@ -11,7 +11,7 @@ import (
 
 func TestTaskJSONLastActivity(t *testing.T) {
 	h, s := decisionAPIServer(t)
-	x, err := s.CreateTask(t.Context(), store.Task{Lane: "activity", Title: "activity", Kind: "implement", CreatedBy: "test"})
+	x, err := s.CreateTask(t.Context(), store.Task{Lane: "activity", Title: "activity", Kind: "implement", CreatedBy: "test", Project: &apiTestProject})
 	if err != nil {
 		t.Fatal(err)
 	}
