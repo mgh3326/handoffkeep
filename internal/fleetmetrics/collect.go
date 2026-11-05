@@ -19,7 +19,7 @@ type HK interface {
 	ExportTasks(ctx context.Context, lane, state, parentLane string, project *string, limit int) ([]byte, error)
 	GetTask(ctx context.Context, id int64) (store.Task, bool, error)
 	ListRelayEventsPage(ctx context.Context, kind string, afterID int64, limit int) ([]store.RelayEvent, error)
-	ListDocuments(ctx context.Context, prefix, kind, session string, limit int) ([]store.Document, error)
+	ListDocuments(ctx context.Context, prefix, kind, session string, task int64, limit int) ([]store.Document, error)
 	GetDocument(ctx context.Context, key string) (store.Document, bool, error)
 	ListTaskComments(ctx context.Context, taskID, afterID int64, limit int) ([]store.TaskComment, error)
 	ListBenchReps(ctx context.Context, limit int) ([]store.BenchRep, error)
@@ -159,7 +159,7 @@ func parallel(ctx context.Context, n, count int, f func(int)) {
 }
 
 func collectDeploys(ctx context.Context, cfg CollectConfig, s *Snapshot) {
-	docs, err := cfg.HK.ListDocuments(ctx, "deploy/", "", "", 1000)
+	docs, err := cfg.HK.ListDocuments(ctx, "deploy/", "", "", 0, 1000)
 	if err != nil {
 		s.Notes = append(s.Notes, "deploy records: "+err.Error())
 		return
