@@ -6,9 +6,8 @@
 // service without records renders "기록 없음", never "최신".
 // Styles are inline except dp-warn/muted, which deploys.css defines.
 
-import type { CSSProperties } from "react";
+import { useEffect, type CSSProperties } from "react";
 import {
-  deployElapsed,
   deployPRLabel,
   deployStamp,
   fetchDeployPending,
@@ -41,7 +40,10 @@ const titleStyle: CSSProperties = {
 const svcStyle: CSSProperties = {
   marginTop: "var(--hk-space-2)",
   paddingTop: "var(--hk-space-2)",
-  borderTop: "1px solid var(--hk-border-subtle)",
+  padding: "var(--hk-space-3)",
+  border: "1px solid var(--hk-border-subtle)",
+  borderRadius: "var(--hk-radius-md)",
+  minWidth: 0,
 };
 const svcHeadStyle: CSSProperties = {
   display: "flex",
@@ -106,19 +108,18 @@ const INVALID_REASON_LABEL: Record<string, string> = {
 };
 const invalidReasonLabel = (reason: string) => INVALID_REASON_LABEL[reason] ?? reason;
 
-function RecordLine({ label, rec, now }: { label: string; rec: DeployRecordView; now: string }) {
+function RecordLine({ label, rec }: { label: string; rec: DeployRecordView }) {
   const ref = shortDeployedRef(rec.deployed_ref);
   const stamp = deployStamp(rec.deployed_at);
-  const elapsed = deployElapsed(now, rec.deployed_at);
   const badResult = rec.result === "failed" || rec.result === "rolled_back";
   return (
     <div style={recStyle} data-result={rec.result}>
       <span className="muted">{label}</span>
       <span style={badResult ? dangerStyle : undefined}>{RESULT_LABEL[rec.result] ?? rec.result}</span>
       <span style={monoStyle}>{ref ?? "ref 없음"}</span>
+      <a className="dp-key" href={`/ui/doc/${rec.record_key.split("/").map(encodeURIComponent).join("/")}`}>{rec.record_key}</a>
       <span>
         {stamp ?? "시각 미기록"}
-        {elapsed !== null ? ` · ${elapsed}` : ""}
       </span>
       {rec.failed_step !== null ? <span className="muted">step {rec.failed_step}</span> : null}
       {rec.serving_maybe_changed ? (
@@ -152,9 +153,9 @@ function MergedList({ svc }: { svc: DeployServiceView }) {
         <ul style={mergedListStyle}>
           {svc.merged_since.map((task) => (
             <li key={task.task_id} style={mergedItemStyle}>
-              <a href={`/ui/tasks/${task.task_id}`}>#{task.task_id}</a>
+              <a style={{ whiteSpace: "nowrap" }} href={`/ui/tasks/${task.task_id}`}>#{task.task_id}</a>
               <span style={mergedTitleStyle}>{task.title}</span>
-              <a href={task.pr} target="_blank" rel="noreferrer">
+              <a style={{ whiteSpace: "nowrap" }} href={task.pr} target="_blank" rel="noreferrer">
                 {deployPRLabel(task.pr)}
               </a>
               <span className="muted">{deployStamp(task.merged_at) ?? task.merged_at}</span>
@@ -166,7 +167,7 @@ function MergedList({ svc }: { svc: DeployServiceView }) {
   );
 }
 
-function ServiceRow({ svc, now }: { svc: DeployServiceView; now: string }) {
+function ServiceRow({ svc }: { svc: DeployServiceView }) {
   return (
     <section style={svcStyle} aria-label={`${svc.service} 배포`}>
       <div style={svcHeadStyle}>
@@ -191,11 +192,12 @@ function ServiceRow({ svc, now }: { svc: DeployServiceView; now: string }) {
         /* docs_capped means the scan stopped before the end of the key space —
            a record beyond the cap could carry a later deployed_at, so the
            shown current/latest are in-window results, not fleet truth. */
-        <RecordLine label={svc.docs_capped ? "현재 판(조회 범위 내)" : "현재 판"} rec={svc.current} now={now} />
+        <RecordLine label={svc.docs_capped ? "현재 판(조회 범위 내)" : "현재 판"} rec={svc.current} />
       )}
-      {svc.latest !== undefined ? (
-        <RecordLine label={svc.docs_capped ? "최근 시도(조회 범위 내)" : "최근 시도"} rec={svc.latest} now={now} />
-      ) : null}
+      <h3>{svc.docs_capped ? "최근 시도(조회 범위 내)" : "최근 시도"}</h3>
+      <div aria-label={`${svc.service} 최근 배포`}>
+        {svc.recent.map((rec) => <RecordLine key={rec.record_key} label="시도" rec={rec} />)}
+      </div>
       {svc.docs_capped ? (
         <p className="dp-warn" style={{ margin: "var(--hk-space-1) 0 0", fontSize: "var(--hk-font-meta)" }}>
           기록 조회 상한에 닿았습니다 — 더 오래된 배포 기록이 있을 수 있어 현재 판·최근 시도·머지 목록 모두 조회 범위
@@ -238,7 +240,9 @@ type Props = {
  * good payload with a warning; a first-load failure is an explicit error,
  * never an empty board. */
 export function DeployPanel({ fetchStatus = fetchDeployPending, pollMs = 15_000 }: Props) {
-  const { data, failed } = useDeployPending(fetchStatus, pollMs);
+  const { data, failed, at } = useDeployPending(fetchStatus, pollMs);
+  useEffect(() => { if (data) document.title = `Deploys · ${data.services.reduce((sum, svc) => sum + svc.merged_since.length, 0)} waiting`; }, [data]);
+  const checked = at === null ? null : new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Seoul", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" }).format(at);
 
   if (data === null) {
     return (
@@ -251,13 +255,13 @@ export function DeployPanel({ fetchStatus = fetchDeployPending, pollMs = 15_000 
     <section style={panelStyle} aria-label="배포 상태" data-deploy-state={failed ? "stale" : "ready"}>
       <div style={headStyle}>
         <h2 style={titleStyle}>배포</h2>
-        {failed ? <span className="dp-warn">갱신 실패 — 이전 자료를 보여 주는 중</span> : null}
+        {checked !== null ? <span className={failed ? "dp-warn" : "muted"}>{failed ? "갱신 실패 · " : ""}마지막 확인 {checked} KST</span> : null}
         {data.events_capped ? (
           <span className="dp-warn">머지 이벤트 조회 상한에 닿아 목록이 잘렸을 수 있습니다.</span>
         ) : null}
       </div>
-      {data.services.map((svc) => (
-        <ServiceRow key={svc.service} svc={svc} now={data.generated_at} />
+      {[...data.services].sort((a, b) => a.service.localeCompare(b.service)).map((svc) => (
+        <ServiceRow key={svc.service} svc={svc} />
       ))}
       <p style={noteStyle}>
         배포가 필요 없는 머지(문서·CI·스킬)도 목록에 섞여 있을 수 있습니다. PR 귀속은 태스크의 refs.pr 기준이며, refs.pr 은 종결 PR

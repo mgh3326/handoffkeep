@@ -1,5 +1,5 @@
 {
-  "generated_at": "\u003cclock\u003e",
+  "generated_at": "<clock>",
   "pr_source": "refs.pr",
   "services": [
     {
@@ -8,7 +8,7 @@
         "deployed_ref": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "failed_step": null,
         "record_key": "deploy/handoffkeep/20260920T010000Z",
-        "recorded_at": "\u003cclock\u003e",
+        "recorded_at": "<clock>",
         "result": "success",
         "source": "backfill"
       },
@@ -27,7 +27,7 @@
         "deployed_ref": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         "failed_step": 7,
         "record_key": "deploy/handoffkeep/20260923T020000Z",
-        "recorded_at": "\u003cclock\u003e",
+        "recorded_at": "<clock>",
         "result": "failed",
         "serving_maybe_changed": true,
         "source": "backfill"
@@ -47,6 +47,27 @@
           "title": "after the deploy"
         }
       ],
+      "recent": [
+        {
+          "deployed_at": "2026-09-23T02:00:00Z",
+          "deployed_ref": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "failed_step": 7,
+          "record_key": "deploy/handoffkeep/20260923T020000Z",
+          "recorded_at": "<clock>",
+          "result": "failed",
+          "serving_maybe_changed": true,
+          "source": "backfill"
+        },
+        {
+          "deployed_at": "2026-09-20T01:00:00Z",
+          "deployed_ref": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "failed_step": null,
+          "record_key": "deploy/handoffkeep/20260920T010000Z",
+          "recorded_at": "<clock>",
+          "result": "success",
+          "source": "backfill"
+        }
+      ],
       "record_count": 3,
       "repo": "mgh3326/handoffkeep",
       "service": "handoffkeep",
@@ -58,13 +79,24 @@
         "deployed_ref": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
         "failed_step": null,
         "record_key": "deploy/auto_trader/20260920T010000Z",
-        "recorded_at": "\u003cclock\u003e",
+        "recorded_at": "<clock>",
         "result": "success",
         "source": "backfill"
       },
       "doc_url": "/ui/doc/deploy/auto_trader/",
       "merged_boundary": "unrecorded",
       "merged_since": [],
+      "recent": [
+        {
+          "deployed_at": null,
+          "deployed_ref": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "failed_step": null,
+          "record_key": "deploy/auto_trader/20260920T010000Z",
+          "recorded_at": "<clock>",
+          "result": "success",
+          "source": "backfill"
+        }
+      ],
       "record_count": 1,
       "repo": "mgh3326/auto_trader",
       "service": "auto_trader",
@@ -78,12 +110,23 @@
         "deployed_ref": null,
         "failed_step": null,
         "record_key": "deploy/panewire-hub/20260923T040000Z",
-        "recorded_at": "\u003cclock\u003e",
+        "recorded_at": "<clock>",
         "result": "failed",
         "source": "backfill"
       },
       "merged_boundary": "no_current",
       "merged_since": [],
+      "recent": [
+        {
+          "deployed_at": "2026-09-23T04:00:00Z",
+          "deployed_ref": null,
+          "failed_step": null,
+          "record_key": "deploy/panewire-hub/20260923T040000Z",
+          "recorded_at": "<clock>",
+          "result": "failed",
+          "source": "backfill"
+        }
+      ],
       "record_count": 1,
       "repo": "mgh3326/panewire",
       "service": "panewire-hub",

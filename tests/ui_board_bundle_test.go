@@ -86,7 +86,7 @@ func consoleTreeError(committed, emitted map[string][]byte) error {
 // must produce: the shell, server and deploys entries, their styles, and the
 // shared chunk, plus the API/security contracts each bundle carries.
 func consoleContractsError(tree map[string][]byte) error {
-	for _, name := range []string{"shell.js", "shell.css", "server.js", "server.css", "deploys.js", "deploys.css", "tokens.css", "shared-client.js", "shared-DocView.js", "shared-DocMarkdown.js"} {
+	for _, name := range []string{"shell.js", "shell.css", "server.js", "server.css", "tokens.css", "shared-client.js", "shared-DocView.js", "shared-DocMarkdown.js"} {
 		body, ok := tree[name]
 		if !ok {
 			return fmt.Errorf("console artifact %s missing", name)
@@ -107,8 +107,8 @@ func consoleContractsError(tree map[string][]byte) error {
 	if !strings.Contains(string(tree["shared-DocView.js"]), "/ui/api/board/doc") {
 		return errors.New("shared-DocView.js lost the /ui/api/board/doc contract")
 	}
-	if !strings.Contains(string(tree["deploys.js"]), "/ui/api/deploy-pending") {
-		return errors.New("deploys.js lost the /ui/api/deploy-pending contract")
+	if !strings.Contains(string(tree["shell.js"]), "/ui/api/deploy-pending") {
+		return errors.New("shell.js lost the /ui/api/deploy-pending contract")
 	}
 	for name, body := range tree {
 		if !strings.HasSuffix(name, ".js") {
@@ -125,7 +125,7 @@ func consoleContractsError(tree map[string][]byte) error {
 // console entry output. Adding or repointing an entry must never delete a
 // sibling's emitted file.
 func consoleSiblingEntriesError(tree map[string][]byte) error {
-	for _, name := range []string{"shell.js", "shell.css", "server.js", "deploys.js", "deploys.css"} {
+	for _, name := range []string{"shell.js", "shell.css", "server.js"} {
 		if len(tree[name]) == 0 {
 			return fmt.Errorf("sibling entry output %s missing", name)
 		}
@@ -216,17 +216,7 @@ func TestConsoleMultiEntryArtifacts(t *testing.T) {
 			t.Fatalf("console.html missing %q", want)
 		}
 	}
-	// /ui/deploys is its own mount page on its own entry: the template must
-	// name its root and both artifacts.
-	deploys, err := os.ReadFile(filepath.Join(filepath.Dir(shellPagePath(t)), "deploys.html"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, want := range []string{`id="deploys-root"`, "/ui/static/console/deploys.js", "/ui/static/console/deploys.css"} {
-		if !strings.Contains(string(deploys), want) {
-			t.Fatalf("deploys.html missing %q", want)
-		}
-	}
+
 }
 
 // One clean build into a scratch outDir must emit exactly the committed file
