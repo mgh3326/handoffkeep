@@ -548,12 +548,18 @@ type decisionReplay struct {
 
 // replayDecisionAttempt looks up (channel, event_key). With the same payload
 // hash it rebuilds the first delivery's outcome and writes nothing; with
-// another it is ErrDecisionEventKeyConflict.
+// another it is ErrDecisionEventKeyConflict. The rebuilt outcome carries the
+// first delivery's result, sentinel, attempt id, resolution id and request;
+// only Duplicate is set, and Task is the live task. A later confirmation of a
+// pending_confirmation attempt is a new attempt under its own key: it never
+// rewrites the pending one, so the pending replay still reports the open
+// request the first delivery saw (R2).
 func replayDecisionAttempt(ctx context.Context, tx pgx.Tx, channel, eventKey, hash string, x Task) (decisionReplay, bool, error) {
 	var attemptID int64
-	var storedHash, result, revisionRequestID string
-	err := tx.QueryRow(ctx, `SELECT id,payload_hash,result,revision_request_id FROM decision_answer_attempts WHERE channel=$1 AND event_key=$2`, channel, eventKey).
-		Scan(&attemptID, &storedHash, &result, &revisionRequestID)
+	var revision int
+	var storedHash, result, revisionRequestID, root string
+	err := tx.QueryRow(ctx, `SELECT id,payload_hash,result,revision_request_id,COALESCE(request_id,''),COALESCE(question_revision,0) FROM decision_answer_attempts WHERE channel=$1 AND event_key=$2`, channel, eventKey).
+		Scan(&attemptID, &storedHash, &result, &revisionRequestID, &root, &revision)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return decisionReplay{}, false, nil
 	}
@@ -567,10 +573,16 @@ func replayDecisionAttempt(ctx context.Context, tx pgx.Tx, channel, eventKey, ha
 	if x.Refs.DecisionRequest != nil {
 		out.Request = *x.Refs.DecisionRequest
 	}
-	if out.Request.ID != revisionRequestID {
-		// The revision moved on; report the request as it was answered.
+	// A pending attempt saw the request open; a later confirmation closed it.
+	// Any other attempt reports the request it addressed, as it stands.
+	wantStatus := ""
+	if result == DecisionResultPendingConfirmation {
+		wantStatus = DecisionRequestOpen
+	}
+	if out.Request.ID != revisionRequestID || (wantStatus != "" && out.Request.Status != wantStatus) {
+		// The revision moved on or was closed; report the request as it was.
 		var snapshot []byte
-		err = tx.QueryRow(ctx, `SELECT refs->'decision_request' FROM task_events WHERE task_id=$1 AND kind='decision' AND refs->'decision_request'->>'id'=$2 ORDER BY id DESC LIMIT 1`, x.ID, revisionRequestID).Scan(&snapshot)
+		err = tx.QueryRow(ctx, `SELECT refs->'decision_request' FROM task_events WHERE task_id=$1 AND kind='decision' AND refs->'decision_request'->>'id'=$2 AND ($3::text='' OR refs->'decision_request'->>'status'=$3::text) ORDER BY id DESC LIMIT 1`, x.ID, revisionRequestID, wantStatus).Scan(&snapshot)
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return decisionReplay{}, false, err
 		}
@@ -584,6 +596,13 @@ func replayDecisionAttempt(ctx context.Context, tx pgx.Tx, channel, eventKey, ha
 	err = tx.QueryRow(ctx, `SELECT resolution_id FROM decision_resolutions WHERE attempt_id=$1`, attemptID).Scan(&out.ResolutionID)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return decisionReplay{}, false, err
+	}
+	if out.ResolutionID == 0 && result == DecisionResultAnswered && root != "" && revision > 0 {
+		// An identical answer to a closed request is its own attempt without
+		// a resolution row; it reports the one resolution of that revision.
+		if out.ResolutionID, err = decisionResolutionID(ctx, tx, root, revision); err != nil {
+			return decisionReplay{}, false, err
+		}
 	}
 	switch result {
 	case decisionAttemptRefused:
