@@ -76,6 +76,8 @@ export async function fetchTaskDetail(id: number): Promise<BoardDetail> {
     !validBoardTask(data.task) ||
     !Array.isArray(data.events) ||
     !Array.isArray(data.dwell) ||
+    !Array.isArray(data.documents) || !data.documents.every(d => record(d) && typeof d.key === "string" && typeof d.kind === "string" && typeof d.origin_class === "string") ||
+    typeof data.documents_truncated !== "boolean" ||
     !Array.isArray(data.origins) || !data.origins.every(validOrigin) ||
     !Array.isArray(data.changes) || !data.changes.every(validChange) ||
     !Array.isArray(data.jobs) || !data.jobs.every(validJob) ||

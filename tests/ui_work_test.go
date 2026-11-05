@@ -41,6 +41,15 @@ func TestUIWorkRecords(t *testing.T) {
 	if _, _, err := s.AddTaskOrigin(t.Context(), task.ID, "test", store.TaskOriginInput{Provider: "github", Namespace: "example/repo", ExternalID: "42", DisplayRef: "#42"}); err != nil {
 		t.Fatal(err)
 	}
+	for _, doc := range []store.Document{
+		{Key: "work/one", Kind: "report", Body: "example", CreatedBy: "test", TaskID: &task.ID, OriginClass: "job"},
+		{Key: "work/two", Kind: "note", Body: "example", CreatedBy: "test", TaskID: &task.ID},
+		{Key: "work/other", Kind: "note", Body: "example", CreatedBy: "test", TaskID: &tasks[1].ID, OriginClass: "authored"},
+	} {
+		if _, _, err := s.PutDocument(t.Context(), doc); err != nil {
+			t.Fatal(err)
+		}
+	}
 	var changeID int64
 	if err := pool.QueryRow(t.Context(), `INSERT INTO changes(repo,pr_number,state,opened_at,created_at,updated_at) VALUES('example/repo',42,'open',now(),now(),now()) RETURNING id`).Scan(&changeID); err != nil {
 		t.Fatal(err)
@@ -90,6 +99,18 @@ func TestUIWorkRecords(t *testing.T) {
 	}
 	if len(d["origins"].([]any)) != 1 || len(d["changes"].([]any)[0].(map[string]any)["reviews"].([]any)) != 2 || len(d["jobs"].([]any)) != 100 || d["jobs_truncated"] != true {
 		t.Fatalf("detail=%v", d)
+	}
+	docs := d["documents"].([]any)
+	if len(docs) != 2 || d["documents_truncated"] != false {
+		t.Fatalf("documents=%v", docs)
+	}
+	if docs[0].(map[string]any)["origin_class"] != "job" || docs[1].(map[string]any)["origin_class"] != "" {
+		t.Fatalf("document classes=%v", docs)
+	}
+	for _, raw := range docs {
+		if _, ok := raw.(map[string]any)["body"]; ok {
+			t.Fatal("document body leaked")
+		}
 	}
 	for _, j := range d["jobs"].([]any) {
 		job := j.(map[string]any)

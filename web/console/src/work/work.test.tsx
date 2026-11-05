@@ -7,7 +7,7 @@ import { inView } from "./views";
 import { navKey } from "../app/routes";
 
 const task: BoardTask = { id: 101, title: "Example task", lane: "x", kind: "implement", state: "developing", priority: 2, created_by: "operator", created_at: "2026-11-05T00:00:00Z", updated_at: "2026-11-05T01:00:00Z", refs: {}, project: "a" };
-const detail = { task, events: [], dwell: [], linear: null, participants: { task_ref: "hk:task/101", coverage: "not_collected", segments: [] }, origins: [], changes: [], jobs: [], origins_truncated: false, changes_truncated: false, jobs_truncated: false };
+const detail = { task, events: [], dwell: [], linear: null, participants: { task_ref: "hk:task/101", coverage: "not_collected", segments: [] }, origins: [], documents: [], documents_truncated: false, changes: [], jobs: [], origins_truncated: false, changes_truncated: false, jobs_truncated: false };
 const json = (data: unknown) => new Response(JSON.stringify(data), { status: 200, headers: { "Content-Type": "application/json" } });
 afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); });
 
@@ -93,4 +93,26 @@ it("W13 keeps the existing routes available", async () => {
   expect(matchRoute("/ui")).toEqual({ view: "home" });
   expect(matchRoute("/ui/doc/guide/example")).toEqual({ view: "doc", key: "guide/example" });
   expect(matchRoute("/ui/tasks/101")).toEqual({ view: "task", id: "101" });
+});
+
+it("shows origin namespace and linked document classes, including an unclassified document", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => json({
+    ...detail,
+    origins: [{ provider: "github", namespace: "example/repo", display_ref: "#42", url: "https://example.com/42" }],
+    documents: [
+      { key: "reports/one", kind: "report", origin_class: "job" },
+      { key: "reports/two", kind: "note", origin_class: "" },
+    ],
+  })));
+  render(<TaskRecord id={101} />);
+  expect(await screen.findByText(/github · example\/repo/)).toBeTruthy();
+  expect(screen.getByText(/report · job/)).toBeTruthy();
+  expect(screen.getByText(/note · 미분류/)).toBeTruthy();
+  expect(screen.getByRole("link", { name: "reports/one" }).getAttribute("href")).toBe("/ui/doc/reports/one");
+  expect(screen.queryByText(/origin class: unknown/)).toBeNull();
+});
+
+it("rejects a malformed linked document list", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => json({ ...detail, documents: [{ key: "x", kind: "note", origin_class: 42 }] })));
+  await expect(fetchTaskDetail(101)).rejects.toThrow("malformed");
 });

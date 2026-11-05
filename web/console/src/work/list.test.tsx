@@ -3,7 +3,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { WorkPage } from "./WorkPage";
 
 const task = { id: 101, title: "Task one", lane: "x", kind: "implement", state: "developing", priority: 2, created_by: "test", created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z", refs: {}, project: "a" };
-const detail = { task, events: [], dwell: [], linear: null, participants: { task_ref: "hk:task/101", coverage: "not_collected", segments: [] }, origins: [], changes: [], jobs: [], origins_truncated: false, changes_truncated: false, jobs_truncated: false };
+const detail = { task, events: [], dwell: [], linear: null, participants: { task_ref: "hk:task/101", coverage: "not_collected", segments: [] }, origins: [], documents: [], documents_truncated: false, changes: [], jobs: [], origins_truncated: false, changes_truncated: false, jobs_truncated: false };
 const response = (value: unknown) => new Response(JSON.stringify(value), { status: 200 });
 let wide = false;
 beforeEach(() => {

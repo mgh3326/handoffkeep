@@ -286,18 +286,26 @@ type boardParticipants struct {
 	Segments  []participantSegment `json:"segments"`
 }
 
+type boardDocument struct {
+	Key         string `json:"key"`
+	Kind        string `json:"kind"`
+	OriginClass string `json:"origin_class"`
+}
+
 type boardDetailResponse struct {
-	Origins          []store.TaskOrigin `json:"origins"`
-	Changes          []store.Change     `json:"changes"`
-	Jobs             []boardJob         `json:"jobs"`
-	OriginsTruncated bool               `json:"origins_truncated"`
-	ChangesTruncated bool               `json:"changes_truncated"`
-	JobsTruncated    bool               `json:"jobs_truncated"`
-	Task             boardTask          `json:"task"`
-	Events           []boardEvent       `json:"events"`
-	Dwell            []dwellSegment     `json:"dwell"`
-	Linear           *boardLinear       `json:"linear"`
-	Participants     boardParticipants  `json:"participants"`
+	Documents          []boardDocument    `json:"documents"`
+	DocumentsTruncated bool               `json:"documents_truncated"`
+	Origins            []store.TaskOrigin `json:"origins"`
+	Changes            []store.Change     `json:"changes"`
+	Jobs               []boardJob         `json:"jobs"`
+	OriginsTruncated   bool               `json:"origins_truncated"`
+	ChangesTruncated   bool               `json:"changes_truncated"`
+	JobsTruncated      bool               `json:"jobs_truncated"`
+	Task               boardTask          `json:"task"`
+	Events             []boardEvent       `json:"events"`
+	Dwell              []dwellSegment     `json:"dwell"`
+	Linear             *boardLinear       `json:"linear"`
+	Participants       boardParticipants  `json:"participants"`
 	// DecisionRequests is every structured request of the task, newest
 	// first, with its derived display state (#618). Always present (possibly
 	// empty) so a client can tell "none recorded" from an older server.
@@ -448,6 +456,20 @@ func (h *Handler) boardTaskDetail(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "internal_error")
 		return
 	}
+	documents, err := h.store.ListDocuments(r.Context(), "", "", "", id, 101)
+	if err != nil {
+		log.Printf("ui.board_detail_error err=%q", err)
+		writeJSONError(w, http.StatusInternalServerError, "internal_error")
+		return
+	}
+	documentsTruncated := len(documents) > 100
+	if documentsTruncated {
+		documents = documents[:100]
+	}
+	projectedDocuments := make([]boardDocument, 0, len(documents))
+	for _, document := range documents {
+		projectedDocuments = append(projectedDocuments, boardDocument{Key: document.Key, Kind: document.Kind, OriginClass: document.OriginClass})
+	}
 	originsTruncated, changesTruncated, jobsTruncated := len(origins) > 100, len(changes) > 100, len(jobs) > 100
 	if originsTruncated {
 		origins = origins[:100]
@@ -470,6 +492,7 @@ func (h *Handler) boardTaskDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	now := time.Now().UTC()
 	response := boardDetailResponse{
+		Documents: projectedDocuments, DocumentsTruncated: documentsTruncated,
 		Origins: origins, Changes: changes, Jobs: projectedJobs, OriginsTruncated: originsTruncated, ChangesTruncated: changesTruncated, JobsTruncated: jobsTruncated,
 		Task:      projectBoardTask(task),
 		Events:    make([]boardEvent, 0, len(task.Events)),
