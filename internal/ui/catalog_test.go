@@ -18,7 +18,7 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/testdb"
 )
 
-// The console fixture was produced by marshaling store.BenchCatalogEntry — the
+// The fixture (it fed the console grades screen until hk 3140) was produced by marshaling store.BenchCatalogEntry — the
 // deployed GET /v1/bench/catalog wire type (#592, hk f0681e5) — with rows
 // hand-picked and ordered to exercise the states the screen renders (a retired
 // row, a consult_only row, an ESTIMATED_ annotation, a null score, a default
@@ -26,7 +26,7 @@ import (
 // This test pins the shape: the committed fixture must round-trip through the
 // real Go type with no field loss.
 func TestBenchCatalogFixtureMatchesGoType(t *testing.T) {
-	raw, err := os.ReadFile("../../web/console/src/queue-proto/grades/fixtures/catalog.response.json")
+	raw, err := os.ReadFile("testdata/catalog.response.json")
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
 	}

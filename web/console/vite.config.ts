@@ -9,7 +9,7 @@ export default defineConfig({
   plugins: [react()],
   base: "/ui/static/console/",
   build: {
-    modulePreload: false,
+    modulePreload: true,
     sourcemap: false,
     cssCodeSplit: true,
     outDir: "../../internal/ui/static/console",
@@ -18,25 +18,14 @@ export default defineConfig({
     emptyOutDir: true,
     rollupOptions: {
       input: {
+        // /ui, /ui/work, /ui/doc/{key} and /ui/tasks/{id} load the shell: Home,
+        // Work and the lazy document viewer behind one router (hk 3140).
+        shell: resolve(root, "src/app/main.tsx"),
+        // The server-rendered pages (/ui/decisions, /ui/timeline, /ui/compose)
+        // mount their htmx content inside the shell chrome.
         server: resolve(root, "src/server.tsx"),
-        fleet: resolve(root, "src/main.tsx"),
-        // /ui/queue loads the queue app built from src/queue-proto: board.js/
-        // board.css are what the page actually serves. The entry fetches the
-        // real board API — the synthetic fixture path lives only in
-        // preview.tsx, which this input never reaches.
-        board: resolve(root, "src/queue-proto/main.tsx"),
-        // /ui/grades loads the read-only grade table built from src/queue-proto/grades —
-        // a separate entry so the queue's initial bundle carries none of it.
-        grades: resolve(root, "src/queue-proto/grades/main.tsx"),
-        // /ui/deploys loads the deploy status screen built from
-        // src/queue-proto/deploys — same separate-entry constraint (#620).
-        deploys: resolve(root, "src/queue-proto/deploys/main.tsx"),
-        // /ui/docs loads the document browser built from src/queue-proto/docs
-        // — its own entry so browsing costs the queue nothing (hk 2245).
-        docs: resolve(root, "src/queue-proto/docs/main.tsx"),
-        // /ui/home loads the read-only operator dashboard built from
-        // src/dashboard — its own entry, same constraint (hk 2280).
-        dashboard: resolve(root, "src/dashboard/main.tsx"),
+        // /ui/deploys stays live until C4 (hk 3143).
+        deploys: resolve(root, "src/deploys/main.tsx"),
         // The --hk-* design tokens ship as their own static stylesheet so the
         // React entries and the Go templates link one and the same file.
         tokens: resolve(root, "src/design/tokens.css"),

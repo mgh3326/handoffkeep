@@ -1,6 +1,8 @@
 import { useLayoutEffect, useRef } from "react";
 import { createRoot } from "react-dom/client";
-import { bootTheme, PageShell, type NavKey } from "./shared/AppShell";
+import { Shell, type NavKey } from "./app/Shell";
+import { bootTheme } from "./shared/theme";
+import "./server.css";
 
 function ServerContent({ content }: { content: HTMLElement }) {
   const slot = useRef<HTMLDivElement>(null);
@@ -21,16 +23,13 @@ document.addEventListener("input", (e) => {
 const root = document.getElementById("server-root");
 const content = document.getElementById("server-content");
 if (root && content) {
-  const keys: Record<string, NavKey> = {
-    timeline: "timeline",
-    decisions: "decisions",
-    compose: "compose",
-    document: "docs",
-  };
+  // Timeline and compose have no navigation row: they stay reachable by link
+  // until C5 (hk 3144) replaces them.
+  const keys: Record<string, NavKey> = { decisions: "decisions" };
   createRoot(root).render(
-    <PageShell current={keys[root.dataset.page ?? ""] ?? "home"}>
+    <Shell current={keys[root.dataset.page ?? ""] ?? null}>
       <ServerContent content={content} />
-    </PageShell>,
+    </Shell>,
   );
 }
 // Confirm the concrete answer in-page. No navigation shortcut can submit it.

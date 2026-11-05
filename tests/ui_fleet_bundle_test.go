@@ -28,9 +28,8 @@ var allowedAbsoluteURLs = []string{
 	"http://www.w3.org/2000/svg",
 	"http://www.w3.org/1998/Math/MathML",
 	"http://www.w3.org/1999/xhtml",
-	// RFC-2606 reserved TLD used by the queue prototype's synthetic fixtures
-	// (see web/console/src/queue-proto/sanitize.ts) — structurally
-	// non-routable, so it can never become an external load.
+	// RFC-2606 reserved TLD: structurally non-routable, so it can never
+	// become an external load.
 	"https://example.invalid/",
 	// Error-message documentation links inside the lazily loaded markdown
 	// renderer chunk (react-markdown, hast-util-to-jsx-runtime) — string
@@ -48,13 +47,13 @@ func consoleDir(t *testing.T) string {
 	return filepath.Join(filepath.Dir(file), "..", "internal", "ui", "static", "console")
 }
 
-func fleetPagePath(t *testing.T) string {
+func shellPagePath(t *testing.T) string {
 	t.Helper()
 	_, file, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("caller path unavailable")
 	}
-	return filepath.Join(filepath.Dir(file), "..", "internal", "ui", "templates", "fleet.html")
+	return filepath.Join(filepath.Dir(file), "..", "internal", "ui", "templates", "console.html")
 }
 
 func readConsoleArtifacts(t *testing.T) map[string]string {
@@ -82,11 +81,11 @@ func readConsoleArtifacts(t *testing.T) map[string]string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	page, err := os.ReadFile(fleetPagePath(t))
+	page, err := os.ReadFile(shellPagePath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	out["fleet.html"] = string(page)
+	out["console.html"] = string(page)
 	if len(out) < 2 {
 		t.Fatalf("missing console artifacts: %v", keys(out))
 	}
@@ -126,13 +125,16 @@ func TestFleetBundleNoAbsoluteURLs(t *testing.T) {
 
 func TestFleetBundleFetchOnlyUIAPI(t *testing.T) {
 	artifacts := readConsoleArtifacts(t)
-	js := artifacts["fleet.js"]
-	// #598: the fleet page reads the live aggregation BFF, not /ui/api/fleet.
-	if !strings.Contains(js, "/ui/api/live") {
-		t.Fatal("bundle does not contain /ui/api/live")
+	// The document viewer and the deploy screen each read one /ui/api route.
+	for name, want := range map[string]string{"shared-DocView.js": "/ui/api/board/doc", "deploys.js": "/ui/api/deploy-pending"} {
+		if !strings.Contains(artifacts[name], want) {
+			t.Fatalf("%s does not contain %s", name, want)
+		}
 	}
-	if strings.Contains(js, "/v1/nodes") || strings.Contains(js, "/v1/jobs") {
-		t.Fatal("bundle contains a hub path")
+	for name, body := range artifacts {
+		if strings.Contains(body, "/v1/nodes") || strings.Contains(body, "/v1/jobs") {
+			t.Fatalf("%s contains a hub path", name)
+		}
 	}
 	for name, body := range artifacts {
 		for _, match := range fetchQuotedRe.FindAllStringSubmatch(body, -1) {
@@ -156,28 +158,36 @@ func TestFleetRuntimeCDNZero(t *testing.T) {
 	}
 }
 
-func TestFleetBundleUsesDisplayState(t *testing.T) {
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("caller path unavailable")
+// Home and Work must not carry the markdown renderer: it ships only in the
+// lazy document-viewer chunk. The check walks shell.js and everything it
+// imports statically, so a static import of the viewer would fail it.
+func TestShellBundleExcludesMarkdownRenderer(t *testing.T) {
+	artifacts := readConsoleArtifacts(t)
+	staticImport := regexp.MustCompile(`(?:from|import)\s*"\./([^"]+\.js)"`)
+	seen := map[string]bool{}
+	var walk func(name string)
+	walk = func(name string) {
+		if seen[name] {
+			return
+		}
+		seen[name] = true
+		body, ok := artifacts[name]
+		if !ok {
+			t.Fatalf("shell imports %s, which is not in the console build", name)
+		}
+		for _, m := range staticImport.FindAllStringSubmatch(body, -1) {
+			walk(m[1])
+		}
 	}
-	src, err := os.ReadFile(filepath.Join(filepath.Dir(file), "..", "web", "console", "src", "FleetApp.tsx"))
-	if err != nil {
-		t.Fatal(err)
+	walk("shell.js")
+	for name := range seen {
+		body := artifacts[name]
+		if strings.Contains(body, "DocMarkdown") || strings.Contains(body, "data-doc-renderer") || strings.Contains(body, "micromark") {
+			t.Errorf("%s is in the shell's static graph and carries the markdown renderer", name)
+		}
 	}
-	source := string(src)
-	if !strings.Contains(source, "display_state") {
-		t.Fatal("source does not read display_state")
-	}
-	if strings.Contains(source, "snapshot_status ===") || strings.Contains(source, "snapshot_status==") {
-		t.Fatal("source classifies snapshot_status itself")
-	}
-	js := readConsoleArtifacts(t)["fleet.js"]
-	if !strings.Contains(js, "display_state") {
-		t.Fatal("bundle does not contain display_state")
-	}
-	if strings.Contains(js, "snapshot_status===") || strings.Contains(js, "snapshot_status==") {
-		t.Fatal("bundle classifies snapshot_status itself")
+	if !strings.Contains(artifacts["shell.js"], "shared-DocView.js") {
+		t.Fatal("shell.js does not reach the document viewer chunk")
 	}
 }
 
