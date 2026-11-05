@@ -205,6 +205,18 @@ func scanTaskOrigins(rows pgx.Rows) ([]TaskOrigin, error) {
 // ListTaskOrigins returns a task's origins in id order. A missing task is
 // ErrTaskNotFound, never an empty list.
 func (s *Store) ListTaskOrigins(ctx context.Context, taskID int64) ([]TaskOrigin, error) {
+	return s.listTaskOrigins(ctx, taskID, 0)
+}
+
+// ListTaskOriginsPage bounds the origins returned for a task.
+func (s *Store) ListTaskOriginsPage(ctx context.Context, taskID int64, limit int) ([]TaskOrigin, error) {
+	if limit < 1 {
+		return nil, errors.New("invalid origin limit")
+	}
+	return s.listTaskOrigins(ctx, taskID, limit)
+}
+
+func (s *Store) listTaskOrigins(ctx context.Context, taskID int64, limit int) ([]TaskOrigin, error) {
 	if taskID < 1 {
 		return nil, errors.New("invalid origin query")
 	}
@@ -220,7 +232,13 @@ func (s *Store) ListTaskOrigins(ctx context.Context, taskID int64) ([]TaskOrigin
 	if !exists {
 		return nil, ErrTaskNotFound
 	}
-	rows, err := tx.Query(ctx, `SELECT `+taskOriginColumns+` FROM task_origins WHERE task_id=$1 ORDER BY id`, taskID)
+	query := `SELECT ` + taskOriginColumns + ` FROM task_origins WHERE task_id=$1 ORDER BY id`
+	args := []any{taskID}
+	if limit > 0 {
+		query += ` LIMIT $2`
+		args = append(args, limit)
+	}
+	rows, err := tx.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}

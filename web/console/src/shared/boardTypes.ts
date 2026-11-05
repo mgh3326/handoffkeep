@@ -1,4 +1,5 @@
 export type TaskRefs = {
+  closure?: { type: string; evidence: string };
   pr?: string;
   head_sha?: string;
   report_path?: string;
@@ -210,7 +211,17 @@ export type BoardParticipants = {
   segments: ParticipantSegment[];
 };
 
+export type WorkOrigin = { provider: string; display_ref?: string; url?: string; namespace: string };
+export type WorkReview = { id: number; lens: string; round: number; pass: number; family?: string; model?: string; verdict?: string; critical?: number | null; high?: number | null; medium?: number | null; low?: number | null };
+export type WorkChange = { id: number; pr: string; state: string; head_sha?: string; merged_at?: string; hold_reason?: string; depends_on_change_id?: number; depends_on_state?: string; reviews: WorkReview[] | null; tasks: unknown[] | null };
+export type WorkJob = { job_id: string; role: string; state: string; host: string; family: string; model: string; harness: string | null; effort: string | null; profile: string; skills: { name: string; calls: number }[] | null; skills_supported: boolean | null; claimed_at: string | null; spawned_at: string | null; ready_at: string | null; ended_at: string | null; end_reason: string | null; diff_stat: { files: number; insertions: number; deletions: number } | null };
 export type BoardDetail = {
+  origins: WorkOrigin[];
+  changes: WorkChange[];
+  jobs: WorkJob[];
+  origins_truncated: boolean;
+  changes_truncated: boolean;
+  jobs_truncated: boolean;
   task: BoardTask;
   events: BoardEvent[];
   dwell: DwellSegment[];

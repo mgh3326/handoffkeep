@@ -64,6 +64,8 @@ func (h *Handler) serveAPI(w http.ResponseWriter, r *http.Request, identity cfac
 		h.reapAPI(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/ui/api/glance":
 		h.glance(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/ui/api/board/projects":
+		h.boardProjects(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/ui/api/board/tasks":
 		h.boardTasks(w, r)
 	case r.Method == http.MethodGet && boardCommentsPathRE.MatchString(r.URL.Path):
