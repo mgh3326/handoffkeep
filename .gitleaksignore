@@ -12,3 +12,7 @@ fbb9c0310addfc23626fe07b2740a899a795cf58:.gitleaksignore:generic-api-key:1
 #   pair is fake test data. The next commit split the assertion so the
 #   literals no longer abut. This comment does not quote them.
 b251b29fa2f22605b9748bf26e7b4045d60609f2:internal/mcp/cfaccess_test.go:generic-api-key:48
+# - 5dd7bfa task_origins_test.go:8 named a test constant apiOriginUUID; the
+#   "api" in the name made gitleaks read the synthetic issue UUID beside it
+#   as a key. 29fe024 renamed the constant (originUUIDFixture). The value is fake data.
+5dd7bfa9e2fba106ef401f79b121afcbc0a17d88:internal/api/task_origins_test.go:generic-api-key:8
