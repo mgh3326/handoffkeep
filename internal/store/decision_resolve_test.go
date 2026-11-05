@@ -445,6 +445,142 @@ func TestResolveDecisionEventKey(t *testing.T) {
 		}
 	})
 
+	// R2: the same key and payload answers what the first delivery got. A
+	// later confirmation of a pending_confirmation attempt is a new attempt
+	// under its own key, and does not rewrite the pending one.
+	t.Run("replay_pending_after_confirmation", func(t *testing.T) {
+		task := decisionTask(t, s, "in_progress")
+		request := humanOnlyRequest(t, s, task.ID)
+		relay := answerA(request, DecisionChannelCLI, "director-1")
+		relay.EventKey = "relay-1"
+		first, err := s.ResolveDecision(ctx, relay)
+		if err != nil || first.Result != DecisionResultPendingConfirmation || first.Duplicate || first.Request.Status != DecisionRequestOpen {
+			t.Fatalf("first=%+v err=%v", first, err)
+		}
+		before, err := s.ResolveDecision(ctx, relay)
+		if err != nil || before.Result != DecisionResultPendingConfirmation || !before.Duplicate || before.AttemptID != first.AttemptID || before.Request.Status != DecisionRequestOpen {
+			t.Fatalf("replay before confirmation=%+v err=%v", before, err)
+		}
+		confirm := ResolveDecisionInput{RequestID: request.ID, Kind: DecisionRequestAnswered, Option: "A", Channel: DecisionChannelConsole, Actor: "operator@example.com", Verified: true, EventKey: "confirm-1"}
+		confirmed, err := s.ResolveDecision(ctx, confirm)
+		if err != nil || confirmed.Result != DecisionResultAnswered || confirmed.Duplicate || confirmed.AttemptID == first.AttemptID || confirmed.ResolutionID == 0 {
+			t.Fatalf("confirmed=%+v err=%v", confirmed, err)
+		}
+		after, err := s.ResolveDecision(ctx, relay)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if after.Result != DecisionResultPendingConfirmation || after.Refusal != nil || !after.Duplicate || after.AttemptID != first.AttemptID || after.ResolutionID != 0 {
+			t.Fatalf("replay after confirmation=%+v", after)
+		}
+		if after.Request.ID != request.ID || after.Request.Status != DecisionRequestOpen || after.Request.Resolution != nil {
+			t.Fatalf("replay after confirmation reports the request as %+v, want the open request the first delivery saw", after.Request)
+		}
+		again, err := s.ResolveDecision(ctx, confirm)
+		if err != nil || again.Result != DecisionResultAnswered || !again.Duplicate || again.AttemptID != confirmed.AttemptID || again.ResolutionID != confirmed.ResolutionID {
+			t.Fatalf("confirmation replay=%+v err=%v", again, err)
+		}
+		rows := attemptsOf(t, pool, task.ID)
+		if len(rows) != 2 || rows[0].Result != DecisionResultPendingConfirmation || rows[1].Result != DecisionResultAnswered {
+			t.Fatalf("attempts=%+v", rows)
+		}
+		if n := resolutionsOf(t, pool, task.ID); n != 1 {
+			t.Fatalf("resolutions=%d", n)
+		}
+	})
+
+	t.Run("replay_of_a_duplicate_answer_keeps_the_resolution", func(t *testing.T) {
+		task := decisionTask(t, s, "in_progress")
+		request := assistantRecord(t, s, task.ID)
+		first, err := s.ResolveDecision(ctx, answerA(request, DecisionChannelCLI, "director-1"))
+		if err != nil || first.ResolutionID == 0 {
+			t.Fatalf("first=%+v err=%v", first, err)
+		}
+		resend := answerA(request, DecisionChannelCLI, "director-2")
+		resend.EventKey = "resend-1"
+		dup, err := s.ResolveDecision(ctx, resend)
+		if err != nil || !dup.Duplicate || dup.ResolutionID != first.ResolutionID || dup.AttemptID == first.AttemptID {
+			t.Fatalf("dup=%+v err=%v", dup, err)
+		}
+		again, err := s.ResolveDecision(ctx, resend)
+		if err != nil || again.Result != DecisionResultAnswered || !again.Duplicate || again.AttemptID != dup.AttemptID || again.ResolutionID != first.ResolutionID {
+			t.Fatalf("again=%+v err=%v", again, err)
+		}
+		if rows := attemptsOf(t, pool, task.ID); len(rows) != 2 {
+			t.Fatalf("attempts=%+v", rows)
+		}
+	})
+
+	// Every refused result replays with the same result, sentinel and
+	// attempt, and writes no second attempt.
+	t.Run("replay_of_each_result", func(t *testing.T) {
+		cases := []struct {
+			name   string
+			result string
+			refuse error
+			setup  func(t *testing.T, taskID int64) ResolveDecisionInput
+		}{
+			{"stale_revision", DecisionResultStaleRevision, ErrDecisionRequestStale, func(t *testing.T, taskID int64) ResolveDecisionInput {
+				first := assistantRecord(t, s, taskID)
+				second := decisionInput()
+				second.Question = "다시"
+				second.Supersedes = first.ID
+				assistantRecordWith(t, s, taskID, second)
+				return answerA(first, DecisionChannelCLI, "director-1")
+			}},
+			{"superseded", DecisionResultSuperseded, ErrDecisionRequestStale, func(t *testing.T, taskID int64) ResolveDecisionInput {
+				request := assistantRecord(t, s, taskID)
+				in := answerA(request, DecisionChannelCLI, "director-1")
+				in.TaskID, in.RequestID = taskID, decisionRequestID(taskID, 9)
+				return in
+			}},
+			{"withdrawn_superseded", DecisionResultSuperseded, ErrDecisionRequestResolved, func(t *testing.T, taskID int64) ResolveDecisionInput {
+				request := assistantRecord(t, s, taskID)
+				withdrawn := ResolveDecisionInput{RequestID: request.ID, Kind: DecisionRequestWithdrawn, Text: "no longer needed", Channel: DecisionChannelCLI, Actor: "director-1"}
+				if _, err := s.ResolveDecision(ctx, withdrawn); err != nil {
+					t.Fatal(err)
+				}
+				return answerA(request, DecisionChannelCLI, "director-1")
+			}},
+			{"conflict", DecisionResultConflict, ErrDecisionRequestResolved, func(t *testing.T, taskID int64) ResolveDecisionInput {
+				request := assistantRecord(t, s, taskID)
+				if _, err := s.ResolveDecision(ctx, answerA(request, DecisionChannelCLI, "director-1")); err != nil {
+					t.Fatal(err)
+				}
+				different := answerA(request, DecisionChannelCLI, "director-1")
+				different.Option = "B"
+				return different
+			}},
+			{"expired", DecisionResultExpired, ErrDecisionRequestResolved, func(t *testing.T, taskID int64) ResolveDecisionInput {
+				request := assistantRecord(t, s, taskID)
+				applied := ResolveDecisionInput{RequestID: request.ID, Kind: DecisionRequestDefaultApplied, Receipt: "hk:doc receipt/x", Channel: DecisionChannelCLI, Actor: "director-1"}
+				if _, err := s.ResolveDecision(ctx, applied); err != nil {
+					t.Fatal(err)
+				}
+				return answerA(request, DecisionChannelCLI, "director-1")
+			}},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				task := decisionTask(t, s, "in_progress")
+				in := tc.setup(t, task.ID)
+				in.EventKey = "each-" + tc.name
+				before := len(attemptsOf(t, pool, task.ID))
+				first, err := s.ResolveDecision(ctx, in)
+				if err != nil || first.Result != tc.result || !errors.Is(first.Refusal, tc.refuse) {
+					t.Fatalf("first=%+v err=%v", first, err)
+				}
+				again, err := s.ResolveDecision(ctx, in)
+				if err != nil || again.Result != tc.result || !errors.Is(again.Refusal, tc.refuse) || !again.Duplicate || again.AttemptID != first.AttemptID || again.ResolutionID != first.ResolutionID {
+					t.Fatalf("again=%+v err=%v", again, err)
+				}
+				if rows := attemptsOf(t, pool, task.ID); len(rows) != before+1 {
+					t.Fatalf("attempts=%+v", rows)
+				}
+			})
+		}
+	})
+
 	t.Run("invalid_key", func(t *testing.T) {
 		task := decisionTask(t, s, "in_progress")
 		request := assistantRecord(t, s, task.ID)
