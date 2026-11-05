@@ -391,8 +391,9 @@ func rounds(ix *index) Rounds {
 		if rep.Role != "impl" || rep.Rounds == nil {
 			continue
 		}
-		if old, ok := latestRep[rep.Task]; !ok || rep.RecordedAt.After(old.RecordedAt) {
-			latestRep[rep.Task] = rep
+		key := repTaskKey(rep.Task)
+		if old, ok := latestRep[key]; !ok || rep.RecordedAt.After(old.RecordedAt) {
+			latestRep[key] = rep
 		}
 	}
 	var perLineage, repsRounds []float64
@@ -1105,4 +1106,14 @@ func normalPath(ix *index) Normal {
 	}
 	out.Coverage = []Coverage{cov}
 	return out
+}
+
+// repTaskKey maps a rep's task_ref to the hk task id the rounds metric looks
+// up: a bare id ("646") and the canonical "hk:task/646" both become "646".
+// Any other ref (a PR URL, a Linear key) stays as is and matches no task.
+func repTaskKey(ref string) string {
+	if id, ok := strings.CutPrefix(ref, "hk:task/"); ok && id != "" && strings.Trim(id, "0123456789") == "" {
+		return id
+	}
+	return ref
 }

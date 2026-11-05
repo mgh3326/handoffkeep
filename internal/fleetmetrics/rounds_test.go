@@ -79,3 +79,20 @@ func TestRoundsMissingTransitionsLowerCoverageNotValue(t *testing.T) {
 		t.Fatalf("coverage = %+v, want 1 linked, 2 without verify transitions", cov)
 	}
 }
+
+// Reps reference hk tasks either by bare id or by the canonical
+// "hk:task/<id>" (205 of 2193 live rows on 2026-11-05); both must link.
+func TestRoundsLinkCanonicalTaskRefs(t *testing.T) {
+	s := roundsFixture()
+	s.Reps[0].Task = "hk:task/3"
+	s.Reps[2].Task = "hk:task/1"
+	r := Compute(s).Rounds
+	if r.RepsAgree != 1 || r.RepsDisagree != 1 {
+		t.Fatalf("reps agree/disagree = %d/%d with hk:task/ refs, want 1/1", r.RepsAgree, r.RepsDisagree)
+	}
+	for ref, want := range map[string]string{"646": "646", "hk:task/646": "646", "hk:task/": "hk:task/", "hk:task/6x": "hk:task/6x", "ROB-12": "ROB-12"} {
+		if got := repTaskKey(ref); got != want {
+			t.Errorf("repTaskKey(%q) = %q, want %q", ref, got, want)
+		}
+	}
+}
