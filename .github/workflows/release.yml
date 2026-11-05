@@ -110,7 +110,7 @@ jobs:
     # verdict: it is not published, and the next tag carries its change.
     if: (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish)) && github.ref_type == 'tag' && github.ref_name != 'v0.0.0'
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    timeout-minutes: 130
     permissions:
       contents: read
       checks: read
@@ -123,7 +123,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          deadline=$(( $(date +%s) + 45*60 ))
+          # Longer than ci.yml's slowest job (45 min) plus runner queue and the
+          # wait for the run to start; TestReleaseGateOutlastsCI pins it.
+          deadline=$(( $(date +%s) + 120*60 ))
           while :; do
             run=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/check-runs?check_name=ci-ok&filter=latest" -q '[.check_runs[] | {status, conclusion}] | first // {} | "\(.status // "none") \(.conclusion // "")"')
             status=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/statuses" -q '[.[] | select(.context == "ci-ok")] | first | .state // "none"')
@@ -151,7 +153,7 @@ jobs:
               echo "green=false" >> "$GITHUB_OUTPUT"; exit 0
             fi
             if [ "$(date +%s)" -ge "$deadline" ]; then
-              echo "no ci-ok verdict on $GITHUB_SHA within 45 minutes" >&2; exit 1
+              echo "no ci-ok verdict on $GITHUB_SHA within 120 minutes" >&2; exit 1
             fi
             sleep 30
           done

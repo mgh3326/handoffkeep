@@ -4,6 +4,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -69,5 +71,50 @@ func TestReleaseCIGreenVerdicts(t *testing.T) {
 				t.Fatalf("exit=%d green=%q, want exit=%d green=%q\n%s", code, green, tc.code, tc.green, logs)
 			}
 		})
+	}
+}
+
+// The release gate waits for main CI, so its deadline must outlast the
+// slowest ci.yml job plus queue time, and its job timeout must outlast the
+// deadline (review on #151, release.yml:125).
+func TestReleaseGateOutlastsCI(t *testing.T) {
+	read := func(name string) []byte {
+		b, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	var ci struct {
+		Jobs map[string]struct {
+			Timeout int `yaml:"timeout-minutes"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal(read("ci.yml"), &ci); err != nil {
+		t.Fatal(err)
+	}
+	slowest := 0
+	for _, j := range ci.Jobs {
+		if j.Timeout > slowest {
+			slowest = j.Timeout
+		}
+	}
+	var rel struct {
+		Jobs map[string]struct {
+			Timeout int    `yaml:"timeout-minutes"`
+			Steps   []step `yaml:"steps"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal(read("release.yml"), &rel); err != nil {
+		t.Fatal(err)
+	}
+	gate := rel.Jobs["ci-green"]
+	m := regexp.MustCompile(`deadline=\$\(\( \$\(date \+%s\) \+ (\d+)\*60 \)\)`).FindStringSubmatch(gate.Steps[0].Run)
+	if m == nil {
+		t.Fatal("ci-green deadline not found")
+	}
+	deadline, _ := strconv.Atoi(m[1])
+	if slowest == 0 || deadline < slowest+60 || gate.Timeout <= deadline {
+		t.Fatalf("slowest ci.yml job %d min, gate deadline %d min, gate job timeout %d min: want deadline >= slowest+60 and timeout > deadline", slowest, deadline, gate.Timeout)
 	}
 }
