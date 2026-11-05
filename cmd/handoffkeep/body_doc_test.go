@@ -26,7 +26,9 @@ func TestTasksAddDocRoundTrip(t *testing.T) {
 	t.Setenv("HANDOFFKEEP_TOKEN", "fixture-token")
 
 	var addOutput bytes.Buffer
-	if err := tasksCmd([]string{"add", "--lane", "doc-lane", "--title", "one operator line", "--project", "experiment", "--doc", "design/2026-09-21/body#3"}, &addOutput); err != nil {
+	// --new: the shared schema may hold a similar title ("one line" in
+	// tests/ui_board_doc_test.go), and this test is not about the duplicate check.
+	if err := tasksCmd([]string{"add", "--lane", "doc-lane", "--title", "one operator line", "--project", "experiment", "--doc", "design/2026-09-21/body#3", "--new"}, &addOutput); err != nil {
 		t.Fatal(err)
 	}
 	var task store.Task

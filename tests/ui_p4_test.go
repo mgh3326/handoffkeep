@@ -53,7 +53,9 @@ func p4PostJSON(t *testing.T, h *httptest.Server, path string, input any) (int, 
 
 func p4Task(t *testing.T, h *httptest.Server, lane, title, kind string) int64 {
 	t.Helper()
-	status, body := p4PostJSON(t, h, "/v1/tasks", map[string]any{"lane": lane, "title": title, "kind": kind, "project": "experiment"})
+	// The fixtures share titles ("hidden ... backlog") in the shared schema,
+	// so they answer the duplicate check with new.
+	status, body := p4PostJSON(t, h, "/v1/tasks", map[string]any{"lane": lane, "title": title, "kind": kind, "project": "experiment", "new": true})
 	if status != http.StatusCreated {
 		t.Fatalf("create task status=%d body=%q", status, body)
 	}

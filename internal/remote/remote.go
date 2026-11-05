@@ -383,6 +383,7 @@ func (c Client) call(ctx context.Context, method, path string, input, output any
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		var x struct {
 			Error, Pattern, Reason string
+			SimilarTasks           []store.SimilarTask `json:"similar_tasks"`
 			Reset                  bool
 			MinSyncID              int64 `json:"min_sync_id"`
 		}
@@ -392,7 +393,7 @@ func (c Client) call(ctx context.Context, method, path string, input, output any
 		if resp.StatusCode == http.StatusGone && x.Reset {
 			return &store.SyncReset{MinSyncID: x.MinSyncID}
 		}
-		return &HTTPError{Status: resp.StatusCode, Code: x.Error, Pattern: x.Pattern, Reason: x.Reason}
+		return &HTTPError{Status: resp.StatusCode, Code: x.Error, Pattern: x.Pattern, Reason: x.Reason, SimilarTasks: x.SimilarTasks}
 	}
 	if e := htmlBodyError(resp); e != nil {
 		return e
@@ -414,9 +415,14 @@ type HTTPError struct {
 	Code    string
 	Pattern string
 	Reason  string
+	// SimilarTasks lists the open tasks a 409 similar_tasks found.
+	SimilarTasks []store.SimilarTask
 }
 
 func (e *HTTPError) Error() string {
+	if len(e.SimilarTasks) > 0 {
+		return (&store.SimilarTasksError{Tasks: e.SimilarTasks}).Error()
+	}
 	if e.Pattern != "" {
 		return fmt.Sprintf("%s:%s", e.Code, e.Pattern)
 	}
@@ -672,14 +678,26 @@ func (c Client) AttachmentUsage(ctx context.Context) (store.AttachmentUsage, err
 // server decodes with unknown fields refused, so a new client that always
 // sent "area":null would break against a server that predates the column.
 // The outer Area shadows the embedded one for encoding/json.
+// Link and New answer the duplicate check and are sent only when set, for
+// the same reason.
 type createTaskBody struct {
 	store.Task
 	Area *string `json:"area,omitempty"`
+	Link int64   `json:"link,omitempty"`
+	New  bool    `json:"new,omitempty"`
 }
 
+// CreateTask files a task with the duplicate check unanswered: a similar open
+// task refuses it with 409 similar_tasks (HTTPError.SimilarTasks).
 func (c Client) CreateTask(ctx context.Context, x store.Task) (store.Task, error) {
+	return c.CreateTaskChecked(ctx, x, store.DuplicateCheck{})
+}
+
+// CreateTaskChecked files a task answering the duplicate check: check.Link
+// relates it to an existing task, check.New files it without looking.
+func (c Client) CreateTaskChecked(ctx context.Context, x store.Task, check store.DuplicateCheck) (store.Task, error) {
 	var out store.Task
-	err := c.call(ctx, "POST", "/v1/tasks", createTaskBody{Task: x, Area: x.Area}, &out)
+	err := c.call(ctx, "POST", "/v1/tasks", createTaskBody{Task: x, Area: x.Area, Link: check.Link, New: check.New}, &out)
 	if err != nil {
 		// The server's code and reason surface unchanged — invalid_context on
 		// create is a validation failure (missing lane, unknown kind), not a
@@ -804,7 +822,11 @@ func (c Client) TransitionTaskWith(ctx context.Context, id int64, in store.Trans
 		Refs        *store.TaskRefs `json:"refs,omitempty"`
 		NoJob       string          `json:"no_job,omitempty"`
 		DuplicateOf int64           `json:"duplicate_of,omitempty"`
-	}{to, note, refs, noJob, in.DuplicateOf}, &out)
+		Priority    *int            `json:"priority,omitempty"`
+		Kind        string          `json:"kind,omitempty"`
+		Project     *string         `json:"project,omitempty"`
+		Set         bool            `json:"set,omitempty"`
+	}{to, note, refs, noJob, in.DuplicateOf, in.Priority, in.Kind, in.Project, in.Set}, &out)
 	if err != nil && noJob != "" {
 		// Same strict-decoder translation as claims: a server that predates
 		// the no_job field answers invalid_context rather than naming it.

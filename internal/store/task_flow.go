@@ -259,6 +259,18 @@ type TransitionInput struct {
 	// ClearOnly turns the transition into clearing the awaiting_decision flag:
 	// it is refused on a task that is not flagged, and the state is unchanged.
 	ClearOnly bool
+	// Priority, Kind and Project apply only to a move out of triage to
+	// backlog or unstarted: they set the task's values as part of the exit,
+	// and the triage gate judges the values the task leaves with.
+	Priority *int
+	Kind     string
+	Project  *string
+	// Set applies a triage exit to the task's children still in triage in
+	// the same transaction: an accept moves them to the same state, each
+	// inheriting priority, kind and project unless it has its own; a decline
+	// drops them. Declining a ticket set's parent declines its triage
+	// children with or without Set.
+	Set bool
 }
 
 // TransitionTask is TransitionTaskWith without a duplicate_of target.
@@ -362,6 +374,9 @@ func (s *Store) transitionTask(ctx context.Context, id int64, in TransitionInput
 	if in.To == "" || !validText(by, 128) || by == "" || !validText(note, MaxBytes) || !validText(noJob, MaxBytes) || (refs != nil && !validTaskRefs(*refs)) || in.DuplicateOf < 0 {
 		return Task{}, errors.New("invalid task transition")
 	}
+	if (in.Priority != nil && *in.Priority < 0) || (in.Kind != "" && !taskKinds[in.Kind]) || (in.Project != nil && !validName(*in.Project)) {
+		return Task{}, errors.New("invalid task transition: priority must not be negative, kind must be one of " + strings.Join(TaskKinds(), ", ") + ", and project a project name")
+	}
 	if err := guard.Reject(note); err != nil {
 		return Task{}, err
 	}
@@ -433,6 +448,11 @@ func (s *Store) transitionTask(ctx context.Context, id int64, in TransitionInput
 	if reopen && !(IsSettledState(from) || from == StateIcebox) {
 		return Task{}, ErrTaskConflict
 	}
+	// The unset kind survives only a decline from triage; a reopen would put
+	// it in unstarted, which the kind constraint refuses.
+	if reopen && x.Kind == "" {
+		return Task{}, fmt.Errorf("%w: this task was declined in triage without a kind; file it again instead", ErrTaskConflict)
+	}
 	if IsSettledState(from) && !reopen {
 		return Task{}, ErrTaskConflict
 	}
@@ -502,18 +522,26 @@ func (s *Store) transitionTask(ctx context.Context, id int64, in TransitionInput
 	if action == actSetFlag && strings.TrimSpace(note) == "" {
 		return Task{}, errors.New("needs_decision requires question")
 	}
+	leavingTriage := action == actMove && from == StateTriage
+	accepting := leavingTriage && (to == StateBacklog || to == StateUnstarted)
+	triageFields := in.Priority != nil || in.Kind != "" || in.Project != nil
+	if triageFields && !accepting {
+		return Task{}, errors.New("invalid task transition: priority, kind and project apply only to leaving triage for backlog or unstarted")
+	}
+	if in.Set && !leavingTriage {
+		return Task{}, errors.New("invalid task transition: set applies only to leaving triage")
+	}
+	before := x
+	if triageFields {
+		if err := applyTriageFieldsTx(ctx, tx, &x, in.Priority, in.Kind, in.Project); err != nil {
+			return Task{}, err
+		}
+	}
 	// The triage gate: a task leaves triage for backlog or unstarted only with
 	// a priority above 0, a project and a kind; declining needs a reason.
-	if action == actMove && from == StateTriage {
-		switch to {
-		case StateBacklog, StateUnstarted:
-			if x.Priority <= 0 || x.Project == nil || *x.Project == "" || !taskKinds[x.Kind] {
-				return Task{}, fmt.Errorf("%w: leaving triage needs a priority above 0, a project and a kind", ErrTriageGate)
-			}
-		default:
-			if strings.TrimSpace(note) == "" {
-				return Task{}, errors.New("declining a triage task requires a reason")
-			}
+	if leavingTriage {
+		if err := triageGate(x, to, note); err != nil {
+			return Task{}, err
 		}
 	}
 	if refs != nil {
@@ -593,6 +621,11 @@ func (s *Store) transitionTask(ctx context.Context, id int64, in TransitionInput
 		applyLifecycle(&x, from, to, now)
 	}
 	x.UpdatedAt = now
+	if triageFields {
+		if err = writeTriageFieldsTx(ctx, tx, before, x, by, now); err != nil {
+			return Task{}, err
+		}
+	}
 	if x, err = writeTaskTx(ctx, tx, x); err != nil {
 		return Task{}, err
 	}
@@ -634,6 +667,19 @@ func (s *Store) transitionTask(ctx context.Context, id int64, in TransitionInput
 	if err := s.recordLinearBoardTaskTx(ctx, tx, x, note); err != nil {
 		return Task{}, err
 	}
+	if leavingTriage {
+		cascade := in.Set
+		if !accepting && !cascade {
+			if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM ticket_sets WHERE parent_task_id=$1)`, id).Scan(&cascade); err != nil {
+				return Task{}, err
+			}
+		}
+		if cascade {
+			if err = s.cascadeTriageTx(ctx, tx, x, accepting, by, note, now); err != nil {
+				return Task{}, err
+			}
+		}
+	}
 	// Rule 8: entering merged by hand also looks for a deploy record that
 	// already lists the task's PR.
 	if action == actMove && to == StateMerged {
@@ -642,4 +688,155 @@ func (s *Store) transitionTask(ctx context.Context, id int64, in TransitionInput
 		}
 	}
 	return x, tx.Commit(ctx)
+}
+
+// triageGate is the one check on a move out of triage: to backlog or
+// unstarted only with a priority above 0, a project and a kind; to dropped or
+// duplicate only with a reason.
+func triageGate(x Task, to, note string) error {
+	switch to {
+	case StateBacklog, StateUnstarted:
+		if x.Priority <= 0 || x.Project == nil || *x.Project == "" || !taskKinds[x.Kind] {
+			return fmt.Errorf("%w: leaving triage needs a priority above 0, a project and a kind", ErrTriageGate)
+		}
+	default:
+		if strings.TrimSpace(note) == "" {
+			return fmt.Errorf("%w: declining a triage task requires a reason", ErrTriageGate)
+		}
+	}
+	return nil
+}
+
+// applyTriageFieldsTx sets the values a task leaves triage with on x; a nil
+// or empty field keeps the task's own. A project must be in the vocabulary
+// and agree with the task's milestone.
+func applyTriageFieldsTx(ctx context.Context, tx pgx.Tx, x *Task, priority *int, kind string, project *string) error {
+	if priority != nil {
+		x.Priority = *priority
+	}
+	if kind != "" {
+		x.Kind = kind
+	}
+	if project != nil {
+		if err := requireTaskProject(ctx, tx, project); err != nil {
+			return err
+		}
+		if x.MilestoneID != nil && (x.Project == nil || *x.Project != *project) {
+			return ErrMilestoneProject
+		}
+		p := *project
+		x.Project = &p
+	}
+	return nil
+}
+
+// writeTriageFieldsTx stores priority, kind and project where x differs from
+// before, with one event per changed field: a project event as
+// SetTaskProject writes, a metadata event for priority and kind.
+func writeTriageFieldsTx(ctx context.Context, tx pgx.Tx, before, x Task, by string, now time.Time) error {
+	if _, err := tx.Exec(ctx, `UPDATE tasks SET priority=$2,kind=$3,project=$4 WHERE id=$1`, x.ID, x.Priority, x.Kind, x.Project); err != nil {
+		return err
+	}
+	if before.Priority != x.Priority {
+		if _, _, err := insertEvent(ctx, tx, taskEventInput{TaskID: x.ID, Kind: "metadata", From: before.State, To: before.State, By: by, Refs: before.Refs, At: now, Field: "priority", FromValue: fmt.Sprint(before.Priority), ToValue: fmt.Sprint(x.Priority)}); err != nil {
+			return err
+		}
+	}
+	if before.Kind != x.Kind {
+		if _, _, err := insertEvent(ctx, tx, taskEventInput{TaskID: x.ID, Kind: "metadata", From: before.State, To: before.State, By: by, Refs: before.Refs, At: now, Field: "kind", FromValue: before.Kind, ToValue: x.Kind}); err != nil {
+			return err
+		}
+	}
+	from, to := "", ""
+	if before.Project != nil {
+		from = *before.Project
+	}
+	if x.Project != nil {
+		to = *x.Project
+	}
+	if from != to {
+		if _, _, err := insertEvent(ctx, tx, taskEventInput{TaskID: x.ID, Kind: TaskEventProject, From: from, To: to, By: by, Refs: before.Refs, At: now, Field: "project", FromValue: from, ToValue: to}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// cascadeTriageTx applies a parent's triage exit to its children still in
+// triage, under the caller's task-mutation lock. An accept moves each child to
+// the parent's state, inheriting priority, kind and project where the child
+// has none; every child then passes the same gate. A decline drops each
+// child: a duplicate parent does not make its children duplicates of anything.
+func (s *Store) cascadeTriageTx(ctx context.Context, tx pgx.Tx, parent Task, accepting bool, by, note string, now time.Time) error {
+	rows, err := tx.Query(ctx, `SELECT `+taskColumns+` FROM tasks WHERE parent_id=$1 AND state=$2 ORDER BY id FOR UPDATE`, parent.ID, StateTriage)
+	if err != nil {
+		return err
+	}
+	var children []Task
+	for rows.Next() {
+		var c Task
+		if err = scanTask(rows, &c); err != nil {
+			rows.Close()
+			return err
+		}
+		children = append(children, c)
+	}
+	rows.Close()
+	if err = rows.Err(); err != nil {
+		return err
+	}
+	to, childNote := parent.State, note
+	if !accepting {
+		to = StateDropped
+		childNote = fmt.Sprintf("declined with set #%d: %s", parent.ID, note)
+	}
+	for _, c := range children {
+		before := c
+		decisionBefore := decisionBeforeOf(c)
+		if accepting {
+			if c.Priority <= 0 {
+				c.Priority = parent.Priority
+			}
+			if c.Kind == "" {
+				c.Kind = parent.Kind
+			}
+			if c.Project == nil || *c.Project == "" {
+				c.Project = parent.Project
+			}
+		}
+		if err = triageGate(c, to, childNote); err != nil {
+			return fmt.Errorf("sub-task #%d: %w", c.ID, err)
+		}
+		if err = s.wrkTaskFenceTx(ctx, tx, c, FenceTarget(to), false); err != nil {
+			return err
+		}
+		if accepting {
+			if err = writeTriageFieldsTx(ctx, tx, before, c, by, now); err != nil {
+				return err
+			}
+		}
+		c.State, c.AwaitingDecision, c.UpdatedAt = to, false, now
+		applyLifecycle(&c, StateTriage, to, now)
+		if c, err = writeTaskTx(ctx, tx, c); err != nil {
+			return err
+		}
+		if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: c.ID, From: StateTriage, To: to, By: by, Note: childNote, Refs: c.Refs, At: now}); err != nil {
+			return err
+		}
+		if err = mirrorTaskDecisionsTx(ctx, tx, decisionBefore, c, by, childNote, 0, now); err != nil {
+			return err
+		}
+		if err = s.afterStateChangeTx(ctx, tx, c, StateTriage, by, now); err != nil {
+			return err
+		}
+		if s.LinearSyncEnabled() && c.Refs.Linear != nil && c.Refs.Linear.Sync {
+			if err = enqueueLinearTaskTransition(ctx, tx, c, childNote); err != nil {
+				return err
+			}
+		}
+		if err = s.recordLinearBoardTaskTx(ctx, tx, c, childNote); err != nil {
+			return err
+		}
+	}
+	return nil
 }
