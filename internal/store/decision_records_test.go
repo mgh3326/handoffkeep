@@ -539,3 +539,44 @@ func TestDecisionRecordOverdueIsDisplayOnly(t *testing.T) {
 		t.Fatalf("overdue list=%+v err=%v", xs, err)
 	}
 }
+
+func TestTasklessJobDecisions(t *testing.T) {
+	s := decisionStore(t)
+	for _, id := range []string{"taskless-escalation", "taskless-lane"} {
+		if _, _, err := s.ClaimJob(t.Context(), Job{JobID: id, Host: "host-a", CreatedBy: "decision-test"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	escalation, created := decisionRelay(t, s, RelayEvent{Kind: "job.escalate", JobID: "taskless-escalation", OwnerLane: "test-lane", Question: "which way?", ReportPath: "taskless-report"})
+	if !created {
+		t.Fatal("escalation not created")
+	}
+	row := onlyDecision(t, decisionRowsOf(t, s, DecisionSourceJobEscalate, fmt.Sprint(escalation.ID)), DecisionStatusOpen)
+	if row.JobID != "taskless-escalation" || row.TaskID != nil {
+		t.Fatalf("escalation: %+v", row)
+	}
+	lane, created := decisionRelay(t, s, RelayEvent{Kind: "lane.event", JobID: "taskless-lane", OwnerLane: "test-lane", EventID: "taskless-ask", Text: "[decision-needed] choose?"})
+	if !created {
+		t.Fatal("lane event not created")
+	}
+	row = onlyDecision(t, decisionRowsOf(t, s, DecisionSourceLaneEvent, fmt.Sprint(lane.ID)), DecisionStatusOpen)
+	if row.JobID != "taskless-lane" || row.TaskID != nil {
+		t.Fatalf("lane decision: %+v", row)
+	}
+	sources, err := s.ListOpenDecisionSources(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, item := range sources.Items {
+		if item.Source == DecisionSourceJobEscalate && item.JobID == "taskless-escalation" {
+			found = true
+			if item.TaskID != nil || item.JobState != "claimed" {
+				t.Fatalf("source: %+v", item)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("taskless escalation missing: %+v", sources.Items)
+	}
+}
