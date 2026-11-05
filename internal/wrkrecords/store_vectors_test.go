@@ -123,7 +123,7 @@ func (db contractDB) seed(t *testing.T, v vector, catalog map[string][]byte) {
 		if c.JobID != "" {
 			claimedBy = Text(c.Payload, "owner_lane") // Canonical claim's task-binding projection.
 		}
-		if _, e := db.owner.Exec(ctx, `INSERT INTO tasks(id,lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at,project,awaiting_decision) VALUES($1,$2,$3,'contract task','implement',$6,0,$4::jsonb,$5,'fixture',now(),now(),$7,$8)`, id, lane, parent, string(refs), claimedBy, state, project, awaiting); e != nil {
+		if _, e := db.owner.Exec(ctx, `INSERT INTO tasks(id,lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at,last_activity_at,project,awaiting_decision) VALUES($1,$2,$3,'contract task','implement',$6,0,$4::jsonb,$5,'fixture',now(),now(),now(),$7,$8)`, id, lane, parent, string(refs), claimedBy, state, project, awaiting); e != nil {
 			t.Fatal(e)
 		}
 	}

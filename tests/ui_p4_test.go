@@ -344,8 +344,8 @@ func p4StructuredDecisionTasks(t *testing.T, _ *store.Store, lane, prefix string
 	}
 	defer tx.Rollback(context.Background())
 	now := time.Now().UTC()
-	rows, err := tx.Query(t.Context(), `INSERT INTO tasks(lane,title,kind,state,awaiting_decision,refs,claimed_by,created_by,created_at,updated_at)
-		SELECT $1,title,'implement','developing',true,$2::jsonb,'worker-a','worker-a',$3,$3
+	rows, err := tx.Query(t.Context(), `INSERT INTO tasks(lane,title,kind,state,awaiting_decision,refs,claimed_by,created_by,created_at,updated_at,last_activity_at)
+		SELECT $1,title,'implement','developing',true,$2::jsonb,'worker-a','worker-a',$3,$3,$3
 		FROM unnest($4::text[]) AS title RETURNING id`, lane, string(refs), now, titles)
 	if err != nil {
 		t.Fatal(err)

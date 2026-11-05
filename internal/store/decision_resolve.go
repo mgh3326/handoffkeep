@@ -510,7 +510,7 @@ func (s *Store) ResolveDecision(ctx context.Context, in ResolveDecisionInput) (R
 			return ResolveDecisionOutcome{}, err
 		}
 	}
-	if err = insertDecisionEvent(ctx, tx, x.ID, x.State, in.Actor, note, x.Refs, now); err != nil {
+	if err = insertDecisionEvent(ctx, tx, &x, in.Actor, note, now); err != nil {
 		return ResolveDecisionOutcome{}, err
 	}
 	if err = mirrorTaskDecisionsTx(ctx, tx, decisionBefore, x, in.Actor, note, 0, now); err != nil {

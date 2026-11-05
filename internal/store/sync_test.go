@@ -348,8 +348,14 @@ func TestSyncDecisionDeleteAndTaskRetention(t *testing.T) {
 		t.Fatalf("terminal task=%+v err=%v", dropped, err)
 	}
 	changes, _, err = s.SyncDelta(ctx, afterDelete.MaxSyncID, 100)
-	if err != nil || len(changes) != 1 || changes[0].Model != "task" || changes[0].Action != "U" {
+	// The state update and subsequent activity-clock update each emit a task row.
+	if err != nil || len(changes) != 2 {
 		t.Fatalf("terminal changes=%v err=%v", changes, err)
+	}
+	for _, change := range changes {
+		if change.Model != "task" || change.Action != "U" || change.ModelID != fmt.Sprint(id) {
+			t.Fatalf("terminal change=%+v", change)
+		}
 	}
 	if _, found, err := s.GetSyncRow(ctx, "task", fmt.Sprint(id)); err != nil || !found {
 		t.Fatalf("terminal task not readable: found=%v err=%v", found, err)

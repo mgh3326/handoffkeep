@@ -533,7 +533,7 @@ func (s *Store) AnswerLinearDecision(ctx context.Context, in LinearDecisionAnswe
 			return "", err
 		}
 		note := "decision-answered " + resolved.ID + " " + v.option.Key + " (operator on Linear " + link.Identifier + ", ver=" + link.Ver + ")"
-		if err = insertDecisionEvent(ctx, tx, x.ID, x.State, linearDecisionRecorder, note, x.Refs, now); err != nil {
+		if err = insertDecisionEvent(ctx, tx, &x, linearDecisionRecorder, note, now); err != nil {
 			return "", err
 		}
 		if err = mirrorTaskDecisionsTx(ctx, tx, decisionBefore, x, linearDecisionRecorder, note, 0, now); err != nil {
