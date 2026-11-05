@@ -1,28 +1,26 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { SearchFn } from "./search";
 import { fetchTaskSearch, safeTaskId } from "./search";
+import { readStored, STORAGE_KEYS, writeStored } from "./storage";
 import "../design/shell.css";
 
 export type Theme = "dark" | "light";
-export const THEME_KEY = "hk-console:theme";
+export const THEME_KEY = STORAGE_KEYS.theme;
 export function loadTheme(storage?: Pick<Storage, "getItem">): Theme {
-  try {
-    return (storage ?? globalThis.localStorage)?.getItem(THEME_KEY) === "light"
-      ? "light"
-      : "dark";
-  } catch {
-    return "dark";
-  }
+  return readStored(THEME_KEY, storage) === "light" ? "light" : "dark";
 }
 export function applyTheme(
   theme: Theme,
   storage?: Pick<Storage, "setItem">,
 ): void {
   document.documentElement.dataset.theme = theme;
-  try {
-    (storage ?? globalThis.localStorage)?.setItem(THEME_KEY, theme);
-  } catch {
-    /* Session preference only. */
+  writeStored(THEME_KEY, theme, storage);
+}
+/** Applies the stored theme before the first render. Every entry calls it
+ * first, so a light-theme page never flashes dark. Dark is the default. */
+export function bootTheme(): void {
+  if (loadTheme() === "light") {
+    document.documentElement.dataset.theme = "light";
   }
 }
 export type NavKey =
@@ -105,7 +103,7 @@ type Recent = { label: string; href: string };
 function recentItems(): Recent[] {
   try {
     const value: unknown = JSON.parse(
-      localStorage.getItem("hk-console:recent") ?? "[]",
+      readStored(STORAGE_KEYS.recent) ?? "[]",
     );
     if (!Array.isArray(value)) return [];
     return value
@@ -127,7 +125,7 @@ function recentItems(): Recent[] {
 function myWorkHref() {
   try {
     const scope = new URLSearchParams(
-      localStorage.getItem("hk-console:scope") ?? "",
+      readStored(STORAGE_KEYS.scope) ?? "",
     );
     scope.set("mine", "1");
     return `/ui/queue?${scope}`;
@@ -279,19 +277,15 @@ export function PageShell({
   useEffect(() => {
     const href = location.pathname + location.search;
     const label = `Recent · ${location.pathname}`;
-    try {
-      localStorage.setItem(
-        "hk-console:recent",
-        JSON.stringify(
-          [
-            { href, label },
-            ...recentItems().filter((item) => item.href !== href),
-          ].slice(0, 5),
-        ),
-      );
-    } catch {
-      /* Session navigation still works. */
-    }
+    writeStored(
+      STORAGE_KEYS.recent,
+      JSON.stringify(
+        [
+          { href, label },
+          ...recentItems().filter((item) => item.href !== href),
+        ].slice(0, 5),
+      ),
+    );
   }, []);
   const [palette, setPalette] = useState(false);
   const [help, setHelp] = useState(false);

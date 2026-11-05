@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/mgh3326/handoffkeep/internal/guard"
 	"github.com/mgh3326/handoffkeep/internal/store"
 	"github.com/mgh3326/handoffkeep/internal/telemetry"
 )
@@ -30,7 +31,7 @@ func TestAppErrMapping(t *testing.T) {
 		{"wrapped sentinel", fmt.Errorf("claim: %w", store.ErrQueueEmpty), http.StatusNotFound, map[string]string{"error": "queue_empty"}},
 		{"sentinel with reason", fmt.Errorf("%w: claimed by another job", store.ErrTaskConflict), http.StatusConflict, map[string]string{"error": "task_conflict", "reason": "claimed by another job"}},
 		{"store validation", errors.New("invalid bench rep"), http.StatusBadRequest, map[string]string{"error": "invalid_context"}},
-		{"secret pattern", errors.New("secret_like_content:aws_key"), http.StatusBadRequest, map[string]string{"error": "secret_like_content", "pattern": "aws_key"}},
+		{"secret pattern", guard.Reject("AKIA" + "ABCDEFGHIJKLMNOP"), http.StatusBadRequest, map[string]string{"error": "secret_like_content", "pattern": "aws_access_key"}},
 		{"integrity violation", &pgconn.PgError{Code: "23505"}, http.StatusBadRequest, map[string]string{"error": "invalid_context"}},
 		{"data exception", &pgconn.PgError{Code: "22P02"}, http.StatusBadRequest, map[string]string{"error": "invalid_context"}},
 		{"undefined column", &pgconn.PgError{Code: "42703"}, http.StatusInternalServerError, map[string]string{"error": "internal_error"}},
@@ -171,5 +172,26 @@ func TestDecodeRejectsTrailingDataAndOversize(t *testing.T) {
 	var tooLarge *http.MaxBytesError
 	if err := decode(r, &v, 64); !errors.As(err, &tooLarge) {
 		t.Fatalf("oversized body err=%v, want *http.MaxBytesError", err)
+	}
+}
+
+// A rule's wire code is its sentinel's own text, so the store and the API
+// name a failure the same way. Not-found sentinels ("x_not_found") may answer
+// the shared "not_found". The two other differences predate the rule and are
+// kept for existing clients; do not add to them.
+func TestErrorRuleCodesMatchSentinels(t *testing.T) {
+	legacy := map[string]string{
+		"invalid_sync":             "invalid_context",
+		"decision_record_not_open": "decision_request_not_open",
+	}
+	for _, rule := range errorRules {
+		text := rule.err.Error()
+		switch {
+		case rule.code == text:
+		case rule.code == "not_found" && strings.HasSuffix(text, "_not_found"):
+		case legacy[text] == rule.code:
+		default:
+			t.Errorf("sentinel %q answers %q; make the wire code the sentinel's text", text, rule.code)
+		}
 	}
 }

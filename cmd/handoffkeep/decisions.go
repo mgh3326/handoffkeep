@@ -18,28 +18,6 @@ const decisionListUsage = "usage: decisions list [--status open|answered|superse
 const decisionSnoozeUsage = "usage: decisions snooze <id> --until <RFC3339>"
 const decisionBackfillUsage = "usage: decisions backfill --dry-run [--json]"
 
-// splitDecisionArgs puts flags before positionals so either order parses.
-func splitDecisionArgs(args []string, valueFlags map[string]bool) ([]string, error) {
-	valueFlags["--url"], valueFlags["--token"] = true, true
-	flags, positional := []string{}, []string{}
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		if !strings.HasPrefix(arg, "-") {
-			positional = append(positional, arg)
-			continue
-		}
-		flags = append(flags, arg)
-		if valueFlags[arg] {
-			i++
-			if i >= len(args) {
-				return nil, fmt.Errorf("%s requires a value", arg)
-			}
-			flags = append(flags, args[i])
-		}
-	}
-	return append(flags, positional...), nil
-}
-
 // decisionListCmd prints decision records as JSON, oldest first.
 func decisionListCmd(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("decisions list", flag.ContinueOnError)
@@ -51,7 +29,7 @@ func decisionListCmd(args []string, out io.Writer) error {
 	fs.StringVar(&f.Source, "source", "", "only this source")
 	fs.BoolVar(&f.IncludeSnoozed, "include-snoozed", false, "list snoozed records too")
 	fs.IntVar(&f.Limit, "limit", 0, "maximum results (server default 1000)")
-	parsed, err := splitDecisionArgs(args, map[string]bool{"--status": true, "--lane": true, "--source": true, "--limit": true})
+	parsed, err := splitArgs(args, "status", "lane", "source", "limit")
 	if err != nil {
 		return err
 	}
@@ -76,7 +54,7 @@ func decisionSnoozeCmd(args []string, out io.Writer) error {
 	fs.SetOutput(io.Discard)
 	c := remoteClient(fs)
 	until := fs.String("until", "", "RFC3339 time the record is hidden until")
-	parsed, err := splitDecisionArgs(args, map[string]bool{"--until": true})
+	parsed, err := splitArgs(args, "until")
 	if err != nil {
 		return err
 	}
@@ -113,7 +91,7 @@ func decisionBackfillCmd(args []string, out io.Writer) error {
 	c := remoteClient(fs)
 	dryRun := fs.Bool("dry-run", false, "classify only; required")
 	asJSON := fs.Bool("json", false, "print the report as JSON")
-	parsed, err := splitDecisionArgs(args, map[string]bool{})
+	parsed, err := splitArgs(args)
 	if err != nil {
 		return err
 	}

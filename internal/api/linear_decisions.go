@@ -228,7 +228,7 @@ func (s Server) taskDecisionAsk(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	id, err := taskID(r)
+	id, err := pathID(r, "id")
 	if err != nil || id < 1 {
 		writeError(w, http.StatusBadRequest, "invalid_context")
 		return

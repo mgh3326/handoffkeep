@@ -28,9 +28,9 @@ type LinearRateGate struct {
 
 func (g *LinearRateGate) clock() time.Time {
 	if g.now != nil {
-		return g.now()
+		return g.now().UTC()
 	}
-	return time.Now()
+	return time.Now().UTC()
 }
 
 // Paused reports whether requests must wait; a nil gate never pauses.

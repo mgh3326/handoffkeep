@@ -49,7 +49,7 @@ func (s Server) decisionRecordSnooze(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.auth(w, r); !ok {
 		return
 	}
-	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	id, err := pathID(r, "id")
 	if err != nil || id < 1 {
 		writeError(w, http.StatusBadRequest, "invalid_context")
 		return

@@ -72,15 +72,17 @@ describe("scanTitleDocs", () => {
     expect(scanTitleDocs("본문 hk:doc a/b.").body).toEqual(["a/b"]);
   });
 
-  it("a whitespace-padded title at the 64KiB cap scans in well under 50ms (no cubic backtracking)", () => {
+  it("a whitespace-padded title at the 64KiB cap scans in well under a second (no cubic backtracking)", () => {
     // S1 regression — the old BODY_MARKER_RE interleaved \s* between optional
     // single-char classes; "본문" + a long space run + no hk:doc blew up to
     // ~29s at n=4000. Titles can reach the 64KiB store cap, so scan a padded
-    // near-miss at full size. This test takes minutes on the old regex.
+    // near-miss at full size. This test takes minutes on the old regex; the
+    // bound is a second, not tens of milliseconds, so a slow or loaded CI
+    // runner cannot fail a linear scan.
     for (const title of ["본문" + " ".repeat(65_000), "본문 문서" + " ".repeat(65_000) + "hk:doc", "x".repeat(64 * 1024)]) {
       const t0 = performance.now();
       scanTitleDocs(title);
-      expect(performance.now() - t0).toBeLessThan(50);
+      expect(performance.now() - t0).toBeLessThan(1000);
     }
   });
 

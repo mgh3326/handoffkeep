@@ -2,22 +2,17 @@ package api
 
 import (
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
-
-func modelID(r *http.Request, key string) (int64, error) {
-	return strconv.ParseInt(r.PathValue(key), 10, 64)
-}
 
 func (s Server) taskDue(w http.ResponseWriter, r *http.Request) {
 	by, ok := s.auth(w, r)
 	if !ok {
 		return
 	}
-	id, err := taskID(r)
+	id, err := pathID(r, "id")
 	if err != nil || id < 1 {
 		writeError(w, http.StatusBadRequest, "invalid_context")
 		return
@@ -88,7 +83,7 @@ func (s Server) milestoneSave(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodPut {
-		id, err := modelID(r, "milestone")
+		id, err := pathID(r, "milestone")
 		if err != nil || id < 1 {
 			writeError(w, http.StatusBadRequest, "invalid_context")
 			return
@@ -125,7 +120,7 @@ func (s Server) labelSave(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodPut {
-		id, err := modelID(r, "label")
+		id, err := pathID(r, "label")
 		if err != nil || id < 1 {
 			writeError(w, http.StatusBadRequest, "invalid_context")
 			return
@@ -145,7 +140,7 @@ func (s Server) labelRetire(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.auth(w, r); !ok {
 		return
 	}
-	id, err := modelID(r, "label")
+	id, err := pathID(r, "label")
 	if err != nil || id < 1 {
 		writeError(w, http.StatusBadRequest, "invalid_context")
 		return
@@ -161,7 +156,7 @@ func (s Server) taskMilestone(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	id, err := taskID(r)
+	id, err := pathID(r, "id")
 	if err != nil || id < 1 {
 		writeError(w, http.StatusBadRequest, "invalid_context")
 		return
@@ -185,7 +180,7 @@ func (s Server) taskLabel(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	id, err := taskID(r)
+	id, err := pathID(r, "id")
 	if err != nil || id < 1 {
 		writeError(w, http.StatusBadRequest, "invalid_context")
 		return
@@ -214,7 +209,7 @@ func (s Server) taskDeadlines(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	id, err := taskID(r)
+	id, err := pathID(r, "id")
 	if err != nil || id < 1 {
 		writeError(w, http.StatusBadRequest, "invalid_context")
 		return
@@ -236,7 +231,7 @@ func (s Server) taskSubscriber(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	id, err := taskID(r)
+	id, err := pathID(r, "id")
 	if err != nil || id < 1 {
 		writeError(w, http.StatusBadRequest, "invalid_context")
 		return
@@ -266,7 +261,7 @@ func (s Server) milestoneGet(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.auth(w, r); !ok {
 		return
 	}
-	id, err := modelID(r, "milestone")
+	id, err := pathID(r, "milestone")
 	if err != nil || id < 1 {
 		writeError(w, http.StatusBadRequest, "invalid_context")
 		return
@@ -283,7 +278,7 @@ func (s Server) milestonePatch(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.auth(w, r); !ok {
 		return
 	}
-	id, err := modelID(r, "milestone")
+	id, err := pathID(r, "milestone")
 	if err != nil || id < 1 {
 		writeError(w, http.StatusBadRequest, "invalid_context")
 		return

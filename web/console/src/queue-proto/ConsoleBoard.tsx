@@ -1,3 +1,4 @@
+import { STORAGE_KEYS, writeStored } from "../shared/storage";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchBoardTasks, fetchLive } from "../shared/boardApi";
 import { usePoll } from "../shared/usePoll";
@@ -30,14 +31,10 @@ export function ConsoleBoard() {
   const scroll = useRef(0);
   useEffect(() => {
     if (lane || claimant) {
-      try {
-        const scope = new URLSearchParams();
-        if (lane) scope.set("lane", lane);
-        if (claimant) scope.set("claimed_by", claimant);
-        localStorage.setItem("hk-console:scope", scope.toString());
-      } catch {
-        /* URL scope still works. */
-      }
+      const scope = new URLSearchParams();
+      if (lane) scope.set("lane", lane);
+      if (claimant) scope.set("claimed_by", claimant);
+      writeStored(STORAGE_KEYS.scope, scope.toString());
     }
     const p = new URLSearchParams(window.location.search);
     for (const [key, value] of Object.entries({

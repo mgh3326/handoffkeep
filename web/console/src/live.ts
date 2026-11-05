@@ -260,3 +260,39 @@ export function taskIdForJob(live: LiveResponse, jobId: string): number | null {
   const parent = live.links.find((entry) => entry.children.includes(jobId));
   return parent ? parent.task_id : null;
 }
+
+/** The /ui/api/live contract check: both sections with status, fetched_at
+ * and items, every node named, links and the mismatch lists present. A
+ * payload that fails it is a failed read, never an empty fleet. */
+export function isLiveResponse(value: unknown): value is LiveResponse {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const x = value as Record<string, unknown>;
+  const section = (v: unknown): boolean => {
+    if (typeof v !== "object" || v === null) {
+      return false;
+    }
+    const s = v as Record<string, unknown>;
+    return typeof s.status === "string" && typeof s.fetched_at === "string" && Array.isArray(s.items);
+  };
+  const node = (v: unknown): boolean => {
+    if (typeof v !== "object" || v === null) {
+      return false;
+    }
+    const n = v as Record<string, unknown>;
+    return typeof n.machine_id === "string" && typeof n.display_state === "string";
+  };
+  const mismatch = x.mismatch;
+  return (
+    typeof x.generated_at === "string" &&
+    section(x.jobs) &&
+    section(x.nodes) &&
+    (x.nodes as { items: unknown[] }).items.every(node) &&
+    Array.isArray(x.links) &&
+    typeof mismatch === "object" &&
+    mismatch !== null &&
+    Array.isArray((mismatch as Record<string, unknown>).tasks_without_job) &&
+    Array.isArray((mismatch as Record<string, unknown>).jobs_without_task)
+  );
+}

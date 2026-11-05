@@ -140,7 +140,7 @@ func (s Server) quotaRelease(w http.ResponseWriter, r *http.Request) {
 		quotaError(w, r, err)
 		return
 	}
-	w.WriteHeader(204)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // quotaPresenceLimit caps one presence listing; the response says when rows
