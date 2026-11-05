@@ -127,6 +127,9 @@ func TestRecordDotsResultWritesOnce(t *testing.T) {
 	if err != nil || !found || doc.Kind != "note" || doc.Session != DotsLane || doc.Body != dotsResultBody("RESULT", issue, c) {
 		t.Fatalf("doc=%+v found=%t err=%v", doc, found, err)
 	}
+	if doc.OriginClass != "import" || doc.TaskID != nil || doc.CreatedBy != dotsCreatedBy {
+		t.Fatalf("dots result origin_class=%q task_id=%v created_by=%q, want import, none, %s", doc.OriginClass, doc.TaskID, doc.CreatedBy, dotsCreatedBy)
+	}
 	// A redelivery carrying an edited comment and a new title changes nothing.
 	edited := c
 	edited.Body = "[dots] RESULT rewritten\nother"
@@ -190,5 +193,25 @@ func TestRecordDotsResultKindsAndFollowupKinds(t *testing.T) {
 	}
 	if rows[0].Kind != OutboxKindDotsDecision || rows[1].Kind != OutboxKindDotsDecision || rows[2].Kind != OutboxKindDotsFollowup || rows[2].EventID != "dots-followup-"+commentID || rows[2].Text != dotsFollowupText(issue) {
 		t.Fatalf("outbox=%+v", rows)
+	}
+}
+
+// A recorded dots result is stored as an import; its key, body and creator
+// are the poller's.
+func TestDotsResultIsImport(t *testing.T) {
+	s := dotsStore(t)
+	ctx := t.Context()
+	issue := DotsIssue{Identifier: "ZZZ-8", Title: "Fake issue", URL: "https://linear.example/zzz/8"}
+	c := DotsComment{ID: "0a1b2c3d-0000-4000-8000-000000000008", CreatedAt: "2026-11-02T01:02:03.000Z", Body: "[dots] RESULT done\nsummary"}
+	key, created, err := s.RecordDotsResult(ctx, "RESULT", issue, c)
+	if err != nil || !created || key != dotsResultKey(issue, c) {
+		t.Fatalf("key=%q created=%t err=%v", key, created, err)
+	}
+	doc, found, err := s.GetDocument(ctx, key)
+	if err != nil || !found {
+		t.Fatalf("doc=%+v found=%t err=%v", doc, found, err)
+	}
+	if doc.OriginClass != "import" || doc.TaskID != nil || doc.Body != dotsResultBody("RESULT", issue, c) || doc.CreatedBy != dotsCreatedBy {
+		t.Fatalf("dots result: origin_class=%q task_id=%v created_by=%q", doc.OriginClass, doc.TaskID, doc.CreatedBy)
 	}
 }

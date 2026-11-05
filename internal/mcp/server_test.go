@@ -38,7 +38,7 @@ func (*spyBackend) PutDocument(context.Context, string, store.Document) (store.D
 func (*spyBackend) GetDocument(context.Context, string) (store.Document, bool, error) {
 	return store.Document{}, false, errors.New("unexpected")
 }
-func (*spyBackend) ListDocuments(context.Context, string, string, string, int) ([]store.Document, error) {
+func (*spyBackend) ListDocuments(context.Context, string, string, string, int64, int) ([]store.Document, error) {
 	return nil, errors.New("unexpected")
 }
 func (*spyBackend) Search(context.Context, string, string, string, int) ([]store.SearchResult, error) {
