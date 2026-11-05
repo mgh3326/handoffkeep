@@ -50,7 +50,7 @@ WITH plan AS (
       WHEN cur_state = 'unstarted' THEN 'reopened'
       WHEN cur_state IN ('researching','developing') THEN 'in_progress'
       WHEN cur_state = 'reviewing' THEN 'verifying'
-      WHEN cur_state IN ('merged','deployed') THEN 'merged'
+      WHEN cur_state IN ('merged','deployed','completed') THEN 'merged'
       WHEN cur_state IN ('dropped','duplicate') THEN 'dropped'
       WHEN cur_state = 'icebox' THEN 'hold'
       ELSE cur_state
