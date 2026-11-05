@@ -272,7 +272,9 @@ func (s *Store) applySourceEventTx(ctx context.Context, tx pgx.Tx, x Task, ev so
 	}
 	decisionBefore := decisionBeforeOf(x)
 	x.State, x.UpdatedAt = to, now
-	applyLifecycle(&x, from, to, now)
+	if err := applyLifecycle(&x, from, to, now, &TaskClosure{Type: "resolved", Evidence: ev.SourceRef}); err != nil {
+		return TaskEventResult{}, err
+	}
 	if x, err = writeTaskTx(ctx, tx, x); err != nil {
 		return TaskEventResult{}, err
 	}

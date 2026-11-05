@@ -1141,9 +1141,11 @@ func (s Server) tasksNext(w http.ResponseWriter, r *http.Request) {
 }
 
 type taskTransitionInput struct {
-	To   string          `json:"to"`
-	Note string          `json:"note"`
-	Refs *store.TaskRefs `json:"refs,omitempty"`
+	Closure  string          `json:"closure,omitempty"`
+	Evidence string          `json:"evidence,omitempty"`
+	To       string          `json:"to"`
+	Note     string          `json:"note"`
+	Refs     *store.TaskRefs `json:"refs,omitempty"`
 	// NoJob records the caller-stated reason a transition may land in
 	// claimed/in_progress without claimed_by + refs.job_id. Without linkage
 	// an empty reason is refused with task_job_required.
@@ -1175,7 +1177,7 @@ func (s Server) taskTransition(w http.ResponseWriter, r *http.Request) {
 		appErr(w, r, err)
 		return
 	}
-	x, err := s.Service.TransitionTaskWith(r.Context(), id, client, store.TransitionInput{To: input.To, Note: input.Note, Refs: input.Refs, NoJob: input.NoJob, DuplicateOf: input.DuplicateOf, Priority: input.Priority, Kind: input.Kind, Project: input.Project, Set: input.Set})
+	x, err := s.Service.TransitionTaskWith(r.Context(), id, client, store.TransitionInput{To: input.To, Closure: input.Closure, Evidence: input.Evidence, Note: input.Note, Refs: input.Refs, NoJob: input.NoJob, DuplicateOf: input.DuplicateOf, Priority: input.Priority, Kind: input.Kind, Project: input.Project, Set: input.Set})
 	if err != nil {
 		appErr(w, r, err)
 		return

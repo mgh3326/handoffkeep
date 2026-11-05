@@ -32,7 +32,7 @@ proposed answer for every item except Q11, where the alternative stands.
 
 ## State model
 
-`tasks.state` holds one of eleven leaf states. The category is derived from the
+`tasks.state` holds one of twelve leaf states. The category is derived from the
 leaf by a fixed table and is never stored, so a category and sub-state cannot
 disagree. API rows add a read-only `category` field.
 
@@ -46,6 +46,7 @@ disagree. API rows add a read-only `category` field.
 | `started` | `reviewing` | A PR is open or under review | **Yes** | No | Merge event, manual move |
 | `completed` | `merged` | Merged. Final for a repository with no deploy stream | No | No | Deploy event, revert event, reopen |
 | `completed` | `deployed` | A deploy record includes the merge | No | No | Revert event, reopen |
+| `completed` | `completed` | Non-code work completed with a result link | No | No | Reopen |
 | `canceled` | `dropped` | Will not be done | No | No | Reopen |
 | `canceled` | `duplicate` | Another task covers it; requires a `duplicate_of` relation | No | No | Reopen |
 | `canceled` | `icebox` | Parked; can be revived | No | No | Revive, reopen |
@@ -71,14 +72,16 @@ does not belong on the same axis (Q2). S1 adds `tasks.awaiting_decision`:
 | From | To |
 |---|---|
 | `triage` | `backlog`, `unstarted` (both through the triage gate); `dropped`, `duplicate` (reason required) |
-| `backlog` | `unstarted`, `researching`, `developing`, `icebox`, `dropped`, `duplicate` |
-| `unstarted` | `backlog`, `researching`, `developing`, `icebox`, `dropped`, `duplicate` |
-| `researching` | `developing`, `reviewing`, `unstarted`, `icebox`, `dropped`, `duplicate` |
-| `developing` | `researching`, `reviewing`, `unstarted`, `icebox`, `dropped`, `duplicate` |
-| `reviewing` | `developing` (fix needed), `merged`, `unstarted`, `icebox`, `dropped`, `duplicate` |
+| `backlog` | `unstarted`, `researching`, `developing`, `icebox`, `dropped`, `duplicate`, `completed` (decide, ops, verify; result link required) |
+| `unstarted` | `backlog`, `researching`, `developing`, `icebox`, `dropped`, `duplicate`, `completed` (decide, ops, verify; result link required) |
+| `researching` | `developing`, `reviewing`, `unstarted`, `icebox`, `dropped`, `duplicate`, `completed` (decide, ops, verify; result link required) |
+| `developing` | `researching`, `reviewing`, `unstarted`, `icebox`, `dropped`, `duplicate`, `completed` (decide, ops, verify; result link required) |
+| `reviewing` | `developing` (fix needed), `merged`, `unstarted`, `icebox`, `dropped`, `duplicate`, `completed` (decide, ops, verify; result link required) |
 | `merged` | `unstarted` (reopen) |
-| `deployed`, `dropped`, `duplicate` | `unstarted` (reopen) |
+| `deployed`, `completed`, `dropped`, `duplicate` | `unstarted` (reopen) |
 | `icebox` | `backlog` (revive), `unstarted` (reopen) |
+
+**Closure.** Each new settled transition records a type and evidence in `refs.closure`. `merged`, `deployed` and `completed` accept `resolved`; `dropped` accepts `cancelled`, `obsolete` or `superseded`; `duplicate` accepts `superseded`. Evidence must be 1–1024 bytes after trimming and contain no secrets. Completed requires an HTTP(S) result link or `hk:doc` reference. A closure absent on rows closed before v41 means unknown. Reopening clears it from the task while its event retains the snapshot.
 
 There is no edge from `triage` to `started`. Moving into `started` still needs
 `claimed_by` plus `refs.job_id` or a recorded no-job reason, as `claimed` and
@@ -87,7 +90,7 @@ There is no edge from `triage` to `started`. Moving into `started` still needs
 `deployed`: deploy records are the strict gate for that state. The `reviewing` to
 `merged` edge stays for repositories mergewake does not merge. That move takes the PR
 through the existing reference flag and stores it in `refs.pr`, so a deploy record can
-match it. A task with no PR can still complete, and stays at `merged`.
+match it. Decide, ops and verify tasks can instead enter `completed` with a result link.
 
 ## Event-driven transitions
 
@@ -495,9 +498,9 @@ restored:
 |---|---|
 | Any state with `awaiting_decision` set | `needs_decision` |
 | `triage`, `backlog` | `backlog` |
-| `unstarted` | `reopened` |
+| `unstarted` | `reopened`, `completed` (decide, ops, verify; result link required) |
 | `researching`, `developing` | `in_progress` |
-| `reviewing` | `verifying` |
+| `reviewing` | `verifying`, `completed` (decide, ops, verify; result link required) |
 | `merged`, `deployed` | `merged` |
 | `dropped`, `duplicate` | `dropped` |
 | `icebox` | `hold` |

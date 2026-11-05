@@ -114,7 +114,7 @@ export function countByView(tasks: ProtoTask[], filters: FilterState, states: re
  * reaches STALE_MIN_AGE_DAYS is marked stale. Age says nothing about
  * execution readiness — the marker only flags that the premise may be old. */
 export const STALE_MIN_AGE_DAYS = 7;
-export const TERMINAL_STATES = ["merged", "deployed", "dropped", "duplicate"] as const;
+export const TERMINAL_STATES = ["merged", "deployed", "completed", "dropped", "duplicate"] as const;
 
 export function isStale(task: ProtoTask, now: string): boolean {
   if ((TERMINAL_STATES as readonly string[]).includes(task.state)) {
@@ -283,7 +283,7 @@ export function groupByProject(tasks: ProtoTask[], now: string): ProjectGroup[] 
 export type StateGroup = { key: string; state: string; tasks: ProtoTask[] };
 
 /** One group per task state in STATE_GROUP_ORDER (operator-facing first,
- * terminal last); states outside the canonical eleven — a server-only enum —
+ * terminal last); states outside the canonical twelve — a server-only enum —
  * follow in first-seen order, each in its own group so the raw value is
  * kept. Tasks with awaiting_decision=true form a leading virtual group keyed
  * "awaiting_decision" and do NOT appear in their state group. Empty states

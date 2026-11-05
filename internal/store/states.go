@@ -3,7 +3,7 @@ package store
 import "sort"
 
 // Task states (docs/linear-internalize.md, "State model"). tasks.state holds
-// one of eleven leaf states. The category is derived from the leaf by
+// one of twelve leaf states. The category is derived from the leaf by
 // taskCategories and is never stored, so a category and a sub-state cannot
 // disagree.
 const (
@@ -15,6 +15,7 @@ const (
 	StateReviewing   = "reviewing"
 	StateMerged      = "merged"
 	StateDeployed    = "deployed"
+	StateCompleted   = "completed"
 	StateDropped     = "dropped"
 	StateDuplicate   = "duplicate"
 	StateIcebox      = "icebox"
@@ -39,14 +40,15 @@ var taskCategories = map[string]string{
 	StateReviewing:   CategoryStarted,
 	StateMerged:      CategoryCompleted,
 	StateDeployed:    CategoryCompleted,
+	StateCompleted:   CategoryCompleted,
 	StateDropped:     CategoryCanceled,
 	StateDuplicate:   CategoryCanceled,
 	StateIcebox:      CategoryCanceled,
 }
 
-// TaskStates lists the eleven states in display order.
+// TaskStates lists the twelve states in display order.
 func TaskStates() []string {
-	return []string{StateTriage, StateBacklog, StateUnstarted, StateResearching, StateDeveloping, StateReviewing, StateMerged, StateDeployed, StateDropped, StateDuplicate, StateIcebox}
+	return []string{StateTriage, StateBacklog, StateUnstarted, StateResearching, StateDeveloping, StateReviewing, StateMerged, StateDeployed, StateCompleted, StateDropped, StateDuplicate, StateIcebox}
 }
 
 // TaskCategory derives the category of a state; "" for an unknown state.
@@ -61,7 +63,7 @@ func IsStartedState(state string) bool { return taskCategories[state] == Categor
 // merged, deployed, dropped and duplicate. icebox is parked, not finished.
 func IsSettledState(state string) bool {
 	switch state {
-	case StateMerged, StateDeployed, StateDropped, StateDuplicate:
+	case StateMerged, StateDeployed, StateCompleted, StateDropped, StateDuplicate:
 		return true
 	}
 	return false
@@ -73,7 +75,7 @@ func IsClaimableState(state string) bool {
 }
 
 // settledStatesSQL is IsSettledState as a SQL list.
-const settledStatesSQL = `'merged','deployed','dropped','duplicate'`
+const settledStatesSQL = `'merged','deployed','completed','dropped','duplicate'`
 
 // startedStatesSQL is the started category as a SQL list.
 const startedStatesSQL = `'researching','developing','reviewing'`
@@ -85,13 +87,14 @@ const startedStatesSQL = `'researching','developing','reviewing'`
 // records are the strict gate for that state.
 var TaskTransitions = map[string]map[string]bool{
 	StateTriage:      {StateBacklog: true, StateUnstarted: true, StateDropped: true, StateDuplicate: true},
-	StateBacklog:     {StateUnstarted: true, StateResearching: true, StateDeveloping: true, StateIcebox: true, StateDropped: true, StateDuplicate: true},
-	StateUnstarted:   {StateBacklog: true, StateResearching: true, StateDeveloping: true, StateIcebox: true, StateDropped: true, StateDuplicate: true},
-	StateResearching: {StateDeveloping: true, StateReviewing: true, StateUnstarted: true, StateIcebox: true, StateDropped: true, StateDuplicate: true},
-	StateDeveloping:  {StateResearching: true, StateReviewing: true, StateUnstarted: true, StateIcebox: true, StateDropped: true, StateDuplicate: true},
-	StateReviewing:   {StateDeveloping: true, StateMerged: true, StateUnstarted: true, StateIcebox: true, StateDropped: true, StateDuplicate: true},
+	StateBacklog:     {StateUnstarted: true, StateResearching: true, StateDeveloping: true, StateIcebox: true, StateDropped: true, StateDuplicate: true, StateCompleted: true},
+	StateUnstarted:   {StateBacklog: true, StateResearching: true, StateDeveloping: true, StateIcebox: true, StateDropped: true, StateDuplicate: true, StateCompleted: true},
+	StateResearching: {StateDeveloping: true, StateReviewing: true, StateUnstarted: true, StateIcebox: true, StateDropped: true, StateDuplicate: true, StateCompleted: true},
+	StateDeveloping:  {StateResearching: true, StateReviewing: true, StateUnstarted: true, StateIcebox: true, StateDropped: true, StateDuplicate: true, StateCompleted: true},
+	StateReviewing:   {StateDeveloping: true, StateMerged: true, StateUnstarted: true, StateIcebox: true, StateDropped: true, StateDuplicate: true, StateCompleted: true},
 	StateMerged:      {StateUnstarted: true},
 	StateDeployed:    {StateUnstarted: true},
+	StateCompleted:   {StateUnstarted: true},
 	StateDropped:     {StateUnstarted: true},
 	StateDuplicate:   {StateUnstarted: true},
 	StateIcebox:      {StateBacklog: true, StateUnstarted: true},
@@ -135,7 +138,7 @@ func substateForJobRole(role, kind string) string {
 
 // Old state names. The API and CLI keep accepting them on input and in
 // filters ("Old names on input" in the design); responses use only the
-// eleven states above.
+// twelve states above.
 const (
 	legacyClaimed       = "claimed"
 	legacyInProgress    = "in_progress"
@@ -178,7 +181,7 @@ func ParseStateFilter(name string) (StateFilter, bool) {
 // filter reports it beside the states.
 const AwaitingDecisionKey = "awaiting_decision"
 
-// LegacyTaskStates lists the state names tasks used before the eleven-state
+// LegacyTaskStates lists the state names tasks used before the twelve-state
 // model. task_events keeps them as written, so history readers (dwell time,
 // fleet metrics) accept both vocabularies.
 func LegacyTaskStates() []string {

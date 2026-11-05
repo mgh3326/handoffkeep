@@ -828,7 +828,9 @@ func (c Client) TransitionTaskWith(ctx context.Context, id int64, in store.Trans
 	var out store.Task
 	err := c.call(ctx, "POST", fmt.Sprintf("/v1/tasks/%d/transition", id), struct {
 		To          string          `json:"to"`
-		Note        string          `json:"note"`
+		Closure     string          `json:"closure,omitempty"`
+		Evidence    string          `json:"evidence,omitempty"`
+		Note        string          `json:"note,omitempty"`
 		Refs        *store.TaskRefs `json:"refs,omitempty"`
 		NoJob       string          `json:"no_job,omitempty"`
 		DuplicateOf int64           `json:"duplicate_of,omitempty"`
@@ -836,7 +838,7 @@ func (c Client) TransitionTaskWith(ctx context.Context, id int64, in store.Trans
 		Kind        string          `json:"kind,omitempty"`
 		Project     *string         `json:"project,omitempty"`
 		Set         bool            `json:"set,omitempty"`
-	}{to, note, refs, noJob, in.DuplicateOf, in.Priority, in.Kind, in.Project, in.Set}, &out)
+	}{to, in.Closure, in.Evidence, note, refs, noJob, in.DuplicateOf, in.Priority, in.Kind, in.Project, in.Set}, &out)
 	if err != nil && noJob != "" {
 		// Same strict-decoder translation as claims: a server that predates
 		// the no_job field answers invalid_context rather than naming it.

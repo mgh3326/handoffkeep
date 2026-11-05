@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 )
 
 var (
+	ErrClosureInvalid = errors.New("closure_invalid")
 	// ErrTriageGate rejects a move out of triage that lacks a priority above
 	// zero, a project or a kind.
 	ErrTriageGate = errors.New("triage_gate")
@@ -78,7 +80,32 @@ func insertEvent(ctx context.Context, q rowQuerier, e taskEventInput) (id int64,
 // applyLifecycle sets the lifecycle timestamps for a move from one state to
 // another. started_at keeps its first value; completed_at and canceled_at
 // describe the current state, so leaving the category clears them.
-func applyLifecycle(x *Task, from, to string, now time.Time) {
+var completedEvidenceRE = regexp.MustCompile(`^(https?://\S+|hk:doc \S+)$`)
+
+func applyLifecycle(x *Task, from, to string, now time.Time, c *TaskClosure) error {
+	if IsSettledState(to) && !IsSettledState(from) {
+		if c == nil {
+			return fmt.Errorf("%w: evidence is required", ErrClosureInvalid)
+		}
+		evidence := strings.TrimSpace(c.Evidence)
+		if len(evidence) < 1 || len(evidence) > 1024 || !validText(evidence, 1024) {
+			return fmt.Errorf("%w: evidence must be 1..1024 bytes", ErrClosureInvalid)
+		}
+		if guard.Reject(evidence) != nil {
+			return fmt.Errorf("%w: evidence contains secret-like content", ErrClosureInvalid)
+		}
+		valid := ((to == StateMerged || to == StateDeployed || to == StateCompleted) && c.Type == "resolved") || (to == StateDuplicate && c.Type == "superseded") || (to == StateDropped && (c.Type == "cancelled" || c.Type == "obsolete" || c.Type == "superseded"))
+		if !valid {
+			return fmt.Errorf("%w: type is not allowed for target state", ErrClosureInvalid)
+		}
+		if to == StateCompleted && !completedEvidenceRE.MatchString(evidence) {
+			return fmt.Errorf("%w: completed requires a result link", ErrClosureInvalid)
+		}
+		x.Refs.Closure = &TaskClosure{Type: c.Type, Evidence: evidence}
+	} else if !IsSettledState(to) {
+		x.Refs.Closure = nil
+	}
+
 	switch TaskCategory(to) {
 	case CategoryStarted:
 		if x.StartedAt == nil {
@@ -109,6 +136,7 @@ func applyLifecycle(x *Task, from, to string, now time.Time) {
 		t := now
 		x.StartedTriageAt = &t
 	}
+	return nil
 }
 
 // writeTaskTx stores the mutable state of x: state, refs, claimant, the
@@ -203,7 +231,9 @@ func (s *Store) claimTaskTx(ctx context.Context, tx pgx.Tx, id int64, by, jobID,
 	if jobID != "" {
 		x.Refs.JobID = jobID
 	}
-	applyLifecycle(&x, from, to, now)
+	if err := applyLifecycle(&x, from, to, now, nil); err != nil {
+		return Task{}, err
+	}
 	x, err := writeTaskTx(ctx, tx, x)
 	if err != nil {
 		return Task{}, err
@@ -251,6 +281,8 @@ func claimConflict(x Task, by, jobID string) error {
 // when the task has no live duplicate_of relation yet.
 type TransitionInput struct {
 	To          string
+	Closure     string
+	Evidence    string
 	By          string
 	Note        string
 	Refs        *TaskRefs
@@ -387,6 +419,9 @@ func (s *Store) transitionTask(ctx context.Context, id int64, in TransitionInput
 		if err := rejectTaskRefs(*refs); err != nil {
 			return Task{}, err
 		}
+		if refs.Closure != nil {
+			return Task{}, fmt.Errorf("%w: closure refs are not patchable", ErrClosureInvalid)
+		}
 		// The disposition object (and its answer) is written only by
 		// CreateDisposition and AnswerDisposition(Batch).
 		if refs.Disposition != nil {
@@ -491,6 +526,9 @@ func (s *Store) transitionTask(ctx context.Context, id int64, in TransitionInput
 		backToBacklog := x.AwaitingDecision && to == StateBacklog && !IsSettledState(from)
 		if !backToBacklog && !taskTransitionAllowed(from, to) {
 			return Task{}, ErrTaskConflict
+		}
+		if to == StateCompleted && x.Kind != "decide" && x.Kind != "ops" && x.Kind != "verify" {
+			return Task{}, fmt.Errorf("%w: completed applies to decide, ops and verify tasks", ErrTaskConflict)
 		}
 		// A task waiting on a decision leaves only the way the old
 		// needs_decision state did: back to backlog, parked, or dropped.
@@ -610,7 +648,9 @@ func (s *Store) transitionTask(ctx context.Context, id int64, in TransitionInput
 		x.AwaitingDecision = true
 		if unpark {
 			x.State = StateBacklog
-			applyLifecycle(&x, from, StateBacklog, now)
+			if err := applyLifecycle(&x, from, StateBacklog, now, nil); err != nil {
+				return Task{}, err
+			}
 		}
 	case actClearFlag:
 		x.AwaitingDecision = false
@@ -618,7 +658,46 @@ func (s *Store) transitionTask(ctx context.Context, id int64, in TransitionInput
 	default:
 		x.AwaitingDecision = false
 		x.State = to
-		applyLifecycle(&x, from, to, now)
+		var closure *TaskClosure
+		if IsSettledState(to) && !IsSettledState(from) {
+			typ, evidence := in.Closure, strings.TrimSpace(in.Evidence)
+			switch to {
+			case StateCompleted:
+				if typ == "" {
+					typ = "resolved"
+				}
+			case StateMerged:
+				if typ == "" {
+					typ = "resolved"
+				}
+				if evidence == "" {
+					evidence = x.Refs.PR
+				}
+				if evidence == "" {
+					evidence = note
+				}
+			case StateDropped:
+				if typ == "" {
+					typ = "cancelled"
+				}
+				if evidence == "" {
+					evidence = note
+				}
+			case StateDuplicate:
+				if typ == "" {
+					typ = "superseded"
+				}
+				var dst int64
+				if err := tx.QueryRow(ctx, `SELECT dst_id FROM task_relations WHERE src_id=$1 AND kind=$2 AND archived_at IS NULL ORDER BY id LIMIT 1`, id, RelationDuplicateOf).Scan(&dst); err != nil {
+					return Task{}, err
+				}
+				evidence = fmt.Sprintf("duplicate of #%d", dst)
+			}
+			closure = &TaskClosure{Type: typ, Evidence: evidence}
+		}
+		if err := applyLifecycle(&x, from, to, now, closure); err != nil {
+			return Task{}, err
+		}
 	}
 	x.UpdatedAt = now
 	if triageFields {
@@ -816,7 +895,9 @@ func (s *Store) cascadeTriageTx(ctx context.Context, tx pgx.Tx, parent Task, acc
 			}
 		}
 		c.State, c.AwaitingDecision, c.UpdatedAt = to, false, now
-		applyLifecycle(&c, StateTriage, to, now)
+		if err := applyLifecycle(&c, StateTriage, to, now, &TaskClosure{Type: "cancelled", Evidence: note}); err != nil {
+			return err
+		}
 		if c, err = writeTaskTx(ctx, tx, c); err != nil {
 			return err
 		}

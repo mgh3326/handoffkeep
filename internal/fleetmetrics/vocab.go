@@ -28,7 +28,9 @@ func isDropped(state string) bool {
 
 // isSettled reports a task that reached its end: merged, deployed, dropped or
 // duplicate.
-func isSettled(state string) bool { return isMerged(state) || isDropped(state) }
+func isSettled(state string) bool {
+	return isMerged(state) || state == store.StateCompleted || isDropped(state)
+}
 
 // isReady reports a task waiting to be claimed.
 func isReady(state string) bool {

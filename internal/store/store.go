@@ -124,7 +124,13 @@ var (
 
 // TaskRefs holds the durable links that let a captain resume work without
 // embedding credentials or implementation details in the queue itself.
+type TaskClosure struct {
+	Type     string `json:"type"`
+	Evidence string `json:"evidence"`
+}
+
 type TaskRefs struct {
+	Closure         *TaskClosure     `json:"closure,omitempty"`
 	PR              string           `json:"pr,omitempty"`
 	HeadSHA         string           `json:"head_sha,omitempty"`
 	ReportPath      string           `json:"report_path,omitempty"`
@@ -1225,6 +1231,9 @@ func (s *Store) migrate(ctx context.Context) error {
 		return err
 	}
 
+	if err := migrateOnce(ctx, tx, 41, func() error { return execAll(ctx, tx, taskClosureV41) }); err != nil {
+		return err
+	}
 	return tx.Commit(ctx)
 }
 func validName(x string) bool        { return nameRE.MatchString(x) }
@@ -2328,6 +2337,9 @@ func (s *Store) createTask(ctx context.Context, x Task, check *DuplicateCheck) (
 	}
 	// Disposition items are born only through CreateDisposition, which moves
 	// them to needs_decision inside the creating transaction.
+	if x.Refs.Closure != nil {
+		return x, errors.New("invalid task: closure is not patchable")
+	}
 	if x.Refs.Disposition != nil {
 		return x, errors.New("invalid task: disposition items use CreateDisposition")
 	}

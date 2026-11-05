@@ -429,7 +429,7 @@ func (s *Store) autoCloseTx(ctx context.Context, tx pgx.Tx, child Task, by strin
 		if err != nil {
 			return err
 		}
-		settled, completed, deployed := true, 0, 0
+		settled, completed, deployed, merged := true, 0, 0, 0
 		for rows.Next() {
 			var state string
 			if err = rows.Scan(&state); err != nil {
@@ -437,8 +437,11 @@ func (s *Store) autoCloseTx(ctx context.Context, tx pgx.Tx, child Task, by strin
 				return err
 			}
 			switch state {
+			case StateCompleted:
+				completed++
 			case StateMerged:
 				completed++
+				merged++
 			case StateDeployed:
 				completed++
 				deployed++
@@ -454,7 +457,7 @@ func (s *Store) autoCloseTx(ctx context.Context, tx pgx.Tx, child Task, by strin
 		if !settled {
 			return nil
 		}
-		ref := fmt.Sprintf("child/%d@%s", child.ID, now.Format(time.RFC3339Nano))
+		ref := fmt.Sprintf("hk:doc child/%d@%s", child.ID, now.Format(time.RFC3339Nano))
 		if completed == 0 {
 			_, _, err = insertEvent(ctx, tx, taskEventInput{
 				TaskID: p.ID, Kind: TaskEventAutoClose, From: p.State, To: p.State, By: "hk", At: now, Refs: p.Refs,
@@ -463,14 +466,19 @@ func (s *Store) autoCloseTx(ctx context.Context, tx pgx.Tx, child Task, by strin
 			})
 			return err
 		}
-		to := StateMerged
+		to := StateCompleted
+		if merged > 0 || deployed > 0 {
+			to = StateMerged
+		}
 		if deployed == completed {
 			to = StateDeployed
 		}
 		from := p.State
 		decisionBefore := decisionBeforeOf(p)
 		p.State, p.UpdatedAt = to, now
-		applyLifecycle(&p, from, to, now)
+		if err := applyLifecycle(&p, from, to, now, &TaskClosure{Type: "resolved", Evidence: ref}); err != nil {
+			return err
+		}
 		if p, err = writeTaskTx(ctx, tx, p); err != nil {
 			return err
 		}

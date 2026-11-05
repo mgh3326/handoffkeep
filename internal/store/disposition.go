@@ -405,7 +405,9 @@ func (s *Store) answerDispositionTx(ctx context.Context, tx pgx.Tx, in Dispositi
 	// researching, the decide kind's sub-state.
 	from := x.State
 	x.State, x.AwaitingDecision, x.UpdatedAt = StateResearching, false, now
-	applyLifecycle(&x, from, StateResearching, now)
+	if err := applyLifecycle(&x, from, StateResearching, now, nil); err != nil {
+		return Task{}, "", err
+	}
 	if x, err = writeTaskTx(ctx, tx, x); err != nil {
 		return Task{}, "", err
 	}
@@ -560,19 +562,24 @@ func (s *Store) ApplyDisposition(ctx context.Context, id int64, by, note string)
 	}
 	now := time.Now().UTC()
 	from := x.State
+	decisionBefore := decisionBeforeOf(x)
 	for _, to := range hops {
 		if !taskTransitionAllowed(from, to) {
 			return Task{}, ErrTaskConflict
+		}
+		typ := "resolved"
+		if to == StateDropped {
+			typ = "cancelled"
+		}
+		if err := applyLifecycle(&x, from, to, now, &TaskClosure{Type: typ, Evidence: "disposition:apply " + x.Refs.Disposition.Answer.Key}); err != nil {
+			return Task{}, err
 		}
 		if _, err = insertTaskEvent(ctx, tx, id, from, to, by, text, x.Refs, now, ""); err != nil {
 			return Task{}, err
 		}
 		from = to
 	}
-	start := x.State
-	decisionBefore := decisionBeforeOf(x)
 	x.State, x.UpdatedAt = from, now
-	applyLifecycle(&x, start, from, now)
 	if x, err = writeTaskTx(ctx, tx, x); err != nil {
 		return Task{}, err
 	}

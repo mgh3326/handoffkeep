@@ -179,32 +179,38 @@ stateDiagram-v2
     backlog --> icebox
     backlog --> dropped
     backlog --> duplicate: requires a duplicate_of relation
+    backlog --> completed: decide, ops, verify; result link required
     unstarted --> backlog
     unstarted --> researching: claim / next (verify, decide)
     unstarted --> developing: claim / next (implement, fix, ops)
     unstarted --> icebox
     unstarted --> dropped
     unstarted --> duplicate
+    unstarted --> completed: decide, ops, verify; result link required
     researching --> developing
     researching --> reviewing
     researching --> unstarted
     researching --> icebox
     researching --> dropped
     researching --> duplicate
+    researching --> completed: decide, ops, verify; result link required
     developing --> researching
     developing --> reviewing
     developing --> unstarted
     developing --> icebox
     developing --> dropped
     developing --> duplicate
+    developing --> completed: decide, ops, verify; result link required
     reviewing --> developing: fix needed
     reviewing --> merged: reference flag stores refs.pr
     reviewing --> unstarted
     reviewing --> icebox
     reviewing --> dropped
     reviewing --> duplicate
+    reviewing --> completed: decide, ops, verify; result link required
     merged --> unstarted: reopen (reason required)
     deployed --> unstarted: reopen (reason required)
+    completed --> unstarted: reopen (reason required)
     dropped --> unstarted: reopen (reason required)
     duplicate --> unstarted: reopen (reason required)
     icebox --> backlog: revive
@@ -213,7 +219,7 @@ stateDiagram-v2
 
 ### State model, hierarchy and relations
 
-`tasks.state` holds one of eleven states; the category is derived from it and
+`tasks.state` holds one of twelve states; the category is derived from it and
 is never stored (API rows carry it read-only as `category`):
 
 | Category | States |

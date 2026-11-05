@@ -74,7 +74,7 @@ func TestEveryManualTransitionEdge(t *testing.T) {
 					in.DuplicateOf = other.ID
 				}
 				got, err := s.TransitionTaskWith(ctx, x.ID, in)
-				allowed := TaskTransitions[from][to] && !IsSettledState(from)
+				allowed := TaskTransitions[from][to] && !IsSettledState(from) && to != StateCompleted
 				if allowed {
 					if err != nil {
 						t.Fatalf("%s -> %s refused: %v", from, to, err)
