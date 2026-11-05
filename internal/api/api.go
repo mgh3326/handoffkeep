@@ -800,6 +800,30 @@ func (s Server) tasksList(w http.ResponseWriter, r *http.Request) {
 		appErr(w, r, err)
 		return
 	}
+	if r.URL.Query().Has("change") {
+		// change is exclusive: any other filter next to it is a mistake, not
+		// an intersection.
+		changeID, parseErr := strconv.ParseInt(r.URL.Query().Get("change"), 10, 64)
+		if parseErr != nil || changeID < 1 {
+			writeError(w, http.StatusBadRequest, "invalid_context")
+			return
+		}
+		for _, other := range []string{"lane", "state", "parent_lane", "project", "area", "stalled", "after_id"} {
+			if r.URL.Query().Has(other) {
+				writeError(w, http.StatusBadRequest, "invalid_context")
+				return
+			}
+		}
+		xs, err := s.Service.ListTasksFiltered(r.Context(), store.TaskQuery{ChangeID: &changeID, Limit: limit})
+		if err != nil {
+			appErr(w, r, err)
+			return
+		}
+		// Echoed like project: an old server that drops the parameter would
+		// answer with every task.
+		jsonOut(w, http.StatusOK, map[string]any{"tasks": xs, "change": changeID})
+		return
+	}
 	lane, state, parentLane := r.URL.Query().Get("lane"), r.URL.Query().Get("state"), r.URL.Query().Get("parent_lane")
 	var project *string
 	if r.URL.Query().Has("project") {
@@ -827,30 +851,6 @@ func (s Server) tasksList(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	var xs []store.Task
-	if r.URL.Query().Has("change") {
-		// change is exclusive: any other filter next to it is a mistake, not
-		// an intersection.
-		changeID, parseErr := strconv.ParseInt(r.URL.Query().Get("change"), 10, 64)
-		if parseErr != nil || changeID < 1 {
-			writeError(w, http.StatusBadRequest, "invalid_context")
-			return
-		}
-		for _, other := range []string{"lane", "state", "parent_lane", "project", "area", "stalled", "after_id"} {
-			if r.URL.Query().Has(other) {
-				writeError(w, http.StatusBadRequest, "invalid_context")
-				return
-			}
-		}
-		xs, err = s.Service.ListTasksFiltered(r.Context(), store.TaskQuery{ChangeID: &changeID, Limit: limit})
-		if err != nil {
-			appErr(w, r, err)
-			return
-		}
-		// Echoed like project: an old server that drops the parameter would
-		// answer with every task.
-		jsonOut(w, http.StatusOK, map[string]any{"tasks": xs, "change": changeID})
-		return
-	}
 	switch {
 	case stalled:
 		q := store.TaskQuery{Lane: lane, State: state, ParentLane: parentLane, Project: project, Area: area, Stalled: true, Limit: limit}
