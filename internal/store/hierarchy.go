@@ -92,6 +92,13 @@ func addRelationTx(ctx context.Context, tx pgx.Tx, src int64, kind string, dst i
 		return false, errors.New("invalid relation: a task cannot relate to itself")
 	}
 	src, dst = normalizeRelation(kind, src, dst)
+	var locked int64
+	if err := tx.QueryRow(ctx, `SELECT id FROM tasks WHERE id=$1 FOR UPDATE`, src).Scan(&locked); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, ErrTaskNotFound
+		}
+		return false, err
+	}
 	var found int
 	if err := tx.QueryRow(ctx, `SELECT count(*) FROM tasks WHERE id IN ($1,$2)`, src, dst).Scan(&found); err != nil {
 		return false, err
@@ -214,14 +221,17 @@ func (s *Store) RemoveTaskRelation(ctx context.Context, src int64, kind string, 
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
 		return false, err
 	}
-	if kind == RelationDuplicateOf {
-		var state string
-		if err = tx.QueryRow(ctx, `SELECT state FROM tasks WHERE id=$1 FOR UPDATE`, src).Scan(&state); err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return false, ErrTaskNotFound
+	var state string
+	if err = tx.QueryRow(ctx, `SELECT state FROM tasks WHERE id=$1 FOR UPDATE`, src).Scan(&state); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			if kind != RelationDuplicateOf {
+				return false, tx.Commit(ctx)
 			}
-			return false, err
+			return false, ErrTaskNotFound
 		}
+		return false, err
+	}
+	if kind == RelationDuplicateOf {
 		if state == StateDuplicate {
 			return false, fmt.Errorf("%w: a duplicate task keeps its duplicate_of relation; reopen it first", ErrTaskConflict)
 		}
@@ -381,7 +391,7 @@ func (s *Store) afterStateChangeTx(ctx context.Context, tx pgx.Tx, x Task, from,
 	}
 	if IsSettledState(from) {
 		var parentState string
-		if err := tx.QueryRow(ctx, `SELECT state FROM tasks WHERE id=$1`, *x.ParentID).Scan(&parentState); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT state FROM tasks WHERE id=$1 FOR UPDATE`, *x.ParentID).Scan(&parentState); err != nil {
 			return err
 		}
 		if TaskCategory(parentState) == CategoryCompleted {

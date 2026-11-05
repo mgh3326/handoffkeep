@@ -321,7 +321,7 @@ func (s *Store) CreateDisposition(ctx context.Context, in DispositionInput) (Tas
 		return Task{}, false, err
 	}
 	var x Task
-	if err = scanTask(tx.QueryRow(ctx, `INSERT INTO tasks(lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at,project,awaiting_decision) VALUES($1,'',$2,'decide','backlog',0,$3::jsonb,$4,$4,$5,$5,$6,true) RETURNING `+taskColumns, in.Lane, in.Title, string(encoded), in.CreatedBy, now, in.Project), &x); err != nil {
+	if err = scanTask(tx.QueryRow(ctx, `INSERT INTO tasks(lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at,last_activity_at,project,awaiting_decision) VALUES($1,'',$2,'decide','backlog',0,$3::jsonb,$4,$4,$5,$5,$5,$6,true) RETURNING `+taskColumns, in.Lane, in.Title, string(encoded), in.CreatedBy, now, in.Project), &x); err != nil {
 		return Task{}, false, err
 	}
 	// The awaiting event carries the question; its id is the item's

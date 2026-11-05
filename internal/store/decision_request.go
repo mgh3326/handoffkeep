@@ -530,11 +530,7 @@ func rejectDecisionRequestSecrets(in DecisionRequestInput) error {
 }
 
 func insertDecisionEvent(ctx context.Context, tx pgx.Tx, id int64, state, by, note string, refs TaskRefs, at time.Time) error {
-	encoded, err := json.Marshal(refs)
-	if err != nil {
-		return err
-	}
-	_, err = tx.Exec(ctx, `INSERT INTO task_events(task_id,"from","to","by",note,refs,at,kind) VALUES($1,$2,$2,$3,$4,$5::jsonb,$6,'decision')`, id, state, by, note, string(encoded), at)
+	_, _, err := insertEvent(ctx, tx, taskEventInput{TaskID: id, Kind: "decision", From: state, To: state, By: by, Note: note, Refs: refs, At: at})
 	return err
 }
 

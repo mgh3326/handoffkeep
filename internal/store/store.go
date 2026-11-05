@@ -450,19 +450,20 @@ type TaskJobRebind struct {
 // the transitional "key#section"). The body text stays in documents; tasks
 // keep only this pointer (hk:doc decision/2026-09-21/task536-body-storage-approved).
 type Task struct {
-	ID         int64     `json:"id"`
-	Lane       string    `json:"lane"`
-	ParentLane string    `json:"parent_lane,omitempty"`
-	Title      string    `json:"title"`
-	Kind       string    `json:"kind"`
-	State      string    `json:"state"`
-	Priority   int       `json:"priority"`
-	Refs       TaskRefs  `json:"refs"`
-	ClaimedBy  string    `json:"claimed_by,omitempty"`
-	CreatedBy  string    `json:"created_by"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
-	BodyDoc    string    `json:"body_doc,omitempty"`
+	ID             int64     `json:"id"`
+	Lane           string    `json:"lane"`
+	ParentLane     string    `json:"parent_lane,omitempty"`
+	Title          string    `json:"title"`
+	Kind           string    `json:"kind"`
+	State          string    `json:"state"`
+	Priority       int       `json:"priority"`
+	Refs           TaskRefs  `json:"refs"`
+	ClaimedBy      string    `json:"claimed_by,omitempty"`
+	CreatedBy      string    `json:"created_by"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
+	LastActivityAt time.Time `json:"last_activity_at"`
+	BodyDoc        string    `json:"body_doc,omitempty"`
 	// Project is the task's entry in the server-configured task_projects
 	// vocabulary. NULL on rows created before the field existed — legacy
 	// rows keep it (no backfill) and render as the "no project" bucket.
@@ -1222,6 +1223,10 @@ func (s *Store) migrate(ctx context.Context) error {
 		return err
 	}
 	if err := migrateOnce(ctx, tx, 40, func() error { return execAll(ctx, tx, benchOutcomesV40) }); err != nil {
+		return err
+	}
+
+	if err := migrateOnce(ctx, tx, 41, func() error { return execAll(ctx, tx, lastActivityV41) }); err != nil {
 		return err
 	}
 
@@ -2215,7 +2220,7 @@ func ValidBodyDoc(v string) bool {
 
 func scanTask(row interface{ Scan(...any) error }, x *Task, extra ...any) error {
 	var refs []byte
-	dest := []any{&x.ID, &x.Lane, &x.ParentLane, &x.Title, &x.Kind, &x.State, &x.Priority, &refs, &x.ClaimedBy, &x.CreatedBy, &x.CreatedAt, &x.UpdatedAt, &x.BodyDoc, &x.Project, &x.Area, &x.Expected, &x.AwaitingDecision, &x.ParentID, &x.StartedAt, &x.CompletedAt, &x.CanceledAt, &x.TriagedAt, &x.StartedTriageAt, &x.MilestoneID, &x.DueAt, &x.SLAStartedAt, &x.SLAMediumRiskAt, &x.SLAHighRiskAt, &x.SLABreachesAt, &x.Source, &x.SourceRef, &x.Labels}
+	dest := []any{&x.ID, &x.Lane, &x.ParentLane, &x.Title, &x.Kind, &x.State, &x.Priority, &refs, &x.ClaimedBy, &x.CreatedBy, &x.CreatedAt, &x.UpdatedAt, &x.LastActivityAt, &x.BodyDoc, &x.Project, &x.Area, &x.Expected, &x.AwaitingDecision, &x.ParentID, &x.StartedAt, &x.CompletedAt, &x.CanceledAt, &x.TriagedAt, &x.StartedTriageAt, &x.MilestoneID, &x.DueAt, &x.SLAStartedAt, &x.SLAMediumRiskAt, &x.SLAHighRiskAt, &x.SLABreachesAt, &x.Source, &x.SourceRef, &x.Labels}
 	if err := row.Scan(append(dest, extra...)...); err != nil {
 		return err
 	}
@@ -2224,7 +2229,7 @@ func scanTask(row interface{ Scan(...any) error }, x *Task, extra ...any) error 
 	return json.Unmarshal(refs, &x.Refs)
 }
 
-const taskBaseColumns = `id,lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at,body_doc,project,area,expected,awaiting_decision,parent_id,started_at,completed_at,canceled_at,triaged_at,started_triage_at,milestone_id,due_at,sla_started_at,sla_medium_risk_at,sla_high_risk_at,sla_breaches_at,source,source_ref`
+const taskBaseColumns = `id,lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at,last_activity_at,body_doc,project,area,expected,awaiting_decision,parent_id,started_at,completed_at,canceled_at,triaged_at,started_triage_at,milestone_id,due_at,sla_started_at,sla_medium_risk_at,sla_high_risk_at,sla_breaches_at,source,source_ref`
 const taskColumns = taskBaseColumns + `,ARRAY(SELECT label_id FROM task_labels WHERE task_id=tasks.id ORDER BY label_id)`
 
 // taskProjectQuerier is the row-query seam requireTaskProject runs against:
@@ -2401,7 +2406,7 @@ func (s *Store) createTask(ctx context.Context, x Task, check *DuplicateCheck) (
 		}
 	}
 	parentID := x.ParentID
-	if err = scanTask(tx.QueryRow(ctx, `INSERT INTO tasks(lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at,body_doc,project,area,expected,parent_id) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING `+taskColumns, x.Lane, x.ParentLane, x.Title, x.Kind, x.State, x.Priority, string(refs), x.ClaimedBy, x.CreatedBy, x.CreatedAt, x.UpdatedAt, x.BodyDoc, x.Project, x.Area, x.Expected, parentID), &x); err != nil {
+	if err = scanTask(tx.QueryRow(ctx, `INSERT INTO tasks(lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at,last_activity_at,body_doc,project,area,expected,parent_id) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$10,$12,$13,$14,$15,$16) RETURNING `+taskColumns, x.Lane, x.ParentLane, x.Title, x.Kind, x.State, x.Priority, string(refs), x.ClaimedBy, x.CreatedBy, x.CreatedAt, x.UpdatedAt, x.BodyDoc, x.Project, x.Area, x.Expected, parentID), &x); err != nil {
 		return x, err
 	}
 	if check != nil && check.Link != 0 {
@@ -2503,15 +2508,10 @@ func (s *Store) RebindTaskJob(ctx context.Context, id int64, fromJob, toJob, by,
 		return Task{}, err
 	}
 	rebind := &TaskJobRebind{FromJob: fromJob, ToJob: toJob, By: by, Reason: reason}
-	eventRefs, err := json.Marshal(struct {
-		TaskRefs
-		JobRebind *TaskJobRebind `json:"job_rebind,omitempty"`
-	}{TaskRefs: x.Refs, JobRebind: rebind})
-	if err != nil {
+	if _, moved, err := insertEvent(ctx, tx, taskEventInput{TaskID: id, From: x.State, To: x.State, By: by, Note: reason, Refs: x.Refs, Rebind: rebind, At: now}); err != nil {
 		return Task{}, err
-	}
-	if _, err = tx.Exec(ctx, `INSERT INTO task_events(task_id,"from","to","by",note,refs,at,kind) VALUES($1,$2,$2,$3,$4,$5::jsonb,$6,'transition')`, id, x.State, by, reason, string(eventRefs), now); err != nil {
-		return Task{}, err
+	} else if moved {
+		x.LastActivityAt = now.Truncate(time.Microsecond)
 	}
 	if err := s.recordLinearBoardTaskTx(ctx, tx, x, reason); err != nil {
 		return Task{}, err

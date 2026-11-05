@@ -68,7 +68,7 @@ func TestIntakeCreatesOnceAndAllowsUnsetKindOnlyInTriageOrDeclined(t *testing.T)
 	if !errors.As(err, &pg) || pg.Code != "23514" || pg.ConstraintName != "tasks_kind_check" {
 		t.Fatalf("kind '' outside triage err=%v, want tasks_kind_check", err)
 	}
-	_, err = pool.Exec(ctx, `INSERT INTO tasks(lane,title,kind,state,created_by,created_at,updated_at) VALUES('l','t','','backlog','tester',now(),now())`)
+	_, err = pool.Exec(ctx, `INSERT INTO tasks(lane,title,kind,state,created_by,created_at,updated_at,last_activity_at) VALUES('l','t','','backlog','tester',now(),now(),now())`)
 	if !errors.As(err, &pg) || pg.ConstraintName != "tasks_kind_check" {
 		t.Fatalf("insert kind '' in backlog err=%v, want tasks_kind_check", err)
 	}
@@ -462,7 +462,7 @@ func TestDuplicateCheckAtCreate(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A dropped task with the same title is not a candidate.
-	if _, err := pool.Exec(ctx, `INSERT INTO tasks(lane,title,kind,state,created_by,created_at,updated_at) VALUES('dup','fix the login redirect loop','fix','dropped','tester',now(),now())`); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO tasks(lane,title,kind,state,created_by,created_at,updated_at,last_activity_at) VALUES('dup','fix the login redirect loop','fix','dropped','tester',now(),now(),now())`); err != nil {
 		t.Fatal(err)
 	}
 	before := countIntakeTables(t, pool)

@@ -20,7 +20,7 @@ func searchTestStore(t *testing.T) (*Store, *pgxpool.Pool) {
 func seedTaskRow(t *testing.T, pool *pgxpool.Pool, lane, title, state string) int64 {
 	t.Helper()
 	var id int64
-	err := pool.QueryRow(context.Background(), `INSERT INTO tasks(lane,title,kind,state,created_by,created_at,updated_at) VALUES($1,$2,'implement',$3,'search-test',now(),now()) RETURNING id`, lane, title, state).Scan(&id)
+	err := pool.QueryRow(context.Background(), `INSERT INTO tasks(lane,title,kind,state,created_by,created_at,updated_at,last_activity_at) VALUES($1,$2,'implement',$3,'search-test',now(),now(),now()) RETURNING id`, lane, title, state).Scan(&id)
 	if err != nil {
 		t.Fatal(err)
 	}
