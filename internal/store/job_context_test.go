@@ -223,7 +223,7 @@ func TestJobSkillsReport(t *testing.T) {
 	if report.JobsTotal != 4 || report.JobsSkillsSupported != 2 || report.JobsSkillsUnsupported != 1 || report.JobsSkillsUnknown != 1 || report.JobsNoSkill.Count != 1 || len(report.NeverUsed) != 1 || report.NeverUsed[0].Name != "available" || len(report.ByHarnessModel) != 2 {
 		t.Fatalf("%+v", report)
 	}
-	if report.ByHarnessModel[0].Harness != "h1" || report.ByHarnessModel[0].Model != "m1" || report.ByHarnessModel[0].Jobs != 1 || len(report.ByHarnessModel[0].Skills) != 1 || report.ByHarnessModel[0].Skills[0].Calls != 0 || report.ByHarnessModel[1].Harness != "h2" || report.ByHarnessModel[1].Jobs != 3 || len(report.ByHarnessModel[1].Skills) != 2 || report.ByHarnessModel[1].Skills[0].Name != "called" || report.ByHarnessModel[1].Skills[0].Calls != 3 {
+	if report.ByHarnessModel[0].Harness != "h1" || report.ByHarnessModel[0].Model != "m1" || report.ByHarnessModel[0].Jobs != 1 || len(report.ByHarnessModel[0].Skills) != 1 || report.ByHarnessModel[0].Skills[0].Calls != "0" || report.ByHarnessModel[1].Harness != "h2" || report.ByHarnessModel[1].Jobs != 3 || len(report.ByHarnessModel[1].Skills) != 2 || report.ByHarnessModel[1].Skills[0].Name != "called" || report.ByHarnessModel[1].Skills[0].Calls != "3" {
 		t.Fatalf("groups: %+v", report.ByHarnessModel)
 	}
 }
@@ -242,5 +242,23 @@ func TestJobSkillsReportLimit(t *testing.T) {
 	}
 	if report.JobsTotal != 3 || report.JobsNoSkill.Count != 3 || !report.JobsNoSkill.Truncated || len(report.JobsNoSkill.Jobs) != 1 || len(report.ByHarnessModel) != 1 || report.ByHarnessModel[0].Jobs != 3 {
 		t.Fatalf("limit changed totals: %+v", report)
+	}
+}
+
+func TestJobSkillsReportLargeCalls(t *testing.T) {
+	s := schemaStore(t, "job_skills_large")
+	since := time.Now().UTC().Add(-time.Hour)
+	yes := true
+	for _, id := range []string{"large-a", "large-b"} {
+		jobContextClaim(t, s, id, nil)
+		skills := []JobSkill{{Name: "big", Source: "repo", Calls: 9223372036854775807}}
+		jobContextUpdate(t, s, id, JobUpdate{SkillsSupported: &yes, Skills: &skills})
+	}
+	report, err := s.JobSkillsReport(t.Context(), since, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.ByHarnessModel) != 1 || len(report.ByHarnessModel[0].Skills) != 1 || report.ByHarnessModel[0].Skills[0].Calls != "18446744073709551614" {
+		t.Fatalf("%+v", report)
 	}
 }

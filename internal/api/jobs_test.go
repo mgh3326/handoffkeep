@@ -78,6 +78,12 @@ func TestJobsClaim(t *testing.T) {
 		t.Fatalf("replay: %d %v", code, body)
 	}
 
+	future := time.Now().UTC().Add(2 * time.Hour).Format(time.RFC3339)
+	code, body = jobsRequest(t, "POST", srv.URL+"/v1/jobs", "tok-a", fmt.Sprintf(`{"job_id":%q,"task_id":2,"host":"host-a","at":%q}`, id, future))
+	if code != http.StatusConflict || body["error"] != "job_id_taken" {
+		t.Fatalf("future conflicting claim: %d %v", code, body)
+	}
+
 	// A different claim on the taken id conflicts, from either client.
 	code, body = jobsClaim(t, srv, "tok-a", id, "host-b", 1)
 	if code != http.StatusConflict || body["error"] != "job_id_taken" {

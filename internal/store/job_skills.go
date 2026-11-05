@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -30,10 +31,10 @@ type JobSkillsGroup struct {
 	Skills  []JobSkillAggregate `json:"skills"`
 }
 type JobSkillAggregate struct {
-	Name   string `json:"name"`
-	Source string `json:"source"`
-	Jobs   int    `json:"jobs"`
-	Calls  int64  `json:"calls"`
+	Name   string      `json:"name"`
+	Source string      `json:"source"`
+	Jobs   int         `json:"jobs"`
+	Calls  json.Number `json:"calls"`
 }
 type JobNoSkill struct {
 	JobID     string    `json:"job_id"`
@@ -80,7 +81,7 @@ func (s *Store) JobSkillsReport(ctx context.Context, since time.Time, limit int)
 		return out, err
 	}
 	rows.Close()
-	rows, err = tx.Query(ctx, `SELECT COALESCE(j.harness,''),COALESCE(j.model,''),x.skill->>'name',x.skill->>'source',count(*),sum((x.skill->>'calls')::bigint)::bigint AS calls FROM jobs j CROSS JOIN LATERAL jsonb_array_elements(COALESCE(j.skills,'[]'::jsonb)) AS x(skill) WHERE j.created_at >= $1 GROUP BY 1,2,3,4 ORDER BY 1,2,calls DESC,3,4`, since)
+	rows, err = tx.Query(ctx, `SELECT COALESCE(j.harness,''),COALESCE(j.model,''),x.skill->>'name',x.skill->>'source',count(*),sum((x.skill->>'calls')::bigint)::text AS calls FROM jobs j CROSS JOIN LATERAL jsonb_array_elements(COALESCE(j.skills,'[]'::jsonb)) AS x(skill) WHERE j.created_at >= $1 GROUP BY 1,2,3,4 ORDER BY 1,2,sum((x.skill->>'calls')::bigint) DESC,3,4`, since)
 	if err != nil {
 		return out, err
 	}

@@ -115,3 +115,8 @@ model, never-used skills and supported jobs without calls. The defaults are
 30 days and 100 jobs; the limit is 1–1000. Invalid parameters return
 `invalid_context`. `handoffkeep jobs skills-report` accepts `--since` as a
 duration such as `30d` or `72h`, or RFC 3339, and `--limit`.
+
+A deployment that has accepted a task-less claim requires a binary that can
+read a null `task_id`. Rolling back to a binary predating this change can make
+reads of those records fail; deploy a compatible binary before accepting such
+claims, and keep it available for rollback.

@@ -485,7 +485,10 @@ func (s *Store) ClaimJob(ctx context.Context, j Job) (Job, bool, error) {
 		if err != nil {
 			return j, false, err
 		}
-		if found && sameTaskID(existing.TaskID, j.TaskID) && existing.Host == j.Host {
+		if found {
+			if !sameTaskID(existing.TaskID, j.TaskID) || existing.Host != j.Host {
+				return existing, false, ErrJobIDTaken
+			}
 			return existing, false, nil
 		}
 		return j, false, errors.New("claim time is in the future")
