@@ -1,13 +1,13 @@
 package store
 
-// Version 46 adds dots_results: one row per recorded dots comment, linking the
+// Version 47 adds dots_results: one row per recorded dots comment, linking the
 // document to the task whose Linear origin is the issue, the lane that was
 // notified, the comment's own hash and whether the answer was adopted
 // (design v1 §12.3, §13.1 R13). It is a new table, so it locks no existing
 // row; its foreign keys take SHARE ROW EXCLUSIVE on tasks while they are
 // created, which waits for task writers to commit and blocks them only for
 // the length of this short transaction.
-var dotsResultsV46 = []string{
+var dotsResultsV47 = []string{
 	`CREATE TABLE IF NOT EXISTS dots_results (
 		id BIGSERIAL PRIMARY KEY,
 		document_key TEXT NOT NULL UNIQUE,
@@ -29,5 +29,5 @@ var dotsResultsV46 = []string{
 		CHECK((adoption_state = 'superseded') = (superseded_by IS NOT NULL))
 	)`,
 	`CREATE INDEX IF NOT EXISTS dots_results_task ON dots_results(task_id) WHERE task_id IS NOT NULL`,
-	`INSERT INTO schema_version(version) VALUES (46)`,
+	`INSERT INTO schema_version(version) VALUES (47)`,
 }
