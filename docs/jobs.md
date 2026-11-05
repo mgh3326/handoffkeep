@@ -22,15 +22,15 @@ Reads are open to every authenticated client.
 
 ## Routes
 
-- `POST /v1/jobs` — `{job_id, task_id, host}` claims an id. A new claim
+- `POST /v1/jobs` — `{job_id, task_id, host, at}` claims an id. A new claim
   returns 201 with the record; replaying an identical claim returns 200; a
   claim that differs in `task_id` or `host` on a taken id returns 409
   `job_id_taken`.
 - `PUT /v1/jobs/{job}` — merges an update over the record. The allowlisted
-  fields are `state`, `role`, `label`, `family`, `profile`, `model`,
+  fields include `state`, `role`, `label`, `family`, `profile`, `model`,
   `pool`, `owner_lane`, `parent_lane`, `parent_job`, `pane_id`,
   `worktree` (`{origin, branch, head}`; `branch` is `null` on a detached
-  worktree), `report_doc`, `result` and `usage`. Any other field returns 400.
+  worktree), `report_doc`, `result`, `usage` and the context fields below. Any other field returns 400.
   Brief text, command lines, pane output and absolute local paths are
   never stored.
 - `GET /v1/jobs/{job}` — returns the record, or 404 `not_found`.
@@ -41,9 +41,8 @@ Reads are open to every authenticated client.
 - States only move forward: `claimed → spawned → completed | escalated |
   lost`. `completed` needs a recorded `spawned`; `escalated` and `lost` may
   end a claim that never spawned. A backward move, a skip to `completed`, or
-  any write to a terminal record returns 409 `job_state_conflict`.
-  The one exception is `usage`: an update that carries only `usage` is
-  accepted on a terminal record, because usage is read at completion or reap.
+  a write to a terminal record outside the late-write set returns 409
+  `job_state_conflict`.
 - `usage` is the harness session's token usage:
   `{input_tokens, output_tokens, reasoning_tokens, cache_read_tokens,
   cache_write_tokens, source}`. Counts are integers >= 0, and a missing or
@@ -76,3 +75,48 @@ Reads are open to every authenticated client.
 | 404 | `not_found` | unknown job id |
 | 409 | `job_id_taken` | a different claim on a taken id |
 | 409 | `job_state_conflict` | backward move or write to a terminal record |
+
+## Job context and skills
+
+Claims may omit `task_id` or send null, and may send `at` as an RFC 3339
+client time. The server records it as `claimed_at`; `created_at` is the
+receipt time. A replay ignores `at`.
+
+Updates accept `harness` and `effort` alongside `model`. An `at` requires
+`state`. Entering `spawned` records `spawned_at` and `spawned_received_at`;
+entering a terminal state records `ended_at` and `ended_received_at`.
+`ready_at` is accepted on a non-terminal update when the stored state is
+`spawned` and records `ready_received_at`. Each pair is set once; a missing
+client `at` leaves its client time unknown. Client times more than one hour
+in the future are invalid.
+
+A report can be pinned with `report_sha256` (64 lowercase hexadecimal
+characters) and `report_version` (positive integer) when `report_doc` is
+stored or sent in the same update. A completed result may include `summary`,
+a string of 1–500 Unicode characters. Reads expose `summary` with source
+`worker`, or, for terminal jobs without a worker summary, `server_fallback`.
+The fallback uses the end state, optional `end_reason` and `diff_stat`
+(`files`, `insertions`, `deletions`); these outcome fields are accepted only
+on the transition into a terminal state. The server computes the fallback on
+read and does not store it.
+
+`skills` replaces the entire array of `{name, source, version_or_hash, calls}`.
+It has at most 100 unique name/source pairs; names are 1–128 bytes, sources
+1–64 bytes, versions at most 128 bytes, and calls nonnegative. A nonempty
+array requires `skills_supported:true`; false requires an empty or absent
+array. A zero call count means the skill was available but never called.
+Terminal updates may contain only `usage`, `skills`, and `skills_supported`.
+Other terminal updates return `job_state_conflict`; invalid values and field
+combinations return `invalid_context` (secret-shaped values retain
+`secret_like_content`).
+
+`GET /v1/job-skills?since=RFC3339&limit=N` reports skill use by harness and
+model, never-used skills and supported jobs without calls. The defaults are
+30 days and 100 jobs; the limit is 1–1000. Invalid parameters return
+`invalid_context`. `handoffkeep jobs skills-report` accepts `--since` as a
+duration such as `30d` or `72h`, or RFC 3339, and `--limit`.
+
+A deployment that has accepted a task-less claim requires a binary that can
+read a null `task_id`. Rolling back to a binary predating this change can make
+reads of those records fail; deploy a compatible binary before accepting such
+claims, and keep it available for rollback.

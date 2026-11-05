@@ -407,7 +407,7 @@ func (s *Store) recordLinearBoardRelayTx(ctx context.Context, tx pgx.Tx, x Relay
 }
 
 func (s *Store) recordLinearBoardJobTx(ctx context.Context, tx pgx.Tx, job Job) error {
-	if !s.LinearBoardEnabled() {
+	if job.TaskID == nil || !s.LinearBoardEnabled() {
 		return nil
 	}
 	var task Task

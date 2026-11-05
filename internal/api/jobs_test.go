@@ -78,6 +78,12 @@ func TestJobsClaim(t *testing.T) {
 		t.Fatalf("replay: %d %v", code, body)
 	}
 
+	future := time.Now().UTC().Add(2 * time.Hour).Format(time.RFC3339)
+	code, body = jobsRequest(t, "POST", srv.URL+"/v1/jobs", "tok-a", fmt.Sprintf(`{"job_id":%q,"task_id":2,"host":"host-a","at":%q}`, id, future))
+	if code != http.StatusConflict || body["error"] != "job_id_taken" {
+		t.Fatalf("future conflicting claim: %d %v", code, body)
+	}
+
 	// A different claim on the taken id conflicts, from either client.
 	code, body = jobsClaim(t, srv, "tok-a", id, "host-b", 1)
 	if code != http.StatusConflict || body["error"] != "job_id_taken" {
@@ -367,5 +373,36 @@ func TestJobsUsage(t *testing.T) {
 		if code, _ := jobsRequest(t, "PUT", url, "tok-a", bad); code != http.StatusBadRequest {
 			t.Errorf("%s: %d, want 400", bad, code)
 		}
+	}
+}
+
+func TestTasklessJob(t *testing.T) {
+	srv := jobsAPIServer(t)
+	url := srv.URL + "/v1/jobs"
+	claim := `{"job_id":"taskless","host":"host-a"}`
+	code, body := jobsRequest(t, "POST", url, "tok-a", claim)
+	if code != http.StatusCreated || body["task_id"] != nil {
+		t.Fatalf("claim: %d %v", code, body)
+	}
+	if code, body = jobsRequest(t, "POST", url, "tok-a", claim); code != http.StatusOK {
+		t.Fatalf("replay: %d %v", code, body)
+	}
+	if code, body = jobsRequest(t, "PUT", url+"/taskless", "tok-a", `{"summary":{"text":"x"}}`); code != http.StatusBadRequest || body["error"] != "invalid_context" {
+		t.Fatalf("summary input: %d %v", code, body)
+	}
+	for _, step := range []string{`{"state":"spawned","role":"builder"}`, `{"state":"completed"}`} {
+		if code, body = jobsRequest(t, "PUT", url+"/taskless", "tok-a", step); code != http.StatusOK {
+			t.Fatalf("update: %d %v", code, body)
+		}
+	}
+	if code, body = jobsRequest(t, "POST", url, "tok-a", `{"job_id":"bad-task","host":"host-a","task_id":0}`); code != http.StatusBadRequest || body["error"] != "invalid_context" {
+		t.Fatalf("bad task: %d %v", code, body)
+	}
+}
+func TestJobSkillsReport(t *testing.T) {
+	srv := jobsAPIServer(t)
+	code, body := jobsRequest(t, "GET", srv.URL+"/v1/job-skills?since=bad", "tok-a", "")
+	if code != http.StatusBadRequest || body["error"] != "invalid_context" {
+		t.Fatalf("%d %v", code, body)
 	}
 }

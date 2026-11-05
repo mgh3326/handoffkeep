@@ -1239,8 +1239,10 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := migrateOnce(ctx, tx, 43, func() error { return execAll(ctx, tx, decisionResolutionsV43) }); err != nil {
 		return err
 	}
-
 	if err := migrateOnce(ctx, tx, 44, func() error { return execAll(ctx, tx, lastActivityV44) }); err != nil {
+		return err
+	}
+	if err := migrateOnce(ctx, tx, 45, func() error { return execAll(ctx, tx, jobContextV45) }); err != nil {
 		return err
 	}
 
