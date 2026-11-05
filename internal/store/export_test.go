@@ -6,24 +6,13 @@ import (
 	"fmt"
 	"testing"
 	"time"
-
-	"github.com/mgh3326/handoffkeep/internal/testdb"
 )
 
 // testExportStore migrates inside a throwaway schema. The export tests
 // compare whole-table counts, so sharing public with other packages' tests
 // makes them flaky — any concurrent writer fails the comparison, and the
 // migrate ALTERs can wedge behind another suite's open snapshot.
-func testExportStore(t *testing.T) *Store {
-	t.Helper()
-	_, dbURL := testdb.Schema(t, "export")
-	st, err := Open(t.Context(), dbURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(st.Close)
-	return st
-}
+func testExportStore(t *testing.T) *Store { return schemaStore(t, "export") }
 
 func exportLane(t *testing.T) string {
 	t.Helper()

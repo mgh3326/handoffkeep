@@ -7,20 +7,10 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/mgh3326/handoffkeep/internal/testdb"
 )
 
 // Each test runs in a throwaway schema so it can count every decision row.
-func decisionStore(t *testing.T) *Store {
-	t.Helper()
-	pool, _ := testdb.SchemaPool(t, "decision_records")
-	s := &Store{pool: pool}
-	if err := s.migrate(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	return s
-}
+func decisionStore(t *testing.T) *Store { return schemaStore(t, "decision_records") }
 
 func decisionRowsWhere(t *testing.T, s *Store, where string, args ...any) []DecisionRecord {
 	t.Helper()

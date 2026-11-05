@@ -1,31 +1,14 @@
 package store
 
 import (
-	"context"
 	"fmt"
 	"sync"
 	"testing"
-
-	"github.com/mgh3326/handoffkeep/internal/testdb"
 )
 
-func testAttachmentStore(t *testing.T) *Store {
-	t.Helper()
-	url := testdb.URL(t)
-	s, e := Open(t.Context(), url)
-	if e != nil {
-		t.Fatal(e)
-	}
-	if _, e = s.pool.Exec(t.Context(), `TRUNCATE attachment_refs, attachments, attachment_usage`); e != nil {
-		s.Close()
-		t.Fatal(e)
-	}
-	t.Cleanup(func() {
-		_, _ = s.pool.Exec(context.Background(), `TRUNCATE attachment_refs, attachments, attachment_usage`)
-		s.Close()
-	})
-	return s
-}
+// testAttachmentStore runs in its own schema: the attachment tests count
+// usage rows, and truncating the shared tables raced other packages' tests.
+func testAttachmentStore(t *testing.T) *Store { return schemaStore(t, "attachments") }
 func attachmentFor(i int) Attachment {
 	return Attachment{SHA256: fmt.Sprintf("%064x", i+1), SizeBytes: 1, MIME: "text/plain", OriginalName: fmt.Sprintf("%d.txt", i), CreatedBy: "node", RefKind: "none"}
 }

@@ -7,21 +7,14 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/mgh3326/handoffkeep/internal/testdb"
 )
 
 // searchTestStore returns a Store migrated inside a fresh throwaway schema so
 // task-search tests never observe rows seeded by other suites sharing the test
 // database.
 func searchTestStore(t *testing.T) (*Store, *pgxpool.Pool) {
-	t.Helper()
-	ctx := context.Background()
-	pool, _ := testdb.SchemaPool(t, "search_tasks")
-	s := &Store{pool: pool}
-	if err := s.migrate(ctx); err != nil {
-		t.Fatal(err)
-	}
-	return s, pool
+	s := schemaStore(t, "search_tasks")
+	return s, s.pool
 }
 
 func seedTaskRow(t *testing.T, pool *pgxpool.Pool, lane, title, state string) int64 {
