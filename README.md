@@ -241,6 +241,21 @@ the claim's sub-state, `verifying` and `join` → `reviewing`, `hold` →
 `icebox`, `needs_decision` → set `awaiting_decision`, `claimed` → the claim
 path, `reopened` → the reopen path); responses use only the current names.
 
+`task_origins` records where a task came from by the provider's durable id,
+not by its display number: `tasks origin add <id> --provider linear
+--namespace NS --external-id <issue UUID> [--display-ref MGH-151]
+[--origin-url U] [--title T]`. A task may have any number of origins. Adding the
+same UUID again (an issue that moved from MGH-151 to ROB-1514) refreshes the
+display number, URL and title and makes no second row; `tasks origin list <id>`
+lists a task's origins and `tasks origin find --provider P --external-id UUID`
+finds every task that came from one external object. (`--url` stays the hk
+server, so the origin's own URL is `--origin-url`.) Origins between hk tasks are
+`task_relations`. `doc put --task N --origin-class authored|job|import` names the
+task a document belongs to and how it came to be (kinds `decision`, `research`,
+`design`, `policy` and `evidence` are accepted too); `doc list --task N` lists
+them. A re-put that omits the two keeps the stored values; an unknown value
+stays NULL.
+
 `tasks.parent_id` is a single, acyclic parent (`tasks add --parent <id>`,
 `tasks parent <id> --to <parent>|--clear`). `task_relations` holds `blocks`,
 `duplicate_of` and `related` edges (`tasks relate|unrelate <id> --kind K

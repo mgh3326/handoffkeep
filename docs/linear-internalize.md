@@ -34,7 +34,7 @@ proposed answer for every item except Q11, where the alternative stands.
 
 **Two clocks.** `updated_at` is the search sync clock and moves on every write.
 `last_activity_at` moves only on task events with `auto=false` or
-`source=panewire.job`. Version 41 backfilled it from those events, with
+`source=panewire.job`. Version 42 backfilled it from those events, with
 `created_at` as the floor.
 
 `tasks.state` holds one of eleven leaf states. The category is derived from the

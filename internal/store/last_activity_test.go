@@ -24,7 +24,7 @@ func TestActivityEventRule(t *testing.T) {
 func TestLastActivityMigration(t *testing.T) {
 	s := schemaStore(t, "activity_migration")
 	ctx := t.Context()
-	for _, q := range []string{`ALTER TABLE tasks DROP COLUMN last_activity_at`, `DELETE FROM schema_version WHERE version=41`} {
+	for _, q := range []string{`ALTER TABLE tasks DROP COLUMN last_activity_at`, `DELETE FROM schema_version WHERE version=42`} {
 		if _, err := s.pool.Exec(ctx, q); err != nil {
 			t.Fatal(err)
 		}
@@ -52,7 +52,7 @@ func TestLastActivityMigration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer tx.Rollback(ctx)
-	if err := execAll(ctx, tx, lastActivityV41); err != nil {
+	if err := execAll(ctx, tx, lastActivityV42); err != nil {
 		t.Fatal(err)
 	}
 	if err := tx.Commit(ctx); err != nil {
