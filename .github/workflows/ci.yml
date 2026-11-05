@@ -29,9 +29,13 @@ on:
 #          one runs-on label); every other event, and an unset variable, uses a
 #          hosted runner. A dispatch checks out an arbitrary ref, so it never
 #          reaches our machines: only reviewed, merged code does.
-# A main push cancels the run of the previous main head, so only the newest
-# head finishes; ci-ok then reports skipped (unknown), never failure.
-concurrency: {group: "ci-${{ github.workflow }}-${{ (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call') && github.run_id || github.ref }}", cancel-in-progress: true}
+# A new push to a pull request cancels that PR's older run. A main push never
+# cancels the running main run: with merges faster than T-POST, cancelling
+# would leave main with no finished ci-ok at all and starve the release gate
+# and mergewake's watch (hk 3103). GitHub keeps one pending run per group, so a
+# newer main push replaces the queued one; that skipped head reports ci-ok
+# skipped (unknown), never failure, and its change ships with the next head.
+concurrency: {group: "ci-${{ github.workflow }}-${{ (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call') && github.run_id || github.ref }}", cancel-in-progress: "${{ github.event_name == 'pull_request' }}"}
 permissions:
   contents: read
 jobs:

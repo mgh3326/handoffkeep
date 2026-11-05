@@ -125,10 +125,11 @@ func tierProblems(ci, anyRef []byte) []string {
 			add("ci.yml must trigger on %s", ev)
 		}
 	}
-	// Only the newest main head runs: the main push group is keyed on the ref
-	// and a newer push cancels the older run.
-	if wf.Concurrency["cancel-in-progress"] != true || !strings.Contains(fmt.Sprint(wf.Concurrency["group"]), "github.ref") {
-		add("ci.yml concurrency must key on github.ref with cancel-in-progress: true")
+	// The group is keyed on the ref. Only a pull request cancels its older
+	// run; a main push lets the running T-POST finish (hk 3103), so main
+	// always gets a finished ci-ok even when merges outpace CI.
+	if wf.Concurrency["cancel-in-progress"] != "${{ github.event_name == 'pull_request' }}" || !strings.Contains(fmt.Sprint(wf.Concurrency["group"]), "github.ref") {
+		add("ci.yml concurrency must key on github.ref and cancel in progress only for pull_request")
 	}
 
 	var prJobs, postJobs []string
@@ -254,7 +255,8 @@ func TestCITierMutantsTurnRed(t *testing.T) {
 		{"self-hosted-pr-test", "    runs-on: ubuntu-latest\n    timeout-minutes: 15\n", "    runs-on: [self-hosted, linux]\n    timeout-minutes: 15\n"},
 		{"runner-variable-pr-test", "    runs-on: ubuntu-latest\n    timeout-minutes: 15\n", "    runs-on: ${{ vars.HANDOFFKEEP_POST_LINUX_RUNNER || 'ubuntu-latest' }}\n    timeout-minutes: 15\n"},
 		{"no-concurrency", "concurrency: {group:", "x-concurrency: {group:"},
-		{"no-cancel-in-progress", "cancel-in-progress: true}", "cancel-in-progress: false}"},
+		{"no-cancel-in-progress", `cancel-in-progress: "${{ github.event_name == 'pull_request' }}"}`, "cancel-in-progress: false}"},
+		{"main-push-cancels", `cancel-in-progress: "${{ github.event_name == 'pull_request' }}"}`, "cancel-in-progress: true}"},
 		{"post-linux-unguarded", "if: ${{ github.event_name != 'pull_request' && contains(fromJSON('[\"all\",\"test\"]'), inputs.suite || 'all') }}\n    name: 'post: race + postgres'", "if: ${{ contains(fromJSON('[\"all\",\"test\"]'), inputs.suite || 'all') }}\n    name: 'post: race + postgres'"},
 		{"ci-ok-always", "if: ${{ " + ciOkIf + " }}", "if: ${{ always() }}"},
 		{"no-macos", "vars.HANDOFFKEEP_POST_MAC_RUNNER) || 'macos-latest'", "vars.HANDOFFKEEP_POST_MAC_RUNNER) || 'ubuntu-latest'"},
