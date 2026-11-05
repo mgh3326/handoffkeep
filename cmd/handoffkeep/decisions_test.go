@@ -209,7 +209,7 @@ func TestDecisionsBackfillDryRunWritesNothing(t *testing.T) {
 	}
 	// live: an escalation of a running job.
 	jobTask := newTask("job task")
-	if _, _, err := st.ClaimJob(ctx, store.Job{JobID: "bf-job-1", TaskID: jobTask.ID, Host: "host-a", CreatedBy: "backfill-test"}); err != nil {
+	if _, _, err := st.ClaimJob(ctx, store.Job{JobID: "bf-job-1", TaskID: &jobTask.ID, Host: "host-a", CreatedBy: "backfill-test"}); err != nil {
 		t.Fatal(err)
 	}
 	spawned := "spawned"

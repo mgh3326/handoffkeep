@@ -437,7 +437,7 @@ func (s *Store) applyDeployRecordTx(ctx context.Context, tx pgx.Tx, key, body st
 // role: the task bound to the job moves forward only, from researching to
 // developing when the role and the task kind say so.
 func (s *Store) applyJobRoleTx(ctx context.Context, tx pgx.Tx, j Job, now time.Time) error {
-	if j.Role == "" {
+	if j.TaskID == nil || j.Role == "" {
 		return nil
 	}
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {

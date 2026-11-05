@@ -267,7 +267,7 @@ func TestEventRule5JobEndDoesNotMoveTask(t *testing.T) {
 	ctx := t.Context()
 	x := flowTask(t, s, pool, "implement", StateDeveloping, true)
 	jobID := fmt.Sprintf("job-r5-%d", x.ID)
-	if _, _, err := s.ClaimJob(ctx, Job{JobID: jobID, TaskID: x.ID, Host: "test-host", CreatedBy: "tester"}); err != nil {
+	if _, _, err := s.ClaimJob(ctx, Job{JobID: jobID, TaskID: &x.ID, Host: "test-host", CreatedBy: "tester"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pool.Exec(ctx, `UPDATE tasks SET refs=refs||jsonb_build_object('job_id',$2::text) WHERE id=$1`, x.ID, jobID); err != nil {
@@ -417,7 +417,7 @@ func TestEventRule9RevertUndoesMerge(t *testing.T) {
 	// A merged task with a live job keeps its claim.
 	live := flowTask(t, s, pool, "implement", StateReviewing, true)
 	jobID := fmt.Sprintf("job-r9-%d", live.ID)
-	if _, _, err := s.ClaimJob(t.Context(), Job{JobID: jobID, TaskID: live.ID, Host: "test-host", CreatedBy: "tester"}); err != nil {
+	if _, _, err := s.ClaimJob(t.Context(), Job{JobID: jobID, TaskID: &live.ID, Host: "test-host", CreatedBy: "tester"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pool.Exec(t.Context(), `UPDATE tasks SET refs=refs||jsonb_build_object('job_id',$2::text) WHERE id=$1`, live.ID, jobID); err != nil {
@@ -531,7 +531,7 @@ func TestJobRoleMovesTaskForwardOnly(t *testing.T) {
 	bind := func(state string) (Task, string) {
 		x := flowTask(t, s, pool, "implement", state, true)
 		jobID := fmt.Sprintf("job-role-%d", x.ID)
-		if _, _, err := s.ClaimJob(ctx, Job{JobID: jobID, TaskID: x.ID, Host: "test-host", CreatedBy: "tester"}); err != nil {
+		if _, _, err := s.ClaimJob(ctx, Job{JobID: jobID, TaskID: &x.ID, Host: "test-host", CreatedBy: "tester"}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := pool.Exec(ctx, `UPDATE tasks SET refs=refs||jsonb_build_object('job_id',$2::text) WHERE id=$1`, x.ID, jobID); err != nil {
