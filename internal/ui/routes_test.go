@@ -11,6 +11,7 @@ func TestRoutePatternsHidePathValues(t *testing.T) {
 		"/ui/api/board/tasks/123":                 "/ui/api/board/tasks/{id}",
 		"/ui/api/board/tasks/123/comments":        "/ui/api/board/tasks/{id}/comments",
 		"/ui/api/nodes/private-machine/accepting": "/ui/api/nodes/{machine}/accepting",
+		"/ui/api/decision-requests/resolve":       "/ui/api/decision-requests/resolve",
 		"/ui/static/console/queue.js":             "/ui/static/{file...}",
 		"/ui/unknown-private-path":                "/ui/{path...}",
 	} {

@@ -99,10 +99,10 @@ func TestTasksDecisionRequestCLIRefusals(t *testing.T) {
 func TestTasksDecisionResolveCLI(t *testing.T) {
 	h, seen := relaneServer(t, 200, `{"task":{"id":618,"state":"merged"},"request":{"id":"dr-618-1","status":"default_applied"},"duplicate":false}`)
 	var out bytes.Buffer
-	if err := run([]string{"tasks", "decision-resolve", "618", "--request", "dr-618-1", "--kind", "default_applied", "--receipt", "hk:doc receipt/x", "--url", h.URL, "--token", "tok"}, &out, io.Discard); err != nil {
+	if err := run([]string{"tasks", "decision-resolve", "618", "--request", "dr-618-1", "--kind", "default_applied", "--receipt", "hk:doc receipt/x", "--event-key", "cli-1", "--url", h.URL, "--token", "tok"}, &out, io.Discard); err != nil {
 		t.Fatal(err)
 	}
-	if req := (*seen)[0]; req.Path != "/v1/tasks/618/decision-request/resolve" || req.Body["receipt"] != "hk:doc receipt/x" || req.Body["kind"] != "default_applied" {
+	if req := (*seen)[0]; req.Path != "/v1/tasks/618/decision-request/resolve" || req.Body["receipt"] != "hk:doc receipt/x" || req.Body["kind"] != "default_applied" || req.Body["event_key"] != "cli-1" {
 		t.Fatalf("request=%+v", req)
 	}
 	if err := run([]string{"tasks", "decision-resolve", "618", "--request", "dr-618-1", "--kind", "default_applied", "--url", h.URL, "--token", "tok"}, io.Discard, io.Discard); err == nil || !strings.Contains(err.Error(), "requires a receipt") {
@@ -110,6 +110,26 @@ func TestTasksDecisionResolveCLI(t *testing.T) {
 	}
 	if len(*seen) != 1 {
 		t.Fatalf("receipt-less application reached the server")
+	}
+}
+
+// A human_only answer from a session waits for the operator: the server
+// answers 202 pending_confirmation, and the command prints it and exits 0.
+func TestTasksDecisionResolveCLIPendingConfirmation(t *testing.T) {
+	h, seen := relaneServer(t, 202, `{"task":{"id":618,"state":"in_progress"},"request":{"id":"dr-618-1","status":"open"},"duplicate":false,"result":"pending_confirmation"}`)
+	var out bytes.Buffer
+	if err := run([]string{"tasks", "decision-resolve", "618", "--request", "dr-618-1", "--kind", "answered", "--option", "A", "--url", h.URL, "--token", "tok"}, &out, io.Discard); err != nil {
+		t.Fatalf("a pending_confirmation answer must exit 0: %v", err)
+	}
+	var printed map[string]any
+	if err := json.Unmarshal(out.Bytes(), &printed); err != nil {
+		t.Fatalf("output %q: %v", out.String(), err)
+	}
+	if printed["result"] != "pending_confirmation" || printed["recorded"] != false || printed["status"] != "open" {
+		t.Fatalf("printed=%v", printed)
+	}
+	if len(*seen) != 1 {
+		t.Fatalf("requests=%d", len(*seen))
 	}
 }
 

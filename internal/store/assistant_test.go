@@ -150,10 +150,16 @@ func TestAssistantResolveRefusesHumanOnly(t *testing.T) {
 	if n := len(outboxRows(t, s)); n != 0 {
 		t.Fatalf("human_only left %d outbox rows", n)
 	}
-	// The same request answers fine through the operator path.
-	closed, err := s.ResolveDecisionRequest(ctx, task.ID, "director-1", DecisionResolveInput{RequestID: got.Request.ID, Kind: DecisionRequestAnswered, Option: "A", Responder: "operator"})
-	if err != nil || closed.Request.Status != DecisionRequestAnswered {
-		t.Fatalf("operator resolve=%+v err=%v", closed.Request.Status, err)
+	// An unverified human path (a session's CLI client) is a relay: the
+	// answer waits for confirmation and the request stays open (R1).
+	_, err = s.ResolveDecisionRequest(ctx, task.ID, "director-1", DecisionResolveInput{RequestID: got.Request.ID, Kind: DecisionRequestAnswered, Option: "A", Responder: "operator"})
+	if !errors.Is(err, ErrDecisionPendingConfirmation) {
+		t.Fatalf("relay resolve err=%v", err)
+	}
+	// The verified operator path closes it.
+	closed, err := s.ResolveDecision(ctx, ResolveDecisionInput{RequestID: got.Request.ID, Kind: DecisionRequestAnswered, Option: "A", Responder: "operator", Channel: DecisionChannelCLI, Actor: "operator", Verified: true})
+	if err != nil || closed.Result != DecisionResultAnswered || closed.Request.Status != DecisionRequestAnswered {
+		t.Fatalf("operator resolve=%+v err=%v", closed, err)
 	}
 }
 
@@ -764,39 +770,34 @@ func TestAssistantChatAnswerRevisionRace(t *testing.T) {
 	}
 }
 
-// Invariant (provenance contract): an operator_decided answer carrying the
-// operator's verbatim quote and this request's exact ref closes a human_only
-// request — recorded decided_by=operator with the quote and ref, the outbox
-// text names the operator quote, and the decision event note carries both.
+// Invariant (provenance contract, R1): an operator_decided answer carrying
+// the operator's verbatim quote and this request's exact ref is a relay, so
+// it does not close a human_only request — it waits as pending_confirmation,
+// writes no outbox row, and a verified operator answer closes it later.
 func TestAssistantResolveOperatorDecidedHumanOnly(t *testing.T) {
-	s, pool := searchTestStore(t)
+	s, _ := searchTestStore(t)
 	ctx := context.Background()
 	task := assistantTask(t, s, "in_progress")
 	in := decisionInput()
 	in.HumanOnly = true
 	request := assistantRecordWith(t, s, task.ID, in)
-	got, err := s.ResolveDecisionRequestAssistant(ctx, task.ID, "berry-mcp", DecisionAssistantResolveInput{
+	_, err := s.ResolveDecisionRequestAssistant(ctx, task.ID, "berry-mcp", DecisionAssistantResolveInput{
 		RequestID: request.ID, Option: "A", Text: "operator said A",
 		Provenance: DecisionProvenanceOperatorDecided, OperatorQuote: "옵션 A로 진행해", DecisionRef: request.ID,
 	})
-	if err != nil {
-		t.Fatal(err)
+	if !errors.Is(err, ErrDecisionPendingConfirmation) {
+		t.Fatalf("relayed human_only answer err=%v", err)
 	}
-	res := got.Request.Resolution
-	if res == nil || res.Provenance != DecisionProvenanceOperatorDecided || res.DecidedBy != DecisionDecidedByOperator ||
-		res.OperatorQuote != "옵션 A로 진행해" || res.DecisionRef != request.ID || res.Responder != DecisionAssistantResponder {
-		t.Fatalf("resolution=%+v", res)
+	got, _, err := s.GetTask(ctx, task.ID)
+	if err != nil || got.Refs.DecisionRequest.Status != DecisionRequestOpen || got.Refs.DecisionRequest.Resolution != nil {
+		t.Fatalf("request after a relay=%+v err=%v", got.Refs.DecisionRequest, err)
 	}
-	rows := outboxRows(t, s)
-	if len(rows) != 1 || !strings.Contains(rows[0].Text, "(operator quote)") {
-		t.Fatalf("outbox=%+v", rows)
+	if n := len(outboxRows(t, s)); n != 0 {
+		t.Fatalf("a pending answer left %d outbox rows", n)
 	}
-	var note string
-	if err := pool.QueryRow(ctx, `SELECT note FROM task_events WHERE task_id=$1 AND kind='decision' ORDER BY id DESC LIMIT 1`, task.ID).Scan(&note); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(note, "(operator quote)") || !strings.Contains(note, "옵션 A로 진행해") {
-		t.Fatalf("event note=%q", note)
+	closed, err := s.ResolveDecision(ctx, ResolveDecisionInput{RequestID: request.ID, Kind: DecisionRequestAnswered, Option: "A", Channel: DecisionChannelCLI, Actor: "operator", Verified: true})
+	if err != nil || closed.Result != DecisionResultAnswered {
+		t.Fatalf("verified answer=%+v err=%v", closed, err)
 	}
 }
 
