@@ -228,7 +228,7 @@ is never stored (API rows carry it read-only as `category`):
 | `backlog` | `backlog` (claimable) |
 | `unstarted` | `unstarted` (claimable) |
 | `started` (open) | `researching`, `developing`, `reviewing` |
-| `completed` | `merged`, `deployed` |
+| `completed` | `merged`, `deployed`, `completed` |
 | `canceled` | `dropped`, `duplicate`, `icebox` |
 
 Open means `started` and nothing else. A claim (`tasks claim`, `tasks next`)
@@ -681,7 +681,8 @@ deployment path is unchanged.
 
 `handoffkeep tasks reopen <id> --reason "reverted after failed smoke"` calls
 `POST /v1/tasks/{id}/reopen` with `{"reason":"reverted after failed smoke"}`.
-Only a settled task (`merged`, `deployed`, `dropped` or `duplicate`) or an `icebox` task can be reopened, and it returns to `unstarted`. The
+Only a settled task (`merged`, `deployed`, `completed`, `dropped` or `duplicate`)
+or an `icebox` task can be reopened, and it returns to `unstarted`. The
 operation requires a non-empty reason, records the authenticated caller and
 reason as an append-only transition audit event, and clears the claimant and
 per-cycle `job_id`, `pr`, `head_sha`, and `report_path` refs. Previous values stay

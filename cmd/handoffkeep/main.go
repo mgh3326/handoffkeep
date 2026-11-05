@@ -281,7 +281,7 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 	c := remoteClient(fs)
 	lane := fs.String("lane", "", "task lane")
 	parentLane := fs.String("parent-lane", "", "parent lane")
-	state := fs.String("state", "", "task state (triage, backlog, unstarted, researching, developing, reviewing, merged, deployed, dropped, duplicate, icebox; old names such as in_progress or hold are still accepted)")
+	state := fs.String("state", "", "task state (triage, backlog, unstarted, researching, developing, reviewing, merged, deployed, completed, dropped, duplicate, icebox; old names such as in_progress or hold are still accepted)")
 	parentID := fs.Int64("parent", 0, "parent task id (tasks add only)")
 	duplicateOf := fs.Int64("duplicate-of", 0, "task a duplicate transition points at (tasks transition --to duplicate)")
 	link := fs.Int64("link", 0, "existing task to relate the new task to as related, answering the duplicate check (tasks add only)")
