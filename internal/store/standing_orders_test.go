@@ -72,3 +72,13 @@ func TestPutStandingOrderSupersede(t *testing.T) {
 		t.Fatalf("count=%d err=%v", count, err)
 	}
 }
+
+func TestStandingOrdersMigrationAfterDecisionDeny(t *testing.T) {
+	s := schemaStore(t, "standing_migration")
+	var version int
+	var tableExists, denyColumnExists bool
+	err := s.pool.QueryRow(t.Context(), `SELECT (SELECT max(version) FROM schema_version), to_regclass('standing_orders') IS NOT NULL, EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='decision_answer_attempts' AND column_name='denies_attempt_id')`).Scan(&version, &tableExists, &denyColumnExists)
+	if err != nil || version != SchemaVersion || !tableExists || !denyColumnExists {
+		t.Fatalf("version=%d table=%v deny_column=%v err=%v", version, tableExists, denyColumnExists, err)
+	}
+}
