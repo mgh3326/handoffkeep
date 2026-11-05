@@ -2,8 +2,9 @@ package store
 
 import (
 	"context"
-	"sort"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 type JobSkillsReport struct {
@@ -49,107 +50,93 @@ type JobNoSkillList struct {
 
 func (s *Store) JobSkillsReport(ctx context.Context, since time.Time, limit int) (JobSkillsReport, error) {
 	out := JobSkillsReport{Since: since, ByHarnessModel: []JobSkillsGroup{}, NeverUsed: []JobSkillCount{}, JobsNoSkill: JobNoSkillList{Jobs: []JobNoSkill{}}}
-	rows, err := s.pool.Query(ctx, `SELECT job_id,task_id,COALESCE(harness,''),COALESCE(model,''),created_at,skills_supported,skills FROM jobs WHERE created_at >= $1 ORDER BY created_at DESC,job_id DESC`, since)
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
 		return out, err
 	}
-	defer rows.Close()
-	type key = [2]string
-	groups := map[key]*JobSkillsGroup{}
-	totals := map[key]*JobSkillCount{}
-	for rows.Next() {
-		var job JobNoSkill
-		var supported *bool
-		var raw []byte
-		if err = rows.Scan(&job.JobID, &job.TaskID, &job.Harness, &job.Model, &job.CreatedAt, &supported, &raw); err != nil {
-			return out, err
-		}
-		out.JobsTotal++
-		if supported == nil {
-			out.JobsSkillsUnknown++
-		} else if *supported {
-			out.JobsSkillsSupported++
-		} else {
-			out.JobsSkillsUnsupported++
-		}
-		gkey := key{job.Harness, job.Model}
-		g := groups[gkey]
-		if g == nil {
-			g = &JobSkillsGroup{Harness: job.Harness, Model: job.Model, Skills: []JobSkillAggregate{}}
-			groups[gkey] = g
-		}
-		g.Jobs++
-		var skills []JobSkill
-		if _, err = scanJSONB(raw, &skills); err != nil {
-			return out, err
-		}
-		var calls int64
-		for _, skill := range skills {
-			calls += skill.Calls
-			k := key{skill.Name, skill.Source}
-			t := totals[k]
-			if t == nil {
-				t = &JobSkillCount{Name: skill.Name, Source: skill.Source}
-				totals[k] = t
-			}
-			t.Jobs++
-			t.Calls += skill.Calls
-			found := false
-			for i := range g.Skills {
-				v := &g.Skills[i]
-				if v.Name == skill.Name && v.Source == skill.Source {
-					v.Jobs++
-					v.Calls += skill.Calls
-					found = true
-					break
-				}
-			}
-			if !found {
-				g.Skills = append(g.Skills, JobSkillAggregate{skill.Name, skill.Source, 1, skill.Calls})
-			}
-		}
-		if supported != nil && *supported && calls == 0 {
-			out.JobsNoSkill.Count++
-			if len(out.JobsNoSkill.Jobs) < limit {
-				out.JobsNoSkill.Jobs = append(out.JobsNoSkill.Jobs, job)
-			}
-		}
-	}
-	if err = rows.Err(); err != nil {
+	defer tx.Rollback(ctx)
+	err = tx.QueryRow(ctx, `SELECT count(*), count(*) FILTER (WHERE skills_supported IS TRUE), count(*) FILTER (WHERE skills_supported IS FALSE), count(*) FILTER (WHERE skills_supported IS NULL) FROM jobs WHERE created_at >= $1`, since).Scan(&out.JobsTotal, &out.JobsSkillsSupported, &out.JobsSkillsUnsupported, &out.JobsSkillsUnknown)
+	if err != nil {
 		return out, err
 	}
+	rows, err := tx.Query(ctx, `SELECT COALESCE(harness,''),COALESCE(model,''),count(*) FROM jobs WHERE created_at >= $1 GROUP BY COALESCE(harness,''),COALESCE(model,'') ORDER BY 1,2`, since)
+	if err != nil {
+		return out, err
+	}
+	type key = [2]string
+	groups := map[key]int{}
+	for rows.Next() {
+		var g JobSkillsGroup
+		g.Skills = []JobSkillAggregate{}
+		if err = rows.Scan(&g.Harness, &g.Model, &g.Jobs); err != nil {
+			rows.Close()
+			return out, err
+		}
+		groups[key{g.Harness, g.Model}] = len(out.ByHarnessModel)
+		out.ByHarnessModel = append(out.ByHarnessModel, g)
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return out, err
+	}
+	rows.Close()
+	rows, err = tx.Query(ctx, `SELECT COALESCE(j.harness,''),COALESCE(j.model,''),x.skill->>'name',x.skill->>'source',count(*),sum((x.skill->>'calls')::bigint)::bigint AS calls FROM jobs j CROSS JOIN LATERAL jsonb_array_elements(COALESCE(j.skills,'[]'::jsonb)) AS x(skill) WHERE j.created_at >= $1 GROUP BY 1,2,3,4 ORDER BY 1,2,calls DESC,3,4`, since)
+	if err != nil {
+		return out, err
+	}
+	for rows.Next() {
+		var harness, model string
+		var skill JobSkillAggregate
+		if err = rows.Scan(&harness, &model, &skill.Name, &skill.Source, &skill.Jobs, &skill.Calls); err != nil {
+			rows.Close()
+			return out, err
+		}
+		i := groups[key{harness, model}]
+		out.ByHarnessModel[i].Skills = append(out.ByHarnessModel[i].Skills, skill)
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return out, err
+	}
+	rows.Close()
+	rows, err = tx.Query(ctx, `SELECT x.skill->>'name',x.skill->>'source',count(*) FROM jobs j CROSS JOIN LATERAL jsonb_array_elements(COALESCE(j.skills,'[]'::jsonb)) AS x(skill) WHERE j.created_at >= $1 GROUP BY 1,2 HAVING sum((x.skill->>'calls')::bigint)=0 ORDER BY 1,2`, since)
+	if err != nil {
+		return out, err
+	}
+	for rows.Next() {
+		var skill JobSkillCount
+		if err = rows.Scan(&skill.Name, &skill.Source, &skill.Jobs); err != nil {
+			rows.Close()
+			return out, err
+		}
+		out.NeverUsed = append(out.NeverUsed, skill)
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return out, err
+	}
+	rows.Close()
+	const noSkill = `created_at >= $1 AND skills_supported IS TRUE AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(skills,'[]'::jsonb)) AS x(skill) WHERE (x.skill->>'calls')::bigint > 0)`
+	if err = tx.QueryRow(ctx, `SELECT count(*) FROM jobs WHERE `+noSkill, since).Scan(&out.JobsNoSkill.Count); err != nil {
+		return out, err
+	}
+	rows, err = tx.Query(ctx, `SELECT job_id,task_id,COALESCE(harness,''),COALESCE(model,''),created_at FROM jobs WHERE `+noSkill+` ORDER BY created_at DESC,job_id DESC LIMIT $2`, since, limit)
+	if err != nil {
+		return out, err
+	}
+	for rows.Next() {
+		var job JobNoSkill
+		if err = rows.Scan(&job.JobID, &job.TaskID, &job.Harness, &job.Model, &job.CreatedAt); err != nil {
+			rows.Close()
+			return out, err
+		}
+		out.JobsNoSkill.Jobs = append(out.JobsNoSkill.Jobs, job)
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return out, err
+	}
+	rows.Close()
 	out.JobsNoSkill.Truncated = out.JobsNoSkill.Count > len(out.JobsNoSkill.Jobs)
-	for _, g := range groups {
-		sort.Slice(g.Skills, func(i, j int) bool {
-			a, b := g.Skills[i], g.Skills[j]
-			if a.Calls != b.Calls {
-				return a.Calls > b.Calls
-			}
-			if a.Name != b.Name {
-				return a.Name < b.Name
-			}
-			return a.Source < b.Source
-		})
-		out.ByHarnessModel = append(out.ByHarnessModel, *g)
-	}
-	sort.Slice(out.ByHarnessModel, func(i, j int) bool {
-		a, b := out.ByHarnessModel[i], out.ByHarnessModel[j]
-		if a.Harness != b.Harness {
-			return a.Harness < b.Harness
-		}
-		return a.Model < b.Model
-	})
-	for _, t := range totals {
-		if t.Calls == 0 {
-			out.NeverUsed = append(out.NeverUsed, *t)
-		}
-	}
-	sort.Slice(out.NeverUsed, func(i, j int) bool {
-		a, b := out.NeverUsed[i], out.NeverUsed[j]
-		if a.Name != b.Name {
-			return a.Name < b.Name
-		}
-		return a.Source < b.Source
-	})
-	return out, nil
+	return out, tx.Commit(ctx)
 }

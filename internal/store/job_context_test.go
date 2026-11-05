@@ -227,3 +227,20 @@ func TestJobSkillsReport(t *testing.T) {
 		t.Fatalf("groups: %+v", report.ByHarnessModel)
 	}
 }
+
+func TestJobSkillsReportLimit(t *testing.T) {
+	s := schemaStore(t, "job_skills_limit")
+	since := time.Now().UTC().Add(-time.Hour)
+	yes := true
+	for _, id := range []string{"limit-a", "limit-b", "limit-c"} {
+		jobContextClaim(t, s, id, nil)
+		jobContextUpdate(t, s, id, JobUpdate{SkillsSupported: &yes})
+	}
+	report, err := s.JobSkillsReport(t.Context(), since, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.JobsTotal != 3 || report.JobsNoSkill.Count != 3 || !report.JobsNoSkill.Truncated || len(report.JobsNoSkill.Jobs) != 1 || len(report.ByHarnessModel) != 1 || report.ByHarnessModel[0].Jobs != 3 {
+		t.Fatalf("limit changed totals: %+v", report)
+	}
+}
