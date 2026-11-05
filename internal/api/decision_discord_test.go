@@ -77,6 +77,13 @@ func (f *fakeDiscord) webhook() *DiscordWebhook {
 	return &DiscordWebhook{URL: f.URL + "/api/webhooks/1/" + fakeDiscordSecret, HTTP: f.Client()}
 }
 
+// fail sets how the fake answers from now on; nil answers normally.
+func (f *fakeDiscord) fail(status func(method string) int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.status = status
+}
+
 func (f *fakeDiscord) take() []discordCall {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -299,7 +306,7 @@ func TestDecisionNotifierNeverLeaksTheWebhookURL(t *testing.T) {
 	st, _ := notifyStoreFixture(t)
 	logs := captureLog(t)
 	discord := newFakeDiscord(t)
-	discord.status = func(string) int { return http.StatusInternalServerError }
+	discord.fail(func(string) int { return http.StatusInternalServerError })
 	x := chatDecision(t, st, "Q-20261105-71", "retry me")
 	start := time.Now().UTC()
 	n := DecisionNotifier{Store: st, Discord: discord.webhook(), Now: clockAt(start.Add(2 * time.Minute))}
@@ -328,19 +335,19 @@ func TestDecisionNotifierNeverLeaksTheWebhookURL(t *testing.T) {
 	unreachableErr := state.LastError
 
 	// A posted message whose edit Discord refuses (deleted) gives up at once.
-	discord.status = nil
+	discord.fail(nil)
 	n.Discord = discord.webhook()
 	n.Now = clockAt(start.Add(2 * time.Hour))
 	n.Drain(t.Context())
 	if state = noticeOf(t, st, x.ID); state.LastStatus != store.DecisionStatusOpen {
 		t.Fatalf("after the retry: %+v", state)
 	}
-	discord.status = func(method string) int {
+	discord.fail(func(method string) int {
 		if method == http.MethodPatch {
 			return http.StatusNotFound
 		}
 		return 0
-	}
+	})
 	if _, err := st.TransitionChatQuestion(t.Context(), "Q-20261105-71", "resolved", "test-answerer"); err != nil {
 		t.Fatal(err)
 	}
@@ -550,7 +557,7 @@ func TestDiscordWebhookPostAndEditMessage(t *testing.T) {
 	}
 
 	// Errors from both calls never quote the URL.
-	discord.status = func(string) int { return http.StatusTooManyRequests }
+	discord.fail(func(string) int { return http.StatusTooManyRequests })
 	_, postErr := w.PostMessage(t.Context(), "x")
 	editErr := w.EditMessage(t.Context(), id, "x")
 	closed := newFakeDiscord(t)
