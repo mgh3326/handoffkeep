@@ -113,6 +113,8 @@ var errorRules = []errorRule{
 	{store.ErrDecisionRecordNotOpen, http.StatusConflict, "decision_request_not_open", false},
 	{store.ErrLedgerAckBackward, http.StatusConflict, "ledger_ack_backward", true},
 	{store.ErrStatusUpdateInvalid, http.StatusBadRequest, "invalid_status_update", true},
+	{store.ErrChangeNotFound, http.StatusNotFound, "not_found", false},
+	{store.ErrChangeDependencyCycle, http.StatusConflict, "change_dependency_cycle", false},
 }
 
 // appErr writes the response for an error returned by the store or a
