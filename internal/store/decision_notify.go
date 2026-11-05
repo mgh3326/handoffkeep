@@ -122,13 +122,7 @@ func scanDecisionNoticeRow(row pgx.Row, x *DecisionNotice, now time.Time, extra 
 	}
 	// Options are not part of a channel message; status, overdue and snooze
 	// are derived as scanDecisionRecord derives them.
-	if r.Status == DecisionStatusOpen {
-		if r.ExpiresAt != nil && !now.Before(*r.ExpiresAt) {
-			r.Status = DecisionStatusExpired
-		}
-		r.Overdue = r.DueAt != nil && !now.Before(*r.DueAt)
-		r.Snoozed = r.SnoozedUntil != nil && now.Before(*r.SnoozedUntil)
-	}
+	r.deriveStatus(now)
 	return nil
 }
 

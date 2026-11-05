@@ -2,7 +2,6 @@ package store
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 
 	"github.com/jackc/pgx/v5"
@@ -20,7 +19,7 @@ func (s *Store) GetLinearBoard(ctx context.Context, id int64) (LinearBoard, bool
 	if err != nil {
 		return b, false, err
 	}
-	if err = json.Unmarshal(raw, &b); err != nil {
+	if _, err = scanJSONB(raw, &b); err != nil {
 		return b, false, err
 	}
 	return b, true, nil

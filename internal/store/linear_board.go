@@ -214,10 +214,8 @@ func loadLinearBoardTx(ctx context.Context, tx pgx.Tx, task Task) (LinearBoard, 
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return b, err
 	}
-	if len(raw) > 0 {
-		if err = json.Unmarshal(raw, &b); err != nil {
-			return b, err
-		}
+	if _, err = scanJSONB(raw, &b); err != nil {
+		return b, err
 	}
 	b.ApplyTask(task)
 	return b, nil

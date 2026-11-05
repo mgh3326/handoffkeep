@@ -173,3 +173,24 @@ func TestDecodeRejectsTrailingDataAndOversize(t *testing.T) {
 		t.Fatalf("oversized body err=%v, want *http.MaxBytesError", err)
 	}
 }
+
+// A rule's wire code is its sentinel's own text, so the store and the API
+// name a failure the same way. Not-found sentinels ("x_not_found") may answer
+// the shared "not_found". The two other differences predate the rule and are
+// kept for existing clients; do not add to them.
+func TestErrorRuleCodesMatchSentinels(t *testing.T) {
+	legacy := map[string]string{
+		"invalid_sync":             "invalid_context",
+		"decision_record_not_open": "decision_request_not_open",
+	}
+	for _, rule := range errorRules {
+		text := rule.err.Error()
+		switch {
+		case rule.code == text:
+		case rule.code == "not_found" && strings.HasSuffix(text, "_not_found"):
+		case legacy[text] == rule.code:
+		default:
+			t.Errorf("sentinel %q answers %q; make the wire code the sentinel's text", text, rule.code)
+		}
+	}
+}
