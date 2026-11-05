@@ -112,6 +112,33 @@ func prRunnerProblems(file string, wf tierWorkflow) []string {
 	return out
 }
 
+// gitleaksScopeProblems pins hk 3145: off a pull request gitleaks-action runs
+// `git log --all` over a fetch-depth 0 checkout, so every other branch and
+// mergewake review ref in it is scanned too, and an old false positive there
+// fails an unrelated run. The test job must delete every ref but HEAD, off
+// pull requests only, in a step before the gitleaks step.
+func gitleaksScopeProblems(wf tierWorkflow) []string {
+	steps := wf.Jobs["test"].Steps
+	scan, prune := -1, -1
+	for i, s := range steps {
+		if hasAction(s.Uses, "gitleaks/gitleaks-action") {
+			scan = i
+		}
+		if strings.Contains(s.Run, "git update-ref") && strings.Contains(s.Run, "for-each-ref") && s.If == "${{ "+postGuard+" }}" {
+			prune = i
+		}
+	}
+	switch {
+	case scan < 0:
+		return []string{"test job must run gitleaks-action"}
+	case prune < 0:
+		return []string{"test job must delete every ref but HEAD, if " + postGuard + ", before gitleaks (hk 3145)"}
+	case prune > scan:
+		return []string{"test job: the ref-pruning step must come before the gitleaks step (hk 3145)"}
+	}
+	return nil
+}
+
 // tierProblems checks ci.yml and ci-any-ref.yml against the tier contract.
 func tierProblems(ci, anyRef []byte) []string {
 	var out []string
@@ -131,6 +158,8 @@ func tierProblems(ci, anyRef []byte) []string {
 	if wf.Concurrency["cancel-in-progress"] != "${{ github.event_name == 'pull_request' }}" || !strings.Contains(fmt.Sprint(wf.Concurrency["group"]), "github.ref") {
 		add("ci.yml concurrency must key on github.ref and cancel in progress only for pull_request")
 	}
+
+	out = append(out, gitleaksScopeProblems(wf)...)
 
 	var prJobs, postJobs []string
 	for name, j := range wf.Jobs {
@@ -261,6 +290,8 @@ func TestCITierMutantsTurnRed(t *testing.T) {
 		{"ci-ok-always", "if: ${{ " + ciOkIf + " }}", "if: ${{ always() }}"},
 		{"no-macos", "vars.HANDOFFKEEP_POST_MAC_RUNNER) || 'macos-latest'", "vars.HANDOFFKEEP_POST_MAC_RUNNER) || 'ubuntu-latest'"},
 		{"self-hosted-on-dispatch", "runs-on: ${{ (" + mainPush + " && vars.HANDOFFKEEP_POST_LINUX_RUNNER) || 'ubuntu-latest' }}", "runs-on: ${{ vars.HANDOFFKEEP_POST_LINUX_RUNNER || 'ubuntu-latest' }}"},
+		{"no-ref-pruning", "          git for-each-ref --format='delete %(refname)' | git update-ref --no-deref --stdin\n", "          true\n"},
+		{"prune-on-pull-request-too", "        if: ${{ github.event_name != 'pull_request' }}\n        run: |\n          git checkout --detach", "        run: |\n          git checkout --detach"},
 	} {
 		t.Run(m.name, func(t *testing.T) {
 			if strings.Count(ci, m.old) != 1 {
@@ -277,5 +308,21 @@ func TestCITierMutantsTurnRed(t *testing.T) {
 				t.Fatal("mutant passed the tier checks")
 			}
 		})
+	}
+}
+
+// The pruning step must come before gitleaks: moved behind it, the scan has
+// already read every ref.
+func TestCITierMutantPruneAfterGitleaksTurnsRed(t *testing.T) {
+	ci := string(readWorkflow(t, "ci.yml"))
+	start := strings.Index(ci, "      # Scan only the history reachable")
+	scan := strings.Index(ci, "      - uses: gitleaks/gitleaks-action@")
+	end := strings.Index(ci, "  vitest:\n")
+	if start < 0 || scan < start || end < scan {
+		t.Fatalf("mutant anchors out of order: %d %d %d", start, scan, end)
+	}
+	mutant := ci[:start] + ci[scan:end] + ci[start:scan] + ci[end:]
+	if len(tierProblems([]byte(mutant), readWorkflow(t, "ci-any-ref.yml"))) == 0 {
+		t.Fatal("mutant passed the tier checks")
 	}
 }
