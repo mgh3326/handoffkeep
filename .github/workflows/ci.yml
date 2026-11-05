@@ -160,6 +160,8 @@ jobs:
       - run: git diff --exit-code -- internal/ui/static/console
       - run: test -z "$(git status --porcelain --untracked-files=all -- internal/ui/static/console)"
       - name: Task expected migration and server startup
+        env:
+          PUSH_BEFORE: ${{ github.event_name == 'push' && github.event.before || '' }}
         run: bash scripts/test-task-expected-migration.sh
       - name: go test -race
         run: go test -v -race -timeout 30m ./...
