@@ -80,11 +80,17 @@ jobs:
     steps:
       - name: Post commit status on target sha
         run: |
+          # A cancelled run says nothing about the sha: post no status, so the
+          # gate reads unknown and holds rather than red (hk 2924).
           case "$RESULT" in
             success)   STATE=success ;;
-            cancelled) STATE=error ;;
+            cancelled) STATE= ;;
             *)         STATE=failure ;;
           esac
+          if [[ -z "$STATE" ]]; then
+            echo "ci was cancelled; no status posted"
+            exit 0
+          fi
           # Only a full run earns the gate context; partial suites get ci-ok-<suite>.
           if [[ "$SUITE" == all ]]; then CONTEXT=ci-ok; else CONTEXT="ci-ok-$SUITE"; fi
           gh api "repos/${GITHUB_REPOSITORY}/statuses/${TARGET_SHA}" \

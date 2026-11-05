@@ -3,7 +3,9 @@
 // Every DB-backed test gets its URL from URL (or a schema from Schema), so
 // the skip policy is the same everywhere: without HANDOFFKEEP_TEST_DB_URL a
 // local run skips the test, while a CI run (CI or GITHUB_ACTIONS set) fails
-// it, so a misconfigured CI job cannot pass by skipping.
+// it, so a misconfigured CI job cannot pass by skipping. A CI job that runs
+// without PostgreSQL on purpose (the PR tier and the macOS job, see
+// .github/workflows/ci.yml) says so with HANDOFFKEEP_TEST_NO_DB=1 and skips.
 package testdb
 
 import (
@@ -23,12 +25,19 @@ import (
 // EnvVar names the variable that holds the test database URL.
 const EnvVar = "HANDOFFKEEP_TEST_DB_URL"
 
+// NoDBVar, set to "1", declares a CI job that runs without PostgreSQL, so
+// DB-backed tests skip there instead of failing.
+const NoDBVar = "HANDOFFKEEP_TEST_NO_DB"
+
 // URL returns the shared test database URL, or skips (locally) / fails
 // (in CI) the test when it is unset.
 func URL(t testing.TB) string {
 	t.Helper()
 	u := os.Getenv(EnvVar)
 	if u == "" {
+		if os.Getenv(NoDBVar) == "1" {
+			t.Skipf("%s=1: this job runs without PostgreSQL; DB tests run after merge", NoDBVar)
+		}
 		if InCI() {
 			t.Fatalf("%s must be set in CI; PostgreSQL tests may not skip there", EnvVar)
 		}
