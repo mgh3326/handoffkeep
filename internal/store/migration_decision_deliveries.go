@@ -1,6 +1,6 @@
 package store
 
-// Version 46 moves the decision request outbox from decision_notify (v38) to
+// Version 47 moves the decision request outbox from decision_notify (v38) to
 // decision_deliveries: one row per (request, destination), so a second
 // destination is a new row rather than new columns (docs/decision-discord.md).
 //
@@ -19,7 +19,7 @@ package store
 // decision_notify, plus the new table (ACCESS EXCLUSIVE on create, ROW
 // EXCLUSIVE for the copy), which nothing else reads yet. decision_notify is
 // left in place, unwritten, for one release.
-var decisionDeliveriesV46 = []string{
+var decisionDeliveriesV47 = []string{
 	`CREATE TABLE IF NOT EXISTS decision_deliveries (
 		request_id BIGINT NOT NULL,
 		destination TEXT NOT NULL CHECK(destination IN ('discord')),
@@ -45,5 +45,5 @@ var decisionDeliveriesV46 = []string{
 			attempts,next_attempt_at,btrim(split_part(last_error,':',1)),posted_at,edited_at,created_at
 		FROM decision_notify
 		ON CONFLICT(request_id,destination) DO NOTHING`,
-	`INSERT INTO schema_version(version) VALUES (46)`,
+	`INSERT INTO schema_version(version) VALUES (47)`,
 }

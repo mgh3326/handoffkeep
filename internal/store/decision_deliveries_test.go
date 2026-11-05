@@ -5,13 +5,13 @@ import (
 	"time"
 )
 
-// Version 46 copies every decision_notify row into decision_deliveries: a
+// Version 47 copies every decision_notify row into decision_deliveries: a
 // channel status becomes applied_version on a pending row, unsent and failed
 // keep their final state, and last_error keeps only its code.
 func TestDecisionDeliveriesBackfill(t *testing.T) {
 	s := schemaStore(t, "deliveries_backfill")
 	ctx := t.Context()
-	for _, q := range []string{`DROP TABLE decision_deliveries`, `DELETE FROM schema_version WHERE version=46`} {
+	for _, q := range []string{`DROP TABLE decision_deliveries`, `DELETE FROM schema_version WHERE version=47`} {
 		if _, err := s.pool.Exec(ctx, q); err != nil {
 			t.Fatal(err)
 		}

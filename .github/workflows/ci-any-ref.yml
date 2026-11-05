@@ -80,11 +80,12 @@ jobs:
     steps:
       - name: Post commit status on target sha
         run: |
-          # A cancelled run says nothing about the sha: post no status, so the
-          # gate reads unknown and holds rather than red (hk 2924).
+          # A cancelled or abandoned run says nothing about the sha: post no
+          # status, so the gate reads unknown and holds rather than red
+          # (hk 2924, hk 3155).
           case "$RESULT" in
             success)   STATE=success ;;
-            cancelled) STATE= ;;
+            cancelled|abandoned) STATE= ;;
             *)         STATE=failure ;;
           esac
           if [[ -z "$STATE" ]]; then
