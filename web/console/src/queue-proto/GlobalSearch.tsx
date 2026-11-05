@@ -5,7 +5,8 @@
 // host (the queue opens its panel, other pages navigate to /ui/tasks/<id>).
 
 import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
-import { stateLabel, StateIcon } from "../shared/StateIcon";
+import { StateIcon } from "../shared/StateIcon";
+import { stateLabel } from "../shared/states";
 import { fetchTaskSearch, highlightParts, isSearchShortcut, safeTaskId, stripMarkers, type SearchFn, type SearchHit } from "../shared/search";
 
 type Lookup =

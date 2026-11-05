@@ -1,6 +1,6 @@
 import { useLayoutEffect, useRef } from "react";
 import { createRoot } from "react-dom/client";
-import { PageShell, type NavKey } from "./shared/AppShell";
+import { bootTheme, PageShell, type NavKey } from "./shared/AppShell";
 
 function ServerContent({ content }: { content: HTMLElement }) {
   const slot = useRef<HTMLDivElement>(null);
@@ -9,6 +9,8 @@ function ServerContent({ content }: { content: HTMLElement }) {
   }, [content]);
   return <div ref={slot} />;
 }
+bootTheme();
+
 const edited = new WeakSet<HTMLFormElement>();
 document.addEventListener("input", (e) => {
   if (e.target instanceof HTMLElement) {

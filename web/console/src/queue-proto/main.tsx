@@ -1,15 +1,12 @@
 import { createRoot } from "react-dom/client";
 import { ConsoleBoard } from "./ConsoleBoard";
 import { TaskPage } from "./TaskPage";
-import { loadTheme, PageShell } from "../shared/AppShell";
+import { bootTheme, PageShell } from "../shared/AppShell";
 import "./proto.css";
 
 // The --hk-* tokens arrive as their own stylesheet (/ui/static/console/
 // tokens.css, linked by the Go template) so this entry never bundles a copy.
-// Dark is the default; light only when the viewer picked it before.
-if (loadTheme() === "light") {
-  document.documentElement.dataset.theme = "light";
-}
+bootTheme();
 
 // Three hosts can mount this entry: the production /ui/queue template and the
 // /ui/tasks/<id> deep link (both board.html → #board-root), and a bare

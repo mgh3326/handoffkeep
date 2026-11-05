@@ -1,4 +1,5 @@
 import { useRef, useState } from "react";
+import { readStored, writeStored } from "../shared/storage";
 import { MEASURE_KEY } from "./storage";
 
 // The seven fixed operator scripts (hk:doc 2198 §5). Verbatim-ish: the
@@ -80,9 +81,9 @@ export type MeasureRecord = {
   at: string;
 };
 
-export function loadMeasurements(storage: Pick<Storage, "getItem"> = localStorage): MeasureRecord[] {
+export function loadMeasurements(storage?: Pick<Storage, "getItem">): MeasureRecord[] {
   try {
-    const raw = storage.getItem(MEASURE_KEY);
+    const raw = readStored(MEASURE_KEY, storage);
     if (!raw) {
       return [];
     }
@@ -93,12 +94,8 @@ export function loadMeasurements(storage: Pick<Storage, "getItem"> = localStorag
   }
 }
 
-export function saveMeasurements(records: MeasureRecord[], storage: Pick<Storage, "setItem"> = localStorage): void {
-  try {
-    storage.setItem(MEASURE_KEY, JSON.stringify(records));
-  } catch {
-    // local-only panel — persistence failure just means nothing is stored.
-  }
+export function saveMeasurements(records: MeasureRecord[], storage?: Pick<Storage, "setItem">): void {
+  writeStored(MEASURE_KEY, JSON.stringify(records), storage);
 }
 
 export function MeasurePanel() {

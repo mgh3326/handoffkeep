@@ -8,7 +8,6 @@
 import type { ReactNode } from "react";
 import { isKnownState, stateLabel, stateToken } from "./states";
 
-export { STATE_GROUP_ORDER, STATE_LABEL, isKnownState, stateLabel, stateToken } from "./states";
 
 // Stroke geometry on a 24-unit grid. Exported for the distinctness test.
 // New state shapes are listed first; legacy shapes follow and are kept for
