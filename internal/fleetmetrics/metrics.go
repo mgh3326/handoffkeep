@@ -1109,11 +1109,15 @@ func normalPath(ix *index) Normal {
 }
 
 // repTaskKey maps a rep's task_ref to the hk task id the rounds metric looks
-// up: a bare id ("646") and the canonical "hk:task/646" both become "646".
+// up: a bare id ("646") and the canonical "hk:task/646" (or "hk:task/0646")
+// all become "646".
 // Any other ref (a PR URL, a Linear key) stays as is and matches no task.
 func repTaskKey(ref string) string {
 	if id, ok := strings.CutPrefix(ref, "hk:task/"); ok && id != "" && strings.Trim(id, "0123456789") == "" {
-		return id
+		// The store accepts leading zeroes; the lookup key is the plain decimal.
+		if n, err := strconv.ParseInt(id, 10, 64); err == nil {
+			return strconv.FormatInt(n, 10)
+		}
 	}
 	return ref
 }
