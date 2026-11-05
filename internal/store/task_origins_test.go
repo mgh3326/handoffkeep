@@ -54,12 +54,19 @@ func TestTaskOriginValidate(t *testing.T) {
 			t.Errorf("%s: accepted %+v", name, o)
 		}
 	}
-	secret := validOrigin()
-	secret.Title = "key sk-ant-api03-" + strings.Repeat("a", 40)
-	if err := checkTaskOriginInput(&secret); err == nil {
-		t.Fatal("secret-like title accepted")
-	} else if _, ok := guard.SecretPattern(err); !ok {
-		t.Fatalf("secret refusal is not a guard.SecretError: %v", err)
+	for name, mutate := range map[string]func(*TaskOriginInput){
+		"title":              func(o *TaskOriginInput) { o.Title = "key sk-ant-api03-" + strings.Repeat("a", 40) },
+		"github external_id": func(o *TaskOriginInput) { o.Provider, o.ExternalID = "github", "ghp_"+strings.Repeat("a", 36) },
+		"sentry external_id": func(o *TaskOriginInput) { o.Provider, o.ExternalID = "sentry", "github_pat_"+strings.Repeat("a", 82) },
+		"display_ref":        func(o *TaskOriginInput) { o.DisplayRef = "ghp_" + strings.Repeat("a", 36) },
+	} {
+		secret := validOrigin()
+		mutate(&secret)
+		if err := checkTaskOriginInput(&secret); err == nil {
+			t.Fatalf("secret-like %s accepted", name)
+		} else if _, ok := guard.SecretPattern(err); !ok {
+			t.Fatalf("secret refusal in %s is not a guard.SecretError: %v", name, err)
+		}
 	}
 	edge := validOrigin()
 	edge.DisplayRef = strings.Repeat("a", 64)
