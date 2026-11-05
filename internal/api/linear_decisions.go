@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -489,13 +490,29 @@ func ParseDiscordWebhookURL(raw string) (string, error) {
 // Post sends one message. allowed_mentions is empty so text from a question can
 // never ping @everyone.
 func (d DiscordWebhook) Post(ctx context.Context, content string) error {
+	return d.send(ctx, http.MethodPost, d.URL, content, nil)
+}
+
+// discordStatusError is a non-2xx answer from Discord.
+type discordStatusError struct{ status int }
+
+func (e discordStatusError) Error() string { return fmt.Sprintf("discord webhook status %d", e.status) }
+
+// discordResponseMaxBytes bounds what is read of a response: a message object
+// is a few kilobytes.
+const discordResponseMaxBytes = 1 << 20
+
+// send is every call to the webhook: the content with mentions disabled, a
+// timeout, and errors that never quote the URL. out, when set, receives the
+// JSON response.
+func (d DiscordWebhook) send(ctx context.Context, method, target, content string, out any) error {
 	body, err := json.Marshal(map[string]any{"content": content, "allowed_mentions": map[string]any{"parse": []string{}}})
 	if err != nil {
 		return err
 	}
 	ctx, cancel := context.WithTimeout(ctx, linearWriteTimeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, d.URL, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, method, target, bytes.NewReader(body))
 	if err != nil {
 		return errors.New("discord webhook request could not be built")
 	}
@@ -515,7 +532,12 @@ func (d DiscordWebhook) Post(ctx context.Context, content string) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return fmt.Errorf("discord webhook status %d", resp.StatusCode)
+		return discordStatusError{resp.StatusCode}
+	}
+	if out != nil {
+		if err := json.NewDecoder(io.LimitReader(resp.Body, discordResponseMaxBytes)).Decode(out); err != nil {
+			return errors.New("discord webhook response could not be read")
+		}
 	}
 	return nil
 }
