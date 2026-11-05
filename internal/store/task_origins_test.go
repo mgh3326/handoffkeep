@@ -14,7 +14,7 @@ const (
 )
 
 func validOrigin() TaskOriginInput {
-	return TaskOriginInput{Provider: "linear", Namespace: "watcha", ExternalID: originUUID, DisplayRef: "MGH-151", URL: "https://linear.app/watcha/issue/MGH-151", Title: "an issue"}
+	return TaskOriginInput{Provider: "linear", Namespace: "example-ws", ExternalID: originUUID, DisplayRef: "MGH-151", URL: "https://linear.app/example-ws/issue/MGH-151", Title: "an issue"}
 }
 
 // The validator reads no database.
@@ -88,7 +88,7 @@ func TestTaskOriginUUIDIsTheKey(t *testing.T) {
 	}
 	moved := validOrigin()
 	moved.DisplayRef = "ROB-1514"
-	moved.URL = "https://linear.app/watcha/issue/ROB-1514"
+	moved.URL = "https://linear.app/example-ws/issue/ROB-1514"
 	second, created, err := s.AddTaskOrigin(ctx, a, "tester", moved)
 	if err != nil || created {
 		t.Fatalf("re-add under a new number: created=%t err=%v", created, err)
@@ -101,7 +101,7 @@ func TestTaskOriginUUIDIsTheKey(t *testing.T) {
 	if err != nil || created || !same.SnapshotAt.Equal(second.SnapshotAt) {
 		t.Fatalf("identical re-add: %+v created=%t err=%v", same, created, err)
 	}
-	sparse, created, err := s.AddTaskOrigin(ctx, a, "tester", TaskOriginInput{Provider: "linear", Namespace: "watcha", ExternalID: originUUID})
+	sparse, created, err := s.AddTaskOrigin(ctx, a, "tester", TaskOriginInput{Provider: "linear", Namespace: "example-ws", ExternalID: originUUID})
 	if err != nil || created || sparse.DisplayRef != "ROB-1514" || sparse.URL != moved.URL {
 		t.Fatalf("sparse re-add: %+v created=%t err=%v", sparse, created, err)
 	}
