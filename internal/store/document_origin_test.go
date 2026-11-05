@@ -48,6 +48,9 @@ func TestDocumentTaskAndOrigin(t *testing.T) {
 	if changed {
 		t.Fatalf("identical re-put without the new fields changed the row: %+v", again)
 	}
+	if again.TaskID == nil || *again.TaskID != taskA || again.OriginClass != "job" {
+		t.Fatalf("unchanged re-put answered task_id=%v origin_class=%q, want the stored %d and job", again.TaskID, again.OriginClass, taskA)
+	}
 	// A re-put with a different body that omits them keeps them too.
 	edited, changed := put(d.Key, "body a v2", nil, "")
 	if !changed || edited.TaskID == nil || *edited.TaskID != taskA || edited.OriginClass != "job" {

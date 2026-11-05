@@ -59,6 +59,7 @@ func TestTaskOriginValidate(t *testing.T) {
 		"github external_id": func(o *TaskOriginInput) { o.Provider, o.ExternalID = "github", "ghp_"+strings.Repeat("a", 36) },
 		"sentry external_id": func(o *TaskOriginInput) { o.Provider, o.ExternalID = "sentry", "github_pat_"+strings.Repeat("a", 82) },
 		"display_ref":        func(o *TaskOriginInput) { o.DisplayRef = "ghp_" + strings.Repeat("a", 36) },
+		"namespace":          func(o *TaskOriginInput) { o.Namespace = "ghp_" + strings.Repeat("a", 36) },
 	} {
 		secret := validOrigin()
 		mutate(&secret)

@@ -3601,6 +3601,12 @@ func (s *Store) PutDocument(ctx context.Context, x Document) (Document, bool, er
 	if e == nil && existing == x.SHA256 &&
 		(x.TaskID == nil || (existingTask != nil && *existingTask == *x.TaskID)) &&
 		(x.OriginClass == "" || (existingClass != nil && *existingClass == x.OriginClass)) {
+		// Answer with what is stored, not with the omitted input fields.
+		x.TaskID = existingTask
+		x.OriginClass = ""
+		if existingClass != nil {
+			x.OriginClass = *existingClass
+		}
 		return x, false, nil
 	}
 	if e != nil && !errors.Is(e, pgx.ErrNoRows) {

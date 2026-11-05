@@ -122,7 +122,7 @@ func checkTaskOriginInput(in *TaskOriginInput) error {
 	// Every caller-supplied text field passes the secret guard: a GitHub or
 	// Sentry external_id is free text, so a token pasted there would otherwise
 	// be stored and returned by the list and find APIs (review on #160).
-	if err := guard.Reject(strings.Join([]string{in.ExternalID, in.DisplayRef, in.URL, in.Title}, "\n")); err != nil {
+	if err := guard.Reject(strings.Join([]string{in.Namespace, in.ExternalID, in.DisplayRef, in.URL, in.Title}, "\n")); err != nil {
 		return err
 	}
 	return nil
