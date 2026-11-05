@@ -130,10 +130,11 @@ jobs:
           green() { echo "green=$1" >> "$GITHUB_OUTPUT"; exit 0; }
           block() { echo "$1; not publishing" >&2; exit 1; }
           while :; do
+            superseded=no
             # A failed API call is "no verdict yet": the deadline ends the wait.
-            if main=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&event=push&branch=main&per_page=1" -q '.workflow_runs | first // {} | "\(.id // 0) \(.status // "none") \(.conclusion // "")"'); then
-              read -r mid ms mc <<<"$main"
-              echo "ci.yml main push run: $mid $ms $mc"
+            if main=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&event=push&branch=main&per_page=1" -q '.workflow_runs | first // {} | "\(.id // 0) \(.status // "none") \(.created_at // "none") \(.conclusion // "")"'); then
+              read -r mid ms mt mc <<<"$main"
+              echo "ci.yml main push run: $mid $ms $mt $mc"
               if [ "$ms" = completed ]; then
                 if job=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$mid/jobs?filter=latest&per_page=100" -q '[.jobs[] | select(.name == "ci-ok")] | first // {} | .conclusion // "none"'); then
                   echo "ci-ok job: $job"
@@ -141,12 +142,26 @@ jobs:
                     success) green true ;;
                     skipped|cancelled|none)
                       case "$mc" in
-                        cancelled|skipped) superseded=yes ;;
+                        cancelled|skipped) superseded=check ;;
                         *) block "main CI on $GITHUB_SHA ended $mc with ci-ok $job" ;;
                       esac ;;
                     *) block "main CI ci-ok on $GITHUB_SHA ended $job" ;;
                   esac
-                  if status=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/statuses" -q '[.[] | select(.context == "ci-ok")] | first | .state // "none"'); then
+                  # A cancelled run counts as superseded only when a newer main
+                  # push run exists for another commit; a manual or other
+                  # cancellation fails closed (review on #151, release.yml:126).
+                  if newest=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?event=push&branch=main&per_page=1" -q '.workflow_runs | first // {} | "\(.head_sha // "none") \(.created_at // "none")"'); then
+                    read -r nsha nt <<<"$newest"
+                    echo "newest ci.yml main push run: $nsha $nt"
+                    if [ "$nsha" != "$GITHUB_SHA" ] && [ "$nsha" != none ] && [[ "$nt" > "$mt" ]]; then
+                      superseded=yes
+                    else
+                      block "main CI on $GITHUB_SHA ended $mc with no newer main push"
+                    fi
+                  else
+                    echo "::warning::reading newest main push run failed; retrying"
+                  fi
+                  if [ "$superseded" = yes ] && status=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/statuses" -q '[.[] | select(.context == "ci-ok")] | first | .state // "none"'); then
                     echo "main CI superseded; ci-any-ref ci-ok status: $status"
                     case "$status" in
                       success) green true ;;

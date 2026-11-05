@@ -35,27 +35,30 @@ func TestReleaseCIGreenVerdicts(t *testing.T) {
 	}
 	script := strings.Replace(job.Steps[0].Run, "sleep 30", "exit 7 # pending: the test stops instead of waiting", 1)
 	for _, tc := range []struct {
-		name, main, job, status, fail string
-		code                          int
-		green                         string
+		name, main, job, status, newest, fail string
+		code                                  int
+		green                                 string
 	}{
-		{"main ci-ok success publishes", "9 completed success", "success", "none", "", 0, "true"},
-		{"main ci-ok failure beats stale success status", "9 completed failure", "failure", "success", "", 1, ""},
-		{"main ci-ok timed out blocks", "9 completed failure", "timed_out", "success", "", 1, ""},
-		{"main run failed before ci-ok blocks despite success status", "9 completed startup_failure", "none", "success", "", 1, ""},
-		{"main run failed with ci-ok skipped blocks", "9 completed failure", "skipped", "success", "", 1, ""},
-		{"no main run yet: stale success waits", "0 none ", "", "success", "", 7, ""},
-		{"main run queued: stale success waits", "9 queued ", "", "success", "", 7, ""},
-		{"main run in progress: any-ref failure waits", "9 in_progress ", "", "failure", "", 7, ""},
-		{"superseded, ci-ok skipped, any-ref success publishes", "9 completed cancelled", "skipped", "success", "", 0, "true"},
-		{"superseded before ci-ok, any-ref success publishes", "9 completed cancelled", "none", "success", "", 0, "true"},
-		{"superseded, any-ref failure blocks", "9 completed cancelled", "skipped", "error", "", 1, ""},
-		{"superseded, any-ref pending waits", "9 completed cancelled", "skipped", "pending", "", 7, ""},
-		{"superseded, no status skips publication", "9 completed cancelled", "cancelled", "none", "", 0, "false"},
-		{"ci-ok failure in a cancelled run blocks", "9 completed cancelled", "failure", "success", "", 1, ""},
-		{"runs API failure waits", "9 completed success", "success", "none", "workflows/ci.yml/runs", 7, ""},
-		{"jobs API failure waits", "9 completed success", "success", "none", "/jobs", 7, ""},
-		{"statuses API failure waits", "9 completed cancelled", "skipped", "success", "statuses", 7, ""},
+		{"main ci-ok success publishes", "9 completed 2026-11-05T10:00:00Z success", "success", "none", "def 2026-11-05T10:05:00Z", "", 0, "true"},
+		{"main ci-ok failure beats stale success status", "9 completed 2026-11-05T10:00:00Z failure", "failure", "success", "def 2026-11-05T10:05:00Z", "", 1, ""},
+		{"main ci-ok timed out blocks", "9 completed 2026-11-05T10:00:00Z failure", "timed_out", "success", "def 2026-11-05T10:05:00Z", "", 1, ""},
+		{"main run failed before ci-ok blocks despite success status", "9 completed 2026-11-05T10:00:00Z startup_failure", "none", "success", "def 2026-11-05T10:05:00Z", "", 1, ""},
+		{"main run failed with ci-ok skipped blocks", "9 completed 2026-11-05T10:00:00Z failure", "skipped", "success", "def 2026-11-05T10:05:00Z", "", 1, ""},
+		{"no main run yet: stale success waits", "0 none none ", "", "success", "def 2026-11-05T10:05:00Z", "", 7, ""},
+		{"main run queued: stale success waits", "9 queued 2026-11-05T10:00:00Z ", "", "success", "def 2026-11-05T10:05:00Z", "", 7, ""},
+		{"main run in progress: any-ref failure waits", "9 in_progress 2026-11-05T10:00:00Z ", "", "failure", "def 2026-11-05T10:05:00Z", "", 7, ""},
+		{"superseded, ci-ok skipped, any-ref success publishes", "9 completed 2026-11-05T10:00:00Z cancelled", "skipped", "success", "def 2026-11-05T10:05:00Z", "", 0, "true"},
+		{"superseded before ci-ok, any-ref success publishes", "9 completed 2026-11-05T10:00:00Z cancelled", "none", "success", "def 2026-11-05T10:05:00Z", "", 0, "true"},
+		{"superseded, any-ref failure blocks", "9 completed 2026-11-05T10:00:00Z cancelled", "skipped", "error", "def 2026-11-05T10:05:00Z", "", 1, ""},
+		{"superseded, any-ref pending waits", "9 completed 2026-11-05T10:00:00Z cancelled", "skipped", "pending", "def 2026-11-05T10:05:00Z", "", 7, ""},
+		{"superseded, no status skips publication", "9 completed 2026-11-05T10:00:00Z cancelled", "cancelled", "none", "def 2026-11-05T10:05:00Z", "", 0, "false"},
+		{"ci-ok failure in a cancelled run blocks", "9 completed 2026-11-05T10:00:00Z cancelled", "failure", "success", "def 2026-11-05T10:05:00Z", "", 1, ""},
+		{"runs API failure waits", "9 completed 2026-11-05T10:00:00Z success", "success", "none", "def 2026-11-05T10:05:00Z", "workflows/ci.yml/runs", 7, ""},
+		{"jobs API failure waits", "9 completed 2026-11-05T10:00:00Z success", "success", "none", "def 2026-11-05T10:05:00Z", "/jobs", 7, ""},
+		{"manual cancel, no newer main push, blocks despite success status", "9 completed 2026-11-05T10:00:00Z cancelled", "none", "success", "abc 2026-11-05T10:00:00Z", "", 1, ""},
+		{"cancelled, newest main run is older, blocks", "9 completed 2026-11-05T10:00:00Z cancelled", "skipped", "success", "def 2026-11-05T09:00:00Z", "", 1, ""},
+		{"newest-run API failure waits", "9 completed 2026-11-05T10:00:00Z cancelled", "skipped", "success", "def 2026-11-05T10:05:00Z", "runs?event=push", 7, ""},
+		{"statuses API failure waits", "9 completed 2026-11-05T10:00:00Z cancelled", "skipped", "success", "def 2026-11-05T10:05:00Z", "statuses", 7, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -67,6 +70,7 @@ func TestReleaseCIGreenVerdicts(t *testing.T) {
 case "$*" in *"$FAKE_FAIL"*) [ -n "$FAKE_FAIL" ] && exit 1 ;; esac
 case "$*" in
   *'actions/workflows/ci.yml/runs?head_sha=abc&event=push&branch=main&'*) printf '%s\n' "$FAKE_MAIN" ;;
+  *'actions/workflows/ci.yml/runs?event=push&branch=main&per_page=1'*) printf '%s\n' "$FAKE_NEWEST" ;;
   *'actions/runs/9/jobs?filter=latest&'*) printf '%s\n' "$FAKE_JOB" ;;
   *statuses*) printf '%s\n' "$FAKE_STATUS" ;;
   *) echo "unexpected gh $*" >&2; exit 2 ;;
@@ -77,7 +81,7 @@ esac
 			}
 			out := filepath.Join(dir, "out")
 			cmd := exec.Command("bash", "-c", script)
-			cmd.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"), "GITHUB_OUTPUT="+out, "GITHUB_SHA=abc", "GITHUB_REPOSITORY=o/r", "FAKE_MAIN="+tc.main, "FAKE_JOB="+tc.job, "FAKE_STATUS="+tc.status, "FAKE_FAIL="+tc.fail)
+			cmd.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"), "GITHUB_OUTPUT="+out, "GITHUB_SHA=abc", "GITHUB_REPOSITORY=o/r", "FAKE_MAIN="+tc.main, "FAKE_JOB="+tc.job, "FAKE_STATUS="+tc.status, "FAKE_NEWEST="+tc.newest, "FAKE_FAIL="+tc.fail)
 			logs, err := cmd.CombinedOutput()
 			code := 0
 			if ee, ok := err.(*exec.ExitError); ok {
