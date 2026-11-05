@@ -27,6 +27,7 @@ import (
 // by matching nothing.
 
 type step struct {
+	If               string         `yaml:"if"`
 	Run              string         `yaml:"run"`
 	WorkingDirectory string         `yaml:"working-directory"`
 	Name             string         `yaml:"name"`

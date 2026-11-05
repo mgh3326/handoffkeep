@@ -46,8 +46,11 @@ package store
 //     task_subscribers, task_origins, linear_board_tasks, linear_outbox,
 //     sync_decisions, ticket_sets, decision_answer_attempts and
 //     decision_resolutions (inserted by ResolveDecision after its task row,
-//     under the level-2 lock; append-only and never locked by a reader);
-//     shared rows read FOR SHARE (labels).
+//     under the level-2 lock; append-only and never locked by a reader), and
+//     the work record: changes, change_tasks and reviews. ApplyTaskSourceEvent
+//     writes the work record under the level-2 lock after its task row
+//     (recordChangeTx); a revert locks two changes rows, the reverted PR's
+//     first. Shared rows read FOR SHARE (labels).
 //     A documents insert or update that sets task_id takes KEY SHARE on that
 //     one task row through the foreign key (PutDocument). That is the level-4
 //     single-task case and needs no level-2 lock: no task writer locks a
@@ -87,6 +90,14 @@ package store
 //     status_updates row. The project metadata writers lock that row and
 //     nothing else, and the KEY SHARE a task or milestone write takes on it
 //     does not conflict with FOR NO KEY UPDATE (status_updates.go).
+//   - SetChangeMergeFlow (the operator's merge-flow write) takes its own
+//     advisory lock first, so two writes cannot each pass the cycle check
+//     against the other's uncommitted dependency, then locks one changes row
+//     (FOR NO KEY UPDATE) and nothing else; the dependency chain is read without
+//     locks. The foreign key's KEY SHARE on the target row does not conflict
+//     with an event writer's upsert, and the event writers never take the
+//     merge-flow lock, so neither side waits on the other while it holds
+//     what the other needs.
 //   - Other advisory locks (disposition origin, task comment insert, labels,
 //     Linear board ownership, quota presence) are each the first lock of
 //     their transaction, and no transaction requests one while it holds a

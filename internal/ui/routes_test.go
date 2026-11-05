@@ -5,6 +5,7 @@ import "testing"
 func TestRoutePatternsHidePathValues(t *testing.T) {
 	for path, want := range map[string]string{
 		"/ui/queue":                               "/ui/queue",
+		"/ui/work":                                "/ui/work",
 		"/ui/tasks/123":                           "/ui/tasks/{id}",
 		"/ui/tasks/123/comments":                  "/ui/tasks/{id}/comments",
 		"/ui/doc/private-key/note":                "/ui/doc/{key...}",

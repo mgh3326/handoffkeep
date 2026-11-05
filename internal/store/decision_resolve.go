@@ -529,7 +529,7 @@ func (s *Store) ResolveDecision(ctx context.Context, in ResolveDecisionInput) (R
 }
 
 // decisionResolutionID is the id of the resolution row of one logical request
-// and revision, 0 when none exists (a request answered before version 42).
+// and revision, 0 when none exists (a request answered before version 43).
 func decisionResolutionID(ctx context.Context, q rowQuerier, root string, revision int) (int64, error) {
 	var id int64
 	err := q.QueryRow(ctx, `SELECT resolution_id FROM decision_resolutions WHERE request_id=$1 AND question_revision=$2`, root, revision).Scan(&id)

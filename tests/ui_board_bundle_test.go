@@ -83,10 +83,10 @@ func consoleTreeError(committed, emitted map[string][]byte) error {
 }
 
 // consoleContractsError checks the entry outputs a correct multi-entry build
-// must produce: both entries, their styles, and the shared chunk, plus the
-// API/security contracts each bundle carries.
+// must produce: the shell, server and deploys entries, their styles, and the
+// shared chunk, plus the API/security contracts each bundle carries.
 func consoleContractsError(tree map[string][]byte) error {
-	for _, name := range []string{"fleet.js", "fleet.css", "board.js", "board.css", "shared-client.js"} {
+	for _, name := range []string{"shell.js", "shell.css", "server.js", "server.css", "deploys.js", "deploys.css", "tokens.css", "shared-client.js", "shared-DocView.js", "shared-DocMarkdown.js"} {
 		body, ok := tree[name]
 		if !ok {
 			return fmt.Errorf("console artifact %s missing", name)
@@ -95,22 +95,26 @@ func consoleContractsError(tree map[string][]byte) error {
 			return fmt.Errorf("console artifact %s is empty", name)
 		}
 	}
-	fleet := string(tree["fleet.js"])
-	// #598: the fleet page reads the live aggregation BFF, not /ui/api/fleet.
-	if !strings.Contains(fleet, "/ui/api/live") {
-		return errors.New("fleet.js lost the /ui/api/live contract")
-	}
-	board := string(tree["board.js"])
-	// /ui/queue's bundle is the queue app: it must carry the board BFF list
-	// contract and both mount points. It no longer serves the old board app's
-	// policy panel, so /ui/api/policy/active is not part of this contract.
-	for _, want := range []string{"/ui/api/board/tasks", "board-root", "queue-proto-root"} {
-		if !strings.Contains(board, want) {
-			return fmt.Errorf("board.js missing %q", want)
+	shell := string(tree["shell.js"])
+	// The shell entry mounts into the template's root, reaches the document
+	// viewer through a lazy chunk, and makes no API read itself.
+	for _, want := range []string{"shell-root", "shared-DocView.js"} {
+		if !strings.Contains(shell, want) {
+			return fmt.Errorf("shell.js missing %q", want)
 		}
 	}
-	for name, body := range map[string]string{"fleet.js": fleet, "board.js": board} {
-		if strings.Contains(body, "/v1/nodes") || strings.Contains(body, "/v1/jobs") || strings.Contains(body, fleetTestSecret) {
+	// The viewer reads one document through the console's JSON route.
+	if !strings.Contains(string(tree["shared-DocView.js"]), "/ui/api/board/doc") {
+		return errors.New("shared-DocView.js lost the /ui/api/board/doc contract")
+	}
+	if !strings.Contains(string(tree["deploys.js"]), "/ui/api/deploy-pending") {
+		return errors.New("deploys.js lost the /ui/api/deploy-pending contract")
+	}
+	for name, body := range tree {
+		if !strings.HasSuffix(name, ".js") {
+			continue
+		}
+		if strings.Contains(string(body), "/v1/nodes") || strings.Contains(string(body), "/v1/jobs") || strings.Contains(string(body), fleetTestSecret) {
 			return fmt.Errorf("%s contains a hub path or secret", name)
 		}
 	}
@@ -121,7 +125,7 @@ func consoleContractsError(tree map[string][]byte) error {
 // console entry output. Adding or repointing an entry must never delete a
 // sibling's emitted file.
 func consoleSiblingEntriesError(tree map[string][]byte) error {
-	for _, name := range []string{"fleet.js", "fleet.css", "board.js", "board.css"} {
+	for _, name := range []string{"shell.js", "shell.css", "server.js", "deploys.js", "deploys.css"} {
 		if len(tree[name]) == 0 {
 			return fmt.Errorf("sibling entry output %s missing", name)
 		}
@@ -145,15 +149,6 @@ func consoleProjectDir(t *testing.T) string {
 		t.Fatal("caller path unavailable")
 	}
 	return filepath.Join(filepath.Dir(file), "..", "web", "console")
-}
-
-func boardTemplatePath(t *testing.T) string {
-	t.Helper()
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("caller path unavailable")
-	}
-	return filepath.Join(filepath.Dir(file), "..", "internal", "ui", "templates", "board.html")
 }
 
 func requireNPM(t *testing.T) string {
@@ -212,28 +207,18 @@ func TestConsoleMultiEntryArtifacts(t *testing.T) {
 	if err := consoleContractsError(committed); err != nil {
 		t.Fatal(err)
 	}
-	page, err := os.ReadFile(boardTemplatePath(t))
+	page, err := os.ReadFile(shellPagePath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	body := string(page)
-	for _, want := range []string{`id="board-root"`, "/ui/static/console/board.js", "/ui/static/console/board.css"} {
-		if !strings.Contains(body, want) {
-			t.Fatalf("board.html missing %q", want)
+	for _, want := range []string{`id="shell-root"`, "/ui/static/console/shell.js", "/ui/static/console/shell.css"} {
+		if !strings.Contains(string(page), want) {
+			t.Fatalf("console.html missing %q", want)
 		}
 	}
-	fleet, err := os.ReadFile(fleetPagePath(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, want := range []string{`id="fleet-root"`, "/ui/static/console/fleet.js", "/ui/static/console/fleet.css"} {
-		if !strings.Contains(string(fleet), want) {
-			t.Fatalf("fleet.html missing %q", want)
-		}
-	}
-	// #620 — /ui/deploys is its own mount page on its own entry, same shape
-	// as board/fleet: the template must name its root and both artifacts.
-	deploys, err := os.ReadFile(filepath.Join(filepath.Dir(fleetPagePath(t)), "deploys.html"))
+	// /ui/deploys is its own mount page on its own entry: the template must
+	// name its root and both artifacts.
+	deploys, err := os.ReadFile(filepath.Join(filepath.Dir(shellPagePath(t)), "deploys.html"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -281,11 +266,11 @@ func TestConsoleCleanBuildMatchesCommitted(t *testing.T) {
 func TestConsoleBuildDriftMutantsTurnRed(t *testing.T) {
 	committed := readTreeDir(t, consoleDir(t))
 	for name, mutate := range map[string]func(map[string][]byte){
-		"missing-board.js":         func(tree map[string][]byte) { delete(tree, "board.js") },
+		"missing-shell.js":         func(tree map[string][]byte) { delete(tree, "shell.js") },
 		"missing-shared-client.js": func(tree map[string][]byte) { delete(tree, "shared-client.js") },
 		"extra-stale.js":           func(tree map[string][]byte) { tree["stale-legacy.js"] = []byte("stale") },
-		"stale-fleet.js":           func(tree map[string][]byte) { tree["fleet.js"] = append([]byte("drift:"), tree["fleet.js"]...) },
-		"empty-board.js":           func(tree map[string][]byte) { tree["board.js"] = nil },
+		"stale-shell.js":           func(tree map[string][]byte) { tree["shell.js"] = append([]byte("drift:"), tree["shell.js"]...) },
+		"empty-shell.js":           func(tree map[string][]byte) { tree["shell.js"] = nil },
 	} {
 		t.Run("tree-"+name, func(t *testing.T) {
 			mutated := make(map[string][]byte, len(committed))
@@ -324,11 +309,11 @@ func TestConsoleBuildDriftMutantsTurnRed(t *testing.T) {
 		}
 	})
 
-	// A single-entry build emits no board output at all; the emitted set must
-	// not silently shrink to the fleet entry.
+	// A build without the deploys entry emits no deploys output; the emitted
+	// set must not silently shrink.
 	t.Run("config-single-entry", func(t *testing.T) {
 		config := writeMutantConfig(t, projectDir, "single-entry", func(source string) string {
-			return strings.Replace(source, "\n        board: resolve(root, \"src/queue-proto/main.tsx\"),", "", 1)
+			return strings.Replace(source, "\n        deploys: resolve(root, \"src/deploys/main.tsx\"),", "", 1)
 		})
 		outDir := filepath.Join(t.TempDir(), "out")
 		viteBuild(t, npm, projectDir, config, outDir)

@@ -1,10 +1,10 @@
 package store
 
-// Version 42 gives a structured decision answer a receipt (hk 3061; design
+// Version 43 gives a structured decision answer a receipt (hk 3061; design
 // hk:doc design/2026-11-05/hk-work-record-design-v1.1 §10.2, §13.1 R1/R2).
 // Until now a dr- request was closed by writing tasks.refs.decision_request
 // alone: no row said who tried to answer, through which channel, or how the
-// answer was verified. Version 42 adds two tables that Store.ResolveDecision
+// answer was verified. Version 43 adds two tables that Store.ResolveDecision
 // writes in the answer's own transaction:
 //
 //   - decision_answer_attempts: one append-only row per attempt, whatever its
@@ -20,7 +20,7 @@ package store
 // decision_answer_attempts for the second table) for the length of this
 // transaction. No row is read or rewritten; requests answered before the
 // upgrade keep their answer in tasks.refs only.
-var decisionResolutionsV42 = []string{
+var decisionResolutionsV43 = []string{
 	`CREATE TABLE IF NOT EXISTS decision_answer_attempts (
 		id BIGSERIAL PRIMARY KEY,
 		channel TEXT NOT NULL CHECK(channel IN ('cli','assistant','console','linear','lane','default')),
@@ -59,5 +59,5 @@ var decisionResolutionsV42 = []string{
 		committed_at TIMESTAMPTZ NOT NULL,
 		UNIQUE(request_id, question_revision)
 	)`,
-	`INSERT INTO schema_version(version) VALUES (42)`,
+	`INSERT INTO schema_version(version) VALUES (43)`,
 }

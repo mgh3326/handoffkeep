@@ -51,23 +51,23 @@ func serveStatic(t *testing.T, h *Handler, target string) *httptest.ResponseReco
 func TestAssetURLStampsVersionedRequests(t *testing.T) {
 	h := newAssetTestHandler(t, "abc123def")
 	rec := httptest.NewRecorder()
-	h.render(rec, "board_page", boardPageData{})
+	h.shell(rec)
 	body := rec.Body.String()
-	if !strings.Contains(body, "/ui/static/console/board.js?v=abc123def") || !strings.Contains(body, "/ui/static/console/board.css?v=abc123def") {
+	if !strings.Contains(body, "/ui/static/console/shell.js?v=abc123def") || !strings.Contains(body, "/ui/static/console/shell.css?v=abc123def") {
 		t.Fatalf("stamped board page did not version asset URLs: %q", body)
 	}
 	if rec.Header().Get("Cache-Control") != "no-cache" {
 		t.Fatalf("html cache-control=%q", rec.Header().Get("Cache-Control"))
 	}
 
-	if rec := serveStatic(t, h, "/ui/static/console/board.js?v=abc123def"); rec.Header().Get("Cache-Control") != "public, max-age=86400" {
+	if rec := serveStatic(t, h, "/ui/static/console/shell.js?v=abc123def"); rec.Header().Get("Cache-Control") != "public, max-age=86400" {
 		t.Fatalf("versioned asset cache-control=%q", rec.Header().Get("Cache-Control"))
 	}
 	// A wrong or missing stamp must revalidate — this is what keeps the fixed
 	// shared-*.js chunk name safe across deploys.
 	for _, target := range []string{
-		"/ui/static/console/board.js",
-		"/ui/static/console/board.js?v=old-stamp",
+		"/ui/static/console/shell.js",
+		"/ui/static/console/shell.js?v=old-stamp",
 		"/ui/static/console/shared-client.js",
 		"/ui/static/console/shared-client.js?v=old-stamp",
 	} {
@@ -79,19 +79,19 @@ func TestAssetURLStampsVersionedRequests(t *testing.T) {
 
 func TestAssetURLUnstampedDisablesCaching(t *testing.T) {
 	h := newAssetTestHandler(t, "")
-	if got := h.assetURL("/ui/static/console/board.js"); got != "/ui/static/console/board.js" {
+	if got := h.assetURL("/ui/static/console/shell.js"); got != "/ui/static/console/shell.js" {
 		t.Fatalf("unstamped assetURL emitted %q — empty ?v= must never appear", got)
 	}
 	rec := httptest.NewRecorder()
-	h.render(rec, "board_page", boardPageData{})
+	h.shell(rec)
 	body := rec.Body.String()
 	if strings.Contains(body, "?v=") {
 		t.Fatalf("unstamped page emitted an empty version query: %q", body)
 	}
-	if !strings.Contains(body, "/ui/static/console/board.js") {
-		t.Fatalf("unstamped page did not reference board.js: %q", body)
+	if !strings.Contains(body, "/ui/static/console/shell.js") {
+		t.Fatalf("unstamped page did not reference shell.js: %q", body)
 	}
-	for _, target := range []string{"/ui/static/console/board.js", "/ui/static/console/shared-client.js", "/ui/static/htmx.min.js"} {
+	for _, target := range []string{"/ui/static/console/shell.js", "/ui/static/console/shared-client.js", "/ui/static/htmx.min.js"} {
 		if rec := serveStatic(t, h, target); rec.Header().Get("Cache-Control") != "no-cache" {
 			t.Fatalf("unstamped %s cache-control=%q — must not stay long-lived", target, rec.Header().Get("Cache-Control"))
 		}
@@ -113,14 +113,14 @@ func TestNewWiresBuildInfoIntoAssetStamp(t *testing.T) {
 		t.Fatal(err)
 	}
 	rec := httptest.NewRecorder()
-	h.render(rec, "board_page", boardPageData{})
-	if body := rec.Body.String(); !strings.Contains(body, "/ui/static/console/board.js?v=testrev0123") {
+	h.shell(rec)
+	if body := rec.Body.String(); !strings.Contains(body, "/ui/static/console/shell.js?v=testrev0123") {
 		t.Fatalf("New() did not stamp board assets from build info: %q", body)
 	}
-	if rec := serveStatic(t, h, "/ui/static/console/board.js?v=testrev0123"); rec.Header().Get("Cache-Control") != "public, max-age=86400" {
+	if rec := serveStatic(t, h, "/ui/static/console/shell.js?v=testrev0123"); rec.Header().Get("Cache-Control") != "public, max-age=86400" {
 		t.Fatalf("stamped asset cache-control=%q", rec.Header().Get("Cache-Control"))
 	}
-	if rec := serveStatic(t, h, "/ui/static/console/board.js?v=other"); rec.Header().Get("Cache-Control") != "no-cache" {
+	if rec := serveStatic(t, h, "/ui/static/console/shell.js?v=other"); rec.Header().Get("Cache-Control") != "no-cache" {
 		t.Fatalf("wrong stamp cache-control=%q", rec.Header().Get("Cache-Control"))
 	}
 
@@ -130,7 +130,7 @@ func TestNewWiresBuildInfoIntoAssetStamp(t *testing.T) {
 		t.Fatal(err)
 	}
 	rec = httptest.NewRecorder()
-	h2.render(rec, "board_page", boardPageData{})
+	h2.shell(rec)
 	if body := rec.Body.String(); strings.Contains(body, "?v=") {
 		t.Fatalf("unstamped New() emitted a version query: %q", body)
 	}
