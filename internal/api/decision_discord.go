@@ -162,7 +162,7 @@ func (n DecisionNotifier) Drain(ctx context.Context) {
 			return "", store.ErrDecisionNoticeSkipped
 		}
 		id, err := n.Discord.PostMessage(ctx, decisionDigestText(d, n.ConsoleURL, now))
-		return id, decisionNoticeError(err)
+		return id, decisionPostError(err)
 	})
 	logDecisionNotify("decision_notify.digest", sendErr)
 	if err != nil && ctx.Err() == nil {

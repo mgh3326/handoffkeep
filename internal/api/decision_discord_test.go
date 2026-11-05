@@ -656,3 +656,24 @@ func TestDecisionNotifierDoesNotRepostAfterALostAnswer(t *testing.T) {
 		t.Fatalf("posts=%d, want 1", posts)
 	}
 }
+
+// The outcome of a send is recorded even when the worker context is canceled
+// right after Discord answered (shutdown), so the next start does not post
+// the same request again.
+func TestDecisionNoticeSettlesAfterCancel(t *testing.T) {
+	st, _ := notifyStoreFixture(t)
+	x := chatDecision(t, st, "Q-20261105-82", "cancel after send")
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	at := time.Now().UTC().Add(2 * time.Minute)
+	found, sendErr, err := st.ProcessNextDecisionNotice(ctx, at, func(context.Context, store.DecisionNotice) (string, error) {
+		cancel()
+		return "123456789012345678", nil
+	})
+	if !found || sendErr != nil || err != nil {
+		t.Fatalf("found=%v sendErr=%v err=%v", found, sendErr, err)
+	}
+	if state := noticeOf(t, st, x.ID); state.MessageID != "123456789012345678" || state.LastStatus != store.DecisionStatusOpen {
+		t.Fatalf("not settled after cancel: %+v", state)
+	}
+}

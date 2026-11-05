@@ -56,6 +56,9 @@ const (
 	decisionNoticeMaxAttempts = 32
 )
 
+// decisionSettleTimeout bounds the write that records a send's outcome.
+const decisionSettleTimeout = 5 * time.Second
+
 // ErrDecisionNoticeSkipped is what a sender returns when the webhook is not
 // configured. The row settles as unsent, so configuring the webhook later
 // does not replay old messages.
@@ -164,31 +167,35 @@ func (s *Store) ProcessNextDecisionNotice(ctx context.Context, now time.Time, se
 		return true, nil, tx.Commit(ctx)
 	}
 	messageID, sendErr := send(ctx, x)
+	// send may have created the message: record the outcome even if ctx is
+	// canceled now (shutdown), or the next start would post it again.
+	settle, cancelSettle := context.WithTimeout(context.WithoutCancel(ctx), decisionSettleTimeout)
+	defer cancelSettle()
 	switch {
 	case errors.Is(sendErr, ErrDecisionNoticeSkipped):
 		sendErr = nil
-		_, err = tx.Exec(ctx, `UPDATE decision_notify SET last_status='unsent',last_error='' WHERE request_id=$1`, x.Record.ID)
+		_, err = tx.Exec(settle, `UPDATE decision_notify SET last_status='unsent',last_error='' WHERE request_id=$1`, x.Record.ID)
 	case sendErr == nil && x.Post():
-		_, err = tx.Exec(ctx, `UPDATE decision_notify SET last_status=$2,message_id=$3,posted_at=$4,attempts=0,last_error='',next_attempt_at=$4 WHERE request_id=$1`,
+		_, err = tx.Exec(settle, `UPDATE decision_notify SET last_status=$2,message_id=$3,posted_at=$4,attempts=0,last_error='',next_attempt_at=$4 WHERE request_id=$1`,
 			x.Record.ID, want, messageID, now)
 	case sendErr == nil:
-		_, err = tx.Exec(ctx, `UPDATE decision_notify SET last_status=$2,edited_at=$3,attempts=0,last_error='',next_attempt_at=$3 WHERE request_id=$1`,
+		_, err = tx.Exec(settle, `UPDATE decision_notify SET last_status=$2,edited_at=$3,attempts=0,last_error='',next_attempt_at=$3 WHERE request_id=$1`,
 			x.Record.ID, want, now)
 	default:
 		attempts := x.Attempts + 1
 		lastError := firstBytes(sendErr.Error(), linearDecisionErrorMaxBytes)
 		if attempts >= decisionNoticeMaxAttempts || errors.Is(sendErr, ErrDecisionNoticeRejected) {
 			sendErr = fmt.Errorf("%w: request %d: %w", ErrDecisionNoticeGaveUp, x.Record.ID, sendErr)
-			_, err = tx.Exec(ctx, `UPDATE decision_notify SET last_status='failed',attempts=$2,last_error=$3 WHERE request_id=$1`, x.Record.ID, attempts, lastError)
+			_, err = tx.Exec(settle, `UPDATE decision_notify SET last_status='failed',attempts=$2,last_error=$3 WHERE request_id=$1`, x.Record.ID, attempts, lastError)
 		} else {
-			_, err = tx.Exec(ctx, `UPDATE decision_notify SET attempts=$2,last_error=$3,next_attempt_at=$4 WHERE request_id=$1`,
+			_, err = tx.Exec(settle, `UPDATE decision_notify SET attempts=$2,last_error=$3,next_attempt_at=$4 WHERE request_id=$1`,
 				x.Record.ID, attempts, lastError, now.Add(linearDecisionOpBackoff(x.Attempts)))
 		}
 	}
 	if err != nil {
 		return true, sendErr, err
 	}
-	return true, sendErr, tx.Commit(ctx)
+	return true, sendErr, tx.Commit(settle)
 }
 
 // DecisionNoticeState is a decision_notify row as stored.
@@ -273,27 +280,31 @@ func (s *Store) ProcessDecisionDigest(ctx context.Context, now time.Time, send f
 		return true, nil, tx.Commit(ctx)
 	}
 	messageID, sendErr := send(ctx, digest)
+	// send may have created the message: record the outcome even if ctx is
+	// canceled now (shutdown), or the next start would post it again.
+	settle, cancelSettle := context.WithTimeout(context.WithoutCancel(ctx), decisionSettleTimeout)
+	defer cancelSettle()
 	switch {
 	case errors.Is(sendErr, ErrDecisionNoticeSkipped):
 		sendErr = nil
-		_, err = tx.Exec(ctx, `UPDATE decision_notify_digest SET state='unsent',listed=$2 WHERE day=$1::date`, day, digest.Total)
+		_, err = tx.Exec(settle, `UPDATE decision_notify_digest SET state='unsent',listed=$2 WHERE day=$1::date`, day, digest.Total)
 	case sendErr == nil:
-		_, err = tx.Exec(ctx, `UPDATE decision_notify_digest SET state='sent',listed=$2,message_id=$3,sent_at=$4,attempts=$5,last_error='' WHERE day=$1::date`,
+		_, err = tx.Exec(settle, `UPDATE decision_notify_digest SET state='sent',listed=$2,message_id=$3,sent_at=$4,attempts=$5,last_error='' WHERE day=$1::date`,
 			day, digest.Total, messageID, now, attempts+1)
 	default:
 		lastError := firstBytes(sendErr.Error(), linearDecisionErrorMaxBytes)
 		if attempts+1 >= decisionNoticeMaxAttempts || errors.Is(sendErr, ErrDecisionNoticeRejected) {
 			sendErr = fmt.Errorf("%w: digest %s: %w", ErrDecisionNoticeGaveUp, day.Format(time.DateOnly), sendErr)
-			_, err = tx.Exec(ctx, `UPDATE decision_notify_digest SET state='failed',attempts=$2,last_error=$3 WHERE day=$1::date`, day, attempts+1, lastError)
+			_, err = tx.Exec(settle, `UPDATE decision_notify_digest SET state='failed',attempts=$2,last_error=$3 WHERE day=$1::date`, day, attempts+1, lastError)
 		} else {
-			_, err = tx.Exec(ctx, `UPDATE decision_notify_digest SET attempts=$2,last_error=$3,next_attempt_at=$4 WHERE day=$1::date`,
+			_, err = tx.Exec(settle, `UPDATE decision_notify_digest SET attempts=$2,last_error=$3,next_attempt_at=$4 WHERE day=$1::date`,
 				day, attempts+1, lastError, now.Add(linearDecisionOpBackoff(attempts)))
 		}
 	}
 	if err != nil {
 		return true, sendErr, err
 	}
-	return true, sendErr, tx.Commit(ctx)
+	return true, sendErr, tx.Commit(settle)
 }
 
 // DecisionDigestState is the stored state of one day's digest.

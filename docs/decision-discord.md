@@ -79,7 +79,7 @@ contains it.
 
 ## Rollout
 
-Schema version 37 adds two new tables, `decision_notify` and
+Schema version 38 adds two new tables, `decision_notify` and
 `decision_notify_digest`. It locks no existing table and writes no rows.
 Requests that were already open before the upgrade get no message of their
 own. The digest lists them once they are more than a day old.
