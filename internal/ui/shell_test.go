@@ -1,7 +1,9 @@
 package ui
 
 import (
+	"context"
 	"io/fs"
+	"net/http"
 	"net/http/httptest"
 	"regexp"
 	"sort"
@@ -42,7 +44,7 @@ func TestShellPagePreloadsExactlyTheEntryImports(t *testing.T) {
 	for _, version := range []string{"", "abc123def"} {
 		h := newAssetTestHandler(t, version)
 		rec := httptest.NewRecorder()
-		h.shell(rec)
+		h.shell(rec, httptest.NewRequest(http.MethodGet, "/ui", nil))
 		body := rec.Body.String()
 		var got []string
 		for _, m := range regexp.MustCompile(`<link rel="modulepreload" href="([^"]*)">`).FindAllStringSubmatch(body, -1) {
@@ -63,7 +65,7 @@ func TestShellPagePreloadsExactlyTheEntryImports(t *testing.T) {
 func TestShellPageLinksOnlyShellAssets(t *testing.T) {
 	h := newAssetTestHandler(t, "abc123def")
 	rec := httptest.NewRecorder()
-	h.shell(rec)
+	h.shell(rec, httptest.NewRequest(http.MethodGet, "/ui", nil))
 	body := rec.Body.String()
 	for _, want := range []string{`id="shell-root"`, "/ui/static/console/shell.js?v=abc123def", "/ui/static/console/shell.css?v=abc123def", "/ui/static/console/tokens.css?v=abc123def"} {
 		if !strings.Contains(body, want) {
@@ -76,5 +78,31 @@ func TestShellPageLinksOnlyShellAssets(t *testing.T) {
 	// The markdown renderer is a lazy chunk: it is never preloaded.
 	if strings.Contains(body, "DocMarkdown") || strings.Contains(body, "DocView") {
 		t.Fatalf("shell page preloads the document viewer: %s", body)
+	}
+}
+
+// The shell is the mount point of every write view, so it must hand out the
+// CSRF form token like the old pages did: the hk_ui_csrf cookie plus the
+// <meta name="hk-csrf"> the browser reads (main CI e4db65e..aaebbe6 broke when
+// it stopped). Without a verified email it renders no token.
+func TestShellIssuesCSRFToken(t *testing.T) {
+	h := newAssetTestHandler(t, "abc123def")
+	r := httptest.NewRequest(http.MethodGet, "/ui", nil)
+	r = r.WithContext(context.WithValue(r.Context(), shellEmailKey{}, "admin@example.com"))
+	rec := httptest.NewRecorder()
+	h.shell(rec, r)
+	var cookie string
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == csrfCookie {
+			cookie = c.Value
+		}
+	}
+	if cookie == "" || !strings.Contains(rec.Body.String(), `<meta name="hk-csrf" content="`+cookie+`">`) {
+		t.Fatalf("shell did not issue the CSRF cookie and meta tag: cookie=%q", cookie)
+	}
+	anon := httptest.NewRecorder()
+	h.shell(anon, httptest.NewRequest(http.MethodGet, "/ui", nil))
+	if strings.Contains(anon.Body.String(), "hk-csrf") || len(anon.Result().Cookies()) != 0 {
+		t.Fatal("shell issued a CSRF token without a verified email")
 	}
 }
