@@ -34,7 +34,7 @@ proposed answer for every item except Q11, where the alternative stands.
 
 **Two clocks.** `updated_at` is the search sync clock and moves on every write.
 `last_activity_at` moves only on task events with `auto=false` or
-`source=panewire.job`. Version 42 backfilled it from those events, with
+`source=panewire.job`. Version 43 backfilled it from those events, with
 `created_at` as the floor.
 
 `tasks.state` holds one of eleven leaf states. The category is derived from the
@@ -166,6 +166,43 @@ treated as overdue.
     the merge is recorded with `applied=false`. This covers a revert that arrives
     before its merge and a merge event redelivered after a revert. Relanding the change
     takes a new PR.
+
+**Changes and reviews from the same events.** Every mergewake event also writes the
+work record, in the same transaction, after the task row is locked and before the rule
+table runs. It runs for a redelivered event and for one the task refuses (triage,
+canceled), because the rows describe the PR, not the task: a second review run on a PR
+is "redelivered" for the task and still records its reviews. An event for a missing
+task is a 404 and writes nothing. A PR is a `changes` row keyed by `(repo, pr_number)`
+from its URL, shared by every task that names it through `change_tasks`.
+
+The payload takes these optional fields; an old payload without them behaves as before,
+and a bad value is a 400.
+
+| Field | Allowed on | Meaning |
+|---|---|---|
+| `head_sha`, `base_sha` | every mergewake source | 40 lower-case hex digits; replaces the stored value unless the change is merged (only the merge event sets them then). On a revert they describe the revert PR. |
+| `merge_sha` | `mergewake.merge` | 40 lower-case hex digits. |
+| `reviews` | `mergewake.review` | Up to 16 review passes: `reviewed_head` (required), `reviewed_base`, `patch_id`, `round` and `pass` (at least 1), `lens` (required), `reviewer_job_id`, `family`, `profile`, `model`, `harness`, `effort`, `executor`, `fallback`, `policy_revision`, `contract_source`, `verdict`, severity counts `critical`, `high`, `medium`, `low` (counts only, never the findings), `started_at`, `finished_at`. |
+
+What each event writes:
+
+| Event | Change rows |
+|---|---|
+| `mergewake.pr` | Upserts the change, `open` with `opened_at` = `at` when new, and links it to the task as `implements`. |
+| `mergewake.review` | Upserts the change, links it, and inserts each review once; the first write of `(reviewed_head, lens, round, pass)` wins and a resend is ignored. |
+| `mergewake.merge` | The change becomes `merged`, with `merged_at` kept from the first merge and `merge_sha` when sent. |
+| `mergewake.revert` | Upserts the reverted PR's change as `merged` and the revert PR's change as `merged` at `at`, sets `reverted_by_change_id` on the reverted change, and links the revert PR to the task as `references`. |
+
+A change never leaves `merged`: a late `mergewake.pr` does not reopen it. `closed` is
+set only by a later reconcile; no event sets it. `GET /v1/changes?task=N` and
+`GET /v1/changes?pr=PR_URL` read the rows with their tasks and reviews;
+`GET /v1/tasks?change=ID` lists the linked tasks.
+
+An operator sets a change's merge-flow fields with
+`POST /v1/changes/{id}/merge-flow` (`priority`, `hold_reason`, `depends_on_change` with
+`depends_on_state` `merged` or `deployed`). It replaces all three, so an omitted field
+is cleared, and only the `operator` and `operator-desk` clients may call it. hk only
+holds these fields; mergewake owns the merge order.
 
 When the merge event moves a task to `merged`, that says the change merged, not that
 CI passed. CI runs after the merge, and failure arrives as a revert. How mergewake

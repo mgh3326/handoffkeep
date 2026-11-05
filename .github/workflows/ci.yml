@@ -68,6 +68,19 @@ jobs:
       - name: go test (no race, no PostgreSQL)
         run: go test -timeout 10m ./...
       - run: python3 scripts/o3gen/test_gen.py
+      # Scan only the history reachable from the commit under test (hk 3145).
+      # fetch-depth 0 fetches every branch and ref, and off a pull request the
+      # action runs `git log --all`, so an old false positive on one branch
+      # (5dd7bfa on wk/hk3038 and refs/mergewake/reviews/160) failed the
+      # any-ref runs of #156, #158 and #159. Detach, then delete every ref (no-deref
+      # so a symref such as origin/HEAD is deleted itself);
+      # HEAD alone keeps the target's own history in the scan. A pull request
+      # is unchanged: the action scans its commit range.
+      - name: drop every ref but HEAD before gitleaks
+        if: ${{ github.event_name != 'pull_request' }}
+        run: |
+          git checkout --detach --quiet
+          git for-each-ref --format='delete %(refname)' | git update-ref --no-deref --stdin
       - uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

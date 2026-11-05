@@ -120,12 +120,12 @@ func TestUIBoardPageCSPAndNoSecret(t *testing.T) {
 	if response.Header.Get("Content-Security-Policy") != ui.ConsoleCSP {
 		t.Fatalf("queue page csp=%q", response.Header.Get("Content-Security-Policy"))
 	}
-	if !strings.Contains(body, `id="board-root"`) || !strings.Contains(body, "/ui/static/console/board.js") || !strings.Contains(body, "/ui/static/console/board.css") {
+	if !strings.Contains(body, `id="shell-root"`) || !strings.Contains(body, "/ui/static/console/shell.js") || !strings.Contains(body, "/ui/static/console/shell.css") {
 		t.Fatalf("board mount incomplete: %q", body)
 	}
 	assertNoSecret(t, body, response.Header, fleetTestSecret, "http://hub.internal:9000")
 
-	for _, asset := range []string{"board.js", "board.css", "fleet.js", "fleet.css"} {
+	for _, asset := range []string{"shell.js", "shell.css", "deploys.js", "deploys.css"} {
 		response = uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/static/console/"+asset, assertion, "")
 		if response.StatusCode != http.StatusOK {
 			t.Fatalf("console asset %s status=%d", asset, response.StatusCode)
@@ -154,7 +154,7 @@ func TestUITaskPageRoute(t *testing.T) {
 
 	response := uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/tasks/42", assertion, "")
 	body := responseText(t, response)
-	if response.StatusCode != http.StatusOK || !strings.Contains(body, `id="board-root"`) || !strings.Contains(body, "/ui/static/console/board.js") {
+	if response.StatusCode != http.StatusOK || !strings.Contains(body, `id="shell-root"`) || !strings.Contains(body, "/ui/static/console/shell.js") {
 		t.Fatalf("task page status=%d body=%q", response.StatusCode, body)
 	}
 	if response.Header.Get("Cache-Control") != "no-cache" {
