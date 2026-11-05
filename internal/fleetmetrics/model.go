@@ -1,6 +1,6 @@
 // Package fleetmetrics computes the five fleet operating metrics of
 // hk:doc advice/2026-09-24/fleet-structure-astra Q6 from a read-only
-// snapshot of hk tasks, relay events, panewire job records, pacelever reps,
+// snapshot of hk tasks, relay events, panewire job records, bench reps,
 // deploy records and GitHub PR facts (#644).
 //
 // The package is pure: Compute takes a Snapshot and returns a Report. Every
@@ -112,7 +112,7 @@ type StatusRun struct {
 	Status string    `json:"status"`
 }
 
-// Rep is one pacelever reps row.
+// Rep is one bench reps row (hk bench_reps, which pacelever publishes).
 type Rep struct {
 	ID            int64     `json:"id"`
 	Source        string    `json:"source"`

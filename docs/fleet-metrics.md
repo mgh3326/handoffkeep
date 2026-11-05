@@ -21,7 +21,7 @@ Chosen: one hk document per day, `report/<date>/fleet-metrics-baseline`
 
 - **Sources live off the server.** Metric 3 and 5 read runtug/panewire job
   directories and completion-sentinel logs on the machine that spawned the
-  jobs, and metric 2 reads `pacelever reps`, which are per-machine. The
+  jobs (metric 2's reps now come from hk `GET /v1/bench/reps`). The
   handoffkeep server (NCP) has none of these; a console page would need new
   agents or secrets on the server and a deploy — both out of scope.
 - **A baseline is a frozen series.** Seven daily values must stay as they
@@ -47,8 +47,8 @@ handoffkeep fleet-metrics --from-snapshot ~/work/herdr-inbox/fleet-metrics/2026-
 | `--machine ID` | hub machine id of the machine running the command (owns the default job root and `[local]` slots). Required for a live run. |
 | `--since 7d\|36h\|RFC3339`, `--until RFC3339` | window; default the 7 days ending now |
 | `--jobs-root PATH[=MACHINE]` | job-directory root, repeatable; default `~/work/herdr-inbox/jobs=<machine>` |
-| `--reps-file PATH[=SOURCE]` | a saved `pacelever reps list --json` from another machine, repeatable |
-| `--no-reps-local` | skip `pacelever reps list` on this machine |
+| `--reps-file PATH[=SOURCE]` | a saved `GET /v1/bench/reps` (or `pacelever reps list --json`) output, repeatable |
+| `--no-hk-reps` | skip reading reps from hk (`GET /v1/bench/reps`) |
 | `--hosts-config PATH` | fleet `hosts.toml` for slot capacity (`[local] max_active`, `[hosts.X] capacity`; default `~/.config/fleet/hosts.toml`) |
 | `--slots MACHINE=N[@RFC3339]` | slot capacity; a dated list is a timeline and replaces `hosts.toml` for that machine. Minutes before the first dated entry have no declared capacity and leave the denominator |
 | `--no-github`, `--no-herdr` | skip `gh api` PR facts / `herdr agent list` liveness |
@@ -59,7 +59,7 @@ Reads, all read-only: `GET /v1/tasks/export`, `GET /v1/tasks/{id}` (events),
 `GET /v1/tasks/{id}/comments`, `GET /v1/relay/events` (paged by `after_id`),
 `GET /v1/documents?prefix=deploy/` + `GET /v1/documents/{key}`; job
 directories and `completion-sentinel.log` under each job root;
-`pacelever reps list --json`; `gh api repos/{repo}/pulls/{n}` and
+`GET /v1/bench/reps` (at most 5000 rows, newest first); `gh api repos/{repo}/pulls/{n}` and
 `gh api repos/{repo}/compare/{merge}...{deployed}`; `herdr agent list`. The
 command writes nothing except the `--snapshot-out` file.
 

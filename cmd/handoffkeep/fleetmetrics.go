@@ -18,7 +18,7 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/fleetmetrics"
 )
 
-const fleetMetricsUsage = "usage: handoffkeep fleet-metrics --machine ID [--since 7d|RFC3339] [--until RFC3339] [--jobs-root PATH[=MACHINE]]... [--reps-file PATH[=SOURCE]]... [--no-reps-local] [--hosts-config PATH] [--slots MACHINE=N[@RFC3339]]... [--no-github] [--no-herdr] [--snapshot-out FILE] [--from-snapshot FILE] [--format md|json]"
+const fleetMetricsUsage = "usage: handoffkeep fleet-metrics --machine ID [--since 7d|RFC3339] [--until RFC3339] [--jobs-root PATH[=MACHINE]]... [--reps-file PATH[=SOURCE]]... [--no-hk-reps] [--hosts-config PATH] [--slots MACHINE=N[@RFC3339]]... [--no-github] [--no-herdr] [--snapshot-out FILE] [--from-snapshot FILE] [--format md|json]"
 
 // fleetMetricsCmd serves "fleet-metrics" (#644): a read-only daily report of
 // the five Q6 operating metrics. Every source is read with GET requests or
@@ -69,9 +69,9 @@ func fleetMetricsRun(args []string, out io.Writer, now time.Time, run fleetmetri
 	machine := fs.String("machine", "", "hub machine id of this machine (owner of the default job root and [local] slots)")
 	var jobRoots, repsFiles, slotFlags multiFlag
 	fs.Var(&jobRoots, "jobs-root", "job directory root PATH[=MACHINE], repeatable (default ~/work/herdr-inbox/jobs=<machine>)")
-	fs.Var(&repsFiles, "reps-file", "saved `pacelever reps list --json` output PATH[=SOURCE], repeatable")
+	fs.Var(&repsFiles, "reps-file", "saved `GET /v1/bench/reps` (or `pacelever reps list --json`) output PATH[=SOURCE], repeatable")
 	fs.Var(&slotFlags, "slots", "task-slot capacity MACHINE=N or MACHINE=N@RFC3339 (dated timeline), repeatable; replaces hosts.toml for that machine")
-	noRepsLocal := fs.Bool("no-reps-local", false, "do not run pacelever reps list on this machine")
+	noHKReps := fs.Bool("no-hk-reps", false, "do not read reps from hk bench_reps")
 	home, _ := os.UserHomeDir()
 	hostsConfig := fs.String("hosts-config", filepath.Join(home, ".config/fleet/hosts.toml"), "fleet hosts.toml for slot capacity ('' to skip)")
 	noGitHub := fs.Bool("no-github", false, "do not read PR facts from GitHub (gh api)")
@@ -141,7 +141,7 @@ func fleetMetricsRun(args []string, out io.Writer, now time.Time, run fleetmetri
 		if err := mustClient(c); err != nil {
 			return err
 		}
-		cfg := fleetmetrics.CollectConfig{HK: c, Run: run, Since: start, Until: end, Now: now, LocalMachine: *machine, RepsLocal: !*noRepsLocal, RepsFiles: repsFiles, GitHub: !*noGitHub, Herdr: !*noHerdr}
+		cfg := fleetmetrics.CollectConfig{HK: c, Run: run, Since: start, Until: end, Now: now, LocalMachine: *machine, HKReps: !*noHKReps, RepsFiles: repsFiles, GitHub: !*noGitHub, Herdr: !*noHerdr}
 		cfg.SlotOverrides = overrides
 		if len(jobRoots) == 0 {
 			jobRoots = multiFlag{filepath.Join(home, "work/herdr-inbox/jobs") + "=" + *machine}

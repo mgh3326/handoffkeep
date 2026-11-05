@@ -22,9 +22,10 @@ type HK interface {
 	ListDocuments(ctx context.Context, prefix, kind, session string, limit int) ([]store.Document, error)
 	GetDocument(ctx context.Context, key string) (store.Document, bool, error)
 	ListTaskComments(ctx context.Context, taskID, afterID int64, limit int) ([]store.TaskComment, error)
+	ListBenchReps(ctx context.Context, limit int) ([]store.BenchRep, error)
 }
 
-// Runner executes a read-only local command (pacelever, gh, herdr).
+// Runner executes a read-only local command (gh, herdr).
 type Runner func(ctx context.Context, name string, args ...string) ([]byte, error)
 
 type CollectConfig struct {
@@ -33,10 +34,11 @@ type CollectConfig struct {
 	Since, Until time.Time
 	Now          time.Time
 	JobRoots     []JobRoot
-	// RepsLocal runs `pacelever reps list --json` on this machine as one source.
-	RepsLocal    bool
+	// HKReps reads the reps pacelever published to hk (bench_reps) as one source.
+	HKReps       bool
 	LocalMachine string
-	// RepsFiles are saved `pacelever reps list --json` outputs, "path" or "path=source".
+	// RepsFiles are saved `GET /v1/bench/reps` or `pacelever reps list --json`
+	// outputs (the same shape), "path" or "path=source".
 	RepsFiles     []string
 	HostsConfig   string
 	SlotOverrides []SlotCapacity
@@ -211,20 +213,22 @@ func collectJobs(ctx context.Context, cfg CollectConfig, s *Snapshot) {
 	}
 }
 
+// hkRepsLimit is the most rows GET /v1/bench/reps returns in one call; the
+// endpoint has no cursor, so a full page means older reps were cut.
+const hkRepsLimit = 5000
+
 func collectReps(ctx context.Context, cfg CollectConfig, s *Snapshot) {
-	if cfg.RepsLocal && cfg.Run != nil {
-		out, err := cfg.Run(ctx, "pacelever", "reps", "list", "--json", "--limit", "100000")
+	if cfg.HKReps {
+		const src = "hk bench_reps"
+		rows, err := cfg.HK.ListBenchReps(ctx, hkRepsLimit)
 		if err != nil {
-			s.Notes = append(s.Notes, "pacelever reps list (local): "+err.Error())
+			s.Notes = append(s.Notes, src+": "+err.Error())
 		} else {
-			src := "pacelever reps list @" + cfg.LocalMachine
-			reps := ParseRepsList(out, src)
-			if reps == nil {
-				s.Notes = append(s.Notes, src+": output did not parse as pacelever reps list --json")
-			} else {
-				s.Reps = append(s.Reps, reps...)
-				s.RepSources = append(s.RepSources, src)
+			if len(rows) >= hkRepsLimit {
+				s.Notes = append(s.Notes, fmt.Sprintf("%s: %d rows returned, the endpoint maximum; older reps are missing", src, len(rows)))
 			}
+			s.Reps = append(s.Reps, repsFromBench(rows, src)...)
+			s.RepSources = append(s.RepSources, src)
 		}
 	}
 	for _, spec := range cfg.RepsFiles {
@@ -239,7 +243,7 @@ func collectReps(ctx context.Context, cfg CollectConfig, s *Snapshot) {
 		}
 		reps := ParseRepsList(b, src)
 		if reps == nil {
-			s.Notes = append(s.Notes, "reps file "+path+": did not parse as pacelever reps list --json")
+			s.Notes = append(s.Notes, "reps file "+path+": did not parse as a reps list (GET /v1/bench/reps shape)")
 		} else {
 			s.Reps = append(s.Reps, reps...)
 			s.RepSources = append(s.RepSources, src)
@@ -369,4 +373,19 @@ func isHex(s string) bool {
 		}
 	}
 	return true
+}
+
+// repsFromBench maps hk bench_reps rows to the reps fleet-metrics reads.
+func repsFromBench(rows []store.BenchRep, source string) []Rep {
+	text := func(p *string) string {
+		if p == nil {
+			return ""
+		}
+		return *p
+	}
+	out := make([]Rep, 0, len(rows))
+	for _, b := range rows {
+		out = append(out, Rep{ID: b.ID, Source: source, Profile: b.Profile, Task: text(b.TaskRef), Role: text(b.Role), Rounds: b.Rounds, BlockersFound: b.BlockersFound, Completed: b.Completed, RecordedAt: b.RecordedAt})
+	}
+	return out
 }
