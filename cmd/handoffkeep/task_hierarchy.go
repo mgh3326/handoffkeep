@@ -14,29 +14,6 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
-// taskArgsFirst moves flags in front of positionals so `tasks parent 7 --to 3`
-// and `tasks parent --to 3 7` parse the same. valueFlags name the flags that
-// take a separate value.
-func taskArgsFirst(args []string, valueFlags map[string]bool) ([]string, error) {
-	flags, positional := []string{}, []string{}
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		if !strings.HasPrefix(arg, "-") {
-			positional = append(positional, arg)
-			continue
-		}
-		flags = append(flags, arg)
-		if valueFlags[arg] {
-			i++
-			if i >= len(args) {
-				return nil, fmt.Errorf("%s requires a value", arg)
-			}
-			flags = append(flags, args[i])
-		}
-	}
-	return append(flags, positional...), nil
-}
-
 // taskParentCmd sets or clears a task's single parent.
 //
 //	tasks parent <id> --to <parent-id>
@@ -47,7 +24,7 @@ func taskParentCmd(args []string, out io.Writer) error {
 	c := remoteClient(fs)
 	to := fs.Int64("to", 0, "parent task id")
 	clear := fs.Bool("clear", false, "remove the task's parent")
-	ordered, err := taskArgsFirst(args, map[string]bool{"--url": true, "--token": true, "--to": true})
+	ordered, err := splitArgs(args, "to")
 	if err != nil {
 		return err
 	}
@@ -94,7 +71,7 @@ func taskRelationCmd(args []string, out io.Writer) error {
 	c := remoteClient(fs)
 	kind := fs.String("kind", "", "relation kind: "+strings.Join(store.RelationKinds(), ", "))
 	other := fs.Int64("other", 0, "task id at the other end of the relation")
-	ordered, err := taskArgsFirst(args[1:], map[string]bool{"--url": true, "--token": true, "--kind": true, "--other": true})
+	ordered, err := splitArgs(args[1:], "kind", "other")
 	if err != nil {
 		return err
 	}

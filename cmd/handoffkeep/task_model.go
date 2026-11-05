@@ -30,7 +30,7 @@ func taskModelCmd(args []string, out io.Writer) error {
 	parent := fs.Int64("parent", 0, "label group id")
 	group := fs.Bool("group", false, "label is a group")
 	level := fs.String("edit-level", "anyone", "label edit level")
-	ordered, err := taskArgsFirst(args[1:], map[string]bool{"--url": true, "--token": true, "--to": true, "--source": true, "--project": true, "--description": true, "--target": true, "--status": true, "--order": true, "--color": true, "--parent": true, "--edit-level": true})
+	ordered, err := splitArgs(args[1:], "to", "source", "project", "description", "target", "status", "order", "color", "parent", "edit-level")
 	if err != nil {
 		return err
 	}

@@ -21,34 +21,6 @@ const decisionAskUsage = "usage: decisions ask <task-id> --question <text> --opt
 
 const decisionResolveUsage = "usage: tasks decision-resolve <id> --request dr-<id>-<rev> --kind answered|default_applied|withdrawn [--option A] [--text <text>] [--receipt <ref>] [--responder <who>]"
 
-// splitSubcommandArgs lets flags and the positional id come in any order. A
-// value flag never takes a following flag as its value: "--reason --block"
-// is a missing value, not reason="--block" with --block silently dropped
-// (the request would be recorded without blocking). Text that starts with
-// "-" is passed in the explicit "--reason=-text" form, which stays one token.
-func splitSubcommandArgs(rest []string, valueFlags map[string]bool) ([]string, error) {
-	flags, positional := []string{}, []string{}
-	for i := 0; i < len(rest); i++ {
-		arg := rest[i]
-		if !strings.HasPrefix(arg, "-") {
-			positional = append(positional, arg)
-			continue
-		}
-		flags = append(flags, arg)
-		if valueFlags[arg] {
-			i++
-			if i >= len(rest) {
-				return nil, fmt.Errorf("%s requires a value", arg)
-			}
-			if strings.HasPrefix(rest[i], "-") {
-				return nil, fmt.Errorf("%s requires a value, got flag %q (write %s=%s for text that starts with -)", arg, rest[i], arg, rest[i])
-			}
-			flags = append(flags, rest[i])
-		}
-	}
-	return append(flags, positional...), nil
-}
-
 func parseSubcommandTaskID(fs *flag.FlagSet, usage string) (int64, error) {
 	if fs.NArg() != 1 {
 		return 0, errors.New(usage)
@@ -127,8 +99,7 @@ func decisionRequestFlags(name, usage string, args []string) (*remote.Client, in
 	block := fs.Bool("block", false, "also move the task to needs_decision")
 	noFreeAnswer := fs.Bool("no-free-answer", false, "disallow a free-form answer")
 	humanOnly := fs.Bool("human-only", false, "reserve the request for the human operator; the assistant path refuses it")
-	valueFlags := map[string]bool{"--url": true, "--token": true, "--question": true, "--option": true, "--ref": true, "--recommended": true, "--reason": true, "--default-action": true, "--default-option": true, "--default-trigger": true, "--due": true, "--doc": true, "--supersedes": true}
-	parseArgs, err := splitSubcommandArgs(args, valueFlags)
+	parseArgs, err := splitArgs(args, "question", "option", "ref", "recommended", "reason", "default-action", "default-option", "default-trigger", "due", "doc", "supersedes")
 	if err != nil {
 		return nil, 0, store.DecisionRequestInput{}, err
 	}
@@ -254,8 +225,7 @@ func decisionResolveCmd(args []string, out, errout io.Writer) error {
 	text := fs.String("text", "", "answer text, application note, or withdrawal reason")
 	receipt := fs.String("receipt", "", "evidence the default was applied (event id, PR, or document)")
 	responder := fs.String("responder", "", "who answered, when recording an answer given elsewhere")
-	valueFlags := map[string]bool{"--url": true, "--token": true, "--request": true, "--kind": true, "--option": true, "--text": true, "--receipt": true, "--responder": true}
-	parseArgs, err := splitSubcommandArgs(args[1:], valueFlags)
+	parseArgs, err := splitArgs(args[1:], "request", "kind", "option", "text", "receipt", "responder")
 	if err != nil {
 		return fmt.Errorf("decision resolution NOT recorded: %v", err)
 	}
