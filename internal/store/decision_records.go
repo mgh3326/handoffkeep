@@ -448,6 +448,10 @@ type DecisionRecordFilter struct {
 	Source         string
 	IncludeSnoozed bool
 	Limit          int
+	// unbounded drops the 1000-row cap and ignores Limit. Only package code
+	// sets it: the ledger must see every open request, while API callers keep
+	// the cap.
+	unbounded bool
 }
 
 // ListDecisionRecords returns rows oldest first (created_at, then id). now is
@@ -473,7 +477,7 @@ func listDecisionRecords(ctx context.Context, pq poolQuerier, f DecisionRecordFi
 	if f.Lane != "" && !validName(f.Lane) {
 		return nil, errors.New("invalid decision request lane")
 	}
-	if f.Limit < 1 || f.Limit > 1000 {
+	if !f.unbounded && (f.Limit < 1 || f.Limit > 1000) {
 		f.Limit = 1000
 	}
 	// Every branch references $1, so its type is always known.
@@ -499,8 +503,11 @@ func listDecisionRecords(ctx context.Context, pq poolQuerier, f DecisionRecordFi
 		args = append(args, f.Source)
 		q += fmt.Sprintf(` AND source=$%d`, len(args))
 	}
-	args = append(args, f.Limit)
-	q += fmt.Sprintf(` ORDER BY created_at ASC,id ASC LIMIT $%d`, len(args))
+	q += ` ORDER BY created_at ASC,id ASC`
+	if !f.unbounded {
+		args = append(args, f.Limit)
+		q += fmt.Sprintf(` LIMIT $%d`, len(args))
+	}
 	rows, err := pq.Query(ctx, q, args...)
 	if err != nil {
 		return nil, err
