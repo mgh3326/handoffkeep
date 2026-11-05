@@ -199,6 +199,28 @@ func TestAttentionLaneEventDualWriteCountedOnce(t *testing.T) {
 	}
 }
 
+// An expired request leaves the request list; its lane event must show again,
+// so the decision is on screen once, not on neither side.
+func TestAttentionLaneEventReturnsWhenItsRequestExpires(t *testing.T) {
+	s := attentionStore(t)
+	dual, _ := decisionRelay(t, s, RelayEvent{Kind: "lane.event", OwnerLane: "exp-lane", EventID: "exp-1", Text: "[decision-needed] still open?"})
+	expire := func(at time.Time) {
+		if _, err := s.pool.Exec(t.Context(), `UPDATE decision_requests SET expires_at=$1 WHERE source='lane_event' AND source_ref=$2`, at, fmt.Sprint(dual.ID)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	expire(attentionNow.Add(time.Hour))
+	got := attentionOf(t, s).Decisions
+	if got.Count != 1 || len(got.Items) != 1 || got.Items[0].Source != AttentionSourceRequest {
+		t.Fatalf("live request: count=%d items=%v, want the request", got.Count, decisionIDs(got.Items))
+	}
+	expire(attentionNow.Add(-time.Minute))
+	got = attentionOf(t, s).Decisions
+	if got.Count != 1 || len(got.Items) != 1 || got.Items[0].Source != AttentionSourceLaneEvent || got.Items[0].ID != dual.ID || got.Items[0].Question != "still open?" {
+		t.Fatalf("expired request: count=%d items=%v, want the lane event %d", got.Count, decisionIDs(got.Items), dual.ID)
+	}
+}
+
 func TestAttentionLaneEventWithoutRequestCounted(t *testing.T) {
 	s := attentionStore(t)
 	lone, _ := decisionRelay(t, s, RelayEvent{Kind: "lane.event", OwnerLane: "lone-lane", EventID: "lone-1", Text: "[decision-needed]   which db?"})

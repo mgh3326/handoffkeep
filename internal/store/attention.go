@@ -77,13 +77,15 @@ type AttentionTask struct {
 	Since  time.Time
 }
 
-// attentionLaneSQL is the lane-event decisions that count here: the inbox's
-// open [decision-needed] events, minus those whose own decision_requests row
-// is still open. Recording such an event also opens that row, so decision_requests
-// is the primary side and the event is skipped, snoozed or not: a snoozed
-// request must not come back through its event.
+// attentionLaneSQL is the lane-event decisions that count here, with the read
+// time as $1: the inbox's open [decision-needed] events, minus those whose own
+// decision_requests row is still live (open and not expired). Recording such an
+// event also opens that row, so decision_requests is the primary side and the
+// event is skipped while the row is live, snoozed or not: a snoozed request
+// must not come back through its event. Once the row expires it leaves the
+// request list, so the event shows again rather than neither of them.
 const attentionLaneSQL = `relay_events e WHERE ` + openLaneDecisionSQL + ` AND NOT EXISTS (
-		SELECT 1 FROM decision_requests d WHERE d.source='lane_event' AND d.source_ref=e.id::text AND d.status='open')`
+		SELECT 1 FROM decision_requests d WHERE d.source='lane_event' AND d.source_ref=e.id::text AND d.` + decisionLiveSQL + `)`
 
 // attentionStalledSQL is the stalled rule of ListTasks, read as "tasks", with
 // the stalled threshold as $1.
@@ -121,7 +123,7 @@ func attentionDecisionsTx(ctx context.Context, tx pgx.Tx, now time.Time) (Attent
 	if err != nil {
 		return out, err
 	}
-	laneItems, err := attentionLaneItems(ctx, tx)
+	laneItems, err := attentionLaneItems(ctx, tx, now)
 	if err != nil {
 		return out, err
 	}
@@ -179,9 +181,9 @@ func attentionRequestItems(ctx context.Context, tx pgx.Tx, now time.Time) ([]Att
 	return out, rows.Err()
 }
 
-func attentionLaneItems(ctx context.Context, tx pgx.Tx) ([]AttentionDecision, error) {
+func attentionLaneItems(ctx context.Context, tx pgx.Tx, now time.Time) ([]AttentionDecision, error) {
 	rows, err := tx.Query(ctx, `SELECT e.id,e.owner_lane,e.text,e.received_at FROM `+attentionLaneSQL+`
-		ORDER BY e.received_at ASC, e.id ASC LIMIT $1`, AttentionItems)
+		ORDER BY e.received_at ASC, e.id ASC LIMIT $2`, now, AttentionItems)
 	if err != nil {
 		return nil, err
 	}
