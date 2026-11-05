@@ -49,7 +49,10 @@ across all workflows; `internal/ciworkflow` enforces both.
   request lets a 500 carry its `request_id` and log the route.
 - A new store sentinel the client must tell apart: declare
   `ErrX = errors.New("x_code")` in the store and add one row to `errorRules`.
+  The wire code is the sentinel's text (a `x_not_found` sentinel may answer
+  the shared `not_found`); `TestErrorRuleCodesMatchSentinels` enforces it.
   Set `reason: true` only when the text after `"x_code: "` is store-authored.
+- Path ids are parsed with `pathID(r, "id")`; the handler checks the range.
 - Unmapped database/network failures become `500 internal_error` and are
   logged; plain validation errors become `400 invalid_context`. Do not add a
   catch-all that hides a 500 as a 400.
@@ -77,9 +80,22 @@ return tx.Commit(ctx)
 
 Not-found reads return `(T, found bool, error)`, or a `ErrXNotFound`
 sentinel when the caller is an API route. Check `pgx.ErrNoRows` with
-`errors.Is`. Wrap with `%w`, never `%v`. Go-side timestamps are
-`time.Now().UTC()`. Every `ORDER BY` that feeds a `LIMIT` ends in a unique
-column (usually `id`) so pages are deterministic.
+`errors.Is`, never by error text. Wrap with `%w`; `fmt.Errorf("%w: ...: %v",
+ErrX, err)` is the one exception, for when only the sentinel may be matched.
+Every `ORDER BY` that feeds a `LIMIT` ends in a unique column (usually `id`)
+so pages are deterministic. A jsonb column is scanned into `[]byte` and read
+with `scanJSONB` (SQL NULL and JSON null leave the target unset). Shared
+validators live in the store and are exported once (`ValidHostID`,
+`validText`); other packages call them instead of copying the regex.
+
+**Time.** Go-side timestamps are `time.Now().UTC()`, and an injectable clock
+(`Now func() time.Time`) returns `.UTC()` too. One table or worker uses one
+clock: either Go time passed in as a parameter, or the database's `now()`,
+never both.
+
+**Secret refusals.** `guard.Reject` returns a `*guard.SecretError`; branch on
+it with `guard.SecretPattern(err)` (or `remote.SecretPattern` for a server
+refusal), never on the `secret_like_content:` text.
 
 **Migrations** (`internal/store/migration.go`). The comment there lists which
 function owns each schema version. A new version:
@@ -99,10 +115,14 @@ order in `internal/store/lockorder.go`.
 
 **CLI.** Output is JSON via `printJSON` unless a command documents a text
 form behind `--json`. Errors go to stderr; exit codes other than 1 are named
-constants.
+constants. A subcommand that takes positionals and flags in any order runs
+its args through `splitArgs(args, "value-flag", ...)` (`args.go`) before
+`fs.Parse`.
 
 **Logging.** `log.Printf` with one `event key=value ...` line
-(e.g. `api.internal_error err="..."`).
+(e.g. `api.internal_error err="..."`). The event name is a literal, not built
+at run time; a failure event ends in `_failed`; ids use the column name
+(`task_id=`, not `task=`); free-form values are `%q`.
 
 ## Tests (Go)
 
@@ -125,8 +145,14 @@ constants.
 - Board/task API calls and their types live in `src/shared/boardApi.ts` and
   `src/shared/boardTypes.ts`; an app's own endpoint types go in its `types.ts`.
 - Polling uses `usePoll(load, ms)` from `src/shared/usePoll.ts` with a stable
-  `load`; no `setInterval` loops.
-- Colors and spacing come from `src/design/tokens.css` (`var(--hk-*)`).
+  `load`; no `setInterval` loops and no hand-written `setTimeout` loops.
+- localStorage goes through `readStored` / `writeStored` in
+  `src/shared/storage.ts`; console-wide keys are in `STORAGE_KEYS`.
+- Every entry calls `bootTheme()` before its first render.
+- Task states come from `src/shared/states.ts` (`STATE_GROUP_ORDER`,
+  `stateLabel`); dates are formatted with `src/shared/time.ts`.
+- Colors, spacing, type sizes, radii and fixed widths come from
+  `src/design/tokens.css` (`var(--hk-*)`) whenever a token has the value.
 - `npm run typecheck` must pass. After any change under `src`, run
   `npm run build` and commit `internal/ui/static/console` with it; CI fails on
   a stale bundle. Tests run with `TZ=Asia/Seoul` (set in `vitest.config.ts`).
