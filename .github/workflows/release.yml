@@ -3,13 +3,16 @@ name: release
 # amd64/arm64) stamped with the tag, plus SHA256SUMS, and publishes them to the
 # tag's GitHub Release with GITHUB_TOKEN. The test tag v0.0.0 (exactly) runs
 # the same build and checks on the tag but is never published.
-# Pull requests and manual runs build and verify the
-# same assets for the dry-run tag v0.0.0 without publishing. Hosts pull
-# published assets themselves; this workflow never reaches a host.
+# Manual runs without publish build and verify the same assets for the
+# dry-run tag v0.0.0. Pull requests do not run this workflow: ci.yml's
+# post-linux job already exercises scripts/test-build-release.sh after merge.
+# Publication does not rerun the test suite (T-DEPLOY in hk:doc
+# decision/2026-11-05/fleet-ci-three-tiers): ci-green waits for ci.yml's
+# ci-ok on the tagged commit. Hosts pull published assets themselves; this
+# workflow never reaches a host.
 on:
   push:
     tags: ["v*"]
-  pull_request:
   workflow_dispatch:
     inputs:
       publish:
@@ -99,53 +102,52 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  test:
+  ci-green:
+    # Publish only a commit whose main CI passed. ci.yml reports a ci-ok
+    # check run on main pushes; ci-any-ref reports a ci-ok commit status. The
+    # tag is cut right after the merge, so this waits for main CI to finish.
+    # A commit whose main run was superseded by a newer main push has no
+    # verdict: it is not published, and the next tag carries its change.
     if: (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish)) && github.ref_type == 'tag' && github.ref_name != 'v0.0.0'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
-    services:
-      postgres:
-        image: postgres:17
-        env:
-          POSTGRES_USER: handoffkeep
-          POSTGRES_PASSWORD: handoffkeep
-          POSTGRES_DB: handoffkeep
-        ports: ["5432:5432"]
-        options: >-
-          --health-cmd "pg_isready -U handoffkeep" --health-interval 10s --health-timeout 5s --health-retries 5
+    timeout-minutes: 50
+    permissions:
+      contents: read
+      checks: read
+      statuses: read
+    outputs:
+      green: ${{ steps.wait.outputs.green }}
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-        with:
-          ref: ${{ github.sha }}
-          fetch-depth: 0
-          persist-credentials: false
-      - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
-        with:
-          go-version-file: go.mod
-      # Full Go tests rebuild and mutate the console bundle. Match ci.yml's
-      # pinned toolchain and locked dependencies before invoking that suite.
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with: {node-version-file: web/console/.nvmrc, cache: npm, cache-dependency-path: web/console/package-lock.json}
-      - run: npm ci
-        working-directory: web/console
-      - run: npm run build
-        working-directory: web/console
-      - run: git diff --exit-code -- internal/ui/static/console
-      - run: test -z "$(git status --porcelain --untracked-files=all -- internal/ui/static/console)"
-      - name: Vet, test, and exercise release helper
+      - id: wait
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          test -z "$(gofmt -l .)"
-          go vet ./...
-          go mod tidy -diff
-          go test -race -timeout 30m ./...
-          bash scripts/test-build-release.sh
-        env:
-          HANDOFFKEEP_TEST_DB_URL: postgres://handoffkeep:handoffkeep@localhost:5432/handoffkeep?sslmode=disable
+          deadline=$(( $(date +%s) + 45*60 ))
+          while :; do
+            run=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/check-runs?check_name=ci-ok&filter=latest" -q '[.check_runs[] | {status, conclusion}] | first // {} | "\(.status // "none") \(.conclusion // "")"')
+            status=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/statuses" -q '[.[] | select(.context == "ci-ok")] | first | .state // "none"')
+            read -r rs rc <<<"$run"
+            echo "ci-ok check: $rs $rc; ci-ok status: $status"
+            if [ "$rc" = success ] || [ "$status" = success ]; then
+              echo "green=true" >> "$GITHUB_OUTPUT"; exit 0
+            fi
+            if [ "$rc" = failure ] || [ "$rc" = timed_out ] || [ "$status" = failure ]; then
+              echo "main CI failed on $GITHUB_SHA; not publishing" >&2; exit 1
+            fi
+            if [ "$rs" = completed ] && [ "$status" = none ]; then
+              echo "::notice::main CI on $GITHUB_SHA ended $rc (superseded); not publishing, the next tag carries this change"
+              echo "green=false" >> "$GITHUB_OUTPUT"; exit 0
+            fi
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "no ci-ok verdict on $GITHUB_SHA within 45 minutes" >&2; exit 1
+            fi
+            sleep 30
+          done
 
   publish:
-    needs: [build, test]
-    if: (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish)) && github.ref_type == 'tag' && github.ref_name != 'v0.0.0'
+    needs: [build, ci-green]
+    if: (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish)) && github.ref_type == 'tag' && github.ref_name != 'v0.0.0' && needs.ci-green.outputs.green == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
