@@ -82,3 +82,18 @@ func (s Server) decisionSources(w http.ResponseWriter, r *http.Request) {
 	}
 	jsonOut(w, http.StatusOK, out)
 }
+
+// decisionDeliveryHygiene serves GET /v1/decisions/deliveries/hygiene: the
+// decision_deliveries rows per destination that are pending, lagging, unsent
+// or failed.
+func (s Server) decisionDeliveryHygiene(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.auth(w, r); !ok {
+		return
+	}
+	out, err := s.Service.Store.DecisionDeliveryHygiene(r.Context(), time.Now().UTC())
+	if err != nil {
+		appErr(w, r, err)
+		return
+	}
+	jsonOut(w, http.StatusOK, out)
+}

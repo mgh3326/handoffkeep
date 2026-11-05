@@ -54,6 +54,28 @@ func TestDecisionsListCLI(t *testing.T) {
 	}
 }
 
+func TestDecisionsHygieneCLI(t *testing.T) {
+	h, calls := decisionCLIServer(t, `{"destinations":{"discord":{"pending":4,"lagging":1,"unsent":2,"failed":3}}}`)
+	var out bytes.Buffer
+	if err := run([]string{"decisions", "hygiene", "--url", h.URL, "--token", "tok"}, &out, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	var printed store.DecisionDeliveryHygiene
+	if err := json.Unmarshal(out.Bytes(), &printed); err != nil ||
+		printed.Destinations[store.DecisionDestinationDiscord] != (store.DecisionDeliveryCounts{Pending: 4, Lagging: 1, Unsent: 2, Failed: 3}) {
+		t.Fatalf("out=%s err=%v", out.String(), err)
+	}
+	if c := (*calls)[0]; c.Method != "GET" || c.Path != "/v1/decisions/deliveries/hygiene" || c.Query != "" {
+		t.Fatalf("call=%+v", c)
+	}
+	if err := run([]string{"decisions", "hygiene", "extra", "--url", h.URL, "--token", "tok"}, io.Discard, io.Discard); err == nil || !strings.Contains(err.Error(), "usage: decisions hygiene") {
+		t.Fatalf("positional arg err=%v", err)
+	}
+	if err := run([]string{"decisions"}, io.Discard, io.Discard); err == nil || !strings.Contains(err.Error(), "usage: decisions hygiene") {
+		t.Fatalf("decisions usage err=%v", err)
+	}
+}
+
 func TestDecisionsSnoozeCLI(t *testing.T) {
 	h, calls := decisionCLIServer(t, `{"id":3,"status":"open","snoozed":true}`)
 	var out bytes.Buffer

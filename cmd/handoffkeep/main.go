@@ -728,10 +728,12 @@ func decisionsCmd(args []string, out io.Writer) error {
 			return decisionSnoozeCmd(args[1:], out)
 		case "backfill":
 			return decisionBackfillCmd(args[1:], out)
+		case "hygiene":
+			return decisionHygieneCmd(args[1:], out)
 		}
 	}
 	if len(args) == 0 || args[0] != "resolve" {
-		return errors.New("usage: decisions resolve <task|escalation|lane> <id> --by <lane> --answer <answer> [--note <note>] [--no-inject]\n       " + decisionAskUsage + "\n       " + decisionListUsage + "\n       " + decisionSnoozeUsage + "\n       " + decisionBackfillUsage)
+		return errors.New("usage: decisions resolve <task|escalation|lane> <id> --by <lane> --answer <answer> [--note <note>] [--no-inject]\n       " + decisionAskUsage + "\n       " + decisionListUsage + "\n       " + decisionSnoozeUsage + "\n       " + decisionBackfillUsage + "\n       " + decisionHygieneUsage)
 	}
 	fs := flag.NewFlagSet("decisions resolve", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -2078,9 +2080,10 @@ func discordDecisionsFromEnv() *api.DiscordWebhook {
 }
 
 // decisionNotifierFromEnv always runs the decision request messages: without
-// the webhook, what falls due settles unsent. HANDOFFKEEP_CONSOLE_URL is
-// optional, but a value that is not an https URL stops the server, so a typo
-// cannot silently drop every link.
+// the webhook, what falls due settles unsent. HANDOFFKEEP_CONSOLE_URL and
+// HANDOFFKEEP_DISCORD_OPERATOR_USER_ID are optional, but an invalid value of
+// either stops the server, so a typo cannot silently drop every link or
+// mention.
 func decisionNotifierFromEnv(st *store.Store) (backgroundWorker, error) {
 	console := ""
 	if raw := strings.TrimSpace(os.Getenv("HANDOFFKEEP_CONSOLE_URL")); raw != "" {
@@ -2090,7 +2093,15 @@ func decisionNotifierFromEnv(st *store.Store) (backgroundWorker, error) {
 		}
 		console = parsed
 	}
-	return api.DecisionNotifier{Store: st, Discord: discordDecisionsFromEnv(), ConsoleURL: console}, nil
+	operator := ""
+	if raw := strings.TrimSpace(os.Getenv("HANDOFFKEEP_DISCORD_OPERATOR_USER_ID")); raw != "" {
+		parsed, err := api.ParseDiscordOperatorUserID(raw)
+		if err != nil {
+			return nil, err
+		}
+		operator = parsed
+	}
+	return api.DecisionNotifier{Store: st, Discord: discordDecisionsFromEnv(), ConsoleURL: console, OperatorUserID: operator}, nil
 }
 
 // notificationForwarderFromEnv is opt-in, separately from the hub settings the
