@@ -3,18 +3,16 @@ package api
 import (
 	"log"
 	"os"
-	"regexp"
 	"strings"
 	"sync"
+
+	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
 // hostGrantPrefix starts an auth-file line that lists the host ids a client
 // may act for: HANDOFFKEEP_HOSTS_<CLIENT>=<id>[,<id>], the same shape as
 // HANDOFFKEEP_QUOTA_<CLIENT>.
 const hostGrantPrefix = "HANDOFFKEEP_HOSTS_"
-
-// hostIDRE is the fleet host id alphabet: the node's HUB_MACHINE_ID.
-var hostIDRE = regexp.MustCompile(`^[a-z0-9-]{1,32}$`)
 
 // HostGrants maps an authenticated client id to the host ids it may act for.
 // A client absent from the map has no HANDOFFKEEP_HOSTS_ line. Every route
@@ -94,7 +92,7 @@ func parseHostList(v string) ([]string, bool) {
 	var hosts []string
 	for _, host := range strings.Split(v, ",") {
 		host = strings.TrimSpace(host)
-		if !hostIDRE.MatchString(host) {
+		if !store.ValidHostID(host) {
 			return nil, false
 		}
 		hosts = append(hosts, host)

@@ -2,7 +2,6 @@ package store
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
@@ -38,7 +37,7 @@ func (s *Store) ReadTaskWorkBoards(ctx context.Context, tasks []Task) (map[int64
 			return nil, err
 		}
 		var board LinearBoard
-		if err := json.Unmarshal(raw, &board); err != nil {
+		if _, err := scanJSONB(raw, &board); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("read work board %d: %w", id, err)
 		}

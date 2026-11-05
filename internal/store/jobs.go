@@ -30,8 +30,12 @@ var (
 // mergewake's mwr-<pr>-<sha7>-p<n>-<unix> both fit it.
 var jobIDRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
-// jobHostRE is the fleet host id alphabet: the node's HUB_MACHINE_ID.
-var jobHostRE = regexp.MustCompile(`^[a-z0-9-]{1,32}$`)
+// hostIDRE is the fleet host id alphabet: the node's HUB_MACHINE_ID.
+var hostIDRE = regexp.MustCompile(`^[a-z0-9-]{1,32}$`)
+
+// ValidHostID reports whether host is a fleet host id. Every package that
+// accepts a host or machine id checks it here.
+func ValidHostID(host string) bool { return hostIDRE.MatchString(host) }
 
 var jobStates = map[string]bool{
 	"claimed": true, "spawned": true, "completed": true, "escalated": true, "lost": true,
@@ -52,7 +56,7 @@ var jobRemoteNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`)
 func ValidJobID(id string) bool { return jobIDRE.MatchString(id) }
 
 // ValidJobHost reports whether host is a legal fleet host id.
-func ValidJobHost(host string) bool { return jobHostRE.MatchString(host) }
+func ValidJobHost(host string) bool { return ValidHostID(host) }
 
 // Job is the cross-host job record. Only allowlisted metadata is stored —
 // never brief text, command lines, pane output or absolute local paths.
@@ -147,14 +151,7 @@ func (u JobUpdate) usageOnly() bool {
 
 func validJobField(s string) bool { return len(s) <= jobFieldMax && !stringContainsNUL(s) }
 
-func stringContainsNUL(s string) bool {
-	for _, r := range s {
-		if r == 0 {
-			return true
-		}
-	}
-	return false
-}
+func stringContainsNUL(s string) bool { return strings.ContainsRune(s, 0) }
 
 // checkJobField scans one stored free-text field like a text attachment:
 // secret-shaped content (a credential in a remote, a token pasted into a
@@ -345,11 +342,11 @@ func scanJob(row pgx.Row) (Job, error) {
 		}
 		j.Usage = &usage
 	}
-	if worktree != nil {
-		j.Worktree = &JobWorktree{}
-		if err = json.Unmarshal(worktree, j.Worktree); err != nil {
-			return j, err
-		}
+	var wt JobWorktree
+	if ok, err := scanJSONB(worktree, &wt); err != nil {
+		return j, err
+	} else if ok {
+		j.Worktree = &wt
 	}
 	j.Result = result
 	return j, nil

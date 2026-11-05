@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/mgh3326/handoffkeep/internal/attachments"
+	"github.com/mgh3326/handoffkeep/internal/guard"
 	"github.com/mgh3326/handoffkeep/internal/store"
 	"github.com/mgh3326/handoffkeep/internal/wrkrecords"
 )
@@ -753,8 +754,11 @@ func (s Server) auth(w http.ResponseWriter, r *http.Request) (string, bool) {
 	}
 	return id, ok
 }
-func taskID(r *http.Request) (int64, error) {
-	return strconv.ParseInt(r.PathValue("id"), 10, 64)
+
+// pathID parses the int64 path value named key. It is the one id parser for
+// routes; callers decide what range is valid.
+func pathID(r *http.Request, key string) (int64, error) {
+	return strconv.ParseInt(r.PathValue(key), 10, 64)
 }
 
 func (s Server) tasksCreate(w http.ResponseWriter, r *http.Request) {
@@ -901,7 +905,7 @@ func (s Server) task(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.auth(w, r); !ok {
 		return
 	}
-	id, err := taskID(r)
+	id, err := pathID(r, "id")
 	if err != nil || id < 1 {
 		writeError(w, http.StatusBadRequest, "invalid_context")
 		return
@@ -976,7 +980,7 @@ func (s Server) taskProject(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	id, err := taskID(r)
+	id, err := pathID(r, "id")
 	if err != nil || id < 1 {
 		writeError(w, http.StatusBadRequest, "invalid_context")
 		return
@@ -1021,7 +1025,7 @@ func (s Server) taskArea(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	id, err := taskID(r)
+	id, err := pathID(r, "id")
 	if err != nil || id < 1 {
 		writeError(w, http.StatusBadRequest, "invalid_context")
 		return
@@ -1064,7 +1068,7 @@ func (s Server) taskClaim(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.auth(w, r); !ok {
 		return
 	}
-	id, err := taskID(r)
+	id, err := pathID(r, "id")
 	if err != nil || id < 1 {
 		writeError(w, http.StatusBadRequest, "invalid_context")
 		return
@@ -1094,7 +1098,7 @@ func (s Server) taskRebind(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.auth(w, r); !ok {
 		return
 	}
-	id, err := taskID(r)
+	id, err := pathID(r, "id")
 	if err != nil || id < 1 {
 		writeError(w, http.StatusBadRequest, "invalid_context")
 		return
@@ -1160,7 +1164,7 @@ func (s Server) taskTransition(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	id, err := taskID(r)
+	id, err := pathID(r, "id")
 	if err != nil || id < 1 {
 		writeError(w, http.StatusBadRequest, "invalid_context")
 		return
@@ -1186,7 +1190,7 @@ func (s Server) taskParent(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	id, err := taskID(r)
+	id, err := pathID(r, "id")
 	if err != nil || id < 1 {
 		writeError(w, http.StatusBadRequest, "invalid_context")
 		return
@@ -1231,7 +1235,7 @@ func (s Server) taskRelationWrite(w http.ResponseWriter, r *http.Request, add bo
 	if !ok {
 		return
 	}
-	id, err := taskID(r)
+	id, err := pathID(r, "id")
 	if err != nil || id < 1 {
 		writeError(w, http.StatusBadRequest, "invalid_context")
 		return
@@ -1272,7 +1276,7 @@ func (s Server) taskDecisionRequest(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	id, err := taskID(r)
+	id, err := pathID(r, "id")
 	if err != nil || id < 1 {
 		writeError(w, http.StatusBadRequest, "invalid_context")
 		return
@@ -1302,7 +1306,7 @@ func (s Server) taskDecisionResolve(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	id, err := taskID(r)
+	id, err := pathID(r, "id")
 	if err != nil || id < 1 {
 		writeError(w, http.StatusBadRequest, "invalid_context")
 		return
@@ -1362,7 +1366,7 @@ func relaneErrorCode(err error) string {
 	case errors.Is(err, store.ErrTaskConflict):
 		return "task_conflict"
 	}
-	if strings.HasPrefix(err.Error(), "secret_like_content") {
+	if _, ok := guard.SecretPattern(err); ok {
 		return "secret_like_content"
 	}
 	if strings.HasPrefix(err.Error(), "invalid task relane") {
@@ -1468,7 +1472,7 @@ func (s Server) dispositionApply(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	id, err := pathID(r, "id")
 	if err != nil || id < 1 {
 		writeError(w, http.StatusBadRequest, "invalid id")
 		return
@@ -1507,10 +1511,6 @@ func (s Server) decisionResolve(w http.ResponseWriter, r *http.Request) {
 	jsonOut(w, http.StatusOK, map[string]any{"event": event})
 }
 
-func relayEventID(r *http.Request) (int64, error) {
-	return strconv.ParseInt(r.PathValue("id"), 10, 64)
-}
-
 func (s Server) relayEventsCreate(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.auth(w, r); !ok {
 		return
@@ -1542,7 +1542,7 @@ func (s Server) relayEventDelivered(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.auth(w, r); !ok {
 		return
 	}
-	id, err := relayEventID(r)
+	id, err := pathID(r, "id")
 	if err != nil || id < 1 {
 		writeError(w, http.StatusBadRequest, "invalid_context")
 		return
@@ -2321,7 +2321,7 @@ func (s Server) taskReopen(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	id, err := taskID(r)
+	id, err := pathID(r, "id")
 	if err != nil || id < 1 {
 		writeError(w, http.StatusBadRequest, "invalid_context")
 		return

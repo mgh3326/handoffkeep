@@ -49,17 +49,14 @@ func (s Server) taskCommentCreate(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	id, err := taskID(r)
+	id, err := pathID(r, "id")
 	if err != nil || id < 1 {
 		writeError(w, http.StatusBadRequest, "invalid_context")
 		return
 	}
 	defer r.Body.Close()
-	r.Body = http.MaxBytesReader(w, r.Body, taskCommentRequestMax)
 	var input taskCommentInput
-	de := json.NewDecoder(r.Body)
-	de.DisallowUnknownFields()
-	if err := de.Decode(&input); err != nil {
+	if err := decodeLimited(r.Body, &input, taskCommentRequestMax); err != nil {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
 			taskCommentErr(w, r, store.ErrTaskCommentTooLong)
@@ -84,7 +81,7 @@ func (s Server) taskCommentsList(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.auth(w, r); !ok {
 		return
 	}
-	id, err := taskID(r)
+	id, err := pathID(r, "id")
 	if err != nil || id < 1 {
 		writeError(w, http.StatusBadRequest, "invalid_context")
 		return

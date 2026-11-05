@@ -113,21 +113,28 @@ func scanDecisionRecord(row pgx.Row, x *DecisionRecord, now time.Time) error {
 		return err
 	}
 	x.Options = nil
-	if len(options) > 0 && string(options) != "null" {
-		var o DecisionOptions
-		if err := json.Unmarshal(options, &o); err != nil {
-			return err
-		}
+	var o DecisionOptions
+	if ok, err := scanJSONB(options, &o); err != nil {
+		return err
+	} else if ok {
 		x.Options = &o
 	}
-	if x.Status == DecisionStatusOpen {
-		if x.ExpiresAt != nil && !now.Before(*x.ExpiresAt) {
-			x.Status = DecisionStatusExpired
-		}
-		x.Overdue = x.DueAt != nil && !now.Before(*x.DueAt)
-		x.Snoozed = x.SnoozedUntil != nil && now.Before(*x.SnoozedUntil)
-	}
+	x.deriveStatus(now)
 	return nil
+}
+
+// deriveStatus sets the read-time fields of an open record against now:
+// expired once expires_at has passed, overdue past due_at, snoozed before
+// snoozed_until. Every reader of decision_requests derives them here.
+func (x *DecisionRecord) deriveStatus(now time.Time) {
+	if x.Status != DecisionStatusOpen {
+		return
+	}
+	if x.ExpiresAt != nil && !now.Before(*x.ExpiresAt) {
+		x.Status = DecisionStatusExpired
+	}
+	x.Overdue = x.DueAt != nil && !now.Before(*x.DueAt)
+	x.Snoozed = x.SnoozedUntil != nil && now.Before(*x.SnoozedUntil)
 }
 
 // decisionOpen is a new open row.

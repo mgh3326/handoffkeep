@@ -18,7 +18,8 @@ import {
   type LiveJob,
   type LiveResponse,
 } from "../live";
-import { StateIcon, stateLabel } from "../shared/StateIcon";
+import { StateIcon } from "../shared/StateIcon";
+import { stateLabel } from "../shared/states";
 import { fetchDashboard } from "./api";
 import { usePoll } from "../shared/usePoll";
 import type { DashboardAccount, DashboardBucket, DashboardMissing, DashboardRepo, DashboardResponse, DashboardTask } from "./types";

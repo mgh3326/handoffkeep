@@ -7,7 +7,6 @@ import (
 	"io"
 	"mime"
 	"net/http"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -17,8 +16,6 @@ import (
 )
 
 const glanceBodyLimit = 256 * 1024
-
-var acceptingMachineRE = regexp.MustCompile(`^[a-z0-9-]{1,32}$`)
 
 var glanceStates = append(store.TaskStates(), store.AwaitingDecisionKey)
 
@@ -290,7 +287,7 @@ func (h *Handler) setAccepting(w http.ResponseWriter, r *http.Request, identity 
 		return
 	}
 	machine, matched = strings.CutSuffix(machine, "/accepting")
-	if !matched || !acceptingMachineRE.MatchString(machine) {
+	if !matched || !store.ValidHostID(machine) {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}

@@ -8,36 +8,10 @@ import (
 	"io"
 	"log"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
-
-// splitTaskArgs moves value flags ahead of positional arguments so a task id
-// may come first, as in the other task subcommands. valueFlags names flags in
-// their "--name" form; the flag package also takes "-name", so both spellings
-// keep their value.
-func splitTaskArgs(args []string, valueFlags map[string]bool) ([]string, error) {
-	flags, positional := []string{}, []string{}
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		if !strings.HasPrefix(arg, "-") {
-			positional = append(positional, arg)
-			continue
-		}
-		flags = append(flags, arg)
-		name := "--" + strings.TrimPrefix(strings.TrimPrefix(arg, "-"), "-")
-		if valueFlags[name] && !strings.Contains(arg, "=") {
-			i++
-			if i >= len(args) {
-				return nil, fmt.Errorf("%s requires a value", arg)
-			}
-			flags = append(flags, args[i])
-		}
-	}
-	return append(flags, positional...), nil
-}
 
 // taskEventCmd posts one mergewake event by hand (tasks event). The mergewake
 // sender is separate work; this command is how the endpoint is exercised.
@@ -51,8 +25,7 @@ func taskEventCmd(args []string, out io.Writer) error {
 	revertedPR := fs.String("reverted-pr", "", "the PR a revert undoes (required for mergewake.revert)")
 	revertPR := fs.String("revert-pr", "", "the revert PR URL (defaults to --source-ref)")
 	at := fs.String("at", "", "when the event happened, RFC 3339 (defaults to now)")
-	valueFlags := map[string]bool{"--url": true, "--token": true, "--source": true, "--source-ref": true, "--pr": true, "--reverted-pr": true, "--revert-pr": true, "--at": true}
-	ordered, err := splitTaskArgs(args, valueFlags)
+	ordered, err := splitArgs(args, "source", "source-ref", "pr", "reverted-pr", "revert-pr", "at")
 	if err != nil {
 		return err
 	}

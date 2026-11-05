@@ -152,10 +152,11 @@ func scanStatusUpdate(row pgx.Row, x *StatusUpdate) error {
 		return err
 	}
 	x.CreatedAt = x.CreatedAt.UTC()
-	if err := json.Unmarshal(snapshot, &x.Snapshot); err != nil {
+	if _, err := scanJSONB(snapshot, &x.Snapshot); err != nil {
 		return err
 	}
-	return json.Unmarshal(diff, &x.Diff)
+	_, err := scanJSONB(diff, &x.Diff)
+	return err
 }
 
 // CreateStatusUpdate records project's health at now. The project must exist

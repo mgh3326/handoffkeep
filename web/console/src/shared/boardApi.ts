@@ -8,7 +8,7 @@ import type {
   BoardTask,
   BoardTasksResponse,
 } from "./boardTypes";
-import type { LiveResponse } from "../live";
+import { isLiveResponse, type LiveResponse } from "../live";
 import { getJSON } from "./http";
 
 export { HttpError } from "./http";
@@ -86,18 +86,8 @@ export async function fetchTaskDetail(id: number): Promise<BoardDetail> {
 /** The live jobs/machine aggregation (#598). Read-only; section statuses
  * inside the payload carry hub failures explicitly. */
 export async function fetchLive(): Promise<LiveResponse> {
-  const data = await getJSON<LiveResponse>("/ui/api/live");
-  if (
-    !data ||
-    !data.jobs ||
-    !data.nodes ||
-    !Array.isArray(data.jobs.items) ||
-    !Array.isArray(data.nodes.items) ||
-    !Array.isArray(data.links) ||
-    typeof data.jobs.status !== "string" ||
-    typeof data.nodes.status !== "string"
-  )
-    throw new Error("malformed live response");
+  const data = await getJSON<unknown>("/ui/api/live");
+  if (!isLiveResponse(data)) throw new Error("malformed live response");
   return data;
 }
 
