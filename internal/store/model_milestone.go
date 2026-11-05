@@ -103,7 +103,7 @@ func (s *Store) SetTaskMilestone(ctx context.Context, id int64, milestone *int64
 	if err = scanTask(tx.QueryRow(ctx, `UPDATE tasks SET milestone_id=$2,updated_at=$3 WHERE id=$1 RETURNING `+taskColumns, id, milestone, now), &x); err != nil {
 		return Task{}, false, err
 	}
-	if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: id, Kind: "metadata", From: x.State, To: x.State, By: by, Refs: x.Refs, At: now, Field: "milestone_id", FromValue: from, ToValue: to}); err != nil {
+	if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: id, Kind: "metadata", From: x.State, To: x.State, By: by, Refs: x.Refs, Into: &x, At: now, Field: "milestone_id", FromValue: from, ToValue: to}); err != nil {
 		return Task{}, false, err
 	}
 	return x, true, tx.Commit(ctx)

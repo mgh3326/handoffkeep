@@ -159,7 +159,7 @@ func TestListTasksProjectFilter(t *testing.T) {
 	}
 	// A legacy row predating the field: inserted directly, no project.
 	var legacy int64
-	if err = pool.QueryRow(ctx, `INSERT INTO tasks(lane,title,kind,state,created_by,created_at,updated_at) VALUES($1,'legacy','implement','backlog','proj-test',now(),now()) RETURNING id`, lane).Scan(&legacy); err != nil {
+	if err = pool.QueryRow(ctx, `INSERT INTO tasks(lane,title,kind,state,created_by,created_at,updated_at,last_activity_at) VALUES($1,'legacy','implement','backlog','proj-test',now(),now(),now()) RETURNING id`, lane).Scan(&legacy); err != nil {
 		t.Fatal(err)
 	}
 	all, err := s.ListTasks(ctx, lane, "", "", nil, nil, 10)
@@ -256,7 +256,7 @@ func TestTaskProjectMigrationIsAdditive(t *testing.T) {
 		}
 	}
 	var legacy int64
-	if err := pool.QueryRow(ctx, `INSERT INTO tasks(lane,title,kind,state,created_by,created_at,updated_at) VALUES($1,'pre-v15','implement','backlog','proj-test',now(),now()) RETURNING id`, lane).Scan(&legacy); err != nil {
+	if err := pool.QueryRow(ctx, `INSERT INTO tasks(lane,title,kind,state,created_by,created_at,updated_at,last_activity_at) VALUES($1,'pre-v15','implement','backlog','proj-test',now(),now(),now()) RETURNING id`, lane).Scan(&legacy); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.migrate(ctx); err != nil {

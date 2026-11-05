@@ -151,8 +151,13 @@ func TestDecisionRecordDispositionOperatorOnly(t *testing.T) {
 	}
 	onlyDecision(t, decisionRowsWhere(t, s, `task_id=$1`, item.ID), DecisionStatusOpen)
 
-	if _, err := s.AnswerDisposition(ctx, DispositionAnswerInput{ID: item.ID, Gen: gen, Key: "E", OperatorEmail: "admin@example.com", EventID: "decision-disposition"}); err != nil {
+	answered, err := s.AnswerDisposition(ctx, DispositionAnswerInput{ID: item.ID, Gen: gen, Key: "E", OperatorEmail: "admin@example.com", EventID: "decision-disposition"})
+	if err != nil {
 		t.Fatal(err)
+	}
+	stored := stateOf(t, s, item.ID)
+	if !answered.LastActivityAt.After(item.LastActivityAt) || !answered.LastActivityAt.Equal(stored.LastActivityAt) {
+		t.Fatalf("disposition activity before=%v returned=%v stored=%v", item.LastActivityAt, answered.LastActivityAt, stored.LastActivityAt)
 	}
 	row = onlyDecision(t, decisionRowsWhere(t, s, `task_id=$1`, item.ID), DecisionStatusAnswered)
 	if row.AnsweredBy != "operator:admin@example.com" || !strings.Contains(row.Answer, "disposition-answer E") {

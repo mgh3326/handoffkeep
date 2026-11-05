@@ -36,11 +36,15 @@ var (
 // taskEventInput is one task_events row. Kind defaults to transition and
 // Applied to true; NotApplied records an event with no effect.
 type taskEventInput struct {
-	TaskID     int64
-	Kind       string
-	From, To   string
-	By, Note   string
-	Refs       TaskRefs
+	TaskID   int64
+	Kind     string
+	From, To string
+	By, Note string
+	Refs     TaskRefs
+	Rebind   *TaskJobRebind
+	// Into, when set, receives the moved activity clock so the Task a caller
+	// returns agrees with the row.
+	Into       *Task
 	At         time.Time
 	NoJob      string
 	Source     string
@@ -57,13 +61,16 @@ type rowQuerier interface {
 }
 
 // insertEvent appends a task event. A row with a source and source_ref that
-// already exists changes nothing (inserted=false): a redelivered event is a
-// no-op.
-func insertEvent(ctx context.Context, q rowQuerier, e taskEventInput) (id int64, inserted bool, err error) {
+// already exists changes nothing; a redelivered event is a no-op. The
+// returned boolean reports whether the activity clock moved.
+func insertEvent(ctx context.Context, q rowQuerier, e taskEventInput) (id int64, moved bool, err error) {
 	if e.Kind == "" {
 		e.Kind = TaskEventTransition
 	}
-	encoded, err := json.Marshal(e.Refs)
+	encoded, err := json.Marshal(struct {
+		TaskRefs
+		JobRebind *TaskJobRebind `json:"job_rebind,omitempty"`
+	}{e.Refs, e.Rebind})
 	if err != nil {
 		return 0, false, err
 	}
@@ -73,6 +80,17 @@ func insertEvent(ctx context.Context, q rowQuerier, e taskEventInput) (id int64,
 		e.TaskID, e.From, e.To, e.By, e.Note, string(encoded), e.At, e.Kind, e.NoJob, e.Source, e.SourceRef, e.Field, e.FromValue, e.ToValue, e.Auto, !e.NotApplied).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, false, nil
+	}
+	if err != nil || !isActivityEvent(e.Auto, e.Source) {
+		return id, false, err
+	}
+	var taskID int64
+	err = q.QueryRow(ctx, `UPDATE tasks SET last_activity_at = GREATEST(last_activity_at, $2) WHERE id = $1 AND last_activity_at < $2 RETURNING id`, e.TaskID, e.At).Scan(&taskID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return id, false, nil
+	}
+	if err == nil && e.Into != nil {
+		e.Into.LastActivityAt = e.At.UTC().Truncate(time.Microsecond)
 	}
 	return id, err == nil, err
 }
@@ -238,8 +256,10 @@ func (s *Store) claimTaskTx(ctx context.Context, tx pgx.Tx, id int64, by, jobID,
 	if err != nil {
 		return Task{}, err
 	}
-	if _, _, err := insertEvent(ctx, tx, taskEventInput{TaskID: id, From: from, To: to, By: by, Refs: x.Refs, At: now, NoJob: noJob}); err != nil {
+	if _, moved, err := insertEvent(ctx, tx, taskEventInput{TaskID: id, From: from, To: to, By: by, Refs: x.Refs, At: now, NoJob: noJob}); err != nil {
 		return Task{}, err
+	} else if moved {
+		x.LastActivityAt = now.Truncate(time.Microsecond)
 	}
 	if s.LinearSyncEnabled() && x.Refs.Linear != nil && x.Refs.Linear.Sync {
 		if err := enqueueLinearTaskTransition(ctx, tx, x, ""); err != nil {
@@ -714,15 +734,21 @@ func (s *Store) transitionTask(ctx context.Context, id int64, in TransitionInput
 		if unpark {
 			to = StateBacklog
 		}
-		if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: id, From: from, To: to, By: by, Note: note, Refs: x.Refs, At: now, NoJob: recordedNoJob}); err != nil {
+		if _, moved, err := insertEvent(ctx, tx, taskEventInput{TaskID: id, From: from, To: to, By: by, Note: note, Refs: x.Refs, At: now, NoJob: recordedNoJob}); err != nil {
 			return Task{}, err
+		} else if moved {
+			x.LastActivityAt = now.Truncate(time.Microsecond)
 		}
 	}
 	var flagEvent int64
 	if x.AwaitingDecision != flagWas {
 		ev := taskEventInput{TaskID: id, Kind: TaskEventAwaiting, From: x.State, To: x.State, By: by, Note: note, Refs: x.Refs, At: now, Field: "awaiting_decision", FromValue: fmt.Sprint(flagWas), ToValue: fmt.Sprint(x.AwaitingDecision)}
-		if flagEvent, _, err = insertEvent(ctx, tx, ev); err != nil {
+		var moved bool
+		if flagEvent, moved, err = insertEvent(ctx, tx, ev); err != nil {
 			return Task{}, err
+		}
+		if moved {
+			x.LastActivityAt = now.Truncate(time.Microsecond)
 		}
 	}
 	if err = mirrorTaskDecisionsTx(ctx, tx, decisionBefore, x, by, note, flagEvent, now); err != nil {

@@ -32,6 +32,11 @@ proposed answer for every item except Q11, where the alternative stands.
 
 ## State model
 
+**Two clocks.** `updated_at` is the search sync clock and moves on every write.
+`last_activity_at` moves only on task events with `auto=false` or
+`source=panewire.job`. Version 44 backfilled it from those events, with
+`created_at` as the floor.
+
 `tasks.state` holds one of twelve leaf states. The category is derived from the
 leaf by a fixed table and is never stored, so a category and sub-state cannot
 disagree. API rows add a read-only `category` field.
@@ -81,7 +86,7 @@ does not belong on the same axis (Q2). S1 adds `tasks.awaiting_decision`:
 | `deployed`, `completed`, `dropped`, `duplicate` | `unstarted` (reopen) |
 | `icebox` | `backlog` (revive), `unstarted` (reopen) |
 
-**Closure.** Each new settled transition records a type and evidence in `refs.closure`. `merged`, `deployed` and `completed` accept `resolved`; `dropped` accepts `cancelled`, `obsolete` or `superseded`; `duplicate` accepts `superseded`. Evidence must be 1–1024 bytes after trimming and contain no secrets. Completed requires an HTTP(S) result link or `hk:doc` reference. A closure absent on rows closed before v44 means unknown. Reopening clears it from the task while its event retains the snapshot.
+**Closure.** Each new settled transition records a type and evidence in `refs.closure`. `merged`, `deployed` and `completed` accept `resolved`; `dropped` accepts `cancelled`, `obsolete` or `superseded`; `duplicate` accepts `superseded`. Evidence must be 1–1024 bytes after trimming and contain no secrets. Completed requires an HTTP(S) result link or `hk:doc` reference. A closure absent on rows closed before v45 means unknown. Reopening clears it from the task while its event retains the snapshot.
 
 There is no edge from `triage` to `started`. Moving into `started` still needs
 `claimed_by` plus `refs.job_id` or a recorded no-job reason, as `claimed` and
