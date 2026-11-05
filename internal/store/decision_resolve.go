@@ -327,7 +327,17 @@ func (s *Store) ResolveDecision(ctx context.Context, in ResolveDecisionInput) (R
 		provenance: provenance, actor: in.Actor, at: now, option: in.Option, text: in.Text,
 	}
 	if prov != nil {
+		// The attempt keeps the quote whatever the result, so it is checked
+		// here, before any attempt row (append-only) can be written.
 		attempt.quote = prov.recordedQuote()
+		if attempt.quote != "" {
+			if !validText(attempt.quote, DecisionOperatorQuoteMaxBytes) || !utf8.ValidString(attempt.quote) {
+				return ResolveDecisionOutcome{}, invalidDecisionRequest(fmt.Sprintf("operator_quote must be at most %d bytes of valid text", DecisionOperatorQuoteMaxBytes))
+			}
+			if err := guard.Reject(attempt.quote); err != nil {
+				return ResolveDecisionOutcome{}, err
+			}
+		}
 	}
 	if parsed {
 		attempt.revision = revision

@@ -261,3 +261,24 @@ func TestDecisionSessionMigration(t *testing.T) {
 		t.Fatal("unknown channel accepted")
 	}
 }
+
+// A quote kept on an attempt is checked even when the request is no longer
+// open: a superseded answer must not store a secret-like quote in the
+// append-only attempts table.
+func TestResolveDecisionSessionStaleQuoteChecked(t *testing.T) {
+	s, _ := searchTestStore(t)
+	ctx := context.Background()
+	task := assistantTask(t, s, "in_progress")
+	first := assistantRecord(t, s, task.ID)
+	next := decisionInput()
+	next.Question = "다시 묻는다"
+	next.Supersedes = first.ID
+	assistantRecordWith(t, s, task.ID, next)
+	in := sessionAnswer(first, "AKIA"+"ABCDEFGHIJKLMNOP")
+	if _, err := s.ResolveDecision(ctx, in); err == nil {
+		t.Fatal("secret-like quote on a stale request accepted")
+	}
+	if got := attemptsOf(t, s.pool, task.ID); len(got) != 0 {
+		t.Fatalf("attempts=%+v", got)
+	}
+}
