@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -185,7 +186,7 @@ func (n DecisionNotifier) sendNotice(ctx context.Context, x store.DecisionNotice
 	text := decisionNoticeText(x, n.ConsoleURL, now)
 	if x.Post() {
 		id, err := n.Discord.PostMessage(ctx, text)
-		return id, decisionNoticeError(err)
+		return id, decisionPostError(err)
 	}
 	return "", decisionNoticeError(n.Discord.EditMessage(ctx, x.MessageID, text))
 }
@@ -205,6 +206,27 @@ func decisionNoticeError(err error) error {
 		return fmt.Errorf("%w: %w", store.ErrDecisionNoticeRejected, err)
 	}
 	return err
+}
+
+// decisionPostError retries a first post only when Discord certainly did not
+// create the message: it answered with a status (5xx or 429), or the
+// connection was never made. A post whose request may have reached Discord
+// without an answer coming back (timeout, reset, unreadable 2xx body) is not
+// retried, since a retry could leave two messages for one request; the row
+// settles as failed and the daily digest still lists the request.
+func decisionPostError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var status discordStatusError
+	var op *net.OpError
+	switch {
+	case errors.As(err, &status), errors.Is(err, errDiscordNoMessageID):
+		return decisionNoticeError(err)
+	case errors.As(err, &op) && op.Op == "dial":
+		return err
+	}
+	return fmt.Errorf("%w: post outcome unknown, not retried: %w", store.ErrDecisionNoticeRejected, err)
 }
 
 const (

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -406,7 +408,7 @@ func TestDecisionDigestOncePerUTCDay(t *testing.T) {
 	// Two days ahead, so every row below is in the past.
 	day := time.Now().UTC().Truncate(24 * time.Hour).Add(48 * time.Hour)
 	at := day.Add(time.Hour)
-	ages := map[string]time.Duration{"Q-20261105-91": 30 * time.Hour, "Q-20261105-92": 72 * time.Hour, "Q-20261105-93": 48 * time.Hour, "Q-20261105-94": 23 * time.Hour, "Q-20261105-95": 96 * time.Hour}
+	ages := map[string]time.Duration{"Q-20261105-91": 30 * time.Hour, "Q-20261105-92": 72 * time.Hour, "Q-20261105-93": 48 * time.Hour, "Q-20261105-94": 23 * time.Hour, "Q-20261105-95": 96 * time.Hour, "Q-20261105-96": 24 * time.Hour}
 	ids := map[string]int64{}
 	for ref, age := range ages {
 		x := chatDecision(t, st, ref, "question "+ref)
@@ -445,7 +447,8 @@ func TestDecisionDigestOncePerUTCDay(t *testing.T) {
 		}
 		last = i
 	}
-	for _, ref := range []string{"Q-20261105-94", "Q-20261105-95"} {
+	// Q-20261105-96 is exactly 24 hours old: not yet open longer than that.
+	for _, ref := range []string{"Q-20261105-94", "Q-20261105-95", "Q-20261105-96"} {
 		if strings.Contains(text, fmt.Sprintf("#%d ·", ids[ref])) {
 			t.Errorf("%s listed:\n%s", ref, text)
 		}
@@ -464,7 +467,7 @@ func TestDecisionDigestOncePerUTCDay(t *testing.T) {
 	}
 	n.Now = clockAt(day.Add(25 * time.Hour))
 	n.Drain(t.Context())
-	if got := digests(); len(got) != 1 || !strings.Contains(got[0].Content, day.Add(24*time.Hour).Format(time.DateOnly)+" (UTC) · 4") {
+	if got := digests(); len(got) != 1 || !strings.Contains(got[0].Content, day.Add(24*time.Hour).Format(time.DateOnly)+" (UTC) · 5") {
 		t.Fatalf("next day: %+v", got)
 	}
 }
@@ -587,5 +590,69 @@ func TestParseConsoleURL(t *testing.T) {
 		} else if strings.Contains(err.Error(), "console.example") {
 			t.Errorf("%q: error quotes the value: %v", raw, err)
 		}
+	}
+}
+
+// A first post is retried only when Discord certainly did not create the
+// message; an outcome the client never heard back is settled, not re-posted.
+func TestDecisionPostErrorRetriesOnlyWhenNothingWasCreated(t *testing.T) {
+	dial := fmt.Errorf("discord webhook: %w", &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection refused")})
+	reset := fmt.Errorf("discord webhook: %w", &net.OpError{Op: "read", Net: "tcp", Err: errors.New("connection reset by peer")})
+	for _, tc := range []struct {
+		name  string
+		err   error
+		retry bool
+	}{
+		{"429", discordStatusError{http.StatusTooManyRequests}, true},
+		{"500", discordStatusError{http.StatusInternalServerError}, true},
+		{"dial refused", dial, true},
+		{"404", discordStatusError{http.StatusNotFound}, false},
+		{"no message id", errDiscordNoMessageID, false},
+		{"read reset", reset, false},
+		{"timeout", fmt.Errorf("discord webhook: %w", context.DeadlineExceeded), false},
+		{"EOF", fmt.Errorf("discord webhook: %w", io.EOF), false},
+		{"unreadable 2xx", errors.New("discord webhook response could not be read"), false},
+	} {
+		got := decisionPostError(tc.err)
+		if rejected := errors.Is(got, store.ErrDecisionNoticeRejected); rejected == tc.retry {
+			t.Errorf("%s: rejected=%v, want retry=%v (%v)", tc.name, rejected, tc.retry, got)
+		}
+	}
+	if decisionPostError(nil) != nil {
+		t.Error("nil must stay nil")
+	}
+}
+
+// Discord reads the post and drops the connection without answering: the
+// row settles as failed and a later drain does not post again.
+func TestDecisionNotifierDoesNotRepostAfterALostAnswer(t *testing.T) {
+	st, _ := notifyStoreFixture(t)
+	var mu sync.Mutex
+	posts := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		mu.Lock()
+		posts++
+		mu.Unlock()
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err == nil {
+			_ = conn.Close()
+		}
+	}))
+	t.Cleanup(srv.Close)
+	x := chatDecision(t, st, "Q-20261105-81", "lost answer")
+	start := time.Now().UTC()
+	n := DecisionNotifier{Store: st, Discord: &DiscordWebhook{URL: srv.URL + "/api/webhooks/1/" + fakeDiscordSecret, HTTP: srv.Client()}, Now: clockAt(start.Add(2 * time.Minute))}
+	n.Drain(t.Context())
+	state := noticeOf(t, st, x.ID)
+	if state.LastStatus != "failed" || state.MessageID != "" {
+		t.Fatalf("after a lost answer: %+v", state)
+	}
+	n.Now = clockAt(start.Add(3 * time.Hour))
+	n.Drain(t.Context())
+	mu.Lock()
+	defer mu.Unlock()
+	if posts != 1 {
+		t.Fatalf("posts=%d, want 1", posts)
 	}
 }

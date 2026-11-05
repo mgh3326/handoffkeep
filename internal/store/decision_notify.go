@@ -244,7 +244,7 @@ func (s *Store) ProcessDecisionDigest(ctx context.Context, now time.Time, send f
 	}
 	digest := DecisionDigest{Day: day}
 	const stale = `d.status='open' AND (d.expires_at IS NULL OR d.expires_at>$1::timestamptz)
-		AND (d.snoozed_until IS NULL OR d.snoozed_until<=$1::timestamptz) AND d.created_at<=$2::timestamptz`
+		AND (d.snoozed_until IS NULL OR d.snoozed_until<=$1::timestamptz) AND d.created_at<$2::timestamptz`
 	cutoff := now.Add(-DecisionDigestAge)
 	if err = tx.QueryRow(ctx, `SELECT count(*) FROM decision_requests d WHERE `+stale, now, cutoff).Scan(&digest.Total); err != nil {
 		return false, nil, err
