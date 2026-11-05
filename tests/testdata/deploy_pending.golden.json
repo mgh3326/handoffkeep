@@ -1,0 +1,93 @@
+{
+  "generated_at": "\u003cclock\u003e",
+  "pr_source": "refs.pr",
+  "services": [
+    {
+      "current": {
+        "deployed_at": "2026-09-20T01:00:00Z",
+        "deployed_ref": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "failed_step": null,
+        "record_key": "deploy/handoffkeep/20260920T010000Z",
+        "recorded_at": "\u003cclock\u003e",
+        "result": "success",
+        "source": "backfill"
+      },
+      "doc_url": "/ui/doc/deploy/handoffkeep/",
+      "invalid": [
+        {
+          "key": "deploy/handoffkeep/20260924T000000Z",
+          "reasons": [
+            "schema"
+          ]
+        }
+      ],
+      "invalid_count": 1,
+      "latest": {
+        "deployed_at": "2026-09-23T02:00:00Z",
+        "deployed_ref": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "failed_step": 7,
+        "record_key": "deploy/handoffkeep/20260923T020000Z",
+        "recorded_at": "\u003cclock\u003e",
+        "result": "failed",
+        "serving_maybe_changed": true,
+        "source": "backfill"
+      },
+      "merged_boundary": "deployed_at",
+      "merged_since": [
+        {
+          "merged_at": "2026-09-22T01:00:00Z",
+          "pr": "https://github.com/mgh3326/handoffkeep/pull/12",
+          "task_id": 3,
+          "title": "newer after the deploy"
+        },
+        {
+          "merged_at": "2026-09-20T02:00:00Z",
+          "pr": "https://github.com/mgh3326/handoffkeep/pull/11",
+          "task_id": 2,
+          "title": "after the deploy"
+        }
+      ],
+      "record_count": 3,
+      "repo": "mgh3326/handoffkeep",
+      "service": "handoffkeep",
+      "target": "ncp"
+    },
+    {
+      "current": {
+        "deployed_at": null,
+        "deployed_ref": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "failed_step": null,
+        "record_key": "deploy/auto_trader/20260920T010000Z",
+        "recorded_at": "\u003cclock\u003e",
+        "result": "success",
+        "source": "backfill"
+      },
+      "doc_url": "/ui/doc/deploy/auto_trader/",
+      "merged_boundary": "unrecorded",
+      "merged_since": [],
+      "record_count": 1,
+      "repo": "mgh3326/auto_trader",
+      "service": "auto_trader",
+      "target": "ncp"
+    },
+    {
+      "current": null,
+      "doc_url": "/ui/doc/deploy/panewire-hub/",
+      "latest": {
+        "deployed_at": "2026-09-23T04:00:00Z",
+        "deployed_ref": null,
+        "failed_step": null,
+        "record_key": "deploy/panewire-hub/20260923T040000Z",
+        "recorded_at": "\u003cclock\u003e",
+        "result": "failed",
+        "source": "backfill"
+      },
+      "merged_boundary": "no_current",
+      "merged_since": [],
+      "record_count": 1,
+      "repo": "mgh3326/panewire",
+      "service": "panewire-hub",
+      "target": "ncp"
+    }
+  ]
+}
