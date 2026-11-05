@@ -48,5 +48,5 @@ func (h *Handler) benchCatalog(w http.ResponseWriter, r *http.Request) {
 // mount point: all data reaches the browser through GET /ui/api/bench/catalog
 // and the page carries no CSRF token because it has no write form.
 func (h *Handler) grades(w http.ResponseWriter, r *http.Request) {
-	h.render(w, "grades_page", nil)
+	h.shell(w)
 }

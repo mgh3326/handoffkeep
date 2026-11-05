@@ -756,7 +756,7 @@ func TestUIP4QueueOperatorView(t *testing.T) {
 			t.Fatalf("board mount page rendered task data %q", title)
 		}
 	}
-	if !strings.Contains(body, `id="board-root"`) {
+	if !strings.Contains(body, `id="shell-root"`) {
 		t.Fatalf("queue page did not mount the board: %q", body)
 	}
 	before := uiRowCounts(t)

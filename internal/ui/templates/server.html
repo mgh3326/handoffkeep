@@ -1,12 +1,11 @@
 {{define "page"}}
 <!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{{.Title}} · handoffkeep</title>
-<link rel="stylesheet" href="{{assetURL "/ui/static/console/tokens.css"}}"><link rel="stylesheet" href="{{assetURL "/ui/static/console/AppShell.css"}}">
+<link rel="stylesheet" href="{{assetURL "/ui/static/console/tokens.css"}}"><link rel="stylesheet" href="{{assetURL "/ui/static/console/shell.css"}}"><link rel="stylesheet" href="{{assetURL "/ui/static/console/server.css"}}">
 <script src="{{assetURL "/ui/static/htmx.min.js"}}"></script></head><body>
 <div id="server-root" data-page="{{.Page}}"></div><div id="server-content" class="hk-server-content">
 {{if eq .Page "timeline"}}{{template "timeline_content" .Body}}{{end}}
 {{if eq .Page "decisions"}}{{template "decisions_content" .Body}}{{end}}
 {{if eq .Page "compose"}}{{template "compose_content" .Body}}{{end}}
-{{if eq .Page "document"}}{{template "document_content" .Body}}{{end}}
 </div><script type="module" src="{{assetURL "/ui/static/console/server.js"}}"></script></body></html>{{end}}
 {{define "timeline_content"}}
 <section id="ui-content" data-ui-fragment="timeline">
@@ -151,10 +150,6 @@
 <script>
   (function () { const form = document.querySelector('[data-compose]'); if (!form || !window.TextEncoder) return; const input = form.querySelector('[data-compose-text]'); const count = form.querySelector('[data-compose-count]'); const update = function () { const bytes = new TextEncoder().encode('[event] ' + input.value + ' (from operator(web) ' + form.dataset.operatorEmail + ')').length; count.textContent = bytes + '/2048 bytes'; input.setCustomValidity(bytes > 2048 ? 'Message is too long.' : ''); }; input.addEventListener('input', update); update(); }());
 </script>
-{{end}}
-
-{{define "document_content"}}
-<section id="ui-content"><h2>{{.Key}}</h2><pre>{{.Body}}</pre></section>
 {{end}}
 
 {{define "fleet_content"}}
