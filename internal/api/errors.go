@@ -116,6 +116,10 @@ var errorRules = []errorRule{
 	{store.ErrStatusUpdateInvalid, http.StatusBadRequest, "invalid_status_update", true},
 	{store.ErrChangeNotFound, http.StatusNotFound, "not_found", false},
 	{store.ErrChangeDependencyCycle, http.StatusConflict, "change_dependency_cycle", false},
+	{store.ErrServiceNotFound, http.StatusNotFound, "not_found", false},
+	{store.ErrDeployNotFound, http.StatusNotFound, "not_found", false},
+	{store.ErrDeployAttemptConflict, http.StatusConflict, "deploy_attempt_conflict", false},
+	{store.ErrDeployAttemptFinished, http.StatusConflict, "deploy_attempt_finished", false},
 }
 
 // appErr writes the response for an error returned by the store or a

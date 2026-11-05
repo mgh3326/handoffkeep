@@ -59,6 +59,11 @@ package store
 //     own level-2 lock, after the document row). decision_requests rows that name a
 //     task or a job are updated only under the level-2 lock, several at a
 //     time in id order (decision_records.go); the table has no foreign key.
+//     FinishDeploy with state success takes the level-2 lock first, then its
+//     deploys row (FOR UPDATE; no task writer locks a deploys row), then the
+//     merged task rows linked to the attempt's changes in ascending id
+//     (deployedTasksTx), then their rows through applySourceEventTx. A
+//     failed or rolled_back finish locks only its deploys row.
 //
 //  6. At commit: the deferred sync allocator (handoffkeep_sync_allocate)
 //     takes pg_advisory_xact_lock(824180067) and then the sync_state row,
@@ -98,6 +103,15 @@ package store
 //     with an event writer's upsert, and the event writers never take the
 //     merge-flow lock, so neither side waits on the other while it holds
 //     what the other needs.
+//   - StartDeploy locks no task row. It inserts its deploys row (a new
+//     attempt_id key), takes KEY SHARE on the services row and on existing
+//     changes rows through the foreign keys (an event writer's upsert takes
+//     FOR NO KEY UPDATE, which does not conflict), reads existing changes
+//     without a lock and inserts only missing changes keys, in (repo,
+//     pr_number) order. Two starts therefore wait on new keys in one order.
+//     A revert event inserting the same two new keys in the other order is
+//     the one cycle left; Postgres aborts one side (40P01) and a start is
+//     safe to retry with the same attempt_id.
 //   - Other advisory locks (disposition origin, task comment insert, labels,
 //     Linear board ownership, quota presence) are each the first lock of
 //     their transaction, and no transaction requests one while it holds a
