@@ -241,7 +241,12 @@ type Props = {
  * never an empty board. */
 export function DeployPanel({ fetchStatus = fetchDeployPending, pollMs = 15_000 }: Props) {
   const { data, failed, at } = useDeployPending(fetchStatus, pollMs);
-  useEffect(() => { if (data) document.title = `Deploys · ${data.services.reduce((sum, svc) => sum + svc.merged_since.length, 0)} waiting`; }, [data]);
+  useEffect(() => {
+    if (!data) return;
+    const previousTitle = document.title;
+    document.title = `Deploys · ${data.services.reduce((sum, svc) => sum + svc.merged_since.length, 0)} waiting`;
+    return () => { document.title = previousTitle; };
+  }, [data]);
   const checked = at === null ? null : new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Seoul", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" }).format(at);
 
   if (data === null) {

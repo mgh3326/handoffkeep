@@ -35,7 +35,7 @@ it("D5 keeps data on failure and clears stale on recovery", async () => {
  await act(async () => { await vi.advanceTimersByTimeAsync(15000); }); expect(screen.queryByText(/갱신 실패/)).toBeNull();
 });
 it("D6 sets the waiting title and rejects malformed history", async () => {
- const {unmount} = render(<DeploysPage fetchStatus={async () => fixture()} />); await screen.findByText("Task 1-0"); expect(document.title).toBe("Deploys · 3 waiting"); unmount();
+ document.title = "Console"; const {unmount} = render(<DeploysPage fetchStatus={async () => fixture()} />); await screen.findByText("Task 1-0"); expect(document.title).toBe("Deploys · 3 waiting"); unmount(); expect(document.title).toBe("Console");
  const malformed = fixture(); Object.assign(malformed.services[0], {recent: "bad"}); render(<DeploysPage fetchStatus={async () => malformed} />); expect(await screen.findByText(/불러오지 못했습니다/)).toBeTruthy(); expect(screen.queryByLabelText("a 배포")).toBeNull();
 });
 it("D7 preserves the advisory and warning content", async () => {
