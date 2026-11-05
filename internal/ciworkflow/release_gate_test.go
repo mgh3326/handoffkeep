@@ -13,9 +13,9 @@ import (
 )
 
 // release.yml ci-green decides publication from ci.yml's ci-ok (hk 3023).
-// The latest check run's verdict wins; a ci-any-ref status counts only when
-// the check run has none, so a stale success status never hides a failed
-// main run (review on #151). Runs the step's own script with a fake gh.
+// The latest check run's verdict wins; a ci-any-ref status counts only once
+// main CI is known to be superseded, so a stale success status never hides a
+// failed or not-yet-started main run (reviews on #151). Runs the step's own script with a fake gh.
 func TestReleaseCIGreenVerdicts(t *testing.T) {
 	body, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", "release.yml"))
 	if err != nil {
@@ -35,29 +35,34 @@ func TestReleaseCIGreenVerdicts(t *testing.T) {
 	}
 	script := strings.Replace(job.Steps[0].Run, "sleep 30", "exit 7 # pending: the test stops instead of waiting", 1)
 	for _, tc := range []struct {
-		name, check, status string
-		code                int
-		green               string
+		name, check, status, main string
+		code                      int
+		green                     string
 	}{
-		{"failed check beats stale success status", "completed failure", "success", 1, ""},
-		{"timed out check beats success status", "completed timed_out", "success", 1, ""},
-		{"check success publishes", "completed success", "none", 0, "true"},
-		{"superseded check, any-ref success publishes", "completed cancelled", "success", 0, "true"},
-		{"superseded check, any-ref failure blocks", "completed skipped", "error", 1, ""},
-		{"superseded check, no status skips publication", "completed cancelled", "none", 0, "false"},
-		{"no check run, any-ref success publishes", "none ", "success", 0, "true"},
-		{"no check run, any-ref failure blocks", "none ", "failure", 1, ""},
-		{"running check waits even with success status", "in_progress ", "success", 7, ""},
+		{"failed check beats stale success status", "completed failure", "success", "", 1, ""},
+		{"timed out check beats success status", "completed timed_out", "success", "", 1, ""},
+		{"check success publishes", "completed success", "none", "", 0, "true"},
+		{"superseded check, any-ref success publishes", "completed cancelled", "success", "", 0, "true"},
+		{"superseded check, any-ref failure blocks", "completed skipped", "error", "", 1, ""},
+		{"superseded check, no status skips publication", "completed cancelled", "none", "", 0, "false"},
+		{"no check run yet, main run queued: stale success waits", "none ", "success", "queued ", 7, ""},
+		{"no check run yet, no main run: stale success waits", "none ", "success", "none ", 7, ""},
+		{"no check run yet, main in progress: any-ref failure waits", "none ", "failure", "in_progress ", 7, ""},
+		{"main run cancelled before ci-ok, any-ref success publishes", "none ", "success", "completed cancelled", 0, "true"},
+		{"main run cancelled before ci-ok, any-ref failure blocks", "none ", "failure", "completed cancelled", 1, ""},
+		{"main run cancelled before ci-ok, no status skips publication", "none ", "none", "completed cancelled", 0, "false"},
+		{"main run failed without ci-ok blocks despite success status", "none ", "success", "completed startup_failure", 1, ""},
+		{"running check waits even with success status", "in_progress ", "success", "", 7, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
-			gh := "#!/bin/sh\ncase \"$*\" in *check-runs*) printf '%s\\n' \"$FAKE_CHECK\" ;; *statuses*) printf '%s\\n' \"$FAKE_STATUS\" ;; esac\n"
+			gh := "#!/bin/sh\ncase \"$*\" in *check-runs*) printf '%s\\n' \"$FAKE_CHECK\" ;; *statuses*) printf '%s\\n' \"$FAKE_STATUS\" ;; *workflows/ci.yml/runs*) printf '%s\\n' \"$FAKE_MAIN\" ;; esac\n"
 			if err := os.WriteFile(filepath.Join(dir, "gh"), []byte(gh), 0o755); err != nil {
 				t.Fatal(err)
 			}
 			out := filepath.Join(dir, "out")
 			cmd := exec.Command("bash", "-c", script)
-			cmd.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"), "GITHUB_OUTPUT="+out, "GITHUB_SHA=abc", "GITHUB_REPOSITORY=o/r", "FAKE_CHECK="+tc.check, "FAKE_STATUS="+tc.status)
+			cmd.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"), "GITHUB_OUTPUT="+out, "GITHUB_SHA=abc", "GITHUB_REPOSITORY=o/r", "FAKE_CHECK="+tc.check, "FAKE_STATUS="+tc.status, "FAKE_MAIN="+tc.main)
 			logs, err := cmd.CombinedOutput()
 			code := 0
 			if ee, ok := err.(*exec.ExitError); ok {

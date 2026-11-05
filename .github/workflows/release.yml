@@ -115,6 +115,7 @@ jobs:
       contents: read
       checks: read
       statuses: read
+      actions: read
     outputs:
       green: ${{ steps.wait.outputs.green }}
     steps:
@@ -133,23 +134,38 @@ jobs:
             echo "ci-ok check: $rs $rc; ci-ok status: $status"
             # The main push's latest ci-ok check run decides when it has a
             # verdict: a failure blocks even if an older any-ref status says
-            # success. A ci-any-ref status counts only when the check run has
-            # no verdict (none yet, or skipped/cancelled because a newer main
-            # push superseded it).
+            # success.
             case "$rc" in
               failure|timed_out|action_required|startup_failure)
                 echo "main CI ci-ok on $GITHUB_SHA ended $rc; not publishing" >&2; exit 1 ;;
               success)
                 echo "green=true" >> "$GITHUB_OUTPUT"; exit 0 ;;
             esac
-            if [ "$rs" = none ] || [ "$rs" = completed ]; then
+            # A ci-any-ref status counts only once main CI is known to have
+            # been superseded: its ci-ok ended without a verdict (skipped or
+            # cancelled), or its ci.yml push run was cancelled before ci-ok
+            # existed. A missing check run alone is not that evidence: the
+            # main run may not have created it yet (review on #151).
+            superseded=no
+            if [ "$rs" = completed ]; then
+              superseded=yes
+            elif [ "$rs" = none ]; then
+              main=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&event=push&branch=main&per_page=1" -q '.workflow_runs | first // {} | "\(.status // "none") \(.conclusion // "")"')
+              read -r ms mc <<<"$main"
+              echo "ci.yml main push run: $ms $mc"
+              if [ "$ms" = completed ]; then
+                case "$mc" in
+                  cancelled|skipped) superseded=yes ;;
+                  *) echo "main CI on $GITHUB_SHA ended $mc without a ci-ok check; not publishing" >&2; exit 1 ;;
+                esac
+              fi
+            fi
+            if [ "$superseded" = yes ]; then
               case "$status" in
                 success) echo "green=true" >> "$GITHUB_OUTPUT"; exit 0 ;;
                 failure|error) echo "ci-any-ref ci-ok status on $GITHUB_SHA is $status; not publishing" >&2; exit 1 ;;
               esac
-            fi
-            if [ "$rs" = completed ]; then
-              echo "::notice::main CI on $GITHUB_SHA ended $rc (superseded) and no ci-any-ref verdict; not publishing, the next tag carries this change"
+              echo "::notice::main CI on $GITHUB_SHA was superseded and has no ci-any-ref verdict; not publishing, the next tag carries this change"
               echo "green=false" >> "$GITHUB_OUTPUT"; exit 0
             fi
             if [ "$(date +%s)" -ge "$deadline" ]; then
