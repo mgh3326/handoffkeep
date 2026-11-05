@@ -1,1 +1,0 @@
-import{c as t,j as o}from"./shared-client.js";import{b as e,P as m}from"./shared-AppShell.js";import{D as s}from"./shared-dashboard.js";import"./shared-usePoll.js";import"./shared-boardApi.js";import"./shared-states.js";e();const r=document.getElementById("dashboard-root");r&&t(r).render(o.jsx(m,{current:"home",children:o.jsx(s,{})}));

@@ -952,14 +952,5 @@ func (h *Handler) document(w http.ResponseWriter, r *http.Request, key string) {
 		http.Error(w, "invalid document key", http.StatusBadRequest)
 		return
 	}
-	document, found, err := h.store.GetDocument(r.Context(), key)
-	if err != nil {
-		http.Error(w, "fleet console unavailable", http.StatusInternalServerError)
-		return
-	}
-	if !found {
-		http.NotFound(w, r)
-		return
-	}
-	h.render(w, "page", pageData{Title: "Document", Page: "document", Body: document})
+	h.shell(w)
 }

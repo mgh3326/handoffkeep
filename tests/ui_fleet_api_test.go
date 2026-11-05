@@ -402,7 +402,7 @@ func TestFleetAPICSPHeader(t *testing.T) {
 	if apiCSP != ui.ConsoleCSP || pageCSP != ui.ConsoleCSP {
 		t.Fatalf("csp api=%q page=%q", apiCSP, pageCSP)
 	}
-	if !strings.Contains(pageBody, `id="fleet-root"`) || !strings.Contains(pageBody, `/ui/static/console/fleet.js`) {
+	if !strings.Contains(pageBody, `id="shell-root"`) || !strings.Contains(pageBody, `/ui/static/console/shell.js`) {
 		t.Fatalf("fleet page mount missing: %q", pageBody)
 	}
 	timeline := uiRequest(t, server.Client(), http.MethodGet, server.URL+"/ui/timeline", assertion, "")

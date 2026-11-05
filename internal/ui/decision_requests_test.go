@@ -9,10 +9,10 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
-// The queue computes its badge and count in the browser from list refs; the
-// Decisions page and glance compute theirs here. Both sides read this one
-// fixture (web/console/src/queue-proto/decision.test.tsx is the other half),
-// so the two implementations of the split cannot drift apart silently.
+// The Decisions page and glance compute the decision badge and count here.
+// The fixture is shared with the browser-side implementation of the same
+// split (it lived in the queue until hk 3140; C3, hk 3063, brings it back), so
+// the two implementations cannot drift apart silently.
 func TestDecisionMarksFixtureMatchesServerCounts(t *testing.T) {
 	raw, err := os.ReadFile("testdata/decision_marks.json")
 	if err != nil {

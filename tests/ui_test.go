@@ -400,8 +400,8 @@ func TestUITimelineQueueAndEscaping(t *testing.T) {
 	claimAndTransition(t, s, decision, "needs_decision", "choose a path")
 	response = uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/queue", assertion, "")
 	body = responseText(t, response)
-	if response.StatusCode != http.StatusOK || !strings.Contains(body, `id="board-root"`) || !strings.Contains(body, "/ui/static/console/board.js") {
-		t.Fatal("queue page did not mount the React board")
+	if response.StatusCode != http.StatusOK || !strings.Contains(body, `id="shell-root"`) || !strings.Contains(body, "/ui/static/console/shell.js") {
+		t.Fatal("queue page did not mount the shell")
 	}
 	if strings.Contains(body, "in progress title") || strings.Contains(body, "decision title") {
 		t.Fatal("queue page leaked server data into the mount HTML")
@@ -479,7 +479,7 @@ func TestUIFleetProxyAndTokenBoundary(t *testing.T) {
 	unconfigured := newUITestServer(t, s, fixture, "", "", 0)
 	response := uiRequest(t, unconfigured.Client(), http.MethodGet, unconfigured.URL+"/ui/fleet", assertion, "")
 	page := responseText(t, response)
-	if response.StatusCode != http.StatusOK || !strings.Contains(page, `id="fleet-root"`) {
+	if response.StatusCode != http.StatusOK || !strings.Contains(page, `id="shell-root"`) {
 		t.Fatal("unconfigured hub did not leave fleet page available")
 	}
 	apiResp := uiRequest(t, unconfigured.Client(), http.MethodGet, unconfigured.URL+"/ui/api/fleet", assertion, "")
@@ -515,7 +515,7 @@ func TestUIFleetProxyAndTokenBoundary(t *testing.T) {
 	defer h.Close()
 	response = uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/fleet", assertion, "")
 	body := responseText(t, response)
-	if response.StatusCode != http.StatusOK || !strings.Contains(body, `id="fleet-root"`) || !strings.Contains(body, "/ui/static/console/fleet.js") {
+	if response.StatusCode != http.StatusOK || !strings.Contains(body, `id="shell-root"`) || !strings.Contains(body, "/ui/static/console/shell.js") {
 		t.Fatalf("normal fleet page failed: %q", body)
 	}
 	if strings.Contains(body, hubValue) {
@@ -550,7 +550,7 @@ func TestUIFleetProxyAndTokenBoundary(t *testing.T) {
 		t.Fatalf("initial hub failure was not available without marking nodes down: %q", apiBody)
 	}
 	pageResp := uiRequest(t, freshFailure.Client(), http.MethodGet, freshFailure.URL+"/ui/fleet", assertion, "")
-	if pageResp.StatusCode != http.StatusOK || !strings.Contains(responseText(t, pageResp), `id="fleet-root"`) {
+	if pageResp.StatusCode != http.StatusOK || !strings.Contains(responseText(t, pageResp), `id="shell-root"`) {
 		t.Fatal("initial hub failure hid the fleet page")
 	}
 }
