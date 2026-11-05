@@ -83,7 +83,7 @@ func consoleTreeError(committed, emitted map[string][]byte) error {
 }
 
 // consoleContractsError checks the entry outputs a correct multi-entry build
-// must produce: the shell, server and deploys entries, their styles, and the
+// must produce: the shell and server entries, their styles, and the
 // shared chunk, plus the API/security contracts each bundle carries.
 func consoleContractsError(tree map[string][]byte) error {
 	for _, name := range []string{"shell.js", "shell.css", "server.js", "server.css", "tokens.css", "shared-client.js", "shared-DocView.js", "shared-DocMarkdown.js"} {
@@ -97,7 +97,7 @@ func consoleContractsError(tree map[string][]byte) error {
 	}
 	shell := string(tree["shell.js"])
 	// The shell entry mounts into the template's root, reaches the document
-	// viewer through a lazy chunk, and makes no API read itself.
+	// viewer through a lazy chunk and reads the deploys API.
 	for _, want := range []string{"shell-root", "shared-DocView.js"} {
 		if !strings.Contains(shell, want) {
 			return fmt.Errorf("shell.js missing %q", want)
@@ -299,11 +299,11 @@ func TestConsoleBuildDriftMutantsTurnRed(t *testing.T) {
 		}
 	})
 
-	// A build without the deploys entry emits no deploys output; the emitted
+	// A build without the server entry emits no server output; the emitted
 	// set must not silently shrink.
 	t.Run("config-single-entry", func(t *testing.T) {
 		config := writeMutantConfig(t, projectDir, "single-entry", func(source string) string {
-			return strings.Replace(source, "\n        deploys: resolve(root, \"src/deploys/main.tsx\"),", "", 1)
+			return strings.Replace(source, "\n        server: resolve(root, \"src/server.tsx\"),", "", 1)
 		})
 		outDir := filepath.Join(t.TempDir(), "out")
 		viteBuild(t, npm, projectDir, config, outDir)
