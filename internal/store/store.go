@@ -1239,7 +1239,7 @@ func (s *Store) migrate(ctx context.Context) error {
 		return err
 	}
 
-	if err := migrateOnce(ctx, tx, 41, func() error { return execAll(ctx, tx, taskClosureV41) }); err != nil {
+	if err := migrateOnce(ctx, tx, 42, func() error { return execAll(ctx, tx, taskClosureV42) }); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
