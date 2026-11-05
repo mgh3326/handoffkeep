@@ -41,13 +41,13 @@ function Section({
   const heading = href ? <a href={href}>{title}</a> : title;
   return (
     <section className="ha-section" aria-label={title}>
-      <h3 className="ha-head">
+      <h2 className="ha-head">
         {heading}
         <span className="ha-count" aria-label={`${count} ${title}`}>
           {count}
         </span>
         {split ? <span className="ha-split">{split}</span> : null}
-      </h3>
+      </h2>
       {children}
     </section>
   );
@@ -161,7 +161,7 @@ export function HomeAttention() {
   const { data, failed } = usePoll(loadAttention, 60_000);
   return (
     <div className="ha-root">
-      <h2 className="ha-title">Waiting on me</h2>
+      <h1 className="ha-title">Waiting on me</h1>
       {failed ? (
         <p className="ha-error" role="alert">
           Could not load what is waiting on you
