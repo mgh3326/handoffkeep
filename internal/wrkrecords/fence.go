@@ -107,6 +107,9 @@ func (s Snapshot) CheckLegacy(p *Policy, actor string, in LegacyIntent) error {
 	if in.To == "dropped" {
 		kind = "end"
 	}
+	if in.To == "completed" {
+		kind = "completed"
+	}
 	if record.Kind != kind {
 		return required()
 	}
