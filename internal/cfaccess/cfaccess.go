@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"log"
 	"math/big"
 	"mime"
 	"net/http"
@@ -18,6 +19,8 @@ import (
 )
 
 const assertionHeader = "Cf-Access-Jwt-Assertion"
+
+const maxKeyAge = 24 * time.Hour
 
 // Config is deliberately small enough to make a verifier testable without a
 // network dependency. Issuer and CertsURL are test-only overrides; production
@@ -55,6 +58,7 @@ type Verifier struct {
 	fetchedAt             time.Time
 	lastUnknownKidRefresh time.Time
 	refreshMu             sync.Mutex
+	refreshing            bool
 }
 
 // New constructs a fail-closed verifier.
@@ -156,27 +160,26 @@ func (v *Verifier) keyFor(ctx context.Context, kid string) (*rsa.PublicKey, erro
 	now := time.Now()
 	v.mu.Lock()
 	key := v.keys[kid]
-	fresh := v.keys != nil && now.Sub(v.fetchedAt) < v.ttl
+	fetchedAt := v.fetchedAt
+	age := now.Sub(fetchedAt)
+	fresh := v.keys != nil && age < v.ttl && age < maxKeyAge
+	if key != nil && age < maxKeyAge {
+		if !fresh && !v.refreshing {
+			v.refreshing = true
+			go v.refreshBackground(fetchedAt)
+		}
+		v.mu.Unlock()
+		return key, nil
+	}
 	refreshUnknown := key == nil && (v.lastUnknownKidRefresh.IsZero() || now.Sub(v.lastUnknownKidRefresh) >= time.Minute)
 	if refreshUnknown {
 		v.lastUnknownKidRefresh = now
 	}
 	v.mu.Unlock()
-	if key != nil && fresh {
-		return key, nil
-	}
 	if key == nil && !refreshUnknown {
 		return nil, errors.New("unknown signing key")
 	}
-	if err := v.refresh(ctx); err != nil {
-		// A fresh cache can still validate a known key when an ordinary refresh
-		// fails. Missing keys never use this fallback.
-		v.mu.Lock()
-		cached, cacheFresh := v.keys[kid], v.keys != nil && time.Since(v.fetchedAt) < v.ttl
-		v.mu.Unlock()
-		if cached != nil && cacheFresh {
-			return cached, nil
-		}
+	if err := v.refresh(ctx, fetchedAt, key == nil); err != nil {
 		return nil, err
 	}
 	v.mu.Lock()
@@ -188,9 +191,29 @@ func (v *Verifier) keyFor(ctx context.Context, kid string) (*rsa.PublicKey, erro
 	return key, nil
 }
 
-func (v *Verifier) refresh(ctx context.Context) error {
+func (v *Verifier) refreshBackground(fetchedAt time.Time) {
+	defer func() { v.mu.Lock(); v.refreshing = false; v.mu.Unlock() }()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := v.refresh(ctx, fetchedAt, false); err != nil {
+		log.Printf("cfaccess.refresh_failed err=%q", err)
+	}
+}
+
+func (v *Verifier) refresh(ctx context.Context, observed time.Time, unknown bool) error {
 	v.refreshMu.Lock()
 	defer v.refreshMu.Unlock()
+
+	v.mu.Lock()
+	// An unknown kid forces a fetch even from a fresh cache, unless another
+	// refresh already completed while this caller waited.
+	age := time.Since(v.fetchedAt)
+	refreshed := !v.fetchedAt.Equal(observed)
+	fresh := v.keys != nil && age < v.ttl && age < maxKeyAge
+	v.mu.Unlock()
+	if refreshed || (!unknown && fresh) {
+		return nil
+	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, v.certs, nil)
 	if err != nil {
