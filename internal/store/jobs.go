@@ -330,13 +330,13 @@ func checkJobUpdate(u JobUpdate) error {
 	if u.EndReason != nil && len(*u.EndReason) > 128 {
 		return errors.New("end reason too long")
 	}
-	if u.DiffStat != nil && (u.DiffStat.Files < 0 || u.DiffStat.Insertions < 0 || u.DiffStat.Deletions < 0) {
+	if u.DiffStat != nil && (u.DiffStat.Files < 0 || u.DiffStat.Insertions < 0 || u.DiffStat.Deletions < 0 || u.DiffStat.Files > 2147483647 || u.DiffStat.Insertions > 2147483647 || u.DiffStat.Deletions > 2147483647) {
 		return errors.New("invalid diff stat")
 	}
 	if u.ReportSHA256 != nil && !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(*u.ReportSHA256) {
 		return errors.New("invalid report hash")
 	}
-	if u.ReportVersion != nil && *u.ReportVersion < 1 {
+	if u.ReportVersion != nil && (*u.ReportVersion < 1 || *u.ReportVersion > 2147483647) {
 		return errors.New("invalid report version")
 	}
 	if u.Skills != nil {

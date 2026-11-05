@@ -158,6 +158,10 @@ func (s Server) jobSkillsReport(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if values, present := r.URL.Query()["limit"]; present && values[0] == "" {
+		writeError(w, http.StatusBadRequest, "invalid_context")
+		return
+	}
 	limit, err := queryLimit(r, 100, 1000)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_context")
