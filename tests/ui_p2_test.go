@@ -566,11 +566,17 @@ func TestUIDocIngressBadgeAndApproval(t *testing.T) {
 	if !strings.Contains(body, `href="/ui/doc/reports/x/y.md"`) || !strings.Contains(body, "operator-web") || strings.Contains(body, "lane-ping") {
 		t.Fatalf("timeline doc/badge body=%q", body)
 	}
+	// /ui/doc/{key} is the shell page; the browser reads the document body
+	// through the JSON route, so the page itself carries no document text.
 	response = uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/doc/reports/x/y.md", assertion, "")
-	if response.StatusCode != http.StatusOK || !strings.Contains(responseText(t, response), "&lt;report body&gt;") {
-		t.Fatal("document was not safely rendered")
+	if page := responseText(t, response); response.StatusCode != http.StatusOK || !strings.Contains(page, `id="shell-root"`) || strings.Contains(page, "report body") {
+		t.Fatalf("document page did not mount the shell without the body: status=%d", response.StatusCode)
 	}
-	response = uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/doc/missing.md", assertion, "")
+	response = uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/api/board/doc?key=reports/x/y.md", assertion, "")
+	if response.StatusCode != http.StatusOK || !strings.Contains(responseText(t, response), "report body") {
+		t.Fatal("document JSON did not carry the body")
+	}
+	response = uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/api/board/doc?key=missing.md", assertion, "")
 	if response.StatusCode != http.StatusNotFound {
 		t.Fatalf("missing document status=%d", response.StatusCode)
 	}

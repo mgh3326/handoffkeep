@@ -98,6 +98,14 @@ type TaskSourceEvent struct {
 	RevertedPR string     `json:"reverted_pr,omitempty"`
 	RevertPR   string     `json:"revert_pr,omitempty"`
 	At         *time.Time `json:"at,omitempty"`
+	// The fields below feed the work record (changes.go); none changes what
+	// an event does to the task. HeadSHA and BaseSHA are allowed on every
+	// mergewake source, MergeSHA only on mergewake.merge, Reviews only on
+	// mergewake.review.
+	HeadSHA  string            `json:"head_sha,omitempty"`
+	BaseSHA  string            `json:"base_sha,omitempty"`
+	MergeSHA string            `json:"merge_sha,omitempty"`
+	Reviews  []TaskEventReview `json:"reviews,omitempty"`
 }
 
 // TaskEventResult says what an event did. Redelivered is set when the same
@@ -139,6 +147,9 @@ func normalizeTaskSourceEvent(in TaskSourceEvent) (TaskSourceEvent, error) {
 	default:
 		return in, errors.New("invalid task event: unknown source")
 	}
+	if err := checkEventChangeFields(in); err != nil {
+		return in, err
+	}
 	return in, nil
 }
 
@@ -178,6 +189,11 @@ func (s *Store) ApplyTaskSourceEvent(ctx context.Context, in TaskSourceEvent) (T
 		if errors.Is(err, pgx.ErrNoRows) {
 			return TaskEventResult{}, ErrTaskNotFound
 		}
+		return TaskEventResult{}, err
+	}
+	// The change rows describe the PR, so they are written for a redelivered
+	// or not-applied event too; a 404 above has written nothing.
+	if err = recordChangeTx(ctx, tx, x, in, at, now); err != nil {
 		return TaskEventResult{}, err
 	}
 	res, err := s.applySourceEventTx(ctx, tx, x, sourceEvent{Source: in.Source, SourceRef: in.SourceRef, PR: in.PR, RevertedPR: in.RevertedPR, RevertPR: in.RevertPR, At: at}, now)

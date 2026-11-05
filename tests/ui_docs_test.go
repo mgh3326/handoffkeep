@@ -130,7 +130,7 @@ func TestUIDocsListAndPrefixes(t *testing.T) {
 
 	// The page itself is operator-only like every other console page.
 	response = uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/docs", assertion, "")
-	if body := responseText(t, response); response.StatusCode != http.StatusOK || !strings.Contains(body, "/ui/static/console/docs.js") {
+	if body := responseText(t, response); response.StatusCode != http.StatusOK || !strings.Contains(body, "/ui/static/console/shell.js") {
 		t.Fatalf("page status=%d body=%s", response.StatusCode, body)
 	}
 

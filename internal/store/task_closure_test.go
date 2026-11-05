@@ -16,9 +16,11 @@ func TestTaskClosureMigration(t *testing.T) {
 	if err := s.pool.QueryRow(t.Context(), `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != SchemaVersion {
 		t.Fatalf("version=%d err=%v", version, err)
 	}
-	var originsExist bool
-	if err := s.pool.QueryRow(t.Context(), `SELECT to_regclass('task_origins') IS NOT NULL`).Scan(&originsExist); err != nil || !originsExist {
-		t.Fatalf("origins migration applied=%t err=%v", originsExist, err)
+	for _, table := range []string{"task_origins", "changes"} {
+		var exists bool
+		if err := s.pool.QueryRow(t.Context(), `SELECT to_regclass($1) IS NOT NULL`, table).Scan(&exists); err != nil || !exists {
+			t.Fatalf("preceding table %s exists=%t err=%v", table, exists, err)
+		}
 	}
 	x, err := s.CreateTask(t.Context(), Task{Lane: relaneLane(t, "closure"), Title: "closure", Kind: "decide", CreatedBy: "tester", Project: projectPtr(testProjectName)})
 	if err != nil {
