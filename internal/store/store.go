@@ -644,6 +644,9 @@ type BenchRep struct {
 	TableGrade    *string   `json:"table_grade"`
 	CreatedBy     string    `json:"created_by"`
 	CreatedAt     time.Time `json:"created_at"`
+	// BenchOutcome's columns are part of the insert-once content; later
+	// outcomes go through PatchBenchRepOutcome.
+	BenchOutcome
 }
 
 type BenchGrade struct {
@@ -1218,6 +1221,9 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := migrateOnce(ctx, tx, 39, func() error { return execAll(ctx, tx, jobUsageV39) }); err != nil {
 		return err
 	}
+	if err := migrateOnce(ctx, tx, 40, func() error { return execAll(ctx, tx, benchOutcomesV40) }); err != nil {
+		return err
+	}
 
 	return tx.Commit(ctx)
 }
@@ -1557,7 +1563,8 @@ func sameBenchRepInput(a, b BenchRep) bool {
 		benchRepPtrEq(a.Notes, b.Notes) &&
 		benchRepPtrEq(a.Effort, b.Effort) &&
 		benchRepPtrEq(a.Grade, b.Grade) &&
-		benchRepPtrEq(a.TableGrade, b.TableGrade)
+		benchRepPtrEq(a.TableGrade, b.TableGrade) &&
+		a.BenchOutcome.same(b.BenchOutcome)
 }
 
 // upsertBenchRepInsert is one race-free statement: insert, or — when the
@@ -1569,7 +1576,18 @@ func sameBenchRepInput(a, b BenchRep) bool {
 // comparison cannot observe a torn or pre-commit state. A returned row is a
 // fresh insert or an identical resend; no row means a different rep holds
 // the key.
-const upsertBenchRepInsert = `INSERT INTO bench_reps(origin_id,profile,model_id,task_ref,tier,role,rounds,blockers_found,completed,input_tokens,output_tokens,notes,recorded_at,effort,grade,table_grade,created_by,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) ON CONFLICT (created_by,origin_id) DO UPDATE SET origin_id=EXCLUDED.origin_id WHERE bench_reps.profile IS NOT DISTINCT FROM EXCLUDED.profile AND bench_reps.model_id IS NOT DISTINCT FROM EXCLUDED.model_id AND bench_reps.task_ref IS NOT DISTINCT FROM EXCLUDED.task_ref AND bench_reps.tier IS NOT DISTINCT FROM EXCLUDED.tier AND bench_reps.role IS NOT DISTINCT FROM EXCLUDED.role AND bench_reps.rounds IS NOT DISTINCT FROM EXCLUDED.rounds AND bench_reps.blockers_found IS NOT DISTINCT FROM EXCLUDED.blockers_found AND bench_reps.completed IS NOT DISTINCT FROM EXCLUDED.completed AND bench_reps.input_tokens IS NOT DISTINCT FROM EXCLUDED.input_tokens AND bench_reps.output_tokens IS NOT DISTINCT FROM EXCLUDED.output_tokens AND bench_reps.notes IS NOT DISTINCT FROM EXCLUDED.notes AND bench_reps.recorded_at IS NOT DISTINCT FROM EXCLUDED.recorded_at AND bench_reps.effort IS NOT DISTINCT FROM EXCLUDED.effort AND bench_reps.grade IS NOT DISTINCT FROM EXCLUDED.grade AND bench_reps.table_grade IS NOT DISTINCT FROM EXCLUDED.table_grade RETURNING id`
+var upsertBenchRepInsert = func() string {
+	cols := append([]string{"origin_id", "profile", "model_id", "task_ref", "tier", "role", "rounds", "blockers_found", "completed", "input_tokens", "output_tokens", "notes", "recorded_at", "effort", "grade", "table_grade", "created_by", "created_at"}, benchOutcomeColumns...)
+	params := make([]string, len(cols))
+	var same []string
+	for i, c := range cols {
+		params[i] = fmt.Sprintf("$%d", i+1)
+		if c != "origin_id" && c != "created_by" && c != "created_at" {
+			same = append(same, "bench_reps."+c+" IS NOT DISTINCT FROM EXCLUDED."+c)
+		}
+	}
+	return `INSERT INTO bench_reps(` + strings.Join(cols, ",") + `) VALUES(` + strings.Join(params, ",") + `) ON CONFLICT (created_by,origin_id) DO UPDATE SET origin_id=EXCLUDED.origin_id WHERE ` + strings.Join(same, " AND ") + ` RETURNING id`
+}()
 
 // UpsertBenchReps inserts one row per input rep and returns the server ids in
 // input order. A rep whose (created_by, origin_id) key is already taken is an
@@ -1588,6 +1606,9 @@ func (s *Store) UpsertBenchReps(ctx context.Context, xs []BenchRep) ([]int64, er
 	for i, x := range xs {
 		if !validBenchRep(x) {
 			return nil, errors.New("invalid bench rep")
+		}
+		if err := x.BenchOutcome.valid(); err != nil {
+			return nil, err
 		}
 		for _, value := range []*string{x.TaskRef, x.Notes} {
 			if value != nil {
@@ -1620,7 +1641,8 @@ func (s *Store) UpsertBenchReps(ctx context.Context, xs []BenchRep) ([]int64, er
 	var conflicts []BenchRepConflict
 	for i, x := range xs {
 		var id int64
-		err = tx.QueryRow(ctx, upsertBenchRepInsert, x.OriginID, x.Profile, x.ModelID, x.TaskRef, x.Tier, x.Role, x.Rounds, x.BlockersFound, x.Completed, x.InputTokens, x.OutputTokens, x.Notes, x.RecordedAt, x.Effort, x.Grade, x.TableGrade, x.CreatedBy, now).Scan(&id)
+		args := append([]any{x.OriginID, x.Profile, x.ModelID, x.TaskRef, x.Tier, x.Role, x.Rounds, x.BlockersFound, x.Completed, x.InputTokens, x.OutputTokens, x.Notes, x.RecordedAt, x.Effort, x.Grade, x.TableGrade, x.CreatedBy, now}, x.BenchOutcome.values()...)
+		err = tx.QueryRow(ctx, upsertBenchRepInsert, args...).Scan(&id)
 		if err == nil {
 			ids = append(ids, id)
 			continue
@@ -1653,19 +1675,17 @@ func (s *Store) ListBenchReps(ctx context.Context, profile, grade, effort string
 	if limit > 5000 {
 		limit = 5000
 	}
-	rows, err := s.pool.Query(ctx, `SELECT id,origin_id,profile,model_id,task_ref,tier,role,rounds,blockers_found,completed,input_tokens,output_tokens,notes,recorded_at,effort,grade,table_grade,created_by,created_at FROM bench_reps WHERE ($1='' OR profile=$1) AND ($2='' OR grade=$2) AND ($3='' OR effort=$3) ORDER BY id DESC LIMIT $4`, profile, grade, effort, limit)
+	rows, err := s.pool.Query(ctx, `SELECT `+benchRepColumns+` FROM bench_reps WHERE ($1='' OR profile=$1) AND ($2='' OR grade=$2) AND ($3='' OR effort=$3) ORDER BY id DESC LIMIT $4`, profile, grade, effort, limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	out := []BenchRep{}
 	for rows.Next() {
-		var x BenchRep
-		if err := rows.Scan(&x.ID, &x.OriginID, &x.Profile, &x.ModelID, &x.TaskRef, &x.Tier, &x.Role, &x.Rounds, &x.BlockersFound, &x.Completed, &x.InputTokens, &x.OutputTokens, &x.Notes, &x.RecordedAt, &x.Effort, &x.Grade, &x.TableGrade, &x.CreatedBy, &x.CreatedAt); err != nil {
+		x, err := scanBenchRep(rows)
+		if err != nil {
 			return nil, err
 		}
-		x.RecordedAt = x.RecordedAt.UTC()
-		x.CreatedAt = x.CreatedAt.UTC()
 		out = append(out, x)
 	}
 	return out, rows.Err()
@@ -1684,19 +1704,17 @@ func (s *Store) ListBenchRepsByTaskRef(ctx context.Context, taskRef string, limi
 	if limit > 5000 {
 		limit = 5000
 	}
-	rows, err := s.pool.Query(ctx, `SELECT id,origin_id,profile,model_id,task_ref,tier,role,rounds,blockers_found,completed,input_tokens,output_tokens,notes,recorded_at,effort,grade,table_grade,created_by,created_at FROM bench_reps WHERE task_ref=$1 ORDER BY id ASC LIMIT $2`, taskRef, limit)
+	rows, err := s.pool.Query(ctx, `SELECT `+benchRepColumns+` FROM bench_reps WHERE task_ref=$1 ORDER BY id ASC LIMIT $2`, taskRef, limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	out := []BenchRep{}
 	for rows.Next() {
-		var x BenchRep
-		if err := rows.Scan(&x.ID, &x.OriginID, &x.Profile, &x.ModelID, &x.TaskRef, &x.Tier, &x.Role, &x.Rounds, &x.BlockersFound, &x.Completed, &x.InputTokens, &x.OutputTokens, &x.Notes, &x.RecordedAt, &x.Effort, &x.Grade, &x.TableGrade, &x.CreatedBy, &x.CreatedAt); err != nil {
+		x, err := scanBenchRep(rows)
+		if err != nil {
 			return nil, err
 		}
-		x.RecordedAt = x.RecordedAt.UTC()
-		x.CreatedAt = x.CreatedAt.UTC()
 		out = append(out, x)
 	}
 	return out, rows.Err()

@@ -35,11 +35,15 @@ func TestSameBenchRepInput(t *testing.T) {
 	str := func(v string) *string { return &v }
 	num := func(v int) *int { return &v }
 	big := func(v int64) *int64 { return &v }
+	flag := func(v bool) *bool { return &v }
 	base := BenchRep{
 		OriginID: 7, Profile: "p", ModelID: str("m"), TaskRef: str("t"), Tier: str("T2"), Role: str("impl"),
 		Rounds: num(1), BlockersFound: num(0), Completed: num(1), InputTokens: big(10), OutputTokens: big(20),
 		Notes: str("n"), RecordedAt: time.Date(2026, 9, 1, 10, 0, 0, 123456000, time.UTC),
 		Effort: str("high"), Grade: str("A"), TableGrade: str("A"), CreatedBy: "c",
+		BenchOutcome: BenchOutcome{ExperimentID: str("e"), Arm: str("arm"), FirstCIGreen: flag(true), CriticalFindings: num(0), HighFindings: num(1),
+			Merged: flag(true), RevertedWithin7d: flag(false), ReviewerProfile: str("rp"), ReviewerEffort: str("re"), ReasoningTokens: big(1),
+			CacheReadTokens: big(2), CacheWriteTokens: big(3), SpawnToReadyS: num(4), SpawnToMergeS: num(5)},
 	}
 	if !sameBenchRepInput(base, base) {
 		t.Fatal("identical rep not equal to itself")
@@ -58,7 +62,7 @@ func TestSameBenchRepInput(t *testing.T) {
 	}
 	// Every compared field, one pair differing only in that field. The table
 	// length is pinned to the compared-field count named above sameBenchRepInput
-	// (15: profile, recorded_at, 13 pointer fields).
+	// (15: profile, recorded_at, 13 pointer fields; plus the outcome columns).
 	type fieldCase struct {
 		name string
 		set  func(*BenchRep)
@@ -80,9 +84,24 @@ func TestSameBenchRepInput(t *testing.T) {
 		{"effort", func(r *BenchRep) { r.Effort = str("low") }, func(r *BenchRep) { r.Effort = nil }},
 		{"grade", func(r *BenchRep) { r.Grade = str("B") }, func(r *BenchRep) { r.Grade = nil }},
 		{"table_grade", func(r *BenchRep) { r.TableGrade = str("B") }, func(r *BenchRep) { r.TableGrade = nil }},
+		{"experiment_id", func(r *BenchRep) { r.ExperimentID = str("y") }, func(r *BenchRep) { r.ExperimentID = nil }},
+		{"arm", func(r *BenchRep) { r.Arm = str("baseline") }, func(r *BenchRep) { r.Arm = nil }},
+		{"first_ci_green", func(r *BenchRep) { r.FirstCIGreen = flag(false) }, func(r *BenchRep) { r.FirstCIGreen = nil }},
+		{"critical_findings", func(r *BenchRep) { r.CriticalFindings = num(3) }, func(r *BenchRep) { r.CriticalFindings = nil }},
+		{"high_findings", func(r *BenchRep) { r.HighFindings = num(3) }, func(r *BenchRep) { r.HighFindings = nil }},
+		{"merged", func(r *BenchRep) { r.Merged = flag(false) }, func(r *BenchRep) { r.Merged = nil }},
+		{"reverted_within_7d", func(r *BenchRep) { r.RevertedWithin7d = flag(true) }, func(r *BenchRep) { r.RevertedWithin7d = nil }},
+		{"reviewer_profile", func(r *BenchRep) { r.ReviewerProfile = str("y") }, func(r *BenchRep) { r.ReviewerProfile = nil }},
+		{"reviewer_effort", func(r *BenchRep) { r.ReviewerEffort = str("y") }, func(r *BenchRep) { r.ReviewerEffort = nil }},
+		{"reasoning_tokens", func(r *BenchRep) { r.ReasoningTokens = big(9) }, func(r *BenchRep) { r.ReasoningTokens = nil }},
+		{"cache_read_tokens", func(r *BenchRep) { r.CacheReadTokens = big(9) }, func(r *BenchRep) { r.CacheReadTokens = nil }},
+		{"cache_write_tokens", func(r *BenchRep) { r.CacheWriteTokens = big(9) }, func(r *BenchRep) { r.CacheWriteTokens = nil }},
+		{"spawn_to_ready_s", func(r *BenchRep) { r.SpawnToReadyS = num(9) }, func(r *BenchRep) { r.SpawnToReadyS = nil }},
+		{"spawn_to_merge_s", func(r *BenchRep) { r.SpawnToMergeS = num(9) }, func(r *BenchRep) { r.SpawnToMergeS = nil }},
 	}
-	if len(fields) != 15 {
-		t.Fatalf("field table has %d rows want 15 compared fields", len(fields))
+	// 15 original fields plus the 14 outcome columns (schema 40).
+	if len(fields) != 15+len(benchOutcomeColumns) {
+		t.Fatalf("field table has %d rows want %d compared fields", len(fields), 15+len(benchOutcomeColumns))
 	}
 	for _, f := range fields {
 		b := base

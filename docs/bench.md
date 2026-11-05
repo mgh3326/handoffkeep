@@ -16,6 +16,7 @@ All requests and responses use `Content-Type: application/json`.
 | PUT | `/v1/bench/scores` | Body `{"scores":[...]}`; 1–1000 rows, response `{"upserted":N}` |
 | GET | `/v1/bench/reps?profile=&grade=&effort=&limit=` | `{"reps":[...]}`; ordered by `id DESC` |
 | PUT | `/v1/bench/reps` | Body `{"reps":[...]}`; 1–1000 rows, response `{"upserted":N,"ids":[...]}` — `ids` carries the server id of every accepted row aligned to the input order |
+| PATCH | `/v1/bench/reps/{id}` | Set-once outcome patch of the rep with server id `{id}` (below); response is the row |
 | GET | `/v1/bench/grades` | `{"grades":[...]}`; ordered by `profile` |
 | PUT | `/v1/bench/grades` | Body `{"grades":[...]}`; 1–1000 rows, response `{"upserted":N}` |
 | GET | `/v1/bench/catalog?pool=&include_retired=` | `{"catalog":[...]}`; ordered by `pool`, grade (`S+`→`C`), `profile`, effort rung |
@@ -255,3 +256,26 @@ and the harmless gap prevents either change from accidentally satisfying the
 other migration's gate. Schema version 12 adds `bench_catalog` and backfills
 it from `bench_grades` with `ON CONFLICT DO NOTHING`; like v9 it is gated on
 its schema-version marker so a replay never disturbs catalog-only columns.
+
+## Outcome columns and the set-once patch
+
+Schema 40 (hk 2886) adds nullable experiment and outcome columns to every rep.
+NULL means unknown, never 0 or false:
+
+| Columns | Type |
+| --- | --- |
+| `experiment_id`, `reviewer_profile`, `reviewer_effort` | text |
+| `arm` | `baseline` or `arm` |
+| `first_ci_green`, `merged`, `reverted_within_7d` | boolean |
+| `critical_findings`, `high_findings`, `spawn_to_ready_s`, `spawn_to_merge_s` | integer, at least 0 |
+| `reasoning_tokens`, `cache_read_tokens`, `cache_write_tokens` | integer, at least 0 |
+
+- **On insert:** `PUT /v1/bench/reps` accepts these columns. They count as rep content, so a resend that changes one of them is `bench_rep_conflict`.
+- **Late outcomes:** a merge, a revert within 7 days, or review findings arrive through `PATCH /v1/bench/reps/{id}`. Any node token may patch. The body is any subset of the columns above, plus `input_tokens` and `output_tokens`.
+- **How a patch applies:**
+  - It fills only columns that are still NULL. An identical value is a no-op.
+  - A different value on a column that already holds one returns 409 `{"error":"bench_rep_outcome_conflict","field":"<column>"}` and writes nothing from that patch.
+  - An empty patch or an unknown key returns 400.
+  - An id with no rep returns 404 `not_found`.
+- `experiment_id` has no foreign key until the experiment registry (hk 2885) exists.
+
