@@ -468,6 +468,22 @@ answer with `decision-resolve` first, then resume. The console (queue row
 badge and count, drawer card, Decisions) reads these records only; answering
 from the console is #580.
 
+Every CLI, assistant and console answer to a `dr-` request goes through one
+store entry, `Store.ResolveDecision`. It records an append-only attempt
+(`decision_answer_attempts`) and, for an answer, one resolution per logical
+request and revision (`decision_resolutions`), and the response carries a
+`result`: `answered`, `conflict`, `stale_revision`, `pending_confirmation`,
+`expired` or `superseded`. `--event-key KEY` (or `event_key` in the body)
+makes a re-sent delivery replay the first result; the same key with another
+answer is `409 decision_event_key_conflict`. Provenance comes from the
+verified channel: the bearer client `operator` and an Access-authenticated
+console user answer as `operator_direct`; any other client, or an assistant
+quoting the operator, is a relay. A `human_only` request does not close on a
+relay: the call answers `202` with `result: pending_confirmation` (the CLI
+prints it and exits 0), the request stays open, and a later `operator_direct`
+answer closes it. The console route is `POST /ui/api/decision-requests/resolve`
+with `{request_id, option, text, event_key}`.
+
 `GET /v1/tasks/export` returns one consistent snapshot of the queue — a
 single bounded JSON document carrying the snapshot ID, watermarks, filtered
 counts, integrity digests, and the task rows — read inside one repeatable-read
