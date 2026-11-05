@@ -122,7 +122,7 @@ func (h *Handler) docsPrefixes(w http.ResponseWriter, r *http.Request) {
 // docsPage serves the browse page. Like /ui/grades it is only a mount point:
 // all data reaches the browser through the two API routes above.
 func (h *Handler) docsPage(w http.ResponseWriter, r *http.Request) {
-	h.shell(w)
+	h.shell(w, r)
 }
 
 func validDocsText(value string) bool {
