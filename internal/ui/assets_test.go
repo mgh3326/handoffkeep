@@ -51,7 +51,7 @@ func serveStatic(t *testing.T, h *Handler, target string) *httptest.ResponseReco
 func TestAssetURLStampsVersionedRequests(t *testing.T) {
 	h := newAssetTestHandler(t, "abc123def")
 	rec := httptest.NewRecorder()
-	h.shell(rec)
+	h.shell(rec, httptest.NewRequest(http.MethodGet, "/ui", nil))
 	body := rec.Body.String()
 	if !strings.Contains(body, "/ui/static/console/shell.js?v=abc123def") || !strings.Contains(body, "/ui/static/console/shell.css?v=abc123def") {
 		t.Fatalf("stamped board page did not version asset URLs: %q", body)
@@ -83,7 +83,7 @@ func TestAssetURLUnstampedDisablesCaching(t *testing.T) {
 		t.Fatalf("unstamped assetURL emitted %q — empty ?v= must never appear", got)
 	}
 	rec := httptest.NewRecorder()
-	h.shell(rec)
+	h.shell(rec, httptest.NewRequest(http.MethodGet, "/ui", nil))
 	body := rec.Body.String()
 	if strings.Contains(body, "?v=") {
 		t.Fatalf("unstamped page emitted an empty version query: %q", body)
@@ -113,7 +113,7 @@ func TestNewWiresBuildInfoIntoAssetStamp(t *testing.T) {
 		t.Fatal(err)
 	}
 	rec := httptest.NewRecorder()
-	h.shell(rec)
+	h.shell(rec, httptest.NewRequest(http.MethodGet, "/ui", nil))
 	if body := rec.Body.String(); !strings.Contains(body, "/ui/static/console/shell.js?v=testrev0123") {
 		t.Fatalf("New() did not stamp board assets from build info: %q", body)
 	}
@@ -130,7 +130,7 @@ func TestNewWiresBuildInfoIntoAssetStamp(t *testing.T) {
 		t.Fatal(err)
 	}
 	rec = httptest.NewRecorder()
-	h2.shell(rec)
+	h2.shell(rec, httptest.NewRequest(http.MethodGet, "/ui", nil))
 	if body := rec.Body.String(); strings.Contains(body, "?v=") {
 		t.Fatalf("unstamped New() emitted a version query: %q", body)
 	}

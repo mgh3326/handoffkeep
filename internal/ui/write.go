@@ -954,5 +954,14 @@ func (h *Handler) document(w http.ResponseWriter, r *http.Request, key string) {
 		http.Error(w, "invalid document key", http.StatusBadRequest)
 		return
 	}
-	h.shell(w)
+	// A missing document is a 404 from the server, as the old page answered,
+	// not a shell that later shows an empty viewer.
+	if _, found, err := h.store.GetDocument(r.Context(), key); err != nil {
+		http.Error(w, "document lookup failed", http.StatusInternalServerError)
+		return
+	} else if !found {
+		http.NotFound(w, r)
+		return
+	}
+	h.shell(w, r)
 }
