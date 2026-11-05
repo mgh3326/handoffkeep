@@ -3,9 +3,7 @@
 
 import { Component, lazy, Suspense, type ReactNode } from "react";
 import type { NavKey } from "./Shell";
-// The C0/C1 seam: Home is this one import. C1 (hk 3141) replaces it with
-// `import { HomeAttention as Home } from "../home/HomeAttention";`.
-import { Home } from "./HomePlaceholder";
+import { HomeAttention as Home } from "../home/HomeAttention";
 import { Moved, TaskPlaceholder, Work } from "./Placeholders";
 
 // The document viewer pulls in the markdown renderer, so it is a lazy chunk:

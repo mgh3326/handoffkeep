@@ -1,0 +1,125 @@
+/* Home "waiting on me" (hk 3141) — tokens only, no color literals. */
+
+.ha-root {
+  display: grid;
+  gap: var(--hk-space-4);
+  padding: var(--hk-space-4);
+  max-width: var(--hk-reading-width);
+  color: var(--hk-text-primary);
+  font-family: var(--hk-font-ui);
+  font-size: var(--hk-type-body-sm);
+}
+
+.ha-title {
+  margin: 0;
+  font-size: var(--hk-type-body);
+  font-weight: var(--hk-weight-strong);
+  color: var(--hk-text-heading);
+}
+
+.ha-section {
+  min-width: 0;
+  padding: var(--hk-space-3);
+  border: var(--hk-border-width) solid var(--hk-border-subtle);
+  border-radius: var(--hk-radius-card);
+  background: var(--hk-surface-1);
+}
+
+.ha-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--hk-space-2);
+  margin: 0 0 var(--hk-space-2);
+  font-size: var(--hk-type-body-sm);
+  font-weight: var(--hk-weight-medium);
+  color: var(--hk-text-heading);
+}
+
+.ha-head a {
+  color: inherit;
+}
+
+.ha-count {
+  padding: 0 var(--hk-space-2);
+  border-radius: var(--hk-radius-pill);
+  background: var(--hk-badge-fill);
+  font-size: var(--hk-type-label);
+  font-variant-numeric: tabular-nums;
+  color: var(--hk-text-secondary);
+}
+
+.ha-split {
+  font-size: var(--hk-type-caption);
+  font-weight: var(--hk-weight-normal);
+  color: var(--hk-text-muted);
+}
+
+.ha-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ha-item {
+  display: grid;
+  gap: var(--hk-space-1);
+  min-height: var(--hk-touch-height);
+  padding: var(--hk-space-2) 0;
+  border-top: var(--hk-border-width) solid var(--hk-border-subtle);
+}
+
+.ha-item:first-child {
+  border-top: 0;
+}
+
+.ha-link {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--hk-text-primary);
+  text-decoration: none;
+}
+
+.ha-link:hover,
+.ha-link:focus-visible {
+  text-decoration: underline;
+}
+
+.ha-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--hk-space-1) var(--hk-space-2);
+  font-size: var(--hk-type-caption);
+  color: var(--hk-text-muted);
+}
+
+.ha-overdue {
+  color: var(--hk-danger);
+}
+
+.ha-stalled {
+  color: var(--hk-warning);
+}
+
+.ha-more,
+.ha-none,
+.ha-note {
+  margin: var(--hk-space-2) 0 0;
+  font-size: var(--hk-type-caption);
+  color: var(--hk-text-muted);
+}
+
+.ha-error {
+  margin: 0;
+  padding: var(--hk-space-2) var(--hk-space-3);
+  border: var(--hk-border-width) solid var(--hk-danger);
+  border-radius: var(--hk-radius-control);
+  font-size: var(--hk-type-caption);
+  color: var(--hk-danger);
+}
+
+.ha-empty {
+  margin: 0;
+  padding: var(--hk-space-6) var(--hk-space-3);
+  text-align: center;
+  color: var(--hk-text-secondary);
+}

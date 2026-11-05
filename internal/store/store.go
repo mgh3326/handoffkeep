@@ -3354,6 +3354,19 @@ type TaskDecision struct {
 	Question string
 }
 
+// awaitingTaskDecisionSQL is the task half of the decision inbox, read as
+// "tasks": awaiting a decision, not a disposition, and without an open
+// structured request (that request is listed on its own).
+const awaitingTaskDecisionSQL = `awaiting_decision AND NOT (refs ? 'disposition') AND COALESCE(refs->'decision_request'->>'status','')<>'open'`
+
+// openLaneDecisionSQL is the lane.event half of the decision inbox, read as
+// relay_events "e": a [decision-needed] event with no later
+// [decision-answered] reply from its lane.
+const openLaneDecisionSQL = `e.kind='lane.event' AND e.text LIKE '[decision-needed]%' AND NOT EXISTS (
+			SELECT 1 FROM relay_events resolved WHERE resolved.kind='lane.event' AND resolved.owner_lane=e.owner_lane
+			AND resolved.text LIKE '[decision-answered] #' || e.id::text || ':%' AND resolved.id>e.id
+		)`
+
 // ListOpenTaskDecisions implements the decision inbox task definition.
 // Disposition items are listed separately by ListOpenDispositions: they are
 // answered only through the operator disposition routes. Tasks whose current
@@ -3368,7 +3381,7 @@ func (s *Store) ListOpenTaskDecisions(ctx context.Context, limit int) ([]TaskDec
 	}
 	rows, err := s.pool.Query(ctx, `SELECT `+prefixedTaskColumns("t")+`,
 		COALESCE((SELECT note FROM task_events WHERE task_id=t.id AND `+awaitingEventSQL+` ORDER BY at DESC,id DESC LIMIT 1),'')
-		FROM tasks t WHERE t.awaiting_decision AND NOT (t.refs ? 'disposition') AND COALESCE(t.refs->'decision_request'->>'status','')<>'open' ORDER BY t.updated_at DESC,t.id DESC LIMIT $1`, limit)
+		FROM tasks t WHERE `+awaitingTaskDecisionSQL+` ORDER BY t.updated_at DESC,t.id DESC LIMIT $1`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -3431,10 +3444,7 @@ func (s *Store) ListOpenLaneDecisions(ctx context.Context, limit int) ([]RelayEv
 		limit = 1000
 	}
 	rows, err := s.pool.Query(ctx, `SELECT `+relayEventColumns+` FROM relay_events e
-		WHERE e.kind='lane.event' AND e.text LIKE '[decision-needed]%' AND NOT EXISTS (
-			SELECT 1 FROM relay_events resolved WHERE resolved.kind='lane.event' AND resolved.owner_lane=e.owner_lane
-			AND resolved.text LIKE '[decision-answered] #' || e.id::text || ':%' AND resolved.id>e.id
-		) ORDER BY e.id DESC LIMIT $1`, limit)
+		WHERE `+openLaneDecisionSQL+` ORDER BY e.id DESC LIMIT $1`, limit)
 	if err != nil {
 		return nil, err
 	}

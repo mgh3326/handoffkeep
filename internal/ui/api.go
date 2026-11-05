@@ -121,6 +121,8 @@ func (h *Handler) serveAPI(w http.ResponseWriter, r *http.Request, identity cfac
 			return
 		}
 		h.deployPending(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/ui/api/attention":
+		h.attention(w, r, identity)
 	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/ui/api/nodes/"):
 		h.setAccepting(w, r, identity)
 	default:
