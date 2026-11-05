@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Runs the same gates as .github/workflows/ci.yml, in the same order, so a
-# change that passes here passes CI. CI additionally runs the reopen/quota
+# change that passes here passes CI (the go half matches the post-merge
+# post-linux job; pull requests run it without -race and PostgreSQL). CI
+# additionally runs the reopen/quota
 # mutant suites, the migration smoke script, release-build and o3gen checks,
 # and gitleaks.
 #
