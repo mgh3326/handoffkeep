@@ -1,0 +1,121 @@
+[
+  {
+    "name": "work-needs-me",
+    "width": 390,
+    "height": 844,
+    "scrollWidth": 390,
+    "errors": []
+  },
+  {
+    "name": "work-active",
+    "width": 390,
+    "height": 844,
+    "scrollWidth": 390,
+    "errors": []
+  },
+  {
+    "name": "work-backlog",
+    "width": 390,
+    "height": 844,
+    "scrollWidth": 390,
+    "errors": []
+  },
+  {
+    "name": "work-shipped",
+    "width": 390,
+    "height": 844,
+    "scrollWidth": 390,
+    "errors": []
+  },
+  {
+    "name": "work-all",
+    "width": 390,
+    "height": 844,
+    "scrollWidth": 390,
+    "errors": []
+  },
+  {
+    "name": "record-full",
+    "width": 390,
+    "height": 844,
+    "scrollWidth": 390,
+    "errors": []
+  },
+  {
+    "name": "record-empty-truncated",
+    "width": 390,
+    "height": 844,
+    "scrollWidth": 390,
+    "errors": []
+  },
+  {
+    "name": "record-no-closure",
+    "width": 390,
+    "height": 844,
+    "scrollWidth": 390,
+    "errors": []
+  },
+  {
+    "name": "work-needs-me",
+    "width": 1440,
+    "height": 900,
+    "scrollWidth": 1440,
+    "errors": []
+  },
+  {
+    "name": "work-active",
+    "width": 1440,
+    "height": 900,
+    "scrollWidth": 1440,
+    "errors": []
+  },
+  {
+    "name": "work-backlog",
+    "width": 1440,
+    "height": 900,
+    "scrollWidth": 1440,
+    "errors": []
+  },
+  {
+    "name": "work-shipped",
+    "width": 1440,
+    "height": 900,
+    "scrollWidth": 1440,
+    "errors": []
+  },
+  {
+    "name": "work-all",
+    "width": 1440,
+    "height": 900,
+    "scrollWidth": 1440,
+    "errors": []
+  },
+  {
+    "name": "pane",
+    "width": 1440,
+    "height": 900,
+    "scrollWidth": 1440,
+    "errors": []
+  },
+  {
+    "name": "record-full",
+    "width": 1440,
+    "height": 900,
+    "scrollWidth": 1440,
+    "errors": []
+  },
+  {
+    "name": "record-empty-truncated",
+    "width": 1440,
+    "height": 900,
+    "scrollWidth": 1440,
+    "errors": []
+  },
+  {
+    "name": "record-no-closure",
+    "width": 1440,
+    "height": 900,
+    "scrollWidth": 1440,
+    "errors": []
+  }
+]
