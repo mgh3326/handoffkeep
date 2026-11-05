@@ -246,3 +246,42 @@ func TestLastActivityReturnedTaskMatchesRow(t *testing.T) {
 		})
 	}
 }
+
+func TestRepairLastActivity(t *testing.T) {
+	s := schemaStore(t, "activity_repair")
+	ctx := t.Context()
+	base := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	task := func(activity int) int64 {
+		var id int64
+		if err := s.pool.QueryRow(ctx, `INSERT INTO tasks(lane,title,kind,state,created_by,created_at,updated_at,last_activity_at) VALUES('repair','task','implement','backlog','test',$1,$1,$2) RETURNING id`, base, base.Add(time.Duration(activity)*time.Hour)).Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	event := func(id int64, at int, auto bool, source string) {
+		if _, err := s.pool.Exec(ctx, `INSERT INTO task_events(task_id,"from","to","by",at,auto,source) VALUES($1,'backlog','backlog','test',$2,$3,$4)`, id, base.Add(time.Duration(at)*time.Hour), auto, source); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a, b, c := task(1), task(5), task(1)
+	event(a, 2, true, "mergewake.merge")
+	event(a, 3, false, "")
+	event(b, 4, false, "")
+	event(c, 6, true, "mergewake.merge")
+	n, err := s.RepairLastActivity(ctx, 500)
+	if err != nil || n != 1 {
+		t.Fatalf("repaired=%d err=%v", n, err)
+	}
+	for id, want := range map[int64]int{a: 3, b: 5, c: 1} {
+		var activity, updated time.Time
+		if err := s.pool.QueryRow(ctx, `SELECT last_activity_at,updated_at FROM tasks WHERE id=$1`, id).Scan(&activity, &updated); err != nil {
+			t.Fatal(err)
+		}
+		if !activity.Equal(base.Add(time.Duration(want)*time.Hour)) || !updated.Equal(base) {
+			t.Errorf("task %d: activity=%v updated=%v", id, activity, updated)
+		}
+	}
+	if n, err := s.RepairLastActivity(ctx, 500); err != nil || n != 0 {
+		t.Fatalf("second pass repaired=%d err=%v", n, err)
+	}
+}

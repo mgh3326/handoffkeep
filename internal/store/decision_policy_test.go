@@ -238,13 +238,13 @@ func TestResolveDecisionSessionPendingKeepsQuote(t *testing.T) {
 	}
 }
 
-// TestDecisionSessionMigration pins version 46 in a throwaway schema: the
+// TestDecisionSessionMigration pins version 47 in a throwaway schema: the
 // session channel is admitted and the proposal columns exist.
 func TestDecisionSessionMigration(t *testing.T) {
 	s, pool := searchTestStore(t)
 	ctx := context.Background()
 	var version int
-	if err := pool.QueryRow(ctx, `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != SchemaVersion || SchemaVersion < 46 {
+	if err := pool.QueryRow(ctx, `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != SchemaVersion || SchemaVersion < 47 {
 		t.Fatalf("max version=%d err=%v want %d", version, err, SchemaVersion)
 	}
 	task := decisionTask(t, s, "in_progress")

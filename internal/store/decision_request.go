@@ -94,6 +94,13 @@ var (
 	// ErrDecisionEventKeyConflict refuses an event key that an earlier
 	// attempt on the same channel used with a different payload.
 	ErrDecisionEventKeyConflict = errors.New("decision_event_key_conflict")
+	// ErrDecisionAttemptNotFound refuses a deny naming no attempt.
+	ErrDecisionAttemptNotFound = errors.New("decision_attempt_not_found")
+	// ErrDecisionAttemptNotPending refuses a deny of an attempt that is not a
+	// pending_confirmation of the task's current request revision.
+	ErrDecisionAttemptNotPending = errors.New("decision_attempt_not_pending")
+	// ErrDecisionAttemptDenied refuses a second deny of one attempt.
+	ErrDecisionAttemptDenied = errors.New("decision_attempt_denied")
 )
 
 // DecisionAssistantResponder is the resolution responder the server fixes on
