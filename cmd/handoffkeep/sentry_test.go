@@ -50,6 +50,7 @@ func TestServerSentryRoutes(t *testing.T) {
 		{http.MethodPost, "/v1/documents/private-doc", "POST /v1/documents/{key...}"},
 		{http.MethodPost, "/hooks/linear", "POST /hooks/linear"},
 		{http.MethodGet, "/ui/tasks/123", "GET /ui/tasks/{id}"},
+		{http.MethodGet, "/ui/api/live", "GET /ui/api/live"},
 		{http.MethodGet, "/mcp", "GET /mcp"},
 		{http.MethodGet, "/private-unknown", "GET <unmatched>"},
 		{http.MethodGet, "/healthz", ""},

@@ -2805,6 +2805,24 @@ func (s *Store) ListTasksPage(ctx context.Context, lane, state, parentLane strin
 	return s.ListTasksFiltered(ctx, TaskQuery{Lane: lane, State: state, ParentLane: parentLane, Project: project, Area: area, AfterID: &afterID, Limit: limit})
 }
 
+// TasksByJobIDs returns tasks linked to any of the supplied hub jobs, in ID order.
+func (s *Store) TasksByJobIDs(ctx context.Context, jobIDs []string) ([]Task, error) {
+	rows, err := s.pool.Query(ctx, `SELECT `+taskColumns+` FROM tasks WHERE refs->>'job_id' = ANY($1::text[]) ORDER BY id ASC`, jobIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Task{}
+	for rows.Next() {
+		var task Task
+		if err := scanTask(rows, &task); err != nil {
+			return nil, err
+		}
+		out = append(out, task)
+	}
+	return out, rows.Err()
+}
+
 // TaskQuery is a task list filter. A nil AfterID keeps the queue's priority
 // order; a set one pages by id. Stalled keeps only stalled tasks.
 type TaskQuery struct {

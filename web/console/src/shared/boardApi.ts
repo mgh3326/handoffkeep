@@ -85,8 +85,8 @@ export async function fetchTaskDetail(id: number): Promise<BoardDetail> {
 
 /** The live jobs/machine aggregation (#598). Read-only; section statuses
  * inside the payload carry hub failures explicitly. */
-export async function fetchLive(): Promise<LiveResponse> {
-  const data = await getJSON<unknown>("/ui/api/live");
+export async function fetchLive(scope?: "jobs"): Promise<LiveResponse> {
+  const data = await getJSON<unknown>(scope === "jobs" ? "/ui/api/live?scope=jobs" : "/ui/api/live");
   if (!isLiveResponse(data)) throw new Error("malformed live response");
   return data;
 }

@@ -2,13 +2,13 @@
 // jobs from /ui/api/live, the PR pipeline from refs.pr, and the sources hk
 // does not record. Failures render as failures, never as an empty fleet.
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import { DashboardApp, paceTone, relativeLabel } from "./DashboardApp";
 import type { DashboardResponse } from "./types";
 import type { LiveResponse } from "../live";
 
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 const NOW = "2026-10-29T12:00:00Z";
 
@@ -85,6 +85,15 @@ const okLive = () => Promise.resolve(live());
 const failed = () => Promise.reject(new Error("boom"));
 
 describe("DashboardApp (hk 2280)", () => {
+  it("requests job-scoped live data", async () => {
+    const fetchMock = vi.fn(async (url: string) => ({
+      ok: true,
+      json: async () => url === "/ui/api/live?scope=jobs" ? live() : dashboard(),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    render(<DashboardApp />);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/ui/api/live?scope=jobs"));
+  });
   it("renders quota, hosts, jobs, PRs and the missing sources", async () => {
     render(<DashboardApp loadDashboard={okDashboard} loadLive={okLive} />);
     expect(screen.getByRole("heading", { level: 1 }).textContent).toContain("Inbox");

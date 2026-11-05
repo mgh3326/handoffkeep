@@ -7,6 +7,7 @@ import { Attention } from "./Attention";
 
 import type { ReactNode } from "react";
 import { fetchLive } from "../shared/boardApi";
+
 import {
   liveAgeLabel,
   liveRequestFailed,
@@ -23,6 +24,8 @@ import { stateLabel } from "../shared/states";
 import { fetchDashboard } from "./api";
 import { usePoll } from "../shared/usePoll";
 import type { DashboardAccount, DashboardBucket, DashboardMissing, DashboardRepo, DashboardResponse, DashboardTask } from "./types";
+
+const fetchJobsLive = () => fetchLive("jobs");
 
 export const DASHBOARD_POLL_MS = 60_000;
 
@@ -387,7 +390,7 @@ function MissingCard({ missing }: { missing: DashboardMissing[] }) {
 
 export function DashboardApp({
   loadDashboard = fetchDashboard,
-  loadLive = fetchLive,
+  loadLive = fetchJobsLive,
   pollMs = DASHBOARD_POLL_MS,
 }: {
   loadDashboard?: () => Promise<DashboardResponse>;

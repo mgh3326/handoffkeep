@@ -173,10 +173,35 @@ type liveNodesCache struct {
 	ok   *liveNodesSection
 }
 
+type liveTaskStore interface {
+	ListTasksPage(context.Context, string, string, string, *string, *string, int64, int) ([]store.Task, error)
+	TasksByJobIDs(context.Context, []string) ([]store.Task, error)
+}
+
 func (h *Handler) liveAPI(w http.ResponseWriter, r *http.Request) {
+	h.liveAPIWithStore(w, r, h.store)
+}
+
+func (h *Handler) liveAPIWithStore(w http.ResponseWriter, r *http.Request, tasksStore liveTaskStore) {
+	scope := r.URL.Query().Get("scope")
+	if scope != "" && scope != "jobs" {
+		writeJSONError(w, http.StatusBadRequest, "invalid_context")
+		return
+	}
 	jobs := h.hub.liveJobsNow(r.Context())
 	nodes := h.hub.liveNodesNow(r.Context())
-	tasks, truncated, err := h.liveTasks(r.Context())
+	var tasks []store.Task
+	var truncated bool
+	var err error
+	if scope == "jobs" {
+		jobIDs := make([]string, 0, len(jobs.Items))
+		for _, job := range jobs.Items {
+			jobIDs = append(jobIDs, job.JobID)
+		}
+		tasks, err = tasksStore.TasksByJobIDs(r.Context(), jobIDs)
+	} else {
+		tasks, truncated, err = liveTasksFromStore(r.Context(), tasksStore)
+	}
 	if err != nil {
 		http.Error(w, "live view unavailable", http.StatusInternalServerError)
 		return
@@ -295,10 +320,14 @@ func (h *Handler) writeLive(w http.ResponseWriter, response liveResponse) {
 // be attributed to tasks outside the active set as well. The scan is bounded by
 // liveTaskScanMax; hitting the bound marks the response truncated.
 func (h *Handler) liveTasks(ctx context.Context) ([]store.Task, bool, error) {
+	return liveTasksFromStore(ctx, h.store)
+}
+
+func liveTasksFromStore(ctx context.Context, tasksStore liveTaskStore) ([]store.Task, bool, error) {
 	tasks := []store.Task{}
 	var after int64
 	for len(tasks) < liveTaskScanMax {
-		page, err := h.store.ListTasksPage(ctx, "", "", "", nil, nil, after, 1000)
+		page, err := tasksStore.ListTasksPage(ctx, "", "", "", nil, nil, after, 1000)
 		if err != nil {
 			return nil, false, err
 		}
