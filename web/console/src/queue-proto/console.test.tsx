@@ -111,6 +111,10 @@ it("walks pages before reporting a complete board and rejects malformed data", a
 });
 it("expires g prefixes and ignores letter shortcuts while typing", () => {
   const to = vi.spyOn(navigate, "to").mockImplementation(() => {});
+  // The chord window is 900ms of Date.now; pin the clock so a slow runner
+  // cannot split a chord the test means to be instant.
+  let clock = 1000;
+  vi.spyOn(Date, "now").mockImplementation(() => clock);
   render(
     <PageShell current="home">
       <input aria-label="Editor" />
@@ -123,8 +127,8 @@ it("expires g prefixes and ignores letter shortcuts while typing", () => {
   fireEvent.keyDown(screen.getByLabelText("Editor"), { key: "g" });
   fireEvent.keyDown(screen.getByLabelText("Editor"), { key: "d" });
   expect(to).not.toHaveBeenCalled();
-  vi.spyOn(Date, "now").mockReturnValueOnce(1000).mockReturnValueOnce(2000);
   fireEvent.keyDown(document.body, { key: "g" });
+  clock += 1000; // past the 900ms chord window
   fireEvent.keyDown(document.body, { key: "d" });
   expect(to).not.toHaveBeenCalled();
 });
