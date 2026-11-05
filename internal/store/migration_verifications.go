@@ -1,10 +1,10 @@
 package store
 
-// Version 46 adds the verification ledger (hk 3120): one verdict per
+// Version 47 adds the verification ledger (hk 3120): one verdict per
 // (change, head SHA), saying how that head was verified. It is a new table;
 // the foreign key to changes takes SHARE ROW EXCLUSIVE on changes for the
 // rest of the transaction, so change writers wait until commit.
-var verificationsV46 = []string{
+var verificationsV47 = []string{
 	`CREATE TABLE IF NOT EXISTS verifications (
 		id BIGSERIAL PRIMARY KEY,
 		change_id BIGINT NOT NULL REFERENCES changes(id),
@@ -23,5 +23,5 @@ var verificationsV46 = []string{
 		recorded_at TIMESTAMPTZ NOT NULL,
 		UNIQUE(change_id, head_sha)
 	)`,
-	`INSERT INTO schema_version(version) VALUES (46)`,
+	`INSERT INTO schema_version(version) VALUES (47)`,
 }
