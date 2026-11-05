@@ -1049,10 +1049,19 @@ func TestAssistantResolveInvisibleQuote(t *testing.T) {
 		}
 	}
 	// A real quote wrapped in invisible runes is still the operator's
-	// words — recorded verbatim, wrapper and all.
-	task := assistantTask(t, s, "in_progress")
-	request := assistantRecordWith(t, s, task.ID, in)
+	// words — recorded verbatim, wrapper and all. On a human_only request it
+	// is a relay, so it waits for confirmation (R1); an ordinary request
+	// closes on it.
 	wrapped := "\u200b\u00ad ship it \ufe0f\u200b"
+	pendingTask := assistantTask(t, s, "in_progress")
+	pendingRequest := assistantRecordWith(t, s, pendingTask.ID, in)
+	if _, err := s.ResolveDecisionRequestAssistant(ctx, pendingTask.ID, "berry-mcp", DecisionAssistantResolveInput{
+		RequestID: pendingRequest.ID, Option: "A", Provenance: DecisionProvenanceOperatorDecided, OperatorQuote: wrapped, DecisionRef: pendingRequest.ID,
+	}); !errors.Is(err, ErrDecisionPendingConfirmation) {
+		t.Fatalf("wrapped quote on human_only err=%v", err)
+	}
+	task := assistantTask(t, s, "in_progress")
+	request := assistantRecord(t, s, task.ID)
 	got, err := s.ResolveDecisionRequestAssistant(ctx, task.ID, "berry-mcp", DecisionAssistantResolveInput{
 		RequestID: request.ID, Option: "A", Provenance: DecisionProvenanceOperatorDecided, OperatorQuote: wrapped, DecisionRef: request.ID,
 	})
