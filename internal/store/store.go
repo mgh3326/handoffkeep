@@ -1246,6 +1246,10 @@ func (s *Store) migrate(ctx context.Context) error {
 		return err
 	}
 
+	if err := migrateOnce(ctx, tx, 46, func() error { return execAll(ctx, tx, standingOrdersV46) }); err != nil {
+		return err
+	}
+
 	return tx.Commit(ctx)
 }
 func validName(x string) bool        { return nameRE.MatchString(x) }
