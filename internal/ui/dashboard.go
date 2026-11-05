@@ -157,7 +157,7 @@ func (h *Handler) dashboardAPI(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) dashboardPage(w http.ResponseWriter, r *http.Request) {
-	h.shell(w)
+	h.shell(w, r)
 }
 
 func buildDashboard(now time.Time, quota []store.QuotaAccountLatest, tasks []store.Task, merged []store.MergedTaskEvent) dashboardResponse {

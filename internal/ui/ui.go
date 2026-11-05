@@ -2,6 +2,7 @@
 package ui
 
 import (
+	"context"
 	"crypto/rand"
 	"embed"
 	"errors"
@@ -189,6 +190,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	email := identity.Email
+	r = r.WithContext(context.WithValue(r.Context(), shellEmailKey{}, email))
 	if r.Method == http.MethodPost {
 		switch r.URL.Path {
 		case "/ui/dispositions/answer":
@@ -221,7 +223,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.URL.Path {
 	case "/ui", "/ui/work":
-		h.shell(w)
+		h.shell(w, r)
 	case "/ui/timeline":
 		h.timeline(w, r, false)
 	case "/ui/queue":
@@ -290,7 +292,7 @@ func (h *Handler) taskPage(w http.ResponseWriter, r *http.Request, raw, email st
 		http.Error(w, "invalid task id", http.StatusBadRequest)
 		return
 	}
-	h.shell(w)
+	h.shell(w, r)
 }
 
 var taskIDPattern = regexp.MustCompile(`^[1-9][0-9]{0,14}$`)
@@ -418,7 +420,7 @@ func (h *Handler) board(w http.ResponseWriter, r *http.Request, email string) {
 		http.Error(w, "invalid task id", http.StatusBadRequest)
 		return
 	}
-	h.shell(w)
+	h.shell(w, r)
 }
 
 func (h *Handler) decisions(w http.ResponseWriter, r *http.Request, fragment bool, email, notice string) {
@@ -617,19 +619,35 @@ func (h *Handler) fleet(w http.ResponseWriter, r *http.Request, fragment bool) {
 		h.render(w, "fleet_content", nil)
 		return
 	}
-	h.shell(w)
+	h.shell(w, r)
 }
 
 // shellPageData is the model of shell_page. Preloads are the unstamped URLs of
 // the static imports of shell.js, in the order the entry lists them.
 type shellPageData struct {
 	Preloads []string
+	// CSRF is the form token for the signed-in operator. The shell's write
+	// views (decision answers, comments) read it from <meta name="hk-csrf">,
+	// and the same request sets the hk_ui_csrf cookie it is checked against.
+	CSRF string
 }
 
+// shellEmailKey carries the verified operator email from ServeHTTP to the
+// shell page, so every mount point issues the same CSRF token without each
+// caller threading the email through.
+type shellEmailKey struct{}
+
 // shell serves the one page behind Home, Work, the document viewer and the
-// task deep link; the browser picks the view from the path.
-func (h *Handler) shell(w http.ResponseWriter) {
-	h.render(w, "shell_page", shellPageData{Preloads: h.shellPreloads()})
+// task deep link; the browser picks the view from the path. It also renews
+// the CSRF form token, as every old page with a write form did (main CI
+// e4db65e..aaebbe6 failed when the shell dropped it).
+func (h *Handler) shell(w http.ResponseWriter, r *http.Request) {
+	email, _ := r.Context().Value(shellEmailKey{}).(string)
+	csrf := ""
+	if email != "" {
+		csrf = h.csrfForForm(w, r, email)
+	}
+	h.render(w, "shell_page", shellPageData{Preloads: h.shellPreloads(), CSRF: csrf})
 }
 
 // staticImportRE matches `from"./x.js"` and `import"./x.js"` in the minified

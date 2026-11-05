@@ -11,13 +11,24 @@ function visit(path: string) {
   return render(<App />);
 }
 
-afterEach(() => window.history.pushState(null, "", "/"));
+const emptyAttention = {
+  generated_at: "2026-11-05T05:00:00Z",
+  decisions: { count: 0, items: [] },
+  tasks: { count: 0, awaiting_decision: 0, stalled: 0, items: [] },
+  deploys: { count: 0, events_capped: false, items: [] },
+};
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  window.history.pushState(null, "", "/");
+});
 
 describe("shell router", () => {
-  it.each(["/ui", "/ui/home"])("%s renders Home", (path) => {
+  it.each(["/ui", "/ui/home"])("%s renders Home", async (path) => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(emptyAttention))));
     visit(path);
-    expect(screen.getByRole("heading", { name: "Home" })).toBeTruthy();
-    expect(screen.getByText(/arrives with hk 3141/)).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Waiting on me" })).toBeTruthy();
+    expect(await screen.findByText("Nothing is waiting on you.")).toBeTruthy();
   });
 
   it("/ui/work renders Work and keeps the URL", () => {
