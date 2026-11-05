@@ -84,6 +84,31 @@ func TestTaskClosure(t *testing.T) {
 			t.Fatalf("%q: %v", tc.evidence, err)
 		}
 	}
+	t.Run("settled transitions retain and reopen clears closure", func(t *testing.T) {
+		now := time.Now().UTC()
+		x := Task{}
+		if err := applyLifecycle(&x, StateReviewing, StateMerged, now, &TaskClosure{Type: "resolved", Evidence: "  result  "}); err != nil {
+			t.Fatal(err)
+		}
+		if x.Refs.Closure == nil || x.Refs.Closure.Evidence != "result" {
+			t.Fatalf("closure=%+v", x.Refs.Closure)
+		}
+		if err := applyLifecycle(&x, StateMerged, StateDeployed, now, &TaskClosure{Type: "bogus", Evidence: "ignored"}); err != nil {
+			t.Fatal(err)
+		}
+		if x.Refs.Closure.Evidence != "result" {
+			t.Fatalf("closure changed: %+v", x.Refs.Closure)
+		}
+		if err := applyLifecycle(&x, StateDeployed, StateUnstarted, now, nil); err != nil || x.Refs.Closure != nil {
+			t.Fatalf("reopen closure=%+v err=%v", x.Refs.Closure, err)
+		}
+	})
+	for _, evidence := range []string{" ", strings.Repeat("x", 1025)} {
+		x := Task{}
+		if err := applyLifecycle(&x, StateBacklog, StateDropped, time.Now().UTC(), &TaskClosure{Type: "cancelled", Evidence: evidence}); !errors.Is(err, ErrClosureInvalid) {
+			t.Fatalf("invalid evidence length: %v", err)
+		}
+	}
 	t.Run("history", func(t *testing.T) {
 		s := schemaStore(t, "closure_history")
 		x := flowTask(t, s, s.pool, "decide", StateBacklog, false)

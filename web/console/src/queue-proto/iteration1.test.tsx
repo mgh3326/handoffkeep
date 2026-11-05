@@ -169,6 +169,7 @@ describe("staleness — explicit threshold, deterministic buckets", () => {
     expect(isStale(mkTask({ created_at: "2026-09-19T08:00:00+09:00" }), NOW)).toBe(false); // 1h
     expect(isStale(mkTask({ created_at: "2026-08-20T00:00:00+09:00", state: "merged" }), NOW)).toBe(false); // terminal
     expect(isStale(mkTask({ created_at: "2026-08-20T00:00:00+09:00", state: "dropped" }), NOW)).toBe(false);
+    expect(isStale(mkTask({ created_at: "2026-08-20T00:00:00+09:00", state: "completed" }), NOW)).toBe(false);
     expect(STALE_MIN_AGE_DAYS).toBe(7);
   });
 
