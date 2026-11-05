@@ -24,6 +24,10 @@ func TestTaskClosureMigration(t *testing.T) {
 	if err := s.pool.QueryRow(t.Context(), `SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='jobs' AND column_name='harness')`).Scan(&jobContextColumn); err != nil || !jobContextColumn {
 		t.Fatalf("job context migration applied=%t err=%v", jobContextColumn, err)
 	}
+	var denialColumn bool
+	if err := s.pool.QueryRow(t.Context(), `SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='decision_answer_attempts' AND column_name='denies_attempt_id')`).Scan(&denialColumn); err != nil || !denialColumn {
+		t.Fatalf("decision denial migration applied=%t err=%v", denialColumn, err)
+	}
 	for _, table := range []string{"task_origins", "changes", "decision_resolutions"} {
 		var exists bool
 		if err := s.pool.QueryRow(t.Context(), `SELECT to_regclass($1) IS NOT NULL`, table).Scan(&exists); err != nil || !exists {

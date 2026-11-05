@@ -1929,6 +1929,7 @@ func serve(args []string, errout io.Writer) error {
 	if *iceboxDays > 0 {
 		workers = append(workers, backlogSweepWorker{store: st, days: *iceboxDays})
 	}
+	workers = append(workers, lastActivityRepairWorker{store: st})
 	linear := linearFromEnv(st)
 	if linear.boardWorker != nil {
 		workers = append(workers, linear.boardWorker)
