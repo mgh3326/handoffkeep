@@ -112,7 +112,7 @@ func TestOriginsMigration(t *testing.T) {
 		t.Error("an origin of a missing task was accepted")
 	}
 	var idx int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_indexes WHERE tablename='task_origins' AND indexdef LIKE '%(provider, external_id)%'`).Scan(&idx); err != nil || idx != 1 {
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_indexes WHERE schemaname=current_schema() AND tablename='task_origins' AND indexdef LIKE '%(provider, external_id)%'`).Scan(&idx); err != nil || idx != 1 {
 		t.Errorf("(provider, external_id) index count=%d err=%v", idx, err)
 	}
 
@@ -134,7 +134,7 @@ func TestOriginsMigration(t *testing.T) {
 	if _, err := pool.Exec(ctx, `INSERT INTO documents(key,kind,body,sha256,created_by,created_at,updated_at,task_id) VALUES('d/task','note','b',$1,'test',now(),now(),999999999)`, strings.Repeat("0", 64)); err == nil {
 		t.Error("a document of a missing task was accepted")
 	}
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_indexes WHERE tablename='documents' AND indexname='documents_task'`).Scan(&idx); err != nil || idx != 1 {
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_indexes WHERE schemaname=current_schema() AND tablename='documents' AND indexname='documents_task'`).Scan(&idx); err != nil || idx != 1 {
 		t.Errorf("documents_task index count=%d err=%v", idx, err)
 	}
 }
