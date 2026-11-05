@@ -129,14 +129,25 @@ jobs:
             status=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/statuses" -q '[.[] | select(.context == "ci-ok")] | first | .state // "none"')
             read -r rs rc <<<"$run"
             echo "ci-ok check: $rs $rc; ci-ok status: $status"
-            if [ "$rc" = success ] || [ "$status" = success ]; then
-              echo "green=true" >> "$GITHUB_OUTPUT"; exit 0
+            # The main push's latest ci-ok check run decides when it has a
+            # verdict: a failure blocks even if an older any-ref status says
+            # success. A ci-any-ref status counts only when the check run has
+            # no verdict (none yet, or skipped/cancelled because a newer main
+            # push superseded it).
+            case "$rc" in
+              failure|timed_out|action_required|startup_failure)
+                echo "main CI ci-ok on $GITHUB_SHA ended $rc; not publishing" >&2; exit 1 ;;
+              success)
+                echo "green=true" >> "$GITHUB_OUTPUT"; exit 0 ;;
+            esac
+            if [ "$rs" = none ] || [ "$rs" = completed ]; then
+              case "$status" in
+                success) echo "green=true" >> "$GITHUB_OUTPUT"; exit 0 ;;
+                failure|error) echo "ci-any-ref ci-ok status on $GITHUB_SHA is $status; not publishing" >&2; exit 1 ;;
+              esac
             fi
-            if [ "$rc" = failure ] || [ "$rc" = timed_out ] || [ "$status" = failure ]; then
-              echo "main CI failed on $GITHUB_SHA; not publishing" >&2; exit 1
-            fi
-            if [ "$rs" = completed ] && [ "$status" = none ]; then
-              echo "::notice::main CI on $GITHUB_SHA ended $rc (superseded); not publishing, the next tag carries this change"
+            if [ "$rs" = completed ]; then
+              echo "::notice::main CI on $GITHUB_SHA ended $rc (superseded) and no ci-any-ref verdict; not publishing, the next tag carries this change"
               echo "green=false" >> "$GITHUB_OUTPUT"; exit 0
             fi
             if [ "$(date +%s)" -ge "$deadline" ]; then
