@@ -34,12 +34,13 @@ const ciOkIf = "always() && (contains(needs.*.result, 'failure') || !(contains(n
 const ciOkIfCancelledOnly = "always() && (contains(needs.*.result, 'failure') || !contains(needs.*.result, 'cancelled'))"
 
 type tierJob struct {
-	If       string         `yaml:"if"`
-	RunsOn   any            `yaml:"runs-on"`
-	Services map[string]any `yaml:"services"`
-	Needs    any            `yaml:"needs"`
-	Uses     string         `yaml:"uses"`
-	Steps    []step         `yaml:"steps"`
+	If          string         `yaml:"if"`
+	RunsOn      any            `yaml:"runs-on"`
+	Services    map[string]any `yaml:"services"`
+	Needs       any            `yaml:"needs"`
+	Uses        string         `yaml:"uses"`
+	Steps       []step         `yaml:"steps"`
+	Concurrency map[string]any `yaml:"concurrency"`
 }
 
 type tierWorkflow struct {
@@ -235,7 +236,7 @@ func tierProblems(ci, anyRef []byte) []string {
 		return append(out, err.Error())
 	}
 	// A dispatch reaches the post tier only because its event is not
-	// pull_request; mergewake bisects with it, so it must run the full suite.
+	// pull_request; an empty packages input retains the full suite for bisection.
 	if _, ok := ar.On["pull_request"]; ok {
 		add("ci-any-ref.yml must not trigger on pull_request")
 	}
@@ -245,6 +246,55 @@ func tierProblems(ci, anyRef []byte) []string {
 	}
 	if !calls {
 		add("ci-any-ref.yml must call ci.yml")
+	}
+	out = append(out, packageProblems(wf, ar)...)
+	return out
+}
+
+func packageProblems(ci, anyRef tierWorkflow) []string {
+	var out []string
+	for _, item := range []struct {
+		name, event string
+		wf          tierWorkflow
+	}{
+		{"ci.yml", "workflow_call", ci}, {"ci-any-ref.yml", "workflow_dispatch", anyRef},
+	} {
+		event, _ := item.wf.On[item.event].(map[string]any)
+		inputs, _ := event["inputs"].(map[string]any)
+		input, _ := inputs["packages"].(map[string]any)
+		if input == nil || input["type"] != "string" || input["default"] != "" {
+			out = append(out, item.name+": packages must be a string with empty default")
+		}
+		for job, spec := range item.wf.Jobs {
+			for _, step := range spec.Steps {
+				if strings.Contains(step.Run, "inputs.packages") {
+					out = append(out, item.name+" job "+job+": packages expression in run")
+				}
+			}
+		}
+	}
+	full := false
+	for _, step := range ci.Jobs["post-linux"].Steps {
+		if strings.TrimSpace(step.Run) == "go test -v -race -timeout 30m ./..." && step.If == "${{ inputs.packages == '' }}" {
+			full = true
+		}
+	}
+	if !full {
+		out = append(out, "post-linux must run the full race suite when packages is empty")
+	}
+	for _, job := range []string{"ci", "status"} {
+		if !strings.Contains(fmt.Sprint(anyRef.Jobs[job].Concurrency["group"]), "inputs.packages") {
+			out = append(out, "ci-any-ref job "+job+": concurrency must include packages")
+		}
+	}
+	status := false
+	for _, step := range anyRef.Jobs["status"].Steps {
+		if strings.Contains(step.Run, `if [[ -n "$PACKAGES" ]]; then CONTEXT=ci-ok-test-packages;`) {
+			status = true
+		}
+	}
+	if !status {
+		out = append(out, "packages status must use ci-ok-test-packages")
 	}
 	return out
 }
@@ -273,6 +323,13 @@ func TestPullRequestsStayOnHostedRunners(t *testing.T) {
 		var wf tierWorkflow
 		if err := yaml.Unmarshal(readWorkflow(t, name), &wf); err != nil {
 			t.Fatal(err)
+		}
+		for job, spec := range wf.Jobs {
+			for _, step := range spec.Steps {
+				if strings.Contains(step.Run, "inputs.packages") {
+					t.Errorf("%s job %s: packages expression in run", name, job)
+				}
+			}
 		}
 		for _, p := range append(prRunnerProblems(name, wf), selfHostedProblems(name, wf)...) {
 			t.Error(p)
@@ -315,6 +372,32 @@ func TestCITierMutantsTurnRed(t *testing.T) {
 			}
 		})
 	}
+	for _, m := range []struct {
+		name, old, new string
+		targetCI       bool
+	}{
+		{"packages-in-run", "          go test -v -race -timeout 30m $PACKAGES", "          go test -v -race -timeout 30m ${{ inputs.packages }}", true},
+		{"packages-posts-ci-ok-test", "then CONTEXT=ci-ok-test-packages;", "then CONTEXT=ci-ok-test;", false},
+		{"packages-concurrency-shared", "-${{ inputs.packages }}", "", false},
+		{"packages-skips-full-suite", "        if: ${{ inputs.packages == '' }}\n        run: go test -v -race -timeout 30m ./...", "        if: ${{ inputs.packages != '' }}\n        run: go test -v -race -timeout 30m ./...", true},
+		{"packages-default-nonempty", "        default: ''\n        type: string\n# Two tiers", "        default: './internal/store'\n        type: string\n# Two tiers", true},
+	} {
+		t.Run(m.name, func(t *testing.T) {
+			a, b := ci, string(anyRef)
+			target := &b
+			if m.targetCI {
+				target = &a
+			}
+			if !strings.Contains(*target, m.old) {
+				t.Fatalf("mutant anchor %q missing", m.old)
+			}
+			*target = strings.Replace(*target, m.old, m.new, 1)
+			if len(tierProblems([]byte(a), []byte(b))) == 0 {
+				t.Fatal("mutant passed tier checks")
+			}
+		})
+	}
+
 }
 
 // The pruning step must come before gitleaks: moved behind it, the scan has
