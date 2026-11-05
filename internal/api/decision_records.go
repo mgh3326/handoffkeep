@@ -56,7 +56,7 @@ func (s Server) decisionRecordSnooze(w http.ResponseWriter, r *http.Request) {
 	}
 	defer r.Body.Close()
 	var input decisionSnoozeInput
-	if err := decode(r, &input, 1024); err != nil {
+	if err := decode(r, &input, bodyTiny); err != nil {
 		appErr(w, r, err)
 		return
 	}

@@ -93,7 +93,7 @@ func (s Server) taskCommentsList(w http.ResponseWriter, r *http.Request) {
 	}
 	var afterID int64
 	if r.URL.Query().Has("after_id") {
-		if afterID, err = queryAfterID(r); err != nil {
+		if afterID, err = queryCursor(r, "after_id"); err != nil {
 			appErr(w, r, err)
 			return
 		}

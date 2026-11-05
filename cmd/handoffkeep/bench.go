@@ -48,7 +48,7 @@ func benchAreaExceptionsListCmd(args []string, out io.Writer) error {
 		return errors.New(benchAreaExceptionsUsage)
 	}
 	if *area != "" {
-		if err := store.ValidateTaskArea(area); err != nil {
+		if err := store.CheckTaskArea(area); err != nil {
 			return err
 		}
 	}

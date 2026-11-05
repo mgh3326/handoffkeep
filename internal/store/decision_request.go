@@ -364,9 +364,9 @@ func optionKeys(options DecisionOptions) map[string]bool {
 	return keys
 }
 
-// ValidateDecisionOptionsDetailed names the first reason options are
+// CheckDecisionOptionsDetailed names the first reason options are
 // refused. It applies the same rules as validDecisionOptions.
-func ValidateDecisionOptionsDetailed(x DecisionOptions) error {
+func CheckDecisionOptionsDetailed(x DecisionOptions) error {
 	if len(x.Options) == 0 {
 		return invalidDecisionRequest("at least one option is required")
 	}
@@ -399,16 +399,16 @@ func ValidateDecisionOptionsDetailed(x DecisionOptions) error {
 	return nil
 }
 
-// ValidateDecisionRequestInput checks a request before anything is written.
+// CheckDecisionRequestInput checks a request before anything is written.
 // It is exported so the CLI can report the exact reason locally.
-func ValidateDecisionRequestInput(in DecisionRequestInput) error {
+func CheckDecisionRequestInput(in DecisionRequestInput) error {
 	if strings.TrimSpace(in.Question) == "" {
 		return invalidDecisionRequest("question is required")
 	}
 	if !validText(in.Question, MaxBytes) || !utf8.ValidString(in.Question) {
 		return invalidDecisionRequest("question is not valid text")
 	}
-	if err := ValidateDecisionOptionsDetailed(in.Options); err != nil {
+	if err := CheckDecisionOptionsDetailed(in.Options); err != nil {
 		return err
 	}
 	// The same bound as a needs_decision transition: the question and its
@@ -445,9 +445,9 @@ func ValidateDecisionRequestInput(in DecisionRequestInput) error {
 	return nil
 }
 
-// ValidateDecisionResolveInput checks the shape of a resolution; option
+// CheckDecisionResolveInput checks the shape of a resolution; option
 // membership is checked against the stored request.
-func ValidateDecisionResolveInput(in DecisionResolveInput) error {
+func CheckDecisionResolveInput(in DecisionResolveInput) error {
 	if !strings.HasPrefix(in.RequestID, "dr-") || !validDecisionLine(in.RequestID, 64) {
 		return invalidDecisionRequest("request_id is required (dr-<task>-<revision>)")
 	}
@@ -559,7 +559,7 @@ func (s *Store) RecordDecisionRequest(ctx context.Context, taskID int64, by stri
 		due := in.DueAt.UTC()
 		in.DueAt = &due
 	}
-	if err := ValidateDecisionRequestInput(in); err != nil {
+	if err := CheckDecisionRequestInput(in); err != nil {
 		return DecisionRequestResult{}, err
 	}
 	if err := rejectDecisionRequestSecrets(in); err != nil {
@@ -742,7 +742,7 @@ func (s *Store) resolveDecisionRequest(ctx context.Context, taskID int64, by str
 	if by == "" || !validText(by, 128) {
 		return DecisionRequestResult{}, invalidDecisionRequest("recorder is required")
 	}
-	if err := ValidateDecisionResolveInput(in); err != nil {
+	if err := CheckDecisionResolveInput(in); err != nil {
 		return DecisionRequestResult{}, err
 	}
 	if err := guard.Reject(strings.Join([]string{in.Text, in.Receipt, in.Responder}, "\n")); err != nil {

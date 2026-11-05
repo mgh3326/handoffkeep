@@ -98,10 +98,10 @@ func taskSweepCmd(args []string, out io.Writer) error {
 // validAutomationFlags checks serve's --started-stalled-hours (1..8760) and
 // --backlog-icebox-days (0 for off, or 1..3650) against the store's bounds.
 func validAutomationFlags(stalledHours, iceboxDays int) error {
-	if err := store.ValidStartedStalledHours(stalledHours); err != nil {
+	if err := store.CheckStartedStalledHours(stalledHours); err != nil {
 		return fmt.Errorf("--started-stalled-hours: %w", err)
 	}
-	if err := store.ValidBacklogIceboxDays(iceboxDays); err != nil {
+	if err := store.CheckBacklogIceboxDays(iceboxDays); err != nil {
 		return fmt.Errorf("--backlog-icebox-days: %w", err)
 	}
 	return nil

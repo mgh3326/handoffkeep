@@ -247,14 +247,14 @@ func (s *Store) processNextLinearOutbox(ctx context.Context, ops []string, proce
 	defer tx.Rollback(ctx)
 	var item LinearOutbox
 	err = scanLinearOutbox(tx.QueryRow(ctx, `SELECT `+linearOutboxColumns+` FROM linear_outbox current
-		WHERE state='pending' AND next_attempt_at<=now() AND op=ANY($1::text[])
+		WHERE state='pending' AND next_attempt_at<=$2 AND op=ANY($1::text[])
 		AND NOT EXISTS (
 			SELECT 1 FROM linear_outbox earlier
 			WHERE earlier.task_id=current.task_id AND earlier.seq<current.seq
 			AND earlier.op=ANY($1::text[])
 			AND earlier.state NOT IN ('sent','skipped')
 		)
-		ORDER BY task_id ASC,seq ASC,id ASC FOR UPDATE SKIP LOCKED LIMIT 1`, ops), &item)
+		ORDER BY task_id ASC,seq ASC,id ASC FOR UPDATE SKIP LOCKED LIMIT 1`, ops, time.Now().UTC()), &item)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}

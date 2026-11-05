@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"strconv"
 
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
@@ -21,14 +20,10 @@ func (s Server) syncDelta(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.auth(w, r); !ok {
 		return
 	}
-	after := int64(0)
-	if r.URL.Query().Has("after") {
-		var err error
-		after, err = strconv.ParseInt(r.URL.Query().Get("after"), 10, 64)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, "invalid_context")
-			return
-		}
+	after, err := queryCursor(r, "after")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_context")
+		return
 	}
 	limit, err := queryLimit(r, 100, store.SyncLimit)
 	if err != nil {

@@ -570,8 +570,10 @@ func (s *Store) ProcessNextLinearDecisionOp(ctx context.Context, process func(co
 		return false, nil, err
 	}
 	defer tx.Rollback(ctx)
+	// Due-ness is judged on the Go clock that also writes next_attempt_at,
+	// as in the decision notice worker; the DB clock is never mixed in.
 	var op LinearDecisionOp
-	err = scanLinearDecisionOp(tx.QueryRow(ctx, `SELECT `+linearDecisionOpColumns+` FROM linear_decision_ops WHERE state='pending' AND next_attempt_at<=now() ORDER BY next_attempt_at ASC,id ASC FOR UPDATE SKIP LOCKED LIMIT 1`), &op)
+	err = scanLinearDecisionOp(tx.QueryRow(ctx, `SELECT `+linearDecisionOpColumns+` FROM linear_decision_ops WHERE state='pending' AND next_attempt_at<=$1 ORDER BY next_attempt_at ASC,id ASC FOR UPDATE SKIP LOCKED LIMIT 1`, time.Now().UTC()), &op)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil, nil
 	}

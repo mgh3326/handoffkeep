@@ -77,18 +77,18 @@ func TestValidTaskAreaIsExactMatch(t *testing.T) {
 // The unknown-area error names the whole allowed set, in order, so a caller
 // can fix the value without a second lookup.
 func TestTaskAreaErrorNamesAllowedSet(t *testing.T) {
-	err := ValidateTaskArea(areaPtr("Blender"))
+	err := CheckTaskArea(areaPtr("Blender"))
 	if !errors.Is(err, ErrTaskAreaUnknown) {
-		t.Fatalf("ValidateTaskArea(Blender)=%v, want ErrTaskAreaUnknown", err)
+		t.Fatalf("CheckTaskArea(Blender)=%v, want ErrTaskAreaUnknown", err)
 	}
 	if !strings.Contains(err.Error(), strings.Join(TaskAreas(), ", ")) {
 		t.Fatalf("error %q does not list the allowed set in order", err)
 	}
-	if err := ValidateTaskArea(nil); err != nil {
-		t.Fatalf("ValidateTaskArea(nil)=%v, want nil (area is optional)", err)
+	if err := CheckTaskArea(nil); err != nil {
+		t.Fatalf("CheckTaskArea(nil)=%v, want nil (area is optional)", err)
 	}
-	if err := ValidateTaskArea(areaPtr("docs")); err != nil {
-		t.Fatalf("ValidateTaskArea(docs)=%v", err)
+	if err := CheckTaskArea(areaPtr("docs")); err != nil {
+		t.Fatalf("CheckTaskArea(docs)=%v", err)
 	}
 }
 
