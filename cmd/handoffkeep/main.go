@@ -53,7 +53,7 @@ func main() {
 }
 func run(args []string, out, errout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: handoffkeep serve|sync|ledger|since|mcp|ctx|memory|doc|attach|r2usage|tasks|decisions|fleet-metrics|bench|version")
+		return errors.New("usage: handoffkeep serve|sync|ledger|since|mcp|ctx|memory|doc|attach|r2usage|tasks|tickets|decisions|fleet-metrics|bench|version")
 	}
 	switch args[0] {
 	case "wrk":
@@ -80,6 +80,8 @@ func run(args []string, out, errout io.Writer) error {
 		return r2UsageCmd(args[1:], out)
 	case "tasks":
 		return tasksCmdE(args[1:], out, errout)
+	case "tickets":
+		return ticketsCmd(args[1:], out)
 	case "decisions":
 		return decisionsCmd(args[1:], out)
 	case "fleet-metrics":
@@ -89,7 +91,7 @@ func run(args []string, out, errout io.Writer) error {
 	case "version", "--version":
 		return versionCmd(args[1:], out)
 	default:
-		return errors.New("usage: handoffkeep serve|sync|ledger|since|mcp|ctx|memory|doc|attach|r2usage|tasks|decisions|fleet-metrics|bench|version")
+		return errors.New("usage: handoffkeep serve|sync|ledger|since|mcp|ctx|memory|doc|attach|r2usage|tasks|tickets|decisions|fleet-metrics|bench|version")
 	}
 }
 
@@ -185,7 +187,7 @@ func taskRefs(pr, headSHA, reportPath, jobID string, linear *store.TaskLinear) (
 }
 
 func normalizeTaskArgs(args []string) ([]string, error) {
-	valueFlags := map[string]bool{"--url": true, "--token": true, "--lane": true, "--parent-lane": true, "--state": true, "--title": true, "--kind": true, "--priority": true, "--expected": true, "--by": true, "--to": true, "--note": true, "--reason": true, "--question": true, "--limit": true, "--pr": true, "--head-sha": true, "--report-path": true, "--job-id": true, "--no-job": true, "--option": true, "--recommended": true, "--tier": true, "--grade": true, "--brief-key": true, "--label": true, "--linear-report-key": true, "--linear-verify-key": true, "--linear-decision-key": true, "--deploy-sha": true, "--origin-pr": true, "--origin-task": true, "--doc": true, "--project": true, "--area": true, "--parent": true, "--duplicate-of": true}
+	valueFlags := map[string]bool{"--url": true, "--token": true, "--lane": true, "--parent-lane": true, "--state": true, "--title": true, "--kind": true, "--priority": true, "--expected": true, "--by": true, "--to": true, "--note": true, "--reason": true, "--question": true, "--limit": true, "--pr": true, "--head-sha": true, "--report-path": true, "--job-id": true, "--no-job": true, "--option": true, "--recommended": true, "--tier": true, "--grade": true, "--brief-key": true, "--label": true, "--linear-report-key": true, "--linear-verify-key": true, "--linear-decision-key": true, "--deploy-sha": true, "--origin-pr": true, "--origin-task": true, "--doc": true, "--project": true, "--area": true, "--parent": true, "--duplicate-of": true, "--link": true}
 	flags, positional := []string{}, []string{}
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -218,7 +220,7 @@ func tasksCmd(args []string, out io.Writer) error {
 
 func tasksCmdE(args []string, out, errout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: tasks add|list|export|claim|next|transition|reopen|rebind|relane|project|projects|milestone|label|labels|due|subscribe|unsubscribe|set-area|areas|parent|relate|unrelate|migrate-states|decision-request|decision-resolve|show|comment|comments|disposition|event|sweep|project-status")
+		return errors.New("usage: tasks add|list|export|claim|next|transition|reopen|rebind|relane|project|projects|milestone|label|labels|due|subscribe|unsubscribe|set-area|areas|parent|relate|unrelate|migrate-states|decision-request|decision-resolve|show|comment|comments|disposition|event|sweep|project-status|intake|triage")
 	}
 	if args[0] == "disposition" {
 		return dispositionCmd(args[1:], out)
@@ -265,6 +267,12 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 	if args[0] == "sweep" {
 		return taskSweepCmd(args[1:], out)
 	}
+	if args[0] == "intake" {
+		return taskIntakeCmd(args[1:], out)
+	}
+	if args[0] == "triage" {
+		return taskTriageCmd(args[1:], out)
+	}
 	fs := flag.NewFlagSet("tasks "+args[0], flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	c := remoteClient(fs)
@@ -273,6 +281,9 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 	state := fs.String("state", "", "task state (triage, backlog, unstarted, researching, developing, reviewing, merged, deployed, dropped, duplicate, icebox; old names such as in_progress or hold are still accepted)")
 	parentID := fs.Int64("parent", 0, "parent task id (tasks add only)")
 	duplicateOf := fs.Int64("duplicate-of", 0, "task a duplicate transition points at (tasks transition --to duplicate)")
+	link := fs.Int64("link", 0, "existing task to relate the new task to as related, answering the duplicate check (tasks add only)")
+	newTask := fs.Bool("new", false, "file the task without the duplicate check (tasks add only)")
+	set := fs.Bool("set", false, "apply a triage exit to the task's children still in triage (tasks transition only)")
 	project := fs.String("project", "", "task project (required on add; an explicit empty value lists legacy no-project rows on list/export)")
 	area := fs.String("area", "", "task area from the closed vocabulary listed by tasks areas (optional on add; an explicit empty value lists no-area rows on list)")
 	title := fs.String("title", "", "task title")
@@ -317,7 +328,16 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 	}
 	linearFlagsUsed, docFlagUsed, noJobSet, projectSet, areaSet, expectedSet := false, false, false, false, false, false
 	parentSet, duplicateOfSet, stalledSet := false, false, false
+	linkSet, kindSet, prioritySet := false, false, false
 	fs.Visit(func(item *flag.Flag) {
+		switch item.Name {
+		case "link":
+			linkSet = true
+		case "kind":
+			kindSet = true
+		case "priority":
+			prioritySet = true
+		}
 		if item.Name == "stalled" {
 			stalledSet = true
 		}
@@ -383,6 +403,18 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 	if parentSet && (args[0] != "add" || *parentID < 1) {
 		return errors.New("--parent requires a positive task id and is accepted only by tasks add (tasks parent changes an existing task)")
 	}
+	if linkSet && (args[0] != "add" || *link < 1) {
+		return errors.New("--link requires a positive task id and is accepted only by tasks add")
+	}
+	if *newTask && args[0] != "add" {
+		return errors.New("--new is accepted only by tasks add")
+	}
+	if linkSet && *newTask {
+		return errors.New("--link and --new are exclusive")
+	}
+	if *set && args[0] != "transition" {
+		return errors.New("--set is accepted only by tasks transition")
+	}
 	if duplicateOfSet && (args[0] != "transition" || *duplicateOf < 1) {
 		return errors.New("--duplicate-of requires a positive task id and is accepted only by tasks transition")
 	}
@@ -443,13 +475,16 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 		if *parentID > 0 {
 			parent = parentID
 		}
-		x, err := c.CreateTask(ctx, store.Task{ParentID: parent, Expected: expectedDuration, Lane: *lane, ParentLane: *parentLane, Title: *title, Kind: *kind, Priority: *priority, Refs: *refs, BodyDoc: *bodyDoc, Project: project, Area: areaTag})
+		x, err := c.CreateTaskChecked(ctx, store.Task{ParentID: parent, Expected: expectedDuration, Lane: *lane, ParentLane: *parentLane, Title: *title, Kind: *kind, Priority: *priority, Refs: *refs, BodyDoc: *bodyDoc, Project: project, Area: areaTag}, store.DuplicateCheck{Link: *link, New: *newTask})
 		if err != nil {
 			// invalid_context on create is a validation failure; append the
 			// add requirements rather than leave a bare code to diagnose.
 			var he *remote.HTTPError
 			if errors.As(err, &he) && he.Code == "invalid_context" {
 				return fmt.Errorf("%w — %s", err, taskCreateRequirements())
+			}
+			if remote.ErrorCode(err) == "similar_tasks" {
+				return fmt.Errorf("%w — pass --link <id> to relate the new task to one of them, or --new to file it anyway", err)
 			}
 			return err
 		}
@@ -581,7 +616,19 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 		if !hasRefs {
 			refs = nil
 		}
-		x, err := c.TransitionTaskWith(ctx, id, store.TransitionInput{To: *to, Note: *note, Refs: refs, NoJob: noJobReason, DuplicateOf: *duplicateOf})
+		in := store.TransitionInput{To: *to, Note: *note, Refs: refs, NoJob: noJobReason, DuplicateOf: *duplicateOf, Set: *set}
+		// Leaving triage may carry the values the gate needs; only flags the
+		// caller set are sent.
+		if prioritySet {
+			in.Priority = priority
+		}
+		if kindSet {
+			in.Kind = *kind
+		}
+		if projectSet {
+			in.Project = project
+		}
+		x, err := c.TransitionTaskWith(ctx, id, in)
 		if err != nil {
 			return err
 		}
@@ -600,7 +647,7 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 		}
 		return printJSON(out, x)
 	default:
-		return errors.New("usage: tasks add|list|export|claim|next|transition|reopen|rebind|relane|project|projects|set-area|areas|parent|relate|unrelate|migrate-states|decision-request|decision-resolve|show|comment|comments|disposition")
+		return errors.New("usage: tasks add|list|export|claim|next|transition|reopen|rebind|relane|project|projects|set-area|areas|parent|relate|unrelate|migrate-states|decision-request|decision-resolve|show|comment|comments|disposition|intake|triage")
 	}
 }
 

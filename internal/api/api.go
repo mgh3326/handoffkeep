@@ -242,9 +242,9 @@ func (s Service) AttachmentUsage(ctx context.Context) (store.AttachmentUsage, er
 	}
 	return s.Attachments.Usage(ctx)
 }
-func (s Service) CreateTask(ctx context.Context, client string, x store.Task) (store.Task, error) {
+func (s Service) CreateTask(ctx context.Context, client string, x store.Task, check store.DuplicateCheck) (store.Task, error) {
 	x.CreatedBy = client
-	return s.Store.CreateTask(ctx, x)
+	return s.Store.CreateTaskChecked(ctx, x, check)
 }
 func (s Service) ClaimTask(ctx context.Context, id int64, by, jobID, noJob string) (store.Task, error) {
 	if err := s.wrkTaskPrecheck(ctx, id, "", true); err != nil {
@@ -602,6 +602,9 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("GET /v1/usage", s.usage)
 	m.HandleFunc("GET /metrics", s.metrics)
 	m.HandleFunc("POST /v1/tasks", s.tasksCreate)
+	m.HandleFunc("POST /v1/intake", s.intake)
+	m.HandleFunc("POST /v1/ticket-sets", s.ticketSetsCreate)
+	m.HandleFunc("GET /v1/triage", s.triageList)
 	m.HandleFunc("GET /v1/tasks", s.tasksList)
 	m.HandleFunc("GET /v1/tasks/export", s.tasksExport)
 	m.HandleFunc("GET /v1/tasks/sweep", s.tasksSweepPreview)
@@ -756,16 +759,21 @@ func (s Server) tasksCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer r.Body.Close()
-	var x store.Task
-	if err := decode(r, &x, store.MaxBytes); err != nil {
+	// link and new answer the duplicate check; see store.CreateTaskChecked.
+	var input struct {
+		store.Task
+		Link int64 `json:"link,omitempty"`
+		New  bool  `json:"new,omitempty"`
+	}
+	if err := decode(r, &input, store.MaxBytes); err != nil {
 		appErr(w, r, err)
 		return
 	}
-	if err := store.ValidateTaskArea(x.Area); err != nil {
+	if err := store.ValidateTaskArea(input.Area); err != nil {
 		appErr(w, r, err)
 		return
 	}
-	x, err := s.Service.CreateTask(r.Context(), client, x)
+	x, err := s.Service.CreateTask(r.Context(), client, input.Task, store.DuplicateCheck{Link: input.Link, New: input.New})
 	if err != nil {
 		appErr(w, r, err)
 		return
@@ -1135,6 +1143,12 @@ type taskTransitionInput struct {
 	// DuplicateOf names the task a duplicate transition points at. The
 	// duplicate_of relation and the duplicate state are written together.
 	DuplicateOf int64 `json:"duplicate_of,omitempty"`
+	// Priority, Kind and Project set the values a task leaves triage with;
+	// Set applies the triage exit to its children still in triage.
+	Priority *int    `json:"priority,omitempty"`
+	Kind     string  `json:"kind,omitempty"`
+	Project  *string `json:"project,omitempty"`
+	Set      bool    `json:"set,omitempty"`
 }
 
 func (s Server) taskTransition(w http.ResponseWriter, r *http.Request) {
@@ -1153,7 +1167,7 @@ func (s Server) taskTransition(w http.ResponseWriter, r *http.Request) {
 		appErr(w, r, err)
 		return
 	}
-	x, err := s.Service.TransitionTaskWith(r.Context(), id, client, store.TransitionInput{To: input.To, Note: input.Note, Refs: input.Refs, NoJob: input.NoJob, DuplicateOf: input.DuplicateOf})
+	x, err := s.Service.TransitionTaskWith(r.Context(), id, client, store.TransitionInput{To: input.To, Note: input.Note, Refs: input.Refs, NoJob: input.NoJob, DuplicateOf: input.DuplicateOf, Priority: input.Priority, Kind: input.Kind, Project: input.Project, Set: input.Set})
 	if err != nil {
 		appErr(w, r, err)
 		return
