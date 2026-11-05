@@ -286,12 +286,12 @@ func TestExportCountsAndFilters(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, to := range []string{"in_progress", "verifying", "merged"} {
-		if _, err := s.TransitionTask(t.Context(), merged.ID, to, "node", "", nil, ""); err != nil {
+		if _, err := s.TransitionTask(t.Context(), merged.ID, to, "node", "fixture outcome", nil, ""); err != nil {
 			t.Fatal(err)
 		}
 	}
 	dropped := newTask(t, s, laneC, "dropped task", 0)
-	if _, err := s.TransitionTask(t.Context(), dropped.ID, "dropped", "node", "", nil, ""); err != nil {
+	if _, err := s.TransitionTask(t.Context(), dropped.ID, "dropped", "node", "fixture outcome", nil, ""); err != nil {
 		t.Fatal(err)
 	}
 

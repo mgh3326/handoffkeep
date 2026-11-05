@@ -206,7 +206,7 @@ func TestTaskLegacyActiveTaskTransitionsOnwardWithoutJob(t *testing.T) {
 	if _, err := s.TransitionTask(t.Context(), legacy2.ID, "verifying", "node", "", nil, ""); err != nil {
 		t.Fatalf("legacy onward after exception: %v", err)
 	}
-	if _, err := s.TransitionTask(t.Context(), legacy2.ID, "merged", "node", "", nil, ""); err != nil {
+	if _, err := s.TransitionTask(t.Context(), legacy2.ID, "merged", "node", "fixture outcome", nil, ""); err != nil {
 		t.Fatalf("legacy to merged: %v", err)
 	}
 	// Nothing was backfilled: the row still carries no claimant and no job.

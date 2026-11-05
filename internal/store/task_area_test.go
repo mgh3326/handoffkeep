@@ -225,7 +225,7 @@ func TestSetTaskAreaEvent(t *testing.T) {
 	}
 	// Area is metadata, not lifecycle: terminal rows stay taggable and the
 	// area event does not disturb the transition history.
-	if _, err = s.TransitionTask(ctx, x.ID, "dropped", "area-test", "", nil, ""); err != nil {
+	if _, err = s.TransitionTask(ctx, x.ID, "dropped", "area-test", "fixture outcome", nil, ""); err != nil {
 		t.Fatalf("drop: %v", err)
 	}
 	x, changed, err = s.SetTaskArea(ctx, x.ID, areaPtr("docs"), "area-test", "post-close")
