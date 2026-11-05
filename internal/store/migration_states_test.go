@@ -433,3 +433,34 @@ func TestStateMigrationRollbackRoundTrip(t *testing.T) {
 		t.Fatalf("%d tasks hold an old state after the second migration", n)
 	}
 }
+
+func TestStateRollbackHandlesCompleted(t *testing.T) {
+	s := schemaStore(t, "rollback_completed")
+	x, err := s.CreateTask(t.Context(), Task{Lane: relaneLane(t, "rollback"), Title: "completed non-code task", Kind: "decide", CreatedBy: "tester", Project: projectPtr(testProjectName)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.TransitionTaskWith(t.Context(), x.ID, TransitionInput{To: StateCompleted, By: "tester", Evidence: "hk:doc research/x"}); err != nil {
+		t.Fatal(err)
+	}
+	script, err := os.ReadFile(filepath.Join("..", "..", "scripts", "rollback-state-migration.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pool.Exec(t.Context(), string(script)); err != nil {
+		t.Fatalf("rollback completed task: %v", err)
+	}
+	var state, closureType string
+	if err := s.pool.QueryRow(t.Context(), `SELECT state, refs->'closure'->>'type' FROM tasks WHERE id=$1`, x.ID).Scan(&state, &closureType); err != nil {
+		t.Fatal(err)
+	}
+	if state != "merged" || closureType != "resolved" {
+		t.Fatalf("rollback state=%q closure=%q", state, closureType)
+	}
+	if err := s.migrate(t.Context()); err != nil {
+		t.Fatalf("re-migrate after rollback: %v", err)
+	}
+	if _, err := s.pool.Exec(t.Context(), `UPDATE tasks SET state='completed' WHERE id=$1`, x.ID); err != nil {
+		t.Fatalf("completed state after re-migration: %v", err)
+	}
+}

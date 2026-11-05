@@ -535,7 +535,8 @@ restored:
    state has not changed since the migration.
 2. Maps every other task, including tasks created after the migration, by the table
    below.
-3. Restores the old constraint and removes the new schema version's row.
+3. Restores the old state constraint, removes the closure check, and clears the
+   state and closure migration versions so both can run again.
 
 | New state | Legacy state |
 |---|---|
