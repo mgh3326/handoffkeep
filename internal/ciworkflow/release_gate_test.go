@@ -13,9 +13,9 @@ import (
 )
 
 // release.yml ci-green decides publication from ci.yml's ci-ok (hk 3023).
-// The latest check run's verdict wins; a ci-any-ref status counts only once
-// main CI is known to be superseded, so a stale success status never hides a
-// failed or not-yet-started main run (reviews on #151). Runs the step's own script with a fake gh.
+// The ci-ok job of ci.yml's main push run is the verdict, so another run of
+// the same SHA cannot override it; a ci-any-ref status counts only once that
+// run is known superseded; a failed API call waits (reviews on #151). Runs the step's own script with a fake gh.
 func TestReleaseCIGreenVerdicts(t *testing.T) {
 	body, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", "release.yml"))
 	if err != nil {
@@ -35,34 +35,49 @@ func TestReleaseCIGreenVerdicts(t *testing.T) {
 	}
 	script := strings.Replace(job.Steps[0].Run, "sleep 30", "exit 7 # pending: the test stops instead of waiting", 1)
 	for _, tc := range []struct {
-		name, check, status, main string
-		code                      int
-		green                     string
+		name, main, job, status, fail string
+		code                          int
+		green                         string
 	}{
-		{"failed check beats stale success status", "completed failure", "success", "", 1, ""},
-		{"timed out check beats success status", "completed timed_out", "success", "", 1, ""},
-		{"check success publishes", "completed success", "none", "", 0, "true"},
-		{"superseded check, any-ref success publishes", "completed cancelled", "success", "", 0, "true"},
-		{"superseded check, any-ref failure blocks", "completed skipped", "error", "", 1, ""},
-		{"superseded check, no status skips publication", "completed cancelled", "none", "", 0, "false"},
-		{"no check run yet, main run queued: stale success waits", "none ", "success", "queued ", 7, ""},
-		{"no check run yet, no main run: stale success waits", "none ", "success", "none ", 7, ""},
-		{"no check run yet, main in progress: any-ref failure waits", "none ", "failure", "in_progress ", 7, ""},
-		{"main run cancelled before ci-ok, any-ref success publishes", "none ", "success", "completed cancelled", 0, "true"},
-		{"main run cancelled before ci-ok, any-ref failure blocks", "none ", "failure", "completed cancelled", 1, ""},
-		{"main run cancelled before ci-ok, no status skips publication", "none ", "none", "completed cancelled", 0, "false"},
-		{"main run failed without ci-ok blocks despite success status", "none ", "success", "completed startup_failure", 1, ""},
-		{"running check waits even with success status", "in_progress ", "success", "", 7, ""},
+		{"main ci-ok success publishes", "9 completed success", "success", "none", "", 0, "true"},
+		{"main ci-ok failure beats stale success status", "9 completed failure", "failure", "success", "", 1, ""},
+		{"main ci-ok timed out blocks", "9 completed failure", "timed_out", "success", "", 1, ""},
+		{"main run failed before ci-ok blocks despite success status", "9 completed startup_failure", "none", "success", "", 1, ""},
+		{"main run failed with ci-ok skipped blocks", "9 completed failure", "skipped", "success", "", 1, ""},
+		{"no main run yet: stale success waits", "0 none ", "", "success", "", 7, ""},
+		{"main run queued: stale success waits", "9 queued ", "", "success", "", 7, ""},
+		{"main run in progress: any-ref failure waits", "9 in_progress ", "", "failure", "", 7, ""},
+		{"superseded, ci-ok skipped, any-ref success publishes", "9 completed cancelled", "skipped", "success", "", 0, "true"},
+		{"superseded before ci-ok, any-ref success publishes", "9 completed cancelled", "none", "success", "", 0, "true"},
+		{"superseded, any-ref failure blocks", "9 completed cancelled", "skipped", "error", "", 1, ""},
+		{"superseded, any-ref pending waits", "9 completed cancelled", "skipped", "pending", "", 7, ""},
+		{"superseded, no status skips publication", "9 completed cancelled", "cancelled", "none", "", 0, "false"},
+		{"ci-ok failure in a cancelled run blocks", "9 completed cancelled", "failure", "success", "", 1, ""},
+		{"runs API failure waits", "9 completed success", "success", "none", "workflows/ci.yml/runs", 7, ""},
+		{"jobs API failure waits", "9 completed success", "success", "none", "/jobs", 7, ""},
+		{"statuses API failure waits", "9 completed cancelled", "skipped", "success", "statuses", 7, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
-			gh := "#!/bin/sh\ncase \"$*\" in *check-runs*) printf '%s\\n' \"$FAKE_CHECK\" ;; *statuses*) printf '%s\\n' \"$FAKE_STATUS\" ;; *workflows/ci.yml/runs*) printf '%s\\n' \"$FAKE_MAIN\" ;; esac\n"
+			// The fake answers each endpoint from the case and rejects any
+			// other query, so the verdict must come from the main push run's
+			// latest ci-ok job. FAKE_FAIL names an endpoint that fails, as a
+			// transient API error would.
+			gh := `#!/bin/sh
+case "$*" in *"$FAKE_FAIL"*) [ -n "$FAKE_FAIL" ] && exit 1 ;; esac
+case "$*" in
+  *'actions/workflows/ci.yml/runs?head_sha=abc&event=push&branch=main&'*) printf '%s\n' "$FAKE_MAIN" ;;
+  *'actions/runs/9/jobs?filter=latest&'*) printf '%s\n' "$FAKE_JOB" ;;
+  *statuses*) printf '%s\n' "$FAKE_STATUS" ;;
+  *) echo "unexpected gh $*" >&2; exit 2 ;;
+esac
+`
 			if err := os.WriteFile(filepath.Join(dir, "gh"), []byte(gh), 0o755); err != nil {
 				t.Fatal(err)
 			}
 			out := filepath.Join(dir, "out")
 			cmd := exec.Command("bash", "-c", script)
-			cmd.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"), "GITHUB_OUTPUT="+out, "GITHUB_SHA=abc", "GITHUB_REPOSITORY=o/r", "FAKE_CHECK="+tc.check, "FAKE_STATUS="+tc.status, "FAKE_MAIN="+tc.main)
+			cmd.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"), "GITHUB_OUTPUT="+out, "GITHUB_SHA=abc", "GITHUB_REPOSITORY=o/r", "FAKE_MAIN="+tc.main, "FAKE_JOB="+tc.job, "FAKE_STATUS="+tc.status, "FAKE_FAIL="+tc.fail)
 			logs, err := cmd.CombinedOutput()
 			code := 0
 			if ee, ok := err.(*exec.ExitError); ok {
