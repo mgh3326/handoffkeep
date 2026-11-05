@@ -139,7 +139,7 @@ func TestRecordVerification(t *testing.T) {
 		}
 	})
 	t.Run("evidence shape", func(t *testing.T) {
-		for _, e := range []string{"http://example.com/x", "https://", "hk:doc ", "hk:doc ../x", "https://example.com/" + strings.Repeat("x", 500), "see CI"} {
+		for _, e := range []string{"http://example.com/x", "https://", "https://?x", "https:///path", "hk:doc ", "hk:doc ../x", "https://example.com/" + strings.Repeat("x", 500), "see CI"} {
 			in := input(pr, "5555555555555555555555555555555555555555", VerificationLive)
 			in.Evidence = e
 			if _, _, err := s.RecordVerification(ctx, in, "lead-client"); err == nil {

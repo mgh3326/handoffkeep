@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -101,8 +102,11 @@ func checkEvidence(e string) error {
 		}
 		return nil
 	}
-	if !strings.HasPrefix(e, "https://") || len(e) <= len("https://") || len(e) > maxEvidence || strings.ContainsFunc(e, blank) {
+	if !strings.HasPrefix(e, "https://") || len(e) > maxEvidence || strings.ContainsFunc(e, blank) {
 		return fmt.Errorf("invalid verification: evidence must be an https URL of at most %d bytes or hk:doc <key>", maxEvidence)
+	}
+	if u, err := url.Parse(e); err != nil || u.Host == "" || u.Hostname() == "" {
+		return errors.New("invalid verification: evidence URL needs a host")
 	}
 	return nil
 }
