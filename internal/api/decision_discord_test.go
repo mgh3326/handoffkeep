@@ -190,17 +190,17 @@ func TestDecisionNotifierPostsOnceAndEditsEachClose(t *testing.T) {
 		t.Fatalf("second drain sent: %+v", calls)
 	}
 
-	if _, err := st.TransitionChatQuestion(t.Context(), "Q-20261105-61", "resolved", "desk"); err != nil {
+	if _, err := st.TransitionChatQuestion(t.Context(), "Q-20261105-61", "resolved", "test-answerer"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.TransitionChatQuestion(t.Context(), "Q-20261105-62", "withdrawn", "desk"); err != nil {
+	if _, err := st.TransitionChatQuestion(t.Context(), "Q-20261105-62", "withdrawn", "test-answerer"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := conn.Exec(t.Context(), `UPDATE decision_requests SET expires_at=$2 WHERE id=$1`, expiring.ID, start.Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	// A redelivered answer is refused and changes nothing.
-	if _, err := st.TransitionChatQuestion(t.Context(), "Q-20261105-61", "resolved", "desk"); !errors.Is(err, store.ErrChatQuestionConflict) {
+	if _, err := st.TransitionChatQuestion(t.Context(), "Q-20261105-61", "resolved", "test-answerer"); !errors.Is(err, store.ErrChatQuestionConflict) {
 		t.Fatalf("redelivered answer: %v", err)
 	}
 	n.Now = clockAt(start.Add(3 * time.Minute))
@@ -217,7 +217,7 @@ func TestDecisionNotifierPostsOnceAndEditsEachClose(t *testing.T) {
 		}
 		byPath[e.Path] = e
 	}
-	for x, want := range map[int64]string{answered.ID: "answered by desk", withdrawn.ID: "superseded (withdrawn)", expiring.ID: "expired unanswered"} {
+	for x, want := range map[int64]string{answered.ID: "answered by test-answerer", withdrawn.ID: "superseded (withdrawn)", expiring.ID: "expired unanswered"} {
 		e, ok := byPath["/api/webhooks/1/"+fakeDiscordSecret+"/messages/"+ids[x]]
 		if !ok {
 			t.Fatalf("no edit of message %s: %+v", ids[x], edits)
@@ -246,14 +246,14 @@ func TestDecisionNotifierPostsOnceAndEditsEachClose(t *testing.T) {
 func TestDecisionNotifierLeavesLinearRequestsToTheLinearFlow(t *testing.T) {
 	st, task := decisionStoreFixture(t)
 	discord := newFakeDiscord(t)
-	if _, err := (LinearDecisions{Team: "ROB", Linear: newFakeLinear()}).Ask(t.Context(), st, task.ID, "desk", askInput()); err != nil {
+	if _, err := (LinearDecisions{Team: "ROB", Linear: newFakeLinear()}).Ask(t.Context(), st, task.ID, "test-answerer", askInput()); err != nil {
 		t.Fatal(err)
 	}
 	plainTask, err := st.CreateTask(t.Context(), store.Task{Lane: "decision-lane", Title: "plain ask", Kind: "implement", CreatedBy: "t", Project: task.Project})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.RecordDecisionRequest(t.Context(), plainTask.ID, "desk", askInput()); err != nil {
+	if _, err := st.RecordDecisionRequest(t.Context(), plainTask.ID, "test-answerer", askInput()); err != nil {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
@@ -341,7 +341,7 @@ func TestDecisionNotifierNeverLeaksTheWebhookURL(t *testing.T) {
 		}
 		return 0
 	}
-	if _, err := st.TransitionChatQuestion(t.Context(), "Q-20261105-71", "resolved", "desk"); err != nil {
+	if _, err := st.TransitionChatQuestion(t.Context(), "Q-20261105-71", "resolved", "test-answerer"); err != nil {
 		t.Fatal(err)
 	}
 	n.Drain(t.Context())
@@ -409,7 +409,7 @@ func TestDecisionDigestOncePerUTCDay(t *testing.T) {
 		}
 	}
 	// The oldest is answered, so it is no longer open.
-	if _, err := st.TransitionChatQuestion(t.Context(), "Q-20261105-95", "resolved", "desk"); err != nil {
+	if _, err := st.TransitionChatQuestion(t.Context(), "Q-20261105-95", "resolved", "test-answerer"); err != nil {
 		t.Fatal(err)
 	}
 	digests := func() []discordCall {
