@@ -90,7 +90,7 @@ func TestRoundsLinkCanonicalTaskRefs(t *testing.T) {
 	if r.RepsAgree != 1 || r.RepsDisagree != 1 {
 		t.Fatalf("reps agree/disagree = %d/%d with hk:task/ refs, want 1/1", r.RepsAgree, r.RepsDisagree)
 	}
-	for ref, want := range map[string]string{"646": "646", "hk:task/646": "646", "hk:task/": "hk:task/", "hk:task/6x": "hk:task/6x", "ROB-12": "ROB-12"} {
+	for ref, want := range map[string]string{"646": "646", "hk:task/646": "646", "hk:task/000000000000000646": "646", "hk:task/99999999999999999999": "hk:task/99999999999999999999", "hk:task/": "hk:task/", "hk:task/6x": "hk:task/6x", "ROB-12": "ROB-12"} {
 		if got := repTaskKey(ref); got != want {
 			t.Errorf("repTaskKey(%q) = %q, want %q", ref, got, want)
 		}
