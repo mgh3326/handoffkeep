@@ -1,4 +1,5 @@
 import {
+  isLiveResponse,
   jobForPane,
   liveSectionLabel,
   loadLabel,
@@ -11,7 +12,7 @@ import {
   type LiveSession,
 } from "./live";
 import { ReapPanel } from "./ReapPanel";
-import { fetchLive } from "./shared/boardApi";
+import { getJSON } from "./shared/http";
 import { usePoll } from "./shared/usePoll";
 
 import { QuotaCard } from "./dashboard/DashboardApp";
@@ -27,6 +28,18 @@ const POLL_MS = 10_000;
  * fields the console reads: section envelopes, links, the mismatch lists and
  * each node's identity. */
 
+
+const LIVE_API = "/ui/api/live";
+
+// The fleet entry names its endpoint itself (the bundle contract tests look
+// for it in fleet.js); the contract check is shared with boardApi.fetchLive.
+const loadLive = async (): Promise<LiveResponse> => {
+  const body = await getJSON<unknown>(LIVE_API);
+  if (!isLiveResponse(body)) {
+    throw new Error("malformed live response");
+  }
+  return body;
+};
 
 /** Session-list message for a node whose snapshot is not a plain session
  * list. Every non-ok state names itself — a stale or failed collection is
@@ -160,7 +173,7 @@ function MachineBlock({ node, live }: { node: LiveNode; live: LiveResponse }) {
  * idle fleet. Read-only — no write controls. */
 export function FleetApp() {
   const quota = usePoll(fetchDashboard, 60000);
-  const { data, failed: refreshFailed } = usePoll(fetchLive, POLL_MS);
+  const { data, failed: refreshFailed } = usePoll(loadLive, POLL_MS);
 
   if (data === null && !refreshFailed) {
     return <p className="muted">불러오는 중</p>;
