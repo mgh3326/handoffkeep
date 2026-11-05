@@ -1224,6 +1224,9 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := migrateOnce(ctx, tx, 40, func() error { return execAll(ctx, tx, benchOutcomesV40) }); err != nil {
 		return err
 	}
+	if err := migrateOnce(ctx, tx, 41, func() error { return execAll(ctx, tx, changesV41) }); err != nil {
+		return err
+	}
 
 	return tx.Commit(ctx)
 }
@@ -2812,7 +2815,9 @@ type TaskQuery struct {
 	Project, Area           *string
 	Stalled                 bool
 	AfterID                 *int64
-	Limit                   int
+	// ChangeID keeps the tasks linked to that change, ordered by id.
+	ChangeID *int64
+	Limit    int
 }
 
 // ListTasksFiltered lists tasks matching q and marks stalled rows.
@@ -2862,13 +2867,17 @@ func (s *Store) ListTasksFiltered(ctx context.Context, tq TaskQuery) ([]Task, er
 			q += fmt.Sprintf(" AND area=$%d", len(args))
 		}
 	}
+	if tq.ChangeID != nil {
+		args = append(args, *tq.ChangeID)
+		q += fmt.Sprintf(" AND id IN (SELECT task_id FROM change_tasks WHERE change_id=$%d)", len(args))
+	}
 	now := time.Now().UTC()
 	if tq.Stalled {
 		args = append(args, now.Add(-s.StartedStalledHours()))
 		q += fmt.Sprintf(" AND state IN ("+startedStatesSQL+") AND NOT awaiting_decision AND "+taskActivitySQL+" < $%d", len(args))
 	}
 	args = append(args, limit)
-	if tq.AfterID != nil {
+	if tq.AfterID != nil || tq.ChangeID != nil {
 		q += fmt.Sprintf(" ORDER BY id ASC LIMIT $%d", len(args))
 	} else {
 		q += fmt.Sprintf(" ORDER BY priority DESC,created_at ASC,id ASC LIMIT $%d", len(args))

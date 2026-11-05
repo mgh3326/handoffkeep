@@ -613,6 +613,8 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("GET /v1/tasks/export", s.tasksExport)
 	m.HandleFunc("GET /v1/tasks/sweep", s.tasksSweepPreview)
 	m.HandleFunc("POST /v1/task-events", s.taskEvents)
+	m.HandleFunc("GET /v1/changes", s.changesList)
+	m.HandleFunc("POST /v1/changes/{id}/merge-flow", s.changeMergeFlow)
 	m.HandleFunc("POST /v1/tasks/next", s.tasksNext)
 	m.HandleFunc("GET /v1/tasks/projects", s.taskProjectsList)
 	m.HandleFunc("POST /v1/tasks/projects", s.taskProjectsCreate)
@@ -825,6 +827,30 @@ func (s Server) tasksList(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	var xs []store.Task
+	if r.URL.Query().Has("change") {
+		// change is exclusive: any other filter next to it is a mistake, not
+		// an intersection.
+		changeID, parseErr := strconv.ParseInt(r.URL.Query().Get("change"), 10, 64)
+		if parseErr != nil || changeID < 1 {
+			writeError(w, http.StatusBadRequest, "invalid_context")
+			return
+		}
+		for _, other := range []string{"lane", "state", "parent_lane", "project", "area", "stalled", "after_id"} {
+			if r.URL.Query().Has(other) {
+				writeError(w, http.StatusBadRequest, "invalid_context")
+				return
+			}
+		}
+		xs, err = s.Service.ListTasksFiltered(r.Context(), store.TaskQuery{ChangeID: &changeID, Limit: limit})
+		if err != nil {
+			appErr(w, r, err)
+			return
+		}
+		// Echoed like project: an old server that drops the parameter would
+		// answer with every task.
+		jsonOut(w, http.StatusOK, map[string]any{"tasks": xs, "change": changeID})
+		return
+	}
 	switch {
 	case stalled:
 		q := store.TaskQuery{Lane: lane, State: state, ParentLane: parentLane, Project: project, Area: area, Stalled: true, Limit: limit}
@@ -2008,7 +2034,7 @@ func benchRowErrorField(row []byte, fieldTypes map[string]reflect.Type) string {
 const (
 	bodyTiny  = 1 << 10  // an id or two and a short reason
 	bodySmall = 4 << 10  // one entity's short fields
-	bodyEvent = 8 << 10  // one external event with its references
+	bodyEvent = 16 << 10 // one external event with its references (16 review items fill ~11 KiB)
 	bodyLarge = 64 << 10 // free text or a list: descriptions, candidates
 )
 

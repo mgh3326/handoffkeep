@@ -44,7 +44,10 @@ package store
 //  5. Rows that belong to a locked task: task_events (its foreign key takes
 //     KEY SHARE on the task row), task_labels, task_relations,
 //     task_subscribers, linear_board_tasks, linear_outbox, sync_decisions,
-//     ticket_sets; shared rows read FOR SHARE (labels). decision_requests rows that name a
+//     ticket_sets, and the work record: changes, change_tasks and reviews.
+//     ApplyTaskSourceEvent writes them under the level-2 lock after its task
+//     row (recordChangeTx); a revert locks two changes rows, the reverted PR's
+//     first. Shared rows read FOR SHARE (labels). decision_requests rows that name a
 //     task or a job are updated only under the level-2 lock, several at a
 //     time in id order (decision_records.go); the table has no foreign key.
 //
@@ -78,6 +81,14 @@ package store
 //     status_updates row. The project metadata writers lock that row and
 //     nothing else, and the KEY SHARE a task or milestone write takes on it
 //     does not conflict with FOR NO KEY UPDATE (status_updates.go).
+//   - SetChangeMergeFlow (the operator's merge-flow write) takes its own
+//     advisory lock first, so two writes cannot each pass the cycle check
+//     against the other's uncommitted dependency, then locks one changes row
+//     (FOR NO KEY UPDATE) and nothing else; the dependency chain is read without
+//     locks. The foreign key's KEY SHARE on the target row does not conflict
+//     with an event writer's upsert, and the event writers never take the
+//     merge-flow lock, so neither side waits on the other while it holds
+//     what the other needs.
 //   - Other advisory locks (disposition origin, task comment insert, labels,
 //     Linear board ownership, quota presence) are each the first lock of
 //     their transaction, and no transaction requests one while it holds a
