@@ -406,6 +406,9 @@ func (s Service) UpsertBenchReps(ctx context.Context, client string, xs []store.
 	}
 	return s.Store.UpsertBenchReps(ctx, xs)
 }
+func (s Service) PatchBenchRepOutcome(ctx context.Context, id int64, p store.BenchRepOutcomePatch) (store.BenchRep, error) {
+	return s.Store.PatchBenchRepOutcome(ctx, id, p)
+}
 func (s Service) ListBenchGrades(ctx context.Context) ([]store.BenchGrade, error) {
 	return s.Store.ListBenchGrades(ctx)
 }
@@ -671,6 +674,7 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("PUT /v1/bench/scores", s.benchScoresPut)
 	m.HandleFunc("GET /v1/bench/reps", s.benchRepsList)
 	m.HandleFunc("PUT /v1/bench/reps", s.benchRepsPut)
+	m.HandleFunc("PATCH /v1/bench/reps/{id}", s.benchRepPatch)
 	m.HandleFunc("GET /v1/bench/grades", s.benchGradesList)
 	m.HandleFunc("PUT /v1/bench/grades", s.benchGradesPut)
 	m.HandleFunc("GET /v1/bench/catalog", s.benchCatalogList)
@@ -1705,6 +1709,31 @@ func (s Server) benchRepsPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOut(w, http.StatusOK, map[string]any{"upserted": len(ids), "ids": ids})
+}
+
+// benchRepPatch fills a stored rep's outcome columns that are still unknown
+// (store.PatchBenchRepOutcome). Any node token may patch.
+func (s Server) benchRepPatch(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.auth(w, r); !ok {
+		return
+	}
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id < 1 {
+		writeError(w, http.StatusBadRequest, "invalid_context")
+		return
+	}
+	defer r.Body.Close()
+	var p store.BenchRepOutcomePatch
+	if err := decode(r, &p, benchRequestMaxBytes); err != nil {
+		appErr(w, r, err)
+		return
+	}
+	x, err := s.Service.PatchBenchRepOutcome(r.Context(), id, p)
+	if err != nil {
+		appErr(w, r, err)
+		return
+	}
+	jsonOut(w, http.StatusOK, x)
 }
 
 func (s Server) benchGradesList(w http.ResponseWriter, r *http.Request) {

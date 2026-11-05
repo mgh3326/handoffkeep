@@ -101,6 +101,7 @@ var errorRules = []errorRule{
 	{store.ErrDecisionRequestHumanOnly, http.StatusConflict, "decision_request_human_only", true},
 	{store.ErrPlacementConflict, http.StatusConflict, "placement_conflict", false},
 	{store.ErrJobNotFound, http.StatusNotFound, "not_found", false},
+	{store.ErrBenchRepNotFound, http.StatusNotFound, "not_found", false},
 	{store.ErrJobIDTaken, http.StatusConflict, "job_id_taken", false},
 	{store.ErrJobStateConflict, http.StatusConflict, "job_state_conflict", true},
 	{store.ErrOutboxEventNotFound, http.StatusNotFound, "not_found", false},
@@ -132,6 +133,11 @@ func appErr(w http.ResponseWriter, r *http.Request, e error) {
 	var repConflict *store.BenchRepConflictError
 	if errors.As(e, &repConflict) {
 		jsonOut(w, http.StatusConflict, map[string]any{"error": "bench_rep_conflict", "conflicts": repConflict.Conflicts})
+		return
+	}
+	var outcomeConflict *store.BenchRepOutcomeConflictError
+	if errors.As(e, &outcomeConflict) {
+		jsonOut(w, http.StatusConflict, map[string]any{"error": "bench_rep_outcome_conflict", "field": outcomeConflict.Field})
 		return
 	}
 	var similar *store.SimilarTasksError
