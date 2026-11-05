@@ -180,7 +180,7 @@ func TestUIDashboard(t *testing.T) {
 	}
 
 	response := uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/home", assertion, "")
-	if body := responseText(t, response); response.StatusCode != http.StatusOK || !strings.Contains(body, "/ui/static/console/dashboard.js") || !strings.Contains(body, `id="dashboard-root"`) {
+	if body := responseText(t, response); response.StatusCode != http.StatusOK || !strings.Contains(body, "/ui/static/console/shell.js") || !strings.Contains(body, `id="shell-root"`) {
 		t.Fatalf("home page status=%d", response.StatusCode)
 	}
 	if csp := response.Header.Get("Content-Security-Policy"); csp == "" {

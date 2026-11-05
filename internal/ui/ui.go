@@ -16,6 +16,7 @@ import (
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mgh3326/handoffkeep/internal/cfaccess"
@@ -63,6 +64,9 @@ type Handler struct {
 	// is empty on unstamped builds, where the static handler must not emit a
 	// long-lived cache policy.
 	assetVersion string
+	// preloads caches shellPreloads: the embedded bundle never changes.
+	preloadOnce sync.Once
+	preloads    []string
 }
 
 // readBuildInfo is a variable so tests can stamp or unstamp build info.
@@ -165,7 +169,7 @@ func (h *Handler) assetURL(p string) string {
 // mutating operation.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	r.Pattern = routePattern(r.URL.Path)
-	if r.URL.Path == "/ui/fleet" || r.URL.Path == "/ui/queue" || r.URL.Path == "/ui/grades" || r.URL.Path == "/ui/deploys" || r.URL.Path == "/ui/docs" || r.URL.Path == "/ui/home" || strings.HasPrefix(r.URL.Path, "/ui/tasks/") || strings.HasPrefix(r.URL.Path, "/ui/api/") {
+	if r.URL.Path == "/ui" || r.URL.Path == "/ui/work" || r.URL.Path == "/ui/fleet" || r.URL.Path == "/ui/queue" || r.URL.Path == "/ui/grades" || r.URL.Path == "/ui/deploys" || r.URL.Path == "/ui/docs" || r.URL.Path == "/ui/home" || strings.HasPrefix(r.URL.Path, "/ui/doc/") || strings.HasPrefix(r.URL.Path, "/ui/tasks/") || strings.HasPrefix(r.URL.Path, "/ui/api/") {
 		setConsoleCSP(w)
 	}
 	identity, authenticated := h.access.AuthenticatedIdentity(r)
@@ -216,8 +220,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch r.URL.Path {
-	case "/ui":
-		http.Redirect(w, r, "/ui/home", http.StatusFound)
+	case "/ui", "/ui/work":
+		h.shell(w)
 	case "/ui/timeline":
 		h.timeline(w, r, false)
 	case "/ui/queue":
@@ -274,10 +278,9 @@ func (h *Handler) serveSubroute(w http.ResponseWriter, r *http.Request, email st
 	http.NotFound(w, r)
 }
 
-// taskPage serves the deep-link task page /ui/tasks/<id>. The queue bundle
-// reads the id from the path and mounts the shared detail component; the
-// server only gates the id shape — a non-numeric or out-of-range id is a 400,
-// never a silently different page.
+// taskPage serves the deep-link task page /ui/tasks/<id>. The shell reads the
+// id from the path; the server only gates the id shape — a non-numeric or
+// out-of-range id is a 400, never a silently different page.
 func (h *Handler) taskPage(w http.ResponseWriter, r *http.Request, raw, email string) {
 	if raw == "" {
 		http.NotFound(w, r)
@@ -287,7 +290,7 @@ func (h *Handler) taskPage(w http.ResponseWriter, r *http.Request, raw, email st
 		http.Error(w, "invalid task id", http.StatusBadRequest)
 		return
 	}
-	h.render(w, "board_page", boardPageData{CSRF: h.csrfForForm(w, r, email)})
+	h.shell(w)
 }
 
 var taskIDPattern = regexp.MustCompile(`^[1-9][0-9]{0,14}$`)
@@ -415,15 +418,7 @@ func (h *Handler) board(w http.ResponseWriter, r *http.Request, email string) {
 		http.Error(w, "invalid task id", http.StatusBadRequest)
 		return
 	}
-	h.render(w, "board_page", boardPageData{CSRF: h.csrfForForm(w, r, email)})
-}
-
-// boardPageData carries the session CSRF token for the queue bundle's one
-// write form (task comments). It is the same token and cookie csrfForForm
-// issues for the decision forms; the bundle reads it from a meta tag because
-// the cookie is HttpOnly.
-type boardPageData struct {
-	CSRF string
+	h.shell(w)
 }
 
 func (h *Handler) decisions(w http.ResponseWriter, r *http.Request, fragment bool, email, notice string) {
@@ -622,7 +617,44 @@ func (h *Handler) fleet(w http.ResponseWriter, r *http.Request, fragment bool) {
 		h.render(w, "fleet_content", nil)
 		return
 	}
-	h.render(w, "fleet_page", nil)
+	h.shell(w)
+}
+
+// shellPageData is the model of shell_page. Preloads are the unstamped URLs of
+// the static imports of shell.js, in the order the entry lists them.
+type shellPageData struct {
+	Preloads []string
+}
+
+// shell serves the one page behind Home, Work, the document viewer and the
+// task deep link; the browser picks the view from the path.
+func (h *Handler) shell(w http.ResponseWriter) {
+	h.render(w, "shell_page", shellPageData{Preloads: h.shellPreloads()})
+}
+
+// staticImportRE matches `from"./x.js"` and `import"./x.js"` in the minified
+// entry. A dynamic import() has its path inside parentheses and never matches.
+var staticImportRE = regexp.MustCompile(`(?:from|import)\s*"\./([A-Za-z0-9._-]+\.js)"`)
+
+// shellPreloads lists the chunks shell.js imports statically, so the page can
+// fetch them in parallel with the entry. The URL is exactly the one the entry
+// imports: a stamped URL is a different module and would load twice.
+func (h *Handler) shellPreloads() []string {
+	h.preloadOnce.Do(func() {
+		entry, err := fs.ReadFile(h.static, "console/shell.js")
+		if err != nil {
+			return
+		}
+		seen := map[string]bool{}
+		for _, m := range staticImportRE.FindAllSubmatch(entry, -1) {
+			file := string(m[1])
+			if !seen[file] {
+				seen[file] = true
+				h.preloads = append(h.preloads, "/ui/static/console/"+file)
+			}
+		}
+	})
+	return h.preloads
 }
 
 func (h *Handler) render(w http.ResponseWriter, name string, data any) {
