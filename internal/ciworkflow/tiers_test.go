@@ -25,8 +25,13 @@ const postGuard = "github.event_name != 'pull_request'"
 const mainPush = "github.event_name == 'push' && github.ref == 'refs/heads/main'"
 
 // ciOkIf is the hk 2924 condition: a run whose only non-success is cancelled
-// skips ci-ok (unknown) instead of failing it.
-const ciOkIf = "always() && (contains(needs.*.result, 'failure') || !contains(needs.*.result, 'cancelled'))"
+// or abandoned (no runner acquired, run 42061203904, hk 3155) skips ci-ok
+// (unknown) instead of failing it.
+const ciOkIf = "always() && (contains(needs.*.result, 'failure') || !(contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'abandoned')))"
+
+// ciOkIfCancelledOnly is the hk 2924 guard before hk 3155; it fails ci-ok on
+// an abandoned job.
+const ciOkIfCancelledOnly = "always() && (contains(needs.*.result, 'failure') || !contains(needs.*.result, 'cancelled'))"
 
 type tierJob struct {
 	If       string         `yaml:"if"`
@@ -288,6 +293,7 @@ func TestCITierMutantsTurnRed(t *testing.T) {
 		{"main-push-cancels", `cancel-in-progress: "${{ github.event_name == 'pull_request' }}"}`, "cancel-in-progress: true}"},
 		{"post-linux-unguarded", "if: ${{ github.event_name != 'pull_request' && contains(fromJSON('[\"all\",\"test\"]'), inputs.suite || 'all') }}\n    name: 'post: race + postgres'", "if: ${{ contains(fromJSON('[\"all\",\"test\"]'), inputs.suite || 'all') }}\n    name: 'post: race + postgres'"},
 		{"ci-ok-always", "if: ${{ " + ciOkIf + " }}", "if: ${{ always() }}"},
+		{"ci-ok-ignores-abandoned", "if: ${{ " + ciOkIf + " }}", "if: ${{ " + ciOkIfCancelledOnly + " }}"},
 		{"no-macos", "vars.HANDOFFKEEP_POST_MAC_RUNNER) || 'macos-latest'", "vars.HANDOFFKEEP_POST_MAC_RUNNER) || 'ubuntu-latest'"},
 		{"self-hosted-on-dispatch", "runs-on: ${{ (" + mainPush + " && vars.HANDOFFKEEP_POST_LINUX_RUNNER) || 'ubuntu-latest' }}", "runs-on: ${{ vars.HANDOFFKEEP_POST_LINUX_RUNNER || 'ubuntu-latest' }}"},
 		{"no-ref-pruning", "          git for-each-ref --format='delete %(refname)' | git update-ref --no-deref --stdin\n", "          true\n"},
