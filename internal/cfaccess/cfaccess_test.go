@@ -256,3 +256,65 @@ func waitRefresh(t *testing.T, v *Verifier) {
 	}
 	t.Fatal("background refresh did not finish")
 }
+
+func TestUnknownKidFetchesAfterInflightRefresh(t *testing.T) {
+	old, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rotated, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var calls atomic.Int32
+	entered, release := make(chan struct{}), make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch calls.Add(1) {
+		case 1:
+			writeTestKey(w, "old", old)
+		case 2:
+			close(entered)
+			<-release
+			writeTestKey(w, "old", old)
+		default:
+			writeTestKey(w, "rotated", rotated)
+		}
+	}))
+	defer server.Close()
+	v := testVerifier(t, server.URL)
+	if _, err := v.keyFor(context.Background(), "old"); err != nil {
+		t.Fatal(err)
+	}
+	v.mu.Lock()
+	v.fetchedAt = time.Now().Add(-2 * time.Minute)
+	v.lastUnknownKidRefresh = time.Time{}
+	v.mu.Unlock()
+	if _, err := v.keyFor(context.Background(), "old"); err != nil {
+		t.Fatal(err)
+	}
+	<-entered
+	done := make(chan error, 1)
+	go func() { _, err := v.keyFor(context.Background(), "rotated"); done <- err }()
+	deadline := time.Now().Add(time.Second)
+	for {
+		v.mu.Lock()
+		started := !v.lastUnknownKidRefresh.IsZero()
+		v.mu.Unlock()
+		if started {
+			break
+		}
+		if time.Now().After(deadline) {
+			close(release)
+			t.Fatal("unknown key request did not start")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("rotated key rejected: %v", err)
+	}
+	waitRefresh(t, v)
+	if got := calls.Load(); got != 3 {
+		t.Errorf("calls=%d, want 3", got)
+	}
+}

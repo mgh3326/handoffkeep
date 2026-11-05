@@ -59,6 +59,8 @@ type Verifier struct {
 	lastUnknownKidRefresh time.Time
 	refreshMu             sync.Mutex
 	refreshing            bool
+	fetchSequence         uint64
+	completedSequence     uint64
 }
 
 // New constructs a fail-closed verifier.
@@ -160,13 +162,13 @@ func (v *Verifier) keyFor(ctx context.Context, kid string) (*rsa.PublicKey, erro
 	now := time.Now()
 	v.mu.Lock()
 	key := v.keys[kid]
-	fetchedAt := v.fetchedAt
-	age := now.Sub(fetchedAt)
+	sequence := v.fetchSequence
+	age := now.Sub(v.fetchedAt)
 	fresh := v.keys != nil && age < v.ttl && age < maxKeyAge
 	if key != nil && age < maxKeyAge {
 		if !fresh && !v.refreshing {
 			v.refreshing = true
-			go v.refreshBackground(fetchedAt)
+			go v.refreshBackground()
 		}
 		v.mu.Unlock()
 		return key, nil
@@ -179,7 +181,7 @@ func (v *Verifier) keyFor(ctx context.Context, kid string) (*rsa.PublicKey, erro
 	if key == nil && !refreshUnknown {
 		return nil, errors.New("unknown signing key")
 	}
-	if err := v.refresh(ctx, fetchedAt, key == nil); err != nil {
+	if err := v.refresh(ctx, sequence, key == nil); err != nil {
 		return nil, err
 	}
 	v.mu.Lock()
@@ -191,29 +193,31 @@ func (v *Verifier) keyFor(ctx context.Context, kid string) (*rsa.PublicKey, erro
 	return key, nil
 }
 
-func (v *Verifier) refreshBackground(fetchedAt time.Time) {
+func (v *Verifier) refreshBackground() {
 	defer func() { v.mu.Lock(); v.refreshing = false; v.mu.Unlock() }()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	if err := v.refresh(ctx, fetchedAt, false); err != nil {
+	if err := v.refresh(ctx, 0, false); err != nil {
 		log.Printf("cfaccess.refresh_failed err=%q", err)
 	}
 }
 
-func (v *Verifier) refresh(ctx context.Context, observed time.Time, unknown bool) error {
+func (v *Verifier) refresh(ctx context.Context, observed uint64, unknown bool) error {
 	v.refreshMu.Lock()
 	defer v.refreshMu.Unlock()
 
 	v.mu.Lock()
-	// An unknown kid forces a fetch even from a fresh cache, unless another
-	// refresh already completed while this caller waited.
+	// An unknown kid needs a fetch started after it arrived. A refresh
+	// already in flight may have captured the key set before rotation.
 	age := time.Since(v.fetchedAt)
-	refreshed := !v.fetchedAt.Equal(observed)
 	fresh := v.keys != nil && age < v.ttl && age < maxKeyAge
-	v.mu.Unlock()
-	if refreshed || (!unknown && fresh) {
+	if (unknown && v.completedSequence > observed) || (!unknown && fresh) {
+		v.mu.Unlock()
 		return nil
 	}
+	v.fetchSequence++
+	sequence := v.fetchSequence
+	v.mu.Unlock()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, v.certs, nil)
 	if err != nil {
@@ -250,6 +254,7 @@ func (v *Verifier) refresh(ctx context.Context, observed time.Time, unknown bool
 	v.mu.Lock()
 	v.keys = keys
 	v.fetchedAt = time.Now()
+	v.completedSequence = sequence
 	v.mu.Unlock()
 	return nil
 }
