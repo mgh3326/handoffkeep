@@ -256,6 +256,44 @@ state blocks the close, and a parent whose sub-tasks are all `dropped` or
 event. Reopening a sub-task records an event on a completed parent and does
 not reopen it.
 
+### Triage intake, ticket sets and the duplicate check
+
+Integrations put work into `triage` with `POST /v1/intake` (`tasks intake
+--source S --source-ref R --title T [--body B|--body-file F] [--project P]
+[--kind K] [--priority N] [--lane L]`). A repeated `(source, source_ref)`
+returns the recorded task with `created:false`. Project, kind and priority may
+be left unset; an unset kind is valid only in `triage`, and on a task declined
+from it (which then cannot be reopened). A body is stored as
+the document `task-body/<id>` and linked by `body_doc`.
+
+A repo session emits a whole ticket set with `POST /v1/ticket-sets` (`tickets
+emit --file set.json`; the document is described in
+`docs/linear-internalize.md`, "Ticket sets"). Every body needs the headings
+Current, Desired, Key interfaces, Out of scope and Acceptance. One transaction
+creates the parent, the children (`parent_id`), their bodies and the `blocks`
+edges (`blocked_by` names a `ref` in the set or an existing task id); an
+unknown reference or a cycle refuses the whole call. The same payload again
+returns the same ids; a changed payload is refused with 409
+`ticket_set_conflict`.
+
+The triage gate: `tasks transition <id> --to backlog|unstarted` needs a
+priority above 0, a project and a kind, which the exit can set (`--priority N
+--kind K --project P`); `--to dropped|duplicate` needs a `--note` reason.
+Every exit sets `triaged_at` and records the caller as the event's `by`.
+`--set` applies the exit to the task's children still in triage in the same
+transaction: an accept moves them to the same state, each inheriting
+priority, kind and project unless it has its own; declining a ticket set's
+parent drops its children still in triage, with or without `--set`.
+`GET /v1/triage` (`tasks triage`) lists the queue oldest first, a ticket set
+as one row (its parent, `child_count`, `age_seconds` and similar open tasks)
+while its parent is in triage.
+
+`tasks add` and `POST /v1/tasks` refuse a title similar (pg_trgm similarity
+of at least 0.5) to a `backlog`, `unstarted` or started task with 409
+`similar_tasks`, listing them. Pass `--link <id>` (`"link"`) to file it
+related to one of them, or `--new` (`"new": true`) to file it anyway.
+Ticket sets never stop for this check.
+
 ### Event-driven transitions, stalled and the backlog sweep
 
 Integration events move tasks forward under the rules in

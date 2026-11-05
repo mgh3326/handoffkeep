@@ -1,6 +1,6 @@
 package store
 
-// Version 37 adds the Discord outbox for decision requests
+// Version 38 adds the Discord outbox for decision requests
 // (docs/decision-discord.md). A decision_notify row is the channel message of
 // one decision_requests row: the transaction that opens the request inserts
 // it, and the worker posts it, then edits it whenever the request's status
@@ -12,7 +12,7 @@ package store
 // the version locks no existing table, and it writes no row: requests opened
 // before the upgrade get no message of their own (the digest lists them once
 // they are a day old).
-var decisionNotifyV37 = []string{
+var decisionNotifyV38 = []string{
 	`CREATE TABLE IF NOT EXISTS decision_notify (
 		request_id BIGINT PRIMARY KEY,
 		message_id TEXT NOT NULL DEFAULT '',
@@ -36,5 +36,5 @@ var decisionNotifyV37 = []string{
 		sent_at TIMESTAMPTZ,
 		created_at TIMESTAMPTZ NOT NULL
 	)`,
-	`INSERT INTO schema_version(version) VALUES (37)`,
+	`INSERT INTO schema_version(version) VALUES (38)`,
 }
