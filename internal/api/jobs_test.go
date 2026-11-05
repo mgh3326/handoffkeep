@@ -319,3 +319,53 @@ func TestJobsGet(t *testing.T) {
 		t.Fatalf("no task param: %d", code)
 	}
 }
+
+// Token usage (hk 3005): null is unknown, the object replaces as a whole,
+// and it is the one field a terminal job still accepts, since usage is read
+// at completion or reap.
+func TestJobsUsage(t *testing.T) {
+	srv := jobsAPIServer(t)
+	id := fmt.Sprintf("8-builder-%d", time.Now().UnixNano())
+	if code, _ := jobsClaim(t, srv, "tok-a", id, "host-a", 8); code != http.StatusCreated {
+		t.Fatalf("claim: %d", code)
+	}
+	url := srv.URL + "/v1/jobs/" + id
+	if _, body := jobsRequest(t, "GET", url, "tok-a", ""); body["usage"] != nil {
+		t.Fatalf("usage before any write: %v", body["usage"])
+	}
+	for _, step := range []string{`{"state":"spawned"}`, `{"state":"completed"}`} {
+		if code, body := jobsRequest(t, "PUT", url, "tok-a", step); code != http.StatusOK {
+			t.Fatalf("%s: %d %v", step, code, body)
+		}
+	}
+	code, body := jobsRequest(t, "PUT", url, "tok-a", `{"usage":{"input_tokens":1200,"output_tokens":340,"reasoning_tokens":null,"cache_read_tokens":9000,"source":"claude-session-jsonl","recorded_at":"2000-01-01T00:00:00Z"}}`)
+	if code != http.StatusOK {
+		t.Fatalf("usage on a completed job: %d %v", code, body)
+	}
+	usage, _ := body["usage"].(map[string]any)
+	if usage["input_tokens"] != float64(1200) || usage["output_tokens"] != float64(340) || usage["cache_read_tokens"] != float64(9000) ||
+		usage["reasoning_tokens"] != nil || usage["cache_write_tokens"] != nil || usage["source"] != "claude-session-jsonl" {
+		t.Fatalf("usage: %v", usage)
+	}
+	if at, _ := usage["recorded_at"].(string); at == "" || strings.HasPrefix(at, "2000") {
+		t.Fatalf("recorded_at must be the server's: %v", usage["recorded_at"])
+	}
+	// A later, fuller read replaces the whole object.
+	code, body = jobsRequest(t, "PUT", url, "tok-a", `{"usage":{"input_tokens":1500,"reasoning_tokens":12}}`)
+	usage, _ = body["usage"].(map[string]any)
+	if code != http.StatusOK || usage["input_tokens"] != float64(1500) || usage["reasoning_tokens"] != float64(12) || usage["output_tokens"] != nil || usage["source"] != nil {
+		t.Fatalf("replace: %d %v", code, usage)
+	}
+	if _, got := jobsRequest(t, "GET", url, "tok-b", ""); got["usage"].(map[string]any)["input_tokens"] != float64(1500) {
+		t.Fatalf("GET usage: %v", got["usage"])
+	}
+	// Usage does not reopen a terminal job for anything else.
+	if code, _ := jobsRequest(t, "PUT", url, "tok-a", `{"usage":{"input_tokens":1},"label":"again"}`); code != http.StatusConflict {
+		t.Fatalf("terminal usage plus a field: %d", code)
+	}
+	for _, bad := range []string{`{"usage":{"input_tokens":-1}}`, `{"usage":{"tokens":5}}`, `{"usage":{"source":"` + strings.Repeat("s", 65) + `"}}`} {
+		if code, _ := jobsRequest(t, "PUT", url, "tok-a", bad); code != http.StatusBadRequest {
+			t.Errorf("%s: %d, want 400", bad, code)
+		}
+	}
+}
