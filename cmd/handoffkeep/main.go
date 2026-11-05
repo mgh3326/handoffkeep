@@ -53,7 +53,7 @@ func main() {
 }
 func run(args []string, out, errout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: handoffkeep serve|sync|ledger|since|mcp|ctx|memory|doc|attach|r2usage|tasks|tickets|decisions|fleet-metrics|bench|version")
+		return errors.New("usage: handoffkeep serve|sync|ledger|since|mcp|ctx|memory|doc|attach|r2usage|tasks|tickets|decisions|dots|fleet-metrics|bench|version")
 	}
 	switch args[0] {
 	case "wrk":
@@ -84,6 +84,8 @@ func run(args []string, out, errout io.Writer) error {
 		return ticketsCmd(args[1:], out)
 	case "decisions":
 		return decisionsCmd(args[1:], out)
+	case "dots":
+		return dotsCmd(args[1:], out)
 	case "fleet-metrics":
 		return fleetMetricsCmd(args[1:], out)
 	case "bench":
@@ -93,7 +95,7 @@ func run(args []string, out, errout io.Writer) error {
 	case "version", "--version":
 		return versionCmd(args[1:], out)
 	default:
-		return errors.New("usage: handoffkeep serve|sync|ledger|since|mcp|ctx|memory|doc|attach|r2usage|tasks|tickets|decisions|fleet-metrics|bench|version")
+		return errors.New("usage: handoffkeep serve|sync|ledger|since|mcp|ctx|memory|doc|attach|r2usage|tasks|tickets|decisions|dots|fleet-metrics|bench|version")
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/mgh3326/handoffkeep/internal/guard"
 )
 
@@ -19,12 +20,13 @@ import (
 // that keeps its own seen-set. The key, the body and the event ids below must
 // stay byte-identical to the poller's: the document key is what makes a second
 // write a no-op, and the shared event id is what lets the hub dedupe the lane
-// notification.
+// notification when both paths notify the same lane (it keys on lane and id).
 
 const (
 	// DotsLabel is the Linear label that puts an issue in dots' scope.
 	DotsLabel = "dots"
-	// DotsLane is the lane owed every dots notification.
+	// DotsLane is the session of every dots document and the lane a
+	// notification goes to when its request names no other (dotsRequesterLane).
 	DotsLane = "operator-desk"
 
 	dotsCreatedBy = "linear-webhook"
@@ -41,13 +43,34 @@ var dotsResultKinds = map[string]string{
 var (
 	dotsIdentifierRE = regexp.MustCompile(`^[A-Za-z0-9_]+-[0-9]+$`)
 	dotsCommentIDRE  = regexp.MustCompile(`^[0-9A-Za-z-]{8,64}$`)
+	// dotsLaneLineRE is the line a request's description carries to name the
+	// lane its answers go to; the group is nameRE.
+	dotsLaneLineRE = regexp.MustCompile(`(?m)^hk-lane:[ \t]*([A-Za-z0-9._-]{1,128})[ \t]*\r?$`)
 )
 
-// DotsIssue is the part of a Linear issue a dots record quotes.
+// dotsRequesterLane picks the lane owed a dots notification: the lane on the
+// first description line matching dotsLaneLineRE, else the lane of the one
+// task linked to the issue, else DotsLane. A line naming an invalid lane does
+// not match, and lines after the first match are not read.
+func dotsRequesterLane(description string, linkedTask *Task) string {
+	if m := dotsLaneLineRE.FindStringSubmatch(description); m != nil {
+		return m[1]
+	}
+	if linkedTask != nil && validName(linkedTask.Lane) {
+		return linkedTask.Lane
+	}
+	return DotsLane
+}
+
+// DotsIssue is the part of a Linear issue a dots record quotes. IssueUUID is
+// Linear's durable id, the external_id of a task origin; Description is read
+// for the hk-lane line only.
 type DotsIssue struct {
-	Identifier string
-	Title      string
-	URL        string
+	Identifier  string
+	Title       string
+	URL         string
+	IssueUUID   string
+	Description string
 }
 
 // DotsComment is one Linear comment. CreatedAt keeps Linear's own ISO-8601
@@ -156,14 +179,44 @@ func dotsFollowupText(issue DotsIssue) string {
 }
 
 func validDotsIssue(issue DotsIssue, commentID string) bool {
-	return dotsIdentifierRE.MatchString(issue.Identifier) && dotsCommentIDRE.MatchString(commentID)
+	return dotsIdentifierRE.MatchString(issue.Identifier) && dotsCommentIDRE.MatchString(commentID) && originUUIDRE.MatchString(issue.IssueUUID)
 }
 
-// RecordDotsResult writes the document for one dots answer and the lane
-// notification owed for it, in one transaction. The first writer of a key wins:
-// a redelivery, or a poller that got there first, changes nothing and queues
-// nothing (that poller notified on its own). created reports whether this call
-// wrote the document.
+// dotsLinkedTask returns the one task whose Linear origin is the issue, or
+// nil when none or several are: an ambiguous link is unknown, not a guess.
+// The caller's later write that names the task takes KEY SHARE on its row.
+func dotsLinkedTask(ctx context.Context, tx pgx.Tx, issueUUID string) (*Task, error) {
+	rows, err := tx.Query(ctx, `SELECT DISTINCT o.task_id, t.lane FROM task_origins o JOIN tasks t ON t.id = o.task_id WHERE o.provider = $1 AND o.external_id = $2 ORDER BY o.task_id LIMIT 2`, OriginLinear, issueUUID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var found []Task
+	for rows.Next() {
+		var t Task
+		if err := rows.Scan(&t.ID, &t.Lane); err != nil {
+			return nil, err
+		}
+		found = append(found, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(found) != 1 {
+		return nil, nil
+	}
+	return &found[0], nil
+}
+
+// RecordDotsResult writes the document for one dots answer, its dots_results
+// row and the lane notification owed for it, in one transaction. The first
+// writer of a key wins: a redelivery, or a poller that got there first, keeps
+// the document body and queues nothing (that poller notified on its own), but
+// the dots_results row is still written and a NULL task link filled in.
+// created reports whether this call wrote the document.
+//
+// Locks (lockorder.go, level 4): the documents row and the dots_results row,
+// each insert or update taking KEY SHARE on the one linked task row.
 func (s *Store) RecordDotsResult(ctx context.Context, kind string, issue DotsIssue, c DotsComment) (key string, created bool, err error) {
 	outboxKind, recorded := dotsResultKinds[kind]
 	if !recorded || !validDotsIssue(issue, c.ID) {
@@ -181,23 +234,46 @@ func (s *Store) RecordDotsResult(ctx context.Context, kind string, issue DotsIss
 		return "", false, err
 	}
 	sum := sha256.Sum256([]byte(body))
+	artefact := sha256.Sum256([]byte(c.Body))
+	verdict := nullIfEmpty(dotsSummaryLine(c.Body))
 	now := time.Now().UTC()
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return "", false, err
 	}
 	defer tx.Rollback(ctx)
-	tag, err := tx.Exec(ctx, `INSERT INTO documents(key,kind,session,job,body,sha256,created_by,created_at,updated_at,origin_class) VALUES($1,'note',$2,'',$3,$4,$5,$6,$6,'import') ON CONFLICT(key) DO NOTHING`, key, DotsLane, body, hex.EncodeToString(sum[:]), dotsCreatedBy, now)
+	task, err := dotsLinkedTask(ctx, tx, issue.IssueUUID)
 	if err != nil {
 		return "", false, err
 	}
-	if tag.RowsAffected() == 0 {
-		return key, false, nil
+	var taskID *int64
+	if task != nil {
+		taskID = &task.ID
 	}
-	if err := insertNotificationOutbox(ctx, tx, outboxKind, DotsLane, "dots-"+c.ID, dotsResultText(kind, key, issue, c), now); err != nil {
+	lane := dotsRequesterLane(issue.Description, task)
+	tag, err := tx.Exec(ctx, `INSERT INTO documents(key,kind,session,job,body,sha256,created_by,created_at,updated_at,origin_class,task_id) VALUES($1,'note',$2,'',$3,$4,$5,$6,$6,'import',$7) ON CONFLICT(key) DO NOTHING`, key, DotsLane, body, hex.EncodeToString(sum[:]), dotsCreatedBy, now, taskID)
+	if err != nil {
 		return "", false, err
 	}
-	return key, true, tx.Commit(ctx)
+	created = tag.RowsAffected() == 1
+	if !created && taskID != nil {
+		if _, err := tx.Exec(ctx, `UPDATE documents SET task_id=$1 WHERE key=$2 AND task_id IS NULL`, *taskID, key); err != nil {
+			return "", false, err
+		}
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO dots_results(document_key,comment_id,issue_uuid,issue_identifier,kind,verdict,artefact_sha256,task_id,routed_lane,created_at,updated_at)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$10)
+		ON CONFLICT(comment_id) DO UPDATE SET task_id=EXCLUDED.task_id, updated_at=EXCLUDED.updated_at
+		WHERE dots_results.task_id IS NULL AND EXCLUDED.task_id IS NOT NULL`,
+		key, c.ID, issue.IssueUUID, issue.Identifier, kind, verdict, hex.EncodeToString(artefact[:]), taskID, lane, now); err != nil {
+		return "", false, err
+	}
+	if created {
+		if err := insertNotificationOutbox(ctx, tx, outboxKind, lane, "dots-"+c.ID, dotsResultText(kind, key, issue, c), now); err != nil {
+			return "", false, err
+		}
+	}
+	return key, created, tx.Commit(ctx)
 }
 
 // RecordDotsFollowup records the flag for a non-dots comment added after an
@@ -212,7 +288,11 @@ func (s *Store) RecordDotsFollowup(ctx context.Context, issue DotsIssue, comment
 		return false, err
 	}
 	defer tx.Rollback(ctx)
-	created, err = insertNotificationOutboxOnce(ctx, tx, OutboxKindDotsFollowup, DotsLane, "dots-followup-"+commentID, dotsFollowupText(issue), time.Now().UTC())
+	task, err := dotsLinkedTask(ctx, tx, issue.IssueUUID)
+	if err != nil {
+		return false, err
+	}
+	created, err = insertNotificationOutboxOnce(ctx, tx, OutboxKindDotsFollowup, dotsRequesterLane(issue.Description, task), "dots-followup-"+commentID, dotsFollowupText(issue), time.Now().UTC())
 	if err != nil {
 		return false, err
 	}
