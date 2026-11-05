@@ -219,12 +219,14 @@ jobs:
     # Aggregate check. On a pull request it covers the T-PR jobs; elsewhere
     # also the post-* jobs. A dispatch with a partial suite never mints a check
     # named exactly 'ci-ok'. When the only non-success among the needed jobs is
-    # cancelled (a newer main head superseded this run, or no runner was
-    # acquired), the job is skipped, so mergewake reads unknown and holds
-    # instead of seeing a failure (hk 2924).
+    # cancelled or abandoned (a newer main head superseded this run, or no
+    # runner was acquired), the job is skipped, so mergewake reads unknown and
+    # holds instead of seeing a failure (hk 2924). A job that never got a
+    # runner reports abandoned in the needs context although the jobs API says
+    # cancelled (run 42061203904: post-macos abandoned, hk 3155).
     name: ${{ (inputs.suite || 'all') == 'all' && 'ci-ok' || format('ci-ok ({0})', inputs.suite) }}
     needs: [test, vitest, build, auto-tag-test, post-linux, post-macos]
-    if: ${{ always() && (contains(needs.*.result, 'failure') || !contains(needs.*.result, 'cancelled')) }}
+    if: ${{ always() && (contains(needs.*.result, 'failure') || !(contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'abandoned'))) }}
     runs-on: ubuntu-latest
     steps:
       - name: Check required jobs

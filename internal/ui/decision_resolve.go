@@ -28,37 +28,13 @@ func (h *Handler) decisionResolve(w http.ResponseWriter, r *http.Request, identi
 		h.audit(apiIdentity(identity), outcome.action, outcome.target, outcome.eventID, outcome.result)
 	}()
 
-	if identity.ServiceName != "" {
-		outcome.result = "service_reject"
-		writeJSONError(w, http.StatusForbidden, "operator_only")
-		return
-	}
-	if !sameOrigin(r) {
-		outcome.result = "origin_reject"
-		writeJSONError(w, http.StatusForbidden, "origin_rejected")
-		return
-	}
-	if !h.validHeaderCSRF(r, identity.Email) {
-		outcome.result = "csrf_reject"
-		writeJSONError(w, http.StatusForbidden, "csrf_rejected")
-		return
-	}
-
-	r.Body = http.MaxBytesReader(w, r.Body, decisionResolveBodyLimit)
 	var input struct {
 		RequestID string `json:"request_id"`
 		Option    string `json:"option"`
 		Text      string `json:"text"`
 		EventKey  string `json:"event_key"`
 	}
-	decoder := json.NewDecoder(r.Body)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&input); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "invalid_request")
-		return
-	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		writeJSONError(w, http.StatusBadRequest, "invalid_request")
+	if !h.decodeDecisionWrite(w, r, identity, &outcome, &input) {
 		return
 	}
 	outcome.target = auditTarget(input.RequestID)
@@ -81,6 +57,80 @@ func (h *Handler) decisionResolve(w http.ResponseWriter, r *http.Request, identi
 	writeBoardJSONStatus(w, status, body)
 }
 
+// decisionDeny records the operator's [아님] for one pending_confirmation
+// attempt of the current request (hk 3163): a denied attempt of its own, the
+// request left open. Body: {request_id, attempt_id, receipt, event_key};
+// receipt is the operator's optional reason. Guards and the status table are
+// those of decisionResolve; a deny answers 200 result "denied".
+func (h *Handler) decisionDeny(w http.ResponseWriter, r *http.Request, identity cfaccess.Identity) {
+	outcome := writeOutcome{action: "decision-deny", target: "-", eventID: "-", result: "invalid"}
+	defer func() {
+		h.audit(apiIdentity(identity), outcome.action, outcome.target, outcome.eventID, outcome.result)
+	}()
+
+	var input struct {
+		RequestID string `json:"request_id"`
+		AttemptID int64  `json:"attempt_id"`
+		Receipt   string `json:"receipt"`
+		EventKey  string `json:"event_key"`
+	}
+	if !h.decodeDecisionWrite(w, r, identity, &outcome, &input) {
+		return
+	}
+	outcome.target = auditTarget(input.RequestID)
+	if input.EventKey == "" {
+		writeJSONError(w, http.StatusBadRequest, "event_key_required")
+		return
+	}
+	outcome.eventID = auditTarget(input.EventKey)
+
+	out, err := h.store.ResolveDecision(r.Context(), store.ResolveDecisionInput{
+		RequestID: input.RequestID, Kind: store.DecisionKindDeny, DeniesAttemptID: input.AttemptID, Receipt: input.Receipt,
+		EventKey: input.EventKey, Channel: store.DecisionChannelConsole, Actor: apiIdentity(identity), Verified: true,
+	})
+	if err != nil {
+		outcome.result = decisionResolveError(w, err)
+		return
+	}
+	outcome.result = out.Result
+	status, body := api.DecisionResolveResponse(out)
+	writeBoardJSONStatus(w, status, body)
+}
+
+// decodeDecisionWrite applies the console decision routes' guards (an Access
+// email identity, same origin, header CSRF) and decodes the size-capped body
+// into input, rejecting unknown fields and trailing data. It answers the
+// refusal itself and reports whether the handler may go on.
+func (h *Handler) decodeDecisionWrite(w http.ResponseWriter, r *http.Request, identity cfaccess.Identity, outcome *writeOutcome, input any) bool {
+	if identity.ServiceName != "" {
+		outcome.result = "service_reject"
+		writeJSONError(w, http.StatusForbidden, "operator_only")
+		return false
+	}
+	if !sameOrigin(r) {
+		outcome.result = "origin_reject"
+		writeJSONError(w, http.StatusForbidden, "origin_rejected")
+		return false
+	}
+	if !h.validHeaderCSRF(r, identity.Email) {
+		outcome.result = "csrf_reject"
+		writeJSONError(w, http.StatusForbidden, "csrf_rejected")
+		return false
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, decisionResolveBodyLimit)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(input); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid_request")
+		return false
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		writeJSONError(w, http.StatusBadRequest, "invalid_request")
+		return false
+	}
+	return true
+}
+
 // auditTarget bounds a caller-supplied value before it reaches the audit line.
 func auditTarget(value string) string {
 	if len(value) > 128 {
@@ -100,6 +150,12 @@ func decisionResolveError(w http.ResponseWriter, err error) string {
 		writeJSONError(w, http.StatusNotFound, "not_found")
 	case errors.Is(err, store.ErrDecisionEventKeyConflict):
 		writeJSONError(w, http.StatusConflict, "decision_event_key_conflict")
+	case errors.Is(err, store.ErrDecisionAttemptNotFound):
+		writeJSONError(w, http.StatusNotFound, "not_found")
+	case errors.Is(err, store.ErrDecisionAttemptNotPending):
+		writeJSONError(w, http.StatusConflict, "decision_attempt_not_pending")
+	case errors.Is(err, store.ErrDecisionAttemptDenied):
+		writeJSONError(w, http.StatusConflict, "decision_attempt_denied")
 	case errors.Is(err, store.ErrInvalidDecisionRequest):
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 	default:
