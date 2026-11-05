@@ -57,7 +57,7 @@ func TestJobHarnessEffort(t *testing.T) {
 	if j.Harness == nil || *j.Harness != "claude-code" || j.Effort == nil || *j.Effort != "high" {
 		t.Fatalf("%+v", j)
 	}
-	if _, err := s.UpdateJob(t.Context(), j.JobID, JobUpdate{Harness: strptr("AKIAIOSFODNN7EXAMPLE")}); err == nil {
+	if _, err := s.UpdateJob(t.Context(), j.JobID, JobUpdate{Harness: strptr("AKIA" + strings.Repeat("A", 16))}); err == nil {
 		t.Fatal("secret harness accepted")
 	} else if _, ok := guard.SecretPattern(err); !ok {
 		t.Fatalf("secret refusal: %v", err)
