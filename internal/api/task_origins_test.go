@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-const originIssueUUID = "3f2b8c1e-9a4d-4e6f-8b7a-1c2d3e4f5a6b"
+const originUUIDFixture = "3f2b8c1e-9a4d-4e6f-8b7a-1c2d3e4f5a6b"
 
 func TestTaskOriginsAPI(t *testing.T) {
 	h, st := relaneAPIServer(t)
@@ -13,11 +13,11 @@ func TestTaskOriginsAPI(t *testing.T) {
 	a := relaneAPITask(t, st, lane, "origin a")
 	b := relaneAPITask(t, st, lane, "origin b")
 	pathA := "/v1/tasks/" + itoa64(a.ID) + "/origins"
-	body := map[string]any{"provider": "linear", "namespace": "watcha", "external_id": originIssueUUID, "display_ref": "MGH-151", "url": "https://linear.app/watcha/issue/MGH-151", "title": "an issue"}
+	body := map[string]any{"provider": "linear", "namespace": "example-ws", "external_id": originUUIDFixture, "display_ref": "MGH-151", "url": "https://linear.app/example-ws/issue/MGH-151", "title": "an issue"}
 
 	code, out := projectRequest(t, h.URL, http.MethodPost, pathA, "tok", body)
 	origin, _ := out["origin"].(map[string]any)
-	if code != http.StatusCreated || out["created"] != true || origin["display_ref"] != "MGH-151" || origin["external_id"] != originIssueUUID {
+	if code != http.StatusCreated || out["created"] != true || origin["display_ref"] != "MGH-151" || origin["external_id"] != originUUIDFixture {
 		t.Fatalf("first POST code=%d body=%v", code, out)
 	}
 	// The issue moved from MGH to ROB: same UUID, new number, no second row.
@@ -38,7 +38,7 @@ func TestTaskOriginsAPI(t *testing.T) {
 	if code, out = projectRequest(t, h.URL, http.MethodPost, "/v1/tasks/"+itoa64(b.ID)+"/origins", "tok", body); code != http.StatusCreated {
 		t.Fatalf("POST to task b code=%d body=%v", code, out)
 	}
-	code, out = projectRequest(t, h.URL, http.MethodGet, "/v1/task-origins?provider=linear&external_id="+originIssueUUID, "tok", nil)
+	code, out = projectRequest(t, h.URL, http.MethodGet, "/v1/task-origins?provider=linear&external_id="+originUUIDFixture, "tok", nil)
 	found, _ := out["origins"].([]any)
 	if code != http.StatusOK || len(found) != 2 {
 		t.Fatalf("find code=%d body=%v", code, out)
@@ -62,14 +62,14 @@ func TestTaskOriginsAPI(t *testing.T) {
 		"bad task id on GET":       {http.MethodGet, "/v1/tasks/abc/origins", nil, 400, "invalid_context"},
 		"unknown task on POST":     {http.MethodPost, "/v1/tasks/999999999/origins", body, 404, "not_found"},
 		"unknown task on GET":      {http.MethodGet, "/v1/tasks/999999999/origins", nil, 404, "not_found"},
-		"unknown body field":       {http.MethodPost, pathA, map[string]any{"provider": "linear", "namespace": "watcha", "external_id": originIssueUUID, "colour": "red"}, 400, ""},
-		"display number as id":     {http.MethodPost, pathA, map[string]any{"provider": "linear", "namespace": "watcha", "external_id": "MGH-151"}, 400, "invalid_context"},
-		"unknown provider":         {http.MethodPost, pathA, map[string]any{"provider": "jira", "namespace": "watcha", "external_id": originIssueUUID}, 400, "invalid_context"},
-		"find without provider":    {http.MethodGet, "/v1/task-origins?external_id=" + originIssueUUID, nil, 400, "invalid_context"},
+		"unknown body field":       {http.MethodPost, pathA, map[string]any{"provider": "linear", "namespace": "example-ws", "external_id": originUUIDFixture, "colour": "red"}, 400, ""},
+		"display number as id":     {http.MethodPost, pathA, map[string]any{"provider": "linear", "namespace": "example-ws", "external_id": "MGH-151"}, 400, "invalid_context"},
+		"unknown provider":         {http.MethodPost, pathA, map[string]any{"provider": "jira", "namespace": "example-ws", "external_id": originUUIDFixture}, 400, "invalid_context"},
+		"find without provider":    {http.MethodGet, "/v1/task-origins?external_id=" + originUUIDFixture, nil, 400, "invalid_context"},
 		"find without external_id": {http.MethodGet, "/v1/task-origins?provider=linear", nil, 400, "invalid_context"},
 		"find with a bad UUID":     {http.MethodGet, "/v1/task-origins?provider=linear&external_id=MGH-151", nil, 400, "invalid_context"},
 		"find with a bad provider": {http.MethodGet, "/v1/task-origins?provider=jira&external_id=x", nil, 400, "invalid_context"},
-		"find with a bad limit":    {http.MethodGet, "/v1/task-origins?provider=linear&external_id=" + originIssueUUID + "&limit=0", nil, 400, "invalid_context"},
+		"find with a bad limit":    {http.MethodGet, "/v1/task-origins?provider=linear&external_id=" + originUUIDFixture + "&limit=0", nil, 400, "invalid_context"},
 	} {
 		code, out := projectRequest(t, h.URL, tc.method, tc.path, "tok", tc.body)
 		if code != tc.status || (tc.errCode != "" && out["error"] != tc.errCode) {

@@ -32,12 +32,12 @@ func recordingHK(t *testing.T, response any) (*httptest.Server, *[]fakeRequest) 
 
 func TestTaskOriginCmd(t *testing.T) {
 	const uuid = "3f2b8c1e-9a4d-4e6f-8b7a-1c2d3e4f5a6b"
-	origin := store.TaskOrigin{ID: 4, TaskID: 9, Provider: "linear", Namespace: "watcha", ExternalID: uuid, DisplayRef: "ROB-1514"}
+	origin := store.TaskOrigin{ID: 4, TaskID: 9, Provider: "linear", Namespace: "example-ws", ExternalID: uuid, DisplayRef: "ROB-1514"}
 	server, seen := recordingHK(t, map[string]any{"origin": origin, "created": true, "origins": []store.TaskOrigin{origin}})
 	base := []string{"--url", server.URL, "--token", "t"}
 
 	var out, errout bytes.Buffer
-	args := append([]string{"tasks", "origin", "add", "9", "--provider", "linear", "--namespace", "watcha", "--external-id", uuid, "--display-ref", "ROB-1514", "--origin-url", "https://linear.app/watcha/issue/ROB-1514", "--title", "an issue"}, base...)
+	args := append([]string{"tasks", "origin", "add", "9", "--provider", "linear", "--namespace", "example-ws", "--external-id", uuid, "--display-ref", "ROB-1514", "--origin-url", "https://linear.app/example-ws/issue/ROB-1514", "--title", "an issue"}, base...)
 	if err := run(args, &out, &errout); err != nil {
 		t.Fatal(err)
 	}
@@ -48,7 +48,7 @@ func TestTaskOriginCmd(t *testing.T) {
 	if err := json.Unmarshal([]byte((*seen)[0].Body), &sent); err != nil {
 		t.Fatal(err)
 	}
-	for k, want := range map[string]string{"provider": "linear", "namespace": "watcha", "external_id": uuid, "display_ref": "ROB-1514", "url": "https://linear.app/watcha/issue/ROB-1514", "title": "an issue"} {
+	for k, want := range map[string]string{"provider": "linear", "namespace": "example-ws", "external_id": uuid, "display_ref": "ROB-1514", "url": "https://linear.app/example-ws/issue/ROB-1514", "title": "an issue"} {
 		if sent[k] != want {
 			t.Errorf("body %s=%q, want %q (body %s)", k, sent[k], want, (*seen)[0].Body)
 		}
@@ -100,11 +100,11 @@ func TestTaskOriginCmd(t *testing.T) {
 	*seen = nil
 	out.Reset()
 	for name, bad := range map[string][]string{
-		"add without --external-id":  {"tasks", "origin", "add", "9", "--provider", "linear", "--namespace", "watcha"},
-		"add without --provider":     {"tasks", "origin", "add", "9", "--namespace", "watcha", "--external-id", uuid},
+		"add without --external-id":  {"tasks", "origin", "add", "9", "--provider", "linear", "--namespace", "example-ws"},
+		"add without --provider":     {"tasks", "origin", "add", "9", "--namespace", "example-ws", "--external-id", uuid},
 		"add without --namespace":    {"tasks", "origin", "add", "9", "--provider", "linear", "--external-id", uuid},
-		"add without an id":          {"tasks", "origin", "add", "--provider", "linear", "--namespace", "watcha", "--external-id", uuid},
-		"add with id 0":              {"tasks", "origin", "add", "0", "--provider", "linear", "--namespace", "watcha", "--external-id", uuid},
+		"add without an id":          {"tasks", "origin", "add", "--provider", "linear", "--namespace", "example-ws", "--external-id", uuid},
+		"add with id 0":              {"tasks", "origin", "add", "0", "--provider", "linear", "--namespace", "example-ws", "--external-id", uuid},
 		"list without an id":         {"tasks", "origin", "list"},
 		"find without --external-id": {"tasks", "origin", "find", "--provider", "linear"},
 		"find without --provider":    {"tasks", "origin", "find", "--external-id", uuid},
