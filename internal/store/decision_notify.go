@@ -226,13 +226,13 @@ func (s *Store) ProcessDecisionDigest(ctx context.Context, now time.Time, send f
 		return false, nil, err
 	}
 	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `INSERT INTO decision_notify_digest(day,state,next_attempt_at,created_at) VALUES($1::date,'pending',$2,$2) ON CONFLICT(day) DO NOTHING`, day.Format(time.DateOnly), now); err != nil {
+	if _, err = tx.Exec(ctx, `INSERT INTO decision_notify_digest(day,state,next_attempt_at,created_at) VALUES($1::date,'pending',$2,$2) ON CONFLICT(day) DO NOTHING`, day, now); err != nil {
 		return false, nil, err
 	}
 	var state string
 	var attempts int
 	var next time.Time
-	err = tx.QueryRow(ctx, `SELECT state,attempts,next_attempt_at FROM decision_notify_digest WHERE day=$1::date FOR UPDATE SKIP LOCKED`, day.Format(time.DateOnly)).Scan(&state, &attempts, &next)
+	err = tx.QueryRow(ctx, `SELECT state,attempts,next_attempt_at FROM decision_notify_digest WHERE day=$1::date FOR UPDATE SKIP LOCKED`, day).Scan(&state, &attempts, &next)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil, nil
 	}
@@ -267,7 +267,7 @@ func (s *Store) ProcessDecisionDigest(ctx context.Context, now time.Time, send f
 		return false, nil, err
 	}
 	if digest.Total == 0 {
-		if _, err = tx.Exec(ctx, `UPDATE decision_notify_digest SET state='empty',sent_at=$2 WHERE day=$1::date`, day.Format(time.DateOnly), now); err != nil {
+		if _, err = tx.Exec(ctx, `UPDATE decision_notify_digest SET state='empty',sent_at=$2 WHERE day=$1::date`, day, now); err != nil {
 			return true, nil, err
 		}
 		return true, nil, tx.Commit(ctx)
@@ -276,18 +276,18 @@ func (s *Store) ProcessDecisionDigest(ctx context.Context, now time.Time, send f
 	switch {
 	case errors.Is(sendErr, ErrDecisionNoticeSkipped):
 		sendErr = nil
-		_, err = tx.Exec(ctx, `UPDATE decision_notify_digest SET state='unsent',listed=$2 WHERE day=$1::date`, day.Format(time.DateOnly), digest.Total)
+		_, err = tx.Exec(ctx, `UPDATE decision_notify_digest SET state='unsent',listed=$2 WHERE day=$1::date`, day, digest.Total)
 	case sendErr == nil:
 		_, err = tx.Exec(ctx, `UPDATE decision_notify_digest SET state='sent',listed=$2,message_id=$3,sent_at=$4,attempts=$5,last_error='' WHERE day=$1::date`,
-			day.Format(time.DateOnly), digest.Total, messageID, now, attempts+1)
+			day, digest.Total, messageID, now, attempts+1)
 	default:
 		lastError := firstBytes(sendErr.Error(), linearDecisionErrorMaxBytes)
 		if attempts+1 >= decisionNoticeMaxAttempts || errors.Is(sendErr, ErrDecisionNoticeRejected) {
 			sendErr = fmt.Errorf("%w: digest %s: %w", ErrDecisionNoticeGaveUp, day.Format(time.DateOnly), sendErr)
-			_, err = tx.Exec(ctx, `UPDATE decision_notify_digest SET state='failed',attempts=$2,last_error=$3 WHERE day=$1::date`, day.Format(time.DateOnly), attempts+1, lastError)
+			_, err = tx.Exec(ctx, `UPDATE decision_notify_digest SET state='failed',attempts=$2,last_error=$3 WHERE day=$1::date`, day, attempts+1, lastError)
 		} else {
 			_, err = tx.Exec(ctx, `UPDATE decision_notify_digest SET attempts=$2,last_error=$3,next_attempt_at=$4 WHERE day=$1::date`,
-				day.Format(time.DateOnly), attempts+1, lastError, now.Add(linearDecisionOpBackoff(attempts)))
+				day, attempts+1, lastError, now.Add(linearDecisionOpBackoff(attempts)))
 		}
 	}
 	if err != nil {
@@ -308,7 +308,9 @@ type DecisionDigestState struct {
 // GetDecisionDigest reads the digest row of one UTC day.
 func (s *Store) GetDecisionDigest(ctx context.Context, day time.Time) (DecisionDigestState, bool, error) {
 	var x DecisionDigestState
-	err := s.pool.QueryRow(ctx, `SELECT state,listed,message_id,attempts,last_error FROM decision_notify_digest WHERE day=$1::date`, day.UTC().Format(time.DateOnly)).
+	day = day.UTC()
+	day = time.Date(day.Year(), day.Month(), day.Day(), 0, 0, 0, 0, time.UTC)
+	err := s.pool.QueryRow(ctx, `SELECT state,listed,message_id,attempts,last_error FROM decision_notify_digest WHERE day=$1::date`, day).
 		Scan(&x.State, &x.Listed, &x.MessageID, &x.Attempts, &x.LastError)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return DecisionDigestState{}, false, nil

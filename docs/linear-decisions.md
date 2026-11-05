@@ -45,6 +45,10 @@ A long question is cut to fit Discord's 2000-character limit; the issue has it
 in full. Messages cannot ping anyone, whatever the question says. Posts made
 while the URL is unset are skipped for good and are not replayed when you set it.
 
+The same webhook also carries one message per decision request from every
+other source, edited when the request closes, and a daily digest. See
+[decision-discord.md](decision-discord.md).
+
 ## How the desk asks
 
 ```bash
