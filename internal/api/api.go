@@ -207,8 +207,8 @@ func (s Service) GetDocument(ctx context.Context, key string) (store.Document, b
 func (s Service) GetDocumentByID(ctx context.Context, id int64) (store.Document, bool, error) {
 	return s.Store.GetDocumentByID(ctx, id)
 }
-func (s Service) ListDocuments(ctx context.Context, prefix, kind, session string, limit int) ([]store.Document, error) {
-	return s.Store.ListDocuments(ctx, prefix, kind, session, limit)
+func (s Service) ListDocuments(ctx context.Context, prefix, kind, session string, task int64, limit int) ([]store.Document, error) {
+	return s.Store.ListDocuments(ctx, prefix, kind, session, task, limit)
 }
 func (s Service) Search(ctx context.Context, q, scope, session string, limit int) ([]store.SearchResult, error) {
 	return s.Store.Search(ctx, q, scope, session, limit)
@@ -634,6 +634,9 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("POST /v1/tasks/{id}/parent", s.taskParent)
 	m.HandleFunc("POST /v1/tasks/{id}/relations", s.taskRelationAdd)
 	m.HandleFunc("POST /v1/tasks/{id}/relations/remove", s.taskRelationRemove)
+	m.HandleFunc("POST /v1/tasks/{id}/origins", s.taskOriginAdd)
+	m.HandleFunc("GET /v1/tasks/{id}/origins", s.taskOriginList)
+	m.HandleFunc("GET /v1/task-origins", s.taskOriginFind)
 	m.HandleFunc("POST /v1/tasks/{id}/reopen", s.taskReopen)
 	m.HandleFunc("POST /v1/tasks/{id}/project", s.taskProject)
 	m.HandleFunc("POST /v1/tasks/{id}/area", s.taskArea)
@@ -2162,7 +2165,14 @@ func (s Server) documents(w http.ResponseWriter, r *http.Request) {
 		appErr(w, r, e)
 		return
 	}
-	xs, e := s.Service.ListDocuments(r.Context(), r.URL.Query().Get("prefix"), r.URL.Query().Get("kind"), r.URL.Query().Get("session"), n)
+	var task int64
+	if raw := r.URL.Query().Get("task"); raw != "" {
+		if task, e = strconv.ParseInt(raw, 10, 64); e != nil || task < 1 {
+			writeError(w, http.StatusBadRequest, "invalid_context")
+			return
+		}
+	}
+	xs, e := s.Service.ListDocuments(r.Context(), r.URL.Query().Get("prefix"), r.URL.Query().Get("kind"), r.URL.Query().Get("session"), task, n)
 	if e != nil {
 		appErr(w, r, e)
 		return

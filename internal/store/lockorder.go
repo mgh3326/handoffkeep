@@ -43,10 +43,17 @@ package store
 //
 //  5. Rows that belong to a locked task: task_events (its foreign key takes
 //     KEY SHARE on the task row), task_labels, task_relations,
-//     task_subscribers, linear_board_tasks, linear_outbox, sync_decisions,
-//     ticket_sets, decision_answer_attempts and decision_resolutions (inserted by
-//     ResolveDecision after its task row, under the level-2 lock; append-only
-//     and never locked by a reader); shared rows read FOR SHARE (labels). decision_requests rows that name a
+//     task_subscribers, task_origins, linear_board_tasks, linear_outbox,
+//     sync_decisions, ticket_sets, decision_answer_attempts and
+//     decision_resolutions (inserted by ResolveDecision after its task row,
+//     under the level-2 lock; append-only and never locked by a reader);
+//     shared rows read FOR SHARE (labels).
+//     A documents insert or update that sets task_id takes KEY SHARE on that
+//     one task row through the foreign key (PutDocument). That is the level-4
+//     single-task case and needs no level-2 lock: no task writer locks a
+//     documents row while it holds a task row (IntakeTask and the dots
+//     writer insert new keys; applyDeployRecordTx runs under PutDocument's
+//     own level-2 lock, after the document row). decision_requests rows that name a
 //     task or a job are updated only under the level-2 lock, several at a
 //     time in id order (decision_records.go); the table has no foreign key.
 //

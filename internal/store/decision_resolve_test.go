@@ -70,7 +70,7 @@ func humanOnlyRequest(t *testing.T, s *Store, taskID int64) DecisionRequest {
 	return assistantRecordWith(t, s, taskID, in)
 }
 
-// TestDecisionResolutionsMigration pins version 41: both tables, the two
+// TestDecisionResolutionsMigration pins version 42: both tables, the two
 // unique keys, an append-only attempts table, and the version record.
 func TestDecisionResolutionsMigration(t *testing.T) {
 	s, pool := searchTestStore(t)
