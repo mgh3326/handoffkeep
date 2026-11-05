@@ -2,7 +2,8 @@
 
 Status: approved direction, 2026-11-03, with operator Amendment 1 folded in. The
 operator answered the questions below on 2026-11-04, which confirms the state table
-and migration map. This note changes no runtime behavior.
+and migration map. This note changes no runtime behavior. S0 through S6a have
+shipped; [As built](#as-built) records what changed from this plan.
 
 hk tracks work the way Linear does, adapted to a fleet where agents do the work
 and events move the state. Two failures motivate this: work silently falls
@@ -441,7 +442,7 @@ names.
 ### Migration mechanics
 
 The migration takes the next schema version when it merges. #124 currently claims
-32, so S1 expects 33 and renumbers if needed. It runs in one transaction:
+32, so S1 expects 33 and renumbers if needed. (S1 took 32; see As built.) It runs in one transaction:
 
 1. Creates `task_state_migration(task_id, legacy_state, legacy_claimed_by, new_state, rule)`,
    recording every changed row.
@@ -532,6 +533,57 @@ shipped (#120), and its archival PR stays as planned under Projection policy. Un
 label storage move to S1b, and status updates to S4. Deadline projection, releases,
 weekly digests and label policy actions are outside these slices and remain planned as
 written below; they need their own go-ahead.
+
+## As built
+
+S0 through S6a merged between 2026-11-04 and 2026-11-05. Read the plan above for the
+reasoning and this section for what shipped. Where they differ, this section is right.
+
+| Slice | PR | Schema | Follow-ups |
+|---|---|---|---|
+| S0 | #126, #127, #128 | none | |
+| S1 | #132 | 32 | |
+| S1b | #133 | 33 | #134 and #135: milestone edits no longer overwrite or silently clear other fields |
+| S2 | #136 | 34 | #137: `tasks event` keeps the values of single-dash flags |
+| Lock order | #138 | none | Not planned. Store locks are taken in one documented order, and `Open` skips migration DDL when the schema is current |
+| S3 | #139 | 35 | |
+| S4 | #141 | 36 | #143: the ledger places every started task, including one behind an expired request or past the 1000-row cap |
+| S5 | #142 | 37 | |
+| S6a | #144 | 38 | |
+| S6b | not started | | Held for a separate operator approval |
+
+`internal/store/migration.go` lists the function that owns each schema version.
+
+**Deploys.** Release v0.0.14 shipped S1, S1b, S2, #137 and #138 at schema 34. Release
+v0.0.20 shipped S3, S4, #143, S5, S6a and a CI change (#140) at schema 38. In both, the CLI went to
+every host before the server started.
+
+### Differences from the plan
+
+- **Schema numbers.** #124 closed without merging, so S1 took 32, not 33. S5 was written as 36,
+  then renumbered to 37 after S4 merged first. S6a was written as 37 and moved to 38
+  after S5 merged.
+- **S6 split in two.** S6a is outbound only: one Discord webhook message per open
+  decision request, edited when the request closes, and a daily digest. Each message
+  links to the console, whose base URL is `HANDOFFKEEP_CONSOLE_URL`. A failed first
+  post is retried only when Discord shows it created nothing (a 5xx, a 429 or a
+  failed dial). A process that stops between the post and its commit can still post
+  a request twice. S6b adds answer buttons, which need an interactions endpoint. It waits for
+  its own operator approval.
+- **Duplicate check.** `tasks add` uses `pg_trgm` title similarity over backlog,
+  unstarted and started tasks and answers `409 similar_tasks` unless the caller passes
+  `--link <id>` or `--new`. There is no FTS fallback, because `pg_trgm` is already
+  required. Recallbeam search is not wired in.
+- **Decision backfill.** S3 classified the open lane asks in a dry-run report and
+  closed none of them. Closing waits for an explicit operator OK.
+- **The mergewake sender.** The hk endpoint shipped in S2. mergewake sends `pr`,
+  `review`, `merge` and `revert` events from its own repository, in a separate PR (Q8).
+- **The deploy gate needs links.** A deploy record moves a `merged` task to `deployed`
+  only when `included_prs` lists full PR URLs and the task's `refs.pr` is one of them.
+  A task that carries only `refs.job_id` is not matched, so the desk links
+  `refs.pr` and writes a correction record.
+- **Client first (Q4).** A host still on a CLI older than S1 rejected the new state
+  names in claim responses. Step 1 of the rollout is not optional.
 
 ## Evidence and current boundaries
 
