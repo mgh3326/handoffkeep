@@ -1334,6 +1334,8 @@ func (s Server) taskDecisionRequest(w http.ResponseWriter, r *http.Request) {
 //
 //	answered              200 (a re-send also carries duplicate:true)
 //	pending_confirmation  202, the request stays open
+//	denied                200, the operator denied a pending attempt; the
+//	                      request stays open
 //	stale_revision        409 decision_request_stale
 //	superseded            409 decision_request_stale, or decision_request_resolved
 //	                      for a withdrawn request
