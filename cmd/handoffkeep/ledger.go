@@ -21,33 +21,6 @@ const (
 	defaultConsumer    = "desk"
 )
 
-// splitFlagArgs puts flags before positionals so either order parses. Value
-// flags are named without dashes and match in their -x and --x forms; a
-// -x=v argument carries its own value.
-func splitFlagArgs(args []string, valueFlags ...string) ([]string, error) {
-	takes := map[string]bool{"url": true, "token": true}
-	for _, f := range valueFlags {
-		takes[f] = true
-	}
-	flags, positional := []string{}, []string{}
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		if !strings.HasPrefix(arg, "-") || arg == "-" {
-			positional = append(positional, arg)
-			continue
-		}
-		flags = append(flags, arg)
-		if name := strings.TrimLeft(arg, "-"); takes[name] {
-			i++
-			if i >= len(args) {
-				return nil, fmt.Errorf("%s requires a value", arg)
-			}
-			flags = append(flags, args[i])
-		}
-	}
-	return append(flags, positional...), nil
-}
-
 // ledgerCmd prints the desk ledger: text by default, sections in order, or
 // the API response with --json. "ledger ack" moves the cursor.
 func ledgerCmd(args []string, out io.Writer) error {
@@ -72,7 +45,7 @@ func ledgerReadCmd(name string, args []string, out io.Writer, onlyChanges bool) 
 	c := remoteClient(fs)
 	consumer := fs.String("consumer", defaultConsumer, "ledger consumer whose cursor is read")
 	asJSON := fs.Bool("json", false, "print JSON")
-	parsed, err := splitFlagArgs(args, "consumer")
+	parsed, err := splitArgs(args, "consumer")
 	if err != nil {
 		return err
 	}
@@ -114,7 +87,7 @@ func ledgerAckCmd(args []string, out io.Writer) error {
 	fs.SetOutput(io.Discard)
 	c := remoteClient(fs)
 	consumer := fs.String("consumer", defaultConsumer, "ledger consumer whose cursor moves")
-	parsed, err := splitFlagArgs(args, "consumer")
+	parsed, err := splitArgs(args, "consumer")
 	if err != nil {
 		return err
 	}
@@ -146,7 +119,7 @@ func projectStatusCmd(args []string, out io.Writer) error {
 	health := fs.String("health", "", "on_track, at_risk or off_track")
 	body := fs.String("body", "", "the update text")
 	limit := fs.Int("limit", 0, "maximum updates listed (server default 100)")
-	parsed, err := splitFlagArgs(args, "health", "body", "limit")
+	parsed, err := splitArgs(args, "health", "body", "limit")
 	if err != nil {
 		return err
 	}

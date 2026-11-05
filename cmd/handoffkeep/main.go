@@ -1311,7 +1311,7 @@ func importDocsManifest(ctx context.Context, c *remote.Client, path string, appl
 		}
 		_, changed, err := c.PutDocument(ctx, "", store.Document{Key: entry.Key, Kind: entry.Kind, Body: string(body)})
 		if err != nil {
-			if pattern, rejected := strings.CutPrefix(err.Error(), "secret_like_content:"); rejected {
+			if pattern, rejected := remote.SecretPattern(err); rejected {
 				item.Status = "rejected"
 				item.Pattern = pattern
 				result.Items = append(result.Items, item)
@@ -1360,7 +1360,7 @@ func importDocs(ctx context.Context, c *remote.Client, dir, glob string, apply b
 		}
 		_, _, e = c.PutDocument(ctx, "", store.Document{Key: key, Kind: kind, Job: job, Body: string(b)})
 		if e != nil {
-			if p, ok := strings.CutPrefix(e.Error(), "secret_like_content:"); ok {
+			if p, ok := remote.SecretPattern(e); ok {
 				rejected = append(rejected, map[string]string{"key": key, "pattern": p})
 				return nil
 			}

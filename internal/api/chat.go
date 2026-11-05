@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/mgh3326/handoffkeep/internal/store"
@@ -211,15 +210,11 @@ func (s Server) chatMessagesList(w http.ResponseWriter, r *http.Request) {
 	jsonOut(w, http.StatusOK, map[string]any{"messages": xs})
 }
 
-func chatMessageID(r *http.Request) (int64, error) {
-	return strconv.ParseInt(r.PathValue("id"), 10, 64)
-}
-
 func (s Server) chatMessageDelivered(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.auth(w, r); !ok {
 		return
 	}
-	id, err := chatMessageID(r)
+	id, err := pathID(r, "id")
 	if err != nil || id < 1 {
 		writeError(w, http.StatusBadRequest, "invalid_context")
 		return
@@ -236,7 +231,7 @@ func (s Server) chatMessageFailed(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.auth(w, r); !ok {
 		return
 	}
-	id, err := chatMessageID(r)
+	id, err := pathID(r, "id")
 	if err != nil || id < 1 {
 		writeError(w, http.StatusBadRequest, "invalid_context")
 		return

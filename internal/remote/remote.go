@@ -446,6 +446,16 @@ func ErrorCode(err error) string {
 	return ""
 }
 
+// SecretPattern reports the pattern the server named when it refused a write
+// as secret_like_content.
+func SecretPattern(err error) (string, bool) {
+	var h *HTTPError
+	if errors.As(err, &h) && h.Code == "secret_like_content" {
+		return h.Pattern, true
+	}
+	return "", false
+}
+
 func esc(x string) string { return url.PathEscape(x) }
 func (c Client) Checkpoint(ctx context.Context, _ string, x store.Checkpoint) (store.Checkpoint, error) {
 	var out store.Checkpoint

@@ -191,7 +191,7 @@ func laneText(text string) string {
 
 func (f *Forwarder) now() time.Time {
 	if f.Now != nil {
-		return f.Now()
+		return f.Now().UTC()
 	}
-	return time.Now()
+	return time.Now().UTC()
 }

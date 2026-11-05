@@ -2,7 +2,7 @@
 package guard
 
 import (
-	"fmt"
+	"errors"
 	"regexp"
 )
 
@@ -32,9 +32,27 @@ func Match(value string) string {
 	}
 	return ""
 }
+
+// SecretError is Reject's refusal. Its text stays
+// "secret_like_content:<pattern>", the form the API and clients expect.
+type SecretError struct{ Pattern string }
+
+func (e *SecretError) Error() string { return "secret_like_content:" + e.Pattern }
+
+// Reject returns a *SecretError naming the first matching pattern, or nil.
 func Reject(value string) error {
 	if p := Match(value); p != "" {
-		return fmt.Errorf("secret_like_content:%s", p)
+		return &SecretError{Pattern: p}
 	}
 	return nil
+}
+
+// SecretPattern reports the matched pattern when err (or an error it wraps)
+// is a Reject refusal. Callers branch on it instead of on the error text.
+func SecretPattern(err error) (string, bool) {
+	var secret *SecretError
+	if errors.As(err, &secret) {
+		return secret.Pattern, true
+	}
+	return "", false
 }

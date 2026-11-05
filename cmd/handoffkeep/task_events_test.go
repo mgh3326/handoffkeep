@@ -204,8 +204,7 @@ func TestTasksSweepCLIRefusesOutOfRangeDays(t *testing.T) {
 	}
 }
 
-func TestSplitTaskArgsSingleDashValueFlags(t *testing.T) {
-	valueFlags := map[string]bool{"--source": true, "--source-ref": true}
+func TestSplitArgsSingleDashValueFlags(t *testing.T) {
 	for _, tc := range []struct {
 		args []string
 		want []string
@@ -214,12 +213,12 @@ func TestSplitTaskArgsSingleDashValueFlags(t *testing.T) {
 		{[]string{"7", "--source", "mergewake.merge", "--source-ref=u"}, []string{"--source", "mergewake.merge", "--source-ref=u", "7"}},
 		{[]string{"-source=mergewake.merge", "7", "-source-ref", "u"}, []string{"-source=mergewake.merge", "-source-ref", "u", "7"}},
 	} {
-		got, err := splitTaskArgs(tc.args, valueFlags)
+		got, err := splitArgs(tc.args, "source", "source-ref")
 		if err != nil || strings.Join(got, " ") != strings.Join(tc.want, " ") {
 			t.Fatalf("%v -> %v err=%v, want %v", tc.args, got, err, tc.want)
 		}
 	}
-	if _, err := splitTaskArgs([]string{"7", "-source"}, valueFlags); err == nil {
+	if _, err := splitArgs([]string{"7", "-source"}, "source", "source-ref"); err == nil {
 		t.Fatal("a trailing -source without a value was accepted")
 	}
 }

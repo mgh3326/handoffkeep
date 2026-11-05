@@ -1,6 +1,7 @@
 // Versioned local presentation state. The ONLY thing persisted is view /
 // filter / grouping / columns / density — never task bodies or credentials.
 
+import { readStored, writeStored } from "../shared/storage";
 import type { ProtoState } from "./types";
 import { EMPTY_FILTERS } from "./adapter";
 
@@ -138,12 +139,7 @@ function withKnownPresentation<T extends Partial<SavedView>>(saved: T): T {
 // Storage is resolved inside the try in both directions: reading the
 // localStorage property itself throws in storage-blocked browsers.
 export function loadPresentation(storage?: Pick<Storage, "getItem">, defaults: ProtoState = DEFAULT_STATE): LoadResult {
-  let raw: string | null = null;
-  try {
-    raw = (storage ?? globalThis.localStorage).getItem(STORAGE_KEY);
-  } catch {
-    raw = null;
-  }
+  const raw = readStored(STORAGE_KEY, storage);
   if (raw === null) {
     return { state: defaults, views: NAMED_VIEWS, versionMismatch: false };
   }
@@ -174,10 +170,6 @@ export function loadPresentation(storage?: Pick<Storage, "getItem">, defaults: P
 }
 
 export function savePresentation(state: ProtoState, views: Record<string, SavedView>, storage?: Pick<Storage, "setItem">): void {
-  try {
-    const payload: PersistedPayload = { schemaVersion: SCHEMA_VERSION, current: toView(state), views };
-    (storage ?? globalThis.localStorage).setItem(STORAGE_KEY, JSON.stringify(payload));
-  } catch {
-    // localStorage may be unavailable — presentation state simply won't persist.
-  }
+  const payload: PersistedPayload = { schemaVersion: SCHEMA_VERSION, current: toView(state), views };
+  writeStored(STORAGE_KEY, JSON.stringify(payload), storage);
 }

@@ -119,7 +119,7 @@ func scanPlacement(row interface{ Scan(...any) error }) (PlacementDecision, erro
 	if err != nil {
 		return d, err
 	}
-	err = json.Unmarshal(raw, &d.Candidates)
+	_, err = scanJSONB(raw, &d.Candidates)
 	return d, err
 }
 

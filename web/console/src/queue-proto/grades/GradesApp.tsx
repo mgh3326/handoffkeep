@@ -6,6 +6,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { fetchCatalog, type CatalogQuery } from "./api";
 import type { BenchCatalogEntry, CatalogResponse } from "./types";
+import { formatDayUTC, formatMinuteUTC } from "../../shared/time";
 
 /** Server-side ladder order (the catalog CHECK constraint's closed set). A
  * grade outside it lands in the trailing "기타" group — never dropped. */
@@ -23,26 +24,6 @@ function effortRank(effort: string): number {
  * estimated scores; anything else in the field is shown verbatim. */
 function isEstimated(entry: BenchCatalogEntry): boolean {
   return entry.benchmark_annotation !== null && entry.benchmark_annotation.startsWith("ESTIMATED");
-}
-
-function formatClock(iso: string): string | null {
-  const t = Date.parse(iso);
-  if (!Number.isFinite(t)) {
-    return null;
-  }
-  const d = new Date(t);
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())} UTC`;
-}
-
-function formatDay(iso: string): string {
-  const t = Date.parse(iso);
-  if (!Number.isFinite(t)) {
-    return "시각 미상";
-  }
-  const d = new Date(t);
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
 }
 
 type Group = { grade: string; rows: BenchCatalogEntry[] };
@@ -85,7 +66,7 @@ function Row({ entry }: { entry: BenchCatalogEntry }) {
     <tr className={retired ? "gr-retired" : undefined} data-profile={entry.profile} data-effort={entry.effort}>
       <td className="gr-profile">
         {entry.profile}
-        {retired ? <span className="gr-badge gr-badge-retired">retired {formatDay(entry.retired_at ?? "")}</span> : null}
+        {retired ? <span className="gr-badge gr-badge-retired">retired {formatDayUTC(entry.retired_at ?? "")}</span> : null}
       </td>
       <td className="gr-effort">{entry.effort === "" ? "기본" : entry.effort}</td>
       <td className="gr-model">{entry.model_id}</td>
@@ -98,7 +79,7 @@ function Row({ entry }: { entry: BenchCatalogEntry }) {
         {entry.benchmark_annotation !== null ? <span className="gr-annotation">{entry.benchmark_annotation}</span> : null}
       </td>
       <td className="gr-decided">
-        {entry.decided_by} · {formatDay(entry.decided_at)}
+        {entry.decided_by} · {formatDayUTC(entry.decided_at)}
         <span className="gr-ref">
           {entry.deviation_ref === "" ? <span className="gr-missing">ref 미상</span> : entry.deviation_ref}
           {entry.boundary_version === "" ? null : <span className="gr-bv"> · {entry.boundary_version}</span>}
@@ -204,7 +185,7 @@ export function GradesApp({ load = fetchCatalog }: { load?: LoadCatalog }) {
   const currentKey = keyOf({ pool, includeRetired });
   const showing = data !== null && data.key === currentKey ? data.body : null;
   const groups = useMemo(() => groupByGrade(showing?.catalog ?? []), [showing]);
-  const clock = showing === null ? null : formatClock(showing.generated_at);
+  const clock = showing === null ? null : formatMinuteUTC(showing.generated_at);
   const shownError = error !== null && error.key === currentKey ? error.message : null;
 
   return (

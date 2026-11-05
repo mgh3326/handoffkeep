@@ -30,7 +30,7 @@ Reads are open to every authenticated client.
   fields are `state`, `role`, `label`, `family`, `profile`, `model`,
   `pool`, `owner_lane`, `parent_lane`, `parent_job`, `pane_id`,
   `worktree` (`{origin, branch, head}`; `branch` is `null` on a detached
-  worktree), `report_doc` and `result`. Any other field returns 400.
+  worktree), `report_doc`, `result` and `usage`. Any other field returns 400.
   Brief text, command lines, pane output and absolute local paths are
   never stored.
 - `GET /v1/jobs/{job}` — returns the record, or 404 `not_found`.
@@ -42,6 +42,16 @@ Reads are open to every authenticated client.
   lost`. `completed` needs a recorded `spawned`; `escalated` and `lost` may
   end a claim that never spawned. A backward move, a skip to `completed`, or
   any write to a terminal record returns 409 `job_state_conflict`.
+  The one exception is `usage`: an update that carries only `usage` is
+  accepted on a terminal record, because usage is read at completion or reap.
+- `usage` is the harness session's token usage:
+  `{input_tokens, output_tokens, reasoning_tokens, cache_read_tokens,
+  cache_write_tokens, source}`. Counts are integers >= 0, and a missing or
+  `null` count is unknown, never 0. `source` (at most 64 bytes,
+  secret-scanned) names the record they came from, such as
+  `claude-session-jsonl`. Each write replaces the stored usage as a whole,
+  and the server sets `usage.recorded_at`. A record that never received usage
+  has no `usage` key. No prompt or response text is stored.
 - `result` is a JSON object of at most 64 KiB, secret-scanned like a text
   attachment (a secret-shaped value returns 400 `secret_like_content`,
   including behind `\uXXXX` escapes), accepted only in the same request as

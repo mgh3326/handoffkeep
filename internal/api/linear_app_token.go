@@ -40,9 +40,9 @@ type LinearAppToken struct {
 func (t *LinearAppToken) Token(ctx context.Context) (string, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	now := time.Now()
+	now := time.Now().UTC()
 	if t.Now != nil {
-		now = t.Now()
+		now = t.Now().UTC()
 	}
 	if t.token != "" && now.Add(linearTokenRenew).Before(t.expires) {
 		return t.token, nil

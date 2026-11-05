@@ -30,8 +30,12 @@ var (
 // mergewake's mwr-<pr>-<sha7>-p<n>-<unix> both fit it.
 var jobIDRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
-// jobHostRE is the fleet host id alphabet: the node's HUB_MACHINE_ID.
-var jobHostRE = regexp.MustCompile(`^[a-z0-9-]{1,32}$`)
+// hostIDRE is the fleet host id alphabet: the node's HUB_MACHINE_ID.
+var hostIDRE = regexp.MustCompile(`^[a-z0-9-]{1,32}$`)
+
+// ValidHostID reports whether host is a fleet host id. Every package that
+// accepts a host or machine id checks it here.
+func ValidHostID(host string) bool { return hostIDRE.MatchString(host) }
 
 var jobStates = map[string]bool{
 	"claimed": true, "spawned": true, "completed": true, "escalated": true, "lost": true,
@@ -52,7 +56,7 @@ var jobRemoteNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`)
 func ValidJobID(id string) bool { return jobIDRE.MatchString(id) }
 
 // ValidJobHost reports whether host is a legal fleet host id.
-func ValidJobHost(host string) bool { return jobHostRE.MatchString(host) }
+func ValidJobHost(host string) bool { return ValidHostID(host) }
 
 // Job is the cross-host job record. Only allowlisted metadata is stored —
 // never brief text, command lines, pane output or absolute local paths.
@@ -74,9 +78,38 @@ type Job struct {
 	Worktree   *JobWorktree    `json:"worktree,omitempty"`
 	ReportDoc  string          `json:"report_doc,omitempty"`
 	Result     json.RawMessage `json:"result,omitempty"`
+	Usage      *JobUsage       `json:"usage,omitempty"`
 	CreatedBy  string          `json:"created_by"`
 	CreatedAt  time.Time       `json:"created_at"`
 	UpdatedAt  time.Time       `json:"updated_at"`
+}
+
+// JobUsage is the token usage a job's harness session recorded. A nil count
+// is unknown, never zero. Source names the harness record it was read from;
+// RecordedAt is set by the store on every write and ignored on input.
+type JobUsage struct {
+	InputTokens      *int64     `json:"input_tokens"`
+	OutputTokens     *int64     `json:"output_tokens"`
+	ReasoningTokens  *int64     `json:"reasoning_tokens"`
+	CacheReadTokens  *int64     `json:"cache_read_tokens"`
+	CacheWriteTokens *int64     `json:"cache_write_tokens"`
+	Source           string     `json:"source,omitempty"`
+	RecordedAt       *time.Time `json:"recorded_at,omitempty"`
+}
+
+// jobUsageSourceMax bounds JobUsage.Source.
+const jobUsageSourceMax = 64
+
+func checkJobUsage(u *JobUsage) error {
+	for _, n := range []*int64{u.InputTokens, u.OutputTokens, u.ReasoningTokens, u.CacheReadTokens, u.CacheWriteTokens} {
+		if n != nil && *n < 0 {
+			return errors.New("invalid job usage: token counts must be >= 0")
+		}
+	}
+	if len(u.Source) > jobUsageSourceMax {
+		return errors.New("invalid job usage source")
+	}
+	return checkJobField(u.Source)
 }
 
 // JobWorktree records where a job runs: the remote, the checked out branch
@@ -104,18 +137,21 @@ type JobUpdate struct {
 	Worktree   *JobWorktree    `json:"worktree"`
 	ReportDoc  *string         `json:"report_doc"`
 	Result     json.RawMessage `json:"result"`
+	// Usage replaces the stored usage as a whole. It is the one field a
+	// terminal job still accepts: usage is read at completion or reap.
+	Usage *JobUsage `json:"usage"`
+}
+
+// usageOnly reports an update that carries usage and nothing else.
+func (u JobUpdate) usageOnly() bool {
+	return u.Usage != nil && u.State == nil && u.Role == nil && u.Label == nil && u.Family == nil &&
+		u.Profile == nil && u.Model == nil && u.Pool == nil && u.OwnerLane == nil && u.ParentLane == nil &&
+		u.ParentJob == nil && u.PaneID == nil && u.Worktree == nil && u.ReportDoc == nil && u.Result == nil
 }
 
 func validJobField(s string) bool { return len(s) <= jobFieldMax && !stringContainsNUL(s) }
 
-func stringContainsNUL(s string) bool {
-	for _, r := range s {
-		if r == 0 {
-			return true
-		}
-	}
-	return false
-}
+func stringContainsNUL(s string) bool { return strings.ContainsRune(s, 0) }
 
 // checkJobField scans one stored free-text field like a text attachment:
 // secret-shaped content (a credential in a remote, a token pasted into a
@@ -255,6 +291,11 @@ func checkJobUpdate(u JobUpdate) error {
 			return err
 		}
 	}
+	if u.Usage != nil {
+		if err := checkJobUsage(u.Usage); err != nil {
+			return err
+		}
+	}
 	if len(u.Result) > 0 {
 		if len(u.Result) > JobResultMaxBytes {
 			return fmt.Errorf("job result too large")
@@ -278,23 +319,34 @@ func checkJobUpdate(u JobUpdate) error {
 	return nil
 }
 
-const jobColumns = `job_id,task_id,host,state,role,label,family,profile,model,pool,owner_lane,parent_lane,parent_job,pane_id,worktree,report_doc,result,created_by,created_at,updated_at`
+const jobColumns = `job_id,task_id,host,state,role,label,family,profile,model,pool,owner_lane,parent_lane,parent_job,pane_id,worktree,report_doc,result,created_by,created_at,updated_at,input_tokens,output_tokens,reasoning_tokens,cache_read_tokens,cache_write_tokens,usage_source,usage_recorded_at`
 
 func scanJob(row pgx.Row) (Job, error) {
 	var j Job
 	var worktree, result []byte
+	var usage JobUsage
+	var source *string
 	err := row.Scan(&j.JobID, &j.TaskID, &j.Host, &j.State, &j.Role, &j.Label,
 		&j.Family, &j.Profile, &j.Model, &j.Pool, &j.OwnerLane, &j.ParentLane,
 		&j.ParentJob, &j.PaneID, &worktree, &j.ReportDoc, &result,
-		&j.CreatedBy, &j.CreatedAt, &j.UpdatedAt)
+		&j.CreatedBy, &j.CreatedAt, &j.UpdatedAt,
+		&usage.InputTokens, &usage.OutputTokens, &usage.ReasoningTokens,
+		&usage.CacheReadTokens, &usage.CacheWriteTokens, &source, &usage.RecordedAt)
 	if err != nil {
 		return j, err
 	}
-	if worktree != nil {
-		j.Worktree = &JobWorktree{}
-		if err = json.Unmarshal(worktree, j.Worktree); err != nil {
-			return j, err
+	// Usage exists once it was written; the write always sets recorded_at.
+	if usage.RecordedAt != nil {
+		if source != nil {
+			usage.Source = *source
 		}
+		j.Usage = &usage
+	}
+	var wt JobWorktree
+	if ok, err := scanJSONB(worktree, &wt); err != nil {
+		return j, err
+	} else if ok {
+		j.Worktree = &wt
 	}
 	j.Result = result
 	return j, nil
@@ -314,7 +366,7 @@ func (s *Store) ClaimJob(ctx context.Context, j Job) (Job, bool, error) {
 	now := time.Now().UTC()
 	j.CreatedAt, j.UpdatedAt = now, now
 	stored, err := scanJob(s.pool.QueryRow(ctx,
-		`INSERT INTO jobs(`+jobColumns+`) VALUES($1,$2,$3,'claimed','','','','','','','','','','',NULL,'',NULL,$4,$5,$5)
+		`INSERT INTO jobs(job_id,task_id,host,state,role,label,family,profile,model,pool,owner_lane,parent_lane,parent_job,pane_id,worktree,report_doc,result,created_by,created_at,updated_at) VALUES($1,$2,$3,'claimed','','','','','','','','','','',NULL,'',NULL,$4,$5,$5)
 		 ON CONFLICT (job_id) DO NOTHING RETURNING `+jobColumns,
 		j.JobID, j.TaskID, j.Host, j.CreatedBy, now))
 	if err == nil {
@@ -396,7 +448,7 @@ func (s *Store) UpdateJob(ctx context.Context, id string, u JobUpdate) (Job, err
 	if err != nil {
 		return j, err
 	}
-	if jobTerminal[j.State] {
+	if jobTerminal[j.State] && !u.usageOnly() {
 		return j, fmt.Errorf("%w: state %s is terminal", ErrJobStateConflict, j.State)
 	}
 	if u.State != nil && jobRank[*u.State] < jobRank[j.State] {
@@ -430,6 +482,17 @@ func (s *Store) UpdateJob(ctx context.Context, id string, u JobUpdate) (Job, err
 		j.Result = u.Result
 	}
 	j.UpdatedAt = time.Now().UTC()
+	if u.Usage != nil {
+		usage := *u.Usage
+		usage.RecordedAt = &j.UpdatedAt
+		j.Usage = &usage
+	}
+	var usage JobUsage
+	var usageSource *string
+	if j.Usage != nil {
+		usage = *j.Usage
+		usageSource = &usage.Source
+	}
 	var worktreeArg, resultArg any
 	if j.Worktree != nil {
 		worktree, err := json.Marshal(j.Worktree)
@@ -442,11 +505,13 @@ func (s *Store) UpdateJob(ctx context.Context, id string, u JobUpdate) (Job, err
 		resultArg = string(j.Result)
 	}
 	j, err = scanJob(tx.QueryRow(ctx,
-		`UPDATE jobs SET state=$2,role=$3,label=$4,family=$5,profile=$6,model=$7,pool=$8,owner_lane=$9,parent_lane=$10,parent_job=$11,pane_id=$12,worktree=$13::jsonb,report_doc=$14,result=$15::jsonb,updated_at=$16
+		`UPDATE jobs SET state=$2,role=$3,label=$4,family=$5,profile=$6,model=$7,pool=$8,owner_lane=$9,parent_lane=$10,parent_job=$11,pane_id=$12,worktree=$13::jsonb,report_doc=$14,result=$15::jsonb,updated_at=$16,
+		 input_tokens=$17,output_tokens=$18,reasoning_tokens=$19,cache_read_tokens=$20,cache_write_tokens=$21,usage_source=$22,usage_recorded_at=$23
 		 WHERE job_id=$1 RETURNING `+jobColumns,
 		j.JobID, j.State, j.Role, j.Label, j.Family, j.Profile, j.Model, j.Pool,
 		j.OwnerLane, j.ParentLane, j.ParentJob, j.PaneID, worktreeArg, j.ReportDoc,
-		resultArg, j.UpdatedAt))
+		resultArg, j.UpdatedAt,
+		usage.InputTokens, usage.OutputTokens, usage.ReasoningTokens, usage.CacheReadTokens, usage.CacheWriteTokens, usageSource, usage.RecordedAt))
 	if err != nil {
 		return j, err
 	}

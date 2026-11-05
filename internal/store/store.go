@@ -1215,6 +1215,9 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := migrateOnce(ctx, tx, 38, func() error { return execAll(ctx, tx, decisionNotifyV38) }); err != nil {
 		return err
 	}
+	if err := migrateOnce(ctx, tx, 39, func() error { return execAll(ctx, tx, jobUsageV39) }); err != nil {
+		return err
+	}
 
 	return tx.Commit(ctx)
 }
@@ -3540,7 +3543,7 @@ func (s *Store) GetMemory(ctx context.Context, agent, name string) (Memory, bool
 	var x Memory
 	e := s.pool.QueryRow(ctx, `SELECT agent,name,description,memory_type,content,updated_by,updated_at FROM memory WHERE agent=$1 AND name=$2`, agent, name).Scan(&x.Agent, &x.Name, &x.Description, &x.Type, &x.Content, &x.UpdatedBy, &x.UpdatedAt)
 	if e != nil {
-		if strings.Contains(e.Error(), "no rows") {
+		if errors.Is(e, pgx.ErrNoRows) {
 			return x, false, nil
 		}
 		return x, false, e
@@ -3565,7 +3568,7 @@ func (s *Store) PutDocument(ctx context.Context, x Document) (Document, bool, er
 	if e == nil && existing == x.SHA256 {
 		return x, false, nil
 	}
-	if e != nil && !strings.Contains(e.Error(), "no rows") {
+	if e != nil && !errors.Is(e, pgx.ErrNoRows) {
 		return x, false, e
 	}
 	// A deploy record moves the merged tasks it lists in the same transaction
@@ -3600,7 +3603,7 @@ func (s *Store) GetDocument(ctx context.Context, key string) (Document, bool, er
 	var x Document
 	e := s.pool.QueryRow(ctx, `SELECT id,key,kind,session,job,body,sha256,created_by,created_at,updated_at FROM documents WHERE key=$1`, key).Scan(&x.ID, &x.Key, &x.Kind, &x.Session, &x.Job, &x.Body, &x.SHA256, &x.CreatedBy, &x.CreatedAt, &x.UpdatedAt)
 	if e != nil {
-		if strings.Contains(e.Error(), "no rows") {
+		if errors.Is(e, pgx.ErrNoRows) {
 			return x, false, nil
 		}
 		return x, false, e
@@ -3614,7 +3617,7 @@ func (s *Store) GetDocumentByID(ctx context.Context, id int64) (Document, bool, 
 	var x Document
 	e := s.pool.QueryRow(ctx, `SELECT id,key,kind,session,job,body,sha256,created_by,created_at,updated_at FROM documents WHERE id=$1`, id).Scan(&x.ID, &x.Key, &x.Kind, &x.Session, &x.Job, &x.Body, &x.SHA256, &x.CreatedBy, &x.CreatedAt, &x.UpdatedAt)
 	if e != nil {
-		if strings.Contains(e.Error(), "no rows") {
+		if errors.Is(e, pgx.ErrNoRows) {
 			return x, false, nil
 		}
 		return x, false, e
@@ -3672,7 +3675,7 @@ func (s *Store) GetAttachment(ctx context.Context, sha string) (Attachment, bool
 	var x Attachment
 	e := s.pool.QueryRow(ctx, `SELECT sha256,size_bytes,mime,original_name,created_by,created_at FROM attachments WHERE sha256=$1`, sha).Scan(&x.SHA256, &x.SizeBytes, &x.MIME, &x.OriginalName, &x.CreatedBy, &x.CreatedAt)
 	if e != nil {
-		if strings.Contains(e.Error(), "no rows") {
+		if errors.Is(e, pgx.ErrNoRows) {
 			return x, false, nil
 		}
 		return x, false, e
@@ -3707,7 +3710,7 @@ func (s *Store) PutAttachment(ctx context.Context, x Attachment, storageCap, put
 	}
 	var present bool
 	e = tx.QueryRow(ctx, `SELECT true FROM attachments WHERE sha256=$1`, x.SHA256).Scan(&present)
-	if e != nil && !strings.Contains(e.Error(), "no rows") {
+	if e != nil && !errors.Is(e, pgx.ErrNoRows) {
 		return x, false, e
 	}
 	if !present {
@@ -3828,7 +3831,7 @@ func (s *Store) ListAttachments(ctx context.Context, refKind, refID string, limi
 func (s *Store) AttachmentUsage(ctx context.Context) (AttachmentUsage, error) {
 	x := AttachmentUsage{Month: monthNow()}
 	e := s.pool.QueryRow(ctx, `SELECT puts,gets,bytes_added FROM attachment_usage WHERE month=$1`, x.Month).Scan(&x.Puts, &x.Gets, &x.BytesAdded)
-	if e != nil && strings.Contains(e.Error(), "no rows") {
+	if e != nil && errors.Is(e, pgx.ErrNoRows) {
 		e = nil
 	}
 	if e != nil {

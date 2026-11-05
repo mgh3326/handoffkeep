@@ -14,6 +14,7 @@ import type { BoardDoc } from "../../shared/boardTypes";
 import { RendererBoundary } from "../RendererBoundary";
 import { fetchDocPrefixes, fetchDocs } from "./api";
 import type { DocPrefix, DocSummary } from "./types";
+import { formatDayUTC } from "../../shared/time";
 
 // The renderer is the shared lazy chunk (src/queue-proto/DocMarkdown), loaded
 // on first document read. The docs entry keeps its own dynamic edge so the
@@ -60,16 +61,6 @@ export function orderPrefixes(prefixes: DocPrefix[]): DocPrefix[] {
     }
     return a.prefix.localeCompare(b.prefix);
   });
-}
-
-function formatDay(iso: string): string {
-  const t = Date.parse(iso);
-  if (!Number.isFinite(t)) {
-    return "시각 미상";
-  }
-  const d = new Date(t);
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
 }
 
 function formatSize(bytes: number): string {
@@ -151,7 +142,7 @@ function DocRow({
         <span>{doc.kind}</span>
         {doc.session !== "" ? <span>{doc.session}</span> : null}
         <span>{formatSize(doc.size)}</span>
-        <span>{formatDay(doc.updated_at)}</span>
+        <span>{formatDayUTC(doc.updated_at)}</span>
       </span>
     </a>
   );
@@ -530,7 +521,7 @@ export function DocsApp() {
                 <span>{selected.kind}</span>
                 {selected.session !== "" ? <span>{selected.session}</span> : null}
                 <span>{formatSize(selected.size)}</span>
-                <span>{formatDay(selected.updated_at)}</span>
+                <span>{formatDayUTC(selected.updated_at)}</span>
               </p>
             ) : null}
             <DocBody key={selectedKey} docKey={selectedKey} />

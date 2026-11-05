@@ -6,12 +6,12 @@ import (
 	"encoding/json"
 	"io"
 	"net/http/httptest"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/mgh3326/handoffkeep/internal/api"
 	"github.com/mgh3326/handoffkeep/internal/store"
+	"github.com/mgh3326/handoffkeep/internal/testdb"
 )
 
 const quotaFreeKey = "devin:0123456789abcdef"
@@ -21,10 +21,9 @@ const quotaFreeHolder = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 // and deduplicated on free_bucket; malformed bodies and old-client bodies keep
 // their existing results.
 func TestQuotaFreeBucketPostgres(t *testing.T) {
-	url := os.Getenv("HANDOFFKEEP_TEST_DB_URL")
-	if url == "" {
-		t.Skip("HANDOFFKEEP_TEST_DB_URL is required for PostgreSQL integration tests")
-	}
+	// Own schema, like TestQuotaWriteScopePostgres: fixed account keys and
+	// deduplicated observations would replay rows left in a reused database.
+	_, url := testdb.Schema(t, "quota_free_bucket")
 	s, err := store.Open(context.Background(), url)
 	if err != nil {
 		t.Fatal(err)
