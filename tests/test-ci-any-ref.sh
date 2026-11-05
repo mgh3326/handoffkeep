@@ -394,7 +394,7 @@ state_case="$(sed -n '/case "\$RESULT" in/,/esac/p' "$root/.github/workflows/ci-
 [[ -n "$state_case" ]]
 check_state() { RESULT="$1" bash -c "$state_case"$'\nprintf \'%s\' "$STATE"'; }
 [[ "$(check_state success)" == success ]]
-[[ "$(check_state cancelled)" == error ]]
+[[ -z "$(check_state cancelled)" ]]  # cancelled posts nothing (hk 2924)
 [[ "$(check_state failure)" == failure ]]
 [[ "$(check_state skipped)" == failure ]]
 

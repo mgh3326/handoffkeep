@@ -16,6 +16,21 @@ on:
         required: false
         default: all
         type: string
+# Two tiers (hk:doc decision/2026-11-05/fleet-ci-three-tiers, hk 2935).
+#   T-PR   pull_request, and every other event too: test, vitest, build and
+#          auto-tag-test. Light: no -race, no PostgreSQL, no macOS, hosted
+#          runners only (this repo is public, so PR code never runs on our
+#          machines). The mergewake required checks name these jobs.
+#   T-POST every event except pull_request (main push, dispatch, and the
+#          ci-any-ref call): the post-* jobs add -race with PostgreSQL, the
+#          migration smoke, the mutant suites, the release dry run and macOS.
+#          On a main push only, their runner comes from a repository
+#          variable (HANDOFFKEEP_POST_LINUX_RUNNER / HANDOFFKEEP_POST_MAC_RUNNER,
+#          one runs-on label); every other event, and an unset variable, uses a
+#          hosted runner. A dispatch checks out an arbitrary ref, so it never
+#          reaches our machines: only reviewed, merged code does.
+# A main push cancels the run of the previous main head, so only the newest
+# head finishes; ci-ok then reports skipped (unknown), never failure.
 concurrency: {group: "ci-${{ github.workflow }}-${{ (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call') && github.run_id || github.ref }}", cancel-in-progress: true}
 permissions:
   contents: read
@@ -23,19 +38,11 @@ jobs:
   test:
     if: ${{ contains(fromJSON('["all","test"]'), inputs.suite || 'all') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 15
     env:
-      HANDOFFKEEP_TEST_DB_URL: postgres://handoffkeep:handoffkeep@localhost:5432/handoffkeep?sslmode=disable
-    services:
-      postgres:
-        image: postgres:17
-        env:
-          POSTGRES_USER: handoffkeep
-          POSTGRES_PASSWORD: handoffkeep
-          POSTGRES_DB: handoffkeep
-        ports: ["5432:5432"]
-        options: >-
-          --health-cmd "pg_isready -U handoffkeep" --health-interval 10s --health-timeout 5s --health-retries 5
+      # T-PR runs without PostgreSQL; DB-backed tests skip here and run in
+      # post-linux (internal/testdb).
+      HANDOFFKEEP_TEST_NO_DB: "1"
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
@@ -54,15 +61,8 @@ jobs:
       - run: test -z "$(gofmt -l .)"
       - run: go vet ./...
       - run: go mod tidy -diff
-      - name: Task expected migration and server startup
-        run: bash scripts/test-task-expected-migration.sh
-      - name: go test -race
-        run: go test -v -race -timeout 30m ./...
-      - name: Reopen regression mutants
-        run: python3 scripts/task-reopen-mutants.py
-      - name: Quota regression mutants
-        run: python3 scripts/quota-mutants.py
-      - run: bash scripts/test-build-release.sh
+      - name: go test (no race, no PostgreSQL)
+        run: go test -timeout 10m ./...
       - run: python3 scripts/o3gen/test_gen.py
       - uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
         env:
@@ -122,3 +122,122 @@ jobs:
           ref: ${{ inputs.ref }}
       - run: python3 scripts/test-auto-tag.py
       - run: python3 scripts/test-repair-release.py
+
+  post-linux:
+    # T-POST only. Service containers need Docker on Linux: a self-hosted
+    # runner named by HANDOFFKEEP_POST_LINUX_RUNNER must provide it.
+    if: ${{ github.event_name != 'pull_request' && contains(fromJSON('["all","test"]'), inputs.suite || 'all') }}
+    name: 'post: race + postgres'
+    runs-on: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.HANDOFFKEEP_POST_LINUX_RUNNER) || 'ubuntu-latest' }}
+    timeout-minutes: 45
+    env:
+      HANDOFFKEEP_TEST_DB_URL: postgres://handoffkeep:handoffkeep@localhost:5432/handoffkeep?sslmode=disable
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: handoffkeep
+          POSTGRES_PASSWORD: handoffkeep
+          POSTGRES_DB: handoffkeep
+        # Loopback only: on a self-hosted runner the fixed test password
+        # must not be reachable from the network.
+        ports: ["127.0.0.1:5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U handoffkeep" --health-interval 10s --health-timeout 5s --health-retries 5
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+      - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with: {go-version-file: go.mod}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with: {node-version-file: web/console/.nvmrc, cache: npm, cache-dependency-path: web/console/package-lock.json}
+      - run: npm ci
+        working-directory: web/console
+      - run: npm run build
+        working-directory: web/console
+      - run: git diff --exit-code -- internal/ui/static/console
+      - run: test -z "$(git status --porcelain --untracked-files=all -- internal/ui/static/console)"
+      - name: Task expected migration and server startup
+        env:
+          PUSH_BEFORE: ${{ github.event_name == 'push' && github.event.before || '' }}
+        run: bash scripts/test-task-expected-migration.sh
+      - name: go test -race
+        run: go test -v -race -timeout 30m ./...
+      - name: Reopen regression mutants
+        run: python3 scripts/task-reopen-mutants.py
+      - name: Quota regression mutants
+        run: python3 scripts/quota-mutants.py
+      - run: bash scripts/test-build-release.sh
+
+  post-macos:
+    # T-POST only: the CLI ships darwin binaries, so the suite also runs on
+    # macOS. No service containers there; DB-backed tests skip and run in
+    # post-linux.
+    if: ${{ github.event_name != 'pull_request' && contains(fromJSON('["all","test"]'), inputs.suite || 'all') }}
+    name: 'post: macos'
+    runs-on: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.HANDOFFKEEP_POST_MAC_RUNNER) || 'macos-latest' }}
+    timeout-minutes: 45
+    env:
+      HANDOFFKEEP_TEST_NO_DB: "1"
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with: {go-version-file: go.mod}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with: {node-version-file: web/console/.nvmrc, cache: npm, cache-dependency-path: web/console/package-lock.json}
+      - run: npm ci
+        working-directory: web/console
+      - run: npm run build
+        working-directory: web/console
+      - run: git diff --exit-code -- internal/ui/static/console
+      - run: test -z "$(git status --porcelain --untracked-files=all -- internal/ui/static/console)"
+      - name: go test -race (no PostgreSQL)
+        run: go test -race -timeout 30m ./...
+
+  ci-ok:
+    # Aggregate check. On a pull request it covers the T-PR jobs; elsewhere
+    # also the post-* jobs. A dispatch with a partial suite never mints a check
+    # named exactly 'ci-ok'. When the only non-success among the needed jobs is
+    # cancelled (a newer main head superseded this run, or no runner was
+    # acquired), the job is skipped, so mergewake reads unknown and holds
+    # instead of seeing a failure (hk 2924).
+    name: ${{ (inputs.suite || 'all') == 'all' && 'ci-ok' || format('ci-ok ({0})', inputs.suite) }}
+    needs: [test, vitest, build, auto-tag-test, post-linux, post-macos]
+    if: ${{ always() && (contains(needs.*.result, 'failure') || !contains(needs.*.result, 'cancelled')) }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check required jobs
+        env:
+          EVENT: ${{ github.event_name }}
+          SUITE: ${{ inputs.suite || 'all' }}
+          TEST: ${{ needs.test.result }}
+          VITEST: ${{ needs.vitest.result }}
+          BUILD: ${{ needs.build.result }}
+          AUTO_TAG: ${{ needs.auto-tag-test.result }}
+          POST_LINUX: ${{ needs.post-linux.result }}
+          POST_MACOS: ${{ needs.post-macos.result }}
+        # A selected job must succeed; an unselected one must report skipped.
+        run: |
+          case "$SUITE" in
+            all|test|vitest|build) ;;
+            *) echo "unknown suite: $SUITE"; exit 1 ;;
+          esac
+          post=yes; [ "$EVENT" = pull_request ] && post=no
+          in_suite() { case "$SUITE" in all|"$1") echo yes ;; *) echo no ;; esac; }
+          bad=0
+          require() {
+            if [ "$1" = yes ] && [ "$3" != success ]; then echo "$2 did not succeed: $3"; bad=1; fi
+            if [ "$1" = no ] && [ "$3" != skipped ]; then echo "$2 ran outside its suite or tier: $3"; bad=1; fi
+          }
+          require yes auto-tag-test "$AUTO_TAG"
+          require "$(in_suite test)" test "$TEST"
+          require "$(in_suite vitest)" vitest "$VITEST"
+          require "$(in_suite build)" build "$BUILD"
+          post_test=no; [ "$post" = yes ] && post_test=$(in_suite test)
+          require "$post_test" post-linux "$POST_LINUX"
+          require "$post_test" post-macos "$POST_MACOS"
+          exit "$bad"
