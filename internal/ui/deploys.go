@@ -116,13 +116,23 @@ type deployPendingResponse struct {
 }
 
 func (h *Handler) deployPending(w http.ResponseWriter, r *http.Request) {
+	response, err := h.pendingDeploys(r)
+	if err != nil {
+		http.Error(w, "fleet console unavailable", http.StatusInternalServerError)
+		return
+	}
+	writeBoardJSON(w, response)
+}
+
+// pendingDeploys assembles the deploy-pending document. Both
+// /ui/api/deploy-pending and /ui/api/attention serve from it.
+func (h *Handler) pendingDeploys(r *http.Request) (deployPendingResponse, error) {
 	// Fetch one row past the bound: "returned full" must mean an event was
 	// actually left unscanned. At exactly the bound nothing was omitted and
 	// no truncation warning is owed.
 	events, err := h.store.ListMergedTaskEvents(r.Context(), deployEventsLimit+1)
 	if err != nil {
-		http.Error(w, "fleet console unavailable", http.StatusInternalServerError)
-		return
+		return deployPendingResponse{}, err
 	}
 	response := deployPendingResponse{
 		GeneratedAt: time.Now().UTC(),
@@ -136,8 +146,7 @@ func (h *Handler) deployPending(w http.ResponseWriter, r *http.Request) {
 	for _, svc := range deployServices {
 		view, err := h.deployServiceView(r, svc.Name, svc.Repo, events)
 		if err != nil {
-			http.Error(w, "fleet console unavailable", http.StatusInternalServerError)
-			return
+			return deployPendingResponse{}, err
 		}
 		// The DESC-ordered scan truncates this service's list only when its
 		// oldest scanned event is still after the boundary — a full cap with
@@ -148,7 +157,7 @@ func (h *Handler) deployPending(w http.ResponseWriter, r *http.Request) {
 		}
 		response.Services = append(response.Services, view)
 	}
-	writeBoardJSON(w, response)
+	return response, nil
 }
 
 // deployParsedDoc is one document under deploy/<service>/ that parsed as a
