@@ -88,6 +88,8 @@ func run(args []string, out, errout io.Writer) error {
 		return fleetMetricsCmd(args[1:], out)
 	case "bench":
 		return benchCmd(args[1:], out)
+	case "jobs":
+		return jobsCmd(args[1:], out)
 	case "version", "--version":
 		return versionCmd(args[1:], out)
 	default:

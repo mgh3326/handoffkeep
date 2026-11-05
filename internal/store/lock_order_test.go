@@ -214,7 +214,7 @@ func TestLockOrderJobUpdateVersusTaskWrite(t *testing.T) {
 
 	task := lockOrderTask(t, jobs, TaskRefs{})
 	const jobID = "lock-order-job"
-	if _, _, err := jobs.ClaimJob(ctx, Job{JobID: jobID, TaskID: task.ID, Host: "lock-host", CreatedBy: "lock-order-test"}); err != nil {
+	if _, _, err := jobs.ClaimJob(ctx, Job{JobID: jobID, TaskID: &task.ID, Host: "lock-host", CreatedBy: "lock-order-test"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := jobs.ClaimTask(ctx, task.ID, "lead", jobID, ""); err != nil {

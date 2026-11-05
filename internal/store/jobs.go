@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/mgh3326/handoffkeep/internal/guard"
@@ -61,27 +62,59 @@ func ValidJobHost(host string) bool { return ValidHostID(host) }
 // Job is the cross-host job record. Only allowlisted metadata is stored —
 // never brief text, command lines, pane output or absolute local paths.
 type Job struct {
-	JobID      string          `json:"job_id"`
-	TaskID     int64           `json:"task_id"`
-	Host       string          `json:"host"`
-	State      string          `json:"state"`
-	Role       string          `json:"role,omitempty"`
-	Label      string          `json:"label,omitempty"`
-	Family     string          `json:"family,omitempty"`
-	Profile    string          `json:"profile,omitempty"`
-	Model      string          `json:"model,omitempty"`
-	Pool       string          `json:"pool,omitempty"`
-	OwnerLane  string          `json:"owner_lane,omitempty"`
-	ParentLane string          `json:"parent_lane,omitempty"`
-	ParentJob  string          `json:"parent_job,omitempty"`
-	PaneID     string          `json:"pane_id,omitempty"`
-	Worktree   *JobWorktree    `json:"worktree,omitempty"`
-	ReportDoc  string          `json:"report_doc,omitempty"`
-	Result     json.RawMessage `json:"result,omitempty"`
-	Usage      *JobUsage       `json:"usage,omitempty"`
-	CreatedBy  string          `json:"created_by"`
-	CreatedAt  time.Time       `json:"created_at"`
-	UpdatedAt  time.Time       `json:"updated_at"`
+	JobID             string          `json:"job_id"`
+	TaskID            *int64          `json:"task_id"`
+	Host              string          `json:"host"`
+	State             string          `json:"state"`
+	Role              string          `json:"role,omitempty"`
+	Label             string          `json:"label,omitempty"`
+	Family            string          `json:"family,omitempty"`
+	Profile           string          `json:"profile,omitempty"`
+	Model             string          `json:"model,omitempty"`
+	Harness           *string         `json:"harness,omitempty"`
+	Effort            *string         `json:"effort,omitempty"`
+	Pool              string          `json:"pool,omitempty"`
+	OwnerLane         string          `json:"owner_lane,omitempty"`
+	ParentLane        string          `json:"parent_lane,omitempty"`
+	ParentJob         string          `json:"parent_job,omitempty"`
+	PaneID            string          `json:"pane_id,omitempty"`
+	Worktree          *JobWorktree    `json:"worktree,omitempty"`
+	ReportDoc         string          `json:"report_doc,omitempty"`
+	Result            json.RawMessage `json:"result,omitempty"`
+	Usage             *JobUsage       `json:"usage,omitempty"`
+	CreatedBy         string          `json:"created_by"`
+	CreatedAt         time.Time       `json:"created_at"`
+	UpdatedAt         time.Time       `json:"updated_at"`
+	ClaimedAt         *time.Time      `json:"claimed_at,omitempty"`
+	SpawnedAt         *time.Time      `json:"spawned_at,omitempty"`
+	SpawnedReceivedAt *time.Time      `json:"spawned_received_at,omitempty"`
+	ReadyAt           *time.Time      `json:"ready_at,omitempty"`
+	ReadyReceivedAt   *time.Time      `json:"ready_received_at,omitempty"`
+	EndedAt           *time.Time      `json:"ended_at,omitempty"`
+	EndedReceivedAt   *time.Time      `json:"ended_received_at,omitempty"`
+	ReportSHA256      *string         `json:"report_sha256,omitempty"`
+	ReportVersion     *int            `json:"report_version,omitempty"`
+	Skills            []JobSkill      `json:"skills"`
+	SkillsSupported   *bool           `json:"skills_supported,omitempty"`
+	EndReason         *string         `json:"end_reason,omitempty"`
+	DiffStat          *JobDiffStat    `json:"diff_stat,omitempty"`
+	Summary           *JobSummary     `json:"summary,omitempty"`
+}
+
+type JobSkill struct {
+	Name          string `json:"name"`
+	Source        string `json:"source"`
+	VersionOrHash string `json:"version_or_hash"`
+	Calls         int64  `json:"calls"`
+}
+type JobDiffStat struct {
+	Files      int `json:"files"`
+	Insertions int `json:"insertions"`
+	Deletions  int `json:"deletions"`
+}
+type JobSummary struct {
+	Text   string `json:"text"`
+	Source string `json:"source"`
 }
 
 // JobUsage is the token usage a job's harness session recorded. A nil count
@@ -129,6 +162,8 @@ type JobUpdate struct {
 	Family     *string         `json:"family"`
 	Profile    *string         `json:"profile"`
 	Model      *string         `json:"model"`
+	Harness    *string         `json:"harness"`
+	Effort     *string         `json:"effort"`
 	Pool       *string         `json:"pool"`
 	OwnerLane  *string         `json:"owner_lane"`
 	ParentLane *string         `json:"parent_lane"`
@@ -137,16 +172,21 @@ type JobUpdate struct {
 	Worktree   *JobWorktree    `json:"worktree"`
 	ReportDoc  *string         `json:"report_doc"`
 	Result     json.RawMessage `json:"result"`
-	// Usage replaces the stored usage as a whole. It is the one field a
-	// terminal job still accepts: usage is read at completion or reap.
-	Usage *JobUsage `json:"usage"`
+	// Usage replaces the stored usage as a whole. It can be written after termination.
+	Usage           *JobUsage    `json:"usage"`
+	At              *time.Time   `json:"at"`
+	ReadyAt         *time.Time   `json:"ready_at"`
+	ReportSHA256    *string      `json:"report_sha256"`
+	ReportVersion   *int         `json:"report_version"`
+	Skills          *[]JobSkill  `json:"skills"`
+	SkillsSupported *bool        `json:"skills_supported"`
+	EndReason       *string      `json:"end_reason"`
+	DiffStat        *JobDiffStat `json:"diff_stat"`
 }
 
-// usageOnly reports an update that carries usage and nothing else.
+// usageOnly reports an update containing only the terminal late-write set.
 func (u JobUpdate) usageOnly() bool {
-	return u.Usage != nil && u.State == nil && u.Role == nil && u.Label == nil && u.Family == nil &&
-		u.Profile == nil && u.Model == nil && u.Pool == nil && u.OwnerLane == nil && u.ParentLane == nil &&
-		u.ParentJob == nil && u.PaneID == nil && u.Worktree == nil && u.ReportDoc == nil && u.Result == nil
+	return (u.Usage != nil || u.Skills != nil || u.SkillsSupported != nil) && u.State == nil && u.Role == nil && u.Label == nil && u.Family == nil && u.Profile == nil && u.Model == nil && u.Harness == nil && u.Effort == nil && u.Pool == nil && u.OwnerLane == nil && u.ParentLane == nil && u.ParentJob == nil && u.PaneID == nil && u.Worktree == nil && u.ReportDoc == nil && u.Result == nil && u.At == nil && u.ReadyAt == nil && u.ReportSHA256 == nil && u.ReportVersion == nil && u.EndReason == nil && u.DiffStat == nil
 }
 
 func validJobField(s string) bool { return len(s) <= jobFieldMax && !stringContainsNUL(s) }
@@ -269,13 +309,55 @@ func checkJobUpdate(u JobUpdate) error {
 		return fmt.Errorf("invalid job state")
 	}
 	for _, f := range []*string{
-		u.Role, u.Label, u.Family, u.Profile, u.Model, u.Pool,
+		u.Role, u.Label, u.Family, u.Profile, u.Model, u.Harness, u.Effort, u.Pool, u.EndReason,
 		u.OwnerLane, u.ParentLane, u.PaneID, u.ReportDoc,
 	} {
 		if f != nil {
 			if err := checkJobField(*f); err != nil {
 				return err
 			}
+		}
+	}
+	if u.At != nil && u.State == nil {
+		return errors.New("at requires state")
+	}
+	now := time.Now().UTC()
+	for _, t := range []*time.Time{u.At, u.ReadyAt} {
+		if t != nil && t.After(now.Add(time.Hour)) {
+			return errors.New("time is in the future")
+		}
+	}
+	if u.EndReason != nil && len(*u.EndReason) > 128 {
+		return errors.New("end reason too long")
+	}
+	if u.DiffStat != nil && (u.DiffStat.Files < 0 || u.DiffStat.Insertions < 0 || u.DiffStat.Deletions < 0) {
+		return errors.New("invalid diff stat")
+	}
+	if u.ReportSHA256 != nil && !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(*u.ReportSHA256) {
+		return errors.New("invalid report hash")
+	}
+	if u.ReportVersion != nil && *u.ReportVersion < 1 {
+		return errors.New("invalid report version")
+	}
+	if u.Skills != nil {
+		if len(*u.Skills) > 100 {
+			return errors.New("too many skills")
+		}
+		seen := map[[2]string]bool{}
+		for _, skill := range *u.Skills {
+			if len(skill.Name) < 1 || len(skill.Name) > 128 || len(skill.Source) < 1 || len(skill.Source) > 64 || len(skill.VersionOrHash) > 128 || skill.Calls < 0 {
+				return errors.New("invalid skill")
+			}
+			for _, f := range []string{skill.Name, skill.Source, skill.VersionOrHash} {
+				if err := checkJobField(f); err != nil {
+					return err
+				}
+			}
+			key := [2]string{skill.Name, skill.Source}
+			if seen[key] {
+				return errors.New("duplicate skill")
+			}
+			seen[key] = true
 		}
 	}
 	if u.ParentJob != nil && *u.ParentJob != "" {
@@ -309,6 +391,12 @@ func checkJobUpdate(u JobUpdate) error {
 		if _, isObj := obj.(map[string]any); !isObj {
 			return fmt.Errorf("job result must be a JSON object")
 		}
+		if value, ok := obj.(map[string]any)["summary"]; ok {
+			text, ok := value.(string)
+			if !ok || utf8.RuneCountInString(text) < 1 || utf8.RuneCountInString(text) > 500 {
+				return errors.New("invalid summary")
+			}
+		}
 		if u.State == nil || *u.State != "completed" {
 			return fmt.Errorf("job result requires state completed")
 		}
@@ -319,11 +407,12 @@ func checkJobUpdate(u JobUpdate) error {
 	return nil
 }
 
-const jobColumns = `job_id,task_id,host,state,role,label,family,profile,model,pool,owner_lane,parent_lane,parent_job,pane_id,worktree,report_doc,result,created_by,created_at,updated_at,input_tokens,output_tokens,reasoning_tokens,cache_read_tokens,cache_write_tokens,usage_source,usage_recorded_at`
+const jobColumns = `job_id,task_id,host,state,role,label,family,profile,model,pool,owner_lane,parent_lane,parent_job,pane_id,worktree,report_doc,result,created_by,created_at,updated_at,input_tokens,output_tokens,reasoning_tokens,cache_read_tokens,cache_write_tokens,usage_source,usage_recorded_at,harness,effort,claimed_at,spawned_at,spawned_received_at,ready_at,ready_received_at,ended_at,ended_received_at,report_sha256,report_version,skills,skills_supported,end_reason,diff_files,diff_insertions,diff_deletions`
 
 func scanJob(row pgx.Row) (Job, error) {
 	var j Job
-	var worktree, result []byte
+	var worktree, result, skills []byte
+	var files, insertions, deletions *int
 	var usage JobUsage
 	var source *string
 	err := row.Scan(&j.JobID, &j.TaskID, &j.Host, &j.State, &j.Role, &j.Label,
@@ -331,7 +420,7 @@ func scanJob(row pgx.Row) (Job, error) {
 		&j.ParentJob, &j.PaneID, &worktree, &j.ReportDoc, &result,
 		&j.CreatedBy, &j.CreatedAt, &j.UpdatedAt,
 		&usage.InputTokens, &usage.OutputTokens, &usage.ReasoningTokens,
-		&usage.CacheReadTokens, &usage.CacheWriteTokens, &source, &usage.RecordedAt)
+		&usage.CacheReadTokens, &usage.CacheWriteTokens, &source, &usage.RecordedAt, &j.Harness, &j.Effort, &j.ClaimedAt, &j.SpawnedAt, &j.SpawnedReceivedAt, &j.ReadyAt, &j.ReadyReceivedAt, &j.EndedAt, &j.EndedReceivedAt, &j.ReportSHA256, &j.ReportVersion, &skills, &j.SkillsSupported, &j.EndReason, &files, &insertions, &deletions)
 	if err != nil {
 		return j, err
 	}
@@ -349,6 +438,33 @@ func scanJob(row pgx.Row) (Job, error) {
 		j.Worktree = &wt
 	}
 	j.Result = result
+	if _, err := scanJSONB(skills, &j.Skills); err != nil {
+		return j, err
+	}
+	if files != nil && insertions != nil && deletions != nil {
+		j.DiffStat = &JobDiffStat{*files, *insertions, *deletions}
+	}
+	var obj map[string]any
+	if json.Unmarshal(result, &obj) == nil {
+		if text, ok := obj["summary"].(string); ok {
+			j.Summary = &JobSummary{text, "worker"}
+		}
+	}
+	if j.Summary == nil && jobTerminal[j.State] {
+		reason := "no exit reason recorded"
+		if j.EndReason != nil {
+			reason = *j.EndReason
+		}
+		diff := "diff: not recorded"
+		if j.DiffStat != nil {
+			diff = fmt.Sprintf("diff: %d files, +%d -%d", j.DiffStat.Files, j.DiffStat.Insertions, j.DiffStat.Deletions)
+		}
+		text := []rune(fmt.Sprintf("%s: %s; %s", j.State, reason, diff))
+		if len(text) > 500 {
+			text = text[:500]
+		}
+		j.Summary = &JobSummary{string(text), "server_fallback"}
+	}
 	return j, nil
 }
 
@@ -356,7 +472,7 @@ func scanJob(row pgx.Row) (Job, error) {
 // and host) returns the stored row with created=false; a different claim on
 // a taken id is ErrJobIDTaken.
 func (s *Store) ClaimJob(ctx context.Context, j Job) (Job, bool, error) {
-	if !ValidJobID(j.JobID) || !ValidJobHost(j.Host) || j.TaskID < 1 || j.CreatedBy == "" || !validJobField(j.CreatedBy) {
+	if !ValidJobID(j.JobID) || !ValidJobHost(j.Host) || (j.TaskID != nil && *j.TaskID < 1) || j.CreatedBy == "" || !validJobField(j.CreatedBy) {
 		return j, false, errors.New("invalid job claim")
 	}
 	if err := guard.Reject(j.JobID); err != nil {
@@ -364,11 +480,21 @@ func (s *Store) ClaimJob(ctx context.Context, j Job) (Job, bool, error) {
 	}
 	j.State = "claimed"
 	now := time.Now().UTC()
+	if j.ClaimedAt != nil && j.ClaimedAt.After(now.Add(time.Hour)) {
+		existing, found, err := s.GetJob(ctx, j.JobID)
+		if err != nil {
+			return j, false, err
+		}
+		if found && sameTaskID(existing.TaskID, j.TaskID) && existing.Host == j.Host {
+			return existing, false, nil
+		}
+		return j, false, errors.New("claim time is in the future")
+	}
 	j.CreatedAt, j.UpdatedAt = now, now
 	stored, err := scanJob(s.pool.QueryRow(ctx,
-		`INSERT INTO jobs(job_id,task_id,host,state,role,label,family,profile,model,pool,owner_lane,parent_lane,parent_job,pane_id,worktree,report_doc,result,created_by,created_at,updated_at) VALUES($1,$2,$3,'claimed','','','','','','','','','','',NULL,'',NULL,$4,$5,$5)
+		`INSERT INTO jobs(job_id,task_id,host,state,role,label,family,profile,model,pool,owner_lane,parent_lane,parent_job,pane_id,worktree,report_doc,result,created_by,created_at,updated_at,claimed_at) VALUES($1,$2,$3,'claimed','','','','','','','','','','',NULL,'',NULL,$4,$5,$5,$6)
 		 ON CONFLICT (job_id) DO NOTHING RETURNING `+jobColumns,
-		j.JobID, j.TaskID, j.Host, j.CreatedBy, now))
+		j.JobID, j.TaskID, j.Host, j.CreatedBy, now, j.ClaimedAt))
 	if err == nil {
 		return stored, true, nil
 	}
@@ -382,11 +508,13 @@ func (s *Store) ClaimJob(ctx context.Context, j Job) (Job, bool, error) {
 	if !found {
 		return j, false, errors.New("job claim raced")
 	}
-	if existing.TaskID != j.TaskID || existing.Host != j.Host {
+	if !sameTaskID(existing.TaskID, j.TaskID) || existing.Host != j.Host {
 		return existing, false, ErrJobIDTaken
 	}
 	return existing, false, nil
 }
+
+func sameTaskID(a, b *int64) bool { return a == nil && b == nil || a != nil && b != nil && *a == *b }
 
 // GetJob returns one job record by id.
 func (s *Store) GetJob(ctx context.Context, id string) (Job, bool, error) {
@@ -459,6 +587,65 @@ func (s *Store) UpdateJob(ctx context.Context, id string, u JobUpdate) (Job, err
 	if u.State != nil && *u.State == "completed" && j.State != "spawned" {
 		return j, fmt.Errorf("%w: %s cannot move to completed", ErrJobStateConflict, j.State)
 	}
+	if u.ReadyAt != nil && (j.State != "spawned" || u.State != nil && jobTerminal[*u.State]) {
+		return j, errors.New("ready requires spawned state")
+	}
+	if (u.EndReason != nil || u.DiffStat != nil) && (u.State == nil || !jobTerminal[*u.State] || jobTerminal[j.State]) {
+		return j, errors.New("outcome requires terminal transition")
+	}
+	if (u.ReportSHA256 != nil || u.ReportVersion != nil) && j.ReportDoc == "" && (u.ReportDoc == nil || *u.ReportDoc == "") {
+		return j, errors.New("report pin requires report")
+	}
+	supported := j.SkillsSupported
+	if u.SkillsSupported != nil {
+		supported = u.SkillsSupported
+	}
+	skills := j.Skills
+	if u.Skills != nil {
+		skills = *u.Skills
+	}
+	if len(skills) > 0 && (supported == nil || !*supported) {
+		return j, errors.New("skills require support")
+	}
+	now := time.Now().UTC()
+	if u.State != nil && *u.State != j.State {
+		if *u.State == "spawned" {
+			j.SpawnedAt = u.At
+			j.SpawnedReceivedAt = &now
+		}
+		if jobTerminal[*u.State] {
+			j.EndedAt = u.At
+			j.EndedReceivedAt = &now
+		}
+	}
+	if u.ReadyAt != nil && j.ReadyReceivedAt == nil {
+		j.ReadyAt = u.ReadyAt
+		j.ReadyReceivedAt = &now
+	}
+	if u.Harness != nil {
+		j.Harness = u.Harness
+	}
+	if u.Effort != nil {
+		j.Effort = u.Effort
+	}
+	if u.ReportSHA256 != nil {
+		j.ReportSHA256 = u.ReportSHA256
+	}
+	if u.ReportVersion != nil {
+		j.ReportVersion = u.ReportVersion
+	}
+	if u.Skills != nil {
+		j.Skills = *u.Skills
+	}
+	if u.SkillsSupported != nil {
+		j.SkillsSupported = u.SkillsSupported
+	}
+	if u.EndReason != nil {
+		j.EndReason = u.EndReason
+	}
+	if u.DiffStat != nil {
+		j.DiffStat = u.DiffStat
+	}
 	// The update is valid; merge the present fields over the record.
 	previousRole, previousState := j.Role, j.State
 	if u.State != nil {
@@ -493,7 +680,20 @@ func (s *Store) UpdateJob(ctx context.Context, id string, u JobUpdate) (Job, err
 		usage = *j.Usage
 		usageSource = &usage.Source
 	}
-	var worktreeArg, resultArg any
+	var worktreeArg, resultArg, skillsArg any
+	var diffFiles, diffInsertions, diffDeletions *int
+	if j.DiffStat != nil {
+		diffFiles = &j.DiffStat.Files
+		diffInsertions = &j.DiffStat.Insertions
+		diffDeletions = &j.DiffStat.Deletions
+	}
+	if j.Skills != nil {
+		raw, err := json.Marshal(j.Skills)
+		if err != nil {
+			return j, err
+		}
+		skillsArg = string(raw)
+	}
 	if j.Worktree != nil {
 		worktree, err := json.Marshal(j.Worktree)
 		if err != nil {
@@ -506,12 +706,12 @@ func (s *Store) UpdateJob(ctx context.Context, id string, u JobUpdate) (Job, err
 	}
 	j, err = scanJob(tx.QueryRow(ctx,
 		`UPDATE jobs SET state=$2,role=$3,label=$4,family=$5,profile=$6,model=$7,pool=$8,owner_lane=$9,parent_lane=$10,parent_job=$11,pane_id=$12,worktree=$13::jsonb,report_doc=$14,result=$15::jsonb,updated_at=$16,
-		 input_tokens=$17,output_tokens=$18,reasoning_tokens=$19,cache_read_tokens=$20,cache_write_tokens=$21,usage_source=$22,usage_recorded_at=$23
+		 input_tokens=$17,output_tokens=$18,reasoning_tokens=$19,cache_read_tokens=$20,cache_write_tokens=$21,usage_source=$22,usage_recorded_at=$23, harness=$24,effort=$25,spawned_at=$26,spawned_received_at=$27,ready_at=$28,ready_received_at=$29,ended_at=$30,ended_received_at=$31,report_sha256=$32,report_version=$33,skills=$34::jsonb,skills_supported=$35,end_reason=$36,diff_files=$37,diff_insertions=$38,diff_deletions=$39
 		 WHERE job_id=$1 RETURNING `+jobColumns,
 		j.JobID, j.State, j.Role, j.Label, j.Family, j.Profile, j.Model, j.Pool,
 		j.OwnerLane, j.ParentLane, j.ParentJob, j.PaneID, worktreeArg, j.ReportDoc,
 		resultArg, j.UpdatedAt,
-		usage.InputTokens, usage.OutputTokens, usage.ReasoningTokens, usage.CacheReadTokens, usage.CacheWriteTokens, usageSource, usage.RecordedAt))
+		usage.InputTokens, usage.OutputTokens, usage.ReasoningTokens, usage.CacheReadTokens, usage.CacheWriteTokens, usageSource, usage.RecordedAt, j.Harness, j.Effort, j.SpawnedAt, j.SpawnedReceivedAt, j.ReadyAt, j.ReadyReceivedAt, j.EndedAt, j.EndedReceivedAt, j.ReportSHA256, j.ReportVersion, skillsArg, j.SkillsSupported, j.EndReason, diffFiles, diffInsertions, diffDeletions))
 	if err != nil {
 		return j, err
 	}

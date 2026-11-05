@@ -204,7 +204,7 @@ func TestDecisionRecordJobEscalate(t *testing.T) {
 	s := decisionStore(t)
 	ctx := t.Context()
 	task := decisionTask(t, s, "backlog")
-	if _, _, err := s.ClaimJob(ctx, Job{JobID: "dr-esc-1", TaskID: task.ID, Host: "host-a", CreatedBy: "decision-test"}); err != nil {
+	if _, _, err := s.ClaimJob(ctx, Job{JobID: "dr-esc-1", TaskID: &task.ID, Host: "host-a", CreatedBy: "decision-test"}); err != nil {
 		t.Fatal(err)
 	}
 	esc := RelayEvent{Kind: "job.escalate", JobID: "dr-esc-1", OwnerLane: "esc-lane", Question: "which way?", ReportPath: "report-1"}
@@ -400,7 +400,7 @@ func TestDecisionRecordSupersededWhenJobEnds(t *testing.T) {
 			task := decisionTask(t, s, "backlog")
 			refs := map[string]string{}
 			for _, job := range []string{"dr-end-a", "dr-end-b"} {
-				if _, _, err := s.ClaimJob(ctx, Job{JobID: job, TaskID: task.ID, Host: "host-a", CreatedBy: "decision-test"}); err != nil {
+				if _, _, err := s.ClaimJob(ctx, Job{JobID: job, TaskID: &task.ID, Host: "host-a", CreatedBy: "decision-test"}); err != nil {
 					t.Fatal(err)
 				}
 				e, _ := decisionRelay(t, s, RelayEvent{Kind: "job.escalate", JobID: job, OwnerLane: "end-lane", Question: "stop?", ReportPath: job})
@@ -427,7 +427,7 @@ func TestDecisionRecordSupersededWhenJobEnds(t *testing.T) {
 func TestDecisionRecordSupersededByJobEndEvent(t *testing.T) {
 	s := decisionStore(t)
 	task := decisionTask(t, s, "backlog")
-	if _, _, err := s.ClaimJob(t.Context(), Job{JobID: "dr-relay-end", TaskID: task.ID, Host: "host-a", CreatedBy: "decision-test"}); err != nil {
+	if _, _, err := s.ClaimJob(t.Context(), Job{JobID: "dr-relay-end", TaskID: &task.ID, Host: "host-a", CreatedBy: "decision-test"}); err != nil {
 		t.Fatal(err)
 	}
 	e, _ := decisionRelay(t, s, RelayEvent{Kind: "job.escalate", JobID: "dr-relay-end", OwnerLane: "end-lane", Question: "stop?", ReportPath: "r"})

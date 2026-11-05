@@ -238,7 +238,7 @@ func TestWorkBoardReconcileRecoversPlacementAndReviewOwner(t *testing.T) {
 	t.Cleanup(st.Close)
 	owner := linearTask(t, st, TaskRefs{})
 	reviewer := linearTask(t, st, TaskRefs{})
-	job, _, err := st.ClaimJob(t.Context(), Job{JobID: "review-owned", TaskID: reviewer.ID, Host: "host-a", CreatedBy: "node"})
+	job, _, err := st.ClaimJob(t.Context(), Job{JobID: "review-owned", TaskID: &reviewer.ID, Host: "host-a", CreatedBy: "node"})
 	if err != nil {
 		t.Fatal(err)
 	}
