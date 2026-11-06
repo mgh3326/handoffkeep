@@ -37,13 +37,15 @@ on:
 #          one runs-on label); every other event, and an unset variable, uses a
 #          hosted runner. A dispatch checks out an arbitrary ref, so it never
 #          reaches our machines: only reviewed, merged code does.
-# A new push to a pull request cancels that PR's older run. A main push never
-# cancels the running main run: with merges faster than T-POST, cancelling
-# would leave main with no finished ci-ok at all and starve the release gate
-# and mergewake's watch (hk 3103). GitHub keeps one pending run per group, so a
-# newer main push replaces the queued one; that skipped head reports ci-ok
-# skipped (unknown), never failure, and its change ships with the next head.
-concurrency: {group: "ci-${{ github.workflow }}-${{ (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call') && github.run_id || github.ref }}", cancel-in-progress: "${{ github.event_name == 'pull_request' }}"}
+# A newer push cancels the older run of the same ref, on a pull request and on
+# main alike (operator 2026-11-06, reverses hk 3103): the newest main head is
+# the one that ships, and its green ci-ok covers the heads it contains. A
+# cancelled head reports ci-ok skipped (unknown), never failure; the release
+# gate treats it as superseded and releases only the newest green head. When
+# the newest head fails, mergewake watch bisects (ci-any-ref) to find and
+# revert the breaking merge. Dispatch and workflow_call runs group by run id,
+# so they never cancel each other.
+concurrency: {group: "ci-${{ github.workflow }}-${{ (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call') && github.run_id || github.ref }}", cancel-in-progress: true}
 permissions:
   contents: read
 jobs:

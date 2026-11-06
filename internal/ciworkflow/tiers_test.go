@@ -250,11 +250,11 @@ func tierProblems(ci, anyRef, policy []byte) []string {
 			add("ci.yml must trigger on %s", ev)
 		}
 	}
-	// The group is keyed on the ref. Only a pull request cancels its older
-	// run; a main push lets the running T-POST finish (hk 3103), so main
-	// always gets a finished ci-ok even when merges outpace CI.
-	if wf.Concurrency["cancel-in-progress"] != "${{ github.event_name == 'pull_request' }}" || !strings.Contains(fmt.Sprint(wf.Concurrency["group"]), "github.ref") {
-		add("ci.yml concurrency must key on github.ref and cancel in progress only for pull_request")
+	// The group is keyed on the ref and a newer push cancels the older run,
+	// on a pull request and on main (operator 2026-11-06): the newest main
+	// head ships, and a failure there is bisected and reverted by watch.
+	if fmt.Sprint(wf.Concurrency["cancel-in-progress"]) != "true" || !strings.Contains(fmt.Sprint(wf.Concurrency["group"]), "github.ref") {
+		add("ci.yml concurrency must key on github.ref and cancel the older run in progress")
 	}
 
 	out = append(out, gitleaksScopeProblems(wf)...)
@@ -451,8 +451,8 @@ func TestCITierMutantsTurnRed(t *testing.T) {
 		{"self-hosted-pr-test", "'all') }}\n    runs-on: ubuntu-latest\n    timeout-minutes: 15\n", "'all') }}\n    runs-on: [self-hosted, linux]\n    timeout-minutes: 15\n"},
 		{"runner-variable-pr-test", "'all') }}\n    runs-on: ubuntu-latest\n    timeout-minutes: 15\n", "'all') }}\n    runs-on: ${{ vars.HANDOFFKEEP_POST_LINUX_RUNNER || 'ubuntu-latest' }}\n    timeout-minutes: 15\n"},
 		{"no-concurrency", "concurrency: {group:", "x-concurrency: {group:"},
-		{"no-cancel-in-progress", `cancel-in-progress: "${{ github.event_name == 'pull_request' }}"}`, "cancel-in-progress: false}"},
-		{"main-push-cancels", `cancel-in-progress: "${{ github.event_name == 'pull_request' }}"}`, "cancel-in-progress: true}"},
+		{"no-cancel-in-progress", "cancel-in-progress: true}", "cancel-in-progress: false}"},
+		{"main-push-keeps-running", "cancel-in-progress: true}", `cancel-in-progress: "${{ github.event_name == 'pull_request' }}"}`},
 		{"post-linux-unguarded", "if: ${{ github.event_name != 'pull_request' && contains(fromJSON('[\"all\",\"test\"]'), inputs.suite || 'all') }}\n    name: 'post: race + postgres'", "if: ${{ contains(fromJSON('[\"all\",\"test\"]'), inputs.suite || 'all') }}\n    name: 'post: race + postgres'"},
 		{"ci-ok-always", "if: ${{ " + ciOkIf + " }}", "if: ${{ always() }}"},
 		{"ci-ok-ignores-abandoned", "if: ${{ " + ciOkIf + " }}", "if: ${{ " + ciOkIfCancelledOnly + " }}"},
