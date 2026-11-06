@@ -227,7 +227,7 @@ func TestForwardAgainstStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(st.Close)
-	if _, err := st.RecordDotsFollowup(t.Context(), store.DotsIssue{Identifier: "ZZZ-1", Title: "t", URL: "u"}, "0a1b2c3d-0000"); err != nil {
+	if _, err := st.RecordDotsFollowup(t.Context(), store.DotsIssue{Identifier: "ZZZ-1", Title: "t", URL: "u", IssueUUID: "0a1b2c3d-0000-4000-8000-0000000000f1"}, "0a1b2c3d-0000"); err != nil {
 		t.Fatal(err)
 	}
 	f, hub, now := forwarderFixture(t, st)
