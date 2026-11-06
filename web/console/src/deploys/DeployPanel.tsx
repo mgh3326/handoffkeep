@@ -121,7 +121,7 @@ function RecentAttempts({ svc, now }: { svc: DeployServiceView; now: string }) {
   );
 }
 
-function MergedList({ svc }: { svc: DeployServiceView }) {
+function MergedList({ svc, now }: { svc: DeployServiceView; now: string }) {
   if (svc.merged_boundary === "unrecorded") {
     return <p className="dp-note">배포 시각(deployed_at) 미기록 — 마지막 배포 이후 머지 목록의 기준이 없습니다.</p>;
   }
@@ -150,7 +150,9 @@ function MergedList({ svc }: { svc: DeployServiceView }) {
               <a className="dp-nowrap" href={task.pr} target="_blank" rel="noreferrer">
                 {deployPRLabel(task.pr)}
               </a>
-              <span className="dp-muted">{deployStamp(task.merged_at) ?? task.merged_at}</span>
+              <span className="dp-muted">
+                <When now={now} iso={task.merged_at} />
+              </span>
             </li>
           ))}
         </ul>
@@ -246,7 +248,7 @@ function ServiceCard({ svc, now }: { svc: DeployServiceView; now: string }) {
         </p>
       ) : null}
       <InvalidRecords svc={svc} />
-      <MergedList svc={svc} />
+      <MergedList svc={svc} now={now} />
     </section>
   );
 }
@@ -294,8 +296,8 @@ export function DeployPanel({ fetchStatus = fetchDeployPending, pollMs = 15_000 
         <ServiceCard key={svc.service} svc={svc} now={data.generated_at} />
       ))}
       <p className="dp-note">
-        배포가 필요 없는 머지(문서·CI·스킬)도 목록에 섞여 있을 수 있습니다. PR 귀속은 태스크의 refs.pr 기준이며, refs.pr 은 종결 PR
-        이 아니라 출처 PR일 수 있습니다(#494 이전).
+        배포가 필요 없는 머지(문서·CI·스킬)도 목록에 섞여 있을 수 있습니다. PR은 태스크에 적힌 PR을 기준으로 연결하며, 머지를 마친 PR이
+        아니라 처음 연 PR일 수 있습니다.
       </p>
     </section>
   );

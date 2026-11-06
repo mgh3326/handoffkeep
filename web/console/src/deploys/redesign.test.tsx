@@ -245,3 +245,22 @@ describe("a service with no attempts", () => {
     expect(within(card).queryByRole("list", { name: /최근 배포/ })).toBeNull();
   });
 });
+
+describe("operator-facing copy", () => {
+  const merged = { task_id: 7, title: "A change", pr: "https://github.com/example/console/pull/9", merged_at: "2026-11-01T10:00:00Z" };
+
+  it("shows a merged task's time as relative, with the absolute time in the title", async () => {
+    show([service({ merged_since: [merged] })]);
+    const item = (await screen.findByText("A change")).closest("li") as HTMLElement;
+    const time = item.querySelector("time") as HTMLElement;
+    expect(time.textContent).toBe("2시간 전");
+    expect(time.getAttribute("title")).toBe("01/11, 19:00 KST");
+    expect(item.textContent).not.toMatch(/\d\d\/\d\d, \d\d:\d\d/);
+  });
+
+  it("the footnote names no internal field or issue number", async () => {
+    show([service()]);
+    const note = (await screen.findByText(/배포가 필요 없는 머지/)) as HTMLElement;
+    expect(note.textContent).not.toMatch(/refs\.pr|종결|#494/);
+  });
+});
