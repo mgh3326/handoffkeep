@@ -32,6 +32,8 @@ export type AttentionDeploy = {
   service: string;
   task_id: number;
   title: string;
+  title_ko?: string;
+  title_ko_stale?: boolean;
   pr: string;
   merged_at: string;
 };

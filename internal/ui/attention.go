@@ -40,11 +40,13 @@ type attentionTaskView struct {
 }
 
 type attentionDeployView struct {
-	Service  string    `json:"service"`
-	TaskID   int64     `json:"task_id"`
-	Title    string    `json:"title"`
-	PR       string    `json:"pr"`
-	MergedAt time.Time `json:"merged_at"`
+	Service      string    `json:"service"`
+	TaskID       int64     `json:"task_id"`
+	Title        string    `json:"title"`
+	TitleKO      string    `json:"title_ko,omitempty"`
+	TitleKOStale bool      `json:"title_ko_stale,omitempty"`
+	PR           string    `json:"pr"`
+	MergedAt     time.Time `json:"merged_at"`
 }
 
 type attentionResponse struct {
@@ -103,9 +105,14 @@ func (h *Handler) attention(w http.ResponseWriter, r *http.Request, identity cfa
 	for _, x := range waiting.Tasks.Items {
 		response.Tasks.Items = append(response.Tasks.Items, attentionTaskView{ID: x.ID, Title: x.Title, Lane: x.Lane, State: x.State, Reason: x.Reason, Since: x.Since})
 	}
-	taskSources := make([]store.TranslationSource, 0, len(waiting.Tasks.Items))
+	response.Deploys.EventsCapped = deploys.EventsCapped
+	response.Deploys.Count, response.Deploys.Items = attentionDeploys(deploys)
+	taskSources := make([]store.TranslationSource, 0, len(waiting.Tasks.Items)+len(response.Deploys.Items))
 	for _, x := range waiting.Tasks.Items {
 		taskSources = append(taskSources, store.TranslationSource{EntityID: strconv.FormatInt(x.ID, 10), Field: "title", Original: x.Title})
+	}
+	for _, x := range response.Deploys.Items {
+		taskSources = append(taskSources, store.TranslationSource{EntityID: strconv.FormatInt(x.TaskID, 10), Field: "title", Original: x.Title})
 	}
 	taskTranslations, err := h.store.ListTranslations(r.Context(), "task", taskSources)
 	if err != nil {
@@ -117,6 +124,14 @@ func (h *Handler) attention(w http.ResponseWriter, r *http.Request, identity cfa
 			if tr.EntityID == strconv.FormatInt(response.Tasks.Items[i].ID, 10) {
 				response.Tasks.Items[i].TitleKO = tr.Text
 				response.Tasks.Items[i].TitleKOStale = tr.Stale
+			}
+		}
+	}
+	for i := range response.Deploys.Items {
+		for _, tr := range taskTranslations {
+			if tr.EntityID == strconv.FormatInt(response.Deploys.Items[i].TaskID, 10) {
+				response.Deploys.Items[i].TitleKO = tr.Text
+				response.Deploys.Items[i].TitleKOStale = tr.Stale
 			}
 		}
 	}
@@ -139,8 +154,6 @@ func (h *Handler) attention(w http.ResponseWriter, r *http.Request, identity cfa
 			}
 		}
 	}
-	response.Deploys.EventsCapped = deploys.EventsCapped
-	response.Deploys.Count, response.Deploys.Items = attentionDeploys(deploys)
 	writeBoardJSON(w, response)
 }
 

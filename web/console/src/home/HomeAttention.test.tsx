@@ -152,3 +152,10 @@ it("shows the error state when the request fails", async () => {
   expect(await screen.findByRole("alert")).toBeTruthy();
   expect(screen.queryByText("대기 중인 일 없음")).toBeNull();
 });
+it("shows a fresh Korean title for a deploy and can reveal the original", async () => {
+  serve(payload({ deploys: { count: 1, events_capped: false, items: [{ ...deploy, title_ko: "배포 대기 작업" }] } }));
+  render(<HomeAttention />);
+  expect(await screen.findByText("배포 대기 작업")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "원문" }));
+  expect(screen.getByText(deploy.title)).toBeTruthy();
+});

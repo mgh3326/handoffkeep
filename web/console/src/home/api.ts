@@ -100,6 +100,8 @@ function deploy(o: Record<string, unknown>, at: string): AttentionDeploy {
     service: text(o, "service", at),
     task_id: id(o, "task_id", at),
     title: text(o, "title", at),
+    title_ko: o.title_ko === undefined ? undefined : text(o, "title_ko", at),
+    title_ko_stale: o.title_ko_stale === undefined ? undefined : flag(o, "title_ko_stale", at),
     pr: text(o, "pr", at),
     merged_at: text(o, "merged_at", at),
   };

@@ -69,7 +69,7 @@ function Row({ item, now, seen, markSeen }: { item: Item; now: string; seen: boo
     chips = <><Chip kind="status" state={x.state} stalled={x.reason === "stalled"} label={x.reason === "stalled" ? "멈춤" : undefined} /><Chip kind="lane" lane={x.lane} /></>;
   } else {
     const x = item.value;
-    href = `/ui/tasks/${x.task_id}`; id = x.task_id; title = x.title; summary = "머지 후 미배포";
+    href = `/ui/tasks/${x.task_id}`; id = x.task_id; stale = !!x.title_ko_stale; hasTranslation = !!x.title_ko; title = !showOriginal && x.title_ko && !stale ? x.title_ko : x.title; summary = "머지 후 미배포";
     icon = <StateIcon state="merged" />; chips = <Chip kind="lane" lane={x.service} />;
   }
   return <li className={`ha-item${seen ? " ha-item--seen" : ""}`}><a className="ha-row" href={href} onClick={() => markSeen(item.key)}>
