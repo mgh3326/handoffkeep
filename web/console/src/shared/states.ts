@@ -7,7 +7,7 @@
  * correctly — the server writes old names into event from/to on rows that
  * predate the migration. */
 export const STATE_LABEL: Record<string, string> = {
-  // ---- current states (eleven, post-hierarchy) ----
+  // ---- current states (twelve, post-hierarchy) ----
   triage: "분류 대기",
   backlog: "대기",
   unstarted: "착수 전",
@@ -16,6 +16,7 @@ export const STATE_LABEL: Record<string, string> = {
   reviewing: "검토 중",
   merged: "머지됨",
   deployed: "배포됨",
+  completed: "완료됨",
   dropped: "종료됨",
   duplicate: "중복",
   icebox: "보류(보관)",
@@ -43,6 +44,7 @@ export const STATE_GROUP_ORDER = [
   "reviewing",
   "merged",
   "deployed",
+  "completed",
   "dropped",
   "duplicate",
   "icebox",

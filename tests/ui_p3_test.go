@@ -294,7 +294,7 @@ func TestUIP3GlanceTaskAggregation(t *testing.T) {
 	_, after := p3Glance(t, h, assertion)
 	tasks := after["tasks"].(map[string]any)
 	states := tasks["by_state"].(map[string]any)
-	if len(states) != 12 {
+	if len(states) != 13 {
 		t.Fatalf("by_state keys=%v", states)
 	}
 	for state, delta := range map[string]int{"backlog": 1, "developing": 24, "reviewing": 2, "awaiting_decision": 1, "icebox": 1, "unstarted": 1} {

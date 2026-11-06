@@ -3,6 +3,7 @@ package wrkrecords_test
 import (
 	"encoding/base64"
 	"encoding/json"
+	"github.com/mgh3326/handoffkeep/internal/store"
 	. "github.com/mgh3326/handoffkeep/internal/wrkrecords"
 	"reflect"
 	"strings"
@@ -653,5 +654,41 @@ func TestDesignReviewClaimEnrollsNoTask(t *testing.T) {
 	}
 	if e := c.s.CheckLegacy(c.e.Policy, "desktop", LegacyIntent{TaskID: 9001, CurrentJob: "subject", Binding: true}); e != nil {
 		t.Fatal("review claim changed shadow subject's task protection")
+	}
+}
+
+func TestCompletedTaskRequiresCompletionReceipt(t *testing.T) {
+	c := fresh(t)
+	claim := c.s.Claim("subject").Receipt()
+	in := LegacyIntent{TaskID: 9001, CurrentJob: "subject", To: "completed", Receipt: &claim}
+	if err := c.s.CheckLegacy(c.e.Policy, "director-1", in); Code(err) != "wrk_receipt_required" {
+		t.Fatalf("claim receipt authorized completed task: %v", err)
+	}
+	b := []byte("finished non-code work\n")
+	done := c.must("desktop", "subject", "completed", Object{"report_b64": base64.StdEncoding.EncodeToString(b), "report_sha256": SHA(b)})
+	receipt := done.Receipt()
+	in.Receipt = &receipt
+	if err := c.s.CheckLegacy(c.e.Policy, "director-1", in); err != nil {
+		t.Fatalf("subject completion receipt rejected: %v", err)
+	}
+	if err := c.s.CheckLegacy(c.e.Policy, "desktop", in); Code(err) != "wrk_receipt_required" {
+		t.Fatalf("host authorized task transition: %v", err)
+	}
+	in.Receipt = nil
+	if err := c.s.CheckLegacy(c.e.Policy, "director-1", in); Code(err) != "wrk_receipt_required" {
+		t.Fatalf("missing receipt authorized completed task: %v", err)
+	}
+	in.To, in.Receipt = "developing", &claim
+	if err := c.s.CheckLegacy(c.e.Policy, "director-1", in); err != nil {
+		t.Fatalf("claim receipt rejected for nonterminal move: %v", err)
+	}
+}
+
+func TestDeployedTaskRequiresJoinedReceipt(t *testing.T) {
+	c := fresh(t)
+	claim := c.s.Claim("subject").Receipt()
+	in := LegacyIntent{TaskID: 9001, CurrentJob: "subject", To: store.FenceTarget(store.StateDeployed), Receipt: &claim}
+	if err := c.s.CheckLegacy(c.e.Policy, "director-1", in); Code(err) != "wrk_receipt_required" {
+		t.Fatalf("claim receipt authorized deployed task: %v", err)
 	}
 }

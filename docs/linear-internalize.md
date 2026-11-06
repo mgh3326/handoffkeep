@@ -37,7 +37,7 @@ proposed answer for every item except Q11, where the alternative stands.
 `source=panewire.job`. Version 44 backfilled it from those events, with
 `created_at` as the floor.
 
-`tasks.state` holds one of eleven leaf states. The category is derived from the
+`tasks.state` holds one of twelve leaf states. The category is derived from the
 leaf by a fixed table and is never stored, so a category and sub-state cannot
 disagree. API rows add a read-only `category` field.
 
@@ -51,6 +51,7 @@ disagree. API rows add a read-only `category` field.
 | `started` | `reviewing` | A PR is open or under review | **Yes** | No | Merge event, manual move |
 | `completed` | `merged` | Merged. Final for a repository with no deploy stream | No | No | Deploy event, revert event, reopen |
 | `completed` | `deployed` | A deploy record includes the merge | No | No | Revert event, reopen |
+| `completed` | `completed` | Non-code work completed with a result link | No | No | Reopen |
 | `canceled` | `dropped` | Will not be done | No | No | Reopen |
 | `canceled` | `duplicate` | Another task covers it; requires a `duplicate_of` relation | No | No | Reopen |
 | `canceled` | `icebox` | Parked; can be revived | No | No | Revive, reopen |
@@ -76,14 +77,16 @@ does not belong on the same axis (Q2). S1 adds `tasks.awaiting_decision`:
 | From | To |
 |---|---|
 | `triage` | `backlog`, `unstarted` (both through the triage gate); `dropped`, `duplicate` (reason required) |
-| `backlog` | `unstarted`, `researching`, `developing`, `icebox`, `dropped`, `duplicate` |
-| `unstarted` | `backlog`, `researching`, `developing`, `icebox`, `dropped`, `duplicate` |
-| `researching` | `developing`, `reviewing`, `unstarted`, `icebox`, `dropped`, `duplicate` |
-| `developing` | `researching`, `reviewing`, `unstarted`, `icebox`, `dropped`, `duplicate` |
-| `reviewing` | `developing` (fix needed), `merged`, `unstarted`, `icebox`, `dropped`, `duplicate` |
+| `backlog` | `unstarted`, `researching`, `developing`, `icebox`, `dropped`, `duplicate`, `completed` (decide, ops, verify; result link required) |
+| `unstarted` | `backlog`, `researching`, `developing`, `icebox`, `dropped`, `duplicate`, `completed` (decide, ops, verify; result link required) |
+| `researching` | `developing`, `reviewing`, `unstarted`, `icebox`, `dropped`, `duplicate`, `completed` (decide, ops, verify; result link required) |
+| `developing` | `researching`, `reviewing`, `unstarted`, `icebox`, `dropped`, `duplicate`, `completed` (decide, ops, verify; result link required) |
+| `reviewing` | `developing` (fix needed), `merged`, `unstarted`, `icebox`, `dropped`, `duplicate`, `completed` (decide, ops, verify; result link required) |
 | `merged` | `unstarted` (reopen) |
-| `deployed`, `dropped`, `duplicate` | `unstarted` (reopen) |
+| `deployed`, `completed`, `dropped`, `duplicate` | `unstarted` (reopen) |
 | `icebox` | `backlog` (revive), `unstarted` (reopen) |
+
+**Closure.** Each new settled transition records a type and evidence in `refs.closure`. `merged`, `deployed` and `completed` accept `resolved`; `dropped` accepts `cancelled`, `obsolete` or `superseded`; `duplicate` accepts `superseded`. Evidence must be 1–1024 bytes after trimming and contain no secrets. Completed requires an HTTP(S) result link or `hk:doc` reference. A closure absent on rows closed before v46 means unknown. Reopening clears it from the task while its event retains the snapshot.
 
 There is no edge from `triage` to `started`. Moving into `started` still needs
 `claimed_by` plus `refs.job_id` or a recorded no-job reason, as `claimed` and
@@ -92,7 +95,7 @@ There is no edge from `triage` to `started`. Moving into `started` still needs
 `deployed`: deploy records are the strict gate for that state. The `reviewing` to
 `merged` edge stays for repositories mergewake does not merge. That move takes the PR
 through the existing reference flag and stores it in `refs.pr`, so a deploy record can
-match it. A task with no PR can still complete, and stays at `merged`.
+match it. Decide, ops and verify tasks can instead enter `completed` with a result link.
 
 ## Event-driven transitions
 
@@ -107,7 +110,7 @@ forward or is recorded with no effect.
 | `mergewake.merge` | mergewake merged the PR after its review passed | `merged` | Any `backlog`, `unstarted` or `started` state |
 | `mergewake.revert` | Revert PR merged, for example after post-merge CI failed | `developing` | `merged`, `deployed` |
 | `hk.deploy` | Successful deploy record lists the PR | `deployed` | `merged` |
-| `hk.auto_close` | Last child closed | `merged` or `deployed`, see Hierarchy | Any non-terminal state except `triage` |
+| `hk.auto_close` | Last child closed | `completed`, `merged` or `deployed`, see Hierarchy | Any non-terminal state except `triage` |
 | `hk.sweep` | Backlog idle past the setting | `icebox` | `backlog` |
 
 **Choosing the sub-state on spawn.** A spawn reaches hk first as a claim with a job
@@ -279,14 +282,15 @@ on it. S3 defines when a decision is superseded.
 
 **Auto-close** (`auto_close_parent`, default on; Linear's `autoCloseParentIssues`)
 runs in the transaction of the child's transition, once every child is settled. A
-child is settled when it is `merged`, `deployed`, `dropped` or `duplicate`. Any child
+child is settled when it is `merged`, `deployed`, `completed`, `dropped` or `duplicate`. Any child
 in `triage`, `backlog`, `unstarted`, a `started` state or `icebox` blocks auto-close.
 
 | Children | Parent result |
 |---|---|
 | Any not settled, including `icebox` (Q6) | No change |
 | At least one completed, all completed ones `deployed` | `deployed`, which each such child reached through a deploy record |
-| At least one completed, some only `merged` | `merged`; a later deploy event can advance it |
+| At least one done child is `merged` or `deployed`, but not all done children are `deployed` | `merged`; a later deploy event can advance it |
+| All done children are `completed` | `completed` for a `decide`, `ops` or `verify` parent; an `implement` or `fix` parent stays open with an unapplied `hk.auto_close` event |
 | All `dropped` or `duplicate` (Q5) | No change; a `hk.auto_close` event is recorded with `applied=false` |
 
 The Linear schema says only that the parent closes when its sub-issues are closed,
@@ -583,7 +587,8 @@ restored:
    state has not changed since the migration.
 2. Maps every other task, including tasks created after the migration, by the table
    below.
-3. Restores the old constraint and removes the new schema version's row.
+3. Restores the old state constraint, removes the closure check, and clears the
+   state migration version and closure migration ID so both can run again.
 
 | New state | Legacy state |
 |---|---|
@@ -592,7 +597,7 @@ restored:
 | `unstarted` | `reopened` |
 | `researching`, `developing` | `in_progress` |
 | `reviewing` | `verifying` |
-| `merged`, `deployed` | `merged` |
+| `merged`, `deployed`, `completed` | `merged` |
 | `dropped`, `duplicate` | `dropped` |
 | `icebox` | `hold` |
 

@@ -142,7 +142,9 @@ func TestTaskCommentNeverMovesTaskOrDecisions(t *testing.T) {
 	t.Cleanup(func() {
 		ctx := context.Background()
 		_, _, _ = s.AppendRelayEvent(ctx, store.RelayEvent{Kind: "lane.event", OwnerLane: lane, EventID: "comment-q-cleanup-" + lane, Text: "[decision-answered] #" + strconv.FormatInt(question.ID, 10) + ": cleanup"})
-		_, _ = s.TransitionTask(ctx, task.ID, "dropped", "cleanup", "", nil, "")
+		if _, err := s.TransitionTask(ctx, task.ID, "dropped", "cleanup", "test cleanup", nil, ""); err != nil {
+			t.Errorf("close cleanup task: %v", err)
+		}
 	})
 	db, err := pgx.Connect(t.Context(), testdb.URL(t))
 	if err != nil {

@@ -179,32 +179,38 @@ stateDiagram-v2
     backlog --> icebox
     backlog --> dropped
     backlog --> duplicate: requires a duplicate_of relation
+    backlog --> completed: decide, ops, verify; result link required
     unstarted --> backlog
     unstarted --> researching: claim / next (verify, decide)
     unstarted --> developing: claim / next (implement, fix, ops)
     unstarted --> icebox
     unstarted --> dropped
     unstarted --> duplicate
+    unstarted --> completed: decide, ops, verify; result link required
     researching --> developing
     researching --> reviewing
     researching --> unstarted
     researching --> icebox
     researching --> dropped
     researching --> duplicate
+    researching --> completed: decide, ops, verify; result link required
     developing --> researching
     developing --> reviewing
     developing --> unstarted
     developing --> icebox
     developing --> dropped
     developing --> duplicate
+    developing --> completed: decide, ops, verify; result link required
     reviewing --> developing: fix needed
     reviewing --> merged: reference flag stores refs.pr
     reviewing --> unstarted
     reviewing --> icebox
     reviewing --> dropped
     reviewing --> duplicate
+    reviewing --> completed: decide, ops, verify; result link required
     merged --> unstarted: reopen (reason required)
     deployed --> unstarted: reopen (reason required)
+    completed --> unstarted: reopen (reason required)
     dropped --> unstarted: reopen (reason required)
     duplicate --> unstarted: reopen (reason required)
     icebox --> backlog: revive
@@ -213,7 +219,7 @@ stateDiagram-v2
 
 ### State model, hierarchy and relations
 
-`tasks.state` holds one of eleven states; the category is derived from it and
+`tasks.state` holds one of twelve states; the category is derived from it and
 is never stored (API rows carry it read-only as `category`):
 
 | Category | States |
@@ -222,7 +228,7 @@ is never stored (API rows carry it read-only as `category`):
 | `backlog` | `backlog` (claimable) |
 | `unstarted` | `unstarted` (claimable) |
 | `started` (open) | `researching`, `developing`, `reviewing` |
-| `completed` | `merged`, `deployed` |
+| `completed` | `merged`, `deployed`, `completed` |
 | `canceled` | `dropped`, `duplicate`, `icebox` |
 
 Open means `started` and nothing else. A claim (`tasks claim`, `tasks next`)
@@ -264,12 +270,14 @@ removing an edge archives it (`archived_at`) and adding it again revives it.
 `duplicate_of` and the `duplicate` state are written in one transaction
 (`tasks transition <id> --to duplicate --duplicate-of <other>` does the same
 thing). `blocks` is informational. With `auto_close_parent` on (the default),
-a parent closes when its last sub-task settles: `deployed` if every completed
-sub-task is `deployed`, otherwise `merged`; a sub-task in `icebox` or any open
-state blocks the close, and a parent whose sub-tasks are all `dropped` or
-`duplicate` stays where it is, with the skip recorded as an `auto_close`
-event. Reopening a sub-task records an event on a completed parent and does
-not reopen it.
+a parent closes when its last sub-task settles: `deployed` if every done
+sub-task is `deployed`, otherwise `merged` if any is `merged` or `deployed`, or
+`completed` if all done sub-tasks are `completed` and the parent is `decide`,
+`ops` or `verify`. An `implement` or `fix` parent stays open in the last case,
+with an `auto_close` event. A sub-task in `icebox` or any open state blocks the
+close, and a parent whose sub-tasks are all `dropped` or `duplicate` stays where
+it is, with the skip recorded as an `auto_close` event. Reopening a sub-task
+records an event on a completed parent and does not reopen it.
 
 ### Triage intake, ticket sets and the duplicate check
 
@@ -686,7 +694,8 @@ deployment path is unchanged.
 
 `handoffkeep tasks reopen <id> --reason "reverted after failed smoke"` calls
 `POST /v1/tasks/{id}/reopen` with `{"reason":"reverted after failed smoke"}`.
-Only a settled task (`merged`, `deployed`, `dropped` or `duplicate`) or an `icebox` task can be reopened, and it returns to `unstarted`. The
+Only a settled task (`merged`, `deployed`, `completed`, `dropped` or `duplicate`)
+or an `icebox` task can be reopened, and it returns to `unstarted`. The
 operation requires a non-empty reason, records the authenticated caller and
 reason as an append-only transition audit event, and clears the claimant and
 per-cycle `job_id`, `pr`, `head_sha`, and `report_path` refs. Previous values stay

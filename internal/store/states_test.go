@@ -3,6 +3,7 @@ package store
 import (
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -12,11 +13,11 @@ func TestStateCategoriesAreTheDesignTable(t *testing.T) {
 	want := map[string]string{
 		"triage": "triage", "backlog": "backlog", "unstarted": "unstarted",
 		"researching": "started", "developing": "started", "reviewing": "started",
-		"merged": "completed", "deployed": "completed",
+		"merged": "completed", "deployed": "completed", "completed": "completed",
 		"dropped": "canceled", "duplicate": "canceled", "icebox": "canceled",
 	}
-	if len(TaskStates()) != 11 {
-		t.Fatalf("TaskStates=%v, want eleven", TaskStates())
+	if len(TaskStates()) != 12 {
+		t.Fatalf("TaskStates=%v, want twelve", TaskStates())
 	}
 	for state, category := range want {
 		if got := TaskCategory(state); got != category {
@@ -52,13 +53,14 @@ func TestStateCategoriesAreTheDesignTable(t *testing.T) {
 func TestManualTransitionTableIsTheDesignTable(t *testing.T) {
 	want := map[string][]string{
 		"triage":      {"backlog", "unstarted", "dropped", "duplicate"},
-		"backlog":     {"unstarted", "researching", "developing", "icebox", "dropped", "duplicate"},
-		"unstarted":   {"backlog", "researching", "developing", "icebox", "dropped", "duplicate"},
-		"researching": {"developing", "reviewing", "unstarted", "icebox", "dropped", "duplicate"},
-		"developing":  {"researching", "reviewing", "unstarted", "icebox", "dropped", "duplicate"},
-		"reviewing":   {"developing", "merged", "unstarted", "icebox", "dropped", "duplicate"},
+		"backlog":     {"unstarted", "researching", "developing", "icebox", "dropped", "duplicate", "completed"},
+		"unstarted":   {"backlog", "researching", "developing", "icebox", "dropped", "duplicate", "completed"},
+		"researching": {"developing", "reviewing", "unstarted", "icebox", "dropped", "duplicate", "completed"},
+		"developing":  {"researching", "reviewing", "unstarted", "icebox", "dropped", "duplicate", "completed"},
+		"reviewing":   {"developing", "merged", "unstarted", "icebox", "dropped", "duplicate", "completed"},
 		"merged":      {"unstarted"},
 		"deployed":    {"unstarted"},
+		"completed":   {"unstarted"},
 		"dropped":     {"unstarted"},
 		"duplicate":   {"unstarted"},
 		"icebox":      {"backlog", "unstarted"},
@@ -145,11 +147,11 @@ func TestOldNamesParseAsFilters(t *testing.T) {
 // TestLinearMappingCoversEveryState keeps the Linear table total over the
 // eleven states, with the design's terminal set.
 func TestLinearMappingCoversEveryState(t *testing.T) {
-	terminal := map[string]bool{"merged": true, "deployed": true, "dropped": true, "duplicate": true, "icebox": true}
+	terminal := map[string]bool{"merged": true, "deployed": true, "completed": true, "dropped": true, "duplicate": true, "icebox": true}
 	names := map[string]string{
 		"triage": "Backlog", "backlog": "Backlog", "unstarted": "Backlog",
 		"researching": "In Progress", "developing": "In Progress", "reviewing": "In Review",
-		"merged": "Done", "deployed": "Done", "dropped": "Canceled", "duplicate": "Canceled", "icebox": "Canceled",
+		"merged": "Done", "deployed": "Done", "completed": "Done", "dropped": "Canceled", "duplicate": "Canceled", "icebox": "Canceled",
 	}
 	for _, state := range TaskStates() {
 		m, ok := LinearTaskStateMapping[state]
@@ -175,5 +177,21 @@ func TestRollbackScriptVersion(t *testing.T) {
 	}
 	if SchemaVersion < stateMigrationVersion {
 		t.Errorf("SchemaVersion=%d is below the state migration %d", SchemaVersion, stateMigrationVersion)
+	}
+}
+
+func TestSettledStatesSQLMatchesIsSettledState(t *testing.T) {
+	got := map[string]bool{}
+	for _, state := range strings.Split(settledStatesSQL, ",") {
+		got[strings.Trim(state, "'")] = true
+	}
+	for _, state := range TaskStates() {
+		if got[state] != IsSettledState(state) {
+			t.Errorf("settled mismatch for %s", state)
+		}
+		delete(got, state)
+	}
+	if len(got) != 0 {
+		t.Errorf("unknown settled states: %v", got)
 	}
 }

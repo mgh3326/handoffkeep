@@ -13,7 +13,7 @@ import { isKnownState, stateLabel, stateToken } from "./states";
 // New state shapes are listed first; legacy shapes follow and are kept for
 // event history rendering (server writes old names into event from/to).
 export const STATE_SHAPES: Record<string, ReactNode> = {
-  // ---- current states (eleven post-hierarchy) ----
+  // ---- current states (twelve post-hierarchy) ----
   triage: <path d="M5 6h14M5 12h9M5 18h5" />,
   backlog: <circle cx="12" cy="12" r="8" strokeDasharray="3 3" />,
   unstarted: (
@@ -52,6 +52,12 @@ export const STATE_SHAPES: Record<string, ReactNode> = {
     <>
       <circle cx="12" cy="12" r="8" />
       <path d="M12 7v10M9 10l3-3 3 3" />
+    </>
+  ),
+  completed: (
+    <>
+      <circle cx="12" cy="12" r="8" />
+      <path d="M7 12l3 3 7-7" />
     </>
   ),
   dropped: (

@@ -26,7 +26,7 @@ func taskRebindFixture(t *testing.T, state string) (*Store, Task) {
 		t.Fatal(err)
 	}
 	if state == "in_progress" {
-		if _, err := s.TransitionTask(ctx, task.ID, state, "old-builder", "", nil, ""); err != nil {
+		if _, err := s.TransitionTask(ctx, task.ID, state, "old-builder", "fixture outcome", nil, ""); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -103,7 +103,7 @@ func TestRebindTaskJobRejectsNonActiveStates(t *testing.T) {
 			s, task := taskRebindFixture(t, "claimed")
 			ctx := context.Background()
 			for _, state := range tc.path {
-				if _, err := s.TransitionTask(ctx, task.ID, state, "old-builder", "", nil, ""); err != nil {
+				if _, err := s.TransitionTask(ctx, task.ID, state, "old-builder", "fixture outcome", nil, ""); err != nil {
 					t.Fatalf("transition to %s: %v", state, err)
 				}
 			}

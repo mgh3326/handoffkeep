@@ -310,6 +310,23 @@ func TestUIFailClosedAndMethodGuard(t *testing.T) {
 
 type rowCounts struct{ Relay, Tasks, TaskEvents int64 }
 
+// uiLaneRowCounts counts only rows that belong to lane: its tasks, their
+// events and relay events owned by it. Tests in the shared schema must not
+// compare global counts (AGENTS.md): other packages write there concurrently.
+func uiLaneRowCounts(t *testing.T, lane string) rowCounts {
+	t.Helper()
+	db, err := pgx.Connect(t.Context(), testdb.URL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close(t.Context())
+	var counts rowCounts
+	if err := db.QueryRow(t.Context(), `SELECT (SELECT COUNT(*) FROM relay_events WHERE owner_lane=$1),(SELECT COUNT(*) FROM tasks WHERE lane=$1),(SELECT COUNT(*) FROM task_events e JOIN tasks x ON x.id=e.task_id WHERE x.lane=$1)`, lane).Scan(&counts.Relay, &counts.Tasks, &counts.TaskEvents); err != nil {
+		t.Fatal(err)
+	}
+	return counts
+}
+
 func uiRowCounts(t *testing.T) rowCounts {
 	t.Helper()
 	db, err := pgx.Connect(t.Context(), testdb.URL(t))

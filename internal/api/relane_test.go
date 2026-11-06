@@ -132,7 +132,7 @@ func TestTasksRelaneAPIBatchPartialFailure(t *testing.T) {
 		if step.to == "claimed" {
 			_, err = st.ClaimTask(ctx, term.ID, "c", "job-1", "")
 		} else {
-			_, err = st.TransitionTask(ctx, term.ID, step.to, "c", "", nil, "")
+			_, err = st.TransitionTask(ctx, term.ID, step.to, "c", "fixture outcome", nil, "")
 		}
 		if err != nil {
 			t.Fatal(err)
