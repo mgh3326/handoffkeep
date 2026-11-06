@@ -46,7 +46,7 @@ func contractStore(t *testing.T) contractDB {
 		t.Fatal("CI database URL")
 	}
 	q := u.Query()
-	q.Set("search_path", schema+",public")
+	q.Set("search_path", testdb.SearchPath(schema))
 	u.RawQuery = q.Encode()
 	owner, e := store.Open(ctx, u.String())
 	if e != nil {

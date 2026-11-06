@@ -10,10 +10,12 @@ package testdb
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -29,8 +31,18 @@ const EnvVar = "HANDOFFKEEP_TEST_DB_URL"
 // DB-backed tests skip there instead of failing.
 const NoDBVar = "HANDOFFKEEP_TEST_NO_DB"
 
+// ExtSchema is the schema that holds the pg_trgm extension in the test
+// database. Throwaway schemas reach the extension's operator classes through
+// it and nothing else, so they never fall through to tables in public.
+const ExtSchema = "hk_test_ext"
+
+// extLockID is the advisory lock that serializes ensureExt across test
+// processes. It differs from the store's migration lock.
+const extLockID = 824180046
+
 // URL returns the shared test database URL, or skips (locally) / fails
-// (in CI) the test when it is unset.
+// (in CI) the test when it is unset. A URL without a search_path gets
+// "public,hk_test_ext", so shared-schema tests still find gin_trgm_ops.
 func URL(t testing.TB) string {
 	t.Helper()
 	u := os.Getenv(EnvVar)
@@ -43,8 +55,80 @@ func URL(t testing.TB) string {
 		}
 		t.Skipf("%s is not set; skipping PostgreSQL test", EnvVar)
 	}
-	return u
+	ensureExt(t, u)
+	parsed, err := url.Parse(u)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Query().Get("search_path") != "" {
+		return u
+	}
+	return WithSearchPath(t, u, "public,"+ExtSchema)
 }
+
+var (
+	extOnce sync.Once
+	extErr  error
+)
+
+// ensureExt makes pg_trgm exist in ExtSchema, once per process. Test
+// processes of different packages run in parallel against one database, so
+// the work runs under an advisory lock: the check and the CREATE EXTENSION
+// cannot interleave with another process's. An extension that an earlier run
+// (or a store migration in public) installed elsewhere is moved, because an
+// extension lives in one schema per database.
+func ensureExt(t testing.TB, dbURL string) {
+	t.Helper()
+	extOnce.Do(func() { extErr = installExt(dbURL) })
+	if extErr != nil {
+		t.Fatalf("testdb: install pg_trgm in %s: %v", ExtSchema, extErr)
+	}
+}
+
+func installExt(dbURL string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	conn, err := pgx.Connect(ctx, dbURL)
+	if err != nil {
+		return err
+	}
+	defer conn.Close(context.Background())
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(context.Background())
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, extLockID); err != nil {
+		return err
+	}
+	if err := placeExt(ctx, tx); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// placeExt leaves pg_trgm installed in ExtSchema, whether it was missing or
+// installed in another schema. The caller holds extLockID.
+func placeExt(ctx context.Context, tx pgx.Tx) error {
+	if _, err := tx.Exec(ctx, `CREATE SCHEMA IF NOT EXISTS `+ExtSchema); err != nil {
+		return err
+	}
+	var current string
+	err := tx.QueryRow(ctx, `SELECT n.nspname FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace WHERE e.extname = 'pg_trgm'`).Scan(&current)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		_, err = tx.Exec(ctx, `CREATE EXTENSION pg_trgm SCHEMA `+ExtSchema)
+	case err != nil:
+	case current != ExtSchema:
+		_, err = tx.Exec(ctx, `ALTER EXTENSION pg_trgm SET SCHEMA `+ExtSchema)
+	}
+	return err
+}
+
+// SearchPath is the search_path for a throwaway schema: the schema, then the
+// extension schema. Tests that create their own schema (to add a role, say)
+// use it instead of writing schema+",public".
+func SearchPath(schema string) string { return schema + "," + ExtSchema }
 
 // InCI reports whether the process runs under CI.
 func InCI() bool {
@@ -65,8 +149,9 @@ func Conn(t testing.TB) *pgx.Conn {
 var schemaSeq atomic.Int64
 
 // Schema creates a throwaway schema named after prefix and returns a URL
-// whose search_path puts it first (then public, for extensions). The schema
-// is dropped at cleanup. Use it for tests that compare whole-table state or
+// whose search_path puts it first, then ExtSchema for pg_trgm; public is not
+// on the path, so a table that exists only in public is invisible. The
+// schema is dropped at cleanup. Use it for tests that compare whole-table state or
 // run lock-taking DDL, where sharing public with concurrently running
 // packages would make them flaky.
 func Schema(t testing.TB, prefix string) (schema, dbURL string) {
@@ -78,7 +163,7 @@ func Schema(t testing.TB, prefix string) (schema, dbURL string) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _, _ = admin.Exec(context.Background(), "DROP SCHEMA "+schema+" CASCADE") })
-	return schema, WithSearchPath(t, base, schema+",public")
+	return schema, WithSearchPath(t, base, SearchPath(schema))
 }
 
 // WithSearchPath returns dbURL with its search_path parameter set.
