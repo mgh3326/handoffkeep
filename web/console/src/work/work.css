@@ -19,6 +19,7 @@
 .work-row-meta { display: flex; align-items: center; flex-wrap: wrap; gap: var(--hk-space-1); min-width: 0; }
 .work-job { overflow: hidden; text-overflow: ellipsis; display: block; max-width: 100%; }
 .work-row-meta time { color: var(--hk-text-muted); font-size: var(--hk-type-meta); }
+.work-record { padding: var(--hk-space-4); min-width: 0; }
 .work-section { border-top: 1px solid var(--hk-border-subtle); padding: var(--hk-space-3) 0; overflow-wrap: anywhere; }
 .work-section h2 { font-size: var(--hk-type-body); }
 

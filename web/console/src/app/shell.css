@@ -80,6 +80,9 @@ small {
   border-bottom: var(--hk-border-width) solid var(--hk-border-subtle);
 }
 .hk-shell-brand {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--hk-space-6);
   font-weight: var(--hk-weight-strong);
   font-size: var(--hk-font-body);
   text-decoration: none;
