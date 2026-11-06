@@ -380,6 +380,7 @@ func TestTaskClosureMigrationLockTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer tx.Rollback(ctx)
 	err = applyTaskClosureMigration(bounded, tx)
 	var pgerr *pgconn.PgError
 	if !errors.As(err, &pgerr) || pgerr.Code != "55P03" {
