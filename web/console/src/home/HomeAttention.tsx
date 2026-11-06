@@ -74,7 +74,7 @@ function Row({ item, now, seen, markSeen }: { item: Item; now: string; seen: boo
   }
   return <li className={`ha-item${seen ? " ha-item--seen" : ""}`}><a className="ha-row" href={href} onClick={() => markSeen(item.key)}>
     <span className="ha-icon">{icon}</span><span className="ha-content">
-      <span className="ha-line"><span className="ha-dot" aria-hidden="true" /><span className="hk-sr-only">{seen ? "읽음" : "읽지 않음"}</span><Mono>#{id}</Mono><span className="ha-row-title">{title}{stale && <small> 갱신 필요</small>}</span><time dateTime={item.time} title={formatMinuteUTC(item.time) ?? "시각 미상"}>{age(now, item.time)}</time></span>
+      <span className="ha-line"><span className="ha-dot" aria-hidden="true" /><span className="hk-sr-only">{seen ? "읽음" : "읽지 않음"}</span><Mono>#{id}</Mono><span className="ha-row-title">{title}{stale && <small className="hk-translation-stale"> 갱신 필요</small>}</span><time dateTime={item.time} title={formatMinuteUTC(item.time) ?? "시각 미상"}>{age(now, item.time)}</time></span>
       <span className="ha-detail"><span className="ha-summary">{summary}</span><span className="ha-chips">{chips}</span></span>
     </span></a>{hasTranslation && !stale && <button type="button" aria-pressed={showOriginal} onClick={() => setOverride(!showOriginal)}>{showOriginal ? "번역" : "원문"}</button>}</li>;
 }

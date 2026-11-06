@@ -317,7 +317,7 @@ export function DecisionPage({ id }: { id: string }) {
           {detail.task?.project ?? detail.record.lane}{" "}
           {detail.task && (
             <>
-              · <a href={`/ui/tasks/${detail.task.id}`}>{!globalOriginal && detail.task.title_ko && !detail.task.title_ko_stale ? detail.task.title_ko : detail.task.title}{detail.task.title_ko_stale && <small> 갱신 필요</small>}</a>
+              · <a href={`/ui/tasks/${detail.task.id}`}>{!globalOriginal && detail.task.title_ko && !detail.task.title_ko_stale ? detail.task.title_ko : detail.task.title}{detail.task.title_ko_stale && <small className="hk-translation-stale"> 갱신 필요</small>}</a>
             </>
           )}
         </p>
@@ -354,7 +354,7 @@ export function DecisionPage({ id }: { id: string }) {
       )}
       {req && (
         <>
-          {req.options_ko_stale && <small>갱신 필요</small>}
+          {req.options_ko_stale && <small className="hk-translation-stale">갱신 필요</small>}
           {req.options_ko && !req.options_ko_stale && <button type="button" aria-pressed={optionsOriginal ?? globalOriginal} onClick={() => setOptionsOriginal(!(optionsOriginal ?? globalOriginal))}>{(optionsOriginal ?? globalOriginal) ? "선택지 번역" : "선택지 원문"}</button>}
           <div
             role="radiogroup"

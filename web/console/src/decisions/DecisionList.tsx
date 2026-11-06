@@ -223,7 +223,7 @@ export function DecisionList() {
                   <span className="decision-row-title">
                     {isNew && <span className="hk-sr-only">안 읽음 </span>}
                     <Mono className="decision-id">#{x.id}</Mono>{" "}
-                    <span className="decision-summary">{summarizeQuestion(!(originalItems[x.id] ?? showOriginal) && x.question_ko && !x.question_ko_stale ? x.question_ko : x.question)}{x.question_ko_stale && <small> 갱신 필요</small>}</span>
+                    <span className="decision-summary">{summarizeQuestion(!(originalItems[x.id] ?? showOriginal) && x.question_ko && !x.question_ko_stale ? x.question_ko : x.question)}{x.question_ko_stale && <small className="hk-translation-stale"> 갱신 필요</small>}</span>
                   </span>
                   <span className="hk-chips">
                     <span className="hk-chip hk-chip--neutral" data-chip="source">

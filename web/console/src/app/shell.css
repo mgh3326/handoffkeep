@@ -199,3 +199,5 @@ small {
     color: var(--hk-text-heading);
   }
 }
+
+.hk-translation-stale { color: var(--hk-text-muted); font-weight: var(--hk-weight-normal); }
