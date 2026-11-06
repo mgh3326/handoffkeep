@@ -45,11 +45,15 @@ export function ConfirmSheet({
         <p>revision {revision}</p>
         <p>직접 답(operator_direct)으로 기록됩니다</p>
         <div className="decision-actions">
-          <button ref={edit} onClick={onEdit}>
+          <button type="button" className="hk-button" ref={edit} onClick={onEdit}>
             수정
           </button>
-          <button onClick={close}>취소</button>
-          <button onClick={onConfirm}>답변 보내기</button>
+          <button type="button" className="hk-button" onClick={close}>
+            취소
+          </button>
+          <button type="button" className="hk-button hk-button--primary" onClick={onConfirm}>
+            답변 보내기
+          </button>
         </div>
       </section>
     </div>
