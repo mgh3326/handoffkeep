@@ -1260,6 +1260,9 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := migrateOnce(ctx, tx, 50, func() error { return execAll(ctx, tx, dotsResultsV50) }); err != nil {
 		return err
 	}
+	if err := migrateOnce(ctx, tx, 51, func() error { return execAll(ctx, tx, changeStateV51) }); err != nil {
+		return err
+	}
 
 	return tx.Commit(ctx)
 }
