@@ -44,19 +44,27 @@ func probe(t *testing.T, prefix string) (schema string, run func() error) {
 }
 
 func TestParallelSchemasSeeTrigramOpclass(t *testing.T) {
+	// Schemas are created here, then probed from goroutines that start
+	// together. Parallel subtests would not do: -parallel caps how many run at
+	// once, so a barrier between them can deadlock.
 	const n = 6
-	var ready sync.WaitGroup
-	ready.Add(n)
-	for i := 0; i < n; i++ {
-		t.Run(fmt.Sprintf("schema%d", i), func(t *testing.T) {
-			t.Parallel()
-			_, run := probe(t, "tdb_par")
-			ready.Done()
-			ready.Wait() // every schema exists before any of them indexes
-			if err := run(); err != nil {
-				t.Fatal(err)
-			}
-		})
+	runs := make([]func() error, n)
+	for i := range runs {
+		_, runs[i] = probe(t, "tdb_par")
+	}
+	start := make(chan struct{})
+	errs := make(chan error, n)
+	for _, run := range runs {
+		go func() {
+			<-start
+			errs <- run()
+		}()
+	}
+	close(start)
+	for range runs {
+		if err := <-errs; err != nil {
+			t.Error(err)
+		}
 	}
 }
 

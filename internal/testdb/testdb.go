@@ -113,6 +113,12 @@ func placeExt(ctx context.Context, tx pgx.Tx) error {
 	if _, err := tx.Exec(ctx, `CREATE SCHEMA IF NOT EXISTS `+ExtSchema); err != nil {
 		return err
 	}
+	// Roles that tests create (NOINHERIT runtime roles with USAGE on their own
+	// schema only) must still resolve similarity() and gin_trgm_ops, as they
+	// did through public's default USAGE grant.
+	if _, err := tx.Exec(ctx, `GRANT USAGE ON SCHEMA `+ExtSchema+` TO PUBLIC`); err != nil {
+		return err
+	}
 	var current string
 	err := tx.QueryRow(ctx, `SELECT n.nspname FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace WHERE e.extname = 'pg_trgm'`).Scan(&current)
 	switch {
