@@ -17,7 +17,10 @@ var patterns = []struct {
 	{"github_token", regexp.MustCompile(`\bghp_[A-Za-z0-9]{36}\b`)},
 	{"slack_token", regexp.MustCompile(`\bxoxb-[0-9]{10,13}-[0-9]{10,13}-[A-Za-z0-9]{20,}\b`)},
 	{"aws_access_key", regexp.MustCompile(`\b(?:AKIA|ASIA)[A-Z0-9]{16}\b`)},
-	{"private_key", regexp.MustCompile(`-----BEGIN`)},
+	// A PEM private key: the BEGIN line followed by base64 body. The header
+	// alone (for example a detector's own regex source in a review brief,
+	// pacelever#55) is not key material.
+	{"private_key", regexp.MustCompile(`-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----\s+[A-Za-z0-9+/=\r\n]{40,}`)},
 	{"bearer_token", regexp.MustCompile(`(?i)\bBearer [A-Za-z0-9._-]{20,}`)},
 	{"token_assignment", regexp.MustCompile(`(?m)\b[A-Z_]*(?:TOKEN|SECRET|KEY)=[^\s]{12,}`)},
 	{"github_fine_grained_token", regexp.MustCompile(`\bgithub_pat_[A-Za-z0-9_]{82}\b`)},
