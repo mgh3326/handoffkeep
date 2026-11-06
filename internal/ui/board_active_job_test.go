@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/mgh3326/handoffkeep/internal/store"
 	"github.com/mgh3326/handoffkeep/internal/testdb"
 )
@@ -29,7 +31,12 @@ func TestNewestLiveJob(t *testing.T) {
 }
 
 func TestBoardListIncludesNewestLiveJob(t *testing.T) {
-	pool, url := testdb.SchemaPool(t, "ui_active_job")
+	_, url := testdb.Schema(t, "ui_active_job")
+	pool, err := pgxpool.New(t.Context(), url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
 	st, err := store.Open(t.Context(), url)
 	if err != nil {
 		t.Fatal(err)
