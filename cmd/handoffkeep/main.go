@@ -733,7 +733,10 @@ func decisionsCmd(args []string, out io.Writer) error {
 		}
 	}
 	if len(args) == 0 || args[0] != "resolve" {
-		return errors.New("usage: decisions resolve <task|escalation|lane> <id> --by <lane> --answer <answer> [--note <note>] [--no-inject]\n       " + decisionAskUsage + "\n       " + decisionListUsage + "\n       " + decisionSnoozeUsage + "\n       " + decisionBackfillUsage)
+		return errors.New("usage: decisions resolve <task|escalation|lane> <id> --by <lane> --answer <answer> [--note <note>] [--no-inject]\n       " + decisionResolveRequestUsage + "\n       " + decisionAskUsage + "\n       " + decisionListUsage + "\n       " + decisionSnoozeUsage + "\n       " + decisionBackfillUsage)
+	}
+	if len(args) > 1 && args[1] == "request" {
+		return decisionResolveRequestCmd(args[2:], out)
 	}
 	fs := flag.NewFlagSet("decisions resolve", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
