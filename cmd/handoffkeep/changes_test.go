@@ -70,8 +70,8 @@ func TestChangesShowCLI(t *testing.T) {
 const changeStateFixture = `{"change":{"id":3,"repo":"example/app","pr_number":9,"pr":"https://github.com/example/app/pull/9","state":"open","head_sha":"1111111111111111111111111111111111111111","opened_at":"2026-11-06T01:00:00Z","updated_at":"2026-11-06T02:00:00Z"},` +
 	`"gate":{"state":"blocked","head_sha":"1111111111111111111111111111111111111111","current":true,"reasons":["threads_open"],"decided_at":"2026-11-06T02:00:00Z"},` +
 	`"checks":[{"head_sha":"1111111111111111111111111111111111111111","name":"build","state":"completed","conclusion":"success","observed_at":"2026-11-06T02:00:00Z","source":"poll"}],` +
-	`"findings":[{"reviewed_head":"1111111111111111111111111111111111111111","round":1,"pass":1,"lens":"correctness","ordinal":0,"review_id":5,"severity":"high","title":"open one","status":"open","replied":false,"observed_at":"2026-11-06T02:00:00Z","source":"review"},` +
-	`{"reviewed_head":"1111111111111111111111111111111111111111","round":1,"pass":1,"lens":"correctness","ordinal":1,"review_id":5,"severity":"low","title":"done one","status":"resolved","replied":true,"observed_at":"2026-11-06T02:00:00Z","source":"review"}],` +
+	`"findings":[{"reviewed_head":"1111111111111111111111111111111111111111","round":1,"pass":1,"lens":"correctness","ordinal":0,"review_id":5,"id":"PRRT_1","location":"a.go:3","severity":"high","blocking":true,"summary":"open one","status":"open","author_replied":false,"observed_at":"2026-11-06T02:00:00Z","source":"review"},` +
+	`{"reviewed_head":"1111111111111111111111111111111111111111","round":1,"pass":1,"lens":"correctness","ordinal":1,"review_id":5,"id":"PRRT_2","severity":"low","blocking":false,"summary":"done one","status":"resolved","author_replied":true,"observed_at":"2026-11-06T02:00:00Z","source":"review"}],` +
 	`"freshness":{"state":null,"checks":{"observed_at":"2026-11-06T02:00:00Z","source":"poll"},"threads":null,"findings":null,"gate":null}}`
 
 func TestChangesShowOnePRCLI(t *testing.T) {
@@ -117,14 +117,14 @@ func TestChangesFindingsCLI(t *testing.T) {
 			t.Fatal(err)
 		}
 		var got struct {
-			Findings []struct{ Title string } `json:"findings"`
+			Findings []struct{ Summary string } `json:"findings"`
 		}
 		if err := json.Unmarshal(out.Bytes(), &got); err != nil {
 			t.Fatalf("output=%s err=%v", out.String(), err)
 		}
 		names := []string{}
 		for _, f := range got.Findings {
-			names = append(names, f.Title)
+			names = append(names, f.Summary)
 		}
 		return names
 	}

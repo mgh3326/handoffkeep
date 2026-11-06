@@ -276,7 +276,7 @@ WHERE reviews.reviewed_base IS NULL AND reviews.patch_id IS NULL AND reviews.rev
 const changeColumns = `id,repo,pr_number,state,head_sha,base_sha,merge_sha,opened_at,merged_at,reverted_by_change_id,priority,hold_reason,depends_on_change_id,depends_on_state,created_at,updated_at,
 draft,gate_state,LEAST(state_observed_at,checks_observed_at,threads_observed_at,findings_observed_at,gate_decided_at),
 (SELECT count(*) FROM change_threads t WHERE t.change_id=changes.id AND NOT t.resolved AND NOT t.gone),
-(SELECT count(*) FROM change_findings f JOIN changes c ON c.id=f.change_id LEFT JOIN change_threads t ON t.change_id=f.change_id AND t.thread_id=f.thread_id
+(SELECT count(*) FROM change_findings f JOIN changes c ON c.id=f.change_id ` + findingThreadJoin + `
 	WHERE f.change_id=changes.id AND ` + findingStatusSQL + `='open')`
 
 func scanChange(row pgx.Row, c *Change) error {

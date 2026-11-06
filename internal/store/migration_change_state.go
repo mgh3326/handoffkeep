@@ -11,8 +11,9 @@ package store
 // scalar: change_checks (one row per change, head and check name),
 // change_threads (one row per GitHub thread node id) and change_findings
 // (append-only per review pass, keyed by the pass and an ordinal, linked to
-// the reviews row; a finding has no status column, its open or resolved
-// state is derived from its thread at read time).
+// the reviews row; in mergewake's prstatus.Finding shape: id, location,
+// severity, blocking, summary, url, author_replied; a finding has no status
+// column, its open or resolved state is derived from its thread at read time).
 //
 // Locks: the ALTER TABLE takes ACCESS EXCLUSIVE on changes for the length of
 // the statement. Every added column is nullable with no default, so it
@@ -86,13 +87,15 @@ var changeStateV50 = []string{
 		lens TEXT NOT NULL,
 		ordinal INT NOT NULL CHECK(ordinal >= 0),
 		review_id BIGINT NOT NULL REFERENCES reviews(id),
-		ext_id TEXT,
-		severity TEXT NOT NULL CHECK(severity IN ('critical','high','medium','low')),
-		path TEXT,
-		line INT,
-		title TEXT,
-		body TEXT,
+		ext_id TEXT NOT NULL,
+		location TEXT,
+		severity TEXT CHECK(severity IN ('critical','high','medium','low')),
+		blocking BOOLEAN NOT NULL DEFAULT false,
+		summary TEXT,
+		url TEXT,
+		author_replied BOOLEAN NOT NULL DEFAULT false,
 		thread_id TEXT,
+		body TEXT,
 		redacted BOOLEAN NOT NULL DEFAULT false,
 		observed_at TIMESTAMPTZ NOT NULL,
 		source TEXT NOT NULL CHECK(source IN ('webhook','poll','fresh','review')),

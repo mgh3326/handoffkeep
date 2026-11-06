@@ -21,6 +21,10 @@ import (
 const findingStatusSQL = `(CASE WHEN t.thread_id IS NOT NULL THEN (CASE WHEN t.resolved OR t.gone THEN 'resolved' ELSE 'open' END)
 	WHEN f.reviewed_head = c.head_sha THEN 'open' ELSE 'superseded' END)`
 
+// findingThreadJoin links a finding to its thread: by its thread_id, else by
+// its id, which is the thread's node id once mergewake has posted the finding.
+const findingThreadJoin = `LEFT JOIN change_threads t ON t.change_id=f.change_id AND t.thread_id=COALESCE(f.thread_id,f.ext_id)`
+
 // ChangeInclude selects the sections of the one-PR read besides the change
 // itself and its freshness, which are always present.
 type ChangeInclude struct{ Checks, Threads, Findings, Gate bool }
@@ -126,28 +130,32 @@ type ChangeThread struct {
 	Source        string     `json:"source"`
 }
 
-// ChangeFinding is one stored finding with its derived Status ("open",
-// "resolved" or "superseded", see findingStatusSQL). Replied is the linked
-// thread's flag, false without one.
+// ChangeFinding is one stored finding in mergewake's prstatus.Finding field
+// names (id, location, severity, blocking, summary, url, author_replied), so a
+// reader can pass them through unchanged, with the pass it belongs to and its
+// derived Status ("open", "resolved" or "superseded", see findingStatusSQL).
+// ThreadID is the linked thread, if any; AuthorReplied is set when mergewake
+// said so or the linked thread says the PR author answered.
 type ChangeFinding struct {
-	ReviewedHead string    `json:"reviewed_head"`
-	Round        int       `json:"round"`
-	Pass         int       `json:"pass"`
-	Lens         string    `json:"lens"`
-	Ordinal      int       `json:"ordinal"`
-	ReviewID     int64     `json:"review_id"`
-	ExtID        *string   `json:"ext_id,omitempty"`
-	Severity     string    `json:"severity"`
-	Path         *string   `json:"path,omitempty"`
-	Line         *int      `json:"line,omitempty"`
-	Title        *string   `json:"title,omitempty"`
-	Body         *string   `json:"body,omitempty"`
-	ThreadID     *string   `json:"thread_id,omitempty"`
-	Redacted     bool      `json:"redacted,omitempty"`
-	Status       string    `json:"status"`
-	Replied      bool      `json:"replied"`
-	ObservedAt   time.Time `json:"observed_at"`
-	Source       string    `json:"source"`
+	ID            string    `json:"id"`
+	Location      *string   `json:"location,omitempty"`
+	Severity      *string   `json:"severity,omitempty"`
+	Blocking      bool      `json:"blocking"`
+	Summary       *string   `json:"summary,omitempty"`
+	URL           *string   `json:"url,omitempty"`
+	AuthorReplied bool      `json:"author_replied"`
+	Status        string    `json:"status"`
+	ThreadID      *string   `json:"thread_id,omitempty"`
+	Body          *string   `json:"body,omitempty"`
+	Redacted      bool      `json:"redacted,omitempty"`
+	ReviewedHead  string    `json:"reviewed_head"`
+	Round         int       `json:"round"`
+	Pass          int       `json:"pass"`
+	Lens          string    `json:"lens"`
+	Ordinal       int       `json:"ordinal"`
+	ReviewID      int64     `json:"review_id"`
+	ObservedAt    time.Time `json:"observed_at"`
+	Source        string    `json:"source"`
 }
 
 // SectionFreshness is when a section was last observed and from where.
@@ -268,15 +276,17 @@ FROM change_threads WHERE change_id=$1 AND NOT gone ORDER BY resolved, last_comm
 		v.Threads = &threads
 	}
 	if opt.Include.Findings {
-		rows, err := tx.Query(ctx, `SELECT f.reviewed_head,f.round,f.pass,f.lens,f.ordinal,f.review_id,f.ext_id,f.severity,f.path,f.line,f.title,f.body,f.thread_id,f.redacted,`+findingStatusSQL+`,COALESCE(t.replied,false),f.observed_at,f.source
-FROM change_findings f JOIN changes c ON c.id=f.change_id LEFT JOIN change_threads t ON t.change_id=f.change_id AND t.thread_id=f.thread_id
+		rows, err := tx.Query(ctx, `SELECT f.ext_id,f.location,f.severity,f.blocking,f.summary,f.url,f.author_replied OR COALESCE(t.replied,false),`+findingStatusSQL+`,COALESCE(f.thread_id,t.thread_id),f.body,f.redacted,
+	f.reviewed_head,f.round,f.pass,f.lens,f.ordinal,f.review_id,f.observed_at,f.source
+FROM change_findings f JOIN changes c ON c.id=f.change_id `+findingThreadJoin+`
 WHERE f.change_id=$1 ORDER BY f.review_id DESC, f.ordinal`, c.ID)
 		if err != nil {
 			return ChangeView{}, false, err
 		}
 		findings, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (ChangeFinding, error) {
 			var f ChangeFinding
-			err := r.Scan(&f.ReviewedHead, &f.Round, &f.Pass, &f.Lens, &f.Ordinal, &f.ReviewID, &f.ExtID, &f.Severity, &f.Path, &f.Line, &f.Title, &f.Body, &f.ThreadID, &f.Redacted, &f.Status, &f.Replied, &f.ObservedAt, &f.Source)
+			err := r.Scan(&f.ID, &f.Location, &f.Severity, &f.Blocking, &f.Summary, &f.URL, &f.AuthorReplied, &f.Status, &f.ThreadID, &f.Body, &f.Redacted,
+				&f.ReviewedHead, &f.Round, &f.Pass, &f.Lens, &f.Ordinal, &f.ReviewID, &f.ObservedAt, &f.Source)
 			return f, err
 		})
 		if err != nil {

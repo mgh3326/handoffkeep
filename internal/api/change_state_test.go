@@ -90,6 +90,7 @@ func TestChangeStateWriteRefusalCarriesReason(t *testing.T) {
 		{"findings lens", http.MethodPut, "/v1/changes/findings", map[string]any{"repo": "example/app", "pr": 1, "reviewed_head": changeTestSHA, "lens": "a b", "observed_at": stateAt(1)}, "lens must match"},
 		{"gate state", http.MethodPut, "/v1/changes/gate", map[string]any{"repo": "example/app", "pr": 1, "head_sha": changeTestSHA, "state": "maybe", "decided_at": stateAt(1)}, "state must be ready, blocked or pending"},
 		{"bad repo", http.MethodPut, "/v1/changes/gate", map[string]any{"repo": "nope", "pr": 1, "head_sha": changeTestSHA, "state": "ready", "decided_at": stateAt(1)}, "repo must be owner/name"},
+		{"finding id", http.MethodPut, "/v1/changes/findings", map[string]any{"repo": "example/app", "pr": 1, "reviewed_head": changeTestSHA, "lens": "correctness", "observed_at": stateAt(1), "findings": []any{map[string]any{"severity": "high"}}}, "a finding needs an id"},
 		{"empty batch", http.MethodPost, "/v1/changes/batch", map[string]any{"repo": "example/app", "pr": 1}, "send at least one"},
 		{"batch section", http.MethodPost, "/v1/changes/batch", map[string]any{"repo": "example/app", "pr": 1, "gate": map[string]any{"head_sha": changeTestSHA, "state": "maybe", "decided_at": stateAt(1)}}, "gate: state must be"},
 		{"future time", http.MethodPut, "/v1/changes/state", map[string]any{"repo": "example/app", "pr": 1, "head_sha": changeTestSHA, "state": "open", "observed_at": time.Now().UTC().Add(48 * time.Hour).Format(time.RFC3339), "source": "poll"}, "in the future"},
@@ -193,7 +194,7 @@ func TestChangeStateWriteAndRead(t *testing.T) {
 	status, body = changesCall(t, h, http.MethodPost, "/v1/changes/batch", "peer-token", stateBody(repo, map[string]any{
 		"state":    map[string]any{"head_sha": changeTestSHA, "state": "open", "title": "stale", "observed_at": stateAt(1), "source": "poll"},
 		"threads":  map[string]any{"observed_at": stateAt(13), "source": "poll", "complete": true, "threads": []any{map[string]any{"thread_id": "T1", "author_kind": "mergewake", "severity": "high", "excerpt": "fix this"}}},
-		"findings": map[string]any{"reviewed_head": changeTestSHA, "round": 1, "pass": 1, "lens": "correctness", "observed_at": stateAt(13), "findings": []any{map[string]any{"severity": "high", "title": "bug", "thread_id": "T1"}}},
+		"findings": map[string]any{"reviewed_head": changeTestSHA, "round": 1, "pass": 1, "lens": "correctness", "observed_at": stateAt(13), "findings": []any{map[string]any{"id": "T1", "location": "internal/a.go:3", "severity": "high", "blocking": true, "summary": "bug", "url": "https://github.com/x/y/pull/1#r1", "author_replied": true}}},
 		"gate":     map[string]any{"head_sha": changeTestSHA, "state": "blocked", "reasons": []string{"threads_open"}, "policy_revision": "abcdef1234567", "decided_at": stateAt(13)},
 	}))
 	if status != http.StatusOK || section(t, body, "state")["applied"] != false || section(t, body, "threads")["applied"] != true ||
@@ -212,8 +213,19 @@ func TestChangeStateWriteAndRead(t *testing.T) {
 	if g := one["gate"].(map[string]any); g["state"] != "blocked" || g["current"] != true || g["policy_revision"] != "abcdef1234567" {
 		t.Fatalf("gate: %v", g)
 	}
-	if f := one["findings"].([]any)[0].(map[string]any); f["status"] != "open" || f["thread_id"] != "T1" {
-		t.Fatalf("finding: %v", f)
+	// A finding comes back under mergewake's prstatus.Finding field names, so
+	// panewire can pass it through unchanged.
+	f := one["findings"].([]any)[0].(map[string]any)
+	want := map[string]any{"id": "T1", "location": "internal/a.go:3", "severity": "high", "blocking": true, "summary": "bug", "url": "https://github.com/x/y/pull/1#r1", "author_replied": true, "status": "open", "thread_id": "T1"}
+	for k, v := range want {
+		if f[k] != v {
+			t.Fatalf("finding[%q]=%v, want %v (finding: %v)", k, f[k], v, f)
+		}
+	}
+	for _, gone := range []string{"title", "path", "line", "ext_id", "replied"} {
+		if _, has := f[gone]; has {
+			t.Fatalf("finding still carries %q: %v", gone, f)
+		}
 	}
 	fresh := one["freshness"].(map[string]any)
 	for _, key := range []string{"state", "checks", "threads", "findings", "gate"} {

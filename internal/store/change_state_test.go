@@ -60,8 +60,11 @@ func TestChangeBatchValidation(t *testing.T) {
 			b.Threads = &ChangeThreadsWrite{ObservedAt: now, Source: "poll", Threads: []ChangeThreadIn{{ThreadID: "T1", AuthorKind: "robot"}}}
 		}, "author_kind"},
 		{"finding severity", func(b *ChangeBatch) {
-			b.Findings = &ChangeFindingsWrite{ReviewedHead: testSHA1, Lens: "correctness", ObservedAt: now, Findings: []ChangeFindingIn{{Severity: "urgent"}}}
+			b.Findings = &ChangeFindingsWrite{ReviewedHead: testSHA1, Lens: "correctness", ObservedAt: now, Findings: []ChangeFindingIn{{ID: "f", Severity: "urgent"}}}
 		}, "severity"},
+		{"finding id", func(b *ChangeBatch) {
+			b.Findings = &ChangeFindingsWrite{ReviewedHead: testSHA1, Lens: "correctness", ObservedAt: now, Findings: []ChangeFindingIn{{Severity: "high"}}}
+		}, "a finding needs an id"},
 		{"finding lens", func(b *ChangeBatch) {
 			b.Findings = &ChangeFindingsWrite{ReviewedHead: testSHA1, Lens: "has space", ObservedAt: now}
 		}, "lens must match"},
@@ -289,7 +292,7 @@ func TestChangeSectionStaleness(t *testing.T) {
 	})
 	t.Run("findings", func(t *testing.T) {
 		w := func(min, pass int) *ChangeFindingsWrite {
-			return &ChangeFindingsWrite{ReviewedHead: testSHA1, Round: 1, Pass: pass, Lens: "correctness", ObservedAt: f.at(min), Findings: []ChangeFindingIn{{Severity: "high", Title: "t"}}}
+			return &ChangeFindingsWrite{ReviewedHead: testSHA1, Round: 1, Pass: pass, Lens: "correctness", ObservedAt: f.at(min), Findings: []ChangeFindingIn{{ID: "f", Severity: "high", Summary: "t"}}}
 		}
 		f.apply(t, ChangeBatch{Findings: w(10, 1)})
 		if got := f.apply(t, ChangeBatch{Findings: w(5, 2)}).Sections["findings"]; got.Applied || got.Reason != "stale" {
@@ -409,7 +412,7 @@ func TestChangeBatchAtomic(t *testing.T) {
 	}
 	st := validState(g.at(1))
 	_, err = g.s.ApplyChangeBatch(t.Context(), ChangeBatch{ChangeRef: g.ref, State: &st,
-		Findings: &ChangeFindingsWrite{ReviewedHead: testSHA1, Lens: "x", ObservedAt: g.at(1), Findings: []ChangeFindingIn{{Severity: "low"}}}})
+		Findings: &ChangeFindingsWrite{ReviewedHead: testSHA1, Lens: "x", ObservedAt: g.at(1), Findings: []ChangeFindingIn{{ID: "f", Severity: "low"}}}})
 	if err == nil {
 		t.Fatal("a failing findings insert was accepted")
 	}
@@ -479,8 +482,8 @@ func TestChangeGuardAndCaps(t *testing.T) {
 		t.Fatalf("plain thread: %+v", p)
 	}
 	findings := &ChangeFindingsWrite{ReviewedHead: testSHA1, Round: 1, Pass: 1, Lens: "correctness", ObservedAt: f.at(2), Findings: []ChangeFindingIn{
-		{Severity: "high", Title: secretLike(), Body: "b"},
-		{Severity: "low", Title: "t", Body: strings.Repeat("x", MaxFindingBody+500)},
+		{ID: "a", Severity: "high", Summary: secretLike(), Body: "b"},
+		{ID: "b", Severity: "low", Summary: strings.Repeat("s", 300), Body: strings.Repeat("x", MaxFindingBody+500)},
 	}}
 	if r := f.apply(t, ChangeBatch{Findings: findings}); !r.Sections["findings"].Redacted {
 		t.Fatalf("findings: %+v", r.Sections["findings"])
@@ -495,8 +498,11 @@ func TestChangeGuardAndCaps(t *testing.T) {
 			longBody = &got[i]
 		}
 	}
-	if secret.Title != nil || !secret.Redacted || secret.Body == nil || *secret.Body != "b" {
+	if secret.Summary != nil || !secret.Redacted || secret.Body == nil || *secret.Body != "b" {
 		t.Fatalf("secret finding: %+v", secret)
+	}
+	if longBody.Summary == nil || len([]rune(*longBody.Summary)) != MaxFindingSummary {
+		t.Fatalf("summary not capped at %d characters: %+v", MaxFindingSummary, longBody)
 	}
 	if longBody.Body == nil || len(*longBody.Body) != MaxFindingBody || longBody.Redacted {
 		t.Fatalf("long finding: %+v", longBody)
@@ -509,7 +515,7 @@ func TestChangeFindingsLinkReviews(t *testing.T) {
 	w := func(min, pass int, n int) ChangeBatch {
 		fs := make([]ChangeFindingIn, n)
 		for i := range fs {
-			fs[i] = ChangeFindingIn{Severity: "medium", Title: "t", ExtID: "e"}
+			fs[i] = ChangeFindingIn{ID: "e", Severity: "medium", Summary: "t"}
 		}
 		return ChangeBatch{Findings: &ChangeFindingsWrite{ReviewedHead: testSHA1, Round: 1, Pass: pass, Lens: "correctness", ObservedAt: f.at(min), Findings: fs}}
 	}
@@ -549,7 +555,7 @@ func TestChangeFindingsLinkReviews(t *testing.T) {
 		t.Fatal(err)
 	}
 	preID := f.count(t, `SELECT id FROM reviews WHERE change_id=$1 AND lens='security'`, first.ChangeID)
-	f.apply(t, ChangeBatch{Findings: &ChangeFindingsWrite{ReviewedHead: testSHA1, Round: 2, Pass: 1, Lens: "security", ObservedAt: f.at(5), Findings: []ChangeFindingIn{{Severity: "high"}}}})
+	f.apply(t, ChangeBatch{Findings: &ChangeFindingsWrite{ReviewedHead: testSHA1, Round: 2, Pass: 1, Lens: "security", ObservedAt: f.at(5), Findings: []ChangeFindingIn{{ID: "g", Severity: "high"}}}})
 	if n := f.count(t, `SELECT count(*) FROM change_findings WHERE review_id=$1`, preID); n != 1 {
 		t.Fatalf("finding not linked to the existing review: %d", n)
 	}
@@ -603,13 +609,14 @@ func TestChangeFindingStatusDerived(t *testing.T) {
 	fs := func(head string, round int, threads ...string) *ChangeFindingsWrite {
 		w := &ChangeFindingsWrite{ReviewedHead: head, Round: round, Lens: "correctness", ObservedAt: f.at(2 + round)}
 		for _, id := range threads {
-			w.Findings = append(w.Findings, ChangeFindingIn{Severity: "high", Title: id, ThreadID: id})
+			w.Findings = append(w.Findings, ChangeFindingIn{ID: id, Severity: "high", Summary: id})
 		}
 		return w
 	}
 	// Round 1 on the current head: one open thread, one resolved, one unposted, one whose thread row is gone, one whose thread row does not exist yet.
-	w := fs(testSHA1, 1, "open-thread", "resolved-thread", "", "gone-thread", "later-thread")
-	w.Findings[2].Title = "unposted"
+	w := fs(testSHA1, 1, "open-thread", "resolved-thread", "unposted", "gone-thread", "later-thread")
+	// A finding whose id is not the thread's names its thread explicitly.
+	w.Findings = append(w.Findings, ChangeFindingIn{ID: "per-pass-7", Severity: "low", ThreadID: "resolved-thread"})
 	f.apply(t, ChangeBatch{Findings: w, Threads: &ChangeThreadsWrite{ObservedAt: f.at(2), Source: "poll", Complete: false, Threads: []ChangeThreadIn{
 		{ThreadID: "open-thread", AuthorKind: "mergewake", Replied: true},
 		{ThreadID: "resolved-thread", AuthorKind: "mergewake", Resolved: true},
@@ -622,24 +629,24 @@ func TestChangeFindingStatusDerived(t *testing.T) {
 	status := func() map[string]ChangeFinding {
 		out := map[string]ChangeFinding{}
 		for _, x := range *f.view(t, ChangeReadOptions{}).Findings {
-			out[*x.Title] = x
+			out[x.ID] = x
 		}
 		return out
 	}
 	got := status()
-	want := map[string]string{"open-thread": "open", "resolved-thread": "resolved", "unposted": "open", "gone-thread": "resolved", "later-thread": "open"}
+	want := map[string]string{"open-thread": "open", "resolved-thread": "resolved", "unposted": "open", "gone-thread": "resolved", "later-thread": "open", "per-pass-7": "resolved"}
 	for title, st := range want {
 		if got[title].Status != st {
 			t.Errorf("%s: status %q, want %q", title, got[title].Status, st)
 		}
 	}
-	if !got["open-thread"].Replied || got["unposted"].Replied {
+	if !got["open-thread"].AuthorReplied || got["unposted"].AuthorReplied || got["open-thread"].ThreadID == nil || *got["open-thread"].ThreadID != "open-thread" {
 		t.Errorf("replied flags: %+v", got)
 	}
 	// The head moves: findings with no live thread on the old head are superseded; thread-linked ones follow their thread.
 	f.apply(t, ChangeBatch{State: &ChangeStateWrite{HeadSHA: testSHA2, State: ChangeOpen, ObservedAt: f.at(10), Source: "webhook"}})
 	got = status()
-	want = map[string]string{"open-thread": "open", "resolved-thread": "resolved", "unposted": "superseded", "gone-thread": "resolved", "later-thread": "superseded"}
+	want = map[string]string{"open-thread": "open", "resolved-thread": "resolved", "unposted": "superseded", "gone-thread": "resolved", "later-thread": "superseded", "per-pass-7": "resolved"}
 	for title, st := range want {
 		if got[title].Status != st {
 			t.Errorf("after head move, %s: status %q, want %q", title, got[title].Status, st)
@@ -647,7 +654,7 @@ func TestChangeFindingStatusDerived(t *testing.T) {
 	}
 	// A new round on the new head is open.
 	nw := fs(testSHA2, 2)
-	nw.Findings = []ChangeFindingIn{{Severity: "low", Title: "fresh"}}
+	nw.Findings = []ChangeFindingIn{{ID: "fresh", Severity: "low"}}
 	f.apply(t, ChangeBatch{Findings: nw})
 	if got = status(); got["fresh"].Status != "open" {
 		t.Errorf("fresh: %+v", got["fresh"])
@@ -662,8 +669,8 @@ func TestChangeFindingStatusDerived(t *testing.T) {
 			t.Fatalf("an open finding follows a closed one: %+v", list)
 		}
 	}
-	if list[0].Title == nil || *list[0].Title != "fresh" {
-		t.Errorf("newest open finding is not first: %q", *list[0].Title)
+	if list[0].ID != "fresh" {
+		t.Errorf("newest open finding is not first: %q", list[0].ID)
 	}
 	// The list counts use the same derivation.
 	cs, err := f.s.ListChangesByPR(t.Context(), repoPR(f.ref.Repo, f.ref.PR), 10)
@@ -748,5 +755,38 @@ func TestChangeListCarriesPRState(t *testing.T) {
 	}
 	if c.FreshnessMin == nil || !c.FreshnessMin.Equal(f.at(2)) {
 		t.Fatalf("freshness_min=%v, want the oldest section (%v)", c.FreshnessMin, f.at(2))
+	}
+}
+
+// A finding in mergewake's prstatus.Finding shape survives the store: every
+// field comes back under the same name, the body is optional, and the thread
+// and the finding's own author_replied both set the flag a reader sees.
+func TestChangeFindingRoundTrip(t *testing.T) {
+	f := newStateFixture(t, "roundtrip")
+	f.apply(t, ChangeBatch{State: ptr(validState(f.at(1)))})
+	in := ChangeFindingIn{ID: "PRRT_kwDOabc", Location: "internal/store/changes.go:120", Severity: "high", Blocking: true,
+		Summary: "unchecked error on commit", URL: "https://github.com/example/app/pull/1#discussion_r1", AuthorReplied: true}
+	f.apply(t, ChangeBatch{Findings: &ChangeFindingsWrite{ReviewedHead: testSHA1, Round: 2, Pass: 1, Lens: "correctness", ObservedAt: f.at(2),
+		Findings: []ChangeFindingIn{in, {ID: "per-pass-2"}}}})
+	got := *f.view(t, ChangeReadOptions{}).Findings
+	if len(got) != 2 {
+		t.Fatalf("findings=%d", len(got))
+	}
+	x := got[0]
+	if x.ID != in.ID || deref(x.Location) != in.Location || deref(x.Severity) != in.Severity || !x.Blocking || deref(x.Summary) != in.Summary ||
+		deref(x.URL) != in.URL || !x.AuthorReplied || x.Body != nil || x.Redacted || x.Status != "open" || x.Round != 2 || x.Pass != 1 || x.Lens != "correctness" || x.ReviewedHead != testSHA1 {
+		t.Fatalf("round trip: %+v", x)
+	}
+	// The optional fields stay unset, and a blocking/author_replied false is not blocking.
+	y := got[1]
+	if y.ID != "per-pass-2" || y.Location != nil || y.Severity != nil || y.Summary != nil || y.URL != nil || y.Blocking || y.AuthorReplied || y.ThreadID != nil {
+		t.Fatalf("bare finding: %+v", y)
+	}
+	// Once its thread arrives resolved, the finding is resolved; the thread's replied flag counts as the author's.
+	f.apply(t, ChangeBatch{Threads: &ChangeThreadsWrite{ObservedAt: f.at(3), Source: "poll", Threads: []ChangeThreadIn{{ThreadID: "PRRT_kwDOabc", AuthorKind: "mergewake", Resolved: true, Replied: true}, {ThreadID: "per-pass-2", AuthorKind: "mergewake", Replied: true}}}})
+	got = *f.view(t, ChangeReadOptions{}).Findings
+	byID := map[string]ChangeFinding{got[0].ID: got[0], got[1].ID: got[1]}
+	if byID["PRRT_kwDOabc"].Status != "resolved" || byID["per-pass-2"].Status != "open" || !byID["per-pass-2"].AuthorReplied || deref(byID["per-pass-2"].ThreadID) != "per-pass-2" {
+		t.Fatalf("after thread: %+v", byID)
 	}
 }

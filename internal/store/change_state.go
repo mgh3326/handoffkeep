@@ -46,7 +46,7 @@ const (
 	MaxThreadExcerpt  = 2000    // characters
 	MaxFindingBody    = 8 << 10 // bytes
 	maxChangeTitle    = 512     // bytes
-	maxFindingTitle   = 512     // bytes
+	MaxFindingSummary = 200     // characters
 	maxChangeChecks   = 500     // per write
 	maxChangeThreads  = 300     // per write
 	maxChangeFinds    = 200     // per write
@@ -139,16 +139,23 @@ type ChangeThreadsWrite struct {
 	Complete   bool             `json:"complete,omitempty"`
 }
 
-// ChangeFindingIn is one finding of a review pass. Its ordinal is its
-// position in the write.
+// ChangeFindingIn is one finding of a review pass, in the shape of mergewake's
+// prstatus.Finding: ID is the thread id once the finding is posted, else
+// mergewake's per-pass id; Location is "path:line"; Summary is one line of at
+// most 200 characters. ThreadID names the thread explicitly when ID is not
+// one (a thread whose node id equals ID is linked without it). Body is
+// optional and, if sent, capped at 8 KB. Its ordinal is its position in the
+// write.
 type ChangeFindingIn struct {
-	ExtID    string `json:"ext_id,omitempty"`
-	Severity string `json:"severity"`
-	Path     string `json:"path,omitempty"`
-	Line     *int   `json:"line,omitempty"`
-	Title    string `json:"title,omitempty"`
-	Body     string `json:"body,omitempty"`
-	ThreadID string `json:"thread_id,omitempty"`
+	ID            string `json:"id"`
+	Location      string `json:"location,omitempty"`
+	Severity      string `json:"severity,omitempty"`
+	Blocking      bool   `json:"blocking,omitempty"`
+	Summary       string `json:"summary,omitempty"`
+	URL           string `json:"url,omitempty"`
+	AuthorReplied bool   `json:"author_replied,omitempty"`
+	ThreadID      string `json:"thread_id,omitempty"`
+	Body          string `json:"body,omitempty"`
 }
 
 // ChangeFindingsWrite is one review pass's findings: append-only, keyed by
@@ -388,21 +395,21 @@ func checkChangeFindings(w ChangeFindingsWrite, now time.Time) error {
 		return err
 	}
 	for _, f := range w.Findings {
-		if !severities[f.Severity] {
-			return invalidChangeWrite("a finding's severity must be critical, high, medium or low")
+		if f.ID == "" {
+			return invalidChangeWrite("a finding needs an id")
 		}
-		if f.Line != nil && (*f.Line < 0 || *f.Line > math.MaxInt32) {
-			return invalidChangeWrite("a finding's line is a non-negative number")
+		if f.Severity != "" && !severities[f.Severity] {
+			return invalidChangeWrite("a finding's severity must be critical, high, medium or low")
 		}
 		for _, x := range []struct {
 			name, v string
 			max     int
-		}{{"ext_id", f.ExtID, 128}, {"finding path", f.Path, 1024}, {"finding thread_id", f.ThreadID, 128}} {
+		}{{"finding id", f.ID, 128}, {"finding location", f.Location, 1100}, {"finding url", f.URL, 1024}, {"finding thread_id", f.ThreadID, 128}} {
 			if err := checkField(x.name, x.v, x.max); err != nil {
 				return err
 			}
 		}
-		if err := checkFreeText("finding title", f.Title); err != nil {
+		if err := checkFreeText("finding summary", f.Summary); err != nil {
 			return err
 		}
 		if err := checkFreeText("finding body", f.Body); err != nil {
@@ -736,13 +743,13 @@ SELECT id FROM ins UNION ALL SELECT id FROM reviews WHERE change_id=$1 AND revie
 	b := &pgx.Batch{}
 	redactedAny := false
 	for i, f := range w.Findings {
-		title, tr := screened(f.Title, func(s string) string { return capBytes(s, maxFindingTitle) })
+		summary, sr := screened(f.Summary, func(s string) string { return capRunes(s, MaxFindingSummary) })
 		body, br := screened(f.Body, func(s string) string { return capBytes(s, MaxFindingBody) })
-		redacted := tr || br
+		redacted := sr || br
 		redactedAny = redactedAny || redacted
-		b.Queue(`INSERT INTO change_findings(change_id,reviewed_head,round,pass,lens,ordinal,review_id,ext_id,severity,path,line,title,body,thread_id,redacted,observed_at,source)
-VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) ON CONFLICT DO NOTHING`,
-			c.id, w.ReviewedHead, w.Round, w.Pass, w.Lens, i, reviewID, nullStr(f.ExtID), f.Severity, nullStr(f.Path), f.Line, title, body, nullStr(f.ThreadID), redacted, w.ObservedAt, source)
+		b.Queue(`INSERT INTO change_findings(change_id,reviewed_head,round,pass,lens,ordinal,review_id,ext_id,location,severity,blocking,summary,url,author_replied,thread_id,body,redacted,observed_at,source)
+VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19) ON CONFLICT DO NOTHING`,
+			c.id, w.ReviewedHead, w.Round, w.Pass, w.Lens, i, reviewID, f.ID, nullStr(f.Location), nullStr(f.Severity), f.Blocking, summary, nullStr(f.URL), f.AuthorReplied, nullStr(f.ThreadID), body, redacted, w.ObservedAt, source)
 	}
 	if err := execBatch(ctx, tx, b); err != nil {
 		return ChangeSectionResult{}, err
