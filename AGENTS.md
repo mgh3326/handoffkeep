@@ -22,11 +22,12 @@ and leave the old code as is unless the change already touches it.
 `scripts/check web` for one half). Run it before pushing.
 
 CI has two tiers (`.github/workflows/ci.yml`). A pull request runs the light
-jobs only: no `-race`, no PostgreSQL, hosted runners. The `post-*` jobs (race
+jobs only: no `-race`, hosted runners, PostgreSQL only for the store (below). The `post-*` jobs (race
 with PostgreSQL, mutants, release dry run, macOS) run on main pushes and
 `ci-any-ref` dispatches, after merge; a red main is bisected and reverted.
 `ci-any-ref` accepts `packages` only with `suite=test`; those runs post `ci-ok-test-packages`.
 `scripts/check go` runs the heavy half locally.
+The PR tier runs PostgreSQL only in `pr: store + postgres` (`./internal/store/...`, when a PR changes `internal/store/` or `internal/testdb/`), because store breaks merged twice and left main red (hk 3193).
 
 DB-backed tests need Postgres 17 and `HANDOFFKEEP_TEST_DB_URL`, e.g.
 
