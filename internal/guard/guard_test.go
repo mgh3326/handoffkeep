@@ -47,6 +47,16 @@ func TestPrivateKeyNeedsKeyMaterial(t *testing.T) {
 	if got := Match(escaped); got != "private_key" {
 		t.Fatalf("JSON-escaped PEM matched %q, want private_key", got)
 	}
+	// JSON-escaped forms with header lines: legacy encrypted RSA and PGP armor (lead verifier).
+	for name, in := range map[string]string{
+		"escaped encrypted RSA": pem("RSA ") + `\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,` + strings.Repeat("0", 32) + `\n\n` + body + `\n-----END` + ` RSA PRIVATE KEY-----`,
+		"escaped PGP armor":     "-----" + "BEGIN PGP PRIVATE" + ` KEY BLOCK-----\nVersion: GnuPG v2\nComment: test\n\n` + body + `\n=AbCd\n-----END PGP PRIVATE` + " KEY BLOCK-----",
+		"escaped CRLF RSA":      pem("RSA ") + `\r\nProc-Type: 4,ENCRYPTED\r\nDEK-Info: AES-128-CBC,` + strings.Repeat("0", 32) + `\r\n\r\n` + body,
+	} {
+		if got := Match(in); got != "private_key" {
+			t.Fatalf("%s matched %q, want private_key", name, got)
+		}
+	}
 	// Padding and line breaks alone do not make key material (minor review note).
 	if got := Match(pem("") + "\n" + strings.Repeat("=\n", 40)); got != "" {
 		t.Fatalf("padding-only body matched %q", got)
