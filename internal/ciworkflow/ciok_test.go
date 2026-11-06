@@ -26,7 +26,7 @@ type ciOkCase struct {
 func greenEnv(suite string, overrides ...string) map[string]string {
 	env := map[string]string{
 		"EVENT": "workflow_dispatch", "SUITE": suite,
-		"TEST": "success", "VITEST": "skipped", "BUILD": "skipped",
+		"TEST": "success", "PR_STORE_DB": "success", "VITEST": "skipped", "BUILD": "skipped",
 		"AUTO_TAG": "success", "POST_LINUX": "success", "POST_MACOS": "success",
 	}
 	if suite == "all" {
@@ -45,9 +45,14 @@ var ciOkCases = []ciOkCase{
 	{name: "suite-test-vitest-ran-fails", env: greenEnv("test", "VITEST", "success"), exit: 1, output: "vitest ran outside its suite"},
 	{name: "failure-with-abandoned-fails", env: greenEnv("test", "TEST", "failure", "POST_MACOS", "abandoned"), exit: 1, output: "test did not succeed: failure"},
 	{name: "suite-all-green-passes", env: greenEnv("all")},
+	// pr-store-db always reports: success on every event that runs the test suite.
+	{name: "pull-request-green-passes", env: greenEnv("all", "EVENT", "pull_request", "POST_LINUX", "skipped", "POST_MACOS", "skipped")},
+	{name: "pr-store-db-failure-fails", env: greenEnv("test", "PR_STORE_DB", "failure"), exit: 1, output: "pr-store-db did not succeed: failure"},
+	{name: "pr-store-db-skipped-in-test-suite-fails", env: greenEnv("test", "PR_STORE_DB", "skipped"), exit: 1, output: "pr-store-db did not succeed: skipped"},
+	{name: "pr-store-db-ran-outside-suite-fails", env: greenEnv("vitest", "VITEST", "success", "TEST", "skipped", "PR_STORE_DB", "success", "POST_LINUX", "skipped", "POST_MACOS", "skipped"), exit: 1, output: "pr-store-db ran outside its suite or tier: success"},
 }
 
-var ciOkNeeds = []string{"TEST", "VITEST", "BUILD", "AUTO_TAG", "POST_LINUX", "POST_MACOS"}
+var ciOkNeeds = []string{"TEST", "PR_STORE_DB", "VITEST", "BUILD", "AUTO_TAG", "POST_LINUX", "POST_MACOS"}
 
 // ciOkJob returns ci-ok's if: expression (without ${{ }}) and its script.
 func ciOkJob(ci []byte) (string, string, error) {
