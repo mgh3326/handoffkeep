@@ -105,6 +105,16 @@ package store
 //     row (insert, or FOR UPDATE on a replay), and takes no task row. No
 //     other writer locks a verifications row, and the event writers that
 //     lock changes rows never wait on one, so it cannot close a cycle.
+//   - ApplyChangeBatch (change_state.go, mergewake's PR-state writes) locks one
+//     changes row FOR UPDATE (after an insert that never updates an existing
+//     row) and then writes only that change's change_checks, change_threads,
+//     change_findings and reviews rows; it takes no task row and no level-2
+//     lock. Those child rows are written only by a holder of their changes
+//     row (recordChangeTx's insertReviewTx runs under upsertChangeTx's row
+//     lock), so two writers of one PR queue on the parent row and no writer
+//     waits on a child row while holding something another needs. The
+//     sections of a batch run in the fixed order state, checks, threads,
+//     findings, gate. GetChangeState reads one snapshot and locks nothing.
 //   - Other advisory locks (disposition origin, task comment insert, labels,
 //     Linear board ownership, quota presence) are each the first lock of
 //     their transaction, and no transaction requests one while it holds a
