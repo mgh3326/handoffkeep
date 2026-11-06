@@ -162,8 +162,37 @@ type DecisionRequest struct {
 	RequestedAt time.Time `json:"requested_at"`
 	// HumanOnly marks a request the assistant path must not answer — the
 	// producer's structural "a human decides this" (merge, deploy, spend).
-	HumanOnly  bool                `json:"human_only,omitempty"`
-	Resolution *DecisionResolution `json:"resolution,omitempty"`
+	HumanOnly bool `json:"human_only,omitempty"`
+	// AnswerPolicy is the producer's answer policy (design v1.1 §10.3): empty
+	// or operator_relay_allowed lets a relayed answer close the request,
+	// operator_direct makes it wait for a verified path. Read it through
+	// EffectivePolicy, which also folds in human_only and dispositions.
+	AnswerPolicy string              `json:"answer_policy,omitempty"`
+	Resolution   *DecisionResolution `json:"resolution,omitempty"`
+}
+
+// Answer policies (DecisionRequest.AnswerPolicy).
+const (
+	DecisionPolicyOperatorDirect = "operator_direct"
+	DecisionPolicyRelayAllowed   = "operator_relay_allowed"
+)
+
+// normalAnswerPolicy reads an empty policy as operator_relay_allowed.
+func normalAnswerPolicy(policy string) string {
+	if policy == "" {
+		return DecisionPolicyRelayAllowed
+	}
+	return policy
+}
+
+// EffectivePolicy is the policy ResolveDecision enforces: operator_direct
+// when the request is human_only, belongs to a disposition item, or names
+// operator_direct itself; operator_relay_allowed otherwise.
+func (r DecisionRequest) EffectivePolicy(disposition bool) string {
+	if r.HumanOnly || disposition || r.AnswerPolicy == DecisionPolicyOperatorDirect {
+		return DecisionPolicyOperatorDirect
+	}
+	return DecisionPolicyRelayAllowed
 }
 
 // RootID is the logical request this revision belongs to: the Root field, or
@@ -222,6 +251,9 @@ type DecisionRequestInput struct {
 	// own paths; the assistant resolve path refuses it. Producers asking
 	// about merge, deploy or spend mark this.
 	HumanOnly bool `json:"human_only,omitempty"`
+	// AnswerPolicy is operator_direct or operator_relay_allowed; empty means
+	// operator_relay_allowed. human_only allows only operator_direct.
+	AnswerPolicy string `json:"answer_policy,omitempty"`
 }
 
 type DecisionResolveInput struct {
@@ -478,6 +510,14 @@ func CheckDecisionRequestInput(in DecisionRequestInput) error {
 	if in.Supersedes != "" && !strings.HasPrefix(in.Supersedes, "dr-") {
 		return invalidDecisionRequest("supersedes must be a request id (dr-<task>-<revision>)")
 	}
+	switch in.AnswerPolicy {
+	case "", DecisionPolicyOperatorDirect, DecisionPolicyRelayAllowed:
+	default:
+		return invalidDecisionRequest("answer_policy must be operator_direct or operator_relay_allowed")
+	}
+	if in.HumanOnly && in.AnswerPolicy == DecisionPolicyRelayAllowed {
+		return invalidDecisionRequest("a human_only request takes answer_policy operator_direct")
+	}
 	return nil
 }
 
@@ -553,7 +593,8 @@ func sameDecisionRequest(current DecisionRequest, currentOptions *DecisionOption
 	return current.Question == in.Question && sameDecisionOptions(currentOptions, &in.Options) && current.Reason == in.Reason &&
 		current.DefaultAction == in.DefaultAction && current.DefaultOption == in.DefaultOption &&
 		current.DefaultTrigger == in.DefaultTrigger && sameDue(current.DueAt, in.DueAt) && current.Doc == in.Doc &&
-		slices.Equal(current.Refs, in.Refs) && current.HumanOnly == in.HumanOnly
+		slices.Equal(current.Refs, in.Refs) && current.HumanOnly == in.HumanOnly &&
+		normalAnswerPolicy(current.AnswerPolicy) == normalAnswerPolicy(in.AnswerPolicy)
 }
 
 func rejectDecisionRequestSecrets(in DecisionRequestInput) error {
@@ -660,6 +701,7 @@ func (s *Store) RecordDecisionRequest(ctx context.Context, taskID int64, by stri
 		Doc:            in.Doc,
 		Refs:           in.Refs,
 		HumanOnly:      in.HumanOnly,
+		AnswerPolicy:   in.AnswerPolicy,
 		RequestedBy:    by,
 		RequestedAt:    now,
 	}
