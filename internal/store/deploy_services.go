@@ -31,17 +31,22 @@ func checkDeployService(x DeployService) error {
 	if len(x.RecordPrefixes) == 0 {
 		return fmt.Errorf("%w: at least one record prefix is required", ErrInvalidDeployService)
 	}
-	seen := map[string]bool{}
+	var seen []string
 	for _, p := range x.RecordPrefixes {
 		segment := strings.TrimSuffix(strings.TrimPrefix(p, "deploy/"), "/")
 		valid := validText(p, maxDocumentPrefixBytes) && strings.HasPrefix(p, "deploy/") && strings.HasSuffix(p, "/")
 		for _, part := range strings.Split(segment, "/") {
 			valid = valid && validName(part)
 		}
-		if !valid || seen[p] {
+		if !valid {
 			return fmt.Errorf("%w: record prefixes must be unique paths under deploy/ ending in /", ErrInvalidDeployService)
 		}
-		seen[p] = true
+		for _, previous := range seen {
+			if strings.HasPrefix(p, previous) || strings.HasPrefix(previous, p) {
+				return fmt.Errorf("%w: record prefixes must not overlap", ErrInvalidDeployService)
+			}
+		}
+		seen = append(seen, p)
 	}
 	return nil
 }

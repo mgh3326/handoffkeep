@@ -17,7 +17,8 @@ func TestDeployServiceValidation(t *testing.T) {
 		"too long":  {DeployService{Name: valid.Name, Repo: valid.Repo, RecordPrefixes: []string{"deploy/" + strings.Repeat(strings.Repeat("a", 128)+"/", 4)}}, "record prefixes"},
 		"missing":   {DeployService{Name: valid.Name, Repo: valid.Repo}, "at least one"},
 		"prefix":    {DeployService{Name: valid.Name, Repo: valid.Repo, RecordPrefixes: []string{"deploy/app"}}, "record prefixes"},
-		"duplicate": {DeployService{Name: valid.Name, Repo: valid.Repo, RecordPrefixes: []string{"deploy/app/", "deploy/app/"}}, "record prefixes"},
+		"nested":    {DeployService{Name: valid.Name, Repo: valid.Repo, RecordPrefixes: []string{"deploy/app/nested/", "deploy/app/"}}, "overlap"},
+		"duplicate": {DeployService{Name: valid.Name, Repo: valid.Repo, RecordPrefixes: []string{"deploy/app/", "deploy/app/"}}, "overlap"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err := checkDeployService(tc.x); err == nil || !strings.Contains(err.Error(), tc.reason) {
