@@ -123,7 +123,7 @@ function RecentAttempts({ svc, now }: { svc: DeployServiceView; now: string }) {
 
 function MergedList({ svc, now }: { svc: DeployServiceView; now: string }) {
   if (svc.merged_boundary === "unrecorded") {
-    return <p className="dp-note">배포 시각(deployed_at) 미기록 — 마지막 배포 이후 머지 목록의 기준이 없습니다.</p>;
+    return <p className="dp-note">배포 시각이 기록되지 않아 마지막 배포 이후 머지 목록을 계산할 수 없습니다.</p>;
   }
   if (svc.merged_boundary === "no_current") {
     return (

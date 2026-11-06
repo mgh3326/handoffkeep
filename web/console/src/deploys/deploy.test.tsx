@@ -115,7 +115,7 @@ describe("DeployPanel", () => {
 
   it("a null deployed_at shows the boundary note and no list (mutant: no fabricated boundary)", async () => {
     render(<DeploysPage fetchStatus={fetcher(fixture())} pollMs={600_000} />);
-    await waitFor(() => expect(screen.getByText(/배포 시각\(deployed_at\) 미기록/)).toBeTruthy());
+    await waitFor(() => expect(screen.getByText(/배포 시각이 기록되지 않아 마지막 배포 이후 머지 목록을 계산할 수 없습니다/)).toBeTruthy());
   });
 
   it("shows a failed latest attempt next to the last success, with the serving caveat", async () => {
