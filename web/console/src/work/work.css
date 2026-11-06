@@ -1,0 +1,11 @@
+.work-layout { display: flex; gap: var(--hk-space-4); min-width: 0; }
+.work-list, .work-pane { min-width: 0; flex: 1; }
+.work-pane { border-left: 1px solid var(--hk-border-subtle); padding-left: var(--hk-space-4); overflow-wrap: anywhere; }
+.work-tabs, .work-filters { display: flex; flex-wrap: wrap; gap: var(--hk-space-2); margin: var(--hk-space-4) 0; }
+.work-filters label { display: flex; flex-direction: column; min-width: 0; }
+.work-filters input, .work-filters select { max-width: 100%; }
+.work-rows a { display: flex; justify-content: space-between; gap: var(--hk-space-3); padding: var(--hk-space-3); border-bottom: 1px solid var(--hk-border-subtle); color: var(--hk-text-primary); text-decoration: none; overflow-wrap: anywhere; }
+.work-rows a[aria-current] { background: var(--hk-surface-selected); }
+.work-section { border-top: 1px solid var(--hk-border-subtle); padding: var(--hk-space-3) 0; overflow-wrap: anywhere; }
+.work-section h2 { font-size: var(--hk-type-body); }
+@media (max-width: 767px) { .work-rows a { flex-direction: column; } }

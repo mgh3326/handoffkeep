@@ -5,7 +5,9 @@ import { Component, lazy, Suspense, type ReactNode } from "react";
 import { DeploysPage } from "../deploys/DeploysPage";
 import type { NavKey } from "./Shell";
 import { HomeAttention as Home } from "../home/HomeAttention";
-import { Moved, TaskPlaceholder, Work } from "./Placeholders";
+import { Moved } from "./Placeholders";
+import { WorkPage } from "../work/WorkPage";
+import { TaskRecord } from "../work/TaskRecord";
 
 // The document viewer pulls in the markdown renderer, so it is a lazy chunk:
 // Home and Work never load it.
@@ -49,7 +51,7 @@ export function matchRoute(pathname: string): Route {
 
 /** The navigation row a route belongs to; null when it belongs to none. */
 export function navKey(route: Route): NavKey | null {
-  return route.view === "home" || route.view === "work" || route.view === "deploys" ? route.view : null;
+  return route.view === "task" ? "work" : route.view === "home" || route.view === "work" || route.view === "deploys" ? route.view : null;
 }
 
 class LoadBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
@@ -67,11 +69,11 @@ export function RouteView({ route }: { route: Route }) {
     case "home":
       return <Home />;
     case "work":
-      return <Work />;
+      return <WorkPage />;
     case "deploys":
       return <DeploysPage />;
     case "task":
-      return <TaskPlaceholder id={route.id} />;
+      return <TaskRecord id={Number(route.id)} />;
     case "doc":
       return (
         <LoadBoundary>
