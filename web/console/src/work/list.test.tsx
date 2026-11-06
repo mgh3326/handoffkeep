@@ -254,6 +254,12 @@ it("toggles one translated title and marks a stale one", async () => {
   render(<WorkPage />);
   expect(await screen.findByText("작업 번역")).toBeTruthy();
   expect(screen.getByText("갱신 필요")).toBeTruthy();
-  fireEvent.click(screen.getByRole("button", { name: "원문 보기" }));
+  const indicator = screen.getByRole("button", { name: "원문 보기" });
+  expect(indicator.getAttribute("aria-expanded")).toBe("false");
+  fireEvent.click(indicator);
+  expect(indicator.getAttribute("aria-expanded")).toBe("true");
   expect(screen.getByText("Task one")).toBeTruthy();
+  expect(screen.getByText("작업 번역")).toBeTruthy();
+  fireEvent.click(indicator);
+  expect(screen.queryByText("Task one")).toBeNull();
 });
