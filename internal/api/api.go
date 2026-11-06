@@ -1334,6 +1334,8 @@ func (s Server) taskDecisionRequest(w http.ResponseWriter, r *http.Request) {
 //
 //	answered              200 (a re-send also carries duplicate:true)
 //	pending_confirmation  202, the request stays open
+//	denied                200, the operator denied a pending attempt; the
+//	                      request stays open
 //	stale_revision        409 decision_request_stale
 //	superseded            409 decision_request_stale, or decision_request_resolved
 //	                      for a withdrawn request
@@ -1359,10 +1361,21 @@ func decisionRequestResult(out store.ResolveDecisionOutcome) store.DecisionReque
 	return store.DecisionRequestResult{Task: out.Task, Request: out.Request, Duplicate: out.Duplicate, Result: out.Result, ResolutionID: out.ResolutionID, AttemptID: out.AttemptID}
 }
 
+// taskDecisionResolveInput is the bearer resolve body: the shared resolve
+// input plus the session channel's claim. Channel is "" or "cli" (today's
+// path) or "session" (an operator session recording the operator's words).
+type taskDecisionResolveInput struct {
+	store.DecisionResolveInput
+	Channel       string `json:"channel,omitempty"`
+	Provenance    string `json:"provenance,omitempty"`
+	OperatorQuote string `json:"operator_quote,omitempty"`
+	DecisionRef   string `json:"decision_ref,omitempty"`
+}
+
 // taskDecisionResolve closes the current request (answered, default_applied
 // with a receipt, or withdrawn). It never changes the task state. Only the
-// bearer client "operator" is a verified operator path; every other client
-// is a relay (R1).
+// bearer client "operator" on the cli channel is a verified operator path;
+// every other client, and the session channel, is a relay (R1).
 func (s Server) taskDecisionResolve(w http.ResponseWriter, r *http.Request) {
 	client, ok := s.auth(w, r)
 	if !ok {
@@ -1374,16 +1387,27 @@ func (s Server) taskDecisionResolve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer r.Body.Close()
-	var input store.DecisionResolveInput
+	var input taskDecisionResolveInput
 	if err := decode(r, &input, store.MaxBytes); err != nil {
 		appErr(w, r, err)
 		return
 	}
-	out, err := s.Service.Store.ResolveDecision(r.Context(), store.ResolveDecisionInput{
+	in := store.ResolveDecisionInput{
 		TaskID: id, RequestID: input.RequestID, Kind: input.Kind, Option: input.Option, Text: input.Text,
 		Receipt: input.Receipt, Responder: input.Responder, EventKey: input.EventKey,
-		Channel: store.DecisionChannelCLI, Actor: client, Verified: client == operatorClientID,
-	})
+		Provenance: input.Provenance, OperatorQuote: input.OperatorQuote, DecisionRef: input.DecisionRef,
+		Actor: client,
+	}
+	switch input.Channel {
+	case "", store.DecisionChannelCLI:
+		in.Channel, in.Verified = store.DecisionChannelCLI, client == operatorClientID
+	case store.DecisionChannelSession:
+		in.Channel = store.DecisionChannelSession
+	default:
+		writeError(w, http.StatusBadRequest, "invalid_context")
+		return
+	}
+	out, err := s.Service.Store.ResolveDecision(r.Context(), in)
 	if err != nil {
 		appErr(w, r, err)
 		return

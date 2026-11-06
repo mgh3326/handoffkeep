@@ -6,7 +6,7 @@
 
 import { describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
-import { DeployPanel } from "./DeployPanel";
+import { DeploysPage } from "./DeploysPage";
 import { deployElapsed, deployPRLabel, deployStamp, shortDeployedRef, type DeployPendingResponse } from "./deploy";
 
 const SHA = "92ee9e2d0ddc47593677adcc9e83040dd9873463";
@@ -33,6 +33,7 @@ function fixture(over: Partial<DeployPendingResponse> = {}): DeployPendingRespon
           source: "backfill",
         },
         merged_boundary: "deployed_at",
+        recent: [],
         merged_since: [
           {
             task_id: 447,
@@ -58,6 +59,7 @@ function fixture(over: Partial<DeployPendingResponse> = {}): DeployPendingRespon
           source: "backfill",
         },
         merged_boundary: "unrecorded",
+        recent: [],
         merged_since: [],
       },
       {
@@ -67,6 +69,7 @@ function fixture(over: Partial<DeployPendingResponse> = {}): DeployPendingRespon
         record_count: 0,
         current: null,
         merged_boundary: "no_current",
+        recent: [],
         merged_since: [],
       },
     ],
@@ -80,15 +83,15 @@ function fetcher(data: DeployPendingResponse) {
 
 describe("DeployPanel", () => {
   it("renders the current version line with short ref, deployed_at and result", async () => {
-    render(<DeployPanel fetchStatus={fetcher(fixture())} pollMs={600_000} />);
+    render(<DeploysPage fetchStatus={fetcher(fixture())} pollMs={600_000} />);
     await waitFor(() => expect(screen.getByText("92ee9e2")).toBeTruthy());
     expect(screen.getAllByText("현재 판").length).toBeGreaterThan(0);
     expect(screen.getAllByText("success").length).toBeGreaterThan(0);
-    expect(screen.getByText(/시간 전|일 전|분 전/)).toBeTruthy();
+    expect(screen.getByText("22/09, 22:40")).toBeTruthy();
   });
 
   it("renders a record-less service as 기록 없음 — never as 최신 (mutant: no fake current)", async () => {
-    render(<DeployPanel fetchStatus={fetcher(fixture())} pollMs={600_000} />);
+    render(<DeploysPage fetchStatus={fetcher(fixture())} pollMs={600_000} />);
     await waitFor(() => expect(screen.getByText("기록 없음")).toBeTruthy());
     const pw = screen.getByLabelText("panewire-hub 배포");
     expect(pw.textContent).not.toContain("최신");
@@ -96,13 +99,13 @@ describe("DeployPanel", () => {
   });
 
   it("keeps the honest heading — '마지막 배포 이후 머지됨', never '미배포' (mutant: heading)", async () => {
-    render(<DeployPanel fetchStatus={fetcher(fixture())} pollMs={600_000} />);
+    render(<DeploysPage fetchStatus={fetcher(fixture())} pollMs={600_000} />);
     await waitFor(() => expect(screen.getByText(/마지막 배포 이후 머지됨/)).toBeTruthy());
     expect(document.body.textContent).not.toContain("미배포");
   });
 
   it("renders the merged-since list with task and PR links", async () => {
-    render(<DeployPanel fetchStatus={fetcher(fixture())} pollMs={600_000} />);
+    render(<DeploysPage fetchStatus={fetcher(fixture())} pollMs={600_000} />);
     await waitFor(() => expect(screen.getByText("console decision fix")).toBeTruthy());
     const task = screen.getByText("#447") as HTMLAnchorElement;
     expect(task.href).toContain("/ui/tasks/447");
@@ -111,7 +114,7 @@ describe("DeployPanel", () => {
   });
 
   it("a null deployed_at shows the boundary note and no list (mutant: no fabricated boundary)", async () => {
-    render(<DeployPanel fetchStatus={fetcher(fixture())} pollMs={600_000} />);
+    render(<DeploysPage fetchStatus={fetcher(fixture())} pollMs={600_000} />);
     await waitFor(() => expect(screen.getByText(/배포 시각\(deployed_at\) 미기록/)).toBeTruthy());
   });
 
@@ -128,8 +131,9 @@ describe("DeployPanel", () => {
       source: "installer",
       serving_maybe_changed: true,
     };
-    render(<DeployPanel fetchStatus={fetcher(data)} pollMs={600_000} />);
-    await waitFor(() => expect(screen.getByText("최근 시도")).toBeTruthy());
+    hk.recent = [hk.latest];
+    render(<DeploysPage fetchStatus={fetcher(data)} pollMs={600_000} />);
+    await waitFor(() => expect(screen.getAllByText("최근 시도").length).toBeGreaterThan(0));
     expect(screen.getByText("failed")).toBeTruthy();
     expect(screen.getByText("step 7")).toBeTruthy();
     expect(screen.getByText(/서빙 판이 바뀌었을 수 있음/)).toBeTruthy();
@@ -148,7 +152,8 @@ describe("DeployPanel", () => {
       recorded_at: "2026-09-23T03:50:00Z",
       source: "installer",
     };
-    render(<DeployPanel fetchStatus={fetcher(data)} pollMs={600_000} />);
+    data.services[0].recent = [data.services[0].latest];
+    render(<DeploysPage fetchStatus={fetcher(data)} pollMs={600_000} />);
     await waitFor(() => expect(screen.getByText("rolled_back")).toBeTruthy());
   });
 
@@ -165,12 +170,12 @@ describe("DeployPanel", () => {
       recorded_at: "2026-09-23T03:50:00Z",
       source: "installer",
     };
-    render(<DeployPanel fetchStatus={fetcher(data)} pollMs={600_000} />);
+    render(<DeploysPage fetchStatus={fetcher(data)} pollMs={600_000} />);
     await waitFor(() => expect(screen.getByText("성공 배포 기록 없음")).toBeTruthy());
   });
 
   it("a first-load failure is an explicit error, not an empty panel", async () => {
-    render(<DeployPanel fetchStatus={vi.fn(() => Promise.reject(new Error("boom")))} pollMs={600_000} />);
+    render(<DeploysPage fetchStatus={vi.fn(() => Promise.reject(new Error("boom")))} pollMs={600_000} />);
     await waitFor(() => expect(screen.getByText(/불러오지 못했습니다/)).toBeTruthy());
     expect(document.querySelector("[data-deploy-state]")?.getAttribute("data-deploy-state")).toBe("error");
   });
@@ -180,7 +185,7 @@ describe("DeployPanel", () => {
     // reach the row renderer — the panel shows the failure state.
     const malformed = { generated_at: "2026-09-23T04:00:00Z", pr_source: "refs.pr", services: [null] };
     render(
-      <DeployPanel
+      <DeploysPage
         fetchStatus={vi.fn(() => Promise.resolve(malformed as unknown as DeployPendingResponse))}
         pollMs={600_000}
       />,
@@ -193,7 +198,7 @@ describe("DeployPanel", () => {
     const data = fixture() as unknown as Record<string, unknown>;
     (data.services as unknown[])[0] = { service: "handoffkeep" };
     render(
-      <DeployPanel
+      <DeploysPage
         fetchStatus={vi.fn(() => Promise.resolve(data as unknown as DeployPendingResponse))}
         pollMs={600_000}
       />,
@@ -207,7 +212,7 @@ describe("DeployPanel", () => {
     const data = fixture();
     (data.services[0] as unknown as Record<string, unknown>).merged_since = [null];
     render(
-      <DeployPanel
+      <DeploysPage
         fetchStatus={vi.fn(() => Promise.resolve(data as unknown as DeployPendingResponse))}
         pollMs={600_000}
       />,
@@ -225,7 +230,7 @@ describe("DeployPanel", () => {
       result: "success",
     };
     render(
-      <DeployPanel
+      <DeploysPage
         fetchStatus={vi.fn(() => Promise.resolve(data as unknown as DeployPendingResponse))}
         pollMs={600_000}
       />,
@@ -241,7 +246,7 @@ describe("DeployPanel", () => {
       const data = fixture() as unknown as Record<string, unknown>;
       delete data[field];
       const { unmount } = render(
-        <DeployPanel
+        <DeploysPage
           fetchStatus={vi.fn(() => Promise.resolve(data as unknown as DeployPendingResponse))}
           pollMs={600_000}
         />,
@@ -255,7 +260,7 @@ describe("DeployPanel", () => {
     const data = fixture();
     (data.services[0].current as unknown as Record<string, unknown>).result = "unknown";
     render(
-      <DeployPanel
+      <DeploysPage
         fetchStatus={vi.fn(() => Promise.resolve(data as unknown as DeployPendingResponse))}
         pollMs={600_000}
       />,
@@ -268,7 +273,7 @@ describe("DeployPanel", () => {
     const data = fixture();
     (data.services[0] as unknown as Record<string, unknown>).merged_boundary = "guessed";
     render(
-      <DeployPanel
+      <DeploysPage
         fetchStatus={vi.fn(() => Promise.resolve(data as unknown as DeployPendingResponse))}
         pollMs={600_000}
       />,
@@ -292,7 +297,7 @@ describe("DeployPanel", () => {
       recorded_at: "2026-09-23T03:50:00Z",
       source: "installer",
     };
-    render(<DeployPanel fetchStatus={fetcher(data)} pollMs={600_000} />);
+    render(<DeploysPage fetchStatus={fetcher(data)} pollMs={600_000} />);
     await waitFor(() => expect(screen.getByText("현재 판(조회 범위 내)")).toBeTruthy());
     expect(screen.getByText("최근 시도(조회 범위 내)")).toBeTruthy();
     expect(screen.getByText(/현재 판·최근 시도·머지 목록 모두 조회 범위 안의 결과입니다/)).toBeTruthy();
@@ -307,7 +312,7 @@ describe("DeployPanel", () => {
       { key: "deploy/handoffkeep/20260923T1456Z", reasons: ["key", "deployed_at"] },
       { key: "deploy/handoffkeep/20260924T010000Z", reasons: ["schema"] },
     ];
-    render(<DeployPanel fetchStatus={fetcher(data)} pollMs={600_000} />);
+    render(<DeploysPage fetchStatus={fetcher(data)} pollMs={600_000} />);
     await waitFor(() => expect(screen.getByTestId("deploy-invalid-list")).toBeTruthy());
     const list = screen.getByTestId("deploy-invalid-list");
     expect(list.textContent).toContain("deploy/handoffkeep/20260923T1456Z");
@@ -321,14 +326,14 @@ describe("DeployPanel", () => {
     const data = fixture();
     data.services[0].invalid_count = 1;
     data.services[0].invalid = [{ key: "deploy/handoffkeep/20260924T030000Z", reasons: ["doc_url_missing"] }];
-    render(<DeployPanel fetchStatus={fetcher(data)} pollMs={600_000} />);
+    render(<DeploysPage fetchStatus={fetcher(data)} pollMs={600_000} />);
     await waitFor(() => expect(screen.getByText("doc_url_missing")).toBeTruthy());
   });
 
   it("count-only warning still renders when an older server sends no invalid list", async () => {
     const data = fixture();
     data.services[0].invalid_count = 3;
-    render(<DeployPanel fetchStatus={fetcher(data)} pollMs={600_000} />);
+    render(<DeploysPage fetchStatus={fetcher(data)} pollMs={600_000} />);
     await waitFor(() =>
       expect(screen.getByText("형식이 맞지 않는 기록 3건은 표시하지 않았습니다.")).toBeTruthy()
     );
@@ -340,7 +345,7 @@ describe("DeployPanel", () => {
     data.services[0].invalid_count = 1;
     data.services[0].invalid = [{ key: "deploy/handoffkeep/20260923T1456Z", reasons: [] }];
     render(
-      <DeployPanel
+      <DeploysPage
         fetchStatus={vi.fn(() => Promise.resolve(data as unknown as DeployPendingResponse))}
         pollMs={600_000}
       />,
@@ -356,7 +361,7 @@ describe("DeployPanel", () => {
     const pw = data.services[2];
     pw.record_count = 200;
     pw.docs_capped = true;
-    render(<DeployPanel fetchStatus={fetcher(data)} pollMs={600_000} />);
+    render(<DeploysPage fetchStatus={fetcher(data)} pollMs={600_000} />);
     await waitFor(() => expect(screen.getByText(/조회 범위 안에 성공 배포 기록이 없습니다/)).toBeTruthy());
     const section = screen.getByLabelText("panewire-hub 배포");
     expect(section.textContent).not.toContain("성공 배포 기록 없음");

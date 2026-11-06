@@ -15,7 +15,7 @@ func routePattern(path string) string {
 		"/ui/api/attention", "/ui/api/board/projects",
 		"/ui/api/search", "/ui/api/policy/active", "/ui/api/board/doc", "/ui/api/docs",
 		"/ui/api/docs/prefixes", "/ui/api/dashboard", "/ui/api/bench/catalog", "/ui/api/deploy-pending",
-		"/ui/api/decision-requests/resolve":
+		"/ui/api/decision-requests/resolve", "/ui/api/decision-requests/deny":
 		return path // only literal, exact matches can reach here
 	}
 	switch {
