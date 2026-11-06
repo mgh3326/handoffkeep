@@ -486,14 +486,22 @@ it("A8 a refused answer restores its inputs without an unconfirmed retry", async
   expect((await screen.findByRole("alert")).textContent).toContain(
     "invalid_request",
   );
+  const memo = screen.getByLabelText("메모") as HTMLTextAreaElement;
+  const wait = screen.getByRole("radio", { name: /Wait/ }) as HTMLButtonElement;
+  expect(memo.disabled).toBe(false);
+  expect(wait.disabled).toBe(false);
+  fireEvent.keyDown(window, { key: "1" });
+  expect(wait.getAttribute("aria-checked")).toBe("true");
+  fireEvent.change(memo, { target: { value: "corrected" } });
+  expect(screen.getByRole("alert").textContent).toContain("invalid_request");
   view.unmount();
   render(<DecisionPage id="42" />);
   await screen.findByRole("heading", { name: "Ship it?" });
   expect(screen.queryByText("결과 미확인")).toBeNull();
   expect(
-    screen.getByRole("radio", { name: /Ship/ }).getAttribute("aria-checked"),
+    screen.getByRole("radio", { name: /Wait/ }).getAttribute("aria-checked"),
   ).toBe("true");
   expect((screen.getByLabelText("메모") as HTMLTextAreaElement).value).toBe(
-    "keep this",
+    "corrected",
   );
 });
