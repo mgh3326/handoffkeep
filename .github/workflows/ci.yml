@@ -210,7 +210,7 @@ jobs:
         if: ${{ steps.decide.outputs.run == 'yes' }}
         env:
           HANDOFFKEEP_TEST_DB_URL: postgres://handoffkeep:handoffkeep@localhost:5432/handoffkeep?sslmode=disable
-        run: go test -timeout 10m -count=1 ./internal/store/...
+        run: go test -timeout 10m -count=1 ./internal/store/... -v
 
   post-linux:
     # T-POST only. Service containers need Docker on Linux: a self-hosted
