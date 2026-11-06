@@ -294,7 +294,7 @@ export function DecisionPage({ id }: { id: string }) {
       </header>
       <h2>{req?.question ?? detail.record.question}</h2>
       {detail.task && <p>태스크 상태: {detail.task.state}</p>}
-      {req?.resolution && (
+      {state === "answered" && req?.resolution && (
         <p>
           답변: {req.resolution.option} {req.resolution.text}
         </p>

@@ -67,6 +67,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   document.querySelector('meta[name="hk-csrf"]')?.remove();
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
   vi.useRealTimers();
 });
@@ -406,4 +407,21 @@ it("A5 a conflict result waits for the detail refetch", async () => {
   expect(
     await screen.findByText(/이전 revision · 다시 확인 필요/),
   ).toBeTruthy();
+});
+it("A3 applied default needs a receipt and does not render an empty answer", async () => {
+  fetcher.mockResolvedValue(
+    response({
+      ...detail,
+      answerable: false,
+      disabled_reason: "closed",
+      request: {
+        ...request,
+        state: "default_applied",
+        resolution: { kind: "default_applied", receipt: "receipt-42" },
+      },
+    }),
+  );
+  await start();
+  expect(screen.getByText("기본값 적용됨 receipt-42")).toBeTruthy();
+  expect(screen.queryByText(/^답변:/)).toBeNull();
 });
