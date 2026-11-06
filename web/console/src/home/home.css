@@ -24,8 +24,9 @@
 .ha-summary { flex: 1; }
 .ha-chips { display: flex; flex: 0 1 auto; max-width: 55%; gap: var(--hk-space-1); overflow: hidden; }
 .ha-chips .hk-chip { flex: none; }
-.ha-item--seen .ha-row { opacity: .7; color: var(--hk-text-secondary); }
-[data-theme="light"] .ha-item--seen .ha-row { opacity: .8; }
+.ha-item--seen .ha-row { color: var(--hk-text-secondary); }
+.ha-item--seen .ha-line, .ha-item--seen .ha-summary { opacity: .7; }
+[data-theme="light"] .ha-item--seen .ha-line, [data-theme="light"] .ha-item--seen .ha-summary { opacity: .8; }
 .ha-item--seen .ha-line { font-weight: var(--hk-weight-normal); }
 .ha-item--seen .ha-dot { visibility: hidden; }
 .ha-empty { min-height: 240px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: var(--hk-space-6); color: var(--hk-text-secondary); }
