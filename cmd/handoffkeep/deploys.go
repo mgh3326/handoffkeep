@@ -101,7 +101,7 @@ func deploysCmd(args []string, out io.Writer) error {
 		if err = dec.Decode(&in); err != nil {
 			return err
 		}
-		if dec.More() {
+		if _, err = dec.Token(); err != io.EOF {
 			return errors.New("deploy file has data after the JSON object")
 		}
 		if err = mustClient(c); err != nil {
