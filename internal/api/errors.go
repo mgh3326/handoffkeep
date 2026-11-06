@@ -120,6 +120,7 @@ var errorRules = []errorRule{
 	{store.ErrChangeNotFound, http.StatusNotFound, "not_found", false},
 	{store.ErrChangeDependencyCycle, http.StatusConflict, "change_dependency_cycle", false},
 	{store.ErrVerificationExists, http.StatusConflict, "verification_exists", false},
+	{store.ErrInvalidChangeWrite, http.StatusBadRequest, "invalid_context", true},
 }
 
 // appErr writes the response for an error returned by the store or a
