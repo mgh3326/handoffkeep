@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -34,7 +35,9 @@ const ciOkIf = "always() && (contains(needs.*.result, 'failure') || !(contains(n
 const ciOkIfCancelledOnly = "always() && (contains(needs.*.result, 'failure') || !contains(needs.*.result, 'cancelled'))"
 
 type tierJob struct {
+	Name        string         `yaml:"name"`
 	If          string         `yaml:"if"`
+	Env         map[string]any `yaml:"env"`
 	RunsOn      any            `yaml:"runs-on"`
 	Services    map[string]any `yaml:"services"`
 	Needs       any            `yaml:"needs"`
@@ -145,8 +148,97 @@ func gitleaksScopeProblems(wf tierWorkflow) []string {
 	return nil
 }
 
-// tierProblems checks ci.yml and ci-any-ref.yml against the tier contract.
-func tierProblems(ci, anyRef []byte) []string {
+// prStoreDB is the one PR-tier job that starts PostgreSQL (hk 3193): it tests
+// ./internal/store/... when a pull request changes internal/store or
+// internal/testdb. It has no event guard, so it always reports a conclusion
+// and can be a required check; only the suite selector may skip it.
+const (
+	prStoreDB      = "pr-store-db"
+	prStoreDBName  = "pr: store + postgres"
+	prStoreDBSuite = "${{ contains(fromJSON('[\"all\",\"test\"]'), inputs.suite || 'all') }}"
+)
+
+// prStoreDBProblems checks the pr-store-db job in wf and its entry in the
+// mergewake policy's required_checks.
+func prStoreDBProblems(wf tierWorkflow, policy []byte) []string {
+	var out []string
+	add := func(f string, a ...any) { out = append(out, fmt.Sprintf("pr-store-db: "+f, a...)) }
+	j, ok := wf.Jobs[prStoreDB]
+	if !ok {
+		return []string{"ci.yml must have a pr-store-db job"}
+	}
+	if j.Name != prStoreDBName {
+		add("name is %q, want %q", j.Name, prStoreDBName)
+	}
+	// (a) No event guard: only the suite selector may skip the job.
+	if j.If != prStoreDBSuite {
+		add("job-level if is %q, want only the suite selector %q", j.If, prStoreDBSuite)
+	}
+	if ro := runsOnText(j.RunsOn); ro != "ubuntu-latest" {
+		add("runs-on is %q, want ubuntu-latest", ro)
+	}
+	// (b) PostgreSQL service, with the DB URL and without the no-DB switch.
+	if _, ok := j.Services["postgres"]; !ok {
+		add("needs a postgres service")
+	}
+	if _, ok := j.Env["HANDOFFKEEP_TEST_NO_DB"]; ok {
+		add("job sets HANDOFFKEEP_TEST_NO_DB")
+	}
+	var testStep, decideStep *step
+	for i, s := range j.Steps {
+		if _, ok := s.Env["HANDOFFKEEP_TEST_NO_DB"]; ok {
+			add("step %d sets HANDOFFKEEP_TEST_NO_DB", i)
+		}
+		if strings.Contains(s.Run, "go test") {
+			testStep = &j.Steps[i]
+		}
+		if strings.Contains(s.Run, "GITHUB_OUTPUT") {
+			decideStep = &j.Steps[i]
+		}
+		// (e) Event data reaches the shell only through env:.
+		if strings.Contains(s.Run, "${{") {
+			add("step %d: run contains an expression; pass it through env:", i)
+		}
+	}
+	if testStep == nil {
+		add("needs a step that runs go test")
+	} else {
+		if fmt.Sprint(testStep.Env["HANDOFFKEEP_TEST_DB_URL"]) == "" || testStep.Env["HANDOFFKEEP_TEST_DB_URL"] == nil {
+			add("the go test step must set HANDOFFKEEP_TEST_DB_URL")
+		}
+		// (c) Store package only, no -race.
+		if !strings.Contains(testStep.Run, "./internal/store/...") {
+			add("go test must name ./internal/store/...")
+		}
+		if strings.Contains(testStep.Run, "-race") {
+			add("go test must not use -race")
+		}
+	}
+	// (d) The decision step matches both directories.
+	if decideStep == nil {
+		add("needs a decision step that writes to GITHUB_OUTPUT")
+	} else {
+		for _, pat := range []string{"internal/store/*", "internal/testdb/*"} {
+			if !strings.Contains(decideStep.Run, pat) {
+				add("decision step must match %s", pat)
+			}
+		}
+	}
+	// (g) The policy requires the check by its name.
+	var pol struct {
+		RequiredChecks []string `yaml:"required_checks"`
+	}
+	if err := yaml.Unmarshal(policy, &pol); err != nil {
+		add("policy.yaml: %v", err)
+	} else if !slices.Contains(pol.RequiredChecks, prStoreDBName) {
+		add("policy.yaml required_checks must include %q", prStoreDBName)
+	}
+	return out
+}
+
+// tierProblems checks ci.yml and ci-any-ref.yml against the tier contract,
+// and ci.yml's pr-store-db job against the mergewake policy.
+func tierProblems(ci, anyRef, policy []byte) []string {
 	var out []string
 	add := func(f string, a ...any) { out = append(out, fmt.Sprintf(f, a...)) }
 	var wf tierWorkflow
@@ -166,6 +258,7 @@ func tierProblems(ci, anyRef []byte) []string {
 	}
 
 	out = append(out, gitleaksScopeProblems(wf)...)
+	out = append(out, prStoreDBProblems(wf, policy)...)
 
 	var prJobs, postJobs []string
 	for name, j := range wf.Jobs {
@@ -183,7 +276,7 @@ func tierProblems(ci, anyRef []byte) []string {
 		if hasRace(j) {
 			add("job %s: pull requests reach it and it runs -race", name)
 		}
-		if len(j.Services) > 0 {
+		if len(j.Services) > 0 && name != prStoreDB {
 			add("job %s: pull requests reach it and it starts service containers", name)
 		}
 		if ro := runsOnText(j.RunsOn); ro != "ubuntu-latest" {
@@ -308,8 +401,17 @@ func readWorkflow(t *testing.T, name string) []byte {
 	return b
 }
 
+func readPolicy(t *testing.T) []byte {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("..", "..", ".mergewake", "policy.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
 func TestCITiers(t *testing.T) {
-	for _, p := range tierProblems(readWorkflow(t, "ci.yml"), readWorkflow(t, "ci-any-ref.yml")) {
+	for _, p := range tierProblems(readWorkflow(t, "ci.yml"), readWorkflow(t, "ci-any-ref.yml"), readPolicy(t)) {
 		t.Error(p)
 	}
 }
@@ -341,10 +443,13 @@ func TestPullRequestsStayOnHostedRunners(t *testing.T) {
 func TestCITierMutantsTurnRed(t *testing.T) {
 	ci := string(readWorkflow(t, "ci.yml"))
 	anyRef := readWorkflow(t, "ci-any-ref.yml")
+	policy := readPolicy(t)
+	const storeIf = "    if: ${{ contains(fromJSON('[\"all\",\"test\"]'), inputs.suite || 'all') }}\n    name: 'pr: store + postgres'"
+	const storeEnv = "        env:\n          HANDOFFKEEP_TEST_DB_URL: postgres://handoffkeep:handoffkeep@localhost:5432/handoffkeep?sslmode=disable\n        run: go test -timeout 10m -count=1 ./internal/store/..."
 	for _, m := range []struct{ name, old, new string }{
 		{"race-in-pr-test", "run: go test -timeout 10m ./...", "run: go test -race -timeout 10m ./..."},
-		{"self-hosted-pr-test", "    runs-on: ubuntu-latest\n    timeout-minutes: 15\n", "    runs-on: [self-hosted, linux]\n    timeout-minutes: 15\n"},
-		{"runner-variable-pr-test", "    runs-on: ubuntu-latest\n    timeout-minutes: 15\n", "    runs-on: ${{ vars.HANDOFFKEEP_POST_LINUX_RUNNER || 'ubuntu-latest' }}\n    timeout-minutes: 15\n"},
+		{"self-hosted-pr-test", "'all') }}\n    runs-on: ubuntu-latest\n    timeout-minutes: 15\n", "'all') }}\n    runs-on: [self-hosted, linux]\n    timeout-minutes: 15\n"},
+		{"runner-variable-pr-test", "'all') }}\n    runs-on: ubuntu-latest\n    timeout-minutes: 15\n", "'all') }}\n    runs-on: ${{ vars.HANDOFFKEEP_POST_LINUX_RUNNER || 'ubuntu-latest' }}\n    timeout-minutes: 15\n"},
 		{"no-concurrency", "concurrency: {group:", "x-concurrency: {group:"},
 		{"no-cancel-in-progress", `cancel-in-progress: "${{ github.event_name == 'pull_request' }}"}`, "cancel-in-progress: false}"},
 		{"main-push-cancels", `cancel-in-progress: "${{ github.event_name == 'pull_request' }}"}`, "cancel-in-progress: true}"},
@@ -355,13 +460,19 @@ func TestCITierMutantsTurnRed(t *testing.T) {
 		{"self-hosted-on-dispatch", "runs-on: ${{ (" + mainPush + " && vars.HANDOFFKEEP_POST_LINUX_RUNNER) || 'ubuntu-latest' }}", "runs-on: ${{ vars.HANDOFFKEEP_POST_LINUX_RUNNER || 'ubuntu-latest' }}"},
 		{"no-ref-pruning", "          git for-each-ref --format='delete %(refname)' | git update-ref --no-deref --stdin\n", "          true\n"},
 		{"prune-on-pull-request-too", "        if: ${{ github.event_name != 'pull_request' }}\n        run: |\n          git checkout --detach", "        run: |\n          git checkout --detach"},
+		{"pr-store-db-pr-only-if", storeIf, "    if: ${{ github.event_name == 'pull_request' && contains(fromJSON('[\"all\",\"test\"]'), inputs.suite || 'all') }}\n    name: 'pr: store + postgres'"},
+		{"pr-store-db-no-db-url", storeEnv, "        run: go test -timeout 10m -count=1 ./internal/store/..."},
+		{"pr-store-db-race", "run: go test -timeout 10m -count=1 ./internal/store/...", "run: go test -race -timeout 10m -count=1 ./internal/store/..."},
+		{"pr-store-db-drops-testdb-path", "internal/store/*|internal/testdb/*)", "internal/store/*)"},
+		{"pr-store-db-expr-in-run", "run: go test -timeout 10m -count=1 ./internal/store/...", "run: go test -timeout 10m -count=1 ./internal/store/... -run '${{ github.head_ref }}'"},
+		{"pr-store-db-not-in-ci-ok", "needs: [test, pr-store-db, vitest,", "needs: [test, vitest,"},
 	} {
 		t.Run(m.name, func(t *testing.T) {
 			if strings.Count(ci, m.old) != 1 {
 				t.Fatalf("mutant anchor %q matches %d times", m.old, strings.Count(ci, m.old))
 			}
 			mutant := strings.Replace(ci, m.old, m.new, 1)
-			problems := tierProblems([]byte(mutant), anyRef)
+			problems := tierProblems([]byte(mutant), anyRef, policy)
 			var wf tierWorkflow
 			if err := yaml.Unmarshal([]byte(mutant), &wf); err == nil {
 				problems = append(problems, prRunnerProblems("ci.yml", wf)...)
@@ -392,12 +503,23 @@ func TestCITierMutantsTurnRed(t *testing.T) {
 				t.Fatalf("mutant anchor %q missing", m.old)
 			}
 			*target = strings.Replace(*target, m.old, m.new, 1)
-			if len(tierProblems([]byte(a), []byte(b))) == 0 {
+			if len(tierProblems([]byte(a), []byte(b), readPolicy(t))) == 0 {
 				t.Fatal("mutant passed tier checks")
 			}
 		})
 	}
 
+	// The policy must list the check by its name.
+	t.Run("pr-store-db-not-required", func(t *testing.T) {
+		old := "  - 'pr: store + postgres'\n"
+		if strings.Count(string(policy), old) != 1 {
+			t.Fatalf("mutant anchor %q matches %d times", old, strings.Count(string(policy), old))
+		}
+		mutant := strings.Replace(string(policy), old, "", 1)
+		if len(tierProblems([]byte(ci), anyRef, []byte(mutant))) == 0 {
+			t.Fatal("mutant passed the tier checks")
+		}
+	})
 }
 
 // The pruning step must come before gitleaks: moved behind it, the scan has
@@ -411,7 +533,7 @@ func TestCITierMutantPruneAfterGitleaksTurnsRed(t *testing.T) {
 		t.Fatalf("mutant anchors out of order: %d %d %d", start, scan, end)
 	}
 	mutant := ci[:start] + ci[scan:end] + ci[start:scan] + ci[end:]
-	if len(tierProblems([]byte(mutant), readWorkflow(t, "ci-any-ref.yml"))) == 0 {
+	if len(tierProblems([]byte(mutant), readWorkflow(t, "ci-any-ref.yml"), readPolicy(t))) == 0 {
 		t.Fatal("mutant passed the tier checks")
 	}
 }
