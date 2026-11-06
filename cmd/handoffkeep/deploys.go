@@ -13,7 +13,7 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
-const servicesUsage = "usage: services put <name> --repo owner/name --pattern P... --mode manual|auto|none [--target T...] | services list | services pending <name> [--limit N]"
+const servicesUsage = "usage: services records-list | services records-put <name> --repo owner/name --prefix P... | services records-deactivate <name> | services put <name> --repo owner/name --pattern P... --mode manual|auto|none [--target T...] | services list | services pending <name> [--limit N]"
 const deploysUsage = "usage: deploys start --file <json> | deploys finish <attempt_id> --state success|failed|rolled_back [--failed-step S]"
 
 func servicesCmd(args []string, out io.Writer) error {
@@ -23,13 +23,14 @@ func servicesCmd(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("services "+args[0], flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	c := remoteClient(fs)
-	var patterns, targets refFlags
+	var patterns, targets, prefixes refFlags
 	repo := fs.String("repo", "", "owner/name")
 	mode := fs.String("mode", "", "manual, auto or none")
 	fs.Var(&patterns, "pattern", "path pattern (repeatable)")
 	fs.Var(&targets, "target", "target (repeatable)")
+	fs.Var(&prefixes, "prefix", "record prefix (repeatable)")
 	limit := fs.Int("limit", 100, "maximum changes")
-	rest, err := splitArgs(args[1:], "repo", "mode", "pattern", "target", "limit")
+	rest, err := splitArgs(args[1:], "repo", "mode", "pattern", "target", "limit", "prefix")
 	if err != nil {
 		return err
 	}
@@ -39,6 +40,33 @@ func servicesCmd(args []string, out io.Writer) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	switch {
+	case args[0] == "records-put" && fs.NArg() == 1:
+		if err = mustClient(c); err != nil {
+			return err
+		}
+		x, err := c.PutDeployService(ctx, store.DeployService{Name: fs.Arg(0), Repo: *repo, RecordPrefixes: prefixes})
+		if err != nil {
+			return err
+		}
+		return printJSON(out, x)
+	case args[0] == "records-list" && fs.NArg() == 0:
+		if err = mustClient(c); err != nil {
+			return err
+		}
+		xs, err := c.ListDeployServices(ctx)
+		if err != nil {
+			return err
+		}
+		return printJSON(out, map[string]any{"services": xs})
+	case args[0] == "records-deactivate" && fs.NArg() == 1:
+		if err = mustClient(c); err != nil {
+			return err
+		}
+		x, err := c.DeactivateDeployService(ctx, fs.Arg(0))
+		if err != nil {
+			return err
+		}
+		return printJSON(out, x)
 	case args[0] == "put" && fs.NArg() == 1:
 		if err = mustClient(c); err != nil {
 			return err

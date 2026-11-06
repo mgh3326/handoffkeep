@@ -186,6 +186,7 @@ function InvalidRecords({ svc }: { svc: DeployServiceView }) {
           {shown.map((rec) => (
             <li key={rec.key} className="dp-invalid-item">
               <span className="hk-mono">{rec.key}</span>
+              {rec.prefix ? <span className="dp-muted">접두사: {rec.prefix}</span> : null}
               <span className="dp-muted">{rec.reasons.map(invalidReasonLabel).join(" · ")}</span>
             </li>
           ))}

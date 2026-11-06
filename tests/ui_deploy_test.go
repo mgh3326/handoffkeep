@@ -666,3 +666,43 @@ func TestUIDeployRecentContract(t *testing.T) {
 		t.Fatalf("service = %v", svc)
 	}
 }
+
+func TestUIDeployRegisteredServicesAndAlias(t *testing.T) {
+	s, db := attentionSchemaStore(t, "ui_deploy_registry")
+	at := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	seedDeployDoc(t, s, "deploy/panewire/20261107T010000Z", deployFixtureBody(t, "panewire", "success", "ref", at.Format(time.RFC3339), nil))
+	seedDeployDoc(t, s, "deploy/panewire/sha-bad", "bad")
+	seedDeployDoc(t, s, "deploy/panewire/20261107T020000Z", deployFixtureBody(t, "pacelever", "success", "foreign", at.Add(time.Minute).Format(time.RFC3339), nil))
+	seedMergedEvent(t, db, s, "before", "https://github.com/mgh3326/panewire/pull/1", at.Add(-time.Minute))
+	after := seedMergedEvent(t, db, s, "after", "https://github.com/mgh3326/panewire/pull/2", at.Add(time.Minute))
+	fixture := newUIJWTFixture(t)
+	h := newUITestServer(t, s, fixture, "", "", 0)
+	defer h.Close()
+	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
+	response := getDeployPending(t, h, assertion)
+	svc := serviceView(t, response, "panewire-hub")
+	if svc["merged_boundary"] != "deployed_at" || !reflect.DeepEqual(mergedIDs(svc), []float64{float64(after)}) {
+		t.Fatalf("alias boundary: %v", svc)
+	}
+	invalids := svc["invalid"].([]any)
+	if len(invalids) != 2 {
+		t.Fatalf("invalid records: %v", invalids)
+	}
+	for _, raw := range invalids {
+		invalid := raw.(map[string]any)
+		if invalid["prefix"] != "deploy/panewire/" || len(invalid["reasons"].([]any)) == 0 {
+			t.Fatalf("invalid: %v", invalid)
+		}
+	}
+	serviceView(t, response, "mergewake")
+	serviceView(t, response, "pacelever")
+	if _, err := s.DeactivateDeployService(t.Context(), "pacelever"); err != nil {
+		t.Fatal(err)
+	}
+	response = getDeployPending(t, h, assertion)
+	for _, raw := range response["services"].([]any) {
+		if raw.(map[string]any)["service"] == "pacelever" {
+			t.Fatal("inactive service shown")
+		}
+	}
+}

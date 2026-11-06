@@ -30,6 +30,7 @@ export type DeployMergedTask = {
  * whole payload. */
 export type DeployInvalidRecord = {
   key: string;
+  prefix?: string;
   reasons: string[];
 };
 
@@ -99,6 +100,7 @@ const isInvalidRecord = (v: unknown): v is DeployInvalidRecord => {
   const r = v as DeployInvalidRecord;
   return (
     typeof r.key === "string" &&
+    (r.prefix === undefined || typeof r.prefix === "string") &&
     Array.isArray(r.reasons) &&
     r.reasons.length > 0 &&
     r.reasons.every((reason) => typeof reason === "string")
