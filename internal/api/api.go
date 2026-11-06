@@ -31,6 +31,21 @@ import (
 type Service struct {
 	Store       *store.Store
 	Attachments *attachments.Manager
+	// Dots backs the /v1/dots/results routes; nil uses Store.
+	Dots DotsResultStore
+}
+
+// DotsResultStore lists dots results and records their adoption.
+type DotsResultStore interface {
+	ListDotsResults(ctx context.Context, taskID int64, issue string, limit int) ([]store.DotsResult, error)
+	SetDotsAdoption(ctx context.Context, id int64, by string, in store.DotsAdoptionInput) (store.DotsResult, bool, error)
+}
+
+func (s Service) dotsResults() DotsResultStore {
+	if s.Dots != nil {
+		return s.Dots
+	}
+	return s.Store
 }
 
 var decisionResolverRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
@@ -617,6 +632,13 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("GET /v1/changes", s.changesList)
 	m.HandleFunc("POST /v1/changes/{id}/merge-flow", s.changeMergeFlow)
 	m.HandleFunc("POST /v1/changes/verifications", s.changeVerification)
+	m.HandleFunc("PUT /v1/changes/state", s.changeStatePut)
+	m.HandleFunc("PUT /v1/changes/checks", s.changeChecksPut)
+	m.HandleFunc("PUT /v1/changes/threads", s.changeThreadsPut)
+	m.HandleFunc("PUT /v1/changes/findings", s.changeFindingsPut)
+	m.HandleFunc("PUT /v1/changes/gate", s.changeGatePut)
+	m.HandleFunc("POST /v1/changes/batch", s.changeBatch)
+	m.HandleFunc("GET /v1/changes/one", s.changeOne)
 	m.HandleFunc("POST /v1/tasks/next", s.tasksNext)
 	m.HandleFunc("GET /v1/tasks/projects", s.taskProjectsList)
 	m.HandleFunc("POST /v1/tasks/projects", s.taskProjectsCreate)
@@ -641,6 +663,8 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("POST /v1/tasks/{id}/origins", s.taskOriginAdd)
 	m.HandleFunc("GET /v1/tasks/{id}/origins", s.taskOriginList)
 	m.HandleFunc("GET /v1/task-origins", s.taskOriginFind)
+	m.HandleFunc("GET /v1/dots/results", s.dotsResultsList)
+	m.HandleFunc("POST /v1/dots/results/{id}/adoption", s.dotsAdoption)
 	m.HandleFunc("POST /v1/tasks/{id}/reopen", s.taskReopen)
 	m.HandleFunc("POST /v1/tasks/{id}/project", s.taskProject)
 	m.HandleFunc("POST /v1/tasks/{id}/area", s.taskArea)
@@ -2100,10 +2124,11 @@ func benchRowErrorField(row []byte, fieldTypes map[string]reflect.Type) string {
 // Payload caps for decode, by what the body carries. A route picks one of
 // these or a store-owned limit (store.MaxBytes, benchRequestMaxBytes, ...).
 const (
-	bodyTiny  = 1 << 10  // an id or two and a short reason
-	bodySmall = 4 << 10  // one entity's short fields
-	bodyEvent = 16 << 10 // one external event with its references (16 review items fill ~11 KiB)
-	bodyLarge = 64 << 10 // free text or a list: descriptions, candidates
+	bodyTiny    = 1 << 10  // an id or two and a short reason
+	bodySmall   = 4 << 10  // one entity's short fields
+	bodyEvent   = 16 << 10 // one external event with its references (16 review items fill ~11 KiB)
+	bodyLarge   = 64 << 10 // free text or a list: descriptions, candidates
+	bodyPRState = 2 << 20  // one PR-state write: ~200 checks, 100 threads and a pass of findings (hk 3198)
 )
 
 // decode reads one JSON request body into v. max is the payload's own byte

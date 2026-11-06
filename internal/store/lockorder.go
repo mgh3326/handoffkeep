@@ -54,9 +54,12 @@ package store
 //     A documents insert or update that sets task_id takes KEY SHARE on that
 //     one task row through the foreign key (PutDocument). That is the level-4
 //     single-task case and needs no level-2 lock: no task writer locks a
-//     documents row while it holds a task row (IntakeTask and the dots
-//     writer insert new keys; applyDeployRecordTx runs under PutDocument's
-//     own level-2 lock, after the document row). decision_requests rows that name a
+//     documents row while it holds a task row (IntakeTask inserts new keys;
+//     applyDeployRecordTx runs under PutDocument's own level-2 lock, after the
+//     document row). The dots writer (RecordDotsResult) is the same case: it
+//     inserts or updates one documents row and one dots_results row, each
+//     taking KEY SHARE on the one linked task row; SetDotsAdoption locks one
+//     dots_results row and no task. decision_requests rows that name a
 //     task or a job are updated only under the level-2 lock, several at a
 //     time in id order (decision_records.go); the table has no foreign key.
 //
@@ -105,6 +108,16 @@ package store
 //     row (insert, or FOR UPDATE on a replay), and takes no task row. No
 //     other writer locks a verifications row, and the event writers that
 //     lock changes rows never wait on one, so it cannot close a cycle.
+//   - ApplyChangeBatch (change_state.go, mergewake's PR-state writes) locks one
+//     changes row FOR UPDATE (after an insert that never updates an existing
+//     row) and then writes only that change's change_checks, change_threads,
+//     change_findings and reviews rows; it takes no task row and no level-2
+//     lock. Those child rows are written only by a holder of their changes
+//     row (recordChangeTx's insertReviewTx runs under upsertChangeTx's row
+//     lock), so two writers of one PR queue on the parent row and no writer
+//     waits on a child row while holding something another needs. The
+//     sections of a batch run in the fixed order state, checks, threads,
+//     findings, gate. GetChangeState reads one snapshot and locks nothing.
 //   - Other advisory locks (disposition origin, task comment insert, labels,
 //     Linear board ownership, quota presence) are each the first lock of
 //     their transaction, and no transaction requests one while it holds a
