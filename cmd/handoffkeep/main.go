@@ -80,6 +80,8 @@ func run(args []string, out, errout io.Writer) error {
 		return attachCmd(args[1:], out)
 	case "r2usage":
 		return r2UsageCmd(args[1:], out)
+	case "translations":
+		return translationsCmd(args[1:], out)
 	case "tasks":
 		return tasksCmdE(args[1:], out, errout)
 	case "tickets":

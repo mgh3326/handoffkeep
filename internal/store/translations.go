@@ -127,3 +127,71 @@ func (s *Store) ListTranslations(ctx context.Context, entity string, sources []T
 	}
 	return out, rows.Err()
 }
+
+// PutTranslations validates the whole batch before writing it atomically.
+func (s *Store) PutTranslations(ctx context.Context, translations []Translation) error {
+	if len(translations) == 0 || len(translations) > 100 {
+		return fmt.Errorf("invalid translation batch size")
+	}
+	for _, t := range translations {
+		if err := checkTranslation(t); err != nil {
+			return err
+		}
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	now := time.Now().UTC()
+	for _, t := range translations {
+		_, err = tx.Exec(ctx, `INSERT INTO translations(entity,entity_id,field,lang,source_sha256,text,translator,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(entity,entity_id,field,lang) DO UPDATE SET source_sha256=EXCLUDED.source_sha256,text=EXCLUDED.text,translator=EXCLUDED.translator,updated_at=EXCLUDED.updated_at`, t.Entity, t.EntityID, t.Field, t.Lang, t.SourceSHA256, t.Text, t.Translator, now)
+		if err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
+}
+
+type MissingTranslation struct {
+	Entity       string `json:"entity"`
+	EntityID     string `json:"entity_id"`
+	Field        string `json:"field"`
+	Lang         string `json:"lang"`
+	Original     string `json:"original"`
+	SourceSHA256 string `json:"source_sha256"`
+	Stale        bool   `json:"stale"`
+}
+
+// MissingTaskTranslations returns missing and stale fields in task ID order.
+func (s *Store) MissingTaskTranslations(ctx context.Context, limit int) ([]MissingTranslation, error) {
+	if limit < 1 || limit > 1000 {
+		return nil, fmt.Errorf("invalid translation limit")
+	}
+	rows, err := s.pool.Query(ctx, `SELECT t.id, t.title, coalesce(d.body,''), coalesce(tt.source_sha256,''), coalesce(tb.source_sha256,'') FROM tasks t LEFT JOIN documents d ON d.key=split_part(t.body_doc,'#',1) LEFT JOIN translations tt ON tt.entity='task' AND tt.entity_id=t.id::text AND tt.field='title' AND tt.lang='ko' LEFT JOIN translations tb ON tb.entity='task' AND tb.entity_id=t.id::text AND tb.field='body' AND tb.lang='ko' WHERE t.state NOT IN (`+settledStatesSQL+`) ORDER BY t.id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []MissingTranslation{}
+	for rows.Next() {
+		var id int64
+		var title, body, titleHash, bodyHash string
+		if err := rows.Scan(&id, &title, &body, &titleHash, &bodyHash); err != nil {
+			return nil, err
+		}
+		for _, f := range []struct{ field, original, hash string }{{"title", title, titleHash}, {"body", body, bodyHash}} {
+			if f.original == "" {
+				continue
+			}
+			hash := SourceSHA256(f.original)
+			if f.hash != hash {
+				out = append(out, MissingTranslation{Entity: "task", EntityID: strconv.FormatInt(id, 10), Field: f.field, Lang: "ko", Original: f.original, SourceSHA256: hash, Stale: f.hash != ""})
+			}
+			if len(out) == limit {
+				return out, nil
+			}
+		}
+	}
+	return out, rows.Err()
+}
