@@ -3,6 +3,7 @@ import { readCsrfToken } from "../shared/boardApi";
 import { isTypingTarget } from "../shared/search";
 import { formatMinuteKST } from "../shared/time";
 import { Chip } from "../shared/ui/Chip";
+import { Mono } from "../shared/ui/Mono";
 import { stateLabel } from "../shared/states";
 import { formatAge, formatRemaining } from "./format";
 import { loadDetail, postResolve } from "./api";
@@ -318,7 +319,7 @@ export function DecisionPage({ id }: { id: string }) {
         </p>
         {req && (
           <p className="decision-ref">
-            {req.id} · revision {req.revision} · {policyLabel(req.answer_policy)}
+            <Mono>{req.id}</Mono> · revision {req.revision} · {policyLabel(req.answer_policy)}
           </p>
         )}
       </header>

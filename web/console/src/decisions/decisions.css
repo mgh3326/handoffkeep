@@ -214,8 +214,7 @@
 }
 .decision-ref {
   color: var(--hk-text-muted);
-  font: var(--hk-weight-normal) var(--hk-type-mono) / var(--hk-line-mono) var(--hk-font-mono);
-  font-variant-numeric: tabular-nums;
+  font: var(--hk-weight-normal) var(--hk-type-meta) / var(--hk-line-meta) var(--hk-font-ui);
 }
 .decision-page .decision-question {
   margin: var(--hk-space-4) 0;

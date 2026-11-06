@@ -84,7 +84,7 @@ async function sheet() {
 it("A1 renders the record, request and task link", async () => {
   await start();
   expect(screen.getByText(/결정 #42/)).toBeTruthy();
-  expect(screen.getByText(/dr-7-2 · revision 2/)).toBeTruthy();
+  expect(document.querySelector(".decision-ref")?.textContent).toMatch(/^dr-7-2 · revision 2/);
   expect(
     screen.getByRole("link", { name: "Ship console" }).getAttribute("href"),
   ).toBe("/ui/tasks/7");
