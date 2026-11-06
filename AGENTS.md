@@ -25,6 +25,7 @@ CI has two tiers (`.github/workflows/ci.yml`). A pull request runs the light
 jobs only: no `-race`, no PostgreSQL, hosted runners. The `post-*` jobs (race
 with PostgreSQL, mutants, release dry run, macOS) run on main pushes and
 `ci-any-ref` dispatches, after merge; a red main is bisected and reverted.
+`ci-any-ref` accepts `packages` only with `suite=test`; those runs post `ci-ok-test-packages`.
 `scripts/check go` runs the heavy half locally.
 
 DB-backed tests need Postgres 17 and `HANDOFFKEEP_TEST_DB_URL`, e.g.

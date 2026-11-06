@@ -16,6 +16,11 @@ on:
         required: false
         default: all
         type: string
+      packages:
+        description: Space-separated Go package patterns (suite=test only)
+        required: false
+        default: ''
+        type: string
 # Two tiers (hk:doc decision/2026-11-05/fleet-ci-three-tiers, hk 2935).
 #   T-PR   pull_request, and every other event too: test, vitest, build and
 #          auto-tag-test. Light: no -race, no PostgreSQL, no macOS, hosted
@@ -177,22 +182,36 @@ jobs:
       - run: git diff --exit-code -- internal/ui/static/console
       - run: test -z "$(git status --porcelain --untracked-files=all -- internal/ui/static/console)"
       - name: Task expected migration and server startup
+        if: ${{ inputs.packages == '' }}
         env:
           PUSH_BEFORE: ${{ github.event_name == 'push' && github.event.before || '' }}
         run: bash scripts/test-task-expected-migration.sh
       - name: go test -race
+        if: ${{ inputs.packages == '' }}
         run: go test -v -race -timeout 30m ./...
+      - name: go test -race (packages)
+        if: ${{ inputs.packages != '' }}
+        env:
+          SUITE: ${{ inputs.suite }}
+          PACKAGES: ${{ inputs.packages }}
+        run: |
+          bash scripts/validate-ci-packages.sh
+          echo "go test -v -race -timeout 30m $PACKAGES"
+          go test -v -race -timeout 30m $PACKAGES
       - name: Reopen regression mutants
+        if: ${{ inputs.packages == '' }}
         run: python3 scripts/task-reopen-mutants.py
       - name: Quota regression mutants
+        if: ${{ inputs.packages == '' }}
         run: python3 scripts/quota-mutants.py
-      - run: bash scripts/test-build-release.sh
+      - if: ${{ inputs.packages == '' }}
+        run: bash scripts/test-build-release.sh
 
   post-macos:
     # T-POST only: the CLI ships darwin binaries, so the suite also runs on
     # macOS. No service containers there; DB-backed tests skip and run in
     # post-linux.
-    if: ${{ github.event_name != 'pull_request' && contains(fromJSON('["all","test"]'), inputs.suite || 'all') }}
+    if: ${{ github.event_name != 'pull_request' && inputs.packages == '' && contains(fromJSON('["all","test"]'), inputs.suite || 'all') }}
     name: 'post: macos'
     runs-on: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.HANDOFFKEEP_POST_MAC_RUNNER) || 'macos-latest' }}
     timeout-minutes: 45
@@ -224,7 +243,7 @@ jobs:
     # holds instead of seeing a failure (hk 2924). A job that never got a
     # runner reports abandoned in the needs context although the jobs API says
     # cancelled (run 42061203904: post-macos abandoned, hk 3155).
-    name: ${{ (inputs.suite || 'all') == 'all' && 'ci-ok' || format('ci-ok ({0})', inputs.suite) }}
+    name: ${{ inputs.packages != '' && 'ci-ok (test, packages)' || ((inputs.suite || 'all') == 'all' && 'ci-ok' || format('ci-ok ({0})', inputs.suite)) }}
     needs: [test, vitest, build, auto-tag-test, post-linux, post-macos]
     if: ${{ always() && (contains(needs.*.result, 'failure') || !(contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'abandoned'))) }}
     runs-on: ubuntu-latest
@@ -233,6 +252,7 @@ jobs:
         env:
           EVENT: ${{ github.event_name }}
           SUITE: ${{ inputs.suite || 'all' }}
+          PACKAGES: ${{ inputs.packages }}
           TEST: ${{ needs.test.result }}
           VITEST: ${{ needs.vitest.result }}
           BUILD: ${{ needs.build.result }}
@@ -258,5 +278,6 @@ jobs:
           require "$(in_suite build)" build "$BUILD"
           post_test=no; [ "$post" = yes ] && post_test=$(in_suite test)
           require "$post_test" post-linux "$POST_LINUX"
+          [ -n "$PACKAGES" ] && post_test=no
           require "$post_test" post-macos "$POST_MACOS"
           exit "$bad"

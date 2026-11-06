@@ -249,7 +249,7 @@ expect_red(mutant_ctx, ci, "ci-ok-for-every-suite")
 # Mutant 3b: the check-run name unconditional ci-ok -> must be RED.
 if re.search(r"(?ms)^  ci-ok:\n", ci):
     mutant_name = ci.replace(
-        "name: ${{ (inputs.suite || 'all') == 'all' && 'ci-ok' || format('ci-ok ({0})', inputs.suite) }}",
+        "name: ${{ inputs.packages != '' && 'ci-ok (test, packages)' || ((inputs.suite || 'all') == 'all' && 'ci-ok' || format('ci-ok ({0})', inputs.suite)) }}",
         "name: ci-ok",
     )
     expect_red(wf, mutant_name, "check-run-always-ci-ok")

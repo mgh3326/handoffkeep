@@ -18,6 +18,12 @@ on:
           - vitest
           - build
 
+      packages:
+        description: Space-separated Go package patterns (suite=test only)
+        required: false
+        default: ''
+        type: string
+
 permissions:
   contents: read
   statuses: write
@@ -33,6 +39,11 @@ jobs:
       sha: ${{ steps.resolve.outputs.sha }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - name: Validate packages
+        env:
+          SUITE: ${{ inputs.suite }}
+          PACKAGES: ${{ inputs.packages }}
+        run: bash scripts/validate-ci-packages.sh
       - id: resolve
         env:
           GH_TOKEN: ${{ github.token }}
@@ -50,7 +61,7 @@ jobs:
     # suite on that sha. The ci and status jobs use DIFFERENT namespaces so a
     # superseded run's status job can never cancel the newer run's ci job.
     concurrency:
-      group: ci-any-ref-ci-${{ needs.resolve.outputs.sha }}-${{ inputs.suite }}
+      group: ci-any-ref-ci-${{ needs.resolve.outputs.sha }}-${{ inputs.suite }}-${{ inputs.packages }}
       cancel-in-progress: true
     permissions:
       contents: read
@@ -58,6 +69,7 @@ jobs:
     with:
       ref: ${{ needs.resolve.outputs.sha }}
       suite: ${{ inputs.suite }}
+      packages: ${{ inputs.packages }}
 
   status:
     name: post ci-ok status
@@ -69,13 +81,14 @@ jobs:
     needs: [resolve, ci]
     runs-on: ubuntu-latest
     concurrency:
-      group: ci-any-ref-status-${{ needs.resolve.outputs.sha }}-${{ inputs.suite }}
+      group: ci-any-ref-status-${{ needs.resolve.outputs.sha }}-${{ inputs.suite }}-${{ inputs.packages }}
       cancel-in-progress: true
     env:
       GH_TOKEN: ${{ github.token }}
       TARGET_SHA: ${{ needs.resolve.outputs.sha }}
       RESULT: ${{ needs.ci.result }}
       SUITE: ${{ inputs.suite }}
+      PACKAGES: ${{ inputs.packages }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
       - name: Post commit status on target sha
@@ -93,7 +106,7 @@ jobs:
             exit 0
           fi
           # Only a full run earns the gate context; partial suites get ci-ok-<suite>.
-          if [[ "$SUITE" == all ]]; then CONTEXT=ci-ok; else CONTEXT="ci-ok-$SUITE"; fi
+          if [[ -n "$PACKAGES" ]]; then CONTEXT=ci-ok-test-packages; elif [[ "$SUITE" == all ]]; then CONTEXT=ci-ok; else CONTEXT="ci-ok-$SUITE"; fi
           gh api "repos/${GITHUB_REPOSITORY}/statuses/${TARGET_SHA}" \
             -f state="$STATE" \
             -f context="$CONTEXT" \
