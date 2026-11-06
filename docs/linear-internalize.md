@@ -207,6 +207,21 @@ An operator sets a change's merge-flow fields with
 is cleared, and only the `operator` and `operator-desk` clients may call it. hk only
 holds these fields; mergewake owns the merge order.
 
+Verification verdicts (hk 3120). A change holds at most one verdict per head SHA, in
+`verifications`: `level` is `live-verified`, `unit-test-verified`, `type-check-only`,
+`verifier-blocked` or `verifier-failed`, with the verifier, its `family`, an `evidence`
+link (`https://...` or `hk:doc <key>`), the `source` (`direct_merge` or `mergewake`) and
+the client that recorded it. CI is an input, not a level: `ci_result` (`success`,
+`failure`, `pending`, `none`) sits beside the level. A new head voids a verdict by read
+alone: `GET /v1/changes` marks each verdict `current` only when its head is the change's
+head, and `verification` is the current one or null. Sending the same verdict again
+returns the stored row; a different one is `409 verification_exists`, except over a
+stored `verifier-blocked` row, which the new verdict replaces (a blocked verifier gave
+no verdict). Any client writes through `POST /v1/changes/verifications`, or
+`handoffkeep changes verify --pr URL --head SHA --level L --verifier V --family F
+--evidence E [--ci R] [--source direct_merge|mergewake]`; `handoffkeep changes show
+--pr URL` reads it back.
+
 When the merge event moves a task to `merged`, that says the change merged, not that
 CI passed. CI runs after the merge, and failure arrives as a revert. How mergewake
 decides to revert is its own contract; hk only receives the event.

@@ -23,3 +23,11 @@ export function formatMinuteUTC(iso: string): string | null {
   const d = new Date(t);
   return `${formatDayUTC(iso)} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())} UTC`;
 }
+
+/** "YYYY-MM-DD HH:MM KST", or null for an unparsable time. */
+export function formatMinuteKST(iso: string): string | null {
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return null;
+  const d = new Date(t + 9 * 60 * 60 * 1000);
+  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())} KST`;
+}
