@@ -15,7 +15,7 @@ import (
 const (
 	changesUsage         = "usage: handoffkeep changes verify|show|checks|findings"
 	changesVerifyUsage   = "usage: handoffkeep changes verify --pr URL --head SHA --level L --verifier V --family F --evidence E [--job ID] [--profile P] [--model M] [--harness H] [--ci success|failure|pending|none] [--source direct_merge|mergewake]"
-	changesShowUsage     = "usage: handoffkeep changes show --pr URL | --task N | --repo OWNER/NAME --pr N [--all-heads] [--include checks,threads,findings,gate]"
+	changesShowUsage     = "usage: handoffkeep changes show --pr URL | --task N | --repo OWNER/NAME --pr N [--all-heads] [--include checks,threads,findings,gate,reviews]"
 	changesChecksUsage   = "usage: handoffkeep changes checks --repo OWNER/NAME --pr N [--all-heads]"
 	changesFindingsUsage = "usage: handoffkeep changes findings --repo OWNER/NAME --pr N [--open]"
 )
@@ -83,7 +83,7 @@ func changesShowCmd(args []string, out io.Writer) error {
 	task := fs.Int64("task", 0, "task id")
 	repo := fs.String("repo", "", "owner/name: read one PR's state")
 	allHeads := fs.Bool("all-heads", false, "with --repo: include the checks of earlier heads")
-	include := fs.String("include", "", "with --repo: comma list of checks, threads, findings, gate")
+	include := fs.String("include", "", "with --repo: comma list of checks, threads, findings, gate, reviews")
 	if err := fs.Parse(args); err != nil || fs.NArg() != 0 {
 		return errors.New(changesShowUsage)
 	}
