@@ -106,8 +106,11 @@ func TestResolveDecisionDeny(t *testing.T) {
 		if got, err := s.ResolveDecision(ctx, answer); err != nil || got.Result != DecisionResultAnswered {
 			t.Fatalf("verified answer after a deny: %+v %v", got, err)
 		}
-		if _, err = s.ResolveDecision(ctx, deny(request, pending.AttemptID, "deny-3")); !errors.Is(err, ErrDecisionRequestResolved) {
-			t.Fatalf("deny on a closed request err=%v", err)
+		// ResolveDecision reports a refusal on a closed request in the
+		// outcome (Refusal) and records the attempt; err stays nil, as for
+		// every other kind (decision_resolve_test conflict/expired cases).
+		if closed, err := s.ResolveDecision(ctx, deny(request, pending.AttemptID, "deny-3")); err != nil || closed.Result != DecisionResultConflict || !errors.Is(closed.Refusal, ErrDecisionRequestResolved) {
+			t.Fatalf("deny on a closed request: %+v %v", closed, err)
 		}
 	})
 
