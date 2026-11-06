@@ -68,6 +68,28 @@ func TestTaskPriorityRoute(t *testing.T) {
 	if status != 200 {
 		t.Fatalf("first: %d %v", status, first)
 	}
+	r := httptest.NewRequest(http.MethodGet, fmt.Sprintf("http://example.com/ui/api/board/tasks/%d", task.ID), nil)
+	w := httptest.NewRecorder()
+	h.serveAPI(w, r, person)
+	var detail struct {
+		Events []struct {
+			Field     string `json:"field"`
+			FromValue string `json:"from_value"`
+			ToValue   string `json:"to_value"`
+		} `json:"events"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &detail); err != nil || w.Code != http.StatusOK {
+		t.Fatalf("detail: %d %s %v", w.Code, w.Body.String(), err)
+	}
+	var found bool
+	for _, event := range detail.Events {
+		if event.Field == "priority" && event.FromValue == "0" && event.ToValue == "2" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("priority values absent from detail: %s", w.Body.String())
+	}
 	status, replay := call(person, "http://example.com", `{"priority":4,"event_key":"one"}`, true)
 	if status != 200 || replay["priority"] != first["priority"] || replay["previous"] != first["previous"] {
 		t.Fatalf("replay: %d %v", status, replay)

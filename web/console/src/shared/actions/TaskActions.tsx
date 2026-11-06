@@ -25,7 +25,7 @@ export function ActionNotices() {
 export function ConfirmDialog({ title, effect, close, confirm }: { title: string; effect: string; close: () => void; confirm: () => void }) {
   return <dialog open aria-label={title} onKeyDown={e => { if (e.key === "Escape") { e.preventDefault(); close(); } if (e.key === "Tab") { const buttons = e.currentTarget.querySelectorAll<HTMLButtonElement>("button:not(:disabled)"); if (!buttons.length) return; if (e.shiftKey && document.activeElement === buttons[0]) { e.preventDefault(); buttons[buttons.length - 1].focus(); } else if (!e.shiftKey && document.activeElement === buttons[buttons.length - 1]) { e.preventDefault(); buttons[0].focus(); } } }}><h2>{title}</h2><button autoFocus onClick={close}>취소</button><button onClick={confirm}>{effect}</button></dialog>;
 }
-export function TaskActions({ target, onPriority }: { target: ActionTarget; onPriority: (priority: number) => void }) {
+export function TaskActions({ target, onPriority, compact = false }: { target: ActionTarget; onPriority: (priority: number) => void; compact?: boolean }) {
   const [open, setOpen] = useState(false); const [palette, setPalette] = useState(false); const [query, setQuery] = useState("");
   const [pending, setPending] = useState(false);
   const change = async (value: number) => {
@@ -34,8 +34,8 @@ export function TaskActions({ target, onPriority }: { target: ActionTarget; onPr
     catch { onPriority(before); window.dispatchEvent(new Event("hk-priority-error")); } finally { setPending(false); }
   };
   return <span className="task-actions" onKeyDown={e => { if (e.key === "Escape") { setOpen(false); setPalette(false); } }}>
-    {actions.filter(a => a.applicable(target)).map(a => <button key={a.id} disabled={pending || !!a.disabledReason(target)} title={a.disabledReason(target) ?? a.label} onClick={() => setOpen(!open)}>{a.label} ({a.shortcut})</button>)}
-    {open && <span className="priority-menu" role="group" aria-label="우선순위 선택">{[0,1,2,3,4,5].map(p => <button key={p} onClick={() => void change(p)}>{p === 0 ? "미지정" : `P${p}`}</button>)}</span>}
+    {actions.filter(a => a.applicable(target)).map(a => <button key={a.id} className={compact ? "action-menu-button" : undefined} aria-label={compact ? `작업 #${target.id} 우선순위 변경` : undefined} aria-expanded={open} disabled={pending || !!a.disabledReason(target)} title={a.disabledReason(target) ?? a.label} onClick={() => setOpen(!open)}>{compact ? <span aria-hidden="true">⋯</span> : `${a.label} (${a.shortcut})`}</button>)}
+    {open && <span className="priority-menu" role="menu" aria-label="우선순위 선택" onKeyDown={e => { if (!e.metaKey && !e.ctrlKey && !e.altKey && /^[0-4]$/.test(e.key)) { e.preventDefault(); void change(Number(e.key)); } }}><span className="priority-menu-heading">우선순위 선택</span>{[1,2,3,4,0].map((p, i) => <button key={p} autoFocus={i === 0} role="menuitemradio" aria-checked={target.priority === p} onClick={() => void change(p)}><span>{p === 0 ? "없음" : `P${p}`}{target.priority === p ? " · 현재" : ""}</span><kbd>{p}</kbd></button>)}</span>}
     {palette && <span className="action-palette" role="dialog" aria-label="명령 팔레트"><label>작업 #{target.id} 명령 <input autoFocus value={query} onChange={e => setQuery(e.target.value)} placeholder="명령 검색" /></label>{actions.filter(a => a.applicable(target) && [a.label, ...a.keywords].some(word => word.toLowerCase().includes(query.toLowerCase()))).map(a => <button key={a.id} disabled={!!a.disabledReason(target)} title={a.disabledReason(target) ?? ""} onClick={() => { setPalette(false); setQuery(""); setOpen(true); }}>{a.label} · {a.shortcut}</button>)}</span>}
     <ActionKeys target={target} open={() => setOpen(true)} palette={() => setPalette(true)} />
   </span>;

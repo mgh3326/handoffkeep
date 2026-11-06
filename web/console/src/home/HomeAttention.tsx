@@ -80,7 +80,7 @@ function HomeTaskAction({ id }: { id: number }) {
   const [failed, setFailed] = useState(false);
   useEffect(() => { let active = true; void fetchTaskDetail(id).then(data => { if (active) setTask(data.task); }).catch(() => { if (active) setFailed(true); }); return () => { active = false; }; }, [id]);
   if (failed) return <span role="alert">작업을 불러오지 못했습니다.</span>;
-  return task && <TaskActions target={task} onPriority={priority => setTask(old => old ? { ...old, priority } : old)} />;
+  return task && <TaskActions compact target={task} onPriority={priority => setTask(old => old ? { ...old, priority } : old)} />;
 }
 function Body({ data }: { data: Attention }) {
   const [seen, setSeen] = useState(readSeen);

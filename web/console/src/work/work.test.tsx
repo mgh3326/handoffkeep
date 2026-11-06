@@ -56,8 +56,8 @@ describe("Work", () => {
     const job = { job_id: "job", role: "worker", state: "spawned", host: "host", family: "openai", profile: "p", model: "m", harness: null, effort: null, skills: [], skills_supported: true, claimed_at: null, spawned_at: "2026-11-05T01:00:00Z", ready_at: "2026-11-05T01:30:00Z", ended_at: null, end_reason: null, diff_stat: null };
     vi.stubGlobal("fetch", vi.fn(async () => json({ ...detail, task: { ...task, started_at: "2026-11-05T01:00:00Z" }, jobs: [job] })));
     render(<TaskRecord id={101} />);
-    expect(await screen.findByText("Queue wait: 1h 0m")).toBeTruthy();
-    expect(screen.getByText("Work: 진행 중 3h 0m")).toBeTruthy();
+    expect(await screen.findByText("대기: 1h 0m")).toBeTruthy();
+    expect(screen.getByText("작업: 진행 중 3h 0m")).toBeTruthy();
     expect(screen.getByText(/spawned → ready 0h 30m/)).toBeTruthy();
   });
   it("W9 displays skills and unsupported harnesses", async () => {
@@ -122,4 +122,13 @@ it("job record includes host and omits empty fields", async () => {
   vi.stubGlobal("fetch", vi.fn(async () => json({ ...detail, jobs: [job] })));
   render(<TaskRecord id={101} />);
   expect(await screen.findByText("job · worker · model-x · fictional-device")).toBeTruthy();
+});
+
+it("describes priority events in Korean and omits unchanged state arrows", async () => {
+  const events = [{ id: 1, kind: "metadata", field: "priority", from_value: "3", to_value: "2", from: "developing", to: "developing", by: "operator:test", note: "priority 3 → 2", at: "2026-11-05T01:00:00Z" }];
+  vi.stubGlobal("fetch", vi.fn(async (path: string) => path.includes("/comments") ? json({ comments: [], truncated: false }) : json({ ...detail, events })));
+  render(<TaskRecord id={101} />);
+  const entry = await screen.findByText(/우선순위 P3 → P2/);
+  expect(entry.textContent).not.toContain("developing");
+  for (const title of ["종료 근거", "출처", "문서", "변경", "작업 실행", "소요 시간"]) expect(screen.getByRole("heading", { name: title })).toBeTruthy();
 });
