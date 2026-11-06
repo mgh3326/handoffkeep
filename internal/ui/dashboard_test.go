@@ -85,7 +85,7 @@ func TestBuildDashboard(t *testing.T) {
 		{TaskID: 8, Title: "no pr", At: now.Add(-2 * time.Hour), Refs: &store.TaskRefs{}},
 		{TaskID: 7, Title: "old", At: now.Add(-8 * 24 * time.Hour), Refs: &store.TaskRefs{PR: "https://github.com/mgh3326/panewire/pull/1"}},
 	}
-	got := buildDashboard(now, quota, tasks, merged)
+	got := buildDashboard(now, quota, tasks, merged, []store.DeployService{{Name: "auto_trader", Repo: "mgh3326/auto_trader", Active: true}})
 
 	if len(got.Quota) != 2 || got.Quota[0].Pool != "claude" || got.Quota[1].Pool != "codex" || got.Quota[1].Auto != nil {
 		t.Fatalf("quota=%+v", got.Quota)
