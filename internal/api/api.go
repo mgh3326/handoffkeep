@@ -628,6 +628,8 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("GET /v1/tasks/export", s.tasksExport)
 	m.HandleFunc("GET /v1/tasks/sweep", s.tasksSweepPreview)
 	m.HandleFunc("POST /v1/task-events", s.taskEvents)
+	m.HandleFunc("GET /v1/standing-orders", s.standingList)
+	m.HandleFunc("POST /v1/standing-orders", s.standingPut)
 	m.HandleFunc("GET /v1/projects/{name}/frontier", s.projectFrontier)
 	m.HandleFunc("GET /v1/changes", s.changesList)
 	m.HandleFunc("POST /v1/changes/{id}/merge-flow", s.changeMergeFlow)
@@ -2129,11 +2131,12 @@ func benchRowErrorField(row []byte, fieldTypes map[string]reflect.Type) string {
 // Payload caps for decode, by what the body carries. A route picks one of
 // these or a store-owned limit (store.MaxBytes, benchRequestMaxBytes, ...).
 const (
-	bodyTiny    = 1 << 10  // an id or two and a short reason
-	bodySmall   = 4 << 10  // one entity's short fields
-	bodyEvent   = 16 << 10 // one external event with its references (16 review items fill ~11 KiB)
-	bodyLarge   = 64 << 10 // free text or a list: descriptions, candidates
-	bodyPRState = 2 << 20  // one PR-state write: ~200 checks, 100 threads and a pass of findings (hk 3198)
+	bodyTiny     = 1 << 10  // an id or two and a short reason
+	bodyStanding = 8 << 10  // standing order
+	bodySmall    = 4 << 10  // one entity's short fields
+	bodyEvent    = 16 << 10 // one external event with its references (16 review items fill ~11 KiB)
+	bodyLarge    = 64 << 10 // free text or a list: descriptions, candidates
+	bodyPRState  = 2 << 20  // one PR-state write: ~200 checks, 100 threads and a pass of findings (hk 3198)
 )
 
 // decode reads one JSON request body into v. max is the payload's own byte
