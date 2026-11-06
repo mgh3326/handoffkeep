@@ -63,6 +63,9 @@ it("renders action and reference sections with newest and overdue ordering", asy
   expect(links[0].getAttribute("href")).toBe("/ui/decisions/41");
   expect(links[1].getAttribute("href")).toBe("/ui/decisions");
   expect(within(action).getByText("기한 경과")).toBeTruthy();
+  const waitingRow = within(action).getByText("Review the plan").closest("a");
+  if (!waitingRow) throw new Error("missing waiting task");
+  expect(within(waitingRow).getByText("결정 대기").getAttribute("data-group")).toBe("decision");
   expect(within(fyi).getByRole("link").getAttribute("href")).toBe("/ui/tasks/77");
   expect(within(action).getByText("+1개 더 있음")).toBeTruthy();
 });
@@ -101,8 +104,28 @@ it("places overdue decisions above chronological groups and labels decision and 
 it("summarizes decisions at a sentence, colon, newline, or 90 graphemes", () => {
   expect(summarizeQuestion("**배포할까요?** 다음 문장입니다.")).toBe("배포할까요?");
   expect(summarizeQuestion("선택: 긴 설명")).toBe("선택");
+  expect(summarizeQuestion("Ship v2.0 to prod? Details follow.")).toBe("Ship v2.0 to prod?");
+  expect(summarizeQuestion("Deploy handoffkeep.service? Later.")).toBe("Deploy handoffkeep.service?");
+  expect(summarizeQuestion("Review https://example.test/docs?sort=recent? Then decide.")).toBe("Review https://example.test/docs?sort=recent?");
   expect(summarizeQuestion("첫 줄\n둘째 줄")).toBe("첫 줄");
   expect(summarizeQuestion("가".repeat(91))).toBe("가".repeat(90) + "…");
+});
+it("summarizes safely when Intl.Segmenter is unavailable", () => {
+  vi.stubGlobal("Intl", { ...Intl, Segmenter: undefined });
+  expect(summarizeQuestion("결정할까요? 설명입니다.")).toBe("결정할까요?");
+  expect(summarizeQuestion("가".repeat(91))).toBe("가".repeat(90) + "…");
+});
+it("caps saved read history when opening a row", async () => {
+  localStorage.setItem("hk-console:home-seen", JSON.stringify(Array.from({ length: 500 }, (_, i) => `old:${i}`)));
+  serve(payload()); render(<HomeAttention />);
+  const row = (await screen.findByText("Ship the console?")).closest("a");
+  if (!row) throw new Error("missing row");
+  row.addEventListener("click", event => event.preventDefault());
+  fireEvent.click(row);
+  const saved: unknown = JSON.parse(localStorage.getItem("hk-console:home-seen") ?? "[]");
+  expect(Array.isArray(saved) && saved.length).toBe(500);
+  expect(saved).toContain("decision:request:41");
+  expect(saved).not.toContain("old:0");
 });
 it("marks a row read locally and restores it on remount", async () => {
   serve(payload()); const view = render(<HomeAttention />);
