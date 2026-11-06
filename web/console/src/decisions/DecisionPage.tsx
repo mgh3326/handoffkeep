@@ -3,7 +3,9 @@ import { readCsrfToken } from "../shared/boardApi";
 import { isTypingTarget } from "../shared/search";
 import { formatMinuteKST } from "../shared/time";
 import { loadDetail, postResolve } from "./api";
+import { Icon } from "../shared/Icon";
 import { ConfirmSheet } from "./ConfirmSheet";
+import { DecisionChip, stateChip } from "./DecisionChip";
 import { readDraft, saveDraft, type Draft } from "./drafts";
 import { ResultBadge, resultLabel } from "./ResultBadge";
 import type {
@@ -245,7 +247,9 @@ export function DecisionPage({ id }: { id: string }) {
       <article className="decision-page">
         <p role="alert">
           불러오지 못함{" "}
-          <button onClick={() => location.reload()}>다시 시도</button>
+          <button type="button" className="hk-button" onClick={() => location.reload()}>
+            다시 시도
+          </button>
         </p>
       </article>
     );
@@ -281,9 +285,14 @@ export function DecisionPage({ id }: { id: string }) {
     });
   return (
     <article className="decision-page">
-      <a href={"/ui/decisions" + location.search}>← 결정 목록</a>
+      <a className="decision-back" href={"/ui/decisions" + location.search}>
+        <Icon name="caret-down" className="decision-back-icon" />
+        결정 목록
+      </a>
       <header>
-        <p className="decision-state">● {label(state)}</p>
+        <p className="decision-state">
+          <DecisionChip {...stateChip(state)} label={label(state)} />
+        </p>
         <h1>결정 #{detail.record.id}</h1>
         <p>
           {detail.task?.project ?? detail.record.lane}{" "}
@@ -294,12 +303,12 @@ export function DecisionPage({ id }: { id: string }) {
           )}
         </p>
         {req && (
-          <p>
+          <p className="decision-ref">
             {req.id} · revision {req.revision} · {req.answer_policy}
           </p>
         )}
       </header>
-      <h2>{req?.question ?? detail.record.question}</h2>
+      <h2 className="decision-question">{req?.question ?? detail.record.question}</h2>
       {detail.task && <p>태스크 상태: {detail.task.state}</p>}
       {state === "answered" && req?.resolution && (
         <p>
@@ -332,6 +341,7 @@ export function DecisionPage({ id }: { id: string }) {
               <button
                 type="button"
                 role="radio"
+                className="decision-option"
                 aria-checked={option === o.key}
                 disabled={!detail.answerable || !editable}
                 key={o.key}
@@ -340,18 +350,28 @@ export function DecisionPage({ id }: { id: string }) {
                   setStale(false);
                 }}
               >
-                <strong>
-                  {i + 1}. {o.label}
-                </strong>{" "}
-                {o.recommended && <span>권장</span>}{" "}
-                {req.default_option === o.key && <span>미응답 시 기본값</span>}
+                <span className="decision-option-mark" aria-hidden="true">
+                  {option === o.key && <Icon name="check" />}
+                </span>
+                <span className="decision-option-body">
+                  <strong>
+                    {i + 1}. {o.label}
+                  </strong>
+                  <span className="hk-chips">
+                    {o.recommended && <DecisionChip group="done" label="권장" icon="check" />}
+                    {req.default_option === o.key && (
+                      <DecisionChip group="neutral" label="미응답 시 기본값" />
+                    )}
+                  </span>
+                </span>
               </button>
             ))}
           </div>
           {req.allow_free && (
-            <label>
+            <label className="decision-memo">
               메모
               <textarea
+                className="hk-input"
                 value={text}
                 disabled={!detail.answerable || !editable}
                 onChange={(e) => {
@@ -361,14 +381,16 @@ export function DecisionPage({ id }: { id: string }) {
               />
             </label>
           )}
-          {req.due_at && <p>기한: {deadline(req.due_at)}</p>}
-          <p>
-            답이 없으면 {req.default_action} (
-            {req.default_trigger || "기록된 트리거 없음"})
-          </p>
-          {state === "default_applied" && req.resolution?.receipt && (
-            <p>기본값 적용됨 {req.resolution.receipt}</p>
-          )}
+          <div className="decision-meta">
+            {req.due_at && <p>기한: {deadline(req.due_at)}</p>}
+            <p>
+              답이 없으면 {req.default_action} (
+              {req.default_trigger || "기록된 트리거 없음"})
+            </p>
+            {state === "default_applied" && req.resolution?.receipt && (
+              <p>기본값 적용됨 {req.resolution.receipt}</p>
+            )}
+          </div>
           <details>
             <summary>맥락</summary>
             <p>
@@ -406,9 +428,13 @@ export function DecisionPage({ id }: { id: string }) {
             <p>
               {body?.request_id} · {body?.event_key} · {sentAt}
             </p>
-            <button onClick={checkResult}>결과 확인</button>
+            <button type="button" className="hk-button" onClick={checkResult}>
+              결과 확인
+            </button>
             {checked && body && (
               <button
+                type="button"
+                className="hk-button hk-button--primary"
                 disabled={!readCsrfToken()}
                 onClick={() => {
                   if (!busy.current) {
@@ -431,6 +457,8 @@ export function DecisionPage({ id }: { id: string }) {
           <>
             <button
               ref={opener}
+              type="button"
+              className="hk-button hk-button--primary decision-answer"
               disabled={
                 !detail.answerable ||
                 !readCsrfToken() ||

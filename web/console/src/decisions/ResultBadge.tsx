@@ -15,6 +15,16 @@ export function resultLabel(
 ) {
   return labels[result] + (result === "unknown" && raw ? ` ${raw}` : "");
 }
+const groups: Record<SubmitResult | "unconfirmed", string> = {
+  answered: "done",
+  pending_confirmation: "input",
+  conflict: "failed",
+  stale_revision: "failed",
+  expired: "neutral",
+  superseded: "neutral",
+  unknown: "failed",
+  unconfirmed: "input",
+};
 export function ResultBadge({
   result,
   raw,
@@ -23,7 +33,9 @@ export function ResultBadge({
   raw?: string;
 }) {
   return (
-    <span className={`decision-result decision-result-${result}`}>
+    <span
+      className={`hk-chip hk-chip--${groups[result]} decision-result decision-result-${result}`}
+    >
       {resultLabel(result, raw)}
     </span>
   );

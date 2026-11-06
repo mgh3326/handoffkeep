@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import {
   fireEvent,
@@ -504,4 +505,58 @@ it("A8 a refused answer restores its inputs without an unconfirmed retry", async
   expect((screen.getByLabelText("메모") as HTMLTextAreaElement).value).toBe(
     "corrected",
   );
+});
+
+// ---- hk 3286 (D4): the redesigned detail page ------------------------------
+
+it("D4 options are large radio choices; the recommended one wears a chip", async () => {
+  await start();
+  const options = screen.getAllByRole("radio");
+  expect(options).toHaveLength(3);
+  const ship = screen.getByRole("radio", { name: /Ship/ });
+  const chip = within(ship).getByText("권장");
+  // A chip with an icon and words, not a color: the label is printed and the
+  // other options carry no such chip.
+  expect(chip.className).toContain("hk-chip");
+  expect(chip.querySelector("svg")).toBeTruthy();
+  expect(within(screen.getByRole("radio", { name: /Wait/ })).queryByText("권장")).toBeNull();
+  const css = readFileSync("src/decisions/decisions.css", "utf8");
+  const at = css.indexOf(".decision-options button {");
+  const block = css.slice(at, css.indexOf("}", at));
+  expect(block).toContain("width: 100%");
+  expect(block).toContain("min-height: var(--hk-touch-height)");
+  expect(block).toContain("padding: var(--hk-space-4)");
+});
+
+it("D4 the picked option shows a check, not only a border color", async () => {
+  await start();
+  const wait = screen.getByRole("radio", { name: /Wait/ });
+  expect(wait.querySelector("svg[data-icon='check']")).toBeNull();
+  fireEvent.click(wait);
+  expect(wait.getAttribute("aria-checked")).toBe("true");
+  expect(wait.querySelector("svg[data-icon='check']")).toBeTruthy();
+});
+
+it("D4 answer and sheet buttons use the D1 button classes", async () => {
+  await start();
+  const answer = screen.getByRole("button", { name: "답변 확인" });
+  expect(answer.className).toContain("hk-button--primary");
+  fireEvent.click(screen.getByRole("radio", { name: /Ship/ }));
+  fireEvent.click(answer);
+  expect(screen.getByRole("button", { name: "답변 보내기" }).className).toContain("hk-button--primary");
+  for (const name of ["수정", "취소"]) {
+    const button = screen.getByRole("button", { name });
+    expect(button.className).toContain("hk-button");
+    expect(button.className).not.toContain("hk-button--primary");
+  }
+});
+
+it("D4 the state is a chip with words, not a bullet glyph", async () => {
+  fetcher.mockResolvedValue(response({ ...detail, request: { ...request, state: "overdue" } }));
+  await start();
+  const chip = document.querySelector(".decision-state .hk-chip");
+  expect(chip?.textContent).toBe("기한 경과 · 기본값 미적용");
+  expect(chip?.getAttribute("data-group")).toBe("failed");
+  expect(document.body.textContent).not.toContain("●");
+  expect(document.body.textContent).not.toContain("←");
 });
