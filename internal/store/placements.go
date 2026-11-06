@@ -61,6 +61,20 @@ type PlacementCandidate struct {
 	Tasks        *int     `json:"tasks,omitempty"`
 	TaskSlots    *int     `json:"task_slots,omitempty"`
 	Power        *float64 `json:"power,omitempty"`
+	// LiveJobs, Load1PerCore and Terms are panewire's score-v2 inputs: the
+	// evidence of why a host ranked where it did.
+	LiveJobs     *int            `json:"live_jobs,omitempty"`
+	Load1PerCore *float64        `json:"load1_per_core,omitempty"`
+	Terms        *PlacementTerms `json:"terms,omitempty"`
+}
+
+// PlacementTerms is the hub's five score factors, each within 0..1.
+type PlacementTerms struct {
+	CPU  float64 `json:"cpu"`
+	Mem  float64 `json:"mem"`
+	IO   float64 `json:"io"`
+	Load float64 `json:"load"`
+	Jobs float64 `json:"jobs"`
 }
 
 // ErrInvalidPlacement wraps a placement record's validation failure. Reasons
@@ -148,6 +162,40 @@ func checkPlacement(d PlacementDecision) error {
 			if n != nil && (math.IsNaN(*n) || math.IsInf(*n, 0)) {
 				return placementInvalid("candidates[%d] signal is NaN or Inf", i)
 			}
+		}
+		if err := checkPlacementScoreInputs(i, c); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// checkPlacementScoreInputs validates the score-v2 candidate fields. Reasons
+// name the field and the rule, never the submitted value.
+func checkPlacementScoreInputs(i int, c PlacementCandidate) error {
+	if c.LiveJobs != nil && *c.LiveJobs < 0 {
+		return placementInvalid("candidates[%d].live_jobs must be >= 0", i)
+	}
+	if n := c.Load1PerCore; n != nil {
+		if math.IsNaN(*n) || math.IsInf(*n, 0) {
+			return placementInvalid("candidates[%d].load1_per_core is NaN or Inf", i)
+		}
+		if *n < 0 {
+			return placementInvalid("candidates[%d].load1_per_core must be >= 0", i)
+		}
+	}
+	if c.Terms == nil {
+		return nil
+	}
+	for _, f := range []struct {
+		name string
+		v    float64
+	}{{"cpu", c.Terms.CPU}, {"mem", c.Terms.Mem}, {"io", c.Terms.IO}, {"load", c.Terms.Load}, {"jobs", c.Terms.Jobs}} {
+		if math.IsNaN(f.v) || math.IsInf(f.v, 0) {
+			return placementInvalid("candidates[%d].terms.%s is NaN or Inf", i, f.name)
+		}
+		if f.v < 0 || f.v > 1 {
+			return placementInvalid("candidates[%d].terms.%s must be within 0..1", i, f.name)
 		}
 	}
 	return nil
