@@ -53,11 +53,7 @@ func main() {
 }
 func run(args []string, out, errout io.Writer) error {
 	if len(args) == 0 {
-<<<<<<< HEAD
-		return errors.New("usage: handoffkeep serve|sync|ledger|since|mcp|ctx|memory|doc|attach|r2usage|tasks|tickets|decisions|services|deploys|fleet-metrics|bench|version")
-=======
-		return errors.New("usage: handoffkeep serve|sync|ledger|since|status|mcp|ctx|memory|doc|attach|r2usage|tasks|tickets|decisions|fleet-metrics|bench|version")
->>>>>>> origin/main
+		return errors.New("usage: handoffkeep serve|sync|ledger|since|status|mcp|ctx|memory|doc|attach|r2usage|tasks|tickets|decisions|services|deploys|fleet-metrics|bench|version")
 	}
 	switch args[0] {
 	case "wrk":
@@ -103,11 +99,7 @@ func run(args []string, out, errout io.Writer) error {
 	case "version", "--version":
 		return versionCmd(args[1:], out)
 	default:
-<<<<<<< HEAD
-		return errors.New("usage: handoffkeep serve|sync|ledger|since|mcp|ctx|memory|doc|attach|r2usage|tasks|tickets|decisions|services|deploys|fleet-metrics|bench|version")
-=======
-		return errors.New("usage: handoffkeep serve|sync|ledger|since|status|mcp|ctx|memory|doc|attach|r2usage|tasks|tickets|decisions|fleet-metrics|bench|version")
->>>>>>> origin/main
+		return errors.New("usage: handoffkeep serve|sync|ledger|since|status|mcp|ctx|memory|doc|attach|r2usage|tasks|tickets|decisions|services|deploys|fleet-metrics|bench|version")
 	}
 }
 
