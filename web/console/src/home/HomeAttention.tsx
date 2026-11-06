@@ -53,14 +53,14 @@ function Row({ item, now, seen, markSeen }: { item: Item; now: string; seen: boo
   if (item.kind === "decision") {
     const x = item.value;
     href = x.source === "request" ? `/ui/decisions/${x.id}` : "/ui/decisions";
-    id = x.id; title = "결정 필요"; summary = summarizeQuestion(x.question) || "질문 없음";
+    id = x.id; title = summarizeQuestion(x.question) || "질문 없음"; summary = "결정 대기";
     icon = <StateIcon state="awaiting_decision" />;
-    chips = <><Chip kind="status" state="awaiting_decision" label={x.source === "request" ? "요청" : "레인 이벤트"} />{x.overdue ? <Chip kind="status" state="stalled" stalled label="기한 경과" /> : x.due_at ? <Chip kind="status" state="triage" label={`기한 ${age(x.due_at, now)} 남음`} /> : null}<Chip kind="lane" lane={x.lane} /></>;
+    chips = <><Chip kind="status" state="awaiting_decision" label={x.source === "request" ? "요청" : "알림"} />{x.overdue ? <Chip kind="status" state="stalled" stalled label="기한 경과" /> : x.due_at ? <Chip kind="status" state="triage" label={`기한 ${age(x.due_at, now)} 남음`} /> : null}<Chip kind="lane" lane={x.lane} /></>;
   } else if (item.kind === "task") {
     const x = item.value;
     href = `/ui/tasks/${x.id}`; id = x.id; title = x.title; summary = x.reason === "stalled" ? "멈춘 작업" : "결정 대기 작업";
     icon = x.reason === "stalled" ? <Icon name="warning" /> : <StateIcon state={x.state} />;
-    chips = <><Chip kind="status" state={x.state} stalled={x.reason === "stalled"} /><Chip kind="lane" lane={x.lane} /></>;
+    chips = <><Chip kind="status" state={x.state} stalled={x.reason === "stalled"} label={x.reason === "stalled" ? "멈춤" : undefined} /><Chip kind="lane" lane={x.lane} /></>;
   } else {
     const x = item.value;
     href = `/ui/tasks/${x.task_id}`; id = x.task_id; title = x.title; summary = "머지 후 미배포";
@@ -84,7 +84,7 @@ function Body({ data }: { data: Attention }) {
   const section = (title: string, items: Item[], count: number) => {
     const groups: { label: string; rows: Item[] }[] = [];
     for (const item of items) {
-      const label = dateGroup(data.generated_at, item.time);
+      const label = item.overdue ? "기한 지남" : dateGroup(data.generated_at, item.time);
       const last = groups[groups.length - 1];
       if (last?.label === label) last.rows.push(item);
       else groups.push({ label, rows: [item] });

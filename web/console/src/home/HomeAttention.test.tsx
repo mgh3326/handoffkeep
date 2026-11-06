@@ -84,6 +84,20 @@ it("groups inbox items by local calendar date", async () => {
   expect(screen.getByRole("heading", { name: "어제" })).toBeTruthy();
   expect(screen.getByRole("heading", { name: "이전" })).toBeTruthy();
 });
+it("places overdue decisions above chronological groups and labels decision and stalled rows", async () => {
+  serve(payload({ generated_at: "2026-11-08T05:00:00Z", decisions: { count: 2, overdue: 1, items: [{ ...request, created_at: "2026-11-07T01:00:00Z" }, { ...laneEvent, created_at: "2026-11-08T01:00:00Z" }] }, tasks: { count: 1, awaiting_decision: 0, stalled: 1, items: [{ ...stalledTask, since: "2026-11-07T02:00:00Z" }] }, deploys: { count: 0, events_capped: false, items: [] } }));
+  render(<HomeAttention />);
+  const action = await screen.findByRole("region", { name: "지금 할 일" });
+  expect(within(action).getAllByRole("heading", { level: 3 }).map(h => h.textContent)).toEqual(["기한 지남", "오늘", "어제"]);
+  const decision = within(action).getByText("Which database?").closest("a");
+  if (!decision) throw new Error("missing decision");
+  expect(within(decision).getByText("알림")).toBeTruthy();
+  expect(within(action).queryByText("레인 이벤트")).toBeNull();
+  const stalled = within(action).getByText("Idle build").closest("a");
+  if (!stalled) throw new Error("missing task");
+  expect(within(stalled).getByText("멈춤")).toBeTruthy();
+  expect(within(stalled).queryByText("검토 중")).toBeNull();
+});
 it("summarizes decisions at a sentence, colon, newline, or 90 graphemes", () => {
   expect(summarizeQuestion("**배포할까요?** 다음 문장입니다.")).toBe("배포할까요?");
   expect(summarizeQuestion("선택: 긴 설명")).toBe("선택");

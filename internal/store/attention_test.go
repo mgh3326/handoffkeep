@@ -174,7 +174,7 @@ func TestAttentionSnoozedAndExpiredRequestsExcluded(t *testing.T) {
 	if got.Count != 2 || len(got.Items) != 2 {
 		t.Fatalf("got %v (count %d), want only %d and %d", decisionIDs(got.Items), got.Count, open, woke)
 	}
-	if ids := decisionIDs(got.Items); ids[0] != fmt.Sprintf("request:%d", open) || ids[1] != fmt.Sprintf("request:%d", woke) {
+	if ids := decisionIDs(got.Items); ids[0] != fmt.Sprintf("request:%d", woke) || ids[1] != fmt.Sprintf("request:%d", open) {
 		t.Fatalf("items=%v", ids)
 	}
 }

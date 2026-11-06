@@ -1,4 +1,4 @@
-.ha-root { max-width: var(--hk-reading-width); padding: var(--hk-space-4); color: var(--hk-text-primary); font-family: var(--hk-font-ui); }
+.ha-root { max-width: 912px; padding: var(--hk-space-4); color: var(--hk-text-primary); font-family: var(--hk-font-ui); }
 .ha-title { margin: 0; font-size: var(--hk-type-page); line-height: var(--hk-line-page); }
 .ha-summary-count, .ha-note { color: var(--hk-text-secondary); font-size: var(--hk-type-meta); }
 .ha-section { margin-top: var(--hk-space-6); min-width: 0; }
@@ -13,7 +13,6 @@
 .ha-icon { flex: 0 0 var(--hk-space-8); width: var(--hk-space-8); height: var(--hk-space-8); display: grid; place-items: center; border: var(--hk-border-width) solid var(--hk-border-control); border-radius: var(--hk-radius-pill); }
 .ha-icon .hk-icon { width: 16px; height: 16px; }
 .ha-content { min-width: 0; flex: 1; display: grid; gap: var(--hk-space-half); position: relative; }
-.ha-item + .ha-item .ha-content::before { content: ""; position: absolute; top: -10px; left: 0; right: 0; border-top: var(--hk-border-width) solid var(--hk-border-subtle); }
 .ha-line, .ha-detail { min-width: 0; display: flex; align-items: center; gap: var(--hk-space-2); }
 .ha-line { height: 17px; font-size: var(--hk-type-row); font-weight: var(--hk-weight-strong); }
 .ha-row-title, .ha-summary { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
