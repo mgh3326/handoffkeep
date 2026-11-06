@@ -2,7 +2,7 @@
  * No CDN: the console CSP allows font-src 'self' only.
  * Pretendard Variable: OFL-1.1, public/fonts/Pretendard-OFL.txt, v1.3.9
  *   dynamic-subset build; the browser fetches only the subsets a page uses.
- * JetBrains Mono: OFL-1.1, public/fonts/JetBrainsMono-OFL.txt, v2.304 via
+ * JetBrains Mono: OFL-1.1, public/fonts/JetBrainsMono-OFL.txt, from
  *   @fontsource-variable/jetbrains-mono 5.3.0 (latin + latin-ext). */
 /* [0] */
 @font-face {
