@@ -252,7 +252,9 @@ it("A14 unknown record states are explicit", async () => {
     response({ ...detail, request: { ...request, state: "future" } }),
   );
   await start();
-  expect(screen.getByText(/지원되지 않는 상태 future/)).toBeTruthy();
+  expect(
+    screen.getAllByText(/지원되지 않는 상태 future/).length,
+  ).toBeGreaterThan(0);
 });
 it("A16 typing targets do not select via numeric keys", async () => {
   await start();

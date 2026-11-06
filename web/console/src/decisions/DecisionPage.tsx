@@ -27,6 +27,7 @@ const states: Record<RecordState, string> = {
   unknown: "지원되지 않는 상태",
 };
 function label(raw: string): string {
+  if (raw === "unknown") return `${states.unknown} ${raw}`;
   return Object.prototype.hasOwnProperty.call(states, raw)
     ? states[raw as RecordState]
     : `${states.unknown} ${raw}`;
@@ -250,15 +251,19 @@ export function DecisionPage({ id }: { id: string }) {
       ? latestAttempt
       : null;
   const reason =
-    detail.disabled_reason === "source_elsewhere"
-      ? "이 원천은 기존 페이지에서 답합니다"
-      : detail.disabled_reason === "superseded"
-        ? "대체된 요청입니다"
-        : detail.disabled_reason === "closed"
-          ? "닫힌 요청입니다"
-          : detail.disabled_reason
-            ? `지원되지 않는 사유 ${detail.disabled_reason}`
-            : "";
+    (!Object.prototype.hasOwnProperty.call(states, state) ||
+      state === "unknown") &&
+    !detail.disabled_reason
+      ? `${states.unknown} ${state}`
+      : detail.disabled_reason === "source_elsewhere"
+        ? "이 원천은 기존 페이지에서 답합니다"
+        : detail.disabled_reason === "superseded"
+          ? "대체된 요청입니다"
+          : detail.disabled_reason === "closed"
+            ? "닫힌 요청입니다"
+            : detail.disabled_reason
+              ? `지원되지 않는 사유 ${detail.disabled_reason}`
+              : "";
   const oldDrafts: { request: string; draft: Draft }[] = detail.history
     .filter((h) => h.id !== req?.id)
     .flatMap((h) => {
