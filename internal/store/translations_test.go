@@ -10,19 +10,21 @@ func TestTranslationValidation(t *testing.T) {
 	valid := Translation{Entity: "task", EntityID: "1", Field: "title", Lang: "ko", SourceSHA256: SourceSHA256("hello"), Text: "안녕하세요", Translator: "test"}
 	for _, tc := range []struct {
 		name   string
+		reason string
 		change func(*Translation)
 	}{
-		{"entity", func(x *Translation) { x.Entity = "wrong" }},
-		{"field", func(x *Translation) { x.Field = "question" }},
-		{"language", func(x *Translation) { x.Lang = "en" }},
-		{"hash", func(x *Translation) { x.SourceSHA256 = "bad" }},
-		{"secret", func(x *Translation) { x.Text = "sk-" + strings.Repeat("a", 48) }},
+		{"entity", "entity", func(x *Translation) { x.Entity = "wrong" }},
+		{"field", "field", func(x *Translation) { x.Field = "question" }},
+		{"language", "lang", func(x *Translation) { x.Lang = "en" }},
+		{"hash", "source_sha256", func(x *Translation) { x.SourceSHA256 = "bad" }},
+		{"secret", "secret_like_content", func(x *Translation) { x.Text = "sk-" + strings.Repeat("a", 48) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			x := valid
 			tc.change(&x)
-			if err := checkTranslation(x); err == nil {
-				t.Fatal("accepted invalid translation")
+			err := checkTranslation(x)
+			if err == nil || !strings.Contains(err.Error(), tc.reason) {
+				t.Fatalf("error=%v, want reason %q", err, tc.reason)
 			}
 		})
 	}

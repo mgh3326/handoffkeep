@@ -54,3 +54,24 @@ func TestTranslationsMissingAPI(t *testing.T) {
 		t.Fatalf("unexpected: %+v", out.Translations)
 	}
 }
+
+func TestTranslationBatchAPI(t *testing.T) {
+	h, st, _ := ledgerAPIServer(t)
+	rows := make([]store.Translation, 100)
+	for i := range rows {
+		rows[i] = store.Translation{Entity: "task", EntityID: strconv.Itoa(i + 1), Field: "title", Lang: "ko", SourceSHA256: store.SourceSHA256("source"), Text: "번역", Translator: "test"}
+	}
+	var result map[string]any
+	if status := decisionAPICall(t, h, http.MethodPut, "/v1/translations", map[string]any{"translations": rows}, &result); status != http.StatusOK || result["count"] != float64(100) {
+		t.Fatalf("status=%d result=%v", status, result)
+	}
+	rows[0].Text = "새 번역"
+	rows[1].Lang = "en"
+	if status := decisionAPICall(t, h, http.MethodPut, "/v1/translations", map[string]any{"translations": rows}, &result); status != http.StatusBadRequest {
+		t.Fatalf("invalid batch status=%d", status)
+	}
+	stored, err := st.ListTranslations(t.Context(), "task", []store.TranslationSource{{EntityID: "1", Field: "title", Original: "source"}})
+	if err != nil || len(stored) != 1 || stored[0].Text != "번역" {
+		t.Fatalf("atomic batch: %+v err=%v", stored, err)
+	}
+}
