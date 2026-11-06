@@ -2,9 +2,9 @@ package store
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -14,9 +14,10 @@ var ErrInvalidDecisionTab = errors.New("invalid decision tab")
 
 type DecisionTabItem struct {
 	DecisionRecord
-	RequestState string `json:"request_state"`
-	RequestID    string `json:"request_id"`
-	Revision     int    `json:"revision"`
+	RequestState       string `json:"request_state"`
+	RequestID          string `json:"request_id"`
+	Revision           int    `json:"revision"`
+	SupersededRecordID *int64 `json:"superseded_record_id"`
 }
 
 type DecisionTab struct {
@@ -37,8 +38,8 @@ func (s *Store) ListDecisionTab(ctx context.Context, tab string, now time.Time, 
 		predicate = decisionOpenSQL + ` AND due_at<=$1::timestamptz`
 		order = `(due_at IS NOT NULL AND due_at<=$1::timestamptz) DESC,due_at ASC NULLS LAST,created_at,id`
 	case "answered":
-		predicate = `$1::timestamptz IS NOT NULL AND status='answered'`
-		order = `answered_at DESC,id DESC`
+		predicate = `$1::timestamptz IS NOT NULL AND (status='answered' OR (status='superseded' AND superseded_by='withdrawn'))`
+		order = `answered_at DESC NULLS LAST,id DESC`
 	case "cleanup":
 		predicate = decisionOpenSQL + ` AND EXISTS (SELECT 1 FROM tasks WHERE tasks.id=decision_requests.task_id AND tasks.state IN (` + settledStatesSQL + `))`
 		order = `created_at,id`
@@ -82,6 +83,10 @@ func (s *Store) ListDecisionTab(ctx context.Context, tab string, now time.Time, 
 	}
 	for i := range out.Items {
 		x := &out.Items[i]
+		x.SupersededRecordID, err = decisionReplacement(ctx, tx, x.SupersededBy)
+		if err != nil {
+			return out, err
+		}
 		if x.Source != DecisionSourceTaskRequest || x.TaskID == nil {
 			continue
 		}
@@ -97,11 +102,41 @@ func (s *Store) ListDecisionTab(ctx context.Context, tab string, now time.Time, 
 				x.RequestID = entry.Request.ID
 				x.Revision = entry.Request.Revision
 				x.RequestState = DecisionRequestState(entry.Request, task.State, entry.SupersededBy != "", now)
+				switch entry.Request.Status {
+				case DecisionRequestOpen, DecisionRequestAnswered, DecisionRequestDefaultApplied, DecisionRequestWithdrawn:
+				default:
+					x.RequestState = entry.Request.Status
+				}
+				if entry.Request.Status == DecisionRequestDefaultApplied && (entry.Request.Resolution == nil || entry.Request.Resolution.Receipt == "") {
+					x.RequestState = "default_applied_without_receipt"
+				}
 				break
 			}
 		}
 	}
 	return out, tx.Commit(ctx)
+}
+
+func decisionReplacement(ctx context.Context, q interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}, ref string) (*int64, error) {
+	source, key, ok := strings.Cut(ref, ":")
+	if !ok || source != DecisionSourceTaskRequest {
+		return nil, nil
+	}
+	var id int64
+	err := q.QueryRow(ctx, `SELECT id FROM decision_requests WHERE source=$1 AND source_ref=$2`, source, key).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &id, nil
+}
+
+func (s *Store) DecisionReplacement(ctx context.Context, ref string) (*int64, error) {
+	return decisionReplacement(ctx, s.pool, ref)
 }
 
 func decisionViewTask(ctx context.Context, tx pgx.Tx, id int64) (Task, bool, error) {
@@ -125,7 +160,7 @@ func decisionViewTask(ctx context.Context, tx pgx.Tx, id int64) (Task, bool, err
 		}
 		if len(raw) > 0 {
 			var refs TaskRefs
-			if err = json.Unmarshal(raw, &refs); err != nil {
+			if _, err = scanJSONB(raw, &refs); err != nil {
 				return Task{}, false, fmt.Errorf("decision task event: %w", err)
 			}
 			task.Events = append(task.Events, TaskEvent{Refs: &refs})

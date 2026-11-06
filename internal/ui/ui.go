@@ -272,7 +272,11 @@ func (h *Handler) serveSubroute(w http.ResponseWriter, r *http.Request, email st
 		return
 	}
 	if raw, ok := strings.CutPrefix(r.URL.Path, "/ui/decisions/"); ok {
-		h.taskPage(w, r, raw, email)
+		if !taskIDPattern.MatchString(raw) {
+			http.Error(w, "invalid decision id", http.StatusBadRequest)
+			return
+		}
+		h.shell(w, r)
 		return
 	}
 	if file, ok := strings.CutPrefix(r.URL.Path, "/ui/static/"); ok {

@@ -112,6 +112,7 @@ export function parseAttention(raw: unknown): Attention {
     generated_at: text(root, "generated_at", "attention"),
     decisions: {
       count: count(decisions, "count", "decisions"),
+      overdue: count(decisions, "overdue", "decisions"),
       items: items(decisions, "decisions", decision),
     },
     tasks: {

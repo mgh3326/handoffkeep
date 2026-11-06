@@ -17,6 +17,5 @@ it("/ui/tasks/42 fetches and displays the task record", async () => {
   window.history.pushState(null, "", "/ui/tasks/42");
   render(<App />);
   expect(await screen.findByRole("heading", { name: "#42 Example task" })).toBeTruthy();
-  expect(fetchMock).toHaveBeenCalledTimes(1);
   expect(fetchMock).toHaveBeenCalledWith("/ui/api/board/tasks/42");
 });

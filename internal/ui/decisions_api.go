@@ -63,10 +63,11 @@ func (h *Handler) decisionsAPI(w http.ResponseWriter, r *http.Request, identity 
 		return
 	}
 	var task *struct {
-		ID    int64  `json:"id"`
-		Title string `json:"title"`
-		State string `json:"state"`
-		Lane  string `json:"lane"`
+		ID      int64   `json:"id"`
+		Title   string  `json:"title"`
+		State   string  `json:"state"`
+		Lane    string  `json:"lane"`
+		Project *string `json:"project"`
 	}
 	type requestView struct {
 		decisionRequestView
@@ -85,23 +86,21 @@ func (h *Handler) decisionsAPI(w http.ResponseWriter, r *http.Request, identity 
 		}
 		if ok {
 			task = &struct {
-				ID    int64  `json:"id"`
-				Title string `json:"title"`
-				State string `json:"state"`
-				Lane  string `json:"lane"`
-			}{t.ID, t.Title, t.State, t.Lane}
+				ID      int64   `json:"id"`
+				Title   string  `json:"title"`
+				State   string  `json:"state"`
+				Lane    string  `json:"lane"`
+				Project *string `json:"project"`
+			}{t.ID, t.Title, t.State, t.Lane, t.Project}
 			entries := store.DecisionRequestHistory(t)
 			for _, entry := range entries {
 				v := projectDecisionRequest(entry, t.State, now)
 				history = append(history, v)
 				if record.Source == store.DecisionSourceTaskRequest && entry.Request.ID == record.SourceRef {
-					policy := "operator_relay_allowed"
-					if entry.Request.HumanOnly {
-						policy = "operator_direct"
-					}
+					policy := entry.Request.EffectivePolicy(t.Refs.Disposition != nil)
 					request = &requestView{v, entry.Request.HumanOnly, policy}
 					reason = ""
-					if !entry.Current || record.Status == store.DecisionStatusSuperseded {
+					if !entry.Current || (record.Status == store.DecisionStatusSuperseded && record.SupersededBy != "withdrawn") {
 						reason = "superseded"
 					} else if entry.Request.Status != store.DecisionRequestOpen || record.Status != store.DecisionStatusOpen {
 						reason = "closed"
@@ -118,16 +117,25 @@ func (h *Handler) decisionsAPI(w http.ResponseWriter, r *http.Request, identity 
 	if record.Source == store.DecisionSourceTaskRequest && request == nil {
 		reason = "superseded"
 	}
+	replacement, err := h.store.DecisionReplacement(r.Context(), record.SupersededBy)
+	if err != nil {
+		decisionsFailed(w, err)
+		return
+	}
+	type recordView struct {
+		store.DecisionRecord
+		SupersededRecordID *int64 `json:"superseded_record_id"`
+	}
 	writeBoardJSON(w, struct {
 		GeneratedAt    time.Time               `json:"generated_at"`
-		Record         store.DecisionRecord    `json:"record"`
+		Record         recordView              `json:"record"`
 		Task           any                     `json:"task"`
 		Request        any                     `json:"request"`
 		History        []decisionRequestView   `json:"history"`
 		Attempts       []store.DecisionAttempt `json:"attempts"`
 		Answerable     bool                    `json:"answerable"`
 		DisabledReason string                  `json:"disabled_reason"`
-	}{now, record, task, request, history, attempts, reason == "", reason})
+	}{now, recordView{record, replacement}, task, request, history, attempts, reason == "", reason})
 }
 
 func decisionsFailed(w http.ResponseWriter, err error) {

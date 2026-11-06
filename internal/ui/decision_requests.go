@@ -49,6 +49,7 @@ type decisionRequestView struct {
 	DefaultTrigger string                    `json:"default_trigger,omitempty"`
 	DueAt          *time.Time                `json:"due_at,omitempty"`
 	Doc            string                    `json:"doc,omitempty"`
+	Refs           []string                  `json:"refs,omitempty"`
 	RequestedBy    string                    `json:"requested_by"`
 	RequestedAt    time.Time                 `json:"requested_at"`
 	Resolution     *store.DecisionResolution `json:"resolution,omitempty"`
@@ -68,12 +69,20 @@ type legacyDecisionView struct {
 func projectDecisionRequest(entry store.DecisionRequestEntry, taskState string, now time.Time) decisionRequestView {
 	request := entry.Request
 	state := store.DecisionRequestState(request, taskState, entry.SupersededBy != "", now)
+	switch request.Status {
+	case store.DecisionRequestOpen, store.DecisionRequestAnswered, store.DecisionRequestDefaultApplied, store.DecisionRequestWithdrawn:
+	default:
+		state = request.Status
+	}
+	if request.Status == store.DecisionRequestDefaultApplied && (request.Resolution == nil || request.Resolution.Receipt == "") {
+		state = "default_applied_without_receipt"
+	}
 	view := decisionRequestView{
 		ID: request.ID, Revision: request.Revision, Supersedes: request.Supersedes, SupersededBy: strings.TrimPrefix(entry.SupersededBy, "?"),
 		Current: entry.Current, State: state, StateLabel: decisionStateLabels[state],
 		Question: request.Question, Options: []store.DecisionOption{}, Reason: request.Reason,
 		DefaultAction: request.DefaultAction, DefaultOption: request.DefaultOption, DefaultTrigger: request.DefaultTrigger,
-		DueAt: request.DueAt, Doc: request.Doc, RequestedBy: request.RequestedBy, RequestedAt: request.RequestedAt.UTC(),
+		DueAt: request.DueAt, Doc: request.Doc, Refs: request.Refs, RequestedBy: request.RequestedBy, RequestedAt: request.RequestedAt.UTC(),
 		Resolution: request.Resolution,
 	}
 	if entry.Options != nil {
