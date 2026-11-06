@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/json"
 	"errors"
 	"math"
 	"reflect"
@@ -67,5 +68,30 @@ func TestPlacementScoreV2InputsRoundTrip(t *testing.T) {
 	// A retry of the identical record carrying the new fields is not a conflict.
 	if _, created, err = s.RecordPlacement(t.Context(), d); err != nil || created {
 		t.Fatalf("retry created=%v err=%v", created, err)
+	}
+}
+
+// TestPlacementDecodesAndChecksPanewireScoreV2Record decodes a record in
+// panewire's shape the way the API does (unknown fields refused) and runs it
+// through checkPlacement. A still-unknown candidate field stays refused.
+func TestPlacementDecodesAndChecksPanewireScoreV2Record(t *testing.T) {
+	record := func(extra string) string {
+		return `{"job_id":"job-v2","attempt":1,"decided_at":"` + time.Now().UTC().Format(time.RFC3339Nano) + `","decided_on":"node-a","source":"auto","ranking":"score","state_source":"hub","outcome":"refused","candidates":[{"host":"node-a","outcome":"ok","reason":"","score":0.42,"signal_age_s":1.5,"cpu_busy_short":0.1,"cpu_busy_5m":0.2,"mem_available":0.6,"swap_in_mbps":0,"power_source":"ac","bridged_jobs":1,"active_jobs":2,"tasks":3,"task_slots":4,"power":12.5,"live_jobs":3,"load1_per_core":0.75,"terms":{"cpu":0.1,"mem":0.2,"io":0.3,"load":0.4,"jobs":0.5}` + extra + `}]}`
+	}
+	decode := func(body string) (PlacementDecision, error) {
+		var d PlacementDecision
+		de := json.NewDecoder(strings.NewReader(body))
+		de.DisallowUnknownFields()
+		return d, de.Decode(&d)
+	}
+	d, err := decode(record(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkPlacement(d); err != nil {
+		t.Fatalf("panewire score-v2 record refused: %v", err)
+	}
+	if _, err := decode(record(`,"live_job":1`)); err == nil {
+		t.Fatal("unknown candidate field accepted")
 	}
 }

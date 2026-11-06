@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -109,5 +110,39 @@ func TestPlacementScoreV2StatusAndReason(t *testing.T) {
 				t.Fatalf("reason=%q want %q", reason, tc.reason)
 			}
 		})
+	}
+}
+
+// TestPlacementEndpointStoresScoreV2Candidate sends panewire's candidate
+// through decode, checkPlacement and the store, then reads it back from GET.
+func TestPlacementEndpointStoresScoreV2Candidate(t *testing.T) {
+	_, url := testdb.Schema(t, "placement_v2_api")
+	st, err := store.Open(t.Context(), url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(st.Close)
+	srv := httptest.NewServer(Server{Service: Service{Store: st}, Tokens: Tokens{"node": "node-token"}, HostGrants: HostGrants{"node": {"host-a": true}}}.Handler())
+	t.Cleanup(srv.Close)
+	status, response := jobsRequest(t, http.MethodPost, srv.URL+"/v1/placements", "node-token", placementBody(panewireCandidate))
+	if status != http.StatusCreated {
+		t.Fatal(status, response)
+	}
+	status, response = jobsRequest(t, http.MethodGet, srv.URL+"/v1/placements?job=job-v2&limit=1", "node-token", "")
+	if status != http.StatusOK {
+		t.Fatal(status, response)
+	}
+	got := response["placements"].([]any)[0].(map[string]any)["candidates"].([]any)[0].(map[string]any)
+	var want map[string]any
+	if err := json.Unmarshal([]byte(panewireCandidate), &want); err != nil {
+		t.Fatal(err)
+	}
+	for k, v := range want {
+		if k == "reason" {
+			continue // empty, not stored with omitempty
+		}
+		if !reflect.DeepEqual(got[k], v) {
+			t.Fatalf("%s: got %v want %v", k, got[k], v)
+		}
 	}
 }
