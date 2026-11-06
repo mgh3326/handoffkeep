@@ -152,7 +152,7 @@ func scanVerification(row pgx.Row, v *Verification) error {
 // modified. The same payload again returns the stored row with created
 // false. A different payload is ErrVerificationExists unless the stored level
 // is verifier-blocked (no verdict was given): then it is replaced in place.
-// It locks at most one changes row (the stub upsert) and one verifications
+// It locks at most one changes row (the stub insert) and one verifications
 // row, and no task row (lockorder.go).
 func (s *Store) RecordVerification(ctx context.Context, in VerificationInput, recordedBy string) (Verification, bool, error) {
 	if err := checkVerification(in); err != nil {
@@ -168,16 +168,15 @@ func (s *Store) RecordVerification(ctx context.Context, in VerificationInput, re
 		return Verification{}, false, err
 	}
 	defer tx.Rollback(ctx)
+	// The stub never updates an existing row: an event writer that created
+	// the change first keeps its head (upsertChangeTx would overwrite it).
+	if _, err = tx.Exec(ctx, `INSERT INTO changes(repo,pr_number,state,head_sha,opened_at,created_at,updated_at)
+VALUES($1,$2,'open',$3,$4,$4,$4) ON CONFLICT(repo,pr_number) DO NOTHING`, repo, n, in.HeadSHA, now); err != nil {
+		return Verification{}, false, err
+	}
 	var changeID int64
 	var changeHead *string
-	err = tx.QueryRow(ctx, `SELECT id,head_sha FROM changes WHERE repo=$1 AND pr_number=$2`, repo, n).Scan(&changeID, &changeHead)
-	if errors.Is(err, pgx.ErrNoRows) {
-		changeID, err = upsertChangeTx(ctx, tx, changeWrite{repo: repo, number: n, state: ChangeOpen, head: in.HeadSHA}, now, now)
-		if err == nil {
-			err = tx.QueryRow(ctx, `SELECT head_sha FROM changes WHERE id=$1`, changeID).Scan(&changeHead)
-		}
-	}
-	if err != nil {
+	if err = tx.QueryRow(ctx, `SELECT id,head_sha FROM changes WHERE repo=$1 AND pr_number=$2`, repo, n).Scan(&changeID, &changeHead); err != nil {
 		return Verification{}, false, err
 	}
 	args := []any{changeID, in.HeadSHA, in.Level, in.Verifier, nullStr(in.VerifierJobID), in.Family, nullStr(in.Profile), nullStr(in.Model), nullStr(in.Harness), in.Evidence, nullStr(in.CIResult), in.Source, recordedBy, now}
