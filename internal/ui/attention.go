@@ -43,8 +43,9 @@ type attentionDeployView struct {
 type attentionResponse struct {
 	GeneratedAt time.Time `json:"generated_at"`
 	Decisions   struct {
-		Count int                     `json:"count"`
-		Items []attentionDecisionView `json:"items"`
+		Count   int                     `json:"count"`
+		Overdue int                     `json:"overdue"`
+		Items   []attentionDecisionView `json:"items"`
 	} `json:"decisions"`
 	Tasks struct {
 		Count            int                 `json:"count"`
@@ -83,6 +84,7 @@ func (h *Handler) attention(w http.ResponseWriter, r *http.Request, identity cfa
 
 	response := attentionResponse{GeneratedAt: now}
 	response.Decisions.Count = waiting.Decisions.Count
+	response.Decisions.Overdue = waiting.Decisions.Overdue
 	response.Decisions.Items = make([]attentionDecisionView, 0, len(waiting.Decisions.Items))
 	for _, x := range waiting.Decisions.Items {
 		response.Decisions.Items = append(response.Decisions.Items, attentionDecisionView(x))

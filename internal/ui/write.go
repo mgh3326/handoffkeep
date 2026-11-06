@@ -801,7 +801,7 @@ func (h *Handler) decisionResult(w http.ResponseWriter, r *http.Request, email, 
 		h.decisions(w, r, true, email, notice)
 		return
 	}
-	http.Redirect(w, r, "/ui/decisions?result="+url.QueryEscape(notice), http.StatusSeeOther)
+	http.Redirect(w, r, "/ui/decisions/legacy?result="+url.QueryEscape(notice), http.StatusSeeOther)
 }
 
 func (h *Handler) composeResult(w http.ResponseWriter, r *http.Request, email, notice string, status int) {
