@@ -27,13 +27,17 @@ const findingThreadJoin = `LEFT JOIN change_threads t ON t.change_id=f.change_id
 
 // ChangeInclude selects the sections of the one-PR read besides the change
 // itself and its freshness, which are always present.
-type ChangeInclude struct{ Checks, Threads, Findings, Gate bool }
+type ChangeInclude struct{ Checks, Threads, Findings, Gate, Reviews bool }
+
+// includeReviews is the read-only section holding the change's review rows
+// (hk 3208); it is not a write section.
+const includeReviews = "reviews"
 
 // AllChangeSections includes every section.
-var AllChangeSections = ChangeInclude{Checks: true, Threads: true, Findings: true, Gate: true}
+var AllChangeSections = ChangeInclude{Checks: true, Threads: true, Findings: true, Gate: true, Reviews: true}
 
 // ParseChangeInclude parses the include query value: a comma list of checks,
-// threads, findings and gate. Empty means all.
+// threads, findings, gate and reviews. Empty means all.
 func ParseChangeInclude(v string) (ChangeInclude, error) {
 	if v == "" {
 		return AllChangeSections, nil
@@ -49,8 +53,10 @@ func ParseChangeInclude(v string) (ChangeInclude, error) {
 			in.Findings = true
 		case SectionGate:
 			in.Gate = true
+		case includeReviews:
+			in.Reviews = true
 		default:
-			return ChangeInclude{}, invalidChangeWrite("include must list checks, threads, findings or gate")
+			return ChangeInclude{}, invalidChangeWrite("include must list checks, threads, findings, gate or reviews")
 		}
 	}
 	return in, nil
@@ -108,6 +114,9 @@ type ChangeCheck struct {
 	CompletedAt *time.Time `json:"completed_at,omitempty"`
 	ObservedAt  time.Time  `json:"observed_at"`
 	Source      string     `json:"source"`
+	// DeliveryID is the delivery of the write that last inserted or changed
+	// the row; unset when that write sent none.
+	DeliveryID *string `json:"delivery_id,omitempty"`
 }
 
 // ChangeThread is one stored review thread.
@@ -176,12 +185,14 @@ type ChangeFreshness struct {
 // ChangeView is the one-PR read. A section the include option left out is nil
 // and absent from the JSON; an included empty one is [].
 type ChangeView struct {
-	Change    ChangeSummary    `json:"change"`
-	Gate      *ChangeGate      `json:"gate,omitempty"`
-	Checks    *[]ChangeCheck   `json:"checks,omitempty"`
-	Threads   *[]ChangeThread  `json:"threads,omitempty"`
-	Findings  *[]ChangeFinding `json:"findings,omitempty"`
-	Freshness ChangeFreshness  `json:"freshness"`
+	Change   ChangeSummary    `json:"change"`
+	Gate     *ChangeGate      `json:"gate,omitempty"`
+	Checks   *[]ChangeCheck   `json:"checks,omitempty"`
+	Threads  *[]ChangeThread  `json:"threads,omitempty"`
+	Findings *[]ChangeFinding `json:"findings,omitempty"`
+	// Reviews is every review row of the change, ordered by id (hk 3208).
+	Reviews   *[]ChangeReview `json:"reviews,omitempty"`
+	Freshness ChangeFreshness `json:"freshness"`
 }
 
 func freshness(at *time.Time, source *string) *SectionFreshness {
@@ -238,14 +249,14 @@ FROM changes WHERE repo=$1 AND pr_number=$2`, ref.Repo, ref.PR).Scan(&c.ID, &c.R
 		v.Gate = &g
 	}
 	if opt.Include.Checks {
-		rows, err := tx.Query(ctx, `SELECT head_sha,name,state,conclusion,url,required,started_at,completed_at,observed_at,source FROM change_checks
+		rows, err := tx.Query(ctx, `SELECT head_sha,name,state,conclusion,url,required,started_at,completed_at,observed_at,source,delivery_id FROM change_checks
 WHERE change_id=$1 AND NOT gone AND ($2 OR head_sha=$3) ORDER BY (head_sha=$3) DESC, head_sha, name`, c.ID, opt.AllHeads, head)
 		if err != nil {
 			return ChangeView{}, false, err
 		}
 		checks, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (ChangeCheck, error) {
 			var k ChangeCheck
-			err := r.Scan(&k.HeadSHA, &k.Name, &k.State, &k.Conclusion, &k.URL, &k.Required, &k.StartedAt, &k.CompletedAt, &k.ObservedAt, &k.Source)
+			err := r.Scan(&k.HeadSHA, &k.Name, &k.State, &k.Conclusion, &k.URL, &k.Required, &k.StartedAt, &k.CompletedAt, &k.ObservedAt, &k.Source, &k.DeliveryID)
 			return k, err
 		})
 		if err != nil {
@@ -255,6 +266,13 @@ WHERE change_id=$1 AND NOT gone AND ($2 OR head_sha=$3) ORDER BY (head_sha=$3) D
 			checks = []ChangeCheck{}
 		}
 		v.Checks = &checks
+	}
+	if opt.Include.Reviews {
+		reviews := []ChangeReview{}
+		if err = readReviews(ctx, tx, []int64{c.ID}, func(_ int64, r ChangeReview) { reviews = append(reviews, r) }); err != nil {
+			return ChangeView{}, false, err
+		}
+		v.Reviews = &reviews
 	}
 	if opt.Include.Threads {
 		rows, err := tx.Query(ctx, `SELECT thread_id,url,path,line,author,author_kind,severity,resolved,outdated,replied,comment_count,last_comment_at,excerpt,redacted,observed_at,source

@@ -124,6 +124,12 @@ func TestParseChangeInclude(t *testing.T) {
 	if in, err := ParseChangeInclude("checks,threads"); err != nil || in != (ChangeInclude{Checks: true, Threads: true}) {
 		t.Fatalf("checks,threads: %+v %v", in, err)
 	}
+	if in, err := ParseChangeInclude("reviews"); err != nil || in != (ChangeInclude{Reviews: true}) {
+		t.Fatalf("reviews: %+v %v", in, err)
+	}
+	if !AllChangeSections.Reviews {
+		t.Fatal("reviews is part of the default read")
+	}
 	for _, bad := range []string{"checks,", "diff", "checks,,gate"} {
 		if _, err := ParseChangeInclude(bad); !errors.Is(err, ErrInvalidChangeWrite) {
 			t.Fatalf("%q: err=%v", bad, err)
