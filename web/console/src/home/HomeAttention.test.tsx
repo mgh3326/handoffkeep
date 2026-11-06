@@ -82,13 +82,13 @@ it("summarizes decisions at a sentence, colon, newline, or 90 graphemes", () => 
 it("marks a row read locally and restores it on remount", async () => {
   serve(payload()); const view = render(<HomeAttention />);
   const row = (await screen.findByText("Ship the console?")).closest("a");
-  expect(row?.querySelector('[aria-label="읽지 않음"]')).toBeTruthy();
+  expect(row && within(row).getByText("읽지 않음")).toBeTruthy();
   if (!row) throw new Error("missing row");
   row.addEventListener("click", event => event.preventDefault());
   fireEvent.click(row);
-  expect(row.querySelector('[aria-label="읽음"]')).toBeTruthy();
+  expect(within(row).getByText("읽음")).toBeTruthy();
   view.unmount(); render(<HomeAttention />);
-  expect((await screen.findByText("Ship the console?")).closest("a")?.querySelector('[aria-label="읽음"]')).toBeTruthy();
+  expect(within((await screen.findByText("Ship the console?")).closest("a")!).getByText("읽음")).toBeTruthy();
 });
 it("renders the centered empty state", async () => {
   serve(payload({ decisions: { count: 0, overdue: 0, items: [] }, tasks: { count: 0, awaiting_decision: 0, stalled: 0, items: [] }, deploys: { count: 0, events_capped: false, items: [] } }));

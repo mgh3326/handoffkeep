@@ -68,7 +68,7 @@ function Row({ item, now, seen, markSeen }: { item: Item; now: string; seen: boo
   }
   return <li className={`ha-item${seen ? " ha-item--seen" : ""}`}><a className="ha-row" href={href} onClick={() => markSeen(item.key)}>
     <span className="ha-icon">{icon}</span><span className="ha-content">
-      <span className="ha-line"><span className="ha-dot" aria-label={seen ? "읽음" : "읽지 않음"} /><Mono>#{id}</Mono><span className="ha-row-title">{title}</span><time dateTime={item.time} title={formatMinuteUTC(item.time) ?? "시각 미상"}>{age(now, item.time)}</time></span>
+      <span className="ha-line"><span className="ha-dot" aria-hidden="true" /><span className="hk-sr-only">{seen ? "읽음" : "읽지 않음"}</span><Mono>#{id}</Mono><span className="ha-row-title">{title}</span><time dateTime={item.time} title={formatMinuteUTC(item.time) ?? "시각 미상"}>{age(now, item.time)}</time></span>
       <span className="ha-detail"><span className="ha-summary">{summary}</span><span className="ha-chips">{chips}</span></span>
     </span></a></li>;
 }
