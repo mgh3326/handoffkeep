@@ -65,7 +65,7 @@ it("renders action and reference sections with newest and overdue ordering", asy
   expect(within(action).getByText("기한 경과")).toBeTruthy();
   const waitingRow = within(action).getByText("Review the plan").closest("a");
   if (!waitingRow) throw new Error("missing waiting task");
-  expect(within(waitingRow).getByText("결정 대기").getAttribute("data-group")).toBe("decision");
+  expect(within(waitingRow).getByText("결정 필요").getAttribute("data-group")).toBe("decision");
   expect(within(fyi).getByRole("link").getAttribute("href")).toBe("/ui/tasks/77");
   expect(within(action).getByText("+1개 더 있음")).toBeTruthy();
 });
