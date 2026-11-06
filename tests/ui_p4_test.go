@@ -487,7 +487,7 @@ func TestUIP4StructuredDecisionRendering(t *testing.T) {
 	recommended := p4DecisionTask(t, h, lane, "긴 한국어 결정 제목: 영속 저장 경로를 선택합니다", p4Options(true, false))
 	plain := p4DecisionTask(t, h, lane, "권고 없는 결정", p4Options(false, true))
 
-	response := uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions", assertion, "")
+	response := uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions/legacy", assertion, "")
 	body := responseText(t, response)
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("status=%d body=%q", response.StatusCode, body)
@@ -530,8 +530,8 @@ func TestUIP4BatchAnswersAndAudit(t *testing.T) {
 	task := p4DecisionTask(t, h, lane, "일괄 답변 태스크", p4Options(true, true))
 	escalation := seedRelay(t, s, lane, "job.escalate", uiLane(t, "batch-escalation"), "", "[decision-needed] ESC worker-a(T16 §2,#75): held영속 Q1\n[options] A|노드 로컬 저장;B|중앙 저장 선행;rec=A", "")
 	laneEvent := seedRelay(t, s, lane, "lane.event", "", "[decision-needed] lane answer", "", "")
-	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions", assertion)
-	body := responseText(t, uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions", assertion, ""))
+	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions/legacy", assertion)
+	body := responseText(t, uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions/legacy", assertion, ""))
 	values := url.Values{"csrf": {csrf}, "mode": {"selected"}}
 	for _, item := range []struct {
 		kind string
@@ -589,7 +589,7 @@ func TestUIP4BatchConflictAndRecommended(t *testing.T) {
 	if status, body := p4PostJSON(t, h, "/v1/tasks/"+strconv.FormatInt(closed, 10)+"/transition", map[string]any{"to": "claimed", "note": "answered"}); status != http.StatusOK {
 		t.Fatalf("close task status=%d body=%q", status, body)
 	}
-	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions", assertion)
+	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions/legacy", assertion)
 	values := url.Values{"csrf": {csrf}, "mode": {"selected"}}
 	p4Item(values, 0, "task", closed, "A: 노드 로컬 저장")
 	values.Set("items.0.select", "1")
@@ -606,7 +606,7 @@ func TestUIP4BatchConflictAndRecommended(t *testing.T) {
 
 	withRecommendation := p4DecisionTask(t, h, lane, "recommended", p4Options(true, true))
 	withoutRecommendation := p4DecisionTask(t, h, lane, "not recommended", p4Options(false, true))
-	cookie, csrf = uiCSRF(t, h.Client(), h.URL+"/ui/decisions", assertion)
+	cookie, csrf = uiCSRF(t, h.Client(), h.URL+"/ui/decisions/legacy", assertion)
 	values = url.Values{"csrf": {csrf}, "mode": {"recommended"}}
 	p4Item(values, 0, "task", withRecommendation, "B: 중앙 저장 선행")
 	p4Item(values, 1, "task", withoutRecommendation, "A: 노드 로컬 저장")
@@ -782,7 +782,7 @@ func TestUIP4BatchRejectsNoFreeCustom(t *testing.T) {
 	defer h.Close()
 	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
 	task := p4DecisionTask(t, h, uiLane(t, "lane-a"), "closed free", p4Options(true, false))
-	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions", assertion)
+	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions/legacy", assertion)
 	values := url.Values{"csrf": {csrf}, "mode": {"selected"}}
 	p4Item(values, 0, "task", task, "A: 노드 로컬 저장")
 	values.Set("items.0.custom", "forbidden direct reply")
@@ -801,7 +801,7 @@ func TestUIP4BatchSelectionBoundsAndHubFailure(t *testing.T) {
 	h := newUITestServer(t, s, fixture, hub.server.URL, "hub-test-token", 0)
 	defer h.Close()
 	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
-	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions", assertion)
+	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions/legacy", assertion)
 	response := uiPostForm(t, h.Client(), h.URL+"/ui/decisions/answer-batch", assertion, cookie, url.Values{"csrf": {csrf}, "mode": {"selected"}}, h.URL, false)
 	if body := responseText(t, response); response.StatusCode != http.StatusOK || !strings.Contains(body, "선택된 항목이 없습니다.") || len(hub.requests()) != 0 {
 		t.Fatalf("empty selection status=%d body=%q hub=%d", response.StatusCode, body, len(hub.requests()))
@@ -845,7 +845,7 @@ func TestUIP4BatchSecurityAndConsoleEscalationClosure(t *testing.T) {
 	defer h.Close()
 	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
 	task := p4DecisionTask(t, h, uiLane(t, "lane-a"), "batch security", p4Options(true, true))
-	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions", assertion)
+	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions/legacy", assertion)
 	values := url.Values{"csrf": {csrf}, "mode": {"selected"}}
 	p4Item(values, 0, "task", task, "A: 노드 로컬 저장")
 	values.Set("items.0.select", "1")
@@ -884,7 +884,7 @@ func TestUIP4BatchSecurityAndConsoleEscalationClosure(t *testing.T) {
 		t.Fatalf("service batch status=%d body=%q", response.StatusCode, responseText(t, response))
 	}
 	response.Body.Close()
-	for _, path := range []string{"/ui/decisions", "/ui/queue"} {
+	for _, path := range []string{"/ui/decisions", "/ui/decisions/legacy", "/ui/queue"} {
 		response = p3Request(t, service.Client(), http.MethodGet, service.URL+path, serviceAssertion, nil, "")
 		if response.StatusCode != http.StatusForbidden {
 			t.Fatalf("service %s status=%d", path, response.StatusCode)
@@ -907,13 +907,13 @@ func TestUIP4BatchSecurityAndConsoleEscalationClosure(t *testing.T) {
 	hub.mu.Unlock()
 	escalationText := "[decision-needed] P4 console escalation closure"
 	escalation := seedRelay(t, s, uiLane(t, "lane-a"), "job.escalate", uiLane(t, "console-close"), "", escalationText, "")
-	cookie, csrf = uiCSRF(t, h.Client(), h.URL+"/ui/decisions", assertion)
+	cookie, csrf = uiCSRF(t, h.Client(), h.URL+"/ui/decisions/legacy", assertion)
 	response = uiPostForm(t, h.Client(), h.URL+"/ui/decisions/answer", assertion, cookie, decisionFields("escalation", escalation.ID, "continue", csrf), h.URL, true)
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("console escalation status=%d body=%q", response.StatusCode, responseText(t, response))
 	}
 	response.Body.Close()
-	body := responseText(t, uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions", assertion, ""))
+	body := responseText(t, uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions/legacy", assertion, ""))
 	if strings.Contains(body, escalationText) {
 		t.Fatalf("console answered escalation remained in inbox: %q", body)
 	}
@@ -929,8 +929,8 @@ func TestUIP4LegacyDecisionControlsAndAnswer(t *testing.T) {
 	lane := uiLane(t, "lane-a")
 	legacy := p4LegacyDecisionTask(t, h, lane, "FT1 legacy options")
 
-	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions", assertion)
-	body := responseText(t, uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions", assertion, ""))
+	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions/legacy", assertion)
+	body := responseText(t, uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions/legacy", assertion, ""))
 	index := p4Index(t, body, "task", legacy)
 	start := strings.Index(body, "#"+strconv.FormatInt(legacy, 10))
 	end := strings.Index(body[start:], "</article>")
@@ -978,8 +978,8 @@ func TestUIP4LegacyDecisionOnlyAndWhitelist(t *testing.T) {
 		lane := uiLane(t, "lane-a")
 		legacy := p4LegacyDecisionTask(t, h, lane, "FT3 legacy only")
 		other := p4DecisionTask(t, h, lane, "FT3 other decision", p4Options(true, true))
-		cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions", assertion)
-		body := responseText(t, uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions", assertion, ""))
+		cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions/legacy", assertion)
+		body := responseText(t, uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions/legacy", assertion, ""))
 		index := p4Index(t, body, "task", legacy)
 		otherIndex := p4Index(t, body, "task", other)
 		values := url.Values{"csrf": {csrf}, "only": {strconv.Itoa(index)}}
@@ -1008,8 +1008,8 @@ func TestUIP4LegacyDecisionOnlyAndWhitelist(t *testing.T) {
 		defer h.Close()
 		assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
 		legacy := p4LegacyDecisionTask(t, h, uiLane(t, "lane-a"), "FT4 legacy whitelist")
-		cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions", assertion)
-		body := responseText(t, uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions", assertion, ""))
+		cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions/legacy", assertion)
+		body := responseText(t, uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions/legacy", assertion, ""))
 		index := p4Index(t, body, "task", legacy)
 		values := url.Values{"csrf": {csrf}, "only": {strconv.Itoa(index)}}
 		p4Item(values, index, "task", legacy, "마음대로")
@@ -1041,7 +1041,7 @@ func TestUIP4DecisionInboxDoesNotHideEventKindsAfterFiftyTasks(t *testing.T) {
 	laneText := "[decision-needed] FT5 lane decision remains visible"
 	seedRelay(t, s, lane, "lane.event", "", laneText, "", "")
 
-	response := uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions", assertion, "")
+	response := uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions/legacy", assertion, "")
 	body := responseText(t, response)
 	if response.StatusCode != http.StatusOK || !strings.Contains(body, escalationQuestion) || !strings.Contains(body, "FT5 lane decision remains visible") {
 		t.Fatalf("decision kinds hidden after fifty tasks status=%d body=%q", response.StatusCode, body)
@@ -1079,8 +1079,8 @@ func TestUIP4RenderedDecisionFormOnlyOverFifty(t *testing.T) {
 	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
 	tasks := p4RecommendedDecisionTasks(t, h, uiLane(t, "lane-a"), "GT1 rendered form", 56)
 	target := tasks[len(tasks)-1]
-	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions", assertion)
-	body := responseText(t, uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions", assertion, ""))
+	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions/legacy", assertion)
+	body := responseText(t, uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions/legacy", assertion, ""))
 	index := p4Index(t, body, "task", target)
 	extra := url.Values{"csrf": {csrf}, "only": {strconv.Itoa(index)}}
 	extra.Set("items."+strconv.Itoa(index)+".answer", "A: 노드 로컬 저장")
@@ -1109,8 +1109,8 @@ func TestUIP4RenderedDecisionFormOnlyThreshold(t *testing.T) {
 			assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
 			tasks := p4RecommendedDecisionTasks(t, h, uiLane(t, "lane-a"), "GT2 rendered form", count)
 			target := tasks[len(tasks)-1]
-			cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions", assertion)
-			body := responseText(t, uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions", assertion, ""))
+			cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions/legacy", assertion)
+			body := responseText(t, uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions/legacy", assertion, ""))
 			index := p4Index(t, body, "task", target)
 			extra := url.Values{"csrf": {csrf}, "only": {strconv.Itoa(index)}}
 			extra.Set("items."+strconv.Itoa(index)+".answer", "A: 노드 로컬 저장")
@@ -1132,8 +1132,8 @@ func TestUIP4SelectedDecisionBatchAdvancesOverFifty(t *testing.T) {
 	defer h.Close()
 	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
 	tasks := p4RecommendedDecisionTasks(t, h, uiLane(t, "lane-a"), "GT3 selected", 51)
-	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions", assertion)
-	body := responseText(t, uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions", assertion, ""))
+	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions/legacy", assertion)
+	body := responseText(t, uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions/legacy", assertion, ""))
 	ordered := p4TasksByRenderedIndex(t, body, tasks)
 	extra := url.Values{"csrf": {csrf}, "mode": {"selected"}}
 	for _, id := range tasks {
@@ -1175,8 +1175,8 @@ func TestUIP4RecommendedDecisionBatchAdvancesOverFifty(t *testing.T) {
 	defer h.Close()
 	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
 	tasks := p4RecommendedDecisionTasks(t, h, uiLane(t, "lane-a"), "GT4 recommended", 51)
-	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions", assertion)
-	body := responseText(t, uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions", assertion, ""))
+	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions/legacy", assertion)
+	body := responseText(t, uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions/legacy", assertion, ""))
 	response, rendered := submitRenderedDecisionForm(t, h, assertion, cookie, body, url.Values{"csrf": {csrf}, "mode": {"recommended"}})
 	responseBody := responseText(t, response)
 	if rendered < len(tasks) || response.StatusCode != http.StatusOK || strings.Count(responseBody, `data-item-status="200"`) != 50 || !regexp.MustCompile(`[1-9][0-9]*건이 남았습니다\. 다시 제출하면 이어서 처리됩니다\.`).MatchString(responseBody) || len(hub.requests()) != 50 {
@@ -1301,7 +1301,7 @@ func TestUIP4OversizedFormTruncatesInsteadOfLocking(t *testing.T) {
 	h := newUITestServer(t, s, fixture, hub.server.URL, "hub-test-token", 0)
 	defer h.Close()
 	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
-	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions", assertion)
+	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions/legacy", assertion)
 	values := url.Values{"csrf": {csrf}, "mode": {"selected"}}
 	for index := 0; index < p4DecisionBatchRenderLimit+1; index++ {
 		p4Item(values, index, "task", int64(index+1), "A: 노드 로컬 저장")
@@ -1365,8 +1365,8 @@ func TestUIP4RenderedDecisionFormSuccessfulControls(t *testing.T) {
 	defer h.Close()
 	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
 	task := p4StructuredDecisionTasks(t, s, uiLane(t, "lane-a"), "AC3", 1)[0]
-	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions", assertion)
-	body := responseText(t, uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions", assertion, ""))
+	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions/legacy", assertion)
+	body := responseText(t, uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions/legacy", assertion, ""))
 	index := p4Index(t, body, "task", task)
 	values, indexes := p4SerializedDecisionForm(t, body, url.Values{
 		"csrf": {csrf},
@@ -1400,8 +1400,8 @@ func TestUIP4RenderedDecisionFormParameterBudget(t *testing.T) {
 	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
 	p4StructuredDecisionTasks(t, s, uiLane(t, "lane-a"), "AC4", p4DecisionBatchRenderLimit)
 	p4Escalations(t, s, uiLane(t, "lane-e"), p4DecisionBatchRenderLimit, p4StructuredDecisionQuestion())
-	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions", assertion)
-	body := responseText(t, uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions", assertion, ""))
+	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions/legacy", assertion)
+	body := responseText(t, uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions/legacy", assertion, ""))
 	controls := p4DecisionFormControls(t, body)
 	indexes := p4RenderedDecisionIndexes(t, controls)
 	if len(indexes) != p4DecisionBatchRenderLimit {
@@ -1478,7 +1478,7 @@ func TestUIP4DecisionRenderLimitAndNotice(t *testing.T) {
 					}
 				})
 			}
-			body := responseText(t, uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions", assertion, ""))
+			body := responseText(t, uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions/legacy", assertion, ""))
 			_, indexes := p4SerializedDecisionForm(t, body, nil)
 			if len(indexes) != p4DecisionBatchRenderLimit {
 				t.Fatalf("AC1 backlog=%d rendered=%d want=%d", test.cards, len(indexes), p4DecisionBatchRenderLimit)
@@ -1513,7 +1513,7 @@ func TestUIP4OnlyBeyondDirectTruncationWindowIsReported(t *testing.T) {
 	h := newUITestServer(t, s, fixture, hub.server.URL, "hub-test-token", 0)
 	defer h.Close()
 	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
-	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions", assertion)
+	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions/legacy", assertion)
 	values := url.Values{"csrf": {csrf}, "only": {strconv.Itoa(p4DecisionBatchRenderLimit)}}
 	for index := 0; index < p4DecisionBatchRenderLimit+1; index++ {
 		p4Item(values, index, "task", int64(index+1), "A: 노드 로컬 저장")
@@ -1538,8 +1538,8 @@ func TestUIP4RecommendedKeepsRemainderNoticeWithoutResults(t *testing.T) {
 	for index := 0; index < 51; index++ {
 		claimAndTransition(t, s, createUITask(t, s, lane, "HT5 legacy "+strconv.Itoa(index)), "needs_decision", "Pick\noptions: 승인 | 반려")
 	}
-	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions", assertion)
-	body := responseText(t, uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions", assertion, ""))
+	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions/legacy", assertion)
+	body := responseText(t, uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions/legacy", assertion, ""))
 	extra := url.Values{"csrf": {csrf}, "mode": {"recommended"}}
 	response, _ := submitRenderedDecisionForm(t, h, assertion, cookie, body, extra)
 	responseBody := responseText(t, response)
@@ -1574,13 +1574,13 @@ func TestUIP4MixedThreeThousandBacklogConverges(t *testing.T) {
 		}
 	}
 	hub.mu.Unlock()
-	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions", assertion)
+	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions/legacy", assertion)
 	counter := newP4OwnedDecisionCounter(t, tasks, escalations, lanes)
 	counts := counter.counts(t)
 	if counts != (p4OpenDecisionCounts{Tasks: 1000, Escalations: 1000, Lanes: 1000}) {
 		t.Fatalf("AC5 initial open decisions=%+v", counts)
 	}
-	body := responseText(t, uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions", assertion, ""))
+	body := responseText(t, uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions/legacy", assertion, ""))
 	_, indexes := p4SerializedDecisionForm(t, body, nil)
 	if len(indexes) != p4DecisionBatchRenderLimit || !strings.Contains(body, `data-render-notice>현재 조회된 3000건 중 1000건 표시`) {
 		t.Fatalf("AC5 initial render=%d notice=%t", len(indexes), strings.Contains(body, `data-render-notice>현재 조회된 3000건 중 1000건 표시`))
@@ -1667,7 +1667,7 @@ func TestUIP4StaleEscalationsFoldIntoSignals(t *testing.T) {
 			t.Logf("stale lane cleanup: %v", err)
 		}
 	})
-	body := responseText(t, uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions", assertion, ""))
+	body := responseText(t, uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions/legacy", assertion, ""))
 	if got := len(p4VisibleOwnedIndexes(t, body, "escalation", staleIDs)); got != 0 {
 		t.Fatalf("unmarked escalations rendered %d answer controls", got)
 	}
@@ -1693,7 +1693,7 @@ func TestUIP4StaleEscalationsFoldIntoSignals(t *testing.T) {
 	}
 	// A direct write against an unmarked escalation is rejected the same way
 	// an unknown or closed decision is: it is not an answerable item.
-	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions", assertion)
+	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions/legacy", assertion)
 	response := uiPostForm(t, h.Client(), h.URL+"/ui/decisions/answer", assertion, cookie, decisionFields("escalation", staleIDs[0], "continue", csrf), h.URL, true)
 	if response.StatusCode != http.StatusBadRequest {
 		t.Fatalf("unmarked escalation answer status=%d body=%q", response.StatusCode, responseText(t, response))

@@ -76,8 +76,8 @@ func TestUIDispositionSingleAnswerRecordsThenNotifies(t *testing.T) {
 	x := mustCreateDisposition(t, s, dispositionInput(lane, dispositionPR(t), 2, "C"))
 	gen := openGen(t, s, x.ID)
 
-	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions", assertion)
-	body := uiGetWithCookie(t, h.Client(), h.URL+"/ui/decisions", assertion, cookie)
+	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions/legacy", assertion)
+	body := uiGetWithCookie(t, h.Client(), h.URL+"/ui/decisions/legacy", assertion, cookie)
 	if !strings.Contains(body, `data-disposition-head>미처분 1 · 최고령 0일<`) || !strings.Contains(body, fmt.Sprintf(`data-disposition-id="%d"`, x.ID)) || !strings.Contains(body, `value="C" checked`) {
 		t.Fatalf("disposition section not rendered: %q", body)
 	}
@@ -123,7 +123,7 @@ func TestUIDispositionEmitFailureStaysRecordedAndRenotifies(t *testing.T) {
 	lane := uiLane(t, "director")
 	x := mustCreateDisposition(t, s, dispositionInput(lane, dispositionPR(t), 0, "A"))
 	gen := openGen(t, s, x.ID)
-	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions", assertion)
+	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions/legacy", assertion)
 	fields := url.Values{"csrf": {csrf}, "id": {strconv.FormatInt(x.ID, 10)}, "gen": {strconv.FormatInt(gen, 10)}, "key": {"A"}}
 	response := uiPostForm(t, h.Client(), h.URL+"/ui/dispositions/answer", assertion, cookie, fields, h.URL, true)
 	body := responseText(t, response)
@@ -168,8 +168,8 @@ func TestUIDispositionBatchIsOneActionOverTheSnapshot(t *testing.T) {
 		mustCreateDisposition(t, s, dispositionInput(lane, dispositionPR(t), 1, "C")),
 		mustCreateDisposition(t, s, dispositionInput(lane, dispositionPR(t), 0, "E")),
 	}
-	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions", assertion)
-	body := uiGetWithCookie(t, h.Client(), h.URL+"/ui/decisions", assertion, cookie)
+	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions/legacy", assertion)
+	body := uiGetWithCookie(t, h.Client(), h.URL+"/ui/decisions/legacy", assertion, cookie)
 	if !strings.Contains(body, "권고 일괄 수락 3건 (A 1 · C 1 · E 1)") || strings.Contains(body, "data-next-batch") {
 		t.Fatalf("batch button: %q", body)
 	}
@@ -229,8 +229,8 @@ func TestUIDispositionNextBatchIsShown(t *testing.T) {
 	for i := 0; i < store.DispositionBatchLimit+2; i++ {
 		mustCreateDisposition(t, s, dispositionInput(lane, dispositionPR(t), 0, "E"))
 	}
-	cookie, _ := uiCSRF(t, h.Client(), h.URL+"/ui/decisions", assertion)
-	body := uiGetWithCookie(t, h.Client(), h.URL+"/ui/decisions", assertion, cookie)
+	cookie, _ := uiCSRF(t, h.Client(), h.URL+"/ui/decisions/legacy", assertion)
+	body := uiGetWithCookie(t, h.Client(), h.URL+"/ui/decisions/legacy", assertion, cookie)
 	if !strings.Contains(body, "data-disposition-head>미처분 52 · 최고령 0일 · 다음 묶음 2건<") {
 		t.Fatalf("header does not name the next batch: %q", body)
 	}
@@ -257,7 +257,7 @@ func TestUIDispositionRefusesNonOperatorPaths(t *testing.T) {
 	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
 	x := mustCreateDisposition(t, s, dispositionInput(lane, dispositionPR(t), 0, "A"))
 	gen := openGen(t, s, x.ID)
-	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions", assertion)
+	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions/legacy", assertion)
 	answer := url.Values{"csrf": {csrf}, "id": {strconv.FormatInt(x.ID, 10)}, "gen": {strconv.FormatInt(gen, 10)}, "key": {"A"}}
 	before := uiRowCounts(t)
 	unchanged := func(label string) {

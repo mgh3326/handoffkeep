@@ -294,7 +294,7 @@ func TestUIFailClosedAndMethodGuard(t *testing.T) {
 	defer h.Close()
 	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
 	before := uiRowCounts(t)
-	for _, endpoint := range []string{"/ui", "/ui/timeline", "/ui/queue", "/ui/deploys", "/ui/decisions", "/ui/fleet", "/ui/events", "/ui/fragments/timeline"} {
+	for _, endpoint := range []string{"/ui", "/ui/timeline", "/ui/queue", "/ui/deploys", "/ui/decisions", "/ui/decisions/legacy", "/ui/fleet", "/ui/events", "/ui/fragments/timeline"} {
 		for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete} {
 			response := uiRequest(t, h.Client(), method, h.URL+endpoint, assertion, "")
 			if response.StatusCode != http.StatusMethodNotAllowed {
@@ -475,7 +475,7 @@ func TestUIDecisionInbox(t *testing.T) {
 	closedLane := seedRelay(t, s, answeredLane, "lane.event", "", "[decision-needed] already answered", "", "")
 	seedRelay(t, s, answeredLane, "lane.event", "", "[decision-answered] #"+strconv.FormatInt(closedLane.ID, 10)+": answer", "", "")
 	seedRelay(t, s, lane, "lane.event", "", "ordinary event", "", "")
-	response := uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions", assertion, "")
+	response := uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions/legacy", assertion, "")
 	body := responseText(t, response)
 	if response.StatusCode != http.StatusOK || !strings.Contains(body, question) || strings.Contains(body, "closed question") {
 		t.Fatal("task decision inbox did not preserve only unresolved full question")

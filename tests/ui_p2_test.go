@@ -169,7 +169,7 @@ func TestUIWriteDecisionRoutes(t *testing.T) {
 	// Task decision: protocol payload, htmx fragment, transition audit, and log.
 	task := createUITask(t, s, "lane-a", "approve task")
 	claimAndTransition(t, s, task, "needs_decision", "Pick one\noptions: approve | hold | reject")
-	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions", assertion)
+	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions/legacy", assertion)
 	var audit bytes.Buffer
 	oldOutput := log.Writer()
 	log.SetOutput(&audit)
@@ -206,7 +206,7 @@ func TestUIWriteDecisionRoutes(t *testing.T) {
 	hub.mu.Unlock()
 	duplicateTask := createUITask(t, s, "lane-a", "duplicate task")
 	claimAndTransition(t, s, duplicateTask, "needs_decision", "choose")
-	cookie, csrf = uiCSRF(t, h.Client(), h.URL+"/ui/decisions", assertion)
+	cookie, csrf = uiCSRF(t, h.Client(), h.URL+"/ui/decisions/legacy", assertion)
 	response = uiPostForm(t, h.Client(), h.URL+"/ui/decisions/answer", assertion, cookie, decisionFields("task", duplicateTask.ID, "yes", csrf), h.URL, true)
 	if body = responseText(t, response); !strings.Contains(body, "이미 전송됨") {
 		t.Fatalf("duplicate response=%q", body)
@@ -222,7 +222,7 @@ func TestUIWriteDecisionRoutes(t *testing.T) {
 	hub.mu.Unlock()
 	failedTask := createUITask(t, s, "lane-a", "failed task")
 	claimAndTransition(t, s, failedTask, "needs_decision", "choose")
-	cookie, csrf = uiCSRF(t, h.Client(), h.URL+"/ui/decisions", assertion)
+	cookie, csrf = uiCSRF(t, h.Client(), h.URL+"/ui/decisions/legacy", assertion)
 	response = uiPostForm(t, h.Client(), h.URL+"/ui/decisions/answer", assertion, cookie, decisionFields("task", failedTask.ID, "yes", csrf), h.URL, true)
 	if body = responseText(t, response); !strings.Contains(body, "레인 전송 실패: hub status 502") {
 		t.Fatalf("failure response=%q", body)
@@ -243,7 +243,7 @@ func TestUIWriteDecisionRoutes(t *testing.T) {
 		}
 	}
 	hub.mu.Unlock()
-	cookie, csrf = uiCSRF(t, h.Client(), h.URL+"/ui/decisions", assertion)
+	cookie, csrf = uiCSRF(t, h.Client(), h.URL+"/ui/decisions/legacy", assertion)
 	response = uiPostForm(t, h.Client(), h.URL+"/ui/decisions/answer", assertion, cookie, decisionFields("task", conflictTask.ID, "yes", csrf), h.URL, true)
 	if body = responseText(t, response); !strings.Contains(body, "이미 답변됨") {
 		t.Fatalf("conflict response=%q", body)
@@ -256,7 +256,7 @@ func TestUIWriteDecisionRoutes(t *testing.T) {
 	hub.mu.Unlock()
 	errorTask := createUITask(t, s, "lane-a", "transition error task")
 	claimAndTransition(t, s, errorTask, "needs_decision", "choose")
-	cookie, csrf = uiCSRF(t, h.Client(), h.URL+"/ui/decisions", assertion)
+	cookie, csrf = uiCSRF(t, h.Client(), h.URL+"/ui/decisions/legacy", assertion)
 	response = uiPostForm(t, h.Client(), h.URL+"/ui/decisions/answer", assertion, cookie, decisionFields("task", errorTask.ID, "-----BEGIN synthetic", csrf), h.URL, true)
 	if body = responseText(t, response); !strings.Contains(body, "web-decision-task-") || !strings.Contains(body, "수동 전이 필요") {
 		t.Fatalf("transition error response=%q", body)
@@ -273,7 +273,7 @@ func TestUIWriteDecisionRoutes(t *testing.T) {
 	hub.mu.Unlock()
 	badTask := createUITask(t, s, "lane-a", "bad hub task")
 	claimAndTransition(t, s, badTask, "needs_decision", "choose")
-	cookie, csrf = uiCSRF(t, h.Client(), h.URL+"/ui/decisions", assertion)
+	cookie, csrf = uiCSRF(t, h.Client(), h.URL+"/ui/decisions/legacy", assertion)
 	response = uiPostForm(t, h.Client(), h.URL+"/ui/decisions/answer", assertion, cookie, decisionFields("task", badTask.ID, "yes", csrf), h.URL, true)
 	if body = responseText(t, response); !strings.Contains(body, "레인 전송 실패: hub status 400") {
 		t.Fatalf("bad hub response=%q", body)
@@ -295,7 +295,7 @@ func TestUIWriteDecisionRoutes(t *testing.T) {
 	}
 	hub.mu.Unlock()
 	laneEvent := seedRelay(t, s, "lane-b", "lane.event", "", "[decision-needed] choose lane", "", "")
-	cookie, csrf = uiCSRF(t, h.Client(), h.URL+"/ui/decisions", assertion)
+	cookie, csrf = uiCSRF(t, h.Client(), h.URL+"/ui/decisions/legacy", assertion)
 	response = uiPostForm(t, h.Client(), h.URL+"/ui/decisions/answer", assertion, cookie, decisionFields("lane", laneEvent.ID, "go", csrf), h.URL, true)
 	if body = responseText(t, response); !strings.Contains(body, "전송됨(event_id=web-decision-lane-") {
 		t.Fatalf("lane response=%q", body)
@@ -304,7 +304,7 @@ func TestUIWriteDecisionRoutes(t *testing.T) {
 	if !strings.HasPrefix(requests[len(requests)-1].Text, "[decision-answered] #"+strconv.FormatInt(laneEvent.ID, 10)+":") {
 		t.Fatalf("lane event text=%q", requests[len(requests)-1].Text)
 	}
-	response = uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions", assertion, "")
+	response = uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions/legacy", assertion, "")
 	if body = responseText(t, response); strings.Contains(body, laneEvent.Text) {
 		t.Fatalf("answered lane item remained in inbox: %q", body)
 	}
@@ -312,7 +312,7 @@ func TestUIWriteDecisionRoutes(t *testing.T) {
 	// Escalations route to their owner lane and do not transition unrelated tasks.
 	escalation := seedRelay(t, s, "lane-b", "job.escalate", "p2-open-escalation", "", "[decision-needed] Need a decision", "")
 	before := uiRowCounts(t)
-	cookie, csrf = uiCSRF(t, h.Client(), h.URL+"/ui/decisions", assertion)
+	cookie, csrf = uiCSRF(t, h.Client(), h.URL+"/ui/decisions/legacy", assertion)
 	response = uiPostForm(t, h.Client(), h.URL+"/ui/decisions/answer", assertion, cookie, decisionFields("escalation", escalation.ID, "continue", csrf), h.URL, true)
 	if body = responseText(t, response); response.StatusCode != http.StatusOK {
 		t.Fatalf("escalation status=%d body=%q", response.StatusCode, body)
@@ -462,7 +462,7 @@ func TestUIWriteHubTimeoutLeavesTaskUnchanged(t *testing.T) {
 	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
 	task := createUITask(t, s, "lane-a", "timeout task")
 	claimAndTransition(t, s, task, "needs_decision", "choose")
-	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions", assertion)
+	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions/legacy", assertion)
 	response := uiPostForm(t, h.Client(), h.URL+"/ui/decisions/answer", assertion, cookie, decisionFields("task", task.ID, "yes", csrf), h.URL, true)
 	body := responseText(t, response)
 	if response.StatusCode != http.StatusOK || !strings.Contains(body, "레인 전송 실패:") {
@@ -483,7 +483,7 @@ func TestUIWriteNeverLeaksHubToken(t *testing.T) {
 	h := newUITestServer(t, s, fixture, hub.server.URL, token, 0)
 	defer h.Close()
 	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
-	for _, endpoint := range []string{"/ui/timeline", "/ui/queue", "/ui/deploys", "/ui/decisions", "/ui/fleet", "/ui/compose"} {
+	for _, endpoint := range []string{"/ui/timeline", "/ui/queue", "/ui/deploys", "/ui/decisions", "/ui/decisions/legacy", "/ui/fleet", "/ui/compose"} {
 		response := uiRequest(t, h.Client(), http.MethodGet, h.URL+endpoint, assertion, "")
 		body := responseText(t, response)
 		if strings.Contains(body, token) {
@@ -587,7 +587,7 @@ func TestUIDocIngressBadgeAndApproval(t *testing.T) {
 	}
 	response.Body.Close()
 
-	response = uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions", assertion, "")
+	response = uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions/legacy", assertion, "")
 	body = responseText(t, response)
 	for _, option := range append(append(approvalOptions, escalationOptions...), laneOptions...) {
 		if strings.Count(body, `.answer" value="`+option+`"`) != 1 {
@@ -605,7 +605,7 @@ func TestUIDocIngressBadgeAndApproval(t *testing.T) {
 	t.Setenv("HANDOFFKEEP_UI_ADMIRAL_LANES", "")
 	withoutApproval := newUITestServer(t, s, fixture, hub.server.URL, "hub-test-token", 0)
 	defer withoutApproval.Close()
-	response = uiRequest(t, withoutApproval.Client(), http.MethodGet, withoutApproval.URL+"/ui/decisions", assertion, "")
+	response = uiRequest(t, withoutApproval.Client(), http.MethodGet, withoutApproval.URL+"/ui/decisions/legacy", assertion, "")
 	if body = responseText(t, response); strings.Contains(body, "Awaiting your approval") {
 		t.Fatal("approval section rendered without admiral lanes")
 	}
@@ -663,7 +663,7 @@ func TestUIApprovalLaneEnvironmentCompatibility(t *testing.T) {
 				titles[lane] = title
 			}
 
-			body := responseText(t, uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions", assertion, ""))
+			body := responseText(t, uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions/legacy", assertion, ""))
 			approvalStart := strings.Index(body, "<h3>Awaiting your approval</h3>")
 			if got := approvalStart >= 0; got != tc.hasApproval {
 				t.Fatalf("HasApproval rendered=%t, want %t; body=%q", got, tc.hasApproval, body)
