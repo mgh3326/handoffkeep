@@ -51,6 +51,7 @@ export function DecisionPage({ id }: { id: string }) {
   const [sentAt, setSentAt] = useState("");
   const busy = useRef(false);
   const opener = useRef<HTMLButtonElement>(null);
+  const editable = screen === "editing" || screen === "send_failed";
   useEffect(() => {
     if (result)
       window.dispatchEvent(
@@ -119,7 +120,7 @@ export function DecisionPage({ id }: { id: string }) {
       if (
         e.isComposing ||
         isTypingTarget(e.target) ||
-        screen !== "editing" ||
+        !editable ||
         !detail?.answerable ||
         !detail.request
       )
@@ -132,7 +133,7 @@ export function DecisionPage({ id }: { id: string }) {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [detail, screen]);
+  }, [detail, editable]);
   const close = () => {
     setScreen("editing");
     opener.current?.focus();
@@ -332,7 +333,7 @@ export function DecisionPage({ id }: { id: string }) {
                 type="button"
                 role="radio"
                 aria-checked={option === o.key}
-                disabled={!detail.answerable || screen !== "editing"}
+                disabled={!detail.answerable || !editable}
                 key={o.key}
                 onClick={() => {
                   setOption(o.key);
@@ -352,7 +353,7 @@ export function DecisionPage({ id }: { id: string }) {
               메모
               <textarea
                 value={text}
-                disabled={!detail.answerable || screen !== "editing"}
+                disabled={!detail.answerable || !editable}
                 onChange={(e) => {
                   setText(e.target.value);
                   setStale(false);
