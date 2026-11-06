@@ -15,9 +15,11 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
-const decisionRequestUsage = "usage: tasks decision-request <id> --question <text> --option 'A|label' [--option ...] [--recommended A] [--reason <text>] --default-action <text> [--default-option B] [--default-trigger <text>] [--due <RFC3339>] [--doc <key>] [--ref <text> ...] [--supersedes dr-<id>-<rev>] [--block] [--no-free-answer] [--human-only]"
+const decisionRequestUsage = "usage: tasks decision-request <id> --question <text> --option 'A|label' [--option ...] [--recommended A] [--reason <text>] --default-action <text> [--default-option B] [--default-trigger <text>] [--due <RFC3339>] [--doc <key>] [--ref <text> ...] [--supersedes dr-<id>-<rev>] [--block] [--no-free-answer] [--human-only] [--answer-policy operator_direct|operator_relay_allowed]"
 
-const decisionAskUsage = "usage: decisions ask <task-id> --question <text> --option 'A|label' [--option ...] [--recommended A] [--reason <text>] --default-action <text> [--default-option B] [--default-trigger <text>] [--due <RFC3339>] [--doc <key>] [--ref <text> ...] [--supersedes dr-<id>-<rev>] [--block] [--no-free-answer] [--human-only]"
+const decisionAskUsage = "usage: decisions ask <task-id> --question <text> --option 'A|label' [--option ...] [--recommended A] [--reason <text>] --default-action <text> [--default-option B] [--default-trigger <text>] [--due <RFC3339>] [--doc <key>] [--ref <text> ...] [--supersedes dr-<id>-<rev>] [--block] [--no-free-answer] [--human-only] [--answer-policy operator_direct|operator_relay_allowed] [--linear]"
+
+const decisionResolveRequestUsage = "usage: decisions resolve request <dr-id> --channel cli|session [--option A] [--text <text>] [--quote '<operator words>'] [--event-key <key>]"
 
 const decisionResolveUsage = "usage: tasks decision-resolve <id> --request dr-<id>-<rev> --kind answered|default_applied|withdrawn [--option A] [--text <text>] [--receipt <ref>] [--responder <who>] [--event-key <key>]"
 
@@ -78,10 +80,10 @@ func notRecorded(err error) error {
 	return fmt.Errorf("decision request NOT recorded: %v — do not notify that it is visible in the console", err)
 }
 
-// decisionRequestFlags parses the flags a decision request is made of. The caller
-// says "NOT recorded" on any error: nothing has left the process yet.
-func decisionRequestFlags(name, usage string, args []string) (*remote.Client, int64, store.DecisionRequestInput, error) {
-	fs := flag.NewFlagSet(name, flag.ContinueOnError)
+// decisionRequestFlags parses the flags a decision request is made of into
+// fs, which the caller may have given flags of its own. The caller says "NOT
+// recorded" on any error: nothing has left the process yet.
+func decisionRequestFlags(fs *flag.FlagSet, usage string, args []string) (*remote.Client, int64, store.DecisionRequestInput, error) {
 	fs.SetOutput(io.Discard)
 	c := remoteClient(fs)
 	question := fs.String("question", "", "the question put to the operator")
@@ -99,7 +101,8 @@ func decisionRequestFlags(name, usage string, args []string) (*remote.Client, in
 	block := fs.Bool("block", false, "also move the task to needs_decision")
 	noFreeAnswer := fs.Bool("no-free-answer", false, "disallow a free-form answer")
 	humanOnly := fs.Bool("human-only", false, "reserve the request for the human operator; the assistant path refuses it")
-	parseArgs, err := splitArgs(args, "question", "option", "ref", "recommended", "reason", "default-action", "default-option", "default-trigger", "due", "doc", "supersedes")
+	answerPolicy := fs.String("answer-policy", "", "operator_direct (a relayed answer waits for the operator) or operator_relay_allowed (default)")
+	parseArgs, err := splitArgs(args, "question", "option", "ref", "recommended", "reason", "default-action", "default-option", "default-trigger", "due", "doc", "supersedes", "answer-policy")
 	if err != nil {
 		return nil, 0, store.DecisionRequestInput{}, err
 	}
@@ -121,6 +124,7 @@ func decisionRequestFlags(name, usage string, args []string) (*remote.Client, in
 		Supersedes:     strings.TrimSpace(*supersedes),
 		Block:          *block,
 		HumanOnly:      *humanOnly,
+		AnswerPolicy:   strings.TrimSpace(*answerPolicy),
 	}
 	if len(optionValues) == 0 {
 		return nil, 0, store.DecisionRequestInput{}, errors.New("at least one --option is required")
@@ -149,7 +153,7 @@ func decisionRequestFlags(name, usage string, args []string) (*remote.Client, in
 // request is recorded in hk first; the printed request_id is what the pane
 // notification carries.
 func decisionRequestCmd(args []string, out io.Writer) error {
-	c, id, input, err := decisionRequestFlags("tasks decision-request", decisionRequestUsage, args[1:])
+	c, id, input, err := decisionRequestFlags(flag.NewFlagSet("tasks decision-request", flag.ContinueOnError), decisionRequestUsage, args[1:])
 	if err != nil {
 		return notRecorded(err)
 	}
@@ -162,19 +166,42 @@ func decisionRequestCmd(args []string, out io.Writer) error {
 	return printJSON(out, decisionRequestOutput(result))
 }
 
-// decisionAskCmd asks the operator through Linear: one request, one issue. The
-// server calls Linear, so it gets a longer budget than a plain record. Re-sending
-// the same command after any failure creates nothing twice.
+// decisionAskCmd records a decision request for the operator. Without
+// --linear it is the record-only route and opens no Linear issue; with
+// --linear the server also opens the request's Linear issue, so it gets a
+// longer budget than a plain record. Re-sending the same command after any
+// failure creates nothing twice.
 func decisionAskCmd(args []string, out io.Writer) error {
-	c, id, input, err := decisionRequestFlags("decisions ask", decisionAskUsage, args)
+	fs := flag.NewFlagSet("decisions ask", flag.ContinueOnError)
+	linear := fs.Bool("linear", false, "also open the request's Linear issue")
+	c, id, input, err := decisionRequestFlags(fs, decisionAskUsage, args)
 	if err != nil {
 		return notRecorded(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	defer cancel()
-	result, err := c.AskDecision(ctx, id, input)
-	if err != nil {
-		return writeFailed("decision ask", id, err)
+	var result store.DecisionAskResult
+	if *linear {
+		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		defer cancel()
+		result, err = c.AskDecision(ctx, id, input)
+		if err != nil {
+			return writeFailed("decision ask", id, err)
+		}
+	} else {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		recorded, err := c.RecordDecisionRequest(ctx, id, input)
+		if err != nil {
+			return writeFailed("decision ask", id, err)
+		}
+		var options store.DecisionOptions
+		if recorded.Task.Refs.DecisionOptions != nil {
+			options = *recorded.Task.Refs.DecisionOptions
+		}
+		request := recorded.Request
+		result = store.DecisionAskResult{
+			Task: recorded.Task, Request: request, Duplicate: recorded.Duplicate,
+			DecisionRef: store.DecisionRef(request.ID), Ver: store.DecisionRequestVer(request.Question, options, request.Doc, request.Refs),
+		}
 	}
 	output := map[string]any{
 		"recorded":      true,
@@ -274,9 +301,13 @@ func decisionResolveCmd(args []string, out, errout io.Writer) error {
 		}
 		return writeFailed("decision resolution", id, err)
 	}
-	// A human_only answer from a session waits for the operator: the server
-	// answers 202 pending_confirmation, the request stays open, and nothing
-	// failed, so the command prints the result and exits 0.
+	return printJSON(out, decisionResolveOutput(result))
+}
+
+// decisionResolveOutput is the printed answer of a resolve. An answer that
+// must wait for the operator gets 202 pending_confirmation: the request stays
+// open and nothing failed, so the command prints the result and exits 0.
+func decisionResolveOutput(result store.DecisionRequestResult) map[string]any {
 	printed := map[string]any{
 		"recorded":   result.Result != store.DecisionResultPendingConfirmation,
 		"duplicate":  result.Duplicate,
@@ -292,5 +323,72 @@ func decisionResolveCmd(args []string, out, errout io.Writer) error {
 	if result.ResolutionID != 0 {
 		printed["resolution_id"] = result.ResolutionID
 	}
-	return printJSON(out, printed)
+	return printed
+}
+
+// decisionResolveRequestCmd answers a dr- request through ResolveDecision.
+// --channel session records the operator's words from a session: with
+// --quote it is the operator's relayed decision bound to this request id,
+// without it the session's own judgement. --channel cli is today's
+// tasks decision-resolve answer and takes no quote.
+func decisionResolveRequestCmd(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("decisions resolve request", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	c := remoteClient(fs)
+	channel := fs.String("channel", "", "cli or session")
+	option := fs.String("option", "", "chosen option key")
+	text := fs.String("text", "", "answer text")
+	quote := fs.String("quote", "", "the operator's verbatim words (session only)")
+	eventKey := fs.String("event-key", "", "delivery key: re-sending the same key and answer replays the first result")
+	parseArgs, err := splitArgs(args, "channel", "option", "text", "quote", "event-key")
+	if err != nil {
+		return fmt.Errorf("decision resolution NOT recorded: %v", err)
+	}
+	if err := fs.Parse(parseArgs); err != nil {
+		return fmt.Errorf("decision resolution NOT recorded: %v", err)
+	}
+	if fs.NArg() != 1 {
+		return errors.New(decisionResolveRequestUsage)
+	}
+	requestID := strings.TrimSpace(fs.Arg(0))
+	id, _, ok := store.ParseDecisionRequestID(requestID)
+	if !ok {
+		return errors.New("request id must be dr-<task>-<revision>\n" + decisionResolveRequestUsage)
+	}
+	in := remote.DecisionChannelResolveInput{
+		DecisionResolveInput: store.DecisionResolveInput{
+			RequestID: requestID, Kind: store.DecisionRequestAnswered,
+			Option: strings.TrimSpace(*option), Text: strings.TrimSpace(*text), EventKey: strings.TrimSpace(*eventKey),
+		},
+		Channel: *channel,
+	}
+	switch *channel {
+	case store.DecisionChannelCLI:
+		if *quote != "" {
+			return errors.New("--quote needs --channel session\n" + decisionResolveRequestUsage)
+		}
+	case store.DecisionChannelSession:
+		in.Provenance = store.DecisionProvenanceAssistantJudgement
+		if *quote != "" {
+			in.Provenance, in.OperatorQuote, in.DecisionRef = store.DecisionProvenanceOperatorDecided, *quote, requestID
+		}
+	default:
+		return errors.New("--channel must be cli or session\n" + decisionResolveRequestUsage)
+	}
+	if err := store.CheckDecisionResolveInput(in.DecisionResolveInput); err != nil {
+		return fmt.Errorf("decision resolution NOT recorded: %v", err)
+	}
+	if err := mustClient(c); err != nil {
+		return fmt.Errorf("decision resolution NOT recorded: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	result, err := c.ResolveDecisionChannel(ctx, id, in)
+	if err != nil {
+		if remote.ErrorCode(err) == "decision_request_human_only" {
+			return fmt.Errorf("decision resolution NOT recorded: the request needs the operator's own answer; pass the operator's words with --quote: %v", err)
+		}
+		return writeFailed("decision resolution", id, err)
+	}
+	return printJSON(out, decisionResolveOutput(result))
 }

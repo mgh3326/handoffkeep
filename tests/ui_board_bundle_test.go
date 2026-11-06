@@ -83,10 +83,10 @@ func consoleTreeError(committed, emitted map[string][]byte) error {
 }
 
 // consoleContractsError checks the entry outputs a correct multi-entry build
-// must produce: the shell, server and deploys entries, their styles, and the
+// must produce: the shell and server entries, their styles, and the
 // shared chunk, plus the API/security contracts each bundle carries.
 func consoleContractsError(tree map[string][]byte) error {
-	for _, name := range []string{"shell.js", "shell.css", "server.js", "server.css", "deploys.js", "deploys.css", "tokens.css", "shared-client.js", "shared-DocView.js", "shared-DocMarkdown.js"} {
+	for _, name := range []string{"shell.js", "shell.css", "server.js", "server.css", "tokens.css", "shared-client.js", "shared-DocView.js", "shared-DocMarkdown.js"} {
 		body, ok := tree[name]
 		if !ok {
 			return fmt.Errorf("console artifact %s missing", name)
@@ -97,7 +97,7 @@ func consoleContractsError(tree map[string][]byte) error {
 	}
 	shell := string(tree["shell.js"])
 	// The shell entry mounts into the template's root, reaches the document
-	// viewer through a lazy chunk, and makes no API read itself.
+	// viewer through a lazy chunk and reads the deploys API.
 	for _, want := range []string{"shell-root", "shared-DocView.js"} {
 		if !strings.Contains(shell, want) {
 			return fmt.Errorf("shell.js missing %q", want)
@@ -107,8 +107,8 @@ func consoleContractsError(tree map[string][]byte) error {
 	if !strings.Contains(string(tree["shared-DocView.js"]), "/ui/api/board/doc") {
 		return errors.New("shared-DocView.js lost the /ui/api/board/doc contract")
 	}
-	if !strings.Contains(string(tree["deploys.js"]), "/ui/api/deploy-pending") {
-		return errors.New("deploys.js lost the /ui/api/deploy-pending contract")
+	if !strings.Contains(string(tree["shell.js"]), "/ui/api/deploy-pending") {
+		return errors.New("shell.js lost the /ui/api/deploy-pending contract")
 	}
 	for name, body := range tree {
 		if !strings.HasSuffix(name, ".js") {
@@ -125,7 +125,7 @@ func consoleContractsError(tree map[string][]byte) error {
 // console entry output. Adding or repointing an entry must never delete a
 // sibling's emitted file.
 func consoleSiblingEntriesError(tree map[string][]byte) error {
-	for _, name := range []string{"shell.js", "shell.css", "server.js", "deploys.js", "deploys.css"} {
+	for _, name := range []string{"shell.js", "shell.css", "server.js"} {
 		if len(tree[name]) == 0 {
 			return fmt.Errorf("sibling entry output %s missing", name)
 		}
@@ -216,17 +216,7 @@ func TestConsoleMultiEntryArtifacts(t *testing.T) {
 			t.Fatalf("console.html missing %q", want)
 		}
 	}
-	// /ui/deploys is its own mount page on its own entry: the template must
-	// name its root and both artifacts.
-	deploys, err := os.ReadFile(filepath.Join(filepath.Dir(shellPagePath(t)), "deploys.html"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, want := range []string{`id="deploys-root"`, "/ui/static/console/deploys.js", "/ui/static/console/deploys.css"} {
-		if !strings.Contains(string(deploys), want) {
-			t.Fatalf("deploys.html missing %q", want)
-		}
-	}
+
 }
 
 // One clean build into a scratch outDir must emit exactly the committed file
@@ -309,11 +299,11 @@ func TestConsoleBuildDriftMutantsTurnRed(t *testing.T) {
 		}
 	})
 
-	// A build without the deploys entry emits no deploys output; the emitted
+	// A build without the server entry emits no server output; the emitted
 	// set must not silently shrink.
 	t.Run("config-single-entry", func(t *testing.T) {
 		config := writeMutantConfig(t, projectDir, "single-entry", func(source string) string {
-			return strings.Replace(source, "\n        deploys: resolve(root, \"src/deploys/main.tsx\"),", "", 1)
+			return strings.Replace(source, "\n        server: resolve(root, \"src/server.tsx\"),", "", 1)
 		})
 		outDir := filepath.Join(t.TempDir(), "out")
 		viteBuild(t, npm, projectDir, config, outDir)

@@ -126,8 +126,10 @@ Schema version 38 adds two new tables, `decision_notify` and
 Requests that were already open before the upgrade get no message of their
 own. The digest lists them once they are more than a day old.
 
-Schema version 47 adds `decision_deliveries` and copies every
-`decision_notify` row into it under a `SHARE` lock on `decision_notify`: a
+Schema version 48 adds `decision_deliveries` and copies every
+`decision_notify` row into it under an `EXCLUSIVE` lock on `decision_notify`
+(so an older worker still sending finishes before the copy, and none starts
+during it): a
 `last_status` of `open`, `answered`, `superseded` or `expired` (or empty)
 becomes `applied_version` on a `pending` row, and `unsent` and `failed` keep
 that state. `decision_notify` stays in place, unwritten, for one release.

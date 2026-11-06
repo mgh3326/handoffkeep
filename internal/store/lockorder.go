@@ -82,8 +82,9 @@ package store
 //     LOCKED) and holds it while it sends; it reads the request and its task
 //     without a lock. Writers only insert new decision_deliveries keys
 //     (openDecisionTx), and decision_notify_digest is written by the worker
-//     alone (decision_notify.go). Version 47 takes SHARE on the retired
-//     decision_notify table for its backfill; nothing writes it afterwards.
+//     alone (decision_notify.go). Version 48 takes EXCLUSIVE on the retired
+//     decision_notify table for its backfill, so an older worker's claim in
+//     flight finishes first; nothing writes it afterwards.
 //   - AckLedger locks one ledger_cursors row and reads sync_state without a
 //     lock; nothing else writes ledger_cursors (ledger.go).
 //   - CreateStatusUpdate locks its task_projects row FOR NO KEY UPDATE

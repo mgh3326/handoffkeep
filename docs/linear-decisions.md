@@ -11,14 +11,14 @@ Set these on the server. The flow also needs the webhook from
 
 | Variable | Value |
 |---|---|
-| `HANDOFFKEEP_LINEAR_OPERATOR_USER_ID` | The Linear user id whose answers count. Unset turns the flow off: `decisions ask` is refused and the webhook handles dots only. |
+| `HANDOFFKEEP_LINEAR_OPERATOR_USER_ID` | The Linear user id whose answers count. Unset turns the flow off: `decisions ask --linear` is refused and the webhook handles dots only. |
 | `HANDOFFKEEP_LINEAR_DECISION_TEAM` | Team key for new issues. Default `ROB`. |
 | `HANDOFFKEEP_DISCORD_DECISIONS_WEBHOOK_URL` | A Discord incoming webhook, `https` only. Unset disables channel posts; everything else keeps working. |
 | `HANDOFFKEEP_LINEAR_DECISION_STATES` | Optional, for answering by state change. See [Answer by state](#answer-by-state). |
 | `HANDOFFKEEP_NOTIFICATION_FORWARD` | `on` sends `notification_outbox` rows to the hub. See [Desk notification](#desk-notification). |
 
 The team needs a label named `decision` and a state of type `canceled`. Without
-them, `decisions ask` is refused with `linear_decision_target_missing` and
+them, `decisions ask --linear` is refused with `linear_decision_target_missing` and
 writes nothing.
 
 Keep the Discord webhook URL out of the repo: anyone holding it can post to the
@@ -51,8 +51,12 @@ other source, edited when the request closes, and a daily digest. See
 
 ## How the desk asks
 
+`decisions ask` records the request only (`POST /v1/tasks/{id}/decision-request`,
+`issue_created: false`) unless `--linear` is given. With `--linear` it opens
+the Linear issue as below.
+
 ```bash
-handoffkeep decisions ask 2615 \
+handoffkeep decisions ask 2615 --linear \
   --question 'Ship the migration this week?' \
   --option 'A|Ship now' --option 'B|Wait a week' --recommended A \
   --default-action 'Hold' --default-option B \
@@ -60,7 +64,7 @@ handoffkeep decisions ask 2615 \
   --ref handoffkeep#107
 ```
 
-The flags match `tasks decision-request`, plus a repeatable `--ref`. The API is
+The flags match `tasks decision-request`, plus `--linear`. The API is
 `POST /v1/tasks/{id}/decision-request/ask` with the same body as
 `/decision-request`. It answers `201` when it created the issue and `200` when
 there was nothing left to create.
@@ -81,7 +85,7 @@ request may be recorded without its issue; re-send to finish.
 **To change a question,** name the open request:
 
 ```bash
-handoffkeep decisions ask 2615 --question 'Ship it next week?' ... --supersedes dr-2615-1
+handoffkeep decisions ask 2615 --linear --question 'Ship it next week?' ... --supersedes dr-2615-1
 ```
 
 Without `--supersedes`, a different question on a task with an open request is

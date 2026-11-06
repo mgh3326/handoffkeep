@@ -202,14 +202,17 @@ func (n DecisionNotifier) sendNotice(ctx context.Context, x store.DecisionNotice
 	if n.Discord == nil {
 		return "", store.ErrDecisionNoticeSkipped
 	}
-	text := decisionNoticeText(x, n.ConsoleURL, now)
+	mention := ""
+	if x.Post() && x.Mention && n.OperatorUserID != "" {
+		mention = "<@" + n.OperatorUserID + "> "
+	}
+	text := decisionNoticeText(x, n.ConsoleURL, now, mention)
 	if x.Post() {
-		var mention []string
-		if x.Mention && n.OperatorUserID != "" {
-			text = clipRunes("<@"+n.OperatorUserID+"> "+text, discordContentMaxRunes)
-			mention = []string{n.OperatorUserID}
+		var users []string
+		if mention != "" {
+			users = []string{n.OperatorUserID}
 		}
-		id, err := n.Discord.PostMessage(ctx, text, mention...)
+		id, err := n.Discord.PostMessage(ctx, text, users...)
 		return id, decisionPostError(err)
 	}
 	return "", decisionNoticeError(n.Discord.EditMessage(ctx, x.MessageID, text))
@@ -319,8 +322,10 @@ func decisionContext(x store.DecisionNotice) string {
 
 // decisionNoticeText is the message for the request's current status. An
 // open request shows the question, cut to fit Discord's limit; a closed one
-// shows how it closed in place of the question.
-func decisionNoticeText(x store.DecisionNotice, console string, now time.Time) string {
+// shows how it closed in place of the question. prefix (an operator mention)
+// starts the message and its room comes out of the question, so the link at
+// the end always survives.
+func decisionNoticeText(x store.DecisionNotice, console string, now time.Time, prefix string) string {
 	r := x.Record
 	link := decisionLinkLine(console, r.ID)
 	ref := fmt.Sprintf("**Decision request #%d**", r.ID)
@@ -352,9 +357,9 @@ func decisionNoticeText(x store.DecisionNotice, console string, now time.Time) s
 		}
 	}
 	if closed != "" {
-		return clipRunes(closed+"\n"+decisionContext(x)+"\n"+link, discordContentMaxRunes)
+		return prefix + clipRunes(closed+"\n"+decisionContext(x)+"\n"+link, discordContentMaxRunes-utf8.RuneCountInString(prefix))
 	}
-	head := "❓ " + ref + " · " + decisionContext(x) + "\n"
+	head := prefix + "❓ " + ref + " · " + decisionContext(x) + "\n"
 	asked := fmt.Sprintf("Asked %s (<t:%d:R>), open %s", decisionTime(r.CreatedAt), r.CreatedAt.Unix(), decisionAge(now.Sub(r.CreatedAt)))
 	if r.DueAt != nil {
 		asked += " · due " + decisionTime(*r.DueAt)

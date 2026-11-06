@@ -516,7 +516,7 @@ func TestDecisionNoticeTextFitsAndShowsEachClose(t *testing.T) {
 		ID: 12, Source: store.DecisionSourceTaskRequest, Lane: "notify-lane", TaskID: &task, Status: store.DecisionStatusOpen,
 		Question: strings.Repeat("가", 3000), CreatedAt: now.Add(-5 * time.Hour), DueAt: &due,
 	}}
-	text := decisionNoticeText(open, "https://console.example", now)
+	text := decisionNoticeText(open, "https://console.example", now, "")
 	if n := utf8.RuneCountInString(text); n > discordContentMaxRunes {
 		t.Fatalf("open message is %d runes", n)
 	}
@@ -539,7 +539,7 @@ func TestDecisionNoticeTextFitsAndShowsEachClose(t *testing.T) {
 		"♻️ **Decision request #12** superseded (task:45:done) at 2026-11-05 12:00 KST": superseded,
 		"⌛ **Decision request #12** expired unanswered at 2026-11-05 12:00 KST":         expired,
 	} {
-		text := decisionNoticeText(x, "", now)
+		text := decisionNoticeText(x, "", now, "")
 		if !strings.HasPrefix(text, want) || strings.Contains(text, "가") || !strings.Contains(text, "Find request #12") || !strings.Contains(text, "task #45") {
 			t.Errorf("closed message:\n%s\nwant prefix %q", text, want)
 		}
@@ -706,10 +706,14 @@ func TestDecisionNoticeMentionsTheOperatorOnPressingFirstPosts(t *testing.T) {
 	with := DecisionNotifier{Discord: discord.webhook(), ConsoleURL: "https://console.example", OperatorUserID: op}
 	without := DecisionNotifier{Discord: discord.webhook(), ConsoleURL: "https://console.example"}
 
+	pressing.Record.Question = strings.Repeat("가", 3000)
 	if _, err := with.sendNotice(t.Context(), pressing, now); err != nil {
 		t.Fatal(err)
 	}
 	calls := discord.take()
+	if len(calls) == 1 && (utf8.RuneCountInString(calls[0].Content) > discordContentMaxRunes || !strings.HasSuffix(calls[0].Content, "\nhttps://console.example/ui/decisions/42")) {
+		t.Fatalf("long pressing post lost its link or overflowed (%d runes):\n%s", utf8.RuneCountInString(calls[0].Content), calls[0].Content)
+	}
 	if len(calls) != 1 || !strings.HasPrefix(calls[0].Content, "<@"+op+"> ") || len(calls[0].Parse) != 0 ||
 		len(calls[0].Users) != 1 || calls[0].Users[0] != op {
 		t.Fatalf("pressing first post: %+v", calls)
@@ -856,13 +860,13 @@ func TestDecisionLinkLine(t *testing.T) {
 	now := time.Date(2026, 11, 5, 3, 0, 0, 0, time.UTC)
 	x := store.DecisionNotice{Record: store.DecisionRecord{ID: 42, Source: store.DecisionSourceChat, Status: store.DecisionStatusOpen, Question: "q", CreatedAt: now}}
 	d := store.DecisionDigest{Day: now, Total: 1, Items: []store.DecisionNotice{x}}
-	if text := decisionNoticeText(x, "https://console.example", now); !strings.Contains(text, "https://console.example/ui/decisions/42") {
+	if text := decisionNoticeText(x, "https://console.example", now, ""); !strings.Contains(text, "https://console.example/ui/decisions/42") {
 		t.Errorf("request:\n%s", text)
 	}
 	if text := decisionDigestText(d, "https://console.example", now); !strings.Contains(text, "https://console.example/ui/decisions?tab=open") {
 		t.Errorf("digest:\n%s", text)
 	}
-	if text := decisionNoticeText(x, "", now); !strings.Contains(text, "Find request #42 on the console's Decisions page or with `handoffkeep decisions list`.") || strings.Contains(text, "/ui/") {
+	if text := decisionNoticeText(x, "", now, ""); !strings.Contains(text, "Find request #42 on the console's Decisions page or with `handoffkeep decisions list`.") || strings.Contains(text, "/ui/") {
 		t.Errorf("request without console:\n%s", text)
 	}
 	if text := decisionDigestText(d, "", now); !strings.Contains(text, "Find them on the console's Decisions page or with `handoffkeep decisions list`.") || strings.Contains(text, "/ui/") {
