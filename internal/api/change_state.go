@@ -102,7 +102,7 @@ func (s Server) changeBatch(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// changeOne is GET /v1/changes/one?repo=owner/name&pr=N[&all_heads=1][&include=checks,threads,findings,gate]:
+// changeOne is GET /v1/changes/one?repo=owner/name&pr=N[&all_heads=1][&include=checks,threads,findings,gate,reviews]:
 // one PR's state. 404 for a PR hk has never seen.
 func (s Server) changeOne(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.auth(w, r); !ok {

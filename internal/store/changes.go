@@ -328,6 +328,25 @@ type changeReader interface {
 	Query(context.Context, string, ...any) (pgx.Rows, error)
 }
 
+// readReviews reads the reviews of the given changes ordered by id and calls
+// add for each, in that order. The list read and the one-PR read share it.
+func readReviews(ctx context.Context, q changeReader, changeIDs []int64, add func(changeID int64, r ChangeReview)) error {
+	rows, err := q.Query(ctx, `SELECT change_id,id,reviewed_head,reviewed_base,patch_id,round,pass,lens,reviewer_job_id,family,profile,model,harness,effort,executor,fallback,policy_revision,contract_source,verdict,critical,high,medium,low,started_at,finished_at,recorded_at,reviewer,same_family,delta,quiet,outside_diff_blocking,patch_digest FROM reviews WHERE change_id=ANY($1) ORDER BY id`, changeIDs)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var r ChangeReview
+		if err = rows.Scan(&id, &r.ID, &r.ReviewedHead, &r.ReviewedBase, &r.PatchID, &r.Round, &r.Pass, &r.Lens, &r.ReviewerJobID, &r.Family, &r.Profile, &r.Model, &r.Harness, &r.Effort, &r.Executor, &r.Fallback, &r.PolicyRevision, &r.ContractSource, &r.Verdict, &r.Critical, &r.High, &r.Medium, &r.Low, &r.StartedAt, &r.FinishedAt, &r.RecordedAt, &r.Reviewer, &r.SameFamily, &r.Delta, &r.Quiet, &r.OutsideDiffBlocking, &r.PatchDigest); err != nil {
+			return err
+		}
+		add(id, r)
+	}
+	return rows.Err()
+}
+
 // listChangesWhere reads changes ordered by id, then their tasks and reviews,
 // each ordered by id, and their verifications, newest first. where may use
 // only $1..$len(args).
@@ -369,21 +388,10 @@ func (s *Store) listChangesWhere(ctx context.Context, q changeReader, where stri
 	if err = trows.Err(); err != nil {
 		return nil, err
 	}
-	rrows, err := q.Query(ctx, `SELECT change_id,id,reviewed_head,reviewed_base,patch_id,round,pass,lens,reviewer_job_id,family,profile,model,harness,effort,executor,fallback,policy_revision,contract_source,verdict,critical,high,medium,low,started_at,finished_at,recorded_at,reviewer,same_family,delta,quiet,outside_diff_blocking,patch_digest FROM reviews WHERE change_id=ANY($1) ORDER BY id`, ids)
+	err = readReviews(ctx, q, ids, func(changeID int64, r ChangeReview) {
+		out[at[changeID]].Reviews = append(out[at[changeID]].Reviews, r)
+	})
 	if err != nil {
-		return nil, err
-	}
-	for rrows.Next() {
-		var id int64
-		var r ChangeReview
-		if err = rrows.Scan(&id, &r.ID, &r.ReviewedHead, &r.ReviewedBase, &r.PatchID, &r.Round, &r.Pass, &r.Lens, &r.ReviewerJobID, &r.Family, &r.Profile, &r.Model, &r.Harness, &r.Effort, &r.Executor, &r.Fallback, &r.PolicyRevision, &r.ContractSource, &r.Verdict, &r.Critical, &r.High, &r.Medium, &r.Low, &r.StartedAt, &r.FinishedAt, &r.RecordedAt, &r.Reviewer, &r.SameFamily, &r.Delta, &r.Quiet, &r.OutsideDiffBlocking, &r.PatchDigest); err != nil {
-			rrows.Close()
-			return nil, err
-		}
-		out[at[id]].Reviews = append(out[at[id]].Reviews, r)
-	}
-	rrows.Close()
-	if err = rrows.Err(); err != nil {
 		return nil, err
 	}
 	vrows, err := q.Query(ctx, `SELECT `+verificationColumns+` FROM verifications WHERE change_id=ANY($1) ORDER BY recorded_at DESC, id DESC`, ids)

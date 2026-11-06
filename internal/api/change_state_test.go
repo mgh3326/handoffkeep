@@ -250,8 +250,8 @@ func TestChangeStateWriteAndRead(t *testing.T) {
 }
 
 // TestChangeReviewHistoryAndCheckDeliveryJSON pins the wire names of the
-// review-history fields (on the list read, where reviews are returned) and of
-// a check's delivery_id (on GET /v1/changes/one), and that a request without
+// review-history fields (on the list read and on the one-PR read's reviews
+// section) and of a check's delivery_id (on GET /v1/changes/one), and that a request without
 // them is unchanged (hk 3208).
 func TestChangeReviewHistoryAndCheckDeliveryJSON(t *testing.T) {
 	h, st := changesServer(t)
@@ -295,6 +295,38 @@ func TestChangeReviewHistoryAndCheckDeliveryJSON(t *testing.T) {
 		if _, has := bare[k]; has {
 			t.Errorf("a review sent without %q reads back with it: %v", k, bare)
 		}
+	}
+
+	// GET /v1/changes/one carries the same rows in its reviews section: in the
+	// default response and with include=reviews, and not with another include.
+	for _, q := range []string{"", "&include=reviews"} {
+		status, one := changesCall(t, h, http.MethodGet, "/v1/changes/one?repo="+repo+"&pr=1"+q, "peer-token", nil)
+		oneReviews, _ := one["reviews"].([]any)
+		if status != http.StatusOK || len(oneReviews) != 2 {
+			t.Fatalf("/one%s reviews: %d %v", q, status, one)
+		}
+		oneFull, oneBare := oneReviews[0].(map[string]any), oneReviews[1].(map[string]any)
+		for k, v := range want {
+			if oneFull[k] != v {
+				t.Errorf("/one%s review[%q]=%v, want %v", q, k, oneFull[k], v)
+			}
+		}
+		for _, k := range []string{"reviewer", "same_family", "delta", "quiet", "outside_diff_blocking", "patch_digest"} {
+			if _, has := oneBare[k]; has {
+				t.Errorf("/one%s: a review sent without %q reads back with it: %v", q, k, oneBare)
+			}
+		}
+		if oneFull["id"] != full["id"] || oneBare["id"] != bare["id"] {
+			t.Errorf("/one%s reviews are not the list's rows in id order: %v", q, oneReviews)
+		}
+		if q != "" {
+			if _, has := one["checks"]; has {
+				t.Errorf("include=reviews returned checks: %v", one)
+			}
+		}
+	}
+	if _, one := changesCall(t, h, http.MethodGet, "/v1/changes/one?repo="+repo+"&pr=1&include=checks", "peer-token", nil); one["reviews"] != nil {
+		t.Errorf("include=checks returned reviews: %v", one["reviews"])
 	}
 
 	// A refused value: a plain 400 invalid_context on the event route.

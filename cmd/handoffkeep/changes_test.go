@@ -208,4 +208,21 @@ func TestChangesShowPrintsReviewHistoryAndDelivery(t *testing.T) {
 	if err := json.Unmarshal(out.Bytes(), &one); err != nil || len(one.Checks) != 1 || one.Checks[0]["delivery_id"] != "delivery-1" {
 		t.Fatalf("output=%s err=%v", out.String(), err)
 	}
+
+	// The one-PR read prints its reviews section with the review-history fields.
+	withReviews := strings.Replace(state, `"freshness":`, `"reviews":[{"id":1,"reviewed_head":"1111111111111111111111111111111111111111","round":1,"pass":1,"lens":"correctness","recorded_at":"2026-11-06T01:00:00Z","reviewer":"sonnet@high","same_family":false,"patch_digest":"`+digest+`"}],"freshness":`, 1)
+	h, calls := ledgerCLIServer(t, http.StatusOK, withReviews)
+	out.Reset()
+	if err := run([]string{"changes", "show", "--url", h.URL, "--token", "tok", "--repo", "example/app", "--pr", "9", "--include", "reviews"}, &out, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if c := (*calls)[0]; c.Path != "/v1/changes/one" || c.Query != "include=reviews&pr=9&repo=example%2Fapp" {
+		t.Fatalf("call=%+v", c)
+	}
+	var rv struct {
+		Reviews []map[string]any `json:"reviews"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &rv); err != nil || len(rv.Reviews) != 1 || rv.Reviews[0]["reviewer"] != "sonnet@high" || rv.Reviews[0]["same_family"] != false || rv.Reviews[0]["patch_digest"] != digest {
+		t.Fatalf("output=%s err=%v", out.String(), err)
+	}
 }

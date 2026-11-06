@@ -77,6 +77,21 @@ func TestReviewHistoryRoundTrip(t *testing.T) {
 		t.Fatalf("NULL columns: n=%d err=%v", nulls, err)
 	}
 
+	// The one-PR read carries the same rows, ordered by id, in its reviews section.
+	one, found, err := s.GetChangeState(t.Context(), ChangeRef{Repo: repo, PR: 1}, ChangeReadOptions{Include: AllChangeSections})
+	if err != nil || !found || one.Reviews == nil || len(*one.Reviews) != 2 {
+		t.Fatalf("one-PR reviews: found=%v err=%v reviews=%v", found, err, one.Reviews)
+	}
+	if r := (*one.Reviews)[0]; r.Pass != 1 || r.Reviewer == nil || *r.Reviewer != "sonnet@high" || r.PatchDigest == nil || *r.PatchDigest != digest || (*one.Reviews)[1].Pass != 2 || (*one.Reviews)[1].Reviewer != nil {
+		t.Fatalf("one-PR reviews: %+v", *one.Reviews)
+	}
+	if only, _, err := s.GetChangeState(t.Context(), ChangeRef{Repo: repo, PR: 1}, ChangeReadOptions{Include: ChangeInclude{Checks: true}}); err != nil || only.Reviews != nil {
+		t.Fatalf("include=checks carries reviews: %v %v", only.Reviews, err)
+	}
+	if none, _, err := s.GetChangeState(t.Context(), ChangeRef{Repo: repo, PR: 1}, ChangeReadOptions{Include: ChangeInclude{Reviews: true}}); err != nil || none.Reviews == nil || none.Checks != nil {
+		t.Fatalf("include=reviews: %+v %v", none, err)
+	}
+
 	// A redelivery of the same key changes nothing, the history fields included.
 	again := full
 	again.Reviewer, again.PatchDigest = strPtr("other"), strPtr(strings.Repeat("cd", 16))
