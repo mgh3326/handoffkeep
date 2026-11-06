@@ -32,6 +32,11 @@ func TestPrivateKeyNeedsKeyMaterial(t *testing.T) {
 			t.Fatalf("%s with a body matched %q, want private_key", header, got)
 		}
 	}
+	// Legacy encrypted PEM: Proc-Type and DEK-Info lines precede the body.
+	encrypted := pem("RSA ") + "\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC," + strings.Repeat("0", 32) + "\n\n" + body + "\n-----END" + " RSA PRIVATE KEY-----"
+	if got := Match(encrypted); got != "private_key" {
+		t.Fatalf("encrypted PEM matched %q, want private_key", got)
+	}
 	// A detector's own pattern text, a bare header and a public key are not key material.
 	for _, input := range []string{
 		"re.compile(r'-----BEGIN (?:RSA |OPENSSH )?PRIVATE KEY-----')",
