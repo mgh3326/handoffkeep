@@ -8,6 +8,11 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+# A newer main push cancels the older image run, the same rule as ci.yml
+# (fleet policy policy/fleet-ci-main-cancel): the newest main head's image is
+# the one that ships and carries the `main` tag; a cancelled head's image check
+# reads unknown, never failure. Manual runs group by run id and never cancel.
+concurrency: {group: "image-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}", cancel-in-progress: true}
 permissions:
   contents: read
 env:
