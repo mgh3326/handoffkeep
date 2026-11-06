@@ -112,10 +112,10 @@ func TestAttentionRequestsCountedAndBounded(t *testing.T) {
 	if first.ID != overdue || !first.Overdue || first.Source != AttentionSourceRequest || first.DueAt == nil {
 		t.Fatalf("first=%+v, want the overdue request %d", first, overdue)
 	}
-	// The rest are the oldest, in creation order.
+	// The rest are the newest, in reverse creation order.
 	for i, x := range got.Items[1:] {
-		if x.ID != ids[i] || x.Overdue {
-			t.Fatalf("item %d = %+v, want request %d", i+1, x, ids[i])
+		if x.ID != ids[len(ids)-1-i] || x.Overdue {
+			t.Fatalf("item %d = %+v, want request %d", i+1, x, ids[len(ids)-1-i])
 		}
 	}
 }
@@ -147,7 +147,8 @@ func TestAttentionEqualKeysComeBackInIDOrder(t *testing.T) {
 		want = append(want, insertAttentionRequest(t, s, attentionRequest{ref: fmt.Sprintf("same%d", i), created: created, due: at(time.Hour)}))
 	}
 	got := attentionOf(t, s).Decisions.Items
-	for i, id := range want {
+	for i := range want {
+		id := want[len(want)-1-i]
 		if got[i].ID != id {
 			t.Fatalf("order=%v, want ids %v", decisionIDs(got), want)
 		}
@@ -156,8 +157,8 @@ func TestAttentionEqualKeysComeBackInIDOrder(t *testing.T) {
 	a := insertAttentionTask(t, s, attentionTaskSeed{title: "a", awaiting: true, created: created})
 	b := insertAttentionTask(t, s, attentionTaskSeed{title: "b", awaiting: true, created: created})
 	tasks := attentionOf(t, s).Tasks.Items
-	if len(tasks) != 2 || tasks[0].ID != a || tasks[1].ID != b {
-		t.Fatalf("tasks=%+v, want %d then %d", tasks, a, b)
+	if len(tasks) != 2 || tasks[0].ID != b || tasks[1].ID != a {
+		t.Fatalf("tasks=%+v, want %d then %d", tasks, b, a)
 	}
 }
 
@@ -173,7 +174,7 @@ func TestAttentionSnoozedAndExpiredRequestsExcluded(t *testing.T) {
 	if got.Count != 2 || len(got.Items) != 2 {
 		t.Fatalf("got %v (count %d), want only %d and %d", decisionIDs(got.Items), got.Count, open, woke)
 	}
-	if ids := decisionIDs(got.Items); ids[0] != fmt.Sprintf("request:%d", open) || ids[1] != fmt.Sprintf("request:%d", woke) {
+	if ids := decisionIDs(got.Items); ids[0] != fmt.Sprintf("request:%d", woke) || ids[1] != fmt.Sprintf("request:%d", open) {
 		t.Fatalf("items=%v", ids)
 	}
 }
@@ -241,7 +242,7 @@ func TestAttentionLaneEventWithoutRequestCounted(t *testing.T) {
 	// Open lane events and requests are one list.
 	req := insertAttentionRequest(t, s, attentionRequest{ref: "later-request", created: time.Now().UTC().Add(time.Hour)})
 	got = attentionOf(t, s).Decisions
-	if got.Count != 2 || got.Items[0].ID != lone.ID || got.Items[1].ID != req {
+	if got.Count != 2 || got.Items[0].ID != req || got.Items[1].ID != lone.ID {
 		t.Fatalf("merged: count=%d items=%v", got.Count, decisionIDs(got.Items))
 	}
 }
@@ -265,11 +266,11 @@ func TestAttentionTasksWaiting(t *testing.T) {
 	if got.AwaitingDecision != 2 || got.Stalled != 1 || got.Count != 3 {
 		t.Fatalf("counts=%+v, want awaiting 2, stalled 1, count 3", got)
 	}
-	// Awaiting first, oldest activity first within each reason.
+	// Newest activity first across reasons.
 	want := []struct {
 		id     int64
 		reason string
-	}{{answeredReq, AttentionReasonAwaitingDecision}, {awaiting, AttentionReasonAwaitingDecision}, {stalled, AttentionReasonStalled}}
+	}{{awaiting, AttentionReasonAwaitingDecision}, {answeredReq, AttentionReasonAwaitingDecision}, {stalled, AttentionReasonStalled}}
 	if len(got.Items) != len(want) {
 		t.Fatalf("items=%+v", got.Items)
 	}
@@ -328,5 +329,15 @@ func TestAttentionTaskItemsBounded(t *testing.T) {
 	got := attentionOf(t, s).Tasks
 	if got.Count != 13 || len(got.Items) != AttentionItems {
 		t.Fatalf("count=%d items=%d", got.Count, len(got.Items))
+	}
+}
+
+func TestAttentionDecisionNewestFirstAndOverduePriority(t *testing.T) {
+	now := time.Date(2026, 11, 6, 0, 0, 0, 0, time.UTC)
+	older := AttentionDecision{ID: 1, CreatedAt: now.Add(-time.Hour)}
+	newer := AttentionDecision{ID: 2, CreatedAt: now}
+	overdue := AttentionDecision{ID: 3, CreatedAt: now.Add(-2 * time.Hour), Overdue: true}
+	if !attentionDecisionLess(newer, older) || attentionDecisionLess(older, newer) || !attentionDecisionLess(overdue, newer) {
+		t.Fatal("expected overdue first, then newest")
 	}
 }
