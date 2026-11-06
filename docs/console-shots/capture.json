@@ -1,222 +1,150 @@
 {
-  "browser": "156.0.8078.74",
+  "browser": "156.0.8078.81",
   "fixtures": "Fictional data; embedded production templates and committed bundles",
   "views": [
     {
-      "file": "inbox-dark-1280.png",
-      "url": "/ui/home",
+      "file": "home-dark-1440.png",
+      "url": "/ui",
       "theme": "dark",
-      "width": 1280,
+      "width": 1440,
       "overflow": false,
       "errors": [],
-      "captured_at": "2026-11-02T16:18:17.610Z"
+      "captured_at": "2026-11-06T21:39:55.703Z"
     },
     {
-      "file": "board-dark-1280.png",
-      "url": "/ui/queue",
+      "file": "work-dark-1440.png",
+      "url": "/ui/work?view=all",
       "theme": "dark",
-      "width": 1280,
+      "width": 1440,
       "overflow": false,
       "errors": [],
-      "captured_at": "2026-11-02T15:29:14.396Z"
+      "captured_at": "2026-11-06T21:39:55.983Z"
     },
     {
-      "file": "task-dark-1280.png",
+      "file": "task-dark-1440.png",
       "url": "/ui/tasks/101",
       "theme": "dark",
-      "width": 1280,
+      "width": 1440,
       "overflow": false,
-      "errors": []
+      "errors": [],
+      "captured_at": "2026-11-06T21:39:56.336Z"
     },
     {
-      "file": "decisions-dark-1280.png",
+      "file": "decisions-dark-1440.png",
       "url": "/ui/decisions",
       "theme": "dark",
-      "width": 1280,
+      "width": 1440,
       "overflow": false,
-      "errors": []
+      "errors": [],
+      "captured_at": "2026-11-06T21:39:56.594Z"
     },
     {
-      "file": "deploys-dark-1280.png",
+      "file": "decision-dark-1440.png",
+      "url": "/ui/decisions/101",
+      "theme": "dark",
+      "width": 1440,
+      "overflow": false,
+      "errors": [],
+      "captured_at": "2026-11-06T21:39:56.901Z"
+    },
+    {
+      "file": "deploys-dark-1440.png",
       "url": "/ui/deploys",
       "theme": "dark",
-      "width": 1280,
+      "width": 1440,
       "overflow": false,
-      "errors": []
+      "errors": [],
+      "captured_at": "2026-11-06T21:39:57.169Z"
     },
     {
-      "file": "fleet-dark-1280.png",
-      "url": "/ui/fleet",
-      "theme": "dark",
-      "width": 1280,
-      "overflow": false,
-      "errors": []
-    },
-    {
-      "file": "docs-dark-1280.png",
-      "url": "/ui/docs?key=guide%2Fconsole",
-      "theme": "dark",
-      "width": 1280,
-      "overflow": false,
-      "errors": []
-    },
-    {
-      "file": "grades-dark-1280.png",
-      "url": "/ui/grades",
-      "theme": "dark",
-      "width": 1280,
-      "overflow": false,
-      "errors": []
-    },
-    {
-      "file": "timeline-dark-1280.png",
-      "url": "/ui/timeline",
-      "theme": "dark",
-      "width": 1280,
-      "overflow": false,
-      "errors": []
-    },
-    {
-      "file": "compose-dark-1280.png",
-      "url": "/ui/compose",
-      "theme": "dark",
-      "width": 1280,
-      "overflow": false,
-      "errors": []
-    },
-    {
-      "file": "document-dark-1280.png",
+      "file": "document-dark-1440.png",
       "url": "/ui/doc/guide/console",
       "theme": "dark",
-      "width": 1280,
-      "overflow": false,
-      "errors": []
-    },
-    {
-      "file": "palette-dark-1280.png",
-      "url": "/ui/queue",
-      "theme": "dark",
-      "width": 1280,
+      "width": 1440,
       "overflow": false,
       "errors": [],
-      "captured_at": "2026-11-02T15:29:16.428Z"
+      "captured_at": "2026-11-06T21:39:57.437Z"
     },
     {
-      "file": "inbox-light-1280.png",
-      "url": "/ui/home",
+      "file": "home-light-1440.png",
+      "url": "/ui",
       "theme": "light",
-      "width": 1280,
+      "width": 1440,
       "overflow": false,
       "errors": [],
-      "captured_at": "2026-11-02T16:18:25.330Z"
+      "captured_at": "2026-11-06T21:39:57.865Z"
     },
     {
-      "file": "board-light-1280.png",
-      "url": "/ui/queue",
+      "file": "work-light-1440.png",
+      "url": "/ui/work?view=all",
       "theme": "light",
-      "width": 1280,
+      "width": 1440,
       "overflow": false,
       "errors": [],
-      "captured_at": "2026-11-02T15:29:21.892Z"
+      "captured_at": "2026-11-06T21:39:58.133Z"
     },
     {
-      "file": "task-light-1280.png",
+      "file": "task-light-1440.png",
       "url": "/ui/tasks/101",
       "theme": "light",
-      "width": 1280,
-      "overflow": false,
-      "errors": []
-    },
-    {
-      "file": "decisions-light-1280.png",
-      "url": "/ui/decisions",
-      "theme": "light",
-      "width": 1280,
-      "overflow": false,
-      "errors": []
-    },
-    {
-      "file": "deploys-light-1280.png",
-      "url": "/ui/deploys",
-      "theme": "light",
-      "width": 1280,
-      "overflow": false,
-      "errors": []
-    },
-    {
-      "file": "fleet-light-1280.png",
-      "url": "/ui/fleet",
-      "theme": "light",
-      "width": 1280,
-      "overflow": false,
-      "errors": []
-    },
-    {
-      "file": "docs-light-1280.png",
-      "url": "/ui/docs?key=guide%2Fconsole",
-      "theme": "light",
-      "width": 1280,
-      "overflow": false,
-      "errors": []
-    },
-    {
-      "file": "grades-light-1280.png",
-      "url": "/ui/grades",
-      "theme": "light",
-      "width": 1280,
-      "overflow": false,
-      "errors": []
-    },
-    {
-      "file": "timeline-light-1280.png",
-      "url": "/ui/timeline",
-      "theme": "light",
-      "width": 1280,
-      "overflow": false,
-      "errors": []
-    },
-    {
-      "file": "compose-light-1280.png",
-      "url": "/ui/compose",
-      "theme": "light",
-      "width": 1280,
-      "overflow": false,
-      "errors": []
-    },
-    {
-      "file": "document-light-1280.png",
-      "url": "/ui/doc/guide/console",
-      "theme": "light",
-      "width": 1280,
-      "overflow": false,
-      "errors": []
-    },
-    {
-      "file": "palette-light-1280.png",
-      "url": "/ui/queue",
-      "theme": "light",
-      "width": 1280,
+      "width": 1440,
       "overflow": false,
       "errors": [],
-      "captured_at": "2026-11-02T15:29:24.092Z"
+      "captured_at": "2026-11-06T21:39:58.470Z"
     },
     {
-      "file": "inbox-dark-390.png",
-      "url": "/ui/home",
+      "file": "decisions-light-1440.png",
+      "url": "/ui/decisions",
+      "theme": "light",
+      "width": 1440,
+      "overflow": false,
+      "errors": [],
+      "captured_at": "2026-11-06T21:39:58.710Z"
+    },
+    {
+      "file": "decision-light-1440.png",
+      "url": "/ui/decisions/101",
+      "theme": "light",
+      "width": 1440,
+      "overflow": false,
+      "errors": [],
+      "captured_at": "2026-11-06T21:39:59.015Z"
+    },
+    {
+      "file": "deploys-light-1440.png",
+      "url": "/ui/deploys",
+      "theme": "light",
+      "width": 1440,
+      "overflow": false,
+      "errors": [],
+      "captured_at": "2026-11-06T21:39:59.306Z"
+    },
+    {
+      "file": "document-light-1440.png",
+      "url": "/ui/doc/guide/console",
+      "theme": "light",
+      "width": 1440,
+      "overflow": false,
+      "errors": [],
+      "captured_at": "2026-11-06T21:39:59.541Z"
+    },
+    {
+      "file": "home-dark-390.png",
+      "url": "/ui",
       "theme": "dark",
       "width": 390,
       "overflow": false,
       "errors": [],
-      "captured_at": "2026-11-02T16:18:29.994Z"
+      "captured_at": "2026-11-06T21:39:59.984Z"
     },
     {
-      "file": "board-dark-390.png",
-      "url": "/ui/queue",
+      "file": "work-dark-390.png",
+      "url": "/ui/work?view=all",
       "theme": "dark",
       "width": 390,
       "overflow": false,
       "errors": [],
-      "captured_at": "2026-11-02T15:29:28.647Z"
+      "captured_at": "2026-11-06T21:40:00.253Z"
     },
     {
       "file": "task-dark-390.png",
@@ -224,7 +152,8 @@
       "theme": "dark",
       "width": 390,
       "overflow": false,
-      "errors": []
+      "errors": [],
+      "captured_at": "2026-11-06T21:40:00.589Z"
     },
     {
       "file": "decisions-dark-390.png",
@@ -232,7 +161,17 @@
       "theme": "dark",
       "width": 390,
       "overflow": false,
-      "errors": []
+      "errors": [],
+      "captured_at": "2026-11-06T21:40:00.829Z"
+    },
+    {
+      "file": "decision-dark-390.png",
+      "url": "/ui/decisions/101",
+      "theme": "dark",
+      "width": 390,
+      "overflow": false,
+      "errors": [],
+      "captured_at": "2026-11-06T21:40:01.120Z"
     },
     {
       "file": "deploys-dark-390.png",
@@ -240,47 +179,8 @@
       "theme": "dark",
       "width": 390,
       "overflow": false,
-      "errors": []
-    },
-    {
-      "file": "fleet-dark-390.png",
-      "url": "/ui/fleet",
-      "theme": "dark",
-      "width": 390,
-      "overflow": false,
-      "errors": []
-    },
-    {
-      "file": "docs-dark-390.png",
-      "url": "/ui/docs?key=guide%2Fconsole",
-      "theme": "dark",
-      "width": 390,
-      "overflow": false,
-      "errors": []
-    },
-    {
-      "file": "grades-dark-390.png",
-      "url": "/ui/grades",
-      "theme": "dark",
-      "width": 390,
-      "overflow": false,
-      "errors": []
-    },
-    {
-      "file": "timeline-dark-390.png",
-      "url": "/ui/timeline",
-      "theme": "dark",
-      "width": 390,
-      "overflow": false,
-      "errors": []
-    },
-    {
-      "file": "compose-dark-390.png",
-      "url": "/ui/compose",
-      "theme": "dark",
-      "width": 390,
-      "overflow": false,
-      "errors": []
+      "errors": [],
+      "captured_at": "2026-11-06T21:40:01.389Z"
     },
     {
       "file": "document-dark-390.png",
@@ -288,34 +188,26 @@
       "theme": "dark",
       "width": 390,
       "overflow": false,
-      "errors": []
-    },
-    {
-      "file": "palette-dark-390.png",
-      "url": "/ui/queue",
-      "theme": "dark",
-      "width": 390,
-      "overflow": false,
       "errors": [],
-      "captured_at": "2026-11-02T15:29:30.372Z"
+      "captured_at": "2026-11-06T21:40:01.643Z"
     },
     {
-      "file": "inbox-light-390.png",
-      "url": "/ui/home",
+      "file": "home-light-390.png",
+      "url": "/ui",
       "theme": "light",
       "width": 390,
       "overflow": false,
       "errors": [],
-      "captured_at": "2026-11-02T16:18:32.721Z"
+      "captured_at": "2026-11-06T21:40:02.065Z"
     },
     {
-      "file": "board-light-390.png",
-      "url": "/ui/queue",
+      "file": "work-light-390.png",
+      "url": "/ui/work?view=all",
       "theme": "light",
       "width": 390,
       "overflow": false,
       "errors": [],
-      "captured_at": "2026-11-02T15:29:34.901Z"
+      "captured_at": "2026-11-06T21:40:02.327Z"
     },
     {
       "file": "task-light-390.png",
@@ -323,7 +215,8 @@
       "theme": "light",
       "width": 390,
       "overflow": false,
-      "errors": []
+      "errors": [],
+      "captured_at": "2026-11-06T21:40:02.648Z"
     },
     {
       "file": "decisions-light-390.png",
@@ -331,7 +224,17 @@
       "theme": "light",
       "width": 390,
       "overflow": false,
-      "errors": []
+      "errors": [],
+      "captured_at": "2026-11-06T21:40:02.890Z"
+    },
+    {
+      "file": "decision-light-390.png",
+      "url": "/ui/decisions/101",
+      "theme": "light",
+      "width": 390,
+      "overflow": false,
+      "errors": [],
+      "captured_at": "2026-11-06T21:40:03.192Z"
     },
     {
       "file": "deploys-light-390.png",
@@ -339,47 +242,8 @@
       "theme": "light",
       "width": 390,
       "overflow": false,
-      "errors": []
-    },
-    {
-      "file": "fleet-light-390.png",
-      "url": "/ui/fleet",
-      "theme": "light",
-      "width": 390,
-      "overflow": false,
-      "errors": []
-    },
-    {
-      "file": "docs-light-390.png",
-      "url": "/ui/docs?key=guide%2Fconsole",
-      "theme": "light",
-      "width": 390,
-      "overflow": false,
-      "errors": []
-    },
-    {
-      "file": "grades-light-390.png",
-      "url": "/ui/grades",
-      "theme": "light",
-      "width": 390,
-      "overflow": false,
-      "errors": []
-    },
-    {
-      "file": "timeline-light-390.png",
-      "url": "/ui/timeline",
-      "theme": "light",
-      "width": 390,
-      "overflow": false,
-      "errors": []
-    },
-    {
-      "file": "compose-light-390.png",
-      "url": "/ui/compose",
-      "theme": "light",
-      "width": 390,
-      "overflow": false,
-      "errors": []
+      "errors": [],
+      "captured_at": "2026-11-06T21:40:03.466Z"
     },
     {
       "file": "document-light-390.png",
@@ -387,16 +251,8 @@
       "theme": "light",
       "width": 390,
       "overflow": false,
-      "errors": []
-    },
-    {
-      "file": "palette-light-390.png",
-      "url": "/ui/queue",
-      "theme": "light",
-      "width": 390,
-      "overflow": false,
       "errors": [],
-      "captured_at": "2026-11-02T15:29:36.485Z"
+      "captured_at": "2026-11-06T21:40:03.705Z"
     }
   ]
 }
