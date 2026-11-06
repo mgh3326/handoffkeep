@@ -133,6 +133,8 @@ package store
 //     A revert event inserting the same two new keys in the other order is
 //     the one cycle left; Postgres aborts one side (40P01) and a start is
 //     safe to retry with the same attempt_id.
+//   - Deploy-service puts take the deploy_services_prefixes advisory lock
+//     before reading or writing registry rows, to serialize prefix claims.
 //   - Other advisory locks (disposition origin, task comment insert, labels,
 //     Linear board ownership, quota presence) are each the first lock of
 //     their transaction, and no transaction requests one while it holds a

@@ -143,7 +143,12 @@ func (h *Handler) dashboardAPI(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "dashboard unavailable", http.StatusInternalServerError)
 		return
 	}
-	response := buildDashboard(time.Now().UTC(), quota, tasks, merged)
+	services, err := h.store.ListDeployServices(r.Context())
+	if err != nil {
+		http.Error(w, "dashboard unavailable", http.StatusInternalServerError)
+		return
+	}
+	response := buildDashboard(time.Now().UTC(), quota, tasks, merged, services)
 	response.QuotaTruncated = quotaTruncated
 	response.TasksTruncated = tasksTruncated
 	body, err := json.Marshal(response)
@@ -160,7 +165,7 @@ func (h *Handler) dashboardPage(w http.ResponseWriter, r *http.Request) {
 	h.shell(w, r)
 }
 
-func buildDashboard(now time.Time, quota []store.QuotaAccountLatest, tasks []store.Task, merged []store.MergedTaskEvent) dashboardResponse {
+func buildDashboard(now time.Time, quota []store.QuotaAccountLatest, tasks []store.Task, merged []store.MergedTaskEvent, services []store.DeployService) dashboardResponse {
 	out := dashboardResponse{
 		GeneratedAt: now.Format(time.RFC3339),
 		Quota:       make([]dashboardAccount, 0, len(quota)),
@@ -180,8 +185,10 @@ func buildDashboard(now time.Time, quota []store.QuotaAccountLatest, tasks []sto
 	}
 	// The fleet's deployed repos always appear, so an empty pipeline reads as
 	// zero open PRs rather than an absent repo.
-	for _, svc := range deployServices {
-		repo(svc.Repo)
+	for _, svc := range services {
+		if svc.Active {
+			repo(svc.Repo)
+		}
 	}
 	for _, task := range tasks {
 		if dashboardActiveStates[task.State] {

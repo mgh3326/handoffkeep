@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"regexp"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/mgh3326/handoffkeep/internal/store"
@@ -23,17 +24,6 @@ const (
 	deployDocsHardCap = 2000
 	deployEventsLimit = 1000
 )
-
-// deployService maps the v0 services onto the GitHub repo a refs.pr value must
-// match exactly. Partial matches never attribute a task.
-var deployServices = []struct {
-	Name string
-	Repo string
-}{
-	{"handoffkeep", "mgh3326/handoffkeep"},
-	{"auto_trader", "mgh3326/auto_trader"},
-	{"panewire-hub", "mgh3326/panewire"},
-}
 
 var deployPRRepoRE = regexp.MustCompile(`^https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/pull/[0-9]+$`)
 
@@ -65,6 +55,7 @@ type deployRecordView struct {
 // the key plus every failed check, so the operator sees what to rewrite.
 type deployInvalidRecord struct {
 	Key     string   `json:"key"`
+	Prefix  string   `json:"prefix"`
 	Reasons []string `json:"reasons"`
 }
 
@@ -145,8 +136,15 @@ func (h *Handler) pendingDeploys(r *http.Request) (deployPendingResponse, error)
 	if scanCapped {
 		events = events[:deployEventsLimit]
 	}
-	for _, svc := range deployServices {
-		view, err := h.deployServiceView(r, svc.Name, svc.Repo, events)
+	services, err := h.store.ListDeployServices(r.Context())
+	if err != nil {
+		return deployPendingResponse{}, err
+	}
+	for _, svc := range services {
+		if !svc.Active {
+			continue
+		}
+		view, err := h.deployServiceView(r, svc, events)
 		if err != nil {
 			return deployPendingResponse{}, err
 		}
@@ -177,7 +175,8 @@ type deployParsedDoc struct {
 // record ordered by deployed_at (key time when a record did not measure one);
 // the newest record overall is surfaced separately so a failed attempt never
 // disappears behind it.
-func (h *Handler) deployServiceView(r *http.Request, service, repo string, events []store.MergedTaskEvent) (deployServiceView, error) {
+func (h *Handler) deployServiceView(r *http.Request, svc store.DeployService, events []store.MergedTaskEvent) (deployServiceView, error) {
+	service, repo := svc.Name, svc.Repo
 	view := deployServiceView{
 		Service:        service,
 		Repo:           repo,
@@ -186,57 +185,57 @@ func (h *Handler) deployServiceView(r *http.Request, service, repo string, event
 		MergedSince:    []deployMergedTask{},
 		Recent:         []deployRecordView{},
 	}
-	prefix := "deploy/" + service + "/"
-	// One row past the bound distinguishes "exactly full" from "truncated" —
-	// at exactly the bound nothing was omitted and no warning is owed.
-	docs, err := h.store.ListDocumentsByPrefix(r.Context(), prefix, deployDocsPerSvc+1)
-	if err != nil {
-		return view, err
-	}
-	view.DocsCapped = len(docs) > deployDocsPerSvc
-	if view.DocsCapped {
-		docs = docs[:deployDocsPerSvc]
-	}
-	view.RecordCount = len(docs)
-	parseDocs := func(page []store.Document) []deployParsedDoc {
-		out := []deployParsedDoc{}
-		for _, doc := range page {
-			rec, deployedAt, reasons := store.ClassifyDeployRecord(doc.Key, service, doc.Body)
-			if len(reasons) > 0 {
-				view.InvalidCount++
-				view.Invalid = append(view.Invalid, deployInvalidRecord{Key: doc.Key, Reasons: reasons})
-				continue
+	parsed := []deployParsedDoc{}
+	seen := map[string]bool{}
+	for _, prefix := range svc.RecordPrefixes {
+		cursor := ""
+		prefixCount := 0
+		for {
+			var docs []store.Document
+			var err error
+			if cursor == "" {
+				docs, err = h.store.ListDocumentsByPrefix(r.Context(), prefix, deployDocsPerSvc+1)
+			} else {
+				docs, err = h.store.ListDocumentsByPrefixBefore(r.Context(), prefix, cursor, deployDocsPerSvc+1)
 			}
-			keyTime, _ := store.DeployRecordKeyTime(doc.Key)
-			out = append(out, deployParsedDoc{key: doc.Key, rec: rec, deployedAt: deployedAt, keyTime: keyTime, recordedAt: doc.CreatedAt})
-		}
-		return out
-	}
-	parsed := parseDocs(docs)
-	// A full first window is never proof of completeness — deployed_at can
-	// reorder against keys (a record's key is write time, its deployed_at is
-	// measured), so the true current success may sit on any page. Drain to
-	// deployDocsHardCap; the flag clears only when a short page proves the
-	// scan reached the end of the key space.
-	if view.DocsCapped {
-		cursor := docs[len(docs)-1].Key
-		for view.DocsCapped && view.RecordCount < deployDocsHardCap {
-			var older []store.Document
-			older, err = h.store.ListDocumentsByPrefixBefore(r.Context(), prefix, cursor, deployDocsPerSvc+1)
 			if err != nil {
 				return view, err
 			}
-			if len(older) > deployDocsPerSvc {
-				older = older[:deployDocsPerSvc]
-			} else {
-				view.DocsCapped = false
+			more := len(docs) > deployDocsPerSvc
+			if more {
+				docs = docs[:deployDocsPerSvc]
 			}
-			view.RecordCount += len(older)
-			if len(older) == 0 {
+			for _, doc := range docs {
+				if seen[doc.Key] {
+					continue
+				}
+				seen[doc.Key] = true
+				view.RecordCount++
+				rec, deployedAt, reasons := store.ClassifyDeployRecord(doc.Key, service, doc.Body)
+				if len(reasons) > 0 {
+					alias := strings.TrimSuffix(prefix, "/")
+					alias = alias[strings.LastIndex(alias, "/")+1:]
+					if alias != service {
+						rec, deployedAt, reasons = store.ClassifyDeployRecord(doc.Key, alias, doc.Body)
+					}
+				}
+				if len(reasons) > 0 {
+					view.InvalidCount++
+					view.Invalid = append(view.Invalid, deployInvalidRecord{Key: doc.Key, Prefix: prefix, Reasons: reasons})
+					continue
+				}
+				keyTime, _ := store.DeployRecordKeyTime(doc.Key)
+				parsed = append(parsed, deployParsedDoc{key: doc.Key, rec: rec, deployedAt: deployedAt, keyTime: keyTime, recordedAt: doc.CreatedAt})
+			}
+			prefixCount += len(docs)
+			if !more || len(docs) == 0 {
 				break
 			}
-			cursor = older[len(older)-1].Key
-			parsed = append(parsed, parseDocs(older)...)
+			if prefixCount >= deployDocsHardCap {
+				view.DocsCapped = true
+				break
+			}
+			cursor = docs[len(docs)-1].Key
 		}
 	}
 	if len(parsed) == 0 {
