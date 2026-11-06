@@ -173,6 +173,16 @@ func TestReviewHistoryFillsBareRow(t *testing.T) {
 	}
 }
 
+// TestReviewHistoryAcceptsMergewakeDigest pins the 12-hex digest mergewake's
+// patch receipt carries today (mergewake internal/pipeline/patchid.go).
+func TestReviewHistoryAcceptsMergewakeDigest(t *testing.T) {
+	for _, d := range []string{"0123456789ab", strings.Repeat("f", 16), strings.Repeat("a", 128)} {
+		if err := (ReviewHistory{PatchDigest: strPtr(d)}).check(); err != nil {
+			t.Fatalf("digest %q refused: %v", d, err)
+		}
+	}
+}
+
 func TestReviewHistoryValidation(t *testing.T) {
 	good := TaskEventReview{ReviewedHead: testSHA1, Round: 1, Pass: 1, Lens: "correctness"}
 	for _, tc := range []struct {
@@ -181,7 +191,7 @@ func TestReviewHistoryValidation(t *testing.T) {
 		want string
 	}{
 		{"digest upper case", ReviewHistory{PatchDigest: strPtr(strings.Repeat("AB", 16))}, "patch_digest"},
-		{"digest too short", ReviewHistory{PatchDigest: strPtr("abcdef")}, "patch_digest"},
+		{"digest too short", ReviewHistory{PatchDigest: strPtr(strings.Repeat("a", 11))}, "patch_digest"},
 		{"digest too long", ReviewHistory{PatchDigest: strPtr(strings.Repeat("a", 129))}, "patch_digest"},
 		{"digest not hex", ReviewHistory{PatchDigest: strPtr(strings.Repeat("g", 20))}, "patch_digest"},
 		{"digest empty", ReviewHistory{PatchDigest: strPtr("")}, "patch_digest"},
