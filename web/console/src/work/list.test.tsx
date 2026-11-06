@@ -15,17 +15,17 @@ beforeEach(() => {
 afterEach(() => { vi.unstubAllGlobals(); history.replaceState(null, "", "/"); });
 it("W3 restores controls and changes the URL", async () => {
   render(<WorkPage />);
-  expect(await screen.findByText("#101 Task one")).toBeTruthy();
-  expect((screen.getByLabelText("Search") as HTMLInputElement).value).toBe("#101");
-  expect((screen.getByLabelText("Priority ≥") as HTMLInputElement).value).toBe("2");
-  expect((screen.getByLabelText("lane") as HTMLSelectElement).value).toBe("x");
-  fireEvent.change(screen.getByLabelText("Search"), { target: { value: "one" } });
+  expect(await screen.findByText("Task one")).toBeTruthy();
+  expect((screen.getByLabelText("검색") as HTMLInputElement).value).toBe("#101");
+  expect((screen.getByLabelText("우선순위 ≥") as HTMLInputElement).value).toBe("2");
+  expect((screen.getByLabelText("레인") as HTMLSelectElement).value).toBe("x");
+  fireEvent.change(screen.getByLabelText("검색"), { target: { value: "one" } });
   expect(new URLSearchParams(location.search).get("q")).toBe("one");
 });
 it("W10 uses a pane on wide screens and links on narrow screens", async () => {
   wide = true;
   const { unmount } = render(<WorkPage />);
-  fireEvent.click(await screen.findByText("#101 Task one"));
+  fireEvent.click(await screen.findByText("Task one"));
   expect(new URLSearchParams(location.search).get("task")).toBe("101");
   expect(await screen.findByRole("heading", { name: "#101 Task one" })).toBeTruthy();
   history.replaceState(null, "", "/ui/work?project=a&view=active");
@@ -33,7 +33,7 @@ it("W10 uses a pane on wide screens and links on narrow screens", async () => {
   await waitFor(() => expect(screen.queryByRole("heading", { name: "#101 Task one" })).toBeNull());
   unmount(); wide = false;
   render(<WorkPage />);
-  expect((await screen.findByText("#101 Task one")).closest("a")?.getAttribute("href")).toBe("/ui/tasks/101");
+  expect((await screen.findByText("Task one")).closest("a")?.getAttribute("href")).toBe("/ui/tasks/101");
 });
 
 it("W12 keeps the selected row and scroll after polling", async () => {
@@ -64,7 +64,7 @@ it("W2 tab counts match rendered rows for twelve tasks", async () => {
   vi.stubGlobal("fetch", vi.fn(async (path: string) => path.includes("projects") ? response({ projects: ["a"] }) : response({ tasks: rows, states, generated_at: "now", truncated: false })));
   history.replaceState(null, "", "/ui/work?project=a");
   const { container } = render(<WorkPage />);
-  for (const [name, count] of [["Needs me", 3], ["Active", 4], ["Backlog", 4], ["Shipped", 3], ["All", 12]] as const) {
+  for (const [name, count] of [["내 차례", 3], ["진행 중", 4], ["대기", 4], ["완료", 3], ["전체", 12]] as const) {
     const button = await screen.findByRole("button", { name: `${name} ${count}` });
     fireEvent.click(button);
     expect(container.querySelectorAll(".work-rows a")).toHaveLength(count);
@@ -102,10 +102,31 @@ it("W14 uses the shared poller without overlapping requests", async () => {
 it("keeps URL filter values visible when they have no matching options", async () => {
   history.replaceState(null, "", "/ui/work?project=missing&view=all&lane=unknown-lane&kind=unknown-kind&state=unknown-state");
   render(<WorkPage />);
-  await screen.findByRole("button", { name: "All 0" });
-  for (const [label, value] of [["Project", "missing"], ["lane", "unknown-lane"], ["kind", "unknown-kind"], ["state", "unknown-state"]]) {
+  await screen.findByRole("button", { name: "전체 0" });
+  for (const [label, value] of [["프로젝트", "missing"], ["레인", "unknown-lane"], ["종류", "unknown-kind"], ["상태", "unknown-state"]]) {
     const select = screen.getByLabelText(label) as HTMLSelectElement;
     expect(select.value).toBe(value);
     expect(select.selectedOptions[0]?.textContent).toBe(value);
   }
+});
+
+it("shows active job model, profile, host fallback, chips and relative time", async () => {
+  const row = { ...task, priority: 1, active_job: { role: "worker", model: "model-x", profile: "high", host: "", harness: null, effort: null } };
+  vi.stubGlobal("fetch", vi.fn(async (path: string) => path.includes("projects") ? response({ projects: ["a"] }) : response({ tasks: [row], states: [], generated_at: "2026-01-01T02:00:00Z", truncated: false })));
+  history.replaceState(null, "", "/ui/work?project=a&view=active");
+  const { container } = render(<WorkPage />);
+  expect(await screen.findByText("worker · model-x · high · 기기 미기록")).toBeTruthy();
+  expect(screen.getByTitle("Task one")).toBeTruthy();
+  expect(screen.getByText("2h").getAttribute("title")).toContain("2026-01-01");
+  expect(container.querySelector(".hk-chip--priority-urgent")?.textContent).toBe("P1");
+});
+it("arrow keys select rows and Enter opens the record", async () => {
+  wide = true;
+  history.replaceState(null, "", "/ui/work?project=a&view=active");
+  render(<WorkPage />);
+  await screen.findByText("Task one");
+  fireEvent.keyDown(window, { key: "ArrowDown" });
+  expect(document.activeElement?.id).toBe("work-row-101");
+  fireEvent.keyDown(document.activeElement!, { key: "Enter" });
+  expect(await screen.findByRole("heading", { name: "#101 Task one" })).toBeTruthy();
 });

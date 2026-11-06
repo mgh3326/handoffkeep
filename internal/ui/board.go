@@ -71,7 +71,34 @@ func projectWorkBoard(board store.LinearBoard) *boardWorkBoard {
 	return view
 }
 
+type boardActiveJob struct {
+	Role    string  `json:"role"`
+	Model   string  `json:"model"`
+	Profile string  `json:"profile"`
+	Host    string  `json:"host"`
+	Harness *string `json:"harness"`
+	Effort  *string `json:"effort"`
+}
+
+func newestLiveJob(jobs []store.Job) *boardActiveJob {
+	var newest *store.Job
+	for i := range jobs {
+		j := &jobs[i]
+		if j.State != "claimed" && j.State != "spawned" {
+			continue
+		}
+		if newest == nil || j.CreatedAt.After(newest.CreatedAt) || (j.CreatedAt.Equal(newest.CreatedAt) && j.JobID > newest.JobID) {
+			newest = j
+		}
+	}
+	if newest == nil {
+		return nil
+	}
+	return &boardActiveJob{Role: newest.Role, Model: newest.Model, Profile: newest.Profile, Host: newest.Host, Harness: newest.Harness, Effort: newest.Effort}
+}
+
 type boardTask struct {
+	ActiveJob  *boardActiveJob `json:"active_job,omitempty"`
 	WorkBoard  *boardWorkBoard `json:"work_board,omitempty"`
 	ID         int64           `json:"id"`
 	Lane       string          `json:"lane"`
@@ -202,6 +229,12 @@ func (h *Handler) boardTasks(w http.ResponseWriter, r *http.Request) {
 	for _, task := range tasks {
 		row := projectBoardTask(task)
 		row.WorkBoard = projectWorkBoard(workBoards[task.ID])
+		jobs, err := h.store.ListJobsByTask(r.Context(), task.ID, 2147483647)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "internal_error")
+			return
+		}
+		row.ActiveJob = newestLiveJob(jobs)
 		response.Tasks = append(response.Tasks, row)
 		response.NextAfterID = task.ID
 	}

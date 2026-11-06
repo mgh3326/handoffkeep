@@ -100,7 +100,10 @@ export type TaskRelation = {
   created_at: string;
 };
 
+export type ActiveJob = { role: string; model: string; profile: string; host: string; harness: string | null; effort: string | null };
+
 export type BoardTask = {
+  active_job?: ActiveJob;
   /** Console-safe projection of the durable board and recorded placements.
    * Absent on old servers and when no execution/PR data is recorded. */
   work_board?: BoardWorkBoard;

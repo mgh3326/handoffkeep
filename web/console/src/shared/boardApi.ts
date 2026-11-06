@@ -200,7 +200,8 @@ function validBoardTask(value: unknown): value is BoardTask {
     typeof value.refs === "object" &&
     value.refs !== null &&
     (!("closure" in value.refs) || (record(value.refs.closure) && typeof value.refs.closure.type === "string" && typeof value.refs.closure.evidence === "string")) &&
-    (!("work_board" in value) || validWorkBoard(value.work_board))
+    (!("work_board" in value) || validWorkBoard(value.work_board)) &&
+    (!("active_job" in value) || (record(value.active_job) && [value.active_job.role, value.active_job.model, value.active_job.profile, value.active_job.host].every(v => typeof v === "string") && [value.active_job.harness, value.active_job.effort].every(v => v === null || typeof v === "string")))
   );
 }
 
