@@ -116,3 +116,10 @@ it("rejects a malformed linked document list", async () => {
   vi.stubGlobal("fetch", vi.fn(async () => json({ ...detail, documents: [{ key: "x", kind: "note", origin_class: 42 }] })));
   await expect(fetchTaskDetail(101)).rejects.toThrow("malformed");
 });
+
+it("job record includes host and omits empty fields", async () => {
+  const job = { job_id: "job", role: "worker", state: "spawned", host: "fictional-device", family: "", profile: "", model: "model-x", harness: null, effort: null, skills: [], skills_supported: true, claimed_at: null, spawned_at: null, ready_at: null, ended_at: null, end_reason: null, diff_stat: null };
+  vi.stubGlobal("fetch", vi.fn(async () => json({ ...detail, jobs: [job] })));
+  render(<TaskRecord id={101} />);
+  expect(await screen.findByText("job · worker · model-x · fictional-device")).toBeTruthy();
+});

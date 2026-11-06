@@ -72,13 +72,14 @@ func projectWorkBoard(board store.LinearBoard) *boardWorkBoard {
 }
 
 type boardTask struct {
-	WorkBoard  *boardWorkBoard `json:"work_board,omitempty"`
-	ID         int64           `json:"id"`
-	Lane       string          `json:"lane"`
-	ParentLane string          `json:"parent_lane,omitempty"`
-	Title      string          `json:"title"`
-	Kind       string          `json:"kind"`
-	State      string          `json:"state"`
+	ActiveJob  *store.ActiveJobSummary `json:"active_job,omitempty"`
+	WorkBoard  *boardWorkBoard         `json:"work_board,omitempty"`
+	ID         int64                   `json:"id"`
+	Lane       string                  `json:"lane"`
+	ParentLane string                  `json:"parent_lane,omitempty"`
+	Title      string                  `json:"title"`
+	Kind       string                  `json:"kind"`
+	State      string                  `json:"state"`
 	// Category is derived from State; AwaitingDecision is the flag that
 	// replaced the needs_decision state. Both feed the console's views.
 	Category         string `json:"category"`
@@ -199,9 +200,22 @@ func (h *Handler) boardTasks(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "internal_error")
 		return
 	}
+	ids := make([]int64, 0, len(tasks))
+	for _, task := range tasks {
+		ids = append(ids, task.ID)
+	}
+	activeJobs, err := h.store.ReadActiveJobs(r.Context(), ids)
+	if err != nil {
+		log.Printf("ui.board_jobs_failed err=%q", err)
+		writeJSONError(w, http.StatusInternalServerError, "internal_error")
+		return
+	}
 	for _, task := range tasks {
 		row := projectBoardTask(task)
 		row.WorkBoard = projectWorkBoard(workBoards[task.ID])
+		if job, ok := activeJobs[task.ID]; ok {
+			row.ActiveJob = &job
+		}
 		response.Tasks = append(response.Tasks, row)
 		response.NextAfterID = task.ID
 	}

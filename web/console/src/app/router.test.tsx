@@ -34,14 +34,14 @@ describe("shell router", () => {
 
   it("/ui/work renders Work and keeps the URL", () => {
     visit("/ui/work");
-    expect(screen.getByRole("heading", { name: "Work" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "작업" })).toBeTruthy();
     expect(window.location.pathname).toBe("/ui/work");
   });
 
   it("/ui/queue renders Work and replaces the URL with /ui/work", () => {
     const length = window.history.length;
     visit("/ui/queue?view=all");
-    expect(screen.getByRole("heading", { name: "Work" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "작업" })).toBeTruthy();
     expect(window.location.pathname).toBe("/ui/work");
     expect(window.location.search).toBe("");
     expect(window.history.length).toBe(length + 1); // pushState in visit(), none from the replace
