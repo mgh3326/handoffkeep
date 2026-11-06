@@ -634,6 +634,13 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("GET /v1/changes", s.changesList)
 	m.HandleFunc("POST /v1/changes/{id}/merge-flow", s.changeMergeFlow)
 	m.HandleFunc("POST /v1/changes/verifications", s.changeVerification)
+	m.HandleFunc("PUT /v1/changes/state", s.changeStatePut)
+	m.HandleFunc("PUT /v1/changes/checks", s.changeChecksPut)
+	m.HandleFunc("PUT /v1/changes/threads", s.changeThreadsPut)
+	m.HandleFunc("PUT /v1/changes/findings", s.changeFindingsPut)
+	m.HandleFunc("PUT /v1/changes/gate", s.changeGatePut)
+	m.HandleFunc("POST /v1/changes/batch", s.changeBatch)
+	m.HandleFunc("GET /v1/changes/one", s.changeOne)
 	m.HandleFunc("POST /v1/tasks/next", s.tasksNext)
 	m.HandleFunc("GET /v1/tasks/projects", s.taskProjectsList)
 	m.HandleFunc("POST /v1/tasks/projects", s.taskProjectsCreate)
@@ -2124,6 +2131,7 @@ const (
 	bodySmall    = 4 << 10  // one entity's short fields
 	bodyEvent    = 16 << 10 // one external event with its references (16 review items fill ~11 KiB)
 	bodyLarge    = 64 << 10 // free text or a list: descriptions, candidates
+	bodyPRState  = 2 << 20  // one PR-state write: ~200 checks, 100 threads and a pass of findings (hk 3198)
 )
 
 // decode reads one JSON request body into v. max is the payload's own byte

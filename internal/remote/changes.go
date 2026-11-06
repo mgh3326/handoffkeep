@@ -30,3 +30,19 @@ func (c Client) ListChanges(ctx context.Context, pr string, taskID int64) ([]sto
 	err := c.call(ctx, "GET", "/v1/changes?"+q.Encode(), nil, &out)
 	return out.Changes, err
 }
+
+// GetChange reads one PR's state (GET /v1/changes/one). include is the
+// comma list of sections to return ("" for all); a PR hk has never seen is a
+// not_found error (ErrorCode).
+func (c Client) GetChange(ctx context.Context, repo string, pr int, allHeads bool, include string) (store.ChangeView, error) {
+	q := url.Values{"repo": {repo}, "pr": {strconv.Itoa(pr)}}
+	if allHeads {
+		q.Set("all_heads", "1")
+	}
+	if include != "" {
+		q.Set("include", include)
+	}
+	var out store.ChangeView
+	err := c.call(ctx, "GET", "/v1/changes/one?"+q.Encode(), nil, &out)
+	return out, err
+}

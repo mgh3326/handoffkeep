@@ -104,6 +104,14 @@ type Change struct {
 	// are all verdicts, newest first (hk 3120).
 	Verification  *Verification  `json:"verification"`
 	Verifications []Verification `json:"verifications"`
+	// PR state mergewake writes (hk 3198): the gate decision, draft flag, the
+	// oldest written section's observed_at and the open thread and finding
+	// counts. A section never written leaves its field unset.
+	Draft        *bool      `json:"draft,omitempty"`
+	GateState    *string    `json:"gate_state,omitempty"`
+	FreshnessMin *time.Time `json:"freshness_min,omitempty"`
+	OpenThreads  int        `json:"open_threads"`
+	OpenFindings int        `json:"open_findings"`
 }
 
 // ChangeMergeFlow is the merge-flow field set. SetChangeMergeFlow replaces
@@ -249,10 +257,15 @@ func recordChangeTx(ctx context.Context, tx pgx.Tx, x Task, in TaskSourceEvent, 
 	return nil
 }
 
+// insertReviewTx records one review pass. The first report of a pass wins and
+// a redelivery changes nothing, except that a row carrying nothing but its key
+// (a findings write got there first, ApplyChangeFindings) is filled in by the
+// first report that carries something.
 func insertReviewTx(ctx context.Context, tx pgx.Tx, changeID int64, rv TaskEventReview, now time.Time) error {
 	_, err := tx.Exec(ctx, `INSERT INTO reviews(change_id,reviewed_head,reviewed_base,patch_id,round,pass,lens,reviewer_job_id,family,profile,model,harness,effort,executor,fallback,policy_revision,contract_source,verdict,critical,high,medium,low,started_at,finished_at,recorded_at)
 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)
-ON CONFLICT(change_id,reviewed_head,lens,round,pass) DO NOTHING`,
+ON CONFLICT(change_id,reviewed_head,lens,round,pass) DO UPDATE SET reviewed_base=EXCLUDED.reviewed_base,patch_id=EXCLUDED.patch_id,reviewer_job_id=EXCLUDED.reviewer_job_id,family=EXCLUDED.family,profile=EXCLUDED.profile,model=EXCLUDED.model,harness=EXCLUDED.harness,effort=EXCLUDED.effort,executor=EXCLUDED.executor,fallback=EXCLUDED.fallback,policy_revision=EXCLUDED.policy_revision,contract_source=EXCLUDED.contract_source,verdict=EXCLUDED.verdict,critical=EXCLUDED.critical,high=EXCLUDED.high,medium=EXCLUDED.medium,low=EXCLUDED.low,started_at=EXCLUDED.started_at,finished_at=EXCLUDED.finished_at
+WHERE reviews.reviewed_base IS NULL AND reviews.patch_id IS NULL AND reviews.reviewer_job_id IS NULL AND reviews.family IS NULL AND reviews.profile IS NULL AND reviews.model IS NULL AND reviews.harness IS NULL AND reviews.effort IS NULL AND reviews.executor IS NULL AND reviews.fallback IS NULL AND reviews.policy_revision IS NULL AND reviews.contract_source IS NULL AND reviews.verdict IS NULL AND reviews.critical IS NULL AND reviews.high IS NULL AND reviews.medium IS NULL AND reviews.low IS NULL AND reviews.started_at IS NULL AND reviews.finished_at IS NULL`,
 		changeID, rv.ReviewedHead, nullStr(rv.ReviewedBase), nullStr(rv.PatchID), rv.Round, rv.Pass, rv.Lens, nullStr(rv.ReviewerJobID),
 		nullStr(rv.Family), nullStr(rv.Profile), nullStr(rv.Model), nullStr(rv.Harness), nullStr(rv.Effort), nullStr(rv.Executor), rv.Fallback,
 		nullStr(rv.PolicyRevision), nullStr(rv.ContractSource), nullStr(rv.Verdict), rv.Critical, rv.High, rv.Medium, rv.Low,
@@ -260,10 +273,14 @@ ON CONFLICT(change_id,reviewed_head,lens,round,pass) DO NOTHING`,
 	return err
 }
 
-const changeColumns = `id,repo,pr_number,state,head_sha,base_sha,merge_sha,opened_at,merged_at,reverted_by_change_id,priority,hold_reason,depends_on_change_id,depends_on_state,created_at,updated_at`
+const changeColumns = `id,repo,pr_number,state,head_sha,base_sha,merge_sha,opened_at,merged_at,reverted_by_change_id,priority,hold_reason,depends_on_change_id,depends_on_state,created_at,updated_at,
+draft,gate_state,LEAST(state_observed_at,checks_observed_at,threads_observed_at,findings_observed_at,gate_decided_at),
+(SELECT count(*) FROM change_threads t WHERE t.change_id=changes.id AND NOT t.resolved AND NOT t.gone),
+(SELECT count(*) FROM change_findings f JOIN changes c ON c.id=f.change_id ` + findingThreadJoin + `
+	WHERE f.change_id=changes.id AND ` + findingStatusSQL + `='open')`
 
 func scanChange(row pgx.Row, c *Change) error {
-	if err := row.Scan(&c.ID, &c.Repo, &c.PRNumber, &c.State, &c.HeadSHA, &c.BaseSHA, &c.MergeSHA, &c.OpenedAt, &c.MergedAt, &c.RevertedByChangeID, &c.Priority, &c.HoldReason, &c.DependsOnChangeID, &c.DependsOnState, &c.CreatedAt, &c.UpdatedAt); err != nil {
+	if err := row.Scan(&c.ID, &c.Repo, &c.PRNumber, &c.State, &c.HeadSHA, &c.BaseSHA, &c.MergeSHA, &c.OpenedAt, &c.MergedAt, &c.RevertedByChangeID, &c.Priority, &c.HoldReason, &c.DependsOnChangeID, &c.DependsOnState, &c.CreatedAt, &c.UpdatedAt, &c.Draft, &c.GateState, &c.FreshnessMin, &c.OpenThreads, &c.OpenFindings); err != nil {
 		return err
 	}
 	c.PR = changeURL(c.Repo, c.PRNumber)
