@@ -50,6 +50,8 @@ type errorRule struct {
 // errorRules is the one table from sentinel to response. Order matters only
 // where one error could match two rules; the first match wins.
 var errorRules = []errorRule{
+	{store.ErrStandingNotNewer, http.StatusConflict, "standing_not_newer", false},
+	{store.ErrStandingConflict, http.StatusConflict, "standing_conflict", false},
 	{store.ErrInvalidSync, http.StatusBadRequest, "invalid_context", false},
 	{attachments.ErrDisabled, http.StatusServiceUnavailable, "attachments_disabled", false},
 	{attachments.ErrTooLarge, http.StatusRequestEntityTooLarge, "attachment_too_large", false},
@@ -83,6 +85,9 @@ var errorRules = []errorRule{
 	{store.ErrDecisionRequestStale, http.StatusConflict, "decision_request_stale", false},
 	{store.ErrDecisionRequestResolved, http.StatusConflict, "decision_request_resolved", false},
 	{store.ErrDecisionEventKeyConflict, http.StatusConflict, "decision_event_key_conflict", false},
+	{store.ErrDecisionAttemptNotFound, http.StatusNotFound, "not_found", false},
+	{store.ErrDecisionAttemptNotPending, http.StatusConflict, "decision_attempt_not_pending", false},
+	{store.ErrDecisionAttemptDenied, http.StatusConflict, "decision_attempt_denied", false},
 	{store.ErrRelayEventNotFound, http.StatusNotFound, "not_found", false},
 	{store.ErrDeviationRefRequired, http.StatusBadRequest, "deviation_ref_required", false},
 	{store.ErrDecidedByRequired, http.StatusBadRequest, "decided_by_required", false},
@@ -116,6 +121,14 @@ var errorRules = []errorRule{
 	{store.ErrStatusUpdateInvalid, http.StatusBadRequest, "invalid_status_update", true},
 	{store.ErrChangeNotFound, http.StatusNotFound, "not_found", false},
 	{store.ErrChangeDependencyCycle, http.StatusConflict, "change_dependency_cycle", false},
+	{store.ErrVerificationExists, http.StatusConflict, "verification_exists", false},
+	{store.ErrInvalidChangeWrite, http.StatusBadRequest, "invalid_context", true},
+	{store.ErrDotsResultNotFound, http.StatusNotFound, "not_found", false},
+	{store.ErrDotsAdoptionFinal, http.StatusConflict, "dots_adoption_final", false},
+	{store.ErrServiceNotFound, http.StatusNotFound, "not_found", false},
+	{store.ErrDeployNotFound, http.StatusNotFound, "not_found", false},
+	{store.ErrDeployAttemptConflict, http.StatusConflict, "deploy_attempt_conflict", false},
+	{store.ErrDeployAttemptFinished, http.StatusConflict, "deploy_attempt_finished", false},
 }
 
 // appErr writes the response for an error returned by the store or a

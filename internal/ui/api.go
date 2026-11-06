@@ -64,6 +64,8 @@ func (h *Handler) serveAPI(w http.ResponseWriter, r *http.Request, identity cfac
 		h.reapAPI(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/ui/api/glance":
 		h.glance(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/ui/api/board/projects":
+		h.boardProjects(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/ui/api/board/tasks":
 		h.boardTasks(w, r)
 	case r.Method == http.MethodGet && boardCommentsPathRE.MatchString(r.URL.Path):
@@ -125,6 +127,8 @@ func (h *Handler) serveAPI(w http.ResponseWriter, r *http.Request, identity cfac
 		h.decisionResolve(w, r, identity)
 	case r.Method == http.MethodGet && (r.URL.Path == "/ui/api/decisions" || strings.HasPrefix(r.URL.Path, "/ui/api/decisions/")):
 		h.decisionsAPI(w, r, identity)
+	case r.Method == http.MethodPost && r.URL.Path == "/ui/api/decision-requests/deny":
+		h.decisionDeny(w, r, identity)
 	case r.Method == http.MethodGet && r.URL.Path == "/ui/api/attention":
 		h.attention(w, r, identity)
 	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/ui/api/nodes/"):

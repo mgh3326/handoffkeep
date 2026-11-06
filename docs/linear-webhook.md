@@ -49,8 +49,11 @@ then handled by its first line:
 | Not starting `[dots]` | labelled `dots`, closed, comment newer than the close | Flag notification | `flagged` |
 | Anything else | any | Nothing | `ignored` |
 
-A repeated delivery answers `duplicate` and writes nothing. If a Linear API read
-fails, the endpoint answers `503 linear_unavailable` so that Linear retries.
+A repeated delivery answers `duplicate`, keeps the document and queues no
+notification; it only fills a missing task link (see Document). If a Linear API
+read fails, the endpoint answers `503 linear_unavailable` so that Linear
+retries. Linear's `Comment` payload usually omits the issue description, so a
+recorded or flagged comment costs one issue read for it.
 
 ### Document
 
@@ -58,10 +61,35 @@ The key is `dots/results/<ISSUE>/<YYYY-MM-DD>-<first 8 of comment id>`, with the
 date taken from the comment's `createdAt`. The document has kind `note` and
 session `operator-desk`. The first writer of a key wins.
 
+The same transaction writes one `dots_results` row per comment: the document
+key, the issue UUID and identifier, the comment id and kind, `verdict` (the
+verdict on a `[dots] KIND: <verdict>` heading, else the summary line, at most
+220 characters), `artefact_sha256` (the SHA-256 of the comment body as Linear
+delivered it; the document's own `sha256` hashes hk's document body),
+`routed_lane`, `task_id` and the adoption fields below.
+
+**Task link.** When exactly one hk task has the origin `(linear, <issue UUID>)`
+(`tasks origin add`), the row's `task_id` and the document's `task_id` name
+it. With no such task, or several, both stay NULL: the link is unknown. When
+the poller wrote the document first, the webhook still writes the row and sets
+a NULL document `task_id`, and queues nothing.
+
 ### Notification
 
-Each notification is one `notification_outbox` row for lane `operator-desk`,
-written in the same transaction as its document. Read unsent rows with
+Each notification is one `notification_outbox` row, written in the same
+transaction as its document. Its lane is, in order:
+
+1. the lane on the first line of the issue description that starts
+   `hk-lane:`, if it reads `hk-lane: <lane>` with a valid lane name and
+   nothing else (an invalid first line falls through; later lines are ignored);
+2. else the lane of the one task linked to the issue (see Task link);
+3. else `operator-desk`.
+
+The same order routes `RESULT`, `BLOCKED`, `QUESTION` and the closed-issue
+flag. `BLOCKED` and `QUESTION` arrive on that lane as `decision` events: the
+lane is the request's thread. hk opens no decision request for them; the
+requester runs `handoffkeep tasks decision-request` when the operator must
+answer. Read unsent rows with
 `GET /v1/assistant/outbox`, and record a hub receipt with
 `POST /v1/assistant/outbox/sent`. The server can do both itself: see
 [Desk notification](linear-decisions.md#desk-notification).
@@ -72,9 +100,28 @@ written in the same transaction as its document. Read unsent rows with
 | `dots_decision` | `decision` | `dots-<comment id>` |
 | `dots_followup` | `info` | `dots-followup-<comment id>` |
 
-The poller uses the same event ids, so the hub dedupes a notification sent by
-both paths. The handler adds no row when the poller already wrote the document,
-because the poller has already notified.
+The poller uses the same event ids. It still notifies `operator-desk` on its
+own, whatever the routed lane. The hub dedupes on `(lane, event_id)`, so the two
+paths fold into one event only when the routed lane is `operator-desk`;
+otherwise the requester and the desk each get one. The handler adds no row when
+the poller already wrote the document, because the poller has already notified.
+
+### Adoption
+
+A result starts at `adoption_state` `pending_review`. Record what became of it:
+
+```bash
+handoffkeep dots results --issue ROB-1        # or --task N
+handoffkeep dots adopt 12 --state accepted --ref https://github.com/o/r/pull/3
+handoffkeep dots adopt 12 --state superseded --superseded-by 15
+```
+
+The states are `accepted` and `partially_used` (both need `--ref`: a GitHub PR
+URL, `hk:task/<id>` or `hk:doc <key>`), `rejected`, and `superseded` (needs
+`--superseded-by`, another result id). `superseded` is final: any other change
+answers `409 dots_adoption_final`. Repeating the stored change answers 200 with
+`changed: false`. The routes are `GET /v1/dots/results?task=N|issue=<ID>` and
+`POST /v1/dots/results/{id}/adoption` with `{"state", "ref", "superseded_by"}`.
 
 ## Register the webhook
 

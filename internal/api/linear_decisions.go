@@ -504,9 +504,14 @@ const discordResponseMaxBytes = 1 << 20
 
 // send is every call to the webhook: the content with mentions disabled, a
 // timeout, and errors that never quote the URL. out, when set, receives the
-// JSON response.
-func (d DiscordWebhook) send(ctx context.Context, method, target, content string, out any) error {
-	body, err := json.Marshal(map[string]any{"content": content, "allowed_mentions": map[string]any{"parse": []string{}}})
+// JSON response. users, when given, are the only ids the message may ping;
+// parse stays empty either way, so no @everyone or role ever pings.
+func (d DiscordWebhook) send(ctx context.Context, method, target, content string, out any, users ...string) error {
+	allowed := map[string]any{"parse": []string{}}
+	if len(users) > 0 {
+		allowed["users"] = users
+	}
+	body, err := json.Marshal(map[string]any{"content": content, "allowed_mentions": allowed})
 	if err != nil {
 		return err
 	}

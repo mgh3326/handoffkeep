@@ -151,8 +151,13 @@ func TestDecisionRecordDispositionOperatorOnly(t *testing.T) {
 	}
 	onlyDecision(t, decisionRowsWhere(t, s, `task_id=$1`, item.ID), DecisionStatusOpen)
 
-	if _, err := s.AnswerDisposition(ctx, DispositionAnswerInput{ID: item.ID, Gen: gen, Key: "E", OperatorEmail: "admin@example.com", EventID: "decision-disposition"}); err != nil {
+	answered, err := s.AnswerDisposition(ctx, DispositionAnswerInput{ID: item.ID, Gen: gen, Key: "E", OperatorEmail: "admin@example.com", EventID: "decision-disposition"})
+	if err != nil {
 		t.Fatal(err)
+	}
+	stored := stateOf(t, s, item.ID)
+	if !answered.LastActivityAt.After(item.LastActivityAt) || !answered.LastActivityAt.Equal(stored.LastActivityAt) {
+		t.Fatalf("disposition activity before=%v returned=%v stored=%v", item.LastActivityAt, answered.LastActivityAt, stored.LastActivityAt)
 	}
 	row = onlyDecision(t, decisionRowsWhere(t, s, `task_id=$1`, item.ID), DecisionStatusAnswered)
 	if row.AnsweredBy != "operator:admin@example.com" || !strings.Contains(row.Answer, "disposition-answer E") {
@@ -204,7 +209,7 @@ func TestDecisionRecordJobEscalate(t *testing.T) {
 	s := decisionStore(t)
 	ctx := t.Context()
 	task := decisionTask(t, s, "backlog")
-	if _, _, err := s.ClaimJob(ctx, Job{JobID: "dr-esc-1", TaskID: task.ID, Host: "host-a", CreatedBy: "decision-test"}); err != nil {
+	if _, _, err := s.ClaimJob(ctx, Job{JobID: "dr-esc-1", TaskID: &task.ID, Host: "host-a", CreatedBy: "decision-test"}); err != nil {
 		t.Fatal(err)
 	}
 	esc := RelayEvent{Kind: "job.escalate", JobID: "dr-esc-1", OwnerLane: "esc-lane", Question: "which way?", ReportPath: "report-1"}
@@ -400,7 +405,7 @@ func TestDecisionRecordSupersededWhenJobEnds(t *testing.T) {
 			task := decisionTask(t, s, "backlog")
 			refs := map[string]string{}
 			for _, job := range []string{"dr-end-a", "dr-end-b"} {
-				if _, _, err := s.ClaimJob(ctx, Job{JobID: job, TaskID: task.ID, Host: "host-a", CreatedBy: "decision-test"}); err != nil {
+				if _, _, err := s.ClaimJob(ctx, Job{JobID: job, TaskID: &task.ID, Host: "host-a", CreatedBy: "decision-test"}); err != nil {
 					t.Fatal(err)
 				}
 				e, _ := decisionRelay(t, s, RelayEvent{Kind: "job.escalate", JobID: job, OwnerLane: "end-lane", Question: "stop?", ReportPath: job})
@@ -427,7 +432,7 @@ func TestDecisionRecordSupersededWhenJobEnds(t *testing.T) {
 func TestDecisionRecordSupersededByJobEndEvent(t *testing.T) {
 	s := decisionStore(t)
 	task := decisionTask(t, s, "backlog")
-	if _, _, err := s.ClaimJob(t.Context(), Job{JobID: "dr-relay-end", TaskID: task.ID, Host: "host-a", CreatedBy: "decision-test"}); err != nil {
+	if _, _, err := s.ClaimJob(t.Context(), Job{JobID: "dr-relay-end", TaskID: &task.ID, Host: "host-a", CreatedBy: "decision-test"}); err != nil {
 		t.Fatal(err)
 	}
 	e, _ := decisionRelay(t, s, RelayEvent{Kind: "job.escalate", JobID: "dr-relay-end", OwnerLane: "end-lane", Question: "stop?", ReportPath: "r"})
@@ -537,5 +542,46 @@ func TestDecisionRecordOverdueIsDisplayOnly(t *testing.T) {
 	xs, err := s.ListDecisionRecords(ctx, DecisionRecordFilter{Source: DecisionSourceTaskRequest}, due.Add(time.Minute))
 	if err != nil || len(xs) != 1 || !xs[0].Overdue || xs[0].Status != DecisionStatusOpen || xs[0].SourceRef != got.Request.ID {
 		t.Fatalf("overdue list=%+v err=%v", xs, err)
+	}
+}
+
+func TestTasklessJobDecisions(t *testing.T) {
+	s := decisionStore(t)
+	for _, id := range []string{"taskless-escalation", "taskless-lane"} {
+		if _, _, err := s.ClaimJob(t.Context(), Job{JobID: id, Host: "host-a", CreatedBy: "decision-test"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	escalation, created := decisionRelay(t, s, RelayEvent{Kind: "job.escalate", JobID: "taskless-escalation", OwnerLane: "test-lane", Question: "which way?", ReportPath: "taskless-report"})
+	if !created {
+		t.Fatal("escalation not created")
+	}
+	row := onlyDecision(t, decisionRowsOf(t, s, DecisionSourceJobEscalate, fmt.Sprint(escalation.ID)), DecisionStatusOpen)
+	if row.JobID != "taskless-escalation" || row.TaskID != nil {
+		t.Fatalf("escalation: %+v", row)
+	}
+	lane, created := decisionRelay(t, s, RelayEvent{Kind: "lane.event", JobID: "taskless-lane", OwnerLane: "test-lane", EventID: "taskless-ask", Text: "[decision-needed] choose?"})
+	if !created {
+		t.Fatal("lane event not created")
+	}
+	row = onlyDecision(t, decisionRowsOf(t, s, DecisionSourceLaneEvent, fmt.Sprint(lane.ID)), DecisionStatusOpen)
+	if row.JobID != "taskless-lane" || row.TaskID != nil {
+		t.Fatalf("lane decision: %+v", row)
+	}
+	sources, err := s.ListOpenDecisionSources(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, item := range sources.Items {
+		if item.Source == DecisionSourceJobEscalate && item.JobID == "taskless-escalation" {
+			found = true
+			if item.TaskID != nil || item.JobState != "claimed" {
+				t.Fatalf("source: %+v", item)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("taskless escalation missing: %+v", sources.Items)
 	}
 }

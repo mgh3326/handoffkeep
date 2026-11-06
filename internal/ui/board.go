@@ -3,6 +3,7 @@ package ui
 import (
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 	"regexp"
 	"sort"
@@ -144,6 +145,7 @@ func projectBoardTask(task store.Task) boardTask {
 func (h *Handler) boardTasks(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	lane := strings.TrimSpace(q.Get("lane"))
+	project := strings.TrimSpace(q.Get("project"))
 	state := strings.TrimSpace(q.Get("state"))
 	parentLane := strings.TrimSpace(q.Get("parent_lane"))
 	var afterID int64
@@ -164,12 +166,20 @@ func (h *Handler) boardTasks(w http.ResponseWriter, r *http.Request) {
 		}
 		limit = parsed
 	}
+	if project != "" && !boardNameRE.MatchString(project) {
+		writeJSONError(w, http.StatusBadRequest, "invalid_context")
+		return
+	}
 	if (lane != "" && !boardNameRE.MatchString(lane)) || (parentLane != "" && !boardNameRE.MatchString(parentLane)) || (state != "" && !boardStates[state]) {
 		http.Error(w, "invalid board query", http.StatusBadRequest)
 		return
 	}
+	var projectFilter *string
+	if project != "" {
+		projectFilter = &project
+	}
 	// One extra row distinguishes "page is full" from "result set is complete".
-	tasks, err := h.store.ListTasksPage(r.Context(), lane, state, parentLane, nil, nil, afterID, limit+1)
+	tasks, err := h.store.ListTasksPage(r.Context(), lane, state, parentLane, projectFilter, nil, afterID, limit+1)
 	if err != nil {
 		http.Error(w, "fleet console unavailable", http.StatusInternalServerError)
 		return
@@ -196,6 +206,38 @@ func (h *Handler) boardTasks(w http.ResponseWriter, r *http.Request) {
 		response.NextAfterID = task.ID
 	}
 	writeBoardJSON(w, response)
+}
+
+func (h *Handler) boardProjects(w http.ResponseWriter, r *http.Request) {
+	projects, err := h.store.ListTaskProjects(r.Context())
+	if err != nil {
+		log.Printf("ui.board_projects_failed err=%q", err)
+		writeJSONError(w, http.StatusInternalServerError, "internal_error")
+		return
+	}
+	writeBoardJSON(w, struct {
+		Projects []string `json:"projects"`
+	}{projects})
+}
+
+type boardJob struct {
+	JobID           string             `json:"job_id"`
+	Role            string             `json:"role"`
+	State           string             `json:"state"`
+	Host            string             `json:"host"`
+	Family          string             `json:"family"`
+	Profile         string             `json:"profile"`
+	Model           string             `json:"model"`
+	Harness         *string            `json:"harness"`
+	Effort          *string            `json:"effort"`
+	Skills          []store.JobSkill   `json:"skills"`
+	SkillsSupported *bool              `json:"skills_supported"`
+	ClaimedAt       *time.Time         `json:"claimed_at"`
+	SpawnedAt       *time.Time         `json:"spawned_at"`
+	ReadyAt         *time.Time         `json:"ready_at"`
+	EndedAt         *time.Time         `json:"ended_at"`
+	EndReason       *string            `json:"end_reason"`
+	DiffStat        *store.JobDiffStat `json:"diff_stat"`
 }
 
 type boardEvent struct {
@@ -245,12 +287,26 @@ type boardParticipants struct {
 	Segments  []participantSegment `json:"segments"`
 }
 
+type boardDocument struct {
+	Key         string `json:"key"`
+	Kind        string `json:"kind"`
+	OriginClass string `json:"origin_class"`
+}
+
 type boardDetailResponse struct {
-	Task         boardTask         `json:"task"`
-	Events       []boardEvent      `json:"events"`
-	Dwell        []dwellSegment    `json:"dwell"`
-	Linear       *boardLinear      `json:"linear"`
-	Participants boardParticipants `json:"participants"`
+	Documents          []boardDocument    `json:"documents"`
+	DocumentsTruncated bool               `json:"documents_truncated"`
+	Origins            []store.TaskOrigin `json:"origins"`
+	Changes            []store.Change     `json:"changes"`
+	Jobs               []boardJob         `json:"jobs"`
+	OriginsTruncated   bool               `json:"origins_truncated"`
+	ChangesTruncated   bool               `json:"changes_truncated"`
+	JobsTruncated      bool               `json:"jobs_truncated"`
+	Task               boardTask          `json:"task"`
+	Events             []boardEvent       `json:"events"`
+	Dwell              []dwellSegment     `json:"dwell"`
+	Linear             *boardLinear       `json:"linear"`
+	Participants       boardParticipants  `json:"participants"`
 	// DecisionRequests is every structured request of the task, newest
 	// first, with its derived display state (#618). Always present (possibly
 	// empty) so a client can tell "none recorded" from an older server.
@@ -383,8 +439,62 @@ func (h *Handler) boardTaskDetail(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	origins, err := h.store.ListTaskOriginsPage(r.Context(), id, 101)
+	if err != nil {
+		log.Printf("ui.board_detail_error err=%q", err)
+		writeJSONError(w, http.StatusInternalServerError, "internal_error")
+		return
+	}
+	changes, err := h.store.ListChangesByTask(r.Context(), id, 101)
+	if err != nil {
+		log.Printf("ui.board_detail_error err=%q", err)
+		writeJSONError(w, http.StatusInternalServerError, "internal_error")
+		return
+	}
+	jobs, err := h.store.ListJobsByTask(r.Context(), id, 101)
+	if err != nil {
+		log.Printf("ui.board_detail_error err=%q", err)
+		writeJSONError(w, http.StatusInternalServerError, "internal_error")
+		return
+	}
+	documents, err := h.store.ListDocuments(r.Context(), "", "", "", id, 101)
+	if err != nil {
+		log.Printf("ui.board_detail_error err=%q", err)
+		writeJSONError(w, http.StatusInternalServerError, "internal_error")
+		return
+	}
+	documentsTruncated := len(documents) > 100
+	if documentsTruncated {
+		documents = documents[:100]
+	}
+	projectedDocuments := make([]boardDocument, 0, len(documents))
+	for _, document := range documents {
+		projectedDocuments = append(projectedDocuments, boardDocument{Key: document.Key, Kind: document.Kind, OriginClass: document.OriginClass})
+	}
+	originsTruncated, changesTruncated, jobsTruncated := len(origins) > 100, len(changes) > 100, len(jobs) > 100
+	if originsTruncated {
+		origins = origins[:100]
+	}
+	if changesTruncated {
+		changes = changes[:100]
+	}
+	if jobsTruncated {
+		jobs = jobs[:100]
+	}
+	if origins == nil {
+		origins = []store.TaskOrigin{}
+	}
+	if changes == nil {
+		changes = []store.Change{}
+	}
+	projectedJobs := make([]boardJob, 0, len(jobs))
+	for _, j := range jobs {
+		projectedJobs = append(projectedJobs, boardJob{j.JobID, j.Role, j.State, j.Host, j.Family, j.Profile, j.Model, j.Harness, j.Effort, j.Skills, j.SkillsSupported, j.ClaimedAt, j.SpawnedAt, j.ReadyAt, j.EndedAt, j.EndReason, j.DiffStat})
+	}
 	now := time.Now().UTC()
 	response := boardDetailResponse{
+		Documents: projectedDocuments, DocumentsTruncated: documentsTruncated,
+		Origins: origins, Changes: changes, Jobs: projectedJobs, OriginsTruncated: originsTruncated, ChangesTruncated: changesTruncated, JobsTruncated: jobsTruncated,
 		Task:      projectBoardTask(task),
 		Events:    make([]boardEvent, 0, len(task.Events)),
 		Dwell:     taskDwell(task, now),

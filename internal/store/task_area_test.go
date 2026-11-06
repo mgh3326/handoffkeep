@@ -348,7 +348,7 @@ func TestListTasksAreaFilter(t *testing.T) {
 		t.Fatal(err)
 	}
 	var legacy int64
-	if err = pool.QueryRow(ctx, `INSERT INTO tasks(lane,title,kind,state,created_by,created_at,updated_at) VALUES($1,'legacy','implement','backlog','area-test',now(),now()) RETURNING id`, lane).Scan(&legacy); err != nil {
+	if err = pool.QueryRow(ctx, `INSERT INTO tasks(lane,title,kind,state,created_by,created_at,updated_at,last_activity_at) VALUES($1,'legacy','implement','backlog','area-test',now(),now(),now()) RETURNING id`, lane).Scan(&legacy); err != nil {
 		t.Fatal(err)
 	}
 	all, err := s.ListTasks(ctx, lane, "", "", nil, nil, 10)
@@ -403,7 +403,7 @@ func TestTaskAreaMigrationIsAdditive(t *testing.T) {
 		}
 	}
 	var legacy int64
-	if err := pool.QueryRow(ctx, `INSERT INTO tasks(lane,title,kind,state,created_by,created_at,updated_at) VALUES($1,'pre-v18','implement','backlog','area-test',now(),now()) RETURNING id`, lane).Scan(&legacy); err != nil {
+	if err := pool.QueryRow(ctx, `INSERT INTO tasks(lane,title,kind,state,created_by,created_at,updated_at,last_activity_at) VALUES($1,'pre-v18','implement','backlog','area-test',now(),now(),now()) RETURNING id`, lane).Scan(&legacy); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.migrate(ctx); err != nil {

@@ -205,7 +205,7 @@ func (s *Store) linkOpenDecisionItems(ctx context.Context, items []OpenDecisionI
 	}
 	jobs := map[string]jobLink{}
 	if len(jobIDs) > 0 {
-		rows, err := s.pool.Query(ctx, `SELECT job_id,task_id,state FROM jobs WHERE job_id=ANY($1)`, jobIDs)
+		rows, err := s.pool.Query(ctx, `SELECT job_id,COALESCE(task_id,0),state FROM jobs WHERE job_id=ANY($1)`, jobIDs)
 		if err != nil {
 			return err
 		}

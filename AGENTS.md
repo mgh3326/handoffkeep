@@ -22,10 +22,12 @@ and leave the old code as is unless the change already touches it.
 `scripts/check web` for one half). Run it before pushing.
 
 CI has two tiers (`.github/workflows/ci.yml`). A pull request runs the light
-jobs only: no `-race`, no PostgreSQL, hosted runners. The `post-*` jobs (race
+jobs only: no `-race`, hosted runners, PostgreSQL only for the store (below). The `post-*` jobs (race
 with PostgreSQL, mutants, release dry run, macOS) run on main pushes and
 `ci-any-ref` dispatches, after merge; a red main is bisected and reverted.
+`ci-any-ref` accepts `packages` only with `suite=test`; those runs post `ci-ok-test-packages`.
 `scripts/check go` runs the heavy half locally.
+The PR tier runs PostgreSQL only in `pr: store + postgres` (`./internal/store/...`, when a PR changes `internal/store/` or `internal/testdb/`), because store breaks merged twice and left main red (hk 3193).
 
 DB-backed tests need Postgres 17 and `HANDOFFKEEP_TEST_DB_URL`, e.g.
 
@@ -103,18 +105,33 @@ never both.
 it with `guard.SecretPattern(err)` (or `remote.SecretPattern` for a server
 refusal), never on the `secret_like_content:` text.
 
-**Migrations** (`internal/store/migration.go`). The comment there lists which
-function owns each schema version. A new version:
-1. takes the next number (`SchemaVersion + 1`) and bumps `SchemaVersion`;
-2. runs through `migrateOnce(ctx, tx, N, func() error { return execAll(ctx, tx, vN) })`
-   inside `Store.migrate`, with `INSERT INTO schema_version(version) VALUES (N)`
-   as its last statement;
-3. says in a comment why it is needed and what lock it takes.
+**Migrations** (`internal/store/migration.go`, `migration_ids.go`). The integer
+versions 1-53 are frozen: the comment in `migration.go` lists which function
+owns each, 53 (`schema_migrations`) is the last integer ever, and
+`SchemaVersion` stays 53. Never add or renumber an integer version; that made
+every schema PR renumber when another one merged (hk 3180).
 
-Every schema change needs a new version, even an additive `IF NOT EXISTS`
+A new migration is a registry entry with a unique string ID
+`YYYYMMDD-<slug>` (the date you write it; lower-case `[a-z0-9-]`, at most 64
+bytes):
+1. Create `internal/store/migration_<slug>.go` with the statements and an
+   `init()` that calls `registerMigration(migration{ID: "YYYYMMDD-<slug>",
+   Apply: ...})`. `Apply` runs the statements with `execAll(ctx, tx, ...)`.
+   Edit no shared list, so parallel PRs merge in either order.
+2. Do not insert into `schema_migrations`: `migrateRegistered` records the ID in
+   the same transaction after `Apply` returns.
+3. Set `After: []string{"<other id>"}` only for a real dependency (a table or
+   column your statements need). Without it entries run in ID order, so
+   do not use `After` to pick a position. An unknown ID or a cycle fails
+   startup, and `TestShippedMigrationRegistryIsValid` fails the build.
+4. Say in a comment why it is needed and what lock it takes.
+
+Every schema change needs a new registered ID, even an additive `IF NOT EXISTS`
 statement: `Open` runs no DDL and takes no table lock on a schema that
-already records every version (`migrateIfBehind`). Store locks follow the
-order in `internal/store/lockorder.go`.
+already records every integer version and every registered ID
+(`migrateIfBehind`). A database holding IDs or versions this binary does not
+know (a newer binary migrated it) still opens. Store locks follow the order in
+`internal/store/lockorder.go`.
 
 **Remote client.** Branch on server error codes with
 `remote.ErrorCode(err) == "not_found"`, never by comparing `err.Error()`.

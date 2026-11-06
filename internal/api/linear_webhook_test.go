@@ -35,15 +35,18 @@ func (f *fakeIssues) LinearIssue(context.Context, string) (LinearIssue, error) {
 type fakeDots struct {
 	results   []string
 	followups []string
+	issues    []store.DotsIssue
 }
 
 func (f *fakeDots) RecordDotsResult(_ context.Context, kind string, issue store.DotsIssue, c store.DotsComment) (string, bool, error) {
 	f.results = append(f.results, kind+" "+issue.Identifier+" "+c.ID)
+	f.issues = append(f.issues, issue)
 	return "k", true, nil
 }
 
 func (f *fakeDots) RecordDotsFollowup(_ context.Context, issue store.DotsIssue, id string) (bool, error) {
 	f.followups = append(f.followups, issue.Identifier+" "+id)
+	f.issues = append(f.issues, issue)
 	return true, nil
 }
 
@@ -54,7 +57,7 @@ func dotsLinearIssue() LinearIssue {
 func linearPayload(body string, at time.Time) []byte {
 	raw, err := json.Marshal(map[string]any{
 		"action": "create", "type": "Comment", "webhookTimestamp": at.UnixMilli(), "futureField": 1,
-		"data": map[string]any{"id": "0a1b2c3d-0000-4000-8000-000000000001", "body": body, "createdAt": "2026-11-02T01:02:03.000Z", "issueId": "issue-1"},
+		"data": map[string]any{"id": "0a1b2c3d-0000-4000-8000-000000000001", "body": body, "createdAt": "2026-11-02T01:02:03.000Z", "issueId": "0a1b2c3d-0000-4000-8000-0000000000e1"},
 	})
 	if err != nil {
 		panic(err)
@@ -202,9 +205,11 @@ func TestLinearWebhookUsesLabelsInThePayload(t *testing.T) {
 		status  string
 		fetches int
 	}{
-		{"complete and open", result, `{` + named + `,` + dots + `,"state":{"type":"started"}}`, "recorded", 0},
+		{"complete and open, description fetched", result, `{` + named + `,` + dots + `,"state":{"type":"started"}}`, "recorded", 1},
+		{"complete, open and described", result, `{` + named + `,"description":"",` + dots + `,"state":{"type":"started"}}`, "recorded", 0},
 		{"complete and open, human comment", human, `{` + named + `,` + dots + `,"state":{"type":"started"}}`, "ignored", 0},
-		{"complete and closed, human comment", human, `{` + named + `,` + dots + `,"state":{"type":"completed"},"completedAt":"2026-11-01T00:00:00.000Z"}`, "flagged", 0},
+		{"complete and closed, human comment, description fetched", human, `{` + named + `,` + dots + `,"state":{"type":"completed"},"completedAt":"2026-11-01T00:00:00.000Z"}`, "flagged", 1},
+		{"complete, closed and described, human comment", human, `{` + named + `,"description":"x",` + dots + `,"state":{"type":"completed"},"completedAt":"2026-11-01T00:00:00.000Z"}`, "flagged", 0},
 		{"labels without dots settle it", result, `{"identifier":"ZZZ-2","labels":[{"name":"other"}]}`, "ignored", 0},
 		{"labels empty settle it", human, `{"identifier":"ZZZ-2","labels":[]}`, "ignored", 0},
 		{"labels absent", result, `{"identifier":"ZZZ-2","title":"t"}`, "recorded", 1},
@@ -282,17 +287,17 @@ func TestLinearAPIReadsTheIssue(t *testing.T) {
 		auth = r.Header.Get("Authorization")
 		raw, _ := io.ReadAll(r.Body)
 		query = string(raw)
-		io.WriteString(w, `{"data":{"issue":{"identifier":"ZZZ-3","title":"t","url":"u","completedAt":"2026-11-01T00:00:00.000Z","canceledAt":null,"state":{"type":"completed"},"labels":{"nodes":[{"name":"dots"}]}}}}`)
+		io.WriteString(w, `{"data":{"issue":{"identifier":"ZZZ-3","title":"t","url":"u","description":"hk-lane: hk-design","completedAt":"2026-11-01T00:00:00.000Z","canceledAt":null,"state":{"type":"completed"},"labels":{"nodes":[{"name":"dots"}]}}}}`)
 	}))
 	defer srv.Close()
 	got, err := LinearAPI{Key: "fake-key-value", URL: srv.URL}.LinearIssue(t.Context(), "issue-3")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if auth != "fake-key-value" || !strings.Contains(query, "issue-3") {
+	if auth != "fake-key-value" || !strings.Contains(query, "issue-3") || !strings.Contains(query, " description ") {
 		t.Fatalf("auth=%q query=%q", auth, query)
 	}
-	if got.Identifier != "ZZZ-3" || got.StateType != "completed" || got.CompletedAt == "" || got.CanceledAt != "" || len(got.Labels) != 1 || got.Labels[0] != "dots" {
+	if got.Identifier != "ZZZ-3" || got.Description != "hk-lane: hk-design" || got.StateType != "completed" || got.CompletedAt == "" || got.CanceledAt != "" || len(got.Labels) != 1 || got.Labels[0] != "dots" {
 		t.Fatalf("issue=%+v", got)
 	}
 }

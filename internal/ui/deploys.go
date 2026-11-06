@@ -3,6 +3,7 @@ package ui
 import (
 	"net/http"
 	"regexp"
+	"sort"
 	"time"
 
 	"github.com/mgh3326/handoffkeep/internal/store"
@@ -91,8 +92,9 @@ type deployServiceView struct {
 	// DocsCapped is set when the scan stopped while older documents may
 	// remain — either the first window was full, or the deeper scan hit its
 	// hard cap before finding a success or reaching the end of the space.
-	DocsCapped bool              `json:"docs_capped,omitempty"`
-	Current    *deployRecordView `json:"current"`
+	DocsCapped bool               `json:"docs_capped,omitempty"`
+	Current    *deployRecordView  `json:"current"`
+	Recent     []deployRecordView `json:"recent"`
 	// Latest is the newest parseable record overall — present whenever it is
 	// not the current one, so a failed/rolled_back attempt after the last
 	// success is visible instead of hidden behind the good deploy.
@@ -182,6 +184,7 @@ func (h *Handler) deployServiceView(r *http.Request, service, repo string, event
 		DocURL:         "/ui/doc/deploy/" + service + "/",
 		MergedBoundary: "no_current",
 		MergedSince:    []deployMergedTask{},
+		Recent:         []deployRecordView{},
 	}
 	prefix := "deploy/" + service + "/"
 	// One row past the bound distinguishes "exactly full" from "truncated" —
@@ -288,6 +291,13 @@ func (h *Handler) deployServiceView(r *http.Request, service, repo string, event
 		lv := toView(latest)
 		view.Latest = &lv
 	}
+	sort.Slice(parsed, func(i, j int) bool { return deployRecordLess(parsed[j], parsed[i]) })
+	for _, p := range parsed {
+		if len(view.Recent) == 10 {
+			break
+		}
+		view.Recent = append(view.Recent, toView(p))
+	}
 	return view, nil
 }
 
@@ -325,13 +335,4 @@ func mergedTasksSince(events []store.MergedTaskEvent, repo string, since time.Ti
 		out = append(out, deployMergedTask{TaskID: event.TaskID, Title: event.Title, PR: event.Refs.PR, MergedAt: event.At.UTC()})
 	}
 	return out
-}
-
-// deploys serves the Deploys page (#620) — the #529 per-service deploy
-// status block moved off the queue onto its own screen. Like /ui/grades it
-// is only a mount point: all data reaches the browser through
-// GET /ui/api/deploy-pending and the page carries no CSRF token because it
-// has no write form.
-func (h *Handler) deploys(w http.ResponseWriter, r *http.Request) {
-	h.render(w, "deploys_page", nil)
 }

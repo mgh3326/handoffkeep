@@ -16,11 +16,19 @@ on:
         required: false
         default: all
         type: string
+      packages:
+        description: Space-separated Go package patterns (suite=test only)
+        required: false
+        default: ''
+        type: string
 # Two tiers (hk:doc decision/2026-11-05/fleet-ci-three-tiers, hk 2935).
-#   T-PR   pull_request, and every other event too: test, vitest, build and
-#          auto-tag-test. Light: no -race, no PostgreSQL, no macOS, hosted
-#          runners only (this repo is public, so PR code never runs on our
-#          machines). The mergewake required checks name these jobs.
+#   T-PR   pull_request, and every other event too: test, pr-store-db, vitest,
+#          build and auto-tag-test. Light: no -race, no macOS, hosted runners
+#          only (this repo is public, so PR code never runs on our machines).
+#          PostgreSQL runs only in pr-store-db, for the store package only,
+#          and only when a PR changes internal/store or internal/testdb: PRs
+#          that broke store tests merged and left main red twice in one day
+#          (hk 3193). The mergewake required checks name these jobs.
 #   T-POST every event except pull_request (main push, dispatch, and the
 #          ci-any-ref call): the post-* jobs add -race with PostgreSQL, the
 #          migration smoke, the mutant suites, the release dry run and macOS.
@@ -140,6 +148,70 @@ jobs:
       - run: python3 scripts/test-auto-tag.py
       - run: python3 scripts/test-repair-release.py
 
+  pr-store-db:
+    # Runs on every event, so it always reports a conclusion and can be a
+    # required check. It tests only on a pull request that changes
+    # internal/store or internal/testdb (hk 3193); anywhere else it succeeds
+    # without testing, because post-linux covers main pushes and dispatches.
+    # If the changed files cannot be listed, it tests.
+    if: ${{ contains(fromJSON('["all","test"]'), inputs.suite || 'all') }}
+    name: 'pr: store + postgres'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: handoffkeep
+          POSTGRES_PASSWORD: handoffkeep
+          POSTGRES_DB: handoffkeep
+        # Loopback only, as in post-linux.
+        ports: ["127.0.0.1:5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U handoffkeep" --health-interval 10s --health-timeout 5s --health-retries 5
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+      - name: decide whether the store tests must run
+        id: decide
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ "$EVENT" != pull_request ]; then
+            echo "event $EVENT: post-linux covers it; not testing"
+            echo "run=no" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ -z "$BASE_SHA" ] || ! files=$(git diff --name-only --no-renames "$BASE_SHA"...HEAD); then
+            echo "cannot list the changed files against base '$BASE_SHA'; testing (fail safe)"
+            echo "run=yes" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          matches=""
+          while IFS= read -r path; do
+            case "$path" in
+              internal/store/*|internal/testdb/*) matches="$matches$path"$'\n' ;;
+            esac
+          done <<< "$files"
+          if [ -n "$matches" ]; then
+            printf 'pull request changes internal/store or internal/testdb; testing:\n%s' "$matches"
+            echo "run=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "pull request changes nothing under internal/store/ or internal/testdb/; not testing"
+            echo "run=no" >> "$GITHUB_OUTPUT"
+          fi
+      - if: ${{ steps.decide.outputs.run == 'yes' }}
+        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with: {go-version-file: go.mod}
+      - name: go test ./internal/store/... (PostgreSQL, no race)
+        if: ${{ steps.decide.outputs.run == 'yes' }}
+        env:
+          HANDOFFKEEP_TEST_DB_URL: postgres://handoffkeep:handoffkeep@localhost:5432/handoffkeep?sslmode=disable
+        run: go test -timeout 10m -count=1 ./internal/store/... -v
+
   post-linux:
     # T-POST only. Service containers need Docker on Linux: a self-hosted
     # runner named by HANDOFFKEEP_POST_LINUX_RUNNER must provide it.
@@ -177,22 +249,36 @@ jobs:
       - run: git diff --exit-code -- internal/ui/static/console
       - run: test -z "$(git status --porcelain --untracked-files=all -- internal/ui/static/console)"
       - name: Task expected migration and server startup
+        if: ${{ inputs.packages == '' }}
         env:
           PUSH_BEFORE: ${{ github.event_name == 'push' && github.event.before || '' }}
         run: bash scripts/test-task-expected-migration.sh
       - name: go test -race
+        if: ${{ inputs.packages == '' }}
         run: go test -v -race -timeout 30m ./...
+      - name: go test -race (packages)
+        if: ${{ inputs.packages != '' }}
+        env:
+          SUITE: ${{ inputs.suite }}
+          PACKAGES: ${{ inputs.packages }}
+        run: |
+          bash scripts/validate-ci-packages.sh
+          echo "go test -v -race -timeout 30m $PACKAGES"
+          go test -v -race -timeout 30m $PACKAGES
       - name: Reopen regression mutants
+        if: ${{ inputs.packages == '' }}
         run: python3 scripts/task-reopen-mutants.py
       - name: Quota regression mutants
+        if: ${{ inputs.packages == '' }}
         run: python3 scripts/quota-mutants.py
-      - run: bash scripts/test-build-release.sh
+      - if: ${{ inputs.packages == '' }}
+        run: bash scripts/test-build-release.sh
 
   post-macos:
     # T-POST only: the CLI ships darwin binaries, so the suite also runs on
     # macOS. No service containers there; DB-backed tests skip and run in
     # post-linux.
-    if: ${{ github.event_name != 'pull_request' && contains(fromJSON('["all","test"]'), inputs.suite || 'all') }}
+    if: ${{ github.event_name != 'pull_request' && inputs.packages == '' && contains(fromJSON('["all","test"]'), inputs.suite || 'all') }}
     name: 'post: macos'
     runs-on: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.HANDOFFKEEP_POST_MAC_RUNNER) || 'macos-latest' }}
     timeout-minutes: 45
@@ -219,19 +305,23 @@ jobs:
     # Aggregate check. On a pull request it covers the T-PR jobs; elsewhere
     # also the post-* jobs. A dispatch with a partial suite never mints a check
     # named exactly 'ci-ok'. When the only non-success among the needed jobs is
-    # cancelled (a newer main head superseded this run, or no runner was
-    # acquired), the job is skipped, so mergewake reads unknown and holds
-    # instead of seeing a failure (hk 2924).
-    name: ${{ (inputs.suite || 'all') == 'all' && 'ci-ok' || format('ci-ok ({0})', inputs.suite) }}
-    needs: [test, vitest, build, auto-tag-test, post-linux, post-macos]
-    if: ${{ always() && (contains(needs.*.result, 'failure') || !contains(needs.*.result, 'cancelled')) }}
+    # cancelled or abandoned (a newer main head superseded this run, or no
+    # runner was acquired), the job is skipped, so mergewake reads unknown and
+    # holds instead of seeing a failure (hk 2924). A job that never got a
+    # runner reports abandoned in the needs context although the jobs API says
+    # cancelled (run 42061203904: post-macos abandoned, hk 3155).
+    name: ${{ inputs.packages != '' && 'ci-ok (test, packages)' || ((inputs.suite || 'all') == 'all' && 'ci-ok' || format('ci-ok ({0})', inputs.suite)) }}
+    needs: [test, pr-store-db, vitest, build, auto-tag-test, post-linux, post-macos]
+    if: ${{ always() && (contains(needs.*.result, 'failure') || !(contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'abandoned'))) }}
     runs-on: ubuntu-latest
     steps:
       - name: Check required jobs
         env:
           EVENT: ${{ github.event_name }}
           SUITE: ${{ inputs.suite || 'all' }}
+          PACKAGES: ${{ inputs.packages }}
           TEST: ${{ needs.test.result }}
+          PR_STORE_DB: ${{ needs.pr-store-db.result }}
           VITEST: ${{ needs.vitest.result }}
           BUILD: ${{ needs.build.result }}
           AUTO_TAG: ${{ needs.auto-tag-test.result }}
@@ -252,9 +342,11 @@ jobs:
           }
           require yes auto-tag-test "$AUTO_TAG"
           require "$(in_suite test)" test "$TEST"
+          require "$(in_suite test)" pr-store-db "$PR_STORE_DB"
           require "$(in_suite vitest)" vitest "$VITEST"
           require "$(in_suite build)" build "$BUILD"
           post_test=no; [ "$post" = yes ] && post_test=$(in_suite test)
           require "$post_test" post-linux "$POST_LINUX"
+          [ -n "$PACKAGES" ] && post_test=no
           require "$post_test" post-macos "$POST_MACOS"
           exit "$bad"

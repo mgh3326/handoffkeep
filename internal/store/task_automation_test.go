@@ -145,7 +145,7 @@ func TestStalledFlagAtReadTime(t *testing.T) {
 	unboundJob := fmt.Sprintf("job-stalled-old-%d", jobbed.ID)
 	jobID := fmt.Sprintf("job-stalled-%d", jobbed.ID)
 	for _, id := range []string{unboundJob, jobID} {
-		if _, _, err := s.ClaimJob(ctx, Job{JobID: id, TaskID: jobbed.ID, Host: "test-host", CreatedBy: "tester"}); err != nil {
+		if _, _, err := s.ClaimJob(ctx, Job{JobID: id, TaskID: &jobbed.ID, Host: "test-host", CreatedBy: "tester"}); err != nil {
 			t.Fatal(err)
 		}
 	}

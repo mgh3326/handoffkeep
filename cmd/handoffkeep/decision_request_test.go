@@ -298,10 +298,10 @@ func TestTasksDecisionWriteOutcomeUnknown(t *testing.T) {
 
 const decisionAskOKBody = `{"task":{"id":618,"state":"in_progress"},"request":{"id":"dr-618-1","revision":1,"status":"open","question":"q","default_action":"보류","requested_by":"desk","requested_at":"2026-09-24T01:00:00Z"},"decision_ref":"D-618-1","ver":"ab12cd3e","issue":{"request_id":"dr-618-1","task_id":618,"ver":"ab12cd3e","issue_id":"i-1","identifier":"ROB-9","url":"https://linear.example/ROB-9"},"duplicate":false,"issue_created":true}`
 
-func TestDecisionsAskCLI(t *testing.T) {
+func TestDecisionsAskCLILinear(t *testing.T) {
 	h, seen := relaneServer(t, 201, decisionAskOKBody)
 	var out bytes.Buffer
-	args := []string{"decisions", "ask", "618", "--question", "ship?", "--option", "A|ship", "--option", "B|hold", "--default-action", "보류", "--ref", "handoffkeep#107", "--ref", "report/x", "--url", h.URL, "--token", "tok"}
+	args := []string{"decisions", "ask", "618", "--question", "ship?", "--option", "A|ship", "--option", "B|hold", "--default-action", "보류", "--ref", "handoffkeep#107", "--ref", "report/x", "--url", h.URL, "--token", "tok", "--linear"}
 	if err := run(args, &out, io.Discard); err != nil {
 		t.Fatal(err)
 	}
@@ -324,7 +324,7 @@ func TestDecisionsAskCLI(t *testing.T) {
 }
 
 func TestDecisionsAskCLIFailures(t *testing.T) {
-	base := []string{"decisions", "ask", "618", "--question", "q", "--option", "A|x", "--default-action", "보류", "--token", "tok"}
+	base := []string{"decisions", "ask", "618", "--question", "q", "--option", "A|x", "--default-action", "보류", "--token", "tok", "--linear"}
 	for name, tc := range map[string]struct {
 		status   int
 		body     string
@@ -351,5 +351,115 @@ func TestDecisionsAskCLIFailures(t *testing.T) {
 	err := run([]string{"decisions", "ask", "618", "--question", "q", "--default-action", "보류", "--url", h.URL, "--token", "tok"}, io.Discard, io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "NOT recorded") || len(*seen) != 0 {
 		t.Fatalf("err=%v seen=%d", err, len(*seen))
+	}
+}
+
+// Without --linear, decisions ask is the record-only route: no Linear issue.
+func TestDecisionsAskCLIRecordOnly(t *testing.T) {
+	h, seen := relaneServer(t, 201, decisionRequestOKBody)
+	var out bytes.Buffer
+	args := []string{"decisions", "ask", "618", "--question", "ship?", "--option", "A|ship", "--option", "B|hold", "--default-action", "보류",
+		"--answer-policy", "operator_direct", "--url", h.URL, "--token", "tok"}
+	if err := run(args, &out, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	var printed map[string]any
+	if err := json.Unmarshal(out.Bytes(), &printed); err != nil {
+		t.Fatalf("out=%s", out.String())
+	}
+	if _, has := printed["issue"]; has || printed["issue_created"] != false || printed["recorded"] != true || printed["request_id"] != "dr-618-1" || printed["decision_ref"] != "D-618-1" || printed["ver"] == "" {
+		t.Fatalf("printed=%v", printed)
+	}
+	req := (*seen)[0]
+	if req.Path != "/v1/tasks/618/decision-request" || req.Body["answer_policy"] != "operator_direct" {
+		t.Fatalf("request=%+v", req)
+	}
+}
+
+func TestTasksDecisionRequestCLIAnswerPolicy(t *testing.T) {
+	h, seen := relaneServer(t, 201, decisionRequestOKBody)
+	base := []string{"tasks", "decision-request", "618", "--question", "q", "--option", "A|x", "--default-action", "보류", "--url", h.URL, "--token", "tok"}
+	if err := run(append(append([]string{}, base...), "--answer-policy", "operator_relay_allowed"), io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if got := (*seen)[0].Body["answer_policy"]; got != "operator_relay_allowed" {
+		t.Fatalf("answer_policy=%v", got)
+	}
+	for _, extra := range [][]string{{"--answer-policy", "anyone"}, {"--human-only", "--answer-policy", "operator_relay_allowed"}} {
+		err := run(append(append([]string{}, base...), extra...), io.Discard, io.Discard)
+		if err == nil || !strings.Contains(err.Error(), "NOT recorded") || !strings.Contains(err.Error(), "answer_policy") {
+			t.Fatalf("%v: err=%v", extra, err)
+		}
+	}
+	if len(*seen) != 1 {
+		t.Fatalf("refusals reached the server: %d", len(*seen))
+	}
+}
+
+const decisionResolveOKBody = `{"task":{"id":5,"state":"in_progress"},"request":{"id":"dr-5-1","revision":1,"status":"answered","question":"q","default_action":"보류","requested_by":"desk","requested_at":"2026-09-24T01:00:00Z"},"duplicate":false,"result":"answered","resolution_id":7}`
+
+func TestDecisionsResolveRequestCLI(t *testing.T) {
+	h, seen := relaneServer(t, 200, decisionResolveOKBody)
+	var out bytes.Buffer
+	if err := run([]string{"decisions", "resolve", "request", "dr-5-1", "--channel", "session", "--quote", "A로 가자", "--option", "A", "--url", h.URL, "--token", "tok"}, &out, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	req := (*seen)[0]
+	if req.Path != "/v1/tasks/5/decision-request/resolve" {
+		t.Fatalf("request=%+v", req)
+	}
+	want := map[string]any{"request_id": "dr-5-1", "kind": "answered", "option": "A", "channel": "session",
+		"provenance": "operator_decided", "operator_quote": "A로 가자", "decision_ref": "dr-5-1"}
+	for k, v := range want {
+		if req.Body[k] != v {
+			t.Fatalf("body[%s]=%v want %v (body=%v)", k, req.Body[k], v, req.Body)
+		}
+	}
+	var printed map[string]any
+	if err := json.Unmarshal(out.Bytes(), &printed); err != nil || printed["result"] != "answered" || printed["resolution_id"] != float64(7) {
+		t.Fatalf("printed=%s err=%v", out.String(), err)
+	}
+
+	if err := run([]string{"decisions", "resolve", "request", "dr-5-1", "--channel", "session", "--option", "A", "--url", h.URL, "--token", "tok"}, io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if body := (*seen)[1].Body; body["provenance"] != "assistant_judgement" || body["operator_quote"] != nil {
+		t.Fatalf("no-quote body=%v", body)
+	}
+	if err := run([]string{"decisions", "resolve", "request", "dr-5-1", "--channel", "cli", "--option", "A", "--url", h.URL, "--token", "tok"}, io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if body := (*seen)[2].Body; body["channel"] != "cli" || body["provenance"] != nil {
+		t.Fatalf("cli body=%v", body)
+	}
+}
+
+func TestDecisionsResolveRequestCLIUsage(t *testing.T) {
+	h, seen := relaneServer(t, 200, decisionResolveOKBody)
+	for name, args := range map[string][]string{
+		"quote on cli":    {"dr-5-1", "--channel", "cli", "--quote", "x", "--option", "A"},
+		"no channel":      {"dr-5-1", "--option", "A"},
+		"unknown channel": {"dr-5-1", "--channel", "x", "--option", "A"},
+		"not a dr- id":    {"5", "--channel", "session", "--option", "A"},
+	} {
+		err := run(append([]string{"decisions", "resolve", "request", "--url", h.URL, "--token", "tok"}, args...), io.Discard, io.Discard)
+		if err == nil || !strings.Contains(err.Error(), "usage: decisions resolve request") {
+			t.Fatalf("%s: err=%v", name, err)
+		}
+	}
+	if len(*seen) != 0 {
+		t.Fatalf("usage errors reached the server: %d", len(*seen))
+	}
+}
+
+// The legacy relay form still posts to /v1/decisions/resolve.
+func TestDecisionsResolveLegacyFormUnchanged(t *testing.T) {
+	h, seen := relaneServer(t, 200, `{"id":1}`)
+	if err := run([]string{"decisions", "resolve", "task", "5", "--by", "l", "--answer", "a", "--url", h.URL, "--token", "tok"}, io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	req := (*seen)[0]
+	if req.Path != "/v1/decisions/resolve" || req.Body["type"] != "task" || req.Body["by"] != "l" || req.Body["answer"] != "a" {
+		t.Fatalf("request=%+v", req)
 	}
 }

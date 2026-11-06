@@ -54,6 +54,28 @@ func TestDecisionsListCLI(t *testing.T) {
 	}
 }
 
+func TestDecisionsHygieneCLI(t *testing.T) {
+	h, calls := decisionCLIServer(t, `{"destinations":{"discord":{"pending":4,"lagging":1,"unsent":2,"failed":3}}}`)
+	var out bytes.Buffer
+	if err := run([]string{"decisions", "hygiene", "--url", h.URL, "--token", "tok"}, &out, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	var printed store.DecisionDeliveryHygiene
+	if err := json.Unmarshal(out.Bytes(), &printed); err != nil ||
+		printed.Destinations[store.DecisionDestinationDiscord] != (store.DecisionDeliveryCounts{Pending: 4, Lagging: 1, Unsent: 2, Failed: 3}) {
+		t.Fatalf("out=%s err=%v", out.String(), err)
+	}
+	if c := (*calls)[0]; c.Method != "GET" || c.Path != "/v1/decisions/deliveries/hygiene" || c.Query != "" {
+		t.Fatalf("call=%+v", c)
+	}
+	if err := run([]string{"decisions", "hygiene", "extra", "--url", h.URL, "--token", "tok"}, io.Discard, io.Discard); err == nil || !strings.Contains(err.Error(), "usage: decisions hygiene") {
+		t.Fatalf("positional arg err=%v", err)
+	}
+	if err := run([]string{"decisions"}, io.Discard, io.Discard); err == nil || !strings.Contains(err.Error(), "usage: decisions hygiene") {
+		t.Fatalf("decisions usage err=%v", err)
+	}
+}
+
 func TestDecisionsSnoozeCLI(t *testing.T) {
 	h, calls := decisionCLIServer(t, `{"id":3,"status":"open","snoozed":true}`)
 	var out bytes.Buffer
@@ -187,7 +209,7 @@ func TestDecisionsBackfillDryRunWritesNothing(t *testing.T) {
 	// stale_candidate: a backlog task flagged 20 days ago. task_events is
 	// append-only, so the old ask is seeded as it would have been written.
 	var stale store.Task
-	if err := pool.QueryRow(ctx, `INSERT INTO tasks(lane,title,kind,state,created_by,created_at,updated_at,awaiting_decision) VALUES('backfill-lane','stale flag','implement','backlog','backfill-test',now()-interval '20 days',now()-interval '20 days',true) RETURNING id`).Scan(&stale.ID); err != nil {
+	if err := pool.QueryRow(ctx, `INSERT INTO tasks(lane,title,kind,state,created_by,created_at,updated_at,last_activity_at,awaiting_decision) VALUES('backfill-lane','stale flag','implement','backlog','backfill-test',now()-interval '20 days',now()-interval '20 days',now()-interval '20 days',true) RETURNING id`).Scan(&stale.ID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pool.Exec(ctx, `INSERT INTO task_events(task_id,"from","to","by",note,at,kind,field,from_value,to_value) VALUES($1,'backlog','backlog','backfill-test','still wanted?',now()-interval '20 days','awaiting_decision','awaiting_decision','false','true')`, stale.ID); err != nil {
@@ -209,7 +231,7 @@ func TestDecisionsBackfillDryRunWritesNothing(t *testing.T) {
 	}
 	// live: an escalation of a running job.
 	jobTask := newTask("job task")
-	if _, _, err := st.ClaimJob(ctx, store.Job{JobID: "bf-job-1", TaskID: jobTask.ID, Host: "host-a", CreatedBy: "backfill-test"}); err != nil {
+	if _, _, err := st.ClaimJob(ctx, store.Job{JobID: "bf-job-1", TaskID: &jobTask.ID, Host: "host-a", CreatedBy: "backfill-test"}); err != nil {
 		t.Fatal(err)
 	}
 	spawned := "spawned"

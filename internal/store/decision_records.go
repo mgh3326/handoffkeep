@@ -354,7 +354,7 @@ func jobTaskTx(ctx context.Context, tx pgx.Tx, jobID string) (int64, error) {
 		return 0, nil
 	}
 	var id int64
-	err := tx.QueryRow(ctx, `SELECT task_id FROM jobs WHERE job_id=$1`, jobID).Scan(&id)
+	err := tx.QueryRow(ctx, `SELECT COALESCE(task_id,0) FROM jobs WHERE job_id=$1`, jobID).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, nil
 	}

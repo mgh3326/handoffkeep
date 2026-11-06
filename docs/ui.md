@@ -332,6 +332,30 @@ Use `handoffkeep decisions resolve <task|escalation|lane> <id> --by <lane>
 `awaiting_decision` flag (the work state is unchanged). `--no-inject` marks that new event delivered as `resolve/<lane>`;
 without it, normal node injection sees the event as undelivered.
 
+### Console decision routes
+
+Two JSON routes answer a structured `dr-` request through
+`Store.ResolveDecision` on the console channel. Both require an Access email
+identity (a service identity is `403 operator_only`), a same-origin request
+(`403 origin_rejected`) and the header CSRF token (`403 csrf_rejected`); the
+body is at most 4 KiB, unknown fields and trailing data are `400
+invalid_request`, and `event_key` is required (`400 event_key_required`). The
+same `event_key` with the same body replays the first result.
+
+- `POST /ui/api/decision-requests/resolve` with `{request_id, option, text,
+  event_key}` answers the request as `operator_direct`.
+- `POST /ui/api/decision-requests/deny` with `{request_id, attempt_id, receipt,
+  event_key}` denies one `pending_confirmation` attempt of the current request
+  revision ([아님]): a new attempt with result `denied`, the operator's optional
+  `receipt` and a `decision-denied` task event; the request stays open. A target
+  that is not pending, or belongs to another task or revision, is `409
+  decision_attempt_not_pending`; an attempt already denied is `409
+  decision_attempt_denied`; an unknown attempt is `404 not_found`.
+
+Results and statuses follow `api.DecisionResolveResponse`: `answered` and
+`denied` are 200, `pending_confirmation` 202, and a request that is no longer
+open is `409 decision_request_resolved`.
+
 The board's **운영자 필요만** preset mirrors the retired htmx operator view as a
 client-side filter only: the backlog column collapses to a count and other
 columns show non-settled `decide` work and tasks with `awaiting_decision` set. It narrows the

@@ -13,6 +13,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"sort"
 	"testing"
 	"time"
 
@@ -111,8 +113,8 @@ func seedMergedEventsBulk(t *testing.T, db *pgx.Conn, s *store.Store, n int, at 
 	t.Helper()
 	lane := uiLane(t, "deploy-bulk")
 	_, err := db.Exec(t.Context(), `WITH inserted AS (
- INSERT INTO tasks(lane,title,kind,state,created_by,created_at,updated_at)
- SELECT $1,'bulk merged','implement','merged','deploy-test',$2,$2 FROM generate_series(1,$3)
+ INSERT INTO tasks(lane,title,kind,state,created_by,created_at,updated_at,last_activity_at)
+ SELECT $1,'bulk merged','implement','merged','deploy-test',$2,$2,$2 FROM generate_series(1,$3)
  RETURNING id)
  INSERT INTO task_events(task_id,"from","to","by",note,refs,at)
  SELECT id,'join','merged','deploy-test','','{}'::jsonb,$2 FROM inserted`, lane, at, n)
@@ -623,4 +625,44 @@ func TestUIDeployPendingAuthBoundary(t *testing.T) {
 		t.Fatalf("service principal status=%d", response.StatusCode)
 	}
 	response.Body.Close()
+}
+
+func TestUIDeployRecentContract(t *testing.T) {
+	s, _ := attentionSchemaStore(t, "ui_deploy_recent")
+	for i := 1; i <= 12; i++ {
+		at := time.Date(2026, 9, 23, i, 0, 0, 0, time.UTC)
+		result := "success"
+		if i == 12 {
+			result = "failed"
+		}
+		seedDeployDoc(t, s, "deploy/handoffkeep/"+at.Format("20060102T150405Z"), deployFixtureBody(t, "handoffkeep", result, fmt.Sprintf("ref-%d", i), at.Format(time.RFC3339), nil))
+	}
+	seedDeployDoc(t, s, "deploy/handoffkeep/20260923T130000Z", "invalid")
+	fixture := newUIJWTFixture(t)
+	h := newUITestServer(t, s, fixture, "", "", 0)
+	defer h.Close()
+	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
+	svc := serviceView(t, getDeployPending(t, h, assertion), "handoffkeep")
+	want := []string{"current", "doc_url", "invalid", "invalid_count", "latest", "merged_boundary", "merged_since", "recent", "record_count", "repo", "service", "target"}
+	keys := make([]string, 0, len(svc))
+	for key := range svc {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	if !reflect.DeepEqual(keys, want) {
+		t.Fatalf("keys = %v", keys)
+	}
+	recent := svc["recent"].([]any)
+	if len(recent) != 10 {
+		t.Fatalf("recent length = %d", len(recent))
+	}
+	for i, item := range recent {
+		row := item.(map[string]any)
+		if row["deployed_ref"] != fmt.Sprintf("ref-%d", 12-i) {
+			t.Fatalf("recent[%d]=%v", i, row)
+		}
+	}
+	if recent[0].(map[string]any)["result"] != "failed" || svc["current"].(map[string]any)["deployed_ref"] != "ref-11" || len(svc["invalid"].([]any)) != 1 {
+		t.Fatalf("service = %v", svc)
+	}
 }

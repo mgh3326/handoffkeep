@@ -31,6 +31,21 @@ import (
 type Service struct {
 	Store       *store.Store
 	Attachments *attachments.Manager
+	// Dots backs the /v1/dots/results routes; nil uses Store.
+	Dots DotsResultStore
+}
+
+// DotsResultStore lists dots results and records their adoption.
+type DotsResultStore interface {
+	ListDotsResults(ctx context.Context, taskID int64, issue string, limit int) ([]store.DotsResult, error)
+	SetDotsAdoption(ctx context.Context, id int64, by string, in store.DotsAdoptionInput) (store.DotsResult, bool, error)
+}
+
+func (s Service) dotsResults() DotsResultStore {
+	if s.Dots != nil {
+		return s.Dots
+	}
+	return s.Store
 }
 
 var decisionResolverRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
@@ -613,8 +628,24 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("GET /v1/tasks/export", s.tasksExport)
 	m.HandleFunc("GET /v1/tasks/sweep", s.tasksSweepPreview)
 	m.HandleFunc("POST /v1/task-events", s.taskEvents)
+	m.HandleFunc("GET /v1/standing-orders", s.standingList)
+	m.HandleFunc("POST /v1/standing-orders", s.standingPut)
+	m.HandleFunc("GET /v1/projects/{name}/frontier", s.projectFrontier)
 	m.HandleFunc("GET /v1/changes", s.changesList)
 	m.HandleFunc("POST /v1/changes/{id}/merge-flow", s.changeMergeFlow)
+	m.HandleFunc("POST /v1/changes/verifications", s.changeVerification)
+	m.HandleFunc("PUT /v1/changes/state", s.changeStatePut)
+	m.HandleFunc("PUT /v1/changes/checks", s.changeChecksPut)
+	m.HandleFunc("PUT /v1/changes/threads", s.changeThreadsPut)
+	m.HandleFunc("PUT /v1/changes/findings", s.changeFindingsPut)
+	m.HandleFunc("PUT /v1/changes/gate", s.changeGatePut)
+	m.HandleFunc("POST /v1/changes/batch", s.changeBatch)
+	m.HandleFunc("GET /v1/changes/one", s.changeOne)
+	m.HandleFunc("GET /v1/services", s.servicesList)
+	m.HandleFunc("PUT /v1/services/{name}", s.servicePut)
+	m.HandleFunc("GET /v1/services/{name}/pending", s.servicePending)
+	m.HandleFunc("POST /v1/deploys", s.deployStart)
+	m.HandleFunc("POST /v1/deploys/{attempt_id}/finish", s.deployFinish)
 	m.HandleFunc("POST /v1/tasks/next", s.tasksNext)
 	m.HandleFunc("GET /v1/tasks/projects", s.taskProjectsList)
 	m.HandleFunc("POST /v1/tasks/projects", s.taskProjectsCreate)
@@ -639,6 +670,8 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("POST /v1/tasks/{id}/origins", s.taskOriginAdd)
 	m.HandleFunc("GET /v1/tasks/{id}/origins", s.taskOriginList)
 	m.HandleFunc("GET /v1/task-origins", s.taskOriginFind)
+	m.HandleFunc("GET /v1/dots/results", s.dotsResultsList)
+	m.HandleFunc("POST /v1/dots/results/{id}/adoption", s.dotsAdoption)
 	m.HandleFunc("POST /v1/tasks/{id}/reopen", s.taskReopen)
 	m.HandleFunc("POST /v1/tasks/{id}/project", s.taskProject)
 	m.HandleFunc("POST /v1/tasks/{id}/area", s.taskArea)
@@ -658,6 +691,7 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("GET /v1/tasks/{id}/comments", s.taskCommentsList)
 	m.HandleFunc("POST /v1/tasks/{id}/comments", s.taskCommentCreate)
 	m.HandleFunc("POST /v1/decisions/resolve", s.decisionResolve)
+	m.HandleFunc("GET /v1/decisions/deliveries/hygiene", s.decisionDeliveryHygiene)
 	m.HandleFunc("GET /v1/decision-requests", s.decisionRecordsList)
 	m.HandleFunc("GET /v1/decision-requests/sources", s.decisionSources)
 	m.HandleFunc("POST /v1/decision-requests/{id}/snooze", s.decisionRecordSnooze)
@@ -668,6 +702,7 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("GET /v1/placements", s.placementsList)
 	m.HandleFunc("POST /v1/jobs", s.jobClaim)
 	m.HandleFunc("GET /v1/jobs", s.jobsList)
+	m.HandleFunc("GET /v1/job-skills", s.jobSkillsReport)
 	m.HandleFunc("GET /v1/jobs/{job}", s.jobGet)
 	m.HandleFunc("PUT /v1/jobs/{job}", s.jobUpdate)
 	m.HandleFunc("GET /v1/quota/accounts/{key}/latest", s.quotaLatest)
@@ -1333,6 +1368,8 @@ func (s Server) taskDecisionRequest(w http.ResponseWriter, r *http.Request) {
 //
 //	answered              200 (a re-send also carries duplicate:true)
 //	pending_confirmation  202, the request stays open
+//	denied                200, the operator denied a pending attempt; the
+//	                      request stays open
 //	stale_revision        409 decision_request_stale
 //	superseded            409 decision_request_stale, or decision_request_resolved
 //	                      for a withdrawn request
@@ -1358,10 +1395,21 @@ func decisionRequestResult(out store.ResolveDecisionOutcome) store.DecisionReque
 	return store.DecisionRequestResult{Task: out.Task, Request: out.Request, Duplicate: out.Duplicate, Result: out.Result, ResolutionID: out.ResolutionID, AttemptID: out.AttemptID}
 }
 
+// taskDecisionResolveInput is the bearer resolve body: the shared resolve
+// input plus the session channel's claim. Channel is "" or "cli" (today's
+// path) or "session" (an operator session recording the operator's words).
+type taskDecisionResolveInput struct {
+	store.DecisionResolveInput
+	Channel       string `json:"channel,omitempty"`
+	Provenance    string `json:"provenance,omitempty"`
+	OperatorQuote string `json:"operator_quote,omitempty"`
+	DecisionRef   string `json:"decision_ref,omitempty"`
+}
+
 // taskDecisionResolve closes the current request (answered, default_applied
 // with a receipt, or withdrawn). It never changes the task state. Only the
-// bearer client "operator" is a verified operator path; every other client
-// is a relay (R1).
+// bearer client "operator" on the cli channel is a verified operator path;
+// every other client, and the session channel, is a relay (R1).
 func (s Server) taskDecisionResolve(w http.ResponseWriter, r *http.Request) {
 	client, ok := s.auth(w, r)
 	if !ok {
@@ -1373,16 +1421,27 @@ func (s Server) taskDecisionResolve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer r.Body.Close()
-	var input store.DecisionResolveInput
+	var input taskDecisionResolveInput
 	if err := decode(r, &input, store.MaxBytes); err != nil {
 		appErr(w, r, err)
 		return
 	}
-	out, err := s.Service.Store.ResolveDecision(r.Context(), store.ResolveDecisionInput{
+	in := store.ResolveDecisionInput{
 		TaskID: id, RequestID: input.RequestID, Kind: input.Kind, Option: input.Option, Text: input.Text,
 		Receipt: input.Receipt, Responder: input.Responder, EventKey: input.EventKey,
-		Channel: store.DecisionChannelCLI, Actor: client, Verified: client == operatorClientID,
-	})
+		Provenance: input.Provenance, OperatorQuote: input.OperatorQuote, DecisionRef: input.DecisionRef,
+		Actor: client,
+	}
+	switch input.Channel {
+	case "", store.DecisionChannelCLI:
+		in.Channel, in.Verified = store.DecisionChannelCLI, client == operatorClientID
+	case store.DecisionChannelSession:
+		in.Channel = store.DecisionChannelSession
+	default:
+		writeError(w, http.StatusBadRequest, "invalid_context")
+		return
+	}
+	out, err := s.Service.Store.ResolveDecision(r.Context(), in)
 	if err != nil {
 		appErr(w, r, err)
 		return
@@ -2072,10 +2131,12 @@ func benchRowErrorField(row []byte, fieldTypes map[string]reflect.Type) string {
 // Payload caps for decode, by what the body carries. A route picks one of
 // these or a store-owned limit (store.MaxBytes, benchRequestMaxBytes, ...).
 const (
-	bodyTiny  = 1 << 10  // an id or two and a short reason
-	bodySmall = 4 << 10  // one entity's short fields
-	bodyEvent = 16 << 10 // one external event with its references (16 review items fill ~11 KiB)
-	bodyLarge = 64 << 10 // free text or a list: descriptions, candidates
+	bodyTiny     = 1 << 10  // an id or two and a short reason
+	bodyStanding = 8 << 10  // standing order
+	bodySmall    = 4 << 10  // one entity's short fields
+	bodyEvent    = 16 << 10 // one external event with its references (16 review items fill ~11 KiB)
+	bodyLarge    = 64 << 10 // free text or a list: descriptions, candidates
+	bodyPRState  = 2 << 20  // one PR-state write: ~200 checks, 100 threads and a pass of findings (hk 3198)
 )
 
 // decode reads one JSON request body into v. max is the payload's own byte

@@ -3,6 +3,7 @@ package api
 import (
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
@@ -25,15 +26,16 @@ func (s Server) jobClaim(w http.ResponseWriter, r *http.Request) {
 	}
 	defer r.Body.Close()
 	var input struct {
-		JobID  string `json:"job_id"`
-		TaskID int64  `json:"task_id"`
-		Host   string `json:"host"`
+		JobID  string     `json:"job_id"`
+		TaskID *int64     `json:"task_id"`
+		At     *time.Time `json:"at"`
+		Host   string     `json:"host"`
 	}
 	if err := decode(r, &input, store.MaxBytes); err != nil {
 		appErr(w, r, err)
 		return
 	}
-	if !store.ValidJobID(input.JobID) || !store.ValidJobHost(input.Host) || input.TaskID < 1 {
+	if !store.ValidJobID(input.JobID) || !store.ValidJobHost(input.Host) || (input.TaskID != nil && *input.TaskID < 1) {
 		writeError(w, http.StatusBadRequest, "invalid_context")
 		return
 	}
@@ -42,7 +44,7 @@ func (s Server) jobClaim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	j, created, err := s.Service.Store.ClaimJob(r.Context(), store.Job{
-		JobID: input.JobID, TaskID: input.TaskID, Host: input.Host, CreatedBy: client,
+		JobID: input.JobID, TaskID: input.TaskID, Host: input.Host, CreatedBy: client, ClaimedAt: input.At,
 	})
 	if err != nil {
 		appErr(w, r, err)
@@ -140,4 +142,35 @@ func (s Server) jobsList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOut(w, http.StatusOK, map[string]any{"jobs": jobs})
+}
+
+func (s Server) jobSkillsReport(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.auth(w, r); !ok {
+		return
+	}
+	since := time.Now().UTC().Add(-30 * 24 * time.Hour)
+	if values, present := r.URL.Query()["since"]; present {
+		raw := values[0]
+		var err error
+		since, err = time.Parse(time.RFC3339, raw)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_context")
+			return
+		}
+	}
+	if values, present := r.URL.Query()["limit"]; present && values[0] == "" {
+		writeError(w, http.StatusBadRequest, "invalid_context")
+		return
+	}
+	limit, err := queryLimit(r, 100, 1000)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_context")
+		return
+	}
+	report, err := s.Service.Store.JobSkillsReport(r.Context(), since, limit)
+	if err != nil {
+		appErr(w, r, err)
+		return
+	}
+	jsonOut(w, http.StatusOK, report)
 }

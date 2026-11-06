@@ -77,6 +77,8 @@ type ChangeReview struct {
 	StartedAt      *time.Time `json:"started_at,omitempty"`
 	FinishedAt     *time.Time `json:"finished_at,omitempty"`
 	RecordedAt     time.Time  `json:"recorded_at"`
+	// Review-history fields (hk 3208); omitted when NULL (unknown).
+	ReviewHistory
 }
 
 // Change is a pull request as the work record holds it.
@@ -100,6 +102,18 @@ type Change struct {
 	UpdatedAt          time.Time      `json:"updated_at"`
 	Tasks              []ChangeTask   `json:"tasks"`
 	Reviews            []ChangeReview `json:"reviews"`
+	// Verification is the verdict on the current head, or nil; Verifications
+	// are all verdicts, newest first (hk 3120).
+	Verification  *Verification  `json:"verification"`
+	Verifications []Verification `json:"verifications"`
+	// PR state mergewake writes (hk 3198): the gate decision, draft flag, the
+	// oldest written section's observed_at and the open thread and finding
+	// counts. A section never written leaves its field unset.
+	Draft        *bool      `json:"draft,omitempty"`
+	GateState    *string    `json:"gate_state,omitempty"`
+	FreshnessMin *time.Time `json:"freshness_min,omitempty"`
+	OpenThreads  int        `json:"open_threads"`
+	OpenFindings int        `json:"open_findings"`
 }
 
 // ChangeMergeFlow is the merge-flow field set. SetChangeMergeFlow replaces
@@ -245,21 +259,50 @@ func recordChangeTx(ctx context.Context, tx pgx.Tx, x Task, in TaskSourceEvent, 
 	return nil
 }
 
+// reviewBareSQL is true for a reviews row that carries nothing but its key,
+// apart from the review-history fields (reviewHistoryFillSQL): the row a
+// findings write creates before any event reports the pass.
+const reviewBareSQL = `reviews.reviewed_base IS NULL AND reviews.patch_id IS NULL AND reviews.reviewer_job_id IS NULL AND reviews.family IS NULL AND reviews.profile IS NULL AND reviews.model IS NULL AND reviews.harness IS NULL AND reviews.effort IS NULL AND reviews.executor IS NULL AND reviews.fallback IS NULL AND reviews.policy_revision IS NULL AND reviews.contract_source IS NULL AND reviews.verdict IS NULL AND reviews.critical IS NULL AND reviews.high IS NULL AND reviews.medium IS NULL AND reviews.low IS NULL AND reviews.started_at IS NULL AND reviews.finished_at IS NULL`
+
+// reviewHistoryFillSQL fills the review-history columns of a bare row from
+// EXCLUDED; a column already set keeps its value, so the first report of a
+// field wins. reviewHistoryGivenSQL is true when EXCLUDED carries any of them.
+const (
+	reviewHistoryFillSQL  = `reviewer=COALESCE(reviews.reviewer,EXCLUDED.reviewer),same_family=COALESCE(reviews.same_family,EXCLUDED.same_family),delta=COALESCE(reviews.delta,EXCLUDED.delta),quiet=COALESCE(reviews.quiet,EXCLUDED.quiet),outside_diff_blocking=COALESCE(reviews.outside_diff_blocking,EXCLUDED.outside_diff_blocking),patch_digest=COALESCE(reviews.patch_digest,EXCLUDED.patch_digest)`
+	reviewHistoryGivenSQL = `(EXCLUDED.reviewer IS NOT NULL OR EXCLUDED.same_family IS NOT NULL OR EXCLUDED.delta IS NOT NULL OR EXCLUDED.quiet IS NOT NULL OR EXCLUDED.outside_diff_blocking IS NOT NULL OR EXCLUDED.patch_digest IS NOT NULL)`
+)
+
+// args is the review-history values in column order: reviewer,
+// same_family, delta, quiet, outside_diff_blocking, patch_digest.
+func (h ReviewHistory) args() []any {
+	return []any{h.Reviewer, h.SameFamily, h.Delta, h.Quiet, h.OutsideDiffBlocking, h.PatchDigest}
+}
+
+// insertReviewTx records one review pass. The first report of a pass wins and
+// a redelivery changes nothing, except that a row carrying nothing but its key
+// (a findings write got there first, ApplyChangeFindings) is filled in by the
+// first report that carries something, review-history fields included; a
+// field the findings write already set keeps its value.
 func insertReviewTx(ctx context.Context, tx pgx.Tx, changeID int64, rv TaskEventReview, now time.Time) error {
-	_, err := tx.Exec(ctx, `INSERT INTO reviews(change_id,reviewed_head,reviewed_base,patch_id,round,pass,lens,reviewer_job_id,family,profile,model,harness,effort,executor,fallback,policy_revision,contract_source,verdict,critical,high,medium,low,started_at,finished_at,recorded_at)
-VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)
-ON CONFLICT(change_id,reviewed_head,lens,round,pass) DO NOTHING`,
-		changeID, rv.ReviewedHead, nullStr(rv.ReviewedBase), nullStr(rv.PatchID), rv.Round, rv.Pass, rv.Lens, nullStr(rv.ReviewerJobID),
-		nullStr(rv.Family), nullStr(rv.Profile), nullStr(rv.Model), nullStr(rv.Harness), nullStr(rv.Effort), nullStr(rv.Executor), rv.Fallback,
-		nullStr(rv.PolicyRevision), nullStr(rv.ContractSource), nullStr(rv.Verdict), rv.Critical, rv.High, rv.Medium, rv.Low,
-		rv.StartedAt, rv.FinishedAt, now)
+	_, err := tx.Exec(ctx, `INSERT INTO reviews(change_id,reviewed_head,reviewed_base,patch_id,round,pass,lens,reviewer_job_id,family,profile,model,harness,effort,executor,fallback,policy_revision,contract_source,verdict,critical,high,medium,low,started_at,finished_at,recorded_at,reviewer,same_family,delta,quiet,outside_diff_blocking,patch_digest)
+VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31)
+ON CONFLICT(change_id,reviewed_head,lens,round,pass) DO UPDATE SET reviewed_base=EXCLUDED.reviewed_base,patch_id=EXCLUDED.patch_id,reviewer_job_id=EXCLUDED.reviewer_job_id,family=EXCLUDED.family,profile=EXCLUDED.profile,model=EXCLUDED.model,harness=EXCLUDED.harness,effort=EXCLUDED.effort,executor=EXCLUDED.executor,fallback=EXCLUDED.fallback,policy_revision=EXCLUDED.policy_revision,contract_source=EXCLUDED.contract_source,verdict=EXCLUDED.verdict,critical=EXCLUDED.critical,high=EXCLUDED.high,medium=EXCLUDED.medium,low=EXCLUDED.low,started_at=EXCLUDED.started_at,finished_at=EXCLUDED.finished_at,`+reviewHistoryFillSQL+`
+WHERE `+reviewBareSQL,
+		append([]any{changeID, rv.ReviewedHead, nullStr(rv.ReviewedBase), nullStr(rv.PatchID), rv.Round, rv.Pass, rv.Lens, nullStr(rv.ReviewerJobID),
+			nullStr(rv.Family), nullStr(rv.Profile), nullStr(rv.Model), nullStr(rv.Harness), nullStr(rv.Effort), nullStr(rv.Executor), rv.Fallback,
+			nullStr(rv.PolicyRevision), nullStr(rv.ContractSource), nullStr(rv.Verdict), rv.Critical, rv.High, rv.Medium, rv.Low,
+			rv.StartedAt, rv.FinishedAt, now}, rv.ReviewHistory.args()...)...)
 	return err
 }
 
-const changeColumns = `id,repo,pr_number,state,head_sha,base_sha,merge_sha,opened_at,merged_at,reverted_by_change_id,priority,hold_reason,depends_on_change_id,depends_on_state,created_at,updated_at`
+const changeColumns = `id,repo,pr_number,state,head_sha,base_sha,merge_sha,opened_at,merged_at,reverted_by_change_id,priority,hold_reason,depends_on_change_id,depends_on_state,created_at,updated_at,
+draft,gate_state,LEAST(state_observed_at,checks_observed_at,threads_observed_at,findings_observed_at,gate_decided_at),
+(SELECT count(*) FROM change_threads t WHERE t.change_id=changes.id AND NOT t.resolved AND NOT t.gone),
+(SELECT count(*) FROM change_findings f JOIN changes c ON c.id=f.change_id ` + findingThreadJoin + `
+	WHERE f.change_id=changes.id AND ` + findingStatusSQL + `='open')`
 
 func scanChange(row pgx.Row, c *Change) error {
-	if err := row.Scan(&c.ID, &c.Repo, &c.PRNumber, &c.State, &c.HeadSHA, &c.BaseSHA, &c.MergeSHA, &c.OpenedAt, &c.MergedAt, &c.RevertedByChangeID, &c.Priority, &c.HoldReason, &c.DependsOnChangeID, &c.DependsOnState, &c.CreatedAt, &c.UpdatedAt); err != nil {
+	if err := row.Scan(&c.ID, &c.Repo, &c.PRNumber, &c.State, &c.HeadSHA, &c.BaseSHA, &c.MergeSHA, &c.OpenedAt, &c.MergedAt, &c.RevertedByChangeID, &c.Priority, &c.HoldReason, &c.DependsOnChangeID, &c.DependsOnState, &c.CreatedAt, &c.UpdatedAt, &c.Draft, &c.GateState, &c.FreshnessMin, &c.OpenThreads, &c.OpenFindings); err != nil {
 		return err
 	}
 	c.PR = changeURL(c.Repo, c.PRNumber)
@@ -285,8 +328,28 @@ type changeReader interface {
 	Query(context.Context, string, ...any) (pgx.Rows, error)
 }
 
+// readReviews reads the reviews of the given changes ordered by id and calls
+// add for each, in that order. The list read and the one-PR read share it.
+func readReviews(ctx context.Context, q changeReader, changeIDs []int64, add func(changeID int64, r ChangeReview)) error {
+	rows, err := q.Query(ctx, `SELECT change_id,id,reviewed_head,reviewed_base,patch_id,round,pass,lens,reviewer_job_id,family,profile,model,harness,effort,executor,fallback,policy_revision,contract_source,verdict,critical,high,medium,low,started_at,finished_at,recorded_at,reviewer,same_family,delta,quiet,outside_diff_blocking,patch_digest FROM reviews WHERE change_id=ANY($1) ORDER BY id`, changeIDs)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var r ChangeReview
+		if err = rows.Scan(&id, &r.ID, &r.ReviewedHead, &r.ReviewedBase, &r.PatchID, &r.Round, &r.Pass, &r.Lens, &r.ReviewerJobID, &r.Family, &r.Profile, &r.Model, &r.Harness, &r.Effort, &r.Executor, &r.Fallback, &r.PolicyRevision, &r.ContractSource, &r.Verdict, &r.Critical, &r.High, &r.Medium, &r.Low, &r.StartedAt, &r.FinishedAt, &r.RecordedAt, &r.Reviewer, &r.SameFamily, &r.Delta, &r.Quiet, &r.OutsideDiffBlocking, &r.PatchDigest); err != nil {
+			return err
+		}
+		add(id, r)
+	}
+	return rows.Err()
+}
+
 // listChangesWhere reads changes ordered by id, then their tasks and reviews,
-// each ordered by id. where may use only $1..$len(args).
+// each ordered by id, and their verifications, newest first. where may use
+// only $1..$len(args).
 func (s *Store) listChangesWhere(ctx context.Context, q changeReader, where string, limit int, args ...any) ([]Change, error) {
 	if limit < 1 || limit > 1000 {
 		limit = 100
@@ -306,6 +369,7 @@ func (s *Store) listChangesWhere(ctx context.Context, q changeReader, where stri
 	at := make(map[int64]int, len(out))
 	for i, c := range out {
 		ids[i], at[c.ID] = c.ID, i
+		out[i].Verifications = []Verification{}
 	}
 	trows, err := q.Query(ctx, `SELECT change_id,task_id,relation FROM change_tasks WHERE change_id=ANY($1) ORDER BY change_id,task_id`, ids)
 	if err != nil {
@@ -324,21 +388,32 @@ func (s *Store) listChangesWhere(ctx context.Context, q changeReader, where stri
 	if err = trows.Err(); err != nil {
 		return nil, err
 	}
-	rrows, err := q.Query(ctx, `SELECT change_id,id,reviewed_head,reviewed_base,patch_id,round,pass,lens,reviewer_job_id,family,profile,model,harness,effort,executor,fallback,policy_revision,contract_source,verdict,critical,high,medium,low,started_at,finished_at,recorded_at FROM reviews WHERE change_id=ANY($1) ORDER BY id`, ids)
+	err = readReviews(ctx, q, ids, func(changeID int64, r ChangeReview) {
+		out[at[changeID]].Reviews = append(out[at[changeID]].Reviews, r)
+	})
 	if err != nil {
 		return nil, err
 	}
-	for rrows.Next() {
-		var id int64
-		var r ChangeReview
-		if err = rrows.Scan(&id, &r.ID, &r.ReviewedHead, &r.ReviewedBase, &r.PatchID, &r.Round, &r.Pass, &r.Lens, &r.ReviewerJobID, &r.Family, &r.Profile, &r.Model, &r.Harness, &r.Effort, &r.Executor, &r.Fallback, &r.PolicyRevision, &r.ContractSource, &r.Verdict, &r.Critical, &r.High, &r.Medium, &r.Low, &r.StartedAt, &r.FinishedAt, &r.RecordedAt); err != nil {
-			rrows.Close()
+	vrows, err := q.Query(ctx, `SELECT `+verificationColumns+` FROM verifications WHERE change_id=ANY($1) ORDER BY recorded_at DESC, id DESC`, ids)
+	if err != nil {
+		return nil, err
+	}
+	for vrows.Next() {
+		var v Verification
+		if err = scanVerification(vrows, &v); err != nil {
+			vrows.Close()
 			return nil, err
 		}
-		out[at[id]].Reviews = append(out[at[id]].Reviews, r)
+		c := &out[at[v.ChangeID]]
+		v.Current = c.HeadSHA != nil && *c.HeadSHA == v.HeadSHA
+		c.Verifications = append(c.Verifications, v)
+		if v.Current {
+			current := v
+			c.Verification = &current
+		}
 	}
-	rrows.Close()
-	return out, rrows.Err()
+	vrows.Close()
+	return out, vrows.Err()
 }
 
 // checkChangeMergeFlow validates a merge-flow field set that needs no

@@ -27,7 +27,7 @@ func TestReadTaskWorkBoards(t *testing.T) {
 		}
 	}
 	// A reviewer job's own task differs from its placement's explicit owner.
-	if _, _, err := st.ClaimJob(t.Context(), Job{JobID: "example-review", TaskID: reviewTask.ID, Host: "example-b", CreatedBy: "example-node"}); err != nil {
+	if _, _, err := st.ClaimJob(t.Context(), Job{JobID: "example-review", TaskID: &reviewTask.ID, Host: "example-b", CreatedBy: "example-node"}); err != nil {
 		t.Fatal(err)
 	}
 	state := "spawned"

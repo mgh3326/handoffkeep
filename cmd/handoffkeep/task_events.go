@@ -144,3 +144,36 @@ func (w backlogSweepWorker) Run(ctx context.Context) {
 		}
 	}
 }
+
+// lastActivityRepairer is the store call lastActivityRepairWorker needs.
+type lastActivityRepairer interface {
+	RepairLastActivity(ctx context.Context, limit int) (int, error)
+}
+
+// lastActivityRepairWorker runs once at serve start: it repairs
+// tasks.last_activity_at left stale by a binary older than v44 (a rollback
+// window) in batches until a pass repairs nothing, logs the total, and returns.
+type lastActivityRepairWorker struct {
+	store lastActivityRepairer
+}
+
+const lastActivityRepairBatch = 500
+
+func (w lastActivityRepairWorker) Run(ctx context.Context) {
+	total := 0
+	for ctx.Err() == nil {
+		n, err := w.store.RepairLastActivity(ctx, lastActivityRepairBatch)
+		total += n
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			log.Printf("tasks.last_activity_repair_error err=%q", err.Error())
+			return
+		}
+		if n == 0 {
+			log.Printf("tasks.last_activity_repair repaired=%d", total)
+			return
+		}
+	}
+}

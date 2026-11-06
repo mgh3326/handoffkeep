@@ -148,6 +148,8 @@ func writeAction(path string) string {
 		return "disposition-renotify"
 	case "/ui/api/decision-requests/resolve":
 		return "decision-resolve"
+	case "/ui/api/decision-requests/deny":
+		return "decision-deny"
 	default:
 		if strings.HasPrefix(path, "/ui/api/nodes/") && strings.HasSuffix(path, "/accepting") {
 			return "accepting"

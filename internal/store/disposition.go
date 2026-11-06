@@ -243,8 +243,8 @@ func DispositionQuestion(refs TaskRefs, note string) string {
 // job, so the recorded reason is fixed to the path itself.
 const dispositionNoJobReason = "disposition item; no job link"
 
-func insertTaskEvent(ctx context.Context, tx pgx.Tx, id int64, from, to, by, note string, refs TaskRefs, at time.Time, noJob string) (int64, error) {
-	eventID, _, err := insertEvent(ctx, tx, taskEventInput{TaskID: id, From: from, To: to, By: by, Note: note, Refs: refs, At: at, NoJob: noJob})
+func insertTaskEvent(ctx context.Context, tx pgx.Tx, id int64, from, to, by, note string, refs TaskRefs, at time.Time, noJob string, into *Task) (int64, error) {
+	eventID, _, err := insertEvent(ctx, tx, taskEventInput{TaskID: id, From: from, To: to, By: by, Note: note, Refs: refs, Into: into, At: at, NoJob: noJob})
 	return eventID, err
 }
 
@@ -321,7 +321,7 @@ func (s *Store) CreateDisposition(ctx context.Context, in DispositionInput) (Tas
 		return Task{}, false, err
 	}
 	var x Task
-	if err = scanTask(tx.QueryRow(ctx, `INSERT INTO tasks(lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at,project,awaiting_decision) VALUES($1,'',$2,'decide','backlog',0,$3::jsonb,$4,$4,$5,$5,$6,true) RETURNING `+taskColumns, in.Lane, in.Title, string(encoded), in.CreatedBy, now, in.Project), &x); err != nil {
+	if err = scanTask(tx.QueryRow(ctx, `INSERT INTO tasks(lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at,last_activity_at,project,awaiting_decision) VALUES($1,'',$2,'decide','backlog',0,$3::jsonb,$4,$4,$5,$5,$5,$6,true) RETURNING `+taskColumns, in.Lane, in.Title, string(encoded), in.CreatedBy, now, in.Project), &x); err != nil {
 		return Task{}, false, err
 	}
 	// The awaiting event carries the question; its id is the item's
@@ -413,7 +413,7 @@ func (s *Store) answerDispositionTx(ctx context.Context, tx pgx.Tx, in Dispositi
 	if in.BatchID != "" {
 		note += " batch=" + in.BatchID
 	}
-	if _, err = insertTaskEvent(ctx, tx, in.ID, from, StateResearching, "operator:"+in.OperatorEmail, note, x.Refs, now, dispositionNoJobReason); err != nil {
+	if _, err = insertTaskEvent(ctx, tx, in.ID, from, StateResearching, "operator:"+in.OperatorEmail, note, x.Refs, now, dispositionNoJobReason, &x); err != nil {
 		return Task{}, "", err
 	}
 	if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: in.ID, Kind: TaskEventAwaiting, From: StateResearching, To: StateResearching, By: "operator:" + in.OperatorEmail, Note: note, Refs: x.Refs, At: now, Field: "awaiting_decision", FromValue: "true", ToValue: "false"}); err != nil {
@@ -564,7 +564,7 @@ func (s *Store) ApplyDisposition(ctx context.Context, id int64, by, note string)
 		if !taskTransitionAllowed(from, to) {
 			return Task{}, ErrTaskConflict
 		}
-		if _, err = insertTaskEvent(ctx, tx, id, from, to, by, text, x.Refs, now, ""); err != nil {
+		if _, err = insertTaskEvent(ctx, tx, id, from, to, by, text, x.Refs, now, "", &x); err != nil {
 			return Task{}, err
 		}
 		from = to
