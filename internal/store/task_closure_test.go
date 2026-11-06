@@ -32,6 +32,10 @@ func TestTaskClosureMigration(t *testing.T) {
 	if err := s.pool.QueryRow(t.Context(), `SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='decision_answer_attempts' AND column_name='operator_quote')`).Scan(&sessionColumn); err != nil || !sessionColumn {
 		t.Fatalf("decision session migration applied=%t err=%v", sessionColumn, err)
 	}
+	var reviewColumn bool
+	if err := s.pool.QueryRow(t.Context(), `SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='change_checks' AND column_name='delivery_id')`).Scan(&reviewColumn); err != nil || !reviewColumn {
+		t.Fatalf("review history migration applied=%t err=%v", reviewColumn, err)
+	}
 	for _, table := range []string{"task_origins", "changes", "decision_resolutions", "decision_deliveries", "verifications", "dots_results", "change_checks", "change_threads", "change_findings"} {
 		var exists bool
 		if err := s.pool.QueryRow(t.Context(), `SELECT to_regclass($1) IS NOT NULL`, table).Scan(&exists); err != nil || !exists {

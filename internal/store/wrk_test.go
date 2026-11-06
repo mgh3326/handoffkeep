@@ -36,7 +36,7 @@ func wrkCIStore(t *testing.T) *Store {
 		t.Fatal(e)
 	}
 	q := u.Query()
-	q.Set("search_path", schema+",public")
+	q.Set("search_path", testdb.SearchPath(schema))
 	u.RawQuery = q.Encode()
 	owner, e := Open(ctx, u.String())
 	if e != nil {
@@ -247,7 +247,7 @@ func TestWrkFourStartupCases(t *testing.T) {
 	q := u.Query()
 	q.Del("role")
 	ownerSchema := strings.Split(q.Get("search_path"), ",")[0]
-	q.Set("search_path", ownerSchema+"_legacy,public")
+	q.Set("search_path", testdb.SearchPath(ownerSchema+"_legacy"))
 	u.RawQuery = q.Encode()
 	ownerURL := u.String()
 	admin, e := pgxpool.New(t.Context(), runtimeURL)
@@ -257,7 +257,7 @@ func TestWrkFourStartupCases(t *testing.T) {
 	admin.Close()
 	// Use the existing owner connection string, not the runtime role, for DDL.
 	original := q.Get("search_path")
-	q.Set("search_path", ownerSchema+",public")
+	q.Set("search_path", testdb.SearchPath(ownerSchema))
 	u.RawQuery = q.Encode()
 	provision, e := pgxpool.New(t.Context(), u.String())
 	if e != nil {
@@ -279,7 +279,7 @@ func TestWrkFourStartupCases(t *testing.T) {
 	}
 	off.Close()
 	// Case 2: explicit distinct migration path provisions the O3 schema.
-	q.Set("search_path", ownerSchema+",public")
+	q.Set("search_path", testdb.SearchPath(ownerSchema))
 	u.RawQuery = q.Encode()
 	migrateURL := u.String()
 	enabled, e := OpenServer(t.Context(), runtimeURL, migrateURL, "enforce", s.WrkEngine().Policy, s.WrkEngine().Generation, false)
