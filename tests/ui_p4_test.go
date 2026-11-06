@@ -759,7 +759,7 @@ func TestUIP4QueueOperatorView(t *testing.T) {
 	if !strings.Contains(body, `id="shell-root"`) {
 		t.Fatalf("queue page did not mount the board: %q", body)
 	}
-	before := uiRowCounts(t)
+	before := uiLaneRowCounts(t, lane)
 	response = uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/api/board/tasks?lane="+lane, assertion, "")
 	if body = responseText(t, response); response.StatusCode != http.StatusOK {
 		t.Fatalf("board tasks status=%d body=%q", response.StatusCode, body)
@@ -769,8 +769,8 @@ func TestUIP4QueueOperatorView(t *testing.T) {
 			t.Fatalf("board API lost task %q: %q", title, body)
 		}
 	}
-	if uiRowCounts(t) != before {
-		t.Fatalf("read-only board API changed rows: before=%+v after=%+v", before, uiRowCounts(t))
+	if after := uiLaneRowCounts(t, lane); after != before {
+		t.Fatalf("read-only board API changed rows: before=%+v after=%+v", before, after)
 	}
 }
 
