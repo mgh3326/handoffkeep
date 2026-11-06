@@ -1,280 +1,189 @@
-# Console design proposal
+# Console design
 
-Implementation status: the console now uses the canonical [tokens](../web/console/src/design/tokens.css) and shared shell. Production-bundle captures with fictional data are in [console-shots](console-shots/capture.json). The proposal below records the approved design and its original review limits.
+`/ui` is one shell around four navigation pages — 홈 · 결정 · 작업 · 배포 — plus
+the task record and document deep links. This page describes the system that
+ships, not a proposal. Palette derivation, the component specification and the
+pre-delivery checklist live in the hk doc
+`design/2026-11-06/console-design-system`; the checklist is answered for the
+whole console in the change that updates this page. Captures with fictional data
+are in [console-shots](console-shots/capture.json).
 
-This proposal makes `/ui` a compact workspace for following tasks, answering
-decisions, and checking fleet capacity. The default is a state-grouped task list.
-The operator can scan task, host, role, model, and PR without opening each task.
+## Superseded
 
-The deliverables are static review artifacts. Existing Go handlers, templates,
-React sources, and the committed console bundle are unchanged. The new
-[token layer](../web/console/src/design/tokens.css) is not loaded in production.
-View implementation follows operator review in a later PR. Nothing is deployed.
+Earlier revisions of this page described the #117 adoption and a set of static
+mocks. Those are superseded: #164 (hk 3140) replaced the old pages with the
+shared shell, and #198–#202 (D1–D5) shipped the shell and page redesign covered
+here.
 
-## Review screens
+The mock pages, **My work**, the command palette and the Fleet hosts, Grades and
+docs-browse screens no longer have a view. `/ui/fleet`, `/ui/grades` and
+`/ui/docs` render the moved notice, and the `/ui/queue` bookmark redirects to
+Work. The server-rendered `/ui/timeline`, `/ui/compose` and
+`/ui/decisions/legacy` pages remain outside the new navigation.
 
-Open the HTML files directly from a checkout. They use relative local assets,
-system font fallbacks, and fictional data. No build, server, login, remote fonts,
-or API connection is needed. Dark is the default. The **Light** button selects
-the derived light palette. `?theme=light` selects it on first load.
+## Tokens
 
-| Screen | Review focus | Mock |
-| --- | --- | --- |
-| Work board | State groups, compact rows, host, role, model, and PR chips | [Board](console-mocks/board.html) |
-| Task detail | Description, properties, linked PR and report, event timeline | [Task detail](console-mocks/task-detail.html) |
-| Decisions inbox | Pending queue, one question, recommendation, explicit answer | [Decisions](console-mocks/decisions.html) |
-| Fleet hosts | Load, freshness, unavailable power, separate shared quota | [Fleet hosts](console-mocks/fleet-hosts.html) |
-| Command palette | Navigation, tasks, documents, keyboard focus | [Palette overlay](console-mocks/command-palette.html) |
+The system is **Dense Dark Minimal**. Dark is the default; light is a derived
+palette on the same roles. Every value a page uses is a `var(--hk-*)` token from
+[`design/tokens.css`](../web/console/src/design/tokens.css) — no per-page hex,
+no second stylesheet.
 
-The mocks illustrate one task detail and one decision. Other row links open
-those representative fixtures. Inbox and Deploys navigation open related
-fixtures because those full screens are outside this brief's mock set.
-**My work** demonstrates a fixed fictional assignment. It is not an identity
-integration. Search filters the palette's local sample entries. The answer
-button previews a choice and never sends an answer.
-
-## Information architecture
-
-Keep the sidebar in this order. A count means work requiring attention, not an
-unread count. The workspace name stays fixed above navigation. Operator and
-theme preferences stay outside task content.
-
-| Sidebar view | Purpose and route to retain | Existing data source and implementation limits |
-| --- | --- | --- |
-| Inbox | Start with actionable decisions and work awaiting review. Use the existing `/ui/home` landing route. | `GET /ui/api/dashboard` supplies work and PR groups. `GET /ui/api/glance` supplies decision and disposition counts. Decision requests come from task refs and detail. There is no persisted notification feed, read receipt, or mark-all-read endpoint. This is an attention queue, not a new notification system. |
-| My work / Board | Follow execution by state at `/ui/queue`. **All work** is the default. **My work** is an explicit claimant or lane filter. | `GET /ui/api/board/tasks?lane=&state=&parent_lane=&after_id=&limit=` supplies task rows. `GET /ui/api/live` supplies jobs, hosts, and exact task-job links. `claimed_by` and lanes are not verified-email identities. Ask the operator to select a scope rather than infer ownership from email. Placement details need the read adapter described below. |
-| Tasks | Search and inspect all lifecycle states using the same `/ui/queue` list and `/ui/tasks/{id}` detail. | `GET /ui/api/search?q=&scope=tasks&limit=` searches tasks and comment snippets. The list and detail APIs supply full task context. Preserve the distinction between search's `has_more` and list pagination. |
-| Decisions | Answer pending requests and inspect resolved history at `/ui/decisions`. | `internal/ui/decision_requests.go` already projects request state and history. Task list refs identify current requests. `GET /ui/api/board/tasks/{id}` supplies `decision_requests` and `decision_legacy`. The HTML page also aggregates legacy task and lane decisions, escalations, and dispositions in `ui.go` and `disposition.go`. There is no equivalent aggregate decisions JSON endpoint. Keep that server aggregation or add a same-origin adapter in the implementation PR. |
-| Deploys | Compare recorded deployment with subsequent merges at `/ui/deploys`. | `GET /ui/api/deploy-pending` supplies service groups, successful deploy records, later merge events, invalid records, and completeness flags. Say **Merged since last recorded deploy**, not **Definitely undeployed**. This view does not grant deploy authority. |
-| Fleet hosts | See accepting, draining, unavailable, and stale hosts at `/ui/fleet`. | `GET /ui/api/live` supplies load, core count, memory, job links, and per-section freshness. `GET /ui/api/fleet` supplies session snapshots. `GET /ui/api/dashboard` supplies quota by account and pool. Host power and host-to-account attribution are unavailable in these BFF responses. |
-| Docs / Search | Browse source documents at `/ui/docs` and open global navigation with the palette. | `GET /ui/api/docs/prefixes` and `/ui/api/docs?prefix=&before=&limit=` browse keys and summaries. `GET /ui/api/board/doc?key=` reads one document. Search supports only `scope=tasks`; document browsing can filter loaded titles or prefixes, but must not claim global document full-text search. |
-
-Keep supporting tools discoverable without enlarging the primary sidebar.
-The existing benchmark catalog at `/ui/grades`, backed by
-`GET /ui/api/bench/catalog`, belongs under Fleet hosts and the palette.
-Cleanup candidates use `GET /ui/api/reap`. The existing timeline and event
-pages remain accessible from task activity and the palette.
-
-Task detail combines `GET /ui/api/board/tasks/{id}` with paged
-`GET /ui/api/board/tasks/{id}/comments?after_id=`. The detail response includes
-events, dwell, Linear identity, decision history, and benchmark participants.
-Read `body_doc` through the document API. `refs.report_path` is provenance text,
-not a browser-readable filesystem URL. Make a report link only when there is
-an explicit document key or approved remote link. Otherwise show the path with
-**Report unavailable in console**. The mock report is an inline fictional sample.
-
-### Board projection for PR #114
-
-[PR #114](https://github.com/mgh3326/handoffkeep/pull/114) introduces the Linear
-work-board projection and immutable placement records. The proposal consumes
-that data without making the browser call bearer-token `/v1` routes or Linear.
-Sources are the PR's
-[work-board guide](https://github.com/mgh3326/handoffkeep/blob/6c4b2f7/docs/linear-work-board.md),
-[placement contract](https://github.com/mgh3326/handoffkeep/blob/6c4b2f7/docs/placement-decisions.md),
-and [projection types](https://github.com/mgh3326/handoffkeep/blob/6c4b2f7/internal/store/linear_board.go).
-These describe the pending dependency, not a deployed console contract.
-
-| Row content | Source today | Proposed use of #114 |
-| --- | --- | --- |
-| Task, state, priority, project | Board list `id`, `title`, `state`, `priority`, `project`, `area` | Keep hk task state authoritative. Linear's coarser workflow state is secondary. |
-| Host | Live `links` joined by exact `refs.job_id`, then jobs' `machine` | Placement `chosen_host` and projected active sessions. Label a recorded placement separately from currently observed execution. Never substitute `decided_on`, which identifies the reporting node. |
-| Role | Live job `role` may be normalized or absent. Benchmark participant roles are historical evidence. | Canonical `lead`, `worker`, `review`, `consult` displayed as Builder, Worker, Reviewer, Consultant. Preserve the canonical value in filters and accessible text. |
-| Model | Live job supplies tier, not model. Benchmark segments can supply historical `model_id`. | Placement `family` and `model`. Do not infer model from tier or catalog. Missing model reads **Not collected**. |
-| PR | Task `refs.pr` and `refs.head_sha` | Keep the PR link beside the execution chips. The snapshot does not establish current GitHub CI or mergeability. |
-| Report and events | Task refs, task events, comments, document keys | READY, ESC, BLOCKED, FINDINGS, MERGED, and placement attempts can extend the timeline when a console-safe read projection exists. Do not scrape Linear's managed description. |
-
-The current `/ui/api/board/*` endpoints do not expose #114's complete active
-session projection. A future same-origin read adapter must supply that projection
-or enrich the board response. Preserve all active sessions per task. Show the
-lead session inline with a **+N sessions** chip that opens the rest, rather than
-overwrite the lead with the last reviewer. The fixtures show one session per task
-to make the row treatment reviewable. Placement history's 180-day retention means
-an absent old record is not proof that a task never ran.
-
-Group by the exact hk states from the board response. Labels are Backlog,
-Reopened, Claimed, In progress, Verifying, Join, Hold, Needs decision, Merged,
-and Dropped. The mock includes five nonempty groups. Keep other nonempty groups
-visible, and make empty groups optional. Do not combine Hold and Needs decision.
-An open PR is a link, not a reason to overwrite the hk state with Verifying.
-
-Within each group, sort by priority, then task ID as a stable tie-breaker.
-Include state and filter parameters in the URL. Restore selected task and scroll
-when detail closes. Exhaust the board's `after_id` pagination before showing a
-complete count. Until then, show **N loaded**. Display truncation and unknown
-fields explicitly.
-
-### Freshness and action semantics
-
-Each live section retains its own `status` and `fetched_at`. Keep last-good data
-visible with a stale label after failure. A never-fetched section reads
-**Unavailable**, not zero. Unknown load, memory, model, power, and job counts
-stay unknown. Load divided by cores is a load ratio, not CPU utilization.
-
-Fleet quota stays in a separate shared-pool section. Do not divide pooled quota
-among hosts. Show the measurement time, window, reset, and expired or reset-passed
-state. The mock's watts value is unavailable because the current console APIs do
-not collect power. #114 candidate power is a historical placement signal, not
-current host telemetry.
-
-The decisions screen distinguishes open, overdue, answered, default applied,
-withdrawn, superseded, and uncleaned requests. A passed deadline never implies
-that a default was applied. Uncleaned terminal-task requests belong in a separate
-cleanup group. Legacy unrecorded requests have no invented recommendation.
-
-In the future implementation, use the existing authenticated and CSRF-protected
-form routes for answers and comments, including `/ui/decisions/answer`,
-`/ui/decisions/answer-batch`, and `/ui/tasks/{id}/comments`. Request display alone
-does not imply that its answer transport is available. Respect the existing
-write gates, request revision, and hub configuration. Keep a failed answer
-editable and visible with its error. Never mark it answered on a timeout.
-
-## Keyboard and focus model
-
-The model is proposed for hk. The reference repository supports the domain and
-navigation structure; it does not establish every shortcut below as an observed
-Linear binding.
-
-| Key | Behavior |
+| Role | Tokens |
 | --- | --- |
-| `j` / `k` or arrows | Move the active row in a list. Do not open it. Keep it visible. Palette uses arrows while its search input accepts text. |
-| `Enter` | Open the active task, decision, host, or palette result. For a decision, opening is separate from submitting an answer. |
-| `Esc` | Close the topmost palette, menu, or detail. Restore focus to its trigger. Returning from a task restores board selection and scroll. |
-| `Cmd+K` / `Ctrl+K` | Open or close the global palette. Focus its search input. Show navigation and recent items before a query. |
-| `g`, then `i` | Inbox. |
-| `g`, then `b` | Work board. |
-| `g`, then `m` | My work with the operator's explicit scope. |
-| `g`, then `t` | All tasks. |
-| `g`, then `d` | Decisions. |
-| `g`, then `e` | Deploys. |
-| `g`, then `h` | Fleet hosts. |
-| `g`, then `s` | Docs and search. |
-| `Tab` / `Shift+Tab` | Native focus order. Trap focus only within the modal palette. |
-| `?` | Open a shortcut reference in the implementation. |
+| Surfaces | `--hk-surface-0`, `--hk-surface-1`, `--hk-surface-2`, `--hk-surface-selected` |
+| Lines and ink | `--hk-border-subtle`, `--hk-border-control`, `--hk-text-primary`, `--hk-text-secondary`, `--hk-text-muted`, `--hk-text-heading` |
+| Action | `--hk-action-bg`, `--hk-action-fg` (lime; one action color) |
+| State ink | `--hk-success`, `--hk-warning`, `--hk-danger`, `--hk-info`, `--hk-state-developing` (one per state) |
+| Chips | `--hk-chip-decision-bg`, `--hk-chip-decision-fg` (one pair per group), `--hk-chip-mix`, `--hk-chip-base` |
+| Focus and motion | `--hk-focus`, `--hk-motion-fast`, `--hk-motion-expand` |
 
-Expire the `g` prefix after 900 ms. Ignore letter shortcuts in inputs, textareas,
-selects, contenteditable fields, and composition events. Modifiers belong to
-their platform shortcuts. Never use a navigation shortcut to submit an answer,
-merge, deploy, or toggle host acceptance. Radio options use native arrow and Tab
-behavior. Recommend a choice in text without silently submitting it.
+Chip fills are the group ink mixed into the surface (`color-mix`), so the text
+keeps its contrast in both themes. Type is `--hk-type-page`, `--hk-type-section`,
+`--hk-type-row`, `--hk-type-meta` and `--hk-type-mono` with the matching
+`--hk-line-page`, `--hk-line-section`, `--hk-line-row`, `--hk-line-meta` and
+`--hk-line-mono`; 12px is the smallest size. Dense rows use `--hk-row-dense` (40px);
+touch targets are at least `--hk-touch-height` (44px). Radii are
+`--hk-radius-chip`, `--hk-radius-control`, `--hk-radius-card` and
+`--hk-radius-pill`. Motion is background/color at `--hk-motion-fast` and
+expanders at `--hk-motion-expand`; `prefers-reduced-motion: reduce` sets both to
+0ms.
 
-The preview implements board `j/k`, native link Enter, palette arrows and Enter,
-Escape, the theme toggle, mobile navigation, and the available fixture `g`
-destinations. It does not implement production search, `g m`, `?`, persisted
-selection, or real writes. The production model above remains implementation
-work, not a capability claim for these HTML files.
+Fonts are self-hosted under `/ui/static/console/fonts` and loaded from
+`design/fonts.css`: Pretendard Variable for UI text (dynamic subsets with
+`unicode-range`, `font-display: swap`) and JetBrains Mono for ids, SHAs and
+digests. There is no remote font dependency.
 
-## Tokens, density, and responsive layout
+The base layout breakpoint is 768px: below it the navigation is a fixed bottom
+tab bar and rows step up to 16/22; from 768px the navigation is a 216px sticky
+sidebar. Detail panes appear from 1024px. Focus is a 2px `--hk-focus` outline
+with a 2px offset, inset inside lists so it is not clipped.
 
-The source is `hk:doc design/fleet-web/linear-style-tokens`, document revision
-`c42825803424592916cf39007d2f96ffad36c848769e41616bec87f8f0dfa250`.
-It records a dark marketing-site system. The proposed app layer preserves its
-void, carbon, and obsidian surfaces, graphite hairlines, type families, weight
-range, spacing scale, radii, and lime primary action.
+## Shared components
 
-Semantic `--hk-*` roles isolate components from palette values. The light theme
-is derived, not observed or operator-approved. It uses the same roles and a
-darker status ink on pale surfaces. Dark review ink and warning amber are also
-derived for the app. Original iris and lavender remain available as primitives.
-Only one lime primary action appears in an actionable view. The decision mock
-uses it for **Preview answer**. Navigation and links stay neutral.
+| Component | File | Behaviour |
+| --- | --- | --- |
+| `Icon`, `IconFrame`, `IconButton` | `shared/Icon.tsx` | One 24-unit, 1.75-stroke icon set. Decorative icons are `aria-hidden`; a standalone icon takes `label`, and `IconButton` requires one. |
+| `StateIcon` | `shared/StateIcon.tsx` | The state shapes, coloured by the `--hk-state-developing`-style role through `currentColor`. Every state has a distinct outline, and `srLabel` exposes the Korean name. |
+| `Chip` | `shared/ui/Chip.tsx` | Static `<span>` with `status`, `priority`, `lane` and `count` variants. The status variant's group is `decision`, `input`, `working`, `failed`, `done` or `neutral`, decided by `statusGroup` in `shared/states.ts`. A lane over 16 characters is cut with the full name in the accessible name. |
+| `Mono`, `MonoRef` | `shared/ui/Mono.tsx`, `shared/ui/MonoRef.tsx` | Mono ids and refs; `MonoRef` shows a shortened SHA or digest with a copy button, announcing through the shell's one live region. |
+| `CollapsedWarning` | `shared/ui/CollapsedWarning.tsx` | A native `<details>`, collapsed by default: warning icon, count, 펼치기/접기, then the body. |
 
-| Concern | Treatment |
-| --- | --- |
-| Type | Inter Variable, then system sans. Berkeley Mono, then JetBrains Mono, IBM Plex Mono, and system monospace. No remote font dependency. Body 16px, small body 15px, caption and app rows 13px, label 12px, micro 10px. Weights 300, 400, 510, 590. |
-| App adaptation | Compact 13px rows and 20–24px page titles replace marketing headings in navigation-heavy views. Exposed 24px and 32px type utilities remain available. |
-| Spacing | The supplied 4px base scale through 128px, with named spacing utilities. Desktop list rows are at least 48px. Mobile controls are at least 44px tall. |
-| Shape | 2px small, 4px badge, 6px input and button, 12px maximum card radius, pill for circular status marks. |
-| Elevation | Surface steps and borders. The palette uses a scrim and strong hairline, without a drop shadow. |
-| States | Color plus text or an icon. Disabled ash is not used for essential body text. Null values are words or labeled dashes. Focus uses a visible 2px outline. |
+`statusGroup` decides the chip group of a task; the decision screens map their
+own record states in `decisions/DecisionChip.tsx`. `STATE_LABEL`,
+`STATE_GROUP_ORDER` and `CHIP_GROUP_ORDER` hold the Korean labels and order.
+Reads go through `getJSON`/`HttpError` (`shared/http.ts`) and `usePoll`
+(`shared/usePoll.ts`); a failed poll keeps the last good data and marks it, and
+loading/failure/staleness are always visible with `role="status"`/`role="alert"`.
 
-At 1280px the sidebar is 216px, task properties are 248px, and row metadata is
-aligned in columns. At 390px the sidebar becomes a menu, task titles wrap, and
-every row retains host, role, model, and PR below its title. Detail properties
-follow the activity content. The selected decision appears above its question;
-other request summaries remain available in a disclosure. Host statistics wrap
-under the host name. Quota pools stack. The palette fits within the viewport and
-its results scroll independently. No page requires horizontal scrolling.
+## Shell and navigation
 
-Use semantic headings, real links and buttons, native radio inputs, text status,
-and an inert background beneath the modal. Restore focus when the palette closes.
-Do not animate selection or require pointer hover to reveal critical information.
-The proposal uses no animation. Font metrics vary across system fallbacks;
-captures record the result on local Chrome, not a bundled Inter font.
+`Shell` (`app/Shell.tsx`) draws the brand, the theme button, one `<nav>` and the
+page. Its `destinations` table is the navigation: 홈 (`/ui`), 결정
+(`/ui/decisions`), 작업 (`/ui/work`), 배포 (`/ui/deploys`) — the decision is
+second because a pending decision outranks everything else. A new page is one
+row in that table.
 
-### Adoption through the existing asset pipeline
+The decision entry shows a count chip and an overdue dot, with the spoken form
+"열린 결정 N건, 기한 경과 M건" in a polite live region; the shell polls
+`/ui/api/attention` every 60 seconds. The theme button reads 밝은 테마 / 어두운
+테마 with a sun or moon icon, and `bootTheme` applies the stored choice before
+the first render.
 
-The proposal lives at `internal/ui/assets/tokens.css` because the brief names
-that review location. The current server embeds `templates/*.html` and `static`
-in `internal/ui/ui.go`. It does not embed `assets`. Each mock imports the proposal
-through a relative CSS path. No Go route or production stylesheet is changed.
+## Home — `/ui`, `/ui/home`
 
-After approval, replace the values in the existing canonical
-`web/console/src/design/tokens.css` with the agreed roles and migrate consumers
-whose token meanings differ. Build with the pinned Node toolchain and
-`npm run build` to emit `internal/ui/static/console/tokens.css`. Commit that
-bundle with the source. Go templates and React entries continue to load the same
-versioned static stylesheet. Remove the proposal copy after migration so the
-app has one token owner. Do not introduce a second framework or a runtime CDN.
+The inbox answers "what is waiting for me". A summary line counts decisions
+(with overdue), tasks and pending deploys. **지금 할 일** merges decisions and
+stalled or decision-blocked tasks, overdue first and then newest; **참고** lists
+merged-but-not-deployed work. Rows are grouped 기한 지남 / 오늘 / 어제 / 이번 주 /
+지난주 / 이전.
 
-Existing reads continue through `getJSON` and validate response shapes.
-Polling continues through stable `usePoll` loaders. Malformed responses produce
-errors rather than empty lists. A new interaction should reuse board API types
-and the current authentication boundary.
+Row anatomy: state icon (or the warning icon for a stalled task), `#id` in
+`Mono`, the title, the age, a one-line status word (결정 대기, 멈춘 작업,
+머지 후 미배포) and its chips — source (요청/알림), overdue or remaining time,
+lane. Unseen rows carry a dot and seen rows are dimmed; a truncated list says
+`+N개 더 있음`. The empty state is "대기 중인 일 없음", a failed first load is a
+`role="alert"`, and a stale list keeps the last data with a note.
 
-## Reference evidence and its limits
+## Work — `/ui/work`
 
-The private reference repository was read at commit
-`dd876c5665fb628d375f8a98a064089957ec56f4`. Links require repository access.
-Only the design conclusions are reproduced here. Private instance data, account
-identifiers, hostnames, and captured payloads are not copied into the mocks.
+The work list follows execution. The header holds the project `select`; the
+tabs are 내 차례 (default), 진행 중, 대기, 완료 and 전체, each with a live count.
+Filters (검색, 레인, 종류, 상태, 우선순위 ≥) sit in a `<details>` sheet below
+1024px and are inline above it; active filters can be removed one by one. The
+URL carries `project`, `view` and the filters, and `/ui/queue` redirects here.
 
-| Reference file | Evidence used and design consequence |
-| --- | --- |
-| [clients/web/notes/sync-engine.md](https://github.com/mgh3326/linear-ref-analysis/blob/dd876c5665fb628d375f8a98a064089957ec56f4/clients/web/notes/sync-engine.md) | Bootstrap, partial model loading, IndexedDB collections, subscriptions, and transaction recovery. Keep a stable list while detail loads separately. This is not authorization to copy Linear's sync engine into hk. |
-| [clients/web/notes/api-surface.md](https://github.com/mgh3326/linear-ref-analysis/blob/dd876c5665fb628d375f8a98a064089957ec56f4/clients/web/notes/api-surface.md) | Workflow names differ from state classes, and assignee differs from delegate. Keep task state, responsible claimant, and executing session separate. |
-| [clients/web/notes/schema.graphql](https://github.com/mgh3326/linear-ref-analysis/blob/dd876c5665fb628d375f8a98a064089957ec56f4/clients/web/notes/schema.graphql) | Inspected `CustomView`, `Issue`, `IssueHistory`, and `WorkflowState`. Custom views have filters, sharing, sidebar names, and display preferences. The board is a view over tasks, while detail owns history and properties. |
-| [extracted/web-idb-schema.json](https://github.com/mgh3326/linear-ref-analysis/blob/dd876c5665fb628d375f8a98a064089957ec56f4/extracted/web-idb-schema.json) | Issue indexes include state, assignee, team, and label dimensions. Comment and history collections link by issue. Keep filters first-class and fetch related detail independently. No IndexedDB work is proposed in this PR. |
-| [extracted/web-sw-manifest.txt](https://github.com/mgh3326/linear-ref-analysis/blob/dd876c5665fb628d375f8a98a064089957ec56f4/extracted/web-sw-manifest.txt) | `CustomViewsHeader`, `IssueDetailsPaneSidebar`, `IssueCommentsAndHistory`, Inbox, and shortcut settings name distinct app components. These support sidebar, list, properties, activity, and palette separation. Component names do not establish exact visual geometry or key bindings. |
-| [comparison/reusable-patterns.md](https://github.com/mgh3326/linear-ref-analysis/blob/dd876c5665fb628d375f8a98a064089957ec56f4/comparison/reusable-patterns.md) | Separate responsibility from delegation, defer related detail, and keep field actions bounded. Retain one task timeline across agent activity. |
-| [comparison/platform-parity.md](https://github.com/mgh3326/linear-ref-analysis/blob/dd876c5665fb628d375f8a98a064089957ec56f4/comparison/platform-parity.md) | Shared inbox, issue, view, and my-issues concepts across clients. Keep these recognizable in navigation while adapting to hk's operator workflow. |
-| [comparison/cache-strategy.md](https://github.com/mgh3326/linear-ref-analysis/blob/dd876c5665fb628d375f8a98a064089957ec56f4/comparison/cache-strategy.md) | Distinguishes cached data and pending writes, with acknowledged gaps in older web observations. Never represent a pending or failed answer as accepted. Prefer newer web observations where these notes differ. |
-| [comparison/api-auth-models.md](https://github.com/mgh3326/linear-ref-analysis/blob/dd876c5665fb628d375f8a98a064089957ec56f4/comparison/api-auth-models.md) | App credentials and automation clients have different boundaries. Keep console requests same-origin and credentials server-side. Treat the old authentication comparison as historical, not the current deployment contract. |
+Rows are grouped by chip group in the fixed order 결정 필요 · 분류 대기 · 진행 중 ·
+실패 · 완료 · 대기, then sorted by priority, `updated_at` and id. Row anatomy:
+`StateIcon`, `#id`, title, then meta chips — status, the active job
+(`role · model · profile · host`), lane, priority (warning at P1) and age. From
+1024px a selected row opens the task record in a side pane; ArrowUp/ArrowDown
+move focus between rows.
 
-The 216px sidebar, row geometry, responsive layout, and hk shortcut assignment
-are design decisions in this proposal. The supplied analysis does not contain
-enough visual evidence to claim a pixel-exact Linear app clone.
+## Decisions — `/ui/decisions`, `/ui/decisions/{id}`
 
-## Capture and validation
+The list has four tabs — 열림, 기한 경과, 답변 기록, 정리 필요 — with counts on
+the first two, and a 모두 확인 button that records what was seen. Tabs stay on one
+line; on a phone the strip scrolls sideways with a fading edge. **새 항목**
+divides unseen rows from the rest. Each row carries a state icon, `#id`, the
+summarised question, and chips for source, record state, remaining deadline,
+lane, new revision and age. Each tab has its own empty state with a
+link to the next useful tab; from 1024px a selected row opens the decision in a
+side panel.
 
-Each mock has dark and light screenshots at 1280px and 390px under
-[`console-shots/`](console-shots/). PNGs use one device pixel per CSS
-pixel and capture the whole page, except the palette overlay, which captures
-the viewport. The filenames encode page, theme, and width.
-The [capture manifest](console-shots/capture.json) records Chrome version,
-viewport checks, and the preview interactions exercised.
+The decision page shows the record state chip, `결정 #id`, the project/lane and
+task link, the request id, revision and answer policy, then the full question.
+Options are large `role="radio"` cards with a numbered label, a 권장 chip on the
+recommended option and a 미응답 시 기본값 chip on the default; a free-text memo
+appears when the request allows it. A deadline/default-action box, 맥락 and 이력
+disclosures, and the 답변 확인 call to action follow. Confirming opens
+`ConfirmSheet`; the result is a `ResultBadge`, and a failed or unconfirmed send
+keeps the selection and its error.
 
-| Screen | Dark, 1280 | Light, 1280 | Dark, 390 | Light, 390 |
-| --- | --- | --- | --- | --- |
-| Board | [PNG](console-shots/board-dark-1280.png) | [PNG](console-shots/board-light-1280.png) | [PNG](console-shots/board-dark-390.png) | [PNG](console-shots/board-light-390.png) |
-| Task detail | [PNG](console-shots/task-dark-1280.png) | [PNG](console-shots/task-light-1280.png) | [PNG](console-shots/task-dark-390.png) | [PNG](console-shots/task-light-390.png) |
-| Decisions | [PNG](console-shots/decisions-dark-1280.png) | [PNG](console-shots/decisions-light-1280.png) | [PNG](console-shots/decisions-dark-390.png) | [PNG](console-shots/decisions-light-390.png) |
-| Fleet hosts | [PNG](console-shots/fleet-dark-1280.png) | [PNG](console-shots/fleet-light-1280.png) | [PNG](console-shots/fleet-dark-390.png) | [PNG](console-shots/fleet-light-390.png) |
-| Palette | [PNG](console-shots/palette-dark-1280.png) | [PNG](console-shots/palette-light-1280.png) | [PNG](console-shots/palette-dark-390.png) | [PNG](console-shots/palette-light-390.png) |
+## Deploys — `/ui/deploys`
 
-Capture with a local Chrome installation and an isolated Playwright dependency:
+One card per service, sorted by service name. The header is the service, the
+target chip and the repo in `Mono`. The status line names 현재 판 with a shortened
+ref in `MonoRef`, then 마지막 시도 with the result chip and its age (성공, 실패,
+롤백). 최근 시도 shows three attempts with 더 보기; each attempt is result,
+version, record key, time and failed step, plus a warning when the deploy
+command finished but the serving version may have changed. A missing time reads
+시각 미기록, never a guess.
+
+A malformed-record warning is a `CollapsedWarning`: `N개 기록 형식 불일치 ·
+펼치기`, with counts by reason and the failing keys inside. 마지막 배포 이후
+머지됨 lists each merged task with its PR and age; when the deploy time is
+missing, the list explains why it cannot be computed. A service with no records
+reads 기록 없음, and a capped scan says so instead of claiming the fleet truth.
+
+## Task record and document viewer
+
+`/ui/tasks/{id}` renders `TaskRecord`: Closure, Origins, Documents, Changes,
+Jobs, Durations and Events. Work rows, Home rows and decision pages link here.
+
+`/ui/doc/{key}` renders `DocView`: the key, kind and update time, then the
+markdown through a lazy renderer; a payload that cannot be rendered is shown as
+raw text rather than an empty document. The document is the only view that loads
+the markdown chunk, so Home and Work never pay for it.
+
+## Captures
+
+Seven routes — home, work, task, decisions, decision, deploys and document — at
+1440px and 390px in dark and light, 28 PNGs. Each page is one viewport as tall
+as the document, so the fixed tab bar sits at the real bottom edge instead of
+being stitched into the middle by a full-page capture. The filenames encode
+page, theme and width; the [manifest](console-shots/capture.json) records the
+browser, URL, overflow check and page errors for every view.
+
+Regenerate with the pinned Node runtime and an isolated `playwright-core`
+install:
 
 ```sh
-npm install --prefix /tmp/hk-console-capture --no-audit --no-fund playwright-core@1.56.1
-NODE_PATH=/tmp/hk-console-capture/node_modules node docs/console-mocks/capture.cjs
+HK_CONSOLE_CAPTURE_DIR=/tmp/hk-console-pages go test -p 2 ./internal/ui -run TestConsoleRouteDocuments
+NODE_PATH=/tmp/hk-console-capture/node_modules node docs/console-capture.cjs
 ```
 
-Set `CHROME_PATH` when Chrome is installed elsewhere. The capture script opens
-`file:` URLs, checks both viewport widths for overflow and script failures,
-exercises preview interactions, and closes the Chrome process it launches.
-It starts no server.
-
-The brief's focused Go check is `go test -p 2 ./internal/ui`. Database-backed
-cases skip locally without `HANDOFFKEEP_TEST_DB_URL`; database integration and
-full suites belong in CI under this brief's host-safety policy. No database
-server is started. The existing `scripts/check` runs full suites, so it is left
-to CI rather than run locally for this static proposal.
+Set `CHROME_PATH` when Chrome is installed elsewhere. The harness serves the
+embedded shell document and the committed bundle against fictional same-origin
+responses; it starts no server and closes the Chrome process it launches. A
+`/ui/static/*` request is read from `internal/ui/static`, so fonts load from the
+same bundle as production.
