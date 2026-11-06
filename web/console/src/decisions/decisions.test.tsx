@@ -130,6 +130,8 @@ it("A5 refuses to post when preflight revision changes", async () => {
   expect(
     fetcher.mock.calls.filter((c) => c[1]?.method === "POST"),
   ).toHaveLength(0);
+  fireEvent.click(screen.getByRole("radio", { name: /Ship/ }));
+  expect(screen.queryByText(/revision이 바뀌었습니다/)).toBeNull();
 });
 it("A6 confirmation displays provenance and allows editing", async () => {
   await sheet();
@@ -198,7 +200,9 @@ it("A9 pending relay remains open with its deadline", async () => {
     }),
   );
   await start();
-  expect(screen.getByText(/중계 답 접수/)).toBeTruthy();
+  expect(screen.getByText("접수 · 확인 대기")).toBeTruthy();
+  const pending = screen.getByText(/중계 답 접수/);
+  expect(pending.textContent).not.toContain("/");
   expect(screen.getByText(/기한:/)).toBeTruthy();
   expect(screen.queryByText("답변됨")).toBeNull();
 });
@@ -462,4 +466,34 @@ it("A10 uncleaned requests explain the cleanup context", async () => {
   expect(
     screen.getByRole("link", { name: "이력 보기" }).getAttribute("href"),
   ).toBe("#decision-history");
+});
+it("A8 a refused answer restores its inputs without an unconfirmed retry", async () => {
+  fetcher.mockImplementation((_path, init) =>
+    Promise.resolve(
+      init?.method === "POST"
+        ? response({ error: "invalid_request" }, 400)
+        : response(detail),
+    ),
+  );
+  const view = render(<DecisionPage id="42" />);
+  await screen.findByRole("heading", { name: "Ship it?" });
+  fireEvent.click(screen.getByRole("radio", { name: /Ship/ }));
+  fireEvent.change(screen.getByLabelText("메모"), {
+    target: { value: "keep this" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "답변 확인" }));
+  fireEvent.click(screen.getByRole("button", { name: "답변 보내기" }));
+  expect((await screen.findByRole("alert")).textContent).toContain(
+    "invalid_request",
+  );
+  view.unmount();
+  render(<DecisionPage id="42" />);
+  await screen.findByRole("heading", { name: "Ship it?" });
+  expect(screen.queryByText("결과 미확인")).toBeNull();
+  expect(
+    screen.getByRole("radio", { name: /Ship/ }).getAttribute("aria-checked"),
+  ).toBe("true");
+  expect((screen.getByLabelText("메모") as HTMLTextAreaElement).value).toBe(
+    "keep this",
+  );
 });
