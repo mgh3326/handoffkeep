@@ -7,6 +7,7 @@
 export const STORAGE_KEYS = {
   theme: "hk-console:theme",
   recent: "hk-console:recent",
+  workProject: "hk-console:work-project",
   scope: "hk-console:scope",
 } as const;
 

@@ -616,6 +616,7 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("GET /v1/projects/{name}/frontier", s.projectFrontier)
 	m.HandleFunc("GET /v1/changes", s.changesList)
 	m.HandleFunc("POST /v1/changes/{id}/merge-flow", s.changeMergeFlow)
+	m.HandleFunc("POST /v1/changes/verifications", s.changeVerification)
 	m.HandleFunc("GET /v1/services", s.servicesList)
 	m.HandleFunc("PUT /v1/services/{name}", s.servicePut)
 	m.HandleFunc("GET /v1/services/{name}/pending", s.servicePending)

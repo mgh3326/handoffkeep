@@ -7,6 +7,7 @@ import { matchRoute } from "./routes";
 vi.mock("./DocView", () => ({ default: ({ docKey }: { docKey: string }) => <p>doc view for {docKey}</p> }));
 
 function visit(path: string) {
+  vi.stubGlobal("matchMedia", () => ({ matches: false, addEventListener: () => {}, removeEventListener: () => {} }));
   window.history.pushState(null, "", path);
   return render(<App />);
 }
@@ -51,9 +52,10 @@ describe("shell router", () => {
     expect(await screen.findByText("doc view for decision/2026-11-05/hk-console-rebuild")).toBeTruthy();
   });
 
-  it("/ui/tasks/{id} renders the task placeholder", () => {
+  it("/ui/tasks/{id} loads the task record", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("", { status: 404 })));
     visit("/ui/tasks/42");
-    expect(screen.getByRole("heading", { name: "Task #42" })).toBeTruthy();
+    expect(await screen.findByText("#42 없음")).toBeTruthy();
   });
 
   it.each(["/ui/fleet", "/ui/grades", "/ui/docs", "/ui/nope", "/ui/doc/", "/ui/tasks/0", "/ui/tasks/x"])(

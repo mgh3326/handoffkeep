@@ -105,6 +105,11 @@ package store
 //     with an event writer's upsert, and the event writers never take the
 //     merge-flow lock, so neither side waits on the other while it holds
 //     what the other needs.
+//   - RecordVerification (verifications.go) locks at most one changes row
+//     (the stub insert, ON CONFLICT DO NOTHING, for a PR hk has not seen) and then one verifications
+//     row (insert, or FOR UPDATE on a replay), and takes no task row. No
+//     other writer locks a verifications row, and the event writers that
+//     lock changes rows never wait on one, so it cannot close a cycle.
 //   - StartDeploy locks no task row. It inserts its deploys row (a new
 //     attempt_id key), takes KEY SHARE on the services row and on existing
 //     changes rows through the foreign keys (an event writer's upsert takes
