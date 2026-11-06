@@ -54,9 +54,12 @@ package store
 //     A documents insert or update that sets task_id takes KEY SHARE on that
 //     one task row through the foreign key (PutDocument). That is the level-4
 //     single-task case and needs no level-2 lock: no task writer locks a
-//     documents row while it holds a task row (IntakeTask and the dots
-//     writer insert new keys; applyDeployRecordTx runs under PutDocument's
-//     own level-2 lock, after the document row). decision_requests rows that name a
+//     documents row while it holds a task row (IntakeTask inserts new keys;
+//     applyDeployRecordTx runs under PutDocument's own level-2 lock, after the
+//     document row). The dots writer (RecordDotsResult) is the same case: it
+//     inserts or updates one documents row and one dots_results row, each
+//     taking KEY SHARE on the one linked task row; SetDotsAdoption locks one
+//     dots_results row and no task. decision_requests rows that name a
 //     task or a job are updated only under the level-2 lock, several at a
 //     time in id order (decision_records.go); the table has no foreign key.
 //

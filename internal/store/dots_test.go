@@ -89,7 +89,7 @@ func TestDotsLaneTextIsDrainable(t *testing.T) {
 
 func TestRecordDotsRejectsMalformedInput(t *testing.T) {
 	s := &Store{} // validation runs before any database access
-	issue := DotsIssue{Identifier: "ZZZ-1", Title: "t", URL: "u"}
+	issue := DotsIssue{Identifier: "ZZZ-1", Title: "t", URL: "u", IssueUUID: dotsTestIssueUUID}
 	good := DotsComment{ID: "0a1b2c3d-0000", CreatedAt: "2026-11-02T00:00:00.000Z", Body: "b"}
 	bad := []struct {
 		name  string
@@ -101,6 +101,7 @@ func TestRecordDotsRejectsMalformedInput(t *testing.T) {
 		{"identifier", "RESULT", DotsIssue{Identifier: "../x"}, good},
 		{"short id", "RESULT", issue, DotsComment{ID: "abc", CreatedAt: good.CreatedAt}},
 		{"created at", "RESULT", issue, DotsComment{ID: good.ID, CreatedAt: "soon"}},
+		{"issue uuid", "RESULT", DotsIssue{Identifier: "ZZZ-1", IssueUUID: "issue-1"}, good},
 	}
 	for _, tc := range bad {
 		if _, _, err := s.RecordDotsResult(t.Context(), tc.kind, tc.issue, tc.c); err == nil {
@@ -114,10 +115,12 @@ func TestRecordDotsRejectsMalformedInput(t *testing.T) {
 
 func dotsStore(t *testing.T) *Store { return schemaStore(t, "hkdots") }
 
+const dotsTestIssueUUID = "0a1b2c3d-0000-4000-8000-0000000000aa"
+
 func TestRecordDotsResultWritesOnce(t *testing.T) {
 	s := dotsStore(t)
 	ctx := t.Context()
-	issue := DotsIssue{Identifier: "ZZZ-7", Title: "Fake issue", URL: "https://linear.example/zzz/7"}
+	issue := DotsIssue{Identifier: "ZZZ-7", Title: "Fake issue", URL: "https://linear.example/zzz/7", IssueUUID: dotsTestIssueUUID}
 	c := DotsComment{ID: "0a1b2c3d-0000-4000-8000-000000000007", CreatedAt: "2026-11-02T01:02:03.000Z", Body: "[dots] RESULT done\nsummary"}
 	key, created, err := s.RecordDotsResult(ctx, "RESULT", issue, c)
 	if err != nil || !created || key != "dots/results/ZZZ-7/2026-11-02-0a1b2c3d" {
@@ -133,7 +136,7 @@ func TestRecordDotsResultWritesOnce(t *testing.T) {
 	// A redelivery carrying an edited comment and a new title changes nothing.
 	edited := c
 	edited.Body = "[dots] RESULT rewritten\nother"
-	if _, created, err = s.RecordDotsResult(ctx, "RESULT", DotsIssue{Identifier: "ZZZ-7", Title: "Renamed", URL: issue.URL}, edited); err != nil || created {
+	if _, created, err = s.RecordDotsResult(ctx, "RESULT", DotsIssue{Identifier: "ZZZ-7", Title: "Renamed", URL: issue.URL, IssueUUID: dotsTestIssueUUID}, edited); err != nil || created {
 		t.Fatalf("redelivery created=%t err=%v", created, err)
 	}
 	again, _, err := s.GetDocument(ctx, key)
@@ -156,7 +159,7 @@ func TestRecordDotsResultLeavesPollerDocument(t *testing.T) {
 	if _, _, err := s.PutDocument(ctx, Document{Key: key, Kind: "note", Session: DotsLane, Body: "poller wrote this", CreatedBy: "poller"}); err != nil {
 		t.Fatal(err)
 	}
-	_, created, err := s.RecordDotsResult(ctx, "QUESTION", DotsIssue{Identifier: "ZZZ-8", Title: "t", URL: "u"}, DotsComment{ID: "0a1b2c3d-0000-4000-8000-000000000008", CreatedAt: "2026-11-02T01:02:03.000Z", Body: "[dots] QUESTION hm"})
+	_, created, err := s.RecordDotsResult(ctx, "QUESTION", DotsIssue{Identifier: "ZZZ-8", Title: "t", URL: "u", IssueUUID: dotsTestIssueUUID}, DotsComment{ID: "0a1b2c3d-0000-4000-8000-000000000008", CreatedAt: "2026-11-02T01:02:03.000Z", Body: "[dots] QUESTION hm"})
 	if err != nil || created {
 		t.Fatalf("created=%t err=%v", created, err)
 	}
@@ -173,7 +176,7 @@ func TestRecordDotsResultLeavesPollerDocument(t *testing.T) {
 func TestRecordDotsResultKindsAndFollowupKinds(t *testing.T) {
 	s := dotsStore(t)
 	ctx := t.Context()
-	issue := DotsIssue{Identifier: "ZZZ-9", Title: "t", URL: "https://linear.example/zzz/9"}
+	issue := DotsIssue{Identifier: "ZZZ-9", Title: "t", URL: "https://linear.example/zzz/9", IssueUUID: dotsTestIssueUUID}
 	for i, kind := range []string{"BLOCKED", "QUESTION"} {
 		id := "0a1b2c3" + string(rune('0'+i)) + "-0000-4000-8000-000000000009"
 		if _, created, err := s.RecordDotsResult(ctx, kind, issue, DotsComment{ID: id, CreatedAt: "2026-11-02T01:02:03.000Z", Body: "[dots] " + kind}); err != nil || !created {
@@ -201,7 +204,7 @@ func TestRecordDotsResultKindsAndFollowupKinds(t *testing.T) {
 func TestDotsResultIsImport(t *testing.T) {
 	s := dotsStore(t)
 	ctx := t.Context()
-	issue := DotsIssue{Identifier: "ZZZ-8", Title: "Fake issue", URL: "https://linear.example/zzz/8"}
+	issue := DotsIssue{Identifier: "ZZZ-8", Title: "Fake issue", URL: "https://linear.example/zzz/8", IssueUUID: dotsTestIssueUUID}
 	c := DotsComment{ID: "0a1b2c3d-0000-4000-8000-000000000008", CreatedAt: "2026-11-02T01:02:03.000Z", Body: "[dots] RESULT done\nsummary"}
 	key, created, err := s.RecordDotsResult(ctx, "RESULT", issue, c)
 	if err != nil || !created || key != dotsResultKey(issue, c) {

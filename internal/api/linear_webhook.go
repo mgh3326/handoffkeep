@@ -36,10 +36,14 @@ type LinearIssue struct {
 	Identifier  string
 	Title       string
 	URL         string
+	Description string
 	Labels      []string
 	StateType   string
 	CompletedAt string
 	CanceledAt  string
+	// described is true when a payload issue carried Description, even as
+	// empty; a payload may leave the field out.
+	described bool
 }
 
 // LinearIssueFetcher reads an issue the webhook payload did not describe.
@@ -106,11 +110,12 @@ func (p linearWebhookPayload) movedState() bool {
 // linearPayloadIssue is data.issue. Linear's documented Comment example has no
 // labels, so Labels stays nil on the usual delivery and the issue is fetched.
 type linearPayloadIssue struct {
-	Identifier string               `json:"identifier"`
-	Title      string               `json:"title"`
-	URL        string               `json:"url"`
-	Labels     []linearPayloadLabel `json:"labels"`
-	State      struct {
+	Identifier  string               `json:"identifier"`
+	Title       string               `json:"title"`
+	URL         string               `json:"url"`
+	Description *string              `json:"description"`
+	Labels      []linearPayloadLabel `json:"labels"`
+	State       struct {
 		Type string `json:"type"`
 	} `json:"state"`
 	CompletedAt string `json:"completedAt"`
@@ -127,6 +132,9 @@ func issueFromPayload(raw json.RawMessage) (LinearIssue, bool) {
 		return LinearIssue{}, false
 	}
 	out := LinearIssue{Identifier: in.Identifier, Title: in.Title, URL: in.URL, Labels: []string{}, StateType: in.State.Type, CompletedAt: in.CompletedAt, CanceledAt: in.CanceledAt}
+	if in.Description != nil {
+		out.Description, out.described = *in.Description, true
+	}
 	for _, label := range in.Labels {
 		out.Labels = append(out.Labels, label.Name)
 	}
@@ -210,8 +218,8 @@ func (h LinearWebhook) handle(ctx context.Context, payload linearWebhookPayload,
 	if dots && !recorded {
 		return ignored, nil
 	}
-	issue, ok := issueFromPayload(data.Issue)
-	if !ok {
+	issue, fromPayload := issueFromPayload(data.Issue)
+	if !fromPayload {
 		var err error
 		if issue, err = h.Issues.LinearIssue(ctx, data.IssueID); err != nil {
 			return "", linearFetchError{err}
@@ -220,7 +228,20 @@ func (h LinearWebhook) handle(ctx context.Context, payload linearWebhookPayload,
 	if !slices.Contains(issue.Labels, store.DotsLabel) {
 		return ignored, nil
 	}
-	dotsIssue := store.DotsIssue{Identifier: issue.Identifier, Title: issue.Title, URL: issue.URL}
+	if !recorded && !commentAfterClose(issue, data.CreatedAt) {
+		return ignored, nil
+	}
+	// The hk-lane line that routes the notification is in the description,
+	// which Linear's Comment payload usually leaves out; a fetched issue
+	// always carries it.
+	if fromPayload && !issue.described {
+		fetched, err := h.Issues.LinearIssue(ctx, data.IssueID)
+		if err != nil {
+			return "", linearFetchError{err}
+		}
+		issue.Description = fetched.Description
+	}
+	dotsIssue := store.DotsIssue{Identifier: issue.Identifier, Title: issue.Title, URL: issue.URL, IssueUUID: data.IssueID, Description: issue.Description}
 	if recorded {
 		_, created, err := h.Store.RecordDotsResult(ctx, kind, dotsIssue, store.DotsComment{ID: data.ID, CreatedAt: data.CreatedAt, Body: data.Body})
 		if err != nil {
@@ -230,9 +251,6 @@ func (h LinearWebhook) handle(ctx context.Context, payload linearWebhookPayload,
 			return "recorded", nil
 		}
 		return "duplicate", nil
-	}
-	if !commentAfterClose(issue, data.CreatedAt) {
-		return ignored, nil
 	}
 	created, err := h.Store.RecordDotsFollowup(ctx, dotsIssue, data.ID)
 	if err != nil {
@@ -293,15 +311,16 @@ type LinearAPI struct {
 	RateGate *LinearRateGate
 }
 
-const linearIssueQuery = `query($id:String!){issue(id:$id){identifier title url completedAt canceledAt state{type} labels(first:100,includeArchived:true){nodes{name}}}}`
+const linearIssueQuery = `query($id:String!){issue(id:$id){identifier title url description completedAt canceledAt state{type} labels(first:100,includeArchived:true){nodes{name}}}}`
 
 func (a LinearAPI) LinearIssue(ctx context.Context, issueID string) (LinearIssue, error) {
 	var out struct {
 		Issue *struct {
-			Identifier string `json:"identifier"`
-			Title      string `json:"title"`
-			URL        string `json:"url"`
-			State      struct {
+			Identifier  string `json:"identifier"`
+			Title       string `json:"title"`
+			URL         string `json:"url"`
+			Description string `json:"description"`
+			State       struct {
 				Type string `json:"type"`
 			} `json:"state"`
 			CompletedAt string `json:"completedAt"`
@@ -320,7 +339,7 @@ func (a LinearAPI) LinearIssue(ctx context.Context, issueID string) (LinearIssue
 		return LinearIssue{}, errors.New("linear api returned no issue")
 	}
 	issue := out.Issue
-	result := LinearIssue{Identifier: issue.Identifier, Title: issue.Title, URL: issue.URL, Labels: []string{}, StateType: issue.State.Type, CompletedAt: issue.CompletedAt, CanceledAt: issue.CanceledAt}
+	result := LinearIssue{Identifier: issue.Identifier, Title: issue.Title, URL: issue.URL, Description: issue.Description, Labels: []string{}, StateType: issue.State.Type, CompletedAt: issue.CompletedAt, CanceledAt: issue.CanceledAt}
 	for _, label := range issue.Labels.Nodes {
 		result.Labels = append(result.Labels, label.Name)
 	}
