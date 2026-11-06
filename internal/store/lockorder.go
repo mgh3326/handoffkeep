@@ -68,6 +68,7 @@ package store
 //     after all other work of its transaction.
 //
 // Exceptions, none of which can close a cycle:
+//   - Standing order writes lock one active standing_orders row and no other existing row.
 //
 //   - PruneSync locks sync_state first, but takes no lock from levels 2-5.
 //   - IntakeTask and EmitTicketSet insert each body as the document
