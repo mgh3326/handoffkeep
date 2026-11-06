@@ -1,6 +1,6 @@
 package store
 
-// Version 50 makes hk the store for a pull request's live state (hk 3176,
+// Version 51 makes hk the store for a pull request's live state (hk 3176,
 // hk 3198; hk:doc research/2026-11-06/hk3176-pr-state-contract §0-§3 and §6).
 // mergewake writes what its webhooks and GraphQL reads carry; readers ask hk.
 //
@@ -22,7 +22,7 @@ package store
 // EXCLUSIVE on changes (and on reviews, for change_findings) through their
 // foreign keys until the transaction commits, so change writers wait for it;
 // the new tables are empty.
-var changeStateV50 = []string{
+var changeStateV51 = []string{
 	`ALTER TABLE changes
 		ADD COLUMN IF NOT EXISTS draft BOOLEAN,
 		ADD COLUMN IF NOT EXISTS base_ref TEXT,
@@ -102,5 +102,5 @@ var changeStateV50 = []string{
 		PRIMARY KEY(change_id, reviewed_head, round, pass, lens, ordinal)
 	)`,
 	`CREATE INDEX IF NOT EXISTS change_findings_review ON change_findings(review_id)`,
-	`INSERT INTO schema_version(version) VALUES (50)`,
+	`INSERT INTO schema_version(version) VALUES (51)`,
 }
