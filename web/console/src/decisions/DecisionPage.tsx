@@ -147,8 +147,7 @@ export function DecisionPage({ id }: { id: string }) {
       const accepted =
         (response.status === 200 && response.result === "answered") ||
         (response.status === 202 && response.result === "pending_confirmation");
-      if (knownConflict || (response.status === 200 && accepted))
-        await fetchDetail();
+      if (knownConflict || accepted) await fetchDetail();
       setResult(response.result);
       setRawResult(response.raw);
       if (accepted || knownConflict) {

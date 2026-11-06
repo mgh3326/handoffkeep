@@ -306,16 +306,44 @@ it("A5 refetches after a stale revision result", async () => {
   expect(screen.queryByText("답변됨")).toBeNull();
 });
 it("A9 a 202 response remains pending", async () => {
-  fetcher.mockImplementation((_path, init) =>
-    Promise.resolve(
-      init?.method === "POST"
-        ? response({ result: "pending_confirmation" }, 202)
-        : response(detail),
-    ),
-  );
+  let reads = 0;
+  fetcher.mockImplementation((_path, init) => {
+    if (init?.method === "POST")
+      return Promise.resolve(response({ result: "pending_confirmation" }, 202));
+    reads++;
+    return Promise.resolve(
+      response(
+        reads < 3
+          ? detail
+          : {
+              ...detail,
+              attempts: [
+                {
+                  id: 1,
+                  channel: "session",
+                  provenance: "relay",
+                  actor: "reviewer",
+                  result: "pending_confirmation",
+                  revision_request_id: "dr-7-2",
+                  question_revision: 2,
+                  received_at: "2026-11-06T08:00:00Z",
+                },
+              ],
+            },
+      ),
+    );
+  });
   await sheet();
   fireEvent.click(screen.getByRole("button", { name: "답변 보내기" }));
   expect(await screen.findByText("접수 · 확인 대기")).toBeTruthy();
+  expect(
+    await screen.findByText(/중계 답 접수.*reviewer.*session/),
+  ).toBeTruthy();
+  expect(screen.getByText(/기한:/)).toBeTruthy();
+  expect(
+    (screen.getByRole("button", { name: "답변 확인" }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(false);
   expect(screen.queryByText("답변됨")).toBeNull();
 });
 it("A16 Escape confirms a dirty memo and returns focus", async () => {
