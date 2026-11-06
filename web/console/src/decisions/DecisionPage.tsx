@@ -138,8 +138,6 @@ export function DecisionPage({ id }: { id: string }) {
     setScreen("sending");
     try {
       const response = await postResolve(payload);
-      setResult(response.result);
-      setRawResult(response.raw);
       const knownConflict =
         response.status === 409 &&
         ["conflict", "stale_revision", "expired", "superseded"].includes(
@@ -150,6 +148,8 @@ export function DecisionPage({ id }: { id: string }) {
         (response.status === 202 && response.result === "pending_confirmation");
       if (knownConflict || (response.status === 200 && accepted))
         await fetchDetail();
+      setResult(response.result);
+      setRawResult(response.raw);
       if (accepted || knownConflict) {
         setOption("");
         setText("");
@@ -249,7 +249,8 @@ export function DecisionPage({ id }: { id: string }) {
     detail.answerable && latestAttempt?.result === "pending_confirmation"
       ? latestAttempt
       : null;
-  const reason = detail.disabled_reason === "source_elsewhere"
+  const reason =
+    detail.disabled_reason === "source_elsewhere"
       ? "이 원천은 기존 페이지에서 답합니다"
       : detail.disabled_reason === "superseded"
         ? "대체된 요청입니다"

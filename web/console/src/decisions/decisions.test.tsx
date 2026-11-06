@@ -383,3 +383,25 @@ it("A16 composing keystrokes do not select options", async () => {
     screen.getByRole("radio", { name: /Wait/ }).getAttribute("aria-checked"),
   ).toBe("false");
 });
+it("A5 a conflict result waits for the detail refetch", async () => {
+  let getCount = 0;
+  let finish: (value: Response) => void = () => {};
+  fetcher.mockImplementation((_path, init) => {
+    if (init?.method === "POST")
+      return Promise.resolve(response({ result: "stale_revision" }, 409));
+    getCount++;
+    return getCount === 3
+      ? new Promise<Response>((resolve) => {
+          finish = resolve;
+        })
+      : Promise.resolve(response(detail));
+  });
+  await sheet();
+  fireEvent.click(screen.getByRole("button", { name: "답변 보내기" }));
+  await waitFor(() => expect(getCount).toBe(3));
+  expect(screen.queryByText(/이전 revision · 다시 확인 필요/)).toBeNull();
+  finish(response(detail));
+  expect(
+    await screen.findByText(/이전 revision · 다시 확인 필요/),
+  ).toBeTruthy();
+});
