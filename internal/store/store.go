@@ -4142,7 +4142,7 @@ func (s *Store) searchTasks(ctx context.Context, q, lane string, limit int) ([]S
 		exactID = id
 	}
 	refsExpr := `jsonb_strip_nulls(jsonb_build_object('id',t.id::text,'state',t.state,'lane',t.lane,'priority',t.priority::text,'pr',t.refs->>'pr','head_sha',t.refs->>'head_sha','report_path',t.refs->>'report_path'))`
-	titleMatch := `(to_tsvector('simple',t.title) @@ plainto_tsquery('simple',$2) OR t.title ILIKE '%'||$4||'%' ESCAPE '\')`
+	titleMatch := `(to_tsvector('simple',t.title) @@ plainto_tsquery('simple',$2) OR t.title ILIKE '%'||$4||'%' ESCAPE '\' OR EXISTS (SELECT 1 FROM translations tr WHERE tr.entity='task' AND tr.entity_id=t.id::text AND tr.lang='ko' AND tr.text ILIKE '%'||$4||'%' ESCAPE '\'))`
 	out := []SearchResult{}
 	if exactID >= 0 {
 		row := s.pool.QueryRow(ctx, `SELECT t.id::text,t.lane,t.kind,t.title,`+refsExpr+`,t.created_at FROM tasks t WHERE t.id=$2 AND ($1='' OR t.lane=$1)`, lane, exactID)
