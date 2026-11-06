@@ -84,10 +84,10 @@ function fetcher(data: DeployPendingResponse) {
 describe("DeployPanel", () => {
   it("renders the current version line with short ref, deployed_at and result", async () => {
     render(<DeploysPage fetchStatus={fetcher(fixture())} pollMs={600_000} />);
-    await waitFor(() => expect(screen.getByText("92ee9e2")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("92ee9e2d0ddc")).toBeTruthy());
     expect(screen.getAllByText("현재 판").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("success").length).toBeGreaterThan(0);
-    expect(screen.getByText("22/09, 22:40")).toBeTruthy();
+    expect(screen.getAllByText("성공").length).toBeGreaterThan(0);
+    expect(screen.getByText("14시간 전").getAttribute("title")).toBe("22/09, 22:40 KST");
   });
 
   it("renders a record-less service as 기록 없음 — never as 최신 (mutant: no fake current)", async () => {
@@ -115,7 +115,7 @@ describe("DeployPanel", () => {
 
   it("a null deployed_at shows the boundary note and no list (mutant: no fabricated boundary)", async () => {
     render(<DeploysPage fetchStatus={fetcher(fixture())} pollMs={600_000} />);
-    await waitFor(() => expect(screen.getByText(/배포 시각\(deployed_at\) 미기록/)).toBeTruthy());
+    await waitFor(() => expect(screen.getByText(/배포 시각이 기록되지 않아 마지막 배포 이후 머지 목록을 계산할 수 없습니다/)).toBeTruthy());
   });
 
   it("shows a failed latest attempt next to the last success, with the serving caveat", async () => {
@@ -134,14 +134,14 @@ describe("DeployPanel", () => {
     hk.recent = [hk.latest];
     render(<DeploysPage fetchStatus={fetcher(data)} pollMs={600_000} />);
     await waitFor(() => expect(screen.getAllByText("최근 시도").length).toBeGreaterThan(0));
-    expect(screen.getByText("failed")).toBeTruthy();
-    expect(screen.getByText("step 7")).toBeTruthy();
+    expect(screen.getAllByText("실패").length).toBeGreaterThan(0);
+    expect(screen.getByText("7단계")).toBeTruthy();
     expect(screen.getByText(/서빙 판이 바뀌었을 수 있음/)).toBeTruthy();
     // the success line is still there — the failed attempt never replaces it
-    expect(screen.getByText("92ee9e2")).toBeTruthy();
+    expect(screen.getByText("92ee9e2d0ddc")).toBeTruthy();
   });
 
-  it("renders rolled_back verbatim", async () => {
+  it("renders rolled_back as 롤백", async () => {
     const data = fixture();
     data.services[0].latest = {
       record_key: "deploy/handoffkeep/20260923T050000Z",
@@ -154,7 +154,7 @@ describe("DeployPanel", () => {
     };
     data.services[0].recent = [data.services[0].latest];
     render(<DeploysPage fetchStatus={fetcher(data)} pollMs={600_000} />);
-    await waitFor(() => expect(screen.getByText("rolled_back")).toBeTruthy());
+    await waitFor(() => expect(screen.getAllByText("롤백").length).toBeGreaterThan(0));
   });
 
   it("a service with records but no success says so — not '기록 없음'", async () => {
@@ -288,6 +288,7 @@ describe("DeployPanel", () => {
     const data = fixture();
     const hk = data.services[0];
     hk.docs_capped = true;
+    hk.recent = [hk.current!];
     hk.latest = {
       record_key: "deploy/handoffkeep/20260923T050000Z",
       result: "failed",
@@ -372,7 +373,7 @@ describe("DeployPanel", () => {
 
 describe("deploy helpers", () => {
   it("shortens only real SHA/digest refs and never invents one", () => {
-    expect(shortDeployedRef(SHA)).toBe("92ee9e2");
+    expect(shortDeployedRef(SHA)).toBe("92ee9e2d0ddc");
     expect(shortDeployedRef(DIGEST)).toBe("sha256:e0580273a4c3…");
     expect(shortDeployedRef("pw-e401923")).toBe("pw-e401923");
     expect(shortDeployedRef(null)).toBeNull();

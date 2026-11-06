@@ -155,19 +155,22 @@ export async function fetchDeployPending(): Promise<DeployPendingResponse> {
   return body;
 }
 
-/** Short form for a deployed ref: 40-hex SHAs and sha256 digests truncate;
- * version strings (pw-e401923) and anything else render verbatim — a ref is
- * never invented or padded. */
+/** Characters kept of a SHA or digest. */
+export const REF_SHORT_LEN = 12;
+
+/** Short form for a deployed ref: 40-hex SHAs and sha256 digests keep their
+ * first 12 characters; version strings (pw-e401923) and anything else render
+ * verbatim — a ref is never invented or padded. */
 export function shortDeployedRef(ref: string | null): string | null {
   if (ref === null) {
     return null;
   }
   if (/^[0-9a-f]{40}$/i.test(ref)) {
-    return ref.slice(0, 7);
+    return ref.slice(0, REF_SHORT_LEN);
   }
   const digest = /^sha256:([0-9a-f]{64})$/i.exec(ref);
   if (digest) {
-    return `sha256:${digest[1].slice(0, 12)}…`;
+    return `sha256:${digest[1].slice(0, REF_SHORT_LEN)}…`;
   }
   return ref;
 }

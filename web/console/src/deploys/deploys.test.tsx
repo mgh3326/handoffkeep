@@ -45,7 +45,7 @@ describe("DeploysPage (#620)", () => {
     expect(screen.getByRole("heading", { level: 1 }).textContent).toContain("배포");
     await waitFor(() => expect(screen.getByLabelText("배포 상태")).toBeTruthy());
     expect(screen.getByText("handoffkeep")).toBeTruthy();
-    expect(screen.getByText("92ee9e2")).toBeTruthy();
+    expect(screen.getByText("92ee9e2d0ddc")).toBeTruthy();
     vi.unstubAllGlobals();
   });
 
