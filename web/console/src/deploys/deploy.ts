@@ -43,6 +43,7 @@ export type DeployServiceView = {
   invalid?: DeployInvalidRecord[];
   docs_capped?: boolean;
   current: DeployRecordView | null;
+  recent: DeployRecordView[];
   latest?: DeployRecordView;
   merged_boundary: "deployed_at" | "unrecorded" | "no_current";
   merged_since: DeployMergedTask[];
@@ -121,6 +122,7 @@ const isServiceView = (v: unknown): v is DeployServiceView => {
     MERGED_BOUNDARIES.has(s.merged_boundary) &&
     Array.isArray(s.merged_since) &&
     s.merged_since.every(isMergedTask) &&
+    Array.isArray(s.recent) && s.recent.every(isRecordView) &&
     (s.current === null || isRecordView(s.current)) &&
     (s.latest === undefined || isRecordView(s.latest))
   );
@@ -201,9 +203,7 @@ export function deployStamp(iso: string | null): string | null {
   if (!Number.isFinite(t)) {
     return null;
   }
-  const d = new Date(t);
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  return new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Seoul", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(t);
 }
 
 /** PR number from a github pull URL for display; the href stays the full URL. */

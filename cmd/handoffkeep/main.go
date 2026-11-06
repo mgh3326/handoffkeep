@@ -53,7 +53,7 @@ func main() {
 }
 func run(args []string, out, errout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: handoffkeep serve|sync|ledger|since|mcp|ctx|memory|doc|attach|r2usage|tasks|tickets|decisions|standing|fleet-metrics|bench|version")
+		return errors.New("usage: handoffkeep serve|sync|ledger|since|status|mcp|ctx|memory|doc|attach|r2usage|tasks|tickets|decisions|standing|fleet-metrics|bench|version")
 	}
 	switch args[0] {
 	case "wrk":
@@ -64,6 +64,8 @@ func run(args []string, out, errout io.Writer) error {
 		return ledgerCmd(args[1:], out)
 	case "since":
 		return sinceCmd(args[1:], out)
+	case "status":
+		return statusCmd(args[1:], out)
 	case "serve":
 		return serve(args[1:], errout)
 	case "mcp":
@@ -95,7 +97,7 @@ func run(args []string, out, errout io.Writer) error {
 	case "version", "--version":
 		return versionCmd(args[1:], out)
 	default:
-		return errors.New("usage: handoffkeep serve|sync|ledger|since|mcp|ctx|memory|doc|attach|r2usage|tasks|tickets|decisions|standing|fleet-metrics|bench|version")
+		return errors.New("usage: handoffkeep serve|sync|ledger|since|status|mcp|ctx|memory|doc|attach|r2usage|tasks|tickets|decisions|standing|fleet-metrics|bench|version")
 	}
 }
 
@@ -733,7 +735,10 @@ func decisionsCmd(args []string, out io.Writer) error {
 		}
 	}
 	if len(args) == 0 || args[0] != "resolve" {
-		return errors.New("usage: decisions resolve <task|escalation|lane> <id> --by <lane> --answer <answer> [--note <note>] [--no-inject]\n       " + decisionAskUsage + "\n       " + decisionListUsage + "\n       " + decisionSnoozeUsage + "\n       " + decisionBackfillUsage)
+		return errors.New("usage: decisions resolve <task|escalation|lane> <id> --by <lane> --answer <answer> [--note <note>] [--no-inject]\n       " + decisionResolveRequestUsage + "\n       " + decisionAskUsage + "\n       " + decisionListUsage + "\n       " + decisionSnoozeUsage + "\n       " + decisionBackfillUsage)
+	}
+	if len(args) > 1 && args[1] == "request" {
+		return decisionResolveRequestCmd(args[2:], out)
 	}
 	fs := flag.NewFlagSet("decisions resolve", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
