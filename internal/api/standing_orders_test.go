@@ -40,23 +40,38 @@ func TestStandingOrdersAPI(t *testing.T) {
 	in.Scope = "race"
 	in.TopicKey = "new"
 	var wg sync.WaitGroup
-	statuses := make(chan int, 2)
+	type result struct {
+		status int
+		body   map[string]any
+	}
+	results := make(chan result, 2)
+	ready := make(chan struct{}, 2)
+	start := make(chan struct{})
 	for i := 0; i < 2; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			status, _ := changesCall(t, h, http.MethodPost, "/v1/standing-orders", "op-token", in)
-			statuses <- status
+			ready <- struct{}{}
+			<-start
+			status, body := changesCall(t, h, http.MethodPost, "/v1/standing-orders", "op-token", in)
+			results <- result{status, body}
 		}()
 	}
+	<-ready
+	<-ready
+	close(start)
 	wg.Wait()
-	close(statuses)
+	close(results)
 	created := 0
-	for status := range statuses {
-		if status == 201 {
+	for result := range results {
+		if result.status == 201 {
 			created++
-		} else if status != 200 && status != 409 {
-			t.Fatalf("race status %d", status)
+		} else if result.status == 200 && result.body["duplicate"] == true {
+			continue
+		} else if result.status == 409 && result.body["error"] == "standing_conflict" {
+			continue
+		} else {
+			t.Fatalf("race response %d %v", result.status, result.body)
 		}
 	}
 	if created != 1 {
