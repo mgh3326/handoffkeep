@@ -152,7 +152,7 @@ it("moves selection down and up without opening a record until Enter", async () 
   history.replaceState(null, "", "/ui/work?project=a&view=active");
   render(<WorkPage />);
   const firstRow = (await screen.findByText("Task two")).closest("a")!;
-  fireEvent.keyDown(firstRow, { key: "ArrowDown" });
+  fireEvent.keyDown(firstRow, { key: "ArrowUp" });
   expect(document.activeElement?.id).toBe("work-row-102");
   fireEvent.keyDown(document.activeElement!, { key: "ArrowDown" });
   expect(document.activeElement?.id).toBe("work-row-101");
@@ -181,7 +181,7 @@ it("preserves modified arrows and narrow page scrolling while supporting focused
   expect(navigate.defaultPrevented).toBe(true);
 });
 
-it("keeps the open record selected while cursor moves and resets cursor on history navigation", async () => {
+it("keeps the open record selected while focus moves and follows focus after history navigation", async () => {
   wide = true;
   const rows = [task, { ...task, id: 102, title: "Task two" }];
   vi.stubGlobal("fetch", vi.fn(async (path: string) => path.includes("projects") ? response({ projects: ["a"] }) : path.includes("/101") ? response(detail) : response({ tasks: rows, states: [], generated_at: "2026-01-01T02:00:00Z", truncated: false })));
@@ -194,7 +194,7 @@ it("keeps the open record selected while cursor moves and resets cursor on histo
   expect(container.querySelector("#work-row-102")?.getAttribute("aria-current")).toBeNull();
   act(() => { history.replaceState(null, "", "/ui/work?project=a&view=active"); window.dispatchEvent(new PopStateEvent("popstate")); });
   fireEvent.keyDown(document.activeElement!, { key: "ArrowDown" });
-  expect(document.activeElement?.id).toBe("work-row-102");
+  expect(document.activeElement?.id).toBe("work-row-101");
 });
 
 
@@ -224,4 +224,20 @@ it("sorts urgent priorities first, unset last, then by update and id", async () 
   const { container } = render(<WorkPage />);
   await screen.findByText("P1 tie");
   expect([...container.querySelectorAll(".work-rows a")].map(a => a.id)).toEqual(["work-row-5", "work-row-4", "work-row-3", "work-row-6", "work-row-2", "work-row-1"]);
+});
+
+
+it("moves relative to the row reached by Tab even after another row was selected", async () => {
+  wide = true;
+  const rows = [task, { ...task, id: 102, title: "Task two" }, { ...task, id: 103, title: "Task three" }];
+  vi.stubGlobal("fetch", vi.fn(async (path: string) => path.includes("projects") ? response({ projects: ["a"] }) : response({ tasks: rows, states: [], generated_at: "2026-01-01T02:00:00Z", truncated: false })));
+  history.replaceState(null, "", "/ui/work?project=a&view=active&task=103");
+  render(<WorkPage />);
+  const middle = (await screen.findByText("Task two")).closest("a")!;
+  middle.focus();
+  fireEvent.keyDown(middle, { key: "ArrowDown" });
+  expect(document.activeElement?.id).toBe("work-row-101");
+  middle.focus();
+  fireEvent.keyDown(middle, { key: "ArrowUp" });
+  expect(document.activeElement?.id).toBe("work-row-103");
 });

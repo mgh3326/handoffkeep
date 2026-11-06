@@ -16,11 +16,10 @@ import "./work.css";
 const labels: Record<View, string> = { "needs-me": "내 차례", active: "진행 중", backlog: "대기", shipped: "완료", all: "전체" };
 export function WorkPage() {
   const [search, setSearch] = useState(() => location.search);
-  const [cursor, setCursor] = useState<string | null>(null);
   const [projects, setProjects] = useState<string[]>([]);
   const [projectsFailed, setProjectsFailed] = useState(false);
   const [wide, setWide] = useState(() => matchMedia("(min-width: 1024px)").matches);
-  useEffect(() => { const pop = () => { setCursor(null); setSearch(location.search); }; window.addEventListener("popstate", pop); return () => window.removeEventListener("popstate", pop); }, []);
+  useEffect(() => { const pop = () => setSearch(location.search); window.addEventListener("popstate", pop); return () => window.removeEventListener("popstate", pop); }, []);
   useEffect(() => { const mq = matchMedia("(min-width: 1024px)"); const update = () => setWide(mq.matches); mq.addEventListener("change", update); return () => mq.removeEventListener("change", update); }, []);
   useEffect(() => { void fetchProjects().then(setProjects).catch(() => setProjectsFailed(true)); }, []);
   const params = useMemo(() => new URLSearchParams(search), [search]);
@@ -28,7 +27,7 @@ export function WorkPage() {
   const view: View = views.find(v => v === params.get("view")) || "needs-me";
   const query = params.get("q") || "", lane = params.get("lane") || "", kind = params.get("kind") || "", state = params.get("state") || "", priority = params.get("p") || "";
   const selected = params.get("task");
-  const update = (key: string, value: string) => { if (key === "task") setCursor(value || null); const next = new URLSearchParams(search); if (value) next.set(key, value); else next.delete(key); history.pushState(null, "", `${location.pathname}?${next}`); setSearch(location.search); };
+  const update = (key: string, value: string) => { const next = new URLSearchParams(search); if (value) next.set(key, value); else next.delete(key); history.pushState(null, "", `${location.pathname}?${next}`); setSearch(location.search); };
   useEffect(() => {
     if (!project) return;
     writeStored(STORAGE_KEYS.workProject, project);
@@ -45,9 +44,9 @@ export function WorkPage() {
     const onKey = (e: KeyboardEvent) => {
       if (e.isComposing || e.metaKey || e.ctrlKey || e.altKey || e.shiftKey || isTypingTarget(e.target) || !(e.target instanceof Element && e.target.closest(".work-rows a")) || !["ArrowUp", "ArrowDown"].includes(e.key) || !visible.length) return;
       e.preventDefault();
-      const current = visible.findIndex(t => String(t.id) === (cursor || selected));
+      const row = e.target.closest(".work-rows a");
+      const current = visible.findIndex(t => document.getElementById(`work-row-${t.id}`) === row);
       const index = current < 0 ? 0 : Math.max(0, Math.min(visible.length - 1, current + (e.key === "ArrowDown" ? 1 : -1)));
-      setCursor(String(visible[index].id));
       document.getElementById(`work-row-${visible[index].id}`)?.focus();
     };
     window.addEventListener("keydown", onKey);
