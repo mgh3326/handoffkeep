@@ -18,6 +18,7 @@ const labels: Record<View, string> = { "needs-me": "내 차례", active: "진행
 export function WorkPage() {
   const showOriginal = useShowOriginal();
   const [originalItems, setOriginalItems] = useState<Record<number, boolean>>({});
+  useEffect(() => setOriginalItems({}), [showOriginal]);
   const [search, setSearch] = useState(() => location.search);
   const [projects, setProjects] = useState<string[]>([]);
   const [projectsFailed, setProjectsFailed] = useState(false);

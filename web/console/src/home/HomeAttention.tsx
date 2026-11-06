@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useShowOriginal } from "../shared/translation";
 import { Icon, IconFrame } from "../shared/Icon";
 import { StateIcon } from "../shared/StateIcon";
@@ -51,6 +51,7 @@ type Item =
 function Row({ item, now, seen, markSeen }: { item: Item; now: string; seen: boolean; markSeen: (key: string) => void }) {
   const globalOriginal = useShowOriginal();
   const [override, setOverride] = useState<boolean | null>(null);
+  useEffect(() => setOverride(null), [globalOriginal]);
   const showOriginal = override ?? globalOriginal;
   let stale = false, hasTranslation = false;
   let href: string, id: number, title: string, summary: string;

@@ -56,6 +56,7 @@ const plainClick = (e: React.MouseEvent) =>
 export function DecisionList() {
   const showOriginal = useShowOriginal();
   const [originalItems, setOriginalItems] = useState<Record<number, boolean>>({});
+  useEffect(() => setOriginalItems({}), [showOriginal]);
   const [tab, setTab] = useState<Tab>(initialTab);
   const [selected, setSelected] = useState<string | null>(() =>
     readStored("hk-decisions:selected", sessionStorage),

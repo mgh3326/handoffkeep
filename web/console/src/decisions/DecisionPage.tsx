@@ -58,6 +58,7 @@ function deadline(iso: string) {
 export function DecisionPage({ id }: { id: string }) {
   const globalOriginal = useShowOriginal();
   const [optionsOriginal, setOptionsOriginal] = useState<boolean | null>(null);
+  useEffect(() => setOptionsOriginal(null), [globalOriginal]);
   const [detail, setDetail] = useState<Detail | null>(null);
   const [screen, setScreen] = useState<ScreenState>("loading");
   const [option, setOption] = useState("");

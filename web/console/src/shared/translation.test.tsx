@@ -12,6 +12,9 @@ it("shows fresh Korean first and toggles each item and the global preference", (
   fireEvent.click(screen.getByRole("button", { name: "원문 전체 보기" }));
   expect(screen.getByText("Second")).toBeTruthy();
   expect(localStorage.getItem(STORAGE_KEYS.showOriginal)).toBe("true");
+  fireEvent.click(screen.getByRole("button", { name: "원문 전체 보기" }));
+  expect(screen.getByText("번역")).toBeTruthy();
+  expect(screen.getByText("두 번째")).toBeTruthy();
 });
 it("marks stale translations and keeps the original visible", () => {
   render(<TranslatedText original="Updated" korean="오래된 번역" stale />);
