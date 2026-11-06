@@ -20,6 +20,9 @@ var (
 	reviewTokenRE = regexp.MustCompile(`^[a-z0-9_.-]{1,64}$`)
 	// reviewProfileRE is a launch profile such as sonnet@high.
 	reviewProfileRE = regexp.MustCompile(`^[a-z0-9_.@-]{1,64}$`)
+	// patchDigestRE is the digest half of mergewake's patch receipt
+	// "<patch-id>:<digest>": lower-case hex.
+	patchDigestRE = regexp.MustCompile(`^[0-9a-f]{16,128}$`)
 )
 
 const (
@@ -55,6 +58,41 @@ type TaskEventReview struct {
 	Low            *int       `json:"low,omitempty"`
 	StartedAt      *time.Time `json:"started_at,omitempty"`
 	FinishedAt     *time.Time `json:"finished_at,omitempty"`
+	ReviewHistory
+}
+
+// ReviewHistory is the optional review-history fields of a review pass
+// (hk 3208). A nil field is unknown, never false or zero. The same fields ride
+// on a findings write's review key (ChangeFindingsWrite).
+type ReviewHistory struct {
+	// Reviewer is the reviewer profile or login.
+	Reviewer *string `json:"reviewer,omitempty"`
+	// SameFamily says the pass's reviewer family equals the author's.
+	SameFamily *bool `json:"same_family,omitempty"`
+	// Delta marks a fix-delta pass, one that reviewed only the fix delta.
+	Delta *bool `json:"delta,omitempty"`
+	// Quiet marks a quiet pass.
+	Quiet *bool `json:"quiet,omitempty"`
+	// OutsideDiffBlocking counts blocking findings outside the diff.
+	OutsideDiffBlocking *int `json:"outside_diff_blocking,omitempty"`
+	// PatchDigest is the digest half of the patch receipt; PatchID stays the
+	// patch-id half.
+	PatchDigest *string `json:"patch_digest,omitempty"`
+}
+
+// check validates the fields that are set. It returns a plain message so the
+// event path and the findings path can each wrap it in their own error.
+func (h ReviewHistory) check() error {
+	if h.Reviewer != nil && (*h.Reviewer == "" || !validReviewText(*h.Reviewer)) {
+		return fmt.Errorf("reviewer must be non-empty printable text of at most %d bytes", maxReviewText)
+	}
+	if h.PatchDigest != nil && !patchDigestRE.MatchString(*h.PatchDigest) {
+		return errors.New("patch_digest must be 16 to 128 lower-case hex digits")
+	}
+	if h.OutsideDiffBlocking != nil && (*h.OutsideDiffBlocking < 0 || *h.OutsideDiffBlocking > maxReviewCount) {
+		return fmt.Errorf("outside_diff_blocking must be 0 to %d", int(maxReviewCount))
+	}
+	return nil
 }
 
 // checkEventChangeFields validates the work-record fields of an event whose
@@ -119,7 +157,7 @@ func checkEventReview(rv TaskEventReview) error {
 	if rv.StartedAt != nil && rv.FinishedAt != nil && rv.FinishedAt.Before(*rv.StartedAt) {
 		return errors.New("finished_at is before started_at")
 	}
-	return nil
+	return rv.ReviewHistory.check()
 }
 
 func validReviewText(v string) bool {

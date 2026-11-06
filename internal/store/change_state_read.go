@@ -108,6 +108,9 @@ type ChangeCheck struct {
 	CompletedAt *time.Time `json:"completed_at,omitempty"`
 	ObservedAt  time.Time  `json:"observed_at"`
 	Source      string     `json:"source"`
+	// DeliveryID is the delivery of the write that last inserted or changed
+	// the row; unset when that write sent none.
+	DeliveryID *string `json:"delivery_id,omitempty"`
 }
 
 // ChangeThread is one stored review thread.
@@ -238,14 +241,14 @@ FROM changes WHERE repo=$1 AND pr_number=$2`, ref.Repo, ref.PR).Scan(&c.ID, &c.R
 		v.Gate = &g
 	}
 	if opt.Include.Checks {
-		rows, err := tx.Query(ctx, `SELECT head_sha,name,state,conclusion,url,required,started_at,completed_at,observed_at,source FROM change_checks
+		rows, err := tx.Query(ctx, `SELECT head_sha,name,state,conclusion,url,required,started_at,completed_at,observed_at,source,delivery_id FROM change_checks
 WHERE change_id=$1 AND NOT gone AND ($2 OR head_sha=$3) ORDER BY (head_sha=$3) DESC, head_sha, name`, c.ID, opt.AllHeads, head)
 		if err != nil {
 			return ChangeView{}, false, err
 		}
 		checks, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (ChangeCheck, error) {
 			var k ChangeCheck
-			err := r.Scan(&k.HeadSHA, &k.Name, &k.State, &k.Conclusion, &k.URL, &k.Required, &k.StartedAt, &k.CompletedAt, &k.ObservedAt, &k.Source)
+			err := r.Scan(&k.HeadSHA, &k.Name, &k.State, &k.Conclusion, &k.URL, &k.Required, &k.StartedAt, &k.CompletedAt, &k.ObservedAt, &k.Source, &k.DeliveryID)
 			return k, err
 		})
 		if err != nil {

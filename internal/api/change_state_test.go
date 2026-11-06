@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -245,5 +246,119 @@ func TestChangeStateWriteAndRead(t *testing.T) {
 	}
 	if d, ok := row["draft"]; ok && d != false {
 		t.Fatalf("draft: %v", d)
+	}
+}
+
+// TestChangeReviewHistoryAndCheckDeliveryJSON pins the wire names of the
+// review-history fields (on the list read, where reviews are returned) and of
+// a check's delivery_id (on GET /v1/changes/one), and that a request without
+// them is unchanged (hk 3208).
+func TestChangeReviewHistoryAndCheckDeliveryJSON(t *testing.T) {
+	h, st := changesServer(t)
+	x := relaneAPITask(t, st, relaneLane(t, "history"), "history target")
+	repo := changeRepoName("history")
+	pr := "https://github.com/" + repo + "/pull/1"
+	digest := strings.Repeat("ab", 16)
+	review := func(pass int, extra map[string]any) map[string]any {
+		r := map[string]any{"reviewed_head": changeTestSHA, "round": 1, "pass": pass, "lens": "correctness", "patch_id": "abcdef0123"}
+		for k, v := range extra {
+			r[k] = v
+		}
+		return r
+	}
+	event := func(r map[string]any) (int, map[string]any) {
+		return changesCall(t, h, http.MethodPost, "/v1/task-events", "peer-token", map[string]any{"source": "mergewake.review", "source_ref": pr, "task_id": x.ID, "reviews": []any{r}})
+	}
+	if status, body := event(review(1, map[string]any{"reviewer": "sonnet@high", "same_family": false, "delta": true, "quiet": false, "outside_diff_blocking": 0, "patch_digest": digest})); status != http.StatusOK {
+		t.Fatalf("review with history: %d %v", status, body)
+	}
+	if status, body := event(review(2, nil)); status != http.StatusOK {
+		t.Fatalf("review without history (an old mergewake): %d %v", status, body)
+	}
+	status, body := changesCall(t, h, http.MethodGet, "/v1/changes?pr="+pr, "peer-token", nil)
+	list, _ := body["changes"].([]any)
+	if status != http.StatusOK || len(list) != 1 {
+		t.Fatalf("list: %d %v", status, body)
+	}
+	reviews := list[0].(map[string]any)["reviews"].([]any)
+	if len(reviews) != 2 {
+		t.Fatalf("reviews: %v", reviews)
+	}
+	full, bare := reviews[0].(map[string]any), reviews[1].(map[string]any)
+	want := map[string]any{"reviewer": "sonnet@high", "same_family": false, "delta": true, "quiet": false, "outside_diff_blocking": float64(0), "patch_digest": digest, "patch_id": "abcdef0123"}
+	for k, v := range want {
+		if full[k] != v {
+			t.Errorf("review[%q]=%v (present=%v), want %v", k, full[k], full[k] != nil, v)
+		}
+	}
+	for _, k := range []string{"reviewer", "same_family", "delta", "quiet", "outside_diff_blocking", "patch_digest"} {
+		if _, has := bare[k]; has {
+			t.Errorf("a review sent without %q reads back with it: %v", k, bare)
+		}
+	}
+
+	// A refused value: a plain 400 invalid_context on the event route.
+	for name, extra := range map[string]map[string]any{
+		"bad digest": {"patch_digest": "XYZ"}, "negative count": {"outside_diff_blocking": -1},
+	} {
+		if status, body := event(review(3, extra)); status != http.StatusBadRequest || body["error"] != "invalid_context" {
+			t.Errorf("%s on an event: %d %v", name, status, body)
+		}
+	}
+	// The findings route answers with the reason.
+	findings := func(extra map[string]any) (int, map[string]any) {
+		b := stateBody(repo, map[string]any{"reviewed_head": changeTestSHA, "round": 1, "pass": 4, "lens": "correctness", "observed_at": stateAt(1), "findings": []any{}})
+		for k, v := range extra {
+			b[k] = v
+		}
+		return changesCall(t, h, http.MethodPut, "/v1/changes/findings", "peer-token", b)
+	}
+	if status, body := findings(map[string]any{"patch_digest": "XYZ"}); status != http.StatusBadRequest || body["error"] != "invalid_context" || !strings.Contains(fmt.Sprint(body["reason"]), "patch_digest") {
+		t.Errorf("bad digest on findings: %d %v", status, body)
+	}
+	if status, body := findings(map[string]any{"outside_diff_blocking": -3}); status != http.StatusBadRequest || body["error"] != "invalid_context" || !strings.Contains(fmt.Sprint(body["reason"]), "outside_diff_blocking") {
+		t.Errorf("negative count on findings: %d %v", status, body)
+	}
+	if status, body := findings(map[string]any{"reviewer": "opus@high", "patch_digest": digest}); status != http.StatusOK {
+		t.Fatalf("findings with history: %d %v", status, body)
+	}
+
+	// A check carries delivery_id after a write that sent one, none after one that did not.
+	put := func(minute int, delivery string, checks ...any) {
+		t.Helper()
+		b := stateBody(repo, map[string]any{"head_sha": changeTestSHA, "observed_at": stateAt(minute), "source": "webhook", "checks": checks})
+		if delivery != "" {
+			b["delivery_id"] = delivery
+		}
+		if status, body := changesCall(t, h, http.MethodPut, "/v1/changes/checks", "peer-token", b); status != http.StatusOK || section(t, body, "checks")["applied"] != true {
+			t.Fatalf("checks: %d %v", status, body)
+		}
+	}
+	checksOf := func() map[string]map[string]any {
+		t.Helper()
+		_, one := changesCall(t, h, http.MethodGet, "/v1/changes/one?repo="+repo+"&pr=1&include=checks&all_heads=1", "peer-token", nil)
+		out := map[string]map[string]any{}
+		for _, c := range one["checks"].([]any) {
+			out[c.(map[string]any)["name"].(string)] = c.(map[string]any)
+		}
+		return out
+	}
+	put(10, "delivery-1", map[string]any{"name": "build", "state": "queued"}, map[string]any{"name": "lint", "state": "queued"})
+	got := checksOf()
+	if got["build"]["delivery_id"] != "delivery-1" || got["lint"]["delivery_id"] != "delivery-1" {
+		t.Fatalf("checks after a write with delivery_id: %v", got)
+	}
+	put(11, "", map[string]any{"name": "lint", "state": "completed", "conclusion": "success"})
+	got = checksOf()
+	if _, has := got["lint"]["delivery_id"]; has {
+		t.Fatalf("a check changed by a write without delivery_id carries one: %v", got["lint"])
+	}
+	if got["build"]["delivery_id"] != "delivery-1" {
+		t.Fatalf("a check the write did not touch lost its delivery_id: %v", got["build"])
+	}
+	status, body = changesCall(t, h, http.MethodPut, "/v1/changes/checks", "peer-token", stateBody(repo, map[string]any{
+		"head_sha": changeTestSHA, "observed_at": stateAt(12), "source": "webhook", "delivery_id": strings.Repeat("d", 129), "checks": []any{}}))
+	if status != http.StatusBadRequest || body["error"] != "invalid_context" {
+		t.Fatalf("long delivery_id: %d %v", status, body)
 	}
 }

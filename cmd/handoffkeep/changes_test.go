@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/mgh3326/handoffkeep/internal/remote"
@@ -158,5 +159,53 @@ func TestChangesStateCLIErrors(t *testing.T) {
 		if err := run(append(args, base...), io.Discard, io.Discard); err == nil || len(*calls) != before {
 			t.Errorf("%v: err=%v, made %d calls", args, err, len(*calls)-before)
 		}
+	}
+}
+
+// TestChangesShowPrintsReviewHistoryAndDelivery: the review-history fields of
+// a review and the delivery_id of a check pass through `changes show` as the
+// server sent them, and a review without them prints without the keys.
+func TestChangesShowPrintsReviewHistoryAndDelivery(t *testing.T) {
+	const digest = "abababababababababababababababab"
+	list := `{"changes":[{"id":3,"repo":"example/app","pr_number":9,"pr":"https://github.com/example/app/pull/9","state":"open","opened_at":"2026-11-06T01:00:00Z","created_at":"2026-11-06T01:00:00Z","updated_at":"2026-11-06T01:00:00Z","priority":0,"open_threads":0,"open_findings":0,"tasks":[],"verification":null,"verifications":[],` +
+		`"reviews":[{"id":1,"reviewed_head":"1111111111111111111111111111111111111111","round":1,"pass":1,"lens":"correctness","recorded_at":"2026-11-06T01:00:00Z","reviewer":"sonnet@high","same_family":false,"delta":true,"quiet":false,"outside_diff_blocking":0,"patch_digest":"` + digest + `"},` +
+		`{"id":2,"reviewed_head":"1111111111111111111111111111111111111111","round":1,"pass":2,"lens":"correctness","recorded_at":"2026-11-06T01:00:00Z"}]}]}`
+	h, _ := ledgerCLIServer(t, http.StatusOK, list)
+	var out bytes.Buffer
+	if err := run([]string{"changes", "show", "--url", h.URL, "--token", "tok", "--pr", "https://github.com/example/app/pull/9"}, &out, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Changes []struct {
+			Reviews []map[string]any `json:"reviews"`
+		} `json:"changes"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil || len(got.Changes) != 1 || len(got.Changes[0].Reviews) != 2 {
+		t.Fatalf("output=%s err=%v", out.String(), err)
+	}
+	full, bare := got.Changes[0].Reviews[0], got.Changes[0].Reviews[1]
+	want := map[string]any{"reviewer": "sonnet@high", "same_family": false, "delta": true, "quiet": false, "outside_diff_blocking": float64(0), "patch_digest": digest}
+	for k, v := range want {
+		if full[k] != v {
+			t.Errorf("review[%q]=%v, want %v", k, full[k], v)
+		}
+	}
+	for k := range want {
+		if _, has := bare[k]; has {
+			t.Errorf("a review without %q prints it: %v", k, bare)
+		}
+	}
+
+	state := strings.Replace(changeStateFixture, `"name":"build","state":"completed"`, `"name":"build","delivery_id":"delivery-1","state":"completed"`, 1)
+	h, _ = ledgerCLIServer(t, http.StatusOK, state)
+	out.Reset()
+	if err := run([]string{"changes", "checks", "--url", h.URL, "--token", "tok", "--repo", "example/app", "--pr", "9"}, &out, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	var one struct {
+		Checks []map[string]any `json:"checks"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &one); err != nil || len(one.Checks) != 1 || one.Checks[0]["delivery_id"] != "delivery-1" {
+		t.Fatalf("output=%s err=%v", out.String(), err)
 	}
 }

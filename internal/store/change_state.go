@@ -111,6 +111,9 @@ type ChangeChecksWrite struct {
 	ObservedAt time.Time       `json:"observed_at"`
 	Source     string          `json:"source"`
 	Complete   bool            `json:"complete,omitempty"`
+	// DeliveryID is the webhook delivery that carried the write; every check
+	// row the write inserts or changes records it (hk 3208).
+	DeliveryID string `json:"delivery_id,omitempty"`
 }
 
 // ChangeThreadIn is one GitHub review thread.
@@ -169,6 +172,9 @@ type ChangeFindingsWrite struct {
 	Findings     []ChangeFindingIn `json:"findings"`
 	ObservedAt   time.Time         `json:"observed_at"`
 	Source       string            `json:"source,omitempty"`
+	// ReviewHistory rides on the pass's review key: it fills the reviews row
+	// when the row is new or still bare (hk 3208).
+	ReviewHistory
 }
 
 // ChangeGateWrite is mergewake's gate decision for one head. DecidedAt is its
@@ -312,6 +318,9 @@ func checkChangeChecks(w ChangeChecksWrite, now time.Time) error {
 	if err := checkObserved("observed_at", w.ObservedAt, now); err != nil {
 		return err
 	}
+	if err := checkField("delivery_id", w.DeliveryID, 128); err != nil {
+		return err
+	}
 	if len(w.Checks) > maxChangeChecks {
 		return invalidChangeWrite("checks has at most %d entries", maxChangeChecks)
 	}
@@ -393,6 +402,9 @@ func checkChangeFindings(w ChangeFindingsWrite, now time.Time) error {
 	}
 	if err := checkObserved("observed_at", w.ObservedAt, now); err != nil {
 		return err
+	}
+	if err := w.ReviewHistory.check(); err != nil {
+		return invalidChangeWrite("%s", err.Error())
 	}
 	for _, f := range w.Findings {
 		if f.ID == "" {
@@ -669,13 +681,14 @@ func applyChecksTx(ctx context.Context, tx pgx.Tx, c changeLock, w ChangeChecksW
 	names := make([]string, 0, len(w.Checks))
 	for _, k := range w.Checks {
 		names = append(names, k.Name)
-		b.Queue(`INSERT INTO change_checks(change_id,head_sha,name,state,conclusion,url,required,started_at,completed_at,observed_at,source,gone)
-VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,false)
+		b.Queue(`INSERT INTO change_checks(change_id,head_sha,name,state,conclusion,url,required,started_at,completed_at,observed_at,source,gone,delivery_id)
+VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,false,$12)
 ON CONFLICT(change_id,head_sha,name) DO UPDATE SET state=EXCLUDED.state,conclusion=EXCLUDED.conclusion,url=EXCLUDED.url,required=EXCLUDED.required,
-	started_at=EXCLUDED.started_at,completed_at=EXCLUDED.completed_at,observed_at=EXCLUDED.observed_at,source=EXCLUDED.source,gone=false
+	started_at=EXCLUDED.started_at,completed_at=EXCLUDED.completed_at,observed_at=EXCLUDED.observed_at,source=EXCLUDED.source,gone=false,
+	delivery_id=EXCLUDED.delivery_id
 WHERE (change_checks.state,change_checks.conclusion,change_checks.url,change_checks.required,change_checks.started_at,change_checks.completed_at,change_checks.observed_at,change_checks.source,change_checks.gone)
 	IS DISTINCT FROM (EXCLUDED.state,EXCLUDED.conclusion,EXCLUDED.url,EXCLUDED.required,EXCLUDED.started_at,EXCLUDED.completed_at,EXCLUDED.observed_at,EXCLUDED.source,EXCLUDED.gone)`,
-			c.id, w.HeadSHA, k.Name, k.State, nullStr(k.Conclusion), nullStr(k.URL), k.Required, k.StartedAt, k.CompletedAt, w.ObservedAt, w.Source)
+			c.id, w.HeadSHA, k.Name, k.State, nullStr(k.Conclusion), nullStr(k.URL), k.Required, k.StartedAt, k.CompletedAt, w.ObservedAt, w.Source, nullStr(w.DeliveryID))
 	}
 	if w.Complete {
 		b.Queue(`UPDATE change_checks SET gone=true,observed_at=$3,source=$4 WHERE change_id=$1 AND head_sha=$2 AND NOT gone AND name <> ALL($5::text[])`,
@@ -730,14 +743,18 @@ func applyFindingsTx(ctx context.Context, tx pgx.Tx, c changeLock, w ChangeFindi
 	if source == "" {
 		source = defaultFindingSrc
 	}
-	// The pass's reviews row: a bare one carrying only its key when no event
-	// has reported it (insertReviewTx fills a bare row later).
+	// The pass's reviews row: a bare one carrying only its key (and the
+	// review-history fields, if sent) when no event has reported it
+	// (insertReviewTx fills a bare row later). A row that is still bare gets
+	// the review-history fields filled the same way; any other row is left
+	// as it is.
 	var reviewID int64
 	if err := tx.QueryRow(ctx, `WITH ins AS (
-	INSERT INTO reviews(change_id,reviewed_head,round,pass,lens,recorded_at) VALUES($1,$2,$3,$4,$5,$6)
-	ON CONFLICT(change_id,reviewed_head,lens,round,pass) DO NOTHING RETURNING id)
+	INSERT INTO reviews(change_id,reviewed_head,round,pass,lens,recorded_at,reviewer,same_family,delta,quiet,outside_diff_blocking,patch_digest) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+	ON CONFLICT(change_id,reviewed_head,lens,round,pass) DO UPDATE SET `+reviewHistoryFillSQL+`
+	WHERE `+reviewBareSQL+` AND `+reviewHistoryGivenSQL+` RETURNING id)
 SELECT id FROM ins UNION ALL SELECT id FROM reviews WHERE change_id=$1 AND reviewed_head=$2 AND lens=$5 AND round=$3 AND pass=$4 LIMIT 1`,
-		c.id, w.ReviewedHead, w.Round, w.Pass, w.Lens, now).Scan(&reviewID); err != nil {
+		append([]any{c.id, w.ReviewedHead, w.Round, w.Pass, w.Lens, now}, w.ReviewHistory.args()...)...).Scan(&reviewID); err != nil {
 		return ChangeSectionResult{}, err
 	}
 	b := &pgx.Batch{}
