@@ -26,13 +26,14 @@ export type BoardData = {
 
 // Walks the after_id cursor until the server reports the set complete. If the
 // client-side cap is hit first the board still renders, marked truncated.
-export async function fetchBoardTasks(): Promise<BoardData> {
+export async function fetchBoardTasks(project?: string): Promise<BoardData> {
   const tasks: BoardTask[] = [];
   let states: string[] = [];
   let generatedAt = "";
   let afterID = 0;
   for (;;) {
     const params = new URLSearchParams({ limit: String(PAGE_LIMIT) });
+    if (project) params.set("project", project);
     if (afterID > 0) {
       params.set("after_id", String(afterID));
     }
@@ -56,16 +57,14 @@ export async function fetchBoardTasks(): Promise<BoardData> {
       return { tasks, states, truncated: false, generatedAt };
     }
     const next = page.next_after_id ?? 0;
-    if (next <= 0 || tasks.length >= MAX_TASKS) {
-      return { tasks, states, truncated: true, generatedAt };
-    }
-    if (next <= afterID) {
+    if (!Number.isSafeInteger(next) || next <= afterID || page.tasks.length === 0) {
       // A cursor that does not advance would re-request the same page until
       // the cap — reject loudly instead of looping on a server violation.
       throw new Error(
         `non-advancing board cursor: after_id=${afterID} next_after_id=${next}`,
       );
     }
+    if (tasks.length >= MAX_TASKS) return { tasks: tasks.slice(0, MAX_TASKS), states, truncated: true, generatedAt };
     afterID = next;
   }
 }
@@ -76,7 +75,13 @@ export async function fetchTaskDetail(id: number): Promise<BoardDetail> {
     !data ||
     !validBoardTask(data.task) ||
     !Array.isArray(data.events) ||
-    !Array.isArray(data.dwell)
+    !Array.isArray(data.dwell) ||
+    !Array.isArray(data.documents) || !data.documents.every(d => record(d) && typeof d.key === "string" && typeof d.kind === "string" && typeof d.origin_class === "string") ||
+    typeof data.documents_truncated !== "boolean" ||
+    !Array.isArray(data.origins) || !data.origins.every(validOrigin) ||
+    !Array.isArray(data.changes) || !data.changes.every(validChange) ||
+    !Array.isArray(data.jobs) || !data.jobs.every(validJob) ||
+    typeof data.origins_truncated !== "boolean" || typeof data.changes_truncated !== "boolean" || typeof data.jobs_truncated !== "boolean"
   )
     throw new Error("malformed task detail");
   return data;
@@ -194,6 +199,7 @@ function validBoardTask(value: unknown): value is BoardTask {
     "refs" in value &&
     typeof value.refs === "object" &&
     value.refs !== null &&
+    (!("closure" in value.refs) || (record(value.refs.closure) && typeof value.refs.closure.type === "string" && typeof value.refs.closure.evidence === "string")) &&
     (!("work_board" in value) || validWorkBoard(value.work_board))
   );
 }
@@ -230,4 +236,28 @@ function validWorkSession(value: unknown): value is BoardWorkSession {
     "at" in value &&
     typeof value.at === "string"
   );
+}
+
+export async function fetchProjects(): Promise<string[]> {
+  const data = await getJSON<{ projects: unknown }>("/ui/api/board/projects");
+  if (!data || !Array.isArray(data.projects) || !data.projects.every((p) => typeof p === "string")) throw new Error("malformed projects");
+  return data.projects;
+}
+
+function record(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
+function optionalString(value: unknown): boolean { return value === undefined || value === null || typeof value === "string"; }
+function optionalNumber(value: unknown): boolean { return value === undefined || value === null || typeof value === "number"; }
+function validOrigin(value: unknown): boolean {
+  return record(value) && typeof value.provider === "string" && typeof value.namespace === "string" && optionalString(value.display_ref) && optionalString(value.url);
+}
+function validReview(value: unknown): boolean {
+  return record(value) && typeof value.id === "number" && typeof value.lens === "string" && typeof value.round === "number" && typeof value.pass === "number" && optionalString(value.family) && optionalString(value.model) && optionalString(value.verdict) && optionalNumber(value.critical) && optionalNumber(value.high) && optionalNumber(value.medium) && optionalNumber(value.low);
+}
+function validChange(value: unknown): boolean {
+  return record(value) && typeof value.id === "number" && typeof value.pr === "string" && typeof value.state === "string" && optionalString(value.head_sha) && optionalString(value.merged_at) && optionalString(value.hold_reason) && optionalNumber(value.depends_on_change_id) && optionalString(value.depends_on_state) && (value.tasks === null || Array.isArray(value.tasks)) && (value.reviews === null || (Array.isArray(value.reviews) && value.reviews.every(validReview)));
+}
+function validJob(value: unknown): boolean {
+  if (!record(value)) return false;
+  const diff = value.diff_stat;
+  return typeof value.job_id === "string" && typeof value.role === "string" && typeof value.state === "string" && typeof value.host === "string" && typeof value.family === "string" && typeof value.profile === "string" && typeof value.model === "string" && optionalString(value.harness) && optionalString(value.effort) && optionalString(value.claimed_at) && optionalString(value.spawned_at) && optionalString(value.ready_at) && optionalString(value.ended_at) && optionalString(value.end_reason) && (diff === null || (record(diff) && typeof diff.files === "number" && typeof diff.insertions === "number" && typeof diff.deletions === "number")) && (value.skills_supported === null || typeof value.skills_supported === "boolean") && (value.skills === null || (Array.isArray(value.skills) && value.skills.every(s => record(s) && typeof s.name === "string" && typeof s.calls === "number")));
 }

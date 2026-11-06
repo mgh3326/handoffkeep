@@ -76,9 +76,9 @@ func TestPutStandingOrderSupersede(t *testing.T) {
 func TestStandingOrdersMigrationAfterDecisionDeny(t *testing.T) {
 	s := schemaStore(t, "standing_migration")
 	var version int
-	var tableExists, denyColumnExists, sessionColumnExists, deliveriesExist bool
-	err := s.pool.QueryRow(t.Context(), `SELECT (SELECT max(version) FROM schema_version), to_regclass('standing_orders') IS NOT NULL, EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='decision_answer_attempts' AND column_name='denies_attempt_id'), EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='decision_answer_attempts' AND column_name='operator_quote'), to_regclass('decision_deliveries') IS NOT NULL`).Scan(&version, &tableExists, &denyColumnExists, &sessionColumnExists, &deliveriesExist)
-	if err != nil || version != SchemaVersion || !tableExists || !denyColumnExists || !sessionColumnExists || !deliveriesExist {
-		t.Fatalf("version=%d table=%v deny_column=%v session_column=%v deliveries=%v err=%v", version, tableExists, denyColumnExists, sessionColumnExists, deliveriesExist, err)
+	var tableExists, denyColumnExists, sessionColumnExists, deliveriesExist, verificationsExist bool
+	err := s.pool.QueryRow(t.Context(), `SELECT (SELECT max(version) FROM schema_version), to_regclass('standing_orders') IS NOT NULL, EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='decision_answer_attempts' AND column_name='denies_attempt_id'), EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='decision_answer_attempts' AND column_name='operator_quote'), to_regclass('decision_deliveries') IS NOT NULL, to_regclass('verifications') IS NOT NULL`).Scan(&version, &tableExists, &denyColumnExists, &sessionColumnExists, &deliveriesExist, &verificationsExist)
+	if err != nil || version != SchemaVersion || !tableExists || !denyColumnExists || !sessionColumnExists || !deliveriesExist || !verificationsExist {
+		t.Fatalf("version=%d table=%v deny_column=%v session_column=%v deliveries=%v verifications=%v err=%v", version, tableExists, denyColumnExists, sessionColumnExists, deliveriesExist, verificationsExist, err)
 	}
 }

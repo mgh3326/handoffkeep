@@ -100,6 +100,10 @@ type Change struct {
 	UpdatedAt          time.Time      `json:"updated_at"`
 	Tasks              []ChangeTask   `json:"tasks"`
 	Reviews            []ChangeReview `json:"reviews"`
+	// Verification is the verdict on the current head, or nil; Verifications
+	// are all verdicts, newest first (hk 3120).
+	Verification  *Verification  `json:"verification"`
+	Verifications []Verification `json:"verifications"`
 }
 
 // ChangeMergeFlow is the merge-flow field set. SetChangeMergeFlow replaces
@@ -286,7 +290,8 @@ type changeReader interface {
 }
 
 // listChangesWhere reads changes ordered by id, then their tasks and reviews,
-// each ordered by id. where may use only $1..$len(args).
+// each ordered by id, and their verifications, newest first. where may use
+// only $1..$len(args).
 func (s *Store) listChangesWhere(ctx context.Context, q changeReader, where string, limit int, args ...any) ([]Change, error) {
 	if limit < 1 || limit > 1000 {
 		limit = 100
@@ -306,6 +311,7 @@ func (s *Store) listChangesWhere(ctx context.Context, q changeReader, where stri
 	at := make(map[int64]int, len(out))
 	for i, c := range out {
 		ids[i], at[c.ID] = c.ID, i
+		out[i].Verifications = []Verification{}
 	}
 	trows, err := q.Query(ctx, `SELECT change_id,task_id,relation FROM change_tasks WHERE change_id=ANY($1) ORDER BY change_id,task_id`, ids)
 	if err != nil {
@@ -338,7 +344,29 @@ func (s *Store) listChangesWhere(ctx context.Context, q changeReader, where stri
 		out[at[id]].Reviews = append(out[at[id]].Reviews, r)
 	}
 	rrows.Close()
-	return out, rrows.Err()
+	if err = rrows.Err(); err != nil {
+		return nil, err
+	}
+	vrows, err := q.Query(ctx, `SELECT `+verificationColumns+` FROM verifications WHERE change_id=ANY($1) ORDER BY recorded_at DESC, id DESC`, ids)
+	if err != nil {
+		return nil, err
+	}
+	for vrows.Next() {
+		var v Verification
+		if err = scanVerification(vrows, &v); err != nil {
+			vrows.Close()
+			return nil, err
+		}
+		c := &out[at[v.ChangeID]]
+		v.Current = c.HeadSHA != nil && *c.HeadSHA == v.HeadSHA
+		c.Verifications = append(c.Verifications, v)
+		if v.Current {
+			current := v
+			c.Verification = &current
+		}
+	}
+	vrows.Close()
+	return out, vrows.Err()
 }
 
 // checkChangeMergeFlow validates a merge-flow field set that needs no
