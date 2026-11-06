@@ -23,8 +23,8 @@
 --      merged, deployed, completed      -> merged
 --      dropped, duplicate               -> dropped
 --      icebox                           -> hold
--- 3. The old state constraint returns; schema versions 32 and 51 are removed.
---    The closure check is dropped so v51 can be applied again on re-migration.
+-- 3. The old state constraint returns; schema versions 32 and 52 are removed.
+--    The closure check is dropped so v52 can be applied again on re-migration.
 --
 -- One state_migration event is appended per changed task; earlier task_events
 -- rows are not rewritten, so events written under the new model keep their
@@ -73,5 +73,5 @@ ALTER TABLE tasks DROP CONSTRAINT tasks_state_check, ADD CONSTRAINT tasks_state_
 
 ALTER TABLE tasks DROP CONSTRAINT IF EXISTS tasks_closure_check;
 
-DELETE FROM schema_version WHERE version = 51;
+DELETE FROM schema_version WHERE version = 52;
 DELETE FROM schema_version WHERE version = 32;
