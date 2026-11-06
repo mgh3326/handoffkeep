@@ -14,6 +14,7 @@ func TestDeployServiceValidation(t *testing.T) {
 	}{
 		"name":      {DeployService{Name: "bad/name", Repo: valid.Repo, RecordPrefixes: valid.RecordPrefixes}, "name"},
 		"repo":      {DeployService{Name: valid.Name, Repo: "bad", RecordPrefixes: valid.RecordPrefixes}, "repo"},
+		"too long":  {DeployService{Name: valid.Name, Repo: valid.Repo, RecordPrefixes: []string{"deploy/" + strings.Repeat(strings.Repeat("a", 128)+"/", 4)}}, "record prefixes"},
 		"missing":   {DeployService{Name: valid.Name, Repo: valid.Repo}, "at least one"},
 		"prefix":    {DeployService{Name: valid.Name, Repo: valid.Repo, RecordPrefixes: []string{"deploy/app"}}, "record prefixes"},
 		"duplicate": {DeployService{Name: valid.Name, Repo: valid.Repo, RecordPrefixes: []string{"deploy/app/", "deploy/app/"}}, "record prefixes"},
@@ -56,6 +57,9 @@ func TestDeployServicesMigrationAndCRUD(t *testing.T) {
 	x, err := s.PutDeployService(ctx, DeployService{Name: "zzz", Repo: "owner/repo", RecordPrefixes: []string{"deploy/zzz/"}})
 	if err != nil || !x.Active {
 		t.Fatalf("put=%+v %v", x, err)
+	}
+	if _, err := s.PutDeployService(ctx, DeployService{Name: "other", Repo: "owner/other", RecordPrefixes: []string{"deploy/zzz/nested/"}}); err == nil || !strings.Contains(err.Error(), "overlaps") {
+		t.Fatalf("overlap error = %v", err)
 	}
 	x, err = s.DeactivateDeployService(ctx, "zzz")
 	if err != nil || x.Active {

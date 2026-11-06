@@ -34,7 +34,7 @@ func checkDeployService(x DeployService) error {
 	seen := map[string]bool{}
 	for _, p := range x.RecordPrefixes {
 		segment := strings.TrimSuffix(strings.TrimPrefix(p, "deploy/"), "/")
-		valid := strings.HasPrefix(p, "deploy/") && strings.HasSuffix(p, "/")
+		valid := validText(p, maxDocumentPrefixBytes) && strings.HasPrefix(p, "deploy/") && strings.HasSuffix(p, "/")
 		for _, part := range strings.Split(segment, "/") {
 			valid = valid && validName(part)
 		}
@@ -56,10 +56,30 @@ func (s *Store) PutDeployService(ctx context.Context, x DeployService) (DeploySe
 	if err := checkDeployService(x); err != nil {
 		return DeployService{}, err
 	}
+	// Serialize prefix claims before checking overlap, including concurrent puts.
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return DeployService{}, err
+	}
+	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('deploy_services_prefixes', 0))`); err != nil {
+		return DeployService{}, err
+	}
+	var conflict bool
+	err = tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM deploy_services s, unnest(s.record_prefixes) AS existing_prefix(prefix), unnest($2::text[]) AS proposed(prefix) WHERE s.active AND s.name <> $1 AND (strpos(existing_prefix.prefix,proposed.prefix)=1 OR strpos(proposed.prefix,existing_prefix.prefix)=1))`, x.Name, x.RecordPrefixes).Scan(&conflict)
+	if err != nil {
+		return DeployService{}, err
+	}
+	if conflict {
+		return DeployService{}, fmt.Errorf("%w: record prefix overlaps another active service", ErrInvalidDeployService)
+	}
 	now := time.Now().UTC()
 	var out DeployService
-	err := scanDeployService(s.pool.QueryRow(ctx, `INSERT INTO deploy_services(name,repo,record_prefixes,active,created_at,updated_at) VALUES($1,$2,$3,true,$4,$4) ON CONFLICT(name) DO UPDATE SET repo=EXCLUDED.repo,record_prefixes=EXCLUDED.record_prefixes,active=true,updated_at=EXCLUDED.updated_at RETURNING `+deployServiceColumns, x.Name, x.Repo, x.RecordPrefixes, now), &out)
-	return out, err
+	err = scanDeployService(tx.QueryRow(ctx, `INSERT INTO deploy_services(name,repo,record_prefixes,active,created_at,updated_at) VALUES($1,$2,$3,true,$4,$4) ON CONFLICT(name) DO UPDATE SET repo=EXCLUDED.repo,record_prefixes=EXCLUDED.record_prefixes,active=true,updated_at=EXCLUDED.updated_at RETURNING `+deployServiceColumns, x.Name, x.Repo, x.RecordPrefixes, now), &out)
+	if err != nil {
+		return DeployService{}, err
+	}
+	return out, tx.Commit(ctx)
 }
 
 func (s *Store) ListDeployServices(ctx context.Context) ([]DeployService, error) {
