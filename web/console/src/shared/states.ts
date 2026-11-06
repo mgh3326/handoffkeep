@@ -64,3 +64,23 @@ export function stateLabel(state: string): string {
 export function stateToken(state: string): string {
   return isKnownState(state) ? state.replace(/_/g, "-") : "unknown";
 }
+
+/** Status chip groups in badge priority order (hk doc design/2026-11-06/
+ * console-design-system §1): the operator's decision first, finished work last.
+ * `neutral` is everything that is not asking for attention. */
+export const CHIP_GROUP_ORDER = ["decision", "input", "working", "failed", "done", "neutral"] as const;
+export type ChipGroup = (typeof CHIP_GROUP_ORDER)[number];
+
+const WORKING_STATES = new Set(["researching", "developing", "reviewing", "claimed", "in_progress", "verifying", "reopened"]);
+const DONE_STATES = new Set(["merged", "deployed", "completed"]);
+
+/** The chip group of a task. One function decides it, so every list, card and
+ * header agrees. `stalled` is the caller's judgement that work stopped. */
+export function statusGroup(task: { state: string; awaiting_decision?: boolean; stalled?: boolean }): ChipGroup {
+  if (task.awaiting_decision || task.state === "awaiting_decision" || task.state === "needs_decision") return "decision";
+  if (task.stalled) return "failed";
+  if (task.state === "triage") return "input";
+  if (WORKING_STATES.has(task.state)) return "working";
+  if (DONE_STATES.has(task.state)) return "done";
+  return "neutral";
+}

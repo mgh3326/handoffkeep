@@ -70,7 +70,7 @@ describe("shell router", () => {
   it("marks the current destination only for Home and Work", () => {
     visit("/ui/work");
     const current = screen.getAllByRole("link").filter((a) => a.getAttribute("aria-current") === "page");
-    expect(current.map((a) => a.textContent)).toEqual(["Work"]);
+    expect(current.map((a) => a.textContent)).toEqual(["작업"]);
   });
 });
 

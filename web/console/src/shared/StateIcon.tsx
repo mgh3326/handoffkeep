@@ -6,6 +6,7 @@
 // in group headers, accessible name on rows).
 
 import type { ReactNode } from "react";
+import { IconFrame } from "./Icon";
 import { isKnownState, stateLabel, stateToken } from "./states";
 
 
@@ -141,21 +142,10 @@ export function StateIcon({ state, srLabel = false, className }: StateIconProps)
   const key = isKnownState(state) ? state : "unknown";
   return (
     <>
-      <svg
-        className={`hk-icon hk-state-${stateToken(state)}${className ? ` ${className}` : ""}`}
-        data-state-shape={key}
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.75"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        aria-hidden="true"
-        focusable="false"
-      >
+      <IconFrame className={`hk-state-${stateToken(state)}${className ? ` ${className}` : ""}`} data-state-shape={key}>
         {STATE_SHAPES[key]}
-      </svg>
-      {srLabel ? <span className="hk-sr">{stateLabel(state)}</span> : null}
+      </IconFrame>
+      {srLabel ? <span className="hk-sr-only">{stateLabel(state)}</span> : null}
     </>
   );
 }

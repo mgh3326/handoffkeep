@@ -12,7 +12,7 @@ const settle = async () => { await act(async () => { await Promise.resolve(); aw
 
 it("D1 routes Deploys and marks its navigation link", () => {
  const route = matchRoute("/ui/deploys"); expect(route).toEqual({view: "deploys"}); expect(navKey(route)).toBe("deploys");
- render(<Shell current={navKey(route)}><div /></Shell>); expect(screen.getByRole("link", {name: "Deploys"}).getAttribute("aria-current")).toBe("page");
+ render(<Shell current={navKey(route)}><div /></Shell>); expect(screen.getByRole("link", {name: "배포"}).getAttribute("aria-current")).toBe("page");
 });
 it("D2 renders ordered service cards and waiting task links", async () => {
  render(<DeploysPage fetchStatus={async () => fixture()} />); await screen.findByText("Task 1-0");
