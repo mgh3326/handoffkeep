@@ -6,8 +6,10 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// Schema versions are recorded in schema_version and claimed in one place
-// each; the next free number is one past the highest below.
+// Integer schema versions 1-53 are recorded in schema_version and claimed in
+// one place each. The list is frozen: 53 is the last integer version.
+// Every later migration is identified by a unique string ID, declared in the
+// registry (migration_ids.go) and recorded in schema_migrations.
 //
 //	1-7, 9-19, 21, 22, 25-31  Store.migrate (store.go); 8 was never used
 //	32                         migrateStatesV32 (migration_states.go), called from Store.migrate
@@ -31,22 +33,25 @@ import (
 //	50                         dotsResultsV50 (migration_dots_results.go), called from Store.migrate
 //	51                         changeStateV51 (migration_change_state.go), called from Store.migrate
 //	52                         reviewHistoryV52 (migration_review_history.go), called from Store.migrate
+//	53                         schemaMigrationsV53 (migration_ids.go), called from Store.migrate
 //	20                         migrateWrk (wrk_migration.go), owner-only via MigrateWrk
 //	23, 24                     migrateQuota (quota.go)
 //
-// A new lock-taking or data-changing step goes through migrateOnce and ends
-// its statements with the INSERT INTO schema_version that records it.
+// Store.migrate runs the integer versions first, then the registered IDs in
+// the order orderMigrations gives (sorted by ID, After respected).
 //
-// Open runs Store.migrate only when a version in migrateVersions is missing
-// (migrateIfBehind, migrateCurrent): on a current schema it takes no table
-// lock, so opening a store beside live writers cannot deadlock with them
-// (lock order, lockorder.go). Every schema change therefore needs a new
-// version, even an additive IF NOT EXISTS statement: an unversioned one would
-// never run on a database that is already current.
+// Open runs Store.migrate only when a version in migrateVersions or a
+// registered ID is missing (migrateIfBehind, migrateCurrent): on a current
+// schema it takes no table lock, so opening a store beside live writers
+// cannot deadlock with them (lock order, lockorder.go). Every schema change
+// therefore needs a new registered ID, even an additive IF NOT EXISTS
+// statement: an unregistered one would never run on a database that is
+// already current.
 
-// SchemaVersion is the highest version a fully migrated database records.
-// Bump it with every new version; tests assert max(version) against it.
-const SchemaVersion = 52
+// SchemaVersion is the highest integer version a fully migrated database
+// records. It is frozen at 53: registered IDs do not change it. Tests assert
+// max(version) against it, and the sync cursor carries it.
+const SchemaVersion = 53
 
 // migrationLockID serializes migrations across processes (one
 // pg_advisory_xact_lock per migrating transaction).
@@ -65,9 +70,12 @@ func migrateVersions() []int {
 }
 
 // migrateCurrent reports whether the current schema already records every
-// version in migrateVersions. It reads the current schema's schema_version
-// only: under a test search_path a later schema's table must not count.
-func migrateCurrent(ctx context.Context, q rowQuerier) (bool, error) {
+// version in migrateVersions and every ID in ordered. It reads the current
+// schema's schema_version first: under a test search_path a later schema's
+// table must not count, and schema_migrations exists only once version 53 is
+// recorded. Versions or IDs the database has beyond what this binary knows
+// (a newer binary migrated it) are ignored, so a binary rollback still opens.
+func migrateCurrent(ctx context.Context, q rowQuerier, ordered []migration) (bool, error) {
 	var exists bool
 	if err := q.QueryRow(ctx, `SELECT current_schema() IS NOT NULL AND to_regclass(format('%I.schema_version', current_schema())) IS NOT NULL`).Scan(&exists); err != nil || !exists {
 		return false, err
@@ -77,7 +85,10 @@ func migrateCurrent(ctx context.Context, q rowQuerier) (bool, error) {
 	if err := q.QueryRow(ctx, `SELECT count(*) FROM schema_version WHERE version = ANY($1)`, want).Scan(&n); err != nil {
 		return false, err
 	}
-	return n == len(want), nil
+	if n != len(want) {
+		return false, nil
+	}
+	return registeredCurrent(ctx, q, ordered)
 }
 
 // migrateOnce runs apply only when schema_version has no row for version.
