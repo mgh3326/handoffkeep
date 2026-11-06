@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -356,5 +357,53 @@ func TestAutoCloseAwaitingDecisionParent(t *testing.T) {
 				t.Fatalf("skip event=%+v", events)
 			}
 		})
+	}
+}
+
+func TestTaskClosureMigrationLockTimeout(t *testing.T) {
+	s := schemaStore(t, "closure_lock")
+	ctx := t.Context()
+	if _, err := s.pool.Exec(ctx, `ALTER TABLE tasks DROP CONSTRAINT tasks_closure_check`); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := s.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Rollback(ctx)
+	if _, err := reader.Exec(ctx, `SELECT id FROM tasks LIMIT 1`); err != nil {
+		t.Fatal(err)
+	}
+	bounded, cancel := context.WithTimeout(ctx, 12*time.Second)
+	defer cancel()
+	tx, err := s.pool.Begin(bounded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = applyTaskClosureMigration(bounded, tx)
+	var pgerr *pgconn.PgError
+	if !errors.As(err, &pgerr) || pgerr.Code != "55P03" {
+		t.Fatalf("migration while reader holds lock: got %v, want PostgreSQL lock timeout", err)
+	}
+	if err := tx.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := reader.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	tx, err = s.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SET LOCAL lock_timeout = '17s'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyTaskClosureMigration(ctx, tx); err != nil {
+		t.Fatalf("migration after reader releases lock: %v", err)
+	}
+	var restored string
+	if err := tx.QueryRow(ctx, `SELECT current_setting('lock_timeout')`).Scan(&restored); err != nil || restored != "17s" {
+		t.Fatalf("lock_timeout after migration=%q err=%v, want 17s", restored, err)
 	}
 }
