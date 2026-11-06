@@ -311,3 +311,42 @@ func TestAutoCloseCompletedParentKinds(t *testing.T) {
 		}
 	})
 }
+
+func TestAutoCloseAwaitingDecisionParent(t *testing.T) {
+	s := schemaStore(t, "auto_close_awaiting")
+	for _, target := range []string{StateCompleted, StateMerged, StateDeployed} {
+		t.Run(target, func(t *testing.T) {
+			parent := flowTask(t, s, s.pool, "decide", StateResearching, true)
+			if _, err := s.pool.Exec(t.Context(), `UPDATE tasks SET awaiting_decision=true WHERE id=$1`, parent.ID); err != nil {
+				t.Fatal(err)
+			}
+			child := flowTask(t, s, s.pool, "decide", StateBacklog, false)
+			setParent(t, s, child, parent)
+			to := StateCompleted
+			if target == StateMerged {
+				last := flowTask(t, s, s.pool, "implement", StateReviewing, true)
+				setParent(t, s, last, parent)
+				if _, err := s.TransitionTaskWith(t.Context(), child.ID, TransitionInput{To: StateCompleted, By: "tester", Evidence: "hk:doc research/x"}); err != nil {
+					t.Fatal(err)
+				}
+				child = last
+				to = StateMerged
+			} else if target == StateDeployed {
+				deployed := flowTask(t, s, s.pool, "implement", StateDeployed, true)
+				setParent(t, s, deployed, parent)
+				to = StateDropped
+			}
+			if _, err := s.TransitionTaskWith(t.Context(), child.ID, TransitionInput{To: to, By: "tester", Note: "done", Evidence: "hk:doc research/x"}); err != nil {
+				t.Fatal(err)
+			}
+			got := stateOf(t, s, parent.ID)
+			if got.State != StateResearching || !got.AwaitingDecision || got.Refs.Closure != nil {
+				t.Fatalf("parent state=%s awaiting=%t closure=%+v", got.State, got.AwaitingDecision, got.Refs.Closure)
+			}
+			events := eventsOfKind(got, TaskEventAutoClose)
+			if len(events) != 1 || events[0].Applied || !events[0].Auto || events[0].Source != "hk.auto_close" || events[0].From != StateResearching || events[0].To != StateResearching {
+				t.Fatalf("skip event=%+v", events)
+			}
+		})
+	}
+}

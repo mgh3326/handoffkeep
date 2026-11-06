@@ -479,6 +479,14 @@ func (s *Store) autoCloseTx(ctx context.Context, tx pgx.Tx, child Task, by strin
 			})
 			return err
 		}
+		if p.AwaitingDecision {
+			_, _, err = insertEvent(ctx, tx, taskEventInput{
+				TaskID: p.ID, Kind: TaskEventAutoClose, From: p.State, To: p.State, By: "hk", At: now, Refs: p.Refs,
+				Note:   "parent is awaiting a decision; the parent stays where it is",
+				Source: "hk.auto_close", SourceRef: ref, Auto: true, NotApplied: true,
+			})
+			return err
+		}
 		to := StateCompleted
 		if merged > 0 || deployed > 0 {
 			to = StateMerged
