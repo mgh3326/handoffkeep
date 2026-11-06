@@ -73,9 +73,8 @@ func (s *Store) PutDeployService(ctx context.Context, x DeployService) (DeploySe
 	if conflict {
 		return DeployService{}, fmt.Errorf("%w: record prefix overlaps another active service", ErrInvalidDeployService)
 	}
-	now := time.Now().UTC()
 	var out DeployService
-	err = scanDeployService(tx.QueryRow(ctx, `INSERT INTO deploy_services(name,repo,record_prefixes,active,created_at,updated_at) VALUES($1,$2,$3,true,$4,$4) ON CONFLICT(name) DO UPDATE SET repo=EXCLUDED.repo,record_prefixes=EXCLUDED.record_prefixes,active=true,updated_at=EXCLUDED.updated_at RETURNING `+deployServiceColumns, x.Name, x.Repo, x.RecordPrefixes, now), &out)
+	err = scanDeployService(tx.QueryRow(ctx, `INSERT INTO deploy_services(name,repo,record_prefixes,active,created_at,updated_at) VALUES($1,$2,$3,true,now(),now()) ON CONFLICT(name) DO UPDATE SET repo=EXCLUDED.repo,record_prefixes=EXCLUDED.record_prefixes,active=true,updated_at=EXCLUDED.updated_at RETURNING `+deployServiceColumns, x.Name, x.Repo, x.RecordPrefixes), &out)
 	if err != nil {
 		return DeployService{}, err
 	}
@@ -99,7 +98,7 @@ func (s *Store) DeactivateDeployService(ctx context.Context, name string) (Deplo
 		return DeployService{}, fmt.Errorf("%w: name must match [A-Za-z0-9._-]{1,128}", ErrInvalidDeployService)
 	}
 	var out DeployService
-	err := scanDeployService(s.pool.QueryRow(ctx, `UPDATE deploy_services SET active=false,updated_at=$2 WHERE name=$1 RETURNING `+deployServiceColumns, name, time.Now().UTC()), &out)
+	err := scanDeployService(s.pool.QueryRow(ctx, `UPDATE deploy_services SET active=false,updated_at=now() WHERE name=$1 RETURNING `+deployServiceColumns, name), &out)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return DeployService{}, ErrServiceNotFound
 	}
