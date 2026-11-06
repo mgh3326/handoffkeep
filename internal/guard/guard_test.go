@@ -37,6 +37,20 @@ func TestPrivateKeyNeedsKeyMaterial(t *testing.T) {
 	if got := Match(encrypted); got != "private_key" {
 		t.Fatalf("encrypted PEM matched %q, want private_key", got)
 	}
+	// OpenPGP armored private key block with armor headers (review r: CodeRabbit Major).
+	pgp := "-----" + "BEGIN PGP PRIVATE" + " KEY BLOCK-----\nVersion: GnuPG v2\nComment: test\n\n" + body + "\n=AbCd\n-----END PGP PRIVATE" + " KEY BLOCK-----"
+	if got := Match(pgp); got != "private_key" {
+		t.Fatalf("PGP private key block matched %q, want private_key", got)
+	}
+	// JSON-escaped PEM: literal backslash-n separators, as in a service-account key file.
+	escaped := `{"private_key": "` + pem("") + `\n` + body[:48] + `\n` + body[48:] + `\n-----END` + ` PRIVATE KEY-----\n"}`
+	if got := Match(escaped); got != "private_key" {
+		t.Fatalf("JSON-escaped PEM matched %q, want private_key", got)
+	}
+	// Padding and line breaks alone do not make key material (minor review note).
+	if got := Match(pem("") + "\n" + strings.Repeat("=\n", 40)); got != "" {
+		t.Fatalf("padding-only body matched %q", got)
+	}
 	// A detector's own pattern text, a bare header and a public key are not key material.
 	for _, input := range []string{
 		"re.compile(r'-----BEGIN (?:RSA |OPENSSH )?PRIVATE KEY-----')",
