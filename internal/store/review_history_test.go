@@ -251,6 +251,16 @@ func TestChangeCheckDeliveryID(t *testing.T) {
 	if err != nil || strings.Contains(string(m), "delivery_id") {
 		t.Fatalf("a check without delivery carries the key: %s %v", m, err)
 	}
+	// The same values and observed_at under a new delivery id: the row stores the
+	// new delivery. The same values without one leave the row alone.
+	checks(3, "d-4", lint)
+	if got := delivery(); got["lint"] == nil || *got["lint"] != "d-4" || *got["build"] != "d-1" {
+		t.Fatalf("an unchanged check under a new delivery: lint=%v", got["lint"])
+	}
+	checks(3, "", lint)
+	if got := delivery(); got["lint"] == nil || *got["lint"] != "d-4" {
+		t.Fatalf("an unchanged check in a write without delivery_id lost its delivery: %v", got["lint"])
+	}
 	// Validation: same as the state write's delivery_id.
 	now := time.Now().UTC()
 	w := ChangeChecksWrite{HeadSHA: testSHA1, ObservedAt: now, Source: "webhook", DeliveryID: strings.Repeat("d", 129)}

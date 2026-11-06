@@ -673,6 +673,10 @@ func applyStateTx(ctx context.Context, tx pgx.Tx, c changeLock, w ChangeStateWri
 	return ChangeSectionResult{Applied: true, Redacted: redacted}, err
 }
 
+// applyChecksTx upserts the checks. A row whose values are unchanged is not
+// rewritten, except that a write carrying a delivery_id stores it when it
+// differs: the write "wrote" the row, so the read reports that delivery. An
+// unchanged row in a write without a delivery_id is left alone.
 func applyChecksTx(ctx context.Context, tx pgx.Tx, c changeLock, w ChangeChecksWrite) (ChangeSectionResult, error) {
 	if olderThan(c.checksObserved, w.ObservedAt) {
 		return staleResult, nil
@@ -687,7 +691,8 @@ ON CONFLICT(change_id,head_sha,name) DO UPDATE SET state=EXCLUDED.state,conclusi
 	started_at=EXCLUDED.started_at,completed_at=EXCLUDED.completed_at,observed_at=EXCLUDED.observed_at,source=EXCLUDED.source,gone=false,
 	delivery_id=EXCLUDED.delivery_id
 WHERE (change_checks.state,change_checks.conclusion,change_checks.url,change_checks.required,change_checks.started_at,change_checks.completed_at,change_checks.observed_at,change_checks.source,change_checks.gone)
-	IS DISTINCT FROM (EXCLUDED.state,EXCLUDED.conclusion,EXCLUDED.url,EXCLUDED.required,EXCLUDED.started_at,EXCLUDED.completed_at,EXCLUDED.observed_at,EXCLUDED.source,EXCLUDED.gone)`,
+	IS DISTINCT FROM (EXCLUDED.state,EXCLUDED.conclusion,EXCLUDED.url,EXCLUDED.required,EXCLUDED.started_at,EXCLUDED.completed_at,EXCLUDED.observed_at,EXCLUDED.source,EXCLUDED.gone)
+	OR (EXCLUDED.delivery_id IS NOT NULL AND change_checks.delivery_id IS DISTINCT FROM EXCLUDED.delivery_id)`,
 			c.id, w.HeadSHA, k.Name, k.State, nullStr(k.Conclusion), nullStr(k.URL), k.Required, k.StartedAt, k.CompletedAt, w.ObservedAt, w.Source, nullStr(w.DeliveryID))
 	}
 	if w.Complete {
