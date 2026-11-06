@@ -1,0 +1,4 @@
+.hk-monoref { display: inline-flex; align-items: center; gap: var(--hk-space-1); min-width: 0; max-width: 100%; }
+.hk-monoref-copy { min-height: var(--hk-space-6); border: 0; border-radius: var(--hk-radius-badge); background: transparent; color: var(--hk-text-muted); cursor: pointer; font-size: var(--hk-type-row); transition: background-color var(--hk-motion-fast), color var(--hk-motion-fast); }
+.hk-monoref-copy:hover { background: var(--hk-badge-fill); color: var(--hk-text-primary); }
+.hk-monoref-copy[data-copied="true"] { color: var(--hk-chip-done-fg); }

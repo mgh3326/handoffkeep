@@ -1,4 +1,4 @@
-import { act, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import { matchRoute, navKey } from "../app/routes";
 import { Shell } from "../app/Shell";
@@ -21,7 +21,9 @@ it("D2 renders ordered service cards and waiting task links", async () => {
 });
 it("D3 renders ten recent attempts including failures and rollback", async () => {
  render(<DeploysPage fetchStatus={async () => fixture()} />); const list = await screen.findByLabelText("a 최근 배포");
- expect(list.querySelectorAll("[data-result]")).toHaveLength(10); for (const result of ["success", "failed", "rolled_back"]) expect(within(list).getAllByText(result).length).toBeGreaterThan(0); expect(within(list).getByRole("note").textContent).toContain("서빙 판이 바뀌었을 수 있음");
+ expect(list.querySelectorAll("[data-result]")).toHaveLength(3);
+ fireEvent.click(screen.getAllByRole("button", {name: "나머지 7건 더 보기"})[0]);
+ expect(list.querySelectorAll("[data-result]")).toHaveLength(10); for (const label of ["성공", "실패", "롤백"]) expect(within(list).getAllByText(label).length).toBeGreaterThan(0); expect(within(list).getByRole("note").textContent).toContain("서빙 판이 바뀌었을 수 있음");
 });
 it("D4 polls every 15 seconds and parks while hidden", async () => {
  vi.useFakeTimers(); let hidden = false; vi.spyOn(document, "hidden", "get").mockImplementation(() => hidden); const fetchStatus = vi.fn(async () => fixture()); render(<DeploysPage fetchStatus={fetchStatus} />); await settle();
@@ -40,4 +42,5 @@ it("D6 sets the waiting title and rejects malformed history", async () => {
 });
 it("D7 preserves the advisory and warning content", async () => {
  const data = fixture(); data.services[0].docs_capped = true; data.services[0].invalid_count = 1; data.services[0].invalid = [{key: "bad/key", reasons: ["schema"]}]; render(<DeploysPage fetchStatus={async () => data} />); expect(await screen.findByText("bad/key")).toBeTruthy(); expect(screen.getByText(/기록 조회 상한/)).toBeTruthy();
+ expect(screen.getByTestId("deploy-invalid-warning").hasAttribute("open")).toBe(false);
 });
