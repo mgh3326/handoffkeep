@@ -406,7 +406,8 @@ func TestChangeBatchAtomic(t *testing.T) {
 	// A database failure after the first section rolls the earlier ones back
 	// too: a findings write whose head violates nothing in the validator but
 	// the reviews insert is forced to fail by a clashing check constraint.
-	g := newStateFixture(t, "atomic2")
+	g := f
+	g.ref.PR = 2 // a second PR in the same schema: a second schemaStore would clash on pg_trgm (hk 3196)
 	if _, err = g.s.pool.Exec(t.Context(), `ALTER TABLE change_findings ADD CONSTRAINT never CHECK(false)`); err != nil {
 		t.Fatal(err)
 	}
