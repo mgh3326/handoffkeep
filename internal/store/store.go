@@ -541,7 +541,9 @@ type RelayEvent struct {
 }
 
 type Store struct {
-	pool        *pgxpool.Pool
+	pool *pgxpool.Pool
+	// registry replaces migrationRegistry when set; tests use it.
+	registry    []migration
 	linearSync  atomic.Bool
 	linearBoard atomic.Bool
 	wrk         atomic.Pointer[wrkrecords.Engine]
@@ -744,7 +746,10 @@ type SearchResult struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
-func Open(ctx context.Context, url string) (*Store, error) {
+func Open(ctx context.Context, url string) (*Store, error) { return open(ctx, url, nil) }
+
+// open is Open with an explicit migration registry; nil means the real one.
+func open(ctx context.Context, url string, registry []migration) (*Store, error) {
 	if !strings.HasPrefix(url, "postgres://") && !strings.HasPrefix(url, "postgresql://") {
 		return nil, errors.New("HANDOFFKEEP_DB_URL must be a PostgreSQL URL")
 	}
@@ -756,7 +761,7 @@ func Open(ctx context.Context, url string) (*Store, error) {
 		p.Close()
 		return nil, err
 	}
-	s := &Store{pool: p}
+	s := &Store{pool: p, registry: registry}
 	if err = retryDeadlock(ctx, migrateAttempts, s.migrateIfBehind); err != nil {
 		p.Close()
 		return nil, err
@@ -768,7 +773,11 @@ func Open(ctx context.Context, url string) (*Store, error) {
 // it writes. On a current schema it takes no table lock, so opening a store
 // beside live writers cannot deadlock with them (lockorder.go, level 1).
 func (s *Store) migrateIfBehind(ctx context.Context) error {
-	current, err := migrateCurrent(ctx, s.pool)
+	ordered, err := orderMigrations(s.migrations())
+	if err != nil {
+		return err
+	}
+	current, err := migrateCurrent(ctx, s.pool, ordered)
 	if err != nil || current {
 		return err
 	}
@@ -797,7 +806,20 @@ func retryDeadlock(ctx context.Context, attempts int, f func(context.Context) er
 	return err
 }
 func (s *Store) Close() { s.pool.Close() }
+
+// migrations is the registry this store migrates with.
+func (s *Store) migrations() []migration {
+	if s.registry != nil {
+		return s.registry
+	}
+	return migrationRegistry
+}
+
 func (s *Store) migrate(ctx context.Context) error {
+	ordered, err := orderMigrations(s.migrations())
+	if err != nil {
+		return err
+	}
 	// Multiple test binaries (and multiple service replicas at deployment) may
 	// open the same database concurrently. Serialize additive DDL so PostgreSQL
 	// catalog creation cannot race before IF NOT EXISTS observes the first row.
@@ -1263,7 +1285,14 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := migrateOnce(ctx, tx, 51, func() error { return execAll(ctx, tx, changeStateV51) }); err != nil {
 		return err
 	}
-	if err := migrateOnce(ctx, tx, 52, func() error { return execAll(ctx, tx, deploysV52) }); err != nil {
+	if err := migrateOnce(ctx, tx, 52, func() error { return execAll(ctx, tx, reviewHistoryV52) }); err != nil {
+		return err
+	}
+	// 53 is the last integer version; every later migration is a registry ID.
+	if err := migrateOnce(ctx, tx, 53, func() error { return execAll(ctx, tx, schemaMigrationsV53) }); err != nil {
+		return err
+	}
+	if err := migrateRegistered(ctx, tx, ordered); err != nil {
 		return err
 	}
 

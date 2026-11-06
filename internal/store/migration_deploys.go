@@ -1,7 +1,13 @@
 package store
 
-// Version 52 adds the work record's deploy tables (hk 3036; design hk:doc
-// design/2026-11-06/hk-work-record-design-v1.2 §2, §5 and §13.1 R6). Until
+import (
+	"context"
+
+	"github.com/jackc/pgx/v5"
+)
+
+// Migration 20261106-deploy-records adds the work record's deploy tables
+// (hk 3036; design hk:doc design/2026-11-06/hk-work-record-design-v1.2 §2, §5 and §13.1 R6). Until
 // now a deploy existed only as a deploy-record document, so hk could not say
 // which changes an attempt shipped to which target, nor which merged changes
 // still wait for a deploy. services is the operator's registry of deployable
@@ -13,7 +19,7 @@ package store
 // lock on changes (deploy_changes.change_id) and on services (deploys.service)
 // while the constraints are added; the referencing tables are empty, so the
 // validation is instant. No existing row is read or written.
-var deploysV52 = []string{
+var deploysMigration = []string{
 	`CREATE TABLE IF NOT EXISTS services (
 		name TEXT PRIMARY KEY,
 		repo TEXT NOT NULL,
@@ -52,5 +58,10 @@ var deploysV52 = []string{
 		CHECK(included = (matched_pattern IS NOT NULL))
 	)`,
 	`CREATE INDEX IF NOT EXISTS deploy_changes_change ON deploy_changes(change_id)`,
-	`INSERT INTO schema_version(version) VALUES (52)`,
+}
+
+func init() {
+	registerMigration(migration{ID: "20261106-deploy-records", Apply: func(ctx context.Context, tx pgx.Tx) error {
+		return execAll(ctx, tx, deploysMigration)
+	}})
 }

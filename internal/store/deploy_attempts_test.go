@@ -46,6 +46,10 @@ func TestDeploysMigration(t *testing.T) {
 	if err := s.pool.QueryRow(ctx, `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != SchemaVersion {
 		t.Fatalf("max(version)=%d err=%v, want %d", version, err, SchemaVersion)
 	}
+	var recorded bool
+	if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE id='20261106-deploy-records')`).Scan(&recorded); err != nil || !recorded {
+		t.Fatalf("migration id recorded=%v err=%v", recorded, err)
+	}
 	insertSvc := `INSERT INTO services(name,repo,path_patterns,deploy_mode,targets,created_at,updated_at) VALUES($1,'example/mig',$2,$3,$4,now(),now())`
 	if _, err := s.pool.Exec(ctx, insertSvc, "nopattern", []string{}, "manual", []string{"a"}); err == nil {
 		t.Fatal("a service without a pattern was accepted")
