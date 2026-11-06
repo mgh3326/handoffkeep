@@ -254,6 +254,6 @@ it("toggles one translated title and marks a stale one", async () => {
   render(<WorkPage />);
   expect(await screen.findByText("작업 번역")).toBeTruthy();
   expect(screen.getByText("갱신 필요")).toBeTruthy();
-  fireEvent.click(screen.getByRole("button", { name: "원문" }));
+  fireEvent.click(screen.getByRole("button", { name: "원문 보기" }));
   expect(screen.getByText("Task one")).toBeTruthy();
 });

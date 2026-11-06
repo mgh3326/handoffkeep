@@ -28,6 +28,6 @@
 .work-filter-sheet summary::-webkit-details-marker { display: none; }
 
 .work-translation-row { position: relative; }
-.work-translation-row > button { position: absolute; right: var(--hk-space-2); top: var(--hk-space-1); }
-.work-translation-row:has(> button) .work-row-title { padding-right: var(--hk-space-12); }
+.work-translation-row > .hk-translation-indicator { position: absolute; right: var(--hk-space-2); top: var(--hk-space-1); }
+.work-translation-row:has(> .hk-translation-indicator) .work-row-title { padding-right: var(--hk-space-12); }
 .work-row-title small { color: var(--hk-text-muted); }

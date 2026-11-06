@@ -64,8 +64,7 @@ export function Shell({ current, children }: { current: NavKey | null; children:
         <a className="hk-shell-brand" href="/ui">
           handoffkeep
         </a>
-        <OriginalPreference />
-        <ThemeChoice />
+        <div className="hk-shell-controls"><OriginalPreference /><ThemeChoice /></div>
       </header>
       <nav className="hk-shell-nav" aria-label="콘솔 내비게이션">
         {destinations.map((d) => (

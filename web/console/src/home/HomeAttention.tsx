@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useShowOriginal } from "../shared/translation";
+import { TranslationIndicator, translationAction, useShowOriginal } from "../shared/translation";
 import { Icon, IconFrame } from "../shared/Icon";
 import { StateIcon } from "../shared/StateIcon";
 import { readStored, writeStored } from "../shared/storage";
@@ -54,29 +54,29 @@ function Row({ item, now, seen, markSeen }: { item: Item; now: string; seen: boo
   useEffect(() => setOverride(null), [globalOriginal]);
   const showOriginal = override ?? globalOriginal;
   let stale = false, hasTranslation = false;
-  let href: string, id: number, title: string, summary: string;
+  let href: string, id: number, title: string, original: string, summary: string;
   let icon: React.ReactNode, chips: React.ReactNode;
   if (item.kind === "decision") {
     const x = item.value;
     href = x.source === "request" ? `/ui/decisions/${x.id}` : "/ui/decisions";
-    id = x.id; stale = !!x.question_ko_stale; hasTranslation = !!x.question_ko; title = summarizeQuestion(!showOriginal && x.question_ko && !stale ? x.question_ko : x.question) || "질문 없음"; summary = "결정 대기";
+    id = x.id; stale = !!x.question_ko_stale; hasTranslation = translationAction.applicable(x.question_ko, stale); original = x.question; title = summarizeQuestion(hasTranslation ? x.question_ko ?? x.question : x.question) || "질문 없음"; summary = "결정 대기";
     icon = <StateIcon state="awaiting_decision" />;
     chips = <><Chip kind="status" state="awaiting_decision" label={x.source === "request" ? "요청" : "알림"} />{x.overdue ? <Chip kind="status" state="stalled" stalled label="기한 경과" /> : x.due_at ? <Chip kind="status" state="triage" label={`기한 ${age(x.due_at, now)} 남음`} /> : null}<Chip kind="lane" lane={x.lane} /></>;
   } else if (item.kind === "task") {
     const x = item.value;
-    href = `/ui/tasks/${x.id}`; id = x.id; stale = !!x.title_ko_stale; hasTranslation = !!x.title_ko; title = !showOriginal && x.title_ko && !stale ? x.title_ko : x.title; summary = x.reason === "stalled" ? "멈춘 작업" : "결정 대기 작업";
+    href = `/ui/tasks/${x.id}`; id = x.id; stale = !!x.title_ko_stale; hasTranslation = translationAction.applicable(x.title_ko, stale); original = x.title; title = hasTranslation ? x.title_ko ?? x.title : x.title; summary = x.reason === "stalled" ? "멈춘 작업" : "결정 대기 작업";
     icon = x.reason === "stalled" ? <Icon name="warning" /> : <StateIcon state={x.state} />;
     chips = <><Chip kind="status" state={x.state} stalled={x.reason === "stalled"} label={x.reason === "stalled" ? "멈춤" : undefined} /><Chip kind="lane" lane={x.lane} /></>;
   } else {
     const x = item.value;
-    href = `/ui/tasks/${x.task_id}`; id = x.task_id; stale = !!x.title_ko_stale; hasTranslation = !!x.title_ko; title = !showOriginal && x.title_ko && !stale ? x.title_ko : x.title; summary = "머지 후 미배포";
+    href = `/ui/tasks/${x.task_id}`; id = x.task_id; stale = !!x.title_ko_stale; hasTranslation = translationAction.applicable(x.title_ko, stale); original = x.title; title = hasTranslation ? x.title_ko ?? x.title : x.title; summary = "머지 후 미배포";
     icon = <StateIcon state="merged" />; chips = <Chip kind="lane" lane={x.service} />;
   }
   return <li className={`ha-item${seen ? " ha-item--seen" : ""}`}><a className="ha-row" href={href} onClick={() => markSeen(item.key)}>
     <span className="ha-icon">{icon}</span><span className="ha-content">
       <span className="ha-line"><span className="ha-dot" aria-hidden="true" /><span className="hk-sr-only">{seen ? "읽음" : "읽지 않음"}</span><Mono>#{id}</Mono><span className="ha-row-title">{title}{stale && <small className="hk-translation-stale"> 갱신 필요</small>}</span><time dateTime={item.time} title={formatMinuteUTC(item.time) ?? "시각 미상"}>{age(now, item.time)}</time></span>
       <span className="ha-detail"><span className="ha-summary">{summary}</span><span className="ha-chips">{chips}</span></span>
-    </span></a>{hasTranslation && !stale && <button type="button" aria-pressed={showOriginal} onClick={() => setOverride(!showOriginal)}>{showOriginal ? "번역" : "원문"}</button>}</li>;
+    </span></a>{hasTranslation && <TranslationIndicator expanded={showOriginal} onChange={setOverride} />}{hasTranslation && showOriginal && <span className="hk-original-text">{original}</span>}</li>;
 }
 function Body({ data }: { data: Attention }) {
   const [seen, setSeen] = useState(readSeen);

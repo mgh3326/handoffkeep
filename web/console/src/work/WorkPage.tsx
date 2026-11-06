@@ -12,7 +12,7 @@ import { formatMinuteKST } from "../shared/time";
 import { formatAge } from "../decisions/format";
 import { inView, views, type View } from "./views";
 import { TaskRecord } from "./TaskRecord";
-import { useShowOriginal } from "../shared/translation";
+import { TranslationIndicator, translationAction, useShowOriginal } from "../shared/translation";
 import "./work.css";
 const labels: Record<View, string> = { "needs-me": "내 차례", active: "진행 중", backlog: "대기", shipped: "완료", all: "전체" };
 export function WorkPage() {
@@ -70,9 +70,9 @@ export function WorkPage() {
       return <section key={group}><h2 className="work-group">{{decision: "결정 필요", input: "분류 대기", working: "진행 중", failed: "실패", done: "완료", neutral: "대기"}[group]} · {rows.length}</h2>{rows.map(t => {
         const job = t.active_job;
         return <div className="work-translation-row" key={t.id}><a id={`work-row-${t.id}`} href={`/ui/tasks/${t.id}`} aria-current={selected === String(t.id) ? "true" : undefined} onKeyDown={e => { if (wide && e.key === "Enter") { e.preventDefault(); update("task", String(t.id)); } }} onClick={e => { if (wide && !e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey) { e.preventDefault(); update("task", String(t.id)); } }}>
-          <span className="work-row-title"><StateIcon state={t.state} /><Mono>#{t.id}</Mono> <span title={t.title}>{!(originalItems[t.id] ?? showOriginal) && t.title_ko && !t.title_ko_stale ? t.title_ko : t.title}{t.title_ko_stale && <small className="hk-translation-stale"> 갱신 필요</small>}</span></span>
+          <span className="work-row-title"><StateIcon state={t.state} /><Mono>#{t.id}</Mono> <span title={t.title}>{translationAction.applicable(t.title_ko, t.title_ko_stale) ? t.title_ko : t.title}{t.title_ko_stale && <small className="hk-translation-stale"> 갱신 필요</small>}</span></span>
           <span className="work-row-meta"><Chip kind="status" state={t.state} awaiting_decision={t.awaiting_decision} />{job && <span className="hk-chip work-job" title={[job.role, job.model, job.profile, job.host || "기기 미기록", job.harness, job.effort].filter(Boolean).join(" · ")}>{[job.role, job.model, job.profile, job.host || "기기 미기록"].filter(Boolean).join(" · ")}</span>}<Chip kind="lane" lane={t.lane} /><Chip kind="priority" value={t.priority} urgent={t.priority === 1} /><time dateTime={t.updated_at} title={formatMinuteKST(t.updated_at) || t.updated_at}>{formatAge(board?.generatedAt || "", t.updated_at) || "시각 미상"}</time></span>
-        </a>{t.title_ko && !t.title_ko_stale && <button type="button" aria-pressed={originalItems[t.id] ?? showOriginal} onClick={() => setOriginalItems(items => ({...items, [t.id]: !(items[t.id] ?? showOriginal)}))}>{(originalItems[t.id] ?? showOriginal) ? "번역" : "원문"}</button>}</div>;
+        </a>{translationAction.applicable(t.title_ko, t.title_ko_stale) && <><TranslationIndicator expanded={originalItems[t.id] ?? showOriginal} onChange={expanded => setOriginalItems(items => ({...items, [t.id]: expanded}))} />{(originalItems[t.id] ?? showOriginal) && <span className="hk-original-text">{t.title}</span>}</>}</div>;
       })}</section>;
     })}</div>
   </section>{wide && selected && /^[1-9][0-9]*$/.test(selected) && <aside className="work-pane"><button onClick={() => update("task", "")}>Close</button><TaskRecord id={Number(selected)} /></aside>}</div>;

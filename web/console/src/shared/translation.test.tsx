@@ -5,15 +5,15 @@ import { STORAGE_KEYS } from "./storage";
 
 beforeEach(() => localStorage.clear());
 it("shows fresh Korean first and toggles each item and the global preference", () => {
-  render(<><OriginalPreference /><TranslatedText original="Original" korean="번역" /><TranslatedText original="Second" korean="두 번째" /></>);
-  expect(screen.getByText("번역")).toBeTruthy();
-  fireEvent.click(screen.getAllByRole("button", { name: "원문" })[0]);
+  render(<><OriginalPreference /><TranslatedText original="Original" korean="첫 번째" /><TranslatedText original="Second" korean="두 번째" /></>);
+  expect(screen.getByText("첫 번째")).toBeTruthy();
+  fireEvent.click(screen.getAllByRole("button", { name: "원문 보기", expanded: false })[0]);
   expect(screen.getByText("Original")).toBeTruthy();
-  fireEvent.click(screen.getByRole("button", { name: "원문 전체 보기" }));
+  fireEvent.click(screen.getByRole("button", { name: "원문 보기", pressed: false }));
   expect(screen.getByText("Second")).toBeTruthy();
   expect(localStorage.getItem(STORAGE_KEYS.showOriginal)).toBe("true");
-  fireEvent.click(screen.getByRole("button", { name: "원문 전체 보기" }));
-  expect(screen.getByText("번역")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "원문 보기", pressed: true }));
+  expect(screen.getByText("첫 번째")).toBeTruthy();
   expect(screen.getByText("두 번째")).toBeTruthy();
 });
 it("marks stale translations and keeps the original visible", () => {

@@ -33,7 +33,8 @@
 .ha-empty p { margin: 0; }
 .ha-error { color: var(--hk-chip-failed-fg); }
 
-.ha-item { display: flex; align-items: center; }
+.ha-item { display: flex; align-items: center; flex-wrap: wrap; }
 .ha-item .ha-row { flex: 1; min-width: 0; }
-.ha-item > button { flex: none; margin-right: var(--hk-space-2); }
+.ha-item > .hk-translation-indicator { flex: none; margin-right: var(--hk-space-2); }
+.ha-item > .hk-original-text { flex-basis: 100%; margin-left: var(--hk-space-8); }
 .ha-row-title small { color: var(--hk-text-muted); }

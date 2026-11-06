@@ -201,3 +201,9 @@ small {
 }
 
 .hk-translation-stale { color: var(--hk-text-muted); font-weight: var(--hk-weight-normal); }
+
+.hk-shell-controls { display: flex; align-items: center; gap: var(--hk-space-2); margin-left: auto; }
+.hk-translation-indicator { display: inline-flex; align-items: center; border: 0; background: transparent; color: var(--hk-text-muted); font-size: var(--hk-type-meta); padding: var(--hk-space-1); line-height: var(--hk-line-row); cursor: pointer; }
+.hk-translation-indicator:hover { color: var(--hk-text-primary); text-decoration: underline; }
+.hk-translation-indicator:focus-visible { outline: var(--hk-focus-width) solid var(--hk-focus); outline-offset: var(--hk-focus-offset); }
+.hk-original-text { display: block; color: var(--hk-text-secondary); font-size: var(--hk-type-meta); padding: var(--hk-space-1) var(--hk-space-2); white-space: pre-wrap; overflow-wrap: anywhere; }
