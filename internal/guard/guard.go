@@ -6,6 +6,11 @@ import (
 	"regexp"
 )
 
+// linePrefix matches the quote or comment markers that may start a PEM line:
+// ">", "#", "//" or "*", each optionally followed by spaces and repeatable
+// ("> > "). It matches empty for an unprefixed line.
+const linePrefix = `(?:[ \t]*(?:[>#*]|//)[ \t]*)*`
+
 var patterns = []struct {
 	name string
 	re   *regexp.Regexp
@@ -24,8 +29,11 @@ var patterns = []struct {
 	// does an OpenPGP armored PRIVATE KEY BLOCK (Version/Comment lines) and a
 	// JSON-escaped PEM (literal \\n separators, e.g. a cloud service-account
 	// key's private_key value). The body needs 40 base64 alphabet characters;
-	// '=' padding and line breaks do not count toward them.
-	{"private_key", regexp.MustCompile(`-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----(?:\s|\\[rn])+(?:[A-Za-z-]+:[^\r\n\\]*(?:\r?\n|(?:\\r)?\\n))*(?:\s|\\[rn])*(?:[A-Za-z0-9+/](?:[=\r\n]|\\[rn])*){40,}`)},
+	// '=' padding and line breaks do not count toward them. Every line may
+	// carry a quote or comment prefix ("> ", "# ", "// ", " * ", repeated
+	// like "> > "), so a key pasted into a comment or blockquote is still
+	// key material (hk 3319).
+	{"private_key", regexp.MustCompile(`-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----(?:\s|\\[rn])+(?:` + linePrefix + `[A-Za-z-]+:[^\r\n\\]*(?:\r?\n|(?:\\r)?\\n))*(?:` + linePrefix + `(?:\s|\\[rn]))*` + linePrefix + `(?:[A-Za-z0-9+/](?:=|(?:\r?\n|\r|\\[rn])` + linePrefix + `)*){40,}`)},
 	{"bearer_token", regexp.MustCompile(`(?i)\bBearer [A-Za-z0-9._-]{20,}`)},
 	{"token_assignment", regexp.MustCompile(`(?m)\b[A-Z_]*(?:TOKEN|SECRET|KEY)=[^\s]{12,}`)},
 	{"github_fine_grained_token", regexp.MustCompile(`\bgithub_pat_[A-Za-z0-9_]{82}\b`)},
