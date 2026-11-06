@@ -1,28 +1,5 @@
-/* #620 deploys page — tokens only, no color literals (same rule as proto.css
- * and grades.css). DeployPanel's classes live here: the panel's layout styles
- * are inline, and these cover the few class hooks it uses. */
-
-.dp-root {
-  padding: 0 20px 32px;
-  max-width: 1200px;
-}
-
-.dp-head h1 {
-  font-size: 18px;
-  margin: 8px 0 2px;
-  color: var(--hk-text-primary);
-}
-
-.dp-sub {
-  margin: 0 0 12px;
-  color: var(--hk-text-secondary);
-  font-size: 13px;
-}
-
-.dp-warn {
-  color: var(--hk-warning);
-}
-
-.muted {
-  color: var(--hk-text-muted);
-}
+.dp-root { padding: var(--hk-space-4); min-width: 0; }
+.dp-head { margin: 0 var(--hk-space-4); }
+.dp-sub, .muted { color: var(--hk-text-muted); }
+.dp-warn { color: var(--hk-warning); }
+.dp-key { overflow-wrap: anywhere; }

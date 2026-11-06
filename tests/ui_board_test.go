@@ -125,7 +125,7 @@ func TestUIBoardPageCSPAndNoSecret(t *testing.T) {
 	}
 	assertNoSecret(t, body, response.Header, fleetTestSecret, "http://hub.internal:9000")
 
-	for _, asset := range []string{"shell.js", "shell.css", "deploys.js", "deploys.css"} {
+	for _, asset := range []string{"shell.js", "shell.css"} {
 		response = uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/static/console/"+asset, assertion, "")
 		if response.StatusCode != http.StatusOK {
 			t.Fatalf("console asset %s status=%d", asset, response.StatusCode)
@@ -614,5 +614,18 @@ func TestUIBoardStoreFailure(t *testing.T) {
 			t.Fatalf("%s status=%d", path, response.StatusCode)
 		}
 		response.Body.Close()
+	}
+}
+
+func TestUIDeploysShellRoute(t *testing.T) {
+	s := uiStore(t)
+	fixture := newUIJWTFixture(t)
+	h := newUITestServer(t, s, fixture, "", "", 0)
+	defer h.Close()
+	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
+	response := uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/deploys", assertion, "")
+	body := responseText(t, response)
+	if response.StatusCode != http.StatusOK || !strings.Contains(body, `id="shell-root"`) || !strings.Contains(body, `<meta name="hk-csrf"`) || response.Header.Get("Content-Security-Policy") != ui.ConsoleCSP {
+		t.Fatalf("deploys shell status=%d body=%s", response.StatusCode, body)
 	}
 }

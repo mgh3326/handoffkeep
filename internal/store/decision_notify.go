@@ -12,16 +12,20 @@ import (
 
 // Every decision request gets one Discord message (docs/decision-discord.md).
 // The transaction that opens a decision_requests row inserts its
-// decision_notify row (openDecisionTx), so a post is owed exactly when the
-// request exists. Closing a request writes nothing here: the answer, supersede
-// or expiry is already committed on the request row, and a request whose
-// status differs from the decision_notify row's last_status is an edit the
-// worker owes. Expiry has no transaction of its own (DecisionStatusExpired is
-// derived from expires_at), so this is also how an expiry reaches the channel.
+// decision_deliveries row (openDecisionTx), one per destination, so a post is
+// owed exactly when the request exists. Closing a request writes nothing here:
+// the answer, supersede or expiry is already committed on the request row, and
+// a request whose effective status differs from the row's applied_version is
+// an edit the worker owes. Expiry has no transaction of its own
+// (DecisionStatusExpired is derived from expires_at), so this is also how an
+// expiry reaches the channel, and why a version is the effective status
+// rather than a stored counter.
 //
-// last_status is what the channel shows: "" before the first post, then the
-// request's status. unsent and failed are final: unsent means the webhook was
-// not configured when the message was due, failed that sending gave up.
+// applied_version is what the destination shows: "" before the first post,
+// then the request's effective status. desired_version is the version the
+// worker last tried to apply. state is pending while the worker owns the row;
+// unsent and failed are final: unsent means the webhook was not configured
+// when the message was due, failed that sending gave up.
 //
 // Requests from source linear are not queued: the Linear flow posts them
 // (RecordLinearDecisionIssue). A request asked through Linear first opens a
@@ -30,19 +34,33 @@ import (
 // before its first post is never posted, so such a request gets the Linear
 // flow's message only.
 //
-// Lock order (lockorder.go): a writer only inserts a new decision_notify key.
-// The worker locks one decision_notify row FOR UPDATE SKIP LOCKED and holds it
-// while it sends, as ProcessNextLinearDecisionOp does; it reads the request
-// and its task without locking them, and nothing else locks an existing
-// decision_notify row. decision_notify_digest is written by the worker only.
+// Lock order (lockorder.go): a writer only inserts a new decision_deliveries
+// key. The worker locks one decision_deliveries row FOR UPDATE SKIP LOCKED and
+// holds it while it sends, as ProcessNextLinearDecisionOp does; it reads the
+// request and its task without locking them, and nothing else locks an
+// existing decision_deliveries row. decision_notify_digest is written by the
+// worker only. The v38 decision_notify table is no longer written.
 
 const (
 	DecisionNoticeUnsent = "unsent"
 	DecisionNoticeFailed = "failed"
+	// DecisionDeliveryPending is a row the worker still owns.
+	DecisionDeliveryPending = "pending"
+	// DecisionDestinationDiscord is the decisions channel webhook, the only
+	// destination so far.
+	DecisionDestinationDiscord = "discord"
 
 	// DecisionNoticePostDelay is how long a new request waits before its first
 	// post. It lets the Linear ask path supersede its task_request row first.
 	DecisionNoticePostDelay = time.Minute
+
+	// DecisionNoticeNearDue is how close to its due time a request's first
+	// post mentions the operator.
+	DecisionNoticeNearDue = 2 * time.Hour
+
+	// DecisionDeliveryLagAge is how long a pending row may sit past its
+	// next attempt behind its request before hygiene counts it as lagging.
+	DecisionDeliveryLagAge = time.Hour
 
 	// DecisionDigestAge is how long a request has been open before the daily
 	// digest lists it.
@@ -54,6 +72,9 @@ const (
 	// About a day of retries with the shared backoff (30s doubling to an
 	// hour), which outlasts a Discord outage.
 	decisionNoticeMaxAttempts = 32
+
+	// decisionErrorCodeMaxBytes bounds last_error_code.
+	decisionErrorCodeMaxBytes = 100
 )
 
 // decisionSettleTimeout bounds the write that records a send's outcome.
@@ -76,15 +97,18 @@ var ErrDecisionNoticeGaveUp = errors.New("decision_notice_gave_up")
 // DecisionNotice is one request whose channel message is behind it. Record
 // carries the status the message must show now (expired included).
 type DecisionNotice struct {
-	Record     DecisionRecord
-	TaskTitle  string
-	MessageID  string
-	LastStatus string
-	Attempts   int
+	Record         DecisionRecord
+	TaskTitle      string
+	MessageID      string
+	AppliedVersion string
+	Attempts       int
+	// Mention is set on a first post only, for a request that blocks its
+	// task, is human_only, or is due within DecisionNoticeNearDue.
+	Mention bool
 }
 
 // Post reports whether the notice is the first message rather than an edit.
-func (n DecisionNotice) Post() bool { return n.LastStatus == "" }
+func (n DecisionNotice) Post() bool { return n.AppliedVersion == "" }
 
 // DecisionDigest is the day's list of requests open longer than
 // DecisionDigestAge, oldest first. Total counts them all; Items holds at most
@@ -101,14 +125,24 @@ func queueDecisionNoticeTx(ctx context.Context, tx pgx.Tx, requestID int64, sour
 		return nil
 	}
 	at = at.UTC()
-	_, err := tx.Exec(ctx, `INSERT INTO decision_notify(request_id,next_attempt_at,created_at) VALUES($1,$2,$3) ON CONFLICT(request_id) DO NOTHING`,
-		requestID, at.Add(DecisionNoticePostDelay), at)
+	_, err := tx.Exec(ctx, `INSERT INTO decision_deliveries(request_id,destination,state,next_attempt_at,created_at) VALUES($1,$2,'pending',$3,$4) ON CONFLICT(request_id,destination) DO NOTHING`,
+		requestID, DecisionDestinationDiscord, at.Add(DecisionNoticePostDelay), at)
 	return err
 }
 
 // decisionEffectiveStatusSQL is scanDecisionRecord's status in SQL, for the
 // request row aliased d and the clock in $1.
 const decisionEffectiveStatusSQL = `CASE WHEN d.status='open' AND d.expires_at<=$1::timestamptz THEN 'expired' ELSE d.status END`
+
+// decisionMentionSQL is DecisionNotice.Mention for the delivery aliased n,
+// request d and task t, with the near-due cutoff in $2: a first post of a
+// request whose task awaits a decision, whose task's current structured
+// request is this one and human_only, or that is due by the cutoff. A request
+// without a task or due time reads NULL in those terms, so the whole is
+// coalesced to false.
+const decisionMentionSQL = `coalesce(n.applied_version='' AND (coalesce(t.awaiting_decision,false)
+		OR (d.source='` + DecisionSourceTaskRequest + `' AND t.refs->'decision_request'->>'id'=d.source_ref AND t.refs->'decision_request'->'human_only'='true'::jsonb)
+		OR d.due_at<=$2::timestamptz),false)`
 
 var decisionRecordColumnsD = "d." + strings.ReplaceAll(decisionRecordColumns, ",", ",d.")
 
@@ -126,12 +160,22 @@ func scanDecisionNoticeRow(row pgx.Row, x *DecisionNotice, now time.Time, extra 
 	return nil
 }
 
-// ProcessNextDecisionNotice runs the next due notice through send and records
-// the result. send returns the message id of a first post. A request that
-// closed before its first post is settled without calling send, and so is a
-// later change to a request that never got a message. A failure
-// retries with backoff until the attempts run out, then the row stays failed.
-// found is false when nothing is due.
+// decisionErrorCode is the stored form of a send error: its text before the
+// first colon, such as "decision_notice_rejected" or "discord webhook status
+// 500". The full error goes to the worker's log.
+func decisionErrorCode(err error) string {
+	code, _, _ := strings.Cut(err.Error(), ":")
+	return firstBytes(strings.TrimSpace(code), decisionErrorCodeMaxBytes)
+}
+
+// ProcessNextDecisionNotice runs the next due delivery through send and
+// records the result. A row is due when it is pending, its next attempt has
+// come and applied_version differs from the request's effective status.
+// send returns the message id of a first post. A request that closed before
+// its first post is settled without calling send, and so is a later change to
+// a request that never got a message. A failure retries with backoff until
+// the attempts run out, then the row stays failed. found is false when
+// nothing is due.
 func (s *Store) ProcessNextDecisionNotice(ctx context.Context, now time.Time, send func(context.Context, DecisionNotice) (string, error)) (found bool, sendErr error, err error) {
 	now = now.UTC()
 	tx, err := s.pool.Begin(ctx)
@@ -140,11 +184,12 @@ func (s *Store) ProcessNextDecisionNotice(ctx context.Context, now time.Time, se
 	}
 	defer tx.Rollback(ctx)
 	var x DecisionNotice
-	err = scanDecisionNoticeRow(tx.QueryRow(ctx, `SELECT `+decisionRecordColumnsD+`,coalesce(t.title,''),n.message_id,n.last_status,n.attempts
-		FROM decision_notify n JOIN decision_requests d ON d.id=n.request_id LEFT JOIN tasks t ON t.id=d.task_id
-		WHERE n.last_status IN ('','open','expired') AND n.next_attempt_at<=$1::timestamptz
-		AND (n.last_status='' OR n.last_status<>`+decisionEffectiveStatusSQL+`)
-		ORDER BY n.next_attempt_at ASC,n.request_id ASC LIMIT 1 FOR UPDATE OF n SKIP LOCKED`, now), &x, now, &x.MessageID, &x.LastStatus, &x.Attempts)
+	err = scanDecisionNoticeRow(tx.QueryRow(ctx, `SELECT `+decisionRecordColumnsD+`,coalesce(t.title,''),n.message_id,n.applied_version,n.attempts,`+decisionMentionSQL+`
+		FROM decision_deliveries n JOIN decision_requests d ON d.id=n.request_id LEFT JOIN tasks t ON t.id=d.task_id
+		WHERE n.destination='`+DecisionDestinationDiscord+`' AND n.state='pending' AND n.next_attempt_at<=$1::timestamptz
+		AND n.applied_version<>`+decisionEffectiveStatusSQL+`
+		ORDER BY n.next_attempt_at ASC,n.request_id ASC LIMIT 1 FOR UPDATE OF n SKIP LOCKED`, now, now.Add(DecisionNoticeNearDue)),
+		&x, now, &x.MessageID, &x.AppliedVersion, &x.Attempts, &x.Mention)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil, nil
 	}
@@ -152,13 +197,17 @@ func (s *Store) ProcessNextDecisionNotice(ctx context.Context, now time.Time, se
 		return false, nil, err
 	}
 	want := x.Record.Status
+	const key = `WHERE request_id=$1 AND destination='` + DecisionDestinationDiscord + `'`
 	// A request that closed before its first post is never posted, and one
 	// that was never posted has no message to edit.
 	if (x.Post() && want != DecisionStatusOpen) || (!x.Post() && x.MessageID == "") {
-		if _, err = tx.Exec(ctx, `UPDATE decision_notify SET last_status=$2 WHERE request_id=$1`, x.Record.ID, want); err != nil {
+		if _, err = tx.Exec(ctx, `UPDATE decision_deliveries SET desired_version=$2,applied_version=$2 `+key, x.Record.ID, want); err != nil {
 			return true, nil, err
 		}
 		return true, nil, tx.Commit(ctx)
+	}
+	if _, err = tx.Exec(ctx, `UPDATE decision_deliveries SET desired_version=$2 `+key, x.Record.ID, want); err != nil {
+		return true, nil, err
 	}
 	messageID, sendErr := send(ctx, x)
 	// send may have created the message: record the outcome even if ctx is
@@ -168,22 +217,22 @@ func (s *Store) ProcessNextDecisionNotice(ctx context.Context, now time.Time, se
 	switch {
 	case errors.Is(sendErr, ErrDecisionNoticeSkipped):
 		sendErr = nil
-		_, err = tx.Exec(settle, `UPDATE decision_notify SET last_status='unsent',last_error='' WHERE request_id=$1`, x.Record.ID)
+		_, err = tx.Exec(settle, `UPDATE decision_deliveries SET state='unsent',last_error_code='' `+key, x.Record.ID)
 	case sendErr == nil && x.Post():
-		_, err = tx.Exec(settle, `UPDATE decision_notify SET last_status=$2,message_id=$3,posted_at=$4,attempts=0,last_error='',next_attempt_at=$4 WHERE request_id=$1`,
-			x.Record.ID, want, messageID, now)
+		_, err = tx.Exec(settle, `UPDATE decision_deliveries SET applied_version=desired_version,message_id=$2,posted_at=$3,attempts=0,last_error_code='',next_attempt_at=$3 `+key,
+			x.Record.ID, messageID, now)
 	case sendErr == nil:
-		_, err = tx.Exec(settle, `UPDATE decision_notify SET last_status=$2,edited_at=$3,attempts=0,last_error='',next_attempt_at=$3 WHERE request_id=$1`,
-			x.Record.ID, want, now)
+		_, err = tx.Exec(settle, `UPDATE decision_deliveries SET applied_version=desired_version,edited_at=$2,attempts=0,last_error_code='',next_attempt_at=$2 `+key,
+			x.Record.ID, now)
 	default:
 		attempts := x.Attempts + 1
-		lastError := firstBytes(sendErr.Error(), linearDecisionErrorMaxBytes)
+		code := decisionErrorCode(sendErr)
 		if attempts >= decisionNoticeMaxAttempts || errors.Is(sendErr, ErrDecisionNoticeRejected) {
 			sendErr = fmt.Errorf("%w: request %d: %w", ErrDecisionNoticeGaveUp, x.Record.ID, sendErr)
-			_, err = tx.Exec(settle, `UPDATE decision_notify SET last_status='failed',attempts=$2,last_error=$3 WHERE request_id=$1`, x.Record.ID, attempts, lastError)
+			_, err = tx.Exec(settle, `UPDATE decision_deliveries SET state='failed',attempts=$2,last_error_code=$3 `+key, x.Record.ID, attempts, code)
 		} else {
-			_, err = tx.Exec(settle, `UPDATE decision_notify SET attempts=$2,last_error=$3,next_attempt_at=$4 WHERE request_id=$1`,
-				x.Record.ID, attempts, lastError, now.Add(linearDecisionOpBackoff(x.Attempts)))
+			_, err = tx.Exec(settle, `UPDATE decision_deliveries SET attempts=$2,last_error_code=$3,next_attempt_at=$4 `+key,
+				x.Record.ID, attempts, code, now.Add(linearDecisionOpBackoff(x.Attempts)))
 		}
 	}
 	if err != nil {
@@ -192,26 +241,73 @@ func (s *Store) ProcessNextDecisionNotice(ctx context.Context, now time.Time, se
 	return true, sendErr, tx.Commit(settle)
 }
 
-// DecisionNoticeState is a decision_notify row as stored.
+// DecisionNoticeState is a decision_deliveries row as stored.
 type DecisionNoticeState struct {
-	RequestID  int64      `json:"request_id"`
-	MessageID  string     `json:"message_id"`
-	PostedAt   *time.Time `json:"posted_at"`
-	LastStatus string     `json:"last_status"`
-	EditedAt   *time.Time `json:"edited_at"`
-	Attempts   int        `json:"attempts"`
-	LastError  string     `json:"last_error"`
+	RequestID      int64      `json:"request_id"`
+	Destination    string     `json:"destination"`
+	MessageID      string     `json:"message_id"`
+	DesiredVersion string     `json:"desired_version"`
+	AppliedVersion string     `json:"applied_version"`
+	State          string     `json:"state"`
+	Attempts       int        `json:"attempts"`
+	LastErrorCode  string     `json:"last_error_code"`
+	NextAttemptAt  time.Time  `json:"next_attempt_at"`
+	PostedAt       *time.Time `json:"posted_at"`
+	EditedAt       *time.Time `json:"edited_at"`
 }
 
-// GetDecisionNotice reads the channel state of one request.
+// GetDecisionNotice reads the Discord delivery of one request.
 func (s *Store) GetDecisionNotice(ctx context.Context, requestID int64) (DecisionNoticeState, bool, error) {
 	var x DecisionNoticeState
-	err := s.pool.QueryRow(ctx, `SELECT request_id,message_id,posted_at,last_status,edited_at,attempts,last_error FROM decision_notify WHERE request_id=$1`, requestID).
-		Scan(&x.RequestID, &x.MessageID, &x.PostedAt, &x.LastStatus, &x.EditedAt, &x.Attempts, &x.LastError)
+	err := s.pool.QueryRow(ctx, `SELECT request_id,destination,message_id,desired_version,applied_version,state,attempts,last_error_code,next_attempt_at,posted_at,edited_at
+		FROM decision_deliveries WHERE request_id=$1 AND destination=$2`, requestID, DecisionDestinationDiscord).
+		Scan(&x.RequestID, &x.Destination, &x.MessageID, &x.DesiredVersion, &x.AppliedVersion, &x.State, &x.Attempts, &x.LastErrorCode, &x.NextAttemptAt, &x.PostedAt, &x.EditedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return DecisionNoticeState{}, false, nil
 	}
 	return x, err == nil, err
+}
+
+// DecisionDeliveryCounts is one destination's hygiene: rows by state, and
+// Lagging, the pending rows behind their request for over
+// DecisionDeliveryLagAge past their next attempt.
+type DecisionDeliveryCounts struct {
+	Pending int `json:"pending"`
+	Lagging int `json:"lagging"`
+	Unsent  int `json:"unsent"`
+	Failed  int `json:"failed"`
+}
+
+// DecisionDeliveryHygiene is the delivery hygiene of every destination.
+type DecisionDeliveryHygiene struct {
+	Destinations map[string]DecisionDeliveryCounts `json:"destinations"`
+}
+
+// DecisionDeliveryHygiene counts decision_deliveries rows per destination.
+// Every known destination is present, zero when it has no row.
+func (s *Store) DecisionDeliveryHygiene(ctx context.Context, now time.Time) (DecisionDeliveryHygiene, error) {
+	now = now.UTC()
+	out := DecisionDeliveryHygiene{Destinations: map[string]DecisionDeliveryCounts{DecisionDestinationDiscord: {}}}
+	rows, err := s.pool.Query(ctx, `SELECT n.destination,
+		count(*) FILTER (WHERE n.state='pending'),
+		count(*) FILTER (WHERE n.state='pending' AND n.applied_version<>`+decisionEffectiveStatusSQL+` AND n.next_attempt_at<$2::timestamptz),
+		count(*) FILTER (WHERE n.state='unsent'),
+		count(*) FILTER (WHERE n.state='failed')
+		FROM decision_deliveries n LEFT JOIN decision_requests d ON d.id=n.request_id
+		GROUP BY n.destination ORDER BY n.destination`, now, now.Add(-DecisionDeliveryLagAge))
+	if err != nil {
+		return DecisionDeliveryHygiene{}, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var dest string
+		var c DecisionDeliveryCounts
+		if err := rows.Scan(&dest, &c.Pending, &c.Lagging, &c.Unsent, &c.Failed); err != nil {
+			return DecisionDeliveryHygiene{}, err
+		}
+		out.Destinations[dest] = c
+	}
+	return out, rows.Err()
 }
 
 // ProcessDecisionDigest sends the digest of now's UTC day through send, once:
