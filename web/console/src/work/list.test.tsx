@@ -125,7 +125,7 @@ it("arrow keys select rows and Enter opens the record", async () => {
   history.replaceState(null, "", "/ui/work?project=a&view=active");
   render(<WorkPage />);
   await screen.findByText("Task one");
-  fireEvent.keyDown(window, { key: "ArrowDown" });
+  fireEvent.keyDown(screen.getByText("Task one").closest("a")!, { key: "ArrowDown" });
   expect(document.activeElement?.id).toBe("work-row-101");
   fireEvent.keyDown(document.activeElement!, { key: "Enter" });
   expect(await screen.findByRole("heading", { name: "#101 Task one" })).toBeTruthy();
@@ -151,13 +151,13 @@ it("moves selection down and up without opening a record until Enter", async () 
   vi.stubGlobal("fetch", vi.fn(async (path: string) => path.includes("projects") ? response({ projects: ["a"] }) : path.includes("/101") ? response(detail) : response({ tasks: rows, states: [], generated_at: "2026-01-01T02:00:00Z", truncated: false })));
   history.replaceState(null, "", "/ui/work?project=a&view=active");
   render(<WorkPage />);
-  await screen.findByText("Task two");
-  fireEvent.keyDown(window, { key: "ArrowDown" });
+  const firstRow = (await screen.findByText("Task two")).closest("a")!;
+  fireEvent.keyDown(firstRow, { key: "ArrowDown" });
   expect(document.activeElement?.id).toBe("work-row-102");
-  fireEvent.keyDown(window, { key: "ArrowDown" });
+  fireEvent.keyDown(document.activeElement!, { key: "ArrowDown" });
   expect(document.activeElement?.id).toBe("work-row-101");
   expect(new URLSearchParams(location.search).get("task")).toBeNull();
-  fireEvent.keyDown(window, { key: "ArrowUp" });
+  fireEvent.keyDown(document.activeElement!, { key: "ArrowUp" });
   expect(document.activeElement?.id).toBe("work-row-102");
   expect(document.activeElement?.getAttribute("aria-current")).toBeNull();
 });
@@ -188,11 +188,23 @@ it("keeps the open record selected while cursor moves and resets cursor on histo
   history.replaceState(null, "", "/ui/work?project=a&view=active&task=101");
   const { container } = render(<WorkPage />);
   await screen.findByText("Task two");
-  fireEvent.keyDown(window, { key: "ArrowUp" });
+  fireEvent.keyDown(container.querySelector("#work-row-101")!, { key: "ArrowUp" });
   expect(document.activeElement?.id).toBe("work-row-102");
   expect(container.querySelector("#work-row-101")?.getAttribute("aria-current")).toBe("true");
   expect(container.querySelector("#work-row-102")?.getAttribute("aria-current")).toBeNull();
   act(() => { history.replaceState(null, "", "/ui/work?project=a&view=active"); window.dispatchEvent(new PopStateEvent("popstate")); });
-  fireEvent.keyDown(window, { key: "ArrowDown" });
+  fireEvent.keyDown(document.activeElement!, { key: "ArrowDown" });
   expect(document.activeElement?.id).toBe("work-row-102");
+});
+
+
+it("wide page arrows leave scrolling and other controls alone", async () => {
+  wide = true;
+  history.replaceState(null, "", "/ui/work?project=a&view=active");
+  render(<WorkPage />);
+  await screen.findByText("Task one");
+  const event = new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true });
+  document.body.dispatchEvent(event);
+  expect(event.defaultPrevented).toBe(false);
+  expect(document.activeElement).toBe(document.body);
 });

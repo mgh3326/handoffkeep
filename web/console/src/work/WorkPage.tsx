@@ -50,7 +50,7 @@ export function WorkPage() {
   const visible = filtered.filter(t => inView(t, view)).sort((a, b) => CHIP_GROUP_ORDER.indexOf(statusGroup(a)) - CHIP_GROUP_ORDER.indexOf(statusGroup(b)) || b.priority - a.priority || b.updated_at.localeCompare(a.updated_at) || b.id - a.id);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.isComposing || e.metaKey || e.ctrlKey || e.altKey || e.shiftKey || isTypingTarget(e.target) || (!wide && !(e.target instanceof Element && e.target.closest(".work-rows a"))) || !["ArrowUp", "ArrowDown"].includes(e.key) || !visible.length) return;
+      if (e.isComposing || e.metaKey || e.ctrlKey || e.altKey || e.shiftKey || isTypingTarget(e.target) || !(e.target instanceof Element && e.target.closest(".work-rows a")) || !["ArrowUp", "ArrowDown"].includes(e.key) || !visible.length) return;
       e.preventDefault();
       const current = visible.findIndex(t => String(t.id) === (cursor || selected));
       const index = current < 0 ? 0 : Math.max(0, Math.min(visible.length - 1, current + (e.key === "ArrowDown" ? 1 : -1)));
