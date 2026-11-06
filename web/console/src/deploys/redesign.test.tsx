@@ -51,6 +51,7 @@ afterEach(() => {
 const invalidRows = (n: number) =>
   Array.from({ length: n }, (_, i) => ({
     key: `deploy/example-console/bad-${String(i).padStart(2, "0")}`,
+    prefix: "deploy/example-console/",
     reasons: i % 2 === 0 ? ["key"] : ["schema", "deployed_at"],
   }));
 
@@ -72,6 +73,7 @@ describe("malformed records collapse", () => {
     const list = within(warning).getByTestId("deploy-invalid-list");
     expect(within(list).getAllByRole("listitem")).toHaveLength(3);
     expect(list.textContent).toContain("deploy/example-console/bad-00");
+    expect(list.textContent).toContain("접두사: deploy/example-console/");
     expect(list.textContent).toContain("키 시각 형식이 계약(YYYYMMDDTHHMMSSZ)이 아님");
     expect(warning.textContent).toContain("키 시각 형식이 계약(YYYYMMDDTHHMMSSZ)이 아님 2건");
     expect(warning.textContent).toContain("deploy-record/v0 본문이 아님(schema·service·result) 1건");
@@ -264,3 +266,9 @@ describe("operator-facing copy", () => {
     expect(note.textContent).not.toMatch(/refs\.pr|종결|#494/);
   });
 });
+
+ it("renders all five registered services", async () => {
+  const names = ["handoffkeep", "auto_trader", "panewire-hub", "mergewake", "pacelever"];
+  show(names.map((name) => service({ service: name, repo: `mgh3326/${name}` })));
+  for (const name of names) expect(await screen.findByRole("region", { name: `${name} 배포` })).toBeTruthy();
+ });

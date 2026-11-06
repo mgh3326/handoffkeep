@@ -4,6 +4,35 @@
   "services": [
     {
       "current": {
+        "deployed_at": null,
+        "deployed_ref": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "failed_step": null,
+        "record_key": "deploy/auto_trader/20260920T010000Z",
+        "recorded_at": "\u003cclock\u003e",
+        "result": "success",
+        "source": "backfill"
+      },
+      "doc_url": "/ui/doc/deploy/auto_trader/",
+      "merged_boundary": "unrecorded",
+      "merged_since": [],
+      "recent": [
+        {
+          "deployed_at": null,
+          "deployed_ref": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "failed_step": null,
+          "record_key": "deploy/auto_trader/20260920T010000Z",
+          "recorded_at": "\u003cclock\u003e",
+          "result": "success",
+          "source": "backfill"
+        }
+      ],
+      "record_count": 1,
+      "repo": "mgh3326/auto_trader",
+      "service": "auto_trader",
+      "target": "ncp"
+    },
+    {
+      "current": {
         "deployed_at": "2026-09-20T01:00:00Z",
         "deployed_ref": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "failed_step": null,
@@ -16,6 +45,7 @@
       "invalid": [
         {
           "key": "deploy/handoffkeep/20260924T000000Z",
+          "prefix": "deploy/handoffkeep/",
           "reasons": [
             "schema"
           ]
@@ -74,33 +104,24 @@
       "target": "ncp"
     },
     {
-      "current": {
-        "deployed_at": null,
-        "deployed_ref": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
-        "failed_step": null,
-        "record_key": "deploy/auto_trader/20260920T010000Z",
-        "recorded_at": "\u003cclock\u003e",
-        "result": "success",
-        "source": "backfill"
-      },
-      "doc_url": "/ui/doc/deploy/auto_trader/",
-      "merged_boundary": "unrecorded",
+      "current": null,
+      "doc_url": "/ui/doc/deploy/mergewake/",
+      "merged_boundary": "no_current",
       "merged_since": [],
-      "recent": [
-        {
-          "deployed_at": null,
-          "deployed_ref": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
-          "failed_step": null,
-          "record_key": "deploy/auto_trader/20260920T010000Z",
-          "recorded_at": "\u003cclock\u003e",
-          "result": "success",
-          "source": "backfill"
-        }
-      ],
-      "record_count": 1,
-      "repo": "mgh3326/auto_trader",
-      "service": "auto_trader",
-      "target": "ncp"
+      "recent": [],
+      "record_count": 0,
+      "repo": "mgh3326/mergewake",
+      "service": "mergewake"
+    },
+    {
+      "current": null,
+      "doc_url": "/ui/doc/deploy/pacelever/",
+      "merged_boundary": "no_current",
+      "merged_since": [],
+      "recent": [],
+      "record_count": 0,
+      "repo": "mgh3326/pacelever",
+      "service": "pacelever"
     },
     {
       "current": null,

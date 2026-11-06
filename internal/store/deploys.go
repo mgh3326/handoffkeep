@@ -9,6 +9,8 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+const maxDocumentPrefixBytes = 512
+
 // ListDocumentsByPrefix returns documents whose key starts with prefix,
 // newest key first, including bodies — unlike ListDocuments, which is a
 // metadata listing. The match is a literal strpos prefix, never LIKE, so a
@@ -28,7 +30,7 @@ func (s *Store) ListDocumentsByPrefixBefore(ctx context.Context, prefix, before 
 }
 
 func (s *Store) listDocumentsByPrefix(ctx context.Context, prefix, before string, limit int) ([]Document, error) {
-	if prefix == "" || !validText(prefix, 512) {
+	if prefix == "" || !validText(prefix, maxDocumentPrefixBytes) {
 		return nil, errors.New("invalid document prefix")
 	}
 	if limit < 1 {
@@ -89,7 +91,7 @@ type DocumentPrefixCount struct {
 // prefix matches every document. before continues the scan strictly below a
 // key already seen, so a full page can always page deeper.
 func (s *Store) ListDocumentSummariesByPrefix(ctx context.Context, prefix, before string, limit int) ([]DocumentSummary, error) {
-	if !validText(prefix, 512) {
+	if !validText(prefix, maxDocumentPrefixBytes) {
 		return nil, errors.New("invalid document prefix")
 	}
 	if before != "" && !validText(before, 512) {
