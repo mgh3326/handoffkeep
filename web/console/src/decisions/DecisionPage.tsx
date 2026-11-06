@@ -125,8 +125,10 @@ export function DecisionPage({ id }: { id: string }) {
       )
         return;
       const n = Number(e.key);
-      if (Number.isInteger(n) && n > 0 && n <= detail.request.options.length)
+      if (Number.isInteger(n) && n > 0 && n <= detail.request.options.length) {
         setOption(detail.request.options[n - 1].key);
+        setStale(false);
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -163,6 +165,11 @@ export function DecisionPage({ id }: { id: string }) {
         setScreen("unconfirmed");
         setChecked(false);
       } else {
+        saveDraft(id, payload.request_id, {
+          option: payload.option,
+          text: payload.text,
+          saved_at: new Date().toISOString(),
+        });
         setError(response.raw);
         setScreen("send_failed");
       }
@@ -299,10 +306,15 @@ export function DecisionPage({ id }: { id: string }) {
         </p>
       )}
       {pending && (
-        <p>
-          중계 답 접수 · 운영자 확인 대기 / 접수 · 확인 대기 — {pending.actor} ·{" "}
-          {pending.channel} · {pending.received_at}. 기한은 계속 진행됩니다.
-        </p>
+        <section>
+          {result !== "pending_confirmation" && (
+            <ResultBadge result="pending_confirmation" />
+          )}
+          <p>
+            중계 답 접수 · 운영자 확인 대기 — {pending.actor} ·{" "}
+            {pending.channel} · {pending.received_at}. 기한은 계속 진행됩니다.
+          </p>
+        </section>
       )}
       {stale && (
         <p role="alert">요청 revision이 바뀌었습니다. 다시 확인하세요.</p>
@@ -322,7 +334,10 @@ export function DecisionPage({ id }: { id: string }) {
                 aria-checked={option === o.key}
                 disabled={!detail.answerable || screen !== "editing"}
                 key={o.key}
-                onClick={() => setOption(o.key)}
+                onClick={() => {
+                  setOption(o.key);
+                  setStale(false);
+                }}
               >
                 <strong>
                   {i + 1}. {o.label}
@@ -338,7 +353,10 @@ export function DecisionPage({ id }: { id: string }) {
               <textarea
                 value={text}
                 disabled={!detail.answerable || screen !== "editing"}
-                onChange={(e) => setText(e.target.value)}
+                onChange={(e) => {
+                  setText(e.target.value);
+                  setStale(false);
+                }}
               />
             </label>
           )}
