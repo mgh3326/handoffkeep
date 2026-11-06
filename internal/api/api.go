@@ -31,6 +31,21 @@ import (
 type Service struct {
 	Store       *store.Store
 	Attachments *attachments.Manager
+	// Dots backs the /v1/dots/results routes; nil uses Store.
+	Dots DotsResultStore
+}
+
+// DotsResultStore lists dots results and records their adoption.
+type DotsResultStore interface {
+	ListDotsResults(ctx context.Context, taskID int64, issue string, limit int) ([]store.DotsResult, error)
+	SetDotsAdoption(ctx context.Context, id int64, by string, in store.DotsAdoptionInput) (store.DotsResult, bool, error)
+}
+
+func (s Service) dotsResults() DotsResultStore {
+	if s.Dots != nil {
+		return s.Dots
+	}
+	return s.Store
 }
 
 var decisionResolverRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
@@ -643,6 +658,8 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("POST /v1/tasks/{id}/origins", s.taskOriginAdd)
 	m.HandleFunc("GET /v1/tasks/{id}/origins", s.taskOriginList)
 	m.HandleFunc("GET /v1/task-origins", s.taskOriginFind)
+	m.HandleFunc("GET /v1/dots/results", s.dotsResultsList)
+	m.HandleFunc("POST /v1/dots/results/{id}/adoption", s.dotsAdoption)
 	m.HandleFunc("POST /v1/tasks/{id}/reopen", s.taskReopen)
 	m.HandleFunc("POST /v1/tasks/{id}/project", s.taskProject)
 	m.HandleFunc("POST /v1/tasks/{id}/area", s.taskArea)

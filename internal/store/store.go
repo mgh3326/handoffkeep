@@ -1257,8 +1257,11 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := migrateOnce(ctx, tx, 49, func() error { return execAll(ctx, tx, verificationsV49) }); err != nil {
 		return err
 	}
+	if err := migrateOnce(ctx, tx, 50, func() error { return execAll(ctx, tx, dotsResultsV50) }); err != nil {
+		return err
+	}
 
-	if err := migrateOnce(ctx, tx, 50, func() error { return execAll(ctx, tx, standingOrdersV50) }); err != nil {
+	if err := migrateOnce(ctx, tx, 51, func() error { return execAll(ctx, tx, standingOrdersV51) }); err != nil {
 		return err
 	}
 
