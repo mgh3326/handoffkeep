@@ -66,6 +66,17 @@ it("renders action and reference sections with newest and overdue ordering", asy
   expect(within(fyi).getByRole("link").getAttribute("href")).toBe("/ui/tasks/77");
   expect(within(action).getByText("+1개 더 있음")).toBeTruthy();
 });
+it("shows a two-line inbox row with kind, identifier, summary, chips and relative time", async () => {
+  serve(payload()); render(<HomeAttention />);
+  const summary = await screen.findByText("Ship the console?");
+  const row = summary.closest("a");
+  if (!row) throw new Error("missing row");
+  expect(within(row).getByText("#41")).toBeTruthy();
+  expect(within(row).getByText("요청")).toBeTruthy();
+  expect(within(row).getByText("desk")).toBeTruthy();
+  expect(within(row).getByText("4시간").getAttribute("title")).toBe("2026-11-05 01:00 UTC");
+  expect(row.querySelector('[data-state-shape="awaiting_decision"]')).toBeTruthy();
+});
 it("groups inbox items by local calendar date", async () => {
   serve(payload({ generated_at: "2026-11-08T05:00:00Z", decisions: { count: 1, overdue: 0, items: [{ ...request, overdue: false, created_at: "2026-11-08T01:00:00Z" }] }, tasks: { count: 1, awaiting_decision: 1, stalled: 0, items: [{ ...waitingTask, since: "2026-11-07T01:00:00Z" }] }, deploys: { count: 1, events_capped: false, items: [{ ...deploy, merged_at: "2026-10-01T01:00:00Z" }] } }));
   render(<HomeAttention />);
