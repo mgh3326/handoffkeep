@@ -71,41 +71,15 @@ func projectWorkBoard(board store.LinearBoard) *boardWorkBoard {
 	return view
 }
 
-type boardActiveJob struct {
-	Role    string  `json:"role"`
-	Model   string  `json:"model"`
-	Profile string  `json:"profile"`
-	Host    string  `json:"host"`
-	Harness *string `json:"harness"`
-	Effort  *string `json:"effort"`
-}
-
-func newestLiveJob(jobs []store.Job) *boardActiveJob {
-	var newest *store.Job
-	for i := range jobs {
-		j := &jobs[i]
-		if j.State != "claimed" && j.State != "spawned" {
-			continue
-		}
-		if newest == nil || j.CreatedAt.After(newest.CreatedAt) || (j.CreatedAt.Equal(newest.CreatedAt) && j.JobID > newest.JobID) {
-			newest = j
-		}
-	}
-	if newest == nil {
-		return nil
-	}
-	return &boardActiveJob{Role: newest.Role, Model: newest.Model, Profile: newest.Profile, Host: newest.Host, Harness: newest.Harness, Effort: newest.Effort}
-}
-
 type boardTask struct {
-	ActiveJob  *boardActiveJob `json:"active_job,omitempty"`
-	WorkBoard  *boardWorkBoard `json:"work_board,omitempty"`
-	ID         int64           `json:"id"`
-	Lane       string          `json:"lane"`
-	ParentLane string          `json:"parent_lane,omitempty"`
-	Title      string          `json:"title"`
-	Kind       string          `json:"kind"`
-	State      string          `json:"state"`
+	ActiveJob  *store.ActiveJobSummary `json:"active_job,omitempty"`
+	WorkBoard  *boardWorkBoard         `json:"work_board,omitempty"`
+	ID         int64                   `json:"id"`
+	Lane       string                  `json:"lane"`
+	ParentLane string                  `json:"parent_lane,omitempty"`
+	Title      string                  `json:"title"`
+	Kind       string                  `json:"kind"`
+	State      string                  `json:"state"`
 	// Category is derived from State; AwaitingDecision is the flag that
 	// replaced the needs_decision state. Both feed the console's views.
 	Category         string `json:"category"`
@@ -226,16 +200,22 @@ func (h *Handler) boardTasks(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "internal_error")
 		return
 	}
+	ids := make([]int64, 0, len(tasks))
+	for _, task := range tasks {
+		ids = append(ids, task.ID)
+	}
+	activeJobs, err := h.store.ReadActiveJobs(r.Context(), ids)
+	if err != nil {
+		log.Printf("ui.board_jobs_failed err=%q", err)
+		writeJSONError(w, http.StatusInternalServerError, "internal_error")
+		return
+	}
 	for _, task := range tasks {
 		row := projectBoardTask(task)
 		row.WorkBoard = projectWorkBoard(workBoards[task.ID])
-		jobs, err := h.store.ListJobsByTask(r.Context(), task.ID, 2147483647)
-		if err != nil {
-			log.Printf("ui.board_jobs_failed task_id=%d err=%q", task.ID, err)
-			writeJSONError(w, http.StatusInternalServerError, "internal_error")
-			return
+		if job, ok := activeJobs[task.ID]; ok {
+			row.ActiveJob = &job
 		}
-		row.ActiveJob = newestLiveJob(jobs)
 		response.Tasks = append(response.Tasks, row)
 		response.NextAfterID = task.ID
 	}

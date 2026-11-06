@@ -5,30 +5,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
-	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/mgh3326/handoffkeep/internal/store"
 	"github.com/mgh3326/handoffkeep/internal/testdb"
 )
-
-func TestNewestLiveJob(t *testing.T) {
-	now := time.Now().UTC()
-	harness, effort := "codex", "high"
-	jobs := []store.Job{
-		{JobID: "a", State: "claimed", CreatedAt: now, Model: "old"},
-		{JobID: "c", State: "completed", CreatedAt: now.Add(time.Hour)},
-		{JobID: "b", State: "spawned", CreatedAt: now, Role: "worker", Model: "model", Profile: "profile", Host: "host", Harness: &harness, Effort: &effort},
-	}
-	got := newestLiveJob(jobs)
-	if got == nil || got.Model != "model" || got.Role != "worker" || got.Profile != "profile" || got.Host != "host" || *got.Harness != harness || *got.Effort != effort {
-		t.Fatalf("unexpected job: %+v", got)
-	}
-	if newestLiveJob(jobs[1:2]) != nil {
-		t.Fatal("terminal job was included")
-	}
-}
 
 func TestBoardListIncludesNewestLiveJob(t *testing.T) {
 	_, url := testdb.Schema(t, "ui_active_job")
@@ -63,7 +45,7 @@ func TestBoardListIncludesNewestLiveJob(t *testing.T) {
 	}
 	var response struct {
 		Tasks []struct {
-			ActiveJob *boardActiveJob `json:"active_job"`
+			ActiveJob *store.ActiveJobSummary `json:"active_job"`
 		} `json:"tasks"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
