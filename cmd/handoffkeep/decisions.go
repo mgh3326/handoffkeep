@@ -17,6 +17,7 @@ import (
 const decisionListUsage = "usage: decisions list [--status open|answered|superseded|expired] [--lane <lane>] [--source <source>] [--include-snoozed] [--limit N]"
 const decisionSnoozeUsage = "usage: decisions snooze <id> --until <RFC3339>"
 const decisionBackfillUsage = "usage: decisions backfill --dry-run [--json]"
+const decisionHygieneUsage = "usage: decisions hygiene"
 
 // decisionListCmd prints decision records as JSON, oldest first.
 func decisionListCmd(args []string, out io.Writer) error {
@@ -115,6 +116,30 @@ func decisionBackfillCmd(args []string, out io.Writer) error {
 		return printJSON(out, report)
 	}
 	return printDecisionBackfill(out, report)
+}
+
+// decisionHygieneCmd prints the decision delivery counts per destination.
+func decisionHygieneCmd(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("decisions hygiene", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	c := remoteClient(fs)
+	parsed, err := splitArgs(args)
+	if err != nil {
+		return err
+	}
+	if err := fs.Parse(parsed); err != nil || fs.NArg() != 0 {
+		return errors.New(decisionHygieneUsage)
+	}
+	if err := mustClient(c); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	h, err := c.DecisionDeliveryHygiene(ctx)
+	if err != nil {
+		return err
+	}
+	return printJSON(out, h)
 }
 
 func printDecisionBackfill(out io.Writer, r store.DecisionBackfillReport) error {

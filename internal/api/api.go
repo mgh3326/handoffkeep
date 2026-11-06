@@ -659,6 +659,7 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("GET /v1/tasks/{id}/comments", s.taskCommentsList)
 	m.HandleFunc("POST /v1/tasks/{id}/comments", s.taskCommentCreate)
 	m.HandleFunc("POST /v1/decisions/resolve", s.decisionResolve)
+	m.HandleFunc("GET /v1/decisions/deliveries/hygiene", s.decisionDeliveryHygiene)
 	m.HandleFunc("GET /v1/decision-requests", s.decisionRecordsList)
 	m.HandleFunc("GET /v1/decision-requests/sources", s.decisionSources)
 	m.HandleFunc("POST /v1/decision-requests/{id}/snooze", s.decisionRecordSnooze)

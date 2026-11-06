@@ -49,8 +49,9 @@ func (d DiscordWebhook) endpoint(suffix string, wait bool) (string, error) {
 }
 
 // PostMessage sends one message and returns its id, which EditMessage needs.
-// ?wait=true makes Discord answer with the message instead of 204.
-func (d DiscordWebhook) PostMessage(ctx context.Context, content string) (string, error) {
+// ?wait=true makes Discord answer with the message instead of 204. mention
+// lists the user ids the message may ping; none means it pings nobody.
+func (d DiscordWebhook) PostMessage(ctx context.Context, content string, mention ...string) (string, error) {
 	target, err := d.endpoint("", true)
 	if err != nil {
 		return "", err
@@ -58,7 +59,7 @@ func (d DiscordWebhook) PostMessage(ctx context.Context, content string) (string
 	var message struct {
 		ID string `json:"id"`
 	}
-	if err := d.send(ctx, http.MethodPost, target, content, &message); err != nil {
+	if err := d.send(ctx, http.MethodPost, target, content, &message, mention...); err != nil {
 		return "", err
 	}
 	if !discordMessageIDRE.MatchString(message.ID) {
@@ -90,6 +91,19 @@ func ParseConsoleURL(raw string) (string, error) {
 	return strings.TrimRight(raw, "/"), nil
 }
 
+// discordUserIDRE is a Discord user snowflake.
+var discordUserIDRE = regexp.MustCompile(`^[0-9]{17,20}$`)
+
+// ParseDiscordOperatorUserID accepts the operator's Discord user id, whom a
+// pressing request's first post mentions. The message says why without
+// quoting the value.
+func ParseDiscordOperatorUserID(raw string) (string, error) {
+	if !discordUserIDRE.MatchString(raw) {
+		return "", errors.New("HANDOFFKEEP_DISCORD_OPERATOR_USER_ID must be a Discord user id of 17 to 20 digits")
+	}
+	return raw, nil
+}
+
 // DecisionNotifyStore is the store surface DecisionNotifier works through.
 type DecisionNotifyStore interface {
 	ProcessNextDecisionNotice(ctx context.Context, now time.Time, send func(context.Context, store.DecisionNotice) (string, error)) (bool, error, error)
@@ -106,7 +120,10 @@ type DecisionNotifier struct {
 	// ConsoleURL is the console's base URL. Empty leaves the link out and
 	// says where to look instead.
 	ConsoleURL string
-	Interval   time.Duration
+	// OperatorUserID is the Discord user a pressing request's first post
+	// mentions (store.DecisionNotice.Mention). Empty mentions nobody.
+	OperatorUserID string
+	Interval       time.Duration
 	// Now is the clock; nil means time.Now.
 	Now func() time.Time
 }
@@ -185,9 +202,17 @@ func (n DecisionNotifier) sendNotice(ctx context.Context, x store.DecisionNotice
 	if n.Discord == nil {
 		return "", store.ErrDecisionNoticeSkipped
 	}
-	text := decisionNoticeText(x, n.ConsoleURL, now)
+	mention := ""
+	if x.Post() && x.Mention && n.OperatorUserID != "" {
+		mention = "<@" + n.OperatorUserID + "> "
+	}
+	text := decisionNoticeText(x, n.ConsoleURL, now, mention)
 	if x.Post() {
-		id, err := n.Discord.PostMessage(ctx, text)
+		var users []string
+		if mention != "" {
+			users = []string{n.OperatorUserID}
+		}
+		id, err := n.Discord.PostMessage(ctx, text, users...)
 		return id, decisionPostError(err)
 	}
 	return "", decisionNoticeError(n.Discord.EditMessage(ctx, x.MessageID, text))
@@ -263,7 +288,8 @@ func decisionAge(d time.Duration) string {
 	return fmt.Sprintf("%dd %dh", int(d/(24*time.Hour)), int(d%(24*time.Hour)/time.Hour))
 }
 
-// decisionLinkLine is the console link, or where to look without one.
+// decisionLinkLine is the console link, or where to look without one: the
+// request's own page for a request (id > 0), the open tab for the digest.
 func decisionLinkLine(console string, id int64) string {
 	if console == "" {
 		if id > 0 {
@@ -271,7 +297,10 @@ func decisionLinkLine(console string, id int64) string {
 		}
 		return "Find them on the console's Decisions page or with `handoffkeep decisions list`."
 	}
-	return console + "/ui/decisions"
+	if id > 0 {
+		return fmt.Sprintf("%s/ui/decisions/%d", console, id)
+	}
+	return console + "/ui/decisions?tab=open"
 }
 
 // decisionContext is the source, lane and task of a request.
@@ -293,8 +322,10 @@ func decisionContext(x store.DecisionNotice) string {
 
 // decisionNoticeText is the message for the request's current status. An
 // open request shows the question, cut to fit Discord's limit; a closed one
-// shows how it closed in place of the question.
-func decisionNoticeText(x store.DecisionNotice, console string, now time.Time) string {
+// shows how it closed in place of the question. prefix (an operator mention)
+// starts the message and its room comes out of the question, so the link at
+// the end always survives.
+func decisionNoticeText(x store.DecisionNotice, console string, now time.Time, prefix string) string {
 	r := x.Record
 	link := decisionLinkLine(console, r.ID)
 	ref := fmt.Sprintf("**Decision request #%d**", r.ID)
@@ -326,9 +357,9 @@ func decisionNoticeText(x store.DecisionNotice, console string, now time.Time) s
 		}
 	}
 	if closed != "" {
-		return clipRunes(closed+"\n"+decisionContext(x)+"\n"+link, discordContentMaxRunes)
+		return prefix + clipRunes(closed+"\n"+decisionContext(x)+"\n"+link, discordContentMaxRunes-utf8.RuneCountInString(prefix))
 	}
-	head := "❓ " + ref + " · " + decisionContext(x) + "\n"
+	head := prefix + "❓ " + ref + " · " + decisionContext(x) + "\n"
 	asked := fmt.Sprintf("Asked %s (<t:%d:R>), open %s", decisionTime(r.CreatedAt), r.CreatedAt.Unix(), decisionAge(now.Sub(r.CreatedAt)))
 	if r.DueAt != nil {
 		asked += " · due " + decisionTime(*r.DueAt)
