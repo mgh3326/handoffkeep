@@ -13,6 +13,14 @@ required_checks:
 watch_checks:
   - 'ci-ok'
   - 'image'
+# Bisect over cancelled main heads (fleet policy policy/fleet-ci-main-cancel):
+# watch dispatches ci-any-ref.yml with {"ref": <sha>} and reads the ci-ok
+# status it posts on that commit. image builds only on main pushes, so the
+# any-ref verdict uses ci-ok alone; a failure only in image is held, not
+# bisected (mergewake #177, hk 3259).
+any_ref_workflow: ci-any-ref.yml
+any_ref_checks:
+  - 'ci-ok'
 blocking:
   - paths: ['deploy/**', 'Dockerfile', 'scripts/**']
     reason: Deployment, service units and SQL installation can alter persistent state before a revert.
