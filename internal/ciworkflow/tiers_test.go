@@ -537,3 +537,31 @@ func TestCITierMutantPruneAfterGitleaksTurnsRed(t *testing.T) {
 		t.Fatal("mutant passed the tier checks")
 	}
 }
+
+// TestImageCancelsSupersededMainRuns pins the fleet main-CI rule on image.yml
+// (policy/fleet-ci-main-cancel): its concurrency is keyed on the ref and a
+// newer push cancels the older run; a mutant without cancellation turns red.
+func TestImageCancelsSupersededMainRuns(t *testing.T) {
+	check := func(src []byte) []string {
+		var wf tierWorkflow
+		if err := yaml.Unmarshal(src, &wf); err != nil {
+			t.Fatal(err)
+		}
+		var out []string
+		if fmt.Sprint(wf.Concurrency["cancel-in-progress"]) != "true" || !strings.Contains(fmt.Sprint(wf.Concurrency["group"]), "github.ref") {
+			out = append(out, "image.yml concurrency must key on github.ref and cancel the older run in progress")
+		}
+		return out
+	}
+	src := readWorkflow(t, "image.yml")
+	if p := check(src); len(p) != 0 {
+		t.Fatal(p)
+	}
+	mutant := strings.Replace(string(src), "cancel-in-progress: true}", "cancel-in-progress: false}", 1)
+	if mutant == string(src) {
+		t.Fatal("mutant did not apply")
+	}
+	if len(check([]byte(mutant))) == 0 {
+		t.Fatal("image-keeps-running mutant stayed green")
+	}
+}
