@@ -98,3 +98,14 @@ it("W14 uses the shared poller without overlapping requests", async () => {
   expect(fetcher.mock.calls.length).toBe(before + 1);
   vi.useRealTimers();
 });
+
+it("keeps URL filter values visible when they have no matching options", async () => {
+  history.replaceState(null, "", "/ui/work?project=missing&view=all&lane=unknown-lane&kind=unknown-kind&state=unknown-state");
+  render(<WorkPage />);
+  await screen.findByRole("button", { name: "All 0" });
+  for (const [label, value] of [["Project", "missing"], ["lane", "unknown-lane"], ["kind", "unknown-kind"], ["state", "unknown-state"]]) {
+    const select = screen.getByLabelText(label) as HTMLSelectElement;
+    expect(select.value).toBe(value);
+    expect(select.selectedOptions[0]?.textContent).toBe(value);
+  }
+});

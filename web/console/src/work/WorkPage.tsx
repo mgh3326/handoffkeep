@@ -31,11 +31,11 @@ export function WorkPage() {
   const board = data?.project === project ? data.board : null;
   const tasks = board?.tasks || [];
   const filtered = tasks.filter(t => { const q = query.trim().toLowerCase(); return (!q || t.title.toLowerCase().includes(q) || String(t.id) === q.replace(/^#/, "")) && (!lane || t.lane === lane) && (!kind || t.kind === kind) && (!state || t.state === state) && (!priority || t.priority >= Number(priority)); });
-  const choices = (key: "lane" | "kind" | "state") => [...new Set(tasks.map(t => t[key]))].sort();
+  const choices = (key: "lane" | "kind" | "state") => [...new Set([...tasks.map(t => t[key]), params.get(key) || ""].filter(Boolean))].sort();
   const filters = [["q", query], ["lane", lane], ["kind", kind], ["state", state], ["p", priority]] as const;
   return <div className="work-layout"><section className="work-list"><h1>Work</h1>
     {projectsFailed && <p role="alert">불러오지 못함</p>}
-    <label>Project <select value={project} onChange={e => update("project", e.target.value)}>{projects.map(p => <option key={p}>{p}</option>)}</select></label>
+    <label>Project <select value={project} onChange={e => update("project", e.target.value)}>{project && !projects.includes(project) && <option value={project}>{project}</option>}{projects.map(p => <option key={p}>{p}</option>)}</select></label>
     <nav className="work-tabs" aria-label="Views">{views.map(v => <button key={v} aria-pressed={view === v} onClick={() => update("view", v)}>{labels[v]} {filtered.filter(t => inView(t, v)).length}</button>)}</nav>
     <div className="work-filters"><label>Search <input value={query} onChange={e => update("q", e.target.value)} /></label>{(["lane", "kind", "state"] as const).map(k => <label key={k}>{k} <select value={params.get(k) || ""} onChange={e => update(k, e.target.value)}><option value="">All</option>{choices(k).map(v => <option key={v} value={v}>{v}</option>)}</select></label>)}<label>Priority ≥ <input type="number" value={priority} onChange={e => update("p", e.target.value)} /></label></div>
     <div>{filters.filter(([, value]) => value).map(([key, value]) => <button key={key} onClick={() => update(key, "")} aria-label={`Remove ${key} filter`}>{key}: {value} ×</button>)}</div>

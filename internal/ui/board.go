@@ -211,6 +211,7 @@ func (h *Handler) boardTasks(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) boardProjects(w http.ResponseWriter, r *http.Request) {
 	projects, err := h.store.ListTaskProjects(r.Context())
 	if err != nil {
+		log.Printf("ui.board_projects_failed err=%q", err)
 		writeJSONError(w, http.StatusInternalServerError, "internal_error")
 		return
 	}
