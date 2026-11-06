@@ -1,3 +1,6 @@
+/* Decisions page (hk 3286, D4). Tokens only: every color, space, radius, type
+ * size and control height is a var(--hk-*) from design/tokens.css. 768px and
+ * 1024px are the literal breakpoints (media queries cannot read tokens). */
 .decision-page,
 .decision-list {
   min-width: 0;
@@ -13,31 +16,285 @@
 .decision-list h1 {
   color: var(--hk-text-heading);
 }
-.decision-state,
-.decision-result {
-  color: var(--hk-info);
+
+/* ---- List: tabs ---------------------------------------------------------- */
+.decision-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--hk-space-2);
+  margin-bottom: var(--hk-space-4);
+}
+/* One row at every width. Past the edge it scrolls sideways; below 768px the
+ * right edge fades so a cut-off tab reads as "more". */
+.decision-tabs {
+  display: flex;
+  flex-wrap: nowrap;
+  flex: 1 1 auto;
+  min-width: 0;
+  gap: var(--hk-space-1);
+  padding: var(--hk-space-1);
+  background: var(--hk-surface-2);
+  border-radius: var(--hk-radius-control);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.decision-tabs::-webkit-scrollbar {
+  display: none;
+}
+.decision-list .decision-tab {
+  flex: none;
+  gap: var(--hk-space-2);
+  padding: 0 var(--hk-space-3);
+  border-radius: var(--hk-radius-chip);
+  color: var(--hk-text-secondary);
+  font-weight: var(--hk-weight-medium);
+  text-decoration: none;
+  white-space: nowrap;
+  word-break: keep-all;
+  transition: background-color var(--hk-motion-fast), color var(--hk-motion-fast);
+}
+.decision-list .decision-tab:hover {
+  background: var(--hk-selected);
+}
+/* The current tab is told by weight and an outline as well as by fill. */
+.decision-list .decision-tab[aria-current="page"] {
+  background: var(--hk-selected);
+  color: var(--hk-text-heading);
+  font-weight: var(--hk-weight-strong);
+  box-shadow: inset 0 0 0 var(--hk-border-width) var(--hk-border-control);
+}
+.decision-tab-count {
+  min-width: 18px;
+  padding: 0 6px;
+  border-radius: var(--hk-radius-pill);
+  background: var(--hk-badge-fill);
+  color: var(--hk-text-primary);
+  font: var(--hk-weight-strong) var(--hk-type-meta) / 18px var(--hk-font-ui);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+.decision-tab[data-tab="open"] .decision-tab-count {
+  background: var(--hk-chip-decision-bg);
+  color: var(--hk-chip-decision-fg);
+}
+.decision-tab[data-tab="overdue"] .decision-tab-count {
+  background: var(--hk-chip-failed-bg);
+  color: var(--hk-chip-failed-fg);
+}
+/* Nothing waiting: a neutral count, not an alarm. */
+.decision-tab .decision-tab-count[data-zero="true"] {
+  background: var(--hk-badge-fill);
+  color: var(--hk-text-secondary);
+}
+.decision-toolbar .hk-button {
+  flex: none;
+}
+
+/* ---- List: rows ---------------------------------------------------------- */
+.decision-list .decision-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--hk-space-3);
+  width: 100%;
+  min-height: var(--hk-row-roomy);
+  padding: var(--hk-space-2) var(--hk-space-3);
+  border-radius: var(--hk-radius-card);
+  color: var(--hk-text-secondary);
+  font: var(--hk-weight-normal) var(--hk-type-row) / var(--hk-line-row) var(--hk-font-ui);
+  text-align: left;
+  text-decoration: none;
+  transition: background-color var(--hk-motion-fast);
+}
+.decision-list .decision-row:hover {
+  background: var(--hk-surface-1);
+}
+.decision-list .decision-row:focus-visible {
+  outline: var(--hk-focus-width) solid var(--hk-focus);
+  outline-offset: var(--hk-focus-offset-inset);
+}
+/* A decision nobody has seen is bold and brighter; no fill and no color
+ * carries it alone (the divider and a hidden "안 읽음" say it too). */
+.decision-list .decision-row--new {
+  color: var(--hk-text-heading);
   font-weight: var(--hk-weight-strong);
 }
+.decision-list .decision-row[aria-current="true"] {
+  background: var(--hk-selected);
+  box-shadow: inset 3px 0 0 var(--hk-text-heading);
+}
+.decision-row-icon {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: var(--hk-icon-hit);
+  height: var(--hk-icon-hit);
+  border: var(--hk-border-width) solid var(--hk-border-subtle);
+  border-radius: var(--hk-radius-pill);
+  font-size: var(--hk-icon-size);
+}
+.decision-row-main {
+  display: grid;
+  flex: 1 1 auto;
+  gap: var(--hk-space-1);
+  min-width: 0;
+}
+.decision-row-title {
+  display: flex;
+  align-items: baseline;
+  gap: var(--hk-space-2);
+  min-width: 0;
+}
+.decision-id {
+  flex: none;
+  color: var(--hk-text-muted);
+  font-weight: var(--hk-weight-normal);
+}
+.decision-summary {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.decision-age {
+  margin-left: auto;
+  color: var(--hk-text-muted);
+  font: var(--hk-weight-normal) var(--hk-type-meta) / var(--hk-line-meta) var(--hk-font-ui);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.decision-divider {
+  margin: var(--hk-space-4) var(--hk-space-3) var(--hk-space-1);
+  color: var(--hk-text-muted);
+  font: var(--hk-weight-medium) var(--hk-type-meta) / var(--hk-line-meta) var(--hk-font-ui);
+}
+.decision-superseded {
+  margin-left: var(--hk-space-3);
+}
+.decision-note {
+  margin: var(--hk-space-2) var(--hk-space-3);
+  color: var(--hk-text-muted);
+  font-size: var(--hk-type-meta);
+  line-height: var(--hk-line-meta);
+}
+.decision-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--hk-space-6);
+  padding: var(--hk-space-12) var(--hk-space-4);
+  text-align: center;
+}
+.decision-empty .decision-empty-icon {
+  width: var(--hk-space-12);
+  height: var(--hk-space-12);
+  color: var(--hk-text-muted);
+}
+.decision-empty-text {
+  margin: 0;
+  color: var(--hk-text-heading);
+  font: var(--hk-weight-strong) var(--hk-type-section) / var(--hk-line-section) var(--hk-font-ui);
+  word-break: keep-all;
+}
+
+/* ---- Detail -------------------------------------------------------------- */
+.decision-page .decision-back {
+  gap: var(--hk-space-1);
+  color: var(--hk-text-secondary);
+  text-decoration: none;
+}
+.decision-back-icon {
+  transform: rotate(90deg);
+}
+.decision-state {
+  margin: 0 0 var(--hk-space-2);
+}
+.decision-result {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.decision-ref {
+  color: var(--hk-text-muted);
+  font: var(--hk-weight-normal) var(--hk-type-meta) / var(--hk-line-meta) var(--hk-font-ui);
+}
+.decision-page .decision-question {
+  margin: var(--hk-space-4) 0;
+  color: var(--hk-text-heading);
+  font-size: var(--hk-type-page);
+  line-height: var(--hk-line-page);
+  font-weight: var(--hk-weight-strong);
+}
+.decision-meta {
+  display: grid;
+  gap: var(--hk-space-1);
+  margin: var(--hk-space-4) 0;
+  padding: var(--hk-space-3);
+  border: var(--hk-border-width) solid var(--hk-border-subtle);
+  border-radius: var(--hk-radius-card);
+  background: var(--hk-surface-1);
+  color: var(--hk-text-secondary);
+}
+.decision-meta p {
+  margin: 0;
+}
+/* Options are large choices: a ring mark that fills with a check when picked
+ * (so the pick never rides on color alone), the number key, the label and the
+ * chips for the recommended and default options. */
 .decision-options {
   display: grid;
   gap: var(--hk-space-2);
+  margin: var(--hk-space-4) 0;
 }
 .decision-options button {
+  display: flex;
+  align-items: center;
+  gap: var(--hk-space-3);
+  width: 100%;
   min-height: var(--hk-touch-height);
+  padding: var(--hk-space-4);
   text-align: left;
-  background: var(--hk-surface-2);
+  background: var(--hk-surface-1);
   color: var(--hk-text-primary);
-  border: var(--hk-border-width) solid var(--hk-border-strong);
-  border-radius: var(--hk-radius-control);
-  padding: var(--hk-space-3);
+  border: var(--hk-border-width) solid var(--hk-border-control);
+  border-radius: var(--hk-radius-card);
+  transition: background-color var(--hk-motion-fast);
+}
+.decision-options button:hover:not(:disabled) {
+  background: var(--hk-surface-2);
+}
+.decision-options button:disabled {
+  cursor: default;
 }
 .decision-options button[aria-checked="true"] {
-  border-color: var(--hk-action-bg);
+  background: var(--hk-selected);
+  border-color: var(--hk-text-heading);
+  box-shadow: inset 0 0 0 var(--hk-border-width) var(--hk-text-heading);
 }
-.decision-options button span {
-  display: inline-block;
-  margin-left: var(--hk-space-2);
-  color: var(--hk-warning);
+.decision-option-mark {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: var(--hk-space-5);
+  height: var(--hk-space-5);
+  border: 2px solid var(--hk-border-control);
+  border-radius: var(--hk-radius-pill);
+  font-size: var(--hk-type-row);
+}
+.decision-options button[aria-checked="true"] .decision-option-mark {
+  background: var(--hk-text-heading);
+  border-color: var(--hk-text-heading);
+  color: var(--hk-surface-0);
+}
+.decision-option-body {
+  display: grid;
+  gap: var(--hk-space-1);
+  min-width: 0;
+}
+.decision-memo {
+  display: grid;
+  gap: var(--hk-space-1);
+  margin: var(--hk-space-4) 0;
+  color: var(--hk-text-secondary);
+  font-weight: var(--hk-weight-medium);
 }
 .decision-page textarea {
   display: block;
@@ -46,6 +303,9 @@
   min-height: var(--hk-touch-height);
   background: var(--hk-input-fill);
   color: var(--hk-text-primary);
+  font-size: var(--hk-type-row);
+  line-height: var(--hk-line-row);
+  resize: vertical;
 }
 .decision-page button {
   min-height: var(--hk-touch-height);
@@ -59,6 +319,12 @@
   min-height: var(--hk-touch-height);
   cursor: pointer;
 }
+.decision-page .hk-button:disabled {
+  background: var(--hk-surface-2);
+  border-color: var(--hk-border-subtle);
+  color: var(--hk-text-disabled);
+  cursor: not-allowed;
+}
 .decision-list button {
   min-height: var(--hk-touch-height);
 }
@@ -67,23 +333,6 @@
   display: inline-flex;
   align-items: center;
 }
-.decision-tabs {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--hk-space-1);
-}
-.decision-list .decision-row {
-  display: grid;
-  width: 100%;
-  text-align: left;
-  padding: var(--hk-space-3);
-  background: var(--hk-surface-1);
-  color: var(--hk-text-primary);
-  border: var(--hk-border-width) solid var(--hk-border-subtle);
-}
-.decision-row[aria-current="true"] {
-  border-color: var(--hk-action-bg);
-}
 .decision-scrim {
   position: fixed;
   inset: 0;
@@ -91,10 +340,12 @@
   display: flex;
   align-items: end;
   justify-content: center;
-  z-index: 20;
+  z-index: var(--hk-z-modal);
 }
 .decision-sheet {
   background: var(--hk-surface-2);
+  border-top: var(--hk-border-width) solid var(--hk-border-control);
+  border-radius: var(--hk-radius-card) var(--hk-radius-card) 0 0;
   padding: var(--hk-space-6);
   width: min(100%, var(--hk-reading-width));
   box-sizing: border-box;
@@ -110,11 +361,40 @@
 .decision-cta {
   position: sticky;
   bottom: var(--hk-space-16);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--hk-space-2);
+  margin-top: var(--hk-space-4);
+  padding: var(--hk-space-3);
+  border: var(--hk-border-width) solid var(--hk-border-subtle);
+  border-radius: var(--hk-radius-card);
   background: var(--hk-surface-1);
-  padding: var(--hk-space-2);
+}
+.decision-cta p {
+  flex: 1 0 100%;
+  margin: 0;
+}
+.decision-cta .decision-answer {
+  flex: 1 1 auto;
 }
 html {
   scroll-padding-bottom: 160px;
+}
+@media (min-width: 768px) {
+  .decision-list .decision-tab,
+  .decision-toolbar .hk-button {
+    min-height: var(--hk-control-height);
+  }
+  .decision-cta .decision-answer {
+    flex: 0 0 auto;
+  }
+}
+@media (max-width: 767.98px) {
+  .decision-tabs {
+    padding-inline-end: var(--hk-space-6);
+    mask-image: linear-gradient(to right, var(--hk-void) calc(100% - var(--hk-space-6)), transparent);
+  }
 }
 @media (min-width: 1024px) {
   .decision-list-layout {
