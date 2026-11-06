@@ -222,7 +222,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch r.URL.Path {
-	case "/ui", "/ui/work":
+	case "/ui", "/ui/work", "/ui/deploys":
 		h.shell(w, r)
 	case "/ui/timeline":
 		h.timeline(w, r, false)
@@ -236,8 +236,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.fleet(w, r, false)
 	case "/ui/grades":
 		h.grades(w, r)
-	case "/ui/deploys":
-		h.deploys(w, r)
 	case "/ui/docs":
 		h.docsPage(w, r)
 	case "/ui/home":

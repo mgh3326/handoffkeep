@@ -13,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/mgh3326/handoffkeep/internal/guard"
 )
 
@@ -33,15 +34,20 @@ import (
 // operator_direct needs Verified (the console's Access email identity, or the
 // bearer client "operator"); anything else an operator said arrives as
 // operator_relay, and a human_only request does not close on a relay — the
-// attempt waits as pending_confirmation until a verified path answers.
+// attempt waits as pending_confirmation until a verified path answers. On a
+// verified path the operator may instead deny one pending attempt (Kind
+// deny, hk 3163): a denied attempt of its own that leaves the request open.
 
 // Answer channels. They are the values of decision_answer_attempts.channel
 // that ResolveDecision accepts; linear, lane and default are reserved by the
-// table for the routes that are not yet moved here.
+// table for the routes that are not yet moved here. session is an operator
+// session recording the operator's words; it carries the assistant claim and
+// is never verified.
 const (
 	DecisionChannelCLI       = "cli"
 	DecisionChannelAssistant = "assistant"
 	DecisionChannelConsole   = "console"
+	DecisionChannelSession   = "session"
 )
 
 // ResolveDecision results (R2). A result is the classification of one answer
@@ -53,7 +59,14 @@ const (
 	DecisionResultPendingConfirmation = "pending_confirmation"
 	DecisionResultExpired             = "expired"
 	DecisionResultSuperseded          = "superseded"
+	// DecisionResultDenied is the operator's refusal of one
+	// pending_confirmation attempt; the request stays open.
+	DecisionResultDenied = "denied"
 )
+
+// DecisionKindDeny is the ResolveDecisionInput.Kind that denies the attempt
+// DeniesAttemptID names instead of answering.
+const DecisionKindDeny = "deny"
 
 // decisionAttemptRefused is the attempt-only result of an assistant judgement
 // on a human_only request: ResolveDecision returns the error, not a result.
@@ -85,11 +98,15 @@ type ResolveDecisionInput struct {
 	TaskID int64
 	// RequestID is the dr- id the caller saw; it fixes the question revision.
 	RequestID string
-	Kind      string
-	Option    string
-	Text      string
-	Receipt   string
-	Responder string
+	// Kind is answered, default_applied, withdrawn or DecisionKindDeny.
+	Kind    string
+	Option  string
+	Text    string
+	Receipt string
+	// DeniesAttemptID is the pending_confirmation attempt a deny refuses;
+	// set with Kind deny only. Receipt is then the operator's reason.
+	DeniesAttemptID int64
+	Responder       string
 	// EventKey identifies the delivery: the same key with the same payload
 	// replays the first result and writes nothing, with another payload it is
 	// ErrDecisionEventKeyConflict. Absent, it is "auto:" + the payload hash.
@@ -99,8 +116,9 @@ type ResolveDecisionInput struct {
 	Actor    string
 	Verified bool
 
-	// The assistant claim (channel assistant only): the provenance it names,
-	// the operator's verbatim words and the request id they are bound to.
+	// The relayed claim (channels assistant and session only): the provenance
+	// it names, the operator's verbatim words and the request id they are
+	// bound to.
 	Provenance    string
 	OperatorQuote string
 	DecisionRef   string
@@ -149,13 +167,14 @@ type decisionPayload struct {
 	Quote             string `json:"quote"`
 	DecisionRef       string `json:"decision_ref"`
 	Actor             string `json:"actor"`
+	DeniesAttemptID   int64  `json:"denies_attempt_id,omitempty"`
 }
 
 func (in ResolveDecisionInput) payloadHash(taskID int64) (string, error) {
 	raw, err := json.Marshal(decisionPayload{
 		TaskID: taskID, RevisionRequestID: in.RequestID, Kind: in.Kind, Option: in.Option, Text: in.Text,
 		Receipt: in.Receipt, Responder: in.Responder, Provenance: in.Provenance, Quote: in.OperatorQuote,
-		DecisionRef: in.DecisionRef, Actor: in.Actor,
+		DecisionRef: in.DecisionRef, Actor: in.Actor, DeniesAttemptID: in.DeniesAttemptID,
 	})
 	if err != nil {
 		return "", err
@@ -173,20 +192,26 @@ type decisionAttempt struct {
 	revision                int
 	provenance              string
 	actor, result           string
+	deniesAttemptID         int64
+	receipt                 string
 	at                      time.Time
+	// The proposed answer, kept whatever the result so a pending or refused
+	// attempt can still be shown.
+	option, text, quote string
 }
 
 func insertDecisionAttempt(ctx context.Context, tx pgx.Tx, a decisionAttempt) (int64, error) {
 	var id int64
-	err := tx.QueryRow(ctx, `INSERT INTO decision_answer_attempts(channel,event_key,payload_hash,task_id,request_id,revision_request_id,question_revision,provenance,actor,result,received_at)
-		VALUES($1,$2,$3,$4,NULLIF($5,''),$6,NULLIF($7,0),NULLIF($8,''),$9,$10,$11) RETURNING id`,
-		a.channel, a.eventKey, a.hash, a.taskID, a.root, a.revisionRequestID, a.revision, a.provenance, a.actor, a.result, a.at).Scan(&id)
+	err := tx.QueryRow(ctx, `INSERT INTO decision_answer_attempts(channel,event_key,payload_hash,task_id,request_id,revision_request_id,question_revision,provenance,actor,result,received_at,denies_attempt_id,receipt,option_id,text,operator_quote)
+		VALUES($1,$2,$3,$4,NULLIF($5,''),$6,NULLIF($7,0),NULLIF($8,''),$9,$10,$11,NULLIF($12,0),NULLIF($13,''),NULLIF($14,''),NULLIF($15,''),NULLIF($16,'')) RETURNING id`,
+		a.channel, a.eventKey, a.hash, a.taskID, a.root, a.revisionRequestID, a.revision, a.provenance, a.actor, a.result, a.at, a.deniesAttemptID, a.receipt,
+		a.option, a.text, a.quote).Scan(&id)
 	return id, err
 }
 
 // derivedProvenance is the provenance of an answer, from the verified channel
 // and never from the body: a Verified channel is operator_direct; an assistant
-// answer is operator_relay with a visible operator quote and
+// or session answer is operator_relay with a visible operator quote and
 // assistant_judgement without; any other unverified answer is operator_relay.
 // It is empty when the assistant's claim is not a known value.
 func derivedProvenance(in ResolveDecisionInput, prov *assistantProvenance) string {
@@ -218,17 +243,21 @@ func decidedBy(in ResolveDecisionInput, prov *assistantProvenance) string {
 
 // ResolveDecision classifies one answer to a dr- request and records it; see
 // the file comment. Validation failures, and a wrk fence refusal, return an
-// error and write nothing. A human_only request answered by an assistant
-// judgement is refused: the attempt is recorded and the error returned.
+// error and write nothing. An assistant judgement on a request whose
+// effective policy is operator_direct is refused: the attempt is recorded and
+// the error returned.
 func (s *Store) ResolveDecision(ctx context.Context, in ResolveDecisionInput) (ResolveDecisionOutcome, error) {
 	assistant := in.Channel == DecisionChannelAssistant
+	// relayed is a channel that carries the assistant claim: the assistant
+	// and an operator session. Only the [via berry] note is assistant-only.
+	relayed := assistant || in.Channel == DecisionChannelSession
 	switch in.Channel {
-	case DecisionChannelCLI, DecisionChannelAssistant, DecisionChannelConsole:
+	case DecisionChannelCLI, DecisionChannelAssistant, DecisionChannelConsole, DecisionChannelSession:
 	default:
-		return ResolveDecisionOutcome{}, invalidDecisionRequest("channel must be cli, assistant or console")
+		return ResolveDecisionOutcome{}, invalidDecisionRequest("channel must be cli, assistant, console or session")
 	}
-	if in.Verified && assistant {
-		return ResolveDecisionOutcome{}, invalidDecisionRequest("the assistant channel is never verified")
+	if in.Verified && relayed {
+		return ResolveDecisionOutcome{}, invalidDecisionRequest("the " + in.Channel + " channel is never verified")
 	}
 	if in.Actor == "" || !validText(in.Actor, 128) {
 		return ResolveDecisionOutcome{}, invalidDecisionRequest("recorder is required")
@@ -238,7 +267,7 @@ func (s *Store) ResolveDecision(ctx context.Context, in ResolveDecisionInput) (R
 	}
 	effective := DecisionResolveInput{RequestID: in.RequestID, Kind: in.Kind, Option: in.Option, Text: in.Text, Receipt: in.Receipt, Responder: in.Responder}
 	var prov *assistantProvenance
-	if assistant {
+	if relayed {
 		if in.Kind != "" && in.Kind != DecisionRequestAnswered {
 			return ResolveDecisionOutcome{}, ErrDecisionAssistantKind
 		}
@@ -247,12 +276,21 @@ func (s *Store) ResolveDecision(ctx context.Context, in ResolveDecisionInput) (R
 		effective.Kind = DecisionRequestAnswered
 		effective.Responder = p.responder()
 	} else if in.Provenance != "" || in.OperatorQuote != "" || in.DecisionRef != "" {
-		// Only the assistant relays a claim; a body that names operator_direct
-		// (or any provenance) on another channel is refused, not trusted.
+		// Only the assistant or a session relays a claim; a body that names
+		// operator_direct (or any provenance) on another channel is refused.
 		return ResolveDecisionOutcome{}, ErrInvalidProvenance
 	}
-	if err := CheckDecisionResolveInput(effective); err != nil {
-		return ResolveDecisionOutcome{}, err
+	switch {
+	case in.Kind == DecisionKindDeny:
+		if err := checkDecisionDenyInput(in); err != nil {
+			return ResolveDecisionOutcome{}, err
+		}
+	case in.DeniesAttemptID != 0:
+		return ResolveDecisionOutcome{}, invalidDecisionRequest("attempt_id belongs to a deny only")
+	default:
+		if err := CheckDecisionResolveInput(effective); err != nil {
+			return ResolveDecisionOutcome{}, err
+		}
 	}
 	if err := guard.Reject(strings.Join([]string{in.Text, in.Receipt, effective.Responder}, "\n")); err != nil {
 		return ResolveDecisionOutcome{}, err
@@ -312,7 +350,20 @@ func (s *Store) ResolveDecision(ctx context.Context, in ResolveDecisionInput) (R
 	now := time.Now().UTC()
 	attempt := decisionAttempt{
 		channel: in.Channel, eventKey: eventKey, hash: hash, taskID: x.ID, revisionRequestID: in.RequestID,
-		provenance: provenance, actor: in.Actor, at: now,
+		provenance: provenance, actor: in.Actor, at: now, option: in.Option, text: in.Text,
+	}
+	if prov != nil {
+		// The attempt keeps the quote whatever the result, so it is checked
+		// here, before any attempt row (append-only) can be written.
+		attempt.quote = prov.recordedQuote()
+		if attempt.quote != "" {
+			if !validText(attempt.quote, DecisionOperatorQuoteMaxBytes) || !utf8.ValidString(attempt.quote) {
+				return ResolveDecisionOutcome{}, invalidDecisionRequest(fmt.Sprintf("operator_quote must be at most %d bytes of valid text", DecisionOperatorQuoteMaxBytes))
+			}
+			if err := guard.Reject(attempt.quote); err != nil {
+				return ResolveDecisionOutcome{}, err
+			}
+		}
 	}
 	if parsed {
 		attempt.revision = revision
@@ -351,7 +402,7 @@ func (s *Store) ResolveDecision(ctx context.Context, in ResolveDecisionInput) (R
 	}
 
 	if current.Status != DecisionRequestOpen {
-		if assistant {
+		if relayed {
 			// Amendment 1 (A2): provenance validity and the operator_decided
 			// ref binding are judged before the duplicate comparison — an
 			// invalid claim or a quote bound to another request id on an
@@ -386,8 +437,11 @@ func (s *Store) ResolveDecision(ctx context.Context, in ResolveDecisionInput) (R
 		}
 		return record(DecisionResultConflict, ErrDecisionRequestResolved)
 	}
+	if in.Kind == DecisionKindDeny {
+		return denyDecisionAttempt(ctx, tx, in, attempt, x, currentCopy)
+	}
 
-	if assistant {
+	if relayed {
 		// An open request left on a merged or dropped task is uncleaned
 		// state, not answerable work — the pending list already excludes it.
 		// Only the operator path closes it, as request cleanup.
@@ -418,10 +472,11 @@ func (s *Store) ResolveDecision(ctx context.Context, in ResolveDecisionInput) (R
 		if prov.effective() == DecisionProvenanceOperatorDecided && prov.ref != in.RequestID {
 			return ResolveDecisionOutcome{}, ErrProvenanceRefMismatch
 		}
-		// A human_only request names the boundary in the request itself: a
-		// judgement never closes it, and neither does a claim without the
-		// operator's quote. The refusal is recorded as an attempt.
-		if current.HumanOnly && prov.effective() != DecisionProvenanceOperatorDecided {
+		// The effective policy names the boundary in the request itself: on
+		// operator_direct (human_only, a disposition, or the producer's own
+		// policy) a judgement never closes it, and neither does a claim
+		// without the operator's quote. The refusal is recorded as an attempt.
+		if current.EffectivePolicy(x.Refs.Disposition != nil) == DecisionPolicyOperatorDirect && prov.effective() != DecisionProvenanceOperatorDecided {
 			var refused error = ErrDecisionRequestHumanOnly
 			if prov.claimed == DecisionProvenanceOperatorDecided {
 				refused = fmt.Errorf("%w: no_operator_quote", ErrDecisionRequestHumanOnly)
@@ -442,9 +497,10 @@ func (s *Store) ResolveDecision(ctx context.Context, in ResolveDecisionInput) (R
 	if effective.Kind == DecisionRequestAnswered && in.Option == "" && (x.Refs.DecisionOptions == nil || !x.Refs.DecisionOptions.AllowFree) {
 		return ResolveDecisionOutcome{}, invalidDecisionRequest("this request does not allow a free answer; name an option")
 	}
-	// R1: a human_only request closes only on a verified path. An answer
-	// relayed by an assistant or a session waits for the operator.
-	if effective.Kind == DecisionRequestAnswered && current.HumanOnly && provenance != DecisionProvenanceOperatorDirect {
+	// "R1: a human_only request closes only on a verified path. An answer
+	// relayed by an assistant or a session waits for the operator." The same
+	// holds for every request whose effective policy is operator_direct.
+	if effective.Kind == DecisionRequestAnswered && current.EffectivePolicy(x.Refs.Disposition != nil) == DecisionPolicyOperatorDirect && provenance != DecisionProvenanceOperatorDirect {
 		return record(DecisionResultPendingConfirmation, nil)
 	}
 
@@ -456,7 +512,7 @@ func (s *Store) ResolveDecision(ctx context.Context, in ResolveDecisionInput) (R
 	resolved := *current
 	resolved.Status = effective.Kind
 	resolved.Resolution = &DecisionResolution{Kind: effective.Kind, Option: in.Option, Text: in.Text, Receipt: in.Receipt, Responder: effective.Responder, By: in.Actor, At: now}
-	if assistant {
+	if relayed {
 		resolved.Resolution.Provenance = prov.effective()
 		resolved.Resolution.OperatorQuote = prov.recordedQuote()
 		resolved.Resolution.DecisionRef = prov.recordedRef()
@@ -485,13 +541,13 @@ func (s *Store) ResolveDecision(ctx context.Context, in ResolveDecisionInput) (R
 	if in.Receipt != "" {
 		note += " receipt " + in.Receipt
 	}
-	if assistant {
+	if relayed {
 		note += " " + prov.marker()
 	}
 	if in.Text != "" {
 		note += ": " + in.Text
 	}
-	if assistant && prov.effective() == DecisionProvenanceOperatorDecided {
+	if relayed && prov.effective() == DecisionProvenanceOperatorDecided {
 		note += " — " + prov.quote
 	}
 	if assistant {
@@ -526,6 +582,76 @@ func (s *Store) ResolveDecision(ctx context.Context, in ResolveDecisionInput) (R
 		return ResolveDecisionOutcome{}, err
 	}
 	return ResolveDecisionOutcome{Result: DecisionResultAnswered, ResolutionID: resolutionID, AttemptID: attemptID, Task: x, Request: resolved}, nil
+}
+
+// checkDecisionDenyInput checks the shape of a deny: only a verified
+// operator path denies, it names one attempt, and its receipt is the one
+// free-text field.
+func checkDecisionDenyInput(in ResolveDecisionInput) error {
+	if !in.Verified {
+		return invalidDecisionRequest("deny needs a verified operator path")
+	}
+	if in.DeniesAttemptID < 1 {
+		return invalidDecisionRequest("attempt_id must be positive")
+	}
+	if !strings.HasPrefix(in.RequestID, "dr-") || !validDecisionLine(in.RequestID, 64) {
+		return invalidDecisionRequest("request_id is required (dr-<task>-<revision>)")
+	}
+	if in.Option != "" || in.Text != "" || in.Responder != "" {
+		return invalidDecisionRequest("deny takes a receipt only")
+	}
+	if in.Receipt != "" && !validDecisionLine(in.Receipt, DecisionRequestReceiptMaxBytes) {
+		return invalidDecisionRequest(fmt.Sprintf("receipt must be one line of at most %d bytes", DecisionRequestReceiptMaxBytes))
+	}
+	return nil
+}
+
+// denyDecisionAttempt records the operator's deny of one pending_confirmation
+// attempt of the open request revision. The denied row is never updated: the
+// deny is its own attempt pointing at it, the request stays open and no
+// resolution is written. The caller holds the task row lock.
+func denyDecisionAttempt(ctx context.Context, tx pgx.Tx, in ResolveDecisionInput, attempt decisionAttempt, x Task, request DecisionRequest) (ResolveDecisionOutcome, error) {
+	var taskID int64
+	var result, revisionRequestID string
+	err := tx.QueryRow(ctx, `SELECT task_id,result,revision_request_id FROM decision_answer_attempts WHERE id=$1 FOR SHARE`, in.DeniesAttemptID).Scan(&taskID, &result, &revisionRequestID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ResolveDecisionOutcome{}, ErrDecisionAttemptNotFound
+	}
+	if err != nil {
+		return ResolveDecisionOutcome{}, err
+	}
+	if taskID != x.ID || result != DecisionResultPendingConfirmation || revisionRequestID != request.ID {
+		return ResolveDecisionOutcome{}, ErrDecisionAttemptNotPending
+	}
+	var denied bool
+	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM decision_answer_attempts WHERE denies_attempt_id=$1)`, in.DeniesAttemptID).Scan(&denied); err != nil {
+		return ResolveDecisionOutcome{}, err
+	}
+	if denied {
+		return ResolveDecisionOutcome{}, ErrDecisionAttemptDenied
+	}
+	attempt.result = DecisionResultDenied
+	attempt.deniesAttemptID = in.DeniesAttemptID
+	attempt.receipt = in.Receipt
+	id, err := insertDecisionAttempt(ctx, tx, attempt)
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.ConstraintName == "decision_answer_attempts_one_deny" {
+		return ResolveDecisionOutcome{}, ErrDecisionAttemptDenied
+	}
+	if err != nil {
+		return ResolveDecisionOutcome{}, err
+	}
+	note := fmt.Sprintf("decision-denied %s attempt %d", request.ID, in.DeniesAttemptID)
+	if in.Receipt != "" {
+		note += " receipt " + in.Receipt
+	}
+	if err = insertDecisionEvent(ctx, tx, &x, in.Actor, note, attempt.at); err != nil {
+		return ResolveDecisionOutcome{}, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return ResolveDecisionOutcome{}, err
+	}
+	return ResolveDecisionOutcome{Result: DecisionResultDenied, AttemptID: id, Task: x, Request: request}, nil
 }
 
 // decisionResolutionID is the id of the resolution row of one logical request

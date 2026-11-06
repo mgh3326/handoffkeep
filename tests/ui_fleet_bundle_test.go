@@ -126,7 +126,7 @@ func TestFleetBundleNoAbsoluteURLs(t *testing.T) {
 func TestFleetBundleFetchOnlyUIAPI(t *testing.T) {
 	artifacts := readConsoleArtifacts(t)
 	// The document viewer and the deploy screen each read one /ui/api route.
-	for name, want := range map[string]string{"shared-DocView.js": "/ui/api/board/doc", "deploys.js": "/ui/api/deploy-pending"} {
+	for name, want := range map[string]string{"shared-DocView.js": "/ui/api/board/doc", "shell.js": "/ui/api/deploy-pending"} {
 		if !strings.Contains(artifacts[name], want) {
 			t.Fatalf("%s does not contain %s", name, want)
 		}
