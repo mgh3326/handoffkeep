@@ -1,180 +1,99 @@
-import { stateLabel } from "../shared/states";
+import { useState } from "react";
+import { Icon, IconFrame } from "../shared/Icon";
+import { StateIcon } from "../shared/StateIcon";
+import { readStored, writeStored } from "../shared/storage";
 import { formatMinuteUTC } from "../shared/time";
+import { Chip } from "../shared/ui/Chip";
+import { Mono } from "../shared/ui/Mono";
 import { usePoll } from "../shared/usePoll";
 import { loadAttention } from "./api";
-import type {
-  Attention,
-  AttentionDecision,
-  AttentionDeploy,
-  AttentionTask,
-} from "./types";
+import type { Attention, AttentionDecision, AttentionDeploy, AttentionTask } from "./types";
 import "./home.css";
 
-/** Where a decision opens. A request has its own page (the route arrives with
- * the decision page, hk 3063); a lane event has no request id, so it opens the
- * inbox. */
-function decisionHref(x: AttentionDecision): string {
-  return x.source === "request" ? `/ui/decisions/${x.id}` : "/ui/decisions";
+const seenKey = "hk-console:home-seen";
+function readSeen(): string[] {
+  try {
+    const value: unknown = JSON.parse(readStored(seenKey) ?? "[]");
+    return Array.isArray(value) ? value.filter((x): x is string => typeof x === "string") : [];
+  } catch { return []; }
 }
-
-function when(iso: string): string {
-  return formatMinuteUTC(iso) ?? "시각 미상";
+export function summarizeQuestion(text: string): string {
+  const line = text.split(/\r?\n/)[0].replace(/[#*_`~\[\]]/g, "").replace(/\s+/g, " ").trim();
+  const match = /[:.!?]/.exec(line);
+  const end = match ? match.index + (match[0] === ":" ? 0 : 1) : line.length;
+  const Segmenter = (Intl as unknown as { Segmenter: new (locale: string, options: { granularity: "grapheme" }) => { segment: (text: string) => Iterable<{ segment: string }> } }).Segmenter;
+  const chars = Array.from(new Segmenter("ko", { granularity: "grapheme" }).segment(line.slice(0, end)), x => x.segment);
+  return chars.length > 90 ? `${chars.slice(0, 90).join("")}…` : chars.join("");
 }
-
-function More({ count, shown }: { count: number; shown: number }) {
-  return count > shown ? <p className="ha-more">+{count - shown} more</p> : null;
+function age(now: string, iso: string): string {
+  const minutes = Math.max(0, Math.floor((Date.parse(now) - Date.parse(iso)) / 60000));
+  if (!Number.isFinite(minutes)) return "시각 미상";
+  if (minutes < 1) return "방금";
+  if (minutes < 60) return `${minutes}분`;
+  if (minutes < 1440) return `${Math.floor(minutes / 60)}시간`;
+  return `${Math.floor(minutes / 1440)}일`;
 }
-
-function Section({
-  title,
-  count,
-  href,
-  split,
-  children,
-}: {
-  title: string;
-  count: number;
-  href?: string;
-  split?: string;
-  children: React.ReactNode;
-}) {
-  const heading = href ? <a href={href}>{title}</a> : title;
-  return (
-    <section className="ha-section" aria-label={title}>
-      <h2 className="ha-head">
-        {heading}
-        <span className="ha-count" aria-label={`${count} ${title}`}>
-          {count}
-        </span>
-        {split ? <span className="ha-split">{split}</span> : null}
-      </h2>
-      {children}
-    </section>
-  );
+function dateGroup(now: string, iso: string): string {
+  const day = (s: string) => { const d = new Date(s); return Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()); };
+  const days = Math.floor((day(now) - day(iso)) / 86400000);
+  if (days <= 0) return "오늘";
+  if (days === 1) return "어제";
+  const weekday = new Date(now).getDay() || 7;
+  if (days < weekday) return "이번 주";
+  if (days < weekday + 7) return "지난주";
+  return "이전";
 }
-
-function DecisionRow({ x }: { x: AttentionDecision }) {
-  return (
-    <li className="ha-item">
-      <a className="ha-link" href={decisionHref(x)}>
-        {x.question || "(no question text)"}
-      </a>
-      <span className="ha-meta">
-        <span>{x.lane}</span>
-        {x.overdue ? <span className="ha-overdue">overdue</span> : null}
-        {x.due_at ? <span>due {when(x.due_at)}</span> : null}
-        <span>asked {when(x.created_at)}</span>
-      </span>
-    </li>
-  );
-}
-
-function TaskRow({ x }: { x: AttentionTask }) {
-  return (
-    <li className="ha-item">
-      <a className="ha-link" href={`/ui/tasks/${x.id}`}>
-        #{x.id} {x.title}
-      </a>
-      <span className="ha-meta">
-        <span>{x.lane}</span>
-        <span>{stateLabel(x.state)}</span>
-        <span className={x.reason === "stalled" ? "ha-stalled" : undefined}>
-          {x.reason === "stalled" ? "stalled" : "awaiting decision"}
-        </span>
-        <span>since {when(x.since)}</span>
-      </span>
-    </li>
-  );
-}
-
-function DeployRow({ x }: { x: AttentionDeploy }) {
-  return (
-    <li className="ha-item">
-      <a className="ha-link" href={`/ui/tasks/${x.task_id}`}>
-        #{x.task_id} {x.title}
-      </a>
-      <span className="ha-meta">
-        <span>{x.service}</span>
-        <span>merged {when(x.merged_at)}</span>
-      </span>
-    </li>
-  );
-}
-
-function Body({ data }: { data: Attention }) {
-  const { decisions, tasks, deploys } = data;
-  if (decisions.count === 0 && tasks.count === 0 && deploys.count === 0) {
-    return <p className="ha-empty">Nothing is waiting on you.</p>;
+type Item =
+  | { kind: "decision"; value: AttentionDecision; time: string; key: string; overdue: boolean }
+  | { kind: "task"; value: AttentionTask; time: string; key: string; overdue: false }
+  | { kind: "deploy"; value: AttentionDeploy; time: string; key: string; overdue: false };
+function Row({ item, now, seen, markSeen }: { item: Item; now: string; seen: boolean; markSeen: (key: string) => void }) {
+  let href: string, id: number, title: string, summary: string;
+  let icon: React.ReactNode, chips: React.ReactNode;
+  if (item.kind === "decision") {
+    const x = item.value;
+    href = x.source === "request" ? `/ui/decisions/${x.id}` : "/ui/decisions";
+    id = x.id; title = "결정 필요"; summary = summarizeQuestion(x.question) || "질문 없음";
+    icon = <StateIcon state="awaiting_decision" />;
+    chips = <><Chip kind="status" state="awaiting_decision" label={x.source === "request" ? "요청" : "레인 이벤트"} />{x.overdue ? <Chip kind="status" state="stalled" stalled label="기한 경과" /> : x.due_at ? <Chip kind="status" state="triage" label={`기한 ${age(x.due_at, now)} 남음`} /> : null}<Chip kind="lane" lane={x.lane} /></>;
+  } else if (item.kind === "task") {
+    const x = item.value;
+    href = `/ui/tasks/${x.id}`; id = x.id; title = x.title; summary = x.reason === "stalled" ? "멈춘 작업" : "결정 대기 작업";
+    icon = x.reason === "stalled" ? <Icon name="warning" /> : <StateIcon state={x.state} />;
+    chips = <><Chip kind="status" state={x.state} stalled={x.reason === "stalled"} /><Chip kind="lane" lane={x.lane} /></>;
+  } else {
+    const x = item.value;
+    href = `/ui/tasks/${x.task_id}`; id = x.task_id; title = x.title; summary = "머지 후 미배포";
+    icon = <StateIcon state="merged" />; chips = <Chip kind="lane" lane={x.service} />;
   }
-  return (
-    <>
-      <Section title="Decisions" count={decisions.count}>
-        {decisions.items.length === 0 ? (
-          <p className="ha-none">None.</p>
-        ) : (
-          <ul className="ha-list">
-            {decisions.items.map((x) => (
-              <DecisionRow key={`${x.source}:${x.id}`} x={x} />
-            ))}
-          </ul>
-        )}
-        <More count={decisions.count} shown={decisions.items.length} />
-      </Section>
-      <Section
-        title="Tasks"
-        count={tasks.count}
-        split={`${tasks.awaiting_decision} awaiting · ${tasks.stalled} stalled`}
-      >
-        {tasks.items.length === 0 ? (
-          <p className="ha-none">None.</p>
-        ) : (
-          <ul className="ha-list">
-            {tasks.items.map((x) => (
-              <TaskRow key={x.id} x={x} />
-            ))}
-          </ul>
-        )}
-        <More count={tasks.count} shown={tasks.items.length} />
-      </Section>
-      <Section title="Deploys" count={deploys.count} href="/ui/deploys">
-        {deploys.items.length === 0 ? (
-          <p className="ha-none">None.</p>
-        ) : (
-          <ul className="ha-list">
-            {deploys.items.map((x) => (
-              <DeployRow key={`${x.service}:${x.task_id}`} x={x} />
-            ))}
-          </ul>
-        )}
-        <More count={deploys.count} shown={deploys.items.length} />
-        {deploys.events_capped ? (
-          <p className="ha-note">The merge scan hit its limit; this list may be incomplete.</p>
-        ) : null}
-      </Section>
-    </>
-  );
+  return <li className={`ha-item${seen ? " ha-item--seen" : ""}`}><a className="ha-row" href={href} onClick={() => markSeen(item.key)}>
+    <span className="ha-icon">{icon}</span><span className="ha-content">
+      <span className="ha-line"><span className="ha-dot" aria-label={seen ? "읽음" : "읽지 않음"} /><Mono>#{id}</Mono><span className="ha-row-title">{title}</span><time dateTime={item.time} title={formatMinuteUTC(item.time) ?? "시각 미상"}>{age(now, item.time)}</time></span>
+      <span className="ha-detail"><span className="ha-summary">{summary}</span><span className="ha-chips">{chips}</span></span>
+    </span></a></li>;
 }
-
-/** Home "waiting on me": open decisions, tasks that need the operator and
- * merges not yet deployed, from GET /ui/api/attention. */
+function Body({ data }: { data: Attention }) {
+  const [seen, setSeen] = useState(readSeen);
+  const markSeen = (key: string) => { const next = [...new Set([...seen, key])]; setSeen(next); writeStored(seenKey, JSON.stringify(next)); };
+  const action: Item[] = [
+    ...data.decisions.items.map((value): Item => ({ kind: "decision", value, time: value.created_at, key: `decision:${value.source}:${value.id}`, overdue: value.overdue })),
+    ...data.tasks.items.map((value): Item => ({ kind: "task", value, time: value.since, key: `task:${value.id}`, overdue: false })),
+  ].sort((a, b) => Number(b.overdue) - Number(a.overdue) || Date.parse(b.time) - Date.parse(a.time));
+  const fyi: Item[] = data.deploys.items.map((value): Item => ({ kind: "deploy", value, time: value.merged_at, key: `deploy:${value.service}:${value.task_id}`, overdue: false })).sort((a, b) => Date.parse(b.time) - Date.parse(a.time));
+  if (!(data.decisions.count + data.tasks.count + data.deploys.count)) return <div className="ha-empty"><IconFrame><path d="M4 5h16v14H4zM4 14h5l2 2h2l2-2h5" /></IconFrame><p>대기 중인 일 없음</p></div>;
+  const section = (title: string, items: Item[], count: number) => {
+    const groups: { label: string; rows: Item[] }[] = [];
+    for (const item of items) {
+      const label = dateGroup(data.generated_at, item.time);
+      const last = groups[groups.length - 1];
+      if (last?.label === label) last.rows.push(item);
+      else groups.push({ label, rows: [item] });
+    }
+    return <section className="ha-section" aria-label={title}><h2>{title} <span>{count}</span></h2>{groups.map((group, index) => <div key={`${group.label}:${index}`}><h3>{group.label}</h3><ul className="ha-list">{group.rows.map(item => <Row key={item.key} item={item} now={data.generated_at} seen={seen.includes(item.key)} markSeen={markSeen} />)}</ul></div>)}{count > items.length ? <p className="ha-note">+{count - items.length}개 더 있음</p> : null}</section>;
+  };
+  return <><p className="ha-summary-count">결정 {data.decisions.count} (기한 경과 {data.decisions.overdue}) · 작업 {data.tasks.count} · 배포 대기 {data.deploys.count}</p>{section("지금 할 일", action, data.decisions.count + data.tasks.count)}{section("참고", fyi, data.deploys.count)}{data.deploys.events_capped ? <p className="ha-note">조회 범위에 제한이 있어 목록이 불완전할 수 있습니다.</p> : null}</>;
+}
 export function HomeAttention() {
   const { data, failed } = usePoll(loadAttention, 60_000);
-  return (
-    <div className="ha-root">
-      <h1 className="ha-title">Waiting on me</h1>
-      {failed ? (
-        <p className="ha-error" role="alert">
-          Could not load what is waiting on you
-          {data ? " · showing the last good data" : ""}.
-        </p>
-      ) : null}
-      {data ? (
-        <Body data={data} />
-      ) : failed ? null : (
-        <p className="ha-none" role="status">
-          Loading…
-        </p>
-      )}
-    </div>
-  );
+  return <div className="ha-root"><h1 className="ha-title">나를 기다리는 일</h1>{failed ? <p className="ha-error" role="alert">목록을 불러오지 못했습니다{data ? " · 마지막으로 불러온 데이터를 표시합니다" : ""}.</p> : null}{data ? <Body data={data} /> : failed ? null : <p role="status">불러오는 중…</p>}</div>;
 }

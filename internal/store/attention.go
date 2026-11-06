@@ -139,7 +139,7 @@ func attentionDecisionsTx(ctx context.Context, tx pgx.Tx, now time.Time) (Attent
 }
 
 // attentionDecisionLess orders overdue first, then the nearest due date (none
-// last), then the oldest, then source and id so equal rows keep a fixed order.
+// last), then the newest, then source and id so equal rows keep a fixed order.
 func attentionDecisionLess(a, b AttentionDecision) bool {
 	if a.Overdue != b.Overdue {
 		return a.Overdue
@@ -151,17 +151,17 @@ func attentionDecisionLess(a, b AttentionDecision) bool {
 		return a.DueAt.Before(*b.DueAt)
 	}
 	if !a.CreatedAt.Equal(b.CreatedAt) {
-		return a.CreatedAt.Before(b.CreatedAt)
+		return a.CreatedAt.After(b.CreatedAt)
 	}
 	if a.Source != b.Source {
 		return a.Source < b.Source
 	}
-	return a.ID < b.ID
+	return a.ID > b.ID
 }
 
 func attentionRequestItems(ctx context.Context, tx pgx.Tx, now time.Time) ([]AttentionDecision, error) {
 	rows, err := tx.Query(ctx, `SELECT id,lane,question,created_at,due_at FROM decision_requests WHERE `+decisionOpenSQL+`
-		ORDER BY (due_at IS NOT NULL AND due_at<=$1::timestamptz) DESC, due_at ASC NULLS LAST, created_at ASC, id ASC LIMIT $2`, now, AttentionItems)
+		ORDER BY (due_at IS NOT NULL AND due_at<=$1::timestamptz) DESC, due_at ASC NULLS LAST, created_at DESC, id DESC LIMIT $2`, now, AttentionItems)
 	if err != nil {
 		return nil, err
 	}
@@ -185,7 +185,7 @@ func attentionRequestItems(ctx context.Context, tx pgx.Tx, now time.Time) ([]Att
 
 func attentionLaneItems(ctx context.Context, tx pgx.Tx, now time.Time) ([]AttentionDecision, error) {
 	rows, err := tx.Query(ctx, `SELECT e.id,e.owner_lane,e.text,e.received_at FROM `+attentionLaneSQL+`
-		ORDER BY e.received_at ASC, e.id ASC LIMIT $2`, now, AttentionItems)
+		ORDER BY e.received_at DESC, e.id DESC LIMIT $2`, now, AttentionItems)
 	if err != nil {
 		return nil, err
 	}
@@ -219,7 +219,7 @@ func attentionTasksTx(ctx context.Context, tx pgx.Tx, stalledBefore time.Time) (
 
 	rows, err := tx.Query(ctx, `SELECT tasks.id,title,lane,state,(`+awaitingTaskDecisionSQL+`) AS awaiting,`+taskActivitySQL+` AS since
 		FROM tasks WHERE (`+awaitingTaskDecisionSQL+`) OR (`+attentionStalledSQL+`)
-		ORDER BY awaiting DESC, since ASC, tasks.id ASC LIMIT $2`, stalledBefore, AttentionItems)
+		ORDER BY since DESC, tasks.id DESC LIMIT $2`, stalledBefore, AttentionItems)
 	if err != nil {
 		return out, err
 	}
