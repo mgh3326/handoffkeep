@@ -84,7 +84,7 @@ describe("Work", () => {
     render(<TaskRecord id={101} />);
     fireEvent.click(await screen.findByRole("button", { name: "다시 시도" }));
     await waitFor(() => expect(screen.getByText(/Example task/)).toBeTruthy());
-    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(fetcher).toHaveBeenCalledTimes(3);
   });
 });
 

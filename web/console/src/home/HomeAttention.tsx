@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Icon, IconFrame } from "../shared/Icon";
 import { StateIcon } from "../shared/StateIcon";
 import { readStored, writeStored } from "../shared/storage";
@@ -8,6 +8,9 @@ import { Mono } from "../shared/ui/Mono";
 import { usePoll } from "../shared/usePoll";
 import { loadAttention } from "./api";
 import type { Attention, AttentionDecision, AttentionDeploy, AttentionTask } from "./types";
+import { fetchTaskDetail } from "../shared/boardApi";
+import { TaskActions } from "../shared/actions/TaskActions";
+import type { BoardTask } from "../shared/boardTypes";
 import "./home.css";
 
 const seenKey = "hk-console:home-seen";
@@ -66,11 +69,18 @@ function Row({ item, now, seen, markSeen }: { item: Item; now: string; seen: boo
     href = `/ui/tasks/${x.task_id}`; id = x.task_id; title = x.title; summary = "머지 후 미배포";
     icon = <StateIcon state="merged" />; chips = <Chip kind="lane" lane={x.service} />;
   }
-  return <li className={`ha-item${seen ? " ha-item--seen" : ""}`}><a className="ha-row" href={href} onClick={() => markSeen(item.key)}>
+  return <li data-action-task={item.kind === "task" ? item.value.id : undefined} className={`ha-item action-row${seen ? " ha-item--seen" : ""}`}><a className="ha-row" href={href} onClick={() => markSeen(item.key)}>
     <span className="ha-icon">{icon}</span><span className="ha-content">
       <span className="ha-line"><span className="ha-dot" aria-hidden="true" /><span className="hk-sr-only">{seen ? "읽음" : "읽지 않음"}</span><Mono>#{id}</Mono><span className="ha-row-title">{title}</span><time dateTime={item.time} title={formatMinuteUTC(item.time) ?? "시각 미상"}>{age(now, item.time)}</time></span>
       <span className="ha-detail"><span className="ha-summary">{summary}</span><span className="ha-chips">{chips}</span></span>
-    </span></a></li>;
+    </span></a>{item.kind === "task" && <HomeTaskAction id={item.value.id} />}</li>;
+}
+function HomeTaskAction({ id }: { id: number }) {
+  const [task, setTask] = useState<BoardTask | null>(null);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => { let active = true; void fetchTaskDetail(id).then(data => { if (active) setTask(data.task); }).catch(() => { if (active) setFailed(true); }); return () => { active = false; }; }, [id]);
+  if (failed) return <span role="alert">작업을 불러오지 못했습니다.</span>;
+  return task && <TaskActions target={task} onPriority={priority => setTask(old => old ? { ...old, priority } : old)} />;
 }
 function Body({ data }: { data: Attention }) {
   const [seen, setSeen] = useState(readSeen);

@@ -34,15 +34,10 @@ func (h *Handler) decisionResolve(w http.ResponseWriter, r *http.Request, identi
 		Text      string `json:"text"`
 		EventKey  string `json:"event_key"`
 	}
-	if !h.decodeDecisionWrite(w, r, identity, &outcome, &input) {
+	if !h.decodeOperatorWrite(w, r, identity, &outcome, &input, &input.EventKey) {
 		return
 	}
 	outcome.target = auditTarget(input.RequestID)
-	if input.EventKey == "" {
-		writeJSONError(w, http.StatusBadRequest, "event_key_required")
-		return
-	}
-	outcome.eventID = auditTarget(input.EventKey)
 
 	out, err := h.store.ResolveDecision(r.Context(), store.ResolveDecisionInput{
 		RequestID: input.RequestID, Kind: store.DecisionRequestAnswered, Option: input.Option, Text: input.Text,
@@ -74,15 +69,10 @@ func (h *Handler) decisionDeny(w http.ResponseWriter, r *http.Request, identity 
 		Receipt   string `json:"receipt"`
 		EventKey  string `json:"event_key"`
 	}
-	if !h.decodeDecisionWrite(w, r, identity, &outcome, &input) {
+	if !h.decodeOperatorWrite(w, r, identity, &outcome, &input, &input.EventKey) {
 		return
 	}
 	outcome.target = auditTarget(input.RequestID)
-	if input.EventKey == "" {
-		writeJSONError(w, http.StatusBadRequest, "event_key_required")
-		return
-	}
-	outcome.eventID = auditTarget(input.EventKey)
 
 	out, err := h.store.ResolveDecision(r.Context(), store.ResolveDecisionInput{
 		RequestID: input.RequestID, Kind: store.DecisionKindDeny, DeniesAttemptID: input.AttemptID, Receipt: input.Receipt,
@@ -97,11 +87,11 @@ func (h *Handler) decisionDeny(w http.ResponseWriter, r *http.Request, identity 
 	writeBoardJSONStatus(w, status, body)
 }
 
-// decodeDecisionWrite applies the console decision routes' guards (an Access
+// decodeOperatorWrite applies the console operator routes' guards (an Access
 // email identity, same origin, header CSRF) and decodes the size-capped body
 // into input, rejecting unknown fields and trailing data. It answers the
 // refusal itself and reports whether the handler may go on.
-func (h *Handler) decodeDecisionWrite(w http.ResponseWriter, r *http.Request, identity cfaccess.Identity, outcome *writeOutcome, input any) bool {
+func (h *Handler) decodeOperatorWrite(w http.ResponseWriter, r *http.Request, identity cfaccess.Identity, outcome *writeOutcome, input any, eventKey *string) bool {
 	if identity.ServiceName != "" {
 		outcome.result = "service_reject"
 		writeJSONError(w, http.StatusForbidden, "operator_only")
@@ -128,6 +118,11 @@ func (h *Handler) decodeDecisionWrite(w http.ResponseWriter, r *http.Request, id
 		writeJSONError(w, http.StatusBadRequest, "invalid_request")
 		return false
 	}
+	if *eventKey == "" {
+		writeJSONError(w, http.StatusBadRequest, "event_key_required")
+		return false
+	}
+	outcome.eventID = auditTarget(*eventKey)
 	return true
 }
 
