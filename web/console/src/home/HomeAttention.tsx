@@ -19,10 +19,11 @@ function readSeen(): string[] {
 }
 export function summarizeQuestion(text: string): string {
   const line = text.split(/\r?\n/)[0].replace(/[#*_`~\[\]]/g, "").replace(/\s+/g, " ").trim();
-  const match = /[:.!?]/.exec(line);
+  const match = /[.!?:](?=\s|$)/.exec(line);
   const end = match ? match.index + (match[0] === ":" ? 0 : 1) : line.length;
-  const Segmenter = (Intl as unknown as { Segmenter: new (locale: string, options: { granularity: "grapheme" }) => { segment: (text: string) => Iterable<{ segment: string }> } }).Segmenter;
-  const chars = Array.from(new Segmenter("ko", { granularity: "grapheme" }).segment(line.slice(0, end)), x => x.segment);
+  const Segmenter = (Intl as unknown as { Segmenter?: new (locale: string, options: { granularity: "grapheme" }) => { segment: (text: string) => Iterable<{ segment: string }> } }).Segmenter;
+  const excerpt = line.slice(0, end);
+  const chars = Segmenter ? Array.from(new Segmenter("ko", { granularity: "grapheme" }).segment(excerpt), x => x.segment) : Array.from(excerpt);
   return chars.length > 90 ? `${chars.slice(0, 90).join("")}…` : chars.join("");
 }
 function age(now: string, iso: string): string {
@@ -60,7 +61,7 @@ function Row({ item, now, seen, markSeen }: { item: Item; now: string; seen: boo
     const x = item.value;
     href = `/ui/tasks/${x.id}`; id = x.id; title = x.title; summary = x.reason === "stalled" ? "멈춘 작업" : "결정 대기 작업";
     icon = x.reason === "stalled" ? <Icon name="warning" /> : <StateIcon state={x.state} />;
-    chips = <><Chip kind="status" state={x.state} stalled={x.reason === "stalled"} label={x.reason === "stalled" ? "멈춤" : undefined} /><Chip kind="lane" lane={x.lane} /></>;
+    chips = <><Chip kind="status" state={x.state} stalled={x.reason === "stalled"} awaiting_decision={x.reason === "awaiting_decision"} label={x.reason === "stalled" ? "멈춤" : "결정 대기"} /><Chip kind="lane" lane={x.lane} /></>;
   } else {
     const x = item.value;
     href = `/ui/tasks/${x.task_id}`; id = x.task_id; title = x.title; summary = "머지 후 미배포";
@@ -74,7 +75,7 @@ function Row({ item, now, seen, markSeen }: { item: Item; now: string; seen: boo
 }
 function Body({ data }: { data: Attention }) {
   const [seen, setSeen] = useState(readSeen);
-  const markSeen = (key: string) => { const next = [...new Set([...seen, key])]; setSeen(next); writeStored(seenKey, JSON.stringify(next)); };
+  const markSeen = (key: string) => { const next = [...new Set([...seen, key])].slice(-500); setSeen(next); writeStored(seenKey, JSON.stringify(next)); };
   const action: Item[] = [
     ...data.decisions.items.map((value): Item => ({ kind: "decision", value, time: value.created_at, key: `decision:${value.source}:${value.id}`, overdue: value.overdue })),
     ...data.tasks.items.map((value): Item => ({ kind: "task", value, time: value.since, key: `task:${value.id}`, overdue: false })),
