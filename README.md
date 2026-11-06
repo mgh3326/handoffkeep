@@ -486,10 +486,23 @@ makes a re-sent delivery replay the first result; the same key with another
 answer is `409 decision_event_key_conflict`. Provenance comes from the
 verified channel: the bearer client `operator` and an Access-authenticated
 console user answer as `operator_direct`; any other client, or an assistant
-quoting the operator, is a relay. A `human_only` request does not close on a
+quoting the operator, is a relay. A request carries an `answer_policy`
+(`--answer-policy` on `tasks decision-request` and `decisions ask`):
+`operator_relay_allowed` (the default) or `operator_direct`. A `human_only`
+request, a disposition item, and an `operator_direct` request do not close on a
 relay: the call answers `202` with `result: pending_confirmation` (the CLI
 prints it and exits 0), the request stays open, and a later `operator_direct`
-answer closes it. The console route is `POST /ui/api/decision-requests/resolve`
+answer closes it. `human_only` with `operator_relay_allowed` is refused. Every
+attempt keeps its proposed option, text and operator quote.
+
+A session records the operator's words with
+`handoffkeep decisions resolve request dr-42-1 --channel session --quote '<words>' [--option A] [--text …] [--event-key k]`
+(`POST /v1/tasks/{id}/decision-request/resolve` with `channel: "session"` and the
+assistant's `provenance`/`operator_quote`/`decision_ref` fields). With `--quote`
+it is an `operator_relay` answer bound to that request id; without it, an
+`assistant_judgement`, refused on an `operator_direct` request. The session
+channel is never verified. `--channel cli` is the plain CLI answer and takes no
+`--quote`. The console route is `POST /ui/api/decision-requests/resolve`
 with `{request_id, option, text, event_key}`.
 
 `GET /v1/tasks/export` returns one consistent snapshot of the queue — a

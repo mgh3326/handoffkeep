@@ -1003,6 +1003,24 @@ func (c Client) ResolveDecisionRequest(ctx context.Context, id int64, in store.D
 	return out, err
 }
 
+// DecisionChannelResolveInput is the resolve body with an answer channel:
+// "cli" or "session", and for session the relayed claim.
+type DecisionChannelResolveInput struct {
+	store.DecisionResolveInput
+	Channel       string `json:"channel,omitempty"`
+	Provenance    string `json:"provenance,omitempty"`
+	OperatorQuote string `json:"operator_quote,omitempty"`
+	DecisionRef   string `json:"decision_ref,omitempty"`
+}
+
+// ResolveDecisionChannel answers a task's current decision request on a
+// named channel.
+func (c Client) ResolveDecisionChannel(ctx context.Context, id int64, in DecisionChannelResolveInput) (store.DecisionRequestResult, error) {
+	var out store.DecisionRequestResult
+	err := c.call(ctx, "POST", fmt.Sprintf("/v1/tasks/%d/decision-request/resolve", id), in, &out)
+	return out, err
+}
+
 // AskDecision records a decision request and gives it its Linear issue.
 func (c Client) AskDecision(ctx context.Context, id int64, in store.DecisionRequestInput) (store.DecisionAskResult, error) {
 	var out store.DecisionAskResult
