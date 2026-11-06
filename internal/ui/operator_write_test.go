@@ -41,7 +41,11 @@ func TestOperatorWriteGuards(t *testing.T) {
 					}
 					w := httptest.NewRecorder()
 					h.serveAPI(w, r, tc.identity)
-					if !strings.Contains(w.Body.String(), `"error":"`+tc.want+`"`) {
+					wantStatus := http.StatusBadRequest
+					if tc.name == "service" || tc.name == "origin" || tc.name == "csrf" {
+						wantStatus = http.StatusForbidden
+					}
+					if w.Code != wantStatus || !strings.Contains(w.Body.String(), `"error":"`+tc.want+`"`) {
 						t.Fatalf("status %d: %s", w.Code, w.Body.String())
 					}
 				})
