@@ -63,7 +63,8 @@ type PlacementCandidate struct {
 	Power        *float64 `json:"power,omitempty"`
 }
 
-// ErrInvalidPlacement wraps a placement record's validation failure. Its text
+// ErrInvalidPlacement wraps a placement record's validation failure. Reasons
+// name the field and the rule, never the submitted value. Its text
 // is the wire code (invalid_context, unchanged for nodes); the text after
 // "invalid_context: " names the failing field, so a node's spool can log why
 // one record was refused and quarantine it (desk 2026-11-07: 733 records
@@ -80,7 +81,7 @@ func checkPlacement(d PlacementDecision) error {
 	case !ValidJobID(d.JobID):
 		return placementInvalid("job_id")
 	case d.Attempt < 1 || d.Attempt > 1000000:
-		return placementInvalid("attempt %d out of range", d.Attempt)
+		return placementInvalid("attempt out of range")
 	case !ValidJobHost(d.DecidedOn):
 		return placementInvalid("decided_on")
 	case d.DecidedAt.IsZero():
@@ -91,10 +92,10 @@ func checkPlacement(d PlacementDecision) error {
 		return placementInvalid("decided_at older than retention")
 	}
 	if d.Source != "auto" && d.Source != "forced" {
-		return placementInvalid("source %q", d.Source)
+		return placementInvalid("source must be auto or forced")
 	}
 	if d.Outcome != "placed" && d.Outcome != "refused" && d.Outcome != "failed" {
-		return placementInvalid("outcome %q", d.Outcome)
+		return placementInvalid("outcome must be placed, refused or failed")
 	}
 	switch {
 	case d.Ranking == "":
@@ -108,10 +109,10 @@ func checkPlacement(d PlacementDecision) error {
 	case d.Candidates == nil:
 		return placementInvalid("candidates missing (send [] when there are none)")
 	case len(d.Candidates) > 64:
-		return placementInvalid("candidates: %d over 64", len(d.Candidates))
+		return placementInvalid("candidates over 64")
 	}
 	if d.Role != "" && d.Role != "lead" && d.Role != "worker" && d.Role != "review" && d.Role != "consult" {
-		return placementInvalid("role %q", d.Role)
+		return placementInvalid("role must be lead, worker, review or consult")
 	}
 	if d.Outcome == "placed" && (d.TaskID == nil || d.ChosenHost == nil || d.Family == "" || d.Role == "") {
 		return placementInvalid("placed decisions require task_id, chosen_host, family and role")
@@ -138,7 +139,7 @@ func checkPlacement(d PlacementDecision) error {
 		case !validText(c.Reason, 256):
 			return placementInvalid("candidates[%d].reason: not printable text of at most 256 bytes", i)
 		case c.PowerSource != "" && c.PowerSource != "ac" && c.PowerSource != "battery":
-			return placementInvalid("candidates[%d].power_source %q", i, c.PowerSource)
+			return placementInvalid("candidates[%d].power_source must be empty, ac or battery", i)
 		}
 		if err := guard.Reject(c.Reason); err != nil {
 			return err
