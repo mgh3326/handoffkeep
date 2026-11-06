@@ -63,11 +63,12 @@ type PlacementCandidate struct {
 	Power        *float64 `json:"power,omitempty"`
 }
 
-// ErrInvalidPlacement wraps a placement record's validation failure. The
-// text after "invalid_placement: " names the failing field, so a node's spool
-// can log why one record was refused and quarantine it (desk 2026-11-07:
-// 733 records queued behind one refused record).
-var ErrInvalidPlacement = errors.New("invalid_placement")
+// ErrInvalidPlacement wraps a placement record's validation failure. Its text
+// is the wire code (invalid_context, unchanged for nodes); the text after
+// "invalid_context: " names the failing field, so a node's spool can log why
+// one record was refused and quarantine it (desk 2026-11-07: 733 records
+// queued behind one refused record).
+var ErrInvalidPlacement = errors.New("invalid_context")
 
 func placementInvalid(format string, args ...any) error {
 	return fmt.Errorf("%w: %s", ErrInvalidPlacement, fmt.Sprintf(format, args...))
