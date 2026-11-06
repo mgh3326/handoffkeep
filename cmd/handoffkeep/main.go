@@ -203,7 +203,7 @@ func taskRefs(pr, headSHA, reportPath, jobID string, linear *store.TaskLinear) (
 }
 
 func normalizeTaskArgs(args []string) ([]string, error) {
-	valueFlags := map[string]bool{"--url": true, "--token": true, "--lane": true, "--parent-lane": true, "--state": true, "--title": true, "--kind": true, "--priority": true, "--expected": true, "--by": true, "--to": true, "--closure": true, "--evidence": true, "--note": true, "--reason": true, "--question": true, "--limit": true, "--pr": true, "--head-sha": true, "--report-path": true, "--job-id": true, "--no-job": true, "--option": true, "--recommended": true, "--tier": true, "--grade": true, "--brief-key": true, "--label": true, "--linear-report-key": true, "--linear-verify-key": true, "--linear-decision-key": true, "--deploy-sha": true, "--origin-pr": true, "--origin-task": true, "--doc": true, "--project": true, "--area": true, "--parent": true, "--duplicate-of": true, "--link": true}
+	valueFlags := map[string]bool{"--url": true, "--token": true, "--lane": true, "--parent-lane": true, "--state": true, "--title": true, "--title-ko": true, "--body-ko": true, "--kind": true, "--priority": true, "--expected": true, "--by": true, "--to": true, "--closure": true, "--evidence": true, "--note": true, "--reason": true, "--question": true, "--limit": true, "--pr": true, "--head-sha": true, "--report-path": true, "--job-id": true, "--no-job": true, "--option": true, "--recommended": true, "--tier": true, "--grade": true, "--brief-key": true, "--label": true, "--linear-report-key": true, "--linear-verify-key": true, "--linear-decision-key": true, "--deploy-sha": true, "--origin-pr": true, "--origin-task": true, "--doc": true, "--project": true, "--area": true, "--parent": true, "--duplicate-of": true, "--link": true}
 	flags, positional := []string{}, []string{}
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -306,6 +306,8 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 	project := fs.String("project", "", "task project (required on add; an explicit empty value lists legacy no-project rows on list/export)")
 	area := fs.String("area", "", "task area from the closed vocabulary listed by tasks areas (optional on add; an explicit empty value lists no-area rows on list)")
 	title := fs.String("title", "", "task title")
+	titleKo := fs.String("title-ko", "", "Korean title translation")
+	bodyKo := fs.String("body-ko", "", "Korean body translation")
 	kind := fs.String("kind", "implement", "task kind")
 	priority := fs.Int("priority", 0, "higher is first")
 	expected := fs.String("expected", "", "expected task duration (for example 4h or 1d; tasks add only)")
@@ -502,6 +504,20 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 		if *parentID > 0 {
 			parent = parentID
 		}
+		var originalBody string
+		if *bodyKo != "" {
+			if *bodyDoc == "" {
+				return errors.New("--body-ko requires --doc")
+			}
+			doc, found, err := c.GetDocument(ctx, strings.SplitN(*bodyDoc, "#", 2)[0])
+			if err != nil {
+				return err
+			}
+			if !found {
+				return errors.New("--body-ko requires an existing document")
+			}
+			originalBody = doc.Body
+		}
 		x, err := c.CreateTaskChecked(ctx, store.Task{ParentID: parent, Expected: expectedDuration, Lane: *lane, ParentLane: *parentLane, Title: *title, Kind: *kind, Priority: *priority, Refs: *refs, BodyDoc: *bodyDoc, Project: project, Area: areaTag}, store.DuplicateCheck{Link: *link, New: *newTask})
 		if err != nil {
 			// invalid_context on create is a validation failure; append the
@@ -514,6 +530,18 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 				return fmt.Errorf("%w — pass --link <id> to relate the new task to one of them, or --new to file it anyway", err)
 			}
 			return err
+		}
+		rows := []store.Translation{}
+		if *titleKo != "" {
+			rows = append(rows, store.Translation{Entity: "task", EntityID: strconv.FormatInt(x.ID, 10), Field: "title", Lang: "ko", SourceSHA256: store.SourceSHA256(x.Title), Text: *titleKo, Translator: "cli"})
+		}
+		if *bodyKo != "" {
+			rows = append(rows, store.Translation{Entity: "task", EntityID: strconv.FormatInt(x.ID, 10), Field: "body", Lang: "ko", SourceSHA256: store.SourceSHA256(originalBody), Text: *bodyKo, Translator: "cli"})
+		}
+		if len(rows) > 0 {
+			if _, err := c.PutTranslations(ctx, rows); err != nil {
+				return fmt.Errorf("task %d created, but translation failed: %w", x.ID, err)
+			}
 		}
 		return printJSON(out, x)
 	case "list":

@@ -79,12 +79,13 @@ describe("Work", () => {
   });
   it("W10 assigns the task page to Work", () => { expect(navKey({ view: "task", id: "101" })).toBe("work"); });
   it("W11 retries a failed record", async () => {
-    const fetcher = vi.fn().mockResolvedValueOnce(new Response("", { status: 500 })).mockResolvedValueOnce(json(detail));
+    let detailCalls = 0;
+    const fetcher = vi.fn(async (path: string) => path.endsWith("/comments") ? json({ comments: [], truncated: false }) : ++detailCalls === 1 ? new Response("", { status: 500 }) : json(detail));
     vi.stubGlobal("fetch", fetcher);
     render(<TaskRecord id={101} />);
     fireEvent.click(await screen.findByRole("button", { name: "다시 시도" }));
     await waitFor(() => expect(screen.getByText(/Example task/)).toBeTruthy());
-    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(detailCalls).toBe(2);
   });
 });
 

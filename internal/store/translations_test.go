@@ -71,6 +71,16 @@ func TestTranslationsMigrationAndRoundTrip(t *testing.T) {
 			t.Fatalf("original=%q got=%+v err=%v", original, got, err)
 		}
 	}
+	for _, revision := range []string{"dr-1-1", "dr-1-2"} {
+		decision := Translation{Entity: "decision_request", EntityID: revision, Field: "question", Lang: "ko", SourceSHA256: SourceSHA256(revision), Text: "질문 " + revision, Translator: "test"}
+		if err := s.PutTranslation(ctx, decision); err != nil {
+			t.Fatal(err)
+		}
+	}
+	decisions, err := s.ListTranslations(ctx, "decision_request", []TranslationSource{{EntityID: "dr-1-1", Field: "question", Original: "dr-1-1"}, {EntityID: "dr-1-2", Field: "question", Original: "dr-1-2"}})
+	if err != nil || len(decisions) != 2 || decisions[0].Text == decisions[1].Text || decisions[0].Stale || decisions[1].Stale {
+		t.Fatalf("decision revisions=%+v err=%v", decisions, err)
+	}
 	got, err := s.Search(ctx, "안녕", "tasks", "", 10)
 	if err != nil || len(got) != 1 || !strings.Contains(got[0].Title, "hello") {
 		t.Fatalf("search=%+v err=%v", got, err)

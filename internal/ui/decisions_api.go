@@ -32,6 +32,33 @@ func (h *Handler) decisionsAPI(w http.ResponseWriter, r *http.Request, identity 
 			decisionsFailed(w, err)
 			return
 		}
+		type translatedItem struct {
+			store.DecisionTabItem
+			QuestionKO      string `json:"question_ko,omitempty"`
+			QuestionKOStale bool   `json:"question_ko_stale,omitempty"`
+		}
+		sources := make([]store.TranslationSource, 0, len(result.Items))
+		for _, item := range result.Items {
+			if strings.HasPrefix(item.SourceRef, "dr-") {
+				sources = append(sources, store.TranslationSource{EntityID: item.SourceRef, Field: "question", Original: item.Question})
+			}
+		}
+		translations, err := h.store.ListTranslations(r.Context(), "decision_request", sources)
+		if err != nil {
+			decisionsFailed(w, err)
+			return
+		}
+		items := make([]translatedItem, 0, len(result.Items))
+		for _, item := range result.Items {
+			v := translatedItem{DecisionTabItem: item}
+			for _, tr := range translations {
+				if tr.EntityID == item.SourceRef {
+					v.QuestionKO = tr.Text
+					v.QuestionKOStale = tr.Stale
+				}
+			}
+			items = append(items, v)
+		}
 		writeBoardJSON(w, struct {
 			GeneratedAt time.Time `json:"generated_at"`
 			Tab         string    `json:"tab"`
@@ -39,12 +66,12 @@ func (h *Handler) decisionsAPI(w http.ResponseWriter, r *http.Request, identity 
 				Open    int `json:"open"`
 				Overdue int `json:"overdue"`
 			} `json:"counts"`
-			Truncated bool                    `json:"truncated"`
-			Items     []store.DecisionTabItem `json:"items"`
+			Truncated bool             `json:"truncated"`
+			Items     []translatedItem `json:"items"`
 		}{GeneratedAt: now, Tab: tab, Counts: struct {
 			Open    int `json:"open"`
 			Overdue int `json:"overdue"`
-		}{result.Open, result.Overdue}, Truncated: result.Truncated, Items: result.Items})
+		}{result.Open, result.Overdue}, Truncated: result.Truncated, Items: items})
 		return
 	}
 	raw := strings.TrimPrefix(r.URL.Path, "/ui/api/decisions/")
@@ -63,11 +90,13 @@ func (h *Handler) decisionsAPI(w http.ResponseWriter, r *http.Request, identity 
 		return
 	}
 	var task *struct {
-		ID      int64   `json:"id"`
-		Title   string  `json:"title"`
-		State   string  `json:"state"`
-		Lane    string  `json:"lane"`
-		Project *string `json:"project"`
+		ID           int64   `json:"id"`
+		Title        string  `json:"title"`
+		TitleKO      string  `json:"title_ko,omitempty"`
+		TitleKOStale bool    `json:"title_ko_stale,omitempty"`
+		State        string  `json:"state"`
+		Lane         string  `json:"lane"`
+		Project      *string `json:"project"`
 	}
 	type requestView struct {
 		decisionRequestView
@@ -86,12 +115,23 @@ func (h *Handler) decisionsAPI(w http.ResponseWriter, r *http.Request, identity 
 		}
 		if ok {
 			task = &struct {
-				ID      int64   `json:"id"`
-				Title   string  `json:"title"`
-				State   string  `json:"state"`
-				Lane    string  `json:"lane"`
-				Project *string `json:"project"`
-			}{t.ID, t.Title, t.State, t.Lane, t.Project}
+				ID           int64   `json:"id"`
+				Title        string  `json:"title"`
+				TitleKO      string  `json:"title_ko,omitempty"`
+				TitleKOStale bool    `json:"title_ko_stale,omitempty"`
+				State        string  `json:"state"`
+				Lane         string  `json:"lane"`
+				Project      *string `json:"project"`
+			}{ID: t.ID, Title: t.Title, State: t.State, Lane: t.Lane, Project: t.Project}
+			translations, e := h.store.ListTranslations(r.Context(), "task", []store.TranslationSource{{EntityID: strconv.FormatInt(t.ID, 10), Field: "title", Original: t.Title}})
+			if e != nil {
+				decisionsFailed(w, e)
+				return
+			}
+			if len(translations) > 0 {
+				task.TitleKO = translations[0].Text
+				task.TitleKOStale = translations[0].Stale
+			}
 			entries := store.DecisionRequestHistory(t)
 			for _, entry := range entries {
 				v := projectDecisionRequest(entry, t.State, now)
@@ -122,9 +162,34 @@ func (h *Handler) decisionsAPI(w http.ResponseWriter, r *http.Request, identity 
 		decisionsFailed(w, err)
 		return
 	}
+	if err := h.translateDecisionViews(r.Context(), history); err != nil {
+		decisionsFailed(w, err)
+		return
+	}
+	if request != nil {
+		for _, v := range history {
+			if v.ID == request.ID {
+				request.decisionRequestView = v
+				break
+			}
+		}
+	}
+	var recordTranslation store.Translation
+	if strings.HasPrefix(record.SourceRef, "dr-") {
+		rows, e := h.store.ListTranslations(r.Context(), "decision_request", []store.TranslationSource{{EntityID: record.SourceRef, Field: "question", Original: record.Question}})
+		if e != nil {
+			decisionsFailed(w, e)
+			return
+		}
+		if len(rows) > 0 {
+			recordTranslation = rows[0]
+		}
+	}
 	type recordView struct {
 		store.DecisionRecord
 		SupersededRecordID *int64 `json:"superseded_record_id"`
+		QuestionKO         string `json:"question_ko,omitempty"`
+		QuestionKOStale    bool   `json:"question_ko_stale,omitempty"`
 	}
 	writeBoardJSON(w, struct {
 		GeneratedAt    time.Time               `json:"generated_at"`
@@ -135,7 +200,7 @@ func (h *Handler) decisionsAPI(w http.ResponseWriter, r *http.Request, identity 
 		Attempts       []store.DecisionAttempt `json:"attempts"`
 		Answerable     bool                    `json:"answerable"`
 		DisabledReason string                  `json:"disabled_reason"`
-	}{now, recordView{record, replacement}, task, request, history, attempts, reason == "", reason})
+	}{now, recordView{DecisionRecord: record, SupersededRecordID: replacement, QuestionKO: recordTranslation.Text, QuestionKOStale: recordTranslation.Stale}, task, request, history, attempts, reason == "", reason})
 }
 
 func decisionsFailed(w http.ResponseWriter, err error) {

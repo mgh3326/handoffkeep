@@ -70,6 +70,8 @@ function decision(o: Record<string, unknown>, at: string): AttentionDecision {
     id: id(o, "id", at),
     lane: text(o, "lane", at),
     question: text(o, "question", at),
+    question_ko: o.question_ko === undefined ? undefined : text(o, "question_ko", at),
+    question_ko_stale: o.question_ko_stale === undefined ? undefined : flag(o, "question_ko_stale", at),
     created_at: text(o, "created_at", at),
     due_at: nullableText(o, "due_at", at),
     overdue: flag(o, "overdue", at),
@@ -84,6 +86,8 @@ function task(o: Record<string, unknown>, at: string): AttentionTask {
   return {
     id: id(o, "id", at),
     title: text(o, "title", at),
+    title_ko: o.title_ko === undefined ? undefined : text(o, "title_ko", at),
+    title_ko_stale: o.title_ko_stale === undefined ? undefined : flag(o, "title_ko_stale", at),
     lane: text(o, "lane", at),
     state: text(o, "state", at),
     reason,

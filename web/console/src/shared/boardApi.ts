@@ -74,6 +74,9 @@ export async function fetchTaskDetail(id: number): Promise<BoardDetail> {
   if (
     !data ||
     !validBoardTask(data.task) ||
+    (data.body !== undefined && typeof data.body !== "string") ||
+    (data.body_ko !== undefined && typeof data.body_ko !== "string") ||
+    (data.body_ko_stale !== undefined && typeof data.body_ko_stale !== "boolean") ||
     !Array.isArray(data.events) ||
     !Array.isArray(data.dwell) ||
     !Array.isArray(data.documents) || !data.documents.every(d => record(d) && typeof d.key === "string" && typeof d.kind === "string" && typeof d.origin_class === "string") ||
@@ -106,6 +109,7 @@ export async function fetchTaskComments(id: number): Promise<TaskComments> {
     const page = await getJSON<BoardCommentsResponse>(
       `/ui/api/board/tasks/${id}/comments${query}`,
     );
+    if (!page || !Array.isArray(page.comments) || typeof page.truncated !== "boolean" || !page.comments.every(c => record(c) && typeof c.id === "number" && typeof c.task_id === "number" && typeof c.body === "string" && typeof c.author === "string" && typeof c.created_at === "string" && (c.body_ko === undefined || typeof c.body_ko === "string") && (c.body_ko_stale === undefined || typeof c.body_ko_stale === "boolean"))) throw new Error("malformed comments response");
     comments.push(...page.comments);
     if (!page.truncated) {
       return { comments, truncated: false };
@@ -182,6 +186,8 @@ function validBoardTask(value: unknown): value is BoardTask {
     value.id > 0 &&
     "title" in value &&
     typeof value.title === "string" &&
+    (!("title_ko" in value) || typeof value.title_ko === "string") &&
+    (!("title_ko_stale" in value) || typeof value.title_ko_stale === "boolean") &&
     "lane" in value &&
     typeof value.lane === "string" &&
     "state" in value &&

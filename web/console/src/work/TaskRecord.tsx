@@ -1,6 +1,7 @@
+import { TranslatedText } from "../shared/translation";
 import { useEffect, useState } from "react";
-import { fetchTaskDetail, HttpError } from "../shared/boardApi";
-import type { BoardDetail } from "../shared/boardTypes";
+import { fetchTaskComments, fetchTaskDetail, HttpError } from "../shared/boardApi";
+import type { BoardComment, BoardDetail } from "../shared/boardTypes";
 import { stateLabel } from "../shared/states";
 import { formatMinuteKST } from "../shared/time";
 import "./work.css";
@@ -17,12 +18,17 @@ function Section({ title, truncated, children }: { title: string; truncated?: bo
 }
 export function TaskRecord({ id }: { id: number }) {
   const [data, setData] = useState<BoardDetail | null>(null);
+  const [comments, setComments] = useState<BoardComment[] | null>(null);
+  const [commentsFailed, setCommentsFailed] = useState(false);
   const [error, setError] = useState<number | null>(null);
   const [attempt, setAttempt] = useState(0);
   useEffect(() => {
     let active = true;
-    setData(null); setError(null);
-    void fetchTaskDetail(id).then(value => { if (active) setData(value); }).catch((e: unknown) => { if (active) setError(e instanceof HttpError ? e.status : 500); });
+    setData(null); setError(null); setComments(null); setCommentsFailed(false);
+    void fetchTaskDetail(id).then(value => {
+      if (active) setData(value);
+      return fetchTaskComments(id).then(result => { if (active) setComments(result.comments); }).catch(() => { if (active) setCommentsFailed(true); });
+    }).catch((e: unknown) => { if (active) setError(e instanceof HttpError ? e.status : 500); });
     return () => { active = false; };
   }, [id, attempt]);
   if (error === 404) return <p>#{id} 없음</p>;
@@ -30,7 +36,9 @@ export function TaskRecord({ id }: { id: number }) {
   if (!data) return <p role="status">Loading…</p>;
   const { task, origins, documents, changes, jobs } = data;
   return <article className="work-record">
-    <header><h1>#{task.id} {task.title}</h1><p>{stateLabel(task.state)} · {task.project || "—"} · {task.lane} · P{task.priority} · {task.kind}</p></header>
+    <header><h1>#{task.id} <TranslatedText original={task.title} korean={task.title_ko} stale={task.title_ko_stale} /></h1><p>{stateLabel(task.state)} · {task.project || "—"} · {task.lane} · P{task.priority} · {task.kind}</p></header>
+    {data.body && <Section title="본문"><TranslatedText original={data.body} korean={data.body_ko} stale={data.body_ko_stale} /></Section>}
+    <Section title="댓글">{commentsFailed ? <p role="alert">댓글을 불러오지 못했습니다</p> : comments === null ? <p>불러오는 중…</p> : comments.length ? comments.map(c => <p key={c.id}><TranslatedText original={c.body} korean={c.body_ko} stale={c.body_ko_stale} /> · {c.author}</p>) : <p>댓글 없음</p>}</Section>
     <Section title="Closure">{task.refs.closure ? <p>{task.refs.closure.type} · {task.refs.closure.evidence}</p> : ["merged", "deployed", "completed", "dropped", "duplicate", "canceled"].includes(task.state) ? <p>종결 증거 없음</p> : <p>기록 없음</p>}</Section>
     <Section title="Origins" truncated={data.origins_truncated}>{origins.length ? origins.map((o, i) => <p key={i}>{o.provider} · {o.namespace} · {o.url ? <a href={o.url}>{o.display_ref || o.url}</a> : o.display_ref || "—"}</p>) : <p>기록 없음</p>}</Section>
     <Section title="Documents" truncated={data.documents_truncated}>{documents.length ? documents.map(d => <p key={d.key}><a href={`/ui/doc/${d.key.split("/").map(encodeURIComponent).join("/")}`}>{d.key}</a> · {d.kind} · {d.origin_class || "미분류"}</p>) : <p>기록 없음</p>}</Section>

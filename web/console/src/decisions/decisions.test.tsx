@@ -576,3 +576,13 @@ it("D4 a passed deadline reads as elapsed in the same units", async () => {
   await start();
   expect(screen.getByText(/2026-11-06 18:00 KST · 3시간 경과/)).toBeTruthy();
 });
+it("shows fresh Korean question and options and lets the operator reveal originals", async () => {
+  fetcher.mockImplementation(async () => response({ ...detail, request: { ...request, question_ko: "배포할까요?", options_ko: [{key:"A",label:"대기"},{key:"B",label:"배포",recommended:true},{key:"C",label:"검토"}] } }));
+  render(<DecisionPage id="42" />);
+  expect(await screen.findByText("배포할까요?")).toBeTruthy();
+  expect(screen.getByRole("radio", { name: /배포/ })).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "원문" }));
+  expect(screen.getByText("Ship it?")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "선택지 원문" }));
+  expect(screen.getByRole("radio", { name: /Ship/ })).toBeTruthy();
+});

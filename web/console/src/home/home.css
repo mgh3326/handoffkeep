@@ -32,3 +32,8 @@
 .ha-empty .hk-icon { width: 80px; height: 80px; }
 .ha-empty p { margin: 0; }
 .ha-error { color: var(--hk-chip-failed-fg); }
+
+.ha-item { display: flex; align-items: center; }
+.ha-item .ha-row { flex: 1; min-width: 0; }
+.ha-item > button { flex: none; margin-right: var(--hk-space-2); }
+.ha-row-title small { color: var(--hk-text-muted); }

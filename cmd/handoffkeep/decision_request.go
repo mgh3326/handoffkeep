@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -80,6 +81,54 @@ func notRecorded(err error) error {
 	return fmt.Errorf("decision request NOT recorded: %v — do not notify that it is visible in the console", err)
 }
 
+type decisionTranslationFlags struct {
+	question *string
+	options  refFlags
+}
+
+func addDecisionTranslationFlags(fs *flag.FlagSet) *decisionTranslationFlags {
+	flags := &decisionTranslationFlags{question: fs.String("question-ko", "", "Korean question")}
+	fs.Var(&flags.options, "option-ko", "Korean option A|label (repeatable)")
+	return flags
+}
+
+func putDecisionTranslations(ctx context.Context, c *remote.Client, request store.DecisionRequest, input store.DecisionRequestInput, flags *decisionTranslationFlags) error {
+	rows := []store.Translation{}
+	if *flags.question != "" {
+		rows = append(rows, store.Translation{Entity: "decision_request", EntityID: request.ID, Field: "question", Lang: "ko", SourceSHA256: store.SourceSHA256(request.Question), Text: *flags.question, Translator: "cli"})
+	}
+	if len(flags.options) > 0 {
+		translated, err := parseTaskDecisionOptions(flags.options, "", !input.Options.AllowFree)
+		if err != nil {
+			return err
+		}
+		if len(translated.Options) != len(input.Options.Options) {
+			return errors.New("--option-ko must supply one translation per option")
+		}
+		for i := range translated.Options {
+			if translated.Options[i].Key != input.Options.Options[i].Key {
+				return errors.New("--option-ko keys must match --option order")
+			}
+			translated.Options[i].Recommended = input.Options.Options[i].Recommended
+		}
+		source, err := json.Marshal(input.Options)
+		if err != nil {
+			return err
+		}
+		target, err := json.Marshal(translated)
+		if err != nil {
+			return err
+		}
+		rows = append(rows, store.Translation{Entity: "decision_request", EntityID: request.ID, Field: "options", Lang: "ko", SourceSHA256: store.SourceSHA256(string(source)), Text: string(target), Translator: "cli"})
+	}
+	if len(rows) > 0 {
+		if _, err := c.PutTranslations(ctx, rows); err != nil {
+			return fmt.Errorf("decision %s recorded, but translation failed: %w", request.ID, err)
+		}
+	}
+	return nil
+}
+
 // decisionRequestFlags parses the flags a decision request is made of into
 // fs, which the caller may have given flags of its own. The caller says "NOT
 // recorded" on any error: nothing has left the process yet.
@@ -102,7 +151,7 @@ func decisionRequestFlags(fs *flag.FlagSet, usage string, args []string) (*remot
 	noFreeAnswer := fs.Bool("no-free-answer", false, "disallow a free-form answer")
 	humanOnly := fs.Bool("human-only", false, "reserve the request for the human operator; the assistant path refuses it")
 	answerPolicy := fs.String("answer-policy", "", "operator_direct (a relayed answer waits for the operator) or operator_relay_allowed (default)")
-	parseArgs, err := splitArgs(args, "question", "option", "ref", "recommended", "reason", "default-action", "default-option", "default-trigger", "due", "doc", "supersedes", "answer-policy")
+	parseArgs, err := splitArgs(args, "question", "question-ko", "option", "option-ko", "ref", "recommended", "reason", "default-action", "default-option", "default-trigger", "due", "doc", "supersedes", "answer-policy")
 	if err != nil {
 		return nil, 0, store.DecisionRequestInput{}, err
 	}
@@ -153,7 +202,9 @@ func decisionRequestFlags(fs *flag.FlagSet, usage string, args []string) (*remot
 // request is recorded in hk first; the printed request_id is what the pane
 // notification carries.
 func decisionRequestCmd(args []string, out io.Writer) error {
-	c, id, input, err := decisionRequestFlags(flag.NewFlagSet("tasks decision-request", flag.ContinueOnError), decisionRequestUsage, args[1:])
+	fs := flag.NewFlagSet("tasks decision-request", flag.ContinueOnError)
+	ko := addDecisionTranslationFlags(fs)
+	c, id, input, err := decisionRequestFlags(fs, decisionRequestUsage, args[1:])
 	if err != nil {
 		return notRecorded(err)
 	}
@@ -162,6 +213,9 @@ func decisionRequestCmd(args []string, out io.Writer) error {
 	result, err := c.RecordDecisionRequest(ctx, id, input)
 	if err != nil {
 		return writeFailed("decision request", id, err)
+	}
+	if err := putDecisionTranslations(ctx, c, result.Request, input, ko); err != nil {
+		return err
 	}
 	return printJSON(out, decisionRequestOutput(result))
 }
@@ -174,6 +228,7 @@ func decisionRequestCmd(args []string, out io.Writer) error {
 func decisionAskCmd(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("decisions ask", flag.ContinueOnError)
 	linear := fs.Bool("linear", false, "also open the request's Linear issue")
+	ko := addDecisionTranslationFlags(fs)
 	c, id, input, err := decisionRequestFlags(fs, decisionAskUsage, args)
 	if err != nil {
 		return notRecorded(err)
@@ -202,6 +257,11 @@ func decisionAskCmd(args []string, out io.Writer) error {
 			Task: recorded.Task, Request: request, Duplicate: recorded.Duplicate,
 			DecisionRef: store.DecisionRef(request.ID), Ver: store.DecisionRequestVer(request.Question, options, request.Doc, request.Refs),
 		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if err := putDecisionTranslations(ctx, c, result.Request, input, ko); err != nil {
+		return err
 	}
 	output := map[string]any{
 		"recorded":      true,

@@ -8,6 +8,8 @@ export type AttentionDecision = {
   id: number;
   lane: string;
   question: string;
+  question_ko?: string;
+  question_ko_stale?: boolean;
   created_at: string;
   due_at: string | null;
   overdue: boolean;
@@ -18,6 +20,8 @@ export type AttentionTaskReason = "awaiting_decision" | "stalled";
 export type AttentionTask = {
   id: number;
   title: string;
+  title_ko?: string;
+  title_ko_stale?: boolean;
   lane: string;
   state: string;
   reason: AttentionTaskReason;

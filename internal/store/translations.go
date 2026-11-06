@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -13,6 +14,9 @@ import (
 
 	"github.com/mgh3326/handoffkeep/internal/guard"
 )
+
+// TranslationBatchMaxBytes permits 100 maximally escaped translation texts.
+const TranslationBatchMaxBytes = 100 * (6*MaxBytes + 1024)
 
 // Translation is a translation of one field at a particular source revision.
 // Decision request entity IDs identify a specific request revision.
@@ -28,11 +32,10 @@ type Translation struct {
 	Stale        bool      `json:"stale"`
 }
 
-var decisionTranslationID = regexp.MustCompile(`^dr-[1-9][0-9]*-[1-9][0-9]*$`)
-
 func validTranslationEntityID(entity, id string) bool {
 	if entity == "decision_request" {
-		return decisionTranslationID.MatchString(id)
+		task, revision, ok := ParseDecisionRequestID(id)
+		return ok && decisionRequestID(task, revision) == id
 	}
 	n, err := strconv.ParseInt(id, 10, 64)
 	return err == nil && n > 0 && strconv.FormatInt(n, 10) == id
@@ -191,6 +194,79 @@ func (s *Store) MissingTaskTranslations(ctx context.Context, limit int) ([]Missi
 			if len(out) == limit {
 				return out, nil
 			}
+		}
+	}
+	return out, rows.Err()
+}
+
+// MissingDecisionTranslations enumerates each structured decision revision.
+func (s *Store) MissingDecisionTranslations(ctx context.Context, limit int) ([]MissingTranslation, error) {
+	if limit < 1 || limit > 1000 {
+		return nil, fmt.Errorf("invalid translation limit")
+	}
+	rows, err := s.pool.Query(ctx, `SELECT d.source_ref,d.question,d.options,coalesce(q.source_sha256,''),coalesce(o.source_sha256,'') FROM decision_requests d LEFT JOIN translations q ON q.entity='decision_request' AND q.entity_id=d.source_ref AND q.field='question' AND q.lang='ko' LEFT JOIN translations o ON o.entity='decision_request' AND o.entity_id=d.source_ref AND o.field='options' AND o.lang='ko' WHERE d.status='open' AND d.source IN ('task_request','linear') ORDER BY d.id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []MissingTranslation{}
+	for rows.Next() {
+		var id, question, qhash, ohash string
+		var raw []byte
+		if err := rows.Scan(&id, &question, &raw, &qhash, &ohash); err != nil {
+			return nil, err
+		}
+		options := ""
+		if len(raw) > 0 && string(raw) != "null" {
+			var parsed DecisionOptions
+			if err := json.Unmarshal(raw, &parsed); err != nil {
+				return nil, err
+			}
+			encoded, err := json.Marshal(parsed)
+			if err != nil {
+				return nil, err
+			}
+			options = string(encoded)
+		}
+		for _, f := range []struct{ field, original, hash string }{{"question", question, qhash}, {"options", options, ohash}} {
+			if f.original == "" {
+				continue
+			}
+			hash := SourceSHA256(f.original)
+			if f.hash != hash {
+				out = append(out, MissingTranslation{Entity: "decision_request", EntityID: id, Field: f.field, Lang: "ko", Original: f.original, SourceSHA256: hash, Stale: f.hash != ""})
+			}
+			if len(out) == limit {
+				return out, nil
+			}
+		}
+	}
+	return out, rows.Err()
+}
+
+// MissingCommentTranslations enumerates comments belonging to unsettled tasks.
+func (s *Store) MissingCommentTranslations(ctx context.Context, limit int) ([]MissingTranslation, error) {
+	if limit < 1 || limit > 1000 {
+		return nil, fmt.Errorf("invalid translation limit")
+	}
+	rows, err := s.pool.Query(ctx, `SELECT c.id,c.body,coalesce(tr.source_sha256,'') FROM task_comments c JOIN tasks t ON t.id=c.task_id LEFT JOIN translations tr ON tr.entity='task_comment' AND tr.entity_id=c.id::text AND tr.field='body' AND tr.lang='ko' WHERE t.state NOT IN (`+settledStatesSQL+`) ORDER BY c.id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []MissingTranslation{}
+	for rows.Next() {
+		var id int64
+		var body, stored string
+		if err := rows.Scan(&id, &body, &stored); err != nil {
+			return nil, err
+		}
+		hash := SourceSHA256(body)
+		if stored != hash {
+			out = append(out, MissingTranslation{Entity: "task_comment", EntityID: strconv.FormatInt(id, 10), Field: "body", Lang: "ko", Original: body, SourceSHA256: hash, Stale: stored != ""})
+		}
+		if len(out) == limit {
+			return out, nil
 		}
 	}
 	return out, rows.Err()

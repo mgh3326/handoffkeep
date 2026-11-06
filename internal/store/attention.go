@@ -51,6 +51,7 @@ type AttentionDecisions struct {
 // request and the relay event id for a lane event.
 type AttentionDecision struct {
 	Source    string
+	SourceRef string
 	ID        int64
 	Lane      string
 	Question  string
@@ -160,7 +161,7 @@ func attentionDecisionLess(a, b AttentionDecision) bool {
 }
 
 func attentionRequestItems(ctx context.Context, tx pgx.Tx, now time.Time) ([]AttentionDecision, error) {
-	rows, err := tx.Query(ctx, `SELECT id,lane,question,created_at,due_at FROM decision_requests WHERE `+decisionOpenSQL+`
+	rows, err := tx.Query(ctx, `SELECT id,source_ref,lane,question,created_at,due_at FROM decision_requests WHERE `+decisionOpenSQL+`
 		ORDER BY (due_at IS NOT NULL AND due_at<=$1::timestamptz) DESC, due_at ASC NULLS LAST, created_at DESC, id DESC LIMIT $2`, now, AttentionItems)
 	if err != nil {
 		return nil, err
@@ -169,7 +170,7 @@ func attentionRequestItems(ctx context.Context, tx pgx.Tx, now time.Time) ([]Att
 	out := []AttentionDecision{}
 	for rows.Next() {
 		x := AttentionDecision{Source: AttentionSourceRequest}
-		if err := rows.Scan(&x.ID, &x.Lane, &x.Question, &x.CreatedAt, &x.DueAt); err != nil {
+		if err := rows.Scan(&x.ID, &x.SourceRef, &x.Lane, &x.Question, &x.CreatedAt, &x.DueAt); err != nil {
 			return nil, err
 		}
 		x.CreatedAt = x.CreatedAt.UTC()

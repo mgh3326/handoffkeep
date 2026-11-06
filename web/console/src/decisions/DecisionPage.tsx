@@ -1,3 +1,4 @@
+import { TranslatedText, useShowOriginal } from "../shared/translation";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { readCsrfToken } from "../shared/boardApi";
 import { isTypingTarget } from "../shared/search";
@@ -55,6 +56,8 @@ function deadline(iso: string) {
   return `${formatMinuteKST(iso) ?? iso}${rel ? ` · ${rel}` : ""}${ms >= 0 && ms <= 2 * 60 * 60_000 ? " · 임박" : ""}`;
 }
 export function DecisionPage({ id }: { id: string }) {
+  const globalOriginal = useShowOriginal();
+  const [optionsOriginal, setOptionsOriginal] = useState<boolean | null>(null);
   const [detail, setDetail] = useState<Detail | null>(null);
   const [screen, setScreen] = useState<ScreenState>("loading");
   const [option, setOption] = useState("");
@@ -313,7 +316,7 @@ export function DecisionPage({ id }: { id: string }) {
           {detail.task?.project ?? detail.record.lane}{" "}
           {detail.task && (
             <>
-              · <a href={`/ui/tasks/${detail.task.id}`}>{detail.task.title}</a>
+              · <a href={`/ui/tasks/${detail.task.id}`}>{!globalOriginal && detail.task.title_ko && !detail.task.title_ko_stale ? detail.task.title_ko : detail.task.title}{detail.task.title_ko_stale && <small> 갱신 필요</small>}</a>
             </>
           )}
         </p>
@@ -323,7 +326,7 @@ export function DecisionPage({ id }: { id: string }) {
           </p>
         )}
       </header>
-      <h2 className="decision-question">{req?.question ?? detail.record.question}</h2>
+      <h2 className="decision-question"><TranslatedText original={req?.question ?? detail.record.question} korean={req?.question_ko ?? detail.record.question_ko} stale={req?.question_ko_stale ?? detail.record.question_ko_stale} /></h2>
       {detail.task && (
         <p className="decision-task-state">
           태스크 상태: <Chip kind="status" state={detail.task.state} />
@@ -350,6 +353,8 @@ export function DecisionPage({ id }: { id: string }) {
       )}
       {req && (
         <>
+          {req.options_ko_stale && <small>갱신 필요</small>}
+          {req.options_ko && !req.options_ko_stale && <button type="button" aria-pressed={optionsOriginal ?? globalOriginal} onClick={() => setOptionsOriginal(!(optionsOriginal ?? globalOriginal))}>{(optionsOriginal ?? globalOriginal) ? "선택지 번역" : "선택지 원문"}</button>}
           <div
             role="radiogroup"
             aria-label="선택지"
@@ -374,7 +379,7 @@ export function DecisionPage({ id }: { id: string }) {
                 </span>
                 <span className="decision-option-body">
                   <strong>
-                    {i + 1}. {o.label}
+                    {i + 1}. {!(optionsOriginal ?? globalOriginal) && req.options_ko && !req.options_ko_stale ? req.options_ko[i]?.label ?? o.label : o.label}
                   </strong>
                   <span className="hk-chips">
                     {o.recommended && <DecisionChip group="done" label="권장" icon="check" />}
@@ -424,7 +429,7 @@ export function DecisionPage({ id }: { id: string }) {
             <summary>이력</summary>
             {detail.history.map((h) => (
               <p key={h.id}>
-                {h.id} · revision {h.revision} · {label(h.state)}
+                {h.id} · revision {h.revision} · {label(h.state)} · <TranslatedText original={h.question} korean={h.question_ko} stale={h.question_ko_stale} />
               </p>
             ))}
             {detail.attempts.map((a) => (

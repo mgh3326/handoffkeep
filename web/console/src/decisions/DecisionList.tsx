@@ -1,3 +1,4 @@
+import { useShowOriginal } from "../shared/translation";
 import { useCallback, useEffect, useState } from "react";
 import { Icon } from "../shared/Icon";
 import { StateIcon } from "../shared/StateIcon";
@@ -53,6 +54,8 @@ const empty: Record<Tab, { text: string; next: Tab; nextLabel: string }> = {
 const plainClick = (e: React.MouseEvent) =>
   !e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey && e.button === 0;
 export function DecisionList() {
+  const showOriginal = useShowOriginal();
+  const [originalItems, setOriginalItems] = useState<Record<number, boolean>>({});
   const [tab, setTab] = useState<Tab>(initialTab);
   const [selected, setSelected] = useState<string | null>(() =>
     readStored("hk-decisions:selected", sessionStorage),
@@ -204,7 +207,7 @@ export function DecisionList() {
           const age = formatAge(now, x.created_at);
           const remaining = state === "open" && x.due_at ? formatRemaining(now, x.due_at) : null;
           return (
-            <div key={x.id}>
+            <div className="decision-translation-row" key={x.id}>
               {firstNew && <p className="decision-divider">새 항목</p>}
               <a
                 href={`/ui/decisions/${x.id}?tab=${tab}`}
@@ -219,7 +222,7 @@ export function DecisionList() {
                   <span className="decision-row-title">
                     {isNew && <span className="hk-sr-only">안 읽음 </span>}
                     <Mono className="decision-id">#{x.id}</Mono>{" "}
-                    <span className="decision-summary">{summarizeQuestion(x.question)}</span>
+                    <span className="decision-summary">{summarizeQuestion(!(originalItems[x.id] ?? showOriginal) && x.question_ko && !x.question_ko_stale ? x.question_ko : x.question)}{x.question_ko_stale && <small> 갱신 필요</small>}</span>
                   </span>
                   <span className="hk-chips">
                     <span className="hk-chip hk-chip--neutral" data-chip="source">
@@ -245,6 +248,7 @@ export function DecisionList() {
                   </span>
                 </span>
               </a>
+              {x.question_ko && !x.question_ko_stale && <button type="button" aria-pressed={originalItems[x.id] ?? showOriginal} onClick={() => setOriginalItems(items => ({...items, [x.id]: !(items[x.id] ?? showOriginal)}))}>{(originalItems[x.id] ?? showOriginal) ? "번역" : "원문"}</button>}
               {x.superseded_record_id && (
                 <a className="decision-superseded" href={`/ui/decisions/${x.superseded_record_id}`}>
                   대체 요청 {x.superseded_by}

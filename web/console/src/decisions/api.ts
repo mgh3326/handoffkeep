@@ -32,6 +32,8 @@ function record(v: unknown): boolean {
     (v.task_id === null || num(v.task_id)) &&
     str(v.lane) &&
     str(v.question) &&
+    optionalString(v.question_ko) &&
+    (v.question_ko_stale === undefined || typeof v.question_ko_stale === "boolean") &&
     nullableString(v.due_at) &&
     typeof v.overdue === "boolean" &&
     str(v.status) &&
@@ -51,6 +53,8 @@ function request(v: unknown): boolean {
     num(v.revision) &&
     str(v.state) &&
     str(v.question) &&
+    optionalString(v.question_ko) &&
+    (v.question_ko_stale === undefined || typeof v.question_ko_stale === "boolean") &&
     Array.isArray(v.options) &&
     v.options.every(
       (x) =>
@@ -59,6 +63,8 @@ function request(v: unknown): boolean {
         str(x.label) &&
         (x.recommended === undefined || typeof x.recommended === "boolean"),
     ) &&
+    (v.options_ko === undefined || (Array.isArray(v.options_ko) && v.options_ko.every(x => obj(x) && str(x.key) && str(x.label)))) &&
+    (v.options_ko_stale === undefined || typeof v.options_ko_stale === "boolean") &&
     typeof v.allow_free === "boolean" &&
     str(v.default_action) &&
     [
@@ -113,6 +119,8 @@ export async function loadDetail(id: string): Promise<Detail> {
       (obj(v.task) &&
         num(v.task.id) &&
         str(v.task.title) &&
+        optionalString(v.task.title_ko) &&
+        (v.task.title_ko_stale === undefined || typeof v.task.title_ko_stale === "boolean") &&
         str(v.task.state) &&
         str(v.task.lane) &&
         (v.task.project === undefined || nullableString(v.task.project)))

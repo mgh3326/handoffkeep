@@ -13,7 +13,7 @@ func (s Server) translationsPut(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		Translations []store.Translation `json:"translations"`
 	}
-	if err := decode(r, &input, bodyLarge); err != nil {
+	if err := decode(r, &input, store.TranslationBatchMaxBytes); err != nil {
 		appErr(w, r, err)
 		return
 	}
@@ -32,7 +32,8 @@ func (s Server) translationsMissing(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.auth(w, r); !ok {
 		return
 	}
-	if r.URL.Query().Get("entity") != "task" || r.URL.Query().Get("state") != "open" {
+	entity := r.URL.Query().Get("entity")
+	if (entity != "task" && entity != "decision_request" && entity != "task_comment") || r.URL.Query().Get("state") != "open" {
 		writeError(w, http.StatusBadRequest, "invalid_context")
 		return
 	}
@@ -41,7 +42,15 @@ func (s Server) translationsMissing(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_context")
 		return
 	}
-	rows, err := s.Service.Store.MissingTaskTranslations(r.Context(), limit)
+	var rows []store.MissingTranslation
+	switch entity {
+	case "task":
+		rows, err = s.Service.Store.MissingTaskTranslations(r.Context(), limit)
+	case "decision_request":
+		rows, err = s.Service.Store.MissingDecisionTranslations(r.Context(), limit)
+	case "task_comment":
+		rows, err = s.Service.Store.MissingCommentTranslations(r.Context(), limit)
+	}
 	if err != nil {
 		appErr(w, r, err)
 		return

@@ -241,3 +241,19 @@ it("moves relative to the row reached by Tab even after another row was selected
   fireEvent.keyDown(middle, { key: "ArrowUp" });
   expect(document.activeElement?.id).toBe("work-row-103");
 });
+it("finds Korean titles and shows the fresh translation first", async () => {
+  vi.stubGlobal("fetch", vi.fn(async (path: string) => path.includes("projects") ? response({ projects: ["a"] }) : response({ tasks: [{ ...task, title_ko: "한국어 작업" }], states: ["developing"], generated_at: "now", truncated: false })));
+  history.replaceState(null, "", "/ui/work?project=a&view=active&q=%ED%95%9C%EA%B5%AD%EC%96%B4");
+  render(<WorkPage />);
+  expect(await screen.findByText("한국어 작업")).toBeTruthy();
+});
+it("toggles one translated title and marks a stale one", async () => {
+  const rows = [{ ...task, title_ko: "작업 번역" }, { ...task, id: 102, title: "Changed", title_ko: "오래됨", title_ko_stale: true }];
+  vi.stubGlobal("fetch", vi.fn(async (path: string) => path.includes("projects") ? response({ projects: ["a"] }) : response({ tasks: rows, states: ["developing"], generated_at: "now", truncated: false })));
+  history.replaceState(null, "", "/ui/work?project=a&view=active");
+  render(<WorkPage />);
+  expect(await screen.findByText("작업 번역")).toBeTruthy();
+  expect(screen.getByText("갱신 필요")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "원문" }));
+  expect(screen.getByText("Task one")).toBeTruthy();
+});

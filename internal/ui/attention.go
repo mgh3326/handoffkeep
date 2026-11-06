@@ -4,9 +4,12 @@ import (
 	"log"
 	"net/http"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/mgh3326/handoffkeep/internal/cfaccess"
+	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
 // attentionDeployItems is how many pending deploys the Home list carries; the
@@ -14,22 +17,26 @@ import (
 const attentionDeployItems = 5
 
 type attentionDecisionView struct {
-	Source    string     `json:"source"`
-	ID        int64      `json:"id"`
-	Lane      string     `json:"lane"`
-	Question  string     `json:"question"`
-	CreatedAt time.Time  `json:"created_at"`
-	DueAt     *time.Time `json:"due_at"`
-	Overdue   bool       `json:"overdue"`
+	Source          string     `json:"source"`
+	ID              int64      `json:"id"`
+	Lane            string     `json:"lane"`
+	Question        string     `json:"question"`
+	QuestionKO      string     `json:"question_ko,omitempty"`
+	QuestionKOStale bool       `json:"question_ko_stale,omitempty"`
+	CreatedAt       time.Time  `json:"created_at"`
+	DueAt           *time.Time `json:"due_at"`
+	Overdue         bool       `json:"overdue"`
 }
 
 type attentionTaskView struct {
-	ID     int64     `json:"id"`
-	Title  string    `json:"title"`
-	Lane   string    `json:"lane"`
-	State  string    `json:"state"`
-	Reason string    `json:"reason"`
-	Since  time.Time `json:"since"`
+	ID           int64     `json:"id"`
+	Title        string    `json:"title"`
+	TitleKO      string    `json:"title_ko,omitempty"`
+	TitleKOStale bool      `json:"title_ko_stale,omitempty"`
+	Lane         string    `json:"lane"`
+	State        string    `json:"state"`
+	Reason       string    `json:"reason"`
+	Since        time.Time `json:"since"`
 }
 
 type attentionDeployView struct {
@@ -87,14 +94,50 @@ func (h *Handler) attention(w http.ResponseWriter, r *http.Request, identity cfa
 	response.Decisions.Overdue = waiting.Decisions.Overdue
 	response.Decisions.Items = make([]attentionDecisionView, 0, len(waiting.Decisions.Items))
 	for _, x := range waiting.Decisions.Items {
-		response.Decisions.Items = append(response.Decisions.Items, attentionDecisionView(x))
+		response.Decisions.Items = append(response.Decisions.Items, attentionDecisionView{Source: x.Source, ID: x.ID, Lane: x.Lane, Question: x.Question, CreatedAt: x.CreatedAt, DueAt: x.DueAt, Overdue: x.Overdue})
 	}
 	response.Tasks.Count = waiting.Tasks.Count
 	response.Tasks.AwaitingDecision = waiting.Tasks.AwaitingDecision
 	response.Tasks.Stalled = waiting.Tasks.Stalled
 	response.Tasks.Items = make([]attentionTaskView, 0, len(waiting.Tasks.Items))
 	for _, x := range waiting.Tasks.Items {
-		response.Tasks.Items = append(response.Tasks.Items, attentionTaskView(x))
+		response.Tasks.Items = append(response.Tasks.Items, attentionTaskView{ID: x.ID, Title: x.Title, Lane: x.Lane, State: x.State, Reason: x.Reason, Since: x.Since})
+	}
+	taskSources := make([]store.TranslationSource, 0, len(waiting.Tasks.Items))
+	for _, x := range waiting.Tasks.Items {
+		taskSources = append(taskSources, store.TranslationSource{EntityID: strconv.FormatInt(x.ID, 10), Field: "title", Original: x.Title})
+	}
+	taskTranslations, err := h.store.ListTranslations(r.Context(), "task", taskSources)
+	if err != nil {
+		h.attentionFailed(w, err)
+		return
+	}
+	for i := range response.Tasks.Items {
+		for _, tr := range taskTranslations {
+			if tr.EntityID == strconv.FormatInt(response.Tasks.Items[i].ID, 10) {
+				response.Tasks.Items[i].TitleKO = tr.Text
+				response.Tasks.Items[i].TitleKOStale = tr.Stale
+			}
+		}
+	}
+	decisionSources := make([]store.TranslationSource, 0, len(waiting.Decisions.Items))
+	for _, x := range waiting.Decisions.Items {
+		if strings.HasPrefix(x.SourceRef, "dr-") {
+			decisionSources = append(decisionSources, store.TranslationSource{EntityID: x.SourceRef, Field: "question", Original: x.Question})
+		}
+	}
+	decisionTranslations, err := h.store.ListTranslations(r.Context(), "decision_request", decisionSources)
+	if err != nil {
+		h.attentionFailed(w, err)
+		return
+	}
+	for i, x := range waiting.Decisions.Items {
+		for _, tr := range decisionTranslations {
+			if tr.EntityID == x.SourceRef {
+				response.Decisions.Items[i].QuestionKO = tr.Text
+				response.Decisions.Items[i].QuestionKOStale = tr.Stale
+			}
+		}
 	}
 	response.Deploys.EventsCapped = deploys.EventsCapped
 	response.Deploys.Count, response.Deploys.Items = attentionDeploys(deploys)

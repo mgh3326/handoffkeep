@@ -33,26 +33,30 @@ var decisionStateLabels = map[string]string{
 const decisionViewUnrecorded = "unrecorded"
 
 type decisionRequestView struct {
-	ID             string                    `json:"id"`
-	Revision       int                       `json:"revision"`
-	Supersedes     string                    `json:"supersedes,omitempty"`
-	SupersededBy   string                    `json:"superseded_by,omitempty"`
-	Current        bool                      `json:"current"`
-	State          string                    `json:"state"`
-	StateLabel     string                    `json:"state_label"`
-	Question       string                    `json:"question"`
-	Options        []store.DecisionOption    `json:"options"`
-	AllowFree      bool                      `json:"allow_free"`
-	Reason         string                    `json:"reason,omitempty"`
-	DefaultAction  string                    `json:"default_action"`
-	DefaultOption  string                    `json:"default_option,omitempty"`
-	DefaultTrigger string                    `json:"default_trigger,omitempty"`
-	DueAt          *time.Time                `json:"due_at,omitempty"`
-	Doc            string                    `json:"doc,omitempty"`
-	Refs           []string                  `json:"refs,omitempty"`
-	RequestedBy    string                    `json:"requested_by"`
-	RequestedAt    time.Time                 `json:"requested_at"`
-	Resolution     *store.DecisionResolution `json:"resolution,omitempty"`
+	ID              string                    `json:"id"`
+	Revision        int                       `json:"revision"`
+	Supersedes      string                    `json:"supersedes,omitempty"`
+	SupersededBy    string                    `json:"superseded_by,omitempty"`
+	Current         bool                      `json:"current"`
+	State           string                    `json:"state"`
+	StateLabel      string                    `json:"state_label"`
+	Question        string                    `json:"question"`
+	QuestionKO      string                    `json:"question_ko,omitempty"`
+	QuestionKOStale bool                      `json:"question_ko_stale,omitempty"`
+	Options         []store.DecisionOption    `json:"options"`
+	OptionsKO       []store.DecisionOption    `json:"options_ko,omitempty"`
+	OptionsKOStale  bool                      `json:"options_ko_stale,omitempty"`
+	AllowFree       bool                      `json:"allow_free"`
+	Reason          string                    `json:"reason,omitempty"`
+	DefaultAction   string                    `json:"default_action"`
+	DefaultOption   string                    `json:"default_option,omitempty"`
+	DefaultTrigger  string                    `json:"default_trigger,omitempty"`
+	DueAt           *time.Time                `json:"due_at,omitempty"`
+	Doc             string                    `json:"doc,omitempty"`
+	Refs            []string                  `json:"refs,omitempty"`
+	RequestedBy     string                    `json:"requested_by"`
+	RequestedAt     time.Time                 `json:"requested_at"`
+	Resolution      *store.DecisionResolution `json:"resolution,omitempty"`
 }
 
 // legacyDecisionView is a needs_decision task whose question was never

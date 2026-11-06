@@ -26,3 +26,8 @@
 .work-filter-sheet summary { display: flex; align-items: center; gap: var(--hk-space-1); list-style: none; min-height: 44px; cursor: pointer; color: var(--hk-text-secondary); }
 @media (min-width: 1024px) { .work-filter-sheet summary { display: none; } .work-tabs button { flex: 0 0 auto; padding-inline: var(--hk-space-4); } }
 .work-filter-sheet summary::-webkit-details-marker { display: none; }
+
+.work-translation-row { position: relative; }
+.work-translation-row > button { position: absolute; right: var(--hk-space-2); top: var(--hk-space-1); }
+.work-translation-row:has(> button) .work-row-title { padding-right: var(--hk-space-12); }
+.work-row-title small { color: var(--hk-text-muted); }

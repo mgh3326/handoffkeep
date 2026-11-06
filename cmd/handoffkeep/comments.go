@@ -22,10 +22,11 @@ func taskCommentsCmd(args []string, in io.Reader, out io.Writer) error {
 	fs.SetOutput(io.Discard)
 	c := remoteClient(fs)
 	body := fs.String("body", "", "comment body")
+	bodyKo := fs.String("body-ko", "", "Korean comment translation")
 	file := fs.String("file", "", "comment body file (- reads stdin)")
 	afterID := fs.Int64("after-id", 0, "list comments with id greater than this")
 	limit := fs.Int("limit", 100, "maximum results")
-	valueFlags := map[string]bool{"--url": true, "--token": true, "--body": true, "--file": true, "--after-id": true, "--limit": true}
+	valueFlags := map[string]bool{"--url": true, "--token": true, "--body": true, "--body-ko": true, "--file": true, "--after-id": true, "--limit": true}
 	flags, positional := []string{}, []string{}
 	rest := args[1:]
 	for i := 0; i < len(rest); i++ {
@@ -94,9 +95,15 @@ func taskCommentsCmd(args []string, in io.Reader, out io.Writer) error {
 		if err != nil {
 			return err
 		}
+		if *bodyKo != "" {
+			row := store.Translation{Entity: "task_comment", EntityID: strconv.FormatInt(x.ID, 10), Field: "body", Lang: "ko", SourceSHA256: store.SourceSHA256(x.Body), Text: *bodyKo, Translator: "cli"}
+			if _, err := c.PutTranslations(ctx, []store.Translation{row}); err != nil {
+				return fmt.Errorf("comment %d created, but translation failed: %w", x.ID, err)
+			}
+		}
 		return printJSON(out, x)
 	default:
-		if set["body"] || set["file"] {
+		if set["body"] || set["file"] || set["body-ko"] {
 			return errors.New("tasks comments takes --after-id and --limit")
 		}
 		if *afterID < 0 || *limit < 1 || *limit > store.TaskCommentListMax {

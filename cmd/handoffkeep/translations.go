@@ -49,7 +49,7 @@ func translationsCmd(args []string, out io.Writer) error {
 		}
 		defer f.Close()
 		var rows []store.Translation
-		dec := json.NewDecoder(io.LimitReader(f, 64<<10))
+		dec := json.NewDecoder(io.LimitReader(f, store.TranslationBatchMaxBytes+1))
 		dec.DisallowUnknownFields()
 		if err = dec.Decode(&rows); err != nil {
 			return err
