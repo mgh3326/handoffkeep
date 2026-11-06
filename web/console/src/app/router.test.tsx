@@ -28,8 +28,8 @@ describe("shell router", () => {
   it.each(["/ui", "/ui/home"])("%s renders Home", async (path) => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(emptyAttention))));
     visit(path);
-    expect(screen.getByRole("heading", { name: "Waiting on me" })).toBeTruthy();
-    expect(await screen.findByText("Nothing is waiting on you.")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "나를 기다리는 일" })).toBeTruthy();
+    expect(await screen.findByText("대기 중인 일 없음")).toBeTruthy();
   });
 
   it("/ui/work renders Work and keeps the URL", () => {
