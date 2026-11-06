@@ -1,4 +1,4 @@
-.work-layout { display: flex; gap: var(--hk-space-4); min-width: 0; }
+.work-layout { box-sizing: border-box; padding: var(--hk-space-4); display: flex; gap: var(--hk-space-4); min-width: 0; }
 .work-list, .work-pane { min-width: 0; flex: 1; }
 .work-pane { border-left: 1px solid var(--hk-border-subtle); padding-left: var(--hk-space-4); overflow-wrap: anywhere; }
 .work-heading { display: flex; justify-content: space-between; align-items: center; gap: var(--hk-space-3); }
@@ -23,5 +23,5 @@
 .work-section h2 { font-size: var(--hk-type-body); }
 
 .work-filter-sheet summary { display: flex; align-items: center; gap: var(--hk-space-1); list-style: none; min-height: 44px; cursor: pointer; color: var(--hk-text-secondary); }
-@media (min-width: 1024px) { .work-filter-sheet summary { display: none; } }
+@media (min-width: 1024px) { .work-filter-sheet summary { display: none; } .work-tabs button { flex: 0 0 auto; padding-inline: var(--hk-space-4); } }
 .work-filter-sheet summary::-webkit-details-marker { display: none; }

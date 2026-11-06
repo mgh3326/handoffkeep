@@ -117,7 +117,7 @@ it("shows active job model, profile, host fallback, chips and relative time", as
   const { container } = render(<WorkPage />);
   expect(await screen.findByText("worker · model-x · high · 기기 미기록")).toBeTruthy();
   expect(screen.getByTitle("Task one")).toBeTruthy();
-  expect(screen.getByText("2h").getAttribute("title")).toContain("2026-01-01");
+  expect(screen.getByText("2시간").getAttribute("title")).toContain("2026-01-01");
   expect(container.querySelector(".hk-chip--priority-urgent")?.textContent).toBe("P1");
 });
 it("arrow keys select rows and Enter opens the record", async () => {
@@ -142,7 +142,7 @@ it("renders a titled state row with the live job host and metadata", async () =>
   expect(container.querySelector('[data-chip="status"]')?.textContent).toBe("개발 중");
   expect(container.querySelector('[data-chip="lane"]')?.textContent).toBe("x");
   expect(container.querySelector('[data-chip="priority"]')?.textContent).toBe("P2");
-  expect(screen.getByText("2h").getAttribute("title")).toContain("2026-01-01");
+  expect(screen.getByText("2시간").getAttribute("title")).toContain("2026-01-01");
 });
 
 it("moves selection down and up without opening a record until Enter", async () => {
@@ -207,4 +207,21 @@ it("wide page arrows leave scrolling and other controls alone", async () => {
   document.body.dispatchEvent(event);
   expect(event.defaultPrevented).toBe(false);
   expect(document.activeElement).toBe(document.body);
+});
+
+
+it("sorts urgent priorities first, unset last, then by update and id", async () => {
+  const rows = [
+    { ...task, id: 1, title: "Unset", priority: 0 },
+    { ...task, id: 2, title: "P3", priority: 3 },
+    { ...task, id: 3, title: "P1 old", priority: 1, updated_at: "2025-01-01T00:00:00Z" },
+    { ...task, id: 4, title: "P1 newer", priority: 1 },
+    { ...task, id: 5, title: "P1 tie", priority: 1 },
+    { ...task, id: 6, title: "P2", priority: 2 },
+  ];
+  vi.stubGlobal("fetch", vi.fn(async (path: string) => path.includes("projects") ? response({ projects: ["a"] }) : response({ tasks: rows, states: [], generated_at: "2026-01-01T02:00:00Z", truncated: false })));
+  history.replaceState(null, "", "/ui/work?project=a&view=active");
+  const { container } = render(<WorkPage />);
+  await screen.findByText("P1 tie");
+  expect([...container.querySelectorAll(".work-rows a")].map(a => a.id)).toEqual(["work-row-5", "work-row-4", "work-row-3", "work-row-6", "work-row-2", "work-row-1"]);
 });
