@@ -79,8 +79,9 @@ a NULL document `task_id`, and queues nothing.
 Each notification is one `notification_outbox` row, written in the same
 transaction as its document. Its lane is, in order:
 
-1. the lane on the first line of the issue description that reads
-   `hk-lane: <lane>` (a valid lane name, nothing else on the line);
+1. the lane on the first line of the issue description that starts
+   `hk-lane:`, if it reads `hk-lane: <lane>` with a valid lane name and
+   nothing else (an invalid first line falls through; later lines are ignored);
 2. else the lane of the one task linked to the issue (see Task link);
 3. else `operator-desk`.
 

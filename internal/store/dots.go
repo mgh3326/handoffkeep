@@ -43,17 +43,18 @@ var dotsResultKinds = map[string]string{
 var (
 	dotsIdentifierRE = regexp.MustCompile(`^[A-Za-z0-9_]+-[0-9]+$`)
 	dotsCommentIDRE  = regexp.MustCompile(`^[0-9A-Za-z-]{8,64}$`)
-	// dotsLaneLineRE is the line a request's description carries to name the
-	// lane its answers go to; the group is nameRE.
-	dotsLaneLineRE = regexp.MustCompile(`(?m)^hk-lane:[ \t]*([A-Za-z0-9._-]{1,128})[ \t]*\r?$`)
+	// dotsLaneDeclRE finds the first line that declares a lane; dotsLaneLineRE
+	// judges it, its group being nameRE.
+	dotsLaneDeclRE = regexp.MustCompile(`(?m)^hk-lane:.*$`)
+	dotsLaneLineRE = regexp.MustCompile(`^hk-lane:[ \t]*([A-Za-z0-9._-]{1,128})[ \t]*\r?$`)
 )
 
-// dotsRequesterLane picks the lane owed a dots notification: the lane on the
-// first description line matching dotsLaneLineRE, else the lane of the one
-// task linked to the issue, else DotsLane. A line naming an invalid lane does
-// not match, and lines after the first match are not read.
+// dotsRequesterLane picks the lane owed a dots notification: the lane named
+// on the first "hk-lane:" line of the description, else the lane of the one
+// task linked to the issue, else DotsLane. Only the first "hk-lane:" line is
+// read: when it names no valid lane, the next rule applies, not a later line.
 func dotsRequesterLane(description string, linkedTask *Task) string {
-	if m := dotsLaneLineRE.FindStringSubmatch(description); m != nil {
+	if m := dotsLaneLineRE.FindStringSubmatch(dotsLaneDeclRE.FindString(description)); m != nil {
 		return m[1]
 	}
 	if linkedTask != nil && validName(linkedTask.Lane) {

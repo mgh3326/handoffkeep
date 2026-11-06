@@ -22,6 +22,7 @@ func TestDotsRequesterLane(t *testing.T) {
 		{"no line, linked task", "Please research.", task, "x"},
 		{"nothing", "", nil, DotsLane},
 		{"second line ignored", "hk-lane: first\nhk-lane: second", nil, "first"},
+		{"invalid first line is not skipped", "hk-lane: bad/name\nhk-lane: later", task, "x"},
 		{"line must start the line", "see hk-lane: other", nil, DotsLane},
 		{"CRLF description", "intro\r\nhk-lane: crlf-lane\r\nend", nil, "crlf-lane"},
 	} {
