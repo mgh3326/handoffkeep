@@ -425,3 +425,13 @@ it("A3 applied default needs a receipt and does not render an empty answer", asy
   expect(screen.getByText("기본값 적용됨 receipt-42")).toBeTruthy();
   expect(screen.queryByText(/^답변:/)).toBeNull();
 });
+it("A10 uncleaned requests explain the cleanup context", async () => {
+  fetcher.mockResolvedValue(
+    response({ ...detail, request: { ...request, state: "uncleaned" } }),
+  );
+  await start();
+  expect(screen.getByText(/종료된 태스크에 남은 미정리 요청/)).toBeTruthy();
+  expect(
+    screen.getByRole("link", { name: "이력 보기" }).getAttribute("href"),
+  ).toBe("#decision-history");
+});

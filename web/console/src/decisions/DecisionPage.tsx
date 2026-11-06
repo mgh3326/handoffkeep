@@ -449,6 +449,12 @@ export function DecisionPage({ id }: { id: string }) {
                 ) : null}
               </p>
             )}
+            {state === "uncleaned" && (
+              <p>
+                종료된 태스크에 남은 미정리 요청입니다.{" "}
+                <a href="#decision-history">이력 보기</a>
+              </p>
+            )}
             {!readCsrfToken() && (
               <p>
                 로그인을 다시 확인하려면 새로고침하세요{" "}
