@@ -12,6 +12,9 @@ describe("summarizeQuestion", () => {
     ["- [링크](https://example.test/x) 확인", "링크 확인"],
     [": 콜론으로 시작", ": 콜론으로 시작"],
     ["", ""],
+    ["[decision-needed] 결제 재시도 간격을 늘려도 될까요?", "결제 재시도 간격을 늘려도 될까요?"],
+    ["[a][b] 두 표식 뒤의 질문입니다.", "두 표식 뒤의 질문입니다."],
+    ["[decision-needed]", "[decision-needed]"],
   ])("%j -> %j", (text, want) => {
     expect(summarizeQuestion(text)).toBe(want);
   });

@@ -2,6 +2,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { readCsrfToken } from "../shared/boardApi";
 import { isTypingTarget } from "../shared/search";
 import { formatMinuteKST } from "../shared/time";
+import { Chip } from "../shared/ui/Chip";
+import { stateLabel } from "../shared/states";
+import { formatAge, formatRemaining } from "./format";
 import { loadDetail, postResolve } from "./api";
 import { Icon } from "../shared/Icon";
 import { ConfirmSheet } from "./ConfirmSheet";
@@ -34,10 +37,21 @@ function label(raw: string): string {
     ? states[raw as RecordState]
     : `${states.unknown} ${raw}`;
 }
+const policies: Record<string, string> = {
+  operator_direct: "직접 답만",
+  operator_relay_allowed: "중계 답 허용",
+};
+function policyLabel(raw: string): string {
+  return Object.prototype.hasOwnProperty.call(policies, raw) ? policies[raw] : raw;
+}
+// The same relative-time functions as the list, so a row and its page agree.
 function deadline(iso: string) {
+  const now = new Date().toISOString();
+  const left = formatRemaining(now, iso);
+  const past = left === null ? formatAge(now, iso) : null;
   const ms = Date.parse(iso) - Date.now();
-  const minutes = Math.ceil(Math.abs(ms) / 60_000);
-  return `${formatMinuteKST(iso) ?? iso} · ${ms < 0 ? `${minutes}분 경과` : `${minutes}분 남음`}${ms >= 0 && ms <= 2 * 60 * 60_000 ? " · 임박" : ""}`;
+  const rel = left !== null ? `${left} 남음` : past !== null ? `${past} 경과` : "";
+  return `${formatMinuteKST(iso) ?? iso}${rel ? ` · ${rel}` : ""}${ms >= 0 && ms <= 2 * 60 * 60_000 ? " · 임박" : ""}`;
 }
 export function DecisionPage({ id }: { id: string }) {
   const [detail, setDetail] = useState<Detail | null>(null);
@@ -304,12 +318,16 @@ export function DecisionPage({ id }: { id: string }) {
         </p>
         {req && (
           <p className="decision-ref">
-            {req.id} · revision {req.revision} · {req.answer_policy}
+            {req.id} · revision {req.revision} · {policyLabel(req.answer_policy)}
           </p>
         )}
       </header>
       <h2 className="decision-question">{req?.question ?? detail.record.question}</h2>
-      {detail.task && <p>태스크 상태: {detail.task.state}</p>}
+      {detail.task && (
+        <p className="decision-task-state">
+          태스크 상태: <Chip kind="status" state={detail.task.state} />
+        </p>
+      )}
       {state === "answered" && req?.resolution && (
         <p>
           답변: {req.resolution.option} {req.resolution.text}
@@ -394,7 +412,7 @@ export function DecisionPage({ id }: { id: string }) {
           <details>
             <summary>맥락</summary>
             <p>
-              {detail.task?.title} · {detail.task?.state}
+              {detail.task?.title} · {detail.task ? stateLabel(detail.task.state) : ""}
             </p>
             {req.doc && <a href={`/ui/doc/${req.doc}`}>{req.doc}</a>}
             {req.refs?.map((ref) => (

@@ -81,6 +81,11 @@
   background: var(--hk-chip-failed-bg);
   color: var(--hk-chip-failed-fg);
 }
+/* Nothing waiting: a neutral count, not an alarm. */
+.decision-tab .decision-tab-count[data-zero="true"] {
+  background: var(--hk-badge-fill);
+  color: var(--hk-text-secondary);
+}
 .decision-toolbar .hk-button {
   flex: none;
 }

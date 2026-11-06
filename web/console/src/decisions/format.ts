@@ -37,14 +37,20 @@ export function summarizeQuestion(text: string): string {
     .map(stripMarkdown)
     .find((l) => l !== "");
   if (!line) return "";
+  return cut(line);
+}
+
+function cut(whole: string): string {
+  // A leading [decision-needed]-style mark is routing, not the question.
+  const line = whole.replace(/^(\[[^\]]*\]\s*)+/, "") || whole;
   let end = line.length;
   const sentence = /[.?!](?=\s|$)/.exec(line);
   if (sentence) end = Math.min(end, sentence.index + 1);
   const colon = line.indexOf(":");
   if (colon > 0) end = Math.min(end, colon);
-  const cut = line.slice(0, end).trim() || line;
-  const parts = graphemes(cut);
-  return parts.length > MAX_SUMMARY ? `${parts.slice(0, MAX_SUMMARY).join("").trimEnd()}…` : cut;
+  const head = line.slice(0, end).trim() || line;
+  const parts = graphemes(head);
+  return parts.length > MAX_SUMMARY ? `${parts.slice(0, MAX_SUMMARY).join("").trimEnd()}…` : head;
 }
 
 function parse(iso: string | null | undefined): number | null {

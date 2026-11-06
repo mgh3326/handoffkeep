@@ -280,3 +280,26 @@ it("D4 the page uses tokens only: no hex colors, no inline styles", () => {
     expect(readFileSync(`src/decisions/${file}.tsx`, "utf8")).not.toMatch(/style=\{/);
   }
 });
+
+it("D4 a lane event reads as 알림 and its [decision-needed] mark is not shown", async () => {
+  rows = [{ ...item, source: "lane_event", question: "[decision-needed] 재시도 간격을 늘려도 될까요?" }];
+  render(<DecisionList />);
+  const row = await screen.findByRole("link", { name: /#42/ });
+  expect(row.querySelector("[data-chip='source']")?.textContent).toBe("알림");
+  expect(row.querySelector(".decision-summary")?.textContent).toBe("재시도 간격을 늘려도 될까요?");
+  expect(row.textContent).not.toContain("decision-needed");
+  expect(row.textContent).not.toContain("레인 이벤트");
+});
+
+it("D4 a zero count is neutral, a non-zero one keeps its tab color", async () => {
+  history.replaceState(null, "", "/ui/decisions?tab=open");
+  vi.mocked(fetch).mockImplementation(async () =>
+    response({ generated_at: "now", tab: "open", counts: { open: 6, overdue: 0 }, truncated: false, items: rows }),
+  );
+  render(<DecisionList />);
+  const nav = await screen.findByRole("navigation", { name: "결정 탭" });
+  await waitFor(() => expect(nav.querySelector("[data-tab='open'] .decision-tab-count")).toBeTruthy());
+  expect(nav.querySelector("[data-tab='overdue'] .decision-tab-count")?.getAttribute("data-zero")).toBe("true");
+  expect(nav.querySelector("[data-tab='open'] .decision-tab-count")?.getAttribute("data-zero")).toBeNull();
+  expect(rule('.decision-tab .decision-tab-count[data-zero="true"]')).toContain("var(--hk-badge-fill)");
+});

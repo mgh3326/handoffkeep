@@ -154,7 +154,11 @@ export function DecisionList() {
                   }}
                 >
                   {x.label}
-                  {count !== undefined && <span className="decision-tab-count">{count}</span>}
+                  {count !== undefined && (
+                    <span className="decision-tab-count" data-zero={count === 0 ? "true" : undefined}>
+                      {count}
+                    </span>
+                  )}
                 </a>
               );
             })}

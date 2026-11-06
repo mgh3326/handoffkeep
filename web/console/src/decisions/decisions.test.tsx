@@ -290,7 +290,8 @@ it("A18 task state and answer are separate", async () => {
     }),
   );
   await start();
-  expect(screen.getByText("태스크 상태: developing")).toBeTruthy();
+  expect(document.querySelector(".decision-task-state")?.textContent).toBe("태스크 상태: 개발 중");
+  expect(document.body.textContent).not.toContain("developing");
   expect(screen.getByText("답변: B yes")).toBeTruthy();
 });
 
@@ -559,4 +560,19 @@ it("D4 the state is a chip with words, not a bullet glyph", async () => {
   expect(chip?.getAttribute("data-group")).toBe("failed");
   expect(document.body.textContent).not.toContain("●");
   expect(document.body.textContent).not.toContain("←");
+});
+
+it("D4 the page deadline uses the list's relative time, and the policy is Korean", async () => {
+  vi.setSystemTime(new Date("2026-11-06T04:00:00Z"));
+  await start();
+  // 09:00Z due, 04:00Z now: the list would say 5시간, not 300분.
+  expect(screen.getByText(/2026-11-06 18:00 KST · 5시간 남음/)).toBeTruthy();
+  expect(document.body.textContent).not.toContain("분 남음");
+  expect(document.querySelector(".decision-ref")?.textContent).toBe("dr-7-2 · revision 2 · 직접 답만");
+});
+
+it("D4 a passed deadline reads as elapsed in the same units", async () => {
+  vi.setSystemTime(new Date("2026-11-06T12:00:00Z"));
+  await start();
+  expect(screen.getByText(/2026-11-06 18:00 KST · 3시간 경과/)).toBeTruthy();
 });

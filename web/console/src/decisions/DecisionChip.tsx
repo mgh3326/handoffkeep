@@ -50,7 +50,7 @@ const SOURCES: Record<string, string> = {
   task_request: "요청",
   task_flag: "태스크 표시",
   job_escalate: "작업 에스컬레이션",
-  lane_event: "레인 이벤트",
+  lane_event: "알림",
   chat: "채팅",
   linear: "Linear",
 };
