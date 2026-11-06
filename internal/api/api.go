@@ -631,6 +631,7 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("GET /v1/projects/{name}/frontier", s.projectFrontier)
 	m.HandleFunc("GET /v1/changes", s.changesList)
 	m.HandleFunc("POST /v1/changes/{id}/merge-flow", s.changeMergeFlow)
+	m.HandleFunc("POST /v1/changes/verifications", s.changeVerification)
 	m.HandleFunc("POST /v1/tasks/next", s.tasksNext)
 	m.HandleFunc("GET /v1/tasks/projects", s.taskProjectsList)
 	m.HandleFunc("POST /v1/tasks/projects", s.taskProjectsCreate)

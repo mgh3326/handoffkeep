@@ -71,3 +71,29 @@ func (s Server) changeMergeFlow(w http.ResponseWriter, r *http.Request) {
 	}
 	jsonOut(w, http.StatusOK, c)
 }
+
+// changeVerification is POST /v1/changes/verifications: the verdict for one
+// head of a change (hk 3120). Any client may write; recorded_by is the
+// client. 201 on create, 200 on a replay or a replaced verifier-blocked row.
+func (s Server) changeVerification(w http.ResponseWriter, r *http.Request) {
+	client, ok := s.auth(w, r)
+	if !ok {
+		return
+	}
+	defer r.Body.Close()
+	var input store.VerificationInput
+	if err := decode(r, &input, bodySmall); err != nil {
+		appErr(w, r, err)
+		return
+	}
+	v, created, err := s.Service.Store.RecordVerification(r.Context(), input, client)
+	if err != nil {
+		appErr(w, r, err)
+		return
+	}
+	status := http.StatusOK
+	if created {
+		status = http.StatusCreated
+	}
+	jsonOut(w, status, v)
+}

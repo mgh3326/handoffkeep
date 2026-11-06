@@ -103,6 +103,11 @@ package store
 //     with an event writer's upsert, and the event writers never take the
 //     merge-flow lock, so neither side waits on the other while it holds
 //     what the other needs.
+//   - RecordVerification (verifications.go) locks at most one changes row
+//     (the stub insert, ON CONFLICT DO NOTHING, for a PR hk has not seen) and then one verifications
+//     row (insert, or FOR UPDATE on a replay), and takes no task row. No
+//     other writer locks a verifications row, and the event writers that
+//     lock changes rows never wait on one, so it cannot close a cycle.
 //   - Other advisory locks (disposition origin, task comment insert, labels,
 //     Linear board ownership, quota presence) are each the first lock of
 //     their transaction, and no transaction requests one while it holds a
