@@ -45,10 +45,10 @@
       "invalid": [
         {
           "key": "deploy/handoffkeep/20260924T000000Z",
+          "prefix": "deploy/handoffkeep/",
           "reasons": [
             "schema"
-          ],
-          "prefix": "deploy/handoffkeep/"
+          ]
         }
       ],
       "invalid_count": 1,
