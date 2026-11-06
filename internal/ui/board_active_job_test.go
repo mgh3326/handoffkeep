@@ -42,7 +42,8 @@ func TestBoardListIncludesNewestLiveJob(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(st.Close)
-	task, err := st.CreateTask(t.Context(), store.Task{Lane: "example", Title: "Example", Kind: "implement", CreatedBy: "test"})
+	project := "experiment"
+	task, err := st.CreateTask(t.Context(), store.Task{Lane: "example", Title: "Example", Kind: "implement", Project: &project, CreatedBy: "test"})
 	if err != nil {
 		t.Fatal(err)
 	}
