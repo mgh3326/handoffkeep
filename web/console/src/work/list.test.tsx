@@ -71,10 +71,10 @@ it("W2 tab counts match rendered rows for twelve tasks", async () => {
   }
 });
 it("W5 renders a future state in All", async () => {
-  vi.stubGlobal("fetch", vi.fn(async (path: string) => path.includes("projects") ? response({ projects: ["a"] }) : response({ tasks: [{ ...task, state: "completed" }], states: ["completed"], generated_at: "now", truncated: false })));
+  vi.stubGlobal("fetch", vi.fn(async (path: string) => path.includes("projects") ? response({ projects: ["a"] }) : response({ tasks: [{ ...task, state: "future_state" }], states: ["future_state"], generated_at: "now", truncated: false })));
   history.replaceState(null, "", "/ui/work?project=a&view=all");
   render(<WorkPage />);
-  expect(await screen.findByText(/알 수 없는 상태 \(completed\)/)).toBeTruthy();
+  expect(await screen.findByText(/알 수 없는 상태 \(future_state\)/)).toBeTruthy();
 });
 it("W4 reports a still-truncated 5000 row cursor walk", async () => {
   let page = 0;
