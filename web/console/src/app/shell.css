@@ -10,10 +10,16 @@ body {
   min-height: 100%;
   margin: 0;
 }
+html {
+  /* The fixed tab bar must never cover a focused control. */
+  scroll-padding-bottom: calc(var(--hk-row-height) + env(safe-area-inset-bottom, 0px));
+}
 body {
   background: var(--hk-surface-0);
   color: var(--hk-text-primary);
-  font: var(--hk-weight-normal) var(--hk-font-row) / var(--hk-leading-body-sm) var(--hk-font-ui);
+  font: var(--hk-weight-normal) var(--hk-font-row) / var(--hk-leading-row) var(--hk-font-ui);
+  letter-spacing: var(--hk-tracking);
+  -webkit-font-smoothing: antialiased;
 }
 a {
   color: inherit;
@@ -36,8 +42,15 @@ button {
 }
 h1 {
   font-size: var(--hk-font-page);
+  line-height: var(--hk-leading-page);
   font-weight: var(--hk-weight-strong);
   margin: 0 0 var(--hk-space-3);
+}
+h1,
+h2,
+h3 {
+  /* Korean headings break between words, never inside one. */
+  word-break: keep-all;
 }
 pre {
   white-space: pre-wrap;
@@ -71,6 +84,20 @@ small {
   font-size: var(--hk-font-body);
   text-decoration: none;
 }
+.hk-shell-theme {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--hk-space-2);
+  white-space: nowrap;
+  transition: background-color var(--hk-motion-fast), color var(--hk-motion-fast);
+}
+.hk-shell-theme:hover {
+  background: var(--hk-selected);
+}
+.hk-shell-theme:focus-visible {
+  outline: var(--hk-focus-width) solid var(--hk-focus);
+  outline-offset: var(--hk-focus-offset);
+}
 .hk-shell-main {
   min-width: 0;
   /* Room for the fixed tab bar so the last line is never covered. */
@@ -93,18 +120,26 @@ small {
 }
 .hk-shell-nav a {
   display: flex;
-  flex-direction: column;
   align-items: center;
   justify-content: center;
+  gap: var(--hk-space-1);
   min-height: var(--hk-row-height);
   min-width: var(--hk-touch-height);
   text-decoration: none;
   color: var(--hk-text-secondary);
-  font-size: var(--hk-font-body);
-}
-.hk-shell-nav-badge {
-  font-size: var(--hk-type-micro);
+  font-size: var(--hk-font-row);
   white-space: nowrap;
+  transition: background-color var(--hk-motion-fast), color var(--hk-motion-fast);
+}
+.hk-shell-nav a:focus-visible {
+  /* Inset: the bar is flush with the screen edge and would clip an outer ring. */
+  outline-offset: var(--hk-focus-offset-inset);
+}
+.hk-shell-nav-dot {
+  width: var(--hk-space-2);
+  height: var(--hk-space-2);
+  border-radius: var(--hk-radius-pill);
+  background: var(--hk-danger);
 }
 .hk-shell-nav a[aria-current="page"] {
   color: var(--hk-text-heading);
@@ -130,6 +165,9 @@ small {
   .hk-view {
     padding: var(--hk-space-6) var(--hk-space-8);
   }
+  html {
+    scroll-padding-bottom: 0;
+  }
   .hk-shell-nav {
     grid-area: nav;
     position: sticky;
@@ -146,8 +184,8 @@ small {
     padding: var(--hk-space-16) var(--hk-space-3) 0;
   }
   .hk-shell-nav a {
-    align-items: flex-start;
-    justify-content: center;
+    align-items: center;
+    justify-content: flex-start;
     min-height: var(--hk-touch-height);
     padding: 0 var(--hk-space-3);
     border-radius: var(--hk-radius-control);

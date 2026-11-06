@@ -20,7 +20,7 @@ it("A14 the badge reports overdue as a subset of open", async () => {
   );
   render(<Shell current="decisions">content</Shell>);
   expect(
-    (await screen.findAllByText("open 6 · overdue 2")).length,
+    (await screen.findAllByText("열린 결정 6건, 기한 경과 2건")).length,
   ).toBeGreaterThan(0);
   expect(screen.queryByText("8")).toBeNull();
 });
@@ -40,7 +40,7 @@ it("A17 one polite region announces a result exactly once", async () => {
     ),
   );
   const { container } = render(<Shell current="decisions">content</Shell>);
-  await screen.findAllByText("open 0 · overdue 0");
+  await screen.findAllByText("열린 결정 0건");
   window.dispatchEvent(
     new CustomEvent("hk-console-announce", { detail: "접수 · 확인 대기" }),
   );

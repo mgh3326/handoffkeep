@@ -3,7 +3,14 @@
  * Dark values come from the supplied marketing system. App density is adapted.
  * Light is DERIVED for review, not an observed Linear theme.
  * Keep scoped utilities opt-in. See docs/console-design.md for pipeline adoption.
+ *
+ * hk 3283 (D1): "Dense Dark Minimal" system, hk doc
+ * design/2026-11-06/console-design-system §1. Role tokens, chip tokens, type
+ * scale, motion and the self-hosted fonts are added here; the older names
+ * below stay and resolve to the new values.
  */
+@import "./fonts.css";
+
 :root {
   color-scheme: dark;
   --hk-void: #08090a;
@@ -37,6 +44,15 @@
   --hk-text-disabled: var(--hk-ash);
   --hk-action-bg: var(--hk-lime);
   --hk-action-fg: var(--hk-void);
+  /* Role aliases. accent is the one action color ("operator's turn"); its
+   * fill is for buttons and counters, never for small text on light. */
+  --hk-bg: var(--hk-surface-0);
+  --hk-selected: var(--hk-surface-selected);
+  --hk-border: var(--hk-border-subtle);
+  --hk-text: var(--hk-text-primary);
+  --hk-muted: var(--hk-text-muted);
+  --hk-accent: var(--hk-lime);
+  --hk-accent-fg: var(--hk-void);
   --hk-input-fill: rgb(255 255 255 / 2%);
   --hk-badge-fill: rgb(255 255 255 / 5%);
   --hk-focus: var(--hk-mist);
@@ -47,28 +63,38 @@
   --hk-warning: #e5bb70; /* Derived semantic warning role, absent in the source. */
   --hk-scrim: rgb(0 0 0 / 64%);
 
-  --hk-font-ui: "Inter Variable", Inter, -apple-system, BlinkMacSystemFont,
-    "Segoe UI", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
-  --hk-font-mono: "Berkeley Mono", "JetBrains Mono", "IBM Plex Mono", ui-monospace,
-    SFMono-Regular, Menlo, Consolas, monospace;
+  --hk-font-ui: "Pretendard Variable", Pretendard, "Apple SD Gothic Neo",
+    "Noto Sans KR", "Malgun Gothic", system-ui, sans-serif;
+  --hk-font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   --hk-weight-light: 300;
   --hk-weight-normal: 400;
-  --hk-weight-medium: 510;
-  --hk-weight-strong: 590;
+  --hk-weight-medium: 500;
+  --hk-weight-strong: 600;
+  /* Type scale: size / line / weight per role. The 10px micro size is gone:
+   * 12px is the smallest text. */
+  --hk-type-page: 20px;
+  --hk-line-page: 28px;
+  --hk-type-section: 15px;
+  --hk-line-section: 22px;
+  --hk-type-row: 14px;
+  --hk-line-row: 20px;
+  --hk-type-meta: 12px;
+  --hk-line-meta: 16px;
+  --hk-type-mono: 12px;
+  --hk-line-mono: 16px;
   --hk-type-body: 16px;
   --hk-type-body-sm: 15px;
   --hk-type-caption: 13px;
   --hk-type-label: 12px;
-  --hk-type-micro: 10px;
+  --hk-type-micro: var(--hk-type-meta);
   --hk-type-subheading: 24px;
   --hk-type-heading-sm: 32px;
-  --hk-type-row: 13px; /* App adaptation; marketing body remains 16px. */
   --hk-leading-body: 1.5;
   --hk-leading-body-sm: 1.6;
   --hk-leading-caption: 1.2;
   --hk-leading-label: 1.4;
   --hk-leading-subheading: 1.33;
-  --hk-tracking: -0.01em;
+  --hk-tracking: 0; /* Hangul is never tracked. */
 
   --hk-space-0: 0;
   --hk-space-1: 4px;
@@ -90,7 +116,8 @@
   --hk-radius-sm: 2px;
   --hk-radius-badge: 4px;
   --hk-radius-control: 6px;
-  --hk-radius-card: 12px;
+  --hk-radius-card: 8px;
+  --hk-radius-chip: 4px;
   --hk-radius-pill: 9999px;
   --hk-hairline: 0.5px;
   --hk-border-width: 1px;
@@ -99,6 +126,8 @@
   --hk-button-pad-y: 10px;
   --hk-button-pad-x: 16px;
   --hk-row-height: 48px;
+  --hk-row-dense: 40px;
+  --hk-row-roomy: 56px;
   --hk-touch-height: 44px;
   --hk-sidebar-width: 216px;
   --hk-properties-width: 248px;
@@ -157,6 +186,37 @@
   --hk-state-needs-decision: var(--hk-danger);
 }
 
+/* Status chip tokens: --hk-chip-{group}-{fg,bg}. Groups follow the badge
+ * order decision > input > working > failed > done, then neutral. The fill is
+ * the group ink mixed into the surface (14% on dark, 10% on light) so the text
+ * keeps its contrast; meaning always travels as text + icon, never color. */
+:root {
+  --hk-chip-decision-fg: #e4f222;
+  --hk-chip-input-fg: #e5bb70;
+  --hk-chip-working-fg: #3fd0e0;
+  --hk-chip-failed-fg: #ff8a80;
+  --hk-chip-done-fg: #5fd27a;
+  --hk-chip-neutral-fg: #a3a8b0;
+  --hk-chip-mix: 14%;
+  --hk-chip-base: var(--hk-surface-1);
+  --hk-chip-decision-bg: color-mix(in srgb, var(--hk-chip-decision-fg) var(--hk-chip-mix), var(--hk-chip-base));
+  --hk-chip-input-bg: color-mix(in srgb, var(--hk-chip-input-fg) var(--hk-chip-mix), var(--hk-chip-base));
+  --hk-chip-working-bg: color-mix(in srgb, var(--hk-chip-working-fg) var(--hk-chip-mix), var(--hk-chip-base));
+  --hk-chip-failed-bg: color-mix(in srgb, var(--hk-chip-failed-fg) var(--hk-chip-mix), var(--hk-chip-base));
+  --hk-chip-done-bg: color-mix(in srgb, var(--hk-chip-done-fg) var(--hk-chip-mix), var(--hk-chip-base));
+  --hk-chip-neutral-bg: color-mix(in srgb, var(--hk-chip-neutral-fg) var(--hk-chip-mix), var(--hk-chip-base));
+}
+:root[data-theme="light"] {
+  --hk-chip-decision-fg: #4f5400;
+  --hk-chip-input-fg: #7a4f0a;
+  --hk-chip-working-fg: #005f69;
+  --hk-chip-failed-fg: #a82828;
+  --hk-chip-done-fg: #146b2a;
+  --hk-chip-neutral-fg: #55595f;
+  --hk-chip-mix: 10%;
+  --hk-chip-base: var(--hk-surface-0);
+}
+
 .hk-type-body { font: var(--hk-weight-normal) var(--hk-type-body)/var(--hk-leading-body) var(--hk-font-ui); }
 .hk-type-body-sm { font: var(--hk-weight-normal) var(--hk-type-body-sm)/var(--hk-leading-body-sm) var(--hk-font-ui); }
 .hk-type-caption { font: var(--hk-weight-normal) var(--hk-type-caption)/var(--hk-leading-caption) var(--hk-font-ui); }
@@ -184,15 +244,54 @@
 
 /* Compatibility roles for existing view components. */
 :root {
---hk-space-half: 2px; --hk-space-section: var(--hk-space-12);
---hk-font-meta: 12px; --hk-leading-meta: 18px; --hk-font-row: 13px; --hk-leading-row: 20px;
---hk-font-body: 15px; --hk-font-section: 16px; --hk-leading-section: 24px;
---hk-font-title: 20px; --hk-leading-title: 28px; --hk-font-page: 24px; --hk-leading-page: 32px;
+--hk-space-half: 2px; --hk-space-section: var(--hk-space-6);
+--hk-font-meta: var(--hk-type-meta); --hk-leading-meta: var(--hk-line-meta); --hk-font-row: var(--hk-type-row); --hk-leading-row: var(--hk-line-row);
+--hk-font-body: 15px; --hk-font-section: var(--hk-type-section); --hk-leading-section: var(--hk-line-section);
+--hk-font-title: 20px; --hk-leading-title: 28px; --hk-font-page: var(--hk-type-page); --hk-leading-page: var(--hk-line-page);
 --hk-row-compact: 48px; --hk-row-context: 64px; --hk-icon-hit: 32px; --hk-icon-size: 16px; --hk-icon-stroke: 1.75;
 --hk-radius-md: var(--hk-radius-control); --hk-radius-lg: var(--hk-radius-card);
---hk-focus-width: 2px; --hk-focus-offset: 2px; --hk-peek-width: 660px; --hk-motion-fast: 0ms;
+--hk-focus-width: 2px; --hk-focus-offset: 2px; --hk-focus-offset-inset: -2px; --hk-peek-width: 660px;
+--hk-motion-fast: 120ms; --hk-motion-expand: 160ms;
 --hk-z-header: 10; --hk-z-panel: 20; --hk-z-popover: 30; --hk-z-modal: 40;
---hk-accent: var(--hk-text-primary); --hk-priority-normal: var(--hk-text-secondary);
+--hk-priority-normal: var(--hk-text-secondary);
 --hk-priority-emphasis: var(--hk-text-primary); --hk-priority-urgent: var(--hk-warning);
 --hk-state-unknown: var(--hk-text-muted); --hk-elevation-panel: none;
 }
+
+/* Reduced motion: every transition and animation collapses to 0ms. Motion is
+ * background/color only (120ms) and expanders (160ms); nothing moves layout. */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --hk-motion-fast: 0ms;
+    --hk-motion-expand: 0ms;
+  }
+}
+
+/* Row type steps up to 16/22 on phones (touch rows). 768px is the one literal
+ * breakpoint: media queries cannot read tokens. */
+@media (max-width: 767.98px) {
+  :root {
+    --hk-type-row: 16px;
+    --hk-line-row: 22px;
+  }
+}
+
+/* Icons (shared/Icon.tsx, StateIcon): one stroke set, sized by the font. */
+.hk-icon { width: 1em; height: 1em; flex: none; vertical-align: -0.125em; }
+
+/* Mono: ids, SHAs, digests. Tokens wrap instead of widening the page. */
+.hk-mono { font: var(--hk-weight-normal) var(--hk-type-mono)/var(--hk-line-mono) var(--hk-font-mono); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; letter-spacing: 0; }
+
+/* Chip: static, nowrap, text always present. Groups wrap in a flex row. */
+.hk-chips { display: flex; flex-wrap: wrap; align-items: center; gap: var(--hk-space-1) var(--hk-space-2); }
+.hk-chip { display: inline-flex; align-items: center; gap: var(--hk-space-1); max-width: 100%; min-height: 20px; padding: 0 var(--hk-space-2); border-radius: var(--hk-radius-chip); background: var(--hk-badge-fill); color: var(--hk-text-secondary); font: var(--hk-weight-medium) var(--hk-type-meta)/var(--hk-line-meta) var(--hk-font-ui); white-space: nowrap; word-break: keep-all; }
+.hk-chip--decision { background: var(--hk-chip-decision-bg); color: var(--hk-chip-decision-fg); }
+.hk-chip--input { background: var(--hk-chip-input-bg); color: var(--hk-chip-input-fg); }
+.hk-chip--working { background: var(--hk-chip-working-bg); color: var(--hk-chip-working-fg); }
+.hk-chip--failed { background: var(--hk-chip-failed-bg); color: var(--hk-chip-failed-fg); }
+.hk-chip--done { background: var(--hk-chip-done-bg); color: var(--hk-chip-done-fg); }
+.hk-chip--neutral { background: var(--hk-chip-neutral-bg); color: var(--hk-chip-neutral-fg); }
+.hk-chip--priority { font-family: var(--hk-font-mono); font-variant-numeric: tabular-nums; font-weight: var(--hk-weight-normal); }
+.hk-chip--priority-urgent { background: var(--hk-chip-input-bg); color: var(--hk-chip-input-fg); }
+.hk-chip--lane { font-family: var(--hk-font-mono); font-weight: var(--hk-weight-normal); background: transparent; box-shadow: inset 0 0 0 var(--hk-border-width) var(--hk-border-subtle); color: var(--hk-text-secondary); }
+.hk-icon-button { display: inline-flex; align-items: center; justify-content: center; min-width: var(--hk-icon-hit); padding: var(--hk-space-1); }
