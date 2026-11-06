@@ -24,8 +24,6 @@ export default defineConfig({
         // The server-rendered pages (/ui/decisions, /ui/timeline, /ui/compose)
         // mount their htmx content inside the shell chrome.
         server: resolve(root, "src/server.tsx"),
-        // /ui/deploys stays live until C4 (hk 3143).
-        deploys: resolve(root, "src/deploys/main.tsx"),
         // The --hk-* design tokens ship as their own static stylesheet so the
         // React entries and the Go templates link one and the same file.
         tokens: resolve(root, "src/design/tokens.css"),
