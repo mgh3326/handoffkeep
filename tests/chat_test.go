@@ -439,7 +439,7 @@ func TestChatPostCrossConversationAndSecretRejected(t *testing.T) {
 	}
 	resp.Body.Close()
 	base["question_ids"] = []string{}
-	base["body"] = "-----BEGIN PRIVATE KEY-----"
+	base["body"] = "-----BEGIN PRIVATE KEY-----\n" + strings.Repeat("A", 64)
 	resp = request(t, h.Client(), http.MethodPost, h.URL+"/v1/chat/messages", "node-token", base)
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("secret status=%d", resp.StatusCode)

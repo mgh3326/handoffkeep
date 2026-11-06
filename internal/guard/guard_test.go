@@ -13,13 +13,33 @@ func TestRejectsSecretsWithoutValue(t *testing.T) {
 		"ghp_" + strings.Repeat("a", 36):                        "github_token",
 		"xoxb-1234567890-1234567890-" + strings.Repeat("a", 20): "slack_token",
 		"AKIA" + strings.Repeat("A", 16):                        "aws_access_key",
-		"-----BEGIN PRIVATE":                                    "private_key",
 		"Bearer abcdefghijklmnopqrstuvwxyz":                     "bearer_token",
 		"MY_TOKEN=abcdefghijklm":                                "token_assignment",
 		"github_pat_" + strings.Repeat("a", 82):                 "github_fine_grained_token",
 	} {
 		if got := Match(input); got != want {
 			t.Fatalf("input matched %q, want %q", got, want)
+		}
+	}
+}
+
+func TestPrivateKeyNeedsKeyMaterial(t *testing.T) {
+	body := strings.Repeat("MIIEvQIBADANBgkqhkiG9w0BAQEFAASC", 3)
+	for _, header := range []string{"-----BEGIN PRIVATE KEY-----", "-----BEGIN RSA PRIVATE KEY-----", "-----BEGIN OPENSSH PRIVATE KEY-----", "-----BEGIN EC PRIVATE KEY-----"} {
+		if got := Match(header + "\n" + body + "\n-----END PRIVATE KEY-----"); got != "private_key" {
+			t.Fatalf("%s with a body matched %q, want private_key", header, got)
+		}
+	}
+	// A detector's own pattern text, a bare header and a public key are not key material.
+	for _, input := range []string{
+		"re.compile(r'-----BEGIN (?:RSA |OPENSSH )?PRIVATE KEY-----')",
+		"-----BEGIN PRIVATE KEY-----",
+		"-----BEGIN PRIVATE KEY----- placeholder",
+		"-----BEGIN PUBLIC KEY-----\n" + body,
+		"-----BEGIN CERTIFICATE-----\n" + body,
+	} {
+		if got := Match(input); got != "" {
+			t.Fatalf("%q matched %q", input, got)
 		}
 	}
 }
