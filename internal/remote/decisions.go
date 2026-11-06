@@ -56,3 +56,10 @@ func (c Client) OpenDecisionSources(ctx context.Context) (store.OpenDecisionSour
 	err := c.call(ctx, "GET", "/v1/decision-requests/sources", nil, &out)
 	return out, err
 }
+
+// DecisionDeliveryHygiene reads the decision delivery counts per destination.
+func (c Client) DecisionDeliveryHygiene(ctx context.Context) (store.DecisionDeliveryHygiene, error) {
+	var out store.DecisionDeliveryHygiene
+	err := c.call(ctx, "GET", "/v1/decisions/deliveries/hygiene", nil, &out)
+	return out, err
+}

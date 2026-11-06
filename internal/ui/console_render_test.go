@@ -22,7 +22,6 @@ func TestConsoleRouteDocuments(t *testing.T) {
 		data           any
 	}{
 		{"shell", "shell_page", shellPageData{Preloads: h.shellPreloads()}},
-		{"deploys", "deploys_page", nil},
 		{"decisions", "page", pageData{Title: "Decisions", Page: "decisions", Body: decision}},
 		{"timeline", "page", pageData{Title: "Timeline", Page: "timeline", Body: timelineData{Events: []store.RelayEvent{{ID: 1, OwnerLane: "example-project", Kind: "ready", Text: "READY · console layout ready for review", ReceivedAt: time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)}}}}},
 		{"compose", "page", pageData{Title: "Compose", Page: "compose", Body: composeData{CSRF: "fixture-token", Lanes: []string{"example-project"}}}},

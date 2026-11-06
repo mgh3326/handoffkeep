@@ -81,11 +81,13 @@ package store
 //     relay ask); chat rows are written only by the chat writers, after their
 //     chat_questions row, and no task or job writer touches them; a snooze
 //     locks one row and nothing else.
-//   - ProcessNextDecisionNotice locks one decision_notify row (SKIP LOCKED)
-//     and holds it while it sends; it reads the request and its task without
-//     a lock. Writers only insert new decision_notify keys (openDecisionTx),
-//     and decision_notify_digest is written by the worker alone
-//     (decision_notify.go).
+//   - ProcessNextDecisionNotice locks one decision_deliveries row (SKIP
+//     LOCKED) and holds it while it sends; it reads the request and its task
+//     without a lock. Writers only insert new decision_deliveries keys
+//     (openDecisionTx), and decision_notify_digest is written by the worker
+//     alone (decision_notify.go). Version 48 takes EXCLUSIVE on the retired
+//     decision_notify table for its backfill, so an older worker's claim in
+//     flight finishes first; nothing writes it afterwards.
 //   - AckLedger locks one ledger_cursors row and reads sync_state without a
 //     lock; nothing else writes ledger_cursors (ledger.go).
 //   - CreateStatusUpdate locks its task_projects row FOR NO KEY UPDATE

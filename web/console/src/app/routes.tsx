@@ -2,6 +2,7 @@
 // every path below; the browser picks the view from location.pathname.
 
 import { Component, lazy, Suspense, type ReactNode } from "react";
+import { DeploysPage } from "../deploys/DeploysPage";
 import type { NavKey } from "./Shell";
 import { HomeAttention as Home } from "../home/HomeAttention";
 import { Moved, TaskPlaceholder, Work } from "./Placeholders";
@@ -12,6 +13,7 @@ const DocView = lazy(() => import("./DocView"));
 
 export type Route =
   | { view: "home" }
+  | { view: "deploys" }
   | { view: "work"; replaceWith?: string }
   | { view: "doc"; key: string }
   | { view: "task"; id: string }
@@ -32,6 +34,7 @@ function docKey(pathname: string): string | null {
 export function matchRoute(pathname: string): Route {
   const path = pathname.length > 1 ? pathname.replace(/\/+$/, "") : pathname;
   if (path === "/ui" || path === "/ui/home") return { view: "home" };
+  if (path === "/ui/deploys") return { view: "deploys" };
   if (path === "/ui/work") return { view: "work" };
   // /ui/queue is the old bookmark for the queue; it now lands on Work.
   if (path === "/ui/queue") return { view: "work", replaceWith: "/ui/work" };
@@ -46,7 +49,7 @@ export function matchRoute(pathname: string): Route {
 
 /** The navigation row a route belongs to; null when it belongs to none. */
 export function navKey(route: Route): NavKey | null {
-  return route.view === "home" || route.view === "work" ? route.view : null;
+  return route.view === "home" || route.view === "work" || route.view === "deploys" ? route.view : null;
 }
 
 class LoadBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
@@ -65,6 +68,8 @@ export function RouteView({ route }: { route: Route }) {
       return <Home />;
     case "work":
       return <Work />;
+    case "deploys":
+      return <DeploysPage />;
     case "task":
       return <TaskPlaceholder id={route.id} />;
     case "doc":

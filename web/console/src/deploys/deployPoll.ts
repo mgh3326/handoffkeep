@@ -15,6 +15,6 @@ export function useDeployPending(fetchStatus: () => Promise<DeployPendingRespons
     }
     return next;
   }, [fetchStatus]);
-  const { data, failed } = usePoll(load, pollMs);
-  return { data, failed };
+  const { data, failed, at } = usePoll(load, pollMs);
+  return { data, failed, at };
 }
