@@ -201,7 +201,7 @@ func taskRefs(pr, headSHA, reportPath, jobID string, linear *store.TaskLinear) (
 }
 
 func normalizeTaskArgs(args []string) ([]string, error) {
-	valueFlags := map[string]bool{"--url": true, "--token": true, "--lane": true, "--parent-lane": true, "--state": true, "--title": true, "--kind": true, "--priority": true, "--expected": true, "--by": true, "--to": true, "--note": true, "--reason": true, "--question": true, "--limit": true, "--pr": true, "--head-sha": true, "--report-path": true, "--job-id": true, "--no-job": true, "--option": true, "--recommended": true, "--tier": true, "--grade": true, "--brief-key": true, "--label": true, "--linear-report-key": true, "--linear-verify-key": true, "--linear-decision-key": true, "--deploy-sha": true, "--origin-pr": true, "--origin-task": true, "--doc": true, "--project": true, "--area": true, "--parent": true, "--duplicate-of": true, "--link": true}
+	valueFlags := map[string]bool{"--url": true, "--token": true, "--lane": true, "--parent-lane": true, "--state": true, "--title": true, "--kind": true, "--priority": true, "--expected": true, "--by": true, "--to": true, "--closure": true, "--evidence": true, "--note": true, "--reason": true, "--question": true, "--limit": true, "--pr": true, "--head-sha": true, "--report-path": true, "--job-id": true, "--no-job": true, "--option": true, "--recommended": true, "--tier": true, "--grade": true, "--brief-key": true, "--label": true, "--linear-report-key": true, "--linear-verify-key": true, "--linear-decision-key": true, "--deploy-sha": true, "--origin-pr": true, "--origin-task": true, "--doc": true, "--project": true, "--area": true, "--parent": true, "--duplicate-of": true, "--link": true}
 	flags, positional := []string{}, []string{}
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -295,7 +295,7 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 	c := remoteClient(fs)
 	lane := fs.String("lane", "", "task lane")
 	parentLane := fs.String("parent-lane", "", "parent lane")
-	state := fs.String("state", "", "task state (triage, backlog, unstarted, researching, developing, reviewing, merged, deployed, dropped, duplicate, icebox; old names such as in_progress or hold are still accepted)")
+	state := fs.String("state", "", "task state (triage, backlog, unstarted, researching, developing, reviewing, merged, deployed, completed, dropped, duplicate, icebox; old names such as in_progress or hold are still accepted)")
 	parentID := fs.Int64("parent", 0, "parent task id (tasks add only)")
 	duplicateOf := fs.Int64("duplicate-of", 0, "task a duplicate transition points at (tasks transition --to duplicate)")
 	link := fs.Int64("link", 0, "existing task to relate the new task to as related, answering the duplicate check (tasks add only)")
@@ -309,6 +309,8 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 	expected := fs.String("expected", "", "expected task duration (for example 4h or 1d; tasks add only)")
 	by := fs.String("by", "", "session label")
 	to := fs.String("to", "", "target state")
+	closure := fs.String("closure", "", "closure type")
+	evidence := fs.String("evidence", "", "closure evidence")
 	note := fs.String("note", "", "transition note")
 	reason := fs.String("reason", "", "reason required for reopen")
 	question := fs.String("question", "", "question required for needs_decision")
@@ -346,8 +348,11 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 	linearFlagsUsed, docFlagUsed, noJobSet, projectSet, areaSet, expectedSet := false, false, false, false, false, false
 	parentSet, duplicateOfSet, stalledSet := false, false, false
 	linkSet, kindSet, prioritySet := false, false, false
+	closureSet := false
 	fs.Visit(func(item *flag.Flag) {
 		switch item.Name {
+		case "closure", "evidence":
+			closureSet = true
 		case "link":
 			linkSet = true
 		case "kind":
@@ -428,6 +433,9 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 	}
 	if linkSet && *newTask {
 		return errors.New("--link and --new are exclusive")
+	}
+	if closureSet && args[0] != "transition" {
+		return errors.New("--closure/--evidence are accepted only by tasks transition")
 	}
 	if *set && args[0] != "transition" {
 		return errors.New("--set is accepted only by tasks transition")
@@ -633,7 +641,7 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 		if !hasRefs {
 			refs = nil
 		}
-		in := store.TransitionInput{To: *to, Note: *note, Refs: refs, NoJob: noJobReason, DuplicateOf: *duplicateOf, Set: *set}
+		in := store.TransitionInput{To: *to, Closure: *closure, Evidence: *evidence, Note: *note, Refs: refs, NoJob: noJobReason, DuplicateOf: *duplicateOf, Set: *set}
 		// Leaving triage may carry the values the gate needs; only flags the
 		// caller set are sent.
 		if prioritySet {

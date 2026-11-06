@@ -58,6 +58,7 @@ var errorRules = []errorRule{
 	{store.ErrAttachmentStorageCap, http.StatusInsufficientStorage, "attachment_storage_cap", false},
 	{store.ErrAttachmentPutCap, http.StatusTooManyRequests, "attachment_put_cap", false},
 	{attachments.ErrR2, http.StatusBadGateway, "attachment_r2_unavailable", false},
+	{store.ErrClosureInvalid, http.StatusBadRequest, "closure_invalid", true},
 	{store.ErrTaskConflict, http.StatusConflict, "task_conflict", true},
 	{store.ErrTaskJobRequired, http.StatusConflict, "task_job_required", true},
 	{store.ErrTriageGate, http.StatusConflict, "triage_gate", true},

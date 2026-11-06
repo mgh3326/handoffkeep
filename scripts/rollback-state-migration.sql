@@ -20,10 +20,11 @@
 --      unstarted                        -> reopened
 --      researching, developing          -> in_progress
 --      reviewing                        -> verifying
---      merged, deployed                 -> merged
+--      merged, deployed, completed      -> merged
 --      dropped, duplicate               -> dropped
 --      icebox                           -> hold
--- 3. The old state constraint returns and schema_version 32 is removed.
+-- 3. The old state constraint returns; schema version 32 and the closure
+--    migration ID are removed. The closure check is dropped so it can run again.
 --
 -- One state_migration event is appended per changed task; earlier task_events
 -- rows are not rewritten, so events written under the new model keep their
@@ -50,7 +51,7 @@ WITH plan AS (
       WHEN cur_state = 'unstarted' THEN 'reopened'
       WHEN cur_state IN ('researching','developing') THEN 'in_progress'
       WHEN cur_state = 'reviewing' THEN 'verifying'
-      WHEN cur_state IN ('merged','deployed') THEN 'merged'
+      WHEN cur_state IN ('merged','deployed','completed') THEN 'merged'
       WHEN cur_state IN ('dropped','duplicate') THEN 'dropped'
       WHEN cur_state = 'icebox' THEN 'hold'
       ELSE cur_state
@@ -70,4 +71,11 @@ FROM changed;
 
 ALTER TABLE tasks DROP CONSTRAINT tasks_state_check, ADD CONSTRAINT tasks_state_check CHECK(state IN ('backlog','reopened','claimed','in_progress','verifying','join','hold','needs_decision','merged','dropped'));
 
+ALTER TABLE tasks DROP CONSTRAINT IF EXISTS tasks_closure_check;
+
+DO $$ BEGIN
+  IF to_regclass(format('%I.schema_migrations', current_schema())) IS NOT NULL THEN
+    DELETE FROM schema_migrations WHERE id = '20261106-task-closure';
+  END IF;
+END $$;
 DELETE FROM schema_version WHERE version = 32;

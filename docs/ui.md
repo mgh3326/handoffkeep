@@ -235,7 +235,7 @@ producer label as a sender badge; other `reason` values remain hidden.
 `GET /ui/api/glance` is a `no-store` JSON snapshot for service clients. It
 contains the UTC generation time, sanitized hub health, raw hub `nodes`,
 `lanes`, and `jobs` data (with only per-node `active_jobs` added), task
-state totals (the eleven states plus `awaiting_decision`), unresolved decisions, the newest 20 active tasks, and fixed
+state totals (the twelve states plus `awaiting_decision`), unresolved decisions, the newest 20 active tasks, and fixed
 console paths. `tasks.decisions_pending` counts generic tasks with `awaiting_decision` set
 plus open `[decision-needed]` lane events; open disposition items are reported
 separately as `tasks.dispositions_open` and are not part of that sum.

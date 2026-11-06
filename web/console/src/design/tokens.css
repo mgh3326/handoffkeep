@@ -132,7 +132,7 @@
 }
 
 :root {
-  /* Current states (eleven post-hierarchy) */
+  /* Current states (twelve post-hierarchy) */
   --hk-state-triage: var(--hk-info);
   --hk-state-backlog: var(--hk-text-muted);
   --hk-state-unstarted: var(--hk-text-secondary);
@@ -141,6 +141,7 @@
   --hk-state-reviewing: var(--hk-review);
   --hk-state-merged: var(--hk-success);
   --hk-state-deployed: var(--hk-success);
+  --hk-state-completed: var(--hk-state-merged);
   --hk-state-dropped: var(--hk-text-muted);
   --hk-state-duplicate: var(--hk-text-muted);
   --hk-state-icebox: var(--hk-text-muted);

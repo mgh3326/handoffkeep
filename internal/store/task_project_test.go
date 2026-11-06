@@ -93,7 +93,7 @@ func TestSetTaskProjectEvent(t *testing.T) {
 		t.Fatalf("SetTaskProject(missing) err=%v", err)
 	}
 	// Terminal rows stay reclassifiable — project is metadata, not lifecycle.
-	if _, err = s.TransitionTask(ctx, x.ID, "dropped", "proj-test", "", nil, ""); err != nil {
+	if _, err = s.TransitionTask(ctx, x.ID, "dropped", "proj-test", "fixture outcome", nil, ""); err != nil {
 		t.Fatalf("drop for terminal-relabel probe: %v", err)
 	}
 	x, changed, err = s.SetTaskProject(ctx, x.ID, "fleet-ops", "proj-test", "post-close reclass")

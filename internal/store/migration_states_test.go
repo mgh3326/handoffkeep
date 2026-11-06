@@ -68,6 +68,8 @@ func rewindStateMigration(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 	for _, q := range []string{
 		`DELETE FROM schema_version WHERE version=32`,
+		`DELETE FROM schema_migrations WHERE id='20261106-task-closure'`,
+		`ALTER TABLE tasks DROP CONSTRAINT tasks_closure_check`,
 		`DROP TABLE task_state_migration`,
 		`DROP TABLE task_relations`,
 		`DROP INDEX task_events_source_ref`,
@@ -431,5 +433,45 @@ func TestStateMigrationRollbackRoundTrip(t *testing.T) {
 	}
 	if n := rowCount(t, pool, `SELECT count(*) FROM tasks WHERE state NOT IN ('triage','backlog','unstarted','researching','developing','reviewing','merged','deployed','dropped','duplicate','icebox')`); n != 0 {
 		t.Fatalf("%d tasks hold an old state after the second migration", n)
+	}
+}
+
+func TestStateRollbackHandlesCompleted(t *testing.T) {
+	s := schemaStore(t, "rollback_completed")
+	x, err := s.CreateTask(t.Context(), Task{Lane: relaneLane(t, "rollback"), Title: "completed non-code task", Kind: "decide", CreatedBy: "tester", Project: projectPtr(testProjectName)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.TransitionTaskWith(t.Context(), x.ID, TransitionInput{To: StateCompleted, By: "tester", Evidence: "hk:doc research/x"}); err != nil {
+		t.Fatal(err)
+	}
+	script, err := os.ReadFile(filepath.Join("..", "..", "scripts", "rollback-state-migration.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pool.Exec(t.Context(), string(script)); err != nil {
+		t.Fatalf("rollback completed task: %v", err)
+	}
+	var state, closureType string
+	if err := s.pool.QueryRow(t.Context(), `SELECT state, refs->'closure'->>'type' FROM tasks WHERE id=$1`, x.ID).Scan(&state, &closureType); err != nil {
+		t.Fatal(err)
+	}
+	if state != "merged" || closureType != "resolved" {
+		t.Fatalf("rollback state=%q closure=%q", state, closureType)
+	}
+	if n := rowCount(t, s.pool, `SELECT count(*) FROM schema_migrations WHERE id=$1`, taskClosureMigrationID); n != 0 {
+		t.Fatalf("closure migration IDs after rollback=%d, want 0", n)
+	}
+	if n := rowCount(t, s.pool, `SELECT count(*) FROM schema_version WHERE version=53`); n != 1 {
+		t.Fatalf("schema version 53 after rollback=%d, want 1", n)
+	}
+	if err := s.migrate(t.Context()); err != nil {
+		t.Fatalf("re-migrate after rollback: %v", err)
+	}
+	if n := rowCount(t, s.pool, `SELECT count(*) FROM schema_migrations WHERE id=$1`, taskClosureMigrationID); n != 1 {
+		t.Fatalf("closure migration IDs after re-migration=%d, want 1", n)
+	}
+	if _, err := s.pool.Exec(t.Context(), `UPDATE tasks SET state='completed' WHERE id=$1`, x.ID); err != nil {
+		t.Fatalf("completed state after re-migration: %v", err)
 	}
 }

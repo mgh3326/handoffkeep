@@ -105,7 +105,7 @@ func TestTaskEveryTransitionWritesOneEvent(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, to := range []string{"in_progress", "verifying", "in_progress", "verifying", "merged"} {
-		if _, err := s.TransitionTask(t.Context(), task.ID, to, "node", "", nil, ""); err != nil {
+		if _, err := s.TransitionTask(t.Context(), task.ID, to, "node", "fixture outcome", nil, ""); err != nil {
 			t.Fatalf("to %s: %v", to, err)
 		}
 	}

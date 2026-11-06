@@ -186,3 +186,17 @@ func TestTasksTriageCommand(t *testing.T) {
 		t.Fatal("limit 0 accepted")
 	}
 }
+
+func TestTasksTransitionClosureFlags(t *testing.T) {
+	h, seen := intakeServer(t, http.StatusOK, `{"id":7,"state":"completed"}`)
+	if _, err := runAgainst(h, "tasks", "transition", "7", "--to", "completed", "--evidence", "https://x/r"); err != nil {
+		t.Fatal(err)
+	}
+	body := (*seen)[0].Body
+	if len(body) != 2 || string(body["to"]) != `"completed"` || string(body["evidence"]) != `"https://x/r"` {
+		t.Fatalf("body=%v", body)
+	}
+	if _, err := runAgainst(h, "tasks", "add", "--evidence", "x"); err == nil || !strings.Contains(err.Error(), "--closure/--evidence are accepted only by tasks transition") {
+		t.Fatalf("err=%v", err)
+	}
+}

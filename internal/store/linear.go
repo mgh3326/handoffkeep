@@ -40,6 +40,7 @@ var LinearTaskStateMapping = map[string]LinearStateMapping{
 	StateReviewing:   {Name: "In Review", Mutate: true},
 	StateMerged:      {Name: "Done", Mutate: true, Terminal: true},
 	StateDeployed:    {Name: "Done", Mutate: true, Terminal: true},
+	StateCompleted:   {Name: "Done", Mutate: true, Terminal: true},
 	StateDropped:     {Name: "Canceled", Mutate: true, Terminal: true},
 	StateDuplicate:   {Name: "Canceled", Mutate: true, Terminal: true},
 	StateIcebox:      {Name: "Canceled", Mutate: true, Terminal: true},

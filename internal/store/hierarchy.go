@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/mgh3326/handoffkeep/internal/wrkrecords"
 )
 
 // Relation kinds. blocks and duplicate_of point from Src to Dst (Src blocks
@@ -409,13 +410,15 @@ func (s *Store) afterStateChangeTx(ctx context.Context, tx pgx.Tx, x Task, from,
 }
 
 // autoCloseTx runs auto_close_parent in the transaction of a child's
-// transition. A child is settled when it is merged, deployed, dropped or
+// transition. A child is settled when it is merged, deployed, completed, dropped or
 // duplicate; a child in triage, backlog, unstarted, a started state or icebox
 // blocks the close (icebox is parked work, not finished work).
 //
 //	any child not settled             -> no change
 //	some completed, all deployed      -> parent deployed
-//	some completed, some only merged  -> parent merged
+//	some completed, some merged       -> parent merged
+//	all done children completed       -> completed for decide, ops, verify;
+//	                                     otherwise no change; skip recorded
 //	all dropped or duplicate          -> no change; the skip is recorded
 //
 // The close applies to a parent in backlog, unstarted or a started state; it
@@ -439,7 +442,7 @@ func (s *Store) autoCloseTx(ctx context.Context, tx pgx.Tx, child Task, by strin
 		if err != nil {
 			return err
 		}
-		settled, completed, deployed := true, 0, 0
+		settled, completed, deployed, merged := true, 0, 0, 0
 		for rows.Next() {
 			var state string
 			if err = rows.Scan(&state); err != nil {
@@ -447,8 +450,11 @@ func (s *Store) autoCloseTx(ctx context.Context, tx pgx.Tx, child Task, by strin
 				return err
 			}
 			switch state {
+			case StateCompleted:
+				completed++
 			case StateMerged:
 				completed++
+				merged++
 			case StateDeployed:
 				completed++
 				deployed++
@@ -464,7 +470,7 @@ func (s *Store) autoCloseTx(ctx context.Context, tx pgx.Tx, child Task, by strin
 		if !settled {
 			return nil
 		}
-		ref := fmt.Sprintf("child/%d@%s", child.ID, now.Format(time.RFC3339Nano))
+		ref := fmt.Sprintf("hk:doc child/%d@%s", child.ID, now.Format(time.RFC3339Nano))
 		if completed == 0 {
 			_, _, err = insertEvent(ctx, tx, taskEventInput{
 				TaskID: p.ID, Kind: TaskEventAutoClose, From: p.State, To: p.State, By: "hk", At: now, Refs: p.Refs,
@@ -473,14 +479,48 @@ func (s *Store) autoCloseTx(ctx context.Context, tx pgx.Tx, child Task, by strin
 			})
 			return err
 		}
-		to := StateMerged
+		if p.AwaitingDecision {
+			_, _, err = insertEvent(ctx, tx, taskEventInput{
+				TaskID: p.ID, Kind: TaskEventAutoClose, From: p.State, To: p.State, By: "hk", At: now, Refs: p.Refs,
+				Note:   "parent is awaiting a decision; the parent stays where it is",
+				Source: "hk.auto_close", SourceRef: ref, Auto: true, NotApplied: true,
+			})
+			return err
+		}
+		to := StateCompleted
+		if merged > 0 || deployed > 0 {
+			to = StateMerged
+		}
 		if deployed == completed {
 			to = StateDeployed
+		}
+		if to == StateCompleted && !canCompleteKind(p.Kind) {
+			_, _, err = insertEvent(ctx, tx, taskEventInput{
+				TaskID: p.ID, Kind: TaskEventAutoClose, From: p.State, To: p.State, By: "hk", At: now, Refs: p.Refs,
+				Note:   fmt.Sprintf("sub-task #%d completed; this parent kind remains open", child.ID),
+				Source: "hk.auto_close", SourceRef: ref, Auto: true, NotApplied: true,
+			})
+			return err
+		}
+		if err := s.wrkTaskFenceTx(ctx, tx, p, FenceTarget(to), false); err != nil {
+			switch wrkrecords.Code(err) {
+			case "scope_denied", "wrk_receipt_required":
+				_, _, err = insertEvent(ctx, tx, taskEventInput{
+					TaskID: p.ID, Kind: TaskEventAutoClose, From: p.State, To: p.State, By: "hk", At: now, Refs: p.Refs,
+					Note:   "parent needs a work receipt; the parent stays where it is",
+					Source: "hk.auto_close", SourceRef: ref, Auto: true, NotApplied: true,
+				})
+				return err
+			default:
+				return err
+			}
 		}
 		from := p.State
 		decisionBefore := decisionBeforeOf(p)
 		p.State, p.UpdatedAt = to, now
-		applyLifecycle(&p, from, to, now)
+		if err := applyLifecycle(&p, from, to, now, &TaskClosure{Type: "resolved", Evidence: ref}); err != nil {
+			return err
+		}
 		if p, err = writeTaskTx(ctx, tx, p); err != nil {
 			return err
 		}
