@@ -1,0 +1,122 @@
+[
+  {
+    "state": "open",
+    "viewport": 390,
+    "scrollWidth": 390
+  },
+  {
+    "state": "overdue",
+    "viewport": 390,
+    "scrollWidth": 390
+  },
+  {
+    "state": "pending",
+    "viewport": 390,
+    "scrollWidth": 390
+  },
+  {
+    "state": "unconfirmed",
+    "viewport": 390,
+    "scrollWidth": 390
+  },
+  {
+    "state": "stale_revision",
+    "viewport": 390,
+    "scrollWidth": 390
+  },
+  {
+    "state": "answered",
+    "viewport": 390,
+    "scrollWidth": 390
+  },
+  {
+    "state": "default_applied",
+    "viewport": 390,
+    "scrollWidth": 390
+  },
+  {
+    "state": "source_elsewhere",
+    "viewport": 390,
+    "scrollWidth": 390
+  },
+  {
+    "state": "list-open",
+    "viewport": 390,
+    "scrollWidth": 390
+  },
+  {
+    "state": "list-overdue",
+    "viewport": 390,
+    "scrollWidth": 390
+  },
+  {
+    "state": "list-answered",
+    "viewport": 390,
+    "scrollWidth": 390
+  },
+  {
+    "state": "list-cleanup",
+    "viewport": 390,
+    "scrollWidth": 390
+  },
+  {
+    "state": "open",
+    "viewport": 1440,
+    "scrollWidth": 1440
+  },
+  {
+    "state": "overdue",
+    "viewport": 1440,
+    "scrollWidth": 1440
+  },
+  {
+    "state": "pending",
+    "viewport": 1440,
+    "scrollWidth": 1425
+  },
+  {
+    "state": "unconfirmed",
+    "viewport": 1440,
+    "scrollWidth": 1425
+  },
+  {
+    "state": "stale_revision",
+    "viewport": 1440,
+    "scrollWidth": 1440
+  },
+  {
+    "state": "answered",
+    "viewport": 1440,
+    "scrollWidth": 1425
+  },
+  {
+    "state": "default_applied",
+    "viewport": 1440,
+    "scrollWidth": 1425
+  },
+  {
+    "state": "source_elsewhere",
+    "viewport": 1440,
+    "scrollWidth": 1440
+  },
+  {
+    "state": "list-open",
+    "viewport": 1440,
+    "scrollWidth": 1440
+  },
+  {
+    "state": "list-overdue",
+    "viewport": 1440,
+    "scrollWidth": 1440
+  },
+  {
+    "state": "list-answered",
+    "viewport": 1440,
+    "scrollWidth": 1440
+  },
+  {
+    "state": "list-cleanup",
+    "viewport": 1440,
+    "scrollWidth": 1440
+  }
+]
