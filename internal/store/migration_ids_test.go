@@ -276,7 +276,7 @@ func TestCurrentDatabaseOpensWithoutMigrating(t *testing.T) {
 func TestRegistrationOrderDoesNotChangeFinalState(t *testing.T) {
 	a, b := tableMig("20261106-a", "ids_a"), tableMig("20261107-b", "ids_b")
 	state := func(url string) string {
-		s := openRegistry(t, url, nil)
+		s := openRegistry(t, url, []migration{})
 		var tables []string
 		if err := s.pool.QueryRow(t.Context(), `SELECT coalesce(array_agg(tablename ORDER BY tablename) FILTER (WHERE tablename LIKE 'ids\_%'), '{}') FROM pg_tables WHERE schemaname=current_schema()`).Scan(&tables); err != nil {
 			t.Fatal(err)
