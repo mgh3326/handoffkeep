@@ -40,7 +40,7 @@ const deploy = {
 function payload(overrides: Record<string, unknown> = {}) {
   return {
     generated_at: "2026-11-05T05:00:00Z",
-    decisions: { count: 3, items: [request, laneEvent] },
+    decisions: { count: 3, overdue: 1, items: [request, laneEvent] },
     tasks: { count: 2, awaiting_decision: 1, stalled: 1, items: [waitingTask, stalledTask] },
     deploys: { count: 1, events_capped: false, items: [deploy] },
     ...overrides,
@@ -84,7 +84,7 @@ it("renders a valid payload as three sections with counts and links", async () =
 it("renders the empty state when all three counts are 0", async () => {
   serve(
     payload({
-      decisions: { count: 0, items: [] },
+      decisions: { count: 0, overdue: 0, items: [] },
       tasks: { count: 0, awaiting_decision: 0, stalled: 0, items: [] },
       deploys: { count: 0, events_capped: false, items: [] },
     }),
@@ -116,7 +116,7 @@ it("shows the error state, not the empty state, when tasks.count is a string", a
 
 it("shows the error state, not the empty state, when an item has no id", async () => {
   const { id: _id, ...noId } = request;
-  await expectErrorNotEmpty(payload({ decisions: { count: 1, items: [noId] } }));
+  await expectErrorNotEmpty(payload({ decisions: { count: 1, overdue: 0, items: [noId] } }));
 });
 
 it("shows the error state when the request fails", async () => {

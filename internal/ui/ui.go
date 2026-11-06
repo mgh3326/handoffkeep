@@ -170,7 +170,7 @@ func (h *Handler) assetURL(p string) string {
 // mutating operation.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	r.Pattern = routePattern(r.URL.Path)
-	if r.URL.Path == "/ui" || r.URL.Path == "/ui/work" || r.URL.Path == "/ui/fleet" || r.URL.Path == "/ui/queue" || r.URL.Path == "/ui/grades" || r.URL.Path == "/ui/deploys" || r.URL.Path == "/ui/docs" || r.URL.Path == "/ui/home" || strings.HasPrefix(r.URL.Path, "/ui/doc/") || strings.HasPrefix(r.URL.Path, "/ui/tasks/") || strings.HasPrefix(r.URL.Path, "/ui/api/") {
+	if r.URL.Path == "/ui" || r.URL.Path == "/ui/work" || r.URL.Path == "/ui/fleet" || r.URL.Path == "/ui/queue" || r.URL.Path == "/ui/grades" || r.URL.Path == "/ui/deploys" || r.URL.Path == "/ui/docs" || r.URL.Path == "/ui/home" || r.URL.Path == "/ui/decisions" || strings.HasPrefix(r.URL.Path, "/ui/decisions/") || strings.HasPrefix(r.URL.Path, "/ui/doc/") || strings.HasPrefix(r.URL.Path, "/ui/tasks/") || strings.HasPrefix(r.URL.Path, "/ui/api/") {
 		setConsoleCSP(w)
 	}
 	identity, authenticated := h.access.AuthenticatedIdentity(r)
@@ -222,13 +222,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch r.URL.Path {
-	case "/ui", "/ui/work", "/ui/deploys":
+	case "/ui", "/ui/work", "/ui/deploys", "/ui/decisions":
 		h.shell(w, r)
 	case "/ui/timeline":
 		h.timeline(w, r, false)
 	case "/ui/queue":
 		h.board(w, r, email)
-	case "/ui/decisions":
+	case "/ui/decisions/legacy":
 		h.decisions(w, r, false, email, r.URL.Query().Get("result"))
 	case "/ui/compose":
 		h.compose(w, r, false, email, r.URL.Query().Get("result"))
@@ -269,6 +269,14 @@ func (h *Handler) serveSubroute(w http.ResponseWriter, r *http.Request, email st
 	}
 	if raw, ok := strings.CutPrefix(r.URL.Path, "/ui/tasks/"); ok {
 		h.taskPage(w, r, raw, email)
+		return
+	}
+	if raw, ok := strings.CutPrefix(r.URL.Path, "/ui/decisions/"); ok {
+		if !taskIDPattern.MatchString(raw) {
+			http.Error(w, "invalid decision id", http.StatusBadRequest)
+			return
+		}
+		h.shell(w, r)
 		return
 	}
 	if file, ok := strings.CutPrefix(r.URL.Path, "/ui/static/"); ok {

@@ -14,7 +14,7 @@ function visit(path: string) {
 
 const emptyAttention = {
   generated_at: "2026-11-05T05:00:00Z",
-  decisions: { count: 0, items: [] },
+  decisions: { count: 0, overdue: 0, items: [] },
   tasks: { count: 0, awaiting_decision: 0, stalled: 0, items: [] },
   deploys: { count: 0, events_capped: false, items: [] },
 };

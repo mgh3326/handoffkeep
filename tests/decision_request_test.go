@@ -163,7 +163,7 @@ func TestUIDecisionRequestViewsAgree(t *testing.T) {
 	}
 
 	// Decisions page: the same totals, and each open request listed once.
-	pageResponse := uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions", assertion, "")
+	pageResponse := uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions/legacy", assertion, "")
 	page := responseText(t, pageResponse)
 	if pageResponse.StatusCode != http.StatusOK {
 		t.Fatalf("decisions status=%d", pageResponse.StatusCode)
@@ -344,7 +344,7 @@ func TestUIDecisionFormsRefuseOpenRequest(t *testing.T) {
 	in := drInput("막는 요청")
 	in.Block = true
 	request := drRecord(t, s, x.ID, in)
-	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions", assertion)
+	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions/legacy", assertion)
 	response := uiPostForm(t, h.Client(), h.URL+"/ui/decisions/answer", assertion, cookie, decisionFields("task", x.ID, "A: 자문 먼저", csrf), h.URL, false)
 	body := responseText(t, response)
 	if response.StatusCode != http.StatusConflict || !strings.Contains(body, request.ID) {

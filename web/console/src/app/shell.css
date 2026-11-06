@@ -93,6 +93,7 @@ small {
 }
 .hk-shell-nav a {
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
   min-height: var(--hk-row-height);
@@ -100,6 +101,10 @@ small {
   text-decoration: none;
   color: var(--hk-text-secondary);
   font-size: var(--hk-font-body);
+}
+.hk-shell-nav-badge {
+  font-size: var(--hk-type-micro);
+  white-space: nowrap;
 }
 .hk-shell-nav a[aria-current="page"] {
   color: var(--hk-text-heading);
@@ -141,7 +146,8 @@ small {
     padding: var(--hk-space-16) var(--hk-space-3) 0;
   }
   .hk-shell-nav a {
-    justify-content: flex-start;
+    align-items: flex-start;
+    justify-content: center;
     min-height: var(--hk-touch-height);
     padding: 0 var(--hk-space-3);
     border-radius: var(--hk-radius-control);

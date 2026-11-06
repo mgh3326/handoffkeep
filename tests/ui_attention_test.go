@@ -81,9 +81,9 @@ func TestUIAttentionShape(t *testing.T) {
 	}
 
 	decisions := body["decisions"].(map[string]any)
-	wantKeys(t, "decisions", decisions, "count", "items")
+	wantKeys(t, "decisions", decisions, "count", "overdue", "items")
 	items := decisions["items"].([]any)
-	if decisions["count"] != float64(1) || len(items) != 1 {
+	if decisions["count"] != float64(1) || decisions["overdue"] != float64(1) || len(items) != 1 {
 		t.Fatalf("decisions=%v", decisions)
 	}
 	wantKeys(t, "decision item", items[0], "source", "id", "lane", "question", "created_at", "due_at", "overdue")

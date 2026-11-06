@@ -42,8 +42,9 @@ type Attention struct {
 
 // AttentionDecisions counts open decisions and carries the first AttentionItems.
 type AttentionDecisions struct {
-	Count int
-	Items []AttentionDecision
+	Count   int
+	Overdue int
+	Items   []AttentionDecision
 }
 
 // AttentionDecision is one open decision. ID is the decision_requests id for a
@@ -114,7 +115,8 @@ func attentionDecisionsTx(ctx context.Context, tx pgx.Tx, now time.Time) (Attent
 	out := AttentionDecisions{Items: []AttentionDecision{}}
 	var requests, lanes int
 	if err := tx.QueryRow(ctx, `SELECT (SELECT COUNT(*) FROM decision_requests WHERE `+decisionOpenSQL+`),
-		(SELECT COUNT(*) FROM `+attentionLaneSQL+`)`, now).Scan(&requests, &lanes); err != nil {
+		(SELECT COUNT(*) FROM `+attentionLaneSQL+`),
+		(SELECT COUNT(*) FROM decision_requests WHERE `+decisionOpenSQL+` AND due_at<=$1::timestamptz)`, now).Scan(&requests, &lanes, &out.Overdue); err != nil {
 		return out, err
 	}
 	out.Count = requests + lanes

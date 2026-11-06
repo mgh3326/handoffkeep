@@ -34,7 +34,7 @@ export type AttentionDeploy = {
 
 export type Attention = {
   generated_at: string;
-  decisions: { count: number; items: AttentionDecision[] };
+  decisions: { count: number; overdue: number; items: AttentionDecision[] };
   tasks: {
     count: number;
     awaiting_decision: number;

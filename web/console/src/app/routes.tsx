@@ -2,6 +2,8 @@
 // every path below; the browser picks the view from location.pathname.
 
 import { Component, lazy, Suspense, type ReactNode } from "react";
+import { DecisionPage } from "../decisions/DecisionPage";
+import { DecisionList } from "../decisions/DecisionList";
 import { DeploysPage } from "../deploys/DeploysPage";
 import type { NavKey } from "./Shell";
 import { HomeAttention as Home } from "../home/HomeAttention";
@@ -14,6 +16,8 @@ import { TaskRecord } from "../work/TaskRecord";
 const DocView = lazy(() => import("./DocView"));
 
 export type Route =
+  | { view: "decisions" }
+  | { view: "decision"; id: string }
   | { view: "home" }
   | { view: "deploys" }
   | { view: "work"; replaceWith?: string }
@@ -36,6 +40,9 @@ function docKey(pathname: string): string | null {
 export function matchRoute(pathname: string): Route {
   const path = pathname.length > 1 ? pathname.replace(/\/+$/, "") : pathname;
   if (path === "/ui" || path === "/ui/home") return { view: "home" };
+  if (path === "/ui/decisions") return { view: "decisions" };
+  const decision = /^\/ui\/decisions\/([1-9][0-9]{0,14})$/.exec(path);
+  if (decision) return { view: "decision", id: decision[1] };
   if (path === "/ui/deploys") return { view: "deploys" };
   if (path === "/ui/work") return { view: "work" };
   // /ui/queue is the old bookmark for the queue; it now lands on Work.
@@ -51,7 +58,7 @@ export function matchRoute(pathname: string): Route {
 
 /** The navigation row a route belongs to; null when it belongs to none. */
 export function navKey(route: Route): NavKey | null {
-  return route.view === "task" ? "work" : route.view === "home" || route.view === "work" || route.view === "deploys" ? route.view : null;
+  return route.view === "decision" || route.view === "decisions" ? "decisions" : route.view === "task" ? "work" : route.view === "home" || route.view === "work" || route.view === "deploys" ? route.view : null;
 }
 
 class LoadBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
@@ -66,6 +73,10 @@ class LoadBoundary extends Component<{ children: ReactNode }, { failed: boolean 
 
 export function RouteView({ route }: { route: Route }) {
   switch (route.view) {
+    case "decisions":
+      return <DecisionList />;
+    case "decision":
+      return <DecisionPage id={route.id} />;
     case "home":
       return <Home />;
     case "work":
