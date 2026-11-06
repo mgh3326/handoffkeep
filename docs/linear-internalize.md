@@ -218,6 +218,43 @@ no verdict). Any client writes through `POST /v1/changes/verifications`, or
 `handoffkeep changes verify --pr URL --head SHA --level L --verifier V --family F
 --evidence E [--ci R] [--source direct_merge|mergewake]`; `handoffkeep changes show
 --pr URL` reads it back.
+**Deploys.** A deploy is recorded as rows, not only as a document (hk 3036).
+
+| Table | Holds |
+|---|---|
+| `services` | `name`, `repo` (`owner/name`), `path_patterns` (at least one), `deploy_mode` `manual`, `auto` or `none`, `targets` (at least one unless `none`). Written only by the `operator` and `operator-desk` clients: `PUT /v1/services/{name}`; `GET /v1/services` lists them. |
+| `deploys` | One row per attempt: `attempt_id` (the caller's, unique), `service`, `targets`, `action` `deploy` or `rollback`, `previous_ref`, `deployed_ref`, `state` `requested`, `running`, `success`, `failed` or `rolled_back`, `started_at`, `finished_at`, `failed_step`, `job_id`, `approval_ref`, `source` `installer` or `mergewake`, `payload_hash`. |
+| `deploy_changes` | `(deploy_id, change_id, included, matched_pattern)`, written once at start and never changed. |
+
+`POST /v1/deploys` starts an attempt. Its body names the candidate PRs with their
+changed paths (`changes: [{pr, paths}]`, computed by the caller from
+`previous_ref..deployed_ref`; for a rollback, the PRs the rollback removes). hk freezes
+them at start: a PR of the service's repo with a path matching a pattern is
+`included=true` with the first matching pattern, anything else `included=false`. A
+pattern `dir/**` matches every path under `dir/`; any other pattern is Go's
+`path.Match`. A PR hk has not seen becomes a stub change in state `merged`. The same
+`attempt_id` with the same payload returns the stored attempt (200; a new one is 201);
+another payload is 409 `deploy_attempt_conflict`.
+`POST /v1/deploys/{attempt_id}/finish {state, failed_step}` moves `requested` or
+`running` to `success`, `failed` or `rolled_back` once; the same state again is 200,
+another is 409 `deploy_attempt_finished`.
+
+A change is contained on a (service, target) when the newest successful attempt of the
+service covering the target that lists it as `included=true` is a `deploy`, not a
+`rollback`. Past attempts stay as they are; a later rollback only makes the change
+uncontained again. `GET /v1/services/{name}/pending` computes, on each read, the merged
+and not reverted changes of the service's repo that are not contained on every target,
+oldest merge first, leaving out a change an attempt of the service recorded as
+`included=false`.
+
+A successful finish checks, in its transaction, every merged task linked as
+`implements` to a change of the attempt. The task moves to `deployed` (`hk.deploy`,
+`source_ref` `deploy:<attempt_id>`) when it has at least one implements change that is
+not reverted and each such change is contained on every target of every service that included it. A change no
+service included needs no deploy when every service of its repo is `deploy_mode none`
+or left it out by the path filter, or the repo has no service. A rollback does not move
+a deployed task back. Deploy-record documents (`deploy/<service>/<stamp>`) still move
+tasks as before; both paths apply.
 
 When the merge event moves a task to `merged`, that says the change merged, not that
 CI passed. CI runs after the merge, and failure arrives as a revert. How mergewake
