@@ -159,5 +159,40 @@ it("moves selection down and up without opening a record until Enter", async () 
   expect(new URLSearchParams(location.search).get("task")).toBeNull();
   fireEvent.keyDown(window, { key: "ArrowUp" });
   expect(document.activeElement?.id).toBe("work-row-102");
-  expect(document.activeElement?.getAttribute("aria-current")).toBe("true");
+  expect(document.activeElement?.getAttribute("aria-current")).toBeNull();
+});
+
+
+it("preserves modified arrows and narrow page scrolling while supporting focused rows", async () => {
+  history.replaceState(null, "", "/ui/work?project=a&view=active");
+  render(<WorkPage />);
+  const row = (await screen.findByText("Task one")).closest("a")!;
+  const scroll = new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true });
+  window.dispatchEvent(scroll);
+  expect(scroll.defaultPrevented).toBe(false);
+  for (const modifier of ["metaKey", "ctrlKey", "altKey", "shiftKey"] as const) {
+    const event = new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true, [modifier]: true });
+    row.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(false);
+  }
+  row.focus();
+  const navigate = new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true });
+  act(() => { row.dispatchEvent(navigate); });
+  expect(navigate.defaultPrevented).toBe(true);
+});
+
+it("keeps the open record selected while cursor moves and resets cursor on history navigation", async () => {
+  wide = true;
+  const rows = [task, { ...task, id: 102, title: "Task two" }];
+  vi.stubGlobal("fetch", vi.fn(async (path: string) => path.includes("projects") ? response({ projects: ["a"] }) : path.includes("/101") ? response(detail) : response({ tasks: rows, states: [], generated_at: "2026-01-01T02:00:00Z", truncated: false })));
+  history.replaceState(null, "", "/ui/work?project=a&view=active&task=101");
+  const { container } = render(<WorkPage />);
+  await screen.findByText("Task two");
+  fireEvent.keyDown(window, { key: "ArrowUp" });
+  expect(document.activeElement?.id).toBe("work-row-102");
+  expect(container.querySelector("#work-row-101")?.getAttribute("aria-current")).toBe("true");
+  expect(container.querySelector("#work-row-102")?.getAttribute("aria-current")).toBeNull();
+  act(() => { history.replaceState(null, "", "/ui/work?project=a&view=active"); window.dispatchEvent(new PopStateEvent("popstate")); });
+  fireEvent.keyDown(window, { key: "ArrowDown" });
+  expect(document.activeElement?.id).toBe("work-row-102");
 });

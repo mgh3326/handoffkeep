@@ -23,10 +23,11 @@ function age(now: string, then: string): string {
 
 export function WorkPage() {
   const [search, setSearch] = useState(() => location.search);
+  const [cursor, setCursor] = useState<string | null>(null);
   const [projects, setProjects] = useState<string[]>([]);
   const [projectsFailed, setProjectsFailed] = useState(false);
   const [wide, setWide] = useState(() => matchMedia("(min-width: 1024px)").matches);
-  useEffect(() => { const pop = () => setSearch(location.search); window.addEventListener("popstate", pop); return () => window.removeEventListener("popstate", pop); }, []);
+  useEffect(() => { const pop = () => { setCursor(null); setSearch(location.search); }; window.addEventListener("popstate", pop); return () => window.removeEventListener("popstate", pop); }, []);
   useEffect(() => { const mq = matchMedia("(min-width: 1024px)"); const update = () => setWide(mq.matches); mq.addEventListener("change", update); return () => mq.removeEventListener("change", update); }, []);
   useEffect(() => { void fetchProjects().then(setProjects).catch(() => setProjectsFailed(true)); }, []);
   const params = useMemo(() => new URLSearchParams(search), [search]);
@@ -34,7 +35,6 @@ export function WorkPage() {
   const view: View = views.find(v => v === params.get("view")) || "needs-me";
   const query = params.get("q") || "", lane = params.get("lane") || "", kind = params.get("kind") || "", state = params.get("state") || "", priority = params.get("p") || "";
   const selected = params.get("task");
-  const [cursor, setCursor] = useState<string | null>(null);
   const update = (key: string, value: string) => { if (key === "task") setCursor(value || null); const next = new URLSearchParams(search); if (value) next.set(key, value); else next.delete(key); history.pushState(null, "", `${location.pathname}?${next}`); setSearch(location.search); };
   useEffect(() => {
     if (!project) return;
@@ -50,7 +50,7 @@ export function WorkPage() {
   const visible = filtered.filter(t => inView(t, view)).sort((a, b) => CHIP_GROUP_ORDER.indexOf(statusGroup(a)) - CHIP_GROUP_ORDER.indexOf(statusGroup(b)) || b.priority - a.priority || b.updated_at.localeCompare(a.updated_at) || b.id - a.id);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.isComposing || isTypingTarget(e.target) || !["ArrowUp", "ArrowDown"].includes(e.key) || !visible.length) return;
+      if (e.isComposing || e.metaKey || e.ctrlKey || e.altKey || e.shiftKey || isTypingTarget(e.target) || (!wide && !(e.target instanceof Element && e.target.closest(".work-rows a"))) || !["ArrowUp", "ArrowDown"].includes(e.key) || !visible.length) return;
       e.preventDefault();
       const current = visible.findIndex(t => String(t.id) === (cursor || selected));
       const index = current < 0 ? 0 : Math.max(0, Math.min(visible.length - 1, current + (e.key === "ArrowDown" ? 1 : -1)));
@@ -73,7 +73,7 @@ export function WorkPage() {
       if (!rows.length) return null;
       return <section key={group}><h2 className="work-group">{{decision: "결정 필요", input: "분류 대기", working: "진행 중", failed: "실패", done: "완료", neutral: "기타"}[group]} · {rows.length}</h2>{rows.map(t => {
         const job = t.active_job;
-        return <a id={`work-row-${t.id}`} key={t.id} href={`/ui/tasks/${t.id}`} aria-current={(cursor || selected) === String(t.id) ? "true" : undefined} onKeyDown={e => { if (wide && e.key === "Enter") { e.preventDefault(); update("task", String(t.id)); } }} onClick={e => { if (wide && !e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey) { e.preventDefault(); update("task", String(t.id)); } }}>
+        return <a id={`work-row-${t.id}`} key={t.id} href={`/ui/tasks/${t.id}`} aria-current={selected === String(t.id) ? "true" : undefined} onKeyDown={e => { if (wide && e.key === "Enter") { e.preventDefault(); update("task", String(t.id)); } }} onClick={e => { if (wide && !e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey) { e.preventDefault(); update("task", String(t.id)); } }}>
           <span className="work-row-title"><StateIcon state={t.state} /><Mono>#{t.id}</Mono> <span title={t.title}>{t.title}</span></span>
           <span className="work-row-meta"><Chip kind="status" state={t.state} awaiting_decision={t.awaiting_decision} />{job && <span className="hk-chip work-job" title={[job.role, job.model, job.profile, job.host || "기기 미기록", job.harness, job.effort].filter(Boolean).join(" · ")}>{[job.role, job.model, job.profile, job.host || "기기 미기록"].filter(Boolean).join(" · ")}</span>}<Chip kind="lane" lane={t.lane} /><Chip kind="priority" value={t.priority} urgent={t.priority === 1} /><time dateTime={t.updated_at} title={formatMinuteKST(t.updated_at) || t.updated_at}>{age(board?.generatedAt || "", t.updated_at)}</time></span>
         </a>;
