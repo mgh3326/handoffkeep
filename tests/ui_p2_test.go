@@ -257,7 +257,7 @@ func TestUIWriteDecisionRoutes(t *testing.T) {
 	errorTask := createUITask(t, s, "lane-a", "transition error task")
 	claimAndTransition(t, s, errorTask, "needs_decision", "choose")
 	cookie, csrf = uiCSRF(t, h.Client(), h.URL+"/ui/decisions/legacy", assertion)
-	response = uiPostForm(t, h.Client(), h.URL+"/ui/decisions/answer", assertion, cookie, decisionFields("task", errorTask.ID, "-----BEGIN synthetic", csrf), h.URL, true)
+	response = uiPostForm(t, h.Client(), h.URL+"/ui/decisions/answer", assertion, cookie, decisionFields("task", errorTask.ID, "-----"+"BEGIN PRIVATE"+" KEY----- "+strings.Repeat("A", 64), csrf), h.URL, true)
 	if body = responseText(t, response); !strings.Contains(body, "web-decision-task-") || !strings.Contains(body, "수동 전이 필요") {
 		t.Fatalf("transition error response=%q", body)
 	}

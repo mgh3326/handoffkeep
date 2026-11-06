@@ -22,7 +22,7 @@ var (
 	reviewProfileRE = regexp.MustCompile(`^[a-z0-9_.@-]{1,64}$`)
 	// patchDigestRE is the digest half of mergewake's patch receipt
 	// "<patch-id>:<digest>": lower-case hex.
-	patchDigestRE = regexp.MustCompile(`^[0-9a-f]{16,128}$`)
+	patchDigestRE = regexp.MustCompile(`^[0-9a-f]{12,128}$`)
 )
 
 const (
@@ -87,7 +87,7 @@ func (h ReviewHistory) check() error {
 		return fmt.Errorf("reviewer must be non-empty printable text of at most %d bytes", maxReviewText)
 	}
 	if h.PatchDigest != nil && !patchDigestRE.MatchString(*h.PatchDigest) {
-		return errors.New("patch_digest must be 16 to 128 lower-case hex digits")
+		return errors.New("patch_digest must be 12 to 128 lower-case hex digits")
 	}
 	if h.OutsideDiffBlocking != nil && (*h.OutsideDiffBlocking < 0 || *h.OutsideDiffBlocking > maxReviewCount) {
 		return fmt.Errorf("outside_diff_blocking must be 0 to %d", int(maxReviewCount))
