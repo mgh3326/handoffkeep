@@ -1,9 +1,15 @@
 import { useCallback, useEffect, useState } from "react";
+import { Icon } from "../shared/Icon";
+import { StateIcon } from "../shared/StateIcon";
 import { readStored, writeStored } from "../shared/storage";
+import { formatMinuteKST } from "../shared/time";
+import { Chip } from "../shared/ui/Chip";
+import { Mono } from "../shared/ui/Mono";
 import { usePoll } from "../shared/usePoll";
 import { loadList } from "./api";
+import { DecisionChip, sourceLabel, stateChip, stateShape } from "./DecisionChip";
 import { DecisionPage } from "./DecisionPage";
-import { ResultBadge } from "./ResultBadge";
+import { formatAge, formatRemaining, summarizeQuestion } from "./format";
 import type { DecisionRecord, Tab } from "./types";
 import "./decisions.css";
 const tabs: { id: Tab; label: string }[] = [
@@ -37,21 +43,15 @@ function itemState(x: DecisionRecord): string {
     x.request_state || (x.status === "open" && x.overdue ? "overdue" : x.status)
   );
 }
-const labels: Record<string, string> = {
-  open: "열림 · 응답 대기",
-  overdue: "기한 경과 · 기본값 미적용",
-  uncleaned: "미정리 요청",
-  answered: "답변됨",
-  default_applied: "기본값 적용됨",
-  withdrawn: "철회됨",
-  superseded: "대체됨",
-  unrecorded: "미기록",
+/** One line of guidance per tab, and where to go next. */
+const empty: Record<Tab, { text: string; next: Tab; nextLabel: string }> = {
+  open: { text: "답할 결정이 없어요", next: "answered", nextLabel: "답변 기록 보기" },
+  overdue: { text: "기한이 지난 결정이 없어요", next: "open", nextLabel: "열린 결정 보기" },
+  answered: { text: "아직 답변한 결정이 없어요", next: "open", nextLabel: "열린 결정 보기" },
+  cleanup: { text: "정리할 요청이 없어요", next: "open", nextLabel: "열린 결정 보기" },
 };
-function stateLabel(raw: string): string {
-  return Object.prototype.hasOwnProperty.call(labels, raw)
-    ? labels[raw]
-    : `지원되지 않는 상태 ${raw}`;
-}
+const plainClick = (e: React.MouseEvent) =>
+  !e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey && e.button === 0;
 export function DecisionList() {
   const [tab, setTab] = useState<Tab>(initialTab);
   const [selected, setSelected] = useState<string | null>(() =>
@@ -129,61 +129,124 @@ export function DecisionList() {
     writeStored(seenKey, JSON.stringify(next));
   };
   let divider = false;
+  const now = data?.generated_at ?? "";
+  const counts = data?.counts;
+  const loaded = data?.tab === tab;
   return (
     <div className="decision-list-layout">
       <section className="decision-list">
         <h1>결정</h1>
-        <nav aria-label="결정 탭" className="decision-tabs">
-          {tabs.map((x) => (
-            <button
-              key={x.id}
-              aria-current={tab === x.id ? "page" : undefined}
-              onClick={() => chooseTab(x.id)}
-            >
-              {x.label}
-            </button>
-          ))}
-        </nav>
-        <button onClick={markSeen}>확인함</button>
-        {failed && (!data || data.tab !== tab) && (
-          <p role="alert">불러오지 못함</p>
+        <div className="decision-toolbar">
+          <nav aria-label="결정 탭" className="decision-tabs">
+            {tabs.map((x) => {
+              const count = x.id === "open" || x.id === "overdue" ? counts?.[x.id] : undefined;
+              return (
+                <a
+                  key={x.id}
+                  href={`/ui/decisions?tab=${x.id}`}
+                  className="decision-tab"
+                  data-tab={x.id}
+                  aria-current={tab === x.id ? "page" : undefined}
+                  onClick={(event) => {
+                    if (!plainClick(event)) return;
+                    event.preventDefault();
+                    chooseTab(x.id);
+                  }}
+                >
+                  {x.label}
+                  {count !== undefined && (
+                    <span className="decision-tab-count" data-zero={count === 0 ? "true" : undefined}>
+                      {count}
+                    </span>
+                  )}
+                </a>
+              );
+            })}
+          </nav>
+          <button type="button" className="hk-button" onClick={markSeen}>
+            모두 확인
+          </button>
+        </div>
+        {failed && !loaded && (
+          <p role="alert" className="decision-note">
+            불러오지 못함
+          </p>
         )}
-        {failed && data?.tab === tab && (
-          <p>
+        {failed && loaded && (
+          <p className="decision-note">
             마지막 확인 {at ? new Date(at).toLocaleString() : data.generated_at}
           </p>
         )}
-        {data?.tab === tab && data.truncated && (
-          <p>{ordered.length}건만 로드</p>
+        {loaded && data.truncated && (
+          <p className="decision-note">{ordered.length}건만 로드</p>
         )}
-        {data?.tab === tab && !data.truncated && !ordered.length && <p>0건</p>}
+        {loaded && !data.truncated && !ordered.length && (
+          <div className="decision-empty">
+            <Icon name="check" className="decision-empty-icon" />
+            <p className="decision-empty-text">{empty[tab].text}</p>
+            <a
+              href={`/ui/decisions?tab=${empty[tab].next}`}
+              onClick={(event) => {
+                if (!plainClick(event)) return;
+                event.preventDefault();
+                chooseTab(empty[tab].next);
+              }}
+            >
+              {empty[tab].nextLabel}
+            </a>
+          </div>
+        )}
         {ordered.map((x) => {
           const isNew = seen[String(x.id)] === undefined;
           const firstNew = isNew && !divider;
           if (firstNew) divider = true;
+          const state = itemState(x);
+          const age = formatAge(now, x.created_at);
+          const remaining = state === "open" && x.due_at ? formatRemaining(now, x.due_at) : null;
           return (
             <div key={x.id}>
-              {firstNew && <p>새 항목</p>}
+              {firstNew && <p className="decision-divider">새 항목</p>}
               <a
                 href={`/ui/decisions/${x.id}?tab=${tab}`}
-                className="decision-row"
+                className={`decision-row${isNew ? " decision-row--new" : ""}`}
                 aria-current={selected === String(x.id) ? "true" : undefined}
                 onClick={(event) => choose(x.id, event)}
               >
-                <strong>
-                  #{x.id} {x.question}
-                </strong>
-                <span>
-                  {x.lane} · {stateLabel(itemState(x))}
+                <span className="decision-row-icon">
+                  <StateIcon state={stateShape(state)} />
                 </span>
-                {seen[String(x.id)] !== undefined &&
-                  seen[String(x.id)] !== x.revision && <span>새 revision</span>}
-                {itemState(x) === "answered" && (
-                  <ResultBadge result="answered" />
-                )}
+                <span className="decision-row-main">
+                  <span className="decision-row-title">
+                    {isNew && <span className="hk-sr-only">안 읽음 </span>}
+                    <Mono className="decision-id">#{x.id}</Mono>{" "}
+                    <span className="decision-summary">{summarizeQuestion(x.question)}</span>
+                  </span>
+                  <span className="hk-chips">
+                    <span className="hk-chip hk-chip--neutral" data-chip="source">
+                      {sourceLabel(x.source)}
+                    </span>
+                    {state !== "open" && <DecisionChip {...stateChip(state)} />}
+                    {remaining && (
+                      <DecisionChip group="input" label={`기한 ${remaining} 남음`} />
+                    )}
+                    {x.lane && <Chip kind="lane" lane={x.lane} />}
+                    {seen[String(x.id)] !== undefined && seen[String(x.id)] !== x.revision && (
+                      <DecisionChip group="input" label="새 revision" />
+                    )}
+                    {age && (
+                      <time
+                        className="decision-age"
+                        dateTime={x.created_at}
+                        title={formatMinuteKST(x.created_at) ?? undefined}
+                      >
+                        {age}
+                      </time>
+                    )}
+                  </span>
+                </span>
               </a>
               {x.superseded_record_id && (
-                <a href={`/ui/decisions/${x.superseded_record_id}`}>
+                <a className="decision-superseded" href={`/ui/decisions/${x.superseded_record_id}`}>
                   대체 요청 {x.superseded_by}
                 </a>
               )}
