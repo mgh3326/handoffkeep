@@ -68,6 +68,8 @@ func rewindStateMigration(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 	for _, q := range []string{
 		`DELETE FROM schema_version WHERE version=32`,
+		`DELETE FROM schema_migrations WHERE id='20261106-task-closure'`,
+		`ALTER TABLE tasks DROP CONSTRAINT tasks_closure_check`,
 		`DROP TABLE task_state_migration`,
 		`DROP TABLE task_relations`,
 		`DROP INDEX task_events_source_ref`,
@@ -457,8 +459,17 @@ func TestStateRollbackHandlesCompleted(t *testing.T) {
 	if state != "merged" || closureType != "resolved" {
 		t.Fatalf("rollback state=%q closure=%q", state, closureType)
 	}
+	if n := rowCount(t, s.pool, `SELECT count(*) FROM schema_migrations WHERE id=$1`, taskClosureMigrationID); n != 0 {
+		t.Fatalf("closure migration IDs after rollback=%d, want 0", n)
+	}
+	if n := rowCount(t, s.pool, `SELECT count(*) FROM schema_version WHERE version=53`); n != 1 {
+		t.Fatalf("schema version 53 after rollback=%d, want 1", n)
+	}
 	if err := s.migrate(t.Context()); err != nil {
 		t.Fatalf("re-migrate after rollback: %v", err)
+	}
+	if n := rowCount(t, s.pool, `SELECT count(*) FROM schema_migrations WHERE id=$1`, taskClosureMigrationID); n != 1 {
+		t.Fatalf("closure migration IDs after re-migration=%d, want 1", n)
 	}
 	if _, err := s.pool.Exec(t.Context(), `UPDATE tasks SET state='completed' WHERE id=$1`, x.ID); err != nil {
 		t.Fatalf("completed state after re-migration: %v", err)

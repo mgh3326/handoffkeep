@@ -16,6 +16,10 @@ func TestTaskClosureMigration(t *testing.T) {
 	if err := s.pool.QueryRow(t.Context(), `SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != SchemaVersion {
 		t.Fatalf("version=%d err=%v", version, err)
 	}
+	var applied bool
+	if err := s.pool.QueryRow(t.Context(), `SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE id=$1)`, taskClosureMigrationID).Scan(&applied); err != nil || !applied {
+		t.Fatalf("closure migration registered=%t err=%v", applied, err)
+	}
 	var activityColumn bool
 	if err := s.pool.QueryRow(t.Context(), `SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='tasks' AND column_name='last_activity_at')`).Scan(&activityColumn); err != nil || !activityColumn {
 		t.Fatalf("last activity migration applied=%t err=%v", activityColumn, err)

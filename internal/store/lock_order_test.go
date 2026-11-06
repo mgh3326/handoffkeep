@@ -315,13 +315,13 @@ func TestMigrateVersionsMatchFreshSchema(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer tx.Rollback(t.Context())
-	if current, err := migrateCurrent(t.Context(), tx); err != nil || !current {
+	if current, err := migrateCurrent(t.Context(), tx, nil); err != nil || !current {
 		t.Fatalf("fresh schema current=%v err=%v", current, err)
 	}
 	if _, err = tx.Exec(t.Context(), `DELETE FROM schema_version WHERE version=$1`, SchemaVersion); err != nil {
 		t.Fatal(err)
 	}
-	if current, err := migrateCurrent(t.Context(), tx); err != nil || current {
+	if current, err := migrateCurrent(t.Context(), tx, nil); err != nil || current {
 		t.Fatalf("schema without v%d current=%v err=%v", SchemaVersion, current, err)
 	}
 }

@@ -551,7 +551,7 @@ restored:
 2. Maps every other task, including tasks created after the migration, by the table
    below.
 3. Restores the old state constraint, removes the closure check, and clears the
-   state and closure migration versions so both can run again.
+   state migration version and closure migration ID so both can run again.
 
 | New state | Legacy state |
 |---|---|
