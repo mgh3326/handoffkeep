@@ -306,4 +306,18 @@ func TestFinishDeployMovesTask(t *testing.T) {
 	if got := state(y.ID); got != StateDeployed {
 		t.Fatalf("no-service change blocked the task: %s", got)
 	}
+	// Revert and reland: the reverted PR, never deployed, does not block the
+	// reland's deploy.
+	z := flowTask(t, f.s, f.s.pool, "implement", StateBacklog, false)
+	send(t, f.s, mergeEvent(z.ID, repoPR(f.repo, 6)))
+	send(t, f.s, revertEvent(z.ID, repoPR(f.repo, 6), repoPR(f.repo, 7)))
+	send(t, f.s, mergeEvent(z.ID, repoPR(f.repo, 8)))
+	if got := state(z.ID); got != StateMerged {
+		t.Fatalf("reland: %s", got)
+	}
+	f.start(t, "t-6", DeployActionDeploy, []string{"a", "b"}, f.cand(8, "internal/z.go"))
+	f.finish(t, "t-6", DeploySuccess)
+	if got := state(z.ID); got != StateDeployed {
+		t.Fatalf("a reverted change blocked the reland: %s", got)
+	}
 }

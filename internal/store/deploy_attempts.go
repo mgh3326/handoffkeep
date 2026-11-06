@@ -519,8 +519,9 @@ func changeDeployedSQL() string {
 
 // deployedTasksTx is the task rule: every merged task linked as implements to
 // a change of attempt deployID moves to deployed (hk.deploy, source_ref
-// "deploy:<attempt_id>") when it has at least one implements change and each
-// one is deployed (changeDeployedSQL). The caller holds the level-2 lock; task
+// "deploy:<attempt_id>") when it has at least one implements change that is
+// not reverted and each such change is deployed (changeDeployedSQL). A
+// reverted change is out, as in PendingChanges: no attempt ships it again. The caller holds the level-2 lock; task
 // rows are locked in ascending id.
 func (s *Store) deployedTasksTx(ctx context.Context, tx pgx.Tx, deployID int64, attemptID string, now time.Time) error {
 	rows, err := tx.Query(ctx, `SELECT `+taskColumns+` FROM tasks WHERE state=$2 AND id IN (
@@ -537,7 +538,7 @@ ORDER BY id FOR UPDATE`, deployID, StateMerged, ChangeImplements)
 		return err
 	}
 	deployed := `SELECT bool_and(` + changeDeployedSQL() + `) IS TRUE
-FROM change_tasks ct JOIN changes c ON c.id=ct.change_id WHERE ct.task_id=$1 AND ct.relation=$2`
+FROM change_tasks ct JOIN changes c ON c.id=ct.change_id WHERE ct.task_id=$1 AND ct.relation=$2 AND c.reverted_by_change_id IS NULL`
 	for _, x := range tasks {
 		var ok bool
 		if err = tx.QueryRow(ctx, deployed, x.ID, ChangeImplements).Scan(&ok); err != nil {

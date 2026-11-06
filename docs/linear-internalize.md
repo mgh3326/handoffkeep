@@ -235,8 +235,8 @@ oldest merge first, leaving out a change an attempt of the service recorded as
 
 A successful finish checks, in its transaction, every merged task linked as
 `implements` to a change of the attempt. The task moves to `deployed` (`hk.deploy`,
-`source_ref` `deploy:<attempt_id>`) when it has at least one implements change and each
-one is contained on every target of every service that included it. A change no
+`source_ref` `deploy:<attempt_id>`) when it has at least one implements change that is
+not reverted and each such change is contained on every target of every service that included it. A change no
 service included needs no deploy when every service of its repo is `deploy_mode none`
 or left it out by the path filter, or the repo has no service. A rollback does not move
 a deployed task back. Deploy-record documents (`deploy/<service>/<stamp>`) still move
