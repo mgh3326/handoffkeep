@@ -162,27 +162,57 @@ var schemaSeq atomic.Int64
 // packages would make them flaky.
 func Schema(t testing.TB, prefix string) (schema, dbURL string) {
 	t.Helper()
-	base := URL(t)
-	schema = fmt.Sprintf("%s_%d_%d", strings.ToLower(prefix), time.Now().UnixNano(), schemaSeq.Add(1))
-	admin := Conn(t)
-	if _, err := admin.Exec(context.Background(), "CREATE SCHEMA "+schema); err != nil {
+	schema, dbURL, drop, err := newSchema(context.Background(), URL(t), prefix)
+	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _, _ = admin.Exec(context.Background(), "DROP SCHEMA "+schema+" CASCADE") })
-	return schema, WithSearchPath(t, base, SearchPath(schema))
+	t.Cleanup(drop)
+	return schema, dbURL
+}
+
+// newSchema is Schema without a testing.TB, so a test can create schemas from
+// concurrent goroutines. base must already have its extension installed.
+func newSchema(ctx context.Context, base, prefix string) (schema, dbURL string, drop func(), err error) {
+	schema = fmt.Sprintf("%s_%d_%d", strings.ToLower(prefix), time.Now().UnixNano(), schemaSeq.Add(1))
+	admin, err := pgx.Connect(ctx, base)
+	if err != nil {
+		return "", "", nil, err
+	}
+	if _, err := admin.Exec(ctx, "CREATE SCHEMA "+schema); err != nil {
+		admin.Close(context.Background())
+		return "", "", nil, err
+	}
+	drop = func() {
+		_, _ = admin.Exec(context.Background(), "DROP SCHEMA "+schema+" CASCADE")
+		_ = admin.Close(context.Background())
+	}
+	dbURL, err = withSearchPath(base, SearchPath(schema))
+	if err != nil {
+		drop()
+		return "", "", nil, err
+	}
+	return schema, dbURL, drop, nil
 }
 
 // WithSearchPath returns dbURL with its search_path parameter set.
 func WithSearchPath(t testing.TB, dbURL, searchPath string) string {
 	t.Helper()
-	parsed, err := url.Parse(dbURL)
+	out, err := withSearchPath(dbURL, searchPath)
 	if err != nil {
 		t.Fatal(err)
+	}
+	return out
+}
+
+func withSearchPath(dbURL, searchPath string) (string, error) {
+	parsed, err := url.Parse(dbURL)
+	if err != nil {
+		return "", err
 	}
 	query := parsed.Query()
 	query.Set("search_path", searchPath)
 	parsed.RawQuery = query.Encode()
-	return parsed.String()
+	return parsed.String(), nil
 }
 
 // SchemaPool is Schema plus a pool bound to the new schema, closed at

@@ -3,23 +3,32 @@ package testdb
 import (
 	"context"
 	"fmt"
-	"sync"
+	neturl "net/url"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
-// useTrigram creates a table in the pool's throwaway schema, indexes it with
+// useTrigram creates a table in the schema behind dbURL, indexes it with
 // gin_trgm_ops, and runs a trigram query: it fails if the opclass or the
 // similarity function is unreachable from that schema's search_path.
-func useTrigram(exec func(sql string) error, query func(sql string) (float64, error)) error {
-	if err := exec(`CREATE TABLE trgm_probe (body TEXT NOT NULL)`); err != nil {
-		return err
-	}
-	if err := exec(`CREATE INDEX trgm_probe_idx ON trgm_probe USING GIN (body gin_trgm_ops)`); err != nil {
-		return err
-	}
-	score, err := query(`SELECT similarity('handoff', 'handoff')`)
+func useTrigram(ctx context.Context, dbURL string) error {
+	conn, err := pgx.Connect(ctx, dbURL)
 	if err != nil {
+		return err
+	}
+	defer conn.Close(context.Background())
+	for _, sql := range []string{
+		`CREATE TABLE trgm_probe (body TEXT NOT NULL)`,
+		`CREATE INDEX trgm_probe_idx ON trgm_probe USING GIN (body gin_trgm_ops)`,
+	} {
+		if _, err := conn.Exec(ctx, sql); err != nil {
+			return err
+		}
+	}
+	var score float32
+	if err := conn.QueryRow(ctx, `SELECT similarity('handoff', 'handoff')`).Scan(&score); err != nil {
 		return err
 	}
 	if score != 1 {
@@ -28,62 +37,83 @@ func useTrigram(exec func(sql string) error, query func(sql string) (float64, er
 	return nil
 }
 
-func probe(t *testing.T, prefix string) (schema string, run func() error) {
-	t.Helper()
-	pool, schema := SchemaPool(t, prefix)
-	ctx := t.Context()
-	return schema, func() error {
-		return useTrigram(
-			func(sql string) error { _, err := pool.Exec(ctx, sql); return err },
-			func(sql string) (float64, error) {
-				var f float32
-				err := pool.QueryRow(ctx, sql).Scan(&f)
-				return float64(f), err
-			})
+// probe creates a throwaway schema on base and uses the trigram opclass in
+// it. It is safe to call from a goroutine; the caller runs drop.
+func probe(ctx context.Context, base, prefix string) (schema string, drop func(), err error) {
+	schema, dbURL, drop, err := newSchema(ctx, base, prefix)
+	if err != nil {
+		return "", nil, err
 	}
+	if err := useTrigram(ctx, dbURL); err != nil {
+		drop()
+		return "", nil, fmt.Errorf("schema %s: %w", schema, err)
+	}
+	return schema, drop, nil
 }
 
-func TestParallelSchemasSeeTrigramOpclass(t *testing.T) {
-	// Schemas are created here, then probed from goroutines that start
-	// together. Parallel subtests would not do: -parallel caps how many run at
-	// once, so a barrier between them can deadlock.
-	const n = 6
-	runs := make([]func() error, n)
-	for i := range runs {
-		_, runs[i] = probe(t, "tdb_par")
-	}
+// probeAll runs n probes concurrently, each creating its own schema, and
+// returns the drops of those that succeeded.
+func probeAll(t *testing.T, base string, n int) (drops []func()) {
+	t.Helper()
 	start := make(chan struct{})
-	errs := make(chan error, n)
-	for _, run := range runs {
+	type result struct {
+		drop func()
+		err  error
+	}
+	results := make(chan result, n)
+	for i := 0; i < n; i++ {
 		go func() {
 			<-start
-			errs <- run()
+			_, drop, err := probe(t.Context(), base, "tdb_par")
+			results <- result{drop, err}
 		}()
 	}
 	close(start)
-	for range runs {
-		if err := <-errs; err != nil {
-			t.Error(err)
+	for i := 0; i < n; i++ {
+		r := <-results
+		if r.err != nil {
+			t.Error(r.err)
+			continue
 		}
+		t.Cleanup(r.drop)
+		drops = append(drops, r.drop)
+	}
+	return drops
+}
+
+// Schemas are created inside the concurrent workers, not before them.
+func TestParallelSchemasSeeTrigramOpclass(t *testing.T) {
+	if got := len(probeAll(t, URL(t), 6)); got != 6 {
+		t.Fatalf("%d of 6 parallel schemas worked", got)
 	}
 }
 
 func TestDroppingOneSchemaLeavesTheOtherWorking(t *testing.T) {
-	first, runFirst := probe(t, "tdb_drop_a")
-	_, runSecond := probe(t, "tdb_drop_b")
-	if err := runFirst(); err != nil {
+	base := URL(t)
+	ctx := t.Context()
+	_, dropFirst, err := probe(ctx, base, "tdb_drop_a")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Conn(t).Exec(t.Context(), "DROP SCHEMA "+first+" CASCADE"); err != nil {
+	_, dropSecond, err := probe(ctx, base, "tdb_drop_b")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := runSecond(); err != nil {
-		t.Fatalf("second schema after the first was dropped: %v", err)
+	t.Cleanup(dropSecond)
+	secondSchema, secondURL, dropThird, err := newSchema(ctx, base, "tdb_drop_c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(dropThird)
+	dropFirst() // DROP SCHEMA ... CASCADE on the first
+	if err := useTrigram(ctx, secondURL); err != nil {
+		t.Fatalf("schema %s after the first was dropped: %v", secondSchema, err)
 	}
 	// The extension must survive too: a new schema still gets the opclass.
-	_, runThird := probe(t, "tdb_drop_c")
-	if err := runThird(); err != nil {
+	if _, drop, err := probe(ctx, base, "tdb_drop_d"); err != nil {
 		t.Fatalf("new schema after a drop: %v", err)
+	} else {
+		drop()
 	}
 }
 
@@ -117,27 +147,56 @@ func TestThrowawaySchemaCannotSeePublicTables(t *testing.T) {
 	}
 }
 
-// Concurrent first-time installs from several test processes must all
-// succeed; the goroutines stand in for the processes (each has its own
-// connection, which is what the advisory lock serializes).
-func TestInstallExtConcurrent(t *testing.T) {
-	url := URL(t)
+// Concurrent first-time setup: a fresh database has no pg_trgm, and each
+// worker installs it and creates its own schema, as test processes of
+// different packages do on a new CI database.
+func TestFirstTimeSetupConcurrent(t *testing.T) {
+	admin := Conn(t)
+	ctx := t.Context()
+	name := fmt.Sprintf("tdb_fresh_%d", time.Now().UnixNano())
+	if _, err := admin.Exec(ctx, `CREATE DATABASE `+name); err != nil {
+		t.Fatalf("create database: %v", err)
+	}
+	t.Cleanup(func() { _, _ = admin.Exec(context.Background(), `DROP DATABASE `+name+` WITH (FORCE)`) })
+	parsed, err := neturl.Parse(URL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed.Path = "/" + name
+	parsed.RawQuery = ""
+	fresh := parsed.String()
+
 	const n = 8
+	start := make(chan struct{})
 	errs := make(chan error, n)
-	var wg sync.WaitGroup
 	for i := 0; i < n; i++ {
-		wg.Add(1)
 		go func() {
-			defer wg.Done()
-			errs <- installExt(url)
+			<-start
+			if err := installExt(fresh); err != nil {
+				errs <- err
+				return
+			}
+			_, drop, err := probe(ctx, fresh, "tdb_fresh")
+			if err == nil {
+				drop()
+			}
+			errs <- err
 		}()
 	}
-	wg.Wait()
-	close(errs)
-	for err := range errs {
-		if err != nil {
-			t.Fatal(err)
+	close(start)
+	for i := 0; i < n; i++ {
+		if err := <-errs; err != nil {
+			t.Error(err)
 		}
+	}
+	var schemas int
+	conn, err := pgx.Connect(ctx, fresh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(context.Background())
+	if err := conn.QueryRow(ctx, `SELECT count(*) FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace WHERE e.extname = 'pg_trgm' AND n.nspname = $1`, ExtSchema).Scan(&schemas); err != nil || schemas != 1 {
+		t.Fatalf("pg_trgm in %s: count=%d err=%v", ExtSchema, schemas, err)
 	}
 }
 
