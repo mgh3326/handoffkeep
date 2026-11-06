@@ -124,6 +124,7 @@ var errorRules = []errorRule{
 	{store.ErrChangeDependencyCycle, http.StatusConflict, "change_dependency_cycle", false},
 	{store.ErrVerificationExists, http.StatusConflict, "verification_exists", false},
 	{store.ErrInvalidChangeWrite, http.StatusBadRequest, "invalid_context", true},
+	{store.ErrInvalidPlacement, http.StatusBadRequest, "invalid_context", true},
 	{store.ErrDotsResultNotFound, http.StatusNotFound, "not_found", false},
 	{store.ErrDotsAdoptionFinal, http.StatusConflict, "dots_adoption_final", false},
 	{store.ErrServiceNotFound, http.StatusNotFound, "not_found", false},

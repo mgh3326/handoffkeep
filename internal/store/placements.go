@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"reflect"
 	"strings"
@@ -62,48 +63,88 @@ type PlacementCandidate struct {
 	Power        *float64 `json:"power,omitempty"`
 }
 
+// ErrInvalidPlacement wraps a placement record's validation failure. The
+// text after "invalid_placement: " names the failing field, so a node's spool
+// can log why one record was refused and quarantine it (desk 2026-11-07:
+// 733 records queued behind one refused record).
+var ErrInvalidPlacement = errors.New("invalid_placement")
+
+func placementInvalid(format string, args ...any) error {
+	return fmt.Errorf("%w: %s", ErrInvalidPlacement, fmt.Sprintf(format, args...))
+}
+
 func checkPlacement(d PlacementDecision) error {
-	if !ValidJobID(d.JobID) || d.Attempt < 1 || d.Attempt > 1000000 || !ValidJobHost(d.DecidedOn) || d.DecidedAt.IsZero() || d.DecidedAt.After(time.Now().UTC().Add(5*time.Minute)) || d.DecidedAt.Before(time.Now().UTC().Add(-PlacementRetention)) {
-		return errors.New("invalid placement identity or time")
+	now := time.Now().UTC()
+	switch {
+	case !ValidJobID(d.JobID):
+		return placementInvalid("job_id")
+	case d.Attempt < 1 || d.Attempt > 1000000:
+		return placementInvalid("attempt %d out of range", d.Attempt)
+	case !ValidJobHost(d.DecidedOn):
+		return placementInvalid("decided_on")
+	case d.DecidedAt.IsZero():
+		return placementInvalid("decided_at missing")
+	case d.DecidedAt.After(now.Add(5 * time.Minute)):
+		return placementInvalid("decided_at in the future")
+	case d.DecidedAt.Before(now.Add(-PlacementRetention)):
+		return placementInvalid("decided_at older than retention")
 	}
 	if d.Source != "auto" && d.Source != "forced" {
-		return errors.New("invalid placement source")
+		return placementInvalid("source %q", d.Source)
 	}
 	if d.Outcome != "placed" && d.Outcome != "refused" && d.Outcome != "failed" {
-		return errors.New("invalid placement outcome")
+		return placementInvalid("outcome %q", d.Outcome)
 	}
-	if d.Ranking == "" || d.StateSource == "" || (d.TaskID != nil && *d.TaskID < 1) || (d.ChosenHost != nil && !ValidJobHost(*d.ChosenHost)) || len(d.Candidates) > 64 || d.Candidates == nil {
-		return errors.New("invalid placement fields")
+	switch {
+	case d.Ranking == "":
+		return placementInvalid("ranking empty")
+	case d.StateSource == "":
+		return placementInvalid("state_source empty")
+	case d.TaskID != nil && *d.TaskID < 1:
+		return placementInvalid("task_id")
+	case d.ChosenHost != nil && !ValidJobHost(*d.ChosenHost):
+		return placementInvalid("chosen_host")
+	case d.Candidates == nil:
+		return placementInvalid("candidates missing (send [] when there are none)")
+	case len(d.Candidates) > 64:
+		return placementInvalid("candidates: %d over 64", len(d.Candidates))
 	}
 	if d.Role != "" && d.Role != "lead" && d.Role != "worker" && d.Role != "review" && d.Role != "consult" {
-		return errors.New("invalid placement role")
+		return placementInvalid("role %q", d.Role)
 	}
 	if d.Outcome == "placed" && (d.TaskID == nil || d.ChosenHost == nil || d.Family == "" || d.Role == "") {
-		return errors.New("placed decisions require task_id, chosen_host, family and role")
+		return placementInvalid("placed decisions require task_id, chosen_host, family and role")
 	}
-	for _, v := range []string{d.JobID, d.ToolVersion, d.Ranking, d.StateSource, d.Reason, d.Profile, d.Pool, d.AccountKey, d.Family, d.Model, d.PaneID, d.Repo} {
-		if !validText(v, 256) {
-			return errors.New("invalid placement text")
+	for _, f := range []struct{ name, v string }{{"job_id", d.JobID}, {"tool_version", d.ToolVersion}, {"ranking", d.Ranking}, {"state_source", d.StateSource}, {"reason", d.Reason}, {"profile", d.Profile}, {"pool", d.Pool}, {"account_key", d.AccountKey}, {"family", d.Family}, {"model", d.Model}, {"pane_id", d.PaneID}, {"repo", d.Repo}} {
+		if !validText(f.v, 256) {
+			return placementInvalid("%s: not printable text of at most 256 bytes", f.name)
 		}
-		if err := guard.Reject(v); err != nil {
+		if err := guard.Reject(f.v); err != nil {
 			return err
 		}
 	}
 	// Only an opaque account alias is accepted; an email, path or credential
 	// URL has no place in this fleet-readable log.
 	if strings.ContainsAny(d.AccountKey, "@/\\ \t\n") {
-		return errors.New("account_key must be an opaque alias or fingerprint")
+		return placementInvalid("account_key must be an opaque alias or fingerprint")
 	}
-	for _, c := range d.Candidates {
-		if !ValidJobHost(c.Host) || c.Outcome == "" || !validText(c.Outcome, 64) || !validText(c.Reason, 256) || (c.PowerSource != "" && c.PowerSource != "ac" && c.PowerSource != "battery") {
-			return errors.New("invalid placement candidate")
+	for i, c := range d.Candidates {
+		switch {
+		case !ValidJobHost(c.Host):
+			return placementInvalid("candidates[%d].host", i)
+		case c.Outcome == "" || !validText(c.Outcome, 64):
+			return placementInvalid("candidates[%d].outcome", i)
+		case !validText(c.Reason, 256):
+			return placementInvalid("candidates[%d].reason: not printable text of at most 256 bytes", i)
+		case c.PowerSource != "" && c.PowerSource != "ac" && c.PowerSource != "battery":
+			return placementInvalid("candidates[%d].power_source %q", i, c.PowerSource)
 		}
 		if err := guard.Reject(c.Reason); err != nil {
 			return err
 		}
 		for _, n := range []*float64{c.Score, c.SignalAgeS, c.CPUBusyShort, c.CPUBusy5m, c.MemAvailable, c.SwapInMBPS, c.Power} {
 			if n != nil && (math.IsNaN(*n) || math.IsInf(*n, 0)) {
-				return errors.New("invalid placement signal")
+				return placementInvalid("candidates[%d] signal is NaN or Inf", i)
 			}
 		}
 	}
