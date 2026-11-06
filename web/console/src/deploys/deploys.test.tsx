@@ -4,7 +4,7 @@
 
 import { describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
-import { DeploysApp } from "./DeploysApp";
+import { DeploysPage } from "./DeploysPage";
 import type { DeployPendingResponse } from "./deploy";
 
 function fixture(): DeployPendingResponse {
@@ -28,19 +28,20 @@ function fixture(): DeployPendingResponse {
           source: "backfill",
         },
         merged_boundary: "deployed_at",
+        recent: [],
         merged_since: [],
       },
     ],
   };
 }
 
-describe("DeploysApp (#620)", () => {
+describe("DeploysPage (#620)", () => {
   it("renders the page header and the deploy panel with service rows", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(() => Promise.resolve(new Response(JSON.stringify(fixture()), { status: 200 }))),
     );
-    render(<DeploysApp />);
+    render(<DeploysPage />);
     expect(screen.getByRole("heading", { level: 1 }).textContent).toContain("배포");
     await waitFor(() => expect(screen.getByLabelText("배포 상태")).toBeTruthy());
     expect(screen.getByText("handoffkeep")).toBeTruthy();
@@ -50,7 +51,7 @@ describe("DeploysApp (#620)", () => {
 
   it("a failed first load shows the explicit error, not an empty page", async () => {
     vi.stubGlobal("fetch", vi.fn(() => Promise.reject(new Error("boom"))));
-    render(<DeploysApp />);
+    render(<DeploysPage />);
     await waitFor(() => expect(screen.getByText(/불러오지 못했습니다/)).toBeTruthy());
     vi.unstubAllGlobals();
   });
