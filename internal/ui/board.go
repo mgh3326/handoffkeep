@@ -231,6 +231,7 @@ func (h *Handler) boardTasks(w http.ResponseWriter, r *http.Request) {
 		row.WorkBoard = projectWorkBoard(workBoards[task.ID])
 		jobs, err := h.store.ListJobsByTask(r.Context(), task.ID, 2147483647)
 		if err != nil {
+			log.Printf("ui.board_jobs_failed task_id=%d err=%q", task.ID, err)
 			writeJSONError(w, http.StatusInternalServerError, "internal_error")
 			return
 		}
