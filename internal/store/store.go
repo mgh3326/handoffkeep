@@ -1,5 +1,4 @@
 // Package store owns PostgreSQL persistence and validation.
-// Probe for hk 3193: this line is reverted before READY.
 package store
 
 import (
