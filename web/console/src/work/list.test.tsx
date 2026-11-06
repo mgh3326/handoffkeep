@@ -130,3 +130,34 @@ it("arrow keys select rows and Enter opens the record", async () => {
   fireEvent.keyDown(document.activeElement!, { key: "Enter" });
   expect(await screen.findByRole("heading", { name: "#101 Task one" })).toBeTruthy();
 });
+
+it("renders a titled state row with the live job host and metadata", async () => {
+  const row = { ...task, active_job: { role: "worker", model: "model-x", profile: "high", host: "studio-device", harness: "codex", effort: "high" } };
+  vi.stubGlobal("fetch", vi.fn(async (path: string) => path.includes("projects") ? response({ projects: ["a"] }) : response({ tasks: [row], states: [], generated_at: "2026-01-01T02:00:00Z", truncated: false })));
+  history.replaceState(null, "", "/ui/work?project=a&view=active");
+  const { container } = render(<WorkPage />);
+  expect(await screen.findByText("worker · model-x · high · studio-device")).toBeTruthy();
+  expect(screen.getByTitle("Task one")).toBeTruthy();
+  expect(container.querySelector(".work-row-title svg[data-state-shape='developing']")).toBeTruthy();
+  expect(container.querySelector('[data-chip="status"]')?.textContent).toBe("개발 중");
+  expect(container.querySelector('[data-chip="lane"]')?.textContent).toBe("x");
+  expect(container.querySelector('[data-chip="priority"]')?.textContent).toBe("P2");
+  expect(screen.getByText("2h").getAttribute("title")).toContain("2026-01-01");
+});
+
+it("moves selection down and up without opening a record until Enter", async () => {
+  wide = true;
+  const rows = [task, { ...task, id: 102, title: "Task two" }];
+  vi.stubGlobal("fetch", vi.fn(async (path: string) => path.includes("projects") ? response({ projects: ["a"] }) : path.includes("/101") ? response(detail) : response({ tasks: rows, states: [], generated_at: "2026-01-01T02:00:00Z", truncated: false })));
+  history.replaceState(null, "", "/ui/work?project=a&view=active");
+  render(<WorkPage />);
+  await screen.findByText("Task two");
+  fireEvent.keyDown(window, { key: "ArrowDown" });
+  expect(document.activeElement?.id).toBe("work-row-102");
+  fireEvent.keyDown(window, { key: "ArrowDown" });
+  expect(document.activeElement?.id).toBe("work-row-101");
+  expect(new URLSearchParams(location.search).get("task")).toBeNull();
+  fireEvent.keyDown(window, { key: "ArrowUp" });
+  expect(document.activeElement?.id).toBe("work-row-102");
+  expect(document.activeElement?.getAttribute("aria-current")).toBe("true");
+});
