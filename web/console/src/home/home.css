@@ -19,9 +19,9 @@
 .ha-row-title { flex: 1; }
 .ha-line time { flex: none; color: var(--hk-text-secondary); font-size: var(--hk-type-meta); font-weight: var(--hk-weight-normal); }
 .ha-dot { width: var(--hk-space-2); height: var(--hk-space-2); flex: none; border-radius: var(--hk-radius-pill); background: var(--hk-text-primary); }
-.ha-detail { height: 20px; font-size: var(--hk-type-meta); color: var(--hk-text-secondary); }
+.ha-detail { min-height: 20px; font-size: var(--hk-type-meta); color: var(--hk-text-secondary); }
 .ha-summary { flex: 1; }
-.ha-chips { display: flex; flex: 0 1 auto; max-width: 55%; gap: var(--hk-space-1); overflow: hidden; }
+.ha-chips { display: flex; flex: 0 1 auto; flex-wrap: wrap; max-width: 55%; gap: var(--hk-space-1); }
 .ha-chips .hk-chip { flex: none; }
 .ha-item--seen .ha-row { color: var(--hk-text-secondary); }
 .ha-item--seen .ha-line, .ha-item--seen .ha-summary { opacity: .7; }
