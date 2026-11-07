@@ -1,5 +1,5 @@
 {
-  "browser": "156.0.8078.81",
+  "browser": "131.0.6778.33",
   "fixtures": "Fictional data; embedded production templates and committed bundles",
   "views": [
     {
@@ -9,34 +9,7 @@
       "width": 1440,
       "overflow": false,
       "errors": [],
-      "captured_at": "2026-11-07T03:53:01.411Z"
-    },
-    {
-      "file": "command-one-light-1440.png",
-      "url": "/ui/work?view=all",
-      "theme": "light",
-      "width": 1440,
-      "overflow": false,
-      "errors": [],
-      "captured_at": "2026-11-07T03:53:03.036Z"
-    },
-    {
-      "file": "command-one-dark-390.png",
-      "url": "/ui/work?view=all",
-      "theme": "dark",
-      "width": 390,
-      "overflow": false,
-      "errors": [],
-      "captured_at": "2026-11-07T03:53:04.677Z"
-    },
-    {
-      "file": "command-one-light-390.png",
-      "url": "/ui/work?view=all",
-      "theme": "light",
-      "width": 390,
-      "overflow": false,
-      "errors": [],
-      "captured_at": "2026-11-07T03:53:06.249Z"
+      "captured_at": "2026-11-07T04:10:24.853Z"
     },
     {
       "file": "command-three-dark-1440.png",
@@ -45,7 +18,7 @@
       "width": 1440,
       "overflow": false,
       "errors": [],
-      "captured_at": "2026-11-07T03:53:01.805Z"
+      "captured_at": "2026-11-07T04:10:25.564Z"
     },
     {
       "file": "query-autocomplete-dark-1440.png",
@@ -54,7 +27,7 @@
       "width": 1440,
       "overflow": false,
       "errors": [],
-      "captured_at": "2026-11-07T03:53:02.122Z"
+      "captured_at": "2026-11-07T04:10:26.229Z"
     },
     {
       "file": "saved-searches-dark-1440.png",
@@ -63,7 +36,16 @@
       "width": 1440,
       "overflow": false,
       "errors": [],
-      "captured_at": "2026-11-07T03:53:02.471Z"
+      "captured_at": "2026-11-07T04:10:26.958Z"
+    },
+    {
+      "file": "command-one-light-1440.png",
+      "url": "/ui/work?view=all",
+      "theme": "light",
+      "width": 1440,
+      "overflow": false,
+      "errors": [],
+      "captured_at": "2026-11-07T04:10:27.706Z"
     },
     {
       "file": "command-three-light-1440.png",
@@ -72,7 +54,7 @@
       "width": 1440,
       "overflow": false,
       "errors": [],
-      "captured_at": "2026-11-07T03:53:03.440Z"
+      "captured_at": "2026-11-07T04:10:28.414Z"
     },
     {
       "file": "query-autocomplete-light-1440.png",
@@ -81,7 +63,7 @@
       "width": 1440,
       "overflow": false,
       "errors": [],
-      "captured_at": "2026-11-07T03:53:03.749Z"
+      "captured_at": "2026-11-07T04:10:29.044Z"
     },
     {
       "file": "saved-searches-light-1440.png",
@@ -90,7 +72,16 @@
       "width": 1440,
       "overflow": false,
       "errors": [],
-      "captured_at": "2026-11-07T03:53:04.097Z"
+      "captured_at": "2026-11-07T04:10:29.782Z"
+    },
+    {
+      "file": "command-one-dark-390.png",
+      "url": "/ui/work?view=all",
+      "theme": "dark",
+      "width": 390,
+      "overflow": false,
+      "errors": [],
+      "captured_at": "2026-11-07T04:10:30.512Z"
     },
     {
       "file": "command-three-dark-390.png",
@@ -99,7 +90,7 @@
       "width": 390,
       "overflow": false,
       "errors": [],
-      "captured_at": "2026-11-07T03:53:05.065Z"
+      "captured_at": "2026-11-07T04:10:31.233Z"
     },
     {
       "file": "query-autocomplete-dark-390.png",
@@ -108,7 +99,7 @@
       "width": 390,
       "overflow": false,
       "errors": [],
-      "captured_at": "2026-11-07T03:53:05.362Z"
+      "captured_at": "2026-11-07T04:10:31.814Z"
     },
     {
       "file": "saved-searches-dark-390.png",
@@ -117,7 +108,16 @@
       "width": 390,
       "overflow": false,
       "errors": [],
-      "captured_at": "2026-11-07T03:53:05.691Z"
+      "captured_at": "2026-11-07T04:10:32.377Z"
+    },
+    {
+      "file": "command-one-light-390.png",
+      "url": "/ui/work?view=all",
+      "theme": "light",
+      "width": 390,
+      "overflow": false,
+      "errors": [],
+      "captured_at": "2026-11-07T04:10:33.117Z"
     },
     {
       "file": "command-three-light-390.png",
@@ -126,7 +126,7 @@
       "width": 390,
       "overflow": false,
       "errors": [],
-      "captured_at": "2026-11-07T03:53:06.624Z"
+      "captured_at": "2026-11-07T04:10:33.801Z"
     },
     {
       "file": "query-autocomplete-light-390.png",
@@ -135,7 +135,7 @@
       "width": 390,
       "overflow": false,
       "errors": [],
-      "captured_at": "2026-11-07T03:53:06.933Z"
+      "captured_at": "2026-11-07T04:10:34.315Z"
     },
     {
       "file": "saved-searches-light-390.png",
@@ -144,7 +144,7 @@
       "width": 390,
       "overflow": false,
       "errors": [],
-      "captured_at": "2026-11-07T03:53:07.247Z"
+      "captured_at": "2026-11-07T04:10:34.893Z"
     }
   ]
 }
