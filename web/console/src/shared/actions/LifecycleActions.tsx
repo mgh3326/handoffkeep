@@ -78,7 +78,7 @@ function ConfirmAction({ action, target, close, onApplied }: { action: Action; t
     >
       <p>기록 경로: {path}</p>
       {target.state !== "reviewing" && <p>이 작업은 검토 중이 아니므로, 저장하면 검토 단계를 거쳐 한 번에 기록됩니다.</p>}
-      <label>종료 근거 <input value={evidence} onChange={e => setEvidence(e.target.value)} placeholder="https://github.com/…/pull/123" /></label>
+      <label>종료 근거 <input value={evidence} onChange={e => setEvidence(e.target.value)} placeholder="PR 링크" /></label>
       <label>메모 (선택) <textarea value={reason} onChange={e => setReason(e.target.value)} /></label>
     </ActionDialog>;
   }
@@ -95,7 +95,7 @@ function ConfirmAction({ action, target, close, onApplied }: { action: Action; t
       })}
     >
       <p>decide·ops·verify 작업만 완료로 닫을 수 있습니다.</p>
-      <label>결과 링크 <input value={evidence} onChange={e => setEvidence(e.target.value)} placeholder="https://… 또는 hk:doc path/to/doc" /></label>
+      <label>결과 링크 <input value={evidence} onChange={e => setEvidence(e.target.value)} placeholder="결과 링크 또는 hk:doc 키" /></label>
       <label>메모 (선택) <textarea value={reason} onChange={e => setReason(e.target.value)} /></label>
     </ActionDialog>;
   }

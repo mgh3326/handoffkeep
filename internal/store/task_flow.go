@@ -516,7 +516,7 @@ func (s *Store) transitionTaskTx(ctx context.Context, tx pgx.Tx, id int64, in Tr
 	// An old-name transition on a task that is already there changes no state,
 	// but a caller's refs patch (PR, head, report) still lands and is recorded.
 	if action == actNoop && refs == nil {
-		return x, tx.Commit(ctx)
+		return x, nil
 	}
 	if reopen && !(IsSettledState(from) || from == StateIcebox) {
 		return Task{}, ErrTaskConflict
