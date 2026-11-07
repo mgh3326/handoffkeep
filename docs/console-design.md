@@ -155,10 +155,61 @@ A malformed-record warning is a `CollapsedWarning`: `N개 기록 형식 불일�
 missing, the list explains why it cannot be computed. A service with no records
 reads 기록 없음, and a capped scan says so instead of claiming the fleet truth.
 
+## Operator commands
+
+Actions that touch something outside hk are operator commands, not direct
+writes. The console records the intent (`POST /ui/api/tasks/{id}/commands`,
+the same Access, origin, CSRF and idempotency guards as every operator write),
+hk relays exactly one `lane.event` to the owner of the target, and the
+executor reports a receipt (`POST /v1/commands/{id}/receipt`). The console
+shows the ladder 기록됨 → 전달됨 → 접수됨 → 완료 | 실패 | 만료 and never shows
+done before the receipt. A row with a command in flight carries a `지시` chip in
+its meta line; the task record's 운영 명령 section shows every command's ladder
+with its times, and a failure shows its error code in Korean.
+
+The tracer kind is `worker.message` (`{text, intent}` with `intent` `steer` or
+`queue`), offered on a task with an active job as 워커에게 지시: 지금 끼어들기
+records a steer, 현재 작업 끝나고 records a queue. `job.stop`, `task.respawn`
+and `deploy.approve` are in the registry but disabled with 실행기 준비 전 until
+their executors land. `worker.message` expires after 30 minutes.
+
+The relay body is the documented executor contract:
+
+```text
+[hk 명령 #<id> · 지금 끼어들기] <text>
+[hk 명령 #<id> · 현재 턴 뒤] <text>
+```
+
+`event_id` is the command key. An executor that can queue holds a
+`현재 턴 뒤` instruction until the worker's current turn ends; one that cannot
+queue treats it as a steer and reports `queue_unsupported` in its receipt.
+Receipts are `acked`, `done` or `failed` (with `error_code` and an optional
+`note`); they move forward only and a repeated receipt is a no-op. A failure is
+legal straight from 기록됨, so an executor that cannot deliver can say so
+before the relay is confirmed. When a command is superseded or expires before
+dispatch, its undelivered relay row is closed (`delivered_to`
+`cancelled:superseded` / `cancelled:expired`), so the next drain skips it. A
+drain that already fetched the row can still deliver it; that in-flight
+delivery is recorded as a late delivery instead of being hidden, and a delivery
+confirmed after the deadline marks the command 만료 with a `만료 후 전달` note.
+A receipt that arrives after the ladder closed is kept as a late report in the
+timeline (`대체 후 보고` / `만료 후 보고`) and answers 200 rather than being
+refused, and the authenticated API client is recorded as the receipt author.
+Executors poll `GET /v1/commands?executor_lane=<lane>&state=acked` or the CLI
+`handoffkeep commands list|receipt`.
+
+Bearer tokens are fleet node credentials: any authenticated client may read or
+act for any lane, the same trust the relay transport already gives (`POST
+/v1/relay/events` accepts any `owner_lane`). A receipt therefore does not add a
+per-lane grant; it records the authenticated client as the receipt author
+(`executor:<client>`) so the action is attributable. A per-lane authorization
+dimension would be a new fleet policy, not part of this command surface.
+
 ## Task record and document viewer
 
 `/ui/tasks/{id}` renders `TaskRecord`: Closure, Origins, Documents, Changes,
-Jobs, Durations and Events. Work rows, Home rows and decision pages link here.
+Jobs, Durations, Operator commands and Events. Work rows, Home rows and
+decision pages link here.
 
 `/ui/doc/{key}` renders `DocView`: the key, kind and update time, then the
 markdown through a lazy renderer; a payload that cannot be rendered is shown as
@@ -167,10 +218,12 @@ the markdown chunk, so Home and Work never pay for it.
 
 ## Captures
 
-Seven routes — home, work, task, decisions, decision, deploys and document — at
-1440px and 390px in dark and light, 28 PNGs. Each page is one viewport as tall
-as the document, so the fixed tab bar sits at the real bottom edge instead of
-being stitched into the middle by a full-page capture. The filenames encode
+Nine routes have committed PNGs — home, work, task, task commands, instruct
+dialog, decisions, decision, deploys and document — at 1440px and 390px in dark
+and light, 36 PNGs. The harness also defines the inbox and lifecycle dialog
+views; capturing them extends the set. Each page is one viewport as tall as the
+document, so the fixed tab bar sits at the real bottom edge instead of being
+stitched into the middle by a full-page capture. The filenames encode
 page, theme and width; the [manifest](console-shots/capture.json) records the
 browser, URL, overflow check and page errors for every view.
 

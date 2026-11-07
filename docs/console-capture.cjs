@@ -197,7 +197,28 @@ const taskDetail = {
   changes_truncated: false,
   jobs: [{ job_id: 'fixture-job-1', role: 'lead', state: 'running', host: 'Fixture host A', family: 'fixture-family', profile: 'fictional-builder', model: 'fixture-builder-1', harness: 'fixture-cli', effort: 'high', skills: [{ name: 'tdd', calls: 2 }], skills_supported: true, claimed_at: ago(70), spawned_at: ago(71), ready_at: ago(70), ended_at: null, end_reason: null, diff_stat: { files: 3, insertions: 120, deletions: 8 } }],
   jobs_truncated: false,
+  commands: [],
+  commands_truncated: false,
   participants: { task_ref: '101', coverage: 'not_collected', segments: [] },
+};
+
+// One command per ladder state, so a single task page shows the full ladder
+// vocabulary: 기록됨, 전달됨, 접수됨, 완료, 실패, 만료 and 대체됨.
+const commandLadders = [
+  { id: 301, kind: 'worker.message', state: 'recorded', intent: 'steer', text: '테스트 실패 원인부터 확인해 주세요', actor: 'operator:fixture', created_at: ago(2), delivered_at: null, acked_at: null, finished_at: null, expires_at: ahead(0.5) },
+  { id: 302, kind: 'worker.message', state: 'delivered', intent: 'queue', text: '현재 작업이 끝나면 릴리스 노트를 갱신해 주세요', actor: 'operator:fixture', created_at: ago(3), delivered_at: ago(2.9), acked_at: null, finished_at: null, expires_at: ahead(0.4) },
+  { id: 303, kind: 'worker.message', state: 'acked', intent: 'steer', text: '머지 전에 CI 로그를 붙여 주세요', actor: 'operator:fixture', created_at: ago(4), delivered_at: ago(3.9), acked_at: ago(3.8), finished_at: null, expires_at: ahead(0.3) },
+  { id: 304, kind: 'worker.message', state: 'done', intent: 'steer', text: 'P1으로 올리고 진행해 주세요', actor: 'operator:fixture', created_at: ago(6), delivered_at: ago(5.9), acked_at: ago(5.8), finished_at: ago(5.5), expires_at: ago(5.4) },
+  { id: 305, kind: 'worker.message', state: 'failed', intent: 'queue', last_error_code: 'worker_rejected', text: '이번 턴 뒤에 리베이스해 주세요', actor: 'operator:fixture', created_at: ago(8), delivered_at: ago(7.9), acked_at: null, finished_at: ago(7.5), expires_at: ago(7.4) },
+  { id: 306, kind: 'worker.message', state: 'expired', intent: 'steer', text: '배포 기록을 다시 확인해 주세요', actor: 'operator:fixture', created_at: ago(40), delivered_at: null, acked_at: null, finished_at: ago(39.5), expires_at: ago(39.5) },
+  { id: 307, kind: 'worker.message', state: 'superseded', intent: 'steer', text: '첫 번째 지시', actor: 'operator:fixture', created_at: ago(10), delivered_at: ago(9.9), acked_at: null, finished_at: ago(9), expires_at: ago(8.9) },
+];
+
+const taskDetailCommands = {
+  ...taskDetail,
+  task: { ...task101, id: 108, title: '운영 명령 단계 확인', priority: 3, refs: {}, awaiting_decision: false },
+  commands: commandLadders,
+  participants: { task_ref: '108', coverage: 'not_collected', segments: [] },
 };
 
 const taskDetail107 = {
@@ -239,6 +260,7 @@ const fixtureFor = (url) => {
   if (p === '/ui/api/board/tasks') return { generated_at: at, states: ['triage', 'backlog', 'unstarted', 'researching', 'developing', 'reviewing', 'merged', 'deployed', 'completed', 'dropped', 'duplicate', 'icebox'], tasks: workTasks, truncated: false };
   if (p === '/ui/api/board/tasks/101') return taskDetail;
   if (p === '/ui/api/board/tasks/107') return taskDetail107;
+  if (p === '/ui/api/board/tasks/108') return taskDetailCommands;
   if (p === '/ui/api/board/lanes') return lanes;
   const taskMatch = /^\/ui\/api\/board\/tasks\/(\d+)$/.exec(p);
   if (taskMatch) {
@@ -300,6 +322,11 @@ const views = {
     step: async page => { await page.locator('[data-action-task="107"]').hover(); await openMenu(page, 107); },
   },
   task: { url: '/ui/tasks/101', wait: '.work-record h1' },
+  'task-commands': { url: '/ui/tasks/108', wait: '.command-ladder' },
+  'instruct-dialog': {
+    url: '/ui/tasks/108', wait: '.work-record h1',
+    step: async page => { await openAction(page, 108, '워커에게 지시'); await page.getByRole('dialog', { name: '워커에게 지시' }).waitFor(); },
+  },
   'close-merged': {
     url: '/ui/tasks/107', wait: '.work-record h1',
     step: async page => { await openAction(page, 107, '머지됨으로 닫기'); await page.getByRole('dialog', { name: '머지됨으로 닫기' }).waitFor(); },

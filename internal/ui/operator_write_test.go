@@ -12,7 +12,7 @@ import (
 func TestOperatorWriteGuards(t *testing.T) {
 	h := &Handler{csrfKey: []byte("guard-test")}
 	operator := cfaccess.Identity{Email: "operator@example.com"}
-	for _, path := range []string{"/ui/api/decision-requests/resolve", "/ui/api/decision-requests/deny", "/ui/api/tasks/1/priority", "/ui/api/inbox/state", "/ui/api/inbox/undo"} {
+	for _, path := range []string{"/ui/api/decision-requests/resolve", "/ui/api/decision-requests/deny", "/ui/api/tasks/1/priority", "/ui/api/tasks/1/commands", "/ui/api/inbox/state", "/ui/api/inbox/undo"} {
 		t.Run(path, func(t *testing.T) {
 			for _, tc := range []struct {
 				name         string

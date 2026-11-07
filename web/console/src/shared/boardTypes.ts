@@ -102,8 +102,36 @@ export type TaskRelation = {
 
 export type ActiveJob = { role: string; model: string; profile: string; host: string; harness: string | null; effort: string | null };
 
+/** One in-flight operator command on a task row (GET.../board/tasks). Absent
+ * when the task has no recorded, delivered or acked command. */
+export type BoardCommandChip = {
+  id: number;
+  kind: string;
+  state: string;
+  created_at: string;
+};
+
+/** One operator command in the task detail ladder. text/intent are the
+ * worker.message instruction; the executor's error code is shown in Korean. */
+export type BoardCommand = {
+  id: number;
+  kind: string;
+  state: string;
+  intent?: string;
+  text?: string;
+  actor: string;
+  last_error_code?: string;
+  created_at: string;
+  delivered_at?: string | null;
+  acked_at?: string | null;
+  finished_at?: string | null;
+  expires_at: string;
+};
+
 export type BoardTask = {
   active_job?: ActiveJob;
+  /** The newest recorded/delivered/acked operator command, for the row chip. */
+  command?: BoardCommandChip;
   /** Console-safe projection of the durable board and recorded placements.
    * Absent on old servers and when no execution/PR data is recorded. */
   work_board?: BoardWorkBoard;
@@ -225,6 +253,9 @@ export type BoardDetail = {
   origins: WorkOrigin[];
   changes: WorkChange[];
   jobs: WorkJob[];
+  /** Operator commands newest first, with the ladder timestamps. */
+  commands: BoardCommand[];
+  commands_truncated: boolean;
   origins_truncated: boolean;
   changes_truncated: boolean;
   jobs_truncated: boolean;

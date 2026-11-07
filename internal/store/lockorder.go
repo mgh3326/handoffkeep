@@ -141,6 +141,19 @@ package store
 //     safe to retry with the same attempt_id.
 //   - Deploy-service puts take the deploy_services_prefixes advisory lock
 //     before reading or writing registry rows, to serialize prefix claims.
+//   - Operator commands (operator_commands.go): RecordOperatorCommand takes
+//     the level-2 lock first because it supersedes several rows and writes
+//     the task timeline, then reads the task without locking it. The order is
+//     operator_commands rows, then task_events (through the task's KEY SHARE),
+//     then the relay_events row a cancel closes. ExpireOperatorCommands takes
+//     the level-2 lock first and follows the same order. RecordOperatorCommand
+//     never holds a task row lock, so a receipt that locks one
+//     operator_commands row and then takes the task's KEY SHARE for its
+//     task_events insert cannot wait on a task row it needs.
+//     MarkRelayEventDelivered reads its relay row without a lock, then moves
+//     the operator_commands row and writes task_events before it updates the
+//     relay row: the command row is always locked before the relay row, so a
+//     concurrent supersede/expire cancel cannot close a cycle with a delivery.
 //   - Other advisory locks (disposition origin, task comment insert, labels,
 //     Linear board ownership, quota presence) are each the first lock of
 //     their transaction, and no transaction requests one while it holds a

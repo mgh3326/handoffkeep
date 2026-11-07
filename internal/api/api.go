@@ -701,6 +701,8 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("POST /v1/relay/events", s.relayEventsCreate)
 	m.HandleFunc("POST /v1/relay/events/{id}/delivered", s.relayEventDelivered)
 	m.HandleFunc("GET /v1/relay/events", s.relayEventsList)
+	m.HandleFunc("GET /v1/commands", s.commandsList)
+	m.HandleFunc("POST /v1/commands/{id}/receipt", s.commandReceipt)
 	m.HandleFunc("POST /v1/placements", s.placementCreate)
 	m.HandleFunc("GET /v1/placements", s.placementsList)
 	m.HandleFunc("POST /v1/jobs", s.jobClaim)

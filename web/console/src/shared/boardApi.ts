@@ -3,11 +3,13 @@ import type {
   BoardWorkSession,
   BoardComment,
   BoardCommentsResponse,
+  BoardCommand,
   BoardDetail,
   BoardDoc,
   BoardTask,
   BoardTasksResponse,
 } from "./boardTypes";
+import type { CommandIntent, OperatorCommandView } from "./actions/commands";
 import { getJSON } from "./http";
 
 export { HttpError } from "./http";
@@ -81,6 +83,8 @@ export async function fetchTaskDetail(id: number): Promise<BoardDetail> {
     !Array.isArray(data.origins) || !data.origins.every(validOrigin) ||
     !Array.isArray(data.changes) || !data.changes.every(validChange) ||
     !Array.isArray(data.jobs) || !data.jobs.every(validJob) ||
+    !Array.isArray(data.commands) || !data.commands.every(validCommand) ||
+    typeof data.commands_truncated !== "boolean" ||
     typeof data.origins_truncated !== "boolean" || typeof data.changes_truncated !== "boolean" || typeof data.jobs_truncated !== "boolean"
   )
     throw new Error("malformed task detail");
@@ -201,6 +205,7 @@ function validBoardTask(value: unknown): value is BoardTask {
     value.refs !== null &&
     (!("closure" in value.refs) || (record(value.refs.closure) && typeof value.refs.closure.type === "string" && typeof value.refs.closure.evidence === "string")) &&
     (!("work_board" in value) || validWorkBoard(value.work_board)) &&
+    (!("command" in value) || value.command === undefined || validCommandChip(value.command)) &&
     (!("active_job" in value) || (record(value.active_job) && [value.active_job.role, value.active_job.model, value.active_job.profile, value.active_job.host].every(v => typeof v === "string") && [value.active_job.harness, value.active_job.effort].every(v => v === null || typeof v === "string")))
   );
 }
@@ -261,6 +266,57 @@ function validJob(value: unknown): boolean {
   if (!record(value)) return false;
   const diff = value.diff_stat;
   return typeof value.job_id === "string" && typeof value.role === "string" && typeof value.state === "string" && typeof value.host === "string" && typeof value.family === "string" && typeof value.profile === "string" && typeof value.model === "string" && optionalString(value.harness) && optionalString(value.effort) && optionalString(value.claimed_at) && optionalString(value.spawned_at) && optionalString(value.ready_at) && optionalString(value.ended_at) && optionalString(value.end_reason) && (diff === null || (record(diff) && typeof diff.files === "number" && typeof diff.insertions === "number" && typeof diff.deletions === "number")) && (value.skills_supported === null || typeof value.skills_supported === "boolean") && (value.skills === null || (Array.isArray(value.skills) && value.skills.every(s => record(s) && typeof s.name === "string" && typeof s.calls === "number")));
+}
+
+function validCommandChip(value: unknown): boolean {
+  return record(value) && typeof value.id === "number" && Number.isSafeInteger(value.id) && value.id > 0 && typeof value.kind === "string" && typeof value.state === "string" && typeof value.created_at === "string";
+}
+function validCommand(value: unknown): value is BoardCommand {
+  return record(value) && typeof value.id === "number" && Number.isSafeInteger(value.id) && value.id > 0 && typeof value.kind === "string" && typeof value.state === "string" && typeof value.actor === "string" && typeof value.created_at === "string" && typeof value.expires_at === "string" && optionalString(value.intent) && optionalString(value.text) && optionalString(value.last_error_code) && optionalString(value.delivered_at) && optionalString(value.acked_at) && optionalString(value.finished_at);
+}
+
+/** The console's one operator-command write: a worker.message recorded for the
+ * task's active job lane. The server derives the executor lane; the client
+ * only supplies the instruction and intent. */
+export async function sendWorkerMessage(id: number, text: string, intent: CommandIntent, eventKey: string): Promise<OperatorCommandView> {
+  const csrf = readCsrfToken();
+  if (!csrf) throw new Error("missing csrf");
+  let response: Response;
+  try {
+    response = await fetch(`/ui/api/tasks/${id}/commands`, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf },
+      body: JSON.stringify({ kind: "worker.message", text, intent, event_key: eventKey }),
+    });
+  } catch {
+    throw new CommandWriteError(0, "network");
+  }
+  if (response.status === 201) {
+    const data: unknown = await response.json();
+    if (!validCommand(data)) throw new Error("malformed command response");
+    return data;
+  }
+  let code = "";
+  try {
+    const parsed = (await response.json()) as { error?: unknown };
+    code = typeof parsed.error === "string" ? parsed.error : "";
+  } catch {
+    // an auth gate answers with an empty body; the status still says why
+  }
+  throw new CommandWriteError(response.status, code);
+}
+
+/** A refused command write: the HTTP status and the server's error code. */
+export class CommandWriteError extends Error {
+  readonly status: number;
+  readonly code: string;
+  constructor(status: number, code: string) {
+    super(`command write failed: ${status} ${code}`);
+    this.name = "CommandWriteError";
+    this.status = status;
+    this.code = code;
+  }
 }
 
 /** A refused or failed lifecycle write: the HTTP status and the server's

@@ -13,12 +13,15 @@ import { formatAge } from "../decisions/format";
 import { inView, views, type View } from "./views";
 import { TaskRecord } from "./TaskRecord";
 import { TaskActions } from "../shared/actions/TaskActions";
+import { CommandChip } from "../shared/actions/CommandLadder";
+import type { OperatorCommandChip } from "../shared/actions/commands";
 import { TriageUi, useInboxTriage, type TriageRow } from "../shared/actions/InboxTriage";
 import { fetchInboxStates, type InboxStateView } from "../shared/inboxApi";
 import "./work.css";
 const labels: Record<View, string> = { "needs-me": "내 차례", active: "진행 중", backlog: "대기", shipped: "완료", all: "전체" };
 export function WorkPage() {
   const [overrides, setOverrides] = useState<Record<number, number>>({});
+  const [commandOverrides, setCommandOverrides] = useState<Record<number, OperatorCommandChip>>({});
   const [search, setSearch] = useState(() => location.search);
   const [refresh, setRefresh] = useState(0);
   const [projects, setProjects] = useState<string[]>([]);
@@ -43,7 +46,18 @@ export function WorkPage() {
   const { data, failed } = usePoll(load, 60000);
   const reload = useCallback(() => setRefresh(value => value + 1), []);
   const board = data?.project === project ? data.board : null;
-  const tasks = (board?.tasks || []).map(t => ({ ...t, priority: overrides[t.id] ?? t.priority }));
+  const tasks = (board?.tasks || []).map(t => {
+    // The optimistic chip lasts only until a poll taken after the command was
+    // recorded: from then the server owns the state (and omits the chip once
+    // the command closes).
+    let command = t.command;
+    const override = commandOverrides[t.id];
+    if (!command && override) {
+      const snapshot = Date.parse(board?.generatedAt || "");
+      if (!(Number.isFinite(snapshot) && snapshot > Date.parse(override.created_at))) command = override;
+    }
+    return { ...t, priority: overrides[t.id] ?? t.priority, command };
+  });
   const filtered = tasks.filter(t => { const q = query.trim().toLowerCase(); return (!q || t.title.toLowerCase().includes(q) || String(t.id) === q.replace(/^#/, "")) && (!lane || t.lane === lane) && (!kind || t.kind === kind) && (!state || t.state === state) && (!priority || t.priority >= Number(priority)); });
   const choices = (key: "lane" | "kind" | "state") => [...new Set([...tasks.map(t => t[key]), params.get(key) || ""].filter(Boolean))].sort();
   const visible = filtered.filter(t => inView(t, view)).sort((a, b) => CHIP_GROUP_ORDER.indexOf(statusGroup(a)) - CHIP_GROUP_ORDER.indexOf(statusGroup(b)) || (a.priority || Number.POSITIVE_INFINITY) - (b.priority || Number.POSITIVE_INFINITY) || b.updated_at.localeCompare(a.updated_at) || b.id - a.id);
@@ -99,8 +113,8 @@ export function WorkPage() {
         const job = t.active_job;
         return <div className="action-row" data-action-task={t.id} key={t.id}><a id={`work-row-${t.id}`} href={`/ui/tasks/${t.id}`} data-inbox-row data-inbox-key={`task:${t.id}`} data-selected={triage.selected.has(`task:${t.id}`) ? "true" : undefined} aria-current={selected === String(t.id) ? "true" : undefined} onKeyDown={e => { if (wide && e.key === "Enter") { e.preventDefault(); update("task", String(t.id)); } }} onClick={e => { if (wide && !e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey) { e.preventDefault(); update("task", String(t.id)); } }}>
           <span className="work-row-title"><StateIcon state={t.state} /><Mono>#{t.id}</Mono> <span title={t.title}>{t.title}</span></span>
-          <span className="work-row-meta"><Chip kind="status" state={t.state} awaiting_decision={t.awaiting_decision} />{job && <span className="hk-chip work-job" title={[job.role, job.model, job.profile, job.host || "기기 미기록", job.harness, job.effort].filter(Boolean).join(" · ")}>{[job.role, job.model, job.profile, job.host || "기기 미기록"].filter(Boolean).join(" · ")}</span>}<Chip kind="lane" lane={t.lane} /><Chip kind="priority" value={t.priority} urgent={t.priority === 1} /><time dateTime={t.updated_at} title={formatMinuteKST(t.updated_at) || t.updated_at}>{formatAge(board?.generatedAt || "", t.updated_at) || "시각 미상"}</time></span>
-        </a><button type="button" className="inbox-select" aria-pressed={triage.selected.has(`task:${t.id}`)} aria-label={`${t.title} 선택`} onClick={() => triage.toggle(`task:${t.id}`)}>✓</button><TaskActions compact target={t} onPriority={value => setOverrides(old => ({ ...old, [t.id]: value }))} /></div>;
+          <span className="work-row-meta"><Chip kind="status" state={t.state} awaiting_decision={t.awaiting_decision} />{t.command && <CommandChip command={t.command} />}{job && <span className="hk-chip work-job" title={[job.role, job.model, job.profile, job.host || "기기 미기록", job.harness, job.effort].filter(Boolean).join(" · ")}>{[job.role, job.model, job.profile, job.host || "기기 미기록"].filter(Boolean).join(" · ")}</span>}<Chip kind="lane" lane={t.lane} /><Chip kind="priority" value={t.priority} urgent={t.priority === 1} /><time dateTime={t.updated_at} title={formatMinuteKST(t.updated_at) || t.updated_at}>{formatAge(board?.generatedAt || "", t.updated_at) || "시각 미상"}</time></span>
+        </a><button type="button" className="inbox-select" aria-pressed={triage.selected.has(`task:${t.id}`)} aria-label={`${t.title} 선택`} onClick={() => triage.toggle(`task:${t.id}`)}>✓</button><TaskActions compact target={t} onPriority={value => setOverrides(old => ({ ...old, [t.id]: value }))} onCommand={command => setCommandOverrides(old => ({ ...old, [t.id]: { id: command.id, kind: command.kind, state: command.state, created_at: command.created_at } }))} /></div>;
       })}</section>;
     })}</div>
   </section>{wide && selected && /^[1-9][0-9]*$/.test(selected) && <aside className="work-pane"><button onClick={() => update("task", "")}>Close</button><TaskRecord id={Number(selected)} /></aside>}</div>;
