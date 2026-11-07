@@ -364,15 +364,18 @@ func (o operatorTools) taskEvents(ctx context.Context, _ *gmcp.CallToolRequest, 
 }
 
 type changeItem struct {
-	SyncID  int64        `json:"sync_id"`
-	Cursor  string       `json:"cursor"`
-	Kind    string       `json:"kind"`
-	Model   string       `json:"model"`
-	ModelID string       `json:"model_id"`
-	Action  string       `json:"action"`
-	TaskID  *int64       `json:"task_id,omitempty"`
-	Task    *taskSummary `json:"task,omitempty"`
-	At      time.Time    `json:"at"`
+	SyncID  int64  `json:"sync_id"`
+	Cursor  string `json:"cursor"`
+	Kind    string `json:"kind"`
+	Model   string `json:"model"`
+	ModelID string `json:"model_id"`
+	Action  string `json:"action"`
+	TaskID  *int64 `json:"task_id,omitempty"`
+	// TaskCurrent is the task's summary when the feed is read, not the state
+	// at this historical row. A task with several rows in one page repeats the
+	// same current summary on each; task_events is the ordered history.
+	TaskCurrent *taskSummary `json:"task_current,omitempty"`
+	At          time.Time    `json:"at"`
 }
 
 type changesSinceInput struct {
@@ -448,15 +451,23 @@ func (o operatorTools) changesSince(ctx context.Context, _ *gmcp.CallToolRequest
 	if err != nil {
 		var reset *store.SyncReset
 		if errors.As(err, &reset) {
-			minCursor := encodeCursor(mcpCursor{Kind: string(cursorChanges), Sync: reset.MinSyncID})
+			// SyncDelta returns rows with sync_id > after, while MinSyncID is
+			// the oldest retained row itself. Resuming at MinSyncID would skip
+			// that row; resume one before it.
+			resume := reset.MinSyncID
+			if resume > 0 {
+				resume--
+			}
+			resumeCursor := encodeCursor(mcpCursor{Kind: string(cursorChanges), Sync: resume})
 			return jsonResult(map[string]any{
-				"items":       []changeItem{},
-				"next_cursor": minCursor,
-				"min_cursor":  minCursor,
-				"max_cursor":  encodeCursor(mcpCursor{Kind: string(cursorChanges), Sync: meta.MaxSyncID}),
-				"has_more":    false,
-				"reset":       true,
-				"message":     "the cursor predates the server's sync retention; continue from min_cursor and expect a gap",
+				"items":                   []changeItem{},
+				"next_cursor":             resumeCursor,
+				"min_cursor":              resumeCursor,
+				"oldest_retained_sync_id": reset.MinSyncID,
+				"max_cursor":              encodeCursor(mcpCursor{Kind: string(cursorChanges), Sync: meta.MaxSyncID}),
+				"has_more":                false,
+				"reset":                   true,
+				"message":                 "the cursor predates the server's sync retention; continue from min_cursor (the position before the oldest retained row) and expect a gap",
 			})
 		}
 		if errors.Is(err, store.ErrInvalidSync) {
@@ -531,7 +542,7 @@ func (o operatorTools) changesSince(ctx context.Context, _ *gmcp.CallToolRequest
 			id := taskID
 			item.TaskID = &id
 			if summary, ok := byID[taskID]; ok {
-				item.Task = &summary
+				item.TaskCurrent = &summary
 			}
 		}
 		items = append(items, item)

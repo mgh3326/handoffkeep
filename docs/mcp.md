@@ -158,19 +158,22 @@ skip a row between calls.
 `changes_since` is the feed behind `handoffkeep since` and `GET
 /v1/sync/delta`: the hk `sync_log`. Every task create/update/delete, comment,
 decision and document write appends one row with a monotonic `sync_id` when its
-transaction commits. A state transition is a `task_updated` row; the attached
-task summary carries the new state, and `task_events` has the transition
-record. Each item carries its own `cursor`; `next_cursor` is the
-position after the last row returned, so processing a page and sending the
-cursor back visits every change exactly once. An idle call returns no items and
-the same cursor. `max_cursor` is the feed's current end, useful for a watcher
-that wants to start from now instead of replaying the retained history.
+transaction commits. A state transition is a `task_updated` row. Its
+`task_current` summary is the task's state when the feed is read, not the state
+at that historical row: a task with several rows in one page repeats the same
+summary, and `task_events` is the ordered transition history. Each item carries
+its own `cursor`; `next_cursor` is the position after the last row returned, so
+processing a page and sending the cursor back visits every change exactly once.
+An idle call returns no items and the same cursor. `max_cursor` is the feed's
+current end, useful for a watcher that wants to start from now instead of
+replaying the retained history.
 
 The feed keeps `HANDOFFKEEP_SYNC_RETENTION` of history (30 days by default).
-A cursor older than the pruned boundary is answered with `reset:true`,
-`min_cursor` and no items; the client should resume from `min_cursor` and
-accept the gap. A client that must not lose changes should poll more often than
-the retention window.
+A cursor older than the pruned boundary is answered with `reset:true` and no
+items. `min_cursor` is the position immediately before the oldest retained row
+(`oldest_retained_sync_id` names that row), so resuming from it returns every
+retained change; the gap before it is the pruned history. A client that must
+not lose changes should poll more often than the retention window.
 
 ## Intake
 

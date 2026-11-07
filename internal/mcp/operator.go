@@ -73,7 +73,7 @@ func registerOperatorTools(s *gmcp.Server, service api.Service, p principal) {
 	}, o.taskEvents)
 	gmcp.AddTool(s, &gmcp.Tool{
 		Name:        "changes_since",
-		Description: "Read the hk change feed across all tasks: task created/updated/deleted, comment, decision and document rows, oldest first, each with a monotonic sync_id and an opaque per-item cursor. A state transition is a task_updated row whose attached task summary carries the new state. Start with no cursor (or an RFC3339 since) and follow next_cursor; each change appears exactly once. max_cursor is the feed's current end. A cursor older than the server's sync retention answers reset:true with min_cursor.",
+		Description: "Read the hk change feed across all tasks: task created/updated/deleted, comment, decision and document rows, oldest first, each with a monotonic sync_id and an opaque per-item cursor. A state transition is a task_updated row; task_current is the task's summary when the feed is read, not the state at that historical row, so use task_events for the ordered transition history. Start with no cursor (or an RFC3339 since) and follow next_cursor; each change appears exactly once. max_cursor is the feed's current end. A cursor older than the server's sync retention answers reset:true with min_cursor, the position before the oldest retained row.",
 		Annotations: readOnlyAnnotations(),
 	}, o.changesSince)
 	gmcp.AddTool(s, &gmcp.Tool{

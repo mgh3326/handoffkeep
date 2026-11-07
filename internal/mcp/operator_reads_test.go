@@ -8,8 +8,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mgh3326/handoffkeep/internal/api"
 	"github.com/mgh3326/handoffkeep/internal/store"
+	"github.com/mgh3326/handoffkeep/internal/testdb"
 )
 
 func newOperatorServer(t *testing.T, st *store.Store, tokens api.Tokens) *httptest.Server {
@@ -17,6 +19,24 @@ func newOperatorServer(t *testing.T, st *store.Store, tokens api.Tokens) *httpte
 	srv := httptest.NewServer(HTTPHandler(api.Service{Store: st}, tokens, nil))
 	t.Cleanup(srv.Close)
 	return srv
+}
+
+// newOperatorStoreWithPool is newOperatorStore plus a pool on the same
+// throwaway schema, for tests that must age or prune sync_log rows directly.
+func newOperatorStoreWithPool(t *testing.T) (*store.Store, *pgxpool.Pool) {
+	t.Helper()
+	_, url := testdb.Schema(t, "mcp_operator_reset")
+	st, err := store.Open(context.Background(), url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(st.Close)
+	pool, err := pgxpool.New(context.Background(), url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	return st, pool
 }
 
 type taskGetOut struct {
@@ -387,18 +407,24 @@ func TestTaskCommentsAndEventsPaging(t *testing.T) {
 
 type changeFeedOut struct {
 	Items []struct {
-		SyncID int64     `json:"sync_id"`
-		Cursor string    `json:"cursor"`
-		Kind   string    `json:"kind"`
-		Model  string    `json:"model"`
-		Action string    `json:"action"`
-		TaskID *int64    `json:"task_id"`
-		At     time.Time `json:"at"`
+		SyncID      int64  `json:"sync_id"`
+		Cursor      string `json:"cursor"`
+		Kind        string `json:"kind"`
+		Model       string `json:"model"`
+		Action      string `json:"action"`
+		TaskID      *int64 `json:"task_id"`
+		TaskCurrent *struct {
+			ID    int64  `json:"id"`
+			State string `json:"state"`
+		} `json:"task_current"`
+		At time.Time `json:"at"`
 	} `json:"items"`
-	NextCursor string `json:"next_cursor"`
-	MaxCursor  string `json:"max_cursor"`
-	HasMore    bool   `json:"has_more"`
-	Reset      bool   `json:"reset"`
+	NextCursor           string `json:"next_cursor"`
+	MinCursor            string `json:"min_cursor"`
+	MaxCursor            string `json:"max_cursor"`
+	OldestRetainedSyncID int64  `json:"oldest_retained_sync_id"`
+	HasMore              bool   `json:"has_more"`
+	Reset                bool   `json:"reset"`
 }
 
 func TestChangesSinceReturnsEachChangeOnce(t *testing.T) {
@@ -429,6 +455,7 @@ func TestChangesSinceReturnsEachChangeOnce(t *testing.T) {
 	got := []int64{}
 	kinds := map[string]bool{}
 	taskCommentTask := map[int64]bool{}
+	taskCurrentState := map[int64]string{}
 	for page := 0; page < 20; page++ {
 		out := callTool[changeFeedOut](t, session, "changes_since", map[string]any{"limit": 3, "cursor": cursor})
 		if out.Reset {
@@ -440,6 +467,9 @@ func TestChangesSinceReturnsEachChangeOnce(t *testing.T) {
 			}
 			got = append(got, item.SyncID)
 			kinds[item.Kind] = true
+			if item.TaskCurrent != nil {
+				taskCurrentState[item.TaskCurrent.ID] = item.TaskCurrent.State
+			}
 			if item.Kind == "task_commented" {
 				if item.TaskID == nil || *item.TaskID != first.ID {
 					t.Fatalf("comment item task_id=%v want %d", item.TaskID, first.ID)
@@ -473,6 +503,14 @@ func TestChangesSinceReturnsEachChangeOnce(t *testing.T) {
 	if second.ID <= 0 {
 		t.Fatal("second fixture task missing")
 	}
+	// task_current is the state when the feed is read, not the state at each
+	// historical row: both rows for the transitioned task report unstarted.
+	if taskCurrentState[first.ID] != store.StateUnstarted {
+		t.Fatalf("task_current[%d]=%q want %q", first.ID, taskCurrentState[first.ID], store.StateUnstarted)
+	}
+	if taskCurrentState[second.ID] != store.StateBacklog {
+		t.Fatalf("task_current[%d]=%q want %q", second.ID, taskCurrentState[second.ID], store.StateBacklog)
+	}
 
 	// An idle call after the last cursor returns nothing and holds the cursor.
 	idle := callTool[changeFeedOut](t, session, "changes_since", map[string]any{"cursor": cursor})
@@ -484,5 +522,52 @@ func TestChangesSinceReturnsEachChangeOnce(t *testing.T) {
 	}
 	if idle.MaxCursor == "" {
 		t.Fatal("feed did not report max_cursor")
+	}
+}
+
+// TestChangesSinceResetResumesAtOldestRetained pins the reset contract: the
+// resume cursor sits immediately before the oldest retained row, so the next
+// call returns that row instead of skipping it.
+func TestChangesSinceResetResumesAtOldestRetained(t *testing.T) {
+	st, pool := newOperatorStoreWithPool(t)
+	ctx := context.Background()
+	newOperatorTask(t, st, "MCP reset pruned one")
+	newOperatorTask(t, st, "MCP reset pruned two")
+	if _, err := pool.Exec(ctx, `UPDATE sync_log SET at=now()-interval '31 days'`); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := st.PruneSync(ctx, 30*24*time.Hour); err != nil || n < 1 {
+		t.Fatalf("prune=%d err=%v", n, err)
+	}
+	retained := newOperatorTask(t, st, "MCP reset retained")
+
+	tokens := api.Tokens{"tester": "bearer-secret"}
+	srv := newOperatorServer(t, st, tokens)
+	session := connectMCP(t, srv.URL, map[string]string{"Authorization": "Bearer bearer-secret"})
+
+	reset := callTool[changeFeedOut](t, session, "changes_since", map[string]any{})
+	if !reset.Reset || len(reset.Items) != 0 || reset.MinCursor == "" {
+		t.Fatalf("reset answer=%+v", reset)
+	}
+	var resume mcpCursor
+	if err := decodeCursor(reset.MinCursor, cursorChanges, &resume); err != nil {
+		t.Fatalf("min_cursor %q: %v", reset.MinCursor, err)
+	}
+	if reset.OldestRetainedSyncID != resume.Sync+1 {
+		t.Fatalf("oldest_retained_sync_id=%d resume=%d", reset.OldestRetainedSyncID, resume.Sync)
+	}
+	if reset.NextCursor != reset.MinCursor {
+		t.Fatalf("next_cursor=%q min_cursor=%q", reset.NextCursor, reset.MinCursor)
+	}
+
+	next := callTool[changeFeedOut](t, session, "changes_since", map[string]any{"cursor": reset.NextCursor})
+	if next.Reset || len(next.Items) == 0 {
+		t.Fatalf("resume answer=%+v", next)
+	}
+	if next.Items[0].SyncID != reset.OldestRetainedSyncID {
+		t.Fatalf("first resumed sync_id=%d want the oldest retained row %d", next.Items[0].SyncID, reset.OldestRetainedSyncID)
+	}
+	if next.Items[0].TaskCurrent == nil || next.Items[0].TaskCurrent.ID != retained.ID {
+		t.Fatalf("retained item task_current=%+v, want task %d", next.Items[0].TaskCurrent, retained.ID)
 	}
 }
