@@ -2010,7 +2010,11 @@ func serve(args []string, errout io.Writer) error {
 	if e != nil {
 		return e
 	}
-	handler := serverHandler(api.Server{Service: svc, Tokens: tokens, QuotaAccounts: quotaAccounts, HostGrants: hostGrants, UI: uiHandler, LinearWebhook: linear.webhook, LinearDecisions: linear.decisions, ClientRevisions: api.NewClientRevisions()}, monitor)
+	mcpAccess, e := mcpAccessFromEnv()
+	if e != nil {
+		return e
+	}
+	handler := serverHandler(api.Server{Service: svc, Tokens: tokens, QuotaAccounts: quotaAccounts, HostGrants: hostGrants, UI: uiHandler, LinearWebhook: linear.webhook, LinearDecisions: linear.decisions, ClientRevisions: api.NewClientRevisions()}, monitor, mcpAccess)
 	addresses := []string{*listen}
 	if *tail != "" {
 		addresses = append(addresses, *tail)
@@ -2033,11 +2037,34 @@ func serve(args []string, errout io.Writer) error {
 	return runServer(ctx, serveOptions{bindings: bindings, workers: workers, store: st})
 }
 
-func serverHandler(server api.Server, monitor *telemetry.Monitor) http.Handler {
+func serverHandler(server api.Server, monitor *telemetry.Monitor, mcpAccess *cfaccess.Verifier) http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle("/mcp", hkmcp.HTTPHandler(server.Service, server.Tokens))
+	mux.Handle("/mcp", hkmcp.HTTPHandler(server.Service, server.Tokens, mcpAccess))
 	mux.Handle("/", server.Handler())
 	return monitor.Handler(mux)
+}
+
+// mcpAccessFromEnv configures the second credential on /mcp. Incomplete
+// configuration leaves that credential off, the same rule uiFromEnv follows;
+// the bearer token path is unchanged. Configuration values are never logged.
+func mcpAccessFromEnv() (*cfaccess.Verifier, error) {
+	team := strings.TrimSpace(os.Getenv("HANDOFFKEEP_MCP_CF_TEAM_DOMAIN"))
+	aud := strings.TrimSpace(os.Getenv("HANDOFFKEEP_MCP_CF_AUD"))
+	emails := strings.TrimSpace(os.Getenv("HANDOFFKEEP_MCP_ALLOWED_EMAILS"))
+	if team == "" || aud == "" || emails == "" {
+		log.Printf("mcp.access disabled reason=incomplete_config team_domain_set=%t aud_set=%t allowlist_set=%t", team != "", aud != "", emails != "")
+		return nil, nil
+	}
+	access, err := cfaccess.New(cfaccess.Config{
+		TeamDomain:    team,
+		AUD:           aud,
+		AllowedEmails: strings.Split(emails, ","),
+	})
+	if err != nil {
+		return nil, err
+	}
+	log.Printf("mcp.access enabled")
+	return access, nil
 }
 
 // uiFromEnv intentionally treats incomplete Cloudflare Access configuration as

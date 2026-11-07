@@ -43,7 +43,7 @@ func TestServerSentryRoutes(t *testing.T) {
 	handler := serverHandler(api.Server{
 		UI:            &ui.Handler{}, // no Access header: reject before any store call
 		LinearWebhook: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }),
-	}, monitor)
+	}, monitor, nil)
 	want := map[string]int{}
 	for _, request := range []struct{ method, path, name string }{
 		{http.MethodGet, "/v1/tasks/123", "GET /v1/tasks/{id}"},
