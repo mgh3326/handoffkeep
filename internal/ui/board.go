@@ -248,9 +248,18 @@ func (h *Handler) boardProjects(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "internal_error")
 		return
 	}
+	owners, err := h.store.ListProjectOwners(r.Context())
+	if err != nil {
+		log.Printf("ui.board_projects_failed err=%q", err)
+		writeJSONError(w, http.StatusInternalServerError, "internal_error")
+		return
+	}
+	// projects keeps its string array so existing readers are unchanged; owners
+	// is the additive read-only view of which design session owns each project.
 	writeBoardJSON(w, struct {
-		Projects []string `json:"projects"`
-	}{projects})
+		Projects []string             `json:"projects"`
+		Owners   []store.ProjectOwner `json:"owners"`
+	}{projects, owners})
 }
 
 // boardLanes lists the lanes a relane may target: the same known set the

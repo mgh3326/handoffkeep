@@ -100,7 +100,13 @@ handoffkeep tasks relane 42 --to lane-b --note "triage follow-up"
 handoffkeep tasks list --parent-lane lane-a --state needs_decision  # tasks with the awaiting_decision flag
 handoffkeep tasks show 42
 handoffkeep tasks export [--lane L --state S --parent-lane P --limit N]
+handoffkeep tasks owners                      # which design session owns each project
+handoffkeep tasks owner auto_trader --set auto_trader-design --note "<decision doc key>"
 ```
+
+`tasks owners` and `tasks owner` answer which design session owns a project and
+record an operator reassignment; the fallback owner is `operator-desk`. See
+[docs/project-design-sessions.md](docs/project-design-sessions.md).
 
 `add` accepts `--parent-lane`, `--pr`, `--head-sha`, `--report-path`, and
 `--job-id` as durable references. `transition` accepts the same reference flags.

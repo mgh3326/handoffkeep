@@ -235,7 +235,7 @@ const fixtureFor = (url) => {
     return decisionTabs[tab] || decisionTabs.open;
   }
   if (p === '/ui/api/decisions/101') return decisionDetail;
-  if (p === '/ui/api/board/projects') return { projects: ['console-demo'] };
+  if (p === '/ui/api/board/projects') return { projects: ['console-demo'], owners: [{ name: 'console-demo', design_lane: 'console-demo-design', effective_owner: 'console-demo-design' }] };
   if (p === '/ui/api/board/tasks') return { generated_at: at, states: ['triage', 'backlog', 'unstarted', 'researching', 'developing', 'reviewing', 'merged', 'deployed', 'completed', 'dropped', 'duplicate', 'icebox'], tasks: workTasks, truncated: false };
   if (p === '/ui/api/board/tasks/101') return taskDetail;
   if (p === '/ui/api/board/tasks/107') return taskDetail107;

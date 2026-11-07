@@ -3,6 +3,7 @@
 .work-pane { border-left: 1px solid var(--hk-border-subtle); padding-left: var(--hk-space-4); overflow-wrap: anywhere; }
 .work-heading { display: flex; justify-content: space-between; align-items: center; gap: var(--hk-space-3); }
 .work-heading h1 { font-size: var(--hk-type-page); }
+.work-owner { display: flex; align-items: center; gap: var(--hk-space-1); color: var(--hk-text-secondary); font-size: var(--hk-type-meta); white-space: nowrap; }
 .work-tabs { display: flex; overflow-x: auto; margin: var(--hk-space-4) 0; border-bottom: 1px solid var(--hk-border-subtle); }
 .work-tabs button { flex: 1 0 auto; min-height: 44px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--hk-text-secondary); font: inherit; cursor: pointer; }
 .work-tabs button[aria-pressed="true"] { border-bottom-color: var(--hk-text-primary); color: var(--hk-text-primary); }
