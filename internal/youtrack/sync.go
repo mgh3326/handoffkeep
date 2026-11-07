@@ -187,6 +187,7 @@ func (s *Service) pushTask(ctx context.Context, task store.Task, opts SyncOption
 	}
 
 	needsFields := !linked || link.PushedTaskUpdatedAt == nil || task.UpdatedAt.After(*link.PushedTaskUpdatedAt)
+	created := false
 	if !linked {
 		existing, found, err := s.client.FindIssueByHKID(ctx, s.schema.Project, s.schema.HKIDField, task.ID)
 		if err != nil {
@@ -194,17 +195,16 @@ func (s *Service) pushTask(ctx context.Context, task store.Task, opts SyncOption
 		}
 		if found {
 			action.IssueID, action.ReadableID = existing.ID, existing.IDReadable
-			if opts.DryRun {
-				action.Action = "update"
-			} else {
+			if !opts.DryRun {
 				link, err = s.store.LinkYouTrackIssue(ctx, task.ID, existing.ID, existing.IDReadable, s.now())
 				if err != nil {
 					return action, err
 				}
 			}
-			linked = true
+			linked, needsFields = true, true
 		} else {
 			action.Action = "create"
+			created = true
 			if opts.DryRun {
 				action.ReadableID = s.schema.Project + "-?"
 				return action, nil
@@ -232,7 +232,8 @@ func (s *Service) pushTask(ctx context.Context, task store.Task, opts SyncOption
 			}
 			linked = true
 		}
-	} else if needsFields {
+	}
+	if linked && needsFields && !created {
 		action.Action = "update"
 		if !opts.DryRun {
 			fields, err := s.issueFields(ctx, task, priority, lane)
@@ -243,7 +244,7 @@ func (s *Service) pushTask(ctx context.Context, task store.Task, opts SyncOption
 				return action, err
 			}
 		}
-	} else {
+	} else if !linked {
 		action.Action = "unchanged"
 	}
 	if action.Action == "" {
