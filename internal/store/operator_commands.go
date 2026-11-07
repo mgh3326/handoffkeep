@@ -533,6 +533,13 @@ func markOperatorCommandsDeliveredTx(ctx context.Context, tx pgx.Tx, lane, event
 // expired and records each in its task timeline. It is called before the
 // console and executor lists read, so a stale command never renders as open.
 func (s *Store) ExpireOperatorCommands(ctx context.Context) (int, error) {
+	// Polls call this before every read. The no-op path takes no lock and no
+	// transaction, so an executor polling a lane never queues behind the
+	// task-mutation lock for nothing.
+	var due bool
+	if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM operator_commands WHERE state IN ('recorded','delivered','acked') AND expires_at < now())`).Scan(&due); err != nil || !due {
+		return 0, err
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return 0, err
