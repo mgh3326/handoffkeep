@@ -268,6 +268,80 @@ func TestOperatorCommandRefusals(t *testing.T) {
 	}
 }
 
+func TestOperatorCommandFailureBeforeDelivery(t *testing.T) {
+	st := schemaStore(t, "opcmd_earlyfail")
+	task := operatorCommandFixture(t, st, "opcmd-earlyfail-lane", "opcmd-earlyfail-job")
+	ctx := t.Context()
+	command := recordWorkerMessage(t, st, task.ID, "opcmd-earlyfail-key", "지시", OperatorCommandIntentSteer)
+	failed, err := st.RecordOperatorCommandReceipt(ctx, command.ID, OperatorCommandReceiptInput{
+		State: OperatorCommandStateFailed, ErrorCode: "executor_unavailable", By: "node-a",
+	})
+	if err != nil || failed.State != OperatorCommandStateFailed || failed.DeliveredAt != nil || failed.FinishedAt == nil {
+		t.Fatalf("early failure: %+v %v", failed, err)
+	}
+	var deliveredTo string
+	if err := st.pool.QueryRow(ctx, `SELECT delivered_to FROM relay_events WHERE owner_lane=$1 AND event_id=$2`, "opcmd-earlyfail-lane", "opcmd-earlyfail-key").Scan(&deliveredTo); err != nil || deliveredTo != "cancelled:failed" {
+		t.Fatalf("failed relay: %q %v", deliveredTo, err)
+	}
+	if undelivered, err := st.ListRelayEvents(ctx, "opcmd-earlyfail-lane", true, 0); err != nil || len(undelivered) != 0 {
+		t.Fatalf("undelivered after failure: %+v %v", undelivered, err)
+	}
+	var note string
+	var auto bool
+	if err := st.pool.QueryRow(ctx, `SELECT note, auto FROM task_events WHERE task_id=$1 AND source_ref=$2`, task.ID, "opcmd-earlyfail-key:failed").Scan(&note, &auto); err != nil || !strings.Contains(note, "오류 코드: executor_unavailable") || auto {
+		t.Fatalf("failure event: note=%q auto=%v err=%v", note, auto, err)
+	}
+}
+
+func TestOperatorCommandSystemEventsDoNotMoveActivity(t *testing.T) {
+	st := schemaStore(t, "opcmd_auto")
+	lane, job := "opcmd-auto-lane", "opcmd-auto-job"
+	task := operatorCommandFixture(t, st, lane, job)
+	ctx := t.Context()
+	command := recordWorkerMessage(t, st, task.ID, "opcmd-auto-key", "지시", OperatorCommandIntentSteer)
+	events, err := st.ListRelayEvents(ctx, lane, true, 0)
+	if err != nil || len(events) != 1 {
+		t.Fatalf("relay: %+v %v", events, err)
+	}
+	if _, err = st.MarkRelayEventDelivered(ctx, events[0].ID, "example-host", "pane-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = st.RecordOperatorCommandReceipt(ctx, command.ID, OperatorCommandReceiptInput{State: OperatorCommandStateAcked, By: "node-a"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = st.RecordOperatorCommandReceipt(ctx, command.ID, OperatorCommandReceiptInput{State: OperatorCommandStateDone, By: "node-a"}); err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	rows, err := st.pool.Query(ctx, `SELECT source_ref, auto FROM task_events WHERE task_id=$1 AND source='operator-command'`, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var ref string
+		var auto bool
+		if err = rows.Scan(&ref, &auto); err != nil {
+			t.Fatal(err)
+		}
+		got[ref] = auto
+	}
+	want := map[string]bool{
+		"opcmd-auto-key:recorded":  false,
+		"opcmd-auto-key:delivered": true,
+		"opcmd-auto-key:acked":     false,
+		"opcmd-auto-key:done":      false,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("events: %v", got)
+	}
+	for ref, auto := range want {
+		if value, ok := got[ref]; !ok || value != auto {
+			t.Fatalf("event %s auto=%v want %v (all %v)", ref, value, auto, got)
+		}
+	}
+}
+
 func TestOperatorCommandReplaySurvivesJobEnd(t *testing.T) {
 	st := schemaStore(t, "opcmd_replay")
 	lane, job := "opcmd-replay-lane", "opcmd-replay-job"

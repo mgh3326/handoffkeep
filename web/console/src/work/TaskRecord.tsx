@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { fetchTaskDetail, fetchTaskComments, HttpError } from "../shared/boardApi";
+import { usePoll } from "../shared/usePoll";
 import type { BoardComment, BoardDetail, BoardEvent } from "../shared/boardTypes";
 import { stateLabel } from "../shared/states";
 import { formatMinuteKST } from "../shared/time";
@@ -30,25 +31,41 @@ function eventText(event: BoardEvent): string {
   const kind = labels[event.kind || "transition"] || "기록";
   return [kind, stateChange, event.note].filter(Boolean).join(" · ");
 }
+type DetailLoad = { detail: BoardDetail } | { missing: true; id: number };
 export function TaskRecord({ id }: { id: number }) {
   const [comments, setComments] = useState<BoardComment[]>([]);
   const [commentsError, setCommentsError] = useState(false);
-  const [data, setData] = useState<BoardDetail | null>(null);
   const [commands, setCommands] = useState<OperatorCommandView[]>([]);
-  const [error, setError] = useState<number | null>(null);
+  const [priorityOverride, setPriorityOverride] = useState<number | null>(null);
   const [attempt, setAttempt] = useState(0);
-  useEffect(() => {
-    let active = true;
-    setData(null); setError(null); setComments([]); setCommentsError(false); setCommands([]);
-    void fetchTaskDetail(id).then(value => { if (active) { setData(value); setCommands(value.commands); void fetchTaskComments(id).then(result => { if (active) setComments(result.comments); }).catch(() => { if (active) setCommentsError(true); }); } }).catch((e: unknown) => { if (active) setError(e instanceof HttpError ? e.status : 500); });
-    return () => { active = false; };
+  const load = useCallback(async (): Promise<DetailLoad> => {
+    try {
+      return { detail: await fetchTaskDetail(id) };
+    } catch (e) {
+      if (e instanceof HttpError && e.status === 404) return { missing: true, id };
+      throw e;
+    }
   }, [id, attempt]);
-  if (error === 404) return <p>#{id} 없음</p>;
-  if (error !== null) return <p role="alert">불러오지 못함 <button onClick={() => setAttempt(n => n + 1)}>다시 시도</button></p>;
-  if (!data) return <p role="status">Loading…</p>;
-  const { task, origins, documents, changes, jobs } = data;
+  // The detail polls so an executor's receipt advances the command ladder
+  // without a reload. Retry restarts the loop through attempt.
+  const { data: loaded, failed } = usePoll(load, 15000);
+  const missing = !!loaded && "missing" in loaded && loaded.id === id;
+  const data = loaded && "detail" in loaded && loaded.detail.task.id === id ? loaded.detail : null;
+  useEffect(() => { setCommands([]); setPriorityOverride(null); setComments([]); setCommentsError(false); }, [id]);
+  useEffect(() => { if (data) setCommands(data.commands); }, [data]);
+  const loadedOnce = data !== null;
+  useEffect(() => {
+    if (!loadedOnce) return;
+    let active = true;
+    void fetchTaskComments(id).then(result => { if (active) setComments(result.comments); }).catch(() => { if (active) setCommentsError(true); });
+    return () => { active = false; };
+  }, [id, loadedOnce]);
+  if (missing) return <p>#{id} 없음</p>;
+  if (!data) return failed ? <p role="alert">불러오지 못함 <button onClick={() => setAttempt(n => n + 1)}>다시 시도</button></p> : <p role="status">Loading…</p>;
+  const { task: loadedTask, origins, documents, changes, jobs } = data;
+  const task = priorityOverride === null ? loadedTask : { ...loadedTask, priority: priorityOverride };
   return <article className="work-record">
-    <header data-action-task={task.id}><TaskActions target={task} onPriority={priority => setData(old => old ? { ...old, task: { ...old.task, priority } } : old)} onCommand={command => setCommands(old => [command, ...old])} /><h1>#{task.id} {task.title}</h1><p>{stateLabel(task.state)} · {task.project || "—"} · {task.lane} · P{task.priority} · {task.kind}</p></header>
+    <header data-action-task={task.id}><TaskActions target={task} onPriority={priority => setPriorityOverride(priority)} onCommand={command => setCommands(old => [command, ...old])} /><h1>#{task.id} {task.title}</h1><p>{stateLabel(task.state)} · {task.project || "—"} · {task.lane} · P{task.priority} · {task.kind}</p></header>
     <Section title="종료 근거">{task.refs.closure ? <p>{task.refs.closure.type} · {task.refs.closure.evidence}</p> : ["merged", "deployed", "completed", "dropped", "duplicate", "canceled"].includes(task.state) ? <p>종결 증거 없음</p> : <p>기록 없음</p>}</Section>
     <Section title="출처" truncated={data.origins_truncated}>{origins.length ? origins.map((o, i) => <p key={i}>{o.provider} · {o.namespace} · {o.url ? <a href={o.url}>{o.display_ref || o.url}</a> : o.display_ref || "—"}</p>) : <p>기록 없음</p>}</Section>
     <Section title="문서" truncated={data.documents_truncated}>{documents.length ? documents.map(d => <p key={d.key}><a href={`/ui/doc/${d.key.split("/").map(encodeURIComponent).join("/")}`}>{d.key}</a> · {d.kind} · {d.origin_class || "미분류"}</p>) : <p>기록 없음</p>}</Section>

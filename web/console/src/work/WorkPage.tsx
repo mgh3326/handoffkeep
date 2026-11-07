@@ -41,7 +41,18 @@ export function WorkPage() {
   const load = useCallback(async () => ({ project, board: project ? await fetchBoardTasks(project) : null }), [project]);
   const { data, failed } = usePoll(load, 60000);
   const board = data?.project === project ? data.board : null;
-  const tasks = (board?.tasks || []).map(t => ({ ...t, priority: overrides[t.id] ?? t.priority, command: commandOverrides[t.id] ?? t.command }));
+  const tasks = (board?.tasks || []).map(t => {
+    // The optimistic chip lasts only until a poll taken after the command was
+    // recorded: from then the server owns the state (and omits the chip once
+    // the command closes).
+    let command = t.command;
+    const override = commandOverrides[t.id];
+    if (!command && override) {
+      const snapshot = Date.parse(board?.generatedAt || "");
+      if (!(Number.isFinite(snapshot) && snapshot > Date.parse(override.created_at))) command = override;
+    }
+    return { ...t, priority: overrides[t.id] ?? t.priority, command };
+  });
   const filtered = tasks.filter(t => { const q = query.trim().toLowerCase(); return (!q || t.title.toLowerCase().includes(q) || String(t.id) === q.replace(/^#/, "")) && (!lane || t.lane === lane) && (!kind || t.kind === kind) && (!state || t.state === state) && (!priority || t.priority >= Number(priority)); });
   const choices = (key: "lane" | "kind" | "state") => [...new Set([...tasks.map(t => t[key]), params.get(key) || ""].filter(Boolean))].sort();
   const visible = filtered.filter(t => inView(t, view)).sort((a, b) => CHIP_GROUP_ORDER.indexOf(statusGroup(a)) - CHIP_GROUP_ORDER.indexOf(statusGroup(b)) || (a.priority || Number.POSITIVE_INFINITY) - (b.priority || Number.POSITIVE_INFINITY) || b.updated_at.localeCompare(a.updated_at) || b.id - a.id);

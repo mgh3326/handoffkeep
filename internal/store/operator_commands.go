@@ -304,7 +304,10 @@ type operatorCommandEventInput struct {
 	// or expired); the command keeps its terminal state.
 	Prefix string
 	By     string
-	At     time.Time
+	// Auto keeps a system transition out of the task's activity clock: an
+	// expiry nobody acted on must not make the task look freshly touched.
+	Auto bool
+	At   time.Time
 }
 
 // appendOperatorCommandEvent writes one command transition into the task
@@ -328,7 +331,7 @@ func appendOperatorCommandEvent(ctx context.Context, tx pgx.Tx, in operatorComma
 	_, _, err = insertEvent(ctx, tx, taskEventInput{
 		TaskID: *in.Command.TaskID, Kind: "metadata", From: task.State, To: task.State, By: by,
 		Note: in.Prefix + operatorCommandStateNote(in.Command, in.Payload, in.State, in.ErrorCode, in.Note), Refs: task.Refs, At: in.At,
-		Source: "operator-command", SourceRef: in.Command.CommandKey + ":" + in.State,
+		Source: "operator-command", SourceRef: in.Command.CommandKey + ":" + in.State, Auto: in.Auto,
 	})
 	return err
 }
@@ -450,7 +453,7 @@ func (s *Store) RecordOperatorCommand(ctx context.Context, in OperatorCommandInp
 		return out, err
 	}
 	for _, old := range superseded {
-		if err = appendOperatorCommandEvent(ctx, tx, operatorCommandEventInput{Command: old, Payload: payload, State: OperatorCommandStateSuperseded, By: "system", At: now}); err != nil {
+		if err = appendOperatorCommandEvent(ctx, tx, operatorCommandEventInput{Command: old, Payload: payload, State: OperatorCommandStateSuperseded, By: "system", Auto: true, At: now}); err != nil {
 			return out, err
 		}
 		// The replacement supersedes an instruction the worker has not seen:
@@ -469,7 +472,9 @@ func (s *Store) RecordOperatorCommand(ctx context.Context, in OperatorCommandInp
 }
 
 // RecordOperatorCommandReceipt applies an executor's ack/done/failed report.
-// Transitions move forward only and a repeated receipt is a no-op.
+// Transitions move forward only and a repeated receipt is a no-op; a failure
+// is legal from recorded, and a receipt for a superseded/expired command is
+// kept as a late report in the timeline without reopening the ladder.
 func (s *Store) RecordOperatorCommandReceipt(ctx context.Context, id int64, in OperatorCommandReceiptInput) (OperatorCommand, error) {
 	var out OperatorCommand
 	if id < 1 {
@@ -540,7 +545,7 @@ func (s *Store) RecordOperatorCommandReceipt(ctx context.Context, id int64, in O
 			return out, err
 		}
 		out.State, out.FinishedAt = OperatorCommandStateExpired, &now
-		if err = appendOperatorCommandEvent(ctx, tx, operatorCommandEventInput{Command: out, State: OperatorCommandStateExpired, By: "system", At: now}); err != nil {
+		if err = appendOperatorCommandEvent(ctx, tx, operatorCommandEventInput{Command: out, State: OperatorCommandStateExpired, By: "system", Auto: true, At: now}); err != nil {
 			return out, err
 		}
 		if err = cancelOperatorCommandRelayTx(ctx, tx, out.ExecutorLane, out.CommandKey, OperatorCommandStateExpired, now); err != nil {
@@ -551,13 +556,16 @@ func (s *Store) RecordOperatorCommandReceipt(ctx context.Context, id int64, in O
 		}
 		return out, ErrOperatorCommandExpired
 	}
-	allowed := (in.State == OperatorCommandStateAcked && out.State != OperatorCommandStateAcked) ||
-		((in.State == OperatorCommandStateDone || in.State == OperatorCommandStateFailed) && out.State != OperatorCommandStateRecorded)
+	allowed := (in.State == OperatorCommandStateAcked && (out.State == OperatorCommandStateRecorded || out.State == OperatorCommandStateDelivered)) ||
+		(in.State == OperatorCommandStateDone && (out.State == OperatorCommandStateDelivered || out.State == OperatorCommandStateAcked)) ||
+		// An executor that cannot deliver reports the failure before the relay
+		// is confirmed; recorded is a legal start for a failed receipt.
+		(in.State == OperatorCommandStateFailed && operatorCommandOpenStates[out.State])
 	if !allowed {
 		return out, fmt.Errorf("%w: %s cannot become %s", ErrOperatorCommandState, out.State, in.State)
 	}
 	var deliveredAt, ackedAt, finishedAt *time.Time
-	if out.DeliveredAt == nil {
+	if out.DeliveredAt == nil && in.State == OperatorCommandStateAcked {
 		deliveredAt = &now
 	}
 	if in.State == OperatorCommandStateAcked {
@@ -574,6 +582,14 @@ func (s *Store) RecordOperatorCommandReceipt(ctx context.Context, id int64, in O
 		Command: out, State: in.State, ErrorCode: in.ErrorCode, Note: in.Note, By: "executor:" + by, At: now,
 	}); err != nil {
 		return out, err
+	}
+	// A failure can arrive before delivery (executor_unavailable,
+	// queue_unsupported); close the undelivered relay so it cannot reach the
+	// worker after the executor already gave up.
+	if in.State == OperatorCommandStateFailed || in.State == OperatorCommandStateDone {
+		if err = cancelOperatorCommandRelayTx(ctx, tx, out.ExecutorLane, out.CommandKey, in.State, now); err != nil {
+			return out, err
+		}
 	}
 	return out, tx.Commit(ctx)
 }
@@ -609,7 +625,7 @@ func markOperatorCommandsDeliveredTx(ctx context.Context, tx pgx.Tx, lane, event
 		return err
 	}
 	for _, c := range delivered {
-		if err = appendOperatorCommandEvent(ctx, tx, operatorCommandEventInput{Command: c, State: OperatorCommandStateDelivered, By: "system", At: at}); err != nil {
+		if err = appendOperatorCommandEvent(ctx, tx, operatorCommandEventInput{Command: c, State: OperatorCommandStateDelivered, By: "system", Auto: true, At: at}); err != nil {
 			return err
 		}
 	}
@@ -656,7 +672,7 @@ func (s *Store) ExpireOperatorCommands(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	for _, c := range expired {
-		if err = appendOperatorCommandEvent(ctx, tx, operatorCommandEventInput{Command: c, State: OperatorCommandStateExpired, By: "system", At: now}); err != nil {
+		if err = appendOperatorCommandEvent(ctx, tx, operatorCommandEventInput{Command: c, State: OperatorCommandStateExpired, By: "system", Auto: true, At: now}); err != nil {
 			return 0, err
 		}
 		// An undelivered instruction past its deadline must not reach the worker.
