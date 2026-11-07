@@ -35,10 +35,10 @@ func (o operatorTools) dotsInbox(ctx context.Context, _ *gmcp.CallToolRequest, i
 		return nil, nil, err
 	}
 	type entry struct {
-		Task          store.Task          `json:"task"`
-		Body          string              `json:"body"`
-		RequesterLane string              `json:"requester_lane"`
-		Replies       []store.TaskComment `json:"replies"`
+		Task          store.Task        `json:"task"`
+		Body          string            `json:"body"`
+		RequesterLane string            `json:"requester_lane"`
+		Replies       []store.DotsReply `json:"replies"`
 	}
 	items := make([]entry, 0, len(tasks))
 	for _, task := range tasks {
@@ -49,18 +49,9 @@ func (o operatorTools) dotsInbox(ctx context.Context, _ *gmcp.CallToolRequest, i
 		if !found {
 			return nil, nil, errors.New("dots request body not found")
 		}
-		comments := []store.TaskComment{}
-		var after int64
-		for {
-			page, err := o.service.ListTaskComments(ctx, task.ID, after, store.TaskCommentListMax)
-			if err != nil {
-				return nil, nil, err
-			}
-			comments = append(comments, page...)
-			if len(page) < store.TaskCommentListMax {
-				break
-			}
-			after = page[len(page)-1].ID
+		comments, err := o.service.Store.ListDotsReplies(ctx, task.ID)
+		if err != nil {
+			return nil, nil, err
 		}
 		items = append(items, entry{Task: task, Body: doc.Body, RequesterLane: task.ParentLane, Replies: comments})
 	}

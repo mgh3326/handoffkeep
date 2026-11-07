@@ -161,6 +161,32 @@ type DotsReplyResult struct {
 	Duplicate   bool   `json:"duplicate"`
 }
 
+// DotsReply is an attributed reply with its structured kind.
+type DotsReply struct {
+	TaskComment
+	Kind    string `json:"kind"`
+	Channel string `json:"channel"`
+}
+
+// ListDotsReplies returns recorded replies in comment order.
+func (s *Store) ListDotsReplies(ctx context.Context, taskID int64) ([]DotsReply, error) {
+	rows, err := s.pool.Query(ctx, `SELECT c.id,c.task_id,c.body,c.author,c.created_at,e.from_value FROM task_comments c JOIN task_events e ON e.task_id=c.task_id AND e.source='dots-hk-chatgpt' AND e.field='dots_reply' AND e.to_value=c.id::text WHERE c.task_id=$1 ORDER BY c.id`, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	replies := []DotsReply{}
+	for rows.Next() {
+		var reply DotsReply
+		if err := rows.Scan(&reply.ID, &reply.TaskID, &reply.Body, &reply.Author, &reply.CreatedAt, &reply.Kind); err != nil {
+			return nil, err
+		}
+		reply.Channel = "chatgpt"
+		replies = append(replies, reply)
+	}
+	return replies, rows.Err()
+}
+
 // ReplyDots writes the reply, its state change, and its recorded outputs together.
 func (s *Store) ReplyDots(ctx context.Context, actor, channel string, in DotsReplyInput) (DotsReplyResult, error) {
 	if in.TaskID < 1 || !validText(actor, 128) || actor == "" || channel != "chatgpt" || !validSourceRef(in.IdempotencyKey) || (in.AskOperator && in.Kind != "QUESTION") {
@@ -219,7 +245,8 @@ func (s *Store) ReplyDots(ctx context.Context, actor, channel string, in DotsRep
 		return DotsReplyResult{}, err
 	}
 	now := time.Now().UTC()
-	if _, err = tx.Exec(ctx, `INSERT INTO task_comments(task_id,body,author,created_at) VALUES($1,$2,$3,$4)`, in.TaskID, in.Body, actor, now); err != nil {
+	var commentRowID int64
+	if err = tx.QueryRow(ctx, `INSERT INTO task_comments(task_id,body,author,created_at) VALUES($1,$2,$3,$4) RETURNING id`, in.TaskID, in.Body, actor, now).Scan(&commentRowID); err != nil {
 		return DotsReplyResult{}, err
 	}
 	var docKey string
@@ -251,7 +278,7 @@ func (s *Store) ReplyDots(ctx context.Context, actor, channel string, in DotsRep
 	if err != nil {
 		return DotsReplyResult{}, err
 	}
-	if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: task.ID, Kind: "source_event", By: actor, Note: payload, At: now, Source: "dots-hk-chatgpt", SourceRef: commentID}); err != nil {
+	if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: task.ID, Kind: "source_event", By: actor, Note: payload, At: now, Source: "dots-hk-chatgpt", SourceRef: commentID, Field: "dots_reply", FromValue: in.Kind, ToValue: strconv.FormatInt(commentRowID, 10)}); err != nil {
 		return DotsReplyResult{}, err
 	}
 	if err = tx.Commit(ctx); err != nil {

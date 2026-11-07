@@ -53,6 +53,10 @@ func TestDotsReplyAtomicAndIdempotent(t *testing.T) {
 	if err != nil || len(comments) != 1 || comments[0].Author != "operator:test@example.com" {
 		t.Fatalf("comments=%v err=%v", comments, err)
 	}
+	replies, err := s.ListDotsReplies(ctx, task.ID)
+	if err != nil || len(replies) != 1 || replies[0].Kind != "RESULT" || replies[0].Channel != "chatgpt" || replies[0].Body != in.Body {
+		t.Fatalf("replies=%+v err=%v", replies, err)
+	}
 	results, err = s.ListDotsResults(ctx, task.ID, "", 10)
 	if err != nil || len(results) != 1 || results[0].Source != "hk" || results[0].RoutedLane != "requester" || !strings.HasPrefix(results[0].DocumentKey, "dots/results/hk-") {
 		t.Fatalf("results=%v err=%v", results, err)
