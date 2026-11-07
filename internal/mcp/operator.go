@@ -234,7 +234,10 @@ func (o operatorTools) taskSearch(ctx context.Context, _ *gmcp.CallToolRequest, 
 		}
 		hits = append(hits, hit{task: task, snippet: result.Snippet})
 	}
-	truncated := searchTruncated && len(hits) < limit
+	// A cut search window stays truncated even when the filtered page is
+	// full: matches may exist beyond the window, so a full filtered page is
+	// not proof that the result is complete.
+	truncated := searchTruncated
 	if len(hits) > limit {
 		hits = hits[:limit]
 		truncated = true

@@ -398,6 +398,46 @@ func TestTaskSearchFiltersBeforeLimit(t *testing.T) {
 	}
 }
 
+func TestTaskSearchCutWindowStaysTruncated(t *testing.T) {
+	st := newOperatorStore(t)
+	ctx := context.Background()
+	if _, err := st.AddTaskProject(ctx, "mcp-project", "tester"); err != nil {
+		t.Fatal(err)
+	}
+	project := "mcp-project"
+	create := func(title string) int64 {
+		task, err := st.CreateTask(ctx, store.Task{
+			Lane: "mcp-window-lane", Title: title, Kind: "implement", Project: &project, CreatedBy: "tester",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return task.ID
+	}
+	// The oldest hit falls outside the 50-row window; the target stays inside
+	// it, so filtering leaves exactly the caller's limit while the window is
+	// still cut.
+	create("window cutoff noise oldest")
+	target := create("window cutoff target")
+	if _, err := st.TransitionTask(ctx, target, store.StateUnstarted, "tester", "", nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 49; i++ {
+		create(fmt.Sprintf("window cutoff noise %d", i))
+	}
+	tokens := api.Tokens{"tester": "bearer-secret"}
+	srv := httptest.NewServer(HTTPHandler(api.Service{Store: st}, tokens, nil))
+	defer srv.Close()
+	session := connectMCP(t, srv.URL, map[string]string{"Authorization": "Bearer bearer-secret"})
+	out := callTool[searchOut](t, session, "task_search", map[string]any{"query": "window cutoff", "state": "unstarted", "limit": 1})
+	if len(out.Results) != 1 || out.Results[0].ID != target {
+		t.Fatalf("filtered search=%+v", out.Results)
+	}
+	if !out.Truncated {
+		t.Fatal("a cut search window with a full filtered page was reported as complete")
+	}
+}
+
 func TestAccessIdentityWritesRecordOperator(t *testing.T) {
 	st := newOperatorStore(t)
 	ctx := context.Background()
