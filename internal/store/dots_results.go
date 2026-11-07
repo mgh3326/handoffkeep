@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -41,6 +42,7 @@ var (
 
 // DotsResult is one dots_results row. Unknown values are absent.
 type DotsResult struct {
+	Source          string     `json:"source"`
 	ID              int64      `json:"id"`
 	DocumentKey     string     `json:"document_key"`
 	CommentID       string     `json:"comment_id"`
@@ -70,7 +72,14 @@ type DotsAdoptionInput struct {
 const dotsResultColumns = `id,document_key,comment_id,issue_uuid,issue_identifier,kind,COALESCE(verdict,''),artefact_sha256,task_id,routed_lane,adoption_state,COALESCE(adopted_ref,''),COALESCE(adopted_by,''),adopted_at,superseded_by,created_at,updated_at`
 
 func scanDotsResult(row pgx.Row, x *DotsResult) error {
-	return row.Scan(&x.ID, &x.DocumentKey, &x.CommentID, &x.IssueUUID, &x.IssueIdentifier, &x.Kind, &x.Verdict, &x.ArtefactSHA256, &x.TaskID, &x.RoutedLane, &x.AdoptionState, &x.AdoptedRef, &x.AdoptedBy, &x.AdoptedAt, &x.SupersededBy, &x.CreatedAt, &x.UpdatedAt)
+	if err := row.Scan(&x.ID, &x.DocumentKey, &x.CommentID, &x.IssueUUID, &x.IssueIdentifier, &x.Kind, &x.Verdict, &x.ArtefactSHA256, &x.TaskID, &x.RoutedLane, &x.AdoptionState, &x.AdoptedRef, &x.AdoptedBy, &x.AdoptedAt, &x.SupersededBy, &x.CreatedAt, &x.UpdatedAt); err != nil {
+		return err
+	}
+	x.Source = "linear"
+	if strings.HasPrefix(x.IssueUUID, "hk:") {
+		x.Source = "hk"
+	}
+	return nil
 }
 
 // ListDotsResults lists the results of one task (taskID > 0) or of one Linear
