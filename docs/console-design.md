@@ -211,11 +211,12 @@ the markdown chunk, so Home and Work never pay for it.
 
 ## Captures
 
-Nine routes — home, work, task, task commands, instruct dialog, decisions,
-decision, deploys and document — at 1440px and 390px in dark and light, 36
-PNGs. Each page is one viewport as tall
-as the document, so the fixed tab bar sits at the real bottom edge instead of
-being stitched into the middle by a full-page capture. The filenames encode
+Nine routes have committed PNGs — home, work, task, task commands, instruct
+dialog, decisions, decision, deploys and document — at 1440px and 390px in dark
+and light, 36 PNGs. The harness also defines the inbox and lifecycle dialog
+views; capturing them extends the set. Each page is one viewport as tall as the
+document, so the fixed tab bar sits at the real bottom edge instead of being
+stitched into the middle by a full-page capture. The filenames encode
 page, theme and width; the [manifest](console-shots/capture.json) records the
 browser, URL, overflow check and page errors for every view.
 

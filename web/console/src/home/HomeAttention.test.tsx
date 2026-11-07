@@ -1,8 +1,9 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { HomeAttention, summarizeQuestion } from "./HomeAttention";
 
 const request = {
+  key: "decision:request:41",
   source: "request",
   id: 41,
   lane: "desk",
@@ -10,8 +11,11 @@ const request = {
   created_at: "2026-11-05T01:00:00Z",
   due_at: "2026-11-05T02:00:00Z",
   overdue: true,
+  read: false,
+  woken: false,
 };
 const laneEvent = {
+  key: "decision:lane_event:907",
   source: "lane_event",
   id: 907,
   lane: "ops",
@@ -19,22 +23,31 @@ const laneEvent = {
   created_at: "2026-11-05T03:00:00Z",
   due_at: null,
   overdue: false,
+  read: false,
+  woken: false,
 };
 const waitingTask = {
+  key: "task:12",
   id: 12,
   title: "Review the plan",
   lane: "desk",
   state: "developing",
+  priority: 2,
   reason: "awaiting_decision",
   since: "2026-11-04T10:00:00Z",
+  read: false,
+  woken: false,
 };
-const stalledTask = { ...waitingTask, id: 13, title: "Idle build", reason: "stalled", state: "reviewing" };
+const stalledTask = { ...waitingTask, key: "task:13", id: 13, title: "Idle build", reason: "stalled", state: "reviewing" };
 const deploy = {
+  key: "deploy:handoffkeep:77",
   service: "handoffkeep",
   task_id: 77,
   title: "Add the attention route",
   pr: "https://github.com/mgh3326/handoffkeep/pull/1",
   merged_at: "2026-11-05T04:00:00Z",
+  read: false,
+  woken: false,
 };
 
 function payload(overrides: Record<string, unknown> = {}) {
@@ -51,7 +64,20 @@ function serve(body: unknown) {
   vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(body))));
 }
 
-beforeEach(() => { const values = new Map<string, string>(); vi.stubGlobal("localStorage", { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => values.set(key, value) }); });
+const stored = new Map<string, string>();
+
+beforeEach(() => {
+  stored.clear();
+  vi.stubGlobal("localStorage", {
+    getItem: (key: string) => stored.get(key) ?? null,
+    setItem: (key: string, value: string) => {
+      stored.set(key, value);
+    },
+    removeItem: (key: string) => {
+      stored.delete(key);
+    },
+  });
+});
 afterEach(() => vi.unstubAllGlobals());
 
 it("renders action and reference sections with newest and overdue ordering", async () => {
@@ -76,6 +102,7 @@ it("shows a two-line inbox row with kind, identifier, summary, chips and relativ
   expect(within(row).getByText("desk")).toBeTruthy();
   expect(within(row).getByText("4시간").getAttribute("title")).toBe("2026-11-05 01:00 UTC");
   expect(row.querySelector('[data-state-shape="awaiting_decision"]')).toBeTruthy();
+  expect(row.getAttribute("data-inbox-key")).toBe("decision:request:41");
 });
 it("groups inbox items by local calendar date", async () => {
   serve(payload({ generated_at: "2026-11-08T05:00:00Z", decisions: { count: 1, overdue: 0, items: [{ ...request, overdue: false, created_at: "2026-11-08T01:00:00Z" }] }, tasks: { count: 1, awaiting_decision: 1, stalled: 0, items: [{ ...waitingTask, since: "2026-11-07T01:00:00Z" }] }, deploys: { count: 1, events_capped: false, items: [{ ...deploy, merged_at: "2026-10-01T01:00:00Z" }] } }));
@@ -104,16 +131,20 @@ it("summarizes decisions at a sentence, colon, newline, or 90 graphemes", () => 
   expect(summarizeQuestion("첫 줄\n둘째 줄")).toBe("첫 줄");
   expect(summarizeQuestion("가".repeat(91))).toBe("가".repeat(90) + "…");
 });
-it("marks a row read locally and restores it on remount", async () => {
-  serve(payload()); const view = render(<HomeAttention />);
-  const row = (await screen.findByText("Ship the console?")).closest("a");
-  expect(row && within(row).getByText("읽지 않음")).toBeTruthy();
-  if (!row) throw new Error("missing row");
-  row.addEventListener("click", event => event.preventDefault());
-  fireEvent.click(row);
-  expect(within(row).getByText("읽음")).toBeTruthy();
-  view.unmount(); render(<HomeAttention />);
-  expect(within((await screen.findByText("Ship the console?")).closest("a")!).getByText("읽음")).toBeTruthy();
+it("renders the server's read state and marks a woken snooze", async () => {
+  serve(payload({
+    decisions: { count: 1, overdue: 0, items: [{ ...request, read: true, overdue: false }] },
+    tasks: { count: 1, awaiting_decision: 1, stalled: 0, items: [{ ...waitingTask, woken: true }] },
+    deploys: { count: 0, events_capped: false, items: [] },
+  }));
+  render(<HomeAttention />);
+  const read = (await screen.findByText("Ship the console?")).closest("a");
+  if (!read) throw new Error("missing read row");
+  expect(within(read).getByText("읽음")).toBeTruthy();
+  expect(read.closest("li")?.className).toContain("ha-item--seen");
+  const woken = screen.getByText("Review the plan").closest("a");
+  if (!woken) throw new Error("missing woken row");
+  expect(within(woken).getByText("다시 알림")).toBeTruthy();
 });
 it("renders the centered empty state", async () => {
   serve(payload({ decisions: { count: 0, overdue: 0, items: [] }, tasks: { count: 0, awaiting_decision: 0, stalled: 0, items: [] }, deploys: { count: 0, events_capped: false, items: [] } }));
@@ -146,9 +177,64 @@ it("shows the error state, not the empty state, when an item has no id", async (
   await expectErrorNotEmpty(payload({ decisions: { count: 1, overdue: 0, items: [noId] } }));
 });
 
+it("shows the error state when an item has no inbox key", async () => {
+  const { key: _key, ...noKey } = request;
+  await expectErrorNotEmpty(payload({ decisions: { count: 1, overdue: 0, items: [{ ...noKey, overdue: false }] } }));
+});
+
 it("shows the error state when the request fails", async () => {
   vi.stubGlobal("fetch", vi.fn(async () => new Response("{}", { status: 500 })));
   render(<HomeAttention />);
   expect(await screen.findByRole("alert")).toBeTruthy();
   expect(screen.queryByText("대기 중인 일 없음")).toBeNull();
+});
+
+it("migrates the browser-local seen list into the server once, then forgets it", async () => {
+  const meta = document.createElement("meta");
+  meta.name = "hk-csrf";
+  meta.content = "token";
+  document.head.append(meta);
+  stored.set("hk-console:home-seen", JSON.stringify(["task:12", "task:13"]));
+  const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url === "/ui/api/inbox/state") {
+      return new Response(JSON.stringify({ action: "read", items: [], failed: [], skipped: 0 }));
+    }
+    void init;
+    return new Response(JSON.stringify(payload()));
+  });
+  vi.stubGlobal("fetch", fetcher);
+  const view = render(<HomeAttention />);
+  await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(2));
+  const call = fetcher.mock.calls.find(([input]) => String(input) === "/ui/api/inbox/state");
+  if (!call) throw new Error("no migration request");
+  const body = JSON.parse(String((call[1] as RequestInit).body));
+  expect(body.action).toBe("read");
+  expect(body.items).toEqual(["task:12", "task:13"]);
+  expect(stored.get("hk-console:home-seen")).toBeUndefined();
+  expect(stored.get("hk-console:home-seen-migrated")).toBe("1");
+  view.unmount();
+  render(<HomeAttention />);
+  await screen.findByText("Ship the console?");
+  expect(fetcher.mock.calls.filter(([input]) => String(input) === "/ui/api/inbox/state")).toHaveLength(1);
+  document.querySelector('meta[name="hk-csrf"]')?.remove();
+});
+
+it("leaves the seen key alone when the migration write fails, so the next load retries", async () => {
+  const meta = document.createElement("meta");
+  meta.name = "hk-csrf";
+  meta.content = "token";
+  document.head.append(meta);
+  stored.set("hk-console:home-seen", JSON.stringify(["task:12"]));
+  const fetcher = vi.fn(async (input: RequestInfo | URL) => {
+    if (String(input) === "/ui/api/inbox/state") return new Response("{}", { status: 500 });
+    return new Response(JSON.stringify(payload()));
+  });
+  vi.stubGlobal("fetch", fetcher);
+  render(<HomeAttention />);
+  await waitFor(() => expect(fetcher.mock.calls.some(([input]) => String(input) === "/ui/api/inbox/state")).toBe(true));
+  await screen.findByText("Ship the console?");
+  expect(stored.get("hk-console:home-seen")).toBe(JSON.stringify(["task:12"]));
+  expect(stored.get("hk-console:home-seen-migrated")).toBeUndefined();
+  document.querySelector('meta[name="hk-csrf"]')?.remove();
 });

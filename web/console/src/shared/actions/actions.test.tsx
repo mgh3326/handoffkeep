@@ -34,7 +34,8 @@ it("shows the current priority and accepts a number key", async () => {
   const meta = document.createElement("meta"); meta.name = "hk-csrf"; meta.content = "token"; document.head.append(meta);
   const fetcher = vi.spyOn(window, "fetch").mockResolvedValue(new Response(JSON.stringify({ previous: 2, priority: 4 }), { status: 200 }));
   render(<div data-action-task="7"><TaskActions compact target={{ id: 7, state: "developing", priority: 2 }} onPriority={() => {}} /></div>);
-  fireEvent.click(screen.getByRole("button", { name: "작업 #7 우선순위 변경" }));
+  fireEvent.click(screen.getByRole("button", { name: "작업 #7 메뉴" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "우선순위 변경" }));
   const menu = screen.getByRole("menu", { name: "우선순위 선택" });
   expect(screen.getByRole("menuitemradio", { name: /P2 · 현재/ }).getAttribute("aria-checked")).toBe("true");
   expect(screen.getByRole("menuitemradio", { name: /없음/ })).toBeTruthy();

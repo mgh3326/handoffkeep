@@ -75,6 +75,12 @@ package store
 // Exceptions, none of which can close a cycle:
 //   - Standing order writes lock one active standing_orders row and no other existing row.
 //
+//   - Inbox triage (operator_inbox.go) locks one operator_inbox_state row and
+//     then, when the item is a decision request and the action is snooze,
+//     that decision_requests row. Only this writer takes inbox state rows, so
+//     the pair cannot close a cycle with a decision writer that locks only its
+//     request.
+//
 //   - PruneSync locks sync_state first, but takes no lock from levels 2-5.
 //   - IntakeTask and EmitTicketSet insert each body as the document
 //     task-body/<id>, named after a task created in the same transaction

@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchTaskDetail, fetchTaskComments, HttpError } from "../shared/boardApi";
 import { usePoll } from "../shared/usePoll";
-import type { BoardComment, BoardDetail, BoardEvent } from "../shared/boardTypes";
+import type { BoardComment, BoardDetail } from "../shared/boardTypes";
 import { stateLabel } from "../shared/states";
 import { formatMinuteKST } from "../shared/time";
+import { eventText } from "../shared/timeline";
 import { TaskActions } from "../shared/actions/TaskActions";
 import { CommandLadder } from "../shared/actions/CommandLadder";
 import type { OperatorCommandView } from "../shared/actions/commands";
@@ -18,18 +19,6 @@ function duration(start?: string | null, end?: string | null): string {
 }
 function Section({ title, truncated, children }: { title: string; truncated?: boolean; children: React.ReactNode }) {
   return <section className="work-section"><h2>{title} {truncated && <small>100+</small>}</h2>{children}</section>;
-}
-function eventText(event: BoardEvent): string {
-  if (event.field === "priority") {
-    const value = (v?: string) => v === "0" || !v ? "없음" : `P${v}`;
-    const reason = event.note?.replace(/^priority \d+ → \d+(?:: )?/, "");
-    return `우선순위 ${value(event.from_value)} → ${value(event.to_value)}${reason ? ` · ${reason}` : ""}`;
-  }
-  const formatValue = event.kind === "transition" || event.kind === "state_migration" || !event.kind ? stateLabel : (value: string) => value;
-  const stateChange = event.from !== event.to ? `${formatValue(event.from)} → ${formatValue(event.to)}` : "";
-  const labels: Record<string, string> = { transition: "상태 변경", relane: "레인 변경", decision: "결정", project: "프로젝트 변경", area: "분야 변경", metadata: "정보 변경" };
-  const kind = labels[event.kind || "transition"] || "기록";
-  return [kind, stateChange, event.note].filter(Boolean).join(" · ");
 }
 type DetailLoad = { detail: BoardDetail } | { missing: true; id: number };
 export function TaskRecord({ id }: { id: number }) {
@@ -50,7 +39,8 @@ export function TaskRecord({ id }: { id: number }) {
     }
   }, [id, attempt]);
   // The detail polls so an executor's receipt advances the command ladder
-  // without a reload. Retry restarts the loop through attempt.
+  // without a reload. Retry and a lifecycle write restart the loop through
+  // attempt.
   const { data: loaded, failed } = usePoll(load, 15000);
   const missing = !!loaded && "missing" in loaded && loaded.id === id;
   const data = loaded && "detail" in loaded && loaded.detail.task.id === id ? loaded.detail : null;
@@ -73,7 +63,7 @@ export function TaskRecord({ id }: { id: number }) {
   const task = priorityOverride === null ? loadedTask : { ...loadedTask, priority: priorityOverride };
   return <article className="work-record">
     {failed && <p role="alert" className="work-stale">최신 정보를 불러오지 못했습니다. 마지막으로 받은 내용입니다.</p>}
-    <header data-action-task={task.id}><TaskActions target={task} onPriority={priority => setPriorityOverride(priority)} onCommand={command => { pending.current.set(command.id, command); setCommands(old => [command, ...old]); }} /><h1>#{task.id} {task.title}</h1><p>{stateLabel(task.state)} · {task.project || "—"} · {task.lane} · P{task.priority} · {task.kind}</p></header>
+    <header data-action-task={task.id}><TaskActions target={task} onPriority={priority => setPriorityOverride(priority)} onCommand={command => { pending.current.set(command.id, command); setCommands(old => [command, ...old]); }} onApplied={() => setAttempt(n => n + 1)} /><h1>#{task.id} {task.title}</h1><p>{stateLabel(task.state)} · {task.project || "—"} · {task.lane} · P{task.priority} · {task.kind}</p></header>
     <Section title="종료 근거">{task.refs.closure ? <p>{task.refs.closure.type} · {task.refs.closure.evidence}</p> : ["merged", "deployed", "completed", "dropped", "duplicate", "canceled"].includes(task.state) ? <p>종결 증거 없음</p> : <p>기록 없음</p>}</Section>
     <Section title="출처" truncated={data.origins_truncated}>{origins.length ? origins.map((o, i) => <p key={i}>{o.provider} · {o.namespace} · {o.url ? <a href={o.url}>{o.display_ref || o.url}</a> : o.display_ref || "—"}</p>) : <p>기록 없음</p>}</Section>
     <Section title="문서" truncated={data.documents_truncated}>{documents.length ? documents.map(d => <p key={d.key}><a href={`/ui/doc/${d.key.split("/").map(encodeURIComponent).join("/")}`}>{d.key}</a> · {d.kind} · {d.origin_class || "미분류"}</p>) : <p>기록 없음</p>}</Section>

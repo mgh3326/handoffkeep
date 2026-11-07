@@ -32,10 +32,11 @@ describe("operator command registry", () => {
   });
   it("renders reserved kinds disabled with the reason as their title", () => {
     render(<TaskActions target={active} onPriority={() => {}} />);
-    const stop = screen.getByRole("button", { name: "워커 중지" });
+    fireEvent.click(screen.getByRole("button", { name: "작업 #101 메뉴" }));
+    const stop = screen.getByRole("menuitem", { name: /워커 중지/ });
     expect((stop as HTMLButtonElement).disabled).toBe(true);
     expect(stop.getAttribute("title")).toBe("실행기 준비 전");
-    expect(screen.getByRole("button", { name: "워커에게 지시" })).toBeTruthy();
+    expect(screen.getByRole("menuitem", { name: /워커에게 지시/ })).toBeTruthy();
   });
 });
 
@@ -69,7 +70,8 @@ describe("instruct dialog", () => {
     const recorded = vi.fn();
     const fetcher = vi.spyOn(window, "fetch").mockResolvedValue(new Response(JSON.stringify({ ...command, intent: "queue" }), { status: 201 }));
     render(<div data-action-task="101"><TaskActions compact target={active} onPriority={() => {}} onCommand={recorded} /></div>);
-    fireEvent.click(screen.getByRole("button", { name: "지시" }));
+    fireEvent.click(screen.getByRole("button", { name: "작업 #101 메뉴" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /워커에게 지시/ }));
     const dialog = screen.getByRole("dialog", { name: "워커에게 지시" });
     expect(dialog.textContent).toContain("지금 끼어들기");
     fireEvent.click(screen.getByRole("radio", { name: "현재 작업 끝나고" }));
