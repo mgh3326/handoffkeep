@@ -309,7 +309,10 @@ func (s *Service) pushTask(ctx context.Context, task store.Task, opts SyncOption
 		if found {
 			action.IssueID, action.ReadableID = existing.ID, existing.IDReadable
 			if !opts.DryRun {
-				mirror, err = s.store.UpsertYouTrackMirror(ctx, store.YouTrackMirrorInput{TaskID: task.ID, IssueID: existing.ID, DisplayRef: existing.IDReadable, URL: s.issueURL(existing.IDReadable), Tenant: s.tenant, Role: "mirror", SyncedAt: s.now()})
+				// Adopt the issue without a watermark: the field push below
+				// has not run yet, and MarkYouTrackTaskSynced advances it only
+				// when that push succeeds.
+				mirror, err = s.store.UpsertYouTrackMirror(ctx, store.YouTrackMirrorInput{TaskID: task.ID, IssueID: existing.ID, DisplayRef: existing.IDReadable, URL: s.issueURL(existing.IDReadable), Tenant: s.tenant, Role: "mirror"})
 				if err != nil {
 					return action, err
 				}

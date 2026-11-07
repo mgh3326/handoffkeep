@@ -163,8 +163,13 @@ func (f *fakeStore) UpsertYouTrackMirror(_ context.Context, in store.YouTrackMir
 	if owner, ok := f.issueOwner[in.IssueID]; ok && owner != in.TaskID {
 		return store.YouTrackMirror{}, store.ErrYouTrackMirrorConflict
 	}
-	now := in.SyncedAt.UTC()
-	f.mirrors[in.TaskID] = store.YouTrackMirror{TaskID: in.TaskID, IssueID: in.IssueID, DisplayRef: in.DisplayRef, URL: in.URL, Tenant: in.Tenant, Role: in.Role, SyncedAt: &now, CreatedAt: now}
+	now := time.Now().UTC()
+	var synced *time.Time
+	if !in.SyncedAt.IsZero() {
+		at := in.SyncedAt.UTC()
+		synced = &at
+	}
+	f.mirrors[in.TaskID] = store.YouTrackMirror{TaskID: in.TaskID, IssueID: in.IssueID, DisplayRef: in.DisplayRef, URL: in.URL, Tenant: in.Tenant, Role: in.Role, SyncedAt: synced, CreatedAt: now}
 	f.issueOwner[in.IssueID] = in.TaskID
 	f.writes++
 	return f.mirrors[in.TaskID], nil
@@ -504,12 +509,14 @@ func (f *fakeStore) ApplyYouTrackActivity(_ context.Context, in store.YouTrackAc
 		cache := f.caches[in.TaskID]
 		cache.TaskID, cache.Priority, cache.Lane, cache.Source = in.TaskID, *in.Priority, task.Lane, store.YouTrackSourceYouTrack
 		f.caches[in.TaskID] = cache
+		f.closeOutboxLocked(in.TaskID, store.YouTrackOpPriority)
 	}
 	if in.Lane != "" && in.Lane != task.Lane {
 		task.Lane = in.Lane
 		cache := f.caches[in.TaskID]
 		cache.TaskID, cache.Priority, cache.Lane, cache.Source = in.TaskID, task.Priority, in.Lane, store.YouTrackSourceYouTrack
 		f.caches[in.TaskID] = cache
+		f.closeOutboxLocked(in.TaskID, store.YouTrackOpLane)
 	}
 	if in.Comment != "" {
 		f.nextComment++
@@ -547,4 +554,14 @@ func (f *fakeStore) MarkYouTrackRevertDone(_ context.Context, activityID string)
 	defer f.mu.Unlock()
 	delete(f.pending, activityID)
 	return nil
+}
+
+// closeOutboxLocked drops the pending export for a field when the operator's
+// newer YouTrack value supersedes it. The caller holds f.mu.
+func (f *fakeStore) closeOutboxLocked(taskID int64, op string) {
+	for id, item := range f.outbox {
+		if item.TaskID == taskID && item.Op == op {
+			f.outboxDue[id] = false
+		}
+	}
 }

@@ -379,12 +379,18 @@ func TestApplyYouTrackActivityKeepsAnUnpushedTaskDue(t *testing.T) {
 	if err := st.PutYouTrackFieldCache(ctx, YouTrackFieldCache{TaskID: x.ID, Priority: 1, Lane: "handoffkeep", Source: YouTrackSourceYouTrack, FetchedAt: pushed}); err != nil {
 		t.Fatal(err)
 	}
+	if err := st.EnqueueYouTrack(ctx, x.ID, YouTrackOpPriority, "9"); err != nil {
+		t.Fatal(err)
+	}
 	priority := 4
 	if _, err := st.ApplyYouTrackActivity(ctx, YouTrackActivity{ID: "a-watermark", TaskID: x.ID, IssueID: "6-2", Priority: &priority}); err != nil {
 		t.Fatal(err)
 	}
 	if cache, _, _ := st.GetYouTrackFieldCache(ctx, x.ID); cache.Priority != 4 {
 		t.Fatalf("the pull did not keep the cache in step: %+v", cache)
+	}
+	if due, _ := st.DueYouTrackOutbox(ctx, 10); len(due) != 0 {
+		t.Fatalf("a stale export survived the operator change: %+v", due)
 	}
 	mirror, _, err := st.GetYouTrackMirror(ctx, x.ID)
 	if err != nil {

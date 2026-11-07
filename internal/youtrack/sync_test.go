@@ -633,6 +633,105 @@ func TestFailedFieldsAfterAMoveStayDue(t *testing.T) {
 	}
 }
 
+func TestFailedFieldsAfterAdoptingAnIssueStayDue(t *testing.T) {
+	fs := newFakeStore()
+	yt := newFakeYouTrack()
+	task := fs.addTask("handoffkeep", "handoffkeep", "adopt then fail", store.StateBacklog, 4)
+	base := time.Date(2026, 11, 7, 9, 0, 0, 0, time.UTC)
+	moved := fs.tasks[task.ID]
+	moved.UpdatedAt = base
+	fs.tasks[task.ID] = moved
+	// The issue exists in YouTrack with the hk ID, but hk has no mirror row.
+	yt.issues["9-95"] = Issue{ID: "9-95", IDReadable: "HK-95", Summary: "adopt then fail", Project: &ProjectRef{ID: "0-1", ShortName: "HK"}, CustomFields: []IssueField{
+		{Name: "hk ID", Value: json.RawMessage(strconv.FormatInt(task.ID, 10))},
+		{Name: "hk 우선순위", Value: json.RawMessage(`0`)},
+		{Name: "레인", Value: json.RawMessage(`{"name":"handoffkeep"}`)},
+		{Name: "hk 상태", Value: json.RawMessage(`{"name":"대기"}`)},
+	}}
+	yt.failFieldUpdate = true
+	svc := newTestService(t, yt, fs)
+	ctx := context.Background()
+
+	report, err := svc.Sync(ctx, SyncOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Errors) == 0 {
+		t.Fatal("the field update failure was not reported")
+	}
+	if got := fs.mirrors[task.ID]; got.DisplayRef != "HK-95" || got.SyncedAt != nil {
+		t.Fatalf("the adopted link got a watermark before its push: %+v", got)
+	}
+	due, _ := fs.DueYouTrackPushTasks(ctx, 10)
+	var found bool
+	for _, candidate := range due {
+		if candidate.ID == task.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("the unsent field push is no longer due after adopting the issue")
+	}
+
+	// The next run pushes the fields and advances the watermark.
+	yt.failFieldUpdate = false
+	if _, err := svc.Sync(ctx, SyncOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if due, _ := fs.DueYouTrackPushTasks(ctx, 10); len(due) != 0 {
+		t.Fatalf("the retried push did not settle: %+v", due)
+	}
+	if got := fs.mirrors[task.ID]; got.SyncedAt == nil || !got.SyncedAt.Equal(base) {
+		t.Fatalf("the successful push did not advance the watermark: %+v", got.SyncedAt)
+	}
+}
+
+func TestOperatorChangeSupersedesAPendingExport(t *testing.T) {
+	fs := newFakeStore()
+	yt := newFakeYouTrack()
+	task := fs.addTask("handoffkeep", "handoffkeep", "pending export", store.StateBacklog, 2)
+	mirrorIssue(fs, yt, task.ID, "9-96", "HK-96")
+	svc := newTestService(t, yt, fs)
+	ctx := context.Background()
+
+	// An hk write queued both exports, and a later push marked the task synced
+	// while the rows were still waiting in backoff.
+	if err := fs.EnqueueYouTrack(ctx, task.ID, store.YouTrackOpPriority, "2"); err != nil {
+		t.Fatal(err)
+	}
+	if err := fs.EnqueueYouTrack(ctx, task.ID, store.YouTrackOpLane, "rstack"); err != nil {
+		t.Fatal(err)
+	}
+	synced := fs.tasks[task.ID].UpdatedAt
+	mirror := fs.mirrors[task.ID]
+	mirror.SyncedAt = &synced
+	fs.mirrors[task.ID] = mirror
+
+	// The operator then changes both fields in YouTrack.
+	yt.activities = []Activity{{
+		ID: "a-supersede", Author: operator(), Target: &Issue{ID: "9-96", IDReadable: "HK-96"},
+		Categories: []ActivityCategory{
+			{Type: "CustomFieldCategory", Field: &ActivityField{Name: "hk 우선순위"}, Added: []json.RawMessage{json.RawMessage(`1`)}},
+			{Type: "CustomFieldCategory", Field: &ActivityField{Name: "레인"}, Added: []json.RawMessage{json.RawMessage(`{"name":"ops"}`)}},
+		},
+	}}
+	if _, err := svc.Sync(ctx, SyncOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	got := fs.tasks[task.ID]
+	if got.Priority != 1 || got.Lane != "ops" {
+		t.Fatalf("PG=%+v", got)
+	}
+	if len(yt.issueUpdates) != 0 {
+		t.Fatalf("a superseded export was sent: %v", yt.issueUpdates)
+	}
+	for _, item := range fs.outbox {
+		if fs.outboxDue[item.ID] {
+			t.Fatalf("a superseded export is still pending: %+v", item)
+		}
+	}
+}
+
 func TestServiceLogsNeverContainToken(t *testing.T) {
 	var buf bytes.Buffer
 	previous := log.Writer()

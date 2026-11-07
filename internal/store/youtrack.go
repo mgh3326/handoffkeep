@@ -59,7 +59,8 @@ type YouTrackMirror struct {
 }
 
 // YouTrackMirrorInput is one upsert. Role is mirror (hk created the issue) or
-// origin (the issue created the hk task).
+// origin (the issue created the hk task). The zero SyncedAt stores NULL: a
+// link adopted before its field push has no watermark yet.
 type YouTrackMirrorInput struct {
 	TaskID     int64
 	IssueID    string
@@ -219,10 +220,17 @@ func (s *Store) UpsertYouTrackMirror(ctx context.Context, in YouTrackMirrorInput
 		return YouTrackMirror{}, ErrYouTrackMirrorConflict
 	}
 	at := in.SyncedAt.UTC()
+	var syncedAt any
+	if !in.SyncedAt.IsZero() {
+		syncedAt = at
+	} else {
+		// No push happened yet; only created_at/snapshot_at need a time.
+		at = time.Now().UTC()
+	}
 	var x YouTrackMirror
 	err := scanYouTrackMirror(s.pool.QueryRow(ctx, `
 		INSERT INTO task_origins(task_id,provider,namespace,external_id,display_ref,url,title_snapshot,snapshot_at,created_by,created_at,tenant,role,synced_at)
-		VALUES($1,'youtrack',$2,$3,$4,$5,NULL,$6,$7,$6,$2,$8,$6)
+		VALUES($1,'youtrack',$2,$3,$4,$5,NULL,$6,$7,$6,$2,$8,$9)
 		ON CONFLICT (task_id) WHERE provider='youtrack' DO UPDATE SET
 			namespace=EXCLUDED.namespace,
 			external_id=EXCLUDED.external_id,
@@ -230,9 +238,9 @@ func (s *Store) UpsertYouTrackMirror(ctx context.Context, in YouTrackMirrorInput
 			url=EXCLUDED.url,
 			tenant=EXCLUDED.tenant,
 			role=EXCLUDED.role,
-			synced_at=EXCLUDED.synced_at
+			synced_at=COALESCE(EXCLUDED.synced_at,task_origins.synced_at)
 		RETURNING `+youtrackMirrorColumns,
-		in.TaskID, in.Tenant, in.IssueID, nullIfEmpty(in.DisplayRef), nullIfEmpty(in.URL), at, YouTrackSyncActor, in.Role), &x)
+		in.TaskID, in.Tenant, in.IssueID, nullIfEmpty(in.DisplayRef), nullIfEmpty(in.URL), at, YouTrackSyncActor, in.Role, syncedAt), &x)
 	if err != nil {
 		var pgErr interface{ SQLState() string }
 		if errors.As(err, &pgErr) && pgErr.SQLState() == "23505" {
@@ -761,6 +769,12 @@ func (s *Store) ApplyYouTrackActivity(ctx context.Context, in YouTrackActivity) 
 			if _, err := tx.Exec(ctx, `UPDATE youtrack_field_cache SET priority=$2 WHERE task_id=$1`, x.ID, *in.Priority); err != nil {
 				return YouTrackApplyResult{}, err
 			}
+			// The operator's value supersedes any queued hk export for this
+			// field; sending the older value afterwards would invert the two
+			// sides and push would no longer see the task as due.
+			if _, err := tx.Exec(ctx, `UPDATE youtrack_outbox SET done_at=now(),last_error='' WHERE task_id=$1 AND op=$2 AND done_at IS NULL`, x.ID, YouTrackOpPriority); err != nil {
+				return YouTrackApplyResult{}, err
+			}
 			x.Priority = *in.Priority
 			x.UpdatedAt = now
 		}
@@ -782,6 +796,9 @@ func (s *Store) ApplyYouTrackActivity(ctx context.Context, in YouTrackActivity) 
 				return YouTrackApplyResult{}, err
 			}
 			if _, err := tx.Exec(ctx, `UPDATE youtrack_field_cache SET lane=$2 WHERE task_id=$1`, x.ID, in.Lane); err != nil {
+				return YouTrackApplyResult{}, err
+			}
+			if _, err := tx.Exec(ctx, `UPDATE youtrack_outbox SET done_at=now(),last_error='' WHERE task_id=$1 AND op=$2 AND done_at IS NULL`, x.ID, YouTrackOpLane); err != nil {
 				return YouTrackApplyResult{}, err
 			}
 			x = moved
