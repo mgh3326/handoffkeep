@@ -74,9 +74,11 @@ func seedDeployDoc(t *testing.T, s *store.Store, key, body string) {
 // deployDB opens a direct connection for the two things the store API does
 // not expose on purpose: wiping deploy/ fixtures and inserting a merged
 // task_event at a controlled timestamp with a controlled refs snapshot.
-func deployDB(t *testing.T) *pgx.Conn {
+func deployDB(t *testing.T) *pgx.Conn { return deployDBAt(t, testdb.URL(t)) }
+
+func deployDBAt(t *testing.T, dbURL string) *pgx.Conn {
 	t.Helper()
-	db, err := pgx.Connect(t.Context(), testdb.URL(t))
+	db, err := pgx.Connect(t.Context(), dbURL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -441,13 +443,11 @@ func TestUIDeployPendingDocsHardCap(t *testing.T) {
 
 // Regression (tester NICE): the merged-events scan fetches limit+1 rows, so a
 // fleet sitting exactly at the bound is NOT flagged truncated — only a row
-// left unscanned is. task_events is append-only, so the test clears merged
-// events via the replication role when the account allows it — keeping the
-// exact-limit case deterministic on a shared DB; without the role it falls
-// back to the count check.
+// left unscanned is. It runs in a throwaway schema: the case needs a known
+// whole-table count of merged events, which the shared schema cannot give.
 func TestUIDeployPendingEventsCappedExactLimit(t *testing.T) {
-	s := uiStore(t)
-	db := deployDB(t)
+	s, dbURL := schemaTestStore(t, "ui_deploy_events")
+	db := deployDBAt(t, dbURL)
 	wipeDeployDocs(t, db)
 	fixture := newUIJWTFixture(t)
 	h := newUITestServer(t, s, fixture, "", "", 0)
@@ -480,7 +480,7 @@ func TestUIDeployPendingEventsCappedExactLimit(t *testing.T) {
 		}
 		wipeDeployDocs(t, db)
 	} else {
-		t.Fatalf("exact-limit case unrunnable: %d merged events survive in shared DB and trigger wipe failed", total)
+		t.Fatalf("exact-limit case unrunnable: %d merged events survive in the throwaway schema", total)
 	}
 
 	// A row beyond the bound is real truncation: when the oldest scanned
