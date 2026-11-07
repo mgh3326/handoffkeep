@@ -5,6 +5,17 @@ hk serves the MCP streamable HTTP transport at `/mcp`. ChatGPT connects to
 so the operator signs in once and the origin receives a signed Access user
 assertion. The existing bearer-token clients keep using the same route.
 
+## Proxied hosts
+
+cloudflared reaches the origin over loopback (`127.0.0.1:8800`) and forwards
+the public `Host`, for example `hk-mcp.robinco.dev`. The MCP SDK's DNS
+rebinding guard rejects a loopback request whose `Host` is not loopback, which
+is meant for unauthenticated localhost servers; `/mcp` authenticates every
+request before the SDK transport sees it, so `HTTPHandler` disables that guard
+and a proxied request is decided by its credential alone. The temporary
+cloudflared `httpHostHeader: localhost` workaround on the `hk-mcp` route is
+therefore unnecessary once this build is deployed and can be removed.
+
 ## Credentials
 
 A request authenticates with either credential:

@@ -204,7 +204,15 @@ func HTTPHandler(service api.Service, tokens api.Tokens, access *cfaccess.Verifi
 		s := newServer(service, p.Actor, false)
 		registerOperatorTools(s, service, p)
 		return s
-	}, &gmcp.StreamableHTTPOptions{Stateless: true})
+	}, &gmcp.StreamableHTTPOptions{
+		Stateless: true,
+		// The SDK's localhost guard rejects a loopback request whose Host is
+		// not loopback. It defends unauthenticated localhost servers against
+		// DNS rebinding; /mcp authenticates every request before the SDK sees
+		// it, and a local proxy (cloudflared) reaches it on 127.0.0.1:8800
+		// with the public Host, so the guard only blocks legitimate traffic.
+		DisableLocalhostProtection: true,
+	})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p, ok := authenticate(r, tokens, access)
 		if !ok {
