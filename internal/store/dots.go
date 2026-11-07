@@ -451,6 +451,9 @@ func (s *Store) RecordDotsResult(ctx context.Context, kind string, issue DotsIss
 	if !validDotsIssue(issue, c.ID) {
 		return "", false, errors.New("invalid dots result")
 	}
+	if err := checkDotsResult(kind, issue, c, false); err != nil {
+		return "", false, err
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return "", false, err
@@ -467,25 +470,35 @@ func (s *Store) RecordDotsResult(ctx context.Context, kind string, issue DotsIss
 	return key, created, tx.Commit(ctx)
 }
 
-func recordDotsResultTx(ctx context.Context, tx pgx.Tx, kind string, issue DotsIssue, c DotsComment, task *Task, lane, createdBy string) (key string, created bool, err error) {
-	outboxKind, recorded := dotsResultKinds[kind]
-	progress := kind == "PROGRESS" && createdBy == "hk-mcp"
-	if progress {
-		outboxKind = OutboxKindDotsReport
-	} else if !recorded {
-		return "", false, errors.New("invalid dots result")
+func checkDotsResult(kind string, issue DotsIssue, c DotsComment, allowProgress bool) error {
+	if !DotsKindRecorded(kind) && !(allowProgress && kind == "PROGRESS") {
+		return errors.New("invalid dots result")
+	}
+	if len(c.ID) < 8 {
+		return errors.New("invalid dots result")
 	}
 	if _, err := time.Parse(time.RFC3339, c.CreatedAt); err != nil {
-		return "", false, errors.New("invalid dots result")
+		return errors.New("invalid dots result")
+	}
+	key := dotsResultKey(issue, c)
+	body := dotsResultBody(kind, issue, c)
+	if !validDocKey(key) || !validText(body, DocumentMaxBytes) {
+		return errors.New("invalid dots result")
+	}
+	return guard.Reject(key + "\n" + body)
+}
+
+func recordDotsResultTx(ctx context.Context, tx pgx.Tx, kind string, issue DotsIssue, c DotsComment, task *Task, lane, createdBy string) (key string, created bool, err error) {
+	progress := kind == "PROGRESS" && createdBy == "hk-mcp"
+	if err := checkDotsResult(kind, issue, c, progress); err != nil {
+		return "", false, err
+	}
+	outboxKind := dotsResultKinds[kind]
+	if progress {
+		outboxKind = OutboxKindDotsReport
 	}
 	key = dotsResultKey(issue, c)
 	body := dotsResultBody(kind, issue, c)
-	if !validDocKey(key) || !validText(body, DocumentMaxBytes) {
-		return "", false, errors.New("invalid dots result")
-	}
-	if err := guard.Reject(key + "\n" + body); err != nil {
-		return "", false, err
-	}
 	sum := sha256.Sum256([]byte(body))
 	artefact := sha256.Sum256([]byte(c.Body))
 	verdict := nullIfEmpty(dotsSummaryLine(c.Body))
