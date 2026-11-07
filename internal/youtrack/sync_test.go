@@ -455,6 +455,10 @@ func TestOverlayMarksStaleOnFetchError(t *testing.T) {
 	if tasks[0].Priority != 4 || !tasks[0].Stale || tasks[0].PrioritySource != store.YouTrackSourceHK {
 		t.Fatalf("overlay=%+v", tasks[0])
 	}
+	// The stale row is persisted, so the next read does not repeat the stall.
+	if cache, ok := fs.caches[task.ID]; !ok || !cache.Stale || cache.Source != store.YouTrackSourceHK {
+		t.Fatalf("stale cache was not written: %+v ok=%v", cache, ok)
+	}
 }
 
 func TestRecordPriorityAndLaneQueueOutbox(t *testing.T) {

@@ -189,7 +189,7 @@ func (s *Service) Overlay(ctx context.Context, tasks []store.Task) {
 				continue
 			}
 			seeds--
-			cache, _ = s.fetchCache(seedCtx, mirror, tasks[i])
+			cache, _ = s.fetchCache(ctx, seedCtx, mirror, tasks[i])
 			if cache.TaskID == 0 {
 				continue
 			}
@@ -204,19 +204,22 @@ func (s *Service) Overlay(ctx context.Context, tasks []store.Task) {
 	}
 }
 
-func (s *Service) fetchCache(ctx context.Context, mirror store.YouTrackMirror, task store.Task) (store.YouTrackFieldCache, error) {
-	issue, err := s.client.GetIssue(ctx, mirror.IssueID)
+// fetchCache reads one issue for a read-path seed. fetchCtx bounds the
+// YouTrack call; the cache write uses writeCtx so a row still lands after the
+// seeding deadline, and the next read does not pay for the same stall again.
+func (s *Service) fetchCache(writeCtx, fetchCtx context.Context, mirror store.YouTrackMirror, task store.Task) (store.YouTrackFieldCache, error) {
+	issue, err := s.client.GetIssue(fetchCtx, mirror.IssueID)
 	if err != nil {
 		// PG is the execution value. Keep it as the last known value and say
 		// the YouTrack read is stale.
 		cache := store.YouTrackFieldCache{TaskID: task.ID, Priority: task.Priority, Lane: task.Lane, Source: store.YouTrackSourceHK, FetchedAt: s.now(), Stale: true}
-		if perr := s.store.PutYouTrackFieldCache(ctx, cache); perr != nil {
+		if perr := s.store.PutYouTrackFieldCache(writeCtx, cache); perr != nil {
 			log.Printf("youtrack.cache_write_failed task_id=%d err=%q", task.ID, perr)
 		}
 		return cache, err
 	}
 	cache := s.cacheFromIssue(task.ID, issue, task)
-	if perr := s.store.PutYouTrackFieldCache(ctx, cache); perr != nil {
+	if perr := s.store.PutYouTrackFieldCache(writeCtx, cache); perr != nil {
 		log.Printf("youtrack.cache_write_failed task_id=%d err=%q", task.ID, perr)
 	}
 	return cache, nil
