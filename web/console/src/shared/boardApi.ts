@@ -245,10 +245,29 @@ function validWorkSession(value: unknown): value is BoardWorkSession {
   );
 }
 
-export async function fetchProjects(): Promise<string[]> {
-  const data = await getJSON<{ projects: unknown }>("/ui/api/board/projects");
+/** One project's design session as the server resolves it. design_lane is the
+ * stored owner ("" when unclaimed); effective_owner already applies the
+ * operator-desk fallback, so the console never repeats that rule. */
+export type ProjectOwner = {
+  name: string;
+  design_lane: string;
+  effective_owner: string;
+};
+
+/** ProjectIndex is the one project selector payload: the vocabulary names and,
+ * from a server that has the owner column, the resolved design session of each.
+ * owners is empty on an older server, which just hides the owner line. */
+export type ProjectIndex = { projects: string[]; owners: ProjectOwner[] };
+
+export async function fetchProjectIndex(): Promise<ProjectIndex> {
+  const data = await getJSON<{ projects: unknown; owners?: unknown }>("/ui/api/board/projects");
   if (!data || !Array.isArray(data.projects) || !data.projects.every((p) => typeof p === "string")) throw new Error("malformed projects");
-  return data.projects;
+  if (data.owners === undefined) return { projects: data.projects, owners: [] };
+  if (!Array.isArray(data.owners) || !data.owners.every((o) => record(o) && typeof o.name === "string" && typeof o.design_lane === "string" && typeof o.effective_owner === "string")) throw new Error("malformed project owners");
+  return {
+    projects: data.projects,
+    owners: data.owners.map((o) => ({ name: o.name as string, design_lane: o.design_lane as string, effective_owner: o.effective_owner as string })),
+  };
 }
 
 function record(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }

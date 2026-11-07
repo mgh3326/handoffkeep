@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { fetchBoardTasks, fetchProjects } from "../shared/boardApi";
+import { fetchBoardTasks, fetchProjectIndex, type ProjectOwner } from "../shared/boardApi";
 import { usePoll } from "../shared/usePoll";
 import { readStored, STORAGE_KEYS, writeStored } from "../shared/storage";
 import { CHIP_GROUP_ORDER, stateLabel, statusGroup } from "../shared/states";
@@ -40,15 +40,21 @@ export function WorkPage() {
   const [search, setSearch] = useState(() => location.search);
   const [refresh, setRefresh] = useState(0);
   const [projects, setProjects] = useState<string[]>([]);
+  const [owners, setOwners] = useState<ProjectOwner[]>([]);
   const [projectsFailed, setProjectsFailed] = useState(false);
   const [wide, setWide] = useState(() => matchMedia("(min-width: 1024px)").matches);
   const [queryDraft, setQueryDraft] = useState<string | null>(null);
   const [saved, setSaved] = useState<SavedSearch[]>(() => readSavedSearches());
   useEffect(() => { const pop = () => setSearch(location.search); window.addEventListener("popstate", pop); return () => window.removeEventListener("popstate", pop); }, []);
   useEffect(() => { const mq = matchMedia("(min-width: 1024px)"); const update = () => setWide(mq.matches); mq.addEventListener("change", update); return () => mq.removeEventListener("change", update); }, []);
-  useEffect(() => { void fetchProjects().then(setProjects).catch(() => setProjectsFailed(true)); }, []);
+  useEffect(() => { void fetchProjectIndex().then(index => { setProjects(index.projects); setOwners(index.owners); }).catch(() => setProjectsFailed(true)); }, []);
   const params = useMemo(() => new URLSearchParams(search), [search]);
   const project = params.get("project") || readStored(STORAGE_KEYS.workProject) || projects[0] || "";
+  // The design session that owns the selected project. effective_owner already
+  // carries the operator-desk fallback; "(없음 → operator-desk)" marks the
+  // project nobody has claimed, since design_lane is then empty.
+  const projectOwner = owners.find(o => o.name === project);
+  const ownerLabel = projectOwner ? (projectOwner.design_lane ? projectOwner.effective_owner : `(없음 → ${projectOwner.effective_owner})`) : "";
   const view: View = views.find(v => v === params.get("view")) || "needs-me";
   const query = params.get("q") || "", lane = params.get("lane") || "", kind = params.get("kind") || "", state = params.get("state") || "", priority = params.get("p") || "";
   const grade = params.get("grade") || "", tier = params.get("tier") || "";
@@ -173,7 +179,8 @@ export function WorkPage() {
   ];
   return <div className="work-layout"><section className="work-list"><div className="work-heading"><h1>작업</h1>
     {projectsFailed && <p role="alert">불러오지 못함</p>}
-    <label>프로젝트 <select value={project} onChange={e => update("project", e.target.value)}>{project && !projects.includes(project) && <option value={project}>{project}</option>}{projects.map(p => <option key={p}>{p}</option>)}</select></label></div>
+    <label>프로젝트 <select value={project} onChange={e => update("project", e.target.value)}>{project && !projects.includes(project) && <option value={project}>{project}</option>}{projects.map(p => <option key={p}>{p}</option>)}</select></label>
+    {ownerLabel && <span className="work-owner">담당 설계 세션 <Mono>{ownerLabel}</Mono></span>}</div>
     <QueryBar value={shownQuery} onChange={changeQuery} onCommit={commitQuery} errors={queryErrors} context={queryContext} actions={<SaveSearch searches={saved} currentQuery={canonicalQuery} onChange={changeSaved} />} />
     <TriageUi triage={triage} />
     <nav className="work-tabs" aria-label="작업 보기">{views.map(v => <button key={v} aria-pressed={view === v} onClick={() => update("view", v)}>{labels[v]} {filtered.filter(t => inView(t, v)).length}</button>)}</nav>

@@ -121,6 +121,30 @@ it("shows active job model, profile, host fallback, chips and relative time", as
   expect(screen.getByText("2시간").getAttribute("title")).toContain("2026-01-01");
   expect(container.querySelector(".hk-chip--priority-urgent")?.textContent).toBe("P1");
 });
+it("shows the selected project's design session with the operator-desk fallback", async () => {
+  const owners = [
+    { name: "a", design_lane: "a-design", effective_owner: "a-design" },
+    { name: "b", design_lane: "", effective_owner: "operator-desk" },
+  ];
+  vi.stubGlobal("fetch", vi.fn(async (path: string) => path.includes("projects") ? response({ projects: ["a", "b"], owners }) : response({ tasks: [task], states: [], generated_at: "2026-01-01T02:00:00Z", truncated: false })));
+  history.replaceState(null, "", "/ui/work?project=a&view=active");
+  const { container, unmount } = render(<WorkPage />);
+  expect(await screen.findByText("a-design")).toBeTruthy();
+  expect(container.querySelector(".work-owner")?.textContent).toContain("담당 설계 세션");
+  unmount();
+  // An unclaimed project reads as the fallback, marked absent.
+  history.replaceState(null, "", "/ui/work?project=b&view=active");
+  render(<WorkPage />);
+  expect(await screen.findByText("(없음 → operator-desk)")).toBeTruthy();
+});
+it("hides the owner line when the server predates the owner column", async () => {
+  vi.stubGlobal("fetch", vi.fn(async (path: string) => path.includes("projects") ? response({ projects: ["a"] }) : response({ tasks: [task], states: [], generated_at: "2026-01-01T02:00:00Z", truncated: false })));
+  history.replaceState(null, "", "/ui/work?project=a&view=active");
+  const { container } = render(<WorkPage />);
+  await screen.findByText("Task one");
+  expect(container.querySelector(".work-owner")).toBeNull();
+});
+
 it("arrow keys select rows and Enter opens the record", async () => {
   wide = true;
   history.replaceState(null, "", "/ui/work?project=a&view=active");

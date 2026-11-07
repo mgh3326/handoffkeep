@@ -107,6 +107,10 @@ package store
 //     status_updates row. The project metadata writers lock that row and
 //     nothing else, and the KEY SHARE a task or milestone write takes on it
 //     does not conflict with FOR NO KEY UPDATE (status_updates.go).
+//   - SetProjectDesignLane locks its one task_projects row FOR NO KEY UPDATE
+//     and then inserts a project_owner_events row; no writer locks an owner
+//     event row and no transaction that holds a task_projects lock waits on
+//     one, so the pair cannot close a cycle (project_owner.go).
 //   - SetChangeMergeFlow (the operator's merge-flow write) takes its own
 //     advisory lock first, so two writes cannot each pass the cycle check
 //     against the other's uncommitted dependency, then locks one changes row
