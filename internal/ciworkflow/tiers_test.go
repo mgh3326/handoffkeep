@@ -428,6 +428,9 @@ func deployWorkflowProblems(raw []byte) []string {
 		if got := fmt.Sprint(run["types"]); got != "[completed]" {
 			add("workflow_run.types is %q, want [completed]", got)
 		}
+		if got := fmt.Sprint(run["branches"]); got != "[main]" {
+			add("workflow_run.branches is %q, want [main]", got)
+		}
 	}
 	if _, ok := wf.On["workflow_dispatch"]; !ok {
 		add("must trigger on workflow_dispatch(sha)")
@@ -985,7 +988,8 @@ func TestCITierMutantsTurnRed(t *testing.T) {
 		{"deploy-one-group-per-run", "group: deploy", "group: deploy-${{ github.run_id }}"},
 		{"deploy-widens-permissions", "  statuses: write", "  statuses: write\n  contents: write"},
 		{"deploy-drops-contents-read", "  contents: read\n  statuses: write", "  statuses: write"},
-		{"deploy-no-workflow-run", "  workflow_run:\n    # ci.yml is by name, the only workflow it may follow.\n    workflows: [ci]\n    types: [completed]\n", ""},
+		{"deploy-no-workflow-run", "  workflow_run:\n    # ci.yml is by name, the only workflow it may follow. branches: [main] drops\n    # every pull request and any-ref call at the trigger, before a run exists;\n    # the target job repeats the main-push test so a manually edited trigger\n    # cannot deploy a PR head.\n    workflows: [ci]\n    types: [completed]\n    branches: [main]\n", ""},
+		{"deploy-follows-any-branch", "    branches: [main]\n", "    branches: [main, develop]\n"},
 		{"deploy-unpinned-context", "context=deploy-ok", "context=ci-ok"},
 		{"deploy-status-on-dispatch-sha", "TARGET_SHA: ${{ needs.target.outputs.sha }}", "TARGET_SHA: ${{ github.sha }}"},
 		{"deploy-status-without-always", "if: ${{ always() && needs.target.result == 'success' }}", "if: ${{ needs.target.result == 'success' }}"},

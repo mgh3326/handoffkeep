@@ -21,9 +21,13 @@ name: deploy
 # pushes deploys the newest head and drops the rest from the queue.
 on:
   workflow_run:
-    # ci.yml is by name, the only workflow it may follow.
+    # ci.yml is by name, the only workflow it may follow. branches: [main] drops
+    # every pull request and any-ref call at the trigger, before a run exists;
+    # the target job repeats the main-push test so a manually edited trigger
+    # cannot deploy a PR head.
     workflows: [ci]
     types: [completed]
+    branches: [main]
   workflow_dispatch:
     inputs:
       sha:
