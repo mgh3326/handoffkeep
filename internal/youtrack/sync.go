@@ -81,6 +81,9 @@ func (s *Service) Sync(ctx context.Context, opts SyncOptions) (SyncReport, error
 	if err != nil {
 		return report, fmt.Errorf("youtrack me: %w", err)
 	}
+	if me.ID == "" && me.Login == "" {
+		return report, fmt.Errorf("youtrack me: empty identity")
+	}
 	report.Bot = me.Login
 	if me.Login == "" {
 		report.Bot = me.ID
@@ -113,7 +116,14 @@ func (s *Service) refreshCache(ctx context.Context, limit int, report *SyncRepor
 			report.fail("cache task %d: %v", link.TaskID, err)
 			continue
 		}
-		cache := s.cacheFromIssue(link.TaskID, issue, store.Task{ID: link.TaskID})
+		fallback := store.Task{ID: link.TaskID}
+		if old, ok, cerr := s.store.GetYouTrackFieldCache(ctx, link.TaskID); cerr != nil {
+			report.fail("cache task %d: %v", link.TaskID, cerr)
+			continue
+		} else if ok {
+			fallback.Priority, fallback.Lane = old.Priority, old.Lane
+		}
+		cache := s.cacheFromIssue(link.TaskID, issue, fallback)
 		cache.Stale = false
 		if err := s.store.PutYouTrackFieldCache(ctx, cache); err != nil {
 			report.fail("cache task %d: %v", link.TaskID, err)
@@ -362,6 +372,7 @@ func (s *Service) pull(ctx context.Context, opts SyncOptions, me User, report *S
 		in, relevant, err := s.mapActivity(ctx, act, me)
 		if err != nil {
 			report.fail("activity %s: %v", act.ID, err)
+			applied = false
 			continue
 		}
 		if !relevant {

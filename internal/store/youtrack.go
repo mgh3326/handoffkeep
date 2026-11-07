@@ -528,7 +528,11 @@ func (s *Store) ApplyYouTrackActivity(ctx context.Context, in YouTrackActivity) 
 
 	out := YouTrackApplyResult{Applied: true, Outcome: YouTrackOutcomeApplied}
 	if in.NewIssue != nil {
-		if err := s.createYouTrackIssueTx(ctx, tx, *in.NewIssue); err != nil {
+		taskID, err := s.createYouTrackIssueTx(ctx, tx, *in.NewIssue)
+		if err != nil {
+			return YouTrackApplyResult{}, err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE youtrack_processed_activities SET outcome=$2,task_id=$3,issue_id=$4 WHERE activity_id=$1`, in.ID, out.Outcome, taskID, in.IssueID); err != nil {
 			return YouTrackApplyResult{}, err
 		}
 		if err := noteActivityProcessed(ctx, tx, in.ID); err != nil {
@@ -687,13 +691,13 @@ func (s *Store) applyYouTrackCommentTx(ctx context.Context, tx pgx.Tx, taskID in
 	return "", nil
 }
 
-func (s *Store) createYouTrackIssueTx(ctx context.Context, tx pgx.Tx, in YouTrackNewIssue) error {
+func (s *Store) createYouTrackIssueTx(ctx context.Context, tx pgx.Tx, in YouTrackNewIssue) (int64, error) {
 	title := strings.TrimSpace(in.Title)
 	if title == "" || !validText(title, MaxBytes) || !validName(in.Lane) || !taskKinds[in.Kind] {
-		return ErrYouTrackActivityInput
+		return 0, ErrYouTrackActivityInput
 	}
 	if err := requireTaskProject(ctx, tx, &in.Project); err != nil {
-		return err
+		return 0, err
 	}
 	now := time.Now().UTC()
 	var x Task
@@ -702,13 +706,15 @@ func (s *Store) createYouTrackIssueTx(ctx context.Context, tx pgx.Tx, in YouTrac
 		VALUES($1,'',$2,$3,$4,$5,'{}'::jsonb,'',$6,$7,$7,$7,'',$8,NULL,NULL,NULL)
 		RETURNING `+taskColumns, in.Lane, title, in.Kind, StateTriage, in.Priority, YouTrackOwnedActor, now, in.Project), &x)
 	if err != nil {
-		return err
+		return 0, err
 	}
-	_, err = tx.Exec(ctx, `
+	if _, err := tx.Exec(ctx, `
 		INSERT INTO youtrack_links(task_id,issue_id,readable_id,pushed_task_updated_at,created_at,updated_at)
 		VALUES($1,$2,$3,$4,$4,$4)
-		ON CONFLICT(task_id) DO NOTHING`, x.ID, in.IssueID, in.ReadableID, now)
-	return err
+		ON CONFLICT(task_id) DO NOTHING`, x.ID, in.IssueID, in.ReadableID, now); err != nil {
+		return 0, err
+	}
+	return x.ID, nil
 }
 
 func touchLinkTx(ctx context.Context, tx pgx.Tx, taskID int64) error {
