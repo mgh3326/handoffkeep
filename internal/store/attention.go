@@ -97,6 +97,15 @@ func attentionInboxVisible(nowParam string) string {
 	return `(s.done_at IS NULL AND (s.snoozed_until IS NULL OR s.snoozed_until<=` + nowParam + `::timestamptz))`
 }
 
+// attentionTaskVisible is the task half. A task's identity outlives one
+// waiting episode, so its done only covers the activity it was given for: a
+// task with activity after the done (a new decision request, a comment)
+// comes back, the same way a due snooze does. Decision and lane-event keys
+// are per request/event already.
+func attentionTaskVisible(nowParam string) string {
+	return `(s.done_at IS NULL OR s.done_at<` + taskActivitySQL + `) AND (s.snoozed_until IS NULL OR s.snoozed_until<=` + nowParam + `::timestamptz)`
+}
+
 // attentionLaneSQL is the lane-event decisions that count here, with the read
 // time as $1: the inbox's open [decision-needed] events, minus those whose own
 // decision_requests row is still live (open and not expired). Recording such an
@@ -204,7 +213,7 @@ func attentionRequestItems(ctx context.Context, tx pgx.Tx, now time.Time) ([]Att
 		x.Key = "decision:" + x.Source + ":" + strconv.FormatInt(x.ID, 10)
 		x.CreatedAt = x.CreatedAt.UTC()
 		x.Read = readAt != nil
-		x.Woken = inboxWoken(readAt, doneAt, snoozedUntil, now)
+		x.Woken = inboxWoken(doneAt, snoozedUntil, now)
 		if x.DueAt != nil {
 			due := x.DueAt.UTC()
 			x.DueAt = &due
@@ -237,7 +246,7 @@ func attentionLaneItems(ctx context.Context, tx pgx.Tx, now time.Time) ([]Attent
 		x.Question = strings.TrimSpace(strings.TrimPrefix(text, "[decision-needed]"))
 		x.CreatedAt = x.CreatedAt.UTC()
 		x.Read = readAt != nil
-		x.Woken = inboxWoken(readAt, doneAt, snoozedUntil, now)
+		x.Woken = inboxWoken(doneAt, snoozedUntil, now)
 		out = append(out, x)
 	}
 	return out, rows.Err()
@@ -253,14 +262,14 @@ func attentionTasksTx(ctx context.Context, tx pgx.Tx, stalledBefore, now time.Ti
 	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FILTER (WHERE `+awaitingTaskDecisionSQL+`),
 		COUNT(*) FILTER (WHERE `+attentionStalledSQL+`)
 		FROM tasks LEFT JOIN operator_inbox_state s ON s.item_key='task:'||tasks.id
-		WHERE ((`+awaitingTaskDecisionSQL+`) OR (`+attentionStalledSQL+`)) AND `+attentionInboxVisible("$2"), stalledBefore, now).Scan(&out.AwaitingDecision, &out.Stalled); err != nil {
+		WHERE ((`+awaitingTaskDecisionSQL+`) OR (`+attentionStalledSQL+`)) AND `+attentionTaskVisible("$2"), stalledBefore, now).Scan(&out.AwaitingDecision, &out.Stalled); err != nil {
 		return out, err
 	}
 	out.Count = out.AwaitingDecision + out.Stalled
 
 	rows, err := tx.Query(ctx, `SELECT tasks.id,title,lane,state,priority,(`+awaitingTaskDecisionSQL+`) AS awaiting,`+taskActivitySQL+` AS since,s.read_at,s.done_at,s.snoozed_until
 		FROM tasks LEFT JOIN operator_inbox_state s ON s.item_key='task:'||tasks.id
-		WHERE ((`+awaitingTaskDecisionSQL+`) OR (`+attentionStalledSQL+`)) AND `+attentionInboxVisible("$2")+`
+		WHERE ((`+awaitingTaskDecisionSQL+`) OR (`+attentionStalledSQL+`)) AND `+attentionTaskVisible("$2")+`
 		ORDER BY since DESC, tasks.id DESC LIMIT $3`, stalledBefore, now, AttentionItems)
 	if err != nil {
 		return out, err
@@ -276,7 +285,7 @@ func attentionTasksTx(ctx context.Context, tx pgx.Tx, stalledBefore, now time.Ti
 		x.Key = "task:" + strconv.FormatInt(x.ID, 10)
 		x.Since = x.Since.UTC()
 		x.Read = readAt != nil
-		x.Woken = inboxWoken(readAt, doneAt, snoozedUntil, now)
+		x.Woken = inboxWoken(doneAt, snoozedUntil, now)
 		x.Reason = AttentionReasonStalled
 		if awaiting {
 			x.Reason = AttentionReasonAwaitingDecision

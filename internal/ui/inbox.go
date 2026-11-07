@@ -4,6 +4,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/mgh3326/handoffkeep/internal/cfaccess"
@@ -18,6 +19,8 @@ const (
 	inboxWritePath = "/ui/api/inbox/state"
 	// inboxUndoPath restores the items of one earlier write.
 	inboxUndoPath = "/ui/api/inbox/undo"
+	// inboxReadLimit bounds the GET state read: the Work page's visible rows.
+	inboxReadLimit = 200
 )
 
 type inboxItemView struct {
@@ -130,10 +133,57 @@ func (h *Handler) inboxUndo(w http.ResponseWriter, r *http.Request, identity cfa
 		return
 	}
 	items := make([]inboxItemView, 0, len(restored))
+	conflicted := []string{}
 	for _, item := range restored {
+		if errors.Is(item.Err, store.ErrInboxUndoConflict) {
+			conflicted = append(conflicted, item.ItemKey)
+			continue
+		}
 		items = append(items, inboxItemViewOf(item.State))
 	}
 	outcome.result = "ok"
+	writeBoardJSON(w, map[string]any{"items": items, "conflicted": conflicted})
+}
+
+// inboxStates serves GET /ui/api/inbox/state?keys=task:1,task:2: the stored
+// triage state of the visible rows, so a page that lists tasks (Work) shows
+// the same read/done/snoozed marks Home does.
+func (h *Handler) inboxStates(w http.ResponseWriter, r *http.Request, identity cfaccess.Identity) {
+	if identity.ServiceName != "" {
+		writeJSONError(w, http.StatusForbidden, "forbidden")
+		return
+	}
+	raw := strings.TrimSpace(r.URL.Query().Get("keys"))
+	keys := []string{}
+	if raw != "" {
+		keys = strings.Split(raw, ",")
+	}
+	if len(keys) > inboxReadLimit {
+		writeJSONError(w, http.StatusBadRequest, "invalid_query")
+		return
+	}
+	for _, key := range keys {
+		if !store.ValidInboxItemKey(key) {
+			writeJSONError(w, http.StatusBadRequest, "invalid_query")
+			return
+		}
+	}
+	states, err := h.store.InboxStates(r.Context(), keys)
+	if err != nil {
+		log.Printf("ui.inbox_states_failed err=%q", err.Error())
+		writeJSONError(w, http.StatusInternalServerError, "internal_error")
+		return
+	}
+	now := time.Now().UTC()
+	type stateView struct {
+		inboxItemView
+		Woken bool `json:"woken"`
+	}
+	items := make([]stateView, 0, len(keys))
+	for _, key := range keys {
+		state := states[key]
+		items = append(items, stateView{inboxItemView: inboxItemViewOf(state), Woken: state.Woken(now)})
+	}
 	writeBoardJSON(w, map[string]any{"items": items})
 }
 

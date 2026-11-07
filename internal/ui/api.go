@@ -133,6 +133,8 @@ func (h *Handler) serveAPI(w http.ResponseWriter, r *http.Request, identity cfac
 		h.decisionDeny(w, r, identity)
 	case r.Method == http.MethodGet && r.URL.Path == "/ui/api/attention":
 		h.attention(w, r, identity)
+	case r.Method == http.MethodGet && r.URL.Path == inboxWritePath:
+		h.inboxStates(w, r, identity)
 	case r.Method == http.MethodPost && r.URL.Path == inboxWritePath:
 		h.inboxState(w, r, identity)
 	case r.Method == http.MethodPost && r.URL.Path == inboxUndoPath:

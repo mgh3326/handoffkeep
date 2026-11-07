@@ -5,6 +5,7 @@
 // shape — a malformed answer is an error, never an empty result.
 
 import { readCsrfToken } from "./boardApi";
+import { getJSON } from "./http";
 
 export type InboxItemState = {
   item_key: string;
@@ -14,6 +15,9 @@ export type InboxItemState = {
 };
 
 export type InboxFailure = { item_key: string; error: string };
+
+/** Stored state plus whether a snooze has come due. */
+export type InboxStateView = InboxItemState & { woken: boolean };
 
 export type InboxWriteResult = {
   action: string;
@@ -140,9 +144,28 @@ export async function writeInbox(
   };
 }
 
-/** Restores every item of the write sent with eventKey. */
-export async function undoInbox(eventKey: string): Promise<InboxItemState[]> {
+export type InboxUndoResult = { items: InboxItemState[]; conflicted: string[] };
+
+/** Restores every item of the write sent with eventKey. An item a later
+ * write moved is reported in conflicted and left as that write left it. */
+export async function undoInbox(eventKey: string): Promise<InboxUndoResult> {
   const raw = await post("/ui/api/inbox/undo", { event_key: eventKey });
-  if (!record(raw) || !Array.isArray(raw.items)) throw new Error("malformed inbox undo response");
-  return raw.items.map(parseItem);
+  if (!record(raw) || !Array.isArray(raw.items) || !Array.isArray(raw.conflicted) || !raw.conflicted.every(key => typeof key === "string"))
+    throw new Error("malformed inbox undo response");
+  return { items: raw.items.map(parseItem), conflicted: raw.conflicted };
+}
+
+/** The stored triage state of keys, for a page that lists tasks without the
+ * attention document (Work). */
+export async function fetchInboxStates(keys: string[]): Promise<Map<string, InboxStateView>> {
+  const out = new Map<string, InboxStateView>();
+  if (keys.length === 0) return out;
+  const raw = await getJSON<unknown>(`/ui/api/inbox/state?keys=${encodeURIComponent(keys.join(","))}`);
+  if (!record(raw) || !Array.isArray(raw.items)) throw new Error("malformed inbox states response");
+  for (const item of raw.items) {
+    const parsed = parseItem(item);
+    if (!record(item) || typeof item.woken !== "boolean") throw new Error("malformed inbox state");
+    out.set(parsed.item_key, { ...parsed, woken: item.woken });
+  }
+  return out;
 }

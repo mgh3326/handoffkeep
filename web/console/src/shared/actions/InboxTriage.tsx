@@ -18,7 +18,7 @@ export const BULK_LIMIT = 50;
 
 export type TriageRow = InboxTarget;
 
-type UndoEntry = { label: string; undo: () => Promise<void> };
+type UndoEntry = { label: string; undo: () => Promise<string[]> };
 
 export type Triage = ReturnType<typeof useInboxTriage>;
 
@@ -108,7 +108,7 @@ export function useInboxTriage(rows: TriageRow[], reload: () => void) {
       if (keys.length > BULK_LIMIT) parts.push(`선택 ${keys.length}건 중 앞 ${BULK_LIMIT}건만 처리했습니다`);
       setNotice(parts.join(" · "));
       if (result.items.length > 0) {
-        pushUndo({ label: inboxActionLabel(id), undo: async () => { await undoInbox(eventKey); } });
+        pushUndo({ label: inboxActionLabel(id), undo: async () => (await undoInbox(eventKey)).conflicted });
       }
       setSelected(new Set());
       setAnchor(null);
@@ -140,6 +140,7 @@ export function useInboxTriage(rows: TriageRow[], reload: () => void) {
         label: "우선순위 변경",
         undo: async () => {
           for (const entry of results) await setTaskPriority(entry.id, entry.result.previous);
+          return [];
         },
       });
       setNotice(`우선순위 ${value === 0 ? "없음" : `P${value}`} · ${results.length}건`);
@@ -159,8 +160,8 @@ export function useInboxTriage(rows: TriageRow[], reload: () => void) {
     stackRef.current = stackRef.current.slice(0, -1);
     setUndoCount(stackRef.current.length);
     try {
-      await last.undo();
-      setNotice(`${last.label} 실행 취소`);
+      const conflicted = await last.undo();
+      setNotice(conflicted.length > 0 ? `${last.label} 실행 취소 · ${conflicted.length}건은 다른 곳에서 바뀌어 그대로 두었습니다` : `${last.label} 실행 취소`);
       reloadRef.current();
     } catch {
       setNotice("실행 취소하지 못했습니다.");
@@ -294,7 +295,7 @@ export function useInboxTriage(rows: TriageRow[], reload: () => void) {
           if (!handler.canUndo) return;
           void handler.undo();
           break;
-        case "u": void handler.runAction(row.read ? "unread" : "read"); break;
+        case "u": void handler.runAction(row.read && !row.woken ? "unread" : "read"); break;
         case "h": void handler.runAction("snooze"); break;
         case "x": if (event.shiftKey) handler.rangeTo(row.key); else handler.toggle(row.key); break;
         case "X": handler.rangeTo(row.key); break;

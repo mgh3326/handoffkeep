@@ -39,7 +39,7 @@ beforeEach(() => {
   fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const body = typeof init?.body === "string" ? JSON.parse(init.body) : { items: [] };
     const path = String(input);
-    if (path === "/ui/api/inbox/undo") return new Response(JSON.stringify({ items: body.items ?? [] }));
+    if (path === "/ui/api/inbox/undo") return new Response(JSON.stringify({ items: [], conflicted: [] }));
     return writeResult(body.items ?? [], body.action);
   });
   vi.stubGlobal("fetch", fetcher);
@@ -99,6 +99,13 @@ it("h opens the snooze picker and a preset sends its time", async () => {
   const until = Date.parse(body.until);
   expect(until).toBeGreaterThan(before + 59 * 60 * 1000);
   expect(until).toBeLessThanOrEqual(Date.now() + 61 * 60 * 1000);
+});
+
+it("lets a woken item be read again, and u sends read for it", async () => {
+  render(<Fixture rows={[row("task:1", { read: true, woken: true })]} />);
+  fireEvent.keyDown(focusRow("task:1"), { key: "u" });
+  await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(1));
+  expect(lastBody()).toMatchObject({ action: "read", items: ["task:1"] });
 });
 
 it("? opens the shortcut help", () => {

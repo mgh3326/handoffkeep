@@ -43,14 +43,18 @@ var (
 	// ErrInvalidInboxSnooze refuses a snooze time that is not in the future
 	// or is further out than MaxInboxSnooze.
 	ErrInvalidInboxSnooze = errors.New("invalid_inbox_snooze")
+	// ErrInboxUndoConflict reports an undo item a later write has moved; the
+	// undo leaves that item as the later write left it.
+	ErrInboxUndoConflict = errors.New("inbox_undo_conflict")
 )
 
 // inboxItemKeyRE is the attention item key the console builds:
 // decision:<request|lane_event>:<id>, task:<id>, and deploy:<service>:<id>
 // (a deploy row keeps the service so one task merged into two services stays
 // two rows). The deploy form without a service is accepted as the brief names
-// it.
-var inboxItemKeyRE = regexp.MustCompile(`^(decision:(request|lane_event):[1-9][0-9]{0,14}|task:[1-9][0-9]{0,14}|deploy:([A-Za-z0-9][A-Za-z0-9._-]{0,95}:)?[1-9][0-9]{0,14})$`)
+// it. The service part matches store nameRE, the source of every registered
+// deploy service name, so every name Home can show is triaged too.
+var inboxItemKeyRE = regexp.MustCompile(`^(decision:(request|lane_event):[1-9][0-9]{0,14}|task:[1-9][0-9]{0,14}|deploy:([A-Za-z0-9._-]{1,128}:)?[1-9][0-9]{0,14})$`)
 
 // ValidInboxItemKey reports whether key is an attention item key.
 func ValidInboxItemKey(key string) bool { return inboxItemKeyRE.MatchString(key) }
@@ -65,21 +69,18 @@ type InboxState struct {
 	UpdatedAt    time.Time
 }
 
-// Woken reports whether a snooze has come due and the operator has not read
-// the item since: the console shows it again marked 「다시 알림」.
+// Woken reports whether a snooze has come due: the item is visible again and
+// the console marks it 「다시 알림」 until the operator reads or completes it.
 func (x InboxState) Woken(now time.Time) bool {
-	return inboxWoken(x.ReadAt, x.DoneAt, x.SnoozedUntil, now)
+	return inboxWoken(x.DoneAt, x.SnoozedUntil, now)
 }
 
-func inboxWoken(readAt, doneAt, snoozedUntil *time.Time, now time.Time) bool {
-	if doneAt != nil || snoozedUntil == nil || snoozedUntil.After(now) {
-		return false
-	}
-	return readAt == nil || readAt.Before(*snoozedUntil)
+func inboxWoken(doneAt, snoozedUntil *time.Time, now time.Time) bool {
+	return doneAt == nil && snoozedUntil != nil && !snoozedUntil.After(now)
 }
 
-// InboxWrite is one item's outcome. Err is set when this item was refused;
-// the other items of the same call still applied.
+// InboxWrite is one item's outcome. Err is set when this item was refused or
+// skipped; the other items of the same call still applied.
 type InboxWrite struct {
 	ItemKey string
 	State   InboxState
@@ -98,7 +99,7 @@ type InboxWriteResult struct {
 // state and writes nothing.
 func (s *Store) ApplyInbox(ctx context.Context, keys []string, action string, until *time.Time, actor, eventKey string) (InboxWriteResult, error) {
 	out := InboxWriteResult{Items: []InboxWrite{}}
-	if !validInboxAction(action) || strings.TrimSpace(actor) == "" || !validText(actor, 256) || strings.TrimSpace(eventKey) == "" || !validText(eventKey, 128) {
+	if !validInboxAction(action) || strings.TrimSpace(actor) == "" || !validText(actor, 320) || strings.TrimSpace(eventKey) == "" || !validText(eventKey, 128) {
 		return out, ErrInvalidInboxWrite
 	}
 	// Microsecond precision, the column's: the value returned here is the
@@ -108,7 +109,7 @@ func (s *Store) ApplyInbox(ctx context.Context, keys []string, action string, un
 		if until == nil {
 			return out, ErrInvalidInboxSnooze
 		}
-		end := until.UTC()
+		end := until.UTC().Truncate(time.Microsecond)
 		if !end.After(now) || end.Sub(now) > MaxInboxSnooze {
 			return out, ErrInvalidInboxSnooze
 		}
@@ -136,9 +137,11 @@ func (s *Store) ApplyInbox(ctx context.Context, keys []string, action string, un
 
 // UndoInbox restores every item of the write eventKey in one transaction: the
 // read/done/snooze values the write replaced, and the decision request snooze
-// it mirrored. A second undo of the same key is a no-op.
+// it mirrored. An item a later write moved is left alone and reported with
+// ErrInboxUndoConflict, so two tabs cannot undo each other's work. A second
+// undo of the same key is a no-op.
 func (s *Store) UndoInbox(ctx context.Context, eventKey, actor string) ([]InboxWrite, error) {
-	if strings.TrimSpace(eventKey) == "" || !validText(eventKey, 128) || strings.TrimSpace(actor) == "" || !validText(actor, 256) {
+	if strings.TrimSpace(eventKey) == "" || !validText(eventKey, 128) || strings.TrimSpace(actor) == "" || !validText(actor, 320) {
 		return nil, ErrInvalidInboxWrite
 	}
 	now := time.Now().UTC().Truncate(time.Microsecond)
@@ -147,22 +150,22 @@ func (s *Store) UndoInbox(ctx context.Context, eventKey, actor string) ([]InboxW
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
-	rows, err := tx.Query(ctx, `SELECT item_key,previous_read_at,previous_done_at,previous_snoozed_until,previous_request_id,previous_request_snoozed_until
+	rows, err := tx.Query(ctx, `SELECT item_key,previous_read_at,previous_done_at,previous_snoozed_until,previous_request_id,previous_request_snoozed_until,applied_read_at,applied_done_at,applied_snoozed_until
 		FROM operator_inbox_events WHERE event_key=$1 AND undone_at IS NULL ORDER BY item_key`, eventKey)
 	if err != nil {
 		return nil, err
 	}
 	type restore struct {
-		key        string
-		read, done *time.Time
-		snooze     *time.Time
-		requestID  *int64
-		request    *time.Time
+		key                                      string
+		read, done, snooze                       *time.Time
+		requestID                                *int64
+		request                                  *time.Time
+		appliedRead, appliedDone, appliedSnooze  *time.Time
 	}
 	restores := []restore{}
 	for rows.Next() {
 		var r restore
-		if err := rows.Scan(&r.key, &r.read, &r.done, &r.snooze, &r.requestID, &r.request); err != nil {
+		if err := rows.Scan(&r.key, &r.read, &r.done, &r.snooze, &r.requestID, &r.request, &r.appliedRead, &r.appliedDone, &r.appliedSnooze); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -174,7 +177,28 @@ func (s *Store) UndoInbox(ctx context.Context, eventKey, actor string) ([]InboxW
 	}
 	out := make([]InboxWrite, 0, len(restores))
 	for _, r := range restores {
-		state := InboxState{ItemKey: r.key, ReadAt: r.read, DoneAt: r.done, SnoozedUntil: r.snooze, Actor: actor, UpdatedAt: now}
+		current, found, err := inboxStateTx(ctx, tx, r.key, true)
+		if err != nil {
+			return nil, err
+		}
+		if !found || !sameInboxTime(current.ReadAt, r.appliedRead) || !sameInboxTime(current.DoneAt, r.appliedDone) || !sameInboxTime(current.SnoozedUntil, r.appliedSnooze) {
+			out = append(out, InboxWrite{ItemKey: r.key, Err: ErrInboxUndoConflict})
+			continue
+		}
+		requestGone := false
+		if r.requestID != nil {
+			var currentSnooze *time.Time
+			err := tx.QueryRow(ctx, `SELECT snoozed_until FROM decision_requests WHERE id=$1 FOR UPDATE`, *r.requestID).Scan(&currentSnooze)
+			switch {
+			case errors.Is(err, pgx.ErrNoRows):
+				requestGone = true
+			case err != nil:
+				return nil, err
+			case !sameInboxTime(currentSnooze, r.appliedSnooze):
+				out = append(out, InboxWrite{ItemKey: r.key, Err: ErrInboxUndoConflict})
+				continue
+			}
+		}
 		if r.read == nil && r.done == nil && r.snooze == nil {
 			if _, err := tx.Exec(ctx, `DELETE FROM operator_inbox_state WHERE item_key=$1`, r.key); err != nil {
 				return nil, err
@@ -185,17 +209,26 @@ func (s *Store) UndoInbox(ctx context.Context, eventKey, actor string) ([]InboxW
 			r.key, r.read, r.done, r.snooze, actor, now); err != nil {
 			return nil, err
 		}
-		if r.requestID != nil {
+		if r.requestID != nil && !requestGone {
 			if _, err := tx.Exec(ctx, `UPDATE decision_requests SET snoozed_until=$2,updated_at=$3 WHERE id=$1`, *r.requestID, r.request, now); err != nil {
 				return nil, err
 			}
 		}
-		out = append(out, InboxWrite{ItemKey: r.key, State: state})
+		out = append(out, InboxWrite{ItemKey: r.key, State: InboxState{ItemKey: r.key, ReadAt: r.read, DoneAt: r.done, SnoozedUntil: r.snooze, Actor: actor, UpdatedAt: now}})
 	}
 	if _, err := tx.Exec(ctx, `UPDATE operator_inbox_events SET undone_at=$2 WHERE event_key=$1 AND undone_at IS NULL`, eventKey, now); err != nil {
 		return nil, err
 	}
 	return out, tx.Commit(ctx)
+}
+
+// sameInboxTime reports whether two nullable times are the same instant,
+// including both absent.
+func sameInboxTime(a, b *time.Time) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return a.Equal(*b)
 }
 
 // InboxStates reads the stored triage state of keys, in batches of 500.
@@ -246,9 +279,9 @@ func inboxRequestID(key string) (int64, bool) {
 }
 
 // applyInboxItem writes one item in its own transaction. Lock order: the
-// operator_inbox_state row, then the decision_requests row a snooze
-// mirrors. Only this writer takes inbox state rows, so the pair cannot close
-// a cycle with a decision writer that locks only its request.
+// operator_inbox_state row, then the decision_requests row a snooze mirrors.
+// Only this writer takes inbox state rows, so the pair cannot close a cycle
+// with a decision writer that locks only its request.
 func (s *Store) applyInboxItem(ctx context.Context, key, action string, until *time.Time, actor, eventKey string, now time.Time) (InboxState, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -256,29 +289,40 @@ func (s *Store) applyInboxItem(ctx context.Context, key, action string, until *t
 	}
 	defer tx.Rollback(ctx)
 
-	prev, found, err := inboxStateTx(ctx, tx, key, true)
-	if err != nil {
-		return InboxState{}, err
-	}
-	if !found {
-		prev = InboxState{ItemKey: key}
-	}
 	var replayed bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM operator_inbox_events WHERE event_key=$1 AND item_key=$2)`, eventKey, key).Scan(&replayed); err != nil {
 		return InboxState{}, err
 	}
 	if replayed {
 		// The same click delivered twice: report what the operator sees now.
+		prev, _, err := inboxStateTx(ctx, tx, key, false)
+		if err != nil {
+			return InboxState{}, err
+		}
 		return prev, tx.Commit(ctx)
+	}
+
+	// Create the row before locking it. SELECT ... FOR UPDATE locks nothing
+	// when no row exists, so two first writes on one item would both read an
+	// empty state and the later upsert would drop the earlier one. An
+	// all-null row means "no triage".
+	if _, err := tx.Exec(ctx, `INSERT INTO operator_inbox_state(item_key,actor,updated_at)
+		VALUES($1,$2,$3) ON CONFLICT (item_key) DO NOTHING`, key, actor, now); err != nil {
+		return InboxState{}, err
+	}
+	prev, _, err := inboxStateTx(ctx, tx, key, true)
+	if err != nil {
+		return InboxState{}, err
 	}
 
 	next := prev
 	next.ItemKey = key
 	switch action {
 	case InboxActionRead:
-		if next.ReadAt == nil {
-			next.ReadAt = &now
-		}
+		// Reading acknowledges the item: it clears the unread mark and any
+		// snooze, including one that has already come due (「다시 알림」).
+		next.ReadAt = &now
+		next.SnoozedUntil = nil
 	case InboxActionUnread:
 		next.ReadAt = nil
 		next.SnoozedUntil = nil
@@ -315,9 +359,9 @@ func (s *Store) applyInboxItem(ctx context.Context, key, action string, until *t
 			previousRequestSnooze = before
 		}
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO operator_inbox_events(event_key,item_key,action,previous_read_at,previous_done_at,previous_snoozed_until,previous_request_id,previous_request_snoozed_until,actor,at)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-		eventKey, key, action, prev.ReadAt, prev.DoneAt, prev.SnoozedUntil, requestID, previousRequestSnooze, actor, now); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO operator_inbox_events(event_key,item_key,action,previous_read_at,previous_done_at,previous_snoozed_until,previous_request_id,previous_request_snoozed_until,applied_read_at,applied_done_at,applied_snoozed_until,actor,at)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+		eventKey, key, action, prev.ReadAt, prev.DoneAt, prev.SnoozedUntil, requestID, previousRequestSnooze, next.ReadAt, next.DoneAt, next.SnoozedUntil, actor, now); err != nil {
 		return InboxState{}, err
 	}
 	return next, tx.Commit(ctx)

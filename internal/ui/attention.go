@@ -156,7 +156,9 @@ func attentionDeploys(pending deployPendingResponse, states map[string]store.Inb
 		for _, task := range service.MergedSince {
 			key := deployInboxKey(service.Service, task.TaskID)
 			state := states[key]
-			if state.DoneAt != nil {
+			// A done covers the merge it was given for: a later merge into
+			// the same service brings the row back, as it does for a task.
+			if state.DoneAt != nil && !state.DoneAt.Before(task.MergedAt) {
 				continue
 			}
 			if state.SnoozedUntil != nil && state.SnoozedUntil.After(now) {

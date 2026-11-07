@@ -14,6 +14,7 @@ import { inView, views, type View } from "./views";
 import { TaskRecord } from "./TaskRecord";
 import { TaskActions } from "../shared/actions/TaskActions";
 import { TriageUi, useInboxTriage, type TriageRow } from "../shared/actions/InboxTriage";
+import { fetchInboxStates, type InboxStateView } from "../shared/inboxApi";
 import "./work.css";
 const labels: Record<View, string> = { "needs-me": "내 차례", active: "진행 중", backlog: "대기", shipped: "완료", all: "전체" };
 export function WorkPage() {
@@ -47,7 +48,24 @@ export function WorkPage() {
   const visible = filtered.filter(t => inView(t, view)).sort((a, b) => CHIP_GROUP_ORDER.indexOf(statusGroup(a)) - CHIP_GROUP_ORDER.indexOf(statusGroup(b)) || (a.priority || Number.POSITIVE_INFINITY) - (b.priority || Number.POSITIVE_INFINITY) || b.updated_at.localeCompare(a.updated_at) || b.id - a.id);
   // The triage rows follow the rendered order, so j/k walks the list the page
   // shows. A task row's inbox key is task:<id>, the same item Home triages.
-  const triageRows: TriageRow[] = visible.map(t => ({ key: `task:${t.id}`, read: false, done: false, woken: false, task: { id: t.id, state: t.state, priority: t.priority } }));
+  // The stored state is one bounded read for the visible rows (the route caps
+  // at 200); a row past the cap shows unread until the filters narrow it.
+  const stateKeys = visible.slice(0, 200).map(t => `task:${t.id}`).join(",");
+  const [inbox, setInbox] = useState<Map<string, InboxStateView>>(() => new Map());
+  useEffect(() => {
+    if (stateKeys === "") {
+      setInbox(new Map());
+      return;
+    }
+    let active = true;
+    void fetchInboxStates(stateKeys.split(",")).then(states => { if (active) setInbox(states); }).catch(() => { if (active) setInbox(new Map()); });
+    return () => { active = false; };
+  }, [stateKeys]);
+  const triageRows: TriageRow[] = visible.map(t => {
+    const key = `task:${t.id}`;
+    const state = inbox.get(key);
+    return { key, read: state?.read ?? false, done: state?.done ?? false, woken: state?.woken ?? false, task: { id: t.id, state: t.state, priority: t.priority } };
+  });
   const triage = useInboxTriage(triageRows, reload);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {

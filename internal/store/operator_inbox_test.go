@@ -122,6 +122,8 @@ func TestApplyInboxValidates(t *testing.T) {
 		{"zero id", "task:0", ErrInvalidInboxItem},
 		{"deploy", "deploy:77", nil},
 		{"deploy service", "deploy:handoffkeep:77", nil},
+		{"deploy service name", "deploy:-api:77", nil},
+		{"deploy dotted service", "deploy:.svc:77", nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			result, err := s.ApplyInbox(ctx, []string{tc.key}, InboxActionRead, nil, "operator:test", "e-"+tc.name)
@@ -240,5 +242,42 @@ func TestInboxSnoozeDecisionInSameTransaction(t *testing.T) {
 	}
 	if len(states) != 0 {
 		t.Fatalf("failed snooze left inbox state %+v", states)
+	}
+}
+
+// An undo restores only the items no later write has moved, so two tabs cannot
+// undo each other's triage.
+func TestUndoInboxLeavesLaterWritesAlone(t *testing.T) {
+	s := schemaStore(t, "inbox_undo_conflict")
+	ctx := t.Context()
+	key := inboxKeyTask(21)
+	if _, err := s.ApplyInbox(ctx, []string{key}, InboxActionRead, nil, "operator:a", "event-a"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ApplyInbox(ctx, []string{key}, InboxActionDone, nil, "operator:b", "event-b"); err != nil {
+		t.Fatal(err)
+	}
+	out, err := s.UndoInbox(ctx, "event-a", "operator:a")
+	if err != nil || len(out) != 1 || !errors.Is(out[0].Err, ErrInboxUndoConflict) {
+		t.Fatalf("undo of the older write: %+v %v", out, err)
+	}
+	states, err := s.InboxStates(ctx, []string{key})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if states[key].DoneAt == nil || states[key].ReadAt == nil {
+		t.Fatalf("later done was reverted: %+v", states[key])
+	}
+	// The later write's own undo still works: the row still matches it.
+	out, err = s.UndoInbox(ctx, "event-b", "operator:b")
+	if err != nil || len(out) != 1 || out[0].Err != nil {
+		t.Fatalf("undo of the later write: %+v %v", out, err)
+	}
+	states, err = s.InboxStates(ctx, []string{key})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if states[key].DoneAt != nil || states[key].ReadAt == nil {
+		t.Fatalf("undo of the later write state %+v", states[key])
 	}
 }

@@ -18,6 +18,9 @@ it("keeps one registry entry per inbox action with Korean refusals", () => {
   const read = find("read");
   expect(read.applicable(target())).toBe(true);
   expect(read.disabledReason(target({ read: true }))).toContain("이미 읽");
+  // A woken item is acknowledged by reading it again.
+  expect(read.applicable(target({ read: true, woken: true }))).toBe(true);
+  expect(read.disabledReason(target({ read: true, woken: true }))).toBeNull();
 
   const unread = find("unread");
   expect(unread.applicable(target())).toBe(false);

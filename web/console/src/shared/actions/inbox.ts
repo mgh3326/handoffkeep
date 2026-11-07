@@ -47,8 +47,10 @@ export const inboxActions: InboxAction[] = [
     keywords: ["read", "읽음", "u"],
     shortcut: "u",
     confirm: "undo",
-    applicable: target => !target.read,
-    disabledReason: target => (target.read ? "이미 읽은 항목입니다" : null),
+    // A woken item can be read even when read before: reading acknowledges
+    // the wake and clears 「다시 알림」.
+    applicable: target => !target.read || target.woken,
+    disabledReason: target => (target.read && !target.woken ? "이미 읽은 항목입니다" : null),
   },
   {
     id: "unread",

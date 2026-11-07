@@ -386,10 +386,9 @@ func TestAttentionExcludesTriagedAndFlagsWoken(t *testing.T) {
 		t.Fatalf("woken task state %+v", item)
 	}
 
-	// Reading an item after it woke clears the mark without putting it back
-	// to sleep. (Reading before the snooze comes due must not clear it, which
-	// is why the read time is set past the wake time here.)
-	if _, err := s.pool.Exec(ctx, `UPDATE operator_inbox_state SET read_at=$2,updated_at=$2 WHERE item_key=$1`, taskKey, until.Add(30*time.Second)); err != nil {
+	// Reading the woken item acknowledges it: read clears the mark and the
+	// snooze through the same action the console sends.
+	if _, err := s.ApplyInbox(ctx, []string{taskKey}, InboxActionRead, nil, "operator:test", "read-one"); err != nil {
 		t.Fatal(err)
 	}
 	got, err = s.Attention(ctx, until.Add(time.Minute))
@@ -398,6 +397,28 @@ func TestAttentionExcludesTriagedAndFlagsWoken(t *testing.T) {
 	}
 	if item := got.Tasks.Items[0]; item.Woken || !item.Read {
 		t.Fatalf("read task state %+v", item)
+	}
+
+	// A done covers the waiting episode it was given for: a task that needs
+	// the operator again afterwards comes back.
+	if _, err := s.ApplyInbox(ctx, []string{taskKey}, InboxActionDone, nil, "operator:test", "done-task"); err != nil {
+		t.Fatal(err)
+	}
+	doneAt := time.Now().UTC()
+	if got, err = s.Attention(ctx, doneAt.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if got.Tasks.Count != 0 || len(got.Tasks.Items) != 0 {
+		t.Fatalf("done task still listed: %+v", got.Tasks)
+	}
+	if _, err := s.pool.Exec(ctx, `INSERT INTO task_comments(task_id,author,body,created_at) VALUES($1,'test','new activity',$2)`, task, doneAt.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if got, err = s.Attention(ctx, doneAt.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if got.Tasks.Count != 1 || len(got.Tasks.Items) != 1 || got.Tasks.Items[0].Key != taskKey {
+		t.Fatalf("task did not return after new activity: %+v", got.Tasks)
 	}
 
 	// Undo brings the completed decision back.
