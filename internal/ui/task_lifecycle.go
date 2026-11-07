@@ -13,6 +13,7 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/cfaccess"
 	"github.com/mgh3326/handoffkeep/internal/guard"
 	"github.com/mgh3326/handoffkeep/internal/store"
+	"github.com/mgh3326/handoffkeep/internal/youtrack"
 )
 
 // The console's task lifecycle writes: one route per registry action, all
@@ -218,10 +219,40 @@ func (h *Handler) relaneTask(w http.ResponseWriter, r *http.Request, identity cf
 	if note == "" {
 		note = "콘솔에서 레인 이동"
 	}
+	previousLane := ""
+	if h.youTrack != nil {
+		var found bool
+		var err error
+		previousLane, _, found, err = h.store.TaskRouting(r.Context(), id)
+		if err != nil {
+			log.Printf("ui.task_relane_failed err=%q", err)
+			writeJSONError(w, http.StatusInternalServerError, "internal_error")
+			outcome.result = "error"
+			return
+		}
+		if !found {
+			writeJSONError(w, http.StatusNotFound, "not_found")
+			return
+		}
+		if err := h.youTrack.PrepareLane(r.Context(), id, input.Lane); err != nil {
+			log.Printf("ui.task_relane_youtrack_failed task_id=%d err=%q", id, err)
+			writeJSONError(w, http.StatusBadGateway, "youtrack_unavailable")
+			outcome.result = "error"
+			return
+		}
+	}
 	result, err := h.store.OperatorRelaneTask(r.Context(), id, input.Lane, apiIdentity(identity), note, input.EventKey, input.FromKey)
 	if err != nil {
+		if h.youTrack != nil {
+			if rerr := h.youTrack.PrepareLane(r.Context(), id, previousLane); rerr != nil {
+				log.Printf("ui.task_relane_restore_failed task_id=%d err=%q", id, rerr)
+			}
+		}
 		outcome.result = lifecycleError(w, err)
 		return
+	}
+	if h.youTrack != nil && result.Changed {
+		h.youTrack.CacheLane(r.Context(), id, input.Lane)
 	}
 	relay := "none"
 	if result.Changed {
@@ -277,6 +308,8 @@ func lifecycleError(w http.ResponseWriter, err error) string {
 		writeJSONError(w, http.StatusConflict, "task_conflict")
 	case errors.Is(err, store.ErrTaskTerminal):
 		writeJSONError(w, http.StatusConflict, "task_terminal")
+	case errors.Is(err, youtrack.ErrUnavailable):
+		writeJSONError(w, http.StatusBadGateway, "youtrack_unavailable")
 	case errors.Is(err, store.ErrClosureInvalid):
 		writeJSONError(w, http.StatusBadRequest, "closure_invalid")
 	case errors.Is(err, store.ErrDuplicateOfRequired):

@@ -37,8 +37,37 @@ func (h *Handler) taskPriority(w http.ResponseWriter, r *http.Request, identity 
 		return
 	}
 	outcome.target = strconv.FormatInt(id, 10)
+	previousPriority := 0
+	if h.youTrack != nil {
+		var found bool
+		var err error
+		_, previousPriority, found, err = h.store.TaskRouting(r.Context(), id)
+		if err != nil {
+			log.Printf("ui.task_priority_failed err=%q", err.Error())
+			writeJSONError(w, http.StatusInternalServerError, "internal_error")
+			outcome.result = "error"
+			return
+		}
+		if !found {
+			writeJSONError(w, http.StatusNotFound, "not_found")
+			return
+		}
+		if err := h.youTrack.PreparePriority(r.Context(), id, *input.Priority); err != nil {
+			log.Printf("ui.task_priority_youtrack_failed task_id=%d err=%q", id, err)
+			writeJSONError(w, http.StatusBadGateway, "youtrack_unavailable")
+			outcome.result = "error"
+			return
+		}
+	}
 	result, err := h.store.SetTaskPriority(r.Context(), id, *input.Priority, apiIdentity(identity), input.Reason, input.EventKey)
 	if err != nil {
+		if h.youTrack != nil {
+			// YouTrack already has the new value; put the old one back so a
+			// refused hk write cannot leave the two sides disagreeing.
+			if rerr := h.youTrack.PreparePriority(r.Context(), id, previousPriority); rerr != nil {
+				log.Printf("ui.task_priority_restore_failed task_id=%d err=%q", id, rerr)
+			}
+		}
 		switch {
 		case errors.Is(err, store.ErrInvalidTaskPriority):
 			writeJSONError(w, http.StatusBadRequest, "invalid_request")
@@ -56,6 +85,9 @@ func (h *Handler) taskPriority(w http.ResponseWriter, r *http.Request, identity 
 			outcome.result = "error"
 		}
 		return
+	}
+	if h.youTrack != nil {
+		h.youTrack.CachePriority(r.Context(), id, *input.Priority)
 	}
 	outcome.result = "ok"
 	writeBoardJSON(w, result)

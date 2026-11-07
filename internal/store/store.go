@@ -513,10 +513,17 @@ type Task struct {
 	SourceRef string `json:"source_ref,omitempty"`
 	// Stalled is computed at read time: a started task with no
 	// awaiting_decision and no activity within started_stalled_hours.
-	Stalled   bool           `json:"stalled"`
-	Children  []TaskChild    `json:"children,omitempty"`
-	Relations []TaskRelation `json:"relations,omitempty"`
-	Events    []TaskEvent    `json:"events,omitempty"`
+	Stalled bool `json:"stalled"`
+	// PrioritySource and LaneSource are "youtrack" when the value came from
+	// the YouTrack-owned cache rather than the hk column. Stale marks a cached
+	// value whose last YouTrack refresh failed. All three are derived at read
+	// time and never stored.
+	PrioritySource string         `json:"priority_source,omitempty"`
+	LaneSource     string         `json:"lane_source,omitempty"`
+	Stale          bool           `json:"stale,omitempty"`
+	Children       []TaskChild    `json:"children,omitempty"`
+	Relations      []TaskRelation `json:"relations,omitempty"`
+	Events         []TaskEvent    `json:"events,omitempty"`
 }
 
 // RelayEvent is a durable report from a worker to its owning lane.  Delivery

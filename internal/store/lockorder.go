@@ -144,4 +144,13 @@ package store
 //   - Other advisory locks (disposition origin, task comment insert, labels,
 //     Linear board ownership, quota presence) are each the first lock of
 //     their transaction, and no transaction requests one while it holds a
-//     lock from levels 2-5.
+//     lock from levels 2-5, with one exception: ApplyYouTrackActivity takes
+//     level 2, then taskCommentInsertLock when the activity carries a
+//     comment, then the task row. CreateTaskComment takes that lock first and
+//     reaches the task row only through the foreign key's KEY SHARE, so it
+//     cannot wait on level 2 and the pair cannot cycle.
+//
+//   - The YouTrack sync's single-run guard is a session-scoped
+//     pg_try_advisory_lock(8241873404) on its own pooled connection. It is
+//     taken before the run and released after it, and no other writer takes
+//     that value, so it introduces no wait cycle.

@@ -22,6 +22,7 @@ import (
 
 	"github.com/mgh3326/handoffkeep/internal/cfaccess"
 	"github.com/mgh3326/handoffkeep/internal/store"
+	"github.com/mgh3326/handoffkeep/internal/youtrack"
 )
 
 //go:embed templates/*.html static
@@ -46,6 +47,10 @@ type Config struct {
 	// SSEHeartbeat is how often /ui/events writes a comment line to an idle
 	// stream; zero means 25 seconds.
 	SSEHeartbeat time.Duration
+	// YouTrack overlays YouTrack-owned priority and lane on linked tasks and
+	// writes those changes through YouTrack first. Nil keeps the console
+	// exactly as it was.
+	YouTrack *youtrack.Service
 }
 
 // Handler is a Cloudflare Access-authenticated UI handler.
@@ -54,6 +59,7 @@ type Handler struct {
 	access        *cfaccess.Verifier
 	templates     *template.Template
 	hub           *hubProxy
+	youTrack      *youtrack.Service
 	pollInterval  time.Duration
 	sseHeartbeat  time.Duration
 	static        fs.FS
@@ -128,6 +134,7 @@ func New(config Config) (*Handler, error) {
 		store:         config.Store,
 		access:        config.Access,
 		hub:           hub,
+		youTrack:      config.YouTrack,
 		pollInterval:  poll,
 		sseHeartbeat:  heartbeat,
 		static:        static,
