@@ -38,6 +38,7 @@ export function WorkPage() {
     writeStored(STORAGE_KEYS.workProject, project);
     if (!params.has("project")) { const next = new URLSearchParams(search); next.set("project", project); history.replaceState(null, "", `${location.pathname}?${next}`); setSearch(location.search); }
   }, [project, params, search]);
+  useEffect(() => { const onChange = () => setRefresh(n => n + 1); window.addEventListener("hk-task-changed", onChange); return () => window.removeEventListener("hk-task-changed", onChange); }, []);
   const load = useCallback(async () => ({ project, board: project ? await fetchBoardTasks(project) : null }), [project, refresh]);
   const { data, failed } = usePoll(load, 60000);
   const reload = useCallback(() => setRefresh(value => value + 1), []);

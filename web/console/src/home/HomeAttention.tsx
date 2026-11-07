@@ -109,9 +109,10 @@ function Row({ item, now, selected, toggle }: { item: Item; now: string; selecte
 function HomeTaskAction({ id }: { id: number }) {
   const [task, setTask] = useState<BoardTask | null>(null);
   const [failed, setFailed] = useState(false);
-  useEffect(() => { let active = true; void fetchTaskDetail(id).then(data => { if (active) setTask(data.task); }).catch(() => { if (active) setFailed(true); }); return () => { active = false; }; }, [id]);
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => { let active = true; void fetchTaskDetail(id).then(data => { if (active) setTask(data.task); }).catch(() => { if (active) setFailed(true); }); return () => { active = false; }; }, [id, attempt]);
   if (failed) return <span role="alert">작업을 불러오지 못했습니다.</span>;
-  return task && <TaskActions compact target={task} onPriority={priority => setTask(old => old ? { ...old, priority } : old)} />;
+  return task && <TaskActions compact target={task} onPriority={priority => setTask(old => old ? { ...old, priority } : old)} onApplied={() => setAttempt(value => value + 1)} />;
 }
 function Body({ data, triage }: { data: Attention; triage: Triage }) {
   const items = useMemo(() => attentionItems(data), [data]);
@@ -133,6 +134,7 @@ export function HomeAttention() {
   const load = useCallback(() => loadAttention(), [refresh]);
   const { data, failed } = usePoll(load, 60_000);
   const reload = useCallback(() => setRefresh(value => value + 1), []);
+  useEffect(() => { const onChange = () => setRefresh(value => value + 1); window.addEventListener("hk-task-changed", onChange); return () => window.removeEventListener("hk-task-changed", onChange); }, []);
   useSeenMigration(reload);
   const items = useMemo(() => (data ? attentionItems(data) : { action: [], fyi: [] }), [data]);
   const rows = useMemo(() => [...items.action, ...items.fyi].map(triageRow), [items]);
