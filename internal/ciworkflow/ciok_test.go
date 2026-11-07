@@ -27,10 +27,17 @@ func greenEnv(suite string, overrides ...string) map[string]string {
 	env := map[string]string{
 		"EVENT": "workflow_dispatch", "SUITE": suite,
 		"TEST": "success", "PR_STORE_DB": "success", "VITEST": "skipped", "BUILD": "skipped",
-		"AUTO_TAG": "success", "POST_LINUX": "success", "POST_MACOS": "success",
+		"AUTO_TAG": "success", "MAIN_LINUX": "success",
+		"DEPLOY_LINUX": "skipped", "DEPLOY_MACOS": "skipped", "DEPLOY_RELEASE": "skipped",
 	}
 	if suite == "all" {
 		env["VITEST"], env["BUILD"] = "success", "success"
+	}
+	if suite == "deploy" {
+		env["AUTO_TAG"] = "skipped"
+		env["TEST"], env["PR_STORE_DB"] = "skipped", "skipped"
+		env["MAIN_LINUX"] = "skipped"
+		env["DEPLOY_LINUX"], env["DEPLOY_MACOS"], env["DEPLOY_RELEASE"] = "success", "success", "success"
 	}
 	for i := 0; i+1 < len(overrides); i += 2 {
 		env[overrides[i]] = overrides[i+1]
@@ -40,19 +47,28 @@ func greenEnv(suite string, overrides ...string) map[string]string {
 
 var ciOkCases = []ciOkCase{
 	// The ci-ok (test) step env of run 42061203904: macOS never got a runner.
-	{name: "run-42061203904-abandoned-macos-skips", env: greenEnv("test", "POST_MACOS", "abandoned"), skipped: true},
+	// On the deploy tier the same abandonment happens to a deploy-* job.
+	{name: "deploy-tier-abandoned-macos-skips", env: greenEnv("deploy", "DEPLOY_MACOS", "abandoned"), skipped: true},
 	{name: "suite-test-green-passes", env: greenEnv("test")},
-	{name: "suite-test-vitest-ran-fails", env: greenEnv("test", "VITEST", "success"), exit: 1, output: "vitest ran outside its suite"},
-	{name: "failure-with-abandoned-fails", env: greenEnv("test", "TEST", "failure", "POST_MACOS", "abandoned"), exit: 1, output: "test did not succeed: failure"},
 	{name: "suite-all-green-passes", env: greenEnv("all")},
+	{name: "suite-deploy-green-passes", env: greenEnv("deploy")},
+	{name: "suite-deploy-failed-linux-fails", env: greenEnv("deploy", "DEPLOY_LINUX", "failure"), exit: 1, output: "deploy-linux did not succeed: failure"},
+	{name: "suite-deploy-dropped-macos-fails", env: greenEnv("deploy", "DEPLOY_MACOS", "skipped"), exit: 1, output: "deploy-macos did not succeed: skipped"},
+	{name: "suite-deploy-dropped-release-fails", env: greenEnv("deploy", "DEPLOY_RELEASE", "skipped"), exit: 1, output: "deploy-release did not succeed: skipped"},
+	// A main-tier job in a deploy run means the tier guards disagree.
+	{name: "deploy-suite-main-job-ran-fails", env: greenEnv("deploy", "MAIN_LINUX", "success"), exit: 1, output: "main-linux ran outside its suite or tier: success"},
+	{name: "deploy-suite-auto-tag-ran-fails", env: greenEnv("deploy", "AUTO_TAG", "success"), exit: 1, output: "auto-tag-test ran outside its suite or tier: success"},
+	{name: "suite-test-vitest-ran-fails", env: greenEnv("test", "VITEST", "success"), exit: 1, output: "vitest ran outside its suite"},
+	{name: "failure-with-abandoned-fails", env: greenEnv("test", "TEST", "failure", "MAIN_LINUX", "abandoned"), exit: 1, output: "test did not succeed: failure"},
 	// pr-store-db always reports: success on every event that runs the test suite.
-	{name: "pull-request-green-passes", env: greenEnv("all", "EVENT", "pull_request", "POST_LINUX", "skipped", "POST_MACOS", "skipped")},
+	{name: "pull-request-green-passes", env: greenEnv("all", "EVENT", "pull_request", "MAIN_LINUX", "skipped")},
 	{name: "pr-store-db-failure-fails", env: greenEnv("test", "PR_STORE_DB", "failure"), exit: 1, output: "pr-store-db did not succeed: failure"},
 	{name: "pr-store-db-skipped-in-test-suite-fails", env: greenEnv("test", "PR_STORE_DB", "skipped"), exit: 1, output: "pr-store-db did not succeed: skipped"},
-	{name: "pr-store-db-ran-outside-suite-fails", env: greenEnv("vitest", "VITEST", "success", "TEST", "skipped", "PR_STORE_DB", "success", "POST_LINUX", "skipped", "POST_MACOS", "skipped"), exit: 1, output: "pr-store-db ran outside its suite or tier: success"},
+	{name: "pr-store-db-ran-outside-suite-fails", env: greenEnv("vitest", "VITEST", "success", "TEST", "skipped", "PR_STORE_DB", "success", "MAIN_LINUX", "skipped"), exit: 1, output: "pr-store-db ran outside its suite or tier: success"},
+	{name: "main-tier-dropped-fails", env: greenEnv("test", "MAIN_LINUX", "skipped"), exit: 1, output: "main-linux did not succeed: skipped"},
 }
 
-var ciOkNeeds = []string{"TEST", "PR_STORE_DB", "VITEST", "BUILD", "AUTO_TAG", "POST_LINUX", "POST_MACOS"}
+var ciOkNeeds = []string{"TEST", "PR_STORE_DB", "VITEST", "BUILD", "AUTO_TAG", "MAIN_LINUX", "DEPLOY_LINUX", "DEPLOY_MACOS", "DEPLOY_RELEASE"}
 
 // ciOkJob returns ci-ok's if: expression (without ${{ }}) and its script.
 func ciOkJob(ci []byte) (string, string, error) {

@@ -5,11 +5,12 @@ name: release
 # the same build and checks on the tag but is never published.
 # Manual runs without publish build and verify the same assets for the
 # dry-run tag v0.0.0. Pull requests do not run this workflow: ci.yml's
-# post-linux job already exercises scripts/test-build-release.sh after merge.
+# deploy tier (deploy.yml) already exercises scripts/test-build-release.sh.
 # Publication does not rerun the test suite (T-DEPLOY in hk:doc
 # decision/2026-11-05/fleet-ci-three-tiers): ci-green waits for ci.yml's
-# ci-ok on the tagged commit. Hosts pull published assets themselves; this
-# workflow never reaches a host.
+# ci-ok on the tagged commit, and its GATE env is the one-line switch to
+# deploy-ok once mergewake reads deploy_checks (decision/2026-11-07 §4-3).
+# Hosts pull published assets themselves; this workflow never reaches a host.
 on:
   push:
     tags: ["v*"]
@@ -116,6 +117,16 @@ jobs:
       contents: read
       actions: read
       statuses: read
+    env:
+      # The gate this job reads, and the one line that switches it. deploy.yml
+      # already publishes deploy-ok on every green deploy tier, but decision
+      # §2 and §4-3 keep the gate on ci-ok until mergewake reads deploy_checks:
+      # changing the meaning of ci-ok before its readers are ready would let a
+      # main-tier-only head through. When it is ready, set this to deploy-ok;
+      # the script then reads that status alone (it needs no main-run lookup,
+      # because deploy.yml posts it for every completed run, superseded or
+      # not), and the ci-ok paths below are skipped.
+      GATE: ci-ok
     outputs:
       green: ${{ steps.wait.outputs.green }}
     steps:
@@ -129,6 +140,25 @@ jobs:
           deadline=$(( $(date +%s) + 120*60 ))
           green() { echo "green=$1" >> "$GITHUB_OUTPUT"; exit 0; }
           block() { echo "$1; not publishing" >&2; exit 1; }
+          # GATE=deploy-ok: deploy.yml posts the status on the head it checked,
+          # so no run lookup is needed and a superseded head is covered.
+          while [ "$GATE" = deploy-ok ]; do
+            if status=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/statuses" -q '[.[] | select(.context == "deploy-ok")] | first | .state // "none"'); then
+              echo "deploy-ok status: $status"
+              case "$status" in
+                success) green true ;;
+                failure|error) block "deploy-ok on $GITHUB_SHA is $status" ;;
+                pending) ;;
+                *) echo "::notice::no deploy-ok status on $GITHUB_SHA yet" ;;
+              esac
+            else
+              echo "::warning::reading deploy-ok statuses failed; retrying"
+            fi
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "no deploy-ok verdict on $GITHUB_SHA within 120 minutes" >&2; exit 1
+            fi
+            sleep 30
+          done
           while :; do
             superseded=no
             # A failed API call is "no verdict yet": the deadline ends the wait.
