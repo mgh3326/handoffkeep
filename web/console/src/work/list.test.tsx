@@ -263,3 +263,23 @@ it("toggles one translated title and marks a stale one", async () => {
   fireEvent.click(indicator);
   expect(screen.queryByText("Task one")).toBeNull();
 });
+
+
+it("shows row actions when the task row receives keyboard focus", async () => {
+  render(<WorkPage />);
+  const row = await screen.findByRole("link", { name: /Task one/ });
+  row.focus();
+  expect(document.activeElement).toBe(row);
+  const action = screen.getByRole("button", { name: /우선순위 변경/, hidden: true });
+  expect(action.closest(".action-row")?.contains(row)).toBe(true);
+});
+it("keeps row priority actions alongside the translation disclosure", async () => {
+  vi.stubGlobal("fetch", vi.fn(async (path: string) => path.includes("projects") ? response({ projects: ["a"] }) : response({ tasks: [{ ...task, title_ko: "작업 번역" }], states: ["developing"], generated_at: "now", truncated: false })));
+  history.replaceState(null, "", "/ui/work?project=a&view=active");
+  render(<WorkPage />);
+  const row = (await screen.findByText("작업 번역")).closest(".action-row");
+  expect(row?.querySelector('[aria-label="원문 보기"]')).toBeTruthy();
+  const priority = screen.getByRole("button", { name: /우선순위 변경/, hidden: true });
+  fireEvent.click(priority);
+  expect(screen.getByRole("menu", { name: "우선순위 선택" })).toBeTruthy();
+});

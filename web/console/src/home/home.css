@@ -38,3 +38,5 @@
 .ha-item > .hk-translation-indicator { flex: none; margin-right: var(--hk-space-2); }
 .ha-item > .hk-original-text { flex-basis: 100%; margin-left: var(--hk-space-8); }
 .ha-row-title small { color: var(--hk-text-muted); }
+
+.ha-item[data-action-task] > .hk-translation-indicator { margin-right: var(--hk-space-12); }

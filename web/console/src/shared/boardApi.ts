@@ -268,3 +268,14 @@ function validJob(value: unknown): boolean {
   const diff = value.diff_stat;
   return typeof value.job_id === "string" && typeof value.role === "string" && typeof value.state === "string" && typeof value.host === "string" && typeof value.family === "string" && typeof value.profile === "string" && typeof value.model === "string" && optionalString(value.harness) && optionalString(value.effort) && optionalString(value.claimed_at) && optionalString(value.spawned_at) && optionalString(value.ready_at) && optionalString(value.ended_at) && optionalString(value.end_reason) && (diff === null || (record(diff) && typeof diff.files === "number" && typeof diff.insertions === "number" && typeof diff.deletions === "number")) && (value.skills_supported === null || typeof value.skills_supported === "boolean") && (value.skills === null || (Array.isArray(value.skills) && value.skills.every(s => record(s) && typeof s.name === "string" && typeof s.calls === "number")));
 }
+
+type PriorityResult = { previous: number; priority: number };
+export async function setTaskPriority(id: number, priority: number): Promise<PriorityResult> {
+  const csrf = readCsrfToken();
+  if (!csrf) throw new Error("missing csrf");
+  const response = await fetch(`/ui/api/tasks/${id}/priority`, { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf }, body: JSON.stringify({ priority, event_key: crypto.randomUUID() }) });
+  if (!response.ok) throw new Error("write failed");
+  const data: unknown = await response.json();
+  if (typeof data !== "object" || data === null || !("previous" in data) || typeof data.previous !== "number" || !("priority" in data) || typeof data.priority !== "number") throw new Error("malformed response");
+  return { previous: data.previous, priority: data.priority };
+}

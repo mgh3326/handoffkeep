@@ -168,7 +168,7 @@ export type BoardEvent = {
    * and from/to carry project names. Absent on pre-relane servers.
    * New kinds: state_migration, awaiting_decision, parent, relation, auto_close. */
   kind?: "transition" | "relane" | "decision" | "project" | "area"
-       | "state_migration" | "awaiting_decision" | "parent" | "relation" | "auto_close";
+       | "metadata" | "source_event" | "state_migration" | "awaiting_decision" | "parent" | "relation" | "auto_close";
   from: string;
   to: string;
   by: string;

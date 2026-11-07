@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { matchRoute, navKey, RouteView } from "./routes";
+import { ActionNotices } from "../shared/actions/TaskActions";
 import { Shell } from "./Shell";
 
 export function App() {
@@ -12,6 +13,7 @@ export function App() {
   return (
     <Shell current={navKey(route)}>
       <RouteView route={route} />
+      <ActionNotices />
     </Shell>
   );
 }
