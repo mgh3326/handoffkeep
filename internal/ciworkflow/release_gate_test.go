@@ -125,6 +125,87 @@ esac
 	}
 }
 
+// TestReleaseDeployOKShape runs ci-green's real deploy_ok_state against
+// combined-status response shapes. Only a well-formed body with an array
+// .statuses may answer "none"; anything else must answer "unknown" so the gate
+// retries instead of treating a malformed 2xx response as "no deploy-ok yet"
+// (review on #228, high).
+func TestReleaseDeployOKShape(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq unavailable")
+	}
+	body, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", "release.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wf struct {
+		Jobs map[string]struct {
+			Steps []step `yaml:"steps"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal(body, &wf); err != nil {
+		t.Fatal(err)
+	}
+	script := wf.Jobs["ci-green"].Steps[0].Run
+	// Extract deploy_ok_state so the test cannot drift from the real function.
+	start := strings.Index(script, "deploy_ok_state() {")
+	if start < 0 {
+		t.Fatal("ci-green has no deploy_ok_state function")
+	}
+	end := strings.Index(script[start:], "\n}\n")
+	if end < 0 {
+		t.Fatal("deploy_ok_state function is not closed")
+	}
+	fn := script[start : start+end+len("\n}")]
+
+	for _, c := range []struct {
+		name, response, want string
+	}{
+		{"deploy-ok-success", `{"statuses":[{"context":"deploy-ok","state":"success"}]}`, "success"},
+		{"deploy-ok-failure", `{"statuses":[{"context":"deploy-ok","state":"failure"}]}`, "failure"},
+		{"deploy-ok-pending", `{"statuses":[{"context":"deploy-ok","state":"pending"}]}`, "pending"},
+		{"no-deploy-ok-among-statuses", `{"statuses":[{"context":"ci-ok","state":"success"}]}`, "none"},
+		{"empty-statuses", `{"statuses":[]}`, "none"},
+		{"missing-statuses-key", `{"state":"success"}`, "unknown"},
+		{"null-statuses", `{"statuses":null}`, "unknown"},
+		{"statuses-not-an-array", `{"statuses":{}}`, "unknown"},
+		{"null-body", `null`, "unknown"},
+		{"array-body", `[]`, "unknown"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			// Fake gh api: prints the body, and applies a -q jq filter the way
+			// the real CLI does (including a non-zero exit on a jq error).
+			gh := fmt.Sprintf(`#!/bin/sh
+resp=%q
+expr=""
+seen=0
+for a in "$@"; do
+  if [ "$seen" = 1 ]; then expr=$a; break; fi
+  [ "$a" = "-q" ] && seen=1
+done
+if [ -n "$expr" ]; then
+  printf '%%s' "$resp" | jq -r "$expr"
+else
+  printf '%%s\n' "$resp"
+fi
+`, c.response)
+			if err := os.WriteFile(filepath.Join(dir, "gh"), []byte(gh), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command("bash", "-c", fn+"\ndeploy_ok_state")
+			cmd.Env = []string{"PATH=" + dir + ":" + os.Getenv("PATH"), "GITHUB_REPOSITORY=o/r", "GITHUB_SHA=abc"}
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("deploy_ok_state failed: %v\n%s", err, out)
+			}
+			if got := strings.TrimSpace(string(out)); got != c.want {
+				t.Fatalf("deploy_ok_state(%s) = %q, want %q", c.response, got, c.want)
+			}
+		})
+	}
+}
+
 // deploy.yml posts deploy-ok on the head its successful deploy tier checked,
 // so proving the deploy tier needs only the statuses API: under GATE=deploy-ok
 // the script must not call the run or jobs endpoints at all (deploy.yml posts

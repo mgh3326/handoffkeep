@@ -146,12 +146,22 @@ jobs:
           green() { echo "green=$1" >> "$GITHUB_OUTPUT"; exit 0; }
           block() { echo "$1; not publishing" >&2; exit 1; }
           # deploy_ok_state prints the deploy-ok state, or "none"; a failed API
-          # call prints "unknown" so the caller retries. The combined status
-          # endpoint returns the LATEST state per context, so a rerun's status
-          # supersedes the old one and no page can hide it (the plain statuses
-          # list is newest-30 only: review on #228, medium).
+          # call or a response without a statuses array prints "unknown" so the
+          # caller retries. The combined status endpoint returns the LATEST
+          # state per context, so a rerun's status supersedes the old one and no
+          # page can hide it (the plain statuses list is newest-30 only: review
+          # on #228, medium).
+          #
+          # Only a well-formed response with an array .statuses may answer
+          # "none" (review on #228, high): a 2xx body of an unexpected shape
+          # must not read as "no deploy-ok yet". The jq expression errors on a
+          # missing or non-array .statuses, and the caller turns that into
+          # "unknown".
           deploy_ok_state() {
-            gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/status" -q '[.statuses[] | select(.context == "deploy-ok") | .state] | first // "none"' 2>/dev/null || echo unknown
+            gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/status" -q '
+              if (.statuses | type) != "array" then error("no statuses array") else . end
+              | [.statuses[] | select(.context == "deploy-ok") | .state] | first // "none"
+            ' 2>/dev/null || echo unknown
           }
           # await_deploy_ok blocks until the deploy tier has a verdict on this
           # head. deploy.yml posts it for every completed deploy run.
