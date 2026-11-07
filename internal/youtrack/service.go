@@ -26,6 +26,7 @@ type Store interface {
 	FindYouTrackMirrorByIssueID(ctx context.Context, issueID string) (store.YouTrackMirror, bool, error)
 	ListYouTrackMirrors(ctx context.Context, taskIDs []int64) (map[int64]store.YouTrackMirror, error)
 	UpsertYouTrackMirror(ctx context.Context, in store.YouTrackMirrorInput) (store.YouTrackMirror, error)
+	UpdateYouTrackMirrorDisplay(ctx context.Context, taskID int64, displayRef, url string) error
 	MarkYouTrackTaskSynced(ctx context.Context, taskID int64, at time.Time) error
 
 	ListYouTrackProjects(ctx context.Context) ([]store.YouTrackProject, error)

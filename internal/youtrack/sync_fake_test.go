@@ -31,7 +31,10 @@ type fakeYouTrack struct {
 	searchCalls  int
 	getCalls     int
 	failUpdate   bool
-	failMe       bool
+	// failFieldUpdate fails only a custom-field update, so a move before it
+	// succeeds.
+	failFieldUpdate bool
+	failMe          bool
 }
 
 func newFakeYouTrack() *fakeYouTrack {
@@ -174,12 +177,12 @@ func (f *fakeYouTrack) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		write(http.StatusOK, issue)
 	case strings.HasPrefix(path, "/api/issues/") && r.Method == http.MethodPost:
-		if f.failUpdate {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if f.failUpdate || (f.failFieldUpdate && body["customFields"] != nil) {
 			write(http.StatusServiceUnavailable, map[string]string{"error": "unavailable"})
 			return
 		}
-		var body map[string]any
-		_ = json.NewDecoder(r.Body).Decode(&body)
 		f.issueUpdates = append(f.issueUpdates, body)
 		id := strings.TrimPrefix(path, "/api/issues/")
 		issue, ok := f.issues[id]

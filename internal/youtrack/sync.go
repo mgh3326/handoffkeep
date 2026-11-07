@@ -359,7 +359,10 @@ func (s *Service) pushTask(ctx context.Context, task store.Task, opts SyncOption
 				action.Action = "move"
 				action.ReadableID = moved.IDReadable
 				if moved.IDReadable != "" {
-					if _, err := s.store.UpsertYouTrackMirror(ctx, store.YouTrackMirrorInput{TaskID: task.ID, IssueID: mirror.IssueID, DisplayRef: moved.IDReadable, URL: s.issueURL(moved.IDReadable), Tenant: s.tenant, Role: mirror.Role, SyncedAt: s.now()}); err != nil {
+					// Only the display number changed. The watermark advances
+					// after the field push below, so a failure there keeps the
+					// task due instead of stranding the unsent fields.
+					if err := s.store.UpdateYouTrackMirrorDisplay(ctx, task.ID, moved.IDReadable, s.issueURL(moved.IDReadable)); err != nil {
 						return action, err
 					}
 				}

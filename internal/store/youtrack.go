@@ -250,6 +250,14 @@ func (s *Store) MarkYouTrackTaskSynced(ctx context.Context, taskID int64, at tim
 	return err
 }
 
+// UpdateYouTrackMirrorDisplay records a moved issue's new display number
+// without advancing synced_at: the field push has not finished yet, and a
+// failure after the move must stay due for the next run.
+func (s *Store) UpdateYouTrackMirrorDisplay(ctx context.Context, taskID int64, displayRef, url string) error {
+	_, err := s.pool.Exec(ctx, `UPDATE task_origins SET display_ref=$2,url=$3 WHERE provider='youtrack' AND task_id=$1`, taskID, nullIfEmpty(displayRef), nullIfEmpty(url))
+	return err
+}
+
 // ValidTaskLane reports whether name is a lane/task name. Other packages use
 // it instead of copying the lane alphabet.
 func ValidTaskLane(name string) bool { return validName(name) }

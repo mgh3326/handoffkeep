@@ -180,6 +180,20 @@ func (f *fakeStore) MarkYouTrackTaskSynced(_ context.Context, taskID int64, at t
 	return nil
 }
 
+func (f *fakeStore) UpdateYouTrackMirrorDisplay(_ context.Context, taskID int64, displayRef, url string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	mirror, ok := f.mirrors[taskID]
+	if !ok {
+		return nil
+	}
+	mirror.DisplayRef = displayRef
+	mirror.URL = url
+	f.mirrors[taskID] = mirror
+	f.writes++
+	return nil
+}
+
 func (f *fakeStore) TouchYouTrackTaskSynced(_ context.Context, taskID int64) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

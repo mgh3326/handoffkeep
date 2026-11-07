@@ -583,6 +583,56 @@ func TestSyncUsesMappedProjectsAndMovesOnChange(t *testing.T) {
 	}
 }
 
+func TestFailedFieldsAfterAMoveStayDue(t *testing.T) {
+	fs := newFakeStore()
+	yt := newFakeYouTrack()
+	task := fs.addTask("handoffkeep", "handoffkeep", "move then fail", store.StateBacklog, 4)
+	mirrorIssue(fs, yt, task.ID, "9-90", "HK-90")
+	// A fixed base makes the watermark comparison independent of the clock.
+	base := time.Date(2026, 11, 7, 9, 0, 0, 0, time.UTC)
+	mirror := fs.mirrors[task.ID]
+	mirror.SyncedAt = &base
+	fs.mirrors[task.ID] = mirror
+	moved := fs.tasks[task.ID]
+	project := "panewire"
+	moved.Project = &project
+	moved.UpdatedAt = base.Add(time.Minute)
+	fs.tasks[task.ID] = moved
+	yt.failFieldUpdate = true
+	svc := newTestService(t, yt, fs)
+	ctx := context.Background()
+
+	report, err := svc.Sync(ctx, SyncOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Errors) == 0 {
+		t.Fatal("the field update failure was not reported")
+	}
+	if got := fs.mirrors[task.ID]; got.DisplayRef != "PW-1" {
+		t.Fatalf("the move did not update the display ref: %+v", got)
+	}
+	due, _ := fs.DueYouTrackPushTasks(ctx, 10)
+	var found bool
+	for _, candidate := range due {
+		if candidate.ID == task.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the unsent field push is no longer due: %+v", fs.mirrors[task.ID])
+	}
+
+	// The next run retries and settles the task.
+	yt.failFieldUpdate = false
+	if _, err := svc.Sync(ctx, SyncOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if due, _ := fs.DueYouTrackPushTasks(ctx, 10); len(due) != 0 {
+		t.Fatalf("the retried push did not settle: %+v", due)
+	}
+}
+
 func TestServiceLogsNeverContainToken(t *testing.T) {
 	var buf bytes.Buffer
 	previous := log.Writer()
