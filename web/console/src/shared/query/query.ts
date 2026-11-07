@@ -108,7 +108,7 @@ function fieldName(value: string): Field | null {
   return FIELDS[value] ?? FIELDS[lower(value)] ?? null;
 }
 
-type Word = { word: string; start: number; end: number };
+type Word = { word: string; end: number };
 
 function skipSpaces(text: string, pos: number): number {
   let index = pos;
@@ -119,7 +119,7 @@ function skipSpaces(text: string, pos: number): number {
 function wordAt(text: string, pos: number): Word | null {
   const start = skipSpaces(text, pos);
   const match = /^\S+/.exec(text.slice(start));
-  return match ? { word: match[0], start, end: start + match[0].length } : null;
+  return match ? { word: match[0], end: start + match[0].length } : null;
 }
 
 function quotedAt(text: string, pos: number): { value: string; end: number } | null {
@@ -190,6 +190,14 @@ export function parseQuery(input: string): QueryParse {
     pos = skipSpaces(input, pos);
     if (pos >= input.length) break;
 
+    // A quoted phrase is text even when it contains a colon or a #.
+    const leadingQuote = quotedAt(input, pos);
+    if (leadingQuote) {
+      text.push(leadingQuote.value);
+      pos = leadingQuote.end;
+      continue;
+    }
+
     const fieldMatch = /^([^\s:]+)\s*:\s*/.exec(input.slice(pos));
     const field = fieldMatch ? fieldName(fieldMatch[1]) : null;
     if (field && fieldMatch) {
@@ -240,12 +248,6 @@ export function parseQuery(input: string): QueryParse {
       continue;
     }
 
-    const quoted = quotedAt(input, pos);
-    if (quoted) {
-      text.push(quoted.value);
-      pos = quoted.end;
-      continue;
-    }
     const word = wordAt(input, pos);
     if (!word) break;
     if (word.word.startsWith("#")) {

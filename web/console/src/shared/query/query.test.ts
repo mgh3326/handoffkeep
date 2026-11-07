@@ -35,6 +35,8 @@ describe("query syntax", () => {
 
   it("keeps a quoted phrase together and reports unknown fields and values", () => {
     expect(parseQuery('"compact list"').filters.text).toBe("compact list");
+    expect(parseQuery('"a:b"').filters.text).toBe("a:b");
+    expect(parseQuery(formatQuery({ ...EMPTY_QUERY, text: "a:b" })).filters.text).toBe("a:b");
     expect(parseQuery("foo:bar").errors[0]).toContain("알 수 없는 필터");
     expect(parseQuery("상태:없는상태").errors[0]).toContain("상태 값을 알 수 없습니다");
     expect(parseQuery("우선순위:9").errors[0]).toContain("1-4");

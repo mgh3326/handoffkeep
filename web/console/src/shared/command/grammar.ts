@@ -135,18 +135,6 @@ export function lookupState(value: string): string | null {
   return STATES.get(normalizeWord(value)) ?? null;
 }
 
-/** Every state value autocomplete offers, Korean first. */
-export function stateChoices(): { value: string; label: string }[] {
-  const seen = new Set<string>();
-  const out: { value: string; label: string }[] = [];
-  for (const state of Object.values(STATE_LABEL)) {
-    if (seen.has(state)) continue;
-    seen.add(state);
-    out.push({ value: state, label: state });
-  }
-  return out;
-}
-
 /** True when the parsed state is one the console can actually write through
  * an existing C1/C2 route. Other states are shown as refusals in preview. */
 export const ROUTED_STATES = new Set(["icebox", "unstarted", "merged", "completed"]);
@@ -160,8 +148,4 @@ export function parsePriority(value: string): number | null {
 
 export function priorityLabel(value: number): string {
   return value === 0 ? "없음" : `P${value}`;
-}
-
-export function closureLabel(closure: DropClosure): string {
-  return CLOSURE_LABEL[closure];
 }

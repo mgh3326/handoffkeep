@@ -295,6 +295,9 @@ const TASK_ACTION_MESSAGES: Record<string, string> = {
   not_found: "작업을 찾을 수 없습니다.",
   relay_failed: "레인은 옮겼지만 레인 알림을 보내지 못했습니다.",
   missing_csrf: "보안 토큰이 없습니다. 새로고침한 뒤 다시 시도하세요.",
+  comment_empty: "코멘트 내용이 필요합니다.",
+  comment_too_long: "코멘트가 너무 깁니다.",
+  comment_invalid: "코멘트를 저장할 수 없습니다.",
   internal_error: "저장하지 못했습니다. 잠시 후 다시 시도하세요.",
 };
 
