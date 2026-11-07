@@ -6,6 +6,7 @@ import (
 	"go/printer"
 	"go/token"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -228,10 +229,17 @@ func formWriteSources(t *testing.T) []string {
 // registeredMCPTools lists every tool name internal/mcp registers.
 func registeredMCPTools(t *testing.T) map[string]bool {
 	t.Helper()
+	files, err := filepath.Glob("../mcp/*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
 	out := map[string]bool{}
-	for _, name := range []string{"server.go", "operator.go", "meta.go"} {
+	for _, path := range files {
+		if strings.HasSuffix(path, "_test.go") {
+			continue
+		}
 		fset := token.NewFileSet()
-		file, err := parser.ParseFile(fset, "../mcp/"+name, nil, 0)
+		file, err := parser.ParseFile(fset, path, nil, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
