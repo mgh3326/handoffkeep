@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"errors"
+	"os"
 
 	"github.com/mgh3326/handoffkeep/internal/api"
 	"github.com/mgh3326/handoffkeep/internal/store"
@@ -12,10 +13,13 @@ import (
 func registerDotsTools(s *gmcp.Server, service api.Service, p principal) {
 	o := operatorTools{service: service, principal: p}
 	gmcp.AddTool(s, &gmcp.Tool{Name: "dots_inbox", Description: "List open dots requests oldest first. Pass the last task id as cursor to continue.", Annotations: readOnlyAnnotations()}, o.dotsInbox)
-	gmcp.AddTool(s, &gmcp.Tool{Name: "dots_reply", Description: "Reply to a dots request. Use kind START, QUESTION, BLOCKED or RESULT; set ask_operator for questions requiring an operator decision. Reuse an idempotency key only for the same reply.", Annotations: writeAnnotations()}, o.dotsReply)
+	gmcp.AddTool(s, &gmcp.Tool{Name: "dots_reply", Description: "Reply to a dots request. START requires expected_updated_at from the inbox. Use ask_operator for questions requiring an operator decision. Reuse an idempotency key only for the same reply.", Annotations: writeAnnotations()}, o.dotsReply)
 }
 
 func (o operatorTools) dotsReply(ctx context.Context, _ *gmcp.CallToolRequest, in store.DotsReplyInput) (*gmcp.CallToolResult, any, error) {
+	if os.Getenv("HANDOFFKEEP_DOTS_REPLY_WRITES") != "on" {
+		return nil, nil, errors.New("dots_reply_writes_disabled")
+	}
 	result, err := o.service.Store.ReplyDots(ctx, o.principal.Actor, o.principal.Channel, in)
 	if err != nil {
 		return nil, nil, err

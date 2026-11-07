@@ -92,6 +92,9 @@ func (l LinearDecisions) Ask(ctx context.Context, st decisionAskStore, taskID in
 	if err != nil {
 		return store.DecisionAskResult{}, err
 	}
+	if store.IsHKDotsRequest(recorded.Task) {
+		return store.DecisionAskResult{}, errors.New("hk dots requests cannot be mirrored to Linear")
+	}
 	request := recorded.Request
 	var options store.DecisionOptions
 	if recorded.Task.Refs.DecisionOptions != nil {
@@ -235,6 +238,19 @@ func (s Server) taskDecisionAsk(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.LinearDecisions == nil {
 		writeError(w, http.StatusServiceUnavailable, "linear_decisions_disabled")
+		return
+	}
+	task, found, err := s.Service.GetTask(r.Context(), id)
+	if err != nil {
+		appErr(w, r, err)
+		return
+	}
+	if !found {
+		writeError(w, http.StatusNotFound, "not_found")
+		return
+	}
+	if store.IsHKDotsRequest(task) {
+		writeError(w, http.StatusConflict, "dots_request_hk_only")
 		return
 	}
 	defer r.Body.Close()

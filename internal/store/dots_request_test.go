@@ -2,6 +2,13 @@ package store
 
 import "testing"
 
+func TestDotsHKRequestIsNotLinearEligible(t *testing.T) {
+	task := Task{Source: "dots", SourceRef: "hk-test", Priority: 1, Refs: TaskRefs{Linear: &TaskLinear{Sync: true}, DecisionRequest: &DecisionRequest{Status: DecisionRequestOpen}}}
+	if got := LinearMirrorReason(task); got != "" {
+		t.Fatalf("hk dots request admitted to Linear: %q", got)
+	}
+}
+
 func TestCreateDotsRequest(t *testing.T) {
 	s := schemaStore(t, "dots_request")
 	ctx := t.Context()

@@ -17,8 +17,10 @@ document and its `parent_lane` identifies the requester.
 On the authenticated ChatGPT connection, `dots_inbox` lists open requests in
 creation order. Use the returned `next_cursor` to fetch another page.
 `dots_reply` takes `task_id`, structured `kind`, `body`, and an
-`idempotency_key`. Reuse the key only when retrying the same reply. `START`
-claims the task for dots, `BLOCKED` parks it with the reason, and `RESULT`
+`idempotency_key`. Reuse the key only when retrying the same reply. For `START`,
+pass the task's `updated_at` from the inbox as `expected_updated_at`. START
+claims the task for dots only if that revision is still current and unclaimed.
+`BLOCKED` parks it with the reason, and `RESULT`
 completes it with the result document as evidence. A `QUESTION` is delivered
 to the requester; set `ask_operator` when it needs an hk decision request and
 the task should await that decision. RESULT, BLOCKED, and QUESTION also create
@@ -27,6 +29,11 @@ comment and the claim. Replies are attributed to the authenticated operator.
 
 The result's `source` is `hk` or `linear`. Existing Linear requests and
 webhooks remain independent and do not need a channel setting.
+
+`HANDOFFKEEP_DOTS_REPLY_WRITES` controls replies. It defaults to `off`, which
+leaves `dots_inbox` available and makes `dots_reply` return
+`dots_reply_writes_disabled`. Set it to `on` to enable replies, or to `off`
+to stop them again.
 
 ## Proxied hosts
 

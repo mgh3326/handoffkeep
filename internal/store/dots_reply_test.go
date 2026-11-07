@@ -1,6 +1,8 @@
 package store
 
 import (
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -42,7 +44,8 @@ func TestDotsReplyAtomicAndIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	first, err := s.ReplyDots(ctx, "operator:test@example.com", "chatgpt", in)
-	if err != nil || first.Duplicate || first.Task.State != StateCompleted || first.Task.Refs.Closure == nil || first.Task.Refs.Closure.Evidence != "hk:doc "+first.DocumentKey {
+	closed, found, getErr := s.GetTask(ctx, task.ID)
+	if err != nil || first.Duplicate || first.State != StateCompleted || getErr != nil || !found || closed.Refs.Closure == nil || closed.Refs.Closure.Evidence != "hk:doc "+first.DocumentKey {
 		t.Fatalf("first=%+v err=%v", first, err)
 	}
 	again, err := s.ReplyDots(ctx, "operator:test@example.com", "chatgpt", in)
@@ -65,8 +68,75 @@ func TestDotsReplyAtomicAndIdempotent(t *testing.T) {
 		t.Fatalf("notifications=%d err=%v", notifications, err)
 	}
 	in.Body = "Different answer"
-	if _, err := s.ReplyDots(ctx, "operator:test@example.com", "chatgpt", in); err == nil {
-		t.Fatal("reused key with different payload accepted")
+	replay, err := s.ReplyDots(ctx, "operator:test@example.com", "chatgpt", in)
+	if err != nil || !replay.Duplicate || replay.DocumentKey != first.DocumentKey || replay.State != first.State {
+		t.Fatalf("changed payload replay=%+v err=%v", replay, err)
+	}
+}
+
+func TestDotsStartConcurrentClaim(t *testing.T) {
+	s := schemaStore(t, "dots_claim")
+	ctx := t.Context()
+	task, err := s.CreateDotsRequest(ctx, "caller", DotsRequestInput{Title: "Research", Body: "Investigate"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	type outcome struct {
+		input  DotsReplyInput
+		result DotsReplyResult
+		err    error
+	}
+	start := make(chan struct{})
+	results := make(chan outcome, 2)
+	for i := 0; i < 2; i++ {
+		in := DotsReplyInput{TaskID: task.ID, Kind: "START", Body: "Starting", IdempotencyKey: fmt.Sprintf("key-%d", i), ExpectedUpdatedAt: &task.UpdatedAt}
+		go func() {
+			<-start
+			result, err := s.ReplyDots(ctx, "operator:test@example.com", "chatgpt", in)
+			results <- outcome{in, result, err}
+		}()
+	}
+	close(start)
+	a, b := <-results, <-results
+	if a.err != nil {
+		a, b = b, a
+	}
+	if a.err != nil || !errors.Is(b.err, ErrTaskConflict) || a.result.State != StateResearching {
+		t.Fatalf("first=%+v second=%+v", a, b)
+	}
+	if _, err := s.ReplyDots(ctx, "operator:test@example.com", "chatgpt", DotsReplyInput{TaskID: task.ID, Kind: "RESULT", Body: "Done", IdempotencyKey: "finish"}); err != nil {
+		t.Fatal(err)
+	}
+	replay, err := s.ReplyDots(ctx, "operator:test@example.com", "chatgpt", a.input)
+	if err != nil || !replay.Duplicate || replay.State != a.result.State {
+		t.Fatalf("replay=%+v err=%v", replay, err)
+	}
+	comments, err := s.ListTaskComments(ctx, task.ID, 0, 10)
+	if err != nil || len(comments) != 2 {
+		t.Fatalf("comments=%+v err=%v", comments, err)
+	}
+}
+
+func TestDotsRequestNeverEnqueuesLinearMirror(t *testing.T) {
+	s := schemaStore(t, "dots_single_channel")
+	s.EnableLinearBoard()
+	s.EnableLinearSync()
+	ctx := t.Context()
+	task, err := s.CreateDotsRequest(ctx, "caller", DotsRequestInput{Title: "Research", Body: "Investigate"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.ReplyDots(ctx, "operator:test@example.com", "chatgpt", DotsReplyInput{TaskID: task.ID, Kind: "START", Body: "Starting", IdempotencyKey: "start", ExpectedUpdatedAt: &task.UpdatedAt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.ReplyDots(ctx, "operator:test@example.com", "chatgpt", DotsReplyInput{TaskID: task.ID, Kind: "QUESTION", Body: "Which option?", AskOperator: true, IdempotencyKey: "question"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	outbox, err := s.ListLinearOutbox(ctx, task.ID)
+	if err != nil || len(outbox) != 0 {
+		t.Fatalf("linear outbox=%+v err=%v", outbox, err)
 	}
 }
 
@@ -113,7 +183,8 @@ func TestDotsOperatorQuestionRollsBackAndRetries(t *testing.T) {
 		t.Fatal(err)
 	}
 	first, err := s.ReplyDots(ctx, "operator:test@example.com", "chatgpt", in)
-	if err != nil || first.Duplicate || !first.Task.AwaitingDecision || first.Task.Refs.DecisionRequest == nil {
+	current, found, getErr := s.GetTask(ctx, task.ID)
+	if err != nil || first.Duplicate || getErr != nil || !found || !current.AwaitingDecision || current.Refs.DecisionRequest == nil {
 		t.Fatalf("first=%+v err=%v", first, err)
 	}
 	again, err := s.ReplyDots(ctx, "operator:test@example.com", "chatgpt", in)
@@ -190,14 +261,15 @@ func TestDotsReplyStates(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			got, err := s.ReplyDots(t.Context(), "operator:test@example.com", "chatgpt", DotsReplyInput{TaskID: task.ID, Kind: tc.kind, Body: "Need an answer", AskOperator: tc.ask, IdempotencyKey: "key"})
-			if err != nil || got.Task.State != tc.state || got.Task.AwaitingDecision != tc.awaiting {
+			got, err := s.ReplyDots(t.Context(), "operator:test@example.com", "chatgpt", DotsReplyInput{TaskID: task.ID, Kind: tc.kind, Body: "Need an answer", AskOperator: tc.ask, IdempotencyKey: "key", ExpectedUpdatedAt: &task.UpdatedAt})
+			current, found, getErr := s.GetTask(t.Context(), task.ID)
+			if err != nil || got.State != tc.state || getErr != nil || !found || current.AwaitingDecision != tc.awaiting {
 				t.Fatalf("reply=%+v err=%v", got, err)
 			}
-			if tc.kind == "START" && got.Task.ClaimedBy != "dots" {
-				t.Fatalf("claimant=%q", got.Task.ClaimedBy)
+			if tc.kind == "START" && current.ClaimedBy != "dots" {
+				t.Fatalf("claimant=%q", current.ClaimedBy)
 			}
-			if tc.ask && got.Task.Refs.DecisionRequest == nil {
+			if tc.ask && current.Refs.DecisionRequest == nil {
 				t.Fatal("missing decision request")
 			}
 			results, err := s.ListDotsResults(t.Context(), task.ID, "", 10)

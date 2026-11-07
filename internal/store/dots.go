@@ -114,7 +114,7 @@ func (s *Store) CreateDotsRequest(ctx context.Context, by string, in DotsRequest
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
 		return Task{}, err
 	}
-	x, err := insertTriageTaskTx(ctx, tx, item, "dots", hex.EncodeToString(key[:]), "dots", nil, by, time.Now().UTC())
+	x, err := insertTriageTaskTx(ctx, tx, item, "dots", "hk-"+hex.EncodeToString(key[:]), "dots", nil, by, time.Now().UTC())
 	if err != nil {
 		return Task{}, err
 	}
@@ -123,6 +123,11 @@ func (s *Store) CreateDotsRequest(ctx context.Context, by string, in DotsRequest
 		return Task{}, err
 	}
 	return x, tx.Commit(ctx)
+}
+
+// IsHKDotsRequest identifies a request that must remain on hk.
+func IsHKDotsRequest(task Task) bool {
+	return task.Source == "dots" && strings.HasPrefix(task.SourceRef, "hk-")
 }
 
 // DotsInbox lists open hk requests in creation order after a task cursor.
@@ -148,15 +153,17 @@ func (s *Store) DotsInbox(ctx context.Context, after int64, limit int) ([]Task, 
 
 // DotsReplyInput is a structured reply to one hk request.
 type DotsReplyInput struct {
-	TaskID         int64  `json:"task_id"`
-	Kind           string `json:"kind"`
-	Body           string `json:"body"`
-	IdempotencyKey string `json:"idempotency_key"`
-	AskOperator    bool   `json:"ask_operator,omitempty"`
+	TaskID            int64      `json:"task_id"`
+	Kind              string     `json:"kind"`
+	Body              string     `json:"body"`
+	IdempotencyKey    string     `json:"idempotency_key"`
+	AskOperator       bool       `json:"ask_operator,omitempty"`
+	ExpectedUpdatedAt *time.Time `json:"expected_updated_at,omitempty"`
 }
 
 type DotsReplyResult struct {
-	Task        Task   `json:"task"`
+	TaskID      int64  `json:"task_id"`
+	State       string `json:"state"`
 	DocumentKey string `json:"document_key,omitempty"`
 	Duplicate   bool   `json:"duplicate"`
 }
@@ -195,6 +202,9 @@ func (s *Store) ReplyDots(ctx context.Context, actor, channel string, in DotsRep
 	if in.Kind != "START" && !DotsKindRecorded(in.Kind) {
 		return DotsReplyResult{}, errors.New("invalid dots reply kind")
 	}
+	if in.Kind == "START" && (in.ExpectedUpdatedAt == nil || in.ExpectedUpdatedAt.IsZero()) {
+		return DotsReplyResult{}, errors.New("START requires expected_updated_at")
+	}
 	if err := CheckTaskCommentBody(in.Body); err != nil {
 		return DotsReplyResult{}, err
 	}
@@ -203,7 +213,11 @@ func (s *Store) ReplyDots(ctx context.Context, actor, channel string, in DotsRep
 	}
 	keyHash := sha256.Sum256([]byte(fmt.Sprintf("%d\x00%s", in.TaskID, in.IdempotencyKey)))
 	commentID := hex.EncodeToString(keyHash[:])
-	payloadHash := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%s\x00%t\x00%s\x00%s", in.Kind, in.Body, in.AskOperator, actor, channel)))
+	expected := ""
+	if in.ExpectedUpdatedAt != nil {
+		expected = in.ExpectedUpdatedAt.UTC().Format(time.RFC3339Nano)
+	}
+	payloadHash := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%s\x00%t\x00%s\x00%s\x00%s", in.Kind, in.Body, in.AskOperator, actor, channel, expected)))
 	payload := hex.EncodeToString(payloadHash[:])
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -225,24 +239,23 @@ func (s *Store) ReplyDots(ctx context.Context, actor, channel string, in DotsRep
 		}
 		return DotsReplyResult{}, err
 	}
-	if task.Lane != "dots" || task.Source != "dots" {
-		return DotsReplyResult{}, errors.New("invalid dots request task")
-	}
 	var previous string
 	err = tx.QueryRow(ctx, `SELECT note FROM task_events WHERE task_id=$1 AND source='dots-hk-chatgpt' AND source_ref=$2`, in.TaskID, commentID).Scan(&previous)
 	if err == nil {
-		if previous != payload {
-			return DotsReplyResult{}, errors.New("dots idempotency key reused with different reply")
+		parts := strings.SplitN(previous, " ", 3)
+		if len(parts) != 3 {
+			return DotsReplyResult{}, errors.New("invalid recorded dots reply")
 		}
-		var docKey string
-		err = tx.QueryRow(ctx, `SELECT document_key FROM dots_results WHERE comment_id=$1`, commentID).Scan(&docKey)
-		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-			return DotsReplyResult{}, err
-		}
-		return DotsReplyResult{Task: task, DocumentKey: docKey, Duplicate: true}, nil
+		return DotsReplyResult{TaskID: task.ID, State: parts[1], DocumentKey: parts[2], Duplicate: true}, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return DotsReplyResult{}, err
+	}
+	if task.Lane != "dots" || !IsHKDotsRequest(task) {
+		return DotsReplyResult{}, errors.New("invalid dots request task")
+	}
+	if in.Kind == "START" && (!task.UpdatedAt.Equal(*in.ExpectedUpdatedAt) || !IsClaimableState(task.State) || task.ClaimedBy != "") {
+		return DotsReplyResult{}, fmt.Errorf("%w: dots request has changed or is already claimed", ErrTaskConflict)
 	}
 	now := time.Now().UTC()
 	var commentRowID int64
@@ -278,13 +291,13 @@ func (s *Store) ReplyDots(ctx context.Context, actor, channel string, in DotsRep
 	if err != nil {
 		return DotsReplyResult{}, err
 	}
-	if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: task.ID, Kind: "source_event", By: actor, Note: payload, At: now, Source: "dots-hk-chatgpt", SourceRef: commentID, Field: "dots_reply", FromValue: in.Kind, ToValue: strconv.FormatInt(commentRowID, 10)}); err != nil {
+	if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: task.ID, Kind: "source_event", By: actor, Note: payload + " " + task.State + " " + docKey, At: now, Source: "dots-hk-chatgpt", SourceRef: commentID, Field: "dots_reply", FromValue: in.Kind, ToValue: strconv.FormatInt(commentRowID, 10)}); err != nil {
 		return DotsReplyResult{}, err
 	}
 	if err = tx.Commit(ctx); err != nil {
 		return DotsReplyResult{}, err
 	}
-	return DotsReplyResult{Task: task, DocumentKey: docKey}, nil
+	return DotsReplyResult{TaskID: task.ID, State: task.State, DocumentKey: docKey}, nil
 }
 
 // DotsComment is one Linear comment. CreatedAt keeps Linear's own ISO-8601
