@@ -74,6 +74,7 @@ func projectWorkBoard(board store.LinearBoard) *boardWorkBoard {
 type boardTask struct {
 	ActiveJob  *store.ActiveJobSummary `json:"active_job,omitempty"`
 	WorkBoard  *boardWorkBoard         `json:"work_board,omitempty"`
+	Command    *boardCommandChip       `json:"command,omitempty"`
 	ID         int64                   `json:"id"`
 	Lane       string                  `json:"lane"`
 	ParentLane string                  `json:"parent_lane,omitempty"`
@@ -210,11 +211,20 @@ func (h *Handler) boardTasks(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "internal_error")
 		return
 	}
+	openCommands, err := h.store.ReadOpenOperatorCommands(r.Context(), ids)
+	if err != nil {
+		log.Printf("ui.board_commands_failed err=%q", err)
+		writeJSONError(w, http.StatusInternalServerError, "internal_error")
+		return
+	}
 	for _, task := range tasks {
 		row := projectBoardTask(task)
 		row.WorkBoard = projectWorkBoard(workBoards[task.ID])
 		if job, ok := activeJobs[task.ID]; ok {
 			row.ActiveJob = &job
+		}
+		if command, ok := openCommands[task.ID]; ok {
+			row.Command = &boardCommandChip{ID: command.ID, Kind: command.Kind, State: command.State, CreatedAt: command.CreatedAt.UTC()}
 		}
 		response.Tasks = append(response.Tasks, row)
 		response.NextAfterID = task.ID
@@ -269,6 +279,55 @@ type boardEvent struct {
 	At        time.Time       `json:"at"`
 }
 
+type boardCommandChip struct {
+	ID        int64     `json:"id"`
+	Kind      string    `json:"kind"`
+	State     string    `json:"state"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// boardCommand is the console-safe projection of one operator command: the
+// ladder timestamps and the instruction text, never arbitrary executor
+// payload.
+type boardCommand struct {
+	ID            int64      `json:"id"`
+	Kind          string     `json:"kind"`
+	State         string     `json:"state"`
+	Intent        string     `json:"intent,omitempty"`
+	Text          string     `json:"text,omitempty"`
+	Actor         string     `json:"actor"`
+	LastErrorCode string     `json:"last_error_code,omitempty"`
+	CreatedAt     time.Time  `json:"created_at"`
+	DeliveredAt   *time.Time `json:"delivered_at"`
+	AckedAt       *time.Time `json:"acked_at"`
+	FinishedAt    *time.Time `json:"finished_at"`
+	ExpiresAt     time.Time  `json:"expires_at"`
+}
+
+func projectBoardCommand(command store.OperatorCommand) boardCommand {
+	out := boardCommand{
+		ID: command.ID, Kind: command.Kind, State: command.State, Actor: command.Actor,
+		LastErrorCode: command.LastErrorCode, CreatedAt: command.CreatedAt.UTC(),
+		DeliveredAt: utcOrNil(command.DeliveredAt), AckedAt: utcOrNil(command.AckedAt),
+		FinishedAt: utcOrNil(command.FinishedAt), ExpiresAt: command.ExpiresAt.UTC(),
+	}
+	if command.Kind == store.OperatorCommandKindWorkerMessage {
+		var payload store.WorkerMessagePayload
+		if err := json.Unmarshal(command.Payload, &payload); err == nil {
+			out.Text, out.Intent = payload.Text, payload.Intent
+		}
+	}
+	return out
+}
+
+func utcOrNil(t *time.Time) *time.Time {
+	if t == nil {
+		return nil
+	}
+	utc := t.UTC()
+	return &utc
+}
+
 type dwellSegment struct {
 	State   string `json:"state"`
 	Seconds int64  `json:"seconds"`
@@ -316,9 +375,11 @@ type boardDetailResponse struct {
 	Origins            []store.TaskOrigin `json:"origins"`
 	Changes            []store.Change     `json:"changes"`
 	Jobs               []boardJob         `json:"jobs"`
+	Commands           []boardCommand     `json:"commands"`
 	OriginsTruncated   bool               `json:"origins_truncated"`
 	ChangesTruncated   bool               `json:"changes_truncated"`
 	JobsTruncated      bool               `json:"jobs_truncated"`
+	CommandsTruncated  bool               `json:"commands_truncated"`
 	Task               boardTask          `json:"task"`
 	Events             []boardEvent       `json:"events"`
 	Dwell              []dwellSegment     `json:"dwell"`
@@ -508,10 +569,25 @@ func (h *Handler) boardTaskDetail(w http.ResponseWriter, r *http.Request) {
 	for _, j := range jobs {
 		projectedJobs = append(projectedJobs, boardJob{j.JobID, j.Role, j.State, j.Host, j.Family, j.Profile, j.Model, j.Harness, j.Effort, j.Skills, j.SkillsSupported, j.ClaimedAt, j.SpawnedAt, j.ReadyAt, j.EndedAt, j.EndReason, j.DiffStat})
 	}
+	commands, err := h.store.ListOperatorCommandsByTask(r.Context(), id, 101)
+	if err != nil {
+		log.Printf("ui.board_detail_error err=%q", err)
+		writeJSONError(w, http.StatusInternalServerError, "internal_error")
+		return
+	}
+	commandsTruncated := len(commands) > 100
+	if commandsTruncated {
+		commands = commands[:100]
+	}
+	projectedCommands := make([]boardCommand, 0, len(commands))
+	for _, command := range commands {
+		projectedCommands = append(projectedCommands, projectBoardCommand(command))
+	}
 	now := time.Now().UTC()
 	response := boardDetailResponse{
 		Documents: projectedDocuments, DocumentsTruncated: documentsTruncated,
 		Origins: origins, Changes: changes, Jobs: projectedJobs, OriginsTruncated: originsTruncated, ChangesTruncated: changesTruncated, JobsTruncated: jobsTruncated,
+		Commands: projectedCommands, CommandsTruncated: commandsTruncated,
 		Task:      projectBoardTask(task),
 		Events:    make([]boardEvent, 0, len(task.Events)),
 		Dwell:     taskDwell(task, now),
@@ -525,6 +601,15 @@ func (h *Handler) boardTaskDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response.Task.WorkBoard = projectWorkBoard(workBoards[task.ID])
+	activeJobs, err := h.store.ReadActiveJobs(r.Context(), []int64{task.ID})
+	if err != nil {
+		log.Printf("ui.board_detail_error err=%q", err)
+		writeJSONError(w, http.StatusInternalServerError, "internal_error")
+		return
+	}
+	if job, ok := activeJobs[task.ID]; ok {
+		response.Task.ActiveJob = &job
+	}
 	response.DecisionRequests, response.DecisionLegacy = taskDecisionViews(task, now)
 	for _, event := range task.Events {
 		response.Events = append(response.Events, boardEvent{

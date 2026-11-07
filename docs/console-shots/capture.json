@@ -253,6 +253,78 @@
       "overflow": false,
       "errors": [],
       "captured_at": "2026-11-06T21:40:03.705Z"
+    },
+    {
+      "file": "task-commands-dark-1440.png",
+      "url": "/ui/tasks/107",
+      "theme": "dark",
+      "width": 1440,
+      "overflow": false,
+      "errors": [],
+      "captured_at": "2026-11-07T01:55:13.320Z"
+    },
+    {
+      "file": "instruct-dialog-dark-1440.png",
+      "url": "/ui/tasks/107",
+      "theme": "dark",
+      "width": 1440,
+      "overflow": false,
+      "errors": [],
+      "captured_at": "2026-11-07T01:55:13.656Z"
+    },
+    {
+      "file": "task-commands-light-1440.png",
+      "url": "/ui/tasks/107",
+      "theme": "light",
+      "width": 1440,
+      "overflow": false,
+      "errors": [],
+      "captured_at": "2026-11-07T01:55:14.220Z"
+    },
+    {
+      "file": "instruct-dialog-light-1440.png",
+      "url": "/ui/tasks/107",
+      "theme": "light",
+      "width": 1440,
+      "overflow": false,
+      "errors": [],
+      "captured_at": "2026-11-07T01:55:14.557Z"
+    },
+    {
+      "file": "task-commands-dark-390.png",
+      "url": "/ui/tasks/107",
+      "theme": "dark",
+      "width": 390,
+      "overflow": false,
+      "errors": [],
+      "captured_at": "2026-11-07T01:55:15.059Z"
+    },
+    {
+      "file": "instruct-dialog-dark-390.png",
+      "url": "/ui/tasks/107",
+      "theme": "dark",
+      "width": 390,
+      "overflow": false,
+      "errors": [],
+      "captured_at": "2026-11-07T01:55:15.359Z"
+    },
+    {
+      "file": "task-commands-light-390.png",
+      "url": "/ui/tasks/107",
+      "theme": "light",
+      "width": 390,
+      "overflow": false,
+      "errors": [],
+      "captured_at": "2026-11-07T01:55:15.891Z"
+    },
+    {
+      "file": "instruct-dialog-light-390.png",
+      "url": "/ui/tasks/107",
+      "theme": "light",
+      "width": 390,
+      "overflow": false,
+      "errors": [],
+      "captured_at": "2026-11-07T01:55:16.220Z"
     }
   ]
 }

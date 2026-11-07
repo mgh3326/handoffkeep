@@ -155,10 +155,44 @@ A malformed-record warning is a `CollapsedWarning`: `N개 기록 형식 불일�
 missing, the list explains why it cannot be computed. A service with no records
 reads 기록 없음, and a capped scan says so instead of claiming the fleet truth.
 
+## Operator commands
+
+Actions that touch something outside hk are operator commands, not direct
+writes. The console records the intent (`POST /ui/api/tasks/{id}/commands`,
+the same Access, origin, CSRF and idempotency guards as every operator write),
+hk relays exactly one `lane.event` to the owner of the target, and the
+executor reports a receipt (`POST /v1/commands/{id}/receipt`). The console
+shows the ladder 기록됨 → 전달됨 → 접수됨 → 완료 | 실패 | 만료 and never shows
+done before the receipt. A row with a command in flight carries a `지시` chip in
+its meta line; the task record's 운영 명령 section shows every command's ladder
+with its times, and a failure shows its error code in Korean.
+
+The tracer kind is `worker.message` (`{text, intent}` with `intent` `steer` or
+`queue`), offered on a task with an active job as 워커에게 지시: 지금 끼어들기
+records a steer, 현재 작업 끝나고 records a queue. `job.stop`, `task.respawn`
+and `deploy.approve` are in the registry but disabled with 실행기 준비 전 until
+their executors land. `worker.message` expires after 30 minutes.
+
+The relay body is the documented executor contract:
+
+```text
+[hk 명령 #<id> · 지금 끼어들기] <text>
+[hk 명령 #<id> · 현재 턴 뒤] <text>
+```
+
+`event_id` is the command key. An executor that can queue holds a
+`현재 턴 뒤` instruction until the worker's current turn ends; one that cannot
+queue treats it as a steer and reports `queue_unsupported` in its receipt.
+Receipts are `acked`, `done` or `failed` (with `error_code` and an optional
+`note`); they move forward only and a repeated receipt is a no-op. Executors
+poll `GET /v1/commands?executor_lane=<lane>&state=acked` or the CLI
+`handoffkeep commands list|receipt`.
+
 ## Task record and document viewer
 
 `/ui/tasks/{id}` renders `TaskRecord`: Closure, Origins, Documents, Changes,
-Jobs, Durations and Events. Work rows, Home rows and decision pages link here.
+Jobs, Durations, Operator commands and Events. Work rows, Home rows and
+decision pages link here.
 
 `/ui/doc/{key}` renders `DocView`: the key, kind and update time, then the
 markdown through a lazy renderer; a payload that cannot be rendered is shown as
@@ -167,8 +201,9 @@ the markdown chunk, so Home and Work never pay for it.
 
 ## Captures
 
-Seven routes — home, work, task, decisions, decision, deploys and document — at
-1440px and 390px in dark and light, 28 PNGs. Each page is one viewport as tall
+Nine routes — home, work, task, task commands, instruct dialog, decisions,
+decision, deploys and document — at 1440px and 390px in dark and light, 36
+PNGs. Each page is one viewport as tall
 as the document, so the fixed tab bar sits at the real bottom edge instead of
 being stitched into the middle by a full-page capture. The filenames encode
 page, theme and width; the [manifest](console-shots/capture.json) records the

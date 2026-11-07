@@ -125,6 +125,8 @@ func (h *Handler) serveAPI(w http.ResponseWriter, r *http.Request, identity cfac
 		h.deployPending(w, r)
 	case r.Method == http.MethodPost && taskPriorityPathRE.MatchString(r.URL.Path):
 		h.taskPriority(w, r, identity)
+	case r.Method == http.MethodPost && taskCommandPathRE.MatchString(r.URL.Path):
+		h.taskCommand(w, r, identity)
 	case r.Method == http.MethodPost && r.URL.Path == "/ui/api/decision-requests/resolve":
 		h.decisionResolve(w, r, identity)
 	case r.Method == http.MethodGet && (r.URL.Path == "/ui/api/decisions" || strings.HasPrefix(r.URL.Path, "/ui/api/decisions/")):

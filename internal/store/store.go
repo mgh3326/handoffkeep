@@ -3137,6 +3137,18 @@ func (s *Store) AppendRelayEvent(ctx context.Context, x RelayEvent) (RelayEvent,
 		return x, false, err
 	}
 	defer tx.Rollback(ctx)
+	x, created, err := s.appendRelayEventTx(ctx, tx, x)
+	if err != nil {
+		return x, false, err
+	}
+	return x, created, tx.Commit(ctx)
+}
+
+// appendRelayEventTx is AppendRelayEvent inside the caller's transaction, so
+// a writer can record its own row and the delivery in one commit. The caller
+// owns the surrounding lock order (lockorder.go).
+func (s *Store) appendRelayEventTx(ctx context.Context, tx pgx.Tx, x RelayEvent) (RelayEvent, bool, error) {
+	var err error
 	// With the work board on, recordLinearBoardRelayTx below locks every task
 	// the event matches: the task-mutation lock comes first, before the job
 	// lock (lock order, lockorder.go).
@@ -3213,31 +3225,43 @@ func (s *Store) AppendRelayEvent(ctx context.Context, x RelayEvent) (RelayEvent,
 		}
 	}
 	hydrateWrkRelay(ctx, tx, &x)
-	return x, created, tx.Commit(ctx)
+	return x, created, nil
 }
 
 // MarkRelayEventDelivered records the first successful delivery. Subsequent
 // calls are intentionally idempotent and return the original delivery time.
+// One transaction also moves an operator command carried by the event to
+// delivered, so the console ladder never shows a command behind its receipt.
 func (s *Store) MarkRelayEventDelivered(ctx context.Context, id int64, machine, pane string) (RelayEvent, error) {
 	if id < 1 || !validText(machine, MaxBytes) || !validText(pane, MaxBytes) {
 		return RelayEvent{}, errors.New("invalid relay event delivery")
 	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return RelayEvent{}, err
+	}
+	defer tx.Rollback(ctx)
 	var x RelayEvent
-	err := scanRelayEvent(s.pool.QueryRow(ctx, `UPDATE relay_events SET delivered_at=now(),delivered_to=$2 WHERE id=$1 AND delivered_at IS NULL RETURNING `+relayEventColumns, id, machine+"/"+pane), &x)
-	if err == nil {
-		hydrateWrkRelay(ctx, s.pool, &x)
-		return x, nil
-	}
-	if !errors.Is(err, pgx.ErrNoRows) {
-		return RelayEvent{}, err
-	}
-	if err = scanRelayEvent(s.pool.QueryRow(ctx, `SELECT `+relayEventColumns+` FROM relay_events WHERE id=$1`, id), &x); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return RelayEvent{}, ErrRelayEventNotFound
+	err = scanRelayEvent(tx.QueryRow(ctx, `UPDATE relay_events SET delivered_at=now(),delivered_to=$2 WHERE id=$1 AND delivered_at IS NULL RETURNING `+relayEventColumns, id, machine+"/"+pane), &x)
+	if errors.Is(err, pgx.ErrNoRows) {
+		if err = scanRelayEvent(tx.QueryRow(ctx, `SELECT `+relayEventColumns+` FROM relay_events WHERE id=$1`, id), &x); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return RelayEvent{}, ErrRelayEventNotFound
+			}
+			return RelayEvent{}, err
 		}
+	} else if err != nil {
 		return RelayEvent{}, err
 	}
-	hydrateWrkRelay(ctx, s.pool, &x)
+	if x.DeliveredAt != nil && x.Kind == "lane.event" {
+		if err = markOperatorCommandsDeliveredTx(ctx, tx, x.OwnerLane, x.EventID, x.DeliveredAt.UTC()); err != nil {
+			return RelayEvent{}, err
+		}
+	}
+	hydrateWrkRelay(ctx, tx, &x)
+	if err = tx.Commit(ctx); err != nil {
+		return RelayEvent{}, err
+	}
 	return x, nil
 }
 
