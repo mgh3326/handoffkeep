@@ -145,10 +145,13 @@ jobs:
           deadline=$(( $(date +%s) + 120*60 ))
           green() { echo "green=$1" >> "$GITHUB_OUTPUT"; exit 0; }
           block() { echo "$1; not publishing" >&2; exit 1; }
-          # deploy_ok_state prints the deploy-ok status, or "none"; a failed API
-          # call prints "unknown" so the caller retries.
+          # deploy_ok_state prints the deploy-ok state, or "none"; a failed API
+          # call prints "unknown" so the caller retries. The combined status
+          # endpoint returns the LATEST state per context, so a rerun's status
+          # supersedes the old one and no page can hide it (the plain statuses
+          # list is newest-30 only: review on #228, medium).
           deploy_ok_state() {
-            gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/statuses" -q '[.[] | select(.context == "deploy-ok")] | first | .state // "none"' 2>/dev/null || echo unknown
+            gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/status" -q '[.statuses[] | select(.context == "deploy-ok") | .state] | first // "none"' 2>/dev/null || echo unknown
           }
           # await_deploy_ok blocks until the deploy tier has a verdict on this
           # head. deploy.yml posts it for every completed deploy run.
@@ -208,7 +211,7 @@ jobs:
                   else
                     echo "::warning::reading newest main push run failed; retrying"
                   fi
-                  if [ "$superseded" = yes ] && status=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/statuses" -q '[.[] | select(.context == "ci-ok")] | first | .state // "none"'); then
+                  if [ "$superseded" = yes ] && status=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/status" -q '[.statuses[] | select(.context == "ci-ok") | .state] | first // "none"'); then
                     echo "main CI superseded; ci-any-ref ci-ok status: $status"
                     case "$status" in
                       success) publishable ;;

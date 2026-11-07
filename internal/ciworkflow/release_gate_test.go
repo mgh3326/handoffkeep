@@ -86,16 +86,20 @@ func TestReleaseCIGreenVerdicts(t *testing.T) {
 			dir := t.TempDir()
 			// The fake answers each endpoint from the case and rejects any
 			// other query, so the verdict must come from the main push run's
-			// latest ci-ok job. FAKE_FAIL names an endpoint that fails, as a
-			// transient API error would.
+			// latest ci-ok job and the combined commit status. It answers the
+			// combined status endpoint (commits/<sha>/status), whose statuses
+			// list is the latest state per context, not the paged list: the
+			// plain list is newest-30 only (review on #228, medium).
+			// FAKE_FAIL names an endpoint that fails, as a transient API error
+			// would.
 			gh := `#!/bin/sh
 case "$*" in *"$FAKE_FAIL"*) [ -n "$FAKE_FAIL" ] && exit 1 ;; esac
 case "$*" in
   *'actions/workflows/ci.yml/runs?head_sha=abc&event=push&branch=main&'*) printf '%s\n' "$FAKE_MAIN" ;;
   *'actions/workflows/ci.yml/runs?event=push&branch=main&per_page=1'*) printf '%s\n' "$FAKE_NEWEST" ;;
   *'actions/runs/9/jobs?filter=latest&'*) printf '%s\n' "$FAKE_JOB" ;;
-  *deploy-ok*) printf '%s\n' "$FAKE_DEPLOY" ;;
-  *statuses*) printf '%s\n' "$FAKE_STATUS" ;;
+  *'select(.context == "deploy-ok")'*) printf '%s\n' "$FAKE_DEPLOY" ;;
+  *'select(.context == "ci-ok")'*) printf '%s\n' "$FAKE_STATUS" ;;
   *) echo "unexpected gh $*" >&2; exit 2 ;;
 esac
 `
@@ -144,7 +148,7 @@ func TestReleaseDeployGateUsesStatusesOnly(t *testing.T) {
 	gh := fmt.Sprintf(`#!/bin/sh
 printf '%%s\n' "$*" >> %q
 case "$*" in
-  *statuses*) printf 'success\n' ;;
+  *'select(.context == "deploy-ok")'*) printf 'success\n' ;;
   *) exit 2 ;;
 esac
 `, calls)
@@ -158,8 +162,13 @@ esac
 		t.Fatalf("deploy-ok gate failed: %v\n%s", err, logs)
 	}
 	got, _ := os.ReadFile(calls)
-	if !strings.Contains(string(got), "commits/abc/statuses") {
-		t.Fatalf("deploy-ok gate did not read the commit statuses: %s", got)
+	// The combined status endpoint, not the newest-30 paged list (review on
+	// #228, medium): the latter can drop an existing deploy-ok.
+	if !strings.Contains(string(got), "commits/abc/status ") {
+		t.Fatalf("deploy-ok gate did not read the combined commit status: %s", got)
+	}
+	if strings.Contains(string(got), "commits/abc/statuses") {
+		t.Fatalf("deploy-ok gate must not read the paged statuses list: %s", got)
 	}
 	if strings.Contains(string(got), "actions/workflows") || strings.Contains(string(got), "/jobs") {
 		t.Fatalf("deploy-ok gate must not look up ci.yml runs or jobs: %s", got)
