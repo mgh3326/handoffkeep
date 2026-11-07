@@ -45,8 +45,8 @@ func TestOperatorInboxMigration(t *testing.T) {
 			}
 		}
 	}
-	if got := columns("operator_inbox_events"); len(got) != 11 {
-		t.Fatalf("operator_inbox_events has %d columns, want 11: %v", len(got), got)
+	if got := columns("operator_inbox_events"); len(got) != 14 {
+		t.Fatalf("operator_inbox_events has %d columns, want 14: %v", len(got), got)
 	}
 	var recorded bool
 	if err := pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE id=$1)`, operatorInboxMigrationID).Scan(&recorded); err != nil || !recorded {
@@ -279,5 +279,34 @@ func TestUndoInboxLeavesLaterWritesAlone(t *testing.T) {
 	}
 	if states[key].DoneAt != nil || states[key].ReadAt == nil {
 		t.Fatalf("undo of the later write state %+v", states[key])
+	}
+}
+
+// A bulk undo restores several mirrored decision snoozes in one transaction.
+func TestUndoInboxRestoresSeveralDecisionSnoozes(t *testing.T) {
+	s := schemaStore(t, "inbox_decision_bulk")
+	ctx := t.Context()
+	first := insertAttentionRequest(t, s, attentionRequest{ref: "bulk-a"})
+	second := insertAttentionRequest(t, s, attentionRequest{ref: "bulk-b"})
+	keys := []string{
+		"decision:request:" + strconv.FormatInt(first, 10),
+		"decision:request:" + strconv.FormatInt(second, 10),
+	}
+	until := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
+	if _, err := s.ApplyInbox(ctx, keys, InboxActionSnooze, &until, "operator:test", "bulk-snooze"); err != nil {
+		t.Fatal(err)
+	}
+	out, err := s.UndoInbox(ctx, "bulk-snooze", "operator:test")
+	if err != nil || len(out) != 2 {
+		t.Fatalf("undo %+v %v", out, err)
+	}
+	for _, id := range []int64{first, second} {
+		var snooze *time.Time
+		if err := s.pool.QueryRow(ctx, `SELECT snoozed_until FROM decision_requests WHERE id=$1`, id).Scan(&snooze); err != nil {
+			t.Fatal(err)
+		}
+		if snooze != nil {
+			t.Fatalf("request %d still snoozed until %v", id, snooze)
+		}
 	}
 }

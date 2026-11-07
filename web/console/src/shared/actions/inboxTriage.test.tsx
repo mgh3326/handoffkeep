@@ -188,6 +188,30 @@ it("Cmd-K lists the selection's actions and the four destinations", () => {
   }
 });
 
+it("sends only the rows an action applies to", async () => {
+  render(<Fixture rows={[row("task:1", { read: true }), row("task:2")]} />);
+  fireEvent.keyDown(focusRow("task:1"), { key: "x" });
+  fireEvent.keyDown(focusRow("task:2"), { key: "x" });
+  const bar = screen.getByRole("region", { name: "선택 항목 작업" });
+  fireEvent.click(within(bar).getByRole("button", { name: "안 읽음" }));
+  await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(1));
+  expect(lastBody()).toMatchObject({ action: "unread", items: ["task:1"] });
+});
+
+it("runs a palette action for the rows it opened for, not the palette's focus", async () => {
+  render(<Fixture rows={[row("task:1"), row("task:2")]} />);
+  fireEvent.keyDown(focusRow("task:1"), { key: "x" });
+  fireEvent.keyDown(focusRow("task:2"), { key: "x" });
+  fireEvent.keyDown(document.activeElement!, { key: "k", metaKey: true });
+  const dialog = screen.getByRole("dialog", { name: "명령 팔레트" });
+  within(dialog).getByRole("textbox").focus();
+  const done = within(dialog).getByText("완료").closest("button");
+  if (!done) throw new Error("missing done entry");
+  fireEvent.click(done);
+  await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(1));
+  expect(lastBody()).toMatchObject({ action: "done", items: ["task:1", "task:2"] });
+});
+
 it("closes an open dialog on Escape", () => {
   render(<Fixture rows={[row("task:1")]} />);
   fireEvent.keyDown(focusRow("task:1"), { key: "h" });

@@ -60,7 +60,10 @@ export function WorkPage() {
     let active = true;
     void fetchInboxStates(stateKeys.split(",")).then(states => { if (active) setInbox(states); }).catch(() => { if (active) setInbox(new Map()); });
     return () => { active = false; };
-  }, [stateKeys]);
+    // A triage write bumps refresh and every poll moves generatedAt; both
+    // must refetch the stored state, or the rows would keep the pre-write
+    // read/done marks.
+  }, [stateKeys, board?.generatedAt, refresh]);
   const triageRows: TriageRow[] = visible.map(t => {
     const key = `task:${t.id}`;
     const state = inbox.get(key);

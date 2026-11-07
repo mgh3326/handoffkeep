@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -156,11 +157,11 @@ func (s *Store) UndoInbox(ctx context.Context, eventKey, actor string) ([]InboxW
 		return nil, err
 	}
 	type restore struct {
-		key                                      string
-		read, done, snooze                       *time.Time
-		requestID                                *int64
-		request                                  *time.Time
-		appliedRead, appliedDone, appliedSnooze  *time.Time
+		key                                     string
+		read, done, snooze                      *time.Time
+		requestID                               *int64
+		request                                 *time.Time
+		appliedRead, appliedDone, appliedSnooze *time.Time
 	}
 	restores := []restore{}
 	for rows.Next() {
@@ -175,29 +176,59 @@ func (s *Store) UndoInbox(ctx context.Context, eventKey, actor string) ([]InboxW
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	out := make([]InboxWrite, 0, len(restores))
-	for _, r := range restores {
+	conflict := make([]bool, len(restores))
+	// Lock and check the state rows first, in item_key order — the order
+	// ApplyInbox takes them. An item whose row no longer holds what this
+	// write applied was moved later and is left alone.
+	for index := range restores {
+		r := restores[index]
 		current, found, err := inboxStateTx(ctx, tx, r.key, true)
 		if err != nil {
 			return nil, err
 		}
 		if !found || !sameInboxTime(current.ReadAt, r.appliedRead) || !sameInboxTime(current.DoneAt, r.appliedDone) || !sameInboxTime(current.SnoozedUntil, r.appliedSnooze) {
-			out = append(out, InboxWrite{ItemKey: r.key, Err: ErrInboxUndoConflict})
+			conflict[index] = true
+		}
+	}
+	// Then the mirrored requests, in ascending id order: decision writers and
+	// the task-mutation path touch several requests in id order, so a bulk
+	// undo must not take them in item_key text order (10 before 9).
+	requestIndex := map[int64][]int{}
+	requestIDs := []int64{}
+	for index := range restores {
+		if restores[index].requestID == nil {
 			continue
 		}
-		requestGone := false
-		if r.requestID != nil {
-			var currentSnooze *time.Time
-			err := tx.QueryRow(ctx, `SELECT snoozed_until FROM decision_requests WHERE id=$1 FOR UPDATE`, *r.requestID).Scan(&currentSnooze)
-			switch {
-			case errors.Is(err, pgx.ErrNoRows):
-				requestGone = true
-			case err != nil:
-				return nil, err
-			case !sameInboxTime(currentSnooze, r.appliedSnooze):
-				out = append(out, InboxWrite{ItemKey: r.key, Err: ErrInboxUndoConflict})
-				continue
+		id := *restores[index].requestID
+		if _, seen := requestIndex[id]; !seen {
+			requestIDs = append(requestIDs, id)
+		}
+		requestIndex[id] = append(requestIndex[id], index)
+	}
+	sort.Slice(requestIDs, func(i, j int) bool { return requestIDs[i] < requestIDs[j] })
+	requestGone := map[int64]bool{}
+	for _, id := range requestIDs {
+		var current *time.Time
+		err := tx.QueryRow(ctx, `SELECT snoozed_until FROM decision_requests WHERE id=$1 FOR UPDATE`, id).Scan(&current)
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			requestGone[id] = true
+		case err != nil:
+			return nil, err
+		default:
+			for _, index := range requestIndex[id] {
+				if !sameInboxTime(current, restores[index].appliedSnooze) {
+					conflict[index] = true
+				}
 			}
+		}
+	}
+	out := make([]InboxWrite, 0, len(restores))
+	for index := range restores {
+		r := restores[index]
+		if conflict[index] {
+			out = append(out, InboxWrite{ItemKey: r.key, Err: ErrInboxUndoConflict})
+			continue
 		}
 		if r.read == nil && r.done == nil && r.snooze == nil {
 			if _, err := tx.Exec(ctx, `DELETE FROM operator_inbox_state WHERE item_key=$1`, r.key); err != nil {
@@ -209,7 +240,7 @@ func (s *Store) UndoInbox(ctx context.Context, eventKey, actor string) ([]InboxW
 			r.key, r.read, r.done, r.snooze, actor, now); err != nil {
 			return nil, err
 		}
-		if r.requestID != nil && !requestGone {
+		if r.requestID != nil && !requestGone[*r.requestID] {
 			if _, err := tx.Exec(ctx, `UPDATE decision_requests SET snoozed_until=$2,updated_at=$3 WHERE id=$1`, *r.requestID, r.request, now); err != nil {
 				return nil, err
 			}
@@ -313,6 +344,16 @@ func (s *Store) applyInboxItem(ctx context.Context, key, action string, until *t
 	prev, _, err := inboxStateTx(ctx, tx, key, true)
 	if err != nil {
 		return InboxState{}, err
+	}
+	// Re-check the event under the lock. A second delivery of the same key
+	// waited above for the first writer to commit, so its event row is
+	// visible here even though the unlocked check missed it; the delivery is
+	// a replay, not a duplicate insert.
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM operator_inbox_events WHERE event_key=$1 AND item_key=$2)`, eventKey, key).Scan(&replayed); err != nil {
+		return InboxState{}, err
+	}
+	if replayed {
+		return prev, tx.Commit(ctx)
 	}
 
 	next := prev

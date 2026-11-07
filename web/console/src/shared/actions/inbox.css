@@ -291,3 +291,11 @@
   outline: var(--hk-focus-width) solid var(--hk-focus);
   outline-offset: var(--hk-focus-offset-inset);
 }
+
+/* Touch has no hover, so the row checkbox is always shown there — the same
+   rule the per-row action menu follows (actions.css). */
+@media (max-width: 767px), (hover: none) {
+  .inbox-select {
+    visibility: visible;
+  }
+}

@@ -181,7 +181,11 @@ func (h *Handler) inboxStates(w http.ResponseWriter, r *http.Request, identity c
 	}
 	items := make([]stateView, 0, len(keys))
 	for _, key := range keys {
-		state := states[key]
+		state, ok := states[key]
+		if !ok {
+			// No row yet: report the requested key, not an empty one.
+			state = store.InboxState{ItemKey: key}
+		}
 		items = append(items, stateView{inboxItemView: inboxItemViewOf(state), Woken: state.Woken(now)})
 	}
 	writeBoardJSON(w, map[string]any{"items": items})

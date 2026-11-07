@@ -62,6 +62,26 @@ export function useInboxTriage(rows: TriageRow[], reload: () => void) {
   const [priorityOpen, setPriorityOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
+  // The rows a dialog or the palette was opened for. Reading the focused row
+  // again when its button is clicked would find the dialog's own focus.
+  const pendingKeys = useRef<string[]>([]);
+  const [paletteRows, setPaletteRows] = useState<TriageRow[]>([]);
+  const takePendingKeys = (): string[] => {
+    const keys = pendingKeys.current;
+    pendingKeys.current = [];
+    return keys;
+  };
+
+  // A refresh can remove a selected row; its key must not keep the bar up for
+  // a row that is no longer on the page.
+  useEffect(() => {
+    setSelected(old => {
+      if (old.size === 0) return old;
+      const present = new Set(rows.map(row => row.key));
+      const next = new Set([...old].filter(key => present.has(key)));
+      return next.size === old.size ? old : next;
+    });
+  }, [rows]);
 
   const targetRows = (): TriageRow[] => {
     const list = rowsRef.current;
@@ -80,13 +100,15 @@ export function useInboxTriage(rows: TriageRow[], reload: () => void) {
     setUndoCount(stackRef.current.length);
   };
 
-  const runAction = async (id: InboxActionId, until?: string) => {
+  const runAction = async (id: InboxActionId, opts?: { until?: string; keys?: string[] }) => {
     if (busyRef.current) return;
-    if (id === "snooze" && until === undefined) {
+    if (id === "snooze" && opts?.until === undefined) {
+      pendingKeys.current = opts?.keys ?? targetRows().map(row => row.key);
       setSnoozeOpen(true);
       return;
     }
     if (id === "priority") {
+      pendingKeys.current = opts?.keys ?? targetRows().map(row => row.key);
       setPriorityOpen(true);
       return;
     }
@@ -94,14 +116,22 @@ export function useInboxTriage(rows: TriageRow[], reload: () => void) {
       setNotice("보류는 작업 수명주기 콘솔 작업에서 제공합니다.");
       return;
     }
-    const keys = targetRows().map(row => row.key);
-    if (keys.length === 0) return;
+    const candidates = opts?.keys ? rowsRef.current.filter(row => opts.keys!.includes(row.key)) : targetRows();
+    const action = inboxActions.find(entry => entry.id === id);
+    // Only the rows the action applies to: a mixed selection's unread must
+    // not touch a row that is already unread (and clear its snooze).
+    const applicable = action ? candidates.filter(row => action.applicable(row) && action.disabledReason(row) === null) : candidates;
+    const keys = applicable.map(row => row.key);
+    if (keys.length === 0) {
+      if (opts?.keys) setNotice("적용할 항목이 없습니다.");
+      return;
+    }
     const capped = keys.slice(0, BULK_LIMIT);
     const eventKey = crypto.randomUUID();
     busyRef.current = true;
     setBusy(true);
     try {
-      const result = await writeInbox(id, capped, eventKey, until);
+      const result = await writeInbox(id, capped, eventKey, opts?.until);
       const parts = [`${inboxActionLabel(id)} ${result.items.length}건`];
       if (result.failed.length > 0) parts.push(`${result.failed.length}건 실패`);
       if (result.skipped > 0) parts.push(`${result.skipped}건 건너뜀`);
@@ -124,7 +154,9 @@ export function useInboxTriage(rows: TriageRow[], reload: () => void) {
   const applyPriority = async (value: number) => {
     setPriorityOpen(false);
     if (busyRef.current) return;
-    const targets = targetRows()
+    const wanted = takePendingKeys();
+    const candidates = wanted.length > 0 ? rowsRef.current.filter(row => wanted.includes(row.key)) : targetRows();
+    const targets = candidates
       .map(row => row.task)
       .filter((task): task is ActionTarget => task !== undefined)
       .slice(0, BULK_LIMIT);
@@ -135,19 +167,32 @@ export function useInboxTriage(rows: TriageRow[], reload: () => void) {
     busyRef.current = true;
     setBusy(true);
     try {
-      const results = await Promise.all(targets.map(async task => ({ id: task.id, result: await setTaskPriority(task.id, value) })));
-      pushUndo({
-        label: "우선순위 변경",
-        undo: async () => {
-          for (const entry of results) await setTaskPriority(entry.id, entry.result.previous);
-          return [];
-        },
-      });
-      setNotice(`우선순위 ${value === 0 ? "없음" : `P${value}`} · ${results.length}건`);
+      // allSettled: a task that closed meanwhile must not hide the changes
+      // the other requests already made.
+      const settled = await Promise.allSettled(targets.map(async task => ({ id: task.id, result: await setTaskPriority(task.id, value) })));
+      const applied = settled
+        .filter((entry): entry is PromiseFulfilledResult<{ id: number; result: { previous: number; priority: number } }> => entry.status === "fulfilled")
+        .map(entry => entry.value);
+      if (applied.length > 0) {
+        pushUndo({
+          label: "우선순위 변경",
+          undo: async () => {
+            const failed: string[] = [];
+            for (const entry of applied) {
+              try {
+                await setTaskPriority(entry.id, entry.result.previous);
+              } catch {
+                failed.push(String(entry.id));
+              }
+            }
+            return failed;
+          },
+        });
+      }
+      const label = value === 0 ? "없음" : `P${value}`;
+      setNotice(applied.length === targets.length ? `우선순위 ${label} · ${applied.length}건` : `우선순위 ${label} · ${applied.length}건 적용 · ${targets.length - applied.length}건 실패`);
       setSelected(new Set());
       reloadRef.current();
-    } catch {
-      setNotice("우선순위를 변경하지 못했습니다.");
     } finally {
       busyRef.current = false;
       setBusy(false);
@@ -210,8 +255,19 @@ export function useInboxTriage(rows: TriageRow[], reload: () => void) {
     }
   };
 
+  const openPalette = () => {
+    if (paletteOpen) {
+      setPaletteOpen(false);
+      return;
+    }
+    // The palette keeps the rows it opened for: focus moves into its input,
+    // and re-reading the focused row would find nothing.
+    setPaletteRows(targetRows());
+    setPaletteOpen(true);
+  };
+
   const paletteEntries = () => {
-    const targets = targetRows();
+    const targets = paletteRows;
     const entries: { id: string; label: string; keywords: string[]; reason: string | null; run?: () => void }[] = [];
     if (targets.length > 0) {
       for (const action of inboxActions) {
@@ -222,7 +278,7 @@ export function useInboxTriage(rows: TriageRow[], reload: () => void) {
           label: action.label,
           keywords: [action.id, ...action.keywords],
           reason: state.disabled ? state.reason : null,
-          run: state.disabled ? undefined : () => { setPaletteOpen(false); void runAction(action.id); },
+          run: state.disabled ? undefined : () => { setPaletteOpen(false); void runAction(action.id, { keys: targets.map(row => row.key) }); },
         });
       }
       const task = targets.length === 1 ? targets[0].task : undefined;
@@ -235,7 +291,7 @@ export function useInboxTriage(rows: TriageRow[], reload: () => void) {
             label: action.label,
             keywords: [action.id, ...action.keywords],
             reason,
-            run: reason ? undefined : () => { setPaletteOpen(false); setPriorityOpen(true); },
+            run: reason ? undefined : () => { setPaletteOpen(false); pendingKeys.current = targets.map(row => row.key); setPriorityOpen(true); },
           });
         }
       }
@@ -252,8 +308,8 @@ export function useInboxTriage(rows: TriageRow[], reload: () => void) {
     return entries;
   };
 
-  const handlers = useRef({ runAction, undo, moveTo, toggle, rangeTo, canUndo: false });
-  handlers.current = { runAction, undo, moveTo, toggle, rangeTo, canUndo: undoCount > 0 };
+  const handlers = useRef({ runAction, undo, moveTo, toggle, rangeTo, openPalette, canUndo: false });
+  handlers.current = { runAction, undo, moveTo, toggle, rangeTo, openPalette, canUndo: undoCount > 0 };
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -263,7 +319,7 @@ export function useInboxTriage(rows: TriageRow[], reload: () => void) {
         // Cmd-K, so a focused row's own palette never opens beside it.
         event.preventDefault();
         event.stopPropagation();
-        setPaletteOpen(open => !open);
+        handlers.current.openPalette();
         return;
       }
       if (event.metaKey || event.ctrlKey || event.altKey) return;
@@ -330,6 +386,7 @@ export function useInboxTriage(rows: TriageRow[], reload: () => void) {
     rangeTo,
     clearSelection,
     clearNotice: () => setNotice(""),
+    takePendingKeys,
     paletteEntries,
   };
 }
@@ -339,7 +396,7 @@ export function TriageUi({ triage }: { triage: Triage }) {
   const selected = triage.selectedRows();
   const pickSnooze = (at: Date) => {
     triage.setSnoozeOpen(false);
-    void triage.runAction("snooze", at.toISOString());
+    void triage.runAction("snooze", { until: at.toISOString(), keys: triage.takePendingKeys() });
   };
   return (
     <>
