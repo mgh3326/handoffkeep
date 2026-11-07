@@ -41,39 +41,46 @@ func TestReleaseCIGreenVerdicts(t *testing.T) {
 		t.Fatalf("ci-green GATE = %q, want ci-ok (the switch to deploy-ok waits for mergewake)", got)
 	}
 	script := strings.ReplaceAll(job.Steps[0].Run, "sleep 30", "exit 7 # pending: the test stops instead of waiting")
+	// deploy is the deploy-ok status beside the ci-ok one: the shipped gate
+	// requires both (review on #228, high), so a ci-ok success alone no longer
+	// publishes.
 	for _, tc := range []struct {
-		name, gate, main, job, status, newest, fail string
-		code                                        int
-		green                                       string
+		name, gate, main, job, status, deploy, newest, fail string
+		code                                                int
+		green                                               string
 	}{
-		{"main ci-ok success publishes", "ci-ok", "9 completed 2026-11-05T10:00:00Z success", "success", "none", "def 2026-11-05T10:05:00Z", "", 0, "true"},
-		{"main ci-ok failure beats stale success status", "ci-ok", "9 completed 2026-11-05T10:00:00Z failure", "failure", "success", "def 2026-11-05T10:05:00Z", "", 1, ""},
-		{"main ci-ok timed out blocks", "ci-ok", "9 completed 2026-11-05T10:00:00Z failure", "timed_out", "success", "def 2026-11-05T10:05:00Z", "", 1, ""},
-		{"main run failed before ci-ok blocks despite success status", "ci-ok", "9 completed 2026-11-05T10:00:00Z startup_failure", "none", "success", "def 2026-11-05T10:05:00Z", "", 1, ""},
-		{"main run failed with ci-ok skipped blocks", "ci-ok", "9 completed 2026-11-05T10:00:00Z failure", "skipped", "success", "def 2026-11-05T10:05:00Z", "", 1, ""},
-		{"no main run yet: stale success waits", "ci-ok", "0 none none ", "", "success", "def 2026-11-05T10:05:00Z", "", 7, ""},
-		{"main run queued: stale success waits", "ci-ok", "9 queued 2026-11-05T10:00:00Z ", "", "success", "def 2026-11-05T10:05:00Z", "", 7, ""},
-		{"main run in progress: any-ref failure waits", "ci-ok", "9 in_progress 2026-11-05T10:00:00Z ", "", "failure", "def 2026-11-05T10:05:00Z", "", 7, ""},
-		{"superseded, ci-ok skipped, any-ref success publishes", "ci-ok", "9 completed 2026-11-05T10:00:00Z cancelled", "skipped", "success", "def 2026-11-05T10:05:00Z", "", 0, "true"},
-		{"superseded before ci-ok, any-ref success publishes", "ci-ok", "9 completed 2026-11-05T10:00:00Z cancelled", "none", "success", "def 2026-11-05T10:05:00Z", "", 0, "true"},
-		{"superseded, any-ref failure blocks", "ci-ok", "9 completed 2026-11-05T10:00:00Z cancelled", "skipped", "error", "def 2026-11-05T10:05:00Z", "", 1, ""},
-		{"superseded, any-ref pending waits", "ci-ok", "9 completed 2026-11-05T10:00:00Z cancelled", "skipped", "pending", "def 2026-11-05T10:05:00Z", "", 7, ""},
-		{"superseded, no status skips publication", "ci-ok", "9 completed 2026-11-05T10:00:00Z cancelled", "cancelled", "none", "def 2026-11-05T10:05:00Z", "", 0, "false"},
-		{"ci-ok failure in a cancelled run blocks", "ci-ok", "9 completed 2026-11-05T10:00:00Z cancelled", "failure", "success", "def 2026-11-05T10:05:00Z", "", 1, ""},
-		{"runs API failure waits", "ci-ok", "9 completed 2026-11-05T10:00:00Z success", "success", "none", "def 2026-11-05T10:05:00Z", "workflows/ci.yml/runs", 7, ""},
-		{"jobs API failure waits", "ci-ok", "9 completed 2026-11-05T10:00:00Z success", "success", "none", "def 2026-11-05T10:05:00Z", "/jobs", 7, ""},
-		{"manual cancel, no newer main push, blocks despite success status", "ci-ok", "9 completed 2026-11-05T10:00:00Z cancelled", "none", "success", "abc 2026-11-05T10:00:00Z", "", 1, ""},
-		{"cancelled, newest main run is older, blocks", "ci-ok", "9 completed 2026-11-05T10:00:00Z cancelled", "skipped", "success", "def 2026-11-05T09:00:00Z", "", 1, ""},
-		{"newest-run API failure waits", "ci-ok", "9 completed 2026-11-05T10:00:00Z cancelled", "skipped", "success", "def 2026-11-05T10:05:00Z", "runs?event=push", 7, ""},
-		{"statuses API failure waits", "ci-ok", "9 completed 2026-11-05T10:00:00Z cancelled", "skipped", "success", "def 2026-11-05T10:05:00Z", "statuses", 7, ""},
+		// Shipped GATE=ci-ok also requires deploy-ok: a green main tier without
+		// deploy-tier evidence does not publish (review on #228, high).
+		{"main ci-ok success, deploy-ok failure blocks", "ci-ok", "9 completed 2026-11-05T10:00:00Z success", "success", "none", "failure", "def 2026-11-05T10:05:00Z", "", 1, ""},
+		{"main ci-ok success, deploy-ok absent waits", "ci-ok", "9 completed 2026-11-05T10:00:00Z success", "success", "none", "none", "def 2026-11-05T10:05:00Z", "", 7, ""},
+		{"main ci-ok success publishes", "ci-ok", "9 completed 2026-11-05T10:00:00Z success", "success", "none", "success", "def 2026-11-05T10:05:00Z", "", 0, "true"},
+		{"main ci-ok failure beats stale success status", "ci-ok", "9 completed 2026-11-05T10:00:00Z failure", "failure", "success", "success", "def 2026-11-05T10:05:00Z", "", 1, ""},
+		{"main ci-ok timed out blocks", "ci-ok", "9 completed 2026-11-05T10:00:00Z failure", "timed_out", "success", "success", "def 2026-11-05T10:05:00Z", "", 1, ""},
+		{"main run failed before ci-ok blocks despite success status", "ci-ok", "9 completed 2026-11-05T10:00:00Z startup_failure", "none", "success", "success", "def 2026-11-05T10:05:00Z", "", 1, ""},
+		{"main run failed with ci-ok skipped blocks", "ci-ok", "9 completed 2026-11-05T10:00:00Z failure", "skipped", "success", "success", "def 2026-11-05T10:05:00Z", "", 1, ""},
+		{"no main run yet: stale success waits", "ci-ok", "0 none none ", "", "success", "success", "def 2026-11-05T10:05:00Z", "", 7, ""},
+		{"main run queued: stale success waits", "ci-ok", "9 queued 2026-11-05T10:00:00Z ", "", "success", "success", "def 2026-11-05T10:05:00Z", "", 7, ""},
+		{"main run in progress: any-ref failure waits", "ci-ok", "9 in_progress 2026-11-05T10:00:00Z ", "", "failure", "success", "def 2026-11-05T10:05:00Z", "", 7, ""},
+		{"superseded, ci-ok skipped, any-ref success publishes", "ci-ok", "9 completed 2026-11-05T10:00:00Z cancelled", "skipped", "success", "success", "def 2026-11-05T10:05:00Z", "", 0, "true"},
+		{"superseded before ci-ok, any-ref success publishes", "ci-ok", "9 completed 2026-11-05T10:00:00Z cancelled", "none", "success", "success", "def 2026-11-05T10:05:00Z", "", 0, "true"},
+		{"superseded, any-ref failure blocks", "ci-ok", "9 completed 2026-11-05T10:00:00Z cancelled", "skipped", "error", "success", "def 2026-11-05T10:05:00Z", "", 1, ""},
+		{"superseded, any-ref pending waits", "ci-ok", "9 completed 2026-11-05T10:00:00Z cancelled", "skipped", "pending", "success", "def 2026-11-05T10:05:00Z", "", 7, ""},
+		{"superseded, no status skips publication", "ci-ok", "9 completed 2026-11-05T10:00:00Z cancelled", "cancelled", "none", "success", "def 2026-11-05T10:05:00Z", "", 0, "false"},
+		{"ci-ok failure in a cancelled run blocks", "ci-ok", "9 completed 2026-11-05T10:00:00Z cancelled", "failure", "success", "success", "def 2026-11-05T10:05:00Z", "", 1, ""},
+		{"runs API failure waits", "ci-ok", "9 completed 2026-11-05T10:00:00Z success", "success", "none", "success", "def 2026-11-05T10:05:00Z", "workflows/ci.yml/runs", 7, ""},
+		{"jobs API failure waits", "ci-ok", "9 completed 2026-11-05T10:00:00Z success", "success", "none", "success", "def 2026-11-05T10:05:00Z", "/jobs", 7, ""},
+		{"manual cancel, no newer main push, blocks despite success status", "ci-ok", "9 completed 2026-11-05T10:00:00Z cancelled", "none", "success", "success", "abc 2026-11-05T10:00:00Z", "", 1, ""},
+		{"cancelled, newest main run is older, blocks", "ci-ok", "9 completed 2026-11-05T10:00:00Z cancelled", "skipped", "success", "success", "def 2026-11-05T09:00:00Z", "", 1, ""},
+		{"newest-run API failure waits", "ci-ok", "9 completed 2026-11-05T10:00:00Z cancelled", "skipped", "success", "success", "def 2026-11-05T10:05:00Z", "runs?event=push", 7, ""},
+		{"statuses API failure waits", "ci-ok", "9 completed 2026-11-05T10:00:00Z cancelled", "skipped", "success", "success", "def 2026-11-05T10:05:00Z", "statuses", 7, ""},
 		// GATE=deploy-ok: the switch decision §4-3 will make. The verdict is
 		// the deploy-ok status alone; no main-run lookup decides it.
-		{"deploy-ok success publishes", "deploy-ok", "", "", "success", "", "", 0, "true"},
-		{"deploy-ok failure blocks", "deploy-ok", "", "", "failure", "", "", 1, ""},
-		{"deploy-ok error blocks", "deploy-ok", "", "", "error", "", "", 1, ""},
-		{"deploy-ok pending waits", "deploy-ok", "", "", "pending", "", "", 7, ""},
-		{"deploy-ok absent waits", "deploy-ok", "", "", "none", "", "", 7, ""},
-		{"deploy-ok statuses API failure waits", "deploy-ok", "", "", "success", "", "statuses", 7, ""},
+		{"deploy-ok success publishes", "deploy-ok", "", "", "none", "success", "", "", 0, "true"},
+		{"deploy-ok failure blocks", "deploy-ok", "", "", "none", "failure", "", "", 1, ""},
+		{"deploy-ok error blocks", "deploy-ok", "", "", "none", "error", "", "", 1, ""},
+		{"deploy-ok pending waits", "deploy-ok", "", "", "none", "pending", "", "", 7, ""},
+		{"deploy-ok absent waits", "deploy-ok", "", "", "none", "none", "", "", 7, ""},
+		{"deploy-ok statuses API failure waits", "deploy-ok", "", "", "none", "success", "", "statuses", 7, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -87,6 +94,7 @@ case "$*" in
   *'actions/workflows/ci.yml/runs?head_sha=abc&event=push&branch=main&'*) printf '%s\n' "$FAKE_MAIN" ;;
   *'actions/workflows/ci.yml/runs?event=push&branch=main&per_page=1'*) printf '%s\n' "$FAKE_NEWEST" ;;
   *'actions/runs/9/jobs?filter=latest&'*) printf '%s\n' "$FAKE_JOB" ;;
+  *deploy-ok*) printf '%s\n' "$FAKE_DEPLOY" ;;
   *statuses*) printf '%s\n' "$FAKE_STATUS" ;;
   *) echo "unexpected gh $*" >&2; exit 2 ;;
 esac
@@ -96,7 +104,7 @@ esac
 			}
 			out := filepath.Join(dir, "out")
 			cmd := exec.Command("bash", "-c", script)
-			cmd.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"), "GITHUB_OUTPUT="+out, "GITHUB_SHA=abc", "GITHUB_REPOSITORY=o/r", "GATE="+tc.gate, "FAKE_MAIN="+tc.main, "FAKE_JOB="+tc.job, "FAKE_STATUS="+tc.status, "FAKE_NEWEST="+tc.newest, "FAKE_FAIL="+tc.fail)
+			cmd.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"), "GITHUB_OUTPUT="+out, "GITHUB_SHA=abc", "GITHUB_REPOSITORY=o/r", "GATE="+tc.gate, "FAKE_DEPLOY="+tc.deploy, "FAKE_MAIN="+tc.main, "FAKE_JOB="+tc.job, "FAKE_STATUS="+tc.status, "FAKE_NEWEST="+tc.newest, "FAKE_FAIL="+tc.fail)
 			logs, err := cmd.CombinedOutput()
 			code := 0
 			if ee, ok := err.(*exec.ExitError); ok {
@@ -114,10 +122,9 @@ esac
 }
 
 // deploy.yml posts deploy-ok on the head its successful deploy tier checked,
-// so GATE=deploy-ok needs only the statuses API. TestReleaseDeployGateMayReadDeployOK
-// keeps that path honest: the same script under GATE=deploy-ok must not call
-// the run or jobs endpoints (deploy.yml posts for every completed run, so no
-// superseded-run fallback exists on that path).
+// so proving the deploy tier needs only the statuses API: under GATE=deploy-ok
+// the script must not call the run or jobs endpoints at all (deploy.yml posts
+// for every completed run, so no superseded-run fallback exists).
 func TestReleaseDeployGateUsesStatusesOnly(t *testing.T) {
 	body, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", "release.yml"))
 	if err != nil {
