@@ -292,6 +292,14 @@ jobs:
       - name: Quota regression mutants
         if: ${{ inputs.packages == '' }}
         run: python3 scripts/quota-mutants.py
+      - name: Release build dry run
+        # Kept in the main tier for the transition (design session, hk 3440):
+        # release.yml still gates on ci-ok, so while that gate holds a green
+        # ci-ok must keep proving the release assets build. deploy-release runs
+        # it too; the duplication ends when the gate switches to deploy-ok
+        # (decision §4-3), when this step and deploy-release's collapse to one.
+        if: ${{ inputs.packages == '' }}
+        run: bash scripts/test-build-release.sh
 
   deploy-linux:
     # T-DEPLOY (hk 3440): the -race suite against PostgreSQL. It runs on a
