@@ -288,8 +288,10 @@ func prStoreDBProblems(wf tierWorkflow, policy []byte) []string {
 }
 
 // mainTierProblems checks main-linux: the non-race PostgreSQL suite, the
-// migration smoke and the mutants run there, and neither -race, macOS nor the
-// release build do.
+// migration smoke, the mutants and the release-build dry run run there, and
+// neither -race nor macOS do. The release build stays in the main tier for the
+// transition (hk 3440): release.yml gates on ci-ok, so while that holds a
+// green ci-ok must keep proving the release assets build.
 func mainTierProblems(wf tierWorkflow) []string {
 	var out []string
 	add := func(f string, a ...any) { out = append(out, fmt.Sprintf("main tier: "+f, a...)) }
@@ -328,6 +330,7 @@ func mainTierProblems(wf tierWorkflow) []string {
 		{"scripts/test-task-expected-migration.sh", "the migration and startup smoke"},
 		{"scripts/task-reopen-mutants.py", "the reopen mutants"},
 		{"scripts/quota-mutants.py", "the quota mutants"},
+		{"scripts/test-build-release.sh", "the release-build dry run (release still gates on ci-ok)"},
 	} {
 		if !strings.Contains(runs, want.needle) {
 			add("main-linux must run %s", want.what)
@@ -924,6 +927,9 @@ func TestCITierMutantsTurnRed(t *testing.T) {
 		{"deploy-macos-on-linux", "'deploy: macos'\n    runs-on: macos-latest", "'deploy: macos'\n    runs-on: ubuntu-latest"},
 		{"deploy-macos-no-db-switch", "      HANDOFFKEEP_TEST_NO_DB: \"1\"\n    steps:\n      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0\n        with:\n          ref: ${{ inputs.ref }}\n      - uses: actions/setup-go", "    steps:\n      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0\n        with:\n          ref: ${{ inputs.ref }}\n      - uses: actions/setup-go"},
 		{"deploy-release-dropped", "      - run: bash scripts/test-build-release.sh", "      - run: true"},
+		// The main tier keeps the release build during the transition. Two
+		// distinct anchors: ci.yml has it in both main-linux and deploy-release.
+		{"main-linux-release-dropped", "        run: bash scripts/test-build-release.sh\n", "        run: true\n"},
 		{"main-linux-migration-dropped", "        run: bash scripts/test-task-expected-migration.sh", "        run: true"},
 		{"main-linux-mutants-dropped", "        run: python3 scripts/task-reopen-mutants.py", "        run: true"},
 		{"ci-ok-always", "if: ${{ " + ciOkIf + " }}", "if: ${{ always() }}"},
