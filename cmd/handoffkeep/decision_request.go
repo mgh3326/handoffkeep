@@ -92,41 +92,50 @@ func addDecisionTranslationFlags(fs *flag.FlagSet) *decisionTranslationFlags {
 	return flags
 }
 
-func putDecisionTranslations(ctx context.Context, c *remote.Client, request store.DecisionRequest, input store.DecisionRequestInput, flags *decisionTranslationFlags) error {
+func decisionTranslations(input store.DecisionRequestInput, flags *decisionTranslationFlags) ([]store.Translation, error) {
 	rows := []store.Translation{}
 	if *flags.question != "" {
-		rows = append(rows, store.Translation{Entity: "decision_request", EntityID: request.ID, Field: "question", Lang: "ko", SourceSHA256: store.SourceSHA256(request.Question), Text: *flags.question, Translator: "cli"})
+		rows = append(rows, store.Translation{Entity: "decision_request", Field: "question", Lang: "ko", Text: *flags.question, Translator: "cli"})
 	}
 	if len(flags.options) > 0 {
 		translated, err := parseTaskDecisionOptions(flags.options, "", !input.Options.AllowFree)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if len(translated.Options) != len(input.Options.Options) {
-			return errors.New("--option-ko must supply one translation per option")
+			return nil, errors.New("--option-ko must supply one translation per option")
 		}
 		for i := range translated.Options {
 			if translated.Options[i].Key != input.Options.Options[i].Key {
-				return errors.New("--option-ko keys must match --option order")
+				return nil, errors.New("--option-ko keys must match --option order")
 			}
 			translated.Options[i].Recommended = input.Options.Options[i].Recommended
 		}
 		source, err := json.Marshal(input.Options)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		target, err := json.Marshal(translated)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		rows = append(rows, store.Translation{Entity: "decision_request", EntityID: request.ID, Field: "options", Lang: "ko", SourceSHA256: store.SourceSHA256(string(source)), Text: string(target), Translator: "cli"})
+		rows = append(rows, store.Translation{Entity: "decision_request", Field: "options", Lang: "ko", SourceSHA256: store.SourceSHA256(string(source)), Text: string(target), Translator: "cli"})
 	}
-	if len(rows) > 0 {
-		if _, err := c.PutTranslations(ctx, rows); err != nil {
-			return fmt.Errorf("decision %s recorded, but translation failed: %w", request.ID, err)
+	return rows, nil
+}
+
+func putDecisionTranslations(ctx context.Context, c *remote.Client, request store.DecisionRequest, rows []store.Translation) error {
+	for i := range rows {
+		rows[i].EntityID = request.ID
+		if rows[i].Field == "question" {
+			rows[i].SourceSHA256 = store.SourceSHA256(request.Question)
 		}
 	}
-	return nil
+	if len(rows) == 0 {
+		return nil
+	}
+	_, err := c.PutTranslations(ctx, rows)
+	return err
 }
 
 // decisionRequestFlags parses the flags a decision request is made of into
@@ -208,6 +217,10 @@ func decisionRequestCmd(args []string, out io.Writer) error {
 	if err != nil {
 		return notRecorded(err)
 	}
+	rows, err := decisionTranslations(input, ko)
+	if err != nil {
+		return notRecorded(err)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	result, err := c.RecordDecisionRequest(ctx, id, input)
@@ -215,7 +228,7 @@ func decisionRequestCmd(args []string, out io.Writer) error {
 		return writeFailed("decision request", id, err)
 	}
 	output := decisionRequestOutput(result)
-	if err := putDecisionTranslations(ctx, c, result.Request, input, ko); err != nil {
+	if err := putDecisionTranslations(ctx, c, result.Request, rows); err != nil {
 		output["translation_error"] = "translation_write_failed"
 	}
 	return printJSON(out, output)
@@ -231,6 +244,10 @@ func decisionAskCmd(args []string, out io.Writer) error {
 	linear := fs.Bool("linear", false, "also open the request's Linear issue")
 	ko := addDecisionTranslationFlags(fs)
 	c, id, input, err := decisionRequestFlags(fs, decisionAskUsage, args)
+	if err != nil {
+		return notRecorded(err)
+	}
+	rows, err := decisionTranslations(input, ko)
 	if err != nil {
 		return notRecorded(err)
 	}
@@ -261,7 +278,7 @@ func decisionAskCmd(args []string, out io.Writer) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	translationErr := putDecisionTranslations(ctx, c, result.Request, input, ko)
+	translationErr := putDecisionTranslations(ctx, c, result.Request, rows)
 	output := map[string]any{
 		"recorded":      true,
 		"duplicate":     result.Duplicate,

@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/mgh3326/handoffkeep/internal/remote"
@@ -81,7 +82,11 @@ func TestDecisionTranslationPayload(t *testing.T) {
 	}
 	input := store.DecisionRequestInput{Question: "Ship?", Options: store.DecisionOptions{Options: []store.DecisionOption{{Key: "A", Label: "Wait"}, {Key: "B", Label: "Ship", Recommended: true}}, AllowFree: true}}
 	client := &remote.Client{URL: h.URL, Token: "tok"}
-	if err := putDecisionTranslations(context.Background(), client, store.DecisionRequest{ID: "dr-7-2", Question: "Ship?"}, input, ko); err != nil {
+	prepared, err := decisionTranslations(input, ko)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := putDecisionTranslations(context.Background(), client, store.DecisionRequest{ID: "dr-7-2", Question: "Ship?"}, prepared); err != nil {
 		t.Fatal(err)
 	}
 	original, _ := json.Marshal(input.Options)
@@ -144,5 +149,36 @@ func TestCreateOutputsSurviveTranslationFailure(t *testing.T) {
 				t.Fatalf("issue missing: %v", got)
 			}
 		})
+	}
+}
+
+func TestDecisionTranslationInvalidOptionsDoNotRecord(t *testing.T) {
+	for _, command := range [][]string{{"tasks", "decision-request", "618"}, {"decisions", "ask", "618"}, {"decisions", "ask", "618", "--linear"}} {
+		for _, tc := range []struct {
+			name    string
+			options []string
+			reason  string
+		}{
+			{"malformed", []string{"--option-ko", "invalid"}, "option"},
+			{"count", []string{"--option-ko", "A|하나"}, "one translation per option"},
+			{"order", []string{"--option-ko", "B|둘", "--option-ko", "A|하나"}, "keys must match"},
+		} {
+			t.Run(strings.Join(command, "_")+"_"+tc.name, func(t *testing.T) {
+				requests := 0
+				h := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					requests++
+					w.WriteHeader(http.StatusInternalServerError)
+				}))
+				defer h.Close()
+				args := append([]string{}, command...)
+				args = append(args, "--question", "q", "--option", "A|one", "--option", "B|two", "--default-action", "wait")
+				args = append(args, tc.options...)
+				args = append(args, "--url", h.URL, "--token", "tok")
+				err := run(args, io.Discard, io.Discard)
+				if err == nil || !strings.Contains(err.Error(), "NOT recorded") || !strings.Contains(err.Error(), tc.reason) || requests != 0 {
+					t.Fatalf("err=%v requests=%d", err, requests)
+				}
+			})
+		}
 	}
 }

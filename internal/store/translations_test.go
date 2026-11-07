@@ -99,9 +99,13 @@ func TestTranslationTaskBodyLimit(t *testing.T) {
 		t.Fatal("oversized title translation accepted")
 	}
 	x.Field = "body"
-	x.Text = strings.Repeat("x", DocumentMaxBytes+1)
+	x.Text = strings.Repeat("한", DocumentMaxBytes/3+1)
+	if err := checkTranslation(x); err != nil {
+		t.Fatalf("expanded Korean body refused: %v", err)
+	}
+	x.Text = strings.Repeat("x", 3*DocumentMaxBytes+1)
 	if err := checkTranslation(x); err == nil {
-		t.Fatal("translation larger than document limit accepted")
+		t.Fatal("translation larger than expansion limit accepted")
 	}
 }
 

@@ -65,7 +65,9 @@ func checkTranslation(t Translation) error {
 		return fmt.Errorf("invalid translation: source_sha256 must be a lowercase SHA-256 digest")
 	}
 	textLimit := MaxBytes
-	if (t.Entity == "task" || t.Entity == "task_comment") && t.Field == "body" {
+	if t.Entity == "task" && t.Field == "body" {
+		textLimit = 3 * DocumentMaxBytes
+	} else if t.Entity == "task_comment" && t.Field == "body" {
 		textLimit = DocumentMaxBytes
 	}
 	if strings.TrimSpace(t.Text) == "" || len(t.Text) > textLimit || !utf8.ValidString(t.Text) || strings.ContainsRune(t.Text, 0) {
