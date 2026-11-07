@@ -3199,7 +3199,7 @@ func (s *Store) appendRelayEventTx(ctx context.Context, tx pgx.Tx, x RelayEvent)
 				return x, false, wrkrecords.Error("wrk_unavailable")
 			}
 			hydrateWrkRelay(ctx, tx, &x)
-			return x, false, tx.Commit(ctx)
+			return x, false, nil
 		}
 	}
 

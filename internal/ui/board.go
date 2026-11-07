@@ -12,6 +12,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/mgh3326/handoffkeep/internal/cfaccess"
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
@@ -515,7 +516,7 @@ func sumInt64(total *int64, value *int64) *int64 {
 	return total
 }
 
-func (h *Handler) boardTaskDetail(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) boardTaskDetail(w http.ResponseWriter, r *http.Request, identity cfaccess.Identity) {
 	rawID := strings.TrimPrefix(r.URL.Path, "/ui/api/board/tasks/")
 	id, err := strconv.ParseInt(rawID, 10, 64)
 	if err != nil || id < 1 {
@@ -583,19 +584,25 @@ func (h *Handler) boardTaskDetail(w http.ResponseWriter, r *http.Request) {
 	for _, j := range jobs {
 		projectedJobs = append(projectedJobs, boardJob{j.JobID, j.Role, j.State, j.Host, j.Family, j.Profile, j.Model, j.Harness, j.Effort, j.Skills, j.SkillsSupported, j.ClaimedAt, j.SpawnedAt, j.ReadyAt, j.EndedAt, j.EndReason, j.DiffStat})
 	}
-	commands, err := h.store.ListOperatorCommandsByTask(r.Context(), id, 101)
-	if err != nil {
-		log.Printf("ui.board_detail_error err=%q", err)
-		writeJSONError(w, http.StatusInternalServerError, "internal_error")
-		return
-	}
-	commandsTruncated := len(commands) > 100
-	if commandsTruncated {
-		commands = commands[:100]
-	}
-	projectedCommands := make([]boardCommand, 0, len(commands))
-	for _, command := range commands {
-		projectedCommands = append(projectedCommands, projectBoardCommand(command))
+	// Command text and actor emails are operator reading material: a service
+	// principal gets the rest of the detail but no commands, like the sibling
+	// operator-only JSON reads.
+	projectedCommands := make([]boardCommand, 0)
+	commandsTruncated := false
+	if identity.ServiceName == "" {
+		commands, err := h.store.ListOperatorCommandsByTask(r.Context(), id, 101)
+		if err != nil {
+			log.Printf("ui.board_detail_error err=%q", err)
+			writeJSONError(w, http.StatusInternalServerError, "internal_error")
+			return
+		}
+		commandsTruncated = len(commands) > 100
+		if commandsTruncated {
+			commands = commands[:100]
+		}
+		for _, command := range commands {
+			projectedCommands = append(projectedCommands, projectBoardCommand(command))
+		}
 	}
 	now := time.Now().UTC()
 	response := boardDetailResponse{

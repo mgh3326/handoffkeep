@@ -462,8 +462,13 @@ func (s *Store) RecordOperatorCommand(ctx context.Context, in OperatorCommandInp
 			return out, err
 		}
 	}
-	if _, _, err = s.appendRelayEventTx(ctx, tx, RelayEvent{Kind: "lane.event", OwnerLane: lane, EventID: in.CommandKey, Text: operatorCommandLaneText(out.ID, payload), EventTime: &now}); err != nil {
+	if _, created, err := s.appendRelayEventTx(ctx, tx, RelayEvent{Kind: "lane.event", OwnerLane: lane, EventID: in.CommandKey, Text: operatorCommandLaneText(out.ID, payload), EventTime: &now}); err != nil {
 		return out, err
+	} else if !created {
+		// The key already names another producer's lane event. Accepting it
+		// would attach this command to that row, so the text never reaches the
+		// executor and a later delivery/supersede acts on the wrong event.
+		return out, fmt.Errorf("%w: command_key %q is already a lane event id", ErrOperatorCommandInvalid, in.CommandKey)
 	}
 	if err = appendOperatorCommandEvent(ctx, tx, operatorCommandEventInput{Command: out, Payload: payload, State: OperatorCommandStateRecorded, At: now}); err != nil {
 		return out, err

@@ -419,6 +419,34 @@ func TestOperatorCommandReceiptAtDeadlineRecordsReport(t *testing.T) {
 	}
 }
 
+func TestOperatorCommandKeyCollisionWithLaneEvent(t *testing.T) {
+	st := schemaStore(t, "opcmd_collision")
+	lane, job := "opcmd-collision-lane", "opcmd-collision-job"
+	task := operatorCommandFixture(t, st, lane, job)
+	ctx := t.Context()
+	// Another producer already owns this event id on the lane; attaching the
+	// command to that row would deliver the wrong text and cancel it later.
+	if _, _, err := st.AppendRelayEvent(ctx, RelayEvent{Kind: "lane.event", OwnerLane: lane, EventID: "opcmd-collision-key", Text: "다른 생산자의 이벤트"}); err != nil {
+		t.Fatal(err)
+	}
+	payload, _ := json.Marshal(WorkerMessagePayload{Text: "지시", Intent: OperatorCommandIntentSteer})
+	_, err := st.RecordOperatorCommand(ctx, OperatorCommandInput{
+		CommandKey: "opcmd-collision-key", Kind: OperatorCommandKindWorkerMessage, TaskID: &task.ID,
+		Payload: payload, Actor: "operator:test", Channel: "console",
+	})
+	if !errors.Is(err, ErrOperatorCommandInvalid) {
+		t.Fatalf("collision: %v", err)
+	}
+	var commands int
+	if err := st.pool.QueryRow(ctx, `SELECT count(*) FROM operator_commands WHERE task_id=$1`, task.ID).Scan(&commands); err != nil || commands != 0 {
+		t.Fatalf("rolled back commands=%d err=%v", commands, err)
+	}
+	var text string
+	if err := st.pool.QueryRow(ctx, `SELECT text FROM relay_events WHERE owner_lane=$1 AND event_id=$2`, lane, "opcmd-collision-key").Scan(&text); err != nil || text != "다른 생산자의 이벤트" {
+		t.Fatalf("relay text=%q err=%v", text, err)
+	}
+}
+
 func TestOperatorCommandReplaySurvivesJobEnd(t *testing.T) {
 	st := schemaStore(t, "opcmd_replay")
 	lane, job := "opcmd-replay-lane", "opcmd-replay-job"

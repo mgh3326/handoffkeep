@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { sendWorkerMessage, CommandWriteError } from "../boardApi";
+import { useRef, useState } from "react";
+import { newEventKey, sendWorkerMessage, CommandWriteError } from "../boardApi";
 import { formatMinuteKST } from "../time";
 import {
   commandErrorLabel,
@@ -33,11 +33,21 @@ export function InstructDialog({ taskId, close, recorded }: { taskId: number; cl
   const [intent, setIntent] = useState<CommandIntent>("steer");
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  // One key per submitted intent: an unchanged retry after a lost response
+  // replays the recorded command instead of recording a superseding second one.
+  const keyRef = useRef<{ signature: string; key: string } | null>(null);
   const submit = async () => {
     if (!text.trim() || pending) return;
     setPending(true); setError(null);
     try {
-      const command = await sendWorkerMessage(taskId, text.trim(), intent);
+      const body = text.trim();
+      const signature = JSON.stringify([body, intent]);
+      let attempt = keyRef.current;
+      if (attempt?.signature !== signature) {
+        attempt = { signature, key: newEventKey() };
+        keyRef.current = attempt;
+      }
+      const command = await sendWorkerMessage(taskId, body, intent, attempt.key);
       recorded(command);
       window.dispatchEvent(new CustomEvent("hk-console-announce", { detail: "명령을 기록했습니다. 실행기 접수 전에는 완료로 표시되지 않습니다." }));
       close();

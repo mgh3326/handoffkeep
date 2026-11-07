@@ -198,6 +198,13 @@ refused, and the authenticated API client is recorded as the receipt author.
 Executors poll `GET /v1/commands?executor_lane=<lane>&state=acked` or the CLI
 `handoffkeep commands list|receipt`.
 
+Bearer tokens are fleet node credentials: any authenticated client may read or
+act for any lane, the same trust the relay transport already gives (`POST
+/v1/relay/events` accepts any `owner_lane`). A receipt therefore does not add a
+per-lane grant; it records the authenticated client as the receipt author
+(`executor:<client>`) so the action is attributable. A per-lane authorization
+dimension would be a new fleet policy, not part of this command surface.
+
 ## Task record and document viewer
 
 `/ui/tasks/{id}` renders `TaskRecord`: Closure, Origins, Documents, Changes,

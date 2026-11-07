@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mgh3326/handoffkeep/internal/cfaccess"
 	"github.com/mgh3326/handoffkeep/internal/store"
 	"github.com/mgh3326/handoffkeep/internal/testdb"
 )
@@ -63,7 +64,7 @@ func TestBoardWorkBoardListAndDetail(t *testing.T) {
 	for _, detail := range []bool{false, true} {
 		rec := httptest.NewRecorder()
 		if detail {
-			h.boardTaskDetail(rec, httptest.NewRequest(http.MethodGet, "/ui/api/board/tasks/"+strconv.FormatInt(task.ID, 10), nil))
+			h.boardTaskDetail(rec, httptest.NewRequest(http.MethodGet, "/ui/api/board/tasks/"+strconv.FormatInt(task.ID, 10), nil), cfaccess.Identity{})
 		} else {
 			h.boardTasks(rec, httptest.NewRequest(http.MethodGet, "/ui/api/board/tasks?lane=example-project", nil))
 		}

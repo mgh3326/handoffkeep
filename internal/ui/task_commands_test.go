@@ -113,6 +113,15 @@ func TestTaskCommandRoute(t *testing.T) {
 	if !found {
 		t.Fatalf("row chip: %+v", board.Tasks)
 	}
+	// A service principal gets the task detail but not the operator command
+	// text or actor email.
+	r = httptest.NewRequest(http.MethodGet, fmt.Sprintf("http://example.com/ui/api/board/tasks/%d", task.ID), nil)
+	w = httptest.NewRecorder()
+	h.serveAPI(w, r, cfaccess.Identity{ServiceName: "svc"})
+	if !strings.Contains(w.Body.String(), `"commands":[]`) || !strings.Contains(w.Body.String(), `"title":"command"`) {
+		t.Fatalf("service detail: %s", w.Body.String())
+	}
+
 	// A task with no live job has no executor to address.
 	other, err := st.CreateTask(ctx, store.Task{Lane: "ui-command-cold", Title: "cold", Kind: "implement", CreatedBy: "test", Project: &project})
 	if err != nil {

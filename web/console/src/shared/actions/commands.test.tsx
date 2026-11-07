@@ -83,4 +83,31 @@ describe("instruct dialog", () => {
     expect(typeof body.event_key).toBe("string");
     expect(screen.queryByRole("dialog")).toBeNull();
   });
+
+  it("reuses the event key for an unchanged retry", async () => {
+    const meta = document.createElement("meta"); meta.name = "hk-csrf"; meta.content = "token"; document.head.append(meta);
+    const fetcher = vi.spyOn(window, "fetch")
+      .mockResolvedValueOnce(new Response("", { status: 500 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ...command, intent: "steer" }), { status: 201 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ...command, intent: "steer" }), { status: 201 }));
+    render(<div data-action-task="101"><TaskActions compact target={active} onPriority={() => {}} onCommand={() => {}} /></div>);
+    fireEvent.click(screen.getByRole("button", { name: "작업 #101 메뉴" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /워커에게 지시/ }));
+    fireEvent.change(screen.getByLabelText("지시 내용"), { target: { value: "같은 지시" } });
+    fireEvent.click(screen.getByRole("button", { name: "명령 기록" }));
+    await screen.findByText("명령을 기록하지 못했습니다.");
+    fireEvent.click(screen.getByRole("button", { name: "명령 기록" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    const first = JSON.parse(String(fetcher.mock.calls[0][1]?.body));
+    const retry = JSON.parse(String(fetcher.mock.calls[1][1]?.body));
+    expect(retry.event_key).toBe(first.event_key);
+    // A changed instruction is a new intent and gets a new key.
+    fireEvent.click(screen.getByRole("button", { name: "작업 #101 메뉴" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /워커에게 지시/ }));
+    fireEvent.change(screen.getByLabelText("지시 내용"), { target: { value: "다른 지시" } });
+    fireEvent.click(screen.getByRole("button", { name: "명령 기록" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    const changed = JSON.parse(String(fetcher.mock.calls[2][1]?.body));
+    expect(changed.event_key).not.toBe(first.event_key);
+  });
 });

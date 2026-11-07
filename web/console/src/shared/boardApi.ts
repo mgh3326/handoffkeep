@@ -278,7 +278,7 @@ function validCommand(value: unknown): value is BoardCommand {
 /** The console's one operator-command write: a worker.message recorded for the
  * task's active job lane. The server derives the executor lane; the client
  * only supplies the instruction and intent. */
-export async function sendWorkerMessage(id: number, text: string, intent: CommandIntent): Promise<OperatorCommandView> {
+export async function sendWorkerMessage(id: number, text: string, intent: CommandIntent, eventKey: string): Promise<OperatorCommandView> {
   const csrf = readCsrfToken();
   if (!csrf) throw new Error("missing csrf");
   let response: Response;
@@ -287,7 +287,7 @@ export async function sendWorkerMessage(id: number, text: string, intent: Comman
       method: "POST",
       credentials: "same-origin",
       headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf },
-      body: JSON.stringify({ kind: "worker.message", text, intent, event_key: newEventKey() }),
+      body: JSON.stringify({ kind: "worker.message", text, intent, event_key: eventKey }),
     });
   } catch {
     throw new CommandWriteError(0, "network");
