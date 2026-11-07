@@ -303,7 +303,19 @@ export function taskActionMessage(code: string): string {
   return TASK_ACTION_MESSAGES[code] ?? "저장하지 못했습니다.";
 }
 
-async function postTaskAction<T>(id: number, action: string, body: Record<string, unknown>): Promise<T> {
+/** A fresh idempotency key for one user intent. randomUUID needs a secure
+ * context; the capture harness serves the bundle over plain http, so fall
+ * back to random hex there. */
+export function newEventKey(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("");
+}
+
+/** eventKey is minted once per user intent (when its dialog opens), so a
+ * retry of a request whose response was lost replays the recorded write. */
+async function postTaskAction<T>(id: number, action: string, body: Record<string, unknown>, eventKey: string): Promise<T> {
   const csrf = readCsrfToken();
   if (!csrf) throw new TaskActionError(0, "missing_csrf");
   let response: Response;
@@ -312,7 +324,7 @@ async function postTaskAction<T>(id: number, action: string, body: Record<string
       method: "POST",
       credentials: "same-origin",
       headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf },
-      body: JSON.stringify({ ...body, event_key: crypto.randomUUID() }),
+      body: JSON.stringify({ ...body, event_key: eventKey }),
     });
   } catch {
     throw new TaskActionError(0, "network");
@@ -326,25 +338,25 @@ async function postTaskAction<T>(id: number, action: string, body: Record<string
 }
 
 export type CloseMergedResult = { state: string; path: string[] };
-export function closeTaskMerged(id: number, evidence: string, reason: string): Promise<CloseMergedResult> {
-  return postTaskAction<CloseMergedResult>(id, "close-merged", { evidence, reason });
+export function closeTaskMerged(id: number, evidence: string, reason: string, eventKey: string): Promise<CloseMergedResult> {
+  return postTaskAction<CloseMergedResult>(id, "close-merged", { evidence, reason }, eventKey);
 }
-export function closeTaskCompleted(id: number, evidence: string, reason: string): Promise<{ state: string }> {
-  return postTaskAction<{ state: string }>(id, "close-completed", { evidence, reason });
+export function closeTaskCompleted(id: number, evidence: string, reason: string, eventKey: string): Promise<{ state: string }> {
+  return postTaskAction<{ state: string }>(id, "close-completed", { evidence, reason }, eventKey);
 }
 export type DropClosure = "cancelled" | "obsolete" | "superseded";
-export function dropTask(id: number, closure: DropClosure, reason: string, duplicateOf = 0): Promise<{ state: string; closure_type: string }> {
-  return postTaskAction<{ state: string; closure_type: string }>(id, "drop", { closure, reason, duplicate_of: duplicateOf });
+export function dropTask(id: number, closure: DropClosure, reason: string, duplicateOf: number, eventKey: string): Promise<{ state: string; closure_type: string }> {
+  return postTaskAction<{ state: string; closure_type: string }>(id, "drop", { closure, reason, duplicate_of: duplicateOf }, eventKey);
 }
-export function holdTask(id: number, held: boolean, to = ""): Promise<{ previous: string; state: string }> {
-  return postTaskAction<{ previous: string; state: string }>(id, "hold", { held, to });
+export function holdTask(id: number, held: boolean, to: string, eventKey: string): Promise<{ previous: string; state: string }> {
+  return postTaskAction<{ previous: string; state: string }>(id, "hold", { held, to }, eventKey);
 }
-export function reopenTask(id: number, reason: string): Promise<{ state: string }> {
-  return postTaskAction<{ state: string }>(id, "reopen", { reason });
+export function reopenTask(id: number, reason: string, eventKey: string): Promise<{ state: string }> {
+  return postTaskAction<{ state: string }>(id, "reopen", { reason }, eventKey);
 }
 export type RelaneOutcome = { previous: string; lane: string; changed: boolean; relay: "sent" | "duplicate" | "unconfigured" | "failed" | "none" };
-export function relaneTask(id: number, lane: string, reason: string): Promise<RelaneOutcome> {
-  return postTaskAction<RelaneOutcome>(id, "relane", { lane, reason });
+export function relaneTask(id: number, lane: string, reason: string, eventKey: string): Promise<RelaneOutcome> {
+  return postTaskAction<RelaneOutcome>(id, "relane", { lane, reason }, eventKey);
 }
 
 /** Every lane a relane may target (the store's known-lane union). */
@@ -358,7 +370,7 @@ type PriorityResult = { previous: number; priority: number };
 export async function setTaskPriority(id: number, priority: number): Promise<PriorityResult> {
   const csrf = readCsrfToken();
   if (!csrf) throw new Error("missing csrf");
-  const response = await fetch(`/ui/api/tasks/${id}/priority`, { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf }, body: JSON.stringify({ priority, event_key: crypto.randomUUID() }) });
+  const response = await fetch(`/ui/api/tasks/${id}/priority`, { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf }, body: JSON.stringify({ priority, event_key: newEventKey() }) });
   if (!response.ok) throw new Error("write failed");
   const data: unknown = await response.json();
   if (typeof data !== "object" || data === null || !("previous" in data) || typeof data.previous !== "number" || !("priority" in data) || typeof data.priority !== "number") throw new Error("malformed response");

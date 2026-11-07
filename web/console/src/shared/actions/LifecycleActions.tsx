@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import {
-  closeTaskCompleted, closeTaskMerged, dropTask, fetchLanes, holdTask, relaneTask, reopenTask,
+  closeTaskCompleted, closeTaskMerged, dropTask, fetchLanes, holdTask, newEventKey, relaneTask, reopenTask,
   TaskActionError, taskActionMessage,
 } from "../boardApi";
 import { stateLabel } from "../states";
@@ -25,19 +25,20 @@ function changed(id: number) {
   window.dispatchEvent(new CustomEvent("hk-task-changed", { detail: { id } }));
 }
 
-/** Renders the dialog or the immediate action for one registry entry. */
-export function LifecycleAction({ action, target, close, onApplied }: { action: Action; target: ActionTarget; close: () => void; onApplied: () => void }) {
+/** Renders the dialog or the immediate action for one registry entry.
+ * eventKey belongs to this user intent: a retried submit reuses it. */
+export function LifecycleAction({ action, target, eventKey, close, onApplied }: { action: Action; target: ActionTarget; eventKey: string; close: () => void; onApplied: () => void }) {
   switch (action.id) {
     case "hold":
-      return <HoldAction target={target} close={close} onApplied={onApplied} />;
+      return <HoldAction target={target} eventKey={eventKey} close={close} onApplied={onApplied} />;
     case "relane":
-      return <RelaneDialog target={target} close={close} onApplied={onApplied} />;
+      return <RelaneDialog target={target} eventKey={eventKey} close={close} onApplied={onApplied} />;
     default:
-      return <ConfirmAction action={action} target={target} close={close} onApplied={onApplied} />;
+      return <ConfirmAction action={action} target={target} eventKey={eventKey} close={close} onApplied={onApplied} />;
   }
 }
 
-function ConfirmAction({ action, target, close, onApplied }: { action: Action; target: ActionTarget; close: () => void; onApplied: () => void }) {
+function ConfirmAction({ action, target, eventKey, close, onApplied }: { action: Action; target: ActionTarget; eventKey: string; close: () => void; onApplied: () => void }) {
   const [pending, setPending] = useState(false);
   const [evidence, setEvidence] = useState(target.refs?.pr ?? "");
   const [reason, setReason] = useState("");
@@ -52,8 +53,9 @@ function ConfirmAction({ action, target, close, onApplied }: { action: Action; t
       onApplied();
       changed(target.id);
     } catch (error) {
+      // Keep the dialog and its event key: a retry after a lost response
+      // replays the recorded write instead of hitting task_conflict.
       failed(error);
-      close();
     } finally {
       setPending(false);
     }
@@ -72,7 +74,7 @@ function ConfirmAction({ action, target, close, onApplied }: { action: Action; t
       close={close}
       pending={pending}
       confirm={() => void run(async () => {
-        await closeTaskMerged(target.id, evidence, reason);
+        await closeTaskMerged(target.id, evidence, reason, eventKey);
         return "머지됨으로 닫았습니다.";
       })}
     >
@@ -90,7 +92,7 @@ function ConfirmAction({ action, target, close, onApplied }: { action: Action; t
       pending={pending}
       confirmDisabled={trimmedEvidence === ""}
       confirm={() => void run(async () => {
-        await closeTaskCompleted(target.id, evidence, reason);
+        await closeTaskCompleted(target.id, evidence, reason, eventKey);
         return "완료로 닫았습니다.";
       })}
     >
@@ -107,7 +109,7 @@ function ConfirmAction({ action, target, close, onApplied }: { action: Action; t
       pending={pending}
       confirmDisabled={trimmedReason === "" || (superseded && !(Number.isSafeInteger(duplicateID) && duplicateID > 0))}
       confirm={() => void run(async () => {
-        await dropTask(target.id, superseded ? "superseded" : closure === "obsolete" ? "obsolete" : "cancelled", reason, superseded ? duplicateID : 0);
+        await dropTask(target.id, superseded ? "superseded" : closure === "obsolete" ? "obsolete" : "cancelled", reason, superseded ? duplicateID : 0, eventKey);
         return superseded ? "중복으로 닫았습니다." : "드롭했습니다.";
       })}
     >
@@ -128,7 +130,7 @@ function ConfirmAction({ action, target, close, onApplied }: { action: Action; t
     pending={pending}
     confirmDisabled={trimmedReason === ""}
     confirm={() => void run(async () => {
-      await reopenTask(target.id, reason);
+      await reopenTask(target.id, reason, eventKey);
       return "작업을 다시 열었습니다.";
     })}
   >
@@ -139,20 +141,21 @@ function ConfirmAction({ action, target, close, onApplied }: { action: Action; t
 
 /** Hold and hold release take effect at once; the toast's undo restores the
  * exact state the task had before (a hold) or re-parks it (a release). */
-function HoldAction({ target, close, onApplied }: { target: ActionTarget; close: () => void; onApplied: () => void }) {
+function HoldAction({ target, eventKey, close, onApplied }: { target: ActionTarget; eventKey: string; close: () => void; onApplied: () => void }) {
   const started = useRef(false);
   useEffect(() => {
     if (started.current) return;
     started.current = true;
     const held = target.state !== "icebox";
-    void holdTask(target.id, held)
+    void holdTask(target.id, held, "", eventKey)
       .then(result => {
         close();
         announce(held ? "보류했습니다." : "보류를 해제했습니다.");
+        const undoKey = newEventKey();
         undoLater(held ? "보류했습니다" : "보류를 해제했습니다", async () => {
           try {
-            if (held) await holdTask(target.id, false, result.previous);
-            else await holdTask(target.id, true);
+            if (held) await holdTask(target.id, false, result.previous, undoKey);
+            else await holdTask(target.id, true, "", undoKey);
             onApplied();
             changed(target.id);
           } catch (error) {
@@ -163,11 +166,11 @@ function HoldAction({ target, close, onApplied }: { target: ActionTarget; close:
         changed(target.id);
       })
       .catch(error => { failed(error); close(); });
-  }, [target.id, target.state, close, onApplied]);
+  }, [target.id, target.state, eventKey, close, onApplied]);
   return null;
 }
 
-function RelaneDialog({ target, close, onApplied }: { target: ActionTarget; close: () => void; onApplied: () => void }) {
+function RelaneDialog({ target, eventKey, close, onApplied }: { target: ActionTarget; eventKey: string; close: () => void; onApplied: () => void }) {
   const [lanes, setLanes] = useState<string[] | null>(null);
   const [loadFailed, setLoadFailed] = useState(false);
   const [lane, setLane] = useState("");
@@ -187,15 +190,16 @@ function RelaneDialog({ target, close, onApplied }: { target: ActionTarget; clos
   }, [target.lane]);
   const confirm = () => {
     setPending(true);
-    void relaneTask(target.id, lane, reason)
+    void relaneTask(target.id, lane, reason, eventKey)
       .then(result => {
         close();
         announce(result.changed ? "레인을 옮겼습니다." : "이미 그 레인에 있습니다.");
         if (!result.changed) return;
         if (result.relay === "failed" || result.relay === "unconfigured") failed(new TaskActionError(0, "relay_failed"));
+        const undoKey = newEventKey();
         undoLater("레인을 옮겼습니다", async () => {
           try {
-            await relaneTask(target.id, result.previous, "레인 이동 실행 취소");
+            await relaneTask(target.id, result.previous, "레인 이동 실행 취소", undoKey);
             onApplied();
             changed(target.id);
           } catch (error) {
@@ -205,7 +209,7 @@ function RelaneDialog({ target, close, onApplied }: { target: ActionTarget; clos
         onApplied();
         changed(target.id);
       })
-      .catch(error => { failed(error); close(); })
+      .catch(error => { failed(error); })
       .finally(() => setPending(false));
   };
   return <ActionDialog

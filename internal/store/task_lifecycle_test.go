@@ -235,12 +235,12 @@ func TestOperatorRelaneTaskReplay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("relane: %v", err)
 	}
-	if !moved.Changed || moved.Previous != x.Lane || moved.Task.Lane != to {
+	if !moved.Changed || moved.Previous != x.Lane || moved.Lane != to {
 		t.Fatalf("moved=%+v", moved)
 	}
 	events := len(stateOf(t, s, x.ID).Events)
 	replay, err := s.OperatorRelaneTask(ctx, x.ID, to, "tester", "again", "relane-1")
-	if err != nil || !replay.Changed || replay.Previous != x.Lane {
+	if err != nil || !replay.Changed || replay.Previous != x.Lane || replay.Lane != to {
 		t.Fatalf("replay=%+v err=%v", replay, err)
 	}
 	if after := len(stateOf(t, s, x.ID).Events); after != events {

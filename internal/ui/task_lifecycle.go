@@ -222,13 +222,13 @@ func (h *Handler) relaneTask(w http.ResponseWriter, r *http.Request, identity cf
 	}
 	relay := "none"
 	if result.Changed {
-		relay = h.emitRelaneNotices(r.Context(), result.Task, result.Previous, input.EventKey)
+		relay = h.emitRelaneNotices(r.Context(), store.Task{ID: id, Title: result.Title, Lane: result.Lane}, result.Previous, input.EventKey)
 	}
 	outcome.result = "ok"
 	if relay == "failed" {
 		outcome.result = "hub_error"
 	}
-	writeBoardJSON(w, map[string]any{"previous": result.Previous, "lane": result.Task.Lane, "relay": relay, "changed": result.Changed})
+	writeBoardJSON(w, map[string]any{"previous": result.Previous, "lane": result.Lane, "relay": relay, "changed": result.Changed})
 }
 
 // emitRelaneNotices sends the two Korean lane notices and reports "sent",

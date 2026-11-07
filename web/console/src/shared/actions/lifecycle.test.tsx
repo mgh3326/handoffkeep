@@ -177,6 +177,48 @@ it("shows the store refusal as a Korean toast", async () => {
   expect(alert.textContent).toContain("작업 상태가 바뀌어 실행할 수 없습니다");
 });
 
+it("reuses the dialog's event key when a failed submit is retried", async () => {
+  const fetcher = vi.spyOn(window, "fetch")
+    .mockRejectedValueOnce(new TypeError("network"))
+    .mockResolvedValueOnce(new Response(JSON.stringify({ state: "merged", path: ["developing", "reviewing", "merged"] }), { status: 200 }));
+  render(<><ActionNotices /><div data-action-task="7"><TaskActions compact target={base} onPriority={() => {}} /></div></>);
+  openMenu();
+  fireEvent.click(screen.getByRole("menuitem", { name: "머지됨으로 닫기" }));
+  fireEvent.click(screen.getByRole("button", { name: "머지됨으로 닫기" }));
+  await screen.findByRole("alert");
+  fireEvent.click(screen.getByRole("button", { name: "머지됨으로 닫기" }));
+  await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(2));
+  expect(writeBody(fetcher, 0).event_key).toBe(writeBody(fetcher, 1).event_key);
+});
+
+it("shows a relay warning next to the relane undo toast", async () => {
+  const fetcher = mockWrites(new Response(JSON.stringify({ previous: "lane-a", lane: "lane-b", changed: true, relay: "failed" }), { status: 200 }), ["lane-a", "lane-b"]);
+  render(<><ActionNotices /><div data-action-task="7"><TaskActions compact target={{ ...base, state: "backlog", lane: "lane-a" }} onPriority={() => {}} /></div></>);
+  openMenu();
+  fireEvent.click(screen.getByRole("menuitem", { name: "레인 넘기기" }));
+  await screen.findByLabelText("옮길 레인");
+  fireEvent.click(screen.getByRole("button", { name: "레인 옮기기" }));
+  await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(2));
+  const alert = await screen.findByRole("alert");
+  expect(alert.textContent).toContain("레인은 옮겼지만 레인 알림을 보내지 못했습니다");
+  expect(screen.getByRole("button", { name: "실행 취소 (z)" })).toBeTruthy();
+});
+
+it("keeps one undo toast: the newest action owns the z key", async () => {
+  const lifecycleUndo = vi.fn().mockResolvedValue(undefined);
+  const onPriority = vi.fn();
+  vi.spyOn(window, "fetch").mockResolvedValue(new Response(JSON.stringify({ previous: 2, priority: 2 }), { status: 200 }));
+  render(<ActionNotices />);
+  window.dispatchEvent(new CustomEvent("hk-lifecycle-undo", { detail: { message: "보류했습니다", undo: lifecycleUndo } }));
+  await screen.findByText(/보류했습니다/);
+  window.dispatchEvent(new CustomEvent("hk-priority-undo", { detail: { id: 1, previous: 2, current: 3, onPriority } }));
+  await waitFor(() => expect(screen.queryByText(/보류했습니다/)).toBeNull());
+  expect(screen.getAllByRole("button", { name: "실행 취소 (z)" })).toHaveLength(1);
+  fireEvent.keyDown(window, { key: "z" });
+  expect(onPriority).toHaveBeenCalled();
+  expect(lifecycleUndo).not.toHaveBeenCalled();
+});
+
 it("writes the timeline row in Korean for transitions, relane and closure", () => {
   expect(eventText({ id: 1, kind: "transition", from: "developing", to: "reviewing", by: "operator", at: "" })).toBe("상태 변경 · 개발 중 → 검토 중");
   expect(eventText({ id: 2, kind: "transition", from: "reviewing", to: "merged", by: "operator", note: "머지 완료", at: "" })).toBe("상태 변경 · 검토 중 → 머지됨 · 머지 완료");

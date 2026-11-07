@@ -34,13 +34,16 @@ type HoldResult struct {
 	State    string `json:"state"`
 }
 
-// RelaneResult is an operator relane: the task, the lane it left, and whether
-// this key moved it. A replay of a key that recorded an event reports
-// Changed true again so its lane notices can be re-sent; the hub dedupes by
-// the event ids derived from the key.
+// RelaneResult is an operator relane: the lane it left, the lane this key
+// moved it to, and whether this key moved it. Lane is the recorded target,
+// not the task's current lane, so a replay after a later move still reports
+// the move this key made. A replay reports Changed true again so its lane
+// notices can be re-sent; the hub dedupes by the event ids derived from the
+// key.
 type RelaneResult struct {
-	Task     Task
 	Previous string
+	Lane     string
+	Title    string
 	Changed  bool
 }
 
@@ -261,10 +264,10 @@ func (s *Store) OperatorRelaneTask(ctx context.Context, id int64, to, by, note, 
 		}
 		return RelaneResult{}, err
 	}
-	var previous string
-	err = tx.QueryRow(ctx, `SELECT "from" FROM task_events WHERE task_id=$1 AND source=$2 AND source_ref=$3`, id, lifecycleSourceRelane, key).Scan(&previous)
+	var previous, recordedTo string
+	err = tx.QueryRow(ctx, `SELECT "from","to" FROM task_events WHERE task_id=$1 AND source=$2 AND source_ref=$3`, id, lifecycleSourceRelane, key).Scan(&previous, &recordedTo)
 	if err == nil {
-		return RelaneResult{Task: x, Previous: previous, Changed: true}, tx.Commit(ctx)
+		return RelaneResult{Previous: previous, Lane: recordedTo, Title: x.Title, Changed: true}, tx.Commit(ctx)
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return RelaneResult{}, err
@@ -274,7 +277,7 @@ func (s *Store) OperatorRelaneTask(ctx context.Context, id int64, to, by, note, 
 	if err != nil {
 		return RelaneResult{}, err
 	}
-	return RelaneResult{Task: x, Previous: before, Changed: changed}, tx.Commit(ctx)
+	return RelaneResult{Previous: before, Lane: x.Lane, Title: x.Title, Changed: changed}, tx.Commit(ctx)
 }
 
 // operatorTransition applies one manual transition under an idempotency key:

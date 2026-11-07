@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { fetchTaskDetail, fetchTaskComments, HttpError } from "../shared/boardApi";
 import type { BoardComment, BoardDetail } from "../shared/boardTypes";
 import { stateLabel } from "../shared/states";
@@ -23,9 +23,16 @@ export function TaskRecord({ id }: { id: number }) {
   const [data, setData] = useState<BoardDetail | null>(null);
   const [error, setError] = useState<number | null>(null);
   const [attempt, setAttempt] = useState(0);
+  const loadedID = useRef(0);
   useEffect(() => {
     let active = true;
-    setData(null); setError(null); setComments([]); setCommentsError(false);
+    // A refresh after a write keeps the record mounted (focus, comments and
+    // timeline stay); only a different task clears it.
+    if (loadedID.current !== id) {
+      loadedID.current = id;
+      setData(null); setComments([]); setCommentsError(false);
+    }
+    setError(null);
     void fetchTaskDetail(id).then(value => { if (active) { setData(value); void fetchTaskComments(id).then(result => { if (active) setComments(result.comments); }).catch(() => { if (active) setCommentsError(true); }); } }).catch((e: unknown) => { if (active) setError(e instanceof HttpError ? e.status : 500); });
     return () => { active = false; };
   }, [id, attempt]);
