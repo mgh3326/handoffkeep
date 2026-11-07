@@ -202,3 +202,10 @@
     grid-template-columns: 56px minmax(0, 1fr);
   }
 }
+
+/* The one accent button in the console's dialogs: applying a command. */
+.inbox-dialog button.command-primary {
+  border-color: var(--hk-action-bg);
+  background: var(--hk-action-bg);
+  color: var(--hk-action-fg);
+}

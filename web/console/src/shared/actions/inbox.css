@@ -1,5 +1,7 @@
 /* Inbox triage chrome: the sticky bulk bar, the undo toast and the three
-   dialogs. Every value that has a token uses one. */
+   dialogs. Every value that has a token uses one. Buttons use the normal
+   button look; the accent is only for the command dialog's apply button
+   (.command-primary in command/command.css). */
 
 .inbox-bar {
   position: sticky;
@@ -29,8 +31,8 @@
   padding: var(--hk-space-1) var(--hk-space-3);
   border: var(--hk-border-width) solid var(--hk-border-control);
   border-radius: var(--hk-radius-control);
-  background: var(--hk-action-bg);
-  color: var(--hk-action-fg);
+  background: var(--hk-surface-2);
+  color: var(--hk-text-primary);
   font: inherit;
   font-size: var(--hk-type-meta);
   cursor: pointer;
@@ -81,8 +83,8 @@
   padding-inline: var(--hk-space-2);
   border: var(--hk-border-width) solid var(--hk-border-control);
   border-radius: var(--hk-radius-control);
-  background: var(--hk-action-bg);
-  color: var(--hk-action-fg);
+  background: var(--hk-surface-2);
+  color: var(--hk-text-primary);
   font: inherit;
   cursor: pointer;
 }
