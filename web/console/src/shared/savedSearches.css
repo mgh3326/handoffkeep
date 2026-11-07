@@ -1,70 +1,76 @@
-/* Saved searches sit under the Work tabs: a compact list of chips with
-   rename/delete, and one inline form for the current query. */
+/* Saved searches: the save control sits at the right end of the query bar and
+   the saved searches are one compact chip row under the Work tabs. */
 
-.work-saved {
-  margin: var(--hk-space-3) 0;
-  padding-top: var(--hk-space-3);
-  border-top: 1px solid var(--hk-border-subtle);
+.work-save {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--hk-space-1);
 }
 
-.work-saved-head {
+.work-save-form {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: var(--hk-space-2);
+  gap: var(--hk-space-1);
 }
 
-.work-saved-head h2 {
-  margin: 0;
-  font-size: var(--hk-type-section);
-  line-height: var(--hk-line-section);
+.work-save-form input {
+  width: 140px;
+  min-width: 0;
 }
 
-.work-saved-head button,
-.work-saved-list button {
+.work-saved {
+  margin: var(--hk-space-2) 0;
+}
+
+.work-save button,
+.work-saved button {
   min-height: var(--hk-control-height);
+  padding: var(--hk-space-1) var(--hk-space-2);
   font-size: var(--hk-type-meta);
+  white-space: nowrap;
 }
 
 .work-saved-list {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: var(--hk-space-1);
+  overflow-x: auto;
   list-style: none;
-  margin: var(--hk-space-2) 0 0;
+  margin: 0;
   padding: 0;
 }
 
 .work-saved-list li {
   display: flex;
+  flex: none;
   align-items: center;
   gap: 2px;
   min-width: 0;
 }
 
 .work-saved-apply {
-  max-width: 100%;
+  max-width: 200px;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
   border-radius: var(--hk-radius-pill);
   background: var(--hk-badge-fill);
 }
 
 .work-saved-list li > button:not(.work-saved-apply) {
-  padding-inline: var(--hk-space-2);
+  border-color: transparent;
+  background: transparent;
+  color: var(--hk-text-secondary);
 }
 
 .work-saved-form {
   display: flex;
-  flex-wrap: wrap;
   gap: var(--hk-space-1);
-  margin-top: var(--hk-space-2);
 }
 
+.work-save input,
 .work-saved-form input {
-  flex: 1;
-  min-width: 160px;
   min-height: var(--hk-control-height);
   padding-inline: var(--hk-space-2);
   border: var(--hk-border-width) solid var(--hk-border-control);
@@ -75,6 +81,11 @@
   font-size: var(--hk-type-meta);
 }
 
+.work-saved-form input {
+  width: 160px;
+}
+
+.work-save input:focus-visible,
 .work-saved-form input:focus-visible {
   outline: var(--hk-focus-width) solid var(--hk-focus);
   outline-offset: var(--hk-focus-offset);
@@ -86,13 +97,8 @@
   color: var(--hk-text-secondary);
 }
 
-.work-saved-empty,
 .work-saved-error {
-  margin: var(--hk-space-1) 0 0;
-  color: var(--hk-text-secondary);
-  font-size: var(--hk-type-meta);
-}
-
-.work-saved-error {
+  margin: 0;
   color: var(--hk-danger);
+  font-size: var(--hk-type-meta);
 }

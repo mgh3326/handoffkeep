@@ -8,7 +8,7 @@ export type SavedSearch = { id: string; name: string; query: string };
 
 export const MAX_SAVED_SEARCHES = 50;
 const MAX_NAME = 60;
-const MAX_QUERY = 500;
+export const MAX_QUERY = 500;
 
 function record(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -27,8 +27,10 @@ function newID(): string {
 
 export function makeSavedSearch(name: string, query: string): SavedSearch | null {
   const trimmedName = trim(name, MAX_NAME);
-  const trimmedQuery = trim(query, MAX_QUERY);
-  if (trimmedName === "" || trimmedQuery === "") return null;
+  const trimmedQuery = query.trim();
+  // A longer query is refused, never cut: a cut query can end inside a quoted
+  // phrase and then means something else when applied.
+  if (trimmedName === "" || trimmedQuery === "" || trimmedQuery.length > MAX_QUERY) return null;
   return { id: newID(), name: trimmedName, query: trimmedQuery };
 }
 

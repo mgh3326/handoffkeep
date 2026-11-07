@@ -116,5 +116,8 @@ it("reports a refused lane and a missing drop reason without sending", () => {
   expect((screen.getByRole("button", { name: "적용 (Enter)" }) as HTMLButtonElement).disabled).toBe(true);
   fireEvent.change(screen.getByLabelText("명령 입력"), { target: { value: "드롭 취소" } });
   expect(screen.getByText("드롭 이유가 필요합니다.")).toBeTruthy();
+  // The reason runs to the end of the line, so the preview shows all of it.
+  fireEvent.change(screen.getByLabelText("명령 입력"), { target: { value: "드롭 취소 이유 필요 없음 우선순위 1" } });
+  expect(screen.getByText("개발 중 → 종료됨 (취소) · 이유: 필요 없음 우선순위 1")).toBeTruthy();
   expect(fetcher).not.toHaveBeenCalled();
 });
