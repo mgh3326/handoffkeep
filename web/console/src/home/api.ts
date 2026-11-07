@@ -66,6 +66,7 @@ function decision(o: Record<string, unknown>, at: string): AttentionDecision {
     return fail(`${at}.source`, "is not request or lane_event");
   }
   return {
+    key: text(o, "key", at),
     source,
     id: id(o, "id", at),
     lane: text(o, "lane", at),
@@ -73,6 +74,8 @@ function decision(o: Record<string, unknown>, at: string): AttentionDecision {
     created_at: text(o, "created_at", at),
     due_at: nullableText(o, "due_at", at),
     overdue: flag(o, "overdue", at),
+    read: flag(o, "read", at),
+    woken: flag(o, "woken", at),
   };
 }
 
@@ -82,22 +85,29 @@ function task(o: Record<string, unknown>, at: string): AttentionTask {
     return fail(`${at}.reason`, "is not awaiting_decision or stalled");
   }
   return {
+    key: text(o, "key", at),
     id: id(o, "id", at),
     title: text(o, "title", at),
     lane: text(o, "lane", at),
     state: text(o, "state", at),
+    priority: count(o, "priority", at),
     reason,
     since: text(o, "since", at),
+    read: flag(o, "read", at),
+    woken: flag(o, "woken", at),
   };
 }
 
 function deploy(o: Record<string, unknown>, at: string): AttentionDeploy {
   return {
+    key: text(o, "key", at),
     service: text(o, "service", at),
     task_id: id(o, "task_id", at),
     title: text(o, "title", at),
     pr: text(o, "pr", at),
     merged_at: text(o, "merged_at", at),
+    read: flag(o, "read", at),
+    woken: flag(o, "woken", at),
   };
 }
 

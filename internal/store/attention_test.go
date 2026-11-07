@@ -2,6 +2,7 @@ package store
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -339,5 +340,73 @@ func TestAttentionDecisionNewestFirstAndOverduePriority(t *testing.T) {
 	overdue := AttentionDecision{ID: 3, CreatedAt: now.Add(-2 * time.Hour), Overdue: true}
 	if !attentionDecisionLess(newer, older) || attentionDecisionLess(older, newer) || !attentionDecisionLess(overdue, newer) {
 		t.Fatal("expected overdue first, then newest")
+	}
+}
+
+// Triage state is part of the inbox read: a completed item leaves the list and
+// its count, a snoozed item leaves until its time, and an item whose snooze
+// came due comes back marked woken (hk 3343).
+func TestAttentionExcludesTriagedAndFlagsWoken(t *testing.T) {
+	s := attentionStore(t)
+	ctx := t.Context()
+	now := time.Now().UTC()
+	request := insertAttentionRequest(t, s, attentionRequest{ref: "triage", created: now.Add(-time.Hour)})
+	task := insertAttentionTask(t, s, attentionTaskSeed{title: "triage task", awaiting: true, created: now.Add(-time.Hour)})
+	requestKey := "decision:request:" + strconv.FormatInt(request, 10)
+	taskKey := "task:" + strconv.FormatInt(task, 10)
+
+	if _, err := s.ApplyInbox(ctx, []string{requestKey}, InboxActionDone, nil, "operator:test", "done-one"); err != nil {
+		t.Fatal(err)
+	}
+	until := now.Add(time.Hour)
+	if _, err := s.ApplyInbox(ctx, []string{taskKey}, InboxActionSnooze, &until, "operator:test", "snooze-one"); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.Attention(ctx, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Decisions.Count != 0 || len(got.Decisions.Items) != 0 {
+		t.Fatalf("completed decision still listed: %+v", got.Decisions)
+	}
+	if got.Tasks.Count != 0 || len(got.Tasks.Items) != 0 {
+		t.Fatalf("snoozed task still listed: %+v", got.Tasks)
+	}
+
+	// After the snooze comes due the task returns, marked woken.
+	got, err = s.Attention(ctx, until.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Tasks.Count != 1 || len(got.Tasks.Items) != 1 {
+		t.Fatalf("woken task missing: %+v", got.Tasks)
+	}
+	if item := got.Tasks.Items[0]; item.Key != taskKey || !item.Woken || item.Read {
+		t.Fatalf("woken task state %+v", item)
+	}
+
+	// Reading the woken item clears the mark without putting it to sleep.
+	if _, err := s.ApplyInbox(ctx, []string{taskKey}, InboxActionRead, nil, "operator:test", "read-one"); err != nil {
+		t.Fatal(err)
+	}
+	got, err = s.Attention(ctx, until.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item := got.Tasks.Items[0]; item.Woken || !item.Read {
+		t.Fatalf("read task state %+v", item)
+	}
+
+	// Undo brings the completed decision back.
+	if _, err := s.UndoInbox(ctx, "done-one", "operator:test"); err != nil {
+		t.Fatal(err)
+	}
+	got, err = s.Attention(ctx, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Decisions.Count != 1 || len(got.Decisions.Items) != 1 || got.Decisions.Items[0].Key != requestKey {
+		t.Fatalf("undo did not restore: %+v", got.Decisions)
 	}
 }

@@ -1,0 +1,286 @@
+/* Inbox triage chrome: the sticky bulk bar, the undo toast and the three
+   dialogs. Every value that has a token uses one. */
+
+.inbox-bar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--hk-space-2);
+  margin-block: var(--hk-space-3);
+  padding: var(--hk-space-2);
+  background: var(--hk-surface-1);
+  border: var(--hk-border-width) solid var(--hk-border-control);
+  border-radius: var(--hk-radius-card);
+  box-shadow: var(--hk-elevation-panel);
+  font-family: var(--hk-font-ui);
+}
+
+.inbox-bar-count {
+  color: var(--hk-text-secondary);
+  font-size: var(--hk-type-meta);
+}
+
+.inbox-bar button,
+.inbox-dialog button {
+  min-height: var(--hk-control-height);
+  padding: var(--hk-space-1) var(--hk-space-3);
+  border: var(--hk-border-width) solid var(--hk-border-control);
+  border-radius: var(--hk-radius-control);
+  background: var(--hk-action-bg);
+  color: var(--hk-action-fg);
+  font: inherit;
+  font-size: var(--hk-type-meta);
+  cursor: pointer;
+}
+
+.inbox-bar button:focus-visible,
+.inbox-dialog button:focus-visible,
+.inbox-dialog input:focus-visible {
+  outline: var(--hk-focus-width) solid var(--hk-focus);
+  outline-offset: var(--hk-focus-offset);
+}
+
+.inbox-bar button:disabled,
+.inbox-dialog button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.inbox-bar .inbox-bar-clear,
+.inbox-dialog .inbox-bar-clear {
+  margin-left: auto;
+  border-color: transparent;
+  background: transparent;
+  color: var(--hk-text-secondary);
+}
+
+.inbox-toast {
+  position: fixed;
+  z-index: 30;
+  left: var(--hk-space-4);
+  bottom: calc(var(--hk-space-4) + var(--hk-space-16));
+  display: flex;
+  align-items: center;
+  gap: var(--hk-space-2);
+  max-width: calc(100vw - 2 * var(--hk-space-4));
+  padding: var(--hk-space-2) var(--hk-space-3);
+  background: var(--hk-surface-1);
+  color: var(--hk-text-primary);
+  border: var(--hk-border-width) solid var(--hk-border-control);
+  border-radius: var(--hk-radius-card);
+  box-shadow: var(--hk-elevation-panel);
+  font-family: var(--hk-font-ui);
+  font-size: var(--hk-type-meta);
+}
+
+.inbox-toast button {
+  min-height: var(--hk-control-height);
+  padding-inline: var(--hk-space-2);
+  border: var(--hk-border-width) solid var(--hk-border-control);
+  border-radius: var(--hk-radius-control);
+  background: var(--hk-action-bg);
+  color: var(--hk-action-fg);
+  font: inherit;
+  cursor: pointer;
+}
+
+.inbox-toast .inbox-toast-close {
+  border-color: transparent;
+  background: transparent;
+  color: var(--hk-text-secondary);
+}
+
+.inbox-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  padding: var(--hk-space-4);
+  background: var(--hk-scrim);
+}
+
+.inbox-dialog {
+  box-sizing: border-box;
+  width: min(420px, 100%);
+  max-height: calc(100vh - 2 * var(--hk-space-4));
+  overflow-y: auto;
+  padding: var(--hk-space-4);
+  background: var(--hk-surface-0);
+  color: var(--hk-text-primary);
+  border: var(--hk-border-width) solid var(--hk-border-control);
+  border-radius: var(--hk-radius-card);
+  box-shadow: var(--hk-elevation-panel);
+  font-family: var(--hk-font-ui);
+}
+
+.inbox-dialog h2 {
+  margin: 0 0 var(--hk-space-2);
+  font-size: var(--hk-type-section);
+}
+
+.inbox-dialog p {
+  margin: 0 0 var(--hk-space-3);
+  color: var(--hk-text-secondary);
+  font-size: var(--hk-type-meta);
+}
+
+.inbox-dialog > button {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--hk-space-3);
+  width: 100%;
+  margin-top: var(--hk-space-2);
+}
+
+.inbox-dialog-meta {
+  color: var(--hk-text-muted);
+  font-size: var(--hk-type-meta);
+}
+
+.inbox-dialog-row {
+  display: flex;
+  align-items: center;
+  gap: var(--hk-space-2);
+  margin-top: var(--hk-space-3);
+}
+
+.inbox-dialog-row input {
+  flex: 1;
+  min-width: 0;
+  min-height: var(--hk-control-height);
+  padding-inline: var(--hk-space-2);
+  border: var(--hk-border-width) solid var(--hk-border-control);
+  border-radius: var(--hk-radius-control);
+  background: var(--hk-input-fill);
+  color: var(--hk-text-primary);
+  font: inherit;
+}
+
+.inbox-help {
+  list-style: none;
+  margin: 0 0 var(--hk-space-3);
+  padding: 0;
+}
+
+.inbox-help li {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--hk-space-4);
+  padding: var(--hk-space-1) 0;
+  border-bottom: 1px solid var(--hk-border-subtle);
+  font-size: var(--hk-type-meta);
+}
+
+.inbox-help kbd {
+  font-family: var(--hk-font-mono);
+  color: var(--hk-text-primary);
+}
+
+.inbox-palette {
+  width: min(560px, 100%);
+}
+
+.inbox-palette label {
+  display: flex;
+  align-items: center;
+  gap: var(--hk-space-2);
+  color: var(--hk-text-secondary);
+  font-size: var(--hk-type-meta);
+}
+
+.inbox-palette input {
+  flex: 1;
+  min-width: 0;
+  min-height: var(--hk-control-height);
+  padding-inline: var(--hk-space-2);
+  border: var(--hk-border-width) solid var(--hk-border-control);
+  border-radius: var(--hk-radius-control);
+  background: var(--hk-input-fill);
+  color: var(--hk-text-primary);
+  font: inherit;
+}
+
+.inbox-palette ul {
+  list-style: none;
+  margin: var(--hk-space-2) 0 0;
+  padding: 0;
+  max-height: 50vh;
+  overflow-y: auto;
+}
+
+.inbox-palette li button {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--hk-space-3);
+  width: 100%;
+  margin-top: var(--hk-space-1);
+  text-align: left;
+}
+
+[data-inbox-row][data-selected="true"] {
+  background: var(--hk-surface-selected);
+}
+
+@media (max-width: 767px) {
+  .inbox-toast {
+    left: var(--hk-space-2);
+    right: var(--hk-space-2);
+    bottom: calc(var(--hk-space-4) + var(--hk-space-16));
+  }
+}
+
+/* The row checkbox: a small toggle laid over the row's leading icon, shown
+   while the row is hovered or focused (or when the row is selected). The
+   keyboard's x key does the same thing. */
+.ha-item,
+.action-row {
+  position: relative;
+}
+
+.inbox-select {
+  position: absolute;
+  left: var(--hk-space-1);
+  top: 50%;
+  z-index: 2;
+  transform: translateY(-50%);
+  display: grid;
+  place-items: center;
+  width: var(--hk-space-6);
+  height: var(--hk-space-6);
+  padding: 0;
+  border: var(--hk-border-width) solid var(--hk-border-control);
+  border-radius: var(--hk-radius-control);
+  background: var(--hk-surface-0);
+  color: var(--hk-text-secondary);
+  font: inherit;
+  font-size: var(--hk-type-meta);
+  cursor: pointer;
+  visibility: hidden;
+}
+
+.inbox-select[aria-pressed="true"],
+.ha-item:hover .inbox-select,
+.ha-item:focus-within .inbox-select,
+.action-row:hover .inbox-select,
+.action-row:focus-within .inbox-select {
+  visibility: visible;
+}
+
+.inbox-select[aria-pressed="true"] {
+  background: var(--hk-action-bg);
+  color: var(--hk-action-fg);
+}
+
+.inbox-select:focus-visible {
+  outline: var(--hk-focus-width) solid var(--hk-focus);
+  outline-offset: var(--hk-focus-offset);
+}
+
+.ha-item--selected .ha-row,
+.action-row:has([data-selected="true"]) > a {
+  background: var(--hk-surface-selected);
+}
