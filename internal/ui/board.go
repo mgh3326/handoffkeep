@@ -108,9 +108,10 @@ type boardTask struct {
 	Area *string `json:"area"`
 	// PrioritySource and LaneSource are "youtrack" when the value came from
 	// the YouTrack-owned cache; Stale marks a value whose last refresh failed.
-	PrioritySource string `json:"priority_source,omitempty"`
-	LaneSource     string `json:"lane_source,omitempty"`
-	Stale          bool   `json:"stale,omitempty"`
+	PrioritySource  string     `json:"priority_source,omitempty"`
+	LaneSource      string     `json:"lane_source,omitempty"`
+	ValuesFetchedAt *time.Time `json:"values_fetched_at,omitempty"`
+	Stale           bool       `json:"stale,omitempty"`
 }
 
 type boardTasksResponse struct {
@@ -147,6 +148,7 @@ func projectBoardTask(task store.Task) boardTask {
 		Area:             task.Area,
 		PrioritySource:   task.PrioritySource,
 		LaneSource:       task.LaneSource,
+		ValuesFetchedAt:  task.ValuesFetchedAt,
 		Stale:            task.Stale,
 	}
 }

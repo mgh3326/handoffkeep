@@ -248,24 +248,6 @@ func (s *Store) MarkYouTrackTaskSynced(ctx context.Context, taskID int64, at tim
 	return err
 }
 
-// TouchYouTrackTaskSynced marks the task's current revision as mirrored. A
-// pull or a write that already put the same value on both sides must not be
-// echoed by the next push.
-func (s *Store) TouchYouTrackTaskSynced(ctx context.Context, taskID int64) error {
-	_, err := s.pool.Exec(ctx, `UPDATE task_origins SET synced_at=(SELECT updated_at FROM tasks WHERE id=$1) WHERE provider='youtrack' AND task_id=$1`, taskID)
-	return err
-}
-
-// TaskRouting reads only the lane and priority a cache write needs. The full
-// task read loads events and children and is too heavy for a batch.
-func (s *Store) TaskRouting(ctx context.Context, id int64) (lane string, priority int, found bool, err error) {
-	err = s.pool.QueryRow(ctx, `SELECT lane,priority FROM tasks WHERE id=$1`, id).Scan(&lane, &priority)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return "", 0, false, nil
-	}
-	return lane, priority, err == nil, err
-}
-
 // TaskProjectExists reports whether name is in the server's project
 // vocabulary.
 func (s *Store) TaskProjectExists(ctx context.Context, name string) (bool, error) {

@@ -27,7 +27,6 @@ type Store interface {
 	ListYouTrackMirrors(ctx context.Context, taskIDs []int64) (map[int64]store.YouTrackMirror, error)
 	UpsertYouTrackMirror(ctx context.Context, in store.YouTrackMirrorInput) (store.YouTrackMirror, error)
 	MarkYouTrackTaskSynced(ctx context.Context, taskID int64, at time.Time) error
-	TouchYouTrackTaskSynced(ctx context.Context, taskID int64) error
 
 	ListYouTrackProjects(ctx context.Context) ([]store.YouTrackProject, error)
 	YouTrackProjectFor(ctx context.Context, hkProject string) (store.YouTrackProject, bool, error)
@@ -238,7 +237,10 @@ func (s *Service) RecordPriority(ctx context.Context, taskID int64, priority int
 	if s == nil {
 		return
 	}
-	if _, ok, err := s.store.GetYouTrackMirror(ctx, taskID); err != nil || !ok {
+	if _, ok, err := s.store.GetYouTrackMirror(ctx, taskID); err != nil {
+		log.Printf("youtrack.mirror_lookup_failed task_id=%d err=%q", taskID, err)
+		return
+	} else if !ok {
 		return
 	}
 	if err := s.store.EnqueueYouTrack(ctx, taskID, store.YouTrackOpPriority, strconv.Itoa(priority)); err != nil {
@@ -254,7 +256,10 @@ func (s *Service) RecordLane(ctx context.Context, taskID int64, lane string) {
 	if s == nil {
 		return
 	}
-	if _, ok, err := s.store.GetYouTrackMirror(ctx, taskID); err != nil || !ok {
+	if _, ok, err := s.store.GetYouTrackMirror(ctx, taskID); err != nil {
+		log.Printf("youtrack.mirror_lookup_failed task_id=%d err=%q", taskID, err)
+		return
+	} else if !ok {
 		return
 	}
 	if err := s.store.EnqueueYouTrack(ctx, taskID, store.YouTrackOpLane, lane); err != nil {
