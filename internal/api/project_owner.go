@@ -57,15 +57,22 @@ func (s Server) projectOwner(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, http.StatusOK, store.ProjectOwnerDetail{ProjectOwner: owner, Events: events})
 		return
 	}
+	// A pointer distinguishes an omitted design_lane from an explicit "":
+	// omitting it is a malformed body, while "" is a deliberate clear. A plain
+	// string would let `{"note":"…"}` silently erase the owner.
 	var in struct {
-		DesignLane string `json:"design_lane"`
-		Note       string `json:"note"`
+		DesignLane *string `json:"design_lane"`
+		Note       string  `json:"note"`
 	}
 	if err := decode(r, &in, bodySmall); err != nil {
 		appErr(w, r, err)
 		return
 	}
-	owner, err := s.Service.Store.SetProjectDesignLane(r.Context(), project, in.DesignLane, client, in.Note)
+	if in.DesignLane == nil {
+		writeError(w, http.StatusBadRequest, "invalid_context")
+		return
+	}
+	owner, err := s.Service.Store.SetProjectDesignLane(r.Context(), project, *in.DesignLane, client, in.Note)
 	if err != nil {
 		projectOwnerError(w, r, err)
 		return

@@ -60,6 +60,14 @@ func TestProjectOwnerRoutesAPI(t *testing.T) {
 	if code, out = projectRequest(t, h.URL, http.MethodPut, path, "tok", map[string]any{"design_lane": "handoffkeep-design", "actor": "someone"}); code != 400 {
 		t.Fatalf("client-supplied actor accepted: code=%d body=%v", code, out)
 	}
+	// A body that omits design_lane entirely is malformed, not a clear: an
+	// accidental `{"note":"…"}` must not erase the owner.
+	for _, body := range []map[string]any{{}, {"note": "orphan note"}} {
+		if code, out = projectRequest(t, h.URL, http.MethodPut, path, "tok", body); code != 400 || out["error"] != "invalid_context" {
+			t.Fatalf("omitted design_lane body=%v code=%d body=%v", body, code, out)
+		}
+	}
+	assertOwnerHistory(t, st, "handoffkeep", 1, "", "handoffkeep-design", "tester")
 
 	// GET now carries the owner and its one event.
 	code, out = projectRequest(t, h.URL, http.MethodGet, path, "tok", nil)
