@@ -199,7 +199,7 @@ func (s *Store) ReplyDots(ctx context.Context, actor, channel string, in DotsRep
 	if in.TaskID < 1 || !validText(actor, 128) || actor == "" || channel != "chatgpt" || !validSourceRef(in.IdempotencyKey) || (in.AskOperator && in.Kind != "QUESTION") {
 		return DotsReplyResult{}, errors.New("invalid dots reply")
 	}
-	if in.Kind != "START" && !DotsKindRecorded(in.Kind) {
+	if in.Kind != "START" && in.Kind != "PROGRESS" && !DotsKindRecorded(in.Kind) {
 		return DotsReplyResult{}, errors.New("invalid dots reply kind")
 	}
 	if in.Kind == "START" && (in.ExpectedUpdatedAt == nil || in.ExpectedUpdatedAt.IsZero()) {
@@ -256,6 +256,9 @@ func (s *Store) ReplyDots(ctx context.Context, actor, channel string, in DotsRep
 	}
 	if in.Kind == "START" && (!task.UpdatedAt.Equal(*in.ExpectedUpdatedAt) || !IsClaimableState(task.State) || task.ClaimedBy != "") {
 		return DotsReplyResult{}, fmt.Errorf("%w: dots request has changed or is already claimed", ErrTaskConflict)
+	}
+	if in.Kind == "PROGRESS" && IsSettledState(task.State) {
+		return DotsReplyResult{}, ErrTaskConflict
 	}
 	now := time.Now().UTC()
 	var commentRowID int64
@@ -466,7 +469,10 @@ func (s *Store) RecordDotsResult(ctx context.Context, kind string, issue DotsIss
 
 func recordDotsResultTx(ctx context.Context, tx pgx.Tx, kind string, issue DotsIssue, c DotsComment, task *Task, lane, createdBy string) (key string, created bool, err error) {
 	outboxKind, recorded := dotsResultKinds[kind]
-	if !recorded {
+	progress := kind == "PROGRESS" && createdBy == "hk-mcp"
+	if progress {
+		outboxKind = OutboxKindDotsReport
+	} else if !recorded {
 		return "", false, errors.New("invalid dots result")
 	}
 	if _, err := time.Parse(time.RFC3339, c.CreatedAt); err != nil {
@@ -493,17 +499,22 @@ func recordDotsResultTx(ctx context.Context, tx pgx.Tx, kind string, issue DotsI
 		return "", false, err
 	}
 	created = tag.RowsAffected() == 1
+	if progress && !created {
+		return "", false, errors.New("dots progress document key collision")
+	}
 	if !created && taskID != nil {
 		if _, err := tx.Exec(ctx, `UPDATE documents SET task_id=$1 WHERE key=$2 AND task_id IS NULL`, *taskID, key); err != nil {
 			return "", false, err
 		}
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO dots_results(document_key,comment_id,issue_uuid,issue_identifier,kind,verdict,artefact_sha256,task_id,routed_lane,created_at,updated_at)
+	if !progress {
+		if _, err := tx.Exec(ctx, `INSERT INTO dots_results(document_key,comment_id,issue_uuid,issue_identifier,kind,verdict,artefact_sha256,task_id,routed_lane,created_at,updated_at)
 		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$10)
 		ON CONFLICT(comment_id) DO UPDATE SET task_id=EXCLUDED.task_id, updated_at=EXCLUDED.updated_at
 		WHERE dots_results.task_id IS NULL AND EXCLUDED.task_id IS NOT NULL`,
-		key, c.ID, issue.IssueUUID, issue.Identifier, kind, verdict, hex.EncodeToString(artefact[:]), taskID, lane, now); err != nil {
-		return "", false, err
+			key, c.ID, issue.IssueUUID, issue.Identifier, kind, verdict, hex.EncodeToString(artefact[:]), taskID, lane, now); err != nil {
+			return "", false, err
+		}
 	}
 	if created {
 		if err := insertNotificationOutbox(ctx, tx, outboxKind, lane, "dots-"+c.ID, dotsResultText(kind, key, issue, c), now); err != nil {

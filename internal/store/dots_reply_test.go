@@ -251,6 +251,7 @@ func TestDotsReplyStates(t *testing.T) {
 		awaiting    bool
 	}{
 		{"START", StateResearching, false, 0, false},
+		{"PROGRESS", StateBacklog, false, 0, false},
 		{"BLOCKED", StateIcebox, false, 1, false},
 		{"QUESTION", StateBacklog, false, 1, false},
 		{"QUESTION", StateBacklog, true, 1, true},
@@ -277,5 +278,42 @@ func TestDotsReplyStates(t *testing.T) {
 				t.Fatalf("results=%+v err=%v", results, err)
 			}
 		})
+	}
+}
+
+func TestDotsProgressRecordsPartialResult(t *testing.T) {
+	s := schemaStore(t, "dots_progress")
+	ctx := t.Context()
+	task, err := s.CreateDotsRequest(ctx, "caller", DotsRequestInput{Title: "Research", Body: "Investigate", RequesterLane: "requester"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := DotsReplyInput{TaskID: task.ID, Kind: "PROGRESS", Body: "Found a lead", IdempotencyKey: "progress"}
+	first, err := s.ReplyDots(ctx, "operator:test@example.com", "chatgpt", in)
+	if err != nil || first.State != StateBacklog || first.DocumentKey == "" {
+		t.Fatalf("reply=%+v err=%v", first, err)
+	}
+	replay, err := s.ReplyDots(ctx, "operator:test@example.com", "chatgpt", in)
+	if err != nil || !replay.Duplicate || replay.DocumentKey != first.DocumentKey {
+		t.Fatalf("replay=%+v err=%v", replay, err)
+	}
+	doc, found, err := s.GetDocument(ctx, first.DocumentKey)
+	if err != nil || !found || !strings.Contains(doc.Body, "[dots] PROGRESS") || !strings.Contains(doc.Body, in.Body) {
+		t.Fatalf("document=%+v found=%v err=%v", doc, found, err)
+	}
+	results, err := s.ListDotsResults(ctx, task.ID, "", 10)
+	if err != nil || len(results) != 0 {
+		t.Fatalf("results=%+v err=%v", results, err)
+	}
+	replies, err := s.ListDotsReplies(ctx, task.ID)
+	if err != nil || len(replies) != 1 || replies[0].Kind != "PROGRESS" {
+		t.Fatalf("replies=%+v err=%v", replies, err)
+	}
+	var count int
+	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM notification_outbox WHERE target_lane='requester' AND kind=$1`, OutboxKindDotsReport).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("notifications=%d err=%v", count, err)
+	}
+	if DotsKindRecorded("PROGRESS") {
+		t.Fatal("Linear webhook must continue ignoring PROGRESS")
 	}
 }

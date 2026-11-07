@@ -20,12 +20,16 @@ creation order. Use the returned `next_cursor` to fetch another page.
 `idempotency_key`. Reuse the key only when retrying the same reply. For `START`,
 pass the task's `updated_at` from the inbox as `expected_updated_at`. START
 claims the task for dots only if that revision is still current and unclaimed.
-`BLOCKED` parks it with the reason, and `RESULT`
+`PROGRESS` records a partial result and leaves the task open. `BLOCKED` parks
+it with the reason, and `RESULT`
 completes it with the result document as evidence. A `QUESTION` is delivered
 to the requester; set `ask_operator` when it needs an hk decision request and
 the task should await that decision. RESULT, BLOCKED, and QUESTION also create
 a result document, result record, and lane notification. START creates only a
-comment and the claim. Replies are attributed to the authenticated operator.
+comment and the claim. PROGRESS creates a document, comment, and notification,
+but no `dots_results` row. That keeps the comparison table limited to the
+three kinds recorded by Linear and needs no schema migration. Replies are
+attributed to the authenticated operator.
 
 The result's `source` is `hk` or `linear`. Existing Linear requests and
 webhooks remain independent and do not need a channel setting.
