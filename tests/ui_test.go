@@ -268,7 +268,7 @@ func mustOtherKey(t *testing.T) *rsa.PrivateKey {
 }
 
 func TestUIFailClosedAndMethodGuard(t *testing.T) {
-	s := uiStore(t)
+	s, dbURL := schemaTestStore(t, "ui_method_guard")
 	bare := httptest.NewServer(api.Server{Service: api.Service{Store: s}, Tokens: api.Tokens{"node": "node-token"}}.Handler())
 	defer bare.Close()
 	for _, endpoint := range []string{"/ui", "/ui/timeline", "/ui/events", "/ui/static/htmx.min.js"} {
@@ -293,7 +293,7 @@ func TestUIFailClosedAndMethodGuard(t *testing.T) {
 	h := newUITestServer(t, s, fixture, "", "", 0)
 	defer h.Close()
 	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
-	before := uiRowCounts(t)
+	before := uiRowCountsAt(t, dbURL)
 	for _, endpoint := range []string{"/ui", "/ui/timeline", "/ui/queue", "/ui/deploys", "/ui/decisions", "/ui/decisions/legacy", "/ui/fleet", "/ui/events", "/ui/fragments/timeline"} {
 		for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete} {
 			response := uiRequest(t, h.Client(), method, h.URL+endpoint, assertion, "")
@@ -303,7 +303,7 @@ func TestUIFailClosedAndMethodGuard(t *testing.T) {
 			response.Body.Close()
 		}
 	}
-	if after := uiRowCounts(t); after != before {
+	if after := uiRowCountsAt(t, dbURL); after != before {
 		t.Fatalf("read-only method guard changed rows: before=%v after=%v", before, after)
 	}
 }
@@ -327,9 +327,12 @@ func uiLaneRowCounts(t *testing.T, lane string) rowCounts {
 	return counts
 }
 
-func uiRowCounts(t *testing.T) rowCounts {
+// uiRowCountsAt counts whole tables in dbURL. Pass a throwaway schema
+// (schemaTestStore) — a global count in the shared schema moves whenever a
+// concurrently running package writes a row (AGENTS.md §Tests).
+func uiRowCountsAt(t *testing.T, dbURL string) rowCounts {
 	t.Helper()
-	db, err := pgx.Connect(t.Context(), testdb.URL(t))
+	db, err := pgx.Connect(t.Context(), dbURL)
 	if err != nil {
 		t.Fatal(err)
 	}

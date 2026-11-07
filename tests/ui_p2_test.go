@@ -159,7 +159,7 @@ func decisionFields(kind string, id int64, answer, csrf string) url.Values {
 func TestUIWriteDecisionRoutes(t *testing.T) {
 	t.Setenv("HANDOFFKEEP_UI_LANES", "lane-a,lane-b")
 	t.Setenv("HANDOFFKEEP_UI_ADMIRAL_LANES", "lane-a")
-	s := uiStore(t)
+	s, dbURL := schemaTestStore(t, "ui_decision_routes")
 	fixture := newUIJWTFixture(t)
 	hub := newFakeIngressHub(t)
 	h := newUITestServer(t, s, fixture, hub.server.URL, "hub-test-token", 0)
@@ -311,21 +311,22 @@ func TestUIWriteDecisionRoutes(t *testing.T) {
 
 	// Escalations route to their owner lane and do not transition unrelated tasks.
 	escalation := seedRelay(t, s, "lane-b", "job.escalate", "p2-open-escalation", "", "[decision-needed] Need a decision", "")
-	before := uiRowCounts(t)
+	before := uiRowCountsAt(t, dbURL)
 	cookie, csrf = uiCSRF(t, h.Client(), h.URL+"/ui/decisions/legacy", assertion)
 	response = uiPostForm(t, h.Client(), h.URL+"/ui/decisions/answer", assertion, cookie, decisionFields("escalation", escalation.ID, "continue", csrf), h.URL, true)
 	if body = responseText(t, response); response.StatusCode != http.StatusOK {
 		t.Fatalf("escalation status=%d body=%q", response.StatusCode, body)
 	}
 	requests = hub.requests()
-	if requests[len(requests)-1].Lane != "lane-b" || before.Tasks != uiRowCounts(t).Tasks || before.TaskEvents != uiRowCounts(t).TaskEvents {
-		t.Fatalf("escalation did not preserve task state: request=%+v before=%+v after=%+v", requests[len(requests)-1], before, uiRowCounts(t))
+	after := uiRowCountsAt(t, dbURL)
+	if requests[len(requests)-1].Lane != "lane-b" || before.Tasks != after.Tasks || before.TaskEvents != after.TaskEvents {
+		t.Fatalf("escalation did not preserve task state: request=%+v before=%+v after=%+v", requests[len(requests)-1], before, after)
 	}
 }
 
 func TestUIWriteSecurityAndCompose(t *testing.T) {
 	t.Setenv("HANDOFFKEEP_UI_LANES", "lane-a")
-	s := uiStore(t)
+	s, dbURL := schemaTestStore(t, "ui_compose")
 	fixture := newUIJWTFixture(t)
 	hub := newFakeIngressHub(t)
 	h := newUITestServer(t, s, fixture, hub.server.URL, "hub-test-token", 0)
@@ -333,7 +334,7 @@ func TestUIWriteSecurityAndCompose(t *testing.T) {
 	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
 	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/compose", assertion)
 	base := url.Values{"lane": {"lane-a"}, "text": {"hello"}, "csrf": {csrf}}
-	before := uiRowCounts(t)
+	before := uiRowCountsAt(t, dbURL)
 
 	for name, mutate := range map[string]func(*http.Cookie, url.Values, string) (int, string){
 		"missing cookie": func(_ *http.Cookie, form url.Values, origin string) (int, string) {
@@ -397,8 +398,8 @@ func TestUIWriteSecurityAndCompose(t *testing.T) {
 		t.Fatalf("unregistered lane status=%d", response.StatusCode)
 	}
 	response.Body.Close()
-	if got := hub.requests(); len(got) != 0 || uiRowCounts(t) != before {
-		t.Fatalf("rejected requests had side effects: hub=%+v before=%+v after=%+v", got, before, uiRowCounts(t))
+	if got, after := hub.requests(), uiRowCountsAt(t, dbURL); len(got) != 0 || after != before {
+		t.Fatalf("rejected requests had side effects: hub=%+v before=%+v after=%+v", got, before, after)
 	}
 
 	// Exactly 2048 bytes succeeds; htmx gets a replacement fragment.
@@ -411,10 +412,10 @@ func TestUIWriteSecurityAndCompose(t *testing.T) {
 	if got := hub.requests(); len(got) != 1 || len([]byte(got[0].Text)) != 2048 || !strings.HasPrefix(got[0].EventID, "web-msg-") {
 		t.Fatalf("exact compose hub=%+v", got)
 	}
-	beforeGET, hubGET := uiRowCounts(t), len(hub.requests())
+	beforeGET, hubGET := uiRowCountsAt(t, dbURL), len(hub.requests())
 	response = uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/compose?lane=lane-a&text=must-not-send", assertion, "")
 	response.Body.Close()
-	if afterGET := uiRowCounts(t); afterGET != beforeGET || len(hub.requests()) != hubGET {
+	if afterGET := uiRowCountsAt(t, dbURL); afterGET != beforeGET || len(hub.requests()) != hubGET {
 		t.Fatalf("GET performed a write: db before=%+v after=%+v hub before=%d after=%d", beforeGET, afterGET, hubGET, len(hub.requests()))
 	}
 
@@ -528,7 +529,7 @@ func TestUIWriteNeverLeaksHubToken(t *testing.T) {
 func TestUIDocIngressBadgeAndApproval(t *testing.T) {
 	t.Setenv("HANDOFFKEEP_UI_LANES", "lane-a")
 	t.Setenv("HANDOFFKEEP_UI_ADMIRAL_LANES", "lane-a")
-	s := uiStore(t)
+	s, dbURL := schemaTestStore(t, "ui_doc_ingress")
 	fixture := newUIJWTFixture(t)
 	hub := newFakeIngressHub(t)
 	h := newUITestServer(t, s, fixture, hub.server.URL, "hub-test-token", 0)
@@ -611,7 +612,7 @@ func TestUIDocIngressBadgeAndApproval(t *testing.T) {
 	}
 
 	// All other UI POST routes remain GET-only, and GET query strings cannot write.
-	before := uiRowCounts(t)
+	before := uiRowCountsAt(t, dbURL)
 	for _, endpoint := range []string{"/ui/compose?lane=lane-a&text=unsafe", "/ui/decisions/answer?type=task&id=" + strconv.FormatInt(approval.ID, 10)} {
 		response = uiRequest(t, h.Client(), http.MethodGet, h.URL+endpoint, assertion, "")
 		response.Body.Close()
@@ -623,7 +624,7 @@ func TestUIDocIngressBadgeAndApproval(t *testing.T) {
 		}
 		response.Body.Close()
 	}
-	if after := uiRowCounts(t); after != before {
+	if after := uiRowCountsAt(t, dbURL); after != before {
 		t.Fatalf("GET/method guard wrote rows: before=%+v after=%+v", before, after)
 	}
 }

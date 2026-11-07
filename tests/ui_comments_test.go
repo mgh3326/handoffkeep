@@ -180,7 +180,7 @@ func TestUITaskCommentWrite(t *testing.T) {
 	}
 
 	before := uiSnapshotTask(t, s, task.ID)
-	rowsBefore := uiRowCounts(t)
+	rowsBefore := uiLaneRowCounts(t, lane)
 	text := fmt.Sprintf("[decision] #%d: yes — approve and dispatch", task.ID)
 	response := uiPostForm(t, h.Client(), uiCommentURL(h.URL, task.ID), assertion, cookie, url.Values{"body": {text}, "csrf": {csrf}}, h.URL, false)
 	if response.StatusCode != http.StatusCreated {
@@ -193,7 +193,7 @@ func TestUITaskCommentWrite(t *testing.T) {
 	if after := uiSnapshotTask(t, s, task.ID); after != before {
 		t.Fatalf("comment changed the task: before=%+v after=%+v", before, after)
 	}
-	if rowsAfter := uiRowCounts(t); rowsAfter != rowsBefore {
+	if rowsAfter := uiLaneRowCounts(t, lane); rowsAfter != rowsBefore {
 		t.Fatalf("comment changed relay/tasks/task_events rows: before=%+v after=%+v", rowsBefore, rowsAfter)
 	}
 	if got := hub.requests(); len(got) != 0 {
