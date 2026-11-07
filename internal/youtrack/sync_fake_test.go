@@ -22,6 +22,7 @@ type fakeYouTrack struct {
 	hasAfter   bool
 
 	fieldValues map[string][]string
+	projectIDs  map[string]string // short name -> id
 
 	issueUpdates []map[string]any
 	comments     []string
@@ -42,13 +43,13 @@ func newFakeYouTrack() *fakeYouTrack {
 		me:     User{ID: "bot-id", Login: "hk-bot", Name: "hk-bot"},
 		issues: map[string]Issue{},
 		fieldValues: map[string][]string{
-			"hk 상태":   states,
-			"레인":      {"handoffkeep", "operator-desk", "rstack"},
-			"hk 프로젝트": {"handoffkeep", "other"},
-			"종류":      {"implement", "verify", "fix", "decide", "ops"},
-			"등급":      {"A", "B", "C"},
-			"티어":      {"T0", "T1", "T2", "T3", "T4"},
+			"hk 상태": states,
+			"레인":    {"handoffkeep", "operator-desk", "rstack"},
+			"종류":    {"implement", "verify", "fix", "decide", "ops"},
+			"등급":    {"A", "B", "C"},
+			"티어":    {"T0", "T1", "T2", "T3", "T4"},
 		},
+		projectIDs: map[string]string{"HK": "0-1", "PW": "0-2", "OTHER": "0-10"},
 	}
 }
 
@@ -57,6 +58,15 @@ func (f *fakeYouTrack) server(t *testing.T) *httptest.Server {
 	srv := httptest.NewServer(f)
 	t.Cleanup(srv.Close)
 	return srv
+}
+
+func (f *fakeYouTrack) projectByID(id string) *ProjectRef {
+	for short, candidate := range f.projectIDs {
+		if candidate == id {
+			return &ProjectRef{ID: id, ShortName: short, Name: short}
+		}
+	}
+	return nil
 }
 
 func (f *fakeYouTrack) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -76,7 +86,11 @@ func (f *fakeYouTrack) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		write(http.StatusOK, f.me)
 	case path == "/api/projects":
-		write(http.StatusOK, []ProjectRef{{ID: "0-1", ShortName: "HK", Name: "HK"}})
+		projects := make([]ProjectRef, 0, len(f.projectIDs))
+		for short, id := range f.projectIDs {
+			projects = append(projects, ProjectRef{ID: id, ShortName: short, Name: short})
+		}
+		write(http.StatusOK, projects)
 	case path == "/api/activitiesPage":
 		page := ActivitiesPage{Activities: f.activities, AfterCursor: f.cursor, HasAfter: f.hasAfter}
 		write(http.StatusOK, page)
@@ -90,6 +104,9 @@ func (f *fakeYouTrack) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case path == "/api/issues" && r.Method == http.MethodPost:
 		f.createCalls++
 		var body struct {
+			Project struct {
+				ID string `json:"id"`
+			} `json:"project"`
 			Summary      string        `json:"summary"`
 			Description  string        `json:"description"`
 			CustomFields []CustomField `json:"customFields"`
@@ -101,7 +118,11 @@ func (f *fakeYouTrack) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			raw, _ := json.Marshal(field.Value)
 			fields = append(fields, IssueField{Name: field.Name, Value: raw})
 		}
-		issue := Issue{ID: id, IDReadable: fmt.Sprintf("HK-%d", f.createCalls), Summary: body.Summary, Description: body.Description, CustomFields: fields}
+		short := "HK"
+		if project := f.projectByID(body.Project.ID); project != nil {
+			short = project.ShortName
+		}
+		issue := Issue{ID: id, IDReadable: short + "-" + strconv.Itoa(f.createCalls), Summary: body.Summary, Description: body.Description, CustomFields: fields, Project: f.projectByID(body.Project.ID)}
 		f.issues[id] = issue
 		write(http.StatusOK, issue)
 	case strings.HasPrefix(path, "/api/admin/projects/"):
@@ -157,6 +178,15 @@ func (f *fakeYouTrack) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			issue = Issue{ID: id, IDReadable: "HK-1"}
 		}
+		if project, ok := body["project"].(map[string]any); ok {
+			if pid, ok := project["id"].(string); ok {
+				issue.Project = f.projectByID(pid)
+				if issue.Project != nil {
+					issue.IDReadable = issue.Project.ShortName + "-1"
+				}
+				f.issues[id] = issue
+			}
+		}
 		write(http.StatusOK, issue)
 	default:
 		write(http.StatusNotFound, map[string]string{"error": "not_found"})
@@ -170,14 +200,27 @@ func newTestService(t *testing.T, f *fakeYouTrack, fs *fakeStore) *Service {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return NewService(fs, client, Options{Now: func() time.Time { return time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC) }})
+	return NewService(fs, client, Options{Tenant: "tenant", Now: func() time.Time { return time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC) }})
 }
 
 func operator() *User { return &User{ID: "admin-id", Login: "admin", Name: "operator"} }
 
-func stateActivity(id, readable, from, to string) Activity {
+// mirrorIssue seeds both sides: the hk mirror row and the YouTrack issue the
+// cache refresh and the pull will read.
+func mirrorIssue(fs *fakeStore, yt *fakeYouTrack, taskID int64, issueID, readable string) {
+	fs.mirror(taskID, issueID, readable)
+	yt.mu.Lock()
+	yt.issues[issueID] = Issue{ID: issueID, IDReadable: readable, Project: &ProjectRef{ID: "0-1", ShortName: "HK"}, CustomFields: []IssueField{
+		{Name: "hk 우선순위", Value: json.RawMessage(`0`)},
+		{Name: "레인", Value: json.RawMessage(`{"name":"handoffkeep"}`)},
+		{Name: "hk 상태", Value: json.RawMessage(`{"name":"대기"}`)},
+	}}
+	yt.mu.Unlock()
+}
+
+func stateActivity(id, issueID, readable, to string) Activity {
 	return Activity{
-		ID: id, Author: operator(), Target: &Issue{ID: "9-" + id, IDReadable: readable},
+		ID: id, Author: operator(), Target: &Issue{ID: issueID, IDReadable: readable},
 		Categories: []ActivityCategory{{
 			Type:  "CustomFieldCategory",
 			Field: &ActivityField{Name: "hk 상태"},

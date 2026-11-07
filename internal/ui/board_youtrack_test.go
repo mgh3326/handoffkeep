@@ -76,10 +76,10 @@ func TestBoardReturnsCachedYouTrackPriorityAndLane(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.LinkYouTrackIssue(ctx, linked.ID, "9-1", "HK-1", time.Now().UTC()); err != nil {
+	if _, err := st.UpsertYouTrackMirror(ctx, store.YouTrackMirrorInput{TaskID: linked.ID, IssueID: "9-1", DisplayRef: "HK-1", Tenant: "tenant", Role: "mirror", SyncedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.PutYouTrackFieldCache(ctx, store.YouTrackFieldCache{TaskID: linked.ID, Priority: 7, Lane: "rstack", FetchedAt: time.Now().UTC()}); err != nil {
+	if err := st.PutYouTrackFieldCache(ctx, store.YouTrackFieldCache{TaskID: linked.ID, Priority: 7, Lane: "rstack", Source: store.YouTrackSourceYouTrack, FetchedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
 	rec := httptest.NewRecorder()
@@ -105,7 +105,7 @@ func TestBoardReturnsCachedYouTrackPriorityAndLane(t *testing.T) {
 	}
 }
 
-func TestPriorityWritesThroughYouTrackAndFailureLeavesHKAlone(t *testing.T) {
+func TestPriorityIsPGFirstAndQueuesExport(t *testing.T) {
 	fake := &uiYouTrack{}
 	st := uiYouTrackStore(t)
 	h := uiYouTrackHandler(t, fake, st)
@@ -115,7 +115,7 @@ func TestPriorityWritesThroughYouTrackAndFailureLeavesHKAlone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.LinkYouTrackIssue(ctx, task.ID, "9-1", "HK-1", time.Now().UTC()); err != nil {
+	if _, err := st.UpsertYouTrackMirror(ctx, store.YouTrackMirrorInput{TaskID: task.ID, IssueID: "9-1", DisplayRef: "HK-1", Tenant: "tenant", Role: "mirror", SyncedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
 	person := cfaccess.Identity{Email: "test@example.com"}
@@ -139,21 +139,30 @@ func TestPriorityWritesThroughYouTrackAndFailureLeavesHKAlone(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("status=%d out=%v", status, out)
 	}
-	if fake.updates != 1 {
-		t.Fatalf("youtrack updates=%d", fake.updates)
-	}
 	got, _, _ := st.GetTask(ctx, task.ID)
 	if got.Priority != 5 {
 		t.Fatalf("priority=%d", got.Priority)
 	}
+	cache, ok, _ := st.GetYouTrackFieldCache(ctx, task.ID)
+	if !ok || cache.Priority != 5 || cache.Source != store.YouTrackSourceHK {
+		t.Fatalf("cache=%+v ok=%v", cache, ok)
+	}
+	if due, _ := st.DueYouTrackOutbox(ctx, 10); len(due) != 1 || due[0].Op != store.YouTrackOpPriority {
+		t.Fatalf("outbox=%+v", due)
+	}
 
+	// A YouTrack outage does not block the next write; the outbox retries.
 	fake.fail = true
 	status, out = call(`{"priority":9,"event_key":"two"}`)
-	if status != http.StatusBadGateway || out["error"] != "youtrack_unavailable" {
-		t.Fatalf("failure: status=%d out=%v", status, out)
+	if status != http.StatusOK {
+		t.Fatalf("outage: status=%d out=%v", status, out)
 	}
 	got, _, _ = st.GetTask(ctx, task.ID)
-	if got.Priority != 5 {
-		t.Fatalf("hk priority changed on a YouTrack failure: %d", got.Priority)
+	if got.Priority != 9 {
+		t.Fatalf("PG priority=%d", got.Priority)
+	}
+	due, _ := st.DueYouTrackOutbox(ctx, 10)
+	if len(due) != 1 || due[0].Value != "9" {
+		t.Fatalf("outbox=%+v", due)
 	}
 }

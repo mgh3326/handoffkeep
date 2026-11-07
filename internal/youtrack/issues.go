@@ -30,9 +30,11 @@ type issueBody struct {
 // FindIssueByHKID finds the one issue whose hk ID field matches. It returns
 // (Issue{}, false, nil) when none exists, so the caller creates instead of
 // updating.
-func (c *Client) FindIssueByHKID(ctx context.Context, project, field string, hkID int64) (Issue, bool, error) {
+func (c *Client) FindIssueByHKID(ctx context.Context, field string, hkID int64) (Issue, bool, error) {
 	q := url.Values{}
-	q.Set("query", fmt.Sprintf(`project: %s "%s": %d`, project, field, hkID))
+	// The hk ID field is shared by every mapped project; the query spans
+	// them and the caller decides whether the found issue's project matches.
+	q.Set("query", fmt.Sprintf(`"%s": %d`, field, hkID))
 	q.Set("fields", issueFields)
 	q.Set("$top", "2")
 	var issues []Issue
@@ -127,6 +129,25 @@ func (c *Client) SetPriority(ctx context.Context, issueID, field string, value i
 func (c *Client) SetLane(ctx context.Context, issueID, field, value string) error {
 	_, err := c.UpdateFields(ctx, issueID, []CustomField{EnumField(field, value)})
 	return err
+}
+
+// MoveIssue puts an issue in another project. The issue's stable internal id
+// and its hk link do not change; only the display number does.
+func (c *Client) MoveIssue(ctx context.Context, issueID, projectID string) (Issue, error) {
+	if strings.TrimSpace(projectID) == "" {
+		return Issue{}, fmt.Errorf("%w: project id is empty", ErrConfig)
+	}
+	q := url.Values{}
+	q.Set("fields", issueFields)
+	var out Issue
+	err := c.post(ctx, "/api/issues/"+url.PathEscape(issueID), q, struct {
+		Project struct {
+			ID string `json:"id"`
+		} `json:"project"`
+	}{Project: struct {
+		ID string `json:"id"`
+	}{ID: projectID}}, &out)
+	return out, err
 }
 
 // FieldInfo is the project custom field and the values its bundle accepts.

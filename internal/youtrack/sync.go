@@ -2,10 +2,12 @@ package youtrack
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
@@ -19,6 +21,7 @@ type SyncOptions struct {
 	CommentLimit  int
 	RefreshLimit  int
 	RevertLimit   int
+	OutboxLimit   int
 }
 
 func (o SyncOptions) withDefaults() SyncOptions {
@@ -37,6 +40,9 @@ func (o SyncOptions) withDefaults() SyncOptions {
 	if o.RevertLimit <= 0 {
 		o.RevertLimit = 20
 	}
+	if o.OutboxLimit <= 0 {
+		o.OutboxLimit = 100
+	}
 	return o
 }
 
@@ -44,7 +50,7 @@ type PushAction struct {
 	TaskID     int64  `json:"task_id"`
 	IssueID    string `json:"issue_id,omitempty"`
 	ReadableID string `json:"readable_id,omitempty"`
-	// Action is create, update, comment or unchanged.
+	// Action is create, update, move, comment or unchanged.
 	Action    string `json:"action"`
 	CommentID int64  `json:"comment_id,omitempty"`
 }
@@ -56,27 +62,39 @@ type PullAction struct {
 	Detail     string `json:"detail,omitempty"`
 }
 
+type OutboxAction struct {
+	TaskID  int64  `json:"task_id"`
+	Op      string `json:"op"`
+	Outcome string `json:"outcome"`
+}
+
 type SyncReport struct {
-	DryRun    bool         `json:"dry_run"`
-	Bot       string       `json:"bot,omitempty"`
-	Pushed    []PushAction `json:"push"`
-	Pulled    []PullAction `json:"pull"`
-	Refreshed int          `json:"refreshed"`
-	Reverted  int          `json:"reverted"`
-	Skipped   int          `json:"skipped"`
-	Errors    []string     `json:"errors,omitempty"`
+	DryRun    bool           `json:"dry_run"`
+	Bot       string         `json:"bot,omitempty"`
+	Outbox    []OutboxAction `json:"outbox"`
+	Pushed    []PushAction   `json:"push"`
+	Pulled    []PullAction   `json:"pull"`
+	Refreshed int            `json:"refreshed"`
+	Reverted  int            `json:"reverted"`
+	Skipped   int            `json:"skipped"`
+	Warnings  []string       `json:"warnings,omitempty"`
+	Errors    []string       `json:"errors,omitempty"`
 }
 
 func (r *SyncReport) fail(format string, args ...any) {
 	r.Errors = append(r.Errors, fmt.Sprintf(format, args...))
 }
 
-// Sync runs one bounded pass: pending reverts, the field-cache refresh, the
-// hk → YouTrack push, and one page of YouTrack → hk activities. In dry-run
-// mode nothing on either side is written.
+func (r *SyncReport) warn(format string, args ...any) {
+	r.Warnings = append(r.Warnings, fmt.Sprintf(format, args...))
+}
+
+// Sync runs one bounded pass: pending reverts, the priority/lane outbox, the
+// field-cache refresh, the hk → YouTrack push, and one page of YouTrack → hk
+// activities. In dry-run mode nothing on either side is written.
 func (s *Service) Sync(ctx context.Context, opts SyncOptions) (SyncReport, error) {
 	opts = opts.withDefaults()
-	report := SyncReport{DryRun: opts.DryRun, Pushed: []PushAction{}, Pulled: []PullAction{}}
+	report := SyncReport{DryRun: opts.DryRun, Outbox: []OutboxAction{}, Pushed: []PushAction{}, Pulled: []PullAction{}}
 	me, err := s.client.Me(ctx)
 	if err != nil {
 		return report, fmt.Errorf("youtrack me: %w", err)
@@ -91,6 +109,7 @@ func (s *Service) Sync(ctx context.Context, opts SyncOptions) (SyncReport, error
 
 	if !opts.DryRun {
 		s.runPendingReverts(ctx, opts.RevertLimit, &report)
+		s.drainOutbox(ctx, opts.OutboxLimit, &report)
 	}
 	s.refreshCache(ctx, opts.RefreshLimit, &report)
 
@@ -101,32 +120,100 @@ func (s *Service) Sync(ctx context.Context, opts SyncOptions) (SyncReport, error
 	return report, nil
 }
 
+// drainOutbox sends the priority and lane writes hk committed to PG. A
+// failure reschedules with backoff; it never undoes the hk write.
+func (s *Service) drainOutbox(ctx context.Context, limit int, report *SyncReport) {
+	items, err := s.store.DueYouTrackOutbox(ctx, limit)
+	if err != nil {
+		report.fail("outbox: %v", err)
+		return
+	}
+	for _, item := range items {
+		action := OutboxAction{TaskID: item.TaskID, Op: item.Op}
+		mirror, ok, err := s.store.GetYouTrackMirror(ctx, item.TaskID)
+		if err != nil {
+			report.fail("outbox task %d: %v", item.TaskID, err)
+			continue
+		}
+		if !ok {
+			_ = s.store.MarkYouTrackOutboxDone(ctx, item.ID)
+			action.Outcome = "unmirrored"
+			report.Outbox = append(report.Outbox, action)
+			continue
+		}
+		var serr error
+		switch item.Op {
+		case store.YouTrackOpPriority:
+			n, perr := strconv.Atoi(strings.TrimSpace(item.Value))
+			if perr != nil {
+				serr = perr
+			} else {
+				serr = s.client.SetPriority(ctx, mirror.IssueID, s.schema.PriorityField, n)
+			}
+		case store.YouTrackOpLane:
+			if e := s.ensureValue(ctx, s.schema.LaneField, item.Value, false); e != nil {
+				serr = e
+			} else {
+				serr = s.client.SetLane(ctx, mirror.IssueID, s.schema.LaneField, item.Value)
+			}
+		default:
+			serr = fmt.Errorf("unknown outbox op %q", item.Op)
+		}
+		if serr != nil {
+			next := s.now().Add(outboxBackoff(item.Attempts + 1))
+			if err := s.store.RescheduleYouTrackOutbox(ctx, item.ID, item.Attempts+1, next, serr.Error()); err != nil {
+				log.Printf("youtrack.outbox_reschedule_failed id=%d err=%q", item.ID, err)
+			}
+			action.Outcome = "retry"
+			report.Outbox = append(report.Outbox, action)
+			report.fail("outbox task %d %s: %v", item.TaskID, item.Op, serr)
+			continue
+		}
+		if err := s.store.MarkYouTrackOutboxDone(ctx, item.ID); err != nil {
+			report.fail("outbox task %d: %v", item.TaskID, err)
+			continue
+		}
+		action.Outcome = "sent"
+		report.Outbox = append(report.Outbox, action)
+	}
+}
+
+func outboxBackoff(attempts int) time.Duration {
+	if attempts < 1 {
+		attempts = 1
+	}
+	if attempts > 9 {
+		attempts = 9
+	}
+	return time.Duration(1<<attempts) * time.Second
+}
+
 func (s *Service) refreshCache(ctx context.Context, limit int, report *SyncReport) {
-	links, err := s.store.RefreshYouTrackFields(ctx, s.ttl, limit)
+	mirrors, err := s.store.RefreshYouTrackFields(ctx, limit)
 	if err != nil {
 		report.fail("cache query: %v", err)
 		return
 	}
-	for _, link := range links {
-		issue, err := s.client.GetIssue(ctx, link.IssueID)
+	for _, mirror := range mirrors {
+		issue, err := s.client.GetIssue(ctx, mirror.IssueID)
 		if err != nil {
-			if merr := s.store.MarkYouTrackFieldCacheStale(ctx, link.TaskID); merr != nil {
-				log.Printf("youtrack.cache_stale_failed task_id=%d err=%q", link.TaskID, merr)
+			if merr := s.store.MarkYouTrackFieldCacheStale(ctx, mirror.TaskID); merr != nil {
+				log.Printf("youtrack.cache_stale_failed task_id=%d err=%q", mirror.TaskID, merr)
 			}
-			report.fail("cache task %d: %v", link.TaskID, err)
+			report.fail("cache task %d: %v", mirror.TaskID, err)
 			continue
 		}
-		fallback := store.Task{ID: link.TaskID}
-		if old, ok, cerr := s.store.GetYouTrackFieldCache(ctx, link.TaskID); cerr != nil {
-			report.fail("cache task %d: %v", link.TaskID, cerr)
+		fallback := store.Task{ID: mirror.TaskID}
+		if old, ok, cerr := s.store.GetYouTrackFieldCache(ctx, mirror.TaskID); cerr != nil {
+			report.fail("cache task %d: %v", mirror.TaskID, cerr)
 			continue
 		} else if ok {
 			fallback.Priority, fallback.Lane = old.Priority, old.Lane
 		}
-		cache := s.cacheFromIssue(link.TaskID, issue, fallback)
+		cache := s.cacheFromIssue(mirror.TaskID, issue, fallback)
 		cache.Stale = false
 		if err := s.store.PutYouTrackFieldCache(ctx, cache); err != nil {
-			report.fail("cache task %d: %v", link.TaskID, err)
+			report.fail("cache task %d: %v", mirror.TaskID, err)
 			continue
 		}
 		report.Refreshed++
@@ -170,50 +257,59 @@ func (s *Service) push(ctx context.Context, opts SyncOptions, report *SyncReport
 
 func (s *Service) pushTask(ctx context.Context, task store.Task, opts SyncOptions, report *SyncReport) (PushAction, error) {
 	action := PushAction{TaskID: task.ID}
-	link, linked, err := s.store.GetYouTrackLink(ctx, task.ID)
+	hkProject := ""
+	if task.Project != nil {
+		hkProject = *task.Project
+	}
+	project, projectID, err := s.projectForTask(ctx, hkProject)
+	if err != nil {
+		if errors.Is(err, ErrProjectMissing) {
+			report.warn("task %d: YouTrack 프로젝트 매핑이 없어 건너뜁니다 (%v)", task.ID, err)
+			action.Action = "skipped"
+			return action, nil
+		}
+		return action, err
+	}
+	mirror, mirrored, err := s.store.GetYouTrackMirror(ctx, task.ID)
 	if err != nil {
 		return action, err
 	}
-	if linked {
-		action.IssueID, action.ReadableID = link.IssueID, link.ReadableID
+	if mirrored {
+		action.IssueID, action.ReadableID = mirror.IssueID, mirror.DisplayRef
 	}
 	cache, cached, err := s.store.GetYouTrackFieldCache(ctx, task.ID)
 	if err != nil {
 		return action, err
 	}
-	priority, lane := task.Priority, task.Lane
+	priority, lane, source := task.Priority, task.Lane, store.YouTrackSourceHK
 	if cached {
-		priority, lane = cache.Priority, cache.Lane
+		priority, lane, source = cache.Priority, cache.Lane, cache.Source
 	}
 
-	needsFields := !linked || link.PushedTaskUpdatedAt == nil || task.UpdatedAt.After(*link.PushedTaskUpdatedAt)
+	needsFields := !mirrored || mirror.SyncedAt == nil || task.UpdatedAt.After(*mirror.SyncedAt)
 	created := false
-	if !linked {
-		existing, found, err := s.client.FindIssueByHKID(ctx, s.schema.Project, s.schema.HKIDField, task.ID)
+	if !mirrored {
+		existing, found, err := s.client.FindIssueByHKID(ctx, s.schema.HKIDField, task.ID)
 		if err != nil {
 			return action, err
 		}
 		if found {
 			action.IssueID, action.ReadableID = existing.ID, existing.IDReadable
 			if !opts.DryRun {
-				link, err = s.store.LinkYouTrackIssue(ctx, task.ID, existing.ID, existing.IDReadable, s.now())
+				mirror, err = s.store.UpsertYouTrackMirror(ctx, store.YouTrackMirrorInput{TaskID: task.ID, IssueID: existing.ID, DisplayRef: existing.IDReadable, URL: s.issueURL(existing.IDReadable), Tenant: s.tenant, Role: "mirror", SyncedAt: s.now()})
 				if err != nil {
 					return action, err
 				}
 			}
-			linked, needsFields = true, true
+			mirrored, needsFields = true, true
 		} else {
 			action.Action = "create"
 			created = true
 			if opts.DryRun {
-				action.ReadableID = s.schema.Project + "-?"
+				action.ReadableID = project.ShortName + "-?"
 				return action, nil
 			}
 			fields, err := s.issueFields(ctx, task, priority, lane)
-			if err != nil {
-				return action, err
-			}
-			projectID, err := s.projectID(ctx)
 			if err != nil {
 				return action, err
 			}
@@ -226,25 +322,44 @@ func (s *Service) pushTask(ctx context.Context, task store.Task, opts SyncOption
 				return action, err
 			}
 			action.IssueID, action.ReadableID = issue.ID, issue.IDReadable
-			link, err = s.store.LinkYouTrackIssue(ctx, task.ID, issue.ID, issue.IDReadable, s.now())
+			mirror, err = s.store.UpsertYouTrackMirror(ctx, store.YouTrackMirrorInput{TaskID: task.ID, IssueID: issue.ID, DisplayRef: issue.IDReadable, URL: s.issueURL(issue.IDReadable), Tenant: s.tenant, Role: "mirror", SyncedAt: s.now()})
 			if err != nil {
 				return action, err
 			}
-			linked = true
+			mirrored = true
 		}
 	}
-	if linked && needsFields && !created {
+	if mirrored && needsFields && !created {
 		action.Action = "update"
 		if !opts.DryRun {
+			// A task that changed project moves with its issue; the display
+			// number changes but the link stays on the stable issue id.
+			current, err := s.client.GetIssue(ctx, mirror.IssueID)
+			if err != nil {
+				return action, err
+			}
+			if current.Project != nil && current.Project.ID != "" && current.Project.ID != projectID {
+				moved, err := s.client.MoveIssue(ctx, mirror.IssueID, projectID)
+				if err != nil {
+					return action, err
+				}
+				action.Action = "move"
+				action.ReadableID = moved.IDReadable
+				if moved.IDReadable != "" {
+					if _, err := s.store.UpsertYouTrackMirror(ctx, store.YouTrackMirrorInput{TaskID: task.ID, IssueID: mirror.IssueID, DisplayRef: moved.IDReadable, URL: s.issueURL(moved.IDReadable), Tenant: s.tenant, Role: mirror.Role, SyncedAt: s.now()}); err != nil {
+						return action, err
+					}
+				}
+			}
 			fields, err := s.issueFields(ctx, task, priority, lane)
 			if err != nil {
 				return action, err
 			}
-			if _, err := s.client.UpdateFields(ctx, link.IssueID, fields); err != nil {
+			if _, err := s.client.UpdateFields(ctx, mirror.IssueID, fields); err != nil {
 				return action, err
 			}
 		}
-	} else if !linked {
+	} else if !mirrored {
 		action.Action = "unchanged"
 	}
 	if action.Action == "" {
@@ -263,13 +378,13 @@ func (s *Service) pushTask(ctx context.Context, task store.Task, opts SyncOption
 		if action.IssueID == "" {
 			return action, fmt.Errorf("no issue to comment on")
 		}
-		mirrored, err := s.client.AddComment(ctx, action.IssueID, comment.Body)
+		mirroredComment, err := s.client.AddComment(ctx, action.IssueID, comment.Body)
 		if err != nil {
 			return action, err
 		}
 		report.Pushed = append(report.Pushed, PushAction{TaskID: task.ID, IssueID: action.IssueID, ReadableID: action.ReadableID, Action: "comment", CommentID: comment.ID})
-		if mirrored.ID != "" {
-			if err := s.store.LinkYouTrackComment(ctx, task.ID, comment.ID, mirrored.ID, s.now()); err != nil {
+		if mirroredComment.ID != "" {
+			if err := s.store.LinkYouTrackComment(ctx, task.ID, comment.ID, mirroredComment.ID, s.now()); err != nil {
 				return action, err
 			}
 		}
@@ -277,14 +392,12 @@ func (s *Service) pushTask(ctx context.Context, task store.Task, opts SyncOption
 	if opts.DryRun {
 		return action, nil
 	}
-	if linked {
-		if err := s.store.MarkYouTrackTaskPushed(ctx, task.ID, task.UpdatedAt); err != nil {
+	if mirrored {
+		if err := s.store.MarkYouTrackTaskSynced(ctx, task.ID, task.UpdatedAt); err != nil {
 			return action, err
 		}
-		if err := s.store.SetYouTrackCachedPriority(ctx, task.ID, priority, s.now()); err != nil {
-			return action, err
-		}
-		if err := s.store.SetYouTrackCachedLane(ctx, task.ID, lane, s.now()); err != nil {
+		cache = store.YouTrackFieldCache{TaskID: task.ID, Priority: priority, Lane: lane, Source: source, FetchedAt: s.now()}
+		if err := s.store.PutYouTrackFieldCache(ctx, cache); err != nil {
 			return action, err
 		}
 	}
@@ -307,15 +420,6 @@ func (s *Service) issueFields(ctx context.Context, task store.Task, priority int
 	}
 	if ok {
 		fields = append(fields, laneField)
-	}
-	if task.Project != nil && *task.Project != "" {
-		f, ok, err := s.enumFieldValue(ctx, s.schema.ProjectField, *task.Project)
-		if err != nil {
-			return nil, err
-		}
-		if ok {
-			fields = append(fields, f)
-		}
 	}
 	if task.Kind != "" {
 		f, ok, err := s.enumFieldValue(ctx, s.schema.KindField, task.Kind)
@@ -355,6 +459,13 @@ func (s *Service) summary(ctx context.Context, task store.Task) (string, error) 
 
 func (s *Service) description(task store.Task) string {
 	return fmt.Sprintf("%s/ui/tasks/%d\n\n%s", strings.TrimRight(s.console, "/"), task.ID, task.Title)
+}
+
+func (s *Service) issueURL(readable string) string {
+	if readable == "" {
+		return ""
+	}
+	return strings.TrimRight(s.client.baseURL, "/") + "/issue/" + readable
 }
 
 func (s *Service) pull(ctx context.Context, opts SyncOptions, me User, report *SyncReport) {
@@ -434,16 +545,13 @@ func (s *Service) mapActivity(ctx context.Context, act Activity, me User) (store
 	if act.Target != nil {
 		in.IssueID = act.Target.ID
 		in.ReadableID = act.Target.IDReadable
-		if in.ReadableID != "" {
-			link, found, err := s.store.FindYouTrackLinkByReadableID(ctx, in.ReadableID)
+		if in.IssueID != "" {
+			mirror, found, err := s.store.FindYouTrackMirrorByIssueID(ctx, in.IssueID)
 			if err != nil {
 				return in, true, err
 			}
 			if found {
-				in.TaskID = link.TaskID
-				if in.IssueID == "" {
-					in.IssueID = link.IssueID
-				}
+				in.TaskID = mirror.TaskID
 			}
 		}
 	}
@@ -516,12 +624,15 @@ func (s *Service) mapActivity(ctx context.Context, act Activity, me User) (store
 		if issue == nil || issue.IDReadable == "" {
 			in.Skip = "새 이슈의 정보를 읽지 못했습니다"
 		} else {
-			newIssue, err := s.newIssue(ctx, issue)
+			newIssue, reason, err := s.newIssue(ctx, issue)
 			if err != nil {
 				return in, true, err
 			}
-			in.NewIssue = newIssue
-			in.TaskID = 0
+			if reason != "" {
+				in.Skip = reason
+			} else {
+				in.NewIssue = newIssue
+			}
 		}
 	}
 	if in.TaskID == 0 && in.NewIssue == nil && in.Skip == "" {
@@ -539,7 +650,29 @@ func (s *Service) mapActivity(ctx context.Context, act Activity, me User) (store
 	return in, true, nil
 }
 
-func (s *Service) newIssue(ctx context.Context, issue *Issue) (*store.YouTrackNewIssue, error) {
+// newIssue maps the operator's issue back to an hk project through the
+// project table. An issue in an unmapped project is skipped, not applied to
+// OTHER silently.
+func (s *Service) newIssue(ctx context.Context, issue *Issue) (*store.YouTrackNewIssue, string, error) {
+	shortName := ""
+	if issue.Project != nil {
+		shortName = issue.Project.ShortName
+	}
+	project := s.project
+	if shortName != "" {
+		mapped, found, err := s.store.YouTrackProjectByShortName(ctx, shortName)
+		if err != nil {
+			return nil, "", err
+		}
+		if !found {
+			return nil, "매핑되지 않은 YouTrack 프로젝트의 새 이슈입니다: " + shortName, nil
+		}
+		if known, err := s.store.TaskProjectExists(ctx, mapped.HKProject); err != nil {
+			return nil, "", err
+		} else if known {
+			project = mapped.HKProject
+		}
+	}
 	lane := s.lane
 	if f, ok := IssueFieldByName(issue.CustomFields, s.schema.LaneField); ok {
 		if v := strings.TrimSpace(f.StringValue()); v != "" {
@@ -552,66 +685,9 @@ func (s *Service) newIssue(ctx context.Context, issue *Issue) (*store.YouTrackNe
 			kind = v
 		}
 	}
-	project := s.project
-	if f, ok := IssueFieldByName(issue.CustomFields, s.schema.ProjectField); ok {
-		if v := strings.TrimSpace(f.StringValue()); v != "" {
-			known, err := s.store.TaskProjectExists(ctx, v)
-			if err != nil {
-				return nil, err
-			}
-			if known {
-				project = v
-			}
-		}
-	}
 	title := strings.TrimSpace(issue.Summary)
 	if title == "" {
 		title = issue.IDReadable
 	}
-	return &store.YouTrackNewIssue{IssueID: issue.ID, ReadableID: issue.IDReadable, Title: title, Lane: lane, Kind: kind, Project: project}, nil
-}
-
-func (s *Service) revert(ctx context.Context, issueID, field, value, refusal string) error {
-	if strings.TrimSpace(issueID) == "" {
-		return fmt.Errorf("no issue id for the revert")
-	}
-	switch field {
-	case "state":
-		state := strings.TrimSpace(value)
-		if state == "" {
-			return nil
-		}
-		label := StateLabel(state)
-		if err := s.ensureValue(ctx, s.schema.StateField, label, StateResolved(state)); err != nil {
-			return err
-		}
-		if err := s.client.SetStateValue(ctx, issueID, s.schema.StateField, label, StateResolved(state)); err != nil {
-			return err
-		}
-	case "priority":
-		n, err := strconv.Atoi(strings.TrimSpace(value))
-		if err != nil {
-			return fmt.Errorf("revert priority %q: %w", value, err)
-		}
-		if err := s.client.SetPriority(ctx, issueID, s.schema.PriorityField, n); err != nil {
-			return err
-		}
-	case "lane":
-		lane := strings.TrimSpace(value)
-		if lane == "" {
-			return nil
-		}
-		if err := s.ensureValue(ctx, s.schema.LaneField, lane, false); err != nil {
-			return err
-		}
-		if err := s.client.SetLane(ctx, issueID, s.schema.LaneField, lane); err != nil {
-			return err
-		}
-	}
-	reason := strings.TrimSpace(refusal)
-	if reason == "" {
-		reason = "hk가 이 변경을 적용하지 않았습니다"
-	}
-	_, err := s.client.AddComment(ctx, issueID, "hk가 거부: "+reason)
-	return err
+	return &store.YouTrackNewIssue{IssueID: issue.ID, ReadableID: issue.IDReadable, Title: title, Lane: lane, Kind: kind, Project: project, Tenant: s.tenant}, "", nil
 }

@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -20,12 +22,18 @@ type Store interface {
 	ListTranslations(ctx context.Context, entity string, sources []store.TranslationSource) ([]store.Translation, error)
 	TaskProjectExists(ctx context.Context, name string) (bool, error)
 
-	GetYouTrackLink(ctx context.Context, taskID int64) (store.YouTrackLink, bool, error)
-	FindYouTrackLinkByReadableID(ctx context.Context, readableID string) (store.YouTrackLink, bool, error)
-	ListYouTrackLinks(ctx context.Context, taskIDs []int64) (map[int64]store.YouTrackLink, error)
-	LinkYouTrackIssue(ctx context.Context, taskID int64, issueID, readableID string, at time.Time) (store.YouTrackLink, error)
-	MarkYouTrackTaskPushed(ctx context.Context, taskID int64, updatedAt time.Time) error
-	TouchYouTrackTaskPushed(ctx context.Context, taskID int64) error
+	GetYouTrackMirror(ctx context.Context, taskID int64) (store.YouTrackMirror, bool, error)
+	FindYouTrackMirrorByIssueID(ctx context.Context, issueID string) (store.YouTrackMirror, bool, error)
+	ListYouTrackMirrors(ctx context.Context, taskIDs []int64) (map[int64]store.YouTrackMirror, error)
+	UpsertYouTrackMirror(ctx context.Context, in store.YouTrackMirrorInput) (store.YouTrackMirror, error)
+	MarkYouTrackTaskSynced(ctx context.Context, taskID int64, at time.Time) error
+	TouchYouTrackTaskSynced(ctx context.Context, taskID int64) error
+
+	ListYouTrackProjects(ctx context.Context) ([]store.YouTrackProject, error)
+	YouTrackProjectFor(ctx context.Context, hkProject string) (store.YouTrackProject, bool, error)
+	YouTrackProjectByShortName(ctx context.Context, shortName string) (store.YouTrackProject, bool, error)
+	PutYouTrackProject(ctx context.Context, p store.YouTrackProject) error
+	SetYouTrackProjectID(ctx context.Context, hkProject, projectID string) error
 
 	GetYouTrackFieldCache(ctx context.Context, taskID int64) (store.YouTrackFieldCache, bool, error)
 	GetYouTrackFieldCaches(ctx context.Context, taskIDs []int64) (map[int64]store.YouTrackFieldCache, error)
@@ -33,7 +41,12 @@ type Store interface {
 	SetYouTrackCachedPriority(ctx context.Context, taskID int64, priority int, at time.Time) error
 	SetYouTrackCachedLane(ctx context.Context, taskID int64, lane string, at time.Time) error
 	MarkYouTrackFieldCacheStale(ctx context.Context, taskID int64) error
-	RefreshYouTrackFields(ctx context.Context, ttl time.Duration, limit int) ([]store.YouTrackLink, error)
+	RefreshYouTrackFields(ctx context.Context, limit int) ([]store.YouTrackMirror, error)
+
+	EnqueueYouTrack(ctx context.Context, taskID int64, op, value string) error
+	DueYouTrackOutbox(ctx context.Context, limit int) ([]store.YouTrackOutboxItem, error)
+	MarkYouTrackOutboxDone(ctx context.Context, id int64) error
+	RescheduleYouTrackOutbox(ctx context.Context, id int64, attempts int, next time.Time, lastError string) error
 
 	DueYouTrackPushTasks(ctx context.Context, limit int) ([]store.Task, error)
 	UnpushedYouTrackComments(ctx context.Context, taskID, afterID int64, limit int) ([]store.TaskComment, error)
@@ -50,7 +63,7 @@ type Store interface {
 // Options tune the service. Zero values get the documented defaults.
 type Options struct {
 	Schema           Schema
-	CacheTTL         time.Duration
+	Tenant           string
 	DefaultHKProject string
 	DefaultLane      string
 	ConsoleBaseURL   string
@@ -59,7 +72,6 @@ type Options struct {
 }
 
 const (
-	defaultCacheTTL       = 60 * time.Second
 	defaultHKProject      = "other"
 	defaultLane           = "operator-desk"
 	defaultConsoleBaseURL = "https://console.robinco.dev"
@@ -70,26 +82,26 @@ type Service struct {
 	store   Store
 	client  *Client
 	schema  Schema
-	ttl     time.Duration
+	tenant  string
 	project string
 	lane    string
 	console string
 	seeds   int
 	now     func() time.Time
 
-	projectMu     sync.Mutex
-	projectCached string
+	projectMu  sync.Mutex
+	projectIDs map[string]string
 
 	fieldMu sync.Mutex
 	fields  map[string]FieldInfo
 }
 
 func NewService(st Store, client *Client, opt Options) *Service {
-	if opt.Schema.Project == "" {
+	if opt.Schema.HKIDField == "" {
 		opt.Schema = DefaultSchema()
 	}
-	if opt.CacheTTL <= 0 {
-		opt.CacheTTL = defaultCacheTTL
+	if opt.Tenant == "" {
+		opt.Tenant = tenantFromClient(client)
 	}
 	if opt.DefaultHKProject == "" {
 		opt.DefaultHKProject = defaultHKProject
@@ -107,24 +119,37 @@ func NewService(st Store, client *Client, opt Options) *Service {
 		opt.Now = func() time.Time { return time.Now().UTC() }
 	}
 	return &Service{
-		store:   st,
-		client:  client,
-		schema:  opt.Schema,
-		ttl:     opt.CacheTTL,
-		project: opt.DefaultHKProject,
-		lane:    opt.DefaultLane,
-		console: opt.ConsoleBaseURL,
-		seeds:   opt.SeedLimit,
-		now:     opt.Now,
-		fields:  map[string]FieldInfo{},
+		store:      st,
+		client:     client,
+		schema:     opt.Schema,
+		tenant:     opt.Tenant,
+		project:    opt.DefaultHKProject,
+		lane:       opt.DefaultLane,
+		console:    opt.ConsoleBaseURL,
+		seeds:      opt.SeedLimit,
+		now:        opt.Now,
+		projectIDs: map[string]string{},
+		fields:     map[string]FieldInfo{},
 	}
 }
 
-func (s *Service) Schema() Schema { return s.schema }
+func tenantFromClient(c *Client) string {
+	if c == nil {
+		return ""
+	}
+	u, err := url.Parse(c.baseURL)
+	if err != nil || u.Host == "" {
+		return c.baseURL
+	}
+	return u.Host
+}
 
-// Overlay replaces priority and lane on linked tasks with the cached
-// YouTrack-owned values and marks where they came from. An unlinked task is
-// left exactly as it was.
+func (s *Service) Schema() Schema { return s.schema }
+func (s *Service) Tenant() string { return s.tenant }
+
+// Overlay replaces priority and lane on mirrored tasks with the cached values
+// and says where they came from. An unmirrored task is left exactly as it
+// was. The cache is refreshed by the sync; a read only seeds a missing row.
 func (s *Service) Overlay(ctx context.Context, tasks []store.Task) {
 	if s == nil || s.client == nil || len(tasks) == 0 {
 		return
@@ -133,12 +158,12 @@ func (s *Service) Overlay(ctx context.Context, tasks []store.Task) {
 	for _, task := range tasks {
 		ids = append(ids, task.ID)
 	}
-	links, err := s.store.ListYouTrackLinks(ctx, ids)
+	mirrors, err := s.store.ListYouTrackMirrors(ctx, ids)
 	if err != nil {
-		log.Printf("youtrack.overlay_links_failed err=%q", err)
+		log.Printf("youtrack.overlay_mirrors_failed err=%q", err)
 		return
 	}
-	if len(links) == 0 {
+	if len(mirrors) == 0 {
 		return
 	}
 	caches, err := s.store.GetYouTrackFieldCaches(ctx, ids)
@@ -148,8 +173,8 @@ func (s *Service) Overlay(ctx context.Context, tasks []store.Task) {
 	}
 	seeds := s.seeds
 	for i := range tasks {
-		link, linked := links[tasks[i].ID]
-		if !linked {
+		mirror, mirrored := mirrors[tasks[i].ID]
+		if !mirrored {
 			continue
 		}
 		cache, cached := caches[tasks[i].ID]
@@ -158,26 +183,27 @@ func (s *Service) Overlay(ctx context.Context, tasks []store.Task) {
 				continue
 			}
 			seeds--
-			cache, _ = s.fetchCache(ctx, link, tasks[i])
+			cache, _ = s.fetchCache(ctx, mirror, tasks[i])
 			if cache.TaskID == 0 {
 				continue
 			}
 		}
 		tasks[i].Priority = cache.Priority
 		tasks[i].Lane = cache.Lane
-		tasks[i].PrioritySource = "youtrack"
-		tasks[i].LaneSource = "youtrack"
+		tasks[i].PrioritySource = cache.Source
+		tasks[i].LaneSource = cache.Source
+		at := cache.FetchedAt
+		tasks[i].ValuesFetchedAt = &at
 		tasks[i].Stale = cache.Stale
 	}
 }
 
-func (s *Service) fetchCache(ctx context.Context, link store.YouTrackLink, task store.Task) (store.YouTrackFieldCache, error) {
-	issue, err := s.client.GetIssue(ctx, link.IssueID)
+func (s *Service) fetchCache(ctx context.Context, mirror store.YouTrackMirror, task store.Task) (store.YouTrackFieldCache, error) {
+	issue, err := s.client.GetIssue(ctx, mirror.IssueID)
 	if err != nil {
-		// Keep the last known value and say it is stale. On the very first
-		// read there is no YouTrack value yet, so the task's own columns are
-		// the best last-known value.
-		cache := store.YouTrackFieldCache{TaskID: task.ID, Priority: task.Priority, Lane: task.Lane, FetchedAt: s.now(), Stale: true}
+		// PG is the execution value. Keep it as the last known value and say
+		// the YouTrack read is stale.
+		cache := store.YouTrackFieldCache{TaskID: task.ID, Priority: task.Priority, Lane: task.Lane, Source: store.YouTrackSourceHK, FetchedAt: s.now(), Stale: true}
 		if perr := s.store.PutYouTrackFieldCache(ctx, cache); perr != nil {
 			log.Printf("youtrack.cache_write_failed task_id=%d err=%q", task.ID, perr)
 		}
@@ -202,96 +228,89 @@ func (s *Service) cacheFromIssue(taskID int64, issue Issue, fallback store.Task)
 			lane = v
 		}
 	}
-	return store.YouTrackFieldCache{TaskID: taskID, Priority: priority, Lane: lane, FetchedAt: s.now()}
+	return store.YouTrackFieldCache{TaskID: taskID, Priority: priority, Lane: lane, Source: store.YouTrackSourceYouTrack, FetchedAt: s.now()}
 }
 
-// PreparePriority writes an hk priority change to YouTrack first. An
-// unlinked task is untouched, so its behaviour is exactly what it was.
-func (s *Service) PreparePriority(ctx context.Context, taskID int64, priority int) error {
-	if s == nil || s.client == nil {
-		return nil
-	}
-	link, ok, err := s.store.GetYouTrackLink(ctx, taskID)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return nil
-	}
-	if err := s.client.SetPriority(ctx, link.IssueID, s.schema.PriorityField, priority); err != nil {
-		return fmt.Errorf("%w: %v", ErrUnavailable, err)
-	}
-	return nil
-}
-
-// CachePriority records an hk-originated priority write on both the cache and
-// the push watermark. Call it only after the store write succeeded.
-func (s *Service) CachePriority(ctx context.Context, taskID int64, priority int) {
+// RecordPriority runs after the PG write committed: it queues the YouTrack
+// export and updates the served cache. A failure here never fails the hk
+// write, and the next push catches the same change.
+func (s *Service) RecordPriority(ctx context.Context, taskID int64, priority int) {
 	if s == nil {
 		return
+	}
+	if _, ok, err := s.store.GetYouTrackMirror(ctx, taskID); err != nil || !ok {
+		return
+	}
+	if err := s.store.EnqueueYouTrack(ctx, taskID, store.YouTrackOpPriority, strconv.Itoa(priority)); err != nil {
+		log.Printf("youtrack.outbox_priority_failed task_id=%d err=%q", taskID, err)
 	}
 	if err := s.store.SetYouTrackCachedPriority(ctx, taskID, priority, s.now()); err != nil {
 		log.Printf("youtrack.cache_priority_failed task_id=%d err=%q", taskID, err)
-		return
-	}
-	if err := s.store.TouchYouTrackTaskPushed(ctx, taskID); err != nil {
-		log.Printf("youtrack.touch_pushed_failed task_id=%d err=%q", taskID, err)
 	}
 }
 
-// PrepareLane writes an hk lane change to YouTrack first, adding the lane to
-// the enum when the operator has not used it there yet.
-func (s *Service) PrepareLane(ctx context.Context, taskID int64, lane string) error {
-	if s == nil || s.client == nil {
-		return nil
-	}
-	link, ok, err := s.store.GetYouTrackLink(ctx, taskID)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return nil
-	}
-	if err := s.ensureValue(ctx, s.schema.LaneField, lane, false); err != nil {
-		return fmt.Errorf("%w: %v", ErrUnavailable, err)
-	}
-	if err := s.client.SetLane(ctx, link.IssueID, s.schema.LaneField, lane); err != nil {
-		return fmt.Errorf("%w: %v", ErrUnavailable, err)
-	}
-	return nil
-}
-
-func (s *Service) CacheLane(ctx context.Context, taskID int64, lane string) {
+// RecordLane is RecordPriority for a lane change.
+func (s *Service) RecordLane(ctx context.Context, taskID int64, lane string) {
 	if s == nil {
 		return
 	}
-	if err := s.store.SetYouTrackCachedLane(ctx, taskID, lane, s.now()); err != nil {
-		log.Printf("youtrack.cache_lane_failed task_id=%d err=%q", taskID, err)
+	if _, ok, err := s.store.GetYouTrackMirror(ctx, taskID); err != nil || !ok {
 		return
 	}
-	if err := s.store.TouchYouTrackTaskPushed(ctx, taskID); err != nil {
-		log.Printf("youtrack.touch_pushed_failed task_id=%d err=%q", taskID, err)
+	if err := s.store.EnqueueYouTrack(ctx, taskID, store.YouTrackOpLane, lane); err != nil {
+		log.Printf("youtrack.outbox_lane_failed task_id=%d err=%q", taskID, err)
+	}
+	if err := s.store.SetYouTrackCachedLane(ctx, taskID, lane, s.now()); err != nil {
+		log.Printf("youtrack.cache_lane_failed task_id=%d err=%q", taskID, err)
 	}
 }
 
-func (s *Service) projectID(ctx context.Context) (string, error) {
+// projectForTask resolves the YouTrack project for an hk project. An unmapped
+// hk project uses OTHER; a missing YouTrack project is an error the push
+// reports as a warning (the sync never creates projects).
+func (s *Service) projectForTask(ctx context.Context, hkProject string) (store.YouTrackProject, string, error) {
+	hkProject = strings.TrimSpace(hkProject)
+	if hkProject == "" {
+		hkProject = s.project
+	}
+	p, found, err := s.store.YouTrackProjectFor(ctx, hkProject)
+	if err != nil {
+		return store.YouTrackProject{}, "", err
+	}
+	if !found {
+		return store.YouTrackProject{}, "", ErrProjectMissing
+	}
+	id, err := s.resolveProjectID(ctx, p)
+	if err != nil {
+		return store.YouTrackProject{}, "", err
+	}
+	return p, id, nil
+}
+
+func (s *Service) resolveProjectID(ctx context.Context, p store.YouTrackProject) (string, error) {
+	if p.ProjectID != "" {
+		return p.ProjectID, nil
+	}
 	s.projectMu.Lock()
 	defer s.projectMu.Unlock()
-	if s.projectCached != "" {
-		return s.projectCached, nil
+	if id := s.projectIDs[p.HKProject]; id != "" {
+		return id, nil
 	}
-	id, err := s.client.ProjectID(ctx, s.schema.Project)
+	id, err := s.client.ProjectID(ctx, p.ShortName)
 	if err != nil {
 		return "", err
 	}
-	s.projectCached = id
+	s.projectIDs[p.HKProject] = id
+	if err := s.store.SetYouTrackProjectID(ctx, p.HKProject, id); err != nil {
+		log.Printf("youtrack.project_id_store_failed hk_project=%q err=%q", p.HKProject, err)
+	}
 	return id, nil
 }
 
 // ensureValue makes a state or enum value exist before a write. A value that
 // is already in the bundle costs one cached lookup.
 func (s *Service) ensureValue(ctx context.Context, field, value string, resolved bool) error {
-	value = trim(value)
+	value = strings.TrimSpace(value)
 	if value == "" {
 		return nil
 	}
@@ -303,11 +322,11 @@ func (s *Service) ensureValue(ctx context.Context, field, value string, resolved
 			return nil
 		}
 	} else {
-		projectID, err := s.projectID(ctx)
+		project, _, err := s.projectForTask(ctx, s.project)
 		if err != nil {
 			return err
 		}
-		info, err = s.client.ProjectFieldValues(ctx, projectID, field)
+		info, err = s.client.ProjectFieldValues(ctx, project.ProjectID, field)
 		if err != nil {
 			return err
 		}
@@ -318,11 +337,11 @@ func (s *Service) ensureValue(ctx context.Context, field, value string, resolved
 		if IsTemporary(err) {
 			return err
 		}
-		projectID, perr := s.projectID(ctx)
+		project, _, perr := s.projectForTask(ctx, s.project)
 		if perr != nil {
 			return err
 		}
-		fresh, ferr := s.client.ProjectFieldValues(ctx, projectID, field)
+		fresh, ferr := s.client.ProjectFieldValues(ctx, project.ProjectID, field)
 		if ferr != nil {
 			return err
 		}
@@ -349,17 +368,57 @@ func (s *Service) stateFieldValue(ctx context.Context, state string) (CustomFiel
 }
 
 func (s *Service) enumFieldValue(ctx context.Context, field, value string) (CustomField, bool, error) {
-	value = trim(value)
+	value = strings.TrimSpace(value)
 	if value == "" {
 		return CustomField{}, false, nil
 	}
 	if err := s.ensureValue(ctx, field, value, false); err != nil {
 		return CustomField{}, false, err
 	}
-	if field == s.schema.StateField {
-		return StateField(field, value, false), true, nil
-	}
 	return EnumField(field, value), true, nil
 }
 
-func trim(v string) string { return strings.TrimSpace(v) }
+func (s *Service) revert(ctx context.Context, issueID, field, value, refusal string) error {
+	if strings.TrimSpace(issueID) == "" {
+		return fmt.Errorf("no issue id for the revert")
+	}
+	switch field {
+	case "state":
+		state := strings.TrimSpace(value)
+		if state == "" {
+			return nil
+		}
+		label := StateLabel(state)
+		if err := s.ensureValue(ctx, s.schema.StateField, label, StateResolved(state)); err != nil {
+			return err
+		}
+		if err := s.client.SetStateValue(ctx, issueID, s.schema.StateField, label, StateResolved(state)); err != nil {
+			return err
+		}
+	case "priority":
+		n, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil {
+			return fmt.Errorf("revert priority %q: %w", value, err)
+		}
+		if err := s.client.SetPriority(ctx, issueID, s.schema.PriorityField, n); err != nil {
+			return err
+		}
+	case "lane":
+		lane := strings.TrimSpace(value)
+		if lane == "" {
+			return nil
+		}
+		if err := s.ensureValue(ctx, s.schema.LaneField, lane, false); err != nil {
+			return err
+		}
+		if err := s.client.SetLane(ctx, issueID, s.schema.LaneField, lane); err != nil {
+			return err
+		}
+	}
+	reason := strings.TrimSpace(refusal)
+	if reason == "" {
+		reason = "hk가 이 변경을 적용하지 않았습니다"
+	}
+	_, err := s.client.AddComment(ctx, issueID, "hk가 거부: "+reason)
+	return err
+}

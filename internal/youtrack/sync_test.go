@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"log"
 	"strconv"
 	"strings"
@@ -17,7 +16,7 @@ import (
 func TestSyncPushCreatesIssueWithKoreanSummaryAndComments(t *testing.T) {
 	fs := newFakeStore()
 	yt := newFakeYouTrack()
-	task := fs.addTask("handoffkeep", "English title", store.StateBacklog, 3)
+	task := fs.addTask("handoffkeep", "handoffkeep", "English title", store.StateBacklog, 3)
 	fs.translations[task.ID] = store.Translation{Entity: "task", EntityID: strconv.FormatInt(task.ID, 10), Field: "title", Lang: "ko", Text: "한국어 제목", Translator: "test"}
 	fs.comments[task.ID] = []store.TaskComment{{ID: 1, TaskID: task.ID, Body: "첫 코멘트", Author: "worker", CreatedAt: time.Now().UTC()}}
 	svc := newTestService(t, yt, fs)
@@ -36,6 +35,9 @@ func TestSyncPushCreatesIssueWithKoreanSummaryAndComments(t *testing.T) {
 	if created.Summary != "한국어 제목" {
 		t.Fatalf("summary=%q", created.Summary)
 	}
+	if created.Project == nil || created.Project.ShortName != "HK" {
+		t.Fatalf("project=%+v", created.Project)
+	}
 	if !strings.HasPrefix(created.Description, "https://console.robinco.dev/ui/tasks/"+strconv.FormatInt(task.ID, 10)+"\n\n") {
 		t.Fatalf("description=%q", created.Description)
 	}
@@ -45,21 +47,21 @@ func TestSyncPushCreatesIssueWithKoreanSummaryAndComments(t *testing.T) {
 	if len(yt.comments) != 1 || yt.comments[0] != "첫 코멘트" {
 		t.Fatalf("comments=%v", yt.comments)
 	}
-	link, ok := fs.links[task.ID]
-	if !ok || link.ReadableID != "HK-1" {
-		t.Fatalf("link=%+v ok=%v", link, ok)
+	mirror, ok := fs.mirrors[task.ID]
+	if !ok || mirror.DisplayRef != "HK-1" || mirror.Role != "mirror" {
+		t.Fatalf("mirror=%+v ok=%v", mirror, ok)
 	}
 	if !fs.pushed[task.ID] {
-		t.Fatal("task was not marked pushed")
+		t.Fatal("task was not marked synced")
 	}
 }
 
 func TestSyncSkipsBotActivity(t *testing.T) {
 	fs := newFakeStore()
 	yt := newFakeYouTrack()
-	task := fs.addTask("handoffkeep", "bot target", store.StateBacklog, 0)
-	fs.link(task.ID, "9-1", "HK-1")
-	activity := stateActivity("a-bot", "HK-1", "대기", "종료됨")
+	task := fs.addTask("handoffkeep", "handoffkeep", "bot target", store.StateBacklog, 0)
+	mirrorIssue(fs, yt, task.ID, "9-1", "HK-1")
+	activity := stateActivity("a-bot", "9-1", "HK-1", "종료됨")
 	activity.Author = &User{ID: "bot-id", Login: "hk-bot"}
 	yt.activities = []Activity{activity}
 	yt.cursor = "c1"
@@ -80,8 +82,8 @@ func TestSyncSkipsBotActivity(t *testing.T) {
 func TestSyncAppliesStatePriorityLaneAndComment(t *testing.T) {
 	fs := newFakeStore()
 	yt := newFakeYouTrack()
-	task := fs.addTask("handoffkeep", "apply target", store.StateBacklog, 0)
-	fs.link(task.ID, "9-7", "HK-7")
+	task := fs.addTask("handoffkeep", "handoffkeep", "apply target", store.StateBacklog, 0)
+	mirrorIssue(fs, yt, task.ID, "9-7", "HK-7")
 	yt.activities = []Activity{{
 		ID: "a-multi", Author: operator(), Target: &Issue{ID: "9-7", IDReadable: "HK-7"},
 		Categories: []ActivityCategory{
@@ -112,9 +114,9 @@ func TestSyncAppliesStatePriorityLaneAndComment(t *testing.T) {
 func TestSyncRefusalRevertsAndPostsKoreanComment(t *testing.T) {
 	fs := newFakeStore()
 	yt := newFakeYouTrack()
-	task := fs.addTask("handoffkeep", "refusal target", store.StateBacklog, 0)
-	fs.link(task.ID, "9-8", "HK-8")
-	yt.activities = []Activity{stateActivity("a-refuse", "HK-8", "대기", "개발 중")}
+	task := fs.addTask("handoffkeep", "handoffkeep", "refusal target", store.StateBacklog, 0)
+	mirrorIssue(fs, yt, task.ID, "9-8", "HK-8")
+	yt.activities = []Activity{stateActivity("a-refuse", "9-8", "HK-8", "개발 중")}
 	svc := newTestService(t, yt, fs)
 
 	report, err := svc.Sync(context.Background(), SyncOptions{})
@@ -148,8 +150,8 @@ func TestSyncRefusalRevertsAndPostsKoreanComment(t *testing.T) {
 func TestSyncSkipsDecisionAnswersAndInstructions(t *testing.T) {
 	fs := newFakeStore()
 	yt := newFakeYouTrack()
-	task := fs.addTask("handoffkeep", "comment target", store.StateBacklog, 0)
-	fs.link(task.ID, "9-9", "HK-9")
+	task := fs.addTask("handoffkeep", "handoffkeep", "comment target", store.StateBacklog, 0)
+	mirrorIssue(fs, yt, task.ID, "9-9", "HK-9")
 	comment := func(id, text string) Activity {
 		return Activity{
 			ID: id, Author: operator(), Target: &Issue{ID: "9-9", IDReadable: "HK-9"},
@@ -182,10 +184,9 @@ func TestSyncCreatesTaskForOperatorIssue(t *testing.T) {
 	yt.activities = []Activity{{
 		ID: "a-new", Author: operator(),
 		Categories: []ActivityCategory{{Type: "IssueCreatedCategory"}},
-		Target: &Issue{ID: "9-77", IDReadable: "HK-77", Summary: "운영자 새 이슈", CustomFields: []IssueField{
+		Target: &Issue{ID: "9-77", IDReadable: "HK-77", Summary: "운영자 새 이슈", Project: &ProjectRef{ID: "0-1", ShortName: "HK"}, CustomFields: []IssueField{
 			{Name: "레인", Value: json.RawMessage(`{"name":"operator-desk"}`)},
 			{Name: "종류", Value: json.RawMessage(`{"name":"fix"}`)},
-			{Name: "hk 프로젝트", Value: json.RawMessage(`{"name":"handoffkeep"}`)},
 		}},
 	}}
 	svc := newTestService(t, yt, fs)
@@ -203,19 +204,19 @@ func TestSyncCreatesTaskForOperatorIssue(t *testing.T) {
 			created = task
 		}
 	}
-	if created.ID == 0 || created.State != store.StateTriage || created.Lane != "operator-desk" || created.Kind != "fix" {
+	if created.ID == 0 || created.State != store.StateTriage || created.Lane != "operator-desk" || created.Kind != "fix" || created.Project == nil || *created.Project != "handoffkeep" {
 		t.Fatalf("created=%+v", created)
 	}
-	if fs.links[created.ID].ReadableID != "HK-77" {
-		t.Fatalf("link=%+v", fs.links[created.ID])
+	if fs.mirrors[created.ID].DisplayRef != "HK-77" {
+		t.Fatalf("mirror=%+v", fs.mirrors[created.ID])
 	}
 }
 
 func TestSyncReplayAppliesOnce(t *testing.T) {
 	fs := newFakeStore()
 	yt := newFakeYouTrack()
-	task := fs.addTask("handoffkeep", "replay target", store.StateBacklog, 0)
-	fs.link(task.ID, "9-10", "HK-10")
+	task := fs.addTask("handoffkeep", "handoffkeep", "replay target", store.StateBacklog, 0)
+	mirrorIssue(fs, yt, task.ID, "9-10", "HK-10")
 	yt.activities = []Activity{{
 		ID: "a-priority", Author: operator(), Target: &Issue{ID: "9-10", IDReadable: "HK-10"},
 		Categories: []ActivityCategory{{Type: "CustomFieldCategory", Field: &ActivityField{Name: "hk 우선순위"}, Added: []json.RawMessage{json.RawMessage(`9`)}}},
@@ -244,9 +245,9 @@ func TestSyncReplayAppliesOnce(t *testing.T) {
 func TestDryRunWritesNothing(t *testing.T) {
 	fs := newFakeStore()
 	yt := newFakeYouTrack()
-	task := fs.addTask("handoffkeep", "dry target", store.StateBacklog, 2)
-	fs.link(task.ID, "9-11", "HK-11")
-	yt.activities = []Activity{stateActivity("a-dry", "HK-11", "대기", "종료됨")}
+	task := fs.addTask("handoffkeep", "handoffkeep", "dry target", store.StateBacklog, 2)
+	mirrorIssue(fs, yt, task.ID, "9-11", "HK-11")
+	yt.activities = []Activity{stateActivity("a-dry", "9-11", "HK-11", "종료됨")}
 	svc := newTestService(t, yt, fs)
 
 	report, err := svc.Sync(context.Background(), SyncOptions{DryRun: true})
@@ -266,95 +267,160 @@ func TestDryRunWritesNothing(t *testing.T) {
 	}
 }
 
-func TestOverlayUsesCacheAndLeavesUnlinkedTasksAlone(t *testing.T) {
+func TestOverlayUsesCacheAndLeavesUnmirroredTasksAlone(t *testing.T) {
 	fs := newFakeStore()
 	yt := newFakeYouTrack()
-	linked := fs.addTask("handoffkeep", "linked", store.StateBacklog, 1)
-	unlinked := fs.addTask("handoffkeep", "unlinked", store.StateBacklog, 2)
-	fs.link(linked.ID, "9-20", "HK-20")
-	fs.caches[linked.ID] = store.YouTrackFieldCache{TaskID: linked.ID, Priority: 7, Lane: "rstack", FetchedAt: time.Now().UTC()}
-	fs.caches[unlinked.ID] = store.YouTrackFieldCache{TaskID: unlinked.ID, Priority: 8, Lane: "nope", FetchedAt: time.Now().UTC()}
+	mirrored := fs.addTask("handoffkeep", "handoffkeep", "mirrored", store.StateBacklog, 1)
+	unmirrored := fs.addTask("handoffkeep", "handoffkeep", "unmirrored", store.StateBacklog, 2)
+	mirrorIssue(fs, yt, mirrored.ID, "9-20", "HK-20")
+	now := time.Now().UTC()
+	fs.caches[mirrored.ID] = store.YouTrackFieldCache{TaskID: mirrored.ID, Priority: 7, Lane: "rstack", Source: store.YouTrackSourceYouTrack, FetchedAt: now}
+	fs.caches[unmirrored.ID] = store.YouTrackFieldCache{TaskID: unmirrored.ID, Priority: 8, Lane: "nope", Source: store.YouTrackSourceYouTrack, FetchedAt: now}
 	svc := newTestService(t, yt, fs)
 
-	tasks := []store.Task{fs.tasks[linked.ID], fs.tasks[unlinked.ID]}
+	tasks := []store.Task{fs.tasks[mirrored.ID], fs.tasks[unmirrored.ID]}
 	svc.Overlay(context.Background(), tasks)
-	if tasks[0].Priority != 7 || tasks[0].Lane != "rstack" || tasks[0].PrioritySource != "youtrack" || tasks[0].LaneSource != "youtrack" || tasks[0].Stale {
-		t.Fatalf("linked overlay=%+v", tasks[0])
+	if tasks[0].Priority != 7 || tasks[0].Lane != "rstack" || tasks[0].PrioritySource != store.YouTrackSourceYouTrack || tasks[0].LaneSource != store.YouTrackSourceYouTrack || tasks[0].Stale || tasks[0].ValuesFetchedAt == nil {
+		t.Fatalf("mirrored overlay=%+v", tasks[0])
 	}
 	if tasks[1].Priority != 2 || tasks[1].Lane != "handoffkeep" || tasks[1].PrioritySource != "" || tasks[1].Stale {
-		t.Fatalf("unlinked changed=%+v", tasks[1])
+		t.Fatalf("unmirrored changed=%+v", tasks[1])
 	}
 }
 
 func TestOverlayMarksStaleOnFetchError(t *testing.T) {
 	fs := newFakeStore()
 	yt := newFakeYouTrack()
-	task := fs.addTask("handoffkeep", "stale target", store.StateBacklog, 4)
-	fs.link(task.ID, "9-30", "HK-30")
+	task := fs.addTask("handoffkeep", "handoffkeep", "stale target", store.StateBacklog, 4)
+	fs.mirror(task.ID, "9-30", "HK-30")
 	svc := newTestService(t, yt, fs)
-	yt.failUpdate = true
 
 	tasks := []store.Task{fs.tasks[task.ID]}
 	svc.Overlay(context.Background(), tasks)
-	if tasks[0].Priority != 4 || !tasks[0].Stale || tasks[0].PrioritySource != "youtrack" {
+	if tasks[0].Priority != 4 || !tasks[0].Stale || tasks[0].PrioritySource != store.YouTrackSourceHK {
 		t.Fatalf("overlay=%+v", tasks[0])
 	}
 }
 
-func TestPreparePriorityAndLaneWriteThrough(t *testing.T) {
+func TestRecordPriorityAndLaneQueueOutbox(t *testing.T) {
 	fs := newFakeStore()
 	yt := newFakeYouTrack()
-	linked := fs.addTask("handoffkeep", "linked", store.StateBacklog, 1)
-	unlinked := fs.addTask("handoffkeep", "unlinked", store.StateBacklog, 2)
-	fs.link(linked.ID, "9-40", "HK-40")
+	mirrored := fs.addTask("handoffkeep", "handoffkeep", "mirrored", store.StateBacklog, 1)
+	unmirrored := fs.addTask("handoffkeep", "handoffkeep", "unmirrored", store.StateBacklog, 2)
+	mirrorIssue(fs, yt, mirrored.ID, "9-40", "HK-40")
 	svc := newTestService(t, yt, fs)
 	ctx := context.Background()
 
-	if err := svc.PreparePriority(ctx, unlinked.ID, 6); err != nil {
-		t.Fatal(err)
+	svc.RecordPriority(ctx, unmirrored.ID, 6)
+	if len(fs.outbox) != 0 {
+		t.Fatalf("an unmirrored task queued an outbox row: %+v", fs.outbox)
 	}
-	if len(yt.issueUpdates) != 0 {
-		t.Fatalf("an unlinked task wrote YouTrack: %v", yt.issueUpdates)
+	svc.RecordPriority(ctx, mirrored.ID, 6)
+	svc.RecordLane(ctx, mirrored.ID, "ops")
+	if len(fs.outbox) != 2 {
+		t.Fatalf("outbox=%+v", fs.outbox)
 	}
-	if err := svc.PreparePriority(ctx, linked.ID, 6); err != nil {
-		t.Fatal(err)
-	}
-	if len(yt.issueUpdates) != 1 {
-		t.Fatalf("updates=%v", yt.issueUpdates)
-	}
-	body, _ := json.Marshal(yt.issueUpdates[0])
-	if !strings.Contains(string(body), "hk 우선순위") || !strings.Contains(string(body), "6") {
-		t.Fatalf("priority body=%s", body)
+	if cache := fs.caches[mirrored.ID]; cache.Priority != 6 || cache.Lane != "ops" || cache.Source != store.YouTrackSourceHK {
+		t.Fatalf("cache=%+v", cache)
 	}
 
-	if err := svc.PrepareLane(ctx, linked.ID, "ops"); err != nil {
+	// The next sync drains the outbox. YouTrack receives both writes.
+	report, err := svc.Sync(ctx, SyncOptions{})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if len(yt.bundleAdds) != 1 || yt.bundleAdds[0] != "ops" {
-		t.Fatalf("bundle adds=%v", yt.bundleAdds)
+	if len(report.Errors) != 0 {
+		t.Fatalf("errors=%v", report.Errors)
 	}
 	if len(yt.issueUpdates) != 2 {
-		t.Fatalf("updates=%v", yt.issueUpdates)
+		t.Fatalf("issue updates=%v", yt.issueUpdates)
+	}
+	if due, _ := fs.DueYouTrackOutbox(ctx, 10); len(due) != 0 {
+		t.Fatalf("outbox not drained: %+v", due)
 	}
 }
 
-func TestPreparePriorityFailureReturnsUnavailableAndWritesNothingLocal(t *testing.T) {
+func TestOutboxFailureDoesNotChangeHK(t *testing.T) {
 	fs := newFakeStore()
 	yt := newFakeYouTrack()
-	task := fs.addTask("handoffkeep", "write target", store.StateBacklog, 3)
-	fs.link(task.ID, "9-50", "HK-50")
+	task := fs.addTask("handoffkeep", "handoffkeep", "write target", store.StateBacklog, 3)
+	mirrorIssue(fs, yt, task.ID, "9-50", "HK-50")
 	svc := newTestService(t, yt, fs)
+	ctx := context.Background()
 	yt.failUpdate = true
 
-	err := svc.PreparePriority(context.Background(), task.ID, 9)
-	if !errors.Is(err, ErrUnavailable) {
-		t.Fatalf("err=%v", err)
+	svc.RecordPriority(ctx, task.ID, 9)
+	if fs.tasks[task.ID].Priority != 3 {
+		t.Fatalf("RecordPriority changed the PG value: %d", fs.tasks[task.ID].Priority)
+	}
+	report, err := svc.Sync(ctx, SyncOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Errors) == 0 {
+		t.Fatal("a YouTrack outage was not reported")
 	}
 	if fs.tasks[task.ID].Priority != 3 {
 		t.Fatalf("hk priority changed on a YouTrack failure: %d", fs.tasks[task.ID].Priority)
 	}
-	if c, ok := fs.caches[task.ID]; ok && c.Priority != 0 && c.Priority != 3 {
-		t.Fatalf("cache changed on a YouTrack failure: %+v", c)
+	var retried bool
+	for _, item := range fs.outbox {
+		if item.Attempts > 0 {
+			retried = true
+		}
+	}
+	if !retried {
+		t.Fatalf("outbox was not rescheduled: %+v", fs.outbox)
+	}
+}
+
+func TestSyncUsesMappedProjectsAndMovesOnChange(t *testing.T) {
+	fs := newFakeStore()
+	yt := newFakeYouTrack()
+	task := fs.addTask("handoffkeep", "handoffkeep", "project target", store.StateBacklog, 0)
+	svc := newTestService(t, yt, fs)
+
+	if _, err := svc.Sync(context.Background(), SyncOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	created := yt.issues["1-1"]
+	if created.Project == nil || created.Project.ShortName != "HK" {
+		t.Fatalf("created project=%+v", created.Project)
+	}
+
+	// Moving the hk project moves the issue; the stable id keeps the link.
+	moved := fs.tasks[task.ID]
+	project := "panewire"
+	moved.Project = &project
+	moved.UpdatedAt = moved.UpdatedAt.Add(time.Hour)
+	fs.tasks[task.ID] = moved
+	report, err := svc.Sync(context.Background(), SyncOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Errors) != 0 {
+		t.Fatalf("errors=%v", report.Errors)
+	}
+	if yt.issues["1-1"].Project == nil || yt.issues["1-1"].Project.ShortName != "PW" {
+		t.Fatalf("issue project=%+v", yt.issues["1-1"].Project)
+	}
+	if got := fs.mirrors[task.ID]; got.IssueID != "1-1" || got.DisplayRef != "PW-1" {
+		t.Fatalf("mirror=%+v", got)
+	}
+
+	// An unmapped hk project goes to OTHER.
+	other := fs.addTask("unmapped-project", "handoffkeep", "other target", store.StateBacklog, 0)
+	if _, err := svc.Sync(context.Background(), SyncOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	var otherIssue Issue
+	for _, issue := range yt.issues {
+		if issue.Summary == "other target" {
+			otherIssue = issue
+		}
+	}
+	if otherIssue.ID == "" || otherIssue.Project == nil || otherIssue.Project.ShortName != "OTHER" {
+		t.Fatalf("other issue=%+v (task %d)", otherIssue, other.ID)
 	}
 }
 
@@ -366,8 +432,8 @@ func TestServiceLogsNeverContainToken(t *testing.T) {
 
 	fs := newFakeStore()
 	yt := newFakeYouTrack()
-	task := fs.addTask("handoffkeep", "log target", store.StateBacklog, 0)
-	fs.link(task.ID, "9-60", "HK-60")
+	task := fs.addTask("handoffkeep", "handoffkeep", "log target", store.StateBacklog, 0)
+	mirrorIssue(fs, yt, task.ID, "9-60", "HK-60")
 	yt.failMe = true
 	svc := newTestService(t, yt, fs)
 	_, err := svc.Sync(context.Background(), SyncOptions{})

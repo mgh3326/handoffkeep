@@ -2,8 +2,8 @@ package youtrack
 
 import (
 	"context"
-	"fmt"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -11,17 +11,23 @@ import (
 )
 
 // fakeStore is the service's store seam. It keeps the same observable rules
-// the SQL store enforces where the sync cares: a task that is not claimable
-// refuses a move into a started state, merged needs closure evidence, and an
-// activity id is applied once.
+// the SQL store enforces where the sync cares: PG is the write authority, a
+// task that is not claimable refuses a move into a started state, merged needs
+// closure evidence, an activity id is applied once, and the outbox keeps one
+// pending row per field.
 type fakeStore struct {
 	mu           sync.Mutex
 	tasks        map[int64]store.Task
-	links        map[int64]store.YouTrackLink
+	mirrors      map[int64]store.YouTrackMirror
+	issueOwner   map[string]int64
 	comments     map[int64][]store.TaskComment
 	caches       map[int64]store.YouTrackFieldCache
 	translations map[int64]store.Translation
-	projects     map[string]bool
+	projects     map[string]store.YouTrackProject
+	taskProjects map[string]bool
+	outbox       map[int64]store.YouTrackOutboxItem
+	outboxNextID int64
+	outboxDue    map[int64]bool
 	cursor       store.YouTrackCursor
 	applied      map[string]store.YouTrackApplyResult
 	pending      map[string]store.YouTrackPendingRevert
@@ -35,11 +41,20 @@ type fakeStore struct {
 func newFakeStore() *fakeStore {
 	return &fakeStore{
 		tasks:        map[int64]store.Task{},
-		links:        map[int64]store.YouTrackLink{},
+		mirrors:      map[int64]store.YouTrackMirror{},
+		issueOwner:   map[string]int64{},
 		comments:     map[int64][]store.TaskComment{},
 		caches:       map[int64]store.YouTrackFieldCache{},
 		translations: map[int64]store.Translation{},
-		projects:     map[string]bool{"handoffkeep": true, "other": true},
+		projects: map[string]store.YouTrackProject{
+			"handoffkeep": {HKProject: "handoffkeep", ShortName: "HK"},
+			"panewire":    {HKProject: "panewire", ShortName: "PW"},
+			"other":       {HKProject: "other", ShortName: "OTHER"},
+		},
+		taskProjects: map[string]bool{"handoffkeep": true, "panewire": true, "other": true},
+		outbox:       map[int64]store.YouTrackOutboxItem{},
+		outboxNextID: 1,
+		outboxDue:    map[int64]bool{},
 		applied:      map[string]store.YouTrackApplyResult{},
 		pending:      map[string]store.YouTrackPendingRevert{},
 		pushed:       map[int64]bool{},
@@ -48,23 +63,27 @@ func newFakeStore() *fakeStore {
 	}
 }
 
-func (f *fakeStore) addTask(lane, title, state string, priority int) store.Task {
+func (f *fakeStore) addTask(project, lane, title, state string, priority int) store.Task {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	return f.addTaskLocked(project, lane, title, state, priority)
+}
+
+func (f *fakeStore) addTaskLocked(project, lane, title, state string, priority int) store.Task {
 	f.nextTaskID++
 	now := time.Now().UTC().Truncate(time.Microsecond)
-	project := "handoffkeep"
-	task := store.Task{ID: f.nextTaskID, Lane: lane, Title: title, State: state, Priority: priority, Kind: "implement", CreatedBy: "test", CreatedAt: now, UpdatedAt: now, LastActivityAt: now, Project: &project}
+	p := project
+	task := store.Task{ID: f.nextTaskID, Lane: lane, Title: title, State: state, Priority: priority, Kind: "implement", CreatedBy: "test", CreatedAt: now, UpdatedAt: now, LastActivityAt: now, Project: &p}
 	f.tasks[task.ID] = task
 	return task
 }
 
-func (f *fakeStore) link(taskID int64, issueID, readable string) {
+func (f *fakeStore) mirror(taskID int64, issueID, readable string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	now := time.Now().UTC()
-	pushed := f.tasks[taskID].UpdatedAt
-	f.links[taskID] = store.YouTrackLink{TaskID: taskID, IssueID: issueID, ReadableID: readable, PushedTaskUpdatedAt: &pushed, CreatedAt: now, UpdatedAt: now}
+	f.mirrors[taskID] = store.YouTrackMirror{TaskID: taskID, IssueID: issueID, DisplayRef: readable, Tenant: "tenant", Role: "mirror", SyncedAt: &now, CreatedAt: now}
+	f.issueOwner[issueID] = taskID
 }
 
 func (f *fakeStore) GetTask(_ context.Context, id int64) (store.Task, bool, error) {
@@ -91,83 +110,129 @@ func (f *fakeStore) ListTranslations(_ context.Context, _ string, sources []stor
 	defer f.mu.Unlock()
 	out := []store.Translation{}
 	for _, source := range sources {
-		if t, ok := f.translations[taskIDFromEntity(source.EntityID)]; ok {
+		id, _ := strconv.ParseInt(source.EntityID, 10, 64)
+		if t, ok := f.translations[id]; ok {
 			out = append(out, t)
 		}
 	}
 	return out, nil
 }
 
-func taskIDFromEntity(entity string) int64 {
-	var id int64
-	fmt.Sscan(entity, &id)
-	return id
-}
-
 func (f *fakeStore) TaskProjectExists(_ context.Context, name string) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.projects[name], nil
+	return f.taskProjects[name], nil
 }
 
-func (f *fakeStore) GetYouTrackLink(_ context.Context, taskID int64) (store.YouTrackLink, bool, error) {
+func (f *fakeStore) GetYouTrackMirror(_ context.Context, taskID int64) (store.YouTrackMirror, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	link, ok := f.links[taskID]
-	return link, ok, nil
+	mirror, ok := f.mirrors[taskID]
+	return mirror, ok, nil
 }
 
-func (f *fakeStore) FindYouTrackLinkByReadableID(_ context.Context, readableID string) (store.YouTrackLink, bool, error) {
+func (f *fakeStore) FindYouTrackMirrorByIssueID(_ context.Context, issueID string) (store.YouTrackMirror, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	for _, link := range f.links {
-		if link.ReadableID == readableID {
-			return link, true, nil
-		}
+	taskID, ok := f.issueOwner[issueID]
+	if !ok {
+		return store.YouTrackMirror{}, false, nil
 	}
-	return store.YouTrackLink{}, false, nil
+	mirror, ok := f.mirrors[taskID]
+	return mirror, ok, nil
 }
 
-func (f *fakeStore) ListYouTrackLinks(_ context.Context, taskIDs []int64) (map[int64]store.YouTrackLink, error) {
+func (f *fakeStore) ListYouTrackMirrors(_ context.Context, taskIDs []int64) (map[int64]store.YouTrackMirror, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	out := map[int64]store.YouTrackLink{}
+	out := map[int64]store.YouTrackMirror{}
 	for _, id := range taskIDs {
-		if link, ok := f.links[id]; ok {
-			out[id] = link
+		if mirror, ok := f.mirrors[id]; ok {
+			out[id] = mirror
 		}
 	}
 	return out, nil
 }
 
-func (f *fakeStore) LinkYouTrackIssue(_ context.Context, taskID int64, issueID, readableID string, at time.Time) (store.YouTrackLink, error) {
+func (f *fakeStore) UpsertYouTrackMirror(_ context.Context, in store.YouTrackMirrorInput) (store.YouTrackMirror, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	link := store.YouTrackLink{TaskID: taskID, IssueID: issueID, ReadableID: readableID, CreatedAt: at, UpdatedAt: at}
-	f.links[taskID] = link
+	if owner, ok := f.issueOwner[in.IssueID]; ok && owner != in.TaskID {
+		return store.YouTrackMirror{}, store.ErrYouTrackMirrorConflict
+	}
+	now := in.SyncedAt.UTC()
+	f.mirrors[in.TaskID] = store.YouTrackMirror{TaskID: in.TaskID, IssueID: in.IssueID, DisplayRef: in.DisplayRef, URL: in.URL, Tenant: in.Tenant, Role: in.Role, SyncedAt: &now, CreatedAt: now}
+	f.issueOwner[in.IssueID] = in.TaskID
 	f.writes++
-	return link, nil
+	return f.mirrors[in.TaskID], nil
 }
 
-func (f *fakeStore) MarkYouTrackTaskPushed(_ context.Context, taskID int64, updatedAt time.Time) error {
+func (f *fakeStore) MarkYouTrackTaskSynced(_ context.Context, taskID int64, at time.Time) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	link := f.links[taskID]
-	link.PushedTaskUpdatedAt = &updatedAt
-	f.links[taskID] = link
+	mirror := f.mirrors[taskID]
+	mirror.SyncedAt = &at
+	f.mirrors[taskID] = mirror
 	f.pushed[taskID] = true
 	return nil
 }
 
-func (f *fakeStore) TouchYouTrackTaskPushed(_ context.Context, taskID int64) error {
+func (f *fakeStore) TouchYouTrackTaskSynced(_ context.Context, taskID int64) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if task, ok := f.tasks[taskID]; ok {
 		at := task.UpdatedAt
-		link := f.links[taskID]
-		link.PushedTaskUpdatedAt = &at
-		f.links[taskID] = link
+		mirror := f.mirrors[taskID]
+		mirror.SyncedAt = &at
+		f.mirrors[taskID] = mirror
 	}
+	return nil
+}
+
+func (f *fakeStore) ListYouTrackProjects(_ context.Context) ([]store.YouTrackProject, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := []store.YouTrackProject{}
+	for _, p := range f.projects {
+		out = append(out, p)
+	}
+	return out, nil
+}
+
+func (f *fakeStore) YouTrackProjectFor(_ context.Context, hkProject string) (store.YouTrackProject, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if p, ok := f.projects[hkProject]; ok {
+		return p, true, nil
+	}
+	p, ok := f.projects["other"]
+	return p, ok, nil
+}
+
+func (f *fakeStore) YouTrackProjectByShortName(_ context.Context, shortName string) (store.YouTrackProject, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, p := range f.projects {
+		if p.ShortName == shortName {
+			return p, true, nil
+		}
+	}
+	return store.YouTrackProject{}, false, nil
+}
+
+func (f *fakeStore) PutYouTrackProject(_ context.Context, p store.YouTrackProject) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.projects[p.HKProject] = p
+	return nil
+}
+
+func (f *fakeStore) SetYouTrackProjectID(_ context.Context, hkProject, projectID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	p := f.projects[hkProject]
+	p.ProjectID = projectID
+	f.projects[hkProject] = p
 	return nil
 }
 
@@ -193,6 +258,9 @@ func (f *fakeStore) GetYouTrackFieldCaches(_ context.Context, taskIDs []int64) (
 func (f *fakeStore) PutYouTrackFieldCache(_ context.Context, x store.YouTrackFieldCache) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if x.Source == "" {
+		x.Source = store.YouTrackSourceYouTrack
+	}
 	f.caches[x.TaskID] = x
 	f.writes++
 	return nil
@@ -202,7 +270,7 @@ func (f *fakeStore) SetYouTrackCachedPriority(_ context.Context, taskID int64, p
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	cache := f.caches[taskID]
-	cache.TaskID, cache.Priority, cache.FetchedAt, cache.Stale = taskID, priority, at, false
+	cache.TaskID, cache.Priority, cache.Source, cache.FetchedAt, cache.Stale = taskID, priority, store.YouTrackSourceHK, at, false
 	if cache.Lane == "" {
 		cache.Lane = f.tasks[taskID].Lane
 	}
@@ -214,7 +282,7 @@ func (f *fakeStore) SetYouTrackCachedLane(_ context.Context, taskID int64, lane 
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	cache := f.caches[taskID]
-	cache.TaskID, cache.Lane, cache.FetchedAt, cache.Stale = taskID, lane, at, false
+	cache.TaskID, cache.Lane, cache.Source, cache.FetchedAt, cache.Stale = taskID, lane, store.YouTrackSourceHK, at, false
 	f.caches[taskID] = cache
 	return nil
 }
@@ -228,8 +296,77 @@ func (f *fakeStore) MarkYouTrackFieldCacheStale(_ context.Context, taskID int64)
 	return nil
 }
 
-func (f *fakeStore) RefreshYouTrackFields(_ context.Context, _ time.Duration, _ int) ([]store.YouTrackLink, error) {
-	return nil, nil
+func (f *fakeStore) RefreshYouTrackFields(_ context.Context, limit int) ([]store.YouTrackMirror, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	ids := make([]int64, 0, len(f.mirrors))
+	for id := range f.mirrors {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	out := []store.YouTrackMirror{}
+	for _, id := range ids {
+		if len(out) >= limit {
+			break
+		}
+		out = append(out, f.mirrors[id])
+	}
+	return out, nil
+}
+
+func (f *fakeStore) EnqueueYouTrack(_ context.Context, taskID int64, op, value string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for id, item := range f.outbox {
+		if item.TaskID == taskID && item.Op == op && f.outboxDue[id] {
+			item.Value = value
+			item.Attempts = 0
+			f.outbox[id] = item
+			return nil
+		}
+	}
+	id := f.outboxNextID
+	f.outboxNextID++
+	f.outbox[id] = store.YouTrackOutboxItem{ID: id, TaskID: taskID, Op: op, Value: value}
+	f.outboxDue[id] = true
+	return nil
+}
+
+func (f *fakeStore) DueYouTrackOutbox(_ context.Context, limit int) ([]store.YouTrackOutboxItem, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	ids := make([]int64, 0, len(f.outbox))
+	for id := range f.outbox {
+		if f.outboxDue[id] {
+			ids = append(ids, id)
+		}
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	out := []store.YouTrackOutboxItem{}
+	for _, id := range ids {
+		if len(out) >= limit {
+			break
+		}
+		out = append(out, f.outbox[id])
+	}
+	return out, nil
+}
+
+func (f *fakeStore) MarkYouTrackOutboxDone(_ context.Context, id int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.outboxDue[id] = false
+	return nil
+}
+
+func (f *fakeStore) RescheduleYouTrackOutbox(_ context.Context, id int64, attempts int, next time.Time, lastError string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	item := f.outbox[id]
+	item.Attempts = attempts
+	f.outbox[id] = item
+	f.outboxDue[id] = !next.After(time.Now())
+	return nil
 }
 
 func (f *fakeStore) DueYouTrackPushTasks(_ context.Context, limit int) ([]store.Task, error) {
@@ -246,11 +383,11 @@ func (f *fakeStore) DueYouTrackPushTasks(_ context.Context, limit int) ([]store.
 			break
 		}
 		task := f.tasks[id]
-		link, linked := f.links[id]
-		if !linked && IsSettled(task.State) {
+		mirror, mirrored := f.mirrors[id]
+		if !mirrored && IsSettled(task.State) {
 			continue
 		}
-		if linked && link.PushedTaskUpdatedAt != nil && !task.UpdatedAt.After(*link.PushedTaskUpdatedAt) {
+		if mirrored && mirror.SyncedAt != nil && !task.UpdatedAt.After(*mirror.SyncedAt) {
 			continue
 		}
 		out = append(out, task)
@@ -304,12 +441,13 @@ func (f *fakeStore) ApplyYouTrackActivity(_ context.Context, in store.YouTrackAc
 		return result, nil
 	}
 	if in.NewIssue != nil {
-		f.nextTaskID++
-		now := time.Now().UTC()
-		project := in.NewIssue.Project
-		task := store.Task{ID: f.nextTaskID, Lane: in.NewIssue.Lane, Title: in.NewIssue.Title, State: store.StateTriage, Kind: in.NewIssue.Kind, CreatedBy: store.YouTrackOwnedActor, CreatedAt: now, UpdatedAt: now, LastActivityAt: now, Project: &project}
+		task := f.addTaskLocked(in.NewIssue.Project, in.NewIssue.Lane, in.NewIssue.Title, store.StateTriage, in.NewIssue.Priority)
+		task.Kind = in.NewIssue.Kind
+		task.CreatedBy = store.YouTrackOwnedActor
 		f.tasks[task.ID] = task
-		f.links[task.ID] = store.YouTrackLink{TaskID: task.ID, IssueID: in.NewIssue.IssueID, ReadableID: in.NewIssue.ReadableID, CreatedAt: now, UpdatedAt: now}
+		now := time.Now().UTC()
+		f.mirrors[task.ID] = store.YouTrackMirror{TaskID: task.ID, IssueID: in.NewIssue.IssueID, DisplayRef: in.NewIssue.ReadableID, Tenant: in.NewIssue.Tenant, Role: "origin", SyncedAt: &now, CreatedAt: now}
+		f.issueOwner[in.NewIssue.IssueID] = task.ID
 		result := store.YouTrackApplyResult{Applied: true, Outcome: store.YouTrackOutcomeApplied}
 		f.applied[in.ID] = result
 		f.writes++
@@ -338,13 +476,13 @@ func (f *fakeStore) ApplyYouTrackActivity(_ context.Context, in store.YouTrackAc
 	if in.Priority != nil && *in.Priority != task.Priority {
 		task.Priority = *in.Priority
 		cache := f.caches[in.TaskID]
-		cache.TaskID, cache.Priority, cache.Lane = in.TaskID, *in.Priority, task.Lane
+		cache.TaskID, cache.Priority, cache.Lane, cache.Source = in.TaskID, *in.Priority, task.Lane, store.YouTrackSourceYouTrack
 		f.caches[in.TaskID] = cache
 	}
 	if in.Lane != "" && in.Lane != task.Lane {
 		task.Lane = in.Lane
 		cache := f.caches[in.TaskID]
-		cache.TaskID, cache.Priority, cache.Lane = in.TaskID, task.Priority, in.Lane
+		cache.TaskID, cache.Priority, cache.Lane, cache.Source = in.TaskID, task.Priority, in.Lane, store.YouTrackSourceYouTrack
 		f.caches[in.TaskID] = cache
 	}
 	if in.Comment != "" {

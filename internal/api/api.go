@@ -359,34 +359,14 @@ func (s Service) RelaneTask(ctx context.Context, id int64, to, client, note stri
 	if err := s.wrkTaskPrecheck(ctx, id, "", true); err != nil {
 		return store.Task{}, false, err
 	}
-	lane := ""
-	if s.YouTrack != nil {
-		var found bool
-		var err error
-		lane, _, found, err = s.Store.TaskRouting(ctx, id)
-		if err != nil {
-			return store.Task{}, false, err
-		}
-		if !found {
-			return store.Task{}, false, store.ErrTaskNotFound
-		}
-		if err := s.YouTrack.PrepareLane(ctx, id, to); err != nil {
-			return store.Task{}, false, err
-		}
-	}
+	// PG is the execution value. The YouTrack export is queued after the
+	// write, so a YouTrack outage never blocks the move.
 	task, changed, err := s.Store.RelaneTask(ctx, id, to, client, note, allowNewLane)
 	if err != nil {
-		if s.YouTrack != nil {
-			// The YouTrack write landed but hk refused the local move. Put the
-			// old lane back so the two sides do not silently diverge.
-			if rerr := s.YouTrack.PrepareLane(ctx, id, lane); rerr != nil {
-				log.Printf("api.youtrack_lane_restore_failed task_id=%d err=%q", id, rerr)
-			}
-		}
 		return store.Task{}, false, err
 	}
 	if s.YouTrack != nil && changed {
-		s.YouTrack.CacheLane(ctx, id, to)
+		s.YouTrack.RecordLane(ctx, id, to)
 	}
 	return task, changed, nil
 }

@@ -2,15 +2,14 @@ package youtrack
 
 import "strings"
 
-// Schema names the YouTrack project and custom fields hk writes, and the
-// Korean labels the operator sees. The labels match the console's
-// STATE_LABEL table (web/console/src/shared/states.ts), so one state has one
-// name on both screens.
+// Schema is the field contract: hk field, YouTrack custom field name, and the
+// Korean value the operator sees. The project is not here: each hk project
+// maps to its own YouTrack project in youtrack_projects. The labels match the
+// console's STATE_LABEL table (web/console/src/shared/states.ts), so one state
+// has one name on both screens.
 type Schema struct {
-	Project       string
 	StateField    string
 	LaneField     string
-	ProjectField  string
 	KindField     string
 	GradeField    string
 	TierField     string
@@ -22,10 +21,8 @@ type Schema struct {
 
 func DefaultSchema() Schema {
 	return Schema{
-		Project:       "HK",
 		StateField:    "hk 상태",
 		LaneField:     "레인",
-		ProjectField:  "hk 프로젝트",
 		KindField:     "종류",
 		GradeField:    "등급",
 		TierField:     "티어",

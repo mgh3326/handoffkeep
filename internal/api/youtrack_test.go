@@ -127,10 +127,10 @@ func TestTaskReadReturnsCachedYouTrackPriorityAndLane(t *testing.T) {
 	ctx := context.Background()
 	linked := apiYouTrackTask(t, st, "handoffkeep", "linked")
 	unlinked := apiYouTrackTask(t, st, "handoffkeep", "unlinked")
-	if _, err := st.LinkYouTrackIssue(ctx, linked.ID, "9-1", "HK-1", time.Now().UTC()); err != nil {
+	if _, err := st.UpsertYouTrackMirror(ctx, store.YouTrackMirrorInput{TaskID: linked.ID, IssueID: "9-1", DisplayRef: "HK-1", Tenant: "tenant", Role: "mirror", SyncedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.PutYouTrackFieldCache(ctx, store.YouTrackFieldCache{TaskID: linked.ID, Priority: 7, Lane: "rstack", FetchedAt: time.Now().UTC()}); err != nil {
+	if err := st.PutYouTrackFieldCache(ctx, store.YouTrackFieldCache{TaskID: linked.ID, Priority: 7, Lane: "rstack", Source: store.YouTrackSourceYouTrack, FetchedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -172,10 +172,10 @@ func TestTaskReadMarksStaleCacheAndFetchError(t *testing.T) {
 	h, st := apiYouTrackServer(t, fake)
 	ctx := context.Background()
 	stale := apiYouTrackTask(t, st, "handoffkeep", "stale")
-	if _, err := st.LinkYouTrackIssue(ctx, stale.ID, "9-2", "HK-2", time.Now().UTC()); err != nil {
+	if _, err := st.UpsertYouTrackMirror(ctx, store.YouTrackMirrorInput{TaskID: stale.ID, IssueID: "9-2", DisplayRef: "HK-2", Tenant: "tenant", Role: "mirror", SyncedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.PutYouTrackFieldCache(ctx, store.YouTrackFieldCache{TaskID: stale.ID, Priority: 3, Lane: "ui-youtrack", FetchedAt: time.Now().UTC(), Stale: true}); err != nil {
+	if err := st.PutYouTrackFieldCache(ctx, store.YouTrackFieldCache{TaskID: stale.ID, Priority: 3, Lane: "ui-youtrack", Source: store.YouTrackSourceYouTrack, FetchedAt: time.Now().UTC(), Stale: true}); err != nil {
 		t.Fatal(err)
 	}
 	got := apiGetTask(t, h, stale.ID)
@@ -186,11 +186,11 @@ func TestTaskReadMarksStaleCacheAndFetchError(t *testing.T) {
 	// A linked task with no cache seeds from the hk columns and marks stale
 	// when YouTrack cannot be read.
 	uncached := apiYouTrackTask(t, st, "handoffkeep", "uncached")
-	if _, err := st.LinkYouTrackIssue(ctx, uncached.ID, "9-3", "HK-3", time.Now().UTC()); err != nil {
+	if _, err := st.UpsertYouTrackMirror(ctx, store.YouTrackMirrorInput{TaskID: uncached.ID, IssueID: "9-3", DisplayRef: "HK-3", Tenant: "tenant", Role: "mirror", SyncedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
 	got = apiGetTask(t, h, uncached.ID)
-	if !got.Stale || got.PrioritySource != "youtrack" || got.Priority != 0 || got.Lane != "handoffkeep" {
+	if !got.Stale || got.PrioritySource != "hk" || got.Priority != 0 || got.Lane != "handoffkeep" {
 		t.Fatalf("fetch-error task=%+v", got)
 	}
 }
@@ -200,46 +200,46 @@ func TestRelaneWritesYouTrackFirstAndUpdatesCache(t *testing.T) {
 	h, st := apiYouTrackServer(t, fake)
 	ctx := context.Background()
 	task := apiYouTrackTask(t, st, "handoffkeep", "relane target")
-	if _, err := st.LinkYouTrackIssue(ctx, task.ID, "9-4", "HK-4", time.Now().UTC()); err != nil {
+	if _, err := st.UpsertYouTrackMirror(ctx, store.YouTrackMirrorInput{TaskID: task.ID, IssueID: "9-4", DisplayRef: "HK-4", Tenant: "tenant", Role: "mirror", SyncedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
 	status, out := relanePost(t, h, "tok", map[string]any{"ids": []int64{task.ID}, "to": "rstack", "note": "test", "allow_new_lane": true})
 	if status != http.StatusOK || out.Moved != 1 || out.Results[0].Error != "" {
 		t.Fatalf("status=%d out=%+v", status, out)
 	}
-	fake.mu.Lock()
-	updates := len(fake.updates)
-	fake.mu.Unlock()
-	if updates != 1 {
-		t.Fatalf("youtrack updates=%d", updates)
-	}
 	got, _, _ := st.GetTask(ctx, task.ID)
 	if got.Lane != "rstack" {
 		t.Fatalf("lane=%s", got.Lane)
 	}
 	cache, ok, _ := st.GetYouTrackFieldCache(ctx, task.ID)
-	if !ok || cache.Lane != "rstack" {
+	if !ok || cache.Lane != "rstack" || cache.Source != store.YouTrackSourceHK {
 		t.Fatalf("cache=%+v ok=%v", cache, ok)
+	}
+	due, err := st.DueYouTrackOutbox(ctx, 10)
+	if err != nil || len(due) != 1 || due[0].Op != store.YouTrackOpLane || due[0].Value != "rstack" {
+		t.Fatalf("outbox=%+v err=%v", due, err)
 	}
 }
 
-func TestRelaneYouTrackFailureChangesNothing(t *testing.T) {
+func TestRelaneSurvivesYouTrackOutage(t *testing.T) {
 	fake := &youtrackAPI{fail: true}
 	h, st := apiYouTrackServer(t, fake)
 	ctx := context.Background()
 	task := apiYouTrackTask(t, st, "handoffkeep", "relane failure")
-	if _, err := st.LinkYouTrackIssue(ctx, task.ID, "9-5", "HK-5", time.Now().UTC()); err != nil {
+	if _, err := st.UpsertYouTrackMirror(ctx, store.YouTrackMirrorInput{TaskID: task.ID, IssueID: "9-5", DisplayRef: "HK-5", Tenant: "tenant", Role: "mirror", SyncedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
 	status, out := relanePost(t, h, "tok", map[string]any{"ids": []int64{task.ID}, "to": "rstack", "note": "test", "allow_new_lane": true})
-	if status != http.StatusOK || out.Failed != 1 || out.Results[0].Error != "youtrack_unavailable" {
+	if status != http.StatusOK || out.Moved != 1 || out.Results[0].Error != "" {
 		t.Fatalf("status=%d out=%+v", status, out)
 	}
 	got, _, _ := st.GetTask(ctx, task.ID)
-	if got.Lane != "handoffkeep" {
-		t.Fatalf("hk lane changed on a YouTrack failure: %s", got.Lane)
+	if got.Lane != "rstack" {
+		t.Fatalf("PG lane=%s", got.Lane)
 	}
-	if _, ok, _ := st.GetYouTrackFieldCache(ctx, task.ID); ok {
-		t.Fatal("cache was written on a YouTrack failure")
+	// PG is the execution value; the export waits in the outbox.
+	due, err := st.DueYouTrackOutbox(ctx, 10)
+	if err != nil || len(due) != 1 || due[0].Op != store.YouTrackOpLane {
+		t.Fatalf("outbox=%+v err=%v", due, err)
 	}
 }

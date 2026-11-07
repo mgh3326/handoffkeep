@@ -30,8 +30,10 @@ func youtrackCmd(args []string, out io.Writer) error {
 	switch args[0] {
 	case "sync":
 		return youtrackSyncCmd(args[1:], out)
+	case "projects":
+		return youtrackProjectsCmd(args[1:], out)
 	default:
-		return errors.New("usage: youtrack sync [--dry-run] [--limit N] [--activities N]")
+		return errors.New("usage: youtrack sync [--dry-run] | youtrack projects list|put")
 	}
 }
 
@@ -42,9 +44,10 @@ func youtrackSyncCmd(args []string, out io.Writer) error {
 	limit := fs.Int("limit", 50, "maximum tasks pushed in this run")
 	activities := fs.Int("activities", 100, "maximum activities read in this run")
 	comments := fs.Int("comments", 50, "maximum comments pushed per task")
-	refresh := fs.Int("refresh", 100, "maximum linked tasks whose field cache is refreshed")
+	refresh := fs.Int("refresh", 100, "maximum mirrored tasks whose field cache is refreshed")
 	reverts := fs.Int("reverts", 20, "maximum pending YouTrack reverts retried")
-	ordered, err := splitArgs(args, "limit", "activities", "comments", "refresh", "reverts")
+	outbox := fs.Int("outbox", 100, "maximum priority/lane outbox entries drained")
+	ordered, err := splitArgs(args, "limit", "activities", "comments", "refresh", "reverts", "outbox")
 	if err != nil {
 		return err
 	}
@@ -91,6 +94,7 @@ func youtrackSyncCmd(args []string, out io.Writer) error {
 		CommentLimit:  *comments,
 		RefreshLimit:  *refresh,
 		RevertLimit:   *reverts,
+		OutboxLimit:   *outbox,
 	})
 	if printErr := printJSON(out, report); printErr != nil {
 		return printErr
@@ -124,13 +128,67 @@ func youTrackFromEnv(st *store.Store) (*youtrack.Service, error) {
 	return youtrack.NewService(st, client, youtrackServiceOptions()), nil
 }
 
-func youtrackServiceOptions() youtrack.Options {
-	schema := youtrack.DefaultSchema()
-	if v := strings.TrimSpace(os.Getenv("YOUTRACK_PROJECT")); v != "" {
-		schema.Project = v
+// youtrackProjectsCmd keeps the hk ↔ YouTrack project mapping. put resolves
+// the short name to the project id once and stores both; list reads PG only.
+func youtrackProjectsCmd(args []string, out io.Writer) error {
+	if len(args) == 0 {
+		return errors.New("usage: youtrack projects list|put <hk project> <youtrack short name>")
 	}
+	dbURL := strings.TrimSpace(os.Getenv("HANDOFFKEEP_DB_URL"))
+	if dbURL == "" {
+		return exitCodeError{code: youtrackExitConfig, err: errors.New("HANDOFFKEEP_DB_URL is required")}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	st, err := store.Open(ctx, dbURL)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	switch args[0] {
+	case "list":
+		if len(args) != 1 {
+			return errors.New("usage: youtrack projects list")
+		}
+		projects, err := st.ListYouTrackProjects(ctx)
+		if err != nil {
+			return err
+		}
+		return printJSON(out, map[string]any{"projects": projects})
+	case "put":
+		if len(args) != 3 {
+			return errors.New("usage: youtrack projects put <hk project> <youtrack short name>")
+		}
+		baseURL := strings.TrimSpace(os.Getenv("YOUTRACK_URL"))
+		token := strings.TrimSpace(os.Getenv("YOUTRACK_BOT_API_KEY"))
+		if baseURL == "" || token == "" {
+			return exitCodeError{code: youtrackExitConfig, err: errors.New("YOUTRACK_URL and YOUTRACK_BOT_API_KEY are required")}
+		}
+		client, err := youtrack.New(youtrack.Config{BaseURL: baseURL, Token: token})
+		if err != nil {
+			return exitCodeError{code: youtrackExitConfig, err: err}
+		}
+		id, err := client.ProjectID(ctx, args[2])
+		if err != nil {
+			return err
+		}
+		project := youtrackProjectRow(args[1], id, args[2])
+		if err := st.PutYouTrackProject(ctx, project); err != nil {
+			return err
+		}
+		return printJSON(out, project)
+	default:
+		return errors.New("usage: youtrack projects list|put <hk project> <youtrack short name>")
+	}
+}
+
+func youtrackProjectRow(hkProject, id, shortName string) store.YouTrackProject {
+	return store.YouTrackProject{HKProject: hkProject, ProjectID: id, ShortName: shortName}
+}
+
+func youtrackServiceOptions() youtrack.Options {
 	return youtrack.Options{
-		Schema:           schema,
+		Schema:           youtrack.DefaultSchema(),
 		DefaultHKProject: strings.TrimSpace(os.Getenv("YOUTRACK_DEFAULT_HK_PROJECT")),
 		DefaultLane:      strings.TrimSpace(os.Getenv("YOUTRACK_DEFAULT_LANE")),
 		ConsoleBaseURL:   strings.TrimSpace(os.Getenv("YOUTRACK_CONSOLE_URL")),
