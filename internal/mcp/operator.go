@@ -197,7 +197,14 @@ func (o operatorTools) taskSearch(ctx context.Context, _ *gmcp.CallToolRequest, 
 		return nil, nil, fmt.Errorf("unknown state %q", in.State)
 	}
 	limit := clampLimit(in.Limit, taskSearchDefaultLimit, taskSearchMaxLimit)
-	results, err := o.service.Search(ctx, query, "tasks", strings.TrimSpace(in.Lane), limit)
+	// Filters run after the store's text search, so a filtered request must
+	// read the whole search window before it limits; otherwise hits that do
+	// not match a filter hide matching hits ranked just after them.
+	searchLimit := limit
+	if len(stateFilter.States) > 0 || stateFilter.Awaiting || in.Project != "" {
+		searchLimit = taskSearchMaxLimit
+	}
+	results, err := o.service.Search(ctx, query, "tasks", strings.TrimSpace(in.Lane), searchLimit)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -206,10 +213,10 @@ func (o operatorTools) taskSearch(ctx context.Context, _ *gmcp.CallToolRequest, 
 		snippet string
 	}
 	hits := make([]hit, 0, len(results))
-	truncated := false
+	searchTruncated := false
 	for _, result := range results {
 		if result.Truncated {
-			truncated = true
+			searchTruncated = true
 		}
 		id, err := strconv.ParseInt(result.Key, 10, 64)
 		if err != nil {
@@ -226,6 +233,11 @@ func (o operatorTools) taskSearch(ctx context.Context, _ *gmcp.CallToolRequest, 
 			continue
 		}
 		hits = append(hits, hit{task: task, snippet: result.Snippet})
+	}
+	truncated := searchTruncated && len(hits) < limit
+	if len(hits) > limit {
+		hits = hits[:limit]
+		truncated = true
 	}
 	tasks := make([]store.Task, 0, len(hits))
 	for _, h := range hits {

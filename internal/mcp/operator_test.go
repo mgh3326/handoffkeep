@@ -360,6 +360,44 @@ func TestOperatorToolsOverHTTP(t *testing.T) {
 	}
 }
 
+func TestTaskSearchFiltersBeforeLimit(t *testing.T) {
+	st := newOperatorStore(t)
+	ctx := context.Background()
+	if _, err := st.AddTaskProject(ctx, "mcp-project", "tester"); err != nil {
+		t.Fatal(err)
+	}
+	project := "mcp-project"
+	target, err := st.CreateTask(ctx, store.Task{
+		Lane: "mcp-search-lane", Title: "ranking filter target", Kind: "implement", Project: &project, CreatedBy: "tester",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.TransitionTask(ctx, target.ID, store.StateUnstarted, "tester", "", nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	// Newer, higher-ranked hits that do not match the state filter must not
+	// consume the single result slot before the filter runs.
+	for i := 0; i < 5; i++ {
+		if _, err := st.CreateTask(ctx, store.Task{
+			Lane: "mcp-search-lane", Title: fmt.Sprintf("ranking filter noise %d", i), Kind: "implement", Project: &project, CreatedBy: "tester",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tokens := api.Tokens{"tester": "bearer-secret"}
+	srv := httptest.NewServer(HTTPHandler(api.Service{Store: st}, tokens, nil))
+	defer srv.Close()
+	session := connectMCP(t, srv.URL, map[string]string{"Authorization": "Bearer bearer-secret"})
+	out := callTool[searchOut](t, session, "task_search", map[string]any{"query": "ranking filter", "state": "unstarted", "limit": 1})
+	if len(out.Results) != 1 || out.Results[0].ID != target.ID {
+		t.Fatalf("filtered search=%+v", out.Results)
+	}
+	if out.Truncated {
+		t.Fatal("filtered search reported truncation with a complete search window")
+	}
+}
+
 func TestAccessIdentityWritesRecordOperator(t *testing.T) {
 	st := newOperatorStore(t)
 	ctx := context.Background()
