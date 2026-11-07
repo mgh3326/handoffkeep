@@ -646,34 +646,45 @@ func (o operatorTools) taskIntake(ctx context.Context, _ *gmcp.CallToolRequest, 
 }
 
 // duplicateCandidates reuses the console search to show likely duplicates
-// before filing. The intake path itself stays the existing idempotent one:
+// before filing. The store search requires every query word, so extra words in
+// the new title can hide an existing shorter title; try a few progressively
+// shorter prefixes. The intake path itself stays the existing idempotent one:
 // the same (source, source_ref) returns the task already recorded.
 func (o operatorTools) duplicateCandidates(ctx context.Context, title, lane string) ([]taskSummary, error) {
-	query := title
-	if len(query) > 512 {
-		query = strings.ToValidUTF8(query[:512], "")
-	}
-	results, err := o.service.Search(ctx, query, "tasks", lane, duplicateCandidateWindow)
-	if err != nil {
-		return nil, err
-	}
+	words := strings.Fields(title)
 	tasks := make([]store.Task, 0, duplicateCandidateLimit)
-	for _, result := range results {
-		if len(tasks) == duplicateCandidateLimit {
-			break
+	seen := map[int64]bool{}
+	for attempt := 0; attempt < 5 && len(words) > 0 && len(tasks) < duplicateCandidateLimit; attempt++ {
+		query := strings.Join(words, " ")
+		if len(query) > 512 {
+			query = strings.ToValidUTF8(query[:512], "")
 		}
-		id, err := strconv.ParseInt(result.Key, 10, 64)
-		if err != nil {
-			continue
-		}
-		task, found, err := o.service.GetTask(ctx, id)
+		results, err := o.service.Search(ctx, query, "tasks", lane, duplicateCandidateWindow)
 		if err != nil {
 			return nil, err
 		}
-		if !found || !duplicateCandidateState(task.State) {
-			continue
+		for _, result := range results {
+			if len(tasks) == duplicateCandidateLimit {
+				break
+			}
+			id, err := strconv.ParseInt(result.Key, 10, 64)
+			if err != nil || seen[id] {
+				continue
+			}
+			seen[id] = true
+			task, found, err := o.service.GetTask(ctx, id)
+			if err != nil {
+				return nil, err
+			}
+			if !found || !duplicateCandidateState(task.State) {
+				continue
+			}
+			tasks = append(tasks, task)
 		}
-		tasks = append(tasks, task)
+		if len(words) == 1 {
+			break
+		}
+		words = words[:len(words)-1]
 	}
 	return o.summaries(ctx, tasks)
 }
