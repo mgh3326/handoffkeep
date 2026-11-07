@@ -35,6 +35,20 @@ func TestCreateDotsRequest(t *testing.T) {
 	if err != nil || len(page) != 1 || page[0].ID != second.ID {
 		t.Fatalf("second page=%+v err=%v", page, err)
 	}
+	if _, err := s.pool.Exec(ctx, `UPDATE tasks SET lane='other' WHERE id=$1`, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	page, err = s.DotsInbox(ctx, first.ID, 1)
+	if err != nil || len(page) != 1 || page[0].ID != second.ID {
+		t.Fatalf("page after cursor relane=%+v err=%v", page, err)
+	}
+	if _, _, err := s.IntakeTask(ctx, IntakeInput{Source: "dots", SourceRef: "other-producer", Title: "Other", Lane: "dots", CreatedBy: "caller"}); err != nil {
+		t.Fatal(err)
+	}
+	page, err = s.DotsInbox(ctx, 0, 10)
+	if err != nil || len(page) != 1 || page[0].ID != second.ID {
+		t.Fatalf("inbox contains non-hk intake=%+v err=%v", page, err)
+	}
 }
 
 func TestCreateDotsRequestIdempotency(t *testing.T) {

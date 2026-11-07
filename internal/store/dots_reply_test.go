@@ -1,6 +1,8 @@
 package store
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -77,6 +79,35 @@ func TestDotsReplyAtomicAndIdempotent(t *testing.T) {
 	in.Body = "Different answer"
 	if _, err := s.ReplyDots(ctx, "operator:test@example.com", "chatgpt", in); !errors.Is(err, ErrDotsReplyKeyConflict) {
 		t.Fatalf("changed payload error=%v", err)
+	}
+}
+
+func TestDotsReplyRejectsDocumentCollision(t *testing.T) {
+	s := schemaStore(t, "dots_doc_collision")
+	ctx := t.Context()
+	task, err := s.CreateDotsRequest(ctx, "caller", DotsRequestInput{Title: "Research", Body: "Investigate"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := "collision"
+	id := sha256.Sum256([]byte(fmt.Sprintf("%d\x00%s", task.ID, key)))
+	for _, date := range []time.Time{time.Now().UTC(), time.Now().UTC().Add(24 * time.Hour)} {
+		docKey := fmt.Sprintf("dots/results/hk-%d/%s-%s", task.ID, date.Format("2006-01-02"), hex.EncodeToString(id[:])[:8])
+		if _, _, err := s.PutDocument(ctx, Document{Key: docKey, Kind: "note", Body: "Existing partial result", CreatedBy: "tester"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, err = s.ReplyDots(ctx, "operator:test@example.com", "chatgpt", DotsReplyInput{TaskID: task.ID, Kind: "RESULT", Body: "A different result", IdempotencyKey: key})
+	if err == nil || !strings.Contains(err.Error(), "document key collision") {
+		t.Fatalf("collision error=%v", err)
+	}
+	current, found, err := s.GetTask(ctx, task.ID)
+	if err != nil || !found || current.State != StateBacklog {
+		t.Fatalf("task=%+v found=%v err=%v", current, found, err)
+	}
+	comments, err := s.ListTaskComments(ctx, task.ID, 0, 10)
+	if err != nil || len(comments) != 0 {
+		t.Fatalf("comments=%+v err=%v", comments, err)
 	}
 }
 
@@ -294,11 +325,13 @@ func TestDotsProgressRecordsPartialResult(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	in := DotsReplyInput{TaskID: task.ID, Kind: "PROGRESS", Body: "Found a lead", IdempotencyKey: "progress"}
+	in := DotsReplyInput{TaskID: task.ID, Kind: "PROGRESS", Body: "Found a lead", IdempotencyKey: "progress", ExpectedUpdatedAt: &task.UpdatedAt}
 	first, err := s.ReplyDots(ctx, "operator:test@example.com", "chatgpt", in)
 	if err != nil || first.State != StateBacklog || first.DocumentKey == "" {
 		t.Fatalf("reply=%+v err=%v", first, err)
 	}
+	newRevision := task.UpdatedAt.Add(time.Second)
+	in.ExpectedUpdatedAt = &newRevision
 	replay, err := s.ReplyDots(ctx, "operator:test@example.com", "chatgpt", in)
 	if err != nil || !replay.Duplicate || replay.DocumentKey != first.DocumentKey {
 		t.Fatalf("replay=%+v err=%v", replay, err)

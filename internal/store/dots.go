@@ -172,7 +172,7 @@ func (s *Store) DotsInbox(ctx context.Context, after int64, limit int) ([]Task, 
 	if after < 0 || limit < 1 || limit > 100 {
 		return nil, errors.New("invalid dots inbox cursor or limit")
 	}
-	rows, err := s.pool.Query(ctx, `SELECT `+taskColumns+` FROM tasks WHERE lane='dots' AND source='dots' AND state NOT IN (`+settledStatesSQL+`) AND ($1::bigint=0 OR (created_at,id) > (SELECT created_at,id FROM tasks WHERE id=$1 AND lane='dots' AND source='dots')) ORDER BY created_at,id LIMIT $2`, after, limit)
+	rows, err := s.pool.Query(ctx, `SELECT `+taskColumns+` FROM tasks WHERE lane='dots' AND source='dots' AND source_ref LIKE 'hk-%' AND state NOT IN (`+settledStatesSQL+`) AND ($1::bigint=0 OR (created_at,id) > (SELECT created_at,id FROM tasks WHERE id=$1)) ORDER BY created_at,id LIMIT $2`, after, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -254,7 +254,7 @@ func (s *Store) ReplyDots(ctx context.Context, actor, channel string, in DotsRep
 	keyHash := sha256.Sum256([]byte(fmt.Sprintf("%d\x00%s", in.TaskID, in.IdempotencyKey)))
 	commentID := hex.EncodeToString(keyHash[:])
 	expected := ""
-	if in.ExpectedUpdatedAt != nil {
+	if in.Kind == "START" && in.ExpectedUpdatedAt != nil {
 		expected = in.ExpectedUpdatedAt.UTC().Format(time.RFC3339Nano)
 	}
 	payloadHash := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%s\x00%t\x00%s\x00%s\x00%s", in.Kind, in.Body, in.AskOperator, actor, channel, expected)))
@@ -554,8 +554,8 @@ func recordDotsResultTx(ctx context.Context, tx pgx.Tx, kind string, issue DotsI
 		return "", false, err
 	}
 	created = tag.RowsAffected() == 1
-	if progress && !created {
-		return "", false, errors.New("dots progress document key collision")
+	if createdBy == "hk-mcp" && !created {
+		return "", false, errors.New("dots reply document key collision")
 	}
 	if !created && taskID != nil {
 		if _, err := tx.Exec(ctx, `UPDATE documents SET task_id=$1 WHERE key=$2 AND task_id IS NULL`, *taskID, key); err != nil {
