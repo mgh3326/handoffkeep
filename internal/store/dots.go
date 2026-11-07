@@ -264,12 +264,11 @@ func (s *Store) ReplyDots(ctx context.Context, actor, channel string, in DotsRep
 		return DotsReplyResult{}, err
 	}
 	defer tx.Rollback(ctx)
-	// Comment ids must become visible in id order; take its lock before any
-	// task lock, as required by the comment writer and lockorder.go.
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, taskCommentInsertLock); err != nil {
+	// Match ApplyYouTrackActivity: mutation lock, comment lock, then task row.
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
 		return DotsReplyResult{}, err
 	}
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, taskCommentInsertLock); err != nil {
 		return DotsReplyResult{}, err
 	}
 	var task Task
@@ -300,7 +299,7 @@ func (s *Store) ReplyDots(ctx context.Context, actor, channel string, in DotsRep
 	if in.Kind == "START" && (!task.UpdatedAt.Equal(*in.ExpectedUpdatedAt) || !IsClaimableState(task.State) || task.ClaimedBy != "") {
 		return DotsReplyResult{}, fmt.Errorf("%w: dots request has changed or is already claimed", ErrTaskConflict)
 	}
-	if in.Kind == "PROGRESS" && IsSettledState(task.State) {
+	if in.Kind != "START" && IsSettledState(task.State) {
 		return DotsReplyResult{}, ErrTaskConflict
 	}
 	now := time.Now().UTC()

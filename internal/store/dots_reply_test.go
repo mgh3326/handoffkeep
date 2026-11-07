@@ -67,6 +67,13 @@ func TestDotsReplyAtomicAndIdempotent(t *testing.T) {
 	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM notification_outbox WHERE target_lane='requester'`).Scan(&notifications); err != nil || notifications != 1 {
 		t.Fatalf("notifications=%d err=%v", notifications, err)
 	}
+	if _, err := s.ReplyDots(ctx, "operator:test@example.com", "chatgpt", DotsReplyInput{TaskID: task.ID, Kind: "QUESTION", Body: "Too late?", IdempotencyKey: "new-question"}); !errors.Is(err, ErrTaskConflict) {
+		t.Fatalf("question on completed task: %v", err)
+	}
+	comments, err = s.ListTaskComments(ctx, task.ID, 0, 10)
+	if err != nil || len(comments) != 1 {
+		t.Fatalf("comments after refusal=%v err=%v", comments, err)
+	}
 	in.Body = "Different answer"
 	if _, err := s.ReplyDots(ctx, "operator:test@example.com", "chatgpt", in); !errors.Is(err, ErrDotsReplyKeyConflict) {
 		t.Fatalf("changed payload error=%v", err)
