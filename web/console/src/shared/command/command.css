@@ -1,0 +1,204 @@
+/* The command bar: one input, its autocomplete, and the per-target preview.
+   Every value with a token uses it. */
+
+.inbox-dialog.command-bar {
+  width: min(760px, 100%);
+  max-height: min(88vh, 900px);
+  display: flex;
+  flex-direction: column;
+  gap: var(--hk-space-3);
+}
+
+.command-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--hk-space-2);
+  flex-wrap: wrap;
+}
+
+.command-head h2 {
+  margin: 0;
+  font-size: var(--hk-type-section);
+  line-height: var(--hk-line-section);
+}
+
+.command-head p {
+  margin: 0;
+  color: var(--hk-text-secondary);
+  font-size: var(--hk-type-meta);
+}
+
+.command-input {
+  display: flex;
+  flex-direction: column;
+  gap: var(--hk-space-1);
+  color: var(--hk-text-secondary);
+  font-size: var(--hk-type-meta);
+}
+
+.command-input input {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: var(--hk-touch-height);
+  padding: var(--hk-space-2) var(--hk-space-3);
+  border: var(--hk-border-width) solid var(--hk-border-control);
+  border-radius: var(--hk-radius-control);
+  background: var(--hk-input-fill);
+  color: var(--hk-text-primary);
+  font-family: var(--hk-font-ui);
+  font-size: var(--hk-type-row);
+}
+
+.command-input input:focus-visible {
+  outline: var(--hk-focus-width) solid var(--hk-focus);
+  outline-offset: var(--hk-focus-offset);
+}
+
+.command-suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--hk-space-1);
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 104px;
+  overflow-y: auto;
+}
+
+.command-suggestions button {
+  min-height: var(--hk-control-height);
+  padding: var(--hk-space-1) var(--hk-space-2);
+  font-size: var(--hk-type-meta);
+}
+
+.command-suggestions button.is-active {
+  background: var(--hk-action-bg);
+  color: var(--hk-action-fg);
+}
+
+.command-errors {
+  display: flex;
+  flex-direction: column;
+  gap: var(--hk-space-1);
+  padding-left: var(--hk-space-2);
+  border-left: 2px solid var(--hk-danger);
+  color: var(--hk-danger);
+  font-size: var(--hk-type-meta);
+}
+
+.command-errors p,
+.command-note {
+  margin: 0;
+}
+
+.command-note {
+  color: var(--hk-text-secondary);
+  font-size: var(--hk-type-meta);
+}
+
+.command-preview {
+  display: flex;
+  flex-direction: column;
+  gap: var(--hk-space-3);
+  max-height: 42vh;
+  overflow-y: auto;
+}
+
+.command-preview section {
+  min-width: 0;
+}
+
+.command-preview h3 {
+  margin: 0 0 var(--hk-space-1);
+  font-size: var(--hk-type-row);
+  font-weight: var(--hk-weight-strong);
+  overflow-wrap: anywhere;
+}
+
+.command-preview ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.command-row {
+  display: grid;
+  grid-template-columns: 80px minmax(0, 1fr);
+  gap: var(--hk-space-1) var(--hk-space-2);
+  padding: var(--hk-space-1) 0;
+  border-bottom: 1px solid var(--hk-border-subtle);
+  font-size: var(--hk-type-meta);
+  overflow-wrap: anywhere;
+}
+
+.command-field {
+  color: var(--hk-text-secondary);
+}
+
+.command-values {
+  color: var(--hk-text-primary);
+}
+
+.command-refusal {
+  grid-column: 2;
+  color: var(--hk-danger);
+}
+
+.command-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--hk-space-2);
+  flex-wrap: wrap;
+}
+
+.command-count {
+  margin-right: auto;
+  color: var(--hk-text-secondary);
+  font-size: var(--hk-type-meta);
+}
+
+.command-actions .command-secondary {
+  margin-left: 0;
+  border-color: transparent;
+  background: transparent;
+  color: var(--hk-text-secondary);
+}
+
+.command-result {
+  display: flex;
+  flex-direction: column;
+  gap: var(--hk-space-2);
+}
+
+.command-result-summary {
+  margin: 0;
+  font-size: var(--hk-type-row);
+  font-weight: var(--hk-weight-strong);
+}
+
+.command-result-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--hk-space-1);
+  max-height: 42vh;
+  overflow-y: auto;
+  font-size: var(--hk-type-meta);
+}
+
+.command-refused {
+  color: var(--hk-danger);
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 767px) {
+  .inbox-dialog.command-bar {
+    max-height: calc(100vh - 2 * var(--hk-space-4));
+  }
+
+  .command-row {
+    grid-template-columns: 56px minmax(0, 1fr);
+  }
+}

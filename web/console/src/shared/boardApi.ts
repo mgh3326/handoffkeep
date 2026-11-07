@@ -295,6 +295,9 @@ const TASK_ACTION_MESSAGES: Record<string, string> = {
   not_found: "작업을 찾을 수 없습니다.",
   relay_failed: "레인은 옮겼지만 레인 알림을 보내지 못했습니다.",
   missing_csrf: "보안 토큰이 없습니다. 새로고침한 뒤 다시 시도하세요.",
+  comment_empty: "코멘트 내용이 필요합니다.",
+  comment_too_long: "코멘트가 너무 깁니다.",
+  comment_invalid: "코멘트를 저장할 수 없습니다.",
   internal_error: "저장하지 못했습니다. 잠시 후 다시 시도하세요.",
 };
 
@@ -369,12 +372,17 @@ export async function fetchLanes(): Promise<string[]> {
 }
 
 type PriorityResult = { previous: number; priority: number };
-export async function setTaskPriority(id: number, priority: number): Promise<PriorityResult> {
+/** eventKey is minted once per change; a replay with the same key returns the
+ * recorded write instead of changing the priority twice. */
+export async function setTaskPriority(id: number, priority: number, eventKey = newEventKey()): Promise<PriorityResult> {
   const csrf = readCsrfToken();
   if (!csrf) throw new Error("missing csrf");
-  const response = await fetch(`/ui/api/tasks/${id}/priority`, { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf }, body: JSON.stringify({ priority, event_key: newEventKey() }) });
-  if (!response.ok) throw new Error("write failed");
-  const data: unknown = await response.json();
-  if (typeof data !== "object" || data === null || !("previous" in data) || typeof data.previous !== "number" || !("priority" in data) || typeof data.priority !== "number") throw new Error("malformed response");
+  const response = await fetch(`/ui/api/tasks/${id}/priority`, { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf }, body: JSON.stringify({ priority, event_key: eventKey }) });
+  const data: unknown = await response.json().catch(() => null);
+  if (!response.ok) {
+    const code = record(data) && typeof data.error === "string" ? data.error : "";
+    throw new TaskActionError(response.status, code);
+  }
+  if (typeof data !== "object" || data === null || !("previous" in data) || typeof data.previous !== "number" || !("priority" in data) || typeof data.priority !== "number") throw new TaskActionError(0, "malformed_response");
   return { previous: data.previous, priority: data.priority };
 }
