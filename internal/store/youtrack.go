@@ -344,15 +344,15 @@ func (s *Store) DueYouTrackPushTasks(ctx context.Context, limit int) ([]Task, er
 	}
 	rows, err := s.pool.Query(ctx, `
 		SELECT `+taskColumns+`
-		FROM tasks t
-		LEFT JOIN youtrack_links l ON l.task_id=t.id
-		WHERE (l.task_id IS NULL AND t.state NOT IN (`+settledStatesSQL+`))
-		   OR (l.task_id IS NOT NULL AND (l.pushed_task_updated_at IS NULL OR t.updated_at > l.pushed_task_updated_at))
-		   OR ((l.task_id IS NOT NULL OR t.state NOT IN (`+settledStatesSQL+`))
+		FROM tasks
+		LEFT JOIN youtrack_links l ON l.task_id=tasks.id
+		WHERE (l.task_id IS NULL AND tasks.state NOT IN (`+settledStatesSQL+`))
+		   OR (l.task_id IS NOT NULL AND (l.pushed_task_updated_at IS NULL OR tasks.updated_at > l.pushed_task_updated_at))
+		   OR ((l.task_id IS NOT NULL OR tasks.state NOT IN (`+settledStatesSQL+`))
 		       AND EXISTS (SELECT 1 FROM task_comments c
-		                   WHERE c.task_id=t.id AND c.author<>$2
+		                   WHERE c.task_id=tasks.id AND c.author<>$2
 		                     AND NOT EXISTS (SELECT 1 FROM youtrack_comment_links cl WHERE cl.hk_comment_id=c.id)))
-		ORDER BY t.updated_at ASC, t.id ASC
+		ORDER BY tasks.updated_at ASC, tasks.id ASC
 		LIMIT $1`, limit, YouTrackOwnedActor)
 	if err != nil {
 		return nil, err
