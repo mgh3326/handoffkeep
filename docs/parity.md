@@ -15,11 +15,11 @@ checked for every one of those routes, so this page cannot silently fall behind.
 
 Baseline: `handoffkeep@64942ff`, the commit this matrix was taken from.
 
-| Thing counted | Count at 64942ff |
-| --- | --- |
-| Console write routes | 14: 7 JSON routes in `internal/ui/api.go`, 7 HTML form routes in `internal/ui/ui.go` |
-| MCP tool definitions | 22: 21 exposed on HTTP `/mcp`, 12 on stdio (the operator/meta tools are HTTP-only; `attachment_put_from_path` is stdio-only) |
-| `/v1` write registrations | 81 method-scoped write registrations, plus four method-agnostic handlers that also accept writes: `/v1/checkpoints`, `/v1/documents/{key}`, `/v1/memory/{agent}/{name}`, `/v1/wrk/{path}` (the rows below cover the user-facing capabilities) |
+| Thing counted | Count at 64942ff | Now |
+| --- | --- | --- |
+| Console write routes | 14: 7 JSON routes in `internal/ui/api.go`, 7 HTML form routes in `internal/ui/ui.go` | 14 (unchanged) |
+| MCP tool definitions | 22: 21 exposed on HTTP `/mcp`, 12 on stdio (the operator/meta tools are HTTP-only; `attachment_put_from_path` is stdio-only) | 26: 25 exposed on HTTP `/mcp`, 12 on stdio (hk 3461 added four HTTP read tools) |
+| `/v1` write registrations | 81 method-scoped write registrations, plus four method-agnostic handlers that also accept writes: `/v1/checkpoints`, `/v1/documents/{key}`, `/v1/memory/{agent}/{name}`, `/v1/wrk/{path}` (the rows below cover the user-facing capabilities) | 81 (unchanged) |
 
 Legend: **—** means the surface has no path for that capability. **ui.write** is
 the console's log line `ui.write email= action= target= event_id= result=`
@@ -33,7 +33,7 @@ inbox and disposition writes refuse them.
 
 | Group | Capability | YouTrack (3404 sync) | Console (/ui) | API (/v1) | CLI | MCP tool | Who may | Audit | Undo / recovery | Tests |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Tasks | Search, list and read a task | Mirrored issue is readable; Korean summary and operator comments are YouTrack-owned | GET /ui/api/board/tasks, GET /ui/api/board/tasks/{id}, GET /ui/api/search | GET /v1/tasks, GET /v1/tasks/{id}, GET /v1/tasks/export, GET /v1/search, GET /v1/triage | tasks list, tasks export, tasks show, tasks triage, ctx search | task_search, task_list, task_show | Operator, bearer, MCP bearer/Access | None (read) | n/a | internal/mcp/operator_test.go, internal/ui/board_*_test.go, internal/api/*task*_test.go |
+| Tasks | Search, list and read a task | Mirrored issue is readable; Korean summary and operator comments are YouTrack-owned | GET /ui/api/board/tasks, GET /ui/api/board/tasks/{id}, GET /ui/api/search | GET /v1/tasks, GET /v1/tasks/{id}, GET /v1/tasks/export, GET /v1/search, GET /v1/triage | tasks list, tasks export, tasks show, tasks triage, ctx search | task_search, task_list, task_show, task_get | Operator, bearer, MCP bearer/Access | None (read) | n/a | internal/mcp/operator_test.go, internal/mcp/operator_reads_test.go, internal/ui/board_*_test.go, internal/api/*task*_test.go |
 | Tasks | Create a task (triage intake) | New issue is pulled into a triage task; unmapped projects are skipped | — | POST /v1/tasks, POST /v1/intake | tasks add, tasks intake | task_intake | Operator via YouTrack; bearer; MCP bearer/Access | created_by, task_origins (source/tenant/role), task_events | No delete; transition drop or duplicate | internal/api/intake_test.go, cmd/handoffkeep/intake_test.go, internal/mcp/operator_test.go |
 | Tasks | Edit a filed task's title or body | YouTrack edits the Korean summary; hk mirrors it, it is not editable back | — | — | — | — | — | — | — | — |
 | Tasks | State transition (claim, start, review, merge, deploy, complete, drop, hold, reopen) | hk 상태 pull applies TransitionTaskWith; a refusal reverts the field and comments; hk pushes its state | POST /ui/api/tasks/{id}/{action} (action = close-merged, close-completed, drop, hold, reopen; relane has its own route) | POST /v1/tasks/{id}/transition, POST /v1/tasks/{id}/reopen, POST /v1/tasks/{id}/claim, POST /v1/tasks/next | tasks transition, tasks reopen, tasks claim, tasks next | — | Operator (console/YouTrack); bearer (API/CLI) | task_events; ui.write; outbox and processed activities | reopen reverses a settled state; claim/start are not reversible | internal/ui/task_lifecycle_test.go, internal/api/task_closure_test.go, internal/youtrack/sync_test.go |
@@ -46,7 +46,8 @@ inbox and disposition writes refuse them.
 | Tasks | Relations | — | — (read on the task page) | POST /v1/tasks/{id}/relations, POST /v1/tasks/{id}/relations/remove | tasks relate, tasks unrelate | — | bearer | task_events | unrelate | cmd/handoffkeep/task_hierarchy_test.go, internal/store/hierarchy_test.go |
 | Tasks | Split / move | — | — (move is relane) | Split: —; move: POST /v1/tasks/relane | Split: —; move: tasks relane | — | bearer | task_events | relane again | internal/api/relane_test.go |
 | Tasks | Subscribers | — | — | POST /v1/tasks/{id}/subscribers | tasks subscribe, tasks unsubscribe | — | bearer | task row; no event | Unsubscribe | cmd/handoffkeep/task_model_test.go |
-| Comments | Read comments | Operator comments are YouTrack-owned and copied to hk as operator:youtrack | GET /ui/api/board/tasks/{id}/comments | GET /v1/tasks/{id}/comments | tasks comments | task_show (last 20) | Operator, bearer, MCP bearer/Access | comment rows | n/a | internal/ui/routes_test.go, internal/mcp/operator_test.go |
+| Tasks | Read one task's event history | hk pushes its state; YouTrack keeps the issue timeline | GET /ui/api/board/tasks/{id} (the `events` array) | GET /v1/tasks/{id} (the `events` array) | tasks show | task_show (last 10), task_events (paged oldest first) | Operator, bearer, MCP bearer/Access | None (read) | n/a | internal/mcp/operator_reads_test.go, internal/ui/board_*_test.go |
+| Comments | Read comments | Operator comments are YouTrack-owned and copied to hk as operator:youtrack | GET /ui/api/board/tasks/{id}/comments | GET /v1/tasks/{id}/comments | tasks comments | task_show (last 20), task_comments (paged, newest last) | Operator, bearer, MCP bearer/Access | comment rows | n/a | internal/ui/routes_test.go, internal/mcp/operator_test.go, internal/mcp/operator_reads_test.go |
 | Comments | Write a comment | hk comments are pushed as issues comments; mirrored comments are linked so they do not echo | POST /ui/tasks/{id}/comments | POST /v1/tasks/{id}/comments | tasks comment | task_comment | Operator, bearer, MCP bearer/Access | comment.author; ui.write; YouTrack comment link | Append-only; no edit or delete | internal/ui/routes_test.go, internal/mcp/operator_test.go, internal/store/youtrack_test.go |
 | Decisions | List open decisions | — | GET /ui/api/decisions, GET /ui/api/decisions/{id}, GET /ui/api/attention | GET /v1/decision-requests, GET /v1/decision-requests/sources, GET /v1/tasks/dispositions/summary | decisions list, decisions hygiene, decisions backfill | decisions_pending | Operator, bearer, MCP bearer/Access | None (read) | n/a | internal/ui/decision_requests_test.go, internal/mcp/operator_test.go |
 | Decisions | Ask (create a structured request) | — | — | POST /v1/tasks/{id}/decision-request (the Linear /ask variant is separate) | tasks decision-request, decisions ask | — | bearer (agents and CLI) | decision record; task_events | No retraction; a superseded request can be replaced | cmd/handoffkeep/decision_request_test.go, internal/api/decision_records_test.go |
@@ -63,6 +64,7 @@ inbox and disposition writes refuse them.
 | Documents | Read and browse documents | — | GET /ui/api/board/doc, GET /ui/api/docs, GET /ui/api/docs/prefixes, GET /ui/doc/{key} | GET /v1/documents, GET /v1/documents/{key} | doc get, doc list | get_document, list_documents, search_context | Operator (console doc pages refuse service identities); bearer; MCP bearer/Access | None (read) | n/a | internal/ui/docs_test.go, internal/mcp/server_test.go |
 | Documents | Write a document | — | — | PUT /v1/documents/{key} | doc put, doc import | put_document | bearer, MCP bearer/Access | Document row (created_by, updated_at); no generic audit | Overwrite; no history | cmd/handoffkeep/doc_get_test.go, cmd/handoffkeep/manifest_test.go, internal/mcp/server_test.go |
 | Context | Search across context, documents and tasks | — | GET /ui/api/search | GET /v1/search | ctx search | search_context | Operator, bearer, MCP bearer/Access | None (read) | n/a | internal/mcp/server_test.go, internal/store/search_tasks_test.go |
+| Context | Watch every task change exactly once | — | — | GET /v1/sync/delta, GET /v1/ledger | since | changes_since | bearer; MCP bearer/Access | None (read; the consumer cursor moves only through `ledger ack`) | n/a; a pruned cursor answers `reset` with `min_cursor` | internal/mcp/operator_reads_test.go, internal/api/sync_test.go, internal/api/ledger_test.go |
 | Context | Checkpoints | — | — (timeline shows relay events, not checkpoints) | GET/POST /v1/checkpoints | ctx checkpoint, ctx recent | put_checkpoint, recent_checkpoints | bearer; MCP stdio/HTTP | checkpoint rows | Checkpoints are append-only | internal/mcp/server_test.go |
 | Context | Agent memory | — | — | GET /v1/memory/{agent}, GET/PUT /v1/memory/{agent}/{name} | memory list, memory push, memory pull | memory_get, memory_put, memory_list | bearer; MCP stdio/HTTP | memory rows | Overwrite by name; push/pull reflect a directory | internal/mcp/server_test.go |
 | Attachments | List attachments and mint a private URL | — | — | GET /v1/attachments, GET /v1/attachments/{sha} | attach list, attach get, attach usage | attachment_list, attachment_get_url | bearer; MCP stdio/HTTP | Attachment metadata | Immutable by design | internal/mcp/server_test.go, internal/attachments/attachments_test.go |
@@ -127,7 +129,7 @@ exception to `ConsoleWrites`.
 
 ## MCP tools at the baseline
 
-All 22 tool definitions at 64942ff. "HTTP" means `/mcp` streamable HTTP; "stdio"
+All 22 tool definitions at 64942ff, plus the four hk 3461 read tools. "HTTP" means `/mcp` streamable HTTP; "stdio"
 means `handoffkeep mcp`. The operator and meta tools are registered only for HTTP,
 because that path has an authenticated principal.
 
@@ -147,7 +149,11 @@ because that path has an authenticated principal.
 | attachment_put_from_path | write | stdio only | Attachment upload |
 | task_search | read | HTTP | Tasks read |
 | task_show | read | HTTP | Tasks read, comments read |
+| task_get | read | HTTP | Tasks read |
 | task_list | read | HTTP | Tasks read |
+| task_comments | read | HTTP | Comments read |
+| task_events | read | HTTP | Tasks event history |
+| changes_since | read | HTTP | Change feed |
 | decisions_pending | read | HTTP | Decisions list |
 | decision_answer | write | HTTP | Decisions answer |
 | task_comment | write | HTTP | Comment write |
@@ -161,3 +167,6 @@ Read tools set `readOnlyHint: true`. The write tools (`put_checkpoint`,
 `task_comment`, `task_intake`) set `readOnlyHint: false` and
 `destructiveHint: false`. Of these, only `decision_answer` can move a task's
 state, by answering the task's request; the rest add records.
+
+`task_get`, `task_comments`, `task_events` and `changes_since` are the four
+tools hk 3461 added after the baseline; all four are read-only and HTTP-only.
