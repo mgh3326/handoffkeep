@@ -21,12 +21,20 @@ and leave the old code as is unless the change already touches it.
 `scripts/check` runs CI's gates in CI's order (`scripts/check go`,
 `scripts/check web` for one half). Run it before pushing.
 
-CI has two tiers (`.github/workflows/ci.yml`). A pull request runs the light
-jobs only: no `-race`, hosted runners, PostgreSQL only for the store (below). The `post-*` jobs (race
-with PostgreSQL, mutants, release dry run, macOS) run on main pushes and
-`ci-any-ref` dispatches, after merge; a red main is bisected and reverted.
+CI has three tiers (`.github/workflows/ci.yml` plus `deploy.yml`). A pull
+request runs the light jobs only: no `-race`, hosted runners, PostgreSQL only
+for the store (below). The main tier is every other non-PR event: the light
+jobs plus `main-linux`, which runs the whole Go suite against PostgreSQL
+**without** `-race`, the migration/startup smoke, the reopen/quota mutants and
+bundle freshness, targeting 10 minutes; its aggregate is `ci-ok`. The deploy
+tier (`deploy.yml`, `suite=deploy`) runs `-race` with PostgreSQL, the same
+suite on macOS, and the release-build dry run after a successful main CI run,
+never cancelling, and publishes the `deploy-ok` commit status; release.yml
+still gates on `ci-ok` until mergewake reads `deploy_checks` (its `GATE` value
+is the one-line switch). A red main head is bisected and reverted.
 `ci-any-ref` accepts `packages` only with `suite=test`; those runs post `ci-ok-test-packages`.
-`scripts/check go` runs the heavy half locally.
+`ci-any-ref suite=deploy` runs the deploy tier as a diagnostic and posts
+`ci-ok-deploy`, never `deploy-ok`. `scripts/check go` runs the heavy half locally.
 The PR tier runs PostgreSQL only in `pr: store + postgres` (`./internal/store/...`, when a PR changes `internal/store/` or `internal/testdb/`), because store breaks merged twice and left main red (hk 3193).
 
 DB-backed tests need Postgres 17 and `HANDOFFKEEP_TEST_DB_URL`, e.g.
