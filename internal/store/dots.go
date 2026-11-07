@@ -203,7 +203,7 @@ func (s *Store) ReplyDots(ctx context.Context, actor, channel string, in DotsRep
 		return DotsReplyResult{}, errors.New("invalid dots request task")
 	}
 	var previous string
-	err = tx.QueryRow(ctx, `SELECT note FROM task_events WHERE task_id=$1 AND source='dots-hk' AND source_ref=$2`, in.TaskID, commentID).Scan(&previous)
+	err = tx.QueryRow(ctx, `SELECT note FROM task_events WHERE task_id=$1 AND source='dots-hk-chatgpt' AND source_ref=$2`, in.TaskID, commentID).Scan(&previous)
 	if err == nil {
 		if previous != payload {
 			return DotsReplyResult{}, errors.New("dots idempotency key reused with different reply")
@@ -251,7 +251,7 @@ func (s *Store) ReplyDots(ctx context.Context, actor, channel string, in DotsRep
 	if err != nil {
 		return DotsReplyResult{}, err
 	}
-	if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: task.ID, Kind: "source_event", By: actor, Note: payload, At: now, Source: "dots-hk", SourceRef: commentID}); err != nil {
+	if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: task.ID, Kind: "source_event", By: actor, Note: payload, At: now, Source: "dots-hk-chatgpt", SourceRef: commentID}); err != nil {
 		return DotsReplyResult{}, err
 	}
 	if err = tx.Commit(ctx); err != nil {

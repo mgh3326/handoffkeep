@@ -73,7 +73,7 @@ func TestDotsOperatorQuestionRollsBackAndRetries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = s.pool.Exec(ctx, `CREATE FUNCTION reject_dots_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.source = 'dots-hk' THEN RAISE EXCEPTION 'injected failure'; END IF; RETURN NEW; END $$`)
+	_, err = s.pool.Exec(ctx, `CREATE FUNCTION reject_dots_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.source = 'dots-hk-chatgpt' THEN RAISE EXCEPTION 'injected failure'; END IF; RETURN NEW; END $$`)
 	if err != nil {
 		t.Fatal(err)
 	}
