@@ -78,7 +78,8 @@ export function previewChange(target: ActionTarget, change: CommandChange, conte
       let refusal = registryReason("drop", target);
       if (!refusal && change.reason.trim() === "") refusal = "드롭 이유가 필요합니다.";
       if (!refusal && change.closure === "superseded" && change.duplicateOf <= 0) refusal = "대체 작업 번호가 필요합니다.";
-      return cell(target, change, "상태", oldState, `종료됨 (${CLOSURE_LABEL[change.closure]})`, refusal);
+      const reason = change.reason.trim() === "" ? "" : ` · 이유: ${truncate(change.reason)}`;
+      return cell(target, change, "상태", oldState, `종료됨 (${CLOSURE_LABEL[change.closure]})${reason}`, refusal);
     }
     case "comment":
       return cell(target, change, "코멘트", "—", truncate(change.text), null);

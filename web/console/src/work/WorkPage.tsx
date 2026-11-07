@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { fetchBoardTasks, fetchProjects } from "../shared/boardApi";
 import { usePoll } from "../shared/usePoll";
 import { readStored, STORAGE_KEYS, writeStored } from "../shared/storage";
-import { CHIP_GROUP_ORDER, statusGroup } from "../shared/states";
+import { CHIP_GROUP_ORDER, stateLabel, statusGroup } from "../shared/states";
 import { Icon } from "../shared/Icon";
 import { StateIcon } from "../shared/StateIcon";
 import { Chip } from "../shared/ui/Chip";
@@ -17,12 +17,20 @@ import { TriageUi, useInboxTriage, type TriageRow } from "../shared/actions/Inbo
 import { fetchInboxStates, type InboxStateView } from "../shared/inboxApi";
 import { QueryBar } from "../shared/query/QueryBar";
 import { formatQuery, parseQuery, sortTasks, taskMatchesQuery, type QueryContext, type QueryFilters, type QuerySort } from "../shared/query/query";
-import { SavedSearchList } from "../shared/SavedSearchList";
+import { SavedSearchChips, SaveSearch } from "../shared/SavedSearchList";
 import { readSavedSearches, writeSavedSearches, type SavedSearch } from "../shared/savedSearches";
 import "./work.css";
 const labels: Record<View, string> = { "needs-me": "내 차례", active: "진행 중", backlog: "대기", shipped: "완료", all: "전체" };
 const sortValues: QuerySort[] = ["default", "priority", "updated", "id", "state"];
 const sortLabels: Record<QuerySort, string> = { default: "기본", priority: "우선순위", updated: "최근", id: "번호", state: "상태" };
+// The value a filter chip shows: states and sorts by their Korean names, the
+// same words the query bar uses.
+function filterValueLabel(key: string, value: string): string {
+  if (key === "state") return stateLabel(value);
+  if (key === "sort") return sortLabels[value as QuerySort];
+  if (key === "p" && value === "0") return "없음";
+  return value;
+}
 export function WorkPage() {
   const [overrides, setOverrides] = useState<Record<number, number>>({});
   const [search, setSearch] = useState(() => location.search);
@@ -162,12 +170,12 @@ export function WorkPage() {
   return <div className="work-layout"><section className="work-list"><div className="work-heading"><h1>작업</h1>
     {projectsFailed && <p role="alert">불러오지 못함</p>}
     <label>프로젝트 <select value={project} onChange={e => update("project", e.target.value)}>{project && !projects.includes(project) && <option value={project}>{project}</option>}{projects.map(p => <option key={p}>{p}</option>)}</select></label></div>
-    <QueryBar value={shownQuery} onChange={changeQuery} onCommit={commitQuery} errors={queryErrors} context={queryContext} />
+    <QueryBar value={shownQuery} onChange={changeQuery} onCommit={commitQuery} errors={queryErrors} context={queryContext} actions={<SaveSearch searches={saved} currentQuery={canonicalQuery} onChange={changeSaved} />} />
     <TriageUi triage={triage} />
     <nav className="work-tabs" aria-label="작업 보기">{views.map(v => <button key={v} aria-pressed={view === v} onClick={() => update("view", v)}>{labels[v]} {filtered.filter(t => inView(t, v)).length}</button>)}</nav>
-    <SavedSearchList searches={saved} currentQuery={canonicalQuery} onApply={applySavedQuery} onChange={changeSaved} />
-    <details className="work-filter-sheet" open={wide || undefined}><summary><Icon name="funnel" /> 필터</summary><div className="work-filters"><label>검색 <input value={query} onChange={e => update("q", e.target.value)} /></label>{(["lane", "kind", "state"] as const).map(k => <label key={k}>{{lane: "레인", kind: "종류", state: "상태"}[k]} <select value={params.get(k) || ""} onChange={e => update(k, e.target.value)}><option value="">전체</option>{choices(k).map(v => <option key={v} value={v}>{v}</option>)}</select></label>)}<label>우선순위 ≥ <input type="number" value={priority} onChange={e => update("p", e.target.value)} /></label><label>등급 <select value={grade} onChange={e => update("grade", e.target.value)}><option value="">전체</option>{gradeChoices.map(v => <option key={v} value={v}>{v}</option>)}</select></label><label>티어 <select value={tier} onChange={e => update("tier", e.target.value)}><option value="">전체</option>{tierChoices.map(v => <option key={v} value={v}>{v}</option>)}</select></label><label>정렬 <select value={sort} onChange={e => update("sort", e.target.value === "default" ? "" : e.target.value)}>{sortValues.map(v => <option key={v} value={v}>{sortLabels[v]}</option>)}</select></label></div></details>
-    <div>{activeFilters.filter(([, value]) => value).map(([key, value, label]) => <button key={key} onClick={() => update(key, "")} aria-label={`${label} 필터 해제`}>{label}: {key === "sort" ? sortLabels[value as QuerySort] : value} 해제</button>)}</div>
+    <SavedSearchChips searches={saved} onApply={applySavedQuery} onChange={changeSaved} />
+    <details className="work-filter-sheet" open={wide || undefined}><summary><Icon name="funnel" /> 필터</summary><div className="work-filters">{(["lane", "kind", "state"] as const).map(k => <label key={k}>{{lane: "레인", kind: "종류", state: "상태"}[k]} <select value={params.get(k) || ""} onChange={e => update(k, e.target.value)}><option value="">전체</option>{choices(k).map(v => <option key={v} value={v}>{k === "state" ? stateLabel(v) : v}</option>)}</select></label>)}<label>우선순위 ≥ <input type="number" value={priority} onChange={e => update("p", e.target.value)} /></label><label>등급 <select value={grade} onChange={e => update("grade", e.target.value)}><option value="">전체</option>{gradeChoices.map(v => <option key={v} value={v}>{v}</option>)}</select></label><label>티어 <select value={tier} onChange={e => update("tier", e.target.value)}><option value="">전체</option>{tierChoices.map(v => <option key={v} value={v}>{v}</option>)}</select></label><label>정렬 <select value={sort} onChange={e => update("sort", e.target.value === "default" ? "" : e.target.value)}>{sortValues.map(v => <option key={v} value={v}>{sortLabels[v]}</option>)}</select></label></div></details>
+    <div>{activeFilters.filter(([, value]) => value).map(([key, value, label]) => <button key={key} onClick={() => update(key, "")} aria-label={`${label} 필터 해제`}>{label}: {filterValueLabel(key, value)} 해제</button>)}</div>
     {failed && <p role="alert">불러오지 못함</p>}{!board && !failed && <p>{!project && projects.length === 0 ? "프로젝트 없음" : "Loading…"}</p>}{board?.truncated && <p>{tasks.length}+ (truncated)</p>}
     <div className="work-rows">{CHIP_GROUP_ORDER.map(group => {
       const rows = visible.filter(t => statusGroup(t) === group);

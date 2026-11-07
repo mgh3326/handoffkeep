@@ -382,7 +382,10 @@ export function taskMatchesQuery(task: BoardTask, filters: QueryFilters): boolea
   if (filters.lane && task.lane !== filters.lane) return false;
   if (filters.project && (task.project ?? "") !== filters.project) return false;
   if (filters.kind && task.kind !== filters.kind) return false;
-  if (filters.priority && task.priority < Number(filters.priority)) return false;
+  // "0" is 우선순위:없음, an exact match; 1-4 keep the control's ≥ meaning.
+  if (filters.priority === "0") {
+    if (task.priority !== 0) return false;
+  } else if (filters.priority && task.priority < Number(filters.priority)) return false;
   if (filters.grade && task.refs.linear?.grade !== filters.grade) return false;
   if (filters.tier && task.refs.linear?.tier !== filters.tier) return false;
   return true;

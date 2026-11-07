@@ -283,7 +283,7 @@ export function CommandBar({ targets, truncated = 0, initialText = "", lanes: la
               실행 {preview.runnable}건{preview.refused > 0 ? ` · 거부 ${preview.refused}건` : ""}
             </span>
             <button type="button" className="command-secondary" onClick={onClose} disabled={phase === "busy"}>취소</button>
-            <button type="button" onClick={() => void run()} disabled={!canApply}>{phase === "busy" ? "적용 중…" : "적용 (Enter)"}</button>
+            <button type="button" className="command-primary" onClick={() => void run()} disabled={!canApply}>{phase === "busy" ? "적용 중…" : "적용 (Enter)"}</button>
           </div>
         ) : null}
       </div>

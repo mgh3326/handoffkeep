@@ -26,6 +26,16 @@ describe("query syntax", () => {
     expect(parseQuery(text).filters).toEqual(filters);
   });
 
+  it("matches 우선순위:없음 exactly and 1-4 as at least that urgent", () => {
+    const none = parseQuery("우선순위:없음").filters;
+    expect(taskMatchesQuery(task({ priority: 0 }), none)).toBe(true);
+    expect(taskMatchesQuery(task({ priority: 2 }), none)).toBe(false);
+    const two = parseQuery("우선순위:2").filters;
+    expect(taskMatchesQuery(task({ priority: 2 }), two)).toBe(true);
+    // The control's meaning is "priority number at least 2": P1 is hidden.
+    expect(taskMatchesQuery(task({ priority: 1 }), two)).toBe(false);
+  });
+
   it("maps the #미해결 and #진행중 shortcuts and keeps #101 as text", () => {
     expect(parseQuery("#미해결").filters.view).toBe("needs-me");
     expect(parseQuery("#진행중").filters.view).toBe("active");
@@ -88,6 +98,7 @@ describe("saved searches", () => {
   it("refuses an empty name or query and renames without changing the query", () => {
     expect(makeSavedSearch("  ", "상태:x")).toBeNull();
     expect(makeSavedSearch("name", "  ")).toBeNull();
+    expect(makeSavedSearch("name", `"${"가".repeat(500)}"`)).toBeNull();
     const search = makeSavedSearch("name", "상태:개발 중")!;
     expect(renameSavedSearch(search, "  ")).toBeNull();
     expect(renameSavedSearch(search, "새 이름")).toEqual({ ...search, name: "새 이름" });
