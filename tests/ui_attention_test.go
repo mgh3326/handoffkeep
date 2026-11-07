@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"reflect"
 	"sort"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -86,10 +87,16 @@ func TestUIAttentionShape(t *testing.T) {
 	if decisions["count"] != float64(1) || decisions["overdue"] != float64(1) || len(items) != 1 {
 		t.Fatalf("decisions=%v", decisions)
 	}
-	wantKeys(t, "decision item", items[0], "source", "id", "lane", "question", "created_at", "due_at", "overdue")
+	wantKeys(t, "decision item", items[0], "key", "source", "id", "lane", "question", "created_at", "due_at", "overdue", "read", "woken")
 	d := items[0].(map[string]any)
 	if d["source"] != "request" || d["lane"] != "desk" || d["question"] != "Ship the console?" || d["overdue"] != true || d["due_at"] == nil {
 		t.Fatalf("decision item=%v", d)
+	}
+	if want := "decision:request:" + strconv.FormatInt(int64(d["id"].(float64)), 10); d["key"] != want {
+		t.Fatalf("decision key=%v, want %q", d["key"], want)
+	}
+	if d["read"] != false || d["woken"] != false {
+		t.Fatalf("decision read=%v woken=%v, want false false", d["read"], d["woken"])
 	}
 
 	tasks := body["tasks"].(map[string]any)
@@ -101,10 +108,18 @@ func TestUIAttentionShape(t *testing.T) {
 	if len(taskItems) != 2 {
 		t.Fatalf("task items=%v", taskItems)
 	}
-	wantKeys(t, "task item", taskItems[0], "id", "title", "lane", "state", "reason", "since")
+	wantKeys(t, "task item", taskItems[0], "key", "id", "title", "lane", "state", "priority", "reason", "since", "read", "woken")
 	first, second := taskItems[0].(map[string]any), taskItems[1].(map[string]any)
 	if first["title"] != "Waiting task" || first["reason"] != "awaiting_decision" || second["title"] != "Stalled task" || second["reason"] != "stalled" || second["state"] != "reviewing" {
 		t.Fatalf("task items=%v", taskItems)
+	}
+	for _, item := range []map[string]any{first, second} {
+		if want := "task:" + strconv.FormatInt(int64(item["id"].(float64)), 10); item["key"] != want {
+			t.Fatalf("task key=%v, want %q", item["key"], want)
+		}
+		if item["read"] != false || item["woken"] != false {
+			t.Fatalf("task %v read=%v woken=%v, want false false", item["title"], item["read"], item["woken"])
+		}
 	}
 
 	deploys := body["deploys"].(map[string]any)
@@ -113,11 +128,19 @@ func TestUIAttentionShape(t *testing.T) {
 	if deploys["count"] != float64(2) || deploys["events_capped"] != false || len(deployItems) != 2 {
 		t.Fatalf("deploys=%v", deploys)
 	}
-	wantKeys(t, "deploy item", deployItems[0], "service", "task_id", "title", "pr", "merged_at")
+	wantKeys(t, "deploy item", deployItems[0], "key", "service", "task_id", "title", "pr", "merged_at", "read", "woken")
 	newest, older := deployItems[0].(map[string]any), deployItems[1].(map[string]any)
 	if newest["title"] != "newer after the deploy" || newest["service"] != "handoffkeep" || newest["pr"] != "https://github.com/mgh3326/handoffkeep/pull/12" ||
 		older["title"] != "after the deploy" {
 		t.Fatalf("deploy items=%v", deployItems)
+	}
+	for _, item := range []map[string]any{newest, older} {
+		if want := "deploy:" + item["service"].(string) + ":" + strconv.FormatInt(int64(item["task_id"].(float64)), 10); item["key"] != want {
+			t.Fatalf("deploy key=%v, want %q", item["key"], want)
+		}
+		if item["read"] != false || item["woken"] != false {
+			t.Fatalf("deploy %v read=%v woken=%v, want false false", item["title"], item["read"], item["woken"])
+		}
 	}
 }
 
