@@ -29,6 +29,22 @@ func taskTestStore(t *testing.T) *store.Store {
 	return s
 }
 
+// schemaTestStore opens a Store on a throwaway schema and returns the
+// schema's database URL as well, so a whole-table count can target the same
+// schema the Store writes to. Tests that compare whole-table counts use it:
+// the shared schema is written by tests in other packages at the same time,
+// so a global count taken there is not stable (AGENTS.md §Tests).
+func schemaTestStore(t *testing.T, prefix string) (*store.Store, string) {
+	t.Helper()
+	_, url := testdb.Schema(t, prefix)
+	s, err := store.Open(t.Context(), url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Close)
+	return s, url
+}
+
 func taskLane(t *testing.T) string { return fmt.Sprintf("task-%d", time.Now().UnixNano()) }
 
 // projectRef supplies the required task project for fixture creates; the

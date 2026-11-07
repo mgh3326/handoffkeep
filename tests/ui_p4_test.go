@@ -706,20 +706,20 @@ func TestUIP4ResolveClosesOnlyItsDecision(t *testing.T) {
 	if updated.State != "developing" {
 		t.Fatalf("resolved task state=%s", updated.State)
 	}
-	before := uiRowCounts(t).Relay
+	before := uiLaneRowCounts(t, lane).Relay
 	response, _ = p4Resolve(t, h, map[string]any{"type": "task", "id": task, "by": "lane-ops", "answer": "again"})
-	if response.StatusCode != http.StatusConflict || uiRowCounts(t).Relay != before {
-		t.Fatalf("already resolved status=%d relay before=%d after=%d", response.StatusCode, before, uiRowCounts(t).Relay)
+	if after := uiLaneRowCounts(t, lane).Relay; response.StatusCode != http.StatusConflict || after != before {
+		t.Fatalf("already resolved status=%d relay before=%d after=%d", response.StatusCode, before, after)
 	}
 	response, _ = p4Resolve(t, h, map[string]any{"type": "task", "id": task + 1000000, "by": "bad lane", "answer": "x"})
 	if response.StatusCode != http.StatusBadRequest {
 		t.Fatalf("invalid by status=%d", response.StatusCode)
 	}
 	tooLong := p4DecisionTask(t, h, lane, "too long resolve", p4Options(true, true))
-	before = uiRowCounts(t).Relay
+	before = uiLaneRowCounts(t, lane).Relay
 	response, _ = p4Resolve(t, h, map[string]any{"type": "task", "id": tooLong, "by": "lane-ops", "answer": strings.Repeat("x", 2049)})
-	if response.StatusCode != http.StatusBadRequest || uiRowCounts(t).Relay != before {
-		t.Fatalf("oversized resolve status=%d relay before=%d after=%d", response.StatusCode, before, uiRowCounts(t).Relay)
+	if after := uiLaneRowCounts(t, lane).Relay; response.StatusCode != http.StatusBadRequest || after != before {
+		t.Fatalf("oversized resolve status=%d relay before=%d after=%d", response.StatusCode, before, after)
 	}
 }
 
@@ -844,12 +844,13 @@ func TestUIP4BatchSecurityAndConsoleEscalationClosure(t *testing.T) {
 	h := newUITestServer(t, s, fixture, hub.server.URL, "hub-test-token", 0)
 	defer h.Close()
 	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
-	task := p4DecisionTask(t, h, uiLane(t, "lane-a"), "batch security", p4Options(true, true))
+	lane := uiLane(t, "lane-a")
+	task := p4DecisionTask(t, h, lane, "batch security", p4Options(true, true))
 	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions/legacy", assertion)
 	values := url.Values{"csrf": {csrf}, "mode": {"selected"}}
 	p4Item(values, 0, "task", task, "A: 노드 로컬 저장")
 	values.Set("items.0.select", "1")
-	before := uiRowCounts(t)
+	before := uiLaneRowCounts(t, lane)
 	wrongCSRF := url.Values{}
 	for key, value := range values {
 		wrongCSRF[key] = append([]string(nil), value...)
@@ -871,8 +872,8 @@ func TestUIP4BatchSecurityAndConsoleEscalationClosure(t *testing.T) {
 			response.Body.Close()
 		})
 	}
-	if len(hub.requests()) != 0 || uiRowCounts(t) != before {
-		t.Fatalf("rejected batch changed state hub=%d before=%+v after=%+v", len(hub.requests()), before, uiRowCounts(t))
+	if after := uiLaneRowCounts(t, lane); len(hub.requests()) != 0 || after != before {
+		t.Fatalf("rejected batch changed state hub=%d before=%+v after=%+v", len(hub.requests()), before, after)
 	}
 
 	serviceHub := newFakeIngressHub(t)

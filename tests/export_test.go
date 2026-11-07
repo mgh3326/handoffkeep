@@ -14,7 +14,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/mgh3326/handoffkeep/internal/store"
-	"github.com/mgh3326/handoffkeep/internal/testdb"
 )
 
 type exportResponse struct {
@@ -63,9 +62,9 @@ func exportDecode(t *testing.T, resp *http.Response) exportResponse {
 	return doc
 }
 
-func exportRecount(t *testing.T, where string, args ...any) (int, map[string]int, map[string]int) {
+func exportRecount(t *testing.T, dbURL, where string, args ...any) (int, map[string]int, map[string]int) {
 	t.Helper()
-	db, err := pgx.Connect(t.Context(), testdb.URL(t))
+	db, err := pgx.Connect(t.Context(), dbURL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,7 +229,7 @@ func TestExportRouteAuthAndValidation(t *testing.T) {
 // three lanes, then compares the export's counts and rows against an
 // independent recount over the same tables.
 func TestExportCountsAndFilters(t *testing.T) {
-	s := taskTestStore(t)
+	s, dbURL := schemaTestStore(t, "export_counts")
 	h := taskHTTP(s)
 	defer h.Close()
 	laneA, laneB, laneC := taskLane(t), taskLane(t), taskLane(t)
@@ -296,7 +295,7 @@ func TestExportCountsAndFilters(t *testing.T) {
 	}
 
 	// Empty scope: recount the whole table independently.
-	total, byState, byLane := exportRecount(t, "1=1")
+	total, byState, byLane := exportRecount(t, dbURL, "1=1")
 	resp := exportGet(t, h, "node-token", "")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status=%d", resp.StatusCode)
@@ -332,7 +331,7 @@ func TestExportCountsAndFilters(t *testing.T) {
 		{"?parent_lane=" + laneA, "parent_lane=$1", []any{laneA}},
 		{"?lane=" + laneA + "&state=backlog", "lane=$1 AND state=$2", []any{laneA, "backlog"}},
 	} {
-		wantTotal, wantByState, wantByLane := exportRecount(t, tc.where, tc.args...)
+		wantTotal, wantByState, wantByLane := exportRecount(t, dbURL, tc.where, tc.args...)
 		resp = exportGet(t, h, "node-token", tc.query+"&limit=10000")
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("query=%s status=%d", tc.query, resp.StatusCode)

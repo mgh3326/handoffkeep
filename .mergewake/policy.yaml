@@ -13,6 +13,14 @@ required_checks:
 watch_checks:
   - 'ci-ok'
   - 'image'
+# Release and rollout take only main commits whose main tier (ci-ok) and
+# deploy tier (deploy-ok, posted by .github/workflows/deploy.yml) are both
+# green. ci-ok stays in the set because deploy.yml's workflow_dispatch can
+# post deploy-ok on a sha without reading its main-tier result.
+# decision/2026-11-07/fleet-ci-three-tiers-r2 §4-3.
+deploy_checks:
+  - 'ci-ok'
+  - 'deploy-ok'
 # Bisect over cancelled main heads (fleet policy policy/fleet-ci-main-cancel):
 # watch dispatches ci-any-ref.yml with {"ref": <sha>} and reads the ci-ok
 # status it posts on that commit. image builds only on main pushes, so the

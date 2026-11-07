@@ -5,11 +5,12 @@ name: release
 # the same build and checks on the tag but is never published.
 # Manual runs without publish build and verify the same assets for the
 # dry-run tag v0.0.0. Pull requests do not run this workflow: ci.yml's
-# post-linux job already exercises scripts/test-build-release.sh after merge.
+# deploy tier (deploy.yml) already exercises scripts/test-build-release.sh.
 # Publication does not rerun the test suite (T-DEPLOY in hk:doc
 # decision/2026-11-05/fleet-ci-three-tiers): ci-green waits for ci.yml's
-# ci-ok on the tagged commit. Hosts pull published assets themselves; this
-# workflow never reaches a host.
+# ci-ok on the tagged commit, and its GATE env is the one-line switch to
+# deploy-ok once mergewake reads deploy_checks (decision/2026-11-07 §4-3).
+# Hosts pull published assets themselves; this workflow never reaches a host.
 on:
   push:
     tags: ["v*"]
@@ -116,6 +117,22 @@ jobs:
       contents: read
       actions: read
       statuses: read
+    env:
+      # The gate this job reads, and the one line that switches it. deploy.yml
+      # already publishes deploy-ok on every green deploy tier, but decision
+      # §2 and §4-3 keep the gate on ci-ok until mergewake reads deploy_checks:
+      # changing the meaning of ci-ok before its readers are ready would let a
+      # main-tier-only head through. When it is ready, set GATE to deploy-ok;
+      # the script then reads that status alone.
+      #
+      # While GATE is ci-ok the publication ALSO requires a deploy-ok success
+      # (review on #228, high). main-linux keeps the release-build dry run for
+      # the transition (design session on #228), so ci-ok does still prove the
+      # assets build; the deploy requirement is belt and braces for the same
+      # concern, and it is what the switch below leaves in place. Requiring
+      # both keeps the transition honest: nothing publishes without deploy-tier
+      # evidence, and the later switch only drops the ci-ok half.
+      GATE: ci-ok
     outputs:
       green: ${{ steps.wait.outputs.green }}
     steps:
@@ -129,6 +146,50 @@ jobs:
           deadline=$(( $(date +%s) + 120*60 ))
           green() { echo "green=$1" >> "$GITHUB_OUTPUT"; exit 0; }
           block() { echo "$1; not publishing" >&2; exit 1; }
+          # deploy_ok_state prints the deploy-ok state, or "none"; a failed API
+          # call or a response without a statuses array prints "unknown" so the
+          # caller retries. The combined status endpoint returns the LATEST
+          # state per context, so a rerun's status supersedes the old one and no
+          # page can hide it (the plain statuses list is newest-30 only: review
+          # on #228, medium).
+          #
+          # Only a well-formed response with an array .statuses may answer
+          # "none" (review on #228, high): a 2xx body of an unexpected shape
+          # must not read as "no deploy-ok yet". The jq expression errors on a
+          # missing or non-array .statuses, and the caller turns that into
+          # "unknown".
+          deploy_ok_state() {
+            gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/status" -q '
+              if (.statuses | type) != "array" then error("no statuses array") else . end
+              | [.statuses[] | select(.context == "deploy-ok") | .state] | first // "none"
+            ' 2>/dev/null || echo unknown
+          }
+          # await_deploy_ok blocks until the deploy tier has a verdict on this
+          # head. deploy.yml posts it for every completed deploy run.
+          await_deploy_ok() {
+            while :; do
+              state=$(deploy_ok_state)
+              case "$state" in
+                success) echo "deploy-ok status: success"; return 0 ;;
+                failure|error) block "deploy-ok on $GITHUB_SHA is $state" ;;
+                pending) echo "deploy-ok status: pending" ;;
+                unknown) echo "::warning::reading deploy-ok statuses failed; retrying" ;;
+                *) echo "::notice::no deploy-ok status on $GITHUB_SHA yet" ;;
+              esac
+              if [ "$(date +%s)" -ge "$deadline" ]; then
+                echo "no deploy-ok verdict on $GITHUB_SHA within 120 minutes" >&2; exit 1
+              fi
+              sleep 30
+            done
+          }
+          # publishable is the only way to publish: it proves the deploy tier
+          # on this head and then answers green. While GATE is ci-ok the ci-ok
+          # half is established first, then this.
+          publishable() { await_deploy_ok; green true; }
+          # GATE=deploy-ok: the deploy tier is the only verdict.
+          if [ "$GATE" = deploy-ok ]; then
+            publishable
+          fi
           while :; do
             superseded=no
             # A failed API call is "no verdict yet": the deadline ends the wait.
@@ -139,7 +200,7 @@ jobs:
                 if job=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$mid/jobs?filter=latest&per_page=100" -q '[.jobs[] | select(.name == "ci-ok")] | first // {} | .conclusion // "none"'); then
                   echo "ci-ok job: $job"
                   case "$job" in
-                    success) green true ;;
+                    success) publishable ;;
                     skipped|cancelled|none)
                       case "$mc" in
                         cancelled|skipped) superseded=check ;;
@@ -161,10 +222,10 @@ jobs:
                   else
                     echo "::warning::reading newest main push run failed; retrying"
                   fi
-                  if [ "$superseded" = yes ] && status=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/statuses" -q '[.[] | select(.context == "ci-ok")] | first | .state // "none"'); then
+                  if [ "$superseded" = yes ] && status=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/status" -q '[.statuses[] | select(.context == "ci-ok") | .state] | first // "none"'); then
                     echo "main CI superseded; ci-any-ref ci-ok status: $status"
                     case "$status" in
-                      success) green true ;;
+                      success) publishable ;;
                       failure|error) block "ci-any-ref ci-ok status on $GITHUB_SHA is $status" ;;
                       pending) ;;
                       *) echo "::notice::main CI on $GITHUB_SHA was superseded and has no ci-any-ref verdict; not publishing, the next tag carries this change"

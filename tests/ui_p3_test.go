@@ -240,7 +240,7 @@ func TestUIP3GlanceFailureNoLeakage(t *testing.T) {
 }
 
 func TestUIP3GlanceTaskAggregation(t *testing.T) {
-	s := uiStore(t)
+	s, _ := schemaTestStore(t, "ui_glance_tasks")
 	fixture := newUIJWTFixture(t)
 	h := newP3UITestServer(t, s, fixture, "", "", []string{"glance-fixture"})
 	defer h.Close()

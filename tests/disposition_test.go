@@ -90,6 +90,10 @@ func openGen(t *testing.T, s *store.Store, id int64) int64 {
 	return 0
 }
 
+// dispositionCounts counts only rows that belong to lane: its tasks, their
+// events and relay events owned by it. Tests in the shared schema must not
+// compare global counts (AGENTS.md §Tests): other packages write there
+// concurrently, so a whole-table count is not stable.
 type dispositionCounts struct {
 	Tasks, TaskEvents, Relay, Backlog, ItemEvents int64
 	ItemState                                     string
@@ -103,7 +107,7 @@ func dispositionRowCounts(t *testing.T, lane string, id int64) dispositionCounts
 	}
 	defer db.Close(t.Context())
 	var c dispositionCounts
-	if err := db.QueryRow(t.Context(), `SELECT (SELECT COUNT(*) FROM tasks),(SELECT COUNT(*) FROM task_events),(SELECT COUNT(*) FROM relay_events),
+	if err := db.QueryRow(t.Context(), `SELECT (SELECT COUNT(*) FROM tasks WHERE lane=$1),(SELECT COUNT(*) FROM task_events e JOIN tasks x ON x.id=e.task_id WHERE x.lane=$1),(SELECT COUNT(*) FROM relay_events WHERE owner_lane=$1),
 		(SELECT COUNT(*) FROM tasks WHERE lane=$1 AND state='backlog'),(SELECT COUNT(*) FROM task_events WHERE task_id=$2),(SELECT state FROM tasks WHERE id=$2)`, lane, id).
 		Scan(&c.Tasks, &c.TaskEvents, &c.Relay, &c.Backlog, &c.ItemEvents, &c.ItemState); err != nil {
 		t.Fatal(err)
@@ -405,7 +409,7 @@ func TestDispositionApplyUsesLegalEdges(t *testing.T) {
 
 // AC ③ / AC+3 / AC+4 / M12: one definition, lane-independent, replayable.
 func TestDispositionSummaryDefinition(t *testing.T) {
-	s := uiStore(t)
+	s, _ := schemaTestStore(t, "disposition_summary")
 	ctx := t.Context()
 	laneA, laneB := uiLane(t, "director"), uiLane(t, "other-director")
 	drainOpenDispositions(t, s)
@@ -494,7 +498,7 @@ func TestDispositionSummaryDefinition(t *testing.T) {
 
 // ESC-2 / C3: beyond the batch limit the summary names the next batch.
 func TestDispositionSummaryNamesNextBatch(t *testing.T) {
-	s := uiStore(t)
+	s, _ := schemaTestStore(t, "disposition_next_batch")
 	lane := uiLane(t, "director")
 	t.Cleanup(func() { drainOpenDispositions(t, s) })
 	base, err := s.DispositionSummary(t.Context(), time.Now().UTC())
@@ -701,7 +705,7 @@ func TestDispositionOriginIsFixedAfterCreation(t *testing.T) {
 
 // Director ruling on SHOULD-2: re-asking clears the previous answer.
 func TestDispositionReaskClearsAnswer(t *testing.T) {
-	s := uiStore(t)
+	s, _ := schemaTestStore(t, "disposition_reask")
 	drainOpenDispositions(t, s)
 	t.Cleanup(func() { drainOpenDispositions(t, s) })
 	lane := uiLane(t, "director")

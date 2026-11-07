@@ -210,7 +210,7 @@ func TestToolListAnnotations(t *testing.T) {
 	for _, tool := range result.Tools {
 		annotations[tool.Name] = tool.Annotations
 	}
-	for _, name := range []string{"task_search", "task_show", "task_get", "task_list", "task_comments", "task_events", "changes_since", "decisions_pending"} {
+	for _, name := range []string{"task_search", "task_show", "task_get", "task_list", "task_comments", "task_events", "changes_since", "decisions_pending", "projects_list", "task_states", "sync_status"} {
 		a := annotations[name]
 		if a == nil || !a.ReadOnlyHint {
 			t.Errorf("%s is not marked read-only: %+v", name, a)

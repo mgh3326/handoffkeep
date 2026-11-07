@@ -96,6 +96,7 @@ func registerOperatorTools(s *gmcp.Server, service api.Service, p principal) {
 		Description: "File a new hk task into triage. Returns the created task, or the task already recorded for an identical intake, plus duplicate candidates found before filing when there are any.",
 		Annotations: writeAnnotations(),
 	}, o.taskIntake)
+	registerMetaTools(s, o)
 }
 
 func readOnlyAnnotations() *gmcp.ToolAnnotations {
