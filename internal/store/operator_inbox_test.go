@@ -112,21 +112,37 @@ func TestApplyInboxStateAndReplay(t *testing.T) {
 func TestApplyInboxValidates(t *testing.T) {
 	s := schemaStore(t, "inbox_validate")
 	ctx := t.Context()
+	// A bad item key is refused per item: the rest of the batch still applies.
 	for _, tc := range []struct {
-		name, key, action, actor, event string
-		want                            error
+		name, key string
+		want      error
 	}{
-		{"key", "conversation:1", InboxActionRead, "operator:test", "e", ErrInvalidInboxItem},
-		{"trailing", "task:12x", InboxActionRead, "operator:test", "e", ErrInvalidInboxItem},
-		{"zero id", "task:0", InboxActionRead, "operator:test", "e", ErrInvalidInboxItem},
-		{"deploy", "deploy:77", InboxActionRead, "operator:test", "e", nil},
-		{"deploy service", "deploy:handoffkeep:77", InboxActionRead, "operator:test", "e", nil},
-		{"actor", "task:1", InboxActionRead, "", "e", ErrInvalidInboxWrite},
-		{"event", "task:1", InboxActionRead, "operator:test", "", ErrInvalidInboxWrite},
+		{"key", "conversation:1", ErrInvalidInboxItem},
+		{"trailing", "task:12x", ErrInvalidInboxItem},
+		{"zero id", "task:0", ErrInvalidInboxItem},
+		{"deploy", "deploy:77", nil},
+		{"deploy service", "deploy:handoffkeep:77", nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := s.ApplyInbox(ctx, []string{tc.key}, tc.action, nil, tc.actor, tc.event)
-			if !errors.Is(err, tc.want) {
+			result, err := s.ApplyInbox(ctx, []string{tc.key}, InboxActionRead, nil, "operator:test", "e-"+tc.name)
+			if err != nil {
+				t.Fatalf("envelope: %v", err)
+			}
+			if len(result.Items) != 1 || !errors.Is(result.Items[0].Err, tc.want) {
+				t.Fatalf("item outcome %+v, want %v", result.Items, tc.want)
+			}
+		})
+	}
+	// An envelope problem refuses the whole call.
+	for _, tc := range []struct {
+		name, actor, event string
+		want               error
+	}{
+		{"actor", "", "e", ErrInvalidInboxWrite},
+		{"event", "operator:test", "", ErrInvalidInboxWrite},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := s.ApplyInbox(ctx, []string{"task:1"}, InboxActionRead, nil, tc.actor, tc.event); !errors.Is(err, tc.want) {
 				t.Fatalf("err %v, want %v", err, tc.want)
 			}
 		})

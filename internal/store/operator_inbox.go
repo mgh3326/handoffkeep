@@ -101,7 +101,9 @@ func (s *Store) ApplyInbox(ctx context.Context, keys []string, action string, un
 	if !validInboxAction(action) || strings.TrimSpace(actor) == "" || !validText(actor, 256) || strings.TrimSpace(eventKey) == "" || !validText(eventKey, 128) {
 		return out, ErrInvalidInboxWrite
 	}
-	now := time.Now().UTC()
+	// Microsecond precision, the column's: the value returned here is the
+	// value a later read sees.
+	now := time.Now().UTC().Truncate(time.Microsecond)
 	if action == InboxActionSnooze {
 		if until == nil {
 			return out, ErrInvalidInboxSnooze
@@ -139,7 +141,7 @@ func (s *Store) UndoInbox(ctx context.Context, eventKey, actor string) ([]InboxW
 	if strings.TrimSpace(eventKey) == "" || !validText(eventKey, 128) || strings.TrimSpace(actor) == "" || !validText(actor, 256) {
 		return nil, ErrInvalidInboxWrite
 	}
-	now := time.Now().UTC()
+	now := time.Now().UTC().Truncate(time.Microsecond)
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, err

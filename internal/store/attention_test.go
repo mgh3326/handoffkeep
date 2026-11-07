@@ -386,8 +386,10 @@ func TestAttentionExcludesTriagedAndFlagsWoken(t *testing.T) {
 		t.Fatalf("woken task state %+v", item)
 	}
 
-	// Reading the woken item clears the mark without putting it to sleep.
-	if _, err := s.ApplyInbox(ctx, []string{taskKey}, InboxActionRead, nil, "operator:test", "read-one"); err != nil {
+	// Reading an item after it woke clears the mark without putting it back
+	// to sleep. (Reading before the snooze comes due must not clear it, which
+	// is why the read time is set past the wake time here.)
+	if _, err := s.pool.Exec(ctx, `UPDATE operator_inbox_state SET read_at=$2,updated_at=$2 WHERE item_key=$1`, taskKey, until.Add(30*time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	got, err = s.Attention(ctx, until.Add(time.Minute))
