@@ -17,6 +17,7 @@ on:
           - test
           - vitest
           - build
+          - deploy
 
       packages:
         description: Space-separated Go package patterns (suite=test only)

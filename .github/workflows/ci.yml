@@ -12,7 +12,7 @@ on:
         default: ''
         type: string
       suite:
-        description: Which suites to run (all, test, vitest, build)
+        description: Which suites to run (all, test, vitest, build, deploy)
         required: false
         default: all
         type: string
@@ -21,7 +21,8 @@ on:
         required: false
         default: ''
         type: string
-# Two tiers (hk:doc decision/2026-11-05/fleet-ci-three-tiers, hk 2935).
+# Three tiers, the third in deploy.yml (hk:doc
+# decision/2026-11-07/fleet-ci-three-tiers-r2, hk 3440).
 #   T-PR   pull_request, and every other event too: test, pr-store-db, vitest,
 #          build and auto-tag-test. Light: no -race, no macOS, hosted runners
 #          only (this repo is public, so PR code never runs on our machines).
@@ -29,14 +30,24 @@ on:
 #          and only when a PR changes internal/store or internal/testdb: PRs
 #          that broke store tests merged and left main red twice in one day
 #          (hk 3193). The mergewake required checks name these jobs.
-#   T-POST every event except pull_request (main push, dispatch, and the
-#          ci-any-ref call): the post-* jobs add -race with PostgreSQL, the
-#          migration smoke, the mutant suites, the release dry run and macOS.
-#          On a main push only, their runner comes from a repository
-#          variable (HANDOFFKEEP_POST_LINUX_RUNNER / HANDOFFKEEP_POST_MAC_RUNNER,
-#          one runs-on label); every other event, and an unset variable, uses a
-#          hosted runner. A dispatch checks out an arbitrary ref, so it never
-#          reaches our machines: only reviewed, merged code does.
+#   T-MAIN every event except pull_request: T-PR plus main-linux, which runs the
+#          whole Go suite against PostgreSQL WITHOUT -race, the migration and
+#          startup smoke, the reopen/quota mutants and bundle freshness. Target
+#          is under 10 minutes. ci-ok means this tier is green: mergewake watch
+#          and release.yml's ci-green read it. On a main push only, its runner
+#          comes from HANDOFFKEEP_POST_LINUX_RUNNER (one runs-on label); every
+#          other event, and an unset variable, uses a hosted runner, because a
+#          dispatch checks out an arbitrary ref and only reviewed, merged code
+#          may reach our machines.
+#   T-DEPLOY suite=deploy only, off a pull request: deploy-linux and
+#          deploy-macos, the -race suite against PostgreSQL, the -race suite
+#          without a database on macOS, and the release-build dry run.
+#          deploy.yml runs this tier from a successful main ci run, and on
+#          dispatch, and publishes the deploy-ok commit status. A ci-any-ref
+#          dispatch runs the same jobs as a diagnostic and publishes no
+#          deploy-ok. The deploy tier stays on hosted runners: deploy.yml also
+#          runs on dispatch, and its provenance is the caller's event, not a
+#          main push.
 # A newer push cancels the older run of the same ref, on a pull request and on
 # main alike (operator 2026-11-06, reverses hk 3103): the newest main head is
 # the one that ships, and its green ci-ok covers the heads it contains. A
@@ -44,8 +55,10 @@ on:
 # gate treats it as superseded and releases only the newest green head. When
 # the newest head fails, mergewake watch bisects (ci-any-ref) to find and
 # revert the breaking merge. Dispatch and workflow_call runs group by run id,
-# so they never cancel each other.
-concurrency: {group: "ci-${{ github.workflow }}-${{ (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call') && github.run_id || github.ref }}", cancel-in-progress: true}
+# so they never cancel each other. A workflow_run call is deploy.yml's: it
+# groups by run id as well, so neither a main push nor the next deploy can
+# cancel a deploy in progress (the deploy tier never cancels).
+concurrency: {group: "ci-${{ github.workflow }}-${{ (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call' || github.event_name == 'workflow_run') && github.run_id || github.ref }}", cancel-in-progress: true}
 permissions:
   contents: read
 jobs:
@@ -55,7 +68,7 @@ jobs:
     timeout-minutes: 15
     env:
       # T-PR runs without PostgreSQL; DB-backed tests skip here and run in
-      # post-linux (internal/testdb).
+      # main-linux (internal/testdb).
       HANDOFFKEEP_TEST_NO_DB: "1"
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -142,6 +155,7 @@ jobs:
           retention-days: 7
 
   auto-tag-test:
+    if: ${{ inputs.suite != 'deploy' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
@@ -154,7 +168,7 @@ jobs:
     # Runs on every event, so it always reports a conclusion and can be a
     # required check. It tests only on a pull request that changes
     # internal/store or internal/testdb (hk 3193); anywhere else it succeeds
-    # without testing, because post-linux covers main pushes and dispatches.
+    # without testing, because main-linux covers main pushes and dispatches.
     # If the changed files cannot be listed, it tests.
     if: ${{ contains(fromJSON('["all","test"]'), inputs.suite || 'all') }}
     name: 'pr: store + postgres'
@@ -167,7 +181,7 @@ jobs:
           POSTGRES_USER: handoffkeep
           POSTGRES_PASSWORD: handoffkeep
           POSTGRES_DB: handoffkeep
-        # Loopback only, as in post-linux.
+        # Loopback only, as in main-linux.
         ports: ["127.0.0.1:5432:5432"]
         options: >-
           --health-cmd "pg_isready -U handoffkeep" --health-interval 10s --health-timeout 5s --health-retries 5
@@ -183,7 +197,7 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           if [ "$EVENT" != pull_request ]; then
-            echo "event $EVENT: post-linux covers it; not testing"
+            echo "event $EVENT: main-linux covers it; not testing"
             echo "run=no" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -214,13 +228,18 @@ jobs:
           HANDOFFKEEP_TEST_DB_URL: postgres://handoffkeep:handoffkeep@localhost:5432/handoffkeep?sslmode=disable
         run: go test -timeout 10m -count=1 ./internal/store/... -v
 
-  post-linux:
-    # T-POST only. Service containers need Docker on Linux: a self-hosted
-    # runner named by HANDOFFKEEP_POST_LINUX_RUNNER must provide it.
+  main-linux:
+    # T-MAIN only. The whole Go suite against PostgreSQL WITHOUT -race, the
+    # migration and startup smoke, the mutant suites and bundle freshness: the
+    # list every merged head runs, kept under 10 minutes (hk 3440). -race,
+    # macOS and the release dry run live in the deploy tier, which deploy.yml
+    # starts after this whole tier is green. Service containers need Docker on
+    # Linux: a self-hosted runner named by HANDOFFKEEP_POST_LINUX_RUNNER must
+    # provide it.
     if: ${{ github.event_name != 'pull_request' && contains(fromJSON('["all","test"]'), inputs.suite || 'all') }}
-    name: 'post: race + postgres'
+    name: 'main: postgres'
     runs-on: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.HANDOFFKEEP_POST_LINUX_RUNNER) || 'ubuntu-latest' }}
-    timeout-minutes: 45
+    timeout-minutes: 30
     env:
       HANDOFFKEEP_TEST_DB_URL: postgres://handoffkeep:handoffkeep@localhost:5432/handoffkeep?sslmode=disable
     services:
@@ -255,34 +274,73 @@ jobs:
         env:
           PUSH_BEFORE: ${{ github.event_name == 'push' && github.event.before || '' }}
         run: bash scripts/test-task-expected-migration.sh
-      - name: go test -race
+      - name: go test (PostgreSQL, no race)
         if: ${{ inputs.packages == '' }}
-        run: go test -v -race -timeout 30m ./...
-      - name: go test -race (packages)
+        run: go test -v -timeout 30m ./...
+      - name: go test (PostgreSQL, no race, packages)
         if: ${{ inputs.packages != '' }}
         env:
           SUITE: ${{ inputs.suite }}
           PACKAGES: ${{ inputs.packages }}
         run: |
           bash scripts/validate-ci-packages.sh
-          echo "go test -v -race -timeout 30m $PACKAGES"
-          go test -v -race -timeout 30m $PACKAGES
+          echo "go test -v -timeout 30m $PACKAGES"
+          go test -v -timeout 30m $PACKAGES
       - name: Reopen regression mutants
         if: ${{ inputs.packages == '' }}
         run: python3 scripts/task-reopen-mutants.py
       - name: Quota regression mutants
         if: ${{ inputs.packages == '' }}
         run: python3 scripts/quota-mutants.py
-      - if: ${{ inputs.packages == '' }}
-        run: bash scripts/test-build-release.sh
 
-  post-macos:
-    # T-POST only: the CLI ships darwin binaries, so the suite also runs on
-    # macOS. No service containers there; DB-backed tests skip and run in
-    # post-linux.
-    if: ${{ github.event_name != 'pull_request' && inputs.packages == '' && contains(fromJSON('["all","test"]'), inputs.suite || 'all') }}
-    name: 'post: macos'
-    runs-on: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.HANDOFFKEEP_POST_MAC_RUNNER) || 'macos-latest' }}
+  deploy-linux:
+    # T-DEPLOY (hk 3440): the -race suite against PostgreSQL. It runs on a
+    # green main head, from deploy.yml, and on a ci-any-ref dispatch with
+    # suite=deploy as a diagnostic. No -race failure may be cancelled: the
+    # deploy.yml concurrency group is one per repository and does not cancel.
+    # Both runners are hosted: a dispatch can name any sha, and only reviewed,
+    # merged code may reach our machines.
+    if: ${{ github.event_name != 'pull_request' && inputs.suite == 'deploy' }}
+    name: 'deploy: race + postgres'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      HANDOFFKEEP_TEST_DB_URL: postgres://handoffkeep:handoffkeep@localhost:5432/handoffkeep?sslmode=disable
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: handoffkeep
+          POSTGRES_PASSWORD: handoffkeep
+          POSTGRES_DB: handoffkeep
+        ports: ["127.0.0.1:5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U handoffkeep" --health-interval 10s --health-timeout 5s --health-retries 5
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+      - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with: {go-version-file: go.mod}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with: {node-version-file: web/console/.nvmrc, cache: npm, cache-dependency-path: web/console/package-lock.json}
+      - run: npm ci
+        working-directory: web/console
+      - run: npm run build
+        working-directory: web/console
+      - run: git diff --exit-code -- internal/ui/static/console
+      - run: test -z "$(git status --porcelain --untracked-files=all -- internal/ui/static/console)"
+      - name: go test -race
+        run: go test -v -race -timeout 30m ./...
+
+  deploy-macos:
+    # T-DEPLOY (hk 3440): the CLI ships darwin binaries, so the -race suite
+    # also runs on macOS. No service containers there; DB-backed tests skip
+    # and already ran in deploy-linux. Hosted only, like deploy-linux.
+    if: ${{ github.event_name != 'pull_request' && inputs.suite == 'deploy' }}
+    name: 'deploy: macos'
+    runs-on: macos-latest
     timeout-minutes: 45
     env:
       HANDOFFKEEP_TEST_NO_DB: "1"
@@ -303,17 +361,35 @@ jobs:
       - name: go test -race (no PostgreSQL)
         run: go test -race -timeout 30m ./...
 
+  deploy-release:
+    # T-DEPLOY (hk 3440): the release-build dry run. The tag build and its
+    # checksums are what a host installs, so its refusal and stamping checks
+    # gate deployment, not the merge.
+    if: ${{ github.event_name != 'pull_request' && inputs.suite == 'deploy' }}
+    name: 'deploy: release build'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with: {go-version-file: go.mod}
+      - run: bash scripts/test-build-release.sh
+
   ci-ok:
-    # Aggregate check. On a pull request it covers the T-PR jobs; elsewhere
-    # also the post-* jobs. A dispatch with a partial suite never mints a check
-    # named exactly 'ci-ok'. When the only non-success among the needed jobs is
-    # cancelled or abandoned (a newer main head superseded this run, or no
-    # runner was acquired), the job is skipped, so mergewake reads unknown and
-    # holds instead of seeing a failure (hk 2924). A job that never got a
-    # runner reports abandoned in the needs context although the jobs API says
-    # cancelled (run 42061203904: post-macos abandoned, hk 3155).
+    # Aggregate check. On a pull request it covers the T-PR jobs; on any other
+    # event the T-MAIN jobs. A dispatch with a partial suite emits ci-ok
+    # (<suite>) and a suite=deploy dispatch covers only the deploy jobs; a
+    # check named exactly 'ci-ok' always means the main tier is green. When
+    # the only non-success among the needed jobs is cancelled or abandoned (a
+    # newer main head superseded this run, or no runner was acquired), the job
+    # is skipped, so mergewake reads unknown and holds instead of seeing a
+    # failure (hk 2924). A job that never got a runner reports abandoned in
+    # the needs context although the jobs API says cancelled (run
+    # 42061203904: a deploy job abandoned, hk 3155).
     name: ${{ inputs.packages != '' && 'ci-ok (test, packages)' || ((inputs.suite || 'all') == 'all' && 'ci-ok' || format('ci-ok ({0})', inputs.suite)) }}
-    needs: [test, pr-store-db, vitest, build, auto-tag-test, post-linux, post-macos]
+    needs: [test, pr-store-db, vitest, build, auto-tag-test, main-linux, deploy-linux, deploy-macos, deploy-release]
     if: ${{ always() && (contains(needs.*.result, 'failure') || !(contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'abandoned'))) }}
     runs-on: ubuntu-latest
     steps:
@@ -327,28 +403,39 @@ jobs:
           VITEST: ${{ needs.vitest.result }}
           BUILD: ${{ needs.build.result }}
           AUTO_TAG: ${{ needs.auto-tag-test.result }}
-          POST_LINUX: ${{ needs.post-linux.result }}
-          POST_MACOS: ${{ needs.post-macos.result }}
+          MAIN_LINUX: ${{ needs.main-linux.result }}
+          DEPLOY_LINUX: ${{ needs.deploy-linux.result }}
+          DEPLOY_MACOS: ${{ needs.deploy-macos.result }}
+          DEPLOY_RELEASE: ${{ needs.deploy-release.result }}
         # A selected job must succeed; an unselected one must report skipped.
         run: |
           case "$SUITE" in
-            all|test|vitest|build) ;;
+            all|test|vitest|build|deploy) ;;
             *) echo "unknown suite: $SUITE"; exit 1 ;;
           esac
           post=yes; [ "$EVENT" = pull_request ] && post=no
+          deploy=no; [ "$SUITE" = deploy ] && deploy=yes
           in_suite() { case "$SUITE" in all|"$1") echo yes ;; *) echo no ;; esac; }
           bad=0
           require() {
             if [ "$1" = yes ] && [ "$3" != success ]; then echo "$2 did not succeed: $3"; bad=1; fi
             if [ "$1" = no ] && [ "$3" != skipped ]; then echo "$2 ran outside its suite or tier: $3"; bad=1; fi
           }
-          require yes auto-tag-test "$AUTO_TAG"
+          # The deploy tier is the only tier a suite=deploy dispatch runs; the
+          # main and PR jobs must all report skipped.
+          deploywanted=no; [ "$deploy" = yes ] && [ "$post" = yes ] && deploywanted=yes
+          require "$deploywanted" deploy-linux "$DEPLOY_LINUX"
+          require "$deploywanted" deploy-macos "$DEPLOY_MACOS"
+          require "$deploywanted" deploy-release "$DEPLOY_RELEASE"
+          main=no; [ "$post" = yes ] && [ "$deploy" = no ] && main=yes
+          # auto-tag-test is a light PR/main job; it never runs in the deploy
+          # tier, which is exactly the three deploy-* jobs.
+          at=yes; [ "$deploy" = yes ] && at=no
+          require "$at" auto-tag-test "$AUTO_TAG"
           require "$(in_suite test)" test "$TEST"
           require "$(in_suite test)" pr-store-db "$PR_STORE_DB"
           require "$(in_suite vitest)" vitest "$VITEST"
           require "$(in_suite build)" build "$BUILD"
-          post_test=no; [ "$post" = yes ] && post_test=$(in_suite test)
-          require "$post_test" post-linux "$POST_LINUX"
-          [ -n "$PACKAGES" ] && post_test=no
-          require "$post_test" post-macos "$POST_MACOS"
+          main_test=no; [ "$main" = yes ] && main_test=$(in_suite test)
+          require "$main_test" main-linux "$MAIN_LINUX"
           exit "$bad"
