@@ -242,6 +242,28 @@ it("moves relative to the row reached by Tab even after another row was selected
   fireEvent.keyDown(middle, { key: "ArrowUp" });
   expect(document.activeElement?.id).toBe("work-row-103");
 });
+it("finds Korean titles and shows the fresh translation first", async () => {
+  vi.stubGlobal("fetch", vi.fn(async (path: string) => path.includes("projects") ? response({ projects: ["a"] }) : response({ tasks: [{ ...task, title_ko: "한국어 작업" }], states: ["developing"], generated_at: "now", truncated: false })));
+  history.replaceState(null, "", "/ui/work?project=a&view=active&q=%ED%95%9C%EA%B5%AD%EC%96%B4");
+  render(<WorkPage />);
+  expect(await screen.findByText("한국어 작업")).toBeTruthy();
+});
+it("toggles one translated title and marks a stale one", async () => {
+  const rows = [{ ...task, title_ko: "작업 번역" }, { ...task, id: 102, title: "Changed", title_ko: "오래됨", title_ko_stale: true }];
+  vi.stubGlobal("fetch", vi.fn(async (path: string) => path.includes("projects") ? response({ projects: ["a"] }) : response({ tasks: rows, states: ["developing"], generated_at: "now", truncated: false })));
+  history.replaceState(null, "", "/ui/work?project=a&view=active");
+  render(<WorkPage />);
+  expect(await screen.findByText("작업 번역")).toBeTruthy();
+  expect(screen.getByText("갱신 필요")).toBeTruthy();
+  const indicator = screen.getByRole("button", { name: "원문 보기" });
+  expect(indicator.getAttribute("aria-expanded")).toBe("false");
+  fireEvent.click(indicator);
+  expect(indicator.getAttribute("aria-expanded")).toBe("true");
+  expect(screen.getByText("Task one")).toBeTruthy();
+  expect(screen.getByText("작업 번역")).toBeTruthy();
+  fireEvent.click(indicator);
+  expect(screen.queryByText("Task one")).toBeNull();
+});
 
 
 it("shows row actions when the task row receives keyboard focus", async () => {
@@ -251,4 +273,15 @@ it("shows row actions when the task row receives keyboard focus", async () => {
   expect(document.activeElement).toBe(row);
   const action = screen.getByRole("button", { name: /작업 #101 메뉴/, hidden: true });
   expect(action.closest(".action-row")?.contains(row)).toBe(true);
+});
+it("keeps row priority actions alongside the translation disclosure", async () => {
+  vi.stubGlobal("fetch", vi.fn(async (path: string) => path.includes("projects") ? response({ projects: ["a"] }) : response({ tasks: [{ ...task, title_ko: "작업 번역" }], states: ["developing"], generated_at: "now", truncated: false })));
+  history.replaceState(null, "", "/ui/work?project=a&view=active");
+  render(<WorkPage />);
+  const row = (await screen.findByText("작업 번역")).closest(".action-row");
+  expect(row?.querySelector('[aria-label="원문 보기"]')).toBeTruthy();
+  const menu = screen.getByRole("button", { name: "작업 #101 메뉴", hidden: true });
+  fireEvent.click(menu);
+  fireEvent.click(screen.getByRole("menuitem", { name: "우선순위 변경" }));
+  expect(screen.getByRole("menu", { name: "우선순위 선택" })).toBeTruthy();
 });

@@ -11,6 +11,8 @@ export type AttentionDecision = {
   id: number;
   lane: string;
   question: string;
+  question_ko?: string;
+  question_ko_stale?: boolean;
   created_at: string;
   due_at: string | null;
   overdue: boolean;
@@ -24,6 +26,8 @@ export type AttentionTask = {
   key: string;
   id: number;
   title: string;
+  title_ko?: string;
+  title_ko_stale?: boolean;
   lane: string;
   state: string;
   priority: number;
@@ -38,6 +42,8 @@ export type AttentionDeploy = {
   service: string;
   task_id: number;
   title: string;
+  title_ko?: string;
+  title_ko_stale?: boolean;
   pr: string;
   merged_at: string;
   read: boolean;

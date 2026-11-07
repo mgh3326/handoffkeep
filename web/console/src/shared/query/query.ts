@@ -375,7 +375,7 @@ export function taskMatchesQuery(task: BoardTask, filters: QueryFilters): boolea
   if (filters.text) {
     const needle = filters.text.trim().toLowerCase();
     const id = String(task.id);
-    const textHit = task.title.toLowerCase().includes(needle) || id === needle.replace(/^#/, "");
+    const textHit = task.title.toLowerCase().includes(needle) || (!task.title_ko_stale && (task.title_ko || "").toLowerCase().includes(needle)) || id === needle.replace(/^#/, "");
     if (!textHit) return false;
   }
   if (filters.state && task.state !== filters.state) return false;

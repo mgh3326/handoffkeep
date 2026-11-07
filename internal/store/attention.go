@@ -55,6 +55,7 @@ type AttentionDecisions struct {
 type AttentionDecision struct {
 	Key       string
 	Source    string
+	SourceRef string
 	ID        int64
 	Lane      string
 	Question  string
@@ -194,8 +195,8 @@ func attentionDecisionLess(a, b AttentionDecision) bool {
 }
 
 func attentionRequestItems(ctx context.Context, tx pgx.Tx, now time.Time) ([]AttentionDecision, error) {
-	rows, err := tx.Query(ctx, `SELECT d.id,d.lane,d.question,d.created_at,d.due_at,s.read_at,s.done_at,s.snoozed_until
-		FROM (SELECT id,lane,question,created_at,due_at FROM decision_requests WHERE `+decisionOpenSQL+`) d
+	rows, err := tx.Query(ctx, `SELECT d.id,d.source_ref,d.lane,d.question,d.created_at,d.due_at,s.read_at,s.done_at,s.snoozed_until
+		FROM (SELECT id,source_ref,lane,question,created_at,due_at FROM decision_requests WHERE `+decisionOpenSQL+`) d
 		LEFT JOIN operator_inbox_state s ON s.item_key='decision:request:'||d.id
 		WHERE `+attentionInboxVisible("$1")+`
 		ORDER BY (d.due_at IS NOT NULL AND d.due_at<=$1::timestamptz) DESC, d.due_at ASC NULLS LAST, d.created_at DESC, d.id DESC LIMIT $2`, now, AttentionItems)
@@ -207,7 +208,7 @@ func attentionRequestItems(ctx context.Context, tx pgx.Tx, now time.Time) ([]Att
 	for rows.Next() {
 		x := AttentionDecision{Source: AttentionSourceRequest}
 		var readAt, doneAt, snoozedUntil *time.Time
-		if err := rows.Scan(&x.ID, &x.Lane, &x.Question, &x.CreatedAt, &x.DueAt, &readAt, &doneAt, &snoozedUntil); err != nil {
+		if err := rows.Scan(&x.ID, &x.SourceRef, &x.Lane, &x.Question, &x.CreatedAt, &x.DueAt, &readAt, &doneAt, &snoozedUntil); err != nil {
 			return nil, err
 		}
 		x.Key = "decision:" + x.Source + ":" + strconv.FormatInt(x.ID, 10)

@@ -1,3 +1,4 @@
+import { TranslatedText, useShowOriginal } from "../shared/translation";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { readCsrfToken } from "../shared/boardApi";
 import { isTypingTarget } from "../shared/search";
@@ -55,6 +56,9 @@ function deadline(iso: string) {
   return `${formatMinuteKST(iso) ?? iso}${rel ? ` · ${rel}` : ""}${ms >= 0 && ms <= 2 * 60 * 60_000 ? " · 임박" : ""}`;
 }
 export function DecisionPage({ id }: { id: string }) {
+  const globalOriginal = useShowOriginal();
+  const [detailOriginal, setDetailOriginal] = useState<boolean | null>(null);
+  useEffect(() => setDetailOriginal(null), [globalOriginal]);
   const [detail, setDetail] = useState<Detail | null>(null);
   const [screen, setScreen] = useState<ScreenState>("loading");
   const [option, setOption] = useState("");
@@ -313,7 +317,7 @@ export function DecisionPage({ id }: { id: string }) {
           {detail.task?.project ?? detail.record.lane}{" "}
           {detail.task && (
             <>
-              · <a href={`/ui/tasks/${detail.task.id}`}>{detail.task.title}</a>
+              · <a href={`/ui/tasks/${detail.task.id}`}>{!globalOriginal && detail.task.title_ko && !detail.task.title_ko_stale ? detail.task.title_ko : detail.task.title}{detail.task.title_ko_stale && <small className="hk-translation-stale"> 갱신 필요</small>}</a>
             </>
           )}
         </p>
@@ -323,10 +327,10 @@ export function DecisionPage({ id }: { id: string }) {
           </p>
         )}
       </header>
-      <h2 className="decision-question">{req?.question ?? detail.record.question}</h2>
+      <div className="decision-question-heading"><h2 className="decision-question">{!(detailOriginal ?? globalOriginal) && (req?.question_ko ?? detail.record.question_ko) && !(req?.question_ko_stale ?? detail.record.question_ko_stale) ? (req?.question_ko ?? detail.record.question_ko) : (req?.question ?? detail.record.question)}{(req?.question_ko_stale ?? detail.record.question_ko_stale) && <small className="hk-translation-stale"> 갱신 필요</small>}</h2>{((req?.question_ko ?? detail.record.question_ko) && !(req?.question_ko_stale ?? detail.record.question_ko_stale) || req?.options_ko && !req.options_ko_stale) && <button className="hk-detail-original" type="button" aria-pressed={detailOriginal ?? globalOriginal} onClick={() => setDetailOriginal(!(detailOriginal ?? globalOriginal))}>원문 보기</button>}</div>
       {detail.task && (
         <p className="decision-task-state">
-          태스크 상태: <Chip kind="status" state={detail.task.state} />
+          작업 상태: <Chip kind="status" state={detail.task.state} />
         </p>
       )}
       {state === "answered" && req?.resolution && (
@@ -350,6 +354,7 @@ export function DecisionPage({ id }: { id: string }) {
       )}
       {req && (
         <>
+          {req.options_ko_stale && <small className="hk-translation-stale">갱신 필요</small>}
           <div
             role="radiogroup"
             aria-label="선택지"
@@ -374,7 +379,7 @@ export function DecisionPage({ id }: { id: string }) {
                 </span>
                 <span className="decision-option-body">
                   <strong>
-                    {i + 1}. {o.label}
+                    {i + 1}. {!(detailOriginal ?? globalOriginal) && req.options_ko && !req.options_ko_stale ? req.options_ko[i]?.label ?? o.label : o.label}
                   </strong>
                   <span className="hk-chips">
                     {o.recommended && <DecisionChip group="done" label="권장" icon="check" />}
@@ -403,7 +408,7 @@ export function DecisionPage({ id }: { id: string }) {
           <div className="decision-meta">
             {req.due_at && <p>기한: {deadline(req.due_at)}</p>}
             <p>
-              답이 없으면 {req.default_action} (
+              답이 없으면 {req.default_action === "Wait" ? "대기" : req.default_action} (
               {req.default_trigger || "기록된 트리거 없음"})
             </p>
             {state === "default_applied" && req.resolution?.receipt && (
@@ -424,7 +429,7 @@ export function DecisionPage({ id }: { id: string }) {
             <summary>이력</summary>
             {detail.history.map((h) => (
               <p key={h.id}>
-                {h.id} · revision {h.revision} · {label(h.state)}
+                {h.id} · revision {h.revision} · {label(h.state)} · <TranslatedText original={h.question} korean={h.question_ko} stale={h.question_ko_stale} />
               </p>
             ))}
             {detail.attempts.map((a) => (

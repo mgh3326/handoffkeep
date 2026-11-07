@@ -604,6 +604,8 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("GET /healthz", healthz)
 	m.HandleFunc("/v1/checkpoints", s.checkpoints)
 	m.HandleFunc("GET /v1/search", s.search)
+	m.HandleFunc("PUT /v1/translations", s.translationsPut)
+	m.HandleFunc("GET /v1/translations/missing", s.translationsMissing)
 	m.HandleFunc("GET /v1/sync/delta", s.syncDelta)
 	m.HandleFunc("GET /v1/sync/bootstrap", s.syncBootstrap)
 	m.HandleFunc("GET /v1/sync/rows/{model}/{model_id...}", s.syncRow)

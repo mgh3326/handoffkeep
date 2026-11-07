@@ -13,6 +13,7 @@ import { formatAge } from "../decisions/format";
 import { inView, views, type View } from "./views";
 import { TaskRecord } from "./TaskRecord";
 import { TaskActions } from "../shared/actions/TaskActions";
+import { TranslationIndicator, translationAction, useShowOriginal } from "../shared/translation";
 import { TriageUi, useInboxTriage, type TriageRow } from "../shared/actions/InboxTriage";
 import { fetchInboxStates, type InboxStateView } from "../shared/inboxApi";
 import { QueryBar } from "../shared/query/QueryBar";
@@ -32,6 +33,9 @@ function filterValueLabel(key: string, value: string): string {
   return value;
 }
 export function WorkPage() {
+  const showOriginal = useShowOriginal();
+  const [originalItems, setOriginalItems] = useState<Record<number, boolean>>({});
+  useEffect(() => setOriginalItems({}), [showOriginal]);
   const [overrides, setOverrides] = useState<Record<number, number>>({});
   const [search, setSearch] = useState(() => location.search);
   const [refresh, setRefresh] = useState(0);
@@ -182,10 +186,10 @@ export function WorkPage() {
       if (!rows.length) return null;
       return <section key={group}><h2 className="work-group">{{decision: "결정 필요", input: "분류 대기", working: "진행 중", failed: "실패", done: "완료", neutral: "대기"}[group]} · {rows.length}</h2>{rows.map(t => {
         const job = t.active_job;
-        return <div className="action-row" data-action-task={t.id} key={t.id}><a id={`work-row-${t.id}`} href={`/ui/tasks/${t.id}`} data-inbox-row data-inbox-key={`task:${t.id}`} data-selected={triage.selected.has(`task:${t.id}`) ? "true" : undefined} aria-current={selected === String(t.id) ? "true" : undefined} onKeyDown={e => { if (wide && e.key === "Enter") { e.preventDefault(); update("task", String(t.id)); } }} onClick={e => { if (wide && !e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey) { e.preventDefault(); update("task", String(t.id)); } }}>
-          <span className="work-row-title"><StateIcon state={t.state} /><Mono>#{t.id}</Mono> <span title={t.title}>{t.title}</span></span>
+        return <div className="work-translation-row action-row" data-action-task={t.id} key={t.id}><a id={`work-row-${t.id}`} href={`/ui/tasks/${t.id}`} data-inbox-row data-inbox-key={`task:${t.id}`} data-selected={triage.selected.has(`task:${t.id}`) ? "true" : undefined} aria-current={selected === String(t.id) ? "true" : undefined} onKeyDown={e => { if (wide && e.key === "Enter") { e.preventDefault(); update("task", String(t.id)); } }} onClick={e => { if (wide && !e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey) { e.preventDefault(); update("task", String(t.id)); } }}>
+          <span className="work-row-title"><StateIcon state={t.state} /><Mono>#{t.id}</Mono> <span title={t.title}>{translationAction.applicable(t.title_ko, t.title_ko_stale) ? t.title_ko : t.title}{t.title_ko_stale && <small className="hk-translation-stale"> 갱신 필요</small>}</span></span>
           <span className="work-row-meta"><Chip kind="status" state={t.state} awaiting_decision={t.awaiting_decision} />{job && <span className="hk-chip work-job" title={[job.role, job.model, job.profile, job.host || "기기 미기록", job.harness, job.effort].filter(Boolean).join(" · ")}>{[job.role, job.model, job.profile, job.host || "기기 미기록"].filter(Boolean).join(" · ")}</span>}<Chip kind="lane" lane={t.lane} /><Chip kind="priority" value={t.priority} urgent={t.priority === 1} /><time dateTime={t.updated_at} title={formatMinuteKST(t.updated_at) || t.updated_at}>{formatAge(board?.generatedAt || "", t.updated_at) || "시각 미상"}</time></span>
-        </a><button type="button" className="inbox-select" aria-pressed={triage.selected.has(`task:${t.id}`)} aria-label={`${t.title} 선택`} onClick={() => triage.toggle(`task:${t.id}`)}>✓</button><TaskActions compact target={t} onPriority={value => setOverrides(old => ({ ...old, [t.id]: value }))} /></div>;
+        </a><button type="button" className="inbox-select" aria-pressed={triage.selected.has(`task:${t.id}`)} aria-label={`${t.title} 선택`} onClick={() => triage.toggle(`task:${t.id}`)}>✓</button><TaskActions compact target={t} onPriority={value => setOverrides(old => ({ ...old, [t.id]: value }))} />{translationAction.applicable(t.title_ko, t.title_ko_stale) && <><TranslationIndicator expanded={originalItems[t.id] ?? showOriginal} onChange={expanded => setOriginalItems(items => ({...items, [t.id]: expanded}))} />{(originalItems[t.id] ?? showOriginal) && <span className="hk-original-text">{t.title}</span>}</>}</div>;
       })}</section>;
     })}</div>
   </section>{wide && selected && /^[1-9][0-9]*$/.test(selected) && <aside className="work-pane"><button onClick={() => update("task", "")}>Close</button><TaskRecord id={Number(selected)} /></aside>}</div>;

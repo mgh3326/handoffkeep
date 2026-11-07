@@ -39,11 +39,13 @@ func pathTaskID(re *regexp.Regexp, path string) (int64, bool) {
 }
 
 type boardComment struct {
-	ID        int64     `json:"id"`
-	TaskID    int64     `json:"task_id"`
-	Body      string    `json:"body"`
-	Author    string    `json:"author"`
-	CreatedAt time.Time `json:"created_at"`
+	ID          int64     `json:"id"`
+	TaskID      int64     `json:"task_id"`
+	Body        string    `json:"body"`
+	BodyKO      string    `json:"body_ko,omitempty"`
+	BodyKOStale bool      `json:"body_ko_stale,omitempty"`
+	Author      string    `json:"author"`
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 type boardCommentsResponse struct {
@@ -83,8 +85,24 @@ func (h *Handler) boardTaskComments(w http.ResponseWriter, r *http.Request, task
 		response.Truncated = true
 		response.NextAfterID = xs[len(xs)-1].ID
 	}
+	sources := make([]store.TranslationSource, 0, len(xs))
 	for _, x := range xs {
-		response.Comments = append(response.Comments, projectBoardComment(x))
+		sources = append(sources, store.TranslationSource{EntityID: strconv.FormatInt(x.ID, 10), Field: "body", Original: x.Body})
+	}
+	translations, err := h.store.ListTranslations(r.Context(), "task_comment", sources)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "internal_error")
+		return
+	}
+	for _, x := range xs {
+		v := projectBoardComment(x)
+		for _, tr := range translations {
+			if tr.EntityID == strconv.FormatInt(x.ID, 10) {
+				v.BodyKO = tr.Text
+				v.BodyKOStale = tr.Stale
+			}
+		}
+		response.Comments = append(response.Comments, v)
 	}
 	writeBoardJSON(w, response)
 }

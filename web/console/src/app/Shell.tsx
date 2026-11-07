@@ -12,6 +12,7 @@ import { usePoll as poll } from "../shared/usePoll";
 import { Icon } from "../shared/Icon";
 import { applyTheme, loadTheme } from "../shared/theme";
 import { Chip } from "../shared/ui/Chip";
+import { OriginalPreference } from "../shared/translation";
 
 export type NavKey = "home" | "work" | "decisions" | "deploys";
 
@@ -63,7 +64,7 @@ export function Shell({ current, children }: { current: NavKey | null; children:
         <a className="hk-shell-brand" href="/ui">
           handoffkeep
         </a>
-        <ThemeChoice />
+        <div className="hk-shell-controls"><OriginalPreference /><ThemeChoice /></div>
       </header>
       <nav className="hk-shell-nav" aria-label="콘솔 내비게이션">
         {destinations.map((d) => (

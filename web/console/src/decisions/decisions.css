@@ -408,3 +408,13 @@ html {
     position: static;
   }
 }
+
+.decision-translation-row { position: relative; }
+.decision-translation-row > .hk-translation-indicator { position: absolute; right: var(--hk-space-2); top: var(--hk-space-1); }
+.decision-translation-row:has(> .hk-translation-indicator) .decision-row { padding-right: var(--hk-space-12); }
+.decision-summary small { color: var(--hk-text-muted); }
+
+.decision-question-heading { display: flex; align-items: baseline; gap: var(--hk-space-2); }
+.hk-detail-original { flex: none; border: 0; background: transparent; color: var(--hk-text-muted); font-size: var(--hk-type-meta); padding: var(--hk-space-1); cursor: pointer; }
+.hk-detail-original:hover { color: var(--hk-text-primary); text-decoration: underline; }
+.hk-detail-original:focus-visible { outline: var(--hk-focus-width) solid var(--hk-focus); outline-offset: var(--hk-focus-offset); }

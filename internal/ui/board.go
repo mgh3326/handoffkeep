@@ -72,14 +72,16 @@ func projectWorkBoard(board store.LinearBoard) *boardWorkBoard {
 }
 
 type boardTask struct {
-	ActiveJob  *store.ActiveJobSummary `json:"active_job,omitempty"`
-	WorkBoard  *boardWorkBoard         `json:"work_board,omitempty"`
-	ID         int64                   `json:"id"`
-	Lane       string                  `json:"lane"`
-	ParentLane string                  `json:"parent_lane,omitempty"`
-	Title      string                  `json:"title"`
-	Kind       string                  `json:"kind"`
-	State      string                  `json:"state"`
+	ActiveJob    *store.ActiveJobSummary `json:"active_job,omitempty"`
+	WorkBoard    *boardWorkBoard         `json:"work_board,omitempty"`
+	ID           int64                   `json:"id"`
+	Lane         string                  `json:"lane"`
+	ParentLane   string                  `json:"parent_lane,omitempty"`
+	Title        string                  `json:"title"`
+	TitleKO      string                  `json:"title_ko,omitempty"`
+	TitleKOStale bool                    `json:"title_ko_stale,omitempty"`
+	Kind         string                  `json:"kind"`
+	State        string                  `json:"state"`
 	// Category is derived from State; AwaitingDecision is the flag that
 	// replaced the needs_decision state. Both feed the console's views.
 	Category         string `json:"category"`
@@ -210,8 +212,25 @@ func (h *Handler) boardTasks(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "internal_error")
 		return
 	}
+	titleSources := make([]store.TranslationSource, 0, len(tasks))
+	for _, task := range tasks {
+		titleSources = append(titleSources, store.TranslationSource{EntityID: strconv.FormatInt(task.ID, 10), Field: "title", Original: task.Title})
+	}
+	translations, err := h.store.ListTranslations(r.Context(), "task", titleSources)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "internal_error")
+		return
+	}
+	translatedTitles := make(map[string]store.Translation, len(translations))
+	for _, translation := range translations {
+		translatedTitles[translation.EntityID] = translation
+	}
 	for _, task := range tasks {
 		row := projectBoardTask(task)
+		if translation, ok := translatedTitles[strconv.FormatInt(task.ID, 10)]; ok {
+			row.TitleKO = translation.Text
+			row.TitleKOStale = translation.Stale
+		}
 		row.WorkBoard = projectWorkBoard(workBoards[task.ID])
 		if job, ok := activeJobs[task.ID]; ok {
 			row.ActiveJob = &job
@@ -334,6 +353,9 @@ type boardDetailResponse struct {
 	ChangesTruncated   bool               `json:"changes_truncated"`
 	JobsTruncated      bool               `json:"jobs_truncated"`
 	Task               boardTask          `json:"task"`
+	Body               string             `json:"body,omitempty"`
+	BodyKO             string             `json:"body_ko,omitempty"`
+	BodyKOStale        bool               `json:"body_ko_stale,omitempty"`
 	Events             []boardEvent       `json:"events"`
 	Dwell              []dwellSegment     `json:"dwell"`
 	Linear             *boardLinear       `json:"linear"`
@@ -538,8 +560,40 @@ func (h *Handler) boardTaskDetail(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "internal_error")
 		return
 	}
+	translations, err := h.store.ListTranslations(r.Context(), "task", []store.TranslationSource{{EntityID: strconv.FormatInt(task.ID, 10), Field: "title", Original: task.Title}})
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "internal_error")
+		return
+	}
+	if len(translations) > 0 {
+		response.Task.TitleKO = translations[0].Text
+		response.Task.TitleKOStale = translations[0].Stale
+	}
+	if task.BodyDoc != "" {
+		doc, found, e := h.store.GetDocument(r.Context(), strings.SplitN(task.BodyDoc, "#", 2)[0])
+		if e != nil {
+			writeJSONError(w, http.StatusInternalServerError, "internal_error")
+			return
+		}
+		if found {
+			response.Body = doc.Body
+			bodyTranslations, e := h.store.ListTranslations(r.Context(), "task", []store.TranslationSource{{EntityID: strconv.FormatInt(task.ID, 10), Field: "body", Original: doc.Body}})
+			if e != nil {
+				writeJSONError(w, http.StatusInternalServerError, "internal_error")
+				return
+			}
+			if len(bodyTranslations) > 0 {
+				response.BodyKO = bodyTranslations[0].Text
+				response.BodyKOStale = bodyTranslations[0].Stale
+			}
+		}
+	}
 	response.Task.WorkBoard = projectWorkBoard(workBoards[task.ID])
 	response.DecisionRequests, response.DecisionLegacy = taskDecisionViews(task, now)
+	if err := h.translateDecisionViews(r.Context(), response.DecisionRequests); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "internal_error")
+		return
+	}
 	for _, event := range task.Events {
 		response.Events = append(response.Events, boardEvent{
 			ID: event.ID, Kind: event.Kind, From: event.From, To: event.To, By: event.By,

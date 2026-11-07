@@ -63,6 +63,12 @@ describe("query syntax", () => {
     expect(taskMatchesQuery(task({ priority: 1 }), { ...filters, priority: "3" })).toBe(false);
   });
 
+  it("matches fresh Korean titles but excludes stale translations", () => {
+    const filters = parseQuery("번역제목").filters;
+    expect(taskMatchesQuery(task({ title_ko: "번역제목" }), filters)).toBe(true);
+    expect(taskMatchesQuery(task({ title_ko: "번역제목", title_ko_stale: true }), filters)).toBe(false);
+  });
+
   it("sorts by priority, update time, id and state", () => {
     const tasks = [task({ id: 1, priority: 3, updated_at: "2026-01-01T00:00:00Z", state: "backlog" }), task({ id: 2, priority: 1, updated_at: "2026-01-03T00:00:00Z", state: "developing" }), task({ id: 3, priority: 0, updated_at: "2026-01-02T00:00:00Z", state: "merged" })];
     expect(sortTasks(tasks, "priority").map(item => item.id)).toEqual([2, 1, 3]);

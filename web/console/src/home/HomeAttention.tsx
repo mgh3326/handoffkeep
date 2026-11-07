@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { TranslationIndicator, translationAction, useShowOriginal } from "../shared/translation";
 import { Icon, IconFrame } from "../shared/Icon";
 import { StateIcon } from "../shared/StateIcon";
 import { readStored, writeStored } from "../shared/storage";
@@ -114,33 +115,39 @@ function filterItems(items: { action: Item[]; fyi: Item[] }, filters: QueryFilte
 }
 
 function Row({ item, now, selected, toggle }: { item: Item; now: string; selected: boolean; toggle: (key: string) => void }) {
-  let href: string, id: number, title: string, summary: string;
+  const globalOriginal = useShowOriginal();
+  const [override, setOverride] = useState<boolean | null>(null);
+  useEffect(() => setOverride(null), [globalOriginal]);
+  const showOriginal = override ?? globalOriginal;
+  let stale = false, hasTranslation = false;
+  let href: string, id: number, title: string, original: string, summary: string;
   let icon: React.ReactNode, chips: React.ReactNode;
   if (item.kind === "decision") {
     const x = item.value;
     href = x.source === "request" ? `/ui/decisions/${x.id}` : "/ui/decisions";
-    id = x.id; title = summarizeQuestion(x.question) || "질문 없음"; summary = "결정 대기";
+    id = x.id; stale = !!x.question_ko_stale; hasTranslation = translationAction.applicable(x.question_ko, stale); original = x.question; title = summarizeQuestion(hasTranslation ? x.question_ko ?? x.question : x.question) || "질문 없음"; summary = "결정 대기";
     icon = <StateIcon state="awaiting_decision" />;
     chips = <><Chip kind="status" state="awaiting_decision" label={x.source === "request" ? "요청" : "알림"} />{x.overdue ? <Chip kind="status" state="stalled" stalled label="기한 경과" /> : x.due_at ? <Chip kind="status" state="triage" label={`기한 ${age(x.due_at, now)} 남음`} /> : null}<Chip kind="lane" lane={x.lane} /></>;
   } else if (item.kind === "task") {
     const x = item.value;
-    href = `/ui/tasks/${x.id}`; id = x.id; title = x.title; summary = x.reason === "stalled" ? "멈춘 작업" : "결정 대기 작업";
+    href = `/ui/tasks/${x.id}`; id = x.id; stale = !!x.title_ko_stale; hasTranslation = translationAction.applicable(x.title_ko, stale); original = x.title; title = hasTranslation ? x.title_ko ?? x.title : x.title; summary = x.reason === "stalled" ? "멈춘 작업" : "결정 대기 작업";
     icon = x.reason === "stalled" ? <Icon name="warning" /> : <StateIcon state={x.state} />;
     chips = <><Chip kind="status" state={x.state} stalled={x.reason === "stalled"} label={x.reason === "stalled" ? "멈춤" : undefined} /><Chip kind="lane" lane={x.lane} /></>;
   } else {
     const x = item.value;
-    href = `/ui/tasks/${x.task_id}`; id = x.task_id; title = x.title; summary = "머지 후 미배포";
+    href = `/ui/tasks/${x.task_id}`; id = x.task_id; stale = !!x.title_ko_stale; hasTranslation = translationAction.applicable(x.title_ko, stale); original = x.title; title = hasTranslation ? x.title_ko ?? x.title : x.title; summary = "머지 후 미배포";
     icon = <StateIcon state="merged" />; chips = <Chip kind="lane" lane={x.service} />;
   }
   return <li data-action-task={item.kind === "task" ? item.value.id : undefined} className={`ha-item action-row${item.read ? " ha-item--seen" : ""}${selected ? " ha-item--selected" : ""}`}>
     <a className="ha-row" href={href} data-inbox-row data-inbox-key={item.key} data-selected={selected ? "true" : undefined}>
       <span className="ha-icon">{icon}</span><span className="ha-content">
-        <span className="ha-line"><span className="ha-dot" aria-hidden="true" /><span className="hk-sr-only">{item.read ? "읽음" : "읽지 않음"}</span><Mono>#{id}</Mono><span className="ha-row-title">{title}</span><time dateTime={item.time} title={formatMinuteUTC(item.time) ?? "시각 미상"}>{age(now, item.time)}</time></span>
+        <span className="ha-line"><span className="ha-dot" aria-hidden="true" /><span className="hk-sr-only">{item.read ? "읽음" : "읽지 않음"}</span><Mono>#{id}</Mono><span className="ha-row-title">{title}{stale && <small className="hk-translation-stale"> 갱신 필요</small>}</span><time dateTime={item.time} title={formatMinuteUTC(item.time) ?? "시각 미상"}>{age(now, item.time)}</time></span>
         <span className="ha-detail"><span className="ha-summary">{summary}</span><span className="ha-chips">{chips}{item.woken ? <Chip kind="status" state="triage" label="다시 알림" /> : null}</span></span>
       </span>
     </a>
     <button type="button" className="inbox-select" aria-pressed={selected} aria-label={`${title} 선택`} onClick={() => toggle(item.key)}>✓</button>
     {item.kind === "task" && <HomeTaskAction id={item.value.id} />}
+    {hasTranslation && <TranslationIndicator expanded={showOriginal} onChange={setOverride} />}{hasTranslation && showOriginal && <span className="hk-original-text">{original}</span>}
   </li>;
 }
 function HomeTaskAction({ id }: { id: number }) {

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/mgh3326/handoffkeep/internal/cfaccess"
@@ -16,40 +17,46 @@ import (
 const attentionDeployItems = 5
 
 type attentionDecisionView struct {
-	Key       string     `json:"key"`
-	Source    string     `json:"source"`
-	ID        int64      `json:"id"`
-	Lane      string     `json:"lane"`
-	Question  string     `json:"question"`
-	CreatedAt time.Time  `json:"created_at"`
-	DueAt     *time.Time `json:"due_at"`
-	Overdue   bool       `json:"overdue"`
-	Read      bool       `json:"read"`
-	Woken     bool       `json:"woken"`
+	Key             string     `json:"key"`
+	Source          string     `json:"source"`
+	ID              int64      `json:"id"`
+	Lane            string     `json:"lane"`
+	Question        string     `json:"question"`
+	QuestionKO      string     `json:"question_ko,omitempty"`
+	QuestionKOStale bool       `json:"question_ko_stale,omitempty"`
+	CreatedAt       time.Time  `json:"created_at"`
+	DueAt           *time.Time `json:"due_at"`
+	Overdue         bool       `json:"overdue"`
+	Read            bool       `json:"read"`
+	Woken           bool       `json:"woken"`
 }
 
 type attentionTaskView struct {
-	Key      string    `json:"key"`
-	ID       int64     `json:"id"`
-	Title    string    `json:"title"`
-	Lane     string    `json:"lane"`
-	State    string    `json:"state"`
-	Priority int       `json:"priority"`
-	Reason   string    `json:"reason"`
-	Since    time.Time `json:"since"`
-	Read     bool      `json:"read"`
-	Woken    bool      `json:"woken"`
+	Key          string    `json:"key"`
+	ID           int64     `json:"id"`
+	Title        string    `json:"title"`
+	TitleKO      string    `json:"title_ko,omitempty"`
+	TitleKOStale bool      `json:"title_ko_stale,omitempty"`
+	Lane         string    `json:"lane"`
+	State        string    `json:"state"`
+	Priority     int       `json:"priority"`
+	Reason       string    `json:"reason"`
+	Since        time.Time `json:"since"`
+	Read         bool      `json:"read"`
+	Woken        bool      `json:"woken"`
 }
 
 type attentionDeployView struct {
-	Key      string    `json:"key"`
-	Service  string    `json:"service"`
-	TaskID   int64     `json:"task_id"`
-	Title    string    `json:"title"`
-	PR       string    `json:"pr"`
-	MergedAt time.Time `json:"merged_at"`
-	Read     bool      `json:"read"`
-	Woken    bool      `json:"woken"`
+	Key          string    `json:"key"`
+	Service      string    `json:"service"`
+	TaskID       int64     `json:"task_id"`
+	Title        string    `json:"title"`
+	TitleKO      string    `json:"title_ko,omitempty"`
+	TitleKOStale bool      `json:"title_ko_stale,omitempty"`
+	PR           string    `json:"pr"`
+	MergedAt     time.Time `json:"merged_at"`
+	Read         bool      `json:"read"`
+	Woken        bool      `json:"woken"`
 }
 
 type attentionResponse struct {
@@ -139,6 +146,53 @@ func (h *Handler) attention(w http.ResponseWriter, r *http.Request, identity cfa
 	}
 	response.Deploys.EventsCapped = deploys.EventsCapped
 	response.Deploys.Count, response.Deploys.Items = attentionDeploys(deploys, states, now)
+	taskSources := make([]store.TranslationSource, 0, len(response.Tasks.Items)+len(response.Deploys.Items))
+	for _, x := range response.Tasks.Items {
+		taskSources = append(taskSources, store.TranslationSource{EntityID: strconv.FormatInt(x.ID, 10), Field: "title", Original: x.Title})
+	}
+	for _, x := range response.Deploys.Items {
+		taskSources = append(taskSources, store.TranslationSource{EntityID: strconv.FormatInt(x.TaskID, 10), Field: "title", Original: x.Title})
+	}
+	taskTranslations, err := h.store.ListTranslations(r.Context(), "task", taskSources)
+	if err != nil {
+		h.attentionFailed(w, err)
+		return
+	}
+	for i := range response.Tasks.Items {
+		for _, tr := range taskTranslations {
+			if tr.EntityID == strconv.FormatInt(response.Tasks.Items[i].ID, 10) {
+				response.Tasks.Items[i].TitleKO = tr.Text
+				response.Tasks.Items[i].TitleKOStale = tr.Stale
+			}
+		}
+	}
+	for i := range response.Deploys.Items {
+		for _, tr := range taskTranslations {
+			if tr.EntityID == strconv.FormatInt(response.Deploys.Items[i].TaskID, 10) {
+				response.Deploys.Items[i].TitleKO = tr.Text
+				response.Deploys.Items[i].TitleKOStale = tr.Stale
+			}
+		}
+	}
+	decisionSources := make([]store.TranslationSource, 0, len(waiting.Decisions.Items))
+	for _, x := range waiting.Decisions.Items {
+		if strings.HasPrefix(x.SourceRef, "dr-") {
+			decisionSources = append(decisionSources, store.TranslationSource{EntityID: x.SourceRef, Field: "question", Original: x.Question})
+		}
+	}
+	decisionTranslations, err := h.store.ListTranslations(r.Context(), "decision_request", decisionSources)
+	if err != nil {
+		h.attentionFailed(w, err)
+		return
+	}
+	for i, x := range waiting.Decisions.Items {
+		for _, tr := range decisionTranslations {
+			if tr.EntityID == x.SourceRef {
+				response.Decisions.Items[i].QuestionKO = tr.Text
+				response.Decisions.Items[i].QuestionKOStale = tr.Stale
+			}
+		}
+	}
 	writeBoardJSON(w, response)
 }
 

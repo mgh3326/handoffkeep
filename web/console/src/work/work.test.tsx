@@ -79,12 +79,13 @@ describe("Work", () => {
   });
   it("W10 assigns the task page to Work", () => { expect(navKey({ view: "task", id: "101" })).toBe("work"); });
   it("W11 retries a failed record", async () => {
-    const fetcher = vi.fn().mockResolvedValueOnce(new Response("", { status: 500 })).mockResolvedValueOnce(json(detail));
+    let detailCalls = 0;
+    const fetcher = vi.fn(async (path: string) => path.endsWith("/comments") ? json({ comments: [], truncated: false }) : ++detailCalls === 1 ? new Response("", { status: 500 }) : json(detail));
     vi.stubGlobal("fetch", fetcher);
     render(<TaskRecord id={101} />);
     fireEvent.click(await screen.findByRole("button", { name: "다시 시도" }));
     await waitFor(() => expect(screen.getByText(/Example task/)).toBeTruthy());
-    expect(fetcher).toHaveBeenCalledTimes(3);
+    expect(detailCalls).toBe(2);
   });
 });
 
@@ -131,4 +132,14 @@ it("describes priority events in Korean and omits unchanged state arrows", async
   const entry = await screen.findByText(/우선순위 P3 → P2/);
   expect(entry.textContent).not.toContain("developing");
   for (const title of ["종료 근거", "출처", "문서", "변경", "작업 실행", "소요 시간"]) expect(screen.getByRole("heading", { name: title })).toBeTruthy();
+});
+it("keeps translated comments and priority events in the timeline", async () => {
+  const events = [{ id: 1, kind: "metadata", field: "priority", from_value: "3", to_value: "2", from: "developing", to: "developing", by: "operator", note: "priority 3 → 2", at: "2026-11-05T01:00:00Z" }];
+  const comments = [{ id: 2, task_id: 101, body: "Original comment", body_ko: "댓글 번역", author: "worker", created_at: "2026-11-05T02:00:00Z" }];
+  vi.stubGlobal("fetch", vi.fn(async (path: string) => path.includes("/comments") ? json({ comments, truncated: false }) : json({ ...detail, task: { ...task, title_ko: "작업 번역" }, events })));
+  render(<TaskRecord id={101} />);
+  expect(await screen.findByText("작업 번역")).toBeTruthy();
+  expect(await screen.findByText("댓글 번역")).toBeTruthy();
+  expect(screen.getByText(/우선순위 P3 → P2/)).toBeTruthy();
+  expect(screen.getByRole("button", { name: "작업 #101 메뉴" })).toBeTruthy();
 });

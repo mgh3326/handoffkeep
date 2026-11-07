@@ -33,6 +33,8 @@ export type DecisionRecord = {
   task_id: number | null;
   lane: string;
   question: string;
+  question_ko?: string;
+  question_ko_stale?: boolean;
   due_at: string | null;
   overdue: boolean;
   status: string;
@@ -57,7 +59,11 @@ export type Request = {
   revision: number;
   state: string;
   question: string;
+  question_ko?: string;
+  question_ko_stale?: boolean;
   options: Option[];
+  options_ko?: Option[];
+  options_ko_stale?: boolean;
   allow_free: boolean;
   default_action: string;
   default_option?: string;
@@ -86,6 +92,8 @@ export type Detail = {
   task: {
     id: number;
     title: string;
+    title_ko?: string;
+    title_ko_stale?: boolean;
     state: string;
     lane: string;
     project?: string | null;

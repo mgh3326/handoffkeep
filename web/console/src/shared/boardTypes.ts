@@ -45,6 +45,8 @@ export type DecisionRequestView = {
   state: "open" | "overdue" | "uncleaned" | "answered" | "default_applied" | "withdrawn" | "superseded" | string;
   state_label: string;
   question: string;
+  question_ko?: string;
+  question_ko_stale?: boolean;
   options: DecisionOption[];
   allow_free: boolean;
   reason?: string;
@@ -114,6 +116,8 @@ export type BoardTask = {
   lane: string;
   parent_lane?: string;
   title: string;
+  title_ko?: string;
+  title_ko_stale?: boolean;
   kind: string;
   state: string;
   /** Server-derived state category (triage/backlog/unstarted/started/completed/canceled).
@@ -232,6 +236,9 @@ export type BoardDetail = {
   changes_truncated: boolean;
   jobs_truncated: boolean;
   task: BoardTask;
+  body?: string;
+  body_ko?: string;
+  body_ko_stale?: boolean;
   events: BoardEvent[];
   dwell: DwellSegment[];
   linear: { issue_id: string; identifier: string } | null;
@@ -264,6 +271,8 @@ export type BoardComment = {
   id: number;
   task_id: number;
   body: string;
+  body_ko?: string;
+  body_ko_stale?: boolean;
   author: string;
   created_at: string;
 };

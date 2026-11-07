@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -387,5 +388,77 @@ func TestMigrateAddsTaskBodyDoc(t *testing.T) {
 	}
 	if got := xs[0].Refs["tasks"]; len(got) != 1 || got[0] != strconv.FormatInt(x.ID, 10) {
 		t.Fatalf("task link=%v want %d", got, x.ID)
+	}
+}
+
+func TestSearchTasksRanksTranslatedBodyBelowTitle(t *testing.T) {
+	s, pool := searchTestStore(t)
+	ctx := t.Context()
+	titleID := seedTaskRow(t, pool, "translation-search", "Title result", "backlog")
+	bodyID := seedTaskRow(t, pool, "translation-search", "Body result", "backlog")
+	if _, err := pool.Exec(ctx, `INSERT INTO documents(key,kind,body,sha256,created_by,created_at,updated_at) VALUES('search/body','note','original body','hash','test',now(),now())`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE tasks SET body_doc='search/body#section' WHERE id=$1`, bodyID); err != nil {
+		t.Fatal(err)
+	}
+	for _, x := range []struct {
+		id                  int64
+		field, text, source string
+	}{{titleID, "title", "검색표적 제목", "Title result"}, {bodyID, "body", "본문 검색표적 내용", "original body"}} {
+		if err := s.PutTranslation(ctx, Translation{Entity: "task", EntityID: strconv.FormatInt(x.id, 10), Field: x.field, Lang: "ko", SourceSHA256: SourceSHA256(x.source), Text: x.text, Translator: "test"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	results, err := s.Search(ctx, "검색표적", "tasks", "translation-search", 10)
+	if err != nil || len(results) != 2 {
+		t.Fatalf("results=%+v err=%v", results, err)
+	}
+	if results[0].Key != strconv.FormatInt(titleID, 10) || results[1].Key != strconv.FormatInt(bodyID, 10) || !strings.Contains(results[0].Snippet, "검색표적") || !strings.Contains(results[1].Snippet, "검색표적") {
+		t.Fatalf("incorrect ranking or snippet: %+v", results)
+	}
+}
+
+func TestSearchTasksExcludesStaleTranslations(t *testing.T) {
+	s, pool := searchTestStore(t)
+	ctx := t.Context()
+	id := seedTaskRow(t, pool, "stale-search", "Original title", "backlog")
+	if _, err := pool.Exec(ctx, `INSERT INTO documents(key,kind,body,sha256,created_by,created_at,updated_at) VALUES('search/stale','note','Original body','hash','test',now(),now())`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE tasks SET body_doc='search/stale#section' WHERE id=$1`, id); err != nil {
+		t.Fatal(err)
+	}
+	var commentID int64
+	if err := pool.QueryRow(ctx, `INSERT INTO task_comments(task_id,body,author,created_at) VALUES($1,'Original comment','test',now()) RETURNING id`, id).Scan(&commentID); err != nil {
+		t.Fatal(err)
+	}
+	for _, x := range []struct{ entity, entityID, field, original, text string }{
+		{"task", strconv.FormatInt(id, 10), "title", "Original title", "제목표적"},
+		{"task", strconv.FormatInt(id, 10), "body", "Original body", "본문표적"},
+		{"task_comment", strconv.FormatInt(commentID, 10), "body", "Original comment", "댓글표적"},
+	} {
+		if err := s.PutTranslation(ctx, Translation{Entity: x.entity, EntityID: x.entityID, Field: x.field, Lang: "ko", SourceSHA256: SourceSHA256(x.original), Text: x.text, Translator: "test"}); err != nil {
+			t.Fatal(err)
+		}
+		results, err := s.Search(ctx, x.text, "tasks", "stale-search", 10)
+		if err != nil || len(results) != 1 || !strings.Contains(results[0].Snippet, x.text) {
+			t.Fatalf("fresh %s: %+v %v", x.field, results, err)
+		}
+	}
+	if _, err := pool.Exec(ctx, `UPDATE tasks SET title='Changed title' WHERE id=$1`, id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE documents SET body='Changed body' WHERE key='search/stale'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE translations SET source_sha256=$1 WHERE entity='task_comment' AND entity_id=$2`, SourceSHA256("Different comment"), strconv.FormatInt(commentID, 10)); err != nil {
+		t.Fatal(err)
+	}
+	for _, query := range []string{"제목표적", "본문표적", "댓글표적"} {
+		results, err := s.Search(ctx, query, "tasks", "stale-search", 10)
+		if err != nil || len(results) != 0 {
+			t.Fatalf("stale %s: %+v %v", query, results, err)
+		}
 	}
 }

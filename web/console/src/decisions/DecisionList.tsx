@@ -1,3 +1,4 @@
+import { TranslationIndicator, translationAction, useShowOriginal } from "../shared/translation";
 import { useCallback, useEffect, useState } from "react";
 import { Icon } from "../shared/Icon";
 import { StateIcon } from "../shared/StateIcon";
@@ -53,6 +54,9 @@ const empty: Record<Tab, { text: string; next: Tab; nextLabel: string }> = {
 const plainClick = (e: React.MouseEvent) =>
   !e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey && e.button === 0;
 export function DecisionList() {
+  const showOriginal = useShowOriginal();
+  const [originalItems, setOriginalItems] = useState<Record<number, boolean>>({});
+  useEffect(() => setOriginalItems({}), [showOriginal]);
   const [tab, setTab] = useState<Tab>(initialTab);
   const [selected, setSelected] = useState<string | null>(() =>
     readStored("hk-decisions:selected", sessionStorage),
@@ -206,6 +210,7 @@ export function DecisionList() {
           return (
             <div key={x.id}>
               {firstNew && <p className="decision-divider">새 항목</p>}
+              <div className="decision-translation-row">
               <a
                 href={`/ui/decisions/${x.id}?tab=${tab}`}
                 className={`decision-row${isNew ? " decision-row--new" : ""}`}
@@ -219,7 +224,7 @@ export function DecisionList() {
                   <span className="decision-row-title">
                     {isNew && <span className="hk-sr-only">안 읽음 </span>}
                     <Mono className="decision-id">#{x.id}</Mono>{" "}
-                    <span className="decision-summary">{summarizeQuestion(x.question)}</span>
+                    <span className="decision-summary">{summarizeQuestion(translationAction.applicable(x.question_ko, x.question_ko_stale) ? x.question_ko ?? x.question : x.question)}{x.question_ko_stale && <small className="hk-translation-stale"> 갱신 필요</small>}</span>
                   </span>
                   <span className="hk-chips">
                     <span className="hk-chip hk-chip--neutral" data-chip="source">
@@ -245,6 +250,8 @@ export function DecisionList() {
                   </span>
                 </span>
               </a>
+              {translationAction.applicable(x.question_ko, x.question_ko_stale) && <><TranslationIndicator expanded={originalItems[x.id] ?? showOriginal} onChange={expanded => setOriginalItems(items => ({...items, [x.id]: expanded}))} />{(originalItems[x.id] ?? showOriginal) && <span className="hk-original-text">{x.question}</span>}</>}
+              </div>
               {x.superseded_record_id && (
                 <a className="decision-superseded" href={`/ui/decisions/${x.superseded_record_id}`}>
                   대체 요청 {x.superseded_by}

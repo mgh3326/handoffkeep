@@ -110,7 +110,7 @@ func TestAttentionRequestsCountedAndBounded(t *testing.T) {
 		t.Fatalf("count=%d items=%d, want 13 and %d", got.Count, len(got.Items), AttentionItems)
 	}
 	first := got.Items[0]
-	if first.ID != overdue || !first.Overdue || first.Source != AttentionSourceRequest || first.DueAt == nil {
+	if first.ID != overdue || first.SourceRef != "overdue" || !first.Overdue || first.Source != AttentionSourceRequest || first.DueAt == nil {
 		t.Fatalf("first=%+v, want the overdue request %d", first, overdue)
 	}
 	// The rest are the newest, in reverse creation order.

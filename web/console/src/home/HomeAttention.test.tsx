@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { HomeAttention, summarizeQuestion } from "./HomeAttention";
 
@@ -237,4 +237,24 @@ it("leaves the seen key alone when the migration write fails, so the next load r
   expect(stored.get("hk-console:home-seen")).toBe(JSON.stringify(["task:12"]));
   expect(stored.get("hk-console:home-seen-migrated")).toBeUndefined();
   document.querySelector('meta[name="hk-csrf"]')?.remove();
+});
+
+it("shows a fresh Korean title for a deploy and can reveal the original", async () => {
+  serve(payload({ deploys: { count: 1, events_capped: false, items: [{ ...deploy, title_ko: "배포 대기 작업" }] } }));
+  render(<HomeAttention />);
+  expect(await screen.findByText("배포 대기 작업")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "원문 보기" }));
+  expect(screen.getByText(deploy.title)).toBeTruthy();
+});
+it("preserves inbox selection and read state for a translated decision", async () => {
+  serve(payload({ decisions: { count: 1, overdue: 0, items: [{ ...request, read: true, overdue: false, question_ko: "배포할까요?" }] }, tasks: { count: 0, awaiting_decision: 0, stalled: 0, items: [] }, deploys: { count: 0, events_capped: false, items: [] } }));
+  render(<HomeAttention />);
+  const row = (await screen.findByText("배포할까요?")).closest("li");
+  if (!row) throw new Error("missing translated row");
+  expect(within(row).getByText("읽음")).toBeTruthy();
+  const select = within(row).getByRole("button", { name: "배포할까요? 선택", hidden: true });
+  fireEvent.click(select);
+  expect(select.getAttribute("aria-pressed")).toBe("true");
+  fireEvent.click(within(row).getByRole("button", { name: "원문 보기" }));
+  expect(within(row).getByText("Ship the console?")).toBeTruthy();
 });
