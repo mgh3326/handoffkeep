@@ -126,6 +126,14 @@ func (f *fakeYouTrack) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.issues[id] = issue
 		write(http.StatusOK, issue)
 	case strings.HasPrefix(path, "/api/admin/projects/"):
+		// An unresolved project id is an empty path segment. Real YouTrack
+		// answers 404, so the fake does too; callers must pass the id that
+		// projectForTask resolved.
+		id := strings.TrimSuffix(strings.TrimPrefix(path, "/api/admin/projects/"), "/customFields")
+		if id == "" {
+			write(http.StatusNotFound, map[string]string{"error": "not_found"})
+			return
+		}
 		fields := make([]map[string]any, 0, len(f.fieldValues))
 		for name, values := range f.fieldValues {
 			bundleType, elementType := "EnumBundle", "EnumBundleElement"

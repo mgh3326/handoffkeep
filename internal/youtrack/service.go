@@ -44,8 +44,8 @@ type Store interface {
 
 	EnqueueYouTrack(ctx context.Context, taskID int64, op, value string) error
 	DueYouTrackOutbox(ctx context.Context, limit int) ([]store.YouTrackOutboxItem, error)
-	MarkYouTrackOutboxDone(ctx context.Context, id int64) error
-	RescheduleYouTrackOutbox(ctx context.Context, id int64, attempts int, next time.Time, lastError string) error
+	MarkYouTrackOutboxDone(ctx context.Context, id int64, value string) error
+	RescheduleYouTrackOutbox(ctx context.Context, id int64, value string, attempts int, next time.Time, lastError string) error
 
 	DueYouTrackPushTasks(ctx context.Context, limit int) ([]store.Task, error)
 	UnpushedYouTrackComments(ctx context.Context, taskID, afterID int64, limit int) ([]store.TaskComment, error)
@@ -279,8 +279,9 @@ func (s *Service) RecordLane(ctx context.Context, taskID int64, lane string) {
 
 // projectForTask resolves the YouTrack project for an hk project. An unmapped
 // hk project uses OTHER; a missing YouTrack project is an error the push
-// reports as a warning (the sync never creates projects).
-func (s *Service) projectForTask(ctx context.Context, hkProject string) (store.YouTrackProject, string, error) {
+// reports as a warning (the sync never creates projects). persist is false in
+// dry-run mode, which must not write the resolved id back to PG.
+func (s *Service) projectForTask(ctx context.Context, hkProject string, persist bool) (store.YouTrackProject, string, error) {
 	hkProject = strings.TrimSpace(hkProject)
 	if hkProject == "" {
 		hkProject = s.project
@@ -292,14 +293,14 @@ func (s *Service) projectForTask(ctx context.Context, hkProject string) (store.Y
 	if !found {
 		return store.YouTrackProject{}, "", ErrProjectMissing
 	}
-	id, err := s.resolveProjectID(ctx, p)
+	id, err := s.resolveProjectID(ctx, p, persist)
 	if err != nil {
 		return store.YouTrackProject{}, "", err
 	}
 	return p, id, nil
 }
 
-func (s *Service) resolveProjectID(ctx context.Context, p store.YouTrackProject) (string, error) {
+func (s *Service) resolveProjectID(ctx context.Context, p store.YouTrackProject, persist bool) (string, error) {
 	if p.ProjectID != "" {
 		return p.ProjectID, nil
 	}
@@ -313,8 +314,10 @@ func (s *Service) resolveProjectID(ctx context.Context, p store.YouTrackProject)
 		return "", err
 	}
 	s.projectIDs[p.HKProject] = id
-	if err := s.store.SetYouTrackProjectID(ctx, p.HKProject, id); err != nil {
-		log.Printf("youtrack.project_id_store_failed hk_project=%q err=%q", p.HKProject, err)
+	if persist {
+		if err := s.store.SetYouTrackProjectID(ctx, p.HKProject, id); err != nil {
+			log.Printf("youtrack.project_id_store_failed hk_project=%q err=%q", p.HKProject, err)
+		}
 	}
 	return id, nil
 }
@@ -334,11 +337,11 @@ func (s *Service) ensureValue(ctx context.Context, field, value string, resolved
 			return nil
 		}
 	} else {
-		project, _, err := s.projectForTask(ctx, s.project)
+		_, projectID, err := s.projectForTask(ctx, s.project, true)
 		if err != nil {
 			return err
 		}
-		info, err = s.client.ProjectFieldValues(ctx, project.ProjectID, field)
+		info, err = s.client.ProjectFieldValues(ctx, projectID, field)
 		if err != nil {
 			return err
 		}
@@ -349,11 +352,11 @@ func (s *Service) ensureValue(ctx context.Context, field, value string, resolved
 		if IsTemporary(err) {
 			return err
 		}
-		project, _, perr := s.projectForTask(ctx, s.project)
+		_, projectID, perr := s.projectForTask(ctx, s.project, true)
 		if perr != nil {
 			return err
 		}
-		fresh, ferr := s.client.ProjectFieldValues(ctx, project.ProjectID, field)
+		fresh, ferr := s.client.ProjectFieldValues(ctx, projectID, field)
 		if ferr != nil {
 			return err
 		}

@@ -165,4 +165,26 @@ func TestPriorityIsPGFirstAndQueuesExport(t *testing.T) {
 	if len(due) != 1 || due[0].Value != "9" {
 		t.Fatalf("outbox=%+v", due)
 	}
+
+	// Replaying the first event key wrote nothing, so it must not export its
+	// older value over the newer write.
+	status, out = call(`{"priority":5,"event_key":"one"}`)
+	if status != http.StatusOK {
+		t.Fatalf("replay: status=%d out=%v", status, out)
+	}
+	if out["replayed"] != true {
+		t.Fatalf("replay was not reported: %v", out)
+	}
+	got, _, _ = st.GetTask(ctx, task.ID)
+	if got.Priority != 9 {
+		t.Fatalf("a replay changed PG: %d", got.Priority)
+	}
+	due, _ = st.DueYouTrackOutbox(ctx, 10)
+	if len(due) != 1 || due[0].Value != "9" {
+		t.Fatalf("a replay queued an older value: %+v", due)
+	}
+	cache, ok, _ = st.GetYouTrackFieldCache(ctx, task.ID)
+	if !ok || cache.Priority != 9 {
+		t.Fatalf("a replay rewrote the cache: %+v", cache)
+	}
 }

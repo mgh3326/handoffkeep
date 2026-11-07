@@ -90,9 +90,9 @@ func (r *SyncReport) warn(format string, args ...any) {
 	r.Warnings = append(r.Warnings, fmt.Sprintf(format, args...))
 }
 
-// Sync runs one bounded pass: pending reverts, the priority/lane outbox, the
-// field-cache refresh, the hk → YouTrack push, and one page of YouTrack → hk
-// activities. In dry-run mode nothing on either side is written.
+// Sync runs one bounded pass: pending reverts, one page of YouTrack → hk
+// activities, the priority/lane outbox, the field-cache refresh, and the
+// hk → YouTrack push. In dry-run mode nothing on either side is written.
 func (s *Service) Sync(ctx context.Context, opts SyncOptions) (SyncReport, error) {
 	opts = opts.withDefaults()
 	report := SyncReport{DryRun: opts.DryRun, Outbox: []OutboxAction{}, Pushed: []PushAction{}, Pulled: []PullAction{}}
@@ -108,22 +108,27 @@ func (s *Service) Sync(ctx context.Context, opts SyncOptions) (SyncReport, error
 		report.Bot = me.ID
 	}
 
+	// YouTrack -> hk first. The pull applies the operator's latest change to
+	// PG; the outbox and the push then send the hk execution value. The other
+	// order can overwrite YouTrack with an hk value the operator has already
+	// changed, and this run would then apply their older activity and leave
+	// the two sides inverted.
 	if !opts.DryRun {
 		s.runPendingReverts(ctx, opts.RevertLimit, &report)
-		s.drainOutbox(ctx, opts.OutboxLimit, &report)
 	}
+	s.pull(ctx, opts, me, &report)
 	if opts.DryRun {
 		if mirrors, err := s.store.RefreshYouTrackFields(ctx, opts.RefreshLimit); err == nil {
 			report.Refreshed = len(mirrors)
 		}
 	} else {
+		s.drainOutbox(ctx, opts.OutboxLimit, &report)
 		s.refreshCache(ctx, opts.RefreshLimit, &report)
 	}
 
 	if err := s.push(ctx, opts, &report); err != nil {
 		report.fail("push: %v", err)
 	}
-	s.pull(ctx, opts, me, &report)
 	return report, nil
 }
 
@@ -143,7 +148,7 @@ func (s *Service) drainOutbox(ctx context.Context, limit int, report *SyncReport
 			continue
 		}
 		if !ok {
-			_ = s.store.MarkYouTrackOutboxDone(ctx, item.ID)
+			_ = s.store.MarkYouTrackOutboxDone(ctx, item.ID, item.Value)
 			action.Outcome = "unmirrored"
 			report.Outbox = append(report.Outbox, action)
 			continue
@@ -168,7 +173,7 @@ func (s *Service) drainOutbox(ctx context.Context, limit int, report *SyncReport
 		}
 		if serr != nil {
 			next := s.now().Add(outboxBackoff(item.Attempts + 1))
-			if err := s.store.RescheduleYouTrackOutbox(ctx, item.ID, item.Attempts+1, next, serr.Error()); err != nil {
+			if err := s.store.RescheduleYouTrackOutbox(ctx, item.ID, item.Value, item.Attempts+1, next, serr.Error()); err != nil {
 				log.Printf("youtrack.outbox_reschedule_failed id=%d err=%q", item.ID, err)
 			}
 			action.Outcome = "retry"
@@ -176,7 +181,7 @@ func (s *Service) drainOutbox(ctx context.Context, limit int, report *SyncReport
 			report.fail("outbox task %d %s: %v", item.TaskID, item.Op, serr)
 			continue
 		}
-		if err := s.store.MarkYouTrackOutboxDone(ctx, item.ID); err != nil {
+		if err := s.store.MarkYouTrackOutboxDone(ctx, item.ID, item.Value); err != nil {
 			report.fail("outbox task %d: %v", item.TaskID, err)
 			continue
 		}
@@ -274,7 +279,7 @@ func (s *Service) pushTask(ctx context.Context, task store.Task, opts SyncOption
 	if task.Project != nil {
 		hkProject = *task.Project
 	}
-	project, projectID, err := s.projectForTask(ctx, hkProject)
+	project, projectID, err := s.projectForTask(ctx, hkProject, !opts.DryRun)
 	if err != nil {
 		if errors.Is(err, ErrProjectMissing) {
 			report.warn("task %d: YouTrack 프로젝트 매핑이 없어 건너뜁니다 (%v)", task.ID, err)
@@ -290,14 +295,9 @@ func (s *Service) pushTask(ctx context.Context, task store.Task, opts SyncOption
 	if mirrored {
 		action.IssueID, action.ReadableID = mirror.IssueID, mirror.DisplayRef
 	}
-	cache, cached, err := s.store.GetYouTrackFieldCache(ctx, task.ID)
-	if err != nil {
-		return action, err
-	}
-	priority, lane, source := task.Priority, task.Lane, store.YouTrackSourceHK
-	if cached {
-		priority, lane, source = cache.Priority, cache.Lane, cache.Source
-	}
+	// PG columns are the execution values. The field cache is display-only;
+	// a push sends what hk holds, not a possibly older YouTrack read.
+	priority, lane := task.Priority, task.Lane
 
 	needsFields := !mirrored || mirror.SyncedAt == nil || task.UpdatedAt.After(*mirror.SyncedAt)
 	created := false
@@ -409,9 +409,14 @@ func (s *Service) pushTask(ctx context.Context, task store.Task, opts SyncOption
 		if err := s.store.MarkYouTrackTaskSynced(ctx, task.ID, task.UpdatedAt); err != nil {
 			return action, err
 		}
-		cache = store.YouTrackFieldCache{TaskID: task.ID, Priority: priority, Lane: lane, Source: source, FetchedAt: s.now()}
-		if err := s.store.PutYouTrackFieldCache(ctx, cache); err != nil {
-			return action, err
+		if needsFields {
+			// The cache is display-only. After fields are pushed it holds the
+			// hk value YouTrack now carries; without a field push it is left
+			// with the last read the sync made.
+			cache := store.YouTrackFieldCache{TaskID: task.ID, Priority: priority, Lane: lane, Source: store.YouTrackSourceHK, FetchedAt: s.now()}
+			if err := s.store.PutYouTrackFieldCache(ctx, cache); err != nil {
+				return action, err
+			}
 		}
 	}
 	return action, nil

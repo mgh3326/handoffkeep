@@ -181,13 +181,17 @@ func TestSyncSkipsDecisionAnswersAndInstructions(t *testing.T) {
 func TestSyncCreatesTaskForOperatorIssue(t *testing.T) {
 	fs := newFakeStore()
 	yt := newFakeYouTrack()
+	issue := &Issue{ID: "9-77", IDReadable: "HK-77", Summary: "운영자 새 이슈", Project: &ProjectRef{ID: "0-1", ShortName: "HK"}, CustomFields: []IssueField{
+		{Name: "레인", Value: json.RawMessage(`{"name":"operator-desk"}`)},
+		{Name: "종류", Value: json.RawMessage(`{"name":"fix"}`)},
+	}}
+	// The pull creates the hk task; the same run's cache refresh reads the
+	// issue, so the fake serves it like YouTrack would.
+	yt.issues[issue.ID] = *issue
 	yt.activities = []Activity{{
 		ID: "a-new", Author: operator(),
 		Categories: []ActivityCategory{{Type: "IssueCreatedCategory"}},
-		Target: &Issue{ID: "9-77", IDReadable: "HK-77", Summary: "운영자 새 이슈", Project: &ProjectRef{ID: "0-1", ShortName: "HK"}, CustomFields: []IssueField{
-			{Name: "레인", Value: json.RawMessage(`{"name":"operator-desk"}`)},
-			{Name: "종류", Value: json.RawMessage(`{"name":"fix"}`)},
-		}},
+		Target:     issue,
 	}}
 	svc := newTestService(t, yt, fs)
 
@@ -248,6 +252,10 @@ func TestDryRunWritesNothing(t *testing.T) {
 	task := fs.addTask("handoffkeep", "handoffkeep", "dry target", store.StateBacklog, 2)
 	mirrorIssue(fs, yt, task.ID, "9-11", "HK-11")
 	yt.activities = []Activity{stateActivity("a-dry", "9-11", "HK-11", "종료됨")}
+	// Make the task due so the dry-run push resolves its project too.
+	moved := fs.tasks[task.ID]
+	moved.UpdatedAt = moved.UpdatedAt.Add(time.Minute)
+	fs.tasks[task.ID] = moved
 	svc := newTestService(t, yt, fs)
 
 	report, err := svc.Sync(context.Background(), SyncOptions{DryRun: true})
@@ -270,6 +278,123 @@ func TestDryRunWritesNothing(t *testing.T) {
 	}
 	if len(fs.advanced) != 0 {
 		t.Fatalf("dry-run advanced the cursor: %v", fs.advanced)
+	}
+	if fs.projectIDs != 0 {
+		t.Fatalf("dry-run persisted %d project ids", fs.projectIDs)
+	}
+}
+
+// pushedFieldValue reads one custom field out of a recorded update body.
+func pushedFieldValue(body map[string]any, name string) any {
+	fields, _ := body["customFields"].([]any)
+	for _, raw := range fields {
+		field, _ := raw.(map[string]any)
+		if field["name"] == name {
+			return field["value"]
+		}
+	}
+	return nil
+}
+
+func TestPushSendsPGValuesNotTheCache(t *testing.T) {
+	fs := newFakeStore()
+	yt := newFakeYouTrack()
+	task := fs.addTask("handoffkeep", "handoffkeep", "push source", store.StateBacklog, 3)
+	mirrorIssue(fs, yt, task.ID, "9-80", "HK-80")
+	// The cache holds an older YouTrack read; PG is the execution value.
+	fs.caches[task.ID] = store.YouTrackFieldCache{TaskID: task.ID, Priority: 0, Lane: "handoffkeep", Source: store.YouTrackSourceYouTrack, FetchedAt: time.Now().UTC()}
+	moved := fs.tasks[task.ID]
+	moved.UpdatedAt = moved.UpdatedAt.Add(time.Minute)
+	fs.tasks[task.ID] = moved
+	svc := newTestService(t, yt, fs)
+
+	report, err := svc.Sync(context.Background(), SyncOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Errors) != 0 {
+		t.Fatalf("errors=%v", report.Errors)
+	}
+	if len(yt.issueUpdates) != 1 {
+		t.Fatalf("updates=%v", yt.issueUpdates)
+	}
+	if got, _ := pushedFieldValue(yt.issueUpdates[0], "hk 우선순위").(float64); got != 3 {
+		t.Fatalf("pushed priority=%v want 3 (update=%v)", got, yt.issueUpdates[0])
+	}
+	if cache := fs.caches[task.ID]; cache.Priority != 3 || cache.Source != store.YouTrackSourceHK {
+		t.Fatalf("cache=%+v", cache)
+	}
+}
+
+func TestSyncPullsBeforeItPushes(t *testing.T) {
+	fs := newFakeStore()
+	yt := newFakeYouTrack()
+	task := fs.addTask("handoffkeep", "handoffkeep", "order target", store.StateBacklog, 2)
+	mirrorIssue(fs, yt, task.ID, "9-81", "HK-81")
+	moved := fs.tasks[task.ID]
+	moved.UpdatedAt = moved.UpdatedAt.Add(time.Minute)
+	fs.tasks[task.ID] = moved
+	yt.activities = []Activity{{
+		ID: "a-order", Author: operator(), Target: &Issue{ID: "9-81", IDReadable: "HK-81"},
+		Categories: []ActivityCategory{{Type: "CustomFieldCategory", Field: &ActivityField{Name: "hk 우선순위"}, Added: []json.RawMessage{json.RawMessage(`1`)}}},
+	}}
+	svc := newTestService(t, yt, fs)
+
+	report, err := svc.Sync(context.Background(), SyncOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Errors) != 0 {
+		t.Fatalf("errors=%v", report.Errors)
+	}
+	if got := fs.tasks[task.ID].Priority; got != 1 {
+		t.Fatalf("PG priority=%d want the operator's 1", got)
+	}
+	if len(yt.issueUpdates) != 1 {
+		t.Fatalf("updates=%v", yt.issueUpdates)
+	}
+	if got, _ := pushedFieldValue(yt.issueUpdates[0], "hk 우선순위").(float64); got != 1 {
+		t.Fatalf("YouTrack was pushed %v but PG is 1 (update=%v)", got, yt.issueUpdates[0])
+	}
+}
+
+func TestSyncConsumesAnActivityItCannotApply(t *testing.T) {
+	fs := newFakeStore()
+	yt := newFakeYouTrack()
+	task := fs.addTask("handoffkeep", "handoffkeep", "skip target", store.StateBacklog, 0)
+	mirrorIssue(fs, yt, task.ID, "9-82", "HK-82")
+	yt.activities = []Activity{
+		{
+			ID: "a-bad", Author: operator(), Target: &Issue{ID: "9-82", IDReadable: "HK-82"},
+			Categories: []ActivityCategory{{Type: "CustomFieldCategory", Field: &ActivityField{Name: "레인"}, Added: []json.RawMessage{json.RawMessage(`{"name":"Ops Desk"}`)}}},
+		},
+		{
+			ID: "a-good", Author: operator(), Target: &Issue{ID: "9-82", IDReadable: "HK-82"},
+			Categories: []ActivityCategory{{Type: "CustomFieldCategory", Field: &ActivityField{Name: "hk 우선순위"}, Added: []json.RawMessage{json.RawMessage(`6`)}}},
+		},
+	}
+	yt.cursor = "c-2"
+	fs.applyErr["a-bad"] = store.ErrYouTrackActivityInput
+	svc := newTestService(t, yt, fs)
+
+	report, err := svc.Sync(context.Background(), SyncOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Errors) != 0 {
+		t.Fatalf("errors=%v", report.Errors)
+	}
+	if report.Skipped != 1 {
+		t.Fatalf("skipped=%d pulled=%+v", report.Skipped, report.Pulled)
+	}
+	if fs.tasks[task.ID].Priority != 6 {
+		t.Fatalf("a later activity was blocked: %+v", fs.tasks[task.ID])
+	}
+	if len(fs.advanced) != 1 || fs.advanced[0] != "c-2" {
+		t.Fatalf("cursor=%v", fs.advanced)
+	}
+	if _, ok := fs.applied["a-bad"]; !ok {
+		t.Fatalf("the unappliable activity was not recorded: %+v", fs.applied)
 	}
 }
 

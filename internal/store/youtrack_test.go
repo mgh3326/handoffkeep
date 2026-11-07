@@ -3,8 +3,10 @@ package store
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/mgh3326/handoffkeep/internal/testdb"
 )
@@ -174,19 +176,38 @@ func TestYouTrackOutboxSupersedesAndReschedules(t *testing.T) {
 	if err != nil || len(items) != 1 || items[0].Value != "5" {
 		t.Fatalf("items=%+v err=%v", items, err)
 	}
-	if err := st.RescheduleYouTrackOutbox(ctx, items[0].ID, 1, time.Now().UTC().Add(time.Hour), "boom"); err != nil {
+	if err := st.RescheduleYouTrackOutbox(ctx, items[0].ID, items[0].Value, 1, time.Now().UTC().Add(time.Hour), "boom"); err != nil {
 		t.Fatal(err)
 	}
 	if due, _ := st.DueYouTrackOutbox(ctx, 10); len(due) != 0 {
 		t.Fatalf("a future item is due: %+v", due)
 	}
-	if err := st.RescheduleYouTrackOutbox(ctx, items[0].ID, 2, time.Now().UTC().Add(-time.Second), "boom"); err != nil {
+	if err := st.RescheduleYouTrackOutbox(ctx, items[0].ID, items[0].Value, 2, time.Now().UTC().Add(-time.Second), "boom"); err != nil {
 		t.Fatal(err)
 	}
 	if due, _ := st.DueYouTrackOutbox(ctx, 10); len(due) != 1 || due[0].Attempts != 2 {
 		t.Fatalf("rescheduled=%+v", due)
 	}
-	if err := st.MarkYouTrackOutboxDone(ctx, items[0].ID); err != nil {
+	// A newer write updates the same row in place. A drain that sent the old
+	// value must not close or back off the newer one.
+	if err := st.EnqueueYouTrack(ctx, x.ID, YouTrackOpPriority, "7"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.MarkYouTrackOutboxDone(ctx, items[0].ID, "5"); err != nil {
+		t.Fatal(err)
+	}
+	due, err := st.DueYouTrackOutbox(ctx, 10)
+	if err != nil || len(due) != 1 || due[0].Value != "7" {
+		t.Fatalf("a superseded row was closed: %+v err=%v", due, err)
+	}
+	if err := st.RescheduleYouTrackOutbox(ctx, items[0].ID, "5", 3, time.Now().UTC().Add(time.Hour), "boom"); err != nil {
+		t.Fatal(err)
+	}
+	due, err = st.DueYouTrackOutbox(ctx, 10)
+	if err != nil || len(due) != 1 || due[0].Value != "7" || due[0].Attempts != 0 {
+		t.Fatalf("a superseded row was rescheduled: %+v err=%v", due, err)
+	}
+	if err := st.MarkYouTrackOutboxDone(ctx, items[0].ID, "7"); err != nil {
 		t.Fatal(err)
 	}
 	if due, _ := st.DueYouTrackOutbox(ctx, 10); len(due) != 0 {
@@ -340,5 +361,95 @@ func TestDuePushTasksSkipsUnchangedMirroredAndSettledUnmirrored(t *testing.T) {
 	}
 	if seen[mirrored.ID] || seen[settled.ID] || !seen[dirty.ID] {
 		t.Fatalf("due tasks=%+v (mirrored=%d settled=%d dirty=%d)", tasks, mirrored.ID, settled.ID, dirty.ID)
+	}
+}
+
+func TestApplyYouTrackActivityKeepsAnUnpushedTaskDue(t *testing.T) {
+	st := schemaStore(t, "youtrack_watermark")
+	ctx := context.Background()
+	x := youtrackTask(t, st, "handoffkeep", "watermark target")
+	pushed := x.UpdatedAt.UTC()
+	if _, err := st.UpsertYouTrackMirror(ctx, youtrackMirrorInput(x.ID, "6-2", "HK-6", "tenant", "mirror", pushed)); err != nil {
+		t.Fatal(err)
+	}
+	// An hk change lands after the push, so the task is due again.
+	if _, err := st.pool.Exec(ctx, `UPDATE tasks SET priority=3,updated_at=updated_at + interval '1 minute' WHERE id=$1`, x.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.PutYouTrackFieldCache(ctx, YouTrackFieldCache{TaskID: x.ID, Priority: 1, Lane: "handoffkeep", Source: YouTrackSourceYouTrack, FetchedAt: pushed}); err != nil {
+		t.Fatal(err)
+	}
+	priority := 4
+	if _, err := st.ApplyYouTrackActivity(ctx, YouTrackActivity{ID: "a-watermark", TaskID: x.ID, IssueID: "6-2", Priority: &priority}); err != nil {
+		t.Fatal(err)
+	}
+	if cache, _, _ := st.GetYouTrackFieldCache(ctx, x.ID); cache.Priority != 4 {
+		t.Fatalf("the pull did not keep the cache in step: %+v", cache)
+	}
+	mirror, _, err := st.GetYouTrackMirror(ctx, x.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mirror.SyncedAt == nil || !mirror.SyncedAt.Equal(pushed) {
+		t.Fatalf("an activity advanced the watermark past an unpushed change: synced_at=%v pushed=%v", mirror.SyncedAt, pushed)
+	}
+	due, err := st.DueYouTrackPushTasks(ctx, 10)
+	if err != nil || len(due) != 1 || due[0].ID != x.ID {
+		t.Fatalf("an unpushed task is not due: %+v err=%v", due, err)
+	}
+
+	// Once the task has been pushed, an activity advances the watermark.
+	task, _, _ := st.GetTask(ctx, x.ID)
+	if err := st.MarkYouTrackTaskSynced(ctx, x.ID, task.UpdatedAt); err != nil {
+		t.Fatal(err)
+	}
+	next := 5
+	if _, err := st.ApplyYouTrackActivity(ctx, YouTrackActivity{ID: "a-watermark-2", TaskID: x.ID, IssueID: "6-2", Priority: &next}); err != nil {
+		t.Fatal(err)
+	}
+	mirror, _, _ = st.GetYouTrackMirror(ctx, x.ID)
+	if mirror.SyncedAt == nil || mirror.SyncedAt.Equal(pushed) {
+		t.Fatalf("a pushed task's watermark did not advance: %+v", mirror.SyncedAt)
+	}
+}
+
+func TestCreateYouTrackIssueRefusesSecretLikeTitle(t *testing.T) {
+	st := schemaStore(t, "youtrack_secret_title")
+	ctx := context.Background()
+	title := "leaked ghp_" + strings.Repeat("a", 36)
+	in := YouTrackActivity{ID: "a-secret", IssueID: "6-9", NewIssue: &YouTrackNewIssue{
+		IssueID: "6-9", ReadableID: "HK-9", Title: title, Lane: "operator-desk", Kind: "implement", Project: "handoffkeep", Tenant: "tenant",
+	}}
+	result, err := st.ApplyYouTrackActivity(ctx, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Outcome != YouTrackOutcomeSkipped {
+		t.Fatalf("outcome=%+v", result)
+	}
+	var count int
+	if err := st.pool.QueryRow(ctx, `SELECT count(*) FROM tasks WHERE title=$1`, title).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatal("a secret-shaped title was stored as a task")
+	}
+	var outcome, refusal string
+	if err := st.pool.QueryRow(ctx, `SELECT outcome,refusal FROM youtrack_processed_activities WHERE activity_id=$1`, "a-secret").Scan(&outcome, &refusal); err != nil {
+		t.Fatal(err)
+	}
+	if outcome != YouTrackOutcomeSkipped || refusal == "" {
+		t.Fatalf("recorded outcome=%q refusal=%q", outcome, refusal)
+	}
+}
+
+func TestTruncateTextKeepsRunesWhole(t *testing.T) {
+	v := strings.Repeat("가", 300) // 900 bytes; 512 is not a rune boundary.
+	got := truncateText(v, 512)
+	if len(got) > 512 || !utf8.ValidString(got) || !strings.HasPrefix(v, got) {
+		t.Fatalf("truncateText split a rune: len=%d valid=%v", len(got), utf8.ValidString(got))
+	}
+	if got := truncateText("short", 512); got != "short" {
+		t.Fatalf("short value changed: %q", got)
 	}
 }

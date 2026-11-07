@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/mgh3326/handoffkeep/internal/guard"
 	"github.com/mgh3326/handoffkeep/internal/wrkrecords"
 )
 
@@ -463,19 +465,29 @@ func (s *Store) DueYouTrackOutbox(ctx context.Context, limit int) ([]YouTrackOut
 	return out, rows.Err()
 }
 
-func (s *Store) MarkYouTrackOutboxDone(ctx context.Context, id int64) error {
-	_, err := s.pool.Exec(ctx, `UPDATE youtrack_outbox SET done_at=now(),last_error='' WHERE id=$1`, id)
+// MarkYouTrackOutboxDone closes the pending write that was sent. A newer
+// EnqueueYouTrack updates the same row in place, so the value guard leaves a
+// superseded row pending and the new value is exported on a later run.
+func (s *Store) MarkYouTrackOutboxDone(ctx context.Context, id int64, value string) error {
+	_, err := s.pool.Exec(ctx, `UPDATE youtrack_outbox SET done_at=now(),last_error='' WHERE id=$1 AND value=$2 AND done_at IS NULL`, id, value)
 	return err
 }
 
-func (s *Store) RescheduleYouTrackOutbox(ctx context.Context, id int64, attempts int, next time.Time, lastError string) error {
-	_, err := s.pool.Exec(ctx, `UPDATE youtrack_outbox SET attempts=$2,next_attempt_at=$3,last_error=$4 WHERE id=$1`, id, attempts, next.UTC(), truncateText(lastError, 512))
+// RescheduleYouTrackOutbox backs off the write that was sent. It is a no-op
+// when EnqueueYouTrack already replaced the value: that row is due afresh.
+func (s *Store) RescheduleYouTrackOutbox(ctx context.Context, id int64, value string, attempts int, next time.Time, lastError string) error {
+	_, err := s.pool.Exec(ctx, `UPDATE youtrack_outbox SET attempts=$3,next_attempt_at=$4,last_error=$5 WHERE id=$1 AND value=$2 AND done_at IS NULL`, id, value, attempts, next.UTC(), truncateText(lastError, 512))
 	return err
 }
 
+// truncateText keeps the value valid UTF-8: a byte cut in the middle of a
+// rune would make the PostgreSQL text parameter invalid.
 func truncateText(v string, max int) string {
 	if len(v) <= max {
 		return v
+	}
+	for max > 0 && !utf8.RuneStart(v[max]) {
+		max--
 	}
 	return v[:max]
 }
@@ -677,6 +689,18 @@ func (s *Store) ApplyYouTrackActivity(ctx context.Context, in YouTrackActivity) 
 	if in.NewIssue != nil {
 		taskID, err := s.createYouTrackIssueTx(ctx, tx, *in.NewIssue)
 		if err != nil {
+			// A secret-shaped title is refused like a comment is; consume the
+			// activity as a skip so the pull cursor can advance.
+			if _, refused := guard.SecretPattern(err); refused {
+				out.Outcome, out.Refusal = YouTrackOutcomeSkipped, "제목이 비밀값으로 보여 hk에 저장하지 않았습니다"
+				if _, uerr := tx.Exec(ctx, `UPDATE youtrack_processed_activities SET outcome=$2,refusal=$3 WHERE activity_id=$1`, in.ID, out.Outcome, out.Refusal); uerr != nil {
+					return YouTrackApplyResult{}, uerr
+				}
+				if uerr := noteActivityProcessed(ctx, tx, in.ID); uerr != nil {
+					return YouTrackApplyResult{}, uerr
+				}
+				return out, tx.Commit(ctx)
+			}
 			return YouTrackApplyResult{}, err
 		}
 		if _, err := tx.Exec(ctx, `UPDATE youtrack_processed_activities SET outcome=$2,task_id=$3,issue_id=$4 WHERE activity_id=$1`, in.ID, out.Outcome, taskID, in.IssueID); err != nil {
@@ -722,7 +746,7 @@ func (s *Store) ApplyYouTrackActivity(ctx context.Context, in YouTrackActivity) 
 			if _, _, err := insertEvent(ctx, tx, taskEventInput{TaskID: x.ID, Kind: "metadata", From: x.State, To: x.State, By: YouTrackOwnedActor, Note: "YouTrack에서 우선순위 변경", Refs: x.Refs, At: now, Source: YouTrackActivitySource, SourceRef: in.ID + "/priority", Field: "priority", FromValue: fmt.Sprint(x.Priority), ToValue: fmt.Sprint(*in.Priority)}); err != nil {
 				return YouTrackApplyResult{}, err
 			}
-			if err := touchMirrorTx(ctx, tx, x.ID); err != nil {
+			if err := touchMirrorTx(ctx, tx, x.ID, x.UpdatedAt); err != nil {
 				return YouTrackApplyResult{}, err
 			}
 			// Keep the served cache in step without claiming a fresh fetch.
@@ -730,6 +754,7 @@ func (s *Store) ApplyYouTrackActivity(ctx context.Context, in YouTrackActivity) 
 				return YouTrackApplyResult{}, err
 			}
 			x.Priority = *in.Priority
+			x.UpdatedAt = now
 		}
 	}
 
@@ -745,7 +770,7 @@ func (s *Store) ApplyYouTrackActivity(ctx context.Context, in YouTrackActivity) 
 				out.RevertField, out.RevertValue = "lane", x.Lane
 			}
 		} else if changed {
-			if err := touchMirrorTx(ctx, tx, x.ID); err != nil {
+			if err := touchMirrorTx(ctx, tx, x.ID, x.UpdatedAt); err != nil {
 				return YouTrackApplyResult{}, err
 			}
 			if _, err := tx.Exec(ctx, `UPDATE youtrack_field_cache SET lane=$2 WHERE task_id=$1`, x.ID, in.Lane); err != nil {
@@ -806,7 +831,7 @@ func (s *Store) applyYouTrackStateTx(ctx context.Context, tx pgx.Tx, x Task, in 
 			return Task{}, "", err
 		}
 		// The state is now on both sides; do not echo it back on the next push.
-		if err := touchMirrorTx(ctx, tx, x.ID); err != nil {
+		if err := touchMirrorTx(ctx, tx, x.ID, x.UpdatedAt); err != nil {
 			return Task{}, "", err
 		}
 		return moved, "", nil
@@ -850,6 +875,9 @@ func (s *Store) createYouTrackIssueTx(ctx context.Context, tx pgx.Tx, in YouTrac
 	if title == "" || !validText(title, MaxBytes) || !validName(in.Lane) || !taskKinds[in.Kind] || strings.TrimSpace(in.Tenant) == "" {
 		return 0, ErrYouTrackActivityInput
 	}
+	if err := guard.Reject(title); err != nil {
+		return 0, err
+	}
 	if err := requireTaskProject(ctx, tx, &in.Project); err != nil {
 		return 0, err
 	}
@@ -871,8 +899,11 @@ func (s *Store) createYouTrackIssueTx(ctx context.Context, tx pgx.Tx, in YouTrac
 	return x.ID, nil
 }
 
-func touchMirrorTx(ctx context.Context, tx pgx.Tx, taskID int64) error {
-	_, err := tx.Exec(ctx, `UPDATE task_origins SET synced_at=(SELECT updated_at FROM tasks WHERE id=$1) WHERE provider='youtrack' AND task_id=$1`, taskID)
+// touchMirrorTx advances the push watermark to the task's new revision, but
+// only when before (the revision the activity started from) had already been
+// pushed and the task had no unpushed hk change.
+func touchMirrorTx(ctx context.Context, tx pgx.Tx, taskID int64, before time.Time) error {
+	_, err := tx.Exec(ctx, `UPDATE task_origins SET synced_at=(SELECT updated_at FROM tasks WHERE id=$1) WHERE provider='youtrack' AND task_id=$1 AND synced_at=$2`, taskID, before.UTC())
 	return err
 }
 

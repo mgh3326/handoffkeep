@@ -30,10 +30,12 @@ type fakeStore struct {
 	outboxDue    map[int64]bool
 	cursor       store.YouTrackCursor
 	applied      map[string]store.YouTrackApplyResult
+	applyErr     map[string]error
 	pending      map[string]store.YouTrackPendingRevert
 	pushed       map[int64]bool
 	advanced     []string
 	writes       int
+	projectIDs   int
 	nextTaskID   int64
 	nextComment  int64
 }
@@ -56,6 +58,7 @@ func newFakeStore() *fakeStore {
 		outboxNextID: 1,
 		outboxDue:    map[int64]bool{},
 		applied:      map[string]store.YouTrackApplyResult{},
+		applyErr:     map[string]error{},
 		pending:      map[string]store.YouTrackPendingRevert{},
 		pushed:       map[int64]bool{},
 		nextTaskID:   100,
@@ -233,6 +236,7 @@ func (f *fakeStore) SetYouTrackProjectID(_ context.Context, hkProject, projectID
 	p := f.projects[hkProject]
 	p.ProjectID = projectID
 	f.projects[hkProject] = p
+	f.projectIDs++
 	return nil
 }
 
@@ -352,17 +356,22 @@ func (f *fakeStore) DueYouTrackOutbox(_ context.Context, limit int) ([]store.You
 	return out, nil
 }
 
-func (f *fakeStore) MarkYouTrackOutboxDone(_ context.Context, id int64) error {
+func (f *fakeStore) MarkYouTrackOutboxDone(_ context.Context, id int64, value string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.outboxDue[id] = false
+	if item, ok := f.outbox[id]; ok && item.Value == value {
+		f.outboxDue[id] = false
+	}
 	return nil
 }
 
-func (f *fakeStore) RescheduleYouTrackOutbox(_ context.Context, id int64, attempts int, next time.Time, lastError string) error {
+func (f *fakeStore) RescheduleYouTrackOutbox(_ context.Context, id int64, value string, attempts int, next time.Time, lastError string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	item := f.outbox[id]
+	if item.Value != value {
+		return nil
+	}
 	item.Attempts = attempts
 	f.outbox[id] = item
 	f.outboxDue[id] = !next.After(time.Now())
@@ -432,6 +441,9 @@ func (f *fakeStore) AdvanceYouTrackCursor(_ context.Context, cursor string) erro
 func (f *fakeStore) ApplyYouTrackActivity(_ context.Context, in store.YouTrackActivity) (store.YouTrackApplyResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err, ok := f.applyErr[in.ID]; ok && in.Skip == "" {
+		return store.YouTrackApplyResult{}, err
+	}
 	if _, ok := f.applied[in.ID]; ok {
 		return store.YouTrackApplyResult{Applied: false, Outcome: store.YouTrackOutcomeDuplicate}, nil
 	}

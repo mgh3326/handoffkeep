@@ -59,7 +59,10 @@ func (h *Handler) taskPriority(w http.ResponseWriter, r *http.Request, identity 
 		}
 		return
 	}
-	if h.youTrack != nil {
+	// A replayed event key wrote nothing. The recorded value may be older than
+	// the row, so exporting the request's priority would overwrite a newer
+	// write in YouTrack.
+	if h.youTrack != nil && !result.Replayed {
 		h.youTrack.RecordPriority(r.Context(), id, *input.Priority)
 	}
 	outcome.result = "ok"
