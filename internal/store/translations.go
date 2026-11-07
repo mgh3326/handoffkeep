@@ -15,7 +15,7 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/guard"
 )
 
-// TranslationBatchMaxBytes permits 100 maximally escaped translation texts.
+// TranslationBatchMaxBytes bounds a batch while allowing one maximally escaped task body.
 const TranslationBatchMaxBytes = 100 * (6*MaxBytes + 1024)
 
 // Translation is a translation of one field at a particular source revision.
@@ -64,7 +64,11 @@ func checkTranslation(t Translation) error {
 	if !translationHash.MatchString(t.SourceSHA256) {
 		return fmt.Errorf("invalid translation: source_sha256 must be a lowercase SHA-256 digest")
 	}
-	if strings.TrimSpace(t.Text) == "" || len(t.Text) > MaxBytes || !utf8.ValidString(t.Text) || strings.ContainsRune(t.Text, 0) {
+	textLimit := MaxBytes
+	if t.Entity == "task" && t.Field == "body" {
+		textLimit = DocumentMaxBytes
+	}
+	if strings.TrimSpace(t.Text) == "" || len(t.Text) > textLimit || !utf8.ValidString(t.Text) || strings.ContainsRune(t.Text, 0) {
 		return fmt.Errorf("invalid translation: text is empty, invalid, or too long")
 	}
 	if strings.TrimSpace(t.Translator) == "" || !validText(t.Translator, 128) {
@@ -177,6 +181,7 @@ func (s *Store) MissingTaskTranslations(ctx context.Context, limit int) ([]Missi
 	}
 	defer rows.Close()
 	out := []MissingTranslation{}
+	totalBytes := 0
 	for rows.Next() {
 		var id int64
 		var title, body, titleHash, bodyHash string
@@ -189,6 +194,11 @@ func (s *Store) MissingTaskTranslations(ctx context.Context, limit int) ([]Missi
 			}
 			hash := SourceSHA256(f.original)
 			if f.hash != hash {
+				// Bound response size while keeping the first missing field reachable.
+				if len(out) > 0 && totalBytes+len(f.original) > 2*DocumentMaxBytes {
+					return out, nil
+				}
+				totalBytes += len(f.original)
 				out = append(out, MissingTranslation{Entity: "task", EntityID: strconv.FormatInt(id, 10), Field: f.field, Lang: "ko", Original: f.original, SourceSHA256: hash, Stale: f.hash != ""})
 			}
 			if len(out) == limit {

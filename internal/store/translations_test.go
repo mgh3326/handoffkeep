@@ -88,3 +88,56 @@ func TestTranslationsMigrationAndRoundTrip(t *testing.T) {
 		t.Fatalf("search=%+v err=%v", got, err)
 	}
 }
+
+func TestTranslationTaskBodyLimit(t *testing.T) {
+	x := Translation{Entity: "task", EntityID: "1", Field: "body", Lang: "ko", SourceSHA256: SourceSHA256("source"), Text: strings.Repeat("x", MaxBytes+1), Translator: "test"}
+	if err := checkTranslation(x); err != nil {
+		t.Fatalf("valid long task body translation refused: %v", err)
+	}
+	x.Field = "title"
+	if err := checkTranslation(x); err == nil {
+		t.Fatal("oversized title translation accepted")
+	}
+	x.Field = "body"
+	x.Text = strings.Repeat("x", DocumentMaxBytes+1)
+	if err := checkTranslation(x); err == nil {
+		t.Fatal("translation larger than document limit accepted")
+	}
+}
+
+func TestMissingTaskTranslationsLongBodiesProgress(t *testing.T) {
+	s := schemaStore(t, "translation_long_bodies")
+	ctx := t.Context()
+	original := strings.Repeat("x", DocumentMaxBytes)
+	ids := make([]string, 3)
+	for i := range ids {
+		id := seedTaskRow(t, s.pool, "long-body-lane", "short title", "backlog")
+		ids[i] = strconv.FormatInt(id, 10)
+		key := "translation/long-" + ids[i]
+		if _, err := s.pool.Exec(ctx, `INSERT INTO documents(key,kind,body,sha256,created_by,created_at,updated_at) VALUES($1,'note',$2,$3,'test',now(),now())`, key, original, SourceSHA256(original)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.pool.Exec(ctx, `UPDATE tasks SET body_doc=$1 WHERE id=$2`, key, id); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.PutTranslation(ctx, Translation{Entity: "task", EntityID: ids[i], Field: "title", Lang: "ko", SourceSHA256: SourceSHA256("short title"), Text: "제목", Translator: "test"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first, err := s.MissingTaskTranslations(ctx, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first) != 2 || first[0].EntityID != ids[0] || first[1].EntityID != ids[1] {
+		t.Fatalf("first page count=%d, want first two body translations", len(first))
+	}
+	for _, row := range first {
+		if err := s.PutTranslation(ctx, Translation{Entity: "task", EntityID: row.EntityID, Field: "body", Lang: "ko", SourceSHA256: row.SourceSHA256, Text: original, Translator: "test"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	next, err := s.MissingTaskTranslations(ctx, 1000)
+	if err != nil || len(next) != 1 || next[0].EntityID != ids[2] {
+		t.Fatalf("next page count=%d err=%v", len(next), err)
+	}
+}

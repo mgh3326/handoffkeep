@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -387,5 +388,27 @@ func TestMigrateAddsTaskBodyDoc(t *testing.T) {
 	}
 	if got := xs[0].Refs["tasks"]; len(got) != 1 || got[0] != strconv.FormatInt(x.ID, 10) {
 		t.Fatalf("task link=%v want %d", got, x.ID)
+	}
+}
+
+func TestSearchTasksRanksTranslatedBodyBelowTitle(t *testing.T) {
+	s, pool := searchTestStore(t)
+	ctx := t.Context()
+	titleID := seedTaskRow(t, pool, "translation-search", "Title result", "backlog")
+	bodyID := seedTaskRow(t, pool, "translation-search", "Body result", "backlog")
+	for _, x := range []struct {
+		id          int64
+		field, text string
+	}{{titleID, "title", "검색표적 제목"}, {bodyID, "body", "본문 검색표적 내용"}} {
+		if err := s.PutTranslation(ctx, Translation{Entity: "task", EntityID: strconv.FormatInt(x.id, 10), Field: x.field, Lang: "ko", SourceSHA256: SourceSHA256("source"), Text: x.text, Translator: "test"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	results, err := s.Search(ctx, "검색표적", "tasks", "translation-search", 10)
+	if err != nil || len(results) != 2 {
+		t.Fatalf("results=%+v err=%v", results, err)
+	}
+	if results[0].Key != strconv.FormatInt(titleID, 10) || results[1].Key != strconv.FormatInt(bodyID, 10) || !strings.Contains(results[0].Snippet, "검색표적") || !strings.Contains(results[1].Snippet, "검색표적") {
+		t.Fatalf("incorrect ranking or snippet: %+v", results)
 	}
 }
