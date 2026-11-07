@@ -2,10 +2,13 @@ package store
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -72,6 +75,232 @@ type DotsIssue struct {
 	URL         string
 	IssueUUID   string
 	Description string
+}
+
+// DotsRequestInput describes a request filed directly in hk.
+type DotsRequestInput struct {
+	Title         string `json:"title"`
+	Body          string `json:"body"`
+	RequesterLane string `json:"requester_lane,omitempty"`
+	Project       string `json:"project,omitempty"`
+}
+
+// CreateDotsRequest creates a standalone request and its body in one transaction.
+func (s *Store) CreateDotsRequest(ctx context.Context, by string, in DotsRequestInput) (Task, error) {
+	lane := in.RequesterLane
+	if lane == "" {
+		lane = by
+	}
+	if !validName(lane) || by == "" || !validText(by, 128) || strings.TrimSpace(in.Body) == "" {
+		return Task{}, errors.New("invalid dots request")
+	}
+	var project *string
+	if in.Project != "" {
+		project = &in.Project
+	}
+	item := triageItem{Title: in.Title, Body: in.Body, Kind: "verify", Project: project}
+	if err := checkTriageItem(item); err != nil {
+		return Task{}, err
+	}
+	var key [16]byte
+	if _, err := rand.Read(key[:]); err != nil {
+		return Task{}, err
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Task{}, err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
+		return Task{}, err
+	}
+	x, err := insertTriageTaskTx(ctx, tx, item, "dots", "hk-"+hex.EncodeToString(key[:]), "dots", nil, by, time.Now().UTC())
+	if err != nil {
+		return Task{}, err
+	}
+	err = scanTask(tx.QueryRow(ctx, `UPDATE tasks SET state=$2,parent_lane=$3,started_triage_at=NULL WHERE id=$1 RETURNING `+taskColumns, x.ID, StateBacklog, lane), &x)
+	if err != nil {
+		return Task{}, err
+	}
+	return x, tx.Commit(ctx)
+}
+
+// IsHKDotsRequest identifies a request that must remain on hk.
+func IsHKDotsRequest(task Task) bool {
+	return task.Source == "dots" && strings.HasPrefix(task.SourceRef, "hk-")
+}
+
+// DotsInbox lists open hk requests in creation order after a task cursor.
+func (s *Store) DotsInbox(ctx context.Context, after int64, limit int) ([]Task, error) {
+	if after < 0 || limit < 1 || limit > 100 {
+		return nil, errors.New("invalid dots inbox cursor or limit")
+	}
+	rows, err := s.pool.Query(ctx, `SELECT `+taskColumns+` FROM tasks WHERE lane='dots' AND source='dots' AND state NOT IN (`+settledStatesSQL+`) AND ($1::bigint=0 OR (created_at,id) > (SELECT created_at,id FROM tasks WHERE id=$1 AND lane='dots' AND source='dots')) ORDER BY created_at,id LIMIT $2`, after, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var tasks []Task
+	for rows.Next() {
+		var task Task
+		if err := scanTask(rows, &task); err != nil {
+			return nil, err
+		}
+		tasks = append(tasks, task)
+	}
+	return tasks, rows.Err()
+}
+
+// DotsReplyInput is a structured reply to one hk request.
+type DotsReplyInput struct {
+	TaskID            int64      `json:"task_id"`
+	Kind              string     `json:"kind"`
+	Body              string     `json:"body"`
+	IdempotencyKey    string     `json:"idempotency_key"`
+	AskOperator       bool       `json:"ask_operator,omitempty"`
+	ExpectedUpdatedAt *time.Time `json:"expected_updated_at,omitempty"`
+}
+
+type DotsReplyResult struct {
+	TaskID      int64  `json:"task_id"`
+	State       string `json:"state"`
+	DocumentKey string `json:"document_key,omitempty"`
+	Duplicate   bool   `json:"duplicate"`
+}
+
+// DotsReply is an attributed reply with its structured kind.
+type DotsReply struct {
+	TaskComment
+	Kind    string `json:"kind"`
+	Channel string `json:"channel"`
+}
+
+// ListDotsReplies returns recorded replies in comment order.
+func (s *Store) ListDotsReplies(ctx context.Context, taskID int64) ([]DotsReply, error) {
+	rows, err := s.pool.Query(ctx, `SELECT c.id,c.task_id,c.body,c.author,c.created_at,e.from_value FROM task_comments c JOIN task_events e ON e.task_id=c.task_id AND e.source='dots-hk-chatgpt' AND e.field='dots_reply' AND e.to_value=c.id::text WHERE c.task_id=$1 ORDER BY c.id`, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	replies := []DotsReply{}
+	for rows.Next() {
+		var reply DotsReply
+		if err := rows.Scan(&reply.ID, &reply.TaskID, &reply.Body, &reply.Author, &reply.CreatedAt, &reply.Kind); err != nil {
+			return nil, err
+		}
+		reply.Channel = "chatgpt"
+		replies = append(replies, reply)
+	}
+	return replies, rows.Err()
+}
+
+// ReplyDots writes the reply, its state change, and its recorded outputs together.
+func (s *Store) ReplyDots(ctx context.Context, actor, channel string, in DotsReplyInput) (DotsReplyResult, error) {
+	if in.TaskID < 1 || !validText(actor, 128) || actor == "" || channel != "chatgpt" || !validSourceRef(in.IdempotencyKey) || (in.AskOperator && in.Kind != "QUESTION") {
+		return DotsReplyResult{}, errors.New("invalid dots reply")
+	}
+	if in.Kind != "START" && in.Kind != "PROGRESS" && !DotsKindRecorded(in.Kind) {
+		return DotsReplyResult{}, errors.New("invalid dots reply kind")
+	}
+	if in.Kind == "START" && (in.ExpectedUpdatedAt == nil || in.ExpectedUpdatedAt.IsZero()) {
+		return DotsReplyResult{}, errors.New("START requires expected_updated_at")
+	}
+	if err := CheckTaskCommentBody(in.Body); err != nil {
+		return DotsReplyResult{}, err
+	}
+	if err := guard.Reject(in.IdempotencyKey); err != nil {
+		return DotsReplyResult{}, err
+	}
+	keyHash := sha256.Sum256([]byte(fmt.Sprintf("%d\x00%s", in.TaskID, in.IdempotencyKey)))
+	commentID := hex.EncodeToString(keyHash[:])
+	expected := ""
+	if in.ExpectedUpdatedAt != nil {
+		expected = in.ExpectedUpdatedAt.UTC().Format(time.RFC3339Nano)
+	}
+	payloadHash := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%s\x00%t\x00%s\x00%s\x00%s", in.Kind, in.Body, in.AskOperator, actor, channel, expected)))
+	payload := hex.EncodeToString(payloadHash[:])
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return DotsReplyResult{}, err
+	}
+	defer tx.Rollback(ctx)
+	// Comment ids must become visible in id order; take its lock before any
+	// task lock, as required by the comment writer and lockorder.go.
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, taskCommentInsertLock); err != nil {
+		return DotsReplyResult{}, err
+	}
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
+		return DotsReplyResult{}, err
+	}
+	var task Task
+	if err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, in.TaskID), &task); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return DotsReplyResult{}, ErrTaskNotFound
+		}
+		return DotsReplyResult{}, err
+	}
+	var previous string
+	err = tx.QueryRow(ctx, `SELECT note FROM task_events WHERE task_id=$1 AND source='dots-hk-chatgpt' AND source_ref=$2`, in.TaskID, commentID).Scan(&previous)
+	if err == nil {
+		parts := strings.SplitN(previous, " ", 3)
+		if len(parts) != 3 {
+			return DotsReplyResult{}, errors.New("invalid recorded dots reply")
+		}
+		return DotsReplyResult{TaskID: task.ID, State: parts[1], DocumentKey: parts[2], Duplicate: true}, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return DotsReplyResult{}, err
+	}
+	if task.Lane != "dots" || !IsHKDotsRequest(task) {
+		return DotsReplyResult{}, errors.New("invalid dots request task")
+	}
+	if in.Kind == "START" && (!task.UpdatedAt.Equal(*in.ExpectedUpdatedAt) || !IsClaimableState(task.State) || task.ClaimedBy != "") {
+		return DotsReplyResult{}, fmt.Errorf("%w: dots request has changed or is already claimed", ErrTaskConflict)
+	}
+	if in.Kind == "PROGRESS" && IsSettledState(task.State) {
+		return DotsReplyResult{}, ErrTaskConflict
+	}
+	now := time.Now().UTC()
+	var commentRowID int64
+	if err = tx.QueryRow(ctx, `INSERT INTO task_comments(task_id,body,author,created_at) VALUES($1,$2,$3,$4) RETURNING id`, in.TaskID, in.Body, actor, now).Scan(&commentRowID); err != nil {
+		return DotsReplyResult{}, err
+	}
+	var docKey string
+	if in.Kind != "START" {
+		issue := DotsIssue{Identifier: "hk-" + strconv.FormatInt(task.ID, 10), Title: task.Title, URL: fmt.Sprintf("hk:task/%d", task.ID), IssueUUID: fmt.Sprintf("hk:%d", task.ID)}
+		comment := DotsComment{ID: commentID, CreatedAt: now.Format(time.RFC3339Nano), Body: "[dots] " + in.Kind + "\n" + in.Body}
+		if _, ok := DotsKind(comment.Body); !ok {
+			return DotsReplyResult{}, errors.New("invalid dots reply")
+		}
+		docKey, _, err = recordDotsResultTx(ctx, tx, in.Kind, issue, comment, &task, task.ParentLane, "hk-mcp")
+		if err != nil {
+			return DotsReplyResult{}, err
+		}
+	}
+	switch in.Kind {
+	case "START":
+		task, err = s.claimTaskTx(ctx, tx, task.ID, "dots", "", "dots request")
+	case "BLOCKED":
+		task, err = s.transitionTaskTx(ctx, tx, task.ID, TransitionInput{To: "hold", By: actor, Note: in.Body}, false)
+	case "RESULT":
+		task, err = s.transitionTaskTx(ctx, tx, task.ID, TransitionInput{To: StateCompleted, By: actor, Evidence: "hk:doc " + docKey}, false)
+	case "QUESTION":
+		if in.AskOperator {
+			var decision DecisionRequestResult
+			decision, err = s.recordDecisionRequestTx(ctx, tx, task.ID, actor, DecisionRequestInput{Question: in.Body, Options: DecisionOptions{Options: []DecisionOption{{Key: "A", Label: "Provide an answer"}}, AllowFree: true}, DefaultAction: "Wait for an answer", Block: true})
+			task = decision.Task
+		}
+	}
+	if err != nil {
+		return DotsReplyResult{}, err
+	}
+	if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: task.ID, Kind: "source_event", By: actor, Note: payload + " " + task.State + " " + docKey, At: now, Source: "dots-hk-chatgpt", SourceRef: commentID, Field: "dots_reply", FromValue: in.Kind, ToValue: strconv.FormatInt(commentRowID, 10)}); err != nil {
+		return DotsReplyResult{}, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return DotsReplyResult{}, err
+	}
+	return DotsReplyResult{TaskID: task.ID, State: task.State, DocumentKey: docKey}, nil
 }
 
 // DotsComment is one Linear comment. CreatedAt keeps Linear's own ISO-8601
@@ -219,25 +448,12 @@ func dotsLinkedTask(ctx context.Context, tx pgx.Tx, issueUUID string) (*Task, er
 // Locks (lockorder.go, level 4): the documents row and the dots_results row,
 // each insert or update taking KEY SHARE on the one linked task row.
 func (s *Store) RecordDotsResult(ctx context.Context, kind string, issue DotsIssue, c DotsComment) (key string, created bool, err error) {
-	outboxKind, recorded := dotsResultKinds[kind]
-	if !recorded || !validDotsIssue(issue, c.ID) {
+	if !validDotsIssue(issue, c.ID) {
 		return "", false, errors.New("invalid dots result")
 	}
-	if _, err := time.Parse(time.RFC3339, c.CreatedAt); err != nil {
-		return "", false, errors.New("invalid dots result")
-	}
-	key = dotsResultKey(issue, c)
-	body := dotsResultBody(kind, issue, c)
-	if !validDocKey(key) || !validText(body, DocumentMaxBytes) {
-		return "", false, errors.New("invalid dots result")
-	}
-	if err := guard.Reject(key + "\n" + body); err != nil {
+	if err := checkDotsResult(kind, issue, c, false); err != nil {
 		return "", false, err
 	}
-	sum := sha256.Sum256([]byte(body))
-	artefact := sha256.Sum256([]byte(c.Body))
-	verdict := nullIfEmpty(dotsSummaryLine(c.Body))
-	now := time.Now().UTC()
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return "", false, err
@@ -247,34 +463,78 @@ func (s *Store) RecordDotsResult(ctx context.Context, kind string, issue DotsIss
 	if err != nil {
 		return "", false, err
 	}
+	key, created, err = recordDotsResultTx(ctx, tx, kind, issue, c, task, dotsRequesterLane(issue.Description, task), dotsCreatedBy)
+	if err != nil {
+		return "", false, err
+	}
+	return key, created, tx.Commit(ctx)
+}
+
+func checkDotsResult(kind string, issue DotsIssue, c DotsComment, allowProgress bool) error {
+	if !DotsKindRecorded(kind) && !(allowProgress && kind == "PROGRESS") {
+		return errors.New("invalid dots result")
+	}
+	if len(c.ID) < 8 {
+		return errors.New("invalid dots result")
+	}
+	if _, err := time.Parse(time.RFC3339, c.CreatedAt); err != nil {
+		return errors.New("invalid dots result")
+	}
+	key := dotsResultKey(issue, c)
+	body := dotsResultBody(kind, issue, c)
+	if !validDocKey(key) || !validText(body, DocumentMaxBytes) {
+		return errors.New("invalid dots result")
+	}
+	return guard.Reject(key + "\n" + body)
+}
+
+func recordDotsResultTx(ctx context.Context, tx pgx.Tx, kind string, issue DotsIssue, c DotsComment, task *Task, lane, createdBy string) (key string, created bool, err error) {
+	progress := kind == "PROGRESS" && createdBy == "hk-mcp"
+	if err := checkDotsResult(kind, issue, c, progress); err != nil {
+		return "", false, err
+	}
+	outboxKind := dotsResultKinds[kind]
+	if progress {
+		outboxKind = OutboxKindDotsReport
+	}
+	key = dotsResultKey(issue, c)
+	body := dotsResultBody(kind, issue, c)
+	sum := sha256.Sum256([]byte(body))
+	artefact := sha256.Sum256([]byte(c.Body))
+	verdict := nullIfEmpty(dotsSummaryLine(c.Body))
+	now := time.Now().UTC()
 	var taskID *int64
 	if task != nil {
 		taskID = &task.ID
 	}
-	lane := dotsRequesterLane(issue.Description, task)
-	tag, err := tx.Exec(ctx, `INSERT INTO documents(key,kind,session,job,body,sha256,created_by,created_at,updated_at,origin_class,task_id) VALUES($1,'note',$2,'',$3,$4,$5,$6,$6,'import',$7) ON CONFLICT(key) DO NOTHING`, key, DotsLane, body, hex.EncodeToString(sum[:]), dotsCreatedBy, now, taskID)
+	tag, err := tx.Exec(ctx, `INSERT INTO documents(key,kind,session,job,body,sha256,created_by,created_at,updated_at,origin_class,task_id) VALUES($1,'note',$2,'',$3,$4,$5,$6,$6,'import',$7) ON CONFLICT(key) DO NOTHING`, key, DotsLane, body, hex.EncodeToString(sum[:]), createdBy, now, taskID)
 	if err != nil {
 		return "", false, err
 	}
 	created = tag.RowsAffected() == 1
+	if progress && !created {
+		return "", false, errors.New("dots progress document key collision")
+	}
 	if !created && taskID != nil {
 		if _, err := tx.Exec(ctx, `UPDATE documents SET task_id=$1 WHERE key=$2 AND task_id IS NULL`, *taskID, key); err != nil {
 			return "", false, err
 		}
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO dots_results(document_key,comment_id,issue_uuid,issue_identifier,kind,verdict,artefact_sha256,task_id,routed_lane,created_at,updated_at)
+	if !progress {
+		if _, err := tx.Exec(ctx, `INSERT INTO dots_results(document_key,comment_id,issue_uuid,issue_identifier,kind,verdict,artefact_sha256,task_id,routed_lane,created_at,updated_at)
 		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$10)
 		ON CONFLICT(comment_id) DO UPDATE SET task_id=EXCLUDED.task_id, updated_at=EXCLUDED.updated_at
 		WHERE dots_results.task_id IS NULL AND EXCLUDED.task_id IS NOT NULL`,
-		key, c.ID, issue.IssueUUID, issue.Identifier, kind, verdict, hex.EncodeToString(artefact[:]), taskID, lane, now); err != nil {
-		return "", false, err
+			key, c.ID, issue.IssueUUID, issue.Identifier, kind, verdict, hex.EncodeToString(artefact[:]), taskID, lane, now); err != nil {
+			return "", false, err
+		}
 	}
 	if created {
 		if err := insertNotificationOutbox(ctx, tx, outboxKind, lane, "dots-"+c.ID, dotsResultText(kind, key, issue, c), now); err != nil {
 			return "", false, err
 		}
 	}
-	return key, created, tx.Commit(ctx)
+	return key, created, nil
 }
 
 // RecordDotsFollowup records the flag for a non-dots comment added after an

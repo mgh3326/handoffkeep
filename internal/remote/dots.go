@@ -9,6 +9,18 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
+// CreateDotsRequest files a request in the dots lane.
+func (c Client) CreateDotsRequest(ctx context.Context, in store.DotsRequestInput) (store.Task, error) {
+	var out struct {
+		Task store.Task `json:"task"`
+	}
+	err := c.call(ctx, "POST", "/v1/dots/requests", in, &out)
+	if err != nil {
+		return store.Task{}, unsupportedRoute(err, "dots_requests_unsupported", "the dots requests route")
+	}
+	return out.Task, nil
+}
+
 // DotsAdoptionResult is the answer to SetDotsAdoption: the stored result and
 // whether this call changed it (false: the same change was already stored).
 type DotsAdoptionResult struct {

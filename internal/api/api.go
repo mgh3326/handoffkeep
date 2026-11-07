@@ -701,6 +701,7 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("GET /v1/tasks/{id}/origins", s.taskOriginList)
 	m.HandleFunc("GET /v1/task-origins", s.taskOriginFind)
 	m.HandleFunc("GET /v1/dots/results", s.dotsResultsList)
+	m.HandleFunc("POST /v1/dots/requests", s.dotsRequestCreate)
 	m.HandleFunc("POST /v1/dots/results/{id}/adoption", s.dotsAdoption)
 	m.HandleFunc("POST /v1/tasks/{id}/reopen", s.taskReopen)
 	m.HandleFunc("POST /v1/tasks/{id}/project", s.taskProject)

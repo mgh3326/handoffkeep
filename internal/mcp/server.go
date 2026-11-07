@@ -203,6 +203,7 @@ func HTTPHandler(service api.Service, tokens api.Tokens, access *cfaccess.Verifi
 		p, _ := principalFrom(r.Context())
 		s := newServer(service, p.Actor, false)
 		registerOperatorTools(s, service, p)
+		registerDotsTools(s, service, p)
 		return s
 	}, &gmcp.StreamableHTTPOptions{
 		Stateless: true,

@@ -230,6 +230,9 @@ func saveLinearBoardTx(ctx context.Context, tx pgx.Tx, b LinearBoard, event Line
 	if _, err = tx.Exec(ctx, `INSERT INTO linear_board_tasks(task_id,status) VALUES($1,$2::jsonb) ON CONFLICT(task_id) DO UPDATE SET status=EXCLUDED.status`, b.Task.ID, string(raw)); err != nil {
 		return err
 	}
+	if IsHKDotsRequest(b.Task) {
+		return nil
+	}
 	// Always persist the console projection; eligibility gates only delivery.
 	if LinearMirrorReason(b.Task) == "" {
 		var linked bool
