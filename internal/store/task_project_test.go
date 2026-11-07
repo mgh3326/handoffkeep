@@ -239,11 +239,16 @@ func TestTaskProjectMigrationIsAdditive(t *testing.T) {
 	ctx := context.Background()
 	lane := taskProjectLane(t)
 	// Remove v33's dependent objects so it can be reapplied after v15, then
-	// rewind the project column, table, marker and event CHECK to v14.
+	// rewind the project column, table, marker and event CHECK to v14. The
+	// registered project-design-lane migration also depends on task_projects
+	// (a foreign key and the design_lane column), so its table goes first and
+	// its ID is unrecorded to let it re-run with v15.
 	for _, q := range []string{
 		`DROP TABLE task_subscribers, task_labels`,
 		`ALTER TABLE tasks DROP COLUMN milestone_id, DROP COLUMN due_at, DROP COLUMN sla_started_at, DROP COLUMN sla_medium_risk_at, DROP COLUMN sla_high_risk_at, DROP COLUMN sla_breaches_at`,
 		`DROP TABLE labels, project_milestones`,
+		`DROP TABLE project_owner_events`,
+		`DELETE FROM schema_migrations WHERE id='20261107-project-design-lane'`,
 		`DELETE FROM schema_version WHERE version=33`,
 		`DELETE FROM schema_version WHERE version=15`,
 		`ALTER TABLE tasks DROP COLUMN project`,

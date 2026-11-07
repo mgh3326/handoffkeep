@@ -128,10 +128,13 @@ func ownerEventCount(t *testing.T, s *Store, ctx context.Context, project string
 	return n
 }
 
+// assertOwnerEvent checks the want-th event of a project in write order (1 is
+// the oldest). Reading ascending keeps the assertion independent of how many
+// events follow it.
 func assertOwnerEvent(t *testing.T, s *Store, ctx context.Context, project string, want int, previous, lane, actor string) {
 	t.Helper()
 	var prev, design, by string
-	err := s.pool.QueryRow(ctx, `SELECT previous_lane, design_lane, actor FROM project_owner_events WHERE project=$1 ORDER BY id DESC OFFSET $2 LIMIT 1`, project, want-1).Scan(&prev, &design, &by)
+	err := s.pool.QueryRow(ctx, `SELECT previous_lane, design_lane, actor FROM project_owner_events WHERE project=$1 ORDER BY id ASC OFFSET $2 LIMIT 1`, project, want-1).Scan(&prev, &design, &by)
 	if err != nil {
 		t.Fatalf("event %d missing: %v", want, err)
 	}
