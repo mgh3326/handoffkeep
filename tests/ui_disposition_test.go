@@ -63,7 +63,7 @@ func setHub(hub *fakeIngressHub, mode string, persist func(ingressRequest)) {
 }
 
 func TestUIDispositionSingleAnswerRecordsThenNotifies(t *testing.T) {
-	s := uiStore(t)
+	s, _ := schemaTestStore(t, "ui_disposition_single")
 	drainOpenDispositions(t, s)
 	t.Cleanup(func() { drainOpenDispositions(t, s) })
 	fixture := newUIJWTFixture(t)
@@ -111,7 +111,7 @@ func TestUIDispositionSingleAnswerRecordsThenNotifies(t *testing.T) {
 // ESC-5 / tester surface ④: record first; a failed emit is shown and can be
 // re-sent with the same event ID and text.
 func TestUIDispositionEmitFailureStaysRecordedAndRenotifies(t *testing.T) {
-	s := uiStore(t)
+	s, _ := schemaTestStore(t, "ui_disposition_emit")
 	drainOpenDispositions(t, s)
 	t.Cleanup(func() { drainOpenDispositions(t, s) })
 	fixture := newUIJWTFixture(t)
@@ -153,7 +153,7 @@ func TestUIDispositionEmitFailureStaysRecordedAndRenotifies(t *testing.T) {
 
 // AC ④ / AC+2: one POST answers exactly the rendered snapshot.
 func TestUIDispositionBatchIsOneActionOverTheSnapshot(t *testing.T) {
-	s := uiStore(t)
+	s, dbURL := schemaTestStore(t, "ui_disposition_batch")
 	drainOpenDispositions(t, s)
 	t.Cleanup(func() { drainOpenDispositions(t, s) })
 	fixture := newUIJWTFixture(t)
@@ -182,10 +182,10 @@ func TestUIDispositionBatchIsOneActionOverTheSnapshot(t *testing.T) {
 		tampered[k] = v
 	}
 	tampered.Set("snapshot", strings.Join(strings.Split(fields.Get("snapshot"), ",")[:2], ","))
-	before := uiRowCounts(t)
+	before := uiRowCountsAt(t, dbURL)
 	response := uiPostForm(t, h.Client(), h.URL+"/ui/dispositions/accept-batch", assertion, cookie, tampered, h.URL, true)
 	responseText(t, response)
-	if response.StatusCode != http.StatusForbidden || uiRowCounts(t) != before || len(hub.requests()) != 0 {
+	if response.StatusCode != http.StatusForbidden || uiRowCountsAt(t, dbURL) != before || len(hub.requests()) != 0 {
 		t.Fatalf("tampered snapshot status=%d", response.StatusCode)
 	}
 
@@ -217,7 +217,7 @@ func TestUIDispositionBatchIsOneActionOverTheSnapshot(t *testing.T) {
 
 // ESC-2 / C3: beyond 50 open items the header and the button name the next batch.
 func TestUIDispositionNextBatchIsShown(t *testing.T) {
-	s := uiStore(t)
+	s, _ := schemaTestStore(t, "ui_disposition_next_batch")
 	drainOpenDispositions(t, s)
 	t.Cleanup(func() { drainOpenDispositions(t, s) })
 	fixture := newUIJWTFixture(t)
@@ -244,7 +244,7 @@ func TestUIDispositionNextBatchIsShown(t *testing.T) {
 
 // AC+1 / C1 / C4 / tester surface ①: every non-operator path is refused and writes nothing.
 func TestUIDispositionRefusesNonOperatorPaths(t *testing.T) {
-	s := uiStore(t)
+	s, dbURL := schemaTestStore(t, "ui_disposition_refuse")
 	drainOpenDispositions(t, s)
 	t.Cleanup(func() { drainOpenDispositions(t, s) })
 	lane := uiLane(t, "director")
@@ -259,13 +259,13 @@ func TestUIDispositionRefusesNonOperatorPaths(t *testing.T) {
 	gen := openGen(t, s, x.ID)
 	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions/legacy", assertion)
 	answer := url.Values{"csrf": {csrf}, "id": {strconv.FormatInt(x.ID, 10)}, "gen": {strconv.FormatInt(gen, 10)}, "key": {"A"}}
-	before := uiRowCounts(t)
+	before := uiRowCountsAt(t, dbURL)
 	unchanged := func(label string) {
 		t.Helper()
 		if got, _, _ := s.GetTask(t.Context(), x.ID); got.State != "backlog" {
 			t.Fatalf("%s moved the item to %s", label, got.State)
 		}
-		if after := uiRowCounts(t); after.TaskEvents != before.TaskEvents || after.Tasks != before.Tasks {
+		if after := uiRowCountsAt(t, dbURL); after.TaskEvents != before.TaskEvents || after.Tasks != before.Tasks {
 			t.Fatalf("%s wrote: before=%+v after=%+v", label, before, after)
 		}
 	}
@@ -342,7 +342,7 @@ func TestUIDispositionRefusesNonOperatorPaths(t *testing.T) {
 // Director ruling on SHOULD-3: glance reports open disposition items beside,
 // not inside, decisions_pending.
 func TestUIGlanceReportsDispositionsSeparately(t *testing.T) {
-	s := uiStore(t)
+	s, _ := schemaTestStore(t, "ui_glance_dispositions")
 	drainOpenDispositions(t, s)
 	t.Cleanup(func() { drainOpenDispositions(t, s) })
 	fixture := newUIJWTFixture(t)
