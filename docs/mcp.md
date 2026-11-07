@@ -11,7 +11,9 @@ Create a standalone hk request with `handoffkeep dots request --title TITLE
 --body BODY`, optionally adding `--requester-lane L` and `--project P`.
 The authenticated caller is the default requester lane. The equivalent API
 is `POST /v1/dots/requests` with `title`, `body`, `requester_lane`, and
-`project`. Each request is a task in the `dots` lane; its body is an hk
+`project`. Pass `--idempotency-key` to retry a request without creating a
+second task. The API accepts the same value as `idempotency_key`. Each request
+is a task in the `dots` lane; its body is an hk
 document and its `parent_lane` identifies the requester.
 
 On the authenticated ChatGPT connection, `dots_inbox` lists open requests in

@@ -79,10 +79,11 @@ type DotsIssue struct {
 
 // DotsRequestInput describes a request filed directly in hk.
 type DotsRequestInput struct {
-	Title         string `json:"title"`
-	Body          string `json:"body"`
-	RequesterLane string `json:"requester_lane,omitempty"`
-	Project       string `json:"project,omitempty"`
+	Title          string `json:"title"`
+	Body           string `json:"body"`
+	RequesterLane  string `json:"requester_lane,omitempty"`
+	Project        string `json:"project,omitempty"`
+	IdempotencyKey string `json:"idempotency_key,omitempty"`
 }
 
 // CreateDotsRequest creates a standalone request and its body in one transaction.
@@ -102,9 +103,24 @@ func (s *Store) CreateDotsRequest(ctx context.Context, by string, in DotsRequest
 	if err := checkTriageItem(item); err != nil {
 		return Task{}, err
 	}
-	var key [16]byte
-	if _, err := rand.Read(key[:]); err != nil {
-		return Task{}, err
+	requestHash := sha256.Sum256([]byte(strings.Join([]string{in.Title, in.Body, lane, in.Project}, "\x00")))
+	requestDigest := hex.EncodeToString(requestHash[:])
+	var sourceRef string
+	if in.IdempotencyKey != "" {
+		if !validSourceRef(in.IdempotencyKey) {
+			return Task{}, errors.New("invalid dots request idempotency key")
+		}
+		if err := guard.Reject(in.IdempotencyKey); err != nil {
+			return Task{}, err
+		}
+		sum := sha256.Sum256([]byte(by + "\x00" + in.IdempotencyKey))
+		sourceRef = "hk-" + hex.EncodeToString(sum[:])
+	} else {
+		var key [16]byte
+		if _, err := rand.Read(key[:]); err != nil {
+			return Task{}, err
+		}
+		sourceRef = "hk-" + hex.EncodeToString(key[:])
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -114,13 +130,34 @@ func (s *Store) CreateDotsRequest(ctx context.Context, by string, in DotsRequest
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
 		return Task{}, err
 	}
-	x, err := insertTriageTaskTx(ctx, tx, item, "dots", "hk-"+hex.EncodeToString(key[:]), "dots", nil, by, time.Now().UTC())
+	if in.IdempotencyKey != "" {
+		existing, found, err := taskBySourceTx(ctx, tx, "dots", sourceRef)
+		if err != nil {
+			return Task{}, err
+		}
+		if found {
+			var original string
+			if err := tx.QueryRow(ctx, `SELECT note FROM task_events WHERE task_id=$1 AND source='dots-request' AND source_ref=$2`, existing.ID, sourceRef).Scan(&original); err != nil {
+				return Task{}, err
+			}
+			if original != requestDigest {
+				return Task{}, errors.New("dots request idempotency key reused with different input")
+			}
+			return existing, nil
+		}
+	}
+	x, err := insertTriageTaskTx(ctx, tx, item, "dots", sourceRef, "dots", nil, by, time.Now().UTC())
 	if err != nil {
 		return Task{}, err
 	}
 	err = scanTask(tx.QueryRow(ctx, `UPDATE tasks SET state=$2,parent_lane=$3,started_triage_at=NULL WHERE id=$1 RETURNING `+taskColumns, x.ID, StateBacklog, lane), &x)
 	if err != nil {
 		return Task{}, err
+	}
+	if in.IdempotencyKey != "" {
+		if _, _, err := insertEvent(ctx, tx, taskEventInput{TaskID: x.ID, Kind: "source_event", By: by, Note: requestDigest, At: x.CreatedAt, Source: "dots-request", SourceRef: sourceRef}); err != nil {
+			return Task{}, err
+		}
 	}
 	return x, tx.Commit(ctx)
 }
@@ -167,6 +204,9 @@ type DotsReplyResult struct {
 	DocumentKey string `json:"document_key,omitempty"`
 	Duplicate   bool   `json:"duplicate"`
 }
+
+// ErrDotsReplyKeyConflict rejects an idempotency key used for another reply.
+var ErrDotsReplyKeyConflict = errors.New("dots_reply_key_conflict")
 
 // DotsReply is an attributed reply with its structured kind.
 type DotsReply struct {
@@ -245,6 +285,9 @@ func (s *Store) ReplyDots(ctx context.Context, actor, channel string, in DotsRep
 		parts := strings.SplitN(previous, " ", 3)
 		if len(parts) != 3 {
 			return DotsReplyResult{}, errors.New("invalid recorded dots reply")
+		}
+		if parts[0] != payload {
+			return DotsReplyResult{}, ErrDotsReplyKeyConflict
 		}
 		return DotsReplyResult{TaskID: task.ID, State: parts[1], DocumentKey: parts[2], Duplicate: true}, nil
 	}

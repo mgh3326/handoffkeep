@@ -11,7 +11,7 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
-const dotsUsage = "usage: dots request --title TITLE --body BODY [--requester-lane L] [--project P]\n       dots results [--task N] [--issue ID]\n       dots adopt <id> --state accepted|partially_used|rejected|superseded [--ref R] [--superseded-by ID]"
+const dotsUsage = "usage: dots request --title TITLE --body BODY [--requester-lane L] [--project P] [--idempotency-key KEY]\n       dots results [--task N] [--issue ID]\n       dots adopt <id> --state accepted|partially_used|rejected|superseded [--ref R] [--superseded-by ID]"
 
 func dotsRequestCmd(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("dots request", flag.ContinueOnError)
@@ -22,6 +22,7 @@ func dotsRequestCmd(args []string, out io.Writer) error {
 	fs.StringVar(&in.Body, "body", "", "request body")
 	fs.StringVar(&in.RequesterLane, "requester-lane", "", "lane to notify")
 	fs.StringVar(&in.Project, "project", "", "task project")
+	fs.StringVar(&in.IdempotencyKey, "idempotency-key", "", "reuse to retry the same request")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}

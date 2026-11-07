@@ -161,3 +161,7 @@ Read tools set `readOnlyHint: true`. The write tools (`put_checkpoint`,
 `task_comment`, `task_intake`) set `readOnlyHint: false` and
 `destructiveHint: false`. Of these, only `decision_answer` can move a task's
 state, by answering the task's request; the rest add records.
+
+After the baseline, `dots_inbox` lists hk dots requests over HTTP and
+`dots_reply` records a reply and its task state change over HTTP. See
+[MCP for ChatGPT](mcp.md#dots-requests) for the write switch and reply kinds.

@@ -68,9 +68,8 @@ func TestDotsReplyAtomicAndIdempotent(t *testing.T) {
 		t.Fatalf("notifications=%d err=%v", notifications, err)
 	}
 	in.Body = "Different answer"
-	replay, err := s.ReplyDots(ctx, "operator:test@example.com", "chatgpt", in)
-	if err != nil || !replay.Duplicate || replay.DocumentKey != first.DocumentKey || replay.State != first.State {
-		t.Fatalf("changed payload replay=%+v err=%v", replay, err)
+	if _, err := s.ReplyDots(ctx, "operator:test@example.com", "chatgpt", in); !errors.Is(err, ErrDotsReplyKeyConflict) {
+		t.Fatalf("changed payload error=%v", err)
 	}
 }
 

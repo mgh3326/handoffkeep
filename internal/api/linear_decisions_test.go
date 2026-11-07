@@ -87,11 +87,27 @@ func (f *fakeLinear) UpdateLinearIssueState(_ context.Context, issueID, stateID 
 
 // fakeAskStore holds what asking writes, with the store's duplicate rule.
 type fakeAskStore struct {
+	task      store.Task
 	result    store.DecisionRequestResult
 	recordErr error
 	records   int
 	links     map[string]store.LinearDecisionLink
 	announced []string
+}
+
+func (f *fakeAskStore) GetTask(_ context.Context, id int64) (store.Task, bool, error) {
+	task := f.task
+	task.ID = id
+	return task, true, nil
+}
+
+func TestLinearDecisionAskRefusesHKDotsBeforeWrites(t *testing.T) {
+	linear := newFakeLinear()
+	st := &fakeAskStore{task: store.Task{Source: "dots", SourceRef: "hk-example"}}
+	_, err := (LinearDecisions{Team: "ROB", Linear: linear}).Ask(t.Context(), st, 7, "desk", askInput())
+	if err == nil || st.records != 0 || len(linear.created) != 0 {
+		t.Fatalf("err=%v records=%d issues=%v", err, st.records, linear.created)
+	}
 }
 
 func (f *fakeAskStore) RecordDecisionRequest(_ context.Context, taskID int64, by string, in store.DecisionRequestInput) (store.DecisionRequestResult, error) {

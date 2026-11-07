@@ -67,6 +67,7 @@ type LinearDecisionAPI interface {
 
 // decisionAskStore is the store surface asking writes through.
 type decisionAskStore interface {
+	GetTask(ctx context.Context, id int64) (store.Task, bool, error)
 	RecordDecisionRequest(ctx context.Context, taskID int64, by string, in store.DecisionRequestInput) (store.DecisionRequestResult, error)
 	LinearDecisionLinkByRequest(ctx context.Context, requestID string) (store.LinearDecisionLink, bool, error)
 	RecordLinearDecisionIssue(ctx context.Context, link store.LinearDecisionLink, supersedes, closeStateID, announce string) (store.LinearDecisionLink, bool, error)
@@ -84,6 +85,16 @@ type LinearDecisions struct {
 // The issue id derives from the request id, so even a crash between creating the
 // issue and storing the link cannot make a second one.
 func (l LinearDecisions) Ask(ctx context.Context, st decisionAskStore, taskID int64, by string, in store.DecisionRequestInput) (store.DecisionAskResult, error) {
+	task, found, err := st.GetTask(ctx, taskID)
+	if err != nil {
+		return store.DecisionAskResult{}, err
+	}
+	if !found {
+		return store.DecisionAskResult{}, store.ErrTaskNotFound
+	}
+	if store.IsHKDotsRequest(task) {
+		return store.DecisionAskResult{}, errors.New("hk dots requests cannot be mirrored to Linear")
+	}
 	target, err := l.Linear.LinearDecisionTarget(ctx, l.Team, store.LinearDecisionLabel)
 	if err != nil {
 		return store.DecisionAskResult{}, err
@@ -91,9 +102,6 @@ func (l LinearDecisions) Ask(ctx context.Context, st decisionAskStore, taskID in
 	recorded, err := st.RecordDecisionRequest(ctx, taskID, by, in)
 	if err != nil {
 		return store.DecisionAskResult{}, err
-	}
-	if store.IsHKDotsRequest(recorded.Task) {
-		return store.DecisionAskResult{}, errors.New("hk dots requests cannot be mirrored to Linear")
 	}
 	request := recorded.Request
 	var options store.DecisionOptions

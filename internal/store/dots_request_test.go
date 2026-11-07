@@ -20,7 +20,7 @@ func TestCreateDotsRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.ID == second.ID || first.Lane != "dots" || first.ParentLane != "requester" || first.State != StateBacklog || first.Source != "dots" || first.SourceRef == "" || second.ParentLane != "caller" {
+	if first.ID == second.ID || first.Lane != "dots" || first.ParentLane != "requester" || first.CreatedBy != "caller" || first.State != StateBacklog || first.Source != "dots" || first.SourceRef == "" || second.ParentLane != "caller" {
 		t.Fatalf("first=%+v second=%+v", first, second)
 	}
 	doc, found, err := s.GetDocument(ctx, first.BodyDoc)
@@ -34,5 +34,22 @@ func TestCreateDotsRequest(t *testing.T) {
 	page, err = s.DotsInbox(ctx, first.ID, 1)
 	if err != nil || len(page) != 1 || page[0].ID != second.ID {
 		t.Fatalf("second page=%+v err=%v", page, err)
+	}
+}
+
+func TestCreateDotsRequestIdempotency(t *testing.T) {
+	s := schemaStore(t, "dots_request_retry")
+	in := DotsRequestInput{Title: "Research", Body: "Investigate", IdempotencyKey: "request-1"}
+	first, err := s.CreateDotsRequest(t.Context(), "caller", in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := s.CreateDotsRequest(t.Context(), "caller", in)
+	if err != nil || again.ID != first.ID {
+		t.Fatalf("first=%+v again=%+v err=%v", first, again, err)
+	}
+	in.Body = "Different"
+	if _, err := s.CreateDotsRequest(t.Context(), "caller", in); err == nil {
+		t.Fatal("different request with the same key was accepted")
 	}
 }
