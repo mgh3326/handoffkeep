@@ -10,6 +10,7 @@ import (
 
 	"github.com/mgh3326/handoffkeep/internal/api"
 	"github.com/mgh3326/handoffkeep/internal/buildinfo"
+	"github.com/mgh3326/handoffkeep/internal/cfaccess"
 	"github.com/mgh3326/handoffkeep/internal/store"
 	gmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -194,17 +195,32 @@ func newServer(service Backend, client string, allowPathUpload bool) *gmcp.Serve
 }
 
 // HTTPHandler authenticates before handing a request to the official streamable transport.
-func HTTPHandler(service api.Service, tokens api.Tokens) http.Handler {
-	h := gmcp.NewStreamableHTTPHandler(func(r *http.Request) *gmcp.Server { client, _ := tokens.Client(r); return New(service, client) }, &gmcp.StreamableHTTPOptions{Stateless: true})
+// An hk bearer token keeps its previous behavior; when access is configured, a
+// Cloudflare Access email assertion for the MCP application is the second
+// credential. A service-token identity is never accepted here.
+func HTTPHandler(service api.Service, tokens api.Tokens, access *cfaccess.Verifier) http.Handler {
+	h := gmcp.NewStreamableHTTPHandler(func(r *http.Request) *gmcp.Server {
+		p, _ := principalFrom(r.Context())
+		s := newServer(service, p.Actor, false)
+		registerOperatorTools(s, service, p)
+		return s
+	}, &gmcp.StreamableHTTPOptions{Stateless: true})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if _, ok := tokens.Client(r); !ok {
+		p, ok := authenticate(r, tokens, access)
+		if !ok {
 			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("WWW-Authenticate", "Bearer")
 			w.WriteHeader(http.StatusUnauthorized)
 			_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
 			return
 		}
-		client, _ := tokens.Client(r)
-		r = r.WithContext(store.WithWrkPrincipal(r.Context(), client, nil))
-		h.ServeHTTP(w, r)
+		ctx := withPrincipal(r.Context(), p)
+		// A bearer token is fenced as the transport-authenticated client id it
+		// always was. An Access identity is an operator path like the console,
+		// which deliberately has no implicit central-role principal.
+		if !p.Access {
+			ctx = store.WithWrkPrincipal(ctx, p.Actor, nil)
+		}
+		h.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
