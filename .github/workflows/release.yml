@@ -126,11 +126,12 @@ jobs:
       # the script then reads that status alone.
       #
       # While GATE is ci-ok the publication ALSO requires a deploy-ok success
-      # (review on #228, high). The main tier no longer runs the release build
-      # (hk 3440 moved it to deploy-release), so a green ci-ok alone no longer
-      # proves the release assets build and verify. Requiring both keeps the
-      # transition honest: nothing publishes without deploy-tier evidence, and
-      # the later switch only drops the ci-ok half.
+      # (review on #228, high). main-linux keeps the release-build dry run for
+      # the transition (design session on #228), so ci-ok does still prove the
+      # assets build; the deploy requirement is belt and braces for the same
+      # concern, and it is what the switch below leaves in place. Requiring
+      # both keeps the transition honest: nothing publishes without deploy-tier
+      # evidence, and the later switch only drops the ci-ok half.
       GATE: ci-ok
     outputs:
       green: ${{ steps.wait.outputs.green }}
