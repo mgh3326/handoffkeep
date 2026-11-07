@@ -143,6 +143,10 @@ func TaskStateMachine() []TaskStateInfo {
 			Claimable: IsClaimableState(name), AllowedTransitions: targets,
 		}
 		if rule, ok := taskClosureRules[name]; ok {
+			// Types would otherwise alias the enforcement table: a caller of
+			// this exported read model could edit a returned rule and change
+			// what applyLifecycle accepts for later transitions.
+			rule.Types = append([]string(nil), rule.Types...)
 			info.Closure = &rule
 		}
 		out = append(out, info)

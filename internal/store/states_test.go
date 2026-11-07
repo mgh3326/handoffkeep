@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestStateCategoriesAreTheDesignTable pins the derived category of each of
@@ -161,6 +162,29 @@ func TestLinearMappingCoversEveryState(t *testing.T) {
 	}
 	if len(LinearTaskStateMapping) != len(TaskStates()) {
 		t.Errorf("mapping has %d entries for %d states", len(LinearTaskStateMapping), len(TaskStates()))
+	}
+}
+
+// TestTaskStateMachineReturnsDetachedClosureTypes keeps the exported read
+// model from aliasing the enforcement table: a caller mutating the returned
+// rule must not change what applyLifecycle accepts.
+func TestTaskStateMachineReturnsDetachedClosureTypes(t *testing.T) {
+	var merged *TaskClosureRule
+	for _, state := range TaskStateMachine() {
+		if state.Name == StateMerged {
+			merged = state.Closure
+		}
+	}
+	if merged == nil || len(merged.Types) == 0 {
+		t.Fatal("merged has no closure rule")
+	}
+	merged.Types[0] = "cancelled"
+	if got := taskClosureRules[StateMerged].Types[0]; got != "resolved" {
+		t.Fatalf("mutating the returned rule changed enforcement to %q", got)
+	}
+	x := Task{}
+	if err := applyLifecycle(&x, StateReviewing, StateMerged, time.Now().UTC(), &TaskClosure{Type: "resolved", Evidence: "https://example.com/r"}); err != nil {
+		t.Fatalf("enforcement refused resolved after the read model was mutated: %v", err)
 	}
 }
 

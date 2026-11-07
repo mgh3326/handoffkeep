@@ -24,7 +24,7 @@ type ProjectOverview struct {
 // ListProjectOverviews returns every configured project in name order with its
 // owner, metadata and open task counts. The two reads share one snapshot.
 func (s *Store) ListProjectOverviews(ctx context.Context) ([]ProjectOverview, error) {
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
 		return nil, err
 	}

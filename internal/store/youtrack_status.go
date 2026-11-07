@@ -36,7 +36,7 @@ func (s *Store) YouTrackSyncStatus(ctx context.Context, now time.Time) (YouTrack
 		YouTrackOutcomeRejected:  0,
 		YouTrackOutcomeDuplicate: 0,
 	}}
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
 		return out, err
 	}
