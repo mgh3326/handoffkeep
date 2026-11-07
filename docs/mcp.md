@@ -117,6 +117,11 @@ priority or lane.
 | `task_states` | read | none | The twelve states with category, terminal and claimable flags, allowed manual transitions and closure requirements |
 | `sync_status` | read | none | YouTrack cursor, pending outbox backlog, processed outcomes in the last 24 hours, mirrored tasks and last run |
 
+The parity matrix — every console write route, `/v1` route, CLI command and MCP
+tool, with the MCP gaps grouped as follow-ups — is [parity.md](parity.md). The
+console write routes in that matrix are enforced by a test in
+`internal/parity`.
+
 Every task result carries `console_url`
 (`https://console.robinco.dev/ui/tasks/<id>`) and, when the task has a YouTrack
 mirror, the readable YouTrack id and URL. Limits are clamped, not rejected:
