@@ -105,18 +105,25 @@ func applyLifecycle(x *Task, from, to string, now time.Time, c *TaskClosure) err
 		if c == nil {
 			return fmt.Errorf("%w: evidence is required", ErrClosureInvalid)
 		}
+		rule := taskClosureRules[to]
 		evidence := strings.TrimSpace(c.Evidence)
-		if len(evidence) < 1 || len(evidence) > 1024 || !validText(evidence, 1024) {
-			return fmt.Errorf("%w: evidence must be 1..1024 bytes", ErrClosureInvalid)
+		if len(evidence) < 1 || len(evidence) > rule.EvidenceMaxBytes || !validText(evidence, rule.EvidenceMaxBytes) {
+			return fmt.Errorf("%w: evidence must be 1..%d bytes", ErrClosureInvalid, rule.EvidenceMaxBytes)
 		}
-		if guard.Reject(evidence) != nil {
+		if rule.RejectsSecretLike && guard.Reject(evidence) != nil {
 			return fmt.Errorf("%w: evidence contains secret-like content", ErrClosureInvalid)
 		}
-		valid := ((to == StateMerged || to == StateDeployed || to == StateCompleted) && c.Type == "resolved") || (to == StateDuplicate && c.Type == "superseded") || (to == StateDropped && (c.Type == "cancelled" || c.Type == "obsolete" || c.Type == "superseded"))
+		valid := false
+		for _, allowed := range rule.Types {
+			if c.Type == allowed {
+				valid = true
+				break
+			}
+		}
 		if !valid {
 			return fmt.Errorf("%w: type is not allowed for target state", ErrClosureInvalid)
 		}
-		if to == StateCompleted && !completedEvidenceRE.MatchString(evidence) {
+		if rule.ResultLink && !completedEvidenceRE.MatchString(evidence) {
 			return fmt.Errorf("%w: completed requires a result link", ErrClosureInvalid)
 		}
 		x.Refs.Closure = &TaskClosure{Type: c.Type, Evidence: evidence}
@@ -657,7 +664,7 @@ func (s *Store) transitionTaskTx(ctx context.Context, tx pgx.Tx, id int64, in Tr
 	}
 	now := time.Now().UTC()
 	var duplicateEdge bool
-	if action == actMove && to == StateDuplicate {
+	if action == actMove && taskClosureRules[to].DuplicateOf {
 		if in.DuplicateOf != 0 {
 			if _, err = addRelationTx(ctx, tx, id, RelationDuplicateOf, in.DuplicateOf, by, now); err != nil {
 				return Task{}, err
@@ -698,16 +705,13 @@ func (s *Store) transitionTaskTx(ctx context.Context, tx pgx.Tx, id int64, in Tr
 		x.State = to
 		var closure *TaskClosure
 		if IsSettledState(to) && !IsSettledState(from) {
+			rule := taskClosureRules[to]
 			typ, evidence := in.Closure, strings.TrimSpace(in.Evidence)
+			if typ == "" {
+				typ = rule.DefaultType
+			}
 			switch to {
-			case StateCompleted:
-				if typ == "" {
-					typ = "resolved"
-				}
 			case StateMerged:
-				if typ == "" {
-					typ = "resolved"
-				}
 				if evidence == "" {
 					evidence = x.Refs.PR
 				}
@@ -715,16 +719,10 @@ func (s *Store) transitionTaskTx(ctx context.Context, tx pgx.Tx, id int64, in Tr
 					evidence = note
 				}
 			case StateDropped:
-				if typ == "" {
-					typ = "cancelled"
-				}
 				if evidence == "" {
 					evidence = note
 				}
 			case StateDuplicate:
-				if typ == "" {
-					typ = "superseded"
-				}
 				var dst int64
 				if err := tx.QueryRow(ctx, `SELECT dst_id FROM task_relations WHERE src_id=$1 AND kind=$2 AND archived_at IS NULL ORDER BY id LIMIT 1`, id, RelationDuplicateOf).Scan(&dst); err != nil {
 					return Task{}, err

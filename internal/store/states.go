@@ -85,6 +85,86 @@ const settledStatesSQL = `'merged','deployed','completed','dropped','duplicate'`
 // startedStatesSQL is the started category as a SQL list.
 const startedStatesSQL = `'researching','developing','reviewing'`
 
+// closureEvidenceMaxBytes bounds a closure's evidence text. applyLifecycle and
+// taskClosureRules read it from here, so a reader of the state machine cannot
+// describe a different bound than the store enforces.
+const closureEvidenceMaxBytes = 1024
+
+// TaskClosureRule is what the store requires to enter one settled state: the
+// allowed closure types, their default, the evidence bound, and the extra
+// guards.
+type TaskClosureRule struct {
+	Types             []string `json:"types"`
+	DefaultType       string   `json:"default_type"`
+	EvidenceMaxBytes  int      `json:"evidence_max_bytes"`
+	RejectsSecretLike bool     `json:"rejects_secret_like"`
+	// ResultLink requires the completed state's https URL or hk:doc evidence.
+	ResultLink bool `json:"result_link"`
+	// DuplicateOf requires a live duplicate_of relation to the task it copies.
+	DuplicateOf bool `json:"duplicate_of"`
+}
+
+// taskClosureRules is the one closure requirement table. applyLifecycle and
+// transitionTaskTx enforce it, and TaskStateMachine reports it.
+var taskClosureRules = map[string]TaskClosureRule{
+	StateMerged:    {Types: []string{"resolved"}, DefaultType: "resolved", EvidenceMaxBytes: closureEvidenceMaxBytes, RejectsSecretLike: true},
+	StateDeployed:  {Types: []string{"resolved"}, DefaultType: "resolved", EvidenceMaxBytes: closureEvidenceMaxBytes, RejectsSecretLike: true},
+	StateCompleted: {Types: []string{"resolved"}, DefaultType: "resolved", EvidenceMaxBytes: closureEvidenceMaxBytes, RejectsSecretLike: true, ResultLink: true},
+	StateDropped:   {Types: []string{"cancelled", "obsolete", "superseded"}, DefaultType: "cancelled", EvidenceMaxBytes: closureEvidenceMaxBytes, RejectsSecretLike: true},
+	StateDuplicate: {Types: []string{"superseded"}, DefaultType: "superseded", EvidenceMaxBytes: closureEvidenceMaxBytes, RejectsSecretLike: true, DuplicateOf: true},
+}
+
+// TaskStateInfo is one state's row in the derived state machine. Nothing here
+// is a second copy: TaskCategory, IsSettledState, IsClaimableState,
+// TaskTransitions and taskClosureRules are the same values the store enforces.
+type TaskStateInfo struct {
+	Name               string           `json:"name"`
+	Category           string           `json:"category"`
+	Terminal           bool             `json:"terminal"`
+	Claimable          bool             `json:"claimable"`
+	AllowedTransitions []string         `json:"allowed_transitions"`
+	Closure            *TaskClosureRule `json:"closure,omitempty"`
+}
+
+// TaskStateMachine returns every state in display order with its category,
+// terminal and claimable flags, allowed manual transitions and closure rule.
+func TaskStateMachine() []TaskStateInfo {
+	states := TaskStates()
+	out := make([]TaskStateInfo, 0, len(states))
+	for _, name := range states {
+		targets := make([]string, 0, len(TaskTransitions[name]))
+		for _, target := range states {
+			if TaskTransitions[name][target] {
+				targets = append(targets, target)
+			}
+		}
+		info := TaskStateInfo{
+			Name: name, Category: TaskCategory(name), Terminal: IsSettledState(name),
+			Claimable: IsClaimableState(name), AllowedTransitions: targets,
+		}
+		if rule, ok := taskClosureRules[name]; ok {
+			info.Closure = &rule
+		}
+		out = append(out, info)
+	}
+	return out
+}
+
+// TaskCategories lists the categories in display order, derived from the state
+// table so the two cannot drift.
+func TaskCategories() []string {
+	seen := map[string]bool{}
+	out := []string{}
+	for _, state := range TaskStates() {
+		category := TaskCategory(state)
+		if !seen[category] {
+			seen[category] = true
+			out = append(out, category)
+		}
+	}
+	return out
+}
+
 // TaskTransitions is the single authoritative manual task state graph.
 // README.md is checked against this table by TestTaskTransitionDocumentation.
 // Event-driven moves (S2) are not edges of this table. There is no edge from
