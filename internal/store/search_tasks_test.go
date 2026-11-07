@@ -452,7 +452,7 @@ func TestSearchTasksExcludesStaleTranslations(t *testing.T) {
 	if _, err := pool.Exec(ctx, `UPDATE documents SET body='Changed body' WHERE key='search/stale'`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pool.Exec(ctx, `UPDATE task_comments SET body='Changed comment' WHERE id=$1`, commentID); err != nil {
+	if _, err := pool.Exec(ctx, `UPDATE translations SET source_sha256=$1 WHERE entity='task_comment' AND entity_id=$2`, SourceSHA256("Different comment"), strconv.FormatInt(commentID, 10)); err != nil {
 		t.Fatal(err)
 	}
 	for _, query := range []string{"제목표적", "본문표적", "댓글표적"} {
