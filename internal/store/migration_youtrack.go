@@ -38,7 +38,7 @@ func applyYouTrackMigration(ctx context.Context, tx pgx.Tx) error {
 
 var youtrackMigration = []string{
 	`CREATE TABLE youtrack_links (
-		task_id BIGINT PRIMARY KEY REFERENCES tasks(id),
+		task_id BIGINT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
 		issue_id TEXT NOT NULL UNIQUE,
 		readable_id TEXT NOT NULL UNIQUE,
 		pushed_task_updated_at TIMESTAMPTZ,
@@ -56,12 +56,12 @@ var youtrackMigration = []string{
 	// the sync and is idempotent by its primary key.
 	`CREATE TABLE youtrack_comment_links (
 		hk_comment_id BIGINT PRIMARY KEY,
-		task_id BIGINT NOT NULL REFERENCES tasks(id),
+		task_id BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
 		youtrack_comment_id TEXT NOT NULL UNIQUE,
 		created_at TIMESTAMPTZ NOT NULL)`,
 	`CREATE INDEX youtrack_comment_links_task ON youtrack_comment_links(task_id)`,
 	`CREATE TABLE youtrack_field_cache (
-		task_id BIGINT PRIMARY KEY REFERENCES tasks(id),
+		task_id BIGINT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
 		priority INTEGER NOT NULL,
 		lane TEXT NOT NULL,
 		fetched_at TIMESTAMPTZ NOT NULL,

@@ -203,7 +203,7 @@ func TestRelaneWritesYouTrackFirstAndUpdatesCache(t *testing.T) {
 	if _, err := st.LinkYouTrackIssue(ctx, task.ID, "9-4", "HK-4", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
-	status, out := relanePost(t, h, "tok", map[string]any{"ids": []int64{task.ID}, "to": "rstack", "note": "test"})
+	status, out := relanePost(t, h, "tok", map[string]any{"ids": []int64{task.ID}, "to": "rstack", "note": "test", "allow_new_lane": true})
 	if status != http.StatusOK || out.Moved != 1 || out.Results[0].Error != "" {
 		t.Fatalf("status=%d out=%+v", status, out)
 	}
@@ -231,7 +231,7 @@ func TestRelaneYouTrackFailureChangesNothing(t *testing.T) {
 	if _, err := st.LinkYouTrackIssue(ctx, task.ID, "9-5", "HK-5", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
-	status, out := relanePost(t, h, "tok", map[string]any{"ids": []int64{task.ID}, "to": "rstack", "note": "test"})
+	status, out := relanePost(t, h, "tok", map[string]any{"ids": []int64{task.ID}, "to": "rstack", "note": "test", "allow_new_lane": true})
 	if status != http.StatusOK || out.Failed != 1 || out.Results[0].Error != "youtrack_unavailable" {
 		t.Fatalf("status=%d out=%+v", status, out)
 	}
