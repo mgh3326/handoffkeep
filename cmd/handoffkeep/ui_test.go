@@ -26,7 +26,7 @@ func TestUIFromEnvLeavesRouteAbsentWhenAccessConfigIncomplete(t *testing.T) {
 			} else {
 				t.Setenv(missing, " ")
 			}
-			handler, err := uiFromEnv(nil)
+			handler, err := uiFromEnv(nil, nil)
 			if err != nil || handler != nil {
 				t.Fatalf("handler=%v err=%v", handler, err)
 			}

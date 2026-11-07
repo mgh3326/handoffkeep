@@ -37,6 +37,8 @@ func (h *Handler) taskPriority(w http.ResponseWriter, r *http.Request, identity 
 		return
 	}
 	outcome.target = strconv.FormatInt(id, 10)
+	// PG is the execution value. The YouTrack export is queued after the
+	// write, so a YouTrack outage never blocks the priority change.
 	result, err := h.store.SetTaskPriority(r.Context(), id, *input.Priority, apiIdentity(identity), input.Reason, input.EventKey)
 	if err != nil {
 		switch {
@@ -56,6 +58,12 @@ func (h *Handler) taskPriority(w http.ResponseWriter, r *http.Request, identity 
 			outcome.result = "error"
 		}
 		return
+	}
+	// A replayed event key wrote nothing. The recorded value may be older than
+	// the row, so exporting the request's priority would overwrite a newer
+	// write in YouTrack.
+	if h.youTrack != nil && !result.Replayed {
+		h.youTrack.RecordPriority(r.Context(), id, *input.Priority)
 	}
 	outcome.result = "ok"
 	writeBoardJSON(w, result)

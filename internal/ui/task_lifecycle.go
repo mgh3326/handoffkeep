@@ -218,10 +218,15 @@ func (h *Handler) relaneTask(w http.ResponseWriter, r *http.Request, identity cf
 	if note == "" {
 		note = "콘솔에서 레인 이동"
 	}
+	// PG is the execution value. The YouTrack export is queued after the
+	// write, so a YouTrack outage never blocks the move.
 	result, err := h.store.OperatorRelaneTask(r.Context(), id, input.Lane, apiIdentity(identity), note, input.EventKey, input.FromKey)
 	if err != nil {
 		outcome.result = lifecycleError(w, err)
 		return
+	}
+	if h.youTrack != nil && result.Changed {
+		h.youTrack.RecordLane(r.Context(), id, input.Lane)
 	}
 	relay := "none"
 	if result.Changed {

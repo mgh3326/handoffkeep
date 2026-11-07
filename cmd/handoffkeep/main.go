@@ -33,6 +33,7 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/telemetry"
 	"github.com/mgh3326/handoffkeep/internal/ui"
 	"github.com/mgh3326/handoffkeep/internal/wrkrecords"
+	"github.com/mgh3326/handoffkeep/internal/youtrack"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -53,7 +54,7 @@ func main() {
 }
 func run(args []string, out, errout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: handoffkeep serve|sync|ledger|since|status|mcp|ctx|memory|doc|attach|r2usage|tasks|tickets|decisions|standing|dots|services|deploys|fleet-metrics|bench|changes|version")
+		return errors.New("usage: handoffkeep serve|sync|ledger|since|status|mcp|ctx|memory|doc|attach|r2usage|tasks|tickets|decisions|standing|dots|services|deploys|fleet-metrics|bench|changes|youtrack|version")
 	}
 	switch args[0] {
 	case "wrk":
@@ -104,10 +105,12 @@ func run(args []string, out, errout io.Writer) error {
 		return deploysCmd(args[1:], out)
 	case "changes":
 		return changesCmd(args[1:], out)
+	case "youtrack":
+		return youtrackCmd(args[1:], out)
 	case "version", "--version":
 		return versionCmd(args[1:], out)
 	default:
-		return errors.New("usage: handoffkeep serve|sync|ledger|since|status|mcp|ctx|memory|doc|attach|r2usage|tasks|tickets|decisions|standing|dots|services|deploys|fleet-metrics|bench|changes|version")
+		return errors.New("usage: handoffkeep serve|sync|ledger|since|status|mcp|ctx|memory|doc|attach|r2usage|tasks|tickets|decisions|standing|dots|services|deploys|fleet-metrics|bench|changes|youtrack|version")
 	}
 }
 
@@ -1975,7 +1978,11 @@ func serve(args []string, errout io.Writer) error {
 	if e != nil {
 		return e
 	}
-	svc := api.Service{Store: st, Attachments: am}
+	youTrack, e := youTrackFromEnv(st)
+	if e != nil {
+		return e
+	}
+	svc := api.Service{Store: st, Attachments: am, YouTrack: youTrack}
 	workers := []backgroundWorker{chatRetentionWorker{store: st}, placementRetentionWorker{store: st}, syncRetentionWorker{store: st, retention: retention}}
 	if *iceboxDays > 0 {
 		workers = append(workers, backlogSweepWorker{store: st, days: *iceboxDays})
@@ -1996,7 +2003,7 @@ func serve(args []string, errout io.Writer) error {
 		return e
 	}
 	workers = append(workers, notifier)
-	uiHandler, e := uiFromEnv(st)
+	uiHandler, e := uiFromEnv(st, youTrack)
 	if e != nil {
 		return e
 	}
@@ -2032,7 +2039,7 @@ func serverHandler(server api.Server, monitor *telemetry.Monitor) http.Handler {
 
 // uiFromEnv intentionally treats incomplete Cloudflare Access configuration as
 // disabled. The API remains available, but api.Server does not register /ui.
-func uiFromEnv(st *store.Store) (http.Handler, error) {
+func uiFromEnv(st *store.Store, youTrack *youtrack.Service) (http.Handler, error) {
 	team := strings.TrimSpace(os.Getenv("HANDOFFKEEP_UI_CF_TEAM_DOMAIN"))
 	aud := strings.TrimSpace(os.Getenv("HANDOFFKEEP_UI_CF_AUD"))
 	emails := strings.TrimSpace(os.Getenv("HANDOFFKEEP_UI_ALLOWED_EMAILS"))
@@ -2053,6 +2060,7 @@ func uiFromEnv(st *store.Store) (http.Handler, error) {
 		Access:   access,
 		HubURL:   strings.TrimSpace(os.Getenv("HANDOFFKEEP_HUB_URL")),
 		HubToken: strings.TrimSpace(os.Getenv("HANDOFFKEEP_HUB_TOKEN")),
+		YouTrack: youTrack,
 	})
 }
 

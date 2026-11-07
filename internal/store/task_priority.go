@@ -18,6 +18,9 @@ var ErrInvalidTaskPriority = errors.New("invalid_task_priority")
 type PriorityResult struct {
 	Previous int `json:"previous"`
 	Priority int `json:"priority"`
+	// Replayed is true when the event key was already recorded and this call
+	// wrote nothing, so the recorded values may not be the row's current ones.
+	Replayed bool `json:"replayed,omitempty"`
 }
 
 // SetTaskPriority records an operator's priority change and replays its first result.
@@ -43,6 +46,7 @@ func (s *Store) SetTaskPriority(ctx context.Context, id int64, priority int, by,
 	}
 	err = tx.QueryRow(ctx, `SELECT from_value::int,to_value::int FROM task_events WHERE task_id=$1 AND source='ui-priority' AND source_ref=$2`, id, key).Scan(&out.Previous, &out.Priority)
 	if err == nil {
+		out.Replayed = true
 		return out, tx.Commit(ctx)
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {

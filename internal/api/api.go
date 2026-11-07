@@ -26,6 +26,7 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/guard"
 	"github.com/mgh3326/handoffkeep/internal/store"
 	"github.com/mgh3326/handoffkeep/internal/wrkrecords"
+	"github.com/mgh3326/handoffkeep/internal/youtrack"
 )
 
 type Service struct {
@@ -33,12 +34,24 @@ type Service struct {
 	Attachments *attachments.Manager
 	// Dots backs the /v1/dots/results routes; nil uses Store.
 	Dots DotsResultStore
+	// YouTrack overlays the YouTrack-owned priority and lane on linked tasks
+	// and writes those changes through YouTrack first. Nil disables the
+	// feature; every other route behaves exactly as before.
+	YouTrack *youtrack.Service
 }
 
 // DotsResultStore lists dots results and records their adoption.
 type DotsResultStore interface {
 	ListDotsResults(ctx context.Context, taskID int64, issue string, limit int) ([]store.DotsResult, error)
 	SetDotsAdoption(ctx context.Context, id int64, by string, in store.DotsAdoptionInput) (store.DotsResult, bool, error)
+}
+
+// overlayTasks replaces priority and lane on linked tasks with the cached
+// YouTrack values. Unlinked tasks keep their hk columns unchanged.
+func (s Service) overlayTasks(ctx context.Context, tasks []store.Task) {
+	if s.YouTrack != nil {
+		s.YouTrack.Overlay(ctx, tasks)
+	}
 }
 
 func (s Service) dotsResults() DotsResultStore {
@@ -346,7 +359,16 @@ func (s Service) RelaneTask(ctx context.Context, id int64, to, client, note stri
 	if err := s.wrkTaskPrecheck(ctx, id, "", true); err != nil {
 		return store.Task{}, false, err
 	}
-	return s.Store.RelaneTask(ctx, id, to, client, note, allowNewLane)
+	// PG is the execution value. The YouTrack export is queued after the
+	// write, so a YouTrack outage never blocks the move.
+	task, changed, err := s.Store.RelaneTask(ctx, id, to, client, note, allowNewLane)
+	if err != nil {
+		return store.Task{}, false, err
+	}
+	if s.YouTrack != nil && changed {
+		s.YouTrack.RecordLane(ctx, id, to)
+	}
+	return task, changed, nil
 }
 func (s Service) SetTaskProject(ctx context.Context, id int64, project, client, note string) (store.Task, bool, error) {
 	if err := s.wrkTaskPrecheck(ctx, id, "", true); err != nil {
@@ -864,6 +886,7 @@ func (s Server) tasksList(w http.ResponseWriter, r *http.Request) {
 		}
 		// Echoed like project: an old server that drops the parameter would
 		// answer with every task.
+		s.Service.overlayTasks(r.Context(), xs)
 		jsonOut(w, http.StatusOK, map[string]any{"tasks": xs, "change": changeID})
 		return
 	}
@@ -920,6 +943,7 @@ func (s Server) tasksList(w http.ResponseWriter, r *http.Request) {
 		appErr(w, r, err)
 		return
 	}
+	s.Service.overlayTasks(r.Context(), xs)
 	body := map[string]any{"tasks": xs}
 	if project != nil {
 		// Echo the requested filter so new clients can tell a filtered
@@ -988,7 +1012,9 @@ func (s Server) task(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found")
 		return
 	}
-	jsonOut(w, http.StatusOK, x)
+	tasks := []store.Task{x}
+	s.Service.overlayTasks(r.Context(), tasks)
+	jsonOut(w, http.StatusOK, tasks[0])
 }
 
 type taskClaimInput struct {
@@ -1497,6 +1523,8 @@ func relaneErrorCode(err error) string {
 		return "unknown_lane"
 	case errors.Is(err, store.ErrTaskConflict):
 		return "task_conflict"
+	case errors.Is(err, youtrack.ErrUnavailable):
+		return "youtrack_unavailable"
 	}
 	if _, ok := guard.SecretPattern(err); ok {
 		return "secret_like_content"
