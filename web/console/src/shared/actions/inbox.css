@@ -284,3 +284,10 @@
 .action-row:has([data-selected="true"]) > a {
   background: var(--hk-surface-selected);
 }
+
+/* The keyboard moves focus with j/k; an outline is not left to :focus-visible
+   so the row the keys act on is always visible. */
+[data-inbox-row]:focus {
+  outline: var(--hk-focus-width) solid var(--hk-focus);
+  outline-offset: var(--hk-focus-offset-inset);
+}

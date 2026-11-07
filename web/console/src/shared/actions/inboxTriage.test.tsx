@@ -181,6 +181,14 @@ it("Cmd-K lists the selection's actions and the four destinations", () => {
   }
 });
 
+it("closes an open dialog on Escape", () => {
+  render(<Fixture rows={[row("task:1")]} />);
+  fireEvent.keyDown(focusRow("task:1"), { key: "h" });
+  expect(screen.getByRole("dialog", { name: "다시 알림 시각" })).toBeTruthy();
+  fireEvent.keyDown(document, { key: "Escape" });
+  expect(screen.queryByRole("dialog", { name: "다시 알림 시각" })).toBeNull();
+});
+
 it("keeps the shortcuts inactive inside a text input", () => {
   render(<Fixture rows={[row("task:1")]} />);
   const input = screen.getByRole("textbox", { name: "메모" });

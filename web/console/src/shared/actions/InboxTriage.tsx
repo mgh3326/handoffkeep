@@ -266,6 +266,13 @@ export function useInboxTriage(rows: TriageRow[], reload: () => void) {
         return;
       }
       if (event.metaKey || event.ctrlKey || event.altKey) return;
+      if (event.key === "Escape") {
+        // A dialog closes on Escape wherever focus sits inside it.
+        if (snoozeOpen) { event.preventDefault(); setSnoozeOpen(false); return; }
+        if (helpOpen) { event.preventDefault(); setHelpOpen(false); return; }
+        if (paletteOpen) { event.preventDefault(); setPaletteOpen(false); return; }
+        if (priorityOpen) { event.preventDefault(); setPriorityOpen(false); return; }
+      }
       if (snoozeOpen || helpOpen || paletteOpen || priorityOpen) return;
       if (isTypingTarget(event.target)) return;
       if (event.key === "?") {
