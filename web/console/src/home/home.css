@@ -40,3 +40,5 @@
 .ha-row-title small { color: var(--hk-text-muted); }
 
 .ha-item[data-action-task] > .hk-translation-indicator { margin-right: var(--hk-space-12); }
+
+.ha-item > .task-actions { top: var(--hk-space-3); transform: none; }

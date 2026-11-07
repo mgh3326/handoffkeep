@@ -30,5 +30,6 @@
 
 .work-translation-row { position: relative; }
 .work-translation-row > .hk-translation-indicator { position: absolute; right: var(--hk-space-12); top: var(--hk-space-1); }
-.work-translation-row:has(> .hk-translation-indicator) .work-row-title { padding-right: var(--hk-space-8); }
+.work-translation-row:has(> .hk-translation-indicator) > a { padding-right: var(--hk-space-20); }
+.work-translation-row > .task-actions { top: var(--hk-space-2); transform: none; }
 .work-row-title small { color: var(--hk-text-muted); }
