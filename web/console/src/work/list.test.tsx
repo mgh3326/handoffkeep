@@ -241,3 +241,13 @@ it("moves relative to the row reached by Tab even after another row was selected
   fireEvent.keyDown(middle, { key: "ArrowUp" });
   expect(document.activeElement?.id).toBe("work-row-103");
 });
+
+
+it("shows row actions when the task row receives keyboard focus", async () => {
+  render(<WorkPage />);
+  const row = await screen.findByRole("link", { name: /Task one/ });
+  row.focus();
+  expect(document.activeElement).toBe(row);
+  const action = screen.getByRole("button", { name: /우선순위 변경/, hidden: true });
+  expect(action.closest(".action-row")?.contains(row)).toBe(true);
+});

@@ -154,6 +154,9 @@ func writeAction(path string) string {
 		if strings.HasPrefix(path, "/ui/api/nodes/") && strings.HasSuffix(path, "/accepting") {
 			return "accepting"
 		}
+		if taskPriorityPathRE.MatchString(path) {
+			return "task-priority"
+		}
 		if taskCommentsPathRE.MatchString(path) {
 			return "comment"
 		}

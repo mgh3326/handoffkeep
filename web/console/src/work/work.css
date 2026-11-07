@@ -11,6 +11,7 @@
 .work-filters input, .work-filters select, .work-heading select { min-height: var(--hk-control-height); max-width: 100%; border: 1px solid var(--hk-border-control); border-radius: var(--hk-radius-control); background: var(--hk-input-fill); color: var(--hk-text-primary); font: inherit; padding: var(--hk-space-1) var(--hk-space-2); }
 .work-group { display: flex; align-items: center; height: 36px; margin: 0; padding: 0 var(--hk-space-2); color: var(--hk-text-secondary); font-size: var(--hk-type-meta); }
 .work-rows a { box-sizing: border-box; display: flex; flex-direction: column; justify-content: center; min-height: 44px; padding: 0 var(--hk-space-2); border-bottom: 1px solid var(--hk-border-subtle); color: var(--hk-text-primary); text-decoration: none; min-width: 0; }
+.work-rows .action-row > a { padding-right: 48px; }
 .work-rows a[aria-current] { background: var(--hk-surface-selected); }
 .work-rows a:focus-visible { outline: 2px solid var(--hk-focus); outline-offset: -2px; }
 .work-row-title { display: flex; align-items: center; gap: var(--hk-space-1); min-width: 0; font-size: var(--hk-type-row); line-height: var(--hk-line-row); }
