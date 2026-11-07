@@ -92,7 +92,6 @@ var errorRules = []errorRule{
 	{store.ErrRelayEventNotFound, http.StatusNotFound, "not_found", false},
 	{store.ErrOperatorCommandNotFound, http.StatusNotFound, "not_found", false},
 	{store.ErrOperatorCommandState, http.StatusConflict, "operator_command_state", true},
-	{store.ErrOperatorCommandExpired, http.StatusConflict, "operator_command_expired", false},
 	{store.ErrOperatorCommandInvalid, http.StatusBadRequest, "invalid_operator_command", false},
 	{store.ErrOperatorCommandNoExecutor, http.StatusConflict, "operator_command_no_executor", false},
 	{store.ErrOperatorCommandNotExecutable, http.StatusConflict, "operator_command_not_executable", false},

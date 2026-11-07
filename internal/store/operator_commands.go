@@ -60,8 +60,6 @@ var (
 	// ErrOperatorCommandState refuses a backward or repeated-conflicting
 	// transition; the reason names the current state.
 	ErrOperatorCommandState = errors.New("operator_command_state")
-	// ErrOperatorCommandExpired refuses a receipt after the deadline.
-	ErrOperatorCommandExpired = errors.New("operator_command_expired")
 	// ErrOperatorCommandNotExecutable is a reserved kind whose executor does
 	// not exist yet.
 	ErrOperatorCommandNotExecutable = errors.New("operator_command_not_executable")
@@ -349,9 +347,11 @@ func (s *Store) findOperatorCommandByKey(ctx context.Context, key string) (Opera
 }
 
 // cancelOperatorCommandRelayTx closes a relay event that will never be
-// executed: the command was superseded or expired before delivery. The relay
-// poller only picks up delivered_at IS NULL rows, and delivered_to names why
-// it was closed, so the worker never receives a stale instruction.
+// dispatched: the command was superseded or expired. The relay poller only
+// picks up delivered_at IS NULL rows, so this stops the next drain. A drain
+// that fetched the row before this commits is already in flight; the later
+// delivery confirmation records that as a late delivery (see
+// markOperatorCommandsDeliveredTx) instead of pretending it was retracted.
 func cancelOperatorCommandRelayTx(ctx context.Context, tx pgx.Tx, lane, eventID, reason string, at time.Time) error {
 	_, err := tx.Exec(ctx, `UPDATE relay_events SET delivered_at=$4, delivered_to=$3
 		WHERE kind='lane.event' AND owner_lane=$1 AND event_id=$2 AND delivered_at IS NULL`, lane, eventID, "cancelled:"+reason, at)
@@ -548,13 +548,19 @@ func (s *Store) RecordOperatorCommandReceipt(ctx context.Context, id int64, in O
 		if err = appendOperatorCommandEvent(ctx, tx, operatorCommandEventInput{Command: out, State: OperatorCommandStateExpired, By: "system", Auto: true, At: now}); err != nil {
 			return out, err
 		}
+		// The executor's report is the only evidence the command ran; keep it
+		// as a late report even though the ladder stays expired, and answer 200
+		// so a 4xx-as-terminal executor does not drop the fact.
+		if err = appendOperatorCommandEvent(ctx, tx, operatorCommandEventInput{
+			Command: out, State: in.State, ErrorCode: in.ErrorCode, Note: in.Note,
+			Prefix: "만료 후 보고 · ", By: "executor:" + by, At: now,
+		}); err != nil {
+			return out, err
+		}
 		if err = cancelOperatorCommandRelayTx(ctx, tx, out.ExecutorLane, out.CommandKey, OperatorCommandStateExpired, now); err != nil {
 			return out, err
 		}
-		if err = tx.Commit(ctx); err != nil {
-			return out, err
-		}
-		return out, ErrOperatorCommandExpired
+		return out, tx.Commit(ctx)
 	}
 	allowed := (in.State == OperatorCommandStateAcked && (out.State == OperatorCommandStateRecorded || out.State == OperatorCommandStateDelivered)) ||
 		(in.State == OperatorCommandStateDone && (out.State == OperatorCommandStateDelivered || out.State == OperatorCommandStateAcked)) ||
@@ -601,33 +607,49 @@ func firstTime(current, next *time.Time) *time.Time {
 	return next
 }
 
-// markOperatorCommandsDeliveredTx moves commands to delivered when the relay
-// event that carries them is confirmed delivered to the executor pane. The
-// state guard makes a replayed delivery a no-op.
+// markOperatorCommandsDeliveredTx records what a confirmed relay delivery
+// means for the command it carries. A recorded command becomes delivered
+// unless its deadline already passed: then it becomes expired and the late
+// delivery is recorded, so the ladder never claims an expired instruction was
+// on time. A command the ladder already closed (superseded/expired) was
+// fetched by the drainer before the close; that in-flight delivery is recorded
+// as such rather than hidden.
 func markOperatorCommandsDeliveredTx(ctx context.Context, tx pgx.Tx, lane, eventID string, at time.Time) error {
-	rows, err := tx.Query(ctx, `UPDATE operator_commands SET state='delivered', delivered_at=$3
-		WHERE executor_lane=$1 AND command_key=$2 AND state='recorded'
-		RETURNING `+operatorCommandColumns, lane, eventID, at)
+	var c OperatorCommand
+	err := scanOperatorCommand(tx.QueryRow(ctx, `SELECT `+operatorCommandColumns+` FROM operator_commands WHERE executor_lane=$1 AND command_key=$2 FOR UPDATE`, lane, eventID), &c)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
-	var delivered []OperatorCommand
-	for rows.Next() {
-		var c OperatorCommand
-		if err = scanOperatorCommand(rows, &c); err != nil {
-			rows.Close()
+	switch c.State {
+	case OperatorCommandStateRecorded:
+		if at.After(c.ExpiresAt) {
+			if _, err = tx.Exec(ctx, `UPDATE operator_commands SET state='expired', finished_at=$2 WHERE id=$1`, c.ID, at); err != nil {
+				return err
+			}
+			c.State, c.FinishedAt = OperatorCommandStateExpired, &at
+			if err = appendOperatorCommandEvent(ctx, tx, operatorCommandEventInput{Command: c, State: OperatorCommandStateExpired, By: "system", Auto: true, At: at}); err != nil {
+				return err
+			}
+			return appendOperatorCommandEvent(ctx, tx, operatorCommandEventInput{
+				Command: c, State: OperatorCommandStateDelivered, Prefix: "만료 후 전달 · ", By: "system", Auto: true, At: at,
+			})
+		}
+		if _, err = tx.Exec(ctx, `UPDATE operator_commands SET state='delivered', delivered_at=$2 WHERE id=$1`, c.ID, at); err != nil {
 			return err
 		}
-		delivered = append(delivered, c)
-	}
-	rows.Close()
-	if err = rows.Err(); err != nil {
-		return err
-	}
-	for _, c := range delivered {
-		if err = appendOperatorCommandEvent(ctx, tx, operatorCommandEventInput{Command: c, State: OperatorCommandStateDelivered, By: "system", Auto: true, At: at}); err != nil {
-			return err
+		c.State, c.DeliveredAt = OperatorCommandStateDelivered, &at
+		return appendOperatorCommandEvent(ctx, tx, operatorCommandEventInput{Command: c, State: OperatorCommandStateDelivered, By: "system", Auto: true, At: at})
+	case OperatorCommandStateSuperseded, OperatorCommandStateExpired:
+		prefix := "대체 후 전달 · "
+		if c.State == OperatorCommandStateExpired {
+			prefix = "만료 후 전달 · "
 		}
+		return appendOperatorCommandEvent(ctx, tx, operatorCommandEventInput{
+			Command: c, State: OperatorCommandStateDelivered, Prefix: prefix, By: "system", Auto: true, At: at,
+		})
 	}
 	return nil
 }

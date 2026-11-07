@@ -187,12 +187,15 @@ Receipts are `acked`, `done` or `failed` (with `error_code` and an optional
 `note`); they move forward only and a repeated receipt is a no-op. A failure is
 legal straight from 기록됨, so an executor that cannot deliver can say so
 before the relay is confirmed. When a command is superseded or expires before
-delivery, its undelivered relay row is closed (`delivered_to`
-`cancelled:superseded` / `cancelled:expired`) and the worker never sees it. A
-receipt that arrives after the ladder closed is kept as a late report in the
-timeline (`대체 후 보고` / `만료 후 보고`) instead of being refused, and the
-authenticated API client is recorded as the receipt author. Executors poll
-`GET /v1/commands?executor_lane=<lane>&state=acked` or the CLI
+dispatch, its undelivered relay row is closed (`delivered_to`
+`cancelled:superseded` / `cancelled:expired`), so the next drain skips it. A
+drain that already fetched the row can still deliver it; that in-flight
+delivery is recorded as a late delivery instead of being hidden, and a delivery
+confirmed after the deadline marks the command 만료 with a `만료 후 전달` note.
+A receipt that arrives after the ladder closed is kept as a late report in the
+timeline (`대체 후 보고` / `만료 후 보고`) and answers 200 rather than being
+refused, and the authenticated API client is recorded as the receipt author.
+Executors poll `GET /v1/commands?executor_lane=<lane>&state=acked` or the CLI
 `handoffkeep commands list|receipt`.
 
 ## Task record and document viewer

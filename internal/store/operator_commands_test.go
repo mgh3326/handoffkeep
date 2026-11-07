@@ -342,6 +342,83 @@ func TestOperatorCommandSystemEventsDoNotMoveActivity(t *testing.T) {
 	}
 }
 
+func TestOperatorCommandDeliveryAfterExpiry(t *testing.T) {
+	st := schemaStore(t, "opcmd_latedeliver")
+	lane, job := "opcmd-latedeliver-lane", "opcmd-latedeliver-job"
+	task := operatorCommandFixture(t, st, lane, job)
+	ctx := t.Context()
+	command := recordWorkerMessage(t, st, task.ID, "opcmd-latedeliver-key", "지시", OperatorCommandIntentSteer)
+	if _, err := st.pool.Exec(ctx, `UPDATE operator_commands SET expires_at=now()-interval '1 minute' WHERE id=$1`, command.ID); err != nil {
+		t.Fatal(err)
+	}
+	// The drainer polls relay_events without touching operator_commands; this
+	// is the path that used to deliver a stale instruction as 'delivered'.
+	events, err := st.ListRelayEvents(ctx, lane, true, 0)
+	if err != nil || len(events) != 1 {
+		t.Fatalf("relay: %+v %v", events, err)
+	}
+	if _, err = st.MarkRelayEventDelivered(ctx, events[0].ID, "example-host", "pane-1"); err != nil {
+		t.Fatal(err)
+	}
+	got := commandByID(t, st, command.ID)
+	if got.State != OperatorCommandStateExpired || got.DeliveredAt != nil || got.FinishedAt == nil {
+		t.Fatalf("late delivery: %+v", got)
+	}
+	var note string
+	var auto bool
+	if err := st.pool.QueryRow(ctx, `SELECT note, auto FROM task_events WHERE task_id=$1 AND source_ref=$2`, task.ID, "opcmd-latedeliver-key:delivered").Scan(&note, &auto); err != nil || !strings.HasPrefix(note, "만료 후 전달 · ") || !auto {
+		t.Fatalf("late delivery event: note=%q auto=%v err=%v", note, auto, err)
+	}
+}
+
+func TestOperatorCommandLateDeliveryOfSuperseded(t *testing.T) {
+	st := schemaStore(t, "opcmd_latesuper")
+	lane, job := "opcmd-latesuper-lane", "opcmd-latesuper-job"
+	task := operatorCommandFixture(t, st, lane, job)
+	ctx := t.Context()
+	first := recordWorkerMessage(t, st, task.ID, "opcmd-latesuper-a", "첫 명령", OperatorCommandIntentSteer)
+	recordWorkerMessage(t, st, task.ID, "opcmd-latesuper-b", "두 번째 명령", OperatorCommandIntentSteer)
+	// A drainer fetched A before the replacement closed its relay row; it
+	// delivers A anyway. The ladder keeps 대체됨 and records the late delivery.
+	var relayID int64
+	if err := st.pool.QueryRow(ctx, `SELECT id FROM relay_events WHERE owner_lane=$1 AND event_id=$2`, lane, "opcmd-latesuper-a").Scan(&relayID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.MarkRelayEventDelivered(ctx, relayID, "example-host", "pane-1"); err != nil {
+		t.Fatal(err)
+	}
+	if got := commandByID(t, st, first.ID); got.State != OperatorCommandStateSuperseded {
+		t.Fatalf("superseded command moved: %+v", got)
+	}
+	var note string
+	if err := st.pool.QueryRow(ctx, `SELECT note FROM task_events WHERE task_id=$1 AND source_ref=$2`, task.ID, "opcmd-latesuper-a:delivered").Scan(&note); err != nil || !strings.HasPrefix(note, "대체 후 전달 · ") {
+		t.Fatalf("late delivery event: note=%q err=%v", note, err)
+	}
+}
+
+func TestOperatorCommandReceiptAtDeadlineRecordsReport(t *testing.T) {
+	st := schemaStore(t, "opcmd_deadline")
+	task := operatorCommandFixture(t, st, "opcmd-deadline-lane", "opcmd-deadline-job")
+	ctx := t.Context()
+	command := recordWorkerMessage(t, st, task.ID, "opcmd-deadline-key", "지시", OperatorCommandIntentSteer)
+	if _, err := st.pool.Exec(ctx, `UPDATE operator_commands SET expires_at=now()-interval '1 minute' WHERE id=$1`, command.ID); err != nil {
+		t.Fatal(err)
+	}
+	// No list/sweep runs first: the receipt itself discovers the deadline.
+	done, err := st.RecordOperatorCommandReceipt(ctx, command.ID, OperatorCommandReceiptInput{State: OperatorCommandStateDone, By: "node-a"})
+	if err != nil || done.State != OperatorCommandStateExpired {
+		t.Fatalf("deadline receipt: %+v %v", done, err)
+	}
+	var note, by string
+	if err := st.pool.QueryRow(ctx, `SELECT note, "by" FROM task_events WHERE task_id=$1 AND source_ref=$2`, task.ID, "opcmd-deadline-key:done").Scan(&note, &by); err != nil || !strings.HasPrefix(note, "만료 후 보고 · ") || by != "executor:node-a" {
+		t.Fatalf("late report: note=%q by=%q err=%v", note, by, err)
+	}
+	var deliveredTo string
+	if err := st.pool.QueryRow(ctx, `SELECT delivered_to FROM relay_events WHERE owner_lane=$1 AND event_id=$2`, "opcmd-deadline-lane", "opcmd-deadline-key").Scan(&deliveredTo); err != nil || deliveredTo != "cancelled:expired" {
+		t.Fatalf("deadline relay: %q %v", deliveredTo, err)
+	}
+}
+
 func TestOperatorCommandReplaySurvivesJobEnd(t *testing.T) {
 	st := schemaStore(t, "opcmd_replay")
 	lane, job := "opcmd-replay-lane", "opcmd-replay-job"

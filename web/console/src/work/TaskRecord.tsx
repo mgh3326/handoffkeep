@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchTaskDetail, fetchTaskComments, HttpError } from "../shared/boardApi";
 import { usePoll } from "../shared/usePoll";
 import type { BoardComment, BoardDetail, BoardEvent } from "../shared/boardTypes";
@@ -38,6 +38,9 @@ export function TaskRecord({ id }: { id: number }) {
   const [commands, setCommands] = useState<OperatorCommandView[]>([]);
   const [priorityOverride, setPriorityOverride] = useState<number | null>(null);
   const [attempt, setAttempt] = useState(0);
+  // Locally recorded commands stay visible until a poll includes them, so a
+  // poll that started before the write cannot replace the fresh row.
+  const pending = useRef(new Map<number, OperatorCommandView>());
   const load = useCallback(async (): Promise<DetailLoad> => {
     try {
       return { detail: await fetchTaskDetail(id) };
@@ -51,8 +54,12 @@ export function TaskRecord({ id }: { id: number }) {
   const { data: loaded, failed } = usePoll(load, 15000);
   const missing = !!loaded && "missing" in loaded && loaded.id === id;
   const data = loaded && "detail" in loaded && loaded.detail.task.id === id ? loaded.detail : null;
-  useEffect(() => { setCommands([]); setPriorityOverride(null); setComments([]); setCommentsError(false); }, [id]);
-  useEffect(() => { if (data) setCommands(data.commands); }, [data]);
+  useEffect(() => { setCommands([]); setPriorityOverride(null); setComments([]); setCommentsError(false); pending.current.clear(); }, [id]);
+  useEffect(() => {
+    if (!data) return;
+    for (const command of data.commands) pending.current.delete(command.id);
+    setCommands([...pending.current.values(), ...data.commands]);
+  }, [data]);
   const loadedOnce = data !== null;
   useEffect(() => {
     if (!loadedOnce) return;
@@ -65,7 +72,8 @@ export function TaskRecord({ id }: { id: number }) {
   const { task: loadedTask, origins, documents, changes, jobs } = data;
   const task = priorityOverride === null ? loadedTask : { ...loadedTask, priority: priorityOverride };
   return <article className="work-record">
-    <header data-action-task={task.id}><TaskActions target={task} onPriority={priority => setPriorityOverride(priority)} onCommand={command => setCommands(old => [command, ...old])} /><h1>#{task.id} {task.title}</h1><p>{stateLabel(task.state)} · {task.project || "—"} · {task.lane} · P{task.priority} · {task.kind}</p></header>
+    {failed && <p role="alert" className="work-stale">최신 정보를 불러오지 못했습니다. 마지막으로 받은 내용입니다.</p>}
+    <header data-action-task={task.id}><TaskActions target={task} onPriority={priority => setPriorityOverride(priority)} onCommand={command => { pending.current.set(command.id, command); setCommands(old => [command, ...old]); }} /><h1>#{task.id} {task.title}</h1><p>{stateLabel(task.state)} · {task.project || "—"} · {task.lane} · P{task.priority} · {task.kind}</p></header>
     <Section title="종료 근거">{task.refs.closure ? <p>{task.refs.closure.type} · {task.refs.closure.evidence}</p> : ["merged", "deployed", "completed", "dropped", "duplicate", "canceled"].includes(task.state) ? <p>종결 증거 없음</p> : <p>기록 없음</p>}</Section>
     <Section title="출처" truncated={data.origins_truncated}>{origins.length ? origins.map((o, i) => <p key={i}>{o.provider} · {o.namespace} · {o.url ? <a href={o.url}>{o.display_ref || o.url}</a> : o.display_ref || "—"}</p>) : <p>기록 없음</p>}</Section>
     <Section title="문서" truncated={data.documents_truncated}>{documents.length ? documents.map(d => <p key={d.key}><a href={`/ui/doc/${d.key.split("/").map(encodeURIComponent).join("/")}`}>{d.key}</a> · {d.kind} · {d.origin_class || "미분류"}</p>) : <p>기록 없음</p>}</Section>
