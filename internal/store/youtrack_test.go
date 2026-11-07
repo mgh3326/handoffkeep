@@ -200,14 +200,11 @@ func TestApplyYouTrackMergedUsesRefsPRAsEvidence(t *testing.T) {
 	x := youtrackTask(t, st, "handoffkeep", "merge target")
 	for _, step := range []TransitionInput{
 		{To: StateDeveloping, By: "test", Note: "start", NoJob: "test"},
-		{To: StateReviewing, By: "test", Note: "review"},
+		{To: StateReviewing, By: "test", Note: "review", Refs: &TaskRefs{PR: "https://example.test/pr/1"}},
 	} {
 		if _, err := st.TransitionTaskWith(ctx, x.ID, step); err != nil {
 			t.Fatal(err)
 		}
-	}
-	if _, err := st.TransitionTaskWith(ctx, x.ID, TransitionInput{To: StateReviewing, By: "test", Note: "pr", Refs: &TaskRefs{PR: "https://example.test/pr/1"}}); err != nil {
-		t.Fatal(err)
 	}
 	if _, err := st.LinkYouTrackIssue(ctx, x.ID, "5-1", "HK-5", time.Now().UTC()); err != nil {
 		t.Fatal(err)

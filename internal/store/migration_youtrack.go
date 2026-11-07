@@ -17,11 +17,10 @@ func init() {
 // and lane cache, and the processed-activity ledger (with the refusal revert
 // that still has to be written back to YouTrack).
 //
-// Every table is new, so no existing row is rewritten. The two references to
-// existing tables (tasks, task_comments) take SHARE ROW EXCLUSIVE on those
-// tables while the constraints are created, which blocks their writers for
-// the duration; the bounded lock wait keeps a long reader from stalling the
-// task API behind the pending lock.
+// Every table is new, so no existing row is rewritten. The references to
+// tasks take SHARE ROW EXCLUSIVE on that table while the constraints are
+// created, which blocks its writers for the duration; the bounded lock wait
+// keeps a long reader from stalling the task API behind the pending lock.
 func applyYouTrackMigration(ctx context.Context, tx pgx.Tx) error {
 	var priorLockTimeout string
 	if err := tx.QueryRow(ctx, `SELECT current_setting('lock_timeout')`).Scan(&priorLockTimeout); err != nil {
@@ -51,8 +50,12 @@ var youtrackMigration = []string{
 		last_activity_id TEXT NOT NULL DEFAULT '',
 		updated_at TIMESTAMPTZ NOT NULL DEFAULT now())`,
 	`INSERT INTO youtrack_cursor(singleton) VALUES (true) ON CONFLICT DO NOTHING`,
+	// hk_comment_id has no foreign key: task_comments is optional in older
+	// schemas (search must still work when it is absent), and a reference
+	// would make that table impossible to drop. The link is written only by
+	// the sync and is idempotent by its primary key.
 	`CREATE TABLE youtrack_comment_links (
-		hk_comment_id BIGINT PRIMARY KEY REFERENCES task_comments(id),
+		hk_comment_id BIGINT PRIMARY KEY,
 		task_id BIGINT NOT NULL REFERENCES tasks(id),
 		youtrack_comment_id TEXT NOT NULL UNIQUE,
 		created_at TIMESTAMPTZ NOT NULL)`,

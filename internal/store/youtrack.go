@@ -342,9 +342,12 @@ func (s *Store) DueYouTrackPushTasks(ctx context.Context, limit int) ([]Task, er
 	if limit < 1 {
 		return nil, nil
 	}
+	// taskColumns carries unqualified names, so the joined link columns would
+	// make created_at ambiguous. Project the tasks first and join the
+	// projection.
 	rows, err := s.pool.Query(ctx, `
-		SELECT `+taskColumns+`
-		FROM tasks
+		SELECT tasks.*
+		FROM (SELECT `+taskColumns+` FROM tasks) tasks
 		LEFT JOIN youtrack_links l ON l.task_id=tasks.id
 		WHERE (l.task_id IS NULL AND tasks.state NOT IN (`+settledStatesSQL+`))
 		   OR (l.task_id IS NOT NULL AND (l.pushed_task_updated_at IS NULL OR tasks.updated_at > l.pushed_task_updated_at))
