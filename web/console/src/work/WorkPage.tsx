@@ -15,8 +15,14 @@ import { TaskRecord } from "./TaskRecord";
 import { TaskActions } from "../shared/actions/TaskActions";
 import { TriageUi, useInboxTriage, type TriageRow } from "../shared/actions/InboxTriage";
 import { fetchInboxStates, type InboxStateView } from "../shared/inboxApi";
+import { QueryBar } from "../shared/query/QueryBar";
+import { formatQuery, parseQuery, sortTasks, taskMatchesQuery, type QueryContext, type QueryFilters, type QuerySort } from "../shared/query/query";
+import { SavedSearchList } from "../shared/SavedSearchList";
+import { readSavedSearches, writeSavedSearches, type SavedSearch } from "../shared/savedSearches";
 import "./work.css";
 const labels: Record<View, string> = { "needs-me": "내 차례", active: "진행 중", backlog: "대기", shipped: "완료", all: "전체" };
+const sortValues: QuerySort[] = ["default", "priority", "updated", "id", "state"];
+const sortLabels: Record<QuerySort, string> = { default: "기본", priority: "우선순위", updated: "최근", id: "번호", state: "상태" };
 export function WorkPage() {
   const [overrides, setOverrides] = useState<Record<number, number>>({});
   const [search, setSearch] = useState(() => location.search);
@@ -24,6 +30,8 @@ export function WorkPage() {
   const [projects, setProjects] = useState<string[]>([]);
   const [projectsFailed, setProjectsFailed] = useState(false);
   const [wide, setWide] = useState(() => matchMedia("(min-width: 1024px)").matches);
+  const [queryDraft, setQueryDraft] = useState<string | null>(null);
+  const [saved, setSaved] = useState<SavedSearch[]>(() => readSavedSearches());
   useEffect(() => { const pop = () => setSearch(location.search); window.addEventListener("popstate", pop); return () => window.removeEventListener("popstate", pop); }, []);
   useEffect(() => { const mq = matchMedia("(min-width: 1024px)"); const update = () => setWide(mq.matches); mq.addEventListener("change", update); return () => mq.removeEventListener("change", update); }, []);
   useEffect(() => { void fetchProjects().then(setProjects).catch(() => setProjectsFailed(true)); }, []);
@@ -31,22 +39,80 @@ export function WorkPage() {
   const project = params.get("project") || readStored(STORAGE_KEYS.workProject) || projects[0] || "";
   const view: View = views.find(v => v === params.get("view")) || "needs-me";
   const query = params.get("q") || "", lane = params.get("lane") || "", kind = params.get("kind") || "", state = params.get("state") || "", priority = params.get("p") || "";
+  const grade = params.get("grade") || "", tier = params.get("tier") || "";
+  const rawSort = params.get("sort") || "default";
+  const sort: QuerySort = sortValues.includes(rawSort as QuerySort) ? rawSort as QuerySort : "default";
   const selected = params.get("task");
-  const update = (key: string, value: string) => { const next = new URLSearchParams(search); if (value) next.set(key, value); else next.delete(key); history.pushState(null, "", `${location.pathname}?${next}`); setSearch(location.search); };
+  const update = (key: string, value: string) => { setQueryDraft(null); const next = new URLSearchParams(search); if (value) next.set(key, value); else next.delete(key); history.pushState(null, "", `${location.pathname}?${next}`); setSearch(location.search); };
+  const queryFilters: QueryFilters = {
+    text: query, state, lane, project, kind, priority, grade, tier, sort,
+    view: view === "needs-me" ? "needs-me" : view === "active" ? "active" : "",
+  };
+  const canonicalQuery = formatQuery(queryFilters);
+  const shownQuery = queryDraft ?? canonicalQuery;
+  const queryErrors = queryDraft === null ? [] : parseQuery(queryDraft).errors;
+  const applyQuery = (filters: QueryFilters) => {
+    const next = new URLSearchParams(search);
+    const put = (key: string, value: string) => { if (value) next.set(key, value); else next.delete(key); };
+    put("q", filters.text);
+    put("lane", filters.lane);
+    // The board is fetched per project and the selector always has one; a
+    // query that omits the field keeps the current project instead of
+    // dropping to the stored default.
+    if (filters.project) put("project", filters.project);
+    put("kind", filters.kind);
+    put("state", filters.state);
+    put("p", filters.priority);
+    put("grade", filters.grade);
+    put("tier", filters.tier);
+    put("sort", filters.sort === "default" ? "" : filters.sort);
+    // A query without a shortcut leaves the current view alone: the tabs are
+    // still the view control.
+    if (filters.view) next.set("view", filters.view);
+    history.replaceState(null, "", `${location.pathname}?${next}`);
+    setSearch(location.search);
+  };
+  const changeQuery = (text: string) => {
+    setQueryDraft(text);
+    const parsed = parseQuery(text);
+    if (parsed.errors.length === 0) applyQuery(parsed.filters);
+  };
+  const commitQuery = (text: string) => {
+    const parsed = parseQuery(text);
+    if (parsed.errors.length === 0) {
+      applyQuery(parsed.filters);
+      setQueryDraft(null);
+    }
+  };
+  const applySavedQuery = (text: string) => {
+    setQueryDraft(text);
+    const parsed = parseQuery(text);
+    if (parsed.errors.length === 0) applyQuery(parsed.filters);
+  };
+  const changeSaved = (list: SavedSearch[]) => { setSaved(list); writeSavedSearches(list); };
   useEffect(() => {
     if (!project) return;
     writeStored(STORAGE_KEYS.workProject, project);
     if (!params.has("project")) { const next = new URLSearchParams(search); next.set("project", project); history.replaceState(null, "", `${location.pathname}?${next}`); setSearch(location.search); }
   }, [project, params, search]);
-  useEffect(() => { const onChange = () => setRefresh(n => n + 1); window.addEventListener("hk-task-changed", onChange); return () => window.removeEventListener("hk-task-changed", onChange); }, []);
+  useEffect(() => { const onChange = () => { setOverrides({}); setRefresh(n => n + 1); }; window.addEventListener("hk-task-changed", onChange); return () => window.removeEventListener("hk-task-changed", onChange); }, []);
   const load = useCallback(async () => ({ project, board: project ? await fetchBoardTasks(project) : null }), [project, refresh]);
   const { data, failed } = usePoll(load, 60000);
   const reload = useCallback(() => setRefresh(value => value + 1), []);
   const board = data?.project === project ? data.board : null;
   const tasks = (board?.tasks || []).map(t => ({ ...t, priority: overrides[t.id] ?? t.priority }));
-  const filtered = tasks.filter(t => { const q = query.trim().toLowerCase(); return (!q || t.title.toLowerCase().includes(q) || String(t.id) === q.replace(/^#/, "")) && (!lane || t.lane === lane) && (!kind || t.kind === kind) && (!state || t.state === state) && (!priority || t.priority >= Number(priority)); });
+  const filtered = tasks.filter(t => taskMatchesQuery(t, queryFilters));
   const choices = (key: "lane" | "kind" | "state") => [...new Set([...tasks.map(t => t[key]), params.get(key) || ""].filter(Boolean))].sort();
-  const visible = filtered.filter(t => inView(t, view)).sort((a, b) => CHIP_GROUP_ORDER.indexOf(statusGroup(a)) - CHIP_GROUP_ORDER.indexOf(statusGroup(b)) || (a.priority || Number.POSITIVE_INFINITY) - (b.priority || Number.POSITIVE_INFINITY) || b.updated_at.localeCompare(a.updated_at) || b.id - a.id);
+  const gradeChoices = [...new Set([...tasks.map(t => t.refs.linear?.grade || ""), grade].filter(Boolean))].sort();
+  const tierChoices = [...new Set([...tasks.map(t => t.refs.linear?.tier || ""), tier].filter(Boolean))].sort();
+  const queryContext: QueryContext = {
+    lanes: [...new Set(tasks.map(t => t.lane))].sort(),
+    projects,
+    kinds: [...new Set(tasks.map(t => t.kind))].sort(),
+    grades: gradeChoices,
+    tiers: tierChoices,
+  };
+  const visible = sortTasks(filtered.filter(t => inView(t, view)), sort);
   // The triage rows follow the rendered order, so j/k walks the list the page
   // shows. A task row's inbox key is task:<id>, the same item Home triages.
   // The stored state is one bounded read for the visible rows (the route caps
@@ -68,7 +134,7 @@ export function WorkPage() {
   const triageRows: TriageRow[] = visible.map(t => {
     const key = `task:${t.id}`;
     const state = inbox.get(key);
-    return { key, read: state?.read ?? false, done: state?.done ?? false, woken: state?.woken ?? false, task: { id: t.id, state: t.state, priority: t.priority } };
+    return { key, read: state?.read ?? false, done: state?.done ?? false, woken: state?.woken ?? false, task: { id: t.id, state: t.state, priority: t.priority, kind: t.kind, lane: t.lane, title: t.title, awaiting_decision: t.awaiting_decision, refs: t.refs } };
   });
   const triage = useInboxTriage(triageRows, reload);
   useEffect(() => {
@@ -83,14 +149,25 @@ export function WorkPage() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   });
-  const filters = [["q", query], ["lane", lane], ["kind", kind], ["state", state], ["p", priority]] as const;
+  const activeFilters: [string, string, string][] = [
+    ["q", query, "검색"],
+    ["lane", lane, "레인"],
+    ["kind", kind, "종류"],
+    ["state", state, "상태"],
+    ["p", priority, "우선순위"],
+    ["grade", grade, "등급"],
+    ["tier", tier, "티어"],
+    ["sort", sort === "default" ? "" : sort, "정렬"],
+  ];
   return <div className="work-layout"><section className="work-list"><div className="work-heading"><h1>작업</h1>
     {projectsFailed && <p role="alert">불러오지 못함</p>}
     <label>프로젝트 <select value={project} onChange={e => update("project", e.target.value)}>{project && !projects.includes(project) && <option value={project}>{project}</option>}{projects.map(p => <option key={p}>{p}</option>)}</select></label></div>
+    <QueryBar value={shownQuery} onChange={changeQuery} onCommit={commitQuery} errors={queryErrors} context={queryContext} />
     <TriageUi triage={triage} />
     <nav className="work-tabs" aria-label="작업 보기">{views.map(v => <button key={v} aria-pressed={view === v} onClick={() => update("view", v)}>{labels[v]} {filtered.filter(t => inView(t, v)).length}</button>)}</nav>
-    <details className="work-filter-sheet" open={wide || undefined}><summary><Icon name="funnel" /> 필터</summary><div className="work-filters"><label>검색 <input value={query} onChange={e => update("q", e.target.value)} /></label>{(["lane", "kind", "state"] as const).map(k => <label key={k}>{{lane: "레인", kind: "종류", state: "상태"}[k]} <select value={params.get(k) || ""} onChange={e => update(k, e.target.value)}><option value="">전체</option>{choices(k).map(v => <option key={v} value={v}>{v}</option>)}</select></label>)}<label>우선순위 ≥ <input type="number" value={priority} onChange={e => update("p", e.target.value)} /></label></div></details>
-    <div>{filters.filter(([, value]) => value).map(([key, value]) => <button key={key} onClick={() => update(key, "")} aria-label={`${{q: "검색", lane: "레인", kind: "종류", state: "상태", p: "우선순위"}[key]} 필터 해제`}>{{q: "검색", lane: "레인", kind: "종류", state: "상태", p: "우선순위"}[key]}: {value} 해제</button>)}</div>
+    <SavedSearchList searches={saved} currentQuery={canonicalQuery} onApply={applySavedQuery} onChange={changeSaved} />
+    <details className="work-filter-sheet" open={wide || undefined}><summary><Icon name="funnel" /> 필터</summary><div className="work-filters"><label>검색 <input value={query} onChange={e => update("q", e.target.value)} /></label>{(["lane", "kind", "state"] as const).map(k => <label key={k}>{{lane: "레인", kind: "종류", state: "상태"}[k]} <select value={params.get(k) || ""} onChange={e => update(k, e.target.value)}><option value="">전체</option>{choices(k).map(v => <option key={v} value={v}>{v}</option>)}</select></label>)}<label>우선순위 ≥ <input type="number" value={priority} onChange={e => update("p", e.target.value)} /></label><label>등급 <select value={grade} onChange={e => update("grade", e.target.value)}><option value="">전체</option>{gradeChoices.map(v => <option key={v} value={v}>{v}</option>)}</select></label><label>티어 <select value={tier} onChange={e => update("tier", e.target.value)}><option value="">전체</option>{tierChoices.map(v => <option key={v} value={v}>{v}</option>)}</select></label><label>정렬 <select value={sort} onChange={e => update("sort", e.target.value === "default" ? "" : e.target.value)}>{sortValues.map(v => <option key={v} value={v}>{sortLabels[v]}</option>)}</select></label></div></details>
+    <div>{activeFilters.filter(([, value]) => value).map(([key, value, label]) => <button key={key} onClick={() => update(key, "")} aria-label={`${label} 필터 해제`}>{label}: {key === "sort" ? sortLabels[value as QuerySort] : value} 해제</button>)}</div>
     {failed && <p role="alert">불러오지 못함</p>}{!board && !failed && <p>{!project && projects.length === 0 ? "프로젝트 없음" : "Loading…"}</p>}{board?.truncated && <p>{tasks.length}+ (truncated)</p>}
     <div className="work-rows">{CHIP_GROUP_ORDER.map(group => {
       const rows = visible.filter(t => statusGroup(t) === group);

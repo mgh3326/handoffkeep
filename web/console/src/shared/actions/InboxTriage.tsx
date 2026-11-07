@@ -11,6 +11,7 @@ import { isTypingTarget } from "../search";
 import { formatMinuteKST } from "../time";
 import { actions as taskActions, type ActionTarget } from "./index";
 import { inboxActions, inboxActionLabel, snoozePresets, type InboxAction, type InboxActionId, type InboxTarget } from "./inbox";
+import { CommandBar } from "../command/CommandBar";
 import "./inbox.css";
 
 /** One write covers at most this many items; a longer selection says so. */
@@ -60,6 +61,7 @@ export function useInboxTriage(rows: TriageRow[], reload: () => void) {
   const [helpOpen, setHelpOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [priorityOpen, setPriorityOpen] = useState(false);
+  const [command, setCommand] = useState<{ targets: ActionTarget[]; text: string; truncated: number } | null>(null);
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
   // The rows a dialog or the palette was opened for. Reading the focused row
@@ -266,9 +268,38 @@ export function useInboxTriage(rows: TriageRow[], reload: () => void) {
     setPaletteOpen(true);
   };
 
+  /** Opens the one-line command bar for the focused row or the selection.
+   * The same 50-item cap as a bulk write keeps one line from fanning out
+   * without bound; the bar says how many rows were left out. */
+  const openCommand = (targets?: TriageRow[], text = "") => {
+    const rows = targets ?? targetRows();
+    const tasks = rows.map(row => row.task).filter((task): task is ActionTarget => task !== undefined);
+    if (tasks.length === 0) {
+      setNotice("명령을 적용할 작업이 없습니다.");
+      return;
+    }
+    const capped = tasks.slice(0, BULK_LIMIT);
+    setCommand({ targets: capped, text, truncated: tasks.length - capped.length });
+  };
+
+  const openCommandFromPalette = (text: string) => {
+    const rows = paletteRows;
+    setPaletteOpen(false);
+    openCommand(rows, text);
+  };
+
   const paletteEntries = () => {
     const targets = paletteRows;
     const entries: { id: string; label: string; keywords: string[]; reason: string | null; run?: () => void }[] = [];
+    if (targets.length > 0 && targets.some(row => row.task !== undefined)) {
+      entries.push({
+        id: "command:open",
+        label: "명령 실행 (한 줄)",
+        keywords: ["command", "명령", "명령 바", "/"],
+        reason: null,
+        run: () => { setPaletteOpen(false); openCommand(targets); },
+      });
+    }
     if (targets.length > 0) {
       for (const action of inboxActions) {
         const state = actionState(action, targets);
@@ -308,12 +339,15 @@ export function useInboxTriage(rows: TriageRow[], reload: () => void) {
     return entries;
   };
 
-  const handlers = useRef({ runAction, undo, moveTo, toggle, rangeTo, openPalette, canUndo: false });
-  handlers.current = { runAction, undo, moveTo, toggle, rangeTo, openPalette, canUndo: undoCount > 0 };
+  const handlers = useRef({ runAction, undo, moveTo, toggle, rangeTo, openPalette, openCommand: () => openCommand(), canUndo: false });
+  handlers.current = { runAction, undo, moveTo, toggle, rangeTo, openPalette, openCommand: () => openCommand(), canUndo: undoCount > 0 };
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.defaultPrevented || event.isComposing) return;
+      // The command bar owns every key while it is open, including its own
+      // Escape and arrow handling.
+      if (command) return;
       if ((event.metaKey || event.ctrlKey) && !event.altKey && event.key.toLowerCase() === "k") {
         // Capture phase and stopPropagation: the page-level palette owns
         // Cmd-K, so a focused row's own palette never opens beside it.
@@ -332,6 +366,14 @@ export function useInboxTriage(rows: TriageRow[], reload: () => void) {
       }
       if (snoozeOpen || helpOpen || paletteOpen || priorityOpen) return;
       if (isTypingTarget(event.target)) return;
+      if (event.key === "/") {
+        // "/" acts on the focused row or the current selection. It is not a
+        // row shortcut, so it works with no focus as long as a selection exists.
+        event.preventDefault();
+        event.stopPropagation();
+        handlers.current.openCommand();
+        return;
+      }
       if (event.key === "?") {
         event.preventDefault();
         event.stopPropagation();
@@ -362,7 +404,7 @@ export function useInboxTriage(rows: TriageRow[], reload: () => void) {
     };
     document.addEventListener("keydown", onKey, true);
     return () => document.removeEventListener("keydown", onKey, true);
-  }, [snoozeOpen, helpOpen, paletteOpen, priorityOpen]);
+  }, [snoozeOpen, helpOpen, paletteOpen, priorityOpen, command]);
 
   return {
     selected,
@@ -373,10 +415,15 @@ export function useInboxTriage(rows: TriageRow[], reload: () => void) {
     helpOpen,
     paletteOpen,
     priorityOpen,
+    command,
     setSnoozeOpen,
     setHelpOpen,
     setPaletteOpen,
     setPriorityOpen,
+    openCommand,
+    openCommandFromPalette,
+    closeCommand: () => setCommand(null),
+    reload: () => reloadRef.current(),
     selectedRows: () => rowsRef.current.filter(row => selected.has(row.key)),
     targetRows,
     runAction,
@@ -434,6 +481,19 @@ export function TriageUi({ triage }: { triage: Triage }) {
       {triage.helpOpen ? <ShortcutHelp close={() => triage.setHelpOpen(false)} /> : null}
       {triage.priorityOpen ? <PriorityPicker onPick={value => void triage.applyPriority(value)} close={() => triage.setPriorityOpen(false)} /> : null}
       {triage.paletteOpen ? <InboxPalette triage={triage} /> : null}
+      {triage.command ? (
+        <CommandBar
+          targets={triage.command.targets}
+          truncated={triage.command.truncated}
+          initialText={triage.command.text}
+          onClose={triage.closeCommand}
+          onApplied={() => {
+            triage.clearSelection();
+            triage.reload();
+            window.dispatchEvent(new CustomEvent("hk-task-changed"));
+          }}
+        />
+      ) : null}
     </>
   );
 }
@@ -494,6 +554,7 @@ const SHORTCUTS: { keys: string; label: string }[] = [
   { keys: "x", label: "선택 / 선택 해제" },
   { keys: "Shift+x", label: "범위 선택" },
   { keys: "⌘K / Ctrl+K", label: "명령 팔레트" },
+  { keys: "/", label: "선택한 항목에 한 줄 명령" },
   { keys: "?", label: "단축키 도움말" },
 ];
 
@@ -521,7 +582,21 @@ function InboxPalette({ triage }: { triage: Triage }) {
   return (
     <div className="inbox-backdrop" onClick={() => triage.setPaletteOpen(false)}>
       <div role="dialog" aria-label="명령 팔레트" className="inbox-dialog inbox-palette" onClick={event => event.stopPropagation()}>
-        <label>명령 <input autoFocus value={query} onChange={event => setQuery(event.target.value)} placeholder="명령 또는 화면 검색" /></label>
+        <label>명령 <input
+          autoFocus
+          value={query}
+          onChange={event => {
+            const value = event.target.value;
+            // ">" switches the palette into the command bar, so Cmd-K can
+            // open it by typing a command instead of clicking a row.
+            if (value.startsWith(">")) {
+              triage.openCommandFromPalette(value.slice(1));
+              return;
+            }
+            setQuery(value);
+          }}
+          placeholder="명령 또는 화면 검색 (> 로 한 줄 명령)"
+        /></label>
         <ul>
           {shown.map(entry => (
             <li key={entry.id}>

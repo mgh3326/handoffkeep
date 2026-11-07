@@ -2,7 +2,7 @@ import { useEffect, type KeyboardEvent, type ReactNode } from "react";
 import { isTypingTarget } from "../search";
 
 /** Focus stays inside an open dialog; Escape closes it. */
-export function dialogKeys(e: KeyboardEvent<HTMLDialogElement>, close: () => void) {
+export function dialogKeys(e: KeyboardEvent<HTMLElement>, close: () => void) {
   if (e.key === "Escape") {
     e.preventDefault();
     close();

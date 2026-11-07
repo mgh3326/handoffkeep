@@ -14,6 +14,8 @@ import { fetchTaskDetail } from "../shared/boardApi";
 import { TaskActions } from "../shared/actions/TaskActions";
 import type { ActionTarget } from "../shared/actions/index";
 import type { BoardTask } from "../shared/boardTypes";
+import { QueryBar } from "../shared/query/QueryBar";
+import { parseQuery, type QueryContext, type QueryFilters } from "../shared/query/query";
 import "./home.css";
 
 // The old browser-local seen list. It is migrated once into the server's
@@ -64,7 +66,7 @@ type Item =
 function attentionItems(data: Attention): { action: Item[]; fyi: Item[] } {
   const action: Item[] = [
     ...data.decisions.items.map((value): Item => ({ kind: "decision", value, time: value.created_at, key: value.key, overdue: value.overdue, read: value.read, woken: value.woken })),
-    ...data.tasks.items.map((value): Item => ({ kind: "task", value, time: value.since, key: value.key, overdue: false, read: value.read, woken: value.woken, task: { id: value.id, state: value.state, priority: value.priority } })),
+    ...data.tasks.items.map((value): Item => ({ kind: "task", value, time: value.since, key: value.key, overdue: false, read: value.read, woken: value.woken, task: { id: value.id, state: value.state, priority: value.priority, title: value.title, lane: value.lane } })),
   ].sort((a, b) => Number(b.overdue) - Number(a.overdue) || Date.parse(b.time) - Date.parse(a.time));
   const fyi: Item[] = data.deploys.items
     .map((value): Item => ({ kind: "deploy", value, time: value.merged_at, key: value.key, overdue: false, read: value.read, woken: value.woken }))
@@ -74,6 +76,41 @@ function attentionItems(data: Attention): { action: Item[]; fyi: Item[] } {
 
 function triageRow(item: Item): TriageRow {
   return { key: item.key, read: item.read, done: false, woken: item.woken, task: item.task };
+}
+
+function itemLane(item: Item): string {
+  return item.kind === "deploy" ? item.value.service : item.value.lane;
+}
+
+function itemState(item: Item): string {
+  return item.kind === "task" ? item.value.state : item.kind === "decision" ? "awaiting_decision" : "merged";
+}
+
+function itemText(item: Item): string {
+  if (item.kind === "decision") return `${item.value.id} ${item.value.question}`;
+  if (item.kind === "task") return `${item.value.id} ${item.value.title}`;
+  return `${item.value.task_id} ${item.value.title} ${item.value.pr} ${item.value.service}`;
+}
+
+/** Home has no project, task-kind, grade or tier field, so those filters hide
+ * everything instead of pretending to match. The page says so. */
+const HOME_UNSUPPORTED = ["project", "kind", "grade", "tier"] as const;
+
+function filterItems(items: { action: Item[]; fyi: Item[] }, filters: QueryFilters): { action: Item[]; fyi: Item[] } {
+  const needle = filters.text.trim().toLowerCase();
+  const match = (item: Item): boolean => {
+    if (needle && !itemText(item).toLowerCase().includes(needle)) return false;
+    if (filters.lane && itemLane(item) !== filters.lane) return false;
+    if (filters.state && itemState(item) !== filters.state) return false;
+    if (filters.priority) {
+      if (item.kind !== "task" || item.value.priority < Number(filters.priority)) return false;
+    }
+    if (HOME_UNSUPPORTED.some(key => filters[key] !== "")) return false;
+    if (filters.view === "needs-me" && item.kind === "deploy") return false;
+    if (filters.view === "active" && !(item.kind === "task" && ["researching", "developing", "reviewing"].includes(item.value.state))) return false;
+    return true;
+  };
+  return { action: items.action.filter(match), fyi: items.fyi.filter(match) };
 }
 
 function Row({ item, now, selected, toggle }: { item: Item; now: string; selected: boolean; toggle: (key: string) => void }) {
@@ -114,9 +151,9 @@ function HomeTaskAction({ id }: { id: number }) {
   if (failed) return <span role="alert">작업을 불러오지 못했습니다.</span>;
   return task && <TaskActions compact target={task} onPriority={priority => setTask(old => old ? { ...old, priority } : old)} onApplied={() => setAttempt(value => value + 1)} />;
 }
-function Body({ data, triage }: { data: Attention; triage: Triage }) {
-  const items = useMemo(() => attentionItems(data), [data]);
+function Body({ data, triage, items, queryActive, unsupported }: { data: Attention; triage: Triage; items: { action: Item[]; fyi: Item[] }; queryActive: boolean; unsupported: boolean }) {
   if (!(data.decisions.count + data.tasks.count + data.deploys.count)) return <div className="ha-empty"><IconFrame><path d="M4 5h16v14H4zM4 14h5l2 2h2l2-2h5" /></IconFrame><p>대기 중인 일 없음</p></div>;
+  if (queryActive && items.action.length + items.fyi.length === 0) return <p className="ha-note">조건에 맞는 항목이 없습니다.</p>;
   const section = (title: string, list: Item[], count: number) => {
     const groups: { label: string; rows: Item[] }[] = [];
     for (const item of list) {
@@ -127,19 +164,29 @@ function Body({ data, triage }: { data: Attention; triage: Triage }) {
     }
     return <section className="ha-section" aria-label={title}><h2>{title} <span>{count}</span></h2>{groups.map((group, index) => <div key={`${group.label}:${index}`}><h3>{group.label}</h3><ul className="ha-list">{group.rows.map(item => <Row key={item.key} item={item} now={data.generated_at} selected={triage.selected.has(item.key)} toggle={triage.toggle} />)}</ul></div>)}{count > list.length ? <p className="ha-note">+{count - list.length}개 더 있음</p> : null}</section>;
   };
-  return <><p className="ha-summary-count">결정 {data.decisions.count} (기한 경과 {data.decisions.overdue}) · 작업 {data.tasks.count} · 배포 대기 {data.deploys.count}</p>{section("지금 할 일", items.action, data.decisions.count + data.tasks.count)}{section("참고", items.fyi, data.deploys.count)}{data.deploys.events_capped ? <p className="ha-note">조회 범위에 제한이 있어 목록이 불완전할 수 있습니다.</p> : null}</>;
+  return <><p className="ha-summary-count">결정 {data.decisions.count} (기한 경과 {data.decisions.overdue}) · 작업 {data.tasks.count} · 배포 대기 {data.deploys.count}</p>{queryActive ? <p className="ha-note">현재 목록에서 필터한 결과입니다.</p> : null}{unsupported ? <p className="ha-note">프로젝트·종류·등급·티어 필터는 작업 화면에서만 적용됩니다.</p> : null}{section("지금 할 일", items.action, queryActive ? items.action.length : data.decisions.count + data.tasks.count)}{section("참고", items.fyi, queryActive ? items.fyi.length : data.deploys.count)}{data.deploys.events_capped ? <p className="ha-note">조회 범위에 제한이 있어 목록이 불완전할 수 있습니다.</p> : null}</>;
 }
 export function HomeAttention() {
   const [refresh, setRefresh] = useState(0);
+  const [query, setQuery] = useState("");
   const load = useCallback(() => loadAttention(), [refresh]);
   const { data, failed } = usePoll(load, 60_000);
   const reload = useCallback(() => setRefresh(value => value + 1), []);
   useEffect(() => { const onChange = () => setRefresh(value => value + 1); window.addEventListener("hk-task-changed", onChange); return () => window.removeEventListener("hk-task-changed", onChange); }, []);
   useSeenMigration(reload);
-  const items = useMemo(() => (data ? attentionItems(data) : { action: [], fyi: [] }), [data]);
+  const parsedQuery = parseQuery(query);
+  const items = useMemo(() => (data ? filterItems(attentionItems(data), parseQuery(query).filters) : { action: [], fyi: [] }), [data, query]);
+  const queryContext: QueryContext = {
+    lanes: data ? [...new Set([...data.decisions.items.map(item => item.lane), ...data.tasks.items.map(item => item.lane), ...data.deploys.items.map(item => item.service)])].sort() : [],
+    projects: [],
+    kinds: [],
+    grades: [],
+    tiers: [],
+  };
+  const unsupported = HOME_UNSUPPORTED.some(key => parsedQuery.filters[key] !== "");
   const rows = useMemo(() => [...items.action, ...items.fyi].map(triageRow), [items]);
   const triage = useInboxTriage(rows, reload);
-  return <div className="ha-root"><h1 className="ha-title">나를 기다리는 일</h1><TriageUi triage={triage} />{failed ? <p className="ha-error" role="alert">목록을 불러오지 못했습니다{data ? " · 마지막으로 불러온 데이터를 표시합니다" : ""}.</p> : null}{data ? <Body data={data} triage={triage} /> : failed ? null : <p role="status">불러오는 중…</p>}</div>;
+  return <div className="ha-root"><h1 className="ha-title">나를 기다리는 일</h1><QueryBar value={query} onChange={setQuery} errors={query.trim() === "" ? [] : parsedQuery.errors} context={queryContext} /><TriageUi triage={triage} />{failed ? <p className="ha-error" role="alert">목록을 불러오지 못했습니다{data ? " · 마지막으로 불러온 데이터를 표시합니다" : ""}.</p> : null}{data ? <Body data={data} triage={triage} items={items} queryActive={query.trim() !== ""} unsupported={unsupported} /> : failed ? null : <p role="status">불러오는 중…</p>}</div>;
 }
 
 /** Moves the browser-local seen list into the server once, then leaves the

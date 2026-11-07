@@ -369,12 +369,17 @@ export async function fetchLanes(): Promise<string[]> {
 }
 
 type PriorityResult = { previous: number; priority: number };
-export async function setTaskPriority(id: number, priority: number): Promise<PriorityResult> {
+/** eventKey is minted once per change; a replay with the same key returns the
+ * recorded write instead of changing the priority twice. */
+export async function setTaskPriority(id: number, priority: number, eventKey = newEventKey()): Promise<PriorityResult> {
   const csrf = readCsrfToken();
   if (!csrf) throw new Error("missing csrf");
-  const response = await fetch(`/ui/api/tasks/${id}/priority`, { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf }, body: JSON.stringify({ priority, event_key: newEventKey() }) });
-  if (!response.ok) throw new Error("write failed");
-  const data: unknown = await response.json();
-  if (typeof data !== "object" || data === null || !("previous" in data) || typeof data.previous !== "number" || !("priority" in data) || typeof data.priority !== "number") throw new Error("malformed response");
+  const response = await fetch(`/ui/api/tasks/${id}/priority`, { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf }, body: JSON.stringify({ priority, event_key: eventKey }) });
+  const data: unknown = await response.json().catch(() => null);
+  if (!response.ok) {
+    const code = record(data) && typeof data.error === "string" ? data.error : "";
+    throw new TaskActionError(response.status, code);
+  }
+  if (typeof data !== "object" || data === null || !("previous" in data) || typeof data.previous !== "number" || !("priority" in data) || typeof data.priority !== "number") throw new TaskActionError(0, "malformed_response");
   return { previous: data.previous, priority: data.priority };
 }

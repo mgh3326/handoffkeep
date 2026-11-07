@@ -1,0 +1,102 @@
+/* Query text input and its autocomplete. It sits above the existing filter
+   controls, not in place of them. */
+
+.hk-query {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: var(--hk-space-1);
+  margin: var(--hk-space-3) 0;
+  font-family: var(--hk-font-ui);
+}
+
+.hk-query-field {
+  display: flex;
+  align-items: center;
+  gap: var(--hk-space-2);
+  min-height: var(--hk-touch-height);
+  padding: 0 var(--hk-space-2);
+  border: var(--hk-border-width) solid var(--hk-border-control);
+  border-radius: var(--hk-radius-control);
+  background: var(--hk-input-fill);
+}
+
+.hk-query-field .hk-icon {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  color: var(--hk-text-secondary);
+}
+
+.hk-query-field input {
+  flex: 1;
+  min-width: 0;
+  min-height: var(--hk-touch-height);
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--hk-text-primary);
+  font: inherit;
+  font-size: var(--hk-type-row);
+  outline: none;
+}
+
+.hk-query-field:focus-within {
+  outline: var(--hk-focus-width) solid var(--hk-focus);
+  outline-offset: var(--hk-focus-offset);
+}
+
+.hk-query-suggestions {
+  position: absolute;
+  z-index: 15;
+  top: 100%;
+  left: 0;
+  right: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--hk-space-1);
+  list-style: none;
+  margin: var(--hk-space-1) 0 0;
+  padding: var(--hk-space-1);
+  max-height: 260px;
+  overflow-y: auto;
+  background: var(--hk-surface-1);
+  border: var(--hk-border-width) solid var(--hk-border-control);
+  border-radius: var(--hk-radius-card);
+  box-shadow: var(--hk-elevation-panel);
+}
+
+.hk-query-suggestions button {
+  display: block;
+  width: 100%;
+  min-height: var(--hk-control-height);
+  padding: var(--hk-space-1) var(--hk-space-2);
+  border: 0;
+  background: transparent;
+  color: var(--hk-text-primary);
+  text-align: left;
+  font: inherit;
+  font-size: var(--hk-type-meta);
+  cursor: pointer;
+}
+
+.hk-query-suggestions button.is-active {
+  background: var(--hk-surface-selected);
+}
+
+.hk-query-suggestions button:focus-visible {
+  outline: var(--hk-focus-width) solid var(--hk-focus);
+  outline-offset: var(--hk-focus-offset-inset);
+}
+
+.hk-query-error {
+  display: flex;
+  flex-direction: column;
+  gap: var(--hk-space-1);
+  color: var(--hk-danger);
+  font-size: var(--hk-type-meta);
+}
+
+.hk-query-error p {
+  margin: 0;
+}

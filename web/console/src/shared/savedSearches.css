@@ -1,0 +1,98 @@
+/* Saved searches sit under the Work tabs: a compact list of chips with
+   rename/delete, and one inline form for the current query. */
+
+.work-saved {
+  margin: var(--hk-space-3) 0;
+  padding-top: var(--hk-space-3);
+  border-top: 1px solid var(--hk-border-subtle);
+}
+
+.work-saved-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--hk-space-2);
+}
+
+.work-saved-head h2 {
+  margin: 0;
+  font-size: var(--hk-type-section);
+  line-height: var(--hk-line-section);
+}
+
+.work-saved-head button,
+.work-saved-list button {
+  min-height: var(--hk-control-height);
+  font-size: var(--hk-type-meta);
+}
+
+.work-saved-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--hk-space-1);
+  list-style: none;
+  margin: var(--hk-space-2) 0 0;
+  padding: 0;
+}
+
+.work-saved-list li {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
+
+.work-saved-apply {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border-radius: var(--hk-radius-pill);
+  background: var(--hk-badge-fill);
+}
+
+.work-saved-list li > button:not(.work-saved-apply) {
+  padding-inline: var(--hk-space-2);
+}
+
+.work-saved-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--hk-space-1);
+  margin-top: var(--hk-space-2);
+}
+
+.work-saved-form input {
+  flex: 1;
+  min-width: 160px;
+  min-height: var(--hk-control-height);
+  padding-inline: var(--hk-space-2);
+  border: var(--hk-border-width) solid var(--hk-border-control);
+  border-radius: var(--hk-radius-control);
+  background: var(--hk-input-fill);
+  color: var(--hk-text-primary);
+  font: inherit;
+  font-size: var(--hk-type-meta);
+}
+
+.work-saved-form input:focus-visible {
+  outline: var(--hk-focus-width) solid var(--hk-focus);
+  outline-offset: var(--hk-focus-offset);
+}
+
+.work-saved-cancel {
+  border-color: transparent;
+  background: transparent;
+  color: var(--hk-text-secondary);
+}
+
+.work-saved-empty,
+.work-saved-error {
+  margin: var(--hk-space-1) 0 0;
+  color: var(--hk-text-secondary);
+  font-size: var(--hk-type-meta);
+}
+
+.work-saved-error {
+  color: var(--hk-danger);
+}
