@@ -5,6 +5,7 @@ import (
 	"crypto/rsa"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -86,6 +87,48 @@ func initialize(h http.Handler, setup func(*http.Request)) *httptest.ResponseRec
 	recorder := httptest.NewRecorder()
 	h.ServeHTTP(recorder, request)
 	return recorder
+}
+
+// A local proxy (cloudflared) connects to /mcp over loopback while keeping
+// the public Host header. Authentication runs before the SDK transport, so
+// such a request is decided by its credential, not its Host.
+func TestHTTPHandlerAcceptsPublicHostFromLocalProxy(t *testing.T) {
+	tokens := api.Tokens{"tester": "bearer-secret"}
+	srv := httptest.NewServer(HTTPHandler(api.Service{}, tokens, nil))
+	defer srv.Close()
+	for _, tc := range []struct {
+		name   string
+		bearer bool
+		want   int
+	}{
+		{"authenticated initialize", true, http.StatusOK},
+		{"unauthenticated initialize", false, http.StatusUnauthorized},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			request, err := http.NewRequest(http.MethodPost, srv.URL, strings.NewReader(initializeBody()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			request.Host = "hk-mcp.example.com"
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("Accept", "application/json, text/event-stream")
+			if tc.bearer {
+				request.Header.Set("Authorization", "Bearer bearer-secret")
+			}
+			response, err := http.DefaultClient.Do(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer response.Body.Close()
+			body, err := io.ReadAll(response.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if response.StatusCode != tc.want {
+				t.Fatalf("status=%d want %d body=%s", response.StatusCode, tc.want, body)
+			}
+		})
+	}
 }
 
 func TestHTTPHandlerSecondCredential(t *testing.T) {
