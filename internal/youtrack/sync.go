@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -111,7 +112,13 @@ func (s *Service) Sync(ctx context.Context, opts SyncOptions) (SyncReport, error
 		s.runPendingReverts(ctx, opts.RevertLimit, &report)
 		s.drainOutbox(ctx, opts.OutboxLimit, &report)
 	}
-	s.refreshCache(ctx, opts.RefreshLimit, &report)
+	if opts.DryRun {
+		if mirrors, err := s.store.RefreshYouTrackFields(ctx, opts.RefreshLimit); err == nil {
+			report.Refreshed = len(mirrors)
+		}
+	} else {
+		s.refreshCache(ctx, opts.RefreshLimit, &report)
+	}
 
 	if err := s.push(ctx, opts, &report); err != nil {
 		report.fail("push: %v", err)
@@ -209,9 +216,15 @@ func (s *Service) refreshCache(ctx context.Context, limit int, report *SyncRepor
 			continue
 		} else if ok {
 			fallback.Priority, fallback.Lane = old.Priority, old.Lane
+		} else if task, found, terr := s.store.GetTask(ctx, mirror.TaskID); terr == nil && found {
+			fallback.Priority, fallback.Lane = task.Priority, task.Lane
 		}
 		cache := s.cacheFromIssue(mirror.TaskID, issue, fallback)
 		cache.Stale = false
+		if cache.Lane == "" {
+			report.warn("cache task %d: no lane value to store", mirror.TaskID)
+			continue
+		}
 		if err := s.store.PutYouTrackFieldCache(ctx, cache); err != nil {
 			report.fail("cache task %d: %v", mirror.TaskID, err)
 			continue
@@ -404,6 +417,31 @@ func (s *Service) pushTask(ctx context.Context, task store.Task, opts SyncOption
 	return action, nil
 }
 
+// permanentActivityError marks an input that can never be applied, so the
+// pull consumes it instead of blocking the page forever.
+func permanentActivityError(err error) bool {
+	return errors.Is(err, store.ErrYouTrackActivityInput) ||
+		errors.Is(err, store.ErrYouTrackTaskNotFound) ||
+		errors.Is(err, store.ErrTaskNotFound) ||
+		errors.Is(err, store.ErrTaskProjectRequired) ||
+		strings.HasPrefix(err.Error(), "invalid task") ||
+		strings.HasPrefix(err.Error(), "invalid task relane")
+}
+
+func permanentReason(err error) string {
+	switch {
+	case errors.Is(err, store.ErrYouTrackActivityInput):
+		return "값이 hk의 형식과 맞지 않습니다"
+	case errors.Is(err, store.ErrYouTrackTaskNotFound), errors.Is(err, store.ErrTaskNotFound):
+		return "hk 작업을 찾지 못했습니다"
+	case errors.Is(err, store.ErrTaskProjectRequired):
+		return "hk 프로젝트가 설정되어 있지 않습니다"
+	case strings.HasPrefix(err.Error(), "invalid task relane"):
+		return "레인 이름이 올바르지 않습니다"
+	}
+	return "hk가 이 활동을 적용할 수 없습니다"
+}
+
 func (s *Service) issueFields(ctx context.Context, task store.Task, priority int, lane string) ([]CustomField, error) {
 	fields := []CustomField{IntField(s.schema.HKIDField, int(task.ID)), IntField(s.schema.PriorityField, priority)}
 	if task.Refs.PR != "" {
@@ -501,6 +539,19 @@ func (s *Service) pull(ctx context.Context, opts SyncOptions, me User, report *S
 		}
 		result, err := s.store.ApplyYouTrackActivity(ctx, in)
 		if err != nil {
+			if permanentActivityError(err) {
+				// An input that hk can never apply must not block the page:
+				// consume it as a skip and keep going.
+				skip := store.YouTrackActivity{ID: in.ID, IssueID: in.IssueID, Skip: "hk가 이 활동을 적용할 수 없습니다: " + permanentReason(err)}
+				if _, serr := s.store.ApplyYouTrackActivity(ctx, skip); serr != nil {
+					report.fail("activity %s: %v", act.ID, serr)
+					applied = false
+					break
+				}
+				report.Skipped++
+				report.Pulled = append(report.Pulled, PullAction{ActivityID: in.ID, TaskID: in.TaskID, Outcome: store.YouTrackOutcomeSkipped, Detail: "입력 오류로 건너뜀"})
+				continue
+			}
 			report.fail("activity %s: %v", act.ID, err)
 			applied = false
 			break
@@ -522,7 +573,7 @@ func (s *Service) pull(ctx context.Context, opts SyncOptions, me User, report *S
 			}
 		}
 	}
-	if applied && page.AfterCursor != "" {
+	if !opts.DryRun && applied && page.AfterCursor != "" {
 		if err := s.store.AdvanceYouTrackCursor(ctx, page.AfterCursor); err != nil {
 			report.fail("cursor advance: %v", err)
 		}
@@ -675,13 +726,13 @@ func (s *Service) newIssue(ctx context.Context, issue *Issue) (*store.YouTrackNe
 	}
 	lane := s.lane
 	if f, ok := IssueFieldByName(issue.CustomFields, s.schema.LaneField); ok {
-		if v := strings.TrimSpace(f.StringValue()); v != "" {
+		if v := strings.TrimSpace(f.StringValue()); v != "" && store.ValidTaskLane(v) {
 			lane = v
 		}
 	}
 	kind := "implement"
 	if f, ok := IssueFieldByName(issue.CustomFields, s.schema.KindField); ok {
-		if v := strings.TrimSpace(f.StringValue()); v != "" {
+		if v := strings.TrimSpace(f.StringValue()); v != "" && slices.Contains(store.TaskKinds(), v) {
 			kind = v
 		}
 	}

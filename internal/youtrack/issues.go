@@ -34,7 +34,9 @@ func (c *Client) FindIssueByHKID(ctx context.Context, field string, hkID int64) 
 	q := url.Values{}
 	// The hk ID field is shared by every mapped project; the query spans
 	// them and the caller decides whether the found issue's project matches.
-	q.Set("query", fmt.Sprintf(`"%s": %d`, field, hkID))
+	// YouTrack's search grammar uses braces around a field name that
+	// contains spaces; a quoted name is parsed as a text search.
+	q.Set("query", fmt.Sprintf(`{%s}: %d`, field, hkID))
 	q.Set("fields", issueFields)
 	q.Set("$top", "2")
 	var issues []Issue
@@ -71,7 +73,7 @@ func (c *Client) CreateIssue(ctx context.Context, in IssueWrite) (Issue, error) 
 	q := url.Values{}
 	q.Set("fields", issueFields)
 	var out Issue
-	err := c.post(ctx, "/api/issues", q, body, &out)
+	err := c.postOnce(ctx, "/api/issues", q, body, &out)
 	return out, err
 }
 
@@ -94,7 +96,7 @@ func (c *Client) AddComment(ctx context.Context, issueID, text string) (Comment,
 	q := url.Values{}
 	q.Set("fields", "id,text,created,author(id,login,name,$type)")
 	var out Comment
-	err := c.post(ctx, "/api/issues/"+url.PathEscape(issueID)+"/comments", q, struct {
+	err := c.postOnce(ctx, "/api/issues/"+url.PathEscape(issueID)+"/comments", q, struct {
 		Text string `json:"text"`
 	}{text}, &out)
 	return out, err
@@ -241,7 +243,7 @@ func (c *Client) AddEnumValue(ctx context.Context, info FieldInfo, value string,
 		body["isResolved"] = true
 	}
 	path := "/api/admin/customFieldSettings/bundles/" + bundlePath + "/" + url.PathEscape(info.BundleID) + "/values"
-	return c.post(ctx, path, nil, body, nil)
+	return c.postOnce(ctx, path, nil, body, nil)
 }
 
 // WriteFields is the one update helper the service uses after it has resolved

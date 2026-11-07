@@ -89,6 +89,74 @@ func TestClientDoesNotRetryFourHundred(t *testing.T) {
 	}
 }
 
+func TestCreateDoesNotRetryFiveHundred(t *testing.T) {
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"boom"}`))
+	}))
+	defer srv.Close()
+	c, err := New(Config{BaseURL: srv.URL, Token: "token", Sleep: func(_ context.Context, _ time.Duration) error { return nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.CreateIssue(context.Background(), IssueWrite{ProjectID: "0-1", Summary: "x"}); err == nil {
+		t.Fatal("expected an error")
+	}
+	if attempts.Load() != 1 {
+		t.Fatalf("a create was retried: attempts=%d", attempts.Load())
+	}
+}
+
+func TestCreateRetriesRateLimit(t *testing.T) {
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if attempts.Add(1) == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":"1-1","idReadable":"HK-1"}`))
+	}))
+	defer srv.Close()
+	c, err := New(Config{BaseURL: srv.URL, Token: "token", Sleep: func(_ context.Context, _ time.Duration) error { return nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.CreateIssue(context.Background(), IssueWrite{ProjectID: "0-1", Summary: "x"}); err != nil {
+		t.Fatal(err)
+	}
+	if attempts.Load() != 2 {
+		t.Fatalf("attempts=%d", attempts.Load())
+	}
+}
+
+func TestClientRedactsTokenFromErrorBodies(t *testing.T) {
+	token := "fixture-token"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"bad_request","error_description":"token ` + token + `"}`))
+	}))
+	defer srv.Close()
+	c, err := New(Config{BaseURL: srv.URL, Token: token, Sleep: func(_ context.Context, _ time.Duration) error { return nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = c.get(context.Background(), "/api/x", nil, nil)
+	if err == nil || strings.Contains(err.Error(), token) || !strings.Contains(err.Error(), "[redacted]") {
+		t.Fatalf("err=%q", err)
+	}
+}
+
+func TestNewRefusesPlainHTTPForANonLoopbackHost(t *testing.T) {
+	if _, err := New(Config{BaseURL: "http://example.com", Token: "token"}); !errors.Is(err, ErrConfig) {
+		t.Fatalf("err=%v", err)
+	}
+	if _, err := New(Config{BaseURL: "http://127.0.0.1:1", Token: "token"}); err != nil {
+		t.Fatalf("loopback http: %v", err)
+	}
+}
+
 func TestClientRedactsTokenFromTransportErrors(t *testing.T) {
 	token := "fixture-token"
 	rt := roundTripFunc(func(*http.Request) (*http.Response, error) {

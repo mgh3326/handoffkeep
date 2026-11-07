@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -74,6 +75,9 @@ func New(cfg Config) (*Client, error) {
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 		return nil, fmt.Errorf("%w: base URL is not an absolute URL", ErrConfig)
 	}
+	if parsed.Scheme != "https" && !loopbackHost(parsed.Hostname()) {
+		return nil, fmt.Errorf("%w: base URL must be https (http is allowed only for loopback test servers)", ErrConfig)
+	}
 	c := &Client{
 		baseURL:   base,
 		token:     cfg.Token,
@@ -105,6 +109,14 @@ func New(cfg Config) (*Client, error) {
 		c.sleep = sleepContext
 	}
 	return c, nil
+}
+
+func loopbackHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func sleepContext(ctx context.Context, d time.Duration) error {
@@ -163,7 +175,7 @@ func IsTemporary(err error) bool {
 	return errors.As(err, &api) && api.Temporary()
 }
 
-func (c *Client) do(ctx context.Context, method, path string, query url.Values, body, out any) error {
+func (c *Client) do(ctx context.Context, method, path string, query url.Values, body, out any, retry5xx bool) error {
 	var payload []byte
 	if body != nil {
 		var err error
@@ -179,7 +191,18 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 	for attempt := 0; ; attempt++ {
 		data, retryAfter, err := c.once(ctx, method, endpoint, payload)
 		if err != nil {
-			if attempt < c.retries && (retryableTransport(err) || IsTemporary(err)) {
+			retryable := false
+			if apiStatus(err) == http.StatusTooManyRequests {
+				// A rate-limited request was not processed.
+				retryable = true
+			} else if IsTemporary(err) {
+				retryable = retry5xx
+			} else if retryableTransport(err) {
+				// A dropped connection after a create may already have
+				// committed; only idempotent requests retry it.
+				retryable = retry5xx
+			}
+			if attempt < c.retries && retryable {
 				if werr := c.sleep(ctx, c.backoffFor(attempt, retryAfter)); werr != nil {
 					return werr
 				}
@@ -233,6 +256,8 @@ func (c *Client) once(ctx context.Context, method, endpoint string, payload []by
 	}
 	apiErr := decodeAPIError(resp.StatusCode, data)
 	apiErr.Method, apiErr.Path = method, pathOf(endpoint)
+	apiErr.Code = redactText(apiErr.Code, c.token)
+	apiErr.Message = redactText(apiErr.Message, c.token)
 	return nil, retryAfter(resp.Header.Get("Retry-After")), apiErr
 }
 
@@ -325,10 +350,33 @@ func redact(err error, token string) error {
 	return errors.New(text)
 }
 
-func (c *Client) get(ctx context.Context, path string, query url.Values, out any) error {
-	return c.do(ctx, http.MethodGet, path, query, nil, out)
+func redactText(text, token string) string {
+	if token == "" {
+		return text
+	}
+	return strings.ReplaceAll(text, token, "[redacted]")
 }
 
+func apiStatus(err error) int {
+	var api *APIError
+	if errors.As(err, &api) {
+		return api.Status
+	}
+	return 0
+}
+
+func (c *Client) get(ctx context.Context, path string, query url.Values, out any) error {
+	return c.do(ctx, http.MethodGet, path, query, nil, out, true)
+}
+
+// post retries 5xx because its callers are idempotent field updates.
 func (c *Client) post(ctx context.Context, path string, query url.Values, body, out any) error {
-	return c.do(ctx, http.MethodPost, path, query, body, out)
+	return c.do(ctx, http.MethodPost, path, query, body, out, true)
+}
+
+// postOnce does not retry 5xx: create and comment calls may already have
+// committed before the response was lost, and a retry would duplicate them.
+// A 429 is still retried because the request was not processed.
+func (c *Client) postOnce(ctx context.Context, path string, query url.Values, body, out any) error {
+	return c.do(ctx, http.MethodPost, path, query, body, out, false)
 }

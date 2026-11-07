@@ -171,6 +171,8 @@ func (s *Service) Overlay(ctx context.Context, tasks []store.Task) {
 		return
 	}
 	seeds := s.seeds
+	seedCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
 	for i := range tasks {
 		mirror, mirrored := mirrors[tasks[i].ID]
 		if !mirrored {
@@ -179,10 +181,15 @@ func (s *Service) Overlay(ctx context.Context, tasks []store.Task) {
 		cache, cached := caches[tasks[i].ID]
 		if !cached {
 			if seeds <= 0 {
+				// The YouTrack value is unknown; say the shown value is the
+				// PG execution value, not a fresh mirror.
+				tasks[i].PrioritySource = store.YouTrackSourceHK
+				tasks[i].LaneSource = store.YouTrackSourceHK
+				tasks[i].Stale = true
 				continue
 			}
 			seeds--
-			cache, _ = s.fetchCache(ctx, mirror, tasks[i])
+			cache, _ = s.fetchCache(seedCtx, mirror, tasks[i])
 			if cache.TaskID == 0 {
 				continue
 			}

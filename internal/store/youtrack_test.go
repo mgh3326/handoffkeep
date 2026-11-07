@@ -146,6 +146,14 @@ func TestYouTrackFieldCacheSourceAndStale(t *testing.T) {
 	if !cache.Stale {
 		t.Fatalf("cache not stale: %+v", cache)
 	}
+	// An hk write updates its own column but must not clear the stale flag.
+	if err := st.SetYouTrackCachedPriority(ctx, x.ID, 6, now); err != nil {
+		t.Fatal(err)
+	}
+	cache, _, _ = st.GetYouTrackFieldCache(ctx, x.ID)
+	if !cache.Stale {
+		t.Fatalf("an hk write cleared stale: %+v", cache)
+	}
 	refreshed, err := st.RefreshYouTrackFields(ctx, 10)
 	if err != nil || len(refreshed) != 1 || refreshed[0].TaskID != x.ID {
 		t.Fatalf("refresh=%+v err=%v", refreshed, err)

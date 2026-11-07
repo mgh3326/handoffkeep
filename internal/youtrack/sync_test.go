@@ -265,6 +265,36 @@ func TestDryRunWritesNothing(t *testing.T) {
 	if fs.tasks[task.ID].State != store.StateBacklog {
 		t.Fatalf("dry-run changed hk state: %s", fs.tasks[task.ID].State)
 	}
+	if fs.writes != 0 {
+		t.Fatalf("dry-run wrote %d rows", fs.writes)
+	}
+	if len(fs.advanced) != 0 {
+		t.Fatalf("dry-run advanced the cursor: %v", fs.advanced)
+	}
+}
+
+func TestOverlaySeedLimitMarksTheRestStale(t *testing.T) {
+	fs := newFakeStore()
+	yt := newFakeYouTrack()
+	first := fs.addTask("handoffkeep", "handoffkeep", "first", store.StateBacklog, 1)
+	second := fs.addTask("handoffkeep", "handoffkeep", "second", store.StateBacklog, 2)
+	third := fs.addTask("handoffkeep", "handoffkeep", "third", store.StateBacklog, 3)
+	mirrorIssue(fs, yt, first.ID, "9-70", "HK-70")
+	mirrorIssue(fs, yt, second.ID, "9-71", "HK-71")
+	mirrorIssue(fs, yt, third.ID, "9-72", "HK-72")
+	svc := newTestService(t, yt, fs)
+	svc.seeds = 1
+
+	tasks := []store.Task{fs.tasks[first.ID], fs.tasks[second.ID], fs.tasks[third.ID]}
+	svc.Overlay(context.Background(), tasks)
+	if tasks[0].PrioritySource != store.YouTrackSourceYouTrack || tasks[0].Stale {
+		t.Fatalf("seeded task=%+v", tasks[0])
+	}
+	for _, task := range tasks[1:] {
+		if task.PrioritySource != store.YouTrackSourceHK || task.LaneSource != store.YouTrackSourceHK || !task.Stale {
+			t.Fatalf("unseeded task=%+v", task)
+		}
+	}
 }
 
 func TestOverlayUsesCacheAndLeavesUnmirroredTasksAlone(t *testing.T) {

@@ -248,6 +248,10 @@ func (s *Store) MarkYouTrackTaskSynced(ctx context.Context, taskID int64, at tim
 	return err
 }
 
+// ValidTaskLane reports whether name is a lane/task name. Other packages use
+// it instead of copying the lane alphabet.
+func ValidTaskLane(name string) bool { return validName(name) }
+
 // TaskProjectExists reports whether name is in the server's project
 // vocabulary.
 func (s *Store) TaskProjectExists(ctx context.Context, name string) (bool, error) {
@@ -375,7 +379,7 @@ func (s *Store) SetYouTrackCachedPriority(ctx context.Context, taskID int64, pri
 	_, err := s.pool.Exec(ctx, `
 		INSERT INTO youtrack_field_cache(task_id,priority,lane,source,fetched_at,stale)
 		VALUES($1,$2,COALESCE((SELECT lane FROM tasks WHERE id=$1),''),$3,$4,false)
-		ON CONFLICT(task_id) DO UPDATE SET priority=EXCLUDED.priority,source=EXCLUDED.source,fetched_at=EXCLUDED.fetched_at,stale=false`,
+		ON CONFLICT(task_id) DO UPDATE SET priority=EXCLUDED.priority,source=EXCLUDED.source,fetched_at=EXCLUDED.fetched_at`,
 		taskID, priority, YouTrackSourceHK, at.UTC())
 	return err
 }
@@ -384,7 +388,7 @@ func (s *Store) SetYouTrackCachedLane(ctx context.Context, taskID int64, lane st
 	_, err := s.pool.Exec(ctx, `
 		INSERT INTO youtrack_field_cache(task_id,priority,lane,source,fetched_at,stale)
 		VALUES($1,COALESCE((SELECT priority FROM tasks WHERE id=$1),0),$2,$3,$4,false)
-		ON CONFLICT(task_id) DO UPDATE SET lane=EXCLUDED.lane,source=EXCLUDED.source,fetched_at=EXCLUDED.fetched_at,stale=false`,
+		ON CONFLICT(task_id) DO UPDATE SET lane=EXCLUDED.lane,source=EXCLUDED.source,fetched_at=EXCLUDED.fetched_at`,
 		taskID, lane, YouTrackSourceHK, at.UTC())
 	return err
 }
@@ -721,6 +725,10 @@ func (s *Store) ApplyYouTrackActivity(ctx context.Context, in YouTrackActivity) 
 			if err := touchMirrorTx(ctx, tx, x.ID); err != nil {
 				return YouTrackApplyResult{}, err
 			}
+			// Keep the served cache in step without claiming a fresh fetch.
+			if _, err := tx.Exec(ctx, `UPDATE youtrack_field_cache SET priority=$2 WHERE task_id=$1`, x.ID, *in.Priority); err != nil {
+				return YouTrackApplyResult{}, err
+			}
 			x.Priority = *in.Priority
 		}
 	}
@@ -738,6 +746,9 @@ func (s *Store) ApplyYouTrackActivity(ctx context.Context, in YouTrackActivity) 
 			}
 		} else if changed {
 			if err := touchMirrorTx(ctx, tx, x.ID); err != nil {
+				return YouTrackApplyResult{}, err
+			}
+			if _, err := tx.Exec(ctx, `UPDATE youtrack_field_cache SET lane=$2 WHERE task_id=$1`, x.ID, in.Lane); err != nil {
 				return YouTrackApplyResult{}, err
 			}
 			x = moved
@@ -913,6 +924,9 @@ func youtrackLaneRefusal(err error) (string, bool) {
 		return "hk에 없는 레인입니다", true
 	case errors.Is(err, ErrTaskConflict):
 		return "hk가 레인 변경을 거부했습니다", true
+	}
+	if strings.HasPrefix(err.Error(), "invalid task relane") {
+		return "레인 이름이 올바르지 않습니다", true
 	}
 	var denied wrkrecords.Error
 	if errors.As(err, &denied) {
