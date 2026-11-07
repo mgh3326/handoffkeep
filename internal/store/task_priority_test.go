@@ -17,14 +17,14 @@ func TestSetTaskPriority(t *testing.T) {
 		t.Fatalf("negative: %v", err)
 	}
 	first, err := s.SetTaskPriority(ctx, x.ID, 2, "operator:test", "reason", "one")
-	if err != nil || first.Previous != x.Priority || first.Priority != 2 {
+	if err != nil || first.Previous != x.Priority || first.Priority != 2 || first.Replayed {
 		t.Fatalf("first: %+v %v", first, err)
 	}
 	if _, err = s.SetTaskPriority(ctx, x.ID, 3, "operator:test", "", "two"); err != nil {
 		t.Fatal(err)
 	}
 	replay, err := s.SetTaskPriority(ctx, x.ID, 4, "operator:test", "", "one")
-	if err != nil || replay != first {
+	if err != nil || replay.Previous != first.Previous || replay.Priority != first.Priority || !replay.Replayed {
 		t.Fatalf("replay: %+v %v", replay, err)
 	}
 	var count int
