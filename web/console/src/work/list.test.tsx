@@ -248,6 +248,6 @@ it("shows row actions when the task row receives keyboard focus", async () => {
   const row = await screen.findByRole("link", { name: /Task one/ });
   row.focus();
   expect(document.activeElement).toBe(row);
-  const action = screen.getByRole("button", { name: /우선순위 변경/, hidden: true });
+  const action = screen.getByRole("button", { name: /작업 #101 메뉴/, hidden: true });
   expect(action.closest(".action-row")?.contains(row)).toBe(true);
 });

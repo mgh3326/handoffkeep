@@ -323,6 +323,11 @@ type TransitionInput struct {
 	// drops them. Declining a ticket set's parent declines its triage
 	// children with or without Set.
 	Set bool
+	// Source and SourceRef name an idempotent producer of this transition.
+	// The event carries them, so a replayed write with the same pair finds
+	// the recorded event instead of applying the transition again.
+	Source    string
+	SourceRef string
 }
 
 // TransitionTask is TransitionTaskWith without a duplicate_of target.
@@ -423,6 +428,22 @@ func FenceTarget(to string) string {
 }
 
 func (s *Store) transitionTask(ctx context.Context, id int64, in TransitionInput, reopen bool) (Task, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Task{}, err
+	}
+	defer tx.Rollback(ctx)
+	x, err := s.transitionTaskTx(ctx, tx, id, in, reopen)
+	if err != nil {
+		return Task{}, err
+	}
+	return x, tx.Commit(ctx)
+}
+
+// transitionTaskTx is transitionTask inside a caller's transaction: an
+// operator action that needs an intermediate step (close-as-merged) records
+// both events under one commit. The caller holds tx open and commits.
+func (s *Store) transitionTaskTx(ctx context.Context, tx pgx.Tx, id int64, in TransitionInput, reopen bool) (Task, error) {
 	noJob := taskReasonText(in.NoJob)
 	by, note, refs := in.By, in.Note, in.Refs
 	if in.To == "" || !validText(by, 128) || by == "" || !validText(note, MaxBytes) || !validText(noJob, MaxBytes) || (refs != nil && !validTaskRefs(*refs)) || in.DuplicateOf < 0 {
@@ -453,18 +474,13 @@ func (s *Store) transitionTask(ctx context.Context, id int64, in TransitionInput
 			return Task{}, errors.New("invalid task transition: decision_request is written by tasks decision-request only")
 		}
 	}
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return Task{}, err
-	}
-	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
 		return Task{}, err
 	}
 
 	var x Task
 	var hasDisposition bool
-	if err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+`,refs ? 'disposition' FROM tasks WHERE id=$1 FOR UPDATE`, id), &x, &hasDisposition); err != nil {
+	if err := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+`,refs ? 'disposition' FROM tasks WHERE id=$1 FOR UPDATE`, id), &x, &hasDisposition); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Task{}, ErrTaskNotFound
 		}
@@ -734,7 +750,7 @@ func (s *Store) transitionTask(ctx context.Context, id int64, in TransitionInput
 		if unpark {
 			to = StateBacklog
 		}
-		if _, moved, err := insertEvent(ctx, tx, taskEventInput{TaskID: id, From: from, To: to, By: by, Note: note, Refs: x.Refs, At: now, NoJob: recordedNoJob}); err != nil {
+		if _, moved, err := insertEvent(ctx, tx, taskEventInput{TaskID: id, From: from, To: to, By: by, Note: note, Refs: x.Refs, At: now, NoJob: recordedNoJob, Source: in.Source, SourceRef: in.SourceRef}); err != nil {
 			return Task{}, err
 		} else if moved {
 			x.LastActivityAt = now.Truncate(time.Microsecond)
@@ -794,7 +810,7 @@ func (s *Store) transitionTask(ctx context.Context, id int64, in TransitionInput
 			return Task{}, err
 		}
 	}
-	return x, tx.Commit(ctx)
+	return x, nil
 }
 
 // triageGate is the one check on a move out of triage: to backlog or

@@ -234,6 +234,20 @@ func (h *Handler) boardProjects(w http.ResponseWriter, r *http.Request) {
 	}{projects})
 }
 
+// boardLanes lists the lanes a relane may target: the same known set the
+// store trusts for a console relane.
+func (h *Handler) boardLanes(w http.ResponseWriter, r *http.Request) {
+	lanes, err := h.store.ListKnownTaskLanes(r.Context())
+	if err != nil {
+		log.Printf("ui.board_lanes_failed err=%q", err)
+		writeJSONError(w, http.StatusInternalServerError, "internal_error")
+		return
+	}
+	writeBoardJSON(w, struct {
+		Lanes []string `json:"lanes"`
+	}{lanes})
+}
+
 type boardJob struct {
 	JobID           string             `json:"job_id"`
 	Role            string             `json:"role"`

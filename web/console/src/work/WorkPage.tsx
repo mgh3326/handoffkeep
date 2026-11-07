@@ -35,7 +35,9 @@ export function WorkPage() {
     writeStored(STORAGE_KEYS.workProject, project);
     if (!params.has("project")) { const next = new URLSearchParams(search); next.set("project", project); history.replaceState(null, "", `${location.pathname}?${next}`); setSearch(location.search); }
   }, [project, params, search]);
-  const load = useCallback(async () => ({ project, board: project ? await fetchBoardTasks(project) : null }), [project]);
+  const [refresh, setRefresh] = useState(0);
+  useEffect(() => { const onChange = () => setRefresh(n => n + 1); window.addEventListener("hk-task-changed", onChange); return () => window.removeEventListener("hk-task-changed", onChange); }, []);
+  const load = useCallback(async () => ({ project, board: project ? await fetchBoardTasks(project) : null }), [project, refresh]);
   const { data, failed } = usePoll(load, 60000);
   const board = data?.project === project ? data.board : null;
   const tasks = (board?.tasks || []).map(t => ({ ...t, priority: overrides[t.id] ?? t.priority }));

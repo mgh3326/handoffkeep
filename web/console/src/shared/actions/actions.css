@@ -13,3 +13,14 @@
 .action-palette { position: fixed; z-index: 21; top: 15%; left: 50%; transform: translateX(-50%); box-sizing: border-box; width: min(90vw, 520px); display: flex; flex-direction: column; gap: var(--hk-space-2); padding: var(--hk-space-4); background: var(--hk-surface-1); color: var(--hk-text-primary); border: 1px solid var(--hk-border-control); border-radius: var(--hk-radius-control);  }
 .action-palette label { display: flex; flex-direction: column; gap: var(--hk-space-2); }
 .action-palette input { font: inherit; color: inherit; background: var(--hk-input-fill); border: 1px solid var(--hk-border-control); padding: var(--hk-space-2); }
+
+.action-menu { position: absolute; z-index: 23; top: 100%; right: 0; min-width: 220px; display: flex; flex-direction: column; gap: var(--hk-space-1); padding: var(--hk-space-2); background: var(--hk-surface-1); color: var(--hk-text-primary); border: 1px solid var(--hk-border-control); border-radius: var(--hk-radius-control); }
+.action-menu button { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; text-align: left; }
+.action-menu button small { color: var(--hk-text-secondary); }
+.action-dialog { position: fixed; z-index: 24; inset: 15% auto auto 50%; transform: translateX(-50%); box-sizing: border-box; width: min(90vw, 520px); display: flex; flex-direction: column; gap: var(--hk-space-3); padding: var(--hk-space-4); background: var(--hk-surface-1); color: var(--hk-text-primary); border: 1px solid var(--hk-border-control); border-radius: var(--hk-radius-control); }
+.action-dialog label { display: flex; flex-direction: column; gap: var(--hk-space-1); }
+.action-dialog fieldset { display: flex; flex-direction: column; gap: var(--hk-space-1); border: 1px solid var(--hk-border-control); border-radius: var(--hk-radius-control); padding: var(--hk-space-2); }
+.action-dialog fieldset label { flex-direction: row; align-items: center; gap: var(--hk-space-2); }
+.action-dialog input, .action-dialog select, .action-dialog textarea { font: inherit; color: inherit; background: var(--hk-input-fill); border: 1px solid var(--hk-border-control); padding: var(--hk-space-2); }
+.action-dialog textarea { min-height: 72px; resize: vertical; }
+.action-dialog-buttons { display: flex; justify-content: flex-end; gap: var(--hk-space-2); }

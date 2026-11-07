@@ -263,6 +263,97 @@ function validJob(value: unknown): boolean {
   return typeof value.job_id === "string" && typeof value.role === "string" && typeof value.state === "string" && typeof value.host === "string" && typeof value.family === "string" && typeof value.profile === "string" && typeof value.model === "string" && optionalString(value.harness) && optionalString(value.effort) && optionalString(value.claimed_at) && optionalString(value.spawned_at) && optionalString(value.ready_at) && optionalString(value.ended_at) && optionalString(value.end_reason) && (diff === null || (record(diff) && typeof diff.files === "number" && typeof diff.insertions === "number" && typeof diff.deletions === "number")) && (value.skills_supported === null || typeof value.skills_supported === "boolean") && (value.skills === null || (Array.isArray(value.skills) && value.skills.every(s => record(s) && typeof s.name === "string" && typeof s.calls === "number")));
 }
 
+/** A refused or failed lifecycle write: the HTTP status and the server's
+ * error code. taskActionMessage turns the code into the Korean toast. */
+export class TaskActionError extends Error {
+  readonly status: number;
+  readonly code: string;
+  constructor(status: number, code: string) {
+    super(`task action failed: ${status} ${code}`);
+    this.name = "TaskActionError";
+    this.status = status;
+    this.code = code;
+  }
+}
+
+const TASK_ACTION_MESSAGES: Record<string, string> = {
+  operator_only: "운영자만 실행할 수 있습니다.",
+  origin_rejected: "다른 출처의 요청이라 거부했습니다.",
+  csrf_rejected: "보안 토큰이 만료되었습니다. 새로고침한 뒤 다시 시도하세요.",
+  event_key_required: "요청 키가 없습니다. 다시 시도하세요.",
+  invalid_request: "입력값을 확인하세요.",
+  task_merge_path: "이 상태에서는 머지됨으로 닫을 수 없습니다.",
+  task_conflict: "작업 상태가 바뀌어 실행할 수 없습니다. 새로고침한 뒤 다시 시도하세요.",
+  task_terminal: "종결된 작업은 변경할 수 없습니다.",
+  closure_invalid: "종료 근거가 올바르지 않습니다 (https URL 또는 hk:doc 키).",
+  duplicate_of_required: "중복 대상 작업 번호를 입력하세요.",
+  unknown_lane: "알 수 없는 레인입니다.",
+  disposition_operator_only: "처분 항목은 콘솔에서 직접 변경할 수 없습니다.",
+  decision_request_open: "열린 결정 요청을 먼저 해결하세요.",
+  task_job_required: "작업 연결이 없어 실행할 수 없습니다.",
+  secret_like_content: "비밀 정보로 보이는 내용은 저장할 수 없습니다.",
+  not_found: "작업을 찾을 수 없습니다.",
+  relay_failed: "레인은 옮겼지만 레인 알림을 보내지 못했습니다.",
+  missing_csrf: "보안 토큰이 없습니다. 새로고침한 뒤 다시 시도하세요.",
+  internal_error: "저장하지 못했습니다. 잠시 후 다시 시도하세요.",
+};
+
+/** The Korean operator-facing message for a lifecycle write refusal. */
+export function taskActionMessage(code: string): string {
+  return TASK_ACTION_MESSAGES[code] ?? "저장하지 못했습니다.";
+}
+
+async function postTaskAction<T>(id: number, action: string, body: Record<string, unknown>): Promise<T> {
+  const csrf = readCsrfToken();
+  if (!csrf) throw new TaskActionError(0, "missing_csrf");
+  let response: Response;
+  try {
+    response = await fetch(`/ui/api/tasks/${id}/${action}`, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf },
+      body: JSON.stringify({ ...body, event_key: crypto.randomUUID() }),
+    });
+  } catch {
+    throw new TaskActionError(0, "network");
+  }
+  const data: unknown = await response.json().catch(() => null);
+  if (!response.ok) {
+    const code = record(data) && typeof data.error === "string" ? data.error : "";
+    throw new TaskActionError(response.status, code);
+  }
+  return data as T;
+}
+
+export type CloseMergedResult = { state: string; path: string[] };
+export function closeTaskMerged(id: number, evidence: string, reason: string): Promise<CloseMergedResult> {
+  return postTaskAction<CloseMergedResult>(id, "close-merged", { evidence, reason });
+}
+export function closeTaskCompleted(id: number, evidence: string, reason: string): Promise<{ state: string }> {
+  return postTaskAction<{ state: string }>(id, "close-completed", { evidence, reason });
+}
+export type DropClosure = "cancelled" | "obsolete" | "superseded";
+export function dropTask(id: number, closure: DropClosure, reason: string, duplicateOf = 0): Promise<{ state: string; closure_type: string }> {
+  return postTaskAction<{ state: string; closure_type: string }>(id, "drop", { closure, reason, duplicate_of: duplicateOf });
+}
+export function holdTask(id: number, held: boolean, to = ""): Promise<{ previous: string; state: string }> {
+  return postTaskAction<{ previous: string; state: string }>(id, "hold", { held, to });
+}
+export function reopenTask(id: number, reason: string): Promise<{ state: string }> {
+  return postTaskAction<{ state: string }>(id, "reopen", { reason });
+}
+export type RelaneOutcome = { previous: string; lane: string; changed: boolean; relay: "sent" | "duplicate" | "unconfigured" | "failed" | "none" };
+export function relaneTask(id: number, lane: string, reason: string): Promise<RelaneOutcome> {
+  return postTaskAction<RelaneOutcome>(id, "relane", { lane, reason });
+}
+
+/** Every lane a relane may target (the store's known-lane union). */
+export async function fetchLanes(): Promise<string[]> {
+  const data = await getJSON<{ lanes: unknown }>("/ui/api/board/lanes");
+  if (!data || !Array.isArray(data.lanes) || !data.lanes.every(lane => typeof lane === "string")) throw new Error("malformed lanes");
+  return data.lanes;
+}
+
 type PriorityResult = { previous: number; priority: number };
 export async function setTaskPriority(id: number, priority: number): Promise<PriorityResult> {
   const csrf = readCsrfToken();
