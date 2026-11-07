@@ -147,6 +147,9 @@ priority or lane.
 | `decision_answer` | write | `request_id`, `option` or `text`, optional `note` | Store result; an already answered or stale request returns its error code |
 | `task_comment` | write | `id`, `body` | The appended comment and its author |
 | `task_intake` | write | `title`, `body`, `project`, optional `lane` | The triage task, `created`, and duplicate candidates found before filing |
+| `projects_list` | read | none | Every project with `design_lane`/`effective_owner`, status and dates, and open task counts by state |
+| `task_states` | read | none | The twelve states with category, terminal and claimable flags, allowed manual transitions and closure requirements |
+| `sync_status` | read | none | YouTrack cursor, pending outbox backlog, processed outcomes in the last 24 hours, mirrored tasks and last run |
 
 Every task result carries `console_url`
 (`https://console.robinco.dev/ui/tasks/<id>`) and, when the task has a YouTrack
@@ -158,6 +161,18 @@ mirror, the readable YouTrack id and URL. Limits are clamped, not rejected:
 an identical repeat returns `created:false` and the task already recorded.
 Candidate duplicates come from the same task search the console uses and are
 returned with the new task.
+
+The three read-only meta tools answer questions about the queue itself.
+`projects_list` reads the owner rule from the store, so `effective_owner` is
+`design_lane` when set and `operator-desk` otherwise; its open counts exclude
+the settled states. `task_states` derives the state graph, categories, terminal
+flags and closure requirements from the tables the store enforces, never from a
+second copy in this package. `sync_status` derives its last-run time from the
+sync bookkeeping timestamps (cursor, processed activities, mirrors, field
+cache, outbox completions, comment links) and reports `"never"` when none
+exist; a pending outbox row's age is how long its write has waited. The Python
+mirror may still be the active YouTrack writer until the Dagu job switches, so
+the status result says so too (docs/youtrack.md).
 
 ## Turning it off
 
