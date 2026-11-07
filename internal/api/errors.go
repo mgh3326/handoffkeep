@@ -60,6 +60,7 @@ var errorRules = []errorRule{
 	{attachments.ErrR2, http.StatusBadGateway, "attachment_r2_unavailable", false},
 	{store.ErrClosureInvalid, http.StatusBadRequest, "closure_invalid", true},
 	{store.ErrTaskConflict, http.StatusConflict, "task_conflict", true},
+	{store.ErrTaskMergePath, http.StatusConflict, "task_merge_path", false},
 	{store.ErrTaskJobRequired, http.StatusConflict, "task_job_required", true},
 	{store.ErrTriageGate, http.StatusConflict, "triage_gate", true},
 	{store.ErrTicketSetConflict, http.StatusConflict, "ticket_set_conflict", true},

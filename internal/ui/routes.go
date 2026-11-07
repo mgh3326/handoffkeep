@@ -12,15 +12,18 @@ func routePattern(path string) string {
 		"/ui/decisions/answer", "/ui/decisions/answer-batch",
 		"/ui/fragments/timeline", "/ui/fragments/decisions", "/ui/fragments/fleet", "/ui/fragments/compose",
 		"/ui/api/fleet", "/ui/api/live", "/ui/api/reap", "/ui/api/glance", "/ui/api/board/tasks",
-		"/ui/api/attention", "/ui/api/decisions", "/ui/api/board/projects",
+		"/ui/api/attention", "/ui/api/decisions", "/ui/api/board/projects", "/ui/api/board/lanes",
 		"/ui/api/search", "/ui/api/policy/active", "/ui/api/board/doc", "/ui/api/docs",
 		"/ui/api/docs/prefixes", "/ui/api/dashboard", "/ui/api/bench/catalog", "/ui/api/deploy-pending",
-		"/ui/api/decision-requests/resolve", "/ui/api/decision-requests/deny":
+		"/ui/api/decision-requests/resolve", "/ui/api/decision-requests/deny",
+		"/ui/api/inbox/state", "/ui/api/inbox/undo":
 		return path // only literal, exact matches can reach here
 	}
 	switch {
 	case taskPriorityPathRE.MatchString(path):
 		return "/ui/api/tasks/{id}/priority"
+	case taskLifecyclePathRE.MatchString(path):
+		return lifecycleRouteName(path)
 	case taskCommentsPathRE.MatchString(path):
 		return "/ui/tasks/{id}/comments"
 	case boardCommentsPathRE.MatchString(path):

@@ -1,9 +1,10 @@
 import { TranslatedText } from "../shared/translation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { fetchTaskDetail, fetchTaskComments, HttpError } from "../shared/boardApi";
-import type { BoardComment, BoardDetail, BoardEvent } from "../shared/boardTypes";
+import type { BoardComment, BoardDetail } from "../shared/boardTypes";
 import { stateLabel } from "../shared/states";
 import { formatMinuteKST } from "../shared/time";
+import { eventText } from "../shared/timeline";
 import { TaskActions } from "../shared/actions/TaskActions";
 import "./work.css";
 
@@ -17,27 +18,22 @@ function duration(start?: string | null, end?: string | null): string {
 function Section({ title, truncated, children }: { title: string; truncated?: boolean; children: React.ReactNode }) {
   return <section className="work-section"><h2>{title} {truncated && <small>100+</small>}</h2>{children}</section>;
 }
-function eventText(event: BoardEvent): string {
-  if (event.field === "priority") {
-    const value = (v?: string) => v === "0" || !v ? "없음" : `P${v}`;
-    const reason = event.note?.replace(/^priority \d+ → \d+(?:: )?/, "");
-    return `우선순위 ${value(event.from_value)} → ${value(event.to_value)}${reason ? ` · ${reason}` : ""}`;
-  }
-  const formatValue = event.kind === "transition" || event.kind === "state_migration" || !event.kind ? stateLabel : (value: string) => value;
-  const stateChange = event.from !== event.to ? `${formatValue(event.from)} → ${formatValue(event.to)}` : "";
-  const labels: Record<string, string> = { transition: "상태 변경", relane: "레인 변경", decision: "결정", project: "프로젝트 변경", area: "분야 변경", metadata: "정보 변경" };
-  const kind = labels[event.kind || "transition"] || "기록";
-  return [kind, stateChange, event.note].filter(Boolean).join(" · ");
-}
 export function TaskRecord({ id }: { id: number }) {
   const [comments, setComments] = useState<BoardComment[]>([]);
   const [commentsError, setCommentsError] = useState(false);
   const [data, setData] = useState<BoardDetail | null>(null);
   const [error, setError] = useState<number | null>(null);
   const [attempt, setAttempt] = useState(0);
+  const loadedID = useRef(0);
   useEffect(() => {
     let active = true;
-    setData(null); setError(null); setComments([]); setCommentsError(false);
+    // A refresh after a write keeps the record mounted (focus, comments and
+    // timeline stay); only a different task clears it.
+    if (loadedID.current !== id) {
+      loadedID.current = id;
+      setData(null); setComments([]); setCommentsError(false);
+    }
+    setError(null);
     void fetchTaskDetail(id).then(value => { if (active) { setData(value); void fetchTaskComments(id).then(result => { if (active) setComments(result.comments); }).catch(() => { if (active) setCommentsError(true); }); } }).catch((e: unknown) => { if (active) setError(e instanceof HttpError ? e.status : 500); });
     return () => { active = false; };
   }, [id, attempt]);
@@ -46,7 +42,7 @@ export function TaskRecord({ id }: { id: number }) {
   if (!data) return <p role="status">Loading…</p>;
   const { task, origins, documents, changes, jobs } = data;
   return <article className="work-record">
-    <header data-action-task={task.id}><TaskActions target={task} onPriority={priority => setData(old => old ? { ...old, task: { ...old.task, priority } } : old)} /><h1>#{task.id} <TranslatedText original={task.title} korean={task.title_ko} stale={task.title_ko_stale} /></h1><p>{stateLabel(task.state)} · {task.project || "—"} · {task.lane} · P{task.priority} · {task.kind}</p></header>
+    <header data-action-task={task.id}><TaskActions target={task} onPriority={priority => setData(old => old ? { ...old, task: { ...old.task, priority } } : old)} onApplied={() => setAttempt(n => n + 1)} /><h1>#{task.id} <TranslatedText original={task.title} korean={task.title_ko} stale={task.title_ko_stale} /></h1><p>{stateLabel(task.state)} · {task.project || "—"} · {task.lane} · P{task.priority} · {task.kind}</p></header>
     {data.body && <Section title="본문"><TranslatedText original={data.body} korean={data.body_ko} stale={data.body_ko_stale} /></Section>}
     <Section title="종료 근거">{task.refs.closure ? <p>{task.refs.closure.type} · {task.refs.closure.evidence}</p> : ["merged", "deployed", "completed", "dropped", "duplicate", "canceled"].includes(task.state) ? <p>종결 증거 없음</p> : <p>기록 없음</p>}</Section>
     <Section title="출처" truncated={data.origins_truncated}>{origins.length ? origins.map((o, i) => <p key={i}>{o.provider} · {o.namespace} · {o.url ? <a href={o.url}>{o.display_ref || o.url}</a> : o.display_ref || "—"}</p>) : <p>기록 없음</p>}</Section>

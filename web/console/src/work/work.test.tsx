@@ -141,5 +141,5 @@ it("keeps translated comments and priority events in the timeline", async () => 
   expect(await screen.findByText("작업 번역")).toBeTruthy();
   expect(await screen.findByText("댓글 번역")).toBeTruthy();
   expect(screen.getByText(/우선순위 P3 → P2/)).toBeTruthy();
-  expect(screen.getByRole("button", { name: /우선순위 변경/ })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "작업 #101 메뉴" })).toBeTruthy();
 });

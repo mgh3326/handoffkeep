@@ -29,8 +29,16 @@ const task101 = {
   refs: { pr: pr(42), head_sha: '0f1e2d3c4b5a69788796a5b4c3d2e1f001234567', decision_request: { id: 'fixture-decision-101', revision: 2, status: 'open' } },
   active_job: { role: 'lead', model: 'fixture-builder-1', profile: 'fictional-builder', host: 'Fixture host A', harness: 'fixture-cli', effort: 'high' },
 };
+const task107 = {
+  id: 107, lane: 'console-demo', project: 'console-demo', title: '레인 이동과 종료 동작 점검',
+  kind: 'build', state: 'developing', priority: 10, created_by: 'fixture-operator',
+  claimed_by: 'fixture-builder', created_at: ago(40), updated_at: ago(1), started_at: ago(30),
+  refs: { pr: pr(45) },
+  active_job: { role: 'lead', model: 'fixture-builder-1', profile: 'fictional-builder', host: 'Fixture host A', harness: 'fixture-cli', effort: 'high' },
+};
 const workTasks = [
   task101,
+  task107,
   { id: 102, lane: 'console-demo', project: 'console-demo', title: '결정 목록의 기한 경과 탭 정리', kind: 'build', state: 'reviewing', priority: 20, created_by: 'fixture-operator', created_at: ago(66), updated_at: ago(3), refs: { pr: pr(41) }, active_job: { role: 'review', model: 'fixture-reviewer-2', profile: 'fictional-reviewer', host: 'Fixture host B', harness: 'fixture-cli', effort: 'high' } },
   { id: 103, lane: 'console-demo', project: 'console-demo', title: '배포 실패 시도 롤백 문구 다듬기', kind: 'build', state: 'backlog', priority: 30, created_by: 'fixture-operator', created_at: ago(60), updated_at: ago(26), refs: { decision_request: { id: 'fixture-decision-103', revision: 1, status: 'open' } } },
   { id: 104, lane: 'fleet-status', project: 'console-demo', title: 'Host 상태 요약 타일 추가', kind: 'feature', state: 'unstarted', priority: 45, created_by: 'fixture-operator', created_at: ago(48), updated_at: ago(30), refs: {} },
@@ -43,23 +51,23 @@ const attention = {
   decisions: {
     count: 3, overdue: 1,
     items: [
-      { source: 'request', id: 101, lane: 'console-demo', question: 'Compact list를 기본값으로 둘까요? 전체 보기보다 한 줄 요약이 먼저 보여야 합니다.', created_at: ago(30), due_at: ago(6), overdue: true },
-      { source: 'lane_event', id: 202, lane: 'deploy-pipeline', question: '배포 실패를 지금 롤백할까요, 다음 시도까지 기다릴까요?', created_at: ago(2), due_at: ahead(5), overdue: false },
-      { source: 'request', id: 103, lane: 'console-demo', question: '결정 목록의 기한 경과를 별도 탭으로 둘까요? 열림 탭의 개수 표시는 그대로 유지합니다.', created_at: ago(9), due_at: null, overdue: false },
+      { key: 'decision:request:101', source: 'request', id: 101, lane: 'console-demo', question: 'Compact list를 기본값으로 둘까요? 전체 보기보다 한 줄 요약이 먼저 보여야 합니다.', created_at: ago(30), due_at: ago(6), overdue: true, read: false, woken: false },
+      { key: 'decision:lane_event:202', source: 'lane_event', id: 202, lane: 'deploy-pipeline', question: '배포 실패를 지금 롤백할까요, 다음 시도까지 기다릴까요?', created_at: ago(2), due_at: ahead(5), overdue: false, read: false, woken: false },
+      { key: 'decision:request:103', source: 'request', id: 103, lane: 'console-demo', question: '결정 목록의 기한 경과를 별도 탭으로 둘까요? 열림 탭의 개수 표시는 그대로 유지합니다.', created_at: ago(9), due_at: null, overdue: false, read: false, woken: false },
     ],
   },
   tasks: {
     count: 2, awaiting_decision: 1, stalled: 1,
     items: [
-      { id: 104, title: 'Host 상태 요약 타일 다듬기', lane: 'fleet-status', state: 'developing', reason: 'stalled', since: ago(4) },
-      { id: 105, title: 'Answer flow 문구 검토', lane: 'console-demo', state: 'reviewing', reason: 'awaiting_decision', since: ago(6) },
+      { key: 'task:104', id: 104, title: 'Host 상태 요약 타일 다듬기', lane: 'fleet-status', state: 'developing', priority: 20, reason: 'stalled', since: ago(4), read: false, woken: false },
+      { key: 'task:105', id: 105, title: 'Answer flow 문구 검토', lane: 'console-demo', state: 'reviewing', priority: 10, reason: 'awaiting_decision', since: ago(6), read: false, woken: false },
     ],
   },
   deploys: {
     count: 2, events_capped: false,
     items: [
-      { service: 'console-demo', task_id: 102, title: '결정 목록의 기한 경과 탭 정리', pr: pr(41), merged_at: ago(4) },
-      { service: 'deploy-pipeline', task_id: 103, title: '배포 실패 시도 롤백 문구 다듬기', pr: pr(43), merged_at: ago(9) },
+      { key: 'deploy:console-demo:102', service: 'console-demo', task_id: 102, title: '결정 목록의 기한 경과 탭 정리', pr: pr(41), merged_at: ago(4), read: false, woken: false },
+      { key: 'deploy:deploy-pipeline:103', service: 'deploy-pipeline', task_id: 103, title: '배포 실패 시도 롤백 문구 다듬기', pr: pr(43), merged_at: ago(9), read: false, woken: false },
     ],
   },
 };
@@ -192,6 +200,27 @@ const taskDetail = {
   participants: { task_ref: '101', coverage: 'not_collected', segments: [] },
 };
 
+const taskDetail107 = {
+  ...taskDetail,
+  task: task107,
+  events: [
+    { id: 11, kind: 'transition', from: 'unstarted', to: 'developing', by: 'fixture-builder', note: '착수', at: ago(30) },
+    { id: 12, kind: 'relane', from: 'fleet-status', to: 'console-demo', by: 'fixture-operator', note: '레인 정리', at: ago(2) },
+  ],
+  dwell: [{ state: 'developing', seconds: 30 * 3600, open: true }],
+  documents: [{ key: 'guide/console', kind: 'guide', origin_class: 'fixture' }],
+  documents_truncated: false,
+  origins: [],
+  origins_truncated: false,
+  changes: [],
+  changes_truncated: false,
+  jobs: [],
+  jobs_truncated: false,
+  participants: { task_ref: '107', coverage: 'not_collected', segments: [] },
+};
+
+const lanes = { lanes: ['console-demo', 'deploy-pipeline', 'fleet-status'] };
+
 const document = {
   key: 'guide/console', kind: 'guide', sha256: '0000000000000000000000000000000000000000000000000000000000000000',
   updated_at: ago(48), format: 'markdown', title: 'Operator console',
@@ -209,6 +238,13 @@ const fixtureFor = (url) => {
   if (p === '/ui/api/board/projects') return { projects: ['console-demo'] };
   if (p === '/ui/api/board/tasks') return { generated_at: at, states: ['triage', 'backlog', 'unstarted', 'researching', 'developing', 'reviewing', 'merged', 'deployed', 'completed', 'dropped', 'duplicate', 'icebox'], tasks: workTasks, truncated: false };
   if (p === '/ui/api/board/tasks/101') return taskDetail;
+  if (p === '/ui/api/board/tasks/107') return taskDetail107;
+  if (p === '/ui/api/board/lanes') return lanes;
+  const taskMatch = /^\/ui\/api\/board\/tasks\/(\d+)$/.exec(p);
+  if (taskMatch) {
+    const task = workTasks.find((entry) => entry.id === Number(taskMatch[1])) || task101;
+    return { ...taskDetail, task };
+  }
   if (p === '/ui/api/board/doc') return document;
   if (p === '/ui/api/deploy-pending') return deployPending;
   return null;
@@ -218,11 +254,74 @@ const assets = {
   '.css': 'text/css', '.js': 'text/javascript', '.woff2': 'font/woff2', '.svg': 'image/svg+xml',
 };
 
+const openMenu = async (page, id) => {
+  await page.getByRole('button', { name: `작업 #${id} 메뉴` }).click();
+  await page.getByRole('menu', { name: '작업 메뉴' }).waitFor();
+};
+const openAction = async (page, id, name) => {
+  await openMenu(page, id);
+  await page.getByRole('menuitem', { name }).click();
+};
+
 // Each page is one shell view; the file name is the route's short name.
+const firstRow = async (page) => {
+  await page.locator('[data-inbox-row]').first().focus();
+};
 const views = {
   home: { url: '/ui', wait: '.ha-item' },
+  'inbox-bulk': {
+    url: '/ui', wait: '.ha-item',
+    act: async (page) => {
+      await firstRow(page);
+      await page.keyboard.press('x');
+      await page.keyboard.press('j');
+      await page.keyboard.press('x');
+      await page.locator('.inbox-bar').waitFor();
+    },
+  },
+  'inbox-snooze': {
+    url: '/ui', wait: '.ha-item',
+    act: async (page) => {
+      await firstRow(page);
+      await page.keyboard.press('h');
+      await page.locator('[role="dialog"][aria-label="다시 알림 시각"]').waitFor();
+    },
+  },
+  'inbox-help': {
+    url: '/ui', wait: '.ha-item',
+    act: async (page) => {
+      await page.keyboard.press('?');
+      await page.locator('[role="dialog"][aria-label="단축키 도움말"]').waitFor();
+    },
+  },
   work: { url: '/ui/work?view=all', wait: '.work-rows a' },
+  'row-menu': {
+    url: '/ui/work?view=all', wait: '.work-rows a',
+    step: async page => { await page.locator('[data-action-task="107"]').hover(); await openMenu(page, 107); },
+  },
   task: { url: '/ui/tasks/101', wait: '.work-record h1' },
+  'close-merged': {
+    url: '/ui/tasks/107', wait: '.work-record h1',
+    step: async page => { await openAction(page, 107, '머지됨으로 닫기'); await page.getByRole('dialog', { name: '머지됨으로 닫기' }).waitFor(); },
+  },
+  'drop-dialog': {
+    url: '/ui/tasks/107', wait: '.work-record h1',
+    step: async page => {
+      await openAction(page, 107, '드롭 / 중복');
+      await page.getByRole('dialog', { name: '드롭 / 중복' }).waitFor();
+      await page.getByLabel('대체됨 (중복)').check();
+      await page.getByLabel('대체 작업 번호').fill('101');
+      await page.getByLabel('이유').fill('같은 작업이 이미 있습니다');
+    },
+  },
+  'relane-picker': {
+    url: '/ui/tasks/107', wait: '.work-record h1',
+    step: async page => {
+      await openAction(page, 107, '레인 넘기기');
+      await page.getByRole('dialog', { name: '레인 넘기기' }).waitFor();
+      await page.getByLabel('옮길 레인').waitFor();
+    },
+  },
   decisions: { url: '/ui/decisions', wait: '.decision-row' },
   decision: { url: '/ui/decisions/101', wait: '.decision-page h1' },
   deploys: { url: '/ui/deploys', wait: '.dp-card' },
@@ -273,9 +372,11 @@ const views = {
           errors.length = 0;
           await page.goto('http://console.example' + view.url);
           await page.locator(view.wait).first().waitFor({ timeout: 10_000 });
+          if (view.act) await view.act(page);
           await page.evaluate(() => document.fonts.ready);
           // Show the selected state of one option card on the decision page.
           if (name === 'decision') await page.locator('.decision-option').first().click();
+          if (view.step) await view.step(page);
           // One settled frame before the shot, so a transition never lands mid-paint.
           await page.waitForTimeout(150);
           // Capture the whole document in one viewport instead of stitching

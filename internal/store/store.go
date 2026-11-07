@@ -2663,17 +2663,27 @@ func knownTaskLanesTx(ctx context.Context, tx pgx.Tx, name string) (bool, error)
 // unless allowNewLane is set, so a typo cannot strand a task in a lane no
 // owner lists.
 func (s *Store) RelaneTask(ctx context.Context, id int64, to, by, note string, allowNewLane bool) (x Task, changed bool, err error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Task{}, false, err
+	}
+	defer tx.Rollback(ctx)
+	x, changed, err = s.relaneTaskTx(ctx, tx, id, to, by, note, allowNewLane, "", "")
+	if err != nil {
+		return Task{}, false, err
+	}
+	return x, changed, tx.Commit(ctx)
+}
+
+// relaneTaskTx is RelaneTask inside a caller's transaction. source and ref,
+// when set, name the idempotent operator write on the recorded event.
+func (s *Store) relaneTaskTx(ctx context.Context, tx pgx.Tx, id int64, to, by, note string, allowNewLane bool, source, ref string) (x Task, changed bool, err error) {
 	if !validName(to) || by == "" || !validText(by, 128) || strings.TrimSpace(note) == "" || !validText(note, MaxBytes) {
 		return Task{}, false, errors.New("invalid task relane")
 	}
 	if err := guard.Reject(note); err != nil {
 		return Task{}, false, err
 	}
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return Task{}, false, err
-	}
-	defer tx.Rollback(ctx)
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
 		return Task{}, false, err
 	}
@@ -2692,7 +2702,7 @@ func (s *Store) RelaneTask(ctx context.Context, id int64, to, by, note string, a
 		return Task{}, false, ErrTaskTerminal
 	}
 	if x.Lane == to {
-		return x, false, tx.Commit(ctx)
+		return x, false, nil
 	}
 	if !allowNewLane {
 		known, err := knownTaskLanesTx(ctx, tx, to)
@@ -2708,13 +2718,13 @@ func (s *Store) RelaneTask(ctx context.Context, id int64, to, by, note string, a
 	if err = scanTask(tx.QueryRow(ctx, `UPDATE tasks SET lane=$2,updated_at=$3 WHERE id=$1 RETURNING `+taskColumns, id, to, x.UpdatedAt), &x); err != nil {
 		return Task{}, false, err
 	}
-	if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: id, Kind: "relane", From: from, To: to, By: by, Note: note, Refs: x.Refs, Into: &x, At: x.UpdatedAt, Field: "lane", FromValue: from, ToValue: to}); err != nil {
+	if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: id, Kind: "relane", From: from, To: to, By: by, Note: note, Refs: x.Refs, Into: &x, At: x.UpdatedAt, Field: "lane", FromValue: from, ToValue: to, Source: source, SourceRef: ref}); err != nil {
 		return Task{}, false, err
 	}
 	if err := s.recordLinearBoardTaskTx(ctx, tx, x, note); err != nil {
 		return Task{}, false, err
 	}
-	return x, true, tx.Commit(ctx)
+	return x, true, nil
 }
 
 // SetTaskProject reclassifies one task within the server-configured project

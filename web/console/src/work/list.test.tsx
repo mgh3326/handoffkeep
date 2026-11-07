@@ -270,7 +270,7 @@ it("shows row actions when the task row receives keyboard focus", async () => {
   const row = await screen.findByRole("link", { name: /Task one/ });
   row.focus();
   expect(document.activeElement).toBe(row);
-  const action = screen.getByRole("button", { name: /우선순위 변경/, hidden: true });
+  const action = screen.getByRole("button", { name: /작업 #101 메뉴/, hidden: true });
   expect(action.closest(".action-row")?.contains(row)).toBe(true);
 });
 it("keeps row priority actions alongside the translation disclosure", async () => {
@@ -279,7 +279,8 @@ it("keeps row priority actions alongside the translation disclosure", async () =
   render(<WorkPage />);
   const row = (await screen.findByText("작업 번역")).closest(".action-row");
   expect(row?.querySelector('[aria-label="원문 보기"]')).toBeTruthy();
-  const priority = screen.getByRole("button", { name: /우선순위 변경/, hidden: true });
-  fireEvent.click(priority);
+  const menu = screen.getByRole("button", { name: "작업 #101 메뉴", hidden: true });
+  fireEvent.click(menu);
+  fireEvent.click(screen.getByRole("menuitem", { name: "우선순위 변경" }));
   expect(screen.getByRole("menu", { name: "우선순위 선택" })).toBeTruthy();
 });

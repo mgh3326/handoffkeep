@@ -558,21 +558,41 @@ func (s *Store) SnoozeDecisionRecord(ctx context.Context, id int64, until, now t
 	if id < 1 || until.IsZero() {
 		return DecisionRecord{}, errors.New("invalid decision request snooze")
 	}
-	until = until.UTC()
+	now = now.UTC()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return DecisionRecord{}, err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := snoozeDecisionRecordTx(ctx, tx, id, until, now); err != nil {
+		return DecisionRecord{}, err
+	}
 	var x DecisionRecord
-	err := scanDecisionRecord(s.pool.QueryRow(ctx, `UPDATE decision_requests SET snoozed_until=$2,updated_at=$3 WHERE id=$1 AND status='open' RETURNING `+decisionRecordColumns, id, until, now.UTC()), &x, now)
-	if err == nil {
-		return x, nil
-	}
-	if !errors.Is(err, pgx.ErrNoRows) {
+	if err := scanDecisionRecord(tx.QueryRow(ctx, `SELECT `+decisionRecordColumns+` FROM decision_requests WHERE id=$1`, id), &x, now); err != nil {
 		return DecisionRecord{}, err
 	}
-	if _, found, err := s.GetDecisionRecord(ctx, id, now); err != nil {
-		return DecisionRecord{}, err
-	} else if !found {
-		return DecisionRecord{}, ErrDecisionRecordNotFound
+	return x, tx.Commit(ctx)
+}
+
+// snoozeDecisionRecordTx is SnoozeDecisionRecord's write, in the caller's
+// transaction, returning the snoozed_until it replaced (nil for none) so the
+// inbox undo can put it back. It locks the one request row and nothing else.
+func snoozeDecisionRecordTx(ctx context.Context, tx pgx.Tx, id int64, until, now time.Time) (*time.Time, error) {
+	var previous *time.Time
+	if err := tx.QueryRow(ctx, `SELECT snoozed_until FROM decision_requests WHERE id=$1 FOR UPDATE`, id).Scan(&previous); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrDecisionRecordNotFound
+		}
+		return nil, err
 	}
-	return DecisionRecord{}, ErrDecisionRecordNotOpen
+	tag, err := tx.Exec(ctx, `UPDATE decision_requests SET snoozed_until=$2,updated_at=$3 WHERE id=$1 AND status='open'`, id, until.UTC(), now.UTC())
+	if err != nil {
+		return nil, err
+	}
+	if tag.RowsAffected() == 0 {
+		return nil, ErrDecisionRecordNotOpen
+	}
+	return previous, nil
 }
 
 func validDecisionSource(source string) bool {

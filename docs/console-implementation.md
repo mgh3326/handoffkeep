@@ -55,4 +55,6 @@ NODE_PATH=/tmp/hk-console-capture/node_modules node docs/console-capture.cjs
 
 [Capture manifest](console-shots/capture.json) records the browser and all 48 results.
 
+The task lifecycle views (row action menu, close-as-merged dialog, drop/duplicate dialog and lane picker) have their own capture set: run the harness with `HK_CONSOLE_CAPTURE_VIEWS=row-menu,close-merged,drop-dialog,relane-picker`. Their images live on the orphan branch `shots/hk3340-console-lifecycle`, one per view at 1440 and 390 in both themes.
+
 To refresh only changed board and palette views while preserving the other capture records, set `HK_CONSOLE_CAPTURE_VIEWS=board,palette` when running the harness.

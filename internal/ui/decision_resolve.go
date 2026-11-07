@@ -92,6 +92,12 @@ func (h *Handler) decisionDeny(w http.ResponseWriter, r *http.Request, identity 
 // into input, rejecting unknown fields and trailing data. It answers the
 // refusal itself and reports whether the handler may go on.
 func (h *Handler) decodeOperatorWrite(w http.ResponseWriter, r *http.Request, identity cfaccess.Identity, outcome *writeOutcome, input any, eventKey *string) bool {
+	return h.decodeOperatorWriteLimited(w, r, identity, outcome, input, eventKey, decisionResolveBodyLimit)
+}
+
+// decodeOperatorWriteLimited is decodeOperatorWrite with the body cap chosen
+// by the route: the shared 4 KiB default unless a batch route needs more.
+func (h *Handler) decodeOperatorWriteLimited(w http.ResponseWriter, r *http.Request, identity cfaccess.Identity, outcome *writeOutcome, input any, eventKey *string, limit int64) bool {
 	if identity.ServiceName != "" {
 		outcome.result = "service_reject"
 		writeJSONError(w, http.StatusForbidden, "operator_only")
@@ -107,7 +113,7 @@ func (h *Handler) decodeOperatorWrite(w http.ResponseWriter, r *http.Request, id
 		writeJSONError(w, http.StatusForbidden, "csrf_rejected")
 		return false
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, decisionResolveBodyLimit)
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(input); err != nil {

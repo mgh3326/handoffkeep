@@ -66,6 +66,8 @@ func (h *Handler) serveAPI(w http.ResponseWriter, r *http.Request, identity cfac
 		h.glance(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/ui/api/board/projects":
 		h.boardProjects(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/ui/api/board/lanes":
+		h.boardLanes(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/ui/api/board/tasks":
 		h.boardTasks(w, r)
 	case r.Method == http.MethodGet && boardCommentsPathRE.MatchString(r.URL.Path):
@@ -125,6 +127,8 @@ func (h *Handler) serveAPI(w http.ResponseWriter, r *http.Request, identity cfac
 		h.deployPending(w, r)
 	case r.Method == http.MethodPost && taskPriorityPathRE.MatchString(r.URL.Path):
 		h.taskPriority(w, r, identity)
+	case r.Method == http.MethodPost && taskLifecyclePathRE.MatchString(r.URL.Path):
+		h.taskLifecycle(w, r, identity)
 	case r.Method == http.MethodPost && r.URL.Path == "/ui/api/decision-requests/resolve":
 		h.decisionResolve(w, r, identity)
 	case r.Method == http.MethodGet && (r.URL.Path == "/ui/api/decisions" || strings.HasPrefix(r.URL.Path, "/ui/api/decisions/")):
@@ -133,6 +137,12 @@ func (h *Handler) serveAPI(w http.ResponseWriter, r *http.Request, identity cfac
 		h.decisionDeny(w, r, identity)
 	case r.Method == http.MethodGet && r.URL.Path == "/ui/api/attention":
 		h.attention(w, r, identity)
+	case r.Method == http.MethodGet && r.URL.Path == inboxWritePath:
+		h.inboxStates(w, r, identity)
+	case r.Method == http.MethodPost && r.URL.Path == inboxWritePath:
+		h.inboxState(w, r, identity)
+	case r.Method == http.MethodPost && r.URL.Path == inboxUndoPath:
+		h.inboxUndo(w, r, identity)
 	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/ui/api/nodes/"):
 		h.setAccepting(w, r, identity)
 	default:
