@@ -1,0 +1,150 @@
+{
+  "browser": "156.0.8078.81",
+  "fixtures": "Fictional data; embedded production templates and committed bundles",
+  "views": [
+    {
+      "file": "command-one-dark-1440.png",
+      "url": "/ui/work?view=all",
+      "theme": "dark",
+      "width": 1440,
+      "overflow": false,
+      "errors": [],
+      "captured_at": "2026-11-07T03:49:49.981Z"
+    },
+    {
+      "file": "command-one-light-1440.png",
+      "url": "/ui/work?view=all",
+      "theme": "light",
+      "width": 1440,
+      "overflow": false,
+      "errors": [],
+      "captured_at": "2026-11-07T03:49:51.625Z"
+    },
+    {
+      "file": "command-one-dark-390.png",
+      "url": "/ui/work?view=all",
+      "theme": "dark",
+      "width": 390,
+      "overflow": false,
+      "errors": [],
+      "captured_at": "2026-11-07T03:49:53.228Z"
+    },
+    {
+      "file": "command-one-light-390.png",
+      "url": "/ui/work?view=all",
+      "theme": "light",
+      "width": 390,
+      "overflow": false,
+      "errors": [],
+      "captured_at": "2026-11-07T03:49:54.782Z"
+    },
+    {
+      "file": "command-three-dark-1440.png",
+      "url": "/ui/work?view=all",
+      "theme": "dark",
+      "width": 1440,
+      "overflow": false,
+      "errors": [],
+      "captured_at": "2026-11-07T03:49:50.366Z"
+    },
+    {
+      "file": "query-autocomplete-dark-1440.png",
+      "url": "/ui/work?view=all",
+      "theme": "dark",
+      "width": 1440,
+      "overflow": false,
+      "errors": [],
+      "captured_at": "2026-11-07T03:49:50.683Z"
+    },
+    {
+      "file": "saved-searches-dark-1440.png",
+      "url": "/ui/work?view=all",
+      "theme": "dark",
+      "width": 1440,
+      "overflow": false,
+      "errors": [],
+      "captured_at": "2026-11-07T03:49:51.041Z"
+    },
+    {
+      "file": "command-three-light-1440.png",
+      "url": "/ui/work?view=all",
+      "theme": "light",
+      "width": 1440,
+      "overflow": false,
+      "errors": [],
+      "captured_at": "2026-11-07T03:49:52.020Z"
+    },
+    {
+      "file": "query-autocomplete-light-1440.png",
+      "url": "/ui/work?view=all",
+      "theme": "light",
+      "width": 1440,
+      "overflow": false,
+      "errors": [],
+      "captured_at": "2026-11-07T03:49:52.333Z"
+    },
+    {
+      "file": "saved-searches-light-1440.png",
+      "url": "/ui/work?view=all",
+      "theme": "light",
+      "width": 1440,
+      "overflow": false,
+      "errors": [],
+      "captured_at": "2026-11-07T03:49:52.680Z"
+    },
+    {
+      "file": "command-three-dark-390.png",
+      "url": "/ui/work?view=all",
+      "theme": "dark",
+      "width": 390,
+      "overflow": false,
+      "errors": [],
+      "captured_at": "2026-11-07T03:49:53.601Z"
+    },
+    {
+      "file": "query-autocomplete-dark-390.png",
+      "url": "/ui/work?view=all",
+      "theme": "dark",
+      "width": 390,
+      "overflow": false,
+      "errors": [],
+      "captured_at": "2026-11-07T03:49:53.894Z"
+    },
+    {
+      "file": "saved-searches-dark-390.png",
+      "url": "/ui/work?view=all",
+      "theme": "dark",
+      "width": 390,
+      "overflow": false,
+      "errors": [],
+      "captured_at": "2026-11-07T03:49:54.225Z"
+    },
+    {
+      "file": "command-three-light-390.png",
+      "url": "/ui/work?view=all",
+      "theme": "light",
+      "width": 390,
+      "overflow": false,
+      "errors": [],
+      "captured_at": "2026-11-07T03:49:55.144Z"
+    },
+    {
+      "file": "query-autocomplete-light-390.png",
+      "url": "/ui/work?view=all",
+      "theme": "light",
+      "width": 390,
+      "overflow": false,
+      "errors": [],
+      "captured_at": "2026-11-07T03:49:55.444Z"
+    },
+    {
+      "file": "saved-searches-light-390.png",
+      "url": "/ui/work?view=all",
+      "theme": "light",
+      "width": 390,
+      "overflow": false,
+      "errors": [],
+      "captured_at": "2026-11-07T03:49:55.774Z"
+    }
+  ]
+}
