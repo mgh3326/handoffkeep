@@ -42,3 +42,14 @@ it("shows the current priority and accepts a number key", async () => {
   await waitFor(() => expect(fetcher).toHaveBeenCalledOnce());
   expect(JSON.parse(String(fetcher.mock.calls[0][1]?.body)).priority).toBe(4);
 });
+
+it("opens only the action belonging to the focused row or detail for the same task", () => {
+  const target = { id: 101, state: "developing", priority: 2 };
+  render(<><div data-action-task="101"><a href="#row">행</a><TaskActions compact target={target} onPriority={() => {}} /></div><header data-action-task="101"><a href="#detail">상세</a><TaskActions target={target} onPriority={() => {}} /></header></>);
+  const row = screen.getByRole("link", { name: "행" }); row.focus();
+  fireEvent.keyDown(row, { key: "k", metaKey: true });
+  expect(screen.getAllByRole("dialog", { name: "명령 팔레트" })).toHaveLength(1);
+  fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+  row.focus(); fireEvent.keyDown(row, { key: "p" });
+  expect(screen.getAllByRole("menu", { name: "우선순위 선택" })).toHaveLength(1);
+});
