@@ -355,8 +355,10 @@ export function reopenTask(id: number, reason: string, eventKey: string): Promis
   return postTaskAction<{ state: string }>(id, "reopen", { reason }, eventKey);
 }
 export type RelaneOutcome = { previous: string; lane: string; changed: boolean; relay: "sent" | "duplicate" | "unconfigured" | "failed" | "none" };
-export function relaneTask(id: number, lane: string, reason: string, eventKey: string): Promise<RelaneOutcome> {
-  return postTaskAction<RelaneOutcome>(id, "relane", { lane, reason }, eventKey);
+/** fromKey names the relane this write undoes; the store lets that undo
+ * restore the lane the recorded move emptied. */
+export function relaneTask(id: number, lane: string, reason: string, eventKey: string, fromKey = ""): Promise<RelaneOutcome> {
+  return postTaskAction<RelaneOutcome>(id, "relane", { lane, reason, from_key: fromKey }, eventKey);
 }
 
 /** Every lane a relane may target (the store's known-lane union). */

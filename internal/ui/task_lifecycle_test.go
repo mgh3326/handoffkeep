@@ -290,6 +290,44 @@ func TestTaskLifecycleTimelineRows(t *testing.T) {
 	}
 }
 
+// TestRelaneUndoRestoresEmptiedLane covers the route's from_key: the undo of
+// a move that emptied its source lane may restore that recorded lane, while
+// the same target without a matching recorded move stays unknown.
+func TestRelaneUndoRestoresEmptiedLane(t *testing.T) {
+	h, st := lifecycleHandler(t)
+	operator := cfaccess.Identity{Email: "operator@example.com"}
+	from, to := "ui-undo-from-"+t.Name(), "ui-undo-to-"+t.Name()
+	lifecycleSeed(t, st, to, store.StateBacklog, "implement")
+	project := "experiment"
+	x, err := st.CreateTask(context.Background(), store.Task{Lane: from, Title: "sole member", Kind: "implement", Priority: 3, CreatedBy: "seed", Project: &project})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := fmt.Sprintf("/ui/api/tasks/%d/relane", x.ID)
+	status, first := h.lifecycleRequest(operator, lifecycleCall{path: path, body: fmt.Sprintf(`{"lane":%q,"reason":"move","event_key":"ui-undo-1"}`, to), csrf: true})
+	if status != http.StatusOK || first["lane"] != to {
+		t.Fatalf("forward: %d %v", status, first)
+	}
+	status, undo := h.lifecycleRequest(operator, lifecycleCall{path: path, body: fmt.Sprintf(`{"lane":%q,"reason":"undo","event_key":"ui-undo-2","from_key":"ui-undo-1"}`, from), csrf: true})
+	if status != http.StatusOK || undo["lane"] != from || undo["previous"] != to {
+		t.Fatalf("undo: %d %v", status, undo)
+	}
+	// Move out again; the emptied source lane is unknown to a write with no
+	// matching recorded move, whether the key is absent or names another move.
+	if status, got := h.lifecycleRequest(operator, lifecycleCall{path: path, body: fmt.Sprintf(`{"lane":%q,"reason":"move","event_key":"ui-undo-3"}`, to), csrf: true}); status != http.StatusOK {
+		t.Fatalf("second move: %d %v", status, got)
+	}
+	for _, body := range []string{
+		fmt.Sprintf(`{"lane":%q,"reason":"no restore","event_key":"ui-undo-4"}`, from),
+		fmt.Sprintf(`{"lane":%q,"reason":"wrong restore","event_key":"ui-undo-5","from_key":"bogus"}`, from),
+	} {
+		status, got := h.lifecycleRequest(operator, lifecycleCall{path: path, body: body, csrf: true})
+		if status != http.StatusBadRequest || got["error"] != "unknown_lane" {
+			t.Fatalf("unknown lane: %d %v", status, got)
+		}
+	}
+}
+
 func TestBoardLanesListsKnownLanes(t *testing.T) {
 	h, st := lifecycleHandler(t)
 	operator := cfaccess.Identity{Email: "operator@example.com"}

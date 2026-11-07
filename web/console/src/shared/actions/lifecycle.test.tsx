@@ -219,6 +219,26 @@ it("keeps one undo toast: the newest action owns the z key", async () => {
   expect(lifecycleUndo).not.toHaveBeenCalled();
 });
 
+it("mints a new key when a failed relane changes its destination", async () => {
+  const fetcher = vi.spyOn(window, "fetch")
+    .mockImplementationOnce(async () => new Response(JSON.stringify({ lanes: ["lane-a", "lane-b", "lane-c"] }), { status: 200 }))
+    .mockRejectedValueOnce(new TypeError("network"))
+    .mockImplementationOnce(async () => new Response(JSON.stringify({ previous: "lane-a", lane: "lane-c", changed: true, relay: "sent" }), { status: 200 }));
+  render(<><ActionNotices /><div data-action-task="7"><TaskActions compact target={{ ...base, state: "backlog", lane: "lane-a" }} onPriority={() => {}} /></div></>);
+  openMenu();
+  fireEvent.click(screen.getByRole("menuitem", { name: "레인 넘기기" }));
+  const select = await screen.findByLabelText("옮길 레인");
+  fireEvent.click(screen.getByRole("button", { name: "레인 옮기기" }));
+  await screen.findByRole("alert");
+  fireEvent.change(select, { target: { value: "lane-c" } });
+  fireEvent.click(screen.getByRole("button", { name: "레인 옮기기" }));
+  await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(3));
+  const first = writeBody(fetcher, 1), second = writeBody(fetcher, 2);
+  expect(first.lane).toBe("lane-b");
+  expect(second.lane).toBe("lane-c");
+  expect(first.event_key).not.toBe(second.event_key);
+});
+
 it("writes the timeline row in Korean for transitions, relane and closure", () => {
   expect(eventText({ id: 1, kind: "transition", from: "developing", to: "reviewing", by: "operator", at: "" })).toBe("상태 변경 · 개발 중 → 검토 중");
   expect(eventText({ id: 2, kind: "transition", from: "reviewing", to: "merged", by: "operator", note: "머지 완료", at: "" })).toBe("상태 변경 · 검토 중 → 머지됨 · 머지 완료");

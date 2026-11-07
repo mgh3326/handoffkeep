@@ -245,7 +245,13 @@ func (s *Store) ReopenTaskBy(ctx context.Context, id int64, by, reason, key stri
 
 // OperatorRelaneTask moves a task to another lane under an idempotency key.
 // It is RelaneTask with replay detection on its relane event.
-func (s *Store) OperatorRelaneTask(ctx context.Context, id int64, to, by, note, key string) (RelaneResult, error) {
+//
+// restoreKey names the relane being undone. When the recorded move started in
+// the requested lane, that value is allowed even if no row uses the lane any
+// more: the undo restores a lane this task was the last member of, which the
+// known-lane check cannot see after the forward move emptied it. Any other
+// unknown lane is still refused.
+func (s *Store) OperatorRelaneTask(ctx context.Context, id int64, to, by, note, key, restoreKey string) (RelaneResult, error) {
 	if !validLifecycleKey(key) || by == "" || !validText(by, 128) {
 		return RelaneResult{}, errors.New("invalid task lifecycle action")
 	}
@@ -272,8 +278,20 @@ func (s *Store) OperatorRelaneTask(ctx context.Context, id int64, to, by, note, 
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return RelaneResult{}, err
 	}
+	allowNewLane := false
+	if restoreKey != "" {
+		var recordedFrom string
+		err := tx.QueryRow(ctx, `SELECT "from" FROM task_events WHERE task_id=$1 AND source=$2 AND source_ref=$3`, id, lifecycleSourceRelane, restoreKey).Scan(&recordedFrom)
+		if errors.Is(err, pgx.ErrNoRows) || (err == nil && recordedFrom != to) {
+			return RelaneResult{}, ErrTaskLaneUnknown
+		}
+		if err != nil {
+			return RelaneResult{}, err
+		}
+		allowNewLane = true
+	}
 	before := x.Lane
-	x, changed, err := s.relaneTaskTx(ctx, tx, id, to, by, note, false, lifecycleSourceRelane, key)
+	x, changed, err := s.relaneTaskTx(ctx, tx, id, to, by, note, allowNewLane, lifecycleSourceRelane, key)
 	if err != nil {
 		return RelaneResult{}, err
 	}

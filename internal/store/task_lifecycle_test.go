@@ -231,7 +231,7 @@ func TestOperatorRelaneTaskReplay(t *testing.T) {
 	to := relaneLane(t, "lifecycle-to")
 	relaneTask(t, s, to, "lane anchor")
 	x := flowTask(t, s, pool, "implement", "backlog", false)
-	moved, err := s.OperatorRelaneTask(ctx, x.ID, to, "tester", "운영자 이동", "relane-1")
+	moved, err := s.OperatorRelaneTask(ctx, x.ID, to, "tester", "운영자 이동", "relane-1", "")
 	if err != nil {
 		t.Fatalf("relane: %v", err)
 	}
@@ -239,7 +239,7 @@ func TestOperatorRelaneTaskReplay(t *testing.T) {
 		t.Fatalf("moved=%+v", moved)
 	}
 	events := len(stateOf(t, s, x.ID).Events)
-	replay, err := s.OperatorRelaneTask(ctx, x.ID, to, "tester", "again", "relane-1")
+	replay, err := s.OperatorRelaneTask(ctx, x.ID, to, "tester", "again", "relane-1", "")
 	if err != nil || !replay.Changed || replay.Previous != x.Lane || replay.Lane != to {
 		t.Fatalf("replay=%+v err=%v", replay, err)
 	}
@@ -252,7 +252,48 @@ func TestOperatorRelaneTaskReplay(t *testing.T) {
 	}
 
 	other := flowTask(t, s, pool, "implement", "backlog", false)
-	if _, err := s.OperatorRelaneTask(ctx, other.ID, "no-such-lane-xyz", "tester", "typo", "relane-2"); !errors.Is(err, ErrTaskLaneUnknown) {
+	if _, err := s.OperatorRelaneTask(ctx, other.ID, "no-such-lane-xyz", "tester", "typo", "relane-2", ""); !errors.Is(err, ErrTaskLaneUnknown) {
 		t.Fatalf("unknown lane err=%v, want ErrTaskLaneUnknown", err)
+	}
+}
+
+// TestRelaneUndoRestoresEmptiedLane covers the undo of a move that emptied
+// its source lane: the lane no longer has a tasks/parent_lane/relay/chat row,
+// so only the recorded from-lane of the relane being undone may restore it.
+func TestRelaneUndoRestoresEmptiedLane(t *testing.T) {
+	s, _ := searchTestStore(t)
+	ctx := context.Background()
+	from, to, elsewhere := relaneLane(t, "undo-from"), relaneLane(t, "undo-to"), relaneLane(t, "undo-elsewhere")
+	relaneTask(t, s, to, "lane anchor")
+	x, err := s.CreateTask(ctx, Task{Lane: from, Title: "sole member", Kind: "implement", Priority: 3, CreatedBy: "tester", Project: projectPtr(testProjectName)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.OperatorRelaneTask(ctx, x.ID, to, "tester", "move", "undo-1", ""); err != nil {
+		t.Fatalf("forward relane: %v", err)
+	}
+	if lanes, err := s.ListKnownTaskLanes(ctx); err != nil {
+		t.Fatal(err)
+	} else if slices.Contains(lanes, from) {
+		t.Fatalf("source lane %q is still known after the move: %v", from, lanes)
+	}
+	restored, err := s.OperatorRelaneTask(ctx, x.ID, from, "tester", "undo", "undo-2", "undo-1")
+	if err != nil {
+		t.Fatalf("undo: %v", err)
+	}
+	if restored.Lane != from || restored.Previous != to || stateOf(t, s, x.ID).Lane != from {
+		t.Fatalf("restored=%+v lane=%q", restored, stateOf(t, s, x.ID).Lane)
+	}
+
+	// A restore key from another lane does not open this now-empty lane.
+	if _, err := s.OperatorRelaneTask(ctx, x.ID, to, "tester", "move again", "undo-3", ""); err != nil {
+		t.Fatalf("second move: %v", err)
+	}
+	other := relaneTask(t, s, elsewhere, "other lane member")
+	if _, err := s.OperatorRelaneTask(ctx, other.ID, to, "tester", "move other", "undo-4", ""); err != nil {
+		t.Fatalf("other move: %v", err)
+	}
+	if _, err := s.OperatorRelaneTask(ctx, x.ID, from, "tester", "bad undo", "undo-5", "undo-4"); !errors.Is(err, ErrTaskLaneUnknown) {
+		t.Fatalf("mismatched restore err=%v, want ErrTaskLaneUnknown", err)
 	}
 }

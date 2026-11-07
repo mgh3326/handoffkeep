@@ -44,6 +44,10 @@ function ConfirmAction({ action, target, eventKey, close, onApplied }: { action:
   const [reason, setReason] = useState("");
   const [closure, setClosure] = useState("cancelled");
   const [duplicateOf, setDuplicateOf] = useState("");
+  // A key belongs to one submitted intent. Editing a field after a failed
+  // attempt starts a new intent (and a new key); an unchanged retry replays.
+  const [key, setKey] = useState(eventKey);
+  const edit = (apply: () => void) => { apply(); setKey(newEventKey()); };
   const run = async (work: () => Promise<string>) => {
     setPending(true);
     try {
@@ -74,14 +78,14 @@ function ConfirmAction({ action, target, eventKey, close, onApplied }: { action:
       close={close}
       pending={pending}
       confirm={() => void run(async () => {
-        await closeTaskMerged(target.id, evidence, reason, eventKey);
+        await closeTaskMerged(target.id, evidence, reason, key);
         return "머지됨으로 닫았습니다.";
       })}
     >
       <p>기록 경로: {path}</p>
       {target.state !== "reviewing" && <p>이 작업은 검토 중이 아니므로, 저장하면 검토 단계를 거쳐 한 번에 기록됩니다.</p>}
-      <label>종료 근거 <input value={evidence} onChange={e => setEvidence(e.target.value)} placeholder="PR 링크" /></label>
-      <label>메모 (선택) <textarea value={reason} onChange={e => setReason(e.target.value)} /></label>
+      <label>종료 근거 <input value={evidence} onChange={e => edit(() => setEvidence(e.target.value))} placeholder="PR 링크" /></label>
+      <label>메모 (선택) <textarea value={reason} onChange={e => edit(() => setReason(e.target.value))} /></label>
     </ActionDialog>;
   }
   if (action.id === "close-completed") {
@@ -92,13 +96,13 @@ function ConfirmAction({ action, target, eventKey, close, onApplied }: { action:
       pending={pending}
       confirmDisabled={trimmedEvidence === ""}
       confirm={() => void run(async () => {
-        await closeTaskCompleted(target.id, evidence, reason, eventKey);
+        await closeTaskCompleted(target.id, evidence, reason, key);
         return "완료로 닫았습니다.";
       })}
     >
       <p>decide·ops·verify 작업만 완료로 닫을 수 있습니다.</p>
-      <label>결과 링크 <input value={evidence} onChange={e => setEvidence(e.target.value)} placeholder="결과 링크 또는 hk:doc 키" /></label>
-      <label>메모 (선택) <textarea value={reason} onChange={e => setReason(e.target.value)} /></label>
+      <label>결과 링크 <input value={evidence} onChange={e => edit(() => setEvidence(e.target.value))} placeholder="결과 링크 또는 hk:doc 키" /></label>
+      <label>메모 (선택) <textarea value={reason} onChange={e => edit(() => setReason(e.target.value))} /></label>
     </ActionDialog>;
   }
   if (action.id === "drop") {
@@ -109,18 +113,18 @@ function ConfirmAction({ action, target, eventKey, close, onApplied }: { action:
       pending={pending}
       confirmDisabled={trimmedReason === "" || (superseded && !(Number.isSafeInteger(duplicateID) && duplicateID > 0))}
       confirm={() => void run(async () => {
-        await dropTask(target.id, superseded ? "superseded" : closure === "obsolete" ? "obsolete" : "cancelled", reason, superseded ? duplicateID : 0, eventKey);
+        await dropTask(target.id, superseded ? "superseded" : closure === "obsolete" ? "obsolete" : "cancelled", reason, superseded ? duplicateID : 0, key);
         return superseded ? "중복으로 닫았습니다." : "드롭했습니다.";
       })}
     >
       <fieldset>
         <legend>종료 유형</legend>
-        <label><input type="radio" name={`closure-${target.id}`} checked={closure === "cancelled"} onChange={() => setClosure("cancelled")} /> 취소</label>
-        <label><input type="radio" name={`closure-${target.id}`} checked={closure === "obsolete"} onChange={() => setClosure("obsolete")} /> 더 이상 필요 없음</label>
-        <label><input type="radio" name={`closure-${target.id}`} checked={superseded} onChange={() => setClosure("superseded")} /> 대체됨 (중복)</label>
+        <label><input type="radio" name={`closure-${target.id}`} checked={closure === "cancelled"} onChange={() => edit(() => setClosure("cancelled"))} /> 취소</label>
+        <label><input type="radio" name={`closure-${target.id}`} checked={closure === "obsolete"} onChange={() => edit(() => setClosure("obsolete"))} /> 더 이상 필요 없음</label>
+        <label><input type="radio" name={`closure-${target.id}`} checked={superseded} onChange={() => edit(() => setClosure("superseded"))} /> 대체됨 (중복)</label>
       </fieldset>
-      {superseded && <label>대체 작업 번호 <input inputMode="numeric" value={duplicateOf} onChange={e => setDuplicateOf(e.target.value)} placeholder="예: 3312" /></label>}
-      <label>이유 <textarea autoFocus={false} value={reason} onChange={e => setReason(e.target.value)} /></label>
+      {superseded && <label>대체 작업 번호 <input inputMode="numeric" value={duplicateOf} onChange={e => edit(() => setDuplicateOf(e.target.value))} placeholder="예: 3312" /></label>}
+      <label>이유 <textarea value={reason} onChange={e => edit(() => setReason(e.target.value))} /></label>
     </ActionDialog>;
   }
   return <ActionDialog
@@ -130,12 +134,12 @@ function ConfirmAction({ action, target, eventKey, close, onApplied }: { action:
     pending={pending}
     confirmDisabled={trimmedReason === ""}
     confirm={() => void run(async () => {
-      await reopenTask(target.id, reason, eventKey);
+      await reopenTask(target.id, reason, key);
       return "작업을 다시 열었습니다.";
     })}
   >
     <p>{stateLabel(target.state)} → {stateLabel("unstarted")}</p>
-    <label>이유 <textarea value={reason} onChange={e => setReason(e.target.value)} /></label>
+    <label>이유 <textarea value={reason} onChange={e => edit(() => setReason(e.target.value))} /></label>
   </ActionDialog>;
 }
 
@@ -176,6 +180,10 @@ function RelaneDialog({ target, eventKey, close, onApplied }: { target: ActionTa
   const [lane, setLane] = useState("");
   const [reason, setReason] = useState("");
   const [pending, setPending] = useState(false);
+  const [key, setKey] = useState(eventKey);
+  // A changed destination or reason is a new intent with a new key; an
+  // unchanged retry replays the recorded move instead of applying a second.
+  const edit = (apply: () => void) => { apply(); setKey(newEventKey()); };
   useEffect(() => {
     let active = true;
     void fetchLanes()
@@ -190,7 +198,7 @@ function RelaneDialog({ target, eventKey, close, onApplied }: { target: ActionTa
   }, [target.lane]);
   const confirm = () => {
     setPending(true);
-    void relaneTask(target.id, lane, reason, eventKey)
+    void relaneTask(target.id, lane, reason, key)
       .then(result => {
         close();
         announce(result.changed ? "레인을 옮겼습니다." : "이미 그 레인에 있습니다.");
@@ -199,7 +207,7 @@ function RelaneDialog({ target, eventKey, close, onApplied }: { target: ActionTa
         const undoKey = newEventKey();
         undoLater("레인을 옮겼습니다", async () => {
           try {
-            await relaneTask(target.id, result.previous, "레인 이동 실행 취소", undoKey);
+            await relaneTask(target.id, result.previous, "레인 이동 실행 취소", undoKey, key);
             onApplied();
             changed(target.id);
           } catch (error) {
@@ -224,7 +232,7 @@ function RelaneDialog({ target, eventKey, close, onApplied }: { target: ActionTa
     {loadFailed && <p role="alert">레인 목록을 불러오지 못했습니다.</p>}
     {!loadFailed && lanes === null && <p role="status">레인 목록 불러오는 중…</p>}
     {lanes !== null && lanes.length === 0 && <p>옮길 다른 레인이 없습니다.</p>}
-    {lanes !== null && lanes.length > 0 && <label>옮길 레인 <select value={lane} onChange={e => setLane(e.target.value)}>{lanes.map(name => <option key={name} value={name}>{name}</option>)}</select></label>}
-    <label>이유 (선택) <textarea value={reason} onChange={e => setReason(e.target.value)} /></label>
+    {lanes !== null && lanes.length > 0 && <label>옮길 레인 <select value={lane} onChange={e => edit(() => setLane(e.target.value))}>{lanes.map(name => <option key={name} value={name}>{name}</option>)}</select></label>}
+    <label>이유 (선택) <textarea value={reason} onChange={e => edit(() => setReason(e.target.value))} /></label>
   </ActionDialog>;
 }

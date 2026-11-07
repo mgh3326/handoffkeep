@@ -207,6 +207,9 @@ func (h *Handler) relaneTask(w http.ResponseWriter, r *http.Request, identity cf
 		Lane     string `json:"lane"`
 		Reason   string `json:"reason"`
 		EventKey string `json:"event_key"`
+		// FromKey names the relane this write undoes, so the undo may restore
+		// the lane that move emptied (see OperatorRelaneTask).
+		FromKey string `json:"from_key"`
 	}
 	if !h.decodeOperatorWrite(w, r, identity, outcome, &input, &input.EventKey) {
 		return
@@ -215,7 +218,7 @@ func (h *Handler) relaneTask(w http.ResponseWriter, r *http.Request, identity cf
 	if note == "" {
 		note = "콘솔에서 레인 이동"
 	}
-	result, err := h.store.OperatorRelaneTask(r.Context(), id, input.Lane, apiIdentity(identity), note, input.EventKey)
+	result, err := h.store.OperatorRelaneTask(r.Context(), id, input.Lane, apiIdentity(identity), note, input.EventKey, input.FromKey)
 	if err != nil {
 		outcome.result = lifecycleError(w, err)
 		return

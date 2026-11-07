@@ -4,9 +4,11 @@ import (
 	"log"
 	"net/http"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/mgh3326/handoffkeep/internal/cfaccess"
+	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
 // attentionDeployItems is how many pending deploys the Home list carries; the
@@ -14,6 +16,7 @@ import (
 const attentionDeployItems = 5
 
 type attentionDecisionView struct {
+	Key       string     `json:"key"`
 	Source    string     `json:"source"`
 	ID        int64      `json:"id"`
 	Lane      string     `json:"lane"`
@@ -21,23 +24,32 @@ type attentionDecisionView struct {
 	CreatedAt time.Time  `json:"created_at"`
 	DueAt     *time.Time `json:"due_at"`
 	Overdue   bool       `json:"overdue"`
+	Read      bool       `json:"read"`
+	Woken     bool       `json:"woken"`
 }
 
 type attentionTaskView struct {
-	ID     int64     `json:"id"`
-	Title  string    `json:"title"`
-	Lane   string    `json:"lane"`
-	State  string    `json:"state"`
-	Reason string    `json:"reason"`
-	Since  time.Time `json:"since"`
+	Key      string    `json:"key"`
+	ID       int64     `json:"id"`
+	Title    string    `json:"title"`
+	Lane     string    `json:"lane"`
+	State    string    `json:"state"`
+	Priority int       `json:"priority"`
+	Reason   string    `json:"reason"`
+	Since    time.Time `json:"since"`
+	Read     bool      `json:"read"`
+	Woken    bool      `json:"woken"`
 }
 
 type attentionDeployView struct {
+	Key      string    `json:"key"`
 	Service  string    `json:"service"`
 	TaskID   int64     `json:"task_id"`
 	Title    string    `json:"title"`
 	PR       string    `json:"pr"`
 	MergedAt time.Time `json:"merged_at"`
+	Read     bool      `json:"read"`
+	Woken    bool      `json:"woken"`
 }
 
 type attentionResponse struct {
@@ -60,9 +72,17 @@ type attentionResponse struct {
 	} `json:"deploys"`
 }
 
+// deployInboxKey is the attention item key of one deploy row. It carries the
+// service so one task merged into two services stays two rows.
+func deployInboxKey(service string, taskID int64) string {
+	return "deploy:" + service + ":" + strconv.FormatInt(taskID, 10)
+}
+
 // attention serves GET /ui/api/attention: what is waiting on the operator, as
 // one bounded document built from the database alone. It never reaches the
-// hub, so a hub outage cannot slow or fail it.
+// hub, so a hub outage cannot slow or fail it. Items the operator completed or
+// snoozed are excluded here and in the counts; a snooze that has come due is
+// shown marked woken.
 func (h *Handler) attention(w http.ResponseWriter, r *http.Request, identity cfaccess.Identity) {
 	// Task titles and deploy state are operator reading material; a service
 	// principal has no page that reads this.
@@ -81,23 +101,44 @@ func (h *Handler) attention(w http.ResponseWriter, r *http.Request, identity cfa
 		h.attentionFailed(w, err)
 		return
 	}
+	deployKeys := make([]string, 0, len(deploys.Services))
+	for _, service := range deploys.Services {
+		for _, task := range service.MergedSince {
+			deployKeys = append(deployKeys, deployInboxKey(service.Service, task.TaskID))
+		}
+	}
+	// Deploy rows come from documents, not the attention snapshot, so their
+	// triage state is a second read. A row written between the two reads can
+	// make a count and its list disagree; both reads are marked stale by the
+	// next poll.
+	states, err := h.store.InboxStates(r.Context(), deployKeys)
+	if err != nil {
+		h.attentionFailed(w, err)
+		return
+	}
 
 	response := attentionResponse{GeneratedAt: now}
 	response.Decisions.Count = waiting.Decisions.Count
 	response.Decisions.Overdue = waiting.Decisions.Overdue
 	response.Decisions.Items = make([]attentionDecisionView, 0, len(waiting.Decisions.Items))
 	for _, x := range waiting.Decisions.Items {
-		response.Decisions.Items = append(response.Decisions.Items, attentionDecisionView(x))
+		response.Decisions.Items = append(response.Decisions.Items, attentionDecisionView{
+			Key: x.Key, Source: x.Source, ID: x.ID, Lane: x.Lane, Question: x.Question,
+			CreatedAt: x.CreatedAt, DueAt: x.DueAt, Overdue: x.Overdue, Read: x.Read, Woken: x.Woken,
+		})
 	}
 	response.Tasks.Count = waiting.Tasks.Count
 	response.Tasks.AwaitingDecision = waiting.Tasks.AwaitingDecision
 	response.Tasks.Stalled = waiting.Tasks.Stalled
 	response.Tasks.Items = make([]attentionTaskView, 0, len(waiting.Tasks.Items))
 	for _, x := range waiting.Tasks.Items {
-		response.Tasks.Items = append(response.Tasks.Items, attentionTaskView(x))
+		response.Tasks.Items = append(response.Tasks.Items, attentionTaskView{
+			Key: x.Key, ID: x.ID, Title: x.Title, Lane: x.Lane, State: x.State, Priority: x.Priority,
+			Reason: x.Reason, Since: x.Since, Read: x.Read, Woken: x.Woken,
+		})
 	}
 	response.Deploys.EventsCapped = deploys.EventsCapped
-	response.Deploys.Count, response.Deploys.Items = attentionDeploys(deploys)
+	response.Deploys.Count, response.Deploys.Items = attentionDeploys(deploys, states, now)
 	writeBoardJSON(w, response)
 }
 
@@ -107,12 +148,26 @@ func (h *Handler) attentionFailed(w http.ResponseWriter, err error) {
 }
 
 // attentionDeploys counts every task merged since its service's last deploy
-// and returns the newest attentionDeployItems of them.
-func attentionDeploys(pending deployPendingResponse) (int, []attentionDeployView) {
+// and returns the newest attentionDeployItems of them. Rows the operator
+// completed or snoozed are left out of both.
+func attentionDeploys(pending deployPendingResponse, states map[string]store.InboxState, now time.Time) (int, []attentionDeployView) {
 	all := []attentionDeployView{}
 	for _, service := range pending.Services {
 		for _, task := range service.MergedSince {
-			all = append(all, attentionDeployView{Service: service.Service, TaskID: task.TaskID, Title: task.Title, PR: task.PR, MergedAt: task.MergedAt})
+			key := deployInboxKey(service.Service, task.TaskID)
+			state := states[key]
+			// A done covers the merge it was given for: a later merge into
+			// the same service brings the row back, as it does for a task.
+			if state.DoneAt != nil && !state.DoneAt.Before(task.MergedAt) {
+				continue
+			}
+			if state.SnoozedUntil != nil && state.SnoozedUntil.After(now) {
+				continue
+			}
+			all = append(all, attentionDeployView{
+				Key: key, Service: service.Service, TaskID: task.TaskID, Title: task.Title, PR: task.PR, MergedAt: task.MergedAt,
+				Read: state.ReadAt != nil, Woken: state.Woken(now),
+			})
 		}
 	}
 	sort.Slice(all, func(i, j int) bool {
