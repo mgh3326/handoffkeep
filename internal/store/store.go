@@ -2907,7 +2907,12 @@ type TaskQuery struct {
 	AfterID                 *int64
 	// ChangeID keeps the tasks linked to that change, ordered by id.
 	ChangeID *int64
-	Limit    int
+	// UpdatedSince and AfterUpdatedAt select the (updated_at,id) keyset the
+	// MCP paging reads use. Setting either switches the order to updated_at
+	// then id, oldest first. AfterUpdatedAt pages strictly after one row.
+	UpdatedSince   *time.Time
+	AfterUpdatedAt *time.Time
+	Limit          int
 }
 
 // ListTasksFiltered lists tasks matching q and marks stalled rows.
@@ -2926,7 +2931,10 @@ func (s *Store) ListTasksFiltered(ctx context.Context, tq TaskQuery) ([]Task, er
 		limit = 1000
 	}
 	q, args := `SELECT `+taskColumns+` FROM tasks WHERE 1=1`, []any{}
-	if tq.AfterID != nil {
+	// An after-id cursor belongs to the id-ordered pages. The updated_at
+	// keyset carries its own AfterID inside the row comparison below; an
+	// id> filter here would drop rows with a newer updated_at but a lower id.
+	if tq.AfterID != nil && tq.AfterUpdatedAt == nil {
 		args = append(args, *tq.AfterID)
 		q += fmt.Sprintf(" AND id>$%d", len(args))
 	}
@@ -2961,15 +2969,30 @@ func (s *Store) ListTasksFiltered(ctx context.Context, tq TaskQuery) ([]Task, er
 		args = append(args, *tq.ChangeID)
 		q += fmt.Sprintf(" AND id IN (SELECT task_id FROM change_tasks WHERE change_id=$%d)", len(args))
 	}
+	if tq.UpdatedSince != nil {
+		args = append(args, tq.UpdatedSince.UTC())
+		q += fmt.Sprintf(" AND updated_at >= $%d", len(args))
+	}
+	if tq.AfterUpdatedAt != nil {
+		afterID := int64(0)
+		if tq.AfterID != nil {
+			afterID = *tq.AfterID
+		}
+		args = append(args, tq.AfterUpdatedAt.UTC(), afterID)
+		q += fmt.Sprintf(" AND (updated_at,id) > ($%d,$%d)", len(args)-1, len(args))
+	}
 	now := time.Now().UTC()
 	if tq.Stalled {
 		args = append(args, now.Add(-s.StartedStalledHours()))
 		q += fmt.Sprintf(" AND state IN ("+startedStatesSQL+") AND NOT awaiting_decision AND "+taskActivitySQL+" < $%d", len(args))
 	}
 	args = append(args, limit)
-	if tq.AfterID != nil || tq.ChangeID != nil {
+	switch {
+	case tq.UpdatedSince != nil || tq.AfterUpdatedAt != nil:
+		q += fmt.Sprintf(" ORDER BY updated_at ASC,id ASC LIMIT $%d", len(args))
+	case tq.AfterID != nil || tq.ChangeID != nil:
 		q += fmt.Sprintf(" ORDER BY id ASC LIMIT $%d", len(args))
-	} else {
+	default:
 		q += fmt.Sprintf(" ORDER BY priority DESC,created_at ASC,id ASC LIMIT $%d", len(args))
 	}
 	rows, err := s.pool.Query(ctx, q, args...)
@@ -3055,27 +3078,15 @@ func (s *Store) GetTask(ctx context.Context, id int64) (Task, bool, error) {
 		return Task{}, false, err
 	}
 	x = one[0]
-	rows, err := s.pool.Query(ctx, `SELECT id,task_id,"from","to","by",note,refs,at,kind,no_job,source,source_ref,field,from_value,to_value,auto,applied FROM task_events WHERE task_id=$1 ORDER BY at,id`, id)
+	rows, err := s.pool.Query(ctx, `SELECT `+taskEventColumns+` FROM task_events WHERE task_id=$1 ORDER BY at,id`, id)
 	if err != nil {
 		return Task{}, false, err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var e TaskEvent
-		var refs []byte
-		if err := rows.Scan(&e.ID, &e.TaskID, &e.From, &e.To, &e.By, &e.Note, &refs, &e.At, &e.Kind, &e.NoJob, &e.Source, &e.SourceRef, &e.Field, &e.FromValue, &e.ToValue, &e.Auto, &e.Applied); err != nil {
+		if err := scanTaskEvent(rows, &e); err != nil {
 			return Task{}, false, err
-		}
-		if len(refs) != 0 {
-			var snapshot struct {
-				TaskRefs
-				JobRebind *TaskJobRebind `json:"job_rebind,omitempty"`
-			}
-			if err := json.Unmarshal(refs, &snapshot); err != nil {
-				return Task{}, false, err
-			}
-			e.Refs = &snapshot.TaskRefs
-			e.Rebind = snapshot.JobRebind
 		}
 		x.Events = append(x.Events, e)
 	}

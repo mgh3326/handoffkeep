@@ -52,10 +52,30 @@ func registerOperatorTools(s *gmcp.Server, service api.Service, p principal) {
 		Annotations: readOnlyAnnotations(),
 	}, o.taskShow)
 	gmcp.AddTool(s, &gmcp.Tool{
+		Name:        "task_get",
+		Description: "Read one hk task in full: body text (from its hk document), state, priority, kind, lane, project, area, labels, claimed_by, refs, parent, children, relations and blockers, the project's design owner, translations, YouTrack link, created_at/updated_at/closed_at and console_url. field_sources names the canonical system for every returned task data field: hk owns the work record (including state, priority, lane, refs and comments by agents); YouTrack owns operator comments, translations/Korean display text and the mirror. Comments and events are a short preview only; page them with task_comments and task_events.",
+		Annotations: readOnlyAnnotations(),
+	}, o.taskGet)
+	gmcp.AddTool(s, &gmcp.Tool{
 		Name:        "task_list",
-		Description: "List hk tasks with optional state, lane and project filters, up to 100. Returns JSON task summaries with console_url and the YouTrack id when a task is mirrored.",
+		Description: "List hk tasks with optional state, lane and project filters, up to 100. Pass cursor (an empty string for the first page) for deterministic pages ordered by updated_at then id, and follow next_cursor until it is empty; updated_since (RFC3339) starts at tasks updated at or after that time. Without cursor or updated_since this is the previous unpaged list. Returns JSON task summaries with console_url and the YouTrack id when a task is mirrored.",
 		Annotations: readOnlyAnnotations(),
 	}, o.taskList)
+	gmcp.AddTool(s, &gmcp.Tool{
+		Name:        "task_comments",
+		Description: "Page one hk task's comments oldest to newest, up to 100 per page. Pass id and an opaque cursor (empty for the first page) and follow next_cursor until has_more is false.",
+		Annotations: readOnlyAnnotations(),
+	}, o.taskComments)
+	gmcp.AddTool(s, &gmcp.Tool{
+		Name:        "task_events",
+		Description: "Page one hk task's events oldest to newest, up to 100 per page. Pass id and an opaque cursor (empty for the first page) and follow next_cursor until has_more is false.",
+		Annotations: readOnlyAnnotations(),
+	}, o.taskEvents)
+	gmcp.AddTool(s, &gmcp.Tool{
+		Name:        "changes_since",
+		Description: "Read the hk change feed across all tasks: task created/updated/deleted, comment, decision and document rows, oldest first, each with a monotonic sync_id and an opaque per-item cursor. A state transition is a task_updated row; task_current is the task's summary when the feed is read, not the state at that historical row, so use task_events for the ordered transition history. Start with no cursor (or an RFC3339 since) and follow next_cursor; each change appears exactly once. max_cursor is the feed's current end. A cursor older than the server's sync retention answers reset:true with min_cursor, the position before the oldest retained row.",
+		Annotations: readOnlyAnnotations(),
+	}, o.changesSince)
 	gmcp.AddTool(s, &gmcp.Tool{
 		Name:        "decisions_pending",
 		Description: "List the open structured decision requests awaiting an operator answer, with their question, options and Korean translations when present. Answer one with decision_answer.",
@@ -299,14 +319,7 @@ func (o operatorTools) taskShow(ctx context.Context, _ *gmcp.CallToolRequest, in
 	if len(events) > taskShowEventLimit {
 		events = events[len(events)-taskShowEventLimit:]
 	}
-	eventViews := make([]taskEventView, 0, len(events))
-	for _, event := range events {
-		eventViews = append(eventViews, taskEventView{
-			ID: event.ID, Kind: event.Kind, From: event.From, To: event.To, By: event.By,
-			Note: event.Note, Field: event.Field, FromValue: event.FromValue, ToValue: event.ToValue,
-			Source: event.Source, At: event.At,
-		})
-	}
+	eventViews := taskEventViews(events)
 	titleKO, titleKOStale, err := o.taskTitleKO(ctx, task)
 	if err != nil {
 		return nil, nil, err
@@ -371,13 +384,25 @@ func (o operatorTools) lastComments(ctx context.Context, taskID int64, limit int
 }
 
 type taskListInput struct {
-	State   string `json:"state,omitempty"`
-	Lane    string `json:"lane,omitempty"`
-	Project string `json:"project,omitempty"`
-	Limit   int    `json:"limit,omitempty"`
+	State        string  `json:"state,omitempty"`
+	Lane         string  `json:"lane,omitempty"`
+	Project      string  `json:"project,omitempty"`
+	Limit        int     `json:"limit,omitempty"`
+	Cursor       *string `json:"cursor,omitempty"`
+	UpdatedSince string  `json:"updated_since,omitempty"`
 }
 
 func (o operatorTools) taskList(ctx context.Context, _ *gmcp.CallToolRequest, in taskListInput) (*gmcp.CallToolResult, any, error) {
+	// A request naming neither cursor nor updated_since is the previous
+	// unpaged list; its output stays exactly what it was, so an existing
+	// client sees no change.
+	if in.Cursor == nil && strings.TrimSpace(in.UpdatedSince) == "" {
+		return o.taskListUnpaged(ctx, in)
+	}
+	return o.taskListPaged(ctx, in)
+}
+
+func (o operatorTools) taskListUnpaged(ctx context.Context, in taskListInput) (*gmcp.CallToolResult, any, error) {
 	limit := clampLimit(in.Limit, taskListDefaultLimit, taskListMaxLimit)
 	query := store.TaskQuery{Lane: strings.TrimSpace(in.Lane), State: strings.TrimSpace(in.State), Limit: limit + 1}
 	if in.Project != "" {
@@ -397,6 +422,56 @@ func (o operatorTools) taskList(ctx context.Context, _ *gmcp.CallToolRequest, in
 		return nil, nil, err
 	}
 	return jsonResult(map[string]any{"tasks": summaries, "truncated": truncated})
+}
+
+// taskListPaged orders by (updated_at,id), oldest first, and pages with an
+// opaque keyset cursor. A task updated between two pages moves ahead of the
+// cursor; the changes_since feed is the exactly-once view for a watcher.
+func (o operatorTools) taskListPaged(ctx context.Context, in taskListInput) (*gmcp.CallToolResult, any, error) {
+	limit := clampLimit(in.Limit, taskListDefaultLimit, taskListMaxLimit)
+	query := store.TaskQuery{Lane: strings.TrimSpace(in.Lane), State: strings.TrimSpace(in.State), Limit: limit + 1}
+	if in.Project != "" {
+		project := in.Project
+		query.Project = &project
+	}
+	if value := strings.TrimSpace(in.UpdatedSince); value != "" {
+		since, err := parseRFC3339("updated_since", value)
+		if err != nil {
+			return nil, nil, err
+		}
+		query.UpdatedSince = &since
+	}
+	if in.Cursor != nil && *in.Cursor != "" {
+		var cur mcpCursor
+		if err := decodeCursor(*in.Cursor, cursorTaskList, &cur); err != nil {
+			return nil, nil, err
+		}
+		at, err := time.Parse(time.RFC3339Nano, cur.Time)
+		if err != nil || cur.ID < 0 {
+			return nil, nil, errInvalidCursor
+		}
+		query.AfterUpdatedAt = &at
+		afterID := cur.ID
+		query.AfterID = &afterID
+	}
+	tasks, err := o.service.ListTasksFiltered(ctx, query)
+	if err != nil {
+		return nil, nil, err
+	}
+	hasMore := len(tasks) > limit
+	if hasMore {
+		tasks = tasks[:limit]
+	}
+	next := ""
+	if hasMore && len(tasks) > 0 {
+		last := tasks[len(tasks)-1]
+		next = encodeCursor(mcpCursor{Kind: string(cursorTaskList), Time: last.UpdatedAt.UTC().Format(time.RFC3339Nano), ID: last.ID})
+	}
+	summaries, err := o.summaries(ctx, tasks)
+	if err != nil {
+		return nil, nil, err
+	}
+	return jsonResult(map[string]any{"tasks": summaries, "truncated": hasMore, "next_cursor": next})
 }
 
 type decisionOptionView struct {

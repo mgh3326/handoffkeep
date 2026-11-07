@@ -129,7 +129,8 @@ change it, writing one `kind='area'` `task_events` row with the old and new
 value, and nothing when the value is unchanged. `tasks list --area A`
 (`GET /v1/tasks?area=A`) filters; `--area ""` selects tasks with no area. An
 unknown value is a 400 `invalid_request` naming the allowed set. The
-console only reads it, and the MCP server has no task tools. Area is routing
+console only reads it, and the MCP server exposes it read-only through
+`task_get` and `task_list`. Area is routing
 metadata, not authority: it is not part of any claim or receipt and is not
 fenced like project or rebind.
 
