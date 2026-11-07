@@ -32,19 +32,47 @@ const (
 // Postgres record the agents write; "youtrack" is the operator's system of
 // record. It is served with task_get so a reader never has to guess which
 // side owns a value it is about to act on.
+//
+// Every task data field task_get returns has an entry. The three conceptual
+// entries (comments_by_agents, operator_comments, korean_display_text) restate
+// the design rule; response metadata such as comments_more and events_more is
+// not a task field and is not listed.
 var taskFieldSources = map[string]string{
-	"state":               "hk",
-	"priority":            "hk",
-	"lane":                "hk",
-	"kind":                "hk",
-	"project":             "hk",
-	"area":                "hk",
-	"labels":              "hk",
-	"claimed_by":          "hk",
-	"refs":                "hk",
+	"id":               "hk",
+	"title":            "hk",
+	"body":             "hk",
+	"body_doc":         "hk",
+	"state":            "hk",
+	"priority":         "hk",
+	"kind":             "hk",
+	"lane":             "hk",
+	"project":          "hk",
+	"area":             "hk",
+	"labels":           "hk",
+	"claimed_by":       "hk",
+	"created_by":       "hk",
+	"refs":             "hk",
+	"created_at":       "hk",
+	"updated_at":       "hk",
+	"started_at":       "hk",
+	"completed_at":     "hk",
+	"canceled_at":      "hk",
+	"closed_at":        "hk",
+	"parent":           "hk",
+	"children":         "hk",
+	"relations":        "hk",
+	"blockers":         "hk",
+	"project_owner":    "hk",
+	"comments_preview": "hk",
+	"events_preview":   "hk",
+	"console_url":      "hk",
+	// The ownership rule the design doc states.
 	"comments_by_agents":  "hk",
 	"operator_comments":   "youtrack",
 	"korean_display_text": "youtrack",
+	// The YouTrack mirror and the Korean display text come from YouTrack.
+	"translations": "youtrack",
+	"youtrack":     "youtrack",
 }
 
 // cursorKind tags an opaque cursor so a cursor from one tool cannot be

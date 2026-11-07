@@ -126,18 +126,20 @@ mirror, the readable YouTrack id and URL. Limits are clamped, not rejected:
 
 ## Field ownership
 
-`task_get` answers with `field_sources`, the canonical system for each field
-(hk:doc `design/2026-11-07/youtrack-first-operator-ui`):
+`task_get` answers with `field_sources`, the canonical system for every task
+data field in that response (hk:doc
+`design/2026-11-07/youtrack-first-operator-ui`):
 
-| Field | Source |
+| Field(s) | Source |
 | --- | --- |
-| `state`, `priority`, `lane`, `refs` | `hk` (the hk Postgres record) |
-| `comments_by_agents` | `hk` |
+| `id`, `title`, `body`, `body_doc`, `state`, `priority`, `kind`, `lane`, `project`, `area`, `labels`, `claimed_by`, `created_by`, `refs`, `created_at`, `updated_at`, `started_at`, `completed_at`, `canceled_at`, `closed_at`, `parent`, `children`, `relations`, `blockers`, `project_owner`, `comments_preview`, `events_preview`, `console_url` | `hk` (the hk Postgres work record) |
+| `comments_by_agents` (agent comments) | `hk` |
 | `operator_comments` | `youtrack` |
-| `korean_display_text` | `youtrack` |
+| `translations`, `korean_display_text`, `youtrack` (the mirror) | `youtrack` |
 
-A reader that is about to change a value must write to its owning system, not
-to whichever copy it happened to read.
+Response metadata (`comments_more`, `events_more`, `field_sources` itself) is
+not a task field and has no entry. A reader that is about to change a value
+must write to its owning system, not to whichever copy it happened to read.
 
 ## Paging and the change feed
 

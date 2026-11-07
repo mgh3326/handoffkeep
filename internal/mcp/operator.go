@@ -53,7 +53,7 @@ func registerOperatorTools(s *gmcp.Server, service api.Service, p principal) {
 	}, o.taskShow)
 	gmcp.AddTool(s, &gmcp.Tool{
 		Name:        "task_get",
-		Description: "Read one hk task in full: body text (from its hk document), state, priority, kind, lane, project, area, labels, claimed_by, refs, parent, children, relations and blockers, the project's design owner, translations, YouTrack link, created_at/updated_at/closed_at and console_url. field_sources names the canonical system per field: hk owns state, priority, lane, refs and comments by agents; YouTrack owns operator comments and Korean display text. Comments and events are a short preview only; page them with task_comments and task_events.",
+		Description: "Read one hk task in full: body text (from its hk document), state, priority, kind, lane, project, area, labels, claimed_by, refs, parent, children, relations and blockers, the project's design owner, translations, YouTrack link, created_at/updated_at/closed_at and console_url. field_sources names the canonical system for every returned task data field: hk owns the work record (including state, priority, lane, refs and comments by agents); YouTrack owns operator comments, translations/Korean display text and the mirror. Comments and events are a short preview only; page them with task_comments and task_events.",
 		Annotations: readOnlyAnnotations(),
 	}, o.taskGet)
 	gmcp.AddTool(s, &gmcp.Tool{

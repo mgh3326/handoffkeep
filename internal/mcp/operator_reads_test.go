@@ -215,8 +215,16 @@ func TestTaskGetCompleteFields(t *testing.T) {
 		t.Fatalf("events preview=%+v more=%v", out.EventsPreview, out.EventsMore)
 	}
 	for field, want := range map[string]string{
-		"state": "hk", "priority": "hk", "lane": "hk", "refs": "hk",
-		"comments_by_agents": "hk", "operator_comments": "youtrack", "korean_display_text": "youtrack",
+		"id": "hk", "title": "hk", "body": "hk", "body_doc": "hk",
+		"state": "hk", "priority": "hk", "kind": "hk", "lane": "hk",
+		"project": "hk", "area": "hk", "labels": "hk", "claimed_by": "hk",
+		"created_by": "hk", "refs": "hk", "created_at": "hk", "updated_at": "hk",
+		"started_at": "hk", "completed_at": "hk", "canceled_at": "hk", "closed_at": "hk",
+		"parent": "hk", "children": "hk", "relations": "hk", "blockers": "hk",
+		"project_owner": "hk", "comments_preview": "hk", "events_preview": "hk",
+		"console_url":        "hk",
+		"comments_by_agents": "hk", "operator_comments": "youtrack",
+		"korean_display_text": "youtrack", "translations": "youtrack", "youtrack": "youtrack",
 	} {
 		if out.FieldSources[field] != want {
 			t.Errorf("field_sources[%q]=%q want %q", field, out.FieldSources[field], want)
