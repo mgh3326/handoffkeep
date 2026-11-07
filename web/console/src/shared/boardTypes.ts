@@ -4,6 +4,9 @@ export type TaskRefs = {
   head_sha?: string;
   report_path?: string;
   job_id?: string;
+  /** The Linear mirror's metadata. grade and tier are the task's (grade X,
+   * Tn) marker; the query bar filters on them. */
+  linear?: { grade?: string; tier?: string; identifier?: string; issue_id?: string; mirror_reason?: string; sync?: boolean };
   /** The task's current structured decision request (#618). The list only
    * needs its identity and status; the drawer reads the full request and
    * its history from the detail's decision_requests. */

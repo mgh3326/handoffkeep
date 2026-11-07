@@ -1,0 +1,104 @@
+/* Saved searches: the save control sits at the right end of the query bar and
+   the saved searches are one compact chip row under the Work tabs. */
+
+.work-save {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--hk-space-1);
+}
+
+.work-save-form {
+  display: flex;
+  align-items: center;
+  gap: var(--hk-space-1);
+}
+
+.work-save-form input {
+  width: 140px;
+  min-width: 0;
+}
+
+.work-saved {
+  margin: var(--hk-space-2) 0;
+}
+
+.work-save button,
+.work-saved button {
+  min-height: var(--hk-control-height);
+  padding: var(--hk-space-1) var(--hk-space-2);
+  font-size: var(--hk-type-meta);
+  white-space: nowrap;
+}
+
+.work-saved-list {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: var(--hk-space-1);
+  overflow-x: auto;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.work-saved-list li {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
+
+.work-saved-apply {
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border-radius: var(--hk-radius-pill);
+  background: var(--hk-badge-fill);
+}
+
+.work-saved-list li > button:not(.work-saved-apply) {
+  border-color: transparent;
+  background: transparent;
+  color: var(--hk-text-secondary);
+}
+
+.work-saved-form {
+  display: flex;
+  gap: var(--hk-space-1);
+}
+
+.work-save input,
+.work-saved-form input {
+  min-height: var(--hk-control-height);
+  padding-inline: var(--hk-space-2);
+  border: var(--hk-border-width) solid var(--hk-border-control);
+  border-radius: var(--hk-radius-control);
+  background: var(--hk-input-fill);
+  color: var(--hk-text-primary);
+  font: inherit;
+  font-size: var(--hk-type-meta);
+}
+
+.work-saved-form input {
+  width: 160px;
+}
+
+.work-save input:focus-visible,
+.work-saved-form input:focus-visible {
+  outline: var(--hk-focus-width) solid var(--hk-focus);
+  outline-offset: var(--hk-focus-offset);
+}
+
+.work-saved-cancel {
+  border-color: transparent;
+  background: transparent;
+  color: var(--hk-text-secondary);
+}
+
+.work-saved-error {
+  margin: 0;
+  color: var(--hk-danger);
+  font-size: var(--hk-type-meta);
+}

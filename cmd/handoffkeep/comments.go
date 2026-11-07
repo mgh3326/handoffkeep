@@ -95,13 +95,17 @@ func taskCommentsCmd(args []string, in io.Reader, out io.Writer) error {
 		if err != nil {
 			return err
 		}
+		translationError := ""
 		if *bodyKo != "" {
 			row := store.Translation{Entity: "task_comment", EntityID: strconv.FormatInt(x.ID, 10), Field: "body", Lang: "ko", SourceSHA256: store.SourceSHA256(x.Body), Text: *bodyKo, Translator: "cli"}
 			if _, err := c.PutTranslations(ctx, []store.Translation{row}); err != nil {
-				return fmt.Errorf("comment %d created, but translation failed: %w", x.ID, err)
+				translationError = "translation_write_failed"
 			}
 		}
-		return printJSON(out, x)
+		return printJSON(out, struct {
+			store.TaskComment
+			TranslationError string `json:"translation_error,omitempty"`
+		}{x, translationError})
 	default:
 		if set["body"] || set["file"] || set["body-ko"] {
 			return errors.New("tasks comments takes --after-id and --limit")

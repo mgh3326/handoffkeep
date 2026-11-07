@@ -295,6 +295,39 @@ const views = {
     },
   },
   work: { url: '/ui/work?view=all', wait: '.work-rows a' },
+  'command-one': {
+    url: '/ui/work?view=all', wait: '.work-rows a',
+    act: async (page) => {
+      await page.locator('[data-inbox-row]').first().focus();
+      await page.keyboard.press('/');
+      await page.getByRole('dialog', { name: '명령 바' }).waitFor();
+      await page.getByLabel('명령 입력').fill('우선순위 1 레인 fleet-status 코멘트 배포 전에 확인해 주세요');
+      await page.getByText('실행 3건', { exact: false }).waitFor();
+    },
+  },
+  'command-three': {
+    url: '/ui/work?view=all', wait: '.work-rows a',
+    act: async (page) => {
+      await page.locator('[data-inbox-row]').first().focus();
+      await page.keyboard.press('x');
+      await page.keyboard.press('j');
+      await page.keyboard.press('x');
+      await page.keyboard.press('j');
+      await page.keyboard.press('x');
+      await page.keyboard.press('/');
+      await page.getByRole('dialog', { name: '명령 바' }).waitFor();
+      await page.getByLabel('명령 입력').fill('우선순위 2');
+      await page.getByText('대상 3건', { exact: false }).waitFor();
+    },
+  },
+  'query-autocomplete': {
+    url: '/ui/work?view=all', wait: '.work-rows a',
+    act: async (page) => {
+      await page.getByLabel('검색 쿼리').click();
+      await page.getByLabel('검색 쿼리').fill('상태:');
+      await page.getByRole('listbox', { name: '쿼리 자동완성' }).waitFor();
+    },
+  },
   'row-menu': {
     url: '/ui/work?view=all', wait: '.work-rows a',
     step: async page => { await page.locator('[data-action-task="107"]').hover(); await openMenu(page, 107); },
@@ -326,6 +359,16 @@ const views = {
   decision: { url: '/ui/decisions/101', wait: '.decision-page h1' },
   deploys: { url: '/ui/deploys', wait: '.dp-card' },
   document: { url: '/ui/doc/guide/console', wait: '.hk-doc h1' },
+  'saved-searches': {
+    url: '/ui/work?view=all', wait: '.work-rows a',
+    act: async (page) => {
+      await page.getByLabel('검색 쿼리').fill('상태:개발 중');
+      await page.getByRole('button', { name: '현재 검색 저장' }).click();
+      await page.getByLabel('저장 이름').fill('진행 중 점검');
+      await page.getByRole('button', { name: '저장', exact: true }).click();
+      await page.getByRole('button', { name: '진행 중 점검', exact: true }).waitFor();
+    },
+  },
 };
 
 (async () => {
@@ -337,7 +380,7 @@ const views = {
   const shellHtml = (await fs.readFile(path.join(pagesDir, 'shell.html'), 'utf8'))
     .replace('</head>', '<meta name="hk-csrf" content="fixture-token"></head>');
   const manifest = [];
-  const shots = path.join(root, 'docs/console-shots');
+  const shots = process.env.HK_CONSOLE_SHOT_DIR || path.join(root, 'docs/console-shots');
   await fs.mkdir(shots, { recursive: true });
   try {
     for (const width of [1440, 390]) {
@@ -399,7 +442,14 @@ const views = {
         await context.close();
       }
     }
-    const previous = selected.size ? JSON.parse(await fs.readFile(path.join(shots, 'capture.json'), 'utf8')).views : [];
+    let previous = [];
+    if (selected.size) {
+      try {
+        previous = JSON.parse(await fs.readFile(path.join(shots, 'capture.json'), 'utf8')).views ?? [];
+      } catch {
+        // A fresh capture directory has no earlier manifest.
+      }
+    }
     const merged = new Map(previous.map((item) => [item.file, item]));
     for (const item of manifest) merged.set(item.file, item);
     await fs.writeFile(path.join(shots, 'capture.json'), JSON.stringify({ browser: browser.version(), fixtures: 'Fictional data; embedded production templates and committed bundles', views: [...merged.values()] }, null, 2) + '\n');

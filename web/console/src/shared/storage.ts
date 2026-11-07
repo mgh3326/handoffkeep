@@ -10,6 +10,7 @@ export const STORAGE_KEYS = {
   recent: "hk-console:recent",
   workProject: "hk-console:work-project",
   scope: "hk-console:scope",
+  savedSearches: "hk-console:saved-searches",
 } as const;
 
 /** The stored string, or null when absent or storage is unavailable. */

@@ -538,12 +538,16 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 		if *bodyKo != "" {
 			rows = append(rows, store.Translation{Entity: "task", EntityID: strconv.FormatInt(x.ID, 10), Field: "body", Lang: "ko", SourceSHA256: store.SourceSHA256(originalBody), Text: *bodyKo, Translator: "cli"})
 		}
+		translationError := ""
 		if len(rows) > 0 {
 			if _, err := c.PutTranslations(ctx, rows); err != nil {
-				return fmt.Errorf("task %d created, but translation failed: %w", x.ID, err)
+				translationError = "translation_write_failed"
 			}
 		}
-		return printJSON(out, x)
+		return printJSON(out, struct {
+			store.Task
+			TranslationError string `json:"translation_error,omitempty"`
+		}{x, translationError})
 	case "list":
 		if fs.NArg() != 0 {
 			return errors.New("tasks list takes flags only")

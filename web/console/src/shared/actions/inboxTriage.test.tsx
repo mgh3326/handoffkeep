@@ -39,6 +39,7 @@ beforeEach(() => {
   fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const body = typeof init?.body === "string" ? JSON.parse(init.body) : { items: [] };
     const path = String(input);
+    if (path === "/ui/api/board/lanes") return new Response(JSON.stringify({ lanes: ["console-demo"] }));
     if (path === "/ui/api/inbox/undo") return new Response(JSON.stringify({ items: [], conflicted: [] }));
     return writeResult(body.items ?? [], body.action);
   });
@@ -183,9 +184,34 @@ it("Cmd-K lists the selection's actions and the four destinations", () => {
   expect(within(dialog).getByText("다시 알림")).toBeTruthy();
   expect(within(dialog).getAllByText("우선순위").length).toBeGreaterThan(0);
   expect(within(dialog).getByText("보류")).toBeTruthy();
+  expect(within(dialog).getByText("명령 실행 (한 줄)")).toBeTruthy();
   for (const label of ["홈 화면으로 이동", "결정 화면으로 이동", "작업 화면으로 이동", "배포 화면으로 이동"]) {
     expect(within(dialog).getByText(label)).toBeTruthy();
   }
+});
+
+it('opens the command bar with "/" for the focused row', () => {
+  render(<Fixture rows={[taskRow("task:1"), taskRow("task:2")]} />);
+  fireEvent.keyDown(focusRow("task:1"), { key: "/" });
+  const dialog = screen.getByRole("dialog", { name: "명령 바" });
+  expect(within(dialog).getByText("대상 1건")).toBeTruthy();
+  const input = within(dialog).getByLabelText("명령 입력");
+  fireEvent.keyDown(input, { key: "Escape" });
+  expect(screen.queryByRole("listbox", { name: "명령 자동완성" })).toBeNull();
+  fireEvent.keyDown(input, { key: "Escape" });
+  expect(screen.queryByRole("dialog", { name: "명령 바" })).toBeNull();
+});
+
+it("opens the command bar from Cmd-K by typing a command after >", () => {
+  render(<Fixture rows={[taskRow("task:1"), taskRow("task:2")]} />);
+  fireEvent.keyDown(focusRow("task:1"), { key: "x" });
+  fireEvent.keyDown(focusRow("task:2"), { key: "x" });
+  fireEvent.keyDown(document.activeElement!, { key: "k", metaKey: true });
+  const palette = screen.getByRole("dialog", { name: "명령 팔레트" });
+  fireEvent.change(within(palette).getByRole("textbox"), { target: { value: ">우선순위 1" } });
+  const bar = screen.getByRole("dialog", { name: "명령 바" });
+  expect((within(bar).getByLabelText("명령 입력") as HTMLInputElement).value).toBe("우선순위 1");
+  expect(within(bar).getByText("대상 2건")).toBeTruthy();
 });
 
 it("sends only the rows an action applies to", async () => {

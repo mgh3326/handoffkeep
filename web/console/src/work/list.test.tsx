@@ -16,10 +16,10 @@ afterEach(() => { vi.unstubAllGlobals(); history.replaceState(null, "", "/"); })
 it("W3 restores controls and changes the URL", async () => {
   render(<WorkPage />);
   expect(await screen.findByText("Task one")).toBeTruthy();
-  expect((screen.getByLabelText("검색") as HTMLInputElement).value).toBe("#101");
+  expect((screen.getByLabelText("검색 쿼리") as HTMLInputElement).value).toContain('"#101"');
   expect((screen.getByLabelText("우선순위 ≥") as HTMLInputElement).value).toBe("2");
   expect((screen.getByLabelText("레인") as HTMLSelectElement).value).toBe("x");
-  fireEvent.change(screen.getByLabelText("검색"), { target: { value: "one" } });
+  fireEvent.change(screen.getByLabelText("검색 쿼리"), { target: { value: "one" } });
   expect(new URLSearchParams(location.search).get("q")).toBe("one");
 });
 it("W10 uses a pane on wide screens and links on narrow screens", async () => {
@@ -74,7 +74,8 @@ it("W5 renders a future state in All", async () => {
   vi.stubGlobal("fetch", vi.fn(async (path: string) => path.includes("projects") ? response({ projects: ["a"] }) : response({ tasks: [{ ...task, state: "future_state" }], states: ["future_state"], generated_at: "now", truncated: false })));
   history.replaceState(null, "", "/ui/work?project=a&view=all");
   render(<WorkPage />);
-  expect(await screen.findByText(/알 수 없는 상태 \(future_state\)/)).toBeTruthy();
+  // The row chip and the state select both name the unknown state.
+  expect((await screen.findAllByText(/알 수 없는 상태 \(future_state\)/)).length).toBeGreaterThan(0);
 });
 it("W4 reports a still-truncated 5000 row cursor walk", async () => {
   let page = 0;
@@ -106,7 +107,7 @@ it("keeps URL filter values visible when they have no matching options", async (
   for (const [label, value] of [["프로젝트", "missing"], ["레인", "unknown-lane"], ["종류", "unknown-kind"], ["상태", "unknown-state"]]) {
     const select = screen.getByLabelText(label) as HTMLSelectElement;
     expect(select.value).toBe(value);
-    expect(select.selectedOptions[0]?.textContent).toBe(value);
+    expect(select.selectedOptions[0]?.textContent).toBe(label === "상태" ? `알 수 없는 상태 (${value})` : value);
   }
 });
 

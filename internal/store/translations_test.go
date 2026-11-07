@@ -141,3 +141,14 @@ func TestMissingTaskTranslationsLongBodiesProgress(t *testing.T) {
 		t.Fatalf("next page count=%d err=%v", len(next), err)
 	}
 }
+
+func TestCommentTranslationMayExpandBeyondSourceLimit(t *testing.T) {
+	row := Translation{Entity: "task_comment", EntityID: "1", Field: "body", Lang: "ko", SourceSHA256: SourceSHA256("source"), Text: strings.Repeat("한", MaxBytes/3+1), Translator: "test"}
+	if err := checkTranslation(row); err != nil {
+		t.Fatal(err)
+	}
+	row.Text = strings.Repeat("x", DocumentMaxBytes+1)
+	if err := checkTranslation(row); err == nil {
+		t.Fatal("oversized translation accepted")
+	}
+}

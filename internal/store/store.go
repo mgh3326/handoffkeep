@@ -4152,7 +4152,7 @@ func (s *Store) searchTasks(ctx context.Context, q, lane string, limit int) ([]S
 		exactID = id
 	}
 	refsExpr := `jsonb_strip_nulls(jsonb_build_object('id',t.id::text,'state',t.state,'lane',t.lane,'priority',t.priority::text,'pr',t.refs->>'pr','head_sha',t.refs->>'head_sha','report_path',t.refs->>'report_path'))`
-	titleMatch := `(to_tsvector('simple',t.title) @@ plainto_tsquery('simple',$2) OR t.title ILIKE '%'||$4||'%' ESCAPE '\' OR EXISTS (SELECT 1 FROM translations tr WHERE tr.entity='task' AND tr.entity_id=t.id::text AND tr.field='title' AND tr.lang='ko' AND tr.text ILIKE '%'||$4||'%' ESCAPE '\'))`
+	titleMatch := `(to_tsvector('simple',t.title) @@ plainto_tsquery('simple',$2) OR t.title ILIKE '%'||$4||'%' ESCAPE '\' OR EXISTS (SELECT 1 FROM translations tr WHERE tr.entity='task' AND tr.entity_id=t.id::text AND tr.field='title' AND tr.lang='ko' AND tr.source_sha256=encode(sha256(convert_to(t.title,'UTF8')),'hex') AND tr.text ILIKE '%'||$4||'%' ESCAPE '\'))`
 	out := []SearchResult{}
 	if exactID >= 0 {
 		row := s.pool.QueryRow(ctx, `SELECT t.id::text,t.lane,t.kind,t.title,`+refsExpr+`,t.created_at FROM tasks t WHERE t.id=$2 AND ($1='' OR t.lane=$1)`, lane, exactID)
@@ -4176,19 +4176,19 @@ func (s *Store) searchTasks(ctx context.Context, q, lane string, limit int) ([]S
 		return nil, fmt.Errorf("search tasks probe: %w", e)
 	}
 	parts := []string{`SELECT 'tasks' scope,t.id::text key,t.lane session,t.kind,t.title,` +
-		`COALESCE((SELECT substr(tr.text,GREATEST(1,position(lower($2) in lower(tr.text))-40),160) FROM translations tr WHERE tr.entity='task' AND tr.entity_id=t.id::text AND tr.field='title' AND tr.lang='ko' AND tr.text ILIKE '%'||$4||'%' ESCAPE '\'),NULLIF(ts_headline('simple',t.title,plainto_tsquery('simple',$2),'MaxWords=24,MinWords=8'),''),left(t.title,160)) snippet,` +
+		`COALESCE((SELECT substr(tr.text,GREATEST(1,position(lower($2) in lower(tr.text))-40),160) FROM translations tr WHERE tr.entity='task' AND tr.entity_id=t.id::text AND tr.field='title' AND tr.lang='ko' AND tr.source_sha256=encode(sha256(convert_to(t.title,'UTF8')),'hex') AND tr.text ILIKE '%'||$4||'%' ESCAPE '\'),NULLIF(ts_headline('simple',t.title,plainto_tsquery('simple',$2),'MaxWords=24,MinWords=8'),''),left(t.title,160)) snippet,` +
 		refsExpr + ` refs,t.created_at,0 match_rank FROM tasks t WHERE ($1='' OR t.lane=$1) AND ` + titleMatch}
 	// A translated body is a task hit, but ranks below a title hit.
 	parts = append(parts, `SELECT 'tasks' scope,t.id::text key,t.lane session,t.kind,t.title,`+
 		`substr(tr.text,GREATEST(1,position(lower($2) in lower(tr.text))-40),160) snippet,`+
-		refsExpr+` refs,t.created_at,1 match_rank FROM tasks t JOIN translations tr ON tr.entity='task' AND tr.entity_id=t.id::text AND tr.field='body' AND tr.lang='ko' WHERE ($1='' OR t.lane=$1) AND tr.text ILIKE '%'||$4||'%' ESCAPE '\' AND NOT `+titleMatch)
+		refsExpr+` refs,t.created_at,1 match_rank FROM tasks t JOIN documents d ON d.key=split_part(t.body_doc,'#',1) JOIN translations tr ON tr.entity='task' AND tr.entity_id=t.id::text AND tr.field='body' AND tr.lang='ko' AND tr.source_sha256=encode(sha256(convert_to(d.body,'UTF8')),'hex') WHERE ($1='' OR t.lane=$1) AND tr.text ILIKE '%'||$4||'%' ESCAPE '\' AND NOT `+titleMatch)
 	if comments {
 		// DISTINCT ON keeps one row per task no matter how many comments match —
 		// otherwise a comment-heavy task would consume the LIMIT+1 window and the
 		// page could report "complete" while other tasks went unfetched.
 		parts = append(parts, `(SELECT DISTINCT ON (t.id) 'tasks' scope,t.id::text key,t.lane session,t.kind,t.title,`+
-			`COALESCE((SELECT substr(tr.text,GREATEST(1,position(lower($2) in lower(tr.text))-40),160) FROM translations tr WHERE tr.entity='task_comment' AND tr.entity_id=c.id::text AND tr.field='body' AND tr.lang='ko' AND tr.text ILIKE '%'||$4||'%' ESCAPE '\'),NULLIF(ts_headline('simple',c.body,plainto_tsquery('simple',$2),'MaxWords=24,MinWords=8'),''),left(c.body,160)) snippet,`+
-			refsExpr+` refs,t.created_at,2 match_rank FROM task_comments c JOIN tasks t ON t.id=c.task_id WHERE ($1='' OR t.lane=$1) AND (to_tsvector('simple',c.body) @@ plainto_tsquery('simple',$2) OR c.body ILIKE '%'||$4||'%' ESCAPE '\' OR EXISTS (SELECT 1 FROM translations tr WHERE tr.entity='task_comment' AND tr.entity_id=c.id::text AND tr.field='body' AND tr.lang='ko' AND tr.text ILIKE '%'||$4||'%' ESCAPE '\')) AND NOT `+titleMatch+` ORDER BY t.id, c.created_at DESC, c.id DESC)`)
+			`COALESCE((SELECT substr(tr.text,GREATEST(1,position(lower($2) in lower(tr.text))-40),160) FROM translations tr WHERE tr.entity='task_comment' AND tr.entity_id=c.id::text AND tr.field='body' AND tr.lang='ko' AND tr.source_sha256=encode(sha256(convert_to(c.body,'UTF8')),'hex') AND tr.text ILIKE '%'||$4||'%' ESCAPE '\'),NULLIF(ts_headline('simple',c.body,plainto_tsquery('simple',$2),'MaxWords=24,MinWords=8'),''),left(c.body,160)) snippet,`+
+			refsExpr+` refs,t.created_at,2 match_rank FROM task_comments c JOIN tasks t ON t.id=c.task_id WHERE ($1='' OR t.lane=$1) AND (to_tsvector('simple',c.body) @@ plainto_tsquery('simple',$2) OR c.body ILIKE '%'||$4||'%' ESCAPE '\' OR EXISTS (SELECT 1 FROM translations tr WHERE tr.entity='task_comment' AND tr.entity_id=c.id::text AND tr.field='body' AND tr.lang='ko' AND tr.source_sha256=encode(sha256(convert_to(c.body,'UTF8')),'hex') AND tr.text ILIKE '%'||$4||'%' ESCAPE '\')) AND NOT `+titleMatch+` ORDER BY t.id, c.created_at DESC, c.id DESC)`)
 	}
 	rows, e := s.pool.Query(ctx, `SELECT scope,key,session,kind,title,snippet,refs,created_at FROM (SELECT DISTINCT ON (key) * FROM (`+strings.Join(parts, " UNION ALL ")+") candidates ORDER BY key,match_rank,created_at DESC) r ORDER BY r.match_rank,r.created_at DESC,r.key DESC LIMIT $3", lane, q, limit+1, like)
 	if e != nil {

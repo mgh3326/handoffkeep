@@ -214,10 +214,11 @@ func decisionRequestCmd(args []string, out io.Writer) error {
 	if err != nil {
 		return writeFailed("decision request", id, err)
 	}
+	output := decisionRequestOutput(result)
 	if err := putDecisionTranslations(ctx, c, result.Request, input, ko); err != nil {
-		return err
+		output["translation_error"] = "translation_write_failed"
 	}
-	return printJSON(out, decisionRequestOutput(result))
+	return printJSON(out, output)
 }
 
 // decisionAskCmd records a decision request for the operator. Without
@@ -260,9 +261,7 @@ func decisionAskCmd(args []string, out io.Writer) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	if err := putDecisionTranslations(ctx, c, result.Request, input, ko); err != nil {
-		return err
-	}
+	translationErr := putDecisionTranslations(ctx, c, result.Request, input, ko)
 	output := map[string]any{
 		"recorded":      true,
 		"duplicate":     result.Duplicate,
@@ -275,6 +274,9 @@ func decisionAskCmd(args []string, out io.Writer) error {
 	}
 	if result.Issue != nil {
 		output["issue"] = result.Issue
+	}
+	if translationErr != nil {
+		output["translation_error"] = "translation_write_failed"
 	}
 	return printJSON(out, output)
 }

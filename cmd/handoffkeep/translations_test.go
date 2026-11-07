@@ -93,3 +93,56 @@ func TestDecisionTranslationPayload(t *testing.T) {
 		t.Fatalf("options=%+v err=%v", translated, err)
 	}
 }
+
+func TestCreateOutputsSurviveTranslationFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		args     []string
+		primary  string
+		expected map[string]any
+	}{
+		{"comment", []string{"tasks", "comment", "42", "--body", "hello", "--body-ko", "안녕"}, `{"id":7,"task_id":42,"body":"hello","author":"node","created_at":"2026-09-21T00:00:00Z"}`, map[string]any{"id": float64(7)}},
+		{"task", []string{"tasks", "add", "--lane", "d", "--title", "hello", "--title-ko", "안녕", "--project", "experiment"}, `{"id":9,"title":"hello","project":"experiment"}`, map[string]any{"id": float64(9)}},
+		{"decision", []string{"tasks", "decision-request", "618", "--question", "q", "--question-ko", "질문", "--option", "A|x", "--default-action", "보류"}, decisionRequestOKBody, map[string]any{"request_id": "dr-618-1", "recorded": true}},
+		{"ask", []string{"decisions", "ask", "618", "--question", "q", "--question-ko", "질문", "--option", "A|x", "--default-action", "보류", "--linear"}, decisionAskOKBody, map[string]any{"request_id": "dr-618-1", "issue_created": true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			posts, puts := 0, 0
+			h := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/v1/translations" {
+					puts++
+					http.Error(w, `{"error":"internal_error"}`, http.StatusInternalServerError)
+					return
+				}
+				posts++
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusCreated)
+				_, _ = io.WriteString(w, tc.primary)
+			}))
+			defer h.Close()
+			var out bytes.Buffer
+			args := append(append([]string{}, tc.args...), "--url", h.URL, "--token", "tok")
+			if err := run(args, &out, io.Discard); err != nil {
+				t.Fatal(err)
+			}
+			var got map[string]any
+			if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+				t.Fatal(err)
+			}
+			for key, want := range tc.expected {
+				if got[key] != want {
+					t.Fatalf("%s: got=%v want=%v", key, got[key], want)
+				}
+			}
+			if got["translation_error"] != "translation_write_failed" || posts != 1 || puts != 1 {
+				t.Fatalf("got=%v posts=%d puts=%d", got, posts, puts)
+			}
+			if tc.name == "decision" && got["notify"] == "" {
+				t.Fatalf("notify missing: %v", got)
+			}
+			if tc.name == "ask" && got["issue"] == nil {
+				t.Fatalf("issue missing: %v", got)
+			}
+		})
+	}
+}
