@@ -3232,6 +3232,9 @@ func (s *Store) appendRelayEventTx(ctx context.Context, tx pgx.Tx, x RelayEvent)
 // calls are intentionally idempotent and return the original delivery time.
 // One transaction also moves an operator command carried by the event to
 // delivered, so the console ladder never shows a command behind its receipt.
+// The event is read unlocked first: the command row is locked before the relay
+// row (lock order, lockorder.go), so a writer that cancels a superseded
+// command's relay cannot cycle with this delivery.
 func (s *Store) MarkRelayEventDelivered(ctx context.Context, id int64, machine, pane string) (RelayEvent, error) {
 	if id < 1 || !validText(machine, MaxBytes) || !validText(pane, MaxBytes) {
 		return RelayEvent{}, errors.New("invalid relay event delivery")
@@ -3242,19 +3245,26 @@ func (s *Store) MarkRelayEventDelivered(ctx context.Context, id int64, machine, 
 	}
 	defer tx.Rollback(ctx)
 	var x RelayEvent
-	err = scanRelayEvent(tx.QueryRow(ctx, `UPDATE relay_events SET delivered_at=now(),delivered_to=$2 WHERE id=$1 AND delivered_at IS NULL RETURNING `+relayEventColumns, id, machine+"/"+pane), &x)
-	if errors.Is(err, pgx.ErrNoRows) {
-		if err = scanRelayEvent(tx.QueryRow(ctx, `SELECT `+relayEventColumns+` FROM relay_events WHERE id=$1`, id), &x); err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return RelayEvent{}, ErrRelayEventNotFound
-			}
-			return RelayEvent{}, err
+	if err = scanRelayEvent(tx.QueryRow(ctx, `SELECT `+relayEventColumns+` FROM relay_events WHERE id=$1`, id), &x); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return RelayEvent{}, ErrRelayEventNotFound
 		}
-	} else if err != nil {
 		return RelayEvent{}, err
 	}
-	if x.DeliveredAt != nil && x.Kind == "lane.event" {
-		if err = markOperatorCommandsDeliveredTx(ctx, tx, x.OwnerLane, x.EventID, x.DeliveredAt.UTC()); err != nil {
+	if x.Kind == "lane.event" {
+		if err = markOperatorCommandsDeliveredTx(ctx, tx, x.OwnerLane, x.EventID, time.Now().UTC()); err != nil {
+			return RelayEvent{}, err
+		}
+	}
+	if x.DeliveredAt == nil {
+		err = scanRelayEvent(tx.QueryRow(ctx, `UPDATE relay_events SET delivered_at=now(),delivered_to=$2 WHERE id=$1 AND delivered_at IS NULL RETURNING `+relayEventColumns, id, machine+"/"+pane), &x)
+		if errors.Is(err, pgx.ErrNoRows) {
+			// A concurrent cancel or delivery closed the row between the read
+			// and the update; report its recorded delivery.
+			if err = scanRelayEvent(tx.QueryRow(ctx, `SELECT `+relayEventColumns+` FROM relay_events WHERE id=$1`, id), &x); err != nil {
+				return RelayEvent{}, err
+			}
+		} else if err != nil {
 			return RelayEvent{}, err
 		}
 	}

@@ -123,11 +123,14 @@ type OperatorCommandInput struct {
 	Channel    string          `json:"channel"`
 }
 
-// OperatorCommandReceiptInput is an executor's report about a command.
+// OperatorCommandReceiptInput is an executor's report about a command. By is
+// the authenticated API client, set by the handler and never read from the
+// request body.
 type OperatorCommandReceiptInput struct {
 	State     string `json:"state"`
 	ErrorCode string `json:"error_code,omitempty"`
 	Note      string `json:"note,omitempty"`
+	By        string `json:"-"`
 }
 
 const operatorCommandColumns = `id,command_key,kind,target_type,target_id,task_id,executor_lane,payload,actor,channel,state,attempts,last_error_code,created_at,delivered_at,acked_at,finished_at,expires_at`
@@ -288,25 +291,67 @@ func loadOperatorCommandTask(ctx context.Context, q rowQuerier, id int64) (opera
 	return out, nil
 }
 
+// operatorCommandEventInput is one transition of a command into the task
+// timeline. By names the writer: the operator, the executor that reported, or
+// system for delivery/expiry/supersede.
+type operatorCommandEventInput struct {
+	Command   OperatorCommand
+	Payload   WorkerMessagePayload
+	State     string
+	ErrorCode string
+	Note      string
+	// Prefix marks a receipt that arrived after the ladder closed (superseded
+	// or expired); the command keeps its terminal state.
+	Prefix string
+	By     string
+	At     time.Time
+}
+
 // appendOperatorCommandEvent writes one command transition into the task
 // timeline. Commands without a task write no event; the source_ref makes a
 // replayed transition a no-op.
-func appendOperatorCommandEvent(ctx context.Context, tx pgx.Tx, c OperatorCommand, p WorkerMessagePayload, state, errorCode, receiptNote string, at time.Time) error {
-	if c.TaskID == nil {
+func appendOperatorCommandEvent(ctx context.Context, tx pgx.Tx, in operatorCommandEventInput) error {
+	if in.Command.TaskID == nil {
 		return nil
 	}
-	task, err := loadOperatorCommandTask(ctx, tx, *c.TaskID)
+	task, err := loadOperatorCommandTask(ctx, tx, *in.Command.TaskID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
+	by := in.By
+	if by == "" {
+		by = in.Command.Actor
+	}
 	_, _, err = insertEvent(ctx, tx, taskEventInput{
-		TaskID: *c.TaskID, Kind: "metadata", From: task.State, To: task.State, By: c.Actor,
-		Note: operatorCommandStateNote(c, p, state, errorCode, receiptNote), Refs: task.Refs, At: at,
-		Source: "operator-command", SourceRef: c.CommandKey + ":" + state,
+		TaskID: *in.Command.TaskID, Kind: "metadata", From: task.State, To: task.State, By: by,
+		Note: in.Prefix + operatorCommandStateNote(in.Command, in.Payload, in.State, in.ErrorCode, in.Note), Refs: task.Refs, At: in.At,
+		Source: "operator-command", SourceRef: in.Command.CommandKey + ":" + in.State,
 	})
+	return err
+}
+
+// findOperatorCommandByKey is the idempotency read. It runs before the task
+// and executor checks so a retry of an already-recorded command returns the
+// original row even after the worker's job ended or the task moved on.
+func (s *Store) findOperatorCommandByKey(ctx context.Context, key string) (OperatorCommand, bool, error) {
+	var x OperatorCommand
+	err := scanOperatorCommand(s.pool.QueryRow(ctx, `SELECT `+operatorCommandColumns+` FROM operator_commands WHERE command_key=$1`, key), &x)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return x, false, nil
+	}
+	return x, err == nil, err
+}
+
+// cancelOperatorCommandRelayTx closes a relay event that will never be
+// executed: the command was superseded or expired before delivery. The relay
+// poller only picks up delivered_at IS NULL rows, and delivered_to names why
+// it was closed, so the worker never receives a stale instruction.
+func cancelOperatorCommandRelayTx(ctx context.Context, tx pgx.Tx, lane, eventID, reason string, at time.Time) error {
+	_, err := tx.Exec(ctx, `UPDATE relay_events SET delivered_at=$4, delivered_to=$3
+		WHERE kind='lane.event' AND owner_lane=$1 AND event_id=$2 AND delivered_at IS NULL`, lane, eventID, "cancelled:"+reason, at)
 	return err
 }
 
@@ -333,6 +378,11 @@ func (s *Store) RecordOperatorCommand(ctx context.Context, in OperatorCommandInp
 	}
 	if !validText(in.Actor, 128) || strings.TrimSpace(in.Actor) == "" || !validText(in.Channel, 64) || strings.TrimSpace(in.Channel) == "" {
 		return out, fmt.Errorf("%w: actor and channel are required", ErrOperatorCommandInvalid)
+	}
+	if existing, found, err := s.findOperatorCommandByKey(ctx, in.CommandKey); err != nil {
+		return out, err
+	} else if found {
+		return existing, nil
 	}
 	encoded, err := json.Marshal(payload)
 	if err != nil {
@@ -400,14 +450,19 @@ func (s *Store) RecordOperatorCommand(ctx context.Context, in OperatorCommandInp
 		return out, err
 	}
 	for _, old := range superseded {
-		if err = appendOperatorCommandEvent(ctx, tx, old, payload, OperatorCommandStateSuperseded, "", "", now); err != nil {
+		if err = appendOperatorCommandEvent(ctx, tx, operatorCommandEventInput{Command: old, Payload: payload, State: OperatorCommandStateSuperseded, By: "system", At: now}); err != nil {
+			return out, err
+		}
+		// The replacement supersedes an instruction the worker has not seen:
+		// close its relay event so the drainer cannot deliver it afterwards.
+		if err = cancelOperatorCommandRelayTx(ctx, tx, old.ExecutorLane, old.CommandKey, OperatorCommandStateSuperseded, now); err != nil {
 			return out, err
 		}
 	}
 	if _, _, err = s.appendRelayEventTx(ctx, tx, RelayEvent{Kind: "lane.event", OwnerLane: lane, EventID: in.CommandKey, Text: operatorCommandLaneText(out.ID, payload), EventTime: &now}); err != nil {
 		return out, err
 	}
-	if err = appendOperatorCommandEvent(ctx, tx, out, payload, OperatorCommandStateRecorded, "", "", now); err != nil {
+	if err = appendOperatorCommandEvent(ctx, tx, operatorCommandEventInput{Command: out, Payload: payload, State: OperatorCommandStateRecorded, At: now}); err != nil {
 		return out, err
 	}
 	return out, tx.Commit(ctx)
@@ -428,9 +483,19 @@ func (s *Store) RecordOperatorCommandReceipt(ctx context.Context, id int64, in O
 	if !validText(in.ErrorCode, operatorCommandErrorMaxBytes) || !validText(in.Note, operatorCommandNoteMaxBytes) {
 		return out, fmt.Errorf("%w: receipt text is too long", ErrOperatorCommandInvalid)
 	}
+	if err := guard.Reject(in.ErrorCode); err != nil {
+		return out, err
+	}
 	in.Note = strings.TrimSpace(in.Note)
 	if err := guard.Reject(in.Note); err != nil {
 		return out, err
+	}
+	by := strings.TrimSpace(in.By)
+	if by == "" {
+		by = "executor"
+	}
+	if !validText(by, 128) {
+		return out, fmt.Errorf("%w: receipt caller is too long", ErrOperatorCommandInvalid)
 	}
 	if in.State == OperatorCommandStateFailed && strings.TrimSpace(in.ErrorCode) == "" {
 		return out, fmt.Errorf("%w: failed needs an error_code", ErrOperatorCommandInvalid)
@@ -451,6 +516,23 @@ func (s *Store) RecordOperatorCommandReceipt(ctx context.Context, id int64, in O
 		return out, tx.Commit(ctx)
 	}
 	if !operatorCommandOpenStates[out.State] {
+		// A superseded or expired command can still have run: the executor had
+		// already received it when the ladder closed. Record the late report in
+		// the timeline and keep the terminal state — never lose the fact that it
+		// executed, and never pretend it completed as the operator's ladder.
+		if out.State == OperatorCommandStateSuperseded || out.State == OperatorCommandStateExpired {
+			prefix := "대체 후 보고 · "
+			if out.State == OperatorCommandStateExpired {
+				prefix = "만료 후 보고 · "
+			}
+			if err = appendOperatorCommandEvent(ctx, tx, operatorCommandEventInput{
+				Command: out, State: in.State, ErrorCode: in.ErrorCode, Note: in.Note,
+				Prefix: prefix, By: "executor:" + by, At: now,
+			}); err != nil {
+				return out, err
+			}
+			return out, tx.Commit(ctx)
+		}
 		return out, fmt.Errorf("%w: %s cannot become %s", ErrOperatorCommandState, out.State, in.State)
 	}
 	if now.After(out.ExpiresAt) {
@@ -458,7 +540,10 @@ func (s *Store) RecordOperatorCommandReceipt(ctx context.Context, id int64, in O
 			return out, err
 		}
 		out.State, out.FinishedAt = OperatorCommandStateExpired, &now
-		if err = appendOperatorCommandEvent(ctx, tx, out, WorkerMessagePayload{}, OperatorCommandStateExpired, "", "", now); err != nil {
+		if err = appendOperatorCommandEvent(ctx, tx, operatorCommandEventInput{Command: out, State: OperatorCommandStateExpired, By: "system", At: now}); err != nil {
+			return out, err
+		}
+		if err = cancelOperatorCommandRelayTx(ctx, tx, out.ExecutorLane, out.CommandKey, OperatorCommandStateExpired, now); err != nil {
 			return out, err
 		}
 		if err = tx.Commit(ctx); err != nil {
@@ -485,7 +570,9 @@ func (s *Store) RecordOperatorCommandReceipt(ctx context.Context, id int64, in O
 		return out, err
 	}
 	out.State, out.DeliveredAt, out.AckedAt, out.FinishedAt, out.LastErrorCode = in.State, firstTime(out.DeliveredAt, deliveredAt), firstTime(out.AckedAt, ackedAt), finishedAt, in.ErrorCode
-	if err = appendOperatorCommandEvent(ctx, tx, out, WorkerMessagePayload{}, in.State, in.ErrorCode, in.Note, now); err != nil {
+	if err = appendOperatorCommandEvent(ctx, tx, operatorCommandEventInput{
+		Command: out, State: in.State, ErrorCode: in.ErrorCode, Note: in.Note, By: "executor:" + by, At: now,
+	}); err != nil {
 		return out, err
 	}
 	return out, tx.Commit(ctx)
@@ -522,7 +609,7 @@ func markOperatorCommandsDeliveredTx(ctx context.Context, tx pgx.Tx, lane, event
 		return err
 	}
 	for _, c := range delivered {
-		if err = appendOperatorCommandEvent(ctx, tx, c, WorkerMessagePayload{}, OperatorCommandStateDelivered, "", "", at); err != nil {
+		if err = appendOperatorCommandEvent(ctx, tx, operatorCommandEventInput{Command: c, State: OperatorCommandStateDelivered, By: "system", At: at}); err != nil {
 			return err
 		}
 	}
@@ -569,7 +656,11 @@ func (s *Store) ExpireOperatorCommands(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	for _, c := range expired {
-		if err = appendOperatorCommandEvent(ctx, tx, c, WorkerMessagePayload{}, OperatorCommandStateExpired, "", "", now); err != nil {
+		if err = appendOperatorCommandEvent(ctx, tx, operatorCommandEventInput{Command: c, State: OperatorCommandStateExpired, By: "system", At: now}); err != nil {
+			return 0, err
+		}
+		// An undelivered instruction past its deadline must not reach the worker.
+		if err = cancelOperatorCommandRelayTx(ctx, tx, c.ExecutorLane, c.CommandKey, OperatorCommandStateExpired, now); err != nil {
 			return 0, err
 		}
 	}

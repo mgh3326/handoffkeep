@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -70,6 +71,21 @@ func TestCommandReceiptAuthAndIdempotency(t *testing.T) {
 	list, err := st.ListOperatorCommands(t.Context(), lane, "", 0, 10)
 	if err != nil || len(list) != 1 || list[0].State != "done" || list[0].TaskID == nil || *list[0].TaskID != task.ID {
 		t.Fatalf("stored: %+v err=%v", list, err)
+	}
+	// The receipt transition is attributed to the authenticated client, not the
+	// operator who recorded the command.
+	got, found, err := st.GetTask(t.Context(), task.ID)
+	if err != nil || !found {
+		t.Fatalf("task: %v %v", found, err)
+	}
+	attributed := ""
+	for _, event := range got.Events {
+		if event.Source == "operator-command" && strings.Contains(event.Note, "명령 완료") {
+			attributed = event.By
+		}
+	}
+	if attributed != "executor:peer" {
+		t.Fatalf("receipt event by %q", attributed)
 	}
 }
 

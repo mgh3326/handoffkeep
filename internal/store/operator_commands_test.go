@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mgh3326/handoffkeep/internal/guard"
 	"github.com/mgh3326/handoffkeep/internal/testdb"
 )
 
@@ -170,6 +171,16 @@ func TestOperatorCommandExpiresAndSupersedes(t *testing.T) {
 	if old.State != OperatorCommandStateSuperseded || old.FinishedAt == nil || commandByID(t, st, second.ID).State != OperatorCommandStateRecorded {
 		t.Fatalf("supersede: first=%+v second=%+v", old, commandByID(t, st, second.ID))
 	}
+	// The superseded instruction must not reach the worker later: its relay
+	// row is closed and the undelivered poll skips it.
+	var deliveredTo string
+	if err := st.pool.QueryRow(ctx, `SELECT delivered_to FROM relay_events WHERE owner_lane=$1 AND event_id=$2`, "opcmd-expiry-lane", "opcmd-expiry-key").Scan(&deliveredTo); err != nil || deliveredTo != "cancelled:superseded" {
+		t.Fatalf("superseded relay: %q %v", deliveredTo, err)
+	}
+	undelivered, err := st.ListRelayEvents(ctx, "opcmd-expiry-lane", true, 0)
+	if err != nil || len(undelivered) != 1 || undelivered[0].EventID != "opcmd-expiry-key-2" {
+		t.Fatalf("undelivered after supersede: %+v %v", undelivered, err)
+	}
 	if _, err := st.pool.Exec(ctx, `UPDATE operator_commands SET expires_at=now()-interval '1 second' WHERE id=$1`, second.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -180,11 +191,29 @@ func TestOperatorCommandExpiresAndSupersedes(t *testing.T) {
 	if got := commandByID(t, st, second.ID); got.State != OperatorCommandStateExpired || got.FinishedAt == nil {
 		t.Fatalf("expired row: %+v", got)
 	}
+	var expiredTo string
+	if err := st.pool.QueryRow(ctx, `SELECT delivered_to FROM relay_events WHERE owner_lane=$1 AND event_id=$2`, "opcmd-expiry-lane", "opcmd-expiry-key-2").Scan(&expiredTo); err != nil || expiredTo != "cancelled:expired" {
+		t.Fatalf("expired relay: %q %v", expiredTo, err)
+	}
 	if n, err := st.ExpireOperatorCommands(ctx); err != nil || n != 0 {
 		t.Fatalf("second sweep: n=%d err=%v", n, err)
 	}
-	if _, err := st.RecordOperatorCommandReceipt(ctx, second.ID, OperatorCommandReceiptInput{State: OperatorCommandStateAcked}); !errors.Is(err, ErrOperatorCommandState) {
-		t.Fatalf("receipt after expiry: %v", err)
+	// An executor that had already received the expired command reports late;
+	// the ladder keeps 만료 and the timeline records what happened.
+	early, err := st.RecordOperatorCommandReceipt(ctx, second.ID, OperatorCommandReceiptInput{State: OperatorCommandStateAcked, By: "node-a"})
+	if err != nil || early.State != OperatorCommandStateExpired {
+		t.Fatalf("late ack: %+v %v", early, err)
+	}
+	late, err := st.RecordOperatorCommandReceipt(ctx, second.ID, OperatorCommandReceiptInput{State: OperatorCommandStateDone, By: "node-a"})
+	if err != nil || late.State != OperatorCommandStateExpired {
+		t.Fatalf("late report: %+v %v", late, err)
+	}
+	var lateNote, lateBy string
+	if err := st.pool.QueryRow(ctx, `SELECT note, "by" FROM task_events WHERE task_id=$1 AND source='operator-command' AND source_ref=$2`, task.ID, "opcmd-expiry-key-2:done").Scan(&lateNote, &lateBy); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(lateNote, "만료 후 보고 · ") || lateBy != "executor:node-a" {
+		t.Fatalf("late event: note=%q by=%q", lateNote, lateBy)
 	}
 	var superseded, expiredNotes int
 	if err := st.pool.QueryRow(ctx, `SELECT count(*) FILTER (WHERE note LIKE '새 명령으로 대체됨%'), count(*) FILTER (WHERE note LIKE '명령 만료%') FROM task_events WHERE task_id=$1 AND source='operator-command'`, task.ID).Scan(&superseded, &expiredNotes); err != nil {
@@ -236,6 +265,41 @@ func TestOperatorCommandRefusals(t *testing.T) {
 	}
 	if _, err := st.RecordOperatorCommand(ctx, OperatorCommandInput{CommandKey: "k3", Kind: OperatorCommandKindWorkerMessage, TaskID: &task.ID, Payload: json.RawMessage(`{"text":"x","intent":"now","extra":1}`), Actor: "operator:test", Channel: "console"}); !errors.Is(err, ErrOperatorCommandInvalid) {
 		t.Fatalf("bad payload: %v", err)
+	}
+}
+
+func TestOperatorCommandReplaySurvivesJobEnd(t *testing.T) {
+	st := schemaStore(t, "opcmd_replay")
+	lane, job := "opcmd-replay-lane", "opcmd-replay-job"
+	task := operatorCommandFixture(t, st, lane, job)
+	first := recordWorkerMessage(t, st, task.ID, "opcmd-replay-key", "지시", OperatorCommandIntentSteer)
+	// The lost-response retry arrives after the worker's job ended: it must
+	// return the original command, not 409 no_executor.
+	if _, err := st.pool.Exec(t.Context(), `UPDATE jobs SET state='completed' WHERE job_id=$1`, job); err != nil {
+		t.Fatal(err)
+	}
+	again := recordWorkerMessage(t, st, task.ID, "opcmd-replay-key", "지시", OperatorCommandIntentSteer)
+	if again.ID != first.ID {
+		t.Fatalf("replay after job end: %+v", again)
+	}
+	var commands int
+	if err := st.pool.QueryRow(t.Context(), `SELECT count(*) FROM operator_commands WHERE task_id=$1`, task.ID).Scan(&commands); err != nil || commands != 1 {
+		t.Fatalf("commands=%d err=%v", commands, err)
+	}
+}
+
+func TestOperatorCommandReceiptRejectsSecretErrorCode(t *testing.T) {
+	st := schemaStore(t, "opcmd_secret")
+	task := operatorCommandFixture(t, st, "opcmd-secret-lane", "opcmd-secret-job")
+	command := recordWorkerMessage(t, st, task.ID, "opcmd-secret-key", "지시", OperatorCommandIntentSteer)
+	_, err := st.RecordOperatorCommandReceipt(t.Context(), command.ID, OperatorCommandReceiptInput{
+		State: OperatorCommandStateFailed, ErrorCode: "ghp_" + strings.Repeat("a", 36),
+	})
+	if _, ok := guard.SecretPattern(err); !ok {
+		t.Fatalf("secret error_code accepted or wrong error: %v", err)
+	}
+	if got := commandByID(t, st, command.ID); got.State != OperatorCommandStateRecorded {
+		t.Fatalf("refused receipt changed state: %+v", got)
 	}
 }
 
