@@ -38,6 +38,8 @@ type fakeStore struct {
 	projectIDs   int
 	nextTaskID   int64
 	nextComment  int64
+	docs         map[string]store.Document
+	docArticles  map[string]store.YouTrackDocArticle
 }
 
 func newFakeStore() *fakeStore {
@@ -63,6 +65,8 @@ func newFakeStore() *fakeStore {
 		pushed:       map[int64]bool{},
 		nextTaskID:   100,
 		nextComment:  200,
+		docs:         map[string]store.Document{},
+		docArticles:  map[string]store.YouTrackDocArticle{},
 	}
 }
 

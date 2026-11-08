@@ -23,6 +23,7 @@ type SyncOptions struct {
 	RefreshLimit  int
 	RevertLimit   int
 	OutboxLimit   int
+	DocLimit      int
 }
 
 func (o SyncOptions) withDefaults() SyncOptions {
@@ -43,6 +44,9 @@ func (o SyncOptions) withDefaults() SyncOptions {
 	}
 	if o.OutboxLimit <= 0 {
 		o.OutboxLimit = 100
+	}
+	if o.DocLimit <= 0 {
+		o.DocLimit = 20
 	}
 	return o
 }
@@ -75,6 +79,8 @@ type SyncReport struct {
 	Outbox    []OutboxAction `json:"outbox"`
 	Pushed    []PushAction   `json:"push"`
 	Pulled    []PullAction   `json:"pull"`
+	Docs      []DocAction    `json:"docs"`
+	DocBytes  int64          `json:"doc_bytes"`
 	Refreshed int            `json:"refreshed"`
 	Reverted  int            `json:"reverted"`
 	Skipped   int            `json:"skipped"`
@@ -95,7 +101,7 @@ func (r *SyncReport) warn(format string, args ...any) {
 // hk → YouTrack push. In dry-run mode nothing on either side is written.
 func (s *Service) Sync(ctx context.Context, opts SyncOptions) (SyncReport, error) {
 	opts = opts.withDefaults()
-	report := SyncReport{DryRun: opts.DryRun, Outbox: []OutboxAction{}, Pushed: []PushAction{}, Pulled: []PullAction{}}
+	report := SyncReport{DryRun: opts.DryRun, Outbox: []OutboxAction{}, Pushed: []PushAction{}, Pulled: []PullAction{}, Docs: []DocAction{}}
 	me, err := s.client.Me(ctx)
 	if err != nil {
 		return report, fmt.Errorf("youtrack me: %w", err)
@@ -129,6 +135,7 @@ func (s *Service) Sync(ctx context.Context, opts SyncOptions) (SyncReport, error
 	if err := s.push(ctx, opts, &report); err != nil {
 		report.fail("push: %v", err)
 	}
+	s.syncDocs(ctx, opts, &report)
 	return report, nil
 }
 
