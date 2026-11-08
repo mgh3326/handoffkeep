@@ -11,6 +11,10 @@ records those answers as they arrive. A poller stays on as a reconciler; both
 paths write the same document key, body and event id, so whichever runs second
 changes nothing.
 
+The separate [hk dots flow](mcp.md#dots-requests) creates independent hk
+tasks and coexists with this webhook. No channel setting is required; Linear
+comments continue to use this path.
+
 Linear's webhook contract: <https://linear.app/developers/webhooks>.
 
 ## Configuration

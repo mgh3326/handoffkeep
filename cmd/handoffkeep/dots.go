@@ -11,15 +11,46 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
-const dotsUsage = "usage: dots results [--task N] [--issue ID]\n       dots adopt <id> --state accepted|partially_used|rejected|superseded [--ref R] [--superseded-by ID]"
+const dotsUsage = "usage: dots request --title TITLE --body BODY [--requester-lane L] [--project P] [--idempotency-key KEY]\n       dots results [--task N] [--issue ID]\n       dots adopt <id> --state accepted|partially_used|rejected|superseded [--ref R] [--superseded-by ID]"
+
+func dotsRequestCmd(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("dots request", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	c := remoteClient(fs)
+	var in store.DotsRequestInput
+	fs.StringVar(&in.Title, "title", "", "request title")
+	fs.StringVar(&in.Body, "body", "", "request body")
+	fs.StringVar(&in.RequesterLane, "requester-lane", "", "lane to notify")
+	fs.StringVar(&in.Project, "project", "", "task project")
+	fs.StringVar(&in.IdempotencyKey, "idempotency-key", "", "reuse to retry the same request")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 || in.Title == "" || in.Body == "" {
+		return errors.New("dots request requires --title and --body")
+	}
+	if err := mustClient(c); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	task, err := c.CreateDotsRequest(ctx, in)
+	if err != nil {
+		return err
+	}
+	return printJSON(out, map[string]any{"task": task})
+}
 
 // dotsCmd lists recorded dots answers and records what became of them.
 //
 //	dots results --task N | --issue ROB-1
 //	dots adopt ID --state S [--ref R] [--superseded-by ID]
 func dotsCmd(args []string, out io.Writer) error {
-	if len(args) == 0 || (args[0] != "results" && args[0] != "adopt") {
+	if len(args) == 0 || (args[0] != "request" && args[0] != "results" && args[0] != "adopt") {
 		return errors.New(dotsUsage)
+	}
+	if args[0] == "request" {
+		return dotsRequestCmd(args[1:], out)
 	}
 	sub := args[0]
 	fs := flag.NewFlagSet("dots "+sub, flag.ContinueOnError)

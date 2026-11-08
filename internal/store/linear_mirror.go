@@ -22,6 +22,9 @@ func validLinearMirrorReason(reason string) bool {
 // maintenance does not use this to create replacements. Priority zero is hk's
 // unset default; only explicit priorities 1 and 2 admit ordinary tasks.
 func LinearMirrorReason(task Task) string {
+	if IsHKDotsRequest(task) {
+		return ""
+	}
 	if IsSettledState(task.State) {
 		return ""
 	}

@@ -622,20 +622,7 @@ func isTerminalTaskState(state string) bool {
 // Supersedes names the open request; the new one gets the next revision and
 // no resolution. New requests are refused on merged/dropped tasks.
 func (s *Store) RecordDecisionRequest(ctx context.Context, taskID int64, by string, in DecisionRequestInput) (DecisionRequestResult, error) {
-	if taskID < 1 {
-		return DecisionRequestResult{}, invalidDecisionRequest("task id must be positive")
-	}
-	if by == "" || !validText(by, 128) {
-		return DecisionRequestResult{}, invalidDecisionRequest("requester is required")
-	}
-	if in.DueAt != nil {
-		due := in.DueAt.UTC()
-		in.DueAt = &due
-	}
-	if err := CheckDecisionRequestInput(in); err != nil {
-		return DecisionRequestResult{}, err
-	}
-	if err := rejectDecisionRequestSecrets(in); err != nil {
+	if err := checkDecisionRequestWrite(taskID, by, &in); err != nil {
 		return DecisionRequestResult{}, err
 	}
 	tx, err := s.pool.Begin(ctx)
@@ -643,6 +630,44 @@ func (s *Store) RecordDecisionRequest(ctx context.Context, taskID int64, by stri
 		return DecisionRequestResult{}, err
 	}
 	defer tx.Rollback(ctx)
+	result, err := s.recordDecisionRequestTx(ctx, tx, taskID, by, in)
+	if err != nil {
+		return DecisionRequestResult{}, err
+	}
+	if result.Duplicate {
+		return result, nil
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return DecisionRequestResult{}, err
+	}
+	return result, nil
+}
+
+func checkDecisionRequestWrite(taskID int64, by string, in *DecisionRequestInput) error {
+	if taskID < 1 {
+		return invalidDecisionRequest("task id must be positive")
+	}
+	if by == "" || !validText(by, 128) {
+		return invalidDecisionRequest("requester is required")
+	}
+	if in.DueAt != nil {
+		due := in.DueAt.UTC()
+		in.DueAt = &due
+	}
+	if err := CheckDecisionRequestInput(*in); err != nil {
+		return err
+	}
+	if err := rejectDecisionRequestSecrets(*in); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Store) recordDecisionRequestTx(ctx context.Context, tx pgx.Tx, taskID int64, by string, in DecisionRequestInput) (DecisionRequestResult, error) {
+	if err := checkDecisionRequestWrite(taskID, by, &in); err != nil {
+		return DecisionRequestResult{}, err
+	}
+	var err error
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
 		return DecisionRequestResult{}, err
 	}
@@ -742,9 +767,6 @@ func (s *Store) RecordDecisionRequest(ctx context.Context, taskID int64, by stri
 		return DecisionRequestResult{}, err
 	}
 	if err = s.recordLinearBoardTaskTx(ctx, tx, x, note); err != nil {
-		return DecisionRequestResult{}, err
-	}
-	if err = tx.Commit(ctx); err != nil {
 		return DecisionRequestResult{}, err
 	}
 	return DecisionRequestResult{Task: x, Request: request}, nil
