@@ -19,10 +19,10 @@ type observedWorkerLocker struct {
 	attempts chan bool
 }
 
-func (l observedWorkerLocker) TryWorkerLock(ctx context.Context, id store.WorkerLock) (func(), bool, error) {
-	release, held, err := l.Store.TryWorkerLock(ctx, id)
+func (l observedWorkerLocker) TryWorkerLock(ctx context.Context, id store.WorkerLock) (*store.WorkerLease, bool, error) {
+	lease, held, err := l.Store.TryWorkerLock(ctx, id)
 	l.attempts <- held
-	return release, held, err
+	return lease, held, err
 }
 
 type countedWorker struct {
@@ -175,4 +175,48 @@ func TestSingletonServeWorkers(t *testing.T) {
 			}
 		})
 	}
+}
+
+type cancellationWorker struct{ started, stopped chan struct{} }
+
+func (w cancellationWorker) Run(ctx context.Context) {
+	close(w.started)
+	<-ctx.Done()
+	close(w.stopped)
+}
+
+func TestSingletonWorkerStopsOnLockSessionLoss(t *testing.T) {
+	_, url := testdb.Schema(t, "worker_lock_loss")
+	st, err := store.Open(t.Context(), url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	started, stopped, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	w := singletonWorker{store: st, id: store.LinearBoardWorkerLock, worker: cancellationWorker{started: started, stopped: stopped}}
+	go func() { w.Run(ctx); close(done) }()
+	select {
+	case <-started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("worker did not start")
+	}
+	conn := testdb.Conn(t)
+	var pid int
+	err = conn.QueryRow(t.Context(), `SELECT pid FROM pg_locks WHERE locktype='advisory' AND granted AND classid=($1::bigint >> 32)::oid AND objid=($1::bigint & 4294967295)::oid`, int64(store.LinearBoardWorkerLock)).Scan(&pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var terminated bool
+	if err := conn.QueryRow(t.Context(), `SELECT pg_terminate_backend($1)`, pid).Scan(&terminated); err != nil || !terminated {
+		t.Fatalf("terminated=%v err=%v", terminated, err)
+	}
+	select {
+	case <-stopped:
+	case <-time.After(6 * time.Second):
+		t.Fatal("worker did not stop after lock loss")
+	}
+	cancel()
+	<-done
 }

@@ -2,8 +2,9 @@
 
 `serve` starts the workers below in each process. The two session locks use
 separate pooled connections. A standby retries every five seconds and starts
-its worker after the active server releases its lock. Advisory locks are scoped
-to a PostgreSQL database, not a schema.
+its worker after the active server releases its lock. The active worker probes
+the lock session every second and stops if the probe fails. Advisory locks are
+scoped to a PostgreSQL database, not a schema.
 
 | Loop | Writes and concurrent behavior | Guard | Test |
 | --- | --- | --- | --- |
@@ -26,7 +27,8 @@ and the reap endpoint reads candidates. The legacy Linear drain is not
 started by `serve`; its CLI uses `LinearDrainAdvisoryLock`.
 
 These guards prevent concurrent processing while the database session or row
-transaction remains alive. They do not guarantee exactly-once delivery across
+transaction remains alive. If a lock session fails, a standby can acquire the
+lock before the next probe cancels the former owner. They do not guarantee exactly-once delivery across
 a process or database failure after a remote service accepts a request but
 before the local receipt commits. The hub deduplicates event IDs; Discord's
 notice sender treats an unknown post outcome as a refusal to retry.
