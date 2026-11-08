@@ -58,6 +58,11 @@ type Store interface {
 	ApplyYouTrackActivity(ctx context.Context, in store.YouTrackActivity) (store.YouTrackApplyResult, error)
 	PendingYouTrackReverts(ctx context.Context, limit int) ([]store.YouTrackPendingRevert, error)
 	MarkYouTrackRevertDone(ctx context.Context, activityID string) error
+
+	DueYouTrackDocs(ctx context.Context, patterns []string, limit int) ([]store.Document, error)
+	OrphanYouTrackDocArticles(ctx context.Context, limit int) ([]store.YouTrackDocArticle, error)
+	GetYouTrackDocArticle(ctx context.Context, docKey string) (store.YouTrackDocArticle, bool, error)
+	UpsertYouTrackDocArticle(ctx context.Context, x store.YouTrackDocArticle) error
 }
 
 // Options tune the service. Zero values get the documented defaults.

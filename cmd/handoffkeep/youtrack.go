@@ -47,7 +47,8 @@ func youtrackSyncCmd(args []string, out io.Writer) error {
 	refresh := fs.Int("refresh", 100, "maximum mirrored tasks whose field cache is refreshed")
 	reverts := fs.Int("reverts", 20, "maximum pending YouTrack reverts retried")
 	outbox := fs.Int("outbox", 100, "maximum priority/lane outbox entries drained")
-	ordered, err := splitArgs(args, "limit", "activities", "comments", "refresh", "reverts", "outbox")
+	docs := fs.Int("docs", 20, "maximum hk documents mirrored to YouTrack 기술 자료 in this run")
+	ordered, err := splitArgs(args, "limit", "activities", "comments", "refresh", "reverts", "outbox", "docs")
 	if err != nil {
 		return err
 	}
@@ -95,6 +96,7 @@ func youtrackSyncCmd(args []string, out io.Writer) error {
 		RefreshLimit:  *refresh,
 		RevertLimit:   *reverts,
 		OutboxLimit:   *outbox,
+		DocLimit:      *docs,
 	})
 	if printErr := printJSON(out, report); printErr != nil {
 		return printErr

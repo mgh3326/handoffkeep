@@ -35,6 +35,12 @@ type fakeYouTrack struct {
 	// succeeds.
 	failFieldUpdate bool
 	failMe          bool
+
+	articles       map[string]Article
+	articleBodies  map[string]string
+	articleParents map[string]string
+	articleCreates int
+	articleUpdates int
 }
 
 func newFakeYouTrack() *fakeYouTrack {
@@ -43,8 +49,11 @@ func newFakeYouTrack() *fakeYouTrack {
 		states = append(states, label)
 	}
 	return &fakeYouTrack{
-		me:     User{ID: "bot-id", Login: "hk-bot", Name: "hk-bot"},
-		issues: map[string]Issue{},
+		me:             User{ID: "bot-id", Login: "hk-bot", Name: "hk-bot"},
+		issues:         map[string]Issue{},
+		articles:       map[string]Article{},
+		articleBodies:  map[string]string{},
+		articleParents: map[string]string{},
 		fieldValues: map[string][]string{
 			"hk 상태": states,
 			"레인":    {"handoffkeep", "operator-desk", "rstack"},
@@ -94,6 +103,41 @@ func (f *fakeYouTrack) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			projects = append(projects, ProjectRef{ID: id, ShortName: short, Name: short})
 		}
 		write(http.StatusOK, projects)
+	case path == "/api/articles" && r.Method == http.MethodPost:
+		var body struct {
+			Summary       string `json:"summary"`
+			Content       string `json:"content"`
+			ParentArticle *struct {
+				ID string `json:"id"`
+			} `json:"parentArticle"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		f.articleCreates++
+		id := fmt.Sprintf("A-%d", f.articleCreates)
+		article := Article{ID: id, IDReadable: "KB-A-" + strconv.Itoa(f.articleCreates), Summary: body.Summary}
+		f.articles[id] = article
+		f.articleBodies[id] = body.Content
+		if body.ParentArticle != nil {
+			f.articleParents[id] = body.ParentArticle.ID
+		}
+		write(http.StatusOK, article)
+	case strings.HasPrefix(path, "/api/articles/") && r.Method == http.MethodPost:
+		var body struct {
+			Summary string `json:"summary"`
+			Content string `json:"content"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		id := strings.TrimPrefix(path, "/api/articles/")
+		article, ok := f.articles[id]
+		if !ok {
+			write(http.StatusNotFound, map[string]string{"error": "not_found"})
+			return
+		}
+		f.articleUpdates++
+		article.Summary = body.Summary
+		f.articles[id] = article
+		f.articleBodies[id] = body.Content
+		write(http.StatusOK, article)
 	case path == "/api/activitiesPage":
 		page := ActivitiesPage{Activities: f.activities, AfterCursor: f.cursor, HasAfter: f.hasAfter}
 		write(http.StatusOK, page)
