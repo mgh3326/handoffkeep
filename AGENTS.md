@@ -28,8 +28,10 @@ jobs plus `main-linux`, which runs the whole Go suite against PostgreSQL
 **without** `-race`, the migration/startup smoke, the reopen/quota mutants and
 bundle freshness, targeting 10 minutes; its aggregate is `ci-ok`. The deploy
 tier (`deploy.yml`, `suite=deploy`) runs `-race` with PostgreSQL, the same
-suite on macOS, and the release-build dry run after a successful main CI run,
-never cancelling, and publishes the `deploy-ok` commit status; release.yml
+suite on macOS, the release-build dry run, and the previous-release schema
+check (the target migrates, the previous release must still serve) after a
+successful main CI run, never cancelling, and publishes the `deploy-ok` commit
+status; release.yml
 still gates on `ci-ok` until mergewake reads `deploy_checks` (its `GATE` value
 is the one-line switch). A red main head is bisected and reverted.
 `ci-any-ref` accepts `packages` only with `suite=test`; those runs post `ci-ok-test-packages`.
@@ -140,6 +142,21 @@ already records every integer version and every registered ID
 (`migrateIfBehind`). A database holding IDs or versions this binary does not
 know (a newer binary migrated it) still opens. Store locks follow the order in
 `internal/store/lockorder.go`.
+
+**Migrations are expand-only.** Blue-green migrates the shared database from
+the new colour while the previous release keeps serving, so one release's
+migration must leave the previous release readable and writable: a migration
+may add tables, columns and indexes, and backfill values, but it must not drop
+or rename a table or column, narrow a column's type or constraints, or add a
+`NOT NULL` without a default on a column the previous release writes. Dropping,
+renaming or narrowing anything the previous release still uses needs a
+two-release contract: expand in this release, keep the old shape working, and
+contract only after the release that stopped using it has itself been
+superseded. The deploy tier enforces the observable part:
+`scripts/test-previous-release-schema.sh` (the `schema-compat` job, hk 3511)
+migrates a fresh database with the target binary, then runs the previous
+release's server on that schema and exercises healthz, task list/show/create,
+comment create and list, and the decision list; a failure fails `deploy-ok`.
 
 **Remote client.** Branch on server error codes with
 `remote.ErrorCode(err) == "not_found"`, never by comparing `err.Error()`.

@@ -1,10 +1,12 @@
 name: deploy
 # The deploy tier (hk:doc decision/2026-11-07/fleet-ci-three-tiers-r2, hk
 # 3440). It runs ci.yml's heavy jobs on a head whose main tier is already
-# green, and publishes the commit status deploy-ok on that head. ci-ok still
-# means "the main tier is green"; deploy-ok means "the deploy tier is green"
-# and is what rollout admission will read once mergewake reads deploy_checks.
-# Until then release.yml's ci-green keeps reading ci-ok (decision §4-3).
+# green, plus the previous-release schema check (schema-compat, hk 3511): the
+# target migrates a fresh database and the previous release must still serve.
+# It publishes the commit status deploy-ok on that head. ci-ok still means
+# "the main tier is green"; deploy-ok means "the deploy tier is green" and is
+# what rollout admission will read once mergewake reads deploy_checks. Until
+# then release.yml's ci-green keeps reading ci-ok (decision §4-3).
 #
 # Triggers:
 #   workflow_run  a ci.yml run completed. Only a successful main push run
@@ -13,7 +15,9 @@ name: deploy
 #                 green). The target is that run's head sha.
 #   workflow_dispatch  the sha input, or the dispatched ref's head when empty.
 #                 This is how a human re-runs the tier on an old head, and how
-#                 the PR that introduced this file was measured.
+#                 the PR that introduced this file was measured. The base
+#                 input picks the previous release for schema-compat; empty
+#                 means the newest v* tag before the target.
 #
 # Concurrency is one group per repository and never cancels: a race failure on
 # a head must not disappear because a newer head arrived, and a cancelled head
@@ -32,6 +36,11 @@ on:
     inputs:
       sha:
         description: 'Commit to run the deploy tier on; empty means the dispatched ref head'
+        required: false
+        default: ''
+        type: string
+      base:
+        description: 'Previous release to check the schema against (commit or tag); empty means the newest v* tag before the target'
         required: false
         default: ''
         type: string
@@ -90,29 +99,110 @@ jobs:
       ref: ${{ needs.target.outputs.sha }}
       suite: deploy
 
+  schema-compat:
+    # The previous release must keep serving on the schema the target
+    # migrates. With blue-green the new colour migrates the shared database
+    # while the old colour still answers requests, so a migration that is not
+    # expand-only breaks a live deploy. scripts/test-previous-release-schema.sh
+    # migrates a fresh database with the target binary, then runs the previous
+    # release's server on it and exercises a smoke set (healthz, task
+    # list/show/create, comment create and list, decision list). The previous
+    # release is the newest v* tag before the target, or the dispatch's base
+    # input. This job is part of the deploy tier: a failure fails deploy-ok.
+    needs: target
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: handoffkeep
+          POSTGRES_PASSWORD: handoffkeep
+          POSTGRES_DB: handoffkeep
+        ports: ["127.0.0.1:5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U handoffkeep" --health-interval 10s --health-timeout 5s --health-retries 5
+    env:
+      HANDOFFKEEP_TEST_DB_URL: postgres://handoffkeep:handoffkeep@localhost:5432/handoffkeep?sslmode=disable
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          # Pin the revision that defines this workflow, not whatever the event
+          # carried: a dispatch (or a re-run) can name an old ref that predates
+          # this script, and the job must still run. workflow_sha is the commit
+          # of the workflow file. Full history and every tag so the target and
+          # the previous release resolve; the script builds both from their
+          # commits, never the working tree.
+          ref: ${{ github.workflow_sha }}
+          fetch-depth: 0
+      - name: Fetch the requested commits
+        env:
+          # A dispatch may name a head no branch or tag points at any more (a
+          # deleted branch, a force-pushed-away commit): fetch-depth 0 covers
+          # refs/heads/* and refs/tags/*, not an arbitrary commit. ci.yml
+          # checks the same target out by name, so fetch it here too rather
+          # than fail on an absent object.
+          TARGET_SHA: ${{ needs.target.outputs.sha }}
+          BASE: ${{ inputs.base }}
+        run: |
+          git fetch --no-tags origin "$TARGET_SHA"
+          if [[ "$BASE" =~ ^[0-9a-f]{40}$ ]]; then
+            git fetch --no-tags origin "$BASE"
+          fi
+      - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with: {go-version-file: go.mod}
+      - name: Previous release on the target schema
+        env:
+          # The target commit to build; the checkout is only the workflow
+          # revision. Only a dispatch can name a base; empty means the newest
+          # v* tag before the target.
+          TARGET_SHA: ${{ needs.target.outputs.sha }}
+          BASE: ${{ inputs.base }}
+        run: |
+          if [[ -n "$BASE" ]]; then
+            bash scripts/test-previous-release-schema.sh "$BASE"
+          else
+            bash scripts/test-previous-release-schema.sh
+          fi
+
   status:
     # deploy-ok on the target sha. A cancelled or abandoned tier says nothing
     # about the commit, so it posts no status and the head reads unknown
     # (hk 2924). This is the only writer of the deploy-ok context anywhere in
     # the repository: ci-any-ref's suite=deploy is a diagnostic and posts
     # ci-ok-deploy instead.
-    needs: [target, ci]
+    needs: [target, ci, schema-compat]
     if: ${{ always() && needs.target.result == 'success' }}
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
       TARGET_SHA: ${{ needs.target.outputs.sha }}
       RESULT: ${{ needs.ci.result }}
+      SCHEMA_COMPAT: ${{ needs.schema-compat.result }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       EVIDENCE: ${{ github.repository }}@${{ needs.target.outputs.sha }}
     steps:
       - name: Post deploy-ok on the target sha
         run: |
-          case "$RESULT" in
-            success)   STATE=success ;;
-            cancelled|abandoned) STATE= ;;
-            *)         STATE=failure ;;
-          esac
+          verdict() {
+            case "$1" in
+              success)             echo success ;;
+              cancelled|abandoned) echo unknown ;;
+              *)                   echo failure ;;
+            esac
+          }
+          # Both jobs are the tier: any failure fails deploy-ok; with no
+          # failure, a cancelled or abandoned job leaves the head unknown; only
+          # two successes report green (hk 3511, hk 2924).
+          a=$(verdict "$RESULT")
+          b=$(verdict "$SCHEMA_COMPAT")
+          if [[ "$a" == failure || "$b" == failure ]]; then
+            STATE=failure
+          elif [[ "$a" == unknown || "$b" == unknown ]]; then
+            STATE=
+          else
+            STATE=success
+          fi
           if [[ -z "$STATE" ]]; then
             echo "deploy tier was cancelled; no deploy-ok status posted"
             exit 0
@@ -121,4 +211,4 @@ jobs:
             -f state="$STATE" \
             -f context=deploy-ok \
             -f target_url="$RUN_URL" \
-            -f description="deploy tier (race + postgres, macOS, release build): $RESULT on $EVIDENCE"
+            -f description="deploy tier (race + postgres, macOS, release build, previous-release schema): $RESULT schema=$SCHEMA_COMPAT on $EVIDENCE"

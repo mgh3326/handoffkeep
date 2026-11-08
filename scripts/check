@@ -11,7 +11,10 @@
 #   scripts/check web      # npm ci, typecheck, build + bundle drift, vitest
 #
 # DB-backed Go tests need HANDOFFKEEP_TEST_DB_URL (see AGENTS.md); without it
-# they skip locally (and fail under CI).
+# they skip locally (and fail under CI). That URL also enables the
+# previous-release schema check (scripts/test-previous-release-schema.sh),
+# which the deploy tier runs; this script does not, to keep the local sweep
+# short.
 set -euo pipefail
 
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)

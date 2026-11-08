@@ -466,6 +466,72 @@ func deployWorkflowProblems(raw []byte) []string {
 		add("ci call must pass suite: deploy, got %q", call.With["suite"])
 	}
 
+	compat, ok := wf.Jobs["schema-compat"]
+	if !ok {
+		add("must have a schema-compat job (previous release on the target schema)")
+	} else {
+		if got := fmt.Sprint(needsList(compat.Needs)); got != "[target]" {
+			add("schema-compat must need only target, got %s", got)
+		}
+		if !strings.Contains(stepRuns(compat), "scripts/test-previous-release-schema.sh") {
+			add("schema-compat must run scripts/test-previous-release-schema.sh")
+		}
+		if v, ok := compat.Env["HANDOFFKEEP_TEST_DB_URL"]; !ok || fmt.Sprint(v) == "" {
+			add("schema-compat must set HANDOFFKEEP_TEST_DB_URL")
+		}
+		if _, ok := compat.Services["postgres"]; !ok {
+			add("schema-compat needs a postgres service")
+		}
+		if ro := runsOnText(compat.RunsOn); ro != "ubuntu-latest" {
+			add("schema-compat runs-on is %q, want hosted ubuntu-latest", ro)
+		}
+		// The checkout must pin the workflow revision itself: a dispatch or a
+		// re-run can name an old ref that predates the script, and the job has
+		// to keep running (reviews on #237). github.workflow_sha is the commit
+		// of the workflow file. The target reaches the script as TARGET_SHA,
+		// which it builds from that commit.
+		fullHistory, pinned := false, false
+		for _, s := range compat.Steps {
+			if !hasAction(s.Uses, "actions/checkout") {
+				continue
+			}
+			if v, _ := s.With["ref"].(string); v != "" {
+				if v != "${{ github.workflow_sha }}" {
+					add("schema-compat checkout ref is %q, want ${{ github.workflow_sha }} so an old dispatch ref cannot drop the script", v)
+				} else {
+					pinned = true
+				}
+			}
+			if fmt.Sprint(s.With["fetch-depth"]) == "0" {
+				fullHistory = true
+			}
+		}
+		if !pinned {
+			add("schema-compat checkout must pin ref: ${{ github.workflow_sha }}")
+		}
+		if !fullHistory {
+			add("schema-compat checkout needs fetch-depth: 0 so the target and base commits resolve")
+		}
+		// The script step itself must carry the target, and a step before it
+		// must fetch the requested commits: fetch-depth 0 covers branch and
+		// tag refs, not a commit no ref points at (review on #237).
+		scriptTarget, fetched := false, false
+		for _, s := range compat.Steps {
+			if strings.Contains(s.Run, "scripts/test-previous-release-schema.sh") {
+				scriptTarget = fmt.Sprint(s.Env["TARGET_SHA"]) == "${{ needs.target.outputs.sha }}"
+			}
+			if strings.Contains(s.Run, `git fetch --no-tags origin "$TARGET_SHA"`) {
+				fetched = true
+			}
+		}
+		if !scriptTarget {
+			add("the schema-compat script step must pass TARGET_SHA=${{ needs.target.outputs.sha }}")
+		}
+		if !fetched {
+			add("schema-compat must fetch TARGET_SHA explicitly (fetch-depth 0 does not cover an unreferenced commit)")
+		}
+	}
+
 	status, ok := wf.Jobs["status"]
 	if !ok {
 		add("must have a status job")
@@ -475,8 +541,8 @@ func deployWorkflowProblems(raw []byte) []string {
 		add("the status job must run with always() so a failed tier reports failure")
 	}
 	needs := fmt.Sprint(needsList(status.Needs))
-	if !strings.Contains(needs, "target") || !strings.Contains(needs, "ci") {
-		add("the status job must need target and ci, got %s", needs)
+	if !strings.Contains(needs, "target") || !strings.Contains(needs, "ci") || !strings.Contains(needs, "schema-compat") {
+		add("the status job must need target, ci and schema-compat, got %s", needs)
 	}
 	runs := stepRuns(status)
 	if strings.Count(runs, "context=deploy-ok") != 1 {
@@ -800,7 +866,8 @@ func (p *boolParser) unary() (bool, error) {
 // TestDeployStatusVerdicts runs deploy.yml's status step against a fake gh:
 // success and failure post deploy-ok on the target sha, a cancelled or
 // abandoned tier posts nothing (the head reads unknown), and the context is
-// never anything else.
+// never anything else. The previous-release schema check is part of the tier,
+// so its result fails deploy-ok too.
 func TestDeployStatusVerdicts(t *testing.T) {
 	var wf tierWorkflow
 	if err := yaml.Unmarshal(readWorkflow(t, "deploy.yml"), &wf); err != nil {
@@ -811,15 +878,17 @@ func TestDeployStatusVerdicts(t *testing.T) {
 		t.Fatalf("deploy.yml status job has %d steps, want one", len(steps))
 	}
 	for _, c := range []struct {
-		result string
-		state  string // "" means no status call at all
+		name, result, compat, state string // state "" means no status call at all
 	}{
-		{"success", "success"},
-		{"failure", "failure"},
-		{"cancelled", ""},
-		{"abandoned", ""},
+		{name: "success", result: "success", compat: "success", state: "success"},
+		{name: "failure", result: "failure", compat: "success", state: "failure"},
+		{name: "cancelled", result: "cancelled", compat: "success", state: ""},
+		{name: "abandoned", result: "abandoned", compat: "success", state: ""},
+		{name: "schema-compat-failure", result: "success", compat: "failure", state: "failure"},
+		{name: "schema-compat-cancelled", result: "success", compat: "cancelled", state: ""},
+		{name: "failure-beats-cancelled", result: "failure", compat: "cancelled", state: "failure"},
 	} {
-		t.Run(c.result, func(t *testing.T) {
+		t.Run(c.name, func(t *testing.T) {
 			dir := t.TempDir()
 			call := filepath.Join(dir, "call")
 			gh := fmt.Sprintf(`#!/bin/sh
@@ -830,7 +899,8 @@ printf '%%s\n' "$*" > %q
 			}
 			cmd := exec.Command("bash", "-euo", "pipefail", "-c", steps[0].Run)
 			cmd.Env = []string{"PATH=" + dir + ":" + os.Getenv("PATH"), "GH_TOKEN=x", "GITHUB_REPOSITORY=o/r",
-				"TARGET_SHA=abc123", "RESULT=" + c.result, "RUN_URL=https://example/run", "EVIDENCE=o/r@abc123"}
+				"TARGET_SHA=abc123", "RESULT=" + c.result, "SCHEMA_COMPAT=" + c.compat,
+				"RUN_URL=https://example/run", "EVIDENCE=o/r@abc123"}
 			if logs, err := cmd.CombinedOutput(); err != nil {
 				t.Fatalf("status step failed: %v\n%s", err, logs)
 			}
@@ -842,7 +912,7 @@ printf '%%s\n' "$*" > %q
 				return
 			}
 			if err != nil {
-				t.Fatalf("no status posted for %s: %v", c.result, err)
+				t.Fatalf("no status posted for %s: %v", c.name, err)
 			}
 			got := string(b)
 			for _, want := range []string{"statuses/abc123", "state=" + c.state, "context=deploy-ok"} {
@@ -863,7 +933,7 @@ func TestCITierJobInventory(t *testing.T) {
 		want []string
 	}{
 		{"ci.yml", []string{"auto-tag-test", "build", "ci-ok", "deploy-linux", "deploy-macos", "deploy-release", "main-linux", "pr-store-db", "test", "vitest"}},
-		{"deploy.yml", []string{"ci", "status", "target"}},
+		{"deploy.yml", []string{"ci", "schema-compat", "status", "target"}},
 	} {
 		var wf tierWorkflow
 		if err := yaml.Unmarshal(readWorkflow(t, c.file), &wf); err != nil {
@@ -997,9 +1067,16 @@ func TestCITierMutantsTurnRed(t *testing.T) {
 		{"deploy-no-workflow-run", "  workflow_run:\n    # ci.yml is by name, the only workflow it may follow. branches: [main] drops\n    # every pull request and any-ref call at the trigger, before a run exists;\n    # the target job repeats the main-push test so a manually edited trigger\n    # cannot deploy a PR head.\n    workflows: [ci]\n    types: [completed]\n    branches: [main]\n", ""},
 		{"deploy-follows-any-branch", "    branches: [main]\n", "    branches: [main, develop]\n"},
 		{"deploy-unpinned-context", "context=deploy-ok", "context=ci-ok"},
-		{"deploy-status-on-dispatch-sha", "TARGET_SHA: ${{ needs.target.outputs.sha }}", "TARGET_SHA: ${{ github.sha }}"},
+		{"deploy-status-on-dispatch-sha", "      TARGET_SHA: ${{ needs.target.outputs.sha }}\n      RESULT:", "      TARGET_SHA: ${{ github.sha }}\n      RESULT:"},
 		{"deploy-status-without-always", "if: ${{ always() && needs.target.result == 'success' }}", "if: ${{ needs.target.result == 'success' }}"},
 		{"deploy-call-without-suite", "      suite: deploy", "      suite: all"},
+		{"deploy-schema-compat-dropped", "            bash scripts/test-previous-release-schema.sh \"$BASE\"\n          else\n            bash scripts/test-previous-release-schema.sh\n", "            true\n          else\n            true\n"},
+		{"deploy-schema-compat-not-in-status", "needs: [target, ci, schema-compat]", "needs: [target, ci]"},
+		{"deploy-schema-compat-no-db", "      HANDOFFKEEP_TEST_DB_URL: postgres://handoffkeep:handoffkeep@localhost:5432/handoffkeep?sslmode=disable\n    steps:\n      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0\n        with:", "    steps:\n      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0\n        with:"},
+		{"deploy-schema-compat-pins-target-ref", "          ref: ${{ github.workflow_sha }}", "          ref: ${{ needs.target.outputs.sha }}"},
+		{"deploy-schema-compat-unpinned", "          ref: ${{ github.workflow_sha }}\n", ""},
+		{"deploy-schema-compat-no-target-sha", "          # v* tag before the target.\n          TARGET_SHA: ${{ needs.target.outputs.sha }}\n", "          # v* tag before the target.\n"},
+		{"deploy-schema-compat-no-fetch", "          git fetch --no-tags origin \"$TARGET_SHA\"\n", ""},
 	} {
 		t.Run(m.name, func(t *testing.T) {
 			src := string(deploy)
