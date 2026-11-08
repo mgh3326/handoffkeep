@@ -2,6 +2,8 @@ package youtrack
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -22,8 +24,10 @@ const docArticleMaxBytes = 256 << 10
 const docTitleMaxRunes = 200
 
 // DocAction is one document the run considered. Action is create, update,
-// stub (over the cap; the article holds only the link), skipped (no YouTrack
-// project for its task), or would_create / would_update in dry-run mode.
+// adopt (an article a lost create response left behind, found by its marker
+// and updated), stub (over the cap; the article holds only the link), skipped
+// (no YouTrack project for its task), or would_create / would_update in
+// dry-run mode.
 type DocAction struct {
 	Key       string `json:"key"`
 	HKProject string `json:"hk_project,omitempty"`
@@ -132,11 +136,25 @@ func (s *Service) pushDoc(ctx context.Context, doc store.Document, dry bool) (Do
 		}
 	}
 	if !found {
-		article, err = s.client.CreateArticle(ctx, ArticleWrite{ProjectID: projectID, ParentID: parentID, Summary: title, Content: content})
+		// A create whose response was lost may already hold this document, so
+		// adopt the article that carries its marker before creating another.
+		marked, ok, err := s.findMarkedArticle(ctx, projectID, doc.Key)
 		if err != nil {
 			return action, err
 		}
-		action.Action = "create"
+		if ok {
+			article, err = s.client.UpdateArticle(ctx, marked.ID, title, content)
+			if err != nil {
+				return action, err
+			}
+			action.Action = "adopt"
+		} else {
+			article, err = s.client.CreateArticle(ctx, ArticleWrite{ProjectID: projectID, ParentID: parentID, Summary: title, Content: content})
+			if err != nil {
+				return action, err
+			}
+			action.Action = "create"
+		}
 	}
 	if oversize {
 		action.Action = "stub"
@@ -166,10 +184,19 @@ func (s *Service) docIndex(ctx context.Context, prefix, hkProject, projectID str
 			return "", gerr
 		}
 	}
+	// As for a document, a lost create response may have left the index behind.
+	marked, ok, err := s.findMarkedArticle(ctx, projectID, key)
+	if err != nil {
+		return "", err
+	}
+	if ok {
+		err = s.store.UpsertYouTrackDocArticle(ctx, store.YouTrackDocArticle{DocKey: key, HKProject: hkProject, ArticleID: marked.ID, SyncedAt: s.now()})
+		return marked.ID, err
+	}
 	article, err := s.client.CreateArticle(ctx, ArticleWrite{
 		ProjectID: projectID,
 		Summary:   prefix,
-		Content:   fmt.Sprintf("hk의 `%s/` 문서를 모은 목록입니다. 내용은 hk에서 관리하며 여기서 고치지 마세요.", prefix),
+		Content:   docMarker(key) + "\n" + fmt.Sprintf("hk의 `%s/` 문서를 모은 목록입니다. 내용은 hk에서 관리하며 여기서 고치지 마세요.", prefix),
 	})
 	if err != nil {
 		return "", err
@@ -178,12 +205,41 @@ func (s *Service) docIndex(ctx context.Context, prefix, hkProject, projectID str
 	return article.ID, err
 }
 
+// docMarkerToken is the search word for one ledger key: a document key or an
+// index key. It is one token, so a full-text search can find it.
+func docMarkerToken(key string) string {
+	sum := sha256.Sum256([]byte(key))
+	return "hkdoc" + hex.EncodeToString(sum[:12])
+}
+
+// docMarker is the line that ties an article body to its ledger key.
+func docMarker(key string) string {
+	return "<!-- hk-marker:" + docMarkerToken(key) + " -->"
+}
+
+// findMarkedArticle returns the article in one YouTrack project whose body
+// carries the marker of a ledger key. An article in another project never
+// matches, because a moved document keeps its old article where it is.
+func (s *Service) findMarkedArticle(ctx context.Context, projectID, key string) (Article, bool, error) {
+	marker := docMarker(key)
+	hits, err := s.client.SearchArticles(ctx, docMarkerToken(key))
+	if err != nil {
+		return Article{}, false, err
+	}
+	for _, hit := range hits {
+		if hit.Project != nil && hit.Project.ID == projectID && strings.Contains(hit.Content, marker) {
+			return hit, true, nil
+		}
+	}
+	return Article{}, false, nil
+}
+
 // docContent is the article body: a header with the hk key, the date and a
 // console link, then the document's markdown as is. The second result is
 // true when the body was over the cap and only the stub was written.
 func (s *Service) docContent(doc store.Document) (string, bool) {
 	link := strings.TrimRight(s.console, "/") + "/ui/doc/" + doc.Key
-	header := fmt.Sprintf("> hk 문서 `%s` · 작성 %s · [hk에서 보기](%s)\n\n", doc.Key, doc.CreatedAt.UTC().Format("2006-01-02"), link)
+	header := docMarker(doc.Key) + "\n" + fmt.Sprintf("> hk 문서 `%s` · 작성 %s · [hk에서 보기](%s)\n\n", doc.Key, doc.CreatedAt.UTC().Format("2006-01-02"), link)
 	if len(doc.Body) > docArticleMaxBytes {
 		return header + fmt.Sprintf("이 문서(%d bytes)는 한도(%d bytes)를 넘어 여기에 옮기지 않았습니다. hk에서 읽어 주세요.\n", len(doc.Body), docArticleMaxBytes), true
 	}

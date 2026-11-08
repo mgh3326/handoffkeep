@@ -95,14 +95,23 @@ func humanComment(body string) bool {
 }
 
 // commentText is the body of the YouTrack comment for one hk comment: who
-// wrote it, when, and the text.
+// wrote it, when, the text, and the marker that names the hk comment. The
+// marker lets a run that lost the create response find the comment and link
+// it instead of posting it again.
 func commentText(c store.TaskComment) string {
 	who := "운영자"
 	if !strings.HasPrefix(c.Author, "operator") {
 		who = fmt.Sprintf("에이전트 메모 (%s)", c.Author)
 	}
+	marker := commentMarker(c.ID)
 	text := fmt.Sprintf("**%s** · %s\n\n%s", who, c.CreatedAt.UTC().Format(descriptionTimeLayout), c.Body)
-	return truncateRunes(text, commentTextLimit)
+	return truncateRunes(text, commentTextLimit-len(marker)-len("\n\n")) + "\n\n" + marker
+}
+
+// commentMarker is the HTML comment that ends a mirrored comment. Its id is the
+// hk comment id, which is what the sync matches on.
+func commentMarker(hkCommentID int64) string {
+	return fmt.Sprintf("<!-- hk-comment:%d -->", hkCommentID)
 }
 
 // workerLine names the host and profile of the newest comment that carries

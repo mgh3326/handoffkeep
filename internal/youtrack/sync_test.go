@@ -45,7 +45,7 @@ func TestSyncPushCreatesIssueWithKoreanSummaryAndComments(t *testing.T) {
 		t.Fatalf("description lost the original title: %q", created.Description)
 	}
 	// A comment is posted with its author and time, as the Python mirror wrote it.
-	if len(yt.comments) != 1 || !strings.HasPrefix(yt.comments[0], "**에이전트 메모 (worker)** · ") || !strings.HasSuffix(yt.comments[0], "\n\n첫 코멘트") {
+	if len(yt.comments) != 1 || !strings.HasPrefix(yt.comments[0], "**에이전트 메모 (worker)** · ") || !strings.HasSuffix(yt.comments[0], "\n\n첫 코멘트\n\n<!-- hk-comment:1 -->") {
 		t.Fatalf("comments=%v", yt.comments)
 	}
 	mirror, ok := fs.mirrors[task.ID]
