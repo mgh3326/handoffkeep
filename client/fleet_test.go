@@ -224,15 +224,15 @@ func fleetCases(t *testing.T) []fleetCase {
 		{
 			// prefix is query-escaped; kind and session go empty, as in
 			// internal/remote.
-			name: "ListDocuments", method: "GET", uri: "/v1/documents?kind=&limit=100&prefix=artifacts%2Fhandoffkeep%2F42%2Fjob+7&session=", status: http.StatusOK,
-			reply: `{"documents": [{"id": 5, "key": "artifacts/handoffkeep/42/job 7/a", "kind": "note", "session": "", "job": "job 7", "body": "{}", "sha256": "ab", "created_by": "svc-panewire", "created_at": "2026-11-08T08:00:00Z", "updated_at": "2026-11-08T08:00:00Z", "task_id": 42, "origin_class": "job"}, {"id": 6, "key": "artifacts/handoffkeep/42/job 7/b", "kind": "note", "sha256": "cd", "created_by": "svc-panewire", "created_at": "2026-11-08T08:00:00Z", "updated_at": "2026-11-08T08:00:00Z"}]}`,
+			name: "ListDocuments", method: "GET", uri: "/v1/documents?kind=&limit=100&prefix=notes%2Fjob+7&session=", status: http.StatusOK,
+			reply: `{"documents": [{"id": 5, "key": "notes/job 7/a", "kind": "note", "session": "", "job": "job 7", "body": "{}", "sha256": "ab", "created_by": "svc-panewire", "created_at": "2026-11-08T08:00:00Z", "updated_at": "2026-11-08T08:00:00Z", "task_id": 42, "origin_class": "job"}, {"id": 6, "key": "notes/job 7/b", "kind": "note", "sha256": "cd", "created_by": "svc-panewire", "created_at": "2026-11-08T08:00:00Z", "updated_at": "2026-11-08T08:00:00Z"}]}`,
 			call: func(ctx context.Context, c client.Client) error {
-				xs, err := c.ListDocuments(ctx, "artifacts/handoffkeep/42/job 7", 100)
+				xs, err := c.ListDocuments(ctx, "notes/job 7", 100)
 				if err != nil {
 					return err
 				}
-				if len(xs) != 2 || xs[0].ID != 5 || xs[0].Key != "artifacts/handoffkeep/42/job 7/a" || xs[0].Job != "job 7" || xs[0].TaskID == nil || *xs[0].TaskID != 42 ||
-					xs[0].OriginClass != "job" || xs[0].UpdatedAt.IsZero() || xs[1].Key != "artifacts/handoffkeep/42/job 7/b" || xs[1].TaskID != nil {
+				if len(xs) != 2 || xs[0].ID != 5 || xs[0].Key != "notes/job 7/a" || xs[0].Job != "job 7" || xs[0].TaskID == nil || *xs[0].TaskID != 42 ||
+					xs[0].OriginClass != "job" || xs[0].UpdatedAt.IsZero() || xs[1].Key != "notes/job 7/b" || xs[1].TaskID != nil {
 					t.Fatalf("document list decoded wrong: %+v", xs)
 				}
 				return nil
