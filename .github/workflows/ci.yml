@@ -26,10 +26,13 @@ on:
 #   T-PR   pull_request, and every other event too: test, pr-store-db, vitest,
 #          build and auto-tag-test. Light: no -race, no macOS, hosted runners
 #          only (this repo is public, so PR code never runs on our machines).
-#          PostgreSQL runs only in pr-store-db, for the store package only,
-#          and only when a PR changes internal/store or internal/testdb: PRs
-#          that broke store tests merged and left main red twice in one day
-#          (hk 3193). The mergewake required checks name these jobs.
+#          PostgreSQL runs only in pr-store-db, for every Go package the PR
+#          changes whose tests import internal/testdb at the PR head, plus
+#          ./internal/store/... when it changes internal/store or
+#          internal/testdb: PRs that broke store tests merged and left main
+#          red twice in one day (hk 3193), and an internal/mcp change first
+#          ran its DB tests on main (hk 3528). The mergewake required checks
+#          name these jobs.
 #   T-MAIN every event except pull_request: T-PR plus main-linux, which runs the
 #          whole Go suite against PostgreSQL WITHOUT -race, the migration and
 #          startup smoke, the reopen/quota mutants and bundle freshness. Target
