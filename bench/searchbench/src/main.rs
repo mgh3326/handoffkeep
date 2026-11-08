@@ -122,7 +122,14 @@ fn run(args: &[String]) -> Result<()> {
         }
         eprintln!("[{name}] build");
         let t = Instant::now();
-        engine.build(&recs).with_context(|| format!("{name}: build"))?;
+        if let Err(e) = engine.build(&recs) {
+            // One failing engine must not stop the others: record it and move on.
+            let msg = format!("{e:#}");
+            eprintln!("[{name}] FAILED build: {msg}");
+            let doc = json!({ "engine": name, "stage": "build", "error": msg });
+            fs::write(o.out.join(format!("{name}__failed.json")), serde_json::to_string_pretty(&doc)?)?;
+            continue;
+        }
         let ingest_s = t.elapsed().as_secs_f64();
         let index_bytes = engine.index_bytes().unwrap_or(0);
         eprintln!("[{name}] built in {ingest_s:.1}s, index {index_bytes} bytes");
@@ -217,7 +224,13 @@ fn summarize(args: &[String]) -> Result<()> {
         .filter(|p| p.extension().map(|x| x == "json").unwrap_or(false))
         .collect();
     files.sort();
-    let docs: Vec<Value> = files
+    let is_failed = |p: &PathBuf| p.file_name().map(|n| n.to_string_lossy().ends_with("__failed.json")).unwrap_or(false);
+    let (failed_files, result_files): (Vec<PathBuf>, Vec<PathBuf>) = files.into_iter().partition(is_failed);
+    let docs: Vec<Value> = result_files
+        .iter()
+        .map(|p| Ok(serde_json::from_str(&fs::read_to_string(p)?)?))
+        .collect::<Result<_>>()?;
+    let failures: Vec<Value> = failed_files
         .iter()
         .map(|p| Ok(serde_json::from_str(&fs::read_to_string(p)?)?))
         .collect::<Result<_>>()?;
@@ -242,6 +255,18 @@ fn summarize(args: &[String]) -> Result<()> {
             l["p50"].as_f64().unwrap_or(0.0),
             l["p95"].as_f64().unwrap_or(0.0),
             d["errors"].as_array().map(|e| e.len()).unwrap_or(0),
+        ));
+    }
+    md.push_str("\n## Failures (engine did not build; the run continued)\n\n");
+    if failures.is_empty() {
+        md.push_str("- none\n");
+    }
+    for f in &failures {
+        md.push_str(&format!(
+            "- {} ({}): {}\n",
+            f["engine"].as_str().unwrap_or(""),
+            f["stage"].as_str().unwrap_or(""),
+            f["error"].as_str().unwrap_or("").replace('\n', " ")
         ));
     }
     md.push_str("\n## Per-query misses (answered queries with no gold in top 10)\n\n");

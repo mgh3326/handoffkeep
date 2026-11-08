@@ -7,7 +7,7 @@ edition = "2024"
 anyhow = "1.0.104"
 lindera = { version = "6.2.0", features = ["embed-ko-dic"] }
 lindera-tantivy = "6.2.0"
-mysql = { version = "28.0.4", default-features = false, features = ["buffer-pool", "minimal-rust", "rustls-tls-ring"] }
+mysql = { version = "28.0.4", default-features = false, features = ["buffer-pool", "minimal-rust", "native-tls"] }
 oracle = { version = "0.6.3", optional = true }
 rusqlite = { version = "0.41.1", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }

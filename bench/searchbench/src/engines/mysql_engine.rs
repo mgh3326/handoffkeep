@@ -3,6 +3,10 @@
 //! Connection settings come only from the environment (see run-db.sh):
 //! MYSQL_HOST, MYSQL_PORT, MYSQL_ADMIN_USER, MYSQL_ADMIN_PASSWORD, and optionally
 //! MYSQL_SSL_CA (path to a CA bundle for HeatWave's certificate).
+//! MYSQL_SSL: `required` (default, TLS through native-tls/OpenSSL) or `disabled`
+//! (no TLS; for the in-VCN private address only).
+//! TLS uses native-tls rather than rustls: HeatWave serves an X.509 v1
+//! certificate, which webpki rejects (UnsupportedCertVersion) but OpenSSL accepts.
 //! The adapter drops and recreates the database `searchbench` and nothing else.
 //!
 //! Modes:
@@ -32,16 +36,23 @@ impl MysqlEngine {
 
     fn opts(db: Option<&str>) -> Result<OptsBuilder> {
         let port: u16 = env("MYSQL_PORT")?.parse().context("MYSQL_PORT")?;
-        let mut ssl = SslOpts::default();
-        if let Ok(ca) = std::env::var("MYSQL_SSL_CA") {
-            ssl = ssl.with_root_cert_path(Some(PathBuf::from(ca)));
-        }
+        let ssl = match std::env::var("MYSQL_SSL").unwrap_or_else(|_| "required".into()).as_str() {
+            "required" => {
+                let mut ssl = SslOpts::default();
+                if let Ok(ca) = std::env::var("MYSQL_SSL_CA") {
+                    ssl = ssl.with_root_cert_path(Some(PathBuf::from(ca)));
+                }
+                Some(ssl)
+            }
+            "disabled" => None,
+            other => return Err(anyhow!("MYSQL_SSL must be required or disabled, got {other:?}")),
+        };
         let mut b = OptsBuilder::new()
             .ip_or_hostname(Some(env("MYSQL_HOST")?))
             .tcp_port(port)
             .user(Some(env("MYSQL_ADMIN_USER")?))
             .pass(Some(env("MYSQL_ADMIN_PASSWORD")?))
-            .ssl_opts(Some(ssl));
+            .ssl_opts(ssl);
         if let Some(db) = db {
             b = b.db_name(Some(db));
         }
