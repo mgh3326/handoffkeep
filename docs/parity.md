@@ -50,8 +50,9 @@ inbox and disposition writes refuse them.
 | Comments | Read comments | Operator comments are YouTrack-owned and copied to hk as operator:youtrack | GET /ui/api/board/tasks/{id}/comments | GET /v1/tasks/{id}/comments | tasks comments | task_show (last 20), task_comments (paged, newest last) | Operator, bearer, MCP bearer/Access | comment rows | n/a | internal/ui/routes_test.go, internal/mcp/operator_test.go, internal/mcp/operator_reads_test.go |
 | Comments | Write a comment | hk comments are pushed as issues comments; mirrored comments are linked so they do not echo | POST /ui/tasks/{id}/comments | POST /v1/tasks/{id}/comments | tasks comment | task_comment | Operator, bearer, MCP bearer/Access | comment.author; ui.write; YouTrack comment link | Append-only; no edit or delete | internal/ui/routes_test.go, internal/mcp/operator_test.go, internal/store/youtrack_test.go |
 | Decisions | List open decisions | — | GET /ui/api/decisions, GET /ui/api/decisions/{id}, GET /ui/api/attention | GET /v1/decision-requests, GET /v1/decision-requests/sources, GET /v1/tasks/dispositions/summary | decisions list, decisions hygiene, decisions backfill | decisions_pending | Operator, bearer, MCP bearer/Access | None (read) | n/a | internal/ui/decision_requests_test.go, internal/mcp/operator_test.go |
+| Decisions | History of closed decisions (answered, default_applied, withdrawn) | — | — (per task on the task page) | — | — | decisions_history | Operator, bearer, MCP bearer/Access | None (read) | n/a | internal/mcp/operator_decisions_test.go |
 | Decisions | Ask (create a structured request) | — | — | POST /v1/tasks/{id}/decision-request (the Linear /ask variant is separate) | tasks decision-request, decisions ask | — | bearer (agents and CLI) | decision record; task_events | No retraction; a superseded request can be replaced | cmd/handoffkeep/decision_request_test.go, internal/api/decision_records_test.go |
-| Decisions | Answer a request | — | POST /ui/api/decision-requests/resolve | POST /v1/decisions/resolve, POST /v1/tasks/{id}/decision-request/resolve | decisions resolve, tasks decision-resolve | decision_answer | Console: operator only (operator_direct); bearer writes may be recorded as pending confirmation; MCP Access is operator_direct, MCP bearer follows the bearer rule | decision record (actor, channel, provenance); task_events; ui.write | Final; the request cannot be unanswered | internal/ui/decision_resolve_test.go, internal/api/decision_resolve_test.go, internal/mcp/operator_test.go |
+| Decisions | Answer a request | — | POST /ui/api/decision-requests/resolve | POST /v1/decisions/resolve, POST /v1/tasks/{id}/decision-request/resolve | decisions resolve, tasks decision-resolve | decision_answer | Console: operator only (operator_direct); bearer writes may be recorded as pending confirmation; MCP Access is operator_direct; MCP bearer on an operator_only request is refused with `decision_operator_only` and its attempt waits as pending confirmation, otherwise it follows the bearer rule | decision record (actor, channel, provenance); task_events; ui.write | Final; the request cannot be unanswered | internal/ui/decision_resolve_test.go, internal/api/decision_resolve_test.go, internal/mcp/operator_test.go |
 | Decisions | Deny a pending confirmation | — | POST /ui/api/decision-requests/deny | — | — | — | Operator only | decision record; ui.write | The denied attempt is final; the request stays open | internal/ui/decision_deny_test.go |
 | Decisions | Snooze a decision record | — | — | POST /v1/decision-requests/{id}/snooze | decisions snooze | — | bearer | decision record | Snooze again with a new time | internal/api/decision_records_test.go |
 | Decisions | Legacy answer (task, escalation, lane) | — | POST /ui/decisions/answer, POST /ui/decisions/answer-batch | POST /v1/decisions/resolve | decisions resolve | — | Operator (console); bearer (API/CLI) | relay event; task_events; ui.write | Final; no undo | internal/ui/write_test.go, internal/api/decision_session_test.go |
@@ -151,6 +152,7 @@ because that path has an authenticated principal.
 | task_events | read | HTTP | Tasks event history |
 | changes_since | read | HTTP | Change feed |
 | decisions_pending | read | HTTP | Decisions list |
+| decisions_history | read | HTTP | Decisions history (closed requests) |
 | decision_answer | write | HTTP | Decisions answer |
 | task_comment | write | HTTP | Comment write |
 | task_intake | write | HTTP | Task create |
@@ -193,3 +195,9 @@ hk 3465 adds `task_update` and `decision_ask` (HTTP only; both `readOnlyHint: fa
 - A write through the ChatGPT channel is labelled author `dots` (comment author,
   task creator, event `by`). Each keyed or audited write leaves a row in
   `mcp_write_audit` with the actor (`operator:<email>`) and channel.
+
+`decisions_history` is the read hk 3500 added. `decisions_pending` now splits its
+list: `decisions` holds the items that need an answer, and `needs_cleanup` holds
+open requests whose task is already merged or dropped. Each item carries
+`operator_only`, which is the store's effective policy (`EffectivePolicy`), so a
+bearer answer to an operator-only request returns `decision_operator_only`.
