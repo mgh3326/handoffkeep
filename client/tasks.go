@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -23,6 +24,9 @@ type Task struct {
 	UpdatedAt time.Time `json:"updated_at"`
 	// Project is nil on a task with no project.
 	Project *string `json:"project"`
+	// Expected is the task's expected duration as a Go duration string
+	// ("24h0m0s"); nil when unset.
+	Expected *string `json:"expected"`
 	// Category is derived from State by the server (started, completed, ...).
 	Category string `json:"category"`
 	// AwaitingDecision is set while the task waits on the operator.
@@ -34,6 +38,8 @@ type TaskRefs struct {
 	Closure *TaskClosure `json:"closure,omitempty"`
 	PR      string       `json:"pr,omitempty"`
 	JobID   string       `json:"job_id,omitempty"`
+	// ReportPath is where the task's worker writes its report.
+	ReportPath string `json:"report_path,omitempty"`
 	// DecisionRequest is the task's current structured decision request.
 	DecisionRequest *DecisionRequest `json:"decision_request,omitempty"`
 }
@@ -87,6 +93,27 @@ func (c Client) GetTask(ctx context.Context, id int64) (Task, bool, error) {
 		return out, false, nil
 	}
 	return out, err == nil, err
+}
+
+// ListTasksInput filters ListTasks. An empty Lane, State or ParentLane
+// matches every task. Limit must be 1 to 1000; the server refuses any other
+// value. The answer stops at Limit tasks without saying whether more exist, so
+// a full page may be a cut one.
+type ListTasksInput struct {
+	Lane, State, ParentLane string
+	Limit                   int
+}
+
+// ListTasks lists tasks through GET /v1/tasks, as the CLI's tasks list does.
+func (c Client) ListTasks(ctx context.Context, in ListTasksInput) ([]Task, error) {
+	var out struct {
+		Tasks []Task `json:"tasks"`
+	}
+	q := url.Values{"lane": {in.Lane}, "state": {in.State}, "parent_lane": {in.ParentLane}, "limit": {fmt.Sprint(in.Limit)}}
+	if err := c.transport().Call(ctx, "GET", "/v1/tasks?"+q.Encode(), nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Tasks, nil
 }
 
 // ClaimTask claims a task for claimedBy, linking jobID, or recording noJob as
