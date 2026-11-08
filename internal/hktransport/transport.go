@@ -6,9 +6,10 @@
 // It lives under internal/ so that no other module can build or send a raw
 // hk request: a request carries the bearer token and the Cloudflare Access
 // pair, so every one is held to the configured origin — the builder accepts
-// only a single-slash absolute path and checks the joined URL, and both
-// senders refuse a request whose scheme or host is not the configured one
-// before any network I/O (hk 3544).
+// only a single-slash absolute path and checks the joined URL, both senders
+// refuse a request that could leave the configured origin before any network
+// I/O, and the redirect guard judges every hop the same way — all through one
+// origin-equality check, sameOrigin (hk 3544).
 //
 // It imports only the standard library and internal/buildinfo, because
 // package client, which the fleet services import, imports it.
@@ -27,6 +28,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/mgh3326/handoffkeep/internal/buildinfo"
 )
@@ -38,7 +40,8 @@ var UserAgent = "handoffkeep/" + buildinfo.Revision()
 
 // Client is one hk API caller. The caller sets URL and Token, and the optional
 // Cloudflare Access pair; the package never loads them. URL is an absolute
-// http or https URL with a host and an optional path prefix. Its fields match
+// http or https URL with an ASCII host (punycode for an internationalized
+// name) and an optional path prefix. Its fields match
 // client.Client's field for field, so each converts to the other.
 type Client struct {
 	URL, Token string
@@ -58,34 +61,69 @@ func (c Client) CFAccessConfigured() bool {
 }
 
 // ErrInvalidURL refuses a configured URL that is not an absolute http or
-// https URL with a host. The URL is not printed.
-var ErrInvalidURL = errors.New("hk_url_invalid: the configured hk URL must be an absolute http or https URL with a host")
+// https URL with an ASCII host. The URL is not printed.
+var ErrInvalidURL = errors.New("hk_url_invalid: the configured hk URL must be an absolute http or https URL with an ASCII host")
 
 // ErrInvalidPath refuses a request path that is not a single-slash absolute
 // path: joined onto the URL, "@host/", "//host/" or "scheme://host/" names
 // another host. The path is not printed.
 var ErrInvalidPath = errors.New("hk_request_path_invalid: an hk request path must start with a single /")
 
-// ErrForeignOrigin refuses, before any network I/O, a request whose scheme or
-// host is not the configured hk URL's: it would carry the bearer token and
-// the CF Access pair elsewhere.
+// ErrForeignOrigin refuses, before any network I/O, a request that could
+// leave the configured origin (see sendable): it would carry the bearer token
+// and the CF Access pair elsewhere.
 var ErrForeignOrigin = errors.New("hk_request_foreign_origin: refused to send an hk request outside the configured scheme and host")
 
 // base parses the configured URL with its trailing slashes removed — the
-// form a request path is joined onto.
+// form a request path is joined onto. It refuses an opaque URL and a host
+// that normalizeHost cannot fold — empty or with a non-ASCII byte.
 func (c Client) base() (*url.URL, error) {
 	u, e := url.Parse(strings.TrimRight(c.URL, "/"))
-	if e != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.Opaque != "" {
+	if e != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Opaque != "" || normalizeHost(u.Host) == "" {
 		return nil, ErrInvalidURL
 	}
 	return u, nil
 }
 
-// sameOrigin reports whether u has the configured URL's scheme and host;
-// hosts compare as normalizeHost folds them.
+// sameOrigin is the one origin-equality check: the builder (NewRequest), both
+// senders (Do, DoNoFollow) and the redirect guard (httpClient) call it, so
+// they cannot drift apart. It reports whether u stays on the configured
+// origin:
+//   - the configured URL is valid (base);
+//   - u is not opaque — through a forward proxy an opaque value is the
+//     request target, whatever host u names;
+//   - u carries exactly the configured URL's userinfo: none when the
+//     configured URL has none, so a request cannot gain credentials or a
+//     confusable "user@" prefix the configuration did not hold;
+//   - u's scheme equals the configured scheme, ASCII case folded;
+//   - u's host equals the configured host as hostEqual compares them: byte
+//     for byte after ASCII case folding and dropping a trailing dot, an IPv6
+//     zone byte-exact, and the port as written — "hk.example:443" and
+//     "hk.example" differ, as they did before. A host with any non-ASCII
+//     byte equals nothing: Go's transport maps it through IDNA to a DNS name
+//     Unicode case folding cannot predict (İ is not i), so the configured
+//     host must be ASCII, punycode for an internationalized name.
 func (c Client) sameOrigin(u *url.URL) bool {
 	base, e := c.base()
-	return e == nil && u != nil && strings.EqualFold(u.Scheme, base.Scheme) && normalizeHost(u.Host) == normalizeHost(base.Host)
+	return e == nil && u != nil && u.Opaque == "" && sameUserinfo(u.User, base.User) && asciiEqualFold(u.Scheme, base.Scheme) && hostEqual(u.Host, base.Host)
+}
+
+// sameUserinfo reports whether a and b are both absent or carry the same
+// username and password, byte for byte.
+func sameUserinfo(a, b *url.Userinfo) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	ap, aset := a.Password()
+	bp, bset := b.Password()
+	return a.Username() == b.Username() && ap == bp && aset == bset
+}
+
+// sendable reports whether r may be sent: its URL is on the configured origin
+// (sameOrigin) and its Host header field, when set, is exactly the URL's host —
+// through a forward proxy the Host field becomes the request target.
+func (c Client) sendable(r *http.Request) bool {
+	return r != nil && c.sameOrigin(r.URL) && (r.Host == "" || r.Host == r.URL.Host)
 }
 
 // NewRequest builds one request against the configured hk URL carrying every
@@ -117,34 +155,85 @@ func (c Client) NewRequest(ctx context.Context, method, path string, body io.Rea
 	return r, nil
 }
 
+// hostEqual reports whether two URL Hosts name the same origin host: both
+// fold under normalizeHost to the same non-empty string. A host with a
+// non-ASCII byte folds to "" and so equals nothing, not even itself.
+func hostEqual(a, b string) bool {
+	na := normalizeHost(a)
+	return na != "" && na == normalizeHost(b)
+}
+
 // normalizeHost folds a URL Host (hostname[:port]) to the form DNS treats as
-// equal: lowercase with a trailing FQDN dot removed.
+// equal: ASCII lowercase with a trailing FQDN dot removed, the port kept as
+// written. It returns "" for an empty host or one with any non-ASCII byte.
 func normalizeHost(h string) string {
 	if host, port, e := net.SplitHostPort(h); e == nil {
-		return foldHostname(host) + ":" + port
+		if f := foldHostname(host); f != "" && isASCII(port) {
+			return f + ":" + port
+		}
+		return ""
 	}
 	return foldHostname(h)
 }
 
-// foldHostname folds one hostname. The zone of an IPv6 literal
-// (fe80::1%zone) names an interface, which Go resolves case-sensitively, so
-// only the address part is folded and the zone is kept byte-exact — a zone
-// that differs, even by case alone, is a different origin.
+// foldHostname folds one hostname, or returns "" when it is empty or holds a
+// non-ASCII byte. The zone of an IPv6 literal (fe80::1%zone) names an
+// interface, which Go resolves case-sensitively, so only the address part is
+// folded and the zone is kept byte-exact — a zone that differs, even by case
+// alone, is a different origin.
 func foldHostname(h string) string {
+	addr, zone := h, ""
 	if strings.Contains(h, ":") {
 		if i := strings.IndexByte(h, '%'); i >= 0 {
-			return strings.ToLower(strings.TrimSuffix(h[:i], ".")) + h[i:]
+			addr, zone = h[:i], h[i:]
 		}
 	}
-	return strings.ToLower(strings.TrimSuffix(h, "."))
+	folded, ok := asciiLower(strings.TrimSuffix(addr, "."))
+	if !ok || folded == "" || !isASCII(zone) {
+		return ""
+	}
+	return folded + zone
+}
+
+// asciiLower lowercases A-Z and reports false for any non-ASCII byte. Unicode
+// lowercasing (strings.ToLower) is not used: it folds İ to i and the Kelvin
+// sign to k, which name other hosts on the wire.
+func asciiLower(s string) (string, bool) {
+	b := []byte(s)
+	for i, ch := range b {
+		switch {
+		case ch >= utf8.RuneSelf:
+			return "", false
+		case 'A' <= ch && ch <= 'Z':
+			b[i] = ch + ('a' - 'A')
+		}
+	}
+	return string(b), true
+}
+
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= utf8.RuneSelf {
+			return false
+		}
+	}
+	return true
+}
+
+// asciiEqualFold compares two schemes with ASCII case folding only.
+func asciiEqualFold(a, b string) bool {
+	la, oka := asciiLower(a)
+	lb, okb := asciiLower(b)
+	return oka && okb && la == lb
 }
 
 // httpClient returns the client for one hk request wrapped so a redirect that
-// would move the Authorization or CF Access headers outside the configured
-// host or scheme is never followed — Go re-sends custom headers on redirects.
-// An https -> plaintext hop is refused for the same reason as a cross-host
-// hop, as is an http -> https upgrade: credentials are scoped to the
-// configured scheme, not just the host. When the wrapped client has no policy
+// would move the Authorization or CF Access headers off the configured origin
+// is never followed — Go re-sends custom headers on redirects. Every hop is
+// judged by sameOrigin against the configured URL, not against the chain's
+// first request. An https -> plaintext hop is refused for the same reason as
+// a cross-host hop, as is an http -> https upgrade: credentials are scoped to
+// the configured scheme, not just the host. When the wrapped client has no policy
 // of its own, Go's default 10-redirect cap is preserved so a same-host loop
 // cannot hang a call on a generous context.
 func (c Client) httpClient() *http.Client {
@@ -155,13 +244,8 @@ func (c Client) httpClient() *http.Client {
 	hc := *h
 	inner := hc.CheckRedirect
 	hc.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		if len(via) > 0 {
-			switch {
-			case normalizeHost(req.URL.Host) != normalizeHost(via[0].URL.Host):
-				return http.ErrUseLastResponse
-			case !strings.EqualFold(req.URL.Scheme, via[0].URL.Scheme):
-				return http.ErrUseLastResponse
-			}
+		if !c.sameOrigin(req.URL) {
+			return http.ErrUseLastResponse
 		}
 		if inner != nil {
 			return inner(req, via)
@@ -210,11 +294,11 @@ func CFAccessLoginHost(host string) bool {
 	return host == "cloudflareaccess.com" || strings.HasSuffix(host, ".cloudflareaccess.com")
 }
 
-// sameOriginHost reports whether h names the configured hk host — host
-// comparisons fold case and a trailing dot and include the port.
+// sameOriginHost reports whether h names the configured hk host, as
+// sameOrigin compares hosts (hostEqual).
 func (c Client) sameOriginHost(h string) bool {
-	base, e := url.Parse(strings.TrimRight(c.URL, "/"))
-	return e == nil && normalizeHost(h) == normalizeHost(base.Host)
+	base, e := c.base()
+	return e == nil && hostEqual(h, base.Host)
 }
 
 // SameHostSchemeChange reports whether u stays on the configured hk host but
@@ -224,8 +308,8 @@ func (c Client) SameHostSchemeChange(u *url.URL) bool {
 	if !u.IsAbs() || !c.sameOriginHost(u.Host) {
 		return false
 	}
-	base, e := url.Parse(strings.TrimRight(c.URL, "/"))
-	return e == nil && !strings.EqualFold(u.Scheme, base.Scheme)
+	base, e := c.base()
+	return e == nil && !asciiEqualFold(u.Scheme, base.Scheme)
 }
 
 // RedirectError classifies a redirect the guard surfaced. A Location pointing
@@ -242,10 +326,10 @@ func (c Client) RedirectError(resp *http.Response) error {
 		}
 		if loc.Host != "" {
 			// loc.Host is set for absolute and scheme-relative Locations alike.
-			base, be := url.Parse(strings.TrimRight(c.URL, "/"))
+			base, be := c.base()
 			if be == nil {
 				switch {
-				case normalizeHost(loc.Host) != normalizeHost(base.Host):
+				case !hostEqual(loc.Host, base.Host):
 					return &HTTPError{Status: resp.StatusCode, Code: "redirect_foreign_host", Reason: "refused to follow a redirect away from the configured handoffkeep host"}
 				case strings.EqualFold(base.Scheme, "https") && loc.IsAbs() && !strings.EqualFold(loc.Scheme, "https"):
 					return &HTTPError{Status: resp.StatusCode, Code: "redirect_scheme_downgrade", Reason: "refused to follow a redirect that drops https for a plaintext scheme on the same host"}
@@ -259,12 +343,14 @@ func (c Client) RedirectError(resp *http.Response) error {
 }
 
 // Do issues r, built by NewRequest, through the redirect-guarded client: a
-// redirect is followed only on the configured host and scheme, at most ten
-// hops, and transport errors are kept leak-free as do describes. A request
-// whose scheme or host is not the configured URL's is refused with
-// ErrForeignOrigin before any network I/O.
+// redirect is followed only on the configured origin, at most ten hops, and
+// transport errors are kept leak-free as do describes. A request that could
+// leave the configured origin — scheme or host not the configured one, an
+// opaque URL, userinfo other than the configured URL's, or a Host field other
+// than the URL's host — is
+// refused with ErrForeignOrigin before any network I/O.
 func (c Client) Do(r *http.Request) (*http.Response, error) {
-	if !c.sameOrigin(r.URL) {
+	if !c.sendable(r) {
 		return nil, ErrForeignOrigin
 	}
 	return c.do(c.httpClient(), r)
@@ -275,7 +361,7 @@ func (c Client) Do(r *http.Request) (*http.Response, error) {
 // header reaches the Location's host. The origin check and the leak-free
 // errors are Do's.
 func (c Client) DoNoFollow(r *http.Request) (*http.Response, error) {
-	if !c.sameOrigin(r.URL) {
+	if !c.sendable(r) {
 		return nil, ErrForeignOrigin
 	}
 	return c.do(c.noFollowClient(), r)
