@@ -59,6 +59,10 @@ func hangulSQL(key string, n int) string {
 	return fmt.Sprintf(`(SELECT string_agg(chr(44032 + ((hashtext(%s || '.' || k::text) & 2147483647) %% 11172)) || CASE WHEN k %% 3 = 0 THEN ' ' ELSE '' END, '' ORDER BY k) FROM generate_series(1, %d) k)`, key, n)
 }
 
+// seedEpoch pins the seeded timestamps. The result digest includes created_at,
+// so now() would make every run's digest differ.
+const seedEpoch = `'2026-01-01T00:00:00Z'::timestamptz`
+
 func seedSearchLatency(ctx context.Context, t *testing.T, s *Store, n int) {
 	t.Helper()
 	stmts := []string{
@@ -68,14 +72,14 @@ func seedSearchLatency(ctx context.Context, t *testing.T, s *Store, n int) {
 		   || CASE WHEN g % 50 = 0 THEN ' 배포 절차 ' ELSE '' END
 		   || CASE WHEN g % 7 = 0 THEN ' 베리 ' ELSE '' END
 		   || CASE WHEN g % 11 = 0 THEN ' deploy 배포 ' ELSE '' END,
-		   md5(g::text), 'bench', now() - (g || ' seconds')::interval, now() - (g || ' seconds')::interval
+		   md5(g::text), 'bench', ` + seedEpoch + ` + (g || ' seconds')::interval, ` + seedEpoch + ` + (g || ' seconds')::interval
 		 FROM generate_series(1, ` + strconv.Itoa(n) + `) g`,
 		`INSERT INTO tasks(lane,title,kind,state,created_by,created_at,updated_at,last_activity_at)
 		 SELECT 'bench',
 		   ` + hangulSQL("g::text || 't'", 12) + `
 		   || CASE WHEN g % 40 = 0 THEN ' 배포 절차 점검 ' ELSE '' END
 		   || CASE WHEN g % 9 = 0 THEN ' 베리 ' ELSE '' END,
-		   'implement', 'backlog', 'bench', now() - (g || ' seconds')::interval, now(), now()
+		   'implement', 'backlog', 'bench', ` + seedEpoch + ` + (g || ' seconds')::interval, ` + seedEpoch + `, ` + seedEpoch + `
 		 FROM generate_series(1, ` + strconv.Itoa(n) + `) g`,
 		`ANALYZE documents`,
 		`ANALYZE tasks`,
