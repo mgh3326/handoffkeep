@@ -144,7 +144,7 @@ priority or lane.
 | --- | --- | --- | --- |
 | `task_search` | read | `query`, optional `state`/`lane`/`project`, `limit` ≤ 50 | Task summaries from the console search path, including Korean translations |
 | `task_show` | read | `id` | Title (with `title_ko` when present), state, priority, lane, project, `refs.pr`, last 20 comments, last 10 events |
-| `task_get` | read | `id` | One task in full: body, state, priority, kind, lane, project, area, labels, `claimed_by`, `refs`, parent, children, relations and blockers, `project_owner`, translations, YouTrack link, timestamps, `console_url`, `field_sources`; comments and events are a five-item preview |
+| `task_get` | read | `id` | One task in full: body, state, priority, kind, lane, project, area, labels, `claimed_by`, `refs`, parent, children, relations and blockers, `project_owner`, translations, YouTrack link, timestamps, `console_url`, `attachments`, `external_links`, `field_sync`, `field_sources`; comments and events are a five-item preview |
 | `task_list` | read | optional `state`/`lane`/`project`, `limit` ≤ 100, `cursor`, `updated_since` | Task summaries; paged calls also carry `next_cursor` |
 | `task_comments` | read | `id`, optional `cursor`, `limit` ≤ 100 | One page of comments, oldest first, with `next_cursor` and `has_more` |
 | `task_events` | read | `id`, optional `cursor`, `limit` ≤ 100 | One page of events, oldest first, with `next_cursor` and `has_more` |
@@ -153,7 +153,7 @@ priority or lane.
 | `decision_answer` | write | `request_id`, `option` or `text`, optional `note` | Store result; an already answered or stale request returns its error code |
 | `task_comment` | write | `id`, `body` | The appended comment and its author |
 | `task_intake` | write | `title`, `body`, `project`, optional `lane` | The triage task, `created`, and duplicate candidates found before filing |
-| `projects_list` | read | none | Every project with `design_lane`/`effective_owner`, status and dates, and open task counts by state |
+| `projects_list` | read | none | Every project with `design_lane`/`effective_owner`, status and dates, open task counts by state, and `health` (in_progress, waiting, blocked, done, overdue counts; assignees; top blocked and overdue tasks) with `as_of` |
 | `task_states` | read | none | The twelve states with category, terminal and claimable flags, allowed manual transitions and closure requirements |
 | `sync_status` | read | none | YouTrack cursor, pending outbox backlog, processed outcomes in the last 24 hours, mirrored tasks and last run |
 
@@ -176,10 +176,24 @@ data field in that response (hk:doc
 
 | Field(s) | Source |
 | --- | --- |
-| `id`, `title`, `body`, `body_doc`, `state`, `priority`, `kind`, `lane`, `project`, `area`, `labels`, `claimed_by`, `created_by`, `refs`, `created_at`, `updated_at`, `started_at`, `completed_at`, `canceled_at`, `closed_at`, `parent`, `children`, `relations`, `blockers`, `project_owner`, `comments_preview`, `events_preview`, `console_url` | `hk` (the hk Postgres work record) |
+| `id`, `title`, `body`, `body_doc`, `state`, `priority`, `kind`, `lane`, `project`, `area`, `labels`, `claimed_by`, `created_by`, `refs`, `created_at`, `updated_at`, `started_at`, `completed_at`, `canceled_at`, `closed_at`, `parent`, `children`, `relations`, `blockers`, `project_owner`, `comments_preview`, `events_preview`, `console_url`, `attachments`, `external_links` | `hk` (the hk Postgres work record) |
 | `comments_by_agents` (agent comments) | `hk` |
 | `operator_comments` | `youtrack` |
 | `translations`, `korean_display_text`, `youtrack` (the mirror) | `youtrack` |
+
+`field_sync` is the sync-time companion to the YouTrack rows: each of
+`operator_comments`, `korean_display_text`, `translations` and `youtrack` has
+`source` (`youtrack`), `status` (`synced` or `unknown`), `last_synced_at` (the
+mirror's watermark, null when unknown) and `source_url` (the YouTrack issue
+link). The watermark belongs to the whole mirror link, so the four fields share
+it. A task with no mirror, or a link with no watermark yet, is `unknown`, never
+omitted.
+
+`attachments` lists the attachments bound to the task's body document (up to 50;
+`attachments_more` says whether there are more). `external_links` lists the
+task's pull requests (`pr`, `origin_pr`, `revert_pr`), `report`, `document`
+(the body doc key), `linear` and `youtrack`; `url` is set only for an https
+value.
 
 Response metadata (`comments_more`, `events_more`, `field_sources` itself) is
 not a task field and has no entry. A reader that is about to change a value
@@ -232,7 +246,13 @@ returned with the new task.
 The three read-only meta tools answer questions about the queue itself.
 `projects_list` reads the owner rule from the store, so `effective_owner` is
 `design_lane` when set and `operator-desk` otherwise; its open counts exclude
-the settled states. `task_states` derives the state graph, categories, terminal
+the settled states. `health` buckets overlap: a blocked task that is also in
+progress counts in both. `waiting` is triage, backlog and unstarted; `done` is
+merged, deployed and completed; dropped and duplicate work is in neither. A
+task is blocked while a `blocks` relation from an open task points at it, and
+overdue while its due date is before `as_of`. Assignees are the claimers of
+open tasks (up to 10); the top blocked and overdue lists hold 5 tasks per
+project, highest priority and earliest due first. `task_states` derives the state graph, categories, terminal
 flags and closure requirements from the tables the store enforces, never from a
 second copy in this package. `sync_status` derives its last-run time from the
 sync bookkeeping timestamps (cursor, processed activities, mirrors, field

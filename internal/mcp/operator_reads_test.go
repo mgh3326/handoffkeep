@@ -91,6 +91,23 @@ type taskGetOut struct {
 	} `json:"youtrack"`
 	ConsoleURL   string            `json:"console_url"`
 	FieldSources map[string]string `json:"field_sources"`
+	Attachments  []struct {
+		SHA256       string `json:"sha256"`
+		OriginalName string `json:"original_name"`
+	} `json:"attachments"`
+	AttachmentsMore bool `json:"attachments_more"`
+	ExternalLinks   []struct {
+		Kind   string  `json:"kind"`
+		Source string  `json:"source"`
+		Ref    string  `json:"ref"`
+		URL    *string `json:"url"`
+	} `json:"external_links"`
+	FieldSync map[string]struct {
+		Source       string     `json:"source"`
+		Status       string     `json:"status"`
+		LastSyncedAt *time.Time `json:"last_synced_at"`
+		SourceURL    *string    `json:"source_url"`
+	} `json:"field_sync"`
 }
 
 func TestTaskGetCompleteFields(t *testing.T) {
@@ -197,6 +214,25 @@ func TestTaskGetCompleteFields(t *testing.T) {
 	}
 	if out.Parent == nil || out.Parent.ID != parent.ID {
 		t.Fatalf("parent=%+v", out.Parent)
+	}
+	linkURL := map[string]string{}
+	for _, link := range out.ExternalLinks {
+		if link.URL != nil {
+			linkURL[link.Kind] = *link.URL
+		}
+	}
+	if linkURL["pr"] != "https://github.com/mgh3326/handoffkeep/pull/9" || linkURL["youtrack"] != "https://youtrack.example/issue/HK-501" {
+		t.Fatalf("external_links=%+v", out.ExternalLinks)
+	}
+	// The mirror has no sync watermark yet: the field is shown as unknown, not omitted.
+	for _, field := range []string{"operator_comments", "korean_display_text", "translations", "youtrack"} {
+		sync, ok := out.FieldSync[field]
+		if !ok || sync.Source != "youtrack" || sync.Status != "unknown" || sync.LastSyncedAt != nil {
+			t.Fatalf("field_sync[%s]=%+v ok=%v", field, sync, ok)
+		}
+	}
+	if out.FieldSources["field_sync"] != "hk" || out.FieldSources["external_links"] != "hk" || out.FieldSources["attachments"] != "hk" {
+		t.Fatalf("field_sources missing new keys: %+v", out.FieldSources)
 	}
 	if len(out.Children) != 1 || out.Children[0].ID != child.ID {
 		t.Fatalf("children=%+v", out.Children)
@@ -621,5 +657,51 @@ func TestChangesSinceResetResumesAtOldestRetained(t *testing.T) {
 	}
 	if next.Items[0].TaskCurrent == nil || next.Items[0].TaskCurrent.ID != retained.ID {
 		t.Fatalf("retained item task_current=%+v, want task %d", next.Items[0].TaskCurrent, retained.ID)
+	}
+}
+
+func TestTaskGetAttachmentsAndSyncWatermark(t *testing.T) {
+	st := newOperatorStore(t)
+	ctx := context.Background()
+	if _, err := st.AddTaskProject(ctx, "mcp-attach-project", "tester"); err != nil {
+		t.Fatal(err)
+	}
+	project := "mcp-attach-project"
+	if _, _, err := st.PutDocument(ctx, store.Document{
+		Key: "task-body/attach-fixture", Kind: "brief", Body: "attachment body", CreatedBy: "tester",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	task, err := st.CreateTask(ctx, store.Task{
+		Lane: "mcp-attach-lane", Title: "task with attachment", Kind: "implement", Project: &project,
+		CreatedBy: "tester", BodyDoc: "task-body/attach-fixture",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const sha = "0000000000000000000000000000000000000000000000000000000000000abc"
+	if _, _, err := st.PutAttachment(ctx, store.Attachment{
+		SHA256: sha, SizeBytes: 3, MIME: "text/plain", OriginalName: "notes.txt",
+		CreatedBy: "tester", RefKind: "document", RefID: "task-body/attach-fixture",
+	}, 1000, 10); err != nil {
+		t.Fatal(err)
+	}
+	synced := time.Date(2026, 11, 8, 1, 2, 3, 0, time.UTC)
+	if _, err := st.UpsertYouTrackMirror(ctx, store.YouTrackMirrorInput{
+		TaskID: task.ID, IssueID: "yt-attach-1", DisplayRef: "HK-777", URL: "https://youtrack.example/issue/HK-777",
+		Tenant: "test", Role: "mirror", SyncedAt: synced,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := newOperatorServer(t, st, api.Tokens{"tester": "bearer-secret"})
+	session := connectMCP(t, srv.URL, map[string]string{"Authorization": "Bearer bearer-secret"})
+	out := callTool[taskGetOut](t, session, "task_get", map[string]any{"id": task.ID})
+	if len(out.Attachments) != 1 || out.Attachments[0].SHA256 != sha || out.Attachments[0].OriginalName != "notes.txt" || out.AttachmentsMore {
+		t.Fatalf("attachments=%+v more=%v", out.Attachments, out.AttachmentsMore)
+	}
+	sync := out.FieldSync["youtrack"]
+	if sync.Status != "synced" || sync.LastSyncedAt == nil || !sync.LastSyncedAt.Equal(synced) || sync.SourceURL == nil || *sync.SourceURL != "https://youtrack.example/issue/HK-777" {
+		t.Fatalf("field_sync[youtrack]=%+v", sync)
 	}
 }

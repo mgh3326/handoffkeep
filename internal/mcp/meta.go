@@ -22,7 +22,7 @@ const syncWriterNote = "The Python mirror may still be the active writer until t
 func registerMetaTools(s *gmcp.Server, o operatorTools) {
 	gmcp.AddTool(s, &gmcp.Tool{
 		Name:        "projects_list",
-		Description: "List every hk task project with its design-session owner (design_lane and effective_owner), status, start and target dates, and open task counts by state. Read-only.",
+		Description: "List every hk task project with its design-session owner (design_lane and effective_owner), status, start and target dates, open task counts by state, and health: in_progress, waiting, blocked, done and overdue counts, open assignees, and the top blocked tasks (with blocker ids) and overdue tasks. as_of is the server time the counts were read at. Read-only.",
 		Annotations: readOnlyAnnotations(),
 	}, o.projectsList)
 	gmcp.AddTool(s, &gmcp.Tool{
@@ -38,11 +38,12 @@ func registerMetaTools(s *gmcp.Server, o operatorTools) {
 }
 
 func (o operatorTools) projectsList(ctx context.Context, _ *gmcp.CallToolRequest, _ struct{}) (*gmcp.CallToolResult, any, error) {
-	projects, err := o.service.Store.ListProjectOverviews(ctx)
+	asOf := time.Now().UTC()
+	projects, err := o.service.Store.ListProjectOverviews(ctx, asOf)
 	if err != nil {
 		return nil, nil, err
 	}
-	return jsonResult(map[string]any{"projects": projects})
+	return jsonResult(map[string]any{"as_of": asOf, "projects": projects})
 }
 
 func (o operatorTools) taskStates(_ context.Context, _ *gmcp.CallToolRequest, _ struct{}) (*gmcp.CallToolResult, any, error) {

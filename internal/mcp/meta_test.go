@@ -123,6 +123,94 @@ func TestProjectsListOwnersAndCounts(t *testing.T) {
 	}
 }
 
+type projectHealthView struct {
+	Name   string `json:"name"`
+	Health struct {
+		InProgress int `json:"in_progress"`
+		Waiting    int `json:"waiting"`
+		Blocked    int `json:"blocked"`
+		Done       int `json:"done"`
+		Overdue    int `json:"overdue"`
+		Assignees  []struct {
+			Name string `json:"name"`
+			Open int    `json:"open"`
+		} `json:"assignees"`
+		TopBlocked []struct {
+			TaskID    int64   `json:"task_id"`
+			BlockedBy []int64 `json:"blocked_by"`
+		} `json:"top_blocked"`
+		TopOverdue []struct {
+			TaskID int64     `json:"task_id"`
+			DueAt  time.Time `json:"due_at"`
+		} `json:"top_overdue"`
+	} `json:"health"`
+}
+
+func TestProjectsListHealthCountsReasonsAndAssignees(t *testing.T) {
+	st, _ := newMetaStore(t)
+	ctx := context.Background()
+	if _, err := st.AddTaskProject(ctx, "health-project", "tester"); err != nil {
+		t.Fatal(err)
+	}
+	project := "health-project"
+	create := func(title string) store.Task {
+		t.Helper()
+		task, err := st.CreateTask(ctx, store.Task{Lane: "health-lane", Title: title, Kind: "implement", Project: &project, CreatedBy: "tester"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return task
+	}
+	create("health waiting")
+	claimed := create("health claimed")
+	if _, err := st.ClaimTask(ctx, claimed.ID, "alice", "job-health-alice", ""); err != nil {
+		t.Fatal(err)
+	}
+	blocker := create("health blocker")
+	blocked := create("health blocked")
+	if _, err := st.AddTaskRelation(ctx, blocker.ID, store.RelationBlocks, blocked.ID, "tester"); err != nil {
+		t.Fatal(err)
+	}
+	overdue := create("health overdue")
+	past := time.Date(2000, 1, 2, 0, 0, 0, 0, time.UTC)
+	if _, _, err := st.SetTaskDue(ctx, overdue.ID, &past, "tester"); err != nil {
+		t.Fatal(err)
+	}
+
+	before := time.Now().UTC()
+	session := newMetaSession(t, st)
+	raw := callTool[struct {
+		AsOf     time.Time           `json:"as_of"`
+		Projects []projectHealthView `json:"projects"`
+	}](t, session, "projects_list", map[string]any{})
+	if raw.AsOf.Before(before.Add(-time.Minute)) || raw.AsOf.After(time.Now().UTC().Add(time.Minute)) {
+		t.Fatalf("as_of=%v not near now", raw.AsOf)
+	}
+	var h *projectHealthView
+	for i := range raw.Projects {
+		if raw.Projects[i].Name == "health-project" {
+			h = &raw.Projects[i]
+		}
+	}
+	if h == nil {
+		t.Fatal("health-project missing")
+	}
+	got := h.Health
+	// Waiting: triage/backlog/unstarted. The claimed task is developing, so it is in progress.
+	if got.Waiting != 4 || got.InProgress != 1 || got.Blocked != 1 || got.Overdue != 1 || got.Done != 0 {
+		t.Fatalf("health counts=%+v", got)
+	}
+	if len(got.Assignees) != 1 || got.Assignees[0].Name != "alice" || got.Assignees[0].Open != 1 {
+		t.Fatalf("assignees=%+v", got.Assignees)
+	}
+	if len(got.TopBlocked) != 1 || got.TopBlocked[0].TaskID != blocked.ID || len(got.TopBlocked[0].BlockedBy) != 1 || got.TopBlocked[0].BlockedBy[0] != blocker.ID {
+		t.Fatalf("top_blocked=%+v", got.TopBlocked)
+	}
+	if len(got.TopOverdue) != 1 || got.TopOverdue[0].TaskID != overdue.ID || !got.TopOverdue[0].DueAt.Equal(past) {
+		t.Fatalf("top_overdue=%+v", got.TopOverdue)
+	}
+}
+
 type stateClosureView struct {
 	Types             []string `json:"types"`
 	DefaultType       string   `json:"default_type"`
