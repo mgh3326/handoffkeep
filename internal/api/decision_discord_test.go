@@ -873,3 +873,24 @@ func TestDecisionLinkLine(t *testing.T) {
 		t.Errorf("digest without console:\n%s", text)
 	}
 }
+
+func TestDecisionDiscordTemplate(t *testing.T) {
+	st, task := decisionStoreFixture(t)
+	q := `Approve deployment {"identity":{"environment_known":true,"config":"x","payload":"y"},"host":"mbp","repo":"mgh3326/handoffkeep","previous":"unknown","release":"d4b91c069","paths":[],"reasons":["missing or invalid previous deployment receipt"]}`
+	_, err := st.RecordDecisionRequest(t.Context(), task.ID, "mergewake-design", store.DecisionRequestInput{Question: q, Options: store.DecisionOptions{Options: []store.DecisionOption{{Key: "A", Label: "Approve this deployment"}, {Key: "B", Label: "Keep the current version"}}}, DefaultAction: "hold"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	discord := newFakeDiscord(t)
+	n := DecisionNotifier{Store: st, Discord: discord.webhook(), Now: clockAt(time.Now().UTC().Add(2 * time.Minute))}
+	n.Drain(t.Context())
+	posts := discord.take()
+	if len(posts) != 1 {
+		t.Fatalf("posts=%+v", posts)
+	}
+	for _, want := range []string{"handoffkeep d4b91c0", "대상 호스트: mbp", "이전 배포 기록이 없음", "A: 이 배포 승인 (권고)", "hk 규칙"} {
+		if !strings.Contains(posts[0].Content, want) {
+			t.Errorf("missing %q in %q", want, posts[0].Content)
+		}
+	}
+}

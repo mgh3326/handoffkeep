@@ -147,12 +147,21 @@ const decisionMentionSQL = `coalesce(n.applied_version='' AND (coalesce(t.awaiti
 var decisionRecordColumnsD = "d." + strings.ReplaceAll(decisionRecordColumns, ",", ",d.")
 
 func scanDecisionNoticeRow(row pgx.Row, x *DecisionNotice, now time.Time, extra ...any) error {
-	var options []byte
+	var options, refsRaw []byte
 	r := &x.Record
 	dest := []any{&r.ID, &r.Source, &r.SourceRef, &r.TaskID, &r.JobID, &r.Lane, &r.Question, &options, &r.Recommended, &r.DefaultAction,
-		&r.DueAt, &r.SnoozedUntil, &r.ExpiresAt, &r.Status, &r.Answer, &r.AnsweredBy, &r.AnsweredAt, &r.SupersededBy, &r.CreatedAt, &r.UpdatedAt, &x.TaskTitle}
+		&r.DueAt, &r.SnoozedUntil, &r.ExpiresAt, &r.Status, &r.Answer, &r.AnsweredBy, &r.AnsweredAt, &r.SupersededBy, &r.CreatedAt, &r.UpdatedAt, &x.TaskTitle, &refsRaw}
 	if err := row.Scan(append(dest, extra...)...); err != nil {
 		return err
+	}
+	var refs TaskRefs
+	if _, err := scanJSONB(refsRaw, &refs); err != nil {
+		return err
+	}
+	if refs.DecisionRequest != nil && refs.DecisionRequest.ID == r.SourceRef && refs.DecisionRequest.Status == DecisionRequestOpen {
+		if rendered, ok := RenderDecisionTemplate(*refs.DecisionRequest, refs.DecisionOptions); ok {
+			r.Question = DecisionTemplateText(rendered)
+		}
 	}
 	// Options are not part of a channel message; status, overdue and snooze
 	// are derived as scanDecisionRecord derives them.
@@ -184,7 +193,7 @@ func (s *Store) ProcessNextDecisionNotice(ctx context.Context, now time.Time, se
 	}
 	defer tx.Rollback(ctx)
 	var x DecisionNotice
-	err = scanDecisionNoticeRow(tx.QueryRow(ctx, `SELECT `+decisionRecordColumnsD+`,coalesce(t.title,''),n.message_id,n.applied_version,n.attempts,`+decisionMentionSQL+`
+	err = scanDecisionNoticeRow(tx.QueryRow(ctx, `SELECT `+decisionRecordColumnsD+`,coalesce(t.title,''),t.refs,n.message_id,n.applied_version,n.attempts,`+decisionMentionSQL+`
 		FROM decision_deliveries n JOIN decision_requests d ON d.id=n.request_id LEFT JOIN tasks t ON t.id=d.task_id
 		WHERE n.destination='`+DecisionDestinationDiscord+`' AND n.state='pending' AND n.next_attempt_at<=$1::timestamptz
 		AND n.applied_version<>`+decisionEffectiveStatusSQL+`
@@ -346,7 +355,7 @@ func (s *Store) ProcessDecisionDigest(ctx context.Context, now time.Time, send f
 	if err = tx.QueryRow(ctx, `SELECT count(*) FROM decision_requests d WHERE `+stale, now, cutoff).Scan(&digest.Total); err != nil {
 		return false, nil, err
 	}
-	rows, err := tx.Query(ctx, `SELECT `+decisionRecordColumnsD+`,coalesce(t.title,'') FROM decision_requests d LEFT JOIN tasks t ON t.id=d.task_id
+	rows, err := tx.Query(ctx, `SELECT `+decisionRecordColumnsD+`,coalesce(t.title,''),t.refs FROM decision_requests d LEFT JOIN tasks t ON t.id=d.task_id
 		WHERE `+stale+` ORDER BY d.created_at ASC,d.id ASC LIMIT $3`, now, cutoff, DecisionDigestMaxItems)
 	if err != nil {
 		return false, nil, err

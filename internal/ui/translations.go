@@ -24,6 +24,9 @@ func (h *Handler) translateDecisionViews(ctx context.Context, views []decisionRe
 		return err
 	}
 	for i := range views {
+		if views[i].QuestionKO != "" {
+			continue
+		}
 		for _, tr := range translations {
 			if tr.EntityID != views[i].ID {
 				continue
