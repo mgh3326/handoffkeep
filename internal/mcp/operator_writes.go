@@ -145,10 +145,11 @@ type decisionAskInput struct {
 }
 
 // decisionAsk records a structured decision request on a task, through the same
-// store path as `tasks decision-request`. Korean display comes from the
-// decision templates when the request is read, so nothing is translated here.
-// A request id is the store's own (dr-<task>-<revision>); a re-send of the same
-// request returns the recorded one with duplicate set.
+// store path as `tasks decision-request`. Korean display comes from the decision
+// templates when the request is read, so nothing is translated here. A request
+// id is the store's own (dr-<task>-<revision>). A repeat of the same idempotency
+// key returns the first call's request with replayed set; the request and its
+// audit row commit together.
 func (o operatorTools) decisionAsk(ctx context.Context, _ *gmcp.CallToolRequest, in decisionAskInput) (*gmcp.CallToolResult, any, error) {
 	if in.TaskID < 1 {
 		return nil, nil, errors.New("task_id must be positive")
@@ -156,21 +157,6 @@ func (o operatorTools) decisionAsk(ctx context.Context, _ *gmcp.CallToolRequest,
 	key := strings.TrimSpace(in.IdempotencyKey)
 	if key == "" {
 		return nil, nil, errors.New("idempotency_key is required")
-	}
-	write := o.write(toolDecisionAsk, key)
-	var replay map[string]any
-	replayed, err := o.service.Store.ReplayMCPWrite(ctx, write, &replay)
-	if err != nil {
-		return nil, nil, err
-	}
-	if replayed {
-		// The key names the task it first asked on; the same key on another
-		// task is a reuse, not a replay.
-		if replay["console_url"] != taskURL(in.TaskID) {
-			return nil, nil, store.ErrIdempotencyKeyReused
-		}
-		replay["replayed"] = true
-		return jsonResult(replay)
 	}
 	input := store.DecisionRequestInput{
 		Question: strings.TrimSpace(in.Question), Reason: strings.TrimSpace(in.Reason),
@@ -187,23 +173,20 @@ func (o operatorTools) decisionAsk(ctx context.Context, _ *gmcp.CallToolRequest,
 		}
 		input.DueAt = &at
 	}
-	recorded, err := o.service.Store.RecordDecisionRequest(ctx, in.TaskID, write.Author, input)
+	write := o.write(toolDecisionAsk, key)
+	recorded, replayed, err := o.service.Store.RecordMCPDecisionRequest(ctx, in.TaskID, input, write)
 	if err != nil {
 		return nil, nil, err
 	}
-	out := map[string]any{
+	return jsonResult(map[string]any{
 		"request_id":  recorded.Request.ID,
 		"request":     recorded.Request,
 		"duplicate":   recorded.Duplicate,
-		"replayed":    false,
+		"replayed":    replayed,
 		"task":        map[string]any{"id": recorded.Task.ID, "state": recorded.Task.State, "console_url": taskURL(recorded.Task.ID)},
 		"console_url": taskURL(recorded.Task.ID),
 		"actor":       o.principal.Actor,
 		"channel":     o.principal.Channel,
 		"author":      write.Author,
-	}
-	if err := o.service.Store.RecordMCPWrite(ctx, write, recorded.Task.ID, out); err != nil {
-		return nil, nil, err
-	}
-	return jsonResult(out)
+	})
 }

@@ -88,25 +88,52 @@ func replayMCPWriteTx(ctx context.Context, tx pgx.Tx, w MCPWrite, out any) (bool
 	return true, json.Unmarshal(raw, out)
 }
 
-// ReplayMCPWrite returns the recorded result of a keyed write this actor already
-// made, for a write that commits in its own transaction. It reports false when
-// the key was never used, and writes nothing.
-func (s *Store) ReplayMCPWrite(ctx context.Context, w MCPWrite, out any) (bool, error) {
+// RecordMCPDecisionRequest records a decision request for an MCP write. The
+// request, its audit row and the replay check share one transaction under an
+// advisory lock on the write's key, so two calls with the same key cannot both
+// record a request, and a retry after a crash finds the first call's result.
+// replayed reports that the key was already used; the returned result is then
+// the first call's.
+func (s *Store) RecordMCPDecisionRequest(ctx context.Context, taskID int64, in DecisionRequestInput, w MCPWrite) (DecisionRequestResult, bool, error) {
 	if err := w.validate(); err != nil {
-		return false, err
+		return DecisionRequestResult{}, false, err
 	}
 	if w.Key == "" {
-		return false, nil
+		return DecisionRequestResult{}, false, ErrInvalidMCPWrite
 	}
-	var raw []byte
-	err := s.pool.QueryRow(ctx, `SELECT result FROM mcp_write_audit WHERE tool=$1 AND actor=$2 AND idempotency_key=$3`, w.Tool, w.Actor, w.Key).Scan(&raw)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return false, nil
+	if err := checkDecisionRequestWrite(taskID, w.Author, &in); err != nil {
+		return DecisionRequestResult{}, false, err
 	}
+	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return false, err
+		return DecisionRequestResult{}, false, err
 	}
-	return true, json.Unmarshal(raw, out)
+	defer tx.Rollback(ctx)
+	// The key lock is taken before any task row, and no path takes a task row
+	// and then this key, so it cannot close a cycle.
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, w.Tool+"\x00"+w.Actor+"\x00"+w.Key); err != nil {
+		return DecisionRequestResult{}, false, err
+	}
+	var recorded DecisionRequestResult
+	replayed, err := replayMCPWriteTx(ctx, tx, w, &recorded)
+	if err != nil {
+		return DecisionRequestResult{}, false, err
+	}
+	if replayed {
+		if recorded.Task.ID != taskID {
+			return DecisionRequestResult{}, false, ErrIdempotencyKeyReused
+		}
+		recorded.Duplicate = true
+		return recorded, true, tx.Commit(ctx)
+	}
+	result, err := s.recordDecisionRequestTx(ctx, tx, taskID, w.Author, in)
+	if err != nil {
+		return DecisionRequestResult{}, false, err
+	}
+	if err := insertMCPWriteAuditTx(ctx, tx, w, taskID, result, time.Now().UTC()); err != nil {
+		return DecisionRequestResult{}, false, err
+	}
+	return result, false, tx.Commit(ctx)
 }
 
 // insertMCPWriteAuditTx writes the audit row inside the write's transaction, so
@@ -238,12 +265,24 @@ func (s *Store) UpdateTask(ctx context.Context, id int64, in TaskUpdateInput, w 
 		changed = append(changed, "state")
 	}
 	if in.Lane != "" && in.Lane != x.Lane {
-		_, laneChanged, err := s.relaneTaskTx(ctx, tx, id, in.Lane, w.Author, in.Note, false, mcpTaskUpdateSource, ref)
+		// relaneTaskTx refuses a blank note; a lane change without one gets this default.
+		laneNote := in.Note
+		if strings.TrimSpace(laneNote) == "" {
+			laneNote = "lane changed by task_update"
+		}
+		_, laneChanged, err := s.relaneTaskTx(ctx, tx, id, in.Lane, w.Author, laneNote, false, mcpTaskUpdateSource, ref)
 		if err != nil {
 			return out, err
 		}
 		if laneChanged {
 			changed = append(changed, "lane")
+		}
+	}
+	if len(in.AddLabels)+len(in.RemoveLabels) > 0 {
+		// The state and lane writes above update their own copy of the row;
+		// reload it so the label events record the state the task now has.
+		if err := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1`, id), &x); err != nil {
+			return out, err
 		}
 	}
 	labelsChanged, err := s.applyTaskUpdateLabels(ctx, tx, &x, in, w.Author)

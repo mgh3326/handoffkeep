@@ -282,3 +282,35 @@ func containsLabel(ids []int64, id int64) bool {
 	}
 	return false
 }
+
+// A lane change with no note is valid: the store supplies the event note.
+func TestTaskUpdateLaneWithoutNote(t *testing.T) {
+	st := newOperatorStore(t)
+	ctx := context.Background()
+	task := newOperatorTask(t, st, "task update lane fixture")
+	project := "mcp-project"
+	if _, err := st.CreateTask(ctx, store.Task{
+		Lane: "mcp-other", Title: "lane target fixture", Kind: "implement", Project: &project, CreatedBy: "tester",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	session := writesSession(t, st)
+	before, found, err := st.GetTask(ctx, task.ID)
+	if err != nil || !found {
+		t.Fatalf("read task: found=%v err=%v", found, err)
+	}
+	out := callTool[mcpTaskUpdateOut](t, session, "task_update", map[string]any{
+		"id": task.ID, "expected_updated_at": before.UpdatedAt.UTC().Format(time.RFC3339Nano),
+		"idempotency_key": "lane-no-note", "lane": "mcp-other",
+	})
+	if len(out.Changed) != 1 || out.Changed[0] != "lane" {
+		t.Fatalf("lane update=%+v", out)
+	}
+	after, _, err := st.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Lane != "mcp-other" {
+		t.Fatalf("lane=%q", after.Lane)
+	}
+}
