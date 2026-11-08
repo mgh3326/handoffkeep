@@ -83,7 +83,7 @@ func registerOperatorTools(s *gmcp.Server, service api.Service, p principal) {
 	}, o.decisionsPending)
 	gmcp.AddTool(s, &gmcp.Tool{
 		Name:        "decisions_history",
-		Description: "Read closed structured decision requests (answered, default_applied or withdrawn), newest task update first, up to 100 per page. Pass cursor (empty for the first page) and follow next_cursor until it is empty. Each item has its options, recommended_option and chosen_option, rationale (the request's reason), decided_by and decided_at, text or receipt, operator_only, the linked task and console_url. Lists the current request of each task; an earlier revision that was superseded is not listed.",
+		Description: "Read closed structured decision requests (answered, default_applied or withdrawn), newest task update first, up to 100 per page. Pass cursor (empty for the first page) and follow next_cursor until it is empty. Each item has its options, recommended_option and chosen_option, rationale (the request's reason), decider, responder, provenance and decided_at, text or receipt, operator_only, the linked task and console_url. Lists the current request of each task; an earlier revision that was superseded is not listed.",
 		Annotations: readOnlyAnnotations(),
 	}, o.decisionsHistory)
 	gmcp.AddTool(s, &gmcp.Tool{
