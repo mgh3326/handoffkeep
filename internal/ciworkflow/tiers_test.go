@@ -199,14 +199,17 @@ func gitleaksScopeProblems(wf tierWorkflow) []string {
 	return nil
 }
 
-// prStoreDB is the one PR-tier job that starts PostgreSQL (hk 3193): it tests
-// ./internal/store/... when a pull request changes internal/store or
-// internal/testdb. It has no event guard, so it always reports a conclusion
+// prStoreDB is the one PR-tier job that starts PostgreSQL (hk 3193): on a pull
+// request it tests every changed Go package with DB-backed tests, and
+// ./internal/store/... when internal/store or internal/testdb changed
+// (hk 3528). It has no event guard, so it always reports a conclusion
 // and can be a required check; only the suite selector may skip it.
 const (
 	prStoreDB      = "pr-store-db"
 	prStoreDBName  = "pr: store + postgres"
 	prStoreDBSuite = "${{ contains(fromJSON('[\"all\",\"test\"]'), inputs.suite || 'all') }}"
+	// prStoreDBPackages feeds the decision step's selection to go test.
+	prStoreDBPackages = "${{ steps.decide.outputs.packages }}"
 )
 
 // prStoreDBProblems checks the pr-store-db job in wf and its entry in the
@@ -257,19 +260,23 @@ func prStoreDBProblems(wf tierWorkflow, policy []byte) []string {
 		if fmt.Sprint(testStep.Env["HANDOFFKEEP_TEST_DB_URL"]) == "" || testStep.Env["HANDOFFKEEP_TEST_DB_URL"] == nil {
 			add("the go test step must set HANDOFFKEEP_TEST_DB_URL")
 		}
-		// (c) Store package only, no -race.
-		if !strings.Contains(testStep.Run, "./internal/store/...") {
-			add("go test must name ./internal/store/...")
+		// (c) Exactly the packages the decision step selected, no -race.
+		if testStep.Env["PACKAGES"] != prStoreDBPackages {
+			add("the go test step must take PACKAGES from %s", prStoreDBPackages)
+		}
+		if !strings.Contains(testStep.Run, "$PACKAGES") || strings.Contains(testStep.Run, "./") {
+			add("go test must run the selected $PACKAGES and name no package itself")
 		}
 		if strings.Contains(testStep.Run, "-race") {
 			add("go test must not use -race")
 		}
 	}
-	// (d) The decision step matches both directories.
+	// (d) The decision step matches both directories, keeps the store
+	// pattern and finds DB-backed packages by their internal/testdb import.
 	if decideStep == nil {
 		add("needs a decision step that writes to GITHUB_OUTPUT")
 	} else {
-		for _, pat := range []string{"internal/store/*", "internal/testdb/*"} {
+		for _, pat := range []string{"internal/store/*", "internal/testdb/*", "./internal/store/...", `/internal/testdb"'`, "packages="} {
 			if !strings.Contains(decideStep.Run, pat) {
 				add("decision step must match %s", pat)
 			}
@@ -996,7 +1003,7 @@ func TestCITierMutantsTurnRed(t *testing.T) {
 	deploy := readWorkflow(t, "deploy.yml")
 	policy := readPolicy(t)
 	const storeIf = "    if: ${{ contains(fromJSON('[\"all\",\"test\"]'), inputs.suite || 'all') }}\n    name: 'pr: store + postgres'"
-	const storeEnv = "        env:\n          HANDOFFKEEP_TEST_DB_URL: postgres://handoffkeep:handoffkeep@localhost:5432/handoffkeep?sslmode=disable\n        run: go test -timeout 10m -count=1 ./internal/store/..."
+	const storeEnv = "        env:\n          HANDOFFKEEP_TEST_DB_URL: postgres://handoffkeep:handoffkeep@localhost:5432/handoffkeep?sslmode=disable\n          PACKAGES: ${{ steps.decide.outputs.packages }}\n"
 	for _, m := range []struct{ name, old, new string }{
 		{"race-in-pr-test", "run: go test -timeout 10m ./...", "run: go test -race -timeout 10m ./..."},
 		{"race-in-main-linux", "run: go test -v -timeout 30m ./...", "run: go test -v -race -timeout 30m ./..."},
@@ -1023,10 +1030,12 @@ func TestCITierMutantsTurnRed(t *testing.T) {
 		{"no-ref-pruning", "          git for-each-ref --format='delete %(refname)' | git update-ref --no-deref --stdin\n", "          true\n"},
 		{"prune-on-pull-request-too", "        if: ${{ github.event_name != 'pull_request' }}\n        run: |\n          git checkout --detach", "        run: |\n          git checkout --detach"},
 		{"pr-store-db-pr-only-if", storeIf, "    if: ${{ github.event_name == 'pull_request' && contains(fromJSON('[\"all\",\"test\"]'), inputs.suite || 'all') }}\n    name: 'pr: store + postgres'"},
-		{"pr-store-db-no-db-url", storeEnv, "        run: go test -timeout 10m -count=1 ./internal/store/..."},
-		{"pr-store-db-race", "run: go test -timeout 10m -count=1 ./internal/store/...", "run: go test -race -timeout 10m -count=1 ./internal/store/..."},
+		{"pr-store-db-no-db-url", storeEnv, "        env:\n          PACKAGES: ${{ steps.decide.outputs.packages }}\n"},
+		{"pr-store-db-race", `go test -timeout 10m -count=1 -v "${pkgs[@]}"`, `go test -race -timeout 10m -count=1 -v "${pkgs[@]}"`},
 		{"pr-store-db-drops-testdb-path", "internal/store/*|internal/testdb/*)", "internal/store/*)"},
-		{"pr-store-db-expr-in-run", "run: go test -timeout 10m -count=1 ./internal/store/...", "run: go test -timeout 10m -count=1 ./internal/store/... -run '${{ github.head_ref }}'"},
+		{"pr-store-db-expr-in-run", `go test -timeout 10m -count=1 -v "${pkgs[@]}"`, `go test -timeout 10m -count=1 -v "${pkgs[@]}" -run '${{ github.head_ref }}'`},
+		{"pr-store-db-ignores-selection", `go test -timeout 10m -count=1 -v "${pkgs[@]}"`, `go test -timeout 10m -count=1 -v ./internal/store/...`},
+		{"pr-store-db-packages-not-from-decision", "          PACKAGES: ${{ steps.decide.outputs.packages }}\n", "          PACKAGES: ./internal/store/...\n"},
 		{"pr-store-db-not-in-ci-ok", "needs: [test, pr-store-db, vitest,", "needs: [test, vitest,"},
 	} {
 		t.Run(m.name, func(t *testing.T) {

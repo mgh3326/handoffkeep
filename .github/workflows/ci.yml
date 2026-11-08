@@ -167,10 +167,16 @@ jobs:
 
   pr-store-db:
     # Runs on every event, so it always reports a conclusion and can be a
-    # required check. It tests only on a pull request that changes
-    # internal/store or internal/testdb (hk 3193); anywhere else it succeeds
-    # without testing, because main-linux covers main pushes and dispatches.
-    # If the changed files cannot be listed, it tests.
+    # required check. On a pull request it runs PostgreSQL tests for every
+    # changed Go package that has DB-backed tests (hk 3528): a package is
+    # DB-backed when one of its _test.go files imports internal/testdb at the
+    # PR head (internal/testdb's own tests count too), and a changed or
+    # removed file belongs to the nearest enclosing directory that holds Go
+    # files. A change under internal/store or internal/testdb also tests
+    # ./internal/store/... (hk 3193). If the changed files cannot be listed it
+    # tests every DB-backed package; if that set cannot be computed (or comes
+    # out empty) it tests ./... . Anywhere else it succeeds without testing,
+    # because main-linux covers main pushes and dispatches.
     if: ${{ contains(fromJSON('["all","test"]'), inputs.suite || 'all') }}
     name: 'pr: store + postgres'
     runs-on: ubuntu-latest
@@ -191,7 +197,7 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
           fetch-depth: 0
-      - name: decide whether the store tests must run
+      - name: decide which DB-backed packages to test
         id: decide
         env:
           EVENT: ${{ github.event_name }}
@@ -202,32 +208,83 @@ jobs:
             echo "run=no" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          if [ -z "$BASE_SHA" ] || ! files=$(git diff --name-only --no-renames "$BASE_SHA"...HEAD); then
-            echo "cannot list the changed files against base '$BASE_SHA'; testing (fail safe)"
+          # go test argument for a package directory; internal/store keeps its
+          # ./internal/store/... pattern.
+          pkgarg() {
+            case "$1" in
+              .) echo . ;;
+              internal/store|internal/store/*) echo ./internal/store/... ;;
+              *) echo "./$1" ;;
+            esac
+          }
+          # Directory of each path; a top-level file is in ".".
+          dirs() { sed -e '/^$/d' -e 's|^[^/]*$|./&|' -e 's|/[^/]*$||' | sort -u; }
+          # The DB-backed marker: a _test.go file importing internal/testdb.
+          marker='^[[:space:]]*(import[[:space:]]+)?([[:alnum:]_.]+[[:space:]]+)?"[^"]*/internal/testdb"'
+          dbdirs=""
+          if gofiles=$(git ls-files -- '*.go') && dbfiles=$(git grep -l -E "$marker" -- '*_test.go' || [ $? -eq 1 ]); then
+            pkgdirs=$(dirs <<< "$gofiles")
+            dbdirs=$(dirs <<< "$dbfiles")
+            if grep -Fxq internal/testdb <<< "$pkgdirs"; then
+              dbdirs=$(printf '%s\ninternal/testdb\n' "$dbdirs" | sed '/^$/d' | sort -u)
+            fi
+          fi
+          if [ -z "$dbdirs" ]; then
+            echo "cannot compute the DB-backed packages; testing ./... (fail safe)"
             echo "run=yes" >> "$GITHUB_OUTPUT"
+            echo "packages=./..." >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          matches=""
-          while IFS= read -r path; do
-            case "$path" in
-              internal/store/*|internal/testdb/*) matches="$matches$path"$'\n' ;;
-            esac
-          done <<< "$files"
-          if [ -n "$matches" ]; then
-            printf 'pull request changes internal/store or internal/testdb; testing:\n%s' "$matches"
-            echo "run=yes" >> "$GITHUB_OUTPUT"
+          selected=""
+          if [ -z "$BASE_SHA" ] || ! files=$(git diff -z --name-only --no-renames "$BASE_SHA"...HEAD | tr '\0' '\n'); then
+            echo "cannot list the changed files against base '$BASE_SHA'; testing every DB-backed package (fail safe)"
+            while IFS= read -r d; do
+              selected="$selected$(pkgarg "$d")"$'\n'
+            done <<< "$dbdirs"
           else
-            echo "pull request changes nothing under internal/store/ or internal/testdb/; not testing"
+            while IFS= read -r path; do
+              [ -n "$path" ] || continue
+              case "$path" in
+                internal/store/*|internal/testdb/*) selected="$selected./internal/store/..."$'\n' ;;
+              esac
+              # The owning package: the nearest enclosing directory with Go files.
+              d=$path
+              while [ "$d" != . ]; do
+                case "$d" in */*) d=${d%/*} ;; *) d=. ;; esac
+                if grep -Fxq -- "$d" <<< "$pkgdirs"; then
+                  if grep -Fxq -- "$d" <<< "$dbdirs"; then
+                    echo "$path -> $(pkgarg "$d")"
+                    selected="$selected$(pkgarg "$d")"$'\n'
+                  fi
+                  break
+                fi
+              done
+            done <<< "$files"
+          fi
+          packages=$(printf '%s' "$selected" | sed '/^$/d' | sort -u | tr '\n' ' ' | sed 's/ $//')
+          if [ -n "$packages" ]; then
+            echo "testing with PostgreSQL: $packages"
+            echo "run=yes" >> "$GITHUB_OUTPUT"
+            echo "packages=$packages" >> "$GITHUB_OUTPUT"
+          else
+            echo "pull request changes no package with DB-backed tests; not testing"
             echo "run=no" >> "$GITHUB_OUTPUT"
           fi
       - if: ${{ steps.decide.outputs.run == 'yes' }}
         uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
         with: {go-version-file: go.mod}
-      - name: go test ./internal/store/... (PostgreSQL, no race)
+      - name: go test the selected DB-backed packages (PostgreSQL, no race)
         if: ${{ steps.decide.outputs.run == 'yes' }}
         env:
           HANDOFFKEEP_TEST_DB_URL: postgres://handoffkeep:handoffkeep@localhost:5432/handoffkeep?sslmode=disable
-        run: go test -timeout 10m -count=1 ./internal/store/... -v
+          PACKAGES: ${{ steps.decide.outputs.packages }}
+        run: |
+          read -ra pkgs <<< "$PACKAGES"
+          if [ "${#pkgs[@]}" -eq 0 ]; then
+            echo "the decision step said run=yes but selected no packages"
+            exit 1
+          fi
+          go test -timeout 10m -count=1 -v "${pkgs[@]}"
 
   main-linux:
     # T-MAIN only. The whole Go suite against PostgreSQL WITHOUT -race, the
