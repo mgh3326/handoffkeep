@@ -44,6 +44,7 @@ func youtrackSyncCmd(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("youtrack sync", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	dryRun := fs.Bool("dry-run", false, "print planned actions without writing hk or YouTrack")
+	pull := fs.Bool("pull", false, "apply YouTrack activities to hk (first run only records the current position)")
 	limit := fs.Int("limit", 50, "maximum tasks pushed in this run")
 	activities := fs.Int("activities", 100, "maximum activities read in this run")
 	comments := fs.Int("comments", 50, "maximum comments pushed per task")
@@ -93,6 +94,7 @@ func youtrackSyncCmd(args []string, out io.Writer) error {
 	service := youtrack.NewService(st, client, youtrackServiceOptions())
 	report, err := service.Sync(ctx, youtrack.SyncOptions{
 		DryRun:        *dryRun,
+		Pull:          *pull,
 		TaskLimit:     *limit,
 		ActivityLimit: *activities,
 		CommentLimit:  *comments,

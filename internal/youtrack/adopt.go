@@ -31,20 +31,19 @@ type AdoptAction struct {
 	ID         string `json:"id"`
 	IssueID    string `json:"issue_id"`
 	ReadableID string `json:"readable_id,omitempty"`
-	// Action is mapped, missing (the issue is gone; the sync creates one),
-	// project_mismatch (the issue is in another project; left alone),
-	// hk_id_mismatch (the issue does not carry this task's hk ID), or
-	// decision_id_mismatch (the issue does not carry this decision's 결정 ID).
+	// Action describes adoption, a missing issue, or a refusal reason.
 	Action string `json:"action"`
 	// Comments is the number of hk comments marked as already posted.
-	Comments int `json:"comments,omitempty"`
+	Comments int    `json:"comments,omitempty"`
+	Reason   string `json:"reason,omitempty"`
 }
 
 // AdoptReport is the outcome of one adoption.
 type AdoptReport struct {
-	DryRun  bool          `json:"dry_run"`
-	Actions []AdoptAction `json:"actions"`
-	Errors  []string      `json:"errors,omitempty"`
+	DryRun  bool           `json:"dry_run"`
+	Actions []AdoptAction  `json:"actions"`
+	Counts  map[string]int `json:"counts"`
+	Errors  []string       `json:"errors,omitempty"`
 }
 
 // Adopt maps the issues the Python mirror created onto the Go sync's mirror
@@ -52,11 +51,10 @@ type AdoptReport struct {
 // ones, and marks the comments the mirror already posted so they are not
 // posted again. Run it once, before the first sync.
 //
-// A task whose issue is in a different YouTrack project from the one its hk
-// project maps to is left unmapped and reported: the sync would create a new
-// issue there, and that is a decision for the operator.
+// A task issue in a different YouTrack project is adopted too; the next push
+// moves the same stable issue id to the mapped project.
 func (s *Service) Adopt(ctx context.Context, st AdoptState, dryRun bool) (AdoptReport, error) {
-	report := AdoptReport{DryRun: dryRun, Actions: []AdoptAction{}}
+	report := AdoptReport{DryRun: dryRun, Actions: []AdoptAction{}, Counts: map[string]int{}}
 	taskKeys := sortedKeys(st.Issues)
 	for _, key := range taskKeys {
 		action, err := s.adoptTask(ctx, key, st, dryRun)
@@ -78,6 +76,25 @@ func (s *Service) Adopt(ctx context.Context, st AdoptState, dryRun bool) (AdoptR
 			continue
 		}
 		report.Actions = append(report.Actions, action)
+	}
+	for _, action := range report.Actions {
+		key := action.Action
+		if action.Kind == "decision" {
+			key = "decision_" + action.Action
+		} else if action.Action == "mapped" {
+			key = "adopt"
+		} else if action.Action == "adopt_moved" {
+			key = "adopt-moved"
+		} else if action.Action == "missing" {
+			key = "skip:missing_issue"
+		} else if action.Action == "hk_id_mismatch" || action.Action == "decision_id_mismatch" || action.Action == "project_mismatch" || action.Action == "refused" {
+			reason := action.Reason
+			if reason == "" {
+				reason = action.Action
+			}
+			key = "refuse:" + reason
+		}
+		report.Counts[key]++
 	}
 	return report, nil
 }
@@ -105,7 +122,7 @@ func (s *Service) adoptTask(ctx context.Context, key string, st AdoptState, dryR
 		hkProject = *task.Project
 	}
 	_, projectID, err := s.projectForTask(ctx, hkProject, false)
-	if err != nil {
+	if err != nil && !errors.Is(err, ErrProjectMissing) {
 		return action, err
 	}
 	issue, err := s.client.GetIssue(ctx, issueID)
@@ -117,8 +134,8 @@ func (s *Service) adoptTask(ctx context.Context, key string, st AdoptState, dryR
 		return action, err
 	}
 	action.ReadableID = issue.IDReadable
-	if issue.Project == nil || issue.Project.ID != projectID {
-		action.Action = "project_mismatch"
+	if issue.Project == nil {
+		action.Action, action.Reason = "refused", "missing_project"
 		return action, nil
 	}
 	// The next sync writes this task's description and fields into the issue,
@@ -126,9 +143,19 @@ func (s *Service) adoptTask(ctx context.Context, key string, st AdoptState, dryR
 	// the Python state is left for the operator, not linked.
 	if !hasIDField(issue, s.schema.HKIDField, taskID) {
 		action.Action = "hk_id_mismatch"
+		action.Reason = "issue_hk_id_mismatch"
+		return action, nil
+	}
+	if owner, exists, err := s.store.FindYouTrackMirrorByIssueID(ctx, issue.ID); err != nil {
+		return action, err
+	} else if exists && owner.TaskID != taskID {
+		action.Action, action.Reason = "hk_id_mismatch", "issue_already_linked_to_another_task"
 		return action, nil
 	}
 	action.Action = "mapped"
+	if projectID != "" && issue.Project.ID != projectID {
+		action.Action = "adopt_moved"
+	}
 	if !dryRun {
 		if _, err := s.store.UpsertYouTrackMirror(ctx, store.YouTrackMirrorInput{TaskID: taskID, IssueID: issue.ID, DisplayRef: issue.IDReadable, URL: s.issueURL(issue.IDReadable), Tenant: s.tenant, Role: "mirror"}); err != nil {
 			return action, err
@@ -179,6 +206,7 @@ func (s *Service) adoptDecision(ctx context.Context, key string, row AdoptDecisi
 	// issue its mapping names, so the issue's 결정 ID must be this decision.
 	if !hasIDField(issue, DecIDField, decisionID) {
 		action.Action = "decision_id_mismatch"
+		action.Reason = "issue_decision_id_mismatch"
 		return action, nil
 	}
 	action.Action = "mapped"

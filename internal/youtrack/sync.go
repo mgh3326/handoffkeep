@@ -17,6 +17,7 @@ import (
 // list is a batch and one run never tries to catch up in a single pass.
 type SyncOptions struct {
 	DryRun        bool
+	Pull          bool
 	TaskLimit     int
 	ActivityLimit int
 	CommentLimit  int
@@ -57,7 +58,9 @@ type PushAction struct {
 	ReadableID string `json:"readable_id,omitempty"`
 	// Action is create, update, move, comment or unchanged.
 	Action    string `json:"action"`
+	Reason    string `json:"reason,omitempty"`
 	CommentID int64  `json:"comment_id,omitempty"`
+	Adopted   bool   `json:"adopted,omitempty"`
 }
 
 type PullAction struct {
@@ -87,6 +90,7 @@ type SyncReport struct {
 	Skipped   int              `json:"skipped"`
 	Warnings  []string         `json:"warnings,omitempty"`
 	Errors    []string         `json:"errors,omitempty"`
+	Counts    map[string]int   `json:"counts"`
 }
 
 func (r *SyncReport) fail(format string, args ...any) {
@@ -97,12 +101,12 @@ func (r *SyncReport) warn(format string, args ...any) {
 	r.Warnings = append(r.Warnings, fmt.Sprintf(format, args...))
 }
 
-// Sync runs one bounded pass: pending reverts, one page of YouTrack → hk
-// activities, the priority/lane outbox, the field-cache refresh, the hk →
-// YouTrack task push, the saved searches, and the DEC decision mirror. In dry-run mode nothing on either side is written.
+// Sync runs one bounded pass: optionally pull YouTrack activities and refresh
+// their field cache, then drain the hk-owned outbox and push tasks, saved
+// searches, DEC issues, and documents to YouTrack. Dry-run mode writes neither side.
 func (s *Service) Sync(ctx context.Context, opts SyncOptions) (SyncReport, error) {
 	opts = opts.withDefaults()
-	report := SyncReport{DryRun: opts.DryRun, Outbox: []OutboxAction{}, Pushed: []PushAction{}, Pulled: []PullAction{}, Decisions: []DecisionAction{}, Docs: []DocAction{}}
+	report := SyncReport{DryRun: opts.DryRun, Outbox: []OutboxAction{}, Pushed: []PushAction{}, Pulled: []PullAction{}, Decisions: []DecisionAction{}, Docs: []DocAction{}, Counts: map[string]int{}}
 	me, err := s.client.Me(ctx)
 	if err != nil {
 		return report, fmt.Errorf("youtrack me: %w", err)
@@ -115,22 +119,28 @@ func (s *Service) Sync(ctx context.Context, opts SyncOptions) (SyncReport, error
 		report.Bot = me.ID
 	}
 
-	// YouTrack -> hk first. The pull applies the operator's latest change to
+	// When enabled, YouTrack -> hk runs first. The pull applies the operator's latest change to
 	// PG; the outbox and the push then send the hk execution value. The other
 	// order can overwrite YouTrack with an hk value the operator has already
 	// changed, and this run would then apply their older activity and leave
 	// the two sides inverted.
-	if !opts.DryRun {
+	if opts.Pull && !opts.DryRun {
 		s.runPendingReverts(ctx, opts.RevertLimit, &report)
 	}
-	s.pull(ctx, opts, me, &report)
+	if opts.Pull {
+		s.pull(ctx, opts, me, &report)
+	}
 	if opts.DryRun {
-		if mirrors, err := s.store.RefreshYouTrackFields(ctx, opts.RefreshLimit); err == nil {
-			report.Refreshed = len(mirrors)
+		if opts.Pull {
+			if mirrors, err := s.store.RefreshYouTrackFields(ctx, opts.RefreshLimit); err == nil {
+				report.Refreshed = len(mirrors)
+			}
 		}
 	} else {
 		s.drainOutbox(ctx, opts.OutboxLimit, &report)
-		s.refreshCache(ctx, opts.RefreshLimit, &report)
+		if opts.Pull {
+			s.refreshCache(ctx, opts.RefreshLimit, &report)
+		}
 	}
 
 	if err := s.push(ctx, opts, &report); err != nil {
@@ -143,7 +153,47 @@ func (s *Service) Sync(ctx context.Context, opts SyncOptions) (SyncReport, error
 	}
 	s.syncDecisions(ctx, opts, &report)
 	s.syncDocs(ctx, opts, &report)
+	report.Counts = syncActionCounts(report)
 	return report, nil
+}
+
+func syncActionCounts(report SyncReport) map[string]int {
+	counts := map[string]int{}
+	for _, action := range report.Pushed {
+		if action.Adopted {
+			counts["adopt"]++
+		}
+		switch action.Action {
+		case "create":
+			counts["create"]++
+		case "update":
+			counts["update"]++
+		case "move":
+			counts["move"]++
+			counts["update"]++
+		case "skipped":
+			reason := action.Reason
+			if reason == "" {
+				reason = "unspecified"
+			}
+			counts["skip:"+reason]++
+		}
+	}
+	for _, action := range report.Pulled {
+		if action.Outcome == store.YouTrackOutcomeRejected {
+			counts["refuse:"+action.Detail]++
+		} else if action.Outcome == "would_skip" {
+			counts["skip:"+action.Detail]++
+		} else if action.Outcome == store.YouTrackOutcomeSkipped {
+			counts["skip:"+action.Detail]++
+		}
+	}
+	for _, action := range report.Outbox {
+		if action.Outcome == "unmirrored" {
+			counts["skip:unmirrored_outbox"]++
+		}
+	}
+	return counts
 }
 
 // drainOutbox sends the priority and lane writes hk committed to PG. A
@@ -360,6 +410,7 @@ func (s *Service) pushTask(ctx context.Context, task store.Task, opts SyncOption
 		if errors.Is(err, ErrProjectMissing) {
 			report.warn("task %d: YouTrack 프로젝트 매핑이 없어 건너뜁니다 (%v)", task.ID, err)
 			action.Action = "skipped"
+			action.Reason = "project_unmapped"
 			return action, nil
 		}
 		return action, err
@@ -384,6 +435,8 @@ func (s *Service) pushTask(ctx context.Context, task store.Task, opts SyncOption
 		}
 		if found {
 			action.IssueID, action.ReadableID = existing.ID, existing.IDReadable
+			action.Adopted = true
+			mirror = store.YouTrackMirror{TaskID: task.ID, IssueID: existing.ID, DisplayRef: existing.IDReadable}
 			if !opts.DryRun {
 				// Adopt the issue without a watermark: the field push below
 				// has not run yet, and MarkYouTrackTaskSynced advances it only
@@ -427,19 +480,20 @@ func (s *Service) pushTask(ctx context.Context, task store.Task, opts SyncOption
 	}
 	if mirrored && needsFields && !created {
 		action.Action = "update"
-		if !opts.DryRun {
-			// A task that changed project moves with its issue; the display
-			// number changes but the link stays on the stable issue id.
-			current, err := s.client.GetIssue(ctx, mirror.IssueID)
-			if err != nil {
-				return action, err
-			}
-			if current.Project != nil && current.Project.ID != "" && current.Project.ID != projectID {
+		// A task that changed project moves with its issue; the display
+		// number changes but the link stays on the stable issue id. Read the
+		// current project in dry-run too, so the plan includes the move.
+		current, err := s.client.GetIssue(ctx, mirror.IssueID)
+		if err != nil {
+			return action, err
+		}
+		if current.Project != nil && current.Project.ID != "" && current.Project.ID != projectID {
+			action.Action = "move"
+			if !opts.DryRun {
 				moved, err := s.client.MoveIssue(ctx, mirror.IssueID, projectID)
 				if err != nil {
 					return action, err
 				}
-				action.Action = "move"
 				action.ReadableID = moved.IDReadable
 				if moved.IDReadable != "" {
 					// Only the display number changed. The watermark advances
@@ -450,6 +504,8 @@ func (s *Service) pushTask(ctx context.Context, task store.Task, opts SyncOption
 					}
 				}
 			}
+		}
+		if !opts.DryRun {
 			view, err := s.renderTask(ctx, task)
 			if err != nil {
 				return action, err
@@ -649,6 +705,10 @@ func (s *Service) pull(ctx context.Context, opts SyncOptions, me User, report *S
 		report.fail("cursor: %v", err)
 		return
 	}
+	if cursor.Cursor == "" {
+		s.baselinePullCursor(ctx, opts, report)
+		return
+	}
 	page, err := s.client.ActivitiesPage(ctx, cursor.Cursor, opts.ActivityLimit)
 	if err != nil {
 		report.fail("activities: %v", err)
@@ -715,6 +775,37 @@ func (s *Service) pull(ctx context.Context, opts SyncOptions, me User, report *S
 			report.fail("cursor advance: %v", err)
 		}
 	}
+}
+
+// baselinePullCursor starts opt-in pull at the current end of history. The
+// API's empty cursor begins at the oldest activity, so drain pages without
+// applying them before saving the final position.
+func (s *Service) baselinePullCursor(ctx context.Context, opts SyncOptions, report *SyncReport) {
+	cursor := ""
+	for pages := 0; pages < 10000; pages++ {
+		previous := cursor
+		page, err := s.client.ActivitiesPage(ctx, cursor, opts.ActivityLimit)
+		if err != nil {
+			report.fail("activity baseline: %v", err)
+			return
+		}
+		if page.AfterCursor != "" {
+			cursor = page.AfterCursor
+		}
+		if !page.HasAfter {
+			if cursor != "" && !opts.DryRun {
+				if err := s.store.AdvanceYouTrackCursor(ctx, cursor); err != nil {
+					report.fail("cursor baseline: %v", err)
+				}
+			}
+			return
+		}
+		if page.AfterCursor == "" || page.AfterCursor == previous {
+			report.fail("activity baseline: cursor did not advance")
+			return
+		}
+	}
+	report.fail("activity baseline: page limit exceeded")
 }
 
 // mapActivity reduces one activitiesPage row to the store input. relevant is

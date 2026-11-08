@@ -174,6 +174,41 @@ func TestAdoptionMapsPythonIssuesWithoutDuplicates(t *testing.T) {
 	}
 }
 
+func TestAdoptHKIssueForMappedOtherProjectThenMoveWithoutDuplicate(t *testing.T) {
+	fs := newFakeStore()
+	yt := newFakeYouTrack()
+	task := fs.addTask("panewire", "handoffkeep", "legacy issue", store.StateBacklog, 2)
+	issue := Issue{ID: "legacy-1", IDReadable: "HK-901", Project: &ProjectRef{ID: "0-1", ShortName: "HK"}, CustomFields: []IssueField{{Name: "hk ID", Value: json.RawMessage(itoa(task.ID))}}}
+	yt.issues[issue.ID] = issue
+	svc := newTestService(t, yt, fs)
+	report, err := svc.Adopt(context.Background(), AdoptState{Issues: map[string]string{itoa(task.ID): issue.ID}}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Actions) != 1 || report.Actions[0].Action != "adopt_moved" || report.Counts["adopt-moved"] != 1 {
+		t.Fatalf("dry-run adoption=%+v", report)
+	}
+	report, err = svc.Adopt(context.Background(), AdoptState{Issues: map[string]string{itoa(task.ID): issue.ID}}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fs.mirrors[task.ID]; got.IssueID != issue.ID {
+		t.Fatalf("mirror=%+v", got)
+	}
+	if _, err := svc.Sync(context.Background(), SyncOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if yt.createCalls != 0 {
+		t.Fatalf("created duplicate issue %d times", yt.createCalls)
+	}
+	if got := yt.issues[issue.ID]; got.Project == nil || got.Project.ID != "0-2" || got.ID != issue.ID {
+		t.Fatalf("issue was not moved in place: %+v", got)
+	}
+	if got := fs.mirrors[task.ID]; got.IssueID != issue.ID || got.DisplayRef != "PW-1" {
+		t.Fatalf("move lost stable link or display ref: %+v", got)
+	}
+}
+
 func TestStalledFlagIsSetAndCleared(t *testing.T) {
 	fs := newFakeStore()
 	yt := newFakeYouTrack()
