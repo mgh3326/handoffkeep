@@ -1,15 +1,25 @@
 # client — the public hk API client
 
 `github.com/mgh3326/handoffkeep/client` is the Go client for hk's bearer-token
-`/v1` API. It holds the one transport hk uses: the hk CLI reaches it through
-`internal/remote`, and the fleet services (panewire, mergewake) import it to
-call hk over HTTP instead of running the hk CLI (hk:doc
+`/v1` API. The fleet services (panewire, mergewake) import it to call hk over
+HTTP instead of running the hk CLI (hk:doc
 `decision/2026-11-08/fleet-dependency-boundaries` §1, §5).
 
-It imports only the standard library and hk's stdlib-only
-`internal/buildinfo`. It never imports hk's store package, so importing it
-adds no hk server dependency (pgx and others) to your build.
-`TestClientImportsOnlyStandardLibrary` enforces this.
+It offers fleet calls only. It exports no way to build or send a raw hk
+request: no request builder, no sender, no raw `*http.Client` and no call that
+takes a path. Every hk request carries the bearer token and the Cloudflare
+Access pair, so raw requests stay inside hk, in the module-internal transport
+`internal/hktransport`, which Go does not let another module import. That
+transport is the one hk's own CLI uses through `internal/remote`. It sends a
+request only to the scheme and host of `Client.URL`, and it never puts a
+redirect's `Location` in an error (hk 3544). If you need a call that is not
+here, add it to this package as a fleet call. `TestClientExportsOnlyFleetCalls`
+fails when an exported name is not on its list.
+
+It imports only the standard library and two stdlib-only hk packages,
+`internal/hktransport` and `internal/buildinfo`. It never imports hk's store
+package, so importing it adds no hk server dependency (pgx and others) to your
+build. `TestClientImportsOnlyStandardLibrary` enforces this.
 
 ## Credentials
 
@@ -28,9 +38,10 @@ c := client.Client{
 task, found, err := c.GetTask(ctx, 3544)
 ```
 
-Every request carries `Authorization: Bearer <token>` and an explicit
-`User-Agent: handoffkeep/<revision>`. The CF Access headers go only to the
-configured URL, and only when both halves are set. A redirect to another host
+`URL` must be an absolute `http` or `https` URL with a host; a path prefix on
+it is kept. Every request carries `Authorization: Bearer <token>` and an
+explicit `User-Agent: handoffkeep/<revision>`. The CF Access headers go only to
+the configured URL, and only when both halves are set. A redirect to another host
 or scheme is never followed, same-host redirects stop after ten hops, and a
 presign answer (`AttachmentURL`) is returned, never followed.
 
