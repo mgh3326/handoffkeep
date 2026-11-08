@@ -230,3 +230,55 @@ func TestDecisionAskReplayAndOperatorOnlyRefusal(t *testing.T) {
 		t.Fatalf("answer=%+v", answer)
 	}
 }
+
+func TestTaskUpdateLabelsByName(t *testing.T) {
+	st := newOperatorStore(t)
+	ctx := context.Background()
+	task := newOperatorTask(t, st, "task update labels fixture")
+	label, err := st.SaveLabel(ctx, store.Label{Name: "dots-review", EditLevel: "anyone"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := writesSession(t, st)
+	read := func() store.Task {
+		t.Helper()
+		x, found, err := st.GetTask(ctx, task.ID)
+		if err != nil || !found {
+			t.Fatalf("read task: found=%v err=%v", found, err)
+		}
+		return x
+	}
+
+	// An unknown label name refuses the whole call and writes nothing.
+	before := read()
+	text, isError := toolText(t, session, "task_update", map[string]any{
+		"id": task.ID, "expected_updated_at": before.UpdatedAt.UTC().Format(time.RFC3339Nano),
+		"idempotency_key": "lbl-unknown", "add_labels": []string{"no-such-label"},
+	})
+	if !isError || !strings.Contains(text, store.ErrLabelNotFound.Error()) {
+		t.Fatalf("unknown label: isError=%v text=%q", isError, text)
+	}
+	if !read().UpdatedAt.Equal(before.UpdatedAt) {
+		t.Fatal("a refused label update changed the task")
+	}
+
+	added := callTool[mcpTaskUpdateOut](t, session, "task_update", map[string]any{
+		"id": task.ID, "expected_updated_at": before.UpdatedAt.UTC().Format(time.RFC3339Nano),
+		"idempotency_key": "lbl-1", "add_labels": []string{" dots-review "},
+	})
+	if len(added.Changed) != 1 || added.Changed[0] != "labels" {
+		t.Fatalf("add label=%+v", added)
+	}
+	if !containsLabel(read().Labels, label.ID) {
+		t.Fatalf("label %d not on the task: %+v", label.ID, read().Labels)
+	}
+}
+
+func containsLabel(ids []int64, id int64) bool {
+	for _, got := range ids {
+		if got == id {
+			return true
+		}
+	}
+	return false
+}

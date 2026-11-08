@@ -124,45 +124,58 @@ func (s *Store) SetTaskLabel(ctx context.Context, id, labelID int64, by string, 
 		}
 		return Task{}, false, err
 	}
-	if err = s.wrkTaskFenceTx(ctx, tx, x, "", true); err != nil {
-		return Task{}, false, err
-	}
-	var retired *time.Time
-	if err = tx.QueryRow(ctx, `SELECT retired_at FROM labels WHERE id=$1 FOR SHARE`, labelID).Scan(&retired); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return Task{}, false, ErrLabelNotFound
-		}
-		return Task{}, false, err
-	}
-	if attach && retired != nil {
-		return Task{}, false, ErrLabelRetired
-	}
-	var changed bool
-	if attach {
-		tag, e := tx.Exec(ctx, `INSERT INTO task_labels(task_id,label_id) VALUES($1,$2) ON CONFLICT DO NOTHING`, id, labelID)
-		err = e
-		changed = tag.RowsAffected() > 0
-	} else {
-		tag, e := tx.Exec(ctx, `DELETE FROM task_labels WHERE task_id=$1 AND label_id=$2`, id, labelID)
-		err = e
-		changed = tag.RowsAffected() > 0
-	}
+	changed, err := s.setTaskLabelTx(ctx, tx, &x, labelID, by, attach)
 	if err != nil {
 		return Task{}, false, err
 	}
+	return x, changed, tx.Commit(ctx)
+}
+
+// setTaskLabelTx attaches or detaches one label inside the caller's transaction.
+// The caller has locked the task row and loaded it into x; on a change x carries
+// the new updated_at.
+func (s *Store) setTaskLabelTx(ctx context.Context, tx pgx.Tx, x *Task, labelID int64, by string, attach bool) (bool, error) {
+	id := x.ID
+	if err := s.wrkTaskFenceTx(ctx, tx, *x, "", true); err != nil {
+		return false, err
+	}
+	var retired *time.Time
+	if err := tx.QueryRow(ctx, `SELECT retired_at FROM labels WHERE id=$1 FOR SHARE`, labelID).Scan(&retired); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, ErrLabelNotFound
+		}
+		return false, err
+	}
+	if attach && retired != nil {
+		return false, ErrLabelRetired
+	}
+	var changed bool
+	if attach {
+		tag, err := tx.Exec(ctx, `INSERT INTO task_labels(task_id,label_id) VALUES($1,$2) ON CONFLICT DO NOTHING`, id, labelID)
+		if err != nil {
+			return false, err
+		}
+		changed = tag.RowsAffected() > 0
+	} else {
+		tag, err := tx.Exec(ctx, `DELETE FROM task_labels WHERE task_id=$1 AND label_id=$2`, id, labelID)
+		if err != nil {
+			return false, err
+		}
+		changed = tag.RowsAffected() > 0
+	}
 	if !changed {
-		return x, false, tx.Commit(ctx)
+		return false, nil
 	}
 	from, to := "", fmt.Sprint(labelID)
 	if !attach {
 		from, to = to, ""
 	}
 	now := time.Now().UTC()
-	if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: id, Kind: "metadata", From: x.State, To: x.State, By: by, Refs: x.Refs, At: now, Field: "labels", FromValue: from, ToValue: to}); err != nil {
-		return Task{}, false, err
+	if _, _, err := insertEvent(ctx, tx, taskEventInput{TaskID: id, Kind: "metadata", From: x.State, To: x.State, By: by, Refs: x.Refs, At: now, Field: "labels", FromValue: from, ToValue: to}); err != nil {
+		return false, err
 	}
-	if err = scanTask(tx.QueryRow(ctx, `UPDATE tasks SET updated_at=$2 WHERE id=$1 RETURNING `+taskColumns, id, now), &x); err != nil {
-		return Task{}, false, err
+	if err := scanTask(tx.QueryRow(ctx, `UPDATE tasks SET updated_at=$2 WHERE id=$1 RETURNING `+taskColumns, id, now), x); err != nil {
+		return false, err
 	}
-	return x, true, tx.Commit(ctx)
+	return true, nil
 }

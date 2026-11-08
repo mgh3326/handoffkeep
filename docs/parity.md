@@ -40,7 +40,7 @@ inbox and disposition writes refuse them.
 | Tasks | Priority | hk 우선순위 is pulled, pushed through the outbox, and reverted on refusal | POST /ui/api/tasks/{id}/priority | POST /v1/tasks/{id}/transition with a priority (only on a triage exit) | tasks transition --priority only on a triage exit; tasks add --priority | task_update (priority, hk 3465) | Operator (console/YouTrack); bearer on a triage exit; MCP Access (dots) | task_events field=priority; ui.write; outbox | Set again; YouTrack refusal reverts | internal/ui/task_priority_test.go, internal/api/youtrack_test.go, internal/mcp/operator_writes_test.go |
 | Tasks | Lane / relane | 레인 is pulled and pushed; a refused value is reverted with a comment | POST /ui/api/tasks/{id}/relane | POST /v1/tasks/relane (batch) | tasks relane | task_update (lane, hk 3465) | Operator (console/YouTrack); bearer (API/CLI); MCP Access (dots) | task_events field=lane; ui.write; relane lane events; outbox | relane again; the console sends from_key so the move can be undone | internal/ui/board_relane_test.go, internal/api/relane_test.go, internal/youtrack/sync_test.go |
 | Tasks | Project | hk project maps to a YouTrack project; a change moves the issue and keeps its stable id | — | POST /v1/tasks/{id}/project | tasks project | — | Operator via YouTrack; bearer | task_events kind=project | Set again | internal/api/task_project_test.go, internal/youtrack/sync_test.go |
-| Tasks | Labels | — (not in the YouTrack field contract) | — | POST /v1/tasks/{id}/labels, GET/POST /v1/labels, PUT /v1/labels/{label}, POST /v1/labels/{label}/retire | tasks label, tasks labels | — | bearer | task_events field=labels | Remove the label; labels are never deleted, only retired | cmd/handoffkeep/task_model_test.go |
+| Tasks | Labels | — (not in the YouTrack field contract) | — | POST /v1/tasks/{id}/labels, GET/POST /v1/labels, PUT /v1/labels/{label}, POST /v1/labels/{label}/retire | tasks label, tasks labels | task_update (labels, hk 3465) | bearer; MCP Access (dots) | task_events field=labels | Remove the label; labels are never deleted, only retired | cmd/handoffkeep/task_model_test.go |
 | Tasks | Due date | — | — | POST /v1/tasks/{id}/due | tasks due | — | bearer | task_events field=due | --clear | cmd/handoffkeep/task_model_test.go |
 | Tasks | Parent / children | — | — (read on the task page) | POST /v1/tasks/{id}/parent | tasks parent, tasks add --parent | — | bearer | task_events | Re-parent or clear | cmd/handoffkeep/task_hierarchy_test.go, internal/store/hierarchy_test.go |
 | Tasks | Relations | — | — (read on the task page) | POST /v1/tasks/{id}/relations, POST /v1/tasks/{id}/relations/remove | tasks relate, tasks unrelate | — | bearer | task_events | unrelate | cmd/handoffkeep/task_hierarchy_test.go, internal/store/hierarchy_test.go |
@@ -96,7 +96,6 @@ exception to `ConsoleWrites`.
 | Capability | Why MCP has no tool | Follow-up |
 | --- | --- | --- |
 | Project (set on a task) | Basic task write | hk 3465 |
-| Labels | Basic task write | hk 3465 |
 | Due date | Basic task write | hk 3465 |
 | Subscribers | Basic task write | hk 3465 |
 | Parent / children | Work-management write | hk 3474 |
@@ -164,7 +163,7 @@ Read tools set `readOnlyHint: true`. The write tools (`put_checkpoint`,
 `task_comment`, `task_intake`) set `readOnlyHint: false` and
 `destructiveHint: false`. Of these, `decision_answer` moves a task's state by
 answering the task's request; the rest add records. `task_update` (hk 3465)
-also moves a task's state, lane and priority.
+also moves a task's state, lane, priority and labels.
 
 After the baseline, `dots_inbox` lists hk dots requests over HTTP and
 `dots_reply` records a reply and its task state change over HTTP. See
@@ -176,13 +175,14 @@ tools hk 3461 added after the baseline; all four are read-only and HTTP-only.
 hk 3465 adds `task_update` and `decision_ask` (HTTP only; both `readOnlyHint: false`,
 `destructiveHint: false`). They join the write contract every dots write follows:
 
-- `task_update` changes state, lane or priority in one call. `expected_updated_at`
+- `task_update` changes state, lane, priority or labels in one call. `expected_updated_at`
   is the task's `updated_at` the caller read; a task that moved since returns
   `revision_conflict` and nothing is written. `idempotency_key` is required; a
   repeat returns the first call's result. The response's `youtrack_sync` is
   `sync_pending` for a mirrored task with a change (the YouTrack push is queued),
-  `applied` otherwise; `sync_failed` is not reported by this tool yet. Labels
-  are not in this tool yet (the Labels row above).
+  `applied` otherwise; `sync_failed` is not reported by this tool yet. Labels are
+  attached and detached by name through `add_labels` and `remove_labels`; the
+  response's `changed` lists `labels` when one moved.
 - `decision_ask` records a structured decision request on a task through the same
   path as `tasks decision-request`; `idempotency_key` is required. A request with
   `answer_policy` `operator_direct` (or `human_only`) is operator-only: `decision_answer`
