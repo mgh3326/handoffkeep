@@ -1993,13 +1993,13 @@ func serve(args []string, errout io.Writer) error {
 	workers = append(workers, lastActivityRepairWorker{store: st})
 	linear := linearFromEnv(st)
 	if linear.boardWorker != nil {
-		workers = append(workers, linear.boardWorker)
+		workers = append(workers, singletonWorker{store: st, id: store.LinearBoardWorkerLock, worker: linear.boardWorker})
 	}
 	if linear.opsWorker != nil {
 		workers = append(workers, linear.opsWorker)
 	}
 	if forwarder := notificationForwarderFromEnv(st); forwarder != nil {
-		workers = append(workers, forwarder)
+		workers = append(workers, singletonWorker{store: st, id: store.HubForwardWorkerLock, worker: forwarder})
 	}
 	notifier, e := decisionNotifierFromEnv(st)
 	if e != nil {
