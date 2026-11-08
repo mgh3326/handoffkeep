@@ -127,16 +127,20 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
-          # Full history and every tag: the previous release is chosen by tag,
-          # and its source is exported from the checkout to be built.
-          ref: ${{ needs.target.outputs.sha }}
+          # Check out the revision that defines this workflow, not the target:
+          # a dispatch may name an old head that predates this script, and the
+          # job must still run. Full history and every tag so both the target
+          # and the previous release resolve; the script builds both from their
+          # commits, never the working tree.
           fetch-depth: 0
       - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
         with: {go-version-file: go.mod}
       - name: Previous release on the target schema
         env:
-          # Only a dispatch can name a base; empty means the newest v* tag
-          # before the target.
+          # The target commit to build; the checkout is only the workflow
+          # revision. Only a dispatch can name a base; empty means the newest
+          # v* tag before the target.
+          TARGET_SHA: ${{ needs.target.outputs.sha }}
           BASE: ${{ inputs.base }}
         run: |
           if [[ -n "$BASE" ]]; then

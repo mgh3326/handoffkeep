@@ -126,6 +126,18 @@ func stepRuns(j tierJob) string {
 	return b.String()
 }
 
+// stepEnv renders every step-level env entry as KEY=value lines so a guard can
+// pin what a step passes to its script.
+func stepEnv(j tierJob) string {
+	var b strings.Builder
+	for _, s := range j.Steps {
+		for k, v := range s.Env {
+			fmt.Fprintf(&b, "%s=%v\n", k, v)
+		}
+	}
+	return b.String()
+}
+
 // tierOf classifies a ci.yml job: "deploy", "main" (non-PR only) or "pr".
 // A PR-tier job may also run on other events; it is the light half either way.
 func tierOf(name string, j tierJob) string {
@@ -484,6 +496,28 @@ func deployWorkflowProblems(raw []byte) []string {
 		}
 		if ro := runsOnText(compat.RunsOn); ro != "ubuntu-latest" {
 			add("schema-compat runs-on is %q, want hosted ubuntu-latest", ro)
+		}
+		// The checkout must stay on the workflow revision: a dispatch may
+		// name an old head that predates the script, and the job has to keep
+		// running (review on #237). The target reaches the script as
+		// TARGET_SHA, which it builds from that commit.
+		fullHistory := false
+		for _, s := range compat.Steps {
+			if !hasAction(s.Uses, "actions/checkout") {
+				continue
+			}
+			if v, ok := s.With["ref"].(string); ok && v != "" {
+				add("schema-compat checkout must not pin the target ref %q; it checks out the workflow revision", v)
+			}
+			if fmt.Sprint(s.With["fetch-depth"]) == "0" {
+				fullHistory = true
+			}
+		}
+		if !fullHistory {
+			add("schema-compat checkout needs fetch-depth: 0 so the target and base commits resolve")
+		}
+		if !strings.Contains(stepEnv(compat), "TARGET_SHA=${{ needs.target.outputs.sha }}") {
+			add("schema-compat must pass TARGET_SHA=${{ needs.target.outputs.sha }} to the script")
 		}
 	}
 
@@ -1022,12 +1056,14 @@ func TestCITierMutantsTurnRed(t *testing.T) {
 		{"deploy-no-workflow-run", "  workflow_run:\n    # ci.yml is by name, the only workflow it may follow. branches: [main] drops\n    # every pull request and any-ref call at the trigger, before a run exists;\n    # the target job repeats the main-push test so a manually edited trigger\n    # cannot deploy a PR head.\n    workflows: [ci]\n    types: [completed]\n    branches: [main]\n", ""},
 		{"deploy-follows-any-branch", "    branches: [main]\n", "    branches: [main, develop]\n"},
 		{"deploy-unpinned-context", "context=deploy-ok", "context=ci-ok"},
-		{"deploy-status-on-dispatch-sha", "TARGET_SHA: ${{ needs.target.outputs.sha }}", "TARGET_SHA: ${{ github.sha }}"},
+		{"deploy-status-on-dispatch-sha", "      TARGET_SHA: ${{ needs.target.outputs.sha }}\n      RESULT:", "      TARGET_SHA: ${{ github.sha }}\n      RESULT:"},
 		{"deploy-status-without-always", "if: ${{ always() && needs.target.result == 'success' }}", "if: ${{ needs.target.result == 'success' }}"},
 		{"deploy-call-without-suite", "      suite: deploy", "      suite: all"},
 		{"deploy-schema-compat-dropped", "            bash scripts/test-previous-release-schema.sh \"$BASE\"\n          else\n            bash scripts/test-previous-release-schema.sh\n", "            true\n          else\n            true\n"},
 		{"deploy-schema-compat-not-in-status", "needs: [target, ci, schema-compat]", "needs: [target, ci]"},
-		{"deploy-schema-compat-no-db", "      HANDOFFKEEP_TEST_DB_URL: postgres://handoffkeep:handoffkeep@localhost:5432/handoffkeep?sslmode=disable\n    steps:\n      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0\n        with:\n          # Full history", "    steps:\n      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0\n        with:\n          # Full history"},
+		{"deploy-schema-compat-no-db", "      HANDOFFKEEP_TEST_DB_URL: postgres://handoffkeep:handoffkeep@localhost:5432/handoffkeep?sslmode=disable\n    steps:\n      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0\n        with:\n          # Check out the revision", "    steps:\n      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0\n        with:\n          # Check out the revision"},
+		{"deploy-schema-compat-pins-target-ref", "          fetch-depth: 0\n      - uses: actions/setup-go", "          ref: ${{ needs.target.outputs.sha }}\n          fetch-depth: 0\n      - uses: actions/setup-go"},
+		{"deploy-schema-compat-no-target-sha", "          TARGET_SHA: ${{ needs.target.outputs.sha }}\n", ""},
 	} {
 		t.Run(m.name, func(t *testing.T) {
 			src := string(deploy)

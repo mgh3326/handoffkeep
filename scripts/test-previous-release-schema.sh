@@ -3,18 +3,24 @@
 # Blue-green starts the new colour, which migrates the shared database, while
 # the old colour keeps serving: a migration may only expand the schema (see
 # AGENTS.md §Migrations). This script proves the observable part of that rule
-# for one target checkout:
+# for one commit:
 #
-#   1. build the target binary from the current checkout
+#   1. build the target binary from TARGET_SHA (default HEAD)
 #   2. migrate a fresh database with it and seed one task through the API
 #   3. start the previous release's server against that schema and exercise a
 #      smoke set with a test token: healthz, task list/show/create, comment
 #      create and list, decision list
 #
-# The previous release is the newest v* tag reachable from HEAD (the target
-# sha), or an explicit base commit/tag.
+# The previous release is the newest v* tag reachable from the target, or an
+# explicit base commit/tag.
 #
-#   scripts/test-previous-release-schema.sh [base-sha-or-tag]
+#   TARGET_SHA=<sha> scripts/test-previous-release-schema.sh [base-sha-or-tag]
+#
+# Both binaries are built from git commits, not the working tree, so the
+# checkout may be the workflow revision rather than the target: the deploy job
+# must keep this script available when a dispatch names an old head that
+# predates it. TARGET_SHA must be a commit in this checkout (fetch tags and
+# history first).
 #
 # Needs HANDOFFKEEP_TEST_DB_URL, a maintenance URL with CREATE DATABASE
 # (see AGENTS.md). The deploy tier runs this job; locally it needs a running
@@ -58,7 +64,9 @@ say() {
 
 # --- pick the previous release -------------------------------------------
 
-target_commit=$(git rev-parse --verify 'HEAD^{commit}')
+target_input=${TARGET_SHA:-HEAD}
+git cat-file -e "$target_input^{commit}" 2>/dev/null || fail "target '$target_input' is not a commit in this checkout"
+target_commit=$(git rev-parse --verify "$target_input^{commit}")
 
 if [[ -n "$base_input" ]]; then
   git cat-file -e "$base_input^{commit}" 2>/dev/null || fail "base '$base_input' is not a commit in this checkout"
@@ -87,9 +95,13 @@ fi
 
 say "target $target_commit, previous release $base_desc ($base_commit)"
 
-# --- build both binaries --------------------------------------------------
+# --- build both binaries from their commits ------------------------------
 
-go build -o "$tmp/target" ./cmd/handoffkeep
+# The working tree is not trusted to be the target: a dispatch may check out
+# the workflow revision while naming an old head. Export each commit.
+mkdir -p "$tmp/target-src"
+git archive "$target_commit" | tar -x -C "$tmp/target-src"
+(cd "$tmp/target-src" && go build -o "$tmp/target" ./cmd/handoffkeep)
 
 mkdir -p "$tmp/previous-src"
 git archive "$base_commit" | tar -x -C "$tmp/previous-src"
