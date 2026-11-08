@@ -2323,12 +2323,21 @@ type taskProjectQuerier interface {
 // passes through — CreateTask and CreateDisposition alike. A nil or empty
 // project is refused as required, a name outside the task_projects
 // vocabulary (or outside the lane-alphabet shape) as unknown.
+// checkTaskProjectName refuses a project name outside the lane alphabet before
+// any lookup, so a NUL or other stray byte never reaches the project query.
+func checkTaskProjectName(project string) error {
+	if !validName(project) {
+		return fmt.Errorf("%w: project names match the lane alphabet [A-Za-z0-9._-]{1,128}", ErrTaskProjectUnknown)
+	}
+	return nil
+}
+
 func requireTaskProject(ctx context.Context, q taskProjectQuerier, project *string) error {
 	if project == nil || *project == "" {
 		return fmt.Errorf("%w: new tasks require --project <name> (the allowed set is listed by tasks projects)", ErrTaskProjectRequired)
 	}
-	if !validName(*project) {
-		return fmt.Errorf("%w: project names match the lane alphabet [A-Za-z0-9._-]{1,128}", ErrTaskProjectUnknown)
+	if err := checkTaskProjectName(*project); err != nil {
+		return err
 	}
 	var known bool
 	if err := q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM task_projects WHERE name=$1)`, *project).Scan(&known); err != nil {
@@ -4024,7 +4033,7 @@ func (s *Store) AttachmentObjectCount(ctx context.Context) (int64, error) {
 	return n, s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM attachments`).Scan(&n)
 }
 func (s *Store) Search(ctx context.Context, q, scope, session string, limit int) ([]SearchResult, error) {
-	if strings.TrimSpace(q) == "" || len(q) > 512 || !validText(session, 128) || (scope != "all" && scope != "ctx" && scope != "docs" && scope != "memory" && scope != "tasks") {
+	if strings.TrimSpace(q) == "" || !validText(q, 512) || !validText(session, 128) || (scope != "all" && scope != "ctx" && scope != "docs" && scope != "memory" && scope != "tasks") {
 		return nil, errors.New("invalid search")
 	}
 	if scope == "tasks" {
