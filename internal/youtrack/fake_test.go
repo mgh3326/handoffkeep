@@ -38,8 +38,46 @@ type fakeStore struct {
 	projectIDs   int
 	nextTaskID   int64
 	nextComment  int64
-	docs         map[string]store.Document
-	docArticles  map[string]store.YouTrackDocArticle
+
+	// The reads the issue text and the decision mirror make.
+	stalled         map[int64]bool
+	events          map[int64][]store.TaskEvent
+	docs            map[string]store.Document
+	changes         map[int64][]store.Change
+	changeStates    map[string]store.ChangeView
+	decisions       []store.DecisionRecord
+	decisionMirrors map[int64]store.YouTrackDecisionMirror
+	commentLinks    map[int64]string
+	docArticles     map[string]store.YouTrackDocArticle
+	attempts        map[string]fakeAttempt
+}
+
+// fakeAttempt mirrors one youtrack_attempts row. next is the time the key is
+// next due.
+type fakeAttempt struct {
+	next     time.Time
+	attempts int
+	lastErr  string
+	skip     string
+}
+
+// attemptKey is the fake's key for one queue item.
+func attemptKey(queue, key string) string { return queue + "|" + key }
+
+// dueAttempt reports whether a queue key may be attempted now. A key with no
+// row is due.
+func (f *fakeStore) dueAttempt(queue, key string, now time.Time) bool {
+	a, ok := f.attempts[attemptKey(queue, key)]
+	return !ok || !a.next.After(now)
+}
+
+// rankAttempt is the scan rank of a queue key: the time it is next due, zero
+// when it has no row.
+func (f *fakeStore) rankAttempt(queue, key string) time.Time {
+	if a, ok := f.attempts[attemptKey(queue, key)]; ok {
+		return a.next
+	}
+	return time.Time{}
 }
 
 func newFakeStore() *fakeStore {
@@ -65,8 +103,16 @@ func newFakeStore() *fakeStore {
 		pushed:       map[int64]bool{},
 		nextTaskID:   100,
 		nextComment:  200,
-		docs:         map[string]store.Document{},
-		docArticles:  map[string]store.YouTrackDocArticle{},
+
+		stalled:         map[int64]bool{},
+		events:          map[int64][]store.TaskEvent{},
+		docs:            map[string]store.Document{},
+		changes:         map[int64][]store.Change{},
+		changeStates:    map[string]store.ChangeView{},
+		decisionMirrors: map[int64]store.YouTrackDecisionMirror{},
+		commentLinks:    map[int64]string{},
+		docArticles:     map[string]store.YouTrackDocArticle{},
+		attempts:        map[string]fakeAttempt{},
 	}
 }
 
@@ -250,6 +296,7 @@ func (f *fakeStore) PutYouTrackProject(_ context.Context, p store.YouTrackProjec
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.projects[p.HKProject] = p
+	f.clearSkipsLocked()
 	return nil
 }
 
@@ -401,14 +448,69 @@ func (f *fakeStore) RescheduleYouTrackOutbox(_ context.Context, id int64, value 
 	return nil
 }
 
+// RecordYouTrackAttempt mirrors the store: a failure backs the key off, a skip
+// parks it, and a success puts it at the back of the scan.
+func (f *fakeStore) RecordYouTrackAttempt(_ context.Context, queue, key, failure, skip string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	now := time.Now().UTC()
+	ak := attemptKey(queue, key)
+	a := f.attempts[ak]
+	switch {
+	case skip != "":
+		a.next, a.lastErr, a.skip = now.Add(time.Hour), "", skip
+	case failure != "":
+		a.attempts++
+		a.lastErr, a.skip = failure, ""
+		a.next = now.Add(time.Duration(30<<min(a.attempts-1, 8)) * time.Second)
+		if a.next.Sub(now) > time.Hour {
+			a.next = now.Add(time.Hour)
+		}
+	default:
+		a.next, a.attempts, a.lastErr, a.skip = now, 0, "", ""
+	}
+	f.attempts[ak] = a
+	return nil
+}
+
+// elapseBackoff moves every key's next attempt into the past, as the time
+// between runs does: a failure's backoff or a skip's hour passes.
+func (f *fakeStore) elapseBackoff() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	past := time.Now().UTC().Add(-time.Second)
+	for k, a := range f.attempts {
+		a.next = past
+		f.attempts[k] = a
+	}
+}
+
+// clearSkipsLocked makes parked keys due again, as ClearYouTrackSkips does.
+func (f *fakeStore) clearSkipsLocked() {
+	for k, a := range f.attempts {
+		if a.skip != "" {
+			delete(f.attempts, k)
+		}
+	}
+}
+
+// DueYouTrackPushTasks mirrors the store scan: the due predicate, then the
+// order by next attempt time and id.
 func (f *fakeStore) DueYouTrackPushTasks(_ context.Context, limit int) ([]store.Task, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	now := time.Now().UTC()
 	ids := make([]int64, 0, len(f.tasks))
 	for id := range f.tasks {
 		ids = append(ids, id)
 	}
-	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	sort.Slice(ids, func(i, j int) bool {
+		ri, rj := f.rankAttempt(queueTask, strconv.FormatInt(ids[i], 10)), f.rankAttempt(queueTask, strconv.FormatInt(ids[j], 10))
+		if !ri.Equal(rj) {
+			return ri.Before(rj)
+		}
+		return ids[i] < ids[j]
+	})
 	out := []store.Task{}
 	for _, id := range ids {
 		if len(out) >= limit {
@@ -419,7 +521,10 @@ func (f *fakeStore) DueYouTrackPushTasks(_ context.Context, limit int) ([]store.
 		if !mirrored && IsSettled(task.State) {
 			continue
 		}
-		if mirrored && mirror.SyncedAt != nil && !task.UpdatedAt.After(*mirror.SyncedAt) {
+		if mirrored && mirror.SyncedAt != nil && !task.UpdatedAt.After(*mirror.SyncedAt) && !inFlight(task.State) {
+			continue
+		}
+		if !f.dueAttempt(queueTask, strconv.FormatInt(id, 10), now) {
 			continue
 		}
 		out = append(out, task)
@@ -427,11 +532,16 @@ func (f *fakeStore) DueYouTrackPushTasks(_ context.Context, limit int) ([]store.
 	return out, nil
 }
 
+const queueTask = store.YouTrackQueueTask
+
 func (f *fakeStore) UnpushedYouTrackComments(_ context.Context, taskID, afterID int64, limit int) ([]store.TaskComment, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	out := []store.TaskComment{}
 	for _, c := range f.comments[taskID] {
+		if _, linked := f.commentLinks[c.ID]; linked {
+			continue
+		}
 		if c.ID > afterID && c.Author != store.YouTrackOwnedActor && len(out) < limit {
 			out = append(out, c)
 		}
@@ -439,7 +549,15 @@ func (f *fakeStore) UnpushedYouTrackComments(_ context.Context, taskID, afterID 
 	return out, nil
 }
 
-func (f *fakeStore) LinkYouTrackComment(_ context.Context, _ int64, _ int64, _ string, _ time.Time) error {
+func (f *fakeStore) LinkYouTrackComment(_ context.Context, _ int64, hkCommentID int64, youtrackCommentID string, _ time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if youtrackCommentID == "" {
+		return store.ErrYouTrackActivityInput
+	}
+	if _, ok := f.commentLinks[hkCommentID]; !ok {
+		f.commentLinks[hkCommentID] = youtrackCommentID
+	}
 	return nil
 }
 

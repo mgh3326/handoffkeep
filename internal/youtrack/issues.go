@@ -27,25 +27,33 @@ type issueBody struct {
 	CustomFields []CustomField `json:"customFields,omitempty"`
 }
 
-// FindIssueByHKID finds the one issue whose hk ID field matches. It returns
-// (Issue{}, false, nil) when none exists, so the caller creates instead of
-// updating.
-func (c *Client) FindIssueByHKID(ctx context.Context, field string, hkID int64) (Issue, bool, error) {
+// FindIssueByField finds the issue in one project whose integer field equals
+// n: the hk ID of a task issue or the 결정 ID of a decision issue. The search
+// is scoped to the project and each hit is checked against both the project
+// id and the field value, because the same number can exist in another
+// project (a DEC issue carries its task's hk ID). It returns (Issue{}, false,
+// nil) when none exists, so the caller creates instead of updating.
+func (c *Client) FindIssueByField(ctx context.Context, projectShort, projectID, field string, n int64) (Issue, bool, error) {
 	q := url.Values{}
-	// The hk ID field is shared by every mapped project; the query spans
-	// them and the caller decides whether the found issue's project matches.
-	// YouTrack's search grammar uses braces around a field name that
-	// contains spaces; a quoted name is parsed as a text search.
-	q.Set("query", fmt.Sprintf(`{%s}: %d`, field, hkID))
+	// YouTrack's search grammar uses braces around a field name that contains
+	// spaces; a quoted name is parsed as a text search.
+	query := fmt.Sprintf(`{%s}: %d`, field, n)
+	if projectShort != "" {
+		query = fmt.Sprintf(`project: %s %s`, projectShort, query)
+	}
+	q.Set("query", query)
 	q.Set("fields", issueFields)
-	q.Set("$top", "2")
+	q.Set("$top", "10")
 	var issues []Issue
 	if err := c.get(ctx, "/api/issues", q, &issues); err != nil {
 		return Issue{}, false, err
 	}
 	for _, issue := range issues {
+		if projectID != "" && (issue.Project == nil || issue.Project.ID != projectID) {
+			continue
+		}
 		if f, ok := IssueFieldByName(issue.CustomFields, field); ok {
-			if n, ok := f.IntValue(); ok && int64(n) == hkID {
+			if v, ok := f.IntValue(); ok && int64(v) == n {
 				return issue, true, nil
 			}
 		}
@@ -68,12 +76,34 @@ func (c *Client) CreateIssue(ctx context.Context, in IssueWrite) (Issue, error) 
 	if strings.TrimSpace(in.ProjectID) == "" || strings.TrimSpace(in.Summary) == "" {
 		return Issue{}, fmt.Errorf("%w: project and summary are required", ErrConfig)
 	}
-	body := issueBody{Summary: in.Summary, Description: in.Description, CustomFields: in.Fields}
+	// A nil value is a clear, which only an update can express; a new issue
+	// simply has no value for that field.
+	fields := make([]CustomField, 0, len(in.Fields))
+	for _, f := range in.Fields {
+		if f.Value != nil {
+			fields = append(fields, f)
+		}
+	}
+	body := issueBody{Summary: in.Summary, Description: in.Description, CustomFields: fields}
 	body.Project.ID = in.ProjectID
 	q := url.Values{}
 	q.Set("fields", issueFields)
 	var out Issue
 	err := c.postOnce(ctx, "/api/issues", q, body, &out)
+	return out, err
+}
+
+// WriteIssue updates an existing issue: the description when it is non-nil,
+// and the custom fields. A nil description leaves the stored one alone.
+func (c *Client) WriteIssue(ctx context.Context, issueID string, description *string, fields []CustomField) (Issue, error) {
+	q := url.Values{}
+	q.Set("fields", issueFields)
+	var out Issue
+	body := struct {
+		Description  *string       `json:"description,omitempty"`
+		CustomFields []CustomField `json:"customFields,omitempty"`
+	}{Description: description, CustomFields: fields}
+	err := c.post(ctx, "/api/issues/"+url.PathEscape(issueID), q, body, &out)
 	return out, err
 }
 

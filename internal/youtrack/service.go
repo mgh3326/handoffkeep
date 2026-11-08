@@ -19,6 +19,15 @@ import (
 type Store interface {
 	GetTask(ctx context.Context, id int64) (store.Task, bool, error)
 	ListTaskComments(ctx context.Context, taskID, afterID int64, limit int) ([]store.TaskComment, error)
+	ListTaskEvents(ctx context.Context, taskID, afterID int64, limit int) ([]store.TaskEvent, error)
+	ListTasksFiltered(ctx context.Context, q store.TaskQuery) ([]store.Task, error)
+	GetDocument(ctx context.Context, key string) (store.Document, bool, error)
+	ListChangesByTask(ctx context.Context, taskID int64, limit int) ([]store.Change, error)
+	GetChangeState(ctx context.Context, ref store.ChangeRef, opt store.ChangeReadOptions) (store.ChangeView, bool, error)
+	ListDecisionRecords(ctx context.Context, f store.DecisionRecordFilter, now time.Time) ([]store.DecisionRecord, error)
+	GetYouTrackDecisionMirror(ctx context.Context, decisionID int64) (store.YouTrackDecisionMirror, bool, error)
+	ListYouTrackDecisionMirrors(ctx context.Context, decisionIDs []int64) (map[int64]store.YouTrackDecisionMirror, error)
+	PutYouTrackDecisionMirror(ctx context.Context, x store.YouTrackDecisionMirror) error
 	ListTranslations(ctx context.Context, entity string, sources []store.TranslationSource) ([]store.Translation, error)
 	TaskProjectExists(ctx context.Context, name string) (bool, error)
 
@@ -59,7 +68,8 @@ type Store interface {
 	PendingYouTrackReverts(ctx context.Context, limit int) ([]store.YouTrackPendingRevert, error)
 	MarkYouTrackRevertDone(ctx context.Context, activityID string) error
 
-	DueYouTrackDocs(ctx context.Context, patterns []string, limit int) ([]store.Document, error)
+	DueYouTrackDocs(ctx context.Context, patterns []string, defaultProject string, limit int) ([]store.Document, error)
+	RecordYouTrackAttempt(ctx context.Context, queue, key, failure, skip string) error
 	OrphanYouTrackDocArticles(ctx context.Context, limit int) ([]store.YouTrackDocArticle, error)
 	GetYouTrackDocArticle(ctx context.Context, docKey string) (store.YouTrackDocArticle, bool, error)
 	UpsertYouTrackDocArticle(ctx context.Context, x store.YouTrackDocArticle) error

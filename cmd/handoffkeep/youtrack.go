@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -30,10 +31,12 @@ func youtrackCmd(args []string, out io.Writer) error {
 	switch args[0] {
 	case "sync":
 		return youtrackSyncCmd(args[1:], out)
+	case "adopt":
+		return youtrackAdoptCmd(args[1:], out)
 	case "projects":
 		return youtrackProjectsCmd(args[1:], out)
 	default:
-		return errors.New("usage: youtrack sync [--dry-run] | youtrack projects list|put")
+		return errors.New("usage: youtrack sync [--dry-run] | youtrack adopt --state <yt_state.json> [--dry-run] | youtrack projects list|put")
 	}
 }
 
@@ -106,6 +109,81 @@ func youtrackSyncCmd(args []string, out io.Writer) error {
 	}
 	if len(report.Errors) > 0 {
 		return exitCodeError{code: youtrackExitFailed, err: fmt.Errorf("%d sync errors", len(report.Errors))}
+	}
+	return nil
+}
+
+// youtrackAdoptCmd maps the issues the Python mirror created onto the Go
+// sync's rows, and marks the comments it already posted. It runs once, before
+// the first sync, under the same lock a sync takes.
+func youtrackAdoptCmd(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("youtrack adopt", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	dryRun := fs.Bool("dry-run", false, "print the mapping without writing hk or YouTrack")
+	statePath := fs.String("state", "", "the Python mirror's yt_state.json")
+	ordered, err := splitArgs(args, "state")
+	if err != nil {
+		return err
+	}
+	if err := fs.Parse(ordered); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 || *statePath == "" {
+		return errors.New("usage: youtrack adopt --state <yt_state.json> [--dry-run]")
+	}
+	raw, err := os.ReadFile(*statePath)
+	if err != nil {
+		return exitCodeError{code: youtrackExitConfig, err: fmt.Errorf("read state: %w", err)}
+	}
+	var state youtrack.AdoptState
+	if err := json.Unmarshal(raw, &state); err != nil {
+		return exitCodeError{code: youtrackExitConfig, err: fmt.Errorf("parse state: %w", err)}
+	}
+	// json.Unmarshal ignores unknown keys, so a wrong file decodes to empty maps.
+	// Adopting nothing would make the next sync create a duplicate issue for
+	// every task.
+	if len(state.Issues) == 0 && len(state.Decisions) == 0 {
+		return exitCodeError{code: youtrackExitConfig, err: errors.New("state has no issues or decisions to adopt; check that --state points at the Python mirror's yt_state.json")}
+	}
+	dbURL := strings.TrimSpace(os.Getenv("HANDOFFKEEP_DB_URL"))
+	baseURL := strings.TrimSpace(os.Getenv("YOUTRACK_URL"))
+	token := strings.TrimSpace(os.Getenv("YOUTRACK_BOT_API_KEY"))
+	if dbURL == "" || baseURL == "" || token == "" {
+		return exitCodeError{code: youtrackExitConfig, err: errors.New("HANDOFFKEEP_DB_URL, YOUTRACK_URL and YOUTRACK_BOT_API_KEY are required")}
+	}
+	client, err := youtrack.New(youtrack.Config{BaseURL: baseURL, Token: token})
+	if err != nil {
+		return exitCodeError{code: youtrackExitConfig, err: err}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	st, err := store.Open(ctx, dbURL)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	lock, acquired, err := st.TryYouTrackSyncLock(ctx)
+	if err != nil {
+		return err
+	}
+	if !acquired {
+		return exitCodeError{code: youtrackExitLockHeld, err: errors.New("another youtrack sync is running")}
+	}
+	defer func() {
+		if err := lock.Release(context.Background()); err != nil {
+			log.Printf("youtrack.unlock_failed err=%q", err)
+		}
+	}()
+	service := youtrack.NewService(st, client, youtrackServiceOptions())
+	report, err := service.Adopt(ctx, state, *dryRun)
+	if printErr := printJSON(out, report); printErr != nil {
+		return printErr
+	}
+	if err != nil {
+		return exitCodeError{code: youtrackExitFailed, err: err}
+	}
+	if len(report.Errors) > 0 {
+		return exitCodeError{code: youtrackExitFailed, err: fmt.Errorf("%d adoption errors", len(report.Errors))}
 	}
 	return nil
 }

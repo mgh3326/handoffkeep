@@ -47,6 +47,15 @@ func (c *Client) CreateArticle(ctx context.Context, in ArticleWrite) (Article, e
 	return out, err
 }
 
+// GetArticle reads one article. A deleted article answers not found.
+func (c *Client) GetArticle(ctx context.Context, articleID string) (Article, error) {
+	q := url.Values{}
+	q.Set("fields", articleFields)
+	var out Article
+	err := c.get(ctx, "/api/articles/"+url.PathEscape(articleID), q, &out)
+	return out, err
+}
+
 // UpdateArticle rewrites an article's title and content. Same content is a
 // no-op on YouTrack, so the 5xx retry is safe.
 func (c *Client) UpdateArticle(ctx context.Context, articleID, summary, content string) (Article, error) {

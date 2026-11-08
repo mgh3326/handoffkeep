@@ -74,18 +74,19 @@ type OutboxAction struct {
 }
 
 type SyncReport struct {
-	DryRun    bool           `json:"dry_run"`
-	Bot       string         `json:"bot,omitempty"`
-	Outbox    []OutboxAction `json:"outbox"`
-	Pushed    []PushAction   `json:"push"`
-	Pulled    []PullAction   `json:"pull"`
-	Docs      []DocAction    `json:"docs"`
-	DocBytes  int64          `json:"doc_bytes"`
-	Refreshed int            `json:"refreshed"`
-	Reverted  int            `json:"reverted"`
-	Skipped   int            `json:"skipped"`
-	Warnings  []string       `json:"warnings,omitempty"`
-	Errors    []string       `json:"errors,omitempty"`
+	DryRun    bool             `json:"dry_run"`
+	Bot       string           `json:"bot,omitempty"`
+	Outbox    []OutboxAction   `json:"outbox"`
+	Pushed    []PushAction     `json:"push"`
+	Pulled    []PullAction     `json:"pull"`
+	Decisions []DecisionAction `json:"decisions"`
+	Docs      []DocAction      `json:"docs"`
+	DocBytes  int64            `json:"doc_bytes"`
+	Refreshed int              `json:"refreshed"`
+	Reverted  int              `json:"reverted"`
+	Skipped   int              `json:"skipped"`
+	Warnings  []string         `json:"warnings,omitempty"`
+	Errors    []string         `json:"errors,omitempty"`
 }
 
 func (r *SyncReport) fail(format string, args ...any) {
@@ -97,11 +98,11 @@ func (r *SyncReport) warn(format string, args ...any) {
 }
 
 // Sync runs one bounded pass: pending reverts, one page of YouTrack → hk
-// activities, the priority/lane outbox, the field-cache refresh, and the
-// hk → YouTrack push. In dry-run mode nothing on either side is written.
+// activities, the priority/lane outbox, the field-cache refresh, the hk →
+// YouTrack task push, the saved searches, and the DEC decision mirror. In dry-run mode nothing on either side is written.
 func (s *Service) Sync(ctx context.Context, opts SyncOptions) (SyncReport, error) {
 	opts = opts.withDefaults()
-	report := SyncReport{DryRun: opts.DryRun, Outbox: []OutboxAction{}, Pushed: []PushAction{}, Pulled: []PullAction{}, Docs: []DocAction{}}
+	report := SyncReport{DryRun: opts.DryRun, Outbox: []OutboxAction{}, Pushed: []PushAction{}, Pulled: []PullAction{}, Decisions: []DecisionAction{}, Docs: []DocAction{}}
 	me, err := s.client.Me(ctx)
 	if err != nil {
 		return report, fmt.Errorf("youtrack me: %w", err)
@@ -135,6 +136,12 @@ func (s *Service) Sync(ctx context.Context, opts SyncOptions) (SyncReport, error
 	if err := s.push(ctx, opts, &report); err != nil {
 		report.fail("push: %v", err)
 	}
+	if !opts.DryRun {
+		if _, err := s.client.EnsureSavedQueries(ctx, savedQueries); err != nil {
+			report.fail("saved queries: %v", err)
+		}
+	}
+	s.syncDecisions(ctx, opts, &report)
 	s.syncDocs(ctx, opts, &report)
 	return report, nil
 }
@@ -269,18 +276,75 @@ func (s *Service) push(ctx context.Context, opts SyncOptions, report *SyncReport
 	if err != nil {
 		return err
 	}
+	stalled, err := s.stalledTaskIDs(ctx)
+	if err != nil {
+		return err
+	}
 	for _, task := range tasks {
-		action, err := s.pushTask(ctx, task, opts, report)
+		key := strconv.FormatInt(task.ID, 10)
+		action, err := s.pushTask(ctx, task, opts, stalled[task.ID], report)
 		if err != nil {
 			report.fail("task %d: %v", task.ID, err)
+			s.recordAttempt(ctx, opts, store.YouTrackQueueTask, key, err.Error(), "", report)
 			continue
+		}
+		if action.Action == "skipped" {
+			s.recordAttempt(ctx, opts, store.YouTrackQueueTask, key, "", store.YouTrackSkipProjectMissing, report)
+		} else {
+			s.recordAttempt(ctx, opts, store.YouTrackQueueTask, key, "", "", report)
 		}
 		report.Pushed = append(report.Pushed, action)
 	}
 	return nil
 }
 
-func (s *Service) pushTask(ctx context.Context, task store.Task, opts SyncOptions, report *SyncReport) (PushAction, error) {
+// recordAttempt stores the outcome of one queue attempt so the key waits
+// its turn (failure), waits an hour (skip), or goes behind the keys that have waited
+// longer (success). A dry run writes nothing, so it records nothing.
+func (s *Service) recordAttempt(ctx context.Context, opts SyncOptions, queue, key, failure, skip string, report *SyncReport) {
+	if opts.DryRun {
+		return
+	}
+	if err := s.store.RecordYouTrackAttempt(ctx, queue, key, failure, skip); err != nil {
+		report.fail("%s attempt %s: %v", queue, key, err)
+	}
+}
+
+// stalledTaskIDs reads every task the store reports as stalled, page by page.
+// The store caps one read at stalledPageSize rows; a full page means more may
+// follow, so the read continues from the last id instead of treating the page
+// as the whole set. A failed read fails the push: a run that could not read
+// them must not clear the 멈춤 field on every issue.
+func (s *Service) stalledTaskIDs(ctx context.Context) (map[int64]bool, error) {
+	out := map[int64]bool{}
+	after := int64(0)
+	for {
+		afterID := after
+		tasks, err := s.store.ListTasksFiltered(ctx, store.TaskQuery{Stalled: true, AfterID: &afterID, Limit: stalledPageSize})
+		if err != nil {
+			return nil, fmt.Errorf("stalled tasks: %w", err)
+		}
+		for _, task := range tasks {
+			out[task.ID] = true
+			after = task.ID
+		}
+		if len(tasks) < stalledPageSize {
+			return out, nil
+		}
+	}
+}
+
+// stalledPageSize is one stalled-task read, the store's per-read maximum.
+const stalledPageSize = 1000
+
+// inFlight states are pushed on every pass: the PR section follows the PR's
+// gate and checks, which move without a write to the task. That is the started
+// category, the same set the store's scans read.
+func inFlight(state string) bool {
+	return store.IsStartedState(state)
+}
+
+func (s *Service) pushTask(ctx context.Context, task store.Task, opts SyncOptions, stalled bool, report *SyncReport) (PushAction, error) {
 	action := PushAction{TaskID: task.ID}
 	hkProject := ""
 	if task.Project != nil {
@@ -306,10 +370,10 @@ func (s *Service) pushTask(ctx context.Context, task store.Task, opts SyncOption
 	// a push sends what hk holds, not a possibly older YouTrack read.
 	priority, lane := task.Priority, task.Lane
 
-	needsFields := !mirrored || mirror.SyncedAt == nil || task.UpdatedAt.After(*mirror.SyncedAt)
+	needsFields := !mirrored || mirror.SyncedAt == nil || task.UpdatedAt.After(*mirror.SyncedAt) || inFlight(task.State)
 	created := false
 	if !mirrored {
-		existing, found, err := s.client.FindIssueByHKID(ctx, s.schema.HKIDField, task.ID)
+		existing, found, err := s.client.FindIssueByField(ctx, project.ShortName, projectID, s.schema.HKIDField, task.ID)
 		if err != nil {
 			return action, err
 		}
@@ -332,7 +396,11 @@ func (s *Service) pushTask(ctx context.Context, task store.Task, opts SyncOption
 				action.ReadableID = project.ShortName + "-?"
 				return action, nil
 			}
-			fields, err := s.issueFields(ctx, task, priority, lane)
+			view, err := s.renderTask(ctx, task)
+			if err != nil {
+				return action, err
+			}
+			fields, err := s.issueFields(ctx, task, priority, lane, view.PR, stalled)
 			if err != nil {
 				return action, err
 			}
@@ -340,7 +408,7 @@ func (s *Service) pushTask(ctx context.Context, task store.Task, opts SyncOption
 			if err != nil {
 				return action, err
 			}
-			issue, err := s.client.CreateIssue(ctx, IssueWrite{ProjectID: projectID, Summary: summary, Description: s.description(task), Fields: fields})
+			issue, err := s.client.CreateIssue(ctx, IssueWrite{ProjectID: projectID, Summary: cleanTitle(summary), Description: view.Text, Fields: fields})
 			if err != nil {
 				return action, err
 			}
@@ -377,11 +445,15 @@ func (s *Service) pushTask(ctx context.Context, task store.Task, opts SyncOption
 					}
 				}
 			}
-			fields, err := s.issueFields(ctx, task, priority, lane)
+			view, err := s.renderTask(ctx, task)
 			if err != nil {
 				return action, err
 			}
-			if _, err := s.client.UpdateFields(ctx, mirror.IssueID, fields); err != nil {
+			fields, err := s.issueFields(ctx, task, priority, lane, view.PR, stalled)
+			if err != nil {
+				return action, err
+			}
+			if _, err := s.client.WriteIssue(ctx, mirror.IssueID, &view.Text, fields); err != nil {
 				return action, err
 			}
 		}
@@ -397,6 +469,16 @@ func (s *Service) pushTask(ctx context.Context, task store.Task, opts SyncOption
 		return action, err
 	}
 	for _, comment := range comments {
+		if !humanComment(comment.Body) {
+			// Machinery notes are not mirrored. Linking them with a marker that
+			// no YouTrack id can equal keeps them from being due on every pass.
+			if !opts.DryRun {
+				if err := s.store.LinkYouTrackComment(ctx, task.ID, comment.ID, noiseLink(comment.ID), s.now()); err != nil {
+					return action, err
+				}
+			}
+			continue
+		}
 		if opts.DryRun {
 			report.Pushed = append(report.Pushed, PushAction{TaskID: task.ID, IssueID: action.IssueID, ReadableID: action.ReadableID, Action: "comment", CommentID: comment.ID})
 			continue
@@ -404,7 +486,7 @@ func (s *Service) pushTask(ctx context.Context, task store.Task, opts SyncOption
 		if action.IssueID == "" {
 			return action, fmt.Errorf("no issue to comment on")
 		}
-		mirroredComment, err := s.client.AddComment(ctx, action.IssueID, comment.Body)
+		mirroredComment, err := s.client.AddComment(ctx, action.IssueID, commentText(comment))
 		if err != nil {
 			return action, err
 		}
@@ -460,25 +542,37 @@ func permanentReason(err error) string {
 	return "hk가 이 활동을 적용할 수 없습니다"
 }
 
-func (s *Service) issueFields(ctx context.Context, task store.Task, priority int, lane string) ([]CustomField, error) {
+// issueFields is the custom-field write of one task. Every field the Python
+// mirror wrote is written here, and the ones it cleared on a missing value
+// (PR, 멈춤) are sent as null so an update clears them too.
+func (s *Service) issueFields(ctx context.Context, task store.Task, priority int, lane string, pr *prView, stalled bool) ([]CustomField, error) {
 	fields := []CustomField{IntField(s.schema.HKIDField, int(task.ID)), IntField(s.schema.PriorityField, priority)}
-	if task.Refs.PR != "" {
-		fields = append(fields, StringField(s.schema.PRField, task.Refs.PR))
+	prValue := task.Refs.PR
+	if pr != nil {
+		prValue = fmt.Sprintf("#%d %s", pr.Number, prStateKO(pr.State))
+	}
+	if prValue != "" {
+		fields = append(fields, StringField(s.schema.PRField, prValue))
+	} else {
+		fields = append(fields, CustomField{Type: fieldSimple, Name: s.schema.PRField})
 	}
 	state, err := s.stateFieldValue(ctx, task.State)
 	if err != nil {
 		return nil, err
 	}
 	fields = append(fields, state)
-	laneField, ok, err := s.enumFieldValue(ctx, s.schema.LaneField, lane)
-	if err != nil {
-		return nil, err
+	enums := []struct{ field, value string }{
+		{s.schema.LaneField, lane},
+		{s.schema.ProjectField, derefString(task.Project)},
+		{s.schema.KindField, task.Kind},
 	}
-	if ok {
-		fields = append(fields, laneField)
+	grade, tier := gradeFromTitle(task.Title)
+	if grade == "" && task.Refs.Linear != nil {
+		grade, tier = task.Refs.Linear.Grade, task.Refs.Linear.Tier
 	}
-	if task.Kind != "" {
-		f, ok, err := s.enumFieldValue(ctx, s.schema.KindField, task.Kind)
+	enums = append(enums, struct{ field, value string }{s.schema.GradeField, grade}, struct{ field, value string }{s.schema.TierField, tier})
+	for _, e := range enums {
+		f, ok, err := s.enumFieldValue(ctx, e.field, e.value)
 		if err != nil {
 			return nil, err
 		}
@@ -486,18 +580,25 @@ func (s *Service) issueFields(ctx context.Context, task store.Task, priority int
 			fields = append(fields, f)
 		}
 	}
-	if task.Refs.Linear != nil {
-		for _, pair := range [][2]string{{s.schema.GradeField, task.Refs.Linear.Grade}, {s.schema.TierField, task.Refs.Linear.Tier}} {
-			f, ok, err := s.enumFieldValue(ctx, pair[0], pair[1])
-			if err != nil {
-				return nil, err
-			}
-			if ok {
-				fields = append(fields, f)
-			}
+	if stalled {
+		f, ok, err := s.enumFieldValue(ctx, s.schema.StallField, StallLabel)
+		if err != nil {
+			return nil, err
 		}
+		if ok {
+			fields = append(fields, f)
+		}
+	} else {
+		fields = append(fields, EmptyEnumField(s.schema.StallField))
 	}
 	return fields, nil
+}
+
+func derefString(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
 }
 
 func (s *Service) summary(ctx context.Context, task store.Task) (string, error) {
@@ -511,10 +612,6 @@ func (s *Service) summary(ctx context.Context, task store.Task) (string, error) 
 		}
 	}
 	return task.Title, nil
-}
-
-func (s *Service) description(task store.Task) string {
-	return fmt.Sprintf("%s/ui/tasks/%d\n\n%s", strings.TrimRight(s.console, "/"), task.ID, task.Title)
 }
 
 func (s *Service) issueURL(readable string) string {

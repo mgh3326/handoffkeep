@@ -35,12 +35,16 @@ type fakeYouTrack struct {
 	// succeeds.
 	failFieldUpdate bool
 	failMe          bool
+	savedQueries    []string
 
 	articles       map[string]Article
 	articleBodies  map[string]string
 	articleParents map[string]string
 	articleCreates int
 	articleUpdates int
+	// failSummary makes a create of an issue or an article with this summary
+	// answer 500, so one item fails while the rest of a batch succeeds.
+	failSummary string
 }
 
 func newFakeYouTrack() *fakeYouTrack {
@@ -55,13 +59,16 @@ func newFakeYouTrack() *fakeYouTrack {
 		articleBodies:  map[string]string{},
 		articleParents: map[string]string{},
 		fieldValues: map[string][]string{
-			"hk 상태": states,
-			"레인":    {"handoffkeep", "operator-desk", "rstack"},
-			"종류":    {"implement", "verify", "fix", "decide", "ops"},
-			"등급":    {"A", "B", "C"},
-			"티어":    {"T0", "T1", "T2", "T3", "T4"},
+			"hk 상태":   states,
+			"레인":      {"handoffkeep", "operator-desk", "rstack"},
+			"종류":      {"implement", "verify", "fix", "decide", "ops"},
+			"등급":      {"A", "B", "C"},
+			"티어":      {"T0", "T1", "T2", "T3", "T4"},
+			"hk 프로젝트": {"handoffkeep", "panewire", "other"},
+			"멈춤":      {"멈춤"},
+			"결정 상태":   {"대기", "기한 경과", "답변됨", "대체됨", "만료"},
 		},
-		projectIDs: map[string]string{"HK": "0-1", "PW": "0-2", "OTHER": "0-10"},
+		projectIDs: map[string]string{"HK": "0-1", "PW": "0-2", "OTHER": "0-10", "DEC": "0-3"},
 	}
 }
 
@@ -103,6 +110,26 @@ func (f *fakeYouTrack) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			projects = append(projects, ProjectRef{ID: id, ShortName: short, Name: short})
 		}
 		write(http.StatusOK, projects)
+	case path == "/api/savedQueries" && r.Method == http.MethodGet:
+		rows := make([]map[string]string, 0, len(f.savedQueries))
+		for _, name := range f.savedQueries {
+			rows = append(rows, map[string]string{"name": name})
+		}
+		write(http.StatusOK, rows)
+	case path == "/api/savedQueries" && r.Method == http.MethodPost:
+		var body struct {
+			Name string `json:"name"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		f.savedQueries = append(f.savedQueries, body.Name)
+		write(http.StatusOK, map[string]string{"id": "sq-" + strconv.Itoa(len(f.savedQueries))})
+	case strings.HasPrefix(path, "/api/articles/") && r.Method == http.MethodGet:
+		article, ok := f.articles[strings.TrimPrefix(path, "/api/articles/")]
+		if !ok {
+			write(http.StatusNotFound, map[string]string{"error": "not_found"})
+			return
+		}
+		write(http.StatusOK, article)
 	case path == "/api/articles" && r.Method == http.MethodPost:
 		var body struct {
 			Summary       string `json:"summary"`
@@ -112,6 +139,10 @@ func (f *fakeYouTrack) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			} `json:"parentArticle"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
+		if f.failSummary != "" && body.Summary == f.failSummary {
+			write(http.StatusInternalServerError, map[string]string{"error": "boom"})
+			return
+		}
 		f.articleCreates++
 		id := fmt.Sprintf("A-%d", f.articleCreates)
 		article := Article{ID: id, IDReadable: "KB-A-" + strconv.Itoa(f.articleCreates), Summary: body.Summary}
@@ -159,6 +190,10 @@ func (f *fakeYouTrack) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			CustomFields []CustomField `json:"customFields"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
+		if f.failSummary != "" && body.Summary == f.failSummary {
+			write(http.StatusInternalServerError, map[string]string{"error": "boom"})
+			return
+		}
 		id := fmt.Sprintf("1-%d", f.createCalls)
 		fields := make([]IssueField, 0, len(body.CustomFields))
 		for _, field := range body.CustomFields {
