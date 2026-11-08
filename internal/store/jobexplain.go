@@ -14,6 +14,10 @@ import (
 // NoSelectionText is shown where a job has no recorded selection.
 const NoSelectionText = "선택 이유 기록 없음"
 
+// UnrenderedSelectionText is shown where a selection is stored but holds no
+// key hk renders (panewire may send keys hk does not know yet).
+const UnrenderedSelectionText = "선택 기록 있음 (표시할 이유 항목 없음)"
+
 // jobRunOthersMax caps the other candidates a JobRun names.
 const jobRunOthersMax = 5
 
@@ -26,8 +30,9 @@ type JobRun struct {
 	Override string   `json:"override,omitempty"`
 	Others   []string `json:"others"`
 	Result   string   `json:"result"`
-	// Recorded is false when the job has no selection record (Why then
-	// says NoSelectionText).
+	// Recorded is true when the job stores a nonempty selection object,
+	// whether or not hk renders any of its keys. Why says NoSelectionText
+	// only when it is false.
 	Recorded bool `json:"selection_recorded"`
 }
 
@@ -66,20 +71,16 @@ func (j Job) Explain() JobRun {
 	run := JobRun{Others: []string{}, Result: jobResultText(j)}
 	chosen, _ := sel["chosen"].(map[string]any)
 	run.What = jobWhatText(j, chosen)
+	run.Recorded = len(sel) > 0
 	run.Why = NoSelectionText
-	if chosen != nil {
+	if run.Recorded {
+		run.Why = UnrenderedSelectionText
 		if why := jobWhyText(chosen, sel); why != "" {
-			run.Why, run.Recorded = why, true
+			run.Why = why
 		}
 	}
 	run.Override = jobOverrideText(sel)
-	if run.Override != "" {
-		run.Recorded = true
-	}
 	run.Others = jobOthersText(sel, chosen)
-	if len(run.Others) > 0 {
-		run.Recorded = true
-	}
 	return run
 }
 

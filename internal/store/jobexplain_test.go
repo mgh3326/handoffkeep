@@ -65,10 +65,18 @@ func TestExplainWithoutSelection(t *testing.T) {
 	if run.What != "모델 m · 호스트 h · 역할 builder" || run.Result != "상태 실행 중" {
 		t.Fatalf("%+v", run)
 	}
-	// An empty object, or a record whose keys have the wrong types, explains nothing.
-	for _, raw := range []string{`{}`, `{"chosen":"x","candidates":3,"policy":[]}`, `{"chosen":{"grade":4,"projected_pct":"high"}}`} {
-		run = Job{JobID: "j", Selection: json.RawMessage(raw)}.Explain()
-		if run.Why != NoSelectionText || run.Recorded {
+	// An empty object is no record.
+	run = Job{JobID: "j", Selection: json.RawMessage(`{}`)}.Explain()
+	if run.Why != NoSelectionText || run.Recorded {
+		t.Fatalf("empty: %+v", run)
+	}
+}
+
+// A stored selection is a record even when hk renders none of its keys.
+func TestExplainUnrenderedSelectionIsRecorded(t *testing.T) {
+	for _, raw := range []string{`{"future_key":1}`, `{"chosen":{"model_id":"m"}}`, `{"chosen":"x","candidates":3,"policy":[]}`, `{"chosen":{"grade":4,"projected_pct":"high"}}`} {
+		run := Job{JobID: "j", Selection: json.RawMessage(raw)}.Explain()
+		if run.Why != UnrenderedSelectionText || !run.Recorded {
 			t.Fatalf("%s: %+v", raw, run)
 		}
 	}
@@ -80,7 +88,7 @@ func TestExplainOverrideAndFallbackWhy(t *testing.T) {
 		t.Fatalf("%+v", run)
 	}
 	run = Job{Selection: json.RawMessage(`{"override":{"reason":"--host mac-dev"}}`)}.Explain()
-	if run.Override != "--host mac-dev" || run.Why != NoSelectionText || !run.Recorded {
+	if run.Override != "--host mac-dev" || run.Why != UnrenderedSelectionText || !run.Recorded {
 		t.Fatalf("%+v", run)
 	}
 }
