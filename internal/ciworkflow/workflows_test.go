@@ -207,9 +207,7 @@ func TestWorkflowPinning(t *testing.T) {
 				uses = append(uses, s.Uses)
 				switch {
 				case hasAction(s.Uses, "actions/setup-go"):
-					if v, _ := s.With["go-version-file"].(string); v != "go.mod" || s.With["go-version"] != nil {
-						t.Errorf("%s job %q: setup-go must use go-version-file: go.mod, got %v", fname, job, s.With)
-					}
+					t.Errorf("%s job %q: call ./.github/actions/setup-go-cached instead of actions/setup-go, so the toolchain cache and download retry apply", fname, job)
 				case hasAction(s.Uses, "actions/setup-node"):
 					if v, _ := s.With["node-version-file"].(string); v != "web/console/.nvmrc" || s.With["node-version"] != nil {
 						t.Errorf("%s job %q: setup-node must use node-version-file: web/console/.nvmrc, got %v", fname, job, s.With)
@@ -232,6 +230,90 @@ func TestWorkflowPinning(t *testing.T) {
 				shas[m[1]] = where
 			}
 		}
+	}
+	// The composite action holds the only actions/setup-go and actions/cache
+	// steps, so its pins follow the same one-version rule.
+	for _, s := range readSetupGoCachedAction(t).Runs.Steps {
+		if s.Uses == "" {
+			continue
+		}
+		m := pinnedUses.FindStringSubmatch(s.Uses)
+		if m == nil {
+			t.Errorf("%s: action %q is not pinned to a full commit SHA", setupGoCachedActionFile, s.Uses)
+			continue
+		}
+		where := m[2] + " (" + setupGoCachedActionFile + ")"
+		if prev, ok := shas[m[1]]; ok && !strings.HasPrefix(prev, m[2]) {
+			t.Errorf("%s pinned to %s and %s; use one version everywhere", m[1], prev, where)
+		}
+		shas[m[1]] = where
+	}
+}
+
+// setupGoCachedActionFile is the one local composite action every job uses
+// for Go, relative to the repository root.
+const setupGoCachedActionFile = ".github/actions/setup-go-cached/action.yml"
+
+type compositeAction struct {
+	Runs struct {
+		Steps []step `yaml:"steps"`
+	} `yaml:"runs"`
+}
+
+func readSetupGoCachedAction(t *testing.T) compositeAction {
+	t.Helper()
+	body, err := os.ReadFile(filepath.Join("..", "..", filepath.FromSlash(setupGoCachedActionFile)))
+	if err != nil {
+		t.Fatalf("read %s: %v", setupGoCachedActionFile, err)
+	}
+	var a compositeAction
+	if err := yaml.Unmarshal(body, &a); err != nil {
+		t.Fatalf("parse %s: %v", setupGoCachedActionFile, err)
+	}
+	if len(a.Runs.Steps) == 0 {
+		t.Fatalf("%s has no steps", setupGoCachedActionFile)
+	}
+	return a
+}
+
+// TestSetupGoCachedAction checks the toolchain cache and the download retry in
+// the composite action. The cache must restore before actions/setup-go runs,
+// its key must include the Go version and runner OS and arch, and setup-go must
+// get three attempts that all read go.mod.
+func TestSetupGoCachedAction(t *testing.T) {
+	a := readSetupGoCachedAction(t)
+	cacheIdx, setupIdx, setupAttempts := -1, -1, 0
+	for i, s := range a.Runs.Steps {
+		switch {
+		case hasAction(s.Uses, "actions/cache"):
+			if cacheIdx < 0 {
+				cacheIdx = i
+			}
+			path, _ := s.With["path"].(string)
+			if !strings.HasPrefix(path, "${{ runner.tool_cache }}/go/") {
+				t.Errorf("cache path must be the tool cache's go/<version> directory, got %q", path)
+			}
+			key, _ := s.With["key"].(string)
+			for _, want := range []string{"runner.os", "runner.arch", "steps.version.outputs.version"} {
+				if !strings.Contains(key, want) {
+					t.Errorf("cache key %q must include %s so toolchains do not leak across versions or platforms", key, want)
+				}
+			}
+		case hasAction(s.Uses, "actions/setup-go"):
+			setupAttempts++
+			if setupIdx < 0 {
+				setupIdx = i
+			}
+			if v, _ := s.With["go-version-file"].(string); v != "go.mod" || s.With["go-version"] != nil {
+				t.Errorf("setup-go must use go-version-file: go.mod, got %v", s.With)
+			}
+		}
+	}
+	if cacheIdx < 0 || setupIdx < 0 || cacheIdx > setupIdx {
+		t.Errorf("actions/cache must restore before actions/setup-go (cache step %d, setup-go step %d)", cacheIdx, setupIdx)
+	}
+	if setupAttempts != 3 {
+		t.Errorf("setup-go must run three bounded attempts on a cache miss, got %d", setupAttempts)
 	}
 }
 

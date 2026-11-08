@@ -79,8 +79,7 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
           fetch-depth: 0
-      - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
-        with: {go-version-file: go.mod}
+      - uses: ./.github/actions/setup-go-cached
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with: {node-version-file: web/console/.nvmrc, cache: npm, cache-dependency-path: web/console/package-lock.json}
       - run: npm ci
@@ -147,8 +146,7 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ inputs.ref }}
-      - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
-        with: {go-version-file: go.mod}
+      - uses: ./.github/actions/setup-go-cached
       - name: go build
         run: CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -trimpath -o handoffkeep-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/handoffkeep
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -274,8 +272,7 @@ jobs:
             echo "run=no" >> "$GITHUB_OUTPUT"
           fi
       - if: ${{ steps.decide.outputs.run == 'yes' }}
-        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
-        with: {go-version-file: go.mod}
+        uses: ./.github/actions/setup-go-cached
       - name: go test the selected DB-backed packages (PostgreSQL, no race)
         if: ${{ steps.decide.outputs.run == 'yes' }}
         env:
@@ -320,8 +317,7 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
           fetch-depth: 0
-      - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
-        with: {go-version-file: go.mod}
+      - uses: ./.github/actions/setup-go-cached
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with: {node-version-file: web/console/.nvmrc, cache: npm, cache-dependency-path: web/console/package-lock.json}
       - run: npm ci
@@ -390,8 +386,7 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
           fetch-depth: 0
-      - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
-        with: {go-version-file: go.mod}
+      - uses: ./.github/actions/setup-go-cached
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with: {node-version-file: web/console/.nvmrc, cache: npm, cache-dependency-path: web/console/package-lock.json}
       - run: npm ci
@@ -417,8 +412,7 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ inputs.ref }}
-      - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
-        with: {go-version-file: go.mod}
+      - uses: ./.github/actions/setup-go-cached
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with: {node-version-file: web/console/.nvmrc, cache: npm, cache-dependency-path: web/console/package-lock.json}
       - run: npm ci
@@ -442,8 +436,7 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ inputs.ref }}
-      - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
-        with: {go-version-file: go.mod}
+      - uses: ./.github/actions/setup-go-cached
       - run: bash scripts/test-build-release.sh
 
   ci-ok:
