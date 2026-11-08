@@ -250,16 +250,19 @@ func (s *Store) UpdateTask(ctx context.Context, id int64, in TaskUpdateInput, w 
 	if !x.UpdatedAt.Equal(in.ExpectedUpdatedAt.UTC()) {
 		return out, ErrRevisionConflict
 	}
+	// Each field's event gets its own source ref. task_events dedupes on
+	// (task, source, source_ref), so one shared ref would drop every event after
+	// the first. Replay reads the audit row, so the refs are free to differ.
 	ref := mcpWriteRef(w.Actor, w.Key)
 	changed := []string{}
 	if in.Priority != nil && *in.Priority != x.Priority {
-		if err := setTaskPriorityTx(ctx, tx, &x, *in.Priority, w.Author, in.Note, mcpTaskUpdateSource, ref); err != nil {
+		if err := setTaskPriorityTx(ctx, tx, &x, *in.Priority, w.Author, in.Note, mcpTaskUpdateSource, ref+":priority"); err != nil {
 			return out, err
 		}
 		changed = append(changed, "priority")
 	}
 	if in.State != "" && in.State != x.State {
-		if _, err := s.transitionTaskTx(ctx, tx, id, TransitionInput{To: in.State, By: w.Author, Note: in.Note, Source: mcpTaskUpdateSource, SourceRef: ref}, false); err != nil {
+		if _, err := s.transitionTaskTx(ctx, tx, id, TransitionInput{To: in.State, By: w.Author, Note: in.Note, Source: mcpTaskUpdateSource, SourceRef: ref + ":state"}, false); err != nil {
 			return out, err
 		}
 		changed = append(changed, "state")
@@ -270,7 +273,7 @@ func (s *Store) UpdateTask(ctx context.Context, id int64, in TaskUpdateInput, w 
 		if strings.TrimSpace(laneNote) == "" {
 			laneNote = "lane changed by task_update"
 		}
-		_, laneChanged, err := s.relaneTaskTx(ctx, tx, id, in.Lane, w.Author, laneNote, false, mcpTaskUpdateSource, ref)
+		_, laneChanged, err := s.relaneTaskTx(ctx, tx, id, in.Lane, w.Author, laneNote, false, mcpTaskUpdateSource, ref+":lane")
 		if err != nil {
 			return out, err
 		}

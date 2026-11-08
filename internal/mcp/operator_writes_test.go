@@ -314,3 +314,43 @@ func TestTaskUpdateLaneWithoutNote(t *testing.T) {
 		t.Fatalf("lane=%q", after.Lane)
 	}
 }
+
+// One call that changes priority and labels records an event for each change;
+// the events do not collide on a shared source ref.
+func TestTaskUpdateRecordsEveryFieldEvent(t *testing.T) {
+	st := newOperatorStore(t)
+	ctx := context.Background()
+	task := newOperatorTask(t, st, "task update events fixture")
+	label, err := st.SaveLabel(ctx, store.Label{Name: "dots-events", EditLevel: "anyone"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := writesSession(t, st)
+	before, _, err := st.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := callTool[mcpTaskUpdateOut](t, session, "task_update", map[string]any{
+		"id": task.ID, "expected_updated_at": before.UpdatedAt.UTC().Format(time.RFC3339Nano),
+		"idempotency_key": "events-1", "priority": 2, "add_labels": []string{"dots-events"},
+	})
+	if len(out.Changed) != 2 {
+		t.Fatalf("changed=%v", out.Changed)
+	}
+	after, _, err := st.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawPriority, sawLabel bool
+	for _, event := range after.Events {
+		if event.Field == "priority" && event.By == "dots" {
+			sawPriority = true
+		}
+		if event.Field == "labels" {
+			sawLabel = true
+		}
+	}
+	if !sawPriority || !sawLabel || !containsLabel(after.Labels, label.ID) {
+		t.Fatalf("events missing: priority=%v labels=%v events=%+v", sawPriority, sawLabel, after.Events)
+	}
+}
