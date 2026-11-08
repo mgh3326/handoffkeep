@@ -101,9 +101,9 @@ func (r *SyncReport) warn(format string, args ...any) {
 	r.Warnings = append(r.Warnings, fmt.Sprintf(format, args...))
 }
 
-// Sync runs one bounded pass: pending reverts, one page of YouTrack → hk
-// activities, the priority/lane outbox, the field-cache refresh, the hk →
-// YouTrack task push, the saved searches, and the DEC decision mirror. In dry-run mode nothing on either side is written.
+// Sync runs one bounded pass: optionally pull YouTrack activities and refresh
+// their field cache, then drain the hk-owned outbox and push tasks, saved
+// searches, DEC issues, and documents to YouTrack. Dry-run mode writes neither side.
 func (s *Service) Sync(ctx context.Context, opts SyncOptions) (SyncReport, error) {
 	opts = opts.withDefaults()
 	report := SyncReport{DryRun: opts.DryRun, Outbox: []OutboxAction{}, Pushed: []PushAction{}, Pulled: []PullAction{}, Decisions: []DecisionAction{}, Docs: []DocAction{}, Counts: map[string]int{}}

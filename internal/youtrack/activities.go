@@ -17,7 +17,7 @@ const activityFields = "id,timestamp,author(id,login,name,$type),target(id,idRea
 	"added($type,name,id,text,value,presentation),removed($type,name,id,text,value,presentation)"
 
 // ActivitiesPage reads one page after cursor. An empty cursor starts at the
-// oldest recorded activity, which is what a first run needs.
+// oldest recorded activity, so callers establish a baseline before applying it.
 func (c *Client) ActivitiesPage(ctx context.Context, cursor string, limit int) (ActivitiesPage, error) {
 	if limit < 1 || limit > 1000 {
 		limit = 100
