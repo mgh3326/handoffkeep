@@ -2,6 +2,7 @@ package youtrack
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -388,5 +389,30 @@ func TestAdoptDecisionRefusesAnIssueOutsideTheDecisionProject(t *testing.T) {
 	}
 	if _, ok := fs.decisionMirrors[6]; !ok {
 		t.Fatal("a decision in DEC was not stored")
+	}
+}
+
+// A task adopted onto an issue that carries another task's hk ID is left
+// unmapped. The next sync would write this task's content into that issue.
+func TestAdoptTaskRefusesAnIssueWithAnotherTasksHKID(t *testing.T) {
+	fs := newFakeStore()
+	yt := newFakeYouTrack()
+	task := fs.addTask("handoffkeep", "handoffkeep", "crossed", store.StateBacklog, 1)
+	other := fs.addTask("handoffkeep", "handoffkeep", "other", store.StateBacklog, 1)
+	yt.issues["1-1"] = Issue{ID: "1-1", IDReadable: "HK-1", Project: &ProjectRef{ID: "0-1", ShortName: "HK"}, CustomFields: []IssueField{
+		{Name: "hk ID", Value: json.RawMessage(itoa(other.ID))},
+	}}
+	svc := newTestService(t, yt, fs)
+	state := AdoptState{Issues: map[string]string{itoa(task.ID): "1-1"}}
+
+	report, err := svc.Adopt(context.Background(), state, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Actions) != 1 || report.Actions[0].Action != "hk_id_mismatch" {
+		t.Fatalf("actions=%+v, want one hk_id_mismatch", report.Actions)
+	}
+	if _, ok := fs.mirrors[task.ID]; ok {
+		t.Fatal("a crossed task-to-issue entry was stored as a mirror")
 	}
 }
