@@ -111,7 +111,8 @@ record an operator reassignment; the fallback owner is `operator-desk`. See
 `add` accepts `--parent-lane`, `--pr`, `--head-sha`, `--report-path`, and
 `--job-id` as durable references. `transition` accepts the same reference flags.
 `tasks rebind` transfers an active task from one job id to another without
-changing its state. It requires a server that implements
+changing its state. Researching, developing and reviewing tasks can be rebound;
+merged, deployed, dropped and held tasks are refused. It requires a server that implements
 `POST /v1/tasks/{id}/rebind`; the minimum server revision is the handoffkeep
 PR 1 head revision recorded in that PR's description.
 `needs_decision` always requires `--question`. `add` also accepts the typed

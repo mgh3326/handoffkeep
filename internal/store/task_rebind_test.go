@@ -88,6 +88,48 @@ func TestRebindTaskJobAllowsInProgressAndRejectsMismatches(t *testing.T) {
 	}
 }
 
+func TestRebindTaskJobAllowsReviewingAndRecordsEvent(t *testing.T) {
+	s, task := taskRebindFixture(t, "in_progress")
+	ctx := context.Background()
+	if _, err := s.TransitionTask(ctx, task.ID, "reviewing", "old-builder", "pr opened", nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	before, _, err := s.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := s.RebindTaskJob(ctx, task.ID, "job-old", "job-new", "new-builder", "reviewer takeover")
+	if err != nil {
+		t.Fatalf("reviewing rebind: %v", err)
+	}
+	if first.State != "reviewing" || first.Refs.JobID != "job-new" || first.ClaimedBy != "new-builder" {
+		t.Fatalf("rebound task=%+v", first)
+	}
+	got, _, err := s.GetTask(ctx, task.ID)
+	if err != nil || len(got.Events) != len(before.Events)+1 {
+		t.Fatalf("events=%d, want %d plus one rebind: err=%v", len(got.Events), len(before.Events), err)
+	}
+	event := got.Events[len(got.Events)-1]
+	if event.Kind != TaskEventTransition || event.From != "reviewing" || event.To != "reviewing" ||
+		event.By != "new-builder" || event.Note != "reviewer takeover" || event.Rebind == nil ||
+		event.Rebind.FromJob != "job-old" || event.Rebind.ToJob != "job-new" ||
+		event.Refs == nil || event.Refs.JobID != "job-new" {
+		t.Fatalf("rebind event=%+v", event)
+	}
+
+	replayed, err := s.RebindTaskJob(ctx, task.ID, "job-old", "job-new", "new-builder", "retry")
+	if err != nil {
+		t.Fatalf("reviewing replay: %v", err)
+	}
+	got, _, err = s.GetTask(ctx, task.ID)
+	if err != nil || len(got.Events) != len(before.Events)+1 || !replayed.UpdatedAt.Equal(first.UpdatedAt) {
+		t.Fatalf("replay changed task: updated=%v/%v events=%d err=%v", first.UpdatedAt, replayed.UpdatedAt, len(got.Events), err)
+	}
+	if _, err := s.RebindTaskJob(ctx, task.ID, "wrong-old", "job-next", "third-builder", "stale"); !errors.Is(err, ErrTaskConflict) || !strings.Contains(err.Error(), `current job_id is "job-new"`) {
+		t.Fatalf("stale reviewing rebind err=%v, want conflict naming current job", err)
+	}
+}
+
 func TestRebindTaskJobRejectsNonActiveStates(t *testing.T) {
 	for _, tc := range []struct {
 		state string
@@ -95,8 +137,6 @@ func TestRebindTaskJobRejectsNonActiveStates(t *testing.T) {
 	}{
 		{state: "hold", path: []string{"hold"}},
 		{state: "dropped", path: []string{"dropped"}},
-		{state: "verifying", path: []string{"in_progress", "verifying"}},
-		{state: "join", path: []string{"in_progress", "join"}},
 		{state: "merged", path: []string{"in_progress", "verifying", "merged"}},
 	} {
 		t.Run(tc.state, func(t *testing.T) {

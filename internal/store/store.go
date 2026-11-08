@@ -2525,6 +2525,9 @@ func (s *Store) ClaimTask(ctx context.Context, id int64, by, jobID, noJob string
 // RebindTaskJob atomically moves an active task's job link to a new job. The
 // current job and task state are checked under the row lock; a completed replay
 // of the same rebind is a no-op when its audit event is still the latest rebind.
+// Rebindable states are researching, developing and reviewing: a reviewing task
+// keeps its PR, so a continuation worker takes over the same work unit.
+// Merged, deployed, dropped and held tasks are refused.
 func (s *Store) RebindTaskJob(ctx context.Context, id int64, fromJob, toJob, by, reason string) (Task, error) {
 	reason = taskReasonText(reason)
 	if !validText(fromJob, 4096) || fromJob == "" || !validText(toJob, 4096) || toJob == "" || fromJob == toJob {
@@ -2563,7 +2566,7 @@ func (s *Store) RebindTaskJob(ctx context.Context, id int64, fromJob, toJob, by,
 		return Task{}, err
 	}
 
-	if (x.State == StateResearching || x.State == StateDeveloping) && x.Refs.JobID == toJob && x.ClaimedBy == by {
+	if rebindableState(x.State) && x.Refs.JobID == toJob && x.ClaimedBy == by {
 		var replay bool
 		err = tx.QueryRow(ctx, `SELECT EXISTS (
 			SELECT 1 FROM task_events e
@@ -2578,7 +2581,7 @@ func (s *Store) RebindTaskJob(ctx context.Context, id int64, fromJob, toJob, by,
 			return x, tx.Commit(ctx)
 		}
 	}
-	if (x.State != StateResearching && x.State != StateDeveloping) || x.Refs.JobID != fromJob {
+	if !rebindableState(x.State) || x.Refs.JobID != fromJob {
 		current := x.Refs.JobID
 		if current == "" {
 			current = "(none)"
@@ -2600,6 +2603,15 @@ func (s *Store) RebindTaskJob(ctx context.Context, id int64, fromJob, toJob, by,
 		return Task{}, err
 	}
 	return x, tx.Commit(ctx)
+}
+
+// rebindableState reports whether a task in state may change its job link.
+func rebindableState(state string) bool {
+	switch state {
+	case StateResearching, StateDeveloping, StateReviewing:
+		return true
+	}
+	return false
 }
 
 // NextTask claims the oldest highest-priority runnable task in one
