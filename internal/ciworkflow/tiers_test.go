@@ -1017,7 +1017,7 @@ func TestCITierMutantsTurnRed(t *testing.T) {
 		{"deploy-linux-unguarded", "    if: ${{ " + deployGuard + " }}\n    name: 'deploy: race + postgres'", "    if: ${{ contains(fromJSON('[\"all\",\"test\"]'), inputs.suite || 'all') }}\n    name: 'deploy: race + postgres'"},
 		{"deploy-linux-race-removed", "go test -v -race -timeout 30m ./...", "go test -v -timeout 30m ./..."},
 		{"deploy-macos-on-linux", "'deploy: macos'\n    runs-on: macos-latest", "'deploy: macos'\n    runs-on: ubuntu-latest"},
-		{"deploy-macos-no-db-switch", "      HANDOFFKEEP_TEST_NO_DB: \"1\"\n    steps:\n      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0\n        with:\n          ref: ${{ inputs.ref }}\n      - uses: actions/setup-go", "    steps:\n      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0\n        with:\n          ref: ${{ inputs.ref }}\n      - uses: actions/setup-go"},
+		{"deploy-macos-no-db-switch", "      HANDOFFKEEP_TEST_NO_DB: \"1\"\n    steps:\n      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0\n        with:\n          ref: ${{ inputs.ref }}\n      - uses: ./.github/actions/setup-go-cached", "    steps:\n      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0\n        with:\n          ref: ${{ inputs.ref }}\n      - uses: ./.github/actions/setup-go-cached"},
 		{"deploy-release-dropped", "      - run: bash scripts/test-build-release.sh", "      - run: true"},
 		// The main tier keeps the release build during the transition. Two
 		// distinct anchors: ci.yml has it in both main-linux and deploy-release.

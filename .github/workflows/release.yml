@@ -46,9 +46,7 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
-        with:
-          go-version-file: go.mod
+      - uses: ./.github/actions/setup-go-cached
       - name: Resolve release tag
         env:
           EVENT: ${{ github.event_name }}

@@ -149,8 +149,7 @@ jobs:
           if [[ "$BASE" =~ ^[0-9a-f]{40}$ ]]; then
             git fetch --no-tags origin "$BASE"
           fi
-      - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
-        with: {go-version-file: go.mod}
+      - uses: ./.github/actions/setup-go-cached
       - name: Previous release on the target schema
         env:
           # The target commit to build; the checkout is only the workflow
