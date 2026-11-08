@@ -17,6 +17,7 @@ import (
 const (
 	taskGetPreviewLimit      = 5
 	taskGetJobsLimit         = 20
+	taskGetAttachmentsLimit  = 50
 	taskCommentsDefaultLimit = 50
 	taskCommentsMaxLimit     = 100
 	taskEventsDefaultLimit   = 50
@@ -68,6 +69,9 @@ var taskFieldSources = map[string]string{
 	"events_preview":   "hk",
 	"console_url":      "hk",
 	"jobs":             "hk",
+	"attachments":      "hk",
+	"external_links":   "hk",
+	"field_sync":       "hk",
 	// The ownership rule the design doc states.
 	"comments_by_agents":  "hk",
 	"operator_comments":   "youtrack",
@@ -76,6 +80,11 @@ var taskFieldSources = map[string]string{
 	"translations": "youtrack",
 	"youtrack":     "youtrack",
 }
+
+// youTrackOwnedFields are the task_get fields whose sync time field_sync
+// reports. The mirror's synced_at is the one watermark for the whole link, so
+// every field here shares it.
+var youTrackOwnedFields = []string{"operator_comments", "korean_display_text", "translations", "youtrack"}
 
 // cursorKind tags an opaque cursor so a cursor from one tool cannot be
 // replayed against another.
@@ -302,6 +311,24 @@ func (o operatorTools) taskGet(ctx context.Context, _ *gmcp.CallToolRequest, in 
 		})
 	}
 
+	attachmentRows := []store.Attachment{}
+	if bodyKey != "" {
+		attachmentRows, err = o.service.Store.ListAttachments(ctx, "document", bodyKey, taskGetAttachmentsLimit+1)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	attachmentsMore := len(attachmentRows) > taskGetAttachmentsLimit
+	if attachmentsMore {
+		attachmentRows = attachmentRows[:taskGetAttachmentsLimit]
+	}
+	attachments := make([]attachmentView, 0, len(attachmentRows))
+	for _, a := range attachmentRows {
+		attachments = append(attachments, attachmentView{
+			SHA256: a.SHA256, SizeBytes: a.SizeBytes, MIME: a.MIME, OriginalName: a.OriginalName, CreatedAt: a.CreatedAt,
+		})
+	}
+
 	var closedAt *time.Time
 	switch {
 	case task.CompletedAt != nil:
@@ -343,10 +370,91 @@ func (o operatorTools) taskGet(ctx context.Context, _ *gmcp.CallToolRequest, in 
 		"events_more":      eventsMore,
 		"jobs":             jobs,
 		"jobs_more":        jobsMore,
+		"attachments":      attachments,
+		"attachments_more": attachmentsMore,
+		"external_links":   externalLinksOf(task, mirror, mirrored),
+		"field_sync":       fieldSyncOf(mirror, mirrored),
 		"youtrack":         summary.YouTrack,
 		"console_url":      summary.ConsoleURL,
 		"field_sources":    taskFieldSources,
 	})
+}
+
+// attachmentView is one attachment bound to a task through its body document.
+// The private object URL is not served here; attachment_get_url mints it.
+type attachmentView struct {
+	SHA256       string    `json:"sha256"`
+	SizeBytes    int64     `json:"size_bytes"`
+	MIME         string    `json:"mime"`
+	OriginalName string    `json:"original_name"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
+// externalLinkView is one link from a task to a system outside its row. Ref is
+// the stored value; URL is set only when that value is an https link.
+type externalLinkView struct {
+	Kind   string  `json:"kind"`
+	Source string  `json:"source"`
+	Ref    string  `json:"ref"`
+	URL    *string `json:"url"`
+}
+
+// fieldSyncView says when a YouTrack-owned field was last synced and where it
+// comes from. Status is "unknown" with a null time when no watermark exists
+// (an hk task not mirrored, or a link adopted before its first push).
+type fieldSyncView struct {
+	Source       string     `json:"source"`
+	Status       string     `json:"status"`
+	LastSyncedAt *time.Time `json:"last_synced_at"`
+	SourceURL    *string    `json:"source_url"`
+}
+
+func httpsOrNil(value string) *string {
+	if strings.HasPrefix(value, "https://") {
+		return &value
+	}
+	return nil
+}
+
+// externalLinksOf lists the task's links to pull requests, reports, documents,
+// the legacy Linear mirror and YouTrack, in a fixed order.
+func externalLinksOf(task store.Task, mirror store.YouTrackMirror, mirrored bool) []externalLinkView {
+	links := []externalLinkView{}
+	add := func(kind, source, ref string) {
+		if ref != "" {
+			links = append(links, externalLinkView{Kind: kind, Source: source, Ref: ref, URL: httpsOrNil(ref)})
+		}
+	}
+	add("pr", "hk", task.Refs.PR)
+	add("origin_pr", "hk", task.Refs.OriginPR)
+	add("revert_pr", "hk", task.Refs.RevertPR)
+	add("report", "hk", task.Refs.ReportPath)
+	add("document", "hk", task.BodyDoc)
+	if task.Refs.Linear != nil {
+		add("linear", "hk", task.Refs.Linear.Identifier)
+	}
+	if mirrored && mirror.DisplayRef != "" {
+		links = append(links, externalLinkView{Kind: "youtrack", Source: "youtrack", Ref: mirror.DisplayRef, URL: httpsOrNil(mirror.URL)})
+	}
+	return links
+}
+
+// fieldSyncOf gives every YouTrack-owned field the mirror's watermark.
+func fieldSyncOf(mirror store.YouTrackMirror, mirrored bool) map[string]fieldSyncView {
+	out := make(map[string]fieldSyncView, len(youTrackOwnedFields))
+	for _, field := range youTrackOwnedFields {
+		view := fieldSyncView{Source: "youtrack", Status: "unknown"}
+		if mirrored {
+			view.SourceURL = httpsOrNil(mirror.URL)
+			if mirror.SyncedAt != nil {
+				at := *mirror.SyncedAt
+				view.Status = "synced"
+				view.LastSyncedAt = &at
+			}
+		}
+		out[field] = view
+	}
+	return out
 }
 
 type taskCommentsInput struct {
