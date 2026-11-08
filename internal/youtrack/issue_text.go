@@ -3,6 +3,7 @@ package youtrack
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"sort"
 	"strconv"
 	"time"
@@ -26,6 +27,45 @@ func noiseLink(hkCommentID int64) string {
 // took over, so the adoption does not post it again.
 func adoptedLink(hkCommentID int64) string {
 	return "adopted:" + strconv.FormatInt(hkCommentID, 10)
+}
+
+// commentMarkerRE reads the hk comment id out of a mirrored comment's marker.
+var commentMarkerRE = regexp.MustCompile(`<!-- hk-comment:([0-9]+) -->`)
+
+// commentMarkPage is the page size of the comment read behind commentMarks.
+const commentMarkPage = 100
+
+// commentMarks maps each hk comment id to the YouTrack comment that carries
+// its marker. It reads every page, oldest first, and stops on a short page. A
+// page that starts with the same comment as the one before means the server
+// ignored $skip, so the read fails instead of looping.
+func (s *Service) commentMarks(ctx context.Context, issueID string) (map[int64]string, error) {
+	marks := map[int64]string{}
+	skip := 0
+	prevFirst := ""
+	for {
+		page, err := s.client.ListComments(ctx, issueID, skip, commentMarkPage)
+		if err != nil {
+			return nil, fmt.Errorf("comments: %w", err)
+		}
+		if skip > 0 && len(page) > 0 && page[0].ID == prevFirst {
+			return nil, fmt.Errorf("comments: page at %d repeats the previous page", skip)
+		}
+		for _, c := range page {
+			m := commentMarkerRE.FindStringSubmatch(c.Text)
+			if m == nil {
+				continue
+			}
+			if id, err := strconv.ParseInt(m[1], 10, 64); err == nil {
+				marks[id] = c.ID
+			}
+		}
+		if len(page) < commentMarkPage {
+			return marks, nil
+		}
+		prevFirst = page[0].ID
+		skip += len(page)
+	}
 }
 
 // renderTask reads what the issue quotes and renders it.

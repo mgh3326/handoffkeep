@@ -88,9 +88,15 @@ func New(cfg Config) (*Client, error) {
 		userAgent: cfg.UserAgent,
 		sleep:     cfg.Sleep,
 	}
-	if c.http == nil {
-		c.http = &http.Client{}
+	// The bearer token follows only redirects that stay on the configured
+	// origin. The client is copied so the caller's transport is kept.
+	hc := &http.Client{}
+	if cfg.HTTPClient != nil {
+		copied := *cfg.HTTPClient
+		hc = &copied
 	}
+	hc.CheckRedirect = sameOriginRedirects(originOf(parsed), hc.CheckRedirect)
+	c.http = hc
 	if c.timeout <= 0 {
 		c.timeout = defaultTimeout
 	}
@@ -109,6 +115,44 @@ func New(cfg Config) (*Client, error) {
 		c.sleep = sleepContext
 	}
 	return c, nil
+}
+
+// maxRedirects matches net/http's own limit, which applies when the caller's
+// client has no CheckRedirect of its own.
+const maxRedirects = 10
+
+// sameOriginRedirects refuses a redirect to another scheme, host or port.
+// Net/http strips Authorization on some host changes but still follows the
+// redirect and reads its answer; the client never does that with the token.
+func sameOriginRedirects(origin string, next func(*http.Request, []*http.Request) error) func(*http.Request, []*http.Request) error {
+	return func(req *http.Request, via []*http.Request) error {
+		if originOf(req.URL) != origin {
+			return fmt.Errorf("youtrack: refused redirect to other origin %s", originOf(req.URL))
+		}
+		if next != nil {
+			return next(req, via)
+		}
+		if len(via) >= maxRedirects {
+			return errors.New("youtrack: stopped after 10 redirects")
+		}
+		return nil
+	}
+}
+
+// originOf is scheme://host:port with the default port filled in, so
+// https://a and https://a:443 compare equal and https://a and http://a do not.
+func originOf(u *url.URL) string {
+	scheme := strings.ToLower(u.Scheme)
+	port := u.Port()
+	if port == "" {
+		switch scheme {
+		case "https":
+			port = "443"
+		case "http":
+			port = "80"
+		}
+	}
+	return scheme + "://" + strings.ToLower(u.Hostname()) + ":" + port
 }
 
 func loopbackHost(host string) bool {
@@ -247,9 +291,15 @@ func (c *Client) once(ctx context.Context, method, endpoint string, payload []by
 		return nil, 0, fmt.Errorf("youtrack %s %s: %w", method, pathOf(endpoint), redact(err, c.token))
 	}
 	defer resp.Body.Close()
-	data, readErr := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
+	// One byte past the cap tells an over-size answer from one that fits. A
+	// truncated body can still be valid JSON (a list followed by padding), so
+	// it is refused, never decoded.
+	data, readErr := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes+1))
 	if readErr != nil {
 		return nil, 0, fmt.Errorf("youtrack %s %s: read: %w", method, pathOf(endpoint), readErr)
+	}
+	if len(data) > maxBodyBytes {
+		return nil, 0, fmt.Errorf("youtrack %s %s: response larger than %d bytes", method, pathOf(endpoint), maxBodyBytes)
 	}
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		return data, 0, nil
@@ -291,10 +341,14 @@ func retryAfter(value string) time.Duration {
 	if value == "" {
 		return 0
 	}
-	if seconds, err := strconv.Atoi(value); err == nil {
-		if seconds < 0 {
-			return 0
+	if isDigits(value) {
+		// Cap before multiplying: a huge count would overflow the duration
+		// into a negative or tiny wait.
+		digits := strings.TrimLeft(value, "0")
+		if len(digits) > 9 {
+			return maxRetryWait
 		}
+		seconds, _ := strconv.Atoi(digits)
 		d := time.Duration(seconds) * time.Second
 		if d > maxRetryWait {
 			return maxRetryWait
@@ -312,6 +366,18 @@ func retryAfter(value string) time.Duration {
 		return d
 	}
 	return 0
+}
+
+func isDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func (c *Client) backoffFor(attempt int, wait time.Duration) time.Duration {

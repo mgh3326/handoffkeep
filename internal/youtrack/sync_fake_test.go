@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -40,11 +41,38 @@ type fakeYouTrack struct {
 	articles       map[string]Article
 	articleBodies  map[string]string
 	articleParents map[string]string
+	articleProject map[string]string
 	articleCreates int
 	articleUpdates int
 	// failSummary makes a create of an issue or an article with this summary
 	// answer 500, so one item fails while the rest of a batch succeeds.
 	failSummary string
+
+	// issueComments holds each issue's comments, oldest first, for the list
+	// route.
+	issueComments map[string][]Comment
+	// loseCommentResponses and loseArticleResponses store that many creates
+	// and then drop the connection before answering, as a lost response does.
+	loseCommentResponses int
+	loseArticleResponses int
+}
+
+// commentsOn counts the comments YouTrack holds on one issue.
+func (f *fakeYouTrack) commentsOn(issueID string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.issueComments[issueID])
+}
+
+// dropConnection closes the connection without an answer.
+func dropConnection(w http.ResponseWriter) {
+	hj, ok := w.(http.Hijacker)
+	if !ok {
+		return
+	}
+	if conn, _, err := hj.Hijack(); err == nil {
+		_ = conn.Close()
+	}
 }
 
 func newFakeYouTrack() *fakeYouTrack {
@@ -58,6 +86,8 @@ func newFakeYouTrack() *fakeYouTrack {
 		articles:       map[string]Article{},
 		articleBodies:  map[string]string{},
 		articleParents: map[string]string{},
+		articleProject: map[string]string{},
+		issueComments:  map[string][]Comment{},
 		fieldValues: map[string][]string{
 			"hk 상태":   states,
 			"레인":      {"handoffkeep", "operator-desk", "rstack"},
@@ -130,10 +160,30 @@ func (f *fakeYouTrack) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		write(http.StatusOK, article)
+	case path == "/api/articles" && r.Method == http.MethodGet:
+		// A full-text search: every article whose content holds the query.
+		needle := r.URL.Query().Get("query")
+		ids := make([]string, 0, len(f.articles))
+		for id := range f.articles {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		out := []Article{}
+		for _, id := range ids {
+			if needle == "" || !strings.Contains(f.articleBodies[id], needle) {
+				continue
+			}
+			article := f.articles[id]
+			article.Content = f.articleBodies[id]
+			article.Project = &ProjectRef{ID: f.articleProject[id]}
+			out = append(out, article)
+		}
+		write(http.StatusOK, out)
 	case path == "/api/articles" && r.Method == http.MethodPost:
 		var body struct {
 			Summary       string `json:"summary"`
 			Content       string `json:"content"`
+			Project       idRef  `json:"project"`
 			ParentArticle *struct {
 				ID string `json:"id"`
 			} `json:"parentArticle"`
@@ -148,8 +198,14 @@ func (f *fakeYouTrack) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		article := Article{ID: id, IDReadable: "KB-A-" + strconv.Itoa(f.articleCreates), Summary: body.Summary}
 		f.articles[id] = article
 		f.articleBodies[id] = body.Content
+		f.articleProject[id] = body.Project.ID
 		if body.ParentArticle != nil {
 			f.articleParents[id] = body.ParentArticle.ID
+		}
+		if f.loseArticleResponses > 0 {
+			f.loseArticleResponses--
+			dropConnection(w)
+			return
 		}
 		write(http.StatusOK, article)
 	case strings.HasPrefix(path, "/api/articles/") && r.Method == http.MethodPost:
@@ -244,8 +300,33 @@ func (f *fakeYouTrack) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			Text string `json:"text"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
+		issueID := strings.TrimSuffix(strings.TrimPrefix(path, "/api/issues/"), "/comments")
 		f.comments = append(f.comments, body.Text)
-		write(http.StatusOK, Comment{ID: "c-" + strconv.Itoa(len(f.comments)), Text: body.Text})
+		comment := Comment{ID: "c-" + strconv.Itoa(len(f.comments)), Text: body.Text}
+		f.issueComments[issueID] = append(f.issueComments[issueID], comment)
+		if f.loseCommentResponses > 0 {
+			f.loseCommentResponses--
+			dropConnection(w)
+			return
+		}
+		write(http.StatusOK, comment)
+	case strings.HasSuffix(path, "/comments") && strings.HasPrefix(path, "/api/issues/") && r.Method == http.MethodGet:
+		// Honours $top and $skip like YouTrack: one slice of the issue's comments.
+		issueID := strings.TrimSuffix(strings.TrimPrefix(path, "/api/issues/"), "/comments")
+		all := f.issueComments[issueID]
+		skip, _ := strconv.Atoi(r.URL.Query().Get("$skip"))
+		top, err := strconv.Atoi(r.URL.Query().Get("$top"))
+		if err != nil || top <= 0 {
+			top = 100
+		}
+		if skip > len(all) {
+			skip = len(all)
+		}
+		end := skip + top
+		if end > len(all) {
+			end = len(all)
+		}
+		write(http.StatusOK, all[skip:end])
 	case strings.HasPrefix(path, "/api/issues/") && r.Method == http.MethodGet:
 		f.getCalls++
 		id := strings.TrimPrefix(path, "/api/issues/")

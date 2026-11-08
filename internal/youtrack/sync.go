@@ -325,6 +325,11 @@ func (s *Service) stalledTaskIDs(ctx context.Context) (map[int64]bool, error) {
 			return nil, fmt.Errorf("stalled tasks: %w", err)
 		}
 		for _, task := range tasks {
+			// The cursor only moves forward. A row at or below it means the
+			// read repeats a page, and continuing would never end.
+			if task.ID <= after {
+				return nil, fmt.Errorf("stalled tasks: task %d does not follow cursor %d", task.ID, after)
+			}
 			out[task.ID] = true
 			after = task.ID
 		}
@@ -468,6 +473,10 @@ func (s *Service) pushTask(ctx context.Context, task store.Task, opts SyncOption
 	if err != nil {
 		return action, err
 	}
+	// marks maps hk comment ids to comments already on the issue. It is read
+	// once, when the first due comment needs posting, so a comment whose create
+	// response was lost is linked, not posted again.
+	var marks map[int64]string
 	for _, comment := range comments {
 		if !humanComment(comment.Body) {
 			// Machinery notes are not mirrored. Linking them with a marker that
@@ -485,6 +494,19 @@ func (s *Service) pushTask(ctx context.Context, task store.Task, opts SyncOption
 		}
 		if action.IssueID == "" {
 			return action, fmt.Errorf("no issue to comment on")
+		}
+		if marks == nil {
+			if marks, err = s.commentMarks(ctx, action.IssueID); err != nil {
+				return action, err
+			}
+		}
+		if id, ok := marks[comment.ID]; ok {
+			// Already on the issue: an earlier create was stored but its
+			// response was lost. Link it and do not post it again.
+			if err := s.store.LinkYouTrackComment(ctx, task.ID, comment.ID, id, s.now()); err != nil {
+				return action, err
+			}
+			continue
 		}
 		mirroredComment, err := s.client.AddComment(ctx, action.IssueID, commentText(comment))
 		if err != nil {

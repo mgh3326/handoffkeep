@@ -11,10 +11,12 @@ const articleFields = "id,idReadable,summary"
 
 // Article is one 기술 자료 article. Content is markdown.
 type Article struct {
-	ID         string `json:"id"`
-	IDReadable string `json:"idReadable"`
-	Summary    string `json:"summary"`
-	Type       string `json:"$type"`
+	ID         string      `json:"id"`
+	IDReadable string      `json:"idReadable"`
+	Summary    string      `json:"summary"`
+	Content    string      `json:"content,omitempty"`
+	Project    *ProjectRef `json:"project,omitempty"`
+	Type       string      `json:"$type"`
 }
 
 // ArticleWrite is one create call. ParentID empty makes a top-level article.
@@ -44,6 +46,19 @@ func (c *Client) CreateArticle(ctx context.Context, in ArticleWrite) (Article, e
 	q.Set("fields", articleFields)
 	var out Article
 	err := c.postOnce(ctx, "/api/articles", q, body, &out)
+	return out, err
+}
+
+// SearchArticles returns up to ten articles whose content holds query, with
+// their content and project, so the caller can check both. The sync uses it to
+// find an article a lost create response left behind.
+func (c *Client) SearchArticles(ctx context.Context, query string) ([]Article, error) {
+	q := url.Values{}
+	q.Set("query", query)
+	q.Set("fields", "id,idReadable,summary,content,project(id,shortName,name,$type)")
+	q.Set("$top", "10")
+	var out []Article
+	err := c.get(ctx, "/api/articles", q, &out)
 	return out, err
 }
 
