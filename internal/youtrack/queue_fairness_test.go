@@ -360,12 +360,18 @@ func TestAdoptDecisionRefusesAnIssueOutsideTheDecisionProject(t *testing.T) {
 	fs := newFakeStore()
 	yt := newFakeYouTrack()
 	yt.issues["7-1"] = Issue{ID: "7-1", IDReadable: "HK-7", Project: &ProjectRef{ID: "0-1", ShortName: "HK"}}
-	yt.issues["8-1"] = Issue{ID: "8-1", IDReadable: "DEC-8", Project: &ProjectRef{ID: "0-3", ShortName: "DEC"}}
+	yt.issues["8-1"] = Issue{ID: "8-1", IDReadable: "DEC-8", Project: &ProjectRef{ID: "0-3", ShortName: "DEC"}, CustomFields: []IssueField{
+		{Name: DecIDField, Value: json.RawMessage(itoa(6))},
+	}}
+	yt.issues["8-2"] = Issue{ID: "8-2", IDReadable: "DEC-9", Project: &ProjectRef{ID: "0-3", ShortName: "DEC"}, CustomFields: []IssueField{
+		{Name: DecIDField, Value: json.RawMessage(itoa(99))},
+	}}
 	svc := newTestService(t, yt, fs)
 	ctx := context.Background()
 	state := AdoptState{Decisions: map[string]AdoptDecisionRow{
 		"5": {Issue: "7-1"},
 		"6": {Issue: "8-1"},
+		"7": {Issue: "8-2"},
 	}}
 
 	report, err := svc.Adopt(ctx, state, false)
@@ -383,6 +389,12 @@ func TestAdoptDecisionRefusesAnIssueOutsideTheDecisionProject(t *testing.T) {
 	}
 	if actions["6"] != "mapped" {
 		t.Fatalf("decision 6 in DEC project: action=%q, want mapped", actions["6"])
+	}
+	if actions["7"] != "decision_id_mismatch" {
+		t.Fatalf("decision 7 in DEC with another 결정 ID: action=%q, want decision_id_mismatch", actions["7"])
+	}
+	if _, ok := fs.decisionMirrors[7]; ok {
+		t.Fatal("a DEC issue carrying another decision's 결정 ID was stored")
 	}
 	if _, ok := fs.decisionMirrors[5]; ok {
 		t.Fatal("a decision mapped to an issue outside DEC was stored")

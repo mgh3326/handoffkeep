@@ -32,8 +32,9 @@ type AdoptAction struct {
 	IssueID    string `json:"issue_id"`
 	ReadableID string `json:"readable_id,omitempty"`
 	// Action is mapped, missing (the issue is gone; the sync creates one),
-	// project_mismatch (the issue is in another project; left alone), or
-	// hk_id_mismatch (the issue does not carry this task's hk ID; left alone).
+	// project_mismatch (the issue is in another project; left alone),
+	// hk_id_mismatch (the issue does not carry this task's hk ID), or
+	// decision_id_mismatch (the issue does not carry this decision's 결정 ID).
 	Action string `json:"action"`
 	// Comments is the number of hk comments marked as already posted.
 	Comments int `json:"comments,omitempty"`
@@ -123,7 +124,7 @@ func (s *Service) adoptTask(ctx context.Context, key string, st AdoptState, dryR
 	// The next sync writes this task's description and fields into the issue,
 	// so the issue must carry this task's hk ID. A stale or crossed entry in
 	// the Python state is left for the operator, not linked.
-	if !hasHKID(issue, s.schema.HKIDField, taskID) {
+	if !hasIDField(issue, s.schema.HKIDField, taskID) {
 		action.Action = "hk_id_mismatch"
 		return action, nil
 	}
@@ -174,6 +175,12 @@ func (s *Service) adoptDecision(ctx context.Context, key string, row AdoptDecisi
 		action.Action = "project_mismatch"
 		return action, nil
 	}
+	// The same holds within DEC: the next sync writes this decision into the
+	// issue its mapping names, so the issue's 결정 ID must be this decision.
+	if !hasIDField(issue, DecIDField, decisionID) {
+		action.Action = "decision_id_mismatch"
+		return action, nil
+	}
 	action.Action = "mapped"
 	if dryRun {
 		return action, nil
@@ -186,8 +193,8 @@ func (s *Service) adoptDecision(ctx context.Context, key string, row AdoptDecisi
 	return action, nil
 }
 
-// hasHKID reports whether the issue's hk ID field holds id.
-func hasHKID(issue Issue, field string, id int64) bool {
+// hasIDField reports whether the issue's int field holds id.
+func hasIDField(issue Issue, field string, id int64) bool {
 	f, ok := IssueFieldByName(issue.CustomFields, field)
 	if !ok {
 		return false
