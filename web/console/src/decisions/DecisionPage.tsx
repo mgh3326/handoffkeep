@@ -356,7 +356,7 @@ export function DecisionPage({ id }: { id: string }) {
         )}
       </header>
       <div className="decision-question-heading"><h2 className="decision-question">{question.heading}{(req?.question_ko_stale ?? detail.record.question_ko_stale) && <small className="hk-translation-stale"> 갱신 필요</small>}</h2>{((req?.question_ko ?? detail.record.question_ko) && !(req?.question_ko_stale ?? detail.record.question_ko_stale) || req?.options_ko && !req.options_ko_stale) && <button className="hk-detail-original" type="button" aria-pressed={original} onClick={() => setDetailOriginal(!original)}>원문 보기</button>}</div>
-      <p>{recommended ? <>권고: {recommendedLabel}{req?.reason && <> — {req.reason}</>}</> : "권고 없음 — 요청자가 권고를 주지 않았습니다"}</p>
+      {req && <p>{recommended ? <>권고: {recommendedLabel}{req?.reason && <> — {req.reason}</>}</> : "권고 없음 — 요청자가 권고를 주지 않았습니다"}</p>}
       {question.fields.length > 0 && <dl className="decision-question-fields">{question.fields.map(([key, value]) => <div key={key}><dt>{key}</dt><dd><QuestionValue value={value} /></dd></div>)}</dl>}
       {detail.task && (
         <p className="decision-task-state">

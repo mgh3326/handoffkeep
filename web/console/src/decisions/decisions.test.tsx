@@ -217,6 +217,7 @@ it("A10 source elsewhere links to legacy", async () => {
     }),
   );
   await start();
+  expect(screen.queryByText(/권고 없음/)).toBeNull();
   expect(
     screen.getByRole("link", { name: "기존 페이지" }).getAttribute("href"),
   ).toBe("/ui/decisions/legacy");
