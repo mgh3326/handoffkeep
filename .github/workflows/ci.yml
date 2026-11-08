@@ -347,6 +347,9 @@ jobs:
         env:
           SUITE: ${{ inputs.suite }}
           PACKAGES: ${{ inputs.packages }}
+          # hk 2658: the search latency measurement runs only on a dispatch
+          # that names ./internal/store, never in the full or PR suites.
+          HANDOFFKEEP_SEARCH_LATENCY: ${{ inputs.packages == './internal/store' && '1' || '' }}
         run: |
           bash scripts/validate-ci-packages.sh
           echo "go test -v -timeout 30m $PACKAGES"
