@@ -1,0 +1,26 @@
+{
+  "generated_at": "2026-11-08T07:05:08.176371+00:00",
+  "source": "handoffkeep CLI v0.0.113 (rev c77449dc), tasks export --limit 10000 (complete=true), tasks comments per task, doc list enumeration + doc get --id",
+  "tasks": {
+    "count": 3536,
+    "bytes": 1285356
+  },
+  "comments": {
+    "count": 12859,
+    "bytes": 7650276
+  },
+  "documents": {
+    "count": 11075,
+    "bytes": 109371714
+  },
+  "documents_by_kind": {
+    "answer": 391,
+    "brief": 2515,
+    "decision": 1,
+    "handoff": 63,
+    "note": 3122,
+    "other": 318,
+    "report": 4665
+  },
+  "tasks_with_comments": 2189
+}

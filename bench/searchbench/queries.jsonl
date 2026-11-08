@@ -1,0 +1,30 @@
+{"id": "q01", "text": "태스크 작성 규칙", "category": "spacing-baseline", "gold": ["task:629"], "gold_basis": "curated: title of 629"}
+{"id": "q02", "text": "태스크작성규칙", "category": "spacing-compound", "gold": ["task:629"], "gold_basis": "curated: 629, spaces removed"}
+{"id": "q03", "text": "콘솔 결정 답변 경로", "category": "korean-phrase", "gold": ["task:48"], "gold_basis": "curated: title of 48"}
+{"id": "q04", "text": "결정 답변 경로를", "category": "particle", "gold": ["task:48"], "gold_basis": "curated: 48 with particle 를"}
+{"id": "q05", "text": "panewire 허브 chat", "category": "english-term-in-korean", "gold": ["task:343"], "gold_basis": "curated: 343 title says /chat"}
+{"id": "q06", "text": "워커 정지 감지", "category": "korean-phrase", "gold": ["task:355"], "gold_basis": "curated: title of 355"}
+{"id": "q07", "text": "워커 정지를 감지하는", "category": "particle-inflection", "gold": ["task:355"], "gold_basis": "curated: 355 with particle/inflection"}
+{"id": "q08", "text": "읽기전용 클라이언트", "category": "korean-compound", "gold": ["task:11"], "gold_basis": "curated: title of 11"}
+{"id": "q09", "text": "적대 검증", "category": "spacing-variant", "gold": ["task:11"], "gold_basis": "curated: 11 has 적대검증"}
+{"id": "q10", "text": "parked-car 자산 리뷰", "category": "english-term-in-korean", "gold": ["task:1313"], "gold_basis": "curated: title of 1313"}
+{"id": "q11", "text": "스폰 선택 시뮬레이션", "category": "korean-for-english-title", "gold": ["task:2409", "task:2411", "task:2412"], "gold_basis": "curated: the three 'Spawn selection simulation' tasks"}
+{"id": "q12", "text": "rt-parity probe grade A+ T1", "category": "english-only", "gold": ["task:2265"], "gold_basis": "curated: title of 2265"}
+{"id": "q13", "text": "drawer 개요 펼치기", "category": "korean-phrase", "gold": ["task:628"], "gold_basis": "curated: title of 628"}
+{"id": "q14", "text": "body_doc 연결 보정", "category": "english-term-in-korean", "gold": ["task:630"], "gold_basis": "curated: title of 630"}
+{"id": "q15", "text": "append-only 보정", "category": "english-term-in-korean", "gold": ["task:630"], "gold_basis": "curated: 630 title"}
+{"id": "q16", "text": "AT 재시작 계획", "category": "2-3-char-acronym", "gold": ["task:2512"], "gold_basis": "curated: title of 2512"}
+{"id": "q17", "text": "decision_table_validate 검증", "category": "identifier-plus-korean", "gold": ["task:29"], "gold_basis": "curated: title of 29"}
+{"id": "q18", "text": "배포를", "category": "particle-compound", "gold": ["task:442"], "gold_basis": "lexical: task titles containing 배포를"}
+{"id": "q19", "text": "배포가", "category": "particle", "gold": ["task:302", "task:432", "task:479"], "gold_basis": "lexical: task titles containing 배포가"}
+{"id": "q20", "text": "배포검증", "category": "compound", "gold": ["doc:1209", "doc:61683", "doc:61686"], "gold_basis": "lexical: docs whose body contains 배포검증"}
+{"id": "q21", "text": "배포 검증", "category": "spacing-variant", "gold": ["doc:1209", "doc:61683", "doc:61686"], "gold_basis": "lexical: same docs as 배포검증"}
+{"id": "q22", "text": "deploy-ok 검증", "category": "english-term-in-korean", "gold": ["doc:61376", "doc:61585", "doc:61683", "doc:61686", "doc:61688", "doc:61690", "doc:61691", "doc:61694"], "gold_basis": "lexical: docs whose body contains both deploy-ok and 검증"}
+{"id": "q23", "text": "캡틴", "category": "2-char", "gold": ["task:7", "task:46", "task:65", "task:72", "task:77", "task:78", "task:84", "task:94", "task:95", "task:109", "task:110", "task:113", "task:114", "task:116", "task:123"], "gold_basis": "lexical: task titles containing 캡틴"}
+{"id": "q24", "text": "stalldetect 블로커 감지", "category": "identifier-plus-korean", "gold": ["doc:2005"], "gold_basis": "curated: key reports/2026-09-17/d1-ev117-stalldetect-blockers"}
+{"id": "q25", "text": "NCP 이전 방향", "category": "korean-phrase", "gold": ["doc:2658"], "gold_basis": "curated: title of doc 2658"}
+{"id": "q26", "text": "fleet-ci-three-tiers", "category": "english-key", "gold": ["doc:60861"], "gold_basis": "curated: key decision/2026-11-07/fleet-ci-three-tiers-r2"}
+{"id": "q27", "text": "PA 두번째 self-hosted runner", "category": "spacing-variant", "gold": ["doc:33375"], "gold_basis": "curated: title of doc 33375"}
+{"id": "q28", "text": "바나나 우유 재고 정산", "category": "no-answer", "gold": [], "gold_basis": "no answer expected: phrase absent from corpus"}
+{"id": "q29", "text": "해저 케이블 절단 복구", "category": "no-answer", "gold": [], "gold_basis": "no answer expected: phrase absent from corpus"}
+{"id": "q30", "text": "김치냉장고 온도 센서 교정", "category": "no-answer", "gold": [], "gold_basis": "no answer expected: phrase absent from corpus"}
