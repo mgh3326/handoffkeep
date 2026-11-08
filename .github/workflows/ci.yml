@@ -273,6 +273,14 @@ jobs:
             echo "pull request changes no package with DB-backed tests; not testing"
             echo "run=no" >> "$GITHUB_OUTPUT"
           fi
+      # CI: PR-tier DB job installs Node for tests/ (unblocks this PR; gap from hk 3528).
+      # tests/ holds the vite-built console tests, which need web/console's node_modules.
+      - if: ${{ steps.decide.outputs.run == 'yes' }}
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with: {node-version-file: web/console/.nvmrc, cache: npm, cache-dependency-path: web/console/package-lock.json}
+      - if: ${{ steps.decide.outputs.run == 'yes' }}
+        run: npm ci
+        working-directory: web/console
       - if: ${{ steps.decide.outputs.run == 'yes' }}
         uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
         with: {go-version-file: go.mod}
