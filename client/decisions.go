@@ -6,7 +6,8 @@ import (
 	"time"
 )
 
-// DecisionAskInput is a structured decision request put to the operator.
+// DecisionAskInput is a structured decision request put to the operator. It
+// is the body of both AskDecision and RecordDecisionRequest.
 type DecisionAskInput struct {
 	Question       string          `json:"question"`
 	Options        DecisionOptions `json:"options"`
@@ -54,10 +55,32 @@ type DecisionAskResult struct {
 	IssueCreated bool `json:"issue_created"`
 }
 
-// AskDecision records a decision request on task taskID and gives it its
-// Linear issue.
+// AskDecision records a decision request on task taskID and opens its Linear
+// issue (the hk CLI's `decisions ask --linear`). When hk runs without Linear
+// decisions it fails with a 503 linear_decisions_disabled HTTPError. A
+// service that must not open an issue uses RecordDecisionRequest.
 func (c Client) AskDecision(ctx context.Context, taskID int64, in DecisionAskInput) (DecisionAskResult, error) {
 	var out DecisionAskResult
 	err := c.transport().Call(ctx, "POST", fmt.Sprintf("/v1/tasks/%d/decision-request/ask", taskID), in, &out)
+	return out, err
+}
+
+// DecisionRequestResult is the answer to RecordDecisionRequest. Request.ID is
+// the request's id: look the decision up by it, not by question text.
+type DecisionRequestResult struct {
+	Task    Task            `json:"task"`
+	Request DecisionRequest `json:"request"`
+	// Duplicate is true when an identical open request already existed;
+	// Request is then that request.
+	Duplicate bool `json:"duplicate"`
+}
+
+// RecordDecisionRequest records a decision request on task taskID and nothing
+// else: it opens no Linear issue (the hk CLI's `decisions ask` without
+// --linear). Services that must not open issues, such as mergewake's deploy
+// approval, use it instead of AskDecision.
+func (c Client) RecordDecisionRequest(ctx context.Context, taskID int64, in DecisionAskInput) (DecisionRequestResult, error) {
+	var out DecisionRequestResult
+	err := c.transport().Call(ctx, "POST", fmt.Sprintf("/v1/tasks/%d/decision-request", taskID), in, &out)
 	return out, err
 }
