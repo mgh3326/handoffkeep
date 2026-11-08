@@ -2002,6 +2002,9 @@ func serve(args []string, errout io.Writer) error {
 		workers = append(workers, singletonWorker{store: st, id: store.HubForwardWorkerLock, worker: forwarder})
 	}
 	notifier, e := decisionNotifierFromEnv(st)
+	if n, ok := notifier.(api.DecisionNotifier); ok && e == nil {
+		st.SetConsoleURL(n.ConsoleURL)
+	}
 	if e != nil {
 		return e
 	}

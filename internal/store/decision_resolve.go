@@ -559,21 +559,11 @@ func (s *Store) ResolveDecision(ctx context.Context, in ResolveDecisionInput) (R
 	if relayed && prov.effective() == DecisionProvenanceOperatorDecided {
 		note += " — " + prov.quote
 	}
-	if assistant {
-		// The notification is written before the decision event so a failure
-		// anywhere later in the transaction still rolls both back together.
-		head := "[via berry] " + resolved.ID + " answered"
-		if in.Option != "" {
-			head += " " + in.Option
-		}
-		head += " " + prov.marker()
-		if in.Text != "" {
-			head += ": "
-		}
-		text := assistantLaneText(head, in.Text)
-		if err = insertNotificationOutbox(ctx, tx, OutboxKindDecisionAnswered, x.Lane, decisionAnsweredEventID(resolved.ID), text, now); err != nil {
-			return ResolveDecisionOutcome{}, err
-		}
+	// One answered notice per resolution, on every channel. It is written
+	// before the decision event so a failure later in the transaction still
+	// rolls both back together.
+	if err = s.queueDecisionAnswerNotice(ctx, tx, x, resolved, in, decidedBy(in, prov), resolutionID, now); err != nil {
+		return ResolveDecisionOutcome{}, err
 	}
 	if err = insertDecisionEvent(ctx, tx, &x, in.Actor, note, now); err != nil {
 		return ResolveDecisionOutcome{}, err

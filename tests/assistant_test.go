@@ -295,7 +295,7 @@ func TestAssistantDecisionResolveAPI(t *testing.T) {
 		t.Fatalf("attribution=%+v", res)
 	}
 	// Exactly one deterministic outbox row (the shared DB holds other tests'
-	// rows; count only this resolution's event id).
+	// rows; count only this request's answered notices).
 	countOutbox := func() int {
 		t.Helper()
 		unsent, err := s.ListUnsentNotifications(t.Context(), 0)
@@ -304,9 +304,9 @@ func TestAssistantDecisionResolveAPI(t *testing.T) {
 		}
 		n := 0
 		for _, row := range unsent {
-			if row.EventID == req.ID+"-answered" {
+			if strings.HasPrefix(row.EventID, "decision-answered-"+req.ID+"-") {
 				n++
-				if row.Kind != store.OutboxKindDecisionAnswered || row.TargetLane != task.Lane {
+				if row.Kind != store.OutboxKindDecisionAnswered || row.TargetLane != req.RequestedBy {
 					t.Fatalf("outbox row=%+v", row)
 				}
 			}
@@ -614,7 +614,7 @@ func TestAssistantOutboxAPI(t *testing.T) {
 	if resolve.StatusCode != http.StatusOK {
 		t.Fatalf("resolve status=%d", resolve.StatusCode)
 	}
-	eventID := req.ID + "-answered"
+	eventPrefix := "decision-answered-" + req.ID + "-"
 	// The shared DB holds other tests' unsent rows; look up only this test's
 	// event id in the list.
 	unsentHas := func() (bool, store.NotificationOutbox) {
@@ -628,7 +628,7 @@ func TestAssistantOutboxAPI(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, row := range listed.Notifications {
-			if row.EventID == eventID {
+			if strings.HasPrefix(row.EventID, eventPrefix) {
 				return true, row
 			}
 		}
@@ -638,6 +638,7 @@ func TestAssistantOutboxAPI(t *testing.T) {
 	if !present || row.SentAt != nil || row.Kind != store.OutboxKindDecisionAnswered {
 		t.Fatalf("unsent lookup present=%t row=%+v", present, row)
 	}
+	eventID := row.EventID
 	mark := func(body any) (int, map[string]any) {
 		t.Helper()
 		resp := request(t, h.Client(), http.MethodPost, h.URL+"/v1/assistant/outbox/sent", "node-token", body)

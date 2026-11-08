@@ -566,6 +566,9 @@ type Store struct {
 	autoCloseOff atomic.Bool
 	// stalledHours is started_stalled_hours; zero means the default.
 	stalledHours atomic.Int64
+	// consoleURL is the console base URL answer notifications link to; nil
+	// or empty leaves the link out.
+	consoleURL atomic.Pointer[string]
 }
 
 // Refs stores repeatable named references. Its decoder accepts legacy scalar
