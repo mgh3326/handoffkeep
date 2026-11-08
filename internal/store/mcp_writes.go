@@ -344,25 +344,3 @@ func (s *Store) applyTaskUpdateLabels(ctx context.Context, tx pgx.Tx, x *Task, i
 	}
 	return changed, nil
 }
-
-// CheckOperatorOnlyDecision refuses a dots answer to an open request whose
-// effective policy is operator_direct. Any other request, or an unknown one, is
-// left to ResolveDecision, which reports its own error.
-func (s *Store) CheckOperatorOnlyDecision(ctx context.Context, requestID string) error {
-	taskID, _, ok := ParseDecisionRequestID(requestID)
-	if !ok {
-		return nil
-	}
-	x, found, err := s.GetTask(ctx, taskID)
-	if err != nil {
-		return err
-	}
-	request := x.Refs.DecisionRequest
-	if !found || request == nil || request.ID != requestID || request.Status != DecisionRequestOpen {
-		return nil
-	}
-	if request.EffectivePolicy(x.Refs.Disposition != nil) == DecisionPolicyOperatorDirect {
-		return ErrOperatorOnlyDecision
-	}
-	return nil
-}

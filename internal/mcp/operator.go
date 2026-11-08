@@ -688,15 +688,11 @@ func (o operatorTools) decisionAnswer(ctx context.Context, _ *gmcp.CallToolReque
 		return nil, nil, errors.New("an option or text is required")
 	}
 	// dots (the ChatGPT channel) never answers an operator-only request: the
-	// refusal names the code and writes no attempt.
-	if o.principal.Channel == ChannelChatGPT {
-		if err := o.service.Store.CheckOperatorOnlyDecision(ctx, requestID); err != nil {
-			return nil, nil, err
-		}
-	}
+	// store refuses it under the task lock, with no attempt written.
 	out, err := o.service.Store.ResolveDecision(ctx, store.ResolveDecisionInput{
 		RequestID: requestID, Kind: store.DecisionRequestAnswered, Option: option, Text: text,
 		Channel: o.principal.decisionChannel(), Actor: o.principal.Actor, Verified: o.principal.Access,
+		RefuseOperatorOnly: o.principal.Channel == ChannelChatGPT,
 	})
 	if err != nil {
 		return nil, nil, err

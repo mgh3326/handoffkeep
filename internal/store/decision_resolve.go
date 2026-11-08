@@ -115,6 +115,11 @@ type ResolveDecisionInput struct {
 	Channel  string
 	Actor    string
 	Verified bool
+	// RefuseOperatorOnly makes an answer to an open request whose effective
+	// policy is operator_direct fail with ErrOperatorOnlyDecision. The check runs
+	// under the task lock, before any attempt is written, so the refusal leaves
+	// no attempt row and cannot race a policy change.
+	RefuseOperatorOnly bool
 
 	// The relayed claim (channels assistant and session only): the provenance
 	// it names, the operator's verbatim words and the request id they are
@@ -346,6 +351,10 @@ func (s *Store) ResolveDecision(ctx context.Context, in ResolveDecisionInput) (R
 
 	decisionBefore := decisionBeforeOf(x)
 	current := x.Refs.DecisionRequest
+	if in.RefuseOperatorOnly && current != nil && current.ID == in.RequestID && current.Status == DecisionRequestOpen &&
+		current.EffectivePolicy(x.Refs.Disposition != nil) == DecisionPolicyOperatorDirect {
+		return ResolveDecisionOutcome{}, ErrOperatorOnlyDecision
+	}
 	provenance := derivedProvenance(in, prov)
 	now := time.Now().UTC()
 	attempt := decisionAttempt{
