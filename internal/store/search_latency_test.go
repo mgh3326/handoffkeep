@@ -15,7 +15,7 @@ import (
 
 // TestSearchLatency measures Store.Search on a throwaway schema seeded to the
 // size of production (about 56k documents and 56k tasks) with Korean text and
-// multi-kilobyte document bodies. It is off unless HANDOFFKEEP_SEARCH_LATENCY=1,
+// roughly 0.8 KB document bodies. It is off unless HANDOFFKEEP_SEARCH_LATENCY=1,
 // which CI's search-latency run sets (hk 2658). Run it on a commit before a change and on the change, then
 // compare result_sha for each query: equal digests mean an identical result
 // set. Each query logs a search.plan block (EXPLAIN ANALYZE, BUFFERS of the
