@@ -319,3 +319,35 @@ func newUnmappedTestService(t *testing.T, f *fakeYouTrack, fs *fakeStore) *Servi
 	}
 	return NewService(fs, client, Options{Tenant: "tenant", DefaultHKProject: "handoffkeep", Now: func() time.Time { return time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC) }})
 }
+
+// A skipped task whose project changes to a mapped one is pushed once its skip
+// window passes, with no mapping write. A permanent park would strand it.
+func TestSkippedTaskMovedToAMappedProjectIsPushed(t *testing.T) {
+	fs := newFakeStore()
+	yt := newFakeYouTrack()
+	delete(fs.projects, "other")
+	task := fs.addTask("ghost", "handoffkeep", "moves later", store.StateBacklog, 4)
+	svc := newUnmappedTestService(t, yt, fs)
+	ctx := context.Background()
+
+	if _, err := svc.Sync(ctx, SyncOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := fs.mirrors[task.ID]; ok {
+		t.Fatal("an unmapped task must not be pushed")
+	}
+
+	moved := fs.tasks[task.ID]
+	project := "handoffkeep"
+	moved.Project = &project
+	moved.UpdatedAt = moved.UpdatedAt.Add(time.Minute)
+	fs.tasks[task.ID] = moved
+	fs.elapseBackoff() // the hour after the skip passes
+
+	if _, err := svc.Sync(ctx, SyncOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := fs.mirrors[task.ID]; !ok {
+		t.Fatal("a task moved to a mapped project was stranded by its earlier skip")
+	}
+}

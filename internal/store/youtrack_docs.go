@@ -25,8 +25,8 @@ type YouTrackDocArticle struct {
 // YouTrack project than the document's project now resolves to. A document
 // resolves to its task's project, or defaultProject when it has no task or a
 // blank project, and falls back to the "other" mapping when that name has none,
-// as YouTrackProjectFor does. A key parked by its attempt state is not due
-// until its next_attempt_at. Ordered by that time and then by key, so a
+// as YouTrackProjectFor does. A key with an attempt state is not due until its
+// next_attempt_at. Ordered by that time and then by key, so a
 // document that failed or was skipped waits behind the rest.
 func (s *Store) DueYouTrackDocs(ctx context.Context, patterns []string, defaultProject string, limit int) ([]Document, error) {
 	if limit < 1 {

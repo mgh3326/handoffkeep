@@ -42,6 +42,15 @@ func TestYouTrackPushScanHonoursAttemptState(t *testing.T) {
 		t.Fatal("a mapping write must not clear a backoff")
 	}
 
+	// A skip is an hour, not a permanent park: once that hour passes the task is
+	// judged again without any mapping write.
+	if _, err := st.pool.Exec(ctx, `UPDATE youtrack_attempts SET next_attempt_at=now()-interval '1 second' WHERE queue='task' AND item_key=$1`, strconv.FormatInt(parked.ID, 10)); err != nil {
+		t.Fatal(err)
+	}
+	if due = dueTaskIDs(t, st); !due[parked.ID] {
+		t.Fatalf("a skipped task was not judged again after its window: %v", due)
+	}
+
 	if err := st.RecordYouTrackAttempt(ctx, YouTrackQueueTask, strconv.FormatInt(passing.ID, 10), "", ""); err != nil {
 		t.Fatal(err)
 	}

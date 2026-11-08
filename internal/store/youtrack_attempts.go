@@ -24,8 +24,10 @@ const youtrackAttemptErrorMax = 500
 // RecordYouTrackAttempt writes the outcome of one attempt at a queue key.
 //   - failure set: the key goes back with backoff (30s, doubling, capped at
 //     one hour) and its attempt count grows.
-//   - skip set: the key is parked until ClearYouTrackSkips runs (a mapping was
-//     written). It is not due, and it sorts last.
+//   - skip set: the key is not due for an hour, and then it is judged again.
+//     A skip is not a permanent park: the item's project may change to a mapped
+//     one without any mapping write, and a parked row would strand it. A mapping
+//     write also clears skips at once (ClearYouTrackSkips).
 //   - both empty: the attempt succeeded. The count resets and the key sorts
 //     behind the keys that have waited longer, which keeps in-flight items
 //     from holding the head of the batch.
@@ -46,8 +48,8 @@ func (s *Store) RecordYouTrackAttempt(ctx context.Context, queue, key, failure, 
 	switch {
 	case skip != "":
 		_, err = s.pool.Exec(ctx, `INSERT INTO youtrack_attempts(queue,item_key,next_attempt_at,attempts,last_error,skip_reason,updated_at)
-			VALUES($1,$2,'infinity'::timestamptz,0,'',$3,now())
-			ON CONFLICT(queue,item_key) DO UPDATE SET next_attempt_at='infinity'::timestamptz, last_error='', skip_reason=EXCLUDED.skip_reason, updated_at=now()`,
+			VALUES($1,$2,now()+make_interval(secs=>3600),0,'',$3,now())
+			ON CONFLICT(queue,item_key) DO UPDATE SET next_attempt_at=now()+make_interval(secs=>3600), last_error='', skip_reason=EXCLUDED.skip_reason, updated_at=now()`,
 			queue, key, skip)
 	case failure != "":
 		_, err = s.pool.Exec(ctx, `INSERT INTO youtrack_attempts(queue,item_key,next_attempt_at,attempts,last_error,skip_reason,updated_at)
@@ -64,7 +66,7 @@ func (s *Store) RecordYouTrackAttempt(ctx context.Context, queue, key, failure, 
 	return err
 }
 
-// ClearYouTrackSkips makes every parked key due again. Writing a project
+// ClearYouTrackSkips makes every skipped key due at once. Writing a project
 // mapping calls it, so a skipped item is judged against the new mapping.
 func (s *Store) ClearYouTrackSkips(ctx context.Context, tx pgx.Tx) error {
 	_, err := tx.Exec(ctx, `DELETE FROM youtrack_attempts WHERE skip_reason<>''`)

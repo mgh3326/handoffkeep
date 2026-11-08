@@ -299,7 +299,7 @@ func (s *Service) push(ctx context.Context, opts SyncOptions, report *SyncReport
 }
 
 // recordAttempt stores the outcome of one queue attempt so the key waits
-// its turn (failure), parks (skip), or goes behind the keys that have waited
+// its turn (failure), waits an hour (skip), or goes behind the keys that have waited
 // longer (success). A dry run writes nothing, so it records nothing.
 func (s *Service) recordAttempt(ctx context.Context, opts SyncOptions, queue, key, failure, skip string, report *SyncReport) {
 	if opts.DryRun {

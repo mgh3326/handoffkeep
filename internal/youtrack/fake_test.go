@@ -53,16 +53,13 @@ type fakeStore struct {
 }
 
 // fakeAttempt mirrors one youtrack_attempts row. next is the time the key is
-// next due; a parked key sits at fakeParked.
+// next due.
 type fakeAttempt struct {
 	next     time.Time
 	attempts int
 	lastErr  string
 	skip     string
 }
-
-// fakeParked is the next time of a skipped key (the store uses infinity).
-var fakeParked = time.Date(9999, 1, 1, 0, 0, 0, 0, time.UTC)
 
 // attemptKey is the fake's key for one queue item.
 func attemptKey(queue, key string) string { return queue + "|" + key }
@@ -462,7 +459,7 @@ func (f *fakeStore) RecordYouTrackAttempt(_ context.Context, queue, key, failure
 	a := f.attempts[ak]
 	switch {
 	case skip != "":
-		a.next, a.lastErr, a.skip = fakeParked, "", skip
+		a.next, a.lastErr, a.skip = now.Add(time.Hour), "", skip
 	case failure != "":
 		a.attempts++
 		a.lastErr, a.skip = failure, ""
@@ -477,17 +474,15 @@ func (f *fakeStore) RecordYouTrackAttempt(_ context.Context, queue, key, failure
 	return nil
 }
 
-// elapseBackoff moves every failed key's next attempt into the past, as the
-// time between two runs does. Parked skips stay parked.
+// elapseBackoff moves every key's next attempt into the past, as the time
+// between runs does: a failure's backoff or a skip's hour passes.
 func (f *fakeStore) elapseBackoff() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	past := time.Now().UTC().Add(-time.Second)
 	for k, a := range f.attempts {
-		if a.skip == "" && a.lastErr != "" {
-			a.next = past
-			f.attempts[k] = a
-		}
+		a.next = past
+		f.attempts[k] = a
 	}
 }
 
