@@ -734,7 +734,11 @@ func (o operatorTools) taskComment(ctx context.Context, _ *gmcp.CallToolRequest,
 	if err := store.CheckTaskCommentBody(in.Body); err != nil {
 		return nil, nil, err
 	}
-	comment, replayed, err := o.service.Store.CreateMCPTaskComment(ctx, in.ID, in.Body, o.write(toolTaskComment, strings.TrimSpace(in.IdempotencyKey)))
+	write, err := o.write(toolTaskComment, strings.TrimSpace(in.IdempotencyKey))
+	if err != nil {
+		return nil, nil, err
+	}
+	comment, replayed, err := o.service.Store.CreateMCPTaskComment(ctx, in.ID, in.Body, write)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -761,6 +765,10 @@ func (o operatorTools) taskIntake(ctx context.Context, _ *gmcp.CallToolRequest, 
 	if project == "" {
 		return nil, nil, errors.New("project is required")
 	}
+	write, err := o.write(toolTaskIntake, strings.TrimSpace(in.IdempotencyKey))
+	if err != nil {
+		return nil, nil, err
+	}
 	candidates, err := o.duplicateCandidates(ctx, title, strings.TrimSpace(in.Lane))
 	if err != nil {
 		return nil, nil, err
@@ -768,7 +776,6 @@ func (o operatorTools) taskIntake(ctx context.Context, _ *gmcp.CallToolRequest, 
 	// A caller's idempotency key names the task it filed, so a repeat with a
 	// changed title still returns that task; without a key the content hash
 	// keeps the existing identical-intake behaviour.
-	write := o.write(toolTaskIntake, strings.TrimSpace(in.IdempotencyKey))
 	sourceRef := chatgptSourceRef(title, in.Body, project)
 	if write.Key != "" {
 		sourceRef = intakeSourceRef(o.principal.Actor, write.Key)
