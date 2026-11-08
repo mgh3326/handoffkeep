@@ -11,8 +11,10 @@
 #      smoke set with a test token: healthz, task list/show/create, comment
 #      create and list, decision list
 #
-# The previous release is the newest v* tag reachable from the target, or an
-# explicit base commit/tag.
+# The previous release is, in order: an explicit base commit/tag argument; the
+# `deploy` tag when it names a commit strictly before the target (hk 3509 moves
+# it on every production deploy); else the newest v* tag reachable from the
+# target. The rule that chose the base is printed.
 #
 #   TARGET_SHA=<sha> scripts/test-previous-release-schema.sh [base-sha-or-tag]
 #
@@ -72,28 +74,45 @@ if [[ -n "$base_input" ]]; then
   git cat-file -e "$base_input^{commit}" 2>/dev/null || fail "base '$base_input' is not a commit in this checkout"
   base_commit=$(git rev-parse --verify "$base_input^{commit}")
   base_desc=$base_input
+  base_rule='explicit argument'
   [[ "$base_commit" == "$target_commit" ]] && fail "base '$base_input' is the target; there is no previous release to check"
 else
-  # Newest version among the v* tags whose commit is reachable from the
-  # target. The target's own tag is skipped: the previous release is the one
-  # that was deployed before this build. v0.0.0 is auto-tag's placeholder,
-  # never a release.
-  tags=$(git tag --merged "$target_commit" --sort=-v:refname)
   base_commit=''
   base_desc=''
-  for tag in $tags; do
-    # Only released tags count; v0.0.0 is auto-tag's placeholder.
-    [[ $tag =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || continue
-    [[ $tag == v0.0.0 ]] && continue
-    [[ "$(git rev-parse --verify "$tag^{commit}")" == "$target_commit" ]] && continue
-    base_commit=$(git rev-parse --verify "$tag^{commit}")
-    base_desc=$tag
-    break
-  done
-  [[ -n "$base_commit" ]] || fail "no v* release tag before $target_commit; pass its commit as the argument"
+  base_rule=''
+
+  # The `deploy` tag is what production runs. It counts only when it names a
+  # commit strictly before the target; the target itself, or a commit that is
+  # not its ancestor, falls through to the v* rule.
+  if deploy_commit=$(git rev-parse -q --verify 'refs/tags/deploy^{commit}'); then
+    if [[ "$deploy_commit" != "$target_commit" ]] && git merge-base --is-ancestor "$deploy_commit" "$target_commit"; then
+      base_commit=$deploy_commit
+      base_desc='deploy'
+      base_rule='deploy tag (an ancestor of the target)'
+    fi
+  fi
+
+  if [[ -z "$base_commit" ]]; then
+    # Newest version among the v* tags whose commit is reachable from the
+    # target. The target's own tag is skipped: the previous release is the one
+    # that was deployed before this build. v0.0.0 is auto-tag's placeholder,
+    # never a release.
+    tags=$(git tag --merged "$target_commit" --sort=-v:refname)
+    for tag in $tags; do
+      # Only released tags count; v0.0.0 is auto-tag's placeholder.
+      [[ $tag =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || continue
+      [[ $tag == v0.0.0 ]] && continue
+      [[ "$(git rev-parse --verify "$tag^{commit}")" == "$target_commit" ]] && continue
+      base_commit=$(git rev-parse --verify "$tag^{commit}")
+      base_desc=$tag
+      base_rule='newest v* tag before the target'
+      break
+    done
+    [[ -n "$base_commit" ]] || fail "no v* release tag before $target_commit; pass its commit as the argument"
+  fi
 fi
 
-say "target $target_commit, previous release $base_desc ($base_commit)"
+say "target $target_commit, previous release $base_desc ($base_commit), chosen by: $base_rule"
 
 # --- build both binaries from their commits ------------------------------
 
@@ -183,7 +202,10 @@ task_id() {
 
 say 'migrate a fresh database with the target binary and seed a task'
 start_server "$tmp/target" target
-api POST /v1/tasks '{"lane":"schema-compat","title":"seed from the target release","kind":"implement","new":true}'
+# A fresh database seeds the task_projects vocabulary (migration); both
+# releases refuse a create without a project (task_project_required), so the
+# seed names one of the seeded projects.
+api POST /v1/tasks '{"lane":"schema-compat","title":"seed from the target release","kind":"implement","project":"handoffkeep","new":true}'
 seed_id=$(task_id)
 expect 'seed task is backlog with the target kind' 'd["state"] == "backlog" and d["kind"] == "implement"'
 stop_server
@@ -202,7 +224,7 @@ expect 'task list includes the row the target created' 'any(t.get("id") == int(a
 api GET "/v1/tasks/$seed_id"
 expect 'task show returns the row the target created' 'd.get("id") == int(a) and d.get("title") == "seed from the target release"' "$seed_id"
 
-api POST /v1/tasks '{"lane":"schema-compat","title":"written by the previous release","kind":"implement","new":true}'
+api POST /v1/tasks '{"lane":"schema-compat","title":"written by the previous release","kind":"implement","project":"handoffkeep","new":true}'
 expect 'the previous release creates a task' 'd.get("id") > 0 and d.get("title") == "written by the previous release"'
 expect 'the created task is owned by the confirming client' 'd.get("created_by") == "test"'
 
