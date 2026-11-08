@@ -1948,10 +1948,17 @@ const operatorClientID = "operator"
 // client still gets operator_required.
 const operatorDeskClientID = "operator-desk"
 
+// panewireDesignClientID is the panewire design session's client id. It owns
+// the bench catalog, so it writes the catalog and area exceptions under its
+// own id instead of going through operator-desk (decision
+// hk:doc decision/2026-11-08/panewire-design-catalog-writer). It gains no other
+// right: quota grants, host grants and task writes are unchanged.
+const panewireDesignClientID = "panewire-design"
+
 // benchCatalogWriter reports whether client may write the bench catalog and
 // the area exceptions.
 func benchCatalogWriter(client string) bool {
-	return client == operatorClientID || client == operatorDeskClientID
+	return client == operatorClientID || client == operatorDeskClientID || client == panewireDesignClientID
 }
 
 type benchCatalogInput struct {

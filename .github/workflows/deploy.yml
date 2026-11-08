@@ -180,7 +180,6 @@ jobs:
       RESULT: ${{ needs.ci.result }}
       SCHEMA_COMPAT: ${{ needs.schema-compat.result }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-      EVIDENCE: ${{ github.repository }}@${{ needs.target.outputs.sha }}
     steps:
       - name: Post deploy-ok on the target sha
         run: |
@@ -207,8 +206,14 @@ jobs:
             echo "deploy tier was cancelled; no deploy-ok status posted"
             exit 0
           fi
+          # GitHub refuses a status description over 140 characters (422), and
+          # a refused status is no deploy-ok at all: the text is short by
+          # construction and truncated here as the bound. The run link is in
+          # target_url.
+          desc="deploy tier: ci=$RESULT schema-compat=$SCHEMA_COMPAT"
+          desc=${desc:0:140}
           gh api "repos/${GITHUB_REPOSITORY}/statuses/${TARGET_SHA}" \
             -f state="$STATE" \
             -f context=deploy-ok \
             -f target_url="$RUN_URL" \
-            -f description="deploy tier (race + postgres, macOS, release build, previous-release schema): $RESULT schema=$SCHEMA_COMPAT on $EVIDENCE"
+            -f description="$desc"
