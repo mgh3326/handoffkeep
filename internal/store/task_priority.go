@@ -52,20 +52,31 @@ func (s *Store) SetTaskPriority(ctx context.Context, id int64, priority int, by,
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return out, err
 	}
-	if IsSettledState(x.State) {
-		return out, ErrTaskTerminal
-	}
 	out = PriorityResult{Previous: x.Priority, Priority: priority}
-	now := time.Now().UTC()
-	if _, err = tx.Exec(ctx, `UPDATE tasks SET priority=$2,updated_at=$3 WHERE id=$1`, id, priority, now); err != nil {
+	if err = setTaskPriorityTx(ctx, tx, &x, priority, by, reason, "ui-priority", key); err != nil {
 		return PriorityResult{}, err
+	}
+	return out, tx.Commit(ctx)
+}
+
+// setTaskPriorityTx writes a priority change and its event inside the caller's
+// transaction. The caller has locked the task row and loaded it into x; on
+// return x carries the new priority and updated_at.
+func setTaskPriorityTx(ctx context.Context, tx pgx.Tx, x *Task, priority int, by, reason, source, key string) error {
+	if IsSettledState(x.State) {
+		return ErrTaskTerminal
+	}
+	now := time.Now().UTC()
+	if _, err := tx.Exec(ctx, `UPDATE tasks SET priority=$2,updated_at=$3 WHERE id=$1`, x.ID, priority, now); err != nil {
+		return err
 	}
 	note := fmt.Sprintf("priority %d → %d", x.Priority, priority)
 	if reason != "" {
 		note += ": " + reason
 	}
-	if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: id, Kind: "metadata", From: x.State, To: x.State, By: by, Note: note, Refs: x.Refs, At: now, Source: "ui-priority", SourceRef: key, Field: "priority", FromValue: fmt.Sprint(x.Priority), ToValue: fmt.Sprint(priority)}); err != nil {
-		return PriorityResult{}, err
+	if _, _, err := insertEvent(ctx, tx, taskEventInput{TaskID: x.ID, Kind: "metadata", From: x.State, To: x.State, By: by, Note: note, Refs: x.Refs, At: now, Source: source, SourceRef: key, Field: "priority", FromValue: fmt.Sprint(x.Priority), ToValue: fmt.Sprint(priority)}); err != nil {
+		return err
 	}
-	return out, tx.Commit(ctx)
+	x.Priority, x.UpdatedAt = priority, now
+	return nil
 }

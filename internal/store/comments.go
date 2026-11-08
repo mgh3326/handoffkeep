@@ -106,6 +106,53 @@ func (s *Store) CreateTaskComment(ctx context.Context, taskID int64, author, bod
 	return x, tx.Commit(ctx)
 }
 
+// CreateMCPTaskComment appends one comment written through MCP, with its audit
+// row, in one transaction. A key this actor already used returns the comment
+// that key made (replayed true) and writes nothing; the same key on another
+// task is ErrIdempotencyKeyReused. The comment's author is w.Author.
+func (s *Store) CreateMCPTaskComment(ctx context.Context, taskID int64, body string, w MCPWrite) (TaskComment, bool, error) {
+	if taskID < 1 || w.Tool == "" {
+		return TaskComment{}, false, ErrTaskCommentInvalid
+	}
+	if err := w.validate(); err != nil {
+		return TaskComment{}, false, err
+	}
+	if err := CheckTaskCommentBody(body); err != nil {
+		return TaskComment{}, false, err
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return TaskComment{}, false, err
+	}
+	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, taskCommentInsertLock); err != nil {
+		return TaskComment{}, false, err
+	}
+	var x TaskComment
+	replayed, err := replayMCPWriteTx(ctx, tx, w, &x)
+	if err != nil {
+		return TaskComment{}, false, err
+	}
+	if replayed {
+		if x.TaskID != taskID {
+			return TaskComment{}, false, ErrIdempotencyKeyReused
+		}
+		return x, true, tx.Commit(ctx)
+	}
+	now := time.Now().UTC()
+	err = scanTaskComment(tx.QueryRow(ctx, `INSERT INTO task_comments(task_id,body,author,created_at,source_ref) SELECT $1,$2,$3,$4,$5 WHERE EXISTS(SELECT 1 FROM tasks WHERE id=$1) RETURNING `+taskCommentColumns, taskID, body, w.Author, now, w.Key), &x)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return TaskComment{}, false, ErrTaskNotFound
+	}
+	if err != nil {
+		return TaskComment{}, false, err
+	}
+	if err := insertMCPWriteAuditTx(ctx, tx, w, taskID, x, now); err != nil {
+		return TaskComment{}, false, err
+	}
+	return x, false, tx.Commit(ctx)
+}
+
 // ListTaskComments returns comments in id order after afterID. A missing task
 // is ErrTaskNotFound so callers never confuse it with a task without comments.
 func (s *Store) ListTaskComments(ctx context.Context, taskID, afterID int64, limit int) ([]TaskComment, error) {

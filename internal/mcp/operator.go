@@ -93,9 +93,19 @@ func registerOperatorTools(s *gmcp.Server, service api.Service, p principal) {
 	}, o.taskComment)
 	gmcp.AddTool(s, &gmcp.Tool{
 		Name:        "task_intake",
-		Description: "File a new hk task into triage. Returns the created task, or the task already recorded for an identical intake, plus duplicate candidates found before filing when there are any.",
+		Description: "File a new hk task into triage. Returns the created task, or the task already recorded for an identical intake, plus duplicate candidates found before filing when there are any. An optional idempotency_key makes a repeat return the task that key filed, whatever the title.",
 		Annotations: writeAnnotations(),
 	}, o.taskIntake)
+	gmcp.AddTool(s, &gmcp.Tool{
+		Name:        "task_update",
+		Description: "Change one hk task's state, lane or priority in one call (any of them). expected_updated_at is the updated_at you read from task_show or task_get; a task that changed since answers revision_conflict and nothing is written. idempotency_key is required; a repeat returns the first call's result. Returns the changed fields, the new revision, console_url and youtrack_sync (sync_pending for a mirrored task). Labels are not changed by this tool yet.",
+		Annotations: writeAnnotations(),
+	}, o.taskUpdate)
+	gmcp.AddTool(s, &gmcp.Tool{
+		Name:        "decision_ask",
+		Description: "Ask the operator a structured decision on one hk task, recorded the same way as tasks decision-request. idempotency_key is required; a repeat returns the first result. The operator answers with decision_answer; a request marked operator-only (answer_policy operator_direct) cannot be answered from this channel.",
+		Annotations: writeAnnotations(),
+	}, o.decisionAsk)
 	registerMetaTools(s, o)
 }
 
@@ -639,6 +649,13 @@ func (o operatorTools) decisionAnswer(ctx context.Context, _ *gmcp.CallToolReque
 	if option == "" && text == "" {
 		return nil, nil, errors.New("an option or text is required")
 	}
+	// dots (the ChatGPT channel) never answers an operator-only request: the
+	// refusal names the code and writes no attempt.
+	if o.principal.Channel == ChannelChatGPT {
+		if err := o.service.Store.CheckOperatorOnlyDecision(ctx, requestID); err != nil {
+			return nil, nil, err
+		}
+	}
 	out, err := o.service.Store.ResolveDecision(ctx, store.ResolveDecisionInput{
 		RequestID: requestID, Kind: store.DecisionRequestAnswered, Option: option, Text: text,
 		Channel: o.principal.decisionChannel(), Actor: o.principal.Actor, Verified: o.principal.Access,
@@ -654,6 +671,7 @@ func (o operatorTools) decisionAnswer(ctx context.Context, _ *gmcp.CallToolReque
 		"request":     out.Request,
 		"actor":       o.principal.Actor,
 		"channel":     o.principal.Channel,
+		"author":      writeAuthor(o.principal),
 		"console_url": taskURL(out.Task.ID),
 		"task":        map[string]any{"id": out.Task.ID, "state": out.Task.State, "console_url": taskURL(out.Task.ID)},
 	}
@@ -665,8 +683,9 @@ func (o operatorTools) decisionAnswer(ctx context.Context, _ *gmcp.CallToolReque
 }
 
 type taskCommentInput struct {
-	ID   int64  `json:"id"`
-	Body string `json:"body"`
+	ID             int64  `json:"id"`
+	Body           string `json:"body"`
+	IdempotencyKey string `json:"idempotency_key,omitempty"`
 }
 
 func (o operatorTools) taskComment(ctx context.Context, _ *gmcp.CallToolRequest, in taskCommentInput) (*gmcp.CallToolResult, any, error) {
@@ -676,21 +695,22 @@ func (o operatorTools) taskComment(ctx context.Context, _ *gmcp.CallToolRequest,
 	if err := store.CheckTaskCommentBody(in.Body); err != nil {
 		return nil, nil, err
 	}
-	comment, err := o.service.CreateTaskComment(ctx, o.principal.Actor, in.ID, in.Body)
+	comment, replayed, err := o.service.Store.CreateMCPTaskComment(ctx, in.ID, in.Body, o.write(toolTaskComment, strings.TrimSpace(in.IdempotencyKey)))
 	if err != nil {
 		return nil, nil, err
 	}
 	return jsonResult(map[string]any{
-		"comment": comment, "actor": o.principal.Actor, "channel": o.principal.Channel,
-		"console_url": taskURL(in.ID),
+		"comment": comment, "replayed": replayed, "actor": o.principal.Actor, "channel": o.principal.Channel,
+		"author": writeAuthor(o.principal), "console_url": taskURL(in.ID),
 	})
 }
 
 type taskIntakeInput struct {
-	Title   string `json:"title"`
-	Body    string `json:"body"`
-	Project string `json:"project"`
-	Lane    string `json:"lane,omitempty"`
+	Title          string `json:"title"`
+	Body           string `json:"body"`
+	Project        string `json:"project"`
+	Lane           string `json:"lane,omitempty"`
+	IdempotencyKey string `json:"idempotency_key,omitempty"`
 }
 
 func (o operatorTools) taskIntake(ctx context.Context, _ *gmcp.CallToolRequest, in taskIntakeInput) (*gmcp.CallToolResult, any, error) {
@@ -706,8 +726,16 @@ func (o operatorTools) taskIntake(ctx context.Context, _ *gmcp.CallToolRequest, 
 	if err != nil {
 		return nil, nil, err
 	}
-	task, created, err := o.service.IntakeTask(ctx, intakeActor(o.principal), store.IntakeInput{
-		Source: "chatgpt", SourceRef: chatgptSourceRef(title, in.Body, project),
+	// A caller's idempotency key names the task it filed, so a repeat with a
+	// changed title still returns that task; without a key the content hash
+	// keeps the existing identical-intake behaviour.
+	write := o.write(toolTaskIntake, strings.TrimSpace(in.IdempotencyKey))
+	sourceRef := chatgptSourceRef(title, in.Body, project)
+	if write.Key != "" {
+		sourceRef = intakeSourceRef(o.principal.Actor, write.Key)
+	}
+	task, created, err := o.service.IntakeTask(ctx, intakeActor(principal{Actor: write.Author}), store.IntakeInput{
+		Source: "chatgpt", SourceRef: sourceRef,
 		Title: title, Body: in.Body, Project: &project, Lane: strings.TrimSpace(in.Lane),
 	})
 	if err != nil {
@@ -718,13 +746,20 @@ func (o operatorTools) taskIntake(ctx context.Context, _ *gmcp.CallToolRequest, 
 		return nil, nil, err
 	}
 	mirror, mirrored := mirrors[task.ID]
-	return jsonResult(map[string]any{
+	out := map[string]any{
 		"created":              created,
 		"task":                 taskSummaryOf(task, mirror, mirrored),
 		"duplicate_candidates": candidates,
 		"actor":                o.principal.Actor,
 		"channel":              o.principal.Channel,
-	})
+		"author":               write.Author,
+	}
+	// The intake is idempotent by its source ref, so a crash before this row
+	// is written converges on the next call with the same key.
+	if err := o.service.Store.RecordMCPWrite(ctx, write, task.ID, out); err != nil {
+		return nil, nil, err
+	}
+	return jsonResult(out)
 }
 
 // duplicateCandidates reuses the console search to show likely duplicates

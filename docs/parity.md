@@ -36,9 +36,9 @@ inbox and disposition writes refuse them.
 | Tasks | Search, list and read a task | Mirrored issue is readable; Korean summary and operator comments are YouTrack-owned | GET /ui/api/board/tasks, GET /ui/api/board/tasks/{id}, GET /ui/api/search | GET /v1/tasks, GET /v1/tasks/{id}, GET /v1/tasks/export, GET /v1/search, GET /v1/triage | tasks list, tasks export, tasks show, tasks triage, ctx search | task_search, task_list, task_show, task_get | Operator, bearer, MCP bearer/Access | None (read) | n/a | internal/mcp/operator_test.go, internal/mcp/operator_reads_test.go, internal/ui/board_*_test.go, internal/api/*task*_test.go |
 | Tasks | Create a task (triage intake) | New issue is pulled into a triage task; unmapped projects are skipped | — | POST /v1/tasks, POST /v1/intake | tasks add, tasks intake | task_intake | Operator via YouTrack; bearer; MCP bearer/Access | created_by, task_origins (source/tenant/role), task_events | No delete; transition drop or duplicate | internal/api/intake_test.go, cmd/handoffkeep/intake_test.go, internal/mcp/operator_test.go |
 | Tasks | Edit a filed task's title or body | YouTrack edits the Korean summary; hk mirrors it, it is not editable back | — | — | — | — | — | — | — | — |
-| Tasks | State transition (claim, start, review, merge, deploy, complete, drop, hold, reopen) | hk 상태 pull applies TransitionTaskWith; a refusal reverts the field and comments; hk pushes its state | POST /ui/api/tasks/{id}/{action} (action = close-merged, close-completed, drop, hold, reopen; relane has its own route) | POST /v1/tasks/{id}/transition, POST /v1/tasks/{id}/reopen, POST /v1/tasks/{id}/claim, POST /v1/tasks/next | tasks transition, tasks reopen, tasks claim, tasks next | — | Operator (console/YouTrack); bearer (API/CLI) | task_events; ui.write; outbox and processed activities | reopen reverses a settled state; claim/start are not reversible | internal/ui/task_lifecycle_test.go, internal/api/task_closure_test.go, internal/youtrack/sync_test.go |
-| Tasks | Priority | hk 우선순위 is pulled, pushed through the outbox, and reverted on refusal | POST /ui/api/tasks/{id}/priority | POST /v1/tasks/{id}/transition with a priority (only on a triage exit) | tasks transition --priority only on a triage exit; tasks add --priority | — | Operator (console/YouTrack); bearer on a triage exit | task_events field=priority; ui.write; outbox | Set again; YouTrack refusal reverts | internal/ui/task_priority_test.go, internal/api/youtrack_test.go |
-| Tasks | Lane / relane | 레인 is pulled and pushed; a refused value is reverted with a comment | POST /ui/api/tasks/{id}/relane | POST /v1/tasks/relane (batch) | tasks relane | — | Operator (console/YouTrack); bearer (API/CLI) | task_events field=lane; ui.write; relane lane events; outbox | relane again; the console sends from_key so the move can be undone | internal/ui/board_relane_test.go, internal/api/relane_test.go, internal/youtrack/sync_test.go |
+| Tasks | State transition (claim, start, review, merge, deploy, complete, drop, hold, reopen) | hk 상태 pull applies TransitionTaskWith; a refusal reverts the field and comments; hk pushes its state | POST /ui/api/tasks/{id}/{action} (action = close-merged, close-completed, drop, hold, reopen; relane has its own route) | POST /v1/tasks/{id}/transition, POST /v1/tasks/{id}/reopen, POST /v1/tasks/{id}/claim, POST /v1/tasks/next | tasks transition, tasks reopen, tasks claim, tasks next | task_update (state, hk 3465) | Operator (console/YouTrack); bearer (API/CLI); MCP Access (dots) | task_events; ui.write; outbox and processed activities | reopen reverses a settled state; claim/start are not reversible | internal/ui/task_lifecycle_test.go, internal/api/task_closure_test.go, internal/youtrack/sync_test.go, internal/mcp/operator_writes_test.go |
+| Tasks | Priority | hk 우선순위 is pulled, pushed through the outbox, and reverted on refusal | POST /ui/api/tasks/{id}/priority | POST /v1/tasks/{id}/transition with a priority (only on a triage exit) | tasks transition --priority only on a triage exit; tasks add --priority | task_update (priority, hk 3465) | Operator (console/YouTrack); bearer on a triage exit; MCP Access (dots) | task_events field=priority; ui.write; outbox | Set again; YouTrack refusal reverts | internal/ui/task_priority_test.go, internal/api/youtrack_test.go, internal/mcp/operator_writes_test.go |
+| Tasks | Lane / relane | 레인 is pulled and pushed; a refused value is reverted with a comment | POST /ui/api/tasks/{id}/relane | POST /v1/tasks/relane (batch) | tasks relane | task_update (lane, hk 3465) | Operator (console/YouTrack); bearer (API/CLI); MCP Access (dots) | task_events field=lane; ui.write; relane lane events; outbox | relane again; the console sends from_key so the move can be undone | internal/ui/board_relane_test.go, internal/api/relane_test.go, internal/youtrack/sync_test.go |
 | Tasks | Project | hk project maps to a YouTrack project; a change moves the issue and keeps its stable id | — | POST /v1/tasks/{id}/project | tasks project | — | Operator via YouTrack; bearer | task_events kind=project | Set again | internal/api/task_project_test.go, internal/youtrack/sync_test.go |
 | Tasks | Labels | — (not in the YouTrack field contract) | — | POST /v1/tasks/{id}/labels, GET/POST /v1/labels, PUT /v1/labels/{label}, POST /v1/labels/{label}/retire | tasks label, tasks labels | — | bearer | task_events field=labels | Remove the label; labels are never deleted, only retired | cmd/handoffkeep/task_model_test.go |
 | Tasks | Due date | — | — | POST /v1/tasks/{id}/due | tasks due | — | bearer | task_events field=due | --clear | cmd/handoffkeep/task_model_test.go |
@@ -95,9 +95,6 @@ exception to `ConsoleWrites`.
 
 | Capability | Why MCP has no tool | Follow-up |
 | --- | --- | --- |
-| State transition | State/lane writes need the expected-version and idempotency contract | hk 3465 |
-| Priority | Same write contract; today only a triage exit sets it through the API | hk 3465 |
-| Lane / relane | Same write contract | hk 3465 |
 | Project (set on a task) | Basic task write | hk 3465 |
 | Labels | Basic task write | hk 3465 |
 | Due date | Basic task write | hk 3465 |
@@ -105,7 +102,7 @@ exception to `ConsoleWrites`.
 | Parent / children | Work-management write | hk 3474 |
 | Relations | Work-management write | hk 3474 |
 | Split / move | Move is relane on the API, console and CLI; split is not implemented on any surface. The MCP write contract is pending. | hk 3474 |
-| Ask a decision | Asking is an agent/CLI producer path; dots's own requests go through the dots request flow (hk 3464) | not planned |
+| Ask a decision | Asking is an agent/CLI producer path; dots's own requests go through the dots request flow (hk 3464) | supported: decision_ask (hk 3465) |
 | Deny a pending confirmation | Only the verified operator path produces the attempt being denied | not planned |
 | Snooze a decision record | Part of the attention inbox | hk 3474 |
 | Legacy answer (task/escalation/lane) | Superseded by structured requests, which `decision_answer` serves | not planned |
@@ -165,8 +162,9 @@ because that path has an authenticated principal.
 Read tools set `readOnlyHint: true`. The write tools (`put_checkpoint`,
 `put_document`, `memory_put`, `attachment_put_from_path`, `decision_answer`,
 `task_comment`, `task_intake`) set `readOnlyHint: false` and
-`destructiveHint: false`. Of these, only `decision_answer` can move a task's
-state, by answering the task's request; the rest add records.
+`destructiveHint: false`. Of these, `decision_answer` moves a task's state by
+answering the task's request; the rest add records. `task_update` (hk 3465)
+also moves a task's state, lane and priority.
 
 After the baseline, `dots_inbox` lists hk dots requests over HTTP and
 `dots_reply` records a reply and its task state change over HTTP. See
@@ -174,3 +172,24 @@ After the baseline, `dots_inbox` lists hk dots requests over HTTP and
 
 `task_get`, `task_comments`, `task_events` and `changes_since` are the four
 tools hk 3461 added after the baseline; all four are read-only and HTTP-only.
+
+hk 3465 adds `task_update` and `decision_ask` (HTTP only; both `readOnlyHint: false`,
+`destructiveHint: false`). They join the write contract every dots write follows:
+
+- `task_update` changes state, lane or priority in one call. `expected_updated_at`
+  is the task's `updated_at` the caller read; a task that moved since returns
+  `revision_conflict` and nothing is written. `idempotency_key` is required; a
+  repeat returns the first call's result. The response's `youtrack_sync` is
+  `sync_pending` for a mirrored task with a change (the YouTrack push is queued),
+  `applied` otherwise; `sync_failed` is not reported by this tool yet. Labels
+  are not in this tool yet (the Labels row above).
+- `decision_ask` records a structured decision request on a task through the same
+  path as `tasks decision-request`; `idempotency_key` is required. A request with
+  `answer_policy` `operator_direct` (or `human_only`) is operator-only: `decision_answer`
+  from the ChatGPT channel refuses it with `operator_only_decision` and writes no
+  attempt.
+- `task_comment` and `task_intake` take an optional `idempotency_key`; a repeat
+  returns the comment or task that key first made.
+- A write through the ChatGPT channel is labelled author `dots` (comment author,
+  task creator, event `by`). Each keyed or audited write leaves a row in
+  `mcp_write_audit` with the actor (`operator:<email>`) and channel.
