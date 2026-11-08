@@ -46,7 +46,9 @@ func TestServerSentryRoutes(t *testing.T) {
 	}, monitor, nil)
 	want := map[string]int{}
 	for _, request := range []struct{ method, path, name string }{
-		{http.MethodGet, "/v1/tasks/123", "GET /v1/tasks/{id}"},
+		// A polling route is head-sampled at 0.005 and would be dropped here
+		// nondeterministically; its rate is covered in internal/telemetry.
+		{http.MethodGet, "/v1/search", "GET /v1/search"},
 		{http.MethodPost, "/v1/documents/private-doc", "POST /v1/documents/{key...}"},
 		{http.MethodPost, "/hooks/linear", "POST /hooks/linear"},
 		{http.MethodGet, "/ui/tasks/123", "GET /ui/tasks/{id}"},
