@@ -121,9 +121,11 @@ func TestAssistantResolveRefusesTerminalTask(t *testing.T) {
 		if err != nil || closed.Request.Status != DecisionRequestAnswered {
 			t.Fatalf("state=%s operator cleanup resolve=%+v err=%v", state, closed.Request.Status, err)
 		}
-	}
-	if n := len(outboxRows(t, s)); n != 0 {
-		t.Fatalf("terminal resolves left %d outbox rows", n)
+		// Only the operator's cleanup answer writes a notice; the refused
+		// assistant attempt above wrote none.
+		if n := len(requestNotices(t, s, request.ID)); n != 1 {
+			t.Fatalf("state=%s refused assistant resolve left %d notices, want 1 from the cleanup", state, n)
+		}
 	}
 }
 

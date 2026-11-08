@@ -332,8 +332,8 @@ func TestResolveDecisionResults(t *testing.T) {
 			t.Fatalf("out=%+v err=%v", out, err)
 		}
 		check(t, task.ID, []string{"pending_confirmation"}, 0)
-		if n := len(outboxRows(t, s)); n != 0 {
-			t.Fatalf("a pending answer left %d outbox rows", n)
+		if n := len(requestNotices(t, s, request.ID)); n != 0 {
+			t.Fatalf("a pending answer left %d notices", n)
 		}
 	})
 
