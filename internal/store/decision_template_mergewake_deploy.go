@@ -35,12 +35,14 @@ func mergewakeDeployTemplate(r DecisionRequest, options *DecisionOptions) (Decis
 		return DecisionTemplate{}, false
 	}
 	reasons := make([]string, 0, len(*p.Reasons))
-	safe := len(*p.Reasons) > 0 && len(*p.Paths) == 0 && *p.Identity.EnvironmentKnown
+	safe := len(*p.Paths) == 0 && *p.Identity.EnvironmentKnown && *p.Previous == "unknown"
+	hasReceiptReason := false
 	for _, reason := range *p.Reasons {
 		switch reason {
 		case "host inventory approval missing or changed":
 			reasons = append(reasons, "이 호스트의 배포 승인 기록이 없거나 바뀜")
 		case "missing or invalid previous deployment receipt":
+			hasReceiptReason = true
 			reasons = append(reasons, "이전 배포 기록이 없음")
 		default:
 			reasons = append(reasons, reason)
@@ -61,11 +63,14 @@ func mergewakeDeployTemplate(r DecisionRequest, options *DecisionOptions) (Decis
 	}
 	if producer {
 		out.Reason = "요청자 권고: " + r.Reason
-	} else if safe {
+	} else if safe && hasReceiptReason {
 		out.Options.Options[0].Recommended = true
-		out.Reason = "hk 규칙: 마이그레이션·승인 경로 변경 없음; 처음 켜는 기록 문제뿐"
+		out.Reason = "hk 규칙: 승인이 필요한 경로 없음 · 이전 배포 기록 없음. 호스트 승인 기록 없음/변경은 처음 켜는 경우와 설정 변경을 구분할 수 없음 — 호스트 설정을 바꾸지 않았다면 A"
 	} else {
 		out.Reason = "검토 필요: 경로 및 사유를 확인하세요"
+	}
+	if !producer && r.Reason != "" {
+		out.Reason += " · 요청자 사유: " + r.Reason
 	}
 	details, err := json.Marshal(struct {
 		Host           string   `json:"대상 호스트"`

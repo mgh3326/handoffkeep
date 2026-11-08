@@ -21,12 +21,20 @@ func TestMergewakeDeployTemplate(t *testing.T) {
 			t.Errorf("question missing %q: %s", want, out.Question)
 		}
 	}
+	if !strings.Contains(out.Reason, "설정 변경을 구분할 수 없음") {
+		t.Fatalf("ambiguous inventory not explained: %q", out.Reason)
+	}
 	if !out.Options.Options[0].Recommended || out.Options.Options[1].Recommended {
 		t.Fatalf("recommendation: %+v", out.Options)
 	}
 	after, _ := json.Marshal(options)
 	if request.Question != deploySample || string(before) != string(after) {
 		t.Fatalf("template mutated source: %s %s", before, after)
+	}
+	request.Reason = "producer context"
+	out, ok = RenderDecisionTemplate(request, &options)
+	if !ok || !strings.Contains(out.Reason, "요청자 사유: producer context") || !strings.Contains(out.Question, "요청자 사유: producer context") {
+		t.Fatalf("producer context lost: %+v", out)
 	}
 	options.Options[1].Recommended = true
 	request.Reason = "producer reason"
@@ -38,7 +46,7 @@ func TestMergewakeDeployTemplate(t *testing.T) {
 
 func TestMergewakeDeployTemplateReviewAndStrictParsing(t *testing.T) {
 	options := DecisionOptions{Options: []DecisionOption{{Key: "A", Label: "Approve this deployment"}, {Key: "B", Label: "Keep the current version"}}}
-	for _, change := range []struct{ from, to string }{{`"paths":[]`, `"paths":["deploy/schema.sql"]`}, {`"missing or invalid previous deployment receipt"`, `"unknown reason"`}, {`"environment_known":true`, `"environment_known":false`}} {
+	for _, change := range []struct{ from, to string }{{`"paths":[]`, `"paths":["deploy/schema.sql"]`}, {`"missing or invalid previous deployment receipt"`, `"unknown reason"`}, {`"environment_known":true`, `"environment_known":false`}, {`"previous":"unknown"`, `"previous":"d4b91c0693df53895052b7a502eedb05c331c7d6"`}, {`"missing or invalid previous deployment receipt"`, `"host inventory approval missing or changed"`}} {
 		r := DecisionRequest{RequestedBy: "mergewake-design", Question: strings.Replace(deploySample, change.from, change.to, 1)}
 		got, ok := RenderDecisionTemplate(r, &options)
 		if !ok || got.Options.Options[0].Recommended || !strings.Contains(got.Reason, "검토 필요") {
