@@ -18,6 +18,9 @@ import (
 // JobResultMaxBytes caps the result object written with state=completed.
 const JobResultMaxBytes = 64 << 10
 
+// JobSelectionMaxBytes caps the selection object a job records.
+const JobSelectionMaxBytes = 32 << 10
+
 // jobFieldMax caps every allowlisted scalar field.
 const jobFieldMax = 256
 
@@ -62,25 +65,29 @@ func ValidJobHost(host string) bool { return ValidHostID(host) }
 // Job is the cross-host job record. Only allowlisted metadata is stored —
 // never brief text, command lines, pane output or absolute local paths.
 type Job struct {
-	JobID             string          `json:"job_id"`
-	TaskID            *int64          `json:"task_id"`
-	Host              string          `json:"host"`
-	State             string          `json:"state"`
-	Role              string          `json:"role,omitempty"`
-	Label             string          `json:"label,omitempty"`
-	Family            string          `json:"family,omitempty"`
-	Profile           string          `json:"profile,omitempty"`
-	Model             string          `json:"model,omitempty"`
-	Harness           *string         `json:"harness,omitempty"`
-	Effort            *string         `json:"effort,omitempty"`
-	Pool              string          `json:"pool,omitempty"`
-	OwnerLane         string          `json:"owner_lane,omitempty"`
-	ParentLane        string          `json:"parent_lane,omitempty"`
-	ParentJob         string          `json:"parent_job,omitempty"`
-	PaneID            string          `json:"pane_id,omitempty"`
-	Worktree          *JobWorktree    `json:"worktree,omitempty"`
-	ReportDoc         string          `json:"report_doc,omitempty"`
-	Result            json.RawMessage `json:"result,omitempty"`
+	JobID      string          `json:"job_id"`
+	TaskID     *int64          `json:"task_id"`
+	Host       string          `json:"host"`
+	State      string          `json:"state"`
+	Role       string          `json:"role,omitempty"`
+	Label      string          `json:"label,omitempty"`
+	Family     string          `json:"family,omitempty"`
+	Profile    string          `json:"profile,omitempty"`
+	Model      string          `json:"model,omitempty"`
+	Harness    *string         `json:"harness,omitempty"`
+	Effort     *string         `json:"effort,omitempty"`
+	Pool       string          `json:"pool,omitempty"`
+	OwnerLane  string          `json:"owner_lane,omitempty"`
+	ParentLane string          `json:"parent_lane,omitempty"`
+	ParentJob  string          `json:"parent_job,omitempty"`
+	PaneID     string          `json:"pane_id,omitempty"`
+	Worktree   *JobWorktree    `json:"worktree,omitempty"`
+	ReportDoc  string          `json:"report_doc,omitempty"`
+	Result     json.RawMessage `json:"result,omitempty"`
+	// Selection is panewire's record of why it chose this model and host. The
+	// shape is panewire's; the store keeps unknown keys (see jobexplain.go for
+	// the keys hk renders).
+	Selection         json.RawMessage `json:"selection,omitempty"`
 	Usage             *JobUsage       `json:"usage,omitempty"`
 	CreatedBy         string          `json:"created_by"`
 	CreatedAt         time.Time       `json:"created_at"`
@@ -172,6 +179,8 @@ type JobUpdate struct {
 	Worktree   *JobWorktree    `json:"worktree"`
 	ReportDoc  *string         `json:"report_doc"`
 	Result     json.RawMessage `json:"result"`
+	// Selection replaces the stored selection as a whole.
+	Selection json.RawMessage `json:"selection"`
 	// Usage replaces the stored usage as a whole. It can be written after termination.
 	Usage           *JobUsage    `json:"usage"`
 	At              *time.Time   `json:"at"`
@@ -186,7 +195,7 @@ type JobUpdate struct {
 
 // usageOnly reports an update containing only the terminal late-write set.
 func (u JobUpdate) usageOnly() bool {
-	return (u.Usage != nil || u.Skills != nil || u.SkillsSupported != nil) && u.State == nil && u.Role == nil && u.Label == nil && u.Family == nil && u.Profile == nil && u.Model == nil && u.Harness == nil && u.Effort == nil && u.Pool == nil && u.OwnerLane == nil && u.ParentLane == nil && u.ParentJob == nil && u.PaneID == nil && u.Worktree == nil && u.ReportDoc == nil && u.Result == nil && u.At == nil && u.ReadyAt == nil && u.ReportSHA256 == nil && u.ReportVersion == nil && u.EndReason == nil && u.DiffStat == nil
+	return (u.Usage != nil || u.Skills != nil || u.SkillsSupported != nil) && u.State == nil && u.Role == nil && u.Label == nil && u.Family == nil && u.Profile == nil && u.Model == nil && u.Harness == nil && u.Effort == nil && u.Pool == nil && u.OwnerLane == nil && u.ParentLane == nil && u.ParentJob == nil && u.PaneID == nil && u.Worktree == nil && u.ReportDoc == nil && u.Result == nil && u.Selection == nil && u.At == nil && u.ReadyAt == nil && u.ReportSHA256 == nil && u.ReportVersion == nil && u.EndReason == nil && u.DiffStat == nil
 }
 
 func validJobField(s string) bool { return len(s) <= jobFieldMax && !stringContainsNUL(s) }
@@ -302,6 +311,24 @@ func checkJobResult(v any) error {
 	return nil
 }
 
+// checkJobSelection requires a size-capped JSON object and scans it like a
+// result. Keys are not allowlisted: panewire owns the shape.
+func checkJobSelection(raw json.RawMessage) error {
+	if len(raw) > JobSelectionMaxBytes {
+		return errors.New("job selection too large")
+	}
+	var obj any
+	de := json.NewDecoder(strings.NewReader(string(raw)))
+	de.UseNumber()
+	if !json.Valid(raw) || de.Decode(&obj) != nil {
+		return errors.New("job selection must be a JSON object")
+	}
+	if _, isObj := obj.(map[string]any); !isObj {
+		return errors.New("job selection must be a JSON object")
+	}
+	return checkJobResult(obj)
+}
+
 // checkJobUpdate validates an update before it reaches the row. Result is
 // checked here because it is request-shaped: object type, size and content.
 func checkJobUpdate(u JobUpdate) error {
@@ -378,6 +405,11 @@ func checkJobUpdate(u JobUpdate) error {
 			return err
 		}
 	}
+	if len(u.Selection) > 0 {
+		if err := checkJobSelection(u.Selection); err != nil {
+			return err
+		}
+	}
 	if len(u.Result) > 0 {
 		if len(u.Result) > JobResultMaxBytes {
 			return fmt.Errorf("job result too large")
@@ -407,11 +439,11 @@ func checkJobUpdate(u JobUpdate) error {
 	return nil
 }
 
-const jobColumns = `job_id,task_id,host,state,role,label,family,profile,model,pool,owner_lane,parent_lane,parent_job,pane_id,worktree,report_doc,result,created_by,created_at,updated_at,input_tokens,output_tokens,reasoning_tokens,cache_read_tokens,cache_write_tokens,usage_source,usage_recorded_at,harness,effort,claimed_at,spawned_at,spawned_received_at,ready_at,ready_received_at,ended_at,ended_received_at,report_sha256,report_version,skills,skills_supported,end_reason,diff_files,diff_insertions,diff_deletions`
+const jobColumns = `job_id,task_id,host,state,role,label,family,profile,model,pool,owner_lane,parent_lane,parent_job,pane_id,worktree,report_doc,result,created_by,created_at,updated_at,input_tokens,output_tokens,reasoning_tokens,cache_read_tokens,cache_write_tokens,usage_source,usage_recorded_at,harness,effort,claimed_at,spawned_at,spawned_received_at,ready_at,ready_received_at,ended_at,ended_received_at,report_sha256,report_version,skills,skills_supported,end_reason,diff_files,diff_insertions,diff_deletions,selection`
 
 func scanJob(row pgx.Row) (Job, error) {
 	var j Job
-	var worktree, result, skills []byte
+	var worktree, result, skills, selection []byte
 	var files, insertions, deletions *int
 	var usage JobUsage
 	var source *string
@@ -420,10 +452,11 @@ func scanJob(row pgx.Row) (Job, error) {
 		&j.ParentJob, &j.PaneID, &worktree, &j.ReportDoc, &result,
 		&j.CreatedBy, &j.CreatedAt, &j.UpdatedAt,
 		&usage.InputTokens, &usage.OutputTokens, &usage.ReasoningTokens,
-		&usage.CacheReadTokens, &usage.CacheWriteTokens, &source, &usage.RecordedAt, &j.Harness, &j.Effort, &j.ClaimedAt, &j.SpawnedAt, &j.SpawnedReceivedAt, &j.ReadyAt, &j.ReadyReceivedAt, &j.EndedAt, &j.EndedReceivedAt, &j.ReportSHA256, &j.ReportVersion, &skills, &j.SkillsSupported, &j.EndReason, &files, &insertions, &deletions)
+		&usage.CacheReadTokens, &usage.CacheWriteTokens, &source, &usage.RecordedAt, &j.Harness, &j.Effort, &j.ClaimedAt, &j.SpawnedAt, &j.SpawnedReceivedAt, &j.ReadyAt, &j.ReadyReceivedAt, &j.EndedAt, &j.EndedReceivedAt, &j.ReportSHA256, &j.ReportVersion, &skills, &j.SkillsSupported, &j.EndReason, &files, &insertions, &deletions, &selection)
 	if err != nil {
 		return j, err
 	}
+	j.Selection = selection
 	// Usage exists once it was written; the write always sets recorded_at.
 	if usage.RecordedAt != nil {
 		if source != nil {
@@ -671,6 +704,9 @@ func (s *Store) UpdateJob(ctx context.Context, id string, u JobUpdate) (Job, err
 	if u.Result != nil {
 		j.Result = u.Result
 	}
+	if u.Selection != nil {
+		j.Selection = u.Selection
+	}
 	j.UpdatedAt = time.Now().UTC()
 	if u.Usage != nil {
 		usage := *u.Usage
@@ -683,7 +719,7 @@ func (s *Store) UpdateJob(ctx context.Context, id string, u JobUpdate) (Job, err
 		usage = *j.Usage
 		usageSource = &usage.Source
 	}
-	var worktreeArg, resultArg, skillsArg any
+	var worktreeArg, resultArg, skillsArg, selectionArg any
 	var diffFiles, diffInsertions, diffDeletions *int
 	if j.DiffStat != nil {
 		diffFiles = &j.DiffStat.Files
@@ -707,14 +743,17 @@ func (s *Store) UpdateJob(ctx context.Context, id string, u JobUpdate) (Job, err
 	if j.Result != nil {
 		resultArg = string(j.Result)
 	}
+	if j.Selection != nil {
+		selectionArg = string(j.Selection)
+	}
 	j, err = scanJob(tx.QueryRow(ctx,
 		`UPDATE jobs SET state=$2,role=$3,label=$4,family=$5,profile=$6,model=$7,pool=$8,owner_lane=$9,parent_lane=$10,parent_job=$11,pane_id=$12,worktree=$13::jsonb,report_doc=$14,result=$15::jsonb,updated_at=$16,
-		 input_tokens=$17,output_tokens=$18,reasoning_tokens=$19,cache_read_tokens=$20,cache_write_tokens=$21,usage_source=$22,usage_recorded_at=$23, harness=$24,effort=$25,spawned_at=$26,spawned_received_at=$27,ready_at=$28,ready_received_at=$29,ended_at=$30,ended_received_at=$31,report_sha256=$32,report_version=$33,skills=$34::jsonb,skills_supported=$35,end_reason=$36,diff_files=$37,diff_insertions=$38,diff_deletions=$39
+		 input_tokens=$17,output_tokens=$18,reasoning_tokens=$19,cache_read_tokens=$20,cache_write_tokens=$21,usage_source=$22,usage_recorded_at=$23, harness=$24,effort=$25,spawned_at=$26,spawned_received_at=$27,ready_at=$28,ready_received_at=$29,ended_at=$30,ended_received_at=$31,report_sha256=$32,report_version=$33,skills=$34::jsonb,skills_supported=$35,end_reason=$36,diff_files=$37,diff_insertions=$38,diff_deletions=$39,selection=$40::jsonb
 		 WHERE job_id=$1 RETURNING `+jobColumns,
 		j.JobID, j.State, j.Role, j.Label, j.Family, j.Profile, j.Model, j.Pool,
 		j.OwnerLane, j.ParentLane, j.ParentJob, j.PaneID, worktreeArg, j.ReportDoc,
 		resultArg, j.UpdatedAt,
-		usage.InputTokens, usage.OutputTokens, usage.ReasoningTokens, usage.CacheReadTokens, usage.CacheWriteTokens, usageSource, usage.RecordedAt, j.Harness, j.Effort, j.SpawnedAt, j.SpawnedReceivedAt, j.ReadyAt, j.ReadyReceivedAt, j.EndedAt, j.EndedReceivedAt, j.ReportSHA256, j.ReportVersion, skillsArg, j.SkillsSupported, j.EndReason, diffFiles, diffInsertions, diffDeletions))
+		usage.InputTokens, usage.OutputTokens, usage.ReasoningTokens, usage.CacheReadTokens, usage.CacheWriteTokens, usageSource, usage.RecordedAt, j.Harness, j.Effort, j.SpawnedAt, j.SpawnedReceivedAt, j.ReadyAt, j.ReadyReceivedAt, j.EndedAt, j.EndedReceivedAt, j.ReportSHA256, j.ReportVersion, skillsArg, j.SkillsSupported, j.EndReason, diffFiles, diffInsertions, diffDeletions, selectionArg))
 	if err != nil {
 		return j, err
 	}

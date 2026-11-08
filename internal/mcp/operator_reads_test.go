@@ -2,9 +2,11 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http/httptest"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -77,7 +79,13 @@ type taskGetOut struct {
 		Kind string `json:"kind"`
 	} `json:"events_preview"`
 	EventsMore bool `json:"events_more"`
-	YouTrack   *struct {
+	Jobs       []struct {
+		JobID string       `json:"job_id"`
+		Model string       `json:"model"`
+		Run   store.JobRun `json:"run"`
+	} `json:"jobs"`
+	JobsMore bool `json:"jobs_more"`
+	YouTrack *struct {
 		ID  string `json:"id"`
 		URL string `json:"url"`
 	} `json:"youtrack"`
@@ -222,13 +230,49 @@ func TestTaskGetCompleteFields(t *testing.T) {
 		"started_at": "hk", "completed_at": "hk", "canceled_at": "hk", "closed_at": "hk",
 		"parent": "hk", "children": "hk", "relations": "hk", "blockers": "hk",
 		"project_owner": "hk", "comments_preview": "hk", "events_preview": "hk",
-		"console_url":        "hk",
+		"console_url": "hk", "jobs": "hk",
 		"comments_by_agents": "hk", "operator_comments": "youtrack",
 		"korean_display_text": "youtrack", "translations": "youtrack", "youtrack": "youtrack",
 	} {
 		if out.FieldSources[field] != want {
 			t.Errorf("field_sources[%q]=%q want %q", field, out.FieldSources[field], want)
 		}
+	}
+}
+
+func TestTaskGetJobs(t *testing.T) {
+	st := newOperatorStore(t)
+	ctx := context.Background()
+	if _, err := st.AddTaskProject(ctx, "mcp-jobs-project", "tester"); err != nil {
+		t.Fatal(err)
+	}
+	project := "mcp-jobs-project"
+	task, err := st.CreateTask(ctx, store.Task{Lane: "mcp-jobs-lane", Title: "task with jobs", Kind: "implement", Project: &project, CreatedBy: "tester"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID := task.ID
+	for _, id := range []string{"mcp-jobs-a", "mcp-jobs-b"} {
+		if _, _, err := st.ClaimJob(ctx, store.Job{JobID: id, TaskID: &taskID, Host: "mac-dev", CreatedBy: "tester"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	spawned, model, selection := "spawned", "gpt-6.1-terra", `{"chosen":{"grade":"A+","tier":"waste","projected_pct":75.5,"why":"waste_risk tier=waste grade=A+ for task B projected=76%"},"candidates":[{"seat":"claude-opus","outcome":"dropped:role_filtered"}]}`
+	if _, err := st.UpdateJob(ctx, "mcp-jobs-a", store.JobUpdate{State: &spawned, Model: &model, Selection: json.RawMessage(selection)}); err != nil {
+		t.Fatal(err)
+	}
+	srv := newOperatorServer(t, st, api.Tokens{"tester": "bearer-secret"})
+	session := connectMCP(t, srv.URL, map[string]string{"Authorization": "Bearer bearer-secret"})
+	out := callTool[taskGetOut](t, session, "task_get", map[string]any{"id": task.ID})
+	if len(out.Jobs) != 2 || out.JobsMore || out.Jobs[0].JobID != "mcp-jobs-a" || out.Jobs[1].JobID != "mcp-jobs-b" {
+		t.Fatalf("jobs=%+v more=%v", out.Jobs, out.JobsMore)
+	}
+	run := out.Jobs[0].Run
+	if !run.Recorded || !strings.Contains(run.Why, "작업 등급 B에 모델 등급 A+") || len(run.Others) != 1 || !strings.HasPrefix(run.What, "모델 gpt-6.1-terra") || run.Result != "상태 실행 중" {
+		t.Fatalf("run=%+v", run)
+	}
+	if bare := out.Jobs[1].Run; bare.Why != store.NoSelectionText || bare.Recorded {
+		t.Fatalf("job without selection: %+v", bare)
 	}
 }
 

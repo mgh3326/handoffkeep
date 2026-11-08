@@ -315,6 +315,10 @@ type boardJob struct {
 	EndedAt         *time.Time         `json:"ended_at"`
 	EndReason       *string            `json:"end_reason"`
 	DiffStat        *store.JobDiffStat `json:"diff_stat"`
+	ReportDoc       string             `json:"report_doc"`
+	// Run is the readable summary of the job: what ran, why, the other
+	// candidates and the result (hk 3516).
+	Run store.JobRun `json:"run"`
 }
 
 type boardEvent struct {
@@ -575,7 +579,7 @@ func (h *Handler) boardTaskDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	projectedJobs := make([]boardJob, 0, len(jobs))
 	for _, j := range jobs {
-		projectedJobs = append(projectedJobs, boardJob{j.JobID, j.Role, j.State, j.Host, j.Family, j.Profile, j.Model, j.Harness, j.Effort, j.Skills, j.SkillsSupported, j.ClaimedAt, j.SpawnedAt, j.ReadyAt, j.EndedAt, j.EndReason, j.DiffStat})
+		projectedJobs = append(projectedJobs, boardJob{j.JobID, j.Role, j.State, j.Host, j.Family, j.Profile, j.Model, j.Harness, j.Effort, j.Skills, j.SkillsSupported, j.ClaimedAt, j.SpawnedAt, j.ReadyAt, j.EndedAt, j.EndReason, j.DiffStat, j.ReportDoc, j.Explain()})
 	}
 	now := time.Now().UTC()
 	response := boardDetailResponse{

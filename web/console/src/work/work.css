@@ -34,3 +34,12 @@
 .work-translation-row:has(> .hk-translation-indicator) > a { padding-right: var(--hk-space-20); }
 .work-translation-row > .task-actions { top: var(--hk-space-2); transform: none; }
 .work-row-title small { color: var(--hk-text-muted); }
+
+.work-job-run { margin-bottom: var(--hk-space-3); }
+.work-job-run h3 { margin: 0 0 var(--hk-space-1); font-size: var(--hk-type-meta); color: var(--hk-text-secondary); font-weight: 500; }
+.work-job-run dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: var(--hk-space-1) var(--hk-space-3); margin: 0; }
+.work-job-run dt { color: var(--hk-text-secondary); }
+.work-job-run dd { margin: 0; min-width: 0; }
+.work-job-run dd p { margin: var(--hk-space-1) 0 0; color: var(--hk-text-secondary); }
+.work-job-run ul { margin: 0; padding-left: var(--hk-space-4); }
+.work-job-skills { margin: var(--hk-space-1) 0 0; color: var(--hk-text-muted); font-size: var(--hk-type-meta); }

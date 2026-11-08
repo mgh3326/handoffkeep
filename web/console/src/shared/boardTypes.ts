@@ -224,7 +224,10 @@ export type BoardParticipants = {
 export type WorkOrigin = { provider: string; display_ref?: string; url?: string; namespace: string };
 export type WorkReview = { id: number; lens: string; round: number; pass: number; family?: string; model?: string; verdict?: string; critical?: number | null; high?: number | null; medium?: number | null; low?: number | null };
 export type WorkChange = { id: number; pr: string; state: string; head_sha?: string; merged_at?: string; hold_reason?: string; depends_on_change_id?: number; depends_on_state?: string; reviews: WorkReview[] | null; tasks: unknown[] | null };
-export type WorkJob = { job_id: string; role: string; state: string; host: string; family: string; model: string; harness: string | null; effort: string | null; profile: string; skills: { name: string; calls: number }[] | null; skills_supported: boolean | null; claimed_at: string | null; spawned_at: string | null; ready_at: string | null; ended_at: string | null; end_reason: string | null; diff_stat: { files: number; insertions: number; deletions: number } | null };
+/** The server's readable summary of a job (store.JobRun, hk 3516): rendered
+ * as is, never rebuilt from the raw selection. */
+export type JobRun = { what: string; why: string; override?: string; others: string[]; result: string; selection_recorded: boolean };
+export type WorkJob = { job_id: string; role: string; state: string; host: string; family: string; model: string; harness: string | null; effort: string | null; profile: string; skills: { name: string; calls: number }[] | null; skills_supported: boolean | null; claimed_at: string | null; spawned_at: string | null; ready_at: string | null; ended_at: string | null; end_reason: string | null; diff_stat: { files: number; insertions: number; deletions: number } | null; report_doc: string; run: JobRun };
 export type WorkDocument = { key: string; kind: string; origin_class: string };
 export type BoardDetail = {
   documents: WorkDocument[];
