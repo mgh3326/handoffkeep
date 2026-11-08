@@ -68,7 +68,8 @@ type Store interface {
 	PendingYouTrackReverts(ctx context.Context, limit int) ([]store.YouTrackPendingRevert, error)
 	MarkYouTrackRevertDone(ctx context.Context, activityID string) error
 
-	DueYouTrackDocs(ctx context.Context, patterns []string, limit int) ([]store.Document, error)
+	DueYouTrackDocs(ctx context.Context, patterns []string, defaultProject string, limit int) ([]store.Document, error)
+	RecordYouTrackAttempt(ctx context.Context, queue, key, failure, skip string) error
 	OrphanYouTrackDocArticles(ctx context.Context, limit int) ([]store.YouTrackDocArticle, error)
 	GetYouTrackDocArticle(ctx context.Context, docKey string) (store.YouTrackDocArticle, bool, error)
 	UpsertYouTrackDocArticle(ctx context.Context, x store.YouTrackDocArticle) error

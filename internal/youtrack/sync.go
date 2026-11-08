@@ -281,35 +281,67 @@ func (s *Service) push(ctx context.Context, opts SyncOptions, report *SyncReport
 		return err
 	}
 	for _, task := range tasks {
+		key := strconv.FormatInt(task.ID, 10)
 		action, err := s.pushTask(ctx, task, opts, stalled[task.ID], report)
 		if err != nil {
 			report.fail("task %d: %v", task.ID, err)
+			s.recordAttempt(ctx, opts, store.YouTrackQueueTask, key, err.Error(), "", report)
 			continue
+		}
+		if action.Action == "skipped" {
+			s.recordAttempt(ctx, opts, store.YouTrackQueueTask, key, "", store.YouTrackSkipProjectMissing, report)
+		} else {
+			s.recordAttempt(ctx, opts, store.YouTrackQueueTask, key, "", "", report)
 		}
 		report.Pushed = append(report.Pushed, action)
 	}
 	return nil
 }
 
-// stalledTaskIDs reads the tasks the store reports as stalled. A failed read
-// fails the push: a run that could not read them must not clear the 멈춤
-// field on every issue.
-func (s *Service) stalledTaskIDs(ctx context.Context) (map[int64]bool, error) {
-	tasks, err := s.store.ListTasksFiltered(ctx, store.TaskQuery{Stalled: true, Limit: 1000})
-	if err != nil {
-		return nil, fmt.Errorf("stalled tasks: %w", err)
+// recordAttempt stores the outcome of one queue attempt so the key waits
+// its turn (failure), parks (skip), or goes behind the keys that have waited
+// longer (success). A dry run writes nothing, so it records nothing.
+func (s *Service) recordAttempt(ctx context.Context, opts SyncOptions, queue, key, failure, skip string, report *SyncReport) {
+	if opts.DryRun {
+		return
 	}
-	out := make(map[int64]bool, len(tasks))
-	for _, task := range tasks {
-		out[task.ID] = true
+	if err := s.store.RecordYouTrackAttempt(ctx, queue, key, failure, skip); err != nil {
+		report.fail("%s attempt %s: %v", queue, key, err)
 	}
-	return out, nil
 }
 
+// stalledTaskIDs reads every task the store reports as stalled, page by page.
+// The store caps one read at stalledPageSize rows; a full page means more may
+// follow, so the read continues from the last id instead of treating the page
+// as the whole set. A failed read fails the push: a run that could not read
+// them must not clear the 멈춤 field on every issue.
+func (s *Service) stalledTaskIDs(ctx context.Context) (map[int64]bool, error) {
+	out := map[int64]bool{}
+	after := int64(0)
+	for {
+		afterID := after
+		tasks, err := s.store.ListTasksFiltered(ctx, store.TaskQuery{Stalled: true, AfterID: &afterID, Limit: stalledPageSize})
+		if err != nil {
+			return nil, fmt.Errorf("stalled tasks: %w", err)
+		}
+		for _, task := range tasks {
+			out[task.ID] = true
+			after = task.ID
+		}
+		if len(tasks) < stalledPageSize {
+			return out, nil
+		}
+	}
+}
+
+// stalledPageSize is one stalled-task read, the store's per-read maximum.
+const stalledPageSize = 1000
+
 // inFlight states are pushed on every pass: the PR section follows the PR's
-// gate and checks, which move without a write to the task.
+// gate and checks, which move without a write to the task. That is the started
+// category, the same set the store's scans read.
 func inFlight(state string) bool {
-	return state == store.StateDeveloping || state == store.StateReviewing
+	return store.IsStartedState(state)
 }
 
 func (s *Service) pushTask(ctx context.Context, task store.Task, opts SyncOptions, stalled bool, report *SyncReport) (PushAction, error) {

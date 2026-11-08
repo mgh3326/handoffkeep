@@ -319,21 +319,45 @@ func (s *Store) YouTrackProjectByShortName(ctx context.Context, shortName string
 	return x, err == nil, err
 }
 
+// PutYouTrackProject writes one mapping. A skipped item was judged against the
+// old mapping, so its skip is cleared in the same transaction.
 func (s *Store) PutYouTrackProject(ctx context.Context, p YouTrackProject) error {
 	if strings.TrimSpace(p.HKProject) == "" || strings.TrimSpace(p.ShortName) == "" {
 		return ErrYouTrackProjectUnknown
 	}
-	_, err := s.pool.Exec(ctx, `
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `
 		INSERT INTO youtrack_projects(hk_project,yt_project_id,short_name,created_at,updated_at)
 		VALUES($1,$2,$3,$4,$4)
 		ON CONFLICT(hk_project) DO UPDATE SET yt_project_id=EXCLUDED.yt_project_id,short_name=EXCLUDED.short_name,updated_at=EXCLUDED.updated_at`,
-		p.HKProject, p.ProjectID, p.ShortName, time.Now().UTC())
-	return err
+		p.HKProject, p.ProjectID, p.ShortName, time.Now().UTC()); err != nil {
+		return err
+	}
+	if err := s.ClearYouTrackSkips(ctx, tx); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
+// SetYouTrackProjectID records the YouTrack id of a mapped project and clears
+// the skips, as PutYouTrackProject does.
 func (s *Store) SetYouTrackProjectID(ctx context.Context, hkProject, projectID string) error {
-	_, err := s.pool.Exec(ctx, `UPDATE youtrack_projects SET yt_project_id=$2,updated_at=now() WHERE hk_project=$1`, hkProject, projectID)
-	return err
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `UPDATE youtrack_projects SET yt_project_id=$2,updated_at=now() WHERE hk_project=$1`, hkProject, projectID); err != nil {
+		return err
+	}
+	if err := s.ClearYouTrackSkips(ctx, tx); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (s *Store) GetYouTrackCursor(ctx context.Context) (YouTrackCursor, error) {
@@ -522,16 +546,21 @@ func (s *Store) DueYouTrackPushTasks(ctx context.Context, limit int) ([]Task, er
 		SELECT tasks.*
 		FROM (SELECT `+taskColumns+` FROM tasks) tasks
 		LEFT JOIN task_origins o ON o.task_id=tasks.id AND o.provider='youtrack'
-		WHERE (o.task_id IS NULL AND tasks.state NOT IN (`+settledStatesSQL+`))
+		LEFT JOIN youtrack_attempts a ON a.queue='task' AND a.item_key=tasks.id::text
+		WHERE ((o.task_id IS NULL AND tasks.state NOT IN (`+settledStatesSQL+`))
 		   OR (o.task_id IS NOT NULL AND (o.synced_at IS NULL OR tasks.updated_at > o.synced_at))
 		   -- The PR section of the issue follows the PR's gate and checks, which
 		   -- move without a task write, so a started task is pushed every pass.
-		   OR (o.task_id IS NOT NULL AND tasks.state IN ('developing','reviewing'))
+		   OR (o.task_id IS NOT NULL AND tasks.state IN (`+startedStatesSQL+`))
 		   OR ((o.task_id IS NOT NULL OR tasks.state NOT IN (`+settledStatesSQL+`))
 		       AND EXISTS (SELECT 1 FROM task_comments c
 		                   WHERE c.task_id=tasks.id AND c.author<>$2
-		                     AND NOT EXISTS (SELECT 1 FROM youtrack_comment_links cl WHERE cl.hk_comment_id=c.id)))
-		ORDER BY tasks.updated_at ASC, tasks.id ASC
+		                     AND NOT EXISTS (SELECT 1 FROM youtrack_comment_links cl WHERE cl.hk_comment_id=c.id))))
+		   -- A key that failed or was skipped waits for its next_attempt_at. The
+		   -- rank orders the scan, so a key that was just attempted goes behind
+		   -- the keys that have waited longer and cannot starve them.
+		  AND `+youtrackAttemptRank("a")+` <= now()
+		ORDER BY `+youtrackAttemptRank("a")+` ASC, tasks.id ASC
 		LIMIT $1`, limit, YouTrackOwnedActor)
 	if err != nil {
 		return nil, err

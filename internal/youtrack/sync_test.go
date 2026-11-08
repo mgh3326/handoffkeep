@@ -613,6 +613,8 @@ func TestFailedFieldsAfterAMoveStayDue(t *testing.T) {
 	if got := fs.mirrors[task.ID]; got.DisplayRef != "PW-1" {
 		t.Fatalf("the move did not update the display ref: %+v", got)
 	}
+	// The next run comes minutes later, after the 30-second first backoff.
+	fs.elapseBackoff()
 	due, _ := fs.DueYouTrackPushTasks(ctx, 10)
 	var found bool
 	for _, candidate := range due {
@@ -663,6 +665,8 @@ func TestFailedFieldsAfterAdoptingAnIssueStayDue(t *testing.T) {
 	if got := fs.mirrors[task.ID]; got.DisplayRef != "HK-95" || got.SyncedAt != nil {
 		t.Fatalf("the adopted link got a watermark before its push: %+v", got)
 	}
+	// The next run comes minutes later, after the 30-second first backoff.
+	fs.elapseBackoff()
 	due, _ := fs.DueYouTrackPushTasks(ctx, 10)
 	var found bool
 	for _, candidate := range due {

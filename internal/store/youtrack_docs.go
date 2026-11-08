@@ -20,10 +20,15 @@ type YouTrackDocArticle struct {
 }
 
 // DueYouTrackDocs returns up to limit documents whose key matches one of the
-// LIKE patterns (for example "design/%") and that have no article yet or whose
-// sha256 differs from the one last written. Ordered by key, so a run that is
-// cut short resumes at the same place next time.
-func (s *Store) DueYouTrackDocs(ctx context.Context, patterns []string, limit int) ([]Document, error) {
+// LIKE patterns (for example "design/%") and that are due: no article yet, a
+// sha256 that differs from the one last written, or an article in a different
+// YouTrack project than the document's project now resolves to. A document
+// resolves to its task's project, or defaultProject when it has no task or a
+// blank project, and falls back to the "other" mapping when that name has none,
+// as YouTrackProjectFor does. A key parked by its attempt state is not due
+// until its next_attempt_at. Ordered by that time and then by key, so a
+// document that failed or was skipped waits behind the rest.
+func (s *Store) DueYouTrackDocs(ctx context.Context, patterns []string, defaultProject string, limit int) ([]Document, error) {
 	if limit < 1 {
 		limit = 20
 	}
@@ -33,8 +38,18 @@ func (s *Store) DueYouTrackDocs(ctx context.Context, patterns []string, limit in
 	rows, err := s.pool.Query(ctx, `SELECT d.id,d.key,d.kind,d.session,d.job,d.body,d.sha256,d.created_by,d.created_at,d.updated_at,d.task_id,COALESCE(d.origin_class,'')
 		FROM documents d
 		LEFT JOIN youtrack_doc_articles a ON a.doc_key=d.key
-		WHERE d.key LIKE ANY($1::text[]) AND (a.doc_key IS NULL OR a.source_sha<>d.sha256)
-		ORDER BY d.key ASC LIMIT $2`, patterns, limit)
+		LEFT JOIN tasks t ON t.id=d.task_id
+		LEFT JOIN LATERAL (
+		  SELECT p.hk_project FROM youtrack_projects p
+		  WHERE p.hk_project IN (COALESCE(NULLIF(BTRIM(t.project),''),$3),'other')
+		  ORDER BY (p.hk_project=COALESCE(NULLIF(BTRIM(t.project),''),$3)) DESC
+		  LIMIT 1) rp ON true
+		LEFT JOIN youtrack_attempts r ON r.queue='doc' AND r.item_key=d.key
+		WHERE d.key LIKE ANY($1::text[])
+		  AND (a.doc_key IS NULL OR a.source_sha<>d.sha256
+		       OR a.hk_project<>COALESCE(rp.hk_project,''))
+		  AND `+youtrackAttemptRank("r")+` <= now()
+		ORDER BY `+youtrackAttemptRank("r")+` ASC, d.key ASC LIMIT $2`, patterns, limit, defaultProject)
 	if err != nil {
 		return nil, err
 	}

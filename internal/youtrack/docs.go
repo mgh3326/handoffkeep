@@ -33,14 +33,16 @@ type DocAction struct {
 }
 
 // syncDocs mirrors one bounded batch of due documents. A document is due when
-// it has no article or its sha256 changed since the last write, so an
-// unchanged document costs no YouTrack call. Deletes are logged, not applied.
+// it has no article, its sha256 changed since the last write, or its project
+// changed, so an unchanged document costs no YouTrack call. A document that
+// failed or was skipped waits behind the others (see recordAttempt). Deletes
+// are logged, not applied.
 func (s *Service) syncDocs(ctx context.Context, opts SyncOptions, report *SyncReport) {
 	patterns := make([]string, 0, len(docPrefixes))
 	for _, prefix := range docPrefixes {
 		patterns = append(patterns, prefix+"/%")
 	}
-	docs, err := s.store.DueYouTrackDocs(ctx, patterns, opts.DocLimit)
+	docs, err := s.store.DueYouTrackDocs(ctx, patterns, s.project, opts.DocLimit)
 	if err != nil {
 		report.fail("docs: %v", err)
 		return
@@ -50,10 +52,16 @@ func (s *Service) syncDocs(ctx context.Context, opts SyncOptions, report *SyncRe
 		report.Docs = append(report.Docs, action)
 		if err != nil {
 			report.fail("doc %s: %v", doc.Key, err)
+			s.recordAttempt(ctx, opts, store.YouTrackQueueDoc, doc.Key, err.Error(), "", report)
 			continue
 		}
-		if !opts.DryRun && action.Action != "skipped" {
-			report.DocBytes += action.Bytes
+		if action.Action == "skipped" {
+			s.recordAttempt(ctx, opts, store.YouTrackQueueDoc, doc.Key, "", store.YouTrackSkipProjectMissing, report)
+		} else {
+			s.recordAttempt(ctx, opts, store.YouTrackQueueDoc, doc.Key, "", "", report)
+			if !opts.DryRun {
+				report.DocBytes += action.Bytes
+			}
 		}
 	}
 	orphans, err := s.store.OrphanYouTrackDocArticles(ctx, opts.DocLimit)
@@ -93,6 +101,11 @@ func (s *Service) pushDoc(ctx context.Context, doc store.Document, dry bool) (Do
 	existing, found, err := s.store.GetYouTrackDocArticle(ctx, doc.Key)
 	if err != nil {
 		return action, err
+	}
+	if found && existing.HKProject != project.HKProject {
+		// The task moved to another project. The article stays where it is,
+		// and the document gets a new one in the project it now belongs to.
+		found = false
 	}
 	if dry {
 		action.Action = "would_create"
@@ -142,7 +155,16 @@ func (s *Service) docIndex(ctx context.Context, prefix, hkProject, projectID str
 		return "", err
 	}
 	if found {
-		return row.ArticleID, nil
+		// The ledger row outlives the article when someone deletes it in
+		// YouTrack; every document under a deleted parent would then fail.
+		// A deleted parent is written again below and the row replaced.
+		_, gerr := s.client.GetArticle(ctx, row.ArticleID)
+		if gerr == nil {
+			return row.ArticleID, nil
+		}
+		if !IsNotFound(gerr) {
+			return "", gerr
+		}
 	}
 	article, err := s.client.CreateArticle(ctx, ArticleWrite{
 		ProjectID: projectID,

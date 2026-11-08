@@ -9,8 +9,9 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
-// decisionListLimit bounds one status read, as the Python mirror did.
-const decisionListLimit = 200
+// decisionPageSize bounds one page of a status read. The mirror reads every
+// page of a status, so the older requests are not dropped past the first page.
+const decisionPageSize = 200
 
 // decisionStatuses are the statuses the DEC project mirrors.
 var decisionStatuses = []string{
@@ -194,7 +195,7 @@ func (s *Service) syncDecisions(ctx context.Context, opts SyncOptions, report *S
 	now := s.now()
 	var rows []store.DecisionRecord
 	for _, status := range decisionStatuses {
-		list, err := s.store.ListDecisionRecords(ctx, store.DecisionRecordFilter{Status: status, IncludeSnoozed: true, Limit: decisionListLimit}, now)
+		list, err := s.decisionsWithStatus(ctx, status, now)
 		if err != nil {
 			report.fail("decisions %s: %v", status, err)
 			return
@@ -214,6 +215,27 @@ func (s *Service) syncDecisions(ctx context.Context, opts SyncOptions, report *S
 		if err := s.syncDecision(ctx, d, projectID, mirrors, opts, report); err != nil {
 			report.fail("decision %d: %v", d.ID, err)
 		}
+	}
+}
+
+// decisionsWithStatus reads every request in one status, oldest first, one page
+// at a time. A full page means more may follow, so the next page starts after
+// the last row's (created_at, id).
+func (s *Service) decisionsWithStatus(ctx context.Context, status string, now time.Time) ([]store.DecisionRecord, error) {
+	var out []store.DecisionRecord
+	filter := store.DecisionRecordFilter{Status: status, IncludeSnoozed: true, Limit: decisionPageSize}
+	for {
+		page, err := s.store.ListDecisionRecords(ctx, filter, now)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, page...)
+		if len(page) < decisionPageSize {
+			return out, nil
+		}
+		last := page[len(page)-1]
+		after := last.CreatedAt
+		filter.AfterCreatedAt, filter.AfterID = &after, last.ID
 	}
 }
 

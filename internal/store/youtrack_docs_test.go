@@ -14,8 +14,11 @@ func TestYouTrackDocsDueFiltersByPatternAndHash(t *testing.T) {
 			t.Fatalf("put %s: %v", key, err)
 		}
 	}
+	if err := s.PutYouTrackProject(ctx, YouTrackProject{HKProject: "handoffkeep", ShortName: "HK"}); err != nil {
+		t.Fatal(err)
+	}
 	patterns := []string{"design/%", "decision/%"}
-	due, err := s.DueYouTrackDocs(ctx, patterns, 10)
+	due, err := s.DueYouTrackDocs(ctx, patterns, "handoffkeep", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -27,10 +30,10 @@ func TestYouTrackDocsDueFiltersByPatternAndHash(t *testing.T) {
 	}
 
 	design := due[1]
-	if err := s.UpsertYouTrackDocArticle(ctx, YouTrackDocArticle{DocKey: design.Key, HKProject: "other", ArticleID: "A-1", SourceSHA: design.SHA256, Bytes: 10, SyncedAt: time.Now().UTC()}); err != nil {
+	if err := s.UpsertYouTrackDocArticle(ctx, YouTrackDocArticle{DocKey: design.Key, HKProject: "handoffkeep", ArticleID: "A-1", SourceSHA: design.SHA256, Bytes: 10, SyncedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
-	due, err = s.DueYouTrackDocs(ctx, patterns, 10)
+	due, err = s.DueYouTrackDocs(ctx, patterns, "handoffkeep", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,7 +44,7 @@ func TestYouTrackDocsDueFiltersByPatternAndHash(t *testing.T) {
 	if _, _, err := s.PutDocument(ctx, Document{Key: design.Key, Kind: "design", Body: "# changed\n\nbody", CreatedBy: "test"}); err != nil {
 		t.Fatal(err)
 	}
-	due, err = s.DueYouTrackDocs(ctx, patterns, 10)
+	due, err = s.DueYouTrackDocs(ctx, patterns, "handoffkeep", 10)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -17,14 +17,26 @@ import (
 // it has no article or its sha256 differs, and orphans are ledger rows whose
 // document is gone.
 
-func (f *fakeStore) DueYouTrackDocs(_ context.Context, patterns []string, limit int) ([]store.Document, error) {
+// DueYouTrackDocs mirrors the store query: a document is due when it has no
+// article, its sha256 changed, or its article is in another project than the
+// document's project resolves to (the task's project, else defaultProject). A
+// parked or backed-off key is not due, and the rest are ordered by their next
+// attempt time and then by key.
+func (f *fakeStore) DueYouTrackDocs(_ context.Context, patterns []string, defaultProject string, limit int) ([]store.Document, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	now := time.Now().UTC()
 	keys := make([]string, 0, len(f.docs))
 	for k := range f.docs {
 		keys = append(keys, k)
 	}
-	sort.Strings(keys)
+	sort.Slice(keys, func(i, j int) bool {
+		ri, rj := f.rankAttempt(store.YouTrackQueueDoc, keys[i]), f.rankAttempt(store.YouTrackQueueDoc, keys[j])
+		if !ri.Equal(rj) {
+			return ri.Before(rj)
+		}
+		return keys[i] < keys[j]
+	})
 	out := []store.Document{}
 	for _, k := range keys {
 		if len(out) >= limit {
@@ -34,12 +46,35 @@ func (f *fakeStore) DueYouTrackDocs(_ context.Context, patterns []string, limit 
 			continue
 		}
 		d := f.docs[k]
-		if a, ok := f.docArticles[k]; ok && a.SourceSHA == d.SHA256 {
+		a, ok := f.docArticles[k]
+		if ok && a.SourceSHA == d.SHA256 && a.HKProject == f.docProject(d, defaultProject) {
+			continue
+		}
+		if !f.dueAttempt(store.YouTrackQueueDoc, k, now) {
 			continue
 		}
 		out = append(out, d)
 	}
 	return out, nil
+}
+
+// docProject is the project a document resolves to, as the store query does:
+// its task's project when set and not blank, else the default; a name with no
+// mapping falls back to "other", and no mapping at all resolves to "".
+func (f *fakeStore) docProject(d store.Document, defaultProject string) string {
+	name := defaultProject
+	if d.TaskID != nil {
+		if task, ok := f.tasks[*d.TaskID]; ok && task.Project != nil && strings.TrimSpace(*task.Project) != "" {
+			name = strings.TrimSpace(*task.Project)
+		}
+	}
+	if _, ok := f.projects[name]; ok {
+		return name
+	}
+	if _, ok := f.projects["other"]; ok {
+		return "other"
+	}
+	return ""
 }
 
 func matchesDocPattern(key string, patterns []string) bool {

@@ -455,6 +455,11 @@ type DecisionRecordFilter struct {
 	Source         string
 	IncludeSnoozed bool
 	Limit          int
+	// AfterCreatedAt and AfterID page past one row in the oldest-first order
+	// (created_at, id). Both are read together; a nil AfterCreatedAt starts at
+	// the first row.
+	AfterCreatedAt *time.Time
+	AfterID        int64
 	// unbounded drops the 1000-row cap and ignores Limit. Only package code
 	// sets it: the ledger must see every open request, while API callers keep
 	// the cap.
@@ -519,6 +524,10 @@ func listDecisionRecords(ctx context.Context, pq poolQuerier, f DecisionRecordFi
 	if f.Source != "" {
 		args = append(args, f.Source)
 		q += fmt.Sprintf(` AND source=$%d`, len(args))
+	}
+	if f.AfterCreatedAt != nil {
+		args = append(args, f.AfterCreatedAt.UTC(), f.AfterID)
+		q += fmt.Sprintf(` AND (created_at,id)>($%d,$%d)`, len(args)-1, len(args))
 	}
 	q += ` ORDER BY created_at ASC,id ASC`
 	if !f.unbounded {
