@@ -17,6 +17,9 @@ permissions:
   contents: read
 env:
   IMAGE: ghcr.io/${{ github.repository }}
+  # Buildx layer cache lives in GHCR, not the Actions cache: the repo's 10 GB
+  # Actions cache limit evicted toolchain caches when gha layers filled it.
+  IMAGE_CACHE: ghcr.io/${{ github.repository }}:buildcache
 jobs:
   image:
     runs-on: ubuntu-latest
@@ -29,8 +32,9 @@ jobs:
       # exclude it — see tests/image_pipeline_test.go).
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+      # Runs on manual dispatch too, so a dispatched build can read and write
+      # the registry cache. Pull requests never reach this workflow.
       - name: Log in to GHCR
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
         with:
           registry: ghcr.io
@@ -45,8 +49,8 @@ jobs:
           platforms: linux/amd64
           load: true
           tags: handoffkeep:ci
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=registry,ref=${{ env.IMAGE_CACHE }}
+          cache-to: type=registry,ref=${{ env.IMAGE_CACHE }},mode=max
       - name: Verify vcs stamp matches the built commit
         run: ./scripts/verify-image-vcs.sh handoffkeep:ci ${{ github.sha }}
       - name: Smoke test image
@@ -73,4 +77,4 @@ jobs:
           tags: |
             ${{ env.IMAGE }}:${{ github.sha }}
             ${{ env.IMAGE }}:main
-          cache-from: type=gha
+          cache-from: type=registry,ref=${{ env.IMAGE_CACHE }}
