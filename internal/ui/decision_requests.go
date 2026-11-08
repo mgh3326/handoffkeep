@@ -93,6 +93,17 @@ func projectDecisionRequest(entry store.DecisionRequestEntry, taskState string, 
 		view.Options = append(view.Options, entry.Options.Options...)
 		view.AllowFree = entry.Options.AllowFree
 	}
+	if request.Status == store.DecisionRequestOpen {
+		if rendered, ok := store.RenderDecisionTemplate(request, entry.Options); ok {
+			view.QuestionKO = rendered.Question
+			view.OptionsKO = rendered.Options.Options
+			view.Options = append([]store.DecisionOption(nil), rendered.Options.Options...)
+			for i := range view.Options {
+				view.Options[i].Label = entry.Options.Options[i].Label
+			}
+			view.Reason = rendered.Reason
+		}
+	}
 	return view
 }
 

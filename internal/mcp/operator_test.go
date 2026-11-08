@@ -493,3 +493,38 @@ func TestAccessIdentityWritesRecordOperator(t *testing.T) {
 		t.Fatalf("intake attribution=%+v", intake)
 	}
 }
+
+func TestDecisionsPendingTemplate(t *testing.T) {
+	st := newOperatorStore(t)
+	task := newOperatorTask(t, st, "template fixture")
+	q := `Approve deployment {"identity":{"environment_known":true,"config":"x","payload":"y"},"host":"mbp","repo":"mgh3326/handoffkeep","previous":"unknown","release":"d4b91c069","paths":[],"reasons":["missing or invalid previous deployment receipt"]}`
+	result, err := st.RecordDecisionRequest(t.Context(), task.ID, "mergewake-design", store.DecisionRequestInput{Question: q, Options: store.DecisionOptions{Options: []store.DecisionOption{{Key: "A", Label: "Approve this deployment"}, {Key: "B", Label: "Keep the current version"}}}, DefaultAction: "hold"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(HTTPHandler(api.Service{Store: st}, api.Tokens{"tester": "bearer-secret"}, nil))
+	defer srv.Close()
+	session := connectMCP(t, srv.URL, map[string]string{"Authorization": "Bearer bearer-secret"})
+	out := callTool[struct {
+		Decisions []struct {
+			RequestID  string `json:"request_id"`
+			Question   string `json:"question"`
+			QuestionKO string `json:"question_ko"`
+			Options    []struct {
+				Recommended bool `json:"recommended"`
+			} `json:"options"`
+			OptionsKO []struct {
+				Label string `json:"label"`
+			} `json:"options_ko"`
+		} `json:"decisions"`
+	}](t, session, "decisions_pending", map[string]any{})
+	for _, d := range out.Decisions {
+		if d.RequestID == result.Request.ID {
+			if d.Question != q || !strings.Contains(d.QuestionKO, "대상 호스트") || len(d.Options) != 2 || !d.Options[0].Recommended || len(d.OptionsKO) != 2 || d.OptionsKO[0].Label != "이 배포 승인" {
+				t.Fatalf("decision=%+v", d)
+			}
+			return
+		}
+	}
+	t.Fatalf("decision missing: %+v", out)
+}

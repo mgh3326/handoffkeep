@@ -134,7 +134,81 @@ func (s *Store) ListTranslations(ctx context.Context, entity string, sources []T
 		t.Stale = t.SourceSHA256 != SourceSHA256(original)
 		out = append(out, t)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	if entity != "decision_request" {
+		return out, nil
+	}
+	var taskIDs []int64
+	for _, id := range ids {
+		if task, _, ok := ParseDecisionRequestID(id); ok {
+			taskIDs = append(taskIDs, task)
+		}
+	}
+	if len(taskIDs) == 0 {
+		return out, nil
+	}
+	taskRows, err := s.pool.Query(ctx, `SELECT refs FROM tasks WHERE id=ANY($1)`, taskIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer taskRows.Close()
+	for taskRows.Next() {
+		var raw []byte
+		var refs TaskRefs
+		if err := taskRows.Scan(&raw); err != nil {
+			return nil, err
+		}
+		if _, err := scanJSONB(raw, &refs); err != nil {
+			return nil, err
+		}
+		request := refs.DecisionRequest
+		if request == nil || request.Status != DecisionRequestOpen {
+			continue
+		}
+		rendered, ok := RenderDecisionTemplate(*request, refs.DecisionOptions)
+		if !ok {
+			continue
+		}
+		fields, requested := originals[request.ID]
+		if !requested {
+			continue
+		}
+		encoded, err := json.Marshal(rendered.Options)
+		if err != nil {
+			return nil, err
+		}
+		for field, value := range map[string]string{"question": rendered.Question, "options": string(encoded)} {
+			original, wanted := fields[field]
+			if !wanted {
+				continue
+			}
+			// Never attach a template to a different revision or source value.
+			if field == "question" && original != request.Question {
+				continue
+			}
+			if field == "options" {
+				source, err := json.Marshal(refs.DecisionOptions)
+				if err != nil {
+					return nil, err
+				}
+				if original != string(source) {
+					continue
+				}
+			}
+			filtered := out[:0]
+			for _, tr := range out {
+				if tr.EntityID != request.ID || tr.Field != field {
+					filtered = append(filtered, tr)
+				}
+			}
+			out = filtered
+			out = append(out, Translation{Entity: entity, EntityID: request.ID, Field: field, Lang: "ko", Text: value, SourceSHA256: SourceSHA256(original), Translator: "hk-template"})
+		}
+	}
+	return out, taskRows.Err()
 }
 
 // PutTranslations validates the whole batch before writing it atomically.
@@ -216,7 +290,7 @@ func (s *Store) MissingDecisionTranslations(ctx context.Context, limit int) ([]M
 	if limit < 1 || limit > 1000 {
 		return nil, fmt.Errorf("invalid translation limit")
 	}
-	rows, err := s.pool.Query(ctx, `SELECT d.source_ref,d.question,d.options,coalesce(q.source_sha256,''),coalesce(o.source_sha256,'') FROM decision_requests d LEFT JOIN translations q ON q.entity='decision_request' AND q.entity_id=d.source_ref AND q.field='question' AND q.lang='ko' LEFT JOIN translations o ON o.entity='decision_request' AND o.entity_id=d.source_ref AND o.field='options' AND o.lang='ko' WHERE d.status='open' AND d.source IN ('task_request','linear') ORDER BY d.id`)
+	rows, err := s.pool.Query(ctx, `SELECT d.source_ref,d.question,d.options,coalesce(q.source_sha256,''),coalesce(o.source_sha256,''),t.refs FROM decision_requests d LEFT JOIN tasks t ON t.id=d.task_id LEFT JOIN translations q ON q.entity='decision_request' AND q.entity_id=d.source_ref AND q.field='question' AND q.lang='ko' LEFT JOIN translations o ON o.entity='decision_request' AND o.entity_id=d.source_ref AND o.field='options' AND o.lang='ko' WHERE d.status='open' AND d.source IN ('task_request','linear') ORDER BY d.id`)
 	if err != nil {
 		return nil, err
 	}
@@ -224,9 +298,18 @@ func (s *Store) MissingDecisionTranslations(ctx context.Context, limit int) ([]M
 	out := []MissingTranslation{}
 	for rows.Next() {
 		var id, question, qhash, ohash string
-		var raw []byte
-		if err := rows.Scan(&id, &question, &raw, &qhash, &ohash); err != nil {
+		var raw, refsRaw []byte
+		if err := rows.Scan(&id, &question, &raw, &qhash, &ohash, &refsRaw); err != nil {
 			return nil, err
+		}
+		var refs TaskRefs
+		if _, err := scanJSONB(refsRaw, &refs); err != nil {
+			return nil, err
+		}
+		if refs.DecisionRequest != nil && refs.DecisionRequest.ID == id && refs.DecisionRequest.Status == DecisionRequestOpen {
+			if _, ok := RenderDecisionTemplate(*refs.DecisionRequest, refs.DecisionOptions); ok {
+				continue
+			}
 		}
 		options := ""
 		if len(raw) > 0 && string(raw) != "null" {

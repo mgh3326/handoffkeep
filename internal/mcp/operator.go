@@ -548,6 +548,12 @@ func (o operatorTools) decisionsPending(ctx context.Context, _ *gmcp.CallToolReq
 			}
 			sources = append(sources, store.TranslationSource{EntityID: request.ID, Field: "options", Original: string(raw)})
 		}
+		if rendered, ok := store.RenderDecisionTemplate(*request, task.Refs.DecisionOptions); ok {
+			item.Options = decisionOptionViews(rendered.Options.Options)
+			for i := range item.Options {
+				item.Options[i].Label = task.Refs.DecisionOptions.Options[i].Label
+			}
+		}
 		items = append(items, item)
 	}
 	taskTranslations, err := o.service.Store.ListTranslations(ctx, "task", taskSources)
