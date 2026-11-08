@@ -160,7 +160,7 @@ func TestResolveDecisionSessionQuoteIsRelay(t *testing.T) {
 		t.Fatalf("resolution=%+v", out.Request.Resolution)
 	}
 	rows := outboxRows(t, s)
-	if len(rows) != 1 || rows[0].EventID != decisionAnswerNoticeEventID(request.ID, out.ResolutionID) || rows[0].TargetLane != request.RequestedBy {
+	if len(rows) != 1 || rows[0].EventID != decisionAnswerNoticeEventID(request.ID, out.ResolutionID) || rows[0].TargetLane != task.Lane {
 		t.Fatalf("a session answer wrote outbox rows=%+v", rows)
 	}
 }

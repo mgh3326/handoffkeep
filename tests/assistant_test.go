@@ -306,7 +306,7 @@ func TestAssistantDecisionResolveAPI(t *testing.T) {
 		for _, row := range unsent {
 			if strings.HasPrefix(row.EventID, "decision-answered-"+req.ID+"-") {
 				n++
-				if row.Kind != store.OutboxKindDecisionAnswered || row.TargetLane != req.RequestedBy {
+				if row.Kind != store.OutboxKindDecisionAnswered || row.TargetLane != task.Lane {
 					t.Fatalf("outbox row=%+v", row)
 				}
 			}

@@ -43,7 +43,7 @@ func TestDecisionAnswerNoticePerChannel(t *testing.T) {
 		}
 		row := rows[0]
 		wantText := "[hk] 결정 답변 " + request.ID + " task " + strconv.FormatInt(task.ID, 10) + ": "
-		if row.EventID != decisionAnswerNoticeEventID(request.ID, out.ResolutionID) || row.Kind != OutboxKindDecisionAnswered || row.TargetLane != request.RequestedBy {
+		if row.EventID != decisionAnswerNoticeEventID(request.ID, out.ResolutionID) || row.Kind != OutboxKindDecisionAnswered || row.TargetLane != task.Lane {
 			t.Fatalf("%s: row=%+v", c.channel, row)
 		}
 		if !strings.HasPrefix(row.Text, wantText) || !strings.Contains(row.Text, " via "+c.channel) || !strings.HasSuffix(row.Text, "| https://console.example.test/ui/tasks/"+strconv.FormatInt(task.ID, 10)) {

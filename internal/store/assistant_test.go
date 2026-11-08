@@ -180,7 +180,7 @@ func TestAssistantResolveAttributionAndOutbox(t *testing.T) {
 		t.Fatalf("resolution=%+v", res)
 	}
 	rows := outboxRows(t, s)
-	if len(rows) != 1 || !strings.HasPrefix(rows[0].EventID, "decision-answered-"+request.ID+"-") || rows[0].Kind != OutboxKindDecisionAnswered || rows[0].TargetLane != request.RequestedBy || rows[0].SentAt != nil {
+	if len(rows) != 1 || !strings.HasPrefix(rows[0].EventID, "decision-answered-"+request.ID+"-") || rows[0].Kind != OutboxKindDecisionAnswered || rows[0].TargetLane != task.Lane || rows[0].SentAt != nil {
 		t.Fatalf("outbox=%+v", rows)
 	}
 	// Repeating the same resolution is a duplicate and writes no second row.

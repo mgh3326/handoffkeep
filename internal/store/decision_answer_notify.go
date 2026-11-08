@@ -31,13 +31,11 @@ func (s *Store) decisionConsoleURL() string {
 
 // queueDecisionAnswerNotice writes the lane notification for one successful
 // resolution, inside the resolve transaction, so a rollback takes the
-// decision event and the notice together. The lane is the request's
-// requested_by when that names a lane, else the task's lane.
+// decision event and the notice together. The lane is the task's lane: the
+// request's requested_by is the filing client's identity, not a hub lane, so
+// routing to it would post to a lane that may not exist.
 func (s *Store) queueDecisionAnswerNotice(ctx context.Context, tx pgx.Tx, x Task, resolved DecisionRequest, in ResolveDecisionInput, decider string, resolutionID int64, at time.Time) error {
 	lane := x.Lane
-	if validName(resolved.RequestedBy) {
-		lane = resolved.RequestedBy
-	}
 	taskID := strconv.FormatInt(x.ID, 10)
 	prefix := "[hk] 결정 답변 " + resolved.ID + " task " + taskID + ": "
 	body := decisionAnswerChoice(x.Refs.DecisionOptions, in, resolved.Status) + " by " + decider + " via " + in.Channel
