@@ -20,6 +20,45 @@ import (
 
 const flushTimeout = 2 * time.Second
 
+// pollingTraceRate is the head sampling rate for the high-volume fleet polling
+// and heartbeat routes, which are most of the span volume. Their error events
+// are still sent at SampleRate 1. A default rate below this one lowers it too.
+const pollingTraceRate = 0.005
+
+// pollingRoutes are transaction names ("METHOD /route", as reported) of the
+// routes that dominate span volume. Writes that run on a fixed heartbeat are
+// included with the reads.
+var pollingRoutes = map[string]bool{
+	"GET /v1/tasks/{id}":                  true,
+	"GET /v1/quota/accounts/{key}/latest": true,
+	"GET /v1/relay/events":                true,
+	"POST /v1/quota/accounts/{key}/lease": true,
+	"POST /v1/changes/batch":              true,
+	"GET /v1/jobs/{job}":                  true,
+	"GET /v1/changes":                     true,
+	"GET /v1/chat/messages":               true,
+	"GET /v1/documents":                   true,
+	"PUT /v1/quota/presence":              true,
+}
+
+// tracesSampler keys the head decision on the transaction name. Transactions
+// are sampled when they start, so a 5xx or a slow request cannot be kept after
+// the fact: the Go SDK has no tail sampling. Child spans inherit their
+// transaction's decision before the sampler is consulted.
+func tracesSampler(defaultRate float64) sentry.TracesSampler {
+	return func(ctx sentry.SamplingContext) float64 {
+		// A HEAD request is served by the GET route, so it shares the rate.
+		name := ctx.Span.Name
+		if rest, ok := strings.CutPrefix(name, "HEAD "); ok {
+			name = "GET " + rest
+		}
+		if pollingRoutes[name] {
+			return math.Min(pollingTraceRate, defaultRate)
+		}
+		return defaultRate
+	}
+}
+
 // Monitor owns a dedicated client; it never changes the process-global hub.
 // A nil client is the disabled state, including when SENTRY_DSN is set alone.
 type Monitor struct {
@@ -50,7 +89,7 @@ func fromEnv(release string, transport sentry.Transport) (*Monitor, error) {
 	}
 	client, err := sentry.NewClient(sentry.ClientOptions{
 		Dsn: dsn, Environment: environment, Release: release,
-		EnableTracing: true, TracesSampleRate: rate, SampleRate: 1,
+		EnableTracing: true, TracesSampleRate: rate, TracesSampler: tracesSampler(rate), SampleRate: 1,
 		MaxSpans: 1000, SendDefaultPII: false, Transport: transport,
 		BeforeSend: scrubEvent, BeforeSendTransaction: scrubEvent,
 	})
@@ -90,7 +129,7 @@ func (m *Monitor) trace(next http.Handler) http.Handler {
 		}
 		hub := sentry.NewHub(m.client, sentry.NewScope())
 		hub.Scope().SetTag("request_id", RequestID(r.Context()))
-		tx := sentry.StartTransaction(sentry.SetHubOnContext(r.Context(), hub), "<unmatched>",
+		tx := sentry.StartTransaction(sentry.SetHubOnContext(r.Context(), hub), transactionName(r.Method, routePattern(next, r)),
 			sentry.WithOpName("http.server"), sentry.WithTransactionSource(sentry.SourceRoute))
 		r = r.WithContext(tx.Context())
 		status := http.StatusOK
@@ -132,16 +171,8 @@ func (m *Monitor) trace(next http.Handler) http.Handler {
 			if panicked != nil && !aborted {
 				status = http.StatusInternalServerError
 			}
-			name := r.Pattern
-			if name == "" || name == "/" {
-				name = "<unmatched>"
-			}
 			method := safeMethod(r.Method)
-			// A "GET /x" pattern also serves HEAD; name by the real method.
-			if verb, rest, ok := strings.Cut(name, " "); ok && verb != "" && !strings.ContainsAny(verb, "/{") {
-				name = rest
-			}
-			name = method + " " + name
+			name := transactionName(r.Method, r.Pattern)
 			tx.Name = name
 			tx.Status = sentry.HTTPtoSpanStatus(status)
 			tx.SetData("http.request.method", method)
@@ -172,6 +203,45 @@ func (m *Monitor) trace(next http.Handler) http.Handler {
 		}()
 		next.ServeHTTP(writer, r)
 	})
+}
+
+// patternResolver is implemented by *http.ServeMux. Its Handler method reports
+// the matched pattern without serving the request.
+type patternResolver interface {
+	Handler(*http.Request) (http.Handler, string)
+}
+
+// routePattern resolves the route pattern before the transaction starts, so the
+// sampler can key on it. Request.Pattern is set only once a mux serves, which
+// is too late for a head decision. The outermost mux reports "/" for a nested
+// mux, so the innermost real pattern wins.
+func routePattern(next http.Handler, r *http.Request) string {
+	pattern := ""
+	for h := next; ; {
+		resolver, ok := h.(patternResolver)
+		if !ok {
+			return pattern
+		}
+		var found string
+		h, found = resolver.Handler(r)
+		if found != "" && found != "/" {
+			pattern = found
+		}
+	}
+}
+
+// transactionName is the reported name "METHOD /route". A "GET /x" pattern
+// also serves HEAD, so the real method is used. Unmatched requests are
+// "<unmatched>".
+func transactionName(method, pattern string) string {
+	name := pattern
+	if name == "" || name == "/" {
+		name = "<unmatched>"
+	}
+	if verb, rest, ok := strings.Cut(name, " "); ok && verb != "" && !strings.ContainsAny(verb, "/{") {
+		name = rest
+	}
+	return safeMethod(method) + " " + name
 }
 
 // apiErrorCode reads the code of a {"error":"<snake_code>"} JSON error body
