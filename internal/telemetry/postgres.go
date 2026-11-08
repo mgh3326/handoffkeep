@@ -7,34 +7,75 @@ import (
 
 	"github.com/getsentry/sentry-go"
 	"github.com/jackc/pgx/v5"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // QueryTracer traces Query, QueryRow and Exec, including calls on transactions.
-// It never reads Args, connection configuration, returned rows, or error text.
+// A query becomes a Sentry span under a sampled Sentry transaction and an OTLP
+// span under a recording OTLP server span. It never reads Args, connection
+// configuration, returned rows, or error text.
 type QueryTracer struct{}
+
+// querySpans carries the spans started by TraceQueryStart to TraceQueryEnd.
+// Either field may be nil.
+type querySpans struct {
+	sentry *sentry.Span
+	otel   trace.Span
+}
 
 type querySpanKey struct{}
 
 var _ pgx.QueryTracer = QueryTracer{}
 
 func (QueryTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
-	parent := sentry.SpanFromContext(ctx)
-	if parent == nil || parent.Sampled != sentry.SampledTrue {
+	sentryParent := sentry.SpanFromContext(ctx)
+	otelParent := trace.SpanFromContext(ctx)
+	sentryOn := sentryParent != nil && sentryParent.Sampled == sentry.SampledTrue
+	otelOn := otelParent.IsRecording()
+	if !sentryOn && !otelOn {
 		return ctx
 	}
-	span := sentry.StartSpan(ctx, "db.sql.query", sentry.WithDescription(normalizeSQL(data.SQL)))
-	span.SetData("db.system", "postgresql")
-	return context.WithValue(span.Context(), querySpanKey{}, span)
+	statement := normalizeSQL(data.SQL)
+	var spans querySpans
+	if sentryOn {
+		span := sentry.StartSpan(ctx, "db.sql.query", sentry.WithDescription(statement))
+		span.SetData("db.system", "postgresql")
+		spans.sentry = span
+		ctx = span.Context()
+	}
+	if otelOn {
+		var span trace.Span
+		ctx, span = otelParent.TracerProvider().Tracer(otlpTracerName).Start(ctx, "db.sql.query",
+			trace.WithSpanKind(trace.SpanKindClient),
+			trace.WithAttributes(attribute.String("db.system", "postgresql"), attribute.String("db.query.text", statement)),
+		)
+		spans.otel = span
+	}
+	return context.WithValue(ctx, querySpanKey{}, spans)
 }
 
 func (QueryTracer) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryEndData) {
-	if span, ok := ctx.Value(querySpanKey{}).(*sentry.Span); ok {
+	spans, ok := ctx.Value(querySpanKey{}).(querySpans)
+	if !ok {
+		return
+	}
+	if span := spans.sentry; span != nil {
 		span.SetData("db.rows_affected", data.CommandTag.RowsAffected())
 		span.Status = sentry.SpanStatusOK
 		if data.Err != nil {
 			span.Status = sentry.SpanStatusInternalError
 		}
 		span.Finish()
+	}
+	if span := spans.otel; span != nil {
+		span.SetAttributes(attribute.Int64("db.rows_affected", data.CommandTag.RowsAffected()))
+		if data.Err != nil {
+			// The error text can carry request content, so only the status is kept.
+			span.SetStatus(codes.Error, "")
+		}
+		span.End()
 	}
 }
 

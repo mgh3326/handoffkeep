@@ -192,14 +192,19 @@ func appErr(w http.ResponseWriter, r *http.Request, e error) {
 
 // writeInternal logs an infrastructure failure as one api.internal_error line
 // and answers 500 with code. request_id ties the client's error to this log
-// line and to Sentry.
+// line and to Sentry. trace_id, present only for a sampled OTLP trace, joins
+// the line and the error to that trace.
 func writeInternal(w http.ResponseWriter, r *http.Request, code string, e error) {
 	requestID := telemetry.RequestID(r.Context())
+	traceID := telemetry.TraceID(r.Context())
 	client, _ := store.WrkPrincipal(r.Context())
-	log.Printf("api.internal_error request_id=%s route=%q client=%q code=%s err=%q", requestID, r.Pattern, client, code, e.Error())
+	log.Printf("api.internal_error request_id=%s trace_id=%s route=%q client=%q code=%s err=%q", requestID, traceID, r.Pattern, client, code, e.Error())
 	body := map[string]string{"error": code}
 	if requestID != "" {
 		body["request_id"] = requestID
+	}
+	if traceID != "" {
+		body["trace_id"] = traceID
 	}
 	jsonOut(w, http.StatusInternalServerError, body)
 }
