@@ -229,9 +229,18 @@ func TestDecisionAskReplayAndOperatorOnlyRefusal(t *testing.T) {
 		t.Fatalf("refused answer recorded %d attempts", len(attempts))
 	}
 
-	// A request without the operator-only policy is answered as before.
+	// A request without the operator-only policy is answered as before. It goes
+	// on another task: the operator-only request stays open on the first, and a
+	// task holds one open request unless the new one supersedes it.
+	project := "mcp-project"
+	other, err := st.CreateTask(ctx, store.Task{
+		Lane: "mcp-lane", Title: "decision ask answerable fixture", Kind: "implement", Project: &project, CreatedBy: "tester",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	open := callTool[mcpDecisionAskOut](t, session, "decision_ask", map[string]any{
-		"task_id": task.ID, "idempotency_key": "ask-2", "question": "Ship docs?", "options": options,
+		"task_id": other.ID, "idempotency_key": "ask-2", "question": "Ship docs?", "options": options,
 		"default_action": "hold",
 	})
 	answer := callTool[answerOut](t, session, "decision_answer", map[string]any{"request_id": open.RequestID, "option": "A"})
