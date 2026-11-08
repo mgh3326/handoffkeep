@@ -195,7 +195,7 @@ const taskDetail = {
   origins_truncated: false,
   changes: [{ id: 1, pr: pr(42), state: 'open', head_sha: '0f1e2d3c4b5a69788796a5b4c3d2e1f001234567', merged_at: null, reviews: [{ id: 1, lens: 'design', round: 1, pass: 2, family: 'fixture-family', model: 'fixture-reviewer-2', verdict: 'pass', critical: 0, high: 0, medium: 1, low: 2 }], tasks: null }],
   changes_truncated: false,
-  jobs: [{ job_id: 'fixture-job-1', role: 'lead', state: 'running', host: 'Fixture host A', family: 'fixture-family', profile: 'fictional-builder', model: 'fixture-builder-1', harness: 'fixture-cli', effort: 'high', skills: [{ name: 'tdd', calls: 2 }], skills_supported: true, claimed_at: ago(70), spawned_at: ago(71), ready_at: ago(70), ended_at: null, end_reason: null, diff_stat: { files: 3, insertions: 120, deletions: 8 } }],
+  jobs: [{ job_id: 'fixture-job-1', role: 'lead', state: 'running', host: 'Fixture host A', family: 'fixture-family', profile: 'fictional-builder', model: 'fixture-builder-1', harness: 'fixture-cli', effort: 'high', skills: [{ name: 'tdd', calls: 2 }], skills_supported: true, claimed_at: ago(70), spawned_at: ago(71), ready_at: ago(70), ended_at: null, end_reason: null, diff_stat: { files: 3, insertions: 120, deletions: 8 }, report_doc: '', run: { what: '모델 fixture-builder-1 · 하네스 fixture-cli · effort high · 프로필 fictional-builder · 호스트 Fixture host A · 역할 lead', why: '선택 이유 기록 없음', others: [], result: '상태 실행 중 · diff 3 files +120 −8', selection_recorded: false } }],
   jobs_truncated: false,
   participants: { task_ref: '101', coverage: 'not_collected', segments: [] },
 };

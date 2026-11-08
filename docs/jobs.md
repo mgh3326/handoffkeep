@@ -30,7 +30,7 @@ Reads are open to every authenticated client.
   fields include `state`, `role`, `label`, `family`, `profile`, `model`,
   `pool`, `owner_lane`, `parent_lane`, `parent_job`, `pane_id`,
   `worktree` (`{origin, branch, head}`; `branch` is `null` on a detached
-  worktree), `report_doc`, `result`, `usage` and the context fields below. Any other field returns 400.
+  worktree), `report_doc`, `result`, `usage`, `selection` and the context fields below. Any other field returns 400.
   Brief text, command lines, pane output and absolute local paths are
   never stored.
 - `GET /v1/jobs/{job}` — returns the record, or 404 `not_found`.
@@ -75,6 +75,33 @@ Reads are open to every authenticated client.
 | 404 | `not_found` | unknown job id |
 | 409 | `job_id_taken` | a different claim on a taken id |
 | 409 | `job_state_conflict` | backward move or write to a terminal record |
+
+## Selection: why this model and host
+
+`selection` is panewire's record of why it chose the job's model and host.
+It is a JSON object of at most 32 KiB (`store.JobSelectionMaxBytes`),
+secret-scanned like `result`; anything else (a `null`, an array, an
+oversized or secret-shaped object) returns 400. It is accepted on any
+non-terminal record, replaces the stored object as a whole, and cannot be
+cleared. Reads of `/v1/jobs` return it as stored. panewire owns the shape,
+so hk keeps unknown keys and rejects none.
+
+hk renders these keys and skips any that is missing or has another type:
+
+| Key | Rendered as |
+| --- | --- |
+| `chosen.why` | the task grade (`for task B`) in the 왜 sentence; shown verbatim when no structured key below can be rendered |
+| `chosen.grade`, `chosen.tier`, `chosen.projected_pct`, `chosen.reset_in_s`, `chosen.waste_urgency` | model grade, quota tier, projected use, time until the quota resets, urgency |
+| `chosen.model_id` | the model, when the job has no `model` |
+| `policy.urgency_source` | where the urgency came from |
+| `candidates[].{seat \| canon \| model_id, outcome}` | 다른 후보: `below_choice`, `admitted`, `dropped:role_filtered` and `dropped:grade_insufficient` get a Korean label; any other `outcome` is shown verbatim. At most 5 are listed. |
+| `override_reason` (or `override.reason`) | the reason an explicit `-m` / `--host` replaced the automatic choice |
+
+The console (`GET /ui/api/board/tasks/{id}`) and the MCP `task_get` serve a
+readable `run` summary per job, built by `store.Job.Explain`:
+`{what, why, override, others, result, selection_recorded}`. A job with no
+usable selection has `why` = `선택 이유 기록 없음`. The raw `selection`
+is not served by either; `GET /v1/jobs/{job}` returns it.
 
 ## Job context and skills
 

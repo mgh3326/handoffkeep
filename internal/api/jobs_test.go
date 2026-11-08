@@ -406,3 +406,43 @@ func TestJobSkillsReport(t *testing.T) {
 		t.Fatalf("%d %v", code, body)
 	}
 }
+
+// A job records why panewire chose its model (hk 3516): any JSON object up to
+// 32 KiB, replaced as a whole, unknown keys kept.
+func TestJobsSelection(t *testing.T) {
+	srv := jobsAPIServer(t)
+	id := fmt.Sprintf("9-builder-%d", time.Now().UnixNano())
+	if code, _ := jobsClaim(t, srv, "tok-a", id, "host-a", 9); code != http.StatusCreated {
+		t.Fatalf("claim: %d", code)
+	}
+	url := srv.URL + "/v1/jobs/" + id
+	if _, body := jobsRequest(t, "GET", url, "tok-a", ""); body["selection"] != nil {
+		t.Fatalf("selection before any write: %v", body["selection"])
+	}
+	put := `{"state":"spawned","selection":{"chosen":{"model_id":"gpt-6.1-terra","why":"waste_risk tier=waste grade=A+ for task B"},"unknown_key":[1,2]}}`
+	code, body := jobsRequest(t, "PUT", url, "tok-a", put)
+	sel, _ := body["selection"].(map[string]any)
+	if code != http.StatusOK || sel["unknown_key"] == nil || sel["chosen"].(map[string]any)["model_id"] != "gpt-6.1-terra" {
+		t.Fatalf("put selection: %d %v", code, body)
+	}
+	if _, got := jobsRequest(t, "GET", url, "tok-b", ""); got["selection"].(map[string]any)["unknown_key"] == nil {
+		t.Fatalf("GET selection: %v", got["selection"])
+	}
+	for name, bad := range map[string]string{
+		"null":      `{"selection":null}`, // there is no way to clear a selection
+		"array":     `{"selection":[]}`,
+		"string":    `{"selection":"x"}`,
+		"too large": `{"selection":{"pad":"` + strings.Repeat("x", store.JobSelectionMaxBytes) + `"}}`,
+	} {
+		code, body := jobsRequest(t, "PUT", url, "tok-a", bad)
+		if code != http.StatusBadRequest {
+			t.Errorf("%s: %d, want 400 (%v)", name, code, body)
+		}
+	}
+	if code, body := jobsRequest(t, "PUT", url, "tok-a", `{"selection":{"a":"AKIA`+strings.Repeat("A", 16)+`"}}`); code != http.StatusBadRequest || body["error"] != "secret_like_content" {
+		t.Fatalf("secret selection: %d %v", code, body)
+	}
+	if _, got := jobsRequest(t, "GET", url, "tok-a", ""); got["selection"].(map[string]any)["unknown_key"] == nil {
+		t.Fatalf("a refused write changed the selection: %v", got["selection"])
+	}
+}

@@ -53,7 +53,7 @@ describe("Work", () => {
   });
   it("W8 shows task and job durations", async () => {
     vi.setSystemTime(new Date("2026-11-05T04:00:00Z"));
-    const job = { job_id: "job", role: "worker", state: "spawned", host: "host", family: "openai", profile: "p", model: "m", harness: null, effort: null, skills: [], skills_supported: true, claimed_at: null, spawned_at: "2026-11-05T01:00:00Z", ready_at: "2026-11-05T01:30:00Z", ended_at: null, end_reason: null, diff_stat: null };
+    const job = { job_id: "job", role: "worker", state: "spawned", host: "host", family: "openai", profile: "p", model: "m", harness: null, effort: null, skills: [], skills_supported: true, claimed_at: null, spawned_at: "2026-11-05T01:00:00Z", ready_at: "2026-11-05T01:30:00Z", ended_at: null, end_reason: null, diff_stat: null, report_doc: "", run: { what: "모델 m", why: "선택 이유 기록 없음", others: [], result: "상태 실행 중", selection_recorded: false } };
     vi.stubGlobal("fetch", vi.fn(async () => json({ ...detail, task: { ...task, started_at: "2026-11-05T01:00:00Z" }, jobs: [job] })));
     render(<TaskRecord id={101} />);
     expect(await screen.findByText("대기: 1h 0m")).toBeTruthy();
@@ -61,7 +61,7 @@ describe("Work", () => {
     expect(screen.getByText(/spawned → ready 0h 30m/)).toBeTruthy();
   });
   it("W9 displays skills and unsupported harnesses", async () => {
-    const job = { job_id: "job", role: "worker", state: "ended", host: "host", family: "openai", profile: "p", model: "m", harness: null, effort: null, skills: [{name:"alpha",calls:2},{name:"beta",calls:3}], skills_supported: true, claimed_at: null, spawned_at: null, ready_at: null, ended_at: null, end_reason: null, diff_stat: null };
+    const job = { job_id: "job", role: "worker", state: "ended", host: "host", family: "openai", profile: "p", model: "m", harness: null, effort: null, skills: [{name:"alpha",calls:2},{name:"beta",calls:3}], skills_supported: true, claimed_at: null, spawned_at: null, ready_at: null, ended_at: null, end_reason: null, diff_stat: null, report_doc: "", run: { what: "모델 m", why: "선택 이유 기록 없음", others: [], result: "상태 실행 중", selection_recorded: false } };
     vi.stubGlobal("fetch", vi.fn(async () => json({ ...detail, jobs: [job, { ...job, job_id: "other", skills_supported: false }] })));
     render(<TaskRecord id={101} />);
     expect(await screen.findByText(/alpha \(2\), beta \(3\)/)).toBeTruthy();
@@ -118,11 +118,33 @@ it("rejects a malformed linked document list", async () => {
   await expect(fetchTaskDetail(101)).rejects.toThrow("malformed");
 });
 
-it("job record includes host and omits empty fields", async () => {
-  const job = { job_id: "job", role: "worker", state: "spawned", host: "fictional-device", family: "", profile: "", model: "model-x", harness: null, effort: null, skills: [], skills_supported: true, claimed_at: null, spawned_at: null, ready_at: null, ended_at: null, end_reason: null, diff_stat: null };
+it("job record shows what ran, and says so when no selection was recorded", async () => {
+  const job = { job_id: "job", role: "worker", state: "spawned", host: "fictional-device", family: "", profile: "", model: "model-x", harness: null, effort: null, skills: [], skills_supported: true, claimed_at: null, spawned_at: null, ready_at: null, ended_at: null, end_reason: null, diff_stat: null, report_doc: "", run: { what: "모델 model-x · 호스트 fictional-device · 역할 worker", why: "선택 이유 기록 없음", others: [], result: "상태 실행 중", selection_recorded: false } };
   vi.stubGlobal("fetch", vi.fn(async () => json({ ...detail, jobs: [job] })));
   render(<TaskRecord id={101} />);
-  expect(await screen.findByText("job · worker · model-x · fictional-device")).toBeTruthy();
+  expect(await screen.findByText("모델 model-x · 호스트 fictional-device · 역할 worker")).toBeTruthy();
+  expect(screen.getByText("선택 이유 기록 없음")).toBeTruthy();
+  expect(screen.getByText("상태 실행 중")).toBeTruthy();
+  expect(screen.queryByText("다른 후보")).toBeNull();
+  expect(screen.getByText("skills 없음")).toBeTruthy();
+});
+
+it("job record explains the choice, the other candidates and the result", async () => {
+  const job = { job_id: "3516-builder-1", role: "builder", state: "completed", host: "mac-dev", family: "openai", profile: "terra@high", model: "gpt-6.1-terra", harness: "codex", effort: "high", skills: [], skills_supported: true, claimed_at: null, spawned_at: null, ready_at: null, ended_at: null, end_reason: "ready", diff_stat: { files: 3, insertions: 120, deletions: 8 }, report_doc: "report/3516 a",
+    run: { what: "모델 gpt-6.1-terra · 하네스 codex · effort high · 프로필 terra@high · 호스트 mac-dev · 역할 builder", why: "작업 등급 B에 모델 등급 A+를 골랐습니다: 쿼터 tier waste(낭비 위험), 예상 사용률 76%, 긴급도 0.31.", override: "-m gpt-6.1-terra", others: ["claude-sonnet — 선택된 후보보다 순위가 낮음", "local-x — dropped:quota_exhausted"], result: "상태 완료 · 종료 사유 ready · 소요 1시간 5분 · 토큰 입력 1,200 / 출력 340 · diff 3 files +120 −8", selection_recorded: true } };
+  vi.stubGlobal("fetch", vi.fn(async () => json({ ...detail, task: { ...task, refs: { job_id: "3516-builder-1", pr: "https://github.com/o/r/pull/9" } }, jobs: [job, { ...job, job_id: "other" }] })));
+  render(<TaskRecord id={101} />);
+  expect((await screen.findAllByText(/작업 등급 B에 모델 등급 A\+를 골랐습니다/)).length).toBe(2);
+  expect(screen.getAllByText("직접 지정: -m gpt-6.1-terra").length).toBe(2);
+  expect(screen.getAllByText("다른 후보").length).toBe(2);
+  expect(screen.getAllByText("claude-sonnet — 선택된 후보보다 순위가 낮음").length).toBe(2);
+  expect(screen.getAllByText("local-x — dropped:quota_exhausted").length).toBe(2);
+  expect(screen.getAllByText(/소요 1시간 5분 · 토큰 입력 1,200/).length).toBe(2);
+  // The report links to the document; only the job the task points at gets the PR link.
+  expect(screen.getAllByRole("link", { name: "보고서" })[0].getAttribute("href")).toBe("/ui/doc/report/3516%20a");
+  const prs = screen.getAllByRole("link", { name: "PR" });
+  expect(prs.length).toBe(1);
+  expect(prs[0].getAttribute("href")).toBe("https://github.com/o/r/pull/9");
 });
 
 it("describes priority events in Korean and omits unchanged state arrows", async () => {

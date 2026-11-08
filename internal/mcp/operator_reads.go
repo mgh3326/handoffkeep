@@ -16,6 +16,7 @@ import (
 
 const (
 	taskGetPreviewLimit      = 5
+	taskGetJobsLimit         = 20
 	taskCommentsDefaultLimit = 50
 	taskCommentsMaxLimit     = 100
 	taskEventsDefaultLimit   = 50
@@ -66,6 +67,7 @@ var taskFieldSources = map[string]string{
 	"comments_preview": "hk",
 	"events_preview":   "hk",
 	"console_url":      "hk",
+	"jobs":             "hk",
 	// The ownership rule the design doc states.
 	"comments_by_agents":  "hk",
 	"operator_comments":   "youtrack",
@@ -141,6 +143,27 @@ func taskEventViews(events []store.TaskEvent) []taskEventView {
 type translationView struct {
 	Text  string `json:"text"`
 	Stale bool   `json:"stale"`
+}
+
+// jobView is one job of task_get: the identifying fields plus the same
+// readable run summary the console shows (hk 3516). The raw selection record
+// is not served; run.why and run.others carry what it says.
+type jobView struct {
+	JobID     string       `json:"job_id"`
+	State     string       `json:"state"`
+	Role      string       `json:"role"`
+	Host      string       `json:"host"`
+	Family    string       `json:"family"`
+	Profile   string       `json:"profile"`
+	Model     string       `json:"model"`
+	Harness   *string      `json:"harness"`
+	Effort    *string      `json:"effort"`
+	Pool      string       `json:"pool"`
+	ReportDoc string       `json:"report_doc"`
+	SpawnedAt *time.Time   `json:"spawned_at"`
+	EndedAt   *time.Time   `json:"ended_at"`
+	EndReason *string      `json:"end_reason"`
+	Run       store.JobRun `json:"run"`
 }
 
 type blockerView struct {
@@ -262,6 +285,23 @@ func (o operatorTools) taskGet(ctx context.Context, _ *gmcp.CallToolRequest, in 
 		events = events[len(events)-taskGetPreviewLimit:]
 	}
 
+	jobRows, err := o.service.Store.ListJobsByTask(ctx, task.ID, taskGetJobsLimit+1)
+	if err != nil {
+		return nil, nil, err
+	}
+	jobsMore := len(jobRows) > taskGetJobsLimit
+	if jobsMore {
+		jobRows = jobRows[:taskGetJobsLimit]
+	}
+	jobs := make([]jobView, 0, len(jobRows))
+	for _, j := range jobRows {
+		jobs = append(jobs, jobView{
+			JobID: j.JobID, State: j.State, Role: j.Role, Host: j.Host, Family: j.Family, Profile: j.Profile,
+			Model: j.Model, Harness: j.Harness, Effort: j.Effort, Pool: j.Pool, ReportDoc: j.ReportDoc,
+			SpawnedAt: j.SpawnedAt, EndedAt: j.EndedAt, EndReason: j.EndReason, Run: j.Explain(),
+		})
+	}
+
 	var closedAt *time.Time
 	switch {
 	case task.CompletedAt != nil:
@@ -301,6 +341,8 @@ func (o operatorTools) taskGet(ctx context.Context, _ *gmcp.CallToolRequest, in 
 		"comments_more":    commentsMore,
 		"events_preview":   taskEventViews(events),
 		"events_more":      eventsMore,
+		"jobs":             jobs,
+		"jobs_more":        jobsMore,
 		"youtrack":         summary.YouTrack,
 		"console_url":      summary.ConsoleURL,
 		"field_sources":    taskFieldSources,
