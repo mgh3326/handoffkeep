@@ -196,6 +196,12 @@ type DotsReplyInput struct {
 	IdempotencyKey    string     `json:"idempotency_key"`
 	AskOperator       bool       `json:"ask_operator,omitempty"`
 	ExpectedUpdatedAt *time.Time `json:"expected_updated_at,omitempty"`
+	// RunToken is required on every kind but START, which issues one.
+	RunToken string `json:"run_token,omitempty"`
+	// Takeover, on START only, starts a request that is already started: it
+	// supersedes the active run token and records the handover in the
+	// request's history. The old run's later replies are then refused.
+	Takeover bool `json:"takeover,omitempty"`
 }
 
 type DotsReplyResult struct {
@@ -203,6 +209,10 @@ type DotsReplyResult struct {
 	State       string `json:"state"`
 	DocumentKey string `json:"document_key,omitempty"`
 	Duplicate   bool   `json:"duplicate"`
+	// RunToken is set on a START result only: the token every later reply on
+	// this run must carry. A START replay returns the token its first call
+	// issued, which a takeover may since have superseded.
+	RunToken string `json:"run_token,omitempty"`
 }
 
 // ErrDotsReplyKeyConflict rejects an idempotency key used for another reply.
@@ -235,8 +245,9 @@ func (s *Store) ListDotsReplies(ctx context.Context, taskID int64) ([]DotsReply,
 }
 
 // ReplyDots writes the reply, its state change, and its recorded outputs together.
+// Every reply but START must carry the run token START issued (dots_run_token.go).
 func (s *Store) ReplyDots(ctx context.Context, actor, channel string, in DotsReplyInput) (DotsReplyResult, error) {
-	if in.TaskID < 1 || !validText(actor, 128) || actor == "" || channel != "chatgpt" || !validSourceRef(in.IdempotencyKey) || (in.AskOperator && in.Kind != "QUESTION") {
+	if in.TaskID < 1 || !validText(actor, 128) || actor == "" || channel != "chatgpt" || !validSourceRef(in.IdempotencyKey) || (in.AskOperator && in.Kind != "QUESTION") || (in.Takeover && in.Kind != "START") {
 		return DotsReplyResult{}, errors.New("invalid dots reply")
 	}
 	if in.Kind != "START" && in.Kind != "PROGRESS" && !DotsKindRecorded(in.Kind) {
@@ -244,6 +255,14 @@ func (s *Store) ReplyDots(ctx context.Context, actor, channel string, in DotsRep
 	}
 	if in.Kind == "START" && (in.ExpectedUpdatedAt == nil || in.ExpectedUpdatedAt.IsZero()) {
 		return DotsReplyResult{}, errors.New("START requires expected_updated_at")
+	}
+	// Refused before any state is read: a reply with no run token, or a token
+	// of the wrong shape, cannot match this run.
+	if in.Kind != "START" && in.RunToken == "" {
+		return DotsReplyResult{}, ErrDotsRunTokenRequired
+	}
+	if in.Kind != "START" && !validDotsRunToken(in.RunToken) {
+		return DotsReplyResult{}, ErrDotsRunTokenMismatch
 	}
 	if err := CheckTaskCommentBody(in.Body); err != nil {
 		return DotsReplyResult{}, err
@@ -257,7 +276,13 @@ func (s *Store) ReplyDots(ctx context.Context, actor, channel string, in DotsRep
 	if in.Kind == "START" && in.ExpectedUpdatedAt != nil {
 		expected = in.ExpectedUpdatedAt.UTC().Format(time.RFC3339Nano)
 	}
-	payloadHash := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%s\x00%t\x00%s\x00%s\x00%s", in.Kind, in.Body, in.AskOperator, actor, channel, expected)))
+	payloadSource := fmt.Sprintf("%s\x00%s\x00%t\x00%s\x00%s\x00%s", in.Kind, in.Body, in.AskOperator, actor, channel, expected)
+	if in.Takeover {
+		// A takeover is not the same reply as a plain START with its key. Plain
+		// START payloads keep their old hash, so stored replays still match.
+		payloadSource += "\x00takeover"
+	}
+	payloadHash := sha256.Sum256([]byte(payloadSource))
 	payload := hex.EncodeToString(payloadHash[:])
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -278,6 +303,13 @@ func (s *Store) ReplyDots(ctx context.Context, actor, channel string, in DotsRep
 		}
 		return DotsReplyResult{}, err
 	}
+	// The token is checked before the replay lookup: a replay returns the first
+	// result, so a caller without the run must not learn it.
+	if in.Kind != "START" {
+		if err = checkDotsRunTokenTx(ctx, tx, task, in.RunToken); err != nil {
+			return DotsReplyResult{}, err
+		}
+	}
 	var previous string
 	err = tx.QueryRow(ctx, `SELECT note FROM task_events WHERE task_id=$1 AND source='dots-hk-chatgpt' AND source_ref=$2`, in.TaskID, commentID).Scan(&previous)
 	if err == nil {
@@ -288,7 +320,13 @@ func (s *Store) ReplyDots(ctx context.Context, actor, channel string, in DotsRep
 		if parts[0] != payload {
 			return DotsReplyResult{}, ErrDotsReplyKeyConflict
 		}
-		return DotsReplyResult{TaskID: task.ID, State: parts[1], DocumentKey: parts[2], Duplicate: true}, nil
+		replayToken := ""
+		if in.Kind == "START" {
+			if replayToken, err = dotsRunTokenForIssueTx(ctx, tx, task.ID, commentID); err != nil {
+				return DotsReplyResult{}, err
+			}
+		}
+		return DotsReplyResult{TaskID: task.ID, State: parts[1], DocumentKey: parts[2], Duplicate: true, RunToken: replayToken}, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return DotsReplyResult{}, err
@@ -296,7 +334,16 @@ func (s *Store) ReplyDots(ctx context.Context, actor, channel string, in DotsRep
 	if task.Lane != "dots" || !IsHKDotsRequest(task) {
 		return DotsReplyResult{}, errors.New("invalid dots request task")
 	}
-	if in.Kind == "START" && (!task.UpdatedAt.Equal(*in.ExpectedUpdatedAt) || !IsClaimableState(task.State) || task.ClaimedBy != "") {
+	if in.Kind == "START" && !task.UpdatedAt.Equal(*in.ExpectedUpdatedAt) {
+		return DotsReplyResult{}, fmt.Errorf("%w: dots request has changed or is already claimed", ErrTaskConflict)
+	}
+	if in.Kind == "START" && in.Takeover {
+		// A takeover starts a request that is already started: it needs a
+		// claim to take over and an unsettled request to take it on.
+		if task.ClaimedBy == "" || IsSettledState(task.State) {
+			return DotsReplyResult{}, fmt.Errorf("%w: dots request is not started, so there is no run to take over", ErrTaskConflict)
+		}
+	} else if in.Kind == "START" && (!IsClaimableState(task.State) || task.ClaimedBy != "") {
 		return DotsReplyResult{}, fmt.Errorf("%w: dots request has changed or is already claimed", ErrTaskConflict)
 	}
 	if in.Kind != "START" && IsSettledState(task.State) {
@@ -319,9 +366,17 @@ func (s *Store) ReplyDots(ctx context.Context, actor, channel string, in DotsRep
 			return DotsReplyResult{}, err
 		}
 	}
+	var runToken string
 	switch in.Kind {
 	case "START":
+		if in.Takeover {
+			runToken, err = issueDotsRunTokenTx(ctx, tx, task.ID, commentID, actor, true, now)
+			break
+		}
 		task, err = s.claimTaskTx(ctx, tx, task.ID, "dots", "", "dots request")
+		if err == nil {
+			runToken, err = issueDotsRunTokenTx(ctx, tx, task.ID, commentID, actor, false, now)
+		}
 	case "BLOCKED":
 		task, err = s.transitionTaskTx(ctx, tx, task.ID, TransitionInput{To: "hold", By: actor, Note: in.Body}, false)
 	case "RESULT":
@@ -342,7 +397,7 @@ func (s *Store) ReplyDots(ctx context.Context, actor, channel string, in DotsRep
 	if err = tx.Commit(ctx); err != nil {
 		return DotsReplyResult{}, err
 	}
-	return DotsReplyResult{TaskID: task.ID, State: task.State, DocumentKey: docKey}, nil
+	return DotsReplyResult{TaskID: task.ID, State: task.State, DocumentKey: docKey, RunToken: runToken}, nil
 }
 
 // DotsComment is one Linear comment. CreatedAt keeps Linear's own ISO-8601

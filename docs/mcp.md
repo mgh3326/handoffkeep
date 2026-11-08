@@ -22,6 +22,17 @@ creation order. Use the returned `next_cursor` to fetch another page.
 `idempotency_key`. Reuse the key only when retrying the same reply. For `START`,
 pass the task's `updated_at` from the inbox as `expected_updated_at`. START
 claims the task for dots only if that revision is still current and unclaimed.
+It returns a `run_token`. Every later reply on that run (`PROGRESS`, `BLOCKED`,
+`QUESTION`, `RESULT`) must send the same `run_token`; the token is returned by
+START only and is never listed by `dots_inbox`. A reply with no token is refused
+with `dots_run_token_required`; a token that is malformed or is not the
+request's active one is refused with `dots_run_token_mismatch`. A refused reply
+writes nothing. A second START on a started request is refused. To take over a
+started request, send START with `takeover: true` and the current
+`expected_updated_at`: it returns a new `run_token`, the previous one is refused
+from then on, and the handover is recorded in the task's events. `dots_inbox`
+reports `started` and `run_started_at` (when the current run's token was
+issued) for each request.
 `PROGRESS` records a partial result and leaves the task open. `BLOCKED` parks
 it with the reason, and `RESULT`
 completes it with the result document as evidence. A `QUESTION` is delivered

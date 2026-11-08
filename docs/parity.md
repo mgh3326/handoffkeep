@@ -86,6 +86,7 @@ inbox and disposition writes refuse them.
 | Fleet | Set a host's accepting flag | — | POST /ui/api/nodes/{machine}/accepting | — (the hub route is /v1/nodes/{machine}/accepting on the hub, not hk) | — | — | Operator, or a service identity with JSON content type | ui.write | Set again | internal/ui/routes_test.go |
 | Relay | Compose one lane event | — | POST /ui/compose | POST /v1/relay/events | — | — | Operator (console); bearer (API) | ui.write; relay event row | A new event is a new record; delivery is tracked separately | internal/ui/write_test.go, internal/ui/routes_test.go |
 | Meta | Describe the task state machine | — | State labels and transitions are rendered in the console | — | — | task_states | MCP bearer/Access; local stdio | None (read) | n/a | internal/mcp/meta_test.go |
+| Dots | Start a dots request and reply on its run (START, PROGRESS, BLOCKED, QUESTION, RESULT) | — | — | — | — | dots_inbox, dots_reply | MCP chatgpt channel only; writes off unless HANDOFFKEEP_DOTS_REPLY_WRITES=on | dots-hk-chatgpt and dots-run-token task_events; dots_run_tokens rows (token history) | A takeover supersedes the run token and is recorded; replies are append-only | internal/store/dots_run_token_test.go, internal/store/dots_reply_test.go, internal/mcp/dots_run_token_test.go |
 
 ## MCP follow-up list
 

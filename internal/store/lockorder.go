@@ -59,7 +59,9 @@ package store
 //     document row). The dots writer (RecordDotsResult) is the same case: it
 //     inserts or updates one documents row and one dots_results row, each
 //     taking KEY SHARE on the one linked task row; SetDotsAdoption locks one
-//     dots_results row and no task. decision_requests rows that name a
+//     dots_results row and no task. ReplyDots reads and writes dots_run_tokens
+//     rows only after it locks the request's task row (FOR UPDATE), so the
+//     active run token cannot change under a reply's check. decision_requests rows that name a
 //     task or a job are updated only under the level-2 lock, several at a
 //     time in id order (decision_records.go); the table has no foreign key.
 //     FinishDeploy with state success takes the level-2 lock first, then its
