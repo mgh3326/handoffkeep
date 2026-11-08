@@ -49,8 +49,13 @@ presign answer (`AttachmentURL`) is returned, never followed.
 
 `GetTask`, `ClaimTask`, `RebindTaskJob`, `ReopenTask`, `CommentTask`,
 `ProjectOwner`, `GetDocument`, `PutDocument`, `PutAttachment`,
-`GetAttachment`, `AttachmentURL` and `AskDecision`. Each uses the same route
-and JSON as its `internal/remote` equivalent. A non-2xx answer is a
+`GetAttachment`, `AttachmentURL`, `RecordDecisionRequest` and `AskDecision`.
+Each uses the same route and JSON as its `internal/remote` equivalent.
+`RecordDecisionRequest` only records the request (the CLI's `decisions ask`);
+`AskDecision` also opens its Linear issue (`decisions ask --linear`) and fails
+with `503 linear_decisions_disabled` when hk runs without Linear decisions. A
+service that must not open issues uses `RecordDecisionRequest`. Both take the
+same `DecisionAskInput`. A non-2xx answer is a
 `*client.HTTPError`; branch on `client.ErrorCode(err)`, never on the error
 text.
 
