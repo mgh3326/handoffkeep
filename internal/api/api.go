@@ -773,19 +773,50 @@ func (s Server) Handler() http.Handler {
 	if s.LinearWebhook != nil {
 		m.Handle("POST /hooks/linear", s.LinearWebhook)
 	}
-	legacy := s.legacyWrkFence(m)
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// The legacy fence may return before ServeMux dispatches the request.
-		_, r.Pattern = m.Handler(r)
-		// ServeMux cleans dot/slash paths with redirects before dispatch. O3
-		// must authenticate and reject those paths without ever sending Location.
-		if wrkRegistered && (r.URL.Path == "/v1/wrk" || strings.HasPrefix(r.URL.Path, "/v1/wrk/")) {
-			r.Pattern = "/v1/wrk/{path...}"
-			s.wrk(w, r)
-			return
-		}
-		legacy.ServeHTTP(w, r)
-	})
+	v1 := v1Handler{mux: m, legacy: s.legacyWrkFence(m)}
+	if wrkRegistered {
+		v1.wrk = http.HandlerFunc(s.wrk)
+	}
+	return v1
+}
+
+// wrkPattern is the route pattern reported for the /v1/wrk surface.
+const wrkPattern = "/v1/wrk/{path...}"
+
+// v1Handler serves the /v1 surface behind the legacy wrk fence. Its Handler
+// method reports the route a request dispatches to without serving it, the way
+// *http.ServeMux does, so telemetry can key the head sampling decision on the
+// route before the request starts (telemetry.routePattern follows any value
+// with this method).
+type v1Handler struct {
+	mux    *http.ServeMux
+	legacy http.Handler
+	wrk    http.Handler // nil when the wrk routes are not registered
+}
+
+func (h v1Handler) isWrk(r *http.Request) bool {
+	return h.wrk != nil && (r.URL.Path == "/v1/wrk" || strings.HasPrefix(r.URL.Path, "/v1/wrk/"))
+}
+
+func (h v1Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// The legacy fence may return before ServeMux dispatches the request.
+	_, r.Pattern = h.mux.Handler(r)
+	// ServeMux cleans dot/slash paths with redirects before dispatch. O3
+	// must authenticate and reject those paths without ever sending Location.
+	if h.isWrk(r) {
+		r.Pattern = wrkPattern
+		h.wrk.ServeHTTP(w, r)
+		return
+	}
+	h.legacy.ServeHTTP(w, r)
+}
+
+// Handler reports the route ServeHTTP would dispatch to, without serving it.
+func (h v1Handler) Handler(r *http.Request) (http.Handler, string) {
+	if h.isWrk(r) {
+		return h.wrk, wrkPattern
+	}
+	return h.mux.Handler(r)
 }
 
 // readBuildInfo is a variable so tests can stamp a VCS-tagged build info.

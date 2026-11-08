@@ -53,12 +53,20 @@ func tracesSampler(defaultRate float64) sentry.TracesSampler {
 		if rest, ok := strings.CutPrefix(name, "HEAD "); ok {
 			name = "GET " + rest
 		}
+		rate := defaultRate
 		if pollingRoutes[name] {
-			return math.Min(pollingTraceRate, defaultRate)
+			rate = math.Min(pollingTraceRate, defaultRate)
 		}
-		return defaultRate
+		if sampleObserver != nil {
+			sampleObserver(ctx.Span.Name, rate)
+		}
+		return rate
 	}
 }
+
+// sampleObserver is nil outside tests. A test sets it to see the transaction
+// name and rate each head decision receives.
+var sampleObserver func(name string, rate float64)
 
 // Monitor owns a dedicated Sentry client and an optional OTLP exporter; it never
 // changes the process-global hub. A nil client is the disabled Sentry state,
