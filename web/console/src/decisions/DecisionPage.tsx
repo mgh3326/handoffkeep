@@ -1,4 +1,4 @@
-import { TranslatedText, useShowOriginal } from "../shared/translation";
+import { useShowOriginal } from "../shared/translation";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { readCsrfToken } from "../shared/boardApi";
 import { isTypingTarget } from "../shared/search";
@@ -54,6 +54,29 @@ function deadline(iso: string) {
   const ms = Date.parse(iso) - Date.now();
   const rel = left !== null ? `${left} 남음` : past !== null ? `${past} 경과` : "";
   return `${formatMinuteKST(iso) ?? iso}${rel ? ` · ${rel}` : ""}${ms >= 0 && ms <= 2 * 60 * 60_000 ? " · 임박" : ""}`;
+}
+function parseQuestion(question: string): { heading: string; fields: [string, unknown][] } {
+  const start = question.indexOf("{");
+  if (start < 0) return { heading: question, fields: [] };
+  try {
+    const value: unknown = JSON.parse(question.slice(start));
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error();
+    const fields = Object.entries(value).flatMap(([key, item]): [string, unknown][] =>
+      item && typeof item === "object" && !Array.isArray(item)
+        ? Object.entries(item).map(([child, nested]) => [`${key}.${child}`, nested])
+        : [[key, item]],
+    );
+    return { heading: question.slice(0, start).trim() || "질문", fields };
+  } catch {
+    return { heading: question, fields: [] };
+  }
+}
+function QuestionValue({ value }: { value: unknown }) {
+  if (Array.isArray(value)) return <ul>{value.map((item, i) => <li key={i}><QuestionValue value={item} /></li>)}</ul>;
+  const text = typeof value === "string" ? value : JSON.stringify(value);
+  if (typeof text === "string" && /^[a-f\d]{13,}$/i.test(text))
+    return <details className="decision-long-id"><summary title={text}>{text.slice(0, 12)}…</summary><span>{text}</span></details>;
+  return <>{text}</>;
 }
 export function DecisionPage({ id }: { id: string }) {
   const globalOriginal = useShowOriginal();
@@ -294,6 +317,11 @@ export function DecisionPage({ id }: { id: string }) {
             : detail.disabled_reason
               ? `지원되지 않는 사유 ${detail.disabled_reason}`
               : "";
+  const original = detailOriginal ?? globalOriginal;
+  const question = parseQuestion(!original && (req?.question_ko ?? detail.record.question_ko) && !(req?.question_ko_stale ?? detail.record.question_ko_stale) ? (req?.question_ko ?? detail.record.question_ko ?? "") : (req?.question ?? detail.record.question));
+  const recommended = req?.options.find((o) => o.recommended);
+  const recommendedLabel = recommended && (!original && req?.options_ko && !req.options_ko_stale ? req.options_ko.find((o) => o.key === recommended.key)?.label ?? recommended.label : recommended.label);
+  const answerAttempt = req && detail.attempts.find((a) => a.revision_request_id === req.id && a.result === "answered");
   const oldDrafts: { request: string; draft: Draft }[] = detail.history
     .filter((h) => h.id !== req?.id)
     .flatMap((h) => {
@@ -327,15 +355,12 @@ export function DecisionPage({ id }: { id: string }) {
           </p>
         )}
       </header>
-      <div className="decision-question-heading"><h2 className="decision-question">{!(detailOriginal ?? globalOriginal) && (req?.question_ko ?? detail.record.question_ko) && !(req?.question_ko_stale ?? detail.record.question_ko_stale) ? (req?.question_ko ?? detail.record.question_ko) : (req?.question ?? detail.record.question)}{(req?.question_ko_stale ?? detail.record.question_ko_stale) && <small className="hk-translation-stale"> 갱신 필요</small>}</h2>{((req?.question_ko ?? detail.record.question_ko) && !(req?.question_ko_stale ?? detail.record.question_ko_stale) || req?.options_ko && !req.options_ko_stale) && <button className="hk-detail-original" type="button" aria-pressed={detailOriginal ?? globalOriginal} onClick={() => setDetailOriginal(!(detailOriginal ?? globalOriginal))}>원문 보기</button>}</div>
+      <div className="decision-question-heading"><h2 className="decision-question">{question.heading}{(req?.question_ko_stale ?? detail.record.question_ko_stale) && <small className="hk-translation-stale"> 갱신 필요</small>}</h2>{((req?.question_ko ?? detail.record.question_ko) && !(req?.question_ko_stale ?? detail.record.question_ko_stale) || req?.options_ko && !req.options_ko_stale) && <button className="hk-detail-original" type="button" aria-pressed={original} onClick={() => setDetailOriginal(!original)}>원문 보기</button>}</div>
+      <p>{recommended ? <>권고: {recommendedLabel}{req?.reason && <> — {req.reason}</>}</> : "권고 없음 — 요청자가 권고를 주지 않았습니다"}</p>
+      {question.fields.length > 0 && <dl className="decision-question-fields">{question.fields.map(([key, value]) => <div key={key}><dt>{key}</dt><dd><QuestionValue value={value} /></dd></div>)}</dl>}
       {detail.task && (
         <p className="decision-task-state">
           작업 상태: <Chip kind="status" state={detail.task.state} />
-        </p>
-      )}
-      {state === "answered" && req?.resolution && (
-        <p>
-          답변: {req.resolution.option} {req.resolution.text}
         </p>
       )}
       {pending && (
@@ -355,56 +380,25 @@ export function DecisionPage({ id }: { id: string }) {
       {req && (
         <>
           {req.options_ko_stale && <small className="hk-translation-stale">갱신 필요</small>}
-          <div
-            role="radiogroup"
-            aria-label="선택지"
-            aria-describedby={error ? "decision-error" : undefined}
-            className="decision-options"
-          >
-            {req.options.map((o, i) => (
-              <button
-                type="button"
-                role="radio"
-                className="decision-option"
-                aria-checked={option === o.key}
-                disabled={!detail.answerable || !editable}
-                key={o.key}
-                onClick={() => {
-                  setOption(o.key);
-                  setStale(false);
-                }}
-              >
-                <span className="decision-option-mark" aria-hidden="true">
-                  {option === o.key && <Icon name="check" />}
-                </span>
-                <span className="decision-option-body">
-                  <strong>
-                    {i + 1}. {!(detailOriginal ?? globalOriginal) && req.options_ko && !req.options_ko_stale ? req.options_ko[i]?.label ?? o.label : o.label}
-                  </strong>
-                  <span className="hk-chips">
-                    {o.recommended && <DecisionChip group="done" label="권장" icon="check" />}
-                    {req.default_option === o.key && (
-                      <DecisionChip group="neutral" label="미응답 시 기본값" />
-                    )}
-                  </span>
-                </span>
-              </button>
-            ))}
-          </div>
-          {req.allow_free && (
-            <label className="decision-memo">
-              메모
-              <textarea
-                className="hk-input"
-                value={text}
-                disabled={!detail.answerable || !editable}
-                onChange={(e) => {
-                  setText(e.target.value);
-                  setStale(false);
-                }}
-              />
-            </label>
+          {detail.answerable ? (
+            <div role="radiogroup" aria-label="선택지" aria-describedby={error ? "decision-error" : undefined} className="decision-options">
+              {req.options.map((o, i) => (
+                <button type="button" role="radio" className="decision-option" aria-checked={option === o.key} disabled={!editable} key={o.key} onClick={() => { setOption(o.key); setStale(false); }}>
+                  <span className="decision-option-mark" aria-hidden="true">{option === o.key && <Icon name="check" />}</span>
+                  <span className="decision-option-body"><strong>{i + 1}. {!original && req.options_ko && !req.options_ko_stale ? req.options_ko.find((translated) => translated.key === o.key)?.label ?? o.label : o.label}</strong><span className="hk-chips">{o.recommended && <DecisionChip group="done" label="권장" icon="check" />}{req.default_option === o.key && <DecisionChip group="neutral" label="미응답 시 기본값" />}</span></span>
+                </button>
+              ))}
+            </div>
+          ) : (
+            <ul className="decision-options decision-options-readonly" aria-label="선택지">
+              {req.options.map((o, i) => <li key={o.key} className="decision-option" aria-current={req.resolution?.option === o.key ? "true" : undefined}>
+                <span className="decision-option-mark" aria-hidden="true">{req.resolution?.option === o.key && <Icon name="check" />}</span>
+                <span className="decision-option-body"><strong>{i + 1}. {!original && req.options_ko && !req.options_ko_stale ? req.options_ko.find((translated) => translated.key === o.key)?.label ?? o.label : o.label}</strong><span className="hk-chips">{req.resolution?.option === o.key && <span>선택됨{answerAttempt && <> · {answerAttempt.actor} · {answerAttempt.channel} · {formatMinuteKST(answerAttempt.received_at) ?? answerAttempt.received_at}</>}</span>}{o.recommended && <DecisionChip group="done" label="권장" icon="check" />}{req.default_option === o.key && <DecisionChip group="neutral" label="미응답 시 기본값" />}</span></span>
+              </li>)}
+            </ul>
           )}
+          {detail.answerable && req.allow_free && <label className="decision-memo">메모<textarea className="hk-input" value={text} disabled={!editable} onChange={(e) => { setText(e.target.value); setStale(false); }} /></label>}
+          {!detail.answerable && req.resolution?.text && <p>메모: {req.resolution.text}</p>}
           <div className="decision-meta">
             {req.due_at && <p>기한: {deadline(req.due_at)}</p>}
             <p>
@@ -429,7 +423,7 @@ export function DecisionPage({ id }: { id: string }) {
             <summary>이력</summary>
             {detail.history.map((h) => (
               <p key={h.id}>
-                {h.id} · revision {h.revision} · {label(h.state)} · <TranslatedText original={h.question} korean={h.question_ko} stale={h.question_ko_stale} />
+                {h.id} · revision {h.revision} · {label(h.state)} · {parseQuestion(!original && h.question_ko && !h.question_ko_stale ? h.question_ko : h.question).heading}
               </p>
             ))}
             {detail.attempts.map((a) => (
@@ -446,7 +440,7 @@ export function DecisionPage({ id }: { id: string }) {
         </>
       )}
       <div className="decision-cta">
-        {screen === "unconfirmed" ? (
+        {screen === "unconfirmed" && detail.answerable ? (
           <>
             <ResultBadge result="unconfirmed" />
             <p>
@@ -479,7 +473,7 @@ export function DecisionPage({ id }: { id: string }) {
           </>
         ) : (
           <>
-            <button
+            {detail.answerable && <button
               ref={opener}
               type="button"
               className="hk-button hk-button--primary decision-answer"
@@ -501,7 +495,7 @@ export function DecisionPage({ id }: { id: string }) {
               }}
             >
               {screen === "sending" ? "전송 중" : "답변 확인"}
-            </button>
+            </button>}
             {reason && (
               <p>
                 {reason}{" "}
