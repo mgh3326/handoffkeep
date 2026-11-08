@@ -178,6 +178,9 @@ tool, with the MCP gaps grouped as follow-ups — is [parity.md](parity.md). The
 console write routes in that matrix are enforced by a test in
 `internal/parity`.
 
+An `idempotency_key` is at most 128 bytes and contains no NUL byte. A write
+refuses any other key with `invalid_mcp_write` before it writes anything.
+
 Every task result carries `console_url`
 (`https://console.robinco.dev/ui/tasks/<id>`) and, when the task has a YouTrack
 mirror, the readable YouTrack id and URL. Limits are clamped, not rejected:

@@ -3,9 +3,11 @@ package store
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"strings"
 	"time"
@@ -56,11 +58,31 @@ type MCPWrite struct {
 
 func (w MCPWrite) validate() error {
 	if w.Tool == "" || !validText(w.Tool, 64) || w.Actor == "" || !validText(w.Actor, 320) ||
-		w.Channel == "" || !validText(w.Channel, 32) || w.Author == "" || !validText(w.Author, 128) ||
-		len(w.Key) > 128 {
+		w.Channel == "" || !validText(w.Channel, 32) || w.Author == "" || !validText(w.Author, 128) {
 		return ErrInvalidMCPWrite
 	}
+	return CheckIdempotencyKey(w.Key)
+}
+
+// maxIdempotencyKeyBytes is the longest idempotency key an MCP write records.
+const maxIdempotencyKeyBytes = 128
+
+// CheckIdempotencyKey refuses a key the audit row cannot hold: one longer than
+// maxIdempotencyKeyBytes, or one with a NUL byte, which PostgreSQL text refuses
+// (SQLSTATE 22021). An empty key passes; each write decides whether it needs one.
+func CheckIdempotencyKey(key string) error {
+	if !validText(key, maxIdempotencyKeyBytes) {
+		return fmt.Errorf("%w: idempotency_key must be at most %d bytes and contain no NUL byte", ErrInvalidMCPWrite, maxIdempotencyKeyBytes)
+	}
 	return nil
+}
+
+// mcpWriteLock is the advisory lock id of one keyed write. The tool, actor and
+// key are joined with NUL and hashed here, not in SQL: a NUL cannot appear in
+// any of them, so the join is unambiguous, but PostgreSQL text refuses it.
+func mcpWriteLock(w MCPWrite) int64 {
+	sum := sha256.Sum256([]byte(w.Tool + "\x00" + w.Actor + "\x00" + w.Key))
+	return int64(binary.BigEndian.Uint64(sum[:8]))
 }
 
 // mcpWriteRef is the event and comment source ref for a keyed write. It is a
@@ -111,7 +133,7 @@ func (s *Store) RecordMCPDecisionRequest(ctx context.Context, taskID int64, in D
 	defer tx.Rollback(ctx)
 	// The key lock is taken before any task row, and no path takes a task row
 	// and then this key, so it cannot close a cycle.
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, w.Tool+"\x00"+w.Actor+"\x00"+w.Key); err != nil {
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, mcpWriteLock(w)); err != nil {
 		return DecisionRequestResult{}, false, err
 	}
 	var recorded DecisionRequestResult
