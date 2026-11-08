@@ -86,6 +86,7 @@ const (
 	cursorComments   cursorKind = "task_comments"
 	cursorTaskEvents cursorKind = "task_events"
 	cursorChanges    cursorKind = "changes_since"
+	cursorDecisions  cursorKind = "decisions_history"
 )
 
 var errInvalidCursor = errors.New("invalid cursor")
@@ -118,6 +119,117 @@ func decodeCursor(raw string, kind cursorKind, c *mcpCursor) error {
 		return errInvalidCursor
 	}
 	return nil
+}
+
+const (
+	decisionsHistoryDefaultLimit = 20
+	decisionsHistoryMaxLimit     = 100
+)
+
+// decisionHistoryFieldSources names the canonical system for each field of a
+// decisions_history item. A closed request is hk's record; YouTrack mirrors
+// nothing here.
+var decisionHistoryFieldSources = map[string]string{
+	"request_id": "hk", "task_id": "hk", "task_title": "hk", "question": "hk",
+	"status": "hk", "operator_only": "hk", "options": "hk", "recommended_option": "hk",
+	"chosen_option": "hk", "text": "hk", "receipt": "hk", "rationale": "hk",
+	"decider": "hk", "responder": "hk", "provenance": "hk", "decided_at": "hk",
+	"console_url": "hk",
+}
+
+type decisionsHistoryInput struct {
+	Cursor string `json:"cursor,omitempty"`
+	Limit  int    `json:"limit,omitempty"`
+}
+
+// decisionHistoryView is one closed structured request: the question and its
+// options as asked, the recommendation, what was chosen and by whom, and the
+// task it belongs to.
+type decisionHistoryView struct {
+	RequestID         string               `json:"request_id"`
+	TaskID            int64                `json:"task_id"`
+	TaskTitle         string               `json:"task_title"`
+	Question          string               `json:"question"`
+	Status            string               `json:"status"`
+	OperatorOnly      bool                 `json:"operator_only"`
+	Options           []decisionOptionView `json:"options"`
+	RecommendedOption string               `json:"recommended_option,omitempty"`
+	ChosenOption      string               `json:"chosen_option,omitempty"`
+	Text              string               `json:"text,omitempty"`
+	Receipt           string               `json:"receipt,omitempty"`
+	Rationale         string               `json:"rationale,omitempty"`
+	Decider           string               `json:"decider,omitempty"`
+	Responder         string               `json:"responder,omitempty"`
+	Provenance        string               `json:"provenance,omitempty"`
+	DecidedAt         time.Time            `json:"decided_at"`
+	ConsoleURL        string               `json:"console_url"`
+}
+
+// decisionsHistory pages closed structured requests newest task update first,
+// keyset on (updated_at,id). A task touched after a page was read moves ahead
+// of the cursor, as it does in task_list.
+func (o operatorTools) decisionsHistory(ctx context.Context, _ *gmcp.CallToolRequest, in decisionsHistoryInput) (*gmcp.CallToolResult, any, error) {
+	limit := clampLimit(in.Limit, decisionsHistoryDefaultLimit, decisionsHistoryMaxLimit)
+	var before *store.DecisionListPosition
+	if in.Cursor != "" {
+		var cur mcpCursor
+		if err := decodeCursor(in.Cursor, cursorDecisions, &cur); err != nil {
+			return nil, nil, err
+		}
+		at, err := time.Parse(time.RFC3339Nano, cur.Time)
+		if err != nil || cur.ID < 1 {
+			return nil, nil, errInvalidCursor
+		}
+		before = &store.DecisionListPosition{UpdatedAt: at, ID: cur.ID}
+	}
+	tasks, err := o.service.Store.ListClosedDecisionRequests(ctx, before, limit+1)
+	if err != nil {
+		return nil, nil, err
+	}
+	hasMore := len(tasks) > limit
+	if hasMore {
+		tasks = tasks[:limit]
+	}
+	next := ""
+	if hasMore {
+		last := tasks[len(tasks)-1]
+		next = encodeCursor(mcpCursor{Kind: string(cursorDecisions), Time: last.UpdatedAt.UTC().Format(time.RFC3339Nano), ID: last.ID})
+	}
+	items := make([]decisionHistoryView, 0, len(tasks))
+	for _, task := range tasks {
+		request := task.Refs.DecisionRequest
+		if request == nil {
+			continue
+		}
+		item := decisionHistoryView{
+			RequestID: request.ID, TaskID: task.ID, TaskTitle: task.Title, Question: request.Question,
+			Status: request.Status, OperatorOnly: decisionOperatorOnly(task, *request),
+			Options: []decisionOptionView{}, Rationale: request.Reason, ConsoleURL: taskURL(task.ID),
+		}
+		if task.Refs.DecisionOptions != nil {
+			item.Options = decisionOptionViews(task.Refs.DecisionOptions.Options)
+			for _, option := range task.Refs.DecisionOptions.Options {
+				if option.Recommended {
+					item.RecommendedOption = option.Key
+					break
+				}
+			}
+		}
+		if res := request.Resolution; res != nil {
+			item.ChosenOption = res.Option
+			item.Text = res.Text
+			item.Receipt = res.Receipt
+			item.Decider = res.By
+			item.Responder = res.Responder
+			item.Provenance = res.Provenance
+			item.DecidedAt = res.At
+		}
+		items = append(items, item)
+	}
+	return jsonResult(map[string]any{
+		"decisions": items, "truncated": hasMore, "next_cursor": next,
+		"as_of": time.Now().UTC(), "field_sources": decisionHistoryFieldSources,
+	})
 }
 
 func parseRFC3339(name, value string) (time.Time, error) {
