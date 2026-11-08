@@ -216,7 +216,7 @@ func TestToolListAnnotations(t *testing.T) {
 			t.Errorf("%s is not marked read-only: %+v", name, a)
 		}
 	}
-	for _, name := range []string{"decision_answer", "task_comment", "task_intake", "task_update", "decision_ask"} {
+	for _, name := range []string{"decision_answer", "task_comment", "task_intake"} {
 		a := annotations[name]
 		if a == nil || a.ReadOnlyHint {
 			t.Errorf("%s is not marked as a write: %+v", name, a)
@@ -460,8 +460,7 @@ func TestAccessIdentityWritesRecordOperator(t *testing.T) {
 
 	const operator = "operator:operator@example.com"
 	comment := callTool[commentOut](t, session, "task_comment", map[string]any{"id": task.ID, "body": "access comment"})
-	// A ChatGPT-channel write is labelled dots; the operator stays in actor.
-	if comment.Comment.Author != "dots" {
+	if comment.Comment.Author != operator {
 		t.Fatalf("comment author=%q", comment.Comment.Author)
 	}
 	if comment.Actor != operator || comment.Channel != ChannelChatGPT {
@@ -487,7 +486,7 @@ func TestAccessIdentityWritesRecordOperator(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("intake read: found=%v err=%v", found, err)
 	}
-	if recorded.CreatedBy != "dots" {
+	if recorded.CreatedBy != "operator-operator-example.com" {
 		t.Fatalf("intake created_by=%q", recorded.CreatedBy)
 	}
 	if intake.Actor != operator || intake.Channel != ChannelChatGPT {

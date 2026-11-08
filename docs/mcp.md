@@ -131,22 +131,19 @@ protected-resource metadata itself.
 An Access identity becomes the principal `operator:<email>` with channel
 `chatgpt`, so works written from ChatGPT are attributed like console writes:
 
-- `task_comment` stores the author `dots` for a write through this channel. The
-  principal `operator:<email>` and channel `chatgpt` are recorded in the
-  `mcp_write_audit` row and in the response, so the record reads as dots while
-  the operator's own console writes keep `operator:<email>`.
+- `task_comment` stores `operator:<email>` as the comment author.
 - `decision_answer` closes the request on the verified operator path with
   actor `operator:<email>` and provenance `operator_direct`.
-- `task_intake` records `source=chatgpt` and `dots` as `created_by`; the tool
-  response reports the exact `operator:<email>` principal and the `chatgpt`
-  channel.
+- `task_intake` records `source=chatgpt` and a store-name-safe form of the
+  principal as `created_by` (the store's intake path accepts names only); the
+  tool response reports the exact `operator:<email>` principal and the
+  `chatgpt` channel.
 
-The store's decision channel column has no `chatgpt` value, so a verified Access
-answer is recorded on the existing `console` channel and a bearer answer on the
-existing `cli` channel. Human-only requests therefore stay open for a bearer
-client and close only through an Access identity, matching the console and CLI
-rules. From the ChatGPT channel an operator-only request is refused outright with
-`operator_only_decision`, so dots cannot close one even with a verified identity.
+The store's decision channel column has no `chatgpt` value and this change
+adds no migration, so a verified Access answer is recorded on the existing
+`console` channel and a bearer answer on the existing `cli` channel. Human-only
+requests therefore stay open for a bearer client and close only through an
+Access identity, matching the console and CLI rules.
 
 ## Tools
 
@@ -165,10 +162,8 @@ priority or lane.
 | `changes_since` | read | optional `cursor` or `since`, `limit` ≤ 100 | One page of the change feed: `items`, `next_cursor`, `max_cursor`, `has_more` |
 | `decisions_pending` | read | none | Open structured requests with question, options, `question_ko`/`options_ko` when fresh, and state |
 | `decision_answer` | write | `request_id`, `option` or `text`, optional `note` | Store result; an already answered or stale request returns its error code |
-| `task_comment` | write | `id`, `body`, optional `idempotency_key` | The appended comment, its author, and `replayed` (a repeated key returns the comment it first made) |
-| `task_intake` | write | `title`, `body`, `project`, optional `lane`, optional `idempotency_key` | The triage task, `created`, and duplicate candidates found before filing; a repeated key returns the task that key first filed |
-| `task_update` | write | `id`, `expected_updated_at`, `idempotency_key`, one or more of `state`, `lane`, `priority`, `add_labels`, `remove_labels` (label names), optional `note` | `changed`, the new `revision`, `replayed`, `console_url` and `youtrack_sync`; a stale revision returns `revision_conflict` and writes nothing |
-| `decision_ask` | write | `task_id`, `idempotency_key`, `question`, `options`, `default_action`, optional `answer_policy`, `human_only`, `block` and the other `tasks decision-request` fields | The recorded request id and whether it was a duplicate |
+| `task_comment` | write | `id`, `body` | The appended comment and its author |
+| `task_intake` | write | `title`, `body`, `project`, optional `lane` | The triage task, `created`, and duplicate candidates found before filing |
 | `projects_list` | read | none | Every project with `design_lane`/`effective_owner`, status and dates, open task counts by state, and `health` (in_progress, waiting, blocked, done, overdue counts; assignees; top blocked and overdue tasks) with `as_of` |
 | `task_states` | read | none | The twelve states with category, terminal and claimable flags, allowed manual transitions and closure requirements |
 | `sync_status` | read | none | YouTrack cursor, pending outbox backlog, processed outcomes in the last 24 hours, mirrored tasks and last run |
@@ -255,9 +250,7 @@ not lose changes should poll more often than the retention window.
 
 `task_intake` files through the existing triage intake path. Source is
 `chatgpt`; the source reference is a digest of the title, body and project, so
-an identical repeat returns `created:false` and the task already recorded. With
-an `idempotency_key` the source reference is the key (scoped to the caller), so a
-repeat returns the task that key filed even when its title or body changed.
+an identical repeat returns `created:false` and the task already recorded.
 Candidate duplicates come from the same task search the console uses and are
 returned with the new task.
 
