@@ -14,9 +14,9 @@ import (
 )
 
 // TestSearchLatency measures Store.Search on a throwaway schema seeded to the
-// size of production (about 56k documents and 56k tasks) with Korean text. It
-// is off unless HANDOFFKEEP_SEARCH_LATENCY=1, which CI's search-latency run
-// sets (hk 2658). Run it on a commit before a change and on the change, then
+// size of production (about 56k documents and 56k tasks) with Korean text and
+// roughly 0.8 KB document bodies. It is off unless HANDOFFKEEP_SEARCH_LATENCY=1,
+// which CI's search-latency run sets (hk 2658). Run it on a commit before a change and on the change, then
 // compare result_sha for each query: equal digests mean an identical result
 // set. Each query logs a search.plan block (EXPLAIN ANALYZE, BUFFERS of the
 // statement Search runs), one search.latency line (p50 and p95 over
@@ -71,7 +71,8 @@ func seedSearchLatency(ctx context.Context, t *testing.T, s *Store, n int) {
 		   ` + hangulSQL("g::text", 60) + `
 		   || CASE WHEN g % 50 = 0 THEN ' 배포 절차 ' ELSE '' END
 		   || CASE WHEN g % 7 = 0 THEN ' 베리 ' ELSE '' END
-		   || CASE WHEN g % 11 = 0 THEN ' deploy 배포 ' ELSE '' END,
+		   || CASE WHEN g % 11 = 0 THEN ' deploy 배포 ' ELSE '' END
+		   || repeat(' archive paragraph', 32),
 		   md5(g::text), 'bench', ` + seedEpoch + ` + (g || ' seconds')::interval, ` + seedEpoch + ` + (g || ' seconds')::interval
 		 FROM generate_series(1, ` + strconv.Itoa(n) + `) g`,
 		`INSERT INTO tasks(lane,title,kind,state,created_by,created_at,updated_at,last_activity_at)
