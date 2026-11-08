@@ -94,12 +94,13 @@ func (f *fakeHK) requests() []seen {
 const taskJSON = `{
   "id": 42, "lane": "panewire-design", "parent_lane": "operator-desk", "title": "ship the client",
   "kind": "feature", "state": "developing", "priority": 2, "category": "started",
-  "project": "handoffkeep", "area": null, "expected": null, "awaiting_decision": true,
+  "project": "handoffkeep", "area": null, "expected": "24h0m0s", "awaiting_decision": true,
   "claimed_by": "worker-1", "created_by": "desk", "body_doc": "task/42/body",
   "created_at": "2026-11-08T01:02:03Z", "updated_at": "2026-11-08T04:05:06Z",
   "last_activity_at": "2026-11-08T04:05:06Z", "stalled": false, "labels": [],
   "refs": {
     "job_id": "job-7", "pr": "https://github.com/mgh3326/handoffkeep/pull/9", "head_sha": "abc",
+    "report_path": "/jobs/job-7/report.md",
     "closure": {"type": "merged", "evidence": "pr 9"},
     "decision_request": {
       "id": "dr-42-3", "revision": 3, "supersedes": "dr-42-2", "root": "dr-42-1",
@@ -122,11 +123,11 @@ func checkTask(t *testing.T, x client.Task) {
 	}
 	if x.ID != 42 || x.Lane != "panewire-design" || x.Title != "ship the client" || x.Kind != "feature" ||
 		x.State != "developing" || x.Category != "started" || x.Priority != 2 || x.ClaimedBy != "worker-1" ||
-		!x.AwaitingDecision || x.Project == nil || *x.Project != "handoffkeep" ||
+		!x.AwaitingDecision || x.Project == nil || *x.Project != "handoffkeep" || x.Expected == nil || *x.Expected != "24h0m0s" ||
 		!x.CreatedAt.Equal(at("2026-11-08T01:02:03Z")) || !x.UpdatedAt.Equal(at("2026-11-08T04:05:06Z")) {
 		t.Fatalf("task decoded wrong: %+v", x)
 	}
-	if x.Refs.JobID != "job-7" || x.Refs.PR != "https://github.com/mgh3326/handoffkeep/pull/9" ||
+	if x.Refs.JobID != "job-7" || x.Refs.PR != "https://github.com/mgh3326/handoffkeep/pull/9" || x.Refs.ReportPath != "/jobs/job-7/report.md" ||
 		x.Refs.Closure == nil || x.Refs.Closure.Type != "merged" || x.Refs.Closure.Evidence != "pr 9" {
 		t.Fatalf("task refs decoded wrong: %+v", x.Refs)
 	}
@@ -190,6 +191,62 @@ func fleetCases(t *testing.T) []fleetCase {
 					return errors.Join(err, errors.New("GetTask on a missing task reported found"))
 				}
 				return nil
+			},
+		},
+		{
+			// The query carries lane, state, parent_lane and limit, empty ones
+			// included, exactly as internal/remote and the hk CLI send them.
+			name: "ListTasks", method: "GET", uri: "/v1/tasks?lane=panewire-design&limit=1000&parent_lane=&state=developing", status: http.StatusOK,
+			reply: `{"tasks": [` + taskJSON + `, {"id": 43, "lane": "panewire-design", "state": "developing", "priority": 0, "expected": null, "refs": {}}]}`,
+			call: func(ctx context.Context, c client.Client) error {
+				xs, err := c.ListTasks(ctx, client.ListTasksInput{Lane: "panewire-design", State: "developing", Limit: 1000})
+				if err != nil {
+					return err
+				}
+				if len(xs) != 2 || xs[1].ID != 43 || xs[1].Expected != nil || xs[1].Refs.ReportPath != "" {
+					t.Fatalf("task list decoded wrong: %+v", xs)
+				}
+				checkTask(t, xs[0])
+				return nil
+			},
+		},
+		{
+			name: "ListTasksAll", method: "GET", uri: "/v1/tasks?lane=&limit=5&parent_lane=operator-desk&state=", status: http.StatusOK,
+			reply: `{"tasks": []}`,
+			call: func(ctx context.Context, c client.Client) error {
+				xs, err := c.ListTasks(ctx, client.ListTasksInput{ParentLane: "operator-desk", Limit: 5})
+				if err == nil && len(xs) != 0 {
+					t.Fatalf("empty task list decoded to %+v", xs)
+				}
+				return err
+			},
+		},
+		{
+			// prefix is query-escaped; kind and session go empty, as in
+			// internal/remote.
+			name: "ListDocuments", method: "GET", uri: "/v1/documents?kind=&limit=100&prefix=artifacts%2Fhandoffkeep%2F42%2Fjob+7&session=", status: http.StatusOK,
+			reply: `{"documents": [{"id": 5, "key": "artifacts/handoffkeep/42/job 7/a", "kind": "note", "session": "", "job": "job 7", "body": "{}", "sha256": "ab", "created_by": "svc-panewire", "created_at": "2026-11-08T08:00:00Z", "updated_at": "2026-11-08T08:00:00Z", "task_id": 42, "origin_class": "job"}, {"id": 6, "key": "artifacts/handoffkeep/42/job 7/b", "kind": "note", "sha256": "cd", "created_by": "svc-panewire", "created_at": "2026-11-08T08:00:00Z", "updated_at": "2026-11-08T08:00:00Z"}]}`,
+			call: func(ctx context.Context, c client.Client) error {
+				xs, err := c.ListDocuments(ctx, "artifacts/handoffkeep/42/job 7", 100)
+				if err != nil {
+					return err
+				}
+				if len(xs) != 2 || xs[0].ID != 5 || xs[0].Key != "artifacts/handoffkeep/42/job 7/a" || xs[0].Job != "job 7" || xs[0].TaskID == nil || *xs[0].TaskID != 42 ||
+					xs[0].OriginClass != "job" || xs[0].UpdatedAt.IsZero() || xs[1].Key != "artifacts/handoffkeep/42/job 7/b" || xs[1].TaskID != nil {
+					t.Fatalf("document list decoded wrong: %+v", xs)
+				}
+				return nil
+			},
+		},
+		{
+			name: "ListDocumentsEmpty", method: "GET", uri: "/v1/documents?kind=&limit=1&prefix=&session=", status: http.StatusOK,
+			reply: `{"documents": []}`,
+			call: func(ctx context.Context, c client.Client) error {
+				xs, err := c.ListDocuments(ctx, "", 1)
+				if err == nil && len(xs) != 0 {
+					t.Fatalf("empty document list decoded to %+v", xs)
+				}
+				return err
 			},
 		},
 		{

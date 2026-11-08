@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"fmt"
 	"net/url"
 	"time"
 )
@@ -34,6 +35,23 @@ func (c Client) GetDocument(ctx context.Context, key string) (Document, bool, er
 		return out, false, nil
 	}
 	return out, e == nil, e
+}
+
+// ListDocuments lists documents by key prefix in key order, as the CLI's doc
+// list does; an empty prefix lists every document. The server matches the
+// prefix with SQL LIKE, so a _ or % in it is a wildcard: check each Key
+// against the prefix before acting on it. Limit must be 1 to 1000; the server
+// refuses any other value. Listed documents carry no Body: read each one with
+// GetDocument.
+func (c Client) ListDocuments(ctx context.Context, prefix string, limit int) ([]Document, error) {
+	var out struct {
+		Documents []Document `json:"documents"`
+	}
+	q := url.Values{"prefix": {prefix}, "kind": {""}, "session": {""}, "limit": {fmt.Sprint(limit)}}
+	if e := c.transport().Call(ctx, "GET", "/v1/documents?"+q.Encode(), nil, &out); e != nil {
+		return nil, e
+	}
+	return out.Documents, nil
 }
 
 // PutDocument writes x under x.Key. changed is false when the stored document

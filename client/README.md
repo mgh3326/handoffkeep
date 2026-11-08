@@ -47,10 +47,15 @@ presign answer (`AttachmentURL`) is returned, never followed.
 
 ## Calls
 
-`GetTask`, `ClaimTask`, `RebindTaskJob`, `ReopenTask`, `CommentTask`,
-`ProjectOwner`, `GetDocument`, `PutDocument`, `PutAttachment`,
-`GetAttachment`, `AttachmentURL`, `RecordDecisionRequest` and `AskDecision`.
-Each uses the same route and JSON as its `internal/remote` equivalent.
+`GetTask`, `ListTasks`, `ClaimTask`, `RebindTaskJob`, `ReopenTask`,
+`CommentTask`, `ProjectOwner`, `GetDocument`, `ListDocuments`,
+`PutDocument`, `PutAttachment`, `GetAttachment`, `AttachmentURL`,
+`RecordDecisionRequest` and `AskDecision`. Each uses the same route and JSON
+as its `internal/remote` equivalent; `internal/clientparity` checks that the
+two list calls send the same query. `ListTasks` and `ListDocuments` take a
+limit from 1 to 1000 and return at most that many rows, with no sign that
+more exist. `ListDocuments` matches its prefix with SQL `LIKE` (`_` and `%`
+are wildcards) and returns documents without their body.
 `RecordDecisionRequest` only records the request (the CLI's `decisions ask`);
 `AskDecision` also opens its Linear issue (`decisions ask --linear`) and fails
 with `503 linear_decisions_disabled` when hk runs without Linear decisions. A

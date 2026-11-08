@@ -256,6 +256,7 @@ func TestServerShapedJSONDecodesIntoClientTypes(t *testing.T) {
 		t.Fatal(err)
 	}
 	if c.ID != s.ID || c.Lane != s.Lane || c.State != s.State || c.ClaimedBy != s.ClaimedBy || c.Refs.JobID != s.Refs.JobID ||
+		c.Priority != s.Priority || c.Expected == nil || *c.Expected != *s.Expected || c.Refs.ReportPath != s.Refs.ReportPath ||
 		c.Refs.PR != s.Refs.PR || c.Refs.Closure.Type != s.Refs.Closure.Type || c.AwaitingDecision != s.AwaitingDecision ||
 		c.Refs.DecisionRequest.ID != s.Refs.DecisionRequest.ID || c.Refs.DecisionRequest.HumanOnly != s.Refs.DecisionRequest.HumanOnly ||
 		!c.Refs.DecisionRequest.DueAt.Equal(*s.Refs.DecisionRequest.DueAt) ||
