@@ -115,11 +115,20 @@ func TestTaskUpdateRefusesIncompleteInput(t *testing.T) {
 	session := writesSession(t, st)
 	expected := task.UpdatedAt.UTC().Format(time.RFC3339Nano)
 
+	// The input schema declares idempotency_key required, so a call without it
+	// is refused before the handler runs, and the refusal names the key.
 	text, isError := toolText(t, session, "task_update", map[string]any{
 		"id": task.ID, "expected_updated_at": expected, "priority": 1,
 	})
-	if !isError || !strings.Contains(text, "idempotency_key is required") {
+	if !isError || !strings.Contains(text, "required") || !strings.Contains(text, `"idempotency_key"`) {
 		t.Fatalf("missing key: isError=%v text=%q", isError, text)
+	}
+	// A blank key passes the schema; the handler refuses it by name.
+	text, isError = toolText(t, session, "task_update", map[string]any{
+		"id": task.ID, "expected_updated_at": expected, "idempotency_key": "  ", "priority": 1,
+	})
+	if !isError || !strings.Contains(text, "idempotency_key is required") {
+		t.Fatalf("blank key: isError=%v text=%q", isError, text)
 	}
 	text, isError = toolText(t, session, "task_update", map[string]any{
 		"id": task.ID, "expected_updated_at": expected, "idempotency_key": "upd-empty",
