@@ -30,10 +30,15 @@ jobs:
       # .git must reach the Docker build context so go build can stamp
       # vcs.revision; checkout already provides it (.dockerignore must not
       # exclude it — see tests/image_pipeline_test.go).
+      # persist-credentials: false keeps the job token out of .git/config:
+      # the build stage copies .git into a layer, and the registry cache
+      # (mode=max) exports intermediate layers to a tag anyone can pull.
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
       - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
       # Runs on manual dispatch too, so a dispatched build can read the
-      # registry cache (private package). Only main pushes write it.
+      # registry cache. Only main pushes write it.
       - name: Log in to GHCR
         uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
         with:
