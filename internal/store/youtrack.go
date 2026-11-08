@@ -343,21 +343,13 @@ func (s *Store) PutYouTrackProject(ctx context.Context, p YouTrackProject) error
 	return tx.Commit(ctx)
 }
 
-// SetYouTrackProjectID records the YouTrack id of a mapped project and clears
-// the skips, as PutYouTrackProject does.
+// SetYouTrackProjectID records the YouTrack id of a mapped project. It is not a
+// mapping write: the id is resolved on first use, and clearing skips here would
+// let unrelated skipped items back into every batch. Writing the mapping
+// (PutYouTrackProject) is what clears skips.
 func (s *Store) SetYouTrackProjectID(ctx context.Context, hkProject, projectID string) error {
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
-	if _, err := tx.Exec(ctx, `UPDATE youtrack_projects SET yt_project_id=$2,updated_at=now() WHERE hk_project=$1`, hkProject, projectID); err != nil {
-		return err
-	}
-	if err := s.ClearYouTrackSkips(ctx, tx); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
+	_, err := s.pool.Exec(ctx, `UPDATE youtrack_projects SET yt_project_id=$2,updated_at=$3 WHERE hk_project=$1`, hkProject, projectID, time.Now().UTC())
+	return err
 }
 
 func (s *Store) GetYouTrackCursor(ctx context.Context) (YouTrackCursor, error) {

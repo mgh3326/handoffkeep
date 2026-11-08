@@ -306,7 +306,6 @@ func (f *fakeStore) SetYouTrackProjectID(_ context.Context, hkProject, projectID
 	p := f.projects[hkProject]
 	p.ProjectID = projectID
 	f.projects[hkProject] = p
-	f.clearSkipsLocked()
 	f.projectIDs++
 	return nil
 }

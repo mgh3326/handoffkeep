@@ -240,7 +240,9 @@ func (s *Service) decisionsWithStatus(ctx context.Context, status string, now ti
 }
 
 func (s *Service) syncDecision(ctx context.Context, d store.DecisionRecord, projectID string, mirrors map[int64]store.YouTrackDecisionMirror, opts SyncOptions, report *SyncReport) error {
-	stamp := d.UpdatedAt.UTC().Format(time.RFC3339Nano)
+	// The label is part of the stamp: overdue and expired are read-time states,
+	// so a request can change label without its updated_at moving.
+	stamp := d.UpdatedAt.UTC().Format(time.RFC3339Nano) + "|" + decisionStateLabel(d)
 	mirror, mirrored := mirrors[d.ID]
 	if mirrored && mirror.Stamp == stamp {
 		return nil

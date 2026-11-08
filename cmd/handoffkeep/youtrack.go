@@ -139,6 +139,12 @@ func youtrackAdoptCmd(args []string, out io.Writer) error {
 	if err := json.Unmarshal(raw, &state); err != nil {
 		return exitCodeError{code: youtrackExitConfig, err: fmt.Errorf("parse state: %w", err)}
 	}
+	// json.Unmarshal ignores unknown keys, so a wrong file decodes to empty maps.
+	// Adopting nothing would make the next sync create a duplicate issue for
+	// every task.
+	if len(state.Issues) == 0 && len(state.Decisions) == 0 {
+		return exitCodeError{code: youtrackExitConfig, err: errors.New("state has no issues or decisions to adopt; check that --state points at the Python mirror's yt_state.json")}
+	}
 	dbURL := strings.TrimSpace(os.Getenv("HANDOFFKEEP_DB_URL"))
 	baseURL := strings.TrimSpace(os.Getenv("YOUTRACK_URL"))
 	token := strings.TrimSpace(os.Getenv("YOUTRACK_BOT_API_KEY"))
