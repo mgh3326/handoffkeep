@@ -4118,15 +4118,33 @@ func (s *Store) search(ctx context.Context, q, scope, session string, limit int)
 	}
 	parts := []string{}
 	if scope == "all" || scope == "ctx" {
-		parts = append(parts, `SELECT 'ctx' scope,'' key,session,kind,title,ts_headline('simple',body,plainto_tsquery('simple',$2),'MaxWords=24,MinWords=8') snippet,refs,created_at FROM checkpoints WHERE ($1='' OR session=$1) AND (to_tsvector('simple',title || ' ' || body) @@ plainto_tsquery('simple',$2) OR title || ' ' || body ILIKE '%' || $2 || '%')`)
+		parts = append(parts, `(SELECT 'ctx' scope,'' key,session,title,created_at,id row_id FROM checkpoints WHERE ($1='' OR session=$1) AND (to_tsvector('simple',title || ' ' || body) @@ plainto_tsquery('simple',$2) OR title || ' ' || body ILIKE '%' || $2 || '%') ORDER BY created_at DESC,key,session,title LIMIT $3)`)
 	}
 	if scope == "all" || scope == "memory" {
-		parts = append(parts, `SELECT 'memory' scope,'' key,agent session,memory_type kind,name title,ts_headline('simple',content,plainto_tsquery('simple',$2),'MaxWords=24,MinWords=8') snippet,'{}'::jsonb refs,updated_at created_at FROM memory WHERE ($1='' OR agent=$1) AND (to_tsvector('simple',name || ' ' || description || ' ' || content) @@ plainto_tsquery('simple',$2) OR name || ' ' || description || ' ' || content ILIKE '%' || $2 || '%')`)
+		// Memory's unique identity is (agent,name), carried in session and title.
+		parts = append(parts, `(SELECT 'memory' scope,'' key,agent session,name title,updated_at created_at,NULL::bigint row_id FROM memory WHERE ($1='' OR agent=$1) AND (to_tsvector('simple',name || ' ' || description || ' ' || content) @@ plainto_tsquery('simple',$2) OR name || ' ' || description || ' ' || content ILIKE '%' || $2 || '%') ORDER BY created_at DESC,key,session,title LIMIT $3)`)
 	}
 	if scope == "all" || scope == "docs" {
-		parts = append(parts, `SELECT 'docs' scope,key,session,kind,key title,ts_headline('simple',body,plainto_tsquery('simple',$2),'MaxWords=24,MinWords=8') snippet,'{}'::jsonb refs,created_at FROM documents WHERE ($1='' OR session=$1) AND (to_tsvector('simple',key || ' ' || body) @@ plainto_tsquery('simple',$2) OR key || ' ' || body ILIKE '%' || $2 || '%')`)
+		parts = append(parts, `(SELECT 'docs' scope,key,session,key title,created_at,id row_id FROM documents WHERE ($1='' OR session=$1) AND (to_tsvector('simple',key || ' ' || body) @@ plainto_tsquery('simple',$2) OR key || ' ' || body ILIKE '%' || $2 || '%') ORDER BY created_at DESC,key,session,title LIMIT $3)`)
 	}
-	mainSQL := `SELECT scope,key,session,kind,title,snippet,refs,created_at FROM (` + strings.Join(parts, " UNION ALL ") + ") r ORDER BY created_at DESC,scope,key,session,title LIMIT $3"
+	mainSQL := `WITH candidates AS (` + strings.Join(parts, " UNION ALL ") + `), page AS MATERIALIZED (
+		SELECT scope,key,session,title,created_at,row_id FROM candidates
+		ORDER BY created_at DESC,scope,key,session,title LIMIT $3
+	)
+	SELECT p.scope,p.key,p.session,
+		CASE p.scope WHEN 'ctx' THEN cp.kind WHEN 'memory' THEN m.memory_type ELSE d.kind END kind,
+		p.title,
+		CASE p.scope
+			WHEN 'ctx' THEN ts_headline('simple',cp.body,plainto_tsquery('simple',$2),'MaxWords=24,MinWords=8')
+			WHEN 'memory' THEN ts_headline('simple',m.content,plainto_tsquery('simple',$2),'MaxWords=24,MinWords=8')
+			ELSE ts_headline('simple',d.body,plainto_tsquery('simple',$2),'MaxWords=24,MinWords=8')
+		END snippet,
+		CASE p.scope WHEN 'ctx' THEN cp.refs ELSE '{}'::jsonb END refs,p.created_at
+	FROM page p
+	LEFT JOIN checkpoints cp ON p.scope='ctx' AND cp.id=p.row_id
+	LEFT JOIN memory m ON p.scope='memory' AND m.agent=p.session AND m.name=p.title
+	LEFT JOIN documents d ON p.scope='docs' AND d.id=p.row_id
+	ORDER BY p.created_at DESC,p.scope,p.key,p.session,p.title`
 	if capture, ok := ctx.Value(searchCaptureKey{}).(searchCapture); ok {
 		capture(mainSQL, []any{session, q, limit + 1})
 	}
