@@ -18,6 +18,7 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/guard"
 	"github.com/mgh3326/handoffkeep/internal/store"
 	"github.com/mgh3326/handoffkeep/internal/telemetry"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
 func TestAppErrMapping(t *testing.T) {
@@ -87,6 +88,48 @@ func TestInternalErrorCarriesRequestID(t *testing.T) {
 		if !strings.Contains(line, want) {
 			t.Fatalf("log line %q lacks %q", line, want)
 		}
+	}
+}
+
+// A sampled trace adds its id to the log line and the 500 body, so the error
+// opens in the trace. An unsampled trace adds nothing: its id names no export.
+func TestInternalErrorCarriesTraceID(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		sampler sdktrace.Sampler
+	}{
+		{"sampled", sdktrace.AlwaysSample()},
+		{"unsampled", sdktrace.NeverSample()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			provider := sdktrace.NewTracerProvider(sdktrace.WithSampler(tc.sampler))
+			t.Cleanup(func() { _ = provider.Shutdown(context.Background()) })
+			ctx, span := provider.Tracer("api-test").Start(context.Background(), "request")
+			defer span.End()
+			wantBody := map[string]string{"error": "internal_error"}
+			wantLog := "trace_id= "
+			if tc.name == "sampled" {
+				wantBody["trace_id"] = span.SpanContext().TraceID().String()
+				wantLog = "trace_id=" + wantBody["trace_id"] + " "
+			}
+			var logs bytes.Buffer
+			log.SetOutput(&logs)
+			t.Cleanup(func() { log.SetOutput(os.Stderr) })
+			r := httptest.NewRequest(http.MethodGet, "/v1/tasks/7", nil)
+			r = r.WithContext(store.WithWrkPrincipal(ctx, "node-a", nil))
+			w := httptest.NewRecorder()
+			appErr(w, r, fmt.Errorf("query: %w", context.DeadlineExceeded))
+			var body map[string]string
+			if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+				t.Fatal(err)
+			}
+			if w.Code != http.StatusInternalServerError || !reflect.DeepEqual(body, wantBody) {
+				t.Fatalf("status=%d body=%v, want %v", w.Code, body, wantBody)
+			}
+			if !strings.Contains(logs.String(), wantLog) {
+				t.Fatalf("log line %q lacks %q", logs.String(), wantLog)
+			}
+		})
 	}
 }
 

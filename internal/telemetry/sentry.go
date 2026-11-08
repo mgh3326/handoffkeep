@@ -16,6 +16,7 @@ import (
 
 	"github.com/felixge/httpsnoop"
 	"github.com/getsentry/sentry-go"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
 const flushTimeout = 2 * time.Second
@@ -59,10 +60,12 @@ func tracesSampler(defaultRate float64) sentry.TracesSampler {
 	}
 }
 
-// Monitor owns a dedicated client; it never changes the process-global hub.
-// A nil client is the disabled state, including when SENTRY_DSN is set alone.
+// Monitor owns a dedicated Sentry client and an optional OTLP exporter; it never
+// changes the process-global hub. A nil client is the disabled Sentry state,
+// including when SENTRY_DSN is set alone. A nil otlp is disabled OTLP tracing.
 type Monitor struct {
 	client    *sentry.Client
+	otlp      *otlpExporter
 	closeOnce sync.Once
 }
 
@@ -71,21 +74,35 @@ func FromEnv(release string) (*Monitor, error) {
 }
 
 func fromEnv(release string, transport sentry.Transport) (*Monitor, error) {
+	return monitorFromEnv(release, transport, nil)
+}
+
+// monitorFromEnv builds each backend that is configured. spans, when non-nil,
+// replaces the OTLP/HTTP exporter; tests use it so that nothing reaches a
+// network.
+func monitorFromEnv(release string, transport sentry.Transport, spans sdktrace.SpanExporter) (*Monitor, error) {
+	environment := deploymentEnvironment()
+	settings, err := otlpSettingsFromEnv(environment, release)
+	if err != nil {
+		return nil, err
+	}
+	m := &Monitor{}
+	if settings != nil {
+		if m.otlp, err = newOTLPExporter(context.Background(), settings, spans); err != nil {
+			return nil, err
+		}
+	}
 	dsn := strings.TrimSpace(os.Getenv("HANDOFFKEEP_SENTRY_DSN"))
 	if dsn == "" {
-		return &Monitor{}, nil
+		return m, nil
 	}
 	rate := 0.2
 	if raw := os.Getenv("HANDOFFKEEP_SENTRY_TRACES_SAMPLE_RATE"); raw != "" {
-		var err error
 		rate, err = strconv.ParseFloat(raw, 64)
 		if err != nil || math.IsNaN(rate) || math.IsInf(rate, 0) || rate < 0 || rate > 1 {
+			m.shutdownOTLP()
 			return nil, errors.New("HANDOFFKEEP_SENTRY_TRACES_SAMPLE_RATE must be between 0 and 1")
 		}
-	}
-	environment := strings.TrimSpace(os.Getenv("HANDOFFKEEP_SENTRY_ENV"))
-	if environment == "" {
-		environment = "production"
 	}
 	client, err := sentry.NewClient(sentry.ClientOptions{
 		Dsn: dsn, Environment: environment, Release: release,
@@ -94,10 +111,28 @@ func fromEnv(release string, transport sentry.Transport) (*Monitor, error) {
 		BeforeSend: scrubEvent, BeforeSendTransaction: scrubEvent,
 	})
 	if err != nil {
+		m.shutdownOTLP()
 		// SDK configuration errors can contain the DSN.
 		return nil, errors.New("invalid HANDOFFKEEP_SENTRY_DSN")
 	}
-	return &Monitor{client: client}, nil
+	m.client = client
+	return m, nil
+}
+
+// deploymentEnvironment is shared by Sentry and OTLP: HANDOFFKEEP_SENTRY_ENV
+// keeps its name, and "production" is the default.
+func deploymentEnvironment() string {
+	environment := strings.TrimSpace(os.Getenv("HANDOFFKEEP_SENTRY_ENV"))
+	if environment == "" {
+		environment = "production"
+	}
+	return environment
+}
+
+func (m *Monitor) shutdownOTLP() {
+	if m.otlp != nil {
+		m.otlp.shutdown()
+	}
 }
 
 // Close flushes after HTTP draining and worker shutdown, with a fixed budget.
@@ -107,16 +142,21 @@ func (m *Monitor) Close() {
 			m.client.Flush(flushTimeout)
 			m.client.Close()
 		}
+		m.shutdownOTLP()
 	})
 }
 
 // Handler wraps the complete server once. Every request except /healthz gets
 // a request id (see withRequestID) whether or not Sentry is enabled. With
-// Sentry enabled, dispatchers must set Request.Pattern to a static template
-// (ServeMux does this automatically). No URL is attached.
+// Sentry or OTLP enabled, dispatchers must set Request.Pattern to a static
+// template (ServeMux does this automatically). No URL is attached.
 func (m *Monitor) Handler(next http.Handler) http.Handler {
+	routes := next
 	if m.client != nil {
 		next = m.trace(next)
+	}
+	if m.otlp != nil {
+		next = m.otlp.trace(routes, next)
 	}
 	return withRequestID(next)
 }
@@ -234,14 +274,23 @@ func routePattern(next http.Handler, r *http.Request) string {
 // also serves HEAD, so the real method is used. Unmatched requests are
 // "<unmatched>".
 func transactionName(method, pattern string) string {
-	name := pattern
-	if name == "" || name == "/" {
+	name := routeTemplate(pattern)
+	if name == "" {
 		name = "<unmatched>"
 	}
-	if verb, rest, ok := strings.Cut(name, " "); ok && verb != "" && !strings.ContainsAny(verb, "/{") {
-		name = rest
-	}
 	return safeMethod(method) + " " + name
+}
+
+// routeTemplate drops the method from a mux pattern: "GET /v1/tasks/{id}"
+// becomes "/v1/tasks/{id}". It is "" for no match or the catch-all "/".
+func routeTemplate(pattern string) string {
+	if pattern == "" || pattern == "/" {
+		return ""
+	}
+	if verb, rest, ok := strings.Cut(pattern, " "); ok && verb != "" && !strings.ContainsAny(verb, "/{") {
+		return rest
+	}
+	return pattern
 }
 
 // apiErrorCode reads the code of a {"error":"<snake_code>"} JSON error body
