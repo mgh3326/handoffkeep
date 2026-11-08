@@ -12,13 +12,19 @@ import (
 type WorkerLock int64
 
 const (
-	HubForwardWorkerLock  WorkerLock = 8241873510
-	LinearBoardWorkerLock WorkerLock = 8241873511
+	HubForwardWorkerLock    WorkerLock = 8241873510
+	LinearBoardWorkerLock   WorkerLock = 8241873511
+	workerLockProbeInterval            = time.Second
+	workerLockProbeTimeout             = 2 * time.Second
 )
 
-// TryWorkerLock reserves a connection for the lifetime of a worker. A failed
-// unlock discards the connection so a locked session cannot return to the pool.
-func (s *Store) TryWorkerLock(ctx context.Context, id WorkerLock) (func(), bool, error) {
+// WorkerLease holds the connection for a session lock.
+type WorkerLease struct{ conn *pgxpool.Conn }
+
+// TryWorkerLock reserves a connection for the lifetime of a worker. An
+// uncertain acquisition discards the connection so a locked session cannot
+// return to the pool.
+func (s *Store) TryWorkerLock(ctx context.Context, id WorkerLock) (*WorkerLease, bool, error) {
 	if id != HubForwardWorkerLock && id != LinearBoardWorkerLock {
 		return nil, false, errors.New("unknown worker lock")
 	}
@@ -28,24 +34,42 @@ func (s *Store) TryWorkerLock(ctx context.Context, id WorkerLock) (func(), bool,
 	}
 	var held bool
 	if err = conn.QueryRow(ctx, `SELECT pg_try_advisory_lock($1)`, int64(id)).Scan(&held); err != nil {
-		conn.Release()
+		discardWorkerConnection(conn)
 		return nil, false, err
 	}
 	if !held {
 		conn.Release()
 		return nil, false, nil
 	}
-	return func() { releaseWorkerLock(conn, id) }, true, nil
+	return &WorkerLease{conn: conn}, true, nil
 }
 
-func releaseWorkerLock(conn *pgxpool.Conn, id WorkerLock) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	var unlocked bool
-	err := conn.QueryRow(ctx, `SELECT pg_advisory_unlock($1)`, int64(id)).Scan(&unlocked)
-	if err != nil || !unlocked {
-		_ = conn.Hijack().Close(ctx)
-		return
+// Watch returns if the session fails or ctx is canceled. The worker must stop
+// before Release returns the connection to the pool.
+func (l *WorkerLease) Watch(ctx context.Context) error {
+	ticker := time.NewTicker(workerLockProbeInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			probe, cancel := context.WithTimeout(ctx, workerLockProbeTimeout)
+			var one int
+			err := l.conn.QueryRow(probe, `SELECT 1`).Scan(&one)
+			cancel()
+			if err != nil {
+				return err
+			}
+		}
 	}
-	conn.Release()
+}
+
+// Release closes the dedicated connection, dropping its session lock.
+func (l *WorkerLease) Release() { discardWorkerConnection(l.conn) }
+
+func discardWorkerConnection(conn *pgxpool.Conn) {
+	ctx, cancel := context.WithTimeout(context.Background(), workerLockProbeTimeout)
+	defer cancel()
+	_ = conn.Hijack().Close(ctx)
 }
