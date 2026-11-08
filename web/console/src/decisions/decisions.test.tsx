@@ -292,7 +292,7 @@ it("A18 task state and answer are separate", async () => {
   await start();
   expect(document.querySelector(".decision-task-state")?.textContent).toBe("작업 상태: 개발 중");
   expect(document.body.textContent).not.toContain("developing");
-  expect(screen.getByText("답변: B yes")).toBeTruthy();
+  expect(screen.getByText("메모: yes")).toBeTruthy();
 });
 
 it("A5 refetches after a stale revision result", async () => {
@@ -397,10 +397,7 @@ it("A4 closed record states have distinct labels and disabled actions", async ()
     );
     const view = render(<DecisionPage id="42" />);
     await screen.findByText(new RegExp(word));
-    expect(
-      (screen.getByRole("button", { name: "답변 확인" }) as HTMLButtonElement)
-        .disabled,
-    ).toBe(true);
+    expect(screen.queryByRole("button", { name: "답변 확인" })).toBeNull();
     view.unmount();
   }
 });
@@ -585,4 +582,51 @@ it("shows fresh Korean question and options and lets the operator reveal origina
   fireEvent.click(screen.getByRole("button", { name: "원문 보기" }));
   expect(screen.getByText("Ship it?")).toBeTruthy();
   expect(screen.getByRole("radio", { name: /Ship/ })).toBeTruthy();
+});
+
+
+it("shows a recommendation and its reason, or explains its absence", async () => {
+  fetcher.mockResolvedValue(response({ ...detail, request: { ...request, reason: "안전합니다" } }));
+  const view = render(<DecisionPage id="42" />);
+  expect(await screen.findByText("권고: Ship — 안전합니다")).toBeTruthy();
+  view.unmount();
+  fetcher.mockResolvedValue(response({ ...detail, request: { ...request, options: request.options.map(({ key, label }) => ({ key, label })) } }));
+  render(<DecisionPage id="42" />);
+  expect(await screen.findByText("권고 없음 — 요청자가 권고를 주지 않았습니다")).toBeTruthy();
+});
+it("renders structured questions and history headings, with malformed JSON falling back", async () => {
+  const question = 'Approve deployment {"sha":"abcdef0123456789","nested":{"name":"prod"},"checks":["one","two"]}';
+  fetcher.mockResolvedValue(response({ ...detail, request: { ...request, question }, history: [{ ...request, question }] }));
+  const view = render(<DecisionPage id="42" />);
+  expect(await screen.findByRole("heading", { name: "Approve deployment" })).toBeTruthy();
+  expect(screen.getByText("nested.name")).toBeTruthy();
+  expect(screen.getByText("prod")).toBeTruthy();
+  expect(screen.getByText("one")).toBeTruthy();
+  expect(screen.getByTitle("abcdef0123456789").textContent).toBe("abcdef012345…");
+  expect(document.querySelector("#decision-history")?.textContent).not.toContain("abcdef");
+  view.unmount();
+  fetcher.mockResolvedValue(response({ ...detail, request: { ...request, question: "Broken {json" } }));
+  render(<DecisionPage id="42" />);
+  expect(await screen.findByRole("heading", { name: "Broken {json" })).toBeTruthy();
+});
+it("shows the recorded choice and answer provenance without controls", async () => {
+  fetcher.mockResolvedValue(response({ ...detail, answerable: false, disabled_reason: "closed", request: { ...request, state: "answered", resolution: { kind: "answered", option: "B", text: "yes" } }, attempts: [{ id: 1, revision_request_id: request.id, question_revision: 2, result: "answered", actor: "Robin", channel: "console", provenance: "operator_direct", received_at: "2026-11-06T08:00:00Z" }] }));
+  await start();
+  const selected = screen.getByText(/선택됨/).closest("li");
+  expect(selected?.getAttribute("aria-current")).toBe("true");
+  expect(selected?.querySelector("svg[data-icon='check']")).toBeTruthy();
+  expect(selected?.textContent).toContain("Robin · console · 2026-11-06 17:00 KST");
+  expect(screen.getByText("메모: yes")).toBeTruthy();
+  expect(screen.queryByRole("radio")).toBeNull();
+  expect(screen.queryByRole("button", { name: "답변 확인" })).toBeNull();
+  expect(screen.queryByRole("textbox")).toBeNull();
+});
+
+it("structures Korean questions and preserves the original toggle", async () => {
+  fetcher.mockResolvedValue(response({ ...detail, request: { ...request, question_ko: '배포 승인 {"환경":"운영"}' } }));
+  render(<DecisionPage id="42" />);
+  expect(await screen.findByRole("heading", { name: "배포 승인" })).toBeTruthy();
+  expect(screen.getByText("운영")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "원문 보기" }));
+  expect(screen.getByRole("heading", { name: "Ship it?" })).toBeTruthy();
 });

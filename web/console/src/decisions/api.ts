@@ -53,6 +53,7 @@ function request(v: unknown): boolean {
     num(v.revision) &&
     str(v.state) &&
     str(v.question) &&
+    optionalString(v.reason) &&
     optionalString(v.question_ko) &&
     (v.question_ko_stale === undefined || typeof v.question_ko_stale === "boolean") &&
     Array.isArray(v.options) &&

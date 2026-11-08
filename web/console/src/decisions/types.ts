@@ -59,6 +59,7 @@ export type Request = {
   revision: number;
   state: string;
   question: string;
+  reason?: string;
   question_ko?: string;
   question_ko_stale?: boolean;
   options: Option[];
