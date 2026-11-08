@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -122,9 +121,11 @@ func TestAssistantResolveRefusesTerminalTask(t *testing.T) {
 		if err != nil || closed.Request.Status != DecisionRequestAnswered {
 			t.Fatalf("state=%s operator cleanup resolve=%+v err=%v", state, closed.Request.Status, err)
 		}
-	}
-	if n := len(outboxRows(t, s)); n != 0 {
-		t.Fatalf("terminal resolves left %d outbox rows", n)
+		// Only the operator's cleanup answer writes a notice; the refused
+		// assistant attempt above wrote none.
+		if n := len(requestNotices(t, s, request.ID)); n != 1 {
+			t.Fatalf("state=%s refused assistant resolve left %d notices, want 1 from the cleanup", state, n)
+		}
 	}
 }
 
@@ -180,9 +181,8 @@ func TestAssistantResolveAttributionAndOutbox(t *testing.T) {
 	if res == nil || res.Kind != DecisionRequestAnswered || res.Option != "B" || res.Responder != DecisionAssistantJudgementResponder || res.By != "berry-mcp" {
 		t.Fatalf("resolution=%+v", res)
 	}
-	eventID := "dr-" + strconv.FormatInt(task.ID, 10) + "-1-answered"
 	rows := outboxRows(t, s)
-	if len(rows) != 1 || rows[0].EventID != eventID || rows[0].Kind != OutboxKindDecisionAnswered || rows[0].TargetLane != task.Lane || rows[0].SentAt != nil {
+	if len(rows) != 1 || !strings.HasPrefix(rows[0].EventID, "decision-answered-"+request.ID+"-") || rows[0].Kind != OutboxKindDecisionAnswered || rows[0].TargetLane != task.Lane || rows[0].SentAt != nil {
 		t.Fatalf("outbox=%+v", rows)
 	}
 	// Repeating the same resolution is a duplicate and writes no second row.
@@ -199,7 +199,7 @@ func TestAssistantResolveAttributionAndOutbox(t *testing.T) {
 		t.Fatalf("different answer err=%v", err)
 	}
 	var count int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM notification_outbox WHERE event_id=$1`, eventID).Scan(&count); err != nil || count != 1 {
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM notification_outbox WHERE event_id LIKE $1`, "decision-answered-"+request.ID+"-%").Scan(&count); err != nil || count != 1 {
 		t.Fatalf("outbox count=%d err=%v", count, err)
 	}
 }
@@ -283,7 +283,11 @@ func TestNotificationOutboxMarkSent(t *testing.T) {
 	if _, err := s.ResolveDecisionRequestAssistant(ctx, task.ID, "berry-mcp", DecisionAssistantResolveInput{RequestID: request.ID, Option: "A"}); err != nil {
 		t.Fatal(err)
 	}
-	eventID := request.ID + "-answered"
+	pending := outboxRows(t, s)
+	if len(pending) != 1 {
+		t.Fatalf("answer left %d outbox rows", len(pending))
+	}
+	eventID := pending[0].EventID
 	if _, err := s.MarkNotificationSent(ctx, eventID, 0); err == nil {
 		t.Fatalf("hub_row_id 0 accepted")
 	}
@@ -886,7 +890,7 @@ func TestAssistantResolveDispositionRefusesQuote(t *testing.T) {
 
 // Invariant: a non-human_only request answers under either provenance — a
 // judgement records decided_by=assistant, a responder that never names the
-// operator, and the (assistant judgement) marker on the outbox text; an
+// operator, and decided_by=assistant on the outbox text; an
 // operator_decided answer on the same kind of request records the operator.
 func TestAssistantResolveProvenanceAttribution(t *testing.T) {
 	s, _ := searchTestStore(t)
@@ -918,14 +922,14 @@ func TestAssistantResolveProvenanceAttribution(t *testing.T) {
 	rows := outboxRows(t, s)
 	var judgeText, decidedText string
 	for _, row := range rows {
-		switch row.EventID {
-		case judgeReq.ID + "-answered":
+		switch {
+		case strings.HasPrefix(row.EventID, "decision-answered-"+judgeReq.ID+"-"):
 			judgeText = row.Text
-		case decidedReq.ID + "-answered":
+		case strings.HasPrefix(row.EventID, "decision-answered-"+decidedReq.ID+"-"):
 			decidedText = row.Text
 		}
 	}
-	if !strings.Contains(judgeText, "(assistant judgement)") || !strings.Contains(decidedText, "(operator quote)") {
+	if !strings.Contains(judgeText, " by "+DecisionDecidedByAssistant+" via assistant") || !strings.Contains(decidedText, " by "+DecisionDecidedByOperator+" via assistant") {
 		t.Fatalf("outbox texts judge=%q decided=%q", judgeText, decidedText)
 	}
 }

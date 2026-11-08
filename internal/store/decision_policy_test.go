@@ -159,8 +159,9 @@ func TestResolveDecisionSessionQuoteIsRelay(t *testing.T) {
 	if out.Request.Resolution.OperatorQuote != "A로 가자" || out.Request.Resolution.DecisionRef != request.ID {
 		t.Fatalf("resolution=%+v", out.Request.Resolution)
 	}
-	if n := len(outboxRows(t, s)); n != 0 {
-		t.Fatalf("a session answer wrote %d [via berry] outbox rows", n)
+	rows := outboxRows(t, s)
+	if len(rows) != 1 || rows[0].EventID != decisionAnswerNoticeEventID(request.ID, out.ResolutionID) || rows[0].TargetLane != task.Lane {
+		t.Fatalf("a session answer wrote outbox rows=%+v", rows)
 	}
 }
 
