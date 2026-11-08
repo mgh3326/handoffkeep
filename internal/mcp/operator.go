@@ -78,12 +78,17 @@ func registerOperatorTools(s *gmcp.Server, service api.Service, p principal) {
 	}, o.changesSince)
 	gmcp.AddTool(s, &gmcp.Tool{
 		Name:        "decisions_pending",
-		Description: "List the open structured decision requests awaiting an operator answer, with their question, options and Korean translations when present. Answer one with decision_answer.",
+		Description: "List the open structured decision requests. decisions holds needs_answer items (the task is open; reason is awaiting_answer or overdue). needs_cleanup holds requests still open on a merged or dropped task (reason task_closed): cleanup to close, not a question to answer. Each item has its question, options, Korean translations when present, and operator_only: true when only a verified operator answer may close it. Answer a needs_answer item with decision_answer.",
 		Annotations: readOnlyAnnotations(),
 	}, o.decisionsPending)
 	gmcp.AddTool(s, &gmcp.Tool{
+		Name:        "decisions_history",
+		Description: "Read closed structured decision requests (answered, default_applied or withdrawn), newest task update first, up to 100 per page. Pass cursor (empty for the first page) and follow next_cursor until it is empty. Each item has its options, recommended_option and chosen_option, rationale (the request's reason), decider, responder, provenance and decided_at, text or receipt, operator_only, the linked task and console_url. Lists the current request of each task; an earlier revision that was superseded is not listed.",
+		Annotations: readOnlyAnnotations(),
+	}, o.decisionsHistory)
+	gmcp.AddTool(s, &gmcp.Tool{
 		Name:        "decision_answer",
-		Description: "Answer one open hk decision request by request id, with an option key or free text and an optional note. Uses the same store path and validation as the console answer. An already answered or stale request returns the store's error code.",
+		Description: "Answer one open hk decision request by request id, with an option key or free text and an optional note. Uses the same store path and validation as the console answer. A request that is operator_only is refused with decision_operator_only unless the call comes through a verified operator path; the attempt is kept and waits for that operator. An already answered or stale request returns the store's error code.",
 		Annotations: writeAnnotations(),
 	}, o.decisionAnswer)
 	gmcp.AddTool(s, &gmcp.Tool{
@@ -494,6 +499,9 @@ type decisionView struct {
 	OptionsKOStale  bool                 `json:"options_ko_stale,omitempty"`
 	AllowFree       bool                 `json:"allow_free"`
 	State           string               `json:"state"`
+	Reason          string               `json:"reason"`
+	TaskState       string               `json:"task_state"`
+	OperatorOnly    bool                 `json:"operator_only"`
 	DefaultAction   string               `json:"default_action"`
 	RequestedBy     string               `json:"requested_by"`
 	RequestedAt     time.Time            `json:"requested_at"`
@@ -527,9 +535,11 @@ func (o operatorTools) decisionsPending(ctx context.Context, _ *gmcp.CallToolReq
 		if request == nil || request.Status != store.DecisionRequestOpen {
 			continue
 		}
+		state := store.DecisionRequestState(*request, task.State, false, now)
 		item := decisionView{
 			RequestID: request.ID, TaskID: task.ID, TaskTitle: task.Title,
-			Question: request.Question, Options: []decisionOptionView{}, State: store.DecisionRequestState(*request, task.State, false, now),
+			Question: request.Question, Options: []decisionOptionView{}, State: state,
+			Reason: decisionPendingReason(state), TaskState: task.State, OperatorOnly: decisionOperatorOnly(task, *request),
 			DefaultAction: request.DefaultAction, RequestedBy: request.RequestedBy, RequestedAt: request.RequestedAt,
 			DueAt: request.DueAt, ConsoleURL: taskURL(task.ID),
 		}
@@ -600,7 +610,35 @@ func (o operatorTools) decisionsPending(ctx context.Context, _ *gmcp.CallToolReq
 			}
 		}
 	}
-	return jsonResult(map[string]any{"decisions": items, "truncated": truncated})
+	decisions := make([]decisionView, 0, len(items))
+	cleanup := make([]decisionView, 0)
+	for _, item := range items {
+		if item.State == store.DecisionViewUncleaned {
+			cleanup = append(cleanup, item)
+			continue
+		}
+		decisions = append(decisions, item)
+	}
+	return jsonResult(map[string]any{"decisions": decisions, "needs_cleanup": cleanup, "truncated": truncated})
+}
+
+// decisionPendingReason says why an open request is listed. An uncleaned
+// request (its task merged or dropped) is cleanup, not an answer to give.
+func decisionPendingReason(state string) string {
+	switch state {
+	case store.DecisionViewUncleaned:
+		return "task_closed"
+	case store.DecisionViewOverdue:
+		return "overdue"
+	}
+	return "awaiting_answer"
+}
+
+// decisionOperatorOnly reports whether the request closes only on a verified
+// operator path. It reads the store's effective policy, the rule ResolveDecision
+// enforces, rather than restating it.
+func decisionOperatorOnly(task store.Task, request store.DecisionRequest) bool {
+	return request.EffectivePolicy(task.Refs.Disposition != nil) == store.DecisionPolicyOperatorDirect
 }
 
 func sameOptionKeys(a []decisionOptionView, b []store.DecisionOption) bool {
@@ -649,20 +687,25 @@ func (o operatorTools) decisionAnswer(ctx context.Context, _ *gmcp.CallToolReque
 	if out.Refusal != nil {
 		return nil, nil, out.Refusal
 	}
-	result := map[string]any{
+	if out.Result == store.DecisionResultPendingConfirmation {
+		// ResolveDecision recorded this attempt and left the request open: only a
+		// verified operator path closes an operator-only request. Refuse with the
+		// code rather than report a success-shaped result.
+		return nil, nil, fmt.Errorf("%s: attempt %d waits for a verified operator answer", decisionOperatorOnlyCode, out.AttemptID)
+	}
+	return jsonResult(map[string]any{
 		"result":      out.Result,
 		"request":     out.Request,
 		"actor":       o.principal.Actor,
 		"channel":     o.principal.Channel,
 		"console_url": taskURL(out.Task.ID),
 		"task":        map[string]any{"id": out.Task.ID, "state": out.Task.State, "console_url": taskURL(out.Task.ID)},
-	}
-	if out.Result == store.DecisionResultPendingConfirmation {
-		result["attempt_id"] = out.AttemptID
-		result["message"] = "the request needs a verified operator path; this attempt is pending confirmation"
-	}
-	return jsonResult(result)
+	})
 }
+
+// decisionOperatorOnlyCode is the refusal a non-operator caller gets on an
+// operator_only request; the text after it names the attempt that waits.
+const decisionOperatorOnlyCode = "decision_operator_only"
 
 type taskCommentInput struct {
 	ID   int64  `json:"id"`

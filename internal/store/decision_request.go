@@ -955,6 +955,44 @@ func (s *Store) ListOpenDecisionRequests(ctx context.Context, limit int) ([]Task
 	return out, rows.Err()
 }
 
+// DecisionListPosition is the (updated_at,id) keyset a closed-request page
+// resumes after. A task updated after a page was read moves ahead of it.
+type DecisionListPosition struct {
+	UpdatedAt time.Time
+	ID        int64
+}
+
+// ListClosedDecisionRequests pages tasks whose current structured request is
+// closed (answered, default_applied or withdrawn), newest task update first.
+// before, when set, reads strictly after that position in that order; the
+// MCP decisions_history tool is its reader.
+func (s *Store) ListClosedDecisionRequests(ctx context.Context, before *DecisionListPosition, limit int) ([]Task, error) {
+	if limit < 1 || limit > 1000 {
+		limit = 1000
+	}
+	closed := []string{DecisionRequestAnswered, DecisionRequestDefaultApplied, DecisionRequestWithdrawn}
+	var rows pgx.Rows
+	var err error
+	if before == nil {
+		rows, err = s.pool.Query(ctx, `SELECT `+taskColumns+` FROM tasks WHERE refs->'decision_request'->>'status' = ANY($1) ORDER BY updated_at DESC,id DESC LIMIT $2`, closed, limit)
+	} else {
+		rows, err = s.pool.Query(ctx, `SELECT `+taskColumns+` FROM tasks WHERE refs->'decision_request'->>'status' = ANY($1) AND (updated_at,id) < ($2,$3) ORDER BY updated_at DESC,id DESC LIMIT $4`, closed, before.UpdatedAt.UTC(), before.ID, limit)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Task{}
+	for rows.Next() {
+		var x Task
+		if err := scanTask(rows, &x); err != nil {
+			return nil, err
+		}
+		out = append(out, x)
+	}
+	return out, rows.Err()
+}
+
 // DecisionRequestCounts splits open requests the way every console surface
 // shows them: pending (task not terminal) and uncleaned (task merged or
 // dropped). It is the count the queue, the drawer and Decisions agree on.
