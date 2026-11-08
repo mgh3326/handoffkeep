@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"os"
 	"regexp"
 	"sort"
 	"strconv"
@@ -32,6 +33,10 @@ const CheckpointKeep = 500
 const MemoryKeep = 2000
 
 var ErrTrigramUnavailable = errors.New("PostgreSQL pg_trgm extension unavailable: grant CREATE on the database/schema or install pg_trgm as an administrator")
+
+// ErrSearchTimeout is returned when one Search call does not finish within its
+// deadline (searchTimeout). The statement is cancelled on the server as well.
+var ErrSearchTimeout = errors.New("search_timeout")
 var nameRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
 var kinds = map[string]bool{"checkpoint": true, "handoff": true, "decision": true, "open_question": true, "next_action": true}
 var memoryTypes = map[string]bool{"user": true, "feedback": true, "project": true, "reference": true}
@@ -4043,7 +4048,36 @@ type searchCapture func(sql string, args []any)
 
 type searchCaptureKey struct{}
 
+// defaultSearchTimeout bounds one Search call, across all of its statements.
+// Short Korean queries (2 characters) cannot use the trigram indexes and scan
+// every row of the searched tables (hk 2658), so an unbounded call can hold a
+// connection for many seconds after its client has gone.
+const defaultSearchTimeout = 5 * time.Second
+
+// searchTimeout is HANDOFFKEEP_SEARCH_TIMEOUT when it parses as a positive Go
+// duration (for example "3s"), otherwise defaultSearchTimeout.
+func searchTimeout() time.Duration {
+	if d, err := time.ParseDuration(strings.TrimSpace(os.Getenv("HANDOFFKEEP_SEARCH_TIMEOUT"))); err == nil && d > 0 {
+		return d
+	}
+	return defaultSearchTimeout
+}
+
+// Search runs search under searchTimeout. A deadline that expires while the
+// call's own context is still live returns ErrSearchTimeout. A cancelled
+// caller gets the plain context error, as before.
 func (s *Store) Search(ctx context.Context, q, scope, session string, limit int) ([]SearchResult, error) {
+	deadline := searchTimeout()
+	sctx, cancel := context.WithTimeout(ctx, deadline)
+	defer cancel()
+	out, err := s.search(sctx, q, scope, session, limit)
+	if err != nil && ctx.Err() == nil && errors.Is(sctx.Err(), context.DeadlineExceeded) {
+		return nil, fmt.Errorf("%w: no result within %s", ErrSearchTimeout, deadline)
+	}
+	return out, err
+}
+
+func (s *Store) search(ctx context.Context, q, scope, session string, limit int) ([]SearchResult, error) {
 	if strings.TrimSpace(q) == "" || !validText(q, 512) || !validText(session, 128) || (scope != "all" && scope != "ctx" && scope != "docs" && scope != "memory" && scope != "tasks") {
 		return nil, errors.New("invalid search")
 	}
