@@ -13,6 +13,11 @@ and leave the old code as is unless the change already touches it.
   bundle is built from `web/console` into `internal/ui/static/console`
   (committed).
 - `internal/remote` — the HTTP client the CLI uses against `/v1`.
+- `client` — the public `/v1` client: the fleet calls and their wire types
+  only, no raw request primitive. It never imports `internal/store`
+  (`client/README.md`).
+- `internal/hktransport` — the one `/v1` transport behind `client` and
+  `internal/remote`. It holds every request to the configured origin.
 - `internal/testdb` — how tests reach Postgres.
 - `tests/` — cross-package integration tests against a real server and DB.
 
@@ -23,7 +28,7 @@ and leave the old code as is unless the change already touches it.
 
 CI has three tiers (`.github/workflows/ci.yml` plus `deploy.yml`). A pull
 request runs the light jobs only: no `-race`, hosted runners, PostgreSQL only
-for the store (below). The main tier is every other non-PR event: the light
+for the DB-backed packages it changes (below). The main tier is every other non-PR event: the light
 jobs plus `main-linux`, which runs the whole Go suite against PostgreSQL
 **without** `-race`, the migration/startup smoke, the reopen/quota mutants and
 bundle freshness, targeting 10 minutes; its aggregate is `ci-ok`. The deploy
@@ -37,7 +42,16 @@ is the one-line switch). A red main head is bisected and reverted.
 `ci-any-ref` accepts `packages` only with `suite=test`; those runs post `ci-ok-test-packages`.
 `ci-any-ref suite=deploy` runs the deploy tier as a diagnostic and posts
 `ci-ok-deploy`, never `deploy-ok`. `scripts/check go` runs the heavy half locally.
-The PR tier runs PostgreSQL only in `pr: store + postgres` (`./internal/store/...`, when a PR changes `internal/store/` or `internal/testdb/`), because store breaks merged twice and left main red (hk 3193).
+The PR tier runs PostgreSQL only in `pr: store + postgres`, and there for every
+Go package the PR changes that has DB-backed tests: a `_test.go` file in it
+imports `internal/testdb` at the PR head, and a changed or removed file belongs
+to the nearest enclosing directory with Go files. A change under
+`internal/store/` or `internal/testdb/` also runs `./internal/store/...`. If
+the changed files cannot be listed it tests every DB-backed package, and if
+that set cannot be computed it tests `./...`. Store breaks merged twice and
+left main red (hk 3193), and so did an `internal/mcp` change whose DB tests
+first ran on main (hk 3528). A package becomes DB-backed by importing
+`internal/testdb`; no workflow edit is needed.
 
 DB-backed tests need Postgres 17 and `HANDOFFKEEP_TEST_DB_URL`, e.g.
 

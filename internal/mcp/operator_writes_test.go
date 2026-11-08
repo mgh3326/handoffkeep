@@ -115,11 +115,20 @@ func TestTaskUpdateRefusesIncompleteInput(t *testing.T) {
 	session := writesSession(t, st)
 	expected := task.UpdatedAt.UTC().Format(time.RFC3339Nano)
 
+	// The input schema declares idempotency_key required, so a call without it
+	// is refused before the handler runs, and the refusal names the key.
 	text, isError := toolText(t, session, "task_update", map[string]any{
 		"id": task.ID, "expected_updated_at": expected, "priority": 1,
 	})
-	if !isError || !strings.Contains(text, "idempotency_key is required") {
+	if !isError || !strings.Contains(text, "required") || !strings.Contains(text, `"idempotency_key"`) {
 		t.Fatalf("missing key: isError=%v text=%q", isError, text)
+	}
+	// A blank key passes the schema; the handler refuses it by name.
+	text, isError = toolText(t, session, "task_update", map[string]any{
+		"id": task.ID, "expected_updated_at": expected, "idempotency_key": "  ", "priority": 1,
+	})
+	if !isError || !strings.Contains(text, "idempotency_key is required") {
+		t.Fatalf("blank key: isError=%v text=%q", isError, text)
 	}
 	text, isError = toolText(t, session, "task_update", map[string]any{
 		"id": task.ID, "expected_updated_at": expected, "idempotency_key": "upd-empty",
@@ -220,9 +229,18 @@ func TestDecisionAskReplayAndOperatorOnlyRefusal(t *testing.T) {
 		t.Fatalf("refused answer recorded %d attempts", len(attempts))
 	}
 
-	// A request without the operator-only policy is answered as before.
+	// A request without the operator-only policy is answered as before. It goes
+	// on another task: the operator-only request stays open on the first, and a
+	// task holds one open request unless the new one supersedes it.
+	project := "mcp-project"
+	other, err := st.CreateTask(ctx, store.Task{
+		Lane: "mcp-lane", Title: "decision ask answerable fixture", Kind: "implement", Project: &project, CreatedBy: "tester",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	open := callTool[mcpDecisionAskOut](t, session, "decision_ask", map[string]any{
-		"task_id": task.ID, "idempotency_key": "ask-2", "question": "Ship docs?", "options": options,
+		"task_id": other.ID, "idempotency_key": "ask-2", "question": "Ship docs?", "options": options,
 		"default_action": "hold",
 	})
 	answer := callTool[answerOut](t, session, "decision_answer", map[string]any{"request_id": open.RequestID, "option": "A"})
@@ -352,5 +370,58 @@ func TestTaskUpdateRecordsEveryFieldEvent(t *testing.T) {
 	}
 	if !sawPriority || !sawLabel || !containsLabel(after.Labels, label.ID) {
 		t.Fatalf("events missing: priority=%v labels=%v events=%+v", sawPriority, sawLabel, after.Events)
+	}
+}
+
+// An idempotency key carrying a NUL byte can never be stored in a text column.
+// Every keyed write refuses it as invalid input that names the key, before it
+// writes anything, rather than failing in PostgreSQL with an encoding error.
+func TestMCPWritesRefuseNULIdempotencyKey(t *testing.T) {
+	st := newOperatorStore(t)
+	ctx := context.Background()
+	task := newOperatorTask(t, st, "nul key fixture")
+	session := writesSession(t, st)
+	const key = "nul\x00key"
+	countTasks := func() int {
+		t.Helper()
+		tasks, err := st.ListTasks(ctx, "", "", "", nil, nil, 100)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(tasks)
+	}
+	tasksBefore := countTasks()
+	options := []map[string]any{{"key": "A", "label": "yes"}, {"key": "B", "label": "no"}}
+	calls := []struct {
+		tool string
+		args map[string]any
+	}{
+		{"task_comment", map[string]any{"id": task.ID, "body": "nul key comment", "idempotency_key": key}},
+		{"task_intake", map[string]any{"title": "nul key intake", "body": "filed with a nul key", "project": "mcp-project", "idempotency_key": key}},
+		{"decision_ask", map[string]any{"task_id": task.ID, "idempotency_key": key, "question": "Merge it?", "options": options, "default_action": "hold"}},
+		{"task_update", map[string]any{"id": task.ID, "expected_updated_at": task.UpdatedAt.UTC().Format(time.RFC3339Nano), "idempotency_key": key, "priority": 1}},
+	}
+	for _, call := range calls {
+		text, isError := toolText(t, session, call.tool, call.args)
+		if !isError || !strings.Contains(text, "idempotency_key") || strings.Contains(text, "SQLSTATE") {
+			t.Errorf("%s with a NUL key: isError=%v text=%q", call.tool, isError, text)
+		}
+	}
+	if got := countTasks(); got != tasksBefore {
+		t.Errorf("tasks=%d after refused writes, want %d", got, tasksBefore)
+	}
+	comments, err := st.ListTaskComments(ctx, task.ID, 0, store.TaskCommentListMax)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(comments) != 0 {
+		t.Errorf("comments=%d after a refused task_comment", len(comments))
+	}
+	after, found, err := st.GetTask(ctx, task.ID)
+	if err != nil || !found {
+		t.Fatalf("read task: found=%v err=%v", found, err)
+	}
+	if !after.UpdatedAt.Equal(task.UpdatedAt) || after.Priority != task.Priority {
+		t.Errorf("refused writes changed the task: before=%v/%d after=%v/%d", task.UpdatedAt, task.Priority, after.UpdatedAt, after.Priority)
 	}
 }

@@ -48,6 +48,7 @@ type fakeStore struct {
 	decisions       []store.DecisionRecord
 	decisionMirrors map[int64]store.YouTrackDecisionMirror
 	commentLinks    map[int64]string
+	docArticles     map[string]store.YouTrackDocArticle
 }
 
 func newFakeStore() *fakeStore {
@@ -81,6 +82,7 @@ func newFakeStore() *fakeStore {
 		changeStates:    map[string]store.ChangeView{},
 		decisionMirrors: map[int64]store.YouTrackDecisionMirror{},
 		commentLinks:    map[int64]string{},
+		docArticles:     map[string]store.YouTrackDocArticle{},
 	}
 }
 

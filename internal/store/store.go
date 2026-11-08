@@ -2323,12 +2323,21 @@ type taskProjectQuerier interface {
 // passes through — CreateTask and CreateDisposition alike. A nil or empty
 // project is refused as required, a name outside the task_projects
 // vocabulary (or outside the lane-alphabet shape) as unknown.
+// checkTaskProjectName refuses a project name outside the lane alphabet before
+// any lookup, so a NUL or other stray byte never reaches the project query.
+func checkTaskProjectName(project string) error {
+	if !validName(project) {
+		return fmt.Errorf("%w: project names match the lane alphabet [A-Za-z0-9._-]{1,128}", ErrTaskProjectUnknown)
+	}
+	return nil
+}
+
 func requireTaskProject(ctx context.Context, q taskProjectQuerier, project *string) error {
 	if project == nil || *project == "" {
 		return fmt.Errorf("%w: new tasks require --project <name> (the allowed set is listed by tasks projects)", ErrTaskProjectRequired)
 	}
-	if !validName(*project) {
-		return fmt.Errorf("%w: project names match the lane alphabet [A-Za-z0-9._-]{1,128}", ErrTaskProjectUnknown)
+	if err := checkTaskProjectName(*project); err != nil {
+		return err
 	}
 	var known bool
 	if err := q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM task_projects WHERE name=$1)`, *project).Scan(&known); err != nil {
@@ -2525,6 +2534,9 @@ func (s *Store) ClaimTask(ctx context.Context, id int64, by, jobID, noJob string
 // RebindTaskJob atomically moves an active task's job link to a new job. The
 // current job and task state are checked under the row lock; a completed replay
 // of the same rebind is a no-op when its audit event is still the latest rebind.
+// Rebindable states are researching, developing and reviewing: a reviewing task
+// keeps its PR, so a continuation worker takes over the same work unit.
+// Merged, deployed, dropped and held tasks are refused.
 func (s *Store) RebindTaskJob(ctx context.Context, id int64, fromJob, toJob, by, reason string) (Task, error) {
 	reason = taskReasonText(reason)
 	if !validText(fromJob, 4096) || fromJob == "" || !validText(toJob, 4096) || toJob == "" || fromJob == toJob {
@@ -2563,7 +2575,7 @@ func (s *Store) RebindTaskJob(ctx context.Context, id int64, fromJob, toJob, by,
 		return Task{}, err
 	}
 
-	if (x.State == StateResearching || x.State == StateDeveloping) && x.Refs.JobID == toJob && x.ClaimedBy == by {
+	if rebindableState(x.State) && x.Refs.JobID == toJob && x.ClaimedBy == by {
 		var replay bool
 		err = tx.QueryRow(ctx, `SELECT EXISTS (
 			SELECT 1 FROM task_events e
@@ -2578,7 +2590,7 @@ func (s *Store) RebindTaskJob(ctx context.Context, id int64, fromJob, toJob, by,
 			return x, tx.Commit(ctx)
 		}
 	}
-	if (x.State != StateResearching && x.State != StateDeveloping) || x.Refs.JobID != fromJob {
+	if !rebindableState(x.State) || x.Refs.JobID != fromJob {
 		current := x.Refs.JobID
 		if current == "" {
 			current = "(none)"
@@ -2600,6 +2612,15 @@ func (s *Store) RebindTaskJob(ctx context.Context, id int64, fromJob, toJob, by,
 		return Task{}, err
 	}
 	return x, tx.Commit(ctx)
+}
+
+// rebindableState reports whether a task in state may change its job link.
+func rebindableState(state string) bool {
+	switch state {
+	case StateResearching, StateDeveloping, StateReviewing:
+		return true
+	}
+	return false
 }
 
 // NextTask claims the oldest highest-priority runnable task in one
@@ -4012,7 +4033,7 @@ func (s *Store) AttachmentObjectCount(ctx context.Context) (int64, error) {
 	return n, s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM attachments`).Scan(&n)
 }
 func (s *Store) Search(ctx context.Context, q, scope, session string, limit int) ([]SearchResult, error) {
-	if strings.TrimSpace(q) == "" || len(q) > 512 || !validText(session, 128) || (scope != "all" && scope != "ctx" && scope != "docs" && scope != "memory" && scope != "tasks") {
+	if strings.TrimSpace(q) == "" || !validText(q, 512) || !validText(session, 128) || (scope != "all" && scope != "ctx" && scope != "docs" && scope != "memory" && scope != "tasks") {
 		return nil, errors.New("invalid search")
 	}
 	if scope == "tasks" {

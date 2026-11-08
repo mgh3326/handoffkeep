@@ -35,9 +35,13 @@ func writeAuthor(p principal) string {
 }
 
 // write names one write of this principal for the audit row. key may be empty
-// for a write that takes no idempotency key.
-func (o operatorTools) write(tool, key string) store.MCPWrite {
-	return store.MCPWrite{Tool: tool, Actor: o.principal.Actor, Channel: o.principal.Channel, Author: writeAuthor(o.principal), Key: key}
+// for a write that takes no idempotency key. A key the audit row cannot hold is
+// refused here, before the tool writes anything.
+func (o operatorTools) write(tool, key string) (store.MCPWrite, error) {
+	if err := store.CheckIdempotencyKey(key); err != nil {
+		return store.MCPWrite{}, err
+	}
+	return store.MCPWrite{Tool: tool, Actor: o.principal.Actor, Channel: o.principal.Channel, Author: writeAuthor(o.principal), Key: key}, nil
 }
 
 // intakeSourceRef keys an intake by the caller's idempotency key. It is scoped
@@ -75,11 +79,15 @@ func (o operatorTools) taskUpdate(ctx context.Context, _ *gmcp.CallToolRequest, 
 	if key == "" {
 		return nil, nil, errors.New("idempotency_key is required")
 	}
+	write, err := o.write(toolTaskUpdate, key)
+	if err != nil {
+		return nil, nil, err
+	}
 	result, err := o.service.Store.UpdateTask(ctx, in.ID, store.TaskUpdateInput{
 		ExpectedUpdatedAt: expected, State: strings.TrimSpace(in.State), Lane: strings.TrimSpace(in.Lane),
 		Priority: in.Priority, AddLabels: trimNames(in.AddLabels), RemoveLabels: trimNames(in.RemoveLabels),
 		Note: in.Note,
-	}, o.write(toolTaskUpdate, key))
+	}, write)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -158,6 +166,10 @@ func (o operatorTools) decisionAsk(ctx context.Context, _ *gmcp.CallToolRequest,
 	if key == "" {
 		return nil, nil, errors.New("idempotency_key is required")
 	}
+	write, err := o.write(toolDecisionAsk, key)
+	if err != nil {
+		return nil, nil, err
+	}
 	input := store.DecisionRequestInput{
 		Question: strings.TrimSpace(in.Question), Reason: strings.TrimSpace(in.Reason),
 		DefaultAction: strings.TrimSpace(in.DefaultAction), DefaultOption: strings.TrimSpace(in.DefaultOption),
@@ -173,7 +185,6 @@ func (o operatorTools) decisionAsk(ctx context.Context, _ *gmcp.CallToolRequest,
 		}
 		input.DueAt = &at
 	}
-	write := o.write(toolDecisionAsk, key)
 	recorded, replayed, err := o.service.Store.RecordMCPDecisionRequest(ctx, in.TaskID, input, write)
 	if err != nil {
 		return nil, nil, err
