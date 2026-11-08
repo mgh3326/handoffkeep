@@ -220,6 +220,36 @@ func TestOTLPStatusAndPanicSpans(t *testing.T) {
 	}
 }
 
+// 1xx informational responses do not finish a response. The span records the
+// final status, not a preceding 103 Early Hints.
+func TestOTLPInformationalStatusIsNotTheSpanStatus(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		final int
+	}{
+		{"success after early hints", http.StatusCreated},
+		{"error after early hints", http.StatusInternalServerError},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			spans := tracetest.NewInMemoryExporter()
+			monitor := otlpTestMonitor(t, "1", spans)
+			mux := http.NewServeMux()
+			mux.HandleFunc("GET /v1/tasks/{id}", func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusEarlyHints)
+				w.WriteHeader(tc.final)
+			})
+			serve(monitor.Handler(mux), httptest.NewRequest(http.MethodGet, "/v1/tasks/7", nil))
+			got := flushedSpans(t, monitor, spans)
+			if len(got) != 1 {
+				t.Fatalf("spans=%v", names(got))
+			}
+			if status := attrInt(got[0].Attributes, "http.response.status_code"); status != int64(tc.final) {
+				t.Fatalf("status attribute=%d, want %d", status, tc.final)
+			}
+		})
+	}
+}
+
 // Nothing a client sends or a query carries reaches a span: no URL, query,
 // header, body, path value, or SQL literal or argument.
 func TestOTLPSpansCarryNoRequestContent(t *testing.T) {

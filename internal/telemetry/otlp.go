@@ -165,7 +165,11 @@ func (e *otlpExporter) trace(routes, next http.Handler) http.Handler {
 		writer := httpsnoop.Wrap(w, httpsnoop.Hooks{
 			WriteHeader: func(next httpsnoop.WriteHeaderFunc) httpsnoop.WriteHeaderFunc {
 				return func(code int) {
-					if !wroteHeader {
+					// 1xx informational responses (103 Early Hints) do not finish
+					// the response, except 101; the final code follows them.
+					// 1xx informational responses (103 Early Hints) do not finish
+					// the response, except 101; the final code follows them.
+					if !wroteHeader && (code >= http.StatusOK || code == http.StatusSwitchingProtocols) {
 						status, wroteHeader = code, true
 					}
 					next(code)
