@@ -126,18 +126,6 @@ func stepRuns(j tierJob) string {
 	return b.String()
 }
 
-// stepEnv renders every step-level env entry as KEY=value lines so a guard can
-// pin what a step passes to its script.
-func stepEnv(j tierJob) string {
-	var b strings.Builder
-	for _, s := range j.Steps {
-		for k, v := range s.Env {
-			fmt.Fprintf(&b, "%s=%v\n", k, v)
-		}
-	}
-	return b.String()
-}
-
 // tierOf classifies a ci.yml job: "deploy", "main" (non-PR only) or "pr".
 // A PR-tier job may also run on other events; it is the light half either way.
 func tierOf(name string, j tierJob) string {
@@ -524,8 +512,23 @@ func deployWorkflowProblems(raw []byte) []string {
 		if !fullHistory {
 			add("schema-compat checkout needs fetch-depth: 0 so the target and base commits resolve")
 		}
-		if !strings.Contains(stepEnv(compat), "TARGET_SHA=${{ needs.target.outputs.sha }}") {
-			add("schema-compat must pass TARGET_SHA=${{ needs.target.outputs.sha }} to the script")
+		// The script step itself must carry the target, and a step before it
+		// must fetch the requested commits: fetch-depth 0 covers branch and
+		// tag refs, not a commit no ref points at (review on #237).
+		scriptTarget, fetched := false, false
+		for _, s := range compat.Steps {
+			if strings.Contains(s.Run, "scripts/test-previous-release-schema.sh") {
+				scriptTarget = fmt.Sprint(s.Env["TARGET_SHA"]) == "${{ needs.target.outputs.sha }}"
+			}
+			if strings.Contains(s.Run, `git fetch --no-tags origin "$TARGET_SHA"`) {
+				fetched = true
+			}
+		}
+		if !scriptTarget {
+			add("the schema-compat script step must pass TARGET_SHA=${{ needs.target.outputs.sha }}")
+		}
+		if !fetched {
+			add("schema-compat must fetch TARGET_SHA explicitly (fetch-depth 0 does not cover an unreferenced commit)")
 		}
 	}
 
@@ -1072,7 +1075,8 @@ func TestCITierMutantsTurnRed(t *testing.T) {
 		{"deploy-schema-compat-no-db", "      HANDOFFKEEP_TEST_DB_URL: postgres://handoffkeep:handoffkeep@localhost:5432/handoffkeep?sslmode=disable\n    steps:\n      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0\n        with:", "    steps:\n      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0\n        with:"},
 		{"deploy-schema-compat-pins-target-ref", "          ref: ${{ github.workflow_sha }}", "          ref: ${{ needs.target.outputs.sha }}"},
 		{"deploy-schema-compat-unpinned", "          ref: ${{ github.workflow_sha }}\n", ""},
-		{"deploy-schema-compat-no-target-sha", "          TARGET_SHA: ${{ needs.target.outputs.sha }}\n", ""},
+		{"deploy-schema-compat-no-target-sha", "          # v* tag before the target.\n          TARGET_SHA: ${{ needs.target.outputs.sha }}\n", "          # v* tag before the target.\n"},
+		{"deploy-schema-compat-no-fetch", "          git fetch --no-tags origin \"$TARGET_SHA\"\n", ""},
 	} {
 		t.Run(m.name, func(t *testing.T) {
 			src := string(deploy)

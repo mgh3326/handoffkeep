@@ -135,6 +135,20 @@ jobs:
           # commits, never the working tree.
           ref: ${{ github.workflow_sha }}
           fetch-depth: 0
+      - name: Fetch the requested commits
+        env:
+          # A dispatch may name a head no branch or tag points at any more (a
+          # deleted branch, a force-pushed-away commit): fetch-depth 0 covers
+          # refs/heads/* and refs/tags/*, not an arbitrary commit. ci.yml
+          # checks the same target out by name, so fetch it here too rather
+          # than fail on an absent object.
+          TARGET_SHA: ${{ needs.target.outputs.sha }}
+          BASE: ${{ inputs.base }}
+        run: |
+          git fetch --no-tags origin "$TARGET_SHA"
+          if [[ "$BASE" =~ ^[0-9a-f]{40}$ ]]; then
+            git fetch --no-tags origin "$BASE"
+          fi
       - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
         with: {go-version-file: go.mod}
       - name: Previous release on the target schema
