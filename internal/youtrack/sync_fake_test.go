@@ -25,13 +25,14 @@ type fakeYouTrack struct {
 	fieldValues map[string][]string
 	projectIDs  map[string]string // short name -> id
 
-	issueUpdates []map[string]any
-	comments     []string
-	bundleAdds   []string
-	createCalls  int
-	searchCalls  int
-	getCalls     int
-	failUpdate   bool
+	issueUpdates  []map[string]any
+	comments      []string
+	bundleAdds    []string
+	createCalls   int
+	searchCalls   int
+	getCalls      int
+	activityReads int
+	failUpdate    bool
 	// failFieldUpdate fails only a custom-field update, so a move before it
 	// succeeds.
 	failFieldUpdate bool
@@ -226,7 +227,33 @@ func (f *fakeYouTrack) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.articleBodies[id] = body.Content
 		write(http.StatusOK, article)
 	case path == "/api/activitiesPage":
-		page := ActivitiesPage{Activities: f.activities, AfterCursor: f.cursor, HasAfter: f.hasAfter}
+		f.activityReads++
+		top, err := strconv.Atoi(r.URL.Query().Get("$top"))
+		if err != nil || top < 1 {
+			top = 100
+		}
+		after := r.URL.Query().Get("after")
+		start := 0
+		if after != "" {
+			for i, activity := range f.activities {
+				if activity.ID == after {
+					start = i + 1
+					break
+				}
+			}
+		}
+		end := start + top
+		if end > len(f.activities) {
+			end = len(f.activities)
+		}
+		activities := append([]Activity(nil), f.activities[start:end]...)
+		page := ActivitiesPage{Activities: activities, AfterCursor: f.cursor, HasAfter: end < len(f.activities) || f.hasAfter}
+		if len(activities) > 0 {
+			page.AfterCursor = activities[len(activities)-1].ID
+			if f.cursor != "" && !page.HasAfter {
+				page.AfterCursor = f.cursor
+			}
+		}
 		write(http.StatusOK, page)
 	case path == "/api/issues" && r.Method == http.MethodGet:
 		f.searchCalls++

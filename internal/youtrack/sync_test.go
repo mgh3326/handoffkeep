@@ -59,6 +59,7 @@ func TestSyncPushCreatesIssueWithKoreanSummaryAndComments(t *testing.T) {
 
 func TestSyncSkipsBotActivity(t *testing.T) {
 	fs := newFakeStore()
+	fs.cursor.Cursor = "before"
 	yt := newFakeYouTrack()
 	task := fs.addTask("handoffkeep", "handoffkeep", "bot target", store.StateBacklog, 0)
 	mirrorIssue(fs, yt, task.ID, "9-1", "HK-1")
@@ -68,7 +69,7 @@ func TestSyncSkipsBotActivity(t *testing.T) {
 	yt.cursor = "c1"
 	svc := newTestService(t, yt, fs)
 
-	report, err := svc.Sync(context.Background(), SyncOptions{})
+	report, err := svc.Sync(context.Background(), SyncOptions{Pull: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,8 +81,51 @@ func TestSyncSkipsBotActivity(t *testing.T) {
 	}
 }
 
+func TestSyncPullIsOffByDefault(t *testing.T) {
+	fs := newFakeStore()
+	yt := newFakeYouTrack()
+	task := fs.addTask("handoffkeep", "handoffkeep", "pull disabled", store.StateBacklog, 0)
+	mirrorIssue(fs, yt, task.ID, "9-70", "HK-70")
+	yt.activities = []Activity{stateActivity("old-edit", "9-70", "HK-70", "종료됨")}
+	svc := newTestService(t, yt, fs)
+	if _, err := svc.Sync(context.Background(), SyncOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if yt.activityReads != 0 || len(fs.applied) != 0 || fs.tasks[task.ID].State != store.StateBacklog {
+		t.Fatalf("default sync read/applied YouTrack activity: reads=%d applied=%v state=%s", yt.activityReads, fs.applied, fs.tasks[task.ID].State)
+	}
+}
+
+func TestFirstPullRunBaselinesAtNewestActivity(t *testing.T) {
+	fs := newFakeStore()
+	yt := newFakeYouTrack()
+	task := fs.addTask("handoffkeep", "handoffkeep", "old activity", store.StateBacklog, 0)
+	issue := Issue{ID: "9-71", IDReadable: "HK-71", Project: &ProjectRef{ID: "0-1", ShortName: "HK"}}
+	fs.mirror(task.ID, issue.ID, issue.IDReadable)
+	yt.issues[issue.ID] = issue
+	yt.activities = []Activity{stateActivity("old-1", issue.ID, issue.IDReadable, "개발 중"), stateActivity("old-2", issue.ID, issue.IDReadable, "종료됨")}
+	svc := newTestService(t, yt, fs)
+	first, err := svc.Sync(context.Background(), SyncOptions{Pull: true, ActivityLimit: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fs.applied) != 0 || fs.tasks[task.ID].State != store.StateBacklog || len(first.Pulled) != 0 {
+		t.Fatalf("baseline replayed history: applied=%v state=%s pulled=%+v", fs.applied, fs.tasks[task.ID].State, first.Pulled)
+	}
+	if len(fs.advanced) != 1 || fs.cursor.Cursor != "old-2" {
+		t.Fatalf("baseline cursor=%q advanced=%v", fs.cursor.Cursor, fs.advanced)
+	}
+	if _, err := svc.Sync(context.Background(), SyncOptions{Pull: true, ActivityLimit: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fs.applied) != 0 {
+		t.Fatalf("old activity replayed after baseline: %v", fs.applied)
+	}
+}
+
 func TestSyncAppliesStatePriorityLaneAndComment(t *testing.T) {
 	fs := newFakeStore()
+	fs.cursor.Cursor = "before"
 	yt := newFakeYouTrack()
 	task := fs.addTask("handoffkeep", "handoffkeep", "apply target", store.StateBacklog, 0)
 	mirrorIssue(fs, yt, task.ID, "9-7", "HK-7")
@@ -96,7 +140,7 @@ func TestSyncAppliesStatePriorityLaneAndComment(t *testing.T) {
 	}}
 	svc := newTestService(t, yt, fs)
 
-	report, err := svc.Sync(context.Background(), SyncOptions{})
+	report, err := svc.Sync(context.Background(), SyncOptions{Pull: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,13 +158,14 @@ func TestSyncAppliesStatePriorityLaneAndComment(t *testing.T) {
 
 func TestSyncRefusalRevertsAndPostsKoreanComment(t *testing.T) {
 	fs := newFakeStore()
+	fs.cursor.Cursor = "before"
 	yt := newFakeYouTrack()
 	task := fs.addTask("handoffkeep", "handoffkeep", "refusal target", store.StateBacklog, 0)
 	mirrorIssue(fs, yt, task.ID, "9-8", "HK-8")
 	yt.activities = []Activity{stateActivity("a-refuse", "9-8", "HK-8", "개발 중")}
 	svc := newTestService(t, yt, fs)
 
-	report, err := svc.Sync(context.Background(), SyncOptions{})
+	report, err := svc.Sync(context.Background(), SyncOptions{Pull: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,6 +195,7 @@ func TestSyncRefusalRevertsAndPostsKoreanComment(t *testing.T) {
 
 func TestSyncSkipsDecisionAnswersAndInstructions(t *testing.T) {
 	fs := newFakeStore()
+	fs.cursor.Cursor = "before"
 	yt := newFakeYouTrack()
 	task := fs.addTask("handoffkeep", "handoffkeep", "comment target", store.StateBacklog, 0)
 	mirrorIssue(fs, yt, task.ID, "9-9", "HK-9")
@@ -162,7 +208,7 @@ func TestSyncSkipsDecisionAnswersAndInstructions(t *testing.T) {
 	yt.activities = []Activity{comment("a-ins", "/지시 배포해"), comment("a-ans", "/답 A"), comment("a-normal", "일반 코멘트")}
 	svc := newTestService(t, yt, fs)
 
-	report, err := svc.Sync(context.Background(), SyncOptions{})
+	report, err := svc.Sync(context.Background(), SyncOptions{Pull: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,6 +227,7 @@ func TestSyncSkipsDecisionAnswersAndInstructions(t *testing.T) {
 
 func TestSyncCreatesTaskForOperatorIssue(t *testing.T) {
 	fs := newFakeStore()
+	fs.cursor.Cursor = "before"
 	yt := newFakeYouTrack()
 	issue := &Issue{ID: "9-77", IDReadable: "HK-77", Summary: "운영자 새 이슈", Project: &ProjectRef{ID: "0-1", ShortName: "HK"}, CustomFields: []IssueField{
 		{Name: "레인", Value: json.RawMessage(`{"name":"operator-desk"}`)},
@@ -196,7 +243,7 @@ func TestSyncCreatesTaskForOperatorIssue(t *testing.T) {
 	}}
 	svc := newTestService(t, yt, fs)
 
-	report, err := svc.Sync(context.Background(), SyncOptions{})
+	report, err := svc.Sync(context.Background(), SyncOptions{Pull: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,6 +266,7 @@ func TestSyncCreatesTaskForOperatorIssue(t *testing.T) {
 
 func TestSyncReplayAppliesOnce(t *testing.T) {
 	fs := newFakeStore()
+	fs.cursor.Cursor = "before"
 	yt := newFakeYouTrack()
 	task := fs.addTask("handoffkeep", "handoffkeep", "replay target", store.StateBacklog, 0)
 	mirrorIssue(fs, yt, task.ID, "9-10", "HK-10")
@@ -228,18 +276,18 @@ func TestSyncReplayAppliesOnce(t *testing.T) {
 	}}
 	svc := newTestService(t, yt, fs)
 
-	first, err := svc.Sync(context.Background(), SyncOptions{})
+	first, err := svc.Sync(context.Background(), SyncOptions{Pull: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(first.Pulled) != 1 || first.Pulled[0].Outcome != store.YouTrackOutcomeApplied {
 		t.Fatalf("first=%+v", first.Pulled)
 	}
-	second, err := svc.Sync(context.Background(), SyncOptions{})
+	second, err := svc.Sync(context.Background(), SyncOptions{Pull: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(second.Pulled) != 1 || second.Pulled[0].Outcome != store.YouTrackOutcomeDuplicate {
+	if len(second.Pulled) != 0 {
 		t.Fatalf("second=%+v", second.Pulled)
 	}
 	if fs.tasks[task.ID].Priority != 9 {
@@ -249,6 +297,7 @@ func TestSyncReplayAppliesOnce(t *testing.T) {
 
 func TestDryRunWritesNothing(t *testing.T) {
 	fs := newFakeStore()
+	fs.cursor.Cursor = "before"
 	yt := newFakeYouTrack()
 	task := fs.addTask("handoffkeep", "handoffkeep", "dry target", store.StateBacklog, 2)
 	mirrorIssue(fs, yt, task.ID, "9-11", "HK-11")
@@ -259,7 +308,7 @@ func TestDryRunWritesNothing(t *testing.T) {
 	fs.tasks[task.ID] = moved
 	svc := newTestService(t, yt, fs)
 
-	report, err := svc.Sync(context.Background(), SyncOptions{DryRun: true})
+	report, err := svc.Sync(context.Background(), SyncOptions{DryRun: true, Pull: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -267,6 +316,9 @@ func TestDryRunWritesNothing(t *testing.T) {
 	t.Logf("dry-run report: %s", data)
 	if !report.DryRun || len(report.Pulled) != 1 || report.Pulled[0].Outcome != "would_apply" {
 		t.Fatalf("report=%+v", report)
+	}
+	if report.Counts["update"] != 1 {
+		t.Fatalf("dry-run counts=%v", report.Counts)
 	}
 	if len(fs.applied) != 0 || len(yt.issueUpdates) != 0 || len(yt.comments) != 0 || yt.createCalls != 0 {
 		t.Fatalf("dry-run wrote: applied=%v updates=%v comments=%v creates=%d", fs.applied, yt.issueUpdates, yt.comments, yt.createCalls)
@@ -282,6 +334,27 @@ func TestDryRunWritesNothing(t *testing.T) {
 	}
 	if fs.projectIDs != 0 {
 		t.Fatalf("dry-run persisted %d project ids", fs.projectIDs)
+	}
+}
+
+func TestSyncDryRunCountsAdoptAndUpdate(t *testing.T) {
+	fs := newFakeStore()
+	yt := newFakeYouTrack()
+	task := fs.addTask("handoffkeep", "handoffkeep", "legacy issue", store.StateBacklog, 1)
+	yt.issues["legacy-2"] = Issue{ID: "legacy-2", IDReadable: "HK-902", Project: &ProjectRef{ID: "0-1", ShortName: "HK"}, CustomFields: []IssueField{{Name: "hk ID", Value: json.RawMessage(itoa(task.ID))}}}
+	svc := newTestService(t, yt, fs)
+	report, err := svc.Sync(context.Background(), SyncOptions{DryRun: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Counts["adopt"] != 1 || report.Counts["update"] != 1 {
+		t.Fatalf("dry-run counts=%v", report.Counts)
+	}
+	if _, ok := fs.mirrors[task.ID]; ok {
+		t.Fatal("dry-run persisted the adopted mirror")
+	}
+	if yt.createCalls != 0 || len(yt.issueUpdates) != 0 {
+		t.Fatalf("dry-run wrote to YouTrack: creates=%d updates=%v", yt.createCalls, yt.issueUpdates)
 	}
 }
 
@@ -329,6 +402,7 @@ func TestPushSendsPGValuesNotTheCache(t *testing.T) {
 
 func TestSyncPullsBeforeItPushes(t *testing.T) {
 	fs := newFakeStore()
+	fs.cursor.Cursor = "before"
 	yt := newFakeYouTrack()
 	task := fs.addTask("handoffkeep", "handoffkeep", "order target", store.StateBacklog, 2)
 	mirrorIssue(fs, yt, task.ID, "9-81", "HK-81")
@@ -341,7 +415,7 @@ func TestSyncPullsBeforeItPushes(t *testing.T) {
 	}}
 	svc := newTestService(t, yt, fs)
 
-	report, err := svc.Sync(context.Background(), SyncOptions{})
+	report, err := svc.Sync(context.Background(), SyncOptions{Pull: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -361,6 +435,7 @@ func TestSyncPullsBeforeItPushes(t *testing.T) {
 
 func TestSyncConsumesAnActivityItCannotApply(t *testing.T) {
 	fs := newFakeStore()
+	fs.cursor.Cursor = "before"
 	yt := newFakeYouTrack()
 	task := fs.addTask("handoffkeep", "handoffkeep", "skip target", store.StateBacklog, 0)
 	mirrorIssue(fs, yt, task.ID, "9-82", "HK-82")
@@ -378,7 +453,7 @@ func TestSyncConsumesAnActivityItCannotApply(t *testing.T) {
 	fs.applyErr["a-bad"] = store.ErrYouTrackActivityInput
 	svc := newTestService(t, yt, fs)
 
-	report, err := svc.Sync(context.Background(), SyncOptions{})
+	report, err := svc.Sync(context.Background(), SyncOptions{Pull: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -693,6 +768,7 @@ func TestFailedFieldsAfterAdoptingAnIssueStayDue(t *testing.T) {
 
 func TestOperatorChangeSupersedesAPendingExport(t *testing.T) {
 	fs := newFakeStore()
+	fs.cursor.Cursor = "before"
 	yt := newFakeYouTrack()
 	task := fs.addTask("handoffkeep", "handoffkeep", "pending export", store.StateBacklog, 2)
 	mirrorIssue(fs, yt, task.ID, "9-96", "HK-96")
@@ -720,7 +796,7 @@ func TestOperatorChangeSupersedesAPendingExport(t *testing.T) {
 			{Type: "CustomFieldCategory", Field: &ActivityField{Name: "레인"}, Added: []json.RawMessage{json.RawMessage(`{"name":"ops"}`)}},
 		},
 	}}
-	if _, err := svc.Sync(ctx, SyncOptions{}); err != nil {
+	if _, err := svc.Sync(ctx, SyncOptions{Pull: true}); err != nil {
 		t.Fatal(err)
 	}
 	got := fs.tasks[task.ID]
