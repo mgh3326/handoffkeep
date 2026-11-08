@@ -4035,6 +4035,14 @@ func (s *Store) AttachmentObjectCount(ctx context.Context) (int64, error) {
 	var n int64
 	return n, s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM attachments`).Scan(&n)
 }
+
+// searchCapture receives the main search statement and its arguments. The
+// latency test uses it to EXPLAIN the exact SQL Search runs; production code
+// never puts one on the context.
+type searchCapture func(sql string, args []any)
+
+type searchCaptureKey struct{}
+
 func (s *Store) Search(ctx context.Context, q, scope, session string, limit int) ([]SearchResult, error) {
 	if strings.TrimSpace(q) == "" || !validText(q, 512) || !validText(session, 128) || (scope != "all" && scope != "ctx" && scope != "docs" && scope != "memory" && scope != "tasks") {
 		return nil, errors.New("invalid search")
@@ -4084,7 +4092,11 @@ func (s *Store) Search(ctx context.Context, q, scope, session string, limit int)
 	if scope == "all" || scope == "docs" {
 		parts = append(parts, `SELECT 'docs' scope,key,session,kind,key title,ts_headline('simple',body,plainto_tsquery('simple',$2),'MaxWords=24,MinWords=8') snippet,'{}'::jsonb refs,created_at FROM documents WHERE ($1='' OR session=$1) AND (to_tsvector('simple',key || ' ' || body) @@ plainto_tsquery('simple',$2) OR key || ' ' || body ILIKE '%' || $2 || '%')`)
 	}
-	rows, e := s.pool.Query(ctx, `SELECT scope,key,session,kind,title,snippet,refs,created_at FROM (`+strings.Join(parts, " UNION ALL ")+") r ORDER BY created_at DESC,scope,key,session,title LIMIT $3", session, q, limit+1)
+	mainSQL := `SELECT scope,key,session,kind,title,snippet,refs,created_at FROM (` + strings.Join(parts, " UNION ALL ") + ") r ORDER BY created_at DESC,scope,key,session,title LIMIT $3"
+	if capture, ok := ctx.Value(searchCaptureKey{}).(searchCapture); ok {
+		capture(mainSQL, []any{session, q, limit + 1})
+	}
+	rows, e := s.pool.Query(ctx, mainSQL, session, q, limit+1)
 	if e != nil {
 		return nil, fmt.Errorf("search: %w", e)
 	}
@@ -4233,7 +4245,11 @@ func (s *Store) searchTasks(ctx context.Context, q, lane string, limit int) ([]S
 			`COALESCE((SELECT substr(tr.text,GREATEST(1,position(lower($2) in lower(tr.text))-40),160) FROM translations tr WHERE tr.entity='task_comment' AND tr.entity_id=c.id::text AND tr.field='body' AND tr.lang='ko' AND tr.source_sha256=encode(sha256(convert_to(c.body,'UTF8')),'hex') AND tr.text ILIKE '%'||$4||'%' ESCAPE '\'),NULLIF(ts_headline('simple',c.body,plainto_tsquery('simple',$2),'MaxWords=24,MinWords=8'),''),left(c.body,160)) snippet,`+
 			refsExpr+` refs,t.created_at,2 match_rank FROM task_comments c JOIN tasks t ON t.id=c.task_id WHERE ($1='' OR t.lane=$1) AND (to_tsvector('simple',c.body) @@ plainto_tsquery('simple',$2) OR c.body ILIKE '%'||$4||'%' ESCAPE '\' OR EXISTS (SELECT 1 FROM translations tr WHERE tr.entity='task_comment' AND tr.entity_id=c.id::text AND tr.field='body' AND tr.lang='ko' AND tr.source_sha256=encode(sha256(convert_to(c.body,'UTF8')),'hex') AND tr.text ILIKE '%'||$4||'%' ESCAPE '\')) AND NOT `+titleMatch+` ORDER BY t.id, c.created_at DESC, c.id DESC)`)
 	}
-	rows, e := s.pool.Query(ctx, `SELECT scope,key,session,kind,title,snippet,refs,created_at FROM (SELECT DISTINCT ON (key) * FROM (`+strings.Join(parts, " UNION ALL ")+") candidates ORDER BY key,match_rank,created_at DESC) r ORDER BY r.match_rank,r.created_at DESC,r.key DESC LIMIT $3", lane, q, limit+1, like)
+	mainSQL := `SELECT scope,key,session,kind,title,snippet,refs,created_at FROM (SELECT DISTINCT ON (key) * FROM (` + strings.Join(parts, " UNION ALL ") + ") candidates ORDER BY key,match_rank,created_at DESC) r ORDER BY r.match_rank,r.created_at DESC,r.key DESC LIMIT $3"
+	if capture, ok := ctx.Value(searchCaptureKey{}).(searchCapture); ok {
+		capture(mainSQL, []any{lane, q, limit + 1, like})
+	}
+	rows, e := s.pool.Query(ctx, mainSQL, lane, q, limit+1, like)
 	if e != nil {
 		return nil, fmt.Errorf("search tasks: %w", e)
 	}
