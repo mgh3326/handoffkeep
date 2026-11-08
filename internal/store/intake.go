@@ -209,17 +209,31 @@ func insertTriageTaskTx(ctx context.Context, tx pgx.Tx, item triageItem, source,
 	return x, err
 }
 
+// CheckIntake reports why IntakeTask would refuse in, with the same checks and
+// the same errors, and never touches the database. A caller that reads before
+// it files runs it first, so refused text never reaches PostgreSQL.
+func CheckIntake(in IntakeInput) error {
+	if err := checkIntakeHeader(in.Source, in.SourceRef, in.Lane, in.CreatedBy); err != nil {
+		return err
+	}
+	item := triageItem{Title: in.Title, Body: in.Body, Kind: in.Kind, Project: in.Project, Priority: in.Priority}
+	if err := checkTriageItem(item); err != nil {
+		return err
+	}
+	if item.Project != nil {
+		return checkTaskProjectName(*item.Project)
+	}
+	return nil
+}
+
 // IntakeTask puts one item into triage. A repeated (source, source_ref)
 // returns the task already recorded for it with created=false and changes
 // nothing. Kind may be left unset; the triage gate requires it on the way out.
 func (s *Store) IntakeTask(ctx context.Context, in IntakeInput) (Task, bool, error) {
-	if err := checkIntakeHeader(in.Source, in.SourceRef, in.Lane, in.CreatedBy); err != nil {
+	if err := CheckIntake(in); err != nil {
 		return Task{}, false, err
 	}
 	item := triageItem{Title: in.Title, Body: in.Body, Kind: in.Kind, Project: in.Project, Priority: in.Priority}
-	if err := checkTriageItem(item); err != nil {
-		return Task{}, false, err
-	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return Task{}, false, err

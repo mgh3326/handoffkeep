@@ -769,10 +769,6 @@ func (o operatorTools) taskIntake(ctx context.Context, _ *gmcp.CallToolRequest, 
 	if err != nil {
 		return nil, nil, err
 	}
-	candidates, err := o.duplicateCandidates(ctx, title, strings.TrimSpace(in.Lane))
-	if err != nil {
-		return nil, nil, err
-	}
 	// A caller's idempotency key names the task it filed, so a repeat with a
 	// changed title still returns that task; without a key the content hash
 	// keeps the existing identical-intake behaviour.
@@ -780,10 +776,21 @@ func (o operatorTools) taskIntake(ctx context.Context, _ *gmcp.CallToolRequest, 
 	if write.Key != "" {
 		sourceRef = intakeSourceRef(o.principal.Actor, write.Key)
 	}
-	task, created, err := o.service.IntakeTask(ctx, intakeActor(principal{Actor: write.Author}), store.IntakeInput{
+	intake := store.IntakeInput{
 		Source: "chatgpt", SourceRef: sourceRef,
 		Title: title, Body: in.Body, Project: &project, Lane: strings.TrimSpace(in.Lane),
-	})
+		CreatedBy: intakeActor(principal{Actor: write.Author}),
+	}
+	// Refuse the intake before the duplicate search reads its title, so text the
+	// store cannot hold (a NUL byte, a second line) never reaches PostgreSQL.
+	if err := store.CheckIntake(intake); err != nil {
+		return nil, nil, err
+	}
+	candidates, err := o.duplicateCandidates(ctx, title, strings.TrimSpace(in.Lane))
+	if err != nil {
+		return nil, nil, err
+	}
+	task, created, err := o.service.IntakeTask(ctx, intakeActor(principal{Actor: write.Author}), intake)
 	if err != nil {
 		return nil, nil, err
 	}
