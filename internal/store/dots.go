@@ -306,7 +306,7 @@ func (s *Store) ReplyDots(ctx context.Context, actor, channel string, in DotsRep
 	// The token is checked before the replay lookup: a replay returns the first
 	// result, so a caller without the run must not learn it.
 	if in.Kind != "START" {
-		if err = checkDotsRunTokenTx(ctx, tx, task.ID, in.RunToken); err != nil {
+		if err = checkDotsRunTokenTx(ctx, tx, task, in.RunToken); err != nil {
 			return DotsReplyResult{}, err
 		}
 	}

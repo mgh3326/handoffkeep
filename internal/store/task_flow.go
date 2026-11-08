@@ -683,6 +683,11 @@ func (s *Store) transitionTaskTx(ctx context.Context, tx pgx.Tx, id int64, in Tr
 		x.Refs.PR = ""
 		x.Refs.HeadSHA = ""
 		x.Refs.ReportPath = ""
+		// A reopen ends any dots run on the request: its run token is revoked
+		// in this transaction, with the claim it belonged to (dots_run_token.go).
+		if _, err := supersedeDotsRunTokensTx(ctx, tx, id, now); err != nil {
+			return Task{}, err
+		}
 	}
 	flagWas := x.AwaitingDecision
 	// Asking a question of a parked task brings it back to backlog, as the old

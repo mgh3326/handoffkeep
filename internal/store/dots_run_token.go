@@ -49,15 +49,18 @@ func validDotsRunToken(token string) bool {
 	return dotsRunTokenRE.MatchString(token)
 }
 
-// checkDotsRunTokenTx refuses unless token is the request's active run token.
-// The caller holds the task row lock, so the active token cannot change
-// during the check.
-func checkDotsRunTokenTx(ctx context.Context, tx pgx.Tx, taskID int64, token string) error {
-	if !validDotsRunToken(token) {
+// checkDotsRunTokenTx refuses unless token is the request's active run token
+// and the request is still claimed. The claim is checked here, not only
+// through the token row, because any path that clears the claim (a reopen, a
+// job release) must end the run, and the check holds for all of them. The
+// caller holds the task row lock, so neither the claim nor the active token
+// can change during the check.
+func checkDotsRunTokenTx(ctx context.Context, tx pgx.Tx, task Task, token string) error {
+	if !validDotsRunToken(token) || task.ClaimedBy == "" {
 		return ErrDotsRunTokenMismatch
 	}
 	var stored string
-	err := tx.QueryRow(ctx, `SELECT token FROM dots_run_tokens WHERE task_id=$1 AND superseded_at IS NULL`, taskID).Scan(&stored)
+	err := tx.QueryRow(ctx, `SELECT token FROM dots_run_tokens WHERE task_id=$1 AND superseded_at IS NULL`, task.ID).Scan(&stored)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrDotsRunTokenMismatch
 	}
@@ -70,6 +73,20 @@ func checkDotsRunTokenTx(ctx context.Context, tx pgx.Tx, taskID int64, token str
 	return nil
 }
 
+// supersedeDotsRunTokensTx ends the request's active run token, if it has
+// one, and returns the reply key of the START that issued it ("" when none).
+// A reopen calls it in the same transaction that clears the claim, so the old
+// run cannot post after the claim is gone; issuance calls it so a new run
+// never meets a leftover active row.
+func supersedeDotsRunTokensTx(ctx context.Context, tx pgx.Tx, taskID int64, now time.Time) (string, error) {
+	var previous string
+	err := tx.QueryRow(ctx, `UPDATE dots_run_tokens SET superseded_at=$2 WHERE task_id=$1 AND superseded_at IS NULL RETURNING issue_key`, taskID, now).Scan(&previous)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	return previous, err
+}
+
 // issueDotsRunTokenTx makes a new token the request's only active one and
 // returns it. issueKey is the reply key of the START that issued it, which
 // is what a replay of that START looks up. A takeover supersedes the active
@@ -80,18 +97,19 @@ func issueDotsRunTokenTx(ctx context.Context, tx pgx.Tx, taskID int64, issueKey,
 	if err != nil {
 		return "", err
 	}
-	var previous string
-	if takeover {
-		err := tx.QueryRow(ctx, `UPDATE dots_run_tokens SET superseded_at=$2 WHERE task_id=$1 AND superseded_at IS NULL RETURNING issue_key`, taskID, now).Scan(&previous)
-		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-			return "", err
-		}
+	previous, err := supersedeDotsRunTokensTx(ctx, tx, taskID, now)
+	if err != nil {
+		return "", err
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO dots_run_tokens(task_id,token,issue_key,takeover,issued_by,issued_at) VALUES($1,$2,$3,$4,$5,$6)`, taskID, token, issueKey, takeover, actor, now); err != nil {
 		return "", err
 	}
-	if takeover {
-		if _, _, err := insertEvent(ctx, tx, taskEventInput{TaskID: taskID, Kind: "source_event", By: actor, Note: "takeover", At: now, Source: "dots-run-token", SourceRef: issueKey, Field: "run_token", FromValue: previous, ToValue: issueKey}); err != nil {
+	if takeover || previous != "" {
+		note := "takeover"
+		if !takeover {
+			note = "superseded by a new run"
+		}
+		if _, _, err := insertEvent(ctx, tx, taskEventInput{TaskID: taskID, Kind: "source_event", By: actor, Note: note, At: now, Source: "dots-run-token", SourceRef: issueKey, Field: "run_token", FromValue: previous, ToValue: issueKey}); err != nil {
 			return "", err
 		}
 	}
