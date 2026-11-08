@@ -43,11 +43,12 @@ on:
 #          deploy-macos, the -race suite against PostgreSQL, the -race suite
 #          without a database on macOS, and the release-build dry run.
 #          deploy.yml runs this tier from a successful main ci run, and on
-#          dispatch, and publishes the deploy-ok commit status. A ci-any-ref
-#          dispatch runs the same jobs as a diagnostic and publishes no
-#          deploy-ok. The deploy tier stays on hosted runners: deploy.yml also
-#          runs on dispatch, and its provenance is the caller's event, not a
-#          main push.
+#          dispatch, plus its schema-compat job (the previous release must
+#          still serve on the target schema, hk 3511), and publishes the
+#          deploy-ok commit status. A ci-any-ref dispatch runs the same jobs
+#          as a diagnostic and publishes no deploy-ok. The deploy tier stays
+#          on hosted runners: deploy.yml also runs on dispatch, and its
+#          provenance is the caller's event, not a main push.
 # A newer push cancels the older run of the same ref, on a pull request and on
 # main alike (operator 2026-11-06, reverses hk 3103): the newest main head is
 # the one that ships, and its green ci-ok covers the heads it contains. A

@@ -466,6 +466,27 @@ func deployWorkflowProblems(raw []byte) []string {
 		add("ci call must pass suite: deploy, got %q", call.With["suite"])
 	}
 
+	compat, ok := wf.Jobs["schema-compat"]
+	if !ok {
+		add("must have a schema-compat job (previous release on the target schema)")
+	} else {
+		if got := fmt.Sprint(needsList(compat.Needs)); got != "[target]" {
+			add("schema-compat must need only target, got %s", got)
+		}
+		if !strings.Contains(stepRuns(compat), "scripts/test-previous-release-schema.sh") {
+			add("schema-compat must run scripts/test-previous-release-schema.sh")
+		}
+		if v, ok := compat.Env["HANDOFFKEEP_TEST_DB_URL"]; !ok || fmt.Sprint(v) == "" {
+			add("schema-compat must set HANDOFFKEEP_TEST_DB_URL")
+		}
+		if _, ok := compat.Services["postgres"]; !ok {
+			add("schema-compat needs a postgres service")
+		}
+		if ro := runsOnText(compat.RunsOn); ro != "ubuntu-latest" {
+			add("schema-compat runs-on is %q, want hosted ubuntu-latest", ro)
+		}
+	}
+
 	status, ok := wf.Jobs["status"]
 	if !ok {
 		add("must have a status job")
@@ -475,8 +496,8 @@ func deployWorkflowProblems(raw []byte) []string {
 		add("the status job must run with always() so a failed tier reports failure")
 	}
 	needs := fmt.Sprint(needsList(status.Needs))
-	if !strings.Contains(needs, "target") || !strings.Contains(needs, "ci") {
-		add("the status job must need target and ci, got %s", needs)
+	if !strings.Contains(needs, "target") || !strings.Contains(needs, "ci") || !strings.Contains(needs, "schema-compat") {
+		add("the status job must need target, ci and schema-compat, got %s", needs)
 	}
 	runs := stepRuns(status)
 	if strings.Count(runs, "context=deploy-ok") != 1 {
@@ -800,7 +821,8 @@ func (p *boolParser) unary() (bool, error) {
 // TestDeployStatusVerdicts runs deploy.yml's status step against a fake gh:
 // success and failure post deploy-ok on the target sha, a cancelled or
 // abandoned tier posts nothing (the head reads unknown), and the context is
-// never anything else.
+// never anything else. The previous-release schema check is part of the tier,
+// so its result fails deploy-ok too.
 func TestDeployStatusVerdicts(t *testing.T) {
 	var wf tierWorkflow
 	if err := yaml.Unmarshal(readWorkflow(t, "deploy.yml"), &wf); err != nil {
@@ -811,15 +833,17 @@ func TestDeployStatusVerdicts(t *testing.T) {
 		t.Fatalf("deploy.yml status job has %d steps, want one", len(steps))
 	}
 	for _, c := range []struct {
-		result string
-		state  string // "" means no status call at all
+		name, result, compat, state string // state "" means no status call at all
 	}{
-		{"success", "success"},
-		{"failure", "failure"},
-		{"cancelled", ""},
-		{"abandoned", ""},
+		{name: "success", result: "success", compat: "success", state: "success"},
+		{name: "failure", result: "failure", compat: "success", state: "failure"},
+		{name: "cancelled", result: "cancelled", compat: "success", state: ""},
+		{name: "abandoned", result: "abandoned", compat: "success", state: ""},
+		{name: "schema-compat-failure", result: "success", compat: "failure", state: "failure"},
+		{name: "schema-compat-cancelled", result: "success", compat: "cancelled", state: ""},
+		{name: "failure-beats-cancelled", result: "failure", compat: "cancelled", state: "failure"},
 	} {
-		t.Run(c.result, func(t *testing.T) {
+		t.Run(c.name, func(t *testing.T) {
 			dir := t.TempDir()
 			call := filepath.Join(dir, "call")
 			gh := fmt.Sprintf(`#!/bin/sh
@@ -830,7 +854,8 @@ printf '%%s\n' "$*" > %q
 			}
 			cmd := exec.Command("bash", "-euo", "pipefail", "-c", steps[0].Run)
 			cmd.Env = []string{"PATH=" + dir + ":" + os.Getenv("PATH"), "GH_TOKEN=x", "GITHUB_REPOSITORY=o/r",
-				"TARGET_SHA=abc123", "RESULT=" + c.result, "RUN_URL=https://example/run", "EVIDENCE=o/r@abc123"}
+				"TARGET_SHA=abc123", "RESULT=" + c.result, "SCHEMA_COMPAT=" + c.compat,
+				"RUN_URL=https://example/run", "EVIDENCE=o/r@abc123"}
 			if logs, err := cmd.CombinedOutput(); err != nil {
 				t.Fatalf("status step failed: %v\n%s", err, logs)
 			}
@@ -842,7 +867,7 @@ printf '%%s\n' "$*" > %q
 				return
 			}
 			if err != nil {
-				t.Fatalf("no status posted for %s: %v", c.result, err)
+				t.Fatalf("no status posted for %s: %v", c.name, err)
 			}
 			got := string(b)
 			for _, want := range []string{"statuses/abc123", "state=" + c.state, "context=deploy-ok"} {
@@ -863,7 +888,7 @@ func TestCITierJobInventory(t *testing.T) {
 		want []string
 	}{
 		{"ci.yml", []string{"auto-tag-test", "build", "ci-ok", "deploy-linux", "deploy-macos", "deploy-release", "main-linux", "pr-store-db", "test", "vitest"}},
-		{"deploy.yml", []string{"ci", "status", "target"}},
+		{"deploy.yml", []string{"ci", "schema-compat", "status", "target"}},
 	} {
 		var wf tierWorkflow
 		if err := yaml.Unmarshal(readWorkflow(t, c.file), &wf); err != nil {
@@ -1000,6 +1025,9 @@ func TestCITierMutantsTurnRed(t *testing.T) {
 		{"deploy-status-on-dispatch-sha", "TARGET_SHA: ${{ needs.target.outputs.sha }}", "TARGET_SHA: ${{ github.sha }}"},
 		{"deploy-status-without-always", "if: ${{ always() && needs.target.result == 'success' }}", "if: ${{ needs.target.result == 'success' }}"},
 		{"deploy-call-without-suite", "      suite: deploy", "      suite: all"},
+		{"deploy-schema-compat-dropped", "            bash scripts/test-previous-release-schema.sh \"$BASE\"\n          else\n            bash scripts/test-previous-release-schema.sh\n", "            true\n          else\n            true\n"},
+		{"deploy-schema-compat-not-in-status", "needs: [target, ci, schema-compat]", "needs: [target, ci]"},
+		{"deploy-schema-compat-no-db", "      HANDOFFKEEP_TEST_DB_URL: postgres://handoffkeep:handoffkeep@localhost:5432/handoffkeep?sslmode=disable\n    steps:\n      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0\n        with:\n          # Full history", "    steps:\n      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0\n        with:\n          # Full history"},
 	} {
 		t.Run(m.name, func(t *testing.T) {
 			src := string(deploy)
