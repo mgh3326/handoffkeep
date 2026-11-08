@@ -135,7 +135,7 @@ func TestRequestTransactionAndQuerySpans(t *testing.T) {
 	monitor, transport := testMonitor(t)
 	conn := protocolConn(t)
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /v1/tasks/{id}", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /v1/tasks/{id}/comments", func(w http.ResponseWriter, r *http.Request) {
 		for i := 0; i < 4; i++ {
 			if _, err := conn.Exec(r.Context(), "SELECT $1::text, 'literal private content', 123", "bound private content"); err != nil {
 				t.Fatal(err)
@@ -144,12 +144,12 @@ func TestRequestTransactionAndQuerySpans(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	})
 	response := httptest.NewRecorder()
-	monitor.Handler(mux).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/tasks/123?token=secret", nil))
+	monitor.Handler(mux).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/tasks/123/comments?token=secret", nil))
 	if len(transport.events) != 1 {
 		t.Fatalf("got %d events", len(transport.events))
 	}
 	event := transport.events[0]
-	if event.Type != "transaction" || event.Transaction != "GET /v1/tasks/{id}" {
+	if event.Type != "transaction" || event.Transaction != "GET /v1/tasks/{id}/comments" {
 		t.Fatalf("unexpected transaction: %q %q", event.Type, event.Transaction)
 	}
 	if event.TransactionInfo.Source != sentry.SourceRoute {
@@ -183,6 +183,7 @@ func TestHealthAndUnsampledRequests(t *testing.T) {
 	for _, rate := range []float64{1, 0} {
 		options := monitor.client.Options()
 		options.TracesSampleRate = rate
+		options.TracesSampler = tracesSampler(rate)
 		client, err := sentry.NewClient(options)
 		if err != nil {
 			t.Fatal(err)
@@ -279,9 +280,9 @@ func TestAbortHandlerIsNotAnError(t *testing.T) {
 func TestHeadOnGetPatternNamesByRealMethod(t *testing.T) {
 	monitor, transport := testMonitor(t)
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /v1/tasks/{id}", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
-	monitor.Handler(mux).ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodHead, "/v1/tasks/1", nil))
-	if len(transport.events) != 1 || transport.events[0].Transaction != "HEAD /v1/tasks/{id}" {
+	mux.HandleFunc("GET /v1/tasks/{id}/comments", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	monitor.Handler(mux).ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodHead, "/v1/tasks/1/comments", nil))
+	if len(transport.events) != 1 || transport.events[0].Transaction != "HEAD /v1/tasks/{id}/comments" {
 		t.Fatalf("got %d events, name %q", len(transport.events), transport.events[0].Transaction)
 	}
 }
@@ -422,5 +423,59 @@ func TestClientGoneIsNotAnError(t *testing.T) {
 	})).ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/v1/tasks/1", nil).WithContext(ctx))
 	if len(transport.events) != 1 || transport.events[0].Type != "transaction" {
 		t.Fatalf("got %d events, want only the transaction", len(transport.events))
+	}
+}
+
+func TestTracesSamplerKeysOnRouteName(t *testing.T) {
+	sample := tracesSampler(0.2)
+	span := func(name string) sentry.SamplingContext {
+		return sentry.SamplingContext{Span: &sentry.Span{Name: name}}
+	}
+	if got := sample(span("GET /v1/tasks/{id}")); got != pollingTraceRate {
+		t.Fatalf("polling route rate=%v, want %v", got, pollingTraceRate)
+	}
+	if got := sample(span("POST /v1/changes/batch")); got != pollingTraceRate {
+		t.Fatalf("heartbeat write rate=%v, want %v", got, pollingTraceRate)
+	}
+	if got := sample(span("HEAD /v1/tasks/{id}")); got != pollingTraceRate {
+		t.Fatalf("HEAD on a polling route rate=%v, want %v", got, pollingTraceRate)
+	}
+	if got := sample(span("POST /v1/tasks/{id}/comments")); got != 0.2 {
+		t.Fatalf("default route rate=%v, want 0.2", got)
+	}
+	if got := sample(span("GET <unmatched>")); got != 0.2 {
+		t.Fatalf("unmatched rate=%v, want the default", got)
+	}
+	// A default below the polling rate is never raised.
+	if got := tracesSampler(0.001)(span("GET /v1/tasks/{id}")); got != 0.001 {
+		t.Fatalf("polling route above a lower default: %v", got)
+	}
+	// Errors are not sampled by rate: SampleRate stays 1 on the client.
+	monitor, _ := testMonitor(t)
+	if monitor.client.Options().SampleRate != 1 {
+		t.Fatal("error SampleRate must stay 1")
+	}
+}
+
+func TestRoutePatternResolvesNestedMuxBeforeServing(t *testing.T) {
+	inner := http.NewServeMux()
+	inner.HandleFunc("GET /v1/tasks/{id}", func(http.ResponseWriter, *http.Request) {})
+	outer := http.NewServeMux()
+	outer.Handle("/", inner)
+	cases := []struct {
+		method, path, want string
+	}{
+		{http.MethodGet, "/v1/tasks/7", "GET /v1/tasks/{id}"},
+		{http.MethodHead, "/v1/tasks/7", "HEAD /v1/tasks/{id}"},
+		{http.MethodGet, "/nope", "GET <unmatched>"},
+	}
+	for _, tc := range cases {
+		r := httptest.NewRequest(tc.method, tc.path, nil)
+		if got := transactionName(r.Method, routePattern(outer, r)); got != tc.want {
+			t.Fatalf("%s %s: name=%q, want %q", tc.method, tc.path, got, tc.want)
+		}
+		if r.Pattern != "" {
+			t.Fatal("resolving the route must not serve the request")
+		}
 	}
 }
