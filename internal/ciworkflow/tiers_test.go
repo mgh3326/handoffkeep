@@ -887,12 +887,16 @@ func TestDeployStatusVerdicts(t *testing.T) {
 		{name: "schema-compat-failure", result: "success", compat: "failure", state: "failure"},
 		{name: "schema-compat-cancelled", result: "success", compat: "cancelled", state: ""},
 		{name: "failure-beats-cancelled", result: "failure", compat: "cancelled", state: "failure"},
+		// GitHub refuses a description over 140 characters, so an overlong
+		// result must still post a short description.
+		{name: "overlong-result", result: strings.Repeat("x", 300), compat: "success", state: "failure"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			dir := t.TempDir()
 			call := filepath.Join(dir, "call")
+			// One argument per line, so the description is read back whole.
 			gh := fmt.Sprintf(`#!/bin/sh
-printf '%%s\n' "$*" > %q
+for a in "$@"; do printf '%%s\n' "$a"; done > %q
 `, call)
 			if err := os.WriteFile(filepath.Join(dir, "gh"), []byte(gh), 0o755); err != nil {
 				t.Fatal(err)
@@ -900,7 +904,7 @@ printf '%%s\n' "$*" > %q
 			cmd := exec.Command("bash", "-euo", "pipefail", "-c", steps[0].Run)
 			cmd.Env = []string{"PATH=" + dir + ":" + os.Getenv("PATH"), "GH_TOKEN=x", "GITHUB_REPOSITORY=o/r",
 				"TARGET_SHA=abc123", "RESULT=" + c.result, "SCHEMA_COMPAT=" + c.compat,
-				"RUN_URL=https://example/run", "EVIDENCE=o/r@abc123"}
+				"RUN_URL=https://example/run"}
 			if logs, err := cmd.CombinedOutput(); err != nil {
 				t.Fatalf("status step failed: %v\n%s", err, logs)
 			}
@@ -919,6 +923,17 @@ printf '%%s\n' "$*" > %q
 				if !strings.Contains(got, want) {
 					t.Errorf("status call %q lacks %q", got, want)
 				}
+			}
+			start := strings.Index(got, "description=")
+			if start < 0 {
+				t.Fatalf("status call %q has no description", got)
+			}
+			desc := got[start+len("description="):]
+			if i := strings.IndexByte(desc, '\n'); i >= 0 {
+				desc = desc[:i]
+			}
+			if len(desc) > 140 {
+				t.Errorf("status description is %d characters, GitHub allows 140: %q", len(desc), desc)
 			}
 		})
 	}
