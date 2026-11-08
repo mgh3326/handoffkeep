@@ -29,7 +29,7 @@ type Document struct {
 // answers not_found.
 func (c Client) GetDocument(ctx context.Context, key string) (Document, bool, error) {
 	var out Document
-	e := c.Call(ctx, "GET", "/v1/documents/"+url.PathEscape(key), nil, &out)
+	e := c.transport().Call(ctx, "GET", "/v1/documents/"+url.PathEscape(key), nil, &out)
 	if ErrorCode(e) == "not_found" {
 		return out, false, nil
 	}
@@ -43,6 +43,6 @@ func (c Client) PutDocument(ctx context.Context, x Document) (Document, bool, er
 		Document Document `json:"document"`
 		Changed  bool     `json:"changed"`
 	}
-	e := c.Call(ctx, "PUT", "/v1/documents/"+url.PathEscape(x.Key), x, &out)
+	e := c.transport().Call(ctx, "PUT", "/v1/documents/"+url.PathEscape(x.Key), x, &out)
 	return out.Document, out.Changed, e
 }

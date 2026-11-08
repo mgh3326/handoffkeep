@@ -1,4 +1,18 @@
-package client
+// Package hktransport is hk's one /v1 transport: the request builder, the
+// redirect-guarded and no-follow senders, the JSON call and the error
+// decoding. Package client (the fleet calls) and internal/remote (the CLI's
+// calls) both send through it.
+//
+// It lives under internal/ so that no other module can build or send a raw
+// hk request: a request carries the bearer token and the Cloudflare Access
+// pair, so every one is held to the configured origin — the builder accepts
+// only a single-slash absolute path and checks the joined URL, and both
+// senders refuse a request whose scheme or host is not the configured one
+// before any network I/O (hk 3544).
+//
+// It imports only the standard library and internal/buildinfo, because
+// package client, which the fleet services import, imports it.
+package hktransport
 
 import (
 	"bytes"
@@ -23,7 +37,9 @@ import (
 var UserAgent = "handoffkeep/" + buildinfo.Revision()
 
 // Client is one hk API caller. The caller sets URL and Token, and the optional
-// Cloudflare Access pair; the package never loads them (see the package doc).
+// Cloudflare Access pair; the package never loads them. URL is an absolute
+// http or https URL with a host and an optional path prefix. Its fields match
+// client.Client's field for field, so each converts to the other.
 type Client struct {
 	URL, Token string
 	// CFAccessClientID and CFAccessClientSecret carry the optional Cloudflare
@@ -35,19 +51,62 @@ type Client struct {
 	HTTP                 *http.Client
 }
 
-// cfAccessConfigured reports whether the service-token pair is present;
+// CFAccessConfigured reports whether the service-token pair is present;
 // whitespace-only values count as unset.
-func (c Client) cfAccessConfigured() bool {
+func (c Client) CFAccessConfigured() bool {
 	return strings.TrimSpace(c.CFAccessClientID) != "" && strings.TrimSpace(c.CFAccessClientSecret) != ""
+}
+
+// ErrInvalidURL refuses a configured URL that is not an absolute http or
+// https URL with a host. The URL is not printed.
+var ErrInvalidURL = errors.New("hk_url_invalid: the configured hk URL must be an absolute http or https URL with a host")
+
+// ErrInvalidPath refuses a request path that is not a single-slash absolute
+// path: joined onto the URL, "@host/", "//host/" or "scheme://host/" names
+// another host. The path is not printed.
+var ErrInvalidPath = errors.New("hk_request_path_invalid: an hk request path must start with a single /")
+
+// ErrForeignOrigin refuses, before any network I/O, a request whose scheme or
+// host is not the configured hk URL's: it would carry the bearer token and
+// the CF Access pair elsewhere.
+var ErrForeignOrigin = errors.New("hk_request_foreign_origin: refused to send an hk request outside the configured scheme and host")
+
+// base parses the configured URL with its trailing slashes removed — the
+// form a request path is joined onto.
+func (c Client) base() (*url.URL, error) {
+	u, e := url.Parse(strings.TrimRight(c.URL, "/"))
+	if e != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.Opaque != "" {
+		return nil, ErrInvalidURL
+	}
+	return u, nil
+}
+
+// sameOrigin reports whether u has the configured URL's scheme and host;
+// hosts compare as normalizeHost folds them.
+func (c Client) sameOrigin(u *url.URL) bool {
+	base, e := c.base()
+	return e == nil && u != nil && strings.EqualFold(u.Scheme, base.Scheme) && normalizeHost(u.Host) == normalizeHost(base.Host)
 }
 
 // NewRequest builds one request against the configured hk URL carrying every
 // header an hk call sends: bearer auth, the explicit User-Agent, and — only
-// when both are configured — the Cloudflare Access service-token pair.
+// when both are configured — the Cloudflare Access service-token pair. path
+// is joined onto the URL (a path prefix on the URL is kept), so it must start
+// with a single "/"; the joined URL must keep the configured scheme and host.
+// Otherwise NewRequest returns an error and no request.
 func (c Client) NewRequest(ctx context.Context, method, path string, body io.Reader) (*http.Request, error) {
+	if _, e := c.base(); e != nil {
+		return nil, e
+	}
+	if !strings.HasPrefix(path, "/") || strings.HasPrefix(path, "//") {
+		return nil, ErrInvalidPath
+	}
 	r, e := http.NewRequestWithContext(ctx, method, strings.TrimRight(c.URL, "/")+path, body)
 	if e != nil {
 		return nil, e
+	}
+	if !c.sameOrigin(r.URL) {
+		return nil, ErrForeignOrigin
 	}
 	r.Header.Set("Authorization", "Bearer "+c.Token)
 	r.Header.Set("User-Agent", UserAgent)
@@ -120,10 +179,11 @@ func (c Client) httpClient() *http.Client {
 // returned as is; callers recognize it with errors.Is.
 var ErrTooManyRedirects = errors.New("stopped after 10 redirects")
 
-// HTTPClientNoFollow never follows a redirect: the presign answer must surface
+// noFollowClient never follows a redirect: the presign answer must surface
 // its Location to the caller rather than forward the CF Access headers — or
-// any headers — to the storage host.
-func (c Client) HTTPClientNoFollow() *http.Client {
+// any headers — to the storage host. It is used only through DoNoFollow, so
+// its errors pass through do.
+func (c Client) noFollowClient() *http.Client {
 	h := c.HTTP
 	if h == nil {
 		h = http.DefaultClient
@@ -142,10 +202,10 @@ func IsRedirectStatus(code int) bool {
 	return false
 }
 
-// cfAccessLoginHost reports whether host is a Cloudflare Access login host
+// CFAccessLoginHost reports whether host is a Cloudflare Access login host
 // (<team>.cloudflareaccess.com or the apex). DNS names compare
 // case-insensitively with an optional trailing dot.
-func cfAccessLoginHost(host string) bool {
+func CFAccessLoginHost(host string) bool {
 	host = strings.ToLower(strings.TrimSuffix(host, "."))
 	return host == "cloudflareaccess.com" || strings.HasSuffix(host, ".cloudflareaccess.com")
 }
@@ -157,10 +217,10 @@ func (c Client) sameOriginHost(h string) bool {
 	return e == nil && normalizeHost(h) == normalizeHost(base.Host)
 }
 
-// sameHostSchemeChange reports whether u stays on the configured hk host but
+// SameHostSchemeChange reports whether u stays on the configured hk host but
 // switches scheme — a redirect in either direction (upgrade or downgrade)
 // moves the request outside the scheme the credentials were configured for.
-func (c Client) sameHostSchemeChange(u *url.URL) bool {
+func (c Client) SameHostSchemeChange(u *url.URL) bool {
 	if !u.IsAbs() || !c.sameOriginHost(u.Host) {
 		return false
 	}
@@ -177,7 +237,7 @@ func (c Client) sameHostSchemeChange(u *url.URL) bool {
 func (c Client) RedirectError(resp *http.Response) error {
 	loc, e := url.Parse(resp.Header.Get("Location"))
 	if e == nil {
-		if cfAccessLoginHost(loc.Hostname()) {
+		if CFAccessLoginHost(loc.Hostname()) {
 			return &HTTPError{Status: resp.StatusCode, Code: "cf_access_login_redirect", Reason: "redirected to the Cloudflare Access login — the CF service token is missing or not allowed for this hostname"}
 		}
 		if loc.Host != "" {
@@ -200,9 +260,25 @@ func (c Client) RedirectError(resp *http.Response) error {
 
 // Do issues r, built by NewRequest, through the redirect-guarded client: a
 // redirect is followed only on the configured host and scheme, at most ten
-// hops, and transport errors are kept leak-free as do describes.
+// hops, and transport errors are kept leak-free as do describes. A request
+// whose scheme or host is not the configured URL's is refused with
+// ErrForeignOrigin before any network I/O.
 func (c Client) Do(r *http.Request) (*http.Response, error) {
+	if !c.sameOrigin(r.URL) {
+		return nil, ErrForeignOrigin
+	}
 	return c.do(c.httpClient(), r)
+}
+
+// DoNoFollow issues r, built by NewRequest, without following any redirect:
+// a 3xx answer is returned with its Location for the caller to judge, and no
+// header reaches the Location's host. The origin check and the leak-free
+// errors are Do's.
+func (c Client) DoNoFollow(r *http.Request) (*http.Response, error) {
+	if !c.sameOrigin(r.URL) {
+		return nil, ErrForeignOrigin
+	}
+	return c.do(c.noFollowClient(), r)
 }
 
 // do issues r through cl and keeps transport errors leak-free: Go packs the

@@ -82,7 +82,7 @@ type TaskComment struct {
 // GetTask reads one task; found is false when the server answers not_found.
 func (c Client) GetTask(ctx context.Context, id int64) (Task, bool, error) {
 	var out Task
-	err := c.Call(ctx, "GET", fmt.Sprintf("/v1/tasks/%d", id), nil, &out)
+	err := c.transport().Call(ctx, "GET", fmt.Sprintf("/v1/tasks/%d", id), nil, &out)
 	if ErrorCode(err) == "not_found" {
 		return out, false, nil
 	}
@@ -101,7 +101,7 @@ func (c Client) ClaimTask(ctx context.Context, id int64, claimedBy, jobID, noJob
 	if noJob != "" {
 		body["no_job"] = noJob
 	}
-	if err := c.Call(ctx, "POST", fmt.Sprintf("/v1/tasks/%d/claim", id), body, &out); err != nil {
+	if err := c.transport().Call(ctx, "POST", fmt.Sprintf("/v1/tasks/%d/claim", id), body, &out); err != nil {
 		return out, err
 	}
 	if !activeTaskState(out.State) {
@@ -121,7 +121,7 @@ func (c Client) ClaimTask(ctx context.Context, id int64, claimedBy, jobID, noJob
 func (c Client) RebindTaskJob(ctx context.Context, id int64, fromJob, toJob, by, reason string) (Task, error) {
 	var out Task
 	body := map[string]string{"from_job": fromJob, "to_job": toJob, "by": by, "reason": reason}
-	err := c.Call(ctx, "POST", fmt.Sprintf("/v1/tasks/%d/rebind", id), body, &out)
+	err := c.transport().Call(ctx, "POST", fmt.Sprintf("/v1/tasks/%d/rebind", id), body, &out)
 	if err != nil {
 		var he *HTTPError
 		if errors.As(err, &he) && he.Code == "" && (he.Status == http.StatusNotFound || he.Status == http.StatusMethodNotAllowed) {
@@ -138,7 +138,7 @@ func (c Client) RebindTaskJob(ctx context.Context, id int64, fromJob, toJob, by,
 // ReopenTask reopens a closed task with reason.
 func (c Client) ReopenTask(ctx context.Context, id int64, reason string) (Task, error) {
 	var out Task
-	err := c.Call(ctx, "POST", fmt.Sprintf("/v1/tasks/%d/reopen", id), struct {
+	err := c.transport().Call(ctx, "POST", fmt.Sprintf("/v1/tasks/%d/reopen", id), struct {
 		Reason string `json:"reason"`
 	}{reason}, &out)
 	return out, err
@@ -149,7 +149,7 @@ func (c Client) ReopenTask(ctx context.Context, id int64, reason string) (Task, 
 // retry after an unknown outcome can add a second comment.
 func (c Client) CommentTask(ctx context.Context, id int64, body string) (TaskComment, error) {
 	var out TaskComment
-	err := c.Call(ctx, "POST", fmt.Sprintf("/v1/tasks/%d/comments", id), map[string]string{"body": body}, &out)
+	err := c.transport().Call(ctx, "POST", fmt.Sprintf("/v1/tasks/%d/comments", id), map[string]string{"body": body}, &out)
 	return out, err
 }
 

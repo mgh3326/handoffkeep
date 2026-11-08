@@ -58,6 +58,6 @@ type DecisionAskResult struct {
 // Linear issue.
 func (c Client) AskDecision(ctx context.Context, taskID int64, in DecisionAskInput) (DecisionAskResult, error) {
 	var out DecisionAskResult
-	err := c.Call(ctx, "POST", fmt.Sprintf("/v1/tasks/%d/decision-request/ask", taskID), in, &out)
+	err := c.transport().Call(ctx, "POST", fmt.Sprintf("/v1/tasks/%d/decision-request/ask", taskID), in, &out)
 	return out, err
 }

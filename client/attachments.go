@@ -11,6 +11,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/mgh3326/handoffkeep/internal/hktransport"
 )
 
 // Attachment is an attachment row as /v1/attachments answers it. It has the
@@ -30,20 +32,21 @@ type Attachment struct {
 // PutAttachment uploads body under name with its MIME type and ref
 // ("kind:id"). created is false when the same bytes were already stored.
 func (c Client) PutAttachment(ctx context.Context, name, mime, ref string, body []byte) (Attachment, bool, error) {
-	r, e := c.NewRequest(ctx, "PUT", "/v1/attachments", bytes.NewReader(body))
+	t := c.transport()
+	r, e := t.NewRequest(ctx, "PUT", "/v1/attachments", bytes.NewReader(body))
 	if e != nil {
 		return Attachment{}, false, e
 	}
 	r.Header.Set("X-HK-Name", name)
 	r.Header.Set("Content-Type", mime)
 	r.Header.Set("X-HK-Ref", ref)
-	resp, e := c.Do(r)
+	resp, e := t.Do(r)
 	if e != nil {
 		return Attachment{}, false, e
 	}
 	defer resp.Body.Close()
-	if IsRedirectStatus(resp.StatusCode) {
-		return Attachment{}, false, c.RedirectError(resp)
+	if hktransport.IsRedirectStatus(resp.StatusCode) {
+		return Attachment{}, false, t.RedirectError(resp)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		var x struct {
@@ -52,7 +55,7 @@ func (c Client) PutAttachment(ctx context.Context, name, mime, ref string, body 
 		_ = json.NewDecoder(resp.Body).Decode(&x)
 		return Attachment{}, false, &HTTPError{Status: resp.StatusCode, Code: x.Error}
 	}
-	if e := HTMLBodyError(resp); e != nil {
+	if e := hktransport.HTMLBodyError(resp); e != nil {
 		return Attachment{}, false, e
 	}
 	var x struct {
@@ -68,11 +71,12 @@ func (c Client) PutAttachment(ctx context.Context, name, mime, ref string, body 
 // returned unless it points at the Access login or changes scheme on the hk
 // host.
 func (c Client) AttachmentURL(ctx context.Context, sha string) (string, error) {
-	r, e := c.NewRequest(ctx, "GET", "/v1/attachments/"+url.PathEscape(sha)+"?presign=1", nil)
+	t := c.transport()
+	r, e := t.NewRequest(ctx, "GET", "/v1/attachments/"+url.PathEscape(sha)+"?presign=1", nil)
 	if e != nil {
 		return "", e
 	}
-	resp, e := c.do(c.HTTPClientNoFollow(), r)
+	resp, e := t.DoNoFollow(r)
 	if e != nil {
 		return "", e
 	}
@@ -83,13 +87,13 @@ func (c Client) AttachmentURL(ctx context.Context, sha string) (string, error) {
 		// missing-token failure as on the JSON routes; a same-host scheme
 		// change is a downgrade or upgrade outside the configured scheme,
 		// not a usable storage URL. The Location value is never printed.
-		if u, pe := url.Parse(loc); pe == nil && (cfAccessLoginHost(u.Hostname()) || c.sameHostSchemeChange(u)) {
-			return "", c.RedirectError(resp)
+		if u, pe := url.Parse(loc); pe == nil && (hktransport.CFAccessLoginHost(u.Hostname()) || t.SameHostSchemeChange(u)) {
+			return "", t.RedirectError(resp)
 		}
 		return loc, nil
 	}
-	if IsRedirectStatus(resp.StatusCode) {
-		return "", c.RedirectError(resp)
+	if hktransport.IsRedirectStatus(resp.StatusCode) {
+		return "", t.RedirectError(resp)
 	}
 	return "", errors.New("attachment_url_failed")
 }
@@ -97,17 +101,18 @@ func (c Client) AttachmentURL(ctx context.Context, sha string) (string, error) {
 // GetAttachment streams an attachment's bytes through hk; the caller closes
 // the body. The returned Attachment carries only the SHA-256 and MIME type.
 func (c Client) GetAttachment(ctx context.Context, sha string) (Attachment, io.ReadCloser, error) {
-	r, e := c.NewRequest(ctx, "GET", "/v1/attachments/"+url.PathEscape(sha), nil)
+	t := c.transport()
+	r, e := t.NewRequest(ctx, "GET", "/v1/attachments/"+url.PathEscape(sha), nil)
 	if e != nil {
 		return Attachment{}, nil, e
 	}
-	resp, e := c.Do(r)
+	resp, e := t.Do(r)
 	if e != nil {
 		return Attachment{}, nil, e
 	}
-	if IsRedirectStatus(resp.StatusCode) {
+	if hktransport.IsRedirectStatus(resp.StatusCode) {
 		defer resp.Body.Close()
-		return Attachment{}, nil, c.RedirectError(resp)
+		return Attachment{}, nil, t.RedirectError(resp)
 	}
 	if resp.StatusCode != 200 {
 		defer resp.Body.Close()
@@ -120,10 +125,10 @@ func (c Client) GetAttachment(ctx context.Context, sha string) (Attachment, io.R
 	// always sets Content-Disposition: attachment on this route, so a real
 	// .html attachment still downloads. Without keys the historical
 	// passthrough is unchanged.
-	if c.cfAccessConfigured() {
+	if t.CFAccessConfigured() {
 		cd, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Disposition"))
 		if !strings.EqualFold(cd, "attachment") {
-			if e := HTMLBodyError(resp); e != nil {
+			if e := hktransport.HTMLBodyError(resp); e != nil {
 				defer resp.Body.Close()
 				return Attachment{}, nil, e
 			}

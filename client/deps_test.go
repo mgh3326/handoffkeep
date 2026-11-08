@@ -11,8 +11,9 @@ import (
 // The fleet services import this package, so it must not drag hk's store,
 // pgx or any other module dependency into their builds (hk:doc
 // decision/2026-11-08/fleet-dependency-boundaries §1, §5). Its whole
-// dependency closure is the standard library plus internal/buildinfo, which
-// is itself stdlib-only.
+// dependency closure is the standard library plus internal/hktransport (the
+// transport every call sends through) and internal/buildinfo, both
+// themselves stdlib-only.
 func TestClientImportsOnlyStandardLibrary(t *testing.T) {
 	gobin, err := exec.LookPath("go")
 	if err != nil {
@@ -23,8 +24,9 @@ func TestClientImportsOnlyStandardLibrary(t *testing.T) {
 		t.Fatalf("go list -deps: %v\n%s", err, out)
 	}
 	allowed := map[string]bool{
-		"github.com/mgh3326/handoffkeep/client":             true,
-		"github.com/mgh3326/handoffkeep/internal/buildinfo": true,
+		"github.com/mgh3326/handoffkeep/client":               true,
+		"github.com/mgh3326/handoffkeep/internal/buildinfo":   true,
+		"github.com/mgh3326/handoffkeep/internal/hktransport": true,
 	}
 	self := false
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {

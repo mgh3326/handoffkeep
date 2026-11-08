@@ -13,19 +13,22 @@ import (
 	"strings"
 
 	"github.com/mgh3326/handoffkeep/client"
+	"github.com/mgh3326/handoffkeep/internal/hktransport"
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
-// Client is the hk CLI's /v1 client: package client's Client — the same
-// fields and the one transport — with the store-typed methods the CLI and the
-// stdio MCP call. Transport calls go through client.Client(c).
-type Client client.Client
+// Client is the hk CLI's /v1 client, with the store-typed methods the CLI and
+// the stdio MCP call. It has package client's fields, so the calls client
+// already makes go through client.Client(c); every other call builds and
+// sends its request through hk's module-internal transport,
+// hktransport.Client(c), which holds each request to the configured origin.
+type Client hktransport.Client
 
-// UserAgent is stamped on every hk request (client.UserAgent): Cloudflare
-// Access can be configured to block the default Go user agent before a
-// request reaches the service, and a distinct UA keeps hk calls identifiable
-// in Access logs.
-var UserAgent = client.UserAgent
+// UserAgent is stamped on every hk request (hktransport.UserAgent):
+// Cloudflare Access can be configured to block the default Go user agent
+// before a request reaches the service, and a distinct UA keeps hk calls
+// identifiable in Access logs.
+var UserAgent = hktransport.UserAgent
 
 // CFAccessPairError rejects a half-configured Cloudflare Access service
 // token: one key without the other is a config error that names the missing
@@ -42,29 +45,29 @@ func CFAccessPairError(id, secret string) error {
 }
 
 // ErrTooManyRedirects is the transport's own redirect cap
-// (client.ErrTooManyRedirects); callers recognize it with errors.Is.
-var ErrTooManyRedirects = client.ErrTooManyRedirects
+// (hktransport.ErrTooManyRedirects); callers recognize it with errors.Is.
+var ErrTooManyRedirects = hktransport.ErrTooManyRedirects
 
 // HTTPError is a response the server actually sent with a non-2xx status
-// (client.HTTPError). Any other error from a call — transport failure,
+// (hktransport.HTTPError). Any other error from a call — transport failure,
 // timeout, an undecodable 2xx body — means the outcome of a write is unknown:
 // the server may have committed it.
-type HTTPError = client.HTTPError
+type HTTPError = hktransport.HTTPError
 
 // ErrorCode returns the server's error code ("not_found", "queue_empty", ...)
 // when err is an *HTTPError, and "" otherwise. Match codes with it, never by
 // comparing err.Error() text.
-func ErrorCode(err error) string { return client.ErrorCode(err) }
+func ErrorCode(err error) string { return hktransport.ErrorCode(err) }
 
 // SecretPattern reports the pattern the server named when it refused a write
 // as secret_like_content.
-func SecretPattern(err error) (string, bool) { return client.SecretPattern(err) }
+func SecretPattern(err error) (string, bool) { return hktransport.SecretPattern(err) }
 
-// call is client.Client.Call, except that a change-feed reader's expired
+// call is hktransport.Client.Call, except that a change-feed reader's expired
 // cursor (410 {"reset":true,"min_sync_id":N}) surfaces as *store.SyncReset,
 // as the store's own feed reports it.
 func (c Client) call(ctx context.Context, method, path string, input, output any) error {
-	err := client.Client(c).Call(ctx, method, path, input, output)
+	err := hktransport.Client(c).Call(ctx, method, path, input, output)
 	var he *HTTPError
 	if errors.As(err, &he) && he.Status == http.StatusGone && he.Reset {
 		return &store.SyncReset{MinSyncID: he.MinSyncID}
@@ -945,7 +948,7 @@ func (c Client) ExportTasks(ctx context.Context, lane, state, parentLane string,
 	if limit > 0 {
 		q.Set("limit", fmt.Sprint(limit))
 	}
-	t := client.Client(c)
+	t := hktransport.Client(c)
 	r, e := t.NewRequest(ctx, "GET", "/v1/tasks/export?"+q.Encode(), nil)
 	if e != nil {
 		return nil, e
@@ -955,7 +958,7 @@ func (c Client) ExportTasks(ctx context.Context, lane, state, parentLane string,
 		return nil, e
 	}
 	defer resp.Body.Close()
-	if client.IsRedirectStatus(resp.StatusCode) {
+	if hktransport.IsRedirectStatus(resp.StatusCode) {
 		return nil, t.RedirectError(resp)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -965,7 +968,7 @@ func (c Client) ExportTasks(ctx context.Context, lane, state, parentLane string,
 		_ = json.NewDecoder(resp.Body).Decode(&x)
 		return nil, &HTTPError{Status: resp.StatusCode, Code: x.Error}
 	}
-	if e := client.HTMLBodyError(resp); e != nil {
+	if e := hktransport.HTMLBodyError(resp); e != nil {
 		return nil, e
 	}
 	body, e := io.ReadAll(resp.Body)
