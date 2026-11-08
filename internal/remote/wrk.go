@@ -10,13 +10,15 @@ import (
 	"net"
 	"net/http"
 
+	"github.com/mgh3326/handoffkeep/internal/hktransport"
 	"github.com/mgh3326/handoffkeep/internal/wrkrecords"
 )
 
 // WrkCall sends exactly one request, buffers and validates its entire response,
 // and returns only a closed code on failure. It never forwards a redirect.
 func (c Client) WrkCall(ctx context.Context, method, path string, body []byte, key, def string) ([]byte, string) {
-	req, e := c.newRequest(ctx, method, path, io.LimitReader(bytes.NewReader(body), int64(len(body))))
+	t := hktransport.Client(c)
+	req, e := t.NewRequest(ctx, method, path, io.LimitReader(bytes.NewReader(body), int64(len(body))))
 	if e != nil {
 		return nil, "transport_unavailable"
 	}
@@ -24,20 +26,24 @@ func (c Client) WrkCall(ctx context.Context, method, path string, body []byte, k
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Idempotency-Key", key)
 	}
-	hc := c.httpClientNoFollow()
 	// A fresh connection also prevents net/http's implicit retry on a reused
 	// connection; wrk's durable retry policy belongs exclusively to C1.
+	hc := *http.DefaultClient
+	if t.HTTP != nil {
+		hc = *t.HTTP
+	}
 	transport := hc.Transport
 	if transport == nil {
 		transport = http.DefaultTransport
 	}
-	if t, ok := transport.(*http.Transport); ok {
-		clone := t.Clone()
+	if tr, ok := transport.(*http.Transport); ok {
+		clone := tr.Clone()
 		clone.DisableKeepAlives = true
 		hc.Transport = clone
 		defer clone.CloseIdleConnections()
 	}
-	response, e := hc.Do(req)
+	t.HTTP = &hc
+	response, e := t.DoNoFollow(req)
 	if e != nil {
 		var op *net.OpError
 		if errors.As(e, &op) && op.Op == "dial" {

@@ -13,6 +13,11 @@ and leave the old code as is unless the change already touches it.
   bundle is built from `web/console` into `internal/ui/static/console`
   (committed).
 - `internal/remote` — the HTTP client the CLI uses against `/v1`.
+- `client` — the public `/v1` client: the fleet calls and their wire types
+  only, no raw request primitive. It never imports `internal/store`
+  (`client/README.md`).
+- `internal/hktransport` — the one `/v1` transport behind `client` and
+  `internal/remote`. It holds every request to the configured origin.
 - `internal/testdb` — how tests reach Postgres.
 - `tests/` — cross-package integration tests against a real server and DB.
 

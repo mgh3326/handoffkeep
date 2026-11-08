@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/mgh3326/handoffkeep/internal/hktransport"
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
@@ -21,17 +22,18 @@ func (c Client) SyncDelta(ctx context.Context, after int64, limit int) ([]store.
 	if after < 0 || limit < 1 || limit > store.SyncLimit {
 		return nil, meta, store.ErrInvalidSync
 	}
-	req, err := c.newRequest(ctx, http.MethodGet, "/v1/sync/delta?after="+strconv.FormatInt(after, 10)+"&limit="+strconv.Itoa(limit), nil)
+	t := hktransport.Client(c)
+	req, err := t.NewRequest(ctx, http.MethodGet, "/v1/sync/delta?after="+strconv.FormatInt(after, 10)+"&limit="+strconv.Itoa(limit), nil)
 	if err != nil {
 		return nil, meta, err
 	}
-	resp, err := c.do(c.httpClient(), req)
+	resp, err := t.Do(req)
 	if err != nil {
 		return nil, meta, err
 	}
 	defer resp.Body.Close()
-	if isRedirectStatus(resp.StatusCode) {
-		return nil, meta, c.redirectError(resp)
+	if hktransport.IsRedirectStatus(resp.StatusCode) {
+		return nil, meta, t.RedirectError(resp)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		var body struct {
@@ -45,7 +47,7 @@ func (c Client) SyncDelta(ctx context.Context, after int64, limit int) ([]store.
 		}
 		return nil, meta, &HTTPError{Status: resp.StatusCode, Code: body.Error}
 	}
-	if err = htmlBodyError(resp); err != nil {
+	if err = hktransport.HTMLBodyError(resp); err != nil {
 		return nil, meta, err
 	}
 	kind, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
