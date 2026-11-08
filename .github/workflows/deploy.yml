@@ -127,11 +127,13 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
-          # Check out the revision that defines this workflow, not the target:
-          # a dispatch may name an old head that predates this script, and the
-          # job must still run. Full history and every tag so both the target
-          # and the previous release resolve; the script builds both from their
+          # Pin the revision that defines this workflow, not whatever the event
+          # carried: a dispatch (or a re-run) can name an old ref that predates
+          # this script, and the job must still run. workflow_sha is the commit
+          # of the workflow file. Full history and every tag so the target and
+          # the previous release resolve; the script builds both from their
           # commits, never the working tree.
+          ref: ${{ github.workflow_sha }}
           fetch-depth: 0
       - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
         with: {go-version-file: go.mod}

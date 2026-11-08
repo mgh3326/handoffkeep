@@ -497,21 +497,29 @@ func deployWorkflowProblems(raw []byte) []string {
 		if ro := runsOnText(compat.RunsOn); ro != "ubuntu-latest" {
 			add("schema-compat runs-on is %q, want hosted ubuntu-latest", ro)
 		}
-		// The checkout must stay on the workflow revision: a dispatch may
-		// name an old head that predates the script, and the job has to keep
-		// running (review on #237). The target reaches the script as
-		// TARGET_SHA, which it builds from that commit.
-		fullHistory := false
+		// The checkout must pin the workflow revision itself: a dispatch or a
+		// re-run can name an old ref that predates the script, and the job has
+		// to keep running (reviews on #237). github.workflow_sha is the commit
+		// of the workflow file. The target reaches the script as TARGET_SHA,
+		// which it builds from that commit.
+		fullHistory, pinned := false, false
 		for _, s := range compat.Steps {
 			if !hasAction(s.Uses, "actions/checkout") {
 				continue
 			}
-			if v, ok := s.With["ref"].(string); ok && v != "" {
-				add("schema-compat checkout must not pin the target ref %q; it checks out the workflow revision", v)
+			if v, _ := s.With["ref"].(string); v != "" {
+				if v != "${{ github.workflow_sha }}" {
+					add("schema-compat checkout ref is %q, want ${{ github.workflow_sha }} so an old dispatch ref cannot drop the script", v)
+				} else {
+					pinned = true
+				}
 			}
 			if fmt.Sprint(s.With["fetch-depth"]) == "0" {
 				fullHistory = true
 			}
+		}
+		if !pinned {
+			add("schema-compat checkout must pin ref: ${{ github.workflow_sha }}")
 		}
 		if !fullHistory {
 			add("schema-compat checkout needs fetch-depth: 0 so the target and base commits resolve")
@@ -1061,8 +1069,9 @@ func TestCITierMutantsTurnRed(t *testing.T) {
 		{"deploy-call-without-suite", "      suite: deploy", "      suite: all"},
 		{"deploy-schema-compat-dropped", "            bash scripts/test-previous-release-schema.sh \"$BASE\"\n          else\n            bash scripts/test-previous-release-schema.sh\n", "            true\n          else\n            true\n"},
 		{"deploy-schema-compat-not-in-status", "needs: [target, ci, schema-compat]", "needs: [target, ci]"},
-		{"deploy-schema-compat-no-db", "      HANDOFFKEEP_TEST_DB_URL: postgres://handoffkeep:handoffkeep@localhost:5432/handoffkeep?sslmode=disable\n    steps:\n      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0\n        with:\n          # Check out the revision", "    steps:\n      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0\n        with:\n          # Check out the revision"},
-		{"deploy-schema-compat-pins-target-ref", "          fetch-depth: 0\n      - uses: actions/setup-go", "          ref: ${{ needs.target.outputs.sha }}\n          fetch-depth: 0\n      - uses: actions/setup-go"},
+		{"deploy-schema-compat-no-db", "      HANDOFFKEEP_TEST_DB_URL: postgres://handoffkeep:handoffkeep@localhost:5432/handoffkeep?sslmode=disable\n    steps:\n      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0\n        with:", "    steps:\n      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0\n        with:"},
+		{"deploy-schema-compat-pins-target-ref", "          ref: ${{ github.workflow_sha }}", "          ref: ${{ needs.target.outputs.sha }}"},
+		{"deploy-schema-compat-unpinned", "          ref: ${{ github.workflow_sha }}\n", ""},
 		{"deploy-schema-compat-no-target-sha", "          TARGET_SHA: ${{ needs.target.outputs.sha }}\n", ""},
 	} {
 		t.Run(m.name, func(t *testing.T) {
