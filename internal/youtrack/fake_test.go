@@ -38,6 +38,16 @@ type fakeStore struct {
 	projectIDs   int
 	nextTaskID   int64
 	nextComment  int64
+
+	// The reads the issue text and the decision mirror make.
+	stalled         map[int64]bool
+	events          map[int64][]store.TaskEvent
+	docs            map[string]store.Document
+	changes         map[int64][]store.Change
+	changeStates    map[string]store.ChangeView
+	decisions       []store.DecisionRecord
+	decisionMirrors map[int64]store.YouTrackDecisionMirror
+	commentLinks    map[int64]string
 }
 
 func newFakeStore() *fakeStore {
@@ -63,6 +73,14 @@ func newFakeStore() *fakeStore {
 		pushed:       map[int64]bool{},
 		nextTaskID:   100,
 		nextComment:  200,
+
+		stalled:         map[int64]bool{},
+		events:          map[int64][]store.TaskEvent{},
+		docs:            map[string]store.Document{},
+		changes:         map[int64][]store.Change{},
+		changeStates:    map[string]store.ChangeView{},
+		decisionMirrors: map[int64]store.YouTrackDecisionMirror{},
+		commentLinks:    map[int64]string{},
 	}
 }
 
@@ -415,7 +433,7 @@ func (f *fakeStore) DueYouTrackPushTasks(_ context.Context, limit int) ([]store.
 		if !mirrored && IsSettled(task.State) {
 			continue
 		}
-		if mirrored && mirror.SyncedAt != nil && !task.UpdatedAt.After(*mirror.SyncedAt) {
+		if mirrored && mirror.SyncedAt != nil && !task.UpdatedAt.After(*mirror.SyncedAt) && !inFlight(task.State) {
 			continue
 		}
 		out = append(out, task)
@@ -428,6 +446,9 @@ func (f *fakeStore) UnpushedYouTrackComments(_ context.Context, taskID, afterID 
 	defer f.mu.Unlock()
 	out := []store.TaskComment{}
 	for _, c := range f.comments[taskID] {
+		if _, linked := f.commentLinks[c.ID]; linked {
+			continue
+		}
 		if c.ID > afterID && c.Author != store.YouTrackOwnedActor && len(out) < limit {
 			out = append(out, c)
 		}
@@ -435,7 +456,15 @@ func (f *fakeStore) UnpushedYouTrackComments(_ context.Context, taskID, afterID 
 	return out, nil
 }
 
-func (f *fakeStore) LinkYouTrackComment(_ context.Context, _ int64, _ int64, _ string, _ time.Time) error {
+func (f *fakeStore) LinkYouTrackComment(_ context.Context, _ int64, hkCommentID int64, youtrackCommentID string, _ time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if youtrackCommentID == "" {
+		return store.ErrYouTrackActivityInput
+	}
+	if _, ok := f.commentLinks[hkCommentID]; !ok {
+		f.commentLinks[hkCommentID] = youtrackCommentID
+	}
 	return nil
 }
 

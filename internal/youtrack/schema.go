@@ -16,6 +16,8 @@ type Schema struct {
 	HKIDField     string
 	PriorityField string
 	PRField       string
+	ProjectField  string
+	StallField    string
 	StateBundle   string
 }
 
@@ -29,9 +31,28 @@ func DefaultSchema() Schema {
 		HKIDField:     "hk ID",
 		PriorityField: "hk 우선순위",
 		PRField:       "PR",
+		ProjectField:  "hk 프로젝트",
+		StallField:    "멈춤",
 		StateBundle:   "hk 상태",
 	}
 }
+
+// DecisionProject is the short name of the YouTrack project that holds one
+// issue per hk decision request. Its fields are the 결정 fields below; the
+// lane and hk ID fields are shared with the task project.
+const DecisionProject = "DEC"
+
+// Decision issue fields (the DEC project). The names are the ones the Python
+// mirror created, so the existing issues keep their values.
+const (
+	DecStateField       = "결정 상태"
+	DecDueField         = "결정 기한"
+	DecIDField          = "결정 ID"
+	DecRecommendedField = "권장"
+)
+
+// StallLabel is the value of the 멈춤 enum on a stalled task.
+const StallLabel = "멈춤"
 
 // StateLabels is the one hk state → YouTrack value table. The keys are the
 // twelve canonical store states.

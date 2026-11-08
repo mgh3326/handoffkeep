@@ -109,11 +109,12 @@ func (c *Client) fetchMe(ctx context.Context) (User, error) {
 }
 
 // CustomField is one field to write on an issue. Type is the issue-field
-// $type; Value is a string, an int, or an enum object.
+// $type; Value is a string, an int, or an enum object. A nil Value is sent as
+// JSON null, which clears the field on an update (see EmptyEnumField).
 type CustomField struct {
 	Type  string `json:"$type"`
 	Name  string `json:"name"`
-	Value any    `json:"value,omitempty"`
+	Value any    `json:"value"`
 }
 
 type EnumValue struct {
@@ -137,6 +138,20 @@ func IntField(name string, value int) CustomField {
 
 func EnumField(name, value string) CustomField {
 	return CustomField{Type: fieldSingleEnum, Name: name, Value: EnumValue{Type: "EnumBundleElement", Name: value}}
+}
+
+// EmptyEnumField clears an enum field on an update.
+func EmptyEnumField(name string) CustomField {
+	return CustomField{Type: fieldSingleEnum, Name: name, Value: nil}
+}
+
+// DateField writes a date as epoch milliseconds, or clears it when unset.
+func DateField(name string, ms *int64) CustomField {
+	f := CustomField{Type: "DateIssueCustomField", Name: name}
+	if ms != nil {
+		f.Value = *ms
+	}
+	return f
 }
 
 func StateField(name, value string, resolved bool) CustomField {

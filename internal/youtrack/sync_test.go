@@ -38,13 +38,14 @@ func TestSyncPushCreatesIssueWithKoreanSummaryAndComments(t *testing.T) {
 	if created.Project == nil || created.Project.ShortName != "HK" {
 		t.Fatalf("project=%+v", created.Project)
 	}
-	if !strings.HasPrefix(created.Description, "https://console.robinco.dev/ui/tasks/"+strconv.FormatInt(task.ID, 10)+"\n\n") {
+	if !strings.HasPrefix(created.Description, "[hk 콘솔에서 열기](https://console.robinco.dev/ui/tasks/"+strconv.FormatInt(task.ID, 10)+")") {
 		t.Fatalf("description=%q", created.Description)
 	}
-	if !strings.Contains(created.Description, "English title") {
+	if !strings.Contains(created.Description, "<sub>원문 제목: English title</sub>") {
 		t.Fatalf("description lost the original title: %q", created.Description)
 	}
-	if len(yt.comments) != 1 || yt.comments[0] != "첫 코멘트" {
+	// A comment is posted with its author and time, as the Python mirror wrote it.
+	if len(yt.comments) != 1 || !strings.HasPrefix(yt.comments[0], "**에이전트 메모 (worker)** · ") || !strings.HasSuffix(yt.comments[0], "\n\n첫 코멘트") {
 		t.Fatalf("comments=%v", yt.comments)
 	}
 	mirror, ok := fs.mirrors[task.ID]

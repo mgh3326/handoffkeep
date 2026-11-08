@@ -524,6 +524,9 @@ func (s *Store) DueYouTrackPushTasks(ctx context.Context, limit int) ([]Task, er
 		LEFT JOIN task_origins o ON o.task_id=tasks.id AND o.provider='youtrack'
 		WHERE (o.task_id IS NULL AND tasks.state NOT IN (`+settledStatesSQL+`))
 		   OR (o.task_id IS NOT NULL AND (o.synced_at IS NULL OR tasks.updated_at > o.synced_at))
+		   -- The PR section of the issue follows the PR's gate and checks, which
+		   -- move without a task write, so a started task is pushed every pass.
+		   OR (o.task_id IS NOT NULL AND tasks.state IN ('developing','reviewing'))
 		   OR ((o.task_id IS NOT NULL OR tasks.state NOT IN (`+settledStatesSQL+`))
 		       AND EXISTS (SELECT 1 FROM task_comments c
 		                   WHERE c.task_id=tasks.id AND c.author<>$2
