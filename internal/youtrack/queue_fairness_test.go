@@ -351,3 +351,42 @@ func TestSkippedTaskMovedToAMappedProjectIsPushed(t *testing.T) {
 		t.Fatal("a task moved to a mapped project was stranded by its earlier skip")
 	}
 }
+
+// A decision adopted from the Python state is mapped only when its issue is in
+// the DEC project. The next sync writes the DEC body into whatever issue the
+// mapping names, so a mapping to an issue elsewhere must be refused.
+func TestAdoptDecisionRefusesAnIssueOutsideTheDecisionProject(t *testing.T) {
+	fs := newFakeStore()
+	yt := newFakeYouTrack()
+	yt.issues["7-1"] = Issue{ID: "7-1", IDReadable: "HK-7", Project: &ProjectRef{ID: "0-1", ShortName: "HK"}}
+	yt.issues["8-1"] = Issue{ID: "8-1", IDReadable: "DEC-8", Project: &ProjectRef{ID: "0-3", ShortName: "DEC"}}
+	svc := newTestService(t, yt, fs)
+	ctx := context.Background()
+	state := AdoptState{Decisions: map[string]AdoptDecisionRow{
+		"5": {Issue: "7-1"},
+		"6": {Issue: "8-1"},
+	}}
+
+	report, err := svc.Adopt(ctx, state, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actions := map[string]string{}
+	for _, a := range report.Actions {
+		if a.Kind == "decision" {
+			actions[a.ID] = a.Action
+		}
+	}
+	if actions["5"] != "project_mismatch" {
+		t.Fatalf("decision 5 in HK project: action=%q, want project_mismatch", actions["5"])
+	}
+	if actions["6"] != "mapped" {
+		t.Fatalf("decision 6 in DEC project: action=%q, want mapped", actions["6"])
+	}
+	if _, ok := fs.decisionMirrors[5]; ok {
+		t.Fatal("a decision mapped to an issue outside DEC was stored")
+	}
+	if _, ok := fs.decisionMirrors[6]; !ok {
+		t.Fatal("a decision in DEC was not stored")
+	}
+}

@@ -155,6 +155,17 @@ func (s *Service) adoptDecision(ctx context.Context, key string, row AdoptDecisi
 		return action, err
 	}
 	action.ReadableID = issue.IDReadable
+	// A decision mirror row is trusted by the next sync, which writes the DEC
+	// body and fields into the issue. An issue outside the DEC project must not
+	// be stored as one.
+	decProjectID, err := s.client.ProjectID(ctx, DecisionProject)
+	if err != nil {
+		return action, err
+	}
+	if issue.Project == nil || issue.Project.ID != decProjectID {
+		action.Action = "project_mismatch"
+		return action, nil
+	}
 	action.Action = "mapped"
 	if dryRun {
 		return action, nil
