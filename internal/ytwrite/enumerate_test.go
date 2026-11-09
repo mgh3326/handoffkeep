@@ -3,6 +3,7 @@ package ytwrite_test
 import (
 	"context"
 	"errors"
+	"strconv"
 	"testing"
 	"time"
 
@@ -43,4 +44,24 @@ func TestEnumerateStableComments(t *testing.T) {
 			t.Fatalf("calls %d, err %v", calls, err)
 		}
 	})
+}
+
+// An issue that keeps paging is an error with its own name, not an endless
+// read (l5 verdict: the enumeration had no cap).
+func TestEnumerateStableCommentsIsBounded(t *testing.T) {
+	stop := ytwrite.MaxEnumeratedComments + 200
+	page := func(_ context.Context, skip, top int) ([]ytwrite.RemoteComment, error) {
+		if skip >= stop {
+			return nil, nil
+		}
+		out := make([]ytwrite.RemoteComment, 0, top)
+		for i := skip; i < skip+top && i < stop; i++ {
+			out = append(out, ytwrite.RemoteComment{ID: strconv.Itoa(i)})
+		}
+		return out, nil
+	}
+	got, err := ytwrite.EnumerateStableComments(context.Background(), 100, page)
+	if !errors.Is(err, ytwrite.ErrEnumerationTooLarge) || got != nil {
+		t.Fatalf("got %d comments, err %v; want ErrEnumerationTooLarge", len(got), err)
+	}
 }

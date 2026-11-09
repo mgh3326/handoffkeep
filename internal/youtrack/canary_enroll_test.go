@@ -1,0 +1,119 @@
+package youtrack
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"testing"
+
+	"github.com/mgh3326/handoffkeep/internal/store"
+)
+
+type issueReader struct {
+	issues map[string]Issue
+	err    error
+	calls  int
+}
+
+func (r *issueReader) GetIssue(_ context.Context, id string) (Issue, error) {
+	r.calls++
+	if r.err != nil {
+		return Issue{}, r.err
+	}
+	issue, ok := r.issues[id]
+	if !ok {
+		return Issue{}, fmt.Errorf("%w: issue %s", ErrNotFound, id)
+	}
+	return issue, nil
+}
+
+const canaryTenant = "mgh3326.youtrack.cloud"
+
+func issueFor(readable, summary string) Issue {
+	return Issue{ID: "2-77", IDReadable: readable, Summary: summary, Project: &ProjectRef{ID: "0-2", ShortName: "HK"}}
+}
+
+func candidate(task int64) store.YTCanaryCandidate {
+	return store.YTCanaryCandidate{TaskID: task, Project: "handoffkeep", ShortName: "HK", ProjectID: "0-2"}
+}
+
+func TestCommentMappingChecksWholeTaskNumber(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		summary string
+		ok      bool
+	}{
+		{"#37 카나리", true},
+		{"#37", true},
+		{"#37\tx", true},
+		{"#3739 another task", false},
+		{"#037 zero-padded", false},
+		{"#3 shorter", false},
+		{"37 no hash", false},
+		{"x #37", false},
+	} {
+		r := &issueReader{issues: map[string]Issue{"HK-37": issueFor("HK-37", tc.summary)}}
+		got, err := VerifyCanary(ctx, r, canaryTenant, candidate(37))
+		if tc.ok != (err == nil) {
+			t.Errorf("summary %q: err = %v, want ok=%v", tc.summary, err, tc.ok)
+			continue
+		}
+		if !tc.ok && !errors.Is(err, ErrCanaryRefused) {
+			t.Errorf("summary %q: err = %v, want ErrCanaryRefused", tc.summary, err)
+		}
+		if tc.ok && (got.TaskID != 37 || got.IssueID != "2-77" || got.IssueReadable != "HK-37" || got.Tenant != canaryTenant || got.ProjectID != "0-2") {
+			t.Errorf("summary %q: binding %+v", tc.summary, got)
+		}
+	}
+}
+
+func TestCommentMappingRequiresExplicitProject(t *testing.T) {
+	ctx := context.Background()
+	r := &issueReader{issues: map[string]Issue{"OTHER-7": issueFor("OTHER-7", "#7 x")}}
+	for name, c := range map[string]store.YTCanaryCandidate{
+		"no project":                 {TaskID: 7},
+		"unmapped project":           {TaskID: 7, Project: "scratch"},
+		"mapping with no short name": {TaskID: 7, Project: "scratch", ProjectID: "0-2"},
+	} {
+		if _, err := VerifyCanary(ctx, r, canaryTenant, c); !errors.Is(err, ErrCanaryRefused) {
+			t.Errorf("%s: err = %v, want ErrCanaryRefused", name, err)
+		}
+	}
+	if r.calls != 0 {
+		t.Fatalf("an unmapped task reached YouTrack (%d reads)", r.calls)
+	}
+}
+
+// Every mapping hk keeps must name the same issue, or the enrollment is
+// refused before any comment could be sent there.
+func TestCommentMappingConflictBeforeSend(t *testing.T) {
+	ctx := context.Background()
+	good := func() *issueReader {
+		return &issueReader{issues: map[string]Issue{"HK-7": issueFor("HK-7", "#7 x")}}
+	}
+	refused := map[string]struct {
+		c store.YTCanaryCandidate
+		r *issueReader
+	}{
+		"old mirror names another issue":  {store.YTCanaryCandidate{TaskID: 7, Project: "handoffkeep", ShortName: "HK", ProjectID: "0-2", MirrorIssueID: "2-55", MirrorTenant: canaryTenant}, good()},
+		"old mirror is on another tenant": {store.YTCanaryCandidate{TaskID: 7, Project: "handoffkeep", ShortName: "HK", ProjectID: "0-2", MirrorIssueID: "2-77", MirrorTenant: "other.youtrack.cloud"}, good()},
+		"entity map names another issue":  {store.YTCanaryCandidate{TaskID: 7, Project: "handoffkeep", ShortName: "HK", ProjectID: "0-2", MappedIssueID: "2-99"}, good()},
+		"issue is in another project":     {store.YTCanaryCandidate{TaskID: 7, Project: "handoffkeep", ShortName: "HK", ProjectID: "0-9"}, good()},
+		"moved issue answers another id":  {candidate(7), &issueReader{issues: map[string]Issue{"HK-7": issueFor("PW-7", "#7 x")}}},
+		"no such issue":                   {candidate(7), &issueReader{}},
+	}
+	for name, tc := range refused {
+		if _, err := VerifyCanary(ctx, tc.r, canaryTenant, tc.c); !errors.Is(err, ErrCanaryRefused) {
+			t.Errorf("%s: err = %v, want ErrCanaryRefused", name, err)
+		}
+	}
+	agree := store.YTCanaryCandidate{TaskID: 7, Project: "handoffkeep", ShortName: "HK", ProjectID: "0-2", MirrorIssueID: "2-77", MirrorTenant: canaryTenant, MappedIssueID: "2-77"}
+	if got, err := VerifyCanary(ctx, good(), canaryTenant, agree); err != nil || got.IssueID != "2-77" {
+		t.Fatalf("agreeing mappings: %+v %v", got, err)
+	}
+	// A read that failed is an error, but not a refusal: the operator retries.
+	_, err := VerifyCanary(ctx, &issueReader{err: &APIError{Status: 503}}, canaryTenant, candidate(7))
+	if err == nil || errors.Is(err, ErrCanaryRefused) {
+		t.Fatalf("failed read: %v", err)
+	}
+}

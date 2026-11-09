@@ -101,6 +101,13 @@ const (
 	ReasonReconcileFailed   = "reconcile_failed"
 	ReasonOperatorNotDone   = "operator_not_applied"
 	ReasonUnsupportedKind   = "unsupported_kind"
+	// Local refusals (slice b1a): the comment row commits and its op is
+	// rejected in the same transaction, before anything is sent.
+	ReasonInvalidComment = "invalid_comment"
+	ReasonAmbiguousIssue = "ambiguous_issue"
+	// ReasonHeld: Admit refused the dispatch (canary removed, mode off,
+	// another tenant); the op stays prepared and nothing is sent.
+	ReasonHeld = "held"
 )
 
 var (

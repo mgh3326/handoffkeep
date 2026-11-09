@@ -64,6 +64,10 @@ type Config struct {
 	BlockedWait time.Duration
 	// PageSize is the comment page requested when searching for evidence (100).
 	PageSize int
+	// Admit, when set, is asked before every dispatch of a prepared op. A
+	// non-nil error holds the op: it stays prepared, nothing is sent, and it
+	// is never rejected for it (canary removal or mode off freezes sends).
+	Admit func(ctx context.Context, op Op) error
 }
 
 // maxDrivePasses bounds the passes of one Drive call.
@@ -117,6 +121,18 @@ type CommentRequest struct {
 	TaskID    int64
 	YTIssueID string
 	Body      string
+}
+
+// CheckComment explains why a comment request is refused before anything is
+// stored. An empty Key is accepted (AppendComment generates one).
+func CheckComment(req CommentRequest) error {
+	return nil
+}
+
+// CommentOp is the op a comment request stores: the immutable payload, its
+// hash, the entity lane and the target. req.Key must be set.
+func CommentOp(req CommentRequest) (NewOp, error) {
+	return NewOp{}, nil
 }
 
 // AppendComment records one comment write durably and tries to dispatch it

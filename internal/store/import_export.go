@@ -9,9 +9,17 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+// ImportComment is one comment row of the import export. HKOpID is set when
+// hk itself writes the comment to YouTrack through the write protocol (slice
+// b1a): the import must skip it, or the issue would get it twice.
+type ImportComment struct {
+	TaskComment
+	HKOpID int64 `json:"hk_op_id,omitempty"`
+}
+
 // ImportCommentsPage returns a stable global comment page for the initial
 // YouTrack import. Comment IDs are append-only and visibility ordered.
-func (s *Store) ImportCommentsPage(ctx context.Context, afterID int64, limit int, project string, maxTaskID int64) ([]TaskComment, error) {
+func (s *Store) ImportCommentsPage(ctx context.Context, afterID int64, limit int, project string, maxTaskID int64) ([]ImportComment, error) {
 	if afterID < 0 || limit < 1 || limit > TaskCommentListMax || !validText(project, 128) || maxTaskID < 0 || (project == "" && maxTaskID != 0) {
 		return nil, errors.New("invalid import cursor")
 	}
@@ -20,10 +28,10 @@ func (s *Store) ImportCommentsPage(ctx context.Context, afterID int64, limit int
 		return nil, err
 	}
 	defer rows.Close()
-	out := []TaskComment{}
+	out := []ImportComment{}
 	for rows.Next() {
-		var x TaskComment
-		if err := scanTaskComment(rows, &x); err != nil {
+		var x ImportComment
+		if err := scanTaskComment(rows, &x.TaskComment); err != nil {
 			return nil, err
 		}
 		out = append(out, x)
@@ -99,7 +107,7 @@ func (s *Store) ImportTaskDocumentsPage(ctx context.Context, taskIDs []int64, af
 }
 
 // ImportCommentsUpdatedPage returns comments for changed tasks or after a creation cursor.
-func (s *Store) ImportCommentsUpdatedPage(ctx context.Context, taskIDs []int64, afterAt time.Time, afterID int64, limit int) ([]TaskComment, error) {
+func (s *Store) ImportCommentsUpdatedPage(ctx context.Context, taskIDs []int64, afterAt time.Time, afterID int64, limit int) ([]ImportComment, error) {
 	if afterID < 0 || limit < 1 || limit > TaskCommentListMax {
 		return nil, errors.New("invalid import cursor")
 	}
@@ -111,10 +119,10 @@ func (s *Store) ImportCommentsUpdatedPage(ctx context.Context, taskIDs []int64, 
 		return nil, err
 	}
 	defer rows.Close()
-	out := []TaskComment{}
+	out := []ImportComment{}
 	for rows.Next() {
-		var x TaskComment
-		if err := scanTaskComment(rows, &x); err != nil {
+		var x ImportComment
+		if err := scanTaskComment(rows, &x.TaskComment); err != nil {
 			return nil, err
 		}
 		out = append(out, x)
