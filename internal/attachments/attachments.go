@@ -110,11 +110,23 @@ func ConfigFromEnv() (Config, bool, error) {
 	return c, true, nil
 }
 
+// ObjectInfo is an object's size and last-modified time, from HEAD or a listing.
+type ObjectInfo struct {
+	Key      string
+	Size     int64
+	Modified time.Time
+}
+
 type ObjectStore interface {
 	Stat(context.Context, string) error
 	Put(context.Context, string, io.Reader, int64, string) error
 	Get(context.Context, string) (io.ReadCloser, error)
 	Presign(context.Context, string, time.Duration) (string, error)
+	// PresignPut returns a URL that accepts one PUT of the object key.
+	PresignPut(context.Context, string, time.Duration) (string, error)
+	Head(context.Context, string) (ObjectInfo, error)
+	Delete(context.Context, string) error
+	List(context.Context, string) ([]ObjectInfo, error)
 }
 type minioStore struct {
 	client *minio.Client
@@ -144,6 +156,35 @@ func (m minioStore) Presign(ctx context.Context, key string, ttl time.Duration) 
 	u, e := m.client.PresignedGetObject(ctx, m.bucket, key, ttl, url.Values{})
 	return u.String(), e
 }
+func (m minioStore) PresignPut(ctx context.Context, key string, ttl time.Duration) (string, error) {
+	u, e := m.client.PresignedPutObject(ctx, m.bucket, key, ttl)
+	if e != nil {
+		return "", e
+	}
+	return u.String(), nil
+}
+func (m minioStore) Head(ctx context.Context, key string) (ObjectInfo, error) {
+	o, e := m.client.StatObject(ctx, m.bucket, key, minio.StatObjectOptions{})
+	if e != nil {
+		return ObjectInfo{}, e
+	}
+	return ObjectInfo{Key: key, Size: o.Size, Modified: o.LastModified}, nil
+}
+func (m minioStore) Delete(ctx context.Context, key string) error {
+	return m.client.RemoveObject(ctx, m.bucket, key, minio.RemoveObjectOptions{})
+}
+func (m minioStore) List(ctx context.Context, prefix string) ([]ObjectInfo, error) {
+	lctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var out []ObjectInfo
+	for o := range m.client.ListObjects(lctx, m.bucket, minio.ListObjectsOptions{Prefix: prefix, Recursive: true}) {
+		if o.Err != nil {
+			return nil, o.Err
+		}
+		out = append(out, ObjectInfo{Key: o.Key, Size: o.Size, Modified: o.LastModified})
+	}
+	return out, nil
+}
 func NewR2(cfg Config) (ObjectStore, error) {
 	endpoint := strings.TrimPrefix(strings.TrimPrefix(cfg.Endpoint, "https://"), "http://")
 	c, e := minio.New(endpoint, &minio.Options{Creds: credentials.NewStaticV4(cfg.AccessKey, cfg.SecretKey, ""), Secure: !strings.HasPrefix(cfg.Endpoint, "http://"), Region: "auto", BucketLookup: minio.BucketLookupPath})
@@ -158,6 +199,16 @@ type Manager struct {
 	Objects ObjectStore
 	Config  Config
 	Enabled bool
+	// Now is the clock for upload expiry and the staging sweep; nil means the
+	// wall clock. Tests inject it.
+	Now func() time.Time
+}
+
+func (m *Manager) now() time.Time {
+	if m.Now != nil {
+		return m.Now().UTC()
+	}
+	return time.Now().UTC()
 }
 
 // AttachmentDB keeps the object transport testable without a live R2 account.
@@ -168,6 +219,9 @@ type AttachmentDB interface {
 	RecordAttachmentGet(context.Context, string, int64) error
 	ListAttachments(context.Context, string, string, int) ([]store.Attachment, error)
 	AttachmentUsage(context.Context) (store.AttachmentUsage, error)
+	CreateAttachmentUpload(context.Context, store.AttachmentUpload) error
+	GetAttachmentUpload(context.Context, string) (store.AttachmentUpload, bool, error)
+	TransitionAttachmentUpload(ctx context.Context, id, from, to, reason string, now time.Time) (bool, error)
 }
 
 func NewFromEnv(s *store.Store) (*Manager, error) {
@@ -196,18 +250,29 @@ func hasNULPrefix(body []byte) bool {
 	}
 	return bytes.IndexByte(body, 0) >= 0
 }
-func validate(c Config, name, declared string, body []byte) (string, error) {
-	if int64(len(body)) > c.MaxBytes {
-		return "", ErrTooLarge
-	}
+
+// checkName refuses a file name that is empty, too long, holds a NUL, or has an
+// archive or dump extension. It is the part of validate that needs no bytes, so
+// a direct upload can refuse a bad declaration before anything is staged.
+func checkName(name string) error {
 	if name == "" || len(name) > 512 || strings.ContainsRune(name, 0) {
-		return "", errors.New("invalid attachment name")
+		return errors.New("invalid attachment name")
 	}
 	ext := strings.ToLower(filepath.Ext(name))
 	for _, bad := range []string{".dump", ".sql", ".tar", ".tgz", ".zip", ".gz"} {
 		if ext == bad {
-			return "", ErrExtension
+			return ErrExtension
 		}
+	}
+	return nil
+}
+
+func validate(c Config, name, declared string, body []byte) (string, error) {
+	if int64(len(body)) > c.MaxBytes {
+		return "", ErrTooLarge
+	}
+	if err := checkName(name); err != nil {
+		return "", err
 	}
 	sniff := strings.ToLower(strings.TrimSpace(strings.Split(http.DetectContentType(body), ";")[0]))
 	declared = strings.ToLower(strings.TrimSpace(strings.Split(declared, ";")[0]))
@@ -242,6 +307,12 @@ func (m *Manager) Put(ctx context.Context, client, name, mime, ref string, body 
 	if !m.Enabled {
 		return store.Attachment{}, false, ErrDisabled
 	}
+	return m.putBytes(ctx, client, name, mime, ref, body)
+}
+
+// putBytes is the one store path for a body: validate, dedupe, capacity, object
+// put, then the metadata row. Put and a completed direct upload both call it.
+func (m *Manager) putBytes(ctx context.Context, client, name, mime, ref string, body []byte) (store.Attachment, bool, error) {
 	mime, e := validate(m.Config, name, mime, body)
 	if e != nil {
 		return store.Attachment{}, false, e

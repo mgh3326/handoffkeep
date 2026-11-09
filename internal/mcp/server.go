@@ -33,6 +33,8 @@ type Backend interface {
 	PutAttachment(context.Context, string, string, string, string, []byte) (store.Attachment, bool, error)
 	ListAttachments(context.Context, string, int) ([]store.Attachment, error)
 	AttachmentURL(context.Context, string) (string, error)
+	BeginAttachmentUpload(context.Context, string, string, string, int64, string, string) (attachments.UploadTicket, error)
+	CompleteAttachmentUpload(context.Context, string, string) (store.Attachment, bool, error)
 }
 
 // attachmentPutMaxRawBytes is the largest file attachment_put accepts before
@@ -57,6 +59,36 @@ var attachmentPutDescription = "Upload one attachment from base64 content; the r
 	"Returns sha256, size_bytes, mime, ref, reference (hk:attachment/<sha256>, the stable reference records store) " +
 	"and lookup_path (GET /v1/attachments/<sha256> with the bearer token). " +
 	"The signed download URL is never returned; attachment_get_url issues one valid for ten minutes."
+
+// attachmentUploadBeginDescription states the direct-upload contract. Its
+// allowed-type list comes from the same constant the manager enforces.
+var attachmentUploadBeginDescription = "Start a direct upload: hk checks the declaration and returns upload_id and a presigned PUT url for a staging object, so the file bytes do not pass through hk. " +
+	"PUT exactly size bytes to url with no authorization header; the url is the credential, valid for ten minutes. Then call attachment_upload_complete with upload_id. " +
+	"Declared: name; mime (allowed by default: " + strings.ReplaceAll(attachments.DefaultMIMEAllow, ",", ", ") + "); size in bytes, at most the server cap; sha256 of the bytes as lowercase hex; optional ref (checkpoint:<id>, document:<key>, memory:<agent>/<name>, task:<id>, or none). " +
+	"Refused now: a disallowed name, mime or size, a bad sha256 or ref, or no capacity. " +
+	"Completion checks the bytes against size and sha256, sniffs the type and secret-scans text; a mismatch or refusal deletes the staged object and is final. " +
+	"Never log the url."
+
+// attachmentUploadCompleteDescription states what completion returns.
+var attachmentUploadCompleteDescription = "Finish a direct upload started by attachment_upload_begin. Returns the same fields as attachment_put: sha256, size_bytes, mime, ref, reference (hk:attachment/<sha256>, the stable reference records store) and lookup_path. " +
+	"Completing an upload already stored returns the stored attachment with created false. " +
+	"A refused upload returns attachment_upload_refused with a reason and is final. " +
+	"If the bytes have not arrived yet it returns attachment_upload_not_received; retry after the PUT."
+
+// attachmentPutResponse is the one response shape for a stored attachment, shared
+// by attachment_put and attachment_upload_complete.
+func attachmentPutResponse(v store.Attachment, created bool) map[string]any {
+	return map[string]any{
+		"attachment":  v,
+		"created":     created,
+		"sha256":      v.SHA256,
+		"size_bytes":  v.SizeBytes,
+		"mime":        v.MIME,
+		"ref":         attachmentRefString(v),
+		"reference":   "hk:attachment/" + v.SHA256,
+		"lookup_path": "/v1/attachments/" + v.SHA256,
+	}
+}
 
 // attachmentRefString renders an attachment's ref the way ParseRef reads it.
 func attachmentRefString(x store.Attachment) string {
@@ -231,16 +263,29 @@ func newServer(service Backend, client string, allowPathUpload bool) *gmcp.Serve
 		if e != nil {
 			return nil, nil, e
 		}
-		return result(map[string]any{
-			"attachment":  v,
-			"created":     created,
-			"sha256":      v.SHA256,
-			"size_bytes":  v.SizeBytes,
-			"mime":        v.MIME,
-			"ref":         attachmentRefString(v),
-			"reference":   "hk:attachment/" + v.SHA256,
-			"lookup_path": "/v1/attachments/" + v.SHA256,
-		})
+		return result(attachmentPutResponse(v, created))
+	})
+	gmcp.AddTool(s, &gmcp.Tool{Name: "attachment_upload_begin", Description: attachmentUploadBeginDescription}, func(ctx context.Context, _ *gmcp.CallToolRequest, x struct {
+		Name   string `json:"name"`
+		MIME   string `json:"mime"`
+		Size   int64  `json:"size"`
+		SHA256 string `json:"sha256"`
+		Ref    string `json:"ref,omitempty"`
+	}) (*gmcp.CallToolResult, any, error) {
+		t, e := service.BeginAttachmentUpload(ctx, client, x.Name, x.MIME, x.Size, x.SHA256, x.Ref)
+		if e != nil {
+			return nil, nil, e
+		}
+		return result(t)
+	})
+	gmcp.AddTool(s, &gmcp.Tool{Name: "attachment_upload_complete", Description: attachmentUploadCompleteDescription}, func(ctx context.Context, _ *gmcp.CallToolRequest, x struct {
+		UploadID string `json:"upload_id"`
+	}) (*gmcp.CallToolResult, any, error) {
+		v, created, e := service.CompleteAttachmentUpload(ctx, client, x.UploadID)
+		if e != nil {
+			return nil, nil, e
+		}
+		return result(attachmentPutResponse(v, created))
 	})
 	if allowPathUpload {
 		gmcp.AddTool(s, &gmcp.Tool{Name: "attachment_put_from_path", Description: "stdio only: upload a local file as a private attachment."}, func(ctx context.Context, _ *gmcp.CallToolRequest, x struct {

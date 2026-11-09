@@ -51,8 +51,9 @@ func (*memObjects) Presign(_ context.Context, k string, _ time.Duration) (string
 // memAttachmentDB keeps one row per sha. Dedupe does not add a second ref
 // here, which the round trip below does not need: every put uses new bytes.
 type memAttachmentDB struct {
-	rows map[string]store.Attachment
-	puts int
+	rows    map[string]store.Attachment
+	puts    int
+	uploads map[string]store.AttachmentUpload
 }
 
 func (m *memAttachmentDB) GetAttachment(_ context.Context, sha string) (store.Attachment, bool, error) {

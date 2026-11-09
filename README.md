@@ -668,7 +668,7 @@ and optional `X-HK-Ref` (`checkpoint:<id>`, `document:<key>`,
 `attachment_put` tool instead: base64 `content_base64`, `name`, optional `mime`
 and `ref`, at most 10 MiB raw. It returns the `sha256`, `size_bytes`, `mime`,
 `ref`, a stable `reference` (`hk:attachment/<sha256>`) for records to store, and
-a `lookup_path`, never a signed URL. `GET /v1/attachments/{sha}` streams through the
+a `lookup_path`, never a signed URL. Large files can skip hk entirely with a direct upload: `POST /v1/attachments/uploads` (MCP `attachment_upload_begin`) checks the declared name, type, size, sha256 and ref and returns a presigned PUT for a staging object; the client PUTs the bytes there, then `POST /v1/attachments/uploads/{id}/complete` (MCP `attachment_upload_complete`) checks size, sha256, type and secrets, then stores them under the same content key as `PUT /v1/attachments`. A refusal is final and deletes the staging object. Staging objects that are never completed are swept hourly. `GET /v1/attachments/{sha}` streams through the
 service; add `?presign=1` for a ten-minute private URL. `/v1/usage` and
 authenticated `/metrics` expose the local fuse counters. `/metrics` also
 reports, per authenticated client, the CLI revision from its last

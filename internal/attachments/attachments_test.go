@@ -17,6 +17,8 @@ type fakeObjects struct {
 	puts, stats int
 	fail        bool
 	objects     map[string][]byte
+	// modified overrides a key's last-modified time; unset keys count as now.
+	modified map[string]time.Time
 }
 
 func (f *fakeObjects) Stat(_ context.Context, k string) error {
@@ -45,12 +47,63 @@ func (f *fakeObjects) Get(_ context.Context, k string) (io.ReadCloser, error) {
 func (f *fakeObjects) Presign(context.Context, string, time.Duration) (string, error) {
 	return "https://fake.invalid", nil
 }
+func (f *fakeObjects) PresignPut(_ context.Context, k string, _ time.Duration) (string, error) {
+	return "https://fake.invalid/put/" + k + "?sig=test", nil
+}
+func (f *fakeObjects) Head(_ context.Context, k string) (ObjectInfo, error) {
+	b, ok := f.objects[k]
+	if !ok {
+		return ObjectInfo{}, errors.New("missing")
+	}
+	return ObjectInfo{Key: k, Size: int64(len(b)), Modified: f.modifiedAt(k)}, nil
+}
+func (f *fakeObjects) Delete(_ context.Context, k string) error {
+	delete(f.objects, k)
+	return nil
+}
+func (f *fakeObjects) List(_ context.Context, prefix string) ([]ObjectInfo, error) {
+	var out []ObjectInfo
+	for k, b := range f.objects {
+		if strings.HasPrefix(k, prefix) {
+			out = append(out, ObjectInfo{Key: k, Size: int64(len(b)), Modified: f.modifiedAt(k)})
+		}
+	}
+	return out, nil
+}
+func (f *fakeObjects) modifiedAt(k string) time.Time {
+	if t, ok := f.modified[k]; ok {
+		return t
+	}
+	return time.Now().UTC()
+}
 
 type fakeDB struct {
 	rows    map[string]store.Attachment
 	puts    int
 	capErr  error
 	hideGet bool
+	uploads map[string]store.AttachmentUpload
+}
+
+func (f *fakeDB) CreateAttachmentUpload(_ context.Context, u store.AttachmentUpload) error {
+	if f.uploads == nil {
+		f.uploads = map[string]store.AttachmentUpload{}
+	}
+	f.uploads[u.ID] = u
+	return nil
+}
+func (f *fakeDB) GetAttachmentUpload(_ context.Context, id string) (store.AttachmentUpload, bool, error) {
+	u, ok := f.uploads[id]
+	return u, ok, nil
+}
+func (f *fakeDB) TransitionAttachmentUpload(_ context.Context, id, from, to, reason string, now time.Time) (bool, error) {
+	u, ok := f.uploads[id]
+	if !ok || u.Status != from {
+		return false, nil
+	}
+	u.Status, u.Reason, u.UpdatedAt = to, reason, now
+	f.uploads[id] = u
+	return true, nil
 }
 
 func (f *fakeDB) GetAttachment(_ context.Context, sha string) (store.Attachment, bool, error) {

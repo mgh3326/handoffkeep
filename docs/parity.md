@@ -18,7 +18,7 @@ Baseline: `handoffkeep@64942ff`, the commit this matrix was taken from.
 | Thing counted | Count at 64942ff | Now |
 | --- | --- | --- |
 | Console write routes | 14: 7 JSON routes in `internal/ui/api.go`, 7 HTML form routes in `internal/ui/ui.go` | 14 (unchanged) |
-| MCP tool definitions | 22: 21 exposed on HTTP `/mcp`, 12 on stdio (the operator/meta tools are HTTP-only; `attachment_put_from_path` is stdio-only) | 31 exposed on HTTP `/mcp` and 13 on stdio, counted by listing the registered tools at hk 3683 (the earlier "25" was stale; `attachment_put` is one of the 31 and of the 13) |
+| MCP tool definitions | 22: 21 exposed on HTTP `/mcp`, 12 on stdio (the operator/meta tools are HTTP-only; `attachment_put_from_path` is stdio-only) | 33 exposed on HTTP `/mcp` and 15 on stdio, counted by listing the registered tools at hk 3683 (the earlier "25" was stale; `attachment_put` and the two direct-upload tools are in both counts) |
 | `/v1` write registrations | 81 method-scoped write registrations, plus four method-agnostic handlers that also accept writes: `/v1/checkpoints`, `/v1/documents/{key}`, `/v1/memory/{agent}/{name}`, `/v1/wrk/{path}` (the rows below cover the user-facing capabilities) | 81 (unchanged) |
 
 Legend: **—** means the surface has no path for that capability. **ui.write** is
@@ -145,6 +145,8 @@ because that path has an authenticated principal.
 | attachment_list | read | HTTP, stdio | Attachments read |
 | attachment_get_url | read | HTTP, stdio | Attachments read |
 | attachment_put | write | HTTP, stdio | Attachment upload from base64; returns the stable reference |
+| attachment_upload_begin | write | HTTP, stdio | Direct upload: declare, then PUT to a presigned URL (bytes skip hk) |
+| attachment_upload_complete | write | HTTP, stdio | Direct upload: check the staged bytes and store them |
 | attachment_put_from_path | write | stdio only | Attachment upload |
 | task_search | read | HTTP | Tasks read |
 | task_show | read | HTTP | Tasks read, comments read |
@@ -163,7 +165,7 @@ because that path has an authenticated principal.
 | sync_status | read | HTTP | YouTrack sync health |
 
 Read tools set `readOnlyHint: true`. The write tools (`put_checkpoint`,
-`put_document`, `memory_put`, `attachment_put`, `attachment_put_from_path`, `decision_answer`,
+`put_document`, `memory_put`, `attachment_put`, `attachment_upload_begin`, `attachment_upload_complete`, `attachment_put_from_path`, `decision_answer`,
 `task_comment`, `task_intake`) set `readOnlyHint: false` and
 `destructiveHint: false`. Of these, `decision_answer` moves a task's state by
 answering the task's request; the rest add records. `task_update` (hk 3465)
