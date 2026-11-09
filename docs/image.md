@@ -55,8 +55,9 @@ Optional server configuration:
   `HANDOFFKEEP_DISCORD_DECISIONS_WEBHOOK_URL`
 - Outbox forwarding to the hub: `HANDOFFKEEP_NOTIFICATION_FORWARD=on`, with the
   hub proxy variables above
-- Attachments / R2 (all-or-none): `HK_S3_ENDPOINT`, `HK_S3_BUCKET`,
-  `HK_S3_ACCESS_KEY_ID`, `HK_S3_SECRET_ACCESS_KEY`; limits:
+- Attachments / S3-compatible storage: `HK_S3_ENDPOINT`, `HK_S3_BUCKET`,
+  `HK_S3_ACCESS_KEY_ID`, `HK_S3_SECRET_ACCESS_KEY`; optional connection settings:
+  `HK_S3_REGION`, `HK_S3_BUCKET_LOOKUP`; limits:
   `HK_ATTACH_MAX_BYTES`, `HK_ATTACH_STORAGE_CAP_BYTES`,
   `HK_ATTACH_MONTHLY_PUT_CAP`, `HK_ATTACH_MONTHLY_GET_CAP`,
   `HK_ATTACH_MIME_ALLOW`

@@ -13,8 +13,76 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mgh3326/handoffkeep/internal/store"
+	"github.com/mgh3326/handoffkeep/internal/testdb"
 )
+
+func TestAttachMigrateDryRunOpensLegacySchema(t *testing.T) {
+	_, dbURL := testdb.Schema(t, "attach_migrate")
+	st, err := store.Open(t.Context(), dbURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = st.PutAttachment(t.Context(), store.Attachment{
+		SHA256: strings.Repeat("a", 64), SizeBytes: 23, MIME: "text/plain",
+		OriginalName: "brief.txt", CreatedBy: "test", RefKind: "none",
+	}, 1024, 10)
+	st.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HANDOFFKEEP_DB_URL", dbURL)
+	for _, prefix := range []string{"HKFROM", "HKTO"} {
+		t.Setenv(prefix+"_S3_ENDPOINT", "http://127.0.0.1:9000")
+		t.Setenv(prefix+"_S3_BUCKET", "attachments")
+		t.Setenv(prefix+"_S3_ACCESS_KEY_ID", "test")
+		t.Setenv(prefix+"_S3_SECRET_ACCESS_KEY", "test-secret")
+	}
+	var out bytes.Buffer
+	if err := run([]string{"attach", "migrate", "--from", "HKFROM", "--to", "HKTO"}, &out, &out); err != nil {
+		t.Fatalf("attach migrate dry-run: %v", err)
+	}
+	var got struct {
+		DryRun  bool  `json:"dry_run"`
+		Objects int64 `json:"objects"`
+		Bytes   int64 `json:"bytes"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("decode output %q: %v", out.String(), err)
+	}
+	if !got.DryRun || got.Objects != 1 || got.Bytes != 23 {
+		t.Fatalf("output = %+v, want dry_run=true objects=1 bytes=23", got)
+	}
+}
+
+func TestAttachMigrateDryRunDoesNotMigrateSchema(t *testing.T) {
+	schema, dbURL := testdb.Schema(t, "attach_migrate_unmigrated")
+	t.Setenv("HANDOFFKEEP_DB_URL", dbURL)
+	for _, prefix := range []string{"HKFROM", "HKTO"} {
+		t.Setenv(prefix+"_S3_ENDPOINT", "http://127.0.0.1:9000")
+		t.Setenv(prefix+"_S3_BUCKET", "attachments")
+		t.Setenv(prefix+"_S3_ACCESS_KEY_ID", "test")
+		t.Setenv(prefix+"_S3_SECRET_ACCESS_KEY", "test-secret")
+	}
+	var out bytes.Buffer
+	if err := run([]string{"attach", "migrate", "--from", "HKFROM", "--to", "HKTO"}, &out, &out); err == nil {
+		t.Fatal("dry-run unexpectedly succeeded on an unmigrated schema")
+	}
+	adminURL := testdb.URL(t)
+	admin, err := pgxpool.New(t.Context(), adminURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer admin.Close()
+	var exists bool
+	if err = admin.QueryRow(t.Context(), `SELECT to_regclass($1) IS NOT NULL`, schema+`.schema_version`).Scan(&exists); err != nil {
+		t.Fatal(err)
+	}
+	if exists {
+		t.Fatal("dry-run created schema_version in the unmigrated schema")
+	}
+}
 
 func TestListenValidation(t *testing.T) {
 	for _, a := range []string{"0.0.0.0:8800", "8.8.8.8:8800", "[::]:8800"} {

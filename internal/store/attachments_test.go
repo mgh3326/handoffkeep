@@ -82,6 +82,32 @@ func TestAttachmentRejectAndDedupeAreAtomic(t *testing.T) {
 	}
 }
 
+func TestAttachmentObjectLocationRecorded(t *testing.T) {
+	s := testAttachmentStore(t)
+	x := attachmentFor(31)
+	x.ObjectLocation = "https://namespace.compat.objectstorage.region.oraclecloud.com/files"
+	if _, _, err := s.PutAttachment(t.Context(), x, 100, 10); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := s.ListAttachmentObjects(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].ObjectLocation != x.ObjectLocation {
+		t.Fatalf("objects = %+v", rows)
+	}
+	if err = s.SetAttachmentObjectLocation(t.Context(), x.SHA256, "https://target.example/files"); err != nil {
+		t.Fatal(err)
+	}
+	rows, err = s.ListAttachmentObjects(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rows[0].ObjectLocation != "https://target.example/files" {
+		t.Fatalf("updated location = %q", rows[0].ObjectLocation)
+	}
+}
+
 // A task ref is stored in attachment_refs, whose CHECK must admit 'task' after
 // the attachment-task-ref migration. A non-canonical task id is refused by the
 // store's validator before any row is written.

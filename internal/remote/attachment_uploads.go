@@ -18,5 +18,5 @@ func (c Client) BeginAttachmentUpload(ctx context.Context, _ string, name, mime 
 // CompleteAttachmentUpload is the remote backend's direct-upload completion.
 func (c Client) CompleteAttachmentUpload(ctx context.Context, _ string, id string) (store.Attachment, bool, error) {
 	x, created, e := client.Client(c).CompleteAttachmentUpload(ctx, id)
-	return store.Attachment(x), created, e
+	return storeAttachment(x), created, e
 }

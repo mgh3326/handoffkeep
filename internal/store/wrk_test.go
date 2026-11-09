@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mgh3326/handoffkeep/internal/testdb"
 	"github.com/mgh3326/handoffkeep/internal/wrkrecords"
@@ -92,6 +94,46 @@ func wrkCIStore(t *testing.T) *Store {
 		t.Fatal(e)
 	}
 	return runtime
+}
+
+func TestOpenExistingUsesRuntimeForWrkSchema(t *testing.T) {
+	_, u := testdb.Schema(t, "open_existing_wrk_runtime")
+	owner, err := Open(t.Context(), u)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owner.Close()
+	if err = owner.MigrateWrk(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := OpenExisting(t.Context(), u, true)
+	if err != nil {
+		t.Fatalf("OpenExisting on wrk schema: %v", err)
+	}
+	runtime.Close()
+}
+
+func TestOpenExistingPreservesRuntimeSchemaError(t *testing.T) {
+	_, u := testdb.Schema(t, "open_existing_wrk_error")
+	owner, err := Open(t.Context(), u)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owner.Close()
+	if _, err = owner.pool.Exec(t.Context(), `CREATE TABLE wrk_records (id integer)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = owner.pool.Exec(t.Context(), `DROP TABLE schema_version`); err != nil {
+		t.Fatal(err)
+	}
+	_, err = OpenExisting(t.Context(), u, true)
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != "42P01" {
+		t.Fatalf("OpenExisting error = %v, want wrapped undefined-table error", err)
+	}
+	if strings.Contains(err.Error(), u) {
+		t.Fatalf("OpenExisting error leaked database URL: %v", err)
+	}
 }
 func storeClaim(job, owner string, task int64) wrkrecords.Object {
 	return wrkrecords.Object{"job_id": job, "owner_lane": owner, "parent_lane": "director-1", "task_id": task, "host_client_id": "desktop", "role": "builder", "tier": "T3", "review_of": nil, "predecessor_job_id": nil, "supersedes": nil}

@@ -1483,7 +1483,10 @@ func importKind(key string) (string, string) {
 
 func attachCmd(args []string, out io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: attach put|get|list|usage")
+		return errors.New("usage: attach put|get|list|usage|migrate")
+	}
+	if args[0] == "migrate" {
+		return attachMigrateCmd(args[1:], out)
 	}
 	fs := flag.NewFlagSet("attach "+args[0], flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -1491,10 +1494,11 @@ func attachCmd(args []string, out io.Writer) error {
 	checkpoint := fs.String("checkpoint", "", "checkpoint id")
 	doc := fs.String("doc", "", "document key")
 	memory := fs.String("memory", "", "memory agent/name")
+	task := fs.String("task", "", "hk task id")
 	name := fs.String("name", "", "original filename")
 	output := fs.String("o", "", "output path")
 	// Permit the documented `attach get SHA -o file` form as well as flags first.
-	valueFlags := map[string]bool{"--url": true, "--token": true, "--checkpoint": true, "--doc": true, "--memory": true, "--name": true, "-o": true}
+	valueFlags := map[string]bool{"--url": true, "--token": true, "--checkpoint": true, "--doc": true, "--memory": true, "--task": true, "--name": true, "-o": true}
 	flags, positional := []string{}, []string{}
 	for i := 1; i < len(args); i++ {
 		a := args[i]
@@ -1530,6 +1534,10 @@ func attachCmd(args []string, out io.Writer) error {
 	}
 	if *memory != "" {
 		ref = "memory:" + *memory
+		n++
+	}
+	if *task != "" {
+		ref = "task:" + *task
 		n++
 	}
 	if n > 1 {
@@ -1593,12 +1601,59 @@ func attachCmd(args []string, out io.Writer) error {
 		}
 		return printJSON(out, u)
 	default:
-		return errors.New("usage: attach put|get|list|usage")
+		return errors.New("usage: attach put|get|list|usage|migrate")
 	}
 }
 
+func attachMigrateCmd(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("attach migrate", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	from := fs.String("from", "", "source environment prefix")
+	to := fs.String("to", "", "target environment prefix")
+	apply := fs.Bool("apply", false, "copy and verify objects, then record target locations")
+	if e := fs.Parse(args); e != nil {
+		return e
+	}
+	if fs.NArg() != 0 || *from == "" || *to == "" {
+		return errors.New("usage: attach migrate --from <env prefix> --to <env prefix> [--apply]")
+	}
+	sourceConfig, sourceOn, e := attachments.ConfigFromPrefix(*from)
+	if e != nil {
+		return e
+	}
+	targetConfig, targetOn, e := attachments.ConfigFromPrefix(*to)
+	if e != nil {
+		return e
+	}
+	if !sourceOn || !targetOn {
+		return errors.New("source and target object-store environment prefixes must each define endpoint, bucket, access key id, and secret access key")
+	}
+	source, e := attachments.NewS3(sourceConfig)
+	if e != nil {
+		return e
+	}
+	target, e := attachments.NewS3(targetConfig)
+	if e != nil {
+		return e
+	}
+	dbURL := os.Getenv("HANDOFFKEEP_DB_URL")
+	if dbURL == "" {
+		return errors.New("HANDOFFKEEP_DB_URL is required")
+	}
+	st, e := store.OpenExisting(context.Background(), dbURL, *apply)
+	if e != nil {
+		return e
+	}
+	defer st.Close()
+	result, e := attachments.Migrate(context.Background(), st, source, target, attachments.ObjectLocation(targetConfig), *apply)
+	if e != nil {
+		return e
+	}
+	return printJSON(out, map[string]any{"dry_run": !*apply, "objects": result.Objects, "bytes": result.Bytes})
+}
+
 func attachmentMIME(name string) string {
-	return map[string]string{".json": "application/json", ".md": "text/markdown", ".csv": "text/csv", ".ndjson": "application/x-ndjson", ".log": "text/x-log", ".txt": "text/plain", ".html": "text/html", ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".pdf": "application/pdf"}[strings.ToLower(filepath.Ext(name))]
+	return map[string]string{".json": "application/json", ".md": "text/markdown", ".csv": "text/csv", ".ndjson": "application/x-ndjson", ".log": "text/x-log", ".txt": "text/plain", ".html": "text/html", ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp", ".pdf": "application/pdf", ".mp4": "video/mp4", ".webm": "video/webm"}[strings.ToLower(filepath.Ext(name))]
 }
 
 // r2usage intentionally does no object-store access. It is safe to run where
