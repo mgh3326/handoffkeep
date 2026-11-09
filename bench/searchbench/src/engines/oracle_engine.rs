@@ -92,6 +92,12 @@ impl OracleEngine {
         // Braces quote any Oracle Text operator characters inside the term.
         format!("{{{}}}", tok.replace('}', "}}"))
     }
+
+    /// CONTAINS query text: each whitespace token is a braced term, joined with OR.
+    /// Empty when the query has no tokens.
+    fn text_query(q: &str) -> String {
+        q.split_whitespace().map(Self::escape).collect::<Vec<_>>().join(" OR ")
+    }
 }
 
 impl Engine for OracleEngine {
@@ -189,11 +195,10 @@ impl Engine for OracleEngine {
 
     fn search(&mut self, _mode: &str, q: &str, k: usize) -> Result<Vec<String>> {
         let conn = self.conn.as_ref().context("not built")?;
-        let terms: Vec<String> = q.split_whitespace().map(Self::escape).collect();
-        if terms.is_empty() {
+        let text_query = Self::text_query(q);
+        if text_query.is_empty() {
             return Ok(Vec::new());
         }
-        let text_query = terms.join(" OR ");
         let sql = format!(
             "SELECT REC_KEY FROM {} WHERE CONTAINS(BODY, :1, 1) > 0 ORDER BY SCORE(1) DESC FETCH FIRST {k} ROWS ONLY",
             self.lexer.table()
@@ -204,6 +209,19 @@ impl Engine for OracleEngine {
             out.push(row?.0);
         }
         Ok(out)
+    }
+
+    fn match_count(&mut self, _mode: &str, q: &str) -> Result<Option<u64>> {
+        let conn = self.conn.as_ref().context("not built")?;
+        let text_query = Self::text_query(q);
+        if text_query.is_empty() {
+            return Ok(Some(0));
+        }
+        let (n,): (i64,) = conn.query_row_as(
+            &format!("SELECT COUNT(*) FROM {} WHERE CONTAINS(BODY, :1, 1) > 0", self.lexer.table()),
+            &[&text_query],
+        )?;
+        Ok(Some(n as u64))
     }
 
     fn setup_notes(&self) -> Vec<String> {

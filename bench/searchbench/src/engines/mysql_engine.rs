@@ -41,6 +41,15 @@ pub fn boolean_query(q: &str, min_chars: usize) -> String {
         .join(" ")
 }
 
+/// The search modifier and MATCH argument for a mode.
+fn match_arg(ngram_min: usize, mode: &str, q: &str) -> Result<(&'static str, String)> {
+    match mode {
+        "boolean" => Ok(("BOOLEAN MODE", boolean_query(q, ngram_min))),
+        "natural" => Ok(("NATURAL LANGUAGE MODE", q.to_string())),
+        other => Err(anyhow!("unknown mode {other}")),
+    }
+}
+
 pub fn env(name: &str) -> Result<String> {
     std::env::var(name).map_err(|_| anyhow!("missing environment variable {name}"))
 }
@@ -121,26 +130,29 @@ impl Engine for MysqlEngine {
     }
 
     fn search(&mut self, mode: &str, q: &str, k: usize) -> Result<Vec<String>> {
-        let conn = self.conn.as_mut().context("not built")?;
-        let (sql, arg) = match mode {
-            "boolean" => {
-                let bq = boolean_query(q, self.ngram_min);
-                (
-                    format!("SELECT rec_key FROM sb_docs WHERE MATCH(body) AGAINST (? IN BOOLEAN MODE) ORDER BY MATCH(body) AGAINST (? IN BOOLEAN MODE) DESC LIMIT {k}"),
-                    bq,
-                )
-            }
-            "natural" => (
-                format!("SELECT rec_key FROM sb_docs WHERE MATCH(body) AGAINST (? IN NATURAL LANGUAGE MODE) ORDER BY MATCH(body) AGAINST (? IN NATURAL LANGUAGE MODE) DESC LIMIT {k}"),
-                q.to_string(),
-            ),
-            other => return Err(anyhow!("unknown mode {other}")),
-        };
+        let (modifier, arg) = match_arg(self.ngram_min, mode, q)?;
         if arg.trim().is_empty() {
             return Ok(Vec::new());
         }
+        let conn = self.conn.as_mut().context("not built")?;
+        let sql = format!(
+            "SELECT rec_key FROM sb_docs WHERE MATCH(body) AGAINST (? IN {modifier}) ORDER BY MATCH(body) AGAINST (? IN {modifier}) DESC LIMIT {k}"
+        );
         let rows: Vec<String> = conn.exec(sql, (arg.clone(), arg))?;
         Ok(rows)
+    }
+
+    fn match_count(&mut self, mode: &str, q: &str) -> Result<Option<u64>> {
+        let (modifier, arg) = match_arg(self.ngram_min, mode, q)?;
+        if arg.trim().is_empty() {
+            return Ok(Some(0));
+        }
+        let conn = self.conn.as_mut().context("not built")?;
+        let n: Option<i64> = conn.exec_first(
+            format!("SELECT COUNT(*) FROM sb_docs WHERE MATCH(body) AGAINST (? IN {modifier})"),
+            (arg,),
+        )?;
+        Ok(Some(n.unwrap_or(0) as u64))
     }
 
     fn setup_notes(&self) -> Vec<String> {

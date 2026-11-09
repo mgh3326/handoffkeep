@@ -31,4 +31,10 @@ pub trait Engine {
     fn is_remote(&self) -> bool {
         false
     }
+    /// How many records the query matches at any rank. Used by the smoke check to
+    /// tell "not matched" (index or query fault) from "matched but ranked low".
+    /// None when the engine does not count matches.
+    fn match_count(&mut self, _mode: &str, _q: &str) -> Result<Option<u64>> {
+        Ok(None)
+    }
 }

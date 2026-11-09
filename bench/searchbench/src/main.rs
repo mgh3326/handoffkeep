@@ -166,9 +166,11 @@ fn run(args: &[String]) -> Result<()> {
             let mut errors = Vec::new();
             let mut lat_us: Vec<u64> = Vec::new();
             for q in &queries {
+                let mut errored = false;
                 let top = match engine.search(mode, &q.text, K) {
                     Ok(v) => v,
                     Err(e) => {
+                        errored = true;
                         errors.push(format!("{}: {e:#}", q.id));
                         Vec::new()
                     }
@@ -209,6 +211,7 @@ fn run(args: &[String]) -> Result<()> {
                     "subset_recall": sub.as_ref().map(|s| s.recall),
                     "unmapped_in_top10": unmapped,
                     "unmapped_by_scope": unmapped_scope,
+                    "error": errored,
                 }));
             }
             let answered: Vec<&Value> = per_query.iter().filter(|p| p["answered"] == true).collect();
@@ -257,6 +260,7 @@ fn run(args: &[String]) -> Result<()> {
                 }
             }
             let errored_queries = errors.len();
+            let clean: Vec<&Value> = answered.iter().copied().filter(|p| p["error"] != true).collect();
             let doc = json!({
                 "engine": name,
                 "mode": mode,
@@ -279,6 +283,8 @@ fn run(args: &[String]) -> Result<()> {
                     "unmapped_results_in_top10": unmapped_total,
                     "unmapped_results_by_scope": unmapped_scope_total,
                     "errored_queries": errored_queries,
+                    "answered_without_errors": clean.len(),
+                    "hit_at_10_without_errors": mean_field(&clean, "hit"),
                 },
                 "latency_ms": {
                     "samples": lat_us.len(),
@@ -302,8 +308,10 @@ fn run(args: &[String]) -> Result<()> {
 /// Smoke check (`run db --smoke`): builds the engine, then runs the first query in
 /// each mode and prints its top 3 mapped keys and whether its gold is in the top 10.
 /// For remote engines it also checks coverage of that query's gold keys. For local
-/// engines it runs a self-probe: the first two words of a task title must find that
-/// task. Writes no results; any failed search or self-probe miss is an error.
+/// engines it runs a self-probe: one word of a task title that occurs in no other
+/// record must find that task in the top 10, and the number of records it matches is
+/// printed (0 means the engine does not index the word; more than 0 with a miss
+/// means ranking). Writes no results; a failed search or a self-probe miss is an error.
 fn smoke_engine(engine: &mut dyn Engine, recs: &[Record], queries: &[Query]) -> Result<()> {
     let name = engine.name();
     let q = queries.first().context("queries.jsonl is empty")?;
@@ -328,23 +336,49 @@ fn smoke_engine(engine: &mut dyn Engine, recs: &[Record], queries: &[Query]) -> 
     if engine.is_remote() {
         return Ok(());
     }
-    let (key, probe) = self_probe(recs).context("no task title with two words to probe with")?;
+    let (key, probe) = self_probe(recs).context("no task title has a word that occurs in only one record")?;
     for mode in engine.modes() {
         let top = engine.search(mode, &probe, K)?;
+        let matches = match engine.match_count(mode, &probe)? {
+            Some(m) => m.to_string(),
+            None => "n/a".into(),
+        };
         match top.iter().position(|k| *k == key) {
-            Some(p) => println!("[{name}/{mode}] self-probe {probe:?} -> {key} at rank {}", p + 1),
-            None => bail!("self-probe {probe:?} did not find {key} in mode {mode} (top3 {:?})", top.iter().take(3).collect::<Vec<_>>()),
+            Some(p) => println!("[{name}/{mode}] self-probe {probe:?} -> {key} at rank {} (matches {matches})", p + 1),
+            None => bail!(
+                "self-probe {probe:?} did not find {key} in mode {mode} (matches {matches}; top3 {:?})",
+                top.iter().take(3).collect::<Vec<_>>()
+            ),
         }
     }
     Ok(())
 }
 
-/// The first two words of the first task title with two words, and that task's key.
+/// A distinctive probe: the first word of a task title (at least four characters,
+/// letters and digits only) that occurs in no other record, and that task's key.
+/// Substring matching makes the check stricter, never looser.
 fn self_probe(recs: &[Record]) -> Option<(String, String)> {
-    recs.iter().filter(|r| r.key.starts_with("task:")).find_map(|r| {
-        let words: Vec<&str> = r.text.lines().next()?.split_whitespace().take(2).collect();
-        (words.len() == 2).then(|| (r.key.clone(), words.join(" ")))
-    })
+    for r in recs.iter().filter(|r| r.key.starts_with("task:")) {
+        let title = r.text.lines().next().unwrap_or("");
+        for w in title.split_whitespace() {
+            if w.chars().count() < 4 || !w.chars().all(char::is_alphanumeric) {
+                continue;
+            }
+            let mut found = 0;
+            for other in recs {
+                if other.text.contains(w) {
+                    found += 1;
+                    if found > 1 {
+                        break;
+                    }
+                }
+            }
+            if found == 1 {
+                return Some((r.key.clone(), w.to_string()));
+            }
+        }
+    }
+    None
 }
 
 /// Unmapped results in a top list, by the scope named in the key (`unmapped:<scope>:<key>`).
@@ -421,19 +455,21 @@ fn summarize(args: &[String]) -> Result<()> {
         .collect::<Result<_>>()?;
 
     let mut md = String::from("# Results\n\n");
-    md.push_str("| engine | mode | ingest s | index MB | answered | hit@10 | recall@10 | MRR@10 | no-answer with hits | p50 ms | p95 ms | errors |\n");
-    md.push_str("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n");
+    md.push_str("| engine | mode | ingest s | index MB | answered | hit@10 | hit@10 without errored queries | recall@10 | MRR@10 | no-answer with hits | p50 ms | p95 ms | errors |\n");
+    md.push_str("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n");
     for d in &docs {
         let a = &d["aggregate"];
         let l = &d["latency_ms"];
         md.push_str(&format!(
-            "| {} | {} | {:.1} | {:.1} | {} | {:.3} | {:.3} | {:.3} | {} | {:.2} | {:.2} | {} |\n",
+            "| {} | {} | {:.1} | {:.1} | {} | {:.3} | {:.3} ({} answered) | {:.3} | {:.3} | {} | {:.2} | {:.2} | {} |\n",
             d["engine"].as_str().unwrap_or(""),
             d["mode"].as_str().unwrap_or(""),
             d["ingest_seconds"].as_f64().unwrap_or(0.0),
             d["index_bytes"].as_f64().unwrap_or(0.0) / 1_048_576.0,
             a["answered_queries"],
             a["hit_at_10"].as_f64().unwrap_or(0.0),
+            a["hit_at_10_without_errors"].as_f64().unwrap_or(0.0),
+            a["answered_without_errors"],
             a["recall_at_10"].as_f64().unwrap_or(0.0),
             a["mrr_at_10"].as_f64().unwrap_or(0.0),
             a["no_answer_queries_with_results"],
