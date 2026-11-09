@@ -1985,7 +1985,7 @@ func serve(args []string, errout io.Writer) error {
 	if e != nil {
 		return e
 	}
-	svc := api.Service{Store: st, Attachments: am, YouTrack: youTrack}
+	svc := api.Service{Store: st, Attachments: am, YouTrack: youTrack, SearchBackend: searchBackendFromEnv()}
 	workers := []backgroundWorker{chatRetentionWorker{store: st}, placementRetentionWorker{store: st}, syncRetentionWorker{store: st, retention: retention}}
 	if *iceboxDays > 0 {
 		workers = append(workers, backlogSweepWorker{store: st, days: *iceboxDays})

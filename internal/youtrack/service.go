@@ -73,6 +73,10 @@ type Store interface {
 	OrphanYouTrackDocArticles(ctx context.Context, limit int) ([]store.YouTrackDocArticle, error)
 	GetYouTrackDocArticle(ctx context.Context, docKey string) (store.YouTrackDocArticle, bool, error)
 	UpsertYouTrackDocArticle(ctx context.Context, x store.YouTrackDocArticle) error
+
+	DocumentKeyExists(ctx context.Context, key string) (bool, error)
+	YouTrackTaskHits(ctx context.Context, issueIDs []string, lane string) (map[string]store.SearchResult, error)
+	YouTrackDocHits(ctx context.Context, articleIDs []string, session string) (map[string]store.SearchResult, error)
 }
 
 // Options tune the service. Zero values get the documented defaults.
@@ -83,7 +87,10 @@ type Options struct {
 	DefaultLane      string
 	ConsoleBaseURL   string
 	SeedLimit        int
-	Now              func() time.Time
+	// SearchTimeout bounds the YouTrack half of one search; zero means
+	// DefaultSearchTimeout.
+	SearchTimeout time.Duration
+	Now           func() time.Time
 }
 
 const (
@@ -103,6 +110,8 @@ type Service struct {
 	console string
 	seeds   int
 	now     func() time.Time
+
+	searchTimeout time.Duration
 
 	projectMu  sync.Mutex
 	projectIDs map[string]string
@@ -133,18 +142,22 @@ func NewService(st Store, client *Client, opt Options) *Service {
 	if opt.Now == nil {
 		opt.Now = func() time.Time { return time.Now().UTC() }
 	}
+	if opt.SearchTimeout <= 0 {
+		opt.SearchTimeout = DefaultSearchTimeout
+	}
 	return &Service{
-		store:      st,
-		client:     client,
-		schema:     opt.Schema,
-		tenant:     opt.Tenant,
-		project:    opt.DefaultHKProject,
-		lane:       opt.DefaultLane,
-		console:    opt.ConsoleBaseURL,
-		seeds:      opt.SeedLimit,
-		now:        opt.Now,
-		projectIDs: map[string]string{},
-		fields:     map[string]FieldInfo{},
+		store:         st,
+		client:        client,
+		schema:        opt.Schema,
+		tenant:        opt.Tenant,
+		project:       opt.DefaultHKProject,
+		lane:          opt.DefaultLane,
+		console:       opt.ConsoleBaseURL,
+		seeds:         opt.SeedLimit,
+		now:           opt.Now,
+		searchTimeout: opt.SearchTimeout,
+		projectIDs:    map[string]string{},
+		fields:        map[string]FieldInfo{},
 	}
 }
 
