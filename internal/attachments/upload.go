@@ -36,6 +36,8 @@ var (
 	ErrUploadInProgress  = errors.New("attachment_upload_in_progress")
 	ErrUploadRefused     = errors.New("attachment_upload_refused")
 	ErrUploadNotReceived = errors.New("attachment_upload_not_received")
+	// ErrDirectUploadDisabled means HK_ATTACH_DIRECT_UPLOAD is not set.
+	ErrDirectUploadDisabled = errors.New("attachment_direct_upload_disabled")
 )
 
 var (
@@ -59,6 +61,9 @@ func (m *Manager) BeginUpload(ctx context.Context, client, name, mime string, si
 	if !m.Enabled {
 		return UploadTicket{}, ErrDisabled
 	}
+	if !m.Config.DirectUpload {
+		return UploadTicket{}, ErrDirectUploadDisabled
+	}
 	if err := checkName(name); err != nil {
 		return UploadTicket{}, err
 	}
@@ -76,9 +81,6 @@ func (m *Manager) BeginUpload(ctx context.Context, client, name, mime string, si
 	if err != nil {
 		return UploadTicket{}, err
 	}
-	if err := m.Store.CheckAttachmentCapacity(ctx, size, m.Config.StorageCap, m.Config.PutCap); err != nil {
-		return UploadTicket{}, err
-	}
 	uid, err := newUploadID()
 	if err != nil {
 		return UploadTicket{}, err
@@ -90,7 +92,12 @@ func (m *Manager) BeginUpload(ctx context.Context, client, name, mime string, si
 	}
 	now := m.now()
 	row := store.AttachmentUpload{ID: uid, StagingKey: key, Name: name, MIME: declared, SizeBytes: size, SHA256: sha, RefKind: kind, RefID: id, CreatedBy: client, Status: store.AttachmentUploadPending, CreatedAt: now, ExpiresAt: now.Add(uploadRowTTL), UpdatedAt: now}
-	if err := m.Store.CreateAttachmentUpload(ctx, row); err != nil {
+	// The reservation checks the storage caps and the staging budget together
+	// with the insert; a refusal creates no row and issues no URL.
+	if err := m.Store.CheckAttachmentCapacity(ctx, size, m.Config.StorageCap, m.Config.PutCap); err != nil {
+		return UploadTicket{}, err
+	}
+	if err := m.Store.ReserveAttachmentUpload(ctx, row, m.Config.StagingCap, now.Add(-StagingSweepAge)); err != nil {
 		return UploadTicket{}, err
 	}
 	return UploadTicket{UploadID: uid, Method: "PUT", URL: u, ExpiresInSeconds: int(UploadTTL / time.Second)}, nil

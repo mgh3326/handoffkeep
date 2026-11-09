@@ -43,13 +43,28 @@ func (m *memObjects) List(_ context.Context, prefix string) ([]attachments.Objec
 	return out, nil
 }
 
-func (m *memAttachmentDB) CreateAttachmentUpload(_ context.Context, u store.AttachmentUpload) error {
+func (m *memAttachmentDB) ReserveAttachmentUpload(_ context.Context, u store.AttachmentUpload, stagingCap int64, since time.Time) error {
 	if m.uploads == nil {
 		m.uploads = map[string]store.AttachmentUpload{}
 	}
-	m.uploads[u.ID] = u
+	return reserveFake(m.uploads, u, stagingCap, since)
+}
+
+// reserveFake applies the same staging budget as the store's reservation.
+func reserveFake(uploads map[string]store.AttachmentUpload, u store.AttachmentUpload, stagingCap int64, since time.Time) error {
+	var used int64
+	for _, o := range uploads {
+		if (o.Status == store.AttachmentUploadPending || o.Status == store.AttachmentUploadCompleting) && o.CreatedAt.After(since) {
+			used += o.SizeBytes
+		}
+	}
+	if used+u.SizeBytes > stagingCap {
+		return store.ErrAttachmentStagingCap
+	}
+	uploads[u.ID] = u
 	return nil
 }
+
 func (m *memAttachmentDB) GetAttachmentUpload(_ context.Context, id string) (store.AttachmentUpload, bool, error) {
 	u, ok := m.uploads[id]
 	return u, ok, nil

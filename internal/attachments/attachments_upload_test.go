@@ -24,7 +24,7 @@ func newUploadManager(t *testing.T) (*Manager, *fakeDB, *fakeObjects) {
 	for _, x := range strings.Split(DefaultMIMEAllow, ",") {
 		allow[x] = true
 	}
-	m := &Manager{Store: db, Objects: objs, Enabled: true, Config: Config{MaxBytes: 1000, StorageCap: 10000, PutCap: 100, GetCap: 100, Allow: allow}}
+	m := &Manager{Store: db, Objects: objs, Enabled: true, Config: Config{MaxBytes: 1000, StorageCap: 10000, PutCap: 100, GetCap: 100, Allow: allow, DirectUpload: true, StagingCap: 1 << 30}}
 	return m, db, objs
 }
 
@@ -432,5 +432,65 @@ func TestPresignedPutPinsContentLength(t *testing.T) {
 	}
 	if signed := parsed.Query().Get("X-Amz-SignedHeaders"); !strings.Contains(signed, "content-length") {
 		t.Fatalf("SignedHeaders=%q; the declared length is not pinned", signed)
+	}
+}
+
+// Direct upload stays off unless HK_ATTACH_DIRECT_UPLOAD is set, so no URL and
+// no upload row exist for it by default.
+func TestDirectUploadIsOffByDefault(t *testing.T) {
+	m, db, _ := newUploadManager(t)
+	m.Config.DirectUpload = false
+	body := []byte("off by default\n")
+	_, err := m.BeginUpload(t.Context(), "node", "a.txt", "text/plain", int64(len(body)), shaOf(body), "")
+	if !errors.Is(err, ErrDirectUploadDisabled) {
+		t.Fatalf("begin err=%v; want direct upload disabled", err)
+	}
+	if len(db.uploads) != 0 {
+		t.Fatalf("a disabled begin recorded %d upload rows", len(db.uploads))
+	}
+}
+
+// The environment turns direct upload on and sets the staging budget; both
+// default to off and 1 GiB.
+func TestConfigFromEnvDirectUploadAndStagingBudget(t *testing.T) {
+	t.Setenv("HK_S3_ENDPOINT", "https://example.invalid")
+	t.Setenv("HK_S3_BUCKET", "bkt")
+	t.Setenv("HK_S3_ACCESS_KEY_ID", "AK")
+	t.Setenv("HK_S3_SECRET_ACCESS_KEY", "SK")
+	t.Setenv("HK_ATTACH_DIRECT_UPLOAD", "")
+	t.Setenv("HK_ATTACH_STAGING_CAP_BYTES", "")
+	c, on, err := ConfigFromEnv()
+	if err != nil || !on || c.DirectUpload || c.StagingCap != DefaultStagingCap {
+		t.Fatalf("defaults: on=%v direct=%v staging=%d err=%v", on, c.DirectUpload, c.StagingCap, err)
+	}
+	t.Setenv("HK_ATTACH_DIRECT_UPLOAD", "1")
+	t.Setenv("HK_ATTACH_STAGING_CAP_BYTES", "4096")
+	c, _, err = ConfigFromEnv()
+	if err != nil || !c.DirectUpload || c.StagingCap != 4096 {
+		t.Fatalf("enabled: direct=%v staging=%d err=%v", c.DirectUpload, c.StagingCap, err)
+	}
+}
+
+// Outstanding staged bytes are bounded: a begin that would exceed the budget
+// is refused and creates no row, and completing an upload frees its share.
+func TestStagingBudgetBoundsOutstandingBytes(t *testing.T) {
+	m, db, objs := newUploadManager(t)
+	m.Config.StagingCap = 100
+	body := bytes.Repeat([]byte("b"), 60)
+	first := begin(t, m, "node", "one.txt", "text/plain", body, "")
+	rows := len(db.uploads)
+	_, err := m.BeginUpload(t.Context(), "node", "two.txt", "text/plain", int64(len(body)), shaOf(body), "")
+	if !errors.Is(err, store.ErrAttachmentStagingCap) {
+		t.Fatalf("over-budget begin err=%v", err)
+	}
+	if len(db.uploads) != rows {
+		t.Fatalf("a refused begin recorded a row")
+	}
+	clientPUT(objs, first, body)
+	if _, _, err := m.CompleteUpload(t.Context(), "node", first.UploadID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.BeginUpload(t.Context(), "node", "three.txt", "text/plain", int64(len(body)), shaOf(body), ""); err != nil {
+		t.Fatalf("begin after the first completed: %v", err)
 	}
 }

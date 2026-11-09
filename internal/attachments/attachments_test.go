@@ -109,15 +109,28 @@ type fakeDB struct {
 	uploads map[string]store.AttachmentUpload
 }
 
-func (f *fakeDB) CreateAttachmentUpload(_ context.Context, u store.AttachmentUpload) error {
+func (f *fakeDB) ReserveAttachmentUpload(_ context.Context, u store.AttachmentUpload, stagingCap int64, since time.Time) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.uploads == nil {
 		f.uploads = map[string]store.AttachmentUpload{}
 	}
-	f.uploads[u.ID] = u
+	return reserveFake(f.uploads, u, stagingCap, since)
+}
+func reserveFake(uploads map[string]store.AttachmentUpload, u store.AttachmentUpload, stagingCap int64, since time.Time) error {
+	var used int64
+	for _, o := range uploads {
+		if (o.Status == store.AttachmentUploadPending || o.Status == store.AttachmentUploadCompleting) && o.CreatedAt.After(since) {
+			used += o.SizeBytes
+		}
+	}
+	if used+u.SizeBytes > stagingCap {
+		return store.ErrAttachmentStagingCap
+	}
+	uploads[u.ID] = u
 	return nil
 }
+
 func (f *fakeDB) GetAttachmentUpload(_ context.Context, id string) (store.AttachmentUpload, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

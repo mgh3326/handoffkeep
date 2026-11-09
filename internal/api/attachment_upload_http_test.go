@@ -91,10 +91,25 @@ func (*uploadDB) ListAttachments(context.Context, string, string, int) ([]store.
 func (*uploadDB) AttachmentUsage(context.Context) (store.AttachmentUsage, error) {
 	return store.AttachmentUsage{}, nil
 }
-func (d *uploadDB) CreateAttachmentUpload(_ context.Context, u store.AttachmentUpload) error {
-	d.uploads[u.ID] = u
+func (d *uploadDB) ReserveAttachmentUpload(_ context.Context, u store.AttachmentUpload, stagingCap int64, since time.Time) error {
+	return reserveFake(d.uploads, u, stagingCap, since)
+}
+
+// reserveFake applies the same staging budget as the store's reservation.
+func reserveFake(uploads map[string]store.AttachmentUpload, u store.AttachmentUpload, stagingCap int64, since time.Time) error {
+	var used int64
+	for _, o := range uploads {
+		if (o.Status == store.AttachmentUploadPending || o.Status == store.AttachmentUploadCompleting) && o.CreatedAt.After(since) {
+			used += o.SizeBytes
+		}
+	}
+	if used+u.SizeBytes > stagingCap {
+		return store.ErrAttachmentStagingCap
+	}
+	uploads[u.ID] = u
 	return nil
 }
+
 func (d *uploadDB) GetAttachmentUpload(_ context.Context, id string) (store.AttachmentUpload, bool, error) {
 	u, ok := d.uploads[id]
 	return u, ok, nil
@@ -116,7 +131,7 @@ func uploadServer(t *testing.T) (*httptest.Server, *uploadObjects) {
 	for _, x := range strings.Split(attachments.DefaultMIMEAllow, ",") {
 		allow[x] = true
 	}
-	m := &attachments.Manager{Store: &uploadDB{rows: map[string]store.Attachment{}, uploads: map[string]store.AttachmentUpload{}}, Objects: objs, Enabled: true, Config: attachments.Config{MaxBytes: 1 << 20, StorageCap: 1 << 30, PutCap: 1000, GetCap: 1000, Allow: allow}}
+	m := &attachments.Manager{Store: &uploadDB{rows: map[string]store.Attachment{}, uploads: map[string]store.AttachmentUpload{}}, Objects: objs, Enabled: true, Config: attachments.Config{MaxBytes: 1 << 20, StorageCap: 1 << 30, PutCap: 1000, GetCap: 1000, Allow: allow, DirectUpload: true, StagingCap: 1 << 30}}
 	h := httptest.NewServer(Server{Service: Service{Attachments: m}, Tokens: Tokens{"node": "node-token"}}.Handler())
 	t.Cleanup(h.Close)
 	return h, objs

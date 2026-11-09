@@ -1,6 +1,7 @@
 package store
 
 import (
+	"errors"
 	"testing"
 	"time"
 )
@@ -35,5 +36,34 @@ func TestAttachmentUploadRowsTransitionOnce(t *testing.T) {
 	}
 	if err := s.CreateAttachmentUpload(t.Context(), AttachmentUpload{ID: "bad"}); err == nil {
 		t.Fatal("malformed upload id stored")
+	}
+}
+
+// The staging budget is checked and the row inserted under one lock: an
+// over-budget reservation is refused and leaves no row, and a finished upload
+// stops counting.
+func TestReserveAttachmentUploadEnforcesTheStagingBudget(t *testing.T) {
+	s := schemaStore(t, "attachment-budget")
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	since := now.Add(-2 * time.Hour)
+	mk := func(id string, size int64) AttachmentUpload {
+		return AttachmentUpload{ID: id, StagingKey: "incoming/" + id, Name: "a.txt", MIME: "text/plain", SizeBytes: size, SHA256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", RefKind: "none", CreatedBy: "node", CreatedAt: now, ExpiresAt: now.Add(time.Hour)}
+	}
+	const a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const b = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	if err := s.ReserveAttachmentUpload(t.Context(), mk(a, 60), 100, since); err != nil {
+		t.Fatalf("first reserve: %v", err)
+	}
+	if err := s.ReserveAttachmentUpload(t.Context(), mk(b, 60), 100, since); !errors.Is(err, ErrAttachmentStagingCap) {
+		t.Fatalf("over-budget reserve err=%v", err)
+	}
+	if _, ok, _ := s.GetAttachmentUpload(t.Context(), b); ok {
+		t.Fatal("a refused reservation left a row")
+	}
+	if ok, err := s.TransitionAttachmentUpload(t.Context(), a, AttachmentUploadPending, AttachmentUploadDone, "", now); err != nil || !ok {
+		t.Fatalf("finish first: ok=%v err=%v", ok, err)
+	}
+	if err := s.ReserveAttachmentUpload(t.Context(), mk(b, 60), 100, since); err != nil {
+		t.Fatalf("reserve after the first finished: %v", err)
 	}
 }

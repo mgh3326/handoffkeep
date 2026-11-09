@@ -28,6 +28,7 @@ const (
 	DefaultStorageCap int64 = 8 << 30
 	DefaultPutCap     int64 = 800000
 	DefaultGetCap     int64 = 8000000
+	DefaultStagingCap int64 = 1 << 30
 )
 
 // DefaultMIMEAllow is the MIME allowlist used when HK_ATTACH_MIME_ALLOW is
@@ -48,6 +49,18 @@ type Config struct {
 	MaxBytes, StorageCap, PutCap, GetCap   int64
 	Allow                                  map[string]bool
 	Endpoint, Bucket, AccessKey, SecretKey string
+	// StagingCap bounds the bytes that direct uploads may have staged at once.
+	StagingCap int64
+	// DirectUpload enables presigned direct upload. It is off unless
+	// HK_ATTACH_DIRECT_UPLOAD is 1 or true: the size bound on a presigned PUT
+	// depends on the store verifying signed headers, which is confirmed only by
+	// the real-bucket negative test (an oversized PUT is refused).
+	DirectUpload bool
+}
+
+func envBool(name string) bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv(name)))
+	return v == "1" || v == "true"
 }
 
 func envInt(name string, def int64) (int64, error) {
@@ -93,6 +106,10 @@ func ConfigFromEnv() (Config, bool, error) {
 	if c.GetCap, e = envInt("HK_ATTACH_MONTHLY_GET_CAP", DefaultGetCap); e != nil {
 		return c, false, e
 	}
+	if c.StagingCap, e = envInt("HK_ATTACH_STAGING_CAP_BYTES", DefaultStagingCap); e != nil {
+		return c, false, e
+	}
+	c.DirectUpload = envBool("HK_ATTACH_DIRECT_UPLOAD")
 	allow := os.Getenv("HK_ATTACH_MIME_ALLOW")
 	if allow == "" {
 		allow = DefaultMIMEAllow
@@ -226,7 +243,7 @@ type AttachmentDB interface {
 	RecordAttachmentGet(context.Context, string, int64) error
 	ListAttachments(context.Context, string, string, int) ([]store.Attachment, error)
 	AttachmentUsage(context.Context) (store.AttachmentUsage, error)
-	CreateAttachmentUpload(context.Context, store.AttachmentUpload) error
+	ReserveAttachmentUpload(context.Context, store.AttachmentUpload, int64, time.Time) error
 	GetAttachmentUpload(context.Context, string) (store.AttachmentUpload, bool, error)
 	TransitionAttachmentUpload(ctx context.Context, id, from, to, reason string, now time.Time) (bool, error)
 }
