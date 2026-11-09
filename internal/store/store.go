@@ -3788,7 +3788,7 @@ func (s *Store) PutDocument(ctx context.Context, x Document) (Document, bool, er
 		if e = writeDeployProjection(ctx, tx, projection); e != nil {
 			return x, true, e
 		}
-		if e = s.applyDeployRecordTx(ctx, tx, x.Key, x.Body, now); e != nil {
+		if e = s.applyDeployRecordTx(ctx, tx, projection, now); e != nil {
 			return x, true, e
 		}
 	}

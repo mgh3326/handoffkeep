@@ -381,10 +381,13 @@ func (s *Store) deployOnMergedTx(ctx context.Context, tx pgx.Tx, x Task, now tim
 			rows.Close()
 			return x, err
 		}
+		var record StoredDeployRecord
 		if body != nil {
-			raw = []byte(*body)
+			record = parseStoredDeployRecord(k, "", *body, time.Time{})
+		} else {
+			record = parseStoredDeployRecord(k, "", string(raw), time.Time{})
 		}
-		prs, _ := deployedPRs(k, string(raw))
+		prs, _ := deployedPRs(record)
 		for _, pr := range prs {
 			if pr == x.Refs.PR {
 				key = k
@@ -409,8 +412,9 @@ func (s *Store) deployOnMergedTx(ctx context.Context, tx pgx.Tx, x Task, now tim
 // result, a null included_prs or an invalid record moves and records nothing,
 // and so does a listed PR whose task is not merged (a reverted PR, or a merge
 // not yet reported: rule 8 applies the record when the task enters merged).
-func (s *Store) applyDeployRecordTx(ctx context.Context, tx pgx.Tx, key, body string, now time.Time) error {
-	prs, ok := deployedPRs(key, body)
+func (s *Store) applyDeployRecordTx(ctx context.Context, tx pgx.Tx, record StoredDeployRecord, now time.Time) error {
+	key := record.Key
+	prs, ok := deployedPRs(record)
 	if !ok || len(prs) == 0 {
 		return nil
 	}

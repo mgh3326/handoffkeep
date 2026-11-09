@@ -98,12 +98,12 @@ func IsDeployRecordKey(key string) bool { return deployRecordKeyRE.MatchString(k
 // shape, the body is a valid record for the key's service, the result is
 // success and included_prs is not null. ok is false for anything else, which
 // moves nothing.
-func deployedPRs(key, body string) ([]string, bool) {
-	m := deployRecordKeyRE.FindStringSubmatch(key)
+func deployedPRs(x StoredDeployRecord) ([]string, bool) {
+	m := deployRecordKeyRE.FindStringSubmatch(x.Key)
 	if m == nil {
 		return nil, false
 	}
-	rec, _, reasons := ClassifyDeployRecord(key, m[1], body)
+	rec, _, reasons := x.Classify(m[1])
 	if len(reasons) > 0 || rec.Result != "success" || rec.IncludedPRs == nil {
 		return nil, false
 	}
