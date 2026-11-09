@@ -152,11 +152,19 @@ func TestOpInsertFailureIsAtomic(t *testing.T) {
 // deadlock waiting for a second.
 func TestCommentEnqueueUsesCallerTransaction(t *testing.T) {
 	_, url := testdb.Schema(t, "ytc_pool")
+	// Migrate with a normal pool first, so the pool of one only serves the
+	// comment.
+	migrated, err := Open(t.Context(), url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	migrated.Close()
+	var s *Store
 	sep := "?"
 	if strings.Contains(url, "?") {
 		sep = "&"
 	}
-	s, err := Open(t.Context(), url+sep+"pool_max_conns=1")
+	s, err = Open(t.Context(), url+sep+"pool_max_conns=1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,8 +231,10 @@ func TestCommentLocalRejects(t *testing.T) {
 		t.Fatalf("op for a marker-quoting body = %+v %v", op, ok)
 	}
 
-	// A task whose map row names another issue: rejected before any send.
+	// A task whose map row names another issue (written after enrollment,
+	// which refuses it up front): rejected before any send.
 	other := ytcTask(t, s, "handoffkeep")
+	ytcEnroll(t, s, other)
 	anchor, _, err := s.YTWriteLedger().Prepare(ctx, time.Now().UTC(), ytwrite.NewOp{Principal: "test", Kind: ytwrite.KindCommentAppend, Key: "anchor",
 		PayloadSHA: "x", Payload: []byte(`{"body":"x"}`), EntityKind: "task", EntityID: "999999", YTTargetID: "2-1", Actor: "a"})
 	if err != nil {
@@ -233,7 +243,6 @@ func TestCommentLocalRejects(t *testing.T) {
 	if _, err := s.pool.Exec(ctx, `INSERT INTO yt_entity_map(entity_kind,hk_key,yt_id,op_id,created_at) VALUES('task',$1,'2-55555',$2,now())`, strconv.FormatInt(other, 10), anchor.ID); err != nil {
 		t.Fatal(err)
 	}
-	ytcEnroll(t, s, other)
 	c2, err := s.CreateTaskComment(ctx, other, "worker", "mapped elsewhere")
 	if err != nil {
 		t.Fatal(err)
@@ -510,6 +519,7 @@ func fmtIDs(ids []int64) string {
 func TestYTCommentCanarySet(t *testing.T) {
 	s := schemaStore(t, "ytc_set")
 	ctx := t.Context()
+	s.SetYTCommentsMode(YTCommentsCanary)
 	task, other := ytcTask(t, s, "handoffkeep"), ytcTask(t, s, "handoffkeep")
 	got, err := s.AddYTCommentCanary(ctx, ytcBinding(task))
 	if err != nil || got.TaskID != task || got.IssueID != ytcBinding(task).IssueID || got.AddedAt.IsZero() {
@@ -541,6 +551,11 @@ func TestYTCommentCanarySet(t *testing.T) {
 	if ok, _ := s.YTCommentAdmitted(ctx, task, ytcBinding(task).IssueID, "other.youtrack.cloud"); ok {
 		t.Fatal("admitted on another tenant")
 	}
+	s.SetYTCommentsMode(YTCommentsOff)
+	if ok, _ := s.YTCommentAdmitted(ctx, task, ytcBinding(task).IssueID, ytcTenant); ok {
+		t.Fatal("admitted with the gate off")
+	}
+	s.SetYTCommentsMode(YTCommentsCanary)
 	if removed, err := s.RemoveYTCommentCanary(ctx, task); err != nil || !removed {
 		t.Fatalf("remove = %v %v", removed, err)
 	}

@@ -103,7 +103,15 @@ func (s *Store) CreateTaskComment(ctx context.Context, taskID int64, author, bod
 	if err != nil {
 		return TaskComment{}, err
 	}
-	return x, tx.Commit(ctx)
+	op, enqueued, err := s.enqueueYTCommentTx(ctx, tx, x)
+	if err != nil {
+		return TaskComment{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return TaskComment{}, err
+	}
+	logYTCommentEnqueued(x, op, enqueued)
+	return x, nil
 }
 
 // CreateMCPTaskComment appends one comment written through MCP, with its audit
@@ -150,7 +158,15 @@ func (s *Store) CreateMCPTaskComment(ctx context.Context, taskID int64, body str
 	if err := insertMCPWriteAuditTx(ctx, tx, w, taskID, x, now); err != nil {
 		return TaskComment{}, false, err
 	}
-	return x, false, tx.Commit(ctx)
+	op, enqueued, err := s.enqueueYTCommentTx(ctx, tx, x)
+	if err != nil {
+		return TaskComment{}, false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return TaskComment{}, false, err
+	}
+	logYTCommentEnqueued(x, op, enqueued)
+	return x, false, nil
 }
 
 // ListTaskComments returns comments in id order after afterID. A missing task

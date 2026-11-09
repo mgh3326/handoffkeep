@@ -105,7 +105,7 @@ func run(args []string, out, errout io.Writer) error {
 		return deploysCmd(args[1:], out)
 	case "changes":
 		return changesCmd(args[1:], out)
-	case "youtrack":
+	case "youtrack", "yt":
 		return youtrackCmd(args[1:], out)
 	case "version", "--version":
 		return versionCmd(args[1:], out)
@@ -2050,6 +2050,13 @@ func serve(args []string, errout io.Writer) error {
 		workers = append(workers, backlogSweepWorker{store: st, days: *iceboxDays})
 	}
 	workers = append(workers, lastActivityRepairWorker{store: st})
+	ytComments, e := ytCommentsWorkerFromEnv(st)
+	if e != nil {
+		return e
+	}
+	if ytComments != nil {
+		workers = append(workers, ytComments)
+	}
 	if am != nil && am.Enabled {
 		workers = append(workers, attachmentStagingSweepWorker{am: am})
 	}

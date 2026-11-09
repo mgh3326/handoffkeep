@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/mgh3326/handoffkeep/internal/store"
+	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
 
 // SyncOptions bound one run. The Dagu job runs every two minutes, so every
@@ -900,6 +901,11 @@ func (s *Service) mapActivity(ctx context.Context, act Activity, me User) (store
 				in.Skip = "결정 답변은 아직 hk가 처리하지 않습니다"
 			case trimmed == "":
 				in.Skip = "빈 코멘트입니다"
+			case strings.Contains(text, ytwrite.MarkerPrefix):
+				// The write protocol put this comment on the issue (slice
+				// b1a); its original is already a PG comment. Whatever the
+				// author, the echo must not become a second one.
+				unsupported = "hk가 쓰기 프로토콜로 쓴 코멘트입니다"
 			default:
 				in.Comment, in.CommentID = text, commentID
 			}

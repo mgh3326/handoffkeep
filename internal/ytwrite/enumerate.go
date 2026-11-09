@@ -39,6 +39,9 @@ func EnumerateStableComments(ctx context.Context, pageSize int, page func(contex
 			if len(items) == 0 {
 				return out, nil
 			}
+			if len(out)+len(items) > MaxEnumeratedComments {
+				return nil, ErrEnumerationTooLarge
+			}
 			for _, c := range items {
 				if c.ID == "" {
 					return nil, ErrInconsistentEnumeration

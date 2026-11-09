@@ -55,6 +55,14 @@ function documentIssueComments(doc) {
 }
 const DECISIONS_PROJECT_ID = 'hk-project:/decisions';
 
+// hk's write protocol copies some comments to YouTrack itself (slice b1a).
+// The export marks the PG original with hk_op_id (its body is unmarked); the
+// marker test only catches a remote echo. Either way the import skips it, so
+// 다시 시작 never adds the comment a second time.
+const HK_OP_MARKER = /<!-- hk-op:[0-9]+ -->/;
+function hkWritesComment(comment) {
+  return (comment.hk_op_id !== undefined && comment.hk_op_id !== null && Number(comment.hk_op_id) > 0) || HK_OP_MARKER.test(String(comment.body || ''));
+}
 function sourceUser(name) {
   const value = name || 'unknown';
   return {id: 'hk-actor:' + value, name: value, fullName: value, type: 'user'};
@@ -403,6 +411,7 @@ class HandoffkeepImport {
     if (!tasks.length) return;
     const comments = this.pages('comments', {task_ids: tasks.map((task) => String(task.id)).join(','), limit: 499}, 'after_id');
     comments.forEach((comment) => {
+      if (hkWritesComment(comment)) return;
       (this.commentsByTask[comment.task_id] || (this.commentsByTask[comment.task_id] = [])).push(comment);
       this.rememberUser(comment.author);
     });

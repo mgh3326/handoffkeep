@@ -17,13 +17,16 @@ type ImportComment struct {
 	HKOpID int64 `json:"hk_op_id,omitempty"`
 }
 
+// importOwnerSQL is the op that owns comment c (yt_comment_write_links), or 0.
+const importOwnerSQL = `coalesce((SELECT w.op_id FROM yt_comment_write_links w WHERE w.comment_id=c.id),0)`
+
 // ImportCommentsPage returns a stable global comment page for the initial
 // YouTrack import. Comment IDs are append-only and visibility ordered.
 func (s *Store) ImportCommentsPage(ctx context.Context, afterID int64, limit int, project string, maxTaskID int64) ([]ImportComment, error) {
 	if afterID < 0 || limit < 1 || limit > TaskCommentListMax || !validText(project, 128) || maxTaskID < 0 || (project == "" && maxTaskID != 0) {
 		return nil, errors.New("invalid import cursor")
 	}
-	rows, err := s.pool.Query(ctx, `SELECT c.id,c.task_id,c.body,c.author,c.created_at FROM task_comments c JOIN tasks t ON t.id=c.task_id WHERE c.id>$1 AND ($3='' OR (t.project=$3 AND c.task_id<=$4)) ORDER BY c.id ASC LIMIT $2`, afterID, limit, project, maxTaskID)
+	rows, err := s.pool.Query(ctx, `SELECT c.id,c.task_id,c.body,c.author,c.created_at,`+importOwnerSQL+` FROM task_comments c JOIN tasks t ON t.id=c.task_id WHERE c.id>$1 AND ($3='' OR (t.project=$3 AND c.task_id<=$4)) ORDER BY c.id ASC LIMIT $2`, afterID, limit, project, maxTaskID)
 	if err != nil {
 		return nil, err
 	}
@@ -31,7 +34,7 @@ func (s *Store) ImportCommentsPage(ctx context.Context, afterID int64, limit int
 	out := []ImportComment{}
 	for rows.Next() {
 		var x ImportComment
-		if err := scanTaskComment(rows, &x.TaskComment); err != nil {
+		if err := rows.Scan(&x.ID, &x.TaskID, &x.Body, &x.Author, &x.CreatedAt, &x.HKOpID); err != nil {
 			return nil, err
 		}
 		out = append(out, x)
@@ -114,7 +117,7 @@ func (s *Store) ImportCommentsUpdatedPage(ctx context.Context, taskIDs []int64, 
 	ids := make([]int64, len(taskIDs))
 	copy(ids, taskIDs)
 	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
-	rows, err := s.pool.Query(ctx, `SELECT id,task_id,body,author,created_at FROM task_comments WHERE (cardinality($1::bigint[])=0 OR task_id=ANY($1)) AND (created_at,id)>($2,$3) ORDER BY created_at,id LIMIT $4`, ids, afterAt.UTC(), afterID, limit)
+	rows, err := s.pool.Query(ctx, `SELECT c.id,c.task_id,c.body,c.author,c.created_at,`+importOwnerSQL+` FROM task_comments c WHERE (cardinality($1::bigint[])=0 OR c.task_id=ANY($1)) AND (c.created_at,c.id)>($2,$3) ORDER BY c.created_at,c.id LIMIT $4`, ids, afterAt.UTC(), afterID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -122,7 +125,7 @@ func (s *Store) ImportCommentsUpdatedPage(ctx context.Context, taskIDs []int64, 
 	out := []ImportComment{}
 	for rows.Next() {
 		var x ImportComment
-		if err := scanTaskComment(rows, &x.TaskComment); err != nil {
+		if err := rows.Scan(&x.ID, &x.TaskID, &x.Body, &x.Author, &x.CreatedAt, &x.HKOpID); err != nil {
 			return nil, err
 		}
 		out = append(out, x)

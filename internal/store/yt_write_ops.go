@@ -82,6 +82,17 @@ func (l *YTWriteLedger) Prepare(ctx context.Context, now time.Time, n ytwrite.Ne
 		return ytwrite.Op{}, false, err
 	}
 	defer tx.Rollback(ctx)
+	op, created, err := prepareYTOpTx(ctx, tx, now, n)
+	if err != nil {
+		return ytwrite.Op{}, false, err
+	}
+	return op, created, tx.Commit(ctx)
+}
+
+// prepareYTOpTx is Prepare inside the caller's transaction: the comment path
+// stores its op in the comment's own transaction (yt_comments.go), so the
+// comment and the op commit or roll back together.
+func prepareYTOpTx(ctx context.Context, tx pgx.Tx, now time.Time, n ytwrite.NewOp) (ytwrite.Op, bool, error) {
 	if err := lockYTEntity(ctx, tx, n.EntityKind, n.EntityID); err != nil {
 		return ytwrite.Op{}, false, err
 	}
@@ -97,7 +108,7 @@ func (l *YTWriteLedger) Prepare(ctx context.Context, now time.Time, n ytwrite.Ne
 		n.Principal, n.Kind, n.Key, n.PayloadSHA, string(n.Payload), n.EntityKind, n.EntityID, n.YTTargetID, n.Actor, parent, n.ChildSeq, now.UTC())
 	op, err := scanYTOp(row)
 	if err == nil {
-		return op, true, tx.Commit(ctx)
+		return op, true, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return ytwrite.Op{}, false, err
@@ -110,7 +121,14 @@ func (l *YTWriteLedger) Prepare(ctx context.Context, now time.Time, n ytwrite.Ne
 	if op.PayloadSHA != n.PayloadSHA {
 		return ytwrite.Op{}, false, ytwrite.ErrKeyConflict
 	}
-	return op, false, tx.Commit(ctx)
+	return op, false, nil
+}
+
+// rejectYTOpTx is Reject inside the caller's transaction, for an op refused
+// before it was ever sent.
+func rejectYTOpTx(ctx context.Context, tx pgx.Tx, now time.Time, id int64, reason, detail string) (ytwrite.Op, error) {
+	return scanYTOp(tx.QueryRow(ctx, `UPDATE yt_write_ops SET state='rejected', reason=$2, last_error=$3, resolved_at=$4
+		WHERE id=$1 AND state='prepared' RETURNING `+ytOpColumns, id, clipText(reason, 200), clipText(detail, 2000), now.UTC()))
 }
 
 func (l *YTWriteLedger) Get(ctx context.Context, principal string, id int64) (ytwrite.Op, error) {

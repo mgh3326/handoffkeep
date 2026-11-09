@@ -338,7 +338,13 @@ func decodeAPIError(status int, data []byte) *APIError {
 	return e
 }
 
-func retryAfter(value string) time.Duration {
+func retryAfter(value string) time.Duration { return parseRetryAfter(value, maxRetryWait) }
+
+// parseRetryAfter reads a Retry-After header in seconds or as an HTTP date,
+// capped at limit. The sync's own retries cap at maxRetryWait; the write
+// adapter passes the server's wait up (write_remote.go).
+func parseRetryAfter(value string, limit time.Duration) time.Duration {
+	maxRetryWait := limit
 	value = strings.TrimSpace(value)
 	if value == "" {
 		return 0

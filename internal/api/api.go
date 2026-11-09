@@ -704,6 +704,7 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("POST /v1/projects/{name}/status-updates", s.statusUpdates)
 	m.HandleFunc("GET /v1/documents", s.documents)
 	m.HandleFunc("GET /v1/import/{resource}", s.importExport)
+	m.HandleFunc("GET /v1/yt/ops", s.ytOps)
 	m.HandleFunc("/v1/documents/{key...}", s.document)
 	m.HandleFunc("GET /v1/memory/{agent}", s.memoryList)
 	m.HandleFunc("/v1/memory/{agent}/{name}", s.memory)

@@ -53,6 +53,10 @@ func ParseProvenance(line string) (actor string, at time.Time, opID int64, ok bo
 // hk rendered.
 const markerPrefix = "<!-- hk-op:"
 
+// MarkerPrefix is markerPrefix for readers outside the package: the activity
+// pull drops a comment that carries it (an echo of a protocol write).
+const MarkerPrefix = markerPrefix
+
 // OpMarker is the trailing HTML comment of a comment body.
 func OpMarker(opID int64) string { return markerPrefix + strconv.FormatInt(opID, 10) + " -->" }
 

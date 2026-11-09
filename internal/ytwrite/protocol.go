@@ -126,60 +126,75 @@ type CommentRequest struct {
 // CheckComment explains why a comment request is refused before anything is
 // stored. An empty Key is accepted (AppendComment generates one).
 func CheckComment(req CommentRequest) error {
+	if !principalRE.MatchString(req.Principal) {
+		return fmt.Errorf("%w: principal is empty or malformed", ErrInvalid)
+	}
+	if err := checkActor(req.Actor); err != nil {
+		return err
+	}
+	if req.TaskID <= 0 {
+		return fmt.Errorf("%w: task id must be positive", ErrInvalid)
+	}
+	if !issueIDRE.MatchString(req.YTIssueID) {
+		return fmt.Errorf("%w: youtrack issue id is empty or malformed", ErrInvalid)
+	}
+	if err := checkBody(req.Body); err != nil {
+		return err
+	}
+	if req.Key != "" && !keyRE.MatchString(req.Key) {
+		return fmt.Errorf("%w: idempotency key is malformed", ErrInvalid)
+	}
 	return nil
 }
 
 // CommentOp is the op a comment request stores: the immutable payload, its
-// hash, the entity lane and the target. req.Key must be set.
+// hash, the entity lane ("task", decimal id) and the target. It does not
+// validate the rest of the request: a store that must record a refused
+// comment as a rejected op builds it here and rejects it in the same
+// transaction. req.Key must be set.
 func CommentOp(req CommentRequest) (NewOp, error) {
-	return NewOp{}, nil
-}
-
-// AppendComment records one comment write durably and tries to dispatch it
-// once. It returns an error only before the op row is durable (invalid request,
-// key conflict, ledger unavailable); after that the answer is a Result.
-func (p *Protocol) AppendComment(ctx context.Context, req CommentRequest) (Result, error) {
-	if !principalRE.MatchString(req.Principal) {
-		return Result{}, fmt.Errorf("%w: principal is empty or malformed", ErrInvalid)
-	}
-	if err := checkActor(req.Actor); err != nil {
-		return Result{}, err
-	}
-	if req.TaskID <= 0 {
-		return Result{}, fmt.Errorf("%w: task id must be positive", ErrInvalid)
-	}
-	if !issueIDRE.MatchString(req.YTIssueID) {
-		return Result{}, fmt.Errorf("%w: youtrack issue id is empty or malformed", ErrInvalid)
-	}
-	if err := checkBody(req.Body); err != nil {
-		return Result{}, err
-	}
-	key := req.Key
-	if key == "" {
-		var b [16]byte
-		if _, err := rand.Read(b[:]); err != nil {
-			return Result{}, fmt.Errorf("ytwrite: generate key: %w", err)
-		}
-		key = "auto-" + hex.EncodeToString(b[:])
-	} else if !keyRE.MatchString(key) {
-		return Result{}, fmt.Errorf("%w: idempotency key is malformed", ErrInvalid)
+	if req.Key == "" {
+		return NewOp{}, fmt.Errorf("%w: idempotency key is empty", ErrInvalid)
 	}
 	payload, err := json.Marshal(CommentPayload{Body: req.Body})
 	if err != nil {
-		return Result{}, err
+		return NewOp{}, err
 	}
 	entityID := strconv.FormatInt(req.TaskID, 10)
-	op, created, err := p.Ledger.Prepare(ctx, p.now(), NewOp{
+	return NewOp{
 		Principal:  req.Principal,
 		Kind:       KindCommentAppend,
-		Key:        key,
+		Key:        req.Key,
 		PayloadSHA: payloadSHA(KindCommentAppend, "task", entityID, req.YTIssueID, req.Actor, req.Body),
 		Payload:    payload,
 		EntityKind: "task",
 		EntityID:   entityID,
 		YTTargetID: req.YTIssueID,
 		Actor:      req.Actor,
-	})
+	}, nil
+}
+
+// AppendComment records one comment write durably and tries to dispatch it
+// once. It returns an error only before the op row is durable (invalid request,
+// key conflict, ledger unavailable); after that the answer is a Result.
+// hk's own comment path does not call it: the store prepares the op inside the
+// comment's transaction and the worker's Drive sends it.
+func (p *Protocol) AppendComment(ctx context.Context, req CommentRequest) (Result, error) {
+	if err := CheckComment(req); err != nil {
+		return Result{}, err
+	}
+	if req.Key == "" {
+		var b [16]byte
+		if _, err := rand.Read(b[:]); err != nil {
+			return Result{}, fmt.Errorf("ytwrite: generate key: %w", err)
+		}
+		req.Key = "auto-" + hex.EncodeToString(b[:])
+	}
+	n, err := CommentOp(req)
+	if err != nil {
+		return Result{}, err
+	}
+	op, created, err := p.Ledger.Prepare(ctx, p.now(), n)
 	if err != nil {
 		return Result{}, err
 	}
@@ -200,14 +215,12 @@ func (p *Protocol) Lookup(ctx context.Context, principal string, id int64) (Resu
 // result maps an op to the caller's answer. blocked marks an op that was
 // refused its dispatch because an earlier op on its entity is unresolved.
 func (p *Protocol) result(op Op, blocked bool) Result {
-	r := Result{OpID: op.ID, State: op.State, Reason: op.Reason}
+	r := Result{OpID: op.ID, State: op.State, Reason: op.Reason, Status: StatusOf(op.State)}
 	switch op.State {
 	case StateApplied:
-		r.Status, r.YTID, r.Reason = StatusApplied, op.YTResultID, ""
+		r.YTID, r.Reason = op.YTResultID, ""
 	case StateRejected:
-		r.Status = StatusRejected
 	default:
-		r.Status = StatusPending
 		wait := time.Duration(0)
 		if d := op.NextAttemptAt.Sub(p.now()); d > 0 {
 			wait = d
@@ -232,6 +245,15 @@ func (p *Protocol) result(op Op, blocked bool) Result {
 func (p *Protocol) advance(ctx context.Context, op Op) Result {
 	if op.State != StatePrepared {
 		return p.result(op, false)
+	}
+	if p.Admit != nil {
+		if err := p.Admit(ctx, op); err != nil {
+			log.Printf("ytwrite.op_held op_id=%d entity_id=%q err=%q", op.ID, op.EntityID, err.Error())
+			r := p.result(op, false)
+			r.Reason = ReasonHeld
+			r.RetryAfter = max(r.RetryAfter, p.BlockedWait)
+			return r
+		}
 	}
 	cur, outcome, err := p.Ledger.Claim(ctx, p.now(), op.ID)
 	if err != nil {
@@ -318,7 +340,14 @@ func (p *Protocol) record(before Op, s settled) Result {
 		before.Reason = ReasonOutcomeUnrecorded
 		return Result{OpID: before.ID, Status: StatusPending, State: before.State, Reason: ReasonOutcomeUnrecorded, RetryAfter: p.StaleAfter}
 	}
+	logTransition(s.op)
 	return p.result(s.op, false)
+}
+
+// logTransition is the one log event per recorded state change: the worker's
+// metrics are these lines.
+func logTransition(op Op) {
+	log.Printf("ytwrite.op_state op_id=%d entity_kind=%s entity_id=%q state=%s reason=%q attempts=%d reconciles=%d", op.ID, op.EntityKind, op.EntityID, op.State, op.Reason, op.Attempts, op.Reconciles)
 }
 
 func (p *Protocol) apply(ctx context.Context, op Op, ytID string) settled {
@@ -380,6 +409,9 @@ func (p *Protocol) Drive(ctx context.Context, limit int) (DriveStats, error) {
 		return st, err
 	}
 	for _, op := range stale {
+		if ctx.Err() != nil {
+			break
+		}
 		recovered, err := p.Ledger.RecoverStale(ctx, op.ID, op.Attempts, now.Add(-p.StaleAfter), now, "dispatch did not finish before "+p.StaleAfter.String())
 		if err != nil {
 			errs = append(errs, err)
@@ -387,18 +419,27 @@ func (p *Protocol) Drive(ctx context.Context, limit int) (DriveStats, error) {
 		}
 		if recovered {
 			st.Recovered++
+			log.Printf("ytwrite.op_state op_id=%d entity_kind=%s entity_id=%q state=%s reason=%q attempts=%d reconciles=%d", op.ID, op.EntityKind, op.EntityID, StateRemoteUnknown, ReasonDispatcherLost, op.Attempts, op.Reconciles)
 		}
 	}
 	// An op that resolves releases the writes queued behind it on its entity,
 	// and Due does not list those while it is unresolved, so go round again
 	// while a pass resolves something.
 	for pass := 0; pass < maxDrivePasses; pass++ {
+		if ctx.Err() != nil {
+			break
+		}
 		due, err := p.Ledger.Due(ctx, p.now(), limit)
 		if err != nil {
 			return st, errors.Join(append(errs, err)...)
 		}
 		resolved := false
 		for _, op := range due {
+			// A stopping worker claims nothing new; what is in flight finishes
+			// on its detached context and the rest stays durable.
+			if ctx.Err() != nil {
+				break
+			}
 			switch op.State {
 			case StatePrepared:
 				st.Visited++
@@ -432,9 +473,14 @@ func (p *Protocol) Drive(ctx context.Context, limit int) (DriveStats, error) {
 // it remote_unknown: no match is not proof the write did not happen, so there
 // is no automatic re-create.
 func (p *Protocol) reconcile(ctx context.Context, op Op) (applied bool, err error) {
+	var wait time.Duration
 	touch := func(reason, detail string) (bool, error) {
 		now := p.now()
-		_, terr := p.Ledger.TouchUnknown(ctx, now, op.ID, now.Add(p.reconcileDelay(op.Reconciles+1)), reason, detail)
+		delay := max(p.reconcileDelay(op.Reconciles+1), min(wait, p.MaxRetryAfter))
+		got, terr := p.Ledger.TouchUnknown(ctx, now, op.ID, now.Add(delay), reason, detail)
+		if terr == nil {
+			logTransition(got)
+		}
 		return false, terr
 	}
 	want, rerr := RenderComment(op)
@@ -448,6 +494,11 @@ func (p *Protocol) reconcile(ctx context.Context, op Op) (applied bool, err erro
 	deleted, mismatched := 0, 0
 	comments, lerr := p.Remote.ListComments(cctx, op.YTTargetID, p.PageSize)
 	if lerr != nil {
+		// A rate-limited search waits at least as long as the server asked.
+		var re *RemoteError
+		if errors.As(lerr, &re) && re.Status == http.StatusTooManyRequests {
+			wait = re.RetryAfter
+		}
 		return touch(ReasonReconcileFailed, lerr.Error())
 	}
 	for _, c := range comments {
@@ -466,6 +517,9 @@ func (p *Protocol) reconcile(ctx context.Context, op Op) (applied bool, err erro
 	switch {
 	case len(matches) == 1 && deleted == 0 && mismatched == 0 && resultIDRE.MatchString(matches[0].ID):
 		s := p.apply(ctx, op, matches[0].ID)
+		if s.err == nil {
+			logTransition(s.op)
+		}
 		return s.err == nil, s.err
 	case len(matches) > 1:
 		return touch(ReasonMultipleMatches, fmt.Sprintf("%d identical comments carry the marker", len(matches)))

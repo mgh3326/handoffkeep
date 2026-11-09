@@ -9,8 +9,11 @@
 // The package holds the rules only. It imports no database package: the
 // Postgres Ledger lives in internal/store, the in-memory Ledger and the fake
 // YouTrack that the fault tests drive live in internal/ytwrite/ytwritetest,
-// and the same contract suite runs against both. Nothing in the hk binary
-// calls it yet; the first production write is slice b1a.
+// and the same contract suite runs against both. The first production writer
+// is slice b1a (hk 3739): the store prepares a comment_append op in an hk
+// comment's own transaction for a task in the comment canary, and serve's
+// worker sends it with Drive over the YouTrack adapter
+// (internal/youtrack/write_remote.go).
 //
 // The rules, each pinned by a fault test:
 //
@@ -268,7 +271,11 @@ type Remote interface {
 	// a 2xx without a usable id; the protocol treats it as uncertain.
 	CreateComment(ctx context.Context, issueID, text string) (id string, err error)
 	// ListComments returns a complete, consistent set of comments, or an error.
-	// Offset-paging adapters must use EnumerateStableComments and propagate its error.
+	// Offset-paging adapters must use EnumerateStableComments and propagate its
+	// error (ErrInconsistentEnumeration, ErrEnumerationTooLarge). Each comment
+	// carries its revision time and deletion flag, so two reads compare the
+	// actual state. A 429 is a *RemoteError with the server's RetryAfter; the
+	// next search waits at least that long.
 	ListComments(ctx context.Context, issueID string, pageSize int) ([]RemoteComment, error)
 }
 

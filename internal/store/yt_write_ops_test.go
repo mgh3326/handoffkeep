@@ -17,7 +17,7 @@ func ytLedgerFactory(t *testing.T) ytwritetest.NewLedger {
 	s := schemaStore(t, "ytw")
 	return func(t *testing.T) ytwrite.Ledger {
 		t.Helper()
-		if _, err := s.pool.Exec(t.Context(), `TRUNCATE yt_entity_map, yt_write_ops RESTART IDENTITY`); err != nil {
+		if _, err := s.pool.Exec(t.Context(), `TRUNCATE yt_comment_write_links, yt_entity_map, yt_write_ops RESTART IDENTITY`); err != nil {
 			t.Fatal(err)
 		}
 		return s.YTWriteLedger()

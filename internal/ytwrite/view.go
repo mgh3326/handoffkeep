@@ -5,7 +5,13 @@ import "time"
 // StatusOf is the three-way answer for a lifecycle state. Only applied is
 // done: remote_unknown, like prepared and dispatched, is pending (hk 3667 Q3).
 func StatusOf(s State) Status {
-	return ""
+	switch s {
+	case StateApplied:
+		return StatusApplied
+	case StateRejected:
+		return StatusRejected
+	}
+	return StatusPending
 }
 
 // OpView is the read-only shape of one op that the operator's view (/v1/yt/ops,
@@ -30,5 +36,14 @@ type OpView struct {
 
 // ViewOf renders an op for the operator's view.
 func ViewOf(op Op) OpView {
-	return OpView{}
+	v := OpView{
+		ID: op.ID, Kind: op.Kind, EntityKind: op.EntityKind, EntityID: op.EntityID, YTTargetID: op.YTTargetID,
+		Actor: op.Actor, State: op.State, Status: StatusOf(op.State), Reason: op.Reason, YTResultID: op.YTResultID,
+		Attempts: op.Attempts, Reconciles: op.Reconciles, CreatedAt: op.CreatedAt, NextAttemptAt: op.NextAttemptAt,
+	}
+	if !op.ResolvedAt.IsZero() {
+		at := op.ResolvedAt
+		v.ResolvedAt = &at
+	}
+	return v
 }

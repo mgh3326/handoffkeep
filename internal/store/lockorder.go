@@ -156,14 +156,21 @@ package store
 //     only through the foreign key's KEY SHARE, so it cannot wait on level 2
 //     and the pair cannot cycle.
 //
-//   - The YouTrack write op log (yt_write_ops.go, hk 3697) is a leaf. Prepare
-//     and Claim take one advisory lock, the entity lane lock
+//   - The YouTrack write op log (yt_write_ops.go, hk 3697). Prepare and Claim
+//     take one advisory lock, the entity lane lock
 //     pg_advisory_xact_lock(hashtextextended('yt_write_entity:<kind>:<id>', 0)),
 //     as the first lock of their transaction, then rows of yt_write_ops (and
-//     yt_entity_map in Apply). No other statement in this package touches
-//     those tables, none of these transactions takes a task row, a job lock or
-//     a lock from levels 1-6, and a transaction holds at most one lane lock, so
-//     no wait cycle can include them.
+//     yt_entity_map in Apply). Since slice b1a (hk 3739, yt_comments.go) the
+//     comment writers are the one exception to "first lock": CreateTaskComment
+//     and CreateMCPTaskComment take taskCommentInsertLock, insert the comment
+//     (KEY SHARE on its task row; MCP also writes its audit row), and only
+//     then take the lane lock of that task and insert new rows of
+//     yt_write_ops, yt_comment_write_links and yt_entity_map. No holder of a
+//     lane lock ever requests taskCommentInsertLock, a task row, a job lock or
+//     a level 1-6 lock, and a transaction holds at most one lane lock, so the
+//     comment lock -> lane lock edge cannot close a cycle. The comment writers
+//     that take level 2 (ApplyYouTrackActivity, ReplyDots) never enqueue an
+//     op, so level 2 -> lane lock does not occur.
 //
 //   - The YouTrack sync's single-run guard is a session-scoped
 //     pg_try_advisory_lock(8241873404) on its own pooled connection. It is

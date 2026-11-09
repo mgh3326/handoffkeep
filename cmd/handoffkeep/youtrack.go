@@ -26,7 +26,7 @@ const (
 
 func youtrackCmd(args []string, out io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: youtrack sync [--dry-run] [--limit N] [--activities N]")
+		return errors.New(youtrackUsage)
 	}
 	switch args[0] {
 	case "sync":
@@ -35,10 +35,17 @@ func youtrackCmd(args []string, out io.Writer) error {
 		return youtrackAdoptCmd(args[1:], out)
 	case "projects":
 		return youtrackProjectsCmd(args[1:], out)
+	case "ops":
+		return youtrackOpsCmd(args[1:], out)
+	case "canary":
+		return youtrackCanaryCmd(args[1:], out)
 	default:
-		return errors.New("usage: youtrack sync [--dry-run] | youtrack adopt --state <yt_state.json> [--dry-run] | youtrack projects list|put")
+		return errors.New(youtrackUsage)
 	}
 }
+
+// youtrackUsage also answers `yt`, the short name of this command.
+const youtrackUsage = "usage: youtrack sync [--dry-run] | youtrack adopt --state <yt_state.json> [--dry-run] | youtrack projects list|put | youtrack ops [--state S] [--task N] | youtrack canary add|remove|list"
 
 func youtrackSyncCmd(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("youtrack sync", flag.ContinueOnError)
