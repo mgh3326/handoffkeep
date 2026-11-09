@@ -244,7 +244,7 @@ func (s Service) ListDocuments(ctx context.Context, prefix, kind, session string
 func (s Service) Search(ctx context.Context, q, scope, session string, limit int) ([]store.SearchResult, error) {
 	if s.SearchBackend == youtrackSearchBackend {
 		if s.YouTrack == nil {
-			log.Printf("search.youtrack_fallback reason=config_missing scope=%s", scope)
+			log.Printf("search.youtrack_fallback reason=config_missing scope=%q", scope)
 			return s.Store.Search(ctx, q, scope, session, limit)
 		}
 		return s.YouTrack.Search(ctx, s.Store.Search, q, scope, session, limit)

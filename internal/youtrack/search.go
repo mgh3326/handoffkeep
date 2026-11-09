@@ -118,7 +118,7 @@ func (s *Service) Search(ctx context.Context, fallback SearchFallback, q, scope,
 		articles, err = s.client.SearchArticleText(yctx, quoteSearchText(text), limit+1)
 	}
 	if err != nil {
-		log.Printf("search.youtrack_fallback reason=%s scope=%s", searchFailureReason(yctx, err), scope)
+		log.Printf("search.youtrack_fallback reason=%s scope=%q", searchFailureReason(yctx, err), scope)
 		return fallback(ctx, q, scope, session, limit)
 	}
 
