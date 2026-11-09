@@ -15,7 +15,11 @@
 #           RB_DB_HOST RB_DB_PORT RB_DB_SERVICE RB_DB_USER RB_DB_PASSWORD RB_WALLET_DIR
 # Optional: MYSQL_SSL=required|disabled (default required; disabled only for the
 #           in-VCN private address), MYSQL_SSL_CA (CA bundle path for HeatWave),
-#           OUT (default out/db), RUNS (default 30)
+#           OUT (default out/db), RUNS (default 30), ENGINES (space-separated engine
+#           names to run; default all of them, see ENGINES below)
+# Remote engines (read-only), each needs its own settings:
+#   youtrack: YOUTRACK_URL (https), YOUTRACK_API_KEY, optional YOUTRACK_HK_FIELD (default "hk ID")
+#   hk-pg:    HK_BIN (default handoffkeep on PATH); the CLI uses its own configuration
 # Oracle needs Oracle Instant Client on the library path (e.g. LD_LIBRARY_PATH).
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -42,7 +46,9 @@ export TNS_ADMIN="$RB_WALLET_DIR"
 export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}"
 OUT="${OUT:-out/db}"
 RUNS="${RUNS:-30}"
-ENGINES=(mysql-heatwave-ngram oracle-text-korean-morph oracle-text-basic oracle-text-world)
+# Each engine is independent; an engine missing its own settings fails alone.
+DEFAULT_ENGINES="mysql-heatwave-ngram oracle-text-korean-morph oracle-text-basic oracle-text-world youtrack hk-pg"
+read -r -a ENGINES <<< "${ENGINES:-$DEFAULT_ENGINES}"
 
 mkdir -p "$OUT" work
 cargo build --release --features oracle

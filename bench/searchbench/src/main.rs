@@ -17,6 +17,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use corpus::{Query, Record};
 use engines::{mysql_engine::MysqlEngine, sqlite_engine, tantivy_engine, Engine};
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -91,6 +92,9 @@ fn engines_for(group: &str, work: &Path) -> Result<Vec<Box<dyn Engine>>> {
     }
     #[cfg(not(feature = "oracle"))]
     eprintln!("note: built without --features oracle; Oracle Text engines are skipped");
+    // Remote systems (read-only): YouTrack REST and the hk production search.
+    db.push(Box::new(engines::youtrack_engine::YoutrackEngine::new()));
+    db.push(Box::new(engines::hk_pg_engine::HkPgEngine::new()));
     match group {
         "local" => Ok(local),
         "db" => Ok(db),
@@ -133,6 +137,11 @@ fn run(args: &[String]) -> Result<()> {
         let ingest_s = t.elapsed().as_secs_f64();
         let index_bytes = engine.index_bytes().unwrap_or(0);
         eprintln!("[{name}] built in {ingest_s:.1}s, index {index_bytes} bytes");
+        let coverage = measure_coverage(engine.as_mut(), &queries);
+        if let Some(c) = &coverage {
+            let exist = c.exists.values().filter(|v| **v == Some(true)).count();
+            eprintln!("[{name}] coverage: {exist} of {} gold keys exist in the system", c.exists.len());
+        }
 
         for mode in engine.modes() {
             eprintln!("[{name}/{mode}] measuring {} queries", queries.len());
@@ -148,6 +157,13 @@ fn run(args: &[String]) -> Result<()> {
                     }
                 };
                 let s = metrics::score(&q.gold, &top);
+                // Subset: only the gold keys that exist in the system (remote engines).
+                let present: Vec<String> = match &coverage {
+                    Some(c) => q.gold.iter().filter(|g| c.exists.get(*g) == Some(&Some(true))).cloned().collect(),
+                    None => Vec::new(),
+                };
+                let sub = if coverage.is_some() && !present.is_empty() { metrics::score(&present, &top) } else { None };
+                let unmapped = top.iter().filter(|k| k.starts_with("unmapped:")).count();
                 for _ in 0..WARMUP {
                     let _ = engine.search(mode, &q.text, K);
                 }
@@ -169,6 +185,11 @@ fn run(args: &[String]) -> Result<()> {
                     "mrr": s.as_ref().map(|s| s.mrr),
                     "recall": s.as_ref().map(|s| s.recall),
                     "first_rank": s.as_ref().and_then(|s| s.first_rank),
+                    "gold_present": if coverage.is_some() { json!(present.len()) } else { Value::Null },
+                    "subset_hit": sub.as_ref().map(|s| s.hit),
+                    "subset_mrr": sub.as_ref().map(|s| s.mrr),
+                    "subset_recall": sub.as_ref().map(|s| s.recall),
+                    "unmapped_in_top10": unmapped,
                 }));
             }
             let answered: Vec<&Value> = per_query.iter().filter(|p| p["answered"] == true).collect();
@@ -183,9 +204,37 @@ fn run(args: &[String]) -> Result<()> {
             let no_answer_hits = per_query.iter().filter(|p| p["answered"] == false && p["returned"].as_u64().unwrap_or(0) > 0).count();
             lat_us.sort_unstable();
             let mean_us = lat_us.iter().sum::<u64>() as f64 / lat_us.len().max(1) as f64;
+            let subset_rows: Vec<&Value> = per_query.iter().filter(|p| p["subset_hit"].is_boolean()).collect();
+            let coverage_json = match &coverage {
+                Some(c) => {
+                    let missing: Vec<&String> = c.exists.iter().filter(|(_, v)| **v == Some(false)).map(|(k, _)| k).collect();
+                    json!({
+                        "gold_keys": c.exists.len(),
+                        "exist": c.exists.values().filter(|v| **v == Some(true)).count(),
+                        "missing": missing.len(),
+                        "unknown": c.exists.values().filter(|v| v.is_none()).count(),
+                        "missing_keys": missing,
+                        "errors": c.errors.iter().take(10).collect::<Vec<_>>(),
+                    })
+                }
+                None => Value::Null,
+            };
+            let subset_json = if coverage.is_some() {
+                json!({
+                    "queries": subset_rows.len(),
+                    "hit_at_10": mean_field(&subset_rows, "subset_hit"),
+                    "recall_at_10": mean_field(&subset_rows, "subset_recall"),
+                    "mrr_at_10": mean_field(&subset_rows, "subset_mrr"),
+                })
+            } else {
+                Value::Null
+            };
+            let unmapped_total: u64 = per_query.iter().filter_map(|p| p["unmapped_in_top10"].as_u64()).sum();
             let doc = json!({
                 "engine": name,
                 "mode": mode,
+                "coverage": coverage_json,
+                "subset": subset_json,
                 "corpus_records": recs.len(),
                 "queries": queries.len(),
                 "k": K,
@@ -200,6 +249,7 @@ fn run(args: &[String]) -> Result<()> {
                     "recall_at_10": mean("recall"),
                     "mrr_at_10": mean("mrr"),
                     "no_answer_queries_with_results": no_answer_hits,
+                    "unmapped_results_in_top10": unmapped_total,
                 },
                 "latency_ms": {
                     "samples": lat_us.len(),
@@ -215,6 +265,48 @@ fn run(args: &[String]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Whether each gold key of the query set exists in a remote system. None when the
+/// engine indexed the corpus itself (coverage does not apply) or there is no gold.
+struct Coverage {
+    exists: BTreeMap<String, Option<bool>>,
+    errors: Vec<String>,
+}
+
+fn measure_coverage(engine: &mut dyn Engine, queries: &[Query]) -> Option<Coverage> {
+    let mut keys: Vec<String> = queries.iter().flat_map(|q| q.gold.iter().cloned()).collect();
+    keys.sort();
+    keys.dedup();
+    if keys.is_empty() {
+        return None;
+    }
+    let mut exists = BTreeMap::new();
+    let mut errors = Vec::new();
+    for key in &keys {
+        match engine.key_exists(key) {
+            Ok(Some(b)) => {
+                exists.insert(key.clone(), Some(b));
+            }
+            Ok(None) => return None,
+            Err(e) => {
+                // Unknown, not missing: an error must not lower coverage.
+                errors.push(format!("{key}: {e:#}"));
+                exists.insert(key.clone(), None);
+            }
+        }
+    }
+    Some(Coverage { exists, errors })
+}
+
+fn mean_field(rows: &[&Value], field: &str) -> f64 {
+    if rows.is_empty() {
+        return 0.0;
+    }
+    rows.iter()
+        .map(|p| p[field].as_f64().or_else(|| p[field].as_bool().map(|b| b as u8 as f64)).unwrap_or(0.0))
+        .sum::<f64>()
+        / rows.len() as f64
 }
 
 fn summarize(args: &[String]) -> Result<()> {
@@ -268,6 +360,43 @@ fn summarize(args: &[String]) -> Result<()> {
             f["stage"].as_str().unwrap_or(""),
             f["error"].as_str().unwrap_or("").replace('\n', " ")
         ));
+    }
+    md.push_str("\n## Coverage and subset (remote systems)\n\n");
+    md.push_str("Subset = answered queries with at least one gold key that exists in the system; its scores use only those gold keys, so a missing mirror is not read as bad ranking.\n\n");
+    let cov_rows: Vec<&Value> = docs.iter().filter(|d| !d["coverage"].is_null()).collect();
+    if cov_rows.is_empty() {
+        md.push_str("- none (local engines only)\n");
+    } else {
+        md.push_str("| engine | mode | gold keys | exist | missing | unknown | all answered: hit@10 | subset queries | subset hit@10 | subset recall@10 | subset MRR@10 | unmapped in top10 |\n");
+        md.push_str("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n");
+        for d in cov_rows {
+            let c = &d["coverage"];
+            let s = &d["subset"];
+            md.push_str(&format!(
+                "| {} | {} | {} | {} | {} | {} | {:.3} | {} | {:.3} | {:.3} | {:.3} | {} |\n",
+                d["engine"].as_str().unwrap_or(""),
+                d["mode"].as_str().unwrap_or(""),
+                c["gold_keys"],
+                c["exist"],
+                c["missing"],
+                c["unknown"],
+                d["aggregate"]["hit_at_10"].as_f64().unwrap_or(0.0),
+                s["queries"],
+                s["hit_at_10"].as_f64().unwrap_or(0.0),
+                s["recall_at_10"].as_f64().unwrap_or(0.0),
+                s["mrr_at_10"].as_f64().unwrap_or(0.0),
+                d["aggregate"]["unmapped_results_in_top10"],
+            ));
+        }
+        for d in docs.iter().filter(|d| !d["coverage"].is_null()) {
+            let errs = d["coverage"]["errors"].as_array().cloned().unwrap_or_default();
+            if !errs.is_empty() {
+                md.push_str(&format!("- {} coverage errors (first {}):\n", d["engine"].as_str().unwrap_or(""), errs.len()));
+                for e in &errs {
+                    md.push_str(&format!("  - {}\n", e.as_str().unwrap_or("").replace('\n', " ")));
+                }
+            }
+        }
     }
     md.push_str("\n## Query errors (first 5 per engine and mode)\n\n");
     let mut any_err = false;

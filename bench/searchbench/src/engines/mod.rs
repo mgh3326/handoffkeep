@@ -4,11 +4,13 @@
 use crate::corpus::Record;
 use anyhow::Result;
 
+pub mod hk_pg_engine;
 pub mod mysql_engine;
 #[cfg(feature = "oracle")]
 pub mod oracle_engine;
 pub mod sqlite_engine;
 pub mod tantivy_engine;
+pub mod youtrack_engine;
 
 pub trait Engine {
     fn name(&self) -> &'static str;
@@ -18,4 +20,10 @@ pub trait Engine {
     fn index_bytes(&mut self) -> Result<u64>;
     fn search(&mut self, mode: &str, q: &str, k: usize) -> Result<Vec<String>>;
     fn setup_notes(&self) -> Vec<String>;
+    /// Remote systems only: whether a corpus key (`task:<id>`, `doc:<id>`) exists in
+    /// the system at all. Ok(None) means coverage does not apply (the engine indexed
+    /// the corpus itself).
+    fn key_exists(&mut self, _key: &str) -> Result<Option<bool>> {
+        Ok(None)
+    }
 }
