@@ -18,6 +18,10 @@ const DECISION_STATE = {open: '열림', answered: '답변됨', superseded: '대�
 const PREFIXES = ['ack','advice','advice-request','briefs','decision','design','experiment','handoff',
   'note','other','policy','reference','report','research','review','runbook','task'];
 const SAFE_PART_BYTES = 240 * 1024;
+// Document key prefixes not imported (operator 2026-11-09): pane screen dumps are noise for reading and
+// search; they stay in hk.
+const EXCLUDED_DOC_PREFIXES = ['screens'];
+function excludedDoc(doc) { return EXCLUDED_DOC_PREFIXES.indexOf(String(doc.key).split('/')[0]) >= 0; }
 const DECISIONS_PROJECT_ID = 'hk-project:/decisions';
 
 function sourceUser(name) {
@@ -400,6 +404,7 @@ class HandoffkeepImport {
       if (afterID !== null) query.after_id = afterID;
       const docs = this.onePage('documents', query) || [];
       for (const doc of docs) {
+        if (excludedDoc(doc)) continue;
         if (documentLimit && !this.seenDocumentIDs[doc.id] && Object.keys(this.seenDocumentIDs).length >= documentLimit) return out;
         this.seenDocumentIDs[doc.id] = true;
         let articles = this.documentArticles(doc, targetProject);
