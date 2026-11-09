@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,12 +15,20 @@ import (
 )
 
 type fakeObjects struct {
+	mu          sync.Mutex
 	puts, stats int
 	fail        bool
 	objects     map[string][]byte
+	// modified overrides a key's last-modified time; unset keys count as now.
+	modified map[string]time.Time
+	// beforePut, when set, runs before each Put stores its object. A test uses
+	// it to overwrite the staging object between verify and promote.
+	beforePut func(key string)
 }
 
 func (f *fakeObjects) Stat(_ context.Context, k string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.stats++
 	if _, ok := f.objects[k]; ok {
 		return nil
@@ -27,15 +36,25 @@ func (f *fakeObjects) Stat(_ context.Context, k string) error {
 	return ErrObjectNotFound
 }
 func (f *fakeObjects) Put(_ context.Context, k string, r io.Reader, _ int64, _ string) error {
+	f.mu.Lock()
 	f.puts++
-	if f.fail {
+	fail, hook := f.fail, f.beforePut
+	f.mu.Unlock()
+	if fail {
 		return errors.New("down")
 	}
+	if hook != nil {
+		hook(k)
+	}
 	b, _ := io.ReadAll(r)
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.objects[k] = b
 	return nil
 }
 func (f *fakeObjects) Get(_ context.Context, k string) (io.ReadCloser, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	b, ok := f.objects[k]
 	if !ok {
 		return nil, ErrObjectNotFound
@@ -45,15 +64,92 @@ func (f *fakeObjects) Get(_ context.Context, k string) (io.ReadCloser, error) {
 func (f *fakeObjects) Presign(context.Context, string, time.Duration) (string, error) {
 	return "https://fake.invalid", nil
 }
+func (f *fakeObjects) PresignPut(_ context.Context, k string, _ time.Duration, _ int64) (string, error) {
+	return "https://fake.invalid/put/" + k + "?sig=test", nil
+}
+func (f *fakeObjects) Head(_ context.Context, k string) (ObjectInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	b, ok := f.objects[k]
+	if !ok {
+		return ObjectInfo{}, ErrObjectNotFound
+	}
+	return ObjectInfo{Key: k, Size: int64(len(b)), Modified: f.modifiedAt(k)}, nil
+}
+func (f *fakeObjects) Delete(_ context.Context, k string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.objects, k)
+	return nil
+}
+func (f *fakeObjects) List(_ context.Context, prefix string) ([]ObjectInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []ObjectInfo
+	for k, b := range f.objects {
+		if strings.HasPrefix(k, prefix) {
+			out = append(out, ObjectInfo{Key: k, Size: int64(len(b)), Modified: f.modifiedAt(k)})
+		}
+	}
+	return out, nil
+}
+func (f *fakeObjects) modifiedAt(k string) time.Time {
+	if t, ok := f.modified[k]; ok {
+		return t
+	}
+	return time.Now().UTC()
+}
 
 type fakeDB struct {
+	mu      sync.Mutex
 	rows    map[string]store.Attachment
 	puts    int
 	capErr  error
 	hideGet bool
+	uploads map[string]store.AttachmentUpload
+}
+
+func (f *fakeDB) ReserveAttachmentUpload(_ context.Context, u store.AttachmentUpload, stagingCap, clientCap int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.uploads == nil {
+		f.uploads = map[string]store.AttachmentUpload{}
+	}
+	return reserveFake(f.uploads, u, stagingCap, clientCap)
+}
+func (f *fakeDB) ListUnreleasedAttachmentUploads(_ context.Context, createdBefore time.Time, limit int) ([]store.AttachmentUpload, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return unreleasedFake(f.uploads, createdBefore, limit), nil
+}
+func (f *fakeDB) MarkAttachmentUploadStagingDeleted(_ context.Context, id string, now time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	markReleasedFake(f.uploads, id, now)
+	return nil
+}
+
+func (f *fakeDB) GetAttachmentUpload(_ context.Context, id string) (store.AttachmentUpload, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	u, ok := f.uploads[id]
+	return u, ok, nil
+}
+func (f *fakeDB) TransitionAttachmentUpload(_ context.Context, id, from, to, reason string, now time.Time) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	u, ok := f.uploads[id]
+	if !ok || u.Status != from {
+		return false, nil
+	}
+	u.Status, u.Reason, u.UpdatedAt = to, reason, now
+	f.uploads[id] = u
+	return true, nil
 }
 
 func (f *fakeDB) GetAttachment(_ context.Context, sha string) (store.Attachment, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.hideGet {
 		return store.Attachment{}, false, nil
 	}
@@ -61,6 +157,8 @@ func (f *fakeDB) GetAttachment(_ context.Context, sha string) (store.Attachment,
 	return x, ok, nil
 }
 func (f *fakeDB) PutAttachment(_ context.Context, x store.Attachment, _, _ int64) (store.Attachment, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.puts++
 	if _, ok := f.rows[x.SHA256]; ok {
 		return f.rows[x.SHA256], false, nil
@@ -124,7 +222,7 @@ func TestContentGuards(t *testing.T) {
 
 func TestDefaultAllowlistAcceptsAllDeclaredTypesAndRejectsDisguises(t *testing.T) {
 	allow := map[string]bool{}
-	for _, x := range strings.Split("image/png,image/jpeg,image/gif,text/html,text/plain,text/markdown,application/json,application/pdf,text/csv,application/x-ndjson,text/x-log", ",") {
+	for _, x := range strings.Split("image/png,image/jpeg,image/gif,image/webp,text/html,text/plain,text/markdown,application/json,application/pdf,text/csv,application/x-ndjson,text/x-log", ",") {
 		allow[x] = true
 	}
 	m := &Manager{Store: &fakeDB{rows: map[string]store.Attachment{}}, Objects: &fakeObjects{objects: map[string][]byte{}}, Enabled: true, Config: Config{MaxBytes: 1000, StorageCap: 10000, PutCap: 100, GetCap: 100, Allow: allow}}
@@ -134,6 +232,7 @@ func TestDefaultAllowlistAcceptsAllDeclaredTypesAndRejectsDisguises(t *testing.T
 		body       []byte
 	}{
 		{"x.png", "image/png", png}, {"x.jpg", "image/jpeg", []byte{0xff, 0xd8, 0xff, 0xe0, 0, 0, 0, 0, "J"[0], "F"[0], "I"[0], "F"[0]}}, {"x.gif", "image/gif", []byte("GIF89a")},
+		{"x.webp", "image/webp", []byte("RIFF\x24\x00\x00\x00WEBPVP8 ")},
 		{"x.html", "text/html", []byte("<html>ok</html>")}, {"x.txt", "text/plain", []byte("plain")}, {"x.md", "text/markdown", []byte("# heading")}, {"x.json", "application/json", []byte(`{"ok":true}`)}, {"x.pdf", "application/pdf", []byte("%PDF-1.4")}, {"x.csv", "text/csv", []byte("a,b\n1,2")}, {"x.ndjson", "application/x-ndjson", []byte("{\"a\":1}\n")}, {"x.log", "text/x-log", []byte("INFO ready")},
 	} {
 		if _, created, err := m.Put(t.Context(), "node", x.name, x.mime, "", x.body); err != nil || !created {
@@ -146,11 +245,14 @@ func TestDefaultAllowlistAcceptsAllDeclaredTypesAndRejectsDisguises(t *testing.T
 	if _, _, err := m.Put(t.Context(), "node", "fake.json", "application/json", "", png); !errors.Is(err, ErrMIME) {
 		t.Fatalf("json disguise=%v", err)
 	}
+	if _, _, err := m.Put(t.Context(), "node", "fake.webp", "image/webp", "", png); !errors.Is(err, ErrMIME) {
+		t.Fatalf("webp disguise=%v", err)
+	}
 }
 
 func TestTextDeclarationsRejectBinarySniffsAndNUL(t *testing.T) {
 	allow := map[string]bool{}
-	for _, x := range strings.Split("image/png,image/jpeg,image/gif,text/html,text/plain,text/markdown,application/json,application/pdf,text/csv,application/x-ndjson,text/x-log", ",") {
+	for _, x := range strings.Split("image/png,image/jpeg,image/gif,image/webp,text/html,text/plain,text/markdown,application/json,application/pdf,text/csv,application/x-ndjson,text/x-log", ",") {
 		allow[x] = true
 	}
 	m := &Manager{Store: &fakeDB{rows: map[string]store.Attachment{}}, Objects: &fakeObjects{objects: map[string][]byte{}}, Enabled: true, Config: Config{MaxBytes: 1000, StorageCap: 10000, PutCap: 100, GetCap: 100, Allow: allow}}
@@ -173,13 +275,18 @@ func TestTextDeclarationsRejectBinarySniffsAndNUL(t *testing.T) {
 }
 
 func TestParseRef(t *testing.T) {
-	for _, ref := range []string{"checkpoint:12", "document:jobs/a.md", "memory:agent/name", ""} {
+	for _, ref := range []string{"checkpoint:12", "document:jobs/a.md", "memory:agent/name", "task:12", ""} {
 		if _, _, err := ParseRef(ref); err != nil {
 			t.Fatalf("%s: %v", ref, err)
 		}
 	}
-	if _, _, err := ParseRef("bad:x"); err == nil {
-		t.Fatal("bad ref accepted")
+	if kind, id, err := ParseRef("task:12"); err != nil || kind != "task" || id != "12" {
+		t.Fatalf("task ref kind=%q id=%q err=%v", kind, id, err)
+	}
+	for _, bad := range []string{"bad:x", "task:", "task:0", "task:-3", "task:012", "task:12x", "task:1 2"} {
+		if _, _, err := ParseRef(bad); err == nil {
+			t.Fatalf("%q accepted", bad)
+		}
 	}
 }
 
@@ -246,5 +353,42 @@ func TestStorageFuseBlocksObjectPut(t *testing.T) {
 	}
 	if obj.puts != 0 {
 		t.Fatalf("R2 puts=%d", obj.puts)
+	}
+}
+
+// reserveFake applies the store's budget: rows whose staging object may still
+// exist count against the global and the per-creator cap.
+func reserveFake(uploads map[string]store.AttachmentUpload, u store.AttachmentUpload, stagingCap, clientCap int64) error {
+	var used, usedByClient int64
+	for _, o := range uploads {
+		if !o.StagingDeletedAt.IsZero() {
+			continue
+		}
+		used += o.SizeBytes
+		if o.CreatedBy == u.CreatedBy {
+			usedByClient += o.SizeBytes
+		}
+	}
+	if used+u.SizeBytes > stagingCap || usedByClient+u.SizeBytes > clientCap {
+		return store.ErrAttachmentStagingCap
+	}
+	uploads[u.ID] = u
+	return nil
+}
+
+func unreleasedFake(uploads map[string]store.AttachmentUpload, createdBefore time.Time, limit int) []store.AttachmentUpload {
+	var out []store.AttachmentUpload
+	for _, o := range uploads {
+		if o.StagingDeletedAt.IsZero() && o.CreatedAt.Before(createdBefore) && len(out) < limit {
+			out = append(out, o)
+		}
+	}
+	return out
+}
+
+func markReleasedFake(uploads map[string]store.AttachmentUpload, id string, now time.Time) {
+	if u, ok := uploads[id]; ok && u.StagingDeletedAt.IsZero() {
+		u.StagingDeletedAt = now
+		uploads[id] = u
 	}
 }

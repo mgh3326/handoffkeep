@@ -112,7 +112,17 @@ func TestOriginsMigration(t *testing.T) {
 		t.Error("an origin of a missing task was accepted")
 	}
 	var idx int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_indexes WHERE schemaname=current_schema() AND tablename='task_origins' AND indexdef LIKE '%(provider, external_id)%'`).Scan(&idx); err != nil || idx != 1 {
+	// Match the index by its key columns in the catalog, not by pg_indexes.indexdef: the view
+	// runs pg_get_indexdef on rows of every schema before the filter applies, and a parallel
+	// test dropping its own schema made that fail with "could not open relation with OID"
+	// (hk 3554).
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_index i
+		JOIN pg_class t ON t.oid = i.indrelid
+		JOIN pg_namespace n ON n.oid = t.relnamespace
+		WHERE n.nspname = current_schema() AND t.relname = 'task_origins'
+		  AND (SELECT array_agg(a.attname ORDER BY k.ord)
+		         FROM unnest(i.indkey::int2[]) WITH ORDINALITY AS k(attnum, ord)
+		         JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum) = ARRAY['provider','external_id']::name[]`).Scan(&idx); err != nil || idx != 1 {
 		t.Errorf("(provider, external_id) index count=%d err=%v", idx, err)
 	}
 

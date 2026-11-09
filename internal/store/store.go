@@ -3862,7 +3862,18 @@ func validAttachmentRef(kind, id string) bool {
 		a, n, ok := strings.Cut(id, "/")
 		return ok && validName(a) && validName(n)
 	}
+	if kind == "task" {
+		return ValidTaskRefID(id)
+	}
 	return false
+}
+
+// ValidTaskRefID reports whether id is a task id written the way ParseRef and
+// the attachment_refs row store it: a positive decimal with no sign or leading
+// zero, so "task:12" and "task:012" cannot name two different refs.
+func ValidTaskRefID(id string) bool {
+	n, e := strconv.ParseInt(id, 10, 64)
+	return e == nil && n > 0 && strconv.FormatInt(n, 10) == id
 }
 func monthNow() string { return time.Now().UTC().Format("2006-01") }
 func (s *Store) GetAttachment(ctx context.Context, sha string) (Attachment, bool, error) {

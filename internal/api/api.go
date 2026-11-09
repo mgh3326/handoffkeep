@@ -286,6 +286,18 @@ func (s Service) AttachmentUsage(ctx context.Context) (store.AttachmentUsage, er
 	}
 	return s.Attachments.Usage(ctx)
 }
+func (s Service) BeginAttachmentUpload(ctx context.Context, client, name, mime string, size int64, sha, ref string) (attachments.UploadTicket, error) {
+	if s.Attachments == nil {
+		return attachments.UploadTicket{}, attachments.ErrDisabled
+	}
+	return s.Attachments.BeginUpload(ctx, client, name, mime, size, sha, ref)
+}
+func (s Service) CompleteAttachmentUpload(ctx context.Context, client, id string) (store.Attachment, bool, error) {
+	if s.Attachments == nil {
+		return store.Attachment{}, false, attachments.ErrDisabled
+	}
+	return s.Attachments.CompleteUpload(ctx, client, id)
+}
 func (s Service) CreateTask(ctx context.Context, client string, x store.Task, check store.DuplicateCheck) (store.Task, error) {
 	x.CreatedBy = client
 	return s.Store.CreateTaskChecked(ctx, x, check)
@@ -698,6 +710,8 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("PUT /v1/attachments", s.attachmentPut)
 	m.HandleFunc("GET /v1/attachments", s.attachments)
 	m.HandleFunc("GET /v1/attachments/{sha}", s.attachment)
+	m.HandleFunc("POST /v1/attachments/uploads", s.attachmentUploadBegin)
+	m.HandleFunc("POST /v1/attachments/uploads/{id}/complete", s.attachmentUploadComplete)
 	m.HandleFunc("GET /v1/usage", s.usage)
 	m.HandleFunc("GET /metrics", s.metrics)
 	m.HandleFunc("POST /v1/tasks", s.tasksCreate)
@@ -2535,6 +2549,58 @@ func (s Server) attachmentPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOut(w, http.StatusCreated, map[string]any{"attachment": x, "created": new, "url": "/v1/attachments/" + x.SHA256})
+}
+
+// attachmentUploadBegin declares a direct upload and answers with a presigned
+// PUT for its staging object. The bytes never pass through hk.
+func (s Server) attachmentUploadBegin(w http.ResponseWriter, r *http.Request) {
+	client, ok := s.auth(w, r)
+	if !ok {
+		return
+	}
+	defer r.Body.Close()
+	var in struct {
+		Name   string `json:"name"`
+		MIME   string `json:"mime"`
+		Size   int64  `json:"size"`
+		SHA256 string `json:"sha256"`
+		Ref    string `json:"ref,omitempty"`
+	}
+	if err := decode(r, &in, bodySmall); err != nil {
+		appErr(w, r, err)
+		return
+	}
+	if s.Service.Attachments == nil || !s.Service.Attachments.Enabled {
+		appErr(w, r, attachments.ErrDisabled)
+		return
+	}
+	t, e := s.Service.BeginAttachmentUpload(r.Context(), client, in.Name, in.MIME, in.Size, in.SHA256, in.Ref)
+	if e != nil {
+		appErr(w, r, e)
+		return
+	}
+	jsonOut(w, http.StatusCreated, t)
+}
+
+// attachmentUploadComplete checks the staged bytes and stores them. The answer
+// has the same fields as PUT /v1/attachments.
+func (s Server) attachmentUploadComplete(w http.ResponseWriter, r *http.Request) {
+	client, ok := s.auth(w, r)
+	if !ok {
+		return
+	}
+	defer r.Body.Close()
+	if s.Service.Attachments == nil || !s.Service.Attachments.Enabled {
+		appErr(w, r, attachments.ErrDisabled)
+		return
+	}
+	x, created, e := s.Service.CompleteAttachmentUpload(r.Context(), client, r.PathValue("id"))
+	if e != nil {
+		appErr(w, r, e)
+		return
+	}
+	// The answer carries the stable reference only, never a signed URL.
+	jsonOut(w, http.StatusOK, map[string]any{"attachment": x, "created": created, "reference": "hk:attachment/" + x.SHA256, "lookup_path": "/v1/attachments/" + x.SHA256})
 }
 func (s Server) attachments(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.auth(w, r); !ok {

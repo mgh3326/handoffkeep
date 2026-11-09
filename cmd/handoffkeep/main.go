@@ -2045,6 +2045,9 @@ func serve(args []string, errout io.Writer) error {
 		workers = append(workers, backlogSweepWorker{store: st, days: *iceboxDays})
 	}
 	workers = append(workers, lastActivityRepairWorker{store: st})
+	if am != nil && am.Enabled {
+		workers = append(workers, attachmentStagingSweepWorker{am: am})
+	}
 	linear := linearFromEnv(st)
 	if linear.boardWorker != nil {
 		workers = append(workers, singletonWorker{store: st, id: store.LinearBoardWorkerLock, worker: linear.boardWorker})
