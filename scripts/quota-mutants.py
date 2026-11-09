@@ -63,11 +63,13 @@ MUTANTS = [
     ),
     (
         "grant-generic-guard-first", "api/api.go", False,
-        '\t\tk, v, ok := strings.Cut(line, "=")\n',
+        '\t\tk, v, ok := strings.Cut(line, "=")\n'
+        '\t\tif id, isQuota := strings.CutPrefix(k, "HANDOFFKEEP_QUOTA_"); isQuota {\n',
         '\t\tk, v, ok := strings.Cut(line, "=")\n'
         '\t\tif !ok || v == "" {\n'
         '\t\t\treturn nil, nil, errors.New("invalid HANDOFFKEEP_AUTH_FILE")\n'
-        '\t\t}\n',
+        '\t\t}\n'
+        '\t\tif id, isQuota := strings.CutPrefix(k, "HANDOFFKEEP_QUOTA_"); isQuota {\n',
         "TestQuotaGrantFile", "quota grant refused startup",
     ),
     (
