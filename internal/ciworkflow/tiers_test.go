@@ -1031,10 +1031,10 @@ func TestCITierMutantsTurnRed(t *testing.T) {
 		{"prune-on-pull-request-too", "        if: ${{ github.event_name != 'pull_request' }}\n        run: |\n          git checkout --detach", "        run: |\n          git checkout --detach"},
 		{"pr-store-db-pr-only-if", storeIf, "    if: ${{ github.event_name == 'pull_request' && contains(fromJSON('[\"all\",\"test\"]'), inputs.suite || 'all') }}\n    name: 'pr: store + postgres'"},
 		{"pr-store-db-no-db-url", storeEnv, "        env:\n          PACKAGES: ${{ steps.decide.outputs.packages }}\n"},
-		{"pr-store-db-race", `go test -timeout 10m -count=1 -v "${pkgs[@]}"`, `go test -race -timeout 10m -count=1 -v "${pkgs[@]}"`},
+		{"pr-store-db-race", `go test -timeout 20m -count=1 -v "${pkgs[@]}"`, `go test -race -timeout 20m -count=1 -v "${pkgs[@]}"`},
 		{"pr-store-db-drops-testdb-path", "internal/store/*|internal/testdb/*)", "internal/store/*)"},
-		{"pr-store-db-expr-in-run", `go test -timeout 10m -count=1 -v "${pkgs[@]}"`, `go test -timeout 10m -count=1 -v "${pkgs[@]}" -run '${{ github.head_ref }}'`},
-		{"pr-store-db-ignores-selection", `go test -timeout 10m -count=1 -v "${pkgs[@]}"`, `go test -timeout 10m -count=1 -v ./internal/store/...`},
+		{"pr-store-db-expr-in-run", `go test -timeout 20m -count=1 -v "${pkgs[@]}"`, `go test -timeout 20m -count=1 -v "${pkgs[@]}" -run '${{ github.head_ref }}'`},
+		{"pr-store-db-ignores-selection", `go test -timeout 20m -count=1 -v "${pkgs[@]}"`, `go test -timeout 20m -count=1 -v ./internal/store/...`},
 		{"pr-store-db-packages-not-from-decision", "          PACKAGES: ${{ steps.decide.outputs.packages }}\n", "          PACKAGES: ./internal/store/...\n"},
 		{"pr-store-db-not-in-ci-ok", "needs: [test, pr-store-db, vitest,", "needs: [test, vitest,"},
 	} {
