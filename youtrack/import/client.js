@@ -55,6 +55,14 @@ function documentIssueComments(doc) {
 }
 const DECISIONS_PROJECT_ID = 'hk-project:/decisions';
 
+// hk's write protocol copies some comments to YouTrack itself (slice b1a).
+// The export marks such a PG comment with hk_op_id, the op that owns it; the
+// import skips it by that ownership alone, so 다시 시작 never adds it a second
+// time. A comment whose body merely quotes an op marker is not owned and is
+// imported like any other.
+function hkWritesComment(comment) {
+  return comment.hk_op_id !== undefined && comment.hk_op_id !== null && Number(comment.hk_op_id) > 0;
+}
 function sourceUser(name) {
   const value = name || 'unknown';
   return {id: 'hk-actor:' + value, name: value, fullName: value, type: 'user'};
@@ -403,6 +411,7 @@ class HandoffkeepImport {
     if (!tasks.length) return;
     const comments = this.pages('comments', {task_ids: tasks.map((task) => String(task.id)).join(','), limit: 499}, 'after_id');
     comments.forEach((comment) => {
+      if (hkWritesComment(comment)) return;
       (this.commentsByTask[comment.task_id] || (this.commentsByTask[comment.task_id] = [])).push(comment);
       this.rememberUser(comment.author);
     });

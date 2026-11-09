@@ -14,7 +14,7 @@ const task=(id,at,title)=>({id,lane:'demo',title,kind:'implement',state:'backlog
 const document=(id,at,key,body,project='demo',created_by='tester')=>({id,key,kind:'note',session:'',job:'',body,sha256:'a'.repeat(64),created_by,created_at:at,updated_at:at,task_id:2,project});
 const data={
  tasks:[task(1,old,'older task'),task(2,fresh,'newer task'),task(3,'2026-01-02T04:05:05.000Z','task after moved cursor')],
- comments:[{id:10,task_id:1,body:'old comment',author:'tester',created_at:old},{id:11,task_id:2,body:'new comment',author:'tester',created_at:fresh}],
+ comments:[{id:10,task_id:1,body:'old comment',author:'tester',created_at:old},{id:11,task_id:2,body:'new comment',author:'tester',created_at:fresh},{id:12,task_id:2,body:'hk wrote this one to YouTrack itself',author:'tester',created_at:fresh,hk_op_id:55},{id:13,task_id:2,body:'quotes the marker <!-- hk-op:56 --> but hk does not own it',author:'tester',created_at:fresh},{id:14,task_id:2,body:'owned, hk_op_id zero is no owner',author:'tester',created_at:fresh,hk_op_id:0}],
  documents:[document(20,old,'demo/old','old document'),document(21,fresh,'demo/new','new document'),document(22,fresh,'reports/mwr-review/report.md','mergewake report','demo','svc-mergewake'),document(23,fresh,'review/mwr-98-reviewer-prompt','review prompt'),document(24,fresh,'reports/job-a/report.md','worker report'),document(25,fresh,'brief/2026-11-09/job-a','worker brief'),document(26,fresh,'reports/job-b/report.md','x'.repeat(245*1024)),document(200,'2026-01-02T04:04:05.123600Z','precision/moved','moved precision doc','precision'),document(199,'2026-01-02T04:04:05.123789Z','precision/unemitted','unemitted precision doc','precision')].concat(Array.from({length:1001},(_,i)=>{const d=document(10000+i,fresh,'bulk/doc-'+i,'bulk document','bulk');d.task_id=null;return d;})),
  decisions:[{id:30,question:'old decision',status:'open',created_at:old,updated_at:old,lane:'demo'},{id:31,question:'new decision',status:'open',created_at:fresh,updated_at:fresh,lane:'demo'}]
 };
@@ -60,10 +60,15 @@ async function main() {
     const issueUpdates=client.getIssueUpdates(demo,null,cutoff,1);
     assert.deepEqual(issueUpdates.map(x=>x.id),['hk-task:2']);
     assert.equal(issueUpdates[0].fields.comments[0].text,'new comment');
-    assert.deepEqual(issueUpdates[0].fields.comments.slice(1).map(x=>x.id),['hk-doc-comment:22','hk-doc-comment:24','hk-doc-comment:25','hk-doc-comment:26','hk-doc-comment:26:part:2']);
-    assert.equal(issueUpdates[0].fields.comments[1].author.id,'hk-actor:svc-mergewake');
-    assert.equal(issueUpdates[0].fields.comments[1].created,fresh);
-    assert(issueUpdates[0].fields.comments[1].text.startsWith('# reports/mwr-review/report.md'));
+    // TestImportSkipsOriginalProtocolOwnedPGComment: the owned PG comment is unmarked; ownership (hk_op_id) skips it.
+    assert(!issueUpdates[0].fields.comments.some(x=>x.id==='hk-comment:12'),'protocol-owned comment was imported');
+    // Only ownership skips: a PG comment that merely quotes a marker, or has no owning op, is imported.
+    assert.deepEqual(issueUpdates[0].fields.comments.filter(x=>x.id.startsWith('hk-comment:')).map(x=>x.id),['hk-comment:11','hk-comment:13','hk-comment:14'],'unowned comments were skipped');
+    const docComments=issueUpdates[0].fields.comments.filter(x=>x.id.startsWith('hk-doc-comment:'));
+    assert.deepEqual(docComments.map(x=>x.id),['hk-doc-comment:22','hk-doc-comment:24','hk-doc-comment:25','hk-doc-comment:26','hk-doc-comment:26:part:2']);
+    assert.equal(docComments[0].author.id,'hk-actor:svc-mergewake');
+    assert.equal(docComments[0].created,fresh);
+    assert(docComments[0].text.startsWith('# reports/mwr-review/report.md'));
     assert(issueUpdates[0].fields.comments.find(x=>x.id==='hk-doc-comment:25').text.includes('brief/2026-11-09/job-a'));
     assert(issueUpdates[0].fields.comments.every(x=>Buffer.byteLength(x.text,'utf8')<=240*1024));
     assert(issueUpdates[0].fields.comments.every(x=>!x.text.includes('review prompt')));
@@ -94,7 +99,7 @@ async function main() {
     let after=null, count=0, pageClient=client;
     for (;;) { const page=pageClient.getArticleUpdates(bulkInfo,after,cutoff,100);if(!page.length)break;count+=page.length;after=page[page.length-1];pageClient=Client({parameters:{loadValue:(name)=>({url:'https://fixture.invalid',login:'client',password:'{"hkToken":"token","accessClientSecret":"secret"}'}[name]||'')}});pageClient.projectTargets.bulk=bulkInfo; }
     assert.equal(count,1001);
-    console.log('PASS task/comment/document/decision updates; linked reports became stable comments, reviewer prompt stayed hk, brief remained article with backlink; fresh-client and microsecond cursors resumed; 1001 bulk articles paged; older rows excluded');
+    console.log('PASS task/comment/document/decision updates; protocol-owned comments skipped, unowned marker quotes kept; linked reports became stable comments, reviewer prompt stayed hk, brief remained article with backlink; fresh-client and microsecond cursors resumed; 1001 bulk articles paged; older rows excluded');
   } finally {
     Module._load = originalLoad;
     server.kill('SIGTERM');

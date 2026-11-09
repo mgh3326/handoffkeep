@@ -574,6 +574,10 @@ type Store struct {
 	// consoleURL is the console base URL answer notifications link to; nil
 	// or empty leaves the link out.
 	consoleURL atomic.Pointer[string]
+	// ytCommentsCanary is the slice b1a gate (SetYTCommentsMode): when set, a
+	// comment on a task in yt_comment_canary gets its write-protocol op in
+	// the comment's transaction.
+	ytCommentsCanary atomic.Bool
 }
 
 // Refs stores repeatable named references. Its decoder accepts legacy scalar

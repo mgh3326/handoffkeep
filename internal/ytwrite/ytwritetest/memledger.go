@@ -18,6 +18,12 @@ import (
 
 // MemLedger is an in-memory ytwrite.Ledger.
 type MemLedger struct {
+	// Hold, when set, is the ledger's admission: Claim answers ClaimHeld for
+	// a prepared op it returns true for, and Due does not list that op. It
+	// runs under the ledger's lock (it must not call the ledger); set it
+	// before the ledger is shared.
+	Hold func(op ytwrite.Op) bool
+
 	mu     sync.Mutex
 	nextID int64
 	ops    map[int64]*ytwrite.Op
@@ -51,7 +57,7 @@ func (l *MemLedger) Prepare(_ context.Context, now time.Time, n ytwrite.NewOp) (
 	op := &ytwrite.Op{
 		ID: l.nextID, Principal: n.Principal, Kind: n.Kind, Key: n.Key,
 		PayloadSHA: n.PayloadSHA, Payload: append([]byte(nil), n.Payload...),
-		EntityKind: n.EntityKind, EntityID: n.EntityID, YTTargetID: n.YTTargetID,
+		EntityKind: n.EntityKind, EntityID: n.EntityID, YTTargetID: n.YTTargetID, Tenant: n.Tenant,
 		Actor: n.Actor, ParentID: n.ParentID, ChildSeq: n.ChildSeq,
 		State: ytwrite.StatePrepared, CreatedAt: now, NextAttemptAt: now,
 	}
@@ -100,6 +106,9 @@ func (l *MemLedger) Claim(_ context.Context, now time.Time, id int64) (ytwrite.O
 	}
 	if op.NextAttemptAt.After(now) {
 		return *op, ytwrite.ClaimNotDue, nil
+	}
+	if l.Hold != nil && l.Hold(*op) {
+		return *op, ytwrite.ClaimHeld, nil
 	}
 	for _, e := range l.ops {
 		if e.ID < op.ID && e.EntityKind == op.EntityKind && e.EntityID == op.EntityID && !e.State.Resolved() {
@@ -247,6 +256,9 @@ func (l *MemLedger) Due(_ context.Context, now time.Time, limit int) ([]ytwrite.
 		case ytwrite.StateRemoteUnknown:
 			return true
 		case ytwrite.StatePrepared:
+			if l.Hold != nil && l.Hold(*o) {
+				return false
+			}
 			for _, e := range l.ops {
 				if e.ID < o.ID && e.EntityKind == o.EntityKind && e.EntityID == o.EntityID && !e.State.Resolved() {
 					return false

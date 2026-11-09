@@ -547,7 +547,8 @@ func (s *Store) DueYouTrackPushTasks(ctx context.Context, limit int) ([]Task, er
 		   OR ((o.task_id IS NOT NULL OR tasks.state NOT IN (`+settledStatesSQL+`))
 		       AND EXISTS (SELECT 1 FROM task_comments c
 		                   WHERE c.task_id=tasks.id AND c.author<>$2
-		                     AND NOT EXISTS (SELECT 1 FROM youtrack_comment_links cl WHERE cl.hk_comment_id=c.id))))
+		                     AND NOT EXISTS (SELECT 1 FROM youtrack_comment_links cl WHERE cl.hk_comment_id=c.id)
+		                     AND NOT EXISTS (SELECT 1 FROM yt_comment_write_links w WHERE w.comment_id=c.id))))
 		   -- A key that failed or was skipped waits for its next_attempt_at. The
 		   -- rank orders the scan, so a key that was just attempted goes behind
 		   -- the keys that have waited longer and cannot starve them.
@@ -569,7 +570,8 @@ func (s *Store) DueYouTrackPushTasks(ctx context.Context, limit int) ([]Task, er
 	return out, rows.Err()
 }
 
-// UnpushedYouTrackComments lists hk comments with no mirror link, in id order.
+// UnpushedYouTrackComments lists hk comments with no mirror link and no
+// write-protocol owner, in id order.
 func (s *Store) UnpushedYouTrackComments(ctx context.Context, taskID, afterID int64, limit int) ([]TaskComment, error) {
 	if taskID < 1 || limit < 1 {
 		return nil, nil
@@ -579,6 +581,9 @@ func (s *Store) UnpushedYouTrackComments(ctx context.Context, taskID, afterID in
 		FROM task_comments c
 		WHERE c.task_id=$1 AND c.id>$2 AND c.author<>$3
 		  AND NOT EXISTS (SELECT 1 FROM youtrack_comment_links l WHERE l.hk_comment_id=c.id)
+		  -- A comment the write protocol owns (slice b1a) is the protocol's to
+		  -- post; the legacy push never posts it too.
+		  AND NOT EXISTS (SELECT 1 FROM yt_comment_write_links w WHERE w.comment_id=c.id)
 		ORDER BY c.id ASC LIMIT $4`, taskID, afterID, YouTrackOwnedActor, limit)
 	if err != nil {
 		return nil, err

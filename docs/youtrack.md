@@ -75,6 +75,14 @@ handoffkeep youtrack projects put handoffkeep HK
 
 `put`은 YouTrack에서 shortName을 project id로 해석해 함께 저장한다.
 
+코멘트 카나리(hk 3739)는 같은 매핑을 쓴다. `handoffkeep youtrack canary
+add <작업>`은 `<shortName>-<작업 번호>` 이슈를 읽어 확인한 뒤 등록하고,
+`handoffkeep youtrack ops`(별칭 `yt ops`)는 쓰기 작업 상태를 보여 준다. 쓰기
+작업은 만들어질 때의 테넌트에 묶이므로 작업을 다른 테넌트로 다시 등록해도 이전
+작업이 그쪽으로 가지 않는다. 확인과 등록 사이에 매핑이 바뀌면 등록이 거절된다. 자세한
+규칙은 `docs/youtrack-write-protocol.md`. 레거시 미러 푸시는 쓰기 프로토콜이
+소유한 코멘트를 다시 올리지 않는다.
+
 ## 상태 이름
 
 YouTrack의 `hk 상태` 번들 값은 콘솔과 같은 한국어 이름이다.
@@ -108,6 +116,7 @@ YouTrack의 `hk 상태` 번들 값은 콘솔과 같은 한국어 이름이다.
 | `YOUTRACK_DEFAULT_HK_PROJECT` | 아니오 | 새 이슈에서 hk 프로젝트를 못 읽을 때(기본 `other`) |
 | `YOUTRACK_DEFAULT_LANE` | 아니오 | 새 이슈에서 레인을 못 읽을 때(기본 `operator-desk`) |
 | `YOUTRACK_CONSOLE_URL` | 아니오 | 이슈 본문 첫 줄 링크(기본 `https://console.robinco.dev`) |
+| `HANDOFFKEEP_YT_COMMENTS_MODE` | 아니오 | `off`(기본) 또는 `canary`. 쓰기 프로토콜 코멘트 카나리(hk 3739, `docs/youtrack-write-protocol.md`). 다른 값이나 YouTrack 자격 없는 `canary`는 서버 시작 실패 |
 
 서버(`handoffkeep serve`)는 `YOUTRACK_URL`과 `YOUTRACK_BOT_API_KEY`가 둘 다 있을
 때만 읽기 캐시를 켠다. 한쪽만 있으면 로그에

@@ -10,6 +10,15 @@ import (
 // twice within the retry bound; callers must not adopt evidence from them.
 var ErrInconsistentEnumeration = errors.New("inconsistent_comment_enumeration")
 
+// ErrEnumerationTooLarge means one read of the target's comments passed
+// MaxEnumeratedComments; the evidence search gives up rather than page without
+// end (the op stays remote_unknown).
+var ErrEnumerationTooLarge = errors.New("comment_enumeration_too_large")
+
+// MaxEnumeratedComments bounds one read of one issue's comments. An hk issue
+// with more comments than this is not expected; it is an error, not a cut.
+const MaxEnumeratedComments = 10000
+
 // EnumerateStableComments reads all offset pages twice per attempt. It accepts
 // only identical sets, including text, update time and deletion state. The
 // page function must return an empty page at the end and honor ctx.
@@ -29,6 +38,9 @@ func EnumerateStableComments(ctx context.Context, pageSize int, page func(contex
 			}
 			if len(items) == 0 {
 				return out, nil
+			}
+			if len(out)+len(items) > MaxEnumeratedComments {
+				return nil, ErrEnumerationTooLarge
 			}
 			for _, c := range items {
 				if c.ID == "" {

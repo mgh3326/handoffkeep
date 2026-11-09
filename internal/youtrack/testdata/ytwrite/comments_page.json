@@ -1,0 +1,5 @@
+[
+  {"text":"imported note from the full import","updated":null,"created":1731117600000,"deleted":false,"id":"4-101","$type":"IssueComment"},
+  {"text":"작성: worker · 2026-11-09T12:00:00Z · hk op 17\n\n첫 코멘트\n\n<!-- hk-op:17 -->","updated":1731153600000,"created":1731153600000,"deleted":false,"id":"4-102","$type":"IssueComment"},
+  {"text":"operator remark, later removed","updated":1731157200000,"created":1731150000000,"deleted":true,"id":"4-103","$type":"IssueComment"}
+]

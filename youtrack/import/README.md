@@ -37,6 +37,8 @@ Projects are the configured hk task projects, plus synthetic buckets for unassig
 
 When `testProject` is set, preparation scans only the selected task/decision prefix and bounded document-author prefix. Task comments and task-linked report/brief bodies are loaded with the task page that uses them. Full imports preload comment author names without loading every comment body.
 
+Comments hk writes to YouTrack itself through the write protocol (hk 3739, `docs/youtrack-write-protocol.md`) are skipped by ownership: the export marks the PG original with `hk_op_id`, the op that owns it, so 다시 시작 never adds them twice. A comment whose body merely quotes `<!-- hk-op:<id> -->` has no owner and is imported like any other.
+
 `getIssueUpdates` and `getArticleUpdates` use timestamp/ID keysets and page from the previous returned source entity. Task-linked `reports/mwr-*` and `reports/<job>/report.md` documents become stable issue comments; `review/mwr-*` prompts stay in hk; task-linked `brief/<date>/<job>` documents remain articles and add a comment linking their summary and hk key. Report comments split into ordered parts at 240 KiB UTF-8 bytes per comment, matching the article part safety cap.
 
 The first continuous update uses a 2026-11-09 07:17 UTC cursor floor for tasks with linked report or brief documents. The full import completed at 07:16 UTC; this re-sends existing linked documents once, and the persisted update cursor then advances beyond the floor. Existing imported articles are not deleted. To find them in the Knowledge Base, search `tag: hk/doc/reports, hk/doc/review, hk/doc/brief`.

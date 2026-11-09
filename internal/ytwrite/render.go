@@ -56,6 +56,28 @@ const markerPrefix = "<!-- hk-op:"
 // OpMarker is the trailing HTML comment of a comment body.
 func OpMarker(opID int64) string { return markerPrefix + strconv.FormatInt(opID, 10) + " -->" }
 
+// RenderedOpID reads the op id from a text in exactly the form RenderComment
+// renders: a provenance line naming op N, a blank line, a body a caller could
+// have sent (no marker in it), a blank line and op N's marker as the very end.
+// ok is false for anything else, including a text that only quotes a marker.
+// The form alone is not ownership: a reader must also find op N in its own
+// ledger, bound to the same target.
+func RenderedOpID(text string) (opID int64, ok bool) {
+	first, rest, found := strings.Cut(text, "\n\n")
+	if !found {
+		return 0, false
+	}
+	actor, _, id, ok := ParseProvenance(first)
+	if !ok || checkActor(actor) != nil {
+		return 0, false
+	}
+	body, found := strings.CutSuffix(rest, "\n\n"+OpMarker(id))
+	if !found || checkBody(body) != nil {
+		return 0, false
+	}
+	return id, true
+}
+
 // CommentPayload is the immutable outbound payload of a comment_append op.
 type CommentPayload struct {
 	Body string `json:"body"`
@@ -125,11 +147,12 @@ func checkBody(body string) error {
 	return nil
 }
 
-// payloadSHA hashes what a comment_append means. The fields are length-framed
+// payloadSHA hashes what a comment_append means, the tenant included: the same
+// key bound to another YouTrack is another write. The fields are length-framed
 // so two different tuples cannot concatenate to the same bytes.
-func payloadSHA(kind, entityKind, entityID, ytTarget, actor, body string) string {
+func payloadSHA(kind, entityKind, entityID, ytTarget, tenant, actor, body string) string {
 	h := sha256.New()
-	for _, f := range []string{kind, entityKind, entityID, ytTarget, actor, body} {
+	for _, f := range []string{kind, entityKind, entityID, ytTarget, tenant, actor, body} {
 		fmt.Fprintf(h, "%d:%s;", len(f), f)
 	}
 	return hex.EncodeToString(h.Sum(nil))
