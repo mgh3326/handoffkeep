@@ -26,7 +26,7 @@ func TestConfigFromPrefixDefaultsAndOCIRegion(t *testing.T) {
 	if err != nil || !enabled {
 		t.Fatalf("R2 config: enabled=%v err=%v", enabled, err)
 	}
-	if r2.Region != "auto" || r2.BucketLookup != "path" || DefaultStorageCap != 20<<30 {
+	if r2.Region != "auto" || r2.BucketLookup != "path" || DefaultStorageCap != 20_000_000_000 {
 		t.Fatalf("R2 defaults: %+v cap=%d", r2, DefaultStorageCap)
 	}
 	t.Setenv("OCI_S3_ENDPOINT", "https://namespace.compat.objectstorage.us-ashburn-1.oraclecloud.com")

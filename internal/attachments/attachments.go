@@ -25,7 +25,7 @@ import (
 
 const (
 	DefaultMaxBytes   int64 = 50 << 20
-	DefaultStorageCap int64 = 20 << 30
+	DefaultStorageCap int64 = 20_000_000_000
 	DefaultPutCap     int64 = 800000
 	DefaultGetCap     int64 = 8000000
 )

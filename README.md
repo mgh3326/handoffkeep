@@ -652,7 +652,7 @@ also be `virtual`. OCI Object Storage uses
 required setting is absent, only attachments are disabled; checkpoints, memory,
 and documents continue to work.
 
-The default safety limits are a 50 MiB object maximum, 20 GiB total storage,
+The default safety limits are a 50 MiB object maximum, 20 GB total storage,
 800,000 monthly writes, and 8,000,000 monthly reads. Set the corresponding
 `HK_ATTACH_*` variables to positive values to adjust them. Text attachments
 are secret-scanned, MIME is sniffed and allowlisted, and dump/archive filename
