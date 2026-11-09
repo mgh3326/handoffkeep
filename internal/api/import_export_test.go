@@ -63,12 +63,13 @@ func TestImportExportRejectsMalformedPagingBeforeStoreRead(t *testing.T) {
 	}
 }
 
-func TestImportUpdatedRoutesRejectMalformedTimestampCursors(t *testing.T) {
+func TestImportUpdatedRoutesRejectInvalidPagingCursors(t *testing.T) {
 	h := Server{Tokens: Tokens{"yt": "fixture-secret"}, ImportReadGrants: map[string]bool{"yt": true}}.Handler()
 	for _, path := range []string{
 		"/v1/import/tasks?after_at=nope",
 		"/v1/import/comments?after_at=nope",
 		"/v1/import/documents?project=demo&after_at=nope",
+		"/v1/import/task-documents?task_ids=",
 		"/v1/import/decisions?after_at=nope",
 	} {
 		t.Run(path, func(t *testing.T) {

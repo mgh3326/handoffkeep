@@ -20,22 +20,40 @@ func TestImportUpdatedPagesUseTimestampAndIDCursors(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if _, err := s.pool.Exec(ctx, `INSERT INTO documents(key,kind,body,sha256,created_by,created_at,updated_at,task_id) VALUES('reports/mwr-review/report.md','report','review',$1,'svc-mergewake',$2,$3,$4)`, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", oldAt, newAt, oldTask); err != nil {
+		t.Fatal(err)
+	}
 	tasks, err := s.ImportTasksUpdatedPage(ctx, ptrString("import-test"), cutoff, 0, 10)
-	if err != nil || len(tasks) != 1 || tasks[0].ID != newTask {
+	if err != nil || len(tasks) != 2 || tasks[0].ID != newTask || tasks[1].ID != oldTask {
 		t.Fatalf("tasks=%+v err=%v", tasks, err)
+	}
+	if want := time.Date(2026, 11, 9, 7, 17, 0, 0, time.UTC); !tasks[1].ImportUpdatedAt.Equal(want) {
+		t.Fatalf("linked document backfill cursor=%v want %v", tasks[1].ImportUpdatedAt, want)
+	}
+	linked, err := s.ImportTaskDocumentsPage(ctx, []int64{oldTask}, 0, 10)
+	if err != nil || len(linked) != 1 || linked[0].Key != "reports/mwr-review/report.md" {
+		t.Fatalf("task documents=%+v err=%v", linked, err)
 	}
 	if _, err := s.pool.Exec(ctx, `INSERT INTO task_comments(task_id,body,author,created_at) VALUES($1,'old','tester',$2),($1,'new','tester',$3)`, newTask, oldAt, newAt); err != nil {
 		t.Fatal(err)
+	}
+	commentAuthors, err := s.ImportCommentAuthorsPage(ctx, "", 10)
+	if err != nil || len(commentAuthors) != 1 || commentAuthors[0].Author != "tester" {
+		t.Fatalf("comment authors=%+v err=%v", commentAuthors, err)
 	}
 	comments, err := s.ImportCommentsUpdatedPage(ctx, []int64{newTask}, cutoff, 0, 10)
 	if err != nil || len(comments) != 1 || comments[0].Body != "new" {
 		t.Fatalf("comments=%+v err=%v", comments, err)
 	}
+	commentsSince, err := s.ImportCommentsUpdatedPage(ctx, nil, cutoff, 0, 10)
+	if err != nil || len(commentsSince) != 1 || commentsSince[0].Body != "new" {
+		t.Fatalf("comments since time=%+v err=%v", commentsSince, err)
+	}
 	if _, err := s.pool.Exec(ctx, `INSERT INTO documents(key,kind,body,sha256,created_by,created_at,updated_at,task_id) VALUES('import-test/old','note','old',$1,'tester',$2,$2,$3),('import-test/new','note','new',$1,'tester',$4,$4,$3)`, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", oldAt, newTask, newAt); err != nil {
 		t.Fatal(err)
 	}
 	docs, err := s.ImportDocumentsUpdatedPage(ctx, "import-test", cutoff, 0, 10)
-	if err != nil || len(docs) != 1 || docs[0].Body != "new" {
+	if err != nil || len(docs) != 2 || !hasDocumentBody(docs, "new") || !hasDocumentBody(docs, "review") {
 		t.Fatalf("docs=%+v err=%v", docs, err)
 	}
 	if _, err := s.pool.Exec(ctx, `INSERT INTO decision_requests(source,source_ref,question,created_at,updated_at) VALUES('chat','old','old',$1,$1),('chat','new','new',$2,$2)`, oldAt, newAt); err != nil {
@@ -48,3 +66,12 @@ func TestImportUpdatedPagesUseTimestampAndIDCursors(t *testing.T) {
 }
 
 func ptrString(value string) *string { return &value }
+
+func hasDocumentBody(docs []Document, body string) bool {
+	for _, doc := range docs {
+		if doc.Body == body {
+			return true
+		}
+	}
+	return false
+}

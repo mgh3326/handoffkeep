@@ -31,20 +31,64 @@ func (s *Store) ImportCommentsPage(ctx context.Context, afterID int64, limit int
 	return out, rows.Err()
 }
 
+// ImportUpdatedTask carries a task and its effective continuous-import cursor timestamp.
+type ImportUpdatedTask struct {
+	Task
+	ImportUpdatedAt time.Time `json:"import_updated_at"`
+}
+
+// The initial YouTrack snapshot completed at 07:16 UTC. This one-time cursor
+// floor re-sends every task with an import-comment or article-backlink document
+// on the first continuous poll, then the persisted YouTrack cursor advances past it.
+const importLinkedDocumentBackfillAt = "2026-11-09 07:17:00+00"
+
 // ImportTasksUpdatedPage returns tasks changed since a timestamp/id keyset.
-func (s *Store) ImportTasksUpdatedPage(ctx context.Context, project *string, afterAt time.Time, afterID int64, limit int) ([]Task, error) {
+func (s *Store) ImportTasksUpdatedPage(ctx context.Context, project *string, afterAt time.Time, afterID int64, limit int) ([]ImportUpdatedTask, error) {
 	if afterID < 0 || limit < 1 || limit > 1000 {
 		return nil, errors.New("invalid import cursor")
 	}
-	rows, err := s.pool.Query(ctx, `SELECT `+taskColumns+` FROM tasks WHERE ($1::text IS NULL OR project IS NOT DISTINCT FROM NULLIF($1,'')) AND (last_activity_at,id)>($2,$3) ORDER BY last_activity_at,id LIMIT $4`, project, afterAt.UTC(), afterID, limit)
+	rows, err := s.pool.Query(ctx, `SELECT `+taskColumns+`,effective.import_updated_at
+		FROM tasks LEFT JOIN LATERAL (SELECT max(updated_at) AS latest_at FROM documents WHERE task_id=tasks.id AND
+			(key LIKE 'reports/mwr-%' OR key LIKE 'reports/%/report.md' OR key LIKE 'brief/%/%')) linked ON true
+		CROSS JOIN LATERAL (SELECT CASE WHEN linked.latest_at IS NULL THEN tasks.last_activity_at ELSE
+			GREATEST(tasks.last_activity_at,linked.latest_at,TIMESTAMPTZ '`+importLinkedDocumentBackfillAt+`') END AS import_updated_at) effective
+		WHERE ($1::text IS NULL OR tasks.project IS NOT DISTINCT FROM NULLIF($1,''))
+		AND (effective.import_updated_at,tasks.id)>($2,$3)
+		ORDER BY effective.import_updated_at,tasks.id LIMIT $4`, project, afterAt.UTC(), afterID, limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := []Task{}
+	out := []ImportUpdatedTask{}
 	for rows.Next() {
-		var x Task
-		if err := scanTask(rows, &x); err != nil {
+		var x ImportUpdatedTask
+		if err := scanTask(rows, &x.Task, &x.ImportUpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, x)
+	}
+	return out, rows.Err()
+}
+
+// ImportTaskDocumentsPage returns task documents that become issue comments or article backlinks.
+func (s *Store) ImportTaskDocumentsPage(ctx context.Context, taskIDs []int64, afterID int64, limit int) ([]Document, error) {
+	if afterID < 0 || limit < 1 || limit > 1000 {
+		return nil, errors.New("invalid import cursor")
+	}
+	ids := make([]int64, len(taskIDs))
+	copy(ids, taskIDs)
+	if len(ids) == 0 {
+		return []Document{}, nil
+	}
+	rows, err := s.pool.Query(ctx, `SELECT id,key,kind,session,job,body,sha256,created_by,created_at,updated_at,task_id,COALESCE(origin_class,'') FROM documents WHERE task_id=ANY($1::bigint[]) AND id>$2 AND (key LIKE 'reports/mwr-%' OR key LIKE 'reports/%/report.md' OR key LIKE 'brief/%/%') ORDER BY id LIMIT $3`, ids, afterID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Document{}
+	for rows.Next() {
+		var x Document
+		if err := rows.Scan(&x.ID, &x.Key, &x.Kind, &x.Session, &x.Job, &x.Body, &x.SHA256, &x.CreatedBy, &x.CreatedAt, &x.UpdatedAt, &x.TaskID, &x.OriginClass); err != nil {
 			return nil, err
 		}
 		out = append(out, x)
@@ -57,7 +101,8 @@ func (s *Store) ImportCommentsUpdatedPage(ctx context.Context, taskIDs []int64, 
 	if afterID < 0 || limit < 1 || limit > TaskCommentListMax {
 		return nil, errors.New("invalid import cursor")
 	}
-	ids := append([]int64(nil), taskIDs...)
+	ids := make([]int64, len(taskIDs))
+	copy(ids, taskIDs)
 	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
 	rows, err := s.pool.Query(ctx, `SELECT id,task_id,body,author,created_at FROM task_comments WHERE (cardinality($1::bigint[])=0 OR task_id=ANY($1)) AND (created_at,id)>($2,$3) ORDER BY created_at,id LIMIT $4`, ids, afterAt.UTC(), afterID, limit)
 	if err != nil {
@@ -68,6 +113,31 @@ func (s *Store) ImportCommentsUpdatedPage(ctx context.Context, taskIDs []int64, 
 	for rows.Next() {
 		var x TaskComment
 		if err := scanTaskComment(rows, &x); err != nil {
+			return nil, err
+		}
+		out = append(out, x)
+	}
+	return out, rows.Err()
+}
+
+type ImportCommentAuthor struct {
+	Author string `json:"author"`
+}
+
+// ImportCommentAuthorsPage keeps the full-import user directory complete without loading comment bodies.
+func (s *Store) ImportCommentAuthorsPage(ctx context.Context, after string, limit int) ([]ImportCommentAuthor, error) {
+	if limit < 1 || limit > 1000 || !validText(after, 128) {
+		return nil, errors.New("invalid import cursor")
+	}
+	rows, err := s.pool.Query(ctx, `SELECT DISTINCT author FROM task_comments WHERE author>$1 ORDER BY author LIMIT $2`, after, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []ImportCommentAuthor{}
+	for rows.Next() {
+		var x ImportCommentAuthor
+		if err := rows.Scan(&x.Author); err != nil {
 			return nil, err
 		}
 		out = append(out, x)

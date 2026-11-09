@@ -100,7 +100,7 @@ func (s Server) importExport(w http.ResponseWriter, r *http.Request) {
 			if len(rows) > limit {
 				rows = rows[:limit]
 				last := rows[len(rows)-1]
-				next = map[string]any{"after_at": last.LastActivityAt, "after_id": last.ID}
+				next = map[string]any{"after_at": last.ImportUpdatedAt, "after_id": last.ID}
 			}
 			jsonOut(w, http.StatusOK, map[string]any{"items": rows, "next_cursor": next})
 			return
@@ -223,6 +223,25 @@ func (s Server) importExport(w http.ResponseWriter, r *http.Request) {
 			next = rows[len(rows)-1].ID
 		}
 		jsonOut(w, http.StatusOK, map[string]any{"items": rows, "next_cursor": next})
+	case "comment-authors":
+		if q.Has("after_at") || q.Has("after_id") || q.Has("project") || q.Has("max_task_id") || q.Has("task_ids") {
+			writeError(w, http.StatusBadRequest, "invalid_context")
+			return
+		}
+		if limit > 999 {
+			limit = 999
+		}
+		rows, err := s.Service.Store.ImportCommentAuthorsPage(ctx, q.Get("after"), limit+1)
+		if err != nil {
+			appErr(w, r, err)
+			return
+		}
+		var next any
+		if len(rows) > limit {
+			rows = rows[:limit]
+			next = rows[len(rows)-1].Author
+		}
+		jsonOut(w, http.StatusOK, map[string]any{"items": rows, "next_cursor": next})
 	case "documents":
 		if q.Has("after") || q.Has("max_task_id") || !q.Has("project") || q.Get("project") == "" {
 			writeError(w, http.StatusBadRequest, "invalid_context")
@@ -260,6 +279,42 @@ func (s Server) importExport(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		rows, err := s.Service.Store.ImportDocumentsPage(ctx, q.Get("project"), after, limit+1)
+		if err != nil {
+			appErr(w, r, err)
+			return
+		}
+		var next any
+		if len(rows) > limit {
+			rows = rows[:limit]
+			next = rows[len(rows)-1].ID
+		}
+		jsonOut(w, http.StatusOK, map[string]any{"items": rows, "next_cursor": next})
+	case "task-documents":
+		if q.Has("after") || q.Has("after_at") || q.Has("project") || q.Has("max_task_id") || !q.Has("task_ids") || q.Get("task_ids") == "" {
+			writeError(w, http.StatusBadRequest, "invalid_context")
+			return
+		}
+		if limit > 999 {
+			limit = 999
+		}
+		afterID := int64(0)
+		if q.Has("after_id") {
+			afterID, err = queryCursor(r, "after_id")
+			if err != nil {
+				appErr(w, r, err)
+				return
+			}
+		}
+		ids := make([]int64, 0)
+		for _, raw := range strings.Split(q.Get("task_ids"), ",") {
+			id, parseErr := strconv.ParseInt(raw, 10, 64)
+			if parseErr != nil || id <= 0 {
+				writeError(w, http.StatusBadRequest, "invalid_context")
+				return
+			}
+			ids = append(ids, id)
+		}
+		rows, err := s.Service.Store.ImportTaskDocumentsPage(ctx, ids, afterID, limit+1)
 		if err != nil {
 			appErr(w, r, err)
 			return
