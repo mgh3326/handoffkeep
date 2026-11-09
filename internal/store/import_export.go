@@ -51,6 +51,34 @@ func (s *Store) ImportDocumentsPage(ctx context.Context, project string, afterID
 	return out, rows.Err()
 }
 
+// ImportDocumentAuthorsPage returns only document IDs and authors so the
+// YouTrack importer can register users before importing articles without
+// downloading every document body twice.
+func (s *Store) ImportDocumentAuthorsPage(ctx context.Context, project string, afterID int64, limit int) ([]ImportDocumentAuthor, error) {
+	if !validText(project, 128) || afterID < 0 || limit < 1 || limit > 1000 {
+		return nil, errors.New("invalid import cursor")
+	}
+	rows, err := s.pool.Query(ctx, `SELECT d.id,d.created_by FROM documents d LEFT JOIN tasks t ON t.id=d.task_id WHERE d.id>$1 AND ($2='' OR ($2='Shared' AND d.task_id IS NULL) OR ($2='Unassigned' AND d.task_id IS NOT NULL AND t.project IS NULL) OR t.project=$2) ORDER BY d.id ASC LIMIT $3`, afterID, project, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []ImportDocumentAuthor{}
+	for rows.Next() {
+		var x ImportDocumentAuthor
+		if err := rows.Scan(&x.ID, &x.CreatedBy); err != nil {
+			return nil, err
+		}
+		out = append(out, x)
+	}
+	return out, rows.Err()
+}
+
+type ImportDocumentAuthor struct {
+	ID        int64  `json:"id"`
+	CreatedBy string `json:"created_by"`
+}
+
 // ImportDecisionsPage returns all decision records, including answered and
 // superseded records, in immutable ID cursor order.
 func (s *Store) ImportDecisionsPage(ctx context.Context, afterID int64, limit int, now time.Time) ([]DecisionRecord, error) {

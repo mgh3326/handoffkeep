@@ -12,7 +12,7 @@ Use the existing Cloudflare Access service-token route from YouTrack to hk. In t
 - **Username/login**: the Cloudflare Access client ID.
 - **Password/token**: a JSON object with `hkToken` (the dedicated hk token) and `accessClientSecret` (the Cloudflare Access service-token secret). Keep the value in the import configuration's protected password field; do not paste it into source files or logs.
 
-The hk auth file contains both `HANDOFFKEEP_TOKEN_youtrack=<token>` and `HANDOFFKEEP_IMPORT_READONLY_youtrack=true`. The import-readonly grant is opt-in and limits that client to `GET /v1/import/*`; other `/v1` reads and all writes receive 403. Continue to enforce Cloudflare Access in front of hk. No credential values belong in this repo.
+The hk auth file contains both `HANDOFFKEEP_TOKEN_youtrack=<token>` and `HANDOFFKEEP_IMPORT_READONLY_youtrack=true`. The import-readonly grant is opt-in and limits that client to `GET /v1/import/*`; other `/v1` reads, `/mcp`, and all writes receive 403. Continue to enforce Cloudflare Access in front of hk. No credential values belong in this repo. Before rolling back to a binary that predates import grants, remove the `HANDOFFKEEP_IMPORT_READONLY_*` line from the auth file; that older binary rejects unknown auth-file keys.
 
 The export routes are:
 
@@ -20,6 +20,7 @@ The export routes are:
 - `/v1/import/tasks?project=<name>&after_id=<id>&limit=<n>` (omit `project` for all task rows; `project=__unassigned__` selects the null-project bucket)
 - `/v1/import/comments?after_id=<id>&limit=<n>`
 - `/v1/import/documents?project=<name>&after_id=<id>&limit=<n>` (`Shared` means no task link; `Unassigned` means a linked task with no project)
+- `/v1/import/document-authors?project=<name>&after_id=<id>&limit=<n>` (lightweight author scan before article import)
 - `/v1/import/decisions?after_id=<id>&limit=<n>`
 
 Every response is `{ "items": [...], "next_cursor": value|null }`. `next_cursor` is exclusive and stable; the import client continues until it is null. Document pages contain at most 20 full-text rows to bound response size. The endpoint never writes or returns attachment bytes.

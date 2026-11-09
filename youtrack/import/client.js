@@ -124,6 +124,21 @@ class HandoffkeepImport {
     this.pages('tasks', {limit: 999}, 'after_id').forEach((task) => this.rememberUser(task.created_by));
     this.pages('decisions', {limit: 999}, 'after_id').forEach((d) => this.rememberUser(d.answered_by || d.lane));
     this.projects = this.testProject ? [this.testSourceProject] : this.pages('projects', {limit: 100}, 'after');
+    let documentCount = 0;
+    const documentProjects = this.projects.concat(['Shared', 'Unassigned']);
+    for (const project of documentProjects) {
+      let after = null;
+      while (!this.maxDocuments || documentCount < this.maxDocuments) {
+        const query = {project: project, limit: 20};
+        if (after !== null) query.after_id = after;
+        const page = this.request('/v1/import/document-authors', query);
+        if (!Array.isArray(page.items)) throw new Error('Malformed handoffkeep document-author page');
+        page.items.forEach((doc) => { this.rememberUser(doc.created_by); documentCount += 1; });
+        if (!page.next_cursor) break;
+        after = String(page.next_cursor);
+      }
+      if (this.maxDocuments && documentCount >= this.maxDocuments) break;
+    }
   }
   rememberUser(name) { if (name) this.usersByName[name] = sourceUser(name); }
   getTimestampFormats() { return ["yyyy-MM-dd'T'HH:mm:ss.SSSSSS'Z'", "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", "yyyy-MM-dd'T'HH:mm:ss'Z'"]; }
@@ -339,19 +354,25 @@ function splitUtf8(text, maxBytes) {
   const lines = text.split(/(?<=\n)/);
   const chunks = [];
   let chunk = '';
+  let chunkBytes = 0;
   lines.forEach((line) => {
-    if (utf8Length(line) > maxBytes) {
-      if (chunk) { chunks.push(chunk); chunk = ''; }
+    const lineBytes = utf8Length(line);
+    if (lineBytes > maxBytes) {
+      if (chunk) { chunks.push(chunk); chunk = ''; chunkBytes = 0; }
       let part = '';
+      let partBytes = 0;
       Array.from(line).forEach((char) => {
-        if (part && utf8Length(part + char) > maxBytes) { chunks.push(part); part = ''; }
+        const charBytes = utf8Length(char);
+        if (part && partBytes + charBytes > maxBytes) { chunks.push(part); part = ''; partBytes = 0; }
         part += char;
+        partBytes += charBytes;
       });
       if (part) chunks.push(part);
       return;
     }
-    if (chunk && utf8Length(chunk + line) > maxBytes) { chunks.push(chunk); chunk = ''; }
+    if (chunk && chunkBytes + lineBytes > maxBytes) { chunks.push(chunk); chunk = ''; chunkBytes = 0; }
     chunk += line;
+    chunkBytes += lineBytes;
   });
   if (chunk) chunks.push(chunk);
   return chunks;

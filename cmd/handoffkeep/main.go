@@ -2046,7 +2046,16 @@ func serve(args []string, errout io.Writer) error {
 
 func serverHandler(server api.Server, monitor *telemetry.Monitor, mcpAccess *cfaccess.Verifier) http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle("/mcp", hkmcp.HTTPHandler(server.Service, server.Tokens, mcpAccess))
+	mcp := hkmcp.HTTPHandler(server.Service, server.Tokens, mcpAccess)
+	mux.Handle("/mcp", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if client, ok := server.Tokens.Client(r); ok && server.ImportReadGrants[client] {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = io.WriteString(w, `{"error":"import_read_only"}`+"\n")
+			return
+		}
+		mcp.ServeHTTP(w, r)
+	}))
 	mux.Handle("/", server.Handler())
 	return monitor.Handler(mux)
 }

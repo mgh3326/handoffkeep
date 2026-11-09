@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"sort"
 	"time"
 
 	"github.com/mgh3326/handoffkeep/internal/store"
@@ -44,6 +45,7 @@ func (s Server) importExport(w http.ResponseWriter, r *http.Request) {
 			appErr(w, r, err)
 			return
 		}
+		sort.Strings(projects)
 		after := q.Get("after")
 		filtered := make([]string, 0, len(projects))
 		for _, p := range projects {
@@ -135,6 +137,33 @@ func (s Server) importExport(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		rows, err := s.Service.Store.ImportDocumentsPage(ctx, q.Get("project"), after, limit+1)
+		if err != nil {
+			appErr(w, r, err)
+			return
+		}
+		var next any
+		if len(rows) > limit {
+			rows = rows[:limit]
+			next = rows[len(rows)-1].ID
+		}
+		jsonOut(w, http.StatusOK, map[string]any{"items": rows, "next_cursor": next})
+	case "document-authors":
+		if q.Has("after_at") || q.Has("after") || !q.Has("project") {
+			writeError(w, http.StatusBadRequest, "invalid_context")
+			return
+		}
+		if limit > 20 {
+			limit = 20
+		}
+		after := int64(0)
+		if q.Has("after_id") {
+			after, err = queryCursor(r, "after_id")
+			if err != nil {
+				appErr(w, r, err)
+				return
+			}
+		}
+		rows, err := s.Service.Store.ImportDocumentAuthorsPage(ctx, q.Get("project"), after, limit+1)
 		if err != nil {
 			appErr(w, r, err)
 			return

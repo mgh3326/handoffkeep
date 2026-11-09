@@ -833,15 +833,30 @@ func (s Server) Handler() http.Handler {
 	if wrkRegistered {
 		v1.wrk = http.HandlerFunc(s.wrk)
 	}
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if client, ok := s.Tokens.Client(r); ok && s.ImportReadGrants[client] {
-			if r.Method != http.MethodGet || !strings.HasPrefix(r.URL.Path, "/v1/import/") {
-				writeError(w, http.StatusForbidden, "import_read_only")
-				return
-			}
+	return importGrantHandler{v1: v1, tokens: s.Tokens, grants: s.ImportReadGrants}
+}
+
+// importGrantHandler preserves v1 route resolution for telemetry while
+// restricting import-only clients to the GET import surface.
+type importGrantHandler struct {
+	v1     v1Handler
+	tokens Tokens
+	grants map[string]bool
+}
+
+func (h importGrantHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if client, ok := h.tokens.Client(r); ok && h.grants[client] {
+		if r.Method != http.MethodGet || !strings.HasPrefix(r.URL.Path, "/v1/import/") {
+			writeError(w, http.StatusForbidden, "import_read_only")
+			return
 		}
-		v1.ServeHTTP(w, r)
-	})
+	}
+	h.v1.ServeHTTP(w, r)
+}
+
+// Handler reports the route the wrapped v1 handler will dispatch to.
+func (h importGrantHandler) Handler(r *http.Request) (http.Handler, string) {
+	return h.v1.Handler(r)
 }
 
 // wrkPattern is the route pattern reported for the /v1/wrk surface.
