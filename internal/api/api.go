@@ -559,6 +559,11 @@ func LoadTokens(path string) (Tokens, QuotaAccounts, error) {
 		if strings.HasPrefix(k, hostGrantPrefix) {
 			continue
 		}
+		// Import grants are read by LoadImportReadGrants from the same
+		// auth file; they are not bearer-token lines.
+		if strings.HasPrefix(k, "HANDOFFKEEP_IMPORT_READONLY_") {
+			continue
+		}
 		if !ok || v == "" {
 			return nil, nil, errors.New("invalid HANDOFFKEEP_AUTH_FILE")
 		}
@@ -592,6 +597,38 @@ func LoadTokens(path string) (Tokens, QuotaAccounts, error) {
 	}
 	return out, grants, nil
 }
+
+// LoadImportReadGrants reads exact opt-in read-only YouTrack import grants.
+// A grant is HANDOFFKEEP_IMPORT_READONLY_<CLIENT>=true next to that client's
+// bearer token; it grants access only to /v1/import/*.
+func LoadImportReadGrants(path string, tokens Tokens) (map[string]bool, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	grants := map[string]bool{}
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		k, v, ok := strings.Cut(line, "=")
+		id, found := strings.CutPrefix(k, "HANDOFFKEEP_IMPORT_READONLY_")
+		if !found {
+			continue
+		}
+		if !ok || v != "true" || id == "" {
+			fmt.Fprintf(os.Stderr, "handoffkeep: ignoring invalid import read grant for %q\n", id)
+			continue
+		}
+		if _, known := tokens[id]; !known {
+			fmt.Fprintf(os.Stderr, "handoffkeep: ignoring import read grant for unknown client %q\n", id)
+			continue
+		}
+		grants[id] = true
+	}
+	return grants, nil
+}
 func (t Tokens) Client(r *http.Request) (string, bool) {
 	header := r.Header.Get("Authorization")
 	if !strings.HasPrefix(header, "Bearer ") || len(header) == len("Bearer ") {
@@ -613,6 +650,9 @@ type Server struct {
 	Tokens  Tokens
 	// QuotaAccounts scopes quota writes; a nil map refuses every account.
 	QuotaAccounts QuotaAccounts
+	// ImportReadGrants restricts a client to GET /v1/import/* and denies every
+	// other route, including all writes.
+	ImportReadGrants map[string]bool
 	// HostGrants binds a client to the host ids it may act for. A client with
 	// no entry keeps today's behavior and is logged (see HostGrants.Allows).
 	HostGrants HostGrants
@@ -651,6 +691,7 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("GET /v1/projects/{name}/status-updates", s.statusUpdates)
 	m.HandleFunc("POST /v1/projects/{name}/status-updates", s.statusUpdates)
 	m.HandleFunc("GET /v1/documents", s.documents)
+	m.HandleFunc("GET /v1/import/{resource}", s.importExport)
 	m.HandleFunc("/v1/documents/{key...}", s.document)
 	m.HandleFunc("GET /v1/memory/{agent}", s.memoryList)
 	m.HandleFunc("/v1/memory/{agent}/{name}", s.memory)
@@ -792,7 +833,30 @@ func (s Server) Handler() http.Handler {
 	if wrkRegistered {
 		v1.wrk = http.HandlerFunc(s.wrk)
 	}
-	return v1
+	return importGrantHandler{v1: v1, tokens: s.Tokens, grants: s.ImportReadGrants}
+}
+
+// importGrantHandler preserves v1 route resolution for telemetry while
+// restricting import-only clients to the GET import surface.
+type importGrantHandler struct {
+	v1     v1Handler
+	tokens Tokens
+	grants map[string]bool
+}
+
+func (h importGrantHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if client, ok := h.tokens.Client(r); ok && h.grants[client] {
+		if r.Method != http.MethodGet || !strings.HasPrefix(r.URL.Path, "/v1/import/") {
+			writeError(w, http.StatusForbidden, "import_read_only")
+			return
+		}
+	}
+	h.v1.ServeHTTP(w, r)
+}
+
+// Handler reports the route the wrapped v1 handler will dispatch to.
+func (h importGrantHandler) Handler(r *http.Request) (http.Handler, string) {
+	return h.v1.Handler(r)
 }
 
 // wrkPattern is the route pattern reported for the /v1/wrk surface.
