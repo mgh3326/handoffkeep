@@ -14,6 +14,7 @@ func applyYouTrackDocPartsMigration(ctx context.Context, tx pgx.Tx) error {
 	return execAll(ctx, tx, []string{
 		`ALTER TABLE youtrack_doc_articles ADD COLUMN IF NOT EXISTS document_key TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE youtrack_doc_articles ADD COLUMN IF NOT EXISTS part_index INTEGER NOT NULL DEFAULT 1 CHECK (part_index > 0)`,
+		`ALTER TABLE youtrack_doc_articles ADD COLUMN IF NOT EXISTS part_count INTEGER NOT NULL DEFAULT 1 CHECK (part_count > 0)`,
 		`ALTER TABLE youtrack_doc_articles ADD COLUMN IF NOT EXISTS part_sha TEXT NOT NULL DEFAULT ''`,
 		`UPDATE youtrack_doc_articles SET document_key=doc_key WHERE document_key=''`,
 		`UPDATE youtrack_doc_articles SET part_sha=source_sha WHERE part_sha=''`,

@@ -159,6 +159,15 @@ func (f *fakeStore) DeleteYouTrackDocArticleParts(_ context.Context, key string,
 func (f *fakeStore) UpsertYouTrackDocArticle(_ context.Context, x store.YouTrackDocArticle) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if x.DocumentKey == "" {
+		x.DocumentKey = x.DocKey
+	}
+	if x.PartIndex == 0 {
+		x.PartIndex = 1
+	}
+	if x.PartCount == 0 {
+		x.PartCount = 1
+	}
 	f.docArticles[x.DocKey] = x
 	return nil
 }
@@ -431,6 +440,103 @@ func TestDocsMultipartRoundTripShrinkAndAdopt(t *testing.T) {
 	}
 	if _, err := svc.ReadDocumentArticle(context.Background(), "reference/large"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestDocsPartialPartFailureKeepsDocumentDueUntilComplete(t *testing.T) {
+	fs := newFakeStore()
+	fy := newFakeYouTrack()
+	key := "reference/retry"
+	fs.putDoc(key, "# Retry\n\n"+strings.Repeat("x", 300<<10))
+	svc := newTestService(t, fy, fs)
+	fy.mu.Lock()
+	fy.failSummary = key + " (2/2)"
+	fy.mu.Unlock()
+	first, err := svc.Sync(context.Background(), SyncOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Errors) == 0 {
+		t.Fatal("expected second-part create failure")
+	}
+	if rows, _ := fs.YouTrackDocArticles(context.Background(), key); len(rows) != 0 {
+		t.Fatalf("partial document has completion ledger: %+v", rows)
+	}
+	fy.mu.Lock()
+	fy.failSummary = ""
+	fy.mu.Unlock()
+	fs.mu.Lock()
+	delete(fs.attempts, attemptKey(store.YouTrackQueueDoc, key))
+	fs.mu.Unlock()
+	second, err := svc.Sync(context.Background(), SyncOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second.Errors) != 0 {
+		t.Fatalf("retry errors: %v", second.Errors)
+	}
+	rows, err := fs.YouTrackDocArticles(context.Background(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 || rows[0].SourceSHA != fs.docs[key].SHA256 || rows[0].PartCount != 2 {
+		t.Fatalf("completion ledger: %+v", rows)
+	}
+	if _, err := svc.ReadDocumentArticle(context.Background(), key); err != nil {
+		t.Fatalf("completed read-back: %v", err)
+	}
+}
+
+func TestDocsFailedSurplusDeleteStaysDueAndReadbackRejectsMixedParts(t *testing.T) {
+	fs := newFakeStore()
+	fy := newFakeYouTrack()
+	key := "research/shrink-retry"
+	fs.putDoc(key, "# Large\n\n"+strings.Repeat("x", 300<<10))
+	svc := newTestService(t, fy, fs)
+	if _, err := svc.Sync(context.Background(), SyncOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	fs.putDoc(key, "# Small\n\n"+strings.Repeat("한글", 17_000))
+	fy.mu.Lock()
+	fy.failArticleDelete = true
+	fy.mu.Unlock()
+	first, err := svc.Sync(context.Background(), SyncOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Errors) == 0 {
+		t.Fatal("expected surplus delete failure")
+	}
+	if _, err := svc.ReadDocumentArticle(context.Background(), key); err == nil {
+		t.Fatal("mixed ledger returned a successful read-back")
+	}
+	fy.mu.Lock()
+	fy.failArticleDelete = false
+	fy.mu.Unlock()
+	fs.mu.Lock()
+	delete(fs.attempts, attemptKey(store.YouTrackQueueDoc, key))
+	fs.mu.Unlock()
+	second, err := svc.Sync(context.Background(), SyncOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second.Errors) != 0 {
+		t.Fatalf("retry errors: %v", second.Errors)
+	}
+	rows, err := fs.YouTrackDocArticles(context.Background(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].PartCount != 1 {
+		t.Fatalf("shrunk ledger: %+v", rows)
+	}
+	got, err := svc.ReadDocumentArticle(context.Background(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "# Small\n\n" + strings.Repeat("한글", 17_000)
+	if got != want {
+		t.Fatalf("readback after retry differs: %d bytes", len(got))
 	}
 }
 

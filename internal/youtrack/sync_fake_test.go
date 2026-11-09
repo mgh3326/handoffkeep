@@ -47,7 +47,8 @@ type fakeYouTrack struct {
 	articleUpdates int
 	// failSummary makes a create of an issue or an article with this summary
 	// answer 500, so one item fails while the rest of a batch succeeds.
-	failSummary string
+	failSummary       string
+	failArticleDelete bool
 
 	// issueComments holds each issue's comments, oldest first, for the list
 	// route.
@@ -163,6 +164,10 @@ func (f *fakeYouTrack) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		article.Content = f.articleBodies[article.ID]
 		write(http.StatusOK, article)
 	case strings.HasPrefix(path, "/api/articles/") && r.Method == http.MethodDelete:
+		if f.failArticleDelete {
+			write(http.StatusInternalServerError, map[string]string{"error": "delete failed"})
+			return
+		}
 		id := strings.TrimPrefix(path, "/api/articles/")
 		delete(f.articles, id)
 		delete(f.articleBodies, id)

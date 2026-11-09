@@ -115,7 +115,7 @@ func (s *Service) pushDoc(ctx context.Context, doc store.Document, dry bool) (Do
 	action.HKProject = project.HKProject
 	content := s.docContent(doc)
 	action.Bytes = int64(len(content))
-	parts := splitDocParts(content, docArticleMaxBytes)
+	parts := docArticleParts(content, doc.Key)
 	action.Parts = len(parts)
 	title := docTitle(doc)
 	existingRows, err := s.store.YouTrackDocArticles(ctx, doc.Key)
@@ -135,7 +135,7 @@ func (s *Service) pushDoc(ctx context.Context, doc store.Document, dry bool) (Do
 		action.Action = "would_create"
 		if found {
 			action.ArticleID = existing.ArticleID
-			if existing.SourceSHA == doc.SHA256 && len(existingRows) == len(parts) {
+			if completeDocLedger(existingRows, parts, doc.SHA256, project.HKProject) {
 				action.Action = "unchanged"
 			} else {
 				action.Action = "would_update"
@@ -147,7 +147,7 @@ func (s *Service) pushDoc(ctx context.Context, doc store.Document, dry bool) (Do
 	if err != nil {
 		return action, err
 	}
-	if found && len(existingRows) > 0 && existingRows[0].SourceSHA == doc.SHA256 && len(existingRows) == len(parts) {
+	if found && completeDocLedger(existingRows, parts, doc.SHA256, project.HKProject) {
 		action.Action = "unchanged"
 		action.ArticleID = existing.ArticleID
 		return action, nil
@@ -158,9 +158,6 @@ func (s *Service) pushDoc(ctx context.Context, doc store.Document, dry bool) (Do
 	for i, part := range parts {
 		ledgerKey := docPartLedgerKey(doc.Key, i+1)
 		markerKey := docPartMarkerKey(doc.Key, i+1)
-		if i > 0 {
-			part = docMarker(markerKey) + "\n" + part
-		}
 		var article Article
 		row, rowFound, e := s.store.GetYouTrackDocArticle(ctx, ledgerKey)
 		if e != nil {
@@ -207,8 +204,10 @@ func (s *Service) pushDoc(ctx context.Context, doc store.Document, dry bool) (Do
 		if i == 0 {
 			action.ArticleID = article.ID
 		}
-		partSum := sha256.Sum256([]byte(part))
-		if e = s.store.UpsertYouTrackDocArticle(ctx, store.YouTrackDocArticle{DocKey: ledgerKey, DocumentKey: doc.Key, PartIndex: i + 1, PartSHA: hex.EncodeToString(partSum[:]), HKProject: project.HKProject, ArticleID: article.ID, SourceSHA: doc.SHA256, Bytes: int64(len(part)), SyncedAt: s.now()}); e != nil {
+		ledgerEntry := store.YouTrackDocArticle{DocKey: ledgerKey, DocumentKey: doc.Key, PartIndex: i + 1, PartCount: len(parts), PartSHA: docPartSHA(part), HKProject: project.HKProject, ArticleID: article.ID, SourceSHA: doc.SHA256, Bytes: int64(len(part)), SyncedAt: s.now()}
+		if i == 0 {
+			existing = ledgerEntry // commit the source SHA only after all child work succeeds
+		} else if e = s.store.UpsertYouTrackDocArticle(ctx, ledgerEntry); e != nil {
 			return action, e
 		}
 	}
@@ -220,6 +219,9 @@ func (s *Service) pushDoc(ctx context.Context, doc store.Document, dry bool) (Do
 		}
 	}
 	if err = s.store.DeleteYouTrackDocArticleParts(ctx, doc.Key, len(parts)+1); err != nil {
+		return action, err
+	}
+	if err = s.store.UpsertYouTrackDocArticle(ctx, existing); err != nil {
 		return action, err
 	}
 	return action, nil
@@ -295,13 +297,36 @@ func (s *Service) findMarkedArticle(ctx context.Context, projectID, key string) 
 	return Article{}, false, nil
 }
 
-// docContent is the article body: a header with the hk key, the date and a
-// console link, then the document's markdown as is. The second result is
-// true when the body was over the cap and only the stub was written.
+// docContent is the article body: a header with the hk key, date and console link, then the Markdown.
 func (s *Service) docContent(doc store.Document) string {
 	link := strings.TrimRight(s.console, "/") + "/ui/doc/" + doc.Key
 	header := docMarker(doc.Key) + "\n" + fmt.Sprintf("> hk 문서 `%s` · 작성 %s · [hk에서 보기](%s)\n\n", doc.Key, doc.CreatedAt.UTC().Format("2006-01-02"), link)
 	return header + doc.Body
+}
+
+func docArticleParts(content, key string) []string {
+	parts := splitDocParts(content, docArticleMaxBytes)
+	for i := 1; i < len(parts); i++ {
+		parts[i] = docMarker(docPartMarkerKey(key, i+1)) + "\n" + parts[i]
+	}
+	return parts
+}
+
+func docPartSHA(content string) string {
+	sum := sha256.Sum256([]byte(content))
+	return hex.EncodeToString(sum[:])
+}
+
+func completeDocLedger(rows []store.YouTrackDocArticle, parts []string, sourceSHA, project string) bool {
+	if len(rows) != len(parts) {
+		return false
+	}
+	for i, row := range rows {
+		if row.PartIndex != i+1 || row.PartCount != len(parts) || row.SourceSHA != sourceSHA || row.PartSHA != docPartSHA(parts[i]) || row.HKProject != project {
+			return false
+		}
+	}
+	return true
 }
 
 func docPartLedgerKey(key string, part int) string {
@@ -348,14 +373,20 @@ func (s *Service) ReadDocumentArticle(ctx context.Context, key string) (string, 
 	if len(rows) == 0 {
 		return "", fmt.Errorf("document %q has no YouTrack articles", key)
 	}
+	if rows[0].PartIndex != 1 || rows[0].PartCount != len(rows) {
+		return "", fmt.Errorf("document %q has incomplete article parts", key)
+	}
 	var b strings.Builder
 	for i, row := range rows {
-		if row.PartIndex != i+1 {
+		if row.PartIndex != i+1 || row.PartCount != rows[0].PartCount || row.SourceSHA != rows[0].SourceSHA {
 			return "", fmt.Errorf("document %q has missing part %d", key, i+1)
 		}
 		a, e := s.client.GetArticle(ctx, row.ArticleID)
 		if e != nil {
 			return "", e
+		}
+		if docPartSHA(a.Content) != row.PartSHA {
+			return "", fmt.Errorf("document %q part %d content does not match its ledger", key, i+1)
 		}
 		part := strings.TrimPrefix(a.Content, docMarker(docPartMarkerKey(key, i+1))+"\n")
 		b.WriteString(part)

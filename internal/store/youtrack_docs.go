@@ -14,6 +14,7 @@ type YouTrackDocArticle struct {
 	DocKey      string    `json:"doc_key"`
 	DocumentKey string    `json:"document_key"`
 	PartIndex   int       `json:"part_index"`
+	PartCount   int       `json:"part_count"`
 	PartSHA     string    `json:"part_sha"`
 	HKProject   string    `json:"hk_project"`
 	ArticleID   string    `json:"article_id"`
@@ -24,7 +25,7 @@ type YouTrackDocArticle struct {
 
 // YouTrackDocArticles returns the primary and child article ledger rows in part order.
 func (s *Store) YouTrackDocArticles(ctx context.Context, key string) ([]YouTrackDocArticle, error) {
-	rows, err := s.pool.Query(ctx, `SELECT doc_key,document_key,part_index,part_sha,hk_project,article_id,source_sha,bytes,synced_at
+	rows, err := s.pool.Query(ctx, `SELECT doc_key,document_key,part_index,part_count,part_sha,hk_project,article_id,source_sha,bytes,synced_at
 		FROM youtrack_doc_articles WHERE document_key=$1 ORDER BY part_index ASC`, key)
 	if err != nil {
 		return nil, err
@@ -33,7 +34,7 @@ func (s *Store) YouTrackDocArticles(ctx context.Context, key string) ([]YouTrack
 	out := []YouTrackDocArticle{}
 	for rows.Next() {
 		var x YouTrackDocArticle
-		if err := rows.Scan(&x.DocKey, &x.DocumentKey, &x.PartIndex, &x.PartSHA, &x.HKProject, &x.ArticleID, &x.SourceSHA, &x.Bytes, &x.SyncedAt); err != nil {
+		if err := rows.Scan(&x.DocKey, &x.DocumentKey, &x.PartIndex, &x.PartCount, &x.PartSHA, &x.HKProject, &x.ArticleID, &x.SourceSHA, &x.Bytes, &x.SyncedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, x)
@@ -139,8 +140,8 @@ func (s *Store) OrphanYouTrackDocArticles(ctx context.Context, limit int) ([]You
 // GetYouTrackDocArticle reads one ledger row.
 func (s *Store) GetYouTrackDocArticle(ctx context.Context, docKey string) (YouTrackDocArticle, bool, error) {
 	var x YouTrackDocArticle
-	err := s.pool.QueryRow(ctx, `SELECT doc_key,document_key,part_index,part_sha,hk_project,article_id,source_sha,bytes,synced_at FROM youtrack_doc_articles WHERE doc_key=$1`, docKey).
-		Scan(&x.DocKey, &x.DocumentKey, &x.PartIndex, &x.PartSHA, &x.HKProject, &x.ArticleID, &x.SourceSHA, &x.Bytes, &x.SyncedAt)
+	err := s.pool.QueryRow(ctx, `SELECT doc_key,document_key,part_index,part_count,part_sha,hk_project,article_id,source_sha,bytes,synced_at FROM youtrack_doc_articles WHERE doc_key=$1`, docKey).
+		Scan(&x.DocKey, &x.DocumentKey, &x.PartIndex, &x.PartCount, &x.PartSHA, &x.HKProject, &x.ArticleID, &x.SourceSHA, &x.Bytes, &x.SyncedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return YouTrackDocArticle{}, false, nil
 	}
@@ -162,11 +163,14 @@ func (s *Store) UpsertYouTrackDocArticle(ctx context.Context, x YouTrackDocArtic
 	if x.PartIndex == 0 {
 		x.PartIndex = 1
 	}
-	_, err := s.pool.Exec(ctx, `INSERT INTO youtrack_doc_articles(doc_key,document_key,part_index,part_sha,hk_project,article_id,source_sha,bytes,synced_at)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
-		ON CONFLICT(doc_key) DO UPDATE SET document_key=EXCLUDED.document_key,part_index=EXCLUDED.part_index,part_sha=EXCLUDED.part_sha,hk_project=EXCLUDED.hk_project, article_id=EXCLUDED.article_id,
+	if x.PartCount == 0 {
+		x.PartCount = 1
+	}
+	_, err := s.pool.Exec(ctx, `INSERT INTO youtrack_doc_articles(doc_key,document_key,part_index,part_count,part_sha,hk_project,article_id,source_sha,bytes,synced_at)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+		ON CONFLICT(doc_key) DO UPDATE SET document_key=EXCLUDED.document_key,part_index=EXCLUDED.part_index,part_count=EXCLUDED.part_count,part_sha=EXCLUDED.part_sha,hk_project=EXCLUDED.hk_project, article_id=EXCLUDED.article_id,
 			source_sha=EXCLUDED.source_sha, bytes=EXCLUDED.bytes, synced_at=EXCLUDED.synced_at`,
-		x.DocKey, x.DocumentKey, x.PartIndex, x.PartSHA, x.HKProject, x.ArticleID, x.SourceSHA, x.Bytes, x.SyncedAt)
+		x.DocKey, x.DocumentKey, x.PartIndex, x.PartCount, x.PartSHA, x.HKProject, x.ArticleID, x.SourceSHA, x.Bytes, x.SyncedAt)
 	return err
 }
 
