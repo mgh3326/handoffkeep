@@ -339,7 +339,7 @@ func TestSearchFallsBackWithReasonOnYouTrackFailure(t *testing.T) {
 			if len(got) != 1 || got[0].Key != "pg" {
 				t.Fatalf("got %+v, want the PostgreSQL answer", got)
 			}
-			if want := "search.youtrack_fallback reason=" + c.reason + " scope=tasks"; !strings.Contains(logs.String(), want) {
+			if want := `search.youtrack_fallback reason=` + c.reason + ` scope="tasks"`; !strings.Contains(logs.String(), want) {
 				t.Fatalf("log = %q, want %q", logs.String(), want)
 			}
 		})
