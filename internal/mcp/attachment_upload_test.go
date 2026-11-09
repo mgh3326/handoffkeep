@@ -25,7 +25,7 @@ func (m *memObjects) PresignPut(_ context.Context, k string, _ time.Duration, _ 
 func (m *memObjects) Head(_ context.Context, k string) (attachments.ObjectInfo, error) {
 	b, ok := m.objects[k]
 	if !ok {
-		return attachments.ObjectInfo{}, errors.New("missing")
+		return attachments.ObjectInfo{}, attachments.ErrObjectNotFound
 	}
 	return attachments.ObjectInfo{Key: k, Size: int64(len(b)), Modified: time.Now().UTC()}, nil
 }
@@ -43,25 +43,17 @@ func (m *memObjects) List(_ context.Context, prefix string) ([]attachments.Objec
 	return out, nil
 }
 
-func (m *memAttachmentDB) ReserveAttachmentUpload(_ context.Context, u store.AttachmentUpload, stagingCap int64, since time.Time) error {
+func (m *memAttachmentDB) ReserveAttachmentUpload(_ context.Context, u store.AttachmentUpload, stagingCap, clientCap int64) error {
 	if m.uploads == nil {
 		m.uploads = map[string]store.AttachmentUpload{}
 	}
-	return reserveFake(m.uploads, u, stagingCap, since)
+	return reserveFake(m.uploads, u, stagingCap, clientCap)
 }
-
-// reserveFake applies the same staging budget as the store's reservation.
-func reserveFake(uploads map[string]store.AttachmentUpload, u store.AttachmentUpload, stagingCap int64, since time.Time) error {
-	var used int64
-	for _, o := range uploads {
-		if (o.Status == store.AttachmentUploadPending || o.Status == store.AttachmentUploadCompleting) && o.CreatedAt.After(since) {
-			used += o.SizeBytes
-		}
-	}
-	if used+u.SizeBytes > stagingCap {
-		return store.ErrAttachmentStagingCap
-	}
-	uploads[u.ID] = u
+func (m *memAttachmentDB) ListUnreleasedAttachmentUploads(_ context.Context, createdBefore time.Time, limit int) ([]store.AttachmentUpload, error) {
+	return unreleasedFake(m.uploads, createdBefore, limit), nil
+}
+func (m *memAttachmentDB) MarkAttachmentUploadStagingDeleted(_ context.Context, id string, now time.Time) error {
+	markReleasedFake(m.uploads, id, now)
 	return nil
 }
 
@@ -215,4 +207,41 @@ func (*spyBackend) BeginAttachmentUpload(context.Context, string, string, string
 }
 func (*spyBackend) CompleteAttachmentUpload(context.Context, string, string) (store.Attachment, bool, error) {
 	return store.Attachment{}, false, errors.New("unexpected")
+}
+
+// reserveFake applies the store's budget: rows whose staging object may still
+// exist count against the global and the per-creator cap.
+func reserveFake(uploads map[string]store.AttachmentUpload, u store.AttachmentUpload, stagingCap, clientCap int64) error {
+	var used, usedByClient int64
+	for _, o := range uploads {
+		if !o.StagingDeletedAt.IsZero() {
+			continue
+		}
+		used += o.SizeBytes
+		if o.CreatedBy == u.CreatedBy {
+			usedByClient += o.SizeBytes
+		}
+	}
+	if used+u.SizeBytes > stagingCap || usedByClient+u.SizeBytes > clientCap {
+		return store.ErrAttachmentStagingCap
+	}
+	uploads[u.ID] = u
+	return nil
+}
+
+func unreleasedFake(uploads map[string]store.AttachmentUpload, createdBefore time.Time, limit int) []store.AttachmentUpload {
+	var out []store.AttachmentUpload
+	for _, o := range uploads {
+		if o.StagingDeletedAt.IsZero() && o.CreatedAt.Before(createdBefore) && len(out) < limit {
+			out = append(out, o)
+		}
+	}
+	return out
+}
+
+func markReleasedFake(uploads map[string]store.AttachmentUpload, id string, now time.Time) {
+	if u, ok := uploads[id]; ok && u.StagingDeletedAt.IsZero() {
+		u.StagingDeletedAt = now
+		uploads[id] = u
+	}
 }

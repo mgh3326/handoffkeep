@@ -49,7 +49,7 @@ func (o *uploadObjects) PresignPut(_ context.Context, k string, _ time.Duration,
 func (o *uploadObjects) Head(_ context.Context, k string) (attachments.ObjectInfo, error) {
 	b, ok := o.objects[k]
 	if !ok {
-		return attachments.ObjectInfo{}, errors.New("missing")
+		return attachments.ObjectInfo{}, attachments.ErrObjectNotFound
 	}
 	return attachments.ObjectInfo{Key: k, Size: int64(len(b)), Modified: time.Now().UTC()}, nil
 }
@@ -91,22 +91,14 @@ func (*uploadDB) ListAttachments(context.Context, string, string, int) ([]store.
 func (*uploadDB) AttachmentUsage(context.Context) (store.AttachmentUsage, error) {
 	return store.AttachmentUsage{}, nil
 }
-func (d *uploadDB) ReserveAttachmentUpload(_ context.Context, u store.AttachmentUpload, stagingCap int64, since time.Time) error {
-	return reserveFake(d.uploads, u, stagingCap, since)
+func (d *uploadDB) ReserveAttachmentUpload(_ context.Context, u store.AttachmentUpload, stagingCap, clientCap int64) error {
+	return reserveFake(d.uploads, u, stagingCap, clientCap)
 }
-
-// reserveFake applies the same staging budget as the store's reservation.
-func reserveFake(uploads map[string]store.AttachmentUpload, u store.AttachmentUpload, stagingCap int64, since time.Time) error {
-	var used int64
-	for _, o := range uploads {
-		if (o.Status == store.AttachmentUploadPending || o.Status == store.AttachmentUploadCompleting) && o.CreatedAt.After(since) {
-			used += o.SizeBytes
-		}
-	}
-	if used+u.SizeBytes > stagingCap {
-		return store.ErrAttachmentStagingCap
-	}
-	uploads[u.ID] = u
+func (d *uploadDB) ListUnreleasedAttachmentUploads(_ context.Context, createdBefore time.Time, limit int) ([]store.AttachmentUpload, error) {
+	return unreleasedFake(d.uploads, createdBefore, limit), nil
+}
+func (d *uploadDB) MarkAttachmentUploadStagingDeleted(_ context.Context, id string, now time.Time) error {
+	markReleasedFake(d.uploads, id, now)
 	return nil
 }
 
@@ -131,7 +123,7 @@ func uploadServer(t *testing.T) (*httptest.Server, *uploadObjects) {
 	for _, x := range strings.Split(attachments.DefaultMIMEAllow, ",") {
 		allow[x] = true
 	}
-	m := &attachments.Manager{Store: &uploadDB{rows: map[string]store.Attachment{}, uploads: map[string]store.AttachmentUpload{}}, Objects: objs, Enabled: true, Config: attachments.Config{MaxBytes: 1 << 20, StorageCap: 1 << 30, PutCap: 1000, GetCap: 1000, Allow: allow, DirectUpload: true, StagingCap: 1 << 30}}
+	m := &attachments.Manager{Store: &uploadDB{rows: map[string]store.Attachment{}, uploads: map[string]store.AttachmentUpload{}}, Objects: objs, Enabled: true, Config: attachments.Config{MaxBytes: 1 << 20, StorageCap: 1 << 30, PutCap: 1000, GetCap: 1000, Allow: allow, DirectUpload: true, StagingCap: 1 << 30, StagingClientCap: 1 << 30}}
 	h := httptest.NewServer(Server{Service: Service{Attachments: m}, Tokens: Tokens{"node": "node-token"}}.Handler())
 	t.Cleanup(h.Close)
 	return h, objs
@@ -215,5 +207,42 @@ func TestDirectUploadRoutesBeginCompleteAndRefuse(t *testing.T) {
 	}
 	if status, _ := uploadCall(t, h, http.MethodPost, "/v1/attachments/uploads", "node-token", map[string]any{"name": "a.exe", "mime": "application/x-msdownload", "size": 1, "sha256": sha}); status < 400 {
 		t.Fatalf("disallowed mime status=%d", status)
+	}
+}
+
+// reserveFake applies the store's budget: rows whose staging object may still
+// exist count against the global and the per-creator cap.
+func reserveFake(uploads map[string]store.AttachmentUpload, u store.AttachmentUpload, stagingCap, clientCap int64) error {
+	var used, usedByClient int64
+	for _, o := range uploads {
+		if !o.StagingDeletedAt.IsZero() {
+			continue
+		}
+		used += o.SizeBytes
+		if o.CreatedBy == u.CreatedBy {
+			usedByClient += o.SizeBytes
+		}
+	}
+	if used+u.SizeBytes > stagingCap || usedByClient+u.SizeBytes > clientCap {
+		return store.ErrAttachmentStagingCap
+	}
+	uploads[u.ID] = u
+	return nil
+}
+
+func unreleasedFake(uploads map[string]store.AttachmentUpload, createdBefore time.Time, limit int) []store.AttachmentUpload {
+	var out []store.AttachmentUpload
+	for _, o := range uploads {
+		if o.StagingDeletedAt.IsZero() && o.CreatedAt.Before(createdBefore) && len(out) < limit {
+			out = append(out, o)
+		}
+	}
+	return out
+}
+
+func markReleasedFake(uploads map[string]store.AttachmentUpload, id string, now time.Time) {
+	if u, ok := uploads[id]; ok && u.StagingDeletedAt.IsZero() {
+		u.StagingDeletedAt = now
+		uploads[id] = u
 	}
 }

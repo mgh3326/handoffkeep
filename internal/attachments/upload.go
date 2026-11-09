@@ -28,6 +28,15 @@ const (
 	// complete loses its bytes.
 	StagingSweepAge = 2 * time.Hour
 	stagingPrefix   = "incoming/"
+	// uploadLease is how long a completion may hold its claim before another
+	// call may reclaim the upload. A claim older than this belongs to a
+	// completion that stopped before it finished.
+	uploadLease = 5 * time.Minute
+	// releaseGrace is slack past a presigned URL's life before a missing staging
+	// object is treated as final.
+	releaseGrace = time.Minute
+	// sweepBatch bounds how many charged uploads one sweep reconciles.
+	sweepBatch = 500
 )
 
 var (
@@ -92,12 +101,12 @@ func (m *Manager) BeginUpload(ctx context.Context, client, name, mime string, si
 	}
 	now := m.now()
 	row := store.AttachmentUpload{ID: uid, StagingKey: key, Name: name, MIME: declared, SizeBytes: size, SHA256: sha, RefKind: kind, RefID: id, CreatedBy: client, Status: store.AttachmentUploadPending, CreatedAt: now, ExpiresAt: now.Add(uploadRowTTL), UpdatedAt: now}
-	// The reservation checks the storage caps and the staging budget together
-	// with the insert; a refusal creates no row and issues no URL.
+	// The reservation checks the staging budget, global and per creator, with
+	// the insert; a refusal creates no row. The storage caps are checked first.
 	if err := m.Store.CheckAttachmentCapacity(ctx, size, m.Config.StorageCap, m.Config.PutCap); err != nil {
 		return UploadTicket{}, err
 	}
-	if err := m.Store.ReserveAttachmentUpload(ctx, row, m.Config.StagingCap, now.Add(-StagingSweepAge)); err != nil {
+	if err := m.Store.ReserveAttachmentUpload(ctx, row, m.Config.StagingCap, m.Config.StagingClientCap); err != nil {
 		return UploadTicket{}, err
 	}
 	return UploadTicket{UploadID: uid, Method: "PUT", URL: u, ExpiresInSeconds: int(UploadTTL / time.Second)}, nil
@@ -122,6 +131,7 @@ func (m *Manager) CompleteUpload(ctx context.Context, client, uploadID string) (
 	if !ok || row.CreatedBy != client {
 		return store.Attachment{}, false, ErrUploadNotFound
 	}
+	now := m.now()
 	switch row.Status {
 	case store.AttachmentUploadDone:
 		x, found, err := m.Store.GetAttachment(ctx, row.SHA256)
@@ -135,9 +145,22 @@ func (m *Manager) CompleteUpload(ctx context.Context, client, uploadID string) (
 	case store.AttachmentUploadRefused:
 		return store.Attachment{}, false, fmt.Errorf("%w: %s", ErrUploadRefused, row.Reason)
 	case store.AttachmentUploadCompleting:
-		return store.Attachment{}, false, ErrUploadInProgress
+		// A claim older than the lease belongs to a completion that stopped before
+		// it moved the row to done. Its staging object is still there (deletion
+		// follows done), so the claim goes back to pending and this call redoes
+		// the completion; the store path is idempotent, so the redo is safe.
+		if now.Before(row.UpdatedAt.Add(uploadLease)) {
+			return store.Attachment{}, false, ErrUploadInProgress
+		}
+		reclaimed, err := m.Store.TransitionAttachmentUpload(ctx, row.ID, store.AttachmentUploadCompleting, store.AttachmentUploadPending, "", now)
+		if err != nil {
+			return store.Attachment{}, false, err
+		}
+		if !reclaimed {
+			return store.Attachment{}, false, ErrUploadInProgress
+		}
+		row.Status = store.AttachmentUploadPending
 	}
-	now := m.now()
 	if !now.Before(row.ExpiresAt) {
 		changed, err := m.finishUpload(ctx, row, store.AttachmentUploadPending, store.AttachmentUploadRefused, "upload_expired", now)
 		if err != nil {
@@ -248,27 +271,45 @@ func (m *Manager) deleteStaging(ctx context.Context, key string) {
 	_ = m.Objects.Delete(ctx, key)
 }
 
-// SweepStaging deletes staging objects older than StagingSweepAge. Any upload
-// row that still points at one has passed its expiry, so it can no longer
-// complete. It returns how many objects it deleted.
+// SweepStaging does two things, in order. It deletes staging objects older than
+// StagingSweepAge, which removes any left by a failed best-effort delete. Then
+// it releases the budget charge of each upload whose staging object is confirmed
+// absent and whose presigned URL is past its life: a PUT cannot recreate the
+// object after that, so the charge is no longer needed. A charge is never
+// released on the upload's state or age alone. It returns how many objects it
+// deleted.
 func (m *Manager) SweepStaging(ctx context.Context) (int, error) {
 	if !m.Enabled {
 		return 0, ErrDisabled
 	}
-	cutoff := m.now().Add(-StagingSweepAge)
+	now := m.now()
 	objs, err := m.Objects.List(ctx, stagingPrefix)
 	if err != nil {
 		return 0, err
 	}
 	deleted := 0
 	for _, o := range objs {
-		if o.Modified.After(cutoff) {
+		if o.Modified.After(now.Add(-StagingSweepAge)) {
 			continue
 		}
 		if err := m.Objects.Delete(ctx, o.Key); err != nil {
 			return deleted, err
 		}
 		deleted++
+	}
+	charged, err := m.Store.ListUnreleasedAttachmentUploads(ctx, now.Add(-(UploadTTL + releaseGrace)), sweepBatch)
+	if err != nil {
+		return deleted, err
+	}
+	for _, u := range charged {
+		// Any Head failure other than "absent" leaves the charge in place: the
+		// object's state is unknown, so the budget keeps counting it.
+		if _, err := m.Objects.Head(ctx, u.StagingKey); !errors.Is(err, ErrObjectNotFound) {
+			continue
+		}
+		if err := m.Store.MarkAttachmentUploadStagingDeleted(ctx, u.ID, now); err != nil {
+			return deleted, err
+		}
 	}
 	return deleted, nil
 }

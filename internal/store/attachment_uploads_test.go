@@ -39,31 +39,44 @@ func TestAttachmentUploadRowsTransitionOnce(t *testing.T) {
 	}
 }
 
-// The staging budget is checked and the row inserted under one lock: an
-// over-budget reservation is refused and leaves no row, and a finished upload
-// stops counting.
+// The staging budget is checked and the row inserted under one lock. A finished
+// upload stays charged until its staging object is marked deleted, and the
+// per-client cap applies on top of the global one.
 func TestReserveAttachmentUploadEnforcesTheStagingBudget(t *testing.T) {
 	s := schemaStore(t, "attachment_budget")
 	now := time.Now().UTC().Truncate(time.Microsecond)
-	since := now.Add(-2 * time.Hour)
-	mk := func(id string, size int64) AttachmentUpload {
-		return AttachmentUpload{ID: id, StagingKey: "incoming/" + id, Name: "a.txt", MIME: "text/plain", SizeBytes: size, SHA256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", RefKind: "none", CreatedBy: "node", CreatedAt: now, ExpiresAt: now.Add(time.Hour)}
+	mk := func(id, client string, size int64) AttachmentUpload {
+		return AttachmentUpload{ID: id, StagingKey: "incoming/" + id, Name: "a.txt", MIME: "text/plain", SizeBytes: size, SHA256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", RefKind: "none", CreatedBy: client, CreatedAt: now, ExpiresAt: now.Add(time.Hour)}
 	}
 	const a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	const b = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	if err := s.ReserveAttachmentUpload(t.Context(), mk(a, 60), 100, since); err != nil {
+	const c = "cccccccccccccccccccccccccccccccc"
+	if err := s.ReserveAttachmentUpload(t.Context(), mk(a, "node", 60), 100, 100); err != nil {
 		t.Fatalf("first reserve: %v", err)
 	}
-	if err := s.ReserveAttachmentUpload(t.Context(), mk(b, 60), 100, since); !errors.Is(err, ErrAttachmentStagingCap) {
+	if err := s.ReserveAttachmentUpload(t.Context(), mk(b, "other", 60), 100, 100); !errors.Is(err, ErrAttachmentStagingCap) {
 		t.Fatalf("over-budget reserve err=%v", err)
 	}
 	if _, ok, _ := s.GetAttachmentUpload(t.Context(), b); ok {
 		t.Fatal("a refused reservation left a row")
 	}
+	if err := s.ReserveAttachmentUpload(t.Context(), mk(c, "node", 60), 1000, 100); !errors.Is(err, ErrAttachmentStagingCap) {
+		t.Fatalf("per-client reserve err=%v", err)
+	}
 	if ok, err := s.TransitionAttachmentUpload(t.Context(), a, AttachmentUploadPending, AttachmentUploadDone, "", now); err != nil || !ok {
 		t.Fatalf("finish first: ok=%v err=%v", ok, err)
 	}
-	if err := s.ReserveAttachmentUpload(t.Context(), mk(b, 60), 100, since); err != nil {
-		t.Fatalf("reserve after the first finished: %v", err)
+	if err := s.ReserveAttachmentUpload(t.Context(), mk(b, "other", 60), 100, 100); !errors.Is(err, ErrAttachmentStagingCap) {
+		t.Fatalf("done upload released its charge before its staging object was confirmed gone: %v", err)
+	}
+	if err := s.MarkAttachmentUploadStagingDeleted(t.Context(), a, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReserveAttachmentUpload(t.Context(), mk(b, "other", 60), 100, 100); err != nil {
+		t.Fatalf("reserve after the staging object was confirmed gone: %v", err)
+	}
+	unreleased, err := s.ListUnreleasedAttachmentUploads(t.Context(), now.Add(time.Hour), 10)
+	if err != nil || len(unreleased) != 1 || unreleased[0].ID != b {
+		t.Fatalf("unreleased=%v err=%v", unreleased, err)
 	}
 }

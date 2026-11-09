@@ -24,11 +24,12 @@ import (
 )
 
 const (
-	DefaultMaxBytes   int64 = 50 << 20
-	DefaultStorageCap int64 = 8 << 30
-	DefaultPutCap     int64 = 800000
-	DefaultGetCap     int64 = 8000000
-	DefaultStagingCap int64 = 1 << 30
+	DefaultMaxBytes         int64 = 50 << 20
+	DefaultStorageCap       int64 = 8 << 30
+	DefaultPutCap           int64 = 800000
+	DefaultGetCap           int64 = 8000000
+	DefaultStagingCap       int64 = 1 << 30
+	DefaultStagingClientCap int64 = 256 << 20
 )
 
 // DefaultMIMEAllow is the MIME allowlist used when HK_ATTACH_MIME_ALLOW is
@@ -49,8 +50,10 @@ type Config struct {
 	MaxBytes, StorageCap, PutCap, GetCap   int64
 	Allow                                  map[string]bool
 	Endpoint, Bucket, AccessKey, SecretKey string
-	// StagingCap bounds the bytes that direct uploads may have staged at once.
-	StagingCap int64
+	// StagingCap bounds the declared bytes of direct uploads still charged to the
+	// budget (their staging objects may exist). StagingClientCap bounds one
+	// creator's share of it, so one client cannot hold the whole budget.
+	StagingCap, StagingClientCap int64
 	// DirectUpload enables presigned direct upload. It is off unless
 	// HK_ATTACH_DIRECT_UPLOAD is 1 or true: the size bound on a presigned PUT
 	// depends on the store verifying signed headers, which is confirmed only by
@@ -109,6 +112,9 @@ func ConfigFromEnv() (Config, bool, error) {
 	if c.StagingCap, e = envInt("HK_ATTACH_STAGING_CAP_BYTES", DefaultStagingCap); e != nil {
 		return c, false, e
 	}
+	if c.StagingClientCap, e = envInt("HK_ATTACH_STAGING_CLIENT_CAP_BYTES", DefaultStagingClientCap); e != nil {
+		return c, false, e
+	}
 	c.DirectUpload = envBool("HK_ATTACH_DIRECT_UPLOAD")
 	allow := os.Getenv("HK_ATTACH_MIME_ALLOW")
 	if allow == "" {
@@ -126,6 +132,10 @@ func ConfigFromEnv() (Config, bool, error) {
 	}
 	return c, true, nil
 }
+
+// ErrObjectNotFound is returned by Head when the object does not exist. Any
+// other Head error means the object's state is unknown.
+var ErrObjectNotFound = errors.New("attachment_object_not_found")
 
 // ObjectInfo is an object's size and last-modified time, from HEAD or a listing.
 type ObjectInfo struct {
@@ -190,6 +200,9 @@ func (m minioStore) PresignPut(ctx context.Context, key string, ttl time.Duratio
 func (m minioStore) Head(ctx context.Context, key string) (ObjectInfo, error) {
 	o, e := m.client.StatObject(ctx, m.bucket, key, minio.StatObjectOptions{})
 	if e != nil {
+		if minio.ToErrorResponse(e).Code == "NoSuchKey" {
+			return ObjectInfo{}, ErrObjectNotFound
+		}
 		return ObjectInfo{}, e
 	}
 	return ObjectInfo{Key: key, Size: o.Size, Modified: o.LastModified}, nil
@@ -243,7 +256,9 @@ type AttachmentDB interface {
 	RecordAttachmentGet(context.Context, string, int64) error
 	ListAttachments(context.Context, string, string, int) ([]store.Attachment, error)
 	AttachmentUsage(context.Context) (store.AttachmentUsage, error)
-	ReserveAttachmentUpload(context.Context, store.AttachmentUpload, int64, time.Time) error
+	ReserveAttachmentUpload(ctx context.Context, u store.AttachmentUpload, stagingCap, clientCap int64) error
+	ListUnreleasedAttachmentUploads(ctx context.Context, createdBefore time.Time, limit int) ([]store.AttachmentUpload, error)
+	MarkAttachmentUploadStagingDeleted(ctx context.Context, id string, now time.Time) error
 	GetAttachmentUpload(context.Context, string) (store.AttachmentUpload, bool, error)
 	TransitionAttachmentUpload(ctx context.Context, id, from, to, reason string, now time.Time) (bool, error)
 }

@@ -110,7 +110,7 @@ func newAttachmentTestServer(t *testing.T) (*gmcp.ClientSession, *memAttachmentD
 	for _, x := range strings.Split(attachments.DefaultMIMEAllow, ",") {
 		allow[x] = true
 	}
-	m := &attachments.Manager{Store: db, Objects: objs, Enabled: true, Config: attachments.Config{MaxBytes: 50 << 20, StorageCap: 1 << 30, PutCap: 1000, GetCap: 1000, Allow: allow, DirectUpload: true, StagingCap: 1 << 30}}
+	m := &attachments.Manager{Store: db, Objects: objs, Enabled: true, Config: attachments.Config{MaxBytes: 50 << 20, StorageCap: 1 << 30, PutCap: 1000, GetCap: 1000, Allow: allow, DirectUpload: true, StagingCap: 1 << 30, StagingClientCap: 1 << 30}}
 	server := New(attachmentBackend{spyBackend: &spyBackend{}, m: m}, "mcp-test")
 	a, b := gmcp.NewInMemoryTransports()
 	ss, err := server.Connect(t.Context(), a, nil)

@@ -25,7 +25,7 @@ func newUploadManager(t *testing.T) (*Manager, *fakeDB, *fakeObjects) {
 	for _, x := range strings.Split(DefaultMIMEAllow, ",") {
 		allow[x] = true
 	}
-	m := &Manager{Store: db, Objects: objs, Enabled: true, Config: Config{MaxBytes: 1000, StorageCap: 10000, PutCap: 100, GetCap: 100, Allow: allow, DirectUpload: true, StagingCap: 1 << 30}}
+	m := &Manager{Store: db, Objects: objs, Enabled: true, Config: Config{MaxBytes: 1000, StorageCap: 10000, PutCap: 100, GetCap: 100, Allow: allow, DirectUpload: true, StagingCap: 1 << 30, StagingClientCap: 1 << 30}}
 	return m, db, objs
 }
 
@@ -491,8 +491,17 @@ func TestStagingBudgetBoundsOutstandingBytes(t *testing.T) {
 	if _, _, err := m.CompleteUpload(t.Context(), "node", first.UploadID); err != nil {
 		t.Fatal(err)
 	}
+	// A completed upload stays charged until its staging object is confirmed gone
+	// and its presigned URL is past its life, not when it completes.
+	if _, err := m.BeginUpload(t.Context(), "node", "three.txt", "text/plain", int64(len(body)), shaOf(body), ""); !errors.Is(err, store.ErrAttachmentStagingCap) {
+		t.Fatalf("completed upload released its charge before reconciliation: %v", err)
+	}
+	m.Now = func() time.Time { return time.Now().Add(UploadTTL + 2*releaseGrace) }
+	if _, err := m.SweepStaging(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := m.BeginUpload(t.Context(), "node", "three.txt", "text/plain", int64(len(body)), shaOf(body), ""); err != nil {
-		t.Fatalf("begin after the first completed: %v", err)
+		t.Fatalf("begin after reconciliation: %v", err)
 	}
 }
 
@@ -530,5 +539,101 @@ func TestExpiryThatLosesTheRaceLeavesTheStagingBytes(t *testing.T) {
 	}
 	if db.uploads[tk.UploadID].Status != store.AttachmentUploadCompleting {
 		t.Fatalf("losing expiry changed the claimed row to %q", db.uploads[tk.UploadID].Status)
+	}
+}
+
+// A staging object whose best-effort delete failed keeps its charge until the
+// sweep removes it, and the charge is released only then.
+func TestBudgetHeldUntilStagingObjectIsGone(t *testing.T) {
+	m, _, objs := newUploadManager(t)
+	m.Config.StagingCap = 100
+	m.Config.StagingClientCap = 100
+	body := bytes.Repeat([]byte("h"), 60)
+	first := begin(t, m, "node", "h.txt", "text/plain", body, "")
+	clientPUT(objs, first, body)
+	if _, _, err := m.CompleteUpload(t.Context(), "node", first.UploadID); err != nil {
+		t.Fatal(err)
+	}
+	// The delete failed: the object is back, recently modified.
+	staging := stagingPrefix + first.UploadID
+	objs.mu.Lock()
+	objs.objects[staging] = body
+	objs.modified[staging] = time.Now().UTC()
+	objs.mu.Unlock()
+	m.Now = func() time.Time { return time.Now().Add(UploadTTL + 2*releaseGrace) }
+	if _, err := m.SweepStaging(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.BeginUpload(t.Context(), "node", "h2.txt", "text/plain", int64(len(body)), shaOf(body), ""); !errors.Is(err, store.ErrAttachmentStagingCap) {
+		t.Fatalf("charge released while the staging object still existed: %v", err)
+	}
+	// Once the object is older than the sweep age, the sweep deletes it and the
+	// charge is released on the same pass.
+	objs.mu.Lock()
+	objs.modified[staging] = time.Now().UTC().Add(-3 * time.Hour)
+	objs.mu.Unlock()
+	m.Now = func() time.Time { return time.Now().Add(UploadTTL + 2*releaseGrace) }
+	if _, err := m.SweepStaging(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.BeginUpload(t.Context(), "node", "h2.txt", "text/plain", int64(len(body)), shaOf(body), ""); err != nil {
+		t.Fatalf("begin after the object was swept: %v", err)
+	}
+}
+
+// One creator cannot hold the whole budget: a begin over its own share is
+// refused, while another creator can still begin.
+func TestClientBudgetCannotBeMonopolized(t *testing.T) {
+	m, _, _ := newUploadManager(t)
+	m.Config.StagingCap = 1000
+	m.Config.StagingClientCap = 100
+	body := bytes.Repeat([]byte("m"), 60)
+	begin(t, m, "greedy", "g1.txt", "text/plain", body, "")
+	if _, err := m.BeginUpload(t.Context(), "greedy", "g2.txt", "text/plain", int64(len(body)), shaOf(body), ""); !errors.Is(err, store.ErrAttachmentStagingCap) {
+		t.Fatalf("greedy client over its share: %v", err)
+	}
+	begin(t, m, "polite", "p1.txt", "text/plain", body, "")
+}
+
+// failingFinalize fails the completing -> done transition a fixed number of
+// times, the transient database error after the attachment was stored.
+type failingFinalize struct {
+	*fakeDB
+	fail int
+}
+
+func (f *failingFinalize) TransitionAttachmentUpload(ctx context.Context, id, from, to, reason string, now time.Time) (bool, error) {
+	if from == store.AttachmentUploadCompleting && to == store.AttachmentUploadDone && f.fail > 0 {
+		f.fail--
+		return false, errors.New("database unavailable")
+	}
+	return f.fakeDB.TransitionAttachmentUpload(ctx, id, from, to, reason, now)
+}
+
+// If the final transition fails after the attachment is stored, the row stays
+// completing. Retries inside the lease are refused; after the lease the claim
+// is reclaimed and the completion is redone, and the client gets the result.
+func TestRetryAfterFinalizeFailureRecovers(t *testing.T) {
+	m, db, objs := newUploadManager(t)
+	body := []byte("finalize may fail once\n")
+	tk := begin(t, m, "node", "f.txt", "text/plain", body, "")
+	clientPUT(objs, tk, body)
+	m.Store = &failingFinalize{fakeDB: db, fail: 1}
+	if _, _, err := m.CompleteUpload(t.Context(), "node", tk.UploadID); err == nil {
+		t.Fatal("the failed finalize was reported as success")
+	}
+	if _, _, err := m.CompleteUpload(t.Context(), "node", tk.UploadID); !errors.Is(err, ErrUploadInProgress) {
+		t.Fatalf("retry inside the lease err=%v; want in progress", err)
+	}
+	m.Now = func() time.Time { return time.Now().Add(uploadLease + time.Minute) }
+	x, _, err := m.CompleteUpload(t.Context(), "node", tk.UploadID)
+	if err != nil {
+		t.Fatalf("retry after the lease: %v", err)
+	}
+	if x.SHA256 != shaOf(body) || db.uploads[tk.UploadID].Status != store.AttachmentUploadDone {
+		t.Fatalf("recovered sha=%s status=%q", x.SHA256, db.uploads[tk.UploadID].Status)
+	}
+	if _, ok := objs.objects[stagingPrefix+tk.UploadID]; ok {
+		t.Fatal("staging object survived the recovered completion")
 	}
 }
