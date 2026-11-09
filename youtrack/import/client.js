@@ -222,6 +222,9 @@ class HandoffkeepImport {
       if (this.testSourceProject !== 'DEC') this.projectTargets[this.testSourceProject] = testInfo;
       return [testInfo];
     }
+    // The wizard calls getProjects() on a fresh instance, before any prepareToImport(): load the hk
+    // project list here too (the first full-import wizard showed only the three synthetic buckets).
+    if (!this.projects.length) this.projects = this.pages('projects', {limit: 100}, 'after');
     const names = this.projects.slice();
     names.sort();
     const seen = Object.create(null);
