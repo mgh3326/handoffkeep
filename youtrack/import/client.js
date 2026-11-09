@@ -1,6 +1,6 @@
 // YouTrack Cloud custom import for handoffkeep. Copy this file into the
 // custom import package's client.js in Administration > Integrations > Imports.
-// This is a one-time, re-runnable import keyed by immutable hk source IDs.
+// The initial import and continuous updates are keyed by immutable hk source IDs.
 const http = require('@jetbrains/youtrack-scripting-api/http');
 
 const FIELD = {
@@ -21,7 +21,38 @@ const SAFE_PART_BYTES = 240 * 1024;
 // Document key prefixes not imported (operator 2026-11-09): pane screen dumps are noise for reading and
 // search; they stay in hk.
 const EXCLUDED_DOC_PREFIXES = ['screens'];
-function excludedDoc(doc) { return EXCLUDED_DOC_PREFIXES.indexOf(String(doc.key).split('/')[0]) >= 0; }
+function documentPath(doc) { return String(doc.key).split('/'); }
+function isReviewPrompt(doc) {
+  const path = documentPath(doc);
+  return path[0] === 'review' && path.length > 1 && path[1].startsWith('mwr-');
+}
+function taskReportKind(doc) {
+  if (!doc.task_id) return '';
+  const path = documentPath(doc);
+  if (path[0] === 'reports' && path[1] && path[1].startsWith('mwr-')) return 'report';
+  if (path[0] === 'reports' && path.length === 3 && path[2] === 'report.md') return 'report';
+  if (path[0] === 'brief' && path.length === 3) return 'brief';
+  return '';
+}
+function excludedDoc(doc) {
+  return EXCLUDED_DOC_PREFIXES.indexOf(documentPath(doc)[0]) >= 0 || isReviewPrompt(doc) || taskReportKind(doc) === 'report';
+}
+function documentIssueComments(doc) {
+  const behavior = taskReportKind(doc);
+  if (!behavior) return [];
+  if (behavior === 'brief') {
+    const prefix = documentPath(doc)[0];
+    const title = truncateRunes('[' + prefix + '] ' + doc.key + ' [' + doc.kind + ']', 250);
+    return [{id:'hk-doc-comment:' + doc.id,body:'Article: ' + title + ' (hk document key: ' + doc.key + ')',author:doc.created_by,created_at:doc.created_at}];
+  }
+  const parts = splitUtf8(doc.body || '', SAFE_PART_BYTES - 1024);
+  return parts.map((part,index) => {
+    const heading = '# ' + doc.key + (parts.length > 1 ? ' (part ' + (index + 1) + '/' + parts.length + ')' : '') + '\n\n';
+    const text = heading + part;
+    if (utf8Length(text) > SAFE_PART_BYTES) throw new Error('Comment part exceeds safe byte limit for ' + doc.key);
+    return {id:'hk-doc-comment:' + doc.id + (index === 0 ? '' : ':part:' + (index + 1)),body:text,author:doc.created_by,created_at:doc.created_at};
+  });
+}
 const DECISIONS_PROJECT_ID = 'hk-project:/decisions';
 
 function sourceUser(name) {
@@ -66,6 +97,24 @@ function cursorID(after, prefix) {
   const id = Number(value);
   if (!Number.isSafeInteger(id) || id < 0) throw new Error('Invalid source cursor');
   return id;
+}
+function isoTimestamp(value) {
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) throw new Error('Invalid update timestamp');
+  return date.toISOString();
+}
+function compareDocumentCursor(a, b) {
+  const at = timestampCursorParts(a.after_at), bt = timestampCursorParts(b.after_at);
+  if (at.seconds !== bt.seconds) return at.seconds - bt.seconds;
+  if (at.fraction !== bt.fraction) return at.fraction < bt.fraction ? -1 : 1;
+  return Number(a.after_id) - Number(b.after_id);
+}
+function timestampCursorParts(value) {
+  const match = String(value).match(/^(.+?)(?:\.(\d+))?(Z|[+-]\d{2}:\d{2})$/);
+  if (!match) throw new Error('Invalid source cursor timestamp');
+  const seconds = Date.parse(match[1] + match[3]);
+  if (Number.isNaN(seconds)) throw new Error('Invalid source cursor timestamp');
+  return {seconds, fraction: (match[2] || '').padEnd(9, '0').slice(0, 9)};
 }
 
 class HandoffkeepImport {
@@ -115,6 +164,9 @@ class HandoffkeepImport {
     this.usersByName = Object.create(null);
     this.commentsByTask = Object.create(null);
     this.documentsByProject = Object.create(null);
+    this.taskUpdateCursors = Object.create(null);
+    this.decisionUpdateCursors = Object.create(null);
+    this.articleUpdateCursors = Object.create(null);
   }
 
   request(path, query) {
@@ -139,6 +191,9 @@ class HandoffkeepImport {
       if (maxItems) query.limit = Math.min(query.limit || 100, maxItems - out.length);
       if (cursor !== null) {
         if (cursorName === 'decision') {
+          query.after_at = cursor.after_at;
+          query.after_id = cursor.after_id;
+        } else if (cursor && typeof cursor === 'object') {
           query.after_at = cursor.after_at;
           query.after_id = cursor.after_id;
         } else query[cursorName || 'after_id'] = cursor;
@@ -168,20 +223,11 @@ class HandoffkeepImport {
       } else {
         this.testTasks = this.pages('tasks', {project: this.testSourceProject, limit: 999}, 'after_id', testLimit);
         this.testTasks.forEach((task) => this.rememberUser(task.created_by));
-        if (this.testTasks.length) {
-          const maxTaskID = this.testTasks[this.testTasks.length - 1].id;
-          this.pages('comments', {project: this.testSourceProject, max_task_id: String(maxTaskID), limit: 500}, 'after_id').forEach((c) => {
-            (this.commentsByTask[c.task_id] || (this.commentsByTask[c.task_id] = [])).push(c);
-            this.rememberUser(c.author);
-          });
-        }
       }
     } else {
-      // Full imports preload the complete author set and comments once.
-      this.pages('comments', {limit: 500}, 'after_id').forEach((c) => {
-        (this.commentsByTask[c.task_id] || (this.commentsByTask[c.task_id] = [])).push(c);
-        this.rememberUser(c.author);
-      });
+      // Comment bodies are fetched with each task page so a continuous run never
+      // scans comments for the entire task corpus.
+      this.pages('comment-authors', {limit:999}, 'after').forEach((row) => this.rememberUser(row.author));
       this.pages('tasks', {limit: 999}, 'after_id').forEach((task) => this.rememberUser(task.created_by));
       this.pages('decisions', {limit: 999}, 'after_id').forEach((d) => this.rememberUser(d.answered_by || d.lane));
     }
@@ -291,7 +337,7 @@ class HandoffkeepImport {
     this.rememberUser(task.created_by);
     const comments = (this.commentsByTask[task.id] || []).map((c) => {
       this.rememberUser(c.author);
-      return {id: 'hk-comment:' + c.id, type: 'comment', text: c.body, author: sourceUser(c.author), created: safeDate(c.created_at)};
+      return {id: String(c.id).startsWith('hk-doc-comment:') ? String(c.id) : 'hk-comment:' + c.id, type: 'comment', text: c.body, author: sourceUser(c.author), created: safeDate(c.created_at)};
     });
     const ref = task.refs || {};
     let grade = '', tier = '';
@@ -318,7 +364,8 @@ class HandoffkeepImport {
       [FIELD.tier]: enumValue(tier), [FIELD.pr]: stringValue(ref.pr),
       [FIELD.job]: stringValue(ref.job_id), [FIELD.stalled]: task.stalled ? [{type: 'enum', name: '멈춤'}] : []
     };
-    return {id: 'hk-task:' + task.id, key: String(task.id), fields: fields};
+    return {id: 'hk-task:' + task.id, key: String(task.id), fields: fields,
+      _hkCursor: {after_at: task.import_updated_at || task.last_activity_at || task.updated_at, after_id: task.id}};
   }
   taskTags(task) {
     const tags = [];
@@ -344,20 +391,40 @@ class HandoffkeepImport {
     const tasks = this.testTasks
       ? this.testTasks.filter((task) => task.id > (after ? cursorID(after, 'hk-task:') : 0)).slice(0, pageLimit)
       : this.onePage('tasks', query);
+    this.loadCommentsForTasks(tasks);
     tasks.forEach((task) => {
       this.seenTaskIDs[task.id] = true;
       out.push(this.issue(task));
     });
     return out;
   }
-  decisionIssues(after, top, projectInfo) {
+  loadCommentsForTasks(tasks) {
+    this.commentsByTask = Object.create(null);
+    if (!tasks.length) return;
+    const comments = this.pages('comments', {task_ids: tasks.map((task) => String(task.id)).join(','), limit: 499}, 'after_id');
+    comments.forEach((comment) => {
+      (this.commentsByTask[comment.task_id] || (this.commentsByTask[comment.task_id] = [])).push(comment);
+      this.rememberUser(comment.author);
+    });
+    const documents = this.pages('task-documents', {task_ids: tasks.map((task) => String(task.id)).join(','), limit: 999}, 'after_id');
+    documents.forEach((doc) => {
+      this.rememberUser(doc.created_by);
+      documentIssueComments(doc).forEach((comment) => {
+        (this.commentsByTask[doc.task_id] || (this.commentsByTask[doc.task_id] = [])).push(comment);
+      });
+    });
+    Object.keys(this.commentsByTask).forEach((taskID) => {
+      this.commentsByTask[taskID].sort((a,b) => Date.parse(a.created_at)-Date.parse(b.created_at) || String(a.id).localeCompare(String(b.id)));
+    });
+  }
+  decisionIssues(after, top, projectInfo, suppliedDecisions) {
     const seen = Object.keys(this.seenDecisionIDs).length;
     if (this.maxTasks && seen >= this.maxTasks) return [];
     const query = {limit: Math.min(Math.max(top || 100, 1), 999, this.maxTasks ? this.maxTasks - seen : 999)};
     if (after) query.after_id = String(cursorID(after, 'hk-decision:'));
-    const decisions = this.testDecisions
+    const decisions = suppliedDecisions || (this.testDecisions
       ? this.testDecisions.filter((d) => d.id > (after ? cursorID(after, 'hk-decision:') : 0)).slice(0, top || 100)
-      : this.onePage('decisions', query);
+      : this.onePage('decisions', query));
     return decisions.map((d) => {
       this.seenDecisionIDs[d.id] = true;
       this.rememberUser(d.answered_by);
@@ -371,7 +438,7 @@ class HandoffkeepImport {
         [FIELD.linkedTask]: integerValue(d.task_id),
         [FIELD.decisionState]: enumValue(state), [FIELD.lane]: enumValue(d.lane),
         [FIELD.recommended]: stringValue(d.recommended), [FIELD.due]: d.due_at ? {type: 'date', value: safeDate(d.due_at)} : null
-      }};
+      }, _hkCursor: {after_at: d.updated_at, after_id: d.id}};
     }).slice(0, top || 100);
   }
 
@@ -434,19 +501,107 @@ class HandoffkeepImport {
     // test import). The hk identity lives in the summary (full key) and the article id/key (hk-doc:<id>:<part>);
     // the prefix is a tag for filtering.
     const docFields = {tags: [{id: 'hk-tag:doc:' + prefix, name: 'hk/doc/' + prefix}]};
-    if (pieces.length === 1) return {id: 'hk-doc:' + doc.id + ':0', key: articleKey(doc.id, 0), fields: Object.assign({}, base, docFields, {summary: title, content: content})};
+    if (pieces.length === 1) return {id: 'hk-doc:' + doc.id + ':0', key: articleKey(doc.id, 0), fields: Object.assign({}, base, docFields, {summary: title, content: content}), _hkCursor: {after_at: doc.updated_at, after_id: doc.id, part: 1}};
     const indexID = 'hk-doc:' + doc.id;
     const index = {id: indexID + ':0', key: articleKey(doc.id, 0), fields: Object.assign({}, base, {
       summary: title + ' (분할 문서)', content: '# ' + title + '\n\n원문이 크기 제한 때문에 ' + pieces.length + '개 문서로 나뉘었습니다.\n' +
         pieces.map((_,i) => '- Part ' + (i+1) + '/' + pieces.length + ' — ' + doc.key + ' (part ' + (i+1) + ')').join('\n')
-    }, docFields)};
+    }, docFields), _hkCursor: {after_at: doc.updated_at, after_id: doc.id, part: 1}};
     return [index].concat(pieces.map((part,i) => ({
       id: 'hk-doc:' + doc.id + ':' + (i+1), key: articleKey(doc.id, i + 1),
-      fields: Object.assign({}, base, docFields, {summary: truncateRunes(title + ' / part ' + (i+1) + ' of ' + pieces.length, 250), content: part, parent: {id: indexID + ':0', type: 'article'}})
+      fields: Object.assign({}, base, docFields, {summary: truncateRunes(title + ' / part ' + (i+1) + ' of ' + pieces.length, 250), content: part, parent: {id: indexID + ':0', type: 'article'}}),
+      _hkCursor: {after_at: doc.updated_at, after_id: doc.id, part: i + 2}
     })));
   }
-  getArticleUpdates() { return []; }
-  getIssueUpdates() { return []; }
+  getIssueUpdates(info, after, updatedAfter, top) {
+    const limit = Math.min(Math.max(top || 100, 1), 999);
+    if (info.id === DECISIONS_PROJECT_ID) {
+      const page = this.updatedPage('decisions', null, after, updatedAfter, limit, this.decisionUpdateCursors);
+      page.rows.forEach((row) => {
+        const cursor = {after_at: row.updated_at, after_id: row.id};
+        this.decisionUpdateCursors['hk-decision:' + row.id] = cursor;
+        this.decisionUpdateCursors[String(row.id)] = cursor;
+      });
+      return this.decisionIssues(null, limit, info, page.rows);
+    }
+    const project = parseProject(info);
+    const page = this.updatedPage('tasks', project, after, updatedAfter, limit, this.taskUpdateCursors);
+    const tasks = page.rows;
+    if (!tasks.length) return [];
+    this.loadCommentsForTasks(tasks);
+    tasks.forEach((task) => {
+      const cursor = {after_at: task.import_updated_at || task.last_activity_at, after_id: task.id};
+      this.taskUpdateCursors['hk-task:' + task.id] = cursor;
+      this.taskUpdateCursors[String(task.id)] = cursor;
+    });
+    return tasks.map((task) => this.issue(task));
+  }
+  getArticleUpdates(info, after, updatedAfter, top) {
+    if (info.id === DECISIONS_PROJECT_ID) return [];
+    const project = parseProject(info);
+    const targetProject = this.projectTargets[project] || {id: projectID(project), key: project, name: project};
+    const out = [];
+    const pageTop = Math.max(1, top || 100);
+    let cursor = {after_at: isoTimestamp(updatedAfter), after_id: 0};
+    let resume = null;
+    if (after) {
+      const text = afterText(after);
+      resume = after._hkCursor && after._hkCursor.before ? after._hkCursor : this.articleUpdateCursors[text];
+      if (!resume) throw new Error('Unknown article update cursor ' + text);
+      cursor = resume.before;
+    }
+    let resumeDocID = resume && resume.docID;
+    let resumePart = resume && resume.part;
+    let exhausted = false;
+    while (out.length < pageTop && !exhausted) {
+      const page = this.request('/v1/import/documents', {project: project, after_at: cursor.after_at, after_id: cursor.after_id, limit: 20});
+      if (!Array.isArray(page.items)) throw new Error('Malformed handoffkeep documents page');
+      let beforeDoc = cursor;
+      for (const doc of page.items) {
+        const docCursor = {after_at: doc.updated_at, after_id: doc.id};
+        if (!excludedDoc(doc)) {
+          let articles = this.documentArticles(doc, targetProject);
+          if (!Array.isArray(articles)) articles = [articles];
+          let firstPart = 0;
+          if (resumeDocID !== null && resumeDocID !== undefined) {
+            const order = compareDocumentCursor(docCursor, resume.docCursor);
+            if (order === 0) firstPart = resumePart;
+            else if (order < 0) { beforeDoc = docCursor; continue; }
+            resumeDocID = null;
+            resumePart = null;
+          }
+          for (let i = firstPart; i < articles.length; i += 1) {
+            const article = articles[i];
+            out.push(article);
+            const state = {before: beforeDoc, docCursor, docID: doc.id, part: i + 1};
+            this.articleUpdateCursors[article.id] = state;
+            this.articleUpdateCursors[article.key] = state;
+            article._hkCursor = state;
+            if (out.length >= pageTop) break;
+          }
+        }
+        beforeDoc = docCursor;
+        if (out.length >= pageTop) break;
+      }
+      if (out.length >= pageTop) break;
+      if (!page.next_cursor) exhausted = true;
+      else cursor = page.next_cursor;
+    }
+    return out;
+  }
+  updatedPage(resource, project, after, updatedAfter, top, cursors) {
+    let cursor = {after_at: isoTimestamp(updatedAfter), after_id: 0};
+    if (after) {
+      const text = afterText(after);
+      cursor = after._hkCursor || cursors[text];
+      if (!cursor) throw new Error('Unknown update cursor ' + text);
+    }
+    const query = {after_at: cursor.after_at, after_id: cursor.after_id, limit: top};
+    if (project !== null) query.project = project;
+    const page = this.request('/v1/import/' + resource, query);
+    if (!Array.isArray(page.items)) throw new Error('Malformed handoffkeep ' + resource + ' page');
+    return {rows: page.items, next: page.next_cursor};
+  }
   getLinkTypes() { return []; }
 }
 
