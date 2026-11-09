@@ -68,6 +68,9 @@ class HandoffkeepImport {
     let secrets;
     try { secrets = JSON.parse(p.loadValue('password') || '{}'); }
     catch (_) { throw new Error('Import password must be a JSON object with hkToken and accessClientSecret'); }
+    if (!secrets || typeof secrets !== 'object' || Array.isArray(secrets)) {
+      throw new Error('Import password must be a JSON object with hkToken and accessClientSecret');
+    }
     this.hkToken = secrets.hkToken;
     this.accessClientSecret = secrets.accessClientSecret;
     if (!this.baseURL.startsWith('https://') || !this.accessClientID || !this.hkToken || !this.accessClientSecret) {
@@ -92,11 +95,13 @@ class HandoffkeepImport {
     if (!response || response.code !== 200) throw new Error('handoffkeep export request failed (' + (response ? response.code : 'no response') + ')');
     return JSON.parse(response.response);
   }
-  pages(resource, initialQuery, cursorName) {
+  pages(resource, initialQuery, cursorName, maxItems) {
     const out = [];
     let cursor = null;
     do {
+      if (maxItems && out.length >= maxItems) break;
       const query = Object.assign({}, initialQuery || {});
+      if (maxItems) query.limit = Math.min(query.limit || 100, maxItems - out.length);
       if (cursor !== null) {
         if (cursorName === 'decision') {
           query.after_at = cursor.after_at;
@@ -117,22 +122,42 @@ class HandoffkeepImport {
   }
 
   prepareToImport() {
-    // Comments are embedded in each issue as required by YouTrack's import
-    // shape. One bounded scan avoids one HTTP request per task.
     this.commentsByTask = Object.create(null);
-    this.pages('comments', {limit: 500}, 'after_id').forEach((c) => {
-      (this.commentsByTask[c.task_id] || (this.commentsByTask[c.task_id] = [])).push(c);
-      this.rememberUser(c.author);
-    });
-    this.pages('tasks', {limit: 999}, 'after_id').forEach((task) => this.rememberUser(task.created_by));
-    this.pages('decisions', {limit: 999}, 'after_id').forEach((d) => this.rememberUser(d.answered_by || d.lane));
-    this.projects = this.testProject ? [this.testSourceProject] : this.pages('projects', {limit: 100}, 'after');
+    this.testTasks = null;
+    this.testDecisions = null;
+    if (this.testProject) {
+      const testLimit = this.maxTasks || 100;
+      if (this.testSourceProject === 'DEC') {
+        this.testDecisions = this.pages('decisions', {limit: 999}, 'after_id', testLimit);
+        this.testDecisions.forEach((d) => this.rememberUser(d.answered_by || d.lane));
+      } else {
+        this.testTasks = this.pages('tasks', {project: this.testSourceProject, limit: 999}, 'after_id', testLimit);
+        this.testTasks.forEach((task) => this.rememberUser(task.created_by));
+        if (this.testTasks.length) {
+          const maxTaskID = this.testTasks[this.testTasks.length - 1].id;
+          this.pages('comments', {project: this.testSourceProject, max_task_id: String(maxTaskID), limit: 500}, 'after_id').forEach((c) => {
+            (this.commentsByTask[c.task_id] || (this.commentsByTask[c.task_id] = [])).push(c);
+            this.rememberUser(c.author);
+          });
+        }
+      }
+    } else {
+      // Full imports preload the complete author set and comments once.
+      this.pages('comments', {limit: 500}, 'after_id').forEach((c) => {
+        (this.commentsByTask[c.task_id] || (this.commentsByTask[c.task_id] = [])).push(c);
+        this.rememberUser(c.author);
+      });
+      this.pages('tasks', {limit: 999}, 'after_id').forEach((task) => this.rememberUser(task.created_by));
+      this.pages('decisions', {limit: 999}, 'after_id').forEach((d) => this.rememberUser(d.answered_by || d.lane));
+    }
+    this.projects = this.testProject ? (this.testSourceProject === 'DEC' ? [] : [this.testSourceProject]) : this.pages('projects', {limit: 100}, 'after');
     let documentCount = 0;
-    const documentProjects = this.projects.concat(['/shared', '/unassigned']);
+    const documentLimit = this.testProject ? (this.maxDocuments || 100) : this.maxDocuments;
+    const documentProjects = this.testProject ? this.projects : this.projects.concat(['/shared', '/unassigned']);
     for (const project of documentProjects) {
       let after = null;
-      while (!this.maxDocuments || documentCount < this.maxDocuments) {
-        const query = {project: project, limit: 20};
+      while (!documentLimit || documentCount < documentLimit) {
+        const query = {project: project, limit: Math.min(20, documentLimit ? documentLimit - documentCount : 20)};
         if (after !== null) query.after_id = after;
         const page = this.request('/v1/import/document-authors', query);
         if (!Array.isArray(page.items)) throw new Error('Malformed handoffkeep document-author page');
@@ -140,7 +165,7 @@ class HandoffkeepImport {
         if (!page.next_cursor) break;
         after = String(page.next_cursor);
       }
-      if (this.maxDocuments && documentCount >= this.maxDocuments) break;
+      if (documentLimit && documentCount >= documentLimit) break;
     }
   }
   rememberUser(name) { if (name) this.usersByName[name] = sourceUser(name); }
@@ -169,7 +194,12 @@ class HandoffkeepImport {
     const result = [];
     const addProject = (id, name, label, keyBase) => {
       let key = keyBase || name.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 10);
-      if (!key) key = 'HK';
+      if (!key) throw new Error('Cannot form a YouTrack project key from an hk project name');
+      if (!keyBase) {
+        if (!/^[A-Z]/.test(key)) key = 'P' + key.slice(0, 9);
+        if (key.length < 2) key = key.padEnd(2, '0');
+      }
+      if (!/^[A-Z][A-Z0-9]{1,9}$/.test(key)) throw new Error('Cannot form a valid YouTrack project key');
       const base = key;
       let suffix = 1;
       while (seen[key]) {
@@ -277,7 +307,10 @@ class HandoffkeepImport {
     const query = {project: name === '/unassigned' ? '/unassigned' : name, limit: pageLimit};
     if (after) query.after_id = String(cursorID(after, 'hk-task:'));
     const out = [];
-    this.onePage('tasks', query).forEach((task) => {
+    const tasks = this.testTasks
+      ? this.testTasks.filter((task) => task.id > (after ? cursorID(after, 'hk-task:') : 0)).slice(0, pageLimit)
+      : this.onePage('tasks', query);
+    tasks.forEach((task) => {
       this.seenTaskIDs[task.id] = true;
       out.push(this.issue(task));
     });
@@ -288,7 +321,10 @@ class HandoffkeepImport {
     if (this.maxTasks && seen >= this.maxTasks) return [];
     const query = {limit: Math.min(Math.max(top || 100, 1), 999, this.maxTasks ? this.maxTasks - seen : 999)};
     if (after) query.after_id = String(cursorID(after, 'hk-decision:'));
-    return this.onePage('decisions', query).map((d) => {
+    const decisions = this.testDecisions
+      ? this.testDecisions.filter((d) => d.id > (after ? cursorID(after, 'hk-decision:') : 0)).slice(0, top || 100)
+      : this.onePage('decisions', query);
+    return decisions.map((d) => {
       this.seenDecisionIDs[d.id] = true;
       this.rememberUser(d.answered_by);
       const state = DECISION_STATE[d.status] || d.status;
@@ -329,7 +365,8 @@ class HandoffkeepImport {
     const docs = this.onePage('documents', query);
     const out = [];
     (docs || []).forEach((doc) => {
-      if (this.maxDocuments && !this.seenDocumentIDs[doc.id] && Object.keys(this.seenDocumentIDs).length >= this.maxDocuments) return;
+      const documentLimit = this.maxDocuments || (this.testProject ? 100 : 0);
+      if (documentLimit && !this.seenDocumentIDs[doc.id] && Object.keys(this.seenDocumentIDs).length >= documentLimit) return;
       this.seenDocumentIDs[doc.id] = true;
       let articles = this.documentArticles(doc, targetProject);
       if (!Array.isArray(articles)) articles = [articles];

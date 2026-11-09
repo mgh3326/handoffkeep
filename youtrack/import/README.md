@@ -17,8 +17,8 @@ The hk auth file contains both `HANDOFFKEEP_TOKEN_youtrack=<token>` and `HANDOFF
 The export routes are:
 
 - `/v1/import/projects?after=<name>&limit=<n>`
-- `/v1/import/tasks?project=<name>&after_id=<id>&limit=<n>` (omit `project` for all task rows; `project=/unassigned` selects the null-project bucket)
-- `/v1/import/comments?after_id=<id>&limit=<n>`
+- `/v1/import/tasks?project=<name>&after_id=<id>&limit=<n>` (omit `project` for all task rows; `project=/unassigned` selects the null-project bucket; `project=/shared` returns an empty task page)
+- `/v1/import/comments?after_id=<id>&limit=<n>` (for a bounded project spike, pair `project=<name>` with `max_task_id=<id>` to scope comments to the selected task prefix)
 - `/v1/import/documents?project=<name>&after_id=<id>&limit=<n>` (`project=/shared` means no task link; `project=/unassigned` means a linked task with no project)
 - `/v1/import/document-authors?project=<name>&after_id=<id>&limit=<n>` (lightweight author scan before article import; accepts the same project buckets)
 - `/v1/import/decisions?after_id=<id>&limit=<n>`
@@ -28,6 +28,8 @@ Every response is `{ "items": [...], "next_cursor": value|null }`. `next_cursor`
 ## What the client imports
 
 Projects are the configured hk task projects, plus synthetic buckets for unassigned tasks, shared documents, and decisions. The synthetic source selectors use slash-prefixed names that cannot collide with valid task project names. Task and decision issues, task comments, and all text documents carry stable hk source IDs, source authors where present, and source timestamps. Large text documents are split into 240 KiB UTF-8-safe parts with an index article. Binary and large artifacts remain in Drive/R2 and are referenced from text.
+
+When `testProject` is set, preparation scans only the selected task/decision prefix, its relevant comments, and the bounded document-author prefix. It does not read the full corpus or register unrelated actors.
 
 The script intentionally returns empty issue/article update pages. Do not enable Continuous import until hk has a reliable delta contract and the operator approves a separate change. Agile boards, saved searches and dashboards need YouTrack REST/Hub REST setup after the spike; the custom import API does not support those entities.
 

@@ -20,7 +20,7 @@ func (s Server) importExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
-	allowed := map[string]bool{"limit": true, "after": true, "after_at": true, "after_id": true, "project": true}
+	allowed := map[string]bool{"limit": true, "after": true, "after_at": true, "after_id": true, "project": true, "max_task_id": true}
 	for key := range q {
 		if !allowed[key] || len(q[key]) != 1 {
 			writeError(w, http.StatusBadRequest, "invalid_context")
@@ -36,7 +36,7 @@ func (s Server) importExport(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	switch resource {
 	case "projects":
-		if q.Has("after_at") || q.Has("after_id") || q.Has("project") {
+		if q.Has("after_at") || q.Has("after_id") || q.Has("project") || q.Has("max_task_id") {
 			writeError(w, http.StatusBadRequest, "invalid_context")
 			return
 		}
@@ -60,7 +60,7 @@ func (s Server) importExport(w http.ResponseWriter, r *http.Request) {
 		}
 		jsonOut(w, http.StatusOK, map[string]any{"items": filtered, "next_cursor": nil})
 	case "tasks":
-		if q.Has("after") || q.Has("after_at") {
+		if q.Has("after") || q.Has("after_at") || q.Has("max_task_id") {
 			writeError(w, http.StatusBadRequest, "invalid_context")
 			return
 		}
@@ -82,6 +82,10 @@ func (s Server) importExport(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusBadRequest, "invalid_context")
 				return
 			}
+			if p == "/shared" {
+				jsonOut(w, http.StatusOK, map[string]any{"items": []any{}, "next_cursor": nil})
+				return
+			}
 			if p == "/unassigned" {
 				p = ""
 			}
@@ -99,7 +103,7 @@ func (s Server) importExport(w http.ResponseWriter, r *http.Request) {
 		}
 		jsonOut(w, http.StatusOK, map[string]any{"items": rows, "next_cursor": next})
 	case "comments":
-		if q.Has("after") || q.Has("after_at") || q.Has("project") {
+		if q.Has("after") || q.Has("after_at") || q.Has("project") != q.Has("max_task_id") || (q.Has("project") && q.Get("project") == "") {
 			writeError(w, http.StatusBadRequest, "invalid_context")
 			return
 		}
@@ -114,7 +118,16 @@ func (s Server) importExport(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		rows, err := s.Service.Store.ImportCommentsPage(ctx, after, limit)
+		project := q.Get("project")
+		maxTaskID := int64(0)
+		if q.Has("max_task_id") {
+			maxTaskID, err = queryCursor(r, "max_task_id")
+			if err != nil || maxTaskID == 0 {
+				writeError(w, http.StatusBadRequest, "invalid_context")
+				return
+			}
+		}
+		rows, err := s.Service.Store.ImportCommentsPage(ctx, after, limit, project, maxTaskID)
 		if err != nil {
 			appErr(w, r, err)
 			return
@@ -125,7 +138,7 @@ func (s Server) importExport(w http.ResponseWriter, r *http.Request) {
 		}
 		jsonOut(w, http.StatusOK, map[string]any{"items": rows, "next_cursor": next})
 	case "documents":
-		if q.Has("after_at") || q.Has("after") || !q.Has("project") || q.Get("project") == "" {
+		if q.Has("after_at") || q.Has("after") || q.Has("max_task_id") || !q.Has("project") || q.Get("project") == "" {
 			writeError(w, http.StatusBadRequest, "invalid_context")
 			return
 		}
@@ -152,7 +165,7 @@ func (s Server) importExport(w http.ResponseWriter, r *http.Request) {
 		}
 		jsonOut(w, http.StatusOK, map[string]any{"items": rows, "next_cursor": next})
 	case "document-authors":
-		if q.Has("after_at") || q.Has("after") || !q.Has("project") || q.Get("project") == "" {
+		if q.Has("after_at") || q.Has("after") || q.Has("max_task_id") || !q.Has("project") || q.Get("project") == "" {
 			writeError(w, http.StatusBadRequest, "invalid_context")
 			return
 		}
@@ -179,7 +192,7 @@ func (s Server) importExport(w http.ResponseWriter, r *http.Request) {
 		}
 		jsonOut(w, http.StatusOK, map[string]any{"items": rows, "next_cursor": next})
 	case "decisions":
-		if q.Has("after") || q.Has("project") || q.Has("after_at") {
+		if q.Has("after") || q.Has("project") || q.Has("after_at") || q.Has("max_task_id") {
 			writeError(w, http.StatusBadRequest, "invalid_context")
 			return
 		}

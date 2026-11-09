@@ -82,4 +82,15 @@ func TestImportExportRejectsEmptyProjectFilters(t *testing.T) {
 	}
 }
 
+func TestImportTaskSharedProjectIsEmpty(t *testing.T) {
+	h := Server{Tokens: Tokens{"yt": "fixture-secret"}, ImportReadGrants: map[string]bool{"yt": true}}.Handler()
+	r := httptest.NewRequest(http.MethodGet, "/v1/import/tasks?project=/shared", nil)
+	r.Header.Set("Authorization", "Bearer fixture-secret")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"items":[]`) || !strings.Contains(w.Body.String(), `"next_cursor":null`) {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
 func containsJSONError(body, want string) bool { return strings.Contains(body, `"error":"`+want+`"`) }
