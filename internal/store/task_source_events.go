@@ -366,20 +366,25 @@ func (s *Store) deployOnMergedTx(ctx context.Context, tx pgx.Tx, x Task, now tim
 	if x.State != StateMerged || !taskEventPRRE.MatchString(x.Refs.PR) {
 		return x, nil
 	}
-	// strpos narrows the scan to bodies that mention the PR; the shared parser
-	// decides.
-	rows, err := tx.Query(ctx, `SELECT key,body FROM documents WHERE strpos(key,'deploy/')=1 AND strpos(body,$1)>0 ORDER BY key DESC LIMIT 200`, x.Refs.PR)
+	// Match projected PRs, or parse documents written by an older server after
+	// the backfill. A SHA mismatch is also stale, including old-server edits.
+	rows, err := tx.Query(ctx, `SELECT d.key,p.record,CASE WHEN p.key IS NULL THEN d.body ELSE NULL END FROM documents d LEFT JOIN deploy_record_projection p ON p.key=d.key AND p.sha256=d.sha256 WHERE strpos(d.key,'deploy/')=1 AND ((p.decoded AND p.record->>'result'='success' AND p.record->'included_prs' ? $1) OR (p.key IS NULL AND strpos(d.body,$1)>0)) ORDER BY d.key DESC`, x.Refs.PR)
 	if err != nil {
 		return x, err
 	}
 	key := ""
 	for key == "" && rows.Next() {
-		var k, body string
-		if err = rows.Scan(&k, &body); err != nil {
+		var k string
+		var raw []byte
+		var body *string
+		if err = rows.Scan(&k, &raw, &body); err != nil {
 			rows.Close()
 			return x, err
 		}
-		prs, _ := deployedPRs(k, body)
+		if body != nil {
+			raw = []byte(*body)
+		}
+		prs, _ := deployedPRs(k, string(raw))
 		for _, pr := range prs {
 			if pr == x.Refs.PR {
 				key = k
