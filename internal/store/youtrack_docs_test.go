@@ -111,6 +111,68 @@ func TestLegacyOversizedStubIsDueForBackfill(t *testing.T) {
 	}
 }
 
+func TestLegacyRowWithoutPartSHAAndStaleChildAreDue(t *testing.T) {
+	s := schemaStore(t, "youtrack_docs_legacy_parts")
+	ctx := context.Background()
+	doc, _, err := s.PutDocument(ctx, Document{Key: "research/legacy-parts", Kind: "research", Body: "# Legacy\n\nbody", CreatedBy: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.PutYouTrackProject(ctx, YouTrackProject{HKProject: "handoffkeep", ShortName: "HK"}); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.UpsertYouTrackDocArticle(ctx, YouTrackDocArticle{DocKey: doc.Key, HKProject: "handoffkeep", ArticleID: "A-1", SourceSHA: doc.SHA256, Bytes: int64(len(doc.Body) + 100), SyncedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	due, err := s.DueYouTrackDocs(ctx, []string{"%"}, "handoffkeep", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(due) != 1 {
+		t.Fatalf("row without part SHA was not due: %+v", due)
+	}
+	if err = s.UpsertYouTrackDocArticle(ctx, YouTrackDocArticle{DocKey: doc.Key, HKProject: "handoffkeep", ArticleID: "A-1", PartCount: 2, SourceSHA: doc.SHA256, PartSHA: "primary", Bytes: int64(len(doc.Body) + 100), SyncedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.UpsertYouTrackDocArticle(ctx, YouTrackDocArticle{DocKey: "/hk-part/child/2", DocumentKey: doc.Key, PartIndex: 2, PartCount: 2, HKProject: "handoffkeep", ArticleID: "A-2", SourceSHA: "old-source", PartSHA: "child", Bytes: 10, SyncedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	due, err = s.DueYouTrackDocs(ctx, []string{"%"}, "handoffkeep", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(due) != 1 {
+		t.Fatalf("stale child was not due: %+v", due)
+	}
+}
+
+func TestPreviousReleaseLedgerWriteCanStillBeReadAndIsNotOrphaned(t *testing.T) {
+	s := schemaStore(t, "youtrack_docs_legacy_write")
+	ctx := context.Background()
+	doc, _, err := s.PutDocument(ctx, Document{Key: "review/legacy-write", Kind: "review", Body: "# Legacy write\n\nbody", CreatedBy: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.pool.Exec(ctx, `INSERT INTO youtrack_doc_articles(doc_key,hk_project,article_id,source_sha,bytes,synced_at) VALUES($1,'handoffkeep','A-old',$2,200,now())`, doc.Key, doc.SHA256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := s.YouTrackDocArticles(ctx, doc.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].DocumentKey != "" {
+		t.Fatalf("legacy row read = %+v", rows)
+	}
+	orphans, err := s.OrphanYouTrackDocArticles(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(orphans) != 0 {
+		t.Fatalf("live document reported orphaned: %+v", orphans)
+	}
+}
+
 func keysOf(docs []Document) []string {
 	out := make([]string, 0, len(docs))
 	for _, d := range docs {

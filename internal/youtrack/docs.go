@@ -165,7 +165,7 @@ func (s *Service) pushDoc(ctx context.Context, doc store.Document, dry bool) (Do
 		}
 		partTitle := title
 		if i > 0 {
-			partTitle = fmt.Sprintf("%s (%d/%d)", doc.Key, i+1, len(parts))
+			partTitle = docPartTitle(doc.Key, i+1, len(parts))
 		}
 		if rowFound && row.HKProject == project.HKProject {
 			article, e = s.client.UpdateArticle(ctx, row.ArticleID, partTitle, part)
@@ -184,7 +184,7 @@ func (s *Service) pushDoc(ctx context.Context, doc store.Document, dry bool) (Do
 			}
 			if ok {
 				article, e = s.client.UpdateArticle(ctx, marked.ID, partTitle, part)
-				if e == nil && action.Action != "create" {
+				if e == nil && action.Action == "" {
 					action.Action = "adopt"
 				}
 			} else {
@@ -193,7 +193,7 @@ func (s *Service) pushDoc(ctx context.Context, doc store.Document, dry bool) (Do
 					parent = action.ArticleID
 				}
 				article, e = s.client.CreateArticle(ctx, ArticleWrite{ProjectID: projectID, ParentID: parent, Summary: partTitle, Content: part})
-				if e == nil && action.Action != "adopt" {
+				if e == nil && action.Action == "" {
 					action.Action = "create"
 				}
 			}
@@ -212,7 +212,7 @@ func (s *Service) pushDoc(ctx context.Context, doc store.Document, dry bool) (Do
 		}
 	}
 	for _, row := range existingRows {
-		if row.PartIndex > len(parts) {
+		if row.HKProject == project.HKProject && row.PartIndex > len(parts) {
 			if e := s.client.DeleteArticle(ctx, row.ArticleID); e != nil && !IsNotFound(e) {
 				return action, e
 			}
@@ -317,6 +317,19 @@ func docPartSHA(content string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+func docPartTitle(key string, part, total int) string {
+	suffix := fmt.Sprintf(" (%d/%d)", part, total)
+	runes := []rune(key)
+	keep := docTitleMaxRunes - len([]rune(suffix))
+	if keep < 0 {
+		keep = 0
+	}
+	if len(runes) > keep {
+		runes = runes[:keep]
+	}
+	return string(runes) + suffix
+}
+
 func completeDocLedger(rows []store.YouTrackDocArticle, parts []string, sourceSHA, project string) bool {
 	if len(rows) != len(parts) {
 		return false
@@ -385,7 +398,7 @@ func (s *Service) ReadDocumentArticle(ctx context.Context, key string) (string, 
 		if e != nil {
 			return "", e
 		}
-		if docPartSHA(a.Content) != row.PartSHA {
+		if row.PartSHA != "" && docPartSHA(a.Content) != row.PartSHA {
 			return "", fmt.Errorf("document %q part %d content does not match its ledger", key, i+1)
 		}
 		part := strings.TrimPrefix(a.Content, docMarker(docPartMarkerKey(key, i+1))+"\n")

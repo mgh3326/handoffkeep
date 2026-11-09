@@ -26,7 +26,7 @@ type YouTrackDocArticle struct {
 // YouTrackDocArticles returns the primary and child article ledger rows in part order.
 func (s *Store) YouTrackDocArticles(ctx context.Context, key string) ([]YouTrackDocArticle, error) {
 	rows, err := s.pool.Query(ctx, `SELECT doc_key,document_key,part_index,part_count,part_sha,hk_project,article_id,source_sha,bytes,synced_at
-		FROM youtrack_doc_articles WHERE document_key=$1 ORDER BY part_index ASC`, key)
+		FROM youtrack_doc_articles WHERE document_key=$1 OR (document_key='' AND doc_key=$1) ORDER BY part_index ASC`, key)
 	if err != nil {
 		return nil, err
 	}
@@ -71,8 +71,11 @@ func (s *Store) DueYouTrackDocs(ctx context.Context, patterns []string, defaultP
 		WHERE d.key LIKE ANY($1::text[])
 		  AND (a.doc_key IS NULL OR a.source_sha<>d.sha256
 		       OR a.hk_project<>COALESCE(rp.hk_project,'')
+	       OR a.part_sha=''
 	       -- Legacy oversized stubs stored fewer bytes than the source body.
-	       OR (a.part_count=1 AND a.bytes<octet_length(d.body)))
+	       OR (a.part_count=1 AND a.bytes<octet_length(d.body))
+	       OR a.part_count<>(SELECT count(*) FROM youtrack_doc_articles p WHERE COALESCE(NULLIF(p.document_key,''),p.doc_key)=d.key)
+	       OR EXISTS (SELECT 1 FROM youtrack_doc_articles p WHERE COALESCE(NULLIF(p.document_key,''),p.doc_key)=d.key AND p.part_index>1 AND p.source_sha<>d.sha256))
 		  AND `+youtrackAttemptRank("r")+` <= now()
 		ORDER BY `+youtrackAttemptRank("r")+` ASC, d.key ASC LIMIT $2`, patterns, limit, defaultProject)
 	if err != nil {
@@ -122,7 +125,7 @@ func (s *Store) OrphanYouTrackDocArticles(ctx context.Context, limit int) ([]You
 	}
 	rows, err := s.pool.Query(ctx, `SELECT a.doc_key,a.hk_project,a.article_id,a.source_sha,a.bytes,a.synced_at
 		FROM youtrack_doc_articles a
-		WHERE a.part_index=1 AND a.doc_key NOT LIKE 'index:%' AND NOT EXISTS (SELECT 1 FROM documents d WHERE d.key=a.document_key)
+		WHERE a.part_index=1 AND a.doc_key NOT LIKE 'index:%' AND NOT EXISTS (SELECT 1 FROM documents d WHERE d.key=COALESCE(NULLIF(a.document_key,''),a.doc_key))
 		ORDER BY a.doc_key ASC LIMIT $1`, limit)
 	if err != nil {
 		return nil, err
@@ -178,6 +181,6 @@ func (s *Store) UpsertYouTrackDocArticle(ctx context.Context, x YouTrackDocArtic
 
 // DeleteYouTrackDocArticleParts removes ledger rows beyond the retained part count.
 func (s *Store) DeleteYouTrackDocArticleParts(ctx context.Context, key string, from int) error {
-	_, err := s.pool.Exec(ctx, `DELETE FROM youtrack_doc_articles WHERE document_key=$1 AND part_index >= $2`, key, from)
+	_, err := s.pool.Exec(ctx, `DELETE FROM youtrack_doc_articles WHERE (document_key=$1 OR (document_key='' AND doc_key=$1)) AND part_index >= $2`, key, from)
 	return err
 }

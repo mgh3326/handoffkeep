@@ -47,7 +47,17 @@ func (f *fakeStore) DueYouTrackDocs(_ context.Context, patterns []string, defaul
 		}
 		d := f.docs[k]
 		a, ok := f.docArticles[k]
-		if ok && a.SourceSHA == d.SHA256 && a.HKProject == f.docProject(d, defaultProject) && !(a.PartCount <= 1 && a.Bytes < int64(len(d.Body))) {
+		rowCount := 0
+		staleChild := false
+		for _, part := range f.docArticles {
+			if part.DocumentKey == k || (part.DocumentKey == "" && part.DocKey == k) {
+				rowCount++
+				if part.PartIndex > 1 && part.SourceSHA != d.SHA256 {
+					staleChild = true
+				}
+			}
+		}
+		if ok && a.SourceSHA == d.SHA256 && a.HKProject == f.docProject(d, defaultProject) && !(a.PartCount <= 1 && a.Bytes < int64(len(d.Body))) && a.PartSHA != "" && !staleChild && a.PartCount == rowCount {
 			continue
 		}
 		if !f.dueAttempt(store.YouTrackQueueDoc, k, now) {
@@ -312,6 +322,86 @@ func TestDocsUpdateRewritesSameArticle(t *testing.T) {
 	}
 	if !strings.Contains(bodies[second.ArticleID], "second") {
 		t.Fatalf("article not rewritten:\n%s", bodies[second.ArticleID])
+	}
+}
+
+func TestDocPartTitleRespectsSummaryRuneLimit(t *testing.T) {
+	title := docPartTitle(strings.Repeat("한", 512), 2, 12)
+	if got := len([]rune(title)); got > docTitleMaxRunes {
+		t.Fatalf("child summary has %d runes, limit %d", got, docTitleMaxRunes)
+	}
+	if !strings.HasSuffix(title, " (2/12)") {
+		t.Fatalf("child summary lost part suffix: %q", title)
+	}
+}
+
+func TestUpdateThatAddsPartRemainsAnUpdate(t *testing.T) {
+	fs := newFakeStore()
+	fy := newFakeYouTrack()
+	key := "design/grow"
+	fs.putDoc(key, "# Grow\n\nsmall")
+	svc := newTestService(t, fy, fs)
+	if _, err := svc.Sync(context.Background(), SyncOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	fs.putDoc(key, "# Grow\n\n"+strings.Repeat("x", 300<<10))
+	report, err := svc.Sync(context.Background(), SyncOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := docActions(report)[key]; got != "update" {
+		t.Fatalf("action = %q, want update", got)
+	}
+	if got := report.DocPrefixes["design"]; got.Update != 1 || got.Create != 0 {
+		t.Fatalf("prefix counts = %+v, want one update and no create", got)
+	}
+}
+
+func TestProjectMoveAndShrinkLeavesOldProjectArticlesAlone(t *testing.T) {
+	fs := newFakeStore()
+	fy := newFakeYouTrack()
+	task := fs.addTask("handoffkeep", "lane", "Move doc", "todo", 3)
+	key := "research/moved-large"
+	fs.putDoc(key, "# Large\n\n"+strings.Repeat("x", 300<<10))
+	fs.mu.Lock()
+	doc := fs.docs[key]
+	id := task.ID
+	doc.TaskID = &id
+	fs.docs[key] = doc
+	fs.mu.Unlock()
+	svc := newTestService(t, fy, fs)
+	if _, err := svc.Sync(context.Background(), SyncOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	oldRows, err := fs.YouTrackDocArticles(context.Background(), key)
+	if err != nil || len(oldRows) != 2 {
+		t.Fatalf("old rows = %+v, err=%v", oldRows, err)
+	}
+	oldChild := oldRows[1].ArticleID
+
+	fs.mu.Lock()
+	newProject := "panewire"
+	task.Project = &newProject
+	fs.tasks[task.ID] = task
+	fs.mu.Unlock()
+	fs.putDoc(key, "# Small\n\nshort")
+	fs.mu.Lock()
+	doc = fs.docs[key]
+	doc.TaskID = &id
+	fs.docs[key] = doc
+	fs.mu.Unlock()
+	if _, err := svc.Sync(context.Background(), SyncOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := fs.YouTrackDocArticles(context.Background(), key)
+	if err != nil || len(rows) != 1 || rows[0].HKProject != "panewire" {
+		t.Fatalf("new project rows = %+v, err=%v", rows, err)
+	}
+	fy.mu.Lock()
+	_, oldChildStillExists := fy.articles[oldChild]
+	fy.mu.Unlock()
+	if !oldChildStillExists {
+		t.Fatal("shrink deleted a child article from the previous project")
 	}
 }
 
