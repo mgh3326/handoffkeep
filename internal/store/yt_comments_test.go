@@ -35,9 +35,35 @@ func ytcBinding(task int64) YTCommentCanary {
 
 func ytcEnroll(t *testing.T, s *Store, task int64) {
 	t.Helper()
-	if _, err := s.AddYTCommentCanary(t.Context(), ytcBinding(task)); err != nil {
-		t.Fatalf("enroll %d: %v", task, err)
+	ytcEnrollAs(t, s, ytcBinding(task))
+}
+
+// ytcEnrollAs publishes b against the task's mappings as they are now.
+func ytcEnrollAs(t *testing.T, s *Store, b YTCommentCanary) {
+	t.Helper()
+	verified, err := s.YTCanaryCandidate(t.Context(), b.TaskID)
+	if err != nil {
+		t.Fatal(err)
 	}
+	if _, err := s.AddYTCommentCanary(t.Context(), b, verified); err != nil {
+		t.Fatalf("enroll %d on %s: %v", b.TaskID, b.Tenant, err)
+	}
+}
+
+// ytcCounting counts the requests a worker makes.
+type ytcCounting struct {
+	ytwrite.Remote
+	posts, lists atomic.Int64
+}
+
+func (c *ytcCounting) CreateComment(ctx context.Context, issueID, text string) (string, error) {
+	c.posts.Add(1)
+	return c.Remote.CreateComment(ctx, issueID, text)
+}
+
+func (c *ytcCounting) ListComments(ctx context.Context, issueID string, pageSize int) ([]ytwrite.RemoteComment, error) {
+	c.lists.Add(1)
+	return c.Remote.ListComments(ctx, issueID, pageSize)
 }
 
 func ytcCount(t *testing.T, s *Store, query string, args ...any) int {
@@ -180,6 +206,14 @@ func TestCommentEnqueueUsesCallerTransaction(t *testing.T) {
 	}
 	if _, ok := ytcOpFor(t, s, c.ID); !ok {
 		t.Fatal("no op")
+	}
+	w := MCPWrite{Tool: "task_comment", Actor: "operator@example.com", Channel: "chatgpt", Author: "dots", Key: "mcp-pool-of-one"}
+	m, _, err := s.CreateMCPTaskComment(ctx, task, "one connection over MCP", w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := ytcOpFor(t, s, m.ID); !ok {
+		t.Fatal("no op for the MCP comment")
 	}
 }
 
@@ -327,20 +361,19 @@ func TestImportMarksProtocolOwnedComments(t *testing.T) {
 	check("update page", updated)
 }
 
-// ytcProtocol runs the protocol over the Postgres ledger with the fake
-// YouTrack, admitting what the store admits.
+// ytcProtocol runs the comment worker's protocol (YTCommentConfig) on the
+// test tenant over yt.
 func ytcProtocol(t *testing.T, s *Store, yt ytwrite.Remote, offset *atomic.Int64) *ytwrite.Protocol {
 	t.Helper()
-	p, err := ytwrite.New(ytwrite.Config{Ledger: s.YTWriteLedger(), Remote: yt,
-		Now: func() time.Time { return time.Now().UTC().Add(time.Duration(offset.Load())) },
-		Admit: func(ctx context.Context, op ytwrite.Op) error {
-			task, _ := strconv.ParseInt(op.EntityID, 10, 64)
-			ok, err := s.YTCommentAdmitted(ctx, task, op.YTTargetID, ytcTenant)
-			if err == nil && !ok {
-				err = errors.New("not admitted")
-			}
-			return err
-		}})
+	return ytcProtocolOn(t, s, yt, ytcTenant, offset)
+}
+
+// ytcProtocolOn is ytcProtocol for a worker configured with tenant; its clock
+// is the wall clock moved by offset.
+func ytcProtocolOn(t *testing.T, s *Store, yt ytwrite.Remote, tenant string, offset *atomic.Int64) *ytwrite.Protocol {
+	t.Helper()
+	p, err := ytwrite.New(s.YTCommentConfig(tenant, ytwrite.Config{Remote: yt,
+		Now: func() time.Time { return time.Now().UTC().Add(time.Duration(offset.Load())) }}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -399,9 +432,7 @@ func TestCommentProtocolOverPostgres(t *testing.T) {
 		t.Fatalf("remove: %v %v", removed, err)
 	}
 	s.SetYTCommentsMode(YTCommentsCanary)
-	if _, err := s.AddYTCommentCanary(ctx, ytcBinding(task)); err != nil {
-		t.Fatal(err)
-	}
+	ytcEnroll(t, s, task)
 	held, err := s.CreateTaskComment(ctx, task, "worker", "enrolled when written")
 	if err != nil {
 		t.Fatal(err)
@@ -521,49 +552,48 @@ func TestYTCommentCanarySet(t *testing.T) {
 	ctx := t.Context()
 	s.SetYTCommentsMode(YTCommentsCanary)
 	task, other := ytcTask(t, s, "handoffkeep"), ytcTask(t, s, "handoffkeep")
-	got, err := s.AddYTCommentCanary(ctx, ytcBinding(task))
+	add := func(b YTCommentCanary) (YTCommentCanary, error) {
+		t.Helper()
+		verified, err := s.YTCanaryCandidate(ctx, b.TaskID)
+		if errors.Is(err, ErrTaskNotFound) {
+			verified = YTCanaryCandidate{TaskID: b.TaskID}
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		return s.AddYTCommentCanary(ctx, b, verified)
+	}
+	got, err := add(ytcBinding(task))
 	if err != nil || got.TaskID != task || got.IssueID != ytcBinding(task).IssueID || got.AddedAt.IsZero() {
 		t.Fatalf("add = %+v %v", got, err)
 	}
-	if _, err := s.AddYTCommentCanary(ctx, ytcBinding(task)); err != nil {
+	if _, err := add(ytcBinding(task)); err != nil {
 		t.Fatalf("same binding again: %v", err)
 	}
 	moved := ytcBinding(task)
 	moved.IssueID = "2-424242"
-	if _, err := s.AddYTCommentCanary(ctx, moved); !errors.Is(err, ErrYTCanaryConflict) {
+	if _, err := add(moved); !errors.Is(err, ErrYTCanaryConflict) {
 		t.Fatalf("another binding for an enrolled task: %v", err)
 	}
 	stolen := ytcBinding(other)
 	stolen.IssueID = ytcBinding(task).IssueID
-	if _, err := s.AddYTCommentCanary(ctx, stolen); !errors.Is(err, ErrYTCanaryConflict) {
+	if _, err := add(stolen); !errors.Is(err, ErrYTCanaryConflict) {
 		t.Fatalf("an issue already bound to another task: %v", err)
 	}
-	if _, err := s.AddYTCommentCanary(ctx, ytcBinding(987654321)); !errors.Is(err, ErrTaskNotFound) {
+	if _, err := add(ytcBinding(987654321)); !errors.Is(err, ErrTaskNotFound) {
 		t.Fatalf("missing task: %v", err)
 	}
 	list, err := s.ListYTCommentCanary(ctx)
 	if err != nil || len(list) != 1 || list[0].TaskID != task || list[0].Tenant != ytcTenant {
 		t.Fatalf("list = %+v %v", list, err)
 	}
-	if ok, err := s.YTCommentAdmitted(ctx, task, ytcBinding(task).IssueID, ytcTenant); err != nil || !ok {
-		t.Fatalf("admitted = %v %v", ok, err)
-	}
-	if ok, _ := s.YTCommentAdmitted(ctx, task, ytcBinding(task).IssueID, "other.youtrack.cloud"); ok {
-		t.Fatal("admitted on another tenant")
-	}
-	s.SetYTCommentsMode(YTCommentsOff)
-	if ok, _ := s.YTCommentAdmitted(ctx, task, ytcBinding(task).IssueID, ytcTenant); ok {
-		t.Fatal("admitted with the gate off")
-	}
-	s.SetYTCommentsMode(YTCommentsCanary)
 	if removed, err := s.RemoveYTCommentCanary(ctx, task); err != nil || !removed {
 		t.Fatalf("remove = %v %v", removed, err)
 	}
 	if removed, err := s.RemoveYTCommentCanary(ctx, task); err != nil || removed {
 		t.Fatalf("second remove = %v %v", removed, err)
 	}
-	if ok, _ := s.YTCommentAdmitted(ctx, task, ytcBinding(task).IssueID, ytcTenant); ok {
-		t.Fatal("admitted after removal")
+	if list, err := s.ListYTCommentCanary(ctx); err != nil || len(list) != 0 {
+		t.Fatalf("list after removal = %+v %v", list, err)
 	}
 }
 

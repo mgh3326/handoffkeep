@@ -37,6 +37,9 @@ import (
 type WriteRemote struct {
 	c    *Client
 	http *http.Client
+	// Now is the clock a Retry-After HTTP date is read against (nil: the
+	// wall clock).
+	Now func() time.Time
 }
 
 var _ ytwrite.Remote = (*WriteRemote)(nil)

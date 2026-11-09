@@ -9,9 +9,10 @@ import (
 )
 
 // CreateTaskComment sends only the body; the server derives the author from
-// the bearer token.
-func (c Client) CreateTaskComment(ctx context.Context, taskID int64, body string) (store.TaskComment, error) {
-	var out store.TaskComment
+// the bearer token. The answer carries the comment's YouTrack projection when
+// the server reports one.
+func (c Client) CreateTaskComment(ctx context.Context, taskID int64, body string) (store.CreatedTaskComment, error) {
+	var out store.CreatedTaskComment
 	err := c.call(ctx, "POST", fmt.Sprintf("/v1/tasks/%d/comments", taskID), map[string]string{"body": body}, &out)
 	return out, err
 }

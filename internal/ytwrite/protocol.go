@@ -54,6 +54,8 @@ type Config struct {
 	// 5s cap is gone: the server's requested wait is honoured.
 	RateLimitWait time.Duration
 	MaxRetryAfter time.Duration
+	// SettleTimeout bounds recording the outcome of one remote call.
+	SettleTimeout time.Duration
 	// AuthWait is the wait after a 401, which needs a repaired token (5m).
 	AuthWait time.Duration
 	// ReconcileBase and ReconcileMax bound the doubling wait between evidence
@@ -120,7 +122,9 @@ type CommentRequest struct {
 	// YouTrack issue id, resolved by the caller.
 	TaskID    int64
 	YTIssueID string
-	Body      string
+	// Tenant is the YouTrack host YTIssueID belongs to.
+	Tenant string
+	Body   string
 }
 
 // CheckComment explains why a comment request is refused before anything is

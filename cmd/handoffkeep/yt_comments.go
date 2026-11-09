@@ -74,28 +74,23 @@ func ytCommentsWorkerFromEnv(st *store.Store) (backgroundWorker, error) {
 		return nil, err
 	}
 	remote := youtrack.NewWriteRemote(client)
-	tenant := remote.Tenant()
-	p, err := ytwrite.New(ytwrite.Config{
-		Ledger:          st.YTWriteLedger(),
-		Remote:          remote,
-		DispatchTimeout: ytCommentsDispatchTimeout,
-		Admit: func(ctx context.Context, op ytwrite.Op) error {
-			task, err := strconv.ParseInt(op.EntityID, 10, 64)
-			if op.EntityKind != "task" || err != nil {
-				return fmt.Errorf("op %d is not on a task lane", op.ID)
-			}
-			ok, err := st.YTCommentAdmitted(ctx, task, op.YTTargetID, tenant)
-			if err != nil {
-				return err
-			}
-			if !ok {
-				return fmt.Errorf("task %d is not enrolled with issue %s on %s", task, op.YTTargetID, tenant)
-			}
-			return nil
-		},
-	})
+	w, err := newYTCommentsWorker(st, remote, remote.Tenant(), nil)
 	if err != nil {
 		return nil, err
+	}
+	return w, nil
+}
+
+// newYTCommentsWorker turns the gate on and builds the dispatcher for one
+// tenant over remote. now is the protocol clock (nil: the wall clock).
+func newYTCommentsWorker(st *store.Store, remote ytwrite.Remote, tenant string, now func() time.Time) (ytCommentsWorker, error) {
+	p, err := ytwrite.New(st.YTCommentConfig(tenant, ytwrite.Config{
+		Remote:          remote,
+		Now:             now,
+		DispatchTimeout: ytCommentsDispatchTimeout,
+	}))
+	if err != nil {
+		return ytCommentsWorker{}, err
 	}
 	st.SetYTCommentsMode(store.YTCommentsCanary)
 	log.Printf("ytwrite.comments_enabled mode=canary tenant=%q", tenant)
@@ -256,7 +251,7 @@ func youtrackCanaryCmd(args []string, out io.Writer) error {
 		return err
 	}
 	binding.AddedBy = *by
-	got, err := st.AddYTCommentCanary(ctx, binding)
+	got, err := st.AddYTCommentCanary(ctx, binding, candidate)
 	if err != nil {
 		return err
 	}

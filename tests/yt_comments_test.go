@@ -20,7 +20,11 @@ import (
 func ytEnroll(t *testing.T, s *store.Store, task int64) {
 	t.Helper()
 	id := strconv.FormatInt(task, 10)
-	if _, err := s.AddYTCommentCanary(t.Context(), store.YTCommentCanary{TaskID: task, Tenant: "tests.youtrack.cloud", IssueID: "2-" + id, IssueReadable: "HK-" + id, ProjectID: "0-2", AddedBy: "tests"}); err != nil {
+	verified, err := s.YTCanaryCandidate(t.Context(), task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddYTCommentCanary(t.Context(), store.YTCommentCanary{TaskID: task, Tenant: "tests.youtrack.cloud", IssueID: "2-" + id, IssueReadable: "HK-" + id, ProjectID: "0-2", AddedBy: "tests"}, verified); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -36,7 +40,9 @@ func ytOps(t *testing.T, s *store.Store, task int64) []ytwrite.Op {
 
 // REST (and the CLI, which posts through it) and the console both enqueue one
 // op per comment of an enrolled task; the MCP path is covered in internal/mcp.
-// The REST answer keeps exactly its old shape.
+// The REST answer keeps every old key and type and adds one optional object,
+// youtrack_projection: the op that will copy the comment, never a claim that
+// YouTrack has it.
 func TestAllAuthorizedCommentEntrypointsEnqueue(t *testing.T) {
 	s := taskTestStore(t)
 	s.SetYTCommentsMode(store.YTCommentsCanary)
@@ -54,16 +60,44 @@ func TestAllAuthorizedCommentEntrypointsEnqueue(t *testing.T) {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	if fmt.Sprint(keys) != "[author body created_at id task_id]" {
+	if fmt.Sprint(keys) != "[author body created_at id task_id youtrack_projection]" {
 		t.Fatalf("REST comment answer changed shape: %v", keys)
+	}
+	if _, ok := body["id"].(float64); !ok || body["body"] != "via REST" || body["author"] != "node" || body["task_id"] != float64(task.ID) {
+		t.Fatalf("REST comment fields changed: %v", body)
+	}
+	if _, ok := body["created_at"].(string); !ok {
+		t.Fatalf("created_at is no longer a string: %v", body)
 	}
 	client := remote.Client{URL: h.URL, Token: "node-token", HTTP: h.Client()}
 	x, err := client.CreateTaskComment(t.Context(), task.ID, "via the CLI client")
 	if err != nil || x.ID == 0 || x.Author != "node" || x.Body != "via the CLI client" {
 		t.Fatalf("CLI client decode: %+v %v", x, err)
 	}
-	if ops := ytOps(t, s, task.ID); len(ops) != 2 || ops[0].Actor != "node" || ops[0].State != ytwrite.StatePrepared {
+	ops := ytOps(t, s, task.ID)
+	if len(ops) != 2 || ops[0].Actor != "node" || ops[0].State != ytwrite.StatePrepared {
 		t.Fatalf("REST/CLI ops = %+v", ops)
+	}
+	projection, _ := body["youtrack_projection"].(map[string]any)
+	if fmt.Sprint(projection) != fmt.Sprint(map[string]any{"status": "pending", "op_id": float64(ops[0].ID)}) {
+		t.Fatalf("REST projection = %v, want pending with op %d", body["youtrack_projection"], ops[0].ID)
+	}
+	if p := x.YouTrackProjection; p == nil || p.Status != "pending" || p.OpID != ops[1].ID || p.Reason != "" {
+		t.Fatalf("CLI client projection = %+v, want pending with op %d", p, ops[1].ID)
+	}
+
+	// Refused locally (the body quotes the op marker): the comment commits,
+	// its projection is rejected with the reason code and nothing else.
+	status, body = postComment(t, h.Client(), h.URL, "node-token", task.ID, map[string]any{"body": "quotes <!-- hk-op:1 --> in prose"})
+	projection, _ = body["youtrack_projection"].(map[string]any)
+	if status != http.StatusCreated || projection["status"] != "rejected" || projection["reason"] != ytwrite.ReasonInvalidComment || projection["op_id"] == nil || len(projection) != 3 {
+		t.Fatalf("rejected projection = %d %v", status, body)
+	}
+	// A task outside the canary: no op, projection none.
+	plain := newTask(t, s, taskLane(t), "yt canary outside", 0)
+	status, body = postComment(t, h.Client(), h.URL, "node-token", plain.ID, map[string]any{"body": "not enrolled"})
+	if projection, _ := body["youtrack_projection"].(map[string]any); status != http.StatusCreated || fmt.Sprint(projection) != fmt.Sprint(map[string]any{"status": "none"}) {
+		t.Fatalf("projection outside the canary = %d %v", status, body)
 	}
 
 	us := uiStore(t)

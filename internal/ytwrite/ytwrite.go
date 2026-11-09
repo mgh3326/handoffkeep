@@ -148,7 +148,9 @@ type Op struct {
 	EntityKind string
 	EntityID   string
 	YTTargetID string
-	Actor      string
+	// Tenant is the YouTrack host the op writes to.
+	Tenant string
+	Actor  string
 	// ParentID and ChildSeq record a parent/child plan (0 = none). The schema
 	// carries them for multi-step writes; this slice does not settle parents.
 	ParentID int64
@@ -181,6 +183,7 @@ type NewOp struct {
 	EntityKind string
 	EntityID   string
 	YTTargetID string
+	Tenant     string
 	Actor      string
 	ParentID   int64
 	ChildSeq   int

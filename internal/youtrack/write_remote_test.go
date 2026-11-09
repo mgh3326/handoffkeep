@@ -36,6 +36,8 @@ type recordedYouTrack struct {
 	requests []string
 	bodies   []string
 	answer   func(w http.ResponseWriter, r *http.Request)
+	// transport, when set, wraps the client's transport.
+	transport func(http.RoundTripper) http.RoundTripper
 }
 
 func (y *recordedYouTrack) serve(t *testing.T) *WriteRemote {
@@ -52,7 +54,11 @@ func (y *recordedYouTrack) serve(t *testing.T) *WriteRemote {
 		y.answer(w, r)
 	}))
 	t.Cleanup(srv.Close)
-	c, err := New(Config{BaseURL: srv.URL, Token: writeRemoteToken, Sleep: func(context.Context, time.Duration) error { return nil }})
+	cfg := Config{BaseURL: srv.URL, Token: writeRemoteToken, Sleep: func(context.Context, time.Duration) error { return nil }}
+	if y.transport != nil {
+		cfg.HTTPClient = &http.Client{Transport: y.transport(http.DefaultTransport)}
+	}
+	c, err := New(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,6 +66,19 @@ func (y *recordedYouTrack) serve(t *testing.T) *WriteRemote {
 }
 
 func (y *recordedYouTrack) count() int { y.mu.Lock(); defer y.mu.Unlock(); return len(y.requests) }
+
+// countOf is the number of requests with this method.
+func (y *recordedYouTrack) countOf(method string) int {
+	y.mu.Lock()
+	defer y.mu.Unlock()
+	n := 0
+	for _, r := range y.requests {
+		if strings.HasPrefix(r, method+" ") {
+			n++
+		}
+	}
+	return n
+}
 
 func TestAdapterCreateCommentDecodesRecordedReply(t *testing.T) {
 	ctx := context.Background()
@@ -83,14 +102,18 @@ func TestAdapterCreateCommentDecodesRecordedReply(t *testing.T) {
 	}
 }
 
-// A 2xx whose body has no usable id is uncertain: an empty id and no error,
-// which the protocol records as remote_unknown.
+// A 2xx whose body has no usable id is uncertain: the adapter returns no
+// trusted id and no error, and the protocol records remote_unknown.
 func TestAdapterSuccessWithoutUsableIDIsUnknown(t *testing.T) {
 	for name, body := range map[string][]byte{"no id": fixture(t, "comment_create_no_id.json"), "not json": []byte("<html>ok</html>"), "empty": nil, "bad id": []byte(`{"id":"../x y"}`)} {
 		y := &recordedYouTrack{answer: func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(body) }}
-		id, err := y.serve(t).CreateComment(context.Background(), "2-77", "x")
+		rm := y.serve(t)
+		id, err := rm.CreateComment(context.Background(), "2-77", "x")
 		if err != nil || (id != "" && name != "bad id") {
 			t.Errorf("%s: CreateComment = %q, %v; want an id the protocol will not trust and no error", name, id, err)
+		}
+		if op := driveOnce(t, rm); op.State != ytwrite.StateRemoteUnknown || op.Reason != ytwrite.ReasonNoID || op.YTResultID != "" {
+			t.Errorf("%s: op %s/%q (result %q), want remote_unknown/%s", name, op.State, op.Reason, op.YTResultID, ytwrite.ReasonNoID)
 		}
 	}
 }
@@ -197,7 +220,34 @@ func TestAdapter429IsOneAttemptAndDurablyDeferred(t *testing.T) {
 	})
 }
 
-// The bot key never reaches an error, so it never reaches the op log.
+// leakyBody returns its bytes and then a read error that quotes the bot key.
+type leakyBody struct {
+	io.Reader
+	closer io.Closer
+}
+
+func (b leakyBody) Read(p []byte) (int, error) {
+	n, err := b.Reader.Read(p)
+	if err == io.EOF {
+		return n, errors.New("stream broke after token " + writeRemoteToken)
+	}
+	return n, err
+}
+
+func (b leakyBody) Close() error { return b.closer.Close() }
+
+type leakyTransport struct{ next http.RoundTripper }
+
+func (l leakyTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	resp, err := l.next.RoundTrip(r)
+	if err == nil {
+		resp.Body = leakyBody{Reader: resp.Body, closer: resp.Body}
+	}
+	return resp, err
+}
+
+// The bot key never reaches an error, so it never reaches the op log: not in
+// an error body the server echoes, and not in a body read error.
 func TestAdapterRedactsBeforePersistence(t *testing.T) {
 	echo := []byte(`{"error":"invalid_grant","error_description":"token ` + writeRemoteToken + ` is not valid here"}`)
 	y := &recordedYouTrack{answer: func(w http.ResponseWriter, _ *http.Request) {
@@ -212,6 +262,194 @@ func TestAdapterRedactsBeforePersistence(t *testing.T) {
 	op := driveOnce(t, rm)
 	if op.State != ytwrite.StateRejected || strings.Contains(op.LastError, writeRemoteToken) || !strings.Contains(op.LastError, "[redacted]") {
 		t.Fatalf("op %s last error %q", op.State, op.LastError)
+	}
+
+	t.Run("body read error", func(t *testing.T) {
+		leaky := func(next http.RoundTripper) http.RoundTripper { return leakyTransport{next} }
+		refused := &recordedYouTrack{transport: leaky, answer: func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":"bad"}`))
+		}}
+		op := driveOnce(t, refused.serve(t))
+		if op.State != ytwrite.StateRejected || strings.Contains(op.LastError, writeRemoteToken) || !strings.Contains(op.LastError, "[redacted]") {
+			t.Fatalf("refused POST with a failing body: op %s last error %q", op.State, op.LastError)
+		}
+		// The evidence search reads a 200 whose body fails the same way.
+		listing := &recordedYouTrack{transport: leaky, answer: func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodPost {
+				w.WriteHeader(http.StatusBadGateway)
+				return
+			}
+			_, _ = w.Write([]byte(`[]`))
+		}}
+		ledger := ytwritetest.NewMemLedger()
+		clock := ytwritetest.NewClock()
+		p, err := ytwrite.New(ytwrite.Config{Ledger: ledger, Remote: listing.serve(t), Now: clock.Now})
+		if err != nil {
+			t.Fatal(err)
+		}
+		r, err := p.AppendComment(context.Background(), ytwrite.CommentRequest{Principal: "hk:task-comments", Key: "task-comment:2", Actor: "worker", TaskID: 77, YTIssueID: "2-77", Body: "본문"})
+		if err != nil || r.State != ytwrite.StateRemoteUnknown {
+			t.Fatalf("%+v %v", r, err)
+		}
+		clock.Advance(time.Minute)
+		if _, err := p.Drive(context.Background(), 10); err != nil {
+			t.Fatal(err)
+		}
+		got, err := ledger.ByID(context.Background(), r.OpID)
+		if err != nil || got.Reconciles != 1 || strings.Contains(got.LastError, writeRemoteToken) || !strings.Contains(got.LastError, "[redacted]") {
+			t.Fatalf("listing with a failing body: op %+v %v", got, err)
+		}
+	})
+}
+
+// retryAfterCases are server waits longer than the old one-hour clamp and the
+// adapter's old 24h parse cap, as seconds and as an HTTP date (rendered
+// against the clock the protocol and the adapter share).
+var retryAfterCases = []struct {
+	name   string
+	header func(now time.Time) string
+	wait   time.Duration
+}{
+	{"7200 seconds", func(time.Time) string { return "7200" }, 2 * time.Hour},
+	{"two days in seconds", func(time.Time) string { return "172800" }, 48 * time.Hour},
+	{"http date two hours on", func(now time.Time) string { return now.Add(2 * time.Hour).Format(http.TimeFormat) }, 2 * time.Hour},
+	{"http date fifty hours on", func(now time.Time) string { return now.Add(50 * time.Hour).Format(http.TimeFormat) }, 50 * time.Hour},
+}
+
+// A long Retry-After is persisted as the server named it, and no request is
+// made before that deadline: not the POST after a 429, not the evidence
+// search after a listing 429.
+func TestAdapterLongRetryAfterIsKept(t *testing.T) {
+	for _, tc := range retryAfterCases {
+		t.Run("post "+tc.name, func(t *testing.T) {
+			clock := ytwritetest.NewClock()
+			var y *recordedYouTrack
+			y = &recordedYouTrack{answer: func(w http.ResponseWriter, _ *http.Request) {
+				if y.countOf(http.MethodPost) == 1 {
+					w.Header().Set("Retry-After", tc.header(clock.Now()))
+					w.WriteHeader(http.StatusTooManyRequests)
+					return
+				}
+				_, _ = w.Write(fixture(t, "comment_create.json"))
+			}}
+			rm := y.serve(t)
+			rm.Now = clock.Now
+			ledger := ytwritetest.NewMemLedger()
+			p, err := ytwrite.New(ytwrite.Config{Ledger: ledger, Remote: rm, Now: clock.Now})
+			if err != nil {
+				t.Fatal(err)
+			}
+			r, err := p.AppendComment(context.Background(), ytwrite.CommentRequest{Principal: "hk:task-comments", Key: "task-comment:3", Actor: "worker", TaskID: 77, YTIssueID: "2-77", Body: "본문"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			op, _ := ledger.ByID(context.Background(), r.OpID)
+			if want := clock.Now().Add(tc.wait); op.State != ytwrite.StatePrepared || !op.NextAttemptAt.Equal(want) {
+				t.Fatalf("op %s next attempt %v, want prepared until %v", op.State, op.NextAttemptAt, want)
+			}
+			clock.Advance(tc.wait - time.Second)
+			if _, err := p.Drive(context.Background(), 10); err != nil {
+				t.Fatal(err)
+			}
+			if n := y.countOf(http.MethodPost); n != 1 {
+				t.Fatalf("%d POSTs one second before the server's deadline", n)
+			}
+			clock.Advance(time.Second)
+			if _, err := p.Drive(context.Background(), 10); err != nil {
+				t.Fatal(err)
+			}
+			if op, _ := ledger.ByID(context.Background(), r.OpID); op.State != ytwrite.StateApplied || y.countOf(http.MethodPost) != 2 {
+				t.Fatalf("at the deadline: op %s, %d POSTs", op.State, y.countOf(http.MethodPost))
+			}
+		})
+		t.Run("listing "+tc.name, func(t *testing.T) {
+			clock := ytwritetest.NewClock()
+			var y *recordedYouTrack
+			y = &recordedYouTrack{answer: func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodPost:
+					w.WriteHeader(http.StatusBadGateway)
+				case y.countOf(http.MethodGet) == 1:
+					w.Header().Set("Retry-After", tc.header(clock.Now()))
+					w.WriteHeader(http.StatusTooManyRequests)
+				default:
+					_, _ = w.Write([]byte(`[]`))
+				}
+			}}
+			rm := y.serve(t)
+			rm.Now = clock.Now
+			ledger := ytwritetest.NewMemLedger()
+			p, err := ytwrite.New(ytwrite.Config{Ledger: ledger, Remote: rm, Now: clock.Now})
+			if err != nil {
+				t.Fatal(err)
+			}
+			r, err := p.AppendComment(context.Background(), ytwrite.CommentRequest{Principal: "hk:task-comments", Key: "task-comment:4", Actor: "worker", TaskID: 77, YTIssueID: "2-77", Body: "본문"})
+			if err != nil || r.State != ytwrite.StateRemoteUnknown {
+				t.Fatalf("%+v %v", r, err)
+			}
+			clock.Advance(time.Minute)
+			if _, err := p.Drive(context.Background(), 10); err != nil {
+				t.Fatal(err)
+			}
+			op, _ := ledger.ByID(context.Background(), r.OpID)
+			if want := clock.Now().Add(tc.wait); op.State != ytwrite.StateRemoteUnknown || !op.NextAttemptAt.Equal(want) || y.countOf(http.MethodGet) != 1 {
+				t.Fatalf("op %s next search %v after %d GETs, want remote_unknown until %v", op.State, op.NextAttemptAt, y.countOf(http.MethodGet), want)
+			}
+			clock.Advance(tc.wait - time.Second)
+			if _, err := p.Drive(context.Background(), 10); err != nil {
+				t.Fatal(err)
+			}
+			if n := y.countOf(http.MethodGet); n != 1 {
+				t.Fatalf("%d GETs one second before the server's deadline", n)
+			}
+			clock.Advance(time.Second)
+			if _, err := p.Drive(context.Background(), 10); err != nil {
+				t.Fatal(err)
+			}
+			if y.countOf(http.MethodGet) < 2 || y.countOf(http.MethodPost) != 1 {
+				t.Fatalf("at the deadline: %d GETs, %d POSTs; want the search and no second POST", y.countOf(http.MethodGet), y.countOf(http.MethodPost))
+			}
+		})
+	}
+}
+
+// Retry-After is capped only past 30 days, a sanity bound for absurd values:
+// 30 days is kept to the second, anything longer is recorded as 30 days.
+func TestRetryAfterSanityCapBoundary(t *testing.T) {
+	const capWait = 30 * 24 * time.Hour
+	for _, tc := range []struct {
+		name   string
+		header func(now time.Time) string
+		want   time.Duration
+	}{
+		{"30 days in seconds", func(time.Time) string { return "2592000" }, capWait},
+		{"30 days and a second", func(time.Time) string { return "2592001" }, capWait},
+		{"http date 31 days on", func(now time.Time) string { return now.Add(31 * 24 * time.Hour).Format(http.TimeFormat) }, capWait},
+		{"29 days in seconds", func(time.Time) string { return "2505600" }, 29 * 24 * time.Hour},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clock := ytwritetest.NewClock()
+			y := &recordedYouTrack{answer: func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Retry-After", tc.header(clock.Now()))
+				w.WriteHeader(http.StatusTooManyRequests)
+			}}
+			rm := y.serve(t)
+			rm.Now = clock.Now
+			ledger := ytwritetest.NewMemLedger()
+			p, err := ytwrite.New(ytwrite.Config{Ledger: ledger, Remote: rm, Now: clock.Now})
+			if err != nil {
+				t.Fatal(err)
+			}
+			r, err := p.AppendComment(context.Background(), ytwrite.CommentRequest{Principal: "hk:task-comments", Key: "task-comment:5", Actor: "worker", TaskID: 77, YTIssueID: "2-77", Body: "본문"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			op, _ := ledger.ByID(context.Background(), r.OpID)
+			if want := clock.Now().Add(tc.want); !op.NextAttemptAt.Equal(want) {
+				t.Fatalf("next attempt %v, want %v", op.NextAttemptAt, want)
+			}
+		})
 	}
 }
 

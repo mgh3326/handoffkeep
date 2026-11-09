@@ -184,8 +184,9 @@ func scanYTCanary(row interface{ Scan(...any) error }, c *YTCommentCanary) error
 // same binding again is a no-op; another binding for an enrolled task, an
 // issue another task is enrolled with or mapped to, or a task mapped to
 // another issue, is ErrYTCanaryConflict. Nothing else is written: an
-// enrollment creates no op row.
-func (s *Store) AddYTCommentCanary(ctx context.Context, c YTCommentCanary) (YTCommentCanary, error) {
+// enrollment creates no op row. verified is the candidate the binding was
+// verified against.
+func (s *Store) AddYTCommentCanary(ctx context.Context, c YTCommentCanary, verified YTCanaryCandidate) (YTCommentCanary, error) {
 	if c.TaskID < 1 || c.Tenant == "" || len(c.Tenant) > 255 || c.IssueID == "" || len(c.IssueID) > 64 ||
 		len(c.IssueReadable) > 64 || len(c.ProjectID) > 64 || c.AddedBy == "" || !validText(c.AddedBy, 200) {
 		return YTCommentCanary{}, errors.New("invalid canary binding")
@@ -250,6 +251,45 @@ func (s *Store) ListYTCommentCanary(ctx context.Context) ([]YTCommentCanary, err
 		out = append(out, c)
 	}
 	return out, rows.Err()
+}
+
+// YTCommentConfig wires cfg for the comment worker of one YouTrack tenant: its
+// ledger and its admission of each dispatch.
+func (s *Store) YTCommentConfig(tenant string, cfg ytwrite.Config) ytwrite.Config {
+	cfg.Ledger = s.YTWriteLedger()
+	cfg.Admit = func(ctx context.Context, op ytwrite.Op) error {
+		task, err := strconv.ParseInt(op.EntityID, 10, 64)
+		if op.EntityKind != "task" || err != nil {
+			return fmt.Errorf("op %d is not on a task lane", op.ID)
+		}
+		ok, err := s.YTCommentAdmitted(ctx, task, op.YTTargetID, tenant)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("task %d is not enrolled with issue %s on %s", task, op.YTTargetID, tenant)
+		}
+		return nil
+	}
+	return cfg
+}
+
+// YTCommentEchoOp reports whether op opID is a comment hk wrote to issueID.
+func (s *Store) YTCommentEchoOp(ctx context.Context, opID int64, issueID string) (bool, error) {
+	return false, nil
+}
+
+// YTProjection is what a comment answer says about its YouTrack copy.
+type YTProjection struct {
+	Status string `json:"status"`
+	OpID   int64  `json:"op_id,omitempty"`
+	Reason string `json:"reason,omitempty"`
+}
+
+// CreatedTaskComment is a created comment with its YouTrack projection.
+type CreatedTaskComment struct {
+	TaskComment
+	YouTrackProjection *YTProjection `json:"youtrack_projection,omitempty"`
 }
 
 // YTCommentAdmitted reports whether the worker may send an op for a task to

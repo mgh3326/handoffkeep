@@ -103,7 +103,7 @@ func taskCommentsCmd(args []string, in io.Reader, out io.Writer) error {
 			}
 		}
 		return printJSON(out, struct {
-			store.TaskComment
+			store.CreatedTaskComment
 			TranslationError string `json:"translation_error,omitempty"`
 		}{x, translationError})
 	default:
