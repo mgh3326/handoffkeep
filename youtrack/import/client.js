@@ -91,7 +91,15 @@ class HandoffkeepImport {
   }
 
   request(path, query) {
-    const response = this.connection.getSync(path, query || {});
+    // The YouTrack scripting http module accepts only string (or string-array) query values;
+    // a number such as limit=100 throws "Can not correctly handle limit query parameter".
+    const params = {};
+    Object.keys(query || {}).forEach((k) => {
+      const v = query[k];
+      if (v === undefined || v === null) return;
+      params[k] = Array.isArray(v) ? v.map(String) : String(v);
+    });
+    const response = this.connection.getSync(path, params);
     if (!response || response.code !== 200) throw new Error('handoffkeep export request failed (' + (response ? response.code : 'no response') + ')');
     return JSON.parse(response.response);
   }
