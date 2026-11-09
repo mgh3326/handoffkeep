@@ -218,6 +218,9 @@ func TestPreviousReleaseProjectMoveInvalidatesMultipartSHA(t *testing.T) {
 	ctx := context.Background()
 	oldProject, newProject := "legacy-old", "legacy-new"
 	for _, project := range []string{oldProject, newProject} {
+		if _, err := s.AddTaskProject(ctx, project, "test"); err != nil {
+			t.Fatal(err)
+		}
 		if err := s.PutYouTrackProject(ctx, YouTrackProject{HKProject: project, ShortName: project}); err != nil {
 			t.Fatal(err)
 		}
