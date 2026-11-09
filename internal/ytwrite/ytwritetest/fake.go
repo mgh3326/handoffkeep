@@ -44,16 +44,17 @@ type Fault struct {
 // FakeYouTrack is an in-memory YouTrack comment store with the failure modes
 // the protocol must survive. It implements ytwrite.Remote.
 type FakeYouTrack struct {
-	mu       sync.Mutex
-	faults   []Fault
-	issues   map[string][]*ytwrite.RemoteComment
-	nextID   int
-	calls    int
-	commits  int
-	delayed  []delayedComment
-	pageCap  int
-	listFail int
-	latency  time.Duration
+	mu         sync.Mutex
+	faults     []Fault
+	issues     map[string][]*ytwrite.RemoteComment
+	nextID     int
+	calls      int
+	commits    int
+	delayed    []delayedComment
+	pageCap    int
+	listFail   int
+	shiftPages bool
+	latency    time.Duration
 
 	// BeforeCreate runs at the start of every CreateComment, with the caller's
 	// context, before anything else. Tests use it to cancel a caller mid-call.
@@ -75,6 +76,9 @@ func (f *FakeYouTrack) Queue(faults ...Fault) {
 // SetPageCap makes the server return at most n comments per page whatever the
 // client asks for (0 = no cap).
 func (f *FakeYouTrack) SetPageCap(n int) { f.mu.Lock(); f.pageCap = n; f.mu.Unlock() }
+
+// ShiftPages inserts a comment after each first page, simulating offset shifts.
+func (f *FakeYouTrack) ShiftPages() { f.mu.Lock(); defer f.mu.Unlock(); f.shiftPages = true }
 
 // FailLists makes the next n ListComments calls fail.
 func (f *FakeYouTrack) FailLists(n int) { f.mu.Lock(); f.listFail = n; f.mu.Unlock() }
@@ -198,7 +202,13 @@ func (f *FakeYouTrack) CreateComment(ctx context.Context, issueID, text string) 
 	return commit(), nil
 }
 
-func (f *FakeYouTrack) ListComments(ctx context.Context, issueID string, skip, top int) ([]ytwrite.RemoteComment, error) {
+func (f *FakeYouTrack) ListComments(ctx context.Context, issueID string, top int) ([]ytwrite.RemoteComment, error) {
+	return ytwrite.EnumerateStableComments(ctx, top, func(ctx context.Context, skip, top int) ([]ytwrite.RemoteComment, error) {
+		return f.listPage(ctx, issueID, skip, top)
+	})
+}
+
+func (f *FakeYouTrack) listPage(ctx context.Context, issueID string, skip, top int) ([]ytwrite.RemoteComment, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if err := ctx.Err(); err != nil {
@@ -219,6 +229,11 @@ func (f *FakeYouTrack) ListComments(ctx context.Context, issueID string, skip, t
 	out := make([]ytwrite.RemoteComment, 0, end-skip)
 	for _, c := range all[skip:end] {
 		out = append(out, *c)
+	}
+	if f.shiftPages && skip == 0 && end < len(all) {
+		f.nextID++
+		c := &ytwrite.RemoteComment{ID: fmt.Sprintf("shift-%d", f.nextID), Text: "inserted"}
+		f.issues[issueID] = append([]*ytwrite.RemoteComment{c}, f.issues[issueID]...)
 	}
 	return out, nil
 }

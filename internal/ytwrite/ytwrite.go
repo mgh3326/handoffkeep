@@ -247,9 +247,10 @@ type Ledger interface {
 
 // RemoteComment is one comment as the remote lists it.
 type RemoteComment struct {
-	ID      string
-	Text    string
-	Deleted bool
+	ID        string
+	Text      string
+	UpdatedAt time.Time
+	Deleted   bool
 }
 
 // Remote is the YouTrack surface the protocol uses. CreateComment makes exactly
@@ -259,8 +260,9 @@ type Remote interface {
 	// CreateComment appends text to the issue. A nil error with an empty id is
 	// a 2xx without a usable id; the protocol treats it as uncertain.
 	CreateComment(ctx context.Context, issueID, text string) (id string, err error)
-	// ListComments returns one page of the issue's comments, skip/top.
-	ListComments(ctx context.Context, issueID string, skip, top int) ([]RemoteComment, error)
+	// ListComments returns a complete, consistent set of comments, or an error.
+	// Offset-paging adapters must use EnumerateStableComments and propagate its error.
+	ListComments(ctx context.Context, issueID string, pageSize int) ([]RemoteComment, error)
 }
 
 // RemoteError is an HTTP answer from the remote. Any other error from Remote

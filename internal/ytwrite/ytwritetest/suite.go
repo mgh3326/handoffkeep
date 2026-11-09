@@ -445,6 +445,20 @@ func RunProtocol(t *testing.T, nl NewLedger) {
 		})
 	}
 
+	t.Run("offset_shift_stays_unknown", func(t *testing.T) {
+		e := newEnv(t, nl)
+		e.page = 1
+		e.restart(e.ledger)
+		e.yt.Inject(testIssue, "unrelated")
+		e.yt.Queue(Fault{Kind: CommitDropReply})
+		r := e.append("shift", "present")
+		e.yt.ShiftPages()
+		e.clock.Advance(time.Minute)
+		e.drive()
+		e.wantStatus(e.lookup(r), ytwrite.StatusPending, ytwrite.StateRemoteUnknown, ytwrite.ReasonReconcileFailed)
+		e.wantRemote(1, 1)
+	})
+
 	t.Run("evidence_search_failure_stays_unknown", func(t *testing.T) {
 		e := newEnv(t, nl)
 		e.yt.Queue(Fault{Kind: CommitDropReply})

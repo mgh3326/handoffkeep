@@ -430,29 +430,22 @@ func (p *Protocol) reconcile(ctx context.Context, op Op) (applied bool, err erro
 	marker := OpMarker(op.ID)
 	var matches []RemoteComment
 	deleted, mismatched := 0, 0
-	skip := 0
-	for {
-		page, lerr := p.Remote.ListComments(cctx, op.YTTargetID, skip, p.PageSize)
-		if lerr != nil {
-			return touch(ReasonReconcileFailed, lerr.Error())
+	comments, lerr := p.Remote.ListComments(cctx, op.YTTargetID, p.PageSize)
+	if lerr != nil {
+		return touch(ReasonReconcileFailed, lerr.Error())
+	}
+	for _, c := range comments {
+		if !strings.Contains(c.Text, marker) {
+			continue
 		}
-		if len(page) == 0 {
-			break
+		switch {
+		case c.Text != want:
+			mismatched++
+		case c.Deleted:
+			deleted++
+		default:
+			matches = append(matches, c)
 		}
-		for _, c := range page {
-			if !strings.Contains(c.Text, marker) {
-				continue
-			}
-			switch {
-			case c.Text != want:
-				mismatched++
-			case c.Deleted:
-				deleted++
-			default:
-				matches = append(matches, c)
-			}
-		}
-		skip += len(page)
 	}
 	switch {
 	case len(matches) == 1 && deleted == 0 && mismatched == 0 && resultIDRE.MatchString(matches[0].ID):
