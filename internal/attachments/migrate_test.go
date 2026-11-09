@@ -109,3 +109,27 @@ func TestMigrateRefusesCorruptSource(t *testing.T) {
 		t.Fatalf("continued after source mismatch: puts=%d locations=%v", target.puts, db.locations)
 	}
 }
+
+// A rerun after the cutover: a row added after the first run exists only at the
+// target (its location already recorded), and a row the previous colour wrote
+// after the snapshot exists only at the source. The rerun copies the second and
+// does not read the first from the source.
+func TestMigrateRerunAfterCutover(t *testing.T) {
+	sha := func(b []byte) string { s := sha256.Sum256(b); return hex.EncodeToString(s[:]) }
+	late, onlyTarget := []byte("written to R2 after the snapshot"), []byte("uploaded to OCI after cutover")
+	db := &migrationDBFake{rows: []store.Attachment{
+		{SHA256: sha(onlyTarget), SizeBytes: int64(len(onlyTarget)), MIME: "text/plain", ObjectLocation: "target"},
+		{SHA256: sha(late), SizeBytes: int64(len(late)), MIME: "text/plain"},
+	}}
+	source := &fakeObjects{objects: map[string][]byte{key(sha(late)): late}}
+	target := &fakeObjects{objects: map[string][]byte{key(sha(onlyTarget)): onlyTarget}}
+	if _, err := Migrate(t.Context(), db, source, target, "target", true); err != nil {
+		t.Fatalf("rerun after cutover: %v", err)
+	}
+	if string(target.objects[key(sha(late))]) != string(late) || db.locations[sha(late)] != "target" {
+		t.Fatalf("late source row not copied: locations=%v", db.locations)
+	}
+	if _, rewrote := db.locations[sha(onlyTarget)]; rewrote || target.puts != 1 {
+		t.Fatalf("target-only row touched: locations=%v puts=%d", db.locations, target.puts)
+	}
+}

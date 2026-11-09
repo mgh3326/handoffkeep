@@ -93,8 +93,14 @@ func ConfigFromPrefix(prefix string) (Config, bool, error) {
 	if c.BucketLookup != "path" && c.BucketLookup != "virtual" {
 		return c, false, fmt.Errorf("%s_S3_BUCKET_LOOKUP must be path or virtual", prefix)
 	}
-	if strings.Contains(c.Endpoint, "compat.objectstorage.") && c.Region == "auto" {
-		return c, false, fmt.Errorf("%s_S3_REGION is required for OCI Object Storage", prefix)
+	if strings.Contains(c.Endpoint, "compat.objectstorage.") {
+		if c.Region == "auto" {
+			return c, false, fmt.Errorf("%s_S3_REGION is required for OCI Object Storage", prefix)
+		}
+		// The namespace endpoint serves path-style requests only.
+		if c.BucketLookup != "path" {
+			return c, false, fmt.Errorf("%s_S3_BUCKET_LOOKUP must be path for OCI Object Storage", prefix)
+		}
 	}
 	var e error
 	if c.MaxBytes, e = envInt("HK_ATTACH_MAX_BYTES", DefaultMaxBytes); e != nil {
@@ -214,7 +220,9 @@ type MigrationResult struct {
 
 // Migrate copies and verifies all content-addressed objects before recording
 // each target location. It never deletes a source object; dry runs only inspect
-// attachment metadata.
+// attachment metadata. An object already verified at the target is not read
+// from the source, so a rerun after the cutover (when new rows exist only at
+// the target) completes and picks up rows added after an earlier run's snapshot.
 func Migrate(ctx context.Context, db MigrationDB, source, target ObjectStore, targetLocation string, apply bool) (MigrationResult, error) {
 	rows, err := db.ListAttachmentObjects(ctx)
 	if err != nil {
@@ -229,22 +237,25 @@ func Migrate(ctx context.Context, db MigrationDB, source, target ObjectStore, ta
 	}
 	for _, x := range rows {
 		objectKey := key(x.SHA256)
-		body, err := readVerified(ctx, source, objectKey, x.SHA256, x.SizeBytes)
-		if err != nil {
-			return result, fmt.Errorf("source %s: %w", x.SHA256, err)
-		}
-		if err = target.Stat(ctx, objectKey); err != nil {
+		if _, err := readVerified(ctx, target, objectKey, x.SHA256, x.SizeBytes); err != nil {
 			if !objectNotFound(err) {
-				return result, fmt.Errorf("target stat %s: %w", x.SHA256, err)
+				return result, fmt.Errorf("target %s: %w", x.SHA256, err)
+			}
+			body, err := readVerified(ctx, source, objectKey, x.SHA256, x.SizeBytes)
+			if err != nil {
+				return result, fmt.Errorf("source %s: %w", x.SHA256, err)
 			}
 			if err = target.Put(ctx, objectKey, bytes.NewReader(body), int64(len(body)), x.MIME); err != nil {
 				return result, fmt.Errorf("target put %s: %w", x.SHA256, err)
 			}
+			if _, err = readVerified(ctx, target, objectKey, x.SHA256, x.SizeBytes); err != nil {
+				return result, fmt.Errorf("target %s: %w", x.SHA256, err)
+			}
 		}
-		if _, err = readVerified(ctx, target, objectKey, x.SHA256, x.SizeBytes); err != nil {
-			return result, fmt.Errorf("target %s: %w", x.SHA256, err)
+		if x.ObjectLocation == targetLocation {
+			continue
 		}
-		if err = db.SetAttachmentObjectLocation(ctx, x.SHA256, targetLocation); err != nil {
+		if err := db.SetAttachmentObjectLocation(ctx, x.SHA256, targetLocation); err != nil {
 			return result, fmt.Errorf("record target location %s: %w", x.SHA256, err)
 		}
 	}
