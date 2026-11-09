@@ -115,7 +115,7 @@ func ConfigFromPrefix(prefix string) (Config, bool, error) {
 	if c.BucketLookup != "path" && c.BucketLookup != "virtual" {
 		return c, false, fmt.Errorf("%s_S3_BUCKET_LOOKUP must be path or virtual", prefix)
 	}
-	if strings.Contains(c.Endpoint, "compat.objectstorage.") {
+	if strings.Contains(strings.ToLower(c.Endpoint), "compat.objectstorage.") {
 		if c.Region == "auto" {
 			return c, false, fmt.Errorf("%s_S3_REGION is required for OCI Object Storage", prefix)
 		}

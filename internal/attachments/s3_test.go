@@ -41,6 +41,13 @@ func TestConfigFromPrefixDefaultsAndOCIRegion(t *testing.T) {
 	if err != nil || !enabled || oci.Region != "us-ashburn-1" || oci.BucketLookup != "path" {
 		t.Fatalf("OCI config=%+v enabled=%v err=%v", oci, enabled, err)
 	}
+	t.Setenv("OCI_S3_ENDPOINT", "https://NS.COMPAT.OBJECTSTORAGE.us-ashburn-1.ORACLECLOUD.COM")
+	t.Setenv("OCI_S3_REGION", "")
+	if _, _, err = ConfigFromPrefix("OCI"); err == nil || !strings.Contains(err.Error(), "OCI_S3_REGION is required") {
+		t.Fatalf("upper-case OCI endpoint skipped the region guard: %v", err)
+	}
+	t.Setenv("OCI_S3_ENDPOINT", "https://namespace.compat.objectstorage.us-ashburn-1.oraclecloud.com")
+	t.Setenv("OCI_S3_REGION", "us-ashburn-1")
 	t.Setenv("OCI_S3_BUCKET_LOOKUP", "virtual")
 	if _, _, err = ConfigFromPrefix("OCI"); err == nil || !strings.Contains(err.Error(), "must be path for OCI") {
 		t.Fatalf("virtual OCI lookup error = %v", err)
