@@ -1640,7 +1640,7 @@ func attachMigrateCmd(args []string, out io.Writer) error {
 	if dbURL == "" {
 		return errors.New("HANDOFFKEEP_DB_URL is required")
 	}
-	st, e := store.OpenExisting(context.Background(), dbURL)
+	st, e := store.OpenExisting(context.Background(), dbURL, *apply)
 	if e != nil {
 		return e
 	}

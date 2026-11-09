@@ -450,10 +450,10 @@ func OpenRuntime(ctx context.Context, url string) (*Store, error) {
 	return &Store{pool: p}, nil
 }
 
-// OpenExisting connects to a migrated database using the same schema choice as
-// OpenServer: wrk tables require the runtime opener; otherwise Open may migrate.
+// OpenExisting connects using the same schema choice as OpenServer. When
+// migrate is false, schemas without wrk tables are opened without running DDL.
 // The probe holds no table lock and errors never include the database URL.
-func OpenExisting(ctx context.Context, url string) (*Store, error) {
+func OpenExisting(ctx context.Context, url string, migrate bool) (*Store, error) {
 	probe, err := newPool(ctx, url)
 	if err != nil {
 		return nil, fmt.Errorf("open database probe: %w", err)
@@ -475,11 +475,33 @@ func OpenExisting(ctx context.Context, url string) (*Store, error) {
 		}
 		return store, nil
 	}
-	store, err := Open(ctx, url)
+	var store *Store
+	if migrate {
+		store, err = Open(ctx, url)
+	} else {
+		store, err = openWithoutMigration(ctx, url)
+	}
 	if err != nil {
-		return nil, fmt.Errorf("open database: %w", err)
+		return nil, fmt.Errorf("open database (migrate=%t): %w", migrate, err)
 	}
 	return store, nil
+}
+
+// openWithoutMigration opens a connection without inspecting or changing the
+// schema. Callers learn whether their required tables exist from their query.
+func openWithoutMigration(ctx context.Context, url string) (*Store, error) {
+	if !strings.HasPrefix(url, "postgres://") && !strings.HasPrefix(url, "postgresql://") {
+		return nil, errors.New("database URL must use postgres:// or postgresql://")
+	}
+	p, err := newPool(ctx, url)
+	if err != nil {
+		return nil, fmt.Errorf("open database pool: %w", err)
+	}
+	if err = p.Ping(ctx); err != nil {
+		p.Close()
+		return nil, fmt.Errorf("ping database: %w", err)
+	}
+	return &Store{pool: p}, nil
 }
 func (s *Store) HasWrkEnrollment(ctx context.Context) bool {
 	var yes bool
@@ -513,7 +535,7 @@ func OpenServer(ctx context.Context, runtimeURL, migrationURL, mode string, poli
 	}
 	// Inspect without DDL. An enrolled/runtime schema must never execute owner
 	// migrations with the runtime credential, even when the API has been disabled.
-	s, e := OpenExisting(ctx, runtimeURL)
+	s, e := OpenExisting(ctx, runtimeURL, true)
 	if e != nil {
 		return nil, fmt.Errorf("%w: %w", wrkrecords.Error("wrk_unavailable"), e)
 	}
