@@ -106,7 +106,7 @@ func TestOpenExistingUsesRuntimeForWrkSchema(t *testing.T) {
 	if err = owner.MigrateWrk(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	runtime, err := OpenExisting(t.Context(), u)
+	runtime, err := OpenExisting(t.Context(), u, true)
 	if err != nil {
 		t.Fatalf("OpenExisting on wrk schema: %v", err)
 	}
@@ -126,7 +126,7 @@ func TestOpenExistingPreservesRuntimeSchemaError(t *testing.T) {
 	if _, err = owner.pool.Exec(t.Context(), `DROP TABLE schema_version`); err != nil {
 		t.Fatal(err)
 	}
-	_, err = OpenExisting(t.Context(), u)
+	_, err = OpenExisting(t.Context(), u, true)
 	var pgErr *pgconn.PgError
 	if !errors.As(err, &pgErr) || pgErr.Code != "42P01" {
 		t.Fatalf("OpenExisting error = %v, want wrapped undefined-table error", err)
