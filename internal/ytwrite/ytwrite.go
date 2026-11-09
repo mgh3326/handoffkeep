@@ -1,0 +1,274 @@
+// Package ytwrite is the write-operation protocol hk uses to write to YouTrack
+// (hk 3667 v2, hk 3697). YouTrack has no transactions, no conditional update
+// and no idempotency key, so hk supplies them with a durable op log (the
+// Ledger): every logical write is one row that is committed before any remote
+// call, carries its immutable outbound payload, and moves through
+//
+//	prepared -> dispatched -> applied | rejected | remote_unknown
+//
+// The package holds the rules only. It imports no database package: the
+// Postgres Ledger lives in internal/store, the in-memory Ledger and the fake
+// YouTrack that the fault tests drive live in internal/ytwrite/ytwritetest,
+// and the same contract suite runs against both. Nothing in the hk binary
+// calls it yet; the first production write is slice b1a.
+//
+// The rules, each pinned by a fault test:
+//
+//   - One remote attempt per dispatch. A create whose reply was lost is never
+//     sent again: it stays remote_unknown until positive evidence (the exact
+//     rendered body, marker included, found by enumerating the target's
+//     comments) adopts it. Absence is never proof; it keeps remote_unknown.
+//   - A caller is told "pending" or "applied" or "rejected", never a success
+//     the ledger has not recorded. Pending is promised only after the op row
+//     is durable.
+//   - An idempotency key is scoped to (principal, kind). The same key with the
+//     same payload returns the recorded result; with another payload it is
+//     ErrKeyConflict.
+//   - Writes to one entity are ordered: an op is dispatched only when every
+//     earlier op on the same entity is resolved.
+package ytwrite
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+)
+
+// State is one op's place in the lifecycle.
+type State string
+
+const (
+	// StatePrepared: the row is durable and no remote call has been made. A
+	// 429 or 401 puts a dispatched op back here with a later NextAttemptAt:
+	// the request was not processed.
+	StatePrepared State = "prepared"
+	// StateDispatched: dispatch ownership is committed and the remote call is
+	// (or was) in flight. A crash here is uncertain, not safe to resend.
+	StateDispatched State = "dispatched"
+	// StateApplied: the remote effect is confirmed and its YouTrack id and map
+	// rows are committed. Terminal.
+	StateApplied State = "applied"
+	// StateRejected: a final refusal, or an operator's "it did not happen".
+	// Terminal.
+	StateRejected State = "rejected"
+	// StateRemoteUnknown: the effect may or may not exist. Only positive
+	// evidence or an operator decision leaves this state.
+	StateRemoteUnknown State = "remote_unknown"
+)
+
+// Valid reports whether s is one of the five states.
+func (s State) Valid() bool {
+	switch s {
+	case StatePrepared, StateDispatched, StateApplied, StateRejected, StateRemoteUnknown:
+		return true
+	}
+	return false
+}
+
+// Resolved reports a terminal state.
+func (s State) Resolved() bool { return s == StateApplied || s == StateRejected }
+
+// Status is the three-way answer a caller sees.
+type Status string
+
+const (
+	StatusPending  Status = "pending"
+	StatusApplied  Status = "applied"
+	StatusRejected Status = "rejected"
+)
+
+// KindCommentAppend is the only kind in this slice: one comment appended to a
+// mapped task's issue.
+const KindCommentAppend = "comment_append"
+
+// Reasons a caller can read on a Result. They are stable codes.
+const (
+	ReasonDispatched        = "dispatched"
+	ReasonRemoteUnknown     = "remote_unknown"
+	ReasonRateLimited       = "rate_limited"
+	ReasonUnauthorized      = "unauthorized"
+	ReasonWaitingForEarlier = "waiting_for_earlier_op"
+	ReasonOutcomeUnrecorded = "outcome_unrecorded"
+	ReasonNoID              = "no_id_in_reply"
+	ReasonTransport         = "transport_error"
+	ReasonServerError       = "http_5xx"
+	ReasonDispatcherLost    = "dispatcher_lost"
+	ReasonNoEvidence        = "no_evidence"
+	ReasonMultipleMatches   = "multiple_matches"
+	ReasonMarkerMismatch    = "marker_mismatch"
+	ReasonMarkerDeleted     = "marker_deleted"
+	ReasonReconcileFailed   = "reconcile_failed"
+	ReasonOperatorNotDone   = "operator_not_applied"
+	ReasonUnsupportedKind   = "unsupported_kind"
+)
+
+var (
+	// ErrInvalid is a request the protocol refuses before anything is stored.
+	ErrInvalid = errors.New("ytwrite_invalid")
+	// ErrKeyConflict is the same (principal, kind, key) with another payload.
+	ErrKeyConflict = errors.New("ytwrite_key_conflict")
+	// ErrNotFound is an op id the principal cannot see.
+	ErrNotFound = errors.New("ytwrite_not_found")
+	// ErrState is a transition the lifecycle does not allow.
+	ErrState = errors.New("ytwrite_state")
+	// ErrConflictingResult is a second, different YouTrack id for an op that
+	// already has one: a duplicate effect. It is reported, never overwritten.
+	ErrConflictingResult = errors.New("ytwrite_conflicting_result")
+)
+
+// Op is one logical write as the ledger holds it. Principal, Kind, Key,
+// PayloadSHA, Payload, EntityKind, EntityID, YTTargetID, Actor, ParentID,
+// ChildSeq and CreatedAt never change after Prepare.
+type Op struct {
+	ID        int64
+	Principal string
+	Kind      string
+	Key       string
+	// PayloadSHA is the hash that tells a replay from a conflicting reuse of
+	// the key. It covers what the write means (kind, target, body), not the
+	// actor or the time.
+	PayloadSHA string
+	// Payload is the immutable outbound payload (JSON); the exact text sent is
+	// a pure function of it and the op, so a resend or a reconciliation
+	// renders the same bytes.
+	Payload []byte
+	// EntityKind and EntityID name the hk entity whose writes are ordered
+	// (task, 3697). YTTargetID is the YouTrack id of the thing written to.
+	EntityKind string
+	EntityID   string
+	YTTargetID string
+	Actor      string
+	// ParentID and ChildSeq record a parent/child plan (0 = none). The schema
+	// carries them for multi-step writes; this slice does not settle parents.
+	ParentID int64
+	ChildSeq int
+
+	State State
+	// YTResultID is the YouTrack id of the created thing, set on applied.
+	YTResultID string
+	// Reason is the latest cause code (terminal or pending); LastError is the
+	// free-form detail behind it.
+	Reason    string
+	LastError string
+	// Attempts counts dispatches; Reconciles counts evidence searches.
+	Attempts   int
+	Reconciles int
+
+	CreatedAt     time.Time
+	DispatchedAt  time.Time
+	NextAttemptAt time.Time
+	ResolvedAt    time.Time
+}
+
+// NewOp is what Prepare stores.
+type NewOp struct {
+	Principal  string
+	Kind       string
+	Key        string
+	PayloadSHA string
+	Payload    []byte
+	EntityKind string
+	EntityID   string
+	YTTargetID string
+	Actor      string
+	ParentID   int64
+	ChildSeq   int
+}
+
+// MapRow is one hk identity -> YouTrack id row committed with an op's
+// `applied`.
+type MapRow struct {
+	EntityKind string
+	HKKey      string
+	YTID       string
+	YTParentID string
+	OpID       int64
+}
+
+// ClaimOutcome says why Claim did or did not start a dispatch.
+type ClaimOutcome string
+
+const (
+	ClaimClaimed     ClaimOutcome = "claimed"
+	ClaimNotPrepared ClaimOutcome = "not_prepared"
+	ClaimNotDue      ClaimOutcome = "not_due"
+	ClaimBlocked     ClaimOutcome = "blocked"
+)
+
+// Ledger is the durable op log. Every method is one atomic step; a method that
+// moves state is a compare-and-set on the current state, so concurrent callers
+// and a second process cannot both win it. Time is always passed in (one clock
+// for the whole table); the ledger never reads its own.
+type Ledger interface {
+	// Prepare stores n as a new prepared op, or returns the op already stored
+	// under (principal, kind, key). created is false for the replay. The same
+	// key with another PayloadSHA is ErrKeyConflict.
+	Prepare(ctx context.Context, now time.Time, n NewOp) (op Op, created bool, err error)
+	// Get returns an op the principal owns; any other id is ErrNotFound.
+	Get(ctx context.Context, principal string, id int64) (Op, error)
+	// ByID returns an op by id for the protocol's own recovery paths.
+	ByID(ctx context.Context, id int64) (Op, error)
+	// Claim starts a dispatch: prepared -> dispatched, attempts+1, only when
+	// the op is due and every earlier op on its entity is resolved.
+	Claim(ctx context.Context, now time.Time, id int64) (Op, ClaimOutcome, error)
+	// Apply records the confirmed effect and commits maps in the same
+	// transaction. From dispatched or remote_unknown. Applying an applied op
+	// with the same id is a no-op; with another id it is ErrConflictingResult.
+	Apply(ctx context.Context, now time.Time, id int64, ytID string, maps []MapRow) (Op, error)
+	// Reject records a final refusal. From prepared, dispatched or
+	// remote_unknown.
+	Reject(ctx context.Context, now time.Time, id int64, reason, detail string) (Op, error)
+	// Defer puts a dispatched op back to prepared, due at next: the remote did
+	// not process the request.
+	Defer(ctx context.Context, now time.Time, id int64, next time.Time, reason, detail string) (Op, error)
+	// MarkUnknown moves a dispatched op to remote_unknown, due for evidence
+	// search at next. Idempotent for an op already remote_unknown.
+	MarkUnknown(ctx context.Context, now time.Time, id int64, next time.Time, reason, detail string) (Op, error)
+	// TouchUnknown records a search that found no evidence: reconciles+1, due
+	// again at next. Only for remote_unknown.
+	TouchUnknown(ctx context.Context, now time.Time, id int64, next time.Time, reason, detail string) (Op, error)
+	// Due lists prepared and remote_unknown ops whose NextAttemptAt <= now,
+	// ascending id. A prepared op queued behind an unresolved earlier op on its
+	// entity is not listed (it cannot be claimed yet, and listing it would let a
+	// long blocked queue crowd out ops that can run).
+	Due(ctx context.Context, now time.Time, limit int) ([]Op, error)
+	// Stale lists dispatched ops whose dispatch began at or before cutoff,
+	// ascending id.
+	Stale(ctx context.Context, cutoff time.Time, limit int) ([]Op, error)
+	// ListState lists ops in one state, ascending id: the operator's view of
+	// what is unresolved.
+	ListState(ctx context.Context, state State, limit int) ([]Op, error)
+	// MapGet reads one committed map row.
+	MapGet(ctx context.Context, entityKind, hkKey string) (MapRow, bool, error)
+}
+
+// RemoteComment is one comment as the remote lists it.
+type RemoteComment struct {
+	ID      string
+	Text    string
+	Deleted bool
+}
+
+// Remote is the YouTrack surface the protocol uses. CreateComment makes exactly
+// one attempt: no retry inside, because a retry after a lost reply could
+// duplicate the comment.
+type Remote interface {
+	// CreateComment appends text to the issue. A nil error with an empty id is
+	// a 2xx without a usable id; the protocol treats it as uncertain.
+	CreateComment(ctx context.Context, issueID, text string) (id string, err error)
+	// ListComments returns one page of the issue's comments, skip/top.
+	ListComments(ctx context.Context, issueID string, skip, top int) ([]RemoteComment, error)
+}
+
+// RemoteError is an HTTP answer from the remote. Any other error from Remote
+// is a transport failure and is uncertain.
+type RemoteError struct {
+	Status     int
+	RetryAfter time.Duration
+	Message    string
+}
+
+func (e *RemoteError) Error() string {
+	return fmt.Sprintf("youtrack answered %d: %s", e.Status, e.Message)
+}
