@@ -57,7 +57,7 @@ func (f *fakeStore) DueYouTrackDocs(_ context.Context, patterns []string, defaul
 				}
 			}
 		}
-		if ok && a.SourceSHA == d.SHA256 && a.HKProject == f.docProject(d, defaultProject) && !(a.PartCount <= 1 && a.Bytes < int64(len(d.Body))) && a.PartSHA != "" && !staleChild && a.PartCount == rowCount {
+		if ok && a.SourceSHA == d.SHA256 && a.HKProject == f.docProject(d, defaultProject) && !(a.PartCount <= 1 && a.Bytes < int64(len(d.Body))) && strings.HasPrefix(a.PartSHA, "v2:") && !staleChild && a.PartCount == rowCount {
 			continue
 		}
 		if !f.dueAttempt(store.YouTrackQueueDoc, k, now) {

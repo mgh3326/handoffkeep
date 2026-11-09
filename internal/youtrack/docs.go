@@ -204,7 +204,7 @@ func (s *Service) pushDoc(ctx context.Context, doc store.Document, dry bool) (Do
 		if i == 0 {
 			action.ArticleID = article.ID
 		}
-		ledgerEntry := store.YouTrackDocArticle{DocKey: ledgerKey, DocumentKey: doc.Key, PartIndex: i + 1, PartCount: len(parts), PartSHA: docPartSHA(part), HKProject: project.HKProject, ArticleID: article.ID, SourceSHA: doc.SHA256, Bytes: int64(len(part)), SyncedAt: s.now()}
+		ledgerEntry := store.YouTrackDocArticle{DocKey: ledgerKey, DocumentKey: doc.Key, PartIndex: i + 1, PartCount: len(parts), PartSHA: docPartSHA(doc.SHA256, part), HKProject: project.HKProject, ArticleID: article.ID, SourceSHA: doc.SHA256, Bytes: int64(len(part)), SyncedAt: s.now()}
 		if i == 0 {
 			existing = ledgerEntry // commit the source SHA only after all child work succeeds
 		} else if e = s.store.UpsertYouTrackDocArticle(ctx, ledgerEntry); e != nil {
@@ -312,9 +312,9 @@ func docArticleParts(content, key string) []string {
 	return parts
 }
 
-func docPartSHA(content string) string {
-	sum := sha256.Sum256([]byte(content))
-	return hex.EncodeToString(sum[:])
+func docPartSHA(sourceSHA, content string) string {
+	sum := sha256.Sum256([]byte("youtrack-doc-part-v2\x00" + sourceSHA + "\x00" + content))
+	return "v2:" + hex.EncodeToString(sum[:])
 }
 
 func docPartTitle(key string, part, total int) string {
@@ -335,7 +335,7 @@ func completeDocLedger(rows []store.YouTrackDocArticle, parts []string, sourceSH
 		return false
 	}
 	for i, row := range rows {
-		if row.PartIndex != i+1 || row.PartCount != len(parts) || row.SourceSHA != sourceSHA || row.PartSHA != docPartSHA(parts[i]) || row.HKProject != project {
+		if row.PartIndex != i+1 || row.PartCount != len(parts) || row.SourceSHA != sourceSHA || row.PartSHA != docPartSHA(sourceSHA, parts[i]) || row.HKProject != project {
 			return false
 		}
 	}
@@ -398,7 +398,7 @@ func (s *Service) ReadDocumentArticle(ctx context.Context, key string) (string, 
 		if e != nil {
 			return "", e
 		}
-		if row.PartSHA != "" && docPartSHA(a.Content) != row.PartSHA {
+		if strings.HasPrefix(row.PartSHA, "v2:") && docPartSHA(row.SourceSHA, a.Content) != row.PartSHA {
 			return "", fmt.Errorf("document %q part %d content does not match its ledger", key, i+1)
 		}
 		part := strings.TrimPrefix(a.Content, docMarker(docPartMarkerKey(key, i+1))+"\n")

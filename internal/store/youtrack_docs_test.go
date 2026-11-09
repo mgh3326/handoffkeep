@@ -70,6 +70,9 @@ func TestYouTrackDocArticleLedgerRoundTripAndOrphans(t *testing.T) {
 	if err := s.UpsertYouTrackDocArticle(ctx, YouTrackDocArticle{DocKey: "review/gone", HKProject: "other", ArticleID: "A-9", SourceSHA: "y", Bytes: 4, SyncedAt: at}); err != nil {
 		t.Fatal(err)
 	}
+	if err := s.UpsertYouTrackDocArticle(ctx, YouTrackDocArticle{DocKey: "/hk-part/gone/2", DocumentKey: "review/gone", PartIndex: 2, PartCount: 2, HKProject: "other", ArticleID: "A-10", SourceSHA: "y", PartSHA: "v2:child", Bytes: 3, SyncedAt: at}); err != nil {
+		t.Fatal(err)
+	}
 	row, ok, err := s.GetYouTrackDocArticle(ctx, "review/gone")
 	if err != nil || !ok {
 		t.Fatalf("get: ok=%v err=%v", ok, err)
@@ -81,8 +84,8 @@ func TestYouTrackDocArticleLedgerRoundTripAndOrphans(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(orphans) != 1 || orphans[0].DocKey != "review/gone" {
-		t.Fatalf("orphans = %+v, want only review/gone (index rows are not documents)", orphans)
+	if len(orphans) != 2 || orphans[0].DocKey != "review/gone" || orphans[1].DocKey != "review/gone" {
+		t.Fatalf("orphans = %+v, want both article parts for review/gone", orphans)
 	}
 	if err := s.UpsertYouTrackDocArticle(ctx, YouTrackDocArticle{DocKey: "review/x", ArticleID: "A-2"}); err == nil {
 		t.Fatal("a row without a project must be refused")
@@ -131,10 +134,10 @@ func TestLegacyRowWithoutPartSHAAndStaleChildAreDue(t *testing.T) {
 	if len(due) != 1 {
 		t.Fatalf("row without part SHA was not due: %+v", due)
 	}
-	if err = s.UpsertYouTrackDocArticle(ctx, YouTrackDocArticle{DocKey: doc.Key, HKProject: "handoffkeep", ArticleID: "A-1", PartCount: 2, SourceSHA: doc.SHA256, PartSHA: "primary", Bytes: int64(len(doc.Body) + 100), SyncedAt: time.Now().UTC()}); err != nil {
+	if err = s.UpsertYouTrackDocArticle(ctx, YouTrackDocArticle{DocKey: doc.Key, HKProject: "handoffkeep", ArticleID: "A-1", PartCount: 2, SourceSHA: doc.SHA256, PartSHA: "v2:primary", Bytes: int64(len(doc.Body) + 100), SyncedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
-	if err = s.UpsertYouTrackDocArticle(ctx, YouTrackDocArticle{DocKey: "/hk-part/child/2", DocumentKey: doc.Key, PartIndex: 2, PartCount: 2, HKProject: "handoffkeep", ArticleID: "A-2", SourceSHA: "old-source", PartSHA: "child", Bytes: 10, SyncedAt: time.Now().UTC()}); err != nil {
+	if err = s.UpsertYouTrackDocArticle(ctx, YouTrackDocArticle{DocKey: "/hk-part/child/2", DocumentKey: doc.Key, PartIndex: 2, PartCount: 2, HKProject: "handoffkeep", ArticleID: "A-2", SourceSHA: "old-source", PartSHA: "v2:child", Bytes: 10, SyncedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
 	due, err = s.DueYouTrackDocs(ctx, []string{"%"}, "handoffkeep", 10)
@@ -149,7 +152,7 @@ func TestLegacyRowWithoutPartSHAAndStaleChildAreDue(t *testing.T) {
 func TestPreviousReleaseLedgerWriteCanStillBeReadAndIsNotOrphaned(t *testing.T) {
 	s := schemaStore(t, "youtrack_docs_legacy_write")
 	ctx := context.Background()
-	doc, _, err := s.PutDocument(ctx, Document{Key: "review/legacy-write", Kind: "review", Body: "# Legacy write\n\nbody", CreatedBy: "test"})
+	doc, _, err := s.PutDocument(ctx, Document{Key: "review/legacy-write", Kind: "other", Body: "# Legacy write\n\nbody", CreatedBy: "test"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,6 +173,43 @@ func TestPreviousReleaseLedgerWriteCanStillBeReadAndIsNotOrphaned(t *testing.T) 
 	}
 	if len(orphans) != 0 {
 		t.Fatalf("live document reported orphaned: %+v", orphans)
+	}
+}
+
+func TestPreviousReleaseUpdateInvalidatesPartSHA(t *testing.T) {
+	s := schemaStore(t, "youtrack_docs_legacy_update")
+	ctx := context.Background()
+	doc, _, err := s.PutDocument(ctx, Document{Key: "design/legacy-update", Kind: "design", Body: "# Before\n\nbody", CreatedBy: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.PutYouTrackProject(ctx, YouTrackProject{HKProject: "handoffkeep", ShortName: "HK"}); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.UpsertYouTrackDocArticle(ctx, YouTrackDocArticle{DocKey: doc.Key, HKProject: "handoffkeep", ArticleID: "A-old", SourceSHA: doc.SHA256, PartSHA: "v2:previous", Bytes: 200, SyncedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	updated, _, err := s.PutDocument(ctx, Document{Key: doc.Key, Kind: "design", Body: "# After\n\nchanged", CreatedBy: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.pool.Exec(ctx, `INSERT INTO youtrack_doc_articles(doc_key,hk_project,article_id,source_sha,bytes,synced_at) VALUES($1,'handoffkeep','A-old',$2,200,now()) ON CONFLICT(doc_key) DO UPDATE SET hk_project=EXCLUDED.hk_project,article_id=EXCLUDED.article_id,source_sha=EXCLUDED.source_sha,bytes=EXCLUDED.bytes,synced_at=EXCLUDED.synced_at`, doc.Key, updated.SHA256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	row, ok, err := s.GetYouTrackDocArticle(ctx, doc.Key)
+	if err != nil || !ok {
+		t.Fatalf("get old-release row: ok=%v err=%v", ok, err)
+	}
+	if row.PartSHA != "" {
+		t.Fatalf("legacy write retained stale part SHA %q", row.PartSHA)
+	}
+	due, err := s.DueYouTrackDocs(ctx, []string{"%"}, "handoffkeep", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(due) != 1 || due[0].Key != doc.Key {
+		t.Fatalf("legacy-updated row was not due: %+v", due)
 	}
 }
 

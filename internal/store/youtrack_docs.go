@@ -71,11 +71,11 @@ func (s *Store) DueYouTrackDocs(ctx context.Context, patterns []string, defaultP
 		WHERE d.key LIKE ANY($1::text[])
 		  AND (a.doc_key IS NULL OR a.source_sha<>d.sha256
 		       OR a.hk_project<>COALESCE(rp.hk_project,'')
-	       OR a.part_sha=''
+		       OR a.part_sha NOT LIKE 'v2:%'
 	       -- Legacy oversized stubs stored fewer bytes than the source body.
 	       OR (a.part_count=1 AND a.bytes<octet_length(d.body))
 	       OR a.part_count<>(SELECT count(*) FROM youtrack_doc_articles p WHERE COALESCE(NULLIF(p.document_key,''),p.doc_key)=d.key)
-	       OR EXISTS (SELECT 1 FROM youtrack_doc_articles p WHERE COALESCE(NULLIF(p.document_key,''),p.doc_key)=d.key AND p.part_index>1 AND p.source_sha<>d.sha256))
+		       OR EXISTS (SELECT 1 FROM youtrack_doc_articles p WHERE COALESCE(NULLIF(p.document_key,''),p.doc_key)=d.key AND p.part_index>1 AND p.source_sha<>d.sha256))
 		  AND `+youtrackAttemptRank("r")+` <= now()
 		ORDER BY `+youtrackAttemptRank("r")+` ASC, d.key ASC LIMIT $2`, patterns, limit, defaultProject)
 	if err != nil {
@@ -123,10 +123,10 @@ func (s *Store) OrphanYouTrackDocArticles(ctx context.Context, limit int) ([]You
 	if limit < 1 {
 		limit = 100
 	}
-	rows, err := s.pool.Query(ctx, `SELECT a.doc_key,a.hk_project,a.article_id,a.source_sha,a.bytes,a.synced_at
+	rows, err := s.pool.Query(ctx, `SELECT COALESCE(NULLIF(a.document_key,''),a.doc_key),a.hk_project,a.article_id,a.source_sha,a.bytes,a.synced_at
 		FROM youtrack_doc_articles a
-		WHERE a.part_index=1 AND a.doc_key NOT LIKE 'index:%' AND NOT EXISTS (SELECT 1 FROM documents d WHERE d.key=COALESCE(NULLIF(a.document_key,''),a.doc_key))
-		ORDER BY a.doc_key ASC LIMIT $1`, limit)
+		WHERE a.doc_key NOT LIKE 'index:%' AND NOT EXISTS (SELECT 1 FROM documents d WHERE d.key=COALESCE(NULLIF(a.document_key,''),a.doc_key))
+		ORDER BY COALESCE(NULLIF(a.document_key,''),a.doc_key),a.part_index,a.doc_key LIMIT $1`, limit)
 	if err != nil {
 		return nil, err
 	}
