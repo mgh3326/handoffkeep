@@ -178,6 +178,10 @@ impl Engine for HkPgEngine {
         Err(anyhow!("existence check failed: {}", first_line(&err)))
     }
 
+    fn is_remote(&self) -> bool {
+        true
+    }
+
     fn setup_notes(&self) -> Vec<String> {
         vec![
             "hk production search through the handoffkeep CLI (ctx search, read-only); the CLI's own configuration is used".into(),

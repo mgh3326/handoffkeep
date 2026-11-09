@@ -3,6 +3,7 @@
 //!   searchbench run local [--only a,b] [--runs N] [--out DIR] [--work DIR]
 //!   searchbench run db    [--only a,b] [--runs N] [--out DIR] [--work DIR]
 //!   searchbench run all   ...
+//!   searchbench run db --smoke [--only a]   (build, one query per mode, no results written)
 //!   searchbench summarize [--out DIR]
 //!
 //! `run local` needs no network. `run db` needs the database settings in the
@@ -32,6 +33,7 @@ struct Opts {
     work: PathBuf,
     runs: usize,
     only: Option<Vec<String>>,
+    smoke: bool,
 }
 
 fn parse_opts(args: &[String]) -> Result<Opts> {
@@ -42,11 +44,13 @@ fn parse_opts(args: &[String]) -> Result<Opts> {
         work: "work".into(),
         runs: 100,
         only: None,
+        smoke: false,
     };
     let mut it = args.iter();
     while let Some(flag) = it.next() {
         let mut val = || it.next().cloned().ok_or_else(|| anyhow!("{flag} needs a value"));
         match flag.as_str() {
+            "--smoke" => o.smoke = true,
             "--corpus" => o.corpus = val()?.into(),
             "--queries" => o.queries = val()?.into(),
             "--out" => o.out = val()?.into(),
@@ -117,6 +121,7 @@ fn run(args: &[String]) -> Result<()> {
     let queries: Vec<Query> = corpus::load_queries(&o.queries)?;
     eprintln!("corpus: {} records, {} queries (loaded in {:.1}s)", recs.len(), queries.len(), t.elapsed().as_secs_f64());
 
+    let mut smoke_failures = 0;
     for mut engine in engines_for(group, &o.work)? {
         let name = engine.name();
         if let Some(only) = &o.only {
@@ -130,6 +135,11 @@ fn run(args: &[String]) -> Result<()> {
             // One failing engine must not stop the others: record it and move on.
             let msg = format!("{e:#}");
             eprintln!("[{name}] FAILED build: {msg}");
+            if o.smoke {
+                println!("[{name}] SMOKE FAILED (build): {msg}");
+                smoke_failures += 1;
+                continue;
+            }
             let doc = json!({ "engine": name, "stage": "build", "error": msg });
             fs::write(o.out.join(format!("{name}__failed.json")), serde_json::to_string_pretty(&doc)?)?;
             continue;
@@ -137,6 +147,13 @@ fn run(args: &[String]) -> Result<()> {
         let ingest_s = t.elapsed().as_secs_f64();
         let index_bytes = engine.index_bytes().unwrap_or(0);
         eprintln!("[{name}] built in {ingest_s:.1}s, index {index_bytes} bytes");
+        if o.smoke {
+            if let Err(e) = smoke_engine(engine.as_mut(), &recs, &queries) {
+                println!("[{name}] SMOKE FAILED: {e:#}");
+                smoke_failures += 1;
+            }
+            continue;
+        }
         let coverage = measure_coverage(engine.as_mut(), &queries);
         if let Some(c) = &coverage {
             let exist = c.exists.values().filter(|v| **v == Some(true)).count();
@@ -164,6 +181,7 @@ fn run(args: &[String]) -> Result<()> {
                 };
                 let sub = if coverage.is_some() && !present.is_empty() { metrics::score(&present, &top) } else { None };
                 let unmapped = top.iter().filter(|k| k.starts_with("unmapped:")).count();
+                let unmapped_scope = unmapped_by_scope(&top);
                 for _ in 0..WARMUP {
                     let _ = engine.search(mode, &q.text, K);
                 }
@@ -190,6 +208,7 @@ fn run(args: &[String]) -> Result<()> {
                     "subset_mrr": sub.as_ref().map(|s| s.mrr),
                     "subset_recall": sub.as_ref().map(|s| s.recall),
                     "unmapped_in_top10": unmapped,
+                    "unmapped_by_scope": unmapped_scope,
                 }));
             }
             let answered: Vec<&Value> = per_query.iter().filter(|p| p["answered"] == true).collect();
@@ -230,6 +249,14 @@ fn run(args: &[String]) -> Result<()> {
                 Value::Null
             };
             let unmapped_total: u64 = per_query.iter().filter_map(|p| p["unmapped_in_top10"].as_u64()).sum();
+            let mut unmapped_scope_total = json!({"docs": 0, "memory": 0, "ctx": 0, "other": 0});
+            for p in &per_query {
+                for s in ["docs", "memory", "ctx", "other"] {
+                    let sum = unmapped_scope_total[s].as_u64().unwrap_or(0) + p["unmapped_by_scope"][s].as_u64().unwrap_or(0);
+                    unmapped_scope_total[s] = json!(sum);
+                }
+            }
+            let errored_queries = errors.len();
             let doc = json!({
                 "engine": name,
                 "mode": mode,
@@ -250,6 +277,8 @@ fn run(args: &[String]) -> Result<()> {
                     "mrr_at_10": mean("mrr"),
                     "no_answer_queries_with_results": no_answer_hits,
                     "unmapped_results_in_top10": unmapped_total,
+                    "unmapped_results_by_scope": unmapped_scope_total,
+                    "errored_queries": errored_queries,
                 },
                 "latency_ms": {
                     "samples": lat_us.len(),
@@ -264,7 +293,71 @@ fn run(args: &[String]) -> Result<()> {
             eprintln!("[{name}/{mode}] wrote {}", path.display());
         }
     }
+    if smoke_failures > 0 {
+        bail!("smoke: {smoke_failures} engine(s) failed");
+    }
     Ok(())
+}
+
+/// Smoke check (`run db --smoke`): builds the engine, then runs the first query in
+/// each mode and prints its top 3 mapped keys and whether its gold is in the top 10.
+/// For remote engines it also checks coverage of that query's gold keys. For local
+/// engines it runs a self-probe: the first two words of a task title must find that
+/// task. Writes no results; any failed search or self-probe miss is an error.
+fn smoke_engine(engine: &mut dyn Engine, recs: &[Record], queries: &[Query]) -> Result<()> {
+    let name = engine.name();
+    let q = queries.first().context("queries.jsonl is empty")?;
+    if engine.is_remote() {
+        let mut exist = Vec::new();
+        for g in &q.gold {
+            exist.push(format!("{g}={:?}", engine.key_exists(g)?));
+        }
+        if !exist.is_empty() {
+            println!("[{name}] gold of {} exists: {}", q.id, exist.join(" "));
+        }
+    }
+    for mode in engine.modes() {
+        let top = engine.search(mode, &q.text, K)?;
+        let gold_hit = match metrics::score(&q.gold, &top) {
+            Some(s) => if s.hit { "yes" } else { "no" },
+            None => "n/a (no gold)",
+        };
+        let top3: Vec<&str> = top.iter().take(3).map(String::as_str).collect();
+        println!("[{name}/{mode}] {} {:?} top3 {:?} gold in top10: {gold_hit}", q.id, q.text, top3);
+    }
+    if engine.is_remote() {
+        return Ok(());
+    }
+    let (key, probe) = self_probe(recs).context("no task title with two words to probe with")?;
+    for mode in engine.modes() {
+        let top = engine.search(mode, &probe, K)?;
+        match top.iter().position(|k| *k == key) {
+            Some(p) => println!("[{name}/{mode}] self-probe {probe:?} -> {key} at rank {}", p + 1),
+            None => bail!("self-probe {probe:?} did not find {key} in mode {mode} (top3 {:?})", top.iter().take(3).collect::<Vec<_>>()),
+        }
+    }
+    Ok(())
+}
+
+/// The first two words of the first task title with two words, and that task's key.
+fn self_probe(recs: &[Record]) -> Option<(String, String)> {
+    recs.iter().filter(|r| r.key.starts_with("task:")).find_map(|r| {
+        let words: Vec<&str> = r.text.lines().next()?.split_whitespace().take(2).collect();
+        (words.len() == 2).then(|| (r.key.clone(), words.join(" ")))
+    })
+}
+
+/// Unmapped results in a top list, by the scope named in the key (`unmapped:<scope>:<key>`).
+fn unmapped_by_scope(top: &[String]) -> Value {
+    let mut c = json!({"docs": 0, "memory": 0, "ctx": 0, "other": 0});
+    for scope in top.iter().filter_map(|k| k.strip_prefix("unmapped:")).map(|k| k.split(':').next().unwrap_or("")) {
+        let slot = match scope {
+            "docs" | "memory" | "ctx" => scope,
+            _ => "other",
+        };
+        c[slot] = json!(c[slot].as_u64().unwrap_or(0) + 1);
+    }
+    c
 }
 
 /// Whether each gold key of the query set exists in a remote system. None when the
@@ -373,7 +466,7 @@ fn summarize(args: &[String]) -> Result<()> {
             let c = &d["coverage"];
             let s = &d["subset"];
             md.push_str(&format!(
-                "| {} | {} | {} | {} | {} | {} | {:.3} | {} | {:.3} | {:.3} | {:.3} | {} |\n",
+                "| {} | {} | {} | {} | {} | {} | {:.3} | {} | {:.3} | {:.3} | {:.3} | {} ({} docs not in corpus, {} memory, {} ctx, {} other) |\n",
                 d["engine"].as_str().unwrap_or(""),
                 d["mode"].as_str().unwrap_or(""),
                 c["gold_keys"],
@@ -386,6 +479,10 @@ fn summarize(args: &[String]) -> Result<()> {
                 s["recall_at_10"].as_f64().unwrap_or(0.0),
                 s["mrr_at_10"].as_f64().unwrap_or(0.0),
                 d["aggregate"]["unmapped_results_in_top10"],
+                d["aggregate"]["unmapped_results_by_scope"]["docs"],
+                d["aggregate"]["unmapped_results_by_scope"]["memory"],
+                d["aggregate"]["unmapped_results_by_scope"]["ctx"],
+                d["aggregate"]["unmapped_results_by_scope"]["other"],
             ));
         }
         for d in docs.iter().filter(|d| !d["coverage"].is_null()) {
@@ -398,7 +495,7 @@ fn summarize(args: &[String]) -> Result<()> {
             }
         }
     }
-    md.push_str("\n## Query errors (first 5 per engine and mode)\n\n");
+    md.push_str("\n## Query errors (first 5 per engine and mode; an errored query scores as a miss)\n\n");
     let mut any_err = false;
     for d in &docs {
         let errs = d["errors"].as_array().cloned().unwrap_or_default();

@@ -6,10 +6,14 @@
 # missing Instant Client, crash) does not stop the others. A failed engine is
 # recorded as <OUT>/<engine>__failed.json and listed under "Failures" in summary.md.
 # Exit status: 0 if every DB engine produced results, 1 if any failed, 2 on bad setup.
+# `./run-db.sh --smoke`: per engine, build, one query per mode (top 3 printed), and a
+# self-probe for local engines; no results written. Run it before a full run: it
+# takes the build time (MySQL ingest is minutes) but no repeated query timing.
 #
 # Settings come from the environment only; values are never printed. The run
 # creates and drops only: MySQL database `searchbench`; ADB tables SB_KM, SB_BASIC,
-# SB_WORLD (with their CONTEXT indexes) in the RB_DB_USER schema.
+# SB_WORLD (with their CONTEXT indexes) and the lexer preference SB_KM_LEX (dropped
+# after its index) in the RB_DB_USER schema.
 #
 # Required: MYSQL_HOST MYSQL_PORT MYSQL_ADMIN_USER MYSQL_ADMIN_PASSWORD
 #           RB_DB_HOST RB_DB_PORT RB_DB_SERVICE RB_DB_USER RB_DB_PASSWORD RB_WALLET_DIR
@@ -41,6 +45,11 @@ if [[ "${1:-}" == "--check" ]]; then
   echo "run-db.sh: environment and corpus present"
   exit 0
 fi
+SMOKE=0
+if [[ "${1:-}" == "--smoke" ]]; then
+  # Build each engine, run one query per mode, self-probe local engines; writes no results.
+  SMOKE=1
+fi
 
 export TNS_ADMIN="$RB_WALLET_DIR"
 export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}"
@@ -54,6 +63,20 @@ mkdir -p "$OUT" work
 cargo build --release --features oracle
 
 failed=0
+if (( SMOKE )); then
+  for e in "${ENGINES[@]}"; do
+    set +e
+    ./target/release/searchbench run db --smoke --only "$e"
+    rc=$?
+    set -e
+    if (( rc != 0 )); then
+      failed=$((failed + 1))
+      echo "run-db.sh: $e SMOKE FAILED; continuing" >&2
+    fi
+  done
+  echo "run-db.sh: smoke finished; failed engines: $failed of ${#ENGINES[@]}"
+  exit $(( failed > 0 ))
+fi
 for e in "${ENGINES[@]}"; do
   # Clear this engine's earlier results so a failed rerun cannot show stale numbers.
   rm -f "$OUT/${e}__"*.json

@@ -83,6 +83,14 @@ impl YoutrackEngine {
     }
 }
 
+/// The HTTP agent. TLS is pinned to native-tls: ureq's default provider is rustls,
+/// which is not compiled in here, and an https request then panics inside ureq.
+fn new_agent() -> ureq::Agent {
+    let tls = ureq::tls::TlsConfig::builder().provider(ureq::tls::TlsProvider::NativeTls).build();
+    let config = ureq::Agent::config_builder().timeout_global(Some(TIMEOUT)).tls_config(tls).build();
+    ureq::Agent::new_with_config(config)
+}
+
 /// Braced terms: YouTrack reads braces as an exact term, so operator characters in
 /// the text are literal. A `}` inside a term is escaped as `\}`.
 pub fn yt_text_query(q: &str) -> String {
@@ -137,8 +145,7 @@ impl Engine for YoutrackEngine {
             .ok()
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| "hk ID".to_string());
-        let config = ureq::Agent::config_builder().timeout_global(Some(TIMEOUT)).build();
-        self.agent = Some(ureq::Agent::new_with_config(config));
+        self.agent = Some(new_agent());
         Ok(())
     }
 
@@ -173,6 +180,10 @@ impl Engine for YoutrackEngine {
         Ok(Some(items.iter().any(|i| hk_id(&i.custom_fields, &self.hk_field) == Some(n))))
     }
 
+    fn is_remote(&self) -> bool {
+        true
+    }
+
     fn setup_notes(&self) -> Vec<String> {
         vec![
             "YouTrack REST, GET only: /api/issues and /api/articles text search, native ranking".into(),
@@ -195,6 +206,28 @@ mod tests {
         assert_eq!(yt_text_query("deploy-ok 검증"), "{deploy-ok} {검증}");
         assert_eq!(yt_text_query("a}b"), r"{a\}b}");
         assert_eq!(yt_text_query("  "), "");
+    }
+
+    /// An https request must fail as an error (here: the listener closes the
+    /// connection), never panic. Regression for the rustls-default panic.
+    #[test]
+    fn https_request_fails_as_error_not_panic() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            if let Ok((stream, _)) = listener.accept() {
+                drop(stream);
+            }
+        });
+        let engine = YoutrackEngine {
+            base: format!("https://127.0.0.1:{port}"),
+            token: "test-token".into(),
+            hk_field: "hk ID".into(),
+            agent: Some(new_agent()),
+        };
+        let r = engine.get_items("/api/issues", "{x}", 1);
+        assert!(r.is_err());
+        server.join().unwrap();
     }
 
     #[test]

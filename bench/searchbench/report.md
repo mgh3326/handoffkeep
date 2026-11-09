@@ -93,6 +93,7 @@ The DB run needs these environment variables (names only; values are never print
 Objects created and dropped by the run:
 - MySQL database `searchbench` (table `sb_docs`, FULLTEXT ngram index).
 - ADB tables `SB_KM`, `SB_BASIC`, `SB_WORLD` and their CONTEXT indexes in the `RB_DB_USER` schema.
+- ADB lexer preference `SB_KM_LEX` (KOREAN_MORPH_LEXER), created before the `SB_KM` index and dropped after it.
 
 Run 2 on oci (`fa5a4f8`, `MYSQL_SSL=disabled`, 2026-11-09 00:00–00:11 UTC). **These numbers are not valid results; they are kept as the record of why the adapters changed.** MySQL connected and ran; the Oracle engines did not connect (ORA-12154, service name used as an alias; fixed to a descriptor).
 
@@ -110,7 +111,34 @@ Run 2 causes found in the adapter (fixed in the next commit, to be rerun):
 - **The 6 errors are not identified yet.** The run-2 summary had no error text. The summary now lists the first five errors per engine and mode, and the setup notes, so the rerun shows them.
 - **Natural mode is not yet explained.** Its zero hit rate and 3/3 no-answer hits (the words match some document) may be engine behaviour (InnoDB relevance favours long documents, and natural mode ORs every bigram). This is a hypothesis; the rerun's top-10 lists must confirm it before it is reported as a finding.
 
-Remote engines (read-only; added by the operator's scope change; **not yet run**):
+Run 3 on oci (`54cc29a`, the operator's run, summary kept with the handoff). **Not valid as DB results.** It found these harness faults, fixed in the next commit:
+- **youtrack** ended in a panic: `uri scheme is https, provider is Rustls but feature is not enabled: rustls`. ureq's default TLS provider is rustls, which this build does not compile. The agent now pins native-tls. A regression test reproduces the panic without the pin and passes with it.
+- **oracle-text-korean-morph** did not build: `DRG-10700: preference does not exist: CTXSYS.KOREAN_MORPH_LEXER`. ADB has no such preference. The bench now creates `SB_KM_LEX` (KOREAN_MORPH_LEXER) in its own schema before the index and drops it after the index exists.
+- **hk-pg all** had 29 unmapped results in the top 10. Checked: the unmapped documents (for example `review/2026-11-09/yt-linear-transition-status`, `briefs/hk3654-search-match.md`) are absent from the corpus snapshot. The snapshot was generated 2026-11-08 07:05 UTC and has no 2026-11-09 keys, so these are documents newer than the corpus. Memory and ctx results have no corpus record by design. The summary now splits unmapped results by scope (docs not in corpus, memory, ctx, other).
+
+Still open. The query construction was checked by reading the code; no harness fault was found in it. The rerun's `--smoke` self-probe decides whether the cause is in the index or in ranking.
+- **oracle-text-basic and oracle-text-world, hit@10 0.074.** Each token is `{tok}`, joined with OR, ordered by SCORE(1). tantivy-default uses the same whitespace split of Hangul and scores 0.630, so the tokenizer alone does not explain the gap. The build now reads back about 25 evenly spaced stored bodies and fails if one differs from its record.
+- **mysql-heatwave-ngram boolean, hit@10 0.185, 6 errors.** The errors are `ERROR 188: FTS query exceeds result cache limit`, a server limit, not a parse error. The five printed are q12, q14, q17, q24 and q26, and each has a hyphen or underscore identifier (`rt-parity`, `body_doc`, `decision_table_validate`, `stalldetect`, `fleet-ci-three-tiers`). An errored query scores as a miss, so 0.185 is a lower bound.
+- **mysql-heatwave-ngram natural, hit@10 0.000.** The query is the raw text against the same indexed column and key as boolean. One candidate, not verified: InnoDB natural mode ignores terms that appear in more than half the rows.
+
+Run 3 numbers, status as above:
+
+| engine | mode | hit@10 | errors | status |
+|---|---|---:|---:|---|
+| mysql-heatwave-ngram | boolean | 0.185 | 6 | open; errors count as misses |
+| mysql-heatwave-ngram | natural | 0.000 | 0 | open |
+| oracle-text-korean-morph | or-score | — | — | build failed (DRG-10700); fixed |
+| oracle-text-basic | or-score | 0.074 | 0 | open |
+| oracle-text-world | or-score | 0.074 | 0 | open |
+| youtrack | native | — | — | panicked (TLS); fixed |
+| hk-pg | all | 0.074 | 1 | live data, newer than the corpus; 29 unmapped in top 10 |
+| hk-pg | tasks | 0.481 | 0 | live data; coverage 46 of 46 gold keys exist |
+
+The one hk-pg error is the production search timing out (`context deadline exceeded`) on q23 (`캡틴`). The hk-pg numbers are live results and are not directly comparable with the local snapshot, because the corpus is older than the production search.
+
+Before the next full run, `./run-db.sh --smoke` builds each engine, runs one query per mode (top 3 printed, gold in top 10 yes/no), and, for local engines, self-probes with the first two words of a task title, which must find that task. It writes no results and exits non-zero if any engine fails. Build time is still paid (MySQL ingest is minutes), but the timed query runs are not.
+
+Remote engines (read-only; added by the operator's scope change; run 3 is above):
 - `youtrack` (mode `native`) and `hk-pg` (modes `all`, `tasks`) report two things. **Coverage:** how many of the gold keys exist in that system at all. **Subset:** the scores on answered queries with at least one gold key present, using only the present gold keys. All-answered scores are reported too, so a missing mirror is not read as bad ranking.
 - Unmapped results (a YouTrack issue with no hk ID, or an hk ctx/memory row) keep their rank as `unmapped:<id>`, and the count per engine is reported.
 - Checked with a local fake YouTrack server and a fake hk CLI only (no YouTrack or production calls). The plumbing, coverage and subset accounting ran end to end; the numbers from the fakes are meaningless and are not results.

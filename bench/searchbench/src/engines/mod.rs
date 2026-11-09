@@ -26,4 +26,9 @@ pub trait Engine {
     fn key_exists(&mut self, _key: &str) -> Result<Option<bool>> {
         Ok(None)
     }
+    /// Remote systems hold data the harness did not ingest, so the smoke check
+    /// does not self-probe them.
+    fn is_remote(&self) -> bool {
+        false
+    }
 }

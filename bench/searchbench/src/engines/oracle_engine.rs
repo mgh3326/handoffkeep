@@ -12,7 +12,7 @@
 
 use super::Engine;
 use crate::corpus::Record;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use oracle::{sql_type::Clob, Connection};
 use std::io::Write;
 
@@ -31,14 +31,19 @@ impl Lexer {
             Lexer::World => "SB_WORLD",
         }
     }
-    fn lexer_sql(self) -> &'static str {
+    /// The lexer preference named in the index PARAMETERS. ADB ships no CTXSYS
+    /// preference for KOREAN_MORPH_LEXER (DRG-10700), so the bench schema creates
+    /// one with CTX_DDL.CREATE_PREFERENCE and drops it after the index exists.
+    fn lexer_ref(self) -> &'static str {
         match self {
-            Lexer::KoreanMorph => "CTXSYS.KOREAN_MORPH_LEXER",
+            Lexer::KoreanMorph => KM_PREFERENCE,
             Lexer::Basic => "CTXSYS.BASIC_LEXER",
             Lexer::World => "CTXSYS.WORLD_LEXER",
         }
     }
 }
+
+const KM_PREFERENCE: &str = "SB_KM_LEX";
 
 pub struct OracleEngine {
     lexer: Lexer,
@@ -116,17 +121,58 @@ impl Engine for OracleEngine {
             conn.execute(&format!("INSERT INTO {t} (ID, REC_KEY, BODY) VALUES (:1, :2, :3)"), &[&(i as i64 + 1), &r.key, &clob])?;
         }
         conn.commit()?;
+        // Read-back: a spread sample of stored bodies must equal the records exactly,
+        // so a write-path fault shows up here, not as ranking.
+        let step = (recs.len() / 25).max(1);
+        for i in (0..recs.len()).step_by(step) {
+            let (body,): (String,) = conn.query_row_as(&format!("SELECT BODY FROM {t} WHERE ID = :1"), &[&(i as i64 + 1)])?;
+            if body != recs[i].text {
+                bail!(
+                    "stored body of {} differs from its record ({} vs {} characters)",
+                    recs[i].key,
+                    body.chars().count(),
+                    recs[i].text.chars().count()
+                );
+            }
+        }
+        let mut lexer_setup = Vec::new();
+        if let Lexer::KoreanMorph = self.lexer {
+            // Leftover from an earlier run: drop it so CREATE_PREFERENCE cannot fail on it.
+            conn.execute(
+                &format!("BEGIN CTX_DDL.DROP_PREFERENCE('{KM_PREFERENCE}'); EXCEPTION WHEN OTHERS THEN NULL; END;"),
+                &[],
+            )?;
+            conn.execute(
+                &format!("BEGIN CTX_DDL.CREATE_PREFERENCE('{KM_PREFERENCE}', 'KOREAN_MORPH_LEXER'); END;"),
+                &[],
+            )?;
+            lexer_setup.push(format!("lexer preference {KM_PREFERENCE} (KOREAN_MORPH_LEXER) created in the bench schema, dropped after the index"));
+        }
         // The CONTEXT index is created after the bulk load; its time is part of ingest.
-        conn.execute(
-            &format!(
-                "CREATE INDEX {t}_IDX ON {t} (BODY) INDEXTYPE IS CTXSYS.CONTEXT PARAMETERS ('LEXER {}')",
-                self.lexer.lexer_sql()
-            ),
-            &[],
-        )?;
+        let index_result = conn
+            .execute(
+                &format!(
+                    "CREATE INDEX {t}_IDX ON {t} (BODY) INDEXTYPE IS CTXSYS.CONTEXT PARAMETERS ('LEXER {}')",
+                    self.lexer.lexer_ref()
+                ),
+                &[],
+            )
+            .map(|_| ());
+        if let Lexer::KoreanMorph = self.lexer {
+            // The index keeps its lexer settings; the bench preference is removed either way.
+            let drop_result = conn
+                .execute(&format!("BEGIN CTX_DDL.DROP_PREFERENCE('{KM_PREFERENCE}'); END;"), &[])
+                .map(|_| ());
+            if index_result.is_ok() {
+                drop_result?;
+            }
+        }
+        index_result?;
         let (ver,): (String,) = conn.query_row_as("SELECT BANNER FROM V$VERSION WHERE ROWNUM = 1", &[])?;
         self.notes.push(format!("server: {ver}"));
-        self.notes.push(format!("CONTEXT index PARAMETERS ('LEXER {}')", self.lexer.lexer_sql()));
+        self.notes.push(format!("CONTEXT index PARAMETERS ('LEXER {}')", self.lexer.lexer_ref()));
+        self.notes.extend(lexer_setup);
+        self.notes.push(format!("read-back: {} sampled bodies equal their records", recs.len().div_ceil(step)));
         self.conn = Some(conn);
         Ok(())
     }
