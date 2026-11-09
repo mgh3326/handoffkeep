@@ -274,5 +274,35 @@ func youtrackServiceOptions() youtrack.Options {
 		DefaultHKProject: strings.TrimSpace(os.Getenv("YOUTRACK_DEFAULT_HK_PROJECT")),
 		DefaultLane:      strings.TrimSpace(os.Getenv("YOUTRACK_DEFAULT_LANE")),
 		ConsoleBaseURL:   strings.TrimSpace(os.Getenv("YOUTRACK_CONSOLE_URL")),
+		SearchTimeout:    youtrackSearchTimeoutFromEnv(),
 	}
+}
+
+// youtrackSearchTimeoutFromEnv reads HANDOFFKEEP_SEARCH_YOUTRACK_TIMEOUT, a Go
+// duration such as "3s". Unset or invalid means the service default.
+func youtrackSearchTimeoutFromEnv() time.Duration {
+	raw := strings.TrimSpace(os.Getenv("HANDOFFKEEP_SEARCH_YOUTRACK_TIMEOUT"))
+	if raw == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		log.Printf("search.youtrack_timeout_invalid value=%q using=default", raw)
+		return 0
+	}
+	return d
+}
+
+// searchBackendFromEnv reads HANDOFFKEEP_SEARCH_BACKEND. Only "youtrack"
+// changes the answer; an unknown value is logged and means PostgreSQL.
+func searchBackendFromEnv() string {
+	raw := strings.TrimSpace(os.Getenv("HANDOFFKEEP_SEARCH_BACKEND"))
+	switch raw {
+	case "", "postgres":
+		return ""
+	case "youtrack":
+		return raw
+	}
+	log.Printf("search.backend_unknown value=%q using=postgres", raw)
+	return ""
 }

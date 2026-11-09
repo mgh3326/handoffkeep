@@ -35,6 +35,8 @@ var (
 	ErrUnavailable    = errors.New("youtrack_unavailable")
 	ErrFieldNotFound  = errors.New("youtrack_field_not_found")
 	ErrProjectMissing = errors.New("youtrack_project_missing")
+	// ErrResponseTooLarge is an answer over maxBodyBytes: refused, never decoded.
+	ErrResponseTooLarge = errors.New("youtrack_response_too_large")
 )
 
 // Config is the client's only input. Token is never rendered by String or by
@@ -299,7 +301,7 @@ func (c *Client) once(ctx context.Context, method, endpoint string, payload []by
 		return nil, 0, fmt.Errorf("youtrack %s %s: read: %w", method, pathOf(endpoint), readErr)
 	}
 	if len(data) > maxBodyBytes {
-		return nil, 0, fmt.Errorf("youtrack %s %s: response larger than %d bytes", method, pathOf(endpoint), maxBodyBytes)
+		return nil, 0, fmt.Errorf("%w: youtrack %s %s: response larger than %d bytes", ErrResponseTooLarge, method, pathOf(endpoint), maxBodyBytes)
 	}
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		return data, 0, nil

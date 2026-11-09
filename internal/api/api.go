@@ -38,6 +38,9 @@ type Service struct {
 	// and writes those changes through YouTrack first. Nil disables the
 	// feature; every other route behaves exactly as before.
 	YouTrack *youtrack.Service
+	// SearchBackend is "youtrack" to answer /v1/search from YouTrack, with
+	// PostgreSQL as the fallback. Anything else, including "", is PostgreSQL.
+	SearchBackend string
 }
 
 // DotsResultStore lists dots results and records their adoption.
@@ -239,8 +242,20 @@ func (s Service) ListDocuments(ctx context.Context, prefix, kind, session string
 	return s.Store.ListDocuments(ctx, prefix, kind, session, task, limit)
 }
 func (s Service) Search(ctx context.Context, q, scope, session string, limit int) ([]store.SearchResult, error) {
+	if s.SearchBackend == youtrackSearchBackend {
+		if s.YouTrack == nil {
+			log.Printf("search.youtrack_fallback reason=config_missing scope=%q", scope)
+			return s.Store.Search(ctx, q, scope, session, limit)
+		}
+		return s.YouTrack.Search(ctx, s.Store.Search, q, scope, session, limit)
+	}
 	return s.Store.Search(ctx, q, scope, session, limit)
 }
+
+// youtrackSearchBackend is the HANDOFFKEEP_SEARCH_BACKEND value that selects
+// the YouTrack search backend.
+const youtrackSearchBackend = "youtrack"
+
 func (s Service) PutAttachment(ctx context.Context, client, name, mime, ref string, body []byte) (store.Attachment, bool, error) {
 	if s.Attachments == nil {
 		return store.Attachment{}, false, attachments.ErrDisabled

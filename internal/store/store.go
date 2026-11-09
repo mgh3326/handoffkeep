@@ -4077,9 +4077,19 @@ func (s *Store) Search(ctx context.Context, q, scope, session string, limit int)
 	return out, err
 }
 
-func (s *Store) search(ctx context.Context, q, scope, session string, limit int) ([]SearchResult, error) {
+// CheckSearch refuses a search request either backend cannot answer. The
+// YouTrack backend calls it before asking YouTrack, so both backends refuse
+// the same inputs.
+func CheckSearch(q, scope, session string) error {
 	if strings.TrimSpace(q) == "" || !validText(q, 512) || !validText(session, 128) || (scope != "all" && scope != "ctx" && scope != "docs" && scope != "memory" && scope != "tasks") {
-		return nil, errors.New("invalid search")
+		return errors.New("invalid search")
+	}
+	return nil
+}
+
+func (s *Store) search(ctx context.Context, q, scope, session string, limit int) ([]SearchResult, error) {
+	if err := CheckSearch(q, scope, session); err != nil {
+		return nil, err
 	}
 	if scope == "tasks" {
 		return s.searchTasks(ctx, q, session, limit)
@@ -4258,7 +4268,7 @@ func (s *Store) searchTasks(ctx context.Context, q, lane string, limit int) ([]S
 		}
 		exactID = id
 	}
-	refsExpr := `jsonb_strip_nulls(jsonb_build_object('id',t.id::text,'state',t.state,'lane',t.lane,'priority',t.priority::text,'pr',t.refs->>'pr','head_sha',t.refs->>'head_sha','report_path',t.refs->>'report_path'))`
+	refsExpr := taskRefsExpr
 	titleMatch := `(to_tsvector('simple',t.title) @@ plainto_tsquery('simple',$2) OR t.title ILIKE '%'||$4||'%' ESCAPE '\' OR EXISTS (SELECT 1 FROM translations tr WHERE tr.entity='task' AND tr.entity_id=t.id::text AND tr.field='title' AND tr.lang='ko' AND tr.source_sha256=encode(sha256(convert_to(t.title,'UTF8')),'hex') AND tr.text ILIKE '%'||$4||'%' ESCAPE '\'))`
 	out := []SearchResult{}
 	if exactID >= 0 {
