@@ -542,6 +542,12 @@ id order (limit default 100, max 500). Errors are distinct: 401
 `unauthorized`, 400 `comment_empty`, 413 `comment_too_long` (body over 64 KiB),
 404 `not_found` (no such task), 400 `secret_like_content`.
 
+With `HANDOFFKEEP_YT_COMMENTS_MODE=canary`, a comment on a task in the comment
+canary also gets a copy on its YouTrack issue through the write protocol; the
+answers above do not change. `GET /v1/yt/ops?state=&task=&after_id=&limit=`
+(`handoffkeep youtrack ops`, alias `yt ops`) lists those writes; see
+`docs/youtrack-write-protocol.md`.
+
 ## Documents and search
 
 `doc get <key>` fetches a document by key; `doc get --id <n>` fetches one by

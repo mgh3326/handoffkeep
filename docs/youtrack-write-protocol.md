@@ -1,11 +1,13 @@
-# hk → YouTrack write protocol (hk 3667, hk 3697)
+# hk → YouTrack write protocol (hk 3667, hk 3697, hk 3739)
 
-Status: **b0, nothing switched.** The protocol core, the op log schema and the
-fault tests exist; no hk code path calls them, no flag is on, and no production
-YouTrack write happens. The first caller is slice b1a (one authenticated comment
-append on a mapped task). Design: `design/2026-11-09/hk3667-youtrack-write-path`
+Status: **b1a, comment canary.** The protocol core (b0) is live for one path:
+a new hk comment on a task enrolled in the comment canary also gets a
+protocol-tracked copy on the task's YouTrack issue, when
+`HANDOFFKEEP_YT_COMMENTS_MODE=canary`. PG stays canonical for comments; the
+`task_comments` row is written exactly as before. Default mode is `off` (no op
+row, no YouTrack call). Design: `design/2026-11-09/hk3667-youtrack-write-path`
 (v2 wins), `consult/2026-11-09/hk3667-write-path-answer`,
-`decision/2026-11-09/r9-data-map-memory-inbox`.
+`decision/2026-11-09/r9-data-map-memory-inbox` §4.
 
 YouTrack has no transactions, no conditional update and no idempotency key. hk
 supplies them with a durable op log. The rules live in `internal/ytwrite`; the
@@ -118,6 +120,105 @@ with seconds; the time is the op's `created_at`, so a resend or a reconciliation
 renders the same bytes). A caller's body may not contain `<!-- hk-op:` and an actor
 may not contain ` · `, so marker-shaped text is data, never evidence.
 
+## Remote contract (`ytwrite.Remote`)
+
+- `CreateComment` makes exactly one attempt. A nil error with an empty or
+  invalid id is a 2xx the protocol cannot trust: `remote_unknown`.
+- `ListComments` returns a **complete and consistent** set or an error. An
+  offset-paging adapter must use `EnumerateStableComments`: two full reads per
+  attempt, accepted only when both give the same set of `(id, text, updated,
+  deleted)`, at most three attempts, then `ErrInconsistentEnumeration`. One read
+  of more than `MaxEnumeratedComments` (10 000) comments is
+  `ErrEnumerationTooLarge`. Any listing error keeps the op `remote_unknown`
+  (`reconcile_failed`); a 429 listing is a `RemoteError` whose `RetryAfter`
+  delays the next search at least that long.
+- Recovery is per attempt: `RecoverStale(id, attempts, cutoff)` moves a
+  `dispatched` op to `remote_unknown` only if that same dispatch attempt is
+  still the stale one (compare-and-set on `attempts` and `dispatched_at`).
+
+## YouTrack adapter (`internal/youtrack/write_remote.go`)
+
+One request per call: no retry inside the call, redirects are not followed (a
+POST is never replayed), `Retry-After` (seconds or HTTP date) is passed up as
+sent (the protocol clamps the recorded wait at one hour), and the bot key is
+removed from every error text before it can reach the op log. Listings request
+`id,text,created,updated,deleted`.
+
+| Single POST observation | Adapter returns | Op |
+|---|---|---|
+| 2xx with a usable id | id | `applied` |
+| 2xx without a usable id, unreadable body | `"", nil` | `remote_unknown` (`no_id_in_reply`) |
+| timeout, connection loss, cancel, 3xx | transport error | `remote_unknown` |
+| 408, 5xx | `RemoteError` | `remote_unknown` (`http_5xx`) |
+| 401 | `RemoteError` | `prepared`, retried after the auth wait |
+| 429 | `RemoteError` + wait | `prepared` until `Retry-After` |
+| other 4xx (400, 403, 404, 409, 422, …) | `RemoteError` | `rejected` (`http_<status>`) |
+
+## Slice b1a: the comment canary
+
+**Gate.** `HANDOFFKEEP_YT_COMMENTS_MODE` = unset or `off` (default) or `canary`.
+Any other value, and `canary` without `YOUTRACK_URL` and `YOUTRACK_BOT_API_KEY`,
+stops `serve` at startup (fail closed). `off` needs no YouTrack configuration.
+
+**Enrollment** (`handoffkeep youtrack canary add <task> [--by NAME]`, direct DB
+like `youtrack projects`; also `remove <task>` and `list`). `add` reads the
+imported issue `<SHORT>-<task id>`, where `<SHORT>` is the exact
+`youtrack_projects` row of the task's project (no `OTHER` fallback), and binds
+the task only when the issue answers with that readable id, its summary starts
+with `#<task id>` followed by a space or nothing (`#37` does not name task 3;
+`#037` and `#3739` do not name task 37), it is in the mapped project, and the
+old mirror link (`task_origins`) and any `yt_entity_map` task row name the same
+issue on the same tenant. The binding keeps the tenant and the stable internal
+issue id, so a rename or move does not change the target. Enrollment writes no
+op row.
+
+**Enqueue.** Every comment entry point (REST and the CLI through it, console,
+MCP `task_comment`) goes through `CreateTaskComment` / `CreateMCPTaskComment`.
+When the gate is `canary` and the task is enrolled, the same transaction writes
+the comment, its op (principal `hk:task-comments`, key `task-comment:<comment
+id>`, lane `("task", "<id>")`, target the bound internal issue id, actor the
+comment author, time the comment time), its ownership row
+`yt_comment_write_links(comment_id, op_id)`, and, with the task's first op, the
+`yt_entity_map` task row. An op failure fails the comment. Text PG accepts but
+the protocol cannot send (a quoted `<!-- hk-op:` marker, an actor with ` · `)
+and a task whose map row names another issue commit the comment with a
+**locally rejected** op; nothing is sent. Handlers never call `AppendComment`
+and their answers are unchanged: a local comment success is never reported as
+a YouTrack write. The YouTrack activity pull and dots replies do not enqueue.
+
+**Dispatch.** One worker in `serve` runs `Drive` every 5 s, sequentially, with a
+4 s dispatch timeout (under the 5 s worker stop budget). Before each send it asks
+`Admit`: the gate must be on and the task still enrolled with that issue on
+this tenant, otherwise the op is **held** (stays `prepared`, never rejected).
+Two serve processes may both run the worker; the ledger's claim is the
+boundary. A stopping worker claims nothing new.
+
+**No double copy.** The legacy mirror push (`youtrack sync`) skips comments
+with an ownership row; the import export marks them (`hk_op_id` on
+`/v1/import/comments` rows) and `youtrack/import/client.js` skips them (and any
+comment carrying the marker); the activity pull drops comments carrying the
+marker, whoever their author.
+
+**Operator view.** `GET /v1/yt/ops?state=&task=&after_id=&limit=` and
+`handoffkeep youtrack ops [--state S] [--task N] [--after-id N] [--limit N]`
+(`handoffkeep yt …` is the same command). `state` is `pending` (default:
+prepared, dispatched, remote_unknown), `all`, or one state. Each op shows id,
+kind, lane, target, actor, state, `status` (`pending` for every unresolved
+state, `remote_unknown` included), reason code, result id, attempts and times;
+never the body, the raw error or the key. A full page carries
+`next_after_id`.
+
+**Migration** `20261109-yt-comment-canary` (expand-only, after
+`20261109-yt-write-ops`): tables `yt_comment_canary` and
+`yt_comment_write_links`. The link table's foreign key takes SHARE ROW
+EXCLUSIVE on `yt_write_ops` while it is created (no earlier release writes that
+table); no lock on `tasks` or `task_comments` (no foreign key to either). The
+previous release does not read or write either table.
+
+**Logs.** `ytwrite.comment_enqueued`, `ytwrite.op_state` (one per recorded
+transition), `ytwrite.op_held`, `ytwrite.drive`, `ytwrite.drive_failed`,
+`ytwrite.comments_enabled`.
+
 ## Tests
 
 `ytwritetest.RunProtocol` (public contract) and `RunLedger` (compare-and-set rules)
@@ -131,13 +232,13 @@ each ledger/remote boundary (before and after the commit of prepare, claim, appl
 mark-unknown, defer), two writes to one entity in order, evidence paging and exact
 match, ambiguous evidence, caller cancellation.
 
-## Not in b0 (carried to later slices)
+## Not yet (later slices)
 
-- Any caller: HTTP/MCP/CLI wiring, the idempotency header, the issue-id resolution
-  from `task_origins`, the worker loop (`Drive`) in `serve`, flags and the authority
-  epoch (design v2.3).
-- The event-feed row an applied op commits (b1a), parent/child settling (b3),
+- Turning the mode on in production (handoffkeep-design with the operator,
+  after deploy), and the authority epoch (design v2.3).
+- Projection metadata in the comment answers (REST/MCP/console bodies are
+  unchanged in b1a).
+- The event-feed row an applied op commits, parent/child settling (b3),
   article generations (b2), claims with a fencing generation (v2.2).
-- A direct GET of the created comment before answering `applied`, and the live
-  canary against the real tenant (index latency, marker preservation, read-after-write
-  are unknown until then).
+- A direct GET of the created comment before answering `applied`; the live
+  canary measures index latency, marker preservation and read-after-write.
