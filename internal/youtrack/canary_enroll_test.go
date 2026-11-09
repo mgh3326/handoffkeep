@@ -27,7 +27,7 @@ func (r *issueReader) GetIssue(_ context.Context, id string) (Issue, error) {
 	return issue, nil
 }
 
-const canaryTenant = "mgh3326.youtrack.cloud"
+const canaryTenant = "canary.youtrack.example"
 
 func issueFor(readable, summary string) Issue {
 	return Issue{ID: "2-77", IDReadable: readable, Summary: summary, Project: &ProjectRef{ID: "0-2", ShortName: "HK"}}
