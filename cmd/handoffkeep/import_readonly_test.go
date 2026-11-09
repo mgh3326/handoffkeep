@@ -23,6 +23,7 @@ func TestServerHandlerDeniesImportOnlyClientOnMCP(t *testing.T) {
 	}, monitor, nil)
 	r := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","method":"tools/call"}`))
 	r.Header.Set("Authorization", "Bearer import-secret")
+	r.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
 	if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), `"error":"import_read_only"`) {
