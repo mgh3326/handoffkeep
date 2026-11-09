@@ -13,21 +13,18 @@ import (
 	"time"
 )
 
-// TestSearchLatency measures Store.Search on a throwaway schema seeded to the
-// size of production (about 56k documents and 56k tasks) with Korean text and
-// roughly 0.8 KB document bodies. It is off unless HANDOFFKEEP_SEARCH_LATENCY=1,
-// which CI's search-latency run sets (hk 2658). Run it on a commit before a change and on the change, then
-// compare result_sha for each query: equal digests mean an identical result
-// set. Each query logs a search.plan block (EXPLAIN ANALYZE, BUFFERS of the
-// statement Search runs), one search.latency line (p50 and p95 over
-// HANDOFFKEEP_SEARCH_LATENCY_REPS calls) and one search.result line.
+// TestSearchLatency measures Store.Search on synthetic data shaped to the
+// production document count, body-size distribution, and common Korean and
+// English terms. It is off unless HANDOFFKEEP_SEARCH_LATENCY=1. Compare
+// result_sha across commits for each query; equal digests mean identical
+// result sets. Each query logs EXPLAIN (ANALYZE, BUFFERS), latency and digest.
 func TestSearchLatency(t *testing.T) {
 	if os.Getenv("HANDOFFKEEP_SEARCH_LATENCY") != "1" {
 		t.Skip("set HANDOFFKEEP_SEARCH_LATENCY=1 to run the search latency measurement")
 	}
 	s := schemaStore(t, "search_latency")
 	ctx := t.Context()
-	seedSearchLatency(ctx, t, s, 56000)
+	seedSearchLatency(ctx, t, s, 11075)
 	reps := 5
 	if raw := os.Getenv("HANDOFFKEEP_SEARCH_LATENCY_REPS"); raw != "" {
 		n, err := strconv.Atoi(raw)
@@ -37,17 +34,23 @@ func TestSearchLatency(t *testing.T) {
 		reps = n
 	}
 	for _, c := range searchLatencyQueries {
-		measureSearchLatency(ctx, t, s, c.name, c.q, c.scope, reps)
+		p95 := measureSearchLatency(ctx, t, s, c.name, c.q, c.scope, reps)
+		if c.name == "all_ko2_deploy" && (p95 >= time.Second || p95 <= 0) {
+			t.Errorf("all-scope two-character Korean p95 = %s, want < 1s", p95)
+		}
 	}
 }
 
 var searchLatencyQueries = []struct{ name, q, scope string }{
-	{"ko2_beri", "베리", "all"},
-	{"ko2_deploy", "배포", "all"},
-	{"ko3_phrase", "배포 절차", "all"},
-	{"en_deploy", "deploy", "all"},
-	{"mixed", "deploy 배포", "all"},
-	{"nohit", "zzqxnohit", "all"},
+	{"all_ko2_deploy", "배포", "all"},
+	{"all_ko2_beri", "베리", "all"},
+	{"all_ko3_phrase", "배포 절차", "all"},
+	{"all_en_deploy", "deploy", "all"},
+	{"all_mixed", "deploy 배포", "all"},
+	{"all_nohit", "zzqxnohit", "all"},
+	{"docs_ko2", "배포", "docs"},
+	{"memory_ko2", "배포", "memory"},
+	{"ctx_ko2", "배포", "ctx"},
 	{"tasks_ko2", "배포", "tasks"},
 	{"tasks_ko3", "배포 절차", "tasks"},
 }
@@ -68,22 +71,40 @@ func seedSearchLatency(ctx context.Context, t *testing.T, s *Store, n int) {
 	stmts := []string{
 		`INSERT INTO documents(key,kind,session,job,body,sha256,created_by,created_at,updated_at)
 		 SELECT 'bench/' || g, 'note', 'bench', '',
-		   ` + hangulSQL("g::text", 60) + `
-		   || CASE WHEN g % 50 = 0 THEN ' 배포 절차 ' ELSE '' END
-		   || CASE WHEN g % 7 = 0 THEN ' 베리 ' ELSE '' END
-		   || CASE WHEN g % 11 = 0 THEN ' deploy 배포 ' ELSE '' END
-		   || repeat(' archive paragraph', 32),
+		   prefix || left(repeat('운영 기록과 절차를 설명하는 synthetic document. English archive content. ',
+		     ceil(GREATEST(0, body_chars-length(prefix))::numeric/61)::integer), GREATEST(0, body_chars-length(prefix))),
 		   md5(g::text), 'bench', ` + seedEpoch + ` + (g || ' seconds')::interval, ` + seedEpoch + ` + (g || ' seconds')::interval
-		 FROM generate_series(1, ` + strconv.Itoa(n) + `) g`,
+		 FROM (SELECT g,
+		   CASE WHEN g % 7 = 0 THEN '배포 절차 ' ELSE '' END ||
+		   CASE WHEN g % 11 = 0 THEN 'deploy release ' ELSE '' END ||
+		   CASE WHEN g % 17 = 0 THEN '베리 ' ELSE '' END prefix,
+		   CASE WHEN g <= 5537 THEN 3613
+		     WHEN g <= 9967 THEN 3613 + ((hashtext(g::text) & 2147483647) % 11738)
+		     WHEN g <= 10964 THEN 16987
+		     WHEN g < ` + strconv.Itoa(n) + ` THEN 143693
+		     ELSE 501157 END body_chars
+		 FROM generate_series(1, ` + strconv.Itoa(n) + `) g) sized`,
 		`INSERT INTO tasks(lane,title,kind,state,created_by,created_at,updated_at,last_activity_at)
 		 SELECT 'bench',
 		   ` + hangulSQL("g::text || 't'", 12) + `
 		   || CASE WHEN g % 40 = 0 THEN ' 배포 절차 점검 ' ELSE '' END
 		   || CASE WHEN g % 9 = 0 THEN ' 베리 ' ELSE '' END,
 		   'implement', 'backlog', 'bench', ` + seedEpoch + ` + (g || ' seconds')::interval, ` + seedEpoch + `, ` + seedEpoch + `
-		 FROM generate_series(1, ` + strconv.Itoa(n) + `) g`,
+ 		 FROM generate_series(1, 56000) g`,
+		`INSERT INTO checkpoints(session,kind,title,body,refs,created_by,created_at)
+		 SELECT 'bench','checkpoint','deploy status ' || g,
+		   CASE WHEN g % 5 = 0 THEN '배포 절차 deploy ' ELSE '' END || repeat('운영 기록과 english archive ', 40),
+		   '{}'::jsonb,'bench',` + seedEpoch + ` + (g || ' seconds')::interval
+		 FROM generate_series(1, 2000) g`,
+		`INSERT INTO memory(agent,name,description,memory_type,content,updated_by,updated_at)
+		 SELECT 'bench','reference-' || g, '운영 기록 deploy', 'reference',
+		   CASE WHEN g % 5 = 0 THEN '배포 절차 ' ELSE '' END || repeat('memory example content ', 40),
+		   'bench',` + seedEpoch + ` + (g || ' seconds')::interval
+		 FROM generate_series(1, 200) g`,
 		`ANALYZE documents`,
 		`ANALYZE tasks`,
+		`ANALYZE checkpoints`,
+		`ANALYZE memory`,
 	}
 	for _, q := range stmts {
 		if _, err := s.pool.Exec(ctx, q); err != nil {
@@ -92,7 +113,7 @@ func seedSearchLatency(ctx context.Context, t *testing.T, s *Store, n int) {
 	}
 }
 
-func measureSearchLatency(ctx context.Context, t *testing.T, s *Store, name, q, scope string, reps int) {
+func measureSearchLatency(ctx context.Context, t *testing.T, s *Store, name, q, scope string, reps int) time.Duration {
 	t.Helper()
 	var stmt string
 	var args []any
@@ -122,6 +143,7 @@ func measureSearchLatency(ctx context.Context, t *testing.T, s *Store, name, q, 
 		fmt.Fprintf(h, "%s|%s|%s|%s|%s|%d\n", x.Scope, x.Key, x.Session, x.Title, x.Snippet, x.CreatedAt.UnixNano())
 	}
 	log.Printf("search.result query=%s scope=%s rows=%d err=%q result_sha=%s", name, scope, len(first), errText(firstErr), hex.EncodeToString(h.Sum(nil)))
+	return p95
 }
 
 func logSearchPlan(ctx context.Context, t *testing.T, s *Store, name, stmt string, args []any) {
