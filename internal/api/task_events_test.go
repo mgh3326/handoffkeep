@@ -120,3 +120,23 @@ func TestSweepPreviewRefusesOutOfRangeDaysAPI(t *testing.T) {
 		}
 	}
 }
+
+func TestTasksDriftRefusesBadMergedDaysAPI(t *testing.T) {
+	// No store behind the server: each request must be refused before the
+	// service reads anything.
+	h := areaNoDBServer(t)
+	for _, q := range []string{"?merged_days=0", "?merged_days=-1", "?merged_days=3651", "?merged_days=x"} {
+		req, _ := http.NewRequest(http.MethodGet, h.URL+"/v1/tasks/drift"+q, nil)
+		req.Header.Set("Authorization", "Bearer tok")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := map[string]any{}
+		_ = json.NewDecoder(resp.Body).Decode(&out)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest || out["error"] != "invalid_context" {
+			t.Fatalf("%s: %d %v", q, resp.StatusCode, out)
+		}
+	}
+}

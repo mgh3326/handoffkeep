@@ -196,11 +196,46 @@ func (s *Store) ApplyTaskSourceEvent(ctx context.Context, in TaskSourceEvent) (T
 	if err = recordChangeTx(ctx, tx, x, in, at, now); err != nil {
 		return TaskEventResult{}, err
 	}
-	res, err := s.applySourceEventTx(ctx, tx, x, sourceEvent{Source: in.Source, SourceRef: in.SourceRef, PR: in.PR, RevertedPR: in.RevertedPR, RevertPR: in.RevertPR, At: at}, now)
+	ev := sourceEvent{Source: in.Source, SourceRef: in.SourceRef, PR: in.PR, RevertedPR: in.RevertedPR, RevertPR: in.RevertPR, At: at}
+	res, err := s.applySourceEventTx(ctx, tx, x, ev, now)
 	if err != nil {
 		return TaskEventResult{}, err
 	}
+	if res.Applied && in.Source == SourceMergewakeMerge {
+		if err = s.propagateMergeTx(ctx, tx, res.Task.ID, ev, now); err != nil {
+			return TaskEventResult{}, err
+		}
+	}
 	return res, tx.Commit(ctx)
+}
+
+// propagateMergeTx is the cross-task half of a merge (hk 3766): a PR merge
+// that applied to task src applies, in the same transaction, to every other
+// non-settled task whose refs.pr is that PR. Each goes through
+// applySourceEventTx, so the same rules, claims, not-applied rows and deploy
+// record lookup hold for it. Settled tasks are not touched. The caller holds
+// the task-mutation lock (level 2), which serializes the sibling row locks.
+func (s *Store) propagateMergeTx(ctx context.Context, tx pgx.Tx, src int64, ev sourceEvent, now time.Time) error {
+	rows, err := tx.Query(ctx, `SELECT `+taskColumns+` FROM tasks WHERE refs->>'pr'=$1 AND id<>$2 AND state NOT IN (`+settledStatesSQL+`) ORDER BY id FOR UPDATE`, ev.PR, src)
+	if err != nil {
+		return err
+	}
+	siblings, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (Task, error) {
+		var x Task
+		err := scanTask(row, &x)
+		return x, err
+	})
+	if err != nil {
+		return err
+	}
+	for _, x := range siblings {
+		sib := ev
+		sib.Note = fmt.Sprintf("the PR is also task #%d's; applied with it", src)
+		if _, err = s.applySourceEventTx(ctx, tx, x, sib, now); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // revertNamesPRTx reports whether a mergewake.revert row on the task names pr
@@ -239,6 +274,12 @@ func (s *Store) applySourceEventTx(ctx context.Context, tx pgx.Tx, x Task, ev so
 		field, revertedPR = revertedPRField, ev.RevertedPR
 	}
 	to, reason := sourceEventTarget(ev.Source, x.State, ev.To)
+	if reason == "" && ev.Source == SourceMergewakeMerge && canCompleteKind(x.Kind) {
+		// A decide, verify or ops task has no change to land. The merge of the
+		// PR it names closes it at completed, with the PR as the result link
+		// (the closure below takes ev.SourceRef as the evidence).
+		to = StateCompleted
+	}
 	if reason == "" && ev.PR != "" && (ev.Source == SourceMergewakeMerge || ev.Source == SourceDeploy) {
 		reverted, err := revertNamesPRTx(ctx, tx, x.ID, ev.PR)
 		if err != nil {
@@ -366,36 +407,8 @@ func (s *Store) deployOnMergedTx(ctx context.Context, tx pgx.Tx, x Task, now tim
 	if x.State != StateMerged || !taskEventPRRE.MatchString(x.Refs.PR) {
 		return x, nil
 	}
-	// Match projected PRs, or parse documents written by an older server after
-	// the backfill. A SHA mismatch is also stale, including old-server edits.
-	rows, err := tx.Query(ctx, `SELECT d.key,p.record,CASE WHEN p.key IS NULL THEN d.body ELSE NULL END FROM documents d LEFT JOIN deploy_record_projection p ON p.key=d.key AND p.sha256=d.sha256 WHERE strpos(d.key,'deploy/')=1 AND ((p.decoded AND strpos(convert_from(p.record,'UTF8'),$1)>0) OR (p.key IS NULL AND strpos(d.body,$1)>0)) ORDER BY d.key DESC`, x.Refs.PR)
-	if err != nil {
-		return x, err
-	}
-	key := ""
-	for key == "" && rows.Next() {
-		var k string
-		var raw []byte
-		var body *string
-		if err = rows.Scan(&k, &raw, &body); err != nil {
-			rows.Close()
-			return x, err
-		}
-		var record StoredDeployRecord
-		if body != nil {
-			record = parseStoredDeployRecord(k, "", *body, time.Time{})
-		} else {
-			record = parseStoredDeployRecord(k, "", string(raw), time.Time{})
-		}
-		prs, _ := deployedPRs(record)
-		for _, pr := range prs {
-			if pr == x.Refs.PR {
-				key = k
-			}
-		}
-	}
-	rows.Close()
-	if err = rows.Err(); err != nil || key == "" {
+	key, err := deployRecordKeyForPRTx(ctx, tx, x.Refs.PR)
+	if err != nil || key == "" {
 		return x, err
 	}
 	ev := sourceEvent{Source: SourceDeploy, SourceRef: deployRef(key, x.Refs.PR), PR: x.Refs.PR, At: now, Note: "deploy record " + key + " lists the PR; applied when the task entered merged"}
@@ -404,6 +417,45 @@ func (s *Store) deployOnMergedTx(ctx context.Context, tx pgx.Tx, x Task, now tim
 		return x, err
 	}
 	return res.Task, nil
+}
+
+// deployRecordKeyForPRTx is the newest deploy record key whose successful
+// included_prs lists pr, or "" when none does. A record is matched through its
+// projection, or parsed from the document body when the projection is stale
+// (an older server wrote it, or a SHA mismatch). Shared by rule 8 and the
+// drift report.
+func deployRecordKeyForPRTx(ctx context.Context, tx pgx.Tx, pr string) (string, error) {
+	rows, err := tx.Query(ctx, `SELECT d.key,p.record,CASE WHEN p.key IS NULL THEN d.body ELSE NULL END FROM documents d LEFT JOIN deploy_record_projection p ON p.key=d.key AND p.sha256=d.sha256 WHERE strpos(d.key,'deploy/')=1 AND ((p.decoded AND strpos(convert_from(p.record,'UTF8'),$1)>0) OR (p.key IS NULL AND strpos(d.body,$1)>0)) ORDER BY d.key DESC`, pr)
+	if err != nil {
+		return "", err
+	}
+	key := ""
+	for key == "" && rows.Next() {
+		var k string
+		var raw []byte
+		var body *string
+		if err = rows.Scan(&k, &raw, &body); err != nil {
+			rows.Close()
+			return "", err
+		}
+		var record StoredDeployRecord
+		if body != nil {
+			record = parseStoredDeployRecord(k, "", *body, time.Time{})
+		} else {
+			record = parseStoredDeployRecord(k, "", string(raw), time.Time{})
+		}
+		prs, _ := deployedPRs(record)
+		for _, listed := range prs {
+			if listed == pr {
+				key = k
+			}
+		}
+	}
+	rows.Close()
+	if err = rows.Err(); err != nil {
+		return "", err
+	}
+	return key, nil
 }
 
 // applyDeployRecordTx is the hk.deploy event: a document stored under a

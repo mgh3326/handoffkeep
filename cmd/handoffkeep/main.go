@@ -239,7 +239,7 @@ func tasksCmd(args []string, out io.Writer) error {
 
 func tasksCmdE(args []string, out, errout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: tasks add|list|export|claim|next|transition|reopen|rebind|relane|project|projects|owner|owners|milestone|label|labels|due|subscribe|unsubscribe|set-area|areas|parent|relate|unrelate|origin|migrate-states|decision-request|decision-resolve|show|comment|comments|disposition|event|sweep|project-status|intake|triage")
+		return errors.New("usage: tasks add|list|export|claim|next|transition|reopen|rebind|relane|project|projects|owner|owners|milestone|label|labels|due|subscribe|unsubscribe|set-area|areas|parent|relate|unrelate|origin|migrate-states|decision-request|decision-resolve|show|comment|comments|disposition|event|sweep|drift|project-status|intake|triage")
 	}
 	if args[0] == "disposition" {
 		return dispositionCmd(args[1:], out)
@@ -291,6 +291,9 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 	}
 	if args[0] == "sweep" {
 		return taskSweepCmd(args[1:], out)
+	}
+	if args[0] == "drift" {
+		return taskDriftCmd(args[1:], out)
 	}
 	if args[0] == "intake" {
 		return taskIntakeCmd(args[1:], out)
