@@ -410,6 +410,20 @@ func RunProtocol(t *testing.T, nl NewLedger) {
 		}
 	})
 
+	t.Run("evidence_search_at_old_page_limit", func(t *testing.T) {
+		e := newEnv(t, nl)
+		e.page = 1
+		e.restart(e.ledger)
+		for i := 0; i < 1999; i++ {
+			e.yt.Inject(testIssue, "unrelated")
+		}
+		e.yt.Queue(Fault{Kind: CommitDropReply})
+		r := e.append("limit", "present")
+		e.clock.Advance(time.Minute)
+		e.drive()
+		e.wantStatus(e.lookup(r), ytwrite.StatusApplied, ytwrite.StateApplied, "")
+	})
+
 	for _, tc := range []struct {
 		name   string
 		mutate func(y *FakeYouTrack, issue, id string)

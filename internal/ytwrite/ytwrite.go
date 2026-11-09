@@ -126,8 +126,8 @@ type Op struct {
 	Kind      string
 	Key       string
 	// PayloadSHA is the hash that tells a replay from a conflicting reuse of
-	// the key. It covers what the write means (kind, target, body), not the
-	// actor or the time.
+	// the key. It covers what the write means (kind, target, actor, body), not the
+	// time.
 	PayloadSHA string
 	// Payload is the immutable outbound payload (JSON); the exact text sent is
 	// a pure function of it and the op, so a resend or a reconciliation

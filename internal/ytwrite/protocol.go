@@ -66,10 +66,6 @@ type Config struct {
 	PageSize int
 }
 
-// maxEvidencePages bounds one evidence search. A target with more comments than
-// PageSize*maxEvidencePages is searched again on the next pass, not skipped.
-const maxEvidencePages = 2000
-
 // maxDrivePasses bounds the passes of one Drive call.
 const maxDrivePasses = 16
 
@@ -435,10 +431,7 @@ func (p *Protocol) reconcile(ctx context.Context, op Op) (applied bool, err erro
 	var matches []RemoteComment
 	deleted, mismatched := 0, 0
 	skip := 0
-	for pages := 0; ; pages++ {
-		if pages >= maxEvidencePages {
-			return touch(ReasonReconcileFailed, "comment enumeration exceeded the page limit")
-		}
+	for {
 		page, lerr := p.Remote.ListComments(cctx, op.YTTargetID, skip, p.PageSize)
 		if lerr != nil {
 			return touch(ReasonReconcileFailed, lerr.Error())
