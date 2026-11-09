@@ -269,6 +269,27 @@ fn summarize(args: &[String]) -> Result<()> {
             f["error"].as_str().unwrap_or("").replace('\n', " ")
         ));
     }
+    md.push_str("\n## Query errors (first 5 per engine and mode)\n\n");
+    let mut any_err = false;
+    for d in &docs {
+        let errs = d["errors"].as_array().cloned().unwrap_or_default();
+        if errs.is_empty() {
+            continue;
+        }
+        any_err = true;
+        md.push_str(&format!("- {} / {}: {} errors\n", d["engine"].as_str().unwrap_or(""), d["mode"].as_str().unwrap_or(""), errs.len()));
+        for e in errs.iter().take(5) {
+            md.push_str(&format!("  - {}\n", e.as_str().unwrap_or("").replace('\n', " ")));
+        }
+    }
+    if !any_err {
+        md.push_str("- none\n");
+    }
+    md.push_str("\n## Setup notes\n\n");
+    for d in &docs {
+        let notes: Vec<&str> = d["setup_notes"].as_array().map(|n| n.iter().filter_map(|v| v.as_str()).collect()).unwrap_or_default();
+        md.push_str(&format!("- {} / {}: {}\n", d["engine"].as_str().unwrap_or(""), d["mode"].as_str().unwrap_or(""), notes.join("; ")));
+    }
     md.push_str("\n## Per-query misses (answered queries with no gold in top 10)\n\n");
     for d in &docs {
         let label = format!("{} / {}", d["engine"].as_str().unwrap_or(""), d["mode"].as_str().unwrap_or(""));

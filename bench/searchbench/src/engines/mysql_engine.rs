@@ -23,6 +23,22 @@ use std::path::PathBuf;
 pub struct MysqlEngine {
     conn: Option<Conn>,
     notes: Vec<String>,
+    /// Server ngram_token_size (default 2). The ngram parser cannot index a token
+    /// with fewer characters than this, so such tokens are dropped from BOOLEAN queries.
+    ngram_min: usize,
+}
+
+/// BOOLEAN MODE query for the ngram parser: each whitespace token becomes a required
+/// phrase `+"tok"`, so operator characters in the text (`-`, `+`, `*`, `(`, ...) are
+/// literal and tokenize the same way the body was indexed. Tokens with fewer than
+/// `min_chars` letters or digits are dropped, as ngram cannot match them.
+pub fn boolean_query(q: &str, min_chars: usize) -> String {
+    q.split_whitespace()
+        .map(|t| t.replace('"', ""))
+        .filter(|t| t.chars().filter(|c| c.is_alphanumeric()).count() >= min_chars)
+        .map(|t| format!("+\"{t}\""))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 pub fn env(name: &str) -> Result<String> {
@@ -31,7 +47,7 @@ pub fn env(name: &str) -> Result<String> {
 
 impl MysqlEngine {
     pub fn new() -> Self {
-        Self { conn: None, notes: Vec::new() }
+        Self { conn: None, notes: Vec::new(), ngram_min: 2 }
     }
 
     fn opts(db: Option<&str>) -> Result<OptsBuilder> {
@@ -76,11 +92,12 @@ impl Engine for MysqlEngine {
         drop(admin);
 
         let mut conn = Conn::new(Self::opts(Some("searchbench"))?)?;
-        let version: Option<(String, String, String)> = conn.query_first(
-            "SELECT CAST(@@version AS CHAR), CAST(@@version_comment AS CHAR), CAST(@@ngram_token_size AS CHAR)",
+        let version: Option<(String, String, u64)> = conn.query_first(
+            "SELECT CAST(@@version AS CHAR), CAST(@@version_comment AS CHAR), CAST(@@ngram_token_size AS UNSIGNED)",
         )?;
         if let Some((v, c, n)) = version {
             self.notes.push(format!("server version {v} ({c}); ngram_token_size={n}"));
+            self.ngram_min = n as usize;
         }
         conn.query_drop(
             "CREATE TABLE sb_docs (id INT UNSIGNED NOT NULL PRIMARY KEY, rec_key VARCHAR(40) NOT NULL, body LONGTEXT NOT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
@@ -107,7 +124,7 @@ impl Engine for MysqlEngine {
         let conn = self.conn.as_mut().context("not built")?;
         let (sql, arg) = match mode {
             "boolean" => {
-                let bq = q.split_whitespace().map(|t| format!("+{t}")).collect::<Vec<_>>().join(" ");
+                let bq = boolean_query(q, self.ngram_min);
                 (
                     format!("SELECT rec_key FROM sb_docs WHERE MATCH(body) AGAINST (? IN BOOLEAN MODE) ORDER BY MATCH(body) AGAINST (? IN BOOLEAN MODE) DESC LIMIT {k}"),
                     bq,
@@ -130,5 +147,30 @@ impl Engine for MysqlEngine {
         let mut n = self.notes.clone();
         n.push("FULLTEXT ... WITH PARSER ngram built after bulk insert (ingest time includes it)".into());
         n
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::boolean_query;
+
+    #[test]
+    fn spaced_korean_tokens_are_required_phrases() {
+        assert_eq!(boolean_query("태스크 작성 규칙", 2), r#"+"태스크" +"작성" +"규칙""#);
+    }
+
+    #[test]
+    fn operator_characters_stay_inside_phrases() {
+        assert_eq!(boolean_query("deploy-ok 검증", 2), r#"+"deploy-ok" +"검증""#);
+        assert_eq!(boolean_query("body_doc 연결", 2), r#"+"body_doc" +"연결""#);
+        assert_eq!(boolean_query(r#"a"b c"#, 2), r#"+"ab""#);
+    }
+
+    #[test]
+    fn tokens_shorter_than_ngram_size_are_dropped() {
+        // "A+" has one letter; ngram_token_size=2 cannot index it.
+        assert_eq!(boolean_query("rt-parity probe grade A+ T1", 2), r#"+"rt-parity" +"probe" +"grade" +"T1""#);
+        assert_eq!(boolean_query("A+ ,", 2), "");
+        assert_eq!(boolean_query("  ", 2), "");
     }
 }

@@ -50,24 +50,37 @@ fn env(name: &str) -> Result<String> {
     std::env::var(name).map_err(|_| anyhow!("missing environment variable {name}"))
 }
 
+/// Replaces connect values in an error message so they are never printed.
+fn redact(msg: &str, values: &[&str]) -> String {
+    values
+        .iter()
+        .filter(|v| !v.is_empty())
+        .fold(msg.to_string(), |m, v| m.replace(v, "<redacted>"))
+}
+
 impl OracleEngine {
     pub fn new(lexer: Lexer) -> Self {
         Self { lexer, conn: None, notes: Vec::new() }
     }
 
-    /// Connects once per engine. With RB_WALLET_DIR the service name is a TNS
-    /// alias resolved through TNS_ADMIN (set by run-db.sh); otherwise the
-    /// connect string is built from RB_DB_HOST, RB_DB_PORT and RB_DB_SERVICE.
+    /// Connects once per engine. RB_DB_SERVICE is a service name, not a tnsnames.ora
+    /// alias (the wallet's aliases differ), so the connect string is a full TCPS
+    /// descriptor built from RB_DB_HOST, RB_DB_PORT and RB_DB_SERVICE. TLS trust comes
+    /// from the wallet in TNS_ADMIN (set by run-db.sh); the server DN is matched.
+    /// Errors are returned with the connect values redacted.
     fn connect() -> Result<Connection> {
         let user = env("RB_DB_USER")?;
         let pass = env("RB_DB_PASSWORD")?;
+        let host = env("RB_DB_HOST")?;
+        let port = env("RB_DB_PORT")?;
         let service = env("RB_DB_SERVICE")?;
-        let connect = if std::env::var("RB_WALLET_DIR").is_ok() {
-            service
-        } else {
-            format!("//{}:{}/{}", env("RB_DB_HOST")?, env("RB_DB_PORT")?, service)
-        };
-        Connection::connect(user, pass, connect).context("oracle connect")
+        let descriptor = format!(
+            "(DESCRIPTION=(ADDRESS=(PROTOCOL=tcps)(HOST={host})(PORT={port}))(CONNECT_DATA=(SERVICE_NAME={service}))(SECURITY=(SSL_SERVER_DN_MATCH=yes)))"
+        );
+        Connection::connect(user, pass, descriptor).map_err(|e| {
+            let msg = redact(&format!("{e}"), &[&host, &port, &service]);
+            anyhow!("oracle connect: {msg}")
+        })
     }
 
     fn escape(tok: &str) -> String {

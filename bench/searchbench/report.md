@@ -1,6 +1,6 @@
 # hk 3536 — search engine bench (report)
 
-Status: **local engines run on the oci host (`out/all`, numbers pending in §3); database engines not yet run.** The timings that count are the oci run's: `run-all.sh` on the oci host (2 cores, linux arm64), with the local and DB engines on the same host. The development-host (macOS arm64) numbers in §3 are a quality cross-check only; they are not timings.
+Status: **local engines measured on the oci host (§3); database engines: MySQL query construction fixed and rerun pending, Oracle connect fixed and rerun pending (§6).** The timings that count are the oci run's: `run-all.sh` on the oci host (2 cores, linux arm64), with the local and DB engines on the same host. The development-host (macOS arm64) numbers in §3 are a quality cross-check only; they are not timings.
 
 ## 1. Corpus
 
@@ -36,14 +36,14 @@ Metrics (top 10 keys per query):
 
 ## 3. Results — local engines (oci host, same host as the DB engines)
 
-Source: `out/all/summary.md` from `run-all.sh` on the oci host (2 cores, linux arm64). Not yet filled in: the oci run's summary has not been copied into this branch. Ingest includes index creation; index size is the tantivy directory or the SQLite file; latency is 3 warm-ups and 100 timed runs per query.
+Source: the oci rerun at `fa5a4f8` (2026-11-09, `run-all.sh`, 2 cores, linux arm64; the local-engine rows of its `out/all/summary.md`). Ingest includes index creation; index size is the tantivy directory or the SQLite file; latency is 3 warm-ups and 100 timed runs per query. The local engines do not depend on the MySQL or Oracle changes.
 
 | engine | mode | ingest s | index MB | hit@10 | recall@10 | MRR@10 | no-answer with hits | p50 ms | p95 ms |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| tantivy-default (`default` tokenizer) | or-bm25 | | | | | | | | |
-| tantivy-lindera-ko-dic (Normal, no POS filter) | or-bm25 | | | | | | | | |
-| sqlite-fts5-unicode61 | or-bm25 | | | | | | | | |
-| sqlite-fts5-trigram | or-bm25 | | | | | | | | |
+| tantivy-default (`default` tokenizer) | or-bm25 | 2.2 | 36.2 | 0.630 | 0.584 | 0.411 | 3 / 3 | 0.04 | 0.11 |
+| tantivy-lindera-ko-dic (Normal, no POS filter) | or-bm25 | 7.6 | 52.5 | 0.630 | 0.548 | 0.336 | 3 / 3 | 0.08 | 0.19 |
+| sqlite-fts5-unicode61 | or-bm25 | 4.0 | 165.1 | 0.667 | 0.589 | 0.430 | 3 / 3 | 1.05 | 10.51 |
+| sqlite-fts5-trigram | or-bm25 | 26.3 | 410.2 | 0.519 | 0.519 | 0.300 | 1 / 3 | 0.44 | 12.96 |
 
 Development-host cross-check (macOS arm64). Quality metrics only; these should match the oci run, since retrieval does not depend on the host. Latency and ingest are omitted because they came from a different machine:
 
@@ -58,7 +58,7 @@ The 27 answered queries give a granularity of 1/27 ≈ 0.037 on hit@10.
 
 ## 4. Per-query misses (answered queries with no gold in the top 10)
 
-Taken from the development host. Retrieval is host-independent, so these should match `out/all/summary.md`; confirm after the oci run.
+Taken from the development host. The oci rerun (`out/all/summary.md`, `fa5a4f8`) gives the same miss list for each of the four local engines.
 
 - **tantivy-default** (10 misses): q02 `태스크작성규칙`, q04 `결정 답변 경로를`, q07 `워커 정지를 감지하는`, q09 `적대 검증`, q10 `parked-car 자산 리뷰`, q11 `스폰 선택 시뮬레이션`, q16 `AT 재시작 계획`, q21 `배포 검증`, q22 `deploy-ok 검증`, q26 `fleet-ci-three-tiers`.
 - **tantivy-lindera-ko-dic** (10 misses): q04, q07, q09, q10, q11, q16, q18 `배포를`, q19 `배포가`, q23 `캡틴`, q26.
@@ -77,7 +77,7 @@ Full per-query lists are in `out/local/summary.md` (not committed; regenerate wi
 ## 5. Access-path findings
 
 - **Rust ↔ MySQL HeatWave:** `mysql` 28.0.4 with `default-features = false` and features `buffer-pool`, `minimal-rust` (pure-Rust flate2, no zlib) and `native-tls`. TLS is OpenSSL on Linux, so the oci host needs `libssl-dev` and `pkg-config` to build. `MYSQL_SSL_CA` is the trust root. Why native-tls and not rustls: on the oci run (2026-11-09) HeatWave served an X.509 v1 certificate and rustls/webpki rejected it (`UnsupportedCertVersion`); OpenSSL accepts v1 certificates. `MYSQL_SSL=disabled` turns TLS off and is for the in-VCN private address only. Not yet run against HeatWave.
-- **Rust ↔ Oracle ADB:** `oracle` 0.6.3 (rust-oracle, ODPI-C) with `--features oracle`. It compiles on macOS arm64 without Oracle Instant Client, because ODPI-C loads the client library at run time. Running needs Instant Client on the library path (`LD_LIBRARY_PATH` on the oci host) and the ADB wallet: `TNS_ADMIN=$RB_WALLET_DIR` and the service name as the connect string. CLOB bodies are written through `oracle::sql_type::Clob::new` and `std::io::Write`. No ORDS path was built. Not yet run against ADB.
+- **Rust ↔ Oracle ADB:** `oracle` 0.6.3 (rust-oracle, ODPI-C) with `--features oracle`. It compiles on macOS arm64 without Oracle Instant Client, because ODPI-C loads the client library at run time. Running needs Instant Client on the library path (`LD_LIBRARY_PATH` on the oci host) and the ADB wallet: `TNS_ADMIN=$RB_WALLET_DIR`. The connect string is a full TCPS descriptor built from `RB_DB_HOST`, `RB_DB_PORT` and `RB_DB_SERVICE` with `SSL_SERVER_DN_MATCH=yes`. `RB_DB_SERVICE` is a service name, not a wallet alias: the first oci run (fa5a4f8, run 2) failed with ORA-12154 when it was passed as an alias. Connect errors have the connect values redacted. CLOB bodies are written through `oracle::sql_type::Clob::new` and `std::io::Write`. No ORDS path was built.
 - **Oracle Text:** one table and one CONTEXT index per lexer (`SB_KM` / `KOREAN_MORPH_LEXER`, `SB_BASIC` / `BASIC_LEXER`, `SB_WORLD` / `WORLD_LEXER`). Queries are `{term} OR {term}` with `SCORE(1)`. Whether ADB exposes `KOREAN_MORPH_LEXER` is not yet verified.
 - **Build:** the workspace builds in release mode with and without `--features oracle`. Scripts use `CARGO_BUILD_JOBS=2` by default.
 
@@ -91,17 +91,23 @@ Objects created and dropped by the run:
 - MySQL database `searchbench` (table `sb_docs`, FULLTEXT ngram index).
 - ADB tables `SB_KM`, `SB_BASIC`, `SB_WORLD` and their CONTEXT indexes in the `RB_DB_USER` schema.
 
-Results to be filled in from `out/db/summary.md` after the oci run:
+Run 2 on oci (`fa5a4f8`, `MYSQL_SSL=disabled`, 2026-11-09 00:00–00:11 UTC). **These numbers are not valid results; they are kept as the record of why the adapters changed.** MySQL connected and ran; the Oracle engines did not connect (ORA-12154, service name used as an alias; fixed to a descriptor).
 
-| engine | mode | ingest s | index MB | hit@10 | recall@10 | MRR@10 | no-answer with hits | p50 ms | p95 ms |
-|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| mysql-heatwave-ngram | boolean | | | | | | | | |
-| mysql-heatwave-ngram | natural | | | | | | | | |
-| oracle-text-korean-morph | or-score | | | | | | | | |
-| oracle-text-basic | or-score | | | | | | | | |
-| oracle-text-world | or-score | | | | | | | | |
+| engine | mode | ingest s | index MB | hit@10 | recall@10 | MRR@10 | no-answer with hits | p50 ms | p95 ms | errors |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| mysql-heatwave-ngram (run 2) | boolean | 440.0 | 140.8 | 0.148 | 0.148 | 0.053 | 0 / 3 | 6.72 | 241.06 | 6 |
+| mysql-heatwave-ngram (run 2) | natural | 440.0 | 140.8 | 0.000 | 0.000 | 0.000 | 3 / 3 | 18.73 | 200.38 | 0 |
+| oracle-text-korean-morph | or-score | | | | | | | | | connect failed |
+| oracle-text-basic | or-score | | | | | | | | | connect failed |
+| oracle-text-world | or-score | | | | | | | | | connect failed |
 
-MySQL modes: `boolean` requires every whitespace token (`+tok`); `natural` is the raw query in NATURAL LANGUAGE MODE (its 50% row threshold applies).
+Run 2 causes found in the adapter (fixed in the next commit, to be rerun):
+- **Boolean operators were parsed.** Tokens went into BOOLEAN MODE unquoted, so `-`, `+` and `"` in the text were operators. Now each token is a quoted phrase, `+"deploy-ok"`, so it tokenizes the way the body did.
+- **One-character tokens cannot match.** The server's `ngram_token_size` is the default 2, so a token like `A` can never be indexed, and in an AND query it empties the result (q12 `rt-parity probe grade A+ T1` has `A`, the only one-character token in the set). Tokens with fewer letters or digits than the server's ngram size are now dropped from BOOLEAN queries, as the trigram adapter drops its short tokens. The size is read from the server at build time and written to the setup notes.
+- **The 6 errors are not identified yet.** The run-2 summary had no error text. The summary now lists the first five errors per engine and mode, and the setup notes, so the rerun shows them.
+- **Natural mode is not yet explained.** Its zero hit rate and 3/3 no-answer hits (the words match some document) may be engine behaviour (InnoDB relevance favours long documents, and natural mode ORs every bigram). This is a hypothesis; the rerun's top-10 lists must confirm it before it is reported as a finding.
+
+MySQL modes: `boolean` requires every token as a quoted phrase (`+"tok"`); `natural` is the raw query in NATURAL LANGUAGE MODE (its 50% row threshold applies).
 
 ## 7. Not measured
 
