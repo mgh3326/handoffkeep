@@ -42,6 +42,10 @@ const attachmentPutMaxRawBytes = 10 << 20
 
 var attachmentPutMaxBase64 = base64.StdEncoding.EncodedLen(attachmentPutMaxRawBytes)
 
+// mcpRequestBodyLimit caps one HTTP MCP request body: the largest attachment_put
+// payload plus 1 MiB for the JSON-RPC envelope.
+var mcpRequestBodyLimit = int64(attachmentPutMaxBase64) + 1<<20
+
 // attachmentPutDescription states the allowed types from the same constant the
 // attachment manager reads, so the list cannot drift from the enforced one.
 var attachmentPutDescription = "Upload one attachment from base64 content; the remote-safe path, with no server file path. " +
@@ -275,6 +279,10 @@ func HTTPHandler(service api.Service, tokens api.Tokens, access *cfaccess.Verifi
 		return s
 	}, &gmcp.StreamableHTTPOptions{
 		Stateless: true,
+		// The SDK default (4 MiB) would refuse a 10 MiB attachment_put before the
+		// tool runs: its base64 form is attachmentPutMaxBase64 bytes. The limit
+		// is that plus headroom for the JSON-RPC envelope.
+		MaxRequestBodyBytes: mcpRequestBodyLimit,
 		// The SDK's localhost guard rejects a loopback request whose Host is
 		// not loopback. It defends unauthenticated localhost servers against
 		// DNS rebinding; /mcp authenticates every request before the SDK sees
