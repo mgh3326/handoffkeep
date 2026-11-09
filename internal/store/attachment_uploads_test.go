@@ -9,7 +9,7 @@ import (
 // Direct-upload rows: create, read, and a transition that only one caller can
 // win. Runs in its own schema because it counts rows.
 func TestAttachmentUploadRowsTransitionOnce(t *testing.T) {
-	s := schemaStore(t, "attachment-uploads")
+	s := schemaStore(t, "attachment_uploads")
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	const id = "0123456789abcdef0123456789abcdef"
 	row := AttachmentUpload{ID: id, StagingKey: "incoming/" + id, Name: "a.txt", MIME: "text/plain", SizeBytes: 3, SHA256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", RefKind: "task", RefID: "12", CreatedBy: "node", CreatedAt: now, ExpiresAt: now.Add(time.Hour)}
@@ -43,7 +43,7 @@ func TestAttachmentUploadRowsTransitionOnce(t *testing.T) {
 // over-budget reservation is refused and leaves no row, and a finished upload
 // stops counting.
 func TestReserveAttachmentUploadEnforcesTheStagingBudget(t *testing.T) {
-	s := schemaStore(t, "attachment-budget")
+	s := schemaStore(t, "attachment_budget")
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	since := now.Add(-2 * time.Hour)
 	mk := func(id string, size int64) AttachmentUpload {
