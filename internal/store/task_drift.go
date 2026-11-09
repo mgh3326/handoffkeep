@@ -83,10 +83,15 @@ const driftMergedPRSQL = `SELECT ` + driftColumns + `updated_at FROM tasks t
 		OR EXISTS (SELECT 1 FROM tasks m WHERE m.id<>t.id AND m.state IN ('merged','deployed') AND m.refs->>'pr'=t.refs->>'pr')
 	) ORDER BY t.id`
 
-// driftMergedSQL is class (c)'s candidates: merged for at least the cutoff.
-// driftMergedWithoutDeploy then drops the ones a deploy record lists.
-const driftMergedSQL = `SELECT ` + driftColumns + `COALESCE(completed_at,updated_at) FROM tasks
-	WHERE state='merged' AND COALESCE(completed_at,updated_at)<$1 ORDER BY COALESCE(completed_at,updated_at),id`
+// driftMergedPageSQL is one page of class (c)'s candidates: merged for at least
+// the cutoff, after the (since, id) keyset cursor. Pages are read in order so
+// the deploy-record filter runs before the class's cap, not after it.
+const driftMergedPageSQL = `SELECT ` + driftColumns + `COALESCE(completed_at,updated_at) FROM tasks
+	WHERE state='merged' AND COALESCE(completed_at,updated_at)<$1 AND (COALESCE(completed_at,updated_at),id)>($2,$3)
+	ORDER BY COALESCE(completed_at,updated_at),id LIMIT $4`
+
+// driftPageSize is how many candidates class (c) reads per page.
+const driftPageSize = 200
 
 // driftIdleStartedSQL is class (d): a researching or developing task with no
 // activity since the cutoff (started_stalled_hours before AsOf).
@@ -128,26 +133,52 @@ func (s *Store) TaskDrift(ctx context.Context, now time.Time, mergedDays int) (T
 // cutoff that no deploy record lists. A task with no PR cannot be listed by a
 // record, so it is reported.
 func driftMergedWithoutDeploy(ctx context.Context, tx pgx.Tx, cutoff time.Time, mergedDays int) (TaskDriftClass, error) {
-	rule := fmt.Sprintf("merged for at least %d days, and no deploy record lists refs.pr", mergedDays)
-	candidates, err := driftList(ctx, tx, rule, driftMergedSQL, cutoff)
-	if err != nil {
-		return TaskDriftClass{}, err
+	out := TaskDriftClass{
+		Rule:  fmt.Sprintf("merged for at least %d days, and no deploy record lists refs.pr", mergedDays),
+		Tasks: []TaskDriftTask{},
 	}
-	kept := []TaskDriftTask{}
-	for _, x := range candidates.Tasks {
-		if x.PR != "" {
-			key, err := deployRecordKeyForPRTx(ctx, tx, x.PR)
-			if err != nil {
-				return TaskDriftClass{}, err
-			}
-			if key != "" {
-				continue
-			}
+	// Candidates are paged by keyset. A page is filtered by its deploy records
+	// before the class cap applies, so the cap counts qualifying tasks only:
+	// Truncated means a qualifying task beyond the listed ones exists.
+	after, afterID := time.Unix(0, 0).UTC(), int64(0)
+scan:
+	for {
+		rows, err := tx.Query(ctx, driftMergedPageSQL, cutoff, after, afterID, driftPageSize)
+		if err != nil {
+			return TaskDriftClass{}, err
 		}
-		kept = append(kept, x)
+		page, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (TaskDriftTask, error) {
+			var x TaskDriftTask
+			err := row.Scan(&x.ID, &x.Lane, &x.Title, &x.Kind, &x.State, &x.PR, &x.DecisionRequest, &x.Since)
+			return x, err
+		})
+		if err != nil {
+			return TaskDriftClass{}, err
+		}
+		for _, x := range page {
+			if x.PR != "" {
+				key, err := deployRecordKeyForPRTx(ctx, tx, x.PR)
+				if err != nil {
+					return TaskDriftClass{}, err
+				}
+				if key != "" {
+					continue
+				}
+			}
+			if len(out.Tasks) == driftClassLimit {
+				out.Truncated = true
+				break scan
+			}
+			out.Tasks = append(out.Tasks, x)
+		}
+		if len(page) < driftPageSize {
+			break
+		}
+		last := page[len(page)-1]
+		after, afterID = last.Since, last.ID
 	}
-	candidates.Tasks, candidates.Count = kept, len(kept)
-	return candidates, nil
+	out.Count = len(out.Tasks)
+	return out, nil
 }
 
 // driftList runs one class query, which takes its args as $1.. and ends in an

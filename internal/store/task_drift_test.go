@@ -119,3 +119,26 @@ func TestDriftIdleStarted(t *testing.T) {
 		t.Fatalf("started_stalled_hours %d", later.StartedStalledHours)
 	}
 }
+
+// TestDriftMergedWithoutDeployScansPastDeployed: more deployed merged tasks
+// than one page and the class cap sort before an undeployed one. The
+// undeployed task is still listed, and the class is not marked truncated.
+func TestDriftMergedWithoutDeployScansPastDeployed(t *testing.T) {
+	s, pool := searchTestStore(t)
+	var prs []string
+	for i := 0; i < driftPageSize+driftClassLimit/2; i++ {
+		x := flowTask(t, s, pool, "implement", StateMerged, false)
+		pr := testPR(5000 + i)
+		setRefsPR(t, s, x.ID, pr)
+		prs = append(prs, pr)
+	}
+	putDeploy(t, s, "deploy/svc/20261105T060000Z", "svc", "success", prs)
+	late := flowTask(t, s, pool, "implement", StateMerged, false)
+	setRefsPR(t, s, late.ID, testPR(9999))
+
+	c := driftAt(t, s, time.Now().UTC().Add(72*time.Hour), DriftDefaultMergedDays).MergedWithoutDeploy
+	ids := driftIDs(c)
+	if !ids[late.ID] || len(c.Tasks) != 1 || c.Count != 1 || c.Truncated {
+		t.Fatalf("merged_without_deploy %+v", c)
+	}
+}
