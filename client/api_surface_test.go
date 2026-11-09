@@ -21,6 +21,8 @@ var exportedAPI = []string{
 	"Client",
 	"Client.AskDecision",
 	"Client.AttachmentURL",
+	"Client.BeginAttachmentUpload",
+	"Client.CompleteAttachmentUpload",
 	"Client.ClaimTask",
 	"Client.CommentTask",
 	"Client.GetAttachment",
@@ -36,6 +38,7 @@ var exportedAPI = []string{
 	"Client.ReopenTask",
 	// Wire types.
 	"Attachment",
+	"AttachmentUploadTicket",
 	"DecisionAskInput",
 	"DecisionAskResult",
 	"DecisionOption",

@@ -81,3 +81,27 @@ func TestAttachmentRejectAndDedupeAreAtomic(t *testing.T) {
 		t.Fatalf("dedupe usage=%+v", u)
 	}
 }
+
+// A task ref is stored in attachment_refs, whose CHECK must admit 'task' after
+// the attachment-task-ref migration. A non-canonical task id is refused by the
+// store's validator before any row is written.
+func TestAttachmentTaskRefIsStoredAndListedByRef(t *testing.T) {
+	s := testAttachmentStore(t)
+	x := attachmentFor(40)
+	x.RefKind, x.RefID = "task", "12"
+	if _, created, e := s.PutAttachment(t.Context(), x, 100, 10); e != nil || !created {
+		t.Fatalf("task ref created=%v err=%v", created, e)
+	}
+	rows, e := s.ListAttachments(t.Context(), "task", "12", 10)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if len(rows) != 1 || rows[0].SHA256 != x.SHA256 || rows[0].RefKind != "task" || rows[0].RefID != "12" {
+		t.Fatalf("list task:12 rows=%+v", rows)
+	}
+	bad := attachmentFor(41)
+	bad.RefKind, bad.RefID = "task", "012"
+	if _, _, e := s.PutAttachment(t.Context(), bad, 100, 10); e == nil {
+		t.Fatal("non-canonical task id stored")
+	}
+}

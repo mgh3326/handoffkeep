@@ -24,11 +24,19 @@ import (
 )
 
 const (
-	DefaultMaxBytes   int64 = 50 << 20
-	DefaultStorageCap int64 = 8 << 30
-	DefaultPutCap     int64 = 800000
-	DefaultGetCap     int64 = 8000000
+	DefaultMaxBytes         int64 = 50 << 20
+	DefaultStorageCap       int64 = 8 << 30
+	DefaultPutCap           int64 = 800000
+	DefaultGetCap           int64 = 8000000
+	DefaultStagingCap       int64 = 1 << 30
+	DefaultStagingClientCap int64 = 256 << 20
 )
+
+// DefaultMIMEAllow is the MIME allowlist used when HK_ATTACH_MIME_ALLOW is
+// unset. The remote MCP attachment_put tool states this set in its description,
+// so change both together. image/webp is sniffed by net/http as image/webp
+// (RIFF....WEBP), which the image rule requires to match the declared type.
+const DefaultMIMEAllow = "image/png,image/jpeg,image/gif,image/webp,text/html,text/plain,text/markdown,application/json,application/pdf,text/csv,application/x-ndjson,text/x-log"
 
 var (
 	ErrDisabled  = errors.New("attachments_disabled")
@@ -42,6 +50,20 @@ type Config struct {
 	MaxBytes, StorageCap, PutCap, GetCap   int64
 	Allow                                  map[string]bool
 	Endpoint, Bucket, AccessKey, SecretKey string
+	// StagingCap bounds the declared bytes of direct uploads still charged to the
+	// budget (their staging objects may exist). StagingClientCap bounds one
+	// creator's share of it, so one client cannot hold the whole budget.
+	StagingCap, StagingClientCap int64
+	// DirectUpload enables presigned direct upload. It is off unless
+	// HK_ATTACH_DIRECT_UPLOAD is 1 or true: the size bound on a presigned PUT
+	// depends on the store verifying signed headers, which is confirmed only by
+	// the real-bucket negative test (an oversized PUT is refused).
+	DirectUpload bool
+}
+
+func envBool(name string) bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv(name)))
+	return v == "1" || v == "true"
 }
 
 func envInt(name string, def int64) (int64, error) {
@@ -87,9 +109,16 @@ func ConfigFromEnv() (Config, bool, error) {
 	if c.GetCap, e = envInt("HK_ATTACH_MONTHLY_GET_CAP", DefaultGetCap); e != nil {
 		return c, false, e
 	}
+	if c.StagingCap, e = envInt("HK_ATTACH_STAGING_CAP_BYTES", DefaultStagingCap); e != nil {
+		return c, false, e
+	}
+	if c.StagingClientCap, e = envInt("HK_ATTACH_STAGING_CLIENT_CAP_BYTES", DefaultStagingClientCap); e != nil {
+		return c, false, e
+	}
+	c.DirectUpload = envBool("HK_ATTACH_DIRECT_UPLOAD")
 	allow := os.Getenv("HK_ATTACH_MIME_ALLOW")
 	if allow == "" {
-		allow = "image/png,image/jpeg,image/gif,text/html,text/plain,text/markdown,application/json,application/pdf,text/csv,application/x-ndjson,text/x-log"
+		allow = DefaultMIMEAllow
 	}
 	c.Allow = map[string]bool{}
 	for _, x := range strings.Split(allow, ",") {
@@ -104,11 +133,29 @@ func ConfigFromEnv() (Config, bool, error) {
 	return c, true, nil
 }
 
+// ErrObjectNotFound is returned by Head when the object does not exist. Any
+// other Head error means the object's state is unknown.
+var ErrObjectNotFound = errors.New("attachment_object_not_found")
+
+// ObjectInfo is an object's size and last-modified time, from HEAD or a listing.
+type ObjectInfo struct {
+	Key      string
+	Size     int64
+	Modified time.Time
+}
+
 type ObjectStore interface {
 	Stat(context.Context, string) error
 	Put(context.Context, string, io.Reader, int64, string) error
 	Get(context.Context, string) (io.ReadCloser, error)
 	Presign(context.Context, string, time.Duration) (string, error)
+	// PresignPut returns a URL that accepts one PUT of the object key with
+	// exactly size bytes: the Content-Length is part of the signature where the
+	// store honours signed headers.
+	PresignPut(context.Context, string, time.Duration, int64) (string, error)
+	Head(context.Context, string) (ObjectInfo, error)
+	Delete(context.Context, string) error
+	List(context.Context, string) ([]ObjectInfo, error)
 }
 type minioStore struct {
 	client *minio.Client
@@ -138,6 +185,43 @@ func (m minioStore) Presign(ctx context.Context, key string, ttl time.Duration) 
 	u, e := m.client.PresignedGetObject(ctx, m.bucket, key, ttl, url.Values{})
 	return u.String(), e
 }
+func (m minioStore) PresignPut(ctx context.Context, key string, ttl time.Duration, size int64) (string, error) {
+	// Content-Length is signed (SigV4 SignedHeaders), so the URL accepts one
+	// body of exactly size bytes; a PUT of any other length fails signature
+	// validation on stores that check signed headers.
+	h := http.Header{}
+	h.Set("Content-Length", strconv.FormatInt(size, 10))
+	u, e := m.client.PresignHeader(ctx, http.MethodPut, m.bucket, key, ttl, nil, h)
+	if e != nil {
+		return "", e
+	}
+	return u.String(), nil
+}
+func (m minioStore) Head(ctx context.Context, key string) (ObjectInfo, error) {
+	o, e := m.client.StatObject(ctx, m.bucket, key, minio.StatObjectOptions{})
+	if e != nil {
+		if minio.ToErrorResponse(e).Code == "NoSuchKey" {
+			return ObjectInfo{}, ErrObjectNotFound
+		}
+		return ObjectInfo{}, e
+	}
+	return ObjectInfo{Key: key, Size: o.Size, Modified: o.LastModified}, nil
+}
+func (m minioStore) Delete(ctx context.Context, key string) error {
+	return m.client.RemoveObject(ctx, m.bucket, key, minio.RemoveObjectOptions{})
+}
+func (m minioStore) List(ctx context.Context, prefix string) ([]ObjectInfo, error) {
+	lctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var out []ObjectInfo
+	for o := range m.client.ListObjects(lctx, m.bucket, minio.ListObjectsOptions{Prefix: prefix, Recursive: true}) {
+		if o.Err != nil {
+			return nil, o.Err
+		}
+		out = append(out, ObjectInfo{Key: o.Key, Size: o.Size, Modified: o.LastModified})
+	}
+	return out, nil
+}
 func NewR2(cfg Config) (ObjectStore, error) {
 	endpoint := strings.TrimPrefix(strings.TrimPrefix(cfg.Endpoint, "https://"), "http://")
 	c, e := minio.New(endpoint, &minio.Options{Creds: credentials.NewStaticV4(cfg.AccessKey, cfg.SecretKey, ""), Secure: !strings.HasPrefix(cfg.Endpoint, "http://"), Region: "auto", BucketLookup: minio.BucketLookupPath})
@@ -152,6 +236,16 @@ type Manager struct {
 	Objects ObjectStore
 	Config  Config
 	Enabled bool
+	// Now is the clock for upload expiry and the staging sweep; nil means the
+	// wall clock. Tests inject it.
+	Now func() time.Time
+}
+
+func (m *Manager) now() time.Time {
+	if m.Now != nil {
+		return m.Now().UTC()
+	}
+	return time.Now().UTC()
 }
 
 // AttachmentDB keeps the object transport testable without a live R2 account.
@@ -162,6 +256,11 @@ type AttachmentDB interface {
 	RecordAttachmentGet(context.Context, string, int64) error
 	ListAttachments(context.Context, string, string, int) ([]store.Attachment, error)
 	AttachmentUsage(context.Context) (store.AttachmentUsage, error)
+	ReserveAttachmentUpload(ctx context.Context, u store.AttachmentUpload, stagingCap, clientCap int64) error
+	ListUnreleasedAttachmentUploads(ctx context.Context, createdBefore time.Time, limit int) ([]store.AttachmentUpload, error)
+	MarkAttachmentUploadStagingDeleted(ctx context.Context, id string, now time.Time) error
+	GetAttachmentUpload(context.Context, string) (store.AttachmentUpload, bool, error)
+	TransitionAttachmentUpload(ctx context.Context, id, from, to, reason string, now time.Time) (bool, error)
 }
 
 func NewFromEnv(s *store.Store) (*Manager, error) {
@@ -190,18 +289,29 @@ func hasNULPrefix(body []byte) bool {
 	}
 	return bytes.IndexByte(body, 0) >= 0
 }
-func validate(c Config, name, declared string, body []byte) (string, error) {
-	if int64(len(body)) > c.MaxBytes {
-		return "", ErrTooLarge
-	}
+
+// checkName refuses a file name that is empty, too long, holds a NUL, or has an
+// archive or dump extension. It is the part of validate that needs no bytes, so
+// a direct upload can refuse a bad declaration before anything is staged.
+func checkName(name string) error {
 	if name == "" || len(name) > 512 || strings.ContainsRune(name, 0) {
-		return "", errors.New("invalid attachment name")
+		return errors.New("invalid attachment name")
 	}
 	ext := strings.ToLower(filepath.Ext(name))
 	for _, bad := range []string{".dump", ".sql", ".tar", ".tgz", ".zip", ".gz"} {
 		if ext == bad {
-			return "", ErrExtension
+			return ErrExtension
 		}
+	}
+	return nil
+}
+
+func validate(c Config, name, declared string, body []byte) (string, error) {
+	if int64(len(body)) > c.MaxBytes {
+		return "", ErrTooLarge
+	}
+	if err := checkName(name); err != nil {
+		return "", err
 	}
 	sniff := strings.ToLower(strings.TrimSpace(strings.Split(http.DetectContentType(body), ";")[0]))
 	declared = strings.ToLower(strings.TrimSpace(strings.Split(declared, ";")[0]))
@@ -236,6 +346,12 @@ func (m *Manager) Put(ctx context.Context, client, name, mime, ref string, body 
 	if !m.Enabled {
 		return store.Attachment{}, false, ErrDisabled
 	}
+	return m.putBytes(ctx, client, name, mime, ref, body)
+}
+
+// putBytes is the one store path for a body: validate, dedupe, capacity, object
+// put, then the metadata row. Put and a completed direct upload both call it.
+func (m *Manager) putBytes(ctx context.Context, client, name, mime, ref string, body []byte) (store.Attachment, bool, error) {
 	mime, e := validate(m.Config, name, mime, body)
 	if e != nil {
 		return store.Attachment{}, false, e
@@ -334,5 +450,11 @@ func ParseRef(ref string) (string, string, error) {
 	if v, ok := strings.CutPrefix(ref, "memory:"); ok {
 		return "memory", v, nil
 	}
-	return "", "", errors.New("ref must be checkpoint:<id>, document:<key>, or memory:<agent>/<name>")
+	if v, ok := strings.CutPrefix(ref, "task:"); ok {
+		if !store.ValidTaskRefID(v) {
+			return "", "", errors.New("task ref id must be a positive decimal task id, such as task:12")
+		}
+		return "task", v, nil
+	}
+	return "", "", errors.New("ref must be checkpoint:<id>, document:<key>, memory:<agent>/<name>, or task:<id>")
 }
