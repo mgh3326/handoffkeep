@@ -1483,7 +1483,10 @@ func importKind(key string) (string, string) {
 
 func attachCmd(args []string, out io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: attach put|get|list|usage")
+		return errors.New("usage: attach put|get|list|usage|migrate")
+	}
+	if args[0] == "migrate" {
+		return attachMigrateCmd(args[1:], out)
 	}
 	fs := flag.NewFlagSet("attach "+args[0], flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -1598,8 +1601,55 @@ func attachCmd(args []string, out io.Writer) error {
 		}
 		return printJSON(out, u)
 	default:
-		return errors.New("usage: attach put|get|list|usage")
+		return errors.New("usage: attach put|get|list|usage|migrate")
 	}
+}
+
+func attachMigrateCmd(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("attach migrate", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	from := fs.String("from", "", "source environment prefix")
+	to := fs.String("to", "", "target environment prefix")
+	apply := fs.Bool("apply", false, "copy and verify objects, then record target locations")
+	if e := fs.Parse(args); e != nil {
+		return e
+	}
+	if fs.NArg() != 0 || *from == "" || *to == "" {
+		return errors.New("usage: attach migrate --from <env prefix> --to <env prefix> [--apply]")
+	}
+	sourceConfig, sourceOn, e := attachments.ConfigFromPrefix(*from)
+	if e != nil {
+		return e
+	}
+	targetConfig, targetOn, e := attachments.ConfigFromPrefix(*to)
+	if e != nil {
+		return e
+	}
+	if !sourceOn || !targetOn {
+		return errors.New("source and target object-store environment prefixes must each define endpoint, bucket, access key id, and secret access key")
+	}
+	source, e := attachments.NewS3(sourceConfig)
+	if e != nil {
+		return e
+	}
+	target, e := attachments.NewS3(targetConfig)
+	if e != nil {
+		return e
+	}
+	dbURL := os.Getenv("HANDOFFKEEP_DB_URL")
+	if dbURL == "" {
+		return errors.New("HANDOFFKEEP_DB_URL is required")
+	}
+	st, e := store.OpenRuntime(context.Background(), dbURL)
+	if e != nil {
+		return e
+	}
+	defer st.Close()
+	result, e := attachments.Migrate(context.Background(), st, source, target, attachments.ObjectLocation(targetConfig), *apply)
+	if e != nil {
+		return e
+	}
+	return printJSON(out, map[string]any{"dry_run": !*apply, "objects": result.Objects, "bytes": result.Bytes})
 }
 
 func attachmentMIME(name string) string {

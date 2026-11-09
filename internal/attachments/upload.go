@@ -97,7 +97,7 @@ func (m *Manager) BeginUpload(ctx context.Context, client, name, mime string, si
 	key := stagingPrefix + uid
 	u, err := m.Objects.PresignPut(ctx, key, UploadTTL, size)
 	if err != nil {
-		return UploadTicket{}, fmt.Errorf("%w: %v", ErrR2, err)
+		return UploadTicket{}, fmt.Errorf("%w: %v", ErrObjectStore, err)
 	}
 	now := m.now()
 	row := store.AttachmentUpload{ID: uid, StagingKey: key, Name: name, MIME: declared, SizeBytes: size, SHA256: sha, RefKind: kind, RefID: id, CreatedBy: client, Status: store.AttachmentUploadPending, CreatedAt: now, ExpiresAt: now.Add(uploadRowTTL), UpdatedAt: now}

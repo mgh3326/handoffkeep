@@ -419,7 +419,7 @@ func TestCompleteEnforcesTheCapAtCompletion(t *testing.T) {
 // The presigned PUT signs the declared Content-Length, so the URL accepts one
 // body of exactly that size where the store checks signed headers.
 func TestPresignedPutPinsContentLength(t *testing.T) {
-	obj, err := NewR2(Config{Endpoint: "https://example.r2.cloudflarestorage.com", Bucket: "bkt", AccessKey: "AK", SecretKey: "SK"})
+	obj, err := NewS3(Config{Endpoint: "https://example.r2.cloudflarestorage.com", Bucket: "bkt", AccessKey: "AK", SecretKey: "SK"})
 	if err != nil {
 		t.Fatal(err)
 	}

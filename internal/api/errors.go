@@ -58,7 +58,7 @@ var errorRules = []errorRule{
 	{store.ErrAttachmentStorageCap, http.StatusInsufficientStorage, "attachment_storage_cap", false},
 	{store.ErrAttachmentPutCap, http.StatusTooManyRequests, "attachment_put_cap", false},
 	{store.ErrSearchTimeout, http.StatusServiceUnavailable, "search_timeout", false},
-	{attachments.ErrR2, http.StatusBadGateway, "attachment_r2_unavailable", false},
+	{attachments.ErrObjectStore, http.StatusBadGateway, "attachment_object_store_unavailable", false},
 	{attachments.ErrDirectUploadDisabled, http.StatusServiceUnavailable, "attachment_direct_upload_disabled", false},
 	{store.ErrAttachmentStagingCap, http.StatusInsufficientStorage, "attachment_staging_cap", false},
 	{attachments.ErrUploadNotFound, http.StatusNotFound, "attachment_upload_not_found", false},
