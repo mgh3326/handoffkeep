@@ -33,6 +33,14 @@ function sourceProject(name) { return name || 'Unassigned'; }
 function projectID(name) { return 'hk-project:' + name; }
 function parseProject(info) { return String(info.id).slice('hk-project:'.length); }
 function safeDate(value) { return value || undefined; }
+// YouTrack parses an article key as a number (the 4th test import failed with 'For input string:
+// "doc:62245:0"'). The whole document or its index keeps the hk document id; part n of a split
+// document uses 900000000 + id*10 + n, which never collides with a document id (parts are at most 9).
+function articleKey(docID, part) {
+  if (!part) return String(docID);
+  if (part > 9) throw new Error('Document ' + docID + ' needs more than 9 parts');
+  return String(900000000 + Number(docID) * 10 + part);
+}
 function truncateRunes(value, max) { return Array.from(String(value || '')).slice(0, max).join(''); }
 // YouTrack passes the last imported document as `after`: an object with id/key, or its id string.
 function afterText(after) {
@@ -404,14 +412,14 @@ class HandoffkeepImport {
     // test import). The hk identity lives in the summary (full key) and the article id/key (hk-doc:<id>:<part>);
     // the prefix is a tag for filtering.
     const docFields = {tags: [{id: 'hk-tag:doc:' + prefix, name: 'hk/doc/' + prefix}]};
-    if (pieces.length === 1) return {id: 'hk-doc:' + doc.id + ':0', key: 'hk-doc:' + doc.id + ':0', fields: Object.assign({}, base, docFields, {summary: title, content: content})};
+    if (pieces.length === 1) return {id: 'hk-doc:' + doc.id + ':0', key: articleKey(doc.id, 0), fields: Object.assign({}, base, docFields, {summary: title, content: content})};
     const indexID = 'hk-doc:' + doc.id;
-    const index = {id: indexID + ':0', key: indexID + ':0', fields: Object.assign({}, base, {
+    const index = {id: indexID + ':0', key: articleKey(doc.id, 0), fields: Object.assign({}, base, {
       summary: title + ' (분할 문서)', content: '# ' + title + '\n\n원문이 크기 제한 때문에 ' + pieces.length + '개 문서로 나뉘었습니다.\n' +
         pieces.map((_,i) => '- Part ' + (i+1) + '/' + pieces.length + ' — ' + doc.key + ' (part ' + (i+1) + ')').join('\n')
     }, docFields)};
     return [index].concat(pieces.map((part,i) => ({
-      id: 'hk-doc:' + doc.id + ':' + (i+1), key: 'hk-doc:' + doc.id + ':' + (i+1),
+      id: 'hk-doc:' + doc.id + ':' + (i+1), key: articleKey(doc.id, i + 1),
       fields: Object.assign({}, base, docFields, {summary: truncateRunes(title + ' / part ' + (i+1) + ' of ' + pieces.length, 250), content: part, parent: {id: indexID + ':0', type: 'article'}})
     })));
   }
