@@ -49,6 +49,15 @@ func TestImportUpdatedPagesUseTimestampAndIDCursors(t *testing.T) {
 	if err != nil || len(commentsSince) != 1 || commentsSince[0].Body != "new" {
 		t.Fatalf("comments since time=%+v err=%v", commentsSince, err)
 	}
+	commentOnlyAt := time.Date(2026, 11, 10, 0, 0, 0, 0, time.UTC)
+	if _, err := s.pool.Exec(ctx, `INSERT INTO task_comments(task_id,body,author,created_at) VALUES($1,'comment-only activity','tester',$2)`, newTask, commentOnlyAt); err != nil {
+		t.Fatal(err)
+	}
+	backfillAt := time.Date(2026, 11, 9, 7, 17, 0, 0, time.UTC)
+	commentActivity, err := s.ImportTasksUpdatedPage(ctx, ptrString("import-test"), backfillAt, oldTask, 10)
+	if err != nil || len(commentActivity) != 1 || commentActivity[0].ID != newTask || !commentActivity[0].ImportUpdatedAt.Equal(commentOnlyAt) {
+		t.Fatalf("comment-only activity=%+v err=%v", commentActivity, err)
+	}
 	if _, err := s.pool.Exec(ctx, `INSERT INTO documents(key,kind,body,sha256,created_by,created_at,updated_at,task_id) VALUES('import-test/old','note','old',$1,'tester',$2,$2,$3),('import-test/new','note','new',$1,'tester',$4,$4,$3)`, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", oldAt, newTask, newAt); err != nil {
 		t.Fatal(err)
 	}

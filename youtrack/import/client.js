@@ -104,8 +104,17 @@ function isoTimestamp(value) {
   return date.toISOString();
 }
 function compareDocumentCursor(a, b) {
-  const at = Date.parse(a.after_at), bt = Date.parse(b.after_at);
-  return at === bt ? Number(a.after_id) - Number(b.after_id) : at - bt;
+  const at = timestampCursorParts(a.after_at), bt = timestampCursorParts(b.after_at);
+  if (at.seconds !== bt.seconds) return at.seconds - bt.seconds;
+  if (at.fraction !== bt.fraction) return at.fraction < bt.fraction ? -1 : 1;
+  return Number(a.after_id) - Number(b.after_id);
+}
+function timestampCursorParts(value) {
+  const match = String(value).match(/^(.+?)(?:\.(\d+))?(Z|[+-]\d{2}:\d{2})$/);
+  if (!match) throw new Error('Invalid source cursor timestamp');
+  const seconds = Date.parse(match[1] + match[3]);
+  if (Number.isNaN(seconds)) throw new Error('Invalid source cursor timestamp');
+  return {seconds, fraction: (match[2] || '').padEnd(9, '0').slice(0, 9)};
 }
 
 class HandoffkeepImport {
@@ -355,7 +364,8 @@ class HandoffkeepImport {
       [FIELD.tier]: enumValue(tier), [FIELD.pr]: stringValue(ref.pr),
       [FIELD.job]: stringValue(ref.job_id), [FIELD.stalled]: task.stalled ? [{type: 'enum', name: '멈춤'}] : []
     };
-    return {id: 'hk-task:' + task.id, key: String(task.id), fields: fields};
+    return {id: 'hk-task:' + task.id, key: String(task.id), fields: fields,
+      _hkCursor: {after_at: task.import_updated_at || task.last_activity_at || task.updated_at, after_id: task.id}};
   }
   taskTags(task) {
     const tags = [];
@@ -428,7 +438,7 @@ class HandoffkeepImport {
         [FIELD.linkedTask]: integerValue(d.task_id),
         [FIELD.decisionState]: enumValue(state), [FIELD.lane]: enumValue(d.lane),
         [FIELD.recommended]: stringValue(d.recommended), [FIELD.due]: d.due_at ? {type: 'date', value: safeDate(d.due_at)} : null
-      }};
+      }, _hkCursor: {after_at: d.updated_at, after_id: d.id}};
     }).slice(0, top || 100);
   }
 
@@ -491,15 +501,16 @@ class HandoffkeepImport {
     // test import). The hk identity lives in the summary (full key) and the article id/key (hk-doc:<id>:<part>);
     // the prefix is a tag for filtering.
     const docFields = {tags: [{id: 'hk-tag:doc:' + prefix, name: 'hk/doc/' + prefix}]};
-    if (pieces.length === 1) return {id: 'hk-doc:' + doc.id + ':0', key: articleKey(doc.id, 0), fields: Object.assign({}, base, docFields, {summary: title, content: content})};
+    if (pieces.length === 1) return {id: 'hk-doc:' + doc.id + ':0', key: articleKey(doc.id, 0), fields: Object.assign({}, base, docFields, {summary: title, content: content}), _hkCursor: {after_at: doc.updated_at, after_id: doc.id, part: 1}};
     const indexID = 'hk-doc:' + doc.id;
     const index = {id: indexID + ':0', key: articleKey(doc.id, 0), fields: Object.assign({}, base, {
       summary: title + ' (분할 문서)', content: '# ' + title + '\n\n원문이 크기 제한 때문에 ' + pieces.length + '개 문서로 나뉘었습니다.\n' +
         pieces.map((_,i) => '- Part ' + (i+1) + '/' + pieces.length + ' — ' + doc.key + ' (part ' + (i+1) + ')').join('\n')
-    }, docFields)};
+    }, docFields), _hkCursor: {after_at: doc.updated_at, after_id: doc.id, part: 1}};
     return [index].concat(pieces.map((part,i) => ({
       id: 'hk-doc:' + doc.id + ':' + (i+1), key: articleKey(doc.id, i + 1),
-      fields: Object.assign({}, base, docFields, {summary: truncateRunes(title + ' / part ' + (i+1) + ' of ' + pieces.length, 250), content: part, parent: {id: indexID + ':0', type: 'article'}})
+      fields: Object.assign({}, base, docFields, {summary: truncateRunes(title + ' / part ' + (i+1) + ' of ' + pieces.length, 250), content: part, parent: {id: indexID + ':0', type: 'article'}}),
+      _hkCursor: {after_at: doc.updated_at, after_id: doc.id, part: i + 2}
     })));
   }
   getIssueUpdates(info, after, updatedAfter, top) {
@@ -535,7 +546,7 @@ class HandoffkeepImport {
     let resume = null;
     if (after) {
       const text = afterText(after);
-      resume = this.articleUpdateCursors[text];
+      resume = after._hkCursor && after._hkCursor.before ? after._hkCursor : this.articleUpdateCursors[text];
       if (!resume) throw new Error('Unknown article update cursor ' + text);
       cursor = resume.before;
     }
@@ -565,6 +576,7 @@ class HandoffkeepImport {
             const state = {before: beforeDoc, docCursor, docID: doc.id, part: i + 1};
             this.articleUpdateCursors[article.id] = state;
             this.articleUpdateCursors[article.key] = state;
+            article._hkCursor = state;
             if (out.length >= pageTop) break;
           }
         }
@@ -581,7 +593,7 @@ class HandoffkeepImport {
     let cursor = {after_at: isoTimestamp(updatedAfter), after_id: 0};
     if (after) {
       const text = afterText(after);
-      cursor = cursors[text];
+      cursor = after._hkCursor || cursors[text];
       if (!cursor) throw new Error('Unknown update cursor ' + text);
     }
     const query = {after_at: cursor.after_at, after_id: cursor.after_id, limit: top};

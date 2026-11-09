@@ -48,10 +48,12 @@ func (s *Store) ImportTasksUpdatedPage(ctx context.Context, project *string, aft
 		return nil, errors.New("invalid import cursor")
 	}
 	rows, err := s.pool.Query(ctx, `SELECT `+taskColumns+`,effective.import_updated_at
-		FROM tasks LEFT JOIN LATERAL (SELECT max(updated_at) AS latest_at FROM documents WHERE task_id=tasks.id AND
+		FROM tasks LEFT JOIN LATERAL (SELECT max(updated_at) AS latest_at,
+			(SELECT max(created_at) FROM task_comments WHERE task_id=tasks.id) AS latest_comment_at FROM documents WHERE task_id=tasks.id AND
 			(key LIKE 'reports/mwr-%' OR key LIKE 'reports/%/report.md' OR key LIKE 'brief/%/%')) linked ON true
-		CROSS JOIN LATERAL (SELECT CASE WHEN linked.latest_at IS NULL THEN tasks.last_activity_at ELSE
-			GREATEST(tasks.last_activity_at,linked.latest_at,TIMESTAMPTZ '`+importLinkedDocumentBackfillAt+`') END AS import_updated_at) effective
+		CROSS JOIN LATERAL (SELECT GREATEST(tasks.last_activity_at,COALESCE(linked.latest_at,tasks.last_activity_at),
+			COALESCE(linked.latest_comment_at,tasks.last_activity_at),
+			CASE WHEN linked.latest_at IS NULL THEN tasks.last_activity_at ELSE TIMESTAMPTZ '`+importLinkedDocumentBackfillAt+`' END) AS import_updated_at) effective
 		WHERE ($1::text IS NULL OR tasks.project IS NOT DISTINCT FROM NULLIF($1,''))
 		AND (effective.import_updated_at,tasks.id)>($2,$3)
 		ORDER BY effective.import_updated_at,tasks.id LIMIT $4`, project, afterAt.UTC(), afterID, limit)
