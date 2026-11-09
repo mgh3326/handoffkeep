@@ -105,6 +105,9 @@ func TestYTCommentsWorkerStopIsBoundedWhileSettling(t *testing.T) {
 	}
 	t.Cleanup(st.Close)
 	project := "ytc-stop"
+	if _, err := st.AddTaskProject(ctx, project, "test"); err != nil {
+		t.Fatal(err)
+	}
 	task, err := st.CreateTask(ctx, store.Task{Lane: "ytc-stop-lane", Title: "stop while settling", Kind: "implement", CreatedBy: "test", Project: &project})
 	if err != nil {
 		t.Fatal(err)
