@@ -355,6 +355,15 @@ started sub-tasks; the default 0 keeps the sweep off. `handoffkeep tasks sweep
 and writes nothing. `--started-stalled-hours` takes 1..8760 and
 `--backlog-icebox-days` takes 0 or 1..3650; serve refuses anything else at
 startup, and the preview answers `400 invalid_context` outside 1..3650.
+A `mergewake.merge` event that applies to a task also applies, in the same
+transaction, to every other non-settled task whose `refs.pr` is that PR:
+implement tasks move to `merged`, and decide, verify and ops tasks close at
+`completed` with the PR as the result link. `handoffkeep tasks drift [--json]
+[--merged-days N]` (`GET /v1/tasks/drift?merged_days=N`, default 2) reads four
+drift classes and writes nothing: settled tasks with an open decision request,
+unsettled tasks whose PR is already merged, merged tasks older than N days that
+no deploy record lists, and researching or developing tasks idle for
+`started_stalled_hours`.
 Schema version 34 adds the `source_event` kind for events
 recorded with `applied=false`, so they never read as transitions.
 

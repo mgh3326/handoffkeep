@@ -78,3 +78,13 @@ func (c Client) SweepPreview(ctx context.Context, days int) ([]store.SweepCandid
 	}
 	return out.Tasks, nil
 }
+
+// TasksDrift reads the drift report (GET /v1/tasks/drift). It writes nothing.
+func (c Client) TasksDrift(ctx context.Context, mergedDays int) (store.TaskDrift, error) {
+	var out store.TaskDrift
+	q := url.Values{"merged_days": {fmt.Sprint(mergedDays)}}
+	if err := c.call(ctx, "GET", "/v1/tasks/drift?"+q.Encode(), nil, &out); err != nil {
+		return store.TaskDrift{}, unsupportedRoute(err, "task_drift_unsupported", "the task drift report")
+	}
+	return out, nil
+}

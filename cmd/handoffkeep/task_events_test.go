@@ -268,3 +268,37 @@ func TestLastActivityRepairWorker(t *testing.T) {
 		t.Fatalf("calls=%d log=%q", f.calls, buf.String())
 	}
 }
+
+func TestTasksDriftCLI(t *testing.T) {
+	cliEnv(t)
+	var paths []string
+	h := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.Method+" "+r.URL.Path+"?"+r.URL.RawQuery)
+		_, _ = io.WriteString(w, `{"as_of":"2026-11-10T00:00:00Z","merged_days":2,"started_stalled_hours":24,`+
+			`"settled_open_decision":{"rule":"r","count":1,"truncated":false,"tasks":[{"id":2825,"lane":"l","title":"decide it","kind":"decide","state":"merged","decision_request":"dr-2825-1","since":"2026-11-09T00:00:00Z"}]},`+
+			`"merged_pr_not_merged":{"rule":"r","count":0,"truncated":false,"tasks":[]},"merged_without_deploy":{"rule":"r","count":0,"truncated":false,"tasks":[]},"idle_started":{"rule":"r","count":0,"truncated":false,"tasks":[]}}`)
+	}))
+	defer h.Close()
+	var out bytes.Buffer
+	if err := run([]string{"tasks", "drift", "--url", h.URL, "--token", "tok"}, &out, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) != 1 || paths[0] != "GET /v1/tasks/drift?merged_days=2" || !strings.Contains(out.String(), "settled_open_decision: 1") || !strings.Contains(out.String(), "#2825") {
+		t.Fatalf("paths=%v out=%s", paths, out.String())
+	}
+	out.Reset()
+	if err := run([]string{"tasks", "drift", "--json", "--merged-days", "5", "--url", h.URL, "--token", "tok"}, &out, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) != 2 || paths[1] != "GET /v1/tasks/drift?merged_days=5" || !strings.Contains(out.String(), `"settled_open_decision"`) {
+		t.Fatalf("paths=%v json=%s", paths, out.String())
+	}
+	for _, args := range [][]string{{"--merged-days", "0"}, {"--merged-days", "3651"}, {"extra"}} {
+		if err := run(append(append([]string{"tasks", "drift"}, args...), "--url", h.URL, "--token", "tok"), io.Discard, io.Discard); err == nil {
+			t.Fatalf("accepted %v", args)
+		}
+	}
+	if len(paths) != 2 {
+		t.Fatalf("refused commands sent requests: %v", paths)
+	}
+}

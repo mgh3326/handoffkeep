@@ -585,3 +585,46 @@ func TestSourceEventTargetIsForwardOnly(t *testing.T) {
 		t.Fatal("unknown source applied")
 	}
 }
+
+// TestMergePropagatesToEverySiblingOnThePR (hk 3766): a merge that applies to
+// one task applies in the same transaction to every other non-settled task on
+// that PR. An implement task moves to merged, a decide task closes at
+// completed with the PR as its result link, and a settled task on the PR is
+// untouched. A redelivered merge changes nothing.
+func TestMergePropagatesToEverySiblingOnThePR(t *testing.T) {
+	s, pool := searchTestStore(t)
+	pr := testPR(401)
+	impl := flowTask(t, s, pool, "implement", StateReviewing, false)
+	setRefsPR(t, s, impl.ID, pr)
+	sibling := flowTask(t, s, pool, "implement", StateResearching, false)
+	setRefsPR(t, s, sibling.ID, pr)
+	decide := flowTask(t, s, pool, "decide", StateReviewing, false)
+	setRefsPR(t, s, decide.ID, pr)
+	settled := flowTask(t, s, pool, "implement", StateDeployed, false)
+	setRefsPR(t, s, settled.ID, pr)
+	settledBefore := stateOf(t, s, settled.ID)
+
+	if res := send(t, s, mergeEvent(impl.ID, pr)); !res.Applied || res.State != StateMerged {
+		t.Fatalf("merge of the trigger task: %+v", res)
+	}
+	if got := stateOf(t, s, sibling.ID); got.State != StateMerged {
+		t.Fatalf("implement sibling: %s, want merged", got.State)
+	}
+	if rows := sourceRows(t, s, sibling.ID, SourceMergewakeMerge); len(rows) != 1 || !rows[0].Applied || rows[0].SourceRef != pr {
+		t.Fatalf("sibling merge rows %+v", rows)
+	}
+	got := stateOf(t, s, decide.ID)
+	if got.State != StateCompleted || got.Refs.Closure == nil || got.Refs.Closure.Evidence != pr {
+		t.Fatalf("decide sibling: state=%s closure=%+v, want completed with the PR as evidence", got.State, got.Refs.Closure)
+	}
+	after := stateOf(t, s, settled.ID)
+	if after.State != StateDeployed || !after.UpdatedAt.Equal(settledBefore.UpdatedAt) || len(sourceRows(t, s, settled.ID, SourceMergewakeMerge)) != 0 {
+		t.Fatalf("settled task on the PR was touched: state=%s rows=%+v", after.State, sourceRows(t, s, settled.ID, SourceMergewakeMerge))
+	}
+	if res := send(t, s, mergeEvent(impl.ID, pr)); !res.Redelivered {
+		t.Fatalf("redelivered merge: %+v", res)
+	}
+	if rows := sourceRows(t, s, sibling.ID, SourceMergewakeMerge); len(rows) != 1 {
+		t.Fatalf("redelivery recorded again: %+v", rows)
+	}
+}

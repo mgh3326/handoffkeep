@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/mgh3326/handoffkeep/internal/store"
@@ -176,4 +177,72 @@ func (w lastActivityRepairWorker) Run(ctx context.Context) {
 			return
 		}
 	}
+}
+
+// taskDriftCmd prints the drift report (tasks drift): the tasks whose state
+// disagrees with the records around them. It writes nothing. Text by default;
+// --json prints the report as JSON.
+func taskDriftCmd(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("tasks drift", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	c := remoteClient(fs)
+	asJSON := fs.Bool("json", false, "print the report as JSON")
+	mergedDays := fs.Int("merged-days", store.DriftDefaultMergedDays, "report merged tasks older than this many days that no deploy record lists")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return errors.New("tasks drift takes flags only")
+	}
+	if err := store.CheckDriftMergedDays(*mergedDays); err != nil {
+		return fmt.Errorf("--merged-days: %w", err)
+	}
+	if err := mustClient(c); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	rep, err := c.TasksDrift(ctx, *mergedDays)
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		return printJSON(out, rep)
+	}
+	return writeTaskDriftText(out, rep)
+}
+
+// writeTaskDriftText prints one heading per drift class, then one line per
+// task it names.
+func writeTaskDriftText(out io.Writer, rep store.TaskDrift) error {
+	var b strings.Builder
+	fmt.Fprintf(&b, "tasks drift as of %s (merged_days=%d, started_stalled_hours=%d)\n", rep.AsOf.Format(time.RFC3339), rep.MergedDays, rep.StartedStalledHours)
+	classes := []struct {
+		name string
+		c    store.TaskDriftClass
+	}{
+		{"settled_open_decision", rep.SettledOpenDecision},
+		{"merged_pr_not_merged", rep.MergedPRNotMerged},
+		{"merged_without_deploy", rep.MergedWithoutDeploy},
+		{"idle_started", rep.IdleStarted},
+	}
+	for _, k := range classes {
+		fmt.Fprintf(&b, "\n%s: %d (%s)", k.name, k.c.Count, k.c.Rule)
+		if k.c.Truncated {
+			fmt.Fprintf(&b, " — more candidates than the %d listed", len(k.c.Tasks))
+		}
+		b.WriteString("\n")
+		for _, x := range k.c.Tasks {
+			fmt.Fprintf(&b, "  #%d %s %s lane=%s since=%s", x.ID, x.Kind, x.State, x.Lane, x.Since.Format(time.RFC3339))
+			if x.PR != "" {
+				fmt.Fprintf(&b, " pr=%s", x.PR)
+			}
+			if x.DecisionRequest != "" {
+				fmt.Fprintf(&b, " decision_request=%s", x.DecisionRequest)
+			}
+			fmt.Fprintf(&b, " %s\n", x.Title)
+		}
+	}
+	_, err := io.WriteString(out, b.String())
+	return err
 }
