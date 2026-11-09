@@ -69,10 +69,13 @@ type Store interface {
 	MarkYouTrackRevertDone(ctx context.Context, activityID string) error
 
 	DueYouTrackDocs(ctx context.Context, patterns []string, defaultProject string, limit int) ([]store.Document, error)
+	AllYouTrackDocs(ctx context.Context, limit int) ([]store.Document, error)
 	RecordYouTrackAttempt(ctx context.Context, queue, key, failure, skip string) error
 	OrphanYouTrackDocArticles(ctx context.Context, limit int) ([]store.YouTrackDocArticle, error)
 	GetYouTrackDocArticle(ctx context.Context, docKey string) (store.YouTrackDocArticle, bool, error)
+	YouTrackDocArticles(ctx context.Context, key string) ([]store.YouTrackDocArticle, error)
 	UpsertYouTrackDocArticle(ctx context.Context, x store.YouTrackDocArticle) error
+	DeleteYouTrackDocArticleParts(ctx context.Context, key string, from int) error
 
 	DocumentKeyExists(ctx context.Context, key string) (bool, error)
 	YouTrackTaskHits(ctx context.Context, tenant string, issueIDs []string, lane string) (map[string]store.SearchResult, error)

@@ -160,7 +160,15 @@ func (f *fakeYouTrack) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			write(http.StatusNotFound, map[string]string{"error": "not_found"})
 			return
 		}
+		article.Content = f.articleBodies[article.ID]
 		write(http.StatusOK, article)
+	case strings.HasPrefix(path, "/api/articles/") && r.Method == http.MethodDelete:
+		id := strings.TrimPrefix(path, "/api/articles/")
+		delete(f.articles, id)
+		delete(f.articleBodies, id)
+		delete(f.articleProject, id)
+		delete(f.articleParents, id)
+		w.WriteHeader(http.StatusNoContent)
 	case path == "/api/articles" && r.Method == http.MethodGet:
 		// A full-text search: every article whose content holds the query.
 		needle := r.URL.Query().Get("query")

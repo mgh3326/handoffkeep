@@ -65,7 +65,7 @@ func (c *Client) SearchArticles(ctx context.Context, query string) ([]Article, e
 // GetArticle reads one article. A deleted article answers not found.
 func (c *Client) GetArticle(ctx context.Context, articleID string) (Article, error) {
 	q := url.Values{}
-	q.Set("fields", articleFields)
+	q.Set("fields", articleFields+",content")
 	var out Article
 	err := c.get(ctx, "/api/articles/"+url.PathEscape(articleID), q, &out)
 	return out, err
@@ -82,6 +82,11 @@ func (c *Client) UpdateArticle(ctx context.Context, articleID, summary, content 
 		Content string `json:"content"`
 	}{summary, content}, &out)
 	return out, err
+}
+
+// DeleteArticle removes a surplus part after a document shrinks.
+func (c *Client) DeleteArticle(ctx context.Context, articleID string) error {
+	return c.delete(ctx, "/api/articles/"+url.PathEscape(articleID), nil)
 }
 
 type idRef struct {
