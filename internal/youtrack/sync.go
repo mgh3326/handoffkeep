@@ -77,20 +77,29 @@ type OutboxAction struct {
 }
 
 type SyncReport struct {
-	DryRun    bool             `json:"dry_run"`
-	Bot       string           `json:"bot,omitempty"`
-	Outbox    []OutboxAction   `json:"outbox"`
-	Pushed    []PushAction     `json:"push"`
-	Pulled    []PullAction     `json:"pull"`
-	Decisions []DecisionAction `json:"decisions"`
-	Docs      []DocAction      `json:"docs"`
-	DocBytes  int64            `json:"doc_bytes"`
-	Refreshed int              `json:"refreshed"`
-	Reverted  int              `json:"reverted"`
-	Skipped   int              `json:"skipped"`
-	Warnings  []string         `json:"warnings,omitempty"`
-	Errors    []string         `json:"errors,omitempty"`
-	Counts    map[string]int   `json:"counts"`
+	DryRun      bool                        `json:"dry_run"`
+	Bot         string                      `json:"bot,omitempty"`
+	Outbox      []OutboxAction              `json:"outbox"`
+	Pushed      []PushAction                `json:"push"`
+	Pulled      []PullAction                `json:"pull"`
+	Decisions   []DecisionAction            `json:"decisions"`
+	Docs        []DocAction                 `json:"docs"`
+	DocBytes    int64                       `json:"doc_bytes"`
+	DocPrefixes map[string]DocPrefixSummary `json:"doc_prefixes,omitempty"`
+	Refreshed   int                         `json:"refreshed"`
+	Reverted    int                         `json:"reverted"`
+	Skipped     int                         `json:"skipped"`
+	Warnings    []string                    `json:"warnings,omitempty"`
+	Errors      []string                    `json:"errors,omitempty"`
+	Counts      map[string]int              `json:"counts"`
+}
+
+type DocPrefixSummary struct {
+	Create    int   `json:"create"`
+	Update    int   `json:"update"`
+	Unchanged int   `json:"unchanged"`
+	Parts     int   `json:"parts"`
+	Bytes     int64 `json:"bytes"`
 }
 
 func (r *SyncReport) fail(format string, args ...any) {

@@ -47,13 +47,41 @@ func (f *fakeStore) DueYouTrackDocs(_ context.Context, patterns []string, defaul
 		}
 		d := f.docs[k]
 		a, ok := f.docArticles[k]
-		if ok && a.SourceSHA == d.SHA256 && a.HKProject == f.docProject(d, defaultProject) {
+		rowCount := 0
+		staleChild := false
+		for _, part := range f.docArticles {
+			if part.DocumentKey == k || (part.DocumentKey == "" && part.DocKey == k) {
+				rowCount++
+				if part.PartIndex > 1 && part.SourceSHA != d.SHA256 {
+					staleChild = true
+				}
+			}
+		}
+		if ok && a.SourceSHA == d.SHA256 && a.HKProject == f.docProject(d, defaultProject) && !(a.PartCount <= 1 && a.Bytes < int64(len(d.Body))) && strings.HasPrefix(a.PartSHA, "v2:") && !staleChild && a.PartCount == rowCount {
 			continue
 		}
 		if !f.dueAttempt(store.YouTrackQueueDoc, k, now) {
 			continue
 		}
 		out = append(out, d)
+	}
+	return out, nil
+}
+
+func (f *fakeStore) AllYouTrackDocs(_ context.Context, limit int) ([]store.Document, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	keys := make([]string, 0, len(f.docs))
+	for k := range f.docs {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out := []store.Document{}
+	for _, k := range keys {
+		if len(out) >= limit {
+			break
+		}
+		out = append(out, f.docs[k])
 	}
 	return out, nil
 }
@@ -111,9 +139,45 @@ func (f *fakeStore) GetYouTrackDocArticle(_ context.Context, docKey string) (sto
 	return a, ok, nil
 }
 
+func (f *fakeStore) YouTrackDocArticles(_ context.Context, key string) ([]store.YouTrackDocArticle, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := []store.YouTrackDocArticle{}
+	for _, a := range f.docArticles {
+		if a.DocumentKey == key || (a.DocumentKey == "" && a.DocKey == key) {
+			if a.PartIndex == 0 {
+				a.PartIndex = 1
+			}
+			out = append(out, a)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].PartIndex < out[j].PartIndex })
+	return out, nil
+}
+
+func (f *fakeStore) DeleteYouTrackDocArticleParts(_ context.Context, key string, from int) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for k, a := range f.docArticles {
+		if a.DocumentKey == key && a.PartIndex >= from {
+			delete(f.docArticles, k)
+		}
+	}
+	return nil
+}
+
 func (f *fakeStore) UpsertYouTrackDocArticle(_ context.Context, x store.YouTrackDocArticle) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if x.DocumentKey == "" {
+		x.DocumentKey = x.DocKey
+	}
+	if x.PartIndex == 0 {
+		x.PartIndex = 1
+	}
+	if x.PartCount == 0 {
+		x.PartCount = 1
+	}
 	f.docArticles[x.DocKey] = x
 	return nil
 }
@@ -180,16 +244,16 @@ func TestDocsCreateUnderPrefixIndexAndSkipUnchanged(t *testing.T) {
 		t.Fatalf("errors: %v", report.Errors)
 	}
 	creates, _, byID, bodies, parents := fy.articleSnapshot()
-	// One parent per prefix (design, decision) plus one article per document.
-	if creates != 4 {
-		t.Fatalf("creates = %d, want 4 (2 index + 2 docs)", creates)
+	// All document prefixes are included: design, decision and policy.
+	if creates != 6 {
+		t.Fatalf("creates = %d, want 6 (3 index + 3 docs)", creates)
 	}
 	actions := docActions(report)
 	if actions["design/alpha"] != "create" || actions["decision/beta"] != "create" {
 		t.Fatalf("actions = %v", actions)
 	}
-	if _, ok := actions["policy/gate"]; ok {
-		t.Fatalf("agent-read policy doc was mirrored: %v", actions)
+	if actions["policy/gate"] != "create" {
+		t.Fatalf("policy prefix was not mirrored: %v", actions)
 	}
 	alpha, ok := fs.docArticle("design/alpha")
 	if !ok {
@@ -261,7 +325,87 @@ func TestDocsUpdateRewritesSameArticle(t *testing.T) {
 	}
 }
 
-func TestDocsOverCapBecomesStub(t *testing.T) {
+func TestDocPartTitleRespectsSummaryRuneLimit(t *testing.T) {
+	title := docPartTitle(strings.Repeat("한", 512), 2, 12)
+	if got := len([]rune(title)); got > docTitleMaxRunes {
+		t.Fatalf("child summary has %d runes, limit %d", got, docTitleMaxRunes)
+	}
+	if !strings.HasSuffix(title, " (2/12)") {
+		t.Fatalf("child summary lost part suffix: %q", title)
+	}
+}
+
+func TestUpdateThatAddsPartRemainsAnUpdate(t *testing.T) {
+	fs := newFakeStore()
+	fy := newFakeYouTrack()
+	key := "design/grow"
+	fs.putDoc(key, "# Grow\n\nsmall")
+	svc := newTestService(t, fy, fs)
+	if _, err := svc.Sync(context.Background(), SyncOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	fs.putDoc(key, "# Grow\n\n"+strings.Repeat("x", 300<<10))
+	report, err := svc.Sync(context.Background(), SyncOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := docActions(report)[key]; got != "update" {
+		t.Fatalf("action = %q, want update", got)
+	}
+	if got := report.DocPrefixes["design"]; got.Update != 1 || got.Create != 0 {
+		t.Fatalf("prefix counts = %+v, want one update and no create", got)
+	}
+}
+
+func TestProjectMoveAndShrinkLeavesOldProjectArticlesAlone(t *testing.T) {
+	fs := newFakeStore()
+	fy := newFakeYouTrack()
+	task := fs.addTask("handoffkeep", "lane", "Move doc", "todo", 3)
+	key := "research/moved-large"
+	fs.putDoc(key, "# Large\n\n"+strings.Repeat("x", 300<<10))
+	fs.mu.Lock()
+	doc := fs.docs[key]
+	id := task.ID
+	doc.TaskID = &id
+	fs.docs[key] = doc
+	fs.mu.Unlock()
+	svc := newTestService(t, fy, fs)
+	if _, err := svc.Sync(context.Background(), SyncOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	oldRows, err := fs.YouTrackDocArticles(context.Background(), key)
+	if err != nil || len(oldRows) != 2 {
+		t.Fatalf("old rows = %+v, err=%v", oldRows, err)
+	}
+	oldChild := oldRows[1].ArticleID
+
+	fs.mu.Lock()
+	newProject := "panewire"
+	task.Project = &newProject
+	fs.tasks[task.ID] = task
+	fs.mu.Unlock()
+	fs.putDoc(key, "# Small\n\nshort")
+	fs.mu.Lock()
+	doc = fs.docs[key]
+	doc.TaskID = &id
+	fs.docs[key] = doc
+	fs.mu.Unlock()
+	if _, err := svc.Sync(context.Background(), SyncOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := fs.YouTrackDocArticles(context.Background(), key)
+	if err != nil || len(rows) != 1 || rows[0].HKProject != "panewire" {
+		t.Fatalf("new project rows = %+v, err=%v", rows, err)
+	}
+	fy.mu.Lock()
+	_, oldChildStillExists := fy.articles[oldChild]
+	fy.mu.Unlock()
+	if !oldChildStillExists {
+		t.Fatal("shrink deleted a child article from the previous project")
+	}
+}
+
+func TestDocsOverCapIsSplitIntoParts(t *testing.T) {
 	fs := newFakeStore()
 	fy := newFakeYouTrack()
 	big := "# Big runbook\n\n" + strings.Repeat("x", docArticleMaxBytes)
@@ -272,17 +416,16 @@ func TestDocsOverCapBecomesStub(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := docActions(report)["runbook/big"]; got != "stub" {
-		t.Fatalf("action = %q, want stub", got)
+	if got := docActions(report)["runbook/big"]; got != "create" {
+		t.Fatalf("action = %q, want create", got)
 	}
 	row, _ := fs.docArticle("runbook/big")
 	_, _, _, bodies, _ := fy.articleSnapshot()
-	stub := bodies[row.ArticleID]
-	if strings.Contains(stub, "xxxxxxxx") || !strings.Contains(stub, "hk에서 읽어 주세요") {
-		t.Fatalf("stub should link to hk, not carry the body: %q", stub[:min(len(stub), 200)])
+	if !strings.Contains(bodies[row.ArticleID], "xxxxxxxx") || report.Docs[0].Parts != 2 {
+		t.Fatalf("large content not stored in parts: parts=%d", report.Docs[0].Parts)
 	}
-	if report.DocBytes >= int64(docArticleMaxBytes) {
-		t.Fatalf("DocBytes = %d, a stub must not count the whole body", report.DocBytes)
+	if report.DocBytes < int64(docArticleMaxBytes) {
+		t.Fatalf("DocBytes = %d, want full content bytes", report.DocBytes)
 	}
 }
 
@@ -291,22 +434,216 @@ func TestDocsDryRunWritesNothing(t *testing.T) {
 	fy := newFakeYouTrack()
 	fs.putDoc("research/gamma", "# Gamma\n\nbody")
 	svc := newTestService(t, fy, fs)
+	if _, err := svc.Sync(context.Background(), SyncOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	fs.putDoc("research/new", "# New\n\nplanned")
+	createsBefore, updatesBefore, _, _, _ := fy.articleSnapshot()
 
 	report, err := svc.Sync(context.Background(), SyncOptions{DryRun: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := docActions(report)["research/gamma"]; got != "would_create" {
-		t.Fatalf("action = %q, want would_create", got)
+	actions := docActions(report)
+	if actions["research/gamma"] != "unchanged" || actions["research/new"] != "would_create" {
+		t.Fatalf("actions = %v, want unchanged and would_create", actions)
 	}
-	if creates, updates, _, _, _ := fy.articleSnapshot(); creates != 0 || updates != 0 {
+	if creates, updates, _, _, _ := fy.articleSnapshot(); creates != createsBefore || updates != updatesBefore {
 		t.Fatalf("dry run wrote articles: creates=%d updates=%d", creates, updates)
 	}
-	if _, ok := fs.docArticle("research/gamma"); ok {
+	if _, ok := fs.docArticle("research/new"); ok {
 		t.Fatal("dry run wrote the ledger")
 	}
-	if report.DocBytes != 0 {
-		t.Fatalf("dry run counted bytes written: %d", report.DocBytes)
+	if report.DocBytes == 0 || report.DocPrefixes["research"].Unchanged != 1 || report.DocPrefixes["research"].Create != 1 {
+		t.Fatal("dry run omitted planned bytes")
+	}
+}
+
+func TestDocsMultipartRoundTripShrinkAndAdopt(t *testing.T) {
+	fs := newFakeStore()
+	fy := newFakeYouTrack()
+	fs.putDoc("reference/bootstrap", "# Bootstrap")
+	svc := newTestService(t, fy, fs)
+	if _, err := svc.Sync(context.Background(), SyncOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	body := "# 대형 문서\n\n" + strings.Repeat("가나다 abc\n\n", 45_000)
+	fs.putDoc("reference/large", body)
+	fy.mu.Lock()
+	fy.loseArticleResponses = 1
+	fy.mu.Unlock()
+	first, err := svc.Sync(context.Background(), SyncOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Errors) == 0 {
+		t.Fatal("expected lost create response to be recorded as an error")
+	}
+	fs.mu.Lock()
+	delete(fs.attempts, attemptKey(store.YouTrackQueueDoc, "reference/large"))
+	fs.mu.Unlock()
+	report, err := svc.Sync(context.Background(), SyncOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := docActions(report)["reference/large"]; got != "adopt" {
+		t.Fatalf("lost create action=%q", got)
+	}
+	rows, err := fs.YouTrackDocArticles(context.Background(), "reference/large")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("rows=%d, want 3 parts", len(rows))
+	}
+	creates, _, _, bodies, _ := fy.articleSnapshot()
+	if creates != 5 {
+		t.Fatalf("creates=%d, want index + bootstrap + 3 parts", creates)
+	}
+	for _, r := range rows {
+		if len(bodies[r.ArticleID]) > docArticleMaxBytes {
+			t.Fatalf("part %d is %d bytes", r.PartIndex, len(bodies[r.ArticleID]))
+		}
+	}
+	got, err := svc.ReadDocumentArticle(context.Background(), "reference/large")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != body {
+		t.Fatalf("readback differs: got %d bytes, want %d", len(got), len(body))
+	}
+
+	fs.putDoc("reference/large", "# 짧은 문서\n\n"+strings.Repeat("한글", 17_000))
+	if _, err := svc.Sync(context.Background(), SyncOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	rows, err = fs.YouTrackDocArticles(context.Background(), "reference/large")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("after shrink rows=%d, want 1", len(rows))
+	}
+	_, _, articles, _, _ := fy.articleSnapshot()
+	if len(articles) != 3 {
+		t.Fatalf("after shrink articles=%d, want index + bootstrap + primary", len(articles))
+	}
+	if _, err := svc.ReadDocumentArticle(context.Background(), "reference/large"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDocsPartialPartFailureKeepsDocumentDueUntilComplete(t *testing.T) {
+	fs := newFakeStore()
+	fy := newFakeYouTrack()
+	key := "reference/retry"
+	fs.putDoc(key, "# Retry\n\n"+strings.Repeat("x", 300<<10))
+	svc := newTestService(t, fy, fs)
+	fy.mu.Lock()
+	fy.failSummary = key + " (2/2)"
+	fy.mu.Unlock()
+	first, err := svc.Sync(context.Background(), SyncOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Errors) == 0 {
+		t.Fatal("expected second-part create failure")
+	}
+	if rows, _ := fs.YouTrackDocArticles(context.Background(), key); len(rows) != 0 {
+		t.Fatalf("partial document has completion ledger: %+v", rows)
+	}
+	fy.mu.Lock()
+	fy.failSummary = ""
+	fy.mu.Unlock()
+	fs.mu.Lock()
+	delete(fs.attempts, attemptKey(store.YouTrackQueueDoc, key))
+	fs.mu.Unlock()
+	second, err := svc.Sync(context.Background(), SyncOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second.Errors) != 0 {
+		t.Fatalf("retry errors: %v", second.Errors)
+	}
+	rows, err := fs.YouTrackDocArticles(context.Background(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 || rows[0].SourceSHA != fs.docs[key].SHA256 || rows[0].PartCount != 2 {
+		t.Fatalf("completion ledger: %+v", rows)
+	}
+	if _, err := svc.ReadDocumentArticle(context.Background(), key); err != nil {
+		t.Fatalf("completed read-back: %v", err)
+	}
+}
+
+func TestLegacyOversizedStubIsDueForBackfill(t *testing.T) {
+	fs := newFakeStore()
+	key := "runbook/legacy-stub"
+	fs.putDoc(key, "# Legacy\n\n"+strings.Repeat("x", 300<<10))
+	doc := fs.docs[key]
+	if err := fs.UpsertYouTrackDocArticle(context.Background(), store.YouTrackDocArticle{DocKey: key, HKProject: "other", ArticleID: "A-stub", SourceSHA: doc.SHA256, Bytes: 120}); err != nil {
+		t.Fatal(err)
+	}
+	due, err := fs.DueYouTrackDocs(context.Background(), []string{"%"}, "other", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(due) != 1 || due[0].Key != key {
+		t.Fatalf("legacy stub was not queued for backfill: %+v", due)
+	}
+}
+
+func TestDocsFailedSurplusDeleteStaysDueAndReadbackRejectsMixedParts(t *testing.T) {
+	fs := newFakeStore()
+	fy := newFakeYouTrack()
+	key := "research/shrink-retry"
+	fs.putDoc(key, "# Large\n\n"+strings.Repeat("x", 300<<10))
+	svc := newTestService(t, fy, fs)
+	if _, err := svc.Sync(context.Background(), SyncOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	fs.putDoc(key, "# Small\n\n"+strings.Repeat("한글", 17_000))
+	fy.mu.Lock()
+	fy.failArticleDelete = true
+	fy.mu.Unlock()
+	first, err := svc.Sync(context.Background(), SyncOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Errors) == 0 {
+		t.Fatal("expected surplus delete failure")
+	}
+	if _, err := svc.ReadDocumentArticle(context.Background(), key); err == nil {
+		t.Fatal("mixed ledger returned a successful read-back")
+	}
+	fy.mu.Lock()
+	fy.failArticleDelete = false
+	fy.mu.Unlock()
+	fs.mu.Lock()
+	delete(fs.attempts, attemptKey(store.YouTrackQueueDoc, key))
+	fs.mu.Unlock()
+	second, err := svc.Sync(context.Background(), SyncOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second.Errors) != 0 {
+		t.Fatalf("retry errors: %v", second.Errors)
+	}
+	rows, err := fs.YouTrackDocArticles(context.Background(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].PartCount != 1 {
+		t.Fatalf("shrunk ledger: %+v", rows)
+	}
+	got, err := svc.ReadDocumentArticle(context.Background(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "# Small\n\n" + strings.Repeat("한글", 17_000)
+	if got != want {
+		t.Fatalf("readback after retry differs: %d bytes", len(got))
 	}
 }
 

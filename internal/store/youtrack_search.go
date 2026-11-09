@@ -80,7 +80,7 @@ func (s *Store) YouTrackDocHits(ctx context.Context, articleIDs []string, sessio
 		return out, nil
 	}
 	rows, err := s.pool.Query(ctx, `SELECT a.article_id,d.key,d.session,d.kind,d.created_at
-		FROM youtrack_doc_articles a JOIN documents d ON d.key=a.doc_key
+		FROM youtrack_doc_articles a JOIN documents d ON d.key=COALESCE(NULLIF(a.document_key,''),a.doc_key)
 		WHERE a.article_id=ANY($1) AND ($2='' OR d.session=$2)
 		ORDER BY a.article_id,d.key`, articleIDs, session)
 	if err != nil {

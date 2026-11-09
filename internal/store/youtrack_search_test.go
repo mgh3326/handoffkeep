@@ -75,20 +75,26 @@ func TestYouTrackDocHitsMapArticlesAndFilterBySession(t *testing.T) {
 	if err := s.UpsertYouTrackDocArticle(ctx, YouTrackDocArticle{DocKey: "design/hits-a", HKProject: "handoffkeep", ArticleID: "55-1"}); err != nil {
 		t.Fatal(err)
 	}
+	if err := s.UpsertYouTrackDocArticle(ctx, YouTrackDocArticle{DocKey: "/hk-part/search-test/2", DocumentKey: "design/hits-a", PartIndex: 2, PartCount: 2, HKProject: "handoffkeep", ArticleID: "55-3"}); err != nil {
+		t.Fatal(err)
+	}
 	// An index article has no document row, so it must not be a hit.
 	if err := s.UpsertYouTrackDocArticle(ctx, YouTrackDocArticle{DocKey: "index:hk:handoffkeep", HKProject: "handoffkeep", ArticleID: "55-2"}); err != nil {
 		t.Fatal(err)
 	}
 
-	hits, err := s.YouTrackDocHits(ctx, []string{"55-1", "55-2"}, "")
+	hits, err := s.YouTrackDocHits(ctx, []string{"55-1", "55-2", "55-3"}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(hits) != 1 {
-		t.Fatalf("hits = %+v, want only the document (index article dropped)", hits)
+	if len(hits) != 2 {
+		t.Fatalf("hits = %+v, want primary and child document articles (index article dropped)", hits)
 	}
 	if x := hits["55-1"]; x.Scope != "docs" || x.Key != "design/hits-a" || x.Title != "design/hits-a" || x.Session != "sess-hits" || x.Kind != "design" {
 		t.Fatalf("55-1 hit = %+v", x)
+	}
+	if x := hits["55-3"]; x.Key != "design/hits-a" {
+		t.Fatalf("child part hit = %+v", x)
 	}
 
 	other, err := s.YouTrackDocHits(ctx, []string{"55-1"}, "other-session")

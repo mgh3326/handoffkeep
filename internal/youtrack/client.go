@@ -448,3 +448,7 @@ func (c *Client) post(ctx context.Context, path string, query url.Values, body, 
 func (c *Client) postOnce(ctx context.Context, path string, query url.Values, body, out any) error {
 	return c.do(ctx, http.MethodPost, path, query, body, out, false)
 }
+
+func (c *Client) delete(ctx context.Context, path string, query url.Values) error {
+	return c.do(ctx, http.MethodDelete, path, query, nil, nil, true)
+}
