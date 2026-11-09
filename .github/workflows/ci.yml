@@ -181,7 +181,7 @@ jobs:
     if: ${{ contains(fromJSON('["all","test"]'), inputs.suite || 'all') }}
     name: 'pr: store + postgres'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     services:
       postgres:
         image: postgres:17
@@ -292,7 +292,8 @@ jobs:
             echo "the decision step said run=yes but selected no packages"
             exit 1
           fi
-          go test -timeout 10m -count=1 -v "${pkgs[@]}"
+          # ./tests alone takes ~10.5 min on main (run 42617745476); 10m panicked on handoffkeep#286 (hk 3746).
+          go test -timeout 20m -count=1 -v "${pkgs[@]}"
 
   main-linux:
     # T-MAIN only. The whole Go suite against PostgreSQL WITHOUT -race, the
