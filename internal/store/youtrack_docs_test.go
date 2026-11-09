@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 )
@@ -30,7 +31,7 @@ func TestYouTrackDocsDueFiltersByPatternAndHash(t *testing.T) {
 	}
 
 	design := due[1]
-	if err := s.UpsertYouTrackDocArticle(ctx, YouTrackDocArticle{DocKey: design.Key, HKProject: "handoffkeep", ArticleID: "A-1", SourceSHA: design.SHA256, Bytes: 10, SyncedAt: time.Now().UTC()}); err != nil {
+	if err := s.UpsertYouTrackDocArticle(ctx, YouTrackDocArticle{DocKey: design.Key, HKProject: "handoffkeep", ArticleID: "A-1", SourceSHA: design.SHA256, Bytes: int64(len(design.Body) + 100), SyncedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
 	due, err = s.DueYouTrackDocs(ctx, patterns, "handoffkeep", 10)
@@ -85,6 +86,28 @@ func TestYouTrackDocArticleLedgerRoundTripAndOrphans(t *testing.T) {
 	}
 	if err := s.UpsertYouTrackDocArticle(ctx, YouTrackDocArticle{DocKey: "review/x", ArticleID: "A-2"}); err == nil {
 		t.Fatal("a row without a project must be refused")
+	}
+}
+
+func TestLegacyOversizedStubIsDueForBackfill(t *testing.T) {
+	s := schemaStore(t, "youtrack_docs_legacy_stub")
+	ctx := context.Background()
+	doc, _, err := s.PutDocument(ctx, Document{Key: "research/legacy-stub", Kind: "research", Body: "# Legacy\n\n" + strings.Repeat("x", 300<<10), CreatedBy: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PutYouTrackProject(ctx, YouTrackProject{HKProject: "handoffkeep", ShortName: "HK"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpsertYouTrackDocArticle(ctx, YouTrackDocArticle{DocKey: doc.Key, HKProject: "handoffkeep", ArticleID: "A-stub", SourceSHA: doc.SHA256, Bytes: 120, SyncedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	due, err := s.DueYouTrackDocs(ctx, []string{"%"}, "handoffkeep", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(due) != 1 || due[0].Key != doc.Key {
+		t.Fatalf("legacy stub was not queued for backfill: %+v", due)
 	}
 }
 

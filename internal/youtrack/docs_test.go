@@ -47,7 +47,7 @@ func (f *fakeStore) DueYouTrackDocs(_ context.Context, patterns []string, defaul
 		}
 		d := f.docs[k]
 		a, ok := f.docArticles[k]
-		if ok && a.SourceSHA == d.SHA256 && a.HKProject == f.docProject(d, defaultProject) {
+		if ok && a.SourceSHA == d.SHA256 && a.HKProject == f.docProject(d, defaultProject) && !(a.PartCount <= 1 && a.Bytes < int64(len(d.Body))) {
 			continue
 		}
 		if !f.dueAttempt(store.YouTrackQueueDoc, k, now) {
@@ -484,6 +484,23 @@ func TestDocsPartialPartFailureKeepsDocumentDueUntilComplete(t *testing.T) {
 	}
 	if _, err := svc.ReadDocumentArticle(context.Background(), key); err != nil {
 		t.Fatalf("completed read-back: %v", err)
+	}
+}
+
+func TestLegacyOversizedStubIsDueForBackfill(t *testing.T) {
+	fs := newFakeStore()
+	key := "runbook/legacy-stub"
+	fs.putDoc(key, "# Legacy\n\n"+strings.Repeat("x", 300<<10))
+	doc := fs.docs[key]
+	if err := fs.UpsertYouTrackDocArticle(context.Background(), store.YouTrackDocArticle{DocKey: key, HKProject: "other", ArticleID: "A-stub", SourceSHA: doc.SHA256, Bytes: 120}); err != nil {
+		t.Fatal(err)
+	}
+	due, err := fs.DueYouTrackDocs(context.Background(), []string{"%"}, "other", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(due) != 1 || due[0].Key != key {
+		t.Fatalf("legacy stub was not queued for backfill: %+v", due)
 	}
 }
 

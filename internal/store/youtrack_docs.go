@@ -70,7 +70,9 @@ func (s *Store) DueYouTrackDocs(ctx context.Context, patterns []string, defaultP
 		LEFT JOIN youtrack_attempts r ON r.queue='doc' AND r.item_key=d.key
 		WHERE d.key LIKE ANY($1::text[])
 		  AND (a.doc_key IS NULL OR a.source_sha<>d.sha256
-		       OR a.hk_project<>COALESCE(rp.hk_project,''))
+		       OR a.hk_project<>COALESCE(rp.hk_project,'')
+	       -- Legacy oversized stubs stored fewer bytes than the source body.
+	       OR (a.part_count=1 AND a.bytes<octet_length(d.body)))
 		  AND `+youtrackAttemptRank("r")+` <= now()
 		ORDER BY `+youtrackAttemptRank("r")+` ASC, d.key ASC LIMIT $2`, patterns, limit, defaultProject)
 	if err != nil {
