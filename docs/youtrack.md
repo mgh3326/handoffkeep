@@ -117,11 +117,36 @@ YouTrack의 `hk 상태` 번들 값은 콘솔과 같은 한국어 이름이다.
 | `YOUTRACK_DEFAULT_LANE` | 아니오 | 새 이슈에서 레인을 못 읽을 때(기본 `operator-desk`) |
 | `YOUTRACK_CONSOLE_URL` | 아니오 | 이슈 본문 첫 줄 링크(기본 `https://console.robinco.dev`) |
 | `HANDOFFKEEP_YT_COMMENTS_MODE` | 아니오 | `off`(기본) 또는 `canary`. 쓰기 프로토콜 코멘트 카나리(hk 3739, `docs/youtrack-write-protocol.md`). 다른 값이나 YouTrack 자격 없는 `canary`는 서버 시작 실패 |
+| `HANDOFFKEEP_YT_READTHROUGH_MODE` | 아니오 | `off`(기본) 또는 `on`. 서버의 YouTrack 읽기 캐시(아래, hk 3762). 앞뒤 공백은 무시하고 대소문자는 구분한다. 다른 값이나 YouTrack 자격 없는 `on`은 서버 시작 실패 |
 
-서버(`handoffkeep serve`)는 `YOUTRACK_URL`과 `YOUTRACK_BOT_API_KEY`가 둘 다 있을
-때만 읽기 캐시를 켠다. 한쪽만 있으면 로그에
-`youtrack.disabled reason=incomplete_config`를 남기고 기능을 끈다. 서버는
-우선순위·레인 쓰기를 PG에만 쓰고 outbox에 넣는다(YouTrack 호출 없음).
+서버(`handoffkeep serve`)는 `HANDOFFKEEP_YT_READTHROUGH_MODE=on`일 때만 읽기
+캐시를 켠다. 켜지면 API와 콘솔이 미러된 작업에 `youtrack_field_cache`의
+우선순위·레인을 덮어 보여 주고(캐시에 없으면 YouTrack에서 채운다),
+`HANDOFFKEEP_SEARCH_BACKEND=youtrack`이면 검색을 YouTrack에 묻고, 레인·우선순위
+변경을 PG에 쓴 뒤 `youtrack_outbox`에 넣고 캐시를 갱신한다. `on`인데
+`YOUTRACK_URL`이나 `YOUTRACK_BOT_API_KEY`가 비어 있으면 서버가 시작하지 않는다.
+
+`off`(기본)이면 두 자격이 있어도 이 서비스를 만들지 않는다. 클라이언트를 만들지
+않으므로 URL도 검사하지 않는다. 읽기는 hk 컬럼을 그대로 쓰고, 캐시를 채우지 않고,
+검색은 PostgreSQL이 답하고, 레인·우선순위 변경은 outbox에 넣지 않는다. 자격이
+하나라도 있으면 시작할 때 `youtrack.readthrough disabled reason=mode_off`를 한 줄
+남긴다(URL·토큰은 남기지 않는다). `HANDOFFKEEP_SEARCH_BACKEND=youtrack`이 함께
+있으면 `search.backend youtrack ignored reason=readthrough_off`도 한 줄 남긴다.
+검색 선택자만으로는 읽기 캐시가 켜지지 않는다.
+
+이 값은 `serve`에만 적용된다. 코멘트 카나리(`HANDOFFKEEP_YT_COMMENTS_MODE`)는 같은
+두 자격을 따로 읽으므로 읽기 캐시를 켜지 않고도 돌아간다. `handoffkeep youtrack
+sync`(`--pull` 포함), `youtrack canary add`, `yt ops`, 미러 링크·동기화 상태 화면·
+가져오기 소유권은 이 값과 무관하다.
+
+**업그레이드.** 자격만 두고 읽기 캐시를 쓰던 배포는 새 바이너리로 올리기 전에
+`HANDOFFKEEP_YT_READTHROUGH_MODE=on`을 넣어야 한다. r9 카나리 배포는 값을 두지
+않는다(`off`). `off`는 새 바이너리가 서비스를 시작한 뒤에야 적용되고, 이 값을
+모르는 이전 바이너리로 되돌리면 자격만으로 읽기 캐시가 다시 켜진다.
+
+**남은 outbox.** `off`로 바꾸기 전에 `youtrack_outbox`에 들어간 행은 지우거나
+폐기하지 않는다. 지금처럼 `youtrack sync`가 내보낸다. `off`인 동안 서버는 새 행을
+넣지 않는다.
 
 ## 종료 코드
 
@@ -164,9 +189,13 @@ steps:
 ## 끄는 방법
 
 1. Dagu 작업을 멈춘다.
-2. 서버에서 `YOUTRACK_URL`과 `YOUTRACK_BOT_API_KEY`를 뺀다. 서버를 재시작하면
-   읽기 경로는 hk 컬럼을 그대로 쓴다(쓰기는 원래부터 PG 우선이다).
-3. 남은 미러·캐시·outbox는 그대로 둔다(다시 켜면 이어서 쓴다).
+2. 서버에서 `HANDOFFKEEP_YT_READTHROUGH_MODE`를 빼거나 `off`로 둔다. 서버를
+   재시작하면 읽기 경로는 hk 컬럼을 그대로 쓴다(쓰기는 원래부터 PG 우선이다).
+   `YOUTRACK_URL`과 `YOUTRACK_BOT_API_KEY`는 코멘트 카나리가 쓰므로 카나리를
+   돌리는 동안에는 남겨 둔다. 카나리도 끄려면 `HANDOFFKEEP_YT_COMMENTS_MODE`를
+   `off`로 둔다.
+3. 남은 미러·캐시·outbox는 그대로 둔다(다시 켜면 이어서 쓴다). 남은 outbox는
+   sync가 계속 내보내므로, 1번에서 Dagu 작업을 멈췄다면 다시 켤 때 나간다.
 
 ## 스키마
 

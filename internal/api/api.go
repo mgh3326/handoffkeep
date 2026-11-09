@@ -34,12 +34,15 @@ type Service struct {
 	Attachments *attachments.Manager
 	// Dots backs the /v1/dots/results routes; nil uses Store.
 	Dots DotsResultStore
-	// YouTrack overlays the YouTrack-owned priority and lane on linked tasks
-	// and writes those changes through YouTrack first. Nil disables the
-	// feature; every other route behaves exactly as before.
+	// YouTrack is the legacy read-through service: it overlays the cached
+	// YouTrack priority and lane on linked tasks, answers YouTrack search, and
+	// queues lane changes for export to YouTrack (PG is written first). serve
+	// sets it only with HANDOFFKEEP_YT_READTHROUGH_MODE=on (docs/youtrack.md).
+	// Nil disables the feature; every other route behaves exactly as before.
 	YouTrack *youtrack.Service
 	// SearchBackend is "youtrack" to answer /v1/search from YouTrack, with
-	// PostgreSQL as the fallback. Anything else, including "", is PostgreSQL.
+	// PostgreSQL as the fallback; it takes effect only with YouTrack set.
+	// Anything else, including "", is PostgreSQL.
 	SearchBackend string
 }
 
