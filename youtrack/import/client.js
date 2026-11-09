@@ -26,7 +26,9 @@ function sourceUser(name) {
 }
 function enumValue(name) { return name ? {type: 'enum', name: name} : null; }
 function stringValue(value) { return value === null || value === undefined || value === '' ? null : {type: 'string', value: String(value)}; }
-function integerValue(value) { return value === null || value === undefined ? null : {type: 'integer', value: Number(value)}; }
+// YouTrack Cloud's import runtime rejects a numeric value here ("fields.hk ID[0].value should be of type
+// string", 2026-11-09 test import), although the API reference lists number; pass the decimal string.
+function integerValue(value) { return value === null || value === undefined ? null : {type: 'integer', value: String(Number(value))}; }
 function sourceProject(name) { return name || 'Unassigned'; }
 function projectID(name) { return 'hk-project:' + name; }
 function parseProject(info) { return String(info.id).slice('hk-project:'.length); }
@@ -355,7 +357,7 @@ class HandoffkeepImport {
         [FIELD.hkID]: integerValue(d.id), [FIELD.decisionID]: integerValue(d.id),
         [FIELD.linkedTask]: integerValue(d.task_id),
         [FIELD.decisionState]: enumValue(state), [FIELD.lane]: enumValue(d.lane),
-        [FIELD.recommended]: stringValue(d.recommended), [FIELD.due]: d.due_at ? {type: 'date', value: new Date(d.due_at).getTime()} : null
+        [FIELD.recommended]: stringValue(d.recommended), [FIELD.due]: d.due_at ? {type: 'date', value: String(d.due_at)} : null
       }};
     }).slice(0, top || 100);
   }
