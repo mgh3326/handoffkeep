@@ -67,6 +67,11 @@ function cursorID(after, prefix) {
   if (!Number.isSafeInteger(id) || id < 0) throw new Error('Invalid source cursor');
   return id;
 }
+function isoTimestamp(value) {
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) throw new Error('Invalid update timestamp');
+  return date.toISOString();
+}
 
 class HandoffkeepImport {
   constructor(context) {
@@ -141,6 +146,9 @@ class HandoffkeepImport {
         if (cursorName === 'decision') {
           query.after_at = cursor.after_at;
           query.after_id = cursor.after_id;
+        } else if (cursor && typeof cursor === 'object') {
+          query.after_at = cursor.after_at;
+          query.after_id = cursor.after_id;
         } else query[cursorName || 'after_id'] = cursor;
       }
       const page = this.request('/v1/import/' + resource, query);
@@ -168,20 +176,10 @@ class HandoffkeepImport {
       } else {
         this.testTasks = this.pages('tasks', {project: this.testSourceProject, limit: 999}, 'after_id', testLimit);
         this.testTasks.forEach((task) => this.rememberUser(task.created_by));
-        if (this.testTasks.length) {
-          const maxTaskID = this.testTasks[this.testTasks.length - 1].id;
-          this.pages('comments', {project: this.testSourceProject, max_task_id: String(maxTaskID), limit: 500}, 'after_id').forEach((c) => {
-            (this.commentsByTask[c.task_id] || (this.commentsByTask[c.task_id] = [])).push(c);
-            this.rememberUser(c.author);
-          });
-        }
       }
     } else {
-      // Full imports preload the complete author set and comments once.
-      this.pages('comments', {limit: 500}, 'after_id').forEach((c) => {
-        (this.commentsByTask[c.task_id] || (this.commentsByTask[c.task_id] = [])).push(c);
-        this.rememberUser(c.author);
-      });
+      // Comment bodies are fetched with each task page so a continuous run never
+      // scans comments for the entire task corpus.
       this.pages('tasks', {limit: 999}, 'after_id').forEach((task) => this.rememberUser(task.created_by));
       this.pages('decisions', {limit: 999}, 'after_id').forEach((d) => this.rememberUser(d.answered_by || d.lane));
     }
@@ -344,20 +342,30 @@ class HandoffkeepImport {
     const tasks = this.testTasks
       ? this.testTasks.filter((task) => task.id > (after ? cursorID(after, 'hk-task:') : 0)).slice(0, pageLimit)
       : this.onePage('tasks', query);
+    this.loadCommentsForTasks(tasks);
     tasks.forEach((task) => {
       this.seenTaskIDs[task.id] = true;
       out.push(this.issue(task));
     });
     return out;
   }
-  decisionIssues(after, top, projectInfo) {
+  loadCommentsForTasks(tasks) {
+    this.commentsByTask = Object.create(null);
+    if (!tasks.length) return;
+    const comments = this.pages('comments', {task_ids: tasks.map((task) => String(task.id)).join(','), limit: 499}, 'after_id');
+    comments.forEach((comment) => {
+      (this.commentsByTask[comment.task_id] || (this.commentsByTask[comment.task_id] = [])).push(comment);
+      this.rememberUser(comment.author);
+    });
+  }
+  decisionIssues(after, top, projectInfo, suppliedDecisions) {
     const seen = Object.keys(this.seenDecisionIDs).length;
     if (this.maxTasks && seen >= this.maxTasks) return [];
     const query = {limit: Math.min(Math.max(top || 100, 1), 999, this.maxTasks ? this.maxTasks - seen : 999)};
     if (after) query.after_id = String(cursorID(after, 'hk-decision:'));
-    const decisions = this.testDecisions
+    const decisions = suppliedDecisions || (this.testDecisions
       ? this.testDecisions.filter((d) => d.id > (after ? cursorID(after, 'hk-decision:') : 0)).slice(0, top || 100)
-      : this.onePage('decisions', query);
+      : this.onePage('decisions', query));
     return decisions.map((d) => {
       this.seenDecisionIDs[d.id] = true;
       this.rememberUser(d.answered_by);
@@ -445,8 +453,50 @@ class HandoffkeepImport {
       fields: Object.assign({}, base, docFields, {summary: truncateRunes(title + ' / part ' + (i+1) + ' of ' + pieces.length, 250), content: part, parent: {id: indexID + ':0', type: 'article'}})
     })));
   }
-  getArticleUpdates() { return []; }
-  getIssueUpdates() { return []; }
+  getIssueUpdates(info, after, updatedAfter, top) {
+    if (info.id === DECISIONS_PROJECT_ID) {
+      const decisions = this.updatedRows('decisions', null, updatedAfter, after, top, 'hk-decision:');
+      return this.decisionIssues(null, top, info, decisions);
+    }
+    const project = parseProject(info);
+    const tasks = this.updatedRows('tasks', project, updatedAfter, after, top, 'hk-task:');
+    if (!tasks.length) return [];
+    this.loadCommentsForTasks(tasks);
+    return tasks.map((task) => this.issue(task));
+  }
+  getArticleUpdates(info, after, updatedAfter, top) {
+    if (info.id === DECISIONS_PROJECT_ID) return [];
+    const project = parseProject(info);
+    const docs = this.updatedRows('documents', project, updatedAfter, null, 1000, 'hk-doc:');
+    const targetProject = this.projectTargets[project] || {id: projectID(project), key: project, name: project};
+    const out = [];
+    for (const doc of docs) {
+      if (excludedDoc(doc)) continue;
+      let articles = this.documentArticles(doc, targetProject);
+      if (!Array.isArray(articles)) articles = [articles];
+      out.push.apply(out, articles);
+    }
+    const pageTop = Math.max(1, top || 100);
+    let start = 0;
+    if (after) {
+      const text = afterText(after).replace(/^hk-doc:/, '').split(':')[0];
+      const articleID = 'hk-doc:' + text + ':' + afterText(after).split(':').pop();
+      const found = out.findIndex((a) => a.id === articleID || a.key === afterText(after));
+      if (found >= 0) start = found + 1;
+    }
+    return out.slice(start, start + pageTop);
+  }
+  updatedRows(resource, project, updatedAfter, after, top, prefix) {
+    const query = {after_at: isoTimestamp(updatedAfter), after_id: 0, limit: 999};
+    if (project !== null) query.project = project;
+    let rows = this.pages(resource, query, 'after_id');
+    if (after) {
+      const id = cursorID(after, prefix);
+      const index = rows.findIndex((row) => Number(row.id) === id);
+      if (index >= 0) rows = rows.slice(index + 1);
+    }
+    return rows.slice(0, Math.max(1, top || 100));
+  }
   getLinkTypes() { return []; }
 }
 

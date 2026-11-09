@@ -63,6 +63,26 @@ func TestImportExportRejectsMalformedPagingBeforeStoreRead(t *testing.T) {
 	}
 }
 
+func TestImportUpdatedRoutesRejectMalformedTimestampCursors(t *testing.T) {
+	h := Server{Tokens: Tokens{"yt": "fixture-secret"}, ImportReadGrants: map[string]bool{"yt": true}}.Handler()
+	for _, path := range []string{
+		"/v1/import/tasks?after_at=nope",
+		"/v1/import/comments?after_at=nope",
+		"/v1/import/documents?project=demo&after_at=nope",
+		"/v1/import/decisions?after_at=nope",
+	} {
+		t.Run(path, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodGet, path, nil)
+			r.Header.Set("Authorization", "Bearer fixture-secret")
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, r)
+			if w.Code != http.StatusBadRequest || !containsJSONError(w.Body.String(), "invalid_context") {
+				t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
 func TestImportExportRejectsEmptyProjectFilters(t *testing.T) {
 	h := Server{Tokens: Tokens{"yt": "fixture-secret"}, ImportReadGrants: map[string]bool{"yt": true}}.Handler()
 	for _, path := range []string{
