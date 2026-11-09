@@ -24,7 +24,7 @@ func (f *fakeObjects) Stat(_ context.Context, k string) error {
 	if _, ok := f.objects[k]; ok {
 		return nil
 	}
-	return errors.New("missing")
+	return ErrObjectNotFound
 }
 func (f *fakeObjects) Put(_ context.Context, k string, r io.Reader, _ int64, _ string) error {
 	f.puts++
@@ -38,7 +38,7 @@ func (f *fakeObjects) Put(_ context.Context, k string, r io.Reader, _ int64, _ s
 func (f *fakeObjects) Get(_ context.Context, k string) (io.ReadCloser, error) {
 	b, ok := f.objects[k]
 	if !ok {
-		return nil, errors.New("missing")
+		return nil, ErrObjectNotFound
 	}
 	return io.NopCloser(bytes.NewReader(b)), nil
 }
@@ -230,7 +230,7 @@ func TestObjectFailureWritesNoMetadata(t *testing.T) {
 	db := &fakeDB{rows: map[string]store.Attachment{}}
 	obj := &fakeObjects{objects: map[string][]byte{}, fail: true}
 	m := &Manager{Store: db, Objects: obj, Enabled: true, Config: Config{MaxBytes: 100, StorageCap: 100, PutCap: 10, GetCap: 10, Allow: map[string]bool{"text/plain": true}}}
-	if _, _, err := m.Put(t.Context(), "node", "note.txt", "text/plain", "", []byte("safe")); !errors.Is(err, ErrR2) {
+	if _, _, err := m.Put(t.Context(), "node", "note.txt", "text/plain", "", []byte("safe")); !errors.Is(err, ErrObjectStore) {
 		t.Fatalf("err=%v", err)
 	}
 	if db.puts != 0 {

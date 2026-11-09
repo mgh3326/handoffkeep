@@ -735,17 +735,18 @@ type BenchAreaException struct {
 	RetiredAt          *time.Time `json:"retired_at"`
 }
 
-// Attachment is immutable binary metadata. Object bytes are kept in R2; PostgreSQL
-// holds only the content address, provenance, and references.
+// Attachment is immutable binary metadata. PostgreSQL holds the content address,
+// object-store location, provenance, and references; object bytes stay in S3 storage.
 type Attachment struct {
-	SHA256       string    `json:"sha256"`
-	SizeBytes    int64     `json:"size_bytes"`
-	MIME         string    `json:"mime"`
-	OriginalName string    `json:"original_name"`
-	CreatedBy    string    `json:"created_by"`
-	CreatedAt    time.Time `json:"created_at"`
-	RefKind      string    `json:"ref_kind,omitempty"`
-	RefID        string    `json:"ref_id,omitempty"`
+	SHA256         string    `json:"sha256"`
+	ObjectLocation string    `json:"-"`
+	SizeBytes      int64     `json:"size_bytes"`
+	MIME           string    `json:"mime"`
+	OriginalName   string    `json:"original_name"`
+	CreatedBy      string    `json:"created_by"`
+	CreatedAt      time.Time `json:"created_at"`
+	RefKind        string    `json:"ref_kind,omitempty"`
+	RefID          string    `json:"ref_id,omitempty"`
 }
 type AttachmentUsage struct {
 	Month      string `json:"month"`
@@ -3869,7 +3870,7 @@ func (s *Store) GetAttachment(ctx context.Context, sha string) (Attachment, bool
 		return Attachment{}, false, errors.New("invalid attachment sha")
 	}
 	var x Attachment
-	e := s.pool.QueryRow(ctx, `SELECT sha256,size_bytes,mime,original_name,created_by,created_at FROM attachments WHERE sha256=$1`, sha).Scan(&x.SHA256, &x.SizeBytes, &x.MIME, &x.OriginalName, &x.CreatedBy, &x.CreatedAt)
+	e := s.pool.QueryRow(ctx, `SELECT sha256,size_bytes,mime,original_name,created_by,created_at,COALESCE(object_location,'') FROM attachments WHERE sha256=$1`, sha).Scan(&x.SHA256, &x.SizeBytes, &x.MIME, &x.OriginalName, &x.CreatedBy, &x.CreatedAt, &x.ObjectLocation)
 	if e != nil {
 		if errors.Is(e, pgx.ErrNoRows) {
 			return x, false, nil
@@ -3879,7 +3880,40 @@ func (s *Store) GetAttachment(ctx context.Context, sha string) (Attachment, bool
 	return x, true, nil
 }
 
-// PutAttachment records an immutable object and its reference after R2 PUT has
+// ListAttachmentObjects returns each stored object once, without multiplying
+// rows by attachment_refs; migration uses this complete inventory.
+func (s *Store) ListAttachmentObjects(ctx context.Context) ([]Attachment, error) {
+	rows, err := s.pool.Query(ctx, `SELECT sha256,size_bytes,mime,original_name,created_by,created_at,COALESCE(object_location,'') FROM attachments ORDER BY sha256`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Attachment{}
+	for rows.Next() {
+		var x Attachment
+		if err = rows.Scan(&x.SHA256, &x.SizeBytes, &x.MIME, &x.OriginalName, &x.CreatedBy, &x.CreatedAt, &x.ObjectLocation); err != nil {
+			return nil, err
+		}
+		out = append(out, x)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) SetAttachmentObjectLocation(ctx context.Context, sha, location string) error {
+	if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(sha) || location == "" || !validText(location, 2048) {
+		return errors.New("invalid attachment object location")
+	}
+	result, err := s.pool.Exec(ctx, `UPDATE attachments SET object_location=$2 WHERE sha256=$1`, sha, location)
+	if err != nil {
+		return err
+	}
+	if result.RowsAffected() != 1 {
+		return errors.New("attachment not found")
+	}
+	return nil
+}
+
+// PutAttachment records an immutable object and its reference after S3 PUT has
 // succeeded. It serializes quota accounting with a locked monthly usage row.
 func (s *Store) PutAttachment(ctx context.Context, x Attachment, storageCap, putCap int64) (Attachment, bool, error) {
 	if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(x.SHA256) || x.SizeBytes < 0 || x.MIME == "" || !validText(x.OriginalName, 512) || !validName(x.CreatedBy) || !validAttachmentRef(x.RefKind, x.RefID) {
@@ -3917,14 +3951,14 @@ func (s *Store) PutAttachment(ctx context.Context, x Attachment, storageCap, put
 			return x, false, ErrAttachmentPutCap
 		}
 		x.CreatedAt = time.Now().UTC()
-		if _, e = tx.Exec(ctx, `INSERT INTO attachments(sha256,size_bytes,mime,original_name,created_by,created_at) VALUES($1,$2,$3,$4,$5,$6)`, x.SHA256, x.SizeBytes, x.MIME, x.OriginalName, x.CreatedBy, x.CreatedAt); e != nil {
+		if _, e = tx.Exec(ctx, `INSERT INTO attachments(sha256,size_bytes,mime,original_name,created_by,created_at,object_location) VALUES($1,$2,$3,$4,$5,$6,$7)`, x.SHA256, x.SizeBytes, x.MIME, x.OriginalName, x.CreatedBy, x.CreatedAt, x.ObjectLocation); e != nil {
 			return x, false, e
 		}
 		if _, e = tx.Exec(ctx, `UPDATE attachment_usage SET puts=puts+1,bytes_added=bytes_added+$2 WHERE month=$1`, month, x.SizeBytes); e != nil {
 			return x, false, e
 		}
 	} else {
-		if e = tx.QueryRow(ctx, `SELECT size_bytes,mime,original_name,created_by,created_at FROM attachments WHERE sha256=$1`, x.SHA256).Scan(&x.SizeBytes, &x.MIME, &x.OriginalName, &x.CreatedBy, &x.CreatedAt); e != nil {
+		if e = tx.QueryRow(ctx, `SELECT size_bytes,mime,original_name,created_by,created_at,COALESCE(object_location,'') FROM attachments WHERE sha256=$1`, x.SHA256).Scan(&x.SizeBytes, &x.MIME, &x.OriginalName, &x.CreatedBy, &x.CreatedAt, &x.ObjectLocation); e != nil {
 			return x, false, e
 		}
 	}
@@ -3934,7 +3968,7 @@ func (s *Store) PutAttachment(ctx context.Context, x Attachment, storageCap, put
 	return x, !present, tx.Commit(ctx)
 }
 
-// CheckAttachmentCapacity is the preflight fuse before an R2 PUT. PutAttachment
+// CheckAttachmentCapacity is the preflight fuse before an S3 PUT. PutAttachment
 // repeats these checks in its transaction to make accounting authoritative.
 func (s *Store) CheckAttachmentCapacity(ctx context.Context, size, storageCap, putCap int64) error {
 	tx, e := s.pool.Begin(ctx)
@@ -4001,7 +4035,7 @@ func (s *Store) ListAttachments(ctx context.Context, refKind, refID string, limi
 	if limit > 1000 {
 		limit = 1000
 	}
-	q := `SELECT a.sha256,a.size_bytes,a.mime,a.original_name,a.created_by,a.created_at,r.ref_kind,r.ref_id FROM attachments a JOIN attachment_refs r ON r.sha256=a.sha256`
+	q := `SELECT a.sha256,a.size_bytes,a.mime,a.original_name,a.created_by,a.created_at,r.ref_kind,r.ref_id,COALESCE(a.object_location,'') FROM attachments a JOIN attachment_refs r ON r.sha256=a.sha256`
 	args := []any{limit}
 	if refKind != "" {
 		q += ` WHERE r.ref_kind=$1 AND r.ref_id=$2 ORDER BY a.created_at DESC,a.sha256,r.ref_kind,r.ref_id LIMIT $3`
@@ -4017,7 +4051,7 @@ func (s *Store) ListAttachments(ctx context.Context, refKind, refID string, limi
 	out := []Attachment{}
 	for rows.Next() {
 		var x Attachment
-		if e = rows.Scan(&x.SHA256, &x.SizeBytes, &x.MIME, &x.OriginalName, &x.CreatedBy, &x.CreatedAt, &x.RefKind, &x.RefID); e != nil {
+		if e = rows.Scan(&x.SHA256, &x.SizeBytes, &x.MIME, &x.OriginalName, &x.CreatedBy, &x.CreatedAt, &x.RefKind, &x.RefID, &x.ObjectLocation); e != nil {
 			return nil, e
 		}
 		out = append(out, x)

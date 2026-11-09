@@ -81,3 +81,29 @@ func TestAttachmentRejectAndDedupeAreAtomic(t *testing.T) {
 		t.Fatalf("dedupe usage=%+v", u)
 	}
 }
+
+func TestAttachmentObjectLocationRecorded(t *testing.T) {
+	s := testAttachmentStore(t)
+	x := attachmentFor(31)
+	x.ObjectLocation = "https://namespace.compat.objectstorage.region.oraclecloud.com/files"
+	if _, _, err := s.PutAttachment(t.Context(), x, 100, 10); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := s.ListAttachmentObjects(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].ObjectLocation != x.ObjectLocation {
+		t.Fatalf("objects = %+v", rows)
+	}
+	if err = s.SetAttachmentObjectLocation(t.Context(), x.SHA256, "https://target.example/files"); err != nil {
+		t.Fatal(err)
+	}
+	rows, err = s.ListAttachmentObjects(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rows[0].ObjectLocation != "https://target.example/files" {
+		t.Fatalf("updated location = %q", rows[0].ObjectLocation)
+	}
+}

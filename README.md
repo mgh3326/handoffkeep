@@ -640,15 +640,19 @@ Deploy this store before the new hub and hook. Old clients keep using legacy
 mode; newer clients must treat an older store's rejection of the extended
 request as a visible incompatibility and keep their pending posts for retry.
 
-## Attachments (R2)
+## Attachments (S3-compatible object storage)
 
-Attachments are immutable, content-addressed private R2 objects. Configure all
-four S3 settings to enable them: `HK_S3_ENDPOINT`, `HK_S3_BUCKET`,
-`HK_S3_ACCESS_KEY_ID`, and `HK_S3_SECRET_ACCESS_KEY`. R2 uses region `auto`
-and path-style requests. When any setting is absent, only attachments are
-disabled; checkpoints, memory, and documents continue to work.
+Attachments are immutable, content-addressed private S3-compatible objects.
+Configure `HK_S3_ENDPOINT`, `HK_S3_BUCKET`, `HK_S3_ACCESS_KEY_ID`, and
+`HK_S3_SECRET_ACCESS_KEY` to enable them. `HK_S3_REGION` defaults to `auto` and
+`HK_S3_BUCKET_LOOKUP` defaults to `path`, preserving R2 behavior; lookup may
+also be `virtual`. OCI Object Storage uses
+`https://<namespace>.compat.objectstorage.<region>.oraclecloud.com`, requires
+`HK_S3_REGION` to match the endpoint region, and uses path lookup. When any
+required setting is absent, only attachments are disabled; checkpoints, memory,
+and documents continue to work.
 
-The default safety limits are a 50 MiB object maximum, 8 GiB total storage,
+The default safety limits are a 50 MiB object maximum, 20 GiB total storage,
 800,000 monthly writes, and 8,000,000 monthly reads. Set the corresponding
 `HK_ATTACH_*` variables to positive values to adjust them. Text attachments
 are secret-scanned, MIME is sniffed and allowlisted, and dump/archive filename
@@ -660,6 +664,18 @@ handoffkeep attach get SHA256 -o image.png
 handoffkeep attach list --doc jobs/example/brief.md
 handoffkeep attach usage
 handoffkeep r2usage --alert
+```
+
+`attach migrate` copies every object from one environment prefix to another,
+checks the source and target size and SHA-256 against the content address, and
+records the target endpoint and bucket for each verified object. It keeps the
+source objects. A prefix such as `OCI` reads `OCI_S3_ENDPOINT`,
+`OCI_S3_REGION`, `OCI_S3_BUCKET`, `OCI_S3_ACCESS_KEY_ID`,
+`OCI_S3_SECRET_ACCESS_KEY`, and optional `OCI_S3_BUCKET_LOOKUP`.
+
+```bash
+handoffkeep attach migrate --from HK --to OCI
+handoffkeep attach migrate --from HK --to OCI --apply
 ```
 
 HTTP clients use raw `PUT /v1/attachments` with `X-HK-Name`, `Content-Type`,

@@ -213,7 +213,7 @@ func (c Client) Search(ctx context.Context, q, scope, session string, limit int)
 }
 func (c Client) PutAttachment(ctx context.Context, _ string, name, mime, ref string, body []byte) (store.Attachment, bool, error) {
 	x, created, e := client.Client(c).PutAttachment(ctx, name, mime, ref, body)
-	return store.Attachment(x), created, e
+	return storeAttachment(x), created, e
 }
 func (c Client) ListAttachments(ctx context.Context, ref string, limit int) ([]store.Attachment, error) {
 	var x struct {
@@ -227,7 +227,11 @@ func (c Client) AttachmentURL(ctx context.Context, sha string) (string, error) {
 }
 func (c Client) GetAttachment(ctx context.Context, sha string) (store.Attachment, io.ReadCloser, error) {
 	x, body, e := client.Client(c).GetAttachment(ctx, sha)
-	return store.Attachment(x), body, e
+	return storeAttachment(x), body, e
+}
+
+func storeAttachment(x client.Attachment) store.Attachment {
+	return store.Attachment{SHA256: x.SHA256, SizeBytes: x.SizeBytes, MIME: x.MIME, OriginalName: x.OriginalName, CreatedBy: x.CreatedBy, CreatedAt: x.CreatedAt, RefKind: x.RefKind, RefID: x.RefID}
 }
 func (c Client) AttachmentUsage(ctx context.Context) (store.AttachmentUsage, error) {
 	var x struct {
