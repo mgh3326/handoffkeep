@@ -18,6 +18,10 @@ const DECISION_STATE = {open: '열림', answered: '답변됨', superseded: '대�
 const PREFIXES = ['ack','advice','advice-request','briefs','decision','design','experiment','handoff',
   'note','other','policy','reference','report','research','review','runbook','task'];
 const SAFE_PART_BYTES = 240 * 1024;
+// Document key prefixes not imported (operator 2026-11-09): pane screen dumps are noise for reading and
+// search; they stay in hk.
+const EXCLUDED_DOC_PREFIXES = ['screens'];
+function excludedDoc(doc) { return EXCLUDED_DOC_PREFIXES.indexOf(String(doc.key).split('/')[0]) >= 0; }
 const DECISIONS_PROJECT_ID = 'hk-project:/decisions';
 
 function sourceUser(name) {
@@ -26,11 +30,28 @@ function sourceUser(name) {
 }
 function enumValue(name) { return name ? {type: 'enum', name: name} : null; }
 function stringValue(value) { return value === null || value === undefined || value === '' ? null : {type: 'string', value: String(value)}; }
-function integerValue(value) { return value === null || value === undefined ? null : {type: 'integer', value: Number(value)}; }
+// YouTrack Cloud's import runtime rejects a numeric value here ("fields.hk ID[0].value should be of type
+// string", 2026-11-09 test import), although the API reference lists number; pass the decimal string.
+function integerValue(value) { return value === null || value === undefined ? null : {type: 'integer', value: String(Number(value))}; }
 function sourceProject(name) { return name || 'Unassigned'; }
 function projectID(name) { return 'hk-project:' + name; }
 function parseProject(info) { return String(info.id).slice('hk-project:'.length); }
-function safeDate(value) { return value || undefined; }
+// YouTrack parses the fraction with Java's SSS..., which counts milliseconds: "…:11.392663Z" became
+// +392663 ms (6.5 minutes late) in the 2026-11-09 test import. Send exactly millisecond precision.
+function safeDate(value) {
+  if (!value) return undefined;
+  const t = Date.parse(value);
+  if (Number.isNaN(t)) throw new Error('Invalid source timestamp ' + value);
+  return new Date(t).toISOString();
+}
+// YouTrack parses an article key as a number (the 4th test import failed with 'For input string:
+// "doc:62245:0"'). The whole document or its index keeps the hk document id; part n of a split
+// document uses 900000000 + id*10 + n, which never collides with a document id (parts are at most 9).
+function articleKey(docID, part) {
+  if (!part) return String(docID);
+  if (part > 9) throw new Error('Document ' + docID + ' needs more than 9 parts');
+  return String(900000000 + Number(docID) * 10 + part);
+}
 function truncateRunes(value, max) { return Array.from(String(value || '')).slice(0, max).join(''); }
 // YouTrack passes the last imported document as `after`: an object with id/key, or its id string.
 function afterText(after) {
@@ -188,12 +209,7 @@ class HandoffkeepImport {
   }
   rememberUser(name) { if (name) this.usersByName[name] = sourceUser(name); }
   getTimestampFormats() {
-    return [
-      "yyyy-MM-dd'T'HH:mm:ss.SSSSSS'Z'", "yyyy-MM-dd'T'HH:mm:ss.SSSSS'Z'",
-      "yyyy-MM-dd'T'HH:mm:ss.SSSS'Z'", "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'",
-      "yyyy-MM-dd'T'HH:mm:ss.SS'Z'", "yyyy-MM-dd'T'HH:mm:ss.S'Z'",
-      "yyyy-MM-dd'T'HH:mm:ss'Z'"
-    ];
+    return ["yyyy-MM-dd'T'HH:mm:ss.SSS'Z'"];
   }
   getUserTimeZoneId() { return 'UTC'; }
   getServerInfo() { return {version: 'handoffkeep /v1/import', time: new Date().toISOString()}; }
@@ -206,6 +222,9 @@ class HandoffkeepImport {
       if (this.testSourceProject !== 'DEC') this.projectTargets[this.testSourceProject] = testInfo;
       return [testInfo];
     }
+    // The wizard calls getProjects() on a fresh instance, before any prepareToImport(): load the hk
+    // project list here too (the first full-import wizard showed only the three synthetic buckets).
+    if (!this.projects.length) this.projects = this.pages('projects', {limit: 100}, 'after');
     const names = this.projects.slice();
     names.sort();
     const seen = Object.create(null);
@@ -260,10 +279,6 @@ class HandoffkeepImport {
       {id: 'hk-recommended', name: FIELD.recommended, type: 'string'},
       {id: 'hk-decision-due', name: FIELD.due, type: 'date'},
       {id: 'hk-linked-task-id', name: FIELD.linkedTask, type: 'integer'}
-    );
-    if (info.id !== DECISIONS_PROJECT_ID) fields.push(
-      {id: 'hk-doc-key', name: FIELD.docKey, type: 'string'},
-      {id: 'hk-doc-prefix', name: FIELD.docPrefix, type: 'enum'}
     );
     return {id: info.id, key: info.key, name: info.name, type: 'DEFAULT', fields: fields};
   }
@@ -355,7 +370,7 @@ class HandoffkeepImport {
         [FIELD.hkID]: integerValue(d.id), [FIELD.decisionID]: integerValue(d.id),
         [FIELD.linkedTask]: integerValue(d.task_id),
         [FIELD.decisionState]: enumValue(state), [FIELD.lane]: enumValue(d.lane),
-        [FIELD.recommended]: stringValue(d.recommended), [FIELD.due]: d.due_at ? {type: 'date', value: new Date(d.due_at).getTime()} : null
+        [FIELD.recommended]: stringValue(d.recommended), [FIELD.due]: d.due_at ? {type: 'date', value: safeDate(d.due_at)} : null
       }};
     }).slice(0, top || 100);
   }
@@ -369,9 +384,10 @@ class HandoffkeepImport {
     if (info.id === DECISIONS_PROJECT_ID) return [];
     const project = parseProject(info);
     const targetProject = this.projectTargets[project] || {id: projectID(project), key: project, name: project};
-    const query = {project: project, limit: Math.min(Math.max(top || 100, 1), 20)};
+    const pageTop = top || 100;
     let cursor = 0;
     let resumePart = 0;
+    let afterID = null;
     if (after) {
       const match = afterText(after).match(/^hk-doc:(\d+):(\d+)$/);
       if (!match) throw new Error('Invalid document cursor');
@@ -379,21 +395,33 @@ class HandoffkeepImport {
       resumePart = Number(match[2]) + 1;
       // Re-read the current source document when the prior import page ended
       // between its index and content parts.
-      query.after_id = String(cursor - 1);
+      afterID = cursor - 1;
     }
-    const docs = this.onePage('documents', query);
+    // YouTrack treats a page shorter than `top` as the end (the 2026-11-09 test import stopped at
+    // 20 articles of 100), while hk serves at most 20 documents per page: fill the page from as many
+    // hk pages as needed.
     const out = [];
-    (docs || []).forEach((doc) => {
-      const documentLimit = this.maxDocuments || (this.testProject ? 100 : 0);
-      if (documentLimit && !this.seenDocumentIDs[doc.id] && Object.keys(this.seenDocumentIDs).length >= documentLimit) return;
-      this.seenDocumentIDs[doc.id] = true;
-      let articles = this.documentArticles(doc, targetProject);
-      if (!Array.isArray(articles)) articles = [articles];
-      if (after && resumePart > 0 && doc.id === cursor) articles = articles.slice(resumePart);
-      articles.forEach((article) => { if (out.length < (top || 100)) out.push(article); });
-      resumePart = 0;
-    });
-    return out;
+    const documentLimit = this.maxDocuments || (this.testProject ? 100 : 0);
+    for (;;) {
+      const query = {project: project, limit: 20};
+      if (afterID !== null) query.after_id = afterID;
+      const docs = this.onePage('documents', query) || [];
+      for (const doc of docs) {
+        if (excludedDoc(doc)) continue;
+        if (documentLimit && !this.seenDocumentIDs[doc.id] && Object.keys(this.seenDocumentIDs).length >= documentLimit) return out;
+        this.seenDocumentIDs[doc.id] = true;
+        let articles = this.documentArticles(doc, targetProject);
+        if (!Array.isArray(articles)) articles = [articles];
+        if (resumePart > 0 && doc.id === cursor) articles = articles.slice(resumePart);
+        resumePart = 0;
+        for (const article of articles) {
+          if (out.length >= pageTop) return out;
+          out.push(article);
+        }
+      }
+      if (docs.length < 20 || out.length >= pageTop) return out;
+      afterID = docs[docs.length - 1].id;
+    }
   }
   documentArticles(doc, project) {
     this.rememberUser(doc.created_by);
@@ -402,15 +430,18 @@ class HandoffkeepImport {
     const pieces = splitUtf8(content, SAFE_PART_BYTES);
     const base = {project: {id: project.id, key: project.key, name: project.name}, author: sourceUser(doc.created_by), created: safeDate(doc.created_at), updated: safeDate(doc.updated_at)};
     const title = truncateRunes('[' + prefix + '] ' + doc.key + ' [' + doc.kind + ']', 250);
-    const docFields = {[FIELD.hkID]: integerValue(doc.id), [FIELD.docKey]: stringValue(doc.key), [FIELD.docPrefix]: enumValue(prefix)};
-    if (pieces.length === 1) return {id: 'hk-doc:' + doc.id + ':0', key: 'hk-doc:' + doc.id + ':0', fields: Object.assign({}, base, docFields, {summary: title, content: content})};
+    // YouTrack articles take no custom fields ("The hk ID field is not valid for this article", 2026-11-09
+    // test import). The hk identity lives in the summary (full key) and the article id/key (hk-doc:<id>:<part>);
+    // the prefix is a tag for filtering.
+    const docFields = {tags: [{id: 'hk-tag:doc:' + prefix, name: 'hk/doc/' + prefix}]};
+    if (pieces.length === 1) return {id: 'hk-doc:' + doc.id + ':0', key: articleKey(doc.id, 0), fields: Object.assign({}, base, docFields, {summary: title, content: content})};
     const indexID = 'hk-doc:' + doc.id;
-    const index = {id: indexID + ':0', key: indexID + ':0', fields: Object.assign({}, base, {
+    const index = {id: indexID + ':0', key: articleKey(doc.id, 0), fields: Object.assign({}, base, {
       summary: title + ' (분할 문서)', content: '# ' + title + '\n\n원문이 크기 제한 때문에 ' + pieces.length + '개 문서로 나뉘었습니다.\n' +
         pieces.map((_,i) => '- Part ' + (i+1) + '/' + pieces.length + ' — ' + doc.key + ' (part ' + (i+1) + ')').join('\n')
     }, docFields)};
     return [index].concat(pieces.map((part,i) => ({
-      id: 'hk-doc:' + doc.id + ':' + (i+1), key: 'hk-doc:' + doc.id + ':' + (i+1),
+      id: 'hk-doc:' + doc.id + ':' + (i+1), key: articleKey(doc.id, i + 1),
       fields: Object.assign({}, base, docFields, {summary: truncateRunes(title + ' / part ' + (i+1) + ' of ' + pieces.length, 250), content: part, parent: {id: indexID + ':0', type: 'article'}})
     })));
   }
