@@ -2,6 +2,7 @@ package attachments
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -492,5 +493,42 @@ func TestStagingBudgetBoundsOutstandingBytes(t *testing.T) {
 	}
 	if _, err := m.BeginUpload(t.Context(), "node", "three.txt", "text/plain", int64(len(body)), shaOf(body), ""); err != nil {
 		t.Fatalf("begin after the first completed: %v", err)
+	}
+}
+
+// staleUploadRead answers GetAttachmentUpload from an earlier read, so a call
+// sees the row as pending after another completion has already claimed it.
+type staleUploadRead struct {
+	*fakeDB
+	stale store.AttachmentUpload
+}
+
+func (s *staleUploadRead) GetAttachmentUpload(context.Context, string) (store.AttachmentUpload, bool, error) {
+	return s.stale, true, nil
+}
+
+// An expiry check that loses the race to a claim must not delete the bytes the
+// claiming completion is using, and must report in-progress, not expired.
+func TestExpiryThatLosesTheRaceLeavesTheStagingBytes(t *testing.T) {
+	m, db, objs := newUploadManager(t)
+	body := []byte("claimed by another completion\n")
+	tk := begin(t, m, "node", "race.txt", "text/plain", body, "")
+	clientPUT(objs, tk, body)
+	db.mu.Lock()
+	stale := db.uploads[tk.UploadID]
+	claimed := stale
+	claimed.Status = store.AttachmentUploadCompleting
+	db.uploads[tk.UploadID] = claimed
+	db.mu.Unlock()
+	m.Store = &staleUploadRead{fakeDB: db, stale: stale}
+	m.Now = func() time.Time { return time.Now().Add(2 * time.Hour) }
+	if _, _, err := m.CompleteUpload(t.Context(), "node", tk.UploadID); !errors.Is(err, ErrUploadInProgress) {
+		t.Fatalf("losing expiry err=%v; want in progress", err)
+	}
+	if _, ok := objs.objects[stagingPrefix+tk.UploadID]; !ok {
+		t.Fatal("a losing expiry deleted the staging bytes of the claiming completion")
+	}
+	if db.uploads[tk.UploadID].Status != store.AttachmentUploadCompleting {
+		t.Fatalf("losing expiry changed the claimed row to %q", db.uploads[tk.UploadID].Status)
 	}
 }

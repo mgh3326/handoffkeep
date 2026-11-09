@@ -139,8 +139,14 @@ func (m *Manager) CompleteUpload(ctx context.Context, client, uploadID string) (
 	}
 	now := m.now()
 	if !now.Before(row.ExpiresAt) {
-		if err := m.finishUpload(ctx, row, store.AttachmentUploadPending, store.AttachmentUploadRefused, "upload_expired", now); err != nil {
+		changed, err := m.finishUpload(ctx, row, store.AttachmentUploadPending, store.AttachmentUploadRefused, "upload_expired", now)
+		if err != nil {
 			return store.Attachment{}, false, err
+		}
+		if !changed {
+			// Another completion claimed the row after this read; its bytes are
+			// its own to finish, so this call must not treat them as expired.
+			return store.Attachment{}, false, ErrUploadInProgress
 		}
 		return store.Attachment{}, false, ErrUploadExpired
 	}
@@ -164,8 +170,12 @@ func (m *Manager) completeClaimed(ctx context.Context, row store.AttachmentUploa
 		return store.Attachment{}, false, fmt.Errorf("%w: %v", ErrUploadNotReceived, cause)
 	}
 	refuse := func(reason string) (store.Attachment, bool, error) {
-		if e := m.finishUpload(ctx, row, store.AttachmentUploadCompleting, store.AttachmentUploadRefused, reason, m.now()); e != nil {
+		changed, e := m.finishUpload(ctx, row, store.AttachmentUploadCompleting, store.AttachmentUploadRefused, reason, m.now())
+		if e != nil {
 			return store.Attachment{}, false, e
+		}
+		if !changed {
+			return store.Attachment{}, false, ErrUploadInProgress
 		}
 		return store.Attachment{}, false, fmt.Errorf("%w: %s", ErrUploadRefused, reason)
 	}
@@ -220,15 +230,18 @@ func (m *Manager) completeClaimed(ctx context.Context, row store.AttachmentUploa
 	return x, created, nil
 }
 
-// finishUpload moves a row to a final state and deletes its staging object.
-// The delete is best effort: the state is already final, and the sweep removes
-// any object that survives.
-func (m *Manager) finishUpload(ctx context.Context, row store.AttachmentUpload, from, to, reason string, now time.Time) error {
-	if _, err := m.Store.TransitionAttachmentUpload(ctx, row.ID, from, to, reason, now); err != nil {
-		return err
+// finishUpload moves a row to a final state and deletes its staging object,
+// but only if this call made the transition. When the row was not in from, a
+// concurrent completion owns it and the staging object is not this call's to
+// delete. The delete is best effort: the state is already final, and the sweep
+// removes any object that survives.
+func (m *Manager) finishUpload(ctx context.Context, row store.AttachmentUpload, from, to, reason string, now time.Time) (bool, error) {
+	changed, err := m.Store.TransitionAttachmentUpload(ctx, row.ID, from, to, reason, now)
+	if err != nil || !changed {
+		return changed, err
 	}
 	m.deleteStaging(ctx, row.StagingKey)
-	return nil
+	return true, nil
 }
 
 func (m *Manager) deleteStaging(ctx context.Context, key string) {
