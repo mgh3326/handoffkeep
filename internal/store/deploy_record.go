@@ -140,6 +140,7 @@ func (x StoredDeployRecord) Classify(service string) (*DeployRecord, *time.Time,
 	return classifyParsedDeployRecord(x.Key, service, &x.Record, x.Decoded)
 }
 
+// JSON bytes retain escaped NULs that Postgres JSONB and text values reject.
 func writeDeployProjection(ctx context.Context, tx pgx.Tx, x StoredDeployRecord) error {
 	data, err := json.Marshal(x.Record)
 	if err != nil {

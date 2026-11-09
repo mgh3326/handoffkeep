@@ -79,3 +79,34 @@ func TestDeployProjectionNonSuccessBeforeMerge(t *testing.T) {
 		}
 	}
 }
+
+func TestDeployProjectionEscapedNULWriteAndBackfill(t *testing.T) {
+	s := schemaStore(t, "deploy_projection_nul")
+	ctx := t.Context()
+	key := "deploy/svc/20261105T090000Z"
+	body := `{"schema":"deploy-record/v0","service":"svc","target":"a\u0000b","result":"success","included_prs":[]}`
+	if _, _, err := s.PutDocument(ctx, Document{Key: key, Kind: "report", Session: "test", Body: body, CreatedBy: "tester"}); err != nil {
+		t.Fatal(err)
+	}
+	check := func() {
+		t.Helper()
+		records, err := s.ListDeployRecords(ctx, "deploy/svc/", "", 10)
+		if err != nil || len(records) != 1 {
+			t.Fatalf("records=%+v err=%v", records, err)
+		}
+		rec, _, reasons := records[0].Classify("svc")
+		if len(reasons) != 0 || rec.Target != "a\x00b" {
+			t.Fatalf("record=%+v reasons=%v", rec, reasons)
+		}
+	}
+	check()
+	for _, q := range []string{`DROP TABLE deploy_record_projection`, `DELETE FROM schema_migrations WHERE id='20261109-deploy-record-projection'`} {
+		if _, err := s.pool.Exec(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	check()
+}

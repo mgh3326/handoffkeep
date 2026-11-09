@@ -12,7 +12,7 @@ import (
 // Previous-release writes after the snapshot use the read-side fallback.
 func init() {
 	registerMigration(migration{ID: "20261109-deploy-record-projection", Apply: func(ctx context.Context, tx pgx.Tx) error {
-		if err := execAll(ctx, tx, []string{`CREATE TABLE deploy_record_projection (key TEXT PRIMARY KEY, sha256 TEXT NOT NULL, record JSONB NOT NULL, decoded BOOLEAN NOT NULL)`}); err != nil {
+		if err := execAll(ctx, tx, []string{`CREATE TABLE deploy_record_projection (key TEXT PRIMARY KEY, sha256 TEXT NOT NULL, record BYTEA NOT NULL, decoded BOOLEAN NOT NULL)`}); err != nil {
 			return err
 		}
 		rows, err := tx.Query(ctx, `SELECT key,sha256,body,created_at FROM documents WHERE strpos(key,'deploy/')=1`)

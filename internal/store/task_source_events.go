@@ -368,7 +368,7 @@ func (s *Store) deployOnMergedTx(ctx context.Context, tx pgx.Tx, x Task, now tim
 	}
 	// Match projected PRs, or parse documents written by an older server after
 	// the backfill. A SHA mismatch is also stale, including old-server edits.
-	rows, err := tx.Query(ctx, `SELECT d.key,p.record,CASE WHEN p.key IS NULL THEN d.body ELSE NULL END FROM documents d LEFT JOIN deploy_record_projection p ON p.key=d.key AND p.sha256=d.sha256 WHERE strpos(d.key,'deploy/')=1 AND ((p.decoded AND p.record->>'result'='success' AND p.record->'included_prs' ? $1) OR (p.key IS NULL AND strpos(d.body,$1)>0)) ORDER BY d.key DESC`, x.Refs.PR)
+	rows, err := tx.Query(ctx, `SELECT d.key,p.record,CASE WHEN p.key IS NULL THEN d.body ELSE NULL END FROM documents d LEFT JOIN deploy_record_projection p ON p.key=d.key AND p.sha256=d.sha256 WHERE strpos(d.key,'deploy/')=1 AND ((p.decoded AND strpos(convert_from(p.record,'UTF8'),$1)>0) OR (p.key IS NULL AND strpos(d.body,$1)>0)) ORDER BY d.key DESC`, x.Refs.PR)
 	if err != nil {
 		return x, err
 	}
