@@ -56,12 +56,12 @@ function documentIssueComments(doc) {
 const DECISIONS_PROJECT_ID = 'hk-project:/decisions';
 
 // hk's write protocol copies some comments to YouTrack itself (slice b1a).
-// The export marks the PG original with hk_op_id (its body is unmarked); the
-// marker test only catches a remote echo. Either way the import skips it, so
-// 다시 시작 never adds the comment a second time.
-const HK_OP_MARKER = /<!-- hk-op:[0-9]+ -->/;
+// The export marks such a PG comment with hk_op_id, the op that owns it; the
+// import skips it by that ownership alone, so 다시 시작 never adds it a second
+// time. A comment whose body merely quotes an op marker is not owned and is
+// imported like any other.
 function hkWritesComment(comment) {
-  return (comment.hk_op_id !== undefined && comment.hk_op_id !== null && Number(comment.hk_op_id) > 0) || HK_OP_MARKER.test(String(comment.body || ''));
+  return comment.hk_op_id !== undefined && comment.hk_op_id !== null && Number(comment.hk_op_id) > 0;
 }
 function sourceUser(name) {
   const value = name || 'unknown';

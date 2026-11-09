@@ -894,6 +894,10 @@ func (s *Service) mapActivity(ctx context.Context, act Activity, me User) (store
 			text := ActivityValueText(values[0])
 			commentID := ActivityValueID(values[0])
 			trimmed := strings.TrimSpace(text)
+			echo, err := s.protocolEcho(ctx, act.Target, text)
+			if err != nil {
+				return in, true, err
+			}
 			switch {
 			case strings.HasPrefix(trimmed, "/지시"):
 				in.Skip = "지시 명령은 아직 hk가 처리하지 않습니다"
@@ -901,7 +905,7 @@ func (s *Service) mapActivity(ctx context.Context, act Activity, me User) (store
 				in.Skip = "결정 답변은 아직 hk가 처리하지 않습니다"
 			case trimmed == "":
 				in.Skip = "빈 코멘트입니다"
-			case strings.Contains(text, ytwrite.MarkerPrefix):
+			case echo:
 				// The write protocol put this comment on the issue (slice
 				// b1a); its original is already a PG comment. Whatever the
 				// author, the echo must not become a second one.
@@ -942,6 +946,19 @@ func (s *Service) mapActivity(ctx context.Context, act Activity, me User) (store
 		}
 	}
 	return in, true, nil
+}
+
+// protocolEcho reports whether a comment added to issue is hk's own copy of a
+// PG comment, written there by the write protocol: it has exactly the rendered
+// form (ytwrite.RenderedOpID) and its op is a comment hk wrote to that same
+// issue. A comment that only quotes a marker, names an op hk does not have, or
+// names an op written to another issue is an ordinary comment.
+func (s *Service) protocolEcho(ctx context.Context, issue *Issue, text string) (bool, error) {
+	opID, ok := ytwrite.RenderedOpID(text)
+	if !ok || issue == nil || issue.ID == "" {
+		return false, nil
+	}
+	return s.store.YTCommentEchoOp(ctx, opID, issue.ID)
 }
 
 // newIssue maps the operator's issue back to an hk project through the

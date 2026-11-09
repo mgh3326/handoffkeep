@@ -29,7 +29,7 @@ import (
 //	3xx (not followed)                          transport error                remote_unknown
 //	408, 5xx                                    *ytwrite.RemoteError           remote_unknown
 //	401                                         *ytwrite.RemoteError           prepared, auth wait
-//	429                                         *ytwrite.RemoteError + wait    prepared until Retry-After
+//	429                                         *ytwrite.RemoteError + wait    prepared until Retry-After (kept as sent, up to ytwrite.RetryAfterCap)
 //	other 4xx (400, 403, 404, 409, 422, ...)    *ytwrite.RemoteError           rejected
 //
 // The bot key is removed from every error text before it leaves this file, so
@@ -44,15 +44,18 @@ type WriteRemote struct {
 
 var _ ytwrite.Remote = (*WriteRemote)(nil)
 
-// maxHonouredRetryAfter bounds the parse of a Retry-After header; the
-// protocol clamps the wait it records (ytwrite.Config.MaxRetryAfter).
-const maxHonouredRetryAfter = 24 * time.Hour
-
 // NewWriteRemote wraps a configured client.
 func NewWriteRemote(c *Client) *WriteRemote {
 	hc := *c.http
 	hc.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	return &WriteRemote{c: c, http: &hc}
+}
+
+func (r *WriteRemote) now() time.Time {
+	if r.Now != nil {
+		return r.Now().UTC()
+	}
+	return time.Now().UTC()
 }
 
 // Tenant is the YouTrack host the client writes to.
@@ -117,7 +120,7 @@ func (r *WriteRemote) send(ctx context.Context, method, path string, query url.V
 	}
 	return nil, nil, &ytwrite.RemoteError{
 		Status:     resp.StatusCode,
-		RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After"), maxHonouredRetryAfter),
+		RetryAfter: parseRetryAfterAt(resp.Header.Get("Retry-After"), ytwrite.RetryAfterCap, r.now()),
 		Message:    redactText(msg, r.c.token),
 	}
 }

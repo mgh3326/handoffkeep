@@ -165,12 +165,24 @@ package store
 //     and CreateMCPTaskComment take taskCommentInsertLock, insert the comment
 //     (KEY SHARE on its task row; MCP also writes its audit row), and only
 //     then take the lane lock of that task and insert new rows of
-//     yt_write_ops, yt_comment_write_links and yt_entity_map. No holder of a
-//     lane lock ever requests taskCommentInsertLock, a task row, a job lock or
-//     a level 1-6 lock, and a transaction holds at most one lane lock, so the
-//     comment lock -> lane lock edge cannot close a cycle. The comment writers
-//     that take level 2 (ApplyYouTrackActivity, ReplyDots) never enqueue an
-//     op, so level 2 -> lane lock does not occur.
+//     yt_write_ops, yt_comment_write_links and yt_entity_map. The canary's
+//     writers take the task's lane lock first too: RemoveYTCommentCanary then
+//     deletes its yt_comment_canary row, AddYTCommentCanary then reads the
+//     task (no lock), takes FOR SHARE on its youtrack_projects and
+//     task_origins rows and inserts its canary row; the comment worker's
+//     Claim (YTCommentLedger) reads that canary row under the same lane lock,
+//     which is what orders a removal against a claim. No holder of a lane lock
+//     requests taskCommentInsertLock, a task row, a job lock or a level 1-4
+//     lock, and a transaction holds at most one lane lock. The only level-5
+//     rows a lane holder waits on are AddYTCommentCanary's FOR SHARE reads;
+//     their writers (UpsertYouTrackMirror, AddTaskOrigin, MarkYouTrackTaskSynced,
+//     UpdateYouTrackMirrorDisplay, PutYouTrackProject, SetYouTrackProjectID,
+//     and ApplyYouTrackActivity, which reaches task_origins only after its
+//     comment lock and task row) never request a lane lock, and none waits on
+//     the comment lock while it holds such a row. So the comment lock -> lane
+//     lock and lane lock -> mapping row edges cannot close a cycle. The
+//     comment writers that take level 2 (ApplyYouTrackActivity, ReplyDots)
+//     never enqueue an op, so level 2 -> lane lock does not occur.
 //
 //   - The YouTrack sync's single-run guard is a session-scoped
 //     pg_try_advisory_lock(8241873404) on its own pooled connection. It is

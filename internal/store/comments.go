@@ -79,39 +79,48 @@ func CheckTaskCommentBody(body string) error {
 }
 
 // CreateTaskComment appends one comment. The transaction writes task_comments
-// only; tasks is read for existence and is never locked for update.
+// (and, for a task in the YouTrack comment canary, its write-protocol op);
+// tasks is read for existence and is never locked for update.
 func (s *Store) CreateTaskComment(ctx context.Context, taskID int64, author, body string) (TaskComment, error) {
+	x, err := s.CreateTaskCommentProjected(ctx, taskID, author, body)
+	return x.TaskComment, err
+}
+
+// CreateTaskCommentProjected is CreateTaskComment answering with the
+// comment's YouTrack projection too (REST and the CLI show it).
+func (s *Store) CreateTaskCommentProjected(ctx context.Context, taskID int64, author, body string) (CreatedTaskComment, error) {
 	if taskID < 1 || author == "" || !validText(author, 128) {
-		return TaskComment{}, ErrTaskCommentInvalid
+		return CreatedTaskComment{}, ErrTaskCommentInvalid
 	}
 	if err := CheckTaskCommentBody(body); err != nil {
-		return TaskComment{}, err
+		return CreatedTaskComment{}, err
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return TaskComment{}, err
+		return CreatedTaskComment{}, err
 	}
 	defer tx.Rollback(ctx)
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, taskCommentInsertLock); err != nil {
-		return TaskComment{}, err
+		return CreatedTaskComment{}, err
 	}
 	var x TaskComment
 	err = scanTaskComment(tx.QueryRow(ctx, `INSERT INTO task_comments(task_id,body,author,created_at) SELECT $1,$2,$3,$4 WHERE EXISTS(SELECT 1 FROM tasks WHERE id=$1) RETURNING `+taskCommentColumns, taskID, body, author, time.Now().UTC()), &x)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return TaskComment{}, ErrTaskNotFound
+		return CreatedTaskComment{}, ErrTaskNotFound
 	}
 	if err != nil {
-		return TaskComment{}, err
+		return CreatedTaskComment{}, err
 	}
 	op, enqueued, err := s.enqueueYTCommentTx(ctx, tx, x)
 	if err != nil {
-		return TaskComment{}, err
+		return CreatedTaskComment{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return TaskComment{}, err
+		return CreatedTaskComment{}, err
 	}
 	logYTCommentEnqueued(x, op, enqueued)
-	return x, nil
+	projection := ytProjectionOf(op, enqueued)
+	return CreatedTaskComment{TaskComment: x, YouTrackProjection: &projection}, nil
 }
 
 // CreateMCPTaskComment appends one comment written through MCP, with its audit
@@ -119,54 +128,67 @@ func (s *Store) CreateTaskComment(ctx context.Context, taskID int64, author, bod
 // that key made (replayed true) and writes nothing; the same key on another
 // task is ErrIdempotencyKeyReused. The comment's author is w.Author.
 func (s *Store) CreateMCPTaskComment(ctx context.Context, taskID int64, body string, w MCPWrite) (TaskComment, bool, error) {
+	x, replayed, err := s.CreateMCPTaskCommentProjected(ctx, taskID, body, w)
+	return x.TaskComment, replayed, err
+}
+
+// CreateMCPTaskCommentProjected is CreateMCPTaskComment answering with the
+// comment's YouTrack projection too; a replay reports the projection of the
+// original comment's op, which a replay never creates a second time.
+func (s *Store) CreateMCPTaskCommentProjected(ctx context.Context, taskID int64, body string, w MCPWrite) (CreatedTaskComment, bool, error) {
 	if taskID < 1 || w.Tool == "" {
-		return TaskComment{}, false, ErrTaskCommentInvalid
+		return CreatedTaskComment{}, false, ErrTaskCommentInvalid
 	}
 	if err := w.validate(); err != nil {
-		return TaskComment{}, false, err
+		return CreatedTaskComment{}, false, err
 	}
 	if err := CheckTaskCommentBody(body); err != nil {
-		return TaskComment{}, false, err
+		return CreatedTaskComment{}, false, err
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return TaskComment{}, false, err
+		return CreatedTaskComment{}, false, err
 	}
 	defer tx.Rollback(ctx)
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, taskCommentInsertLock); err != nil {
-		return TaskComment{}, false, err
+		return CreatedTaskComment{}, false, err
 	}
 	var x TaskComment
 	replayed, err := replayMCPWriteTx(ctx, tx, w, &x)
 	if err != nil {
-		return TaskComment{}, false, err
+		return CreatedTaskComment{}, false, err
 	}
 	if replayed {
 		if x.TaskID != taskID {
-			return TaskComment{}, false, ErrIdempotencyKeyReused
+			return CreatedTaskComment{}, false, ErrIdempotencyKeyReused
 		}
-		return x, true, tx.Commit(ctx)
+		projection, err := ytCommentProjectionTx(ctx, tx, x.ID)
+		if err != nil {
+			return CreatedTaskComment{}, false, err
+		}
+		return CreatedTaskComment{TaskComment: x, YouTrackProjection: &projection}, true, tx.Commit(ctx)
 	}
 	now := time.Now().UTC()
 	err = scanTaskComment(tx.QueryRow(ctx, `INSERT INTO task_comments(task_id,body,author,created_at,source_ref) SELECT $1,$2,$3,$4,$5 WHERE EXISTS(SELECT 1 FROM tasks WHERE id=$1) RETURNING `+taskCommentColumns, taskID, body, w.Author, now, w.Key), &x)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return TaskComment{}, false, ErrTaskNotFound
+		return CreatedTaskComment{}, false, ErrTaskNotFound
 	}
 	if err != nil {
-		return TaskComment{}, false, err
+		return CreatedTaskComment{}, false, err
 	}
 	if err := insertMCPWriteAuditTx(ctx, tx, w, taskID, x, now); err != nil {
-		return TaskComment{}, false, err
+		return CreatedTaskComment{}, false, err
 	}
 	op, enqueued, err := s.enqueueYTCommentTx(ctx, tx, x)
 	if err != nil {
-		return TaskComment{}, false, err
+		return CreatedTaskComment{}, false, err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return TaskComment{}, false, err
+		return CreatedTaskComment{}, false, err
 	}
 	logYTCommentEnqueued(x, op, enqueued)
-	return x, false, nil
+	projection := ytProjectionOf(op, enqueued)
+	return CreatedTaskComment{TaskComment: x, YouTrackProjection: &projection}, false, nil
 }
 
 // ListTaskComments returns comments in id order after afterID. A missing task

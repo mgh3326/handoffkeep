@@ -24,10 +24,17 @@ const (
 	// ytCommentsInterval is how often the worker runs one Drive pass.
 	ytCommentsInterval = 5 * time.Second
 	// ytCommentsDispatchTimeout bounds one YouTrack call (and one evidence
-	// search). It stays under serve's worker stop budget (5s), so a call in
-	// flight at shutdown is recorded before the store closes; a slower call
-	// becomes remote_unknown and is resolved by the marker search.
-	ytCommentsDispatchTimeout = 4 * time.Second
+	// search); ytCommentsSettleTimeout bounds recording its outcome. When
+	// serve stops, a call in flight finishes or times out and its settlement
+	// gets at most ytCommentsSettleTimeout, so the worker returns within
+	// their sum, under serve's worker stop budget (workerStopBudget, 5s), and
+	// before the store closes. A call that times out becomes remote_unknown;
+	// a settlement that cannot finish in time (a locked row, a slow database)
+	// leaves the op dispatched, durable and unrecorded: the next worker's
+	// stale recovery makes it remote_unknown and the marker search applies it
+	// without a second POST.
+	ytCommentsDispatchTimeout = 3 * time.Second
+	ytCommentsSettleTimeout   = 1 * time.Second
 	ytCommentsPassLimit       = 50
 )
 
@@ -88,6 +95,7 @@ func newYTCommentsWorker(st *store.Store, remote ytwrite.Remote, tenant string, 
 		Remote:          remote,
 		Now:             now,
 		DispatchTimeout: ytCommentsDispatchTimeout,
+		SettleTimeout:   ytCommentsSettleTimeout,
 	}))
 	if err != nil {
 		return ytCommentsWorker{}, err
@@ -99,7 +107,9 @@ func newYTCommentsWorker(st *store.Store, remote ytwrite.Remote, tenant string, 
 
 // ytCommentsWorker runs one sequential Drive pass every interval. Two serve
 // processes (blue-green) may both run it: the ledger's compare-and-set claim
-// is the boundary, so an op is sent at most once.
+// is the boundary, so an op is sent at most once. Its ledger is scoped to the
+// tenant it was configured for (store.YTCommentLedger): it neither sends nor
+// searches for an op bound to another tenant.
 type ytCommentsWorker struct {
 	protocol *ytwrite.Protocol
 	interval time.Duration

@@ -22,6 +22,7 @@ type OpView struct {
 	EntityKind    string     `json:"entity_kind"`
 	EntityID      string     `json:"entity_id"`
 	YTTargetID    string     `json:"yt_target_id"`
+	Tenant        string     `json:"tenant,omitempty"`
 	Actor         string     `json:"actor"`
 	State         State      `json:"state"`
 	Status        Status     `json:"status"`
@@ -37,7 +38,7 @@ type OpView struct {
 // ViewOf renders an op for the operator's view.
 func ViewOf(op Op) OpView {
 	v := OpView{
-		ID: op.ID, Kind: op.Kind, EntityKind: op.EntityKind, EntityID: op.EntityID, YTTargetID: op.YTTargetID,
+		ID: op.ID, Kind: op.Kind, EntityKind: op.EntityKind, EntityID: op.EntityID, YTTargetID: op.YTTargetID, Tenant: op.Tenant,
 		Actor: op.Actor, State: op.State, Status: StatusOf(op.State), Reason: op.Reason, YTResultID: op.YTResultID,
 		Attempts: op.Attempts, Reconciles: op.Reconciles, CreatedAt: op.CreatedAt, NextAttemptAt: op.NextAttemptAt,
 	}

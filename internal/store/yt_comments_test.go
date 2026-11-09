@@ -647,6 +647,9 @@ func TestCanaryMigrationUpgradesAlreadyCurrentDatabase(t *testing.T) {
 		if n := tables(s); n != 2 {
 			t.Fatalf("open %d: %d of 2 tables", i, n)
 		}
+		if n := ytcCount(t, s, `SELECT count(*) FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='yt_write_ops' AND column_name='tenant'`); n != 1 {
+			t.Fatalf("open %d: yt_write_ops.tenant columns = %d", i, n)
+		}
 		if n := ytcCount(t, s, `SELECT count(*) FROM schema_migrations WHERE id=$1`, ytCommentCanaryMigrationID); n != 1 {
 			t.Fatalf("open %d: id recorded %d times", i, n)
 		}

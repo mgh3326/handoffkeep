@@ -46,16 +46,22 @@ type Config struct {
 	// caller's cancellation does not cancel either: the write is durable and
 	// its reconciliation must finish.
 	DispatchTimeout time.Duration
+	// SettleTimeout bounds recording what one remote call returned (10s). The
+	// caller's cancellation does not cut it short, but a settlement that
+	// cannot finish in time (a stopping server, a locked row) is abandoned:
+	// the op stays dispatched, which stale recovery turns into remote_unknown
+	// and the marker search resolves. It is never recorded as applied without
+	// the ledger's own commit.
+	SettleTimeout time.Duration
 	// StaleAfter is how long a dispatched op may stay in flight before it is
 	// treated as lost and becomes remote_unknown (twice DispatchTimeout).
 	StaleAfter time.Duration
 	// RateLimitWait is the wait after a 429 without Retry-After (5s);
-	// MaxRetryAfter caps a Retry-After the remote names (1h). The old client's
-	// 5s cap is gone: the server's requested wait is honoured.
+	// MaxRetryAfter caps a Retry-After the remote names (RetryAfterCap, 30
+	// days): a sanity bound for absurd values, not a shortening of real
+	// ones. The server's requested wait is honoured to the second below it.
 	RateLimitWait time.Duration
 	MaxRetryAfter time.Duration
-	// SettleTimeout bounds recording the outcome of one remote call.
-	SettleTimeout time.Duration
 	// AuthWait is the wait after a 401, which needs a repaired token (5m).
 	AuthWait time.Duration
 	// ReconcileBase and ReconcileMax bound the doubling wait between evidence
@@ -66,11 +72,11 @@ type Config struct {
 	BlockedWait time.Duration
 	// PageSize is the comment page requested when searching for evidence (100).
 	PageSize int
-	// Admit, when set, is asked before every dispatch of a prepared op. A
-	// non-nil error holds the op: it stays prepared, nothing is sent, and it
-	// is never rejected for it (canary removal or mode off freezes sends).
-	Admit func(ctx context.Context, op Op) error
 }
+
+// RetryAfterCap is the longest Retry-After the protocol records. A longer
+// value is not a real rate limit; it is recorded as this cap, never dropped.
+const RetryAfterCap = 30 * 24 * time.Hour
 
 // maxDrivePasses bounds the passes of one Drive call.
 const maxDrivePasses = 16
@@ -95,8 +101,9 @@ func New(cfg Config) (*Protocol, error) {
 	}
 	def(&cfg.DispatchTimeout, 30*time.Second)
 	def(&cfg.StaleAfter, 2*cfg.DispatchTimeout)
+	def(&cfg.SettleTimeout, 10*time.Second)
 	def(&cfg.RateLimitWait, 5*time.Second)
-	def(&cfg.MaxRetryAfter, time.Hour)
+	def(&cfg.MaxRetryAfter, RetryAfterCap)
 	def(&cfg.AuthWait, 5*time.Minute)
 	def(&cfg.ReconcileBase, 5*time.Second)
 	def(&cfg.ReconcileMax, 5*time.Minute)
@@ -169,11 +176,12 @@ func CommentOp(req CommentRequest) (NewOp, error) {
 		Principal:  req.Principal,
 		Kind:       KindCommentAppend,
 		Key:        req.Key,
-		PayloadSHA: payloadSHA(KindCommentAppend, "task", entityID, req.YTIssueID, req.Actor, req.Body),
+		PayloadSHA: payloadSHA(KindCommentAppend, "task", entityID, req.YTIssueID, req.Tenant, req.Actor, req.Body),
 		Payload:    payload,
 		EntityKind: "task",
 		EntityID:   entityID,
 		YTTargetID: req.YTIssueID,
+		Tenant:     req.Tenant,
 		Actor:      req.Actor,
 	}, nil
 }
@@ -250,15 +258,6 @@ func (p *Protocol) advance(ctx context.Context, op Op) Result {
 	if op.State != StatePrepared {
 		return p.result(op, false)
 	}
-	if p.Admit != nil {
-		if err := p.Admit(ctx, op); err != nil {
-			log.Printf("ytwrite.op_held op_id=%d entity_id=%q err=%q", op.ID, op.EntityID, err.Error())
-			r := p.result(op, false)
-			r.Reason = ReasonHeld
-			r.RetryAfter = max(r.RetryAfter, p.BlockedWait)
-			return r
-		}
-	}
 	cur, outcome, err := p.Ledger.Claim(ctx, p.now(), op.ID)
 	if err != nil {
 		// The op is durable; whether the claim committed is unknown, and
@@ -271,6 +270,11 @@ func (p *Protocol) advance(ctx context.Context, op Op) Result {
 		return p.send(ctx, cur)
 	case ClaimBlocked:
 		return p.result(cur, true)
+	case ClaimHeld:
+		r := p.result(cur, false)
+		r.Reason = ReasonHeld
+		r.RetryAfter = max(r.RetryAfter, p.BlockedWait)
+		return r
 	default:
 		return p.result(cur, false)
 	}
@@ -280,24 +284,37 @@ func (p *Protocol) detached(ctx context.Context) (context.Context, context.Cance
 	return context.WithTimeout(context.WithoutCancel(ctx), p.DispatchTimeout)
 }
 
+// settling is the context one settlement runs on: not canceled with the
+// caller, but bounded by SettleTimeout.
+func (p *Protocol) settling(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), p.SettleTimeout)
+}
+
 var resultIDRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$`)
 
 // send makes the one remote attempt for a claimed op and records what is
 // known about it.
 func (p *Protocol) send(ctx context.Context, op Op) Result {
 	// From here the write is in flight and durable: the caller going away must
-	// not stop it from being recorded.
-	ctx = context.WithoutCancel(ctx)
+	// not stop the call or its recording, but each is bounded (DispatchTimeout,
+	// SettleTimeout), so a stopping worker returns and an unrecorded dispatch
+	// is left for stale recovery.
 	if op.Kind != KindCommentAppend {
-		return p.record(op, p.reject(ctx, op, ReasonUnsupportedKind, op.Kind))
+		sctx, cancel := p.settling(ctx)
+		defer cancel()
+		return p.record(op, p.reject(sctx, op, ReasonUnsupportedKind, op.Kind))
 	}
 	text, err := RenderComment(op)
 	if err != nil {
-		return p.record(op, p.reject(ctx, op, ReasonUnsupportedKind, err.Error()))
+		sctx, cancel := p.settling(ctx)
+		defer cancel()
+		return p.record(op, p.reject(sctx, op, ReasonUnsupportedKind, err.Error()))
 	}
-	cctx, cancel := p.detached(ctx)
-	defer cancel()
+	cctx, cancelCall := p.detached(ctx)
 	id, err := p.Remote.CreateComment(cctx, op.YTTargetID, text)
+	cancelCall()
+	ctx, cancel := p.settling(ctx)
+	defer cancel()
 	now := p.now()
 	var re *RemoteError
 	switch {

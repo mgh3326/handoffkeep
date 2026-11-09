@@ -20,19 +20,45 @@ import (
 //
 // Lock order: it holds at most one advisory lock per transaction, the entity
 // lane lock (Prepare and Claim only), and then rows of yt_write_ops and
-// yt_entity_map. It takes no task row, no level-2 lock and no job lock, and no
-// writer of another table waits on one of its rows, so it cannot close a cycle
-// with them. It reads no clock: time is passed in (lockorder.go, "Time").
-type YTWriteLedger struct{ s *Store }
+// yt_entity_map (a scoped Claim also reads yt_comment_canary). It takes no task
+// row, no level-2 lock and no job lock, and no writer of another table waits on
+// one of its rows, so it cannot close a cycle with them. It reads no clock:
+// time is passed in (lockorder.go, "Time").
+type YTWriteLedger struct {
+	s *Store
+	// scoped is the comment worker's ledger for one tenant (YTCommentLedger):
+	// Claim and Due admit a prepared op only while its task is enrolled in
+	// the canary with the op's issue on the op's tenant, the tenant is this
+	// one and the mode is on; remote_unknown ops are listed for this tenant
+	// only. The unscoped ledger admits every op (the protocol core's
+	// contract suite, the operator's tools).
+	scoped bool
+	tenant string
+}
 
 // YTWriteLedger returns the Ledger over this store.
 func (s *Store) YTWriteLedger() *YTWriteLedger { return &YTWriteLedger{s: s} }
+
+// YTCommentLedger is the ledger the comment worker of one YouTrack tenant
+// dispatches from (slice b1a, docs/youtrack-write-protocol.md).
+func (s *Store) YTCommentLedger(tenant string) *YTWriteLedger {
+	return &YTWriteLedger{s: s, scoped: true, tenant: tenant}
+}
+
+// ytCommentAdmitSQL is the admission of a prepared op o by the comment
+// worker of the tenant named by the placeholder: o is bound to that tenant,
+// and its task is enrolled in the canary with o's issue on o's tenant. Due
+// and Claim share it, so what a pass lists is what a claim admits.
+func ytCommentAdmitSQL(tenant string) string {
+	return `(o.tenant = ` + tenant + ` AND EXISTS (SELECT 1 FROM yt_comment_canary c
+		WHERE o.entity_kind = 'task' AND c.task_id::text = o.entity_id AND c.issue_id = o.yt_target_id AND c.tenant = o.tenant))`
+}
 
 var _ ytwrite.Ledger = (*YTWriteLedger)(nil)
 
 const ytOpColumns = `id, principal, kind, idem_key, payload_sha, payload, entity_kind, entity_id, yt_target_id, actor,
 	coalesce(parent_id,0), child_seq, state, yt_result_id, reason, last_error, attempts, reconciles,
-	created_at, dispatched_at, next_attempt_at, resolved_at`
+	created_at, dispatched_at, next_attempt_at, resolved_at, tenant`
 
 type ytOpScanner interface{ Scan(dest ...any) error }
 
@@ -42,7 +68,7 @@ func scanYTOp(r ytOpScanner) (ytwrite.Op, error) {
 	var dispatched, resolved *time.Time
 	err := r.Scan(&op.ID, &op.Principal, &op.Kind, &op.Key, &op.PayloadSHA, &op.Payload, &op.EntityKind, &op.EntityID,
 		&op.YTTargetID, &op.Actor, &op.ParentID, &op.ChildSeq, &state, &op.YTResultID, &op.Reason, &op.LastError,
-		&op.Attempts, &op.Reconciles, &op.CreatedAt, &dispatched, &op.NextAttemptAt, &resolved)
+		&op.Attempts, &op.Reconciles, &op.CreatedAt, &dispatched, &op.NextAttemptAt, &resolved, &op.Tenant)
 	if err != nil {
 		return ytwrite.Op{}, err
 	}
@@ -101,11 +127,11 @@ func prepareYTOpTx(ctx context.Context, tx pgx.Tx, now time.Time, n ytwrite.NewO
 		parent = n.ParentID
 	}
 	row := tx.QueryRow(ctx, `INSERT INTO yt_write_ops(principal, kind, idem_key, payload_sha, payload, entity_kind, entity_id,
-			yt_target_id, actor, parent_id, child_seq, state, created_at, next_attempt_at)
-		VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9,$10,$11,'prepared',$12,$12)
+			yt_target_id, actor, parent_id, child_seq, state, created_at, next_attempt_at, tenant)
+		VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9,$10,$11,'prepared',$12,$12,$13)
 		ON CONFLICT (principal, kind, idem_key) DO NOTHING
 		RETURNING `+ytOpColumns,
-		n.Principal, n.Kind, n.Key, n.PayloadSHA, string(n.Payload), n.EntityKind, n.EntityID, n.YTTargetID, n.Actor, parent, n.ChildSeq, now.UTC())
+		n.Principal, n.Kind, n.Key, n.PayloadSHA, string(n.Payload), n.EntityKind, n.EntityID, n.YTTargetID, n.Actor, parent, n.ChildSeq, now.UTC(), n.Tenant)
 	op, err := scanYTOp(row)
 	if err == nil {
 		return op, true, nil
@@ -174,6 +200,21 @@ func (l *YTWriteLedger) Claim(ctx context.Context, now time.Time, id int64) (ytw
 	}
 	if op.NextAttemptAt.After(now) {
 		return op, ytwrite.ClaimNotDue, tx.Commit(ctx)
+	}
+	if l.scoped {
+		// Admission is read here, under the lane lock that the canary's
+		// writers (AddYTCommentCanary, RemoveYTCommentCanary) also take: a
+		// removal either commits before this read and holds the op, or waits
+		// for this claim to commit.
+		admitted := false
+		if l.s.ytCommentsCanary.Load() {
+			if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM yt_write_ops o WHERE o.id=$1 AND `+ytCommentAdmitSQL("$2")+`)`, id, l.tenant).Scan(&admitted); err != nil {
+				return ytwrite.Op{}, "", err
+			}
+		}
+		if !admitted {
+			return op, ytwrite.ClaimHeld, tx.Commit(ctx)
+		}
 	}
 	var blocked bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM yt_write_ops
@@ -321,6 +362,19 @@ func ytLimit(n int) int {
 }
 
 func (l *YTWriteLedger) Due(ctx context.Context, now time.Time, limit int) ([]ytwrite.Op, error) {
+	if l.scoped {
+		// Held prepared ops (not admitted, or the mode is off: $4) are left
+		// out before the limit, so a long held queue cannot fill every pass;
+		// uncertain ops of this tenant are always listed for their evidence
+		// search.
+		return l.list(ctx, `SELECT `+ytOpColumns+` FROM yt_write_ops o
+			WHERE o.state IN ('prepared','remote_unknown') AND o.next_attempt_at <= $1
+			AND ((o.state = 'remote_unknown' AND o.tenant = $3)
+				OR (o.state = 'prepared' AND $4::boolean AND `+ytCommentAdmitSQL("$3")+`
+					AND NOT EXISTS (SELECT 1 FROM yt_write_ops e
+						WHERE e.entity_kind = o.entity_kind AND e.entity_id = o.entity_id AND e.id < o.id AND e.state NOT IN ('applied','rejected'))))
+			ORDER BY o.id LIMIT $2`, now.UTC(), ytLimit(limit), l.tenant, l.s.ytCommentsCanary.Load())
+	}
 	return l.list(ctx, `SELECT `+ytOpColumns+` FROM yt_write_ops o
 		WHERE o.state IN ('prepared','remote_unknown') AND o.next_attempt_at <= $1
 		AND (o.state = 'remote_unknown' OR NOT EXISTS (SELECT 1 FROM yt_write_ops e

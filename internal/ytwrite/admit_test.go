@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,22 +17,22 @@ func commentReq(key, body string) ytwrite.CommentRequest {
 	return ytwrite.CommentRequest{Principal: "hk:task-comments", Key: key, Actor: "worker", TaskID: 7, YTIssueID: "HK-7", Body: body}
 }
 
-// Admit holds a prepared op without sending or rejecting it; once admitted it
-// is sent by the next pass.
-func TestAdmitHoldsWithoutSending(t *testing.T) {
+// A ledger that holds an op (ClaimHeld) keeps it prepared: nothing is sent and
+// it is never rejected for it; once admitted it is sent by the next pass.
+func TestHeldClaimSendsNothing(t *testing.T) {
 	ctx := context.Background()
 	yt := ytwritetest.NewFake()
 	clock := ytwritetest.NewClock()
-	var hold error = errors.New("task 7 is not in the canary set")
-	asked := 0
-	p, err := ytwrite.New(ytwrite.Config{Ledger: ytwritetest.NewMemLedger(), Remote: yt, Now: clock.Now,
-		Admit: func(_ context.Context, op ytwrite.Op) error {
-			asked++
-			if op.YTTargetID != "HK-7" || op.EntityKind != "task" || op.EntityID != "7" {
-				t.Errorf("admit asked for %+v", op)
-			}
-			return hold
-		}})
+	ledger := ytwritetest.NewMemLedger()
+	var held atomic.Bool
+	held.Store(true)
+	ledger.Hold = func(op ytwrite.Op) bool {
+		if op.YTTargetID != "HK-7" || op.EntityKind != "task" || op.EntityID != "7" {
+			t.Errorf("hold asked for %+v", op)
+		}
+		return held.Load()
+	}
+	p, err := ytwrite.New(ytwrite.Config{Ledger: ledger, Remote: yt, Now: clock.Now})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,15 +45,15 @@ func TestAdmitHoldsWithoutSending(t *testing.T) {
 	}
 	for i := 0; i < 3; i++ {
 		clock.Advance(time.Minute)
-		if _, err := p.Drive(ctx, 10); err != nil {
-			t.Fatal(err)
+		if st, err := p.Drive(ctx, 10); err != nil || st.Visited != 0 {
+			t.Fatalf("pass over a held op: %+v %v", st, err)
 		}
 	}
 	got, err := p.Lookup(ctx, "hk:task-comments", r.OpID)
-	if err != nil || got.State != ytwrite.StatePrepared || yt.Calls() != 0 || asked < 2 {
-		t.Fatalf("held op after passes: %+v %v, calls %d, asked %d", got, err, yt.Calls(), asked)
+	if err != nil || got.State != ytwrite.StatePrepared || yt.Calls() != 0 {
+		t.Fatalf("held op after passes: %+v %v, calls %d", got, err, yt.Calls())
 	}
-	hold = nil
+	held.Store(false)
 	if _, err := p.Drive(ctx, 10); err != nil {
 		t.Fatal(err)
 	}

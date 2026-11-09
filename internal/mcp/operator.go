@@ -738,13 +738,14 @@ func (o operatorTools) taskComment(ctx context.Context, _ *gmcp.CallToolRequest,
 	if err != nil {
 		return nil, nil, err
 	}
-	comment, replayed, err := o.service.Store.CreateMCPTaskComment(ctx, in.ID, in.Body, write)
+	comment, replayed, err := o.service.Store.CreateMCPTaskCommentProjected(ctx, in.ID, in.Body, write)
 	if err != nil {
 		return nil, nil, err
 	}
 	return jsonResult(map[string]any{
-		"comment": comment, "replayed": replayed, "actor": o.principal.Actor, "channel": o.principal.Channel,
+		"comment": comment.TaskComment, "replayed": replayed, "actor": o.principal.Actor, "channel": o.principal.Channel,
 		"author": writeAuthor(o.principal), "console_url": taskURL(in.ID),
+		"youtrack_projection": comment.YouTrackProjection,
 	})
 }
 

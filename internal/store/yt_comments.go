@@ -59,15 +59,17 @@ func (s *Store) enqueueYTCommentTx(ctx context.Context, tx pgx.Tx, c TaskComment
 	if !s.ytCommentsCanary.Load() {
 		return ytwrite.Op{}, false, nil
 	}
-	var issueID, projectID string
-	err := tx.QueryRow(ctx, `SELECT issue_id, project_id FROM yt_comment_canary WHERE task_id=$1`, c.TaskID).Scan(&issueID, &projectID)
+	var issueID, projectID, tenant string
+	err := tx.QueryRow(ctx, `SELECT issue_id, project_id, tenant FROM yt_comment_canary WHERE task_id=$1`, c.TaskID).Scan(&issueID, &projectID, &tenant)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ytwrite.Op{}, false, nil
 	}
 	if err != nil {
 		return ytwrite.Op{}, false, err
 	}
-	req := ytwrite.CommentRequest{Principal: YTCommentPrincipal, Key: YTCommentKey(c.ID), Actor: c.Author, TaskID: c.TaskID, YTIssueID: issueID, Body: c.Body}
+	// The op is bound to the tenant the task is enrolled on now; a later
+	// re-enrollment elsewhere never retargets it.
+	req := ytwrite.CommentRequest{Principal: YTCommentPrincipal, Key: YTCommentKey(c.ID), Actor: c.Author, TaskID: c.TaskID, YTIssueID: issueID, Tenant: tenant, Body: c.Body}
 	reason, detail := "", ""
 	if cerr := ytwrite.CheckComment(req); cerr != nil {
 		reason, detail = ytwrite.ReasonInvalidComment, cerr.Error()
@@ -122,6 +124,58 @@ func logYTCommentEnqueued(c TaskComment, op ytwrite.Op, enqueued bool) {
 	log.Printf("ytwrite.comment_enqueued op_id=%d task_id=%d comment_id=%d state=%s reason=%q", op.ID, c.TaskID, c.ID, op.State, op.Reason)
 }
 
+// Projection statuses a comment answer reports.
+const (
+	// YTProjectionNone: no op (the mode is off or the task is not enrolled).
+	YTProjectionNone = "none"
+)
+
+// YTProjection is what a comment answer says about the comment's YouTrack
+// copy: the op that will make it and where it stands. Status is "none" (no
+// op), or the op's ytwrite.Status: "pending" (prepared, dispatched or
+// remote_unknown), "rejected" (Reason is the op's stable reason code, never
+// its free-form error) or, on an MCP replay of a comment already copied,
+// "applied". A fresh comment is never reported applied: the local commit is
+// not a YouTrack write.
+type YTProjection struct {
+	Status string `json:"status"`
+	OpID   int64  `json:"op_id,omitempty"`
+	Reason string `json:"reason,omitempty"`
+}
+
+// ytProjectionOf is the projection of op (enqueued false: no op).
+func ytProjectionOf(op ytwrite.Op, enqueued bool) YTProjection {
+	if !enqueued {
+		return YTProjection{Status: YTProjectionNone}
+	}
+	p := YTProjection{Status: string(ytwrite.StatusOf(op.State)), OpID: op.ID}
+	if op.State == ytwrite.StateRejected {
+		p.Reason = op.Reason
+	}
+	return p
+}
+
+// ytCommentProjectionTx reads the projection of an existing comment (an MCP
+// replay).
+func ytCommentProjectionTx(ctx context.Context, tx pgx.Tx, commentID int64) (YTProjection, error) {
+	op, err := scanYTOp(tx.QueryRow(ctx, `SELECT `+ytOpColumns+` FROM yt_write_ops
+		WHERE id = (SELECT op_id FROM yt_comment_write_links WHERE comment_id=$1)`, commentID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ytProjectionOf(ytwrite.Op{}, false), nil
+	}
+	if err != nil {
+		return YTProjection{}, err
+	}
+	return ytProjectionOf(op, true), nil
+}
+
+// CreatedTaskComment is the answer to a comment create (REST, CLI): the
+// comment with its keys unchanged, plus its YouTrack projection.
+type CreatedTaskComment struct {
+	TaskComment
+	YouTrackProjection *YTProjection `json:"youtrack_projection,omitempty"`
+}
+
 // YTCommentCanary is one task in the canary set with the issue it was bound
 // to at enrollment: the tenant and the stable internal issue id (not the
 // readable id, which changes when an issue moves project).
@@ -154,18 +208,47 @@ type YTCanaryCandidate struct {
 
 // YTCanaryCandidate reads a task's mappings. A missing task is ErrTaskNotFound.
 func (s *Store) YTCanaryCandidate(ctx context.Context, taskID int64) (YTCanaryCandidate, error) {
+	return readYTCanaryCandidate(ctx, s.pool, taskID, "")
+}
+
+type ytRowQuerier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+// readYTCanaryCandidate reads the mappings VerifyCanary checks. lock is ""
+// or " FOR SHARE", applied to the youtrack_projects and task_origins rows.
+func readYTCanaryCandidate(ctx context.Context, q ytRowQuerier, taskID int64, lock string) (YTCanaryCandidate, error) {
 	c := YTCanaryCandidate{TaskID: taskID}
-	err := s.pool.QueryRow(ctx, `SELECT coalesce(t.project,''), coalesce(p.short_name,''), coalesce(p.yt_project_id,''),
-			coalesce(o.external_id,''), coalesce(o.tenant,''), coalesce(m.yt_id,'')
-		FROM tasks t
-		LEFT JOIN youtrack_projects p ON p.hk_project = t.project
-		LEFT JOIN task_origins o ON o.task_id = t.id AND o.provider = 'youtrack'
-		LEFT JOIN yt_entity_map m ON m.entity_kind = 'task' AND m.hk_key = t.id::text
-		WHERE t.id = $1`, taskID).Scan(&c.Project, &c.ShortName, &c.ProjectID, &c.MirrorIssueID, &c.MirrorTenant, &c.MappedIssueID)
+	optional := func(err error) error {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		return err
+	}
+	err := q.QueryRow(ctx, `SELECT coalesce(project,'') FROM tasks WHERE id=$1`, taskID).Scan(&c.Project)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return YTCanaryCandidate{}, ErrTaskNotFound
 	}
-	return c, err
+	if err != nil {
+		return YTCanaryCandidate{}, err
+	}
+	if c.Project != "" {
+		err := q.QueryRow(ctx, `SELECT coalesce(short_name,''), coalesce(yt_project_id,'') FROM youtrack_projects WHERE hk_project=$1`+lock,
+			c.Project).Scan(&c.ShortName, &c.ProjectID)
+		if err := optional(err); err != nil {
+			return YTCanaryCandidate{}, err
+		}
+	}
+	err = q.QueryRow(ctx, `SELECT coalesce(external_id,''), coalesce(tenant,'') FROM task_origins WHERE task_id=$1 AND provider='youtrack'`+lock,
+		taskID).Scan(&c.MirrorIssueID, &c.MirrorTenant)
+	if err := optional(err); err != nil {
+		return YTCanaryCandidate{}, err
+	}
+	err = q.QueryRow(ctx, `SELECT yt_id FROM yt_entity_map WHERE entity_kind='task' AND hk_key=$1`, strconv.FormatInt(taskID, 10)).Scan(&c.MappedIssueID)
+	if err := optional(err); err != nil {
+		return YTCanaryCandidate{}, err
+	}
+	return c, nil
 }
 
 // ErrYTCanaryConflict is an enrollment that disagrees with a binding or map
@@ -180,15 +263,22 @@ func scanYTCanary(row interface{ Scan(...any) error }, c *YTCommentCanary) error
 	return err
 }
 
-// AddYTCommentCanary puts a verified binding in the canary set. Adding the
-// same binding again is a no-op; another binding for an enrolled task, an
-// issue another task is enrolled with or mapped to, or a task mapped to
-// another issue, is ErrYTCanaryConflict. Nothing else is written: an
-// enrollment creates no op row. verified is the candidate the binding was
-// verified against.
+// AddYTCommentCanary puts a verified binding in the canary set. verified is
+// the candidate the binding was verified against (VerifyCanary): the
+// transaction reads the task's mappings again and refuses with
+// ErrYTCanaryConflict if any of them changed since. Adding the same binding
+// again is a no-op; another binding for an enrolled task, an issue another
+// task is enrolled with or mapped to, or a task mapped to another issue, is
+// ErrYTCanaryConflict. Nothing else is written: an enrollment creates no op
+// row.
+//
+// Locks: the task's lane lock first (the one Claim and the comment enqueue
+// take, so the yt_entity_map row of the task and the claim's admission cannot
+// change under it), then FOR SHARE on the task's youtrack_projects and
+// task_origins rows, then the new canary row (lockorder.go).
 func (s *Store) AddYTCommentCanary(ctx context.Context, c YTCommentCanary, verified YTCanaryCandidate) (YTCommentCanary, error) {
 	if c.TaskID < 1 || c.Tenant == "" || len(c.Tenant) > 255 || c.IssueID == "" || len(c.IssueID) > 64 ||
-		len(c.IssueReadable) > 64 || len(c.ProjectID) > 64 || c.AddedBy == "" || !validText(c.AddedBy, 200) {
+		len(c.IssueReadable) > 64 || len(c.ProjectID) > 64 || c.AddedBy == "" || !validText(c.AddedBy, 200) || verified.TaskID != c.TaskID {
 		return YTCommentCanary{}, errors.New("invalid canary binding")
 	}
 	tx, err := s.pool.Begin(ctx)
@@ -196,16 +286,21 @@ func (s *Store) AddYTCommentCanary(ctx context.Context, c YTCommentCanary, verif
 		return YTCommentCanary{}, err
 	}
 	defer tx.Rollback(ctx)
-	var exists bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM tasks WHERE id=$1)`, c.TaskID).Scan(&exists); err != nil {
+	taskKey := strconv.FormatInt(c.TaskID, 10)
+	if err := lockYTEntity(ctx, tx, "task", taskKey); err != nil {
 		return YTCommentCanary{}, err
 	}
-	if !exists {
-		return YTCommentCanary{}, ErrTaskNotFound
+	current, err := readYTCanaryCandidate(ctx, tx, c.TaskID, " FOR SHARE")
+	if err != nil {
+		return YTCommentCanary{}, err
+	}
+	if current != verified {
+		return YTCommentCanary{}, fmt.Errorf("%w: task %d's YouTrack mappings changed after verification (verified %+v, now %+v); verify again",
+			ErrYTCanaryConflict, c.TaskID, verified, current)
 	}
 	var mapped bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM yt_entity_map WHERE entity_kind='task'
-		AND ((hk_key=$1 AND yt_id<>$2) OR (hk_key<>$1 AND yt_id=$2)))`, strconv.FormatInt(c.TaskID, 10), c.IssueID).Scan(&mapped); err != nil {
+		AND ((hk_key=$1 AND yt_id<>$2) OR (hk_key<>$1 AND yt_id=$2)))`, taskKey, c.IssueID).Scan(&mapped); err != nil {
 		return YTCommentCanary{}, err
 	}
 	if mapped {
@@ -228,11 +323,25 @@ func (s *Store) AddYTCommentCanary(ctx context.Context, c YTCommentCanary, verif
 }
 
 // RemoveYTCommentCanary takes a task out of the canary set; removed is false
-// when it was not in it. Ops already prepared are not touched: the worker
-// holds them (YTCommentAdmitted) until the task is enrolled again.
+// when it was not in it. Ops already prepared are not touched: the worker's
+// claim holds them (YTCommentLedger) until the task is enrolled again on the
+// op's tenant. It takes the task's lane lock first, the lock a claim holds
+// while it reads the admission: a removal that commits first holds every
+// later claim, and one that waits behind a claim follows that claim.
 func (s *Store) RemoveYTCommentCanary(ctx context.Context, taskID int64) (bool, error) {
-	tag, err := s.pool.Exec(ctx, `DELETE FROM yt_comment_canary WHERE task_id=$1`, taskID)
-	return tag.RowsAffected() == 1, err
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx)
+	if err := lockYTEntity(ctx, tx, "task", strconv.FormatInt(taskID, 10)); err != nil {
+		return false, err
+	}
+	tag, err := tx.Exec(ctx, `DELETE FROM yt_comment_canary WHERE task_id=$1`, taskID)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, tx.Commit(ctx)
 }
 
 // ListYTCommentCanary lists the canary set by task id.
@@ -253,54 +362,22 @@ func (s *Store) ListYTCommentCanary(ctx context.Context) ([]YTCommentCanary, err
 	return out, rows.Err()
 }
 
-// YTCommentConfig wires cfg for the comment worker of one YouTrack tenant: its
-// ledger and its admission of each dispatch.
+// YTCommentConfig wires cfg for the comment worker of one YouTrack tenant:
+// its ledger is YTCommentLedger(tenant), whose claim admits a dispatch in the
+// claim's own transaction. Mode off, a removal from the canary, or an op bound
+// to another tenant freezes sends without rejecting anything.
 func (s *Store) YTCommentConfig(tenant string, cfg ytwrite.Config) ytwrite.Config {
-	cfg.Ledger = s.YTWriteLedger()
-	cfg.Admit = func(ctx context.Context, op ytwrite.Op) error {
-		task, err := strconv.ParseInt(op.EntityID, 10, 64)
-		if op.EntityKind != "task" || err != nil {
-			return fmt.Errorf("op %d is not on a task lane", op.ID)
-		}
-		ok, err := s.YTCommentAdmitted(ctx, task, op.YTTargetID, tenant)
-		if err != nil {
-			return err
-		}
-		if !ok {
-			return fmt.Errorf("task %d is not enrolled with issue %s on %s", task, op.YTTargetID, tenant)
-		}
-		return nil
-	}
+	cfg.Ledger = s.YTCommentLedger(tenant)
 	return cfg
 }
 
-// YTCommentEchoOp reports whether op opID is a comment hk wrote to issueID.
+// YTCommentEchoOp reports whether op opID is a comment_append op hk wrote (or
+// is writing) to the YouTrack issue issueID: the ownership evidence the
+// activity pull needs before it drops a comment as hk's own echo.
 func (s *Store) YTCommentEchoOp(ctx context.Context, opID int64, issueID string) (bool, error) {
-	return false, nil
-}
-
-// YTProjection is what a comment answer says about its YouTrack copy.
-type YTProjection struct {
-	Status string `json:"status"`
-	OpID   int64  `json:"op_id,omitempty"`
-	Reason string `json:"reason,omitempty"`
-}
-
-// CreatedTaskComment is a created comment with its YouTrack projection.
-type CreatedTaskComment struct {
-	TaskComment
-	YouTrackProjection *YTProjection `json:"youtrack_projection,omitempty"`
-}
-
-// YTCommentAdmitted reports whether the worker may send an op for a task to
-// this issue on this tenant: the gate is on and the task is still enrolled
-// with that binding. Mode off or a removal freezes sends without rejecting.
-func (s *Store) YTCommentAdmitted(ctx context.Context, taskID int64, issueID, tenant string) (bool, error) {
-	if !s.ytCommentsCanary.Load() {
-		return false, nil
-	}
 	var ok bool
-	err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM yt_comment_canary WHERE task_id=$1 AND issue_id=$2 AND tenant=$3)`, taskID, issueID, tenant).Scan(&ok)
+	err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM yt_write_ops o JOIN yt_comment_write_links w ON w.op_id = o.id
+		WHERE o.id=$1 AND o.kind=$2 AND o.yt_target_id=$3)`, opID, ytwrite.KindCommentAppend, issueID).Scan(&ok)
 	return ok, err
 }
 

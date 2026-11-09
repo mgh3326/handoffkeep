@@ -61,6 +61,10 @@ type Store interface {
 	UnpushedYouTrackComments(ctx context.Context, taskID, afterID int64, limit int) ([]store.TaskComment, error)
 	LinkYouTrackComment(ctx context.Context, taskID, hkCommentID int64, youtrackCommentID string, at time.Time) error
 	FindYouTrackCommentLinkByYouTrackID(ctx context.Context, youtrackCommentID string) (store.YouTrackCommentLink, bool, error)
+	// YTCommentEchoOp reports whether op opID is a comment the write
+	// protocol wrote to issueID (slice b1a): the activity pull's ownership
+	// evidence for an echo.
+	YTCommentEchoOp(ctx context.Context, opID int64, issueID string) (bool, error)
 
 	GetYouTrackCursor(ctx context.Context) (store.YouTrackCursor, error)
 	AdvanceYouTrackCursor(ctx context.Context, cursor string) error

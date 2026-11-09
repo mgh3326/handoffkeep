@@ -64,6 +64,13 @@ func TestYTIsTheYouTrackCommand(t *testing.T) {
 	}
 }
 
+// A call in flight at shutdown plus its settlement fits serve's stop budget.
+func TestYTCommentsStopFitsServeBudget(t *testing.T) {
+	if ytCommentsDispatchTimeout+ytCommentsSettleTimeout >= workerStopBudget {
+		t.Fatalf("dispatch %v + settle %v is not under the %v stop budget", ytCommentsDispatchTimeout, ytCommentsSettleTimeout, workerStopBudget)
+	}
+}
+
 // ytStopRemote is the fake YouTrack behind a worker that is being stopped:
 // after the POST commits, afterPost runs before the reply returns.
 type ytStopRemote struct {

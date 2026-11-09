@@ -108,8 +108,9 @@ const (
 	// rejected in the same transaction, before anything is sent.
 	ReasonInvalidComment = "invalid_comment"
 	ReasonAmbiguousIssue = "ambiguous_issue"
-	// ReasonHeld: Admit refused the dispatch (canary removed, mode off,
-	// another tenant); the op stays prepared and nothing is sent.
+	// ReasonHeld: the ledger's claim refused the dispatch (ClaimHeld:
+	// canary removed, mode off, another tenant); the op stays prepared and
+	// nothing is sent.
 	ReasonHeld = "held"
 )
 
@@ -148,7 +149,9 @@ type Op struct {
 	EntityKind string
 	EntityID   string
 	YTTargetID string
-	// Tenant is the YouTrack host the op writes to.
+	// Tenant is the YouTrack host the op was bound to when it was prepared.
+	// It is part of the write's identity (PayloadSHA): only a dispatcher
+	// configured for that tenant sends or searches for it.
 	Tenant string
 	Actor  string
 	// ParentID and ChildSeq record a parent/child plan (0 = none). The schema
@@ -207,6 +210,10 @@ const (
 	ClaimNotPrepared ClaimOutcome = "not_prepared"
 	ClaimNotDue      ClaimOutcome = "not_due"
 	ClaimBlocked     ClaimOutcome = "blocked"
+	// ClaimHeld: the ledger does not admit the dispatch now (for the comment
+	// canary: the task left the canary, the mode is off, or the op is bound
+	// to another tenant). Nothing is sent and the op stays prepared.
+	ClaimHeld ClaimOutcome = "held"
 )
 
 // Ledger is the durable op log. Every method is one atomic step; a method that
@@ -223,7 +230,10 @@ type Ledger interface {
 	// ByID returns an op by id for the protocol's own recovery paths.
 	ByID(ctx context.Context, id int64) (Op, error)
 	// Claim starts a dispatch: prepared -> dispatched, attempts+1, only when
-	// the op is due and every earlier op on its entity is resolved.
+	// the op is due, the ledger admits it (else ClaimHeld) and every earlier op
+	// on its entity is resolved. Admission is decided in the claim's own
+	// atomic step, so a change that revokes it either precedes the claim and
+	// holds the op or follows a committed claim.
 	Claim(ctx context.Context, now time.Time, id int64) (Op, ClaimOutcome, error)
 	// Apply records the confirmed effect and commits maps in the same
 	// transaction. From dispatched or remote_unknown. Applying an applied op
@@ -245,8 +255,10 @@ type Ledger interface {
 	TouchUnknown(ctx context.Context, now time.Time, id int64, next time.Time, reason, detail string) (Op, error)
 	// Due lists prepared and remote_unknown ops whose NextAttemptAt <= now,
 	// ascending id. A prepared op queued behind an unresolved earlier op on its
-	// entity is not listed (it cannot be claimed yet, and listing it would let a
-	// long blocked queue crowd out ops that can run).
+	// entity, or one Claim would hold, is not listed (it cannot be claimed now,
+	// and listing it would let a long blocked or held queue crowd out ops that
+	// can run). A remote_unknown op is listed unless it is bound to a tenant the
+	// ledger does not serve; the evidence search is read-only.
 	Due(ctx context.Context, now time.Time, limit int) ([]Op, error)
 	// Stale lists dispatched ops whose dispatch began at or before cutoff,
 	// ascending id.

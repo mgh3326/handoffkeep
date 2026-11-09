@@ -10,9 +10,11 @@ import (
 )
 
 // CreateTaskComment appends a comment authored by the authenticated client.
-// It is data only: no task state, priority, event, or lane event changes.
-func (s Service) CreateTaskComment(ctx context.Context, client string, taskID int64, body string) (store.TaskComment, error) {
-	return s.Store.CreateTaskComment(ctx, taskID, client, body)
+// It is data only: no task state, priority, event, or lane event changes. The
+// answer adds the comment's YouTrack projection (youtrack_projection) to the
+// comment's keys.
+func (s Service) CreateTaskComment(ctx context.Context, client string, taskID int64, body string) (store.CreatedTaskComment, error) {
+	return s.Store.CreateTaskCommentProjected(ctx, taskID, client, body)
 }
 func (s Service) ListTaskComments(ctx context.Context, taskID, afterID int64, limit int) ([]store.TaskComment, error) {
 	return s.Store.ListTaskComments(ctx, taskID, afterID, limit)
