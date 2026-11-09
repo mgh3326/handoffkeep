@@ -543,8 +543,11 @@ id order (limit default 100, max 500). Errors are distinct: 401
 404 `not_found` (no such task), 400 `secret_like_content`.
 
 With `HANDOFFKEEP_YT_COMMENTS_MODE=canary`, a comment on a task in the comment
-canary also gets a copy on its YouTrack issue through the write protocol; the
-answers above do not change. `GET /v1/yt/ops?state=&task=&after_id=&limit=`
+canary also gets a copy on its YouTrack issue through the write protocol. The
+201 answer (and the CLI's `tasks comment` output) keeps its keys and adds
+`youtrack_projection`: `{"status": "none"}` when no copy is made, else the op
+id and `pending` or `rejected` (with a reason code); it never says the copy
+exists. `GET /v1/yt/ops?state=&task=&after_id=&limit=`
 (`handoffkeep youtrack ops`, alias `yt ops`) lists those writes; see
 `docs/youtrack-write-protocol.md`.
 

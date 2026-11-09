@@ -77,7 +77,9 @@ handoffkeep youtrack projects put handoffkeep HK
 
 코멘트 카나리(hk 3739)는 같은 매핑을 쓴다. `handoffkeep youtrack canary
 add <작업>`은 `<shortName>-<작업 번호>` 이슈를 읽어 확인한 뒤 등록하고,
-`handoffkeep youtrack ops`(별칭 `yt ops`)는 쓰기 작업 상태를 보여 준다. 자세한
+`handoffkeep youtrack ops`(별칭 `yt ops`)는 쓰기 작업 상태를 보여 준다. 쓰기
+작업은 만들어질 때의 테넌트에 묶이므로 작업을 다른 테넌트로 다시 등록해도 이전
+작업이 그쪽으로 가지 않는다. 확인과 등록 사이에 매핑이 바뀌면 등록이 거절된다. 자세한
 규칙은 `docs/youtrack-write-protocol.md`. 레거시 미러 푸시는 쓰기 프로토콜이
 소유한 코멘트를 다시 올리지 않는다.
 
