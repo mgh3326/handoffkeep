@@ -3763,7 +3763,7 @@ func (s *Store) PutDocument(ctx context.Context, x Document) (Document, bool, er
 	defer tx.Rollback(ctx)
 	// applyDeployRecordTx locks the listed tasks: the task-mutation lock comes
 	// before the document row (lock order, lockorder.go).
-	if IsDeployRecordKey(x.Key) {
+	if strings.HasPrefix(x.Key, "deploy/") {
 		if _, e = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); e != nil {
 			return x, false, e
 		}
@@ -3783,8 +3783,12 @@ func (s *Store) PutDocument(ctx context.Context, x Document) (Document, bool, er
 	if e != nil {
 		return x, true, e
 	}
-	if IsDeployRecordKey(x.Key) {
-		if e = s.applyDeployRecordTx(ctx, tx, x.Key, x.Body, now); e != nil {
+	if strings.HasPrefix(x.Key, "deploy/") {
+		projection := parseStoredDeployRecord(x.Key, x.SHA256, x.Body, x.CreatedAt)
+		if e = writeDeployProjection(ctx, tx, projection); e != nil {
+			return x, true, e
+		}
+		if e = s.applyDeployRecordTx(ctx, tx, projection, now); e != nil {
 			return x, true, e
 		}
 	}

@@ -191,12 +191,12 @@ func (h *Handler) deployServiceView(r *http.Request, svc store.DeployService, ev
 		cursor := ""
 		prefixCount := 0
 		for {
-			var docs []store.Document
+			var docs []store.StoredDeployRecord
 			var err error
 			if cursor == "" {
-				docs, err = h.store.ListDocumentsByPrefix(r.Context(), prefix, deployDocsPerSvc+1)
+				docs, err = h.store.ListDeployRecords(r.Context(), prefix, "", deployDocsPerSvc+1)
 			} else {
-				docs, err = h.store.ListDocumentsByPrefixBefore(r.Context(), prefix, cursor, deployDocsPerSvc+1)
+				docs, err = h.store.ListDeployRecords(r.Context(), prefix, cursor, deployDocsPerSvc+1)
 			}
 			if err != nil {
 				return view, err
@@ -211,12 +211,12 @@ func (h *Handler) deployServiceView(r *http.Request, svc store.DeployService, ev
 				}
 				seen[doc.Key] = true
 				view.RecordCount++
-				rec, deployedAt, reasons := store.ClassifyDeployRecord(doc.Key, service, doc.Body)
+				rec, deployedAt, reasons := doc.Classify(service)
 				if len(reasons) > 0 {
 					alias := strings.TrimSuffix(prefix, "/")
 					alias = alias[strings.LastIndex(alias, "/")+1:]
 					if alias != service {
-						rec, deployedAt, reasons = store.ClassifyDeployRecord(doc.Key, alias, doc.Body)
+						rec, deployedAt, reasons = doc.Classify(alias)
 					}
 				}
 				if len(reasons) > 0 {
