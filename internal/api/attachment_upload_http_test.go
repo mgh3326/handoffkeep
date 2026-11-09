@@ -43,8 +43,8 @@ func (o *uploadObjects) Get(_ context.Context, k string) (io.ReadCloser, error) 
 func (o *uploadObjects) Presign(context.Context, string, time.Duration) (string, error) {
 	return "https://objects.invalid/get", nil
 }
-func (o *uploadObjects) PresignPut(_ context.Context, k string, _ time.Duration) (string, error) {
-	return "https://objects.invalid/put/" + k, nil
+func (o *uploadObjects) PresignPut(_ context.Context, k string, _ time.Duration, _ int64) (string, error) {
+	return "https://objects.invalid/put/" + k + "?X-Amz-Signature=test", nil
 }
 func (o *uploadObjects) Head(_ context.Context, k string) (attachments.ObjectInfo, error) {
 	b, ok := o.objects[k]
@@ -161,7 +161,7 @@ func TestDirectUploadRoutesBeginCompleteAndRefuse(t *testing.T) {
 
 	objs.objects["incoming/"+id] = body
 	status, done := uploadCall(t, h, http.MethodPost, "/v1/attachments/uploads/"+id+"/complete", "node-token", map[string]any{})
-	if status != http.StatusOK || done["created"] != true || done["url"] != "/v1/attachments/"+sha {
+	if status != http.StatusOK || done["created"] != true || done["reference"] != "hk:attachment/"+sha || done["lookup_path"] != "/v1/attachments/"+sha || done["url"] != nil {
 		t.Fatalf("complete status=%d body=%v", status, done)
 	}
 	if _, staged := objs.objects["incoming/"+id]; staged {
@@ -183,6 +183,16 @@ func TestDirectUploadRoutesBeginCompleteAndRefuse(t *testing.T) {
 	status, refused := uploadCall(t, h, http.MethodPost, "/v1/attachments/uploads/"+id2+"/complete", "node-token", map[string]any{})
 	if status != http.StatusUnprocessableEntity || refused["error"] != "attachment_upload_refused" || refused["reason"] != "upload_sha256_mismatch" {
 		t.Fatalf("refused status=%d body=%v", status, refused)
+	}
+	// Only the begin answer may carry the presigned URL; no completion or refusal
+	// answer may.
+	for name, body := range map[string]map[string]any{"complete": done, "refusal": refused} {
+		if raw, _ := json.Marshal(body); strings.Contains(string(raw), "X-Amz-Signature") {
+			t.Fatalf("%s answer carries a signed URL: %s", name, raw)
+		}
+	}
+	if raw, _ := json.Marshal(tk); !strings.Contains(string(raw), "X-Amz-Signature") {
+		t.Fatalf("begin answer lost its URL: %s", raw)
 	}
 
 	if status, body := uploadCall(t, h, http.MethodPost, "/v1/attachments/uploads/"+strings.Repeat("0", 32)+"/complete", "node-token", map[string]any{}); status != http.StatusNotFound || body["error"] != "attachment_upload_not_found" {

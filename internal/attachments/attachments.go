@@ -122,8 +122,10 @@ type ObjectStore interface {
 	Put(context.Context, string, io.Reader, int64, string) error
 	Get(context.Context, string) (io.ReadCloser, error)
 	Presign(context.Context, string, time.Duration) (string, error)
-	// PresignPut returns a URL that accepts one PUT of the object key.
-	PresignPut(context.Context, string, time.Duration) (string, error)
+	// PresignPut returns a URL that accepts one PUT of the object key with
+	// exactly size bytes: the Content-Length is part of the signature where the
+	// store honours signed headers.
+	PresignPut(context.Context, string, time.Duration, int64) (string, error)
 	Head(context.Context, string) (ObjectInfo, error)
 	Delete(context.Context, string) error
 	List(context.Context, string) ([]ObjectInfo, error)
@@ -156,8 +158,13 @@ func (m minioStore) Presign(ctx context.Context, key string, ttl time.Duration) 
 	u, e := m.client.PresignedGetObject(ctx, m.bucket, key, ttl, url.Values{})
 	return u.String(), e
 }
-func (m minioStore) PresignPut(ctx context.Context, key string, ttl time.Duration) (string, error) {
-	u, e := m.client.PresignedPutObject(ctx, m.bucket, key, ttl)
+func (m minioStore) PresignPut(ctx context.Context, key string, ttl time.Duration, size int64) (string, error) {
+	// Content-Length is signed (SigV4 SignedHeaders), so the URL accepts one
+	// body of exactly size bytes; a PUT of any other length fails signature
+	// validation on stores that check signed headers.
+	h := http.Header{}
+	h.Set("Content-Length", strconv.FormatInt(size, 10))
+	u, e := m.client.PresignHeader(ctx, http.MethodPut, m.bucket, key, ttl, nil, h)
 	if e != nil {
 		return "", e
 	}

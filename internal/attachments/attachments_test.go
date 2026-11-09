@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,14 +15,20 @@ import (
 )
 
 type fakeObjects struct {
+	mu          sync.Mutex
 	puts, stats int
 	fail        bool
 	objects     map[string][]byte
 	// modified overrides a key's last-modified time; unset keys count as now.
 	modified map[string]time.Time
+	// beforePut, when set, runs before each Put stores its object. A test uses
+	// it to overwrite the staging object between verify and promote.
+	beforePut func(key string)
 }
 
 func (f *fakeObjects) Stat(_ context.Context, k string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.stats++
 	if _, ok := f.objects[k]; ok {
 		return nil
@@ -29,15 +36,25 @@ func (f *fakeObjects) Stat(_ context.Context, k string) error {
 	return errors.New("missing")
 }
 func (f *fakeObjects) Put(_ context.Context, k string, r io.Reader, _ int64, _ string) error {
+	f.mu.Lock()
 	f.puts++
-	if f.fail {
+	fail, hook := f.fail, f.beforePut
+	f.mu.Unlock()
+	if fail {
 		return errors.New("down")
 	}
+	if hook != nil {
+		hook(k)
+	}
 	b, _ := io.ReadAll(r)
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.objects[k] = b
 	return nil
 }
 func (f *fakeObjects) Get(_ context.Context, k string) (io.ReadCloser, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	b, ok := f.objects[k]
 	if !ok {
 		return nil, errors.New("missing")
@@ -47,10 +64,12 @@ func (f *fakeObjects) Get(_ context.Context, k string) (io.ReadCloser, error) {
 func (f *fakeObjects) Presign(context.Context, string, time.Duration) (string, error) {
 	return "https://fake.invalid", nil
 }
-func (f *fakeObjects) PresignPut(_ context.Context, k string, _ time.Duration) (string, error) {
+func (f *fakeObjects) PresignPut(_ context.Context, k string, _ time.Duration, _ int64) (string, error) {
 	return "https://fake.invalid/put/" + k + "?sig=test", nil
 }
 func (f *fakeObjects) Head(_ context.Context, k string) (ObjectInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	b, ok := f.objects[k]
 	if !ok {
 		return ObjectInfo{}, errors.New("missing")
@@ -58,10 +77,14 @@ func (f *fakeObjects) Head(_ context.Context, k string) (ObjectInfo, error) {
 	return ObjectInfo{Key: k, Size: int64(len(b)), Modified: f.modifiedAt(k)}, nil
 }
 func (f *fakeObjects) Delete(_ context.Context, k string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	delete(f.objects, k)
 	return nil
 }
 func (f *fakeObjects) List(_ context.Context, prefix string) ([]ObjectInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	var out []ObjectInfo
 	for k, b := range f.objects {
 		if strings.HasPrefix(k, prefix) {
@@ -78,6 +101,7 @@ func (f *fakeObjects) modifiedAt(k string) time.Time {
 }
 
 type fakeDB struct {
+	mu      sync.Mutex
 	rows    map[string]store.Attachment
 	puts    int
 	capErr  error
@@ -86,6 +110,8 @@ type fakeDB struct {
 }
 
 func (f *fakeDB) CreateAttachmentUpload(_ context.Context, u store.AttachmentUpload) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.uploads == nil {
 		f.uploads = map[string]store.AttachmentUpload{}
 	}
@@ -93,10 +119,14 @@ func (f *fakeDB) CreateAttachmentUpload(_ context.Context, u store.AttachmentUpl
 	return nil
 }
 func (f *fakeDB) GetAttachmentUpload(_ context.Context, id string) (store.AttachmentUpload, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	u, ok := f.uploads[id]
 	return u, ok, nil
 }
 func (f *fakeDB) TransitionAttachmentUpload(_ context.Context, id, from, to, reason string, now time.Time) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	u, ok := f.uploads[id]
 	if !ok || u.Status != from {
 		return false, nil
@@ -107,6 +137,8 @@ func (f *fakeDB) TransitionAttachmentUpload(_ context.Context, id, from, to, rea
 }
 
 func (f *fakeDB) GetAttachment(_ context.Context, sha string) (store.Attachment, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.hideGet {
 		return store.Attachment{}, false, nil
 	}
@@ -114,6 +146,8 @@ func (f *fakeDB) GetAttachment(_ context.Context, sha string) (store.Attachment,
 	return x, ok, nil
 }
 func (f *fakeDB) PutAttachment(_ context.Context, x store.Attachment, _, _ int64) (store.Attachment, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.puts++
 	if _, ok := f.rows[x.SHA256]; ok {
 		return f.rows[x.SHA256], false, nil

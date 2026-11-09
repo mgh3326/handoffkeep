@@ -19,7 +19,7 @@ import (
 // Fake object-store and metadata methods for the direct-upload tools. They sit
 // beside the fakes in attachment_put_test.go so the manager runs over them.
 
-func (m *memObjects) PresignPut(_ context.Context, k string, _ time.Duration) (string, error) {
+func (m *memObjects) PresignPut(_ context.Context, k string, _ time.Duration, _ int64) (string, error) {
 	return "https://objects.invalid/put/" + k + "?X-Amz-Signature=test", nil
 }
 func (m *memObjects) Head(_ context.Context, k string) (attachments.ObjectInfo, error) {

@@ -2599,7 +2599,8 @@ func (s Server) attachmentUploadComplete(w http.ResponseWriter, r *http.Request)
 		appErr(w, r, e)
 		return
 	}
-	jsonOut(w, http.StatusOK, map[string]any{"attachment": x, "created": created, "url": "/v1/attachments/" + x.SHA256})
+	// The answer carries the stable reference only, never a signed URL.
+	jsonOut(w, http.StatusOK, map[string]any{"attachment": x, "created": created, "reference": "hk:attachment/" + x.SHA256, "lookup_path": "/v1/attachments/" + x.SHA256})
 }
 func (s Server) attachments(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.auth(w, r); !ok {

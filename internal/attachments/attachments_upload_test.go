@@ -4,8 +4,12 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"log"
+	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -218,5 +222,215 @@ func TestSweepDeletesOnlyOldStaging(t *testing.T) {
 	}
 	if _, ok := objs.objects[key(shaOf([]byte("kept")))]; !ok {
 		t.Fatal("content object was swept")
+	}
+}
+
+// The client's PUT can land on the staging object at any time before it is
+// deleted, so the test overwrites it in the window between hk's verify and its
+// promotion. The stored object must still hold the verified bytes.
+func TestOverwriteBetweenVerifyAndPromoteDoesNotChangeTheStoredObject(t *testing.T) {
+	m, _, objs := newUploadManager(t)
+	verified := []byte("verified bytes of the handoff\n")
+	tk := begin(t, m, "node", "v.txt", "text/plain", verified, "")
+	clientPUT(objs, tk, verified)
+	staging := stagingPrefix + tk.UploadID
+	forged := bytes.Repeat([]byte("x"), len(verified))
+	overwrote := false
+	objs.beforePut = func(k string) {
+		if strings.HasPrefix(k, "hk/") && !overwrote {
+			overwrote = true
+			objs.mu.Lock()
+			objs.objects[staging] = forged
+			objs.mu.Unlock()
+		}
+	}
+	x, created, err := m.CompleteUpload(t.Context(), "node", tk.UploadID)
+	if err != nil || !created {
+		t.Fatalf("complete created=%v err=%v", created, err)
+	}
+	if !overwrote {
+		t.Fatal("the overwrite never happened between verify and promote; the race was not exercised")
+	}
+	objs.mu.Lock()
+	stored := objs.objects[key(x.SHA256)]
+	objs.mu.Unlock()
+	if !bytes.Equal(stored, verified) || shaOf(stored) != x.SHA256 {
+		t.Fatalf("promoted object holds %q, not the verified bytes", stored)
+	}
+}
+
+// Concurrent completions of one upload id register exactly one attachment; the
+// losers get attachment_upload_in_progress, and a later retry gets the stored one.
+func TestConcurrentCompletesRegisterOneAttachment(t *testing.T) {
+	m, db, objs := newUploadManager(t)
+	body := []byte("concurrent completion\n")
+	tk := begin(t, m, "node", "c.txt", "text/plain", body, "")
+	clientPUT(objs, tk, body)
+	type result struct {
+		x       store.Attachment
+		created bool
+		err     error
+	}
+	const n = 8
+	results := make(chan result, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			x, created, err := m.CompleteUpload(t.Context(), "node", tk.UploadID)
+			results <- result{x, created, err}
+		}()
+	}
+	wg.Wait()
+	close(results)
+	created := 0
+	for r := range results {
+		if r.err != nil {
+			if !errors.Is(r.err, ErrUploadInProgress) {
+				t.Fatalf("concurrent complete err=%v", r.err)
+			}
+			continue
+		}
+		if r.x.SHA256 != shaOf(body) {
+			t.Fatalf("concurrent complete returned sha %s", r.x.SHA256)
+		}
+		if r.created {
+			created++
+		}
+	}
+	if created != 1 {
+		t.Fatalf("%d completions reported created; want exactly 1", created)
+	}
+	db.mu.Lock()
+	rows := len(db.rows)
+	db.mu.Unlock()
+	if rows != 1 {
+		t.Fatalf("attachment rows=%d; want 1", rows)
+	}
+	if _, again, err := m.CompleteUpload(t.Context(), "node", tk.UploadID); err != nil || again {
+		t.Fatalf("retry after the race created=%v err=%v", again, err)
+	}
+}
+
+// A signed URL is a secret for one object. It must appear only in the begin
+// response: not in logs, errors, the upload rows, or the completed attachment.
+func TestSignedURLsStayInTheBeginResponse(t *testing.T) {
+	var logs bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&logs)
+	defer log.SetOutput(prev)
+
+	m, db, objs := newUploadManager(t)
+	body := []byte("secret-free handoff\n")
+	tk := begin(t, m, "node", "s.txt", "text/plain", body, "")
+	secret := tk.URL
+	if !strings.Contains(secret, "sig=test") {
+		t.Fatalf("begin response has no signed URL to protect: %q", secret)
+	}
+
+	var seen []string
+	clientPUT(objs, tk, body)
+	x, _, err := m.CompleteUpload(t.Context(), "node", tk.UploadID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen = append(seen, mustJSON(t, x))
+
+	bad := begin(t, m, "node", "bad.txt", "text/plain", body, "")
+	objs.mu.Lock()
+	objs.objects[stagingPrefix+bad.UploadID] = bytes.Repeat([]byte("y"), len(body))
+	objs.mu.Unlock()
+	_, _, refusal := m.CompleteUpload(t.Context(), "node", bad.UploadID)
+	if refusal == nil {
+		t.Fatal("mismatched bytes were accepted")
+	}
+	seen = append(seen, refusal.Error())
+	seen = append(seen, logs.String())
+	db.mu.Lock()
+	for _, u := range db.uploads {
+		seen = append(seen, mustJSON(t, u))
+	}
+	for _, a := range db.rows {
+		seen = append(seen, mustJSON(t, a))
+	}
+	db.mu.Unlock()
+	for i, text := range seen {
+		if strings.Contains(text, secret) || strings.Contains(text, "sig=test") {
+			t.Fatalf("signed URL leaked into output %d: %q", i, text)
+		}
+	}
+}
+
+func mustJSON(t *testing.T, v any) string {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// The staging delete after a refusal is best effort; a leftover refused object
+// is removed by the sweep once it is old.
+func TestSweepRemovesLeftoverStagingOfRefusedUpload(t *testing.T) {
+	m, _, objs := newUploadManager(t)
+	body := []byte("declared text\n")
+	tk := begin(t, m, "node", "r.txt", "text/plain", body, "")
+	clientPUT(objs, tk, bytes.Repeat([]byte("z"), len(body)))
+	if _, _, err := m.CompleteUpload(t.Context(), "node", tk.UploadID); !errors.Is(err, ErrUploadRefused) {
+		t.Fatalf("mismatch err=%v", err)
+	}
+	staging := stagingPrefix + tk.UploadID
+	objs.mu.Lock()
+	objs.objects[staging] = bytes.Repeat([]byte("z"), len(body))
+	objs.modified[staging] = time.Now().UTC().Add(-3 * time.Hour)
+	objs.mu.Unlock()
+	deleted, err := m.SweepStaging(t.Context())
+	if err != nil || deleted != 1 {
+		t.Fatalf("sweep deleted=%d err=%v", deleted, err)
+	}
+	objs.mu.Lock()
+	_, left := objs.objects[staging]
+	objs.mu.Unlock()
+	if left {
+		t.Fatal("refused staging object survived the sweep")
+	}
+}
+
+// The server's cap is enforced at completion too, not only where begin checked
+// the declaration: a cap lowered after begin refuses the staged object.
+func TestCompleteEnforcesTheCapAtCompletion(t *testing.T) {
+	m, db, objs := newUploadManager(t)
+	body := bytes.Repeat([]byte("c"), 20)
+	tk := begin(t, m, "node", "big.txt", "text/plain", body, "")
+	clientPUT(objs, tk, body)
+	m.Config.MaxBytes = 10
+	_, _, err := m.CompleteUpload(t.Context(), "node", tk.UploadID)
+	if !errors.Is(err, ErrUploadRefused) || !strings.Contains(err.Error(), "upload_too_large") {
+		t.Fatalf("over-cap completion err=%v", err)
+	}
+	if db.uploads[tk.UploadID].Status != store.AttachmentUploadRefused {
+		t.Fatalf("status=%q", db.uploads[tk.UploadID].Status)
+	}
+}
+
+// The presigned PUT signs the declared Content-Length, so the URL accepts one
+// body of exactly that size where the store checks signed headers.
+func TestPresignedPutPinsContentLength(t *testing.T) {
+	obj, err := NewR2(Config{Endpoint: "https://example.r2.cloudflarestorage.com", Bucket: "bkt", AccessKey: "AK", SecretKey: "SK"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, err := obj.PresignPut(t.Context(), "incoming/abc", time.Minute, 1234)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := url.Parse(u)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if signed := parsed.Query().Get("X-Amz-SignedHeaders"); !strings.Contains(signed, "content-length") {
+		t.Fatalf("SignedHeaders=%q; the declared length is not pinned", signed)
 	}
 }

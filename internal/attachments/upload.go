@@ -84,7 +84,7 @@ func (m *Manager) BeginUpload(ctx context.Context, client, name, mime string, si
 		return UploadTicket{}, err
 	}
 	key := stagingPrefix + uid
-	u, err := m.Objects.PresignPut(ctx, key, UploadTTL)
+	u, err := m.Objects.PresignPut(ctx, key, UploadTTL, size)
 	if err != nil {
 		return UploadTicket{}, fmt.Errorf("%w: %v", ErrR2, err)
 	}
@@ -166,9 +166,20 @@ func (m *Manager) completeClaimed(ctx context.Context, row store.AttachmentUploa
 	if err != nil {
 		return release(err)
 	}
+	// The server's cap is checked here, not only at begin: the config may have
+	// changed since, and the staged object is whatever the client PUT.
+	if head.Size > m.Config.MaxBytes {
+		return refuse("upload_too_large")
+	}
 	if head.Size != row.SizeBytes {
 		return refuse("upload_size_mismatch")
 	}
+	// Promotion choice: the content-addressed object is written from the bytes
+	// read and verified below, never by copying or re-reading the staging
+	// object. A presigned PUT can be reused until it expires, so the staging
+	// object may be overwritten after this read; the stored object cannot be,
+	// because it is the verified buffer. The staging object is deleted after
+	// promotion, and a leftover one is swept.
 	r, err := m.Objects.Get(ctx, row.StagingKey)
 	if err != nil {
 		return release(err)
