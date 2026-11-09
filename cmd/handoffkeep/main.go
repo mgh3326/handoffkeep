@@ -1973,6 +1973,10 @@ func serve(args []string, errout io.Writer) error {
 	if e != nil {
 		return e
 	}
+	importReadGrants, e := api.LoadImportReadGrants(auth, tokens)
+	if e != nil {
+		return e
+	}
 	hostGrants, e := api.LoadHostGrants(auth, tokens)
 	if e != nil {
 		return e
@@ -2017,7 +2021,7 @@ func serve(args []string, errout io.Writer) error {
 	if e != nil {
 		return e
 	}
-	handler := serverHandler(api.Server{Service: svc, Tokens: tokens, QuotaAccounts: quotaAccounts, HostGrants: hostGrants, UI: uiHandler, LinearWebhook: linear.webhook, LinearDecisions: linear.decisions, ClientRevisions: api.NewClientRevisions()}, monitor, mcpAccess)
+	handler := serverHandler(api.Server{Service: svc, Tokens: tokens, QuotaAccounts: quotaAccounts, ImportReadGrants: importReadGrants, HostGrants: hostGrants, UI: uiHandler, LinearWebhook: linear.webhook, LinearDecisions: linear.decisions, ClientRevisions: api.NewClientRevisions()}, monitor, mcpAccess)
 	addresses := []string{*listen}
 	if *tail != "" {
 		addresses = append(addresses, *tail)
