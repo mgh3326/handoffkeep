@@ -217,6 +217,31 @@ func youTrackFromEnv(st *store.Store) (*youtrack.Service, error) {
 	return youtrack.NewService(st, client, youtrackServiceOptions()), nil
 }
 
+// serveYouTrack is what serve wires from the YouTrack configuration.
+type serveYouTrack struct {
+	// readThrough backs api.Service.YouTrack and the console; nil disables it.
+	readThrough *youtrack.Service
+	// searchBackend is api.Service.SearchBackend.
+	searchBackend string
+	// comments is the b1a comment worker (yt_comments.go); nil when its mode
+	// is off.
+	comments backgroundWorker
+}
+
+// serveYouTrackFromEnv builds serve's YouTrack pieces from the environment.
+func serveYouTrackFromEnv(st *store.Store) (serveYouTrack, error) {
+	readThrough, err := youTrackFromEnv(st)
+	if err != nil {
+		return serveYouTrack{}, err
+	}
+	searchBackend := searchBackendFromEnv()
+	comments, err := ytCommentsWorkerFromEnv(st)
+	if err != nil {
+		return serveYouTrack{}, err
+	}
+	return serveYouTrack{readThrough: readThrough, searchBackend: searchBackend, comments: comments}, nil
+}
+
 // youtrackProjectsCmd keeps the hk ↔ YouTrack project mapping. put resolves
 // the short name to the project id once and stores both; list reads PG only.
 func youtrackProjectsCmd(args []string, out io.Writer) error {
