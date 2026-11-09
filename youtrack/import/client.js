@@ -263,10 +263,6 @@ class HandoffkeepImport {
       {id: 'hk-decision-due', name: FIELD.due, type: 'date'},
       {id: 'hk-linked-task-id', name: FIELD.linkedTask, type: 'integer'}
     );
-    if (info.id !== DECISIONS_PROJECT_ID) fields.push(
-      {id: 'hk-doc-key', name: FIELD.docKey, type: 'string'},
-      {id: 'hk-doc-prefix', name: FIELD.docPrefix, type: 'enum'}
-    );
     return {id: info.id, key: info.key, name: info.name, type: 'DEFAULT', fields: fields};
   }
 
@@ -404,7 +400,10 @@ class HandoffkeepImport {
     const pieces = splitUtf8(content, SAFE_PART_BYTES);
     const base = {project: {id: project.id, key: project.key, name: project.name}, author: sourceUser(doc.created_by), created: safeDate(doc.created_at), updated: safeDate(doc.updated_at)};
     const title = truncateRunes('[' + prefix + '] ' + doc.key + ' [' + doc.kind + ']', 250);
-    const docFields = {[FIELD.hkID]: integerValue(doc.id), [FIELD.docKey]: stringValue(doc.key), [FIELD.docPrefix]: enumValue(prefix)};
+    // YouTrack articles take no custom fields ("The hk ID field is not valid for this article", 2026-11-09
+    // test import). The hk identity lives in the summary (full key) and the article id/key (hk-doc:<id>:<part>);
+    // the prefix is a tag for filtering.
+    const docFields = {tags: [{id: 'hk-tag:doc:' + prefix, name: 'hk/doc/' + prefix}]};
     if (pieces.length === 1) return {id: 'hk-doc:' + doc.id + ':0', key: 'hk-doc:' + doc.id + ':0', fields: Object.assign({}, base, docFields, {summary: title, content: content})};
     const indexID = 'hk-doc:' + doc.id;
     const index = {id: indexID + ':0', key: indexID + ':0', fields: Object.assign({}, base, {
