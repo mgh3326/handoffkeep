@@ -32,7 +32,14 @@ function integerValue(value) { return value === null || value === undefined ? nu
 function sourceProject(name) { return name || 'Unassigned'; }
 function projectID(name) { return 'hk-project:' + name; }
 function parseProject(info) { return String(info.id).slice('hk-project:'.length); }
-function safeDate(value) { return value || undefined; }
+// YouTrack parses the fraction with Java's SSS..., which counts milliseconds: "…:11.392663Z" became
+// +392663 ms (6.5 minutes late) in the 2026-11-09 test import. Send exactly millisecond precision.
+function safeDate(value) {
+  if (!value) return undefined;
+  const t = Date.parse(value);
+  if (Number.isNaN(t)) throw new Error('Invalid source timestamp ' + value);
+  return new Date(t).toISOString();
+}
 // YouTrack parses an article key as a number (the 4th test import failed with 'For input string:
 // "doc:62245:0"'). The whole document or its index keeps the hk document id; part n of a split
 // document uses 900000000 + id*10 + n, which never collides with a document id (parts are at most 9).
@@ -198,12 +205,7 @@ class HandoffkeepImport {
   }
   rememberUser(name) { if (name) this.usersByName[name] = sourceUser(name); }
   getTimestampFormats() {
-    return [
-      "yyyy-MM-dd'T'HH:mm:ss.SSSSSS'Z'", "yyyy-MM-dd'T'HH:mm:ss.SSSSS'Z'",
-      "yyyy-MM-dd'T'HH:mm:ss.SSSS'Z'", "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'",
-      "yyyy-MM-dd'T'HH:mm:ss.SS'Z'", "yyyy-MM-dd'T'HH:mm:ss.S'Z'",
-      "yyyy-MM-dd'T'HH:mm:ss'Z'"
-    ];
+    return ["yyyy-MM-dd'T'HH:mm:ss.SSS'Z'"];
   }
   getUserTimeZoneId() { return 'UTC'; }
   getServerInfo() { return {version: 'handoffkeep /v1/import', time: new Date().toISOString()}; }
@@ -361,7 +363,7 @@ class HandoffkeepImport {
         [FIELD.hkID]: integerValue(d.id), [FIELD.decisionID]: integerValue(d.id),
         [FIELD.linkedTask]: integerValue(d.task_id),
         [FIELD.decisionState]: enumValue(state), [FIELD.lane]: enumValue(d.lane),
-        [FIELD.recommended]: stringValue(d.recommended), [FIELD.due]: d.due_at ? {type: 'date', value: String(d.due_at)} : null
+        [FIELD.recommended]: stringValue(d.recommended), [FIELD.due]: d.due_at ? {type: 'date', value: safeDate(d.due_at)} : null
       }};
     }).slice(0, top || 100);
   }
@@ -375,9 +377,10 @@ class HandoffkeepImport {
     if (info.id === DECISIONS_PROJECT_ID) return [];
     const project = parseProject(info);
     const targetProject = this.projectTargets[project] || {id: projectID(project), key: project, name: project};
-    const query = {project: project, limit: Math.min(Math.max(top || 100, 1), 20)};
+    const pageTop = top || 100;
     let cursor = 0;
     let resumePart = 0;
+    let afterID = null;
     if (after) {
       const match = afterText(after).match(/^hk-doc:(\d+):(\d+)$/);
       if (!match) throw new Error('Invalid document cursor');
@@ -385,21 +388,32 @@ class HandoffkeepImport {
       resumePart = Number(match[2]) + 1;
       // Re-read the current source document when the prior import page ended
       // between its index and content parts.
-      query.after_id = String(cursor - 1);
+      afterID = cursor - 1;
     }
-    const docs = this.onePage('documents', query);
+    // YouTrack treats a page shorter than `top` as the end (the 2026-11-09 test import stopped at
+    // 20 articles of 100), while hk serves at most 20 documents per page: fill the page from as many
+    // hk pages as needed.
     const out = [];
-    (docs || []).forEach((doc) => {
-      const documentLimit = this.maxDocuments || (this.testProject ? 100 : 0);
-      if (documentLimit && !this.seenDocumentIDs[doc.id] && Object.keys(this.seenDocumentIDs).length >= documentLimit) return;
-      this.seenDocumentIDs[doc.id] = true;
-      let articles = this.documentArticles(doc, targetProject);
-      if (!Array.isArray(articles)) articles = [articles];
-      if (after && resumePart > 0 && doc.id === cursor) articles = articles.slice(resumePart);
-      articles.forEach((article) => { if (out.length < (top || 100)) out.push(article); });
-      resumePart = 0;
-    });
-    return out;
+    const documentLimit = this.maxDocuments || (this.testProject ? 100 : 0);
+    for (;;) {
+      const query = {project: project, limit: 20};
+      if (afterID !== null) query.after_id = afterID;
+      const docs = this.onePage('documents', query) || [];
+      for (const doc of docs) {
+        if (documentLimit && !this.seenDocumentIDs[doc.id] && Object.keys(this.seenDocumentIDs).length >= documentLimit) return out;
+        this.seenDocumentIDs[doc.id] = true;
+        let articles = this.documentArticles(doc, targetProject);
+        if (!Array.isArray(articles)) articles = [articles];
+        if (resumePart > 0 && doc.id === cursor) articles = articles.slice(resumePart);
+        resumePart = 0;
+        for (const article of articles) {
+          if (out.length >= pageTop) return out;
+          out.push(article);
+        }
+      }
+      if (docs.length < 20 || out.length >= pageTop) return out;
+      afterID = docs[docs.length - 1].id;
+    }
   }
   documentArticles(doc, project) {
     this.rememberUser(doc.created_by);
