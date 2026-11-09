@@ -200,7 +200,7 @@ func (c *Client) ProjectID(ctx context.Context, name string) (string, error) {
 	q.Set("fields", "id,shortName,name,$type")
 	q.Set("$top", "100")
 	var projects []ProjectRef
-	if err := c.get(ctx, "/api/projects", q, &projects); err != nil {
+	if err := c.get(ctx, "/api/admin/projects", q, &projects); err != nil {
 		return "", err
 	}
 	for _, p := range projects {
