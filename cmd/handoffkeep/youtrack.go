@@ -197,18 +197,43 @@ func youtrackAdoptCmd(args []string, out io.Writer) error {
 	return nil
 }
 
-// youTrackFromEnv builds the read/write-through service the server uses.
-// Incomplete configuration disables the feature rather than failing startup,
-// following uiFromEnv and linearFromEnv.
+// ytReadthroughModeFromEnv reads HANDOFFKEEP_YT_READTHROUGH_MODE: unset or
+// "off" (the default) or "on", trimmed and case-sensitive like
+// HANDOFFKEEP_YT_COMMENTS_MODE. Any other value is an error, so a typo fails
+// closed instead of guessing a mode.
+func ytReadthroughModeFromEnv() (bool, error) {
+	switch raw := strings.TrimSpace(os.Getenv("HANDOFFKEEP_YT_READTHROUGH_MODE")); raw {
+	case "", "off":
+		return false, nil
+	case "on":
+		return true, nil
+	default:
+		return false, fmt.Errorf("HANDOFFKEEP_YT_READTHROUGH_MODE=%q: want off or on", raw)
+	}
+}
+
+// youTrackFromEnv builds serve's legacy read/write-through service: the
+// priority/lane overlay and cache seeding, YouTrack search, and the lane and
+// priority export enqueue. It is on only with HANDOFFKEEP_YT_READTHROUGH_MODE=on
+// (hk 3762): YOUTRACK_URL and YOUTRACK_BOT_API_KEY alone no longer turn it on,
+// because the b1a comment worker needs them too and reads them itself. Off
+// builds no client, so it never validates the URL; on without both keys is a
+// startup error. Sync and pull build their own service and ignore the mode.
 func youTrackFromEnv(st *store.Store) (*youtrack.Service, error) {
+	on, err := ytReadthroughModeFromEnv()
+	if err != nil {
+		return nil, err
+	}
 	baseURL := strings.TrimSpace(os.Getenv("YOUTRACK_URL"))
 	token := strings.TrimSpace(os.Getenv("YOUTRACK_BOT_API_KEY"))
-	if baseURL == "" && token == "" {
+	if !on {
+		if baseURL != "" || token != "" {
+			log.Printf("youtrack.readthrough disabled reason=mode_off")
+		}
 		return nil, nil
 	}
 	if baseURL == "" || token == "" {
-		log.Printf("youtrack.disabled reason=incomplete_config")
-		return nil, nil
+		return nil, errors.New("HANDOFFKEEP_YT_READTHROUGH_MODE=on needs YOUTRACK_URL and YOUTRACK_BOT_API_KEY")
 	}
 	client, err := youtrack.New(youtrack.Config{BaseURL: baseURL, Token: token})
 	if err != nil {
@@ -229,12 +254,20 @@ type serveYouTrack struct {
 }
 
 // serveYouTrackFromEnv builds serve's YouTrack pieces from the environment.
+// The search selector never turns read-through on: YouTrack search needs both
+// HANDOFFKEEP_YT_READTHROUGH_MODE=on and HANDOFFKEEP_SEARCH_BACKEND=youtrack.
+// The comment worker reads its own credentials and never depends on
+// read-through.
 func serveYouTrackFromEnv(st *store.Store) (serveYouTrack, error) {
 	readThrough, err := youTrackFromEnv(st)
 	if err != nil {
 		return serveYouTrack{}, err
 	}
 	searchBackend := searchBackendFromEnv()
+	if searchBackend == "youtrack" && readThrough == nil {
+		log.Printf("search.backend youtrack ignored reason=readthrough_off")
+		searchBackend = ""
+	}
 	comments, err := ytCommentsWorkerFromEnv(st)
 	if err != nil {
 		return serveYouTrack{}, err
