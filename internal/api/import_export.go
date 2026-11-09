@@ -78,7 +78,11 @@ func (s Server) importExport(w http.ResponseWriter, r *http.Request) {
 		var project *string
 		if q.Has("project") {
 			p := q.Get("project")
-			if p == "__unassigned__" {
+			if p == "" {
+				writeError(w, http.StatusBadRequest, "invalid_context")
+				return
+			}
+			if p == "/unassigned" {
 				p = ""
 			}
 			project = &p
@@ -121,7 +125,7 @@ func (s Server) importExport(w http.ResponseWriter, r *http.Request) {
 		}
 		jsonOut(w, http.StatusOK, map[string]any{"items": rows, "next_cursor": next})
 	case "documents":
-		if q.Has("after_at") || q.Has("after") || !q.Has("project") {
+		if q.Has("after_at") || q.Has("after") || !q.Has("project") || q.Get("project") == "" {
 			writeError(w, http.StatusBadRequest, "invalid_context")
 			return
 		}
@@ -148,7 +152,7 @@ func (s Server) importExport(w http.ResponseWriter, r *http.Request) {
 		}
 		jsonOut(w, http.StatusOK, map[string]any{"items": rows, "next_cursor": next})
 	case "document-authors":
-		if q.Has("after_at") || q.Has("after") || !q.Has("project") {
+		if q.Has("after_at") || q.Has("after") || !q.Has("project") || q.Get("project") == "" {
 			writeError(w, http.StatusBadRequest, "invalid_context")
 			return
 		}

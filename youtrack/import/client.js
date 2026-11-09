@@ -18,6 +18,7 @@ const DECISION_STATE = {open: '열림', answered: '답변됨', superseded: '대�
 const PREFIXES = ['ack','advice','advice-request','briefs','decision','design','experiment','handoff',
   'note','other','policy','reference','report','research','review','runbook','task'];
 const SAFE_PART_BYTES = 240 * 1024;
+const DECISIONS_PROJECT_ID = 'hk-project:/decisions';
 
 function sourceUser(name) {
   const value = name || 'unknown';
@@ -64,7 +65,9 @@ class HandoffkeepImport {
     this.accessClientID = p.loadValue('login');
     // Import configuration has one password field. Store a JSON object there
     // with hkToken and accessClientSecret so neither credential is in the URL.
-    const secrets = JSON.parse(p.loadValue('password') || '{}');
+    let secrets;
+    try { secrets = JSON.parse(p.loadValue('password') || '{}'); }
+    catch (_) { throw new Error('Import password must be a JSON object with hkToken and accessClientSecret'); }
     this.hkToken = secrets.hkToken;
     this.accessClientSecret = secrets.accessClientSecret;
     if (!this.baseURL.startsWith('https://') || !this.accessClientID || !this.hkToken || !this.accessClientSecret) {
@@ -125,7 +128,7 @@ class HandoffkeepImport {
     this.pages('decisions', {limit: 999}, 'after_id').forEach((d) => this.rememberUser(d.answered_by || d.lane));
     this.projects = this.testProject ? [this.testSourceProject] : this.pages('projects', {limit: 100}, 'after');
     let documentCount = 0;
-    const documentProjects = this.projects.concat(['Shared', 'Unassigned']);
+    const documentProjects = this.projects.concat(['/shared', '/unassigned']);
     for (const project of documentProjects) {
       let after = null;
       while (!this.maxDocuments || documentCount < this.maxDocuments) {
@@ -141,22 +144,31 @@ class HandoffkeepImport {
     }
   }
   rememberUser(name) { if (name) this.usersByName[name] = sourceUser(name); }
-  getTimestampFormats() { return ["yyyy-MM-dd'T'HH:mm:ss.SSSSSS'Z'", "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", "yyyy-MM-dd'T'HH:mm:ss'Z'"]; }
+  getTimestampFormats() {
+    return [
+      "yyyy-MM-dd'T'HH:mm:ss.SSSSSS'Z'", "yyyy-MM-dd'T'HH:mm:ss.SSSSS'Z'",
+      "yyyy-MM-dd'T'HH:mm:ss.SSSS'Z'", "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'",
+      "yyyy-MM-dd'T'HH:mm:ss.SS'Z'", "yyyy-MM-dd'T'HH:mm:ss.S'Z'",
+      "yyyy-MM-dd'T'HH:mm:ss'Z'"
+    ];
+  }
   getUserTimeZoneId() { return 'UTC'; }
   getServerInfo() { return {version: 'handoffkeep /v1/import', time: new Date().toISOString()}; }
 
   getProjects() {
     if (this.testProject) {
-      const testInfo = {id: projectID(this.testSourceProject), key: this.testProject, name: this.testProject};
-      this.projectTargets[this.testSourceProject] = testInfo;
+      const testInfo = this.testSourceProject === 'DEC'
+        ? {id: DECISIONS_PROJECT_ID, key: this.testProject, name: this.testProject}
+        : {id: projectID(this.testSourceProject), key: this.testProject, name: this.testProject};
+      if (this.testSourceProject !== 'DEC') this.projectTargets[this.testSourceProject] = testInfo;
       return [testInfo];
     }
     const names = this.projects.slice();
-    names.push('Shared', 'Unassigned');
     names.sort();
     const seen = Object.create(null);
-    const result = names.map((name) => {
-      let key = name === 'Unassigned' ? 'HK' : name === 'Shared' ? 'SHARED' : name.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 10);
+    const result = [];
+    const addProject = (id, name, label, keyBase) => {
+      let key = keyBase || name.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 10);
       if (!key) key = 'HK';
       const base = key;
       let suffix = 1;
@@ -166,13 +178,14 @@ class HandoffkeepImport {
         key = base.slice(0, 10 - tail.length) + tail;
       }
       seen[key] = true;
-      const info = {id: projectID(name), key: key, name: name === 'Unassigned' ? 'Unassigned hk tasks' : name};
-      this.projectTargets[name] = info;
+      const info = {id: id, key: key, name: label};
+      result.push(info);
       return info;
-    });
-    const decisions = {id: 'hk-project:DEC', key: 'DEC', name: 'Decisions'};
-    this.projectTargets.DEC = decisions;
-    result.push(decisions);
+    };
+    names.forEach((name) => { this.projectTargets[name] = addProject(projectID(name), name, name); });
+    this.projectTargets['/shared'] = addProject('hk-project:/shared', 'shared', 'Shared documents', 'SHRDOC');
+    this.projectTargets['/unassigned'] = addProject('hk-project:/unassigned', 'unassigned', 'Unassigned hk tasks', 'HK');
+    addProject(DECISIONS_PROJECT_ID, 'decisions', 'Decisions', 'DEC');
     return result;
   }
 
@@ -193,14 +206,14 @@ class HandoffkeepImport {
   }
   getProject(info) {
     const fields = this.fieldsForProject();
-    if (info.id === 'hk-project:DEC') fields.push(
+    if (info.id === DECISIONS_PROJECT_ID) fields.push(
       {id: 'hk-decision-id', name: FIELD.decisionID, type: 'integer'},
       {id: 'hk-decision-state', name: FIELD.decisionState, type: 'enum'},
       {id: 'hk-recommended', name: FIELD.recommended, type: 'string'},
       {id: 'hk-decision-due', name: FIELD.due, type: 'date'},
       {id: 'hk-linked-task-id', name: FIELD.linkedTask, type: 'integer'}
     );
-    if (info.id !== 'hk-project:DEC') fields.push(
+    if (info.id !== DECISIONS_PROJECT_ID) fields.push(
       {id: 'hk-doc-key', name: FIELD.docKey, type: 'string'},
       {id: 'hk-doc-prefix', name: FIELD.docPrefix, type: 'enum'}
     );
@@ -208,8 +221,9 @@ class HandoffkeepImport {
   }
 
   issue(task) {
-    const project = sourceProject(task.project);
-    const targetProject = this.projectTargets[project] || {id: projectID(project), key: project, name: project};
+    const project = task.project || '';
+    const projectLabel = sourceProject(project);
+    const targetProject = project ? this.projectTargets[project] : this.projectTargets['/unassigned'];
     this.rememberUser(task.created_by);
     const comments = (this.commentsByTask[task.id] || []).map((c) => {
       this.rememberUser(c.author);
@@ -233,7 +247,7 @@ class HandoffkeepImport {
       project: {id: targetProject.id, key: targetProject.key, name: targetProject.name},
       comments: comments,
       tags: this.taskTags(task),
-      [FIELD.hkID]: integerValue(task.id), [FIELD.project]: stringValue(project),
+      [FIELD.hkID]: integerValue(task.id), [FIELD.project]: stringValue(projectLabel),
       [FIELD.state]: task.state ? {type: 'state', name: STATE[task.state] || task.state} : null,
       [FIELD.priority]: integerValue(task.priority), [FIELD.lane]: enumValue(task.lane),
       [FIELD.kind]: enumValue(task.kind), [FIELD.grade]: enumValue(grade),
@@ -255,12 +269,12 @@ class HandoffkeepImport {
     return tags;
   }
   getIssues(info, after, top) {
-    if (info.id === 'hk-project:DEC') return this.decisionIssues(after, top, info);
+    if (info.id === DECISIONS_PROJECT_ID) return this.decisionIssues(after, top, info);
     const name = parseProject(info);
     const seen = Object.keys(this.seenTaskIDs).length;
     if (this.maxTasks && seen >= this.maxTasks) return [];
     const pageLimit = Math.min(Math.max(top || 100, 1), 999, this.maxTasks ? this.maxTasks - seen : 999);
-    const query = {project: name === 'Unassigned' ? '__unassigned__' : name, limit: pageLimit};
+    const query = {project: name === '/unassigned' ? '/unassigned' : name, limit: pageLimit};
     if (after) query.after_id = String(cursorID(after, 'hk-task:'));
     const out = [];
     this.onePage('tasks', query).forEach((task) => {
@@ -297,10 +311,10 @@ class HandoffkeepImport {
   }
 
   getArticles(info, after, top) {
-    const project = info.id === 'hk-project:Unassigned' ? 'Unassigned' : parseProject(info);
-    if (project === 'DEC') return [];
+    if (info.id === DECISIONS_PROJECT_ID) return [];
+    const project = parseProject(info);
     const targetProject = this.projectTargets[project] || {id: projectID(project), key: project, name: project};
-    const query = {project: project === 'Unassigned' ? 'Unassigned' : project, limit: Math.min(Math.max(top || 100, 1), 20)};
+    const query = {project: project, limit: Math.min(Math.max(top || 100, 1), 20)};
     let cursor = 0;
     let resumePart = 0;
     if (after) {

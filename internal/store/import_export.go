@@ -35,7 +35,7 @@ func (s *Store) ImportDocumentsPage(ctx context.Context, project string, afterID
 	if !validText(project, 128) || afterID < 0 || limit < 1 || limit > 1000 {
 		return nil, errors.New("invalid import cursor")
 	}
-	rows, err := s.pool.Query(ctx, `SELECT d.id,d.key,d.kind,d.session,d.job,d.body,d.sha256,d.created_by,d.created_at,d.updated_at,d.task_id,COALESCE(d.origin_class,'') FROM documents d LEFT JOIN tasks t ON t.id=d.task_id WHERE d.id>$1 AND ($2='' OR ($2='Shared' AND d.task_id IS NULL) OR ($2='Unassigned' AND d.task_id IS NOT NULL AND t.project IS NULL) OR t.project=$2) ORDER BY d.id ASC LIMIT $3`, afterID, project, limit)
+	rows, err := s.pool.Query(ctx, `SELECT d.id,d.key,d.kind,d.session,d.job,d.body,d.sha256,d.created_by,d.created_at,d.updated_at,d.task_id,COALESCE(d.origin_class,'') FROM documents d LEFT JOIN tasks t ON t.id=d.task_id WHERE d.id>$1 AND (($2='/shared' AND d.task_id IS NULL) OR ($2='/unassigned' AND d.task_id IS NOT NULL AND t.project IS NULL) OR ($2 NOT IN ('/shared','/unassigned') AND t.project=$2)) ORDER BY d.id ASC LIMIT $3`, afterID, project, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -58,7 +58,7 @@ func (s *Store) ImportDocumentAuthorsPage(ctx context.Context, project string, a
 	if !validText(project, 128) || afterID < 0 || limit < 1 || limit > 1000 {
 		return nil, errors.New("invalid import cursor")
 	}
-	rows, err := s.pool.Query(ctx, `SELECT d.id,d.created_by FROM documents d LEFT JOIN tasks t ON t.id=d.task_id WHERE d.id>$1 AND ($2='' OR ($2='Shared' AND d.task_id IS NULL) OR ($2='Unassigned' AND d.task_id IS NOT NULL AND t.project IS NULL) OR t.project=$2) ORDER BY d.id ASC LIMIT $3`, afterID, project, limit)
+	rows, err := s.pool.Query(ctx, `SELECT d.id,d.created_by FROM documents d LEFT JOIN tasks t ON t.id=d.task_id WHERE d.id>$1 AND (($2='/shared' AND d.task_id IS NULL) OR ($2='/unassigned' AND d.task_id IS NOT NULL AND t.project IS NULL) OR ($2 NOT IN ('/shared','/unassigned') AND t.project=$2)) ORDER BY d.id ASC LIMIT $3`, afterID, project, limit)
 	if err != nil {
 		return nil, err
 	}
