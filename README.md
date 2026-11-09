@@ -549,7 +549,8 @@ canary also gets a copy on its YouTrack issue through the write protocol. The
 id and `pending` or `rejected` (with a reason code); it never says the copy
 exists. `GET /v1/yt/ops?state=&task=&after_id=&limit=`
 (`handoffkeep youtrack ops`, alias `yt ops`) lists those writes; see
-`docs/youtrack-write-protocol.md`.
+`docs/youtrack-write-protocol.md`. The canary does not turn on serve's YouTrack
+read-through, which has its own `HANDOFFKEEP_YT_READTHROUGH_MODE` (`docs/youtrack.md`).
 
 ## Documents and search
 

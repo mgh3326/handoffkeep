@@ -47,9 +47,11 @@ type Config struct {
 	// SSEHeartbeat is how often /ui/events writes a comment line to an idle
 	// stream; zero means 25 seconds.
 	SSEHeartbeat time.Duration
-	// YouTrack overlays YouTrack-owned priority and lane on linked tasks and
-	// writes those changes through YouTrack first. Nil keeps the console
-	// exactly as it was.
+	// YouTrack is serve's legacy read-through service (api.Service.YouTrack):
+	// it overlays the cached YouTrack priority and lane on linked tasks and
+	// queues priority and lane changes for export after the PG write. serve
+	// sets it only with HANDOFFKEEP_YT_READTHROUGH_MODE=on. Nil keeps the
+	// console exactly as it was.
 	YouTrack *youtrack.Service
 }
 

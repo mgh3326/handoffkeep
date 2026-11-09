@@ -2040,22 +2040,19 @@ func serve(args []string, errout io.Writer) error {
 	if e != nil {
 		return e
 	}
-	youTrack, e := youTrackFromEnv(st)
+	yt, e := serveYouTrackFromEnv(st)
 	if e != nil {
 		return e
 	}
-	svc := api.Service{Store: st, Attachments: am, YouTrack: youTrack, SearchBackend: searchBackendFromEnv()}
+	youTrack := yt.readThrough
+	svc := api.Service{Store: st, Attachments: am, YouTrack: youTrack, SearchBackend: yt.searchBackend}
 	workers := []backgroundWorker{chatRetentionWorker{store: st}, placementRetentionWorker{store: st}, syncRetentionWorker{store: st, retention: retention}}
 	if *iceboxDays > 0 {
 		workers = append(workers, backlogSweepWorker{store: st, days: *iceboxDays})
 	}
 	workers = append(workers, lastActivityRepairWorker{store: st})
-	ytComments, e := ytCommentsWorkerFromEnv(st)
-	if e != nil {
-		return e
-	}
-	if ytComments != nil {
-		workers = append(workers, ytComments)
+	if yt.comments != nil {
+		workers = append(workers, yt.comments)
 	}
 	if am != nil && am.Enabled {
 		workers = append(workers, attachmentStagingSweepWorker{am: am})

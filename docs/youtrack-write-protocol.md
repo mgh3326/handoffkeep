@@ -174,6 +174,10 @@ Listings request `id,text,created,updated,deleted`.
 **Gate.** `HANDOFFKEEP_YT_COMMENTS_MODE` = unset or `off` (default) or `canary`.
 Any other value, and `canary` without `YOUTRACK_URL` and `YOUTRACK_BOT_API_KEY`,
 stops `serve` at startup (fail closed). `off` needs no YouTrack configuration.
+`canary` needs the two keys but does not turn on serve's legacy read-through
+(the priority/lane overlay, YouTrack search and the lane/priority outbox):
+that has its own gate, `HANDOFFKEEP_YT_READTHROUGH_MODE` (default `off`,
+`docs/youtrack.md`), and the worker reads the keys itself.
 
 **Enrollment** (`handoffkeep youtrack canary add <task> [--by NAME]`, direct DB
 like `youtrack projects`; also `remove <task>` and `list`). `add` reads the
