@@ -135,7 +135,7 @@ func (f *fakeYouTrack) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		write(http.StatusOK, f.me)
-	case path == "/api/projects":
+	case path == "/api/admin/projects":
 		projects := make([]ProjectRef, 0, len(f.projectIDs))
 		for short, id := range f.projectIDs {
 			projects = append(projects, ProjectRef{ID: id, ShortName: short, Name: short})
