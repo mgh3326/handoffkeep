@@ -32,9 +32,15 @@ function projectID(name) { return 'hk-project:' + name; }
 function parseProject(info) { return String(info.id).slice('hk-project:'.length); }
 function safeDate(value) { return value || undefined; }
 function truncateRunes(value, max) { return Array.from(String(value || '')).slice(0, max).join(''); }
+// YouTrack passes the last imported document as `after`: an object with id/key, or its id string.
+function afterText(after) {
+  if (!after) return '';
+  if (typeof after === 'object') return String(after.id || after.key || '');
+  return String(after);
+}
 function cursorID(after, prefix) {
   if (!after) return 0;
-  const text = String(after);
+  const text = afterText(after);
   const value = text.startsWith(prefix) ? text.slice(prefix.length) : text;
   const id = Number(value);
   if (!Number.isSafeInteger(id) || id < 0) throw new Error('Invalid source cursor');
@@ -159,6 +165,10 @@ class HandoffkeepImport {
       this.pages('decisions', {limit: 999}, 'after_id').forEach((d) => this.rememberUser(d.answered_by || d.lane));
     }
     this.projects = this.testProject ? (this.testSourceProject === 'DEC' ? [] : [this.testSourceProject]) : this.pages('projects', {limit: 100}, 'after');
+    // YouTrack runs the import in a fresh script context: getProjects() from the wizard is not
+    // called again, so the project targets issue() and the article mapping read must be rebuilt here.
+    this.projectTargets = Object.create(null);
+    this.getProjects();
     let documentCount = 0;
     const documentLimit = this.testProject ? (this.maxDocuments || 100) : this.maxDocuments;
     const documentProjects = this.testProject ? this.projects : this.projects.concat(['/shared', '/unassigned']);
@@ -262,6 +272,7 @@ class HandoffkeepImport {
     const project = task.project || '';
     const projectLabel = sourceProject(project);
     const targetProject = project ? this.projectTargets[project] : this.projectTargets['/unassigned'];
+    if (!targetProject) throw new Error('No YouTrack target project for hk project ' + (project || '/unassigned'));
     this.rememberUser(task.created_by);
     const comments = (this.commentsByTask[task.id] || []).map((c) => {
       this.rememberUser(c.author);
@@ -362,7 +373,7 @@ class HandoffkeepImport {
     let cursor = 0;
     let resumePart = 0;
     if (after) {
-      const match = String(after).match(/^hk-doc:(\d+):(\d+)$/);
+      const match = afterText(after).match(/^hk-doc:(\d+):(\d+)$/);
       if (!match) throw new Error('Invalid document cursor');
       cursor = Number(match[1]);
       resumePart = Number(match[2]) + 1;
