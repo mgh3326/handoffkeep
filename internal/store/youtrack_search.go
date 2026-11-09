@@ -27,20 +27,22 @@ func (s *Store) DocumentKeyExists(ctx context.Context, key string) (bool, error)
 	return ok, nil
 }
 
-// YouTrackTaskHits maps YouTrack issue ids to the hk tasks they mirror, keyed
-// by issue id. An issue with no task_origins row is absent, so the caller
-// drops that hit. A non-empty lane keeps only tasks in that lane (the session
-// filter). Title and Snippet are left empty: YouTrack's own text fills them.
-// When two tasks mirror one issue the lower task id wins.
-func (s *Store) YouTrackTaskHits(ctx context.Context, issueIDs []string, lane string) (map[string]SearchResult, error) {
+// YouTrackTaskHits maps YouTrack issue ids to the hk tasks they mirror in one
+// tenant, keyed by issue id. task_origins is unique on (namespace, external_id),
+// and the namespace is the tenant, so a mapping left by another YouTrack tenant
+// never answers. An issue with no mapping in this tenant is absent, so the
+// caller drops that hit. A non-empty lane keeps only tasks in that lane (the
+// session filter). Title and Snippet are left empty: YouTrack's own text fills
+// them. When two tasks mirror one issue in this tenant the lower task id wins.
+func (s *Store) YouTrackTaskHits(ctx context.Context, tenant string, issueIDs []string, lane string) (map[string]SearchResult, error) {
 	out := map[string]SearchResult{}
 	if len(issueIDs) == 0 {
 		return out, nil
 	}
 	rows, err := s.pool.Query(ctx, `SELECT o.external_id,t.id::text,t.lane,t.kind,`+taskRefsExpr+` refs,t.created_at
 		FROM task_origins o JOIN tasks t ON t.id=o.task_id
-		WHERE o.provider='youtrack' AND o.external_id=ANY($1) AND ($2='' OR t.lane=$2)
-		ORDER BY o.external_id,t.id`, issueIDs, lane)
+		WHERE o.provider='youtrack' AND o.namespace=$2 AND o.external_id=ANY($1) AND ($3='' OR t.lane=$3)
+		ORDER BY o.external_id,t.id`, issueIDs, tenant, lane)
 	if err != nil {
 		return nil, fmt.Errorf("youtrack task hits: %w", err)
 	}

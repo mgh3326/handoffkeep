@@ -26,7 +26,7 @@ func TestYouTrackTaskHitsMapIssuesAndFilterByLane(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	hits, err := s.YouTrackTaskHits(ctx, []string{"9-1", "9-2", "9-404"}, "")
+	hits, err := s.YouTrackTaskHits(ctx, "tenant", []string{"9-1", "9-2", "9-404"}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,7 +37,27 @@ func TestYouTrackTaskHitsMapIssuesAndFilterByLane(t *testing.T) {
 		t.Fatalf("9-1 hit = %+v", x)
 	}
 
-	onlyB, err := s.YouTrackTaskHits(ctx, []string{"9-1", "9-2"}, laneB)
+	// A second tenant's mapping of the same issue id is a different row, and it
+	// answers only for that tenant.
+	tc := youtrackTask(t, s, laneA, "tenant-b task")
+	if _, err := s.UpsertYouTrackMirror(ctx, youtrackMirrorInput(tc.ID, "9-1", "HK-9", "tenant-b", "mirror", now)); err != nil {
+		t.Fatal(err)
+	}
+	mine, err := s.YouTrackTaskHits(ctx, "tenant", []string{"9-1"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mine["9-1"].Key != strconv.FormatInt(ta.ID, 10) {
+		t.Fatalf("tenant hit = %+v, want task %d", mine["9-1"], ta.ID)
+	}
+	theirs, err := s.YouTrackTaskHits(ctx, "tenant-b", []string{"9-1"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if theirs["9-1"].Key != strconv.FormatInt(tc.ID, 10) {
+		t.Fatalf("tenant-b hit = %+v, want task %d", theirs["9-1"], tc.ID)
+	}
+	onlyB, err := s.YouTrackTaskHits(ctx, "tenant", []string{"9-1", "9-2"}, laneB)
 	if err != nil {
 		t.Fatal(err)
 	}

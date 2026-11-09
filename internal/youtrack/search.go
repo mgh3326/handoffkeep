@@ -126,7 +126,7 @@ func (s *Service) Search(ctx context.Context, fallback SearchFallback, q, scope,
 	overflow := false
 	if wantTasks {
 		overflow = overflow || len(issues) > limit
-		hits, err := s.store.YouTrackTaskHits(ctx, issueIDs(issues), session)
+		hits, err := s.store.YouTrackTaskHits(ctx, s.tenant, issueIDs(issues), session)
 		if err != nil {
 			return nil, err
 		}

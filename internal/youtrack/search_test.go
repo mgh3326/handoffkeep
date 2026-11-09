@@ -27,20 +27,30 @@ func (f *fakeStore) DocumentKeyExists(_ context.Context, key string) (bool, erro
 	return ok, nil
 }
 
-func (f *fakeStore) YouTrackTaskHits(_ context.Context, issueIDs []string, lane string) (map[string]store.SearchResult, error) {
+func (f *fakeStore) YouTrackTaskHits(_ context.Context, tenant string, issueIDs []string, lane string) (map[string]store.SearchResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	out := map[string]store.SearchResult{}
 	for _, id := range issueIDs {
-		taskID, ok := f.issueOwner[id]
-		if !ok {
+		// Like the SQL: only mirrors in this tenant count, and the lower task id
+		// wins when two tasks mirror one issue.
+		best := int64(-1)
+		for taskID, m := range f.mirrors {
+			if m.IssueID != id || m.Tenant != tenant {
+				continue
+			}
+			if best == -1 || taskID < best {
+				best = taskID
+			}
+		}
+		if best == -1 {
 			continue
 		}
-		t, ok := f.tasks[taskID]
+		t, ok := f.tasks[best]
 		if !ok || (lane != "" && t.Lane != lane) {
 			continue
 		}
-		out[id] = store.SearchResult{Scope: "tasks", Key: strconv.FormatInt(taskID, 10), Session: t.Lane, Kind: t.Kind, CreatedAt: t.CreatedAt}
+		out[id] = store.SearchResult{Scope: "tasks", Key: strconv.FormatInt(best, 10), Session: t.Lane, Kind: t.Kind, CreatedAt: t.CreatedAt}
 	}
 	return out, nil
 }
@@ -146,7 +156,7 @@ func newSearchTest(t *testing.T, yt *fakeSearchYT, timeout time.Duration) (*fake
 	// The fake seeds projects in a map, so its listing order is random. Each
 	// test adds only the projects it needs, which keeps the query deterministic.
 	fs.projects = map[string]store.YouTrackProject{}
-	return fs, NewService(fs, client, Options{SearchTimeout: timeout})
+	return fs, NewService(fs, client, Options{Tenant: "tenant", SearchTimeout: timeout})
 }
 
 func captureLog(t *testing.T) *bytes.Buffer {
@@ -204,6 +214,31 @@ func TestSearchTasksMapsIssuesDropsUnmappedAndFiltersSession(t *testing.T) {
 	}
 	if keys := searchKeys(got); len(keys) != 1 || keys[0] != "tasks:"+strconv.FormatInt(t7.ID, 10) {
 		t.Fatalf("session filter keys = %v, want only task %d", keys, t7.ID)
+	}
+}
+
+func TestSearchIgnoresMappingsFromAnotherTenant(t *testing.T) {
+	yt := &fakeSearchYT{issues: []Issue{{ID: "2-7", Summary: "seven"}}}
+	fs, svc := newSearchTest(t, yt, time.Second)
+	ctx := context.Background()
+	if err := fs.PutYouTrackProject(ctx, store.YouTrackProject{HKProject: "handoffkeep", ShortName: "HK"}); err != nil {
+		t.Fatal(err)
+	}
+	// The older task holds a mapping from a previous YouTrack tenant. It has the
+	// lower id, so only the tenant filter keeps it from winning.
+	old := fs.addTask("handoffkeep", "operator-desk", "old tenant", "open", 1)
+	fs.mu.Lock()
+	fs.mirrors[old.ID] = store.YouTrackMirror{TaskID: old.ID, IssueID: "2-7", Tenant: "old-tenant"}
+	fs.mu.Unlock()
+	cur := fs.addTask("handoffkeep", "operator-desk", "current tenant", "open", 1)
+	fs.mirror(cur.ID, "2-7", "HK-7")
+
+	got, err := svc.Search(ctx, (&fallbackRecorder{}).search, "seven", "tasks", "", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if keys := searchKeys(got); len(keys) != 1 || keys[0] != "tasks:"+strconv.FormatInt(cur.ID, 10) {
+		t.Fatalf("keys = %v, want only the current-tenant task %d", keys, cur.ID)
 	}
 }
 

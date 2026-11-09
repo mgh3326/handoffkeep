@@ -75,7 +75,7 @@ type Store interface {
 	UpsertYouTrackDocArticle(ctx context.Context, x store.YouTrackDocArticle) error
 
 	DocumentKeyExists(ctx context.Context, key string) (bool, error)
-	YouTrackTaskHits(ctx context.Context, issueIDs []string, lane string) (map[string]store.SearchResult, error)
+	YouTrackTaskHits(ctx context.Context, tenant string, issueIDs []string, lane string) (map[string]store.SearchResult, error)
 	YouTrackDocHits(ctx context.Context, articleIDs []string, session string) (map[string]store.SearchResult, error)
 }
 
