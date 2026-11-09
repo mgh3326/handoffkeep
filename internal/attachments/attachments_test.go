@@ -124,7 +124,7 @@ func TestContentGuards(t *testing.T) {
 
 func TestDefaultAllowlistAcceptsAllDeclaredTypesAndRejectsDisguises(t *testing.T) {
 	allow := map[string]bool{}
-	for _, x := range strings.Split("image/png,image/jpeg,image/gif,text/html,text/plain,text/markdown,application/json,application/pdf,text/csv,application/x-ndjson,text/x-log", ",") {
+	for _, x := range strings.Split("image/png,image/jpeg,image/gif,image/webp,text/html,text/plain,text/markdown,application/json,application/pdf,text/csv,application/x-ndjson,text/x-log", ",") {
 		allow[x] = true
 	}
 	m := &Manager{Store: &fakeDB{rows: map[string]store.Attachment{}}, Objects: &fakeObjects{objects: map[string][]byte{}}, Enabled: true, Config: Config{MaxBytes: 1000, StorageCap: 10000, PutCap: 100, GetCap: 100, Allow: allow}}
@@ -134,6 +134,7 @@ func TestDefaultAllowlistAcceptsAllDeclaredTypesAndRejectsDisguises(t *testing.T
 		body       []byte
 	}{
 		{"x.png", "image/png", png}, {"x.jpg", "image/jpeg", []byte{0xff, 0xd8, 0xff, 0xe0, 0, 0, 0, 0, "J"[0], "F"[0], "I"[0], "F"[0]}}, {"x.gif", "image/gif", []byte("GIF89a")},
+		{"x.webp", "image/webp", []byte("RIFF\x24\x00\x00\x00WEBPVP8 ")},
 		{"x.html", "text/html", []byte("<html>ok</html>")}, {"x.txt", "text/plain", []byte("plain")}, {"x.md", "text/markdown", []byte("# heading")}, {"x.json", "application/json", []byte(`{"ok":true}`)}, {"x.pdf", "application/pdf", []byte("%PDF-1.4")}, {"x.csv", "text/csv", []byte("a,b\n1,2")}, {"x.ndjson", "application/x-ndjson", []byte("{\"a\":1}\n")}, {"x.log", "text/x-log", []byte("INFO ready")},
 	} {
 		if _, created, err := m.Put(t.Context(), "node", x.name, x.mime, "", x.body); err != nil || !created {
@@ -146,11 +147,14 @@ func TestDefaultAllowlistAcceptsAllDeclaredTypesAndRejectsDisguises(t *testing.T
 	if _, _, err := m.Put(t.Context(), "node", "fake.json", "application/json", "", png); !errors.Is(err, ErrMIME) {
 		t.Fatalf("json disguise=%v", err)
 	}
+	if _, _, err := m.Put(t.Context(), "node", "fake.webp", "image/webp", "", png); !errors.Is(err, ErrMIME) {
+		t.Fatalf("webp disguise=%v", err)
+	}
 }
 
 func TestTextDeclarationsRejectBinarySniffsAndNUL(t *testing.T) {
 	allow := map[string]bool{}
-	for _, x := range strings.Split("image/png,image/jpeg,image/gif,text/html,text/plain,text/markdown,application/json,application/pdf,text/csv,application/x-ndjson,text/x-log", ",") {
+	for _, x := range strings.Split("image/png,image/jpeg,image/gif,image/webp,text/html,text/plain,text/markdown,application/json,application/pdf,text/csv,application/x-ndjson,text/x-log", ",") {
 		allow[x] = true
 	}
 	m := &Manager{Store: &fakeDB{rows: map[string]store.Attachment{}}, Objects: &fakeObjects{objects: map[string][]byte{}}, Enabled: true, Config: Config{MaxBytes: 1000, StorageCap: 10000, PutCap: 100, GetCap: 100, Allow: allow}}
@@ -173,13 +177,18 @@ func TestTextDeclarationsRejectBinarySniffsAndNUL(t *testing.T) {
 }
 
 func TestParseRef(t *testing.T) {
-	for _, ref := range []string{"checkpoint:12", "document:jobs/a.md", "memory:agent/name", ""} {
+	for _, ref := range []string{"checkpoint:12", "document:jobs/a.md", "memory:agent/name", "task:12", ""} {
 		if _, _, err := ParseRef(ref); err != nil {
 			t.Fatalf("%s: %v", ref, err)
 		}
 	}
-	if _, _, err := ParseRef("bad:x"); err == nil {
-		t.Fatal("bad ref accepted")
+	if kind, id, err := ParseRef("task:12"); err != nil || kind != "task" || id != "12" {
+		t.Fatalf("task ref kind=%q id=%q err=%v", kind, id, err)
+	}
+	for _, bad := range []string{"bad:x", "task:", "task:0", "task:-3", "task:012", "task:12x", "task:1 2"} {
+		if _, _, err := ParseRef(bad); err == nil {
+			t.Fatalf("%q accepted", bad)
+		}
 	}
 }
 

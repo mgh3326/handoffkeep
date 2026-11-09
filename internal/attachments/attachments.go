@@ -30,6 +30,12 @@ const (
 	DefaultGetCap     int64 = 8000000
 )
 
+// DefaultMIMEAllow is the MIME allowlist used when HK_ATTACH_MIME_ALLOW is
+// unset. The remote MCP attachment_put tool states this set in its description,
+// so change both together. image/webp is sniffed by net/http as image/webp
+// (RIFF....WEBP), which the image rule requires to match the declared type.
+const DefaultMIMEAllow = "image/png,image/jpeg,image/gif,image/webp,text/html,text/plain,text/markdown,application/json,application/pdf,text/csv,application/x-ndjson,text/x-log"
+
 var (
 	ErrDisabled  = errors.New("attachments_disabled")
 	ErrTooLarge  = errors.New("attachment_too_large")
@@ -89,7 +95,7 @@ func ConfigFromEnv() (Config, bool, error) {
 	}
 	allow := os.Getenv("HK_ATTACH_MIME_ALLOW")
 	if allow == "" {
-		allow = "image/png,image/jpeg,image/gif,text/html,text/plain,text/markdown,application/json,application/pdf,text/csv,application/x-ndjson,text/x-log"
+		allow = DefaultMIMEAllow
 	}
 	c.Allow = map[string]bool{}
 	for _, x := range strings.Split(allow, ",") {
@@ -334,5 +340,11 @@ func ParseRef(ref string) (string, string, error) {
 	if v, ok := strings.CutPrefix(ref, "memory:"); ok {
 		return "memory", v, nil
 	}
-	return "", "", errors.New("ref must be checkpoint:<id>, document:<key>, or memory:<agent>/<name>")
+	if v, ok := strings.CutPrefix(ref, "task:"); ok {
+		if !store.ValidTaskRefID(v) {
+			return "", "", errors.New("task ref id must be a positive decimal task id, such as task:12")
+		}
+		return "task", v, nil
+	}
+	return "", "", errors.New("ref must be checkpoint:<id>, document:<key>, memory:<agent>/<name>, or task:<id>")
 }

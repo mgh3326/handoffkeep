@@ -3,12 +3,17 @@ package mcp
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 
 	"github.com/mgh3326/handoffkeep/internal/api"
+	"github.com/mgh3326/handoffkeep/internal/attachments"
 	"github.com/mgh3326/handoffkeep/internal/buildinfo"
 	"github.com/mgh3326/handoffkeep/internal/cfaccess"
 	"github.com/mgh3326/handoffkeep/internal/store"
@@ -28,6 +33,33 @@ type Backend interface {
 	PutAttachment(context.Context, string, string, string, string, []byte) (store.Attachment, bool, error)
 	ListAttachments(context.Context, string, int) ([]store.Attachment, error)
 	AttachmentURL(context.Context, string) (string, error)
+}
+
+// attachmentPutMaxRawBytes is the largest file attachment_put accepts before
+// base64 decoding: 10 MiB, the size dots asked to round-trip. Its base64 form
+// is attachmentPutMaxBase64 characters; a larger payload is refused by length.
+const attachmentPutMaxRawBytes = 10 << 20
+
+var attachmentPutMaxBase64 = base64.StdEncoding.EncodedLen(attachmentPutMaxRawBytes)
+
+// attachmentPutDescription states the allowed types from the same constant the
+// attachment manager reads, so the list cannot drift from the enforced one.
+var attachmentPutDescription = "Upload one attachment from base64 content; the remote-safe path, with no server file path. " +
+	"content_base64 is standard padded base64 of at most 10 MiB raw (" + strconv.Itoa(attachmentPutMaxBase64) + " base64 characters). " +
+	"name is the original file name; mime is optional and defaults to the sniffed type. " +
+	"Allowed types by default: " + strings.ReplaceAll(attachments.DefaultMIMEAllow, ",", ", ") + ". " +
+	"Text is refused when the secret guard matches it. " +
+	"ref is optional: checkpoint:<id>, document:<key>, memory:<agent>/<name>, task:<id>, or none. " +
+	"Returns sha256, size_bytes, mime, ref, reference (hk:attachment/<sha256>, the stable reference records store) " +
+	"and lookup_path (GET /v1/attachments/<sha256> with the bearer token). " +
+	"The signed download URL is never returned; attachment_get_url issues one valid for ten minutes."
+
+// attachmentRefString renders an attachment's ref the way ParseRef reads it.
+func attachmentRefString(x store.Attachment) string {
+	if x.RefKind == "" || x.RefKind == "none" {
+		return "none"
+	}
+	return x.RefKind + ":" + x.RefID
 }
 
 func New(service Backend, client string) *gmcp.Server {
@@ -169,6 +201,42 @@ func newServer(service Backend, client string, allowPathUpload bool) *gmcp.Serve
 			return nil, nil, e
 		}
 		return result(map[string]any{"url": v, "expires_in_seconds": 600})
+	})
+	gmcp.AddTool(s, &gmcp.Tool{Name: "attachment_put", Description: attachmentPutDescription}, func(ctx context.Context, _ *gmcp.CallToolRequest, x struct {
+		ContentBase64 string `json:"content_base64"`
+		Name          string `json:"name"`
+		MIME          string `json:"mime,omitempty"`
+		Ref           string `json:"ref,omitempty"`
+	}) (*gmcp.CallToolResult, any, error) {
+		// The base64 length is checked before decoding so an oversized payload
+		// is refused without allocating its decoded form.
+		if len(x.ContentBase64) > attachmentPutMaxBase64 {
+			return nil, nil, attachments.ErrTooLarge
+		}
+		body, e := base64.StdEncoding.DecodeString(x.ContentBase64)
+		if e != nil {
+			return nil, nil, errors.New("content_base64 must be standard base64 (RFC 4648, padded)")
+		}
+		// base64 length is quantized to 4 characters, so a payload one byte over
+		// the raw ceiling can share the encoded length of one at it; the raw
+		// size is checked here so the ceiling is exact.
+		if len(body) > attachmentPutMaxRawBytes {
+			return nil, nil, attachments.ErrTooLarge
+		}
+		v, created, e := service.PutAttachment(ctx, client, x.Name, x.MIME, x.Ref, body)
+		if e != nil {
+			return nil, nil, e
+		}
+		return result(map[string]any{
+			"attachment":  v,
+			"created":     created,
+			"sha256":      v.SHA256,
+			"size_bytes":  v.SizeBytes,
+			"mime":        v.MIME,
+			"ref":         attachmentRefString(v),
+			"reference":   "hk:attachment/" + v.SHA256,
+			"lookup_path": "/v1/attachments/" + v.SHA256,
+		})
 	})
 	if allowPathUpload {
 		gmcp.AddTool(s, &gmcp.Tool{Name: "attachment_put_from_path", Description: "stdio only: upload a local file as a private attachment."}, func(ctx context.Context, _ *gmcp.CallToolRequest, x struct {

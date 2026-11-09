@@ -663,8 +663,12 @@ handoffkeep r2usage --alert
 ```
 
 HTTP clients use raw `PUT /v1/attachments` with `X-HK-Name`, `Content-Type`,
-and optional `X-HK-Ref` (`checkpoint:<id>`, `document:<key>`, or
-`memory:<agent>/<name>`). `GET /v1/attachments/{sha}` streams through the
+and optional `X-HK-Ref` (`checkpoint:<id>`, `document:<key>`,
+`memory:<agent>/<name>`, or `task:<id>`). Remote MCP clients use the
+`attachment_put` tool instead: base64 `content_base64`, `name`, optional `mime`
+and `ref`, at most 10 MiB raw. It returns the `sha256`, `size_bytes`, `mime`,
+`ref`, a stable `reference` (`hk:attachment/<sha256>`) for records to store, and
+a `lookup_path`, never a signed URL. `GET /v1/attachments/{sha}` streams through the
 service; add `?presign=1` for a ten-minute private URL. `/v1/usage` and
 authenticated `/metrics` expose the local fuse counters. `/metrics` also
 reports, per authenticated client, the CLI revision from its last
