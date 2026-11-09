@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
 	"time"
@@ -427,21 +428,58 @@ func wrkError(err error) error {
 // used by the desk's schema step; its credential is never needed by runtime.
 func OpenRuntime(ctx context.Context, url string) (*Store, error) {
 	if !strings.HasPrefix(url, "postgres://") && !strings.HasPrefix(url, "postgresql://") {
-		return nil, wrkrecords.Error("wrk_unavailable")
+		return nil, fmt.Errorf("open wrk runtime: %w", errors.New("database URL must use postgres:// or postgresql://"))
 	}
 	p, e := newPool(ctx, url)
 	if e != nil {
-		return nil, wrkrecords.Error("wrk_unavailable")
+		return nil, fmt.Errorf("open wrk runtime pool: %w", e)
 	}
-	fail := func() (*Store, error) { p.Close(); return nil, wrkrecords.Error("wrk_unavailable") }
-	if p.Ping(ctx) != nil {
-		return fail()
+	if e = p.Ping(ctx); e != nil {
+		p.Close()
+		return nil, fmt.Errorf("ping wrk runtime database: %w", e)
 	}
 	var ready bool
-	if p.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_version WHERE version=20)`).Scan(&ready) != nil || !ready {
-		return fail()
+	if e = p.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_version WHERE version=20)`).Scan(&ready); e != nil {
+		p.Close()
+		return nil, fmt.Errorf("check wrk runtime schema version: %w", e)
+	}
+	if !ready {
+		p.Close()
+		return nil, errors.New("wrk runtime schema version 20 is not present")
 	}
 	return &Store{pool: p}, nil
+}
+
+// OpenExisting connects to a migrated database using the same schema choice as
+// OpenServer: wrk tables require the runtime opener; otherwise Open may migrate.
+// The probe holds no table lock and errors never include the database URL.
+func OpenExisting(ctx context.Context, url string) (*Store, error) {
+	probe, err := newPool(ctx, url)
+	if err != nil {
+		return nil, fmt.Errorf("open database probe: %w", err)
+	}
+	if err = probe.Ping(ctx); err != nil {
+		probe.Close()
+		return nil, fmt.Errorf("ping database probe: %w", err)
+	}
+	var exists bool
+	err = probe.QueryRow(ctx, `SELECT to_regclass('wrk_records') IS NOT NULL OR to_regclass('wrk_contents') IS NOT NULL OR to_regclass('wrk_attempts') IS NOT NULL OR to_regclass('wrk_job_locks') IS NOT NULL`).Scan(&exists)
+	probe.Close()
+	if err != nil {
+		return nil, fmt.Errorf("probe wrk tables: %w", err)
+	}
+	if exists {
+		store, err := OpenRuntime(ctx, url)
+		if err != nil {
+			return nil, fmt.Errorf("open wrk runtime database: %w", err)
+		}
+		return store, nil
+	}
+	store, err := Open(ctx, url)
+	if err != nil {
+		return nil, fmt.Errorf("open database: %w", err)
+	}
+	return store, nil
 }
 func (s *Store) HasWrkEnrollment(ctx context.Context) bool {
 	var yes bool
@@ -475,24 +513,9 @@ func OpenServer(ctx context.Context, runtimeURL, migrationURL, mode string, poli
 	}
 	// Inspect without DDL. An enrolled/runtime schema must never execute owner
 	// migrations with the runtime credential, even when the API has been disabled.
-	probe, e := newPool(ctx, runtimeURL)
+	s, e := OpenExisting(ctx, runtimeURL)
 	if e != nil {
-		return nil, wrkrecords.Error("wrk_unavailable")
-	}
-	var exists bool
-	e = probe.QueryRow(ctx, `SELECT to_regclass('wrk_records') IS NOT NULL OR to_regclass('wrk_contents') IS NOT NULL OR to_regclass('wrk_attempts') IS NOT NULL OR to_regclass('wrk_job_locks') IS NOT NULL`).Scan(&exists)
-	probe.Close()
-	if e != nil {
-		return nil, wrkrecords.Error("wrk_unavailable")
-	}
-	var s *Store
-	if exists {
-		s, e = OpenRuntime(ctx, runtimeURL)
-	} else {
-		s, e = Open(ctx, runtimeURL)
-	}
-	if e != nil {
-		return nil, wrkrecords.Error("wrk_unavailable")
+		return nil, fmt.Errorf("%w: %w", wrkrecords.Error("wrk_unavailable"), e)
 	}
 	if e = s.ConfigureWrk(ctx, mode, policy, generation, recovery); e != nil {
 		s.Close()
