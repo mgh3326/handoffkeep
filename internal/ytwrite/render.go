@@ -127,9 +127,9 @@ func checkBody(body string) error {
 
 // payloadSHA hashes what a comment_append means. The fields are length-framed
 // so two different tuples cannot concatenate to the same bytes.
-func payloadSHA(kind, entityKind, entityID, ytTarget, body string) string {
+func payloadSHA(kind, entityKind, entityID, ytTarget, actor, body string) string {
 	h := sha256.New()
-	for _, f := range []string{kind, entityKind, entityID, ytTarget, body} {
+	for _, f := range []string{kind, entityKind, entityID, ytTarget, actor, body} {
 		fmt.Fprintf(h, "%d:%s;", len(f), f)
 	}
 	return hex.EncodeToString(h.Sum(nil))

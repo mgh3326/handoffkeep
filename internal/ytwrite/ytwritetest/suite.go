@@ -535,6 +535,10 @@ func RunProtocol(t *testing.T, nl NewLedger) {
 				// A new process: retry the caller's key and run the worker until
 				// everything that can resolve has.
 				e.restart(e.ledger)
+				if tc.name == "after_defer_commit" {
+					e.drive()
+					e.wantRemote(1, 0)
+				}
 				if _, err := e.p.AppendComment(context.Background(), e.req("k1", "crashy")); err != nil {
 					t.Fatalf("retry after the crash: %v", err)
 				}

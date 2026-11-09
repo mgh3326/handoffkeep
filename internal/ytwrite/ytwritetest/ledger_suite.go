@@ -100,6 +100,35 @@ func RunLedger(t *testing.T, nl NewLedger) {
 		}
 	})
 
+	t.Run("stale_recovery_checks_attempt_and_cutoff", func(t *testing.T) {
+		l := nl(t)
+		a := prepare(t, l, "stale", "1")
+		claim(t, l, a.ID)
+		snapshot, err := l.Stale(ctx, t0, 10)
+		if err != nil || len(snapshot) != 1 {
+			t.Fatalf("stale snapshot = %+v %v", snapshot, err)
+		}
+		if _, err := l.Defer(ctx, t0, a.ID, t0, "retry", ""); err != nil {
+			t.Fatal(err)
+		}
+		if _, out, err := l.Claim(ctx, t0, a.ID); err != nil || out != ytwrite.ClaimClaimed {
+			t.Fatalf("reclaim = %s %v", out, err)
+		}
+		if changed, err := l.RecoverStale(ctx, a.ID, snapshot[0].Attempts, t0, t0, "old snapshot"); err != nil || changed {
+			t.Fatalf("old attempt recovered = %v %v", changed, err)
+		}
+		current, err := l.ByID(ctx, a.ID)
+		if err != nil || current.State != ytwrite.StateDispatched {
+			t.Fatalf("current = %+v %v", current, err)
+		}
+		if changed, err := l.RecoverStale(ctx, a.ID, current.Attempts, t0.Add(-time.Second), t0, "too early"); err != nil || changed {
+			t.Fatalf("before cutoff = %v %v", changed, err)
+		}
+		if changed, err := l.RecoverStale(ctx, a.ID, current.Attempts, t0, t0, "stale"); err != nil || !changed {
+			t.Fatalf("recovery = %v %v", changed, err)
+		}
+	})
+
 	t.Run("one_unresolved_op_per_entity_blocks_later_ones", func(t *testing.T) {
 		l := nl(t)
 		a, b, c := prepare(t, l, "a", "1"), prepare(t, l, "b", "1"), prepare(t, l, "c", "2")

@@ -161,7 +161,7 @@ func (p *Protocol) AppendComment(ctx context.Context, req CommentRequest) (Resul
 		Principal:  req.Principal,
 		Kind:       KindCommentAppend,
 		Key:        key,
-		PayloadSHA: payloadSHA(KindCommentAppend, "task", entityID, req.YTIssueID, req.Body),
+		PayloadSHA: payloadSHA(KindCommentAppend, "task", entityID, req.YTIssueID, req.Actor, req.Body),
 		Payload:    payload,
 		EntityKind: "task",
 		EntityID:   entityID,
@@ -368,11 +368,14 @@ func (p *Protocol) Drive(ctx context.Context, limit int) (DriveStats, error) {
 		return st, err
 	}
 	for _, op := range stale {
-		if _, err := p.Ledger.MarkUnknown(ctx, now, op.ID, now, ReasonDispatcherLost, "dispatch did not finish before "+p.StaleAfter.String()); err != nil {
+		recovered, err := p.Ledger.RecoverStale(ctx, op.ID, op.Attempts, now.Add(-p.StaleAfter), now, "dispatch did not finish before "+p.StaleAfter.String())
+		if err != nil {
 			errs = append(errs, err)
 			continue
 		}
-		st.Recovered++
+		if recovered {
+			st.Recovered++
+		}
 	}
 	// An op that resolves releases the writes queued behind it on its entity,
 	// and Due does not list those while it is unresolved, so go round again
@@ -459,7 +462,7 @@ func (p *Protocol) reconcile(ctx context.Context, op Op) (applied bool, err erro
 		skip += len(page)
 	}
 	switch {
-	case len(matches) == 1 && resultIDRE.MatchString(matches[0].ID):
+	case len(matches) == 1 && deleted == 0 && mismatched == 0 && resultIDRE.MatchString(matches[0].ID):
 		s := p.apply(ctx, op, matches[0].ID)
 		return s.err == nil, s.err
 	case len(matches) > 1:

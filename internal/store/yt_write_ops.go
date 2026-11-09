@@ -265,6 +265,13 @@ func (l *YTWriteLedger) MarkUnknown(ctx context.Context, _ time.Time, id int64, 
 		id, next.UTC(), clipText(reason, 200), clipText(detail, 2000))
 }
 
+func (l *YTWriteLedger) RecoverStale(ctx context.Context, id int64, attempts int, cutoff, next time.Time, detail string) (bool, error) {
+	tag, err := l.s.pool.Exec(ctx, `UPDATE yt_write_ops SET state='remote_unknown', next_attempt_at=$4, reason=$5, last_error=$6
+ WHERE id=$1 AND state='dispatched' AND attempts=$2 AND dispatched_at <= $3`,
+		id, attempts, cutoff.UTC(), next.UTC(), ytwrite.ReasonDispatcherLost, clipText(detail, 2000))
+	return tag.RowsAffected() == 1, err
+}
+
 func (l *YTWriteLedger) TouchUnknown(ctx context.Context, _ time.Time, id int64, next time.Time, reason, detail string) (ytwrite.Op, error) {
 	return l.moveYTOp(ctx, "touch unknown", "", `UPDATE yt_write_ops SET reconciles=reconciles+1, next_attempt_at=$2, reason=$3, last_error=$4
 		WHERE id=$1 AND state='remote_unknown' RETURNING `+ytOpColumns,

@@ -193,6 +193,20 @@ func (l *MemLedger) MarkUnknown(_ context.Context, _ time.Time, id int64, next t
 	return *op, nil
 }
 
+func (l *MemLedger) RecoverStale(_ context.Context, id int64, attempts int, cutoff, next time.Time, detail string) (bool, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	op, err := l.get(id)
+	if err != nil {
+		return false, err
+	}
+	if op.State != ytwrite.StateDispatched || op.Attempts != attempts || op.DispatchedAt.After(cutoff) {
+		return false, nil
+	}
+	op.State, op.NextAttemptAt, op.Reason, op.LastError = ytwrite.StateRemoteUnknown, next, ytwrite.ReasonDispatcherLost, detail
+	return true, nil
+}
+
 func (l *MemLedger) TouchUnknown(_ context.Context, _ time.Time, id int64, next time.Time, reason, detail string) (ytwrite.Op, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()

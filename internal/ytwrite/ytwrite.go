@@ -225,6 +225,8 @@ type Ledger interface {
 	// MarkUnknown moves a dispatched op to remote_unknown, due for evidence
 	// search at next. Idempotent for an op already remote_unknown.
 	MarkUnknown(ctx context.Context, now time.Time, id int64, next time.Time, reason, detail string) (Op, error)
+	// RecoverStale marks only the scanned dispatch attempt when it is still stale.
+	RecoverStale(ctx context.Context, id int64, attempts int, cutoff, next time.Time, detail string) (bool, error)
 	// TouchUnknown records a search that found no evidence: reconciles+1, due
 	// again at next. Only for remote_unknown.
 	TouchUnknown(ctx context.Context, now time.Time, id int64, next time.Time, reason, detail string) (Op, error)
