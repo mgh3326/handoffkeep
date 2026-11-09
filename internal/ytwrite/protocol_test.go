@@ -43,6 +43,10 @@ func TestRenderCommentIsDeterministic(t *testing.T) {
 	if a != want || b != want {
 		t.Fatalf("rendered %q, want %q", a, want)
 	}
+	actor, at, id, ok := ytwrite.ParseProvenance(strings.SplitN(a, "\n", 2)[0])
+	if !ok || actor != op.Actor || id != op.ID || !at.Equal(op.CreatedAt.Truncate(time.Second)) || at.Location() != time.UTC {
+		t.Fatalf("parsed provenance: %q %v %d %v", actor, at, id, ok)
+	}
 	if !strings.HasSuffix(a, ytwrite.OpMarker(7)) || strings.Contains(a, ytwrite.OpMarker(70)) {
 		t.Fatal("marker is not the exact op marker")
 	}

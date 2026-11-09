@@ -283,6 +283,11 @@ func RunProtocol(t *testing.T, nl NewLedger) {
 		if !errors.Is(err, ytwrite.ErrKeyConflict) {
 			t.Fatalf("same key, other body = %v, want ErrKeyConflict", err)
 		}
+		actor := e.req("k1", "A")
+		actor.Actor = "another-worker"
+		if _, err := e.p.AppendComment(context.Background(), actor); !errors.Is(err, ytwrite.ErrKeyConflict) {
+			t.Fatalf("same key, other actor = %v, want ErrKeyConflict", err)
+		}
 		e.wantRemote(1, 1)
 		other := e.req("k1", "B")
 		other.Principal = "agent-b"
@@ -393,14 +398,14 @@ func RunProtocol(t *testing.T, nl NewLedger) {
 		e.clock.Advance(time.Minute)
 		e.drive()
 		got := e.lookup(r)
-		e.wantStatus(got, ytwrite.StatusApplied, ytwrite.StateApplied, "")
+		e.wantStatus(got, ytwrite.StatusPending, ytwrite.StateRemoteUnknown, ytwrite.ReasonMarkerMismatch)
 		real := ""
 		for _, c := range e.yt.Comments(testIssue) {
 			if strings.Contains(c.Text, "\n\nreal\n\n") {
 				real = c.ID
 			}
 		}
-		if real == "" || got.YTID != real {
+		if real == "" || got.YTID != "" {
 			t.Fatalf("adopted %q, the real comment is %q", got.YTID, real)
 		}
 	})
@@ -411,6 +416,8 @@ func RunProtocol(t *testing.T, nl NewLedger) {
 		reason string
 	}{
 		{"two_identical_matches", func(y *FakeYouTrack, issue, id string) { y.Duplicate(issue, id) }, ytwrite.ReasonMultipleMatches},
+		{"live_and_deleted", func(y *FakeYouTrack, issue, id string) { y.Delete(issue, y.Duplicate(issue, id)) }, ytwrite.ReasonMarkerDeleted},
+		{"live_and_modified", func(y *FakeYouTrack, issue, id string) { y.Inject(issue, "changed "+ytwrite.OpMarker(1)) }, ytwrite.ReasonMarkerMismatch},
 		{"match_was_deleted", func(y *FakeYouTrack, issue, id string) { y.Delete(issue, id) }, ytwrite.ReasonMarkerDeleted},
 	} {
 		t.Run("ambiguous_evidence_stays_unknown/"+tc.name, func(t *testing.T) {
@@ -501,6 +508,7 @@ func RunProtocol(t *testing.T, nl NewLedger) {
 			{"lost_reply_before_unknown_recorded", "MarkUnknown", false, &Fault{Kind: CommitDropReply}, want{ytwrite.StateApplied, 1, 1}},
 			{"lost_reply_after_unknown_recorded", "MarkUnknown", true, &Fault{Kind: CommitDropReply}, want{ytwrite.StateApplied, 1, 1}},
 			{"before_defer_commit", "Defer", false, &Fault{Kind: RateLimit, RetryAfter: time.Minute}, want{ytwrite.StateRemoteUnknown, 0, 1}},
+			{"after_defer_commit", "Defer", true, &Fault{Kind: RateLimit, RetryAfter: time.Minute}, want{ytwrite.StateApplied, 1, 2}},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				e := newEnv(t, nl)
@@ -516,6 +524,12 @@ func RunProtocol(t *testing.T, nl NewLedger) {
 				if err == nil && first.Status == ytwrite.StatusApplied {
 					if op, gerr := e.ledger.ByID(context.Background(), first.OpID); gerr != nil || op.State != ytwrite.StateApplied {
 						t.Fatalf("caller was told applied but the ledger says %+v %v", op, gerr)
+					}
+				}
+				if tc.name == "after_defer_commit" {
+					op, err := e.ledger.ByID(context.Background(), 1)
+					if err != nil || op.State != ytwrite.StatePrepared {
+						t.Fatalf("after defer: %+v %v", op, err)
 					}
 				}
 				// A new process: retry the caller's key and run the worker until
