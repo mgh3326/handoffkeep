@@ -19,7 +19,10 @@ func applyYouTrackDocLegacyWritesMigration(ctx context.Context, tx pgx.Tx) error
 	return execAll(ctx, tx, []string{
 		`CREATE OR REPLACE FUNCTION clear_stale_youtrack_doc_part_sha() RETURNS trigger LANGUAGE plpgsql AS $body$
 		BEGIN
-			IF NEW.source_sha IS DISTINCT FROM OLD.source_sha AND NEW.part_sha IS NOT DISTINCT FROM OLD.part_sha THEN
+			IF (NEW.hk_project IS DISTINCT FROM OLD.hk_project
+			    OR NEW.article_id IS DISTINCT FROM OLD.article_id
+			    OR NEW.source_sha IS DISTINCT FROM OLD.source_sha)
+			   AND NEW.part_sha IS NOT DISTINCT FROM OLD.part_sha THEN
 				NEW.part_sha := '';
 			END IF;
 			RETURN NEW;

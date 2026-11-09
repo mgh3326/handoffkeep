@@ -31,7 +31,7 @@ func TestYouTrackDocsDueFiltersByPatternAndHash(t *testing.T) {
 	}
 
 	design := due[1]
-	if err := s.UpsertYouTrackDocArticle(ctx, YouTrackDocArticle{DocKey: design.Key, HKProject: "handoffkeep", ArticleID: "A-1", SourceSHA: design.SHA256, Bytes: int64(len(design.Body) + 100), SyncedAt: time.Now().UTC()}); err != nil {
+	if err := s.UpsertYouTrackDocArticle(ctx, YouTrackDocArticle{DocKey: design.Key, HKProject: "handoffkeep", ArticleID: "A-1", SourceSHA: design.SHA256, PartSHA: "v2:design", Bytes: int64(len(design.Body) + 100), SyncedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
 	due, err = s.DueYouTrackDocs(ctx, patterns, "handoffkeep", 10)
@@ -210,6 +210,53 @@ func TestPreviousReleaseUpdateInvalidatesPartSHA(t *testing.T) {
 	}
 	if len(due) != 1 || due[0].Key != doc.Key {
 		t.Fatalf("legacy-updated row was not due: %+v", due)
+	}
+}
+
+func TestPreviousReleaseProjectMoveInvalidatesMultipartSHA(t *testing.T) {
+	s := schemaStore(t, "youtrack_docs_legacy_move")
+	ctx := context.Background()
+	oldProject, newProject := "legacy-old", "legacy-new"
+	for _, project := range []string{oldProject, newProject} {
+		if err := s.PutYouTrackProject(ctx, YouTrackProject{HKProject: project, ShortName: project}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	task, err := s.CreateTask(ctx, Task{Lane: relaneLane(t, "youtrack-doc-move"), Title: "move document", Kind: "implement", CreatedBy: "test", Project: &oldProject})
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc, _, err := s.PutDocument(ctx, Document{Key: "design/legacy-move", Kind: "design", Body: "# Before\n\nbody", CreatedBy: "test", TaskID: &task.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpsertYouTrackDocArticle(ctx, YouTrackDocArticle{DocKey: doc.Key, HKProject: oldProject, ArticleID: "A-old", SourceSHA: doc.SHA256, PartIndex: 1, PartCount: 2, PartSHA: "v2:primary", Bytes: 100, SyncedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpsertYouTrackDocArticle(ctx, YouTrackDocArticle{DocKey: "/hk-part/legacy-move/2", DocumentKey: doc.Key, HKProject: oldProject, ArticleID: "A-child", SourceSHA: doc.SHA256, PartIndex: 2, PartCount: 2, PartSHA: "v2:child", Bytes: 20, SyncedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pool.Exec(ctx, `UPDATE tasks SET project=$2 WHERE id=$1`, task.ID, newProject); err != nil {
+		t.Fatal(err)
+	}
+	// This is the previous release's upsert: it replaces the primary article and
+	// project, but cannot update the part SHA or child row.
+	if _, err := s.pool.Exec(ctx, `UPDATE youtrack_doc_articles SET hk_project=$2,article_id='A-new',synced_at=now() WHERE doc_key=$1`, doc.Key, newProject); err != nil {
+		t.Fatal(err)
+	}
+	row, ok, err := s.GetYouTrackDocArticle(ctx, doc.Key)
+	if err != nil || !ok {
+		t.Fatalf("get moved primary row: ok=%v err=%v", ok, err)
+	}
+	if row.PartSHA != "" {
+		t.Fatalf("legacy project move retained stale part SHA %q", row.PartSHA)
+	}
+	due, err := s.DueYouTrackDocs(ctx, []string{"design/%"}, oldProject, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(due) != 1 || due[0].Key != doc.Key {
+		t.Fatalf("legacy project move was not due for multipart repair: %+v", keysOf(due))
 	}
 }
 
