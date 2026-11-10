@@ -62,10 +62,16 @@ func TestFleetCapacityAccessShapeFiltersAndLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 	reset := time.Now().UTC().Add(time.Hour)
-	if _, _, err := st.PutQuota(ctx, key, "test", holder, store.QuotaObservation{
-		Kind: "auto", MeasuredAt: time.Now().UTC(), Buckets: []store.QuotaBucket{{Window: "7d", UsedPct: 66, ResetsAt: &reset, Scope: "account"}},
-	}); err != nil {
+	autoObservation := store.QuotaObservation{
+		Kind: "auto", MeasuredAt: time.Now().UTC().Add(-24 * time.Hour),
+		Buckets: []store.QuotaBucket{{Window: "7d", UsedPct: 66, ResetsAt: &reset, Scope: "account"}},
+	}
+	if _, _, err := st.PutQuota(ctx, key, "test", holder, autoObservation); err != nil {
 		t.Fatal(err)
+	}
+	autoObservation.MeasuredAt = time.Now().UTC()
+	if _, deduped, err := st.PutQuota(ctx, key, "test", holder, autoObservation); err != nil || !deduped {
+		t.Fatalf("republish deduped=%v err=%v", deduped, err)
 	}
 	manualExpiry := time.Now().UTC().Add(-time.Minute)
 	manualMeasured := manualExpiry.Add(-time.Hour)
@@ -135,7 +141,7 @@ func TestFleetCapacityAccessShapeFiltersAndLimit(t *testing.T) {
 		case "manual":
 			manual = window.UsedPct != nil && *window.UsedPct == 95 && window.Expired != nil && *window.Expired && window.ExpiresAt != ""
 		case "auto":
-			auto = window.UsedPct != nil && *window.UsedPct == 66 && window.Window == "7d"
+			auto = window.UsedPct != nil && *window.UsedPct == 66 && window.Window == "7d" && window.AgeSecond <= 5
 		}
 	}
 	if !manual || !auto {
