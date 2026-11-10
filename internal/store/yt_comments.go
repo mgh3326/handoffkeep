@@ -31,6 +31,9 @@ const (
 	// YTCommentsCanary prepares one comment_append op for each new comment
 	// on a task in yt_comment_canary, in the comment's own transaction.
 	YTCommentsCanary YTCommentsMode = "canary"
+	// YTCommentsOn prepares one comment_append op for each new comment on a
+	// task with a consistent yt_task_bindings row.
+	YTCommentsOn YTCommentsMode = "on"
 )
 
 // YTCommentPrincipal owns the comment-copy ops; their idempotency key is

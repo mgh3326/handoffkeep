@@ -16,6 +16,14 @@ import (
 // comment canary (slice b1a). The text after "canary_refused: " says why.
 var ErrCanaryRefused = errors.New("canary_refused")
 
+// ErrNoIssue is not implemented yet.
+var ErrNoIssue = errors.New("no_issue")
+
+// VerifyBinding is not implemented yet.
+func VerifyBinding(ctx context.Context, issues IssueReader, tenant string, c store.YTCanaryCandidate) (store.YTTaskBinding, error) {
+	return store.YTTaskBinding{}, errors.New("VerifyBinding: not implemented")
+}
+
 // IssueReader reads one issue.
 type IssueReader interface {
 	GetIssue(ctx context.Context, issueID string) (Issue, error)

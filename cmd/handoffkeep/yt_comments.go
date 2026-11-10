@@ -81,7 +81,7 @@ func ytCommentsWorkerFromEnv(st *store.Store) (backgroundWorker, error) {
 		return nil, err
 	}
 	remote := youtrack.NewWriteRemote(client)
-	w, err := newYTCommentsWorker(st, remote, remote.Tenant(), nil)
+	w, err := newYTCommentsWorker(st, remote, remote.Tenant(), mode, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -90,7 +90,7 @@ func ytCommentsWorkerFromEnv(st *store.Store) (backgroundWorker, error) {
 
 // newYTCommentsWorker turns the gate on and builds the dispatcher for one
 // tenant over remote. now is the protocol clock (nil: the wall clock).
-func newYTCommentsWorker(st *store.Store, remote ytwrite.Remote, tenant string, now func() time.Time) (ytCommentsWorker, error) {
+func newYTCommentsWorker(st *store.Store, remote ytwrite.Remote, tenant string, _ store.YTCommentsMode, now func() time.Time) (ytCommentsWorker, error) {
 	p, err := ytwrite.New(st.YTCommentConfig(tenant, ytwrite.Config{
 		Remote:          remote,
 		Now:             now,
