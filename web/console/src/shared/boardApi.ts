@@ -2,6 +2,7 @@ import type {
   BoardWorkBoard,
   BoardWorkSession,
   BoardComment,
+  BoardAttachment,
   BoardCommentsResponse,
   BoardDetail,
   BoardDoc,
@@ -97,6 +98,20 @@ export function fetchBoardDoc(key: string): Promise<BoardDoc> {
 }
 
 export type TaskComments = { comments: BoardComment[]; truncated: boolean };
+
+export async function fetchTaskAttachments(id: number): Promise<BoardAttachment[]> {
+  return readAttachments(`/ui/api/board/tasks/${id}/attachments`);
+}
+
+export async function fetchDocumentAttachments(key: string): Promise<BoardAttachment[]> {
+  return readAttachments(`/ui/api/board/doc/attachments?key=${encodeURIComponent(key)}`);
+}
+
+async function readAttachments(path: string): Promise<BoardAttachment[]> {
+  const data = await getJSON<{ attachments: BoardAttachment[] }>(path);
+  if (!data || !Array.isArray(data.attachments) || !data.attachments.every(a => record(a) && typeof a.sha256 === "string" && typeof a.original_name === "string" && typeof a.size_bytes === "number" && typeof a.mime === "string" && typeof a.created_at === "string" && typeof a.created_by === "string")) throw new Error("malformed attachment response");
+  return data.attachments;
+}
 
 /** Reads a task's comments in creation order, walking the after_id cursor.
  * Past the client cap the list is returned marked truncated — never as if it

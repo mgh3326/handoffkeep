@@ -212,6 +212,10 @@ func (m minioStore) Presign(ctx context.Context, key string, ttl time.Duration) 
 	u, e := m.client.PresignedGetObject(ctx, m.bucket, key, ttl, url.Values{})
 	return u.String(), e
 }
+func (m minioStore) PresignDownload(ctx context.Context, key string, ttl time.Duration, disposition string) (string, error) {
+	u, e := m.client.PresignedGetObject(ctx, m.bucket, key, ttl, url.Values{"response-content-disposition": {disposition}})
+	return u.String(), e
+}
 func (m minioStore) PresignPut(ctx context.Context, key string, ttl time.Duration, size int64) (string, error) {
 	// Content-Length is signed (SigV4 SignedHeaders), so the URL accepts one
 	// body of exactly size bytes; a PUT of any other length fails signature
@@ -541,6 +545,29 @@ func (m *Manager) Presign(ctx context.Context, sha string) (string, error) {
 	u, e := m.Objects.Presign(ctx, key(sha), 10*time.Minute)
 	if e != nil {
 		return "", fmt.Errorf("%w: %v", ErrObjectStore, e)
+	}
+	return u, nil
+}
+
+// PresignDownload signs a hot object URL with the browser's download filename.
+func (m *Manager) PresignDownload(ctx context.Context, sha, disposition string) (string, error) {
+	if !m.Enabled {
+		return "", ErrDisabled
+	}
+	if _, ok, err := m.Store.GetAttachment(ctx, sha); err != nil {
+		return "", err
+	} else if !ok {
+		return "", errors.New("attachment_not_found")
+	}
+	objects, ok := m.Objects.(interface {
+		PresignDownload(context.Context, string, time.Duration, string) (string, error)
+	})
+	if !ok {
+		return "", errors.New("object store does not support response disposition")
+	}
+	u, err := objects.PresignDownload(ctx, key(sha), 10*time.Minute, disposition)
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", ErrObjectStore, err)
 	}
 	return u, nil
 }
