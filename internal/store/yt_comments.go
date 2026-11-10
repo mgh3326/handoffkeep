@@ -60,6 +60,24 @@ func (s *Store) ytCommentsModeNow() YTCommentsMode {
 	}
 }
 
+func init() { registerYTKindGate(ytwrite.KindCommentAppend, ytCommentGateSQL) }
+
+// ytCommentGateSQL is the comment_append gate (ytAdmitSQL): o's task is
+// enrolled in the canary (mode canary) or bound (mode on, yt_task_bindings)
+// with o's issue on o's tenant. Mode off admits nothing.
+func ytCommentGateSQL(s *Store) string {
+	switch s.ytCommentsModeNow() {
+	case YTCommentsCanary:
+		return `EXISTS (SELECT 1 FROM yt_comment_canary c
+		WHERE o.entity_kind = 'task' AND c.task_id::text = o.entity_id AND c.issue_id = o.yt_target_id AND c.tenant = o.tenant)`
+	case YTCommentsOn:
+		return `o.entity_kind = 'task' AND EXISTS (SELECT 1 FROM yt_task_bindings b
+		WHERE b.task_id::text = o.entity_id AND b.issue_id = o.yt_target_id AND b.tenant = o.tenant)`
+	default:
+		return `FALSE`
+	}
+}
+
 // enqueueYTCommentTx stores the op that copies comment c to YouTrack, inside
 // the comment's transaction (after its insert, before its commit). It writes
 // nothing when the gate is off. Mode on is enqueueYTCommentOnTx; what follows
@@ -359,7 +377,7 @@ func (s *Store) AddYTCommentCanary(ctx context.Context, c YTCommentCanary, verif
 
 // RemoveYTCommentCanary takes a task out of the canary set; removed is false
 // when it was not in it. Ops already prepared are not touched: the worker's
-// claim holds them (YTCommentLedger) until the task is enrolled again on the
+// claim holds them (YTTenantLedger) until the task is enrolled again on the
 // op's tenant. It takes the task's lane lock first, the lock a claim holds
 // while it reads the admission: a removal that commits first holds every
 // later claim, and one that waits behind a claim follows that claim.
@@ -398,12 +416,12 @@ func (s *Store) ListYTCommentCanary(ctx context.Context) ([]YTCommentCanary, err
 }
 
 // YTCommentConfig wires cfg for the comment worker of one YouTrack tenant:
-// its ledger is YTCommentLedger(tenant), whose claim admits a dispatch in the
+// its ledger is YTTenantLedger(tenant), whose claim admits a dispatch in the
 // claim's own transaction. Mode off, a removal from the canary (mode canary),
 // a task with no matching binding (mode on), or an op bound to another tenant
 // freezes sends without rejecting anything.
 func (s *Store) YTCommentConfig(tenant string, cfg ytwrite.Config) ytwrite.Config {
-	cfg.Ledger = s.YTCommentLedger(tenant)
+	cfg.Ledger = s.YTTenantLedger(tenant)
 	return cfg
 }
 

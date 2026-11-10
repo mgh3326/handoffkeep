@@ -81,8 +81,8 @@ const (
 	StatusRejected Status = "rejected"
 )
 
-// KindCommentAppend is the only kind in this slice: one comment appended to a
-// mapped task's issue.
+// KindCommentAppend is the first registered kind (kind_comment.go): one
+// comment appended to a mapped task's issue.
 const KindCommentAppend = "comment_append"
 
 // Reasons a caller can read on a Result. They are stable codes.

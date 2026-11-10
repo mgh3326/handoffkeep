@@ -116,7 +116,7 @@ func newYTCommentsWorker(st *store.Store, remote ytwrite.Remote, tenant string, 
 // ytCommentsWorker runs one sequential Drive pass every interval. Two serve
 // processes (blue-green) may both run it: the ledger's compare-and-set claim
 // is the boundary, so an op is sent at most once. Its ledger is scoped to the
-// tenant it was configured for (store.YTCommentLedger): it neither sends nor
+// tenant it was configured for (store.YTTenantLedger): it neither sends nor
 // searches for an op bound to another tenant.
 type ytCommentsWorker struct {
 	protocol *ytwrite.Protocol

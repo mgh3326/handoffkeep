@@ -180,7 +180,7 @@ package store
 //     task row only through its foreign key's KEY SHARE, which FOR SHARE
 //     allows and FOR UPDATE blocks; so no first mirror link commits between
 //     an issue writer's checks and its commit. The comment worker's Claim
-//     (YTCommentLedger) reads the task's canary row (mode canary) or binding
+//     (YTTenantLedger) reads the task's canary row (mode canary) or binding
 //     (mode on) under the same lane lock, which is what orders an enrollment,
 //     a removal or a binding against a claim.
 //     No cycle, lock by lock:
