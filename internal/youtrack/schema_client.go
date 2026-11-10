@@ -38,8 +38,11 @@ type ProjectField struct {
 	ID    string `json:"id"`
 	Type  string `json:"$type"`
 	Field struct {
-		ID   string `json:"id"`
-		Name string `json:"name"`
+		ID        string `json:"id"`
+		Name      string `json:"name"`
+		FieldType struct {
+			ID string `json:"id"`
+		} `json:"fieldType"`
 	} `json:"field"`
 	Bundle *struct {
 		ID   string `json:"id"`
@@ -113,7 +116,7 @@ func (c *Client) CreateProject(ctx context.Context, name, shortName, leaderID st
 
 // ListProjectFields lists the fields attached to one project.
 func (c *Client) ListProjectFields(ctx context.Context, projectID string) ([]ProjectField, error) {
-	return getAll[ProjectField](ctx, c, "/api/admin/projects/"+url.PathEscape(projectID)+"/customFields", "id,$type,field(id,name),bundle(id,$type)")
+	return getAll[ProjectField](ctx, c, "/api/admin/projects/"+url.PathEscape(projectID)+"/customFields", "id,$type,field(id,name,fieldType(id)),bundle(id,$type)")
 }
 
 // ListGlobalFields lists the custom field definitions.

@@ -291,7 +291,7 @@ func (f *fakeTenant) projectFields(w http.ResponseWriter, r *http.Request, proje
 	}
 	render := func(pf *fakeProjectField) map[string]any {
 		g := f.globalByID(pf.GlobalID)
-		out := map[string]any{"id": pf.ID, "$type": pf.Type, "field": map[string]any{"id": g.ID, "name": g.Name}}
+		out := map[string]any{"id": pf.ID, "$type": pf.Type, "field": map[string]any{"id": g.ID, "name": g.Name, "fieldType": map[string]any{"id": g.Type}}}
 		if pf.BundleID != "" {
 			out["bundle"] = map[string]any{"id": pf.BundleID, "$type": bundleTypeName(f.bundles[pf.BundleID].Kind)}
 		}
@@ -487,4 +487,10 @@ func (s *fakeSchemaStore) PutYouTrackProject(_ context.Context, p store.YouTrack
 	s.rows[p.HKProject] = p
 	s.puts = append(s.puts, p)
 	return nil
+}
+
+// share attaches the bundle another project's field already uses.
+func (f *fakeTenant) share(p *fakeProject, name string, kind FieldKind, bundle *fakeBundle) {
+	g := f.global(name)
+	p.Fields = append(p.Fields, &fakeProjectField{ID: f.id("90"), GlobalID: g.ID, Type: projectFieldType(kind), BundleID: bundle.ID})
 }

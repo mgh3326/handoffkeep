@@ -454,3 +454,217 @@ func TestDesiredSchemaStateBundleFollowsHKOrderAndFlags(t *testing.T) {
 		t.Fatalf("resolved=%v want %v", resolved, want)
 	}
 }
+
+func TestSchemaNeverAdoptsOrTouchesAReservedBucket(t *testing.T) {
+	f, st, runner := seedSchemaTenant(t)
+	// The store seeds handoffkeep with HK, which is also the import's bucket.
+	bucket := f.addProject("HK", "Unassigned hk tasks")
+	f.attach(bucket, "hk 상태", KindState, []BundleValue{{Name: "대기"}})
+	st.rows["handoffkeep"] = store.YouTrackProject{HKProject: "handoffkeep", ProjectID: bucket.ID, ShortName: "HK"}
+	ctx := context.Background()
+	plan, err := runner.Plan(ctx, "handoffkeep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := planLines(plan)[0]; got != "handoffkeep\tmapping\tput\tHANDOFFKEE" {
+		t.Fatalf("first line %q, want the mapping replaced by the real project's", got)
+	}
+	if _, err := runner.Apply(ctx, plan); err != nil {
+		t.Fatal(err)
+	}
+	if row := st.rows["handoffkeep"]; row.ShortName != "HANDOFFKEE" {
+		t.Fatalf("mapping=%+v", row)
+	}
+	if len(bucket.Fields) != 1 || len(f.bundles[bucket.Fields[0].BundleID].Values) != 1 {
+		t.Fatalf("the HK bucket was changed: %+v", bucket.Fields)
+	}
+	// With no real project, one is created under a name that is not reserved.
+	st.rows["factortrail"] = store.YouTrackProject{HKProject: "factortrail", ProjectID: bucket.ID, ShortName: "HK"}
+	plan, err = runner.Plan(ctx, "factortrail")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := planLines(plan)[0]; got != "factortrail\tproject\tcreate\tFACTORTRAI" {
+		t.Fatalf("first line %q", got)
+	}
+}
+
+func TestSchemaRepairsAStaleMappingAfterAFailedPut(t *testing.T) {
+	f, st, runner := seedSchemaTenant(t)
+	ctx := context.Background()
+	// The row points at a project id that is gone; the project was recreated
+	// under the same short name before the put could land.
+	st.rows["handoffkeep"] = store.YouTrackProject{HKProject: "handoffkeep", ProjectID: "0-gone", ShortName: "HANDOFFKEE"}
+	plan, err := runner.Plan(ctx, "handoffkeep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := planLines(plan)[0]; got != "handoffkeep\tmapping\tput\tHANDOFFKEE" {
+		t.Fatalf("first line %q, want a mapping repair", got)
+	}
+	if _, err := runner.Apply(ctx, plan); err != nil {
+		t.Fatal(err)
+	}
+	want := f.projects[0].ID
+	if row := st.rows["handoffkeep"]; row.ProjectID != want {
+		t.Fatalf("mapping=%+v want id %s", row, want)
+	}
+	again, err := runner.Plan(ctx, "handoffkeep")
+	if err != nil || len(again.Changes) != 0 {
+		t.Fatalf("after the repair: %q err=%v", planLines(again), err)
+	}
+}
+
+func TestSchemaPlansASharedBundleOnce(t *testing.T) {
+	f, st, runner := seedSchemaTenant(t)
+	ctx := context.Background()
+	// mergewake's lane field uses handoffkeep's bundle, which lacks lane-b; both
+	// projects' milestones go into one shared milestone bundle.
+	hk, mw := f.projects[0], f.projects[1]
+	var laneBundle *fakeBundle
+	for _, pf := range hk.Fields {
+		if f.globalByID(pf.GlobalID).Name == "레인" {
+			laneBundle = f.bundles[pf.BundleID]
+		}
+	}
+	for i, pf := range mw.Fields {
+		if f.globalByID(pf.GlobalID).Name == "레인" {
+			mw.Fields = append(mw.Fields[:i], mw.Fields[i+1:]...)
+			break
+		}
+	}
+	f.share(mw, "레인", KindEnum, laneBundle)
+	st.milestones["mergewake"] = []string{"M2", "M3"}
+	plan, err := runner.Plan(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	adds := 0
+	for _, line := range planLines(plan) {
+		if strings.HasSuffix(line, "\t레인\tadd-value\tlane-b") {
+			adds++
+		}
+	}
+	if adds != 1 {
+		t.Fatalf("lane-b is planned %d times, want once:\n%s", adds, strings.Join(planLines(plan), "\n"))
+	}
+	if _, err := runner.Apply(ctx, plan); err != nil {
+		t.Fatalf("apply on a shared bundle: %v", err)
+	}
+	again, err := runner.Plan(ctx, "")
+	if err != nil || len(again.Changes) != 0 {
+		t.Fatalf("second plan: %q err=%v", planLines(again), err)
+	}
+}
+
+func TestSchemaReportsAFieldOfTheWrongTypeInsteadOfConverging(t *testing.T) {
+	f, _, runner := seedSchemaTenant(t)
+	ctx := context.Background()
+	// 마감 already exists as an enum, on the tenant and on handoffkeep.
+	f.attach(f.projects[0], "마감", KindEnum, []BundleValue{{Name: "x"}})
+	plan, err := runner.Plan(ctx, "handoffkeep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, r := range plan.Reports {
+		found = found || (r.Object == "field" && r.Status == "mismatch" && strings.Contains(r.Value, "handoffkeep 마감 type \"enum[1]\" want \"date\""))
+	}
+	if !found {
+		t.Fatalf("reports=%+v lack the 마감 mismatch", plan.Reports)
+	}
+	for _, line := range planLines(plan) {
+		if strings.Contains(line, "\t마감\t") {
+			t.Fatalf("a plan line touches the mismatched field: %q", line)
+		}
+	}
+	// A tenant-wide definition of the wrong type is reported for projects lacking the field.
+	plan, err = runner.Plan(ctx, "mergewake")
+	if err != nil {
+		t.Fatal(err)
+	}
+	found = false
+	for _, r := range plan.Reports {
+		found = found || (r.Object == "field" && strings.Contains(r.Value, "마감 is defined as \"enum[1]\", want \"date\" (not attached to mergewake)"))
+	}
+	if !found {
+		t.Fatalf("reports=%+v lack the definition mismatch", plan.Reports)
+	}
+	// A field with a bundle kind but no bundle is reported too.
+	f.projects[0].Fields[0].BundleID = ""
+	plan, err = runner.Plan(ctx, "handoffkeep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	found = false
+	for _, r := range plan.Reports {
+		found = found || strings.Contains(r.Value, "handoffkeep hk 상태 has no bundle")
+	}
+	if !found {
+		t.Fatalf("reports=%+v lack the missing-bundle finding", plan.Reports)
+	}
+}
+
+func TestSchemaKeepsTheServersFullRetryAfter(t *testing.T) {
+	f, _, _ := seedSchemaTenant(t)
+	limited := false
+	f.hook = func(method, path string, _ int) (int, map[string]string) {
+		if !limited && method == http.MethodPost && path == "/api/admin/projects" {
+			limited = true
+			return http.StatusTooManyRequests, map[string]string{"Retry-After": "120"}
+		}
+		return 0, nil
+	}
+	var waits []time.Duration
+	client := f.client(t, Config{RetryAfterCap: 15 * time.Minute, Sleep: func(_ context.Context, d time.Duration) error {
+		waits = append(waits, d)
+		return nil
+	}})
+	runner := &SchemaRunner{Client: client, Store: &fakeSchemaStore{projects: []string{"factortrail"}, rows: map[string]store.YouTrackProject{}}, Schema: DefaultSchema()}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+	plan, err := runner.Plan(ctx, "factortrail")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runner.Apply(ctx, plan); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(waits, []time.Duration{120 * time.Second}) {
+		t.Fatalf("waits=%v, want the server's 120s", waits)
+	}
+}
+
+func TestSchemaStopsWhenRetryAfterOutlastsTheDeadline(t *testing.T) {
+	f, _, _ := seedSchemaTenant(t)
+	f.hook = func(method, path string, _ int) (int, map[string]string) {
+		if method == http.MethodPost && path == "/api/admin/projects" {
+			return http.StatusTooManyRequests, map[string]string{"Retry-After": "120"}
+		}
+		return 0, nil
+	}
+	slept := false
+	client := f.client(t, Config{RetryAfterCap: 15 * time.Minute, Sleep: func(context.Context, time.Duration) error {
+		slept = true
+		return nil
+	}})
+	runner := &SchemaRunner{Client: client, Store: &fakeSchemaStore{projects: []string{"factortrail"}, rows: map[string]store.YouTrackProject{}}, Schema: DefaultSchema()}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	plan, err := runner.Plan(ctx, "factortrail")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runner.Apply(ctx, plan); err == nil || slept {
+		t.Fatalf("apply err=%v slept=%t, want the 429 returned without sleeping past the deadline", err, slept)
+	}
+	posts := 0
+	for _, w := range f.writes() {
+		if w == "POST /api/admin/projects" {
+			posts++
+		}
+	}
+	if posts != 1 {
+		t.Fatalf("%d project posts, want one (no retry)", posts)
+	}
+}

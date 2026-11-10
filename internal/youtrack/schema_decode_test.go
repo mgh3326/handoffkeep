@@ -35,15 +35,15 @@ func TestSchemaEndpointsDecodeRecordedJSON(t *testing.T) {
 				t.Fatalf("project=%+v err=%v", got, err)
 			}
 		}},
-		{"list project fields", "GET", "/api/admin/projects/0-3/customFields", "project_custom_fields.json", map[string]string{"fields": "bundle(id"}, func(t *testing.T, c *Client) {
+		{"list project fields", "GET", "/api/admin/projects/0-3/customFields", "project_custom_fields.json", map[string]string{"fields": "fieldType(id)"}, func(t *testing.T, c *Client) {
 			got, err := c.ListProjectFields(ctx, "0-3")
 			if err != nil || len(got) != 3 {
 				t.Fatalf("fields=%+v err=%v", got, err)
 			}
-			if got[0].Field.Name != "hk 상태" || got[0].Bundle == nil || got[0].Bundle.ID != "67-40" || got[0].Bundle.Type != "StateBundle" || got[0].Type != "StateProjectCustomField" {
+			if got[0].Field.Name != "hk 상태" || got[0].Bundle == nil || got[0].Bundle.ID != "67-40" || got[0].Bundle.Type != "StateBundle" || got[0].Field.FieldType.ID != "state[1]" || got[0].Type != "StateProjectCustomField" {
 				t.Fatalf("state field=%+v", got[0])
 			}
-			if got[2].Field.Name != "마감" || got[2].Bundle != nil {
+			if got[2].Field.Name != "마감" || got[2].Field.FieldType.ID != "date" || got[2].Bundle != nil {
 				t.Fatalf("date field=%+v", got[2])
 			}
 		}},

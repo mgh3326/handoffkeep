@@ -48,8 +48,9 @@ type Config struct {
 	Timeout    time.Duration
 	MaxRetries int
 	// RetryAfterCap bounds how long a 429's Retry-After is honoured; zero is
-	// maxRetryWait. The schema run raises it so a rate-limited tenant is waited
-	// out, not hammered.
+	// maxRetryWait. The schema run raises it to its whole deadline so the
+	// server's wait is kept; a wait past the context deadline is not slept (the
+	// 429 is returned instead).
 	RetryAfterCap time.Duration
 	Backoff       time.Duration
 	UserAgent     string
@@ -258,7 +259,13 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 				retryable = retry5xx
 			}
 			if attempt < c.retries && retryable {
-				if werr := c.sleep(ctx, c.backoffFor(attempt, retryAfter)); werr != nil {
+				wait := c.backoffFor(attempt, retryAfter)
+				// A wait that outlasts the caller's deadline cannot end in a
+				// retry: stop with the server's answer now.
+				if dl, ok := ctx.Deadline(); ok && time.Until(dl) < wait {
+					return err
+				}
+				if werr := c.sleep(ctx, wait); werr != nil {
 					return werr
 				}
 				continue

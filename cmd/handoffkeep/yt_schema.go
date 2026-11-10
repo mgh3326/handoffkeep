@@ -16,11 +16,10 @@ import (
 const youtrackSchemaUsage = "usage: youtrack schema plan|apply [--project P] [--json]"
 
 // youtrackSchemaTimeout bounds a whole run: a full tenant is a few hundred
-// requests, each waiting out a 429 when YouTrack asks.
+// requests, each waiting out a 429 when YouTrack asks. The client keeps the
+// server's full Retry-After up to this bound and stops instead of sleeping past
+// the run's deadline.
 const youtrackSchemaTimeout = 15 * time.Minute
-
-// youtrackSchemaRetryAfter is the longest Retry-After the run waits for.
-const youtrackSchemaRetryAfter = 60 * time.Second
 
 // youtrackSchemaCmd brings the YouTrack tenant to the schema hk declares
 // (hk 3836). plan lists what is missing and writes nothing; apply makes it so.
@@ -52,7 +51,7 @@ func youtrackSchemaCmd(args []string, out io.Writer) error {
 	}
 	client, err := youtrack.New(youtrack.Config{
 		BaseURL: baseURL, Token: token, UserAgent: "handoffkeep-youtrack-schema",
-		MaxRetries: 6, RetryAfterCap: youtrackSchemaRetryAfter,
+		MaxRetries: 6, RetryAfterCap: youtrackSchemaTimeout,
 	})
 	if err != nil {
 		return exitCodeError{code: youtrackExitConfig, err: err}

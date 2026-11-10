@@ -178,7 +178,8 @@ type projectState struct {
 // globalRef is a field definition: found at plan time, or created by the
 // field-definition change that precedes every attach of it.
 type globalRef struct {
-	id string
+	id  string
+	typ string
 }
 
 // Plan reads the tenant and hk and returns what Apply would do. project limits
@@ -213,9 +214,10 @@ func (r *SchemaRunner) Plan(ctx context.Context, project string) (Plan, error) {
 	}
 	known := map[string]*globalRef{}
 	for _, g := range globals {
-		known[normalizeLabel(g.Name)] = &globalRef{id: g.ID}
+		known[normalizeLabel(g.Name)] = &globalRef{id: g.ID, typ: g.FieldType.ID}
 	}
 
+	pl := &planState{known: known, bundles: map[string]Bundle{}, queued: map[string]bool{}, flagged: map[string]bool{}}
 	var plan Plan
 	for _, hk := range hkProjects {
 		ps, changes, err := r.planProject(hk, rowFor, ytProjects, taken)
@@ -223,7 +225,7 @@ func (r *SchemaRunner) Plan(ctx context.Context, project string) (Plan, error) {
 			return Plan{}, err
 		}
 		plan.Changes = append(plan.Changes, changes...)
-		fieldChanges, err := r.planFields(ctx, ps, vocab, known)
+		fieldChanges, err := r.planFields(ctx, ps, vocab, pl)
 		if err != nil {
 			return Plan{}, err
 		}
@@ -237,7 +239,7 @@ func (r *SchemaRunner) Plan(ctx context.Context, project string) (Plan, error) {
 	if err != nil {
 		return Plan{}, err
 	}
-	plan.Reports = linkTypeReports(linkTypes)
+	plan.Reports = append(linkTypeReports(linkTypes), pl.reports...)
 	return plan, nil
 }
 
@@ -270,15 +272,35 @@ func (r *SchemaRunner) loadVocabulary(ctx context.Context, project string) (Voca
 	return Vocabulary{Kinds: store.TaskKinds(), Lanes: lanes, Areas: store.TaskAreas(), Milestones: milestones}, hkProjects, nil
 }
 
+func reservedShortName(short string) bool {
+	for _, name := range reservedShortNames {
+		if strings.EqualFold(short, name) {
+			return true
+		}
+	}
+	return false
+}
+
 // planProject finds or plans the YouTrack project of one hk project and its
-// youtrack_projects row. An existing mapping row wins: its short name is what
-// sync uses. Without a row a YouTrack project named like the hk project (what
-// the import created) is adopted; only then is one created.
+// youtrack_projects row. A mapping row wins: its short name is what sync uses.
+// Without a row a YouTrack project named like the hk project (what the import
+// created) is adopted; only then is one created. A row that names one of the
+// import's synthetic buckets (HK, DEC, SHRDOC; the store seeds handoffkeep with
+// HK) is not a mapping to adopt: it is replaced by the real project's, so the
+// run never changes a bucket's fields. The row is rewritten whenever it differs
+// from the project found or created, which also repairs a stale id left by a
+// put that failed after the project was created.
 func (r *SchemaRunner) planProject(hk string, rowFor map[string]store.YouTrackProject, yt []AdminProject, taken map[string]bool) (*projectState, []Change, error) {
 	row, hasRow := rowFor[hk]
+	if hasRow && reservedShortName(row.ShortName) {
+		hasRow = false
+	}
 	var found *AdminProject
 	for i := range yt {
 		p := &yt[i]
+		if reservedShortName(p.ShortName) {
+			continue
+		}
 		if !hasRow {
 			if p.Name == hk {
 				found = p
@@ -323,7 +345,7 @@ func (r *SchemaRunner) planProject(hk string, rowFor map[string]store.YouTrackPr
 				return nil
 			}})
 	}
-	if !hasRow || found == nil {
+	if !hasRow || found == nil || row.ProjectID != found.ID || !strings.EqualFold(row.ShortName, found.ShortName) {
 		changes = append(changes, Change{Project: hk, Object: "mapping", Action: "put", Value: ps.short, phase: phaseProject,
 			run: func(ctx context.Context) error {
 				return r.Store.PutYouTrackProject(ctx, store.YouTrackProject{HKProject: hk, ProjectID: ps.ytID, ShortName: ps.short})
@@ -332,9 +354,29 @@ func (r *SchemaRunner) planProject(hk string, rowFor map[string]store.YouTrackPr
 	return ps, changes, nil
 }
 
+// planState is what the changes of one Plan call share across projects: the
+// field definitions, each bundle read once, the bundle changes already queued
+// (projects may share a bundle, and a value is added to it once), and the
+// findings Apply cannot fix.
+type planState struct {
+	known   map[string]*globalRef
+	bundles map[string]Bundle
+	queued  map[string]bool
+	reports []Report
+	flagged map[string]bool
+}
+
+func (p *planState) report(rep Report) {
+	key := rep.Object + "|" + rep.Status + "|" + rep.Value
+	if !p.flagged[key] {
+		p.flagged[key] = true
+		p.reports = append(p.reports, rep)
+	}
+}
+
 // planFields plans the fields of one project. A project that does not exist
 // yet has none, so every field is attached with its whole value set.
-func (r *SchemaRunner) planFields(ctx context.Context, ps *projectState, vocab Vocabulary, known map[string]*globalRef) ([]Change, error) {
+func (r *SchemaRunner) planFields(ctx context.Context, ps *projectState, vocab Vocabulary, pl *planState) ([]Change, error) {
 	var attached []ProjectField
 	if ps.ytID != "" {
 		var err error
@@ -353,13 +395,23 @@ func (r *SchemaRunner) planFields(ctx context.Context, ps *projectState, vocab V
 			}
 		}
 		if have == nil {
-			changes = append(changes, r.planAttach(ps, spec, known)...)
+			changes = append(changes, r.planAttach(ps, spec, pl)...)
 			continue
 		}
-		if !hasBundle(spec.Kind) || have.Bundle == nil {
+		// A field of that name with another type or no bundle is not the field
+		// the schema wants; say so rather than call the project converged.
+		if got := have.Field.FieldType.ID; got != fieldTypeID(spec.Kind) {
+			pl.report(Report{Object: "field", Status: "mismatch", Value: fmt.Sprintf("%s %s type %q want %q", ps.hk, spec.Name, got, fieldTypeID(spec.Kind))})
 			continue
 		}
-		valueChanges, err := r.planValues(ctx, ps, spec, have.Bundle.ID)
+		if !hasBundle(spec.Kind) {
+			continue
+		}
+		if have.Bundle == nil {
+			pl.report(Report{Object: "field", Status: "mismatch", Value: fmt.Sprintf("%s %s has no bundle", ps.hk, spec.Name)})
+			continue
+		}
+		valueChanges, err := r.planValues(ctx, ps, spec, have.Bundle.ID, pl)
 		if err != nil {
 			return nil, err
 		}
@@ -368,13 +420,14 @@ func (r *SchemaRunner) planFields(ctx context.Context, ps *projectState, vocab V
 	return changes, nil
 }
 
-func (r *SchemaRunner) planAttach(ps *projectState, spec FieldSpec, known map[string]*globalRef) []Change {
+func (r *SchemaRunner) planAttach(ps *projectState, spec FieldSpec, pl *planState) []Change {
 	key := normalizeLabel(spec.Name)
-	ref := known[key]
+	ref := pl.known[key]
 	var changes []Change
-	if ref == nil {
-		ref = &globalRef{}
-		known[key] = ref
+	switch {
+	case ref == nil:
+		ref = &globalRef{typ: fieldTypeID(spec.Kind)}
+		pl.known[key] = ref
 		changes = append(changes, Change{Object: spec.Name, Action: "create-field", Value: fieldTypeID(spec.Kind), phase: phaseFieldDef,
 			run: func(ctx context.Context) error {
 				g, err := r.Client.CreateGlobalField(ctx, spec.Name, fieldTypeID(spec.Kind))
@@ -384,6 +437,9 @@ func (r *SchemaRunner) planAttach(ps *projectState, spec FieldSpec, known map[st
 				ref.id = g.ID
 				return nil
 			}})
+	case ref.typ != fieldTypeID(spec.Kind):
+		pl.report(Report{Object: "field", Status: "mismatch", Value: fmt.Sprintf("%s is defined as %q, want %q (not attached to %s)", spec.Name, ref.typ, fieldTypeID(spec.Kind), ps.hk)})
+		return nil
 	}
 	value := fieldTypeID(spec.Kind)
 	if hasBundle(spec.Kind) {
@@ -411,20 +467,38 @@ func (r *SchemaRunner) planAttach(ps *projectState, spec FieldSpec, known map[st
 // planValues compares one attached field's bundle with the spec: missing
 // values are added; a state bundle's existing values also get their resolved
 // flag and ordinal corrected. Values the spec does not name are left alone.
-func (r *SchemaRunner) planValues(ctx context.Context, ps *projectState, spec FieldSpec, bundleID string) ([]Change, error) {
-	bundle, err := r.Client.GetBundle(ctx, spec.Kind, bundleID)
-	if err != nil {
-		return nil, err
+// Projects may share a bundle, so a change is queued once per bundle: the
+// second project's identical addition is dropped, and a value only that
+// project's spec names (a milestone) is still added.
+func (r *SchemaRunner) planValues(ctx context.Context, ps *projectState, spec FieldSpec, bundleID string, pl *planState) ([]Change, error) {
+	bundle, ok := pl.bundles[bundleID]
+	if !ok {
+		var err error
+		if bundle, err = r.Client.GetBundle(ctx, spec.Kind, bundleID); err != nil {
+			return nil, err
+		}
+		pl.bundles[bundleID] = bundle
 	}
 	have := map[string]BundleElement{}
 	for _, el := range bundle.Values {
 		have[normalizeLabel(el.Name)] = el
+	}
+	once := func(action, name string) bool {
+		key := bundleID + "|" + action + "|" + normalizeLabel(name)
+		if pl.queued[key] {
+			return false
+		}
+		pl.queued[key] = true
+		return true
 	}
 	var changes []Change
 	for _, want := range spec.Values {
 		want := want
 		el, ok := have[normalizeLabel(want.Name)]
 		if !ok {
+			if !once("add", want.Name) {
+				continue
+			}
 			value := want.Name
 			if spec.Kind == KindState {
 				value = fmt.Sprintf("%s (resolved=%t ordinal=%d)", want.Name, want.Resolved, want.Ordinal)
@@ -439,13 +513,13 @@ func (r *SchemaRunner) planValues(ctx context.Context, ps *projectState, spec Fi
 		if spec.Kind != KindState {
 			continue
 		}
-		if el.IsResolved != want.Resolved {
+		if el.IsResolved != want.Resolved && once("resolved", want.Name) {
 			changes = append(changes, Change{Project: ps.hk, Object: spec.Name, Action: "set-resolved", Value: fmt.Sprintf("%s=%t", el.Name, want.Resolved), phase: phaseFlag,
 				run: func(ctx context.Context) error {
 					return r.Client.SetStateElement(ctx, bundleID, el.ID, map[string]any{"isResolved": want.Resolved})
 				}})
 		}
-		if el.Ordinal != want.Ordinal {
+		if el.Ordinal != want.Ordinal && once("ordinal", want.Name) {
 			changes = append(changes, Change{Project: ps.hk, Object: spec.Name, Action: "set-ordinal", Value: fmt.Sprintf("%s=%d", el.Name, want.Ordinal), phase: phaseFlag,
 				run: func(ctx context.Context) error {
 					return r.Client.SetStateElement(ctx, bundleID, el.ID, map[string]any{"ordinal": want.Ordinal})
