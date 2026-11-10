@@ -630,7 +630,7 @@ func TestCanaryMigrationUpgradesAlreadyCurrentDatabase(t *testing.T) {
 	_, url := testdb.Schema(t, "ytc_mig")
 	var without []migration
 	for _, m := range migrationRegistry {
-		if m.ID != ytCommentCanaryMigrationID {
+		if m.ID != ytCommentCanaryMigrationID && m.ID != "20261110-yt-comments-on" {
 			without = append(without, m)
 		}
 	}

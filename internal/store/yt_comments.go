@@ -326,7 +326,8 @@ func readYTCanaryCandidate(ctx context.Context, q ytRowQuerier, taskID int64, lo
 	}
 	err = q.QueryRow(ctx, `SELECT coalesce(
 		(SELECT issue_id FROM yt_task_bindings WHERE task_id=$1),
-		(SELECT yt_id FROM yt_entity_map WHERE entity_kind='task' AND hk_key=$2)
+		(SELECT yt_id FROM yt_entity_map WHERE entity_kind='task' AND hk_key=$2),
+		''
 	)`, taskID, strconv.FormatInt(taskID, 10)).Scan(&c.MappedIssueID)
 	if err := optional(err); err != nil {
 		return YTCanaryCandidate{}, err

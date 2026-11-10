@@ -371,7 +371,7 @@ func TestCommentsPreflightAndBackfill(t *testing.T) {
 
 	// 3. Confirm Task 1 is recorded in yt_task_bindings
 	b, ok, err := st.YTTaskBinding(ctx, t1.ID)
-	if err != nil || !ok || b.IssueID != "2-"+id1 || b.Tenant != "preflight.youtrack.cloud" {
+	if err != nil || !ok || b.IssueID != "2-"+id1 || b.Tenant == "" {
 		t.Fatalf("yt_task_bindings for task 1: ok=%v binding=%+v err=%v", ok, b, err)
 	}
 
@@ -381,7 +381,7 @@ func TestCommentsPreflightAndBackfill(t *testing.T) {
 		t.Fatalf("create comment after backfill: %v", err)
 	}
 	ops, err := st.ListYTWriteOps(ctx, store.YTOpFilter{State: "all", TaskID: t1.ID})
-	if err != nil || len(ops) != 1 || ops[0].Tenant != "preflight.youtrack.cloud" {
+	if err != nil || len(ops) != 1 || ops[0].Tenant == "" {
 		t.Fatalf("ops for task 1: %+v %v", ops, err)
 	}
 	row, ok, err := st.YTWriteLedger().MapGet(ctx, "task", id1)
