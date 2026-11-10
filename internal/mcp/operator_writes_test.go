@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/base64"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/mgh3326/handoffkeep/internal/api"
+	"github.com/mgh3326/handoffkeep/internal/attachments"
 	"github.com/mgh3326/handoffkeep/internal/store"
 	gmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -21,6 +23,73 @@ type mcpTaskUpdateOut struct {
 	Channel      string    `json:"channel"`
 	Author       string    `json:"author"`
 	YouTrackSync string    `json:"youtrack_sync"`
+}
+
+func TestAccessAndBearerActorMCPWrites(t *testing.T) {
+	st := newOperatorStore(t)
+	db := &memAttachmentDB{rows: map[string]store.Attachment{}}
+	objects := &memObjects{objects: map[string][]byte{}}
+	allow := map[string]bool{}
+	for _, mime := range strings.Split(attachments.DefaultMIMEAllow, ",") {
+		allow[mime] = true
+	}
+	manager := &attachments.Manager{Store: db, Objects: objects, Enabled: true, Config: attachments.Config{
+		MaxBytes: 50 << 20, StorageCap: 1 << 30, PutCap: 1000, GetCap: 1000, Allow: allow,
+	}}
+	fixture := newAccessFixture(t)
+	srv := httptest.NewServer(HTTPHandler(api.Service{Store: st, Attachments: manager}, api.Tokens{"bearer-client": "bearer-secret"}, fixture.verifier))
+	t.Cleanup(srv.Close)
+	accessSession := connectMCP(t, srv.URL, map[string]string{"Cf-Access-Jwt-Assertion": fixture.token(t, jwt.MapClaims{"email": "someone@example.com"})})
+	bearerSession := connectMCP(t, srv.URL, map[string]string{"Authorization": "Bearer bearer-secret"})
+	const operator = "operator:someone@example.com"
+
+	for _, tc := range []struct {
+		name    string
+		session *gmcp.ClientSession
+		actor   string
+	}{
+		{"access", accessSession, operator},
+		{"bearer", bearerSession, "bearer-client"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			suffix := tc.name
+			callTool[store.Checkpoint](t, tc.session, "put_checkpoint", map[string]any{"session": "actor-" + suffix, "kind": "checkpoint", "title": "actor test", "body": "checkpoint"})
+			checkpoints, err := st.RecentCheckpoints(t.Context(), "actor-"+suffix, "", 10)
+			if err != nil || len(checkpoints) != 1 || checkpoints[0].CreatedBy != tc.actor {
+				t.Fatalf("checkpoint actor: rows=%+v err=%v", checkpoints, err)
+			}
+
+			document := callTool[struct {
+				Document store.Document `json:"document"`
+			}](t, tc.session, "put_document", map[string]any{"key": "actor-test/" + suffix, "kind": "note", "body": "document"})
+			if document.Document.CreatedBy != tc.actor {
+				t.Fatalf("document created_by=%q", document.Document.CreatedBy)
+			}
+
+			memory := callTool[store.Memory](t, tc.session, "memory_put", map[string]any{"agent": "actor-agent", "name": suffix, "description": "actor test", "type": "user", "content": "memory"})
+			storedMemory, found, err := st.GetMemory(t.Context(), "actor-agent", suffix)
+			if err != nil || !found || memory.UpdatedBy != tc.actor || storedMemory.UpdatedBy != tc.actor {
+				t.Fatalf("memory actor: result=%+v stored=%+v found=%v err=%v", memory, storedMemory, found, err)
+			}
+
+			_, err = attachmentCall(t, tc.session, "attachment_put", map[string]any{"name": suffix + ".txt", "mime": "text/plain", "content_base64": base64.StdEncoding.EncodeToString([]byte("attachment-" + suffix))})
+			if err != nil {
+				t.Fatal(err)
+			}
+			foundAttachment := false
+			for _, row := range db.rows {
+				if row.OriginalName == suffix+".txt" {
+					foundAttachment = true
+					if row.CreatedBy != tc.actor {
+						t.Fatalf("attachment created_by=%q, want %q", row.CreatedBy, tc.actor)
+					}
+				}
+			}
+			if !foundAttachment {
+				t.Fatal("attachment row was not stored")
+			}
+		})
+	}
 }
 
 type mcpDecisionAskOut struct {

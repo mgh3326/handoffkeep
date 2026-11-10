@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"net/mail"
 	"os"
 	"regexp"
 	"sort"
@@ -1327,6 +1328,29 @@ func (s *Store) migrate(ctx context.Context) error {
 }
 func validName(x string) bool        { return nameRE.MatchString(x) }
 func validText(x string, n int) bool { return len(x) <= n && !strings.ContainsRune(x, 0) }
+
+// validActor accepts ordinary store names and the operator:<email> identity
+// used by authenticated console and MCP requests. Actor text remains bounded
+// and cannot contain NUL or other control characters.
+func validActor(x string) bool {
+	if validName(x) {
+		return true
+	}
+	if !strings.HasPrefix(x, "operator:") || !validText(x, 128) {
+		return false
+	}
+	email := strings.TrimPrefix(x, "operator:")
+	parsed, err := mail.ParseAddress(email)
+	if err != nil || parsed.Address != email {
+		return false
+	}
+	for _, r := range x {
+		if unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
+}
 
 // taskReasonText normalizes a no-job reason before it is judged: a string
 // made only of spaces and Unicode format characters (zero-width space,
@@ -3590,8 +3614,11 @@ func (s *Store) ListOpenLaneDecisions(ctx context.Context, limit int) ([]RelayEv
 	return out, nil
 }
 func (s *Store) CreateCheckpoint(ctx context.Context, x Checkpoint) (Checkpoint, error) {
-	if !validName(x.Session) || !kinds[x.Kind] || x.Title == "" || !validText(x.Title, MaxBytes) || !validText(x.Body, MaxBytes) || !validName(x.CreatedBy) {
+	if !validName(x.Session) || !kinds[x.Kind] || x.Title == "" || !validText(x.Title, MaxBytes) || !validText(x.Body, MaxBytes) {
 		return x, errors.New("invalid checkpoint")
+	}
+	if !validActor(x.CreatedBy) {
+		return x, errors.New("invalid checkpoint created_by")
 	}
 	if e := guard.Reject(x.Title + "\n" + x.Body); e != nil {
 		return x, e
@@ -3658,8 +3685,11 @@ func (s *Store) RecentCheckpoints(ctx context.Context, session, kind string, lim
 	return out, rows.Err()
 }
 func (s *Store) PutMemory(ctx context.Context, x Memory) (Memory, error) {
-	if !validName(x.Agent) || !validName(x.Name) || !memoryTypes[x.Type] || !validText(x.Description, MaxBytes) || !validText(x.Content, MaxBytes) || !validName(x.UpdatedBy) {
+	if !validName(x.Agent) || !validName(x.Name) || !memoryTypes[x.Type] || !validText(x.Description, MaxBytes) || !validText(x.Content, MaxBytes) {
 		return x, errors.New("invalid memory")
+	}
+	if !validActor(x.UpdatedBy) {
+		return x, errors.New("invalid memory updated_by")
 	}
 	if e := guard.Reject(x.Description + "\n" + x.Content); e != nil {
 		return x, e
@@ -3726,8 +3756,11 @@ func validDocKey(k string) bool {
 	return len(k) > 0 && len(k) <= 512 && !strings.HasPrefix(k, "/") && !strings.Contains(k, "..") && !strings.ContainsRune(k, 0)
 }
 func (s *Store) PutDocument(ctx context.Context, x Document) (Document, bool, error) {
-	if !validDocKey(x.Key) || !documentKinds[x.Kind] || !validText(x.Session, 128) || !validText(x.Job, 128) || !validText(x.Body, DocumentMaxBytes) || !validName(x.CreatedBy) {
+	if !validDocKey(x.Key) || !documentKinds[x.Kind] || !validText(x.Session, 128) || !validText(x.Job, 128) || !validText(x.Body, DocumentMaxBytes) {
 		return x, false, errors.New("invalid document")
+	}
+	if !validActor(x.CreatedBy) {
+		return x, false, errors.New("invalid document created_by")
 	}
 	if (x.OriginClass != "" && !documentOriginClasses[x.OriginClass]) || (x.TaskID != nil && *x.TaskID < 1) {
 		return x, false, errors.New("invalid document")
@@ -3935,8 +3968,11 @@ func (s *Store) SetAttachmentObjectLocation(ctx context.Context, sha, location s
 // PutAttachment records an immutable object and its reference after S3 PUT has
 // succeeded. It serializes quota accounting with a locked monthly usage row.
 func (s *Store) PutAttachment(ctx context.Context, x Attachment, storageCap, putCap int64) (Attachment, bool, error) {
-	if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(x.SHA256) || x.SizeBytes < 0 || x.MIME == "" || !validText(x.OriginalName, 512) || !validName(x.CreatedBy) || !validAttachmentRef(x.RefKind, x.RefID) {
+	if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(x.SHA256) || x.SizeBytes < 0 || x.MIME == "" || !validText(x.OriginalName, 512) || !validAttachmentRef(x.RefKind, x.RefID) {
 		return x, false, errors.New("invalid attachment")
+	}
+	if !validActor(x.CreatedBy) {
+		return x, false, errors.New("invalid attachment created_by")
 	}
 	if x.RefKind == "" {
 		x.RefKind = "none"
