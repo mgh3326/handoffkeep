@@ -39,7 +39,7 @@ export function TaskRecord({ id }: { id: number }) {
       setData(null); setComments([]); setCommentsError(false); setAttachments([]); setAttachmentsLoaded(false); setAttachmentsTruncated(false); setAttachmentsError(false);
     }
     setError(null);
-    void fetchTaskDetail(id).then(value => { if (active) { setData(value); setAttachmentsLoaded(false); setAttachmentsError(false); void fetchTaskComments(id).then(result => { if (active) setComments(result.comments); }).catch(() => { if (active) setCommentsError(true); }); void fetchTaskAttachments(id).then(result => { if (active) { setAttachments(result.attachments); setAttachmentsTruncated(result.truncated); setAttachmentsError(false); setAttachmentsLoaded(true); } }).catch(() => { if (active) { setAttachmentsError(true); setAttachmentsLoaded(true); } }); } }).catch((e: unknown) => { if (active) setError(e instanceof HttpError ? e.status : 500); });
+    void fetchTaskDetail(id).then(value => { if (active) { setData(value); setAttachmentsLoaded(false); setAttachmentsTruncated(false); setAttachmentsError(false); void fetchTaskComments(id).then(result => { if (active) setComments(result.comments); }).catch(() => { if (active) setCommentsError(true); }); void fetchTaskAttachments(id).then(result => { if (active) { setAttachments(result.attachments); setAttachmentsTruncated(result.truncated); setAttachmentsError(false); setAttachmentsLoaded(true); } }).catch(() => { if (active) { setAttachmentsTruncated(false); setAttachmentsError(true); setAttachmentsLoaded(true); } }); } }).catch((e: unknown) => { if (active) setError(e instanceof HttpError ? e.status : 500); });
     return () => { active = false; };
   }, [id, attempt]);
   if (error === 404) return <p>#{id} 없음</p>;
