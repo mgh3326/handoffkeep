@@ -70,6 +70,9 @@ func (m *Manager) BeginUpload(ctx context.Context, client, name, mime string, si
 	if !m.Enabled {
 		return UploadTicket{}, ErrDisabled
 	}
+	if !store.ValidActor(client) {
+		return UploadTicket{}, errors.New("invalid attachment created_by")
+	}
 	if !m.Config.DirectUpload {
 		return UploadTicket{}, ErrDirectUploadDisabled
 	}
