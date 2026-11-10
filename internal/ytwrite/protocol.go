@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"regexp"
 	"strconv"
-	"strings"
 	"time"
 )
 
@@ -84,6 +83,10 @@ const maxDrivePasses = 16
 // Protocol runs the write protocol over a Ledger and a Remote.
 type Protocol struct {
 	Config
+	// Kinds is the registry send and reconcile dispatch through, by op kind.
+	// New fills it with every registered kind; an op of any other kind is
+	// rejected unsupported_kind. Tests may add a kind before the first call.
+	Kinds map[string]Kind
 }
 
 // New fills the defaults and returns a Protocol.
@@ -111,7 +114,11 @@ func New(cfg Config) (*Protocol, error) {
 	if cfg.PageSize <= 0 {
 		cfg.PageSize = 100
 	}
-	return &Protocol{Config: cfg}, nil
+	kinds := make(map[string]Kind, len(kindBuilders))
+	for name, build := range kindBuilders {
+		kinds[name] = build(cfg)
+	}
+	return &Protocol{Config: cfg, Kinds: kinds}, nil
 }
 
 func (p *Protocol) now() time.Time { return p.Now().UTC() }
@@ -299,19 +306,20 @@ func (p *Protocol) send(ctx context.Context, op Op) Result {
 	// not stop the call or its recording, but each is bounded (DispatchTimeout,
 	// SettleTimeout), so a stopping worker returns and an unrecorded dispatch
 	// is left for stale recovery.
-	if op.Kind != KindCommentAppend {
+	kind, ok := p.Kinds[op.Kind]
+	if !ok {
 		sctx, cancel := p.settling(ctx)
 		defer cancel()
 		return p.record(op, p.reject(sctx, op, ReasonUnsupportedKind, op.Kind))
 	}
-	text, err := RenderComment(op)
+	text, err := kind.Render(op)
 	if err != nil {
 		sctx, cancel := p.settling(ctx)
 		defer cancel()
 		return p.record(op, p.reject(sctx, op, ReasonUnsupportedKind, err.Error()))
 	}
 	cctx, cancelCall := p.detached(ctx)
-	id, err := p.Remote.CreateComment(cctx, op.YTTargetID, text)
+	id, err := kind.Send(cctx, p.Remote, op, text)
 	cancelCall()
 	ctx, cancel := p.settling(ctx)
 	defer cancel()
@@ -489,10 +497,11 @@ func (p *Protocol) Drive(ctx context.Context, limit int) (DriveStats, error) {
 	return st, errors.Join(errs...)
 }
 
-// reconcile searches the target's comments for the op's exact rendered body.
-// One exact match is positive evidence and applies the op. Anything else leaves
-// it remote_unknown: no match is not proof the write did not happen, so there
-// is no automatic re-create.
+// reconcile searches the op's target for its exact rendered text through the
+// op's kind. One exact match is positive evidence and applies the op. Anything
+// else leaves it remote_unknown: no match is not proof the write did not
+// happen, so there is no automatic re-create. The decision is the same for
+// every kind; a kind only reports what it found (Evidence).
 func (p *Protocol) reconcile(ctx context.Context, op Op) (applied bool, err error) {
 	var wait time.Duration
 	touch := func(reason, detail string) (bool, error) {
@@ -504,49 +513,33 @@ func (p *Protocol) reconcile(ctx context.Context, op Op) (applied bool, err erro
 		}
 		return false, terr
 	}
-	want, rerr := RenderComment(op)
+	kind, ok := p.Kinds[op.Kind]
+	if !ok {
+		return touch(ReasonReconcileFailed, "unsupported kind "+op.Kind)
+	}
+	want, rerr := kind.Render(op)
 	if rerr != nil {
 		return touch(ReasonReconcileFailed, rerr.Error())
 	}
 	cctx, cancel := p.detached(ctx)
 	defer cancel()
-	marker := OpMarker(op.ID)
-	var matches []RemoteComment
-	deleted, mismatched := 0, 0
-	comments, lerr := p.Remote.ListComments(cctx, op.YTTargetID, p.PageSize)
+	ev, lerr := kind.Evidence(cctx, p.Remote, op, want)
 	if lerr != nil {
-		// A rate-limited search waits at least as long as the server asked.
-		var re *RemoteError
-		if errors.As(lerr, &re) && re.Status == http.StatusTooManyRequests {
-			wait = re.RetryAfter
-		}
+		wait = ev.RetryAfter
 		return touch(ReasonReconcileFailed, lerr.Error())
 	}
-	for _, c := range comments {
-		if !strings.Contains(c.Text, marker) {
-			continue
-		}
-		switch {
-		case c.Text != want:
-			mismatched++
-		case c.Deleted:
-			deleted++
-		default:
-			matches = append(matches, c)
-		}
-	}
 	switch {
-	case len(matches) == 1 && deleted == 0 && mismatched == 0 && resultIDRE.MatchString(matches[0].ID):
-		s := p.apply(ctx, op, matches[0].ID)
+	case len(ev.Matches) == 1 && ev.Deleted == 0 && ev.Mismatched == 0 && resultIDRE.MatchString(ev.Matches[0]):
+		s := p.apply(ctx, op, ev.Matches[0])
 		if s.err == nil {
 			logTransition(s.op)
 		}
 		return s.err == nil, s.err
-	case len(matches) > 1:
-		return touch(ReasonMultipleMatches, fmt.Sprintf("%d identical comments carry the marker", len(matches)))
-	case deleted > 0:
+	case len(ev.Matches) > 1:
+		return touch(ReasonMultipleMatches, fmt.Sprintf("%d identical comments carry the marker", len(ev.Matches)))
+	case ev.Deleted > 0:
 		return touch(ReasonMarkerDeleted, "the marked comment was deleted")
-	case mismatched > 0:
+	case ev.Mismatched > 0:
 		return touch(ReasonMarkerMismatch, "a comment carries the marker with other text")
 	}
 	return touch(ReasonNoEvidence, "no comment carries the marker")

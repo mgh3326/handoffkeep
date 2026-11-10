@@ -364,7 +364,7 @@ func TestYTCommentsOnAdmission(t *testing.T) {
 		t.Fatalf("canary op %+v %v", op, ok)
 	}
 	s.SetYTCommentsMode(YTCommentsOn)
-	ledger := s.YTCommentLedger(ytcTenant)
+	ledger := s.YTTenantLedger(ytcTenant)
 	now := time.Now().UTC().Add(time.Minute)
 	held := func(why string) {
 		t.Helper()

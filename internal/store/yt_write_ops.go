@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -27,10 +30,10 @@ import (
 // time is passed in (lockorder.go, "Time").
 type YTWriteLedger struct {
 	s *Store
-	// scoped is the comment worker's ledger for one tenant (YTCommentLedger):
-	// Claim and Due admit a prepared op only while the tenant is this one and
-	// the gate admits it (ytCommentAdmitSQL); remote_unknown ops are listed
-	// for this tenant only. The unscoped ledger admits every op (the protocol
+	// scoped is the worker's ledger for one tenant (YTTenantLedger): Claim
+	// and Due admit a prepared op only while the tenant is this one and its
+	// kind's gate admits it (ytAdmitSQL); remote_unknown ops are listed for
+	// this tenant only. The unscoped ledger admits every op (the protocol
 	// core's contract suite, the operator's tools).
 	scoped bool
 	tenant string
@@ -39,29 +42,49 @@ type YTWriteLedger struct {
 // YTWriteLedger returns the Ledger over this store.
 func (s *Store) YTWriteLedger() *YTWriteLedger { return &YTWriteLedger{s: s} }
 
-// YTCommentLedger is the ledger the comment worker of one YouTrack tenant
-// dispatches from (slice b1a, docs/youtrack-write-protocol.md).
-func (s *Store) YTCommentLedger(tenant string) *YTWriteLedger {
+// YTTenantLedger is the ledger the write worker of one YouTrack tenant
+// dispatches from (slice b1a, docs/youtrack-write-protocol.md): every
+// registered kind, each admitted by its own gate (ytAdmitSQL).
+func (s *Store) YTTenantLedger(tenant string) *YTWriteLedger {
 	return &YTWriteLedger{s: s, scoped: true, tenant: tenant}
 }
 
-// ytCommentAdmitSQL is the admission of a prepared op o by the comment
-// worker of the tenant named by the placeholder, in gate mode: o is bound to
-// that tenant, and its task is enrolled in the canary (mode canary) or bound
-// (mode on, yt_task_bindings) with o's issue on o's tenant. Mode off admits
-// nothing. Due and Claim share it, so what a pass lists is what a claim
-// admits.
-func ytCommentAdmitSQL(mode YTCommentsMode, tenant string) string {
-	switch mode {
-	case YTCommentsCanary:
-		return `(o.tenant = ` + tenant + ` AND EXISTS (SELECT 1 FROM yt_comment_canary c
-		WHERE o.entity_kind = 'task' AND c.task_id::text = o.entity_id AND c.issue_id = o.yt_target_id AND c.tenant = o.tenant))`
-	case YTCommentsOn:
-		return `(o.tenant = ` + tenant + ` AND o.entity_kind = 'task' AND EXISTS (SELECT 1 FROM yt_task_bindings b
-		WHERE b.task_id::text = o.entity_id AND b.issue_id = o.yt_target_id AND b.tenant = o.tenant))`
-	default:
-		return `FALSE`
+// ytKindGates is the admission of a prepared op o of one kind, by kind: a SQL
+// condition over o (the tenant is already checked), read with the store's
+// current mode for that kind. A kind with no gate here admits nothing. Each
+// kind adds its own entry from its own file's init (registerYTKindGate), so
+// kinds added in parallel edit no shared list.
+var ytKindGates = map[string]func(s *Store) string{}
+
+// registerYTKindGate adds kind's gate. The kind is a ytwrite kind constant
+// and is embedded in SQL as a literal, so it must be plain [a-z_].
+func registerYTKindGate(kind string, gate func(s *Store) string) {
+	if _, dup := ytKindGates[kind]; dup || !ytKindNameRE.MatchString(kind) {
+		panic(fmt.Sprintf("store: yt kind gate %q registered twice or malformed", kind))
 	}
+	ytKindGates[kind] = gate
+}
+
+var ytKindNameRE = regexp.MustCompile(`^[a-z][a-z_]{0,63}$`)
+
+// ytAdmitSQL is the admission of a prepared op o by the worker of the tenant
+// named by the placeholder: o is bound to that tenant and the gate of o's kind
+// admits it. Due and Claim share it, so what a pass lists is what a claim
+// admits.
+func (s *Store) ytAdmitSQL(tenant string) string {
+	kinds := make([]string, 0, len(ytKindGates))
+	for k := range ytKindGates {
+		kinds = append(kinds, k)
+	}
+	sort.Strings(kinds)
+	gates := make([]string, 0, len(kinds))
+	for _, k := range kinds {
+		gates = append(gates, `(o.kind = '`+k+`' AND (`+ytKindGates[k](s)+`))`)
+	}
+	if len(gates) == 0 {
+		gates = append(gates, `FALSE`)
+	}
+	return `(o.tenant = ` + tenant + ` AND (` + strings.Join(gates, ` OR `) + `))`
 }
 
 var _ ytwrite.Ledger = (*YTWriteLedger)(nil)
@@ -217,11 +240,9 @@ func (l *YTWriteLedger) Claim(ctx context.Context, now time.Time, id int64) (ytw
 		// binding's writer (AddYTTaskBinding) also take: a removal either
 		// commits before this read and holds the op, or waits for this claim
 		// to commit.
-		admitted := false
-		if mode := l.s.ytCommentsModeNow(); mode != YTCommentsOff {
-			if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM yt_write_ops o WHERE o.id=$1 AND `+ytCommentAdmitSQL(mode, "$2")+`)`, id, l.tenant).Scan(&admitted); err != nil {
-				return ytwrite.Op{}, "", err
-			}
+		var admitted bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM yt_write_ops o WHERE o.id=$1 AND `+l.s.ytAdmitSQL("$2")+`)`, id, l.tenant).Scan(&admitted); err != nil {
+			return ytwrite.Op{}, "", err
 		}
 		if !admitted {
 			return op, ytwrite.ClaimHeld, tx.Commit(ctx)
@@ -381,7 +402,7 @@ func (l *YTWriteLedger) Due(ctx context.Context, now time.Time, limit int) ([]yt
 		return l.list(ctx, `SELECT `+ytOpColumns+` FROM yt_write_ops o
 			WHERE o.state IN ('prepared','remote_unknown') AND o.next_attempt_at <= $1
 			AND ((o.state = 'remote_unknown' AND o.tenant = $3)
-				OR (o.state = 'prepared' AND `+ytCommentAdmitSQL(l.s.ytCommentsModeNow(), "$3")+`
+				OR (o.state = 'prepared' AND `+l.s.ytAdmitSQL("$3")+`
 					AND NOT EXISTS (SELECT 1 FROM yt_write_ops e
 						WHERE e.entity_kind = o.entity_kind AND e.entity_id = o.entity_id AND e.id < o.id AND e.state NOT IN ('applied','rejected'))))
 			ORDER BY o.id LIMIT $2`, now.UTC(), ytLimit(limit), l.tenant)

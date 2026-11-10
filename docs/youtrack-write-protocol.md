@@ -134,6 +134,34 @@ with seconds; the time is the op's `created_at`, so a resend or a reconciliation
 renders the same bytes). A caller's body may not contain `<!-- hk-op:` and an actor
 may not contain ` · `, so marker-shaped text is data, never evidence.
 
+## Kinds (hk 3864)
+
+An op's `kind` picks its YouTrack side from the registry `Protocol.Kinds`
+(`internal/ytwrite/kind.go`). A `ytwrite.Kind` has three behaviors and no more:
+
+- `Render(op)`: the exact text written, deterministic in the op, with the op marker.
+- `Send(ctx, remote, op, text)`: exactly one remote attempt, no retry inside.
+- `Evidence(ctx, remote, op, text)`: enumerate the target and classify every
+  candidate carrying the marker as an exact live match, an exact deleted one, or
+  a mismatch; a failed search returns its error, with `RetryAfter` from a 429.
+
+Everything else is the protocol's and the same for every kind: claim and
+ordering, the reply classification above, and the evidence rule (exactly one
+exact live match with a valid id, nothing deleted or mismatched, is `applied`;
+otherwise `multiple_matches`, `marker_deleted`, `marker_mismatch` or
+`no_evidence`). An op whose kind is not registered is `rejected /
+unsupported_kind` when sent, and a failed render is `unsupported_kind` (send) or
+`reconcile_failed` (search). `comment_append` (`kind_comment.go`) is the only
+kind so far. A new kind registers itself from its own file (`registerKind`)
+and adds its admission gate in the store (`registerYTKindGate`, below), so
+kinds added in parallel edit no shared list.
+
+The tenant's worker ledger, `Store.YTTenantLedger(tenant)`, admits a prepared op
+with one condition for every kind: `o.tenant = <tenant> AND ((o.kind =
+'comment_append' AND <comment gate>) OR …)`. A kind with no gate admits nothing.
+The comment gate is the canary or binding check below, read from
+`HANDOFFKEEP_YT_COMMENTS_MODE`.
+
 ## Remote contract (`ytwrite.Remote`)
 
 - `CreateComment` makes exactly one attempt. A nil error with an empty or
@@ -227,7 +255,7 @@ write. An MCP replay reports the original comment's op and creates none. The
 console form answer is unchanged.
 
 **Dispatch.** One worker in `serve` runs `Drive` every 5 s, sequentially, over
-`Store.YTCommentLedger(tenant)`, the ledger scoped to the tenant `YOUTRACK_URL`
+`Store.YTTenantLedger(tenant)`, the ledger scoped to the tenant `YOUTRACK_URL`
 names:
 
 - *Tenant binding.* It lists, claims and searches only ops bound to its own
