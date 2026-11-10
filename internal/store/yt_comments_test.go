@@ -833,6 +833,9 @@ func TestYTCommentsOnLegacyMapRowWithoutTenant(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := s.pool.Exec(ctx, `UPDATE yt_write_ops SET state='dispatched', dispatched_at=now() WHERE id=$1`, anchorA.ID); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := s.pool.Exec(ctx, `UPDATE yt_write_ops SET state='applied', yt_result_id='c-anchor-a', resolved_at=now() WHERE id=$1`, anchorA.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -872,6 +875,9 @@ func TestYTCommentsOnLegacyMapRowWithoutTenant(t *testing.T) {
 		YTTargetID: issueB, Actor: "test", Tenant: "",
 	})
 	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pool.Exec(ctx, `UPDATE yt_write_ops SET state='dispatched', dispatched_at=now() WHERE id=$1`, anchorB.ID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.pool.Exec(ctx, `UPDATE yt_write_ops SET state='applied', yt_result_id='c-anchor-b', resolved_at=now() WHERE id=$1`, anchorB.ID); err != nil {
