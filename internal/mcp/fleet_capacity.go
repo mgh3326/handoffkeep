@@ -25,8 +25,11 @@ type fleetCapacityInput struct {
 type fleetCapacityWindow struct {
 	Kind      string     `json:"kind"`
 	Window    string     `json:"window,omitempty"`
+	State     string     `json:"state,omitempty"`
 	UsedPct   *float64   `json:"used_pct,omitempty"`
 	ResetsAt  *time.Time `json:"resets_at,omitempty"`
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+	Expired   *bool      `json:"expired,omitempty"`
 	AgeSecond int64      `json:"age_seconds"`
 }
 
@@ -97,12 +100,17 @@ func (o operatorTools) fleetCapacity(ctx context.Context, _ *gmcp.CallToolReques
 		}
 		for _, observation := range observations {
 			age := int64(now.Sub(observation.MeasuredAt).Seconds())
+			var expired *bool
+			if observation.Kind == "manual" && observation.ExpiresAt != nil {
+				value := !observation.ExpiresAt.After(now)
+				expired = &value
+			}
 			for _, bucket := range observation.Buckets {
 				used := bucket.UsedPct
-				account.Windows = append(account.Windows, fleetCapacityWindow{Kind: observation.Kind, Window: bucket.Window, UsedPct: &used, ResetsAt: bucket.ResetsAt, AgeSecond: age})
+				account.Windows = append(account.Windows, fleetCapacityWindow{Kind: observation.Kind, Window: bucket.Window, UsedPct: &used, ResetsAt: bucket.ResetsAt, ExpiresAt: observation.ExpiresAt, Expired: expired, AgeSecond: age})
 			}
 			if observation.FreeBucket != nil {
-				account.Windows = append(account.Windows, fleetCapacityWindow{Kind: observation.Kind, Window: "free", ResetsAt: observation.FreeBucket.ResetsAt, AgeSecond: age})
+				account.Windows = append(account.Windows, fleetCapacityWindow{Kind: observation.Kind, Window: "free", State: observation.FreeBucket.State, ResetsAt: observation.FreeBucket.ResetsAt, AgeSecond: age})
 			}
 		}
 		accounts = append(accounts, account)
@@ -146,7 +154,7 @@ func (o operatorTools) fleetCapacity(ctx context.Context, _ *gmcp.CallToolReques
 	return jsonResult(map[string]any{
 		"as_of": now, "accounts": accounts, "presence": presence, "placements": placementViews,
 		"placement_note": placementNote(len(placementViews)),
-		"staleness_rule": "handoffkeep has no panewire quota staleness threshold; age_seconds is reported without a stale flag",
+		"staleness_rule": "handoffkeep has no panewire quota staleness threshold; age_seconds is reported without a staleness flag; manual observations include expires_at and expired",
 	})
 }
 

@@ -18,7 +18,7 @@ Baseline: `handoffkeep@64942ff`, the commit this matrix was taken from.
 | Thing counted | Count at 64942ff | Now |
 | --- | --- | --- |
 | Console write routes | 14: 7 JSON routes in `internal/ui/api.go`, 7 HTML form routes in `internal/ui/ui.go` | 14 (unchanged) |
-| MCP tool definitions | 22: 21 exposed on HTTP `/mcp`, 12 on stdio (the operator/meta tools are HTTP-only; `attachment_put_from_path` is stdio-only) | 33 exposed on HTTP `/mcp` and 15 on stdio, counted by listing the registered tools at hk 3683 (the earlier "25" was stale; `attachment_put` and the two direct-upload tools are in both counts) |
+| MCP tool definitions | 22: 21 exposed on HTTP `/mcp`, 12 on stdio (the operator/meta tools are HTTP-only; `attachment_put_from_path` is stdio-only) | 34 exposed on HTTP `/mcp` and 15 on stdio, counted by listing the registered tools at hk 3683 and adding `fleet_capacity` (the earlier "25" was stale; `attachment_put` and the two direct-upload tools are in both counts) |
 | `/v1` write registrations | 81 method-scoped write registrations, plus four method-agnostic handlers that also accept writes: `/v1/checkpoints`, `/v1/documents/{key}`, `/v1/memory/{agent}/{name}`, `/v1/wrk/{path}` (the rows below cover the user-facing capabilities) | 81 (unchanged) |
 
 Legend: **—** means the surface has no path for that capability. **ui.write** is
@@ -84,6 +84,7 @@ inbox and disposition writes refuse them.
 | YouTrack | Run sync and read its health | The sync itself; cursor, outbox and processed activities are hk bookkeeping | Board detail shows the cached priority/lane with a stale flag | — | youtrack sync | sync_status | bearer (CLI); MCP bearer/Access | cursor, outbox, processed activities, field cache | Rerun; pending outbox is retried with backoff | internal/youtrack/sync_test.go, internal/mcp/meta_test.go |
 | YouTrack | Map hk projects to YouTrack projects | `youtrack_projects` is the mapping | — | — | youtrack projects list, youtrack projects put | — | bearer (CLI) | youtrack_projects row | put again | internal/youtrack/client_test.go, cmd/handoffkeep/youtrack_test.go |
 | Fleet | Set a host's accepting flag | — | POST /ui/api/nodes/{machine}/accepting | — (the hub route is /v1/nodes/{machine}/accepting on the hub, not hk) | — | — | Operator, or a service identity with JSON content type | ui.write | Set again | internal/ui/routes_test.go |
+| Fleet | Inspect quota, host/account presence and recent placement attempts | — | — | GET /v1/quota/accounts/{key}/latest, GET /v1/quota/presence, GET /v1/placements | — | fleet_capacity | Operator, bearer, MCP bearer/Access | None (read) | n/a | internal/mcp/fleet_capacity_test.go |
 | Relay | Compose one lane event | — | POST /ui/compose | POST /v1/relay/events | — | — | Operator (console); bearer (API) | ui.write; relay event row | A new event is a new record; delivery is tracked separately | internal/ui/write_test.go, internal/ui/routes_test.go |
 | Meta | Describe the task state machine | — | State labels and transitions are rendered in the console | — | — | task_states | MCP bearer/Access; local stdio | None (read) | n/a | internal/mcp/meta_test.go |
 | Dots | Start a dots request and reply on its run (START, PROGRESS, BLOCKED, QUESTION, RESULT) | — | — | — | — | dots_inbox, dots_reply | MCP chatgpt channel only; writes off unless HANDOFFKEEP_DOTS_REPLY_WRITES=on | dots-hk-chatgpt and dots-run-token task_events; dots_run_tokens rows (token history) | A takeover supersedes the run token and is recorded; replies are append-only | internal/store/dots_run_token_test.go, internal/store/dots_reply_test.go, internal/mcp/dots_run_token_test.go |
@@ -163,6 +164,7 @@ because that path has an authenticated principal.
 | projects_list | read | HTTP | Projects read |
 | task_states | read | HTTP | State machine |
 | sync_status | read | HTTP | YouTrack sync health |
+| fleet_capacity | read | HTTP | Fleet quota and placement capacity evidence |
 
 Read tools set `readOnlyHint: true`. The write tools (`put_checkpoint`,
 `put_document`, `memory_put`, `attachment_put`, `attachment_upload_begin`, `attachment_upload_complete`, `attachment_put_from_path`, `decision_answer`,
@@ -205,3 +207,10 @@ list: `decisions` holds the items that need an answer, and `needs_cleanup` holds
 open requests whose task is already merged or dropped. Each item carries
 `operator_only`, which is the store's effective policy (`EffectivePolicy`), so a
 bearer answer to an operator-only request returns `decision_operator_only`.
+
+`fleet_capacity` (hk 3840) reads latest quota windows, host/account presence and
+recent placement decisions. It returns explicit expiry for manual observations
+and the state of a Devin free bucket; hk has no panewire staleness threshold, so
+quota observation age is reported without a general stale flag. Placement
+records are evidence only; an empty result says `no placement records` while
+quota and presence remain available.

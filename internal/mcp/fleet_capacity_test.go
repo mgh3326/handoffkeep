@@ -19,8 +19,11 @@ type fleetCapacityOut struct {
 		Windows    []struct {
 			Kind      string  `json:"kind"`
 			Window    string  `json:"window"`
+			State     string  `json:"state"`
 			UsedPct   float64 `json:"used_pct"`
 			AgeSecond int64   `json:"age_seconds"`
+			ExpiresAt string  `json:"expires_at"`
+			Expired   *bool   `json:"expired"`
 		} `json:"windows"`
 	} `json:"accounts"`
 	Presence []struct {
@@ -60,6 +63,23 @@ func TestFleetCapacityAccessShapeFiltersAndLimit(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	manualExpiry := time.Now().UTC().Add(-time.Minute)
+	manualMeasured := manualExpiry.Add(-time.Hour)
+	if _, _, err := st.PutQuota(ctx, key, "test", holder, store.QuotaObservation{
+		Kind: "manual", Window: "7d", MeasuredAt: manualMeasured, ExpiresAt: &manualExpiry,
+		Buckets: []store.QuotaBucket{{Window: "7d", UsedPct: 95, Scope: "account"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	devinKey := "devin:abcdef0123456789"
+	if _, err := st.LeaseQuota(ctx, devinKey, "test", holder, 600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := st.PutQuota(ctx, devinKey, "test", holder, store.QuotaObservation{
+		Kind: "auto", MeasuredAt: time.Now().UTC(), FreeBucket: &store.QuotaFreeBucket{State: "unknown"},
+	}); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := st.PutQuotaPresence(ctx, store.QuotaPresence{HostID: "host-a", AccountKey: key, LastSeen: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
@@ -84,8 +104,23 @@ func TestFleetCapacityAccessShapeFiltersAndLimit(t *testing.T) {
 	t.Cleanup(srv.Close)
 	session := connectMCP(t, srv.URL, map[string]string{"Cf-Access-Jwt-Assertion": fixture.token(t, jwt.MapClaims{"email": "operator@example.com"})})
 	out := callTool[fleetCapacityOut](t, session, "fleet_capacity", map[string]any{"limit": 101})
-	if len(out.Accounts) != 1 || out.Accounts[0].AccountKey != key || out.Accounts[0].Pool != "claude" || len(out.Accounts[0].Windows) != 1 || out.Accounts[0].Windows[0].UsedPct != 66 || out.Accounts[0].Windows[0].Window != "7d" {
+	if len(out.Accounts) != 2 || out.Accounts[0].AccountKey != key || out.Accounts[0].Pool != "claude" || len(out.Accounts[0].Windows) != 2 {
 		t.Fatalf("account section=%+v", out.Accounts)
+	}
+	var auto, manual bool
+	for _, window := range out.Accounts[0].Windows {
+		switch window.Kind {
+		case "manual":
+			manual = window.UsedPct == 95 && window.Expired != nil && *window.Expired && window.ExpiresAt != ""
+		case "auto":
+			auto = window.UsedPct == 66 && window.Window == "7d"
+		}
+	}
+	if !manual || !auto {
+		t.Fatalf("auto=%v manual=%v windows=%+v", auto, manual, out.Accounts[0].Windows)
+	}
+	if out.Accounts[1].AccountKey != devinKey || len(out.Accounts[1].Windows) != 1 || out.Accounts[1].Windows[0].State != "unknown" {
+		t.Fatalf("free bucket state=%+v", out.Accounts[1])
 	}
 	if len(out.Presence) != 1 || out.Presence[0].HostID != "host-a" || len(out.Presence[0].Accounts) != 1 || out.Presence[0].Accounts[0].AccountKey != key {
 		t.Fatalf("presence section=%+v", out.Presence)
