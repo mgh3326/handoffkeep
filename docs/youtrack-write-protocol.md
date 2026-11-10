@@ -1,11 +1,11 @@
-# hk → YouTrack write protocol (hk 3667, hk 3697, hk 3739)
+# hk → YouTrack write protocol (hk 3667, hk 3697, hk 3739, hk 3810)
 
-Status: **b1a, comment canary.** The protocol core (b0) is live for one path:
-a new hk comment on a task enrolled in the comment canary also gets a
-protocol-tracked copy on the task's YouTrack issue, when
-`HANDOFFKEEP_YT_COMMENTS_MODE=canary`. PG stays canonical for comments; the
-`task_comments` row is written exactly as before. Default mode is `off` (no op
-row, no YouTrack call). Design: `design/2026-11-09/hk3667-youtrack-write-path`
+Status: **b1, comments.** The protocol core (b0) is live for one path: a new hk
+comment also gets a protocol-tracked copy on the task's YouTrack issue, for a
+task enrolled in the comment canary when `HANDOFFKEEP_YT_COMMENTS_MODE=canary`
+(b1a), and for a task with a verified binding when it is `on` (hk 3810). PG
+stays canonical for comments; the `task_comments` row is written exactly as
+before. Default mode is `off` (no op row, no YouTrack call). Design: `design/2026-11-09/hk3667-youtrack-write-path`
 (v2 wins), `consult/2026-11-09/hk3667-write-path-answer`,
 `decision/2026-11-09/r9-data-map-memory-inbox` §4.
 
@@ -171,10 +171,11 @@ Listings request `id,text,created,updated,deleted`.
 
 ## Slice b1a: the comment canary
 
-**Gate.** `HANDOFFKEEP_YT_COMMENTS_MODE` = unset or `off` (default) or `canary`.
-Any other value, and `canary` without `YOUTRACK_URL` and `YOUTRACK_BOT_API_KEY`,
-stops `serve` at startup (fail closed). `off` needs no YouTrack configuration.
-`canary` needs the two keys but does not turn on serve's legacy read-through
+**Gate.** `HANDOFFKEEP_YT_COMMENTS_MODE` = unset or `off` (default), `canary`,
+or `on` (next section), trimmed and exactly in lower case. Any other value, and
+`canary` or `on` without `YOUTRACK_URL` and `YOUTRACK_BOT_API_KEY`, stops
+`serve` at startup (fail closed). `off` needs no YouTrack configuration.
+`canary` and `on` need the two keys but do not turn on serve's legacy read-through
 (the priority/lane overlay, YouTrack search and the lane/priority outbox):
 that has its own gate, `HANDOFFKEEP_YT_READTHROUGH_MODE` (default `off`,
 `docs/youtrack.md`), and the worker reads the keys itself.
@@ -291,6 +292,153 @@ The previous release does not read or write any of these objects.
 transition), `ytwrite.outcome_record_failed` (a settlement that did not finish),
 `ytwrite.drive`, `ytwrite.drive_failed`, `ytwrite.comments_enabled`.
 
+## Mode on (hk 3810)
+
+`HANDOFFKEEP_YT_COMMENTS_MODE=on` copies the new comments of every task that
+has a **binding**: one `yt_task_bindings` row, the only authority mode on
+reads for where a task's comments go. The canary keeps its meaning (mode
+`canary` reads only `yt_comment_canary`, as above); in mode `on` the canary set
+is not read for routing, only checked for agreement. The worker runs in both
+modes; everything in b1a's Enqueue, Dispatch and No double copy holds, with
+"enrolled" read as "bound".
+
+**Binding.** `yt_task_bindings(task_id, tenant, issue_id, issue_readable,
+project_id, bound_by, bound_at)`, one row per task and one task per
+`(tenant, issue_id)`. It is written only by `youtrack comments-backfill`
+(`Store.AddYTTaskBinding`), after the canary's verification
+(`youtrack.VerifyBinding`: the enrollment rules above, and the task's
+`youtrack_projects` row must carry the YouTrack project id). Publication
+reads the task's mappings again under its locks and refuses
+(`yt_binding_conflict`) when they differ from the verified ones, when any
+source below disagrees, or when the task is bound elsewhere; the same binding
+again is a no-op. A binding writes no op and no map row, and old comments are
+never copied: a task bound later gets ops for the comments written after the
+binding only.
+
+**Cross-checks.** Each source hk keeps, when present, must agree with the
+binding (`ytBindingDisagreement`, plain reads, no network):
+
+| Source (log `source=`) | Disagrees when |
+|---|---|
+| `task_origins` | the task's YouTrack mirror link names another issue, or another non-empty tenant |
+| `yt_entity_map_task` | the task's map row names another issue |
+| `yt_entity_map_issue` | a map row gives the issue to another task |
+| `yt_comment_canary_task` | the task's canary row names another issue or tenant |
+| `yt_comment_canary_issue` | a canary row gives the tenant's issue to another task |
+| `yt_task_bindings_issue` | another task's binding holds the issue (publication and preflight only) |
+| `youtrack_projects` | the task has no project, its project is unmapped, or it maps to another YouTrack project id |
+
+**Enqueue.** In the comment's transaction, after the comment lock and the
+comment's KEY SHARE on its task: the task's lane lock, then the binding. No
+binding: no op and no link, so the legacy push and the import carry the
+comment as before. A disagreeing source: no op and no link either, and one
+`ytwrite.comment_skipped_ambiguous task_id=<id> comment_id=<id>
+source=<source>` line (no body, no credential). Otherwise the op, its link and
+the first op's map anchor are written as in the canary, with the binding's
+tenant and issue. An identity problem never makes a rejected op with a link,
+which would leave the comment on no path; an anchor that still conflicts after
+the checks fails the comment. A body or actor the protocol cannot send keeps
+b1a's locally rejected op and link.
+
+**Admission.** In mode on the worker admits a prepared op only when it is
+bound to the worker's tenant and its task has a binding with the op's issue
+on that tenant, read in the claim under the lane lock that the binding's
+writer also takes. `Due` lists by the same predicate. A canary-era op whose
+task has no matching binding is held, not rejected; mode `canary` admits by
+the canary set again.
+
+**Issue ownership.** `AddYTTaskBinding` and `AddYTCommentCanary` both take
+the issue ownership lock, then FOR SHARE on the task row, then the lane lock,
+and each refuses what the other's table says otherwise: an enrollment whose
+binding names another issue or tenant, or an issue bound to another task, is
+`yt_canary_conflict`. A `canary add` from the previous release takes none of
+this; the enqueue cross-checks catch what it could write (Rollout).
+
+**Commands.** Both open the database directly, like `youtrack canary`, and
+verify against the tenant the worker uses (the host of `YOUTRACK_URL`).
+
+- `handoffkeep youtrack comments-preflight [--project P] [--days N]` is
+  read-only: it reads issues from YouTrack and writes nothing. Candidates are
+  the tasks with a comment in the last N days (default 14), every task in the
+  canary set and every task with an unresolved comment op; `--project` keeps
+  one hk project's. A bound task is checked locally only and comes out
+  `bound` or `bound_ambiguous`; an unbound one is verified in YouTrack and
+  comes out `verifies`, `no_issue` (no project, an unmapped project or one
+  with no YouTrack id, no such issue), `ambiguous` (any other refusal, or a
+  source that disagrees with the would-be binding) or `error` (a failed
+  read). The JSON report has, per hk project, a count and up to 10 task ids
+  for each class; `comments_total` and `max_comments_per_hour` (comments an
+  hk entry point wrote in the window, in all and in the busiest UTC hour);
+  and `unresolved_ops_uncovered`, the unresolved comment ops (count, up to 10
+  op ids) that mode on would hold because their task has no consistent
+  binding on this tenant for the op's issue. Each non-bound class logs
+  `youtrack.comments_classified task_id=<id> class=<class> detail="..."`,
+  each `error` `youtrack.comments_classify_failed task_id=<id> err="..."`.
+- `handoffkeep youtrack comments-backfill [--project P] [--days N] [--by
+  NAME]` classifies the same way and publishes each `verifies` binding. A
+  refused publication counts as `ambiguous` and the run goes on; the report
+  adds `bound_now`. A re-run reads nothing from YouTrack for a bound task.
+- Each YouTrack read has its own 15 s timeout and each task 60 s; there is no
+  budget for the whole run. A task in class `error` makes either command exit
+  1 after the report.
+
+**Volume.** The worker carries at most one `Drive` at a time, every 5 s
+(`ytCommentsInterval`). A pass lists up to 50 due ops (`ytCommentsPassLimit`),
+at most one per task lane (the lane guard), and `Drive` repeats the pass, up
+to 16 times, while a pass resolves something. The POSTs are sequential and
+each is bounded by the 3 s dispatch timeout. So a burst on distinct tasks
+moves at up to 50 ops per tick (36 000 per hour) while a POST takes under
+100 ms, and at the YouTrack round trip beyond that (about 18 000 to 36 000
+per hour at the 100 to 200 ms the read path measured); the floor, every POST
+timing out, is 1 200 per hour. Compare `max_comments_per_hour` from the
+preflight; no limit was changed. A 429 returns that op to `prepared` until
+the `Retry-After` the server sent (5 s without one, at most 30 days) and holds
+its lane behind it; it does not pause the other lanes, so under a tenant-wide
+429 each due lane makes one POST per pass and each waits its own Retry-After.
+
+**Migration** `20261110-yt-task-bindings` (expand-only, after
+`20261109-yt-comment-canary`): the new table `yt_task_bindings` with its
+primary key and `UNIQUE(tenant, issue_id)`. Locks only on the new, empty
+table; no foreign key, so no lock on `tasks`. It writes no row, and the
+previous release neither reads nor writes the table: it keeps serving on the
+migrated schema (`scripts/test-previous-release-schema.sh`).
+
+**Rollout.**
+
+1. Deploy with `HANDOFFKEEP_YT_COMMENTS_MODE=canary`.
+2. `handoffkeep youtrack comments-preflight` (read-only).
+3. `handoffkeep youtrack comments-backfill`.
+4. `comments-preflight` again: `unresolved_ops_uncovered` is 0; review every
+   `ambiguous`, `bound_ambiguous` and `error` task.
+5. `hk-env set HANDOFFKEEP_YT_COMMENTS_MODE=on`, only on a release that knows
+   `on`.
+6. After 10 minutes, `handoffkeep yt ops` (pending) and `yt ops --state
+   rejected`.
+
+During the rollout nobody runs `youtrack canary add` from the previous
+release: it does not take the ownership lock or check bindings.
+
+**Stop and rollback.** Set `HANDOFFKEEP_YT_COMMENTS_MODE=canary` **before**
+`shiftgate rollback`: a release older than this one fails startup on `on`.
+In mode `canary` the ops prepared in mode `on` for tasks outside the canary
+are held, not lost: they stay `prepared`, visible in `yt ops`, and their
+comments are owned by their links, so neither the legacy push nor the import
+sends them. Setting `on` again releases them. There is no unbind command yet
+and no recovery of held ops; both come with the automatic binder (follow-up).
+
+**Residuals.**
+
+- A task created after the backfill has no binding until the backfill runs
+  again; its comments go through the legacy push and the import meanwhile.
+- The enqueue reads its sources without locks, so a project change or mirror
+  write that commits during a comment's transaction is caught by the next
+  comment, not this one; the issue binding itself cannot change under the
+  lane lock.
+- A YouTrack-side move of a bound issue to another project is not seen
+  locally: the binding keeps the stable internal id, so comments still land
+  on the moved issue.
+
+
 ## Tests
 
 `ytwritetest.RunProtocol` (public contract) and `RunLedger` (compare-and-set rules)
@@ -308,6 +456,8 @@ match, ambiguous evidence, caller cancellation.
 
 - Turning the mode on in production (handoffkeep-design with the operator,
   after deploy), and the authority epoch (design v2.3).
+- An automatic binder for new tasks, `comments-unbind`, and recovery of ops
+  held after a stop (hk 3810 follow-up).
 - The event-feed row an applied op commits, parent/child settling (b3),
   article generations (b2), claims with a fencing generation (v2.2).
 - A direct GET of the created comment before answering `applied`; the live
