@@ -138,11 +138,40 @@ func (w ytCommentsWorker) Run(ctx context.Context) {
 	}
 }
 
-const youtrackOpsUsage = "usage: youtrack ops [--state pending|all|prepared|dispatched|applied|rejected|remote_unknown] [--task N] [--after-id N] [--limit N]"
+// ytOpsAlertWorker scans the durable ledger independently of dispatch mode,
+// so pending ops still alert if comment sending is turned off.
+type ytOpsAlertWorker struct {
+	store    *store.Store
+	interval time.Duration
+}
+
+func (w ytOpsAlertWorker) Run(ctx context.Context) {
+	interval := w.interval
+	if interval <= 0 {
+		interval = ytCommentsInterval
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		if _, err := w.store.EnqueueYTWriteOpAlerts(ctx, time.Now().UTC()); err != nil && ctx.Err() == nil {
+			log.Printf("ytwrite.alerts_failed err=%q", err.Error())
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+const youtrackOpsUsage = "usage: youtrack ops [--state pending|all|prepared|dispatched|applied|rejected|remote_unknown] [--task N] [--after-id N] [--limit N] | youtrack ops resolve <op id> --applied <youtrack id> | --not-applied --by <actor> --note <text>"
 
 // youtrackOpsCmd is `youtrack ops` (also `yt ops`): the write-protocol ops
 // through GET /v1/yt/ops. remote_unknown shows status pending, never done.
 func youtrackOpsCmd(args []string, out io.Writer) error {
+	if len(args) > 0 && args[0] == "resolve" {
+		return youtrackOpsResolveCmd(args[1:], out)
+	}
 	fs := flag.NewFlagSet("youtrack ops", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	c := remoteClient(fs)
@@ -180,6 +209,47 @@ func youtrackOpsCmd(args []string, out io.Writer) error {
 		out2["next_after_id"] = next
 	}
 	return printJSON(out, out2)
+}
+
+func youtrackOpsResolveCmd(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("youtrack ops resolve", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	appliedID := fs.String("applied", "", "YouTrack comment id when the op was applied")
+	notApplied := fs.Bool("not-applied", false, "record that the comment was not applied")
+	by := fs.String("by", "", "operator who checked YouTrack")
+	note := fs.String("note", "", "operator's resolution note")
+	ordered, err := splitArgs(args, "applied", "by", "note", "url", "token")
+	if err != nil {
+		return err
+	}
+	if err := fs.Parse(ordered); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 || (*appliedID != "") == *notApplied {
+		return errors.New(youtrackOpsUsage)
+	}
+	if *notApplied && (strings.TrimSpace(*by) == "" || strings.TrimSpace(*note) == "") {
+		return errors.New(youtrackOpsUsage)
+	}
+	id, err := strconv.ParseInt(fs.Arg(0), 10, 64)
+	if err != nil || id < 1 {
+		return errors.New("op id must be positive")
+	}
+	c := remoteClient(fs)
+	if err := mustClient(c); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	actor := *by
+	if actor == "" {
+		actor = "operator:cli"
+	}
+	result, err := c.ResolveYTOp(ctx, id, ytwrite.Resolution{Applied: !*notApplied, YTID: *appliedID, By: actor, Note: *note})
+	if err != nil {
+		return err
+	}
+	return printJSON(out, map[string]any{"op_id": result.OpID, "status": result.Status, "state": result.State, "reason": result.Reason, "yt_id": result.YTID})
 }
 
 const youtrackCanaryUsage = "usage: youtrack canary add <task> [--by NAME] | remove <task> | list"

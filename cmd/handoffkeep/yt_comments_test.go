@@ -62,6 +62,14 @@ func TestYTIsTheYouTrackCommand(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "state") {
 		t.Fatalf("yt ops with a bad state: %v", err)
 	}
+	err = run([]string{"yt", "ops", "resolve", "4", "--not-applied"}, io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "resolve") {
+		t.Fatalf("yt ops resolve without actor/note: %v", err)
+	}
+	err = run([]string{"yt", "ops", "resolve", "4", "--applied", "c-4", "--not-applied"}, io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "resolve") {
+		t.Fatalf("yt ops resolve with both outcomes: %v", err)
+	}
 }
 
 // A call in flight at shutdown plus its settlement fits serve's stop budget.

@@ -1,0 +1,67 @@
+package api
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+
+	"github.com/mgh3326/handoffkeep/internal/store"
+	"github.com/mgh3326/handoffkeep/internal/testdb"
+	"github.com/mgh3326/handoffkeep/internal/ytwrite"
+)
+
+func TestYTOpsResolveHTTPIsOperatorOnlyAndUsesProtocol(t *testing.T) {
+	_, dbURL := testdb.Schema(t, "yt_ops_resolve_api")
+	st, err := store.Open(context.Background(), dbURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(st.Close)
+	h := httptest.NewServer(Server{Service: Service{Store: st}, Tokens: Tokens{"operator": "op-token", "peer": "peer-token"}}.Handler())
+	t.Cleanup(h.Close)
+
+	now := time.Now().UTC()
+	op, _, err := st.YTWriteLedger().Prepare(context.Background(), now, ytwrite.NewOp{Principal: "p", Kind: ytwrite.KindCommentAppend, Key: "resolve", PayloadSHA: "sha", Payload: []byte(`{"body":"x"}`), EntityKind: "task", EntityID: "42", YTTargetID: "2-42", Actor: "a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, outcome, err := st.YTWriteLedger().Claim(context.Background(), now, op.ID); err != nil || outcome != ytwrite.ClaimClaimed {
+		t.Fatalf("claim = %s, %v", outcome, err)
+	}
+	if _, err := st.YTWriteLedger().MarkUnknown(context.Background(), now, op.ID, now, ytwrite.ReasonTransport, "uncertain"); err != nil {
+		t.Fatal(err)
+	}
+	post := func(token string, body any) (int, map[string]any) {
+		t.Helper()
+		raw, _ := json.Marshal(body)
+		req, _ := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/v1/yt/ops/%d/resolve", h.URL, op.ID), bytes.NewReader(raw))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := h.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		out := map[string]any{}
+		_ = json.NewDecoder(resp.Body).Decode(&out)
+		return resp.StatusCode, out
+	}
+	if status, body := post("peer-token", map[string]any{"applied": true, "yt_id": "c-42", "by": "operator"}); status != http.StatusForbidden || body["error"] != "operator_required" {
+		t.Fatalf("peer resolve = %d %v", status, body)
+	}
+	if status, body := post("op-token", map[string]any{"applied": true, "yt_id": "c-42", "by": "operator"}); status != http.StatusOK || body["state"] != string(ytwrite.StateApplied) {
+		t.Fatalf("operator resolve = %d %v", status, body)
+	}
+	resolved, err := st.YTWriteLedger().ByID(context.Background(), op.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.State != ytwrite.StateApplied || resolved.YTResultID != "c-42" {
+		t.Fatalf("resolved op = %+v", resolved)
+	}
+}

@@ -2,6 +2,8 @@ package api
 
 import (
 	"net/http"
+	"strings"
+	"time"
 
 	"github.com/mgh3326/handoffkeep/internal/store"
 	"github.com/mgh3326/handoffkeep/internal/ytwrite"
@@ -49,4 +51,46 @@ func (s Server) ytOps(w http.ResponseWriter, r *http.Request) {
 		next = ops[len(ops)-1].ID
 	}
 	jsonOut(w, http.StatusOK, map[string]any{"ops": views, "next_after_id": next})
+}
+
+type ytOpsResolveInput struct {
+	Applied *bool  `json:"applied"`
+	YTID    string `json:"yt_id"`
+	By      string `json:"by"`
+	Note    string `json:"note"`
+}
+
+// ytOpsResolve is POST /v1/yt/ops/{id}/resolve. Only the operator bearer
+// client may make this ledger write; Protocol.Resolve owns the transition.
+func (s Server) ytOpsResolve(w http.ResponseWriter, r *http.Request) {
+	client, ok := s.auth(w, r)
+	if !ok {
+		return
+	}
+	if client != operatorClientID {
+		writeError(w, http.StatusForbidden, "operator_required")
+		return
+	}
+	id, err := pathID(r, "id")
+	if err != nil || id < 1 {
+		writeError(w, http.StatusBadRequest, "invalid_context")
+		return
+	}
+	defer r.Body.Close()
+	var in ytOpsResolveInput
+	if err := decode(r, &in, bodySmall); err != nil {
+		appErr(w, r, err)
+		return
+	}
+	if in.Applied == nil || (*in.Applied && in.YTID == "") || (!*in.Applied && (in.YTID != "" || strings.TrimSpace(in.By) == "" || strings.TrimSpace(in.Note) == "")) {
+		writeError(w, http.StatusBadRequest, "invalid_context")
+		return
+	}
+	p := &ytwrite.Protocol{Config: ytwrite.Config{Ledger: s.Service.Store.YTWriteLedger(), Now: func() time.Time { return time.Now().UTC() }}}
+	result, err := p.Resolve(r.Context(), id, ytwrite.Resolution{Applied: *in.Applied, YTID: in.YTID, By: in.By, Note: in.Note})
+	if err != nil {
+		appErr(w, r, err)
+		return
+	}
+	jsonOut(w, http.StatusOK, map[string]any{"op_id": result.OpID, "status": result.Status, "state": result.State, "reason": result.Reason, "retry_after": result.RetryAfter.String(), "yt_id": result.YTID})
 }
