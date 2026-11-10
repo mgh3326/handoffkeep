@@ -299,8 +299,8 @@ has a **binding**: one `yt_task_bindings` row, the only authority mode on
 reads for where a task's comments go. The canary keeps its meaning (mode
 `canary` reads only `yt_comment_canary`, as above); in mode `on` the canary set
 is not read for routing, only checked for agreement. The worker runs in both
-modes; everything in b1a's Enqueue, Dispatch and No double copy holds, with
-"enrolled" read as "bound".
+modes. b1a's Dispatch, Projection metadata and No double copy hold with
+"enrolled" read as "bound"; Enqueue and Admission differ as below.
 
 **Binding.** `yt_task_bindings(task_id, tenant, issue_id, issue_readable,
 project_id, bound_by, bound_at)`, one row per task and one task per
@@ -362,7 +362,8 @@ verify against the tenant the worker uses (the host of `YOUTRACK_URL`).
   the tasks with a comment in the last N days (default 14), every task in the
   canary set and every task with an unresolved comment op; `--project` keeps
   one hk project's. A bound task is checked locally only and comes out
-  `bound` or `bound_ambiguous`; an unbound one is verified in YouTrack and
+  `bound` or `bound_ambiguous` (a source disagrees, or it is bound on another
+  tenant); an unbound one is verified in YouTrack and
   comes out `verifies`, `no_issue` (no project, an unmapped project or one
   with no YouTrack id, no such issue), `ambiguous` (any other refusal, or a
   source that disagrees with the would-be binding) or `error` (a failed
@@ -371,9 +372,10 @@ verify against the tenant the worker uses (the host of `YOUTRACK_URL`).
   hk entry point wrote in the window, in all and in the busiest UTC hour);
   and `unresolved_ops_uncovered`, the unresolved comment ops (count, up to 10
   op ids) that mode on would hold because their task has no consistent
-  binding on this tenant for the op's issue. Each non-bound class logs
-  `youtrack.comments_classified task_id=<id> class=<class> detail="..."`,
-  each `error` `youtrack.comments_classify_failed task_id=<id> err="..."`.
+  binding on this tenant for the op's issue. Each `bound_ambiguous`,
+  `no_issue` and `ambiguous` task logs `youtrack.comments_classified
+  task_id=<id> class=<class> detail="..."` to stderr, and each `error` task
+  `youtrack.comments_classify_failed task_id=<id> err="..."`.
 - `handoffkeep youtrack comments-backfill [--project P] [--days N] [--by
   NAME]` classifies the same way and publishes each `verifies` binding. A
   refused publication counts as `ambiguous` and the run goes on; the report
