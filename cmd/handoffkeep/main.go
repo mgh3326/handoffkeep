@@ -2050,6 +2050,7 @@ func serve(args []string, errout io.Writer) error {
 	youTrack := yt.readThrough
 	svc := api.Service{Store: st, Attachments: am, YouTrack: youTrack, SearchBackend: yt.searchBackend}
 	workers := []backgroundWorker{chatRetentionWorker{store: st}, placementRetentionWorker{store: st}, syncRetentionWorker{store: st, retention: retention}}
+	workers = append(workers, ytOpsAlertWorker{store: st})
 	if *iceboxDays > 0 {
 		workers = append(workers, backlogSweepWorker{store: st, days: *iceboxDays})
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/url"
 	"strconv"
+	"time"
 
 	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
@@ -36,4 +37,30 @@ func (c Client) ListYTOps(ctx context.Context, state string, taskID, afterID int
 		next = *out.Next
 	}
 	return out.Ops, next, nil
+}
+
+// ResolveYTOp records the operator's resolution through POST /v1/yt/ops/{id}/resolve.
+func (c Client) ResolveYTOp(ctx context.Context, id int64, resolution ytwrite.Resolution) (ytwrite.Result, error) {
+	var wire struct {
+		OpID       int64          `json:"op_id"`
+		Status     ytwrite.Status `json:"status"`
+		State      ytwrite.State  `json:"state"`
+		Reason     string         `json:"reason"`
+		RetryAfter string         `json:"retry_after"`
+		YTID       string         `json:"yt_id"`
+	}
+	body := struct {
+		Applied bool   `json:"applied"`
+		YTID    string `json:"yt_id"`
+		By      string `json:"by"`
+		Note    string `json:"note"`
+	}{resolution.Applied, resolution.YTID, resolution.By, resolution.Note}
+	if err := c.call(ctx, "POST", "/v1/yt/ops/"+strconv.FormatInt(id, 10)+"/resolve", body, &wire); err != nil {
+		return ytwrite.Result{}, err
+	}
+	retryAfter, err := time.ParseDuration(wire.RetryAfter)
+	if err != nil {
+		return ytwrite.Result{}, err
+	}
+	return ytwrite.Result{OpID: wire.OpID, Status: wire.Status, State: wire.State, Reason: wire.Reason, RetryAfter: retryAfter, YTID: wire.YTID}, nil
 }

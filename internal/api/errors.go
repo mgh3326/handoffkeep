@@ -16,6 +16,7 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/store"
 	"github.com/mgh3326/handoffkeep/internal/telemetry"
 	"github.com/mgh3326/handoffkeep/internal/wrkrecords"
+	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
 
 // Every JSON error body is {"error": "<snake_code>"}, optionally with extra
@@ -50,6 +51,10 @@ type errorRule struct {
 // errorRules is the one table from sentinel to response. Order matters only
 // where one error could match two rules; the first match wins.
 var errorRules = []errorRule{
+	{ytwrite.ErrNotFound, http.StatusNotFound, "ytwrite_not_found", false},
+	{ytwrite.ErrState, http.StatusConflict, "ytwrite_state", false},
+	{ytwrite.ErrInvalid, http.StatusBadRequest, "ytwrite_invalid", false},
+	{ytwrite.ErrConflictingResult, http.StatusConflict, "ytwrite_conflicting_result", false},
 	{store.ErrStandingNotNewer, http.StatusConflict, "standing_not_newer", false},
 	{store.ErrStandingConflict, http.StatusConflict, "standing_conflict", false},
 	{store.ErrInvalidSync, http.StatusBadRequest, "invalid_context", false},

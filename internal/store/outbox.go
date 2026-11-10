@@ -24,6 +24,7 @@ const (
 	OutboxKindDotsReport   = "dots_report"
 	OutboxKindDotsDecision = "dots_decision"
 	OutboxKindDotsFollowup = "dots_followup"
+	OutboxKindYTWriteOp    = "yt_write_op"
 )
 
 var (
@@ -34,8 +35,8 @@ var (
 	ErrOutboxConflict = errors.New("notification_outbox_conflict")
 )
 
-// NotificationOutbox is one lane notification owed by an assistant-path
-// write. SentAt and HubRowID stay NULL until the drainer records the hub's
+// NotificationOutbox is one lane notification owed by a server-side write.
+// SentAt and HubRowID stay NULL until the drainer records the hub's
 // receipt (201 or 409 with the existing row id) here.
 type NotificationOutbox struct {
 	ID         int64      `json:"id"`

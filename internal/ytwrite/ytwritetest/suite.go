@@ -264,6 +264,9 @@ func RunProtocol(t *testing.T, nl NewLedger) {
 		if _, err := e.p.Resolve(context.Background(), r.OpID, ytwrite.Resolution{By: "operator"}); !errors.Is(err, ytwrite.ErrState) {
 			t.Fatalf("second resolve = %v, want ErrState", err)
 		}
+		next := e.append("k2", "after applied resolution")
+		e.wantStatus(next, ytwrite.StatusApplied, ytwrite.StateApplied, "")
+		e.wantRemote(2, 2)
 	})
 
 	t.Run("final_refusal_is_rejected_and_replayed_without_sending", func(t *testing.T) {

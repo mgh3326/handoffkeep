@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -61,6 +64,46 @@ func TestYTIsTheYouTrackCommand(t *testing.T) {
 	err = run([]string{"yt", "ops", "--state", "done"}, io.Discard, io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "state") {
 		t.Fatalf("yt ops with a bad state: %v", err)
+	}
+	err = run([]string{"yt", "ops", "resolve", "4", "--not-applied"}, io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "resolve") {
+		t.Fatalf("yt ops resolve without actor/note: %v", err)
+	}
+	err = run([]string{"yt", "ops", "resolve", "4", "--applied", "c-4", "--not-applied"}, io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "resolve") {
+		t.Fatalf("yt ops resolve with both outcomes: %v", err)
+	}
+}
+
+func TestYTOpsResolveAcceptsURLAndTokenFlags(t *testing.T) {
+	t.Setenv("HANDOFFKEEP_URL", "")
+	t.Setenv("HANDOFFKEEP_TOKEN", "")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/yt/ops/4/resolve" {
+			t.Errorf("request = %s %s", r.Method, r.URL.Path)
+		}
+		if r.Header.Get("Authorization") != "Bearer test-token" {
+			t.Errorf("authorization header = %q", r.Header.Get("Authorization"))
+		}
+		var in map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		if in["applied"] != true || in["yt_id"] != "c-4" {
+			t.Errorf("request body = %v", in)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"op_id": 4, "status": "applied", "state": "applied", "reason": "", "retry_after": "0s", "yt_id": "c-4"})
+	}))
+	t.Cleanup(server.Close)
+
+	var out strings.Builder
+	err := run([]string{"yt", "ops", "resolve", "4", "--applied", "c-4", "--url", server.URL, "--token", "test-token"}, &out, io.Discard)
+	if err != nil {
+		t.Fatalf("resolve with --url/--token: %v", err)
+	}
+	if !strings.Contains(out.String(), "\"state\":\"applied\"") {
+		t.Fatalf("resolve output = %s", out.String())
 	}
 }
 
