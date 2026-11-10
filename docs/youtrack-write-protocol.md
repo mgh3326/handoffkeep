@@ -388,18 +388,21 @@ verify against the tenant the worker uses (the host of `YOUTRACK_URL`).
   1 after the report.
 
 **Volume.** The worker carries at most one `Drive` at a time, every 5 s
-(`ytCommentsInterval`). A pass lists up to 50 due ops (`ytCommentsPassLimit`),
-at most one per task lane (the lane guard), and `Drive` repeats the pass, up
-to 16 times, while a pass resolves something. The POSTs are sequential and
-each is bounded by the 3 s dispatch timeout. So a burst on distinct tasks
-moves at up to 50 ops per tick (36 000 per hour) while a POST takes under
-100 ms, and at the YouTrack round trip beyond that (about 18 000 to 36 000
-per hour at the 100 to 200 ms the read path measured); the floor, every POST
-timing out, is 1 200 per hour. Compare `max_comments_per_hour` from the
-preflight; no limit was changed. A 429 returns that op to `prepared` until
-the `Retry-After` the server sent (5 s without one, at most 30 days) and holds
-its lane behind it; it does not pause the other lanes, so under a tenant-wide
-429 each due lane makes one POST per pass and each waits its own Retry-After.
+(`ytCommentsInterval`); a `Drive` that outlasts the tick is followed by the
+next one at once. A pass lists up to 50 due ops (`ytCommentsPassLimit`), at
+most one per task lane (the lane guard), and `Drive` repeats the pass, up to
+16 times, while a pass resolves something, so one `Drive` moves at most 800
+ops, and a burst on one task at most 16. The POSTs are sequential and each
+is bounded by the 3 s dispatch timeout. So the 5 s tick does not bound a
+burst on distinct tasks; the dispatch round trip and the database time of
+each op do: about 18 000 to 36 000 ops per hour at the 100 to 200 ms the read
+path measured, and 1 200 per hour at the floor, every POST timing out. A
+burst on one task moves at most 16 ops per tick (11 520 per hour). Compare
+`max_comments_per_hour` from the preflight; no limit was changed. A 429
+returns that op to `prepared` until the `Retry-After` the server sent (5 s
+without one, at most 30 days) and holds its lane behind it; it does not
+pause the other lanes, so under a tenant-wide 429 each due lane makes one
+POST per pass and each waits its own Retry-After.
 
 **Migration** `20261110-yt-task-bindings` (expand-only; no `After`, it needs
 no other table and runs after the 20261109 entries in ID order): the new
