@@ -117,3 +117,99 @@ func TestCommentMappingConflictBeforeSend(t *testing.T) {
 		t.Fatalf("failed read: %v", err)
 	}
 }
+
+func TestClassifyTask(t *testing.T) {
+	ctx := context.Background()
+	good := func() *issueReader {
+		return &issueReader{issues: map[string]Issue{"HK-7": issueFor("HK-7", "#7 test task")}}
+	}
+	tests := []struct {
+		name       string
+		candidate  store.YTCanaryCandidate
+		reader     *issueReader
+		wantStatus TaskPreflightStatus
+		wantErr    bool
+	}{
+		{
+			name:       "resolve and verify happy path",
+			candidate:  store.YTCanaryCandidate{TaskID: 7, Project: "handoffkeep", ShortName: "HK", ProjectID: "0-2"},
+			reader:     good(),
+			wantStatus: StatusResolveVerify,
+		},
+		{
+			name:       "resolve and verify with agreeing mirror",
+			candidate:  store.YTCanaryCandidate{TaskID: 7, Project: "handoffkeep", ShortName: "HK", ProjectID: "0-2", MirrorIssueID: "2-77", MirrorTenant: canaryTenant},
+			reader:     good(),
+			wantStatus: StatusResolveVerify,
+		},
+		{
+			name:       "ambiguous when mirror issue ID disagrees",
+			candidate:  store.YTCanaryCandidate{TaskID: 7, Project: "handoffkeep", ShortName: "HK", ProjectID: "0-2", MirrorIssueID: "2-999", MirrorTenant: canaryTenant},
+			reader:     good(),
+			wantStatus: StatusAmbiguous,
+		},
+		{
+			name:       "ambiguous when mirror tenant disagrees",
+			candidate:  store.YTCanaryCandidate{TaskID: 7, Project: "handoffkeep", ShortName: "HK", ProjectID: "0-2", MirrorIssueID: "2-77", MirrorTenant: "other.youtrack.cloud"},
+			reader:     good(),
+			wantStatus: StatusAmbiguous,
+		},
+		{
+			name:       "ambiguous when entity map disagrees",
+			candidate:  store.YTCanaryCandidate{TaskID: 7, Project: "handoffkeep", ShortName: "HK", ProjectID: "0-2", MappedIssueID: "2-888"},
+			reader:     good(),
+			wantStatus: StatusAmbiguous,
+		},
+		{
+			name:       "no issue when task has no project",
+			candidate:  store.YTCanaryCandidate{TaskID: 7},
+			reader:     good(),
+			wantStatus: StatusNoIssue,
+		},
+		{
+			name:       "no issue when project unmapped",
+			candidate:  store.YTCanaryCandidate{TaskID: 7, Project: "unmapped"},
+			reader:     good(),
+			wantStatus: StatusNoIssue,
+		},
+		{
+			name:       "no issue when issue 404",
+			candidate:  store.YTCanaryCandidate{TaskID: 3739, Project: "handoffkeep", ShortName: "HK", ProjectID: "0-2"},
+			reader:     &issueReader{},
+			wantStatus: StatusNoIssue,
+		},
+		{
+			name:       "no issue when summary does not name task",
+			candidate:  store.YTCanaryCandidate{TaskID: 7, Project: "handoffkeep", ShortName: "HK", ProjectID: "0-2"},
+			reader:     &issueReader{issues: map[string]Issue{"HK-7": issueFor("HK-7", "#99 wrong task")}},
+			wantStatus: StatusNoIssue,
+		},
+		{
+			name:      "api error propagates",
+			candidate: store.YTCanaryCandidate{TaskID: 7, Project: "handoffkeep", ShortName: "HK", ProjectID: "0-2"},
+			reader:    &issueReader{err: errors.New("network down")},
+			wantErr:   true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := ClassifyTask(ctx, tc.reader, canaryTenant, tc.candidate)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if res.Status != tc.wantStatus {
+				t.Fatalf("status = %v, want %v (reason: %s)", res.Status, tc.wantStatus, res.Reason)
+			}
+			if tc.wantStatus == StatusResolveVerify && (res.Binding.IssueID != "2-77" || res.Binding.Tenant != canaryTenant) {
+				t.Fatalf("unexpected binding: %+v", res.Binding)
+			}
+		})
+	}
+}

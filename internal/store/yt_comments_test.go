@@ -659,3 +659,143 @@ func TestCanaryMigrationUpgradesAlreadyCurrentDatabase(t *testing.T) {
 		s.Close()
 	}
 }
+
+func TestModeOnCommentProtocol(t *testing.T) {
+	s := schemaStore(t, "ytc_mode_on")
+	ctx := t.Context()
+	s.SetYTCommentsMode(YTCommentsOn)
+	yt := ytwritetest.NewFake()
+	var offset atomic.Int64
+	p := ytcProtocol(t, s, yt, &offset)
+
+	// 1. Verified task enqueues op and link, and Drive applies to fake remote.
+	taskA := ytcTask(t, s, "handoffkeep")
+	issueA := "2-" + strconv.FormatInt(taskA, 10)
+	if err := s.AddYTEntityMapTask(ctx, taskA, issueA, "0-2", ytcTenant); err != nil {
+		t.Fatalf("verify taskA: %v", err)
+	}
+	cA, err := s.CreateTaskComment(ctx, taskA, "worker", "comment on verified task A")
+	if err != nil {
+		t.Fatal(err)
+	}
+	opA, ok := ytcOpFor(t, s, cA.ID)
+	if !ok || opA.State != ytwrite.StatePrepared {
+		t.Fatalf("taskA op = %+v, ok=%v, want prepared op", opA, ok)
+	}
+	if _, err := p.Drive(ctx, 10); err != nil {
+		t.Fatal(err)
+	}
+	opA, _ = ytcOpFor(t, s, cA.ID)
+	csA := yt.Comments(issueA)
+	if opA.State != ytwrite.StateApplied || len(csA) != 1 || opA.YTResultID != csA[0].ID {
+		t.Fatalf("taskA op not applied: op=%+v, remote=%+v", opA, csA)
+	}
+
+	// 2. Unverified task gets no op and no link, and legacy-push query still selects the comment.
+	taskB := ytcTask(t, s, "handoffkeep")
+	if _, err := s.UpsertYouTrackMirror(ctx, YouTrackMirrorInput{TaskID: taskB, IssueID: "9-2", DisplayRef: "HK-2", Tenant: ytcTenant, Role: "mirror", SyncedAt: time.Now().UTC().Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	cB, err := s.CreateTaskComment(ctx, taskB, "worker", "comment on unverified task B")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := ytcOpFor(t, s, cB.ID); ok {
+		t.Fatal("unverified task B got an op")
+	}
+	unpushedB, err := s.UnpushedYouTrackComments(ctx, taskB, 0, 50)
+	if err != nil || len(unpushedB) != 1 || unpushedB[0].ID != cB.ID {
+		t.Fatalf("legacy push did not select unverified comment: %+v %v", unpushedB, err)
+	}
+
+	// 3. Ambiguous task (task_origins and mapping disagree) gets no op and no link.
+	taskC := ytcTask(t, s, "handoffkeep")
+	if _, err := s.UpsertYouTrackMirror(ctx, YouTrackMirrorInput{TaskID: taskC, IssueID: "9-old", DisplayRef: "OLD-1", Tenant: ytcTenant, Role: "mirror", SyncedAt: time.Now().UTC().Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	cC, err := s.CreateTaskComment(ctx, taskC, "worker", "comment on ambiguous task C")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := ytcOpFor(t, s, cC.ID); ok {
+		t.Fatal("ambiguous task C got an op")
+	}
+
+	// 4. Canary mode unchanged: enrolled task enqueues; task outside canary does not enqueue (even if verified in entity map).
+	s.SetYTCommentsMode(YTCommentsCanary)
+	taskEnrolled := ytcTask(t, s, "handoffkeep")
+	ytcEnroll(t, s, taskEnrolled)
+	cEnrolled, err := s.CreateTaskComment(ctx, taskEnrolled, "worker", "canary comment")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := ytcOpFor(t, s, cEnrolled.ID); !ok {
+		t.Fatal("enrolled task got no op in canary mode")
+	}
+	taskNotEnrolled := ytcTask(t, s, "handoffkeep")
+	if err := s.AddYTEntityMapTask(ctx, taskNotEnrolled, "2-notenrolled", "0-2", ytcTenant); err != nil {
+		t.Fatal(err)
+	}
+	cNotEnrolled, err := s.CreateTaskComment(ctx, taskNotEnrolled, "worker", "not enrolled comment")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := ytcOpFor(t, s, cNotEnrolled.ID); ok {
+		t.Fatal("task outside canary got an op in canary mode")
+	}
+
+	// 5. Mode off writes no op rows.
+	s.SetYTCommentsMode(YTCommentsOff)
+	cOff, err := s.CreateTaskComment(ctx, taskA, "worker", "mode off comment")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := ytcOpFor(t, s, cOff.ID); ok {
+		t.Fatal("mode off created an op")
+	}
+
+	// 6. A task verified later starts getting ops for comments after that point only (no backfill of old comments).
+	s.SetYTCommentsMode(YTCommentsOn)
+	taskD := ytcTask(t, s, "handoffkeep")
+	issueD := "2-" + strconv.FormatInt(taskD, 10)
+	if _, err := s.UpsertYouTrackMirror(ctx, YouTrackMirrorInput{TaskID: taskD, IssueID: "9-4", DisplayRef: "HK-4", Tenant: ytcTenant, Role: "mirror", SyncedAt: time.Now().UTC().Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	cD1, err := s.CreateTaskComment(ctx, taskD, "worker", "comment before verification")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := ytcOpFor(t, s, cD1.ID); ok {
+		t.Fatal("unverified task D got an op for cD1")
+	}
+	// Verify task D now
+	if err := s.AddYTEntityMapTask(ctx, taskD, issueD, "0-2", ytcTenant); err != nil {
+		t.Fatalf("verify taskD: %v", err)
+	}
+	// Comment after verification gets op
+	cD2, err := s.CreateTaskComment(ctx, taskD, "worker", "comment after verification")
+	if err != nil {
+		t.Fatal(err)
+	}
+	opD2, ok := ytcOpFor(t, s, cD2.ID)
+	if !ok || opD2.State != ytwrite.StatePrepared {
+		t.Fatalf("cD2 op = %+v, ok=%v, want prepared", opD2, ok)
+	}
+	// cD1 still has no op
+	if _, ok := ytcOpFor(t, s, cD1.ID); ok {
+		t.Fatal("cD1 was unexpectedly backfilled with an op")
+	}
+	// Drive only posts cD2
+	if _, err := p.Drive(ctx, 10); err != nil {
+		t.Fatal(err)
+	}
+	csD := yt.Comments(issueD)
+	if len(csD) != 1 {
+		t.Fatalf("remote issue D has %d comments, want 1", len(csD))
+	}
+	// Legacy push still selects cD1 but not cD2
+	unpushedD, err := s.UnpushedYouTrackComments(ctx, taskD, 0, 50)
+	if err != nil || len(unpushedD) != 1 || unpushedD[0].ID != cD1.ID {
+		t.Fatalf("legacy push for task D: got %+v, want only cD1 (%d)", unpushedD, cD1.ID)
+	}
+}

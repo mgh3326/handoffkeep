@@ -47,11 +47,22 @@ func (s *Store) YTCommentLedger(tenant string) *YTWriteLedger {
 
 // ytCommentAdmitSQL is the admission of a prepared op o by the comment
 // worker of the tenant named by the placeholder: o is bound to that tenant,
-// and its task is enrolled in the canary with o's issue on o's tenant. Due
-// and Claim share it, so what a pass lists is what a claim admits.
-func ytCommentAdmitSQL(tenant string) string {
-	return `(o.tenant = ` + tenant + ` AND EXISTS (SELECT 1 FROM yt_comment_canary c
-		WHERE o.entity_kind = 'task' AND c.task_id::text = o.entity_id AND c.issue_id = o.yt_target_id AND c.tenant = o.tenant))`
+// and its task is enrolled in the canary (in mode canary) or has a verified
+// issue in yt_entity_map or canary (in mode on) on o's tenant. Due and Claim
+// share it, so what a pass lists is what a claim admits.
+func ytCommentAdmitSQL(tenant, mode string) string {
+	return `(o.tenant = ` + tenant + ` AND (
+		(` + mode + ` = 'canary' AND EXISTS (SELECT 1 FROM yt_comment_canary c
+			WHERE o.entity_kind = 'task' AND c.task_id::text = o.entity_id AND c.issue_id = o.yt_target_id AND c.tenant = o.tenant))
+		OR
+		(` + mode + ` = 'on' AND (
+			EXISTS (SELECT 1 FROM yt_comment_canary c
+				WHERE o.entity_kind = 'task' AND c.task_id::text = o.entity_id AND c.issue_id = o.yt_target_id AND c.tenant = o.tenant)
+			OR
+			EXISTS (SELECT 1 FROM yt_entity_map m
+				WHERE m.entity_kind = 'task' AND m.hk_key = o.entity_id AND m.yt_id = o.yt_target_id AND (m.tenant = '' OR m.tenant = o.tenant))
+		))
+	))`
 }
 
 var _ ytwrite.Ledger = (*YTWriteLedger)(nil)
@@ -207,8 +218,9 @@ func (l *YTWriteLedger) Claim(ctx context.Context, now time.Time, id int64) (ytw
 		// removal either commits before this read and holds the op, or waits
 		// for this claim to commit.
 		admitted := false
-		if l.s.ytCommentsCanary.Load() {
-			if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM yt_write_ops o WHERE o.id=$1 AND `+ytCommentAdmitSQL("$2")+`)`, id, l.tenant).Scan(&admitted); err != nil {
+		mode := l.s.YTCommentsMode()
+		if mode != YTCommentsOff {
+			if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM yt_write_ops o WHERE o.id=$1 AND `+ytCommentAdmitSQL("$2", "$3")+`)`, id, l.tenant, string(mode)).Scan(&admitted); err != nil {
 				return ytwrite.Op{}, "", err
 			}
 		}
@@ -278,9 +290,9 @@ func (l *YTWriteLedger) Apply(ctx context.Context, now time.Time, id int64, ytID
 		return ytwrite.Op{}, fmt.Errorf("%w: apply from %s", ytwrite.ErrState, op.State)
 	}
 	for _, m := range maps {
-		tag, err := tx.Exec(ctx, `INSERT INTO yt_entity_map(entity_kind, hk_key, yt_id, yt_parent_id, op_id, created_at)
-			VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (entity_kind, hk_key) DO NOTHING`,
-			m.EntityKind, m.HKKey, m.YTID, m.YTParentID, id, now.UTC())
+		tag, err := tx.Exec(ctx, `INSERT INTO yt_entity_map(entity_kind, hk_key, yt_id, yt_parent_id, op_id, created_at, tenant)
+			VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (entity_kind, hk_key) DO NOTHING`,
+			m.EntityKind, m.HKKey, m.YTID, m.YTParentID, id, now.UTC(), op.Tenant)
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
 			return ytwrite.Op{}, ytwrite.ErrConflictingResult // the yt id already maps to another hk key
@@ -367,13 +379,14 @@ func (l *YTWriteLedger) Due(ctx context.Context, now time.Time, limit int) ([]yt
 		// out before the limit, so a long held queue cannot fill every pass;
 		// uncertain ops of this tenant are always listed for their evidence
 		// search.
+		mode := l.s.YTCommentsMode()
 		return l.list(ctx, `SELECT `+ytOpColumns+` FROM yt_write_ops o
 			WHERE o.state IN ('prepared','remote_unknown') AND o.next_attempt_at <= $1
 			AND ((o.state = 'remote_unknown' AND o.tenant = $3)
-				OR (o.state = 'prepared' AND $4::boolean AND `+ytCommentAdmitSQL("$3")+`
+				OR (o.state = 'prepared' AND $4 <> 'off' AND `+ytCommentAdmitSQL("$3", "$4")+`
 					AND NOT EXISTS (SELECT 1 FROM yt_write_ops e
 						WHERE e.entity_kind = o.entity_kind AND e.entity_id = o.entity_id AND e.id < o.id AND e.state NOT IN ('applied','rejected'))))
-			ORDER BY o.id LIMIT $2`, now.UTC(), ytLimit(limit), l.tenant, l.s.ytCommentsCanary.Load())
+			ORDER BY o.id LIMIT $2`, now.UTC(), ytLimit(limit), l.tenant, string(mode))
 	}
 	return l.list(ctx, `SELECT `+ytOpColumns+` FROM yt_write_ops o
 		WHERE o.state IN ('prepared','remote_unknown') AND o.next_attempt_at <= $1
@@ -396,7 +409,7 @@ func (l *YTWriteLedger) ListState(ctx context.Context, state ytwrite.State, limi
 
 func (l *YTWriteLedger) MapGet(ctx context.Context, entityKind, hkKey string) (ytwrite.MapRow, bool, error) {
 	m := ytwrite.MapRow{EntityKind: entityKind, HKKey: hkKey}
-	err := l.s.pool.QueryRow(ctx, `SELECT yt_id, yt_parent_id, op_id FROM yt_entity_map WHERE entity_kind=$1 AND hk_key=$2`,
+	err := l.s.pool.QueryRow(ctx, `SELECT yt_id, yt_parent_id, coalesce(op_id, 0) FROM yt_entity_map WHERE entity_kind=$1 AND hk_key=$2`,
 		entityKind, hkKey).Scan(&m.YTID, &m.YTParentID, &m.OpID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ytwrite.MapRow{}, false, nil

@@ -1,9 +1,10 @@
-# hk → YouTrack write protocol (hk 3667, hk 3697, hk 3739)
+# hk → YouTrack write protocol (hk 3667, hk 3697, hk 3739, hk 3810)
 
-Status: **b1a, comment canary.** The protocol core (b0) is live for one path:
-a new hk comment on a task enrolled in the comment canary also gets a
+Status: **b1, every comment on a verified task gets a protocol copy (mode on).** The protocol core (b0) is live for comments:
+every new hk comment on a task that has a verified issue in YouTrack gets a
 protocol-tracked copy on the task's YouTrack issue, when
-`HANDOFFKEEP_YT_COMMENTS_MODE=canary`. PG stays canonical for comments; the
+`HANDOFFKEEP_YT_COMMENTS_MODE=on`. Canary mode (`HANDOFFKEEP_YT_COMMENTS_MODE=canary`)
+keeps its meaning (enrolled tasks only). PG stays canonical for comments; the
 `task_comments` row is written exactly as before. Default mode is `off` (no op
 row, no YouTrack call). Design: `design/2026-11-09/hk3667-youtrack-write-path`
 (v2 wins), `consult/2026-11-09/hk3667-write-path-answer`,
@@ -169,45 +170,37 @@ Listings request `id,text,created,updated,deleted`.
 | 429 | `RemoteError` + wait | `prepared` until `Retry-After` (kept as sent, up to 30 days) |
 | other 4xx (400, 403, 404, 409, 422, …) | `RemoteError` | `rejected` (`http_<status>`) |
 
-## Slice b1a: the comment canary
+## Slice b1: comments mode on
 
-**Gate.** `HANDOFFKEEP_YT_COMMENTS_MODE` = unset or `off` (default) or `canary`.
-Any other value, and `canary` without `YOUTRACK_URL` and `YOUTRACK_BOT_API_KEY`,
+**Gate.** `HANDOFFKEEP_YT_COMMENTS_MODE` = unset or `off` (default), `canary` or `on`.
+Any other value, and `canary` or `on` without `YOUTRACK_URL` and `YOUTRACK_BOT_API_KEY`,
 stops `serve` at startup (fail closed). `off` needs no YouTrack configuration.
-`canary` needs the two keys but does not turn on serve's legacy read-through
+`canary` and `on` need the two keys but do not turn on serve's legacy read-through
 (the priority/lane overlay, YouTrack search and the lane/priority outbox):
 that has its own gate, `HANDOFFKEEP_YT_READTHROUGH_MODE` (default `off`,
 `docs/youtrack.md`), and the worker reads the keys itself.
 
-**Enrollment** (`handoffkeep youtrack canary add <task> [--by NAME]`, direct DB
-like `youtrack projects`; also `remove <task>` and `list`). `add` reads the
-imported issue `<SHORT>-<task id>`, where `<SHORT>` is the exact
-`youtrack_projects` row of the task's project (no `OTHER` fallback), and binds
-the task only when the issue answers with that readable id, its summary starts
-with `#<task id>` followed by a space or nothing (`#37` does not name task 3;
-`#037` and `#3739` do not name task 37), it is in the mapped project, and the
-old mirror link (`task_origins`) and any `yt_entity_map` task row name the same
-issue on the same tenant. The binding keeps the tenant and the stable internal
-issue id, so a rename or move does not change the target. Enrollment writes no
-op row. Publication (`AddYTCommentCanary`) is handed the candidate it was
-verified against and reads the task's mappings again in its own transaction
-(after the task's lane lock, with FOR SHARE on the `youtrack_projects` and
-`task_origins` rows); a project mapping, mirror link or `yt_entity_map` task row
-that changed since verification refuses the enrollment (`yt_canary_conflict`):
-verify again.
+**Preflight and Backfill.**
+`handoffkeep youtrack comments-preflight [--project P] [--days N]` audits tasks with
+comments in the last N days without writes: per hk project, counts of tasks that
+resolve+verify, have no issue, or are ambiguous, with up to 10 sample IDs each.
+`handoffkeep youtrack comments-backfill [--project P] [--days N]` verifies and records
+bindings into `yt_entity_map` for tasks that resolve and verify.
 
 **Enqueue.** Every comment entry point (REST and the CLI through it, console,
 MCP `task_comment`) goes through `CreateTaskComment` / `CreateMCPTaskComment`.
-When the gate is `canary` and the task is enrolled, the same transaction writes
-the comment, its op (principal `hk:task-comments`, key `task-comment:<comment
-id>`, lane `("task", "<id>")`, target the bound internal issue id, actor the
-comment author, time the comment time), its ownership row
-`yt_comment_write_links(comment_id, op_id)`, and, with the task's first op, the
-`yt_entity_map` task row. The op is bound to the tenant the task is enrolled on
-at that moment (`yt_write_ops.tenant`). An op failure fails the comment. Text PG accepts but
-the protocol cannot send (a quoted `<!-- hk-op:` marker, an actor with ` · `)
-and a task whose map row names another issue commit the comment with a
-**locally rejected** op; nothing is sent. Handlers never call `AppendComment`.
+When the gate is `on` and the task has a verified issue (in `yt_entity_map` or
+`yt_comment_canary`), or when the gate is `canary` and the task is enrolled in
+`yt_comment_canary`, the same transaction writes the comment, its op
+(principal `hk:task-comments`, key `task-comment:<comment id>`, lane `("task", "<id>")`,
+target the bound internal issue id, actor the comment author, time the comment time),
+its ownership row `yt_comment_write_links(comment_id, op_id)`, and its `yt_entity_map`
+task row. The op is bound to the verified tenant (`yt_write_ops.tenant`). A task with
+no verified issue gets **no op and no link**, so legacy push and import continue
+carrying its comments. Text PG accepts but the protocol cannot send (a quoted `<!-- hk-op:`
+marker, an actor with ` · `) and a task whose map row names another issue commit the
+comment with a **locally rejected** op; nothing is sent. Handlers never call `AppendComment`.
+The YouTrack activity pull and dots replies do not enqueue.
 The YouTrack activity pull and dots replies do not enqueue.
 
 **Projection metadata.** The REST create answer (`POST /v1/tasks/{id}/comments`,

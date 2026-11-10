@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -39,7 +40,7 @@ const (
 )
 
 // ytCommentsModeFromEnv reads HANDOFFKEEP_YT_COMMENTS_MODE: unset or "off"
-// (the default) or "canary". Any other value is an error, so a typo fails
+// (the default), "canary" or "on". Any other value is an error, so a typo fails
 // closed instead of guessing a mode.
 func ytCommentsModeFromEnv() (store.YTCommentsMode, error) {
 	switch raw := strings.TrimSpace(os.Getenv("HANDOFFKEEP_YT_COMMENTS_MODE")); raw {
@@ -47,14 +48,16 @@ func ytCommentsModeFromEnv() (store.YTCommentsMode, error) {
 		return store.YTCommentsOff, nil
 	case string(store.YTCommentsCanary):
 		return store.YTCommentsCanary, nil
+	case string(store.YTCommentsOn):
+		return store.YTCommentsOn, nil
 	default:
-		return "", fmt.Errorf("HANDOFFKEEP_YT_COMMENTS_MODE=%q: want off or canary", raw)
+		return "", fmt.Errorf("HANDOFFKEEP_YT_COMMENTS_MODE=%q: want off, canary or on", raw)
 	}
 }
 
 // ytCommentsWorkerFromEnv sets the store's gate and returns the dispatcher
 // for serve's worker list, or nil when the mode is off (which needs no
-// YouTrack configuration). canary without YOUTRACK_URL and
+// YouTrack configuration). canary and on without YOUTRACK_URL and
 // YOUTRACK_BOT_API_KEY is a startup error, never a writer that silently does
 // nothing.
 func ytCommentsWorkerFromEnv(st *store.Store) (backgroundWorker, error) {
@@ -71,17 +74,17 @@ func ytCommentsWorkerFromEnv(st *store.Store) (backgroundWorker, error) {
 	baseURL := strings.TrimSpace(os.Getenv("YOUTRACK_URL"))
 	token := strings.TrimSpace(os.Getenv("YOUTRACK_BOT_API_KEY"))
 	if baseURL == "" || token == "" {
-		return nil, errors.New("HANDOFFKEEP_YT_COMMENTS_MODE=canary needs YOUTRACK_URL and YOUTRACK_BOT_API_KEY")
+		return nil, fmt.Errorf("HANDOFFKEEP_YT_COMMENTS_MODE=%s needs YOUTRACK_URL and YOUTRACK_BOT_API_KEY", mode)
 	}
 	if st == nil {
-		return nil, errors.New("HANDOFFKEEP_YT_COMMENTS_MODE=canary needs the store")
+		return nil, fmt.Errorf("HANDOFFKEEP_YT_COMMENTS_MODE=%s needs the store", mode)
 	}
 	client, err := youtrack.New(youtrack.Config{BaseURL: baseURL, Token: token, UserAgent: "handoffkeep-ytwrite"})
 	if err != nil {
 		return nil, err
 	}
 	remote := youtrack.NewWriteRemote(client)
-	w, err := newYTCommentsWorker(st, remote, remote.Tenant(), nil)
+	w, err := newYTCommentsWorker(st, remote, remote.Tenant(), mode, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -90,7 +93,7 @@ func ytCommentsWorkerFromEnv(st *store.Store) (backgroundWorker, error) {
 
 // newYTCommentsWorker turns the gate on and builds the dispatcher for one
 // tenant over remote. now is the protocol clock (nil: the wall clock).
-func newYTCommentsWorker(st *store.Store, remote ytwrite.Remote, tenant string, now func() time.Time) (ytCommentsWorker, error) {
+func newYTCommentsWorker(st *store.Store, remote ytwrite.Remote, tenant string, mode store.YTCommentsMode, now func() time.Time) (ytCommentsWorker, error) {
 	p, err := ytwrite.New(st.YTCommentConfig(tenant, ytwrite.Config{
 		Remote:          remote,
 		Now:             now,
@@ -100,8 +103,8 @@ func newYTCommentsWorker(st *store.Store, remote ytwrite.Remote, tenant string, 
 	if err != nil {
 		return ytCommentsWorker{}, err
 	}
-	st.SetYTCommentsMode(store.YTCommentsCanary)
-	log.Printf("ytwrite.comments_enabled mode=canary tenant=%q", tenant)
+	st.SetYTCommentsMode(mode)
+	log.Printf("ytwrite.comments_enabled mode=%s tenant=%q", mode, tenant)
 	return ytCommentsWorker{protocol: p}, nil
 }
 
@@ -266,4 +269,195 @@ func youtrackCanaryCmd(args []string, out io.Writer) error {
 		return err
 	}
 	return printJSON(out, got)
+}
+
+const youtrackCommentsPreflightUsage = "usage: youtrack comments-preflight [--project P] [--days N]"
+
+type projectPreflightReport struct {
+	Project          string  `json:"project"`
+	ResolveVerify    int     `json:"resolve_verify"`
+	NoIssue          int     `json:"no_issue"`
+	Ambiguous        int     `json:"ambiguous"`
+	ResolveVerifyIDs []int64 `json:"resolve_verify_ids"`
+	NoIssueIDs       []int64 `json:"no_issue_ids"`
+	AmbiguousIDs     []int64 `json:"ambiguous_ids"`
+}
+
+// youtrackCommentsPreflightCmd is `youtrack comments-preflight`: a read-only audit
+// of tasks that received comments in the last N days, classified per hk project into
+// resolve_verify, no_issue, or ambiguous, with up to 10 sample task IDs each.
+func youtrackCommentsPreflightCmd(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("youtrack comments-preflight", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	project := fs.String("project", "", "only tasks of this hk project")
+	days := fs.Int("days", 30, "consider tasks with comments in the last N days")
+	ordered, err := splitArgs(args, "project", "days")
+	if err != nil {
+		return err
+	}
+	if err := fs.Parse(ordered); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return errors.New(youtrackCommentsPreflightUsage)
+	}
+	if *days < 1 {
+		return errors.New("days must be positive")
+	}
+	dbURL := strings.TrimSpace(os.Getenv("HANDOFFKEEP_DB_URL"))
+	baseURL := strings.TrimSpace(os.Getenv("YOUTRACK_URL"))
+	token := strings.TrimSpace(os.Getenv("YOUTRACK_BOT_API_KEY"))
+	if dbURL == "" || baseURL == "" || token == "" {
+		return exitCodeError{code: youtrackExitConfig, err: errors.New("HANDOFFKEEP_DB_URL, YOUTRACK_URL and YOUTRACK_BOT_API_KEY are required")}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	st, err := store.Open(ctx, dbURL)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	client, err := youtrack.New(youtrack.Config{BaseURL: baseURL, Token: token, UserAgent: "handoffkeep-ytwrite"})
+	if err != nil {
+		return exitCodeError{code: youtrackExitConfig, err: err}
+	}
+	remote := youtrack.NewWriteRemote(client)
+	cutoff := time.Now().UTC().Add(-time.Duration(*days) * 24 * time.Hour)
+	candidates, err := st.TasksWithRecentCommentsCandidates(ctx, cutoff, *project)
+	if err != nil {
+		return err
+	}
+	reports := make(map[string]*projectPreflightReport)
+	for _, cand := range candidates {
+		p := cand.Project
+		if p == "" {
+			p = "(none)"
+		}
+		rep := reports[p]
+		if rep == nil {
+			rep = &projectPreflightReport{
+				Project:          p,
+				ResolveVerifyIDs: []int64{},
+				NoIssueIDs:       []int64{},
+				AmbiguousIDs:     []int64{},
+			}
+			reports[p] = rep
+		}
+		res, err := youtrack.ClassifyTask(ctx, remote, remote.Tenant(), cand)
+		if err != nil {
+			return err
+		}
+		switch res.Status {
+		case youtrack.StatusResolveVerify:
+			rep.ResolveVerify++
+			if len(rep.ResolveVerifyIDs) < 10 {
+				rep.ResolveVerifyIDs = append(rep.ResolveVerifyIDs, cand.TaskID)
+			}
+		case youtrack.StatusNoIssue:
+			rep.NoIssue++
+			if len(rep.NoIssueIDs) < 10 {
+				rep.NoIssueIDs = append(rep.NoIssueIDs, cand.TaskID)
+			}
+		case youtrack.StatusAmbiguous:
+			rep.Ambiguous++
+			if len(rep.AmbiguousIDs) < 10 {
+				rep.AmbiguousIDs = append(rep.AmbiguousIDs, cand.TaskID)
+			}
+		}
+	}
+	keys := make([]string, 0, len(reports))
+	for k := range reports {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	list := make([]projectPreflightReport, 0, len(keys))
+	for _, k := range keys {
+		list = append(list, *reports[k])
+	}
+	return printJSON(out, map[string]any{
+		"days":     *days,
+		"projects": list,
+	})
+}
+
+const youtrackCommentsBackfillUsage = "usage: youtrack comments-backfill [--project P] [--days N]"
+
+// youtrackCommentsBackfillCmd is `youtrack comments-backfill`: records verified
+// issue mappings into yt_entity_map for tasks with comments in the last N days.
+func youtrackCommentsBackfillCmd(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("youtrack comments-backfill", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	project := fs.String("project", "", "only tasks of this hk project")
+	days := fs.Int("days", 30, "consider tasks with comments in the last N days")
+	ordered, err := splitArgs(args, "project", "days")
+	if err != nil {
+		return err
+	}
+	if err := fs.Parse(ordered); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return errors.New(youtrackCommentsBackfillUsage)
+	}
+	if *days < 1 {
+		return errors.New("days must be positive")
+	}
+	dbURL := strings.TrimSpace(os.Getenv("HANDOFFKEEP_DB_URL"))
+	baseURL := strings.TrimSpace(os.Getenv("YOUTRACK_URL"))
+	token := strings.TrimSpace(os.Getenv("YOUTRACK_BOT_API_KEY"))
+	if dbURL == "" || baseURL == "" || token == "" {
+		return exitCodeError{code: youtrackExitConfig, err: errors.New("HANDOFFKEEP_DB_URL, YOUTRACK_URL and YOUTRACK_BOT_API_KEY are required")}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	st, err := store.Open(ctx, dbURL)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	client, err := youtrack.New(youtrack.Config{BaseURL: baseURL, Token: token, UserAgent: "handoffkeep-ytwrite"})
+	if err != nil {
+		return exitCodeError{code: youtrackExitConfig, err: err}
+	}
+	remote := youtrack.NewWriteRemote(client)
+	cutoff := time.Now().UTC().Add(-time.Duration(*days) * 24 * time.Hour)
+	candidates, err := st.TasksWithRecentCommentsCandidates(ctx, cutoff, *project)
+	if err != nil {
+		return err
+	}
+	verified := 0
+	skippedNoIssue := 0
+	skippedAmbiguous := 0
+	verifiedIDs := []int64{}
+	ambiguousIDs := []int64{}
+	noIssueIDs := []int64{}
+	for _, cand := range candidates {
+		res, err := youtrack.ClassifyTask(ctx, remote, remote.Tenant(), cand)
+		if err != nil {
+			return err
+		}
+		switch res.Status {
+		case youtrack.StatusResolveVerify:
+			if err := st.AddYTEntityMapTask(ctx, res.Binding.TaskID, res.Binding.IssueID, res.Binding.ProjectID, res.Binding.Tenant); err != nil {
+				return err
+			}
+			verified++
+			verifiedIDs = append(verifiedIDs, cand.TaskID)
+		case youtrack.StatusNoIssue:
+			skippedNoIssue++
+			noIssueIDs = append(noIssueIDs, cand.TaskID)
+		case youtrack.StatusAmbiguous:
+			skippedAmbiguous++
+			ambiguousIDs = append(ambiguousIDs, cand.TaskID)
+		}
+	}
+	return printJSON(out, map[string]any{
+		"days":              *days,
+		"verified":          verified,
+		"skipped_no_issue":  skippedNoIssue,
+		"skipped_ambiguous": skippedAmbiguous,
+		"verified_ids":      verifiedIDs,
+		"ambiguous_ids":     ambiguousIDs,
+		"no_issue_ids":      noIssueIDs,
+	})
 }
