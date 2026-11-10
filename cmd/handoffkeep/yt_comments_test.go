@@ -21,14 +21,18 @@ import (
 )
 
 func TestYTCommentsModeFromEnv(t *testing.T) {
-	for value, want := range map[string]store.YTCommentsMode{"": store.YTCommentsOff, "off": store.YTCommentsOff, "canary": store.YTCommentsCanary, " canary ": store.YTCommentsCanary} {
+	for value, want := range map[string]store.YTCommentsMode{
+		"": store.YTCommentsOff, "off": store.YTCommentsOff, " off ": store.YTCommentsOff,
+		"canary": store.YTCommentsCanary, " canary ": store.YTCommentsCanary,
+		"on": store.YTCommentsOn, " on\n": store.YTCommentsOn,
+	} {
 		t.Setenv("HANDOFFKEEP_YT_COMMENTS_MODE", value)
 		if got, err := ytCommentsModeFromEnv(); err != nil || got != want {
 			t.Errorf("%q: %q %v, want %q", value, got, err, want)
 		}
 	}
 	// A value the binary does not know fails closed: an error, never a mode.
-	for _, value := range []string{"on", "CANARY", "true", "all"} {
+	for _, value := range []string{"ON", "On", "CANARY", "true", "all", "1", "o n"} {
 		t.Setenv("HANDOFFKEEP_YT_COMMENTS_MODE", value)
 		if got, err := ytCommentsModeFromEnv(); err == nil {
 			t.Errorf("%q accepted as %q", value, got)
@@ -36,9 +40,9 @@ func TestYTCommentsModeFromEnv(t *testing.T) {
 	}
 }
 
-// canary without YouTrack credentials is a startup error, never a silently
-// idle writer; off needs no YouTrack configuration at all.
-func TestYTCommentsWorkerNeedsCredentialsOnlyInCanary(t *testing.T) {
+// canary or on without YouTrack credentials is a startup error, never a
+// silently idle writer; off needs no YouTrack configuration at all.
+func TestYTCommentsWorkerNeedsCredentialsOnlyInCanaryAndOn(t *testing.T) {
 	t.Setenv("YOUTRACK_URL", "")
 	t.Setenv("YOUTRACK_BOT_API_KEY", "")
 	t.Setenv("HANDOFFKEEP_YT_COMMENTS_MODE", "off")
@@ -48,6 +52,10 @@ func TestYTCommentsWorkerNeedsCredentialsOnlyInCanary(t *testing.T) {
 	t.Setenv("HANDOFFKEEP_YT_COMMENTS_MODE", "canary")
 	if _, err := ytCommentsWorkerFromEnv(nil); err == nil || !strings.Contains(err.Error(), "YOUTRACK_URL") {
 		t.Fatalf("canary without credentials: %v", err)
+	}
+	t.Setenv("HANDOFFKEEP_YT_COMMENTS_MODE", "on")
+	if _, err := ytCommentsWorkerFromEnv(nil); err == nil || !strings.Contains(err.Error(), "YOUTRACK_URL") || !strings.Contains(err.Error(), "=on") {
+		t.Fatalf("on without credentials: %v", err)
 	}
 	t.Setenv("HANDOFFKEEP_YT_COMMENTS_MODE", "bogus")
 	if _, err := ytCommentsWorkerFromEnv(nil); err == nil {
@@ -196,7 +204,7 @@ func TestYTCommentsWorkerStopIsBoundedWhileSettling(t *testing.T) {
 		stoppedAt = time.Now()
 		stop()
 	}
-	w, err := newYTCommentsWorker(st, remote, tenant, nil)
+	w, err := newYTCommentsWorker(st, remote, tenant, store.YTCommentsCanary, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,7 +237,7 @@ func TestYTCommentsWorkerStopIsBoundedWhileSettling(t *testing.T) {
 		t.Fatalf("op after a stop during settlement: %+v %v; want dispatched (durable, unrecorded)", op, err)
 	}
 
-	restarted, err := newYTCommentsWorker(st, remote, tenant, func() time.Time { return time.Now().UTC().Add(time.Minute) })
+	restarted, err := newYTCommentsWorker(st, remote, tenant, store.YTCommentsCanary, func() time.Time { return time.Now().UTC().Add(time.Minute) })
 	if err != nil {
 		t.Fatal(err)
 	}

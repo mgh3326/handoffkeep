@@ -117,3 +117,57 @@ func TestCommentMappingConflictBeforeSend(t *testing.T) {
 		t.Fatalf("failed read: %v", err)
 	}
 }
+
+// Comment mode on (hk 3810) binds with the canary's checks and sorts each
+// refusal: no_issue (no project, an unmapped project, a project with no
+// YouTrack id, no such issue) or a disagreement, which is everything else.
+func TestVerifyBindingClassifiesRefusals(t *testing.T) {
+	ctx := context.Background()
+	good := func() *issueReader {
+		return &issueReader{issues: map[string]Issue{"HK-7": issueFor("HK-7", "#7 x")}}
+	}
+	noIssue := map[string]struct {
+		c       store.YTCanaryCandidate
+		r       *issueReader
+		offline bool
+	}{
+		"no project":                  {store.YTCanaryCandidate{TaskID: 7}, good(), true},
+		"unmapped project":            {store.YTCanaryCandidate{TaskID: 7, Project: "scratch"}, good(), true},
+		"project with no YouTrack id": {store.YTCanaryCandidate{TaskID: 7, Project: "handoffkeep", ShortName: "HK"}, good(), true},
+		"no such issue":               {candidate(7), &issueReader{}, false},
+	}
+	for name, tc := range noIssue {
+		_, err := VerifyBinding(ctx, tc.r, canaryTenant, tc.c)
+		if !errors.Is(err, ErrNoIssue) || !errors.Is(err, ErrCanaryRefused) {
+			t.Errorf("%s: err = %v, want ErrNoIssue", name, err)
+		}
+		if tc.offline && tc.r.calls != 0 {
+			t.Errorf("%s: %d reads; this needs no YouTrack call", name, tc.r.calls)
+		}
+	}
+	disagree := map[string]struct {
+		c store.YTCanaryCandidate
+		r *issueReader
+	}{
+		"old mirror names another issue": {store.YTCanaryCandidate{TaskID: 7, Project: "handoffkeep", ShortName: "HK", ProjectID: "0-2", MirrorIssueID: "2-55", MirrorTenant: canaryTenant}, good()},
+		"entity map names another issue": {store.YTCanaryCandidate{TaskID: 7, Project: "handoffkeep", ShortName: "HK", ProjectID: "0-2", MappedIssueID: "2-99"}, good()},
+		"issue is in another project":    {store.YTCanaryCandidate{TaskID: 7, Project: "handoffkeep", ShortName: "HK", ProjectID: "0-9"}, good()},
+		"moved issue answers another id": {candidate(7), &issueReader{issues: map[string]Issue{"HK-7": issueFor("PW-7", "#7 x")}}},
+		"summary names another task":     {candidate(7), &issueReader{issues: map[string]Issue{"HK-7": issueFor("HK-7", "#8 x")}}},
+	}
+	for name, tc := range disagree {
+		_, err := VerifyBinding(ctx, tc.r, canaryTenant, tc.c)
+		if !errors.Is(err, ErrCanaryRefused) || errors.Is(err, ErrNoIssue) {
+			t.Errorf("%s: err = %v, want a refusal that is not ErrNoIssue", name, err)
+		}
+	}
+	_, err := VerifyBinding(ctx, &issueReader{err: &APIError{Status: 503}}, canaryTenant, candidate(7))
+	if err == nil || errors.Is(err, ErrCanaryRefused) {
+		t.Fatalf("failed read: %v, want an error that is not a refusal", err)
+	}
+	got, err := VerifyBinding(ctx, good(), canaryTenant, candidate(7))
+	want := store.YTTaskBinding{TaskID: 7, Tenant: canaryTenant, IssueID: "2-77", IssueReadable: "HK-7", ProjectID: "0-2"}
+	if err != nil || got != want {
+		t.Fatalf("binding %+v %v, want %+v", got, err, want)
+	}
+}

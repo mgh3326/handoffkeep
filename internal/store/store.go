@@ -575,10 +575,15 @@ type Store struct {
 	// consoleURL is the console base URL answer notifications link to; nil
 	// or empty leaves the link out.
 	consoleURL atomic.Pointer[string]
-	// ytCommentsCanary is the slice b1a gate (SetYTCommentsMode): when set, a
-	// comment on a task in yt_comment_canary gets its write-protocol op in
-	// the comment's transaction.
-	ytCommentsCanary atomic.Bool
+	// ytCommentsMode is the YouTrack comment gate (SetYTCommentsMode), a
+	// YTCommentsMode; unset is off. canary copies the comments of tasks in
+	// yt_comment_canary, on those of tasks with a consistent yt_task_bindings
+	// row, in the comment's transaction.
+	ytCommentsMode atomic.Value
+	// ytBindingChecked, when set (tests only), runs inside AddYTTaskBinding
+	// after every check has passed and before the binding row is inserted,
+	// with every lock of the publication held.
+	ytBindingChecked func()
 }
 
 // Refs stores repeatable named references. Its decoder accepts legacy scalar
@@ -795,6 +800,41 @@ func open(ctx context.Context, url string, registry []migration) (*Store, error)
 		return nil, err
 	}
 	return s, nil
+}
+
+// OpenReadOnly opens a store for a command that must not write: it runs no
+// migration (like OpenForPlan), and every connection starts with
+// default_transaction_read_only on, so PostgreSQL makes each transaction on
+// the pool READ ONLY and refuses any write through it (SQLSTATE 25006). It
+// differs from OpenForPlan, whose pool accepts writes, in that last part.
+// The caller checks the schema it needs with MigrationApplied.
+func OpenReadOnly(ctx context.Context, url string) (*Store, error) {
+	if !strings.HasPrefix(url, "postgres://") && !strings.HasPrefix(url, "postgresql://") {
+		return nil, errors.New("HANDOFFKEEP_DB_URL must be a PostgreSQL URL")
+	}
+	p, err := newPoolParams(ctx, url, map[string]string{"default_transaction_read_only": "on"})
+	if err != nil {
+		return nil, err
+	}
+	if err = p.Ping(ctx); err != nil {
+		p.Close()
+		return nil, err
+	}
+	return &Store{pool: p}, nil
+}
+
+// MigrationApplied reports whether the current schema records the registered
+// migration id in schema_migrations. Like migrateCurrent, it reads the
+// current schema's table only, and a schema from before version 53 (no
+// schema_migrations) has applied none.
+func (s *Store) MigrationApplied(ctx context.Context, id string) (bool, error) {
+	var applied bool
+	err := s.pool.QueryRow(ctx, `SELECT current_schema() IS NOT NULL AND to_regclass(format('%I.schema_migrations', current_schema())) IS NOT NULL`).Scan(&applied)
+	if err != nil || !applied {
+		return false, err
+	}
+	err = s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE id=$1)`, id).Scan(&applied)
+	return applied, err
 }
 
 // migrateIfBehind runs Store.migrate only when the schema is missing a version

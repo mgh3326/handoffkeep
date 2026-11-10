@@ -41,13 +41,17 @@ func youtrackCmd(args []string, out io.Writer) error {
 		return youtrackCanaryCmd(args[1:], out)
 	case "schema":
 		return youtrackSchemaCmd(args[1:], out)
+	case "comments-preflight":
+		return youtrackCommentsCmd(args[1:], out, false)
+	case "comments-backfill":
+		return youtrackCommentsCmd(args[1:], out, true)
 	default:
 		return errors.New(youtrackUsage)
 	}
 }
 
 // youtrackUsage also answers `yt`, the short name of this command.
-const youtrackUsage = "usage: youtrack sync [--dry-run] | youtrack adopt --state <yt_state.json> [--dry-run] | youtrack projects list|put | youtrack ops [--state S] [--task N] | youtrack canary add|remove|list | youtrack schema plan|apply [--project P]"
+const youtrackUsage = "usage: youtrack sync [--dry-run] | youtrack adopt --state <yt_state.json> [--dry-run] | youtrack projects list|put | youtrack ops [--state S] [--task N] | youtrack canary add|remove|list | youtrack schema plan|apply [--project P] | youtrack comments-preflight [--project P] [--days N] | youtrack comments-backfill [--project P] [--days N] [--by NAME]"
 
 func youtrackSyncCmd(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("youtrack sync", flag.ContinueOnError)

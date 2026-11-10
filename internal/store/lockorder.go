@@ -164,25 +164,73 @@ package store
 //     comment writers are the one exception to "first lock": CreateTaskComment
 //     and CreateMCPTaskComment take taskCommentInsertLock, insert the comment
 //     (KEY SHARE on its task row; MCP also writes its audit row), and only
-//     then take the lane lock of that task and insert new rows of
-//     yt_write_ops, yt_comment_write_links and yt_entity_map. The canary's
-//     writers take the task's lane lock first too: RemoveYTCommentCanary then
-//     deletes its yt_comment_canary row, AddYTCommentCanary then reads the
-//     task (no lock), takes FOR SHARE on its youtrack_projects and
-//     task_origins rows and inserts its canary row; the comment worker's
-//     Claim (YTCommentLedger) reads that canary row under the same lane lock,
-//     which is what orders a removal against a claim. No holder of a lane lock
-//     requests taskCommentInsertLock, a task row, a job lock or a level 1-4
-//     lock, and a transaction holds at most one lane lock. The only level-5
-//     rows a lane holder waits on are AddYTCommentCanary's FOR SHARE reads;
-//     their writers (UpsertYouTrackMirror, AddTaskOrigin, MarkYouTrackTaskSynced,
-//     UpdateYouTrackMirrorDisplay, PutYouTrackProject, SetYouTrackProjectID,
-//     and ApplyYouTrackActivity, which reaches task_origins only after its
-//     comment lock and task row) never request a lane lock, and none waits on
-//     the comment lock while it holds such a row. So the comment lock -> lane
-//     lock and lane lock -> mapping row edges cannot close a cycle. The
-//     comment writers that take level 2 (ApplyYouTrackActivity, ReplyDots)
-//     never enqueue an op, so level 2 -> lane lock does not occur.
+//     then take the lane lock of that task, read without a lock (mode on, hk
+//     3810: the task's yt_task_bindings row, its task_origins, yt_entity_map,
+//     yt_comment_canary and youtrack_projects rows) and insert new rows of
+//     yt_write_ops, yt_comment_write_links and yt_entity_map. RemoveYTCommentCanary
+//     takes the task's lane lock first and then deletes its yt_comment_canary
+//     row. The two writers that give an issue to a task, AddYTCommentCanary
+//     and AddYTTaskBinding (yt_task_bindings.go, hk 3810), take the issue
+//     ownership lock pg_advisory_xact_lock(8241873810) first, then FOR UPDATE
+//     on the task row, then the task's lane lock, then FOR SHARE on its
+//     youtrack_projects and task_origins rows, then read the other mappings
+//     without a lock and insert their own new row. FOR UPDATE and not FOR
+//     SHARE: a task with no task_origins row has no origin row to lock, and a
+//     first origin insert (UpsertYouTrackMirror, AddTaskOrigin) reaches the
+//     task row only through its foreign key's KEY SHARE, which FOR SHARE
+//     allows and FOR UPDATE blocks; so no first mirror link commits between
+//     an issue writer's checks and its commit. The comment worker's Claim
+//     (YTCommentLedger) reads the task's canary row (mode canary) or binding
+//     (mode on) under the same lane lock, which is what orders an enrollment,
+//     a removal or a binding against a claim.
+//     No cycle, lock by lock:
+//       - The ownership lock: only those two writers take it, always first
+//         and while holding nothing, so no transaction waits for it while
+//         holding another lock.
+//       - The task row: an issue writer waits for it holding only the
+//         ownership lock, which nobody waits for while holding anything.
+//         While an issue writer holds it, it waits only for the lane lock and
+//         for FOR SHARE on the task's youtrack_projects and task_origins rows.
+//         The transactions FOR UPDATE makes wait are the task writers (an
+//         UPDATE or FOR UPDATE, as FOR SHARE did) and now also every insert
+//         whose foreign key takes KEY SHARE on the task (task_comments,
+//         task_events, task_origins, documents and the other level-5 rows).
+//         None of them holds the lane lock or such a mapping row while it
+//         waits for the task row: the cases follow.
+//       - The comment writers (CreateTaskComment, CreateMCPTaskComment) take
+//         the comment lock, then KEY SHARE on the task through the
+//         task_comments foreign key, then the lane lock. Waiting for the task
+//         row, one holds only the comment lock (and MCP its new audit row);
+//         holding the lane lock, it already holds KEY SHARE, and the issue
+//         writer's FOR UPDATE waits for that instead. Both orders, comment
+//         lock -> task KEY SHARE -> lane lock and ownership lock -> task FOR
+//         UPDATE -> lane lock, put the task row before the lane lock, so they
+//         cannot cycle; the issue writers never request the comment lock.
+//       - No other lane holder touches a task row: yt_write_ops,
+//         yt_entity_map, yt_comment_canary, yt_comment_write_links and
+//         yt_task_bindings have no foreign key to tasks, no holder of a lane
+//         lock requests taskCommentInsertLock, the ownership lock, a task
+//         row, a job lock or a level 1-4 lock, and a transaction holds at
+//         most one lane lock.
+//       - The writers of task_origins and youtrack_projects rows never hold
+//         such a row while they wait for a task row, and never request a lane
+//         lock or the ownership lock. UpsertYouTrackMirror and AddTaskOrigin
+//         are one statement: a first insert takes KEY SHARE after its new
+//         row, which the issue writer's FOR SHARE read cannot see and so never
+//         waits for, and the conflict update keeps task_id and takes no task
+//         lock. MarkYouTrackTaskSynced, UpdateYouTrackMirrorDisplay and
+//         SetYouTrackProjectID are one UPDATE that keeps the key;
+//         PutYouTrackProject then deletes only youtrack_attempts rows.
+//         ApplyYouTrackActivity reaches task_origins only after FOR UPDATE on
+//         its task row, or for a task it created in the same transaction.
+//       - The level-4 task writers hold level-2 and level-3 locks, other task
+//         rows and the level-5 rows of tasks they already hold; an issue
+//         writer requests none of those. No task writer locks a
+//         youtrack_projects row.
+//     So the comment lock -> task row -> lane lock, ownership lock -> task
+//     row -> lane lock and lane lock -> mapping row edges cannot close a
+//     cycle. The comment writers that take level 2 (ApplyYouTrackActivity,
+//     ReplyDots) never enqueue an op, so level 2 -> lane lock does not occur.
 //
 //   - The YouTrack sync's single-run guard is a session-scoped
 //     pg_try_advisory_lock(8241873404) on its own pooled connection. It is

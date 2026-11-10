@@ -149,7 +149,7 @@ handoffkeep youtrack schema apply [--project P] [--json]
 | `YOUTRACK_DEFAULT_HK_PROJECT` | 아니오 | 새 이슈에서 hk 프로젝트를 못 읽을 때(기본 `other`) |
 | `YOUTRACK_DEFAULT_LANE` | 아니오 | 새 이슈에서 레인을 못 읽을 때(기본 `operator-desk`) |
 | `YOUTRACK_CONSOLE_URL` | 아니오 | 이슈 본문 첫 줄 링크(기본 `https://console.robinco.dev`) |
-| `HANDOFFKEEP_YT_COMMENTS_MODE` | 아니오 | `off`(기본) 또는 `canary`. 쓰기 프로토콜 코멘트 카나리(hk 3739, `docs/youtrack-write-protocol.md`). 다른 값이나 YouTrack 자격 없는 `canary`는 서버 시작 실패 |
+| `HANDOFFKEEP_YT_COMMENTS_MODE` | 아니오 | `off`(기본), `canary` 또는 `on`. 쓰기 프로토콜 코멘트 카나리(hk 3739)와 바인딩된 작업 전체(hk 3810, `docs/youtrack-write-protocol.md`). 다른 값이나 YouTrack 자격 없는 `canary`·`on`은 서버 시작 실패 |
 | `HANDOFFKEEP_YT_READTHROUGH_MODE` | 아니오 | `off`(기본) 또는 `on`. 서버의 YouTrack 읽기 캐시(아래, hk 3762). 앞뒤 공백은 무시하고 대소문자는 구분한다. 다른 값이나 YouTrack 자격 없는 `on`은 서버 시작 실패 |
 
 서버(`handoffkeep serve`)는 `HANDOFFKEEP_YT_READTHROUGH_MODE=on`일 때만 읽기

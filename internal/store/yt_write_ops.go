@@ -20,18 +20,18 @@ import (
 //
 // Lock order: it holds at most one advisory lock per transaction, the entity
 // lane lock (Prepare and Claim only), and then rows of yt_write_ops and
-// yt_entity_map (a scoped Claim also reads yt_comment_canary). It takes no task
+// yt_entity_map (a scoped Claim also reads yt_comment_canary or
+// yt_task_bindings). It takes no task
 // row, no level-2 lock and no job lock, and no writer of another table waits on
 // one of its rows, so it cannot close a cycle with them. It reads no clock:
 // time is passed in (lockorder.go, "Time").
 type YTWriteLedger struct {
 	s *Store
 	// scoped is the comment worker's ledger for one tenant (YTCommentLedger):
-	// Claim and Due admit a prepared op only while its task is enrolled in
-	// the canary with the op's issue on the op's tenant, the tenant is this
-	// one and the mode is on; remote_unknown ops are listed for this tenant
-	// only. The unscoped ledger admits every op (the protocol core's
-	// contract suite, the operator's tools).
+	// Claim and Due admit a prepared op only while the tenant is this one and
+	// the gate admits it (ytCommentAdmitSQL); remote_unknown ops are listed
+	// for this tenant only. The unscoped ledger admits every op (the protocol
+	// core's contract suite, the operator's tools).
 	scoped bool
 	tenant string
 }
@@ -46,12 +46,22 @@ func (s *Store) YTCommentLedger(tenant string) *YTWriteLedger {
 }
 
 // ytCommentAdmitSQL is the admission of a prepared op o by the comment
-// worker of the tenant named by the placeholder: o is bound to that tenant,
-// and its task is enrolled in the canary with o's issue on o's tenant. Due
-// and Claim share it, so what a pass lists is what a claim admits.
-func ytCommentAdmitSQL(tenant string) string {
-	return `(o.tenant = ` + tenant + ` AND EXISTS (SELECT 1 FROM yt_comment_canary c
+// worker of the tenant named by the placeholder, in gate mode: o is bound to
+// that tenant, and its task is enrolled in the canary (mode canary) or bound
+// (mode on, yt_task_bindings) with o's issue on o's tenant. Mode off admits
+// nothing. Due and Claim share it, so what a pass lists is what a claim
+// admits.
+func ytCommentAdmitSQL(mode YTCommentsMode, tenant string) string {
+	switch mode {
+	case YTCommentsCanary:
+		return `(o.tenant = ` + tenant + ` AND EXISTS (SELECT 1 FROM yt_comment_canary c
 		WHERE o.entity_kind = 'task' AND c.task_id::text = o.entity_id AND c.issue_id = o.yt_target_id AND c.tenant = o.tenant))`
+	case YTCommentsOn:
+		return `(o.tenant = ` + tenant + ` AND o.entity_kind = 'task' AND EXISTS (SELECT 1 FROM yt_task_bindings b
+		WHERE b.task_id::text = o.entity_id AND b.issue_id = o.yt_target_id AND b.tenant = o.tenant))`
+	default:
+		return `FALSE`
+	}
 }
 
 var _ ytwrite.Ledger = (*YTWriteLedger)(nil)
@@ -203,12 +213,13 @@ func (l *YTWriteLedger) Claim(ctx context.Context, now time.Time, id int64) (ytw
 	}
 	if l.scoped {
 		// Admission is read here, under the lane lock that the canary's
-		// writers (AddYTCommentCanary, RemoveYTCommentCanary) also take: a
-		// removal either commits before this read and holds the op, or waits
-		// for this claim to commit.
+		// writers (AddYTCommentCanary, RemoveYTCommentCanary) and the
+		// binding's writer (AddYTTaskBinding) also take: a removal either
+		// commits before this read and holds the op, or waits for this claim
+		// to commit.
 		admitted := false
-		if l.s.ytCommentsCanary.Load() {
-			if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM yt_write_ops o WHERE o.id=$1 AND `+ytCommentAdmitSQL("$2")+`)`, id, l.tenant).Scan(&admitted); err != nil {
+		if mode := l.s.ytCommentsModeNow(); mode != YTCommentsOff {
+			if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM yt_write_ops o WHERE o.id=$1 AND `+ytCommentAdmitSQL(mode, "$2")+`)`, id, l.tenant).Scan(&admitted); err != nil {
 				return ytwrite.Op{}, "", err
 			}
 		}
@@ -363,17 +374,17 @@ func ytLimit(n int) int {
 
 func (l *YTWriteLedger) Due(ctx context.Context, now time.Time, limit int) ([]ytwrite.Op, error) {
 	if l.scoped {
-		// Held prepared ops (not admitted, or the mode is off: $4) are left
-		// out before the limit, so a long held queue cannot fill every pass;
+		// Held prepared ops (not admitted, or the mode is off) are left out
+		// before the limit, so a long held queue cannot fill every pass;
 		// uncertain ops of this tenant are always listed for their evidence
 		// search.
 		return l.list(ctx, `SELECT `+ytOpColumns+` FROM yt_write_ops o
 			WHERE o.state IN ('prepared','remote_unknown') AND o.next_attempt_at <= $1
 			AND ((o.state = 'remote_unknown' AND o.tenant = $3)
-				OR (o.state = 'prepared' AND $4::boolean AND `+ytCommentAdmitSQL("$3")+`
+				OR (o.state = 'prepared' AND `+ytCommentAdmitSQL(l.s.ytCommentsModeNow(), "$3")+`
 					AND NOT EXISTS (SELECT 1 FROM yt_write_ops e
 						WHERE e.entity_kind = o.entity_kind AND e.entity_id = o.entity_id AND e.id < o.id AND e.state NOT IN ('applied','rejected'))))
-			ORDER BY o.id LIMIT $2`, now.UTC(), ytLimit(limit), l.tenant, l.s.ytCommentsCanary.Load())
+			ORDER BY o.id LIMIT $2`, now.UTC(), ytLimit(limit), l.tenant)
 	}
 	return l.list(ctx, `SELECT `+ytOpColumns+` FROM yt_write_ops o
 		WHERE o.state IN ('prepared','remote_unknown') AND o.next_attempt_at <= $1
