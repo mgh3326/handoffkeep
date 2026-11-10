@@ -6,7 +6,8 @@ const http = require('@jetbrains/youtrack-scripting-api/http');
 const FIELD = {
   hkID: 'hk ID', project: 'hk 프로젝트', state: 'hk 상태', priority: 'hk 우선순위',
   lane: '레인', kind: '종류', grade: '등급', tier: '티어', pr: 'PR', job: '작업 job',
-  stalled: '멈춤', decisionID: '결정 ID', decisionState: '결정 상태',
+  stalled: '멈춤', dueAt: '마감', area: '영역', milestone: '마일스톤', expected: '예상 소요',
+  decisionID: '결정 ID', decisionState: '결정 상태',
   recommended: '권장', due: '결정 기한', linkedTask: '연결 task ID', docKey: 'hk 문서 키', docPrefix: '문서 prefix'
 };
 const STATE = {
@@ -322,7 +323,11 @@ class HandoffkeepImport {
       {id: 'hk-tier', name: FIELD.tier, type: 'enum'},
       {id: 'hk-pr', name: FIELD.pr, type: 'string'},
       {id: 'hk-job', name: FIELD.job, type: 'string'},
-      {id: 'hk-stalled', name: FIELD.stalled, type: 'enum', multiValue: true}
+      {id: 'hk-stalled', name: FIELD.stalled, type: 'enum', multiValue: true},
+      {id: 'hk-due', name: FIELD.dueAt, type: 'date'},
+      {id: 'hk-area', name: FIELD.area, type: 'string'},
+      {id: 'hk-milestone', name: FIELD.milestone, type: 'string'},
+      {id: 'hk-expected', name: FIELD.expected, type: 'period'}
     ];
   }
   getProject(info) {
@@ -356,6 +361,7 @@ class HandoffkeepImport {
       summary: truncateRunes('#' + task.id + ' ' + task.title, 250),
       description: [
         'Original hk title: ' + task.title,
+        task.title_ko ? '제목(한국어): ' + task.title_ko : '',
         task.body_doc ? 'Body document: ' + task.body_doc : '',
         ref.pr ? 'PR: ' + ref.pr : '', ref.job_id ? 'Job: ' + ref.job_id : '',
         task.parent_id ? 'Parent task: #' + task.parent_id : ''
@@ -372,8 +378,31 @@ class HandoffkeepImport {
       [FIELD.tier]: enumValue(tier), [FIELD.pr]: stringValue(ref.pr),
       [FIELD.job]: stringValue(ref.job_id), [FIELD.stalled]: task.stalled ? [{type: 'enum', name: '멈춤'}] : []
     };
+    this.putField(fields, task, FIELD.dueAt, task.due_at ? {type: 'date', value: safeDate(task.due_at)} : null);
+    this.putField(fields, task, FIELD.area, stringValue(task.area));
+    this.putField(fields, task, FIELD.milestone, stringValue(task.milestone_name));
+    this.putField(fields, task, FIELD.expected, periodValue(task.expected));
+    fields.links = this.taskLinks(task);
     return {id: 'hk-task:' + task.id, key: String(task.id), fields: fields,
       _hkCursor: {after_at: task.import_updated_at || task.last_activity_at || task.updated_at, after_id: task.id}};
+  }
+  putField(fields, task, name, value) {
+    if (value === null || value === undefined) {
+      if (typeof console !== 'undefined' && console.warn) console.warn('youtrack.import.field_skipped task_id=' + task.id + ' field=' + name + ' reason=missing_source_value');
+      return;
+    }
+    fields[name] = value;
+  }
+  taskLinks(task) {
+    const links = [];
+    const link = (linkType, linkName, targetID) => links.push({linkType: {id: linkType}, linkName: linkName, target: {id: 'hk-task:' + targetID}});
+    if (task.parent_id) link('subtask', 'subtask of', task.parent_id);
+    (task.relations || []).forEach((relation) => {
+      const src = Number(relation.src_id), id = Number(task.id);
+      if (relation.kind === 'related' && src === id) link('relates', 'relates to', relation.dst_id);
+      if (relation.kind === 'duplicate_of' && src === id) link('duplicate', 'duplicates', relation.dst_id);
+    });
+    return links;
   }
   taskTags(task) {
     const tags = [];
@@ -385,6 +414,7 @@ class HandoffkeepImport {
     });
     if (task.stalled) tags.push({id: 'hk-tag:stalled', name: 'hk/stalled'});
     if (task.awaiting_decision) tags.push({id: 'hk-tag:awaiting-decision', name: 'hk/awaiting-decision'});
+    (task.label_names || []).forEach((name) => { if (name) tags.push({id: 'hk-tag:label:' + name, name: 'hk/label/' + name}); });
     return tags;
   }
   getIssues(info, after, top) {
@@ -611,7 +641,26 @@ class HandoffkeepImport {
     if (!Array.isArray(page.items)) throw new Error('Malformed handoffkeep ' + resource + ' page');
     return {rows: page.items, next: page.next_cursor};
   }
-  getLinkTypes() { return []; }
+  getLinkTypes() {
+    return [
+      {id: 'subtask', name: 'Subtask', sourceToTarget: 'parent for', targetToSource: 'subtask of'},
+      {id: 'relates', name: 'Relates', sourceToTarget: 'relates to', targetToSource: 'relates to'},
+      {id: 'duplicate', name: 'Duplicate', sourceToTarget: 'duplicates', targetToSource: 'is duplicated by'}
+    ];
+  }
+}
+
+function periodValue(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const text = String(value);
+  const units = {ns: 0.000001, us: 0.001, 'µs': 0.001, ms: 1, s: 1000, m: 60000, h: 3600000, d: 86400000};
+  const parts = text.match(/\d+(?:\.\d+)?(?:ns|us|µs|ms|s|m|h|d)/g) || [];
+  if (!parts.length || parts.join('') !== text) throw new Error('Invalid expected duration ' + value);
+  const milliseconds = parts.reduce((total, part) => {
+    const match = part.match(/^(\d+(?:\.\d+)?)(ns|us|µs|ms|s|m|h|d)$/);
+    return total + Number(match[1]) * units[match[2]];
+  }, 0);
+  return {type: 'period', value: String(Math.round(milliseconds))};
 }
 
 function splitUtf8(text, maxBytes) {
