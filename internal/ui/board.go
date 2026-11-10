@@ -50,6 +50,11 @@ type boardAttachment struct {
 	CreatedBy string    `json:"created_by"`
 }
 
+type boardAttachmentsResponse struct {
+	Attachments []boardAttachment `json:"attachments"`
+	Truncated   bool              `json:"truncated"`
+}
+
 func (h *Handler) boardTaskAttachments(w http.ResponseWriter, r *http.Request, taskID int64) {
 	if _, found, err := h.store.GetTask(r.Context(), taskID); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "internal_error")
@@ -83,14 +88,15 @@ func (h *Handler) writeBoardAttachments(w http.ResponseWriter, r *http.Request, 
 		writeJSONError(w, http.StatusInternalServerError, "internal_error")
 		return
 	}
-	if len(rows) > 100 {
+	truncated := len(rows) > 100
+	if truncated {
 		rows = rows[:100]
 	}
 	out := make([]boardAttachment, 0, len(rows))
 	for _, row := range rows {
 		out = append(out, boardAttachment{row.SHA256, row.OriginalName, row.SizeBytes, row.MIME, row.CreatedAt.UTC(), row.CreatedBy})
 	}
-	writeBoardJSON(w, map[string]any{"attachments": out})
+	writeBoardJSON(w, boardAttachmentsResponse{Attachments: out, Truncated: truncated})
 }
 
 // Work-board fields are an allowlist: placement account keys, candidate

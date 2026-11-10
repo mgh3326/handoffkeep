@@ -15,7 +15,10 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/testdb"
 )
 
-type fileRouteObjects struct{ disposition string }
+type fileRouteObjects struct {
+	disposition string
+	location    string
+}
 
 func (*fileRouteObjects) Stat(context.Context, string) error                          { return nil }
 func (*fileRouteObjects) Put(context.Context, string, io.Reader, int64, string) error { return nil }
@@ -27,7 +30,7 @@ func (*fileRouteObjects) Presign(context.Context, string, time.Duration) (string
 }
 func (o *fileRouteObjects) PresignDownload(_ context.Context, _ string, _ time.Duration, disposition string) (string, error) {
 	o.disposition = disposition
-	return "https://objects.example/file?signature=fresh", nil
+	return o.location, nil
 }
 func (*fileRouteObjects) PresignPut(context.Context, string, time.Duration, int64) (string, error) {
 	return "", nil
@@ -50,16 +53,19 @@ func TestUIFileDownload(t *testing.T) {
 	t.Cleanup(st.Close)
 	shaHot := strings.Repeat("a", 64)
 	shaArchived := strings.Repeat("b", 64)
+	shaLegacy := strings.Repeat("d", 64)
+	config := attachments.Config{Endpoint: "http://objects.example", Bucket: "files"}
 	for _, x := range []store.Attachment{
-		{SHA256: shaHot, SizeBytes: 1, MIME: "text/plain", OriginalName: "한글 file.txt", CreatedBy: "ui-test", RefKind: "task", RefID: "1", ObjectLocation: "hot"},
+		{SHA256: shaHot, SizeBytes: 1, MIME: "text/plain", OriginalName: "한글 file.txt", CreatedBy: "ui-test", RefKind: "task", RefID: "1", ObjectLocation: attachments.ObjectLocation(config)},
 		{SHA256: shaArchived, SizeBytes: 1, MIME: "text/plain", OriginalName: "old.txt", CreatedBy: "ui-test", RefKind: "task", RefID: "2", ObjectLocation: "archive/2026"},
+		{SHA256: shaLegacy, SizeBytes: 1, MIME: "text/plain", OriginalName: "legacy.txt", CreatedBy: "ui-test", RefKind: "task", RefID: "3"},
 	} {
 		if _, _, err := st.PutAttachment(ctx, x, 100, 100); err != nil {
 			t.Fatal(err)
 		}
 	}
-	objects := &fileRouteObjects{}
-	am := &attachments.Manager{Store: st, Objects: objects, Enabled: true}
+	objects := &fileRouteObjects{location: "http://objects.example/file?signature=fresh"}
+	am := &attachments.Manager{Store: st, Objects: objects, Config: config, Enabled: true}
 	h := &Handler{store: st, attachments: am}
 	var logs strings.Builder
 	oldOutput := log.Writer()
@@ -71,7 +77,7 @@ func TestUIFileDownload(t *testing.T) {
 		h.fileDownload(w, r, "operator@example.com", sha)
 		return w
 	}
-	if w := call(shaHot); w.Code != http.StatusFound || w.Header().Get("Location") != "https://objects.example/file?signature=fresh" {
+	if w := call(shaHot); w.Code != http.StatusFound || w.Header().Get("Location") != objects.location {
 		t.Fatalf("hot response: %d %v %s", w.Code, w.Header(), w.Body.String())
 	}
 	if !strings.Contains(objects.disposition, "attachment") || !strings.Contains(objects.disposition, "filename") || !strings.Contains(objects.disposition, "file.txt") {
@@ -79,6 +85,9 @@ func TestUIFileDownload(t *testing.T) {
 	}
 	if w := call(shaArchived); w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "archived at archive/2026") || !strings.Contains(w.Body.String(), "hk 3680") {
 		t.Fatalf("archived response: %d %s", w.Code, w.Body.String())
+	}
+	if w := call(shaLegacy); w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "unknown location (legacy metadata)") {
+		t.Fatalf("legacy location response: %d %s", w.Code, w.Body.String())
 	}
 	if w := call(strings.Repeat("c", 64)); w.Code != http.StatusNotFound {
 		t.Fatalf("unknown response: %d", w.Code)
