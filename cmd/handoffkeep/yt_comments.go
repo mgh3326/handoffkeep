@@ -602,9 +602,9 @@ const (
 )
 
 // youtrackCommentsCmd is `youtrack comments-preflight` (backfill false):
-// read-only, it reads YouTrack issues but writes nothing; and `youtrack
-// comments-backfill` (backfill true), which also publishes each verified
-// binding. The report goes to stdout; a task whose reads failed (class error)
+// read-only, it reads YouTrack issues but writes nothing, not even a
+// migration (store.OpenReadOnly); and `youtrack comments-backfill` (backfill
+// true), which also publishes each verified binding. The report goes to stdout; a task whose reads failed (class error)
 // makes the command exit 1 after the report.
 func youtrackCommentsCmd(args []string, out io.Writer, backfill bool) error {
 	name, usage := "comments-preflight", youtrackCommentsPreflightUsage
@@ -650,11 +650,28 @@ func youtrackCommentsCmd(args []string, out io.Writer, backfill bool) error {
 	remote := youtrack.NewWriteRemote(client)
 	openCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	st, err := store.Open(openCtx, dbURL)
+	// The preflight never writes: it opens without migrating, on a pool
+	// whose every transaction is READ ONLY, and refuses a schema from before
+	// this release. The backfill is a write command and migrates as the
+	// server does; yt_task_bindings is its release's own migration.
+	openStore := store.OpenReadOnly
+	if backfill {
+		openStore = store.Open
+	}
+	st, err := openStore(openCtx, dbURL)
 	if err != nil {
 		return err
 	}
 	defer st.Close()
+	if !backfill {
+		applied, err := st.MigrationApplied(openCtx, store.YTTaskBindingsMigration)
+		if err != nil {
+			return err
+		}
+		if !applied {
+			return exitCodeError{code: youtrackExitConfig, err: fmt.Errorf("the database lacks migration %s: deploy the release that adds it first; the preflight never migrates", store.YTTaskBindingsMigration)}
+		}
+	}
 	report, err := ytCommentsRun(context.Background(), st, remote, remote.Tenant(), *project, *days, bindBy)
 	if err != nil {
 		return err

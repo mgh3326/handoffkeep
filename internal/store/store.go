@@ -798,6 +798,41 @@ func open(ctx context.Context, url string, registry []migration) (*Store, error)
 	return s, nil
 }
 
+// OpenReadOnly opens a store for a command that must not write: it runs no
+// migration (like OpenForPlan), and every connection starts with
+// default_transaction_read_only on, so PostgreSQL makes each transaction on
+// the pool READ ONLY and refuses any write through it (SQLSTATE 25006). It
+// differs from OpenForPlan, whose pool accepts writes, in that last part.
+// The caller checks the schema it needs with MigrationApplied.
+func OpenReadOnly(ctx context.Context, url string) (*Store, error) {
+	if !strings.HasPrefix(url, "postgres://") && !strings.HasPrefix(url, "postgresql://") {
+		return nil, errors.New("HANDOFFKEEP_DB_URL must be a PostgreSQL URL")
+	}
+	p, err := newPoolParams(ctx, url, map[string]string{"default_transaction_read_only": "on"})
+	if err != nil {
+		return nil, err
+	}
+	if err = p.Ping(ctx); err != nil {
+		p.Close()
+		return nil, err
+	}
+	return &Store{pool: p}, nil
+}
+
+// MigrationApplied reports whether the current schema records the registered
+// migration id in schema_migrations. Like migrateCurrent, it reads the
+// current schema's table only, and a schema from before version 53 (no
+// schema_migrations) has applied none.
+func (s *Store) MigrationApplied(ctx context.Context, id string) (bool, error) {
+	var applied bool
+	err := s.pool.QueryRow(ctx, `SELECT current_schema() IS NOT NULL AND to_regclass(format('%I.schema_migrations', current_schema())) IS NOT NULL`).Scan(&applied)
+	if err != nil || !applied {
+		return false, err
+	}
+	err = s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE id=$1)`, id).Scan(&applied)
+	return applied, err
+}
+
 // migrateIfBehind runs Store.migrate only when the schema is missing a version
 // it writes. On a current schema it takes no table lock, so opening a store
 // beside live writers cannot deadlock with them (lockorder.go, level 1).

@@ -411,6 +411,70 @@ func TestCommentsPreflightAndBackfill(t *testing.T) {
 	}
 }
 
+// The preflight never migrates: against a schema from before this release
+// (no yt_task_bindings table, no record of its migration) it refuses with
+// exit 2 and asks for the deploy, makes no YouTrack read, and leaves the
+// schema as it was. With store.Open in its place, the open would create the
+// table and record the migration.
+func TestCommentsPreflightRefusesSchemaWithoutBindings(t *testing.T) {
+	_, dbURL := testdb.Schema(t, "ytp_old")
+	ctx := t.Context()
+	st, err := store.Open(ctx, dbURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+	conn, err := pgx.Connect(ctx, dbURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { conn.Close(context.Background()) })
+	// The previous release's schema: every other migration is recorded.
+	if _, err := conn.Exec(ctx, `DROP TABLE yt_task_bindings`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Exec(ctx, `DELETE FROM schema_migrations WHERE id=$1`, store.YTTaskBindingsMigration); err != nil {
+		t.Fatal(err)
+	}
+	schemaLeft := func() string {
+		t.Helper()
+		var table, recorded bool
+		if err := conn.QueryRow(ctx, `SELECT to_regclass('yt_task_bindings') IS NOT NULL, EXISTS(SELECT 1 FROM schema_migrations WHERE id=$1)`,
+			store.YTTaskBindingsMigration).Scan(&table, &recorded); err != nil {
+			t.Fatal(err)
+		}
+		return "table " + strconv.FormatBool(table) + ", record " + strconv.FormatBool(recorded)
+	}
+	if got := schemaLeft(); got != "table false, record false" {
+		t.Fatalf("fixture: %s", got)
+	}
+	fake := &ytpFake{issues: map[string]map[string]any{}, fail: map[string]int{}, hits: map[string]int{}}
+	ts := httptest.NewServer(fake)
+	t.Cleanup(ts.Close)
+	t.Setenv("HANDOFFKEEP_DB_URL", dbURL)
+	t.Setenv("YOUTRACK_URL", ts.URL)
+	t.Setenv("YOUTRACK_BOT_API_KEY", "fake-test-key")
+
+	var out bytes.Buffer
+	err = run([]string{"yt", "comments-preflight"}, &out, io.Discard)
+	var code exitCodeError
+	if !errors.As(err, &code) || code.code != youtrackExitConfig || !strings.Contains(err.Error(), store.YTTaskBindingsMigration) || !strings.Contains(err.Error(), "deploy") {
+		t.Fatalf("err = %v, want exit %d naming %s and the deploy", err, youtrackExitConfig, store.YTTaskBindingsMigration)
+	}
+	if out.Len() != 0 {
+		t.Errorf("a refused preflight printed %q", out.String())
+	}
+	if got := schemaLeft(); got != "table false, record false" {
+		t.Fatalf("the refused preflight changed the schema: %s", got)
+	}
+	fake.mu.Lock()
+	hits := len(fake.hits)
+	fake.mu.Unlock()
+	if hits != 0 {
+		t.Errorf("the refused preflight read YouTrack: %v", fake.hits)
+	}
+}
+
 // The worker started in mode on sets the store's gate to on: a comment on a
 // bound task gets its op, and the worker sends it.
 func TestYTCommentsWorkerStartsInModeOn(t *testing.T) {

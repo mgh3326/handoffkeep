@@ -358,7 +358,10 @@ this; the enqueue cross-checks catch what it could write (Rollout).
 verify against the tenant the worker uses (the host of `YOUTRACK_URL`).
 
 - `handoffkeep youtrack comments-preflight [--project P] [--days N]` is
-  read-only: it reads issues from YouTrack and writes nothing. Candidates are
+  read-only: it reads issues from YouTrack and writes nothing. It opens the
+  database without migrating, on connections whose every transaction is READ
+  ONLY, and refuses (exit 2) a database that does not record migration
+  `20261110-yt-task-bindings`: deploy the release first. Candidates are
   the tasks with a comment in the last N days (default 14), every task in the
   canary set and every task with an unresolved comment op; `--project` keeps
   one hk project's. A bound task is checked locally only and comes out

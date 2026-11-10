@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
+
 	"github.com/mgh3326/handoffkeep/internal/testdb"
 	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 	"github.com/mgh3326/handoffkeep/internal/ytwrite/ytwritetest"
@@ -610,5 +612,31 @@ func TestYTTaskBindingsMigrationUpgradesAlreadyCurrentDatabase(t *testing.T) {
 			t.Fatalf("open %d: the migration wrote %d rows", i, n)
 		}
 		s.Close()
+	}
+}
+
+// OpenReadOnly runs no migration and its pool refuses writes.
+func TestOpenReadOnlyRefusesWrites(t *testing.T) {
+	_, dbURL := testdb.Schema(t, "ytb_ro")
+	s, err := OpenReadOnly(t.Context(), dbURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Close)
+	var tables int
+	if err := s.pool.QueryRow(t.Context(), `SELECT count(*) FROM pg_tables WHERE schemaname=current_schema()`).Scan(&tables); err != nil {
+		t.Fatal(err)
+	}
+	if tables != 0 {
+		t.Fatalf("OpenReadOnly migrated: %d tables in the new schema", tables)
+	}
+	applied, err := s.MigrationApplied(t.Context(), YTTaskBindingsMigration)
+	if err != nil || applied {
+		t.Fatalf("MigrationApplied on an empty schema = %v, %v", applied, err)
+	}
+	_, err = s.pool.Exec(t.Context(), `CREATE TABLE ro_probe (id int)`)
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != "25006" {
+		t.Fatalf("a write through OpenReadOnly: err %v, want SQLSTATE 25006 (read_only_sql_transaction)", err)
 	}
 }

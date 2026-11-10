@@ -24,10 +24,15 @@ import (
 // as in yt_comment_canary). The previous release neither reads nor writes the
 // table, and the migration writes no row.
 func init() {
-	registerMigration(migration{ID: "20261110-yt-task-bindings", Apply: func(ctx context.Context, tx pgx.Tx) error {
+	registerMigration(migration{ID: YTTaskBindingsMigration, Apply: func(ctx context.Context, tx pgx.Tx) error {
 		return execAll(ctx, tx, ytTaskBindingsStatements)
 	}})
 }
+
+// YTTaskBindingsMigration is the migration's registered ID. The comments
+// preflight, which never migrates, refuses a schema that does not record it
+// (Store.MigrationApplied).
+const YTTaskBindingsMigration = "20261110-yt-task-bindings"
 
 var ytTaskBindingsStatements = []string{
 	`CREATE TABLE IF NOT EXISTS yt_task_bindings (
