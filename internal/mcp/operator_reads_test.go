@@ -399,6 +399,80 @@ func TestTaskListPagingReturnsEveryTaskOnce(t *testing.T) {
 	}
 }
 
+// The first page of a cursor="" read must follow the same (updated_at,id)
+// order as the later pages. Priorities here differ from creation order and an
+// old task is updated last, so the store's default priority order would skip
+// or repeat rows across pages.
+func TestTaskListPagingFirstPageUsesUpdatedAtOrder(t *testing.T) {
+	st := newOperatorStore(t)
+	ctx := context.Background()
+	if _, err := st.AddTaskProject(ctx, "mcp-project", "tester"); err != nil {
+		t.Fatal(err)
+	}
+	project := "mcp-project"
+	priorities := []int{1, 5, 2, 4, 3}
+	ids := make([]int64, 0, len(priorities))
+	for i, priority := range priorities {
+		task, err := st.CreateTask(ctx, store.Task{
+			Lane: "mcp-prio-lane", Title: fmt.Sprintf("prio task %d", i), Kind: "implement",
+			Priority: priority, Project: &project, CreatedBy: "tester",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, task.ID)
+	}
+	// The oldest task is updated after the newer ones, so it sorts last.
+	if _, err := st.SetTaskPriority(ctx, ids[0], 6, "operator:test", "reorder", "paging-prio-1"); err != nil {
+		t.Fatal(err)
+	}
+	type stamp struct {
+		id int64
+		at time.Time
+	}
+	stamps := make([]stamp, 0, len(ids))
+	for _, id := range ids {
+		task, found, err := st.GetTask(ctx, id)
+		if err != nil || !found {
+			t.Fatalf("GetTask(%d) found=%v err=%v", id, found, err)
+		}
+		stamps = append(stamps, stamp{id: task.ID, at: task.UpdatedAt})
+	}
+	sort.Slice(stamps, func(i, j int) bool {
+		if !stamps[i].at.Equal(stamps[j].at) {
+			return stamps[i].at.Before(stamps[j].at)
+		}
+		return stamps[i].id < stamps[j].id
+	})
+	want := make([]int64, 0, len(stamps))
+	for _, s := range stamps {
+		want = append(want, s.id)
+	}
+
+	srv := newOperatorServer(t, st, api.Tokens{"tester": "bearer-secret"})
+	session := connectMCP(t, srv.URL, map[string]string{"Authorization": "Bearer bearer-secret"})
+	cursor := ""
+	got := []int64{}
+	for page := 0; page < 10; page++ {
+		out := callTool[listPageOut](t, session, "task_list", map[string]any{
+			"lane": "mcp-prio-lane", "limit": 2, "cursor": cursor,
+		})
+		if out.NextCursor == nil {
+			t.Fatal("paged task_list returned no next_cursor field")
+		}
+		for _, task := range out.Tasks {
+			got = append(got, task.ID)
+		}
+		if *out.NextCursor == "" {
+			break
+		}
+		cursor = *out.NextCursor
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("paged ids=%v want=%v (sorted by updated_at,id)", got, want)
+	}
+}
+
 type commentsPageOut struct {
 	Comments   []store.TaskComment `json:"comments"`
 	NextCursor string              `json:"next_cursor"`
