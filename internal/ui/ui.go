@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"html/template"
 	"io/fs"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -20,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mgh3326/handoffkeep/internal/attachments"
 	"github.com/mgh3326/handoffkeep/internal/cfaccess"
 	"github.com/mgh3326/handoffkeep/internal/store"
 	"github.com/mgh3326/handoffkeep/internal/youtrack"
@@ -38,6 +40,7 @@ var dwellStates = append(store.TaskStates(), store.LegacyTaskStates()...)
 // represented in any template model.
 type Config struct {
 	Store         *store.Store
+	Attachments   *attachments.Manager
 	Access        *cfaccess.Verifier
 	HubURL        string
 	HubToken      string
@@ -58,6 +61,7 @@ type Config struct {
 // Handler is a Cloudflare Access-authenticated UI handler.
 type Handler struct {
 	store         *store.Store
+	attachments   *attachments.Manager
 	access        *cfaccess.Verifier
 	templates     *template.Template
 	hub           *hubProxy
@@ -134,6 +138,7 @@ func New(config Config) (*Handler, error) {
 	}
 	h := &Handler{
 		store:         config.Store,
+		attachments:   config.Attachments,
 		access:        config.Access,
 		hub:           hub,
 		youTrack:      config.YouTrack,
@@ -179,7 +184,7 @@ func (h *Handler) assetURL(p string) string {
 // mutating operation.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	r.Pattern = routePattern(r.URL.Path)
-	if r.URL.Path == "/ui" || r.URL.Path == "/ui/work" || r.URL.Path == "/ui/fleet" || r.URL.Path == "/ui/queue" || r.URL.Path == "/ui/grades" || r.URL.Path == "/ui/deploys" || r.URL.Path == "/ui/docs" || r.URL.Path == "/ui/home" || r.URL.Path == "/ui/decisions" || strings.HasPrefix(r.URL.Path, "/ui/decisions/") || strings.HasPrefix(r.URL.Path, "/ui/doc/") || strings.HasPrefix(r.URL.Path, "/ui/tasks/") || strings.HasPrefix(r.URL.Path, "/ui/api/") {
+	if r.URL.Path == "/ui" || r.URL.Path == "/ui/work" || r.URL.Path == "/ui/fleet" || r.URL.Path == "/ui/queue" || r.URL.Path == "/ui/grades" || r.URL.Path == "/ui/deploys" || r.URL.Path == "/ui/docs" || r.URL.Path == "/ui/home" || r.URL.Path == "/ui/decisions" || strings.HasPrefix(r.URL.Path, "/ui/decisions/") || strings.HasPrefix(r.URL.Path, "/ui/doc/") || strings.HasPrefix(r.URL.Path, "/ui/tasks/") || strings.HasPrefix(r.URL.Path, "/ui/files/") || strings.HasPrefix(r.URL.Path, "/ui/api/") {
 		setConsoleCSP(w)
 	}
 	identity, authenticated := h.access.AuthenticatedIdentity(r)
@@ -188,6 +193,21 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			h.audit("-", writeAction(r.URL.Path), "-", "-", "unauthorized")
 		}
 		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	if strings.HasPrefix(r.URL.Path, "/ui/files/") {
+		sha := strings.TrimPrefix(r.URL.Path, "/ui/files/")
+		if identity.ServiceName != "" {
+			log.Printf("ui.file_download email=%q sha=%q result=service_reject", identity.ServiceName, sha)
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", http.MethodGet)
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		h.fileDownload(w, r, identity.Email, sha)
 		return
 	}
 	if identity.ServiceName != "" && !strings.HasPrefix(r.URL.Path, "/ui/api/") {

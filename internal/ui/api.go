@@ -73,6 +73,13 @@ func (h *Handler) serveAPI(w http.ResponseWriter, r *http.Request, identity cfac
 	case r.Method == http.MethodGet && boardCommentsPathRE.MatchString(r.URL.Path):
 		id, _ := pathTaskID(boardCommentsPathRE, r.URL.Path)
 		h.boardTaskComments(w, r, id)
+	case r.Method == http.MethodGet && boardAttachmentsPathRE.MatchString(r.URL.Path):
+		if identity.ServiceName != "" {
+			writeJSONError(w, http.StatusForbidden, "forbidden")
+			return
+		}
+		id, _ := pathTaskID(boardAttachmentsPathRE, r.URL.Path)
+		h.boardTaskAttachments(w, r, id)
 	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/ui/api/board/tasks/"):
 		h.boardTaskDetail(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/ui/api/search":
@@ -87,6 +94,12 @@ func (h *Handler) serveAPI(w http.ResponseWriter, r *http.Request, identity cfac
 			return
 		}
 		h.boardDoc(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/ui/api/board/doc/attachments":
+		if identity.ServiceName != "" {
+			writeJSONError(w, http.StatusForbidden, "forbidden")
+			return
+		}
+		h.boardDocumentAttachments(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/ui/api/docs":
 		// The browse listing is the same operator-only reading material as
 		// /ui/api/board/doc.

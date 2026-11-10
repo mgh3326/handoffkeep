@@ -2079,7 +2079,7 @@ func serve(args []string, errout io.Writer) error {
 		return e
 	}
 	workers = append(workers, notifier)
-	uiHandler, e := uiFromEnv(st, youTrack)
+	uiHandler, e := uiFromEnv(st, youTrack, am)
 	if e != nil {
 		return e
 	}
@@ -2151,7 +2151,7 @@ func mcpAccessFromEnv() (*cfaccess.Verifier, error) {
 
 // uiFromEnv intentionally treats incomplete Cloudflare Access configuration as
 // disabled. The API remains available, but api.Server does not register /ui.
-func uiFromEnv(st *store.Store, youTrack *youtrack.Service) (http.Handler, error) {
+func uiFromEnv(st *store.Store, youTrack *youtrack.Service, am *attachments.Manager) (http.Handler, error) {
 	team := strings.TrimSpace(os.Getenv("HANDOFFKEEP_UI_CF_TEAM_DOMAIN"))
 	aud := strings.TrimSpace(os.Getenv("HANDOFFKEEP_UI_CF_AUD"))
 	emails := strings.TrimSpace(os.Getenv("HANDOFFKEEP_UI_ALLOWED_EMAILS"))
@@ -2168,11 +2168,12 @@ func uiFromEnv(st *store.Store, youTrack *youtrack.Service) (http.Handler, error
 		return nil, err
 	}
 	return ui.New(ui.Config{
-		Store:    st,
-		Access:   access,
-		HubURL:   strings.TrimSpace(os.Getenv("HANDOFFKEEP_HUB_URL")),
-		HubToken: strings.TrimSpace(os.Getenv("HANDOFFKEEP_HUB_TOKEN")),
-		YouTrack: youTrack,
+		Store:       st,
+		Attachments: am,
+		Access:      access,
+		HubURL:      strings.TrimSpace(os.Getenv("HANDOFFKEEP_HUB_URL")),
+		HubToken:    strings.TrimSpace(os.Getenv("HANDOFFKEEP_HUB_TOKEN")),
+		YouTrack:    youTrack,
 	})
 }
 

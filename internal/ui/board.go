@@ -17,6 +17,7 @@ import (
 )
 
 var boardNameRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
+var boardAttachmentsPathRE = regexp.MustCompile(`^/ui/api/board/tasks/([1-9][0-9]{0,14})/attachments$`)
 
 var boardStates = func() map[string]bool {
 	out := make(map[string]bool, len(taskStates))
@@ -39,6 +40,64 @@ const (
 	// is served as unsupported and the console offers only the raw view.
 	boardDocRenderMaxBytes = 256 << 10
 )
+
+type boardAttachment struct {
+	SHA256    string    `json:"sha256"`
+	Name      string    `json:"original_name"`
+	Size      int64     `json:"size_bytes"`
+	MIME      string    `json:"mime"`
+	CreatedAt time.Time `json:"created_at"`
+	CreatedBy string    `json:"created_by"`
+}
+
+type boardAttachmentsResponse struct {
+	Attachments []boardAttachment `json:"attachments"`
+	Truncated   bool              `json:"truncated"`
+}
+
+func (h *Handler) boardTaskAttachments(w http.ResponseWriter, r *http.Request, taskID int64) {
+	if _, found, err := h.store.GetTask(r.Context(), taskID); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "internal_error")
+		return
+	} else if !found {
+		writeJSONError(w, http.StatusNotFound, "not_found")
+		return
+	}
+	h.writeBoardAttachments(w, r, "task", strconv.FormatInt(taskID, 10))
+}
+
+func (h *Handler) boardDocumentAttachments(w http.ResponseWriter, r *http.Request) {
+	key := r.URL.Query().Get("key")
+	if !validDocumentKey(key) {
+		writeJSONError(w, http.StatusBadRequest, "invalid_context")
+		return
+	}
+	if _, found, err := h.store.GetDocument(r.Context(), key); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "internal_error")
+		return
+	} else if !found {
+		writeJSONError(w, http.StatusNotFound, "not_found")
+		return
+	}
+	h.writeBoardAttachments(w, r, "document", key)
+}
+
+func (h *Handler) writeBoardAttachments(w http.ResponseWriter, r *http.Request, kind, ref string) {
+	rows, err := h.store.ListAttachments(r.Context(), kind, ref, 101)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "internal_error")
+		return
+	}
+	truncated := len(rows) > 100
+	if truncated {
+		rows = rows[:100]
+	}
+	out := make([]boardAttachment, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, boardAttachment{row.SHA256, row.OriginalName, row.SizeBytes, row.MIME, row.CreatedAt.UTC(), row.CreatedBy})
+	}
+	writeBoardJSON(w, boardAttachmentsResponse{Attachments: out, Truncated: truncated})
+}
 
 // Work-board fields are an allowlist: placement account keys, candidate
 // telemetry, pane identifiers and raw verdict text never enter the browser.

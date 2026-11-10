@@ -7,6 +7,8 @@ import { HttpError } from "../shared/http";
 import { fetchDoc, type DocPayload } from "../shared/doc/docApi";
 import { RendererBoundary } from "../shared/doc/RendererBoundary";
 import { formatMinuteUTC } from "../shared/time";
+import { fetchDocumentAttachments } from "../shared/boardApi";
+import type { BoardAttachment } from "../shared/boardTypes";
 import "../shared/doc/doc.css";
 
 const DocMarkdown = lazy(() => import("../shared/doc/DocMarkdown"));
@@ -30,12 +32,19 @@ function sectionFromHash(): string | null {
 
 export default function DocView({ docKey }: { docKey: string }) {
   const [state, setState] = useState<State>({ status: "loading" });
+  const [attachments, setAttachments] = useState<BoardAttachment[]>([]);
+  const [attachmentsTruncated, setAttachmentsTruncated] = useState(false);
+  const [attachmentsError, setAttachmentsError] = useState(false);
   useEffect(() => {
     let cancelled = false;
     setState({ status: "loading" });
+    setAttachments([]);
+    setAttachmentsTruncated(false);
+    setAttachmentsError(false);
     fetchDoc(docKey).then(
       (doc) => {
         if (!cancelled) setState({ status: "ready", doc });
+        void fetchDocumentAttachments(docKey).then(result => { if (!cancelled) { setAttachments(result.attachments); setAttachmentsTruncated(result.truncated); } }).catch(() => { if (!cancelled) setAttachmentsError(true); });
       },
       (err: unknown) => {
         if (cancelled) return;
@@ -73,6 +82,7 @@ export default function DocView({ docKey }: { docKey: string }) {
           <pre className="hk-doc-raw">{doc.body}</pre>
         </>
       )}
+      {(attachments.length > 0 || attachmentsError) && <section><h2>첨부 {attachmentsTruncated && <small>100+</small>}</h2>{attachmentsError ? <p role="alert">첨부를 불러오지 못했습니다.</p> : attachments.map(a => <p key={a.sha256}><a href={`/ui/files/${a.sha256}`}>{a.original_name}</a> · {a.size_bytes} bytes · {a.mime} · {formatMinuteUTC(a.created_at)} · {a.created_by}</p>)}</section>}
     </article>
   );
 }

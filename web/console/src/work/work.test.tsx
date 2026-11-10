@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { fetchBoardTasks, fetchTaskDetail } from "../shared/boardApi";
 import type { BoardTask } from "../shared/boardTypes";
 import { TaskRecord } from "./TaskRecord";
@@ -51,6 +51,34 @@ describe("Work", () => {
     render(<TaskRecord id={101} />);
     expect(await screen.findByText(/h \?/)).toBeTruthy();
   });
+  it("lists task attachments and shows the empty state", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/attachments")) return json({ attachments: [{ sha256: "a".repeat(64), original_name: "notes.txt", size_bytes: 12, mime: "text/plain", created_at: "2026-11-05T00:00:00Z", created_by: "operator" }], truncated: true });
+      if (url.includes("/comments")) return json({ comments: [], truncated: false });
+      return json(detail);
+    }));
+    const { rerender } = render(<TaskRecord id={101} />);
+    const link = await screen.findByRole("link", { name: "notes.txt" });
+    expect(link.getAttribute("href")).toBe(`/ui/files/${"a".repeat(64)}`);
+    expect(screen.getByText("100+")).toBeTruthy();
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => String(input).includes("/attachments") ? json({ attachments: [], truncated: false }) : String(input).includes("/comments") ? json({ comments: [], truncated: false }) : json(detail)));
+    rerender(<TaskRecord id={102} />);
+    expect(await screen.findByText("첨부 없음")).toBeTruthy();
+  });
+  it("shows attachment loading until the list request settles", async () => {
+    let resolveAttachments!: (response: Response) => void;
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/attachments")) return new Promise<Response>(resolve => { resolveAttachments = resolve; });
+      if (url.includes("/comments")) return Promise.resolve(json({ comments: [], truncated: false }));
+      return Promise.resolve(json(detail));
+    }));
+    render(<TaskRecord id={101} />);
+    expect(await screen.findByText("첨부 불러오는 중…")).toBeTruthy();
+    await act(async () => { resolveAttachments(json({ attachments: [], truncated: false })); });
+    expect(await screen.findByText("첨부 없음")).toBeTruthy();
+  });
   it("W8 shows task and job durations", async () => {
     vi.setSystemTime(new Date("2026-11-05T04:00:00Z"));
     const job = { job_id: "job", role: "worker", state: "spawned", host: "host", family: "openai", profile: "p", model: "m", harness: null, effort: null, skills: [], skills_supported: true, claimed_at: null, spawned_at: "2026-11-05T01:00:00Z", ready_at: "2026-11-05T01:30:00Z", ended_at: null, end_reason: null, diff_stat: null, report_doc: "", run: { what: "모델 m", why: "선택 이유 기록 없음", others: [], result: "상태 실행 중", selection_recorded: false } };
@@ -80,7 +108,7 @@ describe("Work", () => {
   it("W10 assigns the task page to Work", () => { expect(navKey({ view: "task", id: "101" })).toBe("work"); });
   it("W11 retries a failed record", async () => {
     let detailCalls = 0;
-    const fetcher = vi.fn(async (path: string) => path.endsWith("/comments") ? json({ comments: [], truncated: false }) : ++detailCalls === 1 ? new Response("", { status: 500 }) : json(detail));
+    const fetcher = vi.fn(async (path: string) => path.endsWith("/comments") ? json({ comments: [], truncated: false }) : path.endsWith("/attachments") ? json({ attachments: [], truncated: false }) : ++detailCalls === 1 ? new Response("", { status: 500 }) : json(detail));
     vi.stubGlobal("fetch", fetcher);
     render(<TaskRecord id={101} />);
     fireEvent.click(await screen.findByRole("button", { name: "다시 시도" }));

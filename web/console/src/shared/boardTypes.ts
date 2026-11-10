@@ -285,3 +285,12 @@ export type BoardCommentsResponse = {
   truncated: boolean;
   next_after_id?: number;
 };
+
+export type BoardAttachment = {
+  sha256: string;
+  original_name: string;
+  size_bytes: number;
+  mime: string;
+  created_at: string;
+  created_by: string;
+};
