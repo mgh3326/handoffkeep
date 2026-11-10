@@ -124,7 +124,7 @@ func newServer(service Backend, client string, allowPathUpload bool) *gmcp.Serve
 		}
 		return &gmcp.CallToolResult{Content: []gmcp.Content{&gmcp.TextContent{Text: string(b)}}}, nil, nil
 	}
-	gmcp.AddTool(s, &gmcp.Tool{Name: "search_context", Description: "Search checkpoints, documents, or memory."}, func(ctx context.Context, _ *gmcp.CallToolRequest, x struct {
+	gmcp.AddTool(s, &gmcp.Tool{Name: "search_context", Description: "Search checkpoints, documents, or memory.", Annotations: readOnlyAnnotations()}, func(ctx context.Context, _ *gmcp.CallToolRequest, x struct {
 		Q       string `json:"q"`
 		Scope   string `json:"scope,omitempty"`
 		Session string `json:"session,omitempty"`
@@ -139,7 +139,7 @@ func newServer(service Backend, client string, allowPathUpload bool) *gmcp.Serve
 		}
 		return result(map[string]any{"results": v})
 	})
-	gmcp.AddTool(s, &gmcp.Tool{Name: "recent_checkpoints", Description: "Read recent checkpoints for one session."}, func(ctx context.Context, _ *gmcp.CallToolRequest, x struct {
+	gmcp.AddTool(s, &gmcp.Tool{Name: "recent_checkpoints", Description: "Read recent checkpoints for one session.", Annotations: readOnlyAnnotations()}, func(ctx context.Context, _ *gmcp.CallToolRequest, x struct {
 		Session string `json:"session"`
 		Limit   int    `json:"limit,omitempty"`
 	}) (*gmcp.CallToolResult, any, error) {
@@ -149,7 +149,7 @@ func newServer(service Backend, client string, allowPathUpload bool) *gmcp.Serve
 		}
 		return result(map[string]any{"checkpoints": v})
 	})
-	gmcp.AddTool(s, &gmcp.Tool{Name: "put_checkpoint", Description: "Store a session checkpoint."}, func(ctx context.Context, _ *gmcp.CallToolRequest, x struct {
+	gmcp.AddTool(s, &gmcp.Tool{Name: "put_checkpoint", Description: "Store a session checkpoint.", Annotations: writeAnnotations()}, func(ctx context.Context, _ *gmcp.CallToolRequest, x struct {
 		Session string     `json:"session"`
 		Kind    string     `json:"kind"`
 		Title   string     `json:"title"`
@@ -162,7 +162,7 @@ func newServer(service Backend, client string, allowPathUpload bool) *gmcp.Serve
 		}
 		return result(v)
 	})
-	gmcp.AddTool(s, &gmcp.Tool{Name: "get_document", Description: "Get a document by key."}, func(ctx context.Context, _ *gmcp.CallToolRequest, x struct {
+	gmcp.AddTool(s, &gmcp.Tool{Name: "get_document", Description: "Get a document by key.", Annotations: readOnlyAnnotations()}, func(ctx context.Context, _ *gmcp.CallToolRequest, x struct {
 		Key string `json:"key"`
 	}) (*gmcp.CallToolResult, any, error) {
 		v, ok, e := service.GetDocument(ctx, x.Key)
@@ -171,7 +171,7 @@ func newServer(service Backend, client string, allowPathUpload bool) *gmcp.Serve
 		}
 		return result(map[string]any{"found": ok, "document": v})
 	})
-	gmcp.AddTool(s, &gmcp.Tool{Name: "put_document", Description: "Create or update a document."}, func(ctx context.Context, _ *gmcp.CallToolRequest, x struct {
+	gmcp.AddTool(s, &gmcp.Tool{Name: "put_document", Description: "Create or update a document.", Annotations: writeAnnotations()}, func(ctx context.Context, _ *gmcp.CallToolRequest, x struct {
 		Key     string `json:"key"`
 		Kind    string `json:"kind"`
 		Body    string `json:"body"`
@@ -184,7 +184,7 @@ func newServer(service Backend, client string, allowPathUpload bool) *gmcp.Serve
 		}
 		return result(map[string]any{"document": v, "changed": changed})
 	})
-	gmcp.AddTool(s, &gmcp.Tool{Name: "list_documents", Description: "List document metadata."}, func(ctx context.Context, _ *gmcp.CallToolRequest, x struct {
+	gmcp.AddTool(s, &gmcp.Tool{Name: "list_documents", Description: "List document metadata.", Annotations: readOnlyAnnotations()}, func(ctx context.Context, _ *gmcp.CallToolRequest, x struct {
 		Prefix  string `json:"prefix,omitempty"`
 		Kind    string `json:"kind,omitempty"`
 		Session string `json:"session,omitempty"`
@@ -196,7 +196,7 @@ func newServer(service Backend, client string, allowPathUpload bool) *gmcp.Serve
 		}
 		return result(map[string]any{"documents": v})
 	})
-	gmcp.AddTool(s, &gmcp.Tool{Name: "memory_get", Description: "Get one agent memory."}, func(ctx context.Context, _ *gmcp.CallToolRequest, x struct {
+	gmcp.AddTool(s, &gmcp.Tool{Name: "memory_get", Description: "Get one agent memory.", Annotations: readOnlyAnnotations()}, func(ctx context.Context, _ *gmcp.CallToolRequest, x struct {
 		Agent string `json:"agent"`
 		Name  string `json:"name"`
 	}) (*gmcp.CallToolResult, any, error) {
@@ -206,7 +206,7 @@ func newServer(service Backend, client string, allowPathUpload bool) *gmcp.Serve
 		}
 		return result(map[string]any{"found": ok, "memory": v})
 	})
-	gmcp.AddTool(s, &gmcp.Tool{Name: "memory_put", Description: "Create or update agent memory."}, func(ctx context.Context, _ *gmcp.CallToolRequest, x struct {
+	gmcp.AddTool(s, &gmcp.Tool{Name: "memory_put", Description: "Create or update agent memory.", Annotations: writeAnnotations()}, func(ctx context.Context, _ *gmcp.CallToolRequest, x struct {
 		Agent       string `json:"agent"`
 		Name        string `json:"name"`
 		Description string `json:"description"`
@@ -219,7 +219,7 @@ func newServer(service Backend, client string, allowPathUpload bool) *gmcp.Serve
 		}
 		return result(v)
 	})
-	gmcp.AddTool(s, &gmcp.Tool{Name: "memory_list", Description: "List agent memory metadata."}, func(ctx context.Context, _ *gmcp.CallToolRequest, x struct {
+	gmcp.AddTool(s, &gmcp.Tool{Name: "memory_list", Description: "List agent memory metadata.", Annotations: readOnlyAnnotations()}, func(ctx context.Context, _ *gmcp.CallToolRequest, x struct {
 		Agent string `json:"agent"`
 	}) (*gmcp.CallToolResult, any, error) {
 		v, e := service.ListMemory(ctx, x.Agent, false)
@@ -228,7 +228,7 @@ func newServer(service Backend, client string, allowPathUpload bool) *gmcp.Serve
 		}
 		return result(map[string]any{"memory": v})
 	})
-	gmcp.AddTool(s, &gmcp.Tool{Name: "attachment_list", Description: "List immutable attachment metadata, optionally by reference."}, func(ctx context.Context, _ *gmcp.CallToolRequest, x struct {
+	gmcp.AddTool(s, &gmcp.Tool{Name: "attachment_list", Description: "List immutable attachment metadata, optionally by reference.", Annotations: readOnlyAnnotations()}, func(ctx context.Context, _ *gmcp.CallToolRequest, x struct {
 		Ref   string `json:"ref,omitempty"`
 		Limit int    `json:"limit,omitempty"`
 	}) (*gmcp.CallToolResult, any, error) {
@@ -238,7 +238,7 @@ func newServer(service Backend, client string, allowPathUpload bool) *gmcp.Serve
 		}
 		return result(map[string]any{"attachments": v})
 	})
-	gmcp.AddTool(s, &gmcp.Tool{Name: "attachment_get_url", Description: "Create a ten-minute private presigned attachment URL."}, func(ctx context.Context, _ *gmcp.CallToolRequest, x struct {
+	gmcp.AddTool(s, &gmcp.Tool{Name: "attachment_get_url", Description: "Create a ten-minute private presigned attachment URL.", Annotations: readOnlyAnnotations()}, func(ctx context.Context, _ *gmcp.CallToolRequest, x struct {
 		SHA256 string `json:"sha256"`
 	}) (*gmcp.CallToolResult, any, error) {
 		v, e := service.AttachmentURL(ctx, x.SHA256)
@@ -247,7 +247,7 @@ func newServer(service Backend, client string, allowPathUpload bool) *gmcp.Serve
 		}
 		return result(map[string]any{"url": v, "expires_in_seconds": 600})
 	})
-	gmcp.AddTool(s, &gmcp.Tool{Name: "attachment_put", Description: attachmentPutDescription}, func(ctx context.Context, _ *gmcp.CallToolRequest, x struct {
+	gmcp.AddTool(s, &gmcp.Tool{Name: "attachment_put", Description: attachmentPutDescription, Annotations: writeAnnotations()}, func(ctx context.Context, _ *gmcp.CallToolRequest, x struct {
 		ContentBase64 string `json:"content_base64"`
 		Name          string `json:"name"`
 		MIME          string `json:"mime,omitempty"`
@@ -274,7 +274,7 @@ func newServer(service Backend, client string, allowPathUpload bool) *gmcp.Serve
 		}
 		return result(attachmentPutResponse(v, created))
 	})
-	gmcp.AddTool(s, &gmcp.Tool{Name: "attachment_upload_begin", Description: attachmentUploadBeginDescription}, func(ctx context.Context, _ *gmcp.CallToolRequest, x struct {
+	gmcp.AddTool(s, &gmcp.Tool{Name: "attachment_upload_begin", Description: attachmentUploadBeginDescription, Annotations: writeAnnotations()}, func(ctx context.Context, _ *gmcp.CallToolRequest, x struct {
 		Name   string `json:"name"`
 		MIME   string `json:"mime"`
 		Size   int64  `json:"size"`
@@ -287,7 +287,7 @@ func newServer(service Backend, client string, allowPathUpload bool) *gmcp.Serve
 		}
 		return result(t)
 	})
-	gmcp.AddTool(s, &gmcp.Tool{Name: "attachment_upload_complete", Description: attachmentUploadCompleteDescription}, func(ctx context.Context, _ *gmcp.CallToolRequest, x struct {
+	gmcp.AddTool(s, &gmcp.Tool{Name: "attachment_upload_complete", Description: attachmentUploadCompleteDescription, Annotations: writeAnnotations()}, func(ctx context.Context, _ *gmcp.CallToolRequest, x struct {
 		UploadID string `json:"upload_id"`
 	}) (*gmcp.CallToolResult, any, error) {
 		v, created, e := service.CompleteAttachmentUpload(ctx, client, x.UploadID)
@@ -297,7 +297,7 @@ func newServer(service Backend, client string, allowPathUpload bool) *gmcp.Serve
 		return result(attachmentPutResponse(v, created))
 	})
 	if allowPathUpload {
-		gmcp.AddTool(s, &gmcp.Tool{Name: "attachment_put_from_path", Description: "stdio only: upload a local file as a private attachment."}, func(ctx context.Context, _ *gmcp.CallToolRequest, x struct {
+		gmcp.AddTool(s, &gmcp.Tool{Name: "attachment_put_from_path", Description: "stdio only: upload a local file as a private attachment.", Annotations: writeAnnotations()}, func(ctx context.Context, _ *gmcp.CallToolRequest, x struct {
 			Path string `json:"path"`
 			Name string `json:"name,omitempty"`
 			MIME string `json:"mime"`
