@@ -203,6 +203,22 @@ func supersedeTaskDecisionsTx(ctx context.Context, tx pgx.Tx, taskID int64, stat
 	return err
 }
 
+// otherBlockingDecisionsTx counts the open rows on a task that keep its
+// awaiting_decision flag, other than the request requestID that is being
+// answered. The store records which sources set the flag: a Block request
+// (task_request, or the linear row that replaced it) and a flag row
+// (task_flag). A job escalation or a lane decision on the task never sets it,
+// so it does not keep the task blocked. The caller holds the task-mutation
+// lock and the task row.
+func otherBlockingDecisionsTx(ctx context.Context, tx pgx.Tx, taskID int64, requestID string) (int, error) {
+	var n int
+	err := tx.QueryRow(ctx, `SELECT count(*) FROM decision_requests
+		WHERE task_id=$1 AND status='open' AND source IN ($2,$3,$4)
+		AND NOT (source IN ($3,$4) AND source_ref=$5)`,
+		taskID, DecisionSourceTaskFlag, DecisionSourceTaskRequest, DecisionSourceLinear, requestID).Scan(&n)
+	return n, err
+}
+
 // supersedeJobDecisionsTx supersedes every open row of a job that ended.
 func supersedeJobDecisionsTx(ctx context.Context, tx pgx.Tx, jobID, state string, at time.Time) error {
 	if jobID == "" {

@@ -360,8 +360,13 @@ func TestAwaitingDecisionFlag(t *testing.T) {
 	if ev := lastEvent(t, s, x.ID); ev.Kind != TaskEventAwaiting || ev.ToValue != "false" {
 		t.Fatalf("clear event: %+v", ev)
 	}
-	if _, err := s.ClearAwaitingDecision(ctx, x.ID, "operator:o", "again"); !errors.Is(err, ErrTaskConflict) {
-		t.Fatalf("clearing an unset flag: err=%v, want ErrTaskConflict", err)
+	// A second clear of an answered task is a no-op: no error, no new event.
+	again, err := s.ClearAwaitingDecision(ctx, x.ID, "operator:o", "again")
+	if err != nil || again.AwaitingDecision || again.State != StateDeveloping {
+		t.Fatalf("clearing an unset flag: %+v err=%v, want a no-op", again, err)
+	}
+	if ev := lastEvent(t, s, x.ID); ev.Kind != TaskEventAwaiting || ev.ToValue != "false" || ev.Note != "use A" {
+		t.Fatalf("no-op clear wrote an event: %+v", ev)
 	}
 	// The backlog task, now claimable after being answered through the old name.
 	if got, err := s.TransitionTask(ctx, backlog.ID, "claimed", "operator:o", "answered", nil, "answered"); err != nil || got.AwaitingDecision || got.State != StateBacklog {

@@ -503,3 +503,76 @@ func TestDecisionRequestResolveThenResume(t *testing.T) {
 		t.Fatalf("resume after answer: %+v %v", resumed.Refs.DecisionRequest, err)
 	}
 }
+
+// Answering a Block request clears the flag that request set. The work state
+// stays, and the clear is one awaiting event true to false that names the
+// request and who answered it.
+func TestDecisionRequestAnswerClearsFlag(t *testing.T) {
+	s, _ := searchTestStore(t)
+	ctx := context.Background()
+	task := decisionTask(t, s, "in_progress")
+	in := decisionInput()
+	in.Block = true
+	got, err := s.RecordDecisionRequest(ctx, task.ID, "director-1", in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	answered, err := s.ResolveDecisionRequest(ctx, task.ID, "director-1", DecisionResolveInput{RequestID: got.Request.ID, Kind: DecisionRequestAnswered, Option: "A", Responder: "operator"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if answered.Task.AwaitingDecision || answered.Task.State != got.Task.State {
+		t.Fatalf("answered: awaiting=%v state=%s, want cleared and %s", answered.Task.AwaitingDecision, answered.Task.State, got.Task.State)
+	}
+	full, _, _ := s.GetTask(ctx, task.ID)
+	if full.AwaitingDecision || full.State != got.Task.State {
+		t.Fatalf("stored: awaiting=%v state=%s", full.AwaitingDecision, full.State)
+	}
+	var clears []TaskEvent
+	for _, e := range full.Events {
+		if e.Kind == TaskEventAwaiting && e.ToValue == "false" {
+			clears = append(clears, e)
+		}
+	}
+	if len(clears) != 1 || clears[0].FromValue != "true" || !strings.Contains(clears[0].Note, got.Request.ID) || !strings.Contains(clears[0].Note, "operator") {
+		t.Fatalf("clear events=%+v, want one true->false naming %s and the responder", clears, got.Request.ID)
+	}
+}
+
+// Another open row that sets the flag keeps it when the request is answered.
+// Answering that row clears the flag through the flag path.
+func TestDecisionRequestAnswerKeepsFlagForOtherBlocker(t *testing.T) {
+	s, _ := searchTestStore(t)
+	ctx := context.Background()
+	task := decisionTask(t, s, "in_progress")
+	in := decisionInput()
+	in.Block = true
+	got, err := s.RecordDecisionRequest(ctx, task.ID, "director-1", in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := openDecisionTx(ctx, tx, decisionOpen{Source: DecisionSourceTaskFlag, SourceRef: strconv.FormatInt(task.ID, 10) + "/other", TaskID: task.ID, Lane: task.Lane, Question: "second question", At: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	answered, err := s.ResolveDecisionRequest(ctx, task.ID, "director-1", DecisionResolveInput{RequestID: got.Request.ID, Kind: DecisionRequestAnswered, Option: "A", Responder: "operator"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !answered.Task.AwaitingDecision || answered.Task.State != got.Task.State {
+		t.Fatalf("first answer: awaiting=%v state=%s, want kept", answered.Task.AwaitingDecision, answered.Task.State)
+	}
+	if _, err := s.ClearAwaitingDecision(ctx, task.ID, "operator:o", "second answered"); err != nil {
+		t.Fatal(err)
+	}
+	var status string
+	if err := s.pool.QueryRow(ctx, `SELECT status FROM decision_requests WHERE task_id=$1 AND source=$2`, task.ID, DecisionSourceTaskFlag).Scan(&status); err != nil || status != "answered" {
+		t.Fatalf("flag row status=%q err=%v, want answered", status, err)
+	}
+}

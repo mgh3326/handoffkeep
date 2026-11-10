@@ -373,3 +373,36 @@ func TestDotsProgressRecordsPartialResult(t *testing.T) {
 		t.Fatal("Linear webhook must continue ignoring PROGRESS")
 	}
 }
+
+// An operator answer to a dots question clears the flag its Block request set,
+// so the run can still record its RESULT.
+func TestDotsOperatorAnswerLetsResultComplete(t *testing.T) {
+	s := schemaStore(t, "dots_answer_result")
+	ctx := t.Context()
+	task, err := s.CreateDotsRequest(ctx, "caller", DotsRequestInput{Title: "Research", Body: "Investigate"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, _ := startDotsRun(t, s, task.ID, "start")
+	if _, err := s.ReplyDots(ctx, "operator:test@example.com", "chatgpt", DotsReplyInput{TaskID: task.ID, Kind: "QUESTION", Body: "Which option?", AskOperator: true, IdempotencyKey: "question", RunToken: started.RunToken}); err != nil {
+		t.Fatal(err)
+	}
+	asked, _, _ := s.GetTask(ctx, task.ID)
+	if !asked.AwaitingDecision || asked.Refs.DecisionRequest == nil {
+		t.Fatalf("question did not flag the task: %+v", asked)
+	}
+	if _, err := s.ResolveDecisionRequest(ctx, task.ID, "operator:test@example.com", DecisionResolveInput{RequestID: asked.Refs.DecisionRequest.ID, Kind: DecisionRequestAnswered, Option: "A", Text: "go ahead", Responder: "operator"}); err != nil {
+		t.Fatal(err)
+	}
+	answered, _, _ := s.GetTask(ctx, task.ID)
+	if answered.AwaitingDecision || answered.State != asked.State {
+		t.Fatalf("after answer: awaiting=%v state=%s, want cleared and %s", answered.AwaitingDecision, answered.State, asked.State)
+	}
+	if _, err := s.ReplyDots(ctx, "operator:test@example.com", "chatgpt", DotsReplyInput{TaskID: task.ID, Kind: "RESULT", Body: "done", IdempotencyKey: "result", RunToken: started.RunToken}); err != nil {
+		t.Fatalf("RESULT after the answer: %v", err)
+	}
+	done, _, _ := s.GetTask(ctx, task.ID)
+	if done.State != StateCompleted {
+		t.Fatalf("state=%s, want %s", done.State, StateCompleted)
+	}
+}

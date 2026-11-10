@@ -528,11 +528,21 @@ func (s *Store) ResolveDecision(ctx context.Context, in ResolveDecisionInput) (R
 		resolved.Resolution.DecidedBy = prov.decidedBy()
 	}
 	x.Refs.DecisionRequest = &resolved
+	// Closing a request ends the block it set: the flag clears unless another
+	// open request on the task still blocks it. The work state stays.
+	flagWas := x.AwaitingDecision
+	if flagWas {
+		var others int
+		if others, err = otherBlockingDecisionsTx(ctx, tx, x.ID, resolved.ID); err != nil {
+			return ResolveDecisionOutcome{}, err
+		}
+		x.AwaitingDecision = others > 0
+	}
 	encoded, err := json.Marshal(x.Refs)
 	if err != nil {
 		return ResolveDecisionOutcome{}, err
 	}
-	if err = scanTask(tx.QueryRow(ctx, `UPDATE tasks SET refs=$2::jsonb,updated_at=$3 WHERE id=$1 RETURNING `+taskColumns, x.ID, string(encoded), now), &x); err != nil {
+	if err = scanTask(tx.QueryRow(ctx, `UPDATE tasks SET refs=$2::jsonb,awaiting_decision=$4,updated_at=$3 WHERE id=$1 RETURNING `+taskColumns, x.ID, string(encoded), now, x.AwaitingDecision), &x); err != nil {
 		return ResolveDecisionOutcome{}, err
 	}
 	var resolutionID int64
@@ -564,6 +574,12 @@ func (s *Store) ResolveDecision(ctx context.Context, in ResolveDecisionInput) (R
 	// rolls both back together.
 	if err = s.queueDecisionAnswerNotice(ctx, tx, x, resolved, in, decidedBy(in, prov), resolutionID, now); err != nil {
 		return ResolveDecisionOutcome{}, err
+	}
+	if flagWas && !x.AwaitingDecision {
+		// The flag's own event: true to false, naming the request and who answered.
+		if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: x.ID, Kind: TaskEventAwaiting, From: x.State, To: x.State, By: in.Actor, Note: "decision-clear " + resolved.ID + " by " + decidedBy(in, prov), Refs: x.Refs, Into: &x, At: now, Field: "awaiting_decision", FromValue: "true", ToValue: "false"}); err != nil {
+			return ResolveDecisionOutcome{}, err
+		}
 	}
 	if err = insertDecisionEvent(ctx, tx, &x, in.Actor, note, now); err != nil {
 		return ResolveDecisionOutcome{}, err

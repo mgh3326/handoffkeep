@@ -14,7 +14,7 @@ import (
 func registerDotsTools(s *gmcp.Server, service api.Service, p principal) {
 	o := operatorTools{service: service, principal: p}
 	gmcp.AddTool(s, &gmcp.Tool{Name: "dots_inbox", Description: "List open dots requests oldest first, with whether each is started and when. The run token is never listed. Pass the last task id as cursor to continue.", Annotations: readOnlyAnnotations()}, o.dotsInbox)
-	gmcp.AddTool(s, &gmcp.Tool{Name: "dots_reply", Description: "Reply to a dots request. START requires expected_updated_at from the inbox and returns run_token; every later reply must send that run_token. START with takeover true takes over an already started request and rotates the run_token. Use ask_operator for questions requiring an operator decision. Reuse an idempotency key only for the same reply.", Annotations: writeAnnotations()}, o.dotsReply)
+	gmcp.AddTool(s, &gmcp.Tool{Name: "dots_reply", Description: "Reply to a dots request. START requires expected_updated_at from the inbox and returns run_token; every later reply must send that run_token. START with takeover true takes over an already started request and rotates the run_token. Use ask_operator for questions requiring an operator decision. When the operator answers a dots question in the chat, record it with decision_answer (the operator's words as text) before continuing; never answer it yourself. Reuse an idempotency key only for the same reply.", Annotations: writeAnnotations()}, o.dotsReply)
 }
 
 func (o operatorTools) dotsReply(ctx context.Context, _ *gmcp.CallToolRequest, in store.DotsReplyInput) (*gmcp.CallToolResult, any, error) {
