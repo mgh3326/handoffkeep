@@ -282,6 +282,33 @@ func (s *Store) ListPlacements(ctx context.Context, job, host string, since time
 	return out, rows.Err()
 }
 
+// ListFleetCapacityPlacements includes attempts where host was either chosen
+// or evaluated as a candidate. The MCP projection applies its smaller limit
+// and omits placement fields that are not part of the diagnostic contract.
+func (s *Store) ListFleetCapacityPlacements(ctx context.Context, job, host string, since time.Time, limit int) ([]PlacementDecision, error) {
+	if (job != "" && !ValidJobID(job)) || (host != "" && !ValidJobHost(host)) || limit < 1 || limit > 100 {
+		return nil, errors.New("invalid placement filter")
+	}
+	rows, err := s.pool.Query(ctx, `SELECT `+placementColumns+` FROM placement_decisions
+		WHERE ($1='' OR job_id=$1)
+		AND ($2='' OR chosen_host=$2 OR EXISTS (SELECT 1 FROM jsonb_array_elements(candidates) c WHERE c->>'host'=$2))
+		AND decided_at >= $3
+		ORDER BY decided_at DESC,id DESC LIMIT $4`, job, host, since, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []PlacementDecision{}
+	for rows.Next() {
+		d, err := scanPlacement(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) PrunePlacements(ctx context.Context) (int64, error) {
 	tag, err := s.pool.Exec(ctx, `DELETE FROM placement_decisions WHERE id IN (SELECT id FROM placement_decisions WHERE decided_at < $1 ORDER BY decided_at,id LIMIT 1000)`, time.Now().UTC().Add(-PlacementRetention))
 	return tag.RowsAffected(), err

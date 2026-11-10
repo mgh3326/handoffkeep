@@ -21,6 +21,11 @@ const syncWriterNote = "The Python mirror may still be the active writer until t
 // sync status tools.
 func registerMetaTools(s *gmcp.Server, o operatorTools) {
 	gmcp.AddTool(s, &gmcp.Tool{
+		Name:        "fleet_capacity",
+		Description: "현재 quota 관측, host-account presence, 최근 placement 시도를 보여줍니다. accounts는 account_key별 pool과 window 사용률, 리셋 시각, 관측 나이를 담습니다. presence는 host별 관측된 각 account_key와 해당 계정의 마지막 관측 나이를 담습니다. placements는 job, host, since 필터를 지원하며 기본 20건, 최대 100건을 최신순으로 반환합니다. 각 시도에는 job_id, 결정 시각, 결과와 사유, 선택된 host/profile/model, 후보 host별 결과와 사유가 포함됩니다. 결과는 저장된 증거이며 어떤 변경이나 spawn도 지시하지 않습니다. hk에는 panewire의 quota staleness 기준이 없어 age_seconds만 보고하고 stale 판정은 하지 않습니다. 기록이 없으면 placement_note에 no placement records라고 표시합니다.",
+		Annotations: readOnlyAnnotations(),
+	}, o.fleetCapacity)
+	gmcp.AddTool(s, &gmcp.Tool{
 		Name:        "projects_list",
 		Description: "List every hk task project with its design-session owner (design_lane and effective_owner), status, start and target dates, open task counts by state, and health: in_progress, waiting, blocked, done and overdue counts, open assignees, and the top blocked tasks (with blocker ids) and overdue tasks. as_of is the server time the counts were read at. Read-only.",
 		Annotations: readOnlyAnnotations(),
