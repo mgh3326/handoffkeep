@@ -474,7 +474,9 @@ func TestYouTrackSchemaVocabulary(t *testing.T) {
 	if _, err := st.CreateTask(ctx, Task{Lane: "lane-m", Title: "four", Kind: "implement", CreatedBy: "test", Project: &other}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.CreateTask(ctx, Task{Lane: "lane-n", Title: "five", Kind: "implement", CreatedBy: "test"}); err != nil {
+	// New tasks need a project; older rows may have none.
+	legacy := youtrackTask(t, st, "lane-n", "five")
+	if _, err := st.pool.Exec(ctx, `UPDATE tasks SET project=NULL WHERE id=$1`, legacy.ID); err != nil {
 		t.Fatal(err)
 	}
 	lanes, err := st.ListTaskLanes(ctx)
