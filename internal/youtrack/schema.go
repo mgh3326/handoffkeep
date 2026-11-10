@@ -161,11 +161,11 @@ type BundleValue struct {
 	Ordinal  int
 }
 
-// Vocabulary is the hk data the desired schema is built from. Milestones are
-// per hk project; the rest is shared by every project.
+// Vocabulary is the hk data the desired schema is built from. Lanes and
+// milestones are per hk project; the rest is shared by every project.
 type Vocabulary struct {
 	Kinds      []string
-	Lanes      []string
+	Lanes      map[string][]string
 	Areas      []string
 	Milestones map[string][]string
 }
@@ -182,7 +182,7 @@ func (s Schema) Desired(v Vocabulary, hkProject string) []FieldSpec {
 		{Name: s.KindField, Kind: KindEnum, Values: enumValues(v.Kinds)},
 		{Name: s.GradeField, Kind: KindEnum, Values: enumValues(Grades)},
 		{Name: s.TierField, Kind: KindEnum, Values: enumValues(Tiers)},
-		{Name: s.LaneField, Kind: KindEnum, Values: enumValues(v.Lanes)},
+		{Name: s.LaneField, Kind: KindEnum, Values: enumValues(v.Lanes[hkProject])},
 		{Name: s.DueField, Kind: KindDate},
 		{Name: s.AreaField, Kind: KindEnum, Values: enumValues(v.Areas)},
 		{Name: s.MilestoneField, Kind: KindEnum, Values: enumValues(v.Milestones[hkProject])},

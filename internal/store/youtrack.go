@@ -1020,21 +1020,23 @@ func youtrackLaneRefusal(err error) (string, bool) {
 	return "", false
 }
 
-// ListTaskLanes lists every distinct lane a task uses, in name order. The
-// YouTrack schema run adds each to the 레인 enum.
-func (s *Store) ListTaskLanes(ctx context.Context) ([]string, error) {
-	rows, err := s.pool.Query(ctx, `SELECT DISTINCT lane FROM tasks WHERE lane <> '' ORDER BY lane`)
+// ListTaskLanes lists the distinct lanes each project's tasks use, in name
+// order, keyed by project; tasks with no project are under "". The YouTrack
+// schema run adds each project's lanes to that project's 레인 enum, so a
+// project's list holds only the lanes its own tasks used.
+func (s *Store) ListTaskLanes(ctx context.Context) (map[string][]string, error) {
+	rows, err := s.pool.Query(ctx, `SELECT DISTINCT COALESCE(project,''),lane FROM tasks WHERE lane <> '' ORDER BY 1,2`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	lanes := []string{}
+	lanes := map[string][]string{}
 	for rows.Next() {
-		var lane string
-		if err := rows.Scan(&lane); err != nil {
+		var project, lane string
+		if err := rows.Scan(&project, &lane); err != nil {
 			return nil, err
 		}
-		lanes = append(lanes, lane)
+		lanes[project] = append(lanes[project], lane)
 	}
 	return lanes, rows.Err()
 }
