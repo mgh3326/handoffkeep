@@ -14,15 +14,17 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
 
-// Slice b1a (hk 3739, docs/youtrack-write-protocol.md): a new hk comment on a
-// task enrolled in the canary also gets a protocol-tracked copy on the task's
-// YouTrack issue. PG stays canonical for comments; the comment row is written
-// exactly as before, and its op, its ownership link and (for the first op) the
-// task's map row are written in the same transaction. Nothing here calls
-// YouTrack: the issue was verified at enrollment, and the worker in serve
-// sends the op (ytwrite.Protocol.Drive).
+// Slice b1a (hk 3739) and comment mode on (hk 3810),
+// docs/youtrack-write-protocol.md: a new hk comment on a task enrolled in the
+// canary (mode canary) or bound to its issue (mode on) also gets a
+// protocol-tracked copy on the task's YouTrack issue. PG stays canonical for
+// comments; the comment row is written exactly as before, and its op, its
+// ownership link and (for the first op) the task's map row are written in the
+// same transaction. Nothing here calls YouTrack: the issue was verified at
+// enrollment or binding, and the worker in serve sends the op
+// (ytwrite.Protocol.Drive).
 
-// YTCommentsMode gates slice b1a (HANDOFFKEEP_YT_COMMENTS_MODE).
+// YTCommentsMode gates the comment copy (HANDOFFKEEP_YT_COMMENTS_MODE).
 type YTCommentsMode string
 
 const (
@@ -45,21 +47,37 @@ func YTCommentKey(commentID int64) string { return "task-comment:" + strconv.For
 
 // SetYTCommentsMode sets the gate for this process. serve calls it once at
 // start, before any request.
-func (s *Store) SetYTCommentsMode(m YTCommentsMode) { s.ytCommentsCanary.Store(m == YTCommentsCanary) }
+func (s *Store) SetYTCommentsMode(m YTCommentsMode) { s.ytCommentsMode.Store(m) }
+
+// ytCommentsModeNow is the gate; unset, and any value that is not canary or
+// on, is off.
+func (s *Store) ytCommentsModeNow() YTCommentsMode {
+	switch m, _ := s.ytCommentsMode.Load().(YTCommentsMode); m {
+	case YTCommentsCanary, YTCommentsOn:
+		return m
+	default:
+		return YTCommentsOff
+	}
+}
 
 // enqueueYTCommentTx stores the op that copies comment c to YouTrack, inside
 // the comment's transaction (after its insert, before its commit). It writes
-// nothing when the gate is off or the task is not enrolled. A comment PG
-// accepts but the protocol cannot send (a body quoting the op marker, an
-// author the provenance line cannot carry) and a task whose map row names
-// another issue get a rejected op: the comment is untouched and nothing is
-// ever sent. Any database error fails the whole comment.
+// nothing when the gate is off. Mode on is enqueueYTCommentOnTx; what follows
+// is mode canary, which writes nothing when the task is not enrolled. A
+// comment PG accepts but the protocol cannot send (a body quoting the op
+// marker, an author the provenance line cannot carry) and a task whose map row
+// names another issue get a rejected op: the comment is untouched and nothing
+// is ever sent. Any database error fails the whole comment.
 //
 // Locks, in this order after the comment insert lock and the comment's KEY
 // SHARE on its task: the op's entity lane lock (lockYTEntity), then new rows
 // of yt_write_ops, yt_comment_write_links and yt_entity_map (lockorder.go).
 func (s *Store) enqueueYTCommentTx(ctx context.Context, tx pgx.Tx, c TaskComment) (ytwrite.Op, bool, error) {
-	if !s.ytCommentsCanary.Load() {
+	switch s.ytCommentsModeNow() {
+	case YTCommentsOn:
+		return enqueueYTCommentOnTx(ctx, tx, c)
+	case YTCommentsCanary:
+	default:
 		return ytwrite.Op{}, false, nil
 	}
 	var issueID, projectID, tenant string
@@ -271,14 +289,17 @@ func scanYTCanary(row interface{ Scan(...any) error }, c *YTCommentCanary) error
 // transaction reads the task's mappings again and refuses with
 // ErrYTCanaryConflict if any of them changed since. Adding the same binding
 // again is a no-op; another binding for an enrolled task, an issue another
-// task is enrolled with or mapped to, or a task mapped to another issue, is
-// ErrYTCanaryConflict. Nothing else is written: an enrollment creates no op
-// row.
+// task is enrolled with or mapped to, a task mapped to another issue, and a
+// yt_task_bindings row that binds the task elsewhere or the issue to another
+// task (mode on, hk 3810), is ErrYTCanaryConflict. Nothing else is written: an
+// enrollment creates no op row.
 //
-// Locks: the task's lane lock first (the one Claim and the comment enqueue
-// take, so the yt_entity_map row of the task and the claim's admission cannot
-// change under it), then FOR SHARE on the task's youtrack_projects and
-// task_origins rows, then the new canary row (lockorder.go).
+// Locks, as AddYTTaskBinding takes them (lockorder.go): the issue ownership
+// lock, FOR SHARE on the task row (a project change waits), the task's lane
+// lock (the one Claim and the comment enqueue take, so the yt_entity_map row
+// of the task and the claim's admission cannot change under it), then FOR
+// SHARE on the task's youtrack_projects and task_origins rows, then the new
+// canary row.
 func (s *Store) AddYTCommentCanary(ctx context.Context, c YTCommentCanary, verified YTCanaryCandidate) (YTCommentCanary, error) {
 	if c.TaskID < 1 || c.Tenant == "" || len(c.Tenant) > 255 || c.IssueID == "" || len(c.IssueID) > 64 ||
 		len(c.IssueReadable) > 64 || len(c.ProjectID) > 64 || c.AddedBy == "" || !validText(c.AddedBy, 200) || verified.TaskID != c.TaskID {
@@ -290,6 +311,9 @@ func (s *Store) AddYTCommentCanary(ctx context.Context, c YTCommentCanary, verif
 	}
 	defer tx.Rollback(ctx)
 	taskKey := strconv.FormatInt(c.TaskID, 10)
+	if err := lockYTIssueOwnershipTx(ctx, tx, c.TaskID); err != nil {
+		return YTCommentCanary{}, err
+	}
 	if err := lockYTEntity(ctx, tx, "task", taskKey); err != nil {
 		return YTCommentCanary{}, err
 	}
@@ -308,6 +332,14 @@ func (s *Store) AddYTCommentCanary(ctx context.Context, c YTCommentCanary, verif
 	}
 	if mapped {
 		return YTCommentCanary{}, fmt.Errorf("%w: yt_entity_map maps task %d or issue %s elsewhere", ErrYTCanaryConflict, c.TaskID, c.IssueID)
+	}
+	var bound bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM yt_task_bindings
+		WHERE (task_id=$1 AND (tenant<>$2 OR issue_id<>$3)) OR (task_id<>$1 AND tenant=$2 AND issue_id=$3))`, c.TaskID, c.Tenant, c.IssueID).Scan(&bound); err != nil {
+		return YTCommentCanary{}, err
+	}
+	if bound {
+		return YTCommentCanary{}, fmt.Errorf("%w: yt_task_bindings binds task %d or issue %s elsewhere", ErrYTCanaryConflict, c.TaskID, c.IssueID)
 	}
 	var got YTCommentCanary
 	err = scanYTCanary(tx.QueryRow(ctx, `INSERT INTO yt_comment_canary(`+ytCanaryColumns+`) VALUES ($1,$2,$3,$4,$5,$6,$7)
@@ -367,8 +399,9 @@ func (s *Store) ListYTCommentCanary(ctx context.Context) ([]YTCommentCanary, err
 
 // YTCommentConfig wires cfg for the comment worker of one YouTrack tenant:
 // its ledger is YTCommentLedger(tenant), whose claim admits a dispatch in the
-// claim's own transaction. Mode off, a removal from the canary, or an op bound
-// to another tenant freezes sends without rejecting anything.
+// claim's own transaction. Mode off, a removal from the canary (mode canary),
+// a task with no matching binding (mode on), or an op bound to another tenant
+// freezes sends without rejecting anything.
 func (s *Store) YTCommentConfig(tenant string, cfg ytwrite.Config) ytwrite.Config {
 	cfg.Ledger = s.YTCommentLedger(tenant)
 	return cfg

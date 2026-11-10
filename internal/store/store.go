@@ -575,10 +575,11 @@ type Store struct {
 	// consoleURL is the console base URL answer notifications link to; nil
 	// or empty leaves the link out.
 	consoleURL atomic.Pointer[string]
-	// ytCommentsCanary is the slice b1a gate (SetYTCommentsMode): when set, a
-	// comment on a task in yt_comment_canary gets its write-protocol op in
-	// the comment's transaction.
-	ytCommentsCanary atomic.Bool
+	// ytCommentsMode is the YouTrack comment gate (SetYTCommentsMode), a
+	// YTCommentsMode; unset is off. canary copies the comments of tasks in
+	// yt_comment_canary, on those of tasks with a consistent yt_task_bindings
+	// row, in the comment's transaction.
+	ytCommentsMode atomic.Value
 }
 
 // Refs stores repeatable named references. Its decoder accepts legacy scalar
