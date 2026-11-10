@@ -1329,10 +1329,10 @@ func (s *Store) migrate(ctx context.Context) error {
 func validName(x string) bool        { return nameRE.MatchString(x) }
 func validText(x string, n int) bool { return len(x) <= n && !strings.ContainsRune(x, 0) }
 
-// validActor accepts ordinary store names and the operator:<email> identity
+// ValidActor accepts ordinary store names and the operator:<email> identity
 // used by authenticated console and MCP requests. Actor text remains bounded
 // and cannot contain NUL or other control characters.
-func validActor(x string) bool {
+func ValidActor(x string) bool {
 	if validName(x) {
 		return true
 	}
@@ -3617,7 +3617,7 @@ func (s *Store) CreateCheckpoint(ctx context.Context, x Checkpoint) (Checkpoint,
 	if !validName(x.Session) || !kinds[x.Kind] || x.Title == "" || !validText(x.Title, MaxBytes) || !validText(x.Body, MaxBytes) {
 		return x, errors.New("invalid checkpoint")
 	}
-	if !validActor(x.CreatedBy) {
+	if !ValidActor(x.CreatedBy) {
 		return x, errors.New("invalid checkpoint created_by")
 	}
 	if e := guard.Reject(x.Title + "\n" + x.Body); e != nil {
@@ -3688,7 +3688,7 @@ func (s *Store) PutMemory(ctx context.Context, x Memory) (Memory, error) {
 	if !validName(x.Agent) || !validName(x.Name) || !memoryTypes[x.Type] || !validText(x.Description, MaxBytes) || !validText(x.Content, MaxBytes) {
 		return x, errors.New("invalid memory")
 	}
-	if !validActor(x.UpdatedBy) {
+	if !ValidActor(x.UpdatedBy) {
 		return x, errors.New("invalid memory updated_by")
 	}
 	if e := guard.Reject(x.Description + "\n" + x.Content); e != nil {
@@ -3759,7 +3759,7 @@ func (s *Store) PutDocument(ctx context.Context, x Document) (Document, bool, er
 	if !validDocKey(x.Key) || !documentKinds[x.Kind] || !validText(x.Session, 128) || !validText(x.Job, 128) || !validText(x.Body, DocumentMaxBytes) {
 		return x, false, errors.New("invalid document")
 	}
-	if !validActor(x.CreatedBy) {
+	if !ValidActor(x.CreatedBy) {
 		return x, false, errors.New("invalid document created_by")
 	}
 	if (x.OriginClass != "" && !documentOriginClasses[x.OriginClass]) || (x.TaskID != nil && *x.TaskID < 1) {
@@ -3971,7 +3971,7 @@ func (s *Store) PutAttachment(ctx context.Context, x Attachment, storageCap, put
 	if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(x.SHA256) || x.SizeBytes < 0 || x.MIME == "" || !validText(x.OriginalName, 512) || !validAttachmentRef(x.RefKind, x.RefID) {
 		return x, false, errors.New("invalid attachment")
 	}
-	if !validActor(x.CreatedBy) {
+	if !ValidActor(x.CreatedBy) {
 		return x, false, errors.New("invalid attachment created_by")
 	}
 	if x.RefKind == "" {

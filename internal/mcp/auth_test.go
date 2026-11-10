@@ -26,6 +26,10 @@ type accessFixture struct {
 }
 
 func newAccessFixture(t *testing.T) accessFixture {
+	return newAccessFixtureWithAllowedEmails(t, "operator@example.com")
+}
+
+func newAccessFixtureWithAllowedEmails(t *testing.T, allowedEmails ...string) accessFixture {
 	t.Helper()
 	private, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -43,7 +47,7 @@ func newAccessFixture(t *testing.T) accessFixture {
 	verifier, err := cfaccess.New(cfaccess.Config{
 		TeamDomain:          "team.example",
 		AUD:                 "mcp-audience",
-		AllowedEmails:       []string{"operator@example.com"},
+		AllowedEmails:       allowedEmails,
 		AllowedServiceNames: []string{"mcp-service"},
 		Issuer:              keys.URL,
 		CertsURL:            keys.URL,

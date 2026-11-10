@@ -36,7 +36,7 @@ func TestAccessAndBearerActorMCPWrites(t *testing.T) {
 	manager := &attachments.Manager{Store: db, Objects: objects, Enabled: true, Config: attachments.Config{
 		MaxBytes: 50 << 20, StorageCap: 1 << 30, PutCap: 1000, GetCap: 1000, Allow: allow,
 	}}
-	fixture := newAccessFixture(t)
+	fixture := newAccessFixtureWithAllowedEmails(t, "someone@example.com")
 	srv := httptest.NewServer(HTTPHandler(api.Service{Store: st, Attachments: manager}, api.Tokens{"bearer-client": "bearer-secret"}, fixture.verifier))
 	t.Cleanup(srv.Close)
 	accessSession := connectMCP(t, srv.URL, map[string]string{"Cf-Access-Jwt-Assertion": fixture.token(t, jwt.MapClaims{"email": "someone@example.com"})})

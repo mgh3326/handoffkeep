@@ -475,6 +475,9 @@ func (m *Manager) Put(ctx context.Context, client, name, mime, ref string, body 
 // putBytes is the one store path for a body: validate, dedupe, capacity, object
 // put, then the metadata row. Put and a completed direct upload both call it.
 func (m *Manager) putBytes(ctx context.Context, client, name, mime, ref string, body []byte) (store.Attachment, bool, error) {
+	if !store.ValidActor(client) {
+		return store.Attachment{}, false, errors.New("invalid attachment created_by")
+	}
 	mime, e := validate(m.Config, name, mime, body)
 	if e != nil {
 		return store.Attachment{}, false, e

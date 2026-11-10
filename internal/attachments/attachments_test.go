@@ -303,6 +303,23 @@ func TestDedupeSkipsSecondObjectPut(t *testing.T) {
 		t.Fatalf("puts object=%d db=%d", obj.puts, db.puts)
 	}
 }
+
+func TestInvalidActorRefusedBeforeObjectPut(t *testing.T) {
+	for _, actor := range []string{"bad\x00actor", strings.Repeat("a", 129)} {
+		t.Run(actor, func(t *testing.T) {
+			db := &fakeDB{rows: map[string]store.Attachment{}}
+			obj := &fakeObjects{objects: map[string][]byte{}}
+			m := &Manager{Store: db, Objects: obj, Enabled: true, Config: Config{MaxBytes: 100, StorageCap: 100, PutCap: 10, Allow: map[string]bool{"text/plain": true}}}
+			if _, _, err := m.Put(t.Context(), actor, "note.txt", "text/plain", "", []byte("safe")); err == nil || !strings.Contains(err.Error(), "created_by") {
+				t.Fatalf("Put error=%v, want created_by refusal", err)
+			}
+			if obj.puts != 0 || obj.stats != 0 || db.puts != 0 {
+				t.Fatalf("invalid actor caused effects: object puts=%d stats=%d metadata puts=%d", obj.puts, obj.stats, db.puts)
+			}
+		})
+	}
+}
+
 func TestDedupeDBHitSkipsObjectLookup(t *testing.T) {
 	db := &fakeDB{rows: map[string]store.Attachment{}}
 	obj := &fakeObjects{objects: map[string][]byte{}}

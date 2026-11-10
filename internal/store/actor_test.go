@@ -18,8 +18,8 @@ func TestValidActor(t *testing.T) {
 		{"operator:someone@example.com\x00", false},
 		{"operator:" + strings.Repeat("a", 121), false},
 	} {
-		if got := validActor(tc.value); got != tc.valid {
-			t.Errorf("validActor(%q)=%v, want %v", tc.value, got, tc.valid)
+		if got := ValidActor(tc.value); got != tc.valid {
+			t.Errorf("ValidActor(%q)=%v, want %v", tc.value, got, tc.valid)
 		}
 	}
 }
