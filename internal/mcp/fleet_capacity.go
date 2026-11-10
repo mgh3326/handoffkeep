@@ -99,7 +99,11 @@ func (o operatorTools) fleetCapacity(ctx context.Context, _ *gmcp.CallToolReques
 			observations = append(observations, *latest.Observation)
 		}
 		for _, observation := range observations {
-			age := int64(now.Sub(observation.MeasuredAt).Seconds())
+			freshnessAt := observation.MeasuredAt
+			if observation.ConfirmedAt != nil {
+				freshnessAt = *observation.ConfirmedAt
+			}
+			age := int64(now.Sub(freshnessAt).Seconds())
 			var expired *bool
 			if observation.Kind == "manual" && observation.ExpiresAt != nil {
 				value := !observation.ExpiresAt.After(now)
@@ -157,7 +161,7 @@ func (o operatorTools) fleetCapacity(ctx context.Context, _ *gmcp.CallToolReques
 	return jsonResult(map[string]any{
 		"as_of": now, "accounts": accounts, "presence": presence, "placements": placementViews,
 		"placement_note": placementNote(len(placementViews)),
-		"staleness_rule": "handoffkeep has no panewire quota staleness threshold; age_seconds is reported without a staleness flag; manual observations include expires_at and expired",
+		"staleness_rule": "handoffkeep has no panewire quota staleness threshold; age_seconds uses confirmed_at or falls back to measured_at and has no stale flag; manual observations include expires_at and expired",
 	})
 }
 
