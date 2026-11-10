@@ -1,0 +1,1 @@
+[{"name":"레인","id":"58-13","fieldType":{"id":"enum[1]","$type":"FieldType"},"$type":"CustomField"},{"name":"hk 상태","id":"58-12","fieldType":{"id":"state[1]","$type":"FieldType"},"$type":"CustomField"}]

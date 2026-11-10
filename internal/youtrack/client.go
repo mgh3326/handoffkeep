@@ -47,8 +47,12 @@ type Config struct {
 	HTTPClient *http.Client
 	Timeout    time.Duration
 	MaxRetries int
-	Backoff    time.Duration
-	UserAgent  string
+	// RetryAfterCap bounds how long a 429's Retry-After is honoured; zero is
+	// maxRetryWait. The schema run raises it so a rate-limited tenant is waited
+	// out, not hammered.
+	RetryAfterCap time.Duration
+	Backoff       time.Duration
+	UserAgent     string
 	// Sleep is the retry wait, injectable so tests do not spend real time.
 	Sleep func(ctx context.Context, d time.Duration) error
 }
@@ -59,6 +63,7 @@ type Client struct {
 	http      *http.Client
 	timeout   time.Duration
 	retries   int
+	retryCap  time.Duration
 	backoff   time.Duration
 	userAgent string
 	sleep     func(context.Context, time.Duration) error
@@ -106,6 +111,10 @@ func New(cfg Config) (*Client, error) {
 		c.retries = 0
 	} else if c.retries == 0 {
 		c.retries = defaultMaxRetries
+	}
+	c.retryCap = cfg.RetryAfterCap
+	if c.retryCap <= 0 {
+		c.retryCap = maxRetryWait
 	}
 	if c.backoff <= 0 {
 		c.backoff = defaultBackoff
@@ -310,7 +319,7 @@ func (c *Client) once(ctx context.Context, method, endpoint string, payload []by
 	apiErr.Method, apiErr.Path = method, pathOf(endpoint)
 	apiErr.Code = redactText(apiErr.Code, c.token)
 	apiErr.Message = redactText(apiErr.Message, c.token)
-	return nil, retryAfter(resp.Header.Get("Retry-After")), apiErr
+	return nil, parseRetryAfterAt(resp.Header.Get("Retry-After"), c.retryCap, time.Now()), apiErr
 }
 
 func pathOf(endpoint string) string {

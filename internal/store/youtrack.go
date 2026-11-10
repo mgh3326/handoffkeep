@@ -1019,3 +1019,41 @@ func youtrackLaneRefusal(err error) (string, bool) {
 	}
 	return "", false
 }
+
+// ListTaskLanes lists every distinct lane a task uses, in name order. The
+// YouTrack schema run adds each to the 레인 enum.
+func (s *Store) ListTaskLanes(ctx context.Context) ([]string, error) {
+	rows, err := s.pool.Query(ctx, `SELECT DISTINCT lane FROM tasks WHERE lane <> '' ORDER BY lane`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	lanes := []string{}
+	for rows.Next() {
+		var lane string
+		if err := rows.Scan(&lane); err != nil {
+			return nil, err
+		}
+		lanes = append(lanes, lane)
+	}
+	return lanes, rows.Err()
+}
+
+// ListMilestoneNames lists the milestone names of each project, in the
+// milestone order (sort_order, then id).
+func (s *Store) ListMilestoneNames(ctx context.Context) (map[string][]string, error) {
+	rows, err := s.pool.Query(ctx, `SELECT project,name FROM project_milestones ORDER BY project, sort_order, id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string][]string{}
+	for rows.Next() {
+		var project, name string
+		if err := rows.Scan(&project, &name); err != nil {
+			return nil, err
+		}
+		out[project] = append(out[project], name)
+	}
+	return out, rows.Err()
+}

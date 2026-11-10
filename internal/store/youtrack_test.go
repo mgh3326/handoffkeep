@@ -459,3 +459,30 @@ func TestTruncateTextKeepsRunesWhole(t *testing.T) {
 		t.Fatalf("short value changed: %q", got)
 	}
 }
+
+func TestYouTrackSchemaVocabulary(t *testing.T) {
+	st := schemaStore(t, "youtrack_schema_vocab")
+	ctx := context.Background()
+	youtrackTask(t, st, "lane-b", "one")
+	youtrackTask(t, st, "lane-a", "two")
+	youtrackTask(t, st, "lane-b", "three")
+	lanes, err := st.ListTaskLanes(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lanes) != 2 || lanes[0] != "lane-a" || lanes[1] != "lane-b" {
+		t.Fatalf("lanes=%v, want [lane-a lane-b]", lanes)
+	}
+	for i, name := range []string{"second", "first"} {
+		if _, err := st.SaveMilestone(ctx, ProjectMilestone{Project: "handoffkeep", Name: name, Status: "planned", SortOrder: 2 - i}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := st.ListMilestoneNames(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if names := got["handoffkeep"]; len(names) != 2 || names[0] != "first" || names[1] != "second" {
+		t.Fatalf("milestones=%v, want [first second] by sort_order", got)
+	}
+}
