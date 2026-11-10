@@ -54,6 +54,7 @@ var errorRules = []errorRule{
 	{ytwrite.ErrNotFound, http.StatusNotFound, "ytwrite_not_found", false},
 	{ytwrite.ErrState, http.StatusConflict, "ytwrite_state", false},
 	{ytwrite.ErrInvalid, http.StatusBadRequest, "ytwrite_invalid", false},
+	{ytwrite.ErrConflictingResult, http.StatusConflict, "ytwrite_conflicting_result", false},
 	{store.ErrStandingNotNewer, http.StatusConflict, "standing_not_newer", false},
 	{store.ErrStandingConflict, http.StatusConflict, "standing_conflict", false},
 	{store.ErrInvalidSync, http.StatusBadRequest, "invalid_context", false},

@@ -18,6 +18,7 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/guard"
 	"github.com/mgh3326/handoffkeep/internal/store"
 	"github.com/mgh3326/handoffkeep/internal/telemetry"
+	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
@@ -31,6 +32,7 @@ func TestAppErrMapping(t *testing.T) {
 		{"sentinel", store.ErrTaskNotFound, http.StatusNotFound, map[string]string{"error": "not_found"}},
 		{"wrapped sentinel", fmt.Errorf("claim: %w", store.ErrQueueEmpty), http.StatusNotFound, map[string]string{"error": "queue_empty"}},
 		{"sentinel with reason", fmt.Errorf("%w: claimed by another job", store.ErrTaskConflict), http.StatusConflict, map[string]string{"error": "task_conflict", "reason": "claimed by another job"}},
+		{"YouTrack result conflict", ytwrite.ErrConflictingResult, http.StatusConflict, map[string]string{"error": "ytwrite_conflicting_result"}},
 		{"store validation", errors.New("invalid bench rep"), http.StatusBadRequest, map[string]string{"error": "invalid_context"}},
 		{"secret pattern", guard.Reject("AKIA" + "ABCDEFGHIJKLMNOP"), http.StatusBadRequest, map[string]string{"error": "secret_like_content", "pattern": "aws_access_key"}},
 		{"integrity violation", &pgconn.PgError{Code: "23505"}, http.StatusBadRequest, map[string]string{"error": "invalid_context"}},

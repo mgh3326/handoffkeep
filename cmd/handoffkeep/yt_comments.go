@@ -218,6 +218,7 @@ func youtrackOpsResolveCmd(args []string, out io.Writer) error {
 	notApplied := fs.Bool("not-applied", false, "record that the comment was not applied")
 	by := fs.String("by", "", "operator who checked YouTrack")
 	note := fs.String("note", "", "operator's resolution note")
+	c := remoteClient(fs)
 	ordered, err := splitArgs(args, "applied", "by", "note", "url", "token")
 	if err != nil {
 		return err
@@ -235,7 +236,6 @@ func youtrackOpsResolveCmd(args []string, out io.Writer) error {
 	if err != nil || id < 1 {
 		return errors.New("op id must be positive")
 	}
-	c := remoteClient(fs)
 	if err := mustClient(c); err != nil {
 		return err
 	}

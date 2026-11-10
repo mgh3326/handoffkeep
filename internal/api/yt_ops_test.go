@@ -36,10 +36,10 @@ func TestYTOpsResolveHTTPIsOperatorOnlyAndUsesProtocol(t *testing.T) {
 	if _, err := st.YTWriteLedger().MarkUnknown(context.Background(), now, op.ID, now, ytwrite.ReasonTransport, "uncertain"); err != nil {
 		t.Fatal(err)
 	}
-	post := func(token string, body any) (int, map[string]any) {
+	post := func(token string, opID int64, body any) (int, map[string]any) {
 		t.Helper()
 		raw, _ := json.Marshal(body)
-		req, _ := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/v1/yt/ops/%d/resolve", h.URL, op.ID), bytes.NewReader(raw))
+		req, _ := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/v1/yt/ops/%d/resolve", h.URL, opID), bytes.NewReader(raw))
 		req.Header.Set("Authorization", "Bearer "+token)
 		req.Header.Set("Content-Type", "application/json")
 		resp, err := h.Client().Do(req)
@@ -51,10 +51,10 @@ func TestYTOpsResolveHTTPIsOperatorOnlyAndUsesProtocol(t *testing.T) {
 		_ = json.NewDecoder(resp.Body).Decode(&out)
 		return resp.StatusCode, out
 	}
-	if status, body := post("peer-token", map[string]any{"applied": true, "yt_id": "c-42", "by": "operator"}); status != http.StatusForbidden || body["error"] != "operator_required" {
+	if status, body := post("peer-token", op.ID, map[string]any{"applied": true, "yt_id": "c-42", "by": "operator"}); status != http.StatusForbidden || body["error"] != "operator_required" {
 		t.Fatalf("peer resolve = %d %v", status, body)
 	}
-	if status, body := post("op-token", map[string]any{"applied": true, "yt_id": "c-42", "by": "operator"}); status != http.StatusOK || body["state"] != string(ytwrite.StateApplied) {
+	if status, body := post("op-token", op.ID, map[string]any{"applied": true, "yt_id": "c-42", "by": "operator"}); status != http.StatusOK || body["state"] != string(ytwrite.StateApplied) {
 		t.Fatalf("operator resolve = %d %v", status, body)
 	}
 	resolved, err := st.YTWriteLedger().ByID(context.Background(), op.ID)
@@ -63,5 +63,30 @@ func TestYTOpsResolveHTTPIsOperatorOnlyAndUsesProtocol(t *testing.T) {
 	}
 	if resolved.State != ytwrite.StateApplied || resolved.YTResultID != "c-42" {
 		t.Fatalf("resolved op = %+v", resolved)
+	}
+
+	ledger := st.YTWriteLedger()
+	owner, _, err := ledger.Prepare(context.Background(), now, ytwrite.NewOp{Principal: "p", Kind: ytwrite.KindCommentAppend, Key: "map-owner", PayloadSHA: "owner-sha", Payload: []byte(`{"body":"owner"}`), EntityKind: "task", EntityID: "43", YTTargetID: "2-43", Actor: "a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, outcome, err := ledger.Claim(context.Background(), now, owner.ID); err != nil || outcome != ytwrite.ClaimClaimed {
+		t.Fatalf("claim map owner = %s, %v", outcome, err)
+	}
+	if _, err := ledger.Apply(context.Background(), now, owner.ID, "c-conflict", []ytwrite.MapRow{{EntityKind: "comment", HKKey: fmt.Sprintf("comment/op:%d", owner.ID), YTID: "c-conflict"}}); err != nil {
+		t.Fatal(err)
+	}
+	conflict, _, err := ledger.Prepare(context.Background(), now, ytwrite.NewOp{Principal: "p", Kind: ytwrite.KindCommentAppend, Key: "conflict", PayloadSHA: "conflict-sha", Payload: []byte(`{"body":"conflict"}`), EntityKind: "task", EntityID: "44", YTTargetID: "2-44", Actor: "a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, outcome, err := ledger.Claim(context.Background(), now, conflict.ID); err != nil || outcome != ytwrite.ClaimClaimed {
+		t.Fatalf("claim conflict op = %s, %v", outcome, err)
+	}
+	if _, err := ledger.MarkUnknown(context.Background(), now, conflict.ID, now, ytwrite.ReasonTransport, "uncertain"); err != nil {
+		t.Fatal(err)
+	}
+	if status, body := post("op-token", conflict.ID, map[string]any{"applied": true, "yt_id": "c-conflict", "by": "operator"}); status != http.StatusConflict || body["error"] != "ytwrite_conflicting_result" {
+		t.Fatalf("conflicting resolution = %d %v", status, body)
 	}
 }
