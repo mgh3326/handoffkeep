@@ -454,7 +454,7 @@ func (f *fakeTenant) bundleRoute(w http.ResponseWriter, r *http.Request, rest []
 type fakeSchemaStore struct {
 	mu         sync.Mutex
 	projects   []string
-	lanes      []string
+	lanes      map[string][]string
 	milestones map[string][]string
 	rows       map[string]store.YouTrackProject
 	puts       []store.YouTrackProject
@@ -463,8 +463,8 @@ type fakeSchemaStore struct {
 func (s *fakeSchemaStore) ListTaskProjects(context.Context) ([]string, error) {
 	return append([]string(nil), s.projects...), nil
 }
-func (s *fakeSchemaStore) ListTaskLanes(context.Context) ([]string, error) {
-	return append([]string(nil), s.lanes...), nil
+func (s *fakeSchemaStore) ListTaskLanes(context.Context) (map[string][]string, error) {
+	return s.lanes, nil
 }
 func (s *fakeSchemaStore) ListMilestoneNames(context.Context) (map[string][]string, error) {
 	return s.milestones, nil

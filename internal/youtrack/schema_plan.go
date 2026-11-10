@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"slices"
 	"sort"
 	"strings"
 
@@ -90,7 +91,7 @@ func (p Plan) JSON() ([]byte, error) {
 // from and the project mapping it writes.
 type SchemaStore interface {
 	ListTaskProjects(ctx context.Context) ([]string, error)
-	ListTaskLanes(ctx context.Context) ([]string, error)
+	ListTaskLanes(ctx context.Context) (map[string][]string, error)
 	ListMilestoneNames(ctx context.Context) (map[string][]string, error)
 	ListYouTrackProjects(ctx context.Context) ([]store.YouTrackProject, error)
 	PutYouTrackProject(ctx context.Context, p store.YouTrackProject) error
@@ -269,7 +270,24 @@ func (r *SchemaRunner) loadVocabulary(ctx context.Context, project string) (Voca
 	if err != nil {
 		return Vocabulary{}, nil, err
 	}
-	return Vocabulary{Kinds: store.TaskKinds(), Lanes: lanes, Areas: store.TaskAreas(), Milestones: milestones}, hkProjects, nil
+	return Vocabulary{Kinds: store.TaskKinds(), Lanes: projectLanes(lanes), Areas: store.TaskAreas(), Milestones: milestones}, hkProjects, nil
+}
+
+// projectLanes files the lanes of tasks with no project under the project
+// such tasks are synced to (defaultHKProject), keeping name order.
+func projectLanes(byProject map[string][]string) map[string][]string {
+	out := make(map[string][]string, len(byProject))
+	for project, lanes := range byProject {
+		if project == "" {
+			project = defaultHKProject
+		}
+		out[project] = append(out[project], lanes...)
+	}
+	for project, lanes := range out {
+		sort.Strings(lanes)
+		out[project] = slices.Compact(lanes)
+	}
+	return out
 }
 
 func reservedShortName(short string) bool {

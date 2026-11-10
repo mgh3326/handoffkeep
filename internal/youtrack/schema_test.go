@@ -27,7 +27,7 @@ func seedSchemaTenant(t *testing.T) (*fakeTenant, *fakeSchemaStore, *SchemaRunne
 	schema := DefaultSchema()
 	st := &fakeSchemaStore{
 		projects:   []string{"factortrail", "handoffkeep", "mergewake"},
-		lanes:      []string{"lane-a", "lane-b"},
+		lanes:      map[string][]string{"factortrail": {"lane-a"}, "handoffkeep": {"lane-a", "lane-b"}, "mergewake": {"lane-a", "lane-b"}},
 		milestones: map[string][]string{"handoffkeep": {"M1", "M2"}},
 		rows:       map[string]store.YouTrackProject{},
 	}
@@ -79,7 +79,7 @@ func TestSchemaPlanListsExactlyWhatIsMissing(t *testing.T) {
 		"factortrail\t종류\tattach\tenum[1] with 5 values",
 		"factortrail\t등급\tattach\tenum[1] with 6 values",
 		"factortrail\t티어\tattach\tenum[1] with 4 values",
-		"factortrail\t레인\tattach\tenum[1] with 2 values",
+		"factortrail\t레인\tattach\tenum[1] with 1 values",
 		"factortrail\t마감\tattach\tdate",
 		"factortrail\t영역\tattach\tenum[1] with 13 values",
 		"factortrail\t마일스톤\tattach\tenum[1] with 0 values",
@@ -666,5 +666,13 @@ func TestSchemaStopsWhenRetryAfterOutlastsTheDeadline(t *testing.T) {
 	}
 	if posts != 1 {
 		t.Fatalf("%d project posts, want one (no retry)", posts)
+	}
+}
+
+func TestProjectLanesFilesUnassignedTasksUnderOther(t *testing.T) {
+	got := projectLanes(map[string][]string{"": {"lane-z", "lane-a"}, "other": {"lane-a", "lane-o"}, "handoffkeep": {"lane-h"}})
+	want := map[string][]string{"other": {"lane-a", "lane-o", "lane-z"}, "handoffkeep": {"lane-h"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("projectLanes=%v want %v", got, want)
 	}
 }

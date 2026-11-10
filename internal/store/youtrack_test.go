@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -466,12 +467,25 @@ func TestYouTrackSchemaVocabulary(t *testing.T) {
 	youtrackTask(t, st, "lane-b", "one")
 	youtrackTask(t, st, "lane-a", "two")
 	youtrackTask(t, st, "lane-b", "three")
+	if _, err := st.AddTaskProject(ctx, "mergewake", "test"); err != nil {
+		t.Fatal(err)
+	}
+	other := "mergewake"
+	if _, err := st.CreateTask(ctx, Task{Lane: "lane-m", Title: "four", Kind: "implement", CreatedBy: "test", Project: &other}); err != nil {
+		t.Fatal(err)
+	}
+	// New tasks need a project; older rows may have none.
+	legacy := youtrackTask(t, st, "lane-n", "five")
+	if _, err := st.pool.Exec(ctx, `UPDATE tasks SET project=NULL WHERE id=$1`, legacy.ID); err != nil {
+		t.Fatal(err)
+	}
 	lanes, err := st.ListTaskLanes(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(lanes) != 2 || lanes[0] != "lane-a" || lanes[1] != "lane-b" {
-		t.Fatalf("lanes=%v, want [lane-a lane-b]", lanes)
+	want := map[string][]string{"": {"lane-n"}, "handoffkeep": {"lane-a", "lane-b"}, "mergewake": {"lane-m"}}
+	if !reflect.DeepEqual(lanes, want) {
+		t.Fatalf("lanes=%v, want %v (each project's own lanes, no project under \"\")", lanes, want)
 	}
 	for i, name := range []string{"second", "first"} {
 		if _, err := st.SaveMilestone(ctx, ProjectMilestone{Project: "handoffkeep", Name: name, Status: "planned", SortOrder: 2 - i}); err != nil {
