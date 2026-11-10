@@ -470,6 +470,12 @@ func (o operatorTools) taskListPaged(ctx context.Context, in taskListInput) (*gm
 		afterID := cur.ID
 		query.AfterID = &afterID
 	}
+	if query.UpdatedSince == nil && query.AfterUpdatedAt == nil {
+		// An empty cursor is the first page: start the keyset at the epoch so
+		// the store orders it by (updated_at,id) like every later page.
+		epoch := time.Unix(0, 0).UTC()
+		query.UpdatedSince = &epoch
+	}
 	tasks, err := o.service.ListTasksFiltered(ctx, query)
 	if err != nil {
 		return nil, nil, err
