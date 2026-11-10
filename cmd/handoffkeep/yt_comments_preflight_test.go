@@ -257,7 +257,7 @@ func TestCommentsPreflightAndBackfill(t *testing.T) {
 	comment(unmapped, h1.Add(-30*time.Minute), "worker")
 	comment(boundAmb, h1.Add(20*time.Minute), store.YouTrackOwnedActor)
 	comment(idle, time.Now().UTC().Add(-20*24*time.Hour), "worker")
-	for _, task := range []int64{race, verifies, ambiguous, failing, bound, boundAmb, canaryOp} {
+	for _, task := range []int64{race, verifies, ambiguous, failing, bound, boundAmb} {
 		fake.add(task)
 	}
 	fake.fail[ytpIssuePath(failing)] = http.StatusServiceUnavailable
