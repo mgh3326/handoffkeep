@@ -47,8 +47,13 @@ type Config struct {
 	HTTPClient *http.Client
 	Timeout    time.Duration
 	MaxRetries int
-	Backoff    time.Duration
-	UserAgent  string
+	// RetryAfterCap bounds how long a 429's Retry-After is honoured; zero is
+	// maxRetryWait. The schema run raises it to its whole deadline so the
+	// server's wait is kept; a wait past the context deadline is not slept (the
+	// 429 is returned instead).
+	RetryAfterCap time.Duration
+	Backoff       time.Duration
+	UserAgent     string
 	// Sleep is the retry wait, injectable so tests do not spend real time.
 	Sleep func(ctx context.Context, d time.Duration) error
 }
@@ -59,6 +64,7 @@ type Client struct {
 	http      *http.Client
 	timeout   time.Duration
 	retries   int
+	retryCap  time.Duration
 	backoff   time.Duration
 	userAgent string
 	sleep     func(context.Context, time.Duration) error
@@ -106,6 +112,10 @@ func New(cfg Config) (*Client, error) {
 		c.retries = 0
 	} else if c.retries == 0 {
 		c.retries = defaultMaxRetries
+	}
+	c.retryCap = cfg.RetryAfterCap
+	if c.retryCap <= 0 {
+		c.retryCap = maxRetryWait
 	}
 	if c.backoff <= 0 {
 		c.backoff = defaultBackoff
@@ -249,7 +259,13 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 				retryable = retry5xx
 			}
 			if attempt < c.retries && retryable {
-				if werr := c.sleep(ctx, c.backoffFor(attempt, retryAfter)); werr != nil {
+				wait := c.backoffFor(attempt, retryAfter)
+				// A wait that outlasts the caller's deadline cannot end in a
+				// retry: stop with the server's answer now.
+				if dl, ok := ctx.Deadline(); ok && time.Until(dl) < wait {
+					return err
+				}
+				if werr := c.sleep(ctx, wait); werr != nil {
 					return werr
 				}
 				continue
@@ -310,7 +326,7 @@ func (c *Client) once(ctx context.Context, method, endpoint string, payload []by
 	apiErr.Method, apiErr.Path = method, pathOf(endpoint)
 	apiErr.Code = redactText(apiErr.Code, c.token)
 	apiErr.Message = redactText(apiErr.Message, c.token)
-	return nil, retryAfter(resp.Header.Get("Retry-After")), apiErr
+	return nil, parseRetryAfterAt(resp.Header.Get("Retry-After"), c.retryCap, time.Now()), apiErr
 }
 
 func pathOf(endpoint string) string {

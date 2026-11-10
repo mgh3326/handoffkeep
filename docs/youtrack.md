@@ -106,6 +106,39 @@ YouTrack의 `hk 상태` 번들 값은 콘솔과 같은 한국어 이름이다.
 방식으로 빠진 값을 추가한다. 필드 계약(이름과 타입)은
 `internal/youtrack/schema.go` 한 파일에 있다.
 
+## 스키마 (`youtrack schema`, hk 3836)
+
+YouTrack 쪽 스키마는 `internal/youtrack/schema.go`의 `Desired` 한 곳에 선언하고,
+`plan`과 `apply`가 같은 선언을 읽는다. 둘 다 서버 컨테이너에서 `youtrack canary`처럼
+`HANDOFFKEEP_DB_URL`, `YOUTRACK_URL`, `YOUTRACK_BOT_API_KEY`로 돈다.
+
+```sh
+handoffkeep youtrack schema plan  [--project P] [--json]
+handoffkeep youtrack schema apply [--project P] [--json]
+```
+
+`plan`은 아무것도 쓰지 않고 변경을 한 줄씩(탭으로 구분: hk 프로젝트, 대상,
+동작, 값) 낸다. YouTrack 전체에 걸린 변경은 프로젝트 칸이 `-`다. `report` 줄은
+`apply`가 고칠 수 없는 점검 결과다(내장 링크 타입 Subtask·Relates·Duplicate가
+없거나 방향이 다름, 같은 이름의 필드가 다른 타입이거나 번들이 없음). 이런 필드는 건드리지 않는다. 링크 타입은 만들지 않는다. `apply`는 같은 계획을
+프로젝트 → 필드 정의 → 필드 연결 → 번들 값 → 플래그·ordinal 순서로, 한 번에
+요청 하나씩 실행하고, 변경마다 `youtrack.schema_applied` 로그를 남기며, 첫
+오류에서 멈춘다(`youtrack.schema_apply_failed`). 429는 서버의 `Retry-After` 전체(실행 제한 15분 안)만큼
+기다린 뒤 다시 보내고, 기다림이 실행 제한을 넘으면 429를 그대로 돌려주며 멈춘다. 바로 이어서 `apply`를 다시 돌리면 계획이 비어 있다.
+
+프로젝트별 번들을 유지한다(공유 번들로 바꾸지 않는다).
+
+| 대상 | 하는 일 |
+|---|---|
+| `hk 상태` | 12개 상태 값을 모두 두고, 각 값의 `isResolved`를 `StateResolved`와 맞추고(기존 값은 플래그 갱신, 없는 값은 추가), ordinal을 hk 상태 순서로 맞춘다 |
+| `종류`, `등급`, `티어`, `레인` | 없는 값만 추가한다(종류는 저장소의 닫힌 집합, 등급 S+·S·A+·A·B·C, 티어 T0–T3, 레인은 hk 작업에 쓰인 모든 레인) |
+| `마감`(date), `영역`(enum, hk 영역 어휘), `마일스톤`(enum, 그 프로젝트의 마일스톤 이름), `예상 소요`(period) | 필드 정의가 없으면 만들고, 프로젝트에 없으면 연결한다 |
+| 프로젝트 | hk 프로젝트마다 YouTrack 프로젝트와 `youtrack_projects` 행이 있게 한다. 이름이 같은 YouTrack 프로젝트가 있으면 매핑만 쓰고, 없으면 만든다(이름 = hk 프로젝트, leader = API 사용자, 짧은 이름은 `youtrack/import/client.js` `getProjects`의 규칙: 대문자 A–Z0–9만 10자, 겹치면 숫자 꼬리). HK 버킷·SHRDOC·DEC는 건드리지 않는다. 매핑 행이 이 예약 이름(저장소가 `handoffkeep`에 심은 `HK` 포함)을 가리키면 실제 프로젝트의 매핑으로 바꿔 쓴다. 매핑 행은 찾았거나 만든 프로젝트와 다르면(id·짧은 이름) 다시 쓴다 |
+
+값·필드·번들·프로젝트를 지우거나 이름을 바꾸지 않고, 필드를 떼지 않는다.
+연결하는 필드는 위 아홉 개뿐이다. `hk ID`, `hk 프로젝트`, `hk 우선순위`, `PR`,
+`작업 job`, `멈춤`은 이 실행이 다루지 않으므로, 이 실행이 만든 새 프로젝트에는 없다.
+
 ## 환경 변수
 
 | 변수 | 필수 | 뜻 |
