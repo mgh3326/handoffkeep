@@ -74,6 +74,21 @@ func TestImportUpdatedPagesUseTimestampAndIDCursors(t *testing.T) {
 	}
 }
 
+func TestImportUpdatedPageIncludesStateOnlyTaskChanges(t *testing.T) {
+	s := schemaStore(t, "import_state_only")
+	ctx := t.Context()
+	cursor := time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)
+	stateChanged := cursor.Add(time.Hour)
+	var id int64
+	if err := s.pool.QueryRow(ctx, `INSERT INTO tasks(lane,title,kind,state,created_by,created_at,updated_at,last_activity_at,project) VALUES('import-state','state changed','implement','deployed','test',$1,$2,$1,'import-state') RETURNING id`, cursor.Add(-time.Hour), stateChanged).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := s.ImportTasksUpdatedPage(ctx, ptrString("import-state"), cursor, 0, 10)
+	if err != nil || len(rows) != 1 || rows[0].ID != id || !rows[0].ImportUpdatedAt.Equal(stateChanged) {
+		t.Fatalf("state-only update rows=%+v err=%v", rows, err)
+	}
+}
+
 func ptrString(value string) *string { return &value }
 
 func hasDocumentBody(docs []Document, body string) bool {

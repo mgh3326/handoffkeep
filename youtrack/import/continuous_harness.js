@@ -13,7 +13,7 @@ const old='2026-01-02T02:04:05.000Z', fresh='2026-01-02T04:04:05.000Z';
 const task=(id,at,title)=>({id,lane:'demo',title,kind:'implement',state:'backlog',priority:1,refs:{},created_by:'tester',created_at:at,updated_at:at,last_activity_at:at,project:'demo',awaiting_decision:false,stalled:false});
 const document=(id,at,key,body,project='demo',created_by='tester')=>({id,key,kind:'note',session:'',job:'',body,sha256:'a'.repeat(64),created_by,created_at:at,updated_at:at,task_id:2,project});
 const data={
- tasks:[task(1,old,'older task'),task(2,fresh,'newer task'),task(3,'2026-01-02T04:05:05.000Z','task after moved cursor')],
+ tasks:[task(1,old,'older task'),Object.assign(task(2,fresh,'newer task'),{title_ko:'새 작업',parent_id:1,relations:[{kind:'related',src_id:2,dst_id:3},{kind:'duplicate_of',src_id:2,dst_id:4}],due_at:'2026-01-03T00:00:00.000Z',area:'backend',milestone_name:'첫 출시',expected:'2h',label_names:['고객 요청']}),task(3,'2026-01-02T04:05:05.000Z','task after moved cursor')],
  comments:[{id:10,task_id:1,body:'old comment',author:'tester',created_at:old},{id:11,task_id:2,body:'new comment',author:'tester',created_at:fresh},{id:12,task_id:2,body:'hk wrote this one to YouTrack itself',author:'tester',created_at:fresh,hk_op_id:55},{id:13,task_id:2,body:'quotes the marker <!-- hk-op:56 --> but hk does not own it',author:'tester',created_at:fresh},{id:14,task_id:2,body:'owned, hk_op_id zero is no owner',author:'tester',created_at:fresh,hk_op_id:0}],
  documents:[document(20,old,'demo/old','old document'),document(21,fresh,'demo/new','new document'),document(22,fresh,'reports/mwr-review/report.md','mergewake report','demo','svc-mergewake'),document(23,fresh,'review/mwr-98-reviewer-prompt','review prompt'),document(24,fresh,'reports/job-a/report.md','worker report'),document(25,fresh,'brief/2026-11-09/job-a','worker brief'),document(26,fresh,'reports/job-b/report.md','x'.repeat(245*1024)),document(200,'2026-01-02T04:04:05.123600Z','precision/moved','moved precision doc','precision'),document(199,'2026-01-02T04:04:05.123789Z','precision/unemitted','unemitted precision doc','precision')].concat(Array.from({length:1001},(_,i)=>{const d=document(10000+i,fresh,'bulk/doc-'+i,'bulk document','bulk');d.task_id=null;return d;})),
  decisions:[{id:30,question:'old decision',status:'open',created_at:old,updated_at:old,lane:'demo'},{id:31,question:'new decision',status:'open',created_at:fresh,updated_at:fresh,lane:'demo'}]
@@ -59,6 +59,18 @@ async function main() {
     client.projectTargets.demo=demo;
     const issueUpdates=client.getIssueUpdates(demo,null,cutoff,1);
     assert.deepEqual(issueUpdates.map(x=>x.id),['hk-task:2']);
+    assert(issueUpdates[0].fields.description.includes('제목(한국어): 새 작업'));
+    assert.deepEqual(issueUpdates[0].fields.links,[
+      {linkType:{id:'subtask'},linkName:'subtask of',target:{id:'hk-task:1'}},
+      {linkType:{id:'relates'},linkName:'relates to',target:{id:'hk-task:3'}},
+      {linkType:{id:'duplicate'},linkName:'duplicates',target:{id:'hk-task:4'}}
+    ]);
+    assert.deepEqual(client.getLinkTypes().map(x=>x.name),['Subtask','Relates','Duplicate']);
+    assert.deepEqual(issueUpdates[0].fields['마감'],{type:'date',value:'2026-01-03T00:00:00.000Z'});
+    assert.deepEqual(issueUpdates[0].fields['영역'],{type:'string',value:'backend'});
+    assert.deepEqual(issueUpdates[0].fields['마일스톤'],{type:'string',value:'첫 출시'});
+    assert.deepEqual(issueUpdates[0].fields['예상 소요'],{type:'period',value:'7200000'});
+    assert(issueUpdates[0].fields.tags.some(x=>x.name==='hk/label/고객 요청'));
     assert.equal(issueUpdates[0].fields.comments[0].text,'new comment');
     // TestImportSkipsOriginalProtocolOwnedPGComment: the owned PG comment is unmarked; ownership (hk_op_id) skips it.
     assert(!issueUpdates[0].fields.comments.some(x=>x.id==='hk-comment:12'),'protocol-owned comment was imported');

@@ -142,7 +142,12 @@ func (s Server) importExport(w http.ResponseWriter, r *http.Request) {
 			rows = rows[:limit]
 			next = rows[len(rows)-1].ID
 		}
-		jsonOut(w, http.StatusOK, map[string]any{"items": rows, "next_cursor": next})
+		importRows, err := s.Service.Store.EnrichImportTasks(ctx, rows)
+		if err != nil {
+			appErr(w, r, err)
+			return
+		}
+		jsonOut(w, http.StatusOK, map[string]any{"items": importRows, "next_cursor": next})
 	case "comments":
 		if q.Has("after") || q.Has("project") != q.Has("max_task_id") || (q.Has("project") && q.Get("project") == "") {
 			writeError(w, http.StatusBadRequest, "invalid_context")

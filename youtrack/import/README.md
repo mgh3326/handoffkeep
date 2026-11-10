@@ -46,3 +46,11 @@ The first continuous update uses a 2026-11-09 07:17 UTC cursor floor for tasks w
 When a split document grows, the importer refreshes its index and sends the new parts under stable IDs. If it shrinks, old excess parts remain because the source API has no delete operation. When a task moves projects, the destination project's update feed resends it under the same hk task ID; the old project feed has no removal signal. Deleting stale parts/articles and reconciling project moves are follow-ups. Agile boards, saved searches and dashboards need YouTrack REST/Hub REST setup; the custom import API does not support those entities.
 
 The import client uses YouTrack's documented custom-import entry points (`getProjects`, `getProject`, `getIssues`, `getUsers`, `getArticles`, `getIssueUpdates`, and `getArticleUpdates`) and the YouTrack scripting HTTP connection API. The target project field types and whether authors/timestamps survive remain runtime acceptance points.
+
+## 작업 필드와 링크
+
+작업 이슈에는 부모 작업을 YouTrack `Subtask` 링크로, `related` 관계를 `Relates` 링크로, `duplicate_of` 관계를 `Duplicate` 링크로 가져옵니다. 링크 대상은 `hk-task:<id>` 안정 ID를 사용합니다. YouTrack 가져오기 API는 다른 이슈가 아직 생성되지 않은 경우에도 이 임시 ID로 링크를 보존한 뒤 가져오기가 끝날 때 참조를 연결합니다.
+
+작업의 `due_at`, `area`, milestone 이름, `expected` 기간은 각각 `마감`, `영역`, `마일스톤`, `예상 소요` 필드로 매핑합니다. `labels` 이름은 `hk/label/<name>` 태그로 가져오며, 현재 제목과 연결된 한국어 번역이 있으면 설명에 `제목(한국어): <번역>` 줄을 추가합니다. 값이 없는 작업은 해당 필드를 생략하고 `youtrack.import.field_skipped` 이벤트를 기록합니다. 해당 사용자 정의 필드와 값은 hk 3836이 YouTrack 프로젝트에 준비합니다.
+
+작업 업데이트 커서는 작업 `updated_at`, 활동 시각, 댓글/연결 문서 시각 중 가장 최신 값을 씁니다. 따라서 활동 시각은 바뀌지 않고 상태만 바뀐 작업도 연속 가져오기에서 다시 전송됩니다.
