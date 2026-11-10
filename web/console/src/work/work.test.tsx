@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { fetchBoardTasks, fetchTaskDetail } from "../shared/boardApi";
 import type { BoardTask } from "../shared/boardTypes";
 import { TaskRecord } from "./TaskRecord";
@@ -64,6 +64,19 @@ describe("Work", () => {
     expect(screen.getByText("100+")).toBeTruthy();
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => String(input).includes("/attachments") ? json({ attachments: [], truncated: false }) : String(input).includes("/comments") ? json({ comments: [], truncated: false }) : json(detail)));
     rerender(<TaskRecord id={102} />);
+    expect(await screen.findByText("첨부 없음")).toBeTruthy();
+  });
+  it("shows attachment loading until the list request settles", async () => {
+    let resolveAttachments!: (response: Response) => void;
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/attachments")) return new Promise<Response>(resolve => { resolveAttachments = resolve; });
+      if (url.includes("/comments")) return Promise.resolve(json({ comments: [], truncated: false }));
+      return Promise.resolve(json(detail));
+    }));
+    render(<TaskRecord id={101} />);
+    expect(await screen.findByText("첨부 불러오는 중…")).toBeTruthy();
+    await act(async () => { resolveAttachments(json({ attachments: [], truncated: false })); });
     expect(await screen.findByText("첨부 없음")).toBeTruthy();
   });
   it("W8 shows task and job durations", async () => {

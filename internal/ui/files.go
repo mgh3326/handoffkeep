@@ -16,7 +16,14 @@ var attachmentSHA256RE = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 func (h *Handler) fileDownload(w http.ResponseWriter, r *http.Request, email, sha string) {
 	result := "internal_error"
-	defer func() { log.Printf("ui.file_download email=%q sha=%q result=%q", email, sha, result) }()
+	var failure string
+	defer func() {
+		if failure == "" {
+			log.Printf("ui.file_download email=%q sha=%q result=%q", email, sha, result)
+			return
+		}
+		log.Printf("ui.file_download email=%q sha=%q result=%q err=%q", email, sha, result, failure)
+	}()
 	if !attachmentSHA256RE.MatchString(sha) {
 		result = "not_found"
 		http.NotFound(w, r)
@@ -24,6 +31,7 @@ func (h *Handler) fileDownload(w http.ResponseWriter, r *http.Request, email, sh
 	}
 	attachment, found, err := h.store.GetAttachment(r.Context(), sha)
 	if err != nil {
+		failure = err.Error()
 		http.Error(w, "file unavailable", http.StatusInternalServerError)
 		return
 	}
@@ -33,6 +41,7 @@ func (h *Handler) fileDownload(w http.ResponseWriter, r *http.Request, email, sh
 		return
 	}
 	if h.attachments == nil {
+		failure = "attachment service unavailable"
 		http.Error(w, "file unavailable", http.StatusInternalServerError)
 		return
 	}
@@ -53,10 +62,12 @@ func (h *Handler) fileDownload(w http.ResponseWriter, r *http.Request, email, sh
 	}
 	location, err := h.attachments.PresignDownload(r.Context(), sha, disposition)
 	if err != nil {
+		failure = err.Error()
 		http.Error(w, "file unavailable", http.StatusInternalServerError)
 		return
 	}
 	if parsed, err := url.ParseRequestURI(location); err != nil || parsed.Scheme != "http" && parsed.Scheme != "https" || parsed.Host == "" {
+		failure = "invalid presigned URL"
 		http.Error(w, "file unavailable", http.StatusInternalServerError)
 		return
 	}
