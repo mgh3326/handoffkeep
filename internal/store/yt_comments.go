@@ -295,11 +295,11 @@ func scanYTCanary(row interface{ Scan(...any) error }, c *YTCommentCanary) error
 // enrollment creates no op row.
 //
 // Locks, as AddYTTaskBinding takes them (lockorder.go): the issue ownership
-// lock, FOR SHARE on the task row (a project change waits), the task's lane
-// lock (the one Claim and the comment enqueue take, so the yt_entity_map row
-// of the task and the claim's admission cannot change under it), then FOR
-// SHARE on the task's youtrack_projects and task_origins rows, then the new
-// canary row.
+// lock, FOR UPDATE on the task row (a project change or a first mirror link
+// waits), the task's lane lock (the one Claim and the comment enqueue take,
+// so the yt_entity_map row of the task and the claim's admission cannot
+// change under it), then FOR SHARE on the task's youtrack_projects and
+// task_origins rows, then the new canary row.
 func (s *Store) AddYTCommentCanary(ctx context.Context, c YTCommentCanary, verified YTCanaryCandidate) (YTCommentCanary, error) {
 	if c.TaskID < 1 || c.Tenant == "" || len(c.Tenant) > 255 || c.IssueID == "" || len(c.IssueID) > 64 ||
 		len(c.IssueReadable) > 64 || len(c.ProjectID) > 64 || c.AddedBy == "" || !validText(c.AddedBy, 200) || verified.TaskID != c.TaskID {

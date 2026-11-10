@@ -348,7 +348,7 @@ task has no matching binding is held, not rejected; mode `canary` admits by
 the canary set again.
 
 **Issue ownership.** `AddYTTaskBinding` and `AddYTCommentCanary` both take
-the issue ownership lock, then FOR SHARE on the task row, then the lane lock,
+the issue ownership lock, then FOR UPDATE on the task row, then the lane lock,
 and each refuses what the other's table says otherwise: an enrollment whose
 binding names another issue or tenant, or an issue bound to another task, is
 `yt_canary_conflict`. A `canary add` from the previous release takes none of

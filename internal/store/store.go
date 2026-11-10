@@ -580,6 +580,10 @@ type Store struct {
 	// yt_comment_canary, on those of tasks with a consistent yt_task_bindings
 	// row, in the comment's transaction.
 	ytCommentsMode atomic.Value
+	// ytBindingChecked, when set (tests only), runs inside AddYTTaskBinding
+	// after every check has passed and before the binding row is inserted,
+	// with every lock of the publication held.
+	ytBindingChecked func()
 }
 
 // Refs stores repeatable named references. Its decoder accepts legacy scalar

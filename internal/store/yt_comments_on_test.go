@@ -2,6 +2,7 @@ package store
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"log"
 	"slices"
@@ -612,6 +613,64 @@ func TestYTTaskBindingsMigrationUpgradesAlreadyCurrentDatabase(t *testing.T) {
 			t.Fatalf("open %d: the migration wrote %d rows", i, n)
 		}
 		s.Close()
+	}
+}
+
+// An absent origin cannot change under a binding's publication. With no
+// task_origins row there is nothing to lock but the task row, and a first
+// mirror link (UpsertYouTrackMirror) reaches it only through its foreign
+// key's KEY SHARE. AddYTTaskBinding holds FOR UPDATE on the task row from
+// before its re-read until its commit, so a first mirror link that starts
+// after every check has passed waits for the binding's commit, and the next
+// comment in mode on finds the two disagreeing and is skipped. Under FOR
+// SHARE the link commits inside the window and the binding is published
+// against mappings that no longer hold.
+func TestAddYTTaskBindingHoldsFirstMirrorLinkUntilCommit(t *testing.T) {
+	dbURL, app := lockOrderSchema(t, "ytb_origin")
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancel()
+	binder := openLockActorStore(t, dbURL, app("binder"))
+	mirror := openLockActorStore(t, dbURL, app("mirror"))
+	ytbMapped(t, binder)
+	task := ytcTask(t, binder, ytbProject)
+	verified, err := binder.YTCanaryCandidate(ctx, task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if verified.MirrorIssueID != "" {
+		t.Fatalf("fixture: task %d already has a mirror link: %+v", task, verified)
+	}
+	conflicting := "9-" + strconv.FormatInt(task, 10)
+	var link *lockActor
+	binder.ytBindingChecked = func() {
+		link = startLockActor(app("mirror"), func() error {
+			_, err := mirror.UpsertYouTrackMirror(ctx, YouTrackMirrorInput{TaskID: task, IssueID: conflicting, DisplayRef: "OLD-1", Tenant: ytcTenant, Role: "mirror"})
+			return err
+		})
+		if !waitBlockedBy(t, ctx, mirror.pool, link, app("binder")) {
+			t.Errorf("the first mirror link committed while the binding's publication held the task row (err %v)", link.err)
+		}
+	}
+	_, err = binder.AddYTTaskBinding(ctx, ytbBinding(task), verified)
+	binder.ytBindingChecked = nil
+	if err != nil {
+		t.Fatalf("publication: %v", err)
+	}
+	if link == nil {
+		t.Fatal("the publication never reached the point after its checks")
+	}
+	finishLockActors(t, ctx, link)
+	if n := ytcCount(t, binder, `SELECT count(*) FROM task_origins WHERE task_id=$1 AND provider='youtrack' AND external_id=$2`, task, conflicting); n != 1 {
+		t.Fatalf("the mirror link to %s did not commit after the binding (%d rows)", conflicting, n)
+	}
+
+	logs := ytbLog(t)
+	binder.SetYTCommentsMode(YTCommentsOn)
+	c := ytbComment(t, binder, task, "after the late mirror link")
+	ytbLegacyCarries(t, binder, c.TaskComment)
+	want := "ytwrite.comment_skipped_ambiguous task_id=" + strconv.FormatInt(task, 10) + " comment_id=" + strconv.FormatInt(c.ID, 10) + " source=task_origins"
+	if !strings.Contains(logs(), want) {
+		t.Errorf("log %q does not contain %q", logs(), want)
 	}
 }
 

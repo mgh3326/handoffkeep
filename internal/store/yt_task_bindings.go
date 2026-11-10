@@ -43,15 +43,19 @@ var ErrYTBindingConflict = errors.New("yt_binding_conflict")
 // table, and neither table's unique index spans both.
 const ytIssueOwnershipLock = 8241873810
 
-// lockYTIssueOwnershipTx takes the issue ownership lock and then FOR SHARE on
-// the task row, so the task's project cannot change before commit. A missing
-// task is ErrTaskNotFound.
+// lockYTIssueOwnershipTx takes the issue ownership lock and then FOR UPDATE on
+// the task row, so neither the task's project nor its first task_origins row
+// can change before commit. FOR SHARE would not do: a first origin insert
+// (UpsertYouTrackMirror, AddTaskOrigin) reaches the task row only through its
+// foreign key's KEY SHARE, which FOR SHARE allows and FOR UPDATE blocks, and
+// with no origin row there is nothing else to lock. A missing task is
+// ErrTaskNotFound.
 func lockYTIssueOwnershipTx(ctx context.Context, tx pgx.Tx, taskID int64) error {
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, ytIssueOwnershipLock); err != nil {
 		return err
 	}
 	var id int64
-	err := tx.QueryRow(ctx, `SELECT id FROM tasks WHERE id=$1 FOR SHARE`, taskID).Scan(&id)
+	err := tx.QueryRow(ctx, `SELECT id FROM tasks WHERE id=$1 FOR UPDATE`, taskID).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrTaskNotFound
 	}
@@ -216,7 +220,7 @@ func enqueueYTCommentOnTx(ctx context.Context, tx pgx.Tx, c TaskComment) (ytwrit
 // Adding the same binding again is a no-op that returns the stored row.
 // Nothing else is written: a binding creates no op row and no map row.
 //
-// Locks, in this order (lockorder.go): the issue ownership lock, FOR SHARE on
+// Locks, in this order (lockorder.go): the issue ownership lock, FOR UPDATE on
 // the task row, the task's lane lock, FOR SHARE on the task's youtrack_projects
 // and task_origins rows, then the new binding row.
 func (s *Store) AddYTTaskBinding(ctx context.Context, b YTTaskBinding, verified YTCanaryCandidate) (YTTaskBinding, error) {
@@ -259,6 +263,9 @@ func (s *Store) AddYTTaskBinding(ctx context.Context, b YTTaskBinding, verified 
 	}
 	if source != "" {
 		return YTTaskBinding{}, fmt.Errorf("%w: %s disagrees with binding task %d to issue %s on %s", ErrYTBindingConflict, source, b.TaskID, b.IssueID, b.Tenant)
+	}
+	if s.ytBindingChecked != nil {
+		s.ytBindingChecked()
 	}
 	var got YTTaskBinding
 	err = scanYTBinding(tx.QueryRow(ctx, `INSERT INTO yt_task_bindings(`+ytBindingColumns+`) VALUES ($1,$2,$3,$4,$5,$6,$7)
