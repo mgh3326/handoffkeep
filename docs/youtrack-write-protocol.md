@@ -185,13 +185,13 @@ that has its own gate, `HANDOFFKEEP_YT_READTHROUGH_MODE` (default `off`,
 comments in the last N days without writes: per hk project, counts of tasks that
 resolve+verify, have no issue, or are ambiguous, with up to 10 sample IDs each.
 `handoffkeep youtrack comments-backfill [--project P] [--days N]` verifies and records
-bindings into `yt_entity_map` for tasks that resolve and verify.
+bindings into `yt_task_bindings` for tasks that resolve and verify.
 
 **Enqueue.** Every comment entry point (REST and the CLI through it, console,
 MCP `task_comment`) goes through `CreateTaskComment` / `CreateMCPTaskComment`.
-When the gate is `on` and the task has a verified issue (in `yt_entity_map` or
-`yt_comment_canary`), or when the gate is `canary` and the task is enrolled in
-`yt_comment_canary`, the same transaction writes the comment, its op
+When the gate is `on` and the task has a verified issue (in `yt_task_bindings`,
+`yt_entity_map` or `yt_comment_canary`), or when the gate is `canary` and the task
+is enrolled in `yt_comment_canary`, the same transaction writes the comment, its op
 (principal `hk:task-comments`, key `task-comment:<comment id>`, lane `("task", "<id>")`,
 target the bound internal issue id, actor the comment author, time the comment time),
 its ownership row `yt_comment_write_links(comment_id, op_id)`, and its `yt_entity_map`

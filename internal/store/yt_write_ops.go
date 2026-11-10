@@ -48,7 +48,7 @@ func (s *Store) YTCommentLedger(tenant string) *YTWriteLedger {
 // ytCommentAdmitSQL is the admission of a prepared op o by the comment
 // worker of the tenant named by the placeholder: o is bound to that tenant,
 // and its task is enrolled in the canary (in mode canary) or has a verified
-// issue in yt_entity_map or canary (in mode on) on o's tenant. Due and Claim
+// issue in yt_task_bindings, yt_entity_map or canary (in mode on) on o's tenant. Due and Claim
 // share it, so what a pass lists is what a claim admits.
 func ytCommentAdmitSQL(tenant, mode string) string {
 	return `(o.tenant = ` + tenant + ` AND (
@@ -58,6 +58,9 @@ func ytCommentAdmitSQL(tenant, mode string) string {
 		(` + mode + ` = 'on' AND (
 			EXISTS (SELECT 1 FROM yt_comment_canary c
 				WHERE o.entity_kind = 'task' AND c.task_id::text = o.entity_id AND c.issue_id = o.yt_target_id AND c.tenant = o.tenant)
+			OR
+			EXISTS (SELECT 1 FROM yt_task_bindings b
+				WHERE o.entity_kind = 'task' AND b.task_id::text = o.entity_id AND b.issue_id = o.yt_target_id AND b.tenant = o.tenant)
 			OR
 			EXISTS (SELECT 1 FROM yt_entity_map m
 				WHERE m.entity_kind = 'task' AND m.hk_key = o.entity_id AND m.yt_id = o.yt_target_id AND (m.tenant = '' OR m.tenant = o.tenant))
@@ -409,7 +412,7 @@ func (l *YTWriteLedger) ListState(ctx context.Context, state ytwrite.State, limi
 
 func (l *YTWriteLedger) MapGet(ctx context.Context, entityKind, hkKey string) (ytwrite.MapRow, bool, error) {
 	m := ytwrite.MapRow{EntityKind: entityKind, HKKey: hkKey}
-	err := l.s.pool.QueryRow(ctx, `SELECT yt_id, yt_parent_id, coalesce(op_id, 0) FROM yt_entity_map WHERE entity_kind=$1 AND hk_key=$2`,
+	err := l.s.pool.QueryRow(ctx, `SELECT yt_id, yt_parent_id, op_id FROM yt_entity_map WHERE entity_kind=$1 AND hk_key=$2`,
 		entityKind, hkKey).Scan(&m.YTID, &m.YTParentID, &m.OpID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ytwrite.MapRow{}, false, nil

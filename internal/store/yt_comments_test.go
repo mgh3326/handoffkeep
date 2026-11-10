@@ -799,3 +799,97 @@ func TestModeOnCommentProtocol(t *testing.T) {
 		t.Fatalf("legacy push for task D: got %+v, want only cD1 (%d)", unpushedD, cD1.ID)
 	}
 }
+
+// A task mapped before the tenant column was backfilled (tenant=”) falls back
+// to the canary row's tenant, enqueues an op with that tenant, admits and applies it.
+// If the map row has tenant=” and no canary row exists to provide the tenant,
+// it is treated as unverified: no op and no link are created, leaving the comment
+// to legacy push.
+func TestYTCommentsOnLegacyMapRowWithoutTenant(t *testing.T) {
+	s := schemaStore(t, "ytc_legacy_map")
+	ctx := t.Context()
+	yt := ytwritetest.NewFake()
+	var offset atomic.Int64
+	p := ytcProtocol(t, s, yt, &offset)
+
+	s.SetYTCommentsMode(YTCommentsOn)
+
+	// 1. Task with legacy map row (tenant='') AND canary row (holding real tenant).
+	taskA := ytcTask(t, s, "handoffkeep")
+	issueA := "2-" + strconv.FormatInt(taskA, 10)
+	verifiedA, err := s.YTCanaryCandidate(ctx, taskA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddYTCommentCanary(ctx, YTCommentCanary{TaskID: taskA, Tenant: ytcTenant, IssueID: issueA, IssueReadable: "HK-" + strconv.FormatInt(taskA, 10), ProjectID: "0-2", AddedBy: "test"}, verifiedA); err != nil {
+		t.Fatal(err)
+	}
+	// Create an anchor op for yt_entity_map since op_id is NOT NULL
+	anchorA, _, err := s.YTWriteLedger().Prepare(ctx, time.Now().UTC(), ytwrite.NewOp{
+		Principal: YTCommentPrincipal, Kind: ytwrite.KindCommentAppend, Key: "anchor:a",
+		PayloadSHA: "sha", Payload: []byte("{}"), EntityKind: "task", EntityID: strconv.FormatInt(taskA, 10),
+		YTTargetID: issueA, Actor: "test", Tenant: ytcTenant,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Insert legacy map row with tenant=''
+	if _, err := s.pool.Exec(ctx, `INSERT INTO yt_entity_map(entity_kind, hk_key, yt_id, yt_parent_id, op_id, created_at, tenant)
+		VALUES ('task', $1, $2, '0-2', $3, now(), '')`, strconv.FormatInt(taskA, 10), issueA, anchorA.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Post comment in mode on: should resolve tenant from canary and enqueue with ytcTenant
+	cA, err := s.CreateTaskComment(ctx, taskA, "worker", "comment on legacy mapped task")
+	if err != nil {
+		t.Fatal(err)
+	}
+	opA, ok := ytcOpFor(t, s, cA.ID)
+	if !ok || opA.State != ytwrite.StatePrepared || opA.Tenant != ytcTenant {
+		t.Fatalf("opA: ok=%v op=%+v, want prepared with tenant %q", ok, opA, ytcTenant)
+	}
+	if _, err := p.Drive(ctx, 10); err != nil {
+		t.Fatal(err)
+	}
+	opA, _ = ytcOpFor(t, s, cA.ID)
+	if opA.State != ytwrite.StateApplied {
+		t.Fatalf("opA state = %s, want applied", opA.State)
+	}
+	csA := yt.Comments(issueA)
+	if len(csA) != 1 {
+		t.Fatalf("remote issue A comments = %d, want 1", len(csA))
+	}
+
+	// 2. Task with legacy map row (tenant='') but NO canary row.
+	taskB := ytcTask(t, s, "handoffkeep")
+	issueB := "2-" + strconv.FormatInt(taskB, 10)
+	anchorB, _, err := s.YTWriteLedger().Prepare(ctx, time.Now().UTC(), ytwrite.NewOp{
+		Principal: YTCommentPrincipal, Kind: ytwrite.KindCommentAppend, Key: "anchor:b",
+		PayloadSHA: "sha", Payload: []byte("{}"), EntityKind: "task", EntityID: strconv.FormatInt(taskB, 10),
+		YTTargetID: issueB, Actor: "test", Tenant: "",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pool.Exec(ctx, `INSERT INTO yt_entity_map(entity_kind, hk_key, yt_id, yt_parent_id, op_id, created_at, tenant)
+		VALUES ('task', $1, $2, '0-2', $3, now(), '')`, strconv.FormatInt(taskB, 10), issueB, anchorB.ID); err != nil {
+		t.Fatal(err)
+	}
+	// Seed mirror so legacy push is enabled
+	if _, err := s.UpsertYouTrackMirror(ctx, YouTrackMirrorInput{TaskID: taskB, IssueID: issueB, DisplayRef: "HK-" + strconv.FormatInt(taskB, 10), Tenant: ytcTenant, Role: "mirror", SyncedAt: time.Now().UTC().Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+
+	cB, err := s.CreateTaskComment(ctx, taskB, "worker", "comment on tenantless map row")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// No op and no link should be created because tenant cannot be resolved
+	if _, ok := ytcOpFor(t, s, cB.ID); ok {
+		t.Fatal("tenantless map row unexpectedly enqueued an op")
+	}
+	unpushedB, err := s.UnpushedYouTrackComments(ctx, taskB, 0, 50)
+	if err != nil || len(unpushedB) != 1 || unpushedB[0].ID != cB.ID {
+		t.Fatalf("legacy push did not select comment cB: got %+v %v", unpushedB, err)
+	}
+}

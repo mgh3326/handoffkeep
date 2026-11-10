@@ -87,7 +87,10 @@ func (s *Store) enqueueYTCommentTx(ctx context.Context, tx pgx.Tx, c TaskComment
 		}
 	} else if mode == YTCommentsOn {
 		taskKey := strconv.FormatInt(c.TaskID, 10)
-		err := tx.QueryRow(ctx, `SELECT yt_id, yt_parent_id, tenant FROM yt_entity_map WHERE entity_kind='task' AND hk_key=$1`, taskKey).Scan(&issueID, &projectID, &tenant)
+		err := tx.QueryRow(ctx, `SELECT issue_id, project_id, tenant FROM yt_task_bindings WHERE task_id=$1`, c.TaskID).Scan(&issueID, &projectID, &tenant)
+		if errors.Is(err, pgx.ErrNoRows) {
+			err = tx.QueryRow(ctx, `SELECT yt_id, yt_parent_id, tenant FROM yt_entity_map WHERE entity_kind='task' AND hk_key=$1`, taskKey).Scan(&issueID, &projectID, &tenant)
+		}
 		if errors.Is(err, pgx.ErrNoRows) {
 			err = tx.QueryRow(ctx, `SELECT issue_id, project_id, tenant FROM yt_comment_canary WHERE task_id=$1`, c.TaskID).Scan(&issueID, &projectID, &tenant)
 		}
@@ -98,6 +101,26 @@ func (s *Store) enqueueYTCommentTx(ctx context.Context, tx pgx.Tx, c TaskComment
 		if err != nil {
 			return ytwrite.Op{}, false, err
 		}
+		// If tenant is empty (legacy map row created before the tenant column or before migration backfill),
+		// fall back to yt_comment_canary or yt_write_ops.
+		if tenant == "" {
+			var canaryTenant string
+			if cerr := tx.QueryRow(ctx, `SELECT tenant FROM yt_comment_canary WHERE task_id=$1`, c.TaskID).Scan(&canaryTenant); cerr == nil && canaryTenant != "" {
+				tenant = canaryTenant
+			}
+		}
+		if tenant == "" {
+			var opTenant string
+			if oerr := tx.QueryRow(ctx, `SELECT o.tenant FROM yt_entity_map m JOIN yt_write_ops o ON o.id = m.op_id WHERE m.entity_kind='task' AND m.hk_key=$1 AND o.tenant <> ''`, taskKey).Scan(&opTenant); oerr == nil && opTenant != "" {
+				tenant = opTenant
+			}
+		}
+		// If tenant is STILL empty, the task cannot be admitted to any worker.
+		// Treat as unverified so the legacy push / import carries the comment without losing it.
+		if tenant == "" {
+			s.logIfAmbiguousTask(ctx, tx, c.TaskID)
+			return ytwrite.Op{}, false, nil
+		}
 	} else {
 		return ytwrite.Op{}, false, nil
 	}
@@ -105,7 +128,9 @@ func (s *Store) enqueueYTCommentTx(ctx context.Context, tx pgx.Tx, c TaskComment
 	// re-enrollment elsewhere never retargets it.
 	req := ytwrite.CommentRequest{Principal: YTCommentPrincipal, Key: YTCommentKey(c.ID), Actor: c.Author, TaskID: c.TaskID, YTIssueID: issueID, Tenant: tenant, Body: c.Body}
 	reason, detail := "", ""
-	if cerr := ytwrite.CheckComment(req); cerr != nil {
+	if req.Tenant == "" {
+		reason, detail = ytwrite.ReasonInvalidComment, "empty tenant"
+	} else if cerr := ytwrite.CheckComment(req); cerr != nil {
 		reason, detail = ytwrite.ReasonInvalidComment, cerr.Error()
 	}
 	n, err := ytwrite.CommentOp(req)
@@ -140,6 +165,10 @@ func (s *Store) enqueueYTCommentTx(ctx context.Context, tx pgx.Tx, c TaskComment
 				return ytwrite.Op{}, false, err
 			case have != issueID:
 				reason, detail = ytwrite.ReasonAmbiguousIssue, "task is mapped to issue "+have+", verified names "+issueID
+			default:
+				if tenant != "" {
+					_, _ = tx.Exec(ctx, `UPDATE yt_entity_map SET tenant=$1 WHERE entity_kind='task' AND hk_key=$2 AND tenant=''`, tenant, taskKey)
+				}
 			}
 		}
 	}
@@ -295,7 +324,10 @@ func readYTCanaryCandidate(ctx context.Context, q ytRowQuerier, taskID int64, lo
 	if err := optional(err); err != nil {
 		return YTCanaryCandidate{}, err
 	}
-	err = q.QueryRow(ctx, `SELECT yt_id FROM yt_entity_map WHERE entity_kind='task' AND hk_key=$1`, strconv.FormatInt(taskID, 10)).Scan(&c.MappedIssueID)
+	err = q.QueryRow(ctx, `SELECT coalesce(
+		(SELECT issue_id FROM yt_task_bindings WHERE task_id=$1),
+		(SELECT yt_id FROM yt_entity_map WHERE entity_kind='task' AND hk_key=$2)
+	)`, taskID, strconv.FormatInt(taskID, 10)).Scan(&c.MappedIssueID)
 	if err := optional(err); err != nil {
 		return YTCanaryCandidate{}, err
 	}
@@ -350,12 +382,16 @@ func (s *Store) AddYTCommentCanary(ctx context.Context, c YTCommentCanary, verif
 			ErrYTCanaryConflict, c.TaskID, verified, current)
 	}
 	var mapped bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM yt_entity_map WHERE entity_kind='task'
-		AND ((hk_key=$1 AND yt_id<>$2) OR (hk_key<>$1 AND yt_id=$2)))`, taskKey, c.IssueID).Scan(&mapped); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(
+		SELECT 1 FROM yt_task_bindings WHERE (task_id=$1 AND issue_id<>$2) OR (task_id<>$1 AND issue_id=$2)
+		UNION ALL
+		SELECT 1 FROM yt_entity_map WHERE entity_kind='task'
+		AND ((hk_key=$3 AND yt_id<>$2) OR (hk_key<>$3 AND yt_id=$2))
+	)`, c.TaskID, c.IssueID, taskKey).Scan(&mapped); err != nil {
 		return YTCommentCanary{}, err
 	}
 	if mapped {
-		return YTCommentCanary{}, fmt.Errorf("%w: yt_entity_map maps task %d or issue %s elsewhere", ErrYTCanaryConflict, c.TaskID, c.IssueID)
+		return YTCommentCanary{}, fmt.Errorf("%w: yt_task_bindings or yt_entity_map maps task %d or issue %s elsewhere", ErrYTCanaryConflict, c.TaskID, c.IssueID)
 	}
 	var got YTCommentCanary
 	err = scanYTCanary(tx.QueryRow(ctx, `INSERT INTO yt_comment_canary(`+ytCanaryColumns+`) VALUES ($1,$2,$3,$4,$5,$6,$7)
@@ -413,10 +449,10 @@ func (s *Store) ListYTCommentCanary(ctx context.Context) ([]YTCommentCanary, err
 	return out, rows.Err()
 }
 
-// AddYTEntityMapTask records a verified YouTrack issue for a task in yt_entity_map.
+// AddYTEntityMapTask records a verified YouTrack issue for a task in yt_task_bindings.
 // An issue already mapped to another task or a task mapped elsewhere returns ErrYTCanaryConflict.
 func (s *Store) AddYTEntityMapTask(ctx context.Context, taskID int64, issueID, projectID, tenant string) error {
-	if taskID < 1 || issueID == "" || len(issueID) > 64 || len(projectID) > 64 || len(tenant) > 255 {
+	if taskID < 1 || issueID == "" || len(issueID) > 64 || len(projectID) > 64 || tenant == "" || len(tenant) > 255 {
 		return errors.New("invalid task entity mapping")
 	}
 	tx, err := s.pool.Begin(ctx)
@@ -429,19 +465,48 @@ func (s *Store) AddYTEntityMapTask(ctx context.Context, taskID int64, issueID, p
 		return err
 	}
 	var mapped bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM yt_entity_map WHERE entity_kind='task'
-		AND ((hk_key=$1 AND yt_id<>$2) OR (hk_key<>$1 AND yt_id=$2)))`, taskKey, issueID).Scan(&mapped); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(
+		SELECT 1 FROM yt_task_bindings WHERE (task_id=$1 AND issue_id<>$2) OR (task_id<>$1 AND issue_id=$2)
+		UNION ALL
+		SELECT 1 FROM yt_entity_map WHERE entity_kind='task' AND ((hk_key=$3 AND yt_id<>$2) OR (hk_key<>$3 AND yt_id=$2))
+		UNION ALL
+		SELECT 1 FROM yt_comment_canary WHERE (task_id=$1 AND issue_id<>$2) OR (task_id<>$1 AND issue_id=$2)
+	)`, taskID, issueID, taskKey).Scan(&mapped); err != nil {
 		return err
 	}
 	if mapped {
-		return fmt.Errorf("%w: yt_entity_map maps task %d or issue %s elsewhere", ErrYTCanaryConflict, taskID, issueID)
+		return fmt.Errorf("%w: yt_task_bindings or yt_entity_map maps task %d or issue %s elsewhere", ErrYTCanaryConflict, taskID, issueID)
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO yt_entity_map(entity_kind, hk_key, yt_id, yt_parent_id, tenant, created_at)
-		VALUES ('task', $1, $2, $3, $4, now()) ON CONFLICT (entity_kind, hk_key) DO UPDATE SET tenant=EXCLUDED.tenant WHERE yt_entity_map.yt_id=EXCLUDED.yt_id`,
-		taskKey, issueID, projectID, tenant); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO yt_task_bindings(task_id, tenant, issue_id, project_id, created_at)
+		VALUES ($1, $2, $3, $4, now()) ON CONFLICT (task_id) DO UPDATE SET tenant=EXCLUDED.tenant, issue_id=EXCLUDED.issue_id, project_id=EXCLUDED.project_id WHERE yt_task_bindings.issue_id=EXCLUDED.issue_id`,
+		taskID, tenant, issueID, projectID); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+// YTTaskBinding is a verified task binding stored in yt_task_bindings.
+type YTTaskBinding struct {
+	TaskID    int64     `json:"task_id"`
+	Tenant    string    `json:"tenant"`
+	IssueID   string    `json:"issue_id"`
+	ProjectID string    `json:"project_id"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// YTTaskBinding returns the verified binding for taskID, if any.
+func (s *Store) YTTaskBinding(ctx context.Context, taskID int64) (YTTaskBinding, bool, error) {
+	var b YTTaskBinding
+	err := s.pool.QueryRow(ctx, `SELECT task_id, tenant, issue_id, project_id, created_at FROM yt_task_bindings WHERE task_id=$1`, taskID).
+		Scan(&b.TaskID, &b.Tenant, &b.IssueID, &b.ProjectID, &b.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return YTTaskBinding{}, false, nil
+	}
+	if err != nil {
+		return YTTaskBinding{}, false, err
+	}
+	b.CreatedAt = b.CreatedAt.UTC()
+	return b, true, nil
 }
 
 // TasksWithRecentCommentsCandidates reads mappings for all tasks that received comments since the cutoff.
@@ -455,11 +520,12 @@ func (s *Store) TasksWithRecentCommentsCandidates(ctx context.Context, since tim
 			coalesce(p.yt_project_id, ''),
 			coalesce(o.external_id, ''),
 			coalesce(o.tenant, ''),
-			coalesce(m.yt_id, '')
+			coalesce(b.issue_id, m.yt_id, '')
 		FROM tasks t
 		JOIN task_comments c ON c.task_id = t.id
 		LEFT JOIN youtrack_projects p ON p.hk_project = t.project
 		LEFT JOIN task_origins o ON o.task_id = t.id AND o.provider = 'youtrack'
+		LEFT JOIN yt_task_bindings b ON b.task_id = t.id
 		LEFT JOIN yt_entity_map m ON m.entity_kind = 'task' AND m.hk_key = t.id::text
 		WHERE c.created_at >= $1
 		  AND ($2 = '' OR t.project = $2)

@@ -369,10 +369,24 @@ func TestCommentsPreflightAndBackfill(t *testing.T) {
 		t.Errorf("backfill skipped: no_issue=%d ambiguous=%d, want 2 and 1", backfillOut.SkippedNoIssue, backfillOut.SkippedAmbiguous)
 	}
 
-	// 3. Confirm Task 1 is recorded in yt_entity_map
+	// 3. Confirm Task 1 is recorded in yt_task_bindings
+	b, ok, err := st.YTTaskBinding(ctx, t1.ID)
+	if err != nil || !ok || b.IssueID != "2-"+id1 || b.Tenant != "preflight.youtrack.cloud" {
+		t.Fatalf("yt_task_bindings for task 1: ok=%v binding=%+v err=%v", ok, b, err)
+	}
+
+	// 4. Confirm mode on creates an op and anchors yt_entity_map with the op
+	st.SetYTCommentsMode(store.YTCommentsOn)
+	if _, err := st.CreateTaskComment(ctx, t1.ID, "worker", "first comment after backfill"); err != nil {
+		t.Fatalf("create comment after backfill: %v", err)
+	}
+	ops, err := st.ListYTWriteOps(ctx, store.YTOpFilter{State: "all", TaskID: t1.ID})
+	if err != nil || len(ops) != 1 || ops[0].Tenant != "preflight.youtrack.cloud" {
+		t.Fatalf("ops for task 1: %+v %v", ops, err)
+	}
 	row, ok, err := st.YTWriteLedger().MapGet(ctx, "task", id1)
-	if err != nil || !ok || row.YTID != "2-"+id1 {
-		t.Fatalf("yt_entity_map for task 1: ok=%v row=%+v err=%v", ok, row, err)
+	if err != nil || !ok || row.YTID != "2-"+id1 || row.OpID != ops[0].ID {
+		t.Fatalf("yt_entity_map for task 1: ok=%v row=%+v op=%+v err=%v", ok, row, ops[0], err)
 	}
 }
 
