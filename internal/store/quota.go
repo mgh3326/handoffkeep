@@ -209,6 +209,25 @@ func (s *Store) LatestQuota(ctx context.Context, key string) (QuotaLatest, error
 	}
 	return out, rows.Err()
 }
+
+// QuotaAccountKeys returns the opaque account keys that currently have a
+// latest observation. Account keys are hashes/aliases and never credentials.
+func (s *Store) QuotaAccountKeys(ctx context.Context) ([]string, error) {
+	rows, err := s.pool.Query(ctx, `SELECT DISTINCT account_key FROM quota_latest ORDER BY account_key`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	keys := []string{}
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			return nil, err
+		}
+		keys = append(keys, key)
+	}
+	return keys, rows.Err()
+}
 func (s *Store) LeaseQuota(ctx context.Context, key, owner, holder string, ttl int) (QuotaLease, error) {
 	var x QuotaLease
 	tx, err := s.pool.Begin(ctx)
