@@ -343,7 +343,9 @@ func (s *Store) TransitionTask(ctx context.Context, id int64, to, by, note strin
 }
 
 // ClearAwaitingDecision answers a flagged task: it clears awaiting_decision
-// and leaves the work state alone. A task that is not waiting is a conflict.
+// and leaves the work state alone. A task that is not waiting is a no-op: the
+// answer may already have cleared the flag (ResolveDecision does so when it
+// closes the task's request), so a second clear must not fail.
 // Existing answer paths keep their guards: an open structured request must be
 // resolved first, and only the operator's web answer resolves a disposition
 // item.
@@ -503,7 +505,8 @@ func (s *Store) transitionTaskTx(ctx context.Context, tx pgx.Tx, id int64, in Tr
 	}
 	if in.ClearOnly {
 		if !x.AwaitingDecision {
-			return Task{}, ErrTaskConflict
+			// Already answered: a resolved decision request clears the flag too.
+			return x, nil
 		}
 		action, to = actClearFlag, x.State
 	}
