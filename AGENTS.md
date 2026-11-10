@@ -23,6 +23,13 @@ and leave the old code as is unless the change already touches it.
 
 ## Checks
 
+**Fleet sessions** (workers, lead and design sessions launched through
+panewire) test by the host-safety preamble at the top of their brief: test
+only the packages you changed, start no local database (DB-backed tests run
+in CI), and never run `go test` on mbp-server. Where that preamble and this
+section differ, the preamble wins. The rest of this section is for people
+and CI.
+
 `scripts/check` runs CI's gates in CI's order (`scripts/check go`,
 `scripts/check web` for one half). Run it before pushing.
 
@@ -53,7 +60,9 @@ left main red (hk 3193), and so did an `internal/mcp` change whose DB tests
 first ran on main (hk 3528). A package becomes DB-backed by importing
 `internal/testdb`; no workflow edit is needed.
 
-DB-backed tests need Postgres 17 and `HANDOFFKEEP_TEST_DB_URL`, e.g.
+DB-backed tests need Postgres 17 and `HANDOFFKEEP_TEST_DB_URL`. A person
+running them locally can start one like this (fleet sessions leave them to
+CI, above):
 
 ```bash
 docker run -d --name hk-pg -p 5432:5432 -e POSTGRES_USER=handoffkeep -e POSTGRES_PASSWORD=handoffkeep -e POSTGRES_DB=handoffkeep postgres:17
