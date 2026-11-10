@@ -12,20 +12,24 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
+type fleetCapacityWindowOut struct {
+	Kind      string   `json:"kind"`
+	Window    string   `json:"window"`
+	State     string   `json:"state"`
+	UsedPct   *float64 `json:"used_pct"`
+	AgeSecond int64    `json:"age_seconds"`
+	ExpiresAt string   `json:"expires_at"`
+	Expired   *bool    `json:"expired"`
+}
+
+type fleetCapacityAccountOut struct {
+	AccountKey string                   `json:"account_key"`
+	Pool       string                   `json:"pool"`
+	Windows    []fleetCapacityWindowOut `json:"windows"`
+}
+
 type fleetCapacityOut struct {
-	Accounts []struct {
-		AccountKey string `json:"account_key"`
-		Pool       string `json:"pool"`
-		Windows    []struct {
-			Kind      string  `json:"kind"`
-			Window    string  `json:"window"`
-			State     string  `json:"state"`
-			UsedPct   float64 `json:"used_pct"`
-			AgeSecond int64   `json:"age_seconds"`
-			ExpiresAt string  `json:"expires_at"`
-			Expired   *bool   `json:"expired"`
-		} `json:"windows"`
-	} `json:"accounts"`
+	Accounts []fleetCapacityAccountOut `json:"accounts"`
 	Presence []struct {
 		HostID   string `json:"host_id"`
 		Accounts []struct {
@@ -71,6 +75,16 @@ func TestFleetCapacityAccessShapeFiltersAndLimit(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	manualEmptyKey := "claude:1123456789abcdef"
+	if _, err := st.LeaseQuota(ctx, manualEmptyKey, "test", holder, 600); err != nil {
+		t.Fatal(err)
+	}
+	manualEmptyExpiry := time.Now().UTC().Add(-time.Minute)
+	if _, _, err := st.PutQuota(ctx, manualEmptyKey, "test", holder, store.QuotaObservation{
+		Kind: "manual", Window: "1h", MeasuredAt: manualEmptyExpiry.Add(-time.Hour), ExpiresAt: &manualEmptyExpiry,
+	}); err != nil {
+		t.Fatal(err)
+	}
 	devinKey := "devin:abcdef0123456789"
 	if _, err := st.LeaseQuota(ctx, devinKey, "test", holder, 600); err != nil {
 		t.Fatal(err)
@@ -104,23 +118,36 @@ func TestFleetCapacityAccessShapeFiltersAndLimit(t *testing.T) {
 	t.Cleanup(srv.Close)
 	session := connectMCP(t, srv.URL, map[string]string{"Cf-Access-Jwt-Assertion": fixture.token(t, jwt.MapClaims{"email": "operator@example.com"})})
 	out := callTool[fleetCapacityOut](t, session, "fleet_capacity", map[string]any{"limit": 101})
-	if len(out.Accounts) != 2 || out.Accounts[0].AccountKey != key || out.Accounts[0].Pool != "claude" || len(out.Accounts[0].Windows) != 2 {
+	if len(out.Accounts) != 3 {
 		t.Fatalf("account section=%+v", out.Accounts)
 	}
+	accountsByKey := make(map[string]fleetCapacityAccountOut)
+	for _, account := range out.Accounts {
+		accountsByKey[account.AccountKey] = account
+	}
+	claude := accountsByKey[key]
+	if claude.Pool != "claude" || len(claude.Windows) != 2 {
+		t.Fatalf("account=%+v", claude)
+	}
 	var auto, manual bool
-	for _, window := range out.Accounts[0].Windows {
+	for _, window := range claude.Windows {
 		switch window.Kind {
 		case "manual":
-			manual = window.UsedPct == 95 && window.Expired != nil && *window.Expired && window.ExpiresAt != ""
+			manual = window.UsedPct != nil && *window.UsedPct == 95 && window.Expired != nil && *window.Expired && window.ExpiresAt != ""
 		case "auto":
-			auto = window.UsedPct == 66 && window.Window == "7d"
+			auto = window.UsedPct != nil && *window.UsedPct == 66 && window.Window == "7d"
 		}
 	}
 	if !manual || !auto {
-		t.Fatalf("auto=%v manual=%v windows=%+v", auto, manual, out.Accounts[0].Windows)
+		t.Fatalf("auto=%v manual=%v windows=%+v", auto, manual, claude.Windows)
 	}
-	if out.Accounts[1].AccountKey != devinKey || len(out.Accounts[1].Windows) != 1 || out.Accounts[1].Windows[0].State != "unknown" {
-		t.Fatalf("free bucket state=%+v", out.Accounts[1])
+	devin := accountsByKey[devinKey]
+	if len(devin.Windows) != 1 || devin.Windows[0].State != "unknown" {
+		t.Fatalf("free bucket state=%+v", devin)
+	}
+	manualEmpty := accountsByKey[manualEmptyKey]
+	if len(manualEmpty.Windows) != 1 || manualEmpty.Windows[0].Kind != "manual" || manualEmpty.Windows[0].Window != "1h" || manualEmpty.Windows[0].UsedPct != nil || manualEmpty.Windows[0].Expired == nil || !*manualEmpty.Windows[0].Expired || manualEmpty.Windows[0].ExpiresAt == "" {
+		t.Fatalf("empty manual observation=%+v", manualEmpty)
 	}
 	if len(out.Presence) != 1 || out.Presence[0].HostID != "host-a" || len(out.Presence[0].Accounts) != 1 || out.Presence[0].Accounts[0].AccountKey != key {
 		t.Fatalf("presence section=%+v", out.Presence)
@@ -133,11 +160,12 @@ func TestFleetCapacityAccessShapeFiltersAndLimit(t *testing.T) {
 		t.Fatalf("default placement count=%d want %d", len(defaultLimit.Placements), fleetCapacityDefaultLimit)
 	}
 	filtered := callTool[fleetCapacityOut](t, session, "fleet_capacity", map[string]any{"job": "fleet-100", "host": "host-b", "since": time.Now().UTC().Add(-time.Hour).Format(time.RFC3339), "limit": 20})
-	if len(filtered.Placements) != 1 || filtered.Placements[0].JobID != "fleet-100" {
+	// Job/host/since filter placement attempts only; quota and presence remain account-wide.
+	if len(filtered.Accounts) != 3 || len(filtered.Placements) != 1 || filtered.Placements[0].JobID != "fleet-100" {
 		t.Fatalf("filtered placements=%+v", filtered.Placements)
 	}
 	missing := callTool[fleetCapacityOut](t, session, "fleet_capacity", map[string]any{"job": "fleet-000", "host": "host-b"})
-	if len(missing.Accounts) != 1 || len(missing.Presence) != 1 || len(missing.Placements) != 0 || missing.PlacementNote != "no placement records" {
+	if len(missing.Accounts) != 3 || len(missing.Presence) != 1 || len(missing.Placements) != 0 || missing.PlacementNote != "no placement records" {
 		t.Fatalf("empty placement result lost other sections or note: %+v", missing)
 	}
 }

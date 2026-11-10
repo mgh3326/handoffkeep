@@ -109,6 +109,9 @@ func (o operatorTools) fleetCapacity(ctx context.Context, _ *gmcp.CallToolReques
 				used := bucket.UsedPct
 				account.Windows = append(account.Windows, fleetCapacityWindow{Kind: observation.Kind, Window: bucket.Window, UsedPct: &used, ResetsAt: bucket.ResetsAt, ExpiresAt: observation.ExpiresAt, Expired: expired, AgeSecond: age})
 			}
+			if observation.Kind == "manual" && len(observation.Buckets) == 0 {
+				account.Windows = append(account.Windows, fleetCapacityWindow{Kind: observation.Kind, Window: observation.Window, ExpiresAt: observation.ExpiresAt, Expired: expired, AgeSecond: age})
+			}
 			if observation.FreeBucket != nil {
 				account.Windows = append(account.Windows, fleetCapacityWindow{Kind: observation.Kind, Window: "free", State: observation.FreeBucket.State, ResetsAt: observation.FreeBucket.ResetsAt, AgeSecond: age})
 			}
