@@ -12,9 +12,11 @@ import (
 // written only by `youtrack comments-backfill` (Store.AddYTTaskBinding), after
 // the same verification a canary enrollment makes.
 //
-// After 20261109-yt-comment-canary: the binding is checked against the
-// canary rows and the write links that migration creates, and the comment
-// worker's admission reads both tables in one statement.
+// No After: the statements need no other table (there is no foreign key), so
+// the entry runs in ID order, after every 20261109 entry. An After on
+// 20261109-yt-comment-canary would only pick a position (AGENTS.md
+// §Migrations), and would break the tests that open a registry without that
+// entry.
 //
 // Expand-only: one new table with its primary key and unique index. CREATE
 // TABLE takes locks on the new, empty table only; there is no foreign key, so
@@ -22,7 +24,7 @@ import (
 // as in yt_comment_canary). The previous release neither reads nor writes the
 // table, and the migration writes no row.
 func init() {
-	registerMigration(migration{ID: "20261110-yt-task-bindings", After: []string{"20261109-yt-comment-canary"}, Apply: func(ctx context.Context, tx pgx.Tx) error {
+	registerMigration(migration{ID: "20261110-yt-task-bindings", Apply: func(ctx context.Context, tx pgx.Tx) error {
 		return execAll(ctx, tx, ytTaskBindingsStatements)
 	}})
 }

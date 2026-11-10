@@ -396,8 +396,9 @@ the `Retry-After` the server sent (5 s without one, at most 30 days) and holds
 its lane behind it; it does not pause the other lanes, so under a tenant-wide
 429 each due lane makes one POST per pass and each waits its own Retry-After.
 
-**Migration** `20261110-yt-task-bindings` (expand-only, after
-`20261109-yt-comment-canary`): the new table `yt_task_bindings` with its
+**Migration** `20261110-yt-task-bindings` (expand-only; no `After`, it needs
+no other table and runs after the 20261109 entries in ID order): the new
+table `yt_task_bindings` with its
 primary key and `UNIQUE(tenant, issue_id)`. Locks only on the new, empty
 table; no foreign key, so no lock on `tasks`. It writes no row, and the
 previous release neither reads nor writes the table: it keeps serving on the
