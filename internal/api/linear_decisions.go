@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"net/url"
 	"slices"
@@ -517,8 +518,29 @@ func (d DiscordWebhook) Post(ctx context.Context, content string) error {
 	return d.send(ctx, http.MethodPost, d.URL, content, nil)
 }
 
-// discordStatusError is a non-2xx answer from Discord.
-type discordStatusError struct{ status int }
+// discordStatusError is a non-2xx answer from Discord. retryAfter is a
+// 429's wait, zero when Discord gave none.
+type discordStatusError struct {
+	status     int
+	retryAfter time.Duration
+}
+
+// discordRetryAfterMax bounds a 429's wait, so a malformed header cannot
+// stall a worker for hours.
+const discordRetryAfterMax = 10 * time.Minute
+
+// discordRetryAfter reads a 429's Retry-After header, in seconds (Discord
+// may send a fraction).
+func discordRetryAfter(resp *http.Response) time.Duration {
+	if resp.StatusCode != http.StatusTooManyRequests {
+		return 0
+	}
+	secs, err := strconv.ParseFloat(strings.TrimSpace(resp.Header.Get("Retry-After")), 64)
+	if err != nil || secs <= 0 || math.IsNaN(secs) {
+		return 0
+	}
+	return min(time.Duration(secs*float64(time.Second)), discordRetryAfterMax)
+}
 
 func (e discordStatusError) Error() string { return fmt.Sprintf("discord webhook status %d", e.status) }
 
@@ -531,11 +553,18 @@ const discordResponseMaxBytes = 1 << 20
 // JSON response. users, when given, are the only ids the message may ping;
 // parse stays empty either way, so no @everyone or role ever pings.
 func (d DiscordWebhook) send(ctx context.Context, method, target, content string, out any, users ...string) error {
+	return d.sendPayload(ctx, method, target, map[string]any{"content": content}, out, users...)
+}
+
+// sendPayload is send with more fields than content (a forum post's
+// thread_name). allowed_mentions is always set here, never by the caller.
+func (d DiscordWebhook) sendPayload(ctx context.Context, method, target string, payload map[string]any, out any, users ...string) error {
 	allowed := map[string]any{"parse": []string{}}
 	if len(users) > 0 {
 		allowed["users"] = users
 	}
-	body, err := json.Marshal(map[string]any{"content": content, "allowed_mentions": allowed})
+	payload["allowed_mentions"] = allowed
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
@@ -561,7 +590,7 @@ func (d DiscordWebhook) send(ctx context.Context, method, target, content string
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return discordStatusError{resp.StatusCode}
+		return discordStatusError{status: resp.StatusCode, retryAfter: discordRetryAfter(resp)}
 	}
 	if out != nil {
 		if err := json.NewDecoder(io.LimitReader(resp.Body, discordResponseMaxBytes)).Decode(out); err != nil {

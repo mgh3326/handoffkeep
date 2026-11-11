@@ -583,7 +583,7 @@ func TestDiscordWebhookPostAndEditMessage(t *testing.T) {
 	if !errors.Is(decisionNoticeError(editErr), editErr) || errors.Is(decisionNoticeError(editErr), store.ErrDecisionNoticeRejected) {
 		t.Errorf("429 must retry: %v", decisionNoticeError(editErr))
 	}
-	if !errors.Is(decisionNoticeError(discordStatusError{http.StatusNotFound}), store.ErrDecisionNoticeRejected) {
+	if !errors.Is(decisionNoticeError(discordStatusError{status: http.StatusNotFound}), store.ErrDecisionNoticeRejected) {
 		t.Error("404 must not retry")
 	}
 }
@@ -611,10 +611,10 @@ func TestDecisionPostErrorRetriesOnlyWhenNothingWasCreated(t *testing.T) {
 		err   error
 		retry bool
 	}{
-		{"429", discordStatusError{http.StatusTooManyRequests}, true},
-		{"500", discordStatusError{http.StatusInternalServerError}, true},
+		{"429", discordStatusError{status: http.StatusTooManyRequests}, true},
+		{"500", discordStatusError{status: http.StatusInternalServerError}, true},
 		{"dial refused", dial, true},
-		{"404", discordStatusError{http.StatusNotFound}, false},
+		{"404", discordStatusError{status: http.StatusNotFound}, false},
 		{"no message id", errDiscordNoMessageID, false},
 		{"read reset", reset, false},
 		{"timeout", fmt.Errorf("discord webhook: %w", context.DeadlineExceeded), false},

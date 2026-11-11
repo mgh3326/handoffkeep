@@ -2081,6 +2081,13 @@ func serve(args []string, errout io.Writer) error {
 		return e
 	}
 	workers = append(workers, notifier)
+	threads, e := taskThreadPosterFromEnv(st)
+	if e != nil {
+		return e
+	}
+	if threads != nil {
+		workers = append(workers, singletonWorker{store: st, id: store.TaskThreadWorkerLock, worker: threads})
+	}
 	uiHandler, e := uiFromEnv(st, youTrack, am)
 	if e != nil {
 		return e
@@ -2283,6 +2290,65 @@ func decisionNotifierFromEnv(st *store.Store) (backgroundWorker, error) {
 		operator = parsed
 	}
 	return api.DecisionNotifier{Store: st, Discord: discordDecisionsFromEnv(), ConsoleURL: console, OperatorUserID: operator}, nil
+}
+
+// taskThreadPosterFromEnv builds the Discord task-thread poster (hk 3990,
+// docs/task-threads.md). It is off, and nil, while
+// HANDOFFKEEP_DISCORD_TASKS_WEBHOOK_URL is unset. HANDOFFKEEP_DISCORD_TASKS_PROJECTS
+// is a comma list of task projects (default store.DefaultTaskThreadProjects);
+// the console URL and operator user id are the decisions channel's. An
+// invalid value stops the server, and no message quotes the webhook URL.
+func taskThreadPosterFromEnv(st *store.Store) (*api.TaskThreadPoster, error) {
+	raw := strings.TrimSpace(os.Getenv("HANDOFFKEEP_DISCORD_TASKS_WEBHOOK_URL"))
+	if raw == "" {
+		return nil, nil
+	}
+	webhook, err := api.ParseDiscordWebhookURL(raw)
+	if err != nil {
+		return nil, errors.New("HANDOFFKEEP_DISCORD_TASKS_WEBHOOK_URL must be an https url")
+	}
+	projects, err := parseTaskThreadProjects(os.Getenv("HANDOFFKEEP_DISCORD_TASKS_PROJECTS"))
+	if err != nil {
+		return nil, err
+	}
+	p := &api.TaskThreadPoster{Discord: &api.DiscordWebhook{URL: webhook}, Projects: projects}
+	if st != nil {
+		p.Store = st
+	}
+	if raw := strings.TrimSpace(os.Getenv("HANDOFFKEEP_CONSOLE_URL")); raw != "" {
+		if p.ConsoleURL, err = api.ParseConsoleURL(raw); err != nil {
+			return nil, err
+		}
+	}
+	if raw := strings.TrimSpace(os.Getenv("HANDOFFKEEP_DISCORD_OPERATOR_USER_ID")); raw != "" {
+		if p.OperatorUserID, err = api.ParseDiscordOperatorUserID(raw); err != nil {
+			return nil, err
+		}
+	}
+	return p, nil
+}
+
+// parseTaskThreadProjects reads the comma list of projects with threads;
+// blank means store.DefaultTaskThreadProjects.
+func parseTaskThreadProjects(raw string) ([]string, error) {
+	if strings.TrimSpace(raw) == "" {
+		raw = store.DefaultTaskThreadProjects
+	}
+	var out []string
+	for _, name := range strings.Split(raw, ",") {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if !store.ValidProjectName(name) {
+			return nil, fmt.Errorf("HANDOFFKEEP_DISCORD_TASKS_PROJECTS: %q is not a project name", name)
+		}
+		out = append(out, name)
+	}
+	if len(out) == 0 {
+		return nil, errors.New("HANDOFFKEEP_DISCORD_TASKS_PROJECTS lists no project")
+	}
+	return out, nil
 }
 
 // notificationForwarderFromEnv is opt-in, separately from the hub settings the

@@ -1368,7 +1368,10 @@ func (s *Store) migrate(ctx context.Context) error {
 
 	return tx.Commit(ctx)
 }
-func validName(x string) bool        { return nameRE.MatchString(x) }
+func validName(x string) bool { return nameRE.MatchString(x) }
+
+// ValidProjectName reports whether x has the shape of a task project name.
+func ValidProjectName(x string) bool { return validName(x) }
 func validText(x string, n int) bool { return len(x) <= n && !strings.ContainsRune(x, 0) }
 
 // ValidActor accepts ordinary store names and the operator:<email> identity
