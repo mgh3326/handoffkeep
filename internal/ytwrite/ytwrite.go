@@ -291,6 +291,10 @@ type RemoteComment struct {
 	Text      string
 	UpdatedAt time.Time
 	Deleted   bool
+	// AuthorID is the YouTrack user id of the comment's author ("" when
+	// the remote did not say). The comment audit tells the bot's comments
+	// from people's by it; the protocol never reads it.
+	AuthorID string
 }
 
 // Remote is the YouTrack surface the protocol uses. CreateComment makes exactly
