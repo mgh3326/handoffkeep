@@ -109,6 +109,17 @@ func (f *FakeYouTrack) Inject(issue, text string) string {
 	return f.addLocked(issue, text)
 }
 
+// InjectAs adds a comment written by the YouTrack user authorID and returns
+// its id.
+func (f *FakeYouTrack) InjectAs(issue, text, authorID string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	id := f.addLocked(issue, text)
+	cs := f.issues[issue]
+	cs[len(cs)-1].AuthorID = authorID
+	return id
+}
+
 // Duplicate adds a second comment with the same text as comment id.
 func (f *FakeYouTrack) Duplicate(issue, id string) string {
 	f.mu.Lock()

@@ -185,7 +185,8 @@ POST is never replayed), `Retry-After` (seconds or HTTP date) is passed up as
 sent (an HTTP date is read against the adapter's clock, `WriteRemote.Now`; only
 waits past `ytwrite.RetryAfterCap` are cut to it), and the bot key is removed from
 every error text, including a body read error, before it can reach the op log.
-Listings request `id,text,created,updated,deleted`.
+Listings request `id,text,created,updated,deleted,author(id)`; the
+author is for the comment audit (`youtrack audit`), never for evidence.
 
 | Single POST observation | Adapter returns | Op |
 |---|---|---|
@@ -539,6 +540,67 @@ and no recovery of held ops; both come with the automatic binder (follow-up).
   locally: the binding keeps the stable internal id, so comments still land
   on the moved issue.
 
+## Comment audit (hk 3899)
+
+`handoffkeep youtrack audit [--project P] [--task N] [--enqueue] [--limit N]`
+compares hk's comments with YouTrack's, task by task, and is the gate for the
+comment cutover: `missing_in_yt`, `duplicate` and `unbound` all 0, or each
+one explained. Like `comments-backfill` it opens the database directly and
+reads YouTrack with the bot key, against the tenant of `YOUTRACK_URL`.
+Without `--enqueue` it writes nothing: `store.OpenReadOnly`, and it refuses
+(exit 2) a database without `20261110-yt-task-bindings`.
+
+Tasks are every task (or `--project`'s, or `--task`), in id order, listed a
+page at a time, at most `--limit` (default all), audited one at a time. For each:
+
+- **Bound on this tenant.** Its issue's comments are listed stably
+  (`EnumerateStableComments`, deleted ones left out) and matched with the
+  task's comments (`ytwrite.AuditComments`), strongest evidence first. A
+  `youtrack_comment_links` value that is a YouTrack id (not `noise:` or
+  `adopted:`) on an hk comment the pull did not write names that comment's
+  copy. Else a comment in the rendered form of op N (`RenderedOpID`) copies
+  the hk comment whose own comment op is N. Else one that ends in the legacy
+  push's trailer (`\n\n<!-- hk-comment:N -->`, nothing after it) copies
+  comment N, unless its text is also another comment's exact body: then it
+  is `ambiguous_copy`, assigned to neither, and a comment it names with no
+  other copy is listed there, not as missing (never enqueued). Any other
+  copies an hk comment whose body equals its text
+  exactly (the import wrote bodies as they are; no trimming). Comments the
+  activity pull wrote into hk (author `operator:youtrack`, never enqueued)
+  are left out, and so are their YouTrack originals, by linked id only
+  (`youtrack_comment_links`; an equal text is no evidence). Classes: `present` (one copy),
+  `missing_in_yt` (none), `duplicate` (two or more), `adopted_unmatched`
+  (none, but the adoption's `adopted:` link says the Python mirror posted it
+  in a form hk cannot identify; never enqueued), and for a YouTrack
+  comment that copies nothing `yt_only_bot` (written by the bot key's user)
+  or `yt_only_human`.
+- **Not bound here**, by reason under `unbound`: `no_project`, `no_issue`
+  (unmapped project, no YouTrack project id, no such issue), `ambiguous` (the
+  issue does not verify, or a local source disagrees), `verifies` (it would
+  bind, but `comments-backfill` has not bound it) and `other_tenant`. The
+  audit never binds.
+
+The JSON report has, per hk project and in `total`, a count and up to 10
+items for each class (task id with comment id, op id and YouTrack ids, or
+task id with a detail). Exit 0 when clean; 4 when it ran in full and
+found a `missing_in_yt`, `duplicate`, `adopted_unmatched` or
+`ambiguous_copy` comment or an unbound task; 1 when a
+task's reads failed (class `error`), an enqueue failed, or the run stopped.
+
+**`--enqueue`** opens the database as the backfill does and, for each
+`missing_in_yt` comment only, prepares its op through the mode-on enqueue
+(`Store.EnqueueYTAuditComment`, which runs `enqueueYTCommentOnTx`): the same
+principal, the key `task-comment:<comment id>`, the binding's tenant and
+issue, the comment's author and time, its link and map anchor. A comment that
+already has an op is left as it is (`linked`), so a second run writes nothing;
+a binding a source disagrees with writes nothing (`skipped`). The worker sends
+the ops when the mode is `on`. `duplicate` and `yt_only` comments are only
+listed: the audit never deletes or edits anything in YouTrack.
+
+**Rate.** One read at a time. A 429 is waited out as the protocol does (the
+server's `Retry-After`, 5 s without one) and the read repeated, at most 5
+times; a wait over 10 minutes stops the run (`stopped`, exit 1). Each read
+(an issue GET, or one issue's full listing) has 60 s.
 
 ## Tests
 

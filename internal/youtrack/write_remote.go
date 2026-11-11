@@ -155,10 +155,14 @@ type listedComment struct {
 	Created int64  `json:"created"`
 	Updated *int64 `json:"updated"`
 	Deleted bool   `json:"deleted"`
+	Author  *struct {
+		ID string `json:"id"`
+	} `json:"author"`
 }
 
 // ListComments reads every comment of the issue twice per attempt
-// (ytwrite.EnumerateStableComments), with its revision time and deletion flag.
+// (ytwrite.EnumerateStableComments), with its revision time, deletion flag
+// and author id.
 // One request per page, no retry: a 429 comes back as a RemoteError with the
 // server's wait.
 func (r *WriteRemote) ListComments(ctx context.Context, issueID string, pageSize int) ([]ytwrite.RemoteComment, error) {
@@ -168,7 +172,7 @@ func (r *WriteRemote) ListComments(ctx context.Context, issueID string, pageSize
 	path := "/api/issues/" + url.PathEscape(issueID) + "/comments"
 	return ytwrite.EnumerateStableComments(ctx, pageSize, func(ctx context.Context, skip, top int) ([]ytwrite.RemoteComment, error) {
 		q := url.Values{}
-		q.Set("fields", "id,text,created,updated,deleted")
+		q.Set("fields", "id,text,created,updated,deleted,author(id)")
 		q.Set("$skip", strconv.Itoa(skip))
 		q.Set("$top", strconv.Itoa(top))
 		data, readErr, err := r.send(ctx, http.MethodGet, path, q, nil)
@@ -188,7 +192,11 @@ func (r *WriteRemote) ListComments(ctx context.Context, issueID string, pageSize
 			if c.Updated != nil {
 				at = *c.Updated
 			}
-			out = append(out, ytwrite.RemoteComment{ID: c.ID, Text: c.Text, UpdatedAt: time.UnixMilli(at), Deleted: c.Deleted})
+			rc := ytwrite.RemoteComment{ID: c.ID, Text: c.Text, UpdatedAt: time.UnixMilli(at), Deleted: c.Deleted}
+			if c.Author != nil {
+				rc.AuthorID = c.Author.ID
+			}
+			out = append(out, rc)
 		}
 		return out, nil
 	})
