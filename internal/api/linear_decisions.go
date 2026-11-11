@@ -519,10 +519,12 @@ func (d DiscordWebhook) Post(ctx context.Context, content string) error {
 }
 
 // discordStatusError is a non-2xx answer from Discord. retryAfter is a
-// 429's wait, zero when Discord gave none.
+// 429's wait, zero when Discord gave none. api names the caller in the
+// message; empty means the webhook.
 type discordStatusError struct {
 	status     int
 	retryAfter time.Duration
+	api        string
 }
 
 // discordRetryAfterMax bounds a 429's wait, so a malformed header cannot
@@ -542,40 +544,67 @@ func discordRetryAfter(resp *http.Response) time.Duration {
 	return min(time.Duration(secs*float64(time.Second)), discordRetryAfterMax)
 }
 
-func (e discordStatusError) Error() string { return fmt.Sprintf("discord webhook status %d", e.status) }
+func (e discordStatusError) Error() string {
+	api := e.api
+	if api == "" {
+		api = discordWebhookAPI
+	}
+	return fmt.Sprintf("%s status %d", api, e.status)
+}
 
 // discordResponseMaxBytes bounds what is read of a response: a message object
 // is a few kilobytes.
 const discordResponseMaxBytes = 1 << 20
+
+// discordWebhookAPI names the webhook in errors.
+const discordWebhookAPI = "discord webhook"
 
 // send is every call to the webhook: the content with mentions disabled, a
 // timeout, and errors that never quote the URL. out, when set, receives the
 // JSON response. users, when given, are the only ids the message may ping;
 // parse stays empty either way, so no @everyone or role ever pings.
 func (d DiscordWebhook) send(ctx context.Context, method, target, content string, out any, users ...string) error {
-	return d.sendPayload(ctx, method, target, map[string]any{"content": content}, out, users...)
+	payload := map[string]any{"content": content, "allowed_mentions": discordAllowedMentions(users)}
+	return discordRequest(ctx, d.HTTP, discordWebhookAPI, method, target, "", payload, out)
 }
 
-// sendPayload is send with more fields than content (a forum post's
-// thread_name). allowed_mentions is always set here, never by the caller.
-func (d DiscordWebhook) sendPayload(ctx context.Context, method, target string, payload map[string]any, out any, users ...string) error {
+// discordAllowedMentions pings only users: parse stays empty, so no
+// @everyone or role ever pings.
+func discordAllowedMentions(users []string) map[string]any {
 	allowed := map[string]any{"parse": []string{}}
 	if len(users) > 0 {
 		allowed["users"] = users
 	}
-	payload["allowed_mentions"] = allowed
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return err
+	return allowed
+}
+
+// discordRequest is one request to Discord, for the webhook and the bot alike:
+// a timeout, a size-capped JSON answer into out (when set), a non-2xx as
+// discordStatusError, and errors that quote neither the URL (a webhook URL
+// is a credential) nor auth (the bot token). api prefixes the errors.
+// payload nil sends no body.
+func discordRequest(ctx context.Context, client *http.Client, api, method, target, auth string, payload, out any) error {
+	var body io.Reader
+	if payload != nil {
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			return err
+		}
+		body = bytes.NewReader(raw)
 	}
 	ctx, cancel := context.WithTimeout(ctx, linearWriteTimeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, method, target, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, method, target, body)
 	if err != nil {
-		return errors.New("discord webhook request could not be built")
+		return errors.New(api + " request could not be built")
 	}
-	req.Header.Set("Content-Type", "application/json")
-	client := d.HTTP
+	if payload != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if auth != "" {
+		req.Header.Set("Authorization", auth)
+		req.Header.Set("User-Agent", discordBotUserAgent)
+	}
 	if client == nil {
 		client = http.DefaultClient
 	}
@@ -586,15 +615,19 @@ func (d DiscordWebhook) sendPayload(ctx context.Context, method, target string, 
 		if errors.As(err, &urlErr) {
 			err = urlErr.Err
 		}
-		return fmt.Errorf("discord webhook: %w", err)
+		return fmt.Errorf("%s: %w", api, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return discordStatusError{status: resp.StatusCode, retryAfter: discordRetryAfter(resp)}
+		status := discordStatusError{status: resp.StatusCode, retryAfter: discordRetryAfter(resp)}
+		if api != discordWebhookAPI {
+			status.api = api
+		}
+		return status
 	}
 	if out != nil {
 		if err := json.NewDecoder(io.LimitReader(resp.Body, discordResponseMaxBytes)).Decode(out); err != nil {
-			return errors.New("discord webhook response could not be read")
+			return errors.New(api + " response could not be read")
 		}
 	}
 	return nil

@@ -23,11 +23,14 @@ import (
 // Delivery is at most once per line. The worker claims a row (claim_key,
 // claimed_at) and commits the claim before it sends, then settles the send's
 // result in a second transaction. A claim older than TaskThreadClaimLease
-// belongs to a worker that died between the two: a thread create whose
-// outcome is unknown leaves the row needs_operator, because a webhook cannot
-// list a forum's threads (that takes a bot) and a second create would leave
-// two threads for one task; a line whose outcome is unknown is counted as
-// posted, so it is never posted twice.
+// belongs to a worker that died between the two. A thread create whose
+// outcome is unknown (such a claim, a 5xx or a timeout) leaves the row creating and
+// unclaimed: its next claim is a lookup (TaskThreadItem.Lookup), due
+// TaskThreadLookupDelay after the outcome, in which the poster lists the
+// forum's threads (hk 4040) and adopts the one it finds, creates again only
+// when it finds none, and stops the row needs_operator when it cannot tell.
+// A second create would leave two threads for one task. A line whose outcome
+// is unknown is counted as posted, so it is never posted twice.
 //
 // Lock order (lockorder.go): the worker locks one task_thread_cursors row,
 // then reads task_events and tasks without locking them; it locks one
@@ -35,8 +38,8 @@ import (
 // or settle transaction, never while it sends. Nothing else writes either
 // table.
 
-// TaskThreadDestinationDiscord is the task-thread forum channel webhook, the
-// only destination so far.
+// TaskThreadDestinationDiscord is the task-thread forum channel, the only
+// destination so far.
 const TaskThreadDestinationDiscord = "discord"
 
 // Delivery states.
@@ -73,6 +76,10 @@ const (
 	// that took it is taken to have died mid-send. It is well above a send's
 	// timeout.
 	TaskThreadClaimLease = 2 * time.Minute
+	// TaskThreadLookupDelay is how long after a create's unknown outcome the
+	// poster looks for its thread: a slow create has that long to surface
+	// before finding none lets it create again.
+	TaskThreadLookupDelay = 2 * time.Minute
 	// TaskThreadIdleAge is how long after a task settles its thread is still
 	// checked for new lines.
 	TaskThreadIdleAge = 30 * 24 * time.Hour
@@ -118,6 +125,9 @@ type TaskThreadItem struct {
 	ThreadID   string
 	ThreadName string
 	Attempts   int
+	// Lookup is set on a create whose earlier attempt has an unknown outcome:
+	// the forum is searched for that thread before anything is created.
+	Lookup bool
 
 	// Create: the task's project, kind and, when set, grade and tier.
 	Project, Kind, Grade, Tier string
@@ -151,12 +161,16 @@ const (
 	// no connection); it is sent again later.
 	TaskThreadRetry
 	// TaskThreadRejected: Discord refused it in a way a retry cannot fix (a
-	// 4xx such as a deleted webhook or thread); the row stops.
+	// 4xx such as a deleted thread or a missing permission); the row stops.
 	TaskThreadRejected
 	// TaskThreadUnknown: the request may have reached Discord without a
-	// usable answer coming back (a 5xx, a timeout). A create leaves the row
-	// needs_operator; a line counts as posted.
+	// usable answer coming back (a 5xx, a timeout). A create is looked up
+	// after TaskThreadLookupDelay; a line counts as posted.
 	TaskThreadUnknown
+	// TaskThreadAmbiguous: a create's lookup could not tell whether its
+	// thread exists (the lookup failed, or found more than one). The row
+	// stops needs_operator. Creates only.
+	TaskThreadAmbiguous
 )
 
 // TaskThreadResult is the settled outcome of one claimed send. ThreadID is
@@ -238,22 +252,23 @@ func (s *Store) QueueTaskThreads(ctx context.Context, now time.Time, projects []
 type TaskThreadRecovery struct {
 	TaskID int64
 	Key    string
-	// State is the row's state afterwards: needs_operator for a create, active
-	// for a line counted as posted.
+	// State is the row's state afterwards: creating for a create (due for a
+	// lookup), active for a line counted as posted.
 	State string
 }
 
 // RecoverTaskThreadClaims settles every claim older than
 // TaskThreadClaimLease: its worker died between the send and the settle, so
-// the send's outcome is unknown. A create leaves the row needs_operator (no
-// second thread); a line is counted as posted (no second line).
+// the send's outcome is unknown. A create is due for a lookup at once (the
+// claim is already older than TaskThreadLookupDelay); a line is counted as
+// posted (no second line).
 func (s *Store) RecoverTaskThreadClaims(ctx context.Context, now time.Time) ([]TaskThreadRecovery, error) {
 	now = now.UTC()
 	rows, err := s.pool.Query(ctx, `WITH old AS (
 			SELECT task_id,destination,claim_key FROM task_thread_deliveries
 			WHERE destination=$1 AND claim_key<>'' AND claimed_at<$2 FOR UPDATE SKIP LOCKED)
 		UPDATE task_thread_deliveries n SET
-			state=CASE WHEN n.state='`+TaskThreadCreating+`' THEN '`+TaskThreadNeedsOperator+`' ELSE n.state END,
+			next_attempt_at=CASE WHEN n.state='`+TaskThreadCreating+`' THEN $3 ELSE n.next_attempt_at END,
 			last_event_id=CASE WHEN old.claim_key LIKE 'e:%' THEN greatest(n.last_event_id,substr(old.claim_key,3)::bigint) ELSE n.last_event_id END,
 			posted=CASE WHEN n.state='`+TaskThreadActive+`' AND old.claim_key NOT LIKE 'e:%' THEN array_append(n.posted,old.claim_key) ELSE n.posted END,
 			last_error=CASE WHEN n.state='`+TaskThreadCreating+`' THEN 'create outcome unknown: claim expired' ELSE 'line outcome unknown: claim expired' END,
@@ -313,8 +328,9 @@ const taskThreadItemsSQL = `WITH d AS (
 SELECT task_id,key,src,ref,at FROM items ORDER BY at,task_id,src,key LIMIT 1`
 
 // ClaimTaskThread claims the next send and commits the claim before the
-// caller sends: a thread owed a create first, else the oldest line owed to
-// any active thread. found is false when nothing is due.
+// caller sends: a thread owed a create first (a pending row, or a creating
+// row due for its lookup), else the oldest line owed to any active thread.
+// found is false when nothing is due.
 func (s *Store) ClaimTaskThread(ctx context.Context, now time.Time) (TaskThreadItem, bool, error) {
 	now = now.UTC()
 	dest := TaskThreadDestinationDiscord
@@ -324,11 +340,11 @@ func (s *Store) ClaimTaskThread(ctx context.Context, now time.Time) (TaskThreadI
 	}
 	defer tx.Rollback(ctx)
 	x := TaskThreadItem{Destination: dest, Type: TaskThreadCreate, Key: TaskThreadCreate}
-	err = tx.QueryRow(ctx, `SELECT n.task_id,n.thread_name,n.attempts,coalesce(t.project,''),t.kind,coalesce(t.refs->'linear'->>'grade',''),coalesce(t.refs->'linear'->>'tier','')
+	err = tx.QueryRow(ctx, `SELECT n.task_id,n.thread_name,n.attempts,n.state='`+TaskThreadCreating+`',coalesce(t.project,''),t.kind,coalesce(t.refs->'linear'->>'grade',''),coalesce(t.refs->'linear'->>'tier','')
 		FROM task_thread_deliveries n JOIN tasks t ON t.id=n.task_id
-		WHERE n.destination=$1 AND n.state='`+TaskThreadPending+`' AND n.claim_key='' AND n.next_attempt_at<=$2::timestamptz
+		WHERE n.destination=$1 AND n.state IN ('`+TaskThreadPending+`','`+TaskThreadCreating+`') AND n.claim_key='' AND n.next_attempt_at<=$2::timestamptz
 		ORDER BY n.next_attempt_at,n.start_event_id LIMIT 1 FOR UPDATE OF n SKIP LOCKED`, dest, now).
-		Scan(&x.TaskID, &x.ThreadName, &x.Attempts, &x.Project, &x.Kind, &x.Grade, &x.Tier)
+		Scan(&x.TaskID, &x.ThreadName, &x.Attempts, &x.Lookup, &x.Project, &x.Kind, &x.Grade, &x.Tier)
 	switch {
 	case err == nil:
 		if _, err = tx.Exec(ctx, `UPDATE task_thread_deliveries SET state='`+TaskThreadCreating+`',claim_key=$3,claimed_at=$4,updated_at=$4 WHERE task_id=$1 AND destination=$2`,
@@ -448,7 +464,9 @@ func loadTaskThreadLine(ctx context.Context, tx pgx.Tx, x *TaskThreadItem, src i
 // SettleTaskThread records the outcome of the send x claimed. It writes only
 // while the claim is still x's, so a claim recovered meanwhile is not
 // overwritten. gaveUp reports a row that stopped (failed or needs_operator)
-// with this settle.
+// with this settle. A create whose outcome is unknown stays creating,
+// unclaimed and due for its lookup TaskThreadLookupDelay from now; after
+// taskThreadMaxAttempts of them it stops needs_operator.
 func (s *Store) SettleTaskThread(ctx context.Context, now time.Time, x TaskThreadItem, res TaskThreadResult) (gaveUp bool, err error) {
 	now = now.UTC()
 	// The send may have created something: record it even if ctx is canceled
@@ -497,13 +515,20 @@ func (s *Store) SettleTaskThread(ctx context.Context, now time.Time, x TaskThrea
 		gaveUp, set, args = true, `state='`+TaskThreadFailed+`',attempts=$5,last_error=$6`, append(args, attempts, errText)
 	case TaskThreadUnknown:
 		switch {
+		case create && attempts >= taskThreadMaxAttempts:
+			gaveUp, set, args = true, `state='`+TaskThreadNeedsOperator+`',attempts=$5,last_error=$6`, append(args, attempts, "create outcome unknown: "+errText)
 		case create:
-			gaveUp, set, args = true, `state='`+TaskThreadNeedsOperator+`',last_error=$5`, append(args, "create outcome unknown: "+errText)
+			set, args = `state='`+TaskThreadCreating+`',attempts=$5,last_error=$6,next_attempt_at=$7`, append(args, attempts, "create outcome unknown: "+errText, now.Add(TaskThreadLookupDelay))
 		case strings.HasPrefix(x.Key, "e:"):
 			set, args = `last_event_id=greatest(last_event_id,substr(claim_key,3)::bigint),last_error=$5`, append(args, "line outcome unknown: "+errText)
 		default:
 			set, args = `posted=array_append(posted,claim_key),last_error=$5`, append(args, "line outcome unknown: "+errText)
 		}
+	case TaskThreadAmbiguous:
+		if !create {
+			return false, errors.New("only a task thread create can be ambiguous")
+		}
+		gaveUp, set, args = true, `state='`+TaskThreadNeedsOperator+`',last_error=$5`, append(args, "create lookup: "+errText)
 	default:
 		return false, fmt.Errorf("unknown task thread outcome %d", res.Outcome)
 	}
