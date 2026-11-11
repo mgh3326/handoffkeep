@@ -161,7 +161,16 @@ otherwise `multiple_matches`, `marker_deleted`, `marker_mismatch` or
 `no_evidence`). An op whose kind is not registered is `rejected /
 unsupported_kind` when sent, and a failed render is `unsupported_kind` (send) or
 `reconcile_failed` (search). `comment_append` (`kind_comment.go`) and
-`issue_create` (`kind_issue.go`, below) are the registered kinds. A new kind registers itself from its own file (`registerKind`)
+`issue_create` (`kind_issue.go`, below) are the registered kinds.
+
+**Precondition: the bot sees every issue.** A kind's search (the comments of
+an issue, the issues of a project with a task's `hk ID`) is complete only if
+the bot account can see every issue in the mapped YouTrack projects; YouTrack
+offers no way to prove a search covered issues hidden from the caller. An
+issue restricted from the bot would be missed, and `issue_create` would create
+a second one. The import and the legacy push make the same assumption
+(handoffkeep-design, hk 3898): keep the bot in every group that can see
+issues of a mapped project. A new kind registers itself from its own file (`registerKind`)
 and adds its admission gate in the store (`registerYTKindGate`, below), so
 kinds added in parallel edit no shared list.
 
