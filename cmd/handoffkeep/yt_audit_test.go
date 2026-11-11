@@ -309,7 +309,7 @@ func TestYouTrackAudit(t *testing.T) {
 			got   []int64
 			want  []int64
 		}{
-			{"present", ytaComments(c.Present), []int64{cImported, cOp, cMirror, cMarked, cNoise, cTrailing, cNewline, cLeading}},
+			{"present", ytaComments(c.Present), []int64{cImported, cOp, cTrailing, cNewline, cLeading, cMirror, cMarked, cNoise}},
 			{"adopted_unmatched", ytaComments(c.AdoptedUnmatched), []int64{cAdopted}},
 			{"missing_in_yt", ytaComments(c.MissingInYT), []int64{cMissing, cSpaced, cEmpty}},
 			{"duplicate", ytaComments(c.Duplicate), []int64{cDup}},
