@@ -154,6 +154,13 @@ func TestAuditCommentsTrimmedImportedBodies(t *testing.T) {
 			t.Fatalf("got %+v", got)
 		}
 	})
+	t.Run("trimmed collision includes op-linked hk comment", func(t *testing.T) {
+		got := ytwrite.AuditComments([]ytwrite.AuditComment{{ID: 1, Body: "body", OpID: 7}, {ID: 2, Body: "body "}}, []ytwrite.RemoteComment{{ID: "4-1", Text: "body"}}, auditBot, nil)
+		want := []ytwrite.AuditAmbiguous{{YTID: "4-1", CommentIDs: []int64{1, 2}}}
+		if !reflect.DeepEqual(got.AmbiguousCopy, want) || len(got.Missing) != 0 || len(got.YTOnlyHuman) != 0 {
+			t.Fatalf("got %+v", got)
+		}
+	})
 }
 
 // A legacy mirror copy is matched by its recorded id, whatever its text

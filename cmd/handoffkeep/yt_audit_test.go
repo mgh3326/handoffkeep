@@ -217,7 +217,10 @@ func TestYouTrackAudit(t *testing.T) {
 	fake.add(issue, "4-14", "trimmed newline", "1-7")
 	cLeading := comment(bound, "\ntrimmed leading")
 	fake.add(issue, "4-15", "trimmed leading", "1-7")
-	cEmpty := comment(bound, " \n ")
+	var cEmpty int64
+	if err := conn.QueryRow(ctx, `INSERT INTO task_comments(task_id,body,author,created_at) VALUES($1,$2,'worker',now()) RETURNING id`, bound, " \n ").Scan(&cEmpty); err != nil {
+		t.Fatal(err)
+	}
 	cDup := comment(bound, "twice")
 	fake.add(issue, "4-4", "twice", ytaBot)
 	fake.add(issue, "4-5", "twice", ytaBot)

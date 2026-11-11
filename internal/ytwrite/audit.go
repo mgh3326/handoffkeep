@@ -91,6 +91,7 @@ func AuditComments(hk []AuditComment, yt []RemoteComment, botID string, legacy f
 	byID := map[int64]int{}
 	byBody := map[string][]int{}
 	byTrimmedBody := map[string][]int{}
+	byTrimmedImportedBody := map[string][]int{}
 	for i, c := range hk {
 		byID[c.ID] = i
 		if c.OpID > 0 {
@@ -100,8 +101,9 @@ func AuditComments(hk []AuditComment, yt []RemoteComment, botID string, legacy f
 			byLink[id] = i
 		}
 		byBody[c.Body] = append(byBody[c.Body], i)
+		byTrimmedBody[strings.TrimSpace(c.Body)] = append(byTrimmedBody[strings.TrimSpace(c.Body)], i)
 		if c.OpID == 0 && len(c.LinkedYTIDs) == 0 {
-			byTrimmedBody[strings.TrimSpace(c.Body)] = append(byTrimmedBody[strings.TrimSpace(c.Body)], i)
+			byTrimmedImportedBody[strings.TrimSpace(c.Body)] = append(byTrimmedImportedBody[strings.TrimSpace(c.Body)], i)
 		}
 	}
 	var out CommentAudit
@@ -147,12 +149,14 @@ func AuditComments(hk []AuditComment, yt []RemoteComment, botID string, legacy f
 	}
 	for _, c := range byText {
 		group := byBody[c.Text]
-		trimmedGroup := byTrimmedBody[strings.TrimSpace(c.Text)]
-		// Trimming is only evidence for imported comments. If one remote
-		// body now names different hk bodies, its owner is ambiguous.
-		if len(trimmedGroup) > 1 && hasDistinctBodies(hk, trimmedGroup) {
-			ids := make([]int64, 0, len(trimmedGroup))
-			for _, i := range trimmedGroup {
+		trimmed := strings.TrimSpace(c.Text)
+		ambiguityGroup := byTrimmedBody[trimmed]
+		// A trimmed collision is ambiguous across all hk comments, even if
+		// one candidate has op or mirror evidence. Trimming itself remains
+		// attribution evidence only for unlinked imported comments.
+		if len(ambiguityGroup) > 1 && hasDistinctBodies(hk, ambiguityGroup) {
+			ids := make([]int64, 0, len(ambiguityGroup))
+			for _, i := range ambiguityGroup {
 				ids = append(ids, hk[i].ID)
 				unsettled[hk[i].ID] = true
 			}
@@ -160,7 +164,7 @@ func AuditComments(hk []AuditComment, yt []RemoteComment, botID string, legacy f
 			continue
 		}
 		if len(group) == 0 {
-			group = trimmedGroup
+			group = byTrimmedImportedBody[trimmed]
 		}
 		if len(group) == 0 {
 			if botID != "" && c.AuthorID == botID {
