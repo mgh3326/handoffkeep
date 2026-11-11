@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mgh3326/handoffkeep/internal/remote"
 	"github.com/mgh3326/handoffkeep/internal/store"
 	"github.com/mgh3326/handoffkeep/internal/youtrack"
 	"github.com/mgh3326/handoffkeep/internal/ytwrite"
@@ -348,11 +349,19 @@ func youtrackOpsResolveCmd(args []string, out io.Writer) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	// An --applied resolution always states the provenance: created unless
-	// --adopted (an issue_create op refuses one that does not).
+	// An issue_create op needs the provenance stated (created unless
+	// --adopted); every other op keeps the request shape a server that
+	// predates the field accepts, so the op's kind is read first (GET
+	// /v1/yt/ops, which every release serves).
 	var provenance *bool
 	if !*notApplied {
-		provenance = adopted
+		issue, err := ytOpIsIssueCreate(ctx, *c, id)
+		if err != nil {
+			return err
+		}
+		if issue || *adopted {
+			provenance = adopted
+		}
 	}
 	actor := *by
 	if actor == "" {
@@ -363,6 +372,16 @@ func youtrackOpsResolveCmd(args []string, out io.Writer) error {
 		return err
 	}
 	return printJSON(out, map[string]any{"op_id": result.OpID, "status": result.Status, "state": result.State, "reason": result.Reason, "yt_id": result.YTID})
+}
+
+// ytOpIsIssueCreate reads whether op id is an issue_create op. An op the
+// listing does not return is not one; the server answers the resolution.
+func ytOpIsIssueCreate(ctx context.Context, c remote.Client, id int64) (bool, error) {
+	ops, _, err := c.ListYTOps(ctx, "all", 0, id-1, 1)
+	if err != nil {
+		return false, err
+	}
+	return len(ops) == 1 && ops[0].ID == id && ops[0].Kind == ytwrite.KindIssueCreate, nil
 }
 
 const youtrackCanaryUsage = "usage: youtrack canary add <task> [--by NAME] | remove <task> | list"
