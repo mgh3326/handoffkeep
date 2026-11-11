@@ -333,12 +333,12 @@ func TestYTBindingCommentsFromMigrationBackfills(t *testing.T) {
 	}
 }
 
-// The legacy push and the catch-up never both own one comment (hk 3897
-// review). Above comments_from on a binding every source agrees with, the
-// comment is the protocol's and the legacy push does not select it; on a
-// binding a source disagrees with, it is the legacy push's, and once the
-// push has linked it the catch-up leaves it even after the disagreement is
-// fixed. A legacy link committed after the scan is seen under the lane lock.
+// The legacy push and the catch-up never both send one comment (hk 3897
+// review). The legacy push keeps selecting every unlinked comment in every
+// mode. A pass that finds comments while a `youtrack sync` run holds the sync
+// lock defers and writes nothing; once the sync has finished, the comment it
+// linked is left, even one on a binding that disagreed then and agrees now,
+// and a link committed after the scan is seen under the lane lock.
 func TestYTCommentCatchUpAndLegacyPushOwnOneEach(t *testing.T) {
 	s := schemaStore(t, "ytcu_t6")
 	ctx := t.Context()
@@ -363,34 +363,71 @@ func TestYTCommentCatchUpAndLegacyPushOwnOneEach(t *testing.T) {
 		}
 		return ids
 	}
-	if got := legacy(agree); len(got) != 0 {
-		t.Fatalf("the legacy push selects %v on an agreeing binding", got)
+	// Mode off: the legacy push still carries both.
+	for task, c := range map[int64]TaskComment{agree: agreeComment, amb: ambComment} {
+		if got := legacy(task); len(got) != 1 || got[0] != c.ID {
+			t.Fatalf("mode off: the legacy push selects %v on task %d, want [%d]", got, task, c.ID)
+		}
 	}
-	if got := legacy(amb); len(got) != 1 || got[0] != ambComment.ID {
-		t.Fatalf("the legacy push selects %v on a disagreeing binding, want [%d]", got, ambComment.ID)
+
+	// A sync run holds the lock: the pass defers and writes nothing.
+	s.SetYTCommentsMode(YTCommentsOn)
+	logs := ytbLog(t)
+	syncRun, held, err := s.TryYouTrackSyncLock(ctx)
+	if err != nil || !held {
+		t.Fatalf("sync lock: %v %v", held, err)
 	}
-	// The push posts and links the ambiguous comment; then the mapping is
-	// fixed. The catch-up, with no skip list (a restarted worker), leaves it.
-	if err := s.LinkYouTrackComment(ctx, amb, ambComment.ID, "4-9", time.Now().UTC()); err != nil {
+	got := ytcuPass(t, s, 200, nil)
+	if !got.Deferred || len(got.Prepared) != 0 || len(got.Skipped) != 0 {
+		t.Fatalf("pass during a sync %+v, want deferred", got)
+	}
+	if !strings.Contains(logs(), "ytwrite.comment_catchup_deferred comments=2 reason=sync_running") {
+		t.Fatalf("no deferral log:\n%s", logs())
+	}
+	if n := ytcCount(t, s, `SELECT count(*) FROM yt_write_ops`); n != 0 {
+		t.Fatalf("a deferred pass wrote %d ops", n)
+	}
+	// The sync posts and links both, then ends. The disagreement is fixed
+	// after it; the catch-up, with no skip list, leaves both.
+	for task, c := range map[int64]TaskComment{agree: agreeComment, amb: ambComment} {
+		if err := s.LinkYouTrackComment(ctx, task, c.ID, "4-"+strconv.FormatInt(c.ID, 10), time.Now().UTC()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := syncRun.Release(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.pool.Exec(ctx, `UPDATE tasks SET project=$2 WHERE id=$1`, amb, ytbProject); err != nil {
 		t.Fatal(err)
 	}
-	s.SetYTCommentsMode(YTCommentsOn)
-	got := ytcuPass(t, s, 200, nil)
-	if len(got.Prepared) != 1 || len(got.Skipped) != 0 {
-		t.Fatalf("pass %+v, want only the agreeing task's comment", got)
+	if got := ytcuPass(t, s, 200, nil); got.Deferred || len(got.Prepared) != 0 || len(got.Skipped) != 0 {
+		t.Fatalf("pass after the sync linked both %+v, want nothing", got)
 	}
-	if op, ok := ytcOpFor(t, s, agreeComment.ID); !ok || op.ID != got.Prepared[0].ID {
-		t.Fatalf("agreeing comment op %+v %v", op, ok)
+	ytcuNoOp(t, s, "linked by the legacy push", agreeComment)
+	ytcuNoOp(t, s, "linked by the legacy push while ambiguous", ambComment)
+
+	// No sync: the catch-up takes a new comment, and the legacy push no
+	// longer selects it.
+	fresh := ytcuRawComment(t, s, agree, "dots")
+	if got := ytcuPass(t, s, 200, nil); len(got.Prepared) != 1 {
+		t.Fatalf("pass with no sync running %+v, want one op", got)
 	}
-	ytcuNoOp(t, s, "linked by the legacy push", ambComment)
+	if got := legacy(agree); len(got) != 0 {
+		t.Fatalf("the legacy push selects %v after the catch-up linked %d", got, fresh.ID)
+	}
+	// The lock is released after the pass: a sync can start.
+	next, held, err := s.TryYouTrackSyncLock(ctx)
+	if err != nil || !held {
+		t.Fatalf("sync lock after a pass: %v %v", held, err)
+	}
+	if err := next.Release(ctx); err != nil {
+		t.Fatal(err)
+	}
 
 	// A legacy link that commits between the scan and the comment's
-	// transaction: the recheck under the lane lock sees it.
+	// transaction: the read under the lane lock sees it.
 	late := ytcuRawComment(t, s, agree, "dots")
-	if err := s.LinkYouTrackComment(ctx, agree, late.ID, "4-10", time.Now().UTC()); err != nil {
+	if err := s.LinkYouTrackComment(ctx, agree, late.ID, "4-late", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	if _, prepared, _, err := s.catchUpYTComment(ctx, late); err != nil || prepared {

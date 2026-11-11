@@ -23,10 +23,12 @@ const YTCatchUpMax = 500
 
 // YTCatchUp is what one catch-up pass did: the ops it prepared, and the
 // comments it skipped because a local source disagrees with their task's
-// binding (each logged once per pass).
+// binding (each logged once per pass). Deferred is a pass that found
+// comments but left them because a `youtrack sync` run held the sync lock.
 type YTCatchUp struct {
 	Prepared []ytwrite.Op
 	Skipped  []int64
+	Deferred bool
 }
 
 // ytCatchUpSelectSQL lists the comments a catch-up prepares an op for, oldest
@@ -47,16 +49,28 @@ const ytCatchUpSelectSQL = `SELECT c.id, c.task_id, c.body, c.author, c.created_
 
 // CatchUpYTComments prepares, in mode on, the op of each comment that the
 // enqueue would have copied but that has none: up to limit comments, oldest
-// first, each in its own transaction. skip lists comment ids to leave out
+// first, each in its own transaction.
+//
+// The legacy push (`youtrack sync`) selects the same comments in every mode
+// and posts each before it links it. The two never both send one: when the
+// scan finds comments, the pass works only while it holds the sync lock
+// (TryYouTrackSyncLock), which every sync run of this release and of the
+// releases before it holds for the whole run, across its selection, its POST
+// and its youtrack_comment_links insert. A sync that is running defers the
+// pass (Deferred, nothing written); a sync that has finished has linked what
+// it posted, and the per-comment read under the lane lock sees that link.
+// While a pass holds the lock, a sync that starts exits as "another youtrack
+// sync is running" and its next run goes on. skip lists comment ids to leave out
 // (the worker passes the ones an earlier pass skipped as ambiguous, so they
 // are logged once and never crowd out the others). Any other mode does
 // nothing. It is idempotent: under the task's lane lock it reads the
 // comment's link and its op again, and prepareYTOpTx keeps one op per
 // (principal, kind, key), so two workers (blue-green) prepare one op.
 //
-// Locks, per comment (lockorder.go): the task's lane lock as the first lock
-// of the transaction, then what ytCommentOnOpTx reads and writes. It never
-// takes taskCommentInsertLock or a task row.
+// Locks (lockorder.go): the session-scoped sync lock, only tried, never
+// waited for; then per comment the task's lane lock as the first lock of the
+// transaction, then what ytCommentOnOpTx reads and writes. It never takes
+// taskCommentInsertLock or a task row.
 func (s *Store) CatchUpYTComments(ctx context.Context, limit int, skip []int64) (YTCatchUp, error) {
 	out := YTCatchUp{Prepared: []ytwrite.Op{}, Skipped: []int64{}}
 	if s.ytCommentsModeNow() != YTCommentsOn || limit < 1 {
@@ -85,6 +99,23 @@ func (s *Store) CatchUpYTComments(ctx context.Context, limit int, skip []int64) 
 	if err := rows.Err(); err != nil {
 		return out, err
 	}
+	if len(comments) == 0 {
+		return out, nil
+	}
+	lock, held, err := s.TryYouTrackSyncLock(ctx)
+	if err != nil {
+		return out, err
+	}
+	if !held {
+		log.Printf("ytwrite.comment_catchup_deferred comments=%d reason=sync_running", len(comments))
+		out.Deferred = true
+		return out, nil
+	}
+	defer func() {
+		if err := lock.Release(context.Background()); err != nil {
+			log.Printf("ytwrite.comment_catchup_unlock_failed err=%q", err.Error())
+		}
+	}()
 	for _, c := range comments {
 		op, prepared, source, err := s.catchUpYTComment(ctx, c)
 		if err != nil {
@@ -115,9 +146,9 @@ func (s *Store) catchUpYTComment(ctx context.Context, c TaskComment) (ytwrite.Op
 	if err := lockYTEntity(ctx, tx, "task", strconv.FormatInt(c.TaskID, 10)); err != nil {
 		return ytwrite.Op{}, false, "", err
 	}
-	// Read again under the lane lock: another worker's op and link, and a
-	// legacy push link committed since the scan (a push from before this
-	// release, or one that read the comment while its binding disagreed).
+	// Read again under the lane lock, with the sync lock held: another
+	// worker's op and link, and the link of a legacy push that finished
+	// after the scan.
 	var owned bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM yt_comment_write_links WHERE comment_id=$1)
 		OR EXISTS(SELECT 1 FROM yt_write_ops WHERE principal=$2 AND kind=$3 AND idem_key=$4)

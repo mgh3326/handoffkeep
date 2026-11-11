@@ -391,13 +391,20 @@ task_id=<id> comment_id=<id> source=<source>`, once per worker process (the
 worker leaves the comment out of its later passes; a restart looks again). A
 failed pass logs `ytwrite.comment_catchup_failed`. No YouTrack call.
 
-**One owner per comment.** On a task whose binding every local source agrees
-with, a comment above `comments_from` belongs to the protocol even before it
-has an op: the legacy push (`UnpushedYouTrackComments`) does not select it,
-whatever the mode, and the enqueue or the catch-up copies it (in mode
-`canary` or `off` it waits for mode `on`). A comment at or below
-`comments_from`, or on a binding a source disagrees with, stays the legacy
-push's, and the catch-up leaves any comment the push has linked.
+**The catch-up and the legacy push.** The legacy push (`youtrack sync`,
+`UnpushedYouTrackComments`) keeps selecting every comment with no link, in
+every mode, and posts each before it links it. The catch-up never runs
+beside it: when a pass finds comments it tries the sync lock
+(`pg_try_advisory_lock(8241873404)`, `TryYouTrackSyncLock`), which every sync
+run of this release and of the releases before it holds for its whole run,
+across its selection, its POSTs and its `youtrack_comment_links` inserts. A
+held lock defers the pass (`ytwrite.comment_catchup_deferred comments=<n>
+reason=sync_running`, nothing written); otherwise the pass holds the lock
+until it ends, and each comment's transaction re-reads the push's link under
+the lane lock, so a comment a finished sync posted is left. A sync that
+starts during a pass exits 3 ("another youtrack sync is running") and its
+next run goes on. Neither waits for the lock, so the lock order is
+unchanged.
 
 **Admission.** In mode on the worker admits a prepared op only when it is
 bound to the worker's tenant and its task has a binding with the op's issue
@@ -511,11 +518,10 @@ and no recovery of held ops; both come with the automatic binder (follow-up).
 - A task created after the backfill has no binding until the backfill runs
   again; its comments go through the legacy push and the import meanwhile,
   and the binding never copies them (`comments_from`).
-- A comment the legacy push read while its binding disagreed, and whose
-  disagreement is fixed before the push links it, can be sent by both. The
-  window is one push's POST, and it needs an operator's fix inside it. A
-  push from before this release does not apply the ownership rule; the
-  catch-up re-reads its link under the lane lock.
+- A sync process that dies after a POST and before its link releases the
+  sync lock with the comment unlinked: the next catch-up pass can copy it
+  again. The legacy push's own retry reads the issue's comments first; the
+  catch-up does not.
 - The enqueue reads its sources without locks, so a project change or mirror
   write that commits during a comment's transaction is caught by the next
   comment, not this one; the issue binding itself cannot change under the
