@@ -733,13 +733,25 @@ func TestBenchCatalogAPI(t *testing.T) {
 	}
 
 	// Sol rows carry any grade the other profiles may: there is no Sol-only
-	// S+ rule, so a Sol A+ rung is accepted like any other profile's.
+	// S+ rule, so a Sol A+ rung is accepted like any other profile's. The codex-sol
+	// rows are dropped straight away so the ladder checks below see only their own rows.
+	dropSolRows := func() {
+		for _, query := range []string{
+			`DELETE FROM bench_grades WHERE profile='codex-sol'`,
+			`DELETE FROM bench_catalog WHERE profile='codex-sol'`,
+		} {
+			if _, err := p.Exec(context.Background(), query); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
 	resp = put("operator-token", benchCatalogRow("codex-sol", "max", "codex", "A+", nil))
 	if resp.StatusCode != http.StatusOK {
 		resp.Body.Close()
 		t.Fatalf("sol A+ status=%d", resp.StatusCode)
 	}
 	resp.Body.Close()
+	dropSolRows()
 
 	// Monotonicity is enforced on the merged state, and the batch is atomic:
 	// the violating pair rolls back together with the innocent mirror row.
@@ -896,22 +908,14 @@ func TestBenchCatalogAPI(t *testing.T) {
 		t.Fatalf("retired catalog row leaked into grades projection")
 	}
 	// The legacy write path grades Sol rows like any other profile: codex-sol
-	// A mirrors through. Both codex-sol rows are dropped again so the checks
-	// below start from the same state as before.
+	// A mirrors through, and the rows are dropped again.
 	resp = benchRequest(t, h.Client(), http.MethodPut, h.URL+"/v1/bench/grades", "test-token", benchBody(t, "grades", map[string]any{
 		"profile": "codex-sol", "grade": "A", "deviation_ref": "deviation-compat-592",
 	}))
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("legacy sol A status=%d", resp.StatusCode)
 	}
-	for _, query := range []string{
-		`DELETE FROM bench_grades WHERE profile='codex-sol'`,
-		`DELETE FROM bench_catalog WHERE profile='codex-sol'`,
-	} {
-		if _, err := p.Exec(context.Background(), query); err != nil {
-			t.Fatal(err)
-		}
-	}
+	dropSolRows()
 	// The legacy write path mirrors into the catalog's default row.
 	resp = benchRequest(t, h.Client(), http.MethodPut, h.URL+"/v1/bench/grades", "test-token", benchBody(t, "grades", map[string]any{
 		"profile": "bench-grade-cat-compat", "grade": "A", "boundary_version": "2026-09-23",
