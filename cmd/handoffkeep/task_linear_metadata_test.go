@@ -24,8 +24,8 @@ func TestTaskLinearCLIFlagsAreExplicitMetadata(t *testing.T) {
 	t.Setenv("HANDOFFKEEP_URL", server.URL)
 	t.Setenv("HANDOFFKEEP_TOKEN", "fixture-token")
 	args := []string{
-		"add", "--lane", "builder-lane", "--title", "metadata", "--project", "experiment", "--linear-sync",
-		"--tier", "T3", "--grade", "S+", "--brief-key", "brief/connector",
+		"add", "--lane", "builder-lane", "--title", "metadata (grade SS, T2)", "--project", "experiment", "--linear-sync",
+		"--tier", "T3", "--grade", "SS", "--brief-key", "brief/connector",
 		"--label", "connector", "--label", "approved",
 		"--linear-report-key", "report/connector", "--linear-verify-key", "report/connector/verify",
 		"--linear-decision-key", "decision/connector", "--deploy-sha", "abcdef0123456789",
@@ -33,7 +33,7 @@ func TestTaskLinearCLIFlagsAreExplicitMetadata(t *testing.T) {
 	if err := tasksCmd(args, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
-	if received.Refs.Linear == nil || !received.Refs.Linear.Sync || received.Refs.Linear.Tier != "T3" || received.Refs.Linear.Grade != "S+" || len(received.Refs.Linear.Labels) != 2 {
+	if received.Title != "metadata (grade SS, T2)" || received.Refs.Linear == nil || !received.Refs.Linear.Sync || received.Refs.Linear.Tier != "T3" || received.Refs.Linear.Grade != "SS" || len(received.Refs.Linear.Labels) != 2 {
 		t.Fatalf("linear refs=%+v", received.Refs.Linear)
 	}
 }

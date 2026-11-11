@@ -27,6 +27,67 @@ func TestBenchUnratedValidation(t *testing.T) {
 	}
 }
 
+func TestTaskGradeScaleIncludesSSAboveSPlus(t *testing.T) {
+	want := []string{"SS", "S+", "S", "A+", "A", "B", "C"}
+	if got := TaskGrades(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("TaskGrades()=%v want %v", got, want)
+	}
+	if !validBenchGrade(BenchGrade{Profile: "example", Grade: "SS", DeviationRef: "hk:task/4045", DecidedBy: "operator"}) {
+		t.Fatal("bench grade validation rejected SS")
+	}
+	if !validBenchCatalogEntry(BenchCatalogEntry{Profile: "example", ModelID: "model", Pool: "codex", Grade: "SS", Gate: "default", DeviationRef: "hk:task/4045", DecidedBy: "operator"}) {
+		t.Fatal("bench catalog validation rejected SS")
+	}
+	for rank, grade := range want {
+		if got := benchGradeRank(grade); got != rank {
+			t.Errorf("benchGradeRank(%q)=%d want %d", grade, got, rank)
+		}
+	}
+	if benchGradeRank("unrated") <= benchGradeRank("C") || validTaskGrade("unrated") {
+		t.Fatalf("unrated must stay bench-only: rank=%d task-valid=%v", benchGradeRank("unrated"), validTaskGrade("unrated"))
+	}
+	if !validTaskLinear(TaskLinear{Grade: "SS"}) {
+		t.Fatal("task grade validation rejected SS")
+	}
+}
+
+func TestBenchCatalogStoresAndOrdersSS(t *testing.T) {
+	pool, _ := testdb.SchemaPool(t, "bench_grade_ss")
+	s := &Store{pool: pool}
+	ctx := t.Context()
+	if err := s.migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	row := func(profile, grade string) BenchCatalogEntry {
+		return BenchCatalogEntry{Profile: profile, ModelID: "model", Pool: "codex", Grade: grade, Gate: "default", DeviationRef: "hk:task/4045", DecidedBy: "operator", DecidedAt: time.Date(2026, 11, 12, 0, 0, 0, 0, time.UTC)}
+	}
+	if _, err := s.UpsertBenchCatalog(ctx, []BenchCatalogEntry{row("ss-profile", "SS"), row("s-plus-profile", "S+")}); err != nil {
+		t.Fatalf("store SS and S+ catalog entries: %v", err)
+	}
+	rows, err := s.ListBenchCatalog(ctx, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, r := range rows {
+		if r.Profile == "ss-profile" || r.Profile == "s-plus-profile" {
+			got = append(got, r.Grade)
+		}
+	}
+	if !reflect.DeepEqual(got, []string{"SS", "S+"}) {
+		t.Fatalf("catalog grades in order=%v want [SS S+]", got)
+	}
+	title := "SS grade task (grade SS, T2)"
+	task, err := s.CreateTask(ctx, Task{Lane: "test-grade-ss", Title: title, Kind: "implement", CreatedBy: "test-grade-ss", Project: projectPtr(testProjectName), Refs: TaskRefs{Linear: &TaskLinear{Grade: "SS", Tier: "T2"}}})
+	if err != nil {
+		t.Fatalf("create SS task: %v", err)
+	}
+	stored, found, err := s.GetTask(ctx, task.ID)
+	if err != nil || !found || stored.Title != title || stored.Refs.Linear == nil || stored.Refs.Linear.Grade != "SS" {
+		t.Fatalf("stored task=%+v found=%v err=%v", stored, found, err)
+	}
+}
+
 // A Sol profile carries any grade the other profiles may: a ladder that tops
 // out at S is accepted, and a Sol ladder that falls off is still refused by
 // the monotonicity rule.

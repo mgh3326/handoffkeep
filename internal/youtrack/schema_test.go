@@ -58,6 +58,12 @@ func planLines(p Plan) []string {
 	return out
 }
 
+func TestSchemaGradesMatchStoreScale(t *testing.T) {
+	if !reflect.DeepEqual(Grades, store.TaskGrades()) {
+		t.Fatalf("schema Grades=%v want store scale %v", Grades, store.TaskGrades())
+	}
+}
+
 func TestSchemaPlanListsExactlyWhatIsMissing(t *testing.T) {
 	f, _, runner := seedSchemaTenant(t)
 	plan, err := runner.Plan(context.Background(), "")
@@ -77,7 +83,7 @@ func TestSchemaPlanListsExactlyWhatIsMissing(t *testing.T) {
 		// attachments: the new project gets every field, an import project the four new ones
 		"factortrail\thk 상태\tattach\tstate[1] with 12 values",
 		"factortrail\t종류\tattach\tenum[1] with 5 values",
-		"factortrail\t등급\tattach\tenum[1] with 6 values",
+		"factortrail\t등급\tattach\tenum[1] with 7 values",
 		"factortrail\t티어\tattach\tenum[1] with 4 values",
 		"factortrail\t레인\tattach\tenum[1] with 1 values",
 		"factortrail\t마감\tattach\tdate",
@@ -103,6 +109,7 @@ func TestSchemaPlanListsExactlyWhatIsMissing(t *testing.T) {
 		"handoffkeep\t종류\tadd-value\tdecide",
 		"handoffkeep\t종류\tadd-value\tops",
 		"handoffkeep\t종류\tadd-value\tverify",
+		"handoffkeep\t등급\tadd-value\tSS",
 		"handoffkeep\t등급\tadd-value\tS+",
 		"handoffkeep\t등급\tadd-value\tS",
 		"handoffkeep\t등급\tadd-value\tA+",

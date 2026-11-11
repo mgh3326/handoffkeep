@@ -340,7 +340,7 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 	originTask := fs.Int64("origin-task", 0, "task this task came from (a disposition item for an ordered follow-up)")
 	bodyDoc := fs.String("doc", "", "hk document key holding the task body: key or key#section (tasks add only)")
 	tier := fs.String("tier", "", "Linear task tier metadata (T0..T3)")
-	grade := fs.String("grade", "", "Linear task grade metadata (S+..C)")
+	grade := fs.String("grade", "", "Linear task grade metadata (SS..C)")
 	briefKey := fs.String("brief-key", "", "handoffkeep brief document key for the Linear issue")
 	linearSync := fs.Bool("linear-sync", false, "retain legacy Linear task metadata (sync connector retired)")
 	linearReportKey := fs.String("linear-report-key", "", "handoffkeep report document key for a terminal Linear comment")
