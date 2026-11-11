@@ -151,7 +151,8 @@ func (s *Store) RunYTFeedConsumers(ctx context.Context, limit int) ([]YTFeedPass
 // runYTFeedConsumer is one pass of c in one transaction: the feed lock (only
 // tried), c's cursor row (created at max_sync_id on the first pass), then up
 // to limit rows of c's models above the cursor in sync_id order, then the
-// handler, then the cursor advance to the last sync_id read. A handler error
+// handler, then the cursor advance: to the last sync_id read after a full
+// page, to the snapshot's max_sync_id after a short one. A handler error
 // rolls the pass back and leaves the cursor where it was, so the same rows
 // come again. A log pruned beyond the cursor is never skipped: the pass
 // reads nothing, logs ytwrite.feed_pruned and records one alert per cursor
@@ -194,11 +195,11 @@ func (s *Store) runYTFeedConsumer(ctx context.Context, c ytFeedConsumer, limit i
 			return pass, err
 		}
 	}
-	// One statement, so pruned_through and the rows come from one snapshot:
-	// a prune that commits later cannot have removed a row this read
-	// skipped, and one that committed earlier shows in pruned_through, which
-	// stops the read.
-	rows, err := tx.Query(ctx, `SELECT st.pruned_through, l.sync_id, l.model, l.model_id, l.action, l.at
+	// One statement, so pruned_through, max_sync_id and the rows come from
+	// one snapshot: a prune that commits later cannot have removed a row this
+	// read skipped, and one that committed earlier shows in pruned_through,
+	// which stops the read.
+	rows, err := tx.Query(ctx, `SELECT st.pruned_through, st.max_sync_id, l.sync_id, l.model, l.model_id, l.action, l.at
 		FROM sync_state st
 		LEFT JOIN LATERAL (SELECT sync_id, model, model_id, action, at FROM sync_log
 			WHERE st.pruned_through <= $1 AND sync_id > $1 AND model = ANY($2::text[])
@@ -209,11 +210,12 @@ func (s *Store) runYTFeedConsumer(ctx context.Context, c ytFeedConsumer, limit i
 		return pass, err
 	}
 	read := []FeedRow{}
+	var maxSyncID int64
 	for rows.Next() {
 		var syncID *int64
 		var model, modelID, action *string
 		var at *time.Time
-		if err := rows.Scan(&pass.PrunedThrough, &syncID, &model, &modelID, &action, &at); err != nil {
+		if err := rows.Scan(&pass.PrunedThrough, &maxSyncID, &syncID, &model, &modelID, &action, &at); err != nil {
 			rows.Close()
 			return pass, err
 		}
@@ -235,23 +237,41 @@ func (s *Store) runYTFeedConsumer(ctx context.Context, c ytFeedConsumer, limit i
 		return pass, tx.Commit(ctx)
 	}
 	pass.Read = len(read)
-	if len(read) == 0 {
+	// A full page ends at the last row read. A short page read every row of
+	// c's models up to max_sync_id in this snapshot, so the cursor moves to
+	// max_sync_id: the rows of other models in between are not c's, and a
+	// consumer whose models are idle keeps up with the prune boundary instead
+	// of falling behind it. No row at or below max_sync_id can commit later:
+	// the allocator assigns sync_ids and sets max_sync_id in one transaction
+	// under its advisory lock (sync_migration.go), so every lower sync_id
+	// committed (or was abandoned) before that one.
+	next := pass.Cursor
+	if len(read) > 0 {
+		next = read[len(read)-1].SyncID
+	}
+	if len(read) < limit && maxSyncID > next {
+		next = maxSyncID
+	}
+	if len(read) > 0 {
+		batch := collapseFeedRows(read)
+		pass.Handled = len(batch)
+		if err := c.handle(ctx, tx, batch); err != nil {
+			return YTFeedPass{Consumer: c.name}, fmt.Errorf("yt feed consumer %s: %w", c.name, err)
+		}
+	}
+	if next == pass.Cursor {
 		return pass, tx.Commit(ctx)
 	}
-	batch := collapseFeedRows(read)
-	pass.Handled = len(batch)
-	if err := c.handle(ctx, tx, batch); err != nil {
-		return YTFeedPass{Consumer: c.name}, fmt.Errorf("yt feed consumer %s: %w", c.name, err)
-	}
-	last := read[len(read)-1].SyncID
-	if _, err := tx.Exec(ctx, `UPDATE yt_feed_cursors SET last_sync_id=$2, updated_at=$3 WHERE consumer=$1`, c.name, last, now); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE yt_feed_cursors SET last_sync_id=$2, updated_at=$3 WHERE consumer=$1`, c.name, next, now); err != nil {
 		return pass, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return YTFeedPass{Consumer: c.name}, err
 	}
-	pass.Cursor = last
-	log.Printf("ytwrite.feed consumer=%q read=%d handled=%d last_sync_id=%d", c.name, pass.Read, pass.Handled, last)
+	pass.Cursor = next
+	if pass.Read > 0 {
+		log.Printf("ytwrite.feed consumer=%q read=%d handled=%d last_sync_id=%d", c.name, pass.Read, pass.Handled, next)
+	}
 	return pass, nil
 }
 

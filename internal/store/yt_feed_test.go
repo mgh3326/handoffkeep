@@ -168,14 +168,65 @@ func TestYTFeedDeliversChangesOnceInOrder(t *testing.T) {
 	if pass.Read < 4 || pass.Handled != 3 {
 		t.Fatalf("pass = %+v", pass)
 	}
-	if pass.Cursor != ytFeedCursor(t, s, "test_all") || pass.Cursor != batch[len(batch)-1].SyncID {
-		t.Fatalf("cursor = %d, stored %d, last row %d", pass.Cursor, ytFeedCursor(t, s, "test_all"), batch[len(batch)-1].SyncID)
+	// A short page moves the cursor to max_sync_id, past the comment rows
+	// this consumer does not read.
+	if max := ytFeedMaxSyncID(t, s); pass.Cursor != ytFeedCursor(t, s, "test_all") || pass.Cursor != max || max <= batch[len(batch)-1].SyncID {
+		t.Fatalf("cursor = %d, stored %d, max_sync_id %d, last row %d", pass.Cursor, ytFeedCursor(t, s, "test_all"), max, batch[len(batch)-1].SyncID)
 	}
 
 	// Nothing new: no handler call, cursor unchanged.
 	again := ytFeedPassOK(t, s, c)
 	if len(rec.batches) != 1 || again.Read != 0 || again.Cursor != pass.Cursor {
 		t.Fatalf("idle pass = %+v, batches %d", again, len(rec.batches))
+	}
+}
+
+// An idle consumer keeps up with changes to models it does not read, so a
+// prune of those rows is not a gap (mergewake finding on #315).
+func TestYTFeedIdleConsumerFollowsPruneBoundary(t *testing.T) {
+	s := schemaStore(t, "yt_feed_idle")
+	task := ytFeedTask(t, s, "one")
+	rec := &ytFeedRecorder{}
+	c := rec.consumer(t, "test_docs", "document")
+	ytFeedPassOK(t, s, c)
+	for _, title := range []string{"two", "three"} {
+		ytFeedExec(t, s, `UPDATE tasks SET title=$2 WHERE id=$1`, task.ID, title)
+	}
+	max := ytFeedMaxSyncID(t, s)
+	if pass := ytFeedPassOK(t, s, c); pass.Read != 0 || pass.Cursor != max || ytFeedCursor(t, s, "test_docs") != max || len(rec.batches) != 0 {
+		t.Fatalf("idle pass = %+v, stored %d, max_sync_id %d", pass, ytFeedCursor(t, s, "test_docs"), max)
+	}
+	ytFeedExec(t, s, `DELETE FROM sync_log WHERE sync_id<=$1`, max)
+	ytFeedExec(t, s, `UPDATE sync_state SET pruned_through=$1 WHERE singleton`, max)
+	doc, _, err := s.PutDocument(t.Context(), Document{Key: "yt-feed/idle", Kind: "note", Body: "one", CreatedBy: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pass := ytFeedPassOK(t, s, c)
+	if pass.Pruned || len(rec.batches) != 1 || len(rec.batches[0]) != 1 || rec.batches[0][0].ModelID != strconv.FormatInt(doc.ID, 10) {
+		t.Fatalf("pass after prune = %+v, batches %+v", pass, rec.batches)
+	}
+}
+
+// A full page stops at its last row, even when max_sync_id is beyond it.
+func TestYTFeedFullPageStopsAtLastRow(t *testing.T) {
+	s := schemaStore(t, "yt_feed_page")
+	a, b := ytFeedTask(t, s, "a"), ytFeedTask(t, s, "b")
+	rec := &ytFeedRecorder{}
+	c := rec.consumer(t, "test_page", "task")
+	ytFeedPassOK(t, s, c)
+	ytFeedExec(t, s, `UPDATE tasks SET title='a2' WHERE id=$1`, a.ID)
+	ytFeedExec(t, s, `UPDATE tasks SET title='b2' WHERE id=$1`, b.ID)
+	pass, err := s.runYTFeedConsumer(t.Context(), c, 1, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pass.Read != 1 || pass.Cursor != rec.batches[0][0].SyncID || pass.Cursor >= ytFeedMaxSyncID(t, s) {
+		t.Fatalf("full page = %+v, max_sync_id %d", pass, ytFeedMaxSyncID(t, s))
+	}
+	next, err := s.runYTFeedConsumer(t.Context(), c, 1, time.Now().UTC())
+	if err != nil || next.Read != 1 || rec.batches[1][0].ModelID != strconv.FormatInt(b.ID, 10) {
+		t.Fatalf("second page = %+v, %v, batches %+v", next, err, rec.batches)
 	}
 }
 
