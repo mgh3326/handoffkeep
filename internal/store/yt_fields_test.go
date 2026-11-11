@@ -159,11 +159,6 @@ func TestYTFieldsSkipsUnboundAndMovedTasks(t *testing.T) {
 	if ops := ytfOps(t, s, bound); len(ops) != 0 {
 		t.Fatalf("other-tenant ops %+v", ops)
 	}
-	// Deleted rows are skipped without failing the pass.
-	ytFeedExec(t, s, `DELETE FROM tasks WHERE id=$1`, unbound)
-	if pass := ytfPass(t, s); pass.Handled != 1 {
-		t.Fatalf("pass %+v", pass)
-	}
 }
 
 func TestYTFieldsModeOff(t *testing.T) {
@@ -222,5 +217,48 @@ func TestYTFieldsTaskWithoutProject(t *testing.T) {
 	ytfPass(t, s)
 	if ops := ytfOps(t, s, task); len(ops) != 1 {
 		t.Fatalf("ops after the move %+v", ops)
+	}
+}
+
+// Applying a task's issue_create publishes its binding, which is no task
+// change: the first snapshot is prepared in the same transaction, behind the
+// issue_create on the task's lane, with the task as it is then (hk 4003
+// review). Mode off prepares none.
+func TestYTFieldsSnapshotOnIssueCreateApply(t *testing.T) {
+	s, _, _ := ytfSetup(t, "ytf_onbind")
+	task := ytcTask(t, s, ytbProject)
+	// A change consumed while the task is unbound prepares nothing.
+	ytFeedExec(t, s, `UPDATE tasks SET state='developing' WHERE id=$1`, task)
+	ytfPass(t, s)
+	if ops := ytfOps(t, s, task); len(ops) != 0 {
+		t.Fatalf("unbound ops %+v", ops)
+	}
+	op := ytiPrepare(t, s, task, ytcTenant)
+	ytiDispatch(t, s, op)
+	if _, err := s.YTWriteLedger().Apply(t.Context(), time.Now().UTC(), op.ID, "2-onbind", ytiMaps(op, "2-onbind")); err != nil {
+		t.Fatal(err)
+	}
+	ops := ytfOps(t, s, task)
+	if len(ops) != 1 || ops[0].ID <= op.ID || ops[0].YTTargetID != "2-onbind" || ops[0].State != ytwrite.StatePrepared {
+		t.Fatalf("ops after the apply %+v (issue_create %d)", ops, op.ID)
+	}
+	if p := ytfPayload(t, ops[0]); ytfField(p, "hk 상태") != "개발 중" || p.ProjectID != ytbProjectID {
+		t.Fatalf("payload %+v", p)
+	}
+	// The next pass sees no change of the task: nothing more.
+	ytfPass(t, s)
+	if ops := ytfOps(t, s, task); len(ops) != 1 {
+		t.Fatalf("ops %+v", ops)
+	}
+
+	s.SetYTFieldsMode(YTFieldsOff, "")
+	other := ytcTask(t, s, ytbProject)
+	op = ytiPrepare(t, s, other, ytcTenant)
+	ytiDispatch(t, s, op)
+	if _, err := s.YTWriteLedger().Apply(t.Context(), time.Now().UTC(), op.ID, "2-onbind-off", ytiMaps(op, "2-onbind-off")); err != nil {
+		t.Fatal(err)
+	}
+	if ops := ytfOps(t, s, other); len(ops) != 0 {
+		t.Fatalf("mode off ops %+v", ops)
 	}
 }

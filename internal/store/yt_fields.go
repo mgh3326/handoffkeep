@@ -157,16 +157,92 @@ func readYTFieldsRows(ctx context.Context, q poolQuerier, ids []int64, now time.
 	return out, rows.Err()
 }
 
-// ytFieldsHandler is the task_fields consumer's handler for one pass at now.
-// Mode off does nothing (the cursor advances). Otherwise, for each changed
-// task, in sync_id order: a deleted task is skipped; a task with no binding
-// is skipped and counted (its issue_create binds it, and its next change
-// snapshots it); a binding on another tenant is skipped and counted; a task
-// whose hk project no longer maps to its binding's YouTrack project is
+// ytFieldsOutcome is what prepareYTFieldsTx did with one task.
+type ytFieldsOutcome string
+
+const (
+	ytFieldsPrepared    ytFieldsOutcome = "prepared"
+	ytFieldsUnchanged   ytFieldsOutcome = "unchanged"
+	ytFieldsDeleted     ytFieldsOutcome = "deleted"
+	ytFieldsUnbound     ytFieldsOutcome = "unbound"
+	ytFieldsOtherTenant ytFieldsOutcome = "other_tenant"
+	ytFieldsMoved       ytFieldsOutcome = "moved"
+	ytFieldsInvalid     ytFieldsOutcome = "invalid"
+)
+
+// prepareYTFieldsTx decides one task's snapshot in tx at now, for the worker
+// of tenant: a deleted task (found false) is skipped; a task with no binding
+// is skipped (its issue_create publishes the binding and prepares the first
+// snapshot then, ytFieldsOnBindTx); a binding on another tenant is skipped; a
+// task whose hk project no longer maps to its binding's YouTrack project is
 // skipped and logged (ytwrite.fields_skipped_moved; a move is Y4c's); a
 // snapshot the protocol cannot store is skipped and logged. Every other task
 // prepares its snapshot through prepareYTSnapshotTx, which makes no op when
 // the snapshot is the one last prepared.
+func prepareYTFieldsTx(ctx context.Context, tx pgx.Tx, now time.Time, tenant string, id int64, t ytFieldsRow, found bool) (ytFieldsOutcome, error) {
+	switch {
+	case !found:
+		return ytFieldsDeleted, nil
+	case t.issueID == "":
+		return ytFieldsUnbound, nil
+	case t.tenant != tenant:
+		return ytFieldsOtherTenant, nil
+	case !t.projectAgrees:
+		log.Printf("ytwrite.fields_skipped_moved task_id=%d project=%q issue_id=%q binding_project_id=%q project_id=%q",
+			id, t.fields.Project, t.issueID, t.bindingProjectID, t.mappedProjectID)
+		return ytFieldsMoved, nil
+	}
+	n, err := ytwrite.FieldsOp(ytwrite.FieldsRequest{Principal: YTFieldsPrincipal, Actor: YTFieldsPrincipal, Tenant: t.tenant,
+		IssueID: t.issueID, ProjectID: t.bindingProjectID, Task: t.fields})
+	if errors.Is(err, ytwrite.ErrInvalid) {
+		// Bad data must not stop the feed: the cursor would never pass
+		// this row.
+		log.Printf("ytwrite.fields_skipped task_id=%d reason=invalid err=%q", id, err.Error())
+		return ytFieldsInvalid, nil
+	}
+	if err != nil {
+		return "", err
+	}
+	op, made, err := prepareYTSnapshotTx(ctx, tx, now, n, n.PayloadSHA)
+	if err != nil {
+		return "", err
+	}
+	if !made {
+		return ytFieldsUnchanged, nil
+	}
+	log.Printf("ytwrite.fields_enqueued op_id=%d task_id=%d issue_id=%q", op.ID, id, t.issueID)
+	return ytFieldsPrepared, nil
+}
+
+// ytFieldsOnBindTx prepares the first snapshot of a task whose binding an
+// applied issue_create op just published in tx (hk 4003 review): the binding
+// is no task change, so the feed would not see it, and the issue_create wrote
+// only the title, hk ID and project. The snapshot reads the task as it is
+// now, so changes the feed consumed while the task was unbound are in it. The
+// caller holds the task's lane lock (Apply), which prepareYTSnapshotTx takes
+// again; the op queues after the issue_create on that lane. Mode off, or a
+// binding on another tenant than the gate's, prepares nothing.
+func (s *Store) ytFieldsOnBindTx(ctx context.Context, tx pgx.Tx, taskID int64, now time.Time) error {
+	mode, tenant := s.ytFieldsNow()
+	if mode != YTFieldsOn {
+		return nil
+	}
+	tasks, err := readYTFieldsRows(ctx, tx, []int64{taskID}, now, s.StartedStalledHours())
+	if err != nil {
+		return err
+	}
+	t, found := tasks[taskID]
+	outcome, err := prepareYTFieldsTx(ctx, tx, now, tenant, taskID, t, found)
+	if err != nil {
+		return err
+	}
+	log.Printf("ytwrite.fields_on_bind task_id=%d outcome=%s", taskID, outcome)
+	return nil
+}
+
+// ytFieldsHandler is the task_fields consumer's handler for one pass at now.
+// Mode off does nothing (the cursor advances). Otherwise each changed task,
+// in sync_id order, goes through prepareYTFieldsTx.
 func ytFieldsHandler(s *Store, now time.Time) FeedHandler {
 	return func(ctx context.Context, tx pgx.Tx, rows []FeedRow) error {
 		mode, tenant := s.ytFieldsNow()
@@ -183,50 +259,18 @@ func ytFieldsHandler(s *Store, now time.Time) FeedHandler {
 		if err != nil {
 			return err
 		}
-		var prepared, unchanged, deleted, unbound, otherTenant, moved, invalid int
+		counts := map[ytFieldsOutcome]int{}
 		for _, id := range ids {
-			t, ok := tasks[id]
-			switch {
-			case !ok:
-				deleted++
-				continue
-			case t.issueID == "":
-				unbound++
-				continue
-			case t.tenant != tenant:
-				otherTenant++
-				continue
-			case !t.projectAgrees:
-				moved++
-				log.Printf("ytwrite.fields_skipped_moved task_id=%d project=%q issue_id=%q binding_project_id=%q project_id=%q",
-					id, t.fields.Project, t.issueID, t.bindingProjectID, t.mappedProjectID)
-				continue
-			}
-			n, err := ytwrite.FieldsOp(ytwrite.FieldsRequest{Principal: YTFieldsPrincipal, Actor: YTFieldsPrincipal, Tenant: t.tenant,
-				IssueID: t.issueID, ProjectID: t.bindingProjectID, Task: t.fields})
-			if errors.Is(err, ytwrite.ErrInvalid) {
-				// Bad data must not stop the feed: the cursor would never
-				// pass this row.
-				invalid++
-				log.Printf("ytwrite.fields_skipped task_id=%d reason=invalid err=%q", id, err.Error())
-				continue
-			}
+			t, found := tasks[id]
+			outcome, err := prepareYTFieldsTx(ctx, tx, now, tenant, id, t, found)
 			if err != nil {
 				return err
 			}
-			op, made, err := prepareYTSnapshotTx(ctx, tx, now, n, n.PayloadSHA)
-			if err != nil {
-				return err
-			}
-			if !made {
-				unchanged++
-				continue
-			}
-			prepared++
-			log.Printf("ytwrite.fields_enqueued op_id=%d task_id=%d issue_id=%q", op.ID, id, t.issueID)
+			counts[outcome]++
 		}
 		log.Printf("ytwrite.fields_feed tasks=%d prepared=%d unchanged=%d deleted=%d unbound=%d other_tenant=%d moved=%d invalid=%d",
-			len(ids), prepared, unchanged, deleted, unbound, otherTenant, moved, invalid)
+			len(ids), counts[ytFieldsPrepared], counts[ytFieldsUnchanged], counts[ytFieldsDeleted], counts[ytFieldsUnbound],
+			counts[ytFieldsOtherTenant], counts[ytFieldsMoved], counts[ytFieldsInvalid])
 		return nil
 	}
 }

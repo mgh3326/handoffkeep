@@ -748,8 +748,10 @@ the feed's `[a-z0-9_]` cursor key). It reads every `task` change from
 `sync_log` (hk 3997) and, in mode on, for each changed task:
 
 - deleted: skipped;
-- no binding: skipped and counted; its `issue_create` binds it, and its next
-  change snapshots it;
+- no binding: skipped and counted. When its `issue_create` is applied, the
+  transaction that publishes the binding also prepares the task's first
+  snapshot (as the task is then), behind the create on the lane: the binding
+  is no task change, so the feed would not see it;
 - a binding on another tenant: skipped and counted;
 - its hk project no longer maps to the binding's YouTrack project (the rule
   `ytBindingDisagreement` uses; a task with no project agrees with the
