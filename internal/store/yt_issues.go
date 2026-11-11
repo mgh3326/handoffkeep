@@ -157,8 +157,10 @@ func bindYTIssueTx(ctx context.Context, tx pgx.Tx, op ytwrite.Op, ytID string, n
 	if err != nil || taskID < 1 || op.EntityKind != "task" {
 		return "", fmt.Errorf("issue_create op %d is not on a task lane (%s:%s)", op.ID, op.EntityKind, op.EntityID)
 	}
-	tag, err := tx.Exec(ctx, `INSERT INTO yt_task_bindings(task_id, tenant, issue_id, issue_readable, project_id, bound_by, bound_at, origin, op_id)
-		VALUES ($1,$2,$3,'',$4,$5,$6,'op_applied',$7) ON CONFLICT DO NOTHING`,
+	// comments_from 0: the comment catch-up copies every comment the task
+	// already has to the issue this op created or adopted.
+	tag, err := tx.Exec(ctx, `INSERT INTO yt_task_bindings(task_id, tenant, issue_id, issue_readable, project_id, bound_by, bound_at, origin, op_id, comments_from)
+		VALUES ($1,$2,$3,'',$4,$5,$6,'op_applied',$7,0) ON CONFLICT DO NOTHING`,
 		taskID, op.Tenant, ytID, op.YTTargetID, op.Principal, now.UTC(), op.ID)
 	if err != nil {
 		return "", err

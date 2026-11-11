@@ -137,7 +137,7 @@ func TestVerifyBindingClassifiesRefusals(t *testing.T) {
 		"no such issue":               {candidate(7), &issueReader{}, false},
 	}
 	for name, tc := range noIssue {
-		_, err := VerifyBinding(ctx, tc.r, canaryTenant, tc.c)
+		_, err := VerifyBinding(ctx, tc.r, canaryTenant, "", tc.c)
 		if !errors.Is(err, ErrNoIssue) || !errors.Is(err, ErrCanaryRefused) {
 			t.Errorf("%s: err = %v, want ErrNoIssue", name, err)
 		}
@@ -156,18 +156,103 @@ func TestVerifyBindingClassifiesRefusals(t *testing.T) {
 		"summary names another task":     {candidate(7), &issueReader{issues: map[string]Issue{"HK-7": issueFor("HK-7", "#8 x")}}},
 	}
 	for name, tc := range disagree {
-		_, err := VerifyBinding(ctx, tc.r, canaryTenant, tc.c)
+		_, err := VerifyBinding(ctx, tc.r, canaryTenant, "", tc.c)
 		if !errors.Is(err, ErrCanaryRefused) || errors.Is(err, ErrNoIssue) {
 			t.Errorf("%s: err = %v, want a refusal that is not ErrNoIssue", name, err)
 		}
 	}
-	_, err := VerifyBinding(ctx, &issueReader{err: &APIError{Status: 503}}, canaryTenant, candidate(7))
+	_, err := VerifyBinding(ctx, &issueReader{err: &APIError{Status: 503}}, canaryTenant, "", candidate(7))
 	if err == nil || errors.Is(err, ErrCanaryRefused) {
 		t.Fatalf("failed read: %v, want an error that is not a refusal", err)
 	}
-	got, err := VerifyBinding(ctx, good(), canaryTenant, candidate(7))
+	got, err := VerifyBinding(ctx, good(), canaryTenant, "", candidate(7))
 	want := store.YTTaskBinding{TaskID: 7, Tenant: canaryTenant, IssueID: "2-77", IssueReadable: "HK-7", ProjectID: "0-2"}
 	if err != nil || got != want {
 		t.Fatalf("binding %+v %v, want %+v", got, err, want)
+	}
+}
+
+type projectLister struct {
+	projects []AdminProject
+	err      error
+}
+
+func (l projectLister) ListAdminProjects(context.Context) ([]AdminProject, error) {
+	return l.projects, l.err
+}
+
+// hk 3897: a task with no hk project binds to the import's bucket issue
+// HK-<id>, in the one project whose short name is HK, when its summary names
+// the task; the run refuses when there is no such project or more than one.
+func TestVerifyBindingNoProjectUsesBucket(t *testing.T) {
+	ctx := context.Background()
+	inBucket := func(readable, summary string) Issue {
+		return Issue{ID: "5-33", IDReadable: readable, Summary: summary, Project: &ProjectRef{ID: "0-1", ShortName: "HK"}}
+	}
+	bucket, err := ResolveBucketProject(ctx, projectLister{projects: []AdminProject{{ID: "0-2", ShortName: "PW"}, {ID: "0-1", ShortName: "HK"}, {ID: "0-3", ShortName: "HKX"}}})
+	if err != nil || bucket != "0-1" {
+		t.Fatalf("bucket %q %v, want 0-1", bucket, err)
+	}
+	noProject := store.YTCanaryCandidate{TaskID: 33}
+
+	r := &issueReader{issues: map[string]Issue{"HK-33": inBucket("HK-33", "#33 closed, no project")}}
+	got, err := VerifyBinding(ctx, r, canaryTenant, bucket, noProject)
+	want := store.YTTaskBinding{TaskID: 33, Tenant: canaryTenant, IssueID: "5-33", IssueReadable: "HK-33", ProjectID: "0-1"}
+	if err != nil || got != want || r.calls != 1 {
+		t.Fatalf("no-project task: %+v %v (%d reads), want %+v", got, err, r.calls, want)
+	}
+
+	refused := map[string]struct {
+		c     store.YTCanaryCandidate
+		issue Issue
+	}{
+		"summary names another task": {noProject, inBucket("HK-33", "#34 other")},
+		"issue moved out of HK":      {noProject, inBucket("PW-33", "#33 moved")},
+		"issue in another HK project": {noProject, Issue{ID: "5-33", IDReadable: "HK-33", Summary: "#33 x",
+			Project: &ProjectRef{ID: "0-9", ShortName: "HK"}}},
+		"map row names another issue": {store.YTCanaryCandidate{TaskID: 33, MappedIssueID: "5-99"}, inBucket("HK-33", "#33 x")},
+	}
+	for name, tc := range refused {
+		_, err := VerifyBinding(ctx, &issueReader{issues: map[string]Issue{"HK-33": tc.issue}}, canaryTenant, bucket, tc.c)
+		if !errors.Is(err, ErrCanaryRefused) || errors.Is(err, ErrNoIssue) {
+			t.Errorf("%s: err = %v, want a refusal that is not ErrNoIssue", name, err)
+		}
+	}
+	if _, err := VerifyBinding(ctx, &issueReader{}, canaryTenant, bucket, noProject); !errors.Is(err, ErrNoIssue) {
+		t.Errorf("no HK-33: err = %v, want ErrNoIssue", err)
+	}
+	// Without a bucket a task with no project has no issue, as before, and
+	// no read is made.
+	r = &issueReader{issues: map[string]Issue{"HK-33": inBucket("HK-33", "#33 x")}}
+	if _, err := VerifyBinding(ctx, r, canaryTenant, "", noProject); !errors.Is(err, ErrNoIssue) || r.calls != 0 {
+		t.Errorf("no bucket: err = %v after %d reads, want ErrNoIssue and no read", err, r.calls)
+	}
+	// A task with a project never falls back to the bucket.
+	r = &issueReader{issues: map[string]Issue{"HK-33": inBucket("HK-33", "#33 x")}}
+	if _, err := VerifyBinding(ctx, r, canaryTenant, bucket, store.YTCanaryCandidate{TaskID: 33, Project: "scratch"}); !errors.Is(err, ErrNoIssue) || r.calls != 0 {
+		t.Errorf("unmapped project: err = %v after %d reads, want ErrNoIssue and no read", err, r.calls)
+	}
+	// The canary keeps refusing a task with no project.
+	if _, err := VerifyCanary(ctx, &issueReader{issues: map[string]Issue{"HK-33": inBucket("HK-33", "#33 x")}}, canaryTenant, noProject); !errors.Is(err, ErrNoIssue) {
+		t.Errorf("canary: err = %v, want ErrNoIssue", err)
+	}
+}
+
+func TestResolveBucketProjectRefusesNoneOrSeveral(t *testing.T) {
+	ctx := context.Background()
+	for name, projects := range map[string][]AdminProject{
+		"none":          {{ID: "0-2", ShortName: "PW"}},
+		"empty list":    nil,
+		"two":           {{ID: "0-1", ShortName: "HK"}, {ID: "0-7", ShortName: "HK"}},
+		"two by case":   {{ID: "0-1", ShortName: "HK"}, {ID: "0-7", ShortName: "hk"}},
+		"answer, no id": {{ShortName: "HK"}},
+	} {
+		if id, err := ResolveBucketProject(ctx, projectLister{projects: projects}); !errors.Is(err, ErrBucketProject) || id != "" {
+			t.Errorf("%s: %q %v, want ErrBucketProject", name, id, err)
+		}
+	}
+	readErr := &APIError{Status: 503}
+	if _, err := ResolveBucketProject(ctx, projectLister{err: readErr}); !errors.Is(err, readErr) || errors.Is(err, ErrBucketProject) {
+		t.Errorf("failed read: %v, want the read error", err)
 	}
 }

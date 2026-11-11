@@ -340,17 +340,22 @@ modes. b1a's Dispatch, Projection metadata and No double copy hold with
 "enrolled" read as "bound"; Enqueue and Admission differ as below.
 
 **Binding.** `yt_task_bindings(task_id, tenant, issue_id, issue_readable,
-project_id, bound_by, bound_at)`, one row per task and one task per
-`(tenant, issue_id)`. It is written only by `youtrack comments-backfill`
+project_id, bound_by, bound_at, comments_from)`, one row per task and one task
+per `(tenant, issue_id)`. It is written only by `youtrack comments-backfill`
 (`Store.AddYTTaskBinding`), after the canary's verification
 (`youtrack.VerifyBinding`: the enrollment rules above, and the task's
-`youtrack_projects` row must carry the YouTrack project id). Publication
+`youtrack_projects` row must carry the YouTrack project id). A task with no hk
+project (hk 3897) verifies the same way against the import's bucket: issue
+`HK-<task id>` in the one YouTrack project whose short name is `HK`, resolved
+from the project list at the start of each run (no such project, or two,
+refuses the whole run with exit 2). hk keeps no `youtrack_projects` row for
+`HK` (a reserved short name). Publication
 reads the task's mappings again under its locks and refuses
 (`yt_binding_conflict`) when they differ from the verified ones, when any
 source below disagrees, or when the task is bound elsewhere; the same binding
 again is a no-op. A binding writes no op and no map row, and old comments are
-never copied: a task bound later gets ops for the comments written after the
-binding only.
+never copied: `comments_from` is the task's highest comment id, read in the
+publication's transaction, and only a comment above it is ever copied.
 
 **Cross-checks.** Each source hk keeps, when present, must agree with the
 binding (`ytBindingDisagreement`, plain reads, no network):
@@ -363,7 +368,7 @@ binding (`ytBindingDisagreement`, plain reads, no network):
 | `yt_comment_canary_task` | the task's canary row names another issue or tenant |
 | `yt_comment_canary_issue` | a canary row gives the tenant's issue to another task |
 | `yt_task_bindings_issue` | another task's binding holds the issue (publication and preflight only) |
-| `youtrack_projects` | the task has no project, its project is unmapped, or it maps to another YouTrack project id |
+| `youtrack_projects` | the task's project is unmapped or maps to another YouTrack project id, or a task with no project is bound to a project some `youtrack_projects` row maps |
 
 **Enqueue.** In the comment's transaction, after the comment lock and the
 comment's KEY SHARE on its task: the task's lane lock, then the binding. No
@@ -376,6 +381,47 @@ tenant and issue. An identity problem never makes a rejected op with a link,
 which would leave the comment on no path; an anchor that still conflicts after
 the checks fails the comment. A body or actor the protocol cannot send keeps
 b1a's locally rejected op and link.
+
+**Catch-up** (hk 3897). **Off by default**: it runs only with
+`HANDOFFKEEP_YT_COMMENTS_CATCHUP=on` (unset or `off` runs none; any other
+value fails startup), and stays off until the legacy comment push refuses to
+post while the mode is `canary` or `on` (hk 3907). A legacy push that posts a
+comment and ends without linking it (a lost response, a failed link insert, a
+dead process) leaves no local trace, so the catch-up would copy that comment
+again. When enabled, before each `Drive` pass the worker in mode on runs
+`Store.CatchUpYTComments`: up to 200 comments (`ytCommentsCatchUpLimit`),
+oldest first, on a bound task, above the binding's `comments_from`, not
+written by the YouTrack pull, not already mirrored by the legacy push
+(`youtrack_comment_links`), with no ownership link and no op under
+`task-comment:<id>`. These are comments written after the binding that the
+enqueue did not copy: a writer that does not enqueue (a dots reply) or a
+comment written while the mode was not `on`. Each gets, in its own
+transaction, exactly what the enqueue would have written (`ytCommentOnOpTx`),
+with the op's `created_at` the pass's time; the transaction takes the task's
+lane lock first and reads the link and the op again, and the op's unique
+`(principal, kind, idem_key)` keeps two workers to one op. It logs
+`ytwrite.comment_catchup task_id=<id> comment_id=<id> op_id=<id>`; a
+disagreeing source gets no op and `ytwrite.comment_catchup_skipped_ambiguous
+task_id=<id> comment_id=<id> source=<source>`, once per worker process (the
+worker leaves the comment out of its later passes; a restart looks again). A
+failed pass logs `ytwrite.comment_catchup_failed`. No YouTrack call.
+
+**The catch-up and the legacy push.** The legacy push (`youtrack sync`,
+`UnpushedYouTrackComments`) keeps selecting every comment with no link, in
+every mode, and posts each before it links it. The catch-up never runs
+beside it: when a pass finds comments it tries the sync lock
+(`pg_try_advisory_lock(8241873404)`, `TryYouTrackSyncLock`), which every sync
+run of this release and of the releases before it holds for its whole run,
+across its selection, its POSTs and its `youtrack_comment_links` inserts. A
+held lock defers the pass (`ytwrite.comment_catchup_deferred comments=<n>
+reason=sync_running`, nothing written); otherwise the pass holds the lock
+until it ends and runs each comment's transaction on the lock's own
+connection (no second pool connection, so a pool of one cannot hang), and
+each transaction re-reads the push's link under the lane lock, so a comment a
+finished sync posted and linked is left. A sync that
+starts during a pass exits 3 ("another youtrack sync is running") and its
+next run goes on. Neither waits for the lock, so the lock order is
+unchanged.
 
 **Admission.** In mode on the worker admits a prepared op only when it is
 bound to the worker's tenant and its task has a binding with the op's issue
@@ -394,14 +440,17 @@ this; the enqueue cross-checks catch what it could write (Rollout).
 **Commands.** Both open the database directly, like `youtrack canary`, and
 verify against the tenant the worker uses (the host of `YOUTRACK_URL`).
 
-- `handoffkeep youtrack comments-preflight [--project P] [--days N]` is
+- `handoffkeep youtrack comments-preflight [--project P] [--days N] [--all]` is
   read-only: it reads issues from YouTrack and writes nothing. It opens the
   database without migrating, on connections whose every transaction is READ
-  ONLY, and refuses (exit 2) a database that does not record migration
-  `20261110-yt-task-bindings`: deploy the release first. Candidates are
+  ONLY, and refuses (exit 2) a database that does not record migrations
+  `20261110-yt-task-bindings` and `20261111-yt-binding-comments-from`: deploy
+  the release first. Candidates are
   the tasks with a comment in the last N days (default 14), every task in the
-  canary set and every task with an unresolved comment op; `--project` keeps
-  one hk project's. A bound task is checked locally only and comes out
+  canary set and every task with an unresolved comment op; `--all` makes every
+  task a candidate (bind-all, hk 3897; `--days` then sets only the comment
+  volume window, and the report says `"all": true`); `--project` keeps one hk
+  project's. A task with no project is reported under project `""`. A bound task is checked locally only and comes out
   `bound` or `bound_ambiguous` (a source disagrees, or it is bound on another
   tenant); an unbound one is verified in YouTrack and
   comes out `verifies`, `no_issue` (no project, an unmapped project or one
@@ -416,8 +465,8 @@ verify against the tenant the worker uses (the host of `YOUTRACK_URL`).
   `no_issue` and `ambiguous` task logs `youtrack.comments_classified
   task_id=<id> class=<class> detail="..."` to stderr, and each `error` task
   `youtrack.comments_classify_failed task_id=<id> err="..."`.
-- `handoffkeep youtrack comments-backfill [--project P] [--days N] [--by
-  NAME]` classifies the same way and publishes each `verifies` binding. A
+- `handoffkeep youtrack comments-backfill [--project P] [--days N] [--all]
+  [--by NAME]` classifies the same way and publishes each `verifies` binding. A
   refused publication counts as `ambiguous` and the run goes on; the report
   adds `bound_now`. A re-run reads nothing from YouTrack for a bound task.
 - Each YouTrack read has its own 15 s timeout and each task 60 s; there is no
@@ -449,6 +498,15 @@ table; no foreign key, so no lock on `tasks`. It writes no row, and the
 previous release neither reads nor writes the table: it keeps serving on the
 migrated schema (`scripts/test-previous-release-schema.sh`).
 
+**Migration** `20261111-yt-binding-comments-from` (expand-only, `After`
+`20261110-yt-task-bindings`, whose table it alters): `ALTER TABLE
+yt_task_bindings ADD COLUMN comments_from BIGINT NOT NULL DEFAULT 0` (catalog
+only, ACCESS EXCLUSIVE on `yt_task_bindings` until the migration commits) and
+a backfill of every existing row to its task's highest comment id. The
+previous release never names the column; a binding it inserts gets 0, and the
+catch-up would then copy all of that task's comments, so `comments-backfill`
+runs from this release only.
+
 **Rollout.**
 
 1. Deploy with `HANDOFFKEEP_YT_COMMENTS_MODE=canary`.
@@ -475,7 +533,13 @@ and no recovery of held ops; both come with the automatic binder (follow-up).
 **Residuals.**
 
 - A task created after the backfill has no binding until the backfill runs
-  again; its comments go through the legacy push and the import meanwhile.
+  again; its comments go through the legacy push and the import meanwhile,
+  and the binding never copies them (`comments_from`).
+- With the catch-up enabled, a sync that posts and ends without linking
+  (lost response, failed link insert, dead process) leaves the comment
+  unlinked, and the next catch-up pass can copy it again: the legacy push's
+  own retry reads the issue's comments first, the catch-up does not. Hence
+  the gate above, until hk 3907.
 - The enqueue reads its sources without locks, so a project change or mirror
   write that commits during a comment's transaction is caught by the next
   comment, not this one; the issue binding itself cannot change under the

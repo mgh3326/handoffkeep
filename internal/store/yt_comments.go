@@ -42,8 +42,13 @@ const (
 // YTCommentKey(comment id), so one persisted comment has at most one op.
 const YTCommentPrincipal = "hk:task-comments"
 
+// ytCommentKeyPrefix is YTCommentKey without the comment id.
+const ytCommentKeyPrefix = "task-comment:"
+
 // YTCommentKey is the idempotency key of the op that copies one comment.
-func YTCommentKey(commentID int64) string { return "task-comment:" + strconv.FormatInt(commentID, 10) }
+func YTCommentKey(commentID int64) string {
+	return ytCommentKeyPrefix + strconv.FormatInt(commentID, 10)
+}
 
 // SetYTCommentsMode sets the gate for this process. serve calls it once at
 // start, before any request.
