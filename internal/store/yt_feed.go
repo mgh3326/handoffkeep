@@ -64,10 +64,21 @@ type ytFeedConsumer struct {
 	name   string
 	models []string
 	handle FeedHandler
+	// build, when set, makes the pass's handler from the store and the
+	// pass's time (registerYTFeedStoreConsumer); handle is then unused.
+	build func(s *Store, now time.Time) FeedHandler
 }
 
-// ytFeedConsumers is the registry, by name. It ships empty: each consumer
-// (Y4b task fields, Y5b documents, Y6 decisions) adds its own entry.
+// handler is c's handler for one pass of s at now.
+func (c ytFeedConsumer) handler(s *Store, now time.Time) FeedHandler {
+	if c.build != nil {
+		return c.build(s, now)
+	}
+	return c.handle
+}
+
+// ytFeedConsumers is the registry, by name: each consumer (Y4b task fields
+// in yt_fields.go, Y5b documents, Y6 decisions) adds its own entry.
 var ytFeedConsumers = map[string]ytFeedConsumer{}
 
 var ytFeedConsumerNameRE = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
@@ -87,6 +98,24 @@ func registerYTFeedConsumer(name string, models []string, handle FeedHandler) {
 	if _, dup := ytFeedConsumers[name]; dup {
 		panic(fmt.Sprintf("store: yt feed consumer %q registered twice", name))
 	}
+	ytFeedConsumers[name] = c
+}
+
+// registerYTFeedStoreConsumer is registerYTFeedConsumer for a consumer whose
+// handler needs the store (its mode, its settings) or the pass's time: build
+// makes the handler at the start of each pass's handling.
+func registerYTFeedStoreConsumer(name string, models []string, build func(s *Store, now time.Time) FeedHandler) {
+	if build == nil {
+		panic(fmt.Sprintf("store: yt feed consumer %q has no handler", name))
+	}
+	c, err := newYTFeedConsumer(name, models, func(context.Context, pgx.Tx, []FeedRow) error { return nil })
+	if err != nil {
+		panic("store: " + err.Error())
+	}
+	if _, dup := ytFeedConsumers[name]; dup {
+		panic(fmt.Sprintf("store: yt feed consumer %q registered twice", name))
+	}
+	c.build = build
 	ytFeedConsumers[name] = c
 }
 
@@ -255,7 +284,7 @@ func (s *Store) runYTFeedConsumer(ctx context.Context, c ytFeedConsumer, limit i
 	if len(read) > 0 {
 		batch := collapseFeedRows(read)
 		pass.Handled = len(batch)
-		if err := c.handle(ctx, tx, batch); err != nil {
+		if err := c.handler(s, now)(ctx, tx, batch); err != nil {
 			return YTFeedPass{Consumer: c.name}, fmt.Errorf("yt feed consumer %s: %w", c.name, err)
 		}
 	}

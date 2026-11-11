@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/mgh3326/handoffkeep/internal/store"
+	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
 
 // The issue text is a port of the Python mirror that wrote these issues
@@ -28,11 +29,9 @@ var (
 	// notices). Those are not mirrored; the mirror only carries human text.
 	noiseRE = regexp.MustCompile(`(?i)^\s*(spawned request=|spawn failed|panewire job\.(completed|escalated|lost)|blocks:|Expected:|design (check|review)|Scope (add|change|extended)|Rescoped|direct-merge|Restart decision|Second attempt|Correction|Field contract|ESC answer|\[mergewake\]|mergewake |ledger|landing|request=)`)
 	// suffixRE is the "(grade B, T2)" or "(T2)" marker at the end of a title.
-	suffixRE = regexp.MustCompile(`\s*\((grade [SABC]\+?, ?T[0-3]|T[0-3])\)\s*$`)
-	// gradeTierRE reads the grade and tier of a title; it needs the grade.
-	gradeTierRE = regexp.MustCompile(`\(grade ([SABC]\+?), (T[0-3])\)\s*$`)
-	hkPrefixRE  = regexp.MustCompile(`^\[hk \d+\]\s*`)
-	workerRE    = regexp.MustCompile(`host=(\S+) profile=(\S+)`)
+	suffixRE   = regexp.MustCompile(`\s*\((grade [SABC]\+?, ?T[0-3]|T[0-3])\)\s*$`)
+	hkPrefixRE = regexp.MustCompile(`^\[hk \d+\]\s*`)
+	workerRE   = regexp.MustCompile(`host=(\S+) profile=(\S+)`)
 )
 
 // gateKO names the merge-gate reasons the console and the issue show.
@@ -81,13 +80,7 @@ func cleanTitle(title string) string {
 
 // gradeFromTitle and tierFromTitle read the marker the title carries. Both
 // come back empty when the title has no "(grade X, Tn)" marker.
-func gradeFromTitle(title string) (grade, tier string) {
-	m := gradeTierRE.FindStringSubmatch(title)
-	if m == nil {
-		return "", ""
-	}
-	return m[1], m[2]
-}
+func gradeFromTitle(title string) (grade, tier string) { return ytwrite.TitleGradeTier(title) }
 
 // humanComment reports whether a task comment is worth mirroring.
 func humanComment(body string) bool {

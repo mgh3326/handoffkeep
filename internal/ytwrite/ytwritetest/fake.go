@@ -67,6 +67,14 @@ type FakeYouTrack struct {
 	fieldsMissing map[string]bool
 	projectText   map[string]bool
 	created       []ytwrite.IssueCreate
+	// bundles are the values the named enum or state fields accept (a
+	// field not named takes any value); updates every IssueFieldsUpdate
+	// received; readFaults the errors the next ReadIssueFields calls
+	// return (fake_fields.go).
+	bundles    map[string]map[string]bool
+	updates    []ytwrite.IssueFieldsUpdate
+	reads      int
+	readFaults []error
 
 	// BeforeCreate runs at the start of every CreateComment, with the caller's
 	// context, before anything else. Tests use it to cancel a caller mid-call.
@@ -78,11 +86,13 @@ type delayedComment struct{ issue, text string }
 type fakeIssue struct {
 	ytwrite.RemoteIssue
 	hkID int64
+	// fields are the issue's field values, by name (no entry: empty).
+	fields map[string]string
 }
 
 // NewFake returns an empty fake with no faults queued.
 func NewFake() *FakeYouTrack {
-	return &FakeYouTrack{issues: map[string][]*ytwrite.RemoteComment{}, projects: map[string][]*fakeIssue{}, fieldsMissing: map[string]bool{}, projectText: map[string]bool{}}
+	return &FakeYouTrack{issues: map[string][]*ytwrite.RemoteComment{}, projects: map[string][]*fakeIssue{}, fieldsMissing: map[string]bool{}, projectText: map[string]bool{}, bundles: map[string]map[string]bool{}}
 }
 
 // Queue adds faults for the next CreateComment calls.

@@ -139,7 +139,9 @@ may not contain ` · `, so marker-shaped text is data, never evidence.
 An op's `kind` picks its YouTrack side from the registry `Protocol.Kinds`
 (`internal/ytwrite/kind.go`). A `ytwrite.Kind` has three behaviors and no more:
 
-- `Render(op)`: the exact text written, deterministic in the op, with the op marker.
+- `Render(op)`: the exact text written, deterministic in the op, with the op
+  marker when the kind's evidence is a marker search (`issue_fields` writes a
+  whole snapshot and compares all of it instead).
 - `Send(ctx, remote, op, text)`: exactly one remote attempt, no retry inside.
 - `Evidence(ctx, remote, op, text)`: enumerate the target and classify every
   candidate carrying the marker as an exact live match, an exact deleted one, or
@@ -160,8 +162,9 @@ exact live match with a valid id, nothing deleted or mismatched, is `applied`;
 otherwise `multiple_matches`, `marker_deleted`, `marker_mismatch` or
 `no_evidence`). An op whose kind is not registered is `rejected /
 unsupported_kind` when sent, and a failed render is `unsupported_kind` (send) or
-`reconcile_failed` (search). `comment_append` (`kind_comment.go`) and
-`issue_create` (`kind_issue.go`, below) are the registered kinds.
+`reconcile_failed` (search). `comment_append` (`kind_comment.go`),
+`issue_create` (`kind_issue.go`, below) and `issue_fields` (`kind_fields.go`,
+below) are the registered kinds.
 
 **Precondition: the bot sees every issue.** A kind's search (the comments of
 an issue, the issues of a project with a task's `hk ID`) is complete only if
@@ -730,6 +733,92 @@ the legacy push or the import can create or link a task's issue beside the
 op, and the op's search does not see it in time.
 
 A rejected create stays rejected; a retry is a later operator command.
+
+## Kind issue_fields (hk 4003)
+
+After the import ended (2026-11-11), a task's state, priority, lane and the
+other fields the import set reach YouTrack only through this kind: one op is
+the full snapshot of the task's issue, written to the task's bound issue in
+one update. `HANDOFFKEEP_YT_FIELDS_MODE` is `off` (the default) or `on`, read
+like the issues mode; on alone starts the write worker (with the YouTrack
+credentials) and makes the legacy `youtrack sync` and `adopt` refuse to run.
+
+**Feed consumer `task_fields`** (`internal/store/yt_fields.go`; the name is
+the feed's `[a-z0-9_]` cursor key). It reads every `task` change from
+`sync_log` (hk 3997) and, in mode on, for each changed task:
+
+- deleted: skipped;
+- no binding: skipped and counted; its `issue_create` binds it, and its next
+  change snapshots it;
+- a binding on another tenant: skipped and counted;
+- its hk project no longer maps to the binding's YouTrack project (the rule
+  `ytBindingDisagreement` uses; a task with no project agrees with the
+  unmapped HK bucket): skipped, `ytwrite.fields_skipped_moved` (Y4c);
+- otherwise its snapshot, from the current row, its current Korean title,
+  its milestone's name, its refs and its 멈춤 as of the pass, is prepared
+  through `prepareYTSnapshotTx`: no op when the snapshot hash equals the last
+  one prepared (an `updated_at`-only change), else one op keyed
+  `issue_fields:<task>:<seq>:<sha>` (A -> B -> A is three ops).
+
+Mode off prepares nothing and still advances the cursor, so a change made
+while off reaches YouTrack with the task's next change. Each pass logs one
+`ytwrite.fields_feed tasks= prepared= unchanged= deleted= unbound=
+other_tenant= moved= invalid=` line.
+
+**Op.** Principal and actor `hk:task-fields`, lane `task:<id>` (with the
+task's comments and its `issue_create`, so the writes to one issue stay in
+order), target the bound issue id, payload the binding's YouTrack project id
+and the snapshot. `PayloadSHA` covers the snapshot, the issue and the tenant.
+
+**Snapshot** (`ytwrite.TaskIssueSnapshot`, the import's mapping in
+`youtrack/import/client.js` `issue()`). Summary `#<id> <title>`, whitespace
+collapsed, cut to 250 runes. Fields, every one in every op (no value clears
+it): `hk ID`, `hk 프로젝트` (the project, `Unassigned` for none), `hk 상태` (the
+Korean label), `hk 우선순위`, `레인`, `종류`, `등급` and `티어` (the title's `(grade
+G, T)` marker, else `refs.linear`), `PR`, `작업 job`, `멈춤` (`멈춤` when stalled),
+`마감` (epoch ms), `영역`, `마일스톤` (the milestone's name), `예상 소요` (whole
+minutes). The description is a stable hk block with no op marker and no
+provenance line, so the same task renders the same text; empty lines after
+the title are left out:
+
+```
+hk task: #<task id> · project: <hk project>
+제목(원문): <title>
+제목(한국어): <ko>
+본문 문서: <body document key>
+PR: <url>
+Job: <job id>
+Parent task: #<parent id>
+```
+
+`ytwrite.ParseFields` reads it back (`ParseFields(RenderFields(x)) == x`).
+
+**Send.** The project's fields (one admin GET; a failure is `not_sent`), then
+exactly one `POST /api/issues/<id>` with the summary, the description and
+every field in the shape the project's field takes (a text or enum `hk
+프로젝트`, a single or multi-value `멈춤`; null, or `[]` for a multi-value field,
+clears). A value missing from (or archived in) a field's bundle, a field the
+project lacks with a value to set, or a type the snapshot cannot be written as
+is `rejected / field_refused` before the POST, with `last_error` naming the
+field and the value; a 4xx from the POST is `rejected / http_4xx`. Either
+raises the rejected-op alert. Bundle values are never created here (the
+schema plan owns them); the next change prepares a new snapshot. No map rows.
+
+**Evidence.** A GET of the issue: the summary, the description and every
+snapshot field equal (a field the issue lacks counts as empty) applies the
+op; anything else is one mismatch and keeps it `remote_unknown`. Resending an
+identical snapshot would be harmless, but the shared rule holds: no automatic
+resend.
+
+**Admission.** Mode on, the op's tenant is the worker's, and the op's target
+is the issue the task is bound to on that tenant now. An op of a task rebound
+since stays prepared.
+
+**Not here.** Tags and issue links (parent, relations) stay as the import set
+them; documents, decisions and a project move are later slices. 멈춤, the
+Korean title and the milestone name are read when the task row changes: a
+task that becomes stalled with no change, a new translation or a renamed
+milestone reaches the issue with the task's next change.
 
 ## Tests
 

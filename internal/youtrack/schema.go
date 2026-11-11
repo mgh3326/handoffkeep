@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/mgh3326/handoffkeep/internal/store"
+	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
 
 // Schema is the field contract: hk field, YouTrack custom field name, and the
@@ -32,22 +33,22 @@ type Schema struct {
 
 func DefaultSchema() Schema {
 	return Schema{
-		StateField:    "hk 상태",
-		LaneField:     "레인",
-		KindField:     "종류",
-		GradeField:    "등급",
-		TierField:     "티어",
-		HKIDField:     "hk ID",
-		PriorityField: "hk 우선순위",
-		PRField:       "PR",
-		ProjectField:  "hk 프로젝트",
-		StallField:    "멈춤",
+		StateField:    ytwrite.FieldState,
+		LaneField:     ytwrite.FieldLane,
+		KindField:     ytwrite.FieldKind,
+		GradeField:    ytwrite.FieldGrade,
+		TierField:     ytwrite.FieldTier,
+		HKIDField:     ytwrite.FieldHKID,
+		PriorityField: ytwrite.FieldPriority,
+		PRField:       ytwrite.FieldPR,
+		ProjectField:  ytwrite.FieldProject,
+		StallField:    ytwrite.FieldStalled,
 		StateBundle:   "hk 상태",
 
-		DueField:       "마감",
-		AreaField:      "영역",
-		MilestoneField: "마일스톤",
-		ExpectedField:  "예상 소요",
+		DueField:       ytwrite.FieldDue,
+		AreaField:      ytwrite.FieldArea,
+		MilestoneField: ytwrite.FieldMilestone,
+		ExpectedField:  ytwrite.FieldExpected,
 	}
 }
 
@@ -66,24 +67,12 @@ const (
 )
 
 // StallLabel is the value of the 멈춤 enum on a stalled task.
-const StallLabel = "멈춤"
+const StallLabel = ytwrite.StalledValue
 
 // StateLabels is the one hk state → YouTrack value table. The keys are the
 // twelve canonical store states.
-var StateLabels = map[string]string{
-	"triage":      "분류 대기",
-	"backlog":     "대기",
-	"unstarted":   "착수 전",
-	"researching": "조사 중",
-	"developing":  "개발 중",
-	"reviewing":   "검토 중",
-	"merged":      "머지됨",
-	"deployed":    "배포됨",
-	"completed":   "완료됨",
-	"dropped":     "종료됨",
-	"duplicate":   "중복",
-	"icebox":      "보류(보관)",
-}
+// It is ytwrite's table, which the issue_fields kind writes with.
+var StateLabels = ytwrite.TaskStateLabels
 
 // resolvedStates mark the state bundle values that mean finished work.
 var resolvedStates = map[string]bool{
