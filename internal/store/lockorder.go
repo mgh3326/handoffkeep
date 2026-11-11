@@ -102,6 +102,11 @@ package store
 //     alone (decision_notify.go). Version 48 takes EXCLUSIVE on the retired
 //     decision_notify table for its backfill, so an older worker's claim in
 //     flight finishes first; nothing writes it afterwards.
+//   - The task-thread poster (task_threads.go) locks its one
+//     task_thread_cursors row, or one task_thread_deliveries row (SKIP
+//     LOCKED), and reads task_events, tasks, changes, deploys and
+//     decision_requests without a lock. It holds no row while it sends, and
+//     nothing else writes either table.
 //   - AckLedger locks one ledger_cursors row and reads sync_state without a
 //     lock; nothing else writes ledger_cursors (ledger.go).
 //   - CreateStatusUpdate locks its task_projects row FOR NO KEY UPDATE

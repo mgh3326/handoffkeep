@@ -21,3 +21,7 @@ b251b29fa2f22605b9748bf26e7b4045d60609f2:internal/mcp/cfaccess_test.go:generic-a
 #   rewrote the fixture with a low-entropy prefix; full-history scans still
 #   read the old commit.
 911c3d1fe353ab13fcf77d409e2a4b32799835b4:client/fleet_test.go:generic-api-key:228
+# - e9c0616 cmd/handoffkeep/task_threads_test.go:32 is a made-up operator
+#   user id in an env-parsing test (hk 3990, #316); the next commit splits the
+#   literal, as decision_notify_test.go does.
+e9c0616fd7a315cf678c648bf68a6a666433ca64:cmd/handoffkeep/task_threads_test.go:discord-client-id:32

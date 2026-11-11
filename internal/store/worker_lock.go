@@ -14,6 +14,7 @@ type WorkerLock int64
 const (
 	HubForwardWorkerLock    WorkerLock = 8241873510
 	LinearBoardWorkerLock   WorkerLock = 8241873511
+	TaskThreadWorkerLock    WorkerLock = 8241873512
 	workerLockProbeInterval            = time.Second
 	workerLockProbeTimeout             = 2 * time.Second
 )
@@ -25,7 +26,7 @@ type WorkerLease struct{ conn *pgxpool.Conn }
 // uncertain acquisition discards the connection so a locked session cannot
 // return to the pool.
 func (s *Store) TryWorkerLock(ctx context.Context, id WorkerLock) (*WorkerLease, bool, error) {
-	if id != HubForwardWorkerLock && id != LinearBoardWorkerLock {
+	if id != HubForwardWorkerLock && id != LinearBoardWorkerLock && id != TaskThreadWorkerLock {
 		return nil, false, errors.New("unknown worker lock")
 	}
 	conn, err := s.pool.Acquire(ctx)
