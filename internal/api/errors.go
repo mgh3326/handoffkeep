@@ -107,7 +107,7 @@ var errorRules = []errorRule{
 	{store.ErrDeviationRefRequired, http.StatusBadRequest, "deviation_ref_required", false},
 	{store.ErrDecidedByRequired, http.StatusBadRequest, "decided_by_required", false},
 	{store.ErrBenchCatalogMonotonicity, http.StatusBadRequest, "bench_catalog_not_monotonic", false},
-	{store.ErrBenchCatalogSolGrade, http.StatusBadRequest, "bench_catalog_sol_grade", false},
+	{store.ErrBenchCatalogScoredSolUnrated, http.StatusBadRequest, "bench_catalog_scored_sol_unrated", false},
 	{store.ErrDecisionRefRequired, http.StatusBadRequest, "decision_ref_required", false},
 	{store.ErrBenchAreaExceptionProfileUnknown, http.StatusBadRequest, "bench_area_exception_profile_unknown", false},
 	{store.ErrBenchAreaExceptionConflict, http.StatusConflict, "bench_area_exception_action_conflict", false},

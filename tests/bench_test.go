@@ -732,11 +732,26 @@ func TestBenchCatalogAPI(t *testing.T) {
 		resp.Body.Close()
 	}
 
-	// The Sol rule moved to the server: Sol profiles accept only S+.
-	resp = put("operator-token", benchCatalogRow("codex-sol", "max", "codex", "A+", nil))
-	if resp.StatusCode != http.StatusBadRequest || benchJSON(t, resp)["error"] != "bench_catalog_sol_grade" {
-		t.Fatalf("sol non-S+ status=%d", resp.StatusCode)
+	// Sol rows carry any grade the other profiles may: there is no Sol-only
+	// S+ rule, so a Sol A+ rung is accepted like any other profile's. The codex-sol
+	// rows are dropped straight away so the ladder checks below see only their own rows.
+	dropSolRows := func() {
+		for _, query := range []string{
+			`DELETE FROM bench_grades WHERE profile='codex-sol'`,
+			`DELETE FROM bench_catalog WHERE profile='codex-sol'`,
+		} {
+			if _, err := p.Exec(context.Background(), query); err != nil {
+				t.Fatal(err)
+			}
+		}
 	}
+	resp = put("operator-token", benchCatalogRow("codex-sol", "max", "codex", "A+", nil))
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		t.Fatalf("sol A+ status=%d", resp.StatusCode)
+	}
+	resp.Body.Close()
+	dropSolRows()
 
 	// Monotonicity is enforced on the merged state, and the batch is atomic:
 	// the violating pair rolls back together with the innocent mirror row.
@@ -892,14 +907,15 @@ func TestBenchCatalogAPI(t *testing.T) {
 	if legacy["bench-cat-retired"] != nil {
 		t.Fatalf("retired catalog row leaked into grades projection")
 	}
-	// The legacy write path enforces the same Sol rule as the catalog — the
-	// mirror must not admit rows the catalog would reject.
+	// The legacy write path grades Sol rows like any other profile: codex-sol
+	// A mirrors through, and the rows are dropped again.
 	resp = benchRequest(t, h.Client(), http.MethodPut, h.URL+"/v1/bench/grades", "test-token", benchBody(t, "grades", map[string]any{
 		"profile": "codex-sol", "grade": "A", "deviation_ref": "deviation-compat-592",
 	}))
-	if resp.StatusCode != http.StatusBadRequest || benchJSON(t, resp)["error"] != "bench_catalog_sol_grade" {
-		t.Fatalf("legacy sol bypass status=%d", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("legacy sol A status=%d", resp.StatusCode)
 	}
+	dropSolRows()
 	// The legacy write path mirrors into the catalog's default row.
 	resp = benchRequest(t, h.Client(), http.MethodPut, h.URL+"/v1/bench/grades", "test-token", benchBody(t, "grades", map[string]any{
 		"profile": "bench-grade-cat-compat", "grade": "A", "boundary_version": "2026-09-23",
@@ -956,11 +972,9 @@ func benchSeedGolden(t *testing.T) []byte {
 
 // TestBenchCatalogSeed replays the operator-approved
 // catalog seed (rev 3759199, the handoffkeep #955 step-2 activation body)
-// through the real PUT handler. Its two codex-sol E6 measurement rungs ride
-// the placeholder exception — grade C with score null makes no grade claim —
-// while every Sol row that does claim a grade below S+ still fails, and a
-// date-only decided_at fails decode with the named catalog error rather than
-// invalid_context.
+// through the real PUT handler. Its two codex-sol E6 measurement rungs are
+// grade C with score null and read back unchanged; a date-only decided_at
+// fails decode with the named catalog error rather than invalid_context.
 func TestBenchCatalogSeed(t *testing.T) {
 	s := benchStore(t)
 	p := benchPool(t)
@@ -1029,25 +1043,8 @@ func TestBenchCatalogSeed(t *testing.T) {
 		}
 	}
 
-	// The exception covers only rows that make no grade claim. A scored C, an
-	// unscored A, and — on the second Sol profile — a scored S each claim a
-	// grade below S+ and must still fail.
-	for _, row := range []map[string]any{
-		benchCatalogRow("codex-sol", "low", "codex", "C", map[string]any{"score": 10.0}),
-		benchCatalogRow("codex-sol", "low", "codex", "A", nil),
-		benchCatalogRow("kiro-sol", "low", "kiro", "S", map[string]any{"score": 60.0}),
-	} {
-		resp = put(benchCatalogBody(t, row))
-		if resp.StatusCode != http.StatusBadRequest || benchJSON(t, resp)["error"] != "bench_catalog_sol_grade" {
-			t.Fatalf("sol grade claim %s/%s status=%d", row["profile"], row["grade"], resp.StatusCode)
-		}
-	}
-	// The placeholder itself round-trips: an unscored C on the other Sol
-	// profile is accepted the same way the seed rows are.
-	resp = put(benchCatalogBody(t, benchCatalogRow("kiro-sol", "low", "kiro", "C", nil)))
-	if resp.StatusCode != http.StatusOK || benchJSON(t, resp)["upserted"] != float64(1) {
-		t.Fatalf("kiro-sol placeholder status=%d", resp.StatusCode)
-	}
+	// Sol grades are not refused on the catalog path: the Sol ladder rules are
+	// covered by TestBenchSolGradeLadder in internal/store.
 
 	// The raw emit's date-only decided_at fails decode with the named error,
 	// and the detail names the field — never a bare invalid_context.

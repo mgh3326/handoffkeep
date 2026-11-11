@@ -130,13 +130,12 @@ rungs without a measured or operator-set grade. Every write must
 include a non-blank `deviation_ref`; a missing, empty, or whitespace-only
 reference rejects the whole batch. `decided_by` is server-set, and `decided_at`
 is set to the server time when omitted. `codex-sol` and `kiro-sol` accept
-`S+` or `unrated`; any other grade is rejected with `400 bench_catalog_sol_grade`, matching
-the catalog invariant. Client text in `provenance`, `notes`,
+any grade the other profiles accept. Client text in `provenance`, `notes`,
 `task_ref`, `boundary_version`, and `deviation_ref` passes through the secret
 guard before storage.
 
 A grade write cannot change a scored Sol default catalog row to `unrated`.
-It rejects the entire batch with `400 bench_catalog_sol_grade`, preserving the
+It rejects the entire batch with `400 bench_catalog_scored_sol_unrated`, preserving the
 score and both grade stores. To make that transition, an operator must explicitly
 remove the score through the catalog write path first.
 
@@ -197,8 +196,8 @@ Catalog rows have this shape:
   value is a 400. The server does not overwrite it because the caller is
   always the operator.
 - Validation requires a non-blank `deviation_ref`. Measured Sol placements
-  (`codex-sol`, `kiro-sol`) require `S+`. Unscored `unrated` rows and legacy
-  C/null placeholders are also accepted. Within one profile, a higher known
+  (`codex-sol`, `kiro-sol`) carry any grade, like the other profiles. A grade
+  write may not turn a scored Sol default row `unrated`. Within one profile, a higher known
   effort rung may not carry a worse grade. Unrated rows do not participate in
   this comparison. Violations roll back the whole batch.
 - `GET /v1/bench/catalog` returns non-retired rows including `consult_only`.
@@ -244,7 +243,7 @@ data rollback because it cannot reconstruct the previous grade decisions.
 | 400 | `{"error":"deviation_ref_required"}` | Grade write has no usable deviation reference |
 | 400 | `{"error":"decided_by_required"}` | Catalog write has no usable `decided_by` |
 | 400 | `{"error":"bench_catalog_not_monotonic"}` | Catalog write would put a worse grade on a higher effort rung |
-| 400 | `{"error":"bench_catalog_sol_grade"}` | Sol row violates the measured `S+` or unscored-placeholder rule |
+| 400 | `{"error":"bench_catalog_scored_sol_unrated"}` | Grade write would turn a scored Sol default row `unrated` |
 | 400 | `{"error":"secret_like_content","pattern":"<name>"}` | Secret guard rejected client text |
 | 401 | `{"error":"unauthorized"}` | Missing or unknown bearer token |
 | 403 | `{"error":"operator_required"}` | Catalog write without the operator, operator-desk or panewire-design token |
