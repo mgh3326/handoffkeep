@@ -75,12 +75,11 @@ var (
 	// a profile whose grade falls as effort rises (higher effort must not
 	// degrade to a worse grade).
 	ErrBenchCatalogMonotonicity = errors.New("bench_catalog_not_monotonic")
-	// ErrBenchCatalogSolGrade enforces the Sol-profile rule on the
-	// server: Sol profiles may only ever be graded S+. The catalog write path
-	// alone admits one placeholder shape that makes no grade claim — grade C
-	// with score null — for the #594 E6 measurement rungs; any real
-	// claim below S+ (a scored C, or an unscored A/B/S) still fails here.
-	ErrBenchCatalogSolGrade = errors.New("bench_catalog_sol_grade")
+	// ErrBenchCatalogScoredSolUnrated refuses a grade write that would turn a
+	// scored Sol default row unrated. The legacy grade mirror must not erase a
+	// measured row; the score is removed through the catalog write path first.
+	// No other Sol grade rule exists (see benchSolProfiles).
+	ErrBenchCatalogScoredSolUnrated = errors.New("bench_catalog_scored_sol_unrated")
 	// ErrDecisionRefRequired rejects an area exception row without the
 	// decision record or task comment that approved it — an exception is
 	// never automatic.
@@ -1479,16 +1478,10 @@ var benchGateValues = map[string]bool{"default": true, "escalation": true, "cons
 // sort after the known rungs.
 var benchEffortRanks = map[string]int{"low": 0, "medium": 1, "high": 2, "xhigh": 3, "max": 4}
 
-// benchSolProfiles restricts measured Sol placements to S+. Unrated rows
-// make no grade claim. Catalog writes also accept the legacy C/null seed
-// shape during the transition to explicit unrated placeholders.
+// benchSolProfiles marks the Sol profiles whose scored default row a grade
+// write may not turn unrated (ErrBenchCatalogScoredSolUnrated). Sol rows
+// otherwise carry any grade the other profiles may.
 var benchSolProfiles = map[string]bool{"codex-sol": true, "kiro-sol": true}
-
-// benchSolPlaceholder accepts an unscored unrated row or the legacy C/null
-// placeholder. A scored row stays subject to the S+ rule.
-func benchSolPlaceholder(x BenchCatalogEntry) bool {
-	return (x.Grade == "unrated" || x.Grade == "C") && x.Score == nil
-}
 
 func benchGradeRank(grade string) int {
 	switch grade {
@@ -1899,11 +1892,10 @@ func (s *Store) UpsertBenchGrades(ctx context.Context, xs []BenchGrade) (int, er
 		if !validBenchGrade(x) {
 			return 0, errors.New("invalid bench grade")
 		}
-		// The legacy path mirrors into the catalog, so it must not admit rows
-		// the catalog itself would reject — the Sol rule applies here too.
-		if benchSolProfiles[x.Profile] && x.Grade != "S+" && x.Grade != "unrated" {
-			return 0, ErrBenchCatalogSolGrade
-		}
+		// Sol rows carry any grade the other profiles may. The S+-only rule that
+		// once applied here is gone: keeping Sol off routine work is a catalog
+		// choice (gate/pool order), not a store rule. Placement's "lowest grade
+		// ≥ task" makes an S-graded Sol the default seat for S tasks.
 		if err := guard.Reject(x.BoundaryVersion); err != nil {
 			return 0, err
 		}
@@ -1927,7 +1919,7 @@ func (s *Store) UpsertBenchGrades(ctx context.Context, xs []BenchGrade) (int, er
 			return 0, err
 		}
 		if tag.RowsAffected() == 0 {
-			return 0, ErrBenchCatalogSolGrade
+			return 0, ErrBenchCatalogScoredSolUnrated
 		}
 	}
 	return len(xs), tx.Commit(ctx)
@@ -1985,9 +1977,8 @@ func (s *Store) UpsertBenchCatalog(ctx context.Context, xs []BenchCatalogEntry) 
 		if !validBenchCatalogEntry(x) {
 			return 0, errors.New("invalid bench catalog entry")
 		}
-		if benchSolProfiles[x.Profile] && x.Grade != "S+" && !benchSolPlaceholder(x) {
-			return 0, ErrBenchCatalogSolGrade
-		}
+		// No Sol grade rule here: a Sol row may carry any grade (see
+		// UpsertBenchGrades for the one Sol guard that remains).
 		for _, value := range []*string{x.GateReason, x.BenchmarkSource, x.BenchmarkAnnotation} {
 			if value != nil {
 				if err := guard.Reject(*value); err != nil {

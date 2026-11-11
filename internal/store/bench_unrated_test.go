@@ -15,13 +15,8 @@ func TestBenchUnratedValidation(t *testing.T) {
 		t.Fatal("grade store rejected unrated")
 	}
 	x := BenchCatalogEntry{Profile: "codex-sol", Effort: "high", ModelID: "gpt-6.1-sol", Pool: "codex", Grade: "unrated", Gate: "default", DeviationRef: "hk:task/2639", DecidedBy: "operator"}
-	if !validBenchCatalogEntry(x) || !benchSolPlaceholder(x) {
+	if !validBenchCatalogEntry(x) {
 		t.Fatal("catalog rejected an unmeasured unrated Sol rung")
-	}
-	score := 50.0
-	x.Score = &score
-	if benchSolPlaceholder(x) {
-		t.Fatal("scored Sol rung was treated as an unrated placeholder")
 	}
 	g.Grade, x.Grade = "unknown", "unknown"
 	if validBenchGrade(g) || validBenchCatalogEntry(x) {
@@ -29,6 +24,27 @@ func TestBenchUnratedValidation(t *testing.T) {
 	}
 	if benchGradeRank("unrated") <= benchGradeRank("C") {
 		t.Fatal("unrated was ranked as a measured grade")
+	}
+}
+
+// A Sol profile carries any grade the other profiles may: a ladder that tops
+// out at S is accepted, and a Sol ladder that falls off is still refused by
+// the monotonicity rule.
+func TestBenchSolGradeLadder(t *testing.T) {
+	pool, _ := testdb.SchemaPool(t, "bench_sol_ladder")
+	s := &Store{pool: pool}
+	ctx := t.Context()
+	if err := s.migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	row := func(effort, grade string) BenchCatalogEntry {
+		return BenchCatalogEntry{Profile: "codex-sol", Effort: effort, ModelID: "sol-model", Pool: "codex", Grade: grade, Gate: "default", DeviationRef: "hk:task/3920", DecidedBy: "operator", DecidedAt: time.Date(2026, 11, 11, 0, 0, 0, 0, time.UTC)}
+	}
+	if _, err := s.UpsertBenchCatalog(ctx, []BenchCatalogEntry{row("low", "B"), row("medium", "A"), row("high", "A+"), row("max", "S")}); err != nil {
+		t.Fatalf("sol ladder topping out at S: %v", err)
+	}
+	if _, err := s.UpsertBenchCatalog(ctx, []BenchCatalogEntry{row("max", "B")}); !errors.Is(err, ErrBenchCatalogMonotonicity) {
+		t.Fatalf("non-monotonic sol ladder: %v", err)
 	}
 }
 
@@ -109,7 +125,7 @@ func TestBenchUnratedSolGradeMirrorPreservesScore(t *testing.T) {
 				{Profile: "earlier-in-batch", Grade: "unrated", DeviationRef: "hk:task/2639", DecidedBy: "operator"},
 				grade,
 			})
-			if !errors.Is(err, ErrBenchCatalogSolGrade) {
+			if !errors.Is(err, ErrBenchCatalogScoredSolUnrated) {
 				t.Fatalf("scored Sol became unrated through the grade mirror: %v", err)
 			}
 			afterCatalog, err := s.ListBenchCatalog(ctx, "", false)
