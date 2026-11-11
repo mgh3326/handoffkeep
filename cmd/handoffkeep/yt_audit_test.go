@@ -209,8 +209,18 @@ func TestYouTrackAudit(t *testing.T) {
 	}
 	fake.add(issue, "4-2", rendered, ytaBot)
 	cMissing := comment(bound, "never copied")
-	cSpaced := comment(bound, "spaced body")
+	cSpaced := comment(bound, "spaced  body")
 	fake.add(issue, "4-3", "spaced body\n", "1-7")
+	cTrailing := comment(bound, "trimmed trailing ")
+	fake.add(issue, "4-13", "trimmed trailing", "1-7")
+	cNewline := comment(bound, "trimmed newline\n")
+	fake.add(issue, "4-14", "trimmed newline", "1-7")
+	cLeading := comment(bound, "\ntrimmed leading")
+	fake.add(issue, "4-15", "trimmed leading", "1-7")
+	var cEmpty int64
+	if err := conn.QueryRow(ctx, `INSERT INTO task_comments(task_id,body,author,created_at) VALUES($1,$2,'worker',now()) RETURNING id`, bound, " \n ").Scan(&cEmpty); err != nil {
+		t.Fatal(err)
+	}
 	cDup := comment(bound, "twice")
 	fake.add(issue, "4-4", "twice", ytaBot)
 	fake.add(issue, "4-5", "twice", ytaBot)
@@ -299,9 +309,9 @@ func TestYouTrackAudit(t *testing.T) {
 			got   []int64
 			want  []int64
 		}{
-			{"present", ytaComments(c.Present), []int64{cImported, cOp, cMirror, cMarked, cNoise}},
+			{"present", ytaComments(c.Present), []int64{cImported, cOp, cTrailing, cNewline, cLeading, cMirror, cMarked, cNoise}},
 			{"adopted_unmatched", ytaComments(c.AdoptedUnmatched), []int64{cAdopted}},
-			{"missing_in_yt", ytaComments(c.MissingInYT), []int64{cMissing, cSpaced}},
+			{"missing_in_yt", ytaComments(c.MissingInYT), []int64{cMissing, cSpaced, cEmpty}},
 			{"duplicate", ytaComments(c.Duplicate), []int64{cDup}},
 			{"no_project", ytaTasks(c.Unbound.NoProject), []int64{noProject}},
 			{"no_issue", ytaTasks(c.Unbound.NoIssue), []int64{noIssue}},
@@ -330,7 +340,7 @@ func TestYouTrackAudit(t *testing.T) {
 		if c.YTOnlyBot.Count != 1 || c.YTOnlyBot.Items[0].YTIDs[0] != "4-6" || !slices.Equal(human, []string{"4-3", "4-9"}) {
 			t.Errorf("%s: yt_only bot %+v human %v, want 4-6 and 4-3 4-9", name, c.YTOnlyBot, human)
 		}
-		if len(r.Projects) != 2 || r.Projects[0].Project != "" || r.Projects[1].Project != project || r.Projects[1].MissingInYT.Count != 2 {
+		if len(r.Projects) != 2 || r.Projects[0].Project != "" || r.Projects[1].Project != project || r.Projects[1].MissingInYT.Count != 3 {
 			t.Errorf("%s: projects %+v", name, r.Projects)
 		}
 	}
@@ -364,6 +374,13 @@ func TestYouTrackAudit(t *testing.T) {
 		if n != 1 {
 			t.Errorf("comment %d has %d prepared ops with its key and link, want 1", c, n)
 		}
+	}
+	var emptyOps int
+	if err := conn.QueryRow(ctx, `SELECT count(*) FROM yt_comment_write_links WHERE comment_id=$1`, cEmpty).Scan(&emptyOps); err != nil {
+		t.Fatal(err)
+	}
+	if emptyOps != 0 {
+		t.Errorf("empty trimmed comment %d was enqueued", cEmpty)
 	}
 	var ops int
 	if err := conn.QueryRow(ctx, `SELECT count(*) FROM yt_write_ops`).Scan(&ops); err != nil {

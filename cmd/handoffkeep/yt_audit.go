@@ -345,6 +345,10 @@ func (a *ytAuditor) auditTask(ctx context.Context, taskID int64, counts []*ytAud
 	item := func(x ytwrite.AuditCopies) ytAuditItem {
 		return ytAuditItem{TaskID: taskID, CommentID: x.CommentID, OpID: x.OpID, YTIDs: x.YTIDs}
 	}
+	bodyByCommentID := make(map[int64]string, len(hk.Comments))
+	for _, c := range hk.Comments {
+		bodyByCommentID[c.ID] = c.Body
+	}
 	each(func(c *ytAuditCounts) {
 		c.TasksAudited++
 		for _, x := range got.Present {
@@ -373,6 +377,9 @@ func (a *ytAuditor) auditTask(ctx context.Context, taskID int64, counts []*ytAud
 		return nil
 	}
 	for _, x := range missing {
+		if strings.TrimSpace(bodyByCommentID[x.CommentID]) == "" {
+			continue
+		}
 		status, op, err := a.st.EnqueueYTAuditComment(ctx, x.CommentID)
 		switch {
 		case err != nil:

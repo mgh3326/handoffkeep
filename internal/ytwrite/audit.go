@@ -1,6 +1,9 @@
 package ytwrite
 
-import "sort"
+import (
+	"sort"
+	"strings"
+)
 
 // The comment audit (hk 3899, `handoffkeep youtrack audit`) compares a bound
 // task's hk comments with the comments on its YouTrack issue. It decides
@@ -13,8 +16,8 @@ type AuditComment struct {
 	Body string
 	// OpID is the comment's own comment_append op on this issue (0: none).
 	// A YouTrack comment in that op's rendered form (RenderedOpID) is its
-	// copy; any comment whose text is exactly Body is one too (the import
-	// wrote the body as it is).
+	// copy. An unlinked imported comment may also match its body after
+	// strings.TrimSpace, because YouTrack trims comment text.
 	OpID int64
 	// LinkedYTIDs are the YouTrack comments a recorded link names as its
 	// copies (the legacy mirror push's youtrack_comment_links id): each is
@@ -56,13 +59,13 @@ type CommentAudit struct {
 // evidence first: a YouTrack comment whose id is in an hk comment's
 // LinkedYTIDs copies that comment; else one in the rendered form of op N
 // (RenderedOpID) copies the hk comment whose OpID is N; else one whose
-// legacy marker names hk comment N (legacy, may be nil: the legacy mirror's
-// own reading of a text) copies comment N, unless its text is also another
-// comment's exact body (AmbiguousCopy); else it copies an hk comment
-// whose body equals its text exactly, not trimmed or normalised: equal bodies are shared out one copy
-// each in comment id order, first to the comments with no copy yet, and a
-// copy left over goes to the last of them, which makes that one a
-// duplicate. botID is the bot's YouTrack user id.
+// legacy marker names hk comment N copies comment N, unless its text is also
+// another comment's exact body (AmbiguousCopy); else exact bodies match. For
+// unlinked imported comments only, surrounding whitespace is ignored because
+// YouTrack trims comment text. If that makes one remote body match distinct
+// hk bodies, the copy is ambiguous. Equal bodies are shared in comment id
+// order; extra copies make the last comment a duplicate. botID is the bot's
+// YouTrack user id.
 func AuditComments(hk []AuditComment, yt []RemoteComment, botID string, legacy func(text string) (int64, bool)) CommentAudit {
 	hk = append([]AuditComment(nil), hk...)
 	sort.Slice(hk, func(i, j int) bool { return hk[i].ID < hk[j].ID })
@@ -87,6 +90,8 @@ func AuditComments(hk []AuditComment, yt []RemoteComment, botID string, legacy f
 	byLink := map[string]int{}
 	byID := map[int64]int{}
 	byBody := map[string][]int{}
+	byTrimmedBody := map[string][]int{}
+	byTrimmedImportedBody := map[string][]int{}
 	for i, c := range hk {
 		byID[c.ID] = i
 		if c.OpID > 0 {
@@ -96,6 +101,10 @@ func AuditComments(hk []AuditComment, yt []RemoteComment, botID string, legacy f
 			byLink[id] = i
 		}
 		byBody[c.Body] = append(byBody[c.Body], i)
+		byTrimmedBody[strings.TrimSpace(c.Body)] = append(byTrimmedBody[strings.TrimSpace(c.Body)], i)
+		if c.OpID == 0 && len(c.LinkedYTIDs) == 0 {
+			byTrimmedImportedBody[strings.TrimSpace(c.Body)] = append(byTrimmedImportedBody[strings.TrimSpace(c.Body)], i)
+		}
 	}
 	var out CommentAudit
 	unsettled := map[int64]bool{}
@@ -140,6 +149,23 @@ func AuditComments(hk []AuditComment, yt []RemoteComment, botID string, legacy f
 	}
 	for _, c := range byText {
 		group := byBody[c.Text]
+		trimmed := strings.TrimSpace(c.Text)
+		ambiguityGroup := byTrimmedBody[trimmed]
+		// A trimmed collision is ambiguous across all hk comments, even if
+		// one candidate has op or mirror evidence. Trimming itself remains
+		// attribution evidence only for unlinked imported comments.
+		if len(ambiguityGroup) > 1 && hasDistinctBodies(hk, ambiguityGroup) {
+			ids := make([]int64, 0, len(ambiguityGroup))
+			for _, i := range ambiguityGroup {
+				ids = append(ids, hk[i].ID)
+				unsettled[hk[i].ID] = true
+			}
+			out.AmbiguousCopy = append(out.AmbiguousCopy, AuditAmbiguous{YTID: c.ID, CommentIDs: ids})
+			continue
+		}
+		if len(group) == 0 {
+			group = byTrimmedImportedBody[trimmed]
+		}
 		if len(group) == 0 {
 			if botID != "" && c.AuthorID == botID {
 				out.YTOnlyBot = append(out.YTOnlyBot, c.ID)
@@ -171,4 +197,17 @@ func AuditComments(hk []AuditComment, yt []RemoteComment, botID string, legacy f
 		}
 	}
 	return out
+}
+
+func hasDistinctBodies(hk []AuditComment, group []int) bool {
+	if len(group) < 2 {
+		return false
+	}
+	body := hk[group[0]].Body
+	for _, i := range group[1:] {
+		if hk[i].Body != body {
+			return true
+		}
+	}
+	return false
 }
