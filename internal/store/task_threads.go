@@ -147,15 +147,15 @@ type TaskThreadOutcome int
 const (
 	// TaskThreadSent: Discord accepted it.
 	TaskThreadSent TaskThreadOutcome = iota + 1
-	// TaskThreadRetry: Discord certainly did not take it (a 5xx or 429
-	// answer, or no connection); it is sent again later.
+	// TaskThreadRetry: Discord certainly did not take it (a 429 answer, or
+	// no connection); it is sent again later.
 	TaskThreadRetry
 	// TaskThreadRejected: Discord refused it in a way a retry cannot fix (a
 	// 4xx such as a deleted webhook or thread); the row stops.
 	TaskThreadRejected
-	// TaskThreadUnknown: the request may have reached Discord without an
-	// answer coming back. A create leaves the row needs_operator; a line
-	// counts as posted.
+	// TaskThreadUnknown: the request may have reached Discord without a
+	// usable answer coming back (a 5xx, a timeout). A create leaves the row
+	// needs_operator; a line counts as posted.
 	TaskThreadUnknown
 )
 
@@ -219,7 +219,7 @@ func (s *Store) QueueTaskThreads(ctx context.Context, now time.Time, projects []
 	queued := 0
 	for _, x := range starts {
 		tag, err := tx.Exec(ctx, `INSERT INTO task_thread_deliveries(task_id,destination,thread_name,start_event_id,since,last_event_id,state,next_attempt_at,created_at,updated_at)
-			VALUES($1,$2,$3,$4,$5,$4,'`+TaskThreadPending+`',$6,$6,$6) ON CONFLICT(task_id,destination) DO NOTHING`,
+			VALUES($1,$2,$3,$4,$5,$4::bigint-1,'`+TaskThreadPending+`',$6,$6,$6) ON CONFLICT(task_id,destination) DO NOTHING`,
 			x.taskID, dest, TaskThreadName(x.taskID, x.title), x.eventID, x.at, now)
 		if err != nil {
 			return 0, err
@@ -432,7 +432,7 @@ func loadTaskThreadLine(ctx context.Context, tx pgx.Tx, x *TaskThreadItem, src i
 		x.Type, x.DecisionID = TaskLineDecisionAnswered, ref
 		var at *time.Time
 		if err := tx.QueryRow(ctx, `SELECT coalesce(r.answered_by,''),r.answered_at,coalesce((SELECT x.channel FROM decision_resolutions x
-				WHERE x.task_id=r.task_id AND x.request_id=r.source_ref AND x.kind='answered' ORDER BY x.committed_at DESC,x.resolution_id DESC LIMIT 1),'')
+				WHERE x.task_id=r.task_id AND (x.request_id=r.source_ref OR x.revision_request_id=r.source_ref) AND x.kind='answered' ORDER BY x.committed_at DESC,x.resolution_id DESC LIMIT 1),'')
 			FROM decision_requests r WHERE r.id=$1`, ref).Scan(&x.AnsweredBy, &at, &x.Channel); err != nil {
 			return err
 		}
@@ -471,7 +471,7 @@ func (s *Store) SettleTaskThread(ctx context.Context, now time.Time, x TaskThrea
 			if !validThreadID(res.ThreadID) {
 				return false, errors.New("task thread create settled without a thread id")
 			}
-			set, args = `state='`+TaskThreadActive+`',thread_id=$5,last_event_id=start_event_id,attempts=0,last_error=''`, append(args, res.ThreadID)
+			set, args = `state='`+TaskThreadActive+`',thread_id=$5,last_event_id=start_event_id-1,attempts=0,last_error=''`, append(args, res.ThreadID)
 		case strings.HasPrefix(x.Key, "e:"):
 			set = `last_event_id=greatest(last_event_id,substr(claim_key,3)::bigint),attempts=0,last_error=''`
 		default:

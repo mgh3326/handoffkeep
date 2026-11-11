@@ -264,9 +264,11 @@ func (d DiscordWebhook) threadEndpoint(threadID string) (string, error) {
 }
 
 // taskThreadOutcome retries only what Discord certainly did not take: a 429
-// or 5xx answer, or a connection never made. A 4xx is a refusal a retry
-// cannot fix. Anything else (timeout, reset, a 2xx whose body could not be
-// read) may have created the message, so it is never sent again.
+// (the rate limiter refuses before the request is handled) or a connection
+// never made. Another 4xx is a refusal a retry cannot fix. Anything else
+// may have created the message and is never sent again: a 5xx (a gateway
+// can answer 502 after the post was made), a timeout or reset, a 2xx whose
+// body could not be read.
 func taskThreadOutcome(err error) store.TaskThreadOutcome {
 	if err == nil {
 		return store.TaskThreadSent
@@ -274,9 +276,9 @@ func taskThreadOutcome(err error) store.TaskThreadOutcome {
 	var status discordStatusError
 	var op *net.OpError
 	switch {
-	case errors.As(err, &status) && (status.status == http.StatusTooManyRequests || status.status >= 500):
+	case errors.As(err, &status) && status.status == http.StatusTooManyRequests:
 		return store.TaskThreadRetry
-	case errors.As(err, &status):
+	case errors.As(err, &status) && status.status < 500:
 		return store.TaskThreadRejected
 	case errors.As(err, &op) && op.Op == "dial":
 		return store.TaskThreadRetry

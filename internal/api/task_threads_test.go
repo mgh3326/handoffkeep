@@ -253,20 +253,23 @@ func TestTaskThreadRetriedLineIsNotDuplicated(t *testing.T) {
 	f.take()
 	pr := "https://github.com/example/app/pull/8"
 	taskEvent(t, st, store.TaskSourceEvent{Source: store.SourceMergewakePR, SourceRef: pr, TaskID: x.ID})
-	// Discord answers 500 to the first line post: it certainly did not take it.
-	f.answer = func(n int, _ http.ResponseWriter) int {
-		if n == 0 {
-			return http.StatusInternalServerError
+	// A 429 without Retry-After on the first line post: Discord certainly did
+	// not take it, and it is retried after the backoff.
+	failed := false
+	f.answer = func(int, http.ResponseWriter) int {
+		if !failed {
+			failed = true
+			return http.StatusTooManyRequests
 		}
 		return 0
 	}
 	p.Drain(ctx)
-	if calls := f.take(); len(calls) != 1 || calls[0].Status != http.StatusInternalServerError {
+	if calls := f.take(); len(calls) != 1 || calls[0].Status != http.StatusTooManyRequests {
 		t.Fatalf("first attempt %+v", calls)
 	}
 	state, _, _ := st.GetTaskThread(ctx, x.ID)
 	if state.Attempts != 1 || !state.NextAttemptAt.After(clock.Now()) || state.ClaimKey != "" {
-		t.Fatalf("after the 500: %+v", state)
+		t.Fatalf("after the 429: %+v", state)
 	}
 	clock.Advance(time.Hour)
 	p.Drain(ctx)
@@ -449,7 +452,8 @@ func TestTaskThreadOutcome(t *testing.T) {
 	}{
 		{nil, store.TaskThreadSent},
 		{discordStatusError{status: http.StatusTooManyRequests}, store.TaskThreadRetry},
-		{discordStatusError{status: http.StatusBadGateway}, store.TaskThreadRetry},
+		{discordStatusError{status: http.StatusBadGateway}, store.TaskThreadUnknown},
+		{discordStatusError{status: http.StatusInternalServerError}, store.TaskThreadUnknown},
 		{discordStatusError{status: http.StatusNotFound}, store.TaskThreadRejected},
 		{errDiscordNoMessageID, store.TaskThreadUnknown},
 		{context.DeadlineExceeded, store.TaskThreadUnknown},
@@ -492,5 +496,23 @@ func TestTaskThreadName(t *testing.T) {
 	long := store.TaskThreadName(42, strings.Repeat("가", 200))
 	if n := len([]rune(long)); n != store.TaskThreadNameMaxRunes {
 		t.Fatalf("long name has %d runes", n)
+	}
+}
+
+// A 5xx may come from a gateway after Discord made the post: a line is not
+// sent again, and a create is never repeated.
+func TestTaskThread5xxIsNeverResent(t *testing.T) {
+	f := newFakeForum(t)
+	f.answer = func(int, http.ResponseWriter) int { return http.StatusBadGateway }
+	clock := &testClock{at: time.Date(2026, 11, 11, 0, 0, 0, 0, time.UTC)}
+	create := store.TaskThreadItem{TaskID: 2, Destination: store.TaskThreadDestinationDiscord, Key: store.TaskThreadCreate, Type: store.TaskThreadCreate, ThreadName: "#2 x"}
+	fs := &fakeThreadStore{items: []store.TaskThreadItem{lineItem(1), create}}
+	p := threadPoster(fs, f, clock)
+	p.Drain(t.Context())
+	if len(fs.settled) != 2 || fs.settled[0].Outcome != store.TaskThreadUnknown || fs.settled[1].Outcome != store.TaskThreadUnknown {
+		t.Fatalf("settled %+v", fs.settled)
+	}
+	if calls := f.take(); len(calls) != 2 {
+		t.Fatalf("calls %+v, want one each", calls)
 	}
 }

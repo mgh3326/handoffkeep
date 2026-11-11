@@ -49,7 +49,7 @@ func TestTaskThreadQueueEpochAndProjects(t *testing.T) {
 		t.Fatalf("second pass queued %d err=%v", n, err)
 	}
 	x := threadState(t, s, in.ID)
-	if x.State != TaskThreadPending || x.ThreadID != nil || x.LastEventID != x.StartEventID || !strings.HasPrefix(x.ThreadName, "#") {
+	if x.State != TaskThreadPending || x.ThreadID != nil || x.LastEventID != x.StartEventID-1 || !strings.HasPrefix(x.ThreadName, "#") {
 		t.Fatalf("queued row %+v", x)
 	}
 	for _, id := range []int64{before.ID, out.ID} {
@@ -58,7 +58,7 @@ func TestTaskThreadQueueEpochAndProjects(t *testing.T) {
 		}
 	}
 	// A second start of the same task owes nothing more.
-	if _, err := s.TransitionTask(ctx, in.ID, StateBacklog, "tester", "park", nil, ""); err != nil {
+	if _, err := s.TransitionTask(ctx, in.ID, StateUnstarted, "tester", "park", nil, ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.TransitionTask(ctx, in.ID, StateDeveloping, "tester", "again", nil, "restarted"); err != nil {
@@ -114,7 +114,7 @@ func TestTaskThreadClaimSettleAndRecover(t *testing.T) {
 		t.Fatal(err)
 	}
 	x := threadState(t, s, task.ID)
-	if x.State != TaskThreadActive || x.ThreadID == nil || *x.ThreadID != "9001" || x.Attempts != 0 || x.LastEventID != x.StartEventID {
+	if x.State != TaskThreadActive || x.ThreadID == nil || *x.ThreadID != "9001" || x.Attempts != 0 || x.LastEventID != x.StartEventID-1 {
 		t.Fatalf("after create %+v", x)
 	}
 	// Settling a claim that is no longer held fails and changes nothing.
@@ -194,5 +194,39 @@ func TestTaskThreadUnknownCreateNeedsOperator(t *testing.T) {
 	send(t, s, TaskSourceEvent{Source: SourceMergewakePR, SourceRef: testPR(302), TaskID: a.ID})
 	if x, found, _ := s.ClaimTaskThread(ctx, now.Add(24*time.Hour)); found {
 		t.Fatalf("claimed %+v after needs_operator", x)
+	}
+}
+
+// A PR event that itself starts the task is the thread's first line.
+func TestTaskThreadStartThatIsAPREvent(t *testing.T) {
+	s := schemaStore(t, "task_threads_prstart")
+	ctx := t.Context()
+	projects := []string{testProjectName}
+	now := time.Now().UTC()
+	if _, err := s.QueueTaskThreads(ctx, now, projects); err != nil {
+		t.Fatal(err)
+	}
+	p := testProjectName
+	x, err := s.CreateTask(ctx, Task{Lane: relaneLane(t, "thread"), Title: "started by its PR", Kind: "implement", Priority: 5, CreatedBy: "tester", Project: &p})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pr := testPR(303)
+	if res := send(t, s, TaskSourceEvent{Source: SourceMergewakePR, SourceRef: pr, TaskID: x.ID}); !res.Applied || res.State != StateReviewing {
+		t.Fatalf("pr event %+v", res)
+	}
+	if n, err := s.QueueTaskThreads(ctx, now, projects); err != nil || n != 1 {
+		t.Fatalf("queued %d err=%v", n, err)
+	}
+	create, _, err := s.ClaimTaskThread(ctx, now)
+	if err != nil || create.Type != TaskThreadCreate {
+		t.Fatalf("create %+v err=%v", create, err)
+	}
+	if _, err = s.SettleTaskThread(ctx, now, create, TaskThreadResult{Outcome: TaskThreadSent, ThreadID: "9100"}); err != nil {
+		t.Fatal(err)
+	}
+	line, found, err := s.ClaimTaskThread(ctx, now)
+	if err != nil || !found || line.Type != TaskLinePROpened || line.PR != pr || line.Key != "e:"+strconv.FormatInt(threadState(t, s, x.ID).StartEventID, 10) {
+		t.Fatalf("first line %+v found=%v err=%v", line, found, err)
 	}
 }

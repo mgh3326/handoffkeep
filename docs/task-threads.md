@@ -64,14 +64,15 @@ so a 2xx answer contains the new thread.
 | `pending` | A thread is owed and is not yet created. |
 | `creating` | A create is claimed and in flight. |
 | `active` | The thread exists. Lines are posted to it. |
-| `needs_operator` | A create may have reached Discord but its answer was lost. Either the request timed out, or the worker died after Discord's 2xx and before the commit. A webhook cannot list a forum's threads (only a bot can), so hk cannot find out whether the thread exists. hk posts nothing more for the task, and it never creates a second thread. |
+| `needs_operator` | A create may have reached Discord but its answer was lost. The answer was a 5xx, the request timed out, or the worker died after Discord's 2xx and before the commit. A webhook cannot list a forum's threads (only a bot can), so hk cannot find out whether the thread exists. hk posts nothing more for the task, and it never creates a second thread. |
 | `failed` | Discord refused the request with a 4xx other than 429, for example because the webhook or the thread was deleted, or the retries ran out (about a day). |
 
-A 5xx answer, a 429 answer or a failed connection means Discord did not take
-the message, so hk sends it again later. If a line's outcome is unknown (a
-timeout, or a claim older than two minutes left by a dead worker), hk counts
-the line as posted and does not send it again. A line can be lost this way,
-but it is never posted twice.
+A 429 answer or a failed connection means Discord did not take the message,
+so hk sends it again later. Any other outcome is unknown: a 5xx answer (a
+gateway can answer 502 after Discord made the post), a timeout, or a claim
+older than two minutes left by a dead worker. hk counts such a line as posted
+and does not send it again, and such a create leaves the row
+`needs_operator`. A line can be lost this way, but it is never posted twice.
 
 A deploy failure is posted only when it is a `deploys` row (written by
 `StartDeploy` and `FinishDeploy`) whose `deploy_changes` include a change of
