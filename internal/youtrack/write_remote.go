@@ -42,7 +42,10 @@ type WriteRemote struct {
 	Now func() time.Time
 }
 
-var _ ytwrite.Remote = (*WriteRemote)(nil)
+var (
+	_ ytwrite.Remote      = (*WriteRemote)(nil)
+	_ ytwrite.IssueRemote = (*WriteRemote)(nil)
+)
 
 // NewWriteRemote wraps a configured client.
 func NewWriteRemote(c *Client) *WriteRemote {
@@ -214,4 +217,72 @@ func (r *WriteRemote) GetIssue(ctx context.Context, issueID string) (Issue, erro
 		return Issue{}, fmt.Errorf("youtrack GET issue %s: decode: %w", issueID, err)
 	}
 	return out, nil
+}
+
+// taskIssueSearchTop is the page an issue search asks for. A task has one
+// issue; a full page cannot be proven complete and is an error.
+const taskIssueSearchTop = 50
+
+// FindTaskIssues searches the project for the issues whose hk ID is taskID in
+// one request (issue_create, hk 3898), checking each hit against the project
+// id and the field value as FindIssueByField does.
+func (r *WriteRemote) FindTaskIssues(ctx context.Context, projectShort, projectID string, taskID int64) ([]ytwrite.RemoteIssue, error) {
+	field := DefaultSchema().HKIDField
+	data, readErr, err := r.send(ctx, http.MethodGet, "/api/issues", issueFieldQuery(projectShort, field, taskID, taskIssueSearchTop), nil)
+	if err != nil {
+		return nil, err
+	}
+	if readErr != nil {
+		return nil, readErr
+	}
+	var page []Issue
+	if err := json.Unmarshal(data, &page); err != nil {
+		return nil, fmt.Errorf("youtrack GET /api/issues: decode: %w", err)
+	}
+	if len(page) >= taskIssueSearchTop {
+		return nil, fmt.Errorf("youtrack GET /api/issues: %d or more issues match hk ID %d; the search is not complete", taskIssueSearchTop, taskID)
+	}
+	out := []ytwrite.RemoteIssue{}
+	for _, issue := range page {
+		if !issueHasField(issue, projectID, field, taskID) {
+			continue
+		}
+		hit := ytwrite.RemoteIssue{ID: issue.ID, Readable: issue.IDReadable, Summary: issue.Summary, Description: issue.Description}
+		if issue.Project != nil {
+			hit.ProjectID = issue.Project.ID
+		}
+		out = append(out, hit)
+	}
+	return out, nil
+}
+
+// CreateIssue makes one POST /api/issues with the project, summary,
+// description and only the hk ID and hk 프로젝트 fields (issue_create): the
+// other fields are a later op's, and leaving them out keeps their usual 4xx
+// causes out of the create.
+func (r *WriteRemote) CreateIssue(ctx context.Context, in ytwrite.IssueCreate) (string, error) {
+	schema := DefaultSchema()
+	fields := []CustomField{IntField(schema.HKIDField, int(in.TaskID))}
+	if in.HKProject != "" {
+		fields = append(fields, EnumField(schema.ProjectField, in.HKProject))
+	}
+	body := issueBody{Summary: in.Summary, Description: in.Description, CustomFields: fields}
+	body.Project.ID = in.ProjectID
+	q := url.Values{}
+	q.Set("fields", "id")
+	data, readErr, err := r.send(ctx, http.MethodPost, "/api/issues", q, body)
+	if err != nil {
+		return "", err
+	}
+	if readErr != nil {
+		// The issue may exist; the id is unknown.
+		return "", nil
+	}
+	var out struct {
+		ID string `json:"id"`
+	}
+	if json.Unmarshal(data, &out) != nil {
+		return "", nil
+	}
+	return out.ID, nil
 }

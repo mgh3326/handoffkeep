@@ -85,6 +85,10 @@ const (
 // comment appended to a mapped task's issue.
 const KindCommentAppend = "comment_append"
 
+// KindIssueCreate (kind_issue.go, hk 3898) creates a task's YouTrack issue,
+// or adopts the one issue that already carries the task's hk ID.
+const KindIssueCreate = "issue_create"
+
 // Reasons a caller can read on a Result. They are stable codes.
 const (
 	ReasonDispatched        = "dispatched"
@@ -104,10 +108,21 @@ const (
 	ReasonReconcileFailed   = "reconcile_failed"
 	ReasonOperatorNotDone   = "operator_not_applied"
 	ReasonUnsupportedKind   = "unsupported_kind"
+	// ReasonNotSent: a read a kind makes before its write failed, so nothing
+	// was sent; the op is prepared again (NotSentError).
+	ReasonNotSent = "not_sent"
 	// Local refusals (slice b1a): the comment row commits and its op is
 	// rejected in the same transaction, before anything is sent.
 	ReasonInvalidComment = "invalid_comment"
 	ReasonAmbiguousIssue = "ambiguous_issue"
+	// ReasonInvalidIssue: a task whose issue the protocol cannot render (an
+	// actor the provenance line cannot carry, a title quoting the marker).
+	ReasonInvalidIssue = "invalid_issue"
+	// ReasonBindingConflict is set on an applied issue_create op whose
+	// binding was not published because the task or the issue was already
+	// bound elsewhere (hk 3898). The op stays applied; the operator's view
+	// lists it with the rejected ops.
+	ReasonBindingConflict = "binding_conflict"
 	// ReasonHeld: the ledger's claim refused the dispatch (ClaimHeld:
 	// canary removed, mode off, another tenant); the op stays prepared and
 	// nothing is sent.
@@ -292,6 +307,39 @@ type Remote interface {
 	// actual state. A 429 is a *RemoteError with the server's RetryAfter; the
 	// next search waits at least that long.
 	ListComments(ctx context.Context, issueID string, pageSize int) ([]RemoteComment, error)
+}
+
+// RemoteIssue is one issue as an issue search returns it.
+type RemoteIssue struct {
+	ID          string
+	Readable    string
+	ProjectID   string
+	Summary     string
+	Description string
+}
+
+// IssueCreate is one issue create: the project, the text, and the task whose
+// hk ID and hk project the issue carries (the only fields a create writes).
+type IssueCreate struct {
+	ProjectID   string
+	Summary     string
+	Description string
+	TaskID      int64
+	HKProject   string
+}
+
+// IssueRemote is the YouTrack surface of the issue_create kind. A Remote
+// that does not implement it cannot send that kind (the op is rejected
+// unsupported_kind before anything is sent).
+type IssueRemote interface {
+	// FindTaskIssues returns every issue of the project (short name and id)
+	// whose hk ID is taskID, checked against both, or an error. A result it
+	// cannot prove complete is an error. A 429 is a *RemoteError with the
+	// server's RetryAfter.
+	FindTaskIssues(ctx context.Context, projectShort, projectID string, taskID int64) ([]RemoteIssue, error)
+	// CreateIssue makes exactly one POST and returns the new issue's id. Its
+	// errors follow CreateComment's.
+	CreateIssue(ctx context.Context, in IssueCreate) (id string, err error)
 }
 
 // RemoteError is an HTTP answer from the remote. Any other error from Remote

@@ -22,9 +22,10 @@ import (
 // a step.
 //
 // Lock order: it holds at most one advisory lock per transaction, the entity
-// lane lock (Prepare and Claim only), and then rows of yt_write_ops and
-// yt_entity_map (a scoped Claim also reads yt_comment_canary or
-// yt_task_bindings). It takes no task
+// lane lock (Prepare, Claim, and Apply of an issue_create op), and then rows
+// of yt_write_ops and yt_entity_map (a scoped Claim also reads
+// yt_comment_canary or yt_task_bindings; an issue_create Apply inserts a
+// yt_task_bindings row). It takes no task
 // row, no level-2 lock and no job lock, and no writer of another table waits on
 // one of its rows, so it cannot close a cycle with them. It reads no clock:
 // time is passed in (lockorder.go, "Time").
@@ -292,10 +293,24 @@ func (l *YTWriteLedger) Apply(ctx context.Context, now time.Time, id int64, ytID
 		return ytwrite.Op{}, err
 	}
 	defer tx.Rollback(ctx)
-	op, err := scanYTOp(tx.QueryRow(ctx, `SELECT `+ytOpColumns+` FROM yt_write_ops WHERE id=$1 FOR UPDATE`, id))
+	// An issue_create op publishes its task's map row and binding, which
+	// the comment path reads under the task's lane lock: take that lock
+	// first, as Claim does, before the op row. Kind and lane are immutable,
+	// so they are read before the lock.
+	var kind, entityKind, entityID string
+	err = tx.QueryRow(ctx, `SELECT kind, entity_kind, entity_id FROM yt_write_ops WHERE id=$1`, id).Scan(&kind, &entityKind, &entityID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ytwrite.Op{}, ytwrite.ErrNotFound
 	}
+	if err != nil {
+		return ytwrite.Op{}, err
+	}
+	if kind == ytwrite.KindIssueCreate {
+		if err := lockYTEntity(ctx, tx, entityKind, entityID); err != nil {
+			return ytwrite.Op{}, err
+		}
+	}
+	op, err := scanYTOp(tx.QueryRow(ctx, `SELECT `+ytOpColumns+` FROM yt_write_ops WHERE id=$1 FOR UPDATE`, id))
 	if err != nil {
 		return ytwrite.Op{}, err
 	}
@@ -330,8 +345,17 @@ func (l *YTWriteLedger) Apply(ctx context.Context, now time.Time, id int64, ytID
 			}
 		}
 	}
-	op, err = scanYTOp(tx.QueryRow(ctx, `UPDATE yt_write_ops SET state='applied', yt_result_id=$2, reason='', last_error='', resolved_at=$3
-		WHERE id=$1 RETURNING `+ytOpColumns, id, ytID, now.UTC()))
+	reason, detail := "", ""
+	if op.Kind == ytwrite.KindIssueCreate {
+		if detail, err = bindYTIssueTx(ctx, tx, op, ytID, now); err != nil {
+			return ytwrite.Op{}, err
+		}
+		if detail != "" {
+			reason = ytwrite.ReasonBindingConflict
+		}
+	}
+	op, err = scanYTOp(tx.QueryRow(ctx, `UPDATE yt_write_ops SET state='applied', yt_result_id=$2, reason=$4, last_error=$5, resolved_at=$3
+		WHERE id=$1 RETURNING `+ytOpColumns, id, ytID, now.UTC(), reason, clipText(detail, 2000)))
 	if err != nil {
 		return ytwrite.Op{}, err
 	}

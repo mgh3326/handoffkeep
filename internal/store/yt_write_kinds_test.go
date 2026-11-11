@@ -24,8 +24,8 @@ func TestYTKindGatesNameRegisteredKinds(t *testing.T) {
 	}
 }
 
-// The per-kind admission keeps the comment gate exactly as it was and
-// admits no other kind.
+// The per-kind admission keeps the comment gate exactly as it was, and the
+// issue_create gate admits nothing while the issues mode is off.
 func TestYTAdmitSQLPerKind(t *testing.T) {
 	s := &Store{}
 	for _, tc := range []struct {
@@ -39,7 +39,7 @@ func TestYTAdmitSQLPerKind(t *testing.T) {
 		WHERE b.task_id::text = o.entity_id AND b.issue_id = o.yt_target_id AND b.tenant = o.tenant)`},
 	} {
 		s.SetYTCommentsMode(tc.mode)
-		want := `(o.tenant = $2 AND ((o.kind = 'comment_append' AND (` + tc.gate + `))))`
+		want := `(o.tenant = $2 AND ((o.kind = 'comment_append' AND (` + tc.gate + `)) OR (o.kind = 'issue_create' AND (FALSE))))`
 		if got := s.ytAdmitSQL("$2"); got != want {
 			t.Errorf("mode %s:\n got %s\nwant %s", tc.mode, got, want)
 		}

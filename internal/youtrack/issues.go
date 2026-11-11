@@ -34,6 +34,21 @@ type issueBody struct {
 // project (a DEC issue carries its task's hk ID). It returns (Issue{}, false,
 // nil) when none exists, so the caller creates instead of updating.
 func (c *Client) FindIssueByField(ctx context.Context, projectShort, projectID, field string, n int64) (Issue, bool, error) {
+	var issues []Issue
+	if err := c.get(ctx, "/api/issues", issueFieldQuery(projectShort, field, n, 10), &issues); err != nil {
+		return Issue{}, false, err
+	}
+	for _, issue := range issues {
+		if issueHasField(issue, projectID, field, n) {
+			return issue, true, nil
+		}
+	}
+	return Issue{}, false, nil
+}
+
+// issueFieldQuery is the search for the issues of one project whose integer
+// field equals n, top at most.
+func issueFieldQuery(projectShort, field string, n int64, top int) url.Values {
 	q := url.Values{}
 	// YouTrack's search grammar uses braces around a field name that contains
 	// spaces; a quoted name is parsed as a text search.
@@ -43,22 +58,22 @@ func (c *Client) FindIssueByField(ctx context.Context, projectShort, projectID, 
 	}
 	q.Set("query", query)
 	q.Set("fields", issueFields)
-	q.Set("$top", "10")
-	var issues []Issue
-	if err := c.get(ctx, "/api/issues", q, &issues); err != nil {
-		return Issue{}, false, err
+	q.Set("$top", strconv.Itoa(top))
+	return q
+}
+
+// issueHasField checks a search hit: it is in the project (when projectID is
+// set) and its integer field equals n.
+func issueHasField(issue Issue, projectID, field string, n int64) bool {
+	if projectID != "" && (issue.Project == nil || issue.Project.ID != projectID) {
+		return false
 	}
-	for _, issue := range issues {
-		if projectID != "" && (issue.Project == nil || issue.Project.ID != projectID) {
-			continue
-		}
-		if f, ok := IssueFieldByName(issue.CustomFields, field); ok {
-			if v, ok := f.IntValue(); ok && int64(v) == n {
-				return issue, true, nil
-			}
-		}
+	f, ok := IssueFieldByName(issue.CustomFields, field)
+	if !ok {
+		return false
 	}
-	return Issue{}, false, nil
+	v, ok := f.IntValue()
+	return ok && int64(v) == n
 }
 
 func (c *Client) GetIssue(ctx context.Context, issueID string) (Issue, error) {

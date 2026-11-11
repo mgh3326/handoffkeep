@@ -325,12 +325,19 @@ func (p *Protocol) send(ctx context.Context, op Op) Result {
 	defer cancel()
 	now := p.now()
 	var re *RemoteError
+	var refused *RefusedError
+	var notSent *NotSentError
 	switch {
 	case err == nil && resultIDRE.MatchString(id):
-		return p.record(op, p.apply(ctx, op, id))
+		return p.record(op, p.apply(ctx, kind, op, id))
 	case err == nil:
-		// 2xx without a usable id: the comment may exist.
-		return p.record(op, p.markUnknown(ctx, op, ReasonNoID, "2xx reply without a valid comment id"))
+		// 2xx without a usable id: the write may exist.
+		return p.record(op, p.markUnknown(ctx, op, ReasonNoID, "2xx reply without a valid id"))
+	case errors.As(err, &refused):
+		// The kind refused before it wrote anything.
+		return p.record(op, p.reject(ctx, op, refused.Reason, refused.Detail))
+	case errors.As(err, &notSent):
+		return p.record(op, p.notSent(ctx, op, notSent))
 	case errors.As(err, &re):
 		switch {
 		case re.Status == http.StatusTooManyRequests:
@@ -379,8 +386,32 @@ func logTransition(op Op) {
 	log.Printf("ytwrite.op_state op_id=%d entity_kind=%s entity_id=%q state=%s reason=%q attempts=%d reconciles=%d", op.ID, op.EntityKind, op.EntityID, op.State, op.Reason, op.Attempts, op.Reconciles)
 }
 
-func (p *Protocol) apply(ctx context.Context, op Op, ytID string) settled {
-	got, err := p.Ledger.Apply(ctx, p.now(), op.ID, ytID, []MapRow{commentMap(op, ytID)})
+// notSent records a read that failed before the write left: nothing was
+// written, so the op is not uncertain. A 429 or 401 waits as a refused write
+// would, another 4xx is final, and anything else (5xx, transport) is tried
+// again after the reconcile backoff.
+func (p *Protocol) notSent(ctx context.Context, op Op, ns *NotSentError) settled {
+	now := p.now()
+	var re *RemoteError
+	if errors.As(ns.Err, &re) {
+		switch {
+		case re.Status == http.StatusTooManyRequests:
+			wait := re.RetryAfter
+			if wait <= 0 {
+				wait = p.RateLimitWait
+			}
+			return p.deferOp(ctx, op, now.Add(min(wait, p.MaxRetryAfter)), ReasonRateLimited, re.Error())
+		case re.Status == http.StatusUnauthorized:
+			return p.deferOp(ctx, op, now.Add(p.AuthWait), ReasonUnauthorized, re.Error())
+		case re.Status >= 400 && re.Status < 500 && re.Status != http.StatusRequestTimeout:
+			return p.reject(ctx, op, "http_"+strconv.Itoa(re.Status), re.Error())
+		}
+	}
+	return p.deferOp(ctx, op, now.Add(p.reconcileDelay(max(op.Attempts-1, 0))), ReasonNotSent, ns.Error())
+}
+
+func (p *Protocol) apply(ctx context.Context, kind Kind, op Op, ytID string) settled {
+	got, err := p.Ledger.Apply(ctx, p.now(), op.ID, ytID, kind.MapRows(op, ytID))
 	if errors.Is(err, ErrConflictingResult) {
 		log.Printf("ytwrite.apply_conflict_failed op_id=%d yt_id=%q", op.ID, ytID)
 	}
@@ -530,19 +561,19 @@ func (p *Protocol) reconcile(ctx context.Context, op Op) (applied bool, err erro
 	}
 	switch {
 	case len(ev.Matches) == 1 && ev.Deleted == 0 && ev.Mismatched == 0 && resultIDRE.MatchString(ev.Matches[0]):
-		s := p.apply(ctx, op, ev.Matches[0])
+		s := p.apply(ctx, kind, op, ev.Matches[0])
 		if s.err == nil {
 			logTransition(s.op)
 		}
 		return s.err == nil, s.err
 	case len(ev.Matches) > 1:
-		return touch(ReasonMultipleMatches, fmt.Sprintf("%d identical comments carry the marker", len(ev.Matches)))
+		return touch(ReasonMultipleMatches, fmt.Sprintf("%d candidates carry the marker", len(ev.Matches)))
 	case ev.Deleted > 0:
-		return touch(ReasonMarkerDeleted, "the marked comment was deleted")
+		return touch(ReasonMarkerDeleted, "the marked candidate was deleted")
 	case ev.Mismatched > 0:
-		return touch(ReasonMarkerMismatch, "a comment carries the marker with other text")
+		return touch(ReasonMarkerMismatch, fmt.Sprintf("%d candidates disagree with the rendered text", ev.Mismatched))
 	}
-	return touch(ReasonNoEvidence, "no comment carries the marker")
+	return touch(ReasonNoEvidence, "no candidate carries the marker")
 }
 
 // Resolution is an operator's decision on a remote_unknown op after looking at
@@ -572,9 +603,13 @@ func (p *Protocol) Resolve(ctx context.Context, id int64, r Resolution) (Result,
 	var got Op
 	if r.Applied {
 		if !resultIDRE.MatchString(r.YTID) {
-			return Result{}, fmt.Errorf("%w: youtrack comment id is empty or malformed", ErrInvalid)
+			return Result{}, fmt.Errorf("%w: youtrack id is empty or malformed", ErrInvalid)
 		}
-		got, err = p.Ledger.Apply(ctx, p.now(), id, r.YTID, []MapRow{commentMap(op, r.YTID)})
+		kind, ok := p.kindFor(op.Kind)
+		if !ok {
+			return Result{}, fmt.Errorf("%w: op %d has unsupported kind %q", ErrInvalid, id, op.Kind)
+		}
+		got, err = p.Ledger.Apply(ctx, p.now(), id, r.YTID, kind.MapRows(op, r.YTID))
 	} else {
 		got, err = p.Ledger.Reject(ctx, p.now(), id, ReasonOperatorNotDone, "by "+r.By+": "+r.Note)
 	}

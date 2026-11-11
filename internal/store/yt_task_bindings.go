@@ -32,7 +32,18 @@ type YTTaskBinding struct {
 	ProjectID     string    `json:"project_id"`
 	BoundBy       string    `json:"bound_by"`
 	BoundAt       time.Time `json:"bound_at"`
+	// Origin is how the binding was published: YTBindingImportVerified
+	// (`youtrack comments-backfill`) or YTBindingOpApplied (an applied
+	// issue_create op, OpID). Set by the store, never by a caller.
+	Origin string `json:"origin"`
+	OpID   int64  `json:"op_id,omitempty"`
 }
+
+// The origins of a binding (yt_task_bindings.origin).
+const (
+	YTBindingImportVerified = "import_verified"
+	YTBindingOpApplied      = "op_applied"
+)
 
 // ErrYTBindingConflict is a binding that disagrees with a mapping hk already
 // keeps, or one verified against mappings that changed since.
@@ -112,10 +123,10 @@ func (s *Store) YTBindingDisagreement(ctx context.Context, b YTTaskBinding) (str
 	return ytBindingDisagreement(ctx, s.pool, b)
 }
 
-const ytBindingColumns = `task_id, tenant, issue_id, issue_readable, project_id, bound_by, bound_at`
+const ytBindingColumns = `task_id, tenant, issue_id, issue_readable, project_id, bound_by, bound_at, origin, coalesce(op_id, 0)`
 
 func scanYTBinding(row interface{ Scan(...any) error }, b *YTTaskBinding) error {
-	err := row.Scan(&b.TaskID, &b.Tenant, &b.IssueID, &b.IssueReadable, &b.ProjectID, &b.BoundBy, &b.BoundAt)
+	err := row.Scan(&b.TaskID, &b.Tenant, &b.IssueID, &b.IssueReadable, &b.ProjectID, &b.BoundBy, &b.BoundAt, &b.Origin, &b.OpID)
 	b.BoundAt = b.BoundAt.UTC()
 	return err
 }
@@ -268,8 +279,8 @@ func (s *Store) AddYTTaskBinding(ctx context.Context, b YTTaskBinding, verified 
 		s.ytBindingChecked()
 	}
 	var got YTTaskBinding
-	err = scanYTBinding(tx.QueryRow(ctx, `INSERT INTO yt_task_bindings(`+ytBindingColumns+`) VALUES ($1,$2,$3,$4,$5,$6,$7)
-		ON CONFLICT DO NOTHING RETURNING `+ytBindingColumns,
+	err = scanYTBinding(tx.QueryRow(ctx, `INSERT INTO yt_task_bindings(task_id, tenant, issue_id, issue_readable, project_id, bound_by, bound_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING RETURNING `+ytBindingColumns,
 		b.TaskID, b.Tenant, b.IssueID, b.IssueReadable, b.ProjectID, b.BoundBy, time.Now().UTC()), &got)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return YTTaskBinding{}, fmt.Errorf("%w: issue %s on %s is bound to another task", ErrYTBindingConflict, b.IssueID, b.Tenant)

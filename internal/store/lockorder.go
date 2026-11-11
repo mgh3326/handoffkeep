@@ -231,6 +231,19 @@ package store
 //     row -> lane lock and lane lock -> mapping row edges cannot close a
 //     cycle. The comment writers that take level 2 (ApplyYouTrackActivity,
 //     ReplyDots) never enqueue an op, so level 2 -> lane lock does not occur.
+//     Issue mode (hk 3898, yt_issues.go) adds two lane holders. CreateTask
+//     in mode on, after its own locks and the task insert, reads the task's
+//     youtrack_projects row without a lock and takes the lane lock of the
+//     task it just inserted, which no other transaction can hold yet, then
+//     inserts the op row. Apply of an issue_create op takes the task's lane
+//     lock first (as Claim does), then FOR UPDATE on the op row, then inserts
+//     the task's yt_entity_map row and its yt_task_bindings row. That insert
+//     can wait for an uncommitted binding of AddYTTaskBinding, which holds
+//     its own task's lane lock and never waits for an op row or a second
+//     lane lock, so the wait cannot close a cycle. Apply takes no ownership
+//     lock and no task row: a canary enrollment racing it is caught by the
+//     comment enqueue's ytBindingDisagreement, which skips that task's
+//     comments.
 //
 //   - The YouTrack sync's single-run guard is a session-scoped
 //     pg_try_advisory_lock(8241873404) on its own pooled connection. It is

@@ -581,16 +581,22 @@ func TestAddYTCommentCanaryRefusesDisagreeingBinding(t *testing.T) {
 const ytTaskBindingsMigrationID = "20261110-yt-task-bindings"
 
 // A database already current on every other ID gains yt_task_bindings when
-// the binary that registers this one opens it, and records the ID once.
+// the binary that registers this one opens it, and records the ID once. The
+// entries that alter the table (After it, hk 3898) are left out with it.
 func TestYTTaskBindingsMigrationUpgradesAlreadyCurrentDatabase(t *testing.T) {
 	_, url := testdb.Schema(t, "ytb_mig")
 	var without []migration
+	dependents := 0
 	for _, m := range migrationRegistry {
-		if m.ID != ytTaskBindingsMigrationID {
+		switch {
+		case m.ID == ytTaskBindingsMigrationID:
+		case slices.Contains(m.After, ytTaskBindingsMigrationID):
+			dependents++
+		default:
 			without = append(without, m)
 		}
 	}
-	if len(without) != len(migrationRegistry)-1 {
+	if len(without) != len(migrationRegistry)-1-dependents {
 		t.Fatalf("migration %s is not registered", ytTaskBindingsMigrationID)
 	}
 	old := openRegistry(t, url, without)

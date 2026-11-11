@@ -25,7 +25,31 @@ type Kind interface {
 	// candidate that carries OpMarker(op.ID) against text. On a failed
 	// enumeration it returns the error, with RetryAfter set from a 429.
 	Evidence(ctx context.Context, remote Remote, op Op, text string) (Evidence, error)
+	// MapRows is the hk identity -> YouTrack id rows committed with op's
+	// applied, when ytID is the created (or adopted) YouTrack id. The send,
+	// evidence and operator paths all apply through it.
+	MapRows(op Op, ytID string) []MapRow
 }
+
+// RefusedError is a kind's refusal in Send before it wrote anything (a read
+// it made showed the write must not happen): the protocol rejects the op with
+// Reason. It is never returned after a write request left.
+type RefusedError struct {
+	Reason string
+	Detail string
+}
+
+func (e *RefusedError) Error() string { return e.Reason + ": " + e.Detail }
+
+// NotSentError is a read in Send that failed before the write request left:
+// nothing was written, so the op goes back to prepared (a 4xx read is
+// rejected). Err is the read's error (a *RemoteError or a transport failure).
+type NotSentError struct {
+	Err error
+}
+
+func (e *NotSentError) Error() string { return "not sent: " + e.Err.Error() }
+func (e *NotSentError) Unwrap() error { return e.Err }
 
 // Evidence is what one search of an op's target found: the candidates that
 // carry the op's marker, by how they compare with the rendered text.
@@ -54,6 +78,19 @@ func registerKind(kind string, build func(Config) Kind) {
 		panic(fmt.Sprintf("ytwrite: kind %q registered twice or empty", kind))
 	}
 	kindBuilders[kind] = build
+}
+
+// kindFor is op kind's Kind on p: the registered instance, or one built from
+// the registry for a Protocol made without New (the operator's resolve).
+func (p *Protocol) kindFor(kind string) (Kind, bool) {
+	if k, ok := p.Kinds[kind]; ok {
+		return k, true
+	}
+	build, ok := kindBuilders[kind]
+	if !ok {
+		return nil, false
+	}
+	return build(p.Config), true
 }
 
 // RegisteredKinds lists every kind New registers on a Protocol, sorted. The

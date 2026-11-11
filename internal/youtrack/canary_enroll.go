@@ -6,10 +6,9 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"unicode"
-	"unicode/utf8"
 
 	"github.com/mgh3326/handoffkeep/internal/store"
+	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
 
 // ErrCanaryRefused is a task whose YouTrack issue cannot be bound for the
@@ -66,7 +65,7 @@ func VerifyCanary(ctx context.Context, issues IssueReader, tenant string, c stor
 		return refuse("issue %s answered without an id", readable)
 	case issue.IDReadable != readable:
 		return refuse("%s answers as %s (moved or renumbered)", readable, issue.IDReadable)
-	case !SummaryNamesTask(issue.Summary, c.TaskID):
+	case !ytwrite.SummaryNamesTask(issue.Summary, c.TaskID):
 		return refuse("summary of %s does not start with #%s", readable, id)
 	case issue.Project == nil || !strings.EqualFold(issue.Project.ShortName, c.ShortName) || (c.ProjectID != "" && issue.Project.ID != c.ProjectID):
 		return refuse("%s is not in the mapped project %s", readable, c.ShortName)
@@ -92,19 +91,4 @@ func VerifyBinding(ctx context.Context, issues IssueReader, tenant string, c sto
 		return store.YTTaskBinding{}, err
 	}
 	return store.YTTaskBinding{TaskID: v.TaskID, Tenant: v.Tenant, IssueID: v.IssueID, IssueReadable: v.IssueReadable, ProjectID: v.ProjectID}, nil
-}
-
-// SummaryNamesTask reports whether an imported issue summary names the task:
-// "#<id>" then a space or the end. "#37" does not name task 3, and "#037" or
-// "#3739" do not name task 37.
-func SummaryNamesTask(summary string, taskID int64) bool {
-	rest, ok := strings.CutPrefix(summary, "#"+strconv.FormatInt(taskID, 10))
-	if !ok {
-		return false
-	}
-	if rest == "" {
-		return true
-	}
-	r, _ := utf8.DecodeRuneInString(rest)
-	return unicode.IsSpace(r)
 }

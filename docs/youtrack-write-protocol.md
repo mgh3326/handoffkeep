@@ -144,6 +144,15 @@ An op's `kind` picks its YouTrack side from the registry `Protocol.Kinds`
 - `Evidence(ctx, remote, op, text)`: enumerate the target and classify every
   candidate carrying the marker as an exact live match, an exact deleted one, or
   a mismatch; a failed search returns its error, with `RetryAfter` from a 429.
+- `MapRows(op, ytID)`: the `yt_entity_map` rows committed with the op's
+  `applied`, on every path (send, evidence, operator resolve). The comment
+  kind returns the one `comment` row (`op:<id>`) it always wrote.
+
+A kind may also refuse in `Send` before it writes anything: a
+`*RefusedError` rejects the op with its reason, and a `*NotSentError` (a read
+before the write failed) puts it back to `prepared` (`not_sent`, after the
+reconcile backoff; a 429 or 401 waits as for a write, another 4xx rejects).
+Neither is ever `remote_unknown`: nothing was sent.
 
 Everything else is the protocol's and the same for every kind: claim and
 ordering, the reply classification above, and the evidence rule (exactly one
@@ -151,8 +160,8 @@ exact live match with a valid id, nothing deleted or mismatched, is `applied`;
 otherwise `multiple_matches`, `marker_deleted`, `marker_mismatch` or
 `no_evidence`). An op whose kind is not registered is `rejected /
 unsupported_kind` when sent, and a failed render is `unsupported_kind` (send) or
-`reconcile_failed` (search). `comment_append` (`kind_comment.go`) is the only
-kind so far. A new kind registers itself from its own file (`registerKind`)
+`reconcile_failed` (search). `comment_append` (`kind_comment.go`) and
+`issue_create` (`kind_issue.go`, below) are the registered kinds. A new kind registers itself from its own file (`registerKind`)
 and adds its admission gate in the store (`registerYTKindGate`, below), so
 kinds added in parallel edit no shared list.
 
@@ -475,6 +484,67 @@ and no recovery of held ops; both come with the automatic binder (follow-up).
   locally: the binding keeps the stable internal id, so comments still land
   on the moved issue.
 
+
+## Kind issue_create (hk 3898)
+
+hk creates a task's YouTrack issue itself, at most once per task, and
+publishes the task's binding in the transaction that records the op applied,
+so later comment and field ops have a target. `HANDOFFKEEP_YT_ISSUES_MODE` is
+`off` (the default) or `on`, read like the comments mode; either mode on
+starts the write worker and needs `YOUTRACK_URL` and `YOUTRACK_BOT_API_KEY`.
+Turning it on ends the YouTrack import (decision D3); the operator does that.
+
+**Op.** Principal `hk:task-issues`, key `task-issue:<task id>`, lane
+`task:<id>`, target the YouTrack project id, payload the title, the hk
+project and the YouTrack project's short name. In mode on, `CreateTask`
+prepares it in the task's own transaction when the task's project has a
+`youtrack_projects` row with a project id; otherwise no op and one
+`ytwrite.issue_skipped` line. A task the protocol cannot render (an actor
+with ` · `, a title quoting the marker) gets the op rejected `invalid_issue`.
+`handoffkeep youtrack issues-backfill [--project P] [--dry-run]` prepares the
+op for every task with no binding, bound to the host of `YOUTRACK_URL`; it
+calls no YouTrack, skips a task that already has its op, and so is idempotent.
+
+**Text.** Summary `#<id> <title>` on one line, cut to 250 runes. Description:
+
+```
+작성: <actor> · <UTC> · hk op <op id>
+hk task: #<task id> · project: <hk project>
+제목(원문): <title>
+
+<!-- hk-op:<op id> -->
+```
+
+`ytwrite.ParseIssue` reads it back (`ParseIssue(RenderIssue(x)) == x`).
+
+**Send.** First the project's issues with `hk ID` = task id (one GET,
+checked against the project id and the field). Exactly one, whose summary
+names the task (`SummaryNamesTask`), is adopted: no POST, the op applies with
+its id. Any other hit (two or more, or one that does not name the task) is
+`rejected / ambiguous_issue`, no POST. None: exactly one POST with the
+project, summary, description and only the `hk ID` and `hk 프로젝트` fields
+(state, lane, kind, grade and tags are the later snapshot op's). The reply
+classification is the shared one; a failed search is `not_sent` (above).
+
+**Evidence.** The same search. Exactly one issue with the task's `hk ID`,
+whose description contains the op's marker, applies the op. Zero, two marker
+hits, or a marker hit beside another issue with that `hk ID` keep it
+`remote_unknown`; there is never an automatic re-create.
+
+**Binding.** Applying the op (send, evidence or `yt ops resolve`) takes the
+task's lane lock, writes the task's `yt_entity_map` row (parent: the project)
+and inserts `yt_task_bindings` with `origin = 'op_applied'` and `op_id`, in
+one transaction (migration `20261111-yt-task-binding-origin` adds `origin`,
+default `import_verified`, and `op_id`). `issue_readable` is left empty: the
+protocol carries only the stable id. A binding is never overwritten: the same
+issue is a no-op; a task bound to another issue, or the issue bound to another
+task, keeps the op applied with reason `binding_conflict`, inserts nothing
+and logs `ytwrite.binding_conflict task_id= op_id= issue_id=`. `yt ops --state
+rejected` lists such ops and the alert worker raises them as rejected.
+
+**Admission.** Mode on, the op's tenant is the worker's, and the task has no
+binding or one with `op_id` = this op. A binding from the import holds the op.
+A rejected create stays rejected; a retry is a later operator command.
 
 ## Tests
 

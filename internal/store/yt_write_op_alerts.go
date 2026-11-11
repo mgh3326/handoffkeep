@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
 
 const ytWriteOpAlertDelay = 10 * time.Minute
@@ -18,10 +20,12 @@ func (s *Store) EnqueueYTWriteOpAlerts(ctx context.Context, now time.Time) (int,
 	}
 	defer tx.Rollback(ctx)
 
+	// The binding-conflict reason is a literal, not a parameter, so a cached
+	// generic plan can still use its partial index (yt_write_ops_binding_conflict).
 	rows, err := tx.Query(ctx, `SELECT id,kind,entity_id,state,created_at FROM yt_write_ops
 		WHERE (state IN ('prepared','dispatched','remote_unknown') AND created_at <= $1
 				AND NOT EXISTS (SELECT 1 FROM notification_outbox n WHERE n.event_id='yt-op-'||yt_write_ops.id::text||'-pending'))
-			OR (state='rejected'
+			OR ((state='rejected' OR (state='applied' AND reason='`+ytwrite.ReasonBindingConflict+`'))
 				AND NOT EXISTS (SELECT 1 FROM notification_outbox n WHERE n.event_id='yt-op-'||yt_write_ops.id::text||'-rejected'))
 		ORDER BY id FOR SHARE`, now.UTC().Add(-ytWriteOpAlertDelay))
 	if err != nil {
@@ -51,7 +55,9 @@ func (s *Store) EnqueueYTWriteOpAlerts(ctx context.Context, now time.Time) (int,
 	for _, x := range candidates {
 		condition := "pending"
 		ageAt := now.UTC()
-		if x.state == "rejected" {
+		if x.state == "rejected" || x.state == "applied" {
+			// An applied op is listed only for its binding conflict, which
+			// counts as rejected.
 			condition = "rejected"
 		}
 		age := int(ageAt.Sub(x.createdAt.UTC()).Minutes())
