@@ -259,10 +259,9 @@ func TestYTIssueBindingNeverOverwritten(t *testing.T) {
 func TestYTIssueGate(t *testing.T) {
 	s := schemaStore(t, "yti_gate")
 	ytbMapped(t, s)
-	now := time.Now().UTC()
 	claim := func(op ytwrite.Op) ytwrite.ClaimOutcome {
 		t.Helper()
-		_, out, err := s.YTTenantLedger(ytcTenant).Claim(t.Context(), now, op.ID)
+		_, out, err := s.YTTenantLedger(ytcTenant).Claim(t.Context(), time.Now().UTC(), op.ID)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -295,7 +294,7 @@ func TestYTIssueGate(t *testing.T) {
 	if out := ytiClaimEventually(t, s, free); out != ytwrite.ClaimClaimed {
 		t.Fatalf("no binding: %s", out)
 	}
-	if due, err := s.YTTenantLedger(ytcTenant).Due(t.Context(), now, 100); err != nil || len(due) != 0 {
+	if due, err := s.YTTenantLedger(ytcTenant).Due(t.Context(), time.Now().UTC(), 100); err != nil || len(due) != 0 {
 		t.Fatalf("due lists held ops: %+v %v", due, err)
 	}
 }
