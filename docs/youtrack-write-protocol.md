@@ -433,6 +433,18 @@ starts during a pass exits 3 ("another youtrack sync is running") and its
 next run goes on. Neither waits for the lock, so the lock order is
 unchanged.
 
+**Legacy sync is refused while the protocol owns writes (hk 3907).** The
+legacy push and the adoption are a second writer to the same YouTrack objects,
+so `youtrack sync` (with or without `--dry-run`) and `youtrack adopt` exit 5
+before any store or YouTrack call while `HANDOFFKEEP_YT_COMMENTS_MODE` is
+`canary` or `on`, or `HANDOFFKEEP_YT_ISSUES_MODE` is `on`. The stderr line
+names the variable. An unparsable value of either is exit 2, so the guard
+fails closed. With both off, the commands run as before. The other
+subcommands keep their behaviour: `ops`, `schema plan`, `comments-preflight`,
+`audit` without `--enqueue`, `comments-backfill`, `canary`, `projects` and
+`schema apply` do not push task or comment content, and `audit --enqueue` writes
+ops through the protocol. This retires the residual above that waited for hk 3907.
+
 **Admission.** In mode on the worker admits a prepared op only when it is
 bound to the worker's tenant and its task has a binding with the op's issue
 on that tenant, read in the claim under the lane lock that the binding's

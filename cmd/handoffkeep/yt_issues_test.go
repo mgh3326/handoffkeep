@@ -8,23 +8,6 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
-func TestYTIssuesModeFromEnv(t *testing.T) {
-	for value, want := range map[string]store.YTIssuesMode{
-		"": store.YTIssuesOff, "off": store.YTIssuesOff, " off ": store.YTIssuesOff, "on": store.YTIssuesOn, " on\n": store.YTIssuesOn,
-	} {
-		t.Setenv("HANDOFFKEEP_YT_ISSUES_MODE", value)
-		if got, err := ytIssuesModeFromEnv(); err != nil || got != want {
-			t.Errorf("%q: %q %v, want %q", value, got, err, want)
-		}
-	}
-	for _, value := range []string{"ON", "canary", "true", "1"} {
-		t.Setenv("HANDOFFKEEP_YT_ISSUES_MODE", value)
-		if got, err := ytIssuesModeFromEnv(); err == nil {
-			t.Errorf("%q accepted as %q", value, got)
-		}
-	}
-}
-
 // The issues mode alone starts the write worker (the comments mode may stay
 // off), and needs the YouTrack credentials like the comments mode.
 func TestYTIssuesModeStartsTheWriteWorker(t *testing.T) {

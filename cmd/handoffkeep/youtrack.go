@@ -22,6 +22,9 @@ const (
 	youtrackExitFailed   = 1
 	youtrackExitConfig   = 2
 	youtrackExitLockHeld = 3
+	// youtrackExitProtocolOwned: a legacy push refused because the write
+	// protocol owns YouTrack writes (hk 3907). Nothing was written.
+	youtrackExitProtocolOwned = 5
 )
 
 func youtrackCmd(args []string, out io.Writer) error {
@@ -30,8 +33,14 @@ func youtrackCmd(args []string, out io.Writer) error {
 	}
 	switch args[0] {
 	case "sync":
+		if err := youtrackRefuseLegacyPush(args[0]); err != nil {
+			return err
+		}
 		return youtrackSyncCmd(args[1:], out)
 	case "adopt":
+		if err := youtrackRefuseLegacyPush(args[0]); err != nil {
+			return err
+		}
 		return youtrackAdoptCmd(args[1:], out)
 	case "projects":
 		return youtrackProjectsCmd(args[1:], out)
@@ -205,6 +214,44 @@ func youtrackAdoptCmd(args []string, out io.Writer) error {
 		return exitCodeError{code: youtrackExitFailed, err: fmt.Errorf("%d adoption errors", len(report.Errors))}
 	}
 	return nil
+}
+
+// youtrackProtocolOwner names the env setting that hands YouTrack writes to
+// the write protocol, or returns "" when none is set: comments mode canary or
+// on, or issues mode on. An unparsable mode is an error, so the guard fails
+// closed.
+func youtrackProtocolOwner() (string, error) {
+	comments, err := ytCommentsModeFromEnv()
+	if err != nil {
+		return "", err
+	}
+	if comments != store.YTCommentsOff {
+		return "HANDOFFKEEP_YT_COMMENTS_MODE=" + string(comments), nil
+	}
+	issues, err := ytIssuesModeFromEnv()
+	if err != nil {
+		return "", err
+	}
+	if issues == store.YTIssuesOn {
+		return "HANDOFFKEEP_YT_ISSUES_MODE=on", nil
+	}
+	return "", nil
+}
+
+// youtrackRefuseLegacyPush guards the subcommands that push task or comment
+// content to YouTrack outside the write protocol: sync (with or without
+// --dry-run) and adopt (hk 3907). It runs before any argument, store or
+// YouTrack use. The error's single stderr line names the mode that blocks the
+// command.
+func youtrackRefuseLegacyPush(sub string) error {
+	owner, err := youtrackProtocolOwner()
+	if err != nil {
+		return exitCodeError{code: youtrackExitConfig, err: err}
+	}
+	if owner == "" {
+		return nil
+	}
+	return exitCodeError{code: youtrackExitProtocolOwned, err: fmt.Errorf("youtrack %s refused: %s; the write protocol owns YouTrack writes (hk 3907)", sub, owner)}
 }
 
 // ytReadthroughModeFromEnv reads HANDOFFKEEP_YT_READTHROUGH_MODE: unset or
