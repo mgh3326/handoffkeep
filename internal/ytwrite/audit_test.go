@@ -165,6 +165,34 @@ func TestAuditCommentsEvidenceOrder(t *testing.T) {
 	}
 }
 
+// A text that is one comment's exact body and ends in another's legacy
+// trailer is assigned to neither; a comment it names with no other copy is
+// not missing (its copy may exist), so it is never enqueued.
+func TestAuditCommentsAmbiguousCopy(t *testing.T) {
+	legacy := func(text string) (int64, bool) {
+		if strings.HasSuffix(text, "<!-- hk-comment:1 -->") {
+			return 1, true
+		}
+		return 0, false
+	}
+	quoted := "quoted example\n\n<!-- hk-comment:1 -->"
+	f := ytwritetest.NewFake()
+	both := f.InjectAs(auditIssue, quoted, auditBot)
+	got := ytwrite.AuditComments([]ytwrite.AuditComment{{ID: 1, Body: "A"}, {ID: 2, Body: quoted}, {ID: 3, Body: "C"}}, auditList(t, f), auditBot, legacy)
+	want := ytwrite.CommentAudit{
+		Missing:       []ytwrite.AuditCopies{copies(3, 0)},
+		AmbiguousCopy: []ytwrite.AuditAmbiguous{{YTID: both, CommentIDs: []int64{1, 2}}},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("audit\n got %+v\nwant %+v", got, want)
+	}
+	// The trailer naming the comment whose exact body it is: no conflict.
+	got = ytwrite.AuditComments([]ytwrite.AuditComment{{ID: 1, Body: quoted}}, auditList(t, f), auditBot, legacy)
+	if !reflect.DeepEqual(got.Present, []ytwrite.AuditCopies{copies(1, 0, both)}) || got.AmbiguousCopy != nil {
+		t.Fatalf("self-trailer: %+v", got)
+	}
+}
+
 // With no bot id known, nothing counts as the bot's.
 func TestAuditCommentsUnknownBot(t *testing.T) {
 	got := ytwrite.AuditComments(nil, []ytwrite.RemoteComment{{ID: "4-1", Text: "x"}}, "", nil)

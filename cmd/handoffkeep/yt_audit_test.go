@@ -245,6 +245,13 @@ func TestYouTrackAudit(t *testing.T) {
 		t.Fatal(err)
 	}
 	fake.add(issue, "4-11", "machinery note", "1-7")
+	// A comment whose body ends in another comment's legacy trailer, and the
+	// comment it names, with no other copy: the one YouTrack copy is
+	// ambiguous_copy, assigned to neither, and neither is enqueued.
+	cNamed := comment(bound, "named by a quoted trailer")
+	quoted := "quoted example\n\n<!-- hk-comment:" + strconv.FormatInt(cNamed, 10) + " -->"
+	cQuoting := comment(bound, quoted)
+	fake.add(issue, "4-12", quoted, "1-7")
 	// A comment the adoption linked, whose Python-mirror copy hk cannot
 	// identify: adopted_unmatched, never enqueued.
 	cAdopted := comment(bound, "posted by the Python mirror")
@@ -306,6 +313,9 @@ func TestYouTrackAudit(t *testing.T) {
 			if !slices.Equal(x.got, x.want) {
 				t.Errorf("%s: %s = %v, want %v", name, x.class, x.got, x.want)
 			}
+		}
+		if c.AmbiguousCopy.Count != 1 || !slices.Equal(c.AmbiguousCopy.Items[0].CommentIDs, []int64{cNamed, cQuoting}) || c.AmbiguousCopy.Items[0].YTIDs[0] != "4-12" {
+			t.Errorf("%s: ambiguous_copy %+v, want 4-12 naming %d and %d", name, c.AmbiguousCopy, cNamed, cQuoting)
 		}
 		if c.Unbound.Count != 4 {
 			t.Errorf("%s: unbound %d, want 4", name, c.Unbound.Count)

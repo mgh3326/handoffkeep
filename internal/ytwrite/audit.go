@@ -29,16 +29,27 @@ type AuditCopies struct {
 	YTIDs     []string
 }
 
-// CommentAudit is one issue's comparison. Every hk comment is in exactly one
-// of Present (one copy), Missing (none) and Duplicate (two or more); every
-// live YouTrack comment is a copy of one hk comment or in YTOnlyBot (written
-// by the bot) or YTOnlyHuman (anyone else). Deleted comments are left out.
+// AuditAmbiguous is a YouTrack comment whose evidence names two hk comments:
+// its text is one's exact body and ends in another's legacy trailer.
+type AuditAmbiguous struct {
+	YTID       string
+	CommentIDs []int64
+}
+
+// CommentAudit is one issue's comparison. Every live YouTrack comment is a
+// copy of one hk comment, in AmbiguousCopy (assigned to neither), or in
+// YTOnlyBot (written by the bot) or YTOnlyHuman (anyone else). Every hk
+// comment is in exactly one of Present (one copy), Duplicate (two or more)
+// and Missing (none), except that one with no copy named by an
+// AmbiguousCopy entry is listed there only: its copy may exist. Deleted
+// comments are left out.
 type CommentAudit struct {
-	Present     []AuditCopies
-	Missing     []AuditCopies
-	Duplicate   []AuditCopies
-	YTOnlyBot   []string
-	YTOnlyHuman []string
+	Present       []AuditCopies
+	Missing       []AuditCopies
+	Duplicate     []AuditCopies
+	AmbiguousCopy []AuditAmbiguous
+	YTOnlyBot     []string
+	YTOnlyHuman   []string
 }
 
 // AuditComments matches hk comments to YouTrack comments, by the strongest
@@ -46,7 +57,8 @@ type CommentAudit struct {
 // LinkedYTIDs copies that comment; else one in the rendered form of op N
 // (RenderedOpID) copies the hk comment whose OpID is N; else one whose
 // legacy marker names hk comment N (legacy, may be nil: the legacy mirror's
-// own reading of a text) copies comment N; else it copies an hk comment
+// own reading of a text) copies comment N, unless its text is also another
+// comment's exact body (AmbiguousCopy); else it copies an hk comment
 // whose body equals its text exactly, not trimmed or normalised: equal bodies are shared out one copy
 // each in comment id order, first to the comments with no copy yet, and a
 // copy left over goes to the last of them, which makes that one a
@@ -85,6 +97,8 @@ func AuditComments(hk []AuditComment, yt []RemoteComment, botID string, legacy f
 		}
 		byBody[c.Body] = append(byBody[c.Body], i)
 	}
+	var out CommentAudit
+	unsettled := map[int64]bool{}
 	var byText []RemoteComment
 	for _, c := range live {
 		if i, ok := byLink[c.ID]; ok {
@@ -100,6 +114,23 @@ func AuditComments(hk []AuditComment, yt []RemoteComment, botID string, legacy f
 		if legacy != nil {
 			if n, ok := legacy(c.Text); ok {
 				if i, ok := byID[n]; ok {
+					// The text may also be another comment's exact body
+					// (a body can end in a quoted trailer): then the
+					// evidence conflicts and the copy is no one's.
+					others := []int64{}
+					for _, j := range byBody[c.Text] {
+						if j != i {
+							others = append(others, hk[j].ID)
+						}
+					}
+					if len(others) > 0 {
+						ids := append([]int64{hk[i].ID}, others...)
+						for _, id := range ids {
+							unsettled[id] = true
+						}
+						out.AmbiguousCopy = append(out.AmbiguousCopy, AuditAmbiguous{YTID: c.ID, CommentIDs: ids})
+						continue
+					}
 					copies[i] = append(copies[i], c.ID)
 					continue
 				}
@@ -107,7 +138,6 @@ func AuditComments(hk []AuditComment, yt []RemoteComment, botID string, legacy f
 		}
 		byText = append(byText, c)
 	}
-	var out CommentAudit
 	for _, c := range byText {
 		group := byBody[c.Text]
 		if len(group) == 0 {
@@ -131,7 +161,9 @@ func AuditComments(hk []AuditComment, yt []RemoteComment, botID string, legacy f
 		got := AuditCopies{CommentID: c.ID, OpID: c.OpID, YTIDs: copies[i]}
 		switch len(copies[i]) {
 		case 0:
-			out.Missing = append(out.Missing, got)
+			if !unsettled[c.ID] {
+				out.Missing = append(out.Missing, got)
+			}
 		case 1:
 			out.Present = append(out.Present, got)
 		default:

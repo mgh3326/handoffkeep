@@ -54,11 +54,13 @@ const (
 var ytAuditTaskPage = store.YTAuditTaskPageMax
 
 type ytAuditItem struct {
-	TaskID    int64    `json:"task_id"`
-	CommentID int64    `json:"comment_id,omitempty"`
-	OpID      int64    `json:"op_id,omitempty"`
-	YTIDs     []string `json:"yt_ids,omitempty"`
-	Detail    string   `json:"detail,omitempty"`
+	TaskID    int64 `json:"task_id"`
+	CommentID int64 `json:"comment_id,omitempty"`
+	// CommentIDs are the hk comments an ambiguous_copy's evidence names.
+	CommentIDs []int64  `json:"comment_ids,omitempty"`
+	OpID       int64    `json:"op_id,omitempty"`
+	YTIDs      []string `json:"yt_ids,omitempty"`
+	Detail     string   `json:"detail,omitempty"`
 }
 
 // ytAuditClass is a count and its first ytAuditSample items, in the order
@@ -126,10 +128,15 @@ type ytAuditCounts struct {
 	Duplicate    ytAuditClass `json:"duplicate"`
 	// AdoptedUnmatched is hk comments the adoption says the Python mirror
 	// posted, with no copy hk can identify: never enqueued, for the operator.
-	AdoptedUnmatched ytAuditClass   `json:"adopted_unmatched"`
-	YTOnlyBot        ytAuditClass   `json:"yt_only_bot"`
-	YTOnlyHuman      ytAuditClass   `json:"yt_only_human"`
-	Unbound          ytAuditUnbound `json:"unbound"`
+	AdoptedUnmatched ytAuditClass `json:"adopted_unmatched"`
+	// AmbiguousCopy is YouTrack comments that are one hk comment's exact
+	// body and end in another's legacy trailer: assigned to neither, and
+	// neither comment is enqueued (when it has no other copy it is listed
+	// here only, not as missing_in_yt).
+	AmbiguousCopy ytAuditClass   `json:"ambiguous_copy"`
+	YTOnlyBot     ytAuditClass   `json:"yt_only_bot"`
+	YTOnlyHuman   ytAuditClass   `json:"yt_only_human"`
+	Unbound       ytAuditUnbound `json:"unbound"`
 	// Error is the tasks whose reads failed; run again.
 	Error ytAuditClass `json:"error"`
 }
@@ -167,7 +174,7 @@ type ytAuditReport struct {
 
 // gap reports whether the run found what the cutover gate refuses.
 func (r *ytAuditReport) gap() bool {
-	return r.Total.MissingInYT.Count > 0 || r.Total.Duplicate.Count > 0 || r.Total.AdoptedUnmatched.Count > 0 || r.Total.Unbound.Count > 0
+	return r.Total.MissingInYT.Count > 0 || r.Total.Duplicate.Count > 0 || r.Total.AdoptedUnmatched.Count > 0 || r.Total.AmbiguousCopy.Count > 0 || r.Total.Unbound.Count > 0
 }
 
 // ytAuditRemote is the YouTrack the audit reads: one issue, and one issue's
@@ -349,6 +356,9 @@ func (a *ytAuditor) auditTask(ctx context.Context, taskID int64, counts []*ytAud
 		for _, x := range adopted {
 			c.AdoptedUnmatched.add(item(x))
 		}
+		for _, x := range got.AmbiguousCopy {
+			c.AmbiguousCopy.add(ytAuditItem{TaskID: taskID, CommentIDs: x.CommentIDs, YTIDs: []string{x.YTID}})
+		}
 		for _, x := range got.Duplicate {
 			c.Duplicate.add(item(x))
 		}
@@ -447,7 +457,7 @@ func projectCounts(ps []*ytAuditProject) []*ytAuditCounts {
 
 // fillEmpty makes every empty item list [] rather than null.
 func (c *ytAuditCounts) fillEmpty() {
-	for _, x := range []*ytAuditClass{&c.Present, &c.MissingInYT, &c.Duplicate, &c.AdoptedUnmatched, &c.YTOnlyBot, &c.YTOnlyHuman, &c.Error,
+	for _, x := range []*ytAuditClass{&c.Present, &c.MissingInYT, &c.Duplicate, &c.AdoptedUnmatched, &c.AmbiguousCopy, &c.YTOnlyBot, &c.YTOnlyHuman, &c.Error,
 		&c.Unbound.NoProject, &c.Unbound.NoIssue, &c.Unbound.Ambiguous, &c.Unbound.Verifies, &c.Unbound.OtherTenant} {
 		if x.Items == nil {
 			x.Items = []ytAuditItem{}
@@ -534,8 +544,8 @@ func youtrackAuditCmd(args []string, out io.Writer) error {
 	case failed > 0 || report.Stopped != "":
 		return exitCodeError{code: youtrackExitFailed, err: fmt.Errorf("the audit is incomplete (%d failures, stopped %q); run again", failed, report.Stopped)}
 	case report.gap():
-		return exitCodeError{code: youtrackExitAuditGap, err: fmt.Errorf("audit gap: %d missing_in_yt, %d duplicate, %d adopted_unmatched, %d unbound",
-			report.Total.MissingInYT.Count, report.Total.Duplicate.Count, report.Total.AdoptedUnmatched.Count, report.Total.Unbound.Count)}
+		return exitCodeError{code: youtrackExitAuditGap, err: fmt.Errorf("audit gap: %d missing_in_yt, %d duplicate, %d adopted_unmatched, %d ambiguous_copy, %d unbound",
+			report.Total.MissingInYT.Count, report.Total.Duplicate.Count, report.Total.AdoptedUnmatched.Count, report.Total.AmbiguousCopy.Count, report.Total.Unbound.Count)}
 	}
 	return nil
 }

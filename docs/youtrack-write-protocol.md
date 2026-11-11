@@ -497,7 +497,10 @@ page at a time, at most `--limit` (default all), audited one at a time. For each
   copy. Else a comment in the rendered form of op N (`RenderedOpID`) copies
   the hk comment whose own comment op is N. Else one that ends in the legacy
   push's trailer (`\n\n<!-- hk-comment:N -->`, nothing after it) copies
-  comment N. Any other copies an hk comment whose body equals its text
+  comment N, unless its text is also another comment's exact body: then it
+  is `ambiguous_copy`, assigned to neither, and a comment it names with no
+  other copy is listed there, not as missing (never enqueued). Any other
+  copies an hk comment whose body equals its text
   exactly (the import wrote bodies as they are; no trimming). Comments the
   activity pull wrote into hk (author `operator:youtrack`, never enqueued)
   are left out, and so are their YouTrack originals, by linked id only
@@ -516,8 +519,8 @@ page at a time, at most `--limit` (default all), audited one at a time. For each
 The JSON report has, per hk project and in `total`, a count and up to 10
 items for each class (task id with comment id, op id and YouTrack ids, or
 task id with a detail). Exit 0 when clean; 4 when it ran in full and
-found a `missing_in_yt`, `duplicate` or `adopted_unmatched` comment or an
-unbound task; 1 when a
+found a `missing_in_yt`, `duplicate`, `adopted_unmatched` or
+`ambiguous_copy` comment or an unbound task; 1 when a
 task's reads failed (class `error`), an enqueue failed, or the run stopped.
 
 **`--enqueue`** opens the database as the backfill does and, for each
