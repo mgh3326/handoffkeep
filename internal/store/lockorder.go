@@ -167,7 +167,10 @@ package store
 //     then take the lane lock of that task, read without a lock (mode on, hk
 //     3810: the task's yt_task_bindings row, its task_origins, yt_entity_map,
 //     yt_comment_canary and youtrack_projects rows) and insert new rows of
-//     yt_write_ops, yt_comment_write_links and yt_entity_map. RemoveYTCommentCanary
+//     yt_write_ops, yt_comment_write_links and yt_entity_map. The comment
+//     worker's catch-up (CatchUpYTComments, hk 3897) makes the same reads and
+//     inserts for a committed comment, with the lane lock as the first lock
+//     of its transaction and no comment lock. RemoveYTCommentCanary
 //     takes the task's lane lock first and then deletes its yt_comment_canary
 //     row. The two writers that give an issue to a task, AddYTCommentCanary
 //     and AddYTTaskBinding (yt_task_bindings.go, hk 3810), take the issue

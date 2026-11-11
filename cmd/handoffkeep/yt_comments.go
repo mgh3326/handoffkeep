@@ -38,6 +38,9 @@ const (
 	ytCommentsDispatchTimeout = 3 * time.Second
 	ytCommentsSettleTimeout   = 1 * time.Second
 	ytCommentsPassLimit       = 50
+	// ytCommentsCatchUpLimit bounds the comments one catch-up pass prepares
+	// ops for (store.CatchUpYTComments), oldest first.
+	ytCommentsCatchUpLimit = 200
 )
 
 // ytCommentsModeFromEnv reads HANDOFFKEEP_YT_COMMENTS_MODE: unset or "off"
@@ -110,7 +113,13 @@ func newYTCommentsWorker(st *store.Store, remote ytwrite.Remote, tenant string, 
 	}
 	st.SetYTCommentsMode(mode)
 	log.Printf("ytwrite.comments_enabled mode=%s tenant=%q", mode, tenant)
-	return ytCommentsWorker{protocol: p}, nil
+	return ytCommentsWorker{protocol: p, catchUp: st}, nil
+}
+
+// ytCommentCatchUpper prepares the ops of comments the enqueue missed
+// (store.CatchUpYTComments).
+type ytCommentCatchUpper interface {
+	CatchUpYTComments(ctx context.Context, limit int, skip []int64) (store.YTCatchUp, error)
 }
 
 // ytCommentsWorker runs one sequential Drive pass every interval. Two serve
@@ -118,8 +127,15 @@ func newYTCommentsWorker(st *store.Store, remote ytwrite.Remote, tenant string, 
 // is the boundary, so an op is sent at most once. Its ledger is scoped to the
 // tenant it was configured for (store.YTTenantLedger): it neither sends nor
 // searches for an op bound to another tenant.
+//
+// Before each Drive pass, catchUp (when set) prepares the ops of comments on
+// bound tasks that the enqueue missed; it does nothing outside mode on. A
+// comment it skipped as ambiguous is left out of later passes of this
+// process, so it is logged once and never crowds out the others; a restart
+// looks at it again.
 type ytCommentsWorker struct {
 	protocol *ytwrite.Protocol
+	catchUp  ytCommentCatchUpper
 	interval time.Duration
 }
 
@@ -130,7 +146,15 @@ func (w ytCommentsWorker) Run(ctx context.Context) {
 	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	skipped := []int64{}
 	for {
+		if w.catchUp != nil {
+			got, err := w.catchUp.CatchUpYTComments(ctx, ytCommentsCatchUpLimit, skipped)
+			if err != nil && ctx.Err() == nil {
+				log.Printf("ytwrite.comment_catchup_failed err=%q", err.Error())
+			}
+			skipped = append(skipped, got.Skipped...)
+		}
 		st, err := w.protocol.Drive(ctx, ytCommentsPassLimit)
 		if err != nil && ctx.Err() == nil {
 			log.Printf("ytwrite.drive_failed err=%q", err.Error())
@@ -429,6 +453,7 @@ func (p *ytCommentsProject) class(name string) *ytCommentsClass {
 type ytCommentsReport struct {
 	Tenant             string               `json:"tenant"`
 	Days               int                  `json:"days"`
+	All                bool                 `json:"all,omitempty"`
 	Project            string               `json:"project,omitempty"`
 	CommentsTotal      int                  `json:"comments_total"`
 	MaxCommentsPerHour int                  `json:"max_comments_per_hour"`
@@ -454,7 +479,7 @@ type ytClassified struct {
 // the local sources only (no YouTrack call); an unbound one is verified in
 // YouTrack (youtrack.VerifyBinding) and its would-be binding checked against
 // the same local sources.
-func classifyYTCommentTask(ctx context.Context, st *store.Store, issues youtrack.IssueReader, tenant string, taskID int64) ytClassified {
+func classifyYTCommentTask(ctx context.Context, st *store.Store, issues youtrack.IssueReader, tenant, bucketID string, taskID int64) ytClassified {
 	failed := func(err error) ytClassified { return ytClassified{class: ytClassError, detail: err.Error()} }
 	b, found, err := st.YTTaskBinding(ctx, taskID)
 	if err != nil {
@@ -478,7 +503,7 @@ func classifyYTCommentTask(ctx context.Context, st *store.Store, issues youtrack
 		return failed(err)
 	}
 	gctx, cancel := context.WithTimeout(ctx, ytCommentsGetTimeout)
-	b, err = youtrack.VerifyBinding(gctx, issues, tenant, verified)
+	b, err = youtrack.VerifyBinding(gctx, issues, tenant, bucketID, verified)
 	cancel()
 	switch {
 	case errors.Is(err, youtrack.ErrNoIssue):
@@ -498,18 +523,34 @@ func classifyYTCommentTask(ctx context.Context, st *store.Store, issues youtrack
 	return ytClassified{class: ytClassVerifies, binding: b, verified: verified}
 }
 
-// ytCommentsRun classifies every candidate and, when bindBy is not "" (the
+// ytCommentsOptions selects what one preflight or backfill run covers.
+type ytCommentsOptions struct {
+	// Project keeps one hk project's tasks ("" for all).
+	Project string
+	// Days is the comment window: candidates (unless All) and the volume.
+	Days int
+	// All makes every task a candidate (bind-all, hk 3897).
+	All bool
+	// BucketID is the YouTrack project a task with no hk project verifies
+	// against (youtrack.ResolveBucketProject).
+	BucketID string
+	// BindBy, when not "" (the backfill), publishes each verified binding.
+	BindBy string
+}
+
+// ytCommentsRun classifies every candidate and, when o.BindBy is not "" (the
 // backfill), publishes each verified binding; a refused publication counts
 // as ambiguous and the run goes on. It never stops on one task.
-func ytCommentsRun(ctx context.Context, st *store.Store, issues youtrack.IssueReader, tenant, project string, days int, bindBy string) (ytCommentsReport, error) {
-	r := ytCommentsReport{Tenant: tenant, Days: days, Project: project, Projects: []*ytCommentsProject{}}
+func ytCommentsRun(ctx context.Context, st *store.Store, issues youtrack.IssueReader, tenant string, o ytCommentsOptions) (ytCommentsReport, error) {
+	project, days, bindBy := o.Project, o.Days, o.BindBy
+	r := ytCommentsReport{Tenant: tenant, Days: days, All: o.All, Project: project, Projects: []*ytCommentsProject{}}
 	r.Uncovered.OpIDs = []int64{}
 	since := time.Now().UTC().Add(-time.Duration(days) * 24 * time.Hour)
 	var err error
 	if r.CommentsTotal, r.MaxCommentsPerHour, err = st.YTCommentVolume(ctx, since, project); err != nil {
 		return r, err
 	}
-	candidates, err := st.YTCommentCandidates(ctx, since, project)
+	candidates, err := st.YTCommentCandidates(ctx, since, project, o.All)
 	if err != nil {
 		return r, err
 	}
@@ -519,7 +560,7 @@ func ytCommentsRun(ctx context.Context, st *store.Store, issues youtrack.IssueRe
 	for _, c := range candidates {
 		candidate[c.TaskID] = true
 		tctx, cancel := context.WithTimeout(ctx, ytCommentsTaskTimeout)
-		got := classifyYTCommentTask(tctx, st, issues, tenant, c.TaskID)
+		got := classifyYTCommentTask(tctx, st, issues, tenant, o.BucketID, c.TaskID)
 		if bindBy != "" && got.class == ytClassVerifies {
 			b := got.binding
 			b.BoundBy = bindBy
@@ -597,8 +638,8 @@ func ytCommentsRun(ctx context.Context, st *store.Store, issues youtrack.IssueRe
 }
 
 const (
-	youtrackCommentsPreflightUsage = "usage: youtrack comments-preflight [--project P] [--days N]"
-	youtrackCommentsBackfillUsage  = "usage: youtrack comments-backfill [--project P] [--days N] [--by NAME]"
+	youtrackCommentsPreflightUsage = "usage: youtrack comments-preflight [--project P] [--days N] [--all]"
+	youtrackCommentsBackfillUsage  = "usage: youtrack comments-backfill [--project P] [--days N] [--all] [--by NAME]"
 )
 
 // youtrackCommentsCmd is `youtrack comments-preflight` (backfill false):
@@ -615,6 +656,7 @@ func youtrackCommentsCmd(args []string, out io.Writer, backfill bool) error {
 	fs.SetOutput(io.Discard)
 	project := fs.String("project", "", "only tasks of this hk project")
 	days := fs.Int("days", ytCommentsDefaultDays, "tasks with a comment in the last N days")
+	all := fs.Bool("all", false, "every task, not only those with a recent comment")
 	valueFlags := []string{"project", "days"}
 	var by *string
 	if backfill {
@@ -664,15 +706,28 @@ func youtrackCommentsCmd(args []string, out io.Writer, backfill bool) error {
 	}
 	defer st.Close()
 	if !backfill {
-		applied, err := st.MigrationApplied(openCtx, store.YTTaskBindingsMigration)
-		if err != nil {
-			return err
-		}
-		if !applied {
-			return exitCodeError{code: youtrackExitConfig, err: fmt.Errorf("the database lacks migration %s: deploy the release that adds it first; the preflight never migrates", store.YTTaskBindingsMigration)}
+		for _, id := range []string{store.YTTaskBindingsMigration, store.YTBindingCommentsFromMigration} {
+			applied, err := st.MigrationApplied(openCtx, id)
+			if err != nil {
+				return err
+			}
+			if !applied {
+				return exitCodeError{code: youtrackExitConfig, err: fmt.Errorf("the database lacks migration %s: deploy the release that adds it first; the preflight never migrates", id)}
+			}
 		}
 	}
-	report, err := ytCommentsRun(context.Background(), st, remote, remote.Tenant(), *project, *days, bindBy)
+	// A task with no hk project verifies against the import's bucket. Its id
+	// is read once, before any task: no bucket, or two, refuses the run.
+	bucketCtx, cancelBucket := context.WithTimeout(context.Background(), ytCommentsGetTimeout)
+	bucketID, err := youtrack.ResolveBucketProject(bucketCtx, client)
+	cancelBucket()
+	if errors.Is(err, youtrack.ErrBucketProject) {
+		return exitCodeError{code: youtrackExitConfig, err: err}
+	}
+	if err != nil {
+		return exitCodeError{code: youtrackExitFailed, err: fmt.Errorf("list YouTrack projects: %w", err)}
+	}
+	report, err := ytCommentsRun(context.Background(), st, remote, remote.Tenant(), ytCommentsOptions{Project: *project, Days: *days, All: *all, BucketID: bucketID, BindBy: bindBy})
 	if err != nil {
 		return err
 	}

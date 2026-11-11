@@ -76,13 +76,15 @@ func ytpIDs(t *testing.T, name string, got ytpClass, want ...int64) {
 }
 
 // ytpFake is the YouTrack the commands verify against: one issue per task,
-// keyed by readable id, and a hit counter per path.
+// keyed by readable id, the project list (projects; nil answers the one
+// bucket project HK, id 0-1), and a hit counter per path.
 type ytpFake struct {
-	mu     sync.Mutex
-	issues map[string]map[string]any
-	fail   map[string]int
-	hits   map[string]int
-	onGet  func(path string)
+	mu       sync.Mutex
+	issues   map[string]map[string]any
+	fail     map[string]int
+	hits     map[string]int
+	onGet    func(path string)
+	projects []map[string]any
 }
 
 func (f *ytpFake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -91,7 +93,16 @@ func (f *ytpFake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	issue, ok := f.issues[r.URL.Path]
 	status := f.fail[r.URL.Path]
 	hook := f.onGet
+	projects := f.projects
 	f.mu.Unlock()
+	if r.Method == http.MethodGet && r.URL.Path == "/api/admin/projects" {
+		if projects == nil {
+			projects = []map[string]any{{"id": ytpBucketID, "shortName": "HK", "name": "Unassigned hk tasks"}}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(projects)
+		return
+	}
 	if r.Method != http.MethodGet || !strings.HasPrefix(r.URL.Path, "/api/issues/") {
 		http.Error(w, `{"error":"unexpected"}`, http.StatusMethodNotAllowed)
 		return
@@ -123,6 +134,10 @@ func (f *ytpFake) resetHits() {
 }
 
 func ytpIssuePath(task int64) string { return "/api/issues/HK-" + strconv.FormatInt(task, 10) }
+
+// ytpBucketID is the fake's import bucket, the project HK no
+// youtrack_projects row maps.
+const ytpBucketID = "0-1"
 
 func (f *ytpFake) add(task int64) {
 	id := strconv.FormatInt(task, 10)
@@ -505,6 +520,12 @@ func TestYTCommentsWorkerStartsInModeOn(t *testing.T) {
 	if _, err := st.AddYTTaskBinding(ctx, store.YTTaskBinding{TaskID: task.ID, Tenant: tenant, IssueID: "2-" + id, IssueReadable: "HK-" + id, ProjectID: "0-2", BoundBy: "test"}, verified); err != nil {
 		t.Fatal(err)
 	}
+	// Written after the binding while the mode is still off: no op until
+	// the running worker's catch-up (hk 3897).
+	missed, err := st.CreateTaskComment(ctx, task.ID, "worker", "written before the worker started")
+	if err != nil {
+		t.Fatal(err)
+	}
 	remote := ytwritetest.NewFake()
 	w, err := newYTCommentsWorker(st, remote, tenant, store.YTCommentsOn, nil)
 	if err != nil {
@@ -520,6 +541,167 @@ func TestYTCommentsWorkerStartsInModeOn(t *testing.T) {
 	if err != nil || len(ops) != 1 || ops[0].State != ytwrite.StateApplied || len(remote.Comments("2-"+id)) != 1 {
 		t.Fatalf("mode on: ops %+v %v, remote %+v", ops, err, remote.Comments("2-"+id))
 	}
+	runCtx, stop := context.WithCancel(ctx)
+	w.interval = 10 * time.Millisecond
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		w.Run(runCtx)
+	}()
+	deadline := time.Now().Add(10 * time.Second)
+	for len(remote.Comments("2-"+id)) < 2 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	stop()
+	<-done
+	ops, err = st.ListYTWriteOps(ctx, store.YTOpFilter{State: "all", TaskID: task.ID})
+	if err != nil || len(ops) != 2 || ops[1].Key != store.YTCommentKey(missed.ID) || ops[1].State != ytwrite.StateApplied || len(remote.Comments("2-"+id)) != 2 {
+		t.Fatalf("catch-up through the running worker: ops %+v %v, remote %+v", ops, err, remote.Comments("2-"+id))
+	}
+}
+
+// hk 3897: --all makes every task a candidate, not only those with a recent
+// comment, and a task with no hk project verifies against the import's
+// bucket HK (HK-<id> in the one project with that short name). The bucket is
+// resolved once per run; no HK project, or two, refuses the whole run before
+// any task.
+func TestCommentsBackfillAllBindsBucketTasks(t *testing.T) {
+	_, dbURL := testdb.Schema(t, "ytp_all")
+	ctx := t.Context()
+	st, err := store.Open(ctx, dbURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(st.Close)
+	conn, err := pgx.Connect(ctx, dbURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { conn.Close(context.Background()) })
+	fake := &ytpFake{issues: map[string]map[string]any{}, fail: map[string]int{}, hits: map[string]int{}}
+	ts := httptest.NewServer(fake)
+	t.Cleanup(ts.Close)
+	u, err := url.Parse(ts.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tenant := u.Host
+	const project = "ytp-all"
+	if _, err := st.AddTaskProject(ctx, project, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.PutYouTrackProject(ctx, store.YouTrackProject{HKProject: project, ProjectID: "0-2", ShortName: "PW"}); err != nil {
+		t.Fatal(err)
+	}
+	newTask := func(p *string) int64 {
+		t.Helper()
+		x, err := st.CreateTask(ctx, store.Task{Lane: "ytp-all-lane", Title: "all", Kind: "implement", CreatedBy: "test", Project: p})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return x.ID
+	}
+	issue := func(readable, internal, summary, projectID, short string) {
+		fake.issues["/api/issues/"+readable] = map[string]any{"id": internal, "idReadable": readable, "summary": summary,
+			"project": map[string]any{"id": projectID, "shortName": short}}
+	}
+	p := project
+	bucket := newTask(nil)   // no project, closed long ago: HK-<id>
+	orphan := newTask(nil)   // no project and no issue
+	idle := newTask(&p)      // mapped project, no comment
+	wrongSum := newTask(nil) // no project; HK-<id> names another task
+	for _, task := range []int64{bucket, orphan, idle, wrongSum} {
+		if _, err := conn.Exec(ctx, `UPDATE tasks SET project=NULL WHERE id=$1 AND $2`, task, task != idle); err != nil {
+			t.Fatal(err)
+		}
+	}
+	id := func(task int64) string { return strconv.FormatInt(task, 10) }
+	issue("HK-"+id(bucket), "5-"+id(bucket), "#"+id(bucket)+" closed", ytpBucketID, "HK")
+	issue("HK-"+id(wrongSum), "5-"+id(wrongSum), "#9999 other", ytpBucketID, "HK")
+	issue("PW-"+id(idle), "2-"+id(idle), "#"+id(idle)+" idle", "0-2", "PW")
+	var oldComment int64
+	if err := conn.QueryRow(ctx, `INSERT INTO task_comments(task_id,body,author,created_at) VALUES($1,'old','worker',$2) RETURNING id`,
+		bucket, time.Now().UTC().Add(-90*24*time.Hour)).Scan(&oldComment); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HANDOFFKEEP_DB_URL", dbURL)
+	t.Setenv("YOUTRACK_URL", ts.URL)
+	t.Setenv("YOUTRACK_BOT_API_KEY", "fake-test-key")
+
+	// Without --all none of them is a candidate: nothing has a recent comment.
+	r, err := ytpRun(t, "yt", "comments-preflight")
+	if err != nil || len(r.Projects) != 0 {
+		t.Fatalf("preflight without --all: %+v %v", r.Projects, err)
+	}
+	before := ytpSnapshot(t, conn)
+	r, err = ytpRun(t, "yt", "comments-preflight", "--all")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after := ytpSnapshot(t, conn); after != before {
+		t.Fatalf("preflight --all wrote: %s -> %s", before, after)
+	}
+	noProject := r.project(t, "")
+	ytpIDs(t, "no project verifies", noProject.Verifies, bucket)
+	ytpIDs(t, "no project no_issue", noProject.NoIssue, orphan)
+	ytpIDs(t, "no project ambiguous", noProject.Ambiguous, wrongSum)
+	ytpIDs(t, "mapped verifies", r.project(t, project).Verifies, idle)
+
+	for name, projects := range map[string][]map[string]any{
+		"no HK project":   {{"id": "0-2", "shortName": "PW"}},
+		"two HK projects": {{"id": ytpBucketID, "shortName": "HK"}, {"id": "0-8", "shortName": "HK"}},
+	} {
+		fake.mu.Lock()
+		fake.projects = projects
+		fake.mu.Unlock()
+		fake.resetHits()
+		var out bytes.Buffer
+		err := run([]string{"yt", "comments-backfill", "--all"}, &out, io.Discard)
+		var code exitCodeError
+		if !errors.As(err, &code) || code.code != youtrackExitConfig || !strings.Contains(err.Error(), "HK") {
+			t.Fatalf("%s: err %v, want exit %d naming HK", name, err, youtrackExitConfig)
+		}
+		if out.Len() != 0 || fake.hitsOf("/api/issues/HK-"+id(bucket)) != 0 {
+			t.Fatalf("%s: the refused run printed %q or read an issue", name, out.String())
+		}
+		if n := ytpSnapshot(t, conn); n != before {
+			t.Fatalf("%s: the refused run wrote: %s", name, n)
+		}
+	}
+	fake.mu.Lock()
+	fake.projects = nil
+	fake.mu.Unlock()
+
+	r, err = ytpRun(t, "yt", "comments-backfill", "--all")
+	if err != nil || r.BoundNow == nil || *r.BoundNow != 2 {
+		t.Fatalf("backfill --all: bound_now %v, err %v", r.BoundNow, err)
+	}
+	for task, want := range map[int64]store.YTTaskBinding{
+		bucket: {TaskID: bucket, Tenant: tenant, IssueID: "5-" + id(bucket), IssueReadable: "HK-" + id(bucket), ProjectID: ytpBucketID, CommentsFrom: oldComment},
+		idle:   {TaskID: idle, Tenant: tenant, IssueID: "2-" + id(idle), IssueReadable: "PW-" + id(idle), ProjectID: "0-2"},
+	} {
+		got, found, err := st.YTTaskBinding(ctx, task)
+		got.BoundBy, got.BoundAt = "", time.Time{}
+		if err != nil || !found || got != want {
+			t.Fatalf("task %d binding %+v %v %v, want %+v", task, got, found, err, want)
+		}
+	}
+	for _, task := range []int64{orphan, wrongSum} {
+		if _, found, err := st.YTTaskBinding(ctx, task); err != nil || found {
+			t.Fatalf("task %d bound (%v)", task, err)
+		}
+	}
+	// Bound now, the bucket task's comments are copied like any other's.
+	st.SetYTCommentsMode(store.YTCommentsOn)
+	c, err := st.CreateTaskCommentProjected(ctx, bucket, "worker", "after the bind-all")
+	if err != nil || c.YouTrackProjection == nil || c.YouTrackProjection.Status != string(ytwrite.StatusPending) {
+		t.Fatalf("comment on the bucket task: %+v %v", c.YouTrackProjection, err)
+	}
+	r, err = ytpRun(t, "yt", "comments-preflight", "--all")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ytpIDs(t, "no project bound", r.project(t, "").Bound, bucket)
 }
 
 // The usage names the two new commands.
