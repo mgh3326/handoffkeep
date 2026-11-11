@@ -74,11 +74,11 @@ func TestAuditCommentsClasses(t *testing.T) {
 	}
 	got := ytwrite.AuditComments(hk, auditList(t, f), auditBot, nil)
 	want := ytwrite.CommentAudit{
-		Present:     []ytwrite.AuditCopies{copies(1, 7, byOp), copies(2, 0, imported)},
-		Missing:     []ytwrite.AuditCopies{copies(3, 0), copies(5, 0)},
+		Present:     []ytwrite.AuditCopies{copies(1, 7, byOp), copies(2, 0, imported), copies(3, 0, spaced)},
+		Missing:     []ytwrite.AuditCopies{copies(5, 0)},
 		Duplicate:   []ytwrite.AuditCopies{copies(4, 0, twiceA, twiceB)},
 		YTOnlyBot:   []string{strayOp},
-		YTOnlyHuman: []string{spaced, human},
+		YTOnlyHuman: []string{human},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("audit\n got %+v\nwant %+v", got, want)
@@ -112,6 +112,45 @@ func TestAuditCommentsEqualBodies(t *testing.T) {
 		imported := f.InjectAs(auditIssue, "LGTM", auditHuman)
 		got := ytwrite.AuditComments([]ytwrite.AuditComment{{ID: 1, Body: "LGTM", OpID: 3}}, auditList(t, f), auditBot, nil)
 		if !reflect.DeepEqual(got.Duplicate, []ytwrite.AuditCopies{copies(1, 3, rendered, imported)}) || len(got.Present) != 0 {
+			t.Fatalf("got %+v", got)
+		}
+	})
+}
+
+func TestAuditCommentsTrimmedImportedBodies(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		text string
+	}{
+		{"trailing space", "body ", "body"},
+		{"trailing newline", "body\n", "body"},
+		{"leading newline", "\nbody", "body"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ytwrite.AuditComments([]ytwrite.AuditComment{{ID: 1, Body: tt.body}}, []ytwrite.RemoteComment{{ID: "4-1", Text: tt.text}}, auditBot, nil)
+			if !reflect.DeepEqual(got.Present, []ytwrite.AuditCopies{copies(1, 0, "4-1")}) || len(got.Missing)+len(got.YTOnlyHuman)+len(got.YTOnlyBot) != 0 {
+				t.Fatalf("got %+v", got)
+			}
+		})
+	}
+	t.Run("inner whitespace remains different", func(t *testing.T) {
+		got := ytwrite.AuditComments([]ytwrite.AuditComment{{ID: 1, Body: "two  spaces"}}, []ytwrite.RemoteComment{{ID: "4-1", Text: "two spaces"}}, auditBot, nil)
+		if !reflect.DeepEqual(got.Missing, []ytwrite.AuditCopies{copies(1, 0)}) || !reflect.DeepEqual(got.YTOnlyHuman, []string{"4-1"}) {
+			t.Fatalf("got %+v", got)
+		}
+	})
+	t.Run("one hk comment with two trimmed copies is duplicate", func(t *testing.T) {
+		got := ytwrite.AuditComments([]ytwrite.AuditComment{{ID: 1, Body: "body "}}, []ytwrite.RemoteComment{{ID: "4-1", Text: "body"}, {ID: "4-2", Text: " body\n"}}, auditBot, nil)
+		if !reflect.DeepEqual(got.Duplicate, []ytwrite.AuditCopies{copies(1, 0, "4-1", "4-2")}) {
+			t.Fatalf("got %+v", got)
+		}
+	})
+	t.Run("one trimmed YouTrack body matching distinct hk bodies is ambiguous", func(t *testing.T) {
+		got := ytwrite.AuditComments([]ytwrite.AuditComment{{ID: 1, Body: "body "}, {ID: 2, Body: "body\n"}}, []ytwrite.RemoteComment{{ID: "4-1", Text: "body"}}, auditBot, nil)
+		want := []ytwrite.AuditAmbiguous{{YTID: "4-1", CommentIDs: []int64{1, 2}}}
+		if !reflect.DeepEqual(got.AmbiguousCopy, want) || len(got.Missing) != 0 || len(got.YTOnlyHuman) != 0 {
 			t.Fatalf("got %+v", got)
 		}
 	})
