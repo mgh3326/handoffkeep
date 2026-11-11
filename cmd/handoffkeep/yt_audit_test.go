@@ -225,6 +225,16 @@ func TestYouTrackAudit(t *testing.T) {
 		t.Fatal(err)
 	}
 	fake.add(issue, "4-7", "said in YouTrack", "1-7")
+	// Someone wrote the same words again; the pull has no link for it, so it
+	// is YouTrack's alone, not hidden by the equal text.
+	fake.add(issue, "4-9", "said in YouTrack", "1-8")
+	// A comment the legacy mirror push posted and linked: the link is an
+	// outbound copy, matched by its id although the push wrapped the body.
+	cMirror := comment(bound, "pushed by the legacy mirror")
+	if err := st.LinkYouTrackComment(ctx, bound, cMirror, "4-8", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	fake.add(issue, "4-8", "작성: worker\n\npushed by the legacy mirror\n\n<!-- hk-comment:"+strconv.FormatInt(cMirror, 10)+" -->", ytaBot)
 
 	noProject := newTask()
 	if _, err := conn.Exec(ctx, `UPDATE tasks SET project=NULL WHERE id=$1`, noProject); err != nil {
@@ -240,6 +250,10 @@ func TestYouTrackAudit(t *testing.T) {
 	t.Setenv("HANDOFFKEEP_DB_URL", dbURL)
 	t.Setenv("YOUTRACK_URL", ts.URL)
 	t.Setenv("YOUTRACK_BOT_API_KEY", "fake-test-key")
+	// Two tasks a page, so a default run pages through all five.
+	page := ytAuditTaskPage
+	ytAuditTaskPage = 2
+	t.Cleanup(func() { ytAuditTaskPage = page })
 
 	gap := func(name string, err error) {
 		t.Helper()
@@ -262,7 +276,7 @@ func TestYouTrackAudit(t *testing.T) {
 			got   []int64
 			want  []int64
 		}{
-			{"present", ytaComments(c.Present), []int64{cImported, cOp}},
+			{"present", ytaComments(c.Present), []int64{cImported, cOp, cMirror}},
 			{"missing_in_yt", ytaComments(c.MissingInYT), []int64{cMissing, cSpaced}},
 			{"duplicate", ytaComments(c.Duplicate), []int64{cDup}},
 			{"no_project", ytaTasks(c.Unbound.NoProject), []int64{noProject}},
@@ -282,8 +296,12 @@ func TestYouTrackAudit(t *testing.T) {
 		if c.Present.Items[1].OpID != opID {
 			t.Errorf("%s: the op copy is matched as %+v, want op %d", name, c.Present.Items[1], opID)
 		}
-		if c.YTOnlyBot.Count != 1 || c.YTOnlyBot.Items[0].YTIDs[0] != "4-6" || c.YTOnlyHuman.Count != 1 || c.YTOnlyHuman.Items[0].YTIDs[0] != "4-3" {
-			t.Errorf("%s: yt_only bot %+v human %+v, want 4-6 and 4-3", name, c.YTOnlyBot, c.YTOnlyHuman)
+		human := []string{}
+		for _, it := range c.YTOnlyHuman.Items {
+			human = append(human, it.YTIDs...)
+		}
+		if c.YTOnlyBot.Count != 1 || c.YTOnlyBot.Items[0].YTIDs[0] != "4-6" || !slices.Equal(human, []string{"4-3", "4-9"}) {
+			t.Errorf("%s: yt_only bot %+v human %v, want 4-6 and 4-3 4-9", name, c.YTOnlyBot, human)
 		}
 		if len(r.Projects) != 2 || r.Projects[0].Project != "" || r.Projects[1].Project != project || r.Projects[1].MissingInYT.Count != 2 {
 			t.Errorf("%s: projects %+v", name, r.Projects)
@@ -349,9 +367,9 @@ func TestYouTrackAudit(t *testing.T) {
 	if err != nil || r.Tasks != 1 || r.Total.Present.Count != 1 || r.Total.Present.Items[0].CommentID != cClean {
 		t.Errorf("--task %d: err %v report %+v", clean, err, r.Total)
 	}
-	r, _ = ytaRun(t, "--limit", "2")
-	if r.Tasks != 2 || r.Limit != 2 {
-		t.Errorf("--limit 2 read %d tasks", r.Tasks)
+	r, _ = ytaRun(t, "--limit", "3")
+	if r.Tasks != 3 || r.Limit != 3 {
+		t.Errorf("--limit 3 read %d tasks", r.Tasks)
 	}
 	if fake.refused != 0 {
 		t.Errorf("the audit made %d requests the fake refuses (a write?)", fake.refused)

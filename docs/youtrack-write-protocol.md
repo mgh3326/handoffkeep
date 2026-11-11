@@ -486,18 +486,20 @@ reads YouTrack with the bot key, against the tenant of `YOUTRACK_URL`.
 Without `--enqueue` it writes nothing: `store.OpenReadOnly`, and it refuses
 (exit 2) a database without `20261110-yt-task-bindings`.
 
-Tasks are every task (or `--project`'s, or `--task`), in id order, at most
-`--limit` (default all), one at a time. For each:
+Tasks are every task (or `--project`'s, or `--task`), in id order, listed a
+page at a time, at most `--limit` (default all), audited one at a time. For each:
 
 - **Bound on this tenant.** Its issue's comments are listed stably
   (`EnumerateStableComments`, deleted ones left out) and matched with the
-  task's comments (`ytwrite.AuditComments`). A YouTrack comment in the
+  task's comments (`ytwrite.AuditComments`). A YouTrack comment the legacy
+  mirror push posted and recorded (`youtrack_comment_links` row of an hk
+  comment that the pull did not write) copies that comment, by id. One in the
   rendered form of op N (`RenderedOpID`) copies the hk comment whose own
   comment op is N; any other copies an hk comment whose body equals its text
   exactly (the import wrote bodies as they are; no trimming). Comments the
   activity pull wrote into hk (author `operator:youtrack`, never enqueued)
-  are left out, and so are their YouTrack originals
-  (`youtrack_comment_links`). Classes: `present` (one copy),
+  are left out, and so are their YouTrack originals, by linked id only
+  (`youtrack_comment_links`; an equal text is no evidence). Classes: `present` (one copy),
   `missing_in_yt` (none), `duplicate` (two or more), and for a YouTrack
   comment that copies nothing `yt_only_bot` (written by the bot key's user)
   or `yt_only_human`.

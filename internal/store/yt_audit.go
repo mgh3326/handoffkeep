@@ -17,21 +17,19 @@ import (
 // missing ones' ops through the enqueue path. Every read here is a plain
 // read, so a read-only store (OpenReadOnly) can run the audit.
 
-// YTAuditTaskMax bounds the tasks one audit run reads.
-const YTAuditTaskMax = 100000
+// YTAuditTaskPageMax bounds one page of YTAuditTasks.
+const YTAuditTaskPageMax = 1000
 
-// YTAuditTasks lists, in id order, the tasks an audit covers: every task,
-// or only project's when project is not "", or only task taskID when it is
-// not 0; at most limit (0: YTAuditTaskMax).
-func (s *Store) YTAuditTasks(ctx context.Context, project string, taskID int64, limit int) ([]YTCommentCandidate, error) {
-	if limit == 0 {
-		limit = YTAuditTaskMax
-	}
-	if taskID < 0 || limit < 1 || limit > YTAuditTaskMax {
+// YTAuditTasks lists, in id order, a page of the tasks an audit covers:
+// every task, or only project's when project is not "", or only task taskID
+// when it is not 0; those with id greater than afterID, at most limit. The
+// caller pages with the last id until a page comes back short.
+func (s *Store) YTAuditTasks(ctx context.Context, project string, taskID, afterID int64, limit int) ([]YTCommentCandidate, error) {
+	if taskID < 0 || afterID < 0 || limit < 1 || limit > YTAuditTaskPageMax {
 		return nil, errors.New("invalid audit task filter")
 	}
 	rows, err := s.pool.Query(ctx, `SELECT id, coalesce(project,'') FROM tasks
-		WHERE ($1 = '' OR project = $1) AND ($2 = 0 OR id = $2) ORDER BY id LIMIT $3`, project, taskID, limit)
+		WHERE ($1 = '' OR project = $1) AND ($2 = 0 OR id = $2) AND id > $3 ORDER BY id LIMIT $4`, project, taskID, afterID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -52,23 +50,24 @@ type YTAuditComments struct {
 	// Comments are the task's comments that belong on its issue, in id
 	// order: every comment except the ones the YouTrack activity pull wrote
 	// (author YouTrackOwnedActor), which the enqueue never copies either.
-	// OpID is the comment's comment_append op when that op targets issueID.
+	// OpID is the comment's comment_append op when that op targets issueID;
+	// MirrorYTID the YouTrack comment the legacy mirror push posted for it.
 	Comments []ytwrite.AuditComment
-	// PulledYTIDs are the YouTrack comments the pull copied into this task
-	// (youtrack_comment_links), and PulledBodies the bodies of the pulled
-	// comments: a YouTrack comment that is either came from YouTrack and is
-	// not hk's to account for.
-	PulledYTIDs  map[string]bool
-	PulledBodies map[string]bool
+	// PulledYTIDs are the YouTrack comments the pull copied into this task:
+	// youtrack_comment_links rows whose hk comment the pull wrote. They came
+	// from YouTrack and are not hk's to account for. A link whose hk comment
+	// any other writer made is the legacy push's outbound copy (MirrorYTID).
+	PulledYTIDs map[string]bool
 }
 
 // YTAuditTaskComments reads task taskID's comments for the audit against
 // issue issueID.
 func (s *Store) YTAuditTaskComments(ctx context.Context, taskID int64, issueID string) (YTAuditComments, error) {
-	out := YTAuditComments{Comments: []ytwrite.AuditComment{}, PulledYTIDs: map[string]bool{}, PulledBodies: map[string]bool{}}
+	out := YTAuditComments{Comments: []ytwrite.AuditComment{}, PulledYTIDs: map[string]bool{}}
 	rows, err := s.pool.Query(ctx, `SELECT c.id, c.body, c.author,
 			coalesce((SELECT o.id FROM yt_comment_write_links w JOIN yt_write_ops o ON o.id = w.op_id
-				WHERE w.comment_id = c.id AND o.kind = $2 AND o.yt_target_id = $3), 0)
+				WHERE w.comment_id = c.id AND o.kind = $2 AND o.yt_target_id = $3), 0),
+			coalesce((SELECT l.youtrack_comment_id FROM youtrack_comment_links l WHERE l.hk_comment_id = c.id), '')
 		FROM task_comments c WHERE c.task_id = $1 ORDER BY c.id`, taskID, ytwrite.KindCommentAppend, issueID)
 	if err != nil {
 		return YTAuditComments{}, err
@@ -76,30 +75,18 @@ func (s *Store) YTAuditTaskComments(ctx context.Context, taskID int64, issueID s
 	defer rows.Close()
 	for rows.Next() {
 		var c ytwrite.AuditComment
-		var author string
-		if err := rows.Scan(&c.ID, &c.Body, &author, &c.OpID); err != nil {
+		var author, linked string
+		if err := rows.Scan(&c.ID, &c.Body, &author, &c.OpID, &linked); err != nil {
 			return YTAuditComments{}, err
 		}
 		if author == YouTrackOwnedActor {
-			out.PulledBodies[c.Body] = true
+			if linked != "" {
+				out.PulledYTIDs[linked] = true
+			}
 			continue
 		}
+		c.MirrorYTID = linked
 		out.Comments = append(out.Comments, c)
-	}
-	if err := rows.Err(); err != nil {
-		return YTAuditComments{}, err
-	}
-	rows, err = s.pool.Query(ctx, `SELECT youtrack_comment_id FROM youtrack_comment_links WHERE task_id = $1`, taskID)
-	if err != nil {
-		return YTAuditComments{}, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return YTAuditComments{}, err
-		}
-		out.PulledYTIDs[id] = true
 	}
 	return out, rows.Err()
 }

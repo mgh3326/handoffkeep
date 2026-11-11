@@ -49,6 +49,10 @@ const (
 	ytAuditRateLimitAttempts = 5
 )
 
+// ytAuditTaskPage is how many tasks the run lists at a time; it pages
+// through every task (a variable so a test can page a few).
+var ytAuditTaskPage = store.YTAuditTaskPageMax
+
 type ytAuditItem struct {
 	TaskID    int64    `json:"task_id"`
 	CommentID int64    `json:"comment_id,omitempty"`
@@ -299,18 +303,13 @@ func (a *ytAuditor) auditTask(ctx context.Context, taskID int64, counts []*ytAud
 		return err
 	}
 	// A YouTrack comment the activity pull copied into hk came from YouTrack:
-	// it is not hk's to account for, unless its text is also an hk comment's
-	// body (then it may be that comment's copy).
-	bodies := map[string]bool{}
-	for _, c := range hk.Comments {
-		bodies[c.Body] = true
-	}
+	// it is not hk's to account for. Only the linked ids are known; an equal
+	// text is no evidence (two people may write the same words).
 	yt := listed[:0:0]
 	for _, c := range listed {
-		if hk.PulledYTIDs[c.ID] || (hk.PulledBodies[c.Text] && !bodies[c.Text]) {
-			continue
+		if !hk.PulledYTIDs[c.ID] {
+			yt = append(yt, c)
 		}
-		yt = append(yt, c)
 	}
 	got := ytwrite.AuditComments(hk.Comments, yt, a.botID)
 	item := func(x ytwrite.AuditCopies) ytAuditItem {
@@ -358,36 +357,50 @@ func (a *ytAuditor) auditTask(ctx context.Context, taskID int64, counts []*ytAud
 }
 
 // run audits the tasks of project (or task taskID), at most limit (0: all),
-// in task id order. One task's failed read is class error and the run goes
+// in task id order, listing them a page at a time. One task's failed read is class error and the run goes
 // on; a rate limit longer than the audit waits stops it.
 func (a *ytAuditor) run(ctx context.Context, project string, taskID int64, limit int) (ytAuditReport, error) {
 	r := ytAuditReport{Tenant: a.tenant, Project: project, Task: taskID, Limit: limit, Projects: []*ytAuditProject{}}
 	if a.enqueue {
 		r.Enqueue = &ytAuditEnqueue{OpIDs: []int64{}}
 	}
-	tasks, err := a.st.YTAuditTasks(ctx, project, taskID, limit)
-	if err != nil {
-		return r, err
-	}
 	byProject := map[string]*ytAuditProject{}
-	for _, t := range tasks {
-		p := byProject[t.Project]
-		if p == nil {
-			p = &ytAuditProject{Project: t.Project}
-			byProject[t.Project] = p
-			r.Projects = append(r.Projects, p)
+	var after int64
+	for {
+		page := ytAuditTaskPage
+		if limit > 0 {
+			page = min(page, limit-r.Tasks)
 		}
-		r.Tasks++
-		err := a.auditTask(ctx, t.TaskID, []*ytAuditCounts{&p.ytAuditCounts, &r.Total}, r.Enqueue)
-		if err == nil {
-			continue
+		if page < 1 || r.Stopped != "" {
+			break
 		}
-		p.Error.add(ytAuditItem{TaskID: t.TaskID, Detail: err.Error()})
-		r.Total.Error.add(ytAuditItem{TaskID: t.TaskID, Detail: err.Error()})
-		log.Printf("youtrack.audit_task_failed task_id=%d err=%q", t.TaskID, err.Error())
-		var stop errYTAuditStop
-		if errors.As(err, &stop) || ctx.Err() != nil {
-			r.Stopped = err.Error()
+		tasks, err := a.st.YTAuditTasks(ctx, project, taskID, after, page)
+		if err != nil {
+			return r, err
+		}
+		for _, t := range tasks {
+			after = t.TaskID
+			p := byProject[t.Project]
+			if p == nil {
+				p = &ytAuditProject{Project: t.Project}
+				byProject[t.Project] = p
+				r.Projects = append(r.Projects, p)
+			}
+			r.Tasks++
+			err := a.auditTask(ctx, t.TaskID, []*ytAuditCounts{&p.ytAuditCounts, &r.Total}, r.Enqueue)
+			if err == nil {
+				continue
+			}
+			p.Error.add(ytAuditItem{TaskID: t.TaskID, Detail: err.Error()})
+			r.Total.Error.add(ytAuditItem{TaskID: t.TaskID, Detail: err.Error()})
+			log.Printf("youtrack.audit_task_failed task_id=%d err=%q", t.TaskID, err.Error())
+			var stop errYTAuditStop
+			if errors.As(err, &stop) || ctx.Err() != nil {
+				r.Stopped = err.Error()
+				break
+			}
+		}
+		if len(tasks) < page {
 			break
 		}
 	}
@@ -439,7 +452,7 @@ func youtrackAuditCmd(args []string, out io.Writer) error {
 	if err := fs.Parse(ordered); err != nil {
 		return fmt.Errorf("%v; %s", err, youtrackAuditUsage)
 	}
-	if fs.NArg() != 0 || *task < 0 || *limit < 0 || *limit > store.YTAuditTaskMax {
+	if fs.NArg() != 0 || *task < 0 || *limit < 0 {
 		return errors.New(youtrackAuditUsage)
 	}
 	dbURL := strings.TrimSpace(os.Getenv("HANDOFFKEEP_DB_URL"))

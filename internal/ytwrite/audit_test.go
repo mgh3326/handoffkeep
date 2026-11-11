@@ -115,6 +115,23 @@ func TestAuditCommentsEqualBodies(t *testing.T) {
 	})
 }
 
+// A legacy mirror copy is matched by its recorded id, whatever its text
+// (the push wraps the body), and only the comment it was recorded for.
+func TestAuditCommentsMirrorLink(t *testing.T) {
+	f := ytwritetest.NewFake()
+	mirrored := f.InjectAs(auditIssue, "작성: worker\n\npushed\n\n<!-- hk-comment:1 -->", auditBot)
+	unlinked := f.InjectAs(auditIssue, "작성: worker\n\npushed\n\n<!-- hk-comment:2 -->", auditBot)
+	got := ytwrite.AuditComments([]ytwrite.AuditComment{{ID: 1, Body: "pushed", MirrorYTID: mirrored}, {ID: 2, Body: "pushed"}}, auditList(t, f), auditBot)
+	want := ytwrite.CommentAudit{
+		Present:   []ytwrite.AuditCopies{copies(1, 0, mirrored)},
+		Missing:   []ytwrite.AuditCopies{copies(2, 0)},
+		YTOnlyBot: []string{unlinked},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("audit\n got %+v\nwant %+v", got, want)
+	}
+}
+
 // With no bot id known, nothing counts as the bot's.
 func TestAuditCommentsUnknownBot(t *testing.T) {
 	got := ytwrite.AuditComments(nil, []ytwrite.RemoteComment{{ID: "4-1", Text: "x"}}, "")
