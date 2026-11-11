@@ -235,6 +235,22 @@ func TestYouTrackAudit(t *testing.T) {
 		t.Fatal(err)
 	}
 	fake.add(issue, "4-8", "작성: worker\n\npushed by the legacy mirror\n\n<!-- hk-comment:"+strconv.FormatInt(cMirror, 10)+" -->", ytaBot)
+	// A legacy copy whose link was lost: its marker names the comment.
+	cMarked := comment(bound, "pushed, link lost")
+	fake.add(issue, "4-10", "**운영자** · now\n\npushed, link lost\n\n<!-- hk-comment:"+strconv.FormatInt(cMarked, 10)+" -->", ytaBot)
+	// A machinery note the push chose not to mirror: its noise link is no id,
+	// and its imported copy matches by body.
+	cNoise := comment(bound, "machinery note")
+	if err := st.LinkYouTrackComment(ctx, bound, cNoise, "noise:"+strconv.FormatInt(cNoise, 10), time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	fake.add(issue, "4-11", "machinery note", "1-7")
+	// A comment the adoption linked, whose Python-mirror copy hk cannot
+	// identify: adopted_unmatched, never enqueued.
+	cAdopted := comment(bound, "posted by the Python mirror")
+	if err := st.LinkYouTrackComment(ctx, bound, cAdopted, "adopted:"+strconv.FormatInt(cAdopted, 10), time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
 
 	noProject := newTask()
 	if _, err := conn.Exec(ctx, `UPDATE tasks SET project=NULL WHERE id=$1`, noProject); err != nil {
@@ -276,7 +292,8 @@ func TestYouTrackAudit(t *testing.T) {
 			got   []int64
 			want  []int64
 		}{
-			{"present", ytaComments(c.Present), []int64{cImported, cOp, cMirror}},
+			{"present", ytaComments(c.Present), []int64{cImported, cOp, cMirror, cMarked, cNoise}},
+			{"adopted_unmatched", ytaComments(c.AdoptedUnmatched), []int64{cAdopted}},
 			{"missing_in_yt", ytaComments(c.MissingInYT), []int64{cMissing, cSpaced}},
 			{"duplicate", ytaComments(c.Duplicate), []int64{cDup}},
 			{"no_project", ytaTasks(c.Unbound.NoProject), []int64{noProject}},

@@ -50,20 +50,23 @@ type YTAuditComments struct {
 	// Comments are the task's comments that belong on its issue, in id
 	// order: every comment except the ones the YouTrack activity pull wrote
 	// (author YouTrackOwnedActor), which the enqueue never copies either.
-	// OpID is the comment's comment_append op when that op targets issueID;
-	// MirrorYTID the YouTrack comment the legacy mirror push posted for it.
+	// OpID is the comment's comment_append op when that op targets issueID.
 	Comments []ytwrite.AuditComment
+	// Links are the comments' youtrack_comment_links values, as stored: a
+	// YouTrack id the legacy mirror push posted, or one of its synthetic
+	// markers (youtrack.CommentLinkIsID tells them apart).
+	Links map[int64]string
 	// PulledYTIDs are the YouTrack comments the pull copied into this task:
 	// youtrack_comment_links rows whose hk comment the pull wrote. They came
 	// from YouTrack and are not hk's to account for. A link whose hk comment
-	// any other writer made is the legacy push's outbound copy (MirrorYTID).
+	// any other writer made is the legacy push's (Links).
 	PulledYTIDs map[string]bool
 }
 
 // YTAuditTaskComments reads task taskID's comments for the audit against
 // issue issueID.
 func (s *Store) YTAuditTaskComments(ctx context.Context, taskID int64, issueID string) (YTAuditComments, error) {
-	out := YTAuditComments{Comments: []ytwrite.AuditComment{}, PulledYTIDs: map[string]bool{}}
+	out := YTAuditComments{Comments: []ytwrite.AuditComment{}, Links: map[int64]string{}, PulledYTIDs: map[string]bool{}}
 	rows, err := s.pool.Query(ctx, `SELECT c.id, c.body, c.author,
 			coalesce((SELECT o.id FROM yt_comment_write_links w JOIN yt_write_ops o ON o.id = w.op_id
 				WHERE w.comment_id = c.id AND o.kind = $2 AND o.yt_target_id = $3), 0),
@@ -85,7 +88,9 @@ func (s *Store) YTAuditTaskComments(ctx context.Context, taskID int64, issueID s
 			}
 			continue
 		}
-		c.MirrorYTID = linked
+		if linked != "" {
+			out.Links[c.ID] = linked
+		}
 		out.Comments = append(out.Comments, c)
 	}
 	return out, rows.Err()

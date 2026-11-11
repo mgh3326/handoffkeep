@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -120,13 +121,16 @@ func (u *ytAuditUnbound) add(reason string, it ytAuditItem) {
 // yt_only_bot or yt_only_human for a YouTrack comment that copies none.
 type ytAuditCounts struct {
 	// TasksAudited is the bound tasks whose comments were compared.
-	TasksAudited int            `json:"tasks_audited"`
-	Present      ytAuditClass   `json:"present"`
-	MissingInYT  ytAuditClass   `json:"missing_in_yt"`
-	Duplicate    ytAuditClass   `json:"duplicate"`
-	YTOnlyBot    ytAuditClass   `json:"yt_only_bot"`
-	YTOnlyHuman  ytAuditClass   `json:"yt_only_human"`
-	Unbound      ytAuditUnbound `json:"unbound"`
+	TasksAudited int          `json:"tasks_audited"`
+	Present      ytAuditClass `json:"present"`
+	MissingInYT  ytAuditClass `json:"missing_in_yt"`
+	Duplicate    ytAuditClass `json:"duplicate"`
+	// AdoptedUnmatched is hk comments the adoption says the Python mirror
+	// posted, with no copy hk can identify: never enqueued, for the operator.
+	AdoptedUnmatched ytAuditClass   `json:"adopted_unmatched"`
+	YTOnlyBot        ytAuditClass   `json:"yt_only_bot"`
+	YTOnlyHuman      ytAuditClass   `json:"yt_only_human"`
+	Unbound          ytAuditUnbound `json:"unbound"`
 	// Error is the tasks whose reads failed; run again.
 	Error ytAuditClass `json:"error"`
 }
@@ -164,7 +168,7 @@ type ytAuditReport struct {
 
 // gap reports whether the run found what the cutover gate refuses.
 func (r *ytAuditReport) gap() bool {
-	return r.Total.MissingInYT.Count > 0 || r.Total.Duplicate.Count > 0 || r.Total.Unbound.Count > 0
+	return r.Total.MissingInYT.Count > 0 || r.Total.Duplicate.Count > 0 || r.Total.AdoptedUnmatched.Count > 0 || r.Total.Unbound.Count > 0
 }
 
 // ytAuditRemote is the YouTrack the audit reads: one issue, and one issue's
@@ -311,7 +315,36 @@ func (a *ytAuditor) auditTask(ctx context.Context, taskID int64, counts []*ytAud
 			yt = append(yt, c)
 		}
 	}
+	// The legacy mirror push's evidence, read by the sync's own rules: a
+	// recorded link that is a YouTrack id, and a comment carrying the
+	// <!-- hk-comment:N --> marker of one of this task's comments.
+	index := map[int64]int{}
+	for i, c := range hk.Comments {
+		index[c.ID] = i
+		if link := hk.Links[c.ID]; youtrack.CommentLinkIsID(link) {
+			hk.Comments[i].KnownYTIDs = append(hk.Comments[i].KnownYTIDs, link)
+		}
+	}
+	for _, c := range yt {
+		if id, ok := youtrack.LegacyCommentID(c.Text); ok {
+			if i, ok := index[id]; ok && !slices.Contains(hk.Comments[i].KnownYTIDs, c.ID) {
+				hk.Comments[i].KnownYTIDs = append(hk.Comments[i].KnownYTIDs, c.ID)
+			}
+		}
+	}
 	got := ytwrite.AuditComments(hk.Comments, yt, a.botID)
+	// A comment the adoption linked was posted by the Python mirror in a form
+	// hk cannot recognise; with no copy found it is adopted_unmatched, for
+	// the operator, and never enqueued: a second copy may be the result.
+	missing := got.Missing[:0:0]
+	var adopted []ytwrite.AuditCopies
+	for _, x := range got.Missing {
+		if youtrack.CommentLinkIsAdopted(hk.Links[x.CommentID]) {
+			adopted = append(adopted, x)
+		} else {
+			missing = append(missing, x)
+		}
+	}
 	item := func(x ytwrite.AuditCopies) ytAuditItem {
 		return ytAuditItem{TaskID: taskID, CommentID: x.CommentID, OpID: x.OpID, YTIDs: x.YTIDs}
 	}
@@ -320,8 +353,11 @@ func (a *ytAuditor) auditTask(ctx context.Context, taskID int64, counts []*ytAud
 		for _, x := range got.Present {
 			c.Present.add(item(x))
 		}
-		for _, x := range got.Missing {
+		for _, x := range missing {
 			c.MissingInYT.add(item(x))
+		}
+		for _, x := range adopted {
+			c.AdoptedUnmatched.add(item(x))
 		}
 		for _, x := range got.Duplicate {
 			c.Duplicate.add(item(x))
@@ -336,7 +372,7 @@ func (a *ytAuditor) auditTask(ctx context.Context, taskID int64, counts []*ytAud
 	if !a.enqueue {
 		return nil
 	}
-	for _, x := range got.Missing {
+	for _, x := range missing {
 		status, op, err := a.st.EnqueueYTAuditComment(ctx, x.CommentID)
 		switch {
 		case err != nil:
@@ -421,7 +457,7 @@ func projectCounts(ps []*ytAuditProject) []*ytAuditCounts {
 
 // fillEmpty makes every empty item list [] rather than null.
 func (c *ytAuditCounts) fillEmpty() {
-	for _, x := range []*ytAuditClass{&c.Present, &c.MissingInYT, &c.Duplicate, &c.YTOnlyBot, &c.YTOnlyHuman, &c.Error,
+	for _, x := range []*ytAuditClass{&c.Present, &c.MissingInYT, &c.Duplicate, &c.AdoptedUnmatched, &c.YTOnlyBot, &c.YTOnlyHuman, &c.Error,
 		&c.Unbound.NoProject, &c.Unbound.NoIssue, &c.Unbound.Ambiguous, &c.Unbound.Verifies, &c.Unbound.OtherTenant} {
 		if x.Items == nil {
 			x.Items = []ytAuditItem{}
@@ -508,8 +544,8 @@ func youtrackAuditCmd(args []string, out io.Writer) error {
 	case failed > 0 || report.Stopped != "":
 		return exitCodeError{code: youtrackExitFailed, err: fmt.Errorf("the audit is incomplete (%d failures, stopped %q); run again", failed, report.Stopped)}
 	case report.gap():
-		return exitCodeError{code: youtrackExitAuditGap, err: fmt.Errorf("audit gap: %d missing_in_yt, %d duplicate, %d unbound",
-			report.Total.MissingInYT.Count, report.Total.Duplicate.Count, report.Total.Unbound.Count)}
+		return exitCodeError{code: youtrackExitAuditGap, err: fmt.Errorf("audit gap: %d missing_in_yt, %d duplicate, %d adopted_unmatched, %d unbound",
+			report.Total.MissingInYT.Count, report.Total.Duplicate.Count, report.Total.AdoptedUnmatched.Count, report.Total.Unbound.Count)}
 	}
 	return nil
 }

@@ -491,16 +491,21 @@ page at a time, at most `--limit` (default all), audited one at a time. For each
 
 - **Bound on this tenant.** Its issue's comments are listed stably
   (`EnumerateStableComments`, deleted ones left out) and matched with the
-  task's comments (`ytwrite.AuditComments`). A YouTrack comment the legacy
-  mirror push posted and recorded (`youtrack_comment_links` row of an hk
-  comment that the pull did not write) copies that comment, by id. One in the
+  task's comments (`ytwrite.AuditComments`). The legacy mirror push's
+  evidence comes first, read by the sync's own rules: a
+  `youtrack_comment_links` value that is a YouTrack id (not `noise:` or
+  `adopted:`) on an hk comment the pull did not write, and a YouTrack comment
+  carrying the `<!-- hk-comment:N -->` marker of one of the task's comments,
+  each copy that comment whatever its text. One in the
   rendered form of op N (`RenderedOpID`) copies the hk comment whose own
   comment op is N; any other copies an hk comment whose body equals its text
   exactly (the import wrote bodies as they are; no trimming). Comments the
   activity pull wrote into hk (author `operator:youtrack`, never enqueued)
   are left out, and so are their YouTrack originals, by linked id only
   (`youtrack_comment_links`; an equal text is no evidence). Classes: `present` (one copy),
-  `missing_in_yt` (none), `duplicate` (two or more), and for a YouTrack
+  `missing_in_yt` (none), `duplicate` (two or more), `adopted_unmatched`
+  (none, but the adoption's `adopted:` link says the Python mirror posted it
+  in a form hk cannot identify; never enqueued), and for a YouTrack
   comment that copies nothing `yt_only_bot` (written by the bot key's user)
   or `yt_only_human`.
 - **Not bound here**, by reason under `unbound`: `no_project`, `no_issue`
@@ -512,7 +517,8 @@ page at a time, at most `--limit` (default all), audited one at a time. For each
 The JSON report has, per hk project and in `total`, a count and up to 10
 items for each class (task id with comment id, op id and YouTrack ids, or
 task id with a detail). Exit 0 when clean; 4 when it ran in full and
-found a `missing_in_yt` or `duplicate` comment or an unbound task; 1 when a
+found a `missing_in_yt`, `duplicate` or `adopted_unmatched` comment or an
+unbound task; 1 when a
 task's reads failed (class `error`), an enqueue failed, or the run stopped.
 
 **`--enqueue`** opens the database as the backfill does and, for each

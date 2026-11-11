@@ -16,10 +16,10 @@ type AuditComment struct {
 	// copy; any comment whose text is exactly Body is one too (the import
 	// wrote the body as it is).
 	OpID int64
-	// MirrorYTID is the YouTrack comment the legacy mirror push posted for
-	// it and recorded (youtrack_comment_links; "": none). That comment is
-	// its copy whatever its text.
-	MirrorYTID string
+	// KnownYTIDs are YouTrack comments other evidence names as its copies
+	// (the legacy mirror push's recorded id, or its marker in the text):
+	// each is its copy whatever its text.
+	KnownYTIDs []string
 }
 
 // AuditCopies is one hk comment and the YouTrack comments that copy it.
@@ -42,7 +42,7 @@ type CommentAudit struct {
 }
 
 // AuditComments matches hk comments to YouTrack comments. A YouTrack comment
-// whose id is an hk comment's MirrorYTID copies that comment; one in the
+// whose id is in an hk comment's KnownYTIDs copies that comment; one in the
 // rendered form of op N (RenderedOpID) copies the hk comment whose OpID is
 // N. Any other one copies an hk comment whose body equals its text
 // exactly, not trimmed or normalised: equal bodies are shared out one copy
@@ -70,20 +70,20 @@ func AuditComments(hk []AuditComment, yt []RemoteComment, botID string) CommentA
 	})
 	copies := make([][]string, len(hk))
 	byOp := map[int64]int{}
-	byMirror := map[string]int{}
+	byKnown := map[string]int{}
 	byBody := map[string][]int{}
 	for i, c := range hk {
 		if c.OpID > 0 {
 			byOp[c.OpID] = i
 		}
-		if c.MirrorYTID != "" {
-			byMirror[c.MirrorYTID] = i
+		for _, id := range c.KnownYTIDs {
+			byKnown[id] = i
 		}
 		byBody[c.Body] = append(byBody[c.Body], i)
 	}
 	var byText []RemoteComment
 	for _, c := range live {
-		if i, ok := byMirror[c.ID]; ok {
+		if i, ok := byKnown[c.ID]; ok {
 			copies[i] = append(copies[i], c.ID)
 			continue
 		}

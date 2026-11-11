@@ -121,7 +121,7 @@ func TestAuditCommentsMirrorLink(t *testing.T) {
 	f := ytwritetest.NewFake()
 	mirrored := f.InjectAs(auditIssue, "작성: worker\n\npushed\n\n<!-- hk-comment:1 -->", auditBot)
 	unlinked := f.InjectAs(auditIssue, "작성: worker\n\npushed\n\n<!-- hk-comment:2 -->", auditBot)
-	got := ytwrite.AuditComments([]ytwrite.AuditComment{{ID: 1, Body: "pushed", MirrorYTID: mirrored}, {ID: 2, Body: "pushed"}}, auditList(t, f), auditBot)
+	got := ytwrite.AuditComments([]ytwrite.AuditComment{{ID: 1, Body: "pushed", KnownYTIDs: []string{mirrored}}, {ID: 2, Body: "pushed"}}, auditList(t, f), auditBot)
 	want := ytwrite.CommentAudit{
 		Present:   []ytwrite.AuditCopies{copies(1, 0, mirrored)},
 		Missing:   []ytwrite.AuditCopies{copies(2, 0)},
