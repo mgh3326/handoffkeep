@@ -54,7 +54,7 @@ func TestYTFeedConsumerRegistration(t *testing.T) {
 	if _, err := newYTFeedConsumer("task_fields", []string{"task", "document", "task_comment", "decision"}, h); err != nil {
 		t.Fatal(err)
 	}
-	if got := SnapshotKey("task_fields", "42", "abc"); got != "task_fields:42:abc" {
+	if got := SnapshotKey("task_fields", "42", 3, "abc"); got != "task_fields:42:3:abc" {
 		t.Fatalf("SnapshotKey = %q", got)
 	}
 }
@@ -220,7 +220,7 @@ func TestYTFeedHandlerErrorKeepsCursor(t *testing.T) {
 
 	// A handler error also rolls back what the handler wrote.
 	wrote, err := newYTFeedConsumer("test_rollback", []string{"task"}, func(ctx context.Context, tx pgx.Tx, rows []FeedRow) error {
-		if _, err := tx.Exec(ctx, `INSERT INTO yt_snapshot_state(entity_kind,entity_id,kind,last_sha,last_op_id) VALUES('task','1','test','x',1)`); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO yt_snapshot_state(entity_kind,entity_id,kind,seq,last_sha,last_op_id) VALUES('task','1','test',1,'x',1)`); err != nil {
 			return err
 		}
 		return errors.New("after write")
@@ -309,43 +309,43 @@ func TestPrepareYTSnapshotSkipsIdenticalSHA(t *testing.T) {
 		}
 		return op, prepared
 	}
-	state := func() (string, int64) {
+	state := func() (int64, string, int64) {
 		t.Helper()
+		var seq, id int64
 		var sha string
-		var id int64
-		if err := s.pool.QueryRow(ctx, `SELECT last_sha,last_op_id FROM yt_snapshot_state WHERE entity_kind='task' AND entity_id='42' AND kind='task_fields'`).Scan(&sha, &id); err != nil {
+		if err := s.pool.QueryRow(ctx, `SELECT seq,last_sha,last_op_id FROM yt_snapshot_state WHERE entity_kind='task' AND entity_id='42' AND kind='task_fields'`).Scan(&seq, &sha, &id); err != nil {
 			t.Fatal(err)
 		}
-		return sha, id
+		return seq, sha, id
 	}
 	a, ok := prepare("aaa")
-	if !ok || a.Key != "task_fields:42:aaa" || a.State != ytwrite.StatePrepared {
+	if !ok || a.Key != "task_fields:42:1:aaa" || a.State != ytwrite.StatePrepared {
 		t.Fatalf("first prepare = %+v, %t", a, ok)
 	}
-	if sha, id := state(); sha != "aaa" || id != a.ID {
-		t.Fatalf("state = %s/%d, want aaa/%d", sha, id, a.ID)
+	if seq, sha, id := state(); seq != 1 || sha != "aaa" || id != a.ID {
+		t.Fatalf("state = %d/%s/%d, want 1/aaa/%d", seq, sha, id, a.ID)
 	}
+	// An identical sha (a no-op update) makes no op and leaves the state.
 	if _, ok := prepare("aaa"); ok {
 		t.Fatal("an identical sha prepared an op")
 	}
+	if seq, _, _ := state(); seq != 1 {
+		t.Fatalf("seq after a skipped prepare = %d, want 1", seq)
+	}
 	b, ok := prepare("bbb")
-	if !ok || b.ID == a.ID || b.Key != "task_fields:42:bbb" {
+	if !ok || b.ID == a.ID || b.Key != "task_fields:42:2:bbb" {
 		t.Fatalf("changed sha prepare = %+v, %t", b, ok)
 	}
-	if sha, id := state(); sha != "bbb" || id != b.ID {
-		t.Fatalf("state = %s/%d, want bbb/%d", sha, id, b.ID)
-	}
-	// A -> B -> A: the A key exists, so no new op; the state follows (hk 3997 ESC default).
-	logs := ytbLog(t)
+	// A -> B -> A: the revert is a new op that renders A (hk 3997 ESC reply B).
 	back, ok := prepare("aaa")
-	if ok || back.ID != a.ID || !strings.Contains(logs(), "ytwrite.snapshot_revisit") {
-		t.Fatalf("revisit = %+v, %t, log %q", back, ok, logs())
+	if !ok || back.ID == a.ID || back.ID == b.ID || back.Key != "task_fields:42:3:aaa" || back.PayloadSHA != "aaa" || string(back.Payload) != string(a.Payload) {
+		t.Fatalf("revert prepare = %+v, %t", back, ok)
 	}
-	if sha, id := state(); sha != "aaa" || id != a.ID {
-		t.Fatalf("state = %s/%d, want aaa/%d", sha, id, a.ID)
+	if seq, sha, id := state(); seq != 3 || sha != "aaa" || id != back.ID {
+		t.Fatalf("state = %d/%s/%d, want 3/aaa/%d", seq, sha, id, back.ID)
 	}
 	var ops int
-	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM yt_write_ops WHERE kind='task_fields'`).Scan(&ops); err != nil || ops != 2 {
+	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM yt_write_ops WHERE kind='task_fields'`).Scan(&ops); err != nil || ops != 3 {
 		t.Fatalf("ops = %d, %v", ops, err)
 	}
 }

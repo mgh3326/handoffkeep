@@ -7,6 +7,7 @@ import (
 	"log"
 	"regexp"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -272,21 +273,21 @@ func collapseFeedRows(rows []FeedRow) []FeedRow {
 }
 
 // SnapshotKey is the idempotency key of a snapshot op: the op kind, the
-// entity id and the SHA of the snapshot it sends, as <kind>:<id>:<sha>.
-func SnapshotKey(kind, entityID, sha string) string {
-	return kind + ":" + entityID + ":" + sha
+// entity id, the snapshot's sequence number for that entity and kind, and the
+// SHA of the snapshot it sends, as <kind>:<id>:<seq>:<sha>. The sequence makes
+// every prepared snapshot its own key, so a state the entity returns to (A ->
+// B -> A) is sent again.
+func SnapshotKey(kind, entityID string, seq int64, sha string) string {
+	return kind + ":" + entityID + ":" + strconv.FormatInt(seq, 10) + ":" + sha
 }
 
 // prepareYTSnapshotTx prepares a snapshot op n in tx only when sha differs
 // from the last SHA prepared for (n.EntityKind, n.EntityID, n.Kind), so an
 // update that leaves the snapshot as it was (a last_activity_at repair) makes
-// no op. It sets n.Key to SnapshotKey(n.Kind, n.EntityID, sha) and records sha
-// and the op's id in yt_snapshot_state in the same transaction. prepared is
-// false when the SHA is unchanged, and also when an op for this exact key
-// already exists (the snapshot went back to an earlier state, A -> B -> A):
-// that op is returned, the state records sha, and ytwrite.snapshot_revisit is
-// logged. Sending the reverted state again is the consumer's decision (hk
-// 3997 ESC).
+// no op. Otherwise it increments that entity and kind's seq, sets n.Key to
+// SnapshotKey(n.Kind, n.EntityID, seq, sha), prepares the op and records seq,
+// sha and the op's id in yt_snapshot_state, all in the same transaction.
+// prepared is false only for an unchanged SHA.
 //
 // Locks: the entity's lane lock (lockYTEntity) first, then its
 // yt_snapshot_state row, then what prepareYTOpTx takes. No other writer
@@ -299,26 +300,25 @@ func prepareYTSnapshotTx(ctx context.Context, tx pgx.Tx, now time.Time, n ytwrit
 		return ytwrite.Op{}, false, err
 	}
 	var lastSHA string
-	err := tx.QueryRow(ctx, `SELECT last_sha FROM yt_snapshot_state WHERE entity_kind=$1 AND entity_id=$2 AND kind=$3 FOR UPDATE`,
-		n.EntityKind, n.EntityID, n.Kind).Scan(&lastSHA)
+	var seq int64
+	err := tx.QueryRow(ctx, `SELECT seq,last_sha FROM yt_snapshot_state WHERE entity_kind=$1 AND entity_id=$2 AND kind=$3 FOR UPDATE`,
+		n.EntityKind, n.EntityID, n.Kind).Scan(&seq, &lastSHA)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return ytwrite.Op{}, false, err
 	}
 	if err == nil && lastSHA == sha {
 		return ytwrite.Op{}, false, nil
 	}
-	n.Key = SnapshotKey(n.Kind, n.EntityID, sha)
-	op, created, err := prepareYTOpTx(ctx, tx, now, n)
+	seq++
+	n.Key = SnapshotKey(n.Kind, n.EntityID, seq, sha)
+	op, _, err := prepareYTOpTx(ctx, tx, now, n)
 	if err != nil {
 		return ytwrite.Op{}, false, err
 	}
-	if !created {
-		log.Printf("ytwrite.snapshot_revisit kind=%s entity_kind=%s entity_id=%q op_id=%d", n.Kind, n.EntityKind, n.EntityID, op.ID)
-	}
-	if _, err := tx.Exec(ctx, `INSERT INTO yt_snapshot_state(entity_kind,entity_id,kind,last_sha,last_op_id) VALUES($1,$2,$3,$4,$5)
-		ON CONFLICT (entity_kind,entity_id,kind) DO UPDATE SET last_sha=EXCLUDED.last_sha, last_op_id=EXCLUDED.last_op_id`,
-		n.EntityKind, n.EntityID, n.Kind, sha, op.ID); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO yt_snapshot_state(entity_kind,entity_id,kind,seq,last_sha,last_op_id) VALUES($1,$2,$3,$4,$5,$6)
+		ON CONFLICT (entity_kind,entity_id,kind) DO UPDATE SET seq=EXCLUDED.seq, last_sha=EXCLUDED.last_sha, last_op_id=EXCLUDED.last_op_id`,
+		n.EntityKind, n.EntityID, n.Kind, seq, sha, op.ID); err != nil {
 		return ytwrite.Op{}, false, err
 	}
-	return op, created, nil
+	return op, true, nil
 }

@@ -8,8 +8,9 @@ import (
 
 // 20261111-yt-feed adds the two tables of the YouTrack change-feed tracker
 // (hk 3997, yt_feed.go): yt_feed_cursors, one row per feed consumer holding
-// the last sync_log sync_id it handled, and yt_snapshot_state, the last
-// payload SHA a snapshot consumer prepared an op for, per entity and kind.
+// the last sync_log sync_id it handled, and yt_snapshot_state, per entity and
+// kind the count of snapshot ops prepared (seq) and the SHA and op of the
+// last one.
 // Consumers (task fields, documents, decisions) read every change to their
 // models from sync_log through one cursor instead of an enqueue in each of
 // the many writers of those tables.
@@ -36,6 +37,7 @@ var ytFeedStatements = []string{
 		entity_kind TEXT NOT NULL CHECK(entity_kind <> '' AND length(entity_kind) <= 64),
 		entity_id TEXT NOT NULL CHECK(entity_id <> '' AND length(entity_id) <= 512),
 		kind TEXT NOT NULL CHECK(kind <> '' AND length(kind) <= 64),
+		seq BIGINT NOT NULL CHECK(seq > 0),
 		last_sha TEXT NOT NULL,
 		last_op_id BIGINT NOT NULL,
 		PRIMARY KEY(entity_kind, entity_id, kind)
