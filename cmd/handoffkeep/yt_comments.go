@@ -42,6 +42,9 @@ const (
 	// ytCommentsCatchUpLimit bounds the comments one catch-up pass prepares
 	// ops for (store.CatchUpYTComments), oldest first.
 	ytCommentsCatchUpLimit = 200
+	// ytFeedPassLimit bounds the sync_log rows each feed consumer reads in
+	// one worker pass (store.RunYTFeedConsumers).
+	ytFeedPassLimit = 200
 )
 
 // ytCommentsModeFromEnv reads HANDOFFKEEP_YT_COMMENTS_MODE: unset or "off"
@@ -162,7 +165,7 @@ func newYTWriteWorker(st *store.Store, remote ytwrite.Remote, tenant string, com
 		return ytCommentsWorker{}, err
 	}
 	st.SetYTCommentsMode(store.YTCommentsOff)
-	return ytCommentsWorker{protocol: p}, nil
+	return ytCommentsWorker{protocol: p, feed: st}, nil
 }
 
 // newYTCommentsWorker sets the gate to mode (canary or on) and builds the
@@ -184,7 +187,7 @@ func newYTCommentsWorker(st *store.Store, remote ytwrite.Remote, tenant string, 
 	}
 	st.SetYTCommentsMode(mode)
 	log.Printf("ytwrite.comments_enabled mode=%s tenant=%q catchup=%t", mode, tenant, catchUp)
-	w := ytCommentsWorker{protocol: p}
+	w := ytCommentsWorker{protocol: p, feed: st}
 	if catchUp {
 		w.catchUp = st
 	}
@@ -195,6 +198,12 @@ func newYTCommentsWorker(st *store.Store, remote ytwrite.Remote, tenant string, 
 // (store.CatchUpYTComments).
 type ytCommentCatchUpper interface {
 	CatchUpYTComments(ctx context.Context, limit int, skip []int64) (store.YTCatchUp, error)
+}
+
+// ytFeedRunner runs one pass of every registered change-feed consumer
+// (store.RunYTFeedConsumers, hk 3997).
+type ytFeedRunner interface {
+	RunYTFeedConsumers(ctx context.Context, limit int) ([]store.YTFeedPass, error)
 }
 
 // ytCommentsWorker runs one sequential Drive pass every interval. Two serve
@@ -208,9 +217,15 @@ type ytCommentCatchUpper interface {
 // comment it skipped as ambiguous is left out of later passes of this
 // process, so it is logged once and never crowds out the others; a restart
 // looks at it again.
+//
+// After the catch-up, feed (when set) runs each registered change-feed
+// consumer once, up to ytFeedPassLimit rows each, so the ops they prepare
+// go out in the same pass's Drive. With no consumer registered it does
+// nothing.
 type ytCommentsWorker struct {
 	protocol *ytwrite.Protocol
 	catchUp  ytCommentCatchUpper
+	feed     ytFeedRunner
 	interval time.Duration
 }
 
@@ -229,6 +244,10 @@ func (w ytCommentsWorker) Run(ctx context.Context) {
 				log.Printf("ytwrite.comment_catchup_failed err=%q", err.Error())
 			}
 			skipped = append(skipped, got.Skipped...)
+		}
+		if w.feed != nil {
+			// Each failing consumer is logged by the store (ytwrite.feed_failed).
+			_, _ = w.feed.RunYTFeedConsumers(ctx, ytFeedPassLimit)
 		}
 		st, err := w.protocol.Drive(ctx, ytCommentsPassLimit)
 		if err != nil && ctx.Err() == nil {
