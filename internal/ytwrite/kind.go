@@ -14,7 +14,9 @@ import (
 type Kind interface {
 	// Render is the exact text written for op: deterministic in the op (a
 	// resend or a reconciliation renders the same bytes) and carrying
-	// OpMarker(op.ID). An error means the op cannot be sent.
+	// OpMarker(op.ID) when the kind's evidence is a marker search
+	// (issue_fields compares its whole snapshot instead). An error means the
+	// op cannot be sent.
 	Render(op Op) (string, error)
 	// Send makes exactly one remote attempt to write text for op and returns
 	// the created YouTrack id. No retry inside: a retry after a lost reply

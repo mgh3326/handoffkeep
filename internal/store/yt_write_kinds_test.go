@@ -39,10 +39,23 @@ func TestYTAdmitSQLPerKind(t *testing.T) {
 		WHERE b.task_id::text = o.entity_id AND b.issue_id = o.yt_target_id AND b.tenant = o.tenant)`},
 	} {
 		s.SetYTCommentsMode(tc.mode)
-		want := `(o.tenant = $2 AND ((o.kind = 'comment_append' AND (` + tc.gate + `)) OR (o.kind = 'issue_create' AND (FALSE))))`
+		want := `(o.tenant = $2 AND ((o.kind = 'comment_append' AND (` + tc.gate + `)) OR (o.kind = 'issue_create' AND (FALSE)) OR (o.kind = 'issue_fields' AND (FALSE))))`
 		if got := s.ytAdmitSQL("$2"); got != want {
 			t.Errorf("mode %s:\n got %s\nwant %s", tc.mode, got, want)
 		}
+	}
+	// The fields mode (hk 4003) admits an op whose target is the task's
+	// bound issue on the op's tenant; on without a tenant is off.
+	s.SetYTCommentsMode(YTCommentsOff)
+	s.SetYTFieldsMode(YTFieldsOn, "")
+	if got := ytFieldsGateSQL(s); got != `FALSE` {
+		t.Errorf("fields on without a tenant: %s", got)
+	}
+	s.SetYTFieldsMode(YTFieldsOn, ytcTenant)
+	want := `(o.tenant = $2 AND ((o.kind = 'comment_append' AND (FALSE)) OR (o.kind = 'issue_create' AND (FALSE)) OR (o.kind = 'issue_fields' AND (o.entity_kind = 'task' AND EXISTS (SELECT 1 FROM yt_task_bindings b
+		WHERE b.task_id::text = o.entity_id AND b.issue_id = o.yt_target_id AND b.tenant = o.tenant)))))`
+	if got := s.ytAdmitSQL("$2"); got != want {
+		t.Errorf("fields on:\n got %s\nwant %s", got, want)
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -25,7 +26,8 @@ import (
 // lane lock (Prepare, Claim, and Apply of an issue_create op), and then rows
 // of yt_write_ops and yt_entity_map (a scoped Claim also reads
 // yt_comment_canary or yt_task_bindings; an issue_create Apply inserts a
-// yt_task_bindings row). It takes no task
+// yt_task_bindings row and, in fields mode on, the task's yt_snapshot_state
+// row and its first issue_fields op, under the same lane lock). It takes no task
 // row, no level-2 lock and no job lock, and no writer of another table waits on
 // one of its rows, so it cannot close a cycle with them. It reads no clock:
 // time is passed in (lockorder.go, "Time").
@@ -363,6 +365,12 @@ func (l *YTWriteLedger) Apply(ctx context.Context, now time.Time, id int64, ytID
 	}
 	if op.Kind == ytwrite.KindIssueCreate && detail == "" {
 		if err := bindYTIssueTx(ctx, tx, op, ytID, now, adopted); err != nil {
+			return ytwrite.Op{}, err
+		}
+		// The new binding is no task change: the first field snapshot is
+		// prepared here, behind this op on the task's lane (hk 4003).
+		taskID, _ := strconv.ParseInt(op.EntityID, 10, 64)
+		if err := l.s.ytFieldsOnBindTx(ctx, tx, taskID, now); err != nil {
 			return ytwrite.Op{}, err
 		}
 	}

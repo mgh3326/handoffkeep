@@ -323,19 +323,25 @@ func TestYTFeedPrunedBeyondCursorReadsNothing(t *testing.T) {
 	}
 }
 
-func TestRunYTFeedConsumersWithNoneRegistered(t *testing.T) {
-	if len(ytFeedConsumers) != 0 {
-		t.Fatalf("production registers feed consumers: %v", ytFeedConsumers)
+// Production registers the task_fields consumer (hk 4003) and nothing else;
+// with its mode off a pass creates its cursor and prepares nothing.
+func TestRunYTFeedConsumersRegistered(t *testing.T) {
+	if len(ytFeedConsumers) != 1 || ytFeedConsumers[ytFieldsConsumer].build == nil {
+		t.Fatalf("production feed consumers: %v", ytFeedConsumers)
 	}
-	s := schemaStore(t, "yt_feed_none")
-	ytFeedTask(t, s, "one")
+	s := schemaStore(t, "yt_feed_registered")
+	task := ytFeedTask(t, s, "one")
+	if passes, err := s.RunYTFeedConsumers(t.Context(), 100); err != nil || len(passes) != 1 || !passes[0].Created || passes[0].Consumer != ytFieldsConsumer {
+		t.Fatalf("passes = %+v, %v", passes, err)
+	}
+	ytFeedExec(t, s, `UPDATE tasks SET title='two' WHERE id=$1`, task.ID)
 	passes, err := s.RunYTFeedConsumers(t.Context(), 100)
-	if err != nil || len(passes) != 0 {
+	if err != nil || len(passes) != 1 || passes[0].Handled != 1 {
 		t.Fatalf("passes = %+v, %v", passes, err)
 	}
 	var n int
-	if err := s.pool.QueryRow(t.Context(), `SELECT count(*) FROM yt_feed_cursors`).Scan(&n); err != nil || n != 0 {
-		t.Fatalf("cursors = %d, %v", n, err)
+	if err := s.pool.QueryRow(t.Context(), `SELECT count(*) FROM yt_write_ops`).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("ops = %d, %v", n, err)
 	}
 }
 
