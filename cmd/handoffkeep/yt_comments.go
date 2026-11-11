@@ -348,11 +348,17 @@ func youtrackOpsResolveCmd(args []string, out io.Writer) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	// An --applied resolution always states the provenance: created unless
+	// --adopted (an issue_create op refuses one that does not).
+	var provenance *bool
+	if !*notApplied {
+		provenance = adopted
+	}
 	actor := *by
 	if actor == "" {
 		actor = "operator:cli"
 	}
-	result, err := c.ResolveYTOp(ctx, id, ytwrite.Resolution{Applied: !*notApplied, YTID: *appliedID, Adopted: *adopted, By: actor, Note: *note})
+	result, err := c.ResolveYTOp(ctx, id, ytwrite.Resolution{Applied: !*notApplied, YTID: *appliedID, Adopted: provenance, By: actor, Note: *note})
 	if err != nil {
 		return err
 	}

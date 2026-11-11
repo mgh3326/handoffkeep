@@ -702,8 +702,10 @@ While the op is unresolved, `comments-backfill` binding and canary enrollment
 of the task are refused. An operator's `yt ops resolve <op> --applied <issue id>`
 states the issue's provenance, which the ledger did not record: by default the
 op created it (`comments_from` 0, the catch-up copies the task's comments);
-with `--adopted` (API `"adopted": true`) the issue existed before (its binding
-starts after the task's latest comment).
+with `--adopted` the issue existed before (its binding starts after the task's
+latest comment). The CLI always sends the choice (API `"adopted": true|false`);
+a resolution of an `issue_create` op that omits it (an older client) is refused
+`ytwrite_invalid` and the op stays `remote_unknown`.
 
 **Precondition: no legacy writer.** Issue mode coordinates with no other
 writer of task issues. Before `HANDOFFKEEP_YT_ISSUES_MODE=on`: hk 3907 must be

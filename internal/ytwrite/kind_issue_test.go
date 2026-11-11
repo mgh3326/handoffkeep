@@ -318,12 +318,19 @@ func TestIssueCreateResolveWritesTaskMapRow(t *testing.T) {
 	op := e.prepareIssue()
 	e.drive()
 	bare := &ytwrite.Protocol{Config: ytwrite.Config{Ledger: e.ledger, Now: e.clock.Now}}
-	res, err := bare.Resolve(context.Background(), op.ID, ytwrite.Resolution{Applied: true, YTID: "2-77", By: "operator"})
+	// An issue resolution must state its provenance: an older client that
+	// omits it is refused, and the op stays remote_unknown.
+	if _, err := bare.Resolve(context.Background(), op.ID, ytwrite.Resolution{Applied: true, YTID: "2-77", By: "operator"}); !errors.Is(err, ytwrite.ErrInvalid) {
+		t.Fatalf("resolution without provenance: %v", err)
+	}
+	e.want(op.ID, ytwrite.StateRemoteUnknown, ytwrite.ReasonServerError)
+	created := false
+	res, err := bare.Resolve(context.Background(), op.ID, ytwrite.Resolution{Applied: true, YTID: "2-77", Adopted: &created, By: "operator"})
 	if err != nil || res.Status != ytwrite.StatusApplied || res.YTID != "2-77" {
 		t.Fatalf("resolve %+v %v", res, err)
 	}
 	e.wantMap(e.want(op.ID, ytwrite.StateApplied, ""), "2-77")
-	// By default the operator says the op created the issue.
+	// adopted false: the op created the issue.
 	if m, _, _ := e.ledger.MapGet(context.Background(), "task", "3898"); m.Adopted {
 		t.Fatalf("resolved map row %+v marked adopted", m)
 	}
@@ -337,11 +344,12 @@ func TestIssueCreateResolveAdopted(t *testing.T) {
 	op := e.prepareIssue()
 	e.drive()
 	bare := &ytwrite.Protocol{Config: ytwrite.Config{Ledger: e.ledger, Now: e.clock.Now}}
-	if _, err := bare.Resolve(context.Background(), op.ID, ytwrite.Resolution{Applied: false, Adopted: true, By: "operator", Note: "n"}); !errors.Is(err, ytwrite.ErrInvalid) {
+	adopted := true
+	if _, err := bare.Resolve(context.Background(), op.ID, ytwrite.Resolution{Applied: false, Adopted: &adopted, By: "operator", Note: "n"}); !errors.Is(err, ytwrite.ErrInvalid) {
 		t.Fatalf("adopted without applied: %v", err)
 	}
 	e.want(op.ID, ytwrite.StateRemoteUnknown, ytwrite.ReasonServerError)
-	if _, err := bare.Resolve(context.Background(), op.ID, ytwrite.Resolution{Applied: true, YTID: "2-78", Adopted: true, By: "operator"}); err != nil {
+	if _, err := bare.Resolve(context.Background(), op.ID, ytwrite.Resolution{Applied: true, YTID: "2-78", Adopted: &adopted, By: "operator"}); err != nil {
 		t.Fatal(err)
 	}
 	if m, _, _ := e.ledger.MapGet(context.Background(), "task", "3898"); !m.Adopted || m.YTID != "2-78" {

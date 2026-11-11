@@ -290,6 +290,8 @@ func (issueCreate) Evidence(ctx context.Context, remote Remote, op Op, text stri
 	return ev, nil
 }
 
+func (issueCreate) needsProvenance() bool { return true }
+
 // MapRows maps the task to its issue, with the YouTrack project as parent, as
 // the comment path anchors a task's map row.
 func (issueCreate) MapRows(op Op, ytID string) []MapRow {

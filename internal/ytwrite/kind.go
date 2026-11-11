@@ -91,6 +91,11 @@ func registerKind(kind string, build func(Config) Kind) {
 	kindBuilders[kind] = build
 }
 
+// provenanceKind is a kind whose applied effect depends on whether its
+// YouTrack id was created by the op or adopted (issue_create): an operator's
+// resolution of it must say which.
+type provenanceKind interface{ needsProvenance() bool }
+
 // kindFor is op kind's Kind on p: the registered instance, or one built from
 // the registry for a Protocol made without New (the operator's resolve).
 func (p *Protocol) kindFor(kind string) (Kind, bool) {

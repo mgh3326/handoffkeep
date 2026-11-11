@@ -593,11 +593,13 @@ type Resolution struct {
 	// not exist and the op is closed as rejected.
 	Applied bool
 	YTID    string
-	// Adopted says YTID existed before the op (it adopted an issue made
-	// elsewhere) rather than being created by it; only with Applied. An
-	// adopted issue already holds the task's history, so its binding starts
-	// after the latest comment; a created one starts at 0.
-	Adopted bool
+	// Adopted says whether YTID existed before the op (it adopted an issue
+	// made elsewhere: true) or was created by it (false); only with Applied.
+	// An adopted issue already holds the task's history, so its binding
+	// starts after the latest comment; a created one starts at 0. nil is "not
+	// stated", which a kind whose binding depends on it refuses
+	// (issue_create), so an older client cannot pick a cutoff by omission.
+	Adopted *bool
 	By      string
 	Note    string
 }
@@ -615,8 +617,8 @@ func (p *Protocol) Resolve(ctx context.Context, id int64, r Resolution) (Result,
 	if err := checkActor(r.By); err != nil {
 		return Result{}, err
 	}
-	if r.Adopted && !r.Applied {
-		return Result{}, fmt.Errorf("%w: adopted needs applied", ErrInvalid)
+	if r.Adopted != nil && !r.Applied {
+		return Result{}, fmt.Errorf("%w: adopted goes with applied only", ErrInvalid)
 	}
 	var got Op
 	if r.Applied {
@@ -627,10 +629,13 @@ func (p *Protocol) Resolve(ctx context.Context, id int64, r Resolution) (Result,
 		if !ok {
 			return Result{}, fmt.Errorf("%w: op %d has unsupported kind %q", ErrInvalid, id, op.Kind)
 		}
+		if pk, ok := kind.(provenanceKind); ok && pk.needsProvenance() && r.Adopted == nil {
+			return Result{}, fmt.Errorf("%w: op %d is a %s: say whether the YouTrack id was created by it or adopted (adopted true or false)", ErrInvalid, id, op.Kind)
+		}
 		// The ledger did not record the provenance; the operator states it.
 		maps := kind.MapRows(op, r.YTID)
 		for i := range maps {
-			maps[i].Adopted = r.Adopted
+			maps[i].Adopted = r.Adopted != nil && *r.Adopted
 		}
 		got, err = p.Ledger.Apply(ctx, p.now(), id, r.YTID, maps)
 	} else {

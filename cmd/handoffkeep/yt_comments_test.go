@@ -109,9 +109,9 @@ func TestYTIsTheYouTrackCommand(t *testing.T) {
 	}
 }
 
-// --adopted reaches the server as "adopted": true; without it the field is
-// not sent, so a server that predates it still takes the resolution.
-func TestYTOpsResolveSendsAdoptedOnlyWhenSet(t *testing.T) {
+// An --applied resolution always states the provenance: "adopted": true with
+// --adopted, false without it (created).
+func TestYTOpsResolveStatesProvenance(t *testing.T) {
 	t.Setenv("HANDOFFKEEP_URL", "")
 	t.Setenv("HANDOFFKEEP_TOKEN", "")
 	var bodies []map[string]any
@@ -131,11 +131,8 @@ func TestYTOpsResolveSendsAdoptedOnlyWhenSet(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if len(bodies) != 2 || bodies[0]["adopted"] != true {
+	if len(bodies) != 2 || bodies[0]["adopted"] != true || bodies[1]["adopted"] != false {
 		t.Fatalf("bodies %v", bodies)
-	}
-	if _, sent := bodies[1]["adopted"]; sent {
-		t.Fatalf("adopted sent without the flag: %v", bodies[1])
 	}
 }
 
