@@ -491,14 +491,13 @@ page at a time, at most `--limit` (default all), audited one at a time. For each
 
 - **Bound on this tenant.** Its issue's comments are listed stably
   (`EnumerateStableComments`, deleted ones left out) and matched with the
-  task's comments (`ytwrite.AuditComments`). The legacy mirror push's
-  evidence comes first, read by the sync's own rules: a
+  task's comments (`ytwrite.AuditComments`), strongest evidence first. A
   `youtrack_comment_links` value that is a YouTrack id (not `noise:` or
-  `adopted:`) on an hk comment the pull did not write, and a YouTrack comment
-  carrying the `<!-- hk-comment:N -->` marker of one of the task's comments,
-  each copy that comment whatever its text. One in the
-  rendered form of op N (`RenderedOpID`) copies the hk comment whose own
-  comment op is N; any other copies an hk comment whose body equals its text
+  `adopted:`) on an hk comment the pull did not write names that comment's
+  copy. Else a comment in the rendered form of op N (`RenderedOpID`) copies
+  the hk comment whose own comment op is N. Else one that ends in the legacy
+  push's trailer (`\n\n<!-- hk-comment:N -->`, nothing after it) copies
+  comment N. Any other copies an hk comment whose body equals its text
   exactly (the import wrote bodies as they are; no trimming). Comments the
   activity pull wrote into hk (author `operator:youtrack`, never enqueued)
   are left out, and so are their YouTrack originals, by linked id only

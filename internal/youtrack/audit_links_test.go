@@ -28,7 +28,13 @@ func TestAuditReadsLegacyCommentEvidence(t *testing.T) {
 	if id, ok := LegacyCommentID(text); !ok || id != 42 {
 		t.Fatalf("LegacyCommentID(%q) = %d %v, want 42", text, id, ok)
 	}
-	if _, ok := LegacyCommentID("no marker here"); ok {
-		t.Fatal("a text without the marker names a comment")
+	for _, quoted := range []string{"no marker here", "quotes <!-- hk-comment:7 --> inline", "<!-- hk-comment:7 -->", text + "\n"} {
+		if id, ok := LegacyCommentID(quoted); ok {
+			t.Errorf("LegacyCommentID(%q) = %d: only the trailing marker counts", quoted, id)
+		}
+	}
+	// A body quoting another marker before its own: the trailing one wins.
+	if id, ok := LegacyCommentID("quotes <!-- hk-comment:7 -->\n\n<!-- hk-comment:8 -->"); !ok || id != 8 {
+		t.Errorf("trailing marker = %d %v, want 8", id, ok)
 	}
 }

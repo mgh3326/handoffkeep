@@ -3,6 +3,8 @@ package ytwrite_test
 import (
 	"encoding/json"
 	"reflect"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -70,7 +72,7 @@ func TestAuditCommentsClasses(t *testing.T) {
 		{ID: 3, Body: "spaced body"},
 		{ID: 5, Body: "missing"},
 	}
-	got := ytwrite.AuditComments(hk, auditList(t, f), auditBot)
+	got := ytwrite.AuditComments(hk, auditList(t, f), auditBot, nil)
 	want := ytwrite.CommentAudit{
 		Present:     []ytwrite.AuditCopies{copies(1, 7, byOp), copies(2, 0, imported)},
 		Missing:     []ytwrite.AuditCopies{copies(3, 0), copies(5, 0)},
@@ -89,7 +91,7 @@ func TestAuditCommentsEqualBodies(t *testing.T) {
 	t.Run("one copy for two comments", func(t *testing.T) {
 		f := ytwritetest.NewFake()
 		only := f.InjectAs(auditIssue, "LGTM", auditBot)
-		got := ytwrite.AuditComments([]ytwrite.AuditComment{{ID: 1, Body: "LGTM"}, {ID: 2, Body: "LGTM"}}, auditList(t, f), auditBot)
+		got := ytwrite.AuditComments([]ytwrite.AuditComment{{ID: 1, Body: "LGTM"}, {ID: 2, Body: "LGTM"}}, auditList(t, f), auditBot, nil)
 		if !reflect.DeepEqual(got.Present, []ytwrite.AuditCopies{copies(1, 0, only)}) || !reflect.DeepEqual(got.Missing, []ytwrite.AuditCopies{copies(2, 0)}) {
 			t.Fatalf("got %+v", got)
 		}
@@ -98,7 +100,7 @@ func TestAuditCommentsEqualBodies(t *testing.T) {
 		f := ytwritetest.NewFake()
 		rendered := f.InjectAs(auditIssue, auditRendered(t, 3, "LGTM"), auditBot)
 		imported := f.InjectAs(auditIssue, "LGTM", auditBot)
-		got := ytwrite.AuditComments([]ytwrite.AuditComment{{ID: 1, Body: "LGTM", OpID: 3}, {ID: 2, Body: "LGTM"}}, auditList(t, f), auditBot)
+		got := ytwrite.AuditComments([]ytwrite.AuditComment{{ID: 1, Body: "LGTM", OpID: 3}, {ID: 2, Body: "LGTM"}}, auditList(t, f), auditBot, nil)
 		want := []ytwrite.AuditCopies{copies(1, 3, rendered), copies(2, 0, imported)}
 		if !reflect.DeepEqual(got.Present, want) || len(got.Missing)+len(got.Duplicate)+len(got.YTOnlyBot)+len(got.YTOnlyHuman) != 0 {
 			t.Fatalf("got %+v", got)
@@ -108,7 +110,7 @@ func TestAuditCommentsEqualBodies(t *testing.T) {
 		f := ytwritetest.NewFake()
 		rendered := f.InjectAs(auditIssue, auditRendered(t, 3, "LGTM"), auditBot)
 		imported := f.InjectAs(auditIssue, "LGTM", auditHuman)
-		got := ytwrite.AuditComments([]ytwrite.AuditComment{{ID: 1, Body: "LGTM", OpID: 3}}, auditList(t, f), auditBot)
+		got := ytwrite.AuditComments([]ytwrite.AuditComment{{ID: 1, Body: "LGTM", OpID: 3}}, auditList(t, f), auditBot, nil)
 		if !reflect.DeepEqual(got.Duplicate, []ytwrite.AuditCopies{copies(1, 3, rendered, imported)}) || len(got.Present) != 0 {
 			t.Fatalf("got %+v", got)
 		}
@@ -121,7 +123,7 @@ func TestAuditCommentsMirrorLink(t *testing.T) {
 	f := ytwritetest.NewFake()
 	mirrored := f.InjectAs(auditIssue, "작성: worker\n\npushed\n\n<!-- hk-comment:1 -->", auditBot)
 	unlinked := f.InjectAs(auditIssue, "작성: worker\n\npushed\n\n<!-- hk-comment:2 -->", auditBot)
-	got := ytwrite.AuditComments([]ytwrite.AuditComment{{ID: 1, Body: "pushed", KnownYTIDs: []string{mirrored}}, {ID: 2, Body: "pushed"}}, auditList(t, f), auditBot)
+	got := ytwrite.AuditComments([]ytwrite.AuditComment{{ID: 1, Body: "pushed", LinkedYTIDs: []string{mirrored}}, {ID: 2, Body: "pushed"}}, auditList(t, f), auditBot, nil)
 	want := ytwrite.CommentAudit{
 		Present:   []ytwrite.AuditCopies{copies(1, 0, mirrored)},
 		Missing:   []ytwrite.AuditCopies{copies(2, 0)},
@@ -132,9 +134,40 @@ func TestAuditCommentsMirrorLink(t *testing.T) {
 	}
 }
 
+// A legacy marker counts only after a recorded link and an op rendering: an
+// op copy whose body quotes another comment's marker stays its op's.
+func TestAuditCommentsEvidenceOrder(t *testing.T) {
+	legacy := func(text string) (int64, bool) {
+		rest, ok := strings.CutPrefix(text, "legacy:")
+		if !ok {
+			return 0, false
+		}
+		n, err := strconv.ParseInt(rest, 10, 64)
+		return n, err == nil
+	}
+	f := ytwritetest.NewFake()
+	// Comment 2's op copy: the legacy reader would name comment 1 in it.
+	opCopy := f.InjectAs(auditIssue, auditRendered(t, 9, "B"), auditBot)
+	byMarker := f.InjectAs(auditIssue, "legacy:3", auditBot)
+	quoting := func(text string) (int64, bool) {
+		if text == auditRendered(t, 9, "B") {
+			return 1, true
+		}
+		return legacy(text)
+	}
+	got := ytwrite.AuditComments([]ytwrite.AuditComment{{ID: 1, Body: "A"}, {ID: 2, Body: "B", OpID: 9}, {ID: 3, Body: "C"}}, auditList(t, f), auditBot, quoting)
+	want := ytwrite.CommentAudit{
+		Present: []ytwrite.AuditCopies{copies(2, 9, opCopy), copies(3, 0, byMarker)},
+		Missing: []ytwrite.AuditCopies{copies(1, 0)},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("audit\n got %+v\nwant %+v", got, want)
+	}
+}
+
 // With no bot id known, nothing counts as the bot's.
 func TestAuditCommentsUnknownBot(t *testing.T) {
-	got := ytwrite.AuditComments(nil, []ytwrite.RemoteComment{{ID: "4-1", Text: "x"}}, "")
+	got := ytwrite.AuditComments(nil, []ytwrite.RemoteComment{{ID: "4-1", Text: "x"}}, "", nil)
 	if !reflect.DeepEqual(got.YTOnlyHuman, []string{"4-1"}) || got.YTOnlyBot != nil {
 		t.Fatalf("got %+v", got)
 	}

@@ -16,10 +16,10 @@ type AuditComment struct {
 	// copy; any comment whose text is exactly Body is one too (the import
 	// wrote the body as it is).
 	OpID int64
-	// KnownYTIDs are YouTrack comments other evidence names as its copies
-	// (the legacy mirror push's recorded id, or its marker in the text):
-	// each is its copy whatever its text.
-	KnownYTIDs []string
+	// LinkedYTIDs are the YouTrack comments a recorded link names as its
+	// copies (the legacy mirror push's youtrack_comment_links id): each is
+	// its copy whatever its text.
+	LinkedYTIDs []string
 }
 
 // AuditCopies is one hk comment and the YouTrack comments that copy it.
@@ -41,15 +41,17 @@ type CommentAudit struct {
 	YTOnlyHuman []string
 }
 
-// AuditComments matches hk comments to YouTrack comments. A YouTrack comment
-// whose id is in an hk comment's KnownYTIDs copies that comment; one in the
-// rendered form of op N (RenderedOpID) copies the hk comment whose OpID is
-// N. Any other one copies an hk comment whose body equals its text
-// exactly, not trimmed or normalised: equal bodies are shared out one copy
+// AuditComments matches hk comments to YouTrack comments, by the strongest
+// evidence first: a YouTrack comment whose id is in an hk comment's
+// LinkedYTIDs copies that comment; else one in the rendered form of op N
+// (RenderedOpID) copies the hk comment whose OpID is N; else one whose
+// legacy marker names hk comment N (legacy, may be nil: the legacy mirror's
+// own reading of a text) copies comment N; else it copies an hk comment
+// whose body equals its text exactly, not trimmed or normalised: equal bodies are shared out one copy
 // each in comment id order, first to the comments with no copy yet, and a
 // copy left over goes to the last of them, which makes that one a
 // duplicate. botID is the bot's YouTrack user id.
-func AuditComments(hk []AuditComment, yt []RemoteComment, botID string) CommentAudit {
+func AuditComments(hk []AuditComment, yt []RemoteComment, botID string, legacy func(text string) (int64, bool)) CommentAudit {
 	hk = append([]AuditComment(nil), hk...)
 	sort.Slice(hk, func(i, j int) bool { return hk[i].ID < hk[j].ID })
 	live := make([]RemoteComment, 0, len(yt))
@@ -70,20 +72,22 @@ func AuditComments(hk []AuditComment, yt []RemoteComment, botID string) CommentA
 	})
 	copies := make([][]string, len(hk))
 	byOp := map[int64]int{}
-	byKnown := map[string]int{}
+	byLink := map[string]int{}
+	byID := map[int64]int{}
 	byBody := map[string][]int{}
 	for i, c := range hk {
+		byID[c.ID] = i
 		if c.OpID > 0 {
 			byOp[c.OpID] = i
 		}
-		for _, id := range c.KnownYTIDs {
-			byKnown[id] = i
+		for _, id := range c.LinkedYTIDs {
+			byLink[id] = i
 		}
 		byBody[c.Body] = append(byBody[c.Body], i)
 	}
 	var byText []RemoteComment
 	for _, c := range live {
-		if i, ok := byKnown[c.ID]; ok {
+		if i, ok := byLink[c.ID]; ok {
 			copies[i] = append(copies[i], c.ID)
 			continue
 		}
@@ -91,6 +95,14 @@ func AuditComments(hk []AuditComment, yt []RemoteComment, botID string) CommentA
 			if i, ok := byOp[op]; ok {
 				copies[i] = append(copies[i], c.ID)
 				continue
+			}
+		}
+		if legacy != nil {
+			if n, ok := legacy(c.Text); ok {
+				if i, ok := byID[n]; ok {
+					copies[i] = append(copies[i], c.ID)
+					continue
+				}
 			}
 		}
 		byText = append(byText, c)

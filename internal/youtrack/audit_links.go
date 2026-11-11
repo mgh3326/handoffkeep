@@ -1,6 +1,7 @@
 package youtrack
 
 import (
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -20,10 +21,15 @@ func CommentLinkIsID(link string) bool {
 // Python mirror posted the comment, in a form hk cannot recognise by id.
 func CommentLinkIsAdopted(link string) bool { return strings.HasPrefix(link, "adopted:") }
 
+// legacyTrailerRE is the end commentText writes: a blank line and the
+// marker, and nothing after it.
+var legacyTrailerRE = regexp.MustCompile(`\n\n<!-- hk-comment:([0-9]+) -->\z`)
+
 // LegacyCommentID reads the hk comment id from a mirrored comment's
-// <!-- hk-comment:N --> marker, the evidence commentMarks links by.
+// trailing <!-- hk-comment:N --> marker, where commentText puts it. A
+// marker anywhere else is quoted text, not evidence.
 func LegacyCommentID(text string) (int64, bool) {
-	m := commentMarkerRE.FindStringSubmatch(text)
+	m := legacyTrailerRE.FindStringSubmatch(text)
 	if m == nil {
 		return 0, false
 	}

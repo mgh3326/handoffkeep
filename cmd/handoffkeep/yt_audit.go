@@ -9,7 +9,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -316,23 +315,14 @@ func (a *ytAuditor) auditTask(ctx context.Context, taskID int64, counts []*ytAud
 		}
 	}
 	// The legacy mirror push's evidence, read by the sync's own rules: a
-	// recorded link that is a YouTrack id, and a comment carrying the
-	// <!-- hk-comment:N --> marker of one of this task's comments.
-	index := map[int64]int{}
+	// recorded link that is a YouTrack id, and (after op renderings, in
+	// AuditComments) a comment ending in an hk comment's legacy marker.
 	for i, c := range hk.Comments {
-		index[c.ID] = i
 		if link := hk.Links[c.ID]; youtrack.CommentLinkIsID(link) {
-			hk.Comments[i].KnownYTIDs = append(hk.Comments[i].KnownYTIDs, link)
+			hk.Comments[i].LinkedYTIDs = append(hk.Comments[i].LinkedYTIDs, link)
 		}
 	}
-	for _, c := range yt {
-		if id, ok := youtrack.LegacyCommentID(c.Text); ok {
-			if i, ok := index[id]; ok && !slices.Contains(hk.Comments[i].KnownYTIDs, c.ID) {
-				hk.Comments[i].KnownYTIDs = append(hk.Comments[i].KnownYTIDs, c.ID)
-			}
-		}
-	}
-	got := ytwrite.AuditComments(hk.Comments, yt, a.botID)
+	got := ytwrite.AuditComments(hk.Comments, yt, a.botID, youtrack.LegacyCommentID)
 	// A comment the adoption linked was posted by the Python mirror in a form
 	// hk cannot recognise; with no copy found it is adopted_unmatched, for
 	// the operator, and never enqueued: a second copy may be the result.
