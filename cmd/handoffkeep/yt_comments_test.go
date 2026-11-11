@@ -297,6 +297,14 @@ func TestYTCommentsWorkerStopIsBoundedWhileSettling(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// hk 3997: every pass also runs the change-feed consumers; none is
+	// registered, so the pass runs zero of them.
+	if w.feed == nil {
+		t.Fatal("the write worker runs no change-feed pass")
+	}
+	if passes, err := w.feed.RunYTFeedConsumers(ctx, ytFeedPassLimit); err != nil || len(passes) != 0 {
+		t.Fatalf("feed passes with no consumer = %+v, %v", passes, err)
+	}
 	done := make(chan struct{})
 	go func() {
 		w.Run(workerCtx)

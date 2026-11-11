@@ -233,7 +233,27 @@ func (s *Store) PutTranslations(ctx context.Context, translations []Translation)
 			return err
 		}
 	}
+	// translations has no feed trigger, but a task's YouTrack description
+	// carries its Korean title (D5), so a title written after the task must
+	// reach the feed (hk 3997): one task 'U' row per task, in this
+	// transaction. The commit-time allocator gives it its sync_id.
+	if _, err = tx.Exec(ctx, `INSERT INTO sync_log(model,model_id,action,at)
+		SELECT 'task', id, 'U', clock_timestamp() FROM (SELECT DISTINCT unnest($1::text[]) AS id) titled ORDER BY id`,
+		translatedTaskTitles(translations)); err != nil {
+		return err
+	}
 	return tx.Commit(ctx)
+}
+
+// translatedTaskTitles lists the task ids whose title translations holds.
+func translatedTaskTitles(translations []Translation) []string {
+	ids := []string{}
+	for _, t := range translations {
+		if t.Entity == "task" && t.Field == "title" {
+			ids = append(ids, t.EntityID)
+		}
+	}
+	return ids
 }
 
 type MissingTranslation struct {

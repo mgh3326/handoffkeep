@@ -216,7 +216,8 @@ package store
 //         yt_task_bindings have no foreign key to tasks, no holder of a lane
 //         lock requests taskCommentInsertLock, the ownership lock, a task
 //         row, a job lock or a level 1-4 lock, and a transaction holds at
-//         most one lane lock.
+//         most one lane lock, except a feed pass (below), which only one
+//         transaction at a time can run.
 //       - The writers of task_origins and youtrack_projects rows never hold
 //         such a row while they wait for a task row, and never request a lane
 //         lock or the ownership lock. UpsertYouTrackMirror and AddTaskOrigin
@@ -250,6 +251,24 @@ package store
 //     lock and no task row: a canary enrollment racing it is caught by the
 //     comment enqueue's ytBindingDisagreement, which skips that task's
 //     comments.
+//
+//   - The YouTrack change feed (yt_feed.go, hk 3997). A consumer's pass
+//     takes pg_try_advisory_xact_lock(8241873997) as the first lock of its
+//     transaction, only tried: a pass that does not get it reads nothing. It
+//     then inserts or locks FOR UPDATE its one yt_feed_cursors row, reads
+//     sync_state and sync_log without a lock, and runs the consumer's handler,
+//     which reads model rows without a lock and prepares ops: per entity the
+//     lane lock, then that entity's yt_snapshot_state row
+//     (prepareYTSnapshotTx), then yt_write_ops rows. It may take several lane
+//     locks, in the order of its rows; since the feed lock admits one pass at
+//     a time, every other lane holder holds one lane lock and never waits for
+//     a second one, so the lanes cannot close a cycle. Nothing but a pass
+//     locks a cursor or snapshot-state row, and a handler takes no task row,
+//     no level 2-5 lock and no comment lock. The pruned alert inserts a new
+//     notification_outbox key (ON CONFLICT DO NOTHING).
+//     PutTranslations (translations.go) inserts sync_log rows for the task
+//     titles it writes after its translations rows and locks no task row; its
+//     commit takes level 6 like any feed writer.
 //
 //   - The YouTrack sync's single-run guard is a session-scoped
 //     pg_try_advisory_lock(8241873404) on its own pooled connection. It is
