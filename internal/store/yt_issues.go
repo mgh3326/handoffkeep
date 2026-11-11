@@ -58,106 +58,18 @@ func (s *Store) ytIssuesNow() (YTIssuesMode, string) {
 
 func init() { registerYTKindGate(ytwrite.KindIssueCreate, ytIssueGateSQL) }
 
-// ytIssueGateSQL is the issue_create gate (ytAdmitSQL): mode on, this
-// process holds the YouTrack write fence (HoldYTIssueFence: the legacy
-// `youtrack sync`'s single-run lock), and o's task has no binding or a binding
-// this op published. A binding from the import (or another op) holds the op:
-// the task already has its issue. Mode off, or the fence held by no one here,
-// admits nothing.
-//
-// The fence is held for the whole write pass, from the claim through the
-// search, the create and the settlement, so no `youtrack sync` or `youtrack
-// adopt` of this release or the previous one (both take the same lock first)
-// writes task issues or origins while an issue op is in flight.
+// ytIssueGateSQL is the issue_create gate (ytAdmitSQL): mode on, and o's task
+// has no binding or a binding this op published. A binding from the import
+// (or another op) holds the op: the task already has its issue. Mode off
+// admits nothing. Issue mode assumes the legacy `youtrack sync` refuses to
+// write while it is on (hk 3907) and the import has ended (D3); nothing here
+// coordinates with them (docs/youtrack-write-protocol.md).
 func ytIssueGateSQL(s *Store) string {
-	if mode, _ := s.ytIssuesNow(); mode != YTIssuesOn || !s.ytIssueFence.Load() {
+	if mode, _ := s.ytIssuesNow(); mode != YTIssuesOn {
 		return `FALSE`
 	}
 	return `o.entity_kind = 'task' AND NOT EXISTS (SELECT 1 FROM yt_task_bindings b
 		WHERE b.task_id::text = o.entity_id AND b.op_id IS DISTINCT FROM o.id)`
-}
-
-// HoldYTIssueFence tries to take the legacy sync's single-run lock for one
-// write pass. While it is held (held true, until release), this process's
-// gate admits issue_create ops; a second serve process or a running `youtrack
-// sync`/`youtrack adopt` keeps it from being taken, and the ops wait for a
-// later pass. release must be called once.
-func (s *Store) HoldYTIssueFence(ctx context.Context) (release func(), held bool, err error) {
-	lock, held, err := s.TryYouTrackSyncLock(ctx)
-	if err != nil || !held {
-		return func() {}, false, err
-	}
-	s.ytIssueFence.Store(true)
-	return func() {
-		s.ytIssueFence.Store(false)
-		if err := lock.Release(context.Background()); err != nil {
-			log.Printf("ytwrite.issue_fence_release_failed err=%q", err.Error())
-		}
-	}, true, nil
-}
-
-// ytIssueOwnedSQL is true when the task of issue_create op o already has an
-// issue hk knows of another way: a binding this op did not publish, a YouTrack
-// origin (the import, the legacy push or `youtrack adopt`), a canary
-// enrollment, or a task map row.
-const ytIssueOwnedSQL = `(EXISTS (SELECT 1 FROM yt_task_bindings b WHERE b.task_id::text = o.entity_id AND b.op_id IS DISTINCT FROM o.id)
-	OR EXISTS (SELECT 1 FROM task_origins t WHERE t.task_id::text = o.entity_id AND t.provider = 'youtrack')
-	OR EXISTS (SELECT 1 FROM yt_comment_canary c WHERE c.task_id::text = o.entity_id)
-	OR EXISTS (SELECT 1 FROM yt_entity_map m WHERE m.entity_kind = 'task' AND m.hk_key = o.entity_id))`
-
-// RejectOwnedYTIssueOps rejects (issue_owned) the prepared issue_create ops
-// whose task gained an issue another way after the op was prepared, so none
-// is created twice and none is held in front of the task's comment ops. The
-// worker runs it holding the write fence, before its pass; each op is
-// rechecked under its task's lane lock.
-func (s *Store) RejectOwnedYTIssueOps(ctx context.Context, now time.Time) (int, error) {
-	rows, err := s.pool.Query(ctx, `SELECT o.id FROM yt_write_ops o WHERE o.kind = $1 AND o.state = 'prepared' AND o.entity_kind = 'task'
-		AND `+ytIssueOwnedSQL+` ORDER BY o.id LIMIT 100`, ytwrite.KindIssueCreate)
-	if err != nil {
-		return 0, err
-	}
-	ids, err := pgx.CollectRows(rows, pgx.RowTo[int64])
-	if err != nil {
-		return 0, err
-	}
-	n := 0
-	for _, id := range ids {
-		rejected, err := s.rejectOwnedYTIssueOp(ctx, now, id)
-		if err != nil {
-			return n, err
-		}
-		if rejected {
-			n++
-		}
-	}
-	return n, nil
-}
-
-func (s *Store) rejectOwnedYTIssueOp(ctx context.Context, now time.Time, id int64) (bool, error) {
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return false, err
-	}
-	defer tx.Rollback(ctx)
-	var entityID string
-	if err := tx.QueryRow(ctx, `SELECT entity_id FROM yt_write_ops WHERE id=$1`, id).Scan(&entityID); err != nil {
-		return false, err
-	}
-	if err := lockYTEntity(ctx, tx, "task", entityID); err != nil {
-		return false, err
-	}
-	var owned bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM yt_write_ops o WHERE o.id = $1 AND o.state = 'prepared' AND `+ytIssueOwnedSQL+`)`, id).Scan(&owned); err != nil {
-		return false, err
-	}
-	if !owned {
-		return false, nil
-	}
-	if _, err := rejectYTOpTx(ctx, tx, now, id, ytwrite.ReasonIssueOwned, "the task already has a YouTrack issue (binding, origin, canary or map row)"); err != nil {
-		return false, err
-	}
-	log.Printf("ytwrite.issue_rejected_owned op_id=%d task_id=%s", id, entityID)
-	return true, tx.Commit(ctx)
 }
 
 // ytIssueProject is a task's hk project and the YouTrack project it maps to.
@@ -326,10 +238,8 @@ type YTIssueBackfillProject struct {
 	Existing int `json:"existing"`
 	// Unmapped: the project maps to no YouTrack project.
 	Unmapped int `json:"unmapped"`
-	// Owned: the task already has an issue hk knows of (a canary enrollment,
-	// a task map row, or a YouTrack origin from the import or the legacy
-	// push); creating one would make a second. Such a task is bound by
-	// `youtrack comments-backfill`'s verification instead.
+	// Owned: the task already has an issue hk knows of (a binding, a canary
+	// enrollment or a task map row); creating one would make a second.
 	Owned int `json:"owned"`
 }
 
@@ -342,8 +252,8 @@ type YTIssueBackfillReport struct {
 }
 
 // BackfillYTIssueOps prepares the issue_create op of every task with no
-// binding, no canary enrollment, no task map row and no YouTrack origin (only
-// project's tasks when it is not ""), bound to tenant. It calls
+// binding, no canary enrollment and no task map row (only project's tasks
+// when it is not ""), bound to tenant. It calls
 // no YouTrack: adoption of an existing issue happens when the op is sent. A
 // task that already has its op is counted and left alone, so a second run
 // prepares nothing. Each task is its own transaction; a dry run writes
@@ -422,7 +332,6 @@ func (s *Store) backfillYTIssue(ctx context.Context, tenant string, taskID int64
 	var owned bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM yt_comment_canary WHERE task_id=$1)
 		OR EXISTS(SELECT 1 FROM yt_entity_map WHERE entity_kind='task' AND hk_key=$2)
-		OR EXISTS(SELECT 1 FROM task_origins WHERE task_id=$1 AND provider='youtrack')
 		OR EXISTS(SELECT 1 FROM yt_task_bindings WHERE task_id=$1)`, taskID, strconv.FormatInt(taskID, 10)).Scan(&owned); err != nil {
 		return "", "", err
 	}

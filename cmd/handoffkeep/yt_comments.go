@@ -149,11 +149,7 @@ func newYTWriteWorker(st *store.Store, remote ytwrite.Remote, tenant string, com
 	st.SetYTIssuesMode(issues, tenant)
 	log.Printf("ytwrite.issues_mode mode=%s tenant=%q", issues, tenant)
 	if comments != store.YTCommentsOff {
-		w, err := newYTCommentsWorker(st, remote, tenant, comments, catchUp, now)
-		if err == nil && issues == store.YTIssuesOn {
-			w.issues = st
-		}
-		return w, err
+		return newYTCommentsWorker(st, remote, tenant, comments, catchUp, now)
 	}
 	p, err := ytwrite.New(st.YTCommentConfig(tenant, ytwrite.Config{
 		Remote:          remote,
@@ -165,7 +161,7 @@ func newYTWriteWorker(st *store.Store, remote ytwrite.Remote, tenant string, com
 		return ytCommentsWorker{}, err
 	}
 	st.SetYTCommentsMode(store.YTCommentsOff)
-	return ytCommentsWorker{protocol: p, issues: st}, nil
+	return ytCommentsWorker{protocol: p}, nil
 }
 
 // newYTCommentsWorker sets the gate to mode (canary or on) and builds the
@@ -200,14 +196,6 @@ type ytCommentCatchUpper interface {
 	CatchUpYTComments(ctx context.Context, limit int, skip []int64) (store.YTCatchUp, error)
 }
 
-// ytIssueFencer is the issue mode's part of a pass (hk 3898): the write
-// fence (the legacy sync's single-run lock, held for the whole pass) and the
-// sweep of prepared issue ops whose task got an issue another way.
-type ytIssueFencer interface {
-	HoldYTIssueFence(ctx context.Context) (release func(), held bool, err error)
-	RejectOwnedYTIssueOps(ctx context.Context, now time.Time) (int, error)
-}
-
 // ytCommentsWorker runs one sequential Drive pass every interval. Two serve
 // processes (blue-green) may both run it: the ledger's compare-and-set claim
 // is the boundary, so an op is sent at most once. Its ledger is scoped to the
@@ -222,8 +210,6 @@ type ytIssueFencer interface {
 type ytCommentsWorker struct {
 	protocol *ytwrite.Protocol
 	catchUp  ytCommentCatchUpper
-	// issues is set in issue mode on: each pass holds its fence.
-	issues   ytIssueFencer
 	interval time.Duration
 }
 
@@ -243,11 +229,7 @@ func (w ytCommentsWorker) Run(ctx context.Context) {
 			}
 			skipped = append(skipped, got.Skipped...)
 		}
-		// The catch-up takes and frees the same lock itself, so the fence is
-		// taken after it.
-		release := w.holdIssueFence(ctx)
 		st, err := w.protocol.Drive(ctx, ytCommentsPassLimit)
-		release()
 		if err != nil && ctx.Err() == nil {
 			log.Printf("ytwrite.drive_failed err=%q", err.Error())
 		}
@@ -260,27 +242,6 @@ func (w ytCommentsWorker) Run(ctx context.Context) {
 		case <-ticker.C:
 		}
 	}
-}
-
-// holdIssueFence takes the issue write fence for one pass and sweeps the
-// prepared issue ops whose task got an issue another way. Without the fence
-// (a sync or another serve holds the lock) the pass still runs and issue ops
-// wait. It returns the release, a no-op when nothing was taken.
-func (w ytCommentsWorker) holdIssueFence(ctx context.Context) func() {
-	if w.issues == nil {
-		return func() {}
-	}
-	release, held, err := w.issues.HoldYTIssueFence(ctx)
-	if err != nil && ctx.Err() == nil {
-		log.Printf("ytwrite.issue_fence_failed err=%q", err.Error())
-	}
-	if !held {
-		return release
-	}
-	if _, err := w.issues.RejectOwnedYTIssueOps(ctx, time.Now().UTC()); err != nil && ctx.Err() == nil {
-		log.Printf("ytwrite.issue_owned_sweep_failed err=%q", err.Error())
-	}
-	return release
 }
 
 // ytOpsAlertWorker scans the durable ledger independently of dispatch mode,

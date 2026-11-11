@@ -64,28 +64,6 @@ func ytiDispatch(t *testing.T, s *Store, op ytwrite.Op) {
 	}
 }
 
-// ytiFence takes the issue write fence for the rest of the test, retrying
-// while another test package's legacy sync run holds the same lock on the
-// shared test database.
-func ytiFence(t *testing.T, s *Store) func() {
-	t.Helper()
-	deadline := time.Now().Add(20 * time.Second)
-	for {
-		release, held, err := s.HoldYTIssueFence(t.Context())
-		if err != nil {
-			t.Fatal(err)
-		}
-		if held {
-			t.Cleanup(release)
-			return release
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the sync lock stayed held")
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-}
-
 // ytiClaim claims op on the tenant's worker ledger.
 func ytiClaim(t *testing.T, s *Store, op ytwrite.Op) ytwrite.ClaimOutcome {
 	t.Helper()
@@ -141,7 +119,6 @@ func TestYTIssueApplyBindsTheTask(t *testing.T) {
 	ytcuRawComment(t, s, x.ID, "worker") // written before the issue exists
 	yt := ytwritetest.NewFake()
 	var offset atomic.Int64
-	ytiFence(t, s)
 	if _, err := ytcProtocol(t, s, yt, &offset).Drive(t.Context(), 10); err != nil {
 		t.Fatal(err)
 	}
@@ -263,23 +240,16 @@ func TestYTIssueBindingNeverOverwritten(t *testing.T) {
 	}
 }
 
-// The worker admits an issue_create op only in mode on, while it holds the
-// write fence, on its tenant, and while the task has no binding or one this op
-// published.
+// The worker admits an issue_create op only in mode on, on its tenant, and
+// while the task has no binding or one this op published.
 func TestYTIssueGate(t *testing.T) {
 	s := schemaStore(t, "yti_gate")
 	ytbMapped(t, s)
 	free := ytiPrepare(t, s, ytcTask(t, s, ytbProject), ytcTenant)
-	release := ytiFence(t, s)
 	if out := ytiClaim(t, s, free); out != ytwrite.ClaimHeld {
 		t.Fatalf("mode off: %s", out)
 	}
-	release()
 	s.SetYTIssuesMode(YTIssuesOn, ytcTenant)
-	if out := ytiClaim(t, s, free); out != ytwrite.ClaimHeld {
-		t.Fatalf("mode on without the fence: %s", out)
-	}
-	ytiFence(t, s)
 
 	elsewhere := ytiPrepare(t, s, ytcTask(t, s, ytbProject), "other.youtrack.cloud")
 	if out := ytiClaim(t, s, elsewhere); out != ytwrite.ClaimHeld {
@@ -445,64 +415,20 @@ func TestYTIssuePendingOpFencesOtherIssueWriters(t *testing.T) {
 func TestYTIssueBackfillSkipsOwnedTasks(t *testing.T) {
 	s := schemaStore(t, "yti_owned")
 	ytbMapped(t, s)
-	canary, anchored, origin := ytcTask(t, s, ytbProject), ytcTask(t, s, ytbProject), ytcTask(t, s, ytbProject)
+	canary, anchored := ytcTask(t, s, ytbProject), ytcTask(t, s, ytbProject)
 	ytbCanaryRow(t, s, canary, ytcTenant, "2-c")
 	ytbAnchor(t, s, anchored, "2-a")
-	if _, err := s.UpsertYouTrackMirror(t.Context(), YouTrackMirrorInput{TaskID: origin, IssueID: "2-o", DisplayRef: "HK-9", Tenant: ytcTenant, Role: "mirror"}); err != nil {
-		t.Fatal(err)
-	}
 	r, err := s.BackfillYTIssueOps(t.Context(), ytcTenant, ytbProject, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(r.Projects) != 1 || r.Projects[0].Owned != 3 || r.Projects[0].Prepared != 0 {
+	if len(r.Projects) != 1 || r.Projects[0].Owned != 2 || r.Projects[0].Prepared != 0 {
 		t.Fatalf("report %+v", r.Projects)
 	}
-	for _, task := range []int64{canary, anchored, origin} {
+	for _, task := range []int64{canary, anchored} {
 		if ops := ytiOps(t, s, task); len(ops) != 0 {
 			t.Fatalf("task %d got ops %+v", task, ops)
 		}
-	}
-}
-
-// The write fence is the legacy sync's own lock: while a pass holds it no
-// sync can start, and the push lists no task whose issue op is unresolved;
-// once the op is applied the task is listed again (the push adopts the issue
-// by hk ID).
-func TestYTIssueFencesTheLegacySync(t *testing.T) {
-	s := schemaStore(t, "yti_sync")
-	ytbMapped(t, s)
-	plain, owned := ytcTask(t, s, ytbProject), ytcTask(t, s, ytbProject)
-	op := ytiPrepare(t, s, owned, ytcTenant)
-	listed := func() map[int64]bool {
-		t.Helper()
-		due, err := s.DueYouTrackPushTasks(t.Context(), 100)
-		if err != nil {
-			t.Fatal(err)
-		}
-		ids := map[int64]bool{}
-		for _, x := range due {
-			ids[x.ID] = true
-		}
-		return ids
-	}
-	if ids := listed(); !ids[plain] || ids[owned] {
-		t.Fatalf("push lists %v; want %d and not %d", ids, plain, owned)
-	}
-	release := ytiFence(t, s)
-	if _, held, err := s.TryYouTrackSyncLock(t.Context()); err != nil || held {
-		t.Fatalf("a sync started during the fence: %v %v", held, err)
-	}
-	s.SetYTIssuesMode(YTIssuesOn, ytcTenant)
-	if out := ytiClaim(t, s, op); out != ytwrite.ClaimClaimed {
-		t.Fatalf("claim under the fence: %s", out)
-	}
-	if _, err := s.YTWriteLedger().Apply(t.Context(), time.Now().UTC(), op.ID, "2-made", ytiMaps(op, "2-made")); err != nil {
-		t.Fatal(err)
-	}
-	release()
-	if ids := listed(); !ids[owned] {
-		t.Fatalf("push lists %v; want %d once its op is applied", ids, owned)
 	}
 }
 
@@ -553,28 +479,13 @@ func TestYTIssueApplyGuardRefusesABindinglessApply(t *testing.T) {
 	}
 }
 
-// A prepared op whose task got an issue another way is rejected issue_owned
-// by the sweep; an op of an unowned task is left alone. An origin naming
-// another issue is also a conflict at apply.
-func TestYTIssueOwnedSweepAndOriginConflict(t *testing.T) {
-	s := schemaStore(t, "yti_owned_sweep")
+// A YouTrack origin naming another issue is a conflict at apply: the op is
+// applied with binding_conflict and no binding is written.
+func TestYTIssueOriginConflict(t *testing.T) {
+	s := schemaStore(t, "yti_origin")
 	ytbMapped(t, s)
-	adopted, free, raced := ytcTask(t, s, ytbProject), ytcTask(t, s, ytbProject), ytcTask(t, s, ytbProject)
-	adoptedOp, freeOp, racedOp := ytiPrepare(t, s, adopted, ytcTenant), ytiPrepare(t, s, free, ytcTenant), ytiPrepare(t, s, raced, ytcTenant)
-	if _, err := s.UpsertYouTrackMirror(t.Context(), YouTrackMirrorInput{TaskID: adopted, IssueID: "2-old", DisplayRef: "HK-1", Tenant: ytcTenant, Role: "mirror"}); err != nil {
-		t.Fatal(err)
-	}
-	n, err := s.RejectOwnedYTIssueOps(t.Context(), time.Now().UTC())
-	if err != nil || n != 1 {
-		t.Fatalf("swept %d %v", n, err)
-	}
-	if got, _ := s.YTWriteLedger().ByID(t.Context(), adoptedOp.ID); got.State != ytwrite.StateRejected || got.Reason != ytwrite.ReasonIssueOwned {
-		t.Fatalf("owned op %+v", got)
-	}
-	if got, _ := s.YTWriteLedger().ByID(t.Context(), freeOp.ID); got.State != ytwrite.StatePrepared {
-		t.Fatalf("free op %+v", got)
-	}
-	// An origin that appears while the op is in flight is a conflict.
+	raced := ytcTask(t, s, ytbProject)
+	racedOp := ytiPrepare(t, s, raced, ytcTenant)
 	ytiDispatch(t, s, racedOp)
 	if _, err := s.UpsertYouTrackMirror(t.Context(), YouTrackMirrorInput{TaskID: raced, IssueID: "2-other", DisplayRef: "HK-2", Tenant: ytcTenant, Role: "mirror"}); err != nil {
 		t.Fatal(err)

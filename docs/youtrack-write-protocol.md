@@ -640,9 +640,9 @@ with ` · `, a title quoting the marker) gets the op rejected `invalid_issue`.
 `handoffkeep youtrack issues-backfill [--project P] [--dry-run]` prepares the
 op for every task with no binding, bound to the host of `YOUTRACK_URL`; it
 calls no YouTrack, skips a task that already has its op, and so is idempotent.
-It also skips (counts as `owned`) a task hk already ties to an issue: a canary
-enrollment, a task map row, or a YouTrack `task_origins` row (the import or
-the legacy push); `youtrack comments-backfill` binds those after verifying.
+It also skips (counts as `owned`) a task hk already ties to an issue: a
+binding, a canary enrollment or a task map row, read again under the task's
+lane lock.
 
 **Text.** Summary `#<id> <title>` on one line, cut to 250 runes. Description:
 
@@ -694,23 +694,20 @@ keeps the op applied with reason
 `ytwrite.binding_conflict task_id= op_id= issue_id=`. `yt ops --state
 rejected` lists such ops and the alert worker raises them as rejected.
 
-**Admission and the write fence.** Mode on, the op's tenant is the worker's,
-the task has no binding or one with `op_id` = this op, and this serve process
-holds the write fence: in issue mode each worker pass takes the legacy `youtrack
-sync` single-run lock (`Store.HoldYTIssueFence`, a try-lock) and holds it from
-the claim through the search, the create and the settlement. `youtrack sync` and
-`youtrack adopt`, of this release or the previous one, take the same lock first,
-so neither writes task issues or origins while an issue op is in flight; a pass
-that cannot take the lock dispatches no issue op. Under the fence, before the
-pass, prepared issue ops whose task got an issue another way (a binding, a
-YouTrack origin, a canary row or a task map row) are rejected `issue_owned`, so
-none is created twice or held in front of the task's comment ops. The legacy
-push lists no task whose issue op is unresolved; once the op is applied it
-finds the issue by `hk ID` and records its mirror as usual. While the op is
-unresolved, `comments-backfill` binding and canary enrollment of the task are
-refused. An operator's `yt ops resolve --applied` is treated as an adoption
-(the ledger did not record the issue's provenance), so its binding starts after
-the task's latest comment.
+**Admission.** Mode on, the op's tenant is the worker's, and the task has no
+binding or one with `op_id` = this op. A binding from the import holds the op.
+While the op is unresolved, `comments-backfill` binding and canary enrollment
+of the task are refused. An operator's `yt ops resolve --applied` is treated as
+an adoption (the ledger did not record the issue's provenance), so its binding
+starts after the task's latest comment.
+
+**Precondition: no legacy writer.** Issue mode coordinates with no other
+writer of task issues. Before `HANDOFFKEEP_YT_ISSUES_MODE=on`: hk 3907 must be
+deployed (the legacy `youtrack sync` refuses to write while the comments or
+issues mode is on), and the YouTrack import must have ended (D3). Without them
+the legacy push or the import can create or link a task's issue beside the
+op, and the op's search does not see it in time.
+
 A rejected create stays rejected; a retry is a later operator command.
 
 ## Tests
