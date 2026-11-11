@@ -605,13 +605,15 @@ func TestCommentsBackfillAllBindsBucketTasks(t *testing.T) {
 		fake.issues["/api/issues/"+readable] = map[string]any{"id": internal, "idReadable": readable, "summary": summary,
 			"project": map[string]any{"id": projectID, "shortName": short}}
 	}
+	// CreateTask requires a project; the import's no-project tasks are older
+	// rows, so the project is cleared afterwards.
 	p := project
-	bucket := newTask(nil)   // no project, closed long ago: HK-<id>
-	orphan := newTask(nil)   // no project and no issue
-	idle := newTask(&p)      // mapped project, no comment
-	wrongSum := newTask(nil) // no project; HK-<id> names another task
-	for _, task := range []int64{bucket, orphan, idle, wrongSum} {
-		if _, err := conn.Exec(ctx, `UPDATE tasks SET project=NULL WHERE id=$1 AND $2`, task, task != idle); err != nil {
+	bucket := newTask(&p)   // no project, closed long ago: HK-<id>
+	orphan := newTask(&p)   // no project and no issue
+	idle := newTask(&p)     // mapped project, no comment
+	wrongSum := newTask(&p) // no project; HK-<id> names another task
+	for _, task := range []int64{bucket, orphan, wrongSum} {
+		if _, err := conn.Exec(ctx, `UPDATE tasks SET project=NULL WHERE id=$1`, task); err != nil {
 			t.Fatal(err)
 		}
 	}

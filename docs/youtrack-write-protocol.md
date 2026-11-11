@@ -391,6 +391,14 @@ task_id=<id> comment_id=<id> source=<source>`, once per worker process (the
 worker leaves the comment out of its later passes; a restart looks again). A
 failed pass logs `ytwrite.comment_catchup_failed`. No YouTrack call.
 
+**One owner per comment.** On a task whose binding every local source agrees
+with, a comment above `comments_from` belongs to the protocol even before it
+has an op: the legacy push (`UnpushedYouTrackComments`) does not select it,
+whatever the mode, and the enqueue or the catch-up copies it (in mode
+`canary` or `off` it waits for mode `on`). A comment at or below
+`comments_from`, or on a binding a source disagrees with, stays the legacy
+push's, and the catch-up leaves any comment the push has linked.
+
 **Admission.** In mode on the worker admits a prepared op only when it is
 bound to the worker's tenant and its task has a binding with the op's issue
 on that tenant, read in the claim under the lane lock that the binding's
@@ -503,10 +511,11 @@ and no recovery of held ops; both come with the automatic binder (follow-up).
 - A task created after the backfill has no binding until the backfill runs
   again; its comments go through the legacy push and the import meanwhile,
   and the binding never copies them (`comments_from`).
-- The legacy push (`youtrack sync`) also selects a comment above
-  `comments_from` that has no op yet. If it reads one, the catch-up prepares
-  its op before the push links it, and both send, YouTrack gets two copies.
-  The window is the catch-up's tick (5 s) after the comment commits.
+- A comment the legacy push read while its binding disagreed, and whose
+  disagreement is fixed before the push links it, can be sent by both. The
+  window is one push's POST, and it needs an operator's fix inside it. A
+  push from before this release does not apply the ownership rule; the
+  catch-up re-reads its link under the lane lock.
 - The enqueue reads its sources without locks, so a project change or mirror
   write that commits during a comment's transaction is caught by the next
   comment, not this one; the issue binding itself cannot change under the

@@ -571,10 +571,30 @@ func (s *Store) DueYouTrackPushTasks(ctx context.Context, limit int) ([]Task, er
 }
 
 // UnpushedYouTrackComments lists hk comments with no mirror link and no
-// write-protocol owner, in id order.
+// write-protocol owner, in id order. A comment above comments_from on a task
+// whose binding every local source agrees with (ytBindingDisagreement) is the
+// protocol's even before it has an op: the enqueue or the worker's catch-up
+// (CatchUpYTComments, hk 3897) copies it, so the legacy push never selects
+// it, and the two never both post one comment. A comment on a binding a
+// source disagrees with stays the legacy push's, as the enqueue and the
+// catch-up leave it.
 func (s *Store) UnpushedYouTrackComments(ctx context.Context, taskID, afterID int64, limit int) ([]TaskComment, error) {
 	if taskID < 1 || limit < 1 {
 		return nil, nil
+	}
+	ownedAbove := int64(-1)
+	b, found, err := readYTBinding(ctx, s.pool, taskID)
+	if err != nil {
+		return nil, err
+	}
+	if found {
+		source, err := ytBindingDisagreement(ctx, s.pool, b)
+		if err != nil {
+			return nil, err
+		}
+		if source == "" {
+			ownedAbove = b.CommentsFrom
+		}
 	}
 	rows, err := s.pool.Query(ctx, `
 		SELECT c.id,c.task_id,c.body,c.author,c.created_at
@@ -584,7 +604,8 @@ func (s *Store) UnpushedYouTrackComments(ctx context.Context, taskID, afterID in
 		  -- A comment the write protocol owns (slice b1a) is the protocol's to
 		  -- post; the legacy push never posts it too.
 		  AND NOT EXISTS (SELECT 1 FROM yt_comment_write_links w WHERE w.comment_id=c.id)
-		ORDER BY c.id ASC LIMIT $4`, taskID, afterID, YouTrackOwnedActor, limit)
+		  AND ($5 < 0 OR c.id <= $5)
+		ORDER BY c.id ASC LIMIT $4`, taskID, afterID, YouTrackOwnedActor, limit, ownedAbove)
 	if err != nil {
 		return nil, err
 	}

@@ -103,8 +103,9 @@ func (s *Store) CatchUpYTComments(ctx context.Context, limit int, skip []int64) 
 }
 
 // catchUpYTComment prepares comment c's op in its own transaction. prepared
-// is false when another writer linked the comment first or the task has no
-// binding; source is the disagreeing source when the binding is ambiguous.
+// is false when another writer linked the comment first (an op link or a
+// legacy push link) or the task has no binding; source is the disagreeing
+// source when the binding is ambiguous.
 func (s *Store) catchUpYTComment(ctx context.Context, c TaskComment) (ytwrite.Op, bool, string, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -114,9 +115,13 @@ func (s *Store) catchUpYTComment(ctx context.Context, c TaskComment) (ytwrite.Op
 	if err := lockYTEntity(ctx, tx, "task", strconv.FormatInt(c.TaskID, 10)); err != nil {
 		return ytwrite.Op{}, false, "", err
 	}
+	// Read again under the lane lock: another worker's op and link, and a
+	// legacy push link committed since the scan (a push from before this
+	// release, or one that read the comment while its binding disagreed).
 	var owned bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM yt_comment_write_links WHERE comment_id=$1)
-		OR EXISTS(SELECT 1 FROM yt_write_ops WHERE principal=$2 AND kind=$3 AND idem_key=$4)`,
+		OR EXISTS(SELECT 1 FROM yt_write_ops WHERE principal=$2 AND kind=$3 AND idem_key=$4)
+		OR EXISTS(SELECT 1 FROM youtrack_comment_links WHERE hk_comment_id=$1)`,
 		c.ID, YTCommentPrincipal, ytwrite.KindCommentAppend, YTCommentKey(c.ID)).Scan(&owned); err != nil {
 		return ytwrite.Op{}, false, "", err
 	}

@@ -87,6 +87,27 @@ func ytbLegacyCarries(t *testing.T, s *Store, c TaskComment) {
 	}
 }
 
+// ytbHeldForCatchUp asserts that comment c has no op and no ownership link,
+// and that the legacy push does not select it either: its task's binding
+// agrees and c is above comments_from, so it is the protocol's, and the
+// worker's catch-up copies it in mode on (hk 3897).
+func ytbHeldForCatchUp(t *testing.T, s *Store, c TaskComment) {
+	t.Helper()
+	if op, ok := ytcOpFor(t, s, c.ID); ok {
+		t.Fatalf("comment %d got op %+v", c.ID, op)
+	}
+	if n := ytcCount(t, s, `SELECT count(*) FROM yt_comment_write_links WHERE comment_id=$1`, c.ID); n != 0 {
+		t.Fatalf("comment %d has %d ownership links", c.ID, n)
+	}
+	got, err := s.UnpushedYouTrackComments(t.Context(), c.TaskID, 0, 500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.ContainsFunc(got, func(x TaskComment) bool { return x.ID == c.ID }) {
+		t.Fatalf("the legacy push selects comment %d, which the catch-up owns: %+v", c.ID, got)
+	}
+}
+
 // ytbAnchor writes a yt_entity_map task row; its op is a throwaway on an
 // unrelated lane, moved by nothing.
 func ytbAnchor(t *testing.T, s *Store, task int64, issue string) {
@@ -289,7 +310,9 @@ func TestYTCommentsOnAmbiguousBindingSkips(t *testing.T) {
 }
 
 // T4: canary mode is unchanged: it reads only yt_comment_canary, so a bound
-// task that is not enrolled gets no op.
+// task that is not enrolled gets no op. The comment is still the protocol's
+// (the legacy push leaves it), and the catch-up copies it once the mode is
+// on.
 func TestYTCommentsCanaryModeIgnoresBindings(t *testing.T) {
 	s := schemaStore(t, "ytb_t4")
 	ytbMapped(t, s)
@@ -301,10 +324,17 @@ func TestYTCommentsCanaryModeIgnoresBindings(t *testing.T) {
 	if op, ok := ytcOpFor(t, s, c.ID); !ok || op.YTTargetID != ytcBinding(enrolled).IssueID {
 		t.Fatalf("an enrolled task in canary mode: op %+v %v", op, ok)
 	}
-	ytbLegacyCarries(t, s, ytbComment(t, s, bound, "bound, not enrolled").TaskComment)
+	held := ytbComment(t, s, bound, "bound, not enrolled").TaskComment
+	ytbHeldForCatchUp(t, s, held)
+	s.SetYTCommentsMode(YTCommentsOn)
+	got, err := s.CatchUpYTComments(t.Context(), 10, nil)
+	if op, ok := ytcOpFor(t, s, held.ID); err != nil || len(got.Prepared) != 1 || !ok || op.ID != got.Prepared[0].ID {
+		t.Fatalf("catch-up in mode on: %+v %v, op %+v %v", got, err, op, ok)
+	}
 }
 
-// T5: mode off writes no op row, bound or not.
+// T5: mode off writes no op row, bound or not. An unbound task's comments
+// stay the legacy push's; a bound task's are held for the catch-up.
 func TestYTCommentsOffIgnoresBindings(t *testing.T) {
 	s := schemaStore(t, "ytb_t5")
 	ytbMapped(t, s)
@@ -314,9 +344,8 @@ func TestYTCommentsOffIgnoresBindings(t *testing.T) {
 		if set {
 			s.SetYTCommentsMode(YTCommentsOff)
 		}
-		for _, task := range []int64{bound, unbound} {
-			ytbLegacyCarries(t, s, ytbComment(t, s, task, "off").TaskComment)
-		}
+		ytbHeldForCatchUp(t, s, ytbComment(t, s, bound, "off").TaskComment)
+		ytbLegacyCarries(t, s, ytbComment(t, s, unbound, "off").TaskComment)
 	}
 	if n := ytcCount(t, s, `SELECT (SELECT count(*) FROM yt_write_ops)+(SELECT count(*) FROM yt_entity_map)+(SELECT count(*) FROM yt_comment_write_links)`); n != 0 {
 		t.Fatalf("mode off wrote %d op/map/link rows", n)
