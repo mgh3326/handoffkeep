@@ -373,7 +373,13 @@ which would leave the comment on no path; an anchor that still conflicts after
 the checks fails the comment. A body or actor the protocol cannot send keeps
 b1a's locally rejected op and link.
 
-**Catch-up** (hk 3897). Before each `Drive` pass the worker in mode on runs
+**Catch-up** (hk 3897). **Off by default**: it runs only with
+`HANDOFFKEEP_YT_COMMENTS_CATCHUP=on` (unset or `off` runs none; any other
+value fails startup), and stays off until the legacy comment push refuses to
+post while the mode is `canary` or `on` (hk 3907). A legacy push that posts a
+comment and ends without linking it (a lost response, a failed link insert, a
+dead process) leaves no local trace, so the catch-up would copy that comment
+again. When enabled, before each `Drive` pass the worker in mode on runs
 `Store.CatchUpYTComments`: up to 200 comments (`ytCommentsCatchUpLimit`),
 oldest first, on a bound task, above the binding's `comments_from`, not
 written by the YouTrack pull, not already mirrored by the legacy push
@@ -400,8 +406,10 @@ run of this release and of the releases before it holds for its whole run,
 across its selection, its POSTs and its `youtrack_comment_links` inserts. A
 held lock defers the pass (`ytwrite.comment_catchup_deferred comments=<n>
 reason=sync_running`, nothing written); otherwise the pass holds the lock
-until it ends, and each comment's transaction re-reads the push's link under
-the lane lock, so a comment a finished sync posted is left. A sync that
+until it ends and runs each comment's transaction on the lock's own
+connection (no second pool connection, so a pool of one cannot hang), and
+each transaction re-reads the push's link under the lane lock, so a comment a
+finished sync posted and linked is left. A sync that
 starts during a pass exits 3 ("another youtrack sync is running") and its
 next run goes on. Neither waits for the lock, so the lock order is
 unchanged.
@@ -518,10 +526,11 @@ and no recovery of held ops; both come with the automatic binder (follow-up).
 - A task created after the backfill has no binding until the backfill runs
   again; its comments go through the legacy push and the import meanwhile,
   and the binding never copies them (`comments_from`).
-- A sync process that dies after a POST and before its link releases the
-  sync lock with the comment unlinked: the next catch-up pass can copy it
-  again. The legacy push's own retry reads the issue's comments first; the
-  catch-up does not.
+- With the catch-up enabled, a sync that posts and ends without linking
+  (lost response, failed link insert, dead process) leaves the comment
+  unlinked, and the next catch-up pass can copy it again: the legacy push's
+  own retry reads the issue's comments first, the catch-up does not. Hence
+  the gate above, until hk 3907.
 - The enqueue reads its sources without locks, so a project change or mirror
   write that commits during a comment's transaction is caught by the next
   comment, not this one; the issue binding itself cannot change under the

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"errors"
 	"strconv"
 	"strings"
@@ -430,8 +431,43 @@ func TestYTCommentCatchUpAndLegacyPushOwnOneEach(t *testing.T) {
 	if err := s.LinkYouTrackComment(ctx, agree, late.ID, "4-late", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
-	if _, prepared, _, err := s.catchUpYTComment(ctx, late); err != nil || prepared {
+	if _, prepared, _, err := catchUpYTComment(ctx, s.pool, late); err != nil || prepared {
 		t.Fatalf("catch-up of a comment the legacy push linked: prepared %v, %v", prepared, err)
 	}
 	ytcuNoOp(t, s, "linked after the scan", late)
+}
+
+// A pass holds the sync lock's connection and runs each comment's
+// transaction on it, so it finishes in a pool of one connection (review
+// #309: it used to wait for a second connection forever).
+func TestYTCommentCatchUpInOneConnectionPool(t *testing.T) {
+	_, url := testdb.Schema(t, "ytcu_one")
+	setup, err := Open(t.Context(), url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ytbMapped(t, setup)
+	task := ytcTask(t, setup, ytbProject)
+	ytbBind(t, setup, ytbBinding(task))
+	c := ytcuRawComment(t, setup, task, "dots")
+	setup.Close()
+	sep := "?"
+	if strings.Contains(url, "?") {
+		sep = "&"
+	}
+	s, err := Open(t.Context(), url+sep+"pool_max_conns=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	s.SetYTCommentsMode(YTCommentsOn)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	got, err := s.CatchUpYTComments(ctx, 200, nil)
+	if err != nil || len(got.Prepared) != 1 {
+		t.Fatalf("pass in a pool of one: %+v %v", got, err)
+	}
+	if op, ok := ytcOpFor(t, s, c.ID); !ok || op.ID != got.Prepared[0].ID {
+		t.Fatalf("op %+v %v", op, ok)
+	}
 }

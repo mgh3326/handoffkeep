@@ -59,6 +59,23 @@ func ytCommentsModeFromEnv() (store.YTCommentsMode, error) {
 	}
 }
 
+// ytCommentsCatchUpFromEnv reads HANDOFFKEEP_YT_COMMENTS_CATCHUP: unset or
+// "off" (the default) runs no catch-up, "on" runs it before each Drive pass
+// in mode on. Any other value is an error, as for the mode. The catch-up
+// stays off until the legacy comment push (`youtrack sync`) refuses to post
+// while the mode is canary or on (hk 3907): the push can post a comment and
+// end without linking it, which the catch-up cannot see.
+func ytCommentsCatchUpFromEnv() (bool, error) {
+	switch raw := strings.TrimSpace(os.Getenv("HANDOFFKEEP_YT_COMMENTS_CATCHUP")); raw {
+	case "", "off":
+		return false, nil
+	case "on":
+		return true, nil
+	default:
+		return false, fmt.Errorf("HANDOFFKEEP_YT_COMMENTS_CATCHUP=%q: want off or on", raw)
+	}
+}
+
 // ytCommentsWorkerFromEnv sets the store's gate and returns the dispatcher
 // for serve's worker list, or nil when the mode is off (which needs no
 // YouTrack configuration). canary or on without YOUTRACK_URL and
@@ -66,6 +83,10 @@ func ytCommentsModeFromEnv() (store.YTCommentsMode, error) {
 // nothing.
 func ytCommentsWorkerFromEnv(st *store.Store) (backgroundWorker, error) {
 	mode, err := ytCommentsModeFromEnv()
+	if err != nil {
+		return nil, err
+	}
+	catchUp, err := ytCommentsCatchUpFromEnv()
 	if err != nil {
 		return nil, err
 	}
@@ -88,7 +109,7 @@ func ytCommentsWorkerFromEnv(st *store.Store) (backgroundWorker, error) {
 		return nil, err
 	}
 	remote := youtrack.NewWriteRemote(client)
-	w, err := newYTCommentsWorker(st, remote, remote.Tenant(), mode, nil)
+	w, err := newYTCommentsWorker(st, remote, remote.Tenant(), mode, catchUp, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -96,9 +117,10 @@ func ytCommentsWorkerFromEnv(st *store.Store) (backgroundWorker, error) {
 }
 
 // newYTCommentsWorker sets the gate to mode (canary or on) and builds the
-// dispatcher for one tenant over remote. now is the protocol clock (nil: the
-// wall clock).
-func newYTCommentsWorker(st *store.Store, remote ytwrite.Remote, tenant string, mode store.YTCommentsMode, now func() time.Time) (ytCommentsWorker, error) {
+// dispatcher for one tenant over remote; catchUp runs the catch-up before
+// each Drive pass (HANDOFFKEEP_YT_COMMENTS_CATCHUP). now is the protocol clock
+// (nil: the wall clock).
+func newYTCommentsWorker(st *store.Store, remote ytwrite.Remote, tenant string, mode store.YTCommentsMode, catchUp bool, now func() time.Time) (ytCommentsWorker, error) {
 	if mode != store.YTCommentsCanary && mode != store.YTCommentsOn {
 		return ytCommentsWorker{}, fmt.Errorf("the comment worker runs in mode canary or on, not %q", mode)
 	}
@@ -112,8 +134,12 @@ func newYTCommentsWorker(st *store.Store, remote ytwrite.Remote, tenant string, 
 		return ytCommentsWorker{}, err
 	}
 	st.SetYTCommentsMode(mode)
-	log.Printf("ytwrite.comments_enabled mode=%s tenant=%q", mode, tenant)
-	return ytCommentsWorker{protocol: p, catchUp: st}, nil
+	log.Printf("ytwrite.comments_enabled mode=%s tenant=%q catchup=%t", mode, tenant, catchUp)
+	w := ytCommentsWorker{protocol: p}
+	if catchUp {
+		w.catchUp = st
+	}
+	return w, nil
 }
 
 // ytCommentCatchUpper prepares the ops of comments the enqueue missed
@@ -128,7 +154,7 @@ type ytCommentCatchUpper interface {
 // tenant it was configured for (store.YTTenantLedger): it neither sends nor
 // searches for an op bound to another tenant.
 //
-// Before each Drive pass, catchUp (when set) prepares the ops of comments on
+// Before each Drive pass, catchUp (when set: HANDOFFKEEP_YT_COMMENTS_CATCHUP=on) prepares the ops of comments on
 // bound tasks that the enqueue missed; it does nothing outside mode on. A
 // comment it skipped as ambiguous is left out of later passes of this
 // process, so it is logged once and never crowds out the others; a restart

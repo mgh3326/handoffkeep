@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
 
@@ -116,8 +118,11 @@ func (s *Store) CatchUpYTComments(ctx context.Context, limit int, skip []int64) 
 			log.Printf("ytwrite.comment_catchup_unlock_failed err=%q", err.Error())
 		}
 	}()
+	// The comments' transactions run on the lock's own connection: the pass
+	// needs no second pool connection, so it cannot wait on itself in a
+	// pool of one.
 	for _, c := range comments {
-		op, prepared, source, err := s.catchUpYTComment(ctx, c)
+		op, prepared, source, err := catchUpYTComment(ctx, lock.conn, c)
 		if err != nil {
 			return out, err
 		}
@@ -133,12 +138,17 @@ func (s *Store) CatchUpYTComments(ctx context.Context, limit int, skip []int64) 
 	return out, nil
 }
 
-// catchUpYTComment prepares comment c's op in its own transaction. prepared
-// is false when another writer linked the comment first (an op link or a
-// legacy push link) or the task has no binding; source is the disagreeing
-// source when the binding is ambiguous.
-func (s *Store) catchUpYTComment(ctx context.Context, c TaskComment) (ytwrite.Op, bool, string, error) {
-	tx, err := s.pool.Begin(ctx)
+// ytTxBeginner is a pool or one of its connections.
+type ytTxBeginner interface {
+	Begin(ctx context.Context) (pgx.Tx, error)
+}
+
+// catchUpYTComment prepares comment c's op in its own transaction on db.
+// prepared is false when another writer linked the comment first (an op link
+// or a legacy push link) or the task has no binding; source is the
+// disagreeing source when the binding is ambiguous.
+func catchUpYTComment(ctx context.Context, db ytTxBeginner, c TaskComment) (ytwrite.Op, bool, string, error) {
+	tx, err := db.Begin(ctx)
 	if err != nil {
 		return ytwrite.Op{}, false, "", err
 	}
