@@ -287,6 +287,17 @@ func (s *Store) AddYTTaskBinding(ctx context.Context, b YTTaskBinding, verified 
 	if err != nil {
 		return YTTaskBinding{}, err
 	}
+	if !found {
+		// hk is creating (or adopting) the task's issue itself (hk 3898):
+		// that op publishes the binding when it is applied.
+		pending, err := ytIssueOpPendingTx(ctx, tx, b.TaskID)
+		if err != nil {
+			return YTTaskBinding{}, err
+		}
+		if pending {
+			return YTTaskBinding{}, fmt.Errorf("%w: task %d has an unresolved issue_create op", ErrYTBindingConflict, b.TaskID)
+		}
+	}
 	if found {
 		if have.Tenant != b.Tenant || have.IssueID != b.IssueID {
 			return YTTaskBinding{}, fmt.Errorf("%w: task %d is bound to issue %s on %s", ErrYTBindingConflict, b.TaskID, have.IssueID, have.Tenant)

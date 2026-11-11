@@ -1,6 +1,7 @@
 package store
 
 import (
+	"errors"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -63,6 +64,24 @@ func ytiDispatch(t *testing.T, s *Store, op ytwrite.Op) {
 	}
 }
 
+// ytiClaimEventually claims op on the tenant's worker ledger, retrying while
+// it is held: another test package's legacy sync run may hold the sync lock
+// on the shared test database for a moment.
+func ytiClaimEventually(t *testing.T, s *Store, op ytwrite.Op) ytwrite.ClaimOutcome {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		_, out, err := s.YTTenantLedger(ytcTenant).Claim(t.Context(), time.Now().UTC(), op.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out != ytwrite.ClaimHeld || time.Now().After(deadline) {
+			return out
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 func ytiMaps(op ytwrite.Op, issue string) []ytwrite.MapRow {
 	return []ytwrite.MapRow{{EntityKind: "task", HKKey: op.EntityID, YTID: issue, YTParentID: op.YTTargetID, OpID: op.ID}}
 }
@@ -105,10 +124,17 @@ func TestYTIssueApplyBindsTheTask(t *testing.T) {
 	ytbMapped(t, s)
 	s.SetYTIssuesMode(YTIssuesOn, ytcTenant)
 	x := ytiCreate(t, s, ytbProject)
+	ytcuRawComment(t, s, x.ID, "worker") // written before the issue exists
 	yt := ytwritetest.NewFake()
 	var offset atomic.Int64
-	if _, err := ytcProtocol(t, s, yt, &offset).Drive(t.Context(), 10); err != nil {
-		t.Fatal(err)
+	p := ytcProtocol(t, s, yt, &offset)
+	deadline := time.Now().Add(20 * time.Second)
+	for ytiOps(t, s, x.ID)[0].State == ytwrite.StatePrepared && time.Now().Before(deadline) {
+		// Held only while another package's sync run holds the sync lock.
+		if _, err := p.Drive(t.Context(), 10); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 	op := ytiOps(t, s, x.ID)[0]
 	issues := yt.Issues(ytbProjectID)
@@ -124,7 +150,7 @@ func TestYTIssueApplyBindsTheTask(t *testing.T) {
 		t.Fatalf("binding %v %v", found, err)
 	}
 	if b.Origin != YTBindingOpApplied || b.OpID != op.ID || b.Tenant != ytcTenant || b.IssueID != op.YTResultID || b.ProjectID != ytbProjectID ||
-		b.BoundBy != YTIssuePrincipal || !b.BoundAt.Equal(op.ResolvedAt) {
+		b.BoundBy != YTIssuePrincipal || !b.BoundAt.Equal(op.ResolvedAt) || b.CommentsFrom != 0 {
 		t.Fatalf("binding %+v for op %+v", b, op)
 	}
 	if n := ytcCount(t, s, `SELECT count(*) FROM yt_task_bindings`); n != 1 {
@@ -190,6 +216,9 @@ func TestYTIssueBindingNeverOverwritten(t *testing.T) {
 	}
 	if b, _, _ := s.YTTaskBinding(t.Context(), other); b.IssueID != ytbBinding(other).IssueID || b.Origin != YTBindingImportVerified {
 		t.Fatalf("binding overwritten: %+v", b)
+	}
+	if _, ok, _ := s.YTWriteLedger().MapGet(t.Context(), "task", op.EntityID); ok {
+		t.Fatal("a conflicting apply published the task's map row")
 	}
 	want := "ytwrite.binding_conflict task_id=" + strconv.FormatInt(other, 10) + " op_id=" + strconv.FormatInt(op.ID, 10) + ` issue_id="2-elsewhere"`
 	if !strings.Contains(logs(), want) {
@@ -260,10 +289,10 @@ func TestYTIssueGate(t *testing.T) {
 		VALUES ($1,$2,'2-own',$3,'test',now(),'op_applied',$4)`, ownTask, ytcTenant, ytbProjectID, own.ID); err != nil {
 		t.Fatal(err)
 	}
-	if out := claim(own); out != ytwrite.ClaimClaimed {
+	if out := ytiClaimEventually(t, s, own); out != ytwrite.ClaimClaimed {
 		t.Fatalf("own binding: %s", out)
 	}
-	if out := claim(free); out != ytwrite.ClaimClaimed {
+	if out := ytiClaimEventually(t, s, free); out != ytwrite.ClaimClaimed {
 		t.Fatalf("no binding: %s", out)
 	}
 	if due, err := s.YTTenantLedger(ytcTenant).Due(t.Context(), now, 100); err != nil || len(due) != 0 {
@@ -357,5 +386,156 @@ func TestYTTaskBindingOriginMigrationUpgrades(t *testing.T) {
 			t.Fatalf("open %d: id recorded %d times", i, n)
 		}
 		s.Close()
+	}
+}
+
+// A task map row anchored by an earlier comment op (the canary) is kept: the
+// apply of an issue_create op naming another issue records the conflict
+// instead of failing, and writes neither map row nor binding.
+func TestYTIssueApplyKeepsAnExistingMapRow(t *testing.T) {
+	s := schemaStore(t, "yti_anchor")
+	ytbMapped(t, s)
+	task := ytcTask(t, s, ytbProject)
+	ytbAnchor(t, s, task, "2-canary")
+	op := ytiPrepare(t, s, task, ytcTenant)
+	ytiDispatch(t, s, op)
+	got, err := s.YTWriteLedger().Apply(t.Context(), time.Now().UTC(), op.ID, "2-new", ytiMaps(op, "2-new"))
+	if err != nil || got.State != ytwrite.StateApplied || got.Reason != ytwrite.ReasonBindingConflict {
+		t.Fatalf("apply %+v %v", got, err)
+	}
+	if m, _, _ := s.YTWriteLedger().MapGet(t.Context(), "task", op.EntityID); m.YTID != "2-canary" {
+		t.Fatalf("map row %+v, want the canary's", m)
+	}
+	if _, found, _ := s.YTTaskBinding(t.Context(), task); found {
+		t.Fatal("bound a task whose map row names another issue")
+	}
+}
+
+// While a task's issue_create op is unresolved, neither a comments-backfill
+// binding nor a canary enrollment can give it an issue another way.
+func TestYTIssuePendingOpFencesOtherIssueWriters(t *testing.T) {
+	s := schemaStore(t, "yti_fence")
+	ytbMapped(t, s)
+	task := ytcTask(t, s, ytbProject)
+	op := ytiPrepare(t, s, task, ytcTenant)
+	if _, err := ytbAdd(t, s, ytbBinding(task)); !errors.Is(err, ErrYTBindingConflict) {
+		t.Fatalf("binding with a pending issue op: %v", err)
+	}
+	verified, err := s.YTCanaryCandidate(t.Context(), task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddYTCommentCanary(t.Context(), ytcBinding(task), verified); !errors.Is(err, ErrYTCanaryConflict) {
+		t.Fatalf("canary with a pending issue op: %v", err)
+	}
+	if _, err := s.YTWriteLedger().Reject(t.Context(), time.Now().UTC(), op.ID, "test", "closed"); err != nil {
+		t.Fatal(err)
+	}
+	ytbBind(t, s, ytbBinding(task)) // a rejected op no longer holds the task
+}
+
+// The backfill leaves a task the canary or a map row already ties to an issue.
+func TestYTIssueBackfillSkipsOwnedTasks(t *testing.T) {
+	s := schemaStore(t, "yti_owned")
+	ytbMapped(t, s)
+	canary, anchored, origin := ytcTask(t, s, ytbProject), ytcTask(t, s, ytbProject), ytcTask(t, s, ytbProject)
+	ytbCanaryRow(t, s, canary, ytcTenant, "2-c")
+	ytbAnchor(t, s, anchored, "2-a")
+	if _, err := s.UpsertYouTrackMirror(t.Context(), YouTrackMirrorInput{TaskID: origin, IssueID: "2-o", DisplayRef: "HK-9", Tenant: ytcTenant, Role: "mirror"}); err != nil {
+		t.Fatal(err)
+	}
+	r, err := s.BackfillYTIssueOps(t.Context(), ytcTenant, ytbProject, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Projects) != 1 || r.Projects[0].Owned != 3 || r.Projects[0].Prepared != 0 {
+		t.Fatalf("report %+v", r.Projects)
+	}
+	for _, task := range []int64{canary, anchored, origin} {
+		if ops := ytiOps(t, s, task); len(ops) != 0 {
+			t.Fatalf("task %d got ops %+v", task, ops)
+		}
+	}
+}
+
+// The legacy push never lists a task whose issue hk creates itself, and the
+// issue op is held while a legacy sync run holds its lock.
+func TestYTIssueFencesTheLegacySync(t *testing.T) {
+	s := schemaStore(t, "yti_sync")
+	ytbMapped(t, s)
+	plain, owned := ytcTask(t, s, ytbProject), ytcTask(t, s, ytbProject)
+	op := ytiPrepare(t, s, owned, ytcTenant)
+	due, err := s.DueYouTrackPushTasks(t.Context(), 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := map[int64]bool{}
+	for _, x := range due {
+		ids[x.ID] = true
+	}
+	if !ids[plain] || ids[owned] {
+		t.Fatalf("push lists %v; want %d and not %d", ids, plain, owned)
+	}
+
+	s.SetYTIssuesMode(YTIssuesOn, ytcTenant)
+	lock, held, err := s.TryYouTrackSyncLock(t.Context())
+	if err != nil || !held {
+		t.Fatalf("sync lock %v %v", held, err)
+	}
+	if _, out, err := s.YTTenantLedger(ytcTenant).Claim(t.Context(), time.Now().UTC(), op.ID); err != nil || out != ytwrite.ClaimHeld {
+		t.Fatalf("claim during a sync run: %s %v", out, err)
+	}
+	if err := lock.Release(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if out := ytiClaimEventually(t, s, op); out != ytwrite.ClaimClaimed {
+		t.Fatalf("claim after the run: %s", out)
+	}
+}
+
+// An adopted issue already holds the task's history: its binding starts after
+// the task's highest comment, as a verified binding does.
+func TestYTIssueAdoptedBindingSkipsHistory(t *testing.T) {
+	s := schemaStore(t, "yti_adopt")
+	ytbMapped(t, s)
+	task := ytcTask(t, s, ytbProject)
+	ytcuRawComment(t, s, task, "worker")
+	last := ytcuRawComment(t, s, task, "worker").ID
+	op := ytiPrepare(t, s, task, ytcTenant)
+	ytiDispatch(t, s, op)
+	maps := ytiMaps(op, "2-adopted")
+	maps[0].Adopted = true
+	if got, err := s.YTWriteLedger().Apply(t.Context(), time.Now().UTC(), op.ID, "2-adopted", maps); err != nil || got.Reason != "" {
+		t.Fatalf("apply %+v %v", got, err)
+	}
+	b, found, err := s.YTTaskBinding(t.Context(), task)
+	if err != nil || !found || b.CommentsFrom != last || b.Origin != YTBindingOpApplied {
+		t.Fatalf("binding %+v %v %v, want comments_from %d", b, found, err, last)
+	}
+}
+
+// A resolver that marks an issue_create op applied without its binding (the
+// previous release's, which knows no such kind) is refused by the database;
+// other kinds are untouched.
+func TestYTIssueApplyGuardRefusesABindinglessApply(t *testing.T) {
+	s := schemaStore(t, "yti_guard")
+	ytbMapped(t, s)
+	op := ytiPrepare(t, s, ytcTask(t, s, ytbProject), ytcTenant)
+	ytiDispatch(t, s, op)
+	oldApply := `UPDATE yt_write_ops SET state='applied', yt_result_id=$2, reason='', last_error='', resolved_at=now() WHERE id=$1`
+	if _, err := s.pool.Exec(t.Context(), oldApply, op.ID, "2-9"); err == nil || !strings.Contains(err.Error(), "applied without its binding") {
+		t.Fatalf("bindingless apply: %v", err)
+	}
+	if got, _ := s.YTWriteLedger().ByID(t.Context(), op.ID); got.State != ytwrite.StateDispatched {
+		t.Fatalf("op %+v", got)
+	}
+	comment, _, err := s.YTWriteLedger().Prepare(t.Context(), time.Now().UTC(), ytwrite.NewOp{Principal: "test", Kind: ytwrite.KindCommentAppend,
+		Key: "k", PayloadSHA: "x", Payload: []byte(`{"body":"x"}`), EntityKind: "task", EntityID: "424242", YTTargetID: "2-1", Actor: "a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ytiDispatch(t, s, comment)
+	if _, err := s.pool.Exec(t.Context(), oldApply, comment.ID, "c-1"); err != nil {
+		t.Fatalf("comment apply: %v", err)
 	}
 }

@@ -90,6 +90,9 @@ func TestIssueCreateNoneCreatesOne(t *testing.T) {
 		t.Fatalf("summary %q description %q", summary, description)
 	}
 	e.wantMap(got, got.YTResultID)
+	if m, _, _ := e.ledger.MapGet(context.Background(), "task", "3898"); m.Adopted {
+		t.Fatalf("map row %+v of a created issue marked adopted", m)
+	}
 }
 
 func TestIssueCreateAdoptsTheOneNamedIssue(t *testing.T) {
@@ -103,6 +106,9 @@ func TestIssueCreateAdoptsTheOneNamedIssue(t *testing.T) {
 		t.Fatalf("op %+v, creates %d, issues %+v", got, e.yt.Calls(), e.yt.Issues(issueProject))
 	}
 	e.wantMap(got, existing)
+	if m, _, _ := e.ledger.MapGet(context.Background(), "task", "3898"); !m.Adopted {
+		t.Fatalf("map row %+v not marked adopted", m)
+	}
 }
 
 func TestIssueCreateAmbiguousSendsNothing(t *testing.T) {
@@ -150,19 +156,43 @@ func TestIssueCreateLostReplyEvidenceApplies(t *testing.T) {
 	e.wantMap(got, issues[0].ID)
 }
 
-// The evidence finds the marker in the description even after someone edited
-// the rest of it: "contains the marker" is the rule, not the exact text.
-func TestIssueCreateEvidenceReadsTheMarker(t *testing.T) {
+// Evidence needs the exact rendered description: a 5xx create followed by
+// an unrelated issue that quotes the op's marker is not the op's issue, and
+// an edited description is not proof either; both stay remote_unknown. The
+// exact text, appearing late, applies.
+func TestIssueCreateEvidenceNeedsTheExactText(t *testing.T) {
 	e := newIssueEnv(t)
 	e.yt.Queue(ytwritetest.Fault{Kind: ytwritetest.Refuse, Status: http.StatusInternalServerError})
 	op := e.prepareIssue()
 	e.drive()
 	e.want(op.ID, ytwrite.StateRemoteUnknown, ytwrite.ReasonServerError)
-	id := e.yt.InjectIssue(issueProject, issueTask, "#3898 renamed", "edited by a person\n\n"+ytwrite.OpMarker(op.ID))
+	e.yt.InjectIssue(issueProject, issueTask, "#3898 unrelated", "copied from elsewhere\n\n"+ytwrite.OpMarker(op.ID))
 	e.clock.Advance(time.Hour)
 	e.drive()
-	if got := e.want(op.ID, ytwrite.StateApplied, ""); got.YTResultID != id {
+	e.want(op.ID, ytwrite.StateRemoteUnknown, ytwrite.ReasonMarkerMismatch)
+
+	f := newIssueEnv(t)
+	f.yt.Queue(ytwritetest.Fault{Kind: ytwritetest.Refuse, Status: http.StatusInternalServerError})
+	op = f.prepareIssue()
+	f.drive()
+	summary, description := f.rendered(op)
+	id := f.yt.InjectIssue(issueProject, issueTask, summary, description)
+	f.clock.Advance(time.Hour)
+	f.drive()
+	if got := f.want(op.ID, ytwrite.StateApplied, ""); got.YTResultID != id {
 		t.Fatalf("op %+v, want %s", got, id)
+	}
+}
+
+// A text hk project field (the importer's shape) is sent as text.
+func TestIssueCreateSendsTheProjectFieldShape(t *testing.T) {
+	e := newIssueEnv(t)
+	e.yt.SetProjectFieldText(issueProject)
+	op := e.prepareIssue()
+	e.drive()
+	e.want(op.ID, ytwrite.StateApplied, "")
+	if c := e.yt.Created(); len(c) != 1 || !c[0].HKProjectText || c[0].HKProject != "handoffkeep" || c[0].TaskID != issueTask {
+		t.Fatalf("creates %+v", c)
 	}
 }
 
@@ -170,21 +200,24 @@ func TestIssueCreateEvidenceOtherwiseUnknown(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		reason string
-		seed   func(yt *ytwritetest.FakeYouTrack, op ytwrite.Op)
+		seed   func(yt *ytwritetest.FakeYouTrack, op ytwrite.Op, desc string)
 	}{
-		{"zero_issues", ytwrite.ReasonNoEvidence, func(*ytwritetest.FakeYouTrack, ytwrite.Op) {}},
-		{"issue_without_marker", ytwrite.ReasonMarkerMismatch, func(yt *ytwritetest.FakeYouTrack, op ytwrite.Op) {
+		{"zero_issues", ytwrite.ReasonNoEvidence, func(*ytwritetest.FakeYouTrack, ytwrite.Op, string) {}},
+		{"issue_without_marker", ytwrite.ReasonMarkerMismatch, func(yt *ytwritetest.FakeYouTrack, op ytwrite.Op, desc string) {
 			yt.InjectIssue(issueProject, issueTask, "#3898 made by hand", "no marker")
 		}},
-		{"another_ops_marker", ytwrite.ReasonMarkerMismatch, func(yt *ytwritetest.FakeYouTrack, op ytwrite.Op) {
+		{"another_ops_marker", ytwrite.ReasonMarkerMismatch, func(yt *ytwritetest.FakeYouTrack, op ytwrite.Op, desc string) {
 			yt.InjectIssue(issueProject, issueTask, "#3898", ytwrite.OpMarker(op.ID*10))
 		}},
-		{"two_marker_hits", ytwrite.ReasonMultipleMatches, func(yt *ytwritetest.FakeYouTrack, op ytwrite.Op) {
-			yt.InjectIssue(issueProject, issueTask, "#3898 a", ytwrite.OpMarker(op.ID))
-			yt.InjectIssue(issueProject, issueTask, "#3898 b", ytwrite.OpMarker(op.ID))
+		{"quoted_marker", ytwrite.ReasonMarkerMismatch, func(yt *ytwritetest.FakeYouTrack, op ytwrite.Op, desc string) {
+			yt.InjectIssue(issueProject, issueTask, "#3898", "quote "+ytwrite.OpMarker(op.ID))
 		}},
-		{"marker_hit_and_another_issue", ytwrite.ReasonMarkerMismatch, func(yt *ytwritetest.FakeYouTrack, op ytwrite.Op) {
-			yt.InjectIssue(issueProject, issueTask, "#3898 a", ytwrite.OpMarker(op.ID))
+		{"two_exact_hits", ytwrite.ReasonMultipleMatches, func(yt *ytwritetest.FakeYouTrack, op ytwrite.Op, desc string) {
+			yt.InjectIssue(issueProject, issueTask, "#3898 a", desc)
+			yt.InjectIssue(issueProject, issueTask, "#3898 b", desc)
+		}},
+		{"exact_hit_and_another_issue", ytwrite.ReasonMarkerMismatch, func(yt *ytwritetest.FakeYouTrack, op ytwrite.Op, desc string) {
+			yt.InjectIssue(issueProject, issueTask, "#3898 a", desc)
 			yt.InjectIssue(issueProject, issueTask, "#3898 b", "")
 		}},
 	} {
@@ -193,7 +226,8 @@ func TestIssueCreateEvidenceOtherwiseUnknown(t *testing.T) {
 			e.yt.Queue(ytwritetest.Fault{Kind: ytwritetest.Refuse, Status: http.StatusBadGateway})
 			op := e.prepareIssue()
 			e.drive()
-			tc.seed(e.yt, op)
+			_, desc := e.rendered(op)
+			tc.seed(e.yt, op, desc)
 			for range 3 {
 				e.clock.Advance(time.Hour)
 				e.drive()
@@ -357,5 +391,26 @@ func TestSummaryNamesTask(t *testing.T) {
 		if got := ytwrite.SummaryNamesTask(summary, 37); got != want {
 			t.Errorf("SummaryNamesTask(%q, 37) = %v", summary, got)
 		}
+	}
+}
+
+// A project without the issue fields holds the op before anything is
+// searched or sent; once the schema is repaired the op goes out.
+func TestIssueCreateHeldUntilFieldsExist(t *testing.T) {
+	e := newIssueEnv(t)
+	e.yt.SetIssueFieldsMissing(issueProject, true)
+	op := e.prepareIssue()
+	for range 3 {
+		e.drive()
+		e.clock.Advance(time.Hour)
+	}
+	got := e.want(op.ID, ytwrite.StatePrepared, ytwrite.ReasonNotSent)
+	if e.yt.Finds() != 0 || e.yt.Calls() != 0 || !strings.Contains(got.LastError, "hk ID") {
+		t.Fatalf("op %+v, finds %d, creates %d", got, e.yt.Finds(), e.yt.Calls())
+	}
+	e.yt.SetIssueFieldsMissing(issueProject, false)
+	e.drive()
+	if e.want(op.ID, ytwrite.StateApplied, ""); e.yt.Calls() != 1 {
+		t.Fatalf("creates %d", e.yt.Calls())
 	}
 }

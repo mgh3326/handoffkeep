@@ -327,9 +327,15 @@ func (p *Protocol) send(ctx context.Context, op Op) Result {
 	var re *RemoteError
 	var refused *RefusedError
 	var notSent *NotSentError
+	var adopted *AdoptedError
 	switch {
 	case err == nil && resultIDRE.MatchString(id):
-		return p.record(op, p.apply(ctx, kind, op, id))
+		return p.record(op, p.apply(ctx, kind, op, id, false))
+	case errors.As(err, &adopted) && resultIDRE.MatchString(adopted.ID):
+		return p.record(op, p.apply(ctx, kind, op, adopted.ID, true))
+	case adopted != nil:
+		// Nothing was written; an id the ledger cannot hold is no adoption.
+		return p.record(op, p.reject(ctx, op, ReasonNoID, "adopted id is empty or malformed"))
 	case err == nil:
 		// 2xx without a usable id: the write may exist.
 		return p.record(op, p.markUnknown(ctx, op, ReasonNoID, "2xx reply without a valid id"))
@@ -410,8 +416,12 @@ func (p *Protocol) notSent(ctx context.Context, op Op, ns *NotSentError) settled
 	return p.deferOp(ctx, op, now.Add(p.reconcileDelay(max(op.Attempts-1, 0))), ReasonNotSent, ns.Error())
 }
 
-func (p *Protocol) apply(ctx context.Context, kind Kind, op Op, ytID string) settled {
-	got, err := p.Ledger.Apply(ctx, p.now(), op.ID, ytID, kind.MapRows(op, ytID))
+func (p *Protocol) apply(ctx context.Context, kind Kind, op Op, ytID string, adopted bool) settled {
+	maps := kind.MapRows(op, ytID)
+	for i := range maps {
+		maps[i].Adopted = adopted
+	}
+	got, err := p.Ledger.Apply(ctx, p.now(), op.ID, ytID, maps)
 	if errors.Is(err, ErrConflictingResult) {
 		log.Printf("ytwrite.apply_conflict_failed op_id=%d yt_id=%q", op.ID, ytID)
 	}
@@ -561,7 +571,7 @@ func (p *Protocol) reconcile(ctx context.Context, op Op) (applied bool, err erro
 	}
 	switch {
 	case len(ev.Matches) == 1 && ev.Deleted == 0 && ev.Mismatched == 0 && resultIDRE.MatchString(ev.Matches[0]):
-		s := p.apply(ctx, kind, op, ev.Matches[0])
+		s := p.apply(ctx, kind, op, ev.Matches[0], false)
 		if s.err == nil {
 			logTransition(s.op)
 		}

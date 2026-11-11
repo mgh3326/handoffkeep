@@ -271,7 +271,11 @@ func (r *WriteRemote) FindTaskIssues(ctx context.Context, projectShort, projectI
 func (r *WriteRemote) CreateIssue(ctx context.Context, in ytwrite.IssueCreate) (string, error) {
 	schema := DefaultSchema()
 	fields := []CustomField{IntField(schema.HKIDField, int(in.TaskID))}
-	if in.HKProject != "" {
+	switch {
+	case in.HKProject == "":
+	case in.HKProjectText:
+		fields = append(fields, StringField(schema.ProjectField, in.HKProject))
+	default:
 		fields = append(fields, EnumField(schema.ProjectField, in.HKProject))
 	}
 	body := issueBody{Summary: in.Summary, Description: in.Description, CustomFields: fields}
@@ -293,4 +297,82 @@ func (r *WriteRemote) CreateIssue(ctx context.Context, in ytwrite.IssueCreate) (
 		return "", nil
 	}
 	return out.ID, nil
+}
+
+// issueFieldsTop is the page of project fields CheckIssueFields asks for; a
+// full page cannot be proven complete.
+const issueFieldsTop = 200
+
+// CheckIssueFields reads the project's fields in one request and reports a
+// missing hk ID field, a missing hk 프로젝트 field, or (for an enum field, the
+// legacy push's shape) hkProject missing or archived among its values, so
+// issue_create holds its op instead of having the search or the create
+// refused for good. A text hk 프로젝트 field (the importer's shape) is
+// reported so the create sends text.
+func (r *WriteRemote) CheckIssueFields(ctx context.Context, projectID, hkProject string) (ytwrite.IssueFields, error) {
+	schema := DefaultSchema()
+	q := url.Values{}
+	q.Set("fields", "$type,field(name),bundle(id,values(name,archived))")
+	q.Set("$top", strconv.Itoa(issueFieldsTop))
+	path := "/api/admin/projects/" + url.PathEscape(projectID) + "/customFields"
+	var none ytwrite.IssueFields
+	data, readErr, err := r.send(ctx, http.MethodGet, path, q, nil)
+	if err != nil {
+		return none, err
+	}
+	if readErr != nil {
+		return none, readErr
+	}
+	var fields []struct {
+		Type  string `json:"$type"`
+		Field struct {
+			Name string `json:"name"`
+		} `json:"field"`
+		Bundle *struct {
+			Values []struct {
+				Name     string `json:"name"`
+				Archived bool   `json:"archived"`
+			} `json:"values"`
+		} `json:"bundle"`
+	}
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return none, fmt.Errorf("youtrack GET %s: decode: %w", path, err)
+	}
+	if len(fields) >= issueFieldsTop {
+		return none, fmt.Errorf("youtrack GET %s: %d or more fields; the listing is not complete", path, issueFieldsTop)
+	}
+	var out ytwrite.IssueFields
+	hasID, hasProject, hasValue := false, false, hkProject == ""
+	for _, f := range fields {
+		switch f.Field.Name {
+		case schema.HKIDField:
+			hasID = true
+		case schema.ProjectField:
+			hasProject = true
+			switch f.Type {
+			case "SimpleProjectCustomField", "TextProjectCustomField":
+				// The importer's text field takes any value.
+				out.ProjectText, hasValue = true, true
+			case "EnumProjectCustomField":
+			default:
+				return none, fmt.Errorf("youtrack project %s: %q is a %s, not a text or enum field", projectID, schema.ProjectField, f.Type)
+			}
+			if f.Bundle != nil {
+				for _, v := range f.Bundle.Values {
+					if v.Name == hkProject && !v.Archived {
+						hasValue = true
+					}
+				}
+			}
+		}
+	}
+	switch {
+	case !hasID:
+		return none, fmt.Errorf("youtrack project %s has no %q field", projectID, schema.HKIDField)
+	case !hasProject && hkProject != "":
+		return none, fmt.Errorf("youtrack project %s has no %q field", projectID, schema.ProjectField)
+	case !hasValue:
+		return none, fmt.Errorf("youtrack project %s: %q has no value %q", projectID, schema.ProjectField, hkProject)
+	}
+	return out, nil
 }

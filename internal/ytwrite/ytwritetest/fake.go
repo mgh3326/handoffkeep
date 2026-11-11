@@ -62,6 +62,11 @@ type FakeYouTrack struct {
 	projects   map[string][]*fakeIssue
 	findFaults []error
 	finds      int
+	// fieldsMissing names the projects whose issue fields are not set up;
+	// projectText those whose hk project field is text.
+	fieldsMissing map[string]bool
+	projectText   map[string]bool
+	created       []ytwrite.IssueCreate
 
 	// BeforeCreate runs at the start of every CreateComment, with the caller's
 	// context, before anything else. Tests use it to cancel a caller mid-call.
@@ -77,7 +82,7 @@ type fakeIssue struct {
 
 // NewFake returns an empty fake with no faults queued.
 func NewFake() *FakeYouTrack {
-	return &FakeYouTrack{issues: map[string][]*ytwrite.RemoteComment{}, projects: map[string][]*fakeIssue{}}
+	return &FakeYouTrack{issues: map[string][]*ytwrite.RemoteComment{}, projects: map[string][]*fakeIssue{}, fieldsMissing: map[string]bool{}, projectText: map[string]bool{}}
 }
 
 // Queue adds faults for the next CreateComment calls.
@@ -510,6 +515,7 @@ func (f *FakeYouTrack) CreateIssue(ctx context.Context, in ytwrite.IssueCreate) 
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
+	f.created = append(f.created, in)
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
@@ -545,4 +551,39 @@ func (f *FakeYouTrack) CreateIssue(ctx context.Context, in ytwrite.IssueCreate) 
 		panic("ytwritetest: DelayCommit is not supported for issues")
 	}
 	return commit(), nil
+}
+
+// SetIssueFieldsMissing makes CheckIssueFields refuse the project (missing
+// true) or accept it again.
+func (f *FakeYouTrack) SetIssueFieldsMissing(projectID string, missing bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.fieldsMissing[projectID] = missing
+}
+
+// SetProjectFieldText makes the project's hk project field a text field.
+func (f *FakeYouTrack) SetProjectFieldText(projectID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.projectText[projectID] = true
+}
+
+// Created returns every IssueCreate the fake received, in order.
+func (f *FakeYouTrack) Created() []ytwrite.IssueCreate {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]ytwrite.IssueCreate(nil), f.created...)
+}
+
+// CheckIssueFields refuses a project marked by SetIssueFieldsMissing.
+func (f *FakeYouTrack) CheckIssueFields(ctx context.Context, projectID, _ string) (ytwrite.IssueFields, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return ytwrite.IssueFields{}, err
+	}
+	if f.fieldsMissing[projectID] {
+		return ytwrite.IssueFields{}, fmt.Errorf("project %s has no hk ID field", projectID)
+	}
+	return ytwrite.IssueFields{ProjectText: f.projectText[projectID]}, nil
 }

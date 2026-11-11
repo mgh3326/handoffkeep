@@ -324,6 +324,22 @@ func (l *YTWriteLedger) Apply(ctx context.Context, now time.Time, id int64, ytID
 	default:
 		return ytwrite.Op{}, fmt.Errorf("%w: apply from %s", ytwrite.ErrState, op.State)
 	}
+	// An issue_create op checks every mapping hk keeps for the task and the
+	// issue before it writes any: on a conflict it publishes neither the map
+	// row nor the binding, keeps what is there, and records the conflict.
+	reason, detail := "", ""
+	adopted := false
+	for _, m := range maps {
+		adopted = adopted || m.Adopted
+	}
+	if op.Kind == ytwrite.KindIssueCreate {
+		if detail, err = ytIssueConflictTx(ctx, tx, op, ytID); err != nil {
+			return ytwrite.Op{}, err
+		}
+		if detail != "" {
+			reason, maps = ytwrite.ReasonBindingConflict, nil
+		}
+	}
 	for _, m := range maps {
 		tag, err := tx.Exec(ctx, `INSERT INTO yt_entity_map(entity_kind, hk_key, yt_id, yt_parent_id, op_id, created_at)
 			VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (entity_kind, hk_key) DO NOTHING`,
@@ -345,13 +361,9 @@ func (l *YTWriteLedger) Apply(ctx context.Context, now time.Time, id int64, ytID
 			}
 		}
 	}
-	reason, detail := "", ""
-	if op.Kind == ytwrite.KindIssueCreate {
-		if detail, err = bindYTIssueTx(ctx, tx, op, ytID, now); err != nil {
+	if op.Kind == ytwrite.KindIssueCreate && detail == "" {
+		if err := bindYTIssueTx(ctx, tx, op, ytID, now, adopted); err != nil {
 			return ytwrite.Op{}, err
-		}
-		if detail != "" {
-			reason = ytwrite.ReasonBindingConflict
 		}
 	}
 	op, err = scanYTOp(tx.QueryRow(ctx, `UPDATE yt_write_ops SET state='applied', yt_result_id=$2, reason=$4, last_error=$5, resolved_at=$3

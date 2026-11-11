@@ -58,16 +58,26 @@ func (s *Store) ytIssuesNow() (YTIssuesMode, string) {
 
 func init() { registerYTKindGate(ytwrite.KindIssueCreate, ytIssueGateSQL) }
 
-// ytIssueGateSQL is the issue_create gate (ytAdmitSQL): mode on, and o's task
-// has no binding or a binding this op published. A binding from the import
-// (or another op) holds the op: the task already has its issue. Mode off
-// admits nothing.
+// ytIssueGateSQL is the issue_create gate (ytAdmitSQL): mode on, o's task
+// has no binding or a binding this op published, and no legacy `youtrack
+// sync` run holds its single-run lock. A binding from the import (or another
+// op) holds the op: the task already has its issue. Mode off admits nothing.
+//
+// The sync lock fences the legacy push, the other writer that creates task
+// issues: the push lists only tasks with no issue_create op
+// (DueYouTrackPushTasks) and does so under that lock, so a run that listed a
+// task before its op was prepared holds the op until the run ends, and the
+// op's search then finds what the run created. The lock is session scoped
+// and visible in pg_locks; this worker never holds it during a claim.
 func ytIssueGateSQL(s *Store) string {
 	if mode, _ := s.ytIssuesNow(); mode != YTIssuesOn {
 		return `FALSE`
 	}
 	return `o.entity_kind = 'task' AND NOT EXISTS (SELECT 1 FROM yt_task_bindings b
-		WHERE b.task_id::text = o.entity_id AND b.op_id IS DISTINCT FROM o.id)`
+		WHERE b.task_id::text = o.entity_id AND b.op_id IS DISTINCT FROM o.id)
+		AND NOT EXISTS (SELECT 1 FROM pg_locks l WHERE l.locktype = 'advisory' AND l.granted
+			AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database())
+			AND ((l.classid::bigint << 32) | l.objid::bigint) = ` + strconv.FormatInt(youTrackSyncLockKey, 10) + ` AND l.objsubid = 1)`
 }
 
 // ytIssueProject is a task's hk project and the YouTrack project it maps to.
@@ -144,43 +154,81 @@ func (s *Store) enqueueYTIssueTx(ctx context.Context, tx pgx.Tx, t Task) error {
 	return nil
 }
 
-// bindYTIssueTx publishes the binding of an issue_create op being applied
-// with issue ytID, in Apply's transaction (which holds the task's lane
-// lock). It never overwrites: a binding of the task to the same issue on the
-// same tenant is kept as it is; a binding of the task to another issue, or of
-// the issue to another task, keeps the op applied, inserts nothing and
-// returns a non-empty conflict detail (logged as ytwrite.binding_conflict).
-// The readable id is not known here (the protocol carries only the stable
-// id), so it is left empty.
-func bindYTIssueTx(ctx context.Context, tx pgx.Tx, op ytwrite.Op, ytID string, now time.Time) (string, error) {
+// ytIssueConflictTx reads, in Apply's transaction (which holds the task's
+// lane lock), whether publishing issue ytID for op's task would contradict a
+// mapping hk already keeps: the task bound to another issue, the issue bound
+// to another task, the task's map row naming another issue, or a map row
+// giving the issue to another task. It returns the conflict ("" when none)
+// and logs it as ytwrite.binding_conflict. A binding or map row naming this
+// same issue is no conflict. Nothing is written.
+func ytIssueConflictTx(ctx context.Context, tx pgx.Tx, op ytwrite.Op, ytID string) (string, error) {
 	taskID, err := strconv.ParseInt(op.EntityID, 10, 64)
 	if err != nil || taskID < 1 || op.EntityKind != "task" {
 		return "", fmt.Errorf("issue_create op %d is not on a task lane (%s:%s)", op.ID, op.EntityKind, op.EntityID)
 	}
-	// comments_from 0: the comment catch-up copies every comment the task
-	// already has to the issue this op created or adopted.
-	tag, err := tx.Exec(ctx, `INSERT INTO yt_task_bindings(task_id, tenant, issue_id, issue_readable, project_id, bound_by, bound_at, origin, op_id, comments_from)
-		VALUES ($1,$2,$3,'',$4,$5,$6,'op_applied',$7,0) ON CONFLICT DO NOTHING`,
-		taskID, op.Tenant, ytID, op.YTTargetID, op.Principal, now.UTC(), op.ID)
+	var detail string
+	err = tx.QueryRow(ctx, `SELECT coalesce(
+		(SELECT 'task is bound to issue '||issue_id||' on '||tenant||' ('||origin||')' FROM yt_task_bindings
+			WHERE task_id=$1 AND (tenant<>$2 OR issue_id<>$3)),
+		(SELECT 'issue is bound to task '||task_id FROM yt_task_bindings
+			WHERE tenant=$2 AND issue_id=$3 AND task_id<>$1 LIMIT 1),
+		(SELECT 'task is mapped to issue '||yt_id FROM yt_entity_map
+			WHERE entity_kind='task' AND hk_key=$4 AND yt_id<>$3),
+		(SELECT 'issue is mapped to task '||hk_key FROM yt_entity_map
+			WHERE entity_kind='task' AND yt_id=$3 AND hk_key<>$4),
+		'')`, taskID, op.Tenant, ytID, op.EntityID).Scan(&detail)
 	if err != nil {
 		return "", err
 	}
-	if tag.RowsAffected() == 1 {
-		return "", nil
+	if detail != "" {
+		log.Printf("ytwrite.binding_conflict task_id=%d op_id=%d issue_id=%q detail=%q", taskID, op.ID, ytID, detail)
+	}
+	return detail, nil
+}
+
+// bindYTIssueTx publishes the binding of an issue_create op applied with
+// issue ytID, after ytIssueConflictTx found no conflict and the map row was
+// written. A binding of the task to this same issue is kept as it is. The
+// readable id is not known here (the protocol carries only the stable id),
+// so it is left empty.
+//
+// comments_from: for an issue this op created, 0, so the comment catch-up
+// copies every comment the task has. For an adopted issue (made before the
+// op, by the importer or the legacy push), the task's highest comment id now,
+// as a verified binding gets it: the issue already holds that history, and
+// copying it again would duplicate it.
+func bindYTIssueTx(ctx context.Context, tx pgx.Tx, op ytwrite.Op, ytID string, now time.Time, adopted bool) error {
+	taskID, _ := strconv.ParseInt(op.EntityID, 10, 64)
+	tag, err := tx.Exec(ctx, `INSERT INTO yt_task_bindings(task_id, tenant, issue_id, issue_readable, project_id, bound_by, bound_at, origin, op_id, comments_from)
+		VALUES ($1,$2,$3,'',$4,$5,$6,'op_applied',$7,
+			CASE WHEN $8 THEN (SELECT coalesce(max(id),0) FROM task_comments WHERE task_id=$1) ELSE 0 END)
+		ON CONFLICT DO NOTHING`,
+		taskID, op.Tenant, ytID, op.YTTargetID, op.Principal, now.UTC(), op.ID, adopted)
+	if err != nil || tag.RowsAffected() == 1 {
+		return err
 	}
 	have, found, err := readYTBinding(ctx, tx, taskID)
 	if err != nil {
-		return "", err
+		return err
 	}
 	if found && have.Tenant == op.Tenant && have.IssueID == ytID {
-		return "", nil
+		return nil
 	}
-	detail := fmt.Sprintf("issue %s on %s is bound to another task", ytID, op.Tenant)
-	if found {
-		detail = fmt.Sprintf("task %d is bound to issue %s on %s (%s)", taskID, have.IssueID, have.Tenant, have.Origin)
-	}
-	log.Printf("ytwrite.binding_conflict task_id=%d op_id=%d issue_id=%q detail=%q", taskID, op.ID, ytID, detail)
-	return detail, nil
+	// Another task's binding took the issue after the conflict check (its
+	// writer holds that task's lane, not this one): roll the apply back; the
+	// op is retried and the next check records the conflict.
+	return fmt.Errorf("%w: issue %s on %s was bound to another task during the apply of op %d", ytwrite.ErrConflictingResult, ytID, op.Tenant, op.ID)
+}
+
+// ytIssueOpPendingTx reports whether task has an issue_create op that is not
+// yet applied or rejected: the writers that give the task an issue another
+// way (AddYTTaskBinding, AddYTCommentCanary) refuse while it does, so the op
+// never races them to a second issue. The caller holds the task's lane lock.
+func ytIssueOpPendingTx(ctx context.Context, q ytRowQuerier, taskID int64) (bool, error) {
+	var pending bool
+	err := q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM yt_write_ops WHERE kind=$1 AND entity_kind='task' AND entity_id=$2
+		AND state NOT IN ('applied','rejected'))`, ytwrite.KindIssueCreate, strconv.FormatInt(taskID, 10)).Scan(&pending)
+	return pending, err
 }
 
 // YTIssueBackfillProject counts one hk project's tasks in a backfill.
@@ -194,6 +242,11 @@ type YTIssueBackfillProject struct {
 	Existing int `json:"existing"`
 	// Unmapped: the project maps to no YouTrack project.
 	Unmapped int `json:"unmapped"`
+	// Owned: the task already has an issue hk knows of (a canary enrollment,
+	// a task map row, or a YouTrack origin from the import or the legacy
+	// push); creating one would make a second. Such a task is bound by
+	// `youtrack comments-backfill`'s verification instead.
+	Owned int `json:"owned"`
 }
 
 // YTIssueBackfillReport is what `youtrack issues-backfill` did.
@@ -205,7 +258,8 @@ type YTIssueBackfillReport struct {
 }
 
 // BackfillYTIssueOps prepares the issue_create op of every task with no
-// binding (only project's tasks when it is not ""), bound to tenant. It calls
+// binding, no canary enrollment, no task map row and no YouTrack origin (only
+// project's tasks when it is not ""), bound to tenant. It calls
 // no YouTrack: adoption of an existing issue happens when the op is sent. A
 // task that already has its op is counted and left alone, so a second run
 // prepares nothing. Each task is its own transaction; a dry run writes
@@ -247,13 +301,18 @@ func (s *Store) BackfillYTIssueOps(ctx context.Context, tenant, project string, 
 			p.Existing++
 		case "unmapped":
 			p.Unmapped++
+		case "owned":
+			p.Owned++
 		}
 	}
 	return r, nil
 }
 
 // backfillYTIssue is one task of a backfill, in one transaction: "prepared",
-// "rejected", "existing" or "unmapped", and the task's project.
+// "rejected", "existing", "owned" or "unmapped", and the task's project. It
+// takes the task's lane lock first, the lock canary enrollment and the
+// comment path take before they give the task an issue, so an "owned" check
+// and the op it allows cannot interleave with them.
 func (s *Store) backfillYTIssue(ctx context.Context, tenant string, taskID int64, dryRun bool) (string, string, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -265,6 +324,9 @@ func (s *Store) backfillYTIssue(ctx context.Context, tenant string, taskID int64
 		return "", "", err
 	}
 	name := deref(t.Project)
+	if err := lockYTEntity(ctx, tx, "task", strconv.FormatInt(taskID, 10)); err != nil {
+		return "", "", err
+	}
 	var exists bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM yt_write_ops WHERE principal=$1 AND kind=$2 AND idem_key=$3)`,
 		YTIssuePrincipal, ytwrite.KindIssueCreate, ytwrite.IssueKey(taskID)).Scan(&exists); err != nil {
@@ -272,6 +334,15 @@ func (s *Store) backfillYTIssue(ctx context.Context, tenant string, taskID int64
 	}
 	if exists {
 		return "existing", name, nil
+	}
+	var owned bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM yt_comment_canary WHERE task_id=$1)
+		OR EXISTS(SELECT 1 FROM yt_entity_map WHERE entity_kind='task' AND hk_key=$2)
+		OR EXISTS(SELECT 1 FROM task_origins WHERE task_id=$1 AND provider='youtrack')`, taskID, strconv.FormatInt(taskID, 10)).Scan(&owned); err != nil {
+		return "", "", err
+	}
+	if owned {
+		return "owned", name, nil
 	}
 	p, found, err := readYTIssueProject(ctx, tx, name)
 	if err != nil {

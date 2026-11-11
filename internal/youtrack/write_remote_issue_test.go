@@ -118,3 +118,67 @@ func TestWriteRemoteCreateIssue(t *testing.T) {
 		t.Fatalf("refused: %v, requests %d", err, refused.count())
 	}
 }
+
+func TestWriteRemoteCheckIssueFields(t *testing.T) {
+	field := func(name string, values ...map[string]any) map[string]any {
+		f := map[string]any{"$type": "SimpleProjectCustomField", "field": map[string]any{"name": name}}
+		if values != nil {
+			f["$type"] = "EnumProjectCustomField"
+			f["bundle"] = map[string]any{"id": "b-1", "values": values}
+		}
+		return f
+	}
+	text := func(name string) map[string]any {
+		return map[string]any{"$type": "SimpleProjectCustomField", "field": map[string]any{"name": name}}
+	}
+	value := func(name string, archived bool) map[string]any {
+		return map[string]any{"name": name, "archived": archived}
+	}
+	for _, tc := range []struct {
+		name     string
+		fields   []any
+		project  string
+		want     string
+		wantText bool
+	}{
+		{"text_project_field", []any{field("hk ID"), text("hk 프로젝트")}, "handoffkeep", "", true},
+		{"other_type", []any{field("hk ID"), map[string]any{"$type": "UserProjectCustomField", "field": map[string]any{"name": "hk 프로젝트"}}}, "handoffkeep", "not a text or enum field", false},
+		{"ok", []any{field("hk ID"), field("hk 프로젝트", value("handoffkeep", false))}, "handoffkeep", "", false},
+		{"no_project_value_needed", []any{field("hk ID")}, "", "", false},
+		{"no_hk_id", []any{field("hk 프로젝트", value("handoffkeep", false))}, "handoffkeep", `"hk ID"`, false},
+		{"no_project_field", []any{field("hk ID")}, "handoffkeep", `"hk 프로젝트" field`, false},
+		{"no_value", []any{field("hk ID"), field("hk 프로젝트", value("other", false))}, "handoffkeep", `no value "handoffkeep"`, false},
+		{"archived_value", []any{field("hk ID"), field("hk 프로젝트", value("handoffkeep", true))}, "handoffkeep", `no value "handoffkeep"`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var path string
+			y := &recordedYouTrack{answer: func(w http.ResponseWriter, r *http.Request) {
+				path = r.URL.Path
+				_ = json.NewEncoder(w).Encode(tc.fields)
+			}}
+			got, err := y.serve(t).CheckIssueFields(t.Context(), "0-7", tc.project)
+			if (tc.want == "") != (err == nil) || (err != nil && !strings.Contains(err.Error(), tc.want)) || got.ProjectText != tc.wantText {
+				t.Fatalf("got %+v err %v, want %q text %v", got, err, tc.want, tc.wantText)
+			}
+			if path != "/api/admin/projects/0-7/customFields" || y.count() != 1 {
+				t.Fatalf("path %q, requests %d", path, y.count())
+			}
+		})
+	}
+	refused := &recordedYouTrack{answer: func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusForbidden) }}
+	var re *ytwrite.RemoteError
+	if _, err := refused.serve(t).CheckIssueFields(t.Context(), "0-7", ""); !errors.As(err, &re) || re.Status != http.StatusForbidden {
+		t.Fatalf("refused: %v", err)
+	}
+}
+
+// A text hk 프로젝트 field (the importer's shape) gets the project as text.
+func TestWriteRemoteCreateIssueTextProject(t *testing.T) {
+	y := &recordedYouTrack{answer: func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(`{"id":"2-1"}`)) }}
+	if _, err := y.serve(t).CreateIssue(t.Context(), ytwrite.IssueCreate{ProjectID: "0-7", Summary: "s", TaskID: 1, HKProject: "handoffkeep", HKProjectText: true}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(y.bodies[0], `{"$type":"SimpleIssueCustomField","name":"hk 프로젝트","value":"handoffkeep"}`) {
+		t.Fatalf("body %s", y.bodies[0])
+	}
+}

@@ -630,6 +630,9 @@ with ` · `, a title quoting the marker) gets the op rejected `invalid_issue`.
 `handoffkeep youtrack issues-backfill [--project P] [--dry-run]` prepares the
 op for every task with no binding, bound to the host of `YOUTRACK_URL`; it
 calls no YouTrack, skips a task that already has its op, and so is idempotent.
+It also skips (counts as `owned`) a task hk already ties to an issue: a canary
+enrollment, a task map row, or a YouTrack `task_origins` row (the import or
+the legacy push); `youtrack comments-backfill` binds those after verifying.
 
 **Text.** Summary `#<id> <title>` on one line, cut to 250 runes. Description:
 
@@ -643,33 +646,50 @@ hk task: #<task id> · project: <hk project>
 
 `ytwrite.ParseIssue` reads it back (`ParseIssue(RenderIssue(x)) == x`).
 
-**Send.** First the project's issues with `hk ID` = task id (one GET,
-checked against the project id and the field). Exactly one, whose summary
-names the task (`SummaryNamesTask`), is adopted: no POST, the op applies with
-its id. Any other hit (two or more, or one that does not name the task) is
+**Send.** First the project's fields (one admin GET): without `hk ID`, or
+without `hk 프로젝트` (for an enum field, without the task's project among its
+live values), the op is held `not_sent` until the schema is repaired, never
+rejected. A text `hk 프로젝트` field (the importer's shape) is sent as text, an
+enum field (the legacy push's) as an enum value. Then the project's issues
+with `hk ID` = task id (one GET, checked against the project id and the
+field). Exactly one, whose summary names the task (`SummaryNamesTask`), is
+adopted (`AdoptedError`): no POST, the op applies with its id and its map rows
+are marked `Adopted`. Any other hit (two or more, or one that does not name the task) is
 `rejected / ambiguous_issue`, no POST. None: exactly one POST with the
 project, summary, description and only the `hk ID` and `hk 프로젝트` fields
 (state, lane, kind, grade and tags are the later snapshot op's). The reply
 classification is the shared one; a failed search is `not_sent` (above).
 
 **Evidence.** The same search. Exactly one issue with the task's `hk ID`,
-whose description contains the op's marker, applies the op. Zero, two marker
-hits, or a marker hit beside another issue with that `hk ID` keep it
-`remote_unknown`; there is never an automatic re-create.
+whose description is exactly the rendered text, applies the op; a quoted or
+copied marker is not ownership. Zero, two exact hits, an edited description,
+or a hit beside another issue with that `hk ID` keep it `remote_unknown`;
+there is never an automatic re-create.
 
 **Binding.** Applying the op (send, evidence or `yt ops resolve`) takes the
-task's lane lock, writes the task's `yt_entity_map` row (parent: the project)
-and inserts `yt_task_bindings` with `origin = 'op_applied'` and `op_id`, in
-one transaction (migration `20261111-yt-task-binding-origin` adds `origin`,
-default `import_verified`, and `op_id`). `issue_readable` is left empty: the
-protocol carries only the stable id. A binding is never overwritten: the same
-issue is a no-op; a task bound to another issue, or the issue bound to another
-task, keeps the op applied with reason `binding_conflict`, inserts nothing
-and logs `ytwrite.binding_conflict task_id= op_id= issue_id=`. `yt ops --state
+task's lane lock, first checks every mapping hk keeps (the task's binding and
+map row, and the issue's), then writes the task's `yt_entity_map` row
+(parent: the project) and inserts `yt_task_bindings` with `origin =
+'op_applied'` and `op_id`, in one transaction (migration `20261111-yt-task-binding-origin` adds `origin`,
+default `import_verified`, and `op_id`, and a trigger that refuses to apply
+an `issue_create` op without its binding, so a resolver that does not know the
+kind cannot close one). `issue_readable` is left empty: the protocol carries
+only the stable id. `comments_from` is 0 for an issue the op created (the
+catch-up copies the task's comments) and the task's highest comment id for an
+adopted one (it already holds that history). Nothing is overwritten: the same
+issue is a no-op; a task bound or mapped to another issue, or the issue bound
+or mapped to another task, keeps the op applied with reason
+`binding_conflict`, writes neither map row nor binding and logs
+`ytwrite.binding_conflict task_id= op_id= issue_id=`. `yt ops --state
 rejected` lists such ops and the alert worker raises them as rejected.
 
-**Admission.** Mode on, the op's tenant is the worker's, and the task has no
-binding or one with `op_id` = this op. A binding from the import holds the op.
+**Admission.** Mode on, the op's tenant is the worker's, the task has no
+binding or one with `op_id` = this op, and no legacy `youtrack sync` run holds
+its single-run lock (read in `pg_locks`). A binding from the import holds the
+op. The legacy push lists no task that has an `issue_create` op, under that
+same lock, so the two writers never create one task's issue concurrently.
+While the op is unresolved, `comments-backfill` binding and canary enrollment
+of the task are refused.
 A rejected create stays rejected; a retry is a later operator command.
 
 ## Tests

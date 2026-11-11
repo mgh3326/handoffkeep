@@ -215,6 +215,10 @@ type MapRow struct {
 	YTID       string
 	YTParentID string
 	OpID       int64
+	// Adopted: the YouTrack thing existed before the op, which adopted it
+	// (AdoptedError) instead of creating it. Not stored in the map; the
+	// ledger may use it for what it publishes with the op.
+	Adopted bool
 }
 
 // ClaimOutcome says why Claim did or did not start a dispatch.
@@ -330,12 +334,27 @@ type IssueCreate struct {
 	Description string
 	TaskID      int64
 	HKProject   string
+	// HKProjectText sends the hk project as text instead of an enum value.
+	HKProjectText bool
+}
+
+// IssueFields is how the project's fields take an issue_create write.
+type IssueFields struct {
+	// ProjectText: the hk project field is a text field (the importer's
+	// shape), not an enum (the legacy push's).
+	ProjectText bool
 }
 
 // IssueRemote is the YouTrack surface of the issue_create kind. A Remote
 // that does not implement it cannot send that kind (the op is rejected
 // unsupported_kind before anything is sent).
 type IssueRemote interface {
+	// CheckIssueFields reports whether the project can take an issue_create
+	// write: it has the hk ID field and the hk project field with hkProject
+	// among its values (when hkProject is not ""). A missing field or value
+	// is a plain error (the op is held, not rejected, until the schema is
+	// repaired); a failed read follows CreateComment's errors.
+	CheckIssueFields(ctx context.Context, projectID, hkProject string) (IssueFields, error)
 	// FindTaskIssues returns every issue of the project (short name and id)
 	// whose hk ID is taskID, checked against both, or an error. A result it
 	// cannot prove complete is an error. A 429 is a *RemoteError with the

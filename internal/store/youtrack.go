@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mgh3326/handoffkeep/internal/guard"
 	"github.com/mgh3326/handoffkeep/internal/wrkrecords"
+	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
 
 // YouTrack is the operator's screen; hk is the record agents use. PG columns
@@ -539,7 +540,11 @@ func (s *Store) DueYouTrackPushTasks(ctx context.Context, limit int) ([]Task, er
 		FROM (SELECT `+taskColumns+` FROM tasks) tasks
 		LEFT JOIN task_origins o ON o.task_id=tasks.id AND o.provider='youtrack'
 		LEFT JOIN youtrack_attempts a ON a.queue='task' AND a.item_key=tasks.id::text
-		WHERE ((o.task_id IS NULL AND tasks.state NOT IN (`+settledStatesSQL+`))
+		-- A task hk creates its issue for itself (an issue_create op, hk
+		-- 3898) is never created here: that op owns the create.
+		WHERE (o.task_id IS NOT NULL OR NOT EXISTS (SELECT 1 FROM yt_write_ops w
+		       WHERE w.kind='`+ytwrite.KindIssueCreate+`' AND w.entity_kind='task' AND w.entity_id=tasks.id::text))
+		  AND ((o.task_id IS NULL AND tasks.state NOT IN (`+settledStatesSQL+`))
 		   OR (o.task_id IS NOT NULL AND (o.synced_at IS NULL OR tasks.updated_at > o.synced_at))
 		   -- The PR section of the issue follows the PR's gate and checks, which
 		   -- move without a task write, so a started task is pushed every pass.
@@ -649,6 +654,10 @@ func (s *Store) MarkYouTrackRevertDone(ctx context.Context, activityID string) e
 	return err
 }
 
+// youTrackSyncLockKey is the session advisory lock of the single-run guard.
+// The issue_create gate reads it in pg_locks (ytIssueGateSQL).
+const youTrackSyncLockKey int64 = 8241873404
+
 // YouTrackSyncLock is the single-run guard. pg_try_advisory_lock is session
 // scoped, so the caller must hold its connection until Release.
 type YouTrackSyncLock struct {
@@ -661,7 +670,7 @@ func (s *Store) TryYouTrackSyncLock(ctx context.Context) (*YouTrackSyncLock, boo
 		return nil, false, err
 	}
 	var held bool
-	if err := conn.QueryRow(ctx, `SELECT pg_try_advisory_lock(8241873404)`).Scan(&held); err != nil {
+	if err := conn.QueryRow(ctx, `SELECT pg_try_advisory_lock($1)`, youTrackSyncLockKey).Scan(&held); err != nil {
 		conn.Release()
 		return nil, false, err
 	}
@@ -676,7 +685,7 @@ func (l *YouTrackSyncLock) Release(ctx context.Context) error {
 	if l == nil || l.conn == nil {
 		return nil
 	}
-	_, err := l.conn.Exec(ctx, `SELECT pg_advisory_unlock(8241873404)`)
+	_, err := l.conn.Exec(ctx, `SELECT pg_advisory_unlock($1)`, youTrackSyncLockKey)
 	l.conn.Release()
 	l.conn = nil
 	return err

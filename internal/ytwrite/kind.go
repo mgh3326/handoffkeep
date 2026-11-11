@@ -41,6 +41,17 @@ type RefusedError struct {
 
 func (e *RefusedError) Error() string { return e.Reason + ": " + e.Detail }
 
+// AdoptedError is not a failure: Send found the effect already present (an
+// issue made before this op) and adopts it without writing. The protocol
+// applies the op with ID and marks its map rows Adopted, so the store can
+// tell an adopted thing, which may already hold history, from a created
+// one.
+type AdoptedError struct {
+	ID string
+}
+
+func (e *AdoptedError) Error() string { return "adopted " + e.ID }
+
 // NotSentError is a read in Send that failed before the write request left:
 // nothing was written, so the op goes back to prepared (a 4xx read is
 // rejected). Err is the read's error (a *RemoteError or a transport failure).

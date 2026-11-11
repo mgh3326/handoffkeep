@@ -364,6 +364,13 @@ func (s *Store) AddYTCommentCanary(ctx context.Context, c YTCommentCanary, verif
 	if bound {
 		return YTCommentCanary{}, fmt.Errorf("%w: yt_task_bindings binds task %d or issue %s elsewhere", ErrYTCanaryConflict, c.TaskID, c.IssueID)
 	}
+	pending, err := ytIssueOpPendingTx(ctx, tx, c.TaskID)
+	if err != nil {
+		return YTCommentCanary{}, err
+	}
+	if pending {
+		return YTCommentCanary{}, fmt.Errorf("%w: task %d has an unresolved issue_create op (hk 3898)", ErrYTCanaryConflict, c.TaskID)
+	}
 	var got YTCommentCanary
 	err = scanYTCanary(tx.QueryRow(ctx, `INSERT INTO yt_comment_canary(`+ytCanaryColumns+`) VALUES ($1,$2,$3,$4,$5,$6,$7)
 		ON CONFLICT DO NOTHING RETURNING `+ytCanaryColumns,

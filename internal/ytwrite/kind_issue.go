@@ -216,7 +216,8 @@ func (issueCreate) Render(op Op) (string, error) {
 	return description, nil
 }
 
-// Send looks for the task's issue first and writes only when there is none:
+// Send checks the project's fields, then looks for the task's issue and
+// writes only when there is none:
 // exactly one issue with the task's hk ID whose summary names the task is
 // adopted (no POST); any other hit is ambiguous_issue (no POST); no hit is
 // exactly one create with the summary, the description and only the hk ID
@@ -230,13 +231,20 @@ func (issueCreate) Send(ctx context.Context, remote Remote, op Op, text string) 
 	if err != nil {
 		return "", &RefusedError{Reason: ReasonInvalidIssue, Detail: err.Error()}
 	}
+	// A project without the fields the search and the create use would
+	// refuse with a 4xx and reject the op for good: hold it instead until
+	// the schema is repaired.
+	fields, err := ir.CheckIssueFields(ctx, op.YTTargetID, p.Project)
+	if err != nil {
+		return "", &NotSentError{Err: err}
+	}
 	hits, err := ir.FindTaskIssues(ctx, p.YTProjectShort, op.YTTargetID, x.TaskID)
 	if err != nil {
 		return "", &NotSentError{Err: err}
 	}
 	switch {
 	case len(hits) == 1 && SummaryNamesTask(hits[0].Summary, x.TaskID):
-		return hits[0].ID, nil
+		return "", &AdoptedError{ID: hits[0].ID}
 	case len(hits) > 0:
 		ids := make([]string, 0, len(hits))
 		for _, h := range hits {
@@ -245,13 +253,15 @@ func (issueCreate) Send(ctx context.Context, remote Remote, op Op, text string) 
 		return "", &RefusedError{Reason: ReasonAmbiguousIssue, Detail: fmt.Sprintf("project %s has %d issues with hk ID %d and none can be adopted: %s", op.YTTargetID, len(hits), x.TaskID, strings.Join(ids, ","))}
 	}
 	summary, _ := RenderIssue(x)
-	return ir.CreateIssue(ctx, IssueCreate{ProjectID: op.YTTargetID, Summary: summary, Description: text, TaskID: x.TaskID, HKProject: p.Project})
+	return ir.CreateIssue(ctx, IssueCreate{ProjectID: op.YTTargetID, Summary: summary, Description: text, TaskID: x.TaskID, HKProject: p.Project, HKProjectText: fields.ProjectText})
 }
 
 // Evidence lists the project's issues with the task's hk ID. Exactly one,
-// whose description carries the op's marker, is the match; every other issue
-// with that hk ID counts as a mismatch, so the shared rule keeps the op
-// remote_unknown unless that one issue is all there is.
+// whose description is exactly the rendered text (provenance, task, title and
+// marker), is the match; a quoted or copied marker in other text is not
+// ownership. Every other issue with that hk ID counts as a mismatch, so the
+// shared rule keeps the op remote_unknown unless that one issue is all there
+// is.
 func (issueCreate) Evidence(ctx context.Context, remote Remote, op Op, text string) (Evidence, error) {
 	var ev Evidence
 	ir, ok := remote.(IssueRemote)
@@ -270,9 +280,8 @@ func (issueCreate) Evidence(ctx context.Context, remote Remote, op Op, text stri
 		}
 		return ev, err
 	}
-	marker := OpMarker(op.ID)
 	for _, h := range hits {
-		if strings.Contains(h.Description, marker) {
+		if h.Description == text {
 			ev.Matches = append(ev.Matches, h.ID)
 		} else {
 			ev.Mismatched++
