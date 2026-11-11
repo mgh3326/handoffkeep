@@ -279,6 +279,12 @@ package store
 //     pg_try_advisory_lock(8241873404) on its own pooled connection. It is
 //     taken before the run and released after it, and no other writer takes
 //     that value, so it introduces no wait cycle.
+//
+//   - The bench grade mirror has its own table order: bench_grades before
+//     bench_catalog. UpsertBenchGrades and UpsertBenchCatalog acquire both
+//     ROW EXCLUSIVE locks in that order; the grade-scale migration takes
+//     ACCESS EXCLUSIVE in the same order with a 5s lock_timeout. No other
+//     transaction combines these tables with task or job locks.
 
 // Serve's hub-forward and Linear-board workers hold session locks 8241873510
 // and 8241873511 respectively on separate pooled connections. They take the

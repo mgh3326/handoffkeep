@@ -1476,6 +1476,16 @@ func benchGradeOrderSQL() string {
 	return b.String()
 }
 
+// lockBenchGradeTables serializes the grade mirror writers against schema
+// changes and acquires both table locks in their shared order.
+func lockBenchGradeTables(ctx context.Context, tx pgx.Tx) error {
+	if _, err := tx.Exec(ctx, `LOCK TABLE bench_grades IN ROW EXCLUSIVE MODE`); err != nil {
+		return err
+	}
+	_, err := tx.Exec(ctx, `LOCK TABLE bench_catalog IN ROW EXCLUSIVE MODE`)
+	return err
+}
+
 func validBenchRequiredText(x string) bool {
 	return x != "" && len(x) <= 200 && validText(x, 200)
 }
@@ -1927,6 +1937,9 @@ func (s *Store) UpsertBenchGrades(ctx context.Context, xs []BenchGrade) (int, er
 		return 0, err
 	}
 	defer tx.Rollback(ctx)
+	if err := lockBenchGradeTables(ctx, tx); err != nil {
+		return 0, err
+	}
 	now := time.Now().UTC()
 	for _, x := range xs {
 		if strings.TrimSpace(x.DeviationRef) == "" {
@@ -2005,6 +2018,9 @@ func (s *Store) UpsertBenchCatalog(ctx context.Context, xs []BenchCatalogEntry) 
 		return 0, err
 	}
 	defer tx.Rollback(ctx)
+	if err := lockBenchGradeTables(ctx, tx); err != nil {
+		return 0, err
+	}
 	now := time.Now().UTC()
 	profiles := map[string]bool{}
 	for _, x := range xs {
