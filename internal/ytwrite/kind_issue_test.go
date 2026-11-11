@@ -323,6 +323,11 @@ func TestIssueCreateResolveWritesTaskMapRow(t *testing.T) {
 		t.Fatalf("resolve %+v %v", res, err)
 	}
 	e.wantMap(e.want(op.ID, ytwrite.StateApplied, ""), "2-77")
+	// The ledger did not record where the issue came from: the operator's
+	// resolution is treated as an adoption (its history is not copied again).
+	if m, _, _ := e.ledger.MapGet(context.Background(), "task", "3898"); !m.Adopted {
+		t.Fatalf("resolved map row %+v not marked adopted", m)
+	}
 }
 
 func TestIssueOpIdentity(t *testing.T) {

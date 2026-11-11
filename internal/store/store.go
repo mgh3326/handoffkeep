@@ -583,6 +583,10 @@ type Store struct {
 	// ytIssues is the YouTrack issue gate and tenant (SetYTIssuesMode); nil
 	// is off. On prepares an issue_create op in each new task's transaction.
 	ytIssues atomic.Pointer[ytIssuesGate]
+	// ytIssueFence is true while this process holds the YouTrack write
+	// fence for a worker pass (HoldYTIssueFence); the issue_create gate
+	// admits nothing without it.
+	ytIssueFence atomic.Bool
 	// ytBindingChecked, when set (tests only), runs inside AddYTTaskBinding
 	// after every check has passed and before the binding row is inserted,
 	// with every lock of the publication held.

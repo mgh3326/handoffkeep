@@ -255,6 +255,9 @@ func (s *Store) IntakeTask(ctx context.Context, in IntakeInput) (Task, bool, err
 	if err != nil {
 		return Task{}, false, err
 	}
+	if err := s.enqueueYTIssueTx(ctx, tx, x); err != nil {
+		return Task{}, false, err
+	}
 	return x, true, tx.Commit(ctx)
 }
 
@@ -550,12 +553,18 @@ func (s *Store) EmitTicketSet(ctx context.Context, in TicketSetInput) (TicketSet
 	if err != nil {
 		return TicketSet{}, false, err
 	}
+	if err := s.enqueueYTIssueTx(ctx, tx, parent); err != nil {
+		return TicketSet{}, false, err
+	}
 	out.ParentID, out.CreatedAt = parent.ID, now
 	ids := map[string]int64{}
 	for _, c := range in.Children {
 		child, err := insertTriageTaskTx(ctx, tx, c.item(), in.Source, childSourceRef(in.SourceRef, c.Ref), in.Lane, &parent.ID, in.CreatedBy, now)
 		if err != nil {
 			return TicketSet{}, false, fmt.Errorf("child %s: %w", c.Ref, err)
+		}
+		if err := s.enqueueYTIssueTx(ctx, tx, child); err != nil {
+			return TicketSet{}, false, err
 		}
 		ids[c.Ref] = child.ID
 		out.Children = append(out.Children, TicketSetChild{Ref: c.Ref, ID: child.ID})

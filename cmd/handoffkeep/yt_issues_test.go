@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
@@ -61,4 +63,38 @@ func TestYouTrackIssuesBackfillArgs(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "HANDOFFKEEP_DB_URL") {
 		t.Fatalf("no database: %v", err)
 	}
+}
+
+// fakeFence records what one pass does with the issue fence.
+type fakeFence struct {
+	held               bool
+	holds, sweeps, rel int
+}
+
+func (f *fakeFence) HoldYTIssueFence(context.Context) (func(), bool, error) {
+	f.holds++
+	if !f.held {
+		return func() {}, false, nil
+	}
+	return func() { f.rel++ }, true, nil
+}
+
+func (f *fakeFence) RejectOwnedYTIssueOps(context.Context, time.Time) (int, error) {
+	f.sweeps++
+	return 0, nil
+}
+
+// A pass sweeps owned issue ops and releases the fence only when it took it.
+func TestYTWriteWorkerHoldsTheIssueFence(t *testing.T) {
+	held := &fakeFence{held: true}
+	ytCommentsWorker{issues: held}.holdIssueFence(t.Context())()
+	if held.holds != 1 || held.sweeps != 1 || held.rel != 1 {
+		t.Fatalf("held: %+v", held)
+	}
+	busy := &fakeFence{}
+	ytCommentsWorker{issues: busy}.holdIssueFence(t.Context())()
+	if busy.holds != 1 || busy.sweeps != 0 || busy.rel != 0 {
+		t.Fatalf("busy: %+v", busy)
+	}
+	ytCommentsWorker{}.holdIssueFence(t.Context())() // comments only: no fence
 }

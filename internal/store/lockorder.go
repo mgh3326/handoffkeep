@@ -249,6 +249,11 @@ package store
 //     lock and no task row: a canary enrollment racing it is caught by the
 //     comment enqueue's ytBindingDisagreement, which skips that task's
 //     comments.
+//     In issue mode the write worker also holds the YouTrack sync's
+//     session lock (8241873404, HoldYTIssueFence) for a whole pass, while it
+//     takes the lane locks and rows above. Every taker of that lock (the
+//     sync, adopt, the comment catch-up, the fence) uses pg_try_advisory_lock
+//     and never waits for it, so holding it adds no wait edge.
 //
 //   - The YouTrack sync's single-run guard is a session-scoped
 //     pg_try_advisory_lock(8241873404) on its own pooled connection. It is

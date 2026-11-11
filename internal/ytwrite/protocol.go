@@ -619,7 +619,14 @@ func (p *Protocol) Resolve(ctx context.Context, id int64, r Resolution) (Result,
 		if !ok {
 			return Result{}, fmt.Errorf("%w: op %d has unsupported kind %q", ErrInvalid, id, op.Kind)
 		}
-		got, err = p.Ledger.Apply(ctx, p.now(), id, r.YTID, kind.MapRows(op, r.YTID))
+		// The operator names an existing thing whose provenance the ledger
+		// did not record: treat it as adopted (for an issue, its history is
+		// not copied again).
+		maps := kind.MapRows(op, r.YTID)
+		for i := range maps {
+			maps[i].Adopted = true
+		}
+		got, err = p.Ledger.Apply(ctx, p.now(), id, r.YTID, maps)
 	} else {
 		got, err = p.Ledger.Reject(ctx, p.now(), id, ReasonOperatorNotDone, "by "+r.By+": "+r.Note)
 	}

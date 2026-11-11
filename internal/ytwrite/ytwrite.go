@@ -123,6 +123,10 @@ const (
 	// bound elsewhere (hk 3898). The op stays applied; the operator's view
 	// lists it with the rejected ops.
 	ReasonBindingConflict = "binding_conflict"
+	// ReasonIssueOwned: a prepared issue_create op whose task gained an
+	// issue another way (binding, origin, canary, map row) before it was
+	// sent; rejected without sending (hk 3898).
+	ReasonIssueOwned = "issue_owned"
 	// ReasonHeld: the ledger's claim refused the dispatch (ClaimHeld:
 	// canary removed, mode off, another tenant); the op stays prepared and
 	// nothing is sent.

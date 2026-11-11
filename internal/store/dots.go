@@ -150,6 +150,9 @@ func (s *Store) CreateDotsRequest(ctx context.Context, by string, in DotsRequest
 	if err != nil {
 		return Task{}, err
 	}
+	if err := s.enqueueYTIssueTx(ctx, tx, x); err != nil {
+		return Task{}, err
+	}
 	err = scanTask(tx.QueryRow(ctx, `UPDATE tasks SET state=$2,parent_lane=$3,started_triage_at=NULL WHERE id=$1 RETURNING `+taskColumns, x.ID, StateBacklog, lane), &x)
 	if err != nil {
 		return Task{}, err

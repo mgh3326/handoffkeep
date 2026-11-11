@@ -540,10 +540,12 @@ func (s *Store) DueYouTrackPushTasks(ctx context.Context, limit int) ([]Task, er
 		FROM (SELECT `+taskColumns+` FROM tasks) tasks
 		LEFT JOIN task_origins o ON o.task_id=tasks.id AND o.provider='youtrack'
 		LEFT JOIN youtrack_attempts a ON a.queue='task' AND a.item_key=tasks.id::text
-		-- A task hk creates its issue for itself (an issue_create op, hk
-		-- 3898) is never created here: that op owns the create.
+		-- A task whose issue_create op (hk 3898) is unresolved is never
+		-- created here: that op owns the create. Once it is applied the
+		-- push finds the issue by hk ID and records its mirror as usual.
 		WHERE (o.task_id IS NOT NULL OR NOT EXISTS (SELECT 1 FROM yt_write_ops w
-		       WHERE w.kind='`+ytwrite.KindIssueCreate+`' AND w.entity_kind='task' AND w.entity_id=tasks.id::text))
+		       WHERE w.kind='`+ytwrite.KindIssueCreate+`' AND w.entity_kind='task' AND w.entity_id=tasks.id::text
+		         AND w.state NOT IN ('applied','rejected')))
 		  AND ((o.task_id IS NULL AND tasks.state NOT IN (`+settledStatesSQL+`))
 		   OR (o.task_id IS NOT NULL AND (o.synced_at IS NULL OR tasks.updated_at > o.synced_at))
 		   -- The PR section of the issue follows the PR's gate and checks, which
@@ -655,7 +657,7 @@ func (s *Store) MarkYouTrackRevertDone(ctx context.Context, activityID string) e
 }
 
 // youTrackSyncLockKey is the session advisory lock of the single-run guard.
-// The issue_create gate reads it in pg_locks (ytIssueGateSQL).
+// The issue write fence takes it too (HoldYTIssueFence).
 const youTrackSyncLockKey int64 = 8241873404
 
 // YouTrackSyncLock is the single-run guard. pg_try_advisory_lock is session
