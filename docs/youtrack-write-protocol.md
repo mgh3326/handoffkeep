@@ -641,8 +641,10 @@ with ` · `, a title quoting the marker) gets the op rejected `invalid_issue`.
 op for every task with no binding, bound to the host of `YOUTRACK_URL`; it
 calls no YouTrack, skips a task that already has its op, and so is idempotent.
 It also skips (counts as `owned`) a task hk already ties to an issue: a
-binding, a canary enrollment or a task map row, read again under the task's
-lane lock.
+binding, a canary enrollment, a task map row or a YouTrack `task_origins` row
+recorded earlier (a pull or `youtrack adopt`), read again under the task's
+lane lock. Reading the origin row is the only contact with the legacy sync's
+data; nothing coordinates with it.
 
 **Text.** Summary `#<id> <title>` on one line, cut to 250 runes. Description:
 
@@ -697,9 +699,11 @@ rejected` lists such ops and the alert worker raises them as rejected.
 **Admission.** Mode on, the op's tenant is the worker's, and the task has no
 binding or one with `op_id` = this op. A binding from the import holds the op.
 While the op is unresolved, `comments-backfill` binding and canary enrollment
-of the task are refused. An operator's `yt ops resolve --applied` is treated as
-an adoption (the ledger did not record the issue's provenance), so its binding
-starts after the task's latest comment.
+of the task are refused. An operator's `yt ops resolve <op> --applied <issue id>`
+states the issue's provenance, which the ledger did not record: by default the
+op created it (`comments_from` 0, the catch-up copies the task's comments);
+with `--adopted` (API `"adopted": true`) the issue existed before (its binding
+starts after the task's latest comment).
 
 **Precondition: no legacy writer.** Issue mode coordinates with no other
 writer of task issues. Before `HANDOFFKEEP_YT_ISSUES_MODE=on`: hk 3907 must be

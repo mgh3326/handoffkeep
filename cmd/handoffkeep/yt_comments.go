@@ -270,7 +270,7 @@ func (w ytOpsAlertWorker) Run(ctx context.Context) {
 	}
 }
 
-const youtrackOpsUsage = "usage: youtrack ops [--state pending|all|prepared|dispatched|applied|rejected|remote_unknown] [--task N] [--after-id N] [--limit N] | youtrack ops resolve <op id> --applied <youtrack id> | --not-applied --by <actor> --note <text>"
+const youtrackOpsUsage = "usage: youtrack ops [--state pending|all|prepared|dispatched|applied|rejected|remote_unknown] [--task N] [--after-id N] [--limit N] | youtrack ops resolve <op id> --applied <youtrack id> [--adopted] | --not-applied --by <actor> --note <text>"
 
 // youtrackOpsCmd is `youtrack ops` (also `yt ops`): the write-protocol ops
 // through GET /v1/yt/ops. remote_unknown shows status pending, never done.
@@ -322,6 +322,7 @@ func youtrackOpsResolveCmd(args []string, out io.Writer) error {
 	fs.SetOutput(io.Discard)
 	appliedID := fs.String("applied", "", "YouTrack comment id when the op was applied")
 	notApplied := fs.Bool("not-applied", false, "record that the comment was not applied")
+	adopted := fs.Bool("adopted", false, "with --applied on an issue_create op: the issue existed before the op (its history is not copied again)")
 	by := fs.String("by", "", "operator who checked YouTrack")
 	note := fs.String("note", "", "operator's resolution note")
 	c := remoteClient(fs)
@@ -332,7 +333,7 @@ func youtrackOpsResolveCmd(args []string, out io.Writer) error {
 	if err := fs.Parse(ordered); err != nil {
 		return err
 	}
-	if fs.NArg() != 1 || (*appliedID != "") == *notApplied {
+	if fs.NArg() != 1 || (*appliedID != "") == *notApplied || (*adopted && *notApplied) {
 		return errors.New(youtrackOpsUsage)
 	}
 	if *notApplied && (strings.TrimSpace(*by) == "" || strings.TrimSpace(*note) == "") {
@@ -351,7 +352,7 @@ func youtrackOpsResolveCmd(args []string, out io.Writer) error {
 	if actor == "" {
 		actor = "operator:cli"
 	}
-	result, err := c.ResolveYTOp(ctx, id, ytwrite.Resolution{Applied: !*notApplied, YTID: *appliedID, By: actor, Note: *note})
+	result, err := c.ResolveYTOp(ctx, id, ytwrite.Resolution{Applied: !*notApplied, YTID: *appliedID, Adopted: *adopted, By: actor, Note: *note})
 	if err != nil {
 		return err
 	}

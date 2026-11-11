@@ -49,12 +49,15 @@ func (c Client) ResolveYTOp(ctx context.Context, id int64, resolution ytwrite.Re
 		RetryAfter string         `json:"retry_after"`
 		YTID       string         `json:"yt_id"`
 	}
+	// adopted is sent only when set, so a server that predates it still
+	// takes an ordinary resolution.
 	body := struct {
 		Applied bool   `json:"applied"`
 		YTID    string `json:"yt_id"`
+		Adopted bool   `json:"adopted,omitempty"`
 		By      string `json:"by"`
 		Note    string `json:"note"`
-	}{resolution.Applied, resolution.YTID, resolution.By, resolution.Note}
+	}{resolution.Applied, resolution.YTID, resolution.Adopted, resolution.By, resolution.Note}
 	if err := c.call(ctx, "POST", "/v1/yt/ops/"+strconv.FormatInt(id, 10)+"/resolve", body, &wire); err != nil {
 		return ytwrite.Result{}, err
 	}

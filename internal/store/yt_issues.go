@@ -239,7 +239,8 @@ type YTIssueBackfillProject struct {
 	// Unmapped: the project maps to no YouTrack project.
 	Unmapped int `json:"unmapped"`
 	// Owned: the task already has an issue hk knows of (a binding, a canary
-	// enrollment or a task map row); creating one would make a second.
+	// enrollment, a task map row or a YouTrack origin recorded earlier);
+	// creating one would make a second.
 	Owned int `json:"owned"`
 }
 
@@ -252,8 +253,9 @@ type YTIssueBackfillReport struct {
 }
 
 // BackfillYTIssueOps prepares the issue_create op of every task with no
-// binding, no canary enrollment and no task map row (only project's tasks
-// when it is not ""), bound to tenant. It calls
+// binding, no canary enrollment, no task map row and no YouTrack origin (only
+// project's tasks when it is not ""), bound to tenant. It reads the origin
+// row only; it does not coordinate with the legacy sync. It calls
 // no YouTrack: adoption of an existing issue happens when the op is sent. A
 // task that already has its op is counted and left alone, so a second run
 // prepares nothing. Each task is its own transaction; a dry run writes
@@ -332,7 +334,8 @@ func (s *Store) backfillYTIssue(ctx context.Context, tenant string, taskID int64
 	var owned bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM yt_comment_canary WHERE task_id=$1)
 		OR EXISTS(SELECT 1 FROM yt_entity_map WHERE entity_kind='task' AND hk_key=$2)
-		OR EXISTS(SELECT 1 FROM yt_task_bindings WHERE task_id=$1)`, taskID, strconv.FormatInt(taskID, 10)).Scan(&owned); err != nil {
+		OR EXISTS(SELECT 1 FROM yt_task_bindings WHERE task_id=$1)
+		OR EXISTS(SELECT 1 FROM task_origins WHERE task_id=$1 AND provider='youtrack')`, taskID, strconv.FormatInt(taskID, 10)).Scan(&owned); err != nil {
 		return "", "", err
 	}
 	if owned {

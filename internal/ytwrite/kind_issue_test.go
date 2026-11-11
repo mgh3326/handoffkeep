@@ -323,10 +323,29 @@ func TestIssueCreateResolveWritesTaskMapRow(t *testing.T) {
 		t.Fatalf("resolve %+v %v", res, err)
 	}
 	e.wantMap(e.want(op.ID, ytwrite.StateApplied, ""), "2-77")
-	// The ledger did not record where the issue came from: the operator's
-	// resolution is treated as an adoption (its history is not copied again).
-	if m, _, _ := e.ledger.MapGet(context.Background(), "task", "3898"); !m.Adopted {
-		t.Fatalf("resolved map row %+v not marked adopted", m)
+	// By default the operator says the op created the issue.
+	if m, _, _ := e.ledger.MapGet(context.Background(), "task", "3898"); m.Adopted {
+		t.Fatalf("resolved map row %+v marked adopted", m)
+	}
+}
+
+// --adopted marks the resolution as an adoption; adopted without applied is
+// refused before anything is written.
+func TestIssueCreateResolveAdopted(t *testing.T) {
+	e := newIssueEnv(t)
+	e.yt.Queue(ytwritetest.Fault{Kind: ytwritetest.Refuse, Status: http.StatusBadGateway})
+	op := e.prepareIssue()
+	e.drive()
+	bare := &ytwrite.Protocol{Config: ytwrite.Config{Ledger: e.ledger, Now: e.clock.Now}}
+	if _, err := bare.Resolve(context.Background(), op.ID, ytwrite.Resolution{Applied: false, Adopted: true, By: "operator", Note: "n"}); !errors.Is(err, ytwrite.ErrInvalid) {
+		t.Fatalf("adopted without applied: %v", err)
+	}
+	e.want(op.ID, ytwrite.StateRemoteUnknown, ytwrite.ReasonServerError)
+	if _, err := bare.Resolve(context.Background(), op.ID, ytwrite.Resolution{Applied: true, YTID: "2-78", Adopted: true, By: "operator"}); err != nil {
+		t.Fatal(err)
+	}
+	if m, _, _ := e.ledger.MapGet(context.Background(), "task", "3898"); !m.Adopted || m.YTID != "2-78" {
+		t.Fatalf("map row %+v, want adopted 2-78", m)
 	}
 }
 

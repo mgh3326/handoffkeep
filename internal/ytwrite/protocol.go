@@ -593,6 +593,11 @@ type Resolution struct {
 	// not exist and the op is closed as rejected.
 	Applied bool
 	YTID    string
+	// Adopted says YTID existed before the op (it adopted an issue made
+	// elsewhere) rather than being created by it; only with Applied. An
+	// adopted issue already holds the task's history, so its binding starts
+	// after the latest comment; a created one starts at 0.
+	Adopted bool
 	By      string
 	Note    string
 }
@@ -610,6 +615,9 @@ func (p *Protocol) Resolve(ctx context.Context, id int64, r Resolution) (Result,
 	if err := checkActor(r.By); err != nil {
 		return Result{}, err
 	}
+	if r.Adopted && !r.Applied {
+		return Result{}, fmt.Errorf("%w: adopted needs applied", ErrInvalid)
+	}
 	var got Op
 	if r.Applied {
 		if !resultIDRE.MatchString(r.YTID) {
@@ -619,12 +627,10 @@ func (p *Protocol) Resolve(ctx context.Context, id int64, r Resolution) (Result,
 		if !ok {
 			return Result{}, fmt.Errorf("%w: op %d has unsupported kind %q", ErrInvalid, id, op.Kind)
 		}
-		// The operator names an existing thing whose provenance the ledger
-		// did not record: treat it as adopted (for an issue, its history is
-		// not copied again).
+		// The ledger did not record the provenance; the operator states it.
 		maps := kind.MapRows(op, r.YTID)
 		for i := range maps {
-			maps[i].Adopted = true
+			maps[i].Adopted = r.Adopted
 		}
 		got, err = p.Ledger.Apply(ctx, p.now(), id, r.YTID, maps)
 	} else {

@@ -103,6 +103,40 @@ func TestYTIsTheYouTrackCommand(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "resolve") {
 		t.Fatalf("yt ops resolve with both outcomes: %v", err)
 	}
+	err = run([]string{"yt", "ops", "resolve", "4", "--not-applied", "--adopted", "--by", "a", "--note", "n"}, io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "--adopted") {
+		t.Fatalf("yt ops resolve --adopted --not-applied: %v", err)
+	}
+}
+
+// --adopted reaches the server as "adopted": true; without it the field is
+// not sent, so a server that predates it still takes the resolution.
+func TestYTOpsResolveSendsAdoptedOnlyWhenSet(t *testing.T) {
+	t.Setenv("HANDOFFKEEP_URL", "")
+	t.Setenv("HANDOFFKEEP_TOKEN", "")
+	var bodies []map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var in map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		bodies = append(bodies, in)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"op_id": 4, "status": "applied", "state": "applied", "reason": "", "retry_after": "0s", "yt_id": "2-4"})
+	}))
+	t.Cleanup(server.Close)
+	for _, extra := range [][]string{{"--adopted"}, nil} {
+		args := append([]string{"yt", "ops", "resolve", "4", "--applied", "2-4", "--url", server.URL, "--token", "t"}, extra...)
+		if err := run(args, io.Discard, io.Discard); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(bodies) != 2 || bodies[0]["adopted"] != true {
+		t.Fatalf("bodies %v", bodies)
+	}
+	if _, sent := bodies[1]["adopted"]; sent {
+		t.Fatalf("adopted sent without the flag: %v", bodies[1])
+	}
 }
 
 func TestYTOpsResolveAcceptsURLAndTokenFlags(t *testing.T) {

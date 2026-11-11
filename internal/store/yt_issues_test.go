@@ -415,17 +415,20 @@ func TestYTIssuePendingOpFencesOtherIssueWriters(t *testing.T) {
 func TestYTIssueBackfillSkipsOwnedTasks(t *testing.T) {
 	s := schemaStore(t, "yti_owned")
 	ytbMapped(t, s)
-	canary, anchored := ytcTask(t, s, ytbProject), ytcTask(t, s, ytbProject)
+	canary, anchored, origin := ytcTask(t, s, ytbProject), ytcTask(t, s, ytbProject), ytcTask(t, s, ytbProject)
 	ytbCanaryRow(t, s, canary, ytcTenant, "2-c")
 	ytbAnchor(t, s, anchored, "2-a")
+	if _, err := s.UpsertYouTrackMirror(t.Context(), YouTrackMirrorInput{TaskID: origin, IssueID: "2-o", DisplayRef: "HK-9", Tenant: ytcTenant, Role: "mirror"}); err != nil {
+		t.Fatal(err)
+	}
 	r, err := s.BackfillYTIssueOps(t.Context(), ytcTenant, ytbProject, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(r.Projects) != 1 || r.Projects[0].Owned != 2 || r.Projects[0].Prepared != 0 {
+	if len(r.Projects) != 1 || r.Projects[0].Owned != 3 || r.Projects[0].Prepared != 0 {
 		t.Fatalf("report %+v", r.Projects)
 	}
-	for _, task := range []int64{canary, anchored} {
+	for _, task := range []int64{canary, anchored, origin} {
 		if ops := ytiOps(t, s, task); len(ops) != 0 {
 			t.Fatalf("task %d got ops %+v", task, ops)
 		}
