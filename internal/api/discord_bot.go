@@ -21,11 +21,14 @@ const (
 	discordBotAPI = "discord bot"
 	// discordBotUserAgent is the User-Agent form Discord asks bots to send.
 	discordBotUserAgent = "DiscordBot (https://github.com/mgh3326/handoffkeep, 1)"
-	// discordArchivedThreadsLimit is the most archived threads one lookup
-	// reads (Discord's page maximum). A lost create is minutes old, and a
-	// thread archives after an hour idle at the earliest, so the newest page
-	// holds it if it is archived at all.
+	// discordArchivedThreadsLimit is one page of archived threads (Discord's
+	// page maximum).
 	discordArchivedThreadsLimit = 100
+	// discordArchivedThreadsPages bounds the archived pages one lookup reads.
+	// A forum with more archived threads than that answers
+	// errDiscordLookupIncomplete: a search that did not reach the end proves
+	// nothing about a thread being absent.
+	discordArchivedThreadsPages = 10
 )
 
 // DiscordMessage is a message to post: its content, flags and the users it
@@ -50,8 +53,9 @@ type TaskThreadDiscord interface {
 	CreateForumThread(ctx context.Context, forumID, name string, msg DiscordMessage) (string, error)
 	// PostThreadMessage adds a message to a thread.
 	PostThreadMessage(ctx context.Context, threadID string, msg DiscordMessage) error
-	// ForumThreads lists the forum's active and newest archived threads, and
-	// returns the bot's own user id with them.
+	// ForumThreads lists the forum's active and archived public threads,
+	// and returns the bot's own user id with them. It fails rather than
+	// return a partial list.
 	ForumThreads(ctx context.Context, forumID string) (botUserID string, threads []DiscordThread, err error)
 }
 
@@ -133,8 +137,8 @@ func (b *DiscordBot) PostThreadMessage(ctx context.Context, threadID string, msg
 // ForumThreads reads the bot's user id (GET /users/@me) and the forum's
 // guild (GET /channels/{forum}), both cached for the process, then the
 // guild's active threads (GET /guilds/{guild}/threads/active, which lists
-// every channel's, filtered here to the forum) and the forum's newest
-// archived public threads.
+// every channel's, filtered here to the forum) and every page of the
+// forum's archived public threads.
 func (b *DiscordBot) ForumThreads(ctx context.Context, forumID string) (string, []DiscordThread, error) {
 	if !discordMessageIDRE.MatchString(forumID) {
 		return "", nil, errors.New("invalid discord forum id")
@@ -147,23 +151,67 @@ func (b *DiscordBot) ForumThreads(ctx context.Context, forumID string) (string, 
 	if err != nil {
 		return "", nil, err
 	}
-	var active, archived struct {
+	var active struct {
 		Threads []DiscordThread `json:"threads"`
 	}
 	if err := b.call(ctx, http.MethodGet, "/guilds/"+guild+"/threads/active", nil, &active); err != nil {
 		return "", nil, err
 	}
-	query := url.Values{"limit": {strconv.Itoa(discordArchivedThreadsLimit)}}
-	if err := b.call(ctx, http.MethodGet, "/channels/"+forumID+"/threads/archived/public?"+query.Encode(), nil, &archived); err != nil {
+	archived, err := b.archivedThreads(ctx, forumID)
+	if err != nil {
 		return "", nil, err
 	}
 	var threads []DiscordThread
-	for _, t := range append(active.Threads, archived.Threads...) {
+	for _, t := range append(active.Threads, archived...) {
 		if t.ParentID == forumID {
 			threads = append(threads, t)
 		}
 	}
 	return botID, threads, nil
+}
+
+// errDiscordLookupIncomplete is a forum whose archived threads did not fit
+// in the pages one lookup reads.
+var errDiscordLookupIncomplete = errors.New("discord bot: archived thread list incomplete")
+
+// archivedThreads pages GET /channels/{forum}/threads/archived/public, newest
+// archived first, until Discord says there is no more (has_more false).
+func (b *DiscordBot) archivedThreads(ctx context.Context, forumID string) ([]DiscordThread, error) {
+	var out []DiscordThread
+	before := ""
+	for range discordArchivedThreadsPages {
+		query := url.Values{"limit": {strconv.Itoa(discordArchivedThreadsLimit)}}
+		if before != "" {
+			query.Set("before", before)
+		}
+		var page struct {
+			Threads []struct {
+				DiscordThread
+				Metadata struct {
+					ArchiveTimestamp string `json:"archive_timestamp"`
+				} `json:"thread_metadata"`
+			} `json:"threads"`
+			HasMore bool `json:"has_more"`
+		}
+		if err := b.call(ctx, http.MethodGet, "/channels/"+forumID+"/threads/archived/public?"+query.Encode(), nil, &page); err != nil {
+			return nil, err
+		}
+		for _, t := range page.Threads {
+			out = append(out, t.DiscordThread)
+		}
+		if !page.HasMore {
+			return out, nil
+		}
+		if len(page.Threads) == 0 {
+			return nil, errDiscordLookupIncomplete
+		}
+		next := page.Threads[len(page.Threads)-1].Metadata.ArchiveTimestamp
+		if next == "" || next == before {
+			return nil, errDiscordLookupIncomplete
+		}
+		before = next
+	}
+	return nil, errDiscordLookupIncomplete
 }
 
 func (b *DiscordBot) botUserID(ctx context.Context) (string, error) {

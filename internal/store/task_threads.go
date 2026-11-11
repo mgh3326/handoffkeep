@@ -158,7 +158,8 @@ const (
 	// TaskThreadSent: Discord accepted it.
 	TaskThreadSent TaskThreadOutcome = iota + 1
 	// TaskThreadRetry: Discord certainly did not take it (a 429 answer, or
-	// no connection); it is sent again later.
+	// no connection); it is sent again later. A lookup item's retry stays a
+	// lookup.
 	TaskThreadRetry
 	// TaskThreadRejected: Discord refused it in a way a retry cannot fix (a
 	// 4xx such as a deleted thread or a missing permission); the row stops.
@@ -507,7 +508,11 @@ func (s *Store) SettleTaskThread(ctx context.Context, now time.Time, x TaskThrea
 			break
 		}
 		state := TaskThreadActive
-		if create {
+		switch {
+		case create && x.Lookup:
+			// The lookup did not run: the next claim is a lookup again.
+			state = TaskThreadCreating
+		case create:
 			state = TaskThreadPending
 		}
 		set, args = `state='`+state+`',attempts=$5,last_error=$6,next_attempt_at=$7`, append(args, attempts, errText, now.Add(wait))

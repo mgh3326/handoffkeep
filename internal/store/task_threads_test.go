@@ -212,6 +212,19 @@ func TestTaskThreadUnknownCreateIsLookedUp(t *testing.T) {
 		}
 		lookups[x.TaskID] = x
 	}
+	// A rate-limited lookup did not run: the row comes back as a lookup.
+	if gaveUp, err := s.SettleTaskThread(ctx, at, lookups[a.ID], TaskThreadResult{Outcome: TaskThreadRetry, RetryAfter: time.Second, Err: errors.New("thread lookup: discord bot status 429")}); err != nil || gaveUp {
+		t.Fatalf("settle lookup retry gaveUp=%v err=%v", gaveUp, err)
+	}
+	if x := threadState(t, s, a.ID); x.State != TaskThreadCreating || x.ClaimKey != "" {
+		t.Fatalf("after lookup retry %+v", x)
+	}
+	at = at.Add(2 * time.Second)
+	again, found, err := s.ClaimTaskThread(ctx, at)
+	if err != nil || !found || again.TaskID != a.ID || !again.Lookup {
+		t.Fatalf("lookup after retry %+v found=%v err=%v", again, found, err)
+	}
+	lookups[a.ID] = again
 	if gaveUp, err := s.SettleTaskThread(ctx, at, lookups[a.ID], TaskThreadResult{Outcome: TaskThreadAmbiguous, Err: errors.New("2 threads match the lost create")}); err != nil || !gaveUp {
 		t.Fatalf("settle ambiguous gaveUp=%v err=%v", gaveUp, err)
 	}

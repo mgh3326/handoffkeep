@@ -220,6 +220,13 @@ func (p *TaskThreadPoster) send(ctx context.Context, x store.TaskThreadItem) (re
 	}
 	if x.Lookup {
 		botID, threads, err := p.Discord.ForumThreads(ctx, p.ForumID)
+		if err != nil && taskThreadOutcome(err) == store.TaskThreadRetry {
+			// A 429 or a connection never made: the lookup did not run.
+			// The row stays due for its lookup, after Retry-After.
+			res := taskThreadResult(err)
+			res.Err = fmt.Errorf("thread lookup: %w", err)
+			return res, false
+		}
 		lost := decideLostCreate(p.ForumID, x.ThreadName, botID, threads, err)
 		switch lost.action {
 		case lostCreateAdopt:

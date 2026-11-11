@@ -51,6 +51,45 @@ type fakeForum struct {
 	lose     int
 	active   []DiscordThread
 	archived []DiscordThread
+	// page is the archived page size (0 means Discord's own 100); endless
+	// answers has_more on every page.
+	page    int
+	endless bool
+}
+
+// archivedAt is the archive time of archived thread i, newest first.
+func archivedAt(i int) string {
+	return time.Date(2026, 11, 12, 0, 0, 0, 0, time.UTC).Add(-time.Duration(i) * time.Second).Format(time.RFC3339)
+}
+
+// archivedPage is the page of f.archived Discord answers for before.
+func (f *fakeForum) archivedPage(before string) map[string]any {
+	start := 0
+	if before != "" {
+		start = len(f.archived)
+		for i := range f.archived {
+			if archivedAt(i) < before {
+				start = i
+				break
+			}
+		}
+	}
+	size := f.page
+	if size == 0 {
+		size = 100
+	}
+	end := min(start+size, len(f.archived))
+	threads := []map[string]any{}
+	for i := start; i < end; i++ {
+		t := f.archived[i]
+		threads = append(threads, map[string]any{"id": t.ID, "parent_id": t.ParentID, "owner_id": t.OwnerID, "name": t.Name,
+			"thread_metadata": map[string]any{"archived": true, "archive_timestamp": archivedAt(i)}})
+	}
+	if f.endless && len(threads) == 0 {
+		threads = append(threads, map[string]any{"id": "1", "parent_id": fakeForumID, "owner_id": fakeOtherUser, "name": "filler",
+			"thread_metadata": map[string]any{"archived": true, "archive_timestamp": before}})
+	}
+	return map[string]any{"threads": threads, "members": []any{}, "has_more": f.endless || end < len(f.archived)}
 }
 
 func newFakeForum(t *testing.T) *fakeForum {
@@ -121,7 +160,7 @@ func newFakeForum(t *testing.T) *fakeForum {
 		case r.Method == http.MethodGet && path == "guilds/"+fakeGuildID+"/threads/active":
 			reply(map[string]any{"threads": f.active, "members": []any{}})
 		case r.Method == http.MethodGet && path == "channels/"+fakeForumID+"/threads/archived/public":
-			reply(map[string]any{"threads": f.archived, "members": []any{}, "has_more": false})
+			reply(f.archivedPage(r.URL.Query().Get("before")))
 		default:
 			f.calls[len(f.calls)-1].Status = http.StatusNotFound
 			w.WriteHeader(http.StatusNotFound)
@@ -828,17 +867,14 @@ func TestTaskThreadLogsNeverQuoteToken(t *testing.T) {
 		return buf.Write(b)
 	}))
 	t.Cleanup(func() { log.SetOutput(os.Stderr) })
-	for _, code := range []int{0, http.StatusForbidden, http.StatusBadGateway, http.StatusTooManyRequests} {
+	// A 429 retries forever against this fake store; its errors are the
+	// same discordStatusError as the 403's.
+	for _, code := range []int{0, http.StatusForbidden, http.StatusBadGateway} {
 		f := newFakeForum(t)
 		f.answer = func(int, http.ResponseWriter) int { return code }
 		clock := &testClock{at: time.Date(2026, 11, 12, 0, 0, 0, 0, time.UTC)}
 		create := store.TaskThreadItem{TaskID: 6, Destination: store.TaskThreadDestinationDiscord, Key: store.TaskThreadCreate, Type: store.TaskThreadCreate, ThreadName: "#6 x"}
 		fs := &fakeThreadStore{items: []store.TaskThreadItem{create, lookupItem(7), lineItem(8)}}
-		if code == http.StatusTooManyRequests {
-			// A 429 create or line retries forever against this fake; the
-			// lookup's 429 stops for the operator.
-			fs.items = []store.TaskThreadItem{lookupItem(7)}
-		}
 		p := threadPoster(fs, f, clock)
 		p.Drain(t.Context())
 		for _, s := range fs.settled {
@@ -860,3 +896,75 @@ func TestTaskThreadLogsNeverQuoteToken(t *testing.T) {
 type writerFunc func([]byte) (int, error)
 
 func (w writerFunc) Write(b []byte) (int, error) { return w(b) }
+
+// A lookup that Discord rate-limits did not run: it waits Retry-After and is
+// tried again, instead of stopping for the operator.
+func TestTaskThreadLookup429Retries(t *testing.T) {
+	f := newFakeForum(t)
+	f.active = []DiscordThread{{ID: "8003", ParentID: fakeForumID, OwnerID: fakeBotUserID, Name: "#5 lost"}}
+	limited := false
+	f.answer = func(_ int, w http.ResponseWriter) int {
+		if !limited {
+			limited = true
+			w.Header().Set("Retry-After", "2")
+			return http.StatusTooManyRequests
+		}
+		return 0
+	}
+	clock := &testClock{at: time.Date(2026, 11, 12, 0, 0, 0, 0, time.UTC)}
+	fs := &fakeThreadStore{items: []store.TaskThreadItem{lookupItem(5)}}
+	p := threadPoster(fs, f, clock)
+	p.Drain(t.Context())
+	if len(fs.settled) != 2 || fs.settled[0].Outcome != store.TaskThreadRetry || fs.settled[0].RetryAfter != 2*time.Second ||
+		fs.settled[1].Outcome != store.TaskThreadSent || fs.settled[1].ThreadID != "8003" {
+		t.Fatalf("settled %+v", fs.settled)
+	}
+	if len(clock.sleeps) != 1 || clock.sleeps[0] != 2*time.Second {
+		t.Fatalf("sleeps %v, want one of 2s", clock.sleeps)
+	}
+	if creates := ofKind(f.take(), "create"); len(creates) != 0 {
+		t.Fatalf("created %+v", creates)
+	}
+}
+
+// The archived list is read to its end: a candidate past the first page is
+// found, and a list that does not end is no proof the thread is absent.
+func TestTaskThreadLookupReadsEveryArchivedPage(t *testing.T) {
+	mine := DiscordThread{ID: "8003", ParentID: fakeForumID, OwnerID: fakeBotUserID, Name: "#5 lost"}
+	other := DiscordThread{ID: "8100", ParentID: fakeForumID, OwnerID: fakeOtherUser, Name: "other"}
+	for _, tc := range []struct {
+		name    string
+		endless bool
+		want    store.TaskThreadOutcome
+		creates int
+	}{
+		{"candidate on the third page", false, store.TaskThreadSent, 0},
+		{"a list that never ends", true, store.TaskThreadAmbiguous, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFakeForum(t)
+			f.archived = []DiscordThread{other, other, other, other, mine}
+			if tc.endless {
+				f.archived = []DiscordThread{other, other}
+			}
+			f.page, f.endless = 2, tc.endless
+			clock := &testClock{at: time.Date(2026, 11, 12, 0, 0, 0, 0, time.UTC)}
+			fs := &fakeThreadStore{items: []store.TaskThreadItem{lookupItem(5)}}
+			p := threadPoster(fs, f, clock)
+			p.Drain(t.Context())
+			calls := f.take()
+			if got := len(ofKind(calls, "create")); got != tc.creates {
+				t.Fatalf("creates %d", got)
+			}
+			if len(fs.settled) != 1 || fs.settled[0].Outcome != tc.want {
+				t.Fatalf("settled %+v", fs.settled)
+			}
+			if !tc.endless && fs.settled[0].ThreadID != "8003" {
+				t.Fatalf("adopted %q", fs.settled[0].ThreadID)
+			}
+			if tc.endless && !errors.Is(fs.settled[0].Err, errDiscordLookupIncomplete) {
+				t.Fatalf("err %v", fs.settled[0].Err)
+			}
+		})
+	}
+}
