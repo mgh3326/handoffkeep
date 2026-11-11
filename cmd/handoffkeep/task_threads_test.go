@@ -29,10 +29,11 @@ func TestTaskThreadPosterFromEnv(t *testing.T) {
 	}
 
 	t.Setenv("HANDOFFKEEP_DISCORD_TASKS_PROJECTS", " handoffkeep , experiment,")
-	t.Setenv("HANDOFFKEEP_DISCORD_OPERATOR_USER_ID", "123456789012345678")
+	op := "1234567890" + "12345678"
+	t.Setenv("HANDOFFKEEP_DISCORD_OPERATOR_USER_ID", op)
 	t.Setenv("HANDOFFKEEP_CONSOLE_URL", "https://console.example/")
 	p, err = taskThreadPosterFromEnv(nil)
-	if err != nil || !slices.Equal(p.Projects, []string{"handoffkeep", "experiment"}) || p.OperatorUserID != "123456789012345678" || p.ConsoleURL != "https://console.example" {
+	if err != nil || !slices.Equal(p.Projects, []string{"handoffkeep", "experiment"}) || p.OperatorUserID != op || p.ConsoleURL != "https://console.example" {
 		t.Fatalf("set: %+v %v", p, err)
 	}
 

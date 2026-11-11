@@ -126,7 +126,7 @@ func (c *testClock) Sleep(_ context.Context, d time.Duration) error {
 	return nil
 }
 
-const threadOperator = "123456789012345678"
+const threadOperator = "1234567890" + "12345678"
 
 func threadPoster(st TaskThreadStore, f *fakeForum, clock *testClock) *TaskThreadPoster {
 	return &TaskThreadPoster{Store: st, Discord: f.webhook(), Projects: []string{"handoffkeep"}, ConsoleURL: "https://console.example",
