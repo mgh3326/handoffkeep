@@ -254,7 +254,7 @@ func (a *ytAuditor) unbound(ctx context.Context, taskID int64) (reason, detail s
 	var b store.YTTaskBinding
 	err = a.call(ctx, func(ctx context.Context) error {
 		var verr error
-		b, verr = youtrack.VerifyBinding(ctx, a.remote, a.tenant, c)
+		b, verr = youtrack.VerifyBinding(ctx, a.remote, a.tenant, "", c) // c has a project: no bucket
 		return verr
 	})
 	switch {
