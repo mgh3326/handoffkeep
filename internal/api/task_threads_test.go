@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -55,20 +56,33 @@ type fakeForum struct {
 	// answers has_more on every page.
 	page    int
 	endless bool
+	tied    []int
 }
 
-// archivedAt is the archive time of archived thread i, newest first.
-func archivedAt(i int) string {
-	return time.Date(2026, 11, 12, 0, 0, 0, 0, time.UTC).Add(-time.Duration(i) * time.Second).Format(time.RFC3339)
+// archivedAt is the archive time of archived thread i, newest first; tied
+// lists indexes that share the time of the thread before them.
+func (f *fakeForum) archivedAt(i int) time.Time {
+	at := time.Date(2026, 11, 12, 0, 0, 0, 0, time.UTC)
+	for j := 1; j <= i; j++ {
+		if !slices.Contains(f.tied, j) {
+			at = at.Add(-time.Second)
+		}
+	}
+	return at
 }
 
-// archivedPage is the page of f.archived Discord answers for before.
+// archivedPage is the page of f.archived Discord answers for before, which
+// is exclusive, as Discord's is.
 func (f *fakeForum) archivedPage(before string) map[string]any {
 	start := 0
 	if before != "" {
+		cut, err := time.Parse(time.RFC3339Nano, before)
+		if err != nil {
+			return map[string]any{"threads": []any{}, "has_more": false}
+		}
 		start = len(f.archived)
 		for i := range f.archived {
-			if archivedAt(i) < before {
+			if f.archivedAt(i).Before(cut) {
 				start = i
 				break
 			}
@@ -83,11 +97,13 @@ func (f *fakeForum) archivedPage(before string) map[string]any {
 	for i := start; i < end; i++ {
 		t := f.archived[i]
 		threads = append(threads, map[string]any{"id": t.ID, "parent_id": t.ParentID, "owner_id": t.OwnerID, "name": t.Name,
-			"thread_metadata": map[string]any{"archived": true, "archive_timestamp": archivedAt(i)}})
+			"thread_metadata": map[string]any{"archived": true, "archive_timestamp": f.archivedAt(i).Format("2006-01-02T15:04:05.000000+00:00")}})
 	}
 	if f.endless && len(threads) == 0 {
-		threads = append(threads, map[string]any{"id": "1", "parent_id": fakeForumID, "owner_id": fakeOtherUser, "name": "filler",
-			"thread_metadata": map[string]any{"archived": true, "archive_timestamp": before}})
+		f.nextID++
+		cut, _ := time.Parse(time.RFC3339Nano, before)
+		threads = append(threads, map[string]any{"id": fmt.Sprint(f.nextID), "parent_id": fakeForumID, "owner_id": fakeOtherUser, "name": "filler",
+			"thread_metadata": map[string]any{"archived": true, "archive_timestamp": cut.Add(-time.Second).Format(time.RFC3339Nano)}})
 	}
 	return map[string]any{"threads": threads, "members": []any{}, "has_more": f.endless || end < len(f.archived)}
 }
@@ -931,38 +947,43 @@ func TestTaskThreadLookup429Retries(t *testing.T) {
 // found, and a list that does not end is no proof the thread is absent.
 func TestTaskThreadLookupReadsEveryArchivedPage(t *testing.T) {
 	mine := DiscordThread{ID: "8003", ParentID: fakeForumID, OwnerID: fakeBotUserID, Name: "#5 lost"}
-	other := DiscordThread{ID: "8100", ParentID: fakeForumID, OwnerID: fakeOtherUser, Name: "other"}
+	other := func(id string) DiscordThread {
+		return DiscordThread{ID: id, ParentID: fakeForumID, OwnerID: fakeOtherUser, Name: "other"}
+	}
 	for _, tc := range []struct {
-		name    string
-		endless bool
-		want    store.TaskThreadOutcome
-		creates int
+		name     string
+		archived []DiscordThread
+		tied     []int
+		endless  bool
+		want     store.TaskThreadOutcome
 	}{
-		{"candidate on the third page", false, store.TaskThreadSent, 0},
-		{"a list that never ends", true, store.TaskThreadAmbiguous, 0},
+		{"candidate on the third page", []DiscordThread{other("8101"), other("8102"), other("8103"), other("8104"), mine}, nil, false, store.TaskThreadSent},
+		// The last thread on page one and the candidate share an archive
+		// time: an exclusive cursor at that time would skip the candidate.
+		{"candidate tied with the page boundary", []DiscordThread{other("8101"), other("8102"), mine}, []int{2}, false, store.TaskThreadSent},
+		{"a list that never ends", []DiscordThread{other("8101"), other("8102")}, nil, true, store.TaskThreadAmbiguous},
+		// A page of nothing but ties cannot move the cursor.
+		{"a page of ties only", []DiscordThread{other("8101"), other("8102"), other("8103"), mine}, []int{1, 2, 3}, false, store.TaskThreadAmbiguous},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFakeForum(t)
-			f.archived = []DiscordThread{other, other, other, other, mine}
-			if tc.endless {
-				f.archived = []DiscordThread{other, other}
-			}
+			f.archived, f.tied = tc.archived, tc.tied
 			f.page, f.endless = 2, tc.endless
 			clock := &testClock{at: time.Date(2026, 11, 12, 0, 0, 0, 0, time.UTC)}
 			fs := &fakeThreadStore{items: []store.TaskThreadItem{lookupItem(5)}}
 			p := threadPoster(fs, f, clock)
 			p.Drain(t.Context())
 			calls := f.take()
-			if got := len(ofKind(calls, "create")); got != tc.creates {
+			if got := len(ofKind(calls, "create")); got != 0 {
 				t.Fatalf("creates %d", got)
 			}
 			if len(fs.settled) != 1 || fs.settled[0].Outcome != tc.want {
 				t.Fatalf("settled %+v", fs.settled)
 			}
-			if !tc.endless && fs.settled[0].ThreadID != "8003" {
+			if tc.want == store.TaskThreadSent && fs.settled[0].ThreadID != "8003" {
 				t.Fatalf("adopted %q", fs.settled[0].ThreadID)
 			}
-			if tc.endless && !errors.Is(fs.settled[0].Err, errDiscordLookupIncomplete) {
+			if tc.want == store.TaskThreadAmbiguous && !errors.Is(fs.settled[0].Err, errDiscordLookupIncomplete) {
 				t.Fatalf("err %v", fs.settled[0].Err)
 			}
 		})

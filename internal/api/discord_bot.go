@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // The task-thread forum's Discord client (hk 4040, docs/task-threads.md). It
@@ -29,6 +30,10 @@ const (
 	// errDiscordLookupIncomplete: a search that did not reach the end proves
 	// nothing about a thread being absent.
 	discordArchivedThreadsPages = 10
+	// discordArchiveCursorOverlap moves the archived cursor past the last
+	// thread's timestamp, so threads archived at that instant are read again
+	// rather than skipped.
+	discordArchiveCursorOverlap = time.Millisecond
 )
 
 // DiscordMessage is a message to post: its content, flags and the users it
@@ -176,8 +181,15 @@ var errDiscordLookupIncomplete = errors.New("discord bot: archived thread list i
 
 // archivedThreads pages GET /channels/{forum}/threads/archived/public, newest
 // archived first, until Discord says there is no more (has_more false).
+// Discord's before is exclusive on archive_timestamp, so a cursor at the
+// last thread's own timestamp would skip a thread archived at the same
+// instant on the far side of the page boundary. The cursor is therefore set
+// just past it, so every tie is read again (and deduplicated), and a page
+// that brings no thread not already seen proves nothing: the list counts as
+// incomplete.
 func (b *DiscordBot) archivedThreads(ctx context.Context, forumID string) ([]DiscordThread, error) {
 	var out []DiscordThread
+	seen := map[string]bool{}
 	before := ""
 	for range discordArchivedThreadsPages {
 		query := url.Values{"limit": {strconv.Itoa(discordArchivedThreadsLimit)}}
@@ -196,20 +208,24 @@ func (b *DiscordBot) archivedThreads(ctx context.Context, forumID string) ([]Dis
 		if err := b.call(ctx, http.MethodGet, "/channels/"+forumID+"/threads/archived/public?"+query.Encode(), nil, &page); err != nil {
 			return nil, err
 		}
+		fresh := false
 		for _, t := range page.Threads {
-			out = append(out, t.DiscordThread)
+			if !seen[t.ID] {
+				seen[t.ID], fresh = true, true
+				out = append(out, t.DiscordThread)
+			}
 		}
 		if !page.HasMore {
 			return out, nil
 		}
-		if len(page.Threads) == 0 {
+		if !fresh {
 			return nil, errDiscordLookupIncomplete
 		}
-		next := page.Threads[len(page.Threads)-1].Metadata.ArchiveTimestamp
-		if next == "" || next == before {
+		last, err := time.Parse(time.RFC3339Nano, page.Threads[len(page.Threads)-1].Metadata.ArchiveTimestamp)
+		if err != nil {
 			return nil, errDiscordLookupIncomplete
 		}
-		before = next
+		before = last.Add(discordArchiveCursorOverlap).UTC().Format(time.RFC3339Nano)
 	}
 	return nil, errDiscordLookupIncomplete
 }

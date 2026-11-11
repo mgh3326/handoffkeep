@@ -503,8 +503,15 @@ func (s *Store) SettleTaskThread(ctx context.Context, now time.Time, x TaskThrea
 		} else {
 			wait = linearDecisionOpBackoff(x.Attempts)
 		}
-		if attempts >= taskThreadMaxAttempts {
+		switch {
+		case attempts >= taskThreadMaxAttempts && create && x.Lookup:
+			// The lookups never ran, so an earlier create may still have
+			// made the thread: that is the operator's, not a failure.
+			gaveUp, set, args = true, `state='`+TaskThreadNeedsOperator+`',attempts=$5,last_error=$6`, append(args, attempts, "create lookup: "+errText)
+		case attempts >= taskThreadMaxAttempts:
 			gaveUp, set, args = true, `state='`+TaskThreadFailed+`',attempts=$5,last_error=$6`, append(args, attempts, errText)
+		}
+		if gaveUp {
 			break
 		}
 		state := TaskThreadActive

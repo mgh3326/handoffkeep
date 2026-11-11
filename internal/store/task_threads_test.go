@@ -284,6 +284,32 @@ func TestTaskThreadUnknownCreateGivesUp(t *testing.T) {
 	if got := threadState(t, s, task.ID); got.State != TaskThreadNeedsOperator || got.Attempts != taskThreadMaxAttempts {
 		t.Fatalf("after the cap %+v", got)
 	}
+
+	// A lookup that never runs (connection failures) also ends
+	// needs_operator at the cap, not failed: the thread may exist.
+	other := startedThreadTask(t, s, testProjectName, "lookup never runs")
+	if _, err := s.QueueTaskThreads(ctx, now, projects); err != nil {
+		t.Fatal(err)
+	}
+	y, found, err := s.ClaimTaskThread(ctx, now)
+	if err != nil || !found || y.TaskID != other.ID {
+		t.Fatalf("claim %+v found=%v err=%v", y, found, err)
+	}
+	if _, err := s.SettleTaskThread(ctx, now, y, TaskThreadResult{Outcome: TaskThreadUnknown, Err: errors.New("context deadline exceeded")}); err != nil {
+		t.Fatal(err)
+	}
+	later := now.Add(TaskThreadLookupDelay + time.Second)
+	y, found, err = s.ClaimTaskThread(ctx, later)
+	if err != nil || !found || !y.Lookup {
+		t.Fatalf("lookup claim %+v found=%v err=%v", y, found, err)
+	}
+	y.Attempts = taskThreadMaxAttempts - 1
+	if gaveUp, err := s.SettleTaskThread(ctx, later, y, TaskThreadResult{Outcome: TaskThreadRetry, Err: errors.New("thread lookup: discord bot: dial tcp: connection refused")}); err != nil || !gaveUp {
+		t.Fatalf("settle gaveUp=%v err=%v", gaveUp, err)
+	}
+	if got := threadState(t, s, other.ID); got.State != TaskThreadNeedsOperator {
+		t.Fatalf("lookup retries exhausted: %+v", got)
+	}
 }
 
 // A PR event that itself starts the task is the thread's first line.

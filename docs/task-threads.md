@@ -73,7 +73,7 @@ is `POST /channels/{thread}/messages`, and a 2xx answer is the new message.
 | `pending` | A thread is owed and is not yet created. |
 | `creating` | A create is claimed and in flight. Or, with no claim, a create's outcome is unknown and hk will look for its thread (below). |
 | `active` | The thread exists. Lines are posted to it. |
-| `needs_operator` | A create's outcome is unknown and the lookup could not settle it: the lookup failed (other than a 429 or a failed connection), was refused or was incomplete, or more than one thread matches. Or the outcome stayed unknown for 32 attempts. hk posts nothing more for the task, and it never creates a second thread. |
+| `needs_operator` | A create's outcome is unknown and the lookup could not settle it: the lookup failed (other than a 429 or a failed connection), was refused or was incomplete, or more than one thread matches. Or the outcome stayed unknown, or the lookup could not run, for 32 attempts. hk posts nothing more for the task, and it never creates a second thread. |
 | `failed` | Discord refused the request with a 4xx other than 429, for example because the webhook or the thread was deleted, or the retries ran out (about a day). |
 
 A 429 answer or a failed connection means Discord did not take the message,
@@ -92,8 +92,10 @@ create can appear, and then it looks for the thread:
 2. It lists the guild's active threads (`GET /guilds/{guild}/threads/active`)
    whose parent is the forum, and the forum's archived public threads
    (`GET /channels/{forum}/threads/archived/public`), page by page until
-   Discord reports no more. If the archived list does not end within 1,000
-   threads, the lookup counts as failed.
+   Discord reports no more. Each page starts just after the last thread's
+   archive time, so threads archived at the same instant are read again,
+   not skipped. If the archived list does not end within 10 pages, or a page
+   brings no new thread, the lookup counts as failed.
 3. A candidate is a thread with exactly the task's thread name whose owner is
    the bot. A thread that someone else made, or that is in another channel,
    is not a candidate.
