@@ -324,6 +324,9 @@ func (s *Store) CreateDisposition(ctx context.Context, in DispositionInput) (Tas
 	if err = scanTask(tx.QueryRow(ctx, `INSERT INTO tasks(lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at,last_activity_at,project,awaiting_decision) VALUES($1,'',$2,'decide','backlog',0,$3::jsonb,$4,$4,$5,$5,$5,$6,true) RETURNING `+taskColumns, in.Lane, in.Title, string(encoded), in.CreatedBy, now, in.Project), &x); err != nil {
 		return Task{}, false, err
 	}
+	if err := s.enqueueYTIssueTx(ctx, tx, x); err != nil {
+		return Task{}, false, err
+	}
 	// The awaiting event carries the question; its id is the item's
 	// generation, which an operator answer must quote.
 	gen, _, err := insertEvent(ctx, tx, taskEventInput{TaskID: x.ID, Kind: TaskEventAwaiting, From: StateBacklog, To: StateBacklog, By: in.CreatedBy, Note: question, Refs: refs, At: now, Field: "awaiting_decision", FromValue: "false", ToValue: "true"})

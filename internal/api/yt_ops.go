@@ -56,6 +56,7 @@ func (s Server) ytOps(w http.ResponseWriter, r *http.Request) {
 type ytOpsResolveInput struct {
 	Applied *bool  `json:"applied"`
 	YTID    string `json:"yt_id"`
+	Adopted *bool  `json:"adopted"`
 	By      string `json:"by"`
 	Note    string `json:"note"`
 }
@@ -82,12 +83,12 @@ func (s Server) ytOpsResolve(w http.ResponseWriter, r *http.Request) {
 		appErr(w, r, err)
 		return
 	}
-	if in.Applied == nil || (*in.Applied && in.YTID == "") || (!*in.Applied && (in.YTID != "" || strings.TrimSpace(in.By) == "" || strings.TrimSpace(in.Note) == "")) {
+	if in.Applied == nil || (*in.Applied && in.YTID == "") || (!*in.Applied && (in.YTID != "" || in.Adopted != nil || strings.TrimSpace(in.By) == "" || strings.TrimSpace(in.Note) == "")) {
 		writeError(w, http.StatusBadRequest, "invalid_context")
 		return
 	}
 	p := &ytwrite.Protocol{Config: ytwrite.Config{Ledger: s.Service.Store.YTWriteLedger(), Now: func() time.Time { return time.Now().UTC() }}}
-	result, err := p.Resolve(r.Context(), id, ytwrite.Resolution{Applied: *in.Applied, YTID: in.YTID, By: in.By, Note: in.Note})
+	result, err := p.Resolve(r.Context(), id, ytwrite.Resolution{Applied: *in.Applied, YTID: in.YTID, Adopted: in.Adopted, By: in.By, Note: in.Note})
 	if err != nil {
 		appErr(w, r, err)
 		return

@@ -54,6 +54,8 @@ func youtrackCmd(args []string, out io.Writer) error {
 		return youtrackCommentsCmd(args[1:], out, false)
 	case "comments-backfill":
 		return youtrackCommentsCmd(args[1:], out, true)
+	case "issues-backfill":
+		return youtrackIssuesBackfillCmd(args[1:], out)
 	case "audit":
 		return youtrackAuditCmd(args[1:], out)
 	default:
@@ -62,7 +64,7 @@ func youtrackCmd(args []string, out io.Writer) error {
 }
 
 // youtrackUsage also answers `yt`, the short name of this command.
-const youtrackUsage = "usage: youtrack sync [--dry-run] | youtrack adopt --state <yt_state.json> [--dry-run] | youtrack projects list|put | youtrack ops [--state S] [--task N] | youtrack canary add|remove|list | youtrack schema plan|apply [--project P] | youtrack comments-preflight [--project P] [--days N] [--all] | youtrack comments-backfill [--project P] [--days N] [--all] [--by NAME] | youtrack audit [--project P] [--task N] [--enqueue] [--limit N]"
+const youtrackUsage = "usage: youtrack sync [--dry-run] | youtrack adopt --state <yt_state.json> [--dry-run] | youtrack projects list|put | youtrack ops [--state S] [--task N] | youtrack canary add|remove|list | youtrack schema plan|apply [--project P] | youtrack comments-preflight [--project P] [--days N] [--all] | youtrack comments-backfill [--project P] [--days N] [--all] [--by NAME] | youtrack audit [--project P] [--task N] [--enqueue] [--limit N] | youtrack issues-backfill [--project P] [--dry-run]"
 
 func youtrackSyncCmd(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("youtrack sync", flag.ContinueOnError)
@@ -214,20 +216,6 @@ func youtrackAdoptCmd(args []string, out io.Writer) error {
 	return nil
 }
 
-// ytIssuesModeFromEnv reads HANDOFFKEEP_YT_ISSUES_MODE: unset or "off" (the
-// default) or "on", trimmed and case-sensitive like the comments mode. Any
-// other value is an error, so a typo fails closed.
-func ytIssuesModeFromEnv() (bool, error) {
-	switch raw := strings.TrimSpace(os.Getenv("HANDOFFKEEP_YT_ISSUES_MODE")); raw {
-	case "", "off":
-		return false, nil
-	case "on":
-		return true, nil
-	default:
-		return false, fmt.Errorf("HANDOFFKEEP_YT_ISSUES_MODE=%q: want off or on", raw)
-	}
-}
-
 // youtrackProtocolOwner names the env setting that hands YouTrack writes to
 // the write protocol, or returns "" when none is set: comments mode canary or
 // on, or issues mode on. An unparsable mode is an error, so the guard fails
@@ -244,7 +232,7 @@ func youtrackProtocolOwner() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if issues {
+	if issues == store.YTIssuesOn {
 		return "HANDOFFKEEP_YT_ISSUES_MODE=on", nil
 	}
 	return "", nil

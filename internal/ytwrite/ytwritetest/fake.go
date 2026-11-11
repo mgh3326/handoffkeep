@@ -32,8 +32,9 @@ const (
 	Refuse
 )
 
-// Fault is one queued failure; the fake takes one per CreateComment call, in
-// order, and behaves normally once the queue is empty.
+// Fault is one queued failure; the fake takes one per create call
+// (CreateComment or CreateIssue), in order, and behaves normally once the
+// queue is empty.
 type Fault struct {
 	Kind       FaultKind
 	Status     int
@@ -41,8 +42,9 @@ type Fault struct {
 	Commit     bool
 }
 
-// FakeYouTrack is an in-memory YouTrack comment store with the failure modes
-// the protocol must survive. It implements ytwrite.Remote.
+// FakeYouTrack is an in-memory YouTrack comment and issue store with the
+// failure modes the protocol must survive. It implements ytwrite.Remote and
+// ytwrite.IssueRemote.
 type FakeYouTrack struct {
 	mu         sync.Mutex
 	faults     []Fault
@@ -55,6 +57,16 @@ type FakeYouTrack struct {
 	listFail   int
 	shiftPages bool
 	latency    time.Duration
+	// projects holds the issues by YouTrack project id; findFaults are the
+	// errors the next FindTaskIssues calls return, in order.
+	projects   map[string][]*fakeIssue
+	findFaults []error
+	finds      int
+	// fieldsMissing names the projects whose issue fields are not set up;
+	// projectText those whose hk project field is text.
+	fieldsMissing map[string]bool
+	projectText   map[string]bool
+	created       []ytwrite.IssueCreate
 
 	// BeforeCreate runs at the start of every CreateComment, with the caller's
 	// context, before anything else. Tests use it to cancel a caller mid-call.
@@ -63,8 +75,15 @@ type FakeYouTrack struct {
 
 type delayedComment struct{ issue, text string }
 
+type fakeIssue struct {
+	ytwrite.RemoteIssue
+	hkID int64
+}
+
 // NewFake returns an empty fake with no faults queued.
-func NewFake() *FakeYouTrack { return &FakeYouTrack{issues: map[string][]*ytwrite.RemoteComment{}} }
+func NewFake() *FakeYouTrack {
+	return &FakeYouTrack{issues: map[string][]*ytwrite.RemoteComment{}, projects: map[string][]*fakeIssue{}, fieldsMissing: map[string]bool{}, projectText: map[string]bool{}}
+}
 
 // Queue adds faults for the next CreateComment calls.
 func (f *FakeYouTrack) Queue(faults ...Fault) {
@@ -86,8 +105,9 @@ func (f *FakeYouTrack) FailLists(n int) { f.mu.Lock(); f.listFail = n; f.mu.Unlo
 // SetLatency makes every CreateComment take d, to widen race windows.
 func (f *FakeYouTrack) SetLatency(d time.Duration) { f.mu.Lock(); f.latency = d; f.mu.Unlock() }
 
-// Calls is the number of CreateComment calls received, Commits the number of
-// comments that actually exist because of them.
+// Calls is the number of create calls (CreateComment, CreateIssue) received,
+// Commits the number of comments or issues that actually exist because of
+// them.
 func (f *FakeYouTrack) Calls() int   { f.mu.Lock(); defer f.mu.Unlock(); return f.calls }
 func (f *FakeYouTrack) Commits() int { f.mu.Lock(); defer f.mu.Unlock(); return f.commits }
 
@@ -425,4 +445,145 @@ func (c *CrashLedger) MapGet(ctx context.Context, entityKind, hkKey string) (ytw
 		return ytwrite.MapRow{}, false, err
 	}
 	return c.Ledger.MapGet(ctx, entityKind, hkKey)
+}
+
+// InjectIssue adds an issue hk did not create (or created earlier) to the
+// project, carrying hk ID taskID, and returns its id.
+func (f *FakeYouTrack) InjectIssue(projectID string, taskID int64, summary, description string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.addIssueLocked(projectID, taskID, summary, description)
+}
+
+// Issues returns a copy of the project's issues, oldest first.
+func (f *FakeYouTrack) Issues(projectID string) []ytwrite.RemoteIssue {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]ytwrite.RemoteIssue, 0, len(f.projects[projectID]))
+	for _, i := range f.projects[projectID] {
+		out = append(out, i.RemoteIssue)
+	}
+	return out
+}
+
+// QueueFind makes the next FindTaskIssues calls return errs, in order.
+func (f *FakeYouTrack) QueueFind(errs ...error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.findFaults = append(f.findFaults, errs...)
+}
+
+// Finds is the number of FindTaskIssues calls received.
+func (f *FakeYouTrack) Finds() int { f.mu.Lock(); defer f.mu.Unlock(); return f.finds }
+
+func (f *FakeYouTrack) addIssueLocked(projectID string, taskID int64, summary, description string) string {
+	f.nextID++
+	id := fmt.Sprintf("2-%d", f.nextID)
+	f.projects[projectID] = append(f.projects[projectID], &fakeIssue{
+		RemoteIssue: ytwrite.RemoteIssue{ID: id, Readable: fmt.Sprintf("HK-%d", f.nextID), ProjectID: projectID, Summary: summary, Description: description},
+		hkID:        taskID,
+	})
+	return id
+}
+
+// FindTaskIssues returns every issue of the project carrying hk ID taskID.
+// The short name is not checked: the fake keys issues by project id.
+func (f *FakeYouTrack) FindTaskIssues(ctx context.Context, _, projectID string, taskID int64) ([]ytwrite.RemoteIssue, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.finds++
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if len(f.findFaults) > 0 {
+		err := f.findFaults[0]
+		f.findFaults = f.findFaults[1:]
+		return nil, err
+	}
+	out := []ytwrite.RemoteIssue{}
+	for _, i := range f.projects[projectID] {
+		if i.hkID == taskID {
+			out = append(out, i.RemoteIssue)
+		}
+	}
+	return out, nil
+}
+
+// CreateIssue creates one issue, failing as the next queued Fault says (as
+// CreateComment does).
+func (f *FakeYouTrack) CreateIssue(ctx context.Context, in ytwrite.IssueCreate) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	f.created = append(f.created, in)
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	var fault Fault
+	if len(f.faults) > 0 {
+		fault, f.faults = f.faults[0], f.faults[1:]
+	}
+	commit := func() string {
+		f.commits++
+		return f.addIssueLocked(in.ProjectID, in.TaskID, in.Summary, in.Description)
+	}
+	switch fault.Kind {
+	case CommitDropReply:
+		commit()
+		return "", errConnReset
+	case NoID:
+		commit()
+		return "", nil
+	case RateLimit:
+		return "", &ytwrite.RemoteError{Status: http.StatusTooManyRequests, RetryAfter: fault.RetryAfter, Message: "rate limited"}
+	case ServerError:
+		if fault.Commit {
+			commit()
+		}
+		st := fault.Status
+		if st == 0 {
+			st = http.StatusBadGateway
+		}
+		return "", &ytwrite.RemoteError{Status: st, Message: "server error"}
+	case Refuse:
+		return "", &ytwrite.RemoteError{Status: fault.Status, Message: "refused"}
+	case DelayCommit:
+		panic("ytwritetest: DelayCommit is not supported for issues")
+	}
+	return commit(), nil
+}
+
+// SetIssueFieldsMissing makes CheckIssueFields refuse the project (missing
+// true) or accept it again.
+func (f *FakeYouTrack) SetIssueFieldsMissing(projectID string, missing bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.fieldsMissing[projectID] = missing
+}
+
+// SetProjectFieldText makes the project's hk project field a text field.
+func (f *FakeYouTrack) SetProjectFieldText(projectID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.projectText[projectID] = true
+}
+
+// Created returns every IssueCreate the fake received, in order.
+func (f *FakeYouTrack) Created() []ytwrite.IssueCreate {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]ytwrite.IssueCreate(nil), f.created...)
+}
+
+// CheckIssueFields refuses a project marked by SetIssueFieldsMissing.
+func (f *FakeYouTrack) CheckIssueFields(ctx context.Context, projectID, _ string) (ytwrite.IssueFields, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return ytwrite.IssueFields{}, err
+	}
+	if f.fieldsMissing[projectID] {
+		return ytwrite.IssueFields{}, fmt.Errorf("project %s has no hk ID field", projectID)
+	}
+	return ytwrite.IssueFields{ProjectText: f.projectText[projectID]}, nil
 }

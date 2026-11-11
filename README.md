@@ -560,7 +560,10 @@ exists. `GET /v1/yt/ops?state=&task=&after_id=&limit=`
 (`handoffkeep youtrack ops`, alias `yt ops`) lists those writes; see
 `docs/youtrack-write-protocol.md`. `HANDOFFKEEP_YT_COMMENTS_MODE=on` does the
 same for every task with a verified binding (`handoffkeep youtrack
-comments-preflight` and `comments-backfill`, same document). Neither mode turns
+comments-preflight` and `comments-backfill`, same document).
+`HANDOFFKEEP_YT_ISSUES_MODE=on` has hk create each new task's YouTrack issue
+through the same protocol (`handoffkeep youtrack issues-backfill` prepares it
+for existing tasks; same document). None of these modes turns
 on serve's YouTrack read-through, which has its own
 `HANDOFFKEEP_YT_READTHROUGH_MODE` (`docs/youtrack.md`).
 

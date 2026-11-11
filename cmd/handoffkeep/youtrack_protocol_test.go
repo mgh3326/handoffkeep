@@ -5,6 +5,8 @@ import (
 	"io"
 	"strings"
 	"testing"
+
+	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
 // protocolTestDB points at a port nothing listens on. The guard must refuse
@@ -106,7 +108,7 @@ func TestYouTrackLegacyPushUnparsableModeFailsClosed(t *testing.T) {
 }
 
 func TestYTIssuesModeFromEnv(t *testing.T) {
-	for raw, want := range map[string]bool{"": false, "off": false, " off ": false, "on": true, " on ": true} {
+	for raw, want := range map[string]store.YTIssuesMode{"": store.YTIssuesOff, "off": store.YTIssuesOff, " off ": store.YTIssuesOff, "on": store.YTIssuesOn, " on ": store.YTIssuesOn} {
 		t.Setenv("HANDOFFKEEP_YT_ISSUES_MODE", raw)
 		if got, err := ytIssuesModeFromEnv(); err != nil || got != want {
 			t.Errorf("%q: got %v err %v, want %v", raw, got, err, want)

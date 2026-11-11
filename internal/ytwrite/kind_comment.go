@@ -48,3 +48,5 @@ func (k commentAppend) Evidence(ctx context.Context, remote Remote, op Op, text 
 	}
 	return ev, nil
 }
+
+func (commentAppend) MapRows(op Op, ytID string) []MapRow { return []MapRow{commentMap(op, ytID)} }

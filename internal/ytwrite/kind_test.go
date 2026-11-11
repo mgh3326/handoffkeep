@@ -3,6 +3,7 @@ package ytwrite_test
 import (
 	"context"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -48,7 +49,7 @@ func TestCommentRenderGolden(t *testing.T) {
 }
 
 func TestRegisteredKinds(t *testing.T) {
-	if got := ytwrite.RegisteredKinds(); len(got) != 1 || got[0] != ytwrite.KindCommentAppend {
+	if got := ytwrite.RegisteredKinds(); len(got) != 2 || got[0] != ytwrite.KindCommentAppend || got[1] != ytwrite.KindIssueCreate {
 		t.Fatalf("registered kinds %v", got)
 	}
 }
@@ -90,6 +91,10 @@ func (k *noteKind) Evidence(ctx context.Context, remote ytwrite.Remote, op ytwri
 		}
 	}
 	return ev, nil
+}
+
+func (*noteKind) MapRows(op ytwrite.Op, ytID string) []ytwrite.MapRow {
+	return []ytwrite.MapRow{{EntityKind: "note", HKKey: "op:" + strconv.FormatInt(op.ID, 10), YTID: ytID, YTParentID: op.YTTargetID, OpID: op.ID}}
 }
 
 type kindEnv struct {

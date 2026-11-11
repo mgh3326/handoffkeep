@@ -579,6 +579,9 @@ type Store struct {
 	// yt_comment_canary, on those of tasks with a consistent yt_task_bindings
 	// row, in the comment's transaction.
 	ytCommentsMode atomic.Value
+	// ytIssues is the YouTrack issue gate and tenant (SetYTIssuesMode); nil
+	// is off. On prepares an issue_create op in each new task's transaction.
+	ytIssues atomic.Pointer[ytIssuesGate]
 	// ytBindingChecked, when set (tests only), runs inside AddYTTaskBinding
 	// after every check has passed and before the binding row is inserted,
 	// with every lock of the publication held.
@@ -2578,6 +2581,9 @@ func (s *Store) createTask(ctx context.Context, x Task, check *DuplicateCheck) (
 		if err = enqueueLinearTaskCreate(ctx, tx, x); err != nil {
 			return x, err
 		}
+	}
+	if err = s.enqueueYTIssueTx(ctx, tx, x); err != nil {
+		return x, err
 	}
 	return x, tx.Commit(ctx)
 }

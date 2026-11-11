@@ -42,7 +42,10 @@ type WriteRemote struct {
 	Now func() time.Time
 }
 
-var _ ytwrite.Remote = (*WriteRemote)(nil)
+var (
+	_ ytwrite.Remote      = (*WriteRemote)(nil)
+	_ ytwrite.IssueRemote = (*WriteRemote)(nil)
+)
 
 // NewWriteRemote wraps a configured client.
 func NewWriteRemote(c *Client) *WriteRemote {
@@ -220,6 +223,156 @@ func (r *WriteRemote) GetIssue(ctx context.Context, issueID string) (Issue, erro
 	var out Issue
 	if err := json.Unmarshal(data, &out); err != nil {
 		return Issue{}, fmt.Errorf("youtrack GET issue %s: decode: %w", issueID, err)
+	}
+	return out, nil
+}
+
+// taskIssueSearchTop is the page an issue search asks for. A task has one
+// issue; a full page cannot be proven complete and is an error.
+const taskIssueSearchTop = 50
+
+// FindTaskIssues searches the project for the issues whose hk ID is taskID in
+// one request (issue_create, hk 3898), checking each hit against the project
+// id and the field value as FindIssueByField does.
+func (r *WriteRemote) FindTaskIssues(ctx context.Context, projectShort, projectID string, taskID int64) ([]ytwrite.RemoteIssue, error) {
+	field := DefaultSchema().HKIDField
+	data, readErr, err := r.send(ctx, http.MethodGet, "/api/issues", issueFieldQuery(projectShort, field, taskID, taskIssueSearchTop), nil)
+	if err != nil {
+		return nil, err
+	}
+	if readErr != nil {
+		return nil, readErr
+	}
+	var page []Issue
+	if err := json.Unmarshal(data, &page); err != nil {
+		return nil, fmt.Errorf("youtrack GET /api/issues: decode: %w", err)
+	}
+	if len(page) >= taskIssueSearchTop {
+		return nil, fmt.Errorf("youtrack GET /api/issues: %d or more issues match hk ID %d; the search is not complete", taskIssueSearchTop, taskID)
+	}
+	out := []ytwrite.RemoteIssue{}
+	for _, issue := range page {
+		if !issueHasField(issue, projectID, field, taskID) {
+			continue
+		}
+		hit := ytwrite.RemoteIssue{ID: issue.ID, Readable: issue.IDReadable, Summary: issue.Summary, Description: issue.Description}
+		if issue.Project != nil {
+			hit.ProjectID = issue.Project.ID
+		}
+		out = append(out, hit)
+	}
+	return out, nil
+}
+
+// CreateIssue makes one POST /api/issues with the project, summary,
+// description and only the hk ID and hk 프로젝트 fields (issue_create): the
+// other fields are a later op's, and leaving them out keeps their usual 4xx
+// causes out of the create.
+func (r *WriteRemote) CreateIssue(ctx context.Context, in ytwrite.IssueCreate) (string, error) {
+	schema := DefaultSchema()
+	fields := []CustomField{IntField(schema.HKIDField, int(in.TaskID))}
+	switch {
+	case in.HKProject == "":
+	case in.HKProjectText:
+		fields = append(fields, StringField(schema.ProjectField, in.HKProject))
+	default:
+		fields = append(fields, EnumField(schema.ProjectField, in.HKProject))
+	}
+	body := issueBody{Summary: in.Summary, Description: in.Description, CustomFields: fields}
+	body.Project.ID = in.ProjectID
+	q := url.Values{}
+	q.Set("fields", "id")
+	data, readErr, err := r.send(ctx, http.MethodPost, "/api/issues", q, body)
+	if err != nil {
+		return "", err
+	}
+	if readErr != nil {
+		// The issue may exist; the id is unknown.
+		return "", nil
+	}
+	var out struct {
+		ID string `json:"id"`
+	}
+	if json.Unmarshal(data, &out) != nil {
+		return "", nil
+	}
+	return out.ID, nil
+}
+
+// issueFieldsTop is the page of project fields CheckIssueFields asks for; a
+// full page cannot be proven complete.
+const issueFieldsTop = 200
+
+// CheckIssueFields reads the project's fields in one request and reports a
+// missing hk ID field, a missing hk 프로젝트 field, or (for an enum field, the
+// legacy push's shape) hkProject missing or archived among its values, so
+// issue_create holds its op instead of having the search or the create
+// refused for good. A text hk 프로젝트 field (the importer's shape) is
+// reported so the create sends text.
+func (r *WriteRemote) CheckIssueFields(ctx context.Context, projectID, hkProject string) (ytwrite.IssueFields, error) {
+	schema := DefaultSchema()
+	q := url.Values{}
+	q.Set("fields", "$type,field(name),bundle(id,values(name,archived))")
+	q.Set("$top", strconv.Itoa(issueFieldsTop))
+	path := "/api/admin/projects/" + url.PathEscape(projectID) + "/customFields"
+	var none ytwrite.IssueFields
+	data, readErr, err := r.send(ctx, http.MethodGet, path, q, nil)
+	if err != nil {
+		return none, err
+	}
+	if readErr != nil {
+		return none, readErr
+	}
+	var fields []struct {
+		Type  string `json:"$type"`
+		Field struct {
+			Name string `json:"name"`
+		} `json:"field"`
+		Bundle *struct {
+			Values []struct {
+				Name     string `json:"name"`
+				Archived bool   `json:"archived"`
+			} `json:"values"`
+		} `json:"bundle"`
+	}
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return none, fmt.Errorf("youtrack GET %s: decode: %w", path, err)
+	}
+	if len(fields) >= issueFieldsTop {
+		return none, fmt.Errorf("youtrack GET %s: %d or more fields; the listing is not complete", path, issueFieldsTop)
+	}
+	var out ytwrite.IssueFields
+	hasID, hasProject, hasValue := false, false, hkProject == ""
+	for _, f := range fields {
+		switch f.Field.Name {
+		case schema.HKIDField:
+			hasID = true
+		case schema.ProjectField:
+			hasProject = true
+			switch f.Type {
+			case "SimpleProjectCustomField", "TextProjectCustomField":
+				// The importer's text field takes any value.
+				out.ProjectText, hasValue = true, true
+			case "EnumProjectCustomField":
+			default:
+				return none, fmt.Errorf("youtrack project %s: %q is a %s, not a text or enum field", projectID, schema.ProjectField, f.Type)
+			}
+			if f.Bundle != nil {
+				for _, v := range f.Bundle.Values {
+					if v.Name == hkProject && !v.Archived {
+						hasValue = true
+					}
+				}
+			}
+		}
+	}
+	switch {
+	case !hasID:
+		return none, fmt.Errorf("youtrack project %s has no %q field", projectID, schema.HKIDField)
+	case !hasProject && hkProject != "":
+		return none, fmt.Errorf("youtrack project %s has no %q field", projectID, schema.ProjectField)
+	case !hasValue:
+		return none, fmt.Errorf("youtrack project %s: %q has no value %q", projectID, schema.ProjectField, hkProject)
 	}
 	return out, nil
 }

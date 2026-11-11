@@ -364,6 +364,13 @@ func (s *Store) AddYTCommentCanary(ctx context.Context, c YTCommentCanary, verif
 	if bound {
 		return YTCommentCanary{}, fmt.Errorf("%w: yt_task_bindings binds task %d or issue %s elsewhere", ErrYTCanaryConflict, c.TaskID, c.IssueID)
 	}
+	pending, err := ytIssueOpPendingTx(ctx, tx, c.TaskID)
+	if err != nil {
+		return YTCommentCanary{}, err
+	}
+	if pending {
+		return YTCommentCanary{}, fmt.Errorf("%w: task %d has an unresolved issue_create op (hk 3898)", ErrYTCanaryConflict, c.TaskID)
+	}
 	var got YTCommentCanary
 	err = scanYTCanary(tx.QueryRow(ctx, `INSERT INTO yt_comment_canary(`+ytCanaryColumns+`) VALUES ($1,$2,$3,$4,$5,$6,$7)
 		ON CONFLICT DO NOTHING RETURNING `+ytCanaryColumns,
@@ -442,6 +449,8 @@ func (s *Store) YTCommentEchoOp(ctx context.Context, opID int64, issueID string)
 
 // YTOpFilter selects ops for the operator's view. State is a lifecycle state,
 // "pending" (prepared, dispatched or remote_unknown; the default) or "all".
+// "rejected" also lists applied ops whose binding was not published
+// (reason binding_conflict).
 type YTOpFilter struct {
 	State   string
 	TaskID  int64
@@ -477,8 +486,11 @@ func (s *Store) ListYTWriteOps(ctx context.Context, f YTOpFilter) ([]ytwrite.Op,
 	if f.TaskID > 0 {
 		task = strconv.FormatInt(f.TaskID, 10)
 	}
+	// An applied issue_create op whose binding was not published is listed
+	// with the rejected ops: the task has an issue hk does not use.
+	conflicts := len(states) == 1 && states[0] == string(ytwrite.StateRejected)
 	return s.YTWriteLedger().list(ctx, `SELECT `+ytOpColumns+` FROM yt_write_ops
-		WHERE (cardinality($1::text[]) = 0 OR state = ANY($1::text[]))
+		WHERE (cardinality($1::text[]) = 0 OR state = ANY($1::text[]) OR ($5 AND state = 'applied' AND reason = '`+ytwrite.ReasonBindingConflict+`'))
 		AND ($2 = '' OR (entity_kind = 'task' AND entity_id = $2))
-		AND id > $3 ORDER BY id LIMIT $4`, states, task, f.AfterID, f.Limit)
+		AND id > $3 ORDER BY id LIMIT $4`, states, task, f.AfterID, f.Limit, conflicts)
 }

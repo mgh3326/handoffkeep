@@ -36,7 +36,18 @@ type YTTaskBinding struct {
 	// cover: the task's highest comment id when the binding was published.
 	// Only a comment above it is ever copied (CatchUpYTComments).
 	CommentsFrom int64 `json:"comments_from"`
+	// Origin is how the binding was published: YTBindingImportVerified
+	// (`youtrack comments-backfill`) or YTBindingOpApplied (an applied
+	// issue_create op, OpID). Set by the store, never by a caller.
+	Origin string `json:"origin"`
+	OpID   int64  `json:"op_id,omitempty"`
 }
+
+// The origins of a binding (yt_task_bindings.origin).
+const (
+	YTBindingImportVerified = "import_verified"
+	YTBindingOpApplied      = "op_applied"
+)
 
 // ErrYTBindingConflict is a binding that disagrees with a mapping hk already
 // keeps, or one verified against mappings that changed since.
@@ -122,10 +133,10 @@ func (s *Store) YTBindingDisagreement(ctx context.Context, b YTTaskBinding) (str
 	return ytBindingDisagreement(ctx, s.pool, b)
 }
 
-const ytBindingColumns = `task_id, tenant, issue_id, issue_readable, project_id, bound_by, bound_at, comments_from`
+const ytBindingColumns = `task_id, tenant, issue_id, issue_readable, project_id, bound_by, bound_at, comments_from, origin, coalesce(op_id, 0)`
 
 func scanYTBinding(row interface{ Scan(...any) error }, b *YTTaskBinding) error {
-	err := row.Scan(&b.TaskID, &b.Tenant, &b.IssueID, &b.IssueReadable, &b.ProjectID, &b.BoundBy, &b.BoundAt, &b.CommentsFrom)
+	err := row.Scan(&b.TaskID, &b.Tenant, &b.IssueID, &b.IssueReadable, &b.ProjectID, &b.BoundBy, &b.BoundAt, &b.CommentsFrom, &b.Origin, &b.OpID)
 	b.BoundAt = b.BoundAt.UTC()
 	return err
 }
@@ -276,6 +287,17 @@ func (s *Store) AddYTTaskBinding(ctx context.Context, b YTTaskBinding, verified 
 	if err != nil {
 		return YTTaskBinding{}, err
 	}
+	if !found {
+		// hk is creating (or adopting) the task's issue itself (hk 3898):
+		// that op publishes the binding when it is applied.
+		pending, err := ytIssueOpPendingTx(ctx, tx, b.TaskID)
+		if err != nil {
+			return YTTaskBinding{}, err
+		}
+		if pending {
+			return YTTaskBinding{}, fmt.Errorf("%w: task %d has an unresolved issue_create op", ErrYTBindingConflict, b.TaskID)
+		}
+	}
 	if found {
 		if have.Tenant != b.Tenant || have.IssueID != b.IssueID {
 			return YTTaskBinding{}, fmt.Errorf("%w: task %d is bound to issue %s on %s", ErrYTBindingConflict, b.TaskID, have.IssueID, have.Tenant)
@@ -293,7 +315,7 @@ func (s *Store) AddYTTaskBinding(ctx context.Context, b YTTaskBinding, verified 
 		s.ytBindingChecked()
 	}
 	var got YTTaskBinding
-	err = scanYTBinding(tx.QueryRow(ctx, `INSERT INTO yt_task_bindings(`+ytBindingColumns+`)
+	err = scanYTBinding(tx.QueryRow(ctx, `INSERT INTO yt_task_bindings(task_id, tenant, issue_id, issue_readable, project_id, bound_by, bound_at, comments_from)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,(SELECT coalesce(max(id),0) FROM task_comments WHERE task_id=$1))
 		ON CONFLICT DO NOTHING RETURNING `+ytBindingColumns,
 		b.TaskID, b.Tenant, b.IssueID, b.IssueReadable, b.ProjectID, b.BoundBy, time.Now().UTC()), &got)

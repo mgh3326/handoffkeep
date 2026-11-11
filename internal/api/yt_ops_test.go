@@ -54,6 +54,9 @@ func TestYTOpsResolveHTTPIsOperatorOnlyAndUsesProtocol(t *testing.T) {
 	if status, body := post("peer-token", op.ID, map[string]any{"applied": true, "yt_id": "c-42", "by": "operator"}); status != http.StatusForbidden || body["error"] != "operator_required" {
 		t.Fatalf("peer resolve = %d %v", status, body)
 	}
+	if status, body := post("op-token", op.ID, map[string]any{"applied": false, "adopted": true, "by": "operator", "note": "n"}); status != http.StatusBadRequest || body["error"] != "invalid_context" {
+		t.Fatalf("adopted without applied = %d %v", status, body)
+	}
 	if status, body := post("op-token", op.ID, map[string]any{"applied": true, "yt_id": "c-42", "by": "operator"}); status != http.StatusOK || body["state"] != string(ytwrite.StateApplied) {
 		t.Fatalf("operator resolve = %d %v", status, body)
 	}

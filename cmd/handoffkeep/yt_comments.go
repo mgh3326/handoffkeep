@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mgh3326/handoffkeep/internal/remote"
 	"github.com/mgh3326/handoffkeep/internal/store"
 	"github.com/mgh3326/handoffkeep/internal/youtrack"
 	"github.com/mgh3326/handoffkeep/internal/ytwrite"
@@ -59,6 +60,20 @@ func ytCommentsModeFromEnv() (store.YTCommentsMode, error) {
 	}
 }
 
+// ytIssuesModeFromEnv reads HANDOFFKEEP_YT_ISSUES_MODE (hk 3898): unset or
+// "off" (the default) or "on", trimmed and exactly in lower case like the
+// comments mode. Any other value is an error.
+func ytIssuesModeFromEnv() (store.YTIssuesMode, error) {
+	switch raw := strings.TrimSpace(os.Getenv("HANDOFFKEEP_YT_ISSUES_MODE")); raw {
+	case "", string(store.YTIssuesOff):
+		return store.YTIssuesOff, nil
+	case string(store.YTIssuesOn):
+		return store.YTIssuesOn, nil
+	default:
+		return "", fmt.Errorf("HANDOFFKEEP_YT_ISSUES_MODE=%q: want off or on", raw)
+	}
+}
+
 // ytCommentsCatchUpFromEnv reads HANDOFFKEEP_YT_COMMENTS_CATCHUP: unset or
 // "off" (the default) runs no catch-up, "on" runs it before each Drive pass
 // in mode on. Any other value is an error, as for the mode. The catch-up
@@ -76,13 +91,17 @@ func ytCommentsCatchUpFromEnv() (bool, error) {
 	}
 }
 
-// ytCommentsWorkerFromEnv sets the store's gate and returns the dispatcher
-// for serve's worker list, or nil when the mode is off (which needs no
-// YouTrack configuration). canary or on without YOUTRACK_URL and
-// YOUTRACK_BOT_API_KEY is a startup error, never a writer that silently does
-// nothing.
+// ytCommentsWorkerFromEnv sets the store's gates and returns the write
+// dispatcher for serve's worker list, or nil when the comments mode and the
+// issues mode are both off (which needs no YouTrack configuration). Either on
+// without YOUTRACK_URL and YOUTRACK_BOT_API_KEY is a startup error, never a
+// writer that silently does nothing.
 func ytCommentsWorkerFromEnv(st *store.Store) (backgroundWorker, error) {
 	mode, err := ytCommentsModeFromEnv()
+	if err != nil {
+		return nil, err
+	}
+	issues, err := ytIssuesModeFromEnv()
 	if err != nil {
 		return nil, err
 	}
@@ -90,30 +109,60 @@ func ytCommentsWorkerFromEnv(st *store.Store) (backgroundWorker, error) {
 	if err != nil {
 		return nil, err
 	}
-	if mode == store.YTCommentsOff {
+	if mode == store.YTCommentsOff && issues == store.YTIssuesOff {
 		if st != nil {
 			st.SetYTCommentsMode(store.YTCommentsOff)
+			st.SetYTIssuesMode(store.YTIssuesOff, "")
 		}
 		return nil, nil
+	}
+	which := "HANDOFFKEEP_YT_COMMENTS_MODE=" + string(mode)
+	if mode == store.YTCommentsOff {
+		which = "HANDOFFKEEP_YT_ISSUES_MODE=" + string(issues)
 	}
 	baseURL := strings.TrimSpace(os.Getenv("YOUTRACK_URL"))
 	token := strings.TrimSpace(os.Getenv("YOUTRACK_BOT_API_KEY"))
 	if baseURL == "" || token == "" {
-		return nil, fmt.Errorf("HANDOFFKEEP_YT_COMMENTS_MODE=%s needs YOUTRACK_URL and YOUTRACK_BOT_API_KEY", mode)
+		return nil, fmt.Errorf("%s needs YOUTRACK_URL and YOUTRACK_BOT_API_KEY", which)
 	}
 	if st == nil {
-		return nil, fmt.Errorf("HANDOFFKEEP_YT_COMMENTS_MODE=%s needs the store", mode)
+		return nil, fmt.Errorf("%s needs the store", which)
 	}
 	client, err := youtrack.New(youtrack.Config{BaseURL: baseURL, Token: token, UserAgent: "handoffkeep-ytwrite"})
 	if err != nil {
 		return nil, err
 	}
 	remote := youtrack.NewWriteRemote(client)
-	w, err := newYTCommentsWorker(st, remote, remote.Tenant(), mode, catchUp, nil)
+	w, err := newYTWriteWorker(st, remote, remote.Tenant(), mode, issues, catchUp, nil)
 	if err != nil {
 		return nil, err
 	}
 	return w, nil
+}
+
+// newYTWriteWorker sets both gates (the comments mode may be off when the
+// issues mode is on) and builds the dispatcher for one tenant over remote.
+// catchUp applies to the comments mode only.
+func newYTWriteWorker(st *store.Store, remote ytwrite.Remote, tenant string, comments store.YTCommentsMode, issues store.YTIssuesMode, catchUp bool, now func() time.Time) (ytCommentsWorker, error) {
+	if comments == store.YTCommentsOff && issues != store.YTIssuesOn {
+		return ytCommentsWorker{}, errors.New("the write worker runs with the comments mode or the issues mode on")
+	}
+	st.SetYTIssuesMode(issues, tenant)
+	log.Printf("ytwrite.issues_mode mode=%s tenant=%q", issues, tenant)
+	if comments != store.YTCommentsOff {
+		return newYTCommentsWorker(st, remote, tenant, comments, catchUp, now)
+	}
+	p, err := ytwrite.New(st.YTCommentConfig(tenant, ytwrite.Config{
+		Remote:          remote,
+		Now:             now,
+		DispatchTimeout: ytCommentsDispatchTimeout,
+		SettleTimeout:   ytCommentsSettleTimeout,
+	}))
+	if err != nil {
+		return ytCommentsWorker{}, err
+	}
+	st.SetYTCommentsMode(store.YTCommentsOff)
+	return ytCommentsWorker{protocol: p}, nil
 }
 
 // newYTCommentsWorker sets the gate to mode (canary or on) and builds the
@@ -222,7 +271,7 @@ func (w ytOpsAlertWorker) Run(ctx context.Context) {
 	}
 }
 
-const youtrackOpsUsage = "usage: youtrack ops [--state pending|all|prepared|dispatched|applied|rejected|remote_unknown] [--task N] [--after-id N] [--limit N] | youtrack ops resolve <op id> --applied <youtrack id> | --not-applied --by <actor> --note <text>"
+const youtrackOpsUsage = "usage: youtrack ops [--state pending|all|prepared|dispatched|applied|rejected|remote_unknown] [--task N] [--after-id N] [--limit N] | youtrack ops resolve <op id> --applied <youtrack id> [--adopted] | --not-applied --by <actor> --note <text>"
 
 // youtrackOpsCmd is `youtrack ops` (also `yt ops`): the write-protocol ops
 // through GET /v1/yt/ops. remote_unknown shows status pending, never done.
@@ -274,6 +323,7 @@ func youtrackOpsResolveCmd(args []string, out io.Writer) error {
 	fs.SetOutput(io.Discard)
 	appliedID := fs.String("applied", "", "YouTrack comment id when the op was applied")
 	notApplied := fs.Bool("not-applied", false, "record that the comment was not applied")
+	adopted := fs.Bool("adopted", false, "with --applied on an issue_create op: the issue existed before the op (its history is not copied again)")
 	by := fs.String("by", "", "operator who checked YouTrack")
 	note := fs.String("note", "", "operator's resolution note")
 	c := remoteClient(fs)
@@ -284,7 +334,7 @@ func youtrackOpsResolveCmd(args []string, out io.Writer) error {
 	if err := fs.Parse(ordered); err != nil {
 		return err
 	}
-	if fs.NArg() != 1 || (*appliedID != "") == *notApplied {
+	if fs.NArg() != 1 || (*appliedID != "") == *notApplied || (*adopted && *notApplied) {
 		return errors.New(youtrackOpsUsage)
 	}
 	if *notApplied && (strings.TrimSpace(*by) == "" || strings.TrimSpace(*note) == "") {
@@ -299,15 +349,39 @@ func youtrackOpsResolveCmd(args []string, out io.Writer) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	// An issue_create op needs the provenance stated (created unless
+	// --adopted); every other op keeps the request shape a server that
+	// predates the field accepts, so the op's kind is read first (GET
+	// /v1/yt/ops, which every release serves).
+	var provenance *bool
+	if !*notApplied {
+		issue, err := ytOpIsIssueCreate(ctx, *c, id)
+		if err != nil {
+			return err
+		}
+		if issue || *adopted {
+			provenance = adopted
+		}
+	}
 	actor := *by
 	if actor == "" {
 		actor = "operator:cli"
 	}
-	result, err := c.ResolveYTOp(ctx, id, ytwrite.Resolution{Applied: !*notApplied, YTID: *appliedID, By: actor, Note: *note})
+	result, err := c.ResolveYTOp(ctx, id, ytwrite.Resolution{Applied: !*notApplied, YTID: *appliedID, Adopted: provenance, By: actor, Note: *note})
 	if err != nil {
 		return err
 	}
 	return printJSON(out, map[string]any{"op_id": result.OpID, "status": result.Status, "state": result.State, "reason": result.Reason, "yt_id": result.YTID})
+}
+
+// ytOpIsIssueCreate reads whether op id is an issue_create op. An op the
+// listing does not return is not one; the server answers the resolution.
+func ytOpIsIssueCreate(ctx context.Context, c remote.Client, id int64) (bool, error) {
+	ops, _, err := c.ListYTOps(ctx, "all", 0, id-1, 1)
+	if err != nil {
+		return false, err
+	}
+	return len(ops) == 1 && ops[0].ID == id && ops[0].Kind == ytwrite.KindIssueCreate, nil
 }
 
 const youtrackCanaryUsage = "usage: youtrack canary add <task> [--by NAME] | remove <task> | list"
@@ -764,4 +838,54 @@ func youtrackCommentsCmd(args []string, out io.Writer, backfill bool) error {
 		return exitCodeError{code: youtrackExitFailed, err: fmt.Errorf("%d tasks could not be classified (class error); run again", report.errors)}
 	}
 	return nil
+}
+
+const youtrackIssuesBackfillUsage = "usage: youtrack issues-backfill [--project P] [--dry-run]"
+
+// youtrackIssuesBackfillCmd is `youtrack issues-backfill` (hk 3898): it
+// prepares the issue_create op of every task with no binding, bound to the
+// tenant of YOUTRACK_URL (the host the write worker sends to), and calls no
+// YouTrack: adopting an issue that already carries the task's hk ID happens
+// when the op is sent. A task that already has its op is left alone, so a
+// second run prepares nothing. --dry-run counts without writing. It opens the
+// database directly, like `youtrack canary`.
+func youtrackIssuesBackfillCmd(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("youtrack issues-backfill", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	project := fs.String("project", "", "only tasks of this hk project")
+	dryRun := fs.Bool("dry-run", false, "count the tasks without preparing ops")
+	ordered, err := splitArgs(args, "project")
+	if err != nil {
+		return err
+	}
+	if err := fs.Parse(ordered); err != nil {
+		return fmt.Errorf("%v; %s", err, youtrackIssuesBackfillUsage)
+	}
+	if fs.NArg() != 0 {
+		return errors.New(youtrackIssuesBackfillUsage)
+	}
+	dbURL := strings.TrimSpace(os.Getenv("HANDOFFKEEP_DB_URL"))
+	baseURL := strings.TrimSpace(os.Getenv("YOUTRACK_URL"))
+	token := strings.TrimSpace(os.Getenv("YOUTRACK_BOT_API_KEY"))
+	if dbURL == "" || baseURL == "" || token == "" {
+		return exitCodeError{code: youtrackExitConfig, err: errors.New("HANDOFFKEEP_DB_URL, YOUTRACK_URL and YOUTRACK_BOT_API_KEY are required")}
+	}
+	// The client only names the tenant here; nothing is sent.
+	client, err := youtrack.New(youtrack.Config{BaseURL: baseURL, Token: token, UserAgent: "handoffkeep-ytwrite"})
+	if err != nil {
+		return exitCodeError{code: youtrackExitConfig, err: err}
+	}
+	tenant := youtrack.NewWriteRemote(client).Tenant()
+	openCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	st, err := store.Open(openCtx, dbURL)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	report, err := st.BackfillYTIssueOps(context.Background(), tenant, strings.TrimSpace(*project), *dryRun)
+	if err != nil {
+		return err
+	}
+	return printJSON(out, report)
 }

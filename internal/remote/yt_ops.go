@@ -49,12 +49,16 @@ func (c Client) ResolveYTOp(ctx context.Context, id int64, resolution ytwrite.Re
 		RetryAfter string         `json:"retry_after"`
 		YTID       string         `json:"yt_id"`
 	}
+	// adopted is sent only when stated (the CLI states it for an
+	// issue_create op), so any other resolution keeps the request shape a
+	// server that predates the field accepts.
 	body := struct {
 		Applied bool   `json:"applied"`
 		YTID    string `json:"yt_id"`
+		Adopted *bool  `json:"adopted,omitempty"`
 		By      string `json:"by"`
 		Note    string `json:"note"`
-	}{resolution.Applied, resolution.YTID, resolution.By, resolution.Note}
+	}{resolution.Applied, resolution.YTID, resolution.Adopted, resolution.By, resolution.Note}
 	if err := c.call(ctx, "POST", "/v1/yt/ops/"+strconv.FormatInt(id, 10)+"/resolve", body, &wire); err != nil {
 		return ytwrite.Result{}, err
 	}

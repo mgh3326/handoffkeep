@@ -683,8 +683,8 @@ func TestCommentsBackfillAllBindsBucketTasks(t *testing.T) {
 		t.Fatalf("backfill --all: bound_now %v, err %v", r.BoundNow, err)
 	}
 	for task, want := range map[int64]store.YTTaskBinding{
-		bucket: {TaskID: bucket, Tenant: tenant, IssueID: "5-" + id(bucket), IssueReadable: "HK-" + id(bucket), ProjectID: ytpBucketID, CommentsFrom: oldComment},
-		idle:   {TaskID: idle, Tenant: tenant, IssueID: "2-" + id(idle), IssueReadable: "PW-" + id(idle), ProjectID: "0-2"},
+		bucket: {TaskID: bucket, Tenant: tenant, IssueID: "5-" + id(bucket), IssueReadable: "HK-" + id(bucket), ProjectID: ytpBucketID, CommentsFrom: oldComment, Origin: store.YTBindingImportVerified},
+		idle:   {TaskID: idle, Tenant: tenant, IssueID: "2-" + id(idle), IssueReadable: "PW-" + id(idle), ProjectID: "0-2", Origin: store.YTBindingImportVerified},
 	} {
 		got, found, err := st.YTTaskBinding(ctx, task)
 		got.BoundBy, got.BoundAt = "", time.Time{}

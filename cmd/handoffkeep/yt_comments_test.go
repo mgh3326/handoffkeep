@@ -103,12 +103,79 @@ func TestYTIsTheYouTrackCommand(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "resolve") {
 		t.Fatalf("yt ops resolve with both outcomes: %v", err)
 	}
+	err = run([]string{"yt", "ops", "resolve", "4", "--not-applied", "--adopted", "--by", "a", "--note", "n"}, io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "--adopted") {
+		t.Fatalf("yt ops resolve --adopted --not-applied: %v", err)
+	}
+}
+
+// ytOpsServer answers the op listing with one op of kind and records the
+// resolve bodies; kind "" lists nothing.
+func ytOpsServer(t *testing.T, kind string, bodies *[]map[string]any) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet && r.URL.Path == "/v1/yt/ops" {
+			if r.URL.Query().Get("state") != "all" || r.URL.Query().Get("after_id") != "3" || r.URL.Query().Get("limit") != "1" {
+				t.Errorf("listing query %v", r.URL.Query())
+			}
+			ops := []any{}
+			if kind != "" {
+				ops = append(ops, map[string]any{"id": 4, "kind": kind, "state": "remote_unknown", "status": "pending"})
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"ops": ops, "next_after_id": nil})
+			return
+		}
+		var in map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		*bodies = append(*bodies, in)
+		_ = json.NewEncoder(w).Encode(map[string]any{"op_id": 4, "status": "applied", "state": "applied", "reason": "", "retry_after": "0s", "yt_id": "2-4"})
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+// An issue_create resolution always states the provenance ("adopted": true
+// with --adopted, false without); a comment resolution keeps the request
+// shape a server that predates the field accepts (no "adopted").
+func TestYTOpsResolveStatesProvenance(t *testing.T) {
+	t.Setenv("HANDOFFKEEP_URL", "")
+	t.Setenv("HANDOFFKEEP_TOKEN", "")
+	resolve := func(server *httptest.Server, extra ...string) {
+		t.Helper()
+		args := append([]string{"yt", "ops", "resolve", "4", "--applied", "2-4", "--url", server.URL, "--token", "t"}, extra...)
+		if err := run(args, io.Discard, io.Discard); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var issue []map[string]any
+	server := ytOpsServer(t, "issue_create", &issue)
+	resolve(server, "--adopted")
+	resolve(server)
+	if len(issue) != 2 || issue[0]["adopted"] != true || issue[1]["adopted"] != false {
+		t.Fatalf("issue bodies %v", issue)
+	}
+	for _, kind := range []string{"comment_append", ""} {
+		var comment []map[string]any
+		resolve(ytOpsServer(t, kind, &comment))
+		if _, sent := comment[0]["adopted"]; len(comment) != 1 || sent {
+			t.Fatalf("%q op body %v: adopted must not be sent", kind, comment)
+		}
+	}
 }
 
 func TestYTOpsResolveAcceptsURLAndTokenFlags(t *testing.T) {
 	t.Setenv("HANDOFFKEEP_URL", "")
 	t.Setenv("HANDOFFKEEP_TOKEN", "")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/v1/yt/ops" {
+			// The kind lookup before an --applied resolution.
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"ops": []any{map[string]any{"id": 4, "kind": "comment_append"}}, "next_after_id": nil})
+			return
+		}
 		if r.Method != http.MethodPost || r.URL.Path != "/v1/yt/ops/4/resolve" {
 			t.Errorf("request = %s %s", r.Method, r.URL.Path)
 		}
@@ -119,7 +186,7 @@ func TestYTOpsResolveAcceptsURLAndTokenFlags(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 			t.Errorf("decode request: %v", err)
 		}
-		if in["applied"] != true || in["yt_id"] != "c-4" {
+		if _, sent := in["adopted"]; in["applied"] != true || in["yt_id"] != "c-4" || sent {
 			t.Errorf("request body = %v", in)
 		}
 		w.Header().Set("Content-Type", "application/json")
