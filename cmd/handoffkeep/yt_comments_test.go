@@ -40,6 +40,28 @@ func TestYTCommentsModeFromEnv(t *testing.T) {
 	}
 }
 
+// HANDOFFKEEP_YT_COMMENTS_CATCHUP is off unless it is exactly "on" (hk
+// 3897: the catch-up stays off until hk 3907); any other value fails closed.
+func TestYTCommentsCatchUpFromEnv(t *testing.T) {
+	for value, want := range map[string]bool{"": false, "off": false, " off ": false, "on": true, " on\n": true} {
+		t.Setenv("HANDOFFKEEP_YT_COMMENTS_CATCHUP", value)
+		if got, err := ytCommentsCatchUpFromEnv(); err != nil || got != want {
+			t.Errorf("%q: %v %v, want %v", value, got, err, want)
+		}
+	}
+	for _, value := range []string{"ON", "true", "1", "yes"} {
+		t.Setenv("HANDOFFKEEP_YT_COMMENTS_CATCHUP", value)
+		if got, err := ytCommentsCatchUpFromEnv(); err == nil {
+			t.Errorf("%q accepted as %v", value, got)
+		}
+	}
+	t.Setenv("HANDOFFKEEP_YT_COMMENTS_MODE", "on")
+	t.Setenv("HANDOFFKEEP_YT_COMMENTS_CATCHUP", "bogus")
+	if _, err := ytCommentsWorkerFromEnv(nil); err == nil || !strings.Contains(err.Error(), "HANDOFFKEEP_YT_COMMENTS_CATCHUP") {
+		t.Fatalf("an unknown catch-up value: %v", err)
+	}
+}
+
 // canary or on without YouTrack credentials is a startup error, never a
 // silently idle writer; off needs no YouTrack configuration at all.
 func TestYTCommentsWorkerNeedsCredentialsOnlyInCanaryAndOn(t *testing.T) {
@@ -204,7 +226,7 @@ func TestYTCommentsWorkerStopIsBoundedWhileSettling(t *testing.T) {
 		stoppedAt = time.Now()
 		stop()
 	}
-	w, err := newYTCommentsWorker(st, remote, tenant, store.YTCommentsCanary, nil)
+	w, err := newYTCommentsWorker(st, remote, tenant, store.YTCommentsCanary, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,7 +259,7 @@ func TestYTCommentsWorkerStopIsBoundedWhileSettling(t *testing.T) {
 		t.Fatalf("op after a stop during settlement: %+v %v; want dispatched (durable, unrecorded)", op, err)
 	}
 
-	restarted, err := newYTCommentsWorker(st, remote, tenant, store.YTCommentsCanary, func() time.Time { return time.Now().UTC().Add(time.Minute) })
+	restarted, err := newYTCommentsWorker(st, remote, tenant, store.YTCommentsCanary, false, func() time.Time { return time.Now().UTC().Add(time.Minute) })
 	if err != nil {
 		t.Fatal(err)
 	}

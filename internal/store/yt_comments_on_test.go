@@ -584,14 +584,16 @@ const ytTaskBindingsMigrationID = "20261110-yt-task-bindings"
 // the binary that registers this one opens it, and records the ID once.
 func TestYTTaskBindingsMigrationUpgradesAlreadyCurrentDatabase(t *testing.T) {
 	_, url := testdb.Schema(t, "ytb_mig")
+	// Without the bindings migration and the one that needs its table
+	// (20261111-yt-binding-comments-from, After it).
 	var without []migration
 	for _, m := range migrationRegistry {
-		if m.ID != ytTaskBindingsMigrationID {
+		if m.ID != ytTaskBindingsMigrationID && m.ID != YTBindingCommentsFromMigration {
 			without = append(without, m)
 		}
 	}
-	if len(without) != len(migrationRegistry)-1 {
-		t.Fatalf("migration %s is not registered", ytTaskBindingsMigrationID)
+	if len(without) != len(migrationRegistry)-2 {
+		t.Fatalf("migration %s or %s is not registered", ytTaskBindingsMigrationID, YTBindingCommentsFromMigration)
 	}
 	old := openRegistry(t, url, without)
 	table := func(s *Store) int {

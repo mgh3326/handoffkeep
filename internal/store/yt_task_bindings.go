@@ -32,6 +32,10 @@ type YTTaskBinding struct {
 	ProjectID     string    `json:"project_id"`
 	BoundBy       string    `json:"bound_by"`
 	BoundAt       time.Time `json:"bound_at"`
+	// CommentsFrom is the highest task_comments id the binding does not
+	// cover: the task's highest comment id when the binding was published.
+	// Only a comment above it is ever copied (CatchUpYTComments).
+	CommentsFrom int64 `json:"comments_from"`
 }
 
 // ErrYTBindingConflict is a binding that disagrees with a mapping hk already
@@ -70,7 +74,7 @@ const (
 	ytSourceCanaryTask   = "yt_comment_canary_task"  // the task's canary row names another issue or tenant
 	ytSourceCanaryIssue  = "yt_comment_canary_issue" // a canary row gives the tenant's issue to another task
 	ytSourceBindingIssue = "yt_task_bindings_issue"  // another task's binding holds the tenant's issue
-	ytSourceProject      = "youtrack_projects"       // the task has no project, or it maps to another YouTrack project
+	ytSourceProject      = "youtrack_projects"       // the task's project maps to another YouTrack project or none, or a task with no project is bound to a mapped project
 )
 
 // ytBindingSourcesSQL reads, in one statement, which sources disagree with
@@ -84,14 +88,20 @@ const ytBindingSourcesSQL = `SELECT
 	EXISTS(SELECT 1 FROM yt_comment_canary WHERE task_id=$1 AND (tenant <> $2 OR issue_id <> $3)),
 	EXISTS(SELECT 1 FROM yt_comment_canary WHERE tenant=$2 AND issue_id=$3 AND task_id <> $1),
 	EXISTS(SELECT 1 FROM yt_task_bindings WHERE tenant=$2 AND issue_id=$3 AND task_id <> $1),
-	NOT EXISTS(SELECT 1 FROM tasks t JOIN youtrack_projects p ON p.hk_project = t.project WHERE t.id=$1 AND p.yt_project_id=$5)`
+	NOT (EXISTS(SELECT 1 FROM tasks t JOIN youtrack_projects p ON p.hk_project = t.project WHERE t.id=$1 AND p.yt_project_id=$5)
+		OR (EXISTS(SELECT 1 FROM tasks WHERE id=$1 AND coalesce(project,'') = '')
+			AND NOT EXISTS(SELECT 1 FROM youtrack_projects WHERE yt_project_id=$5)))`
 
 // ytBindingDisagreement names the first local source that disagrees with
 // binding b, or "" when every source present agrees: the task's mirror link,
 // its map row and canary row name b's issue (and tenant), no map row, canary
 // row or other binding gives that issue to another task, and the task's
-// project maps to b's YouTrack project. It makes no network call. Enqueue,
-// the binding's publication and the preflight share it.
+// project maps to b's YouTrack project. A task with no project agrees with a
+// YouTrack project that no youtrack_projects row maps: the import's bucket
+// for such tasks, short name HK (hk 3897), which has no row of its own and
+// which youtrack.VerifyBinding resolves by name before it binds. It makes no
+// network call. Enqueue, the catch-up, the binding's publication and the
+// preflight share it.
 func ytBindingDisagreement(ctx context.Context, q ytRowQuerier, b YTTaskBinding) (string, error) {
 	var flags [7]bool
 	if err := q.QueryRow(ctx, ytBindingSourcesSQL, b.TaskID, b.Tenant, b.IssueID, strconv.FormatInt(b.TaskID, 10), b.ProjectID).Scan(
@@ -112,10 +122,10 @@ func (s *Store) YTBindingDisagreement(ctx context.Context, b YTTaskBinding) (str
 	return ytBindingDisagreement(ctx, s.pool, b)
 }
 
-const ytBindingColumns = `task_id, tenant, issue_id, issue_readable, project_id, bound_by, bound_at`
+const ytBindingColumns = `task_id, tenant, issue_id, issue_readable, project_id, bound_by, bound_at, comments_from`
 
 func scanYTBinding(row interface{ Scan(...any) error }, b *YTTaskBinding) error {
-	err := row.Scan(&b.TaskID, &b.Tenant, &b.IssueID, &b.IssueReadable, &b.ProjectID, &b.BoundBy, &b.BoundAt)
+	err := row.Scan(&b.TaskID, &b.Tenant, &b.IssueID, &b.IssueReadable, &b.ProjectID, &b.BoundBy, &b.BoundAt, &b.CommentsFrom)
 	b.BoundAt = b.BoundAt.UTC()
 	return err
 }
@@ -141,32 +151,45 @@ func (s *Store) YTTaskBinding(ctx context.Context, taskID int64) (YTTaskBinding,
 // binding gets no op and no link, and so does a task whose binding any local
 // source disagrees with (ytBindingDisagreement; one log event names the
 // source): the legacy push and the import carry such a comment as before.
-// Otherwise the op targets the binding's issue on its tenant, its link is
-// written, and the first op anchors the task's yt_entity_map row as in the
-// canary. A comment the protocol cannot send gets a rejected op and its link,
-// as in the canary; an identity problem never does.
+// Otherwise ytCommentOnOpTx writes the op, its link and the first op's map
+// anchor, with the comment's own time.
 //
 // Locks, after the comment insert lock and the comment's KEY SHARE on its
-// task: the task's lane lock, then plain reads of the binding and the sources,
-// then new rows of yt_write_ops, yt_comment_write_links and yt_entity_map
-// (lockorder.go). The lane lock is the one AddYTTaskBinding takes before it
-// reads and inserts, so a binding is either seen whole or not at all.
+// task: those of ytCommentOnOpTx (lockorder.go).
 func enqueueYTCommentOnTx(ctx context.Context, tx pgx.Tx, c TaskComment) (ytwrite.Op, bool, error) {
+	op, enqueued, source, err := ytCommentOnOpTx(ctx, tx, c, c.CreatedAt.UTC())
+	if source != "" {
+		log.Printf("ytwrite.comment_skipped_ambiguous task_id=%d comment_id=%d source=%s", c.TaskID, c.ID, source)
+	}
+	return op, enqueued, err
+}
+
+// ytCommentOnOpTx is the mode-on copy of comment c, shared by the enqueue
+// (in the comment's transaction) and the worker's catch-up (CatchUpYTComments,
+// in its own). A task with no binding gets nothing; a binding some local
+// source disagrees with gets nothing either, and source names that source for
+// the caller to log. Otherwise the op targets the binding's issue on its
+// tenant, its link is written, and the first op anchors the task's
+// yt_entity_map row as in the canary; now is the op's created_at. A comment
+// the protocol cannot send gets a rejected op and its link, as in the canary;
+// an identity problem never does.
+//
+// Locks: the task's lane lock, then plain reads of the binding and the
+// sources, then new rows of yt_write_ops, yt_comment_write_links and
+// yt_entity_map (lockorder.go). The lane lock is the one AddYTTaskBinding
+// takes before it reads and inserts, so a binding is either seen whole or not
+// at all.
+func ytCommentOnOpTx(ctx context.Context, tx pgx.Tx, c TaskComment, now time.Time) (op ytwrite.Op, enqueued bool, source string, err error) {
 	taskKey := strconv.FormatInt(c.TaskID, 10)
 	if err := lockYTEntity(ctx, tx, "task", taskKey); err != nil {
-		return ytwrite.Op{}, false, err
+		return ytwrite.Op{}, false, "", err
 	}
 	b, found, err := readYTBinding(ctx, tx, c.TaskID)
 	if err != nil || !found {
-		return ytwrite.Op{}, false, err
+		return ytwrite.Op{}, false, "", err
 	}
-	source, err := ytBindingDisagreement(ctx, tx, b)
-	if err != nil {
-		return ytwrite.Op{}, false, err
-	}
-	if source != "" {
-		log.Printf("ytwrite.comment_skipped_ambiguous task_id=%d comment_id=%d source=%s", c.TaskID, c.ID, source)
-		return ytwrite.Op{}, false, nil
+	if source, err = ytBindingDisagreement(ctx, tx, b); err != nil || source != "" {
+		return ytwrite.Op{}, false, source, err
 	}
 	req := ytwrite.CommentRequest{Principal: YTCommentPrincipal, Key: YTCommentKey(c.ID), Actor: c.Author, TaskID: c.TaskID, YTIssueID: b.IssueID, Tenant: b.Tenant, Body: c.Body}
 	reason, detail := "", ""
@@ -175,27 +198,27 @@ func enqueueYTCommentOnTx(ctx context.Context, tx pgx.Tx, c TaskComment) (ytwrit
 	}
 	n, err := ytwrite.CommentOp(req)
 	if err != nil {
-		return ytwrite.Op{}, false, err
+		return ytwrite.Op{}, false, "", err
 	}
-	now := c.CreatedAt.UTC()
-	op, _, err := prepareYTOpTx(ctx, tx, now, n)
+	now = now.UTC()
+	op, _, err = prepareYTOpTx(ctx, tx, now, n)
 	if err != nil {
-		return ytwrite.Op{}, false, err
+		return ytwrite.Op{}, false, "", err
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO yt_comment_write_links(comment_id, op_id, created_at) VALUES ($1,$2,$3)`, c.ID, op.ID, now); err != nil {
-		return ytwrite.Op{}, false, err
+		return ytwrite.Op{}, false, "", err
 	}
 	if reason != "" {
 		op, err = rejectYTOpTx(ctx, tx, now, op.ID, reason, detail)
 		if err != nil {
-			return ytwrite.Op{}, false, err
+			return ytwrite.Op{}, false, "", err
 		}
-		return op, true, nil
+		return op, true, "", nil
 	}
 	tag, err := tx.Exec(ctx, `INSERT INTO yt_entity_map(entity_kind, hk_key, yt_id, yt_parent_id, op_id, created_at)
 		VALUES ('task',$1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`, taskKey, b.IssueID, b.ProjectID, op.ID, now)
 	if err != nil {
-		return ytwrite.Op{}, false, err
+		return ytwrite.Op{}, false, "", err
 	}
 	if tag.RowsAffected() == 0 {
 		// The sources were read under the lane lock and agreed, and every
@@ -206,10 +229,10 @@ func enqueueYTCommentOnTx(ctx context.Context, tx pgx.Tx, c TaskComment) (ytwrit
 		var have string
 		err := tx.QueryRow(ctx, `SELECT yt_id FROM yt_entity_map WHERE entity_kind='task' AND hk_key=$1`, taskKey).Scan(&have)
 		if err != nil || have != b.IssueID {
-			return ytwrite.Op{}, false, fmt.Errorf("yt_entity_map conflicts with task %d's checked binding to %s (have %q): %v", c.TaskID, b.IssueID, have, err)
+			return ytwrite.Op{}, false, "", fmt.Errorf("yt_entity_map conflicts with task %d's checked binding to %s (have %q): %v", c.TaskID, b.IssueID, have, err)
 		}
 	}
-	return op, true, nil
+	return op, true, "", nil
 }
 
 // AddYTTaskBinding publishes a verified binding. verified is the candidate
@@ -218,7 +241,9 @@ func enqueueYTCommentOnTx(ctx context.Context, tx pgx.Tx, c TaskComment) (ytwrit
 // any of them changed since, then refuses if any local source disagrees with
 // the binding (ytBindingDisagreement) or another binding holds the task.
 // Adding the same binding again is a no-op that returns the stored row.
-// Nothing else is written: a binding creates no op row and no map row.
+// Nothing else is written: a binding creates no op row and no map row. The
+// new row's comments_from is the task's highest comment id read in the same
+// transaction, so the binding never copies a comment written before it.
 //
 // Locks, in this order (lockorder.go): the issue ownership lock, FOR UPDATE on
 // the task row, the task's lane lock, FOR SHARE on the task's youtrack_projects
@@ -268,7 +293,8 @@ func (s *Store) AddYTTaskBinding(ctx context.Context, b YTTaskBinding, verified 
 		s.ytBindingChecked()
 	}
 	var got YTTaskBinding
-	err = scanYTBinding(tx.QueryRow(ctx, `INSERT INTO yt_task_bindings(`+ytBindingColumns+`) VALUES ($1,$2,$3,$4,$5,$6,$7)
+	err = scanYTBinding(tx.QueryRow(ctx, `INSERT INTO yt_task_bindings(`+ytBindingColumns+`)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,(SELECT coalesce(max(id),0) FROM task_comments WHERE task_id=$1))
 		ON CONFLICT DO NOTHING RETURNING `+ytBindingColumns,
 		b.TaskID, b.Tenant, b.IssueID, b.IssueReadable, b.ProjectID, b.BoundBy, time.Now().UTC()), &got)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -288,16 +314,18 @@ type YTCommentCandidate struct {
 
 // YTCommentCandidates lists, in id order, the tasks with a comment created at
 // or after since, every task in yt_comment_canary, and every task with a
-// comment op not yet applied or rejected; project, when not "", keeps only
-// that hk project's tasks.
-func (s *Store) YTCommentCandidates(ctx context.Context, since time.Time, project string) ([]YTCommentCandidate, error) {
+// comment op not yet applied or rejected; all lists every task instead
+// (bind-all, hk 3897). project, when not "", keeps only that hk project's
+// tasks.
+func (s *Store) YTCommentCandidates(ctx context.Context, since time.Time, project string, all bool) ([]YTCommentCandidate, error) {
 	rows, err := s.pool.Query(ctx, `WITH ids AS (
 			SELECT task_id FROM task_comments WHERE created_at >= $1
 			UNION SELECT task_id FROM yt_comment_canary
 			UNION SELECT CASE WHEN entity_id ~ '^[0-9]{1,18}$' THEN entity_id::bigint END FROM yt_write_ops
-				WHERE principal=$3 AND kind=$4 AND entity_kind='task' AND state NOT IN ('applied','rejected'))
+				WHERE principal=$3 AND kind=$4 AND entity_kind='task' AND state NOT IN ('applied','rejected')
+			UNION SELECT id FROM tasks WHERE $5)
 		SELECT t.id, coalesce(t.project,'') FROM tasks t JOIN ids ON ids.task_id = t.id
-		WHERE $2 = '' OR t.project = $2 ORDER BY t.id`, since.UTC(), project, YTCommentPrincipal, ytwrite.KindCommentAppend)
+		WHERE $2 = '' OR t.project = $2 ORDER BY t.id`, since.UTC(), project, YTCommentPrincipal, ytwrite.KindCommentAppend, all)
 	if err != nil {
 		return nil, err
 	}
