@@ -159,7 +159,10 @@ func TestTaskThreadClaimSettleAndRecover(t *testing.T) {
 	}
 }
 
-func TestTaskThreadUnknownCreateNeedsOperator(t *testing.T) {
+// A create whose outcome is unknown is never created blind: it waits
+// TaskThreadLookupDelay, then comes back as a lookup. A lookup that cannot
+// tell stops the row needs_operator; one that finds the thread adopts it.
+func TestTaskThreadUnknownCreateIsLookedUp(t *testing.T) {
 	s := schemaStore(t, "task_threads_unknown")
 	ctx := t.Context()
 	projects := []string{testProjectName}
@@ -173,27 +176,139 @@ func TestTaskThreadUnknownCreateNeedsOperator(t *testing.T) {
 		t.Fatal(err)
 	}
 	first, _, err := s.ClaimTaskThread(ctx, now)
-	if err != nil || first.TaskID != a.ID {
+	if err != nil || first.TaskID != a.ID || first.Lookup {
 		t.Fatalf("first claim %+v err=%v", first, err)
 	}
-	if gaveUp, err := s.SettleTaskThread(ctx, now, first, TaskThreadResult{Outcome: TaskThreadUnknown, Err: errors.New("context deadline exceeded")}); err != nil || !gaveUp {
+	if gaveUp, err := s.SettleTaskThread(ctx, now, first, TaskThreadResult{Outcome: TaskThreadUnknown, Err: errors.New("context deadline exceeded")}); err != nil || gaveUp {
 		t.Fatalf("settle unknown gaveUp=%v err=%v", gaveUp, err)
 	}
-	if x := threadState(t, s, a.ID); x.State != TaskThreadNeedsOperator || x.ClaimKey != "" {
+	if x := threadState(t, s, a.ID); x.State != TaskThreadCreating || x.ClaimKey != "" || x.Attempts != 1 || x.NextAttemptAt.Sub(now.Add(TaskThreadLookupDelay)).Abs() > time.Millisecond || !strings.Contains(x.LastError, "unknown") {
 		t.Fatalf("after unknown %+v", x)
 	}
 	second, _, err := s.ClaimTaskThread(ctx, now)
-	if err != nil || second.TaskID != b.ID {
+	if err != nil || second.TaskID != b.ID || second.Lookup {
 		t.Fatalf("second claim %+v err=%v", second, err)
 	}
-	got, err := s.RecoverTaskThreadClaims(ctx, now.Add(TaskThreadClaimLease+time.Second))
-	if err != nil || len(got) != 1 || got[0].TaskID != b.ID || got[0].State != TaskThreadNeedsOperator {
+	expired := now.Add(TaskThreadClaimLease + time.Second)
+	got, err := s.RecoverTaskThreadClaims(ctx, expired)
+	if err != nil || len(got) != 1 || got[0].TaskID != b.ID || got[0].State != TaskThreadCreating {
 		t.Fatalf("recovered %+v err=%v", got, err)
 	}
-	// Neither row is ever created again, and neither gets a line.
+	if x := threadState(t, s, b.ID); x.ClaimKey != "" || x.NextAttemptAt.After(expired) {
+		t.Fatalf("after recovery %+v", x)
+	}
+
+	// Before the delay the first row is not due; nothing is created blind.
+	if x, found, _ := s.ClaimTaskThread(ctx, now.Add(TaskThreadLookupDelay-time.Second)); found {
+		t.Fatalf("claimed %+v before the settle delay", x)
+	}
+	// After it (and the recovered row at once) both come back as lookups.
+	at := now.Add(TaskThreadLookupDelay + 2*time.Second)
+	lookups := map[int64]TaskThreadItem{}
+	for range 2 {
+		x, found, err := s.ClaimTaskThread(ctx, at)
+		if err != nil || !found || x.Type != TaskThreadCreate || !x.Lookup {
+			t.Fatalf("lookup claim %+v found=%v err=%v", x, found, err)
+		}
+		lookups[x.TaskID] = x
+	}
+	// A rate-limited lookup did not run: the row comes back as a lookup.
+	if gaveUp, err := s.SettleTaskThread(ctx, at, lookups[a.ID], TaskThreadResult{Outcome: TaskThreadRetry, RetryAfter: time.Second, Err: errors.New("thread lookup: discord bot status 429")}); err != nil || gaveUp {
+		t.Fatalf("settle lookup retry gaveUp=%v err=%v", gaveUp, err)
+	}
+	if x := threadState(t, s, a.ID); x.State != TaskThreadCreating || x.ClaimKey != "" {
+		t.Fatalf("after lookup retry %+v", x)
+	}
+	at = at.Add(2 * time.Second)
+	again, found, err := s.ClaimTaskThread(ctx, at)
+	if err != nil || !found || again.TaskID != a.ID || !again.Lookup {
+		t.Fatalf("lookup after retry %+v found=%v err=%v", again, found, err)
+	}
+	lookups[a.ID] = again
+	if gaveUp, err := s.SettleTaskThread(ctx, at, lookups[a.ID], TaskThreadResult{Outcome: TaskThreadAmbiguous, Err: errors.New("2 threads match the lost create")}); err != nil || !gaveUp {
+		t.Fatalf("settle ambiguous gaveUp=%v err=%v", gaveUp, err)
+	}
+	if x := threadState(t, s, a.ID); x.State != TaskThreadNeedsOperator || x.ThreadID != nil || x.ClaimKey != "" {
+		t.Fatalf("after ambiguous %+v", x)
+	}
+	if _, err := s.SettleTaskThread(ctx, at, lookups[b.ID], TaskThreadResult{Outcome: TaskThreadSent, ThreadID: "9100"}); err != nil {
+		t.Fatal(err)
+	}
+	if x := threadState(t, s, b.ID); x.State != TaskThreadActive || x.ThreadID == nil || *x.ThreadID != "9100" {
+		t.Fatalf("after adopt %+v", x)
+	}
+	// The needs_operator row is never created again and gets no line.
 	send(t, s, TaskSourceEvent{Source: SourceMergewakePR, SourceRef: testPR(302), TaskID: a.ID})
-	if x, found, _ := s.ClaimTaskThread(ctx, now.Add(24*time.Hour)); found {
-		t.Fatalf("claimed %+v after needs_operator", x)
+	for {
+		x, found, err := s.ClaimTaskThread(ctx, now.Add(24*time.Hour))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !found {
+			break
+		}
+		if x.TaskID == a.ID {
+			t.Fatalf("claimed %+v after needs_operator", x)
+		}
+		if _, err := s.SettleTaskThread(ctx, now.Add(24*time.Hour), x, TaskThreadResult{Outcome: TaskThreadSent}); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// A create whose outcome stays unknown stops needs_operator after the
+// attempt cap, and only a create can be ambiguous.
+func TestTaskThreadUnknownCreateGivesUp(t *testing.T) {
+	s := schemaStore(t, "task_threads_unknown_cap")
+	ctx := t.Context()
+	projects := []string{testProjectName}
+	now := time.Now().UTC()
+	if _, err := s.QueueTaskThreads(ctx, now, projects); err != nil {
+		t.Fatal(err)
+	}
+	task := startedThreadTask(t, s, testProjectName, "always unknown")
+	if _, err := s.QueueTaskThreads(ctx, now, projects); err != nil {
+		t.Fatal(err)
+	}
+	x, found, err := s.ClaimTaskThread(ctx, now)
+	if err != nil || !found {
+		t.Fatalf("claim found=%v err=%v", found, err)
+	}
+	if _, err := s.SettleTaskThread(ctx, now, TaskThreadItem{TaskID: x.TaskID, Destination: x.Destination, Key: "e:1", Type: TaskLineMerged}, TaskThreadResult{Outcome: TaskThreadAmbiguous}); err == nil {
+		t.Fatal("a line settled ambiguous")
+	}
+	x.Attempts = taskThreadMaxAttempts - 1
+	if gaveUp, err := s.SettleTaskThread(ctx, now, x, TaskThreadResult{Outcome: TaskThreadUnknown, Err: errors.New("discord bot status 502")}); err != nil || !gaveUp {
+		t.Fatalf("settle gaveUp=%v err=%v", gaveUp, err)
+	}
+	if got := threadState(t, s, task.ID); got.State != TaskThreadNeedsOperator || got.Attempts != taskThreadMaxAttempts {
+		t.Fatalf("after the cap %+v", got)
+	}
+
+	// A lookup that never runs (connection failures) also ends
+	// needs_operator at the cap, not failed: the thread may exist.
+	other := startedThreadTask(t, s, testProjectName, "lookup never runs")
+	if _, err := s.QueueTaskThreads(ctx, now, projects); err != nil {
+		t.Fatal(err)
+	}
+	y, found, err := s.ClaimTaskThread(ctx, now)
+	if err != nil || !found || y.TaskID != other.ID {
+		t.Fatalf("claim %+v found=%v err=%v", y, found, err)
+	}
+	if _, err := s.SettleTaskThread(ctx, now, y, TaskThreadResult{Outcome: TaskThreadUnknown, Err: errors.New("context deadline exceeded")}); err != nil {
+		t.Fatal(err)
+	}
+	later := now.Add(TaskThreadLookupDelay + time.Second)
+	y, found, err = s.ClaimTaskThread(ctx, later)
+	if err != nil || !found || !y.Lookup {
+		t.Fatalf("lookup claim %+v found=%v err=%v", y, found, err)
+	}
+	y.Attempts = taskThreadMaxAttempts - 1
+	if gaveUp, err := s.SettleTaskThread(ctx, later, y, TaskThreadResult{Outcome: TaskThreadRetry, Err: errors.New("thread lookup: discord bot: dial tcp: connection refused")}); err != nil || !gaveUp {
+		t.Fatalf("settle gaveUp=%v err=%v", gaveUp, err)
+	}
+	if got := threadState(t, s, other.ID); got.State != TaskThreadNeedsOperator {
+		t.Fatalf("lookup retries exhausted: %+v", got)
 	}
 }
 

@@ -2293,25 +2293,34 @@ func decisionNotifierFromEnv(st *store.Store) (backgroundWorker, error) {
 }
 
 // taskThreadPosterFromEnv builds the Discord task-thread poster (hk 3990,
-// docs/task-threads.md). It is off, and nil, while
-// HANDOFFKEEP_DISCORD_TASKS_WEBHOOK_URL is unset. HANDOFFKEEP_DISCORD_TASKS_PROJECTS
-// is a comma list of task projects (default store.DefaultTaskThreadProjects);
-// the console URL and operator user id are the decisions channel's. An
-// invalid value stops the server, and no message quotes the webhook URL.
+// hk 4040, docs/task-threads.md). It posts as the bot
+// HANDOFFKEEP_DISCORD_BOT_TOKEN into the forum
+// HANDOFFKEEP_DISCORD_TASKS_FORUM_ID: both unset is off (nil), and exactly
+// one set or a forum id that is not a Discord id stops the server.
+// HANDOFFKEEP_DISCORD_TASKS_PROJECTS is a comma list of task projects
+// (default store.DefaultTaskThreadProjects); the console URL and operator
+// user id are the decisions channel's. No message quotes a value; the token
+// is a credential.
 func taskThreadPosterFromEnv(st *store.Store) (*api.TaskThreadPoster, error) {
-	raw := strings.TrimSpace(os.Getenv("HANDOFFKEEP_DISCORD_TASKS_WEBHOOK_URL"))
-	if raw == "" {
+	token := strings.TrimSpace(os.Getenv("HANDOFFKEEP_DISCORD_BOT_TOKEN"))
+	forum := strings.TrimSpace(os.Getenv("HANDOFFKEEP_DISCORD_TASKS_FORUM_ID"))
+	switch {
+	case token == "" && forum == "":
 		return nil, nil
+	case token == "":
+		return nil, errors.New("HANDOFFKEEP_DISCORD_BOT_TOKEN must be set when HANDOFFKEEP_DISCORD_TASKS_FORUM_ID is")
+	case forum == "":
+		return nil, errors.New("HANDOFFKEEP_DISCORD_TASKS_FORUM_ID must be set when HANDOFFKEEP_DISCORD_BOT_TOKEN is")
 	}
-	webhook, err := api.ParseDiscordWebhookURL(raw)
+	forum, err := api.ParseDiscordSnowflake("HANDOFFKEEP_DISCORD_TASKS_FORUM_ID", forum)
 	if err != nil {
-		return nil, errors.New("HANDOFFKEEP_DISCORD_TASKS_WEBHOOK_URL must be an https url")
+		return nil, err
 	}
 	projects, err := parseTaskThreadProjects(os.Getenv("HANDOFFKEEP_DISCORD_TASKS_PROJECTS"))
 	if err != nil {
 		return nil, err
 	}
-	p := &api.TaskThreadPoster{Discord: &api.DiscordWebhook{URL: webhook}, Projects: projects}
+	p := &api.TaskThreadPoster{Discord: &api.DiscordBot{Token: token}, ForumID: forum, Projects: projects}
 	if st != nil {
 		p.Store = st
 	}

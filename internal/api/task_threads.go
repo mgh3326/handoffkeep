@@ -7,7 +7,6 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
@@ -17,12 +16,13 @@ import (
 // Discord task threads (hk 3990): one forum post per task in the configured
 // projects, then one short Korean line per record about it. The store owns
 // what is due and the claim (store/task_threads.go); this file renders and
-// sends. Push only: a webhook, no bot, nothing read back. See
-// docs/task-threads.md.
+// sends through the bot (discord_bot.go, hk 4040). It posts, and lists the
+// forum's threads only to find a thread whose create answer was lost; it
+// reads no message content. See docs/task-threads.md.
 
 const (
 	taskThreadInterval = 10 * time.Second
-	// taskThreadPerMinute is the most messages one webhook is sent a minute.
+	// taskThreadPerMinute is the most messages the forum is sent a minute.
 	taskThreadPerMinute = 30
 	// discordSuppressEmbeds is Discord's SUPPRESS_EMBEDS message flag: a PR
 	// link must not unfurl into the PR's description.
@@ -39,10 +39,12 @@ type TaskThreadStore interface {
 }
 
 // TaskThreadPoster creates the task threads and posts their lines. It runs
-// only when the forum webhook is configured.
+// only when the bot token and the forum are configured.
 type TaskThreadPoster struct {
 	Store   TaskThreadStore
-	Discord *DiscordWebhook
+	Discord TaskThreadDiscord
+	// ForumID is the forum channel the threads are posts in.
+	ForumID string
 	// Projects are the task projects that get threads.
 	Projects []string
 	// ConsoleURL is the console's base URL. Empty leaves links out and says
@@ -136,15 +138,15 @@ func (p *TaskThreadPoster) Drain(ctx context.Context) {
 		if !found {
 			return
 		}
-		res := p.send(ctx, x)
+		res, recovered := p.send(ctx, x)
 		gaveUp, err := p.Store.SettleTaskThread(ctx, p.now(), x, res)
-		logTaskThread(x, res, gaveUp)
+		logTaskThread(x, res, recovered, gaveUp)
 		if err != nil {
 			log.Printf("discord.task_thread_settle_failed task_id=%d key=%q err=%q", x.TaskID, x.Key, err.Error())
 			return
 		}
 		if res.Outcome == store.TaskThreadRetry && res.RetryAfter > 0 {
-			// A 429 is the webhook's limit, not one row's: everything waits.
+			// A 429 is the bot's limit, not one row's: everything waits.
 			if p.sleep(ctx, res.RetryAfter) != nil {
 				return
 			}
@@ -154,18 +156,22 @@ func (p *TaskThreadPoster) Drain(ctx context.Context) {
 
 // logTaskThread logs one settled send. The event names are spelled out so
 // each stays greppable.
-func logTaskThread(x store.TaskThreadItem, res store.TaskThreadResult, gaveUp bool) {
+func logTaskThread(x store.TaskThreadItem, res store.TaskThreadResult, recovered, gaveUp bool) {
 	errText := ""
 	if res.Err != nil {
 		errText = res.Err.Error()
 	}
 	create := x.Type == store.TaskThreadCreate
 	switch {
+	case res.Outcome == store.TaskThreadSent && recovered:
+		log.Printf("discord.task_thread_recovered task_id=%d thread_id=%s", x.TaskID, res.ThreadID)
 	case res.Outcome == store.TaskThreadSent && create:
 		log.Printf("discord.task_thread_created task_id=%d thread_id=%s", x.TaskID, res.ThreadID)
 	case res.Outcome == store.TaskThreadSent:
-	case res.Outcome == store.TaskThreadUnknown && create:
+	case res.Outcome == store.TaskThreadAmbiguous, res.Outcome == store.TaskThreadUnknown && create && gaveUp:
 		log.Printf("discord.task_thread_needs_operator task_id=%d err=%q", x.TaskID, errText)
+	case res.Outcome == store.TaskThreadUnknown && create:
+		log.Printf("discord.task_thread_create_unknown task_id=%d attempts=%d err=%q", x.TaskID, x.Attempts+1, errText)
 	case create:
 		log.Printf("discord.task_thread_create_failed task_id=%d gave_up=%t err=%q", x.TaskID, gaveUp, errText)
 	default:
@@ -199,68 +205,108 @@ func (p *TaskThreadPoster) waitRate(ctx context.Context) error {
 	}
 }
 
-// send makes the one request the item needs and classifies its outcome.
-func (p *TaskThreadPoster) send(ctx context.Context, x store.TaskThreadItem) store.TaskThreadResult {
-	var users []string
-	mention := ""
-	if x.Mention && p.OperatorUserID != "" {
-		users, mention = []string{p.OperatorUserID}, "<@"+p.OperatorUserID+"> "
+// send makes the request the item needs and classifies its outcome. A
+// lookup item first searches the forum for the thread an earlier create may
+// have made (decideLostCreate); recovered reports a thread adopted that way.
+func (p *TaskThreadPoster) send(ctx context.Context, x store.TaskThreadItem) (res store.TaskThreadResult, recovered bool) {
+	if x.Type != store.TaskThreadCreate {
+		var users []string
+		mention := ""
+		if x.Mention && p.OperatorUserID != "" {
+			users, mention = []string{p.OperatorUserID}, "<@"+p.OperatorUserID+"> "
+		}
+		msg := DiscordMessage{Content: clipRunes(mention+taskThreadLineText(x, p.ConsoleURL), discordContentMaxRunes), Flags: discordSuppressEmbeds, Users: users}
+		return taskThreadResult(p.Discord.PostThreadMessage(ctx, x.ThreadID, msg)), false
 	}
-	var message struct {
-		ID        string `json:"id"`
-		ChannelID string `json:"channel_id"`
+	if x.Lookup {
+		botID, threads, err := p.Discord.ForumThreads(ctx, p.ForumID)
+		if err != nil && taskThreadOutcome(err) == store.TaskThreadRetry {
+			// A 429 or a connection never made: the lookup did not run.
+			// The row stays due for its lookup, after Retry-After.
+			res := taskThreadResult(err)
+			res.Err = fmt.Errorf("thread lookup: %w", err)
+			return res, false
+		}
+		lost := decideLostCreate(p.ForumID, x.ThreadName, botID, threads, err)
+		switch lost.action {
+		case lostCreateAdopt:
+			return store.TaskThreadResult{Outcome: store.TaskThreadSent, ThreadID: lost.threadID}, true
+		case lostCreateNeedsOperator:
+			return store.TaskThreadResult{Outcome: store.TaskThreadAmbiguous, Err: lost.err}, false
+		}
 	}
-	payload := map[string]any{"flags": discordSuppressEmbeds}
-	var target string
-	var err error
-	if x.Type == store.TaskThreadCreate {
-		payload["content"] = taskThreadStartText(x, p.ConsoleURL)
-		payload["thread_name"] = x.ThreadName
-		target, err = p.Discord.endpoint("", true)
-	} else {
-		payload["content"] = clipRunes(mention+taskThreadLineText(x, p.ConsoleURL), discordContentMaxRunes)
-		target, err = p.Discord.threadEndpoint(x.ThreadID)
+	msg := DiscordMessage{Content: taskThreadStartText(x, p.ConsoleURL), Flags: discordSuppressEmbeds}
+	threadID, err := p.Discord.CreateForumThread(ctx, p.ForumID, x.ThreadName, msg)
+	res = taskThreadResult(err)
+	if res.Outcome == store.TaskThreadSent {
+		res.ThreadID = threadID
 	}
-	if err != nil {
-		return store.TaskThreadResult{Outcome: store.TaskThreadRetry, Err: err}
-	}
-	err = p.Discord.sendPayload(ctx, http.MethodPost, target, payload, &message, users...)
-	if err == nil && !discordMessageIDRE.MatchString(message.ID) {
-		err = errDiscordNoMessageID
-	}
+	return res, false
+}
+
+// taskThreadResult classifies one request's error.
+func taskThreadResult(err error) store.TaskThreadResult {
 	res := store.TaskThreadResult{Outcome: taskThreadOutcome(err), Err: err}
 	var status discordStatusError
 	if errors.As(err, &status) {
 		res.RetryAfter = status.retryAfter
 	}
-	if res.Outcome == store.TaskThreadSent && x.Type == store.TaskThreadCreate {
-		// A forum post's message lives in the thread it created.
-		if !discordMessageIDRE.MatchString(message.ChannelID) {
-			return store.TaskThreadResult{Outcome: store.TaskThreadUnknown, Err: errors.New("discord webhook returned no thread id")}
-		}
-		res.ThreadID = message.ChannelID
-	}
 	return res
 }
 
-// threadEndpoint is the webhook URL that posts into one thread and waits for
-// the message, so a 2xx means the line exists.
-func (d DiscordWebhook) threadEndpoint(threadID string) (string, error) {
-	if !discordMessageIDRE.MatchString(threadID) {
-		return "", errors.New("invalid discord thread id")
+type lostCreateAction int
+
+const (
+	// lostCreateAdopt: exactly one thread is the lost create's; it is the
+	// task's thread.
+	lostCreateAdopt lostCreateAction = iota + 1
+	// lostCreateCreate: no thread is; the create is made again.
+	lostCreateCreate
+	// lostCreateNeedsOperator: hk cannot tell (the lookup failed, or more
+	// than one thread matches); the row stops for the operator.
+	lostCreateNeedsOperator
+)
+
+type lostCreate struct {
+	action   lostCreateAction
+	threadID string
+	err      error
+}
+
+// decideLostCreate decides what a create whose earlier outcome is unknown
+// does, from the forum lookup. A candidate is a thread in forum with exactly
+// the task's thread name that the bot itself owns: a thread someone else
+// made, or one in another channel, is never the task's. The caller runs the
+// lookup only once the unknown outcome is TaskThreadLookupDelay old, so a
+// slow create has surfaced by then. One candidate is adopted, none means
+// create again, and anything else (more than one, or no answer to the
+// lookup) is the operator's: a second thread is never posted while one may
+// exist.
+func decideLostCreate(forumID, name, botUserID string, threads []DiscordThread, lookupErr error) lostCreate {
+	if lookupErr != nil {
+		return lostCreate{action: lostCreateNeedsOperator, err: fmt.Errorf("thread lookup failed: %w", lookupErr)}
 	}
-	target, err := d.endpoint("", true)
-	if err != nil {
-		return "", err
+	if !discordMessageIDRE.MatchString(botUserID) {
+		return lostCreate{action: lostCreateNeedsOperator, err: errors.New("thread lookup returned no bot user id")}
 	}
-	parsed, err := url.Parse(target)
-	if err != nil {
-		return "", errors.New("discord webhook url could not be parsed")
+	seen := map[string]bool{}
+	var found []string
+	for _, t := range threads {
+		if t.ParentID != forumID || t.OwnerID != botUserID || t.Name != name || seen[t.ID] {
+			continue
+		}
+		seen[t.ID] = true
+		found = append(found, t.ID)
 	}
-	query := parsed.Query()
-	query.Set("thread_id", threadID)
-	parsed.RawQuery = query.Encode()
-	return parsed.String(), nil
+	switch {
+	case len(found) == 0:
+		return lostCreate{action: lostCreateCreate}
+	case len(found) > 1:
+		return lostCreate{action: lostCreateNeedsOperator, err: fmt.Errorf("%d threads match the lost create", len(found))}
+	case !discordMessageIDRE.MatchString(found[0]):
+		return lostCreate{action: lostCreateNeedsOperator, err: errors.New("the matching thread has no valid id")}
+	}
+	return lostCreate{action: lostCreateAdopt, threadID: found[0]}
 }
 
 // taskThreadOutcome retries only what Discord certainly did not take: a 429
