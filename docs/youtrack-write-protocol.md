@@ -1224,9 +1224,11 @@ release rollback never meets an authority value it cannot parse (consult hk
   create published (`origin = 'op_applied'`, `op_id` the create); the
   `yt_write_ops` guard allows exactly that change (migration
   `20261112-yt-comment-queued-target`). A create that ends rejected, or applied
-  with `binding_conflict`, publishes no such binding: the op is claimed with
-  no target and `Send` refuses it, `rejected / issue_not_bound`, nothing sent,
-  and the rejected-op alert reports it. A task with no pending create, a body
+  with `binding_conflict`, publishes no such binding: the claim rejects the op
+  in its own transaction, `rejected / issue_not_bound`, so it is never
+  dispatched without a target (and never reaches stale recovery or
+  `remote_unknown`). Nothing is sent, and the rejected-op alert reports it.
+  `Send` also refuses an empty target as a backstop. A task with no pending create, a body
   the protocol cannot send, and a mapping disagreement are still refused.
   The previous release's comment gate never admits a targetless op, so it
   holds such an op rather than send it. A dots reply (`ReplyDots`), which prepares no op

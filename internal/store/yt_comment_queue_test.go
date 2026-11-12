@@ -145,7 +145,9 @@ func TestYTCommentQueuedCreateRejected(t *testing.T) {
 	counting := &ytcCounting{Remote: yt}
 	var offset atomic.Int64
 	got := ytqDrive(t, s, ytcProtocol(t, s, counting, &offset), op.ID)
-	if got.State != ytwrite.StateRejected || got.Reason != ytwrite.ReasonIssueNotBound || got.YTTargetID != "" {
+	// Rejected by the claim itself: never dispatched, so no stale recovery
+	// can leave it remote_unknown on the lane.
+	if got.State != ytwrite.StateRejected || got.Reason != ytwrite.ReasonIssueNotBound || got.YTTargetID != "" || got.Attempts != 0 {
 		t.Fatalf("comment op %+v", got)
 	}
 	if n := counting.posts.Load(); n != 0 {
@@ -185,7 +187,7 @@ func TestYTCommentQueuedCreateBindingConflict(t *testing.T) {
 	counting := &ytcCounting{Remote: yt}
 	var offset atomic.Int64
 	got := ytqDrive(t, s, ytcProtocol(t, s, counting, &offset), op.ID)
-	if got.State != ytwrite.StateRejected || got.Reason != ytwrite.ReasonIssueNotBound || got.YTTargetID != "" || counting.posts.Load() != 0 {
+	if got.State != ytwrite.StateRejected || got.Reason != ytwrite.ReasonIssueNotBound || got.YTTargetID != "" || got.Attempts != 0 || counting.posts.Load() != 0 {
 		t.Fatalf("comment op %+v, posts %d", got, counting.posts.Load())
 	}
 }

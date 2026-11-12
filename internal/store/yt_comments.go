@@ -88,7 +88,7 @@ func ytCommentModeGateSQL(s *Store) string {
 		// An op with no target is a comment queued behind its task's
 		// issue_create (hk 4263): lane order holds it until the create
 		// resolves, and its claim fills the target from the create's binding
-		// (claimYTCommentTargetTx) or leaves it empty, which Send refuses.
+		// (claimYTCommentTargetTx) or rejects it.
 		return `o.principal <> '` + ytDocCommentPrincipal + `' AND o.entity_kind = 'task' AND (EXISTS (SELECT 1 FROM yt_task_bindings b
 		WHERE b.task_id::text = o.entity_id AND b.issue_id = o.yt_target_id AND b.tenant = o.tenant)
 		OR (o.principal = '` + YTCommentPrincipal + `' AND o.yt_target_id = ''))`
@@ -156,9 +156,9 @@ func (s *Store) enqueueYTCommentTx(ctx context.Context, tx pgx.Tx, c TaskComment
 // behind the create, so it is never claimed before the create resolves; its
 // claim takes the target from the binding the create published
 // (claimYTCommentTargetTx). A create that ends rejected, or applied without a
-// binding (binding_conflict), leaves the target empty and the op is rejected
-// at its send (ytwrite.ReasonIssueNotBound), which the rejected-op alert
-// reports. No map anchor is written: the create's apply writes the task's map
+// binding (binding_conflict), publishes none, and the claim rejects the op
+// (ytwrite.ReasonIssueNotBound) instead of dispatching it, which the
+// rejected-op alert reports. No map anchor is written: the create's apply writes the task's map
 // row. A task with a binding (a source disagreed) or with no pending create
 // gets nothing (enqueued false).
 //
@@ -210,16 +210,19 @@ func queueYTCommentTx(ctx context.Context, tx pgx.Tx, c TaskComment) (ytwrite.Op
 // queueYTCommentTx) at its claim, in Claim's transaction under the task's
 // lane lock: the issue of the task's binding published by the task's own
 // issue_create op (origin op_applied, that op applied) on the op's tenant,
-// and the payload hash that covers it. A task with no such binding gives ""
-// and the op's own hash: the op is dispatched with no target and Send refuses
-// it. Any other op is returned unchanged.
-func claimYTCommentTargetTx(ctx context.Context, tx pgx.Tx, op ytwrite.Op) (target, sha string, err error) {
+// and the payload hash that covers it. unbound is true when the op is queued
+// but its task has no such binding (the create was rejected, or applied with
+// binding_conflict): Claim then rejects it in the same transaction
+// (ytwrite.ReasonIssueNotBound), so a targetless op is never dispatched and
+// never reaches stale recovery or remote_unknown. Any other op is returned
+// unchanged.
+func claimYTCommentTargetTx(ctx context.Context, tx pgx.Tx, op ytwrite.Op) (target, sha string, unbound bool, err error) {
 	if op.Kind != ytwrite.KindCommentAppend || op.Principal != YTCommentPrincipal || op.EntityKind != "task" || op.YTTargetID != "" {
-		return op.YTTargetID, op.PayloadSHA, nil
+		return op.YTTargetID, op.PayloadSHA, false, nil
 	}
 	taskID, err := strconv.ParseInt(op.EntityID, 10, 64)
 	if err != nil || taskID < 1 {
-		return op.YTTargetID, op.PayloadSHA, nil
+		return "", "", true, nil
 	}
 	var issueID string
 	err = tx.QueryRow(ctx, `SELECT b.issue_id FROM yt_task_bindings b JOIN yt_write_ops i ON i.id = b.op_id
@@ -228,21 +231,21 @@ func claimYTCommentTargetTx(ctx context.Context, tx pgx.Tx, op ytwrite.Op) (targ
 		taskID, op.Tenant, YTBindingOpApplied, YTIssuePrincipal, ytwrite.KindIssueCreate, ytwrite.IssueKey(taskID)).Scan(&issueID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		log.Printf("ytwrite.comment_queued_unbound op_id=%d task_id=%d", op.ID, taskID)
-		return op.YTTargetID, op.PayloadSHA, nil
+		return "", "", true, nil
 	}
 	if err != nil {
-		return "", "", err
+		return "", "", false, err
 	}
 	var p ytwrite.CommentPayload
 	if err := json.Unmarshal(op.Payload, &p); err != nil {
-		return "", "", fmt.Errorf("payload of op %d: %w", op.ID, err)
+		return "", "", false, fmt.Errorf("payload of op %d: %w", op.ID, err)
 	}
 	n, err := ytwrite.CommentOp(ytwrite.CommentRequest{Principal: op.Principal, Key: op.Key, Actor: op.Actor, TaskID: taskID, YTIssueID: issueID, Tenant: op.Tenant, Body: p.Body})
 	if err != nil {
-		return "", "", err
+		return "", "", false, err
 	}
 	log.Printf("ytwrite.comment_queued_targeted op_id=%d task_id=%d issue_id=%q", op.ID, taskID, issueID)
-	return n.YTTargetID, n.PayloadSHA, nil
+	return n.YTTargetID, n.PayloadSHA, false, nil
 }
 
 // enqueueYTCommentIfCanonicalTx is the YouTrack copy of a comment whose writer

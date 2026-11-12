@@ -18,9 +18,10 @@ type commentAppend struct{ pageSize int }
 
 func (commentAppend) Render(op Op) (string, error) { return RenderComment(op) }
 
-// Send refuses an op with no target: a comment queued behind its task's
-// issue_create (hk 4263) whose claim found no binding from that create. It
-// never calls YouTrack with an empty issue id.
+// Send refuses an op with no target. The store's claim rejects a comment
+// queued behind its task's issue_create (hk 4263) that has no binding from
+// that create before it dispatches it; this is the backstop that never calls
+// YouTrack with an empty issue id.
 func (commentAppend) Send(ctx context.Context, remote Remote, op Op, text string) (string, error) {
 	if !issueIDRE.MatchString(op.YTTargetID) {
 		return "", &RefusedError{Reason: ReasonIssueNotBound, Detail: "task " + op.EntityID + " has no binding from its issue_create op; the comment was queued behind it"}
