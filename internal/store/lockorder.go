@@ -57,7 +57,10 @@ package store
 //     single-task case and needs no level-2 lock: no task writer locks a
 //     documents row while it holds a task row (IntakeTask inserts new keys;
 //     applyDeployRecordTx runs under PutDocument's own level-2 lock, after the
-//     document row). The dots writer (RecordDotsResult) is the same case: it
+//     document row). AddYTArticleBinding takes the same order with FOR
+//     SHARE: the documents row, then its task row, then that project's
+//     youtrack_projects row (which no writer holds while it locks a task or
+//     a document), then inserts its new yt_article_bindings row. The dots writer (RecordDotsResult) is the same case: it
 //     inserts or updates one documents row and one dots_results row, each
 //     taking KEY SHARE on the one linked task row; SetDotsAdoption locks one
 //     dots_results row and no task. ReplyDots reads and writes dots_run_tokens
@@ -241,8 +244,13 @@ package store
 //         youtrack_projects row.
 //     So the comment lock -> task row -> lane lock, ownership lock -> task
 //     row -> lane lock and lane lock -> mapping row edges cannot close a
-//     cycle. The comment writers that take level 2 (ApplyYouTrackActivity,
-//     ReplyDots) never enqueue an op, so level 2 -> lane lock does not occur.
+//     cycle. ApplyYouTrackActivity takes level 2 and never enqueues an op.
+//     ReplyDots takes level 2 and its task row FOR UPDATE, and enqueues only
+//     while comments are canonical in YouTrack (hk 4122): then the authority
+//     row FOR SHARE and the task's lane lock follow. No lane holder requests
+//     a level-2 lock or a task row (AddYTTaskBinding takes the task row before
+//     the lane lock), and a switch requests neither, so level 2 -> task row ->
+//     lane lock cannot close a cycle.
 //     Issue mode (hk 3898, yt_issues.go) adds two lane holders. A task
 //     creator (CreateTask, intake, ticket sets, dots, dispositions) in mode
 //     on, after its own locks and the task insert, reads the task's
@@ -303,6 +311,22 @@ package store
 //     decision's uncommitted binding of the same issue, whose holder waits
 //     for no second lane lock, so the wait cannot close a cycle. Neither
 //     takes a task row, a decision_requests row or a level 1-5 lock.
+//
+//   - The authority rows (yt_authority.go, hk 4122). A switch to youtrack
+//     (SetYTAuthority) first tries the legacy sync lock 8241873404 at
+//     transaction scope, never waiting (a few tries, then it refuses); a
+//     rollback to hk skips it. Then it locks yt_authority rows FOR UPDATE in
+//     kind order, reads yt_write_ops, yt_feed_cursors and sync_log without a
+//     lock and updates only its locked rows. Every op preparation
+//     (prepareYTOpTx, after its lane lock) and the comment writers and the
+//     audit enqueue (after the comment's task KEY SHARE, before the lane
+//     lock; ReplyDots after its task row) read their kind's row FOR SHARE,
+//     first inserting it ON CONFLICT DO NOTHING if it is missing
+//     (ytAuthorityShareTx), which can wait only for a switch's own insert. A holder of FOR SHARE may wait
+//     for a switch; a switch, once it holds the sync lock, waits only for
+//     those rows, and a FOR SHARE holder never waits for the sync lock (sync,
+//     adopt and the comment catch-up only try it, before any row lock), so
+//     no cycle closes.
 //
 //   - The YouTrack sync's single-run guard is a session-scoped
 //     pg_try_advisory_lock(8241873404) on its own pooled connection. It is

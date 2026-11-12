@@ -357,6 +357,14 @@ func (s *Store) ReplyDots(ctx context.Context, actor, channel string, in DotsRep
 	if err = tx.QueryRow(ctx, `INSERT INTO task_comments(task_id,body,author,created_at) VALUES($1,$2,$3,$4) RETURNING id`, in.TaskID, in.Body, actor, now).Scan(&commentRowID); err != nil {
 		return DotsReplyResult{}, err
 	}
+	// While comments are canonical in YouTrack (hk 4122) the reply gets its
+	// op in this transaction, or is refused; under hk nothing changes.
+	reply := TaskComment{ID: commentRowID, TaskID: in.TaskID, Body: in.Body, Author: actor, CreatedAt: now}
+	replyOp, replyEnqueued, err := s.enqueueYTCommentIfCanonicalTx(ctx, tx, reply)
+	if err != nil {
+		return DotsReplyResult{}, err
+	}
+
 	var docKey string
 	if in.Kind != "START" {
 		issue := DotsIssue{Identifier: "hk-" + strconv.FormatInt(task.ID, 10), Title: task.Title, URL: fmt.Sprintf("hk:task/%d", task.ID), IssueUUID: fmt.Sprintf("hk:%d", task.ID)}
@@ -400,6 +408,7 @@ func (s *Store) ReplyDots(ctx context.Context, actor, channel string, in DotsRep
 	if err = tx.Commit(ctx); err != nil {
 		return DotsReplyResult{}, err
 	}
+	logYTCommentEnqueued(reply, replyOp, replyEnqueued)
 	return DotsReplyResult{TaskID: task.ID, State: task.State, DocumentKey: docKey, RunToken: runToken}, nil
 }
 

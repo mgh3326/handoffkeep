@@ -36,10 +36,16 @@ func (s Server) importExport(w http.ResponseWriter, r *http.Request) {
 	}
 	resource := r.PathValue("resource")
 	ctx := r.Context()
+	// Each read below first checks the resource's kind (hk 4122,
+	// importYTCanonical), after the request's own validation.
+	kind := importResourceKind[resource]
 	switch resource {
 	case "projects":
 		if q.Has("after_at") || q.Has("after_id") || q.Has("project") || q.Has("max_task_id") {
 			writeError(w, http.StatusBadRequest, "invalid_context")
+			return
+		}
+		if s.importYTCanonical(w, r, kind) {
 			return
 		}
 		projects, err := s.Service.Store.ListTaskProjects(ctx)
@@ -91,6 +97,9 @@ func (s Server) importExport(w http.ResponseWriter, r *http.Request) {
 				}
 				project = &p
 			}
+			if s.importYTCanonical(w, r, kind) {
+				return
+			}
 			rows, err := s.Service.Store.ImportTasksUpdatedPage(ctx, project, at, id, limit+1)
 			if err != nil {
 				appErr(w, r, err)
@@ -131,6 +140,9 @@ func (s Server) importExport(w http.ResponseWriter, r *http.Request) {
 				p = ""
 			}
 			project = &p
+		}
+		if s.importYTCanonical(w, r, kind) {
+			return
 		}
 		rows, err := s.Service.Store.ListTasksPage(ctx, "", "", "", project, nil, after, limit+1)
 		if err != nil {
@@ -187,6 +199,9 @@ func (s Server) importExport(w http.ResponseWriter, r *http.Request) {
 					ids = append(ids, n)
 				}
 			}
+			if s.importYTCanonical(w, r, kind) {
+				return
+			}
 			rows, err := s.Service.Store.ImportCommentsUpdatedPage(ctx, ids, at, id, limit+1)
 			if err != nil {
 				appErr(w, r, err)
@@ -218,6 +233,9 @@ func (s Server) importExport(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		if s.importYTCanonical(w, r, kind) {
+			return
+		}
 		rows, err := s.Service.Store.ImportCommentsPage(ctx, after, limit, project, maxTaskID)
 		if err != nil {
 			appErr(w, r, err)
@@ -235,6 +253,9 @@ func (s Server) importExport(w http.ResponseWriter, r *http.Request) {
 		}
 		if limit > 999 {
 			limit = 999
+		}
+		if s.importYTCanonical(w, r, kind) {
+			return
 		}
 		rows, err := s.Service.Store.ImportCommentAuthorsPage(ctx, q.Get("after"), limit+1)
 		if err != nil {
@@ -261,6 +282,9 @@ func (s Server) importExport(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusBadRequest, "invalid_context")
 				return
 			}
+			if s.importYTCanonical(w, r, kind) {
+				return
+			}
 			rows, err := s.Service.Store.ImportDocumentsUpdatedPage(ctx, q.Get("project"), at, id, limit+1)
 			if err != nil {
 				appErr(w, r, err)
@@ -282,6 +306,9 @@ func (s Server) importExport(w http.ResponseWriter, r *http.Request) {
 				appErr(w, r, err)
 				return
 			}
+		}
+		if s.importYTCanonical(w, r, kind) {
+			return
 		}
 		rows, err := s.Service.Store.ImportDocumentsPage(ctx, q.Get("project"), after, limit+1)
 		if err != nil {
@@ -319,6 +346,9 @@ func (s Server) importExport(w http.ResponseWriter, r *http.Request) {
 			}
 			ids = append(ids, id)
 		}
+		if s.importYTCanonical(w, r, kind) {
+			return
+		}
 		rows, err := s.Service.Store.ImportTaskDocumentsPage(ctx, ids, afterID, limit+1)
 		if err != nil {
 			appErr(w, r, err)
@@ -346,6 +376,9 @@ func (s Server) importExport(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		if s.importYTCanonical(w, r, kind) {
+			return
+		}
 		rows, err := s.Service.Store.ImportDocumentAuthorsPage(ctx, q.Get("project"), after, limit+1)
 		if err != nil {
 			appErr(w, r, err)
@@ -371,6 +404,9 @@ func (s Server) importExport(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusBadRequest, "invalid_context")
 				return
 			}
+			if s.importYTCanonical(w, r, kind) {
+				return
+			}
 			rows, err := s.Service.Store.ImportDecisionsUpdatedPage(ctx, at, id, limit+1, time.Now().UTC())
 			if err != nil {
 				appErr(w, r, err)
@@ -392,6 +428,9 @@ func (s Server) importExport(w http.ResponseWriter, r *http.Request) {
 				appErr(w, r, err)
 				return
 			}
+		}
+		if s.importYTCanonical(w, r, kind) {
+			return
 		}
 		rows, err := s.Service.Store.ImportDecisionsPage(ctx, afterID, limit+1, time.Now().UTC())
 		if err != nil {
@@ -427,4 +466,20 @@ func importCursor(r *http.Request) (time.Time, int64, error) {
 		}
 	}
 	return at.UTC(), id, nil
+}
+
+// importYTCanonical answers an empty page and reports true when kind is
+// canonical in YouTrack (hk 4122): a kind YouTrack owns is never imported
+// again, so an import run that still holds the grant writes nothing over it.
+func (s Server) importYTCanonical(w http.ResponseWriter, r *http.Request, kind store.YTAuthorityKind) bool {
+	side, err := s.Service.Store.YTAuthorityOf(r.Context(), kind)
+	if err != nil {
+		appErr(w, r, err)
+		return true
+	}
+	if side != store.YTAuthorityYouTrack {
+		return false
+	}
+	jsonOut(w, http.StatusOK, map[string]any{"items": []any{}, "next_cursor": nil})
+	return true
 }

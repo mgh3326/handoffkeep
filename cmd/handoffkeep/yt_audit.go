@@ -158,11 +158,24 @@ type ytAuditEnqueue struct {
 	OpIDs    []int64 `json:"op_ids"`
 }
 
+// Repair directions of an audit (hk 4122): which side a gap is repaired
+// from, by the comments authority.
+const (
+	// ytAuditRepairToYT: hk is canonical; --enqueue copies a missing_in_yt
+	// comment to YouTrack.
+	ytAuditRepairToYT = "pg_to_youtrack"
+	// ytAuditRepairToPG: YouTrack is canonical; a gap is repaired from
+	// YouTrack into PG, and --enqueue prepares nothing.
+	ytAuditRepairToPG = "youtrack_to_pg"
+)
+
 type ytAuditReport struct {
-	Tenant  string `json:"tenant"`
-	Project string `json:"project,omitempty"`
-	Task    int64  `json:"task,omitempty"`
-	Limit   int    `json:"limit,omitempty"`
+	Tenant string `json:"tenant"`
+	// RepairDirection is ytAuditRepairToYT or ytAuditRepairToPG.
+	RepairDirection string `json:"repair_direction"`
+	Project         string `json:"project,omitempty"`
+	Task            int64  `json:"task,omitempty"`
+	Limit           int    `json:"limit,omitempty"`
 	// Tasks is how many tasks the run read; Stopped, when set, says why it
 	// ended before the last one.
 	Tasks    int               `json:"tasks"`
@@ -170,6 +183,64 @@ type ytAuditReport struct {
 	Total    ytAuditCounts     `json:"total"`
 	Projects []*ytAuditProject `json:"projects"`
 	Enqueue  *ytAuditEnqueue   `json:"enqueue,omitempty"`
+	// EnqueueSkipped says why --enqueue prepared nothing (the comments
+	// authority is youtrack).
+	EnqueueSkipped string `json:"enqueue_skipped,omitempty"`
+	// Documents counts the documents with no article binding on this
+	// tenant (hk 4053); absent with --task, or without the articles
+	// migration.
+	Documents *ytAuditDocuments `json:"documents,omitempty"`
+}
+
+// ytAuditDocuments is the documents the import made an article for
+// (store.YTArticleExcluded false) that have no yt_article_bindings row on
+// the audit's tenant, in all and per project (an hk project, /shared or
+// /unassigned). It is a count for the document cutover, not part of the
+// comment gate: it does not change the exit.
+type ytAuditDocuments struct {
+	Documents int                  `json:"documents"`
+	Unbound   ytArticlesClass      `json:"unbound"`
+	Projects  []*ytAuditDocProject `json:"projects"`
+}
+
+type ytAuditDocProject struct {
+	Project string          `json:"project"`
+	Unbound ytArticlesClass `json:"unbound"`
+}
+
+// documents counts the unbound documents of bucket ("" for all).
+func (a *ytAuditor) documents(ctx context.Context, bucket string) (*ytAuditDocuments, error) {
+	out := &ytAuditDocuments{Unbound: ytArticlesClass{DocumentIDs: []int64{}}, Projects: []*ytAuditDocProject{}}
+	byProject := map[string]*ytAuditDocProject{}
+	var after int64
+	for {
+		docs, err := a.st.YTArticleDocs(ctx, bucket, after, ytArticleDocPage)
+		if err != nil {
+			return nil, err
+		}
+		for _, d := range docs {
+			after = d.DocumentID
+			if store.YTArticleExcluded(d.Key, d.TaskID) {
+				continue
+			}
+			out.Documents++
+			p := byProject[d.Bucket]
+			if p == nil {
+				p = &ytAuditDocProject{Project: d.Bucket, Unbound: ytArticlesClass{DocumentIDs: []int64{}}}
+				byProject[d.Bucket] = p
+				out.Projects = append(out.Projects, p)
+			}
+			if d.BoundTenant != a.tenant {
+				out.Unbound.add(d.DocumentID)
+				p.Unbound.add(d.DocumentID)
+			}
+		}
+		if len(docs) < ytArticleDocPage {
+			break
+		}
+	}
+	sort.Slice(out.Projects, func(i, j int) bool { return out.Projects[i].Project < out.Projects[j].Project })
+	return out, nil
 }
 
 // gap reports whether the run found what the cutover gate refuses.
@@ -193,6 +264,12 @@ type ytAuditor struct {
 	tenant  string
 	botID   string
 	enqueue bool
+	// toPG: comments are canonical in YouTrack (ytAuditRepairToPG); the run
+	// enqueues nothing, even with enqueue set.
+	toPG bool
+	// articles is set when the schema has yt_article_bindings: the run
+	// then also counts the unbound documents (ytAuditDocuments).
+	articles bool
 	// sleep waits d or until ctx ends (nil: the wall clock).
 	sleep func(ctx context.Context, d time.Duration) error
 }
@@ -392,6 +469,12 @@ func (a *ytAuditor) auditTask(ctx context.Context, taskID int64, counts []*ytAud
 			}
 		case status == store.YTAuditLinked:
 			enq.Linked++
+		case status == store.YTAuditAuthority:
+			// Comments switched to YouTrack during the run: stop
+			// enqueuing; the report's direction follows (run).
+			enq.Skipped++
+			a.toPG, a.enqueue = true, false
+			return nil
 		default:
 			enq.Skipped++
 		}
@@ -403,7 +486,14 @@ func (a *ytAuditor) auditTask(ctx context.Context, taskID int64, counts []*ytAud
 // in task id order, listing them a page at a time. One task's failed read is class error and the run goes
 // on; a rate limit longer than the audit waits stops it.
 func (a *ytAuditor) run(ctx context.Context, project string, taskID int64, limit int) (ytAuditReport, error) {
-	r := ytAuditReport{Tenant: a.tenant, Project: project, Task: taskID, Limit: limit, Projects: []*ytAuditProject{}}
+	r := ytAuditReport{Tenant: a.tenant, RepairDirection: ytAuditRepairToYT, Project: project, Task: taskID, Limit: limit, Projects: []*ytAuditProject{}}
+	if a.toPG {
+		r.RepairDirection = ytAuditRepairToPG
+		if a.enqueue {
+			a.enqueue = false
+			r.EnqueueSkipped = "comments authority is youtrack: repair from YouTrack to PG; no op is prepared"
+		}
+	}
 	if a.enqueue {
 		r.Enqueue = &ytAuditEnqueue{OpIDs: []int64{}}
 	}
@@ -447,9 +537,20 @@ func (a *ytAuditor) run(ctx context.Context, project string, taskID int64, limit
 			break
 		}
 	}
+	if a.toPG && r.RepairDirection != ytAuditRepairToPG {
+		r.RepairDirection = ytAuditRepairToPG
+		r.EnqueueSkipped = "comments authority switched to youtrack during the run: enqueuing stopped"
+	}
 	sort.Slice(r.Projects, func(i, j int) bool { return r.Projects[i].Project < r.Projects[j].Project })
 	for _, p := range append([]*ytAuditCounts{&r.Total}, projectCounts(r.Projects)...) {
 		p.fillEmpty()
+	}
+	if a.articles && taskID == 0 {
+		docs, err := a.documents(ctx, project)
+		if err != nil {
+			return r, err
+		}
+		r.Documents = docs
 	}
 	return r, nil
 }
@@ -531,11 +632,21 @@ func youtrackAuditCmd(args []string, out io.Writer) error {
 			return exitCodeError{code: youtrackExitConfig, err: fmt.Errorf("the database lacks migration %s: deploy the release that adds it first; the audit never migrates", store.YTTaskBindingsMigration)}
 		}
 	}
+	// The document count needs yt_article_bindings; a schema from before
+	// it (read-only, so not migrated) is audited without the count.
+	articles, err := st.MigrationApplied(openCtx, store.YTArticleBindingsMigration)
+	if err != nil {
+		return err
+	}
 	me, err := client.Me(openCtx)
 	if err != nil {
 		return fmt.Errorf("read the bot's YouTrack user: %w", err)
 	}
-	a := &ytAuditor{st: st, remote: remote, tenant: remote.Tenant(), botID: me.ID, enqueue: *enqueue}
+	toPG, err := ytAuditToPG(openCtx, st)
+	if err != nil {
+		return err
+	}
+	a := &ytAuditor{st: st, remote: remote, tenant: remote.Tenant(), botID: me.ID, enqueue: *enqueue, toPG: toPG, articles: articles}
 	report, err := a.run(context.Background(), *project, *task, *limit)
 	if err != nil {
 		return err
@@ -555,4 +666,16 @@ func youtrackAuditCmd(args []string, out io.Writer) error {
 			report.Total.MissingInYT.Count, report.Total.Duplicate.Count, report.Total.AdoptedUnmatched.Count, report.Total.AmbiguousCopy.Count, report.Total.Unbound.Count)}
 	}
 	return nil
+}
+
+// ytAuditToPG reads whether comments are canonical in YouTrack. A database
+// without the authority table (an older schema the read-only audit does not
+// migrate) is hk.
+func ytAuditToPG(ctx context.Context, st *store.Store) (bool, error) {
+	applied, err := st.MigrationApplied(ctx, store.YTAuthorityMigration)
+	if err != nil || !applied {
+		return false, err
+	}
+	side, err := st.YTAuthorityOf(ctx, store.YTAuthorityComments)
+	return side == store.YTAuthorityYouTrack, err
 }

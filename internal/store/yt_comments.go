@@ -103,7 +103,51 @@ func ytCommentModeGateSQL(s *Store) string {
 // Locks, in this order after the comment insert lock and the comment's KEY
 // SHARE on its task: the op's entity lane lock (lockYTEntity), then new rows
 // of yt_write_ops, yt_comment_write_links and yt_entity_map (lockorder.go).
+//
+// While comments are canonical in YouTrack (hk 4122), a comment that would
+// end up only in PG is refused with ErrYTCommentUnsendable and the caller's
+// transaction rolls back: a comment the protocol can never send, and a
+// comment that gets no op or a born-rejected one (the mode is not on or
+// canary, the task is not bound or enrolled, a source disagrees). FOR SHARE on
+// the comments row orders the comment against a switch (SetYTAuthority).
 func (s *Store) enqueueYTCommentTx(ctx context.Context, tx pgx.Tx, c TaskComment) (ytwrite.Op, bool, error) {
+	side, err := ytAuthorityShareTx(ctx, tx, YTAuthorityComments)
+	if err != nil {
+		return ytwrite.Op{}, false, err
+	}
+	if side != YTAuthorityYouTrack {
+		return s.enqueueYTCommentModeTx(ctx, tx, c)
+	}
+	if cerr := ytwrite.CheckCommentContent(c.Author, c.Body); cerr != nil {
+		return ytwrite.Op{}, false, fmt.Errorf("%w: %v", ErrYTCommentUnsendable, cerr)
+	}
+	op, enqueued, err := s.enqueueYTCommentModeTx(ctx, tx, c)
+	switch {
+	case err != nil:
+		return op, enqueued, err
+	case !enqueued:
+		return ytwrite.Op{}, false, fmt.Errorf("%w: comments mode %s has no YouTrack copy for task %d (not bound or enrolled, or a mapping disagrees)",
+			ErrYTCommentUnsendable, s.ytCommentsModeNow(), c.TaskID)
+	case op.State == ytwrite.StateRejected:
+		return ytwrite.Op{}, false, fmt.Errorf("%w: its YouTrack copy would be rejected (%s)", ErrYTCommentUnsendable, op.Reason)
+	}
+	return op, enqueued, nil
+}
+
+// enqueueYTCommentIfCanonicalTx is the YouTrack copy of a comment whose writer
+// prepares no op while hk is canonical (ReplyDots): nothing under hk, today's
+// behaviour; under youtrack, enqueueYTCommentTx, which refuses a comment that
+// would stay only in PG.
+func (s *Store) enqueueYTCommentIfCanonicalTx(ctx context.Context, tx pgx.Tx, c TaskComment) (ytwrite.Op, bool, error) {
+	side, err := ytAuthorityShareTx(ctx, tx, YTAuthorityComments)
+	if err != nil || side != YTAuthorityYouTrack {
+		return ytwrite.Op{}, false, err
+	}
+	return s.enqueueYTCommentTx(ctx, tx, c)
+}
+
+// enqueueYTCommentModeTx is enqueueYTCommentTx by the comments mode alone.
+func (s *Store) enqueueYTCommentModeTx(ctx context.Context, tx pgx.Tx, c TaskComment) (ytwrite.Op, bool, error) {
 	switch s.ytCommentsModeNow() {
 	case YTCommentsOn:
 		return enqueueYTCommentOnTx(ctx, tx, c)

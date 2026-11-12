@@ -893,6 +893,111 @@ Korean title and the milestone name are read when the task row changes: a
 task that becomes stalled with no change, a new translation or a renamed
 milestone reaches the issue with the task's next change.
 
+## Article bindings (hk 4053)
+
+The import made a YouTrack article for most hk documents, and hk kept no
+record of which. `yt_article_bindings` records it, one row per document, so
+the document kind (Y5b) updates that article instead of creating a second.
+No mode reads the table yet; nothing changes until Y5b ships.
+
+**Row.** `document_id` (primary key), `tenant`, `article_id` (stable internal
+id), `article_readable`, `project_id`, `part` (0: the whole document, or the
+index article of a split one), `generation` (0; Y5c owns it), `content_sha`
+(sha256 of the content the article held when it was verified; NULL for a
+split document's index), `origin` (`import_verified` here; `op_applied` is
+for Y5b), `op_id`, `needs_update`, `bound_by`, `bound_at`, and
+`UNIQUE(tenant, article_id)`. `Store.AddYTArticleBinding` writes it: the same
+binding again is a no-op; any other binding for the document, or another
+document's binding to the article, is `yt_article_binding_conflict` and
+changes nothing. It also refuses a document that changed (body, task or
+project) since it was verified, and an excluded one.
+
+**Scope.** The import's own filter (`youtrack/import/client.js`): a document
+with no task is in project `/shared` (the YouTrack project named `Shared
+documents`), one of a task with no project in `/unassigned` (`Unassigned hk
+tasks`), any other in its task's hk project (its `youtrack_projects` row; a
+row whose YouTrack id is one of those two projects counts as unmapped). The
+two are found by name, not short name: the import gives them `SHRDOC` and
+`HK` with a numeric tail when an hk project took the name first (`SHRDOC2`),
+and the readable-id lookup uses the short name YouTrack reports. No such
+project, or two, refuses the run (exit 2). `screens/*`, `review/mwr-*` and a task's reports
+(`reports/mwr-*/...`, `reports/<job>/report.md`) are `excluded`: they became
+issue comments (Y5d).
+
+**Verification.** An article verifies when it is a top-level article of the
+document's YouTrack project and its summary is the import's rendering:
+`[<prefix>] <key> [<kind>]` cut to 250 code points (`store.YTArticleSummary`),
+or that and ` (분할 문서)` for the index of a document over 240 KiB
+(`store.YTArticleIndexSummary`). `internal/store/testdata` holds the golden,
+generated from `client.js` itself. Then:
+
+- one article, and its content's sha256 equals `documents.sha256`: `matched`;
+- one article with other content, or a split document's index: `sha_differs`,
+  bound with `needs_update` true;
+- none: `missing`; two or more: `ambiguous`, never bound.
+
+The whole article list is read once per run (id, idReadable, summary,
+project, parent; 100 a page), before the first document that needs a lookup
+and outside its 60 s budget. It is read twice, as `EnumerateStableComments`
+reads comments (decision-4): a YouTrack project whose articles (ids,
+summaries, parents) differ between the two reads, or repeat within one (an
+offset page shifted), binds nothing. Its documents are class `error` with
+reason `list_unstable`, the report sets `list_unstable: true` on it, and the
+command exits 1; run it again. Other projects proceed. The article is then read by one GET of
+`<SHORT>-A-<document id>`, the readable id the import's article key
+(`articleKey`, the document id) would give it. A project whose first such GET
+verifies keeps that lookup (`lookup: "readable_id"`); a document whose GET
+then misses falls back to the summary. A project whose first GET does not
+verify is matched by summary from here on (`lookup: "summary"`), and the
+matched article's content is read by id. On both paths a second top-level
+article of the project with the document's summary makes it `ambiguous`. 
+
+**A long rendering** is never bound (decisions 5 and 6 of hk 4053). This
+applies when the full rendering `[<prefix>] <key> [<kind>]` is 242 code
+points or longer (`store.YTArticleSummaryCut`, whose comment has the full
+argument). Below 242, both strings a document can match are shorter than 250:
+the summary is at most 241 and the index at most 249. Every cut rendering of
+any key is at least 250 (a cut summary is exactly 250, a cut index at least
+258), and an uncut rendering names one key, so a match is the document's own.
+From 242 on, a summary or index can equal another, longer key's cut summary,
+and neither a unique article nor equal content proves ownership, since two
+documents can share a body. Such a document is `ambiguous`, also counted
+under `summary_cut`, with no YouTrack read. It stays unbound, and Y5b puts it
+on its exception list rather than creating an article. Which lookup the live import allows is UNVERIFIED until
+the first preflight (hk 4053 report).
+
+**Commands.** Both open the database directly and verify against the tenant
+of `YOUTRACK_URL`; `--project` is an hk project, `/shared` or `/unassigned`.
+
+**Precondition.** No YouTrack article writer runs during a backfill: the
+import has ended (D3), and the legacy docs push (`youtrack sync`) is off. hk
+cannot fence YouTrack writes. The double read detects a writer during the
+enumeration but not after it, so an article created between the list and a
+binding is outside what the backfill checks.
+
+- `handoffkeep youtrack articles-preflight [--project P]` is read-only
+  (`store.OpenReadOnly`; exit 2 without migration `20261112-yt-article-bindings`).
+  The JSON report has, per project, its `lookup` and a count and up to 10
+  document ids for `bound`, `matched`, `sha_differs`, `missing`, `ambiguous` (and its subset `summary_cut`),
+  `excluded` and `error`. A bound or excluded document is classified without
+  a YouTrack read.
+- `handoffkeep youtrack articles-backfill [--project P] [--by NAME]` binds
+  every `matched` and `sha_differs` document and adds `bound_now`; a refused
+  publication counts as `ambiguous` and the run goes on. A re-run binds
+  nothing and reads nothing for a bound document.
+- Each read has 15 s and each document 60 s; the article list, read once, has 10 minutes. A document in
+  class `error` exits 1 after the report.
+
+**Audit.** `youtrack audit` (without `--task`) adds `documents`: the in-scope
+documents and those with no binding on its tenant (`unbound`, count and up to
+10 ids, in all and per project). It is a count for the document cutover; it
+does not change the audit's exit.
+
+**Migration** `20261112-yt-article-bindings` (expand-only, no `After`): the
+new table with its primary key and unique index. Locks only on the new, empty
+table; no foreign key. It writes no row, and the previous release neither
+reads nor writes the table.
+
 ## Kind issue_move (hk 4055)
 
 A task's hk project can change while its issue stays in the YouTrack project
@@ -991,6 +1096,103 @@ SHA-256 to the import's output.
 
 **Audit.** A document copy is not an hk comment, so `youtrack audit` lists it
 as `yt_only_bot`, which the audit's gate does not count.
+
+## Authority (hk 4122)
+
+Which side is canonical, per content kind, is a row in `yt_authority`
+(migration `20261112-yt-authority`, expand-only: one new table seeded with one
+`hk` row per kind). The kinds are `tasks`, `comments`, `documents` and
+`decisions`; the authority is `hk` (the default) or `youtrack`. A kind with no
+row reads as `hk`. The modes stay env values; the authority is not one, so a
+release rollback never meets an authority value it cannot parse (consult hk
+3833 §3.4).
+
+**Authority hk** is today's behaviour exactly.
+
+**Authority youtrack** for a kind:
+
+- `/v1/import/*` answers every page of that kind's resources with
+  `{"items": [], "next_cursor": null}` (200), after the request's own
+  validation: `projects` and `tasks` are tasks, `comments` and
+  `comment-authors` comments, `documents`, `task-documents` and
+  `document-authors` documents, `decisions` decisions. The other kinds' pages
+  are unchanged.
+- `youtrack sync` and `youtrack adopt` refuse (exit 5, before any YouTrack
+  call) while any kind is youtrack, naming the kinds, even with every mode off.
+  They check while holding the sync lock, which a switch to youtrack needs
+  too, so no switch commits during a run. The mode guard (hk 3907) still
+  refuses first while a mode is on.
+- `youtrack audit` reports `"repair_direction": "youtrack_to_pg"` (otherwise
+  `"pg_to_youtrack"`) when comments are youtrack, and `--enqueue` prepares
+  nothing (`"enqueue_skipped"` says why). Each enqueue transaction also
+  reads the authority itself, so a run that started before a switch stops
+  enqueuing at the switch. Its classes and exit codes are unchanged.
+- A comment that would stay only in PG is refused with 400
+  `{"error": "yt_comment_unsendable", "reason": ...}` and nothing is written:
+  one the protocol can never send (`ytwrite.CheckCommentContent`: the author
+  or the body, for example a body quoting the op marker), and one that gets no
+  op or a born-rejected one (the comments mode is off, the task is not bound,
+  or not enrolled in canary, or a mapping disagrees). Under hk the same
+  comments commit as before. A dots reply (`ReplyDots`), which prepares no op
+  under hk, gets its op in the reply's transaction under youtrack, or the whole
+  reply is refused the same way. Every comment writer reads the comments row
+  `FOR SHARE` (creating it as hk first if it is missing), so a switch waits for
+  a comment in flight and a comment sees a switch that committed first.
+
+**Commands.** `handoffkeep youtrack authority show` prints every kind's row
+(`GET /v1/yt/authority`). `handoffkeep youtrack authority set <kind|all>
+<hk|youtrack> --by NAME --note TEXT` (`POST /v1/yt/authority`, operator token
+only) switches in one transaction and prints every row before and after. The
+server first takes the legacy sync lock (a running `youtrack sync`, `adopt`
+or comment catch-up makes it refuse), then checks, for each kind it changes to
+youtrack, that its own write mode is on (tasks: `HANDOFFKEEP_YT_ISSUES_MODE` and `HANDOFFKEEP_YT_FIELDS_MODE`;
+comments: `HANDOFFKEEP_YT_COMMENTS_MODE=on`; documents:
+`HANDOFFKEEP_YT_DOC_COMMENTS_MODE`; decisions: `HANDOFFKEEP_YT_DECISIONS_MODE`) and that the kind has no `prepared`, `dispatched` or
+`remote_unknown` op (by principal: `hk:task-issues` and `hk:task-fields`,
+`hk:task-comments`, `hk:doc-comments`, `hk:decisions`), and that its feed
+consumers have read every change (`task_fields` for tasks, `task_docs` for
+documents, `decision_issues` for decisions; a consumer
+that has never run, or whose cursor is behind `sync_state.pruned_through`,
+refuses). Every op preparation holds its kind's row
+`FOR SHARE`, so the switch counts an op whose transaction was open when it
+started. Any refusal is 409
+`yt_authority_refused` naming each kind and reason, and no kind changes. A kind
+already on the target is left as it was. Setting `hk` always succeeds. Each
+changed kind logs `ytwrite.authority_set kind= authority= switched_by= note=`.
+
+### Switch runbook (consult hk 3833 §3.2, operator A53)
+
+Before the day, with no freeze: each kind's mode on, `youtrack audit`
+rehearsed until it is clean, a restore drill rehearsed, and the delta audit
+timed. There is no full YouTrack export (A53).
+
+1. Freeze: no new spawns, no hk deploys, no `youtrack_projects` edits and no
+   task project moves. PG writes need not stop; their ops follow.
+2. Confirm the import grant is gone (D3): the hk auth file has no
+   `HANDOFFKEEP_TOKEN_youtrack` or `HANDOFFKEEP_IMPORT_READONLY_youtrack` line.
+3. `youtrack ops`: no pending op, no `remote_unknown`, and only explained
+   `rejected` ones.
+4. Full `youtrack audit`: `unbound` 0 (or explained per task), `missing_in_yt`
+   0, `duplicate` 0, and the `yt_only` lists reviewed.
+5. The restore check (consult §3.3): no diff outside the allowed exception
+   list. Documents
+   over 240 KiB are on a "not updated" exception list at the first switch
+   (D4).
+6. `youtrack authority set <kind> youtrack --by NAME --note TEXT` for each
+   kind, or `all`. Check that the printed
+   `after` rows are youtrack and `youtrack authority show` agrees.
+7. Lift the freeze. For the next day, run the audit periodically and keep the
+   pending-op alert on.
+
+### Rollback
+
+`youtrack authority set <kind|all> hk --by NAME --note TEXT`: the effects
+above stop at once and nothing else changes. The only reverse repair is the
+audit's `yt_only` items (what people wrote in YouTrack meanwhile). A release
+rollback leaves the rows alone, but the previous release does not read
+`yt_authority`: while it serves, every kind behaves as hk (import pages,
+legacy push, unsendable comments). Set the kinds to hk before rolling back a
+release, or switch them again once the release that reads the table is back.
 
 ## Kinds decision_create and decision_fields (hk 4054)
 

@@ -356,6 +356,29 @@ func TestYouTrackAudit(t *testing.T) {
 	if after := ytpSnapshot(t, conn); after != before {
 		t.Fatalf("read-only audit wrote: %s -> %s", before, after)
 	}
+	if r.RepairDirection != ytAuditRepairToYT {
+		t.Errorf("hk authority: repair_direction %q, want %q", r.RepairDirection, ytAuditRepairToYT)
+	}
+
+	// hk 4122: while comments are canonical in YouTrack the same gaps are
+	// repaired from YouTrack to PG, and --enqueue prepares nothing.
+	if _, err := conn.Exec(ctx, `UPDATE yt_authority SET authority='youtrack' WHERE kind='comments'`); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{nil, {"--enqueue"}} {
+		r, err = ytaRun(t, args...)
+		gap("youtrack authority", err)
+		check("youtrack authority", r)
+		if r.RepairDirection != ytAuditRepairToPG || r.Enqueue != nil || (len(args) > 0) != (r.EnqueueSkipped != "") {
+			t.Errorf("youtrack authority %v: direction %q enqueue %+v skipped %q", args, r.RepairDirection, r.Enqueue, r.EnqueueSkipped)
+		}
+		if after := ytpSnapshot(t, conn); after != before {
+			t.Fatalf("youtrack authority %v: the audit wrote: %s -> %s", args, before, after)
+		}
+	}
+	if _, err := conn.Exec(ctx, `UPDATE yt_authority SET authority='hk' WHERE kind='comments'`); err != nil {
+		t.Fatal(err)
+	}
 
 	// --enqueue: one op per missing comment, with its key and link.
 	r, err = ytaRun(t, "--enqueue")
