@@ -779,3 +779,59 @@ func TestYTArticlesCatchUpRetriesNoProject(t *testing.T) {
 		t.Fatal("catch-up not done once nothing waits")
 	}
 }
+
+// r4547806956: a document the live feed skips as no_project after the
+// catch-up has finished joins the same retry set, so its create comes once
+// its mapping exists, with no further document change.
+func TestYTArticlesFeedNoProjectIsRetried(t *testing.T) {
+	s := ytartSetup(t, "ytart_feednp", true)
+	ctx := t.Context()
+	if _, err := s.RunYTFeedConsumers(ctx, 100); err != nil || !s.ytDocsCaughtUp.Load() {
+		t.Fatalf("catch-up: %v %v", s.ytDocsCaughtUp.Load(), err)
+	}
+	if _, err := s.AddTaskProject(ctx, "ytart-fnp", "test"); err != nil {
+		t.Fatal(err)
+	}
+	project := "ytart-fnp"
+	task, err := s.CreateTask(ctx, Task{Lane: "ytart-lane", Title: "articles", Kind: "implement", CreatedBy: "test", Project: &project})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := ytartPut(t, s, "design/ytart/feed-noproj.md", "body", &task.ID)
+	if _, err := s.RunYTFeedConsumers(ctx, 100); err != nil {
+		t.Fatal(err)
+	}
+	if ops := ytartOps(t, s, id); len(ops) != 0 || s.ytDocsCaughtUp.Load() {
+		t.Fatalf("no_project from the feed: ops %+v caught up %v", ops, s.ytDocsCaughtUp.Load())
+	}
+	if err := s.PutYouTrackProject(ctx, YouTrackProject{HKProject: "ytart-fnp", ProjectID: "0-44", ShortName: "YTFNP"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.RunYTFeedConsumers(ctx, 100); err != nil {
+		t.Fatal(err)
+	}
+	if ops := ytartOps(t, s, id); len(ops) != 1 || ops[0].Kind != ytwrite.KindArticleCreate || ops[0].YTTargetID != "0-44" || !s.ytDocsCaughtUp.Load() {
+		t.Fatalf("after the mapping: ops %+v caught up %v", ops, s.ytDocsCaughtUp.Load())
+	}
+}
+
+// r4547807096: once documents are canonical in YouTrack, a backfill binding
+// is published but queues no update of the PG body over the article.
+func TestYTArticleBindingAfterSwitchQueuesNothing(t *testing.T) {
+	s := ytartSetup(t, "ytart_switched", true)
+	id := ytartPut(t, s, "note/ytart/switched", "hk body", nil)
+	ytartImported(t, s, id)
+	if _, err := s.pool.Exec(t.Context(), `INSERT INTO yt_authority(kind) VALUES ('documents') ON CONFLICT DO NOTHING`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pool.Exec(t.Context(), `UPDATE yt_authority SET authority='youtrack' WHERE kind='documents'`); err != nil {
+		t.Fatal(err)
+	}
+	ytartBind(t, s, id, "3-960", ytwrite.ContentSHA("what the import wrote"), true)
+	if ops := ytartOps(t, s, id); len(ops) != 0 {
+		t.Fatalf("ops after the switch %+v", ops)
+	}
+	if b := ytartBinding(t, s, id); !b.NeedsUpdate {
+		t.Fatalf("binding %+v", b)
+	}
+}

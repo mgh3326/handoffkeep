@@ -297,12 +297,14 @@ var ytSHA256Hex = regexp.MustCompile(`^[0-9a-f]{64}$`)
 //
 // In HANDOFFKEEP_YT_DOCS_MODE=on the new binding's article_update, when its
 // article does not hold the document's body, is prepared in the same
-// transaction (ytArticleSnapshotTx), after the insert, under the documents
-// authority row's FOR SHARE that prepareYTOpTx takes.
+// transaction (ytArticleSnapshotTx), after the insert, unless documents are
+// canonical in YouTrack (then none is).
 //
 // Locks, in this order (lockorder.go): the document's lane lock (as the
-// feed and an article_create's Apply take it, before any row), then FOR
-// SHARE on the documents row, then
+// feed and an article_create's Apply take it, before any row), FOR SHARE on
+// the documents yt_authority row (as prepareYTOpTx takes it; a switch holds
+// it FOR UPDATE and takes no lane lock or documents row), then FOR SHARE on
+// the documents row, then
 // on its task's row, then on that project's youtrack_projects row, held to
 // commit, so neither the body, the task, the task's project nor its mapping
 // can change between the comparison and the insert; then the new binding
@@ -322,6 +324,14 @@ func (s *Store) AddYTArticleBinding(ctx context.Context, b YTArticleBinding, ver
 	}
 	defer tx.Rollback(ctx)
 	if err := lockYTEntity(ctx, tx, ytwrite.ArticleEntity, strconv.FormatInt(b.DocumentID, 10)); err != nil {
+		return YTArticleBinding{}, err
+	}
+	// FOR SHARE on the documents authority row before the binding exists
+	// (r4547807096): a switch (FOR UPDATE) either commits first, and this
+	// transaction then sees documents canonical in YouTrack and queues no
+	// update, or waits for the binding and its update and counts them.
+	side, err := ytAuthorityShareTx(ctx, tx, YTAuthorityDocuments)
+	if err != nil {
 		return YTArticleBinding{}, err
 	}
 	if err := lockYTArticleSourcesTx(ctx, tx, b.DocumentID); err != nil {
@@ -361,8 +371,12 @@ func (s *Store) AddYTArticleBinding(ctx context.Context, b YTArticleBinding, ver
 		// the document's body gets its article_update in the same
 		// transaction: no feed row comes for a binding, and the documents
 		// authority switch must not see it published with no op behind it.
-		if _, err := s.ytArticleSnapshotTx(ctx, tx, b.DocumentID, time.Now().UTC()); err != nil {
-			return YTArticleBinding{}, err
+		// Once documents are canonical in YouTrack, a PG body is never
+		// written over the article: the binding is kept, its update is not.
+		if side == YTAuthorityHK {
+			if _, err := s.ytArticleSnapshotTx(ctx, tx, b.DocumentID, time.Now().UTC()); err != nil {
+				return YTArticleBinding{}, err
+			}
 		}
 		return got, tx.Commit(ctx)
 	}

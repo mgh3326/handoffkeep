@@ -606,8 +606,8 @@ type Store struct {
 	// this process (catchUpYTArticlesOnce).
 	ytDocsCaughtUp atomic.Bool
 	// ytDocsCatchUpMu guards ytDocsScanned (the catch-up's full scan ran in
-	// this process) and ytDocsNoProject (the documents it skipped as
-	// no_project, retried on every feed pass until none is left).
+	// this process) and ytDocsNoProject (the documents it or the live feed
+	// skipped as no_project, retried on every feed pass until none is left).
 	ytDocsCatchUpMu sync.Mutex
 	ytDocsScanned   bool
 	ytDocsNoProject []int64
