@@ -38,6 +38,12 @@ describe("shell router", () => {
     expect(window.location.pathname).toBe("/ui/work");
   });
 
+  it("/ui/work-status renders WorkStatusPage and keeps the URL", () => {
+    visit("/ui/work-status");
+    expect(screen.getByRole("heading", { name: "작업 현황" })).toBeTruthy();
+    expect(window.location.pathname).toBe("/ui/work-status");
+  });
+
   it("/ui/queue renders Work and replaces the URL with /ui/work", () => {
     const length = window.history.length;
     visit("/ui/queue?view=all");
@@ -77,6 +83,8 @@ describe("shell router", () => {
 describe("matchRoute", () => {
   it("tolerates a trailing slash and rejects a malformed escape in a doc key", () => {
     expect(matchRoute("/ui/work/")).toEqual({ view: "work" });
+    expect(matchRoute("/ui/work-status")).toEqual({ view: "work-status" });
+    expect(matchRoute("/ui/work-status/")).toEqual({ view: "work-status" });
     expect(matchRoute("/ui/doc/%E0%A4%A")).toEqual({ view: "moved" });
   });
 });

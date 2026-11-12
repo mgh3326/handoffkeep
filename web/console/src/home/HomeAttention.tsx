@@ -10,6 +10,8 @@ import { usePoll } from "../shared/usePoll";
 import { BULK_LIMIT, TriageUi, useInboxTriage, type Triage, type TriageRow } from "../shared/actions/InboxTriage";
 import { writeInbox } from "../shared/inboxApi";
 import { loadAttention } from "./api";
+import { loadWorkStatus } from "../work-status/api";
+import type { WorkStatusResponse } from "../work-status/types";
 import type { Attention, AttentionDecision, AttentionDeploy, AttentionTask } from "./types";
 import { fetchTaskDetail } from "../shared/boardApi";
 import { TaskActions } from "../shared/actions/TaskActions";
@@ -158,7 +160,7 @@ function HomeTaskAction({ id }: { id: number }) {
   if (failed) return <span role="alert">작업을 불러오지 못했습니다.</span>;
   return task && <TaskActions compact target={task} onPriority={priority => setTask(old => old ? { ...old, priority } : old)} onApplied={() => setAttempt(value => value + 1)} />;
 }
-function Body({ data, triage, items, queryActive, unsupported }: { data: Attention; triage: Triage; items: { action: Item[]; fyi: Item[] }; queryActive: boolean; unsupported: boolean }) {
+function Body({ data, workStatus, triage, items, queryActive, unsupported }: { data: Attention; workStatus: WorkStatusResponse | null; triage: Triage; items: { action: Item[]; fyi: Item[] }; queryActive: boolean; unsupported: boolean }) {
   if (!(data.decisions.count + data.tasks.count + data.deploys.count)) return <div className="ha-empty"><IconFrame><path d="M4 5h16v14H4zM4 14h5l2 2h2l2-2h5" /></IconFrame><p>대기 중인 일 없음</p></div>;
   if (queryActive && items.action.length + items.fyi.length === 0) return <p className="ha-note">조건에 맞는 항목이 없습니다.</p>;
   const section = (title: string, list: Item[], count: number) => {
@@ -171,13 +173,14 @@ function Body({ data, triage, items, queryActive, unsupported }: { data: Attenti
     }
     return <section className="ha-section" aria-label={title}><h2>{title} <span>{count}</span></h2>{groups.map((group, index) => <div key={`${group.label}:${index}`}><h3>{group.label}</h3><ul className="ha-list">{group.rows.map(item => <Row key={item.key} item={item} now={data.generated_at} selected={triage.selected.has(item.key)} toggle={triage.toggle} />)}</ul></div>)}{count > list.length ? <p className="ha-note">+{count - list.length}개 더 있음</p> : null}</section>;
   };
-  return <><p className="ha-summary-count">결정 {data.decisions.count} (기한 경과 {data.decisions.overdue}) · 작업 {data.tasks.count} · 배포 대기 {data.deploys.count}</p>{queryActive ? <p className="ha-note">현재 목록에서 필터한 결과입니다.</p> : null}{unsupported ? <p className="ha-note">프로젝트·종류·등급·티어 필터는 작업 화면에서만 적용됩니다.</p> : null}{section("지금 할 일", items.action, queryActive ? items.action.length : data.decisions.count + data.tasks.count)}{section("참고", items.fyi, queryActive ? items.fyi.length : data.deploys.count)}{data.deploys.events_capped ? <p className="ha-note">조회 범위에 제한이 있어 목록이 불완전할 수 있습니다.</p> : null}</>;
+  return <><p className="ha-summary-count">결정 {data.decisions.count} (기한 경과 {data.decisions.overdue}) · 작업 {data.tasks.count} · 배포 대기 {data.deploys.count}{workStatus ? <> · <a href="/ui/work-status" className="ha-work-status-link">열린 작업 {workStatus.summary.total_open}</a></> : null}</p>{queryActive ? <p className="ha-note">현재 목록에서 필터한 결과입니다.</p> : null}{unsupported ? <p className="ha-note">프로젝트·종류·등급·티어 필터는 작업 화면에서만 적용됩니다.</p> : null}{section("지금 할 일", items.action, queryActive ? items.action.length : data.decisions.count + data.tasks.count)}{section("참고", items.fyi, queryActive ? items.fyi.length : data.deploys.count)}{data.deploys.events_capped ? <p className="ha-note">조회 범위에 제한이 있어 목록이 불완전할 수 있습니다.</p> : null}</>;
 }
 export function HomeAttention() {
   const [refresh, setRefresh] = useState(0);
   const [query, setQuery] = useState("");
   const load = useCallback(() => loadAttention(), [refresh]);
   const { data, failed } = usePoll(load, 60_000);
+  const { data: workStatus } = usePoll(loadWorkStatus, 60_000);
   const reload = useCallback(() => setRefresh(value => value + 1), []);
   useEffect(() => { const onChange = () => setRefresh(value => value + 1); window.addEventListener("hk-task-changed", onChange); return () => window.removeEventListener("hk-task-changed", onChange); }, []);
   useSeenMigration(reload);
@@ -193,7 +196,7 @@ export function HomeAttention() {
   const unsupported = HOME_UNSUPPORTED.some(key => parsedQuery.filters[key] !== "");
   const rows = useMemo(() => [...items.action, ...items.fyi].map(triageRow), [items]);
   const triage = useInboxTriage(rows, reload);
-  return <div className="ha-root"><h1 className="ha-title">나를 기다리는 일</h1><QueryBar value={query} onChange={setQuery} errors={query.trim() === "" ? [] : parsedQuery.errors} context={queryContext} /><TriageUi triage={triage} />{failed ? <p className="ha-error" role="alert">목록을 불러오지 못했습니다{data ? " · 마지막으로 불러온 데이터를 표시합니다" : ""}.</p> : null}{data ? <Body data={data} triage={triage} items={items} queryActive={query.trim() !== ""} unsupported={unsupported} /> : failed ? null : <p role="status">불러오는 중…</p>}</div>;
+  return <div className="ha-root"><h1 className="ha-title">나를 기다리는 일</h1><QueryBar value={query} onChange={setQuery} errors={query.trim() === "" ? [] : parsedQuery.errors} context={queryContext} /><TriageUi triage={triage} />{failed ? <p className="ha-error" role="alert">목록을 불러오지 못했습니다{data ? " · 마지막으로 불러온 데이터를 표시합니다" : ""}.</p> : null}{data ? <Body data={data} workStatus={workStatus} triage={triage} items={items} queryActive={query.trim() !== ""} unsupported={unsupported} /> : failed ? null : <p role="status">불러오는 중…</p>}</div>;
 }
 
 /** Moves the browser-local seen list into the server once, then leaves the

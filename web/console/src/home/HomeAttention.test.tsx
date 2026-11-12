@@ -60,8 +60,23 @@ function payload(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function serve(body: unknown) {
-  vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(body))));
+const defaultWorkStatus = {
+  generated_at: "2026-11-05T05:00:00Z",
+  summary: { total_open: 5, backlog: 2, in_work: 1, in_review: 1, waiting_deploy: 1, merged_no_deploy_record: 0, bundle_parents: 0 },
+  projects: [],
+  in_work: [],
+  backlog: [],
+  movement: [],
+};
+
+function serve(body: unknown, workStatusBody: unknown = defaultWorkStatus) {
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.includes("/ui/api/work-status")) {
+      return new Response(JSON.stringify(workStatusBody));
+    }
+    return new Response(JSON.stringify(body));
+  }));
 }
 
 const stored = new Map<string, string>();
@@ -205,7 +220,7 @@ it("migrates the browser-local seen list into the server once, then forgets it",
   });
   vi.stubGlobal("fetch", fetcher);
   const view = render(<HomeAttention />);
-  await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(2));
+  await waitFor(() => expect(fetcher.mock.calls.some(([input]) => String(input) === "/ui/api/inbox/state")).toBe(true));
   const call = fetcher.mock.calls.find(([input]) => String(input) === "/ui/api/inbox/state");
   if (!call) throw new Error("no migration request");
   const body = JSON.parse(String((call[1] as RequestInit).body));
@@ -257,4 +272,11 @@ it("preserves inbox selection and read state for a translated decision", async (
   expect(select.getAttribute("aria-pressed")).toBe("true");
   fireEvent.click(within(row).getByRole("button", { name: "원문 보기" }));
   expect(within(row).getByText("Ship the console?")).toBeTruthy();
+});
+
+it("links to work status page from open task summary count", async () => {
+  serve(payload(), { ...defaultWorkStatus, summary: { ...defaultWorkStatus.summary, total_open: 42 } });
+  render(<HomeAttention />);
+  const link = await screen.findByRole("link", { name: "열린 작업 42" });
+  expect(link.getAttribute("href")).toBe("/ui/work-status");
 });

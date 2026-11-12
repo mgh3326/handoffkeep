@@ -10,6 +10,7 @@ import { HomeAttention as Home } from "../home/HomeAttention";
 import { Moved } from "./Placeholders";
 import { WorkPage } from "../work/WorkPage";
 import { TaskRecord } from "../work/TaskRecord";
+import { WorkStatusPage } from "../work-status/WorkStatusPage";
 
 // The document viewer pulls in the markdown renderer, so it is a lazy chunk:
 // Home and Work never load it.
@@ -21,6 +22,7 @@ export type Route =
   | { view: "home" }
   | { view: "deploys" }
   | { view: "work"; replaceWith?: string }
+  | { view: "work-status" }
   | { view: "doc"; key: string }
   | { view: "task"; id: string }
   | { view: "moved" };
@@ -45,6 +47,7 @@ export function matchRoute(pathname: string): Route {
   if (decision) return { view: "decision", id: decision[1] };
   if (path === "/ui/deploys") return { view: "deploys" };
   if (path === "/ui/work") return { view: "work" };
+  if (path === "/ui/work-status") return { view: "work-status" };
   // /ui/queue is the old bookmark for the queue; it now lands on Work.
   if (path === "/ui/queue") return { view: "work", replaceWith: "/ui/work" };
   if (pathname.startsWith("/ui/doc/")) {
@@ -58,7 +61,13 @@ export function matchRoute(pathname: string): Route {
 
 /** The navigation row a route belongs to; null when it belongs to none. */
 export function navKey(route: Route): NavKey | null {
-  return route.view === "decision" || route.view === "decisions" ? "decisions" : route.view === "task" ? "work" : route.view === "home" || route.view === "work" || route.view === "deploys" ? route.view : null;
+  return route.view === "decision" || route.view === "decisions"
+    ? "decisions"
+    : route.view === "task"
+    ? "work"
+    : route.view === "home" || route.view === "work" || route.view === "deploys" || route.view === "work-status"
+    ? route.view
+    : null;
 }
 
 class LoadBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
@@ -81,6 +90,8 @@ export function RouteView({ route }: { route: Route }) {
       return <Home />;
     case "work":
       return <WorkPage />;
+    case "work-status":
+      return <WorkStatusPage />;
     case "deploys":
       return <DeploysPage />;
     case "task":
