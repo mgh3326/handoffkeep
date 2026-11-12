@@ -49,7 +49,7 @@ func TestCommentRenderGolden(t *testing.T) {
 }
 
 func TestRegisteredKinds(t *testing.T) {
-	want := []string{ytwrite.KindCommentAppend, ytwrite.KindDecisionCreate, ytwrite.KindDecisionFields, ytwrite.KindIssueCreate, ytwrite.KindIssueFields}
+	want := []string{ytwrite.KindCommentAppend, ytwrite.KindDecisionCreate, ytwrite.KindDecisionFields, ytwrite.KindIssueCreate, ytwrite.KindIssueFields, ytwrite.KindIssueMove}
 	if got := ytwrite.RegisteredKinds(); strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("registered kinds %v", got)
 	}

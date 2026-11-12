@@ -22,13 +22,14 @@ import (
 // a step.
 //
 // Lock order: it holds at most one advisory lock per transaction, the entity
-// lane lock (Prepare, Claim, and Apply of an issue_create or decision_create
-// op), and then rows of yt_write_ops and yt_entity_map (a scoped Claim also
-// reads yt_comment_canary, yt_task_bindings or yt_decision_bindings; an
-// issue_create Apply inserts a yt_task_bindings row and, in fields mode on,
-// the task's yt_snapshot_state row and its first issue_fields op, and a
-// decision_create Apply the same for the decision with yt_decision_bindings
-// and decision_fields, under the same lane lock). It takes no task
+// lane lock (Prepare, Claim, and Apply of an issue_create, issue_move or
+// decision_create op), and then rows of yt_write_ops and yt_entity_map (a
+// scoped Claim also reads yt_comment_canary, yt_task_bindings or
+// yt_decision_bindings; an issue_create Apply inserts a yt_task_bindings row
+// and, in fields mode on, the task's yt_snapshot_state row and its first
+// issue_fields op, an issue_move Apply updates the binding's project, and a
+// decision_create Apply does as issue_create for the decision with
+// yt_decision_bindings and decision_fields, all under the same lane lock). It takes no task
 // row, no level-2 lock and no job lock, and no writer of another table waits on
 // one of its rows, so it cannot close a cycle with them. It reads no clock:
 // time is passed in (lockorder.go, "Time").
@@ -320,9 +321,10 @@ func (l *YTWriteLedger) Apply(ctx context.Context, now time.Time, id int64, ytID
 	}
 	defer tx.Rollback(ctx)
 	// A create kind's op (issue_create, decision_create) publishes its
-	// entity's map row and binding, which the other paths read under the
-	// entity's lane lock: take that lock first, as Claim does, before the op
-	// row. Kind and lane are immutable, so they are read before the lock.
+	// entity's map row and binding, and an issue_move op its binding's
+	// project, which the other paths and the feed read under the entity's
+	// lane lock: take that lock first, as Claim does, before the op row. Kind
+	// and lane are immutable, so they are read before the lock.
 	var kind, entityKind, entityID string
 	err = tx.QueryRow(ctx, `SELECT kind, entity_kind, entity_id FROM yt_write_ops WHERE id=$1`, id).Scan(&kind, &entityKind, &entityID)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -332,7 +334,7 @@ func (l *YTWriteLedger) Apply(ctx context.Context, now time.Time, id int64, ytID
 		return ytwrite.Op{}, err
 	}
 	hook, hooked := ytApplyHooks[kind]
-	if hooked {
+	if hooked || kind == ytwrite.KindIssueMove {
 		if err := lockYTEntity(ctx, tx, entityKind, entityID); err != nil {
 			return ytwrite.Op{}, err
 		}
@@ -391,6 +393,11 @@ func (l *YTWriteLedger) Apply(ctx context.Context, now time.Time, id int64, ytID
 	}
 	if hooked && detail == "" {
 		if err := hook.bind(l.s, ctx, tx, op, ytID, now, adopted); err != nil {
+			return ytwrite.Op{}, err
+		}
+	}
+	if op.Kind == ytwrite.KindIssueMove {
+		if err := bindYTMoveTx(ctx, tx, op); err != nil {
 			return ytwrite.Op{}, err
 		}
 	}

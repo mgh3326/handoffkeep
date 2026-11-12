@@ -164,8 +164,8 @@ otherwise `multiple_matches`, `marker_deleted`, `marker_mismatch` or
 unsupported_kind` when sent, and a failed render is `unsupported_kind` (send) or
 `reconcile_failed` (search). `comment_append` (`kind_comment.go`),
 `issue_create` (`kind_issue.go`, below), `issue_fields` (`kind_fields.go`,
-below), and `decision_create` and `decision_fields` (`kind_decision.go`,
-below) are the registered kinds.
+below), `issue_move` (`kind_move.go`, below), and `decision_create` and
+`decision_fields` (`kind_decision.go`, below) are the registered kinds.
 
 **Precondition: the bot sees every issue.** A kind's search (the comments of
 an issue, the issues of a project with a task's `hk ID`) is complete only if
@@ -320,14 +320,38 @@ issue (`Store.YTCommentEchoOp`). A comment that quotes a marker, names an op hk
 does not have, or names an op written to another issue is pulled as an ordinary
 comment.
 
-**Operator view.** `GET /v1/yt/ops?state=&task=&after_id=&limit=` and
-`handoffkeep youtrack ops [--state S] [--task N] [--after-id N] [--limit N]`
+**Operator view.** `GET /v1/yt/ops?state=&kind=&task=&after_id=&limit=` and
+`handoffkeep youtrack ops [--state S] [--kind K] [--task N] [--after-id N] [--limit N]`
 (`handoffkeep yt …` is the same command). `state` is `pending` (default:
-prepared, dispatched, remote_unknown), `all`, or one state. Each op shows id,
+prepared, dispatched, remote_unknown), `all`, or one state; `kind` is one
+registered op kind (an unknown kind is refused). Each op shows id,
 kind, lane, target, tenant, actor, state, `status` (`pending` for every unresolved
-state, `remote_unknown` included), reason code, result id, attempts and times;
-never the body, the raw error or the key. A full page carries
-`next_after_id`.
+state, `remote_unknown` included), reason code, result id, attempts
+and times; never the body or the key. A full page carries `next_after_id`.
+
+**Operator resolve.** `handoffkeep youtrack ops resolve <op id> --applied <yt id>
+[--adopted]` or `… --not-applied --by <name> --note <text>` posts the decision
+through `POST /v1/yt/ops/{id}/resolve` (operator bearer only). It refuses an op
+that is not `remote_unknown` (409 `ytwrite_state`) and never resends.
+
+**Alerts** (`handoffkeep-design` lane, outbox kind `yt_write_op`). The alert
+worker raises two classes: `stuck` (an op prepared or dispatched for more
+than 10 minutes, or `remote_unknown` for more than 10 minutes since its creation) and `rejected` (an op rejected, or applied with reason
+`binding_conflict`). Per class and 10-minute window it writes one notice that
+covers every op of the class not yet announced, for example
+`[ytwrite] 2 stuck (dispatched: 1, prepared: 1) op ids 12, 15 | handoffkeep yt ops`.
+`yt_write_op_alerts` records each op's announcement per class, so an op is
+named once; an op that a window's notice could not take (that window already
+has one for the class) is named by the next window. A `remote_unknown` op is
+stuck until the operator resolves it. `last_error` (the detail behind the reason:
+the YouTrack message or the operator's note) is shown only to the operator's
+client; other tokens get the view without it.
+
+**Migration** `20261112-yt-write-op-alert-batch` (expand-only): the table
+`yt_write_op_alerts` (no foreign key, so `yt_write_ops` takes no lock), written
+only by the alert worker, and a backfill from the per-op notices of
+`20261110-yt-write-op-alert` (`yt-op-<id>-pending|rejected`), so an op already
+announced is not announced again.
 
 **Migration** `20261109-yt-comment-canary` (expand-only, after
 `20261109-yt-write-ops`; unreleased, so the tenant column was added to it in
@@ -756,7 +780,8 @@ the feed's `[a-z0-9_]` cursor key). It reads every `task` change from
 - a binding on another tenant: skipped and counted;
 - its hk project no longer maps to the binding's YouTrack project (the rule
   `ytBindingDisagreement` uses; a task with no project agrees with the
-  unmapped HK bucket): skipped, `ytwrite.fields_skipped_moved` (Y4c);
+  unmapped HK bucket): its issue moves first (`issue_move`, below), and the
+  snapshot names the project the issue belongs in (hk 4055);
 - otherwise its snapshot, from the current row, its current Korean title,
   its milestone's name, its refs and its 멈춤 as of the pass, is prepared
   through `prepareYTSnapshotTx`: no op when the snapshot hash equals the last
@@ -776,12 +801,13 @@ is rejected again is retried on the following call, not in a loop.
 Mode off prepares nothing and still advances the cursor, so a change made
 while off reaches YouTrack with the task's next change. Each pass logs one
 `ytwrite.fields_feed tasks= prepared= unchanged= deleted= unbound=
-other_tenant= moved= invalid=` line.
+other_tenant= moved= move_skipped= invalid=` line.
 
 **Op.** Principal and actor `hk:task-fields`, lane `task:<id>` (with the
-task's comments and its `issue_create`, so the writes to one issue stay in
-order), target the bound issue id, payload the binding's YouTrack project id
-and the snapshot. `PayloadSHA` covers the snapshot, the issue and the tenant.
+task's comments, its `issue_create` and its `issue_move`, so the writes to one
+issue stay in order), target the bound issue id, payload the YouTrack project
+the issue belongs in (the binding's, or the target of a move in flight) and the
+snapshot. `PayloadSHA` covers the snapshot, the issue and the tenant.
 
 **Snapshot** (`ytwrite.TaskIssueSnapshot`, the import's mapping in
 `youtrack/import/client.js` `issue()`). Summary `#<id> <title>`, whitespace
@@ -858,14 +884,68 @@ for pacing; the next run passes the sent ones as unchanged. `--dry-run`
 applies the same rule (an unchanged hash whose op was rejected counts as
 prepared) and writes nothing. It
 prints one JSON summary, `scanned prepared unchanged unbound moved
-other_tenant invalid` per hk project and in `total`, and exits 6 without
+move_skipped other_tenant invalid` per hk project and in `total`, and exits 6 without
 touching the database unless `HANDOFFKEEP_YT_FIELDS_MODE=on`.
 
 **Not here.** Tags and issue links (parent, relations) stay as the import set
-them; documents and a project move are later slices (decisions: below). 멈춤, the
+them; documents are a later slice (a project move and decisions: below). 멈춤, the
 Korean title and the milestone name are read when the task row changes: a
 task that becomes stalled with no change, a new translation or a renamed
 milestone reaches the issue with the task's next change.
+
+## Kind issue_move (hk 4055)
+
+A task's hk project can change while its issue stays in the YouTrack project
+of the old one. The issue then moves: `issue_move` (`kind_move.go`) sends one
+POST that sets the issue's project, and the task_fields consumer
+(`internal/store/yt_move.go`) prepares it. Moves have their own mode,
+`HANDOFFKEEP_YT_MOVES_MODE` (`off` or `on`, default `off`, hk 4111). Off, a
+moved task is skipped as it was before moves existed: no move, no snapshot,
+logged as `ytwrite.fields_skipped_moved` and counted as `moved`. Turning the mode
+off admits no issue_move op, so a move already prepared is held until it is
+on again.
+
+**Prepare.** For a bound task (on the worker's tenant) the feed decides the
+project its issue belongs in: the YouTrack project its hk project maps to; a
+task with no hk project stays in the HK bucket its issue is in. The issue is
+on its way to the target of its latest unresolved move (an `issue_move` op not
+yet applied or rejected), or else to its binding's project. When that differs
+from the belonging project, one move op is prepared, keyed
+`issue_move:<task>:<seq>:<sha>` (`yt_snapshot_state`, kind `issue_move`; the
+sha is the target's, so a repeat of a move already prepared is no new op), and
+the snapshot naming the belonging project follows it on the lane. A task moved
+away and back before the first move applied gets a move back, so the issue
+ends where the task is. A move the protocol rejected is not prepared again:
+`ytwrite.move_stuck` is logged and the operator resolves the op.
+
+**Unmapped target.** When the belonging project maps to no YouTrack project
+(an hk project no `youtrack_projects` row names), nothing is prepared for the
+task's issue: no move and no snapshot. The feed logs
+`ytwrite.move_skipped_unmapped task_id= project= issue_id= binding_project_id=`
+and counts it as `move_skipped=` on the `ytwrite.fields_feed` line.
+
+**Send.** One `POST /api/issues/{id}` with `{"project":{"id":<target>}}`,
+asking for `id,project(id)`. The move is settled by the reply only when it
+names the same issue in the target project; any other reply is uncertain
+(`remote_unknown`), and the op is never sent again on its own.
+
+**Evidence.** A GET of the issue's project. The target project is the one
+match (a lost reply, the move happened: applied). Any other project is no
+evidence (`no_evidence`: the operator decides).
+
+**Apply.** In the apply transaction, under the task's lane lock (the lock an
+`issue_create` apply takes): the binding keeps its issue and takes the op's
+target as its `project_id`. `issue_readable` is cleared, not updated: the
+protocol carries only the stable id, and an `issue_create` binding leaves it
+empty for the same reason. A binding that no longer names the op's issue
+(rebound since the op was prepared) is `ErrConflictingResult`: the apply
+rolls back and the op stays unresolved.
+
+**Admission.** The moves gate: `HANDOFFKEEP_YT_MOVES_MODE` on, and the op's
+target is the issue the task is bound to on the op's tenant now.
+
+**Not here.** A move made in YouTrack itself is not seen locally (see the
+note in the comment path above). hk moves only the issues it binds.
 
 ## Document comments (hk 4xxx)
 
