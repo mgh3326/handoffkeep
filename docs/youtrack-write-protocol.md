@@ -1028,9 +1028,11 @@ release rollback never meets an authority value it cannot parse (consult hk
   or the body, for example a body quoting the op marker), and one that gets no
   op or a born-rejected one (the comments mode is off, the task is not bound,
   or not enrolled in canary, or a mapping disagrees). Under hk the same
-  comments commit as before. Every comment writer reads the comments row
-  `FOR SHARE`, so a switch waits for a comment in flight and a comment sees a
-  switch that committed first.
+  comments commit as before. A dots reply (`ReplyDots`), which prepares no op
+  under hk, gets its op in the reply's transaction under youtrack, or the whole
+  reply is refused the same way. Every comment writer reads the comments row
+  `FOR SHARE` (creating it as hk first if it is missing), so a switch waits for
+  a comment in flight and a comment sees a switch that committed first.
 
 **Commands.** `handoffkeep youtrack authority show` prints every kind's row
 (`GET /v1/yt/authority`). `handoffkeep youtrack authority set <kind|all>
@@ -1045,7 +1047,8 @@ comments: `HANDOFFKEEP_YT_COMMENTS_MODE=on`; documents:
 `hk:task-comments`, `hk:doc-comments`, `hk:decisions`), and that its feed
 consumers have read every change (`task_fields` for tasks, `task_docs` for
 documents, `decision_issues` for decisions; a consumer
-that has never run refuses). Every op preparation holds its kind's row
+that has never run, or whose cursor is behind `sync_state.pruned_through`,
+refuses). Every op preparation holds its kind's row
 `FOR SHARE`, so the switch counts an op whose transaction was open when it
 started. Any refusal is 409
 `yt_authority_refused` naming each kind and reason, and no kind changes. A kind

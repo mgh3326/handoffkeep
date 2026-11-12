@@ -151,7 +151,7 @@ func (s *Store) EnqueueYTAuditComment(ctx context.Context, commentID int64) (str
 	}
 	// Read in this transaction and held FOR SHARE until its commit, so an
 	// audit that started before a switch prepares nothing after it.
-	side, err := ytAuthorityTx(ctx, tx, YTAuthorityComments, " FOR SHARE")
+	side, err := ytAuthorityShareTx(ctx, tx, YTAuthorityComments)
 	if err != nil {
 		return "", ytwrite.Op{}, err
 	}

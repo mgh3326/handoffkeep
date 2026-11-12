@@ -57,6 +57,14 @@ func TestYTAuthorityDefaultRows(t *testing.T) {
 	if got := ytaAll(t, s); got[YTAuthorityComments] != YTAuthorityHK {
 		t.Fatalf("missing row lists as %v", got)
 	}
+	// A writer recreates the missing row (as hk) so it has a row to lock.
+	task := ytcTask(t, s, "handoffkeep")
+	if _, err := s.CreateTaskComment(t.Context(), task, "worker", "recreates the row"); err != nil {
+		t.Fatal(err)
+	}
+	if n := ytcCount(t, s, `SELECT count(*) FROM yt_authority WHERE kind='comments' AND authority='hk'`); n != 1 {
+		t.Fatalf("comments row after a comment write: %d, want 1", n)
+	}
 	// The schema refuses an unknown kind or side.
 	if _, err := s.pool.Exec(t.Context(), `INSERT INTO yt_authority(kind) VALUES ('files')`); err == nil {
 		t.Fatal("unknown kind accepted")
@@ -180,6 +188,19 @@ func TestYTAuthoritySetRefusals(t *testing.T) {
 	_, _, err = set([]YTAuthorityKind{YTAuthorityTasks}, YTAuthorityYouTrack)
 	refused(err, "changes to read")
 	if _, err := s.pool.Exec(ctx, `UPDATE yt_feed_cursors SET last_sync_id=(SELECT coalesce(max(sync_id),0) FROM sync_log) WHERE consumer=$1`, ytFieldsConsumer); err != nil {
+		t.Fatal(err)
+	}
+	// A prune past the cursor removed rows the feed never read: refused.
+	var pruned int64
+	if err := s.pool.QueryRow(ctx, `SELECT pruned_through FROM sync_state WHERE singleton`).Scan(&pruned); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pool.Exec(ctx, `UPDATE sync_state SET pruned_through=(SELECT last_sync_id+1 FROM yt_feed_cursors WHERE consumer=$1) WHERE singleton`, ytFieldsConsumer); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = set([]YTAuthorityKind{YTAuthorityTasks}, YTAuthorityYouTrack)
+	refused(err, "behind the sync_log prune")
+	if _, err := s.pool.Exec(ctx, `UPDATE sync_state SET pruned_through=$1 WHERE singleton`, pruned); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := set([]YTAuthorityKind{YTAuthorityTasks}, YTAuthorityYouTrack); err != nil {
@@ -341,4 +362,57 @@ func TestYTAuthorityUnsendableComment(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertBornRejected()
+}
+
+// A dots reply writes its comment directly (ReplyDots): under hk it gets no
+// op, as today; under youtrack it gets its op in the reply's transaction, or
+// the whole reply is refused when the comment would stay only in PG.
+func TestYTAuthorityDotsReply(t *testing.T) {
+	s := schemaStore(t, "yta_dots")
+	ctx := t.Context()
+	task, err := s.CreateDotsRequest(ctx, "caller", DotsRequestInput{Title: "Research", Body: "Investigate", RequesterLane: "requester"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, _ := startDotsRun(t, s, task.ID, "start")
+	reply := func(key, body string) error {
+		_, err := s.ReplyDots(ctx, "operator:test@example.com", "chatgpt", DotsReplyInput{TaskID: task.ID, Kind: "PROGRESS", Body: body, IdempotencyKey: key, RunToken: started.RunToken})
+		return err
+	}
+	s.SetYTCommentsMode(YTCommentsCanary)
+	ytcEnroll(t, s, task.ID)
+	if err := reply("hk-progress", "under hk"); err != nil {
+		t.Fatal(err)
+	}
+	if n := ytcCount(t, s, `SELECT count(*) FROM yt_write_ops`); n != 0 {
+		t.Fatalf("hk: a dots reply prepared %d ops, want 0 (today's behaviour)", n)
+	}
+
+	s.SetYTCommentsMode(YTCommentsOn)
+	if _, _, err := s.SetYTAuthority(ctx, []YTAuthorityKind{YTAuthorityComments}, YTAuthorityYouTrack, "operator", "drill"); err != nil {
+		t.Fatal(err)
+	}
+	comments := ytcCount(t, s, `SELECT count(*) FROM task_comments WHERE task_id=$1`, task.ID)
+	// Mode on and the task is not bound: no copy path, so the reply is refused.
+	if err := reply("yt-unbound", "no copy path"); !errors.Is(err, ErrYTCommentUnsendable) {
+		t.Fatalf("youtrack, unbound: err = %v", err)
+	}
+	s.SetYTCommentsMode(YTCommentsCanary)
+	if err := reply("yt-marker", "quotes <!-- hk-op:12 -->"); !errors.Is(err, ErrYTCommentUnsendable) {
+		t.Fatalf("youtrack, unsendable body: err = %v", err)
+	}
+	if n := ytcCount(t, s, `SELECT count(*) FROM task_comments WHERE task_id=$1`, task.ID); n != comments {
+		t.Fatalf("%d comments after refused replies, want %d", n, comments)
+	}
+	// Enrolled in canary: the reply commits with its op.
+	if err := reply("yt-enrolled", "copied"); err != nil {
+		t.Fatal(err)
+	}
+	var commentID int64
+	if err := s.pool.QueryRow(ctx, `SELECT max(id) FROM task_comments WHERE task_id=$1`, task.ID).Scan(&commentID); err != nil {
+		t.Fatal(err)
+	}
+	if op, ok := ytcOpFor(t, s, commentID); !ok || op.State != ytwrite.StatePrepared {
+		t.Fatalf("youtrack, enrolled: op %+v %v", op, ok)
+	}
 }

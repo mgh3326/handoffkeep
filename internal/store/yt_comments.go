@@ -111,7 +111,7 @@ func ytCommentModeGateSQL(s *Store) string {
 // canary, the task is not bound or enrolled, a source disagrees). FOR SHARE on
 // the comments row orders the comment against a switch (SetYTAuthority).
 func (s *Store) enqueueYTCommentTx(ctx context.Context, tx pgx.Tx, c TaskComment) (ytwrite.Op, bool, error) {
-	side, err := ytAuthorityTx(ctx, tx, YTAuthorityComments, " FOR SHARE")
+	side, err := ytAuthorityShareTx(ctx, tx, YTAuthorityComments)
 	if err != nil {
 		return ytwrite.Op{}, false, err
 	}
@@ -132,6 +132,18 @@ func (s *Store) enqueueYTCommentTx(ctx context.Context, tx pgx.Tx, c TaskComment
 		return ytwrite.Op{}, false, fmt.Errorf("%w: its YouTrack copy would be rejected (%s)", ErrYTCommentUnsendable, op.Reason)
 	}
 	return op, enqueued, nil
+}
+
+// enqueueYTCommentIfCanonicalTx is the YouTrack copy of a comment whose writer
+// prepares no op while hk is canonical (ReplyDots): nothing under hk, today's
+// behaviour; under youtrack, enqueueYTCommentTx, which refuses a comment that
+// would stay only in PG.
+func (s *Store) enqueueYTCommentIfCanonicalTx(ctx context.Context, tx pgx.Tx, c TaskComment) (ytwrite.Op, bool, error) {
+	side, err := ytAuthorityShareTx(ctx, tx, YTAuthorityComments)
+	if err != nil || side != YTAuthorityYouTrack {
+		return ytwrite.Op{}, false, err
+	}
+	return s.enqueueYTCommentTx(ctx, tx, c)
 }
 
 // enqueueYTCommentModeTx is enqueueYTCommentTx by the comments mode alone.

@@ -103,7 +103,7 @@ func lockYTAuthorityForOpTx(ctx context.Context, tx pgx.Tx, principal string) er
 	if kind == "" {
 		return nil
 	}
-	_, err := ytAuthorityTx(ctx, tx, kind, " FOR SHARE")
+	_, err := ytAuthorityShareTx(ctx, tx, kind)
 	return err
 }
 
@@ -189,16 +189,38 @@ func ytAuthoritiesTx(ctx context.Context, q interface {
 	return out, nil
 }
 
-// ytAuthorityTx reads one kind's side; no row is hk. lock is "" or a
-// row-lock clause (the comment writers read FOR SHARE, so a switch waits for
-// a comment in flight and the comment sees a switch that committed first).
-func ytAuthorityTx(ctx context.Context, q ytRowQuerier, kind YTAuthorityKind, lock string) (YTAuthoritySide, error) {
+// ytAuthorityTx reads one kind's side without a lock; no row is hk.
+func ytAuthorityTx(ctx context.Context, q ytRowQuerier, kind YTAuthorityKind) (YTAuthoritySide, error) {
 	var side YTAuthoritySide
-	err := q.QueryRow(ctx, `SELECT authority FROM yt_authority WHERE kind=$1`+lock, string(kind)).Scan(&side)
+	err := q.QueryRow(ctx, `SELECT authority FROM yt_authority WHERE kind=$1`, string(kind)).Scan(&side)
 	if errors.Is(err, pgx.ErrNoRows) || (err == nil && !validYTAuthoritySide(side)) {
 		return YTAuthorityHK, nil
 	}
 	return side, err
+}
+
+// ytAuthorityShareTx reads one kind's side FOR SHARE in a writer's
+// transaction (the comment writers, the audit enqueue, every op
+// preparation), so a switch waits for the writer in flight and the writer sees
+// a switch that committed first. A missing row is created first (as hk, ON
+// CONFLICT DO NOTHING), so there is always a row to lock: a switch that
+// creates the same row waits for this insert, or this insert for the switch's.
+func ytAuthorityShareTx(ctx context.Context, tx pgx.Tx, kind YTAuthorityKind) (YTAuthoritySide, error) {
+	var side YTAuthoritySide
+	err := tx.QueryRow(ctx, `SELECT authority FROM yt_authority WHERE kind=$1 FOR SHARE`, string(kind)).Scan(&side)
+	if errors.Is(err, pgx.ErrNoRows) {
+		if _, err := tx.Exec(ctx, `INSERT INTO yt_authority(kind) VALUES ($1) ON CONFLICT DO NOTHING`, string(kind)); err != nil {
+			return "", err
+		}
+		err = tx.QueryRow(ctx, `SELECT authority FROM yt_authority WHERE kind=$1 FOR SHARE`, string(kind)).Scan(&side)
+	}
+	if err != nil {
+		return "", err
+	}
+	if !validYTAuthoritySide(side) {
+		return YTAuthorityHK, nil
+	}
+	return side, nil
 }
 
 // YTAuthorities reads every kind's row.
@@ -208,7 +230,7 @@ func (s *Store) YTAuthorities(ctx context.Context) ([]YTAuthority, error) {
 
 // YTAuthorityOf reads one kind's side; an unknown kind is hk.
 func (s *Store) YTAuthorityOf(ctx context.Context, kind YTAuthorityKind) (YTAuthoritySide, error) {
-	return ytAuthorityTx(ctx, s.pool, kind, "")
+	return ytAuthorityTx(ctx, s.pool, kind)
 }
 
 // ytAuthorityWriteModeOff explains why kind's write mode in this process is
@@ -316,6 +338,10 @@ func (s *Store) SetYTAuthority(ctx context.Context, kinds []YTAuthorityKind, sid
 			if pending > 0 {
 				refusals = append(refusals, fmt.Sprintf("%s: %d ops are prepared, dispatched or remote_unknown (youtrack ops)", k, pending))
 			}
+			var prunedThrough int64
+			if err := tx.QueryRow(ctx, `SELECT pruned_through FROM sync_state WHERE singleton`).Scan(&prunedThrough); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				return nil, nil, err
+			}
 			for _, f := range ytAuthorityFeeds[k] {
 				var cursor *int64
 				if err := tx.QueryRow(ctx, `SELECT last_sync_id FROM yt_feed_cursors WHERE consumer=$1`, f.consumer).Scan(&cursor); err != nil && !errors.Is(err, pgx.ErrNoRows) {
@@ -323,6 +349,12 @@ func (s *Store) SetYTAuthority(ctx context.Context, kinds []YTAuthorityKind, sid
 				}
 				if cursor == nil {
 					refusals = append(refusals, fmt.Sprintf("%s: feed consumer %s has not run yet", k, f.consumer))
+					continue
+				}
+				// Rows the prune removed before the consumer read them cannot
+				// be counted below; the feed itself stops on them.
+				if prunedThrough > *cursor {
+					refusals = append(refusals, fmt.Sprintf("%s: feed consumer %s is behind the sync_log prune (cursor %d, pruned through %d)", k, f.consumer, *cursor, prunedThrough))
 					continue
 				}
 				var behind int
