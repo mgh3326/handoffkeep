@@ -145,6 +145,61 @@ func TestDocCommentRenderedFormIsOwnedByItsOp(t *testing.T) {
 	}
 }
 
+// ImportedDocCommentKey is the audit's inverse of DocComments: every body
+// the import could post names its key back, and nothing else does.
+func TestImportedDocCommentKey(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		text string
+		key  string
+	}{
+		{"report", "# reports/job-b/report.md\n\nbody", "reports/job-b/report.md"},
+		{"report part", "# reports/job-b/report.md (part 2/4)\n\nmore", "reports/job-b/report.md"},
+		{"mwr report", "# reports/mwr-review/deep/path\n\nx", "reports/mwr-review/deep/path"},
+		{"brief", "Article: [brief] brief/2026-11-09/job-a [brief] (hk document key: brief/2026-11-09/job-a)", "brief/2026-11-09/job-a"},
+	} {
+		if got, ok := ImportedDocCommentKey(tc.text); !ok || got != tc.key {
+			t.Errorf("%s: got %q %v, want %q", tc.name, got, ok, tc.key)
+		}
+	}
+	for _, text := range []string{
+		"just a comment",
+		"# notes/hello",
+		"# reports/job/other.md",
+		"# reports/job/a/report.md",
+		"# brief/2026-11-09/job-a",
+		"Article: [brief] brief/x (hk document key: notes/x)",
+		"Article: [note] brief/a/b [note] (hk document key: brief/a/b)",
+		"작성: worker · 2026-11-12T01:02:03Z · hk op 1\n\n# reports/job-b/report.md\n\nbody\n\n<!-- hk-op:1 -->",
+		"Article: [brief] brief/a/b [brief] (hk document key: brief/a/b)\n\n<!-- hk-op:1 -->",
+	} {
+		if key, ok := ImportedDocCommentKey(text); ok {
+			t.Errorf("%q: got key %q, want no match", text, key)
+		}
+	}
+}
+
+// Every body DocComments renders reads its key back through
+// ImportedDocCommentKey, split report parts included.
+func TestImportedDocCommentKeyReadsDocCommentsOutput(t *testing.T) {
+	for _, tc := range []struct{ key, kind, body string }{
+		{"reports/job-b/report.md", "report", docFixtureBody()},
+		{"reports/job-a/report.md", "report", "hello\n"},
+		{"brief/2026-11-09/job-a", "brief", "ignored"},
+	} {
+		bodies, ok, err := DocComments(tc.key, tc.kind, tc.body)
+		if err != nil || !ok {
+			t.Fatalf("%s: ok=%v err=%v", tc.key, ok, err)
+		}
+		for i, b := range bodies {
+			got, ok := ImportedDocCommentKey(b)
+			if !ok || got != tc.key {
+				t.Errorf("%s part %d: got %q %v, want %q", tc.key, i, got, ok, tc.key)
+			}
+		}
+	}
+}
+
 // jsonString quotes s as a JSON string (the payload's body field).
 func jsonString(s string) string {
 	var b strings.Builder

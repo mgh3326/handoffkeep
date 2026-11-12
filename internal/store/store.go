@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 	"unicode"
@@ -593,6 +594,22 @@ type Store struct {
 	// (SetYTDocCommentsMode), a YTDocCommentsMode; unset is off. On copies
 	// task-tied reports and briefs from the change feed (yt_doc_comments.go).
 	ytDocComments atomic.Value
+	// ytDecisions is the YouTrack decision gate, tenant and DEC project
+	// (SetYTDecisionsMode); nil is off. On prepares decision ops from the
+	// change feed.
+	ytDecisions atomic.Pointer[ytDecisionsGate]
+	// ytDocs is the YouTrack document-article gate, tenant and bucket
+	// projects (SetYTDocsMode); nil is off. On prepares document ops from
+	// the change feed (hk 4206).
+	ytDocs atomic.Pointer[ytDocsGate]
+	// ytDocsCaughtUp is set once the document-article catch-up has run in
+	// this process (catchUpYTArticlesOnce).
+	ytDocsCaughtUp atomic.Bool
+	// ytDocsCatchUpMu guards ytDocsScanned (the catch-up's full scan ran in
+	// this process) and ytDocsLastScan (when it last scanned).
+	ytDocsCatchUpMu sync.Mutex
+	ytDocsScanned   bool
+	ytDocsLastScan  time.Time
 	// ytBindingChecked, when set (tests only), runs inside AddYTTaskBinding
 	// after every check has passed and before the binding row is inserted,
 	// with every lock of the publication held.

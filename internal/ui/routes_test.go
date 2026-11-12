@@ -7,6 +7,8 @@ func TestRoutePatternsHidePathValues(t *testing.T) {
 		"/ui/queue":                               "/ui/queue",
 		"/ui/api/board/projects":                  "/ui/api/board/projects",
 		"/ui/work":                                "/ui/work",
+		"/ui/work-status":                         "/ui/work-status",
+		"/ui/api/work-status":                     "/ui/api/work-status",
 		"/ui/tasks/123":                           "/ui/tasks/{id}",
 		"/ui/tasks/123/comments":                  "/ui/tasks/{id}/comments",
 		"/ui/doc/private-key/note":                "/ui/doc/{key...}",

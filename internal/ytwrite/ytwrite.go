@@ -131,6 +131,11 @@ const (
 	// canary removed, mode off, another tenant); the op stays prepared and
 	// nothing is sent.
 	ReasonHeld = "held"
+	// ReasonIssueNotBound: a comment_append op queued behind its task's
+	// issue_create (hk 4263) reached its send and the task has no binding
+	// from that create (the create was rejected, or applied with
+	// binding_conflict). Nothing is sent.
+	ReasonIssueNotBound = "issue_not_bound"
 )
 
 var (
@@ -149,7 +154,10 @@ var (
 
 // Op is one logical write as the ledger holds it. Principal, Kind, Key,
 // PayloadSHA, Payload, EntityKind, EntityID, YTTargetID, Actor, ParentID,
-// ChildSeq and CreatedAt never change after Prepare.
+// ChildSeq and CreatedAt never change after Prepare, with one exception: a
+// comment_append op queued behind its task's issue_create has no YTTargetID
+// until the claim that dispatches it fills it, with the PayloadSHA that covers
+// it, from the binding that create published (hk 4263).
 type Op struct {
 	ID        int64
 	Principal string
@@ -303,6 +311,14 @@ type RemoteComment struct {
 	// the remote did not say). The comment audit tells the bot's comments
 	// from people's by it; the protocol never reads it.
 	AuthorID string
+	// CreatedAt, AuthorLogin and AuthorName are the comment's creation time
+	// and its author's login and name, as listed ("" or zero when the
+	// remote did not say). The rebuild drill (`youtrack audit --rebuild`)
+	// reads an imported comment's author and time from them; the protocol
+	// and the stable enumeration never read them.
+	CreatedAt   time.Time
+	AuthorLogin string
+	AuthorName  string
 }
 
 // Remote is the YouTrack surface the protocol uses. CreateComment makes exactly

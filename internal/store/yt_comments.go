@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -84,8 +85,13 @@ func ytCommentModeGateSQL(s *Store) string {
 		return `o.principal <> '` + ytDocCommentPrincipal + `' AND EXISTS (SELECT 1 FROM yt_comment_canary c
 		WHERE o.entity_kind = 'task' AND c.task_id::text = o.entity_id AND c.issue_id = o.yt_target_id AND c.tenant = o.tenant)`
 	case YTCommentsOn:
-		return `o.principal <> '` + ytDocCommentPrincipal + `' AND o.entity_kind = 'task' AND EXISTS (SELECT 1 FROM yt_task_bindings b
-		WHERE b.task_id::text = o.entity_id AND b.issue_id = o.yt_target_id AND b.tenant = o.tenant)`
+		// An op with no target is a comment queued behind its task's
+		// issue_create (hk 4263): lane order holds it until the create
+		// resolves, and its claim fills the target from the create's binding
+		// (claimYTCommentTargetTx) or rejects it.
+		return `o.principal <> '` + ytDocCommentPrincipal + `' AND o.entity_kind = 'task' AND (EXISTS (SELECT 1 FROM yt_task_bindings b
+		WHERE b.task_id::text = o.entity_id AND b.issue_id = o.yt_target_id AND b.tenant = o.tenant)
+		OR (o.principal = '` + YTCommentPrincipal + `' AND o.yt_target_id = ''))`
 	default:
 		return `FALSE`
 	}
@@ -103,7 +109,178 @@ func ytCommentModeGateSQL(s *Store) string {
 // Locks, in this order after the comment insert lock and the comment's KEY
 // SHARE on its task: the op's entity lane lock (lockYTEntity), then new rows
 // of yt_write_ops, yt_comment_write_links and yt_entity_map (lockorder.go).
+//
+// While comments are canonical in YouTrack (hk 4122), a comment that would
+// end up only in PG is refused with ErrYTCommentUnsendable and the caller's
+// transaction rolls back: a comment the protocol can never send, and a
+// comment that gets no op or a born-rejected one (the mode is not on or
+// canary, the task is not bound or enrolled, a source disagrees). One
+// exception (hk 4263): in mode on, a task with no binding whose issue_create
+// op is still pending gets a queued op behind that create
+// (queueYTCommentTx). FOR SHARE on the comments row orders the comment
+// against a switch (SetYTAuthority).
 func (s *Store) enqueueYTCommentTx(ctx context.Context, tx pgx.Tx, c TaskComment) (ytwrite.Op, bool, error) {
+	side, err := ytAuthorityShareTx(ctx, tx, YTAuthorityComments)
+	if err != nil {
+		return ytwrite.Op{}, false, err
+	}
+	if side != YTAuthorityYouTrack {
+		return s.enqueueYTCommentModeTx(ctx, tx, c)
+	}
+	if cerr := ytwrite.CheckCommentContent(c.Author, c.Body); cerr != nil {
+		return ytwrite.Op{}, false, fmt.Errorf("%w: %v", ErrYTCommentUnsendable, cerr)
+	}
+	op, enqueued, err := s.enqueueYTCommentModeTx(ctx, tx, c)
+	if err == nil && !enqueued && s.ytCommentsModeNow() == YTCommentsOn {
+		op, enqueued, err = queueYTCommentTx(ctx, tx, c)
+	}
+	switch {
+	case err != nil:
+		return op, enqueued, err
+	case !enqueued:
+		return ytwrite.Op{}, false, fmt.Errorf("%w: comments mode %s has no YouTrack copy for task %d (not bound or enrolled, or a mapping disagrees)",
+			ErrYTCommentUnsendable, s.ytCommentsModeNow(), c.TaskID)
+	case op.State == ytwrite.StateRejected:
+		return ytwrite.Op{}, false, fmt.Errorf("%w: its YouTrack copy would be rejected (%s)", ErrYTCommentUnsendable, op.Reason)
+	}
+	return op, enqueued, nil
+}
+
+// queueYTCommentTx is the comment copy of a task that has no binding yet
+// because its issue is still being created (hk 4263): a task created a moment
+// ago gets its binding only when its issue_create op applies. When the task
+// has no binding and its issue_create op (YTIssuePrincipal, IssueKey) is
+// prepared, dispatched or remote_unknown, it prepares the comment's
+// comment_append op with the usual key and payload, on the create's tenant,
+// with no target, and links it to the comment. The op is on the task's lane
+// behind the create, so it is never claimed before the create resolves; its
+// claim takes the target from the binding the create published
+// (claimYTCommentTargetTx). A create that ends rejected, or applied without a
+// binding (binding_conflict), publishes none, and the claim rejects the op
+// (ytwrite.ReasonIssueNotBound) instead of dispatching it; so does a binding
+// a local source disagrees with (ytwrite.ReasonAmbiguousIssue). The
+// rejected-op alert reports both. No map anchor is written: the create's apply writes the task's map
+// row. A task with a binding (a source disagreed) or with no pending create
+// gets nothing (enqueued false).
+//
+// Only enqueueYTCommentTx calls it, under comments authority youtrack in mode
+// on; under hk such a comment commits with no op and the catch-up copies it
+// once the binding exists.
+//
+// Locks: the task's lane lock (already held from ytCommentOnOpTx; advisory
+// locks are re-entrant), then plain reads of the binding and the create op,
+// then new rows of yt_write_ops and yt_comment_write_links (lockorder.go).
+// Apply takes the same lane lock before it publishes the binding, so either
+// the binding is seen here or the create is still pending.
+func queueYTCommentTx(ctx context.Context, tx pgx.Tx, c TaskComment) (ytwrite.Op, bool, error) {
+	taskKey := strconv.FormatInt(c.TaskID, 10)
+	if err := lockYTEntity(ctx, tx, "task", taskKey); err != nil {
+		return ytwrite.Op{}, false, err
+	}
+	if _, found, err := readYTBinding(ctx, tx, c.TaskID); err != nil || found {
+		return ytwrite.Op{}, false, err
+	}
+	var createID int64
+	var tenant string
+	err := tx.QueryRow(ctx, `SELECT id, tenant FROM yt_write_ops WHERE principal=$1 AND kind=$2 AND idem_key=$3
+		AND entity_kind='task' AND entity_id=$4 AND state IN ('prepared','dispatched','remote_unknown')`,
+		YTIssuePrincipal, ytwrite.KindIssueCreate, ytwrite.IssueKey(c.TaskID), taskKey).Scan(&createID, &tenant)
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && tenant == "") {
+		return ytwrite.Op{}, false, nil
+	}
+	if err != nil {
+		return ytwrite.Op{}, false, err
+	}
+	n, err := ytwrite.CommentOp(ytwrite.CommentRequest{Principal: YTCommentPrincipal, Key: YTCommentKey(c.ID), Actor: c.Author, TaskID: c.TaskID, Tenant: tenant, Body: c.Body})
+	if err != nil {
+		return ytwrite.Op{}, false, err
+	}
+	now := c.CreatedAt.UTC()
+	op, _, err := prepareYTOpTx(ctx, tx, now, n)
+	if err != nil {
+		return ytwrite.Op{}, false, err
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO yt_comment_write_links(comment_id, op_id, created_at) VALUES ($1,$2,$3)`, c.ID, op.ID, now); err != nil {
+		return ytwrite.Op{}, false, err
+	}
+	log.Printf("ytwrite.comment_queued op_id=%d task_id=%d comment_id=%d issue_op_id=%d", op.ID, c.TaskID, c.ID, createID)
+	return op, true, nil
+}
+
+// claimYTCommentTargetTx is the target of a queued comment op (no target,
+// queueYTCommentTx) at its claim, in Claim's transaction under the task's
+// lane lock: the issue of the task's binding published by the task's own
+// issue_create op (origin op_applied, that op applied) on the op's tenant,
+// and the payload hash that covers it. The binding is checked against every
+// local source as a fresh comment's is (ytBindingDisagreement): a task moved
+// to another project while its create was pending, for example, keeps a
+// binding in the old project, and its comment must not go there.
+//
+// reject is the reason Claim rejects the op with, in the same transaction,
+// instead of dispatching it: ytwrite.ReasonIssueNotBound when the task has no
+// such binding (the create was rejected, or applied with binding_conflict),
+// ytwrite.ReasonAmbiguousIssue when a source disagrees with it. A targetless
+// op is never dispatched, so it never reaches stale recovery or
+// remote_unknown. Any other op is returned unchanged.
+func claimYTCommentTargetTx(ctx context.Context, tx pgx.Tx, op ytwrite.Op) (target, sha, reject, detail string, err error) {
+	if op.Kind != ytwrite.KindCommentAppend || op.Principal != YTCommentPrincipal || op.EntityKind != "task" || op.YTTargetID != "" {
+		return op.YTTargetID, op.PayloadSHA, "", "", nil
+	}
+	const unbound = "the comment was queued behind the task's issue_create op, which published no binding"
+	taskID, err := strconv.ParseInt(op.EntityID, 10, 64)
+	if err != nil || taskID < 1 {
+		return "", "", ytwrite.ReasonIssueNotBound, unbound, nil
+	}
+	b, found, err := readYTBinding(ctx, tx, taskID)
+	if err != nil {
+		return "", "", "", "", err
+	}
+	var createID int64
+	if found {
+		err = tx.QueryRow(ctx, `SELECT id FROM yt_write_ops WHERE principal=$1 AND kind=$2 AND idem_key=$3 AND state='applied'`,
+			YTIssuePrincipal, ytwrite.KindIssueCreate, ytwrite.IssueKey(taskID)).Scan(&createID)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return "", "", "", "", err
+		}
+	}
+	if !found || b.Origin != YTBindingOpApplied || b.OpID == 0 || b.OpID != createID || b.Tenant != op.Tenant {
+		log.Printf("ytwrite.comment_queued_unbound op_id=%d task_id=%d", op.ID, taskID)
+		return "", "", ytwrite.ReasonIssueNotBound, unbound, nil
+	}
+	source, err := ytBindingDisagreement(ctx, tx, b)
+	if err != nil {
+		return "", "", "", "", err
+	}
+	if source != "" {
+		log.Printf("ytwrite.comment_queued_ambiguous op_id=%d task_id=%d issue_id=%q source=%s", op.ID, taskID, b.IssueID, source)
+		return "", "", ytwrite.ReasonAmbiguousIssue, "binding to " + b.IssueID + " disagrees with " + source, nil
+	}
+	var p ytwrite.CommentPayload
+	if err := json.Unmarshal(op.Payload, &p); err != nil {
+		return "", "", "", "", fmt.Errorf("payload of op %d: %w", op.ID, err)
+	}
+	n, err := ytwrite.CommentOp(ytwrite.CommentRequest{Principal: op.Principal, Key: op.Key, Actor: op.Actor, TaskID: taskID, YTIssueID: b.IssueID, Tenant: op.Tenant, Body: p.Body})
+	if err != nil {
+		return "", "", "", "", err
+	}
+	log.Printf("ytwrite.comment_queued_targeted op_id=%d task_id=%d issue_id=%q", op.ID, taskID, b.IssueID)
+	return n.YTTargetID, n.PayloadSHA, "", "", nil
+}
+
+// enqueueYTCommentIfCanonicalTx is the YouTrack copy of a comment whose writer
+// prepares no op while hk is canonical (ReplyDots): nothing under hk, today's
+// behaviour; under youtrack, enqueueYTCommentTx, which refuses a comment that
+// would stay only in PG.
+func (s *Store) enqueueYTCommentIfCanonicalTx(ctx context.Context, tx pgx.Tx, c TaskComment) (ytwrite.Op, bool, error) {
+	side, err := ytAuthorityShareTx(ctx, tx, YTAuthorityComments)
+	if err != nil || side != YTAuthorityYouTrack {
+		return ytwrite.Op{}, false, err
+	}
+	return s.enqueueYTCommentTx(ctx, tx, c)
+}
+
+// enqueueYTCommentModeTx is enqueueYTCommentTx by the comments mode alone.
+func (s *Store) enqueueYTCommentModeTx(ctx context.Context, tx pgx.Tx, c TaskComment) (ytwrite.Op, bool, error) {
 	switch s.ytCommentsModeNow() {
 	case YTCommentsOn:
 		return enqueueYTCommentOnTx(ctx, tx, c)

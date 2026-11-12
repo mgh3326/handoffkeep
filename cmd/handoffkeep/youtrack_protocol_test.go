@@ -105,6 +105,25 @@ func TestYouTrackLegacyPushUnparsableModeFailsClosed(t *testing.T) {
 	if got := exitCodeOf(err); got != youtrackExitConfig || !strings.Contains(err.Error(), "HANDOFFKEEP_YT_ISSUES_MODE") {
 		t.Fatalf("issues mode \"Yes\": exit %d err %v, want config naming the issues mode", got, err)
 	}
+	// A bad value is a config error even when an earlier mode already owns
+	// the writes: the guard parses every mode before it picks the owner.
+	protocolEnv(t, "on", "bogus")
+	err = youtrackCmd([]string{"sync"}, io.Discard)
+	if got := exitCodeOf(err); got != youtrackExitConfig || !strings.Contains(err.Error(), "HANDOFFKEEP_YT_ISSUES_MODE") {
+		t.Fatalf("comments on + issues \"bogus\": exit %d err %v, want config naming the issues mode", got, err)
+	}
+	protocolEnv(t, "on", "")
+	t.Setenv("HANDOFFKEEP_YT_FIELDS_MODE", "bogus")
+	err = youtrackCmd([]string{"sync"}, io.Discard)
+	if got := exitCodeOf(err); got != youtrackExitConfig || !strings.Contains(err.Error(), "HANDOFFKEEP_YT_FIELDS_MODE") {
+		t.Fatalf("comments on + fields \"bogus\": exit %d err %v, want config naming the fields mode", got, err)
+	}
+	protocolEnv(t, "on", "")
+	t.Setenv("HANDOFFKEEP_YT_DOC_COMMENTS_MODE", "bogus")
+	err = youtrackCmd([]string{"sync"}, io.Discard)
+	if got := exitCodeOf(err); got != youtrackExitConfig || !strings.Contains(err.Error(), "HANDOFFKEEP_YT_DOC_COMMENTS_MODE") {
+		t.Fatalf("comments on + doc-comments \"bogus\": exit %d err %v, want config naming the doc-comments mode", got, err)
+	}
 }
 
 func TestYTIssuesModeFromEnv(t *testing.T) {
@@ -130,6 +149,8 @@ func TestYouTrackUnguardedSubcommandsRunWhileProtocolOwnsWrites(t *testing.T) {
 		{"schema", "plan"},
 		{"comments-preflight"},
 		{"comments-backfill"},
+		{"articles-preflight"},
+		{"articles-backfill"},
 		{"audit"},
 		{"audit", "--enqueue"},
 		{"canary", "list"},

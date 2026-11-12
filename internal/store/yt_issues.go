@@ -56,7 +56,22 @@ func (s *Store) ytIssuesNow() (YTIssuesMode, string) {
 	return YTIssuesOn, g.tenant
 }
 
-func init() { registerYTKindGate(ytwrite.KindIssueCreate, ytIssueGateSQL) }
+func init() {
+	registerYTKindGate(ytwrite.KindIssueCreate, ytIssueGateSQL)
+	registerYTApplyHook(ytwrite.KindIssueCreate, ytApplyHook{conflict: ytIssueConflictTx, bind: bindYTIssueApplyTx})
+}
+
+// bindYTIssueApplyTx is the issue_create apply hook's bind: the task's
+// binding, then its first field snapshot, which the new binding (no task
+// change) would not otherwise reach: prepared here, behind the op on the
+// task's lane (hk 4003).
+func bindYTIssueApplyTx(s *Store, ctx context.Context, tx pgx.Tx, op ytwrite.Op, ytID string, now time.Time, adopted bool) error {
+	if err := bindYTIssueTx(ctx, tx, op, ytID, now, adopted); err != nil {
+		return err
+	}
+	taskID, _ := strconv.ParseInt(op.EntityID, 10, 64)
+	return s.ytFieldsOnBindTx(ctx, tx, taskID, now)
+}
 
 // ytIssueGateSQL is the issue_create gate (ytAdmitSQL): mode on, and o's task
 // has no binding or a binding this op published. A binding from the import

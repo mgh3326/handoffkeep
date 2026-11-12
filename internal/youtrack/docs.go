@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/mgh3326/handoffkeep/internal/store"
+	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
 
 // docArticleMaxBytes is the per-part cap. JetBrains does not publish an article
@@ -270,15 +271,11 @@ func (s *Service) docIndex(ctx context.Context, prefix, hkProject, projectID str
 
 // docMarkerToken is the search word for one ledger key: a document key or an
 // index key. It is one token, so a full-text search can find it.
-func docMarkerToken(key string) string {
-	sum := sha256.Sum256([]byte(key))
-	return "hkdoc" + hex.EncodeToString(sum[:12])
-}
+func docMarkerToken(key string) string { return ytwrite.LegacyDocToken(key) }
 
-// docMarker is the line that ties an article body to its ledger key.
-func docMarker(key string) string {
-	return "<!-- hk-marker:" + docMarkerToken(key) + " -->"
-}
+// docMarker is the line that ties an article body to its ledger key; the
+// document kinds (hk 4206) verify a legacy article by it.
+func docMarker(key string) string { return ytwrite.LegacyDocMarker(key) }
 
 // findMarkedArticle returns the article in one YouTrack project whose body
 // carries the marker of a ledger key. An article in another project never

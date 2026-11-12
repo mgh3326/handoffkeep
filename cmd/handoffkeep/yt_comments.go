@@ -120,6 +120,52 @@ func ytDocCommentsModeFromEnv() (store.YTDocCommentsMode, error) {
 	}
 }
 
+// ytDecisionsModeFromEnv reads HANDOFFKEEP_YT_DECISIONS_MODE (hk 4054): unset
+// or "off" (the default) or "on", exactly like the issues mode. Any other
+// value is an error.
+func ytDecisionsModeFromEnv() (store.YTDecisionsMode, error) {
+	switch raw := strings.TrimSpace(os.Getenv("HANDOFFKEEP_YT_DECISIONS_MODE")); raw {
+	case "", string(store.YTDecisionsOff):
+		return store.YTDecisionsOff, nil
+	case string(store.YTDecisionsOn):
+		return store.YTDecisionsOn, nil
+	default:
+		return "", fmt.Errorf("HANDOFFKEEP_YT_DECISIONS_MODE=%q: want off or on", raw)
+	}
+}
+
+// ytDocsModeFromEnv reads HANDOFFKEEP_YT_DOCS_MODE (hk 4206): unset or "off"
+// (the default) or "on", exactly like the issues mode. Any other value is an
+// error.
+func ytDocsModeFromEnv() (store.YTDocsMode, error) {
+	switch raw := strings.TrimSpace(os.Getenv("HANDOFFKEEP_YT_DOCS_MODE")); raw {
+	case "", string(store.YTDocsOff):
+		return store.YTDocsOff, nil
+	case string(store.YTDocsOn):
+		return store.YTDocsOn, nil
+	default:
+		return "", fmt.Errorf("HANDOFFKEEP_YT_DOCS_MODE=%q: want off or on", raw)
+	}
+}
+
+// ytDocsSetting is the document-article mode and, when on, the YouTrack
+// projects of the /shared and /unassigned buckets.
+type ytDocsSetting struct {
+	mode    store.YTDocsMode
+	buckets map[string]store.YTArticleProject
+}
+
+// ytDecisionsProjectTimeout bounds the one YouTrack read serve makes at start
+// in decisions mode on: the DEC project's id, which every decision_create op
+// targets (the feed calls no YouTrack).
+const ytDecisionsProjectTimeout = 10 * time.Second
+
+// ytDecisionsSetting is the decisions mode and, when on, the DEC project's id.
+type ytDecisionsSetting struct {
+	mode      store.YTDecisionsMode
+	projectID string
+}
+
 // ytCommentsCatchUpFromEnv reads HANDOFFKEEP_YT_COMMENTS_CATCHUP: unset or
 // "off" (the default) runs no catch-up, "on" runs it before each Drive pass
 // in mode on. Any other value is an error, as for the mode. The catch-up
@@ -139,9 +185,10 @@ func ytCommentsCatchUpFromEnv() (bool, error) {
 
 // ytCommentsWorkerFromEnv sets the store's gates and returns the write
 // dispatcher for serve's worker list, or nil when the comments, issues,
-// fields and document-comment modes are all off (which needs no YouTrack
-// configuration). Any on without YOUTRACK_URL and YOUTRACK_BOT_API_KEY is a
-// startup error, never a writer that silently does nothing.
+// fields, document-comment and decisions modes are all off (which needs no
+// YouTrack configuration). Any on without YOUTRACK_URL and
+// YOUTRACK_BOT_API_KEY is a startup error, never a writer that silently does
+// nothing; decisions mode on also reads the DEC project's id once.
 func ytCommentsWorkerFromEnv(st *store.Store) (backgroundWorker, error) {
 	mode, err := ytCommentsModeFromEnv()
 	if err != nil {
@@ -159,7 +206,15 @@ func ytCommentsWorkerFromEnv(st *store.Store) (backgroundWorker, error) {
 	if err != nil {
 		return nil, err
 	}
+	decisions, err := ytDecisionsModeFromEnv()
+	if err != nil {
+		return nil, err
+	}
 	moves, err := ytMovesModeFromEnv()
+	if err != nil {
+		return nil, err
+	}
+	articles, err := ytDocsModeFromEnv()
 	if err != nil {
 		return nil, err
 	}
@@ -170,12 +225,14 @@ func ytCommentsWorkerFromEnv(st *store.Store) (backgroundWorker, error) {
 	if st != nil {
 		st.SetYTMovesMode(moves)
 	}
-	if mode == store.YTCommentsOff && issues == store.YTIssuesOff && fields == store.YTFieldsOff && docs == store.YTDocCommentsOff {
+	if mode == store.YTCommentsOff && issues == store.YTIssuesOff && fields == store.YTFieldsOff && docs == store.YTDocCommentsOff && decisions == store.YTDecisionsOff && articles == store.YTDocsOff {
 		if st != nil {
 			st.SetYTCommentsMode(store.YTCommentsOff)
 			st.SetYTIssuesMode(store.YTIssuesOff, "")
 			st.SetYTFieldsMode(store.YTFieldsOff, "")
 			st.SetYTDocCommentsMode(store.YTDocCommentsOff)
+			st.SetYTDecisionsMode(store.YTDecisionsOff, "", "", "")
+			st.SetYTDocsMode(store.YTDocsOff, "", nil)
 			st.SetYTMovesMode(store.YTMovesOff)
 		}
 		return nil, nil
@@ -187,8 +244,12 @@ func ytCommentsWorkerFromEnv(st *store.Store) (backgroundWorker, error) {
 		which = "HANDOFFKEEP_YT_ISSUES_MODE=" + string(issues)
 	case fields != store.YTFieldsOff:
 		which = "HANDOFFKEEP_YT_FIELDS_MODE=" + string(fields)
-	default:
+	case docs != store.YTDocCommentsOff:
 		which = "HANDOFFKEEP_YT_DOC_COMMENTS_MODE=" + string(docs)
+	case decisions != store.YTDecisionsOff:
+		which = "HANDOFFKEEP_YT_DECISIONS_MODE=" + string(decisions)
+	default:
+		which = "HANDOFFKEEP_YT_DOCS_MODE=" + string(articles)
 	}
 	baseURL := strings.TrimSpace(os.Getenv("YOUTRACK_URL"))
 	token := strings.TrimSpace(os.Getenv("YOUTRACK_BOT_API_KEY"))
@@ -203,7 +264,37 @@ func ytCommentsWorkerFromEnv(st *store.Store) (backgroundWorker, error) {
 		return nil, err
 	}
 	remote := youtrack.NewWriteRemote(client)
-	w, err := newYTWriteWorker(st, remote, remote.Tenant(), mode, issues, fields, docs, catchUp, nil)
+	dec := ytDecisionsSetting{mode: decisions}
+	if decisions == store.YTDecisionsOn {
+		// A decision_create op targets the DEC project by id, which only
+		// YouTrack knows; the feed that prepares the op calls no YouTrack,
+		// so the id is read once here. A failure stops the start, never a
+		// mode that silently prepares nothing.
+		ctx, cancel := context.WithTimeout(context.Background(), ytDecisionsProjectTimeout)
+		dec.projectID, err = client.ProjectID(ctx, youtrack.DecisionProject)
+		cancel()
+		if err != nil {
+			return nil, fmt.Errorf("%s: read the %s project: %w", "HANDOFFKEEP_YT_DECISIONS_MODE=on", youtrack.DecisionProject, err)
+		}
+	}
+	art := ytDocsSetting{mode: articles}
+	if articles == store.YTDocsOn {
+		// A new document's article goes to the import's /shared or
+		// /unassigned project when it has no task or its task no project;
+		// only YouTrack knows their ids, so they are read once here, as the
+		// articles backfill does (by name). A failure stops the start.
+		ctx, cancel := context.WithTimeout(context.Background(), ytDecisionsProjectTimeout)
+		buckets, err := ytArticleBuckets(ctx, client)
+		cancel()
+		if err != nil {
+			return nil, fmt.Errorf("HANDOFFKEEP_YT_DOCS_MODE=on: read the article bucket projects: %w", err)
+		}
+		art.buckets = map[string]store.YTArticleProject{}
+		for k, b := range buckets {
+			art.buckets[k] = store.YTArticleProject{ID: b.ID, ShortName: b.ShortName}
+		}
+	}
+	w, err := newYTWriteWorker(st, remote, remote.Tenant(), mode, issues, fields, docs, dec, art, catchUp, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -211,11 +302,12 @@ func ytCommentsWorkerFromEnv(st *store.Store) (backgroundWorker, error) {
 }
 
 // newYTWriteWorker sets the gates (the comments mode may be off when the
-// issues, fields or document-comment mode is on) and builds the dispatcher for
-// one tenant over remote. catchUp applies to the comments mode only.
-func newYTWriteWorker(st *store.Store, remote ytwrite.Remote, tenant string, comments store.YTCommentsMode, issues store.YTIssuesMode, fields store.YTFieldsMode, docs store.YTDocCommentsMode, catchUp bool, now func() time.Time) (ytCommentsWorker, error) {
-	if comments == store.YTCommentsOff && issues != store.YTIssuesOn && fields != store.YTFieldsOn && docs != store.YTDocCommentsOn {
-		return ytCommentsWorker{}, errors.New("the write worker runs with the comments, issues, fields or document-comment mode on")
+// issues, fields, document-comment or decisions mode is on) and builds the
+// dispatcher for one tenant over remote. catchUp applies to the comments mode
+// only.
+func newYTWriteWorker(st *store.Store, remote ytwrite.Remote, tenant string, comments store.YTCommentsMode, issues store.YTIssuesMode, fields store.YTFieldsMode, docs store.YTDocCommentsMode, decisions ytDecisionsSetting, articles ytDocsSetting, catchUp bool, now func() time.Time) (ytCommentsWorker, error) {
+	if comments == store.YTCommentsOff && issues != store.YTIssuesOn && fields != store.YTFieldsOn && docs != store.YTDocCommentsOn && decisions.mode != store.YTDecisionsOn && articles.mode != store.YTDocsOn {
+		return ytCommentsWorker{}, errors.New("the write worker runs with the comments, issues, fields, document-comment, decisions or docs mode on")
 	}
 	st.SetYTIssuesMode(issues, tenant)
 	log.Printf("ytwrite.issues_mode mode=%s tenant=%q", issues, tenant)
@@ -223,6 +315,11 @@ func newYTWriteWorker(st *store.Store, remote ytwrite.Remote, tenant string, com
 	log.Printf("ytwrite.fields_mode mode=%s tenant=%q", fields, tenant)
 	st.SetYTDocCommentsMode(docs)
 	log.Printf("ytwrite.doc_comments_mode mode=%s tenant=%q", docs, tenant)
+	st.SetYTDecisionsMode(decisions.mode, tenant, decisions.projectID, youtrack.DecisionProject)
+	log.Printf("ytwrite.decisions_mode mode=%s tenant=%q project_id=%q", decisions.mode, tenant, decisions.projectID)
+	st.SetYTDocsMode(articles.mode, tenant, articles.buckets)
+	log.Printf("ytwrite.docs_mode mode=%s tenant=%q shared=%q unassigned=%q", articles.mode, tenant,
+		articles.buckets[store.YTArticleBucketShared].ID, articles.buckets[store.YTArticleBucketUnassigned].ID)
 	if comments != store.YTCommentsOff {
 		return newYTCommentsWorker(st, remote, tenant, comments, catchUp, now)
 	}
@@ -861,6 +958,12 @@ const (
 	youtrackCommentsBackfillUsage  = "usage: youtrack comments-backfill [--project P] [--days N] [--all] [--by NAME]"
 )
 
+// ytBindingMigrations are the registered migrations a binding read needs:
+// ytBindingColumns selects comments_from, origin and op_id. The read-only
+// commands check them all and refuse a schema without one, because they
+// never migrate.
+var ytBindingMigrations = []string{store.YTTaskBindingsMigration, store.YTBindingCommentsFromMigration, store.YTTaskBindingOriginMigration}
+
 // youtrackCommentsCmd is `youtrack comments-preflight` (backfill false):
 // read-only, it reads YouTrack issues but writes nothing, not even a
 // migration (store.OpenReadOnly); and `youtrack comments-backfill` (backfill
@@ -925,7 +1028,7 @@ func youtrackCommentsCmd(args []string, out io.Writer, backfill bool) error {
 	}
 	defer st.Close()
 	if !backfill {
-		for _, id := range []string{store.YTTaskBindingsMigration, store.YTBindingCommentsFromMigration} {
+		for _, id := range ytBindingMigrations {
 			applied, err := st.MigrationApplied(openCtx, id)
 			if err != nil {
 				return err

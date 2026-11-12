@@ -212,6 +212,33 @@ func taskDriftCmd(args []string, out io.Writer) error {
 	return writeTaskDriftText(out, rep)
 }
 
+// taskSettleMergedCmd runs the merged-task sweep (tasks settle-merged). It
+// defaults to --dry-run: the report lists what would move and writes nothing.
+// --dry-run=false applies the moves. Output is JSON.
+func taskSettleMergedCmd(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("tasks settle-merged", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	c := remoteClient(fs)
+	project := fs.String("project", "", "settle only this project's merged tasks (default every project)")
+	dryRun := fs.Bool("dry-run", true, "print what would move and write nothing; --dry-run=false applies")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return errors.New("tasks settle-merged takes flags only")
+	}
+	if err := mustClient(c); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	rep, err := c.SettleMerged(ctx, *project, *dryRun)
+	if err != nil {
+		return err
+	}
+	return printJSON(out, rep)
+}
+
 // writeTaskDriftText prints one heading per drift class, then one line per
 // task it names.
 func writeTaskDriftText(out io.Writer, rep store.TaskDrift) error {

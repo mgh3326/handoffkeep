@@ -323,11 +323,13 @@ func TestYTFeedPrunedBeyondCursorReadsNothing(t *testing.T) {
 	}
 }
 
-// Production registers the task_fields consumer (hk 4003) and the task_docs
-// consumer (hk 4xxx) and nothing else; with their modes off a pass creates
-// their cursors and prepares nothing.
+// Production registers the task_fields consumer (hk 4003), the task_docs
+// consumer (hk 4xxx), the decision_issues consumer (hk 4054) and the
+// document_articles consumer (hk 4206) and nothing else; with their modes off a pass creates their cursors and prepares
+// nothing.
 func TestRunYTFeedConsumersRegistered(t *testing.T) {
-	if len(ytFeedConsumers) != 2 || ytFeedConsumers[ytFieldsConsumer].build == nil || ytFeedConsumers[ytDocCommentsConsumer].build == nil {
+	if len(ytFeedConsumers) != 4 || ytFeedConsumers[ytFieldsConsumer].build == nil || ytFeedConsumers[ytDocCommentsConsumer].build == nil ||
+		ytFeedConsumers[ytDecisionsConsumer].build == nil || ytFeedConsumers[ytDocsConsumer].build == nil {
 		t.Fatalf("production feed consumers: %v", ytFeedConsumers)
 	}
 	passOf := func(passes []YTFeedPass, name string) (YTFeedPass, bool) {
@@ -341,17 +343,17 @@ func TestRunYTFeedConsumersRegistered(t *testing.T) {
 	s := schemaStore(t, "yt_feed_registered")
 	task := ytFeedTask(t, s, "one")
 	passes, err := s.RunYTFeedConsumers(t.Context(), 100)
-	if err != nil || len(passes) != 2 {
+	if err != nil || len(passes) != 4 {
 		t.Fatalf("passes = %+v, %v", passes, err)
 	}
-	for _, name := range []string{ytFieldsConsumer, ytDocCommentsConsumer} {
+	for _, name := range []string{ytFieldsConsumer, ytDocCommentsConsumer, ytDecisionsConsumer, ytDocsConsumer} {
 		if p, ok := passOf(passes, name); !ok || !p.Created {
 			t.Fatalf("first pass of %s = %+v, %v", name, p, ok)
 		}
 	}
 	ytFeedExec(t, s, `UPDATE tasks SET title='two' WHERE id=$1`, task.ID)
 	passes, err = s.RunYTFeedConsumers(t.Context(), 100)
-	if err != nil || len(passes) != 2 {
+	if err != nil || len(passes) != 4 {
 		t.Fatalf("passes = %+v, %v", passes, err)
 	}
 	if p, ok := passOf(passes, ytFieldsConsumer); !ok || p.Handled != 1 {

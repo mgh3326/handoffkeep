@@ -217,6 +217,7 @@ stateDiagram-v2
     reviewing --> duplicate
     reviewing --> completed: decide, ops, verify; result link required
     merged --> unstarted: reopen (reason required)
+    merged --> completed: closure evidence (result link or hk:doc)
     deployed --> unstarted: reopen (reason required)
     completed --> unstarted: reopen (reason required)
     dropped --> unstarted: reopen (reason required)
@@ -248,7 +249,9 @@ not a state: the task keeps its work state, cannot be claimed while flagged,
 and the answer paths clear the flag. A task leaves `triage` for `backlog` or
 `unstarted` only with a priority above 0, a project and a kind. No manual edge
 enters `deployed`, and a task cannot enter `merged` from `researching` or
-`developing` by hand.
+`developing` by hand. A `merged` task closes as `completed` only with a result
+link (an https URL or `hk:doc <key>`), the same evidence `completed` takes; the
+kind rule for `completed` does not apply to this edge.
 
 Old state names still work as input and in `--state` filters (`in_progress` →
 the claim's sub-state, `verifying` and `join` → `reviewing`, `hold` →
@@ -363,7 +366,13 @@ implement tasks move to `merged`, and decide, verify and ops tasks close at
 drift classes and writes nothing: settled tasks with an open decision request,
 unsettled tasks whose PR is already merged, merged tasks older than N days that
 no deploy record lists, and researching or developing tasks idle for
-`started_stalled_hours`.
+`started_stalled_hours`. `handoffkeep tasks settle-merged [--project P]
+[--dry-run]` (`POST /v1/tasks/settle-merged`, body `{project, dry_run}`) moves
+each merged task whose implementing changes are all deployed to `deployed`
+(source `deploy`, ref `deploy:<attempt_id>`), and reports every other merged
+task with the reason it stayed merged: `no_merge_commit`, `no_deploy_stage`
+or `not_yet_deployed`. `--dry-run` defaults to true: nothing is written unless
+`--dry-run=false` is given.
 Schema version 34 adds the `source_event` kind for events
 recorded with `applied=false`, so they never read as transitions.
 
@@ -563,7 +572,11 @@ same for every task with a verified binding (`handoffkeep youtrack
 comments-preflight` and `comments-backfill`, same document).
 `HANDOFFKEEP_YT_ISSUES_MODE=on` has hk create each new task's YouTrack issue
 through the same protocol (`handoffkeep youtrack issues-backfill` prepares it
-for existing tasks; same document). None of these modes turns
+for existing tasks; same document). Which side is canonical per kind is a
+database row, not a mode: `handoffkeep youtrack authority show|set`
+(`GET`/`POST /v1/yt/authority`; same document, §Authority). While comments are
+canonical in YouTrack, a comment the protocol cannot send is refused with 400
+`yt_comment_unsendable`. None of these modes turns
 on serve's YouTrack read-through, which has its own
 `HANDOFFKEEP_YT_READTHROUGH_MODE` (`docs/youtrack.md`).
 

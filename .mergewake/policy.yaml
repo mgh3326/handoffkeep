@@ -29,6 +29,11 @@ deploy_checks:
 any_ref_workflow: ci-any-ref.yml
 any_ref_checks:
   - 'ci-ok'
+# A red deploy tier is bisected with ci-any-ref.yml suite=deploy, which posts
+# ci-ok-deploy on the commit (mergewake v0.5.231, hk 4277; the 48d47133 case
+# of 2026-11-12 timed out without it).
+any_ref_deploy_checks:
+  - 'ci-ok-deploy'
 blocking:
   - paths: ['deploy/**', 'Dockerfile', 'scripts/**']
     reason: Deployment, service units and SQL installation can alter persistent state before a revert.
