@@ -326,13 +326,14 @@ func (a *ytArticler) classify(ctx context.Context, d store.YTArticleDoc, bindBy 
 	if missing != "" {
 		return ytArticleResult{class: ytArticleMissing, detail: missing}
 	}
-	// A summary cut at 250 code points no longer holds the whole key, so
-	// another document can render it too, and neither a unique article nor
-	// equal content proves which document an article is (two documents may
-	// share a body). Such a document is never bound (decision-5): it is
-	// ambiguous, reason summary_cut, with no YouTrack read.
+	// A document whose summaries could also be another key's (its full
+	// rendering is 242 code points or longer, store.YTArticleSummaryCut has
+	// the length argument) is never bound: neither a unique article nor
+	// equal content proves which document an article is, since two documents
+	// may share a body (decisions 5 and 6). It is ambiguous, reason
+	// summary_cut, with no YouTrack read.
 	if store.YTArticleSummaryCut(c.Key, c.Kind) {
-		return ytArticleResult{class: ytArticleAmbiguous, summaryCut: true, detail: "summary_cut: the summary is cut at 250 code points and cannot name the document"}
+		return ytArticleResult{class: ytArticleAmbiguous, summaryCut: true, detail: "summary_cut: the rendering is 242 code points or longer, so its summaries cannot name the document alone"}
 	}
 	single, index := store.YTArticleSummary(c.Key, c.Kind), store.YTArticleIndexSummary(c.Key, c.Kind)
 	if err := a.loadIndex(ctx); err != nil {

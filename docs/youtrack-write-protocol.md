@@ -952,14 +952,18 @@ verify is matched by summary from here on (`lookup: "summary"`), and the
 matched article's content is read by id. On both paths a second top-level
 article of the project with the document's summary makes it `ambiguous`. 
 
-**A cut summary** (the rendering is over 250 code points, so the summary no
-longer holds the whole key and another document can render it too) is never
-bound (decision-5 of hk 4053). Neither a unique article nor equal content
-proves which document such an article is, because two documents can share a
-body. The document is `ambiguous`, also counted under `summary_cut`, with no
-YouTrack read. It stays unbound; Y5b puts it on its exception list rather
-than creating an article. An uncut summary contains the whole key, which is
-unique, and binds as above. Which lookup the live import allows is UNVERIFIED until
+**A long rendering** is never bound (decisions 5 and 6 of hk 4053). This
+applies when the full rendering `[<prefix>] <key> [<kind>]` is 242 code
+points or longer (`store.YTArticleSummaryCut`, whose comment has the full
+argument). Below 242, both strings a document can match are shorter than 250:
+the summary is at most 241 and the index at most 249. Every cut rendering of
+any key is at least 250 (a cut summary is exactly 250, a cut index at least
+258), and an uncut rendering names one key, so a match is the document's own.
+From 242 on, a summary or index can equal another, longer key's cut summary,
+and neither a unique article nor equal content proves ownership, since two
+documents can share a body. Such a document is `ambiguous`, also counted
+under `summary_cut`, with no YouTrack read. It stays unbound, and Y5b puts it
+on its exception list rather than creating an article. Which lookup the live import allows is UNVERIFIED until
 the first preflight (hk 4053 report).
 
 **Commands.** Both open the database directly and verify against the tenant

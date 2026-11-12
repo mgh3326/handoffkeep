@@ -72,12 +72,44 @@ func YTArticleSummary(key, kind string) string {
 	return string(r)
 }
 
-// YTArticleSummaryCut reports whether YTArticleSummary cuts the rendering
-// at 250 code points: only then can two documents (whose keys are unique)
-// render the same summary.
+// ytArticleIndexSuffixRunes is the length of ytArticleIndexSuffix in code
+// points.
+var ytArticleIndexSuffixRunes = utf8.RuneCountInString(ytArticleIndexSuffix)
+
+// ytArticleSafeRenderingRunes is the longest full rendering whose summaries
+// can name only their own document: 250 - 8 - 1 = 241 code points.
+var ytArticleSafeRenderingRunes = ytArticleSummaryRunes - ytArticleIndexSuffixRunes - 1
+
+// YTArticleSummaryCut reports whether a document's article summaries cannot
+// name it alone (decision-6, hk 4053); such a document is never bound
+// (summary_cut). It is true when the full rendering
+// "[<prefix>] <key> [<kind>]" is 242 code points or longer.
+//
+// The argument is by length. Let R be the full rendering. The import names a
+// document's article YTArticleSummary (R cut to 250) or, for a split
+// document, YTArticleIndexSummary (that, plus the 8 code points of
+// " (분할 문서)", not cut again).
+//
+//   - When R is 241 code points or shorter, both strings this document can
+//     match are shorter than 250: the summary is R itself (at most 241), and
+//     the index is R plus the suffix (at most 249).
+//   - Every cut rendering of any key is 250 code points or longer: a cut
+//     summary is exactly 250, and a cut document's index is at least 258.
+//     So no string this document matches is a cut rendering of another key.
+//   - An uncut rendering names one key. The kind has no brackets, so the
+//     final " [<kind>]" parses back unambiguously, and the prefix is the
+//     key's own first component; the index adds a fixed suffix that ends in
+//     ")", where a summary ends in "]".
+//   - Part articles (" / part i of n") are children and are never matched.
+//
+// From 242 code points on, the index reaches 250 and can equal the cut
+// summary of another, longer key; at exactly 250 the summary is not cut but
+// has a cut summary's length, so it can equal one (finding r4545414568);
+// from 251 on, the summary itself is cut. All are refused. So two keys can share a matchable summary only when the
+// summary is cut, and this function returns true for every such document.
 func YTArticleSummaryCut(key, kind string) bool {
 	prefix, _, _ := strings.Cut(key, "/")
-	return utf8.RuneCountInString("["+prefix+"] "+key+" ["+kind+"]") > ytArticleSummaryRunes
+	return utf8.RuneCountInString("["+prefix+"] "+key+" ["+kind+"]") > ytArticleSafeRenderingRunes
 }
 
 // YTArticleIndexSummary is the summary of a split document's index article:
