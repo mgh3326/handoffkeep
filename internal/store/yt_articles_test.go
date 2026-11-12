@@ -473,6 +473,10 @@ func TestYTArticlesCatchUpCoversTheFirstPassGap(t *testing.T) {
 	if ops := ytartOps(t, s, same); len(ops) != 0 {
 		t.Fatalf("unchanged ops %+v", ops)
 	}
+	var marker bool
+	if err := s.pool.QueryRow(t.Context(), `SELECT EXISTS(SELECT 1 FROM yt_feed_cursors WHERE consumer=$1)`, ytDocsCatchUpMarker).Scan(&marker); err != nil || !marker {
+		t.Fatalf("catch-up marker %v %v", marker, err)
+	}
 	// Again, directly: idempotent.
 	if _, err := s.catchUpYTArticles(t.Context(), time.Now().UTC()); err != nil {
 		t.Fatal(err)
@@ -541,6 +545,12 @@ func TestYTAuthorityDocumentsWaitsForArticles(t *testing.T) {
 	refused(set(), "documents: 1 ops")
 
 	if _, err := s.YTWriteLedger().Reject(ctx, time.Now().UTC(), ops[0].ID, "operator_not_applied", "test"); err != nil {
+		t.Fatal(err)
+	}
+	// r4546651995/r4546652097: a caught-up cursor proves nothing until the
+	// first catch-up has covered the documents changed before it.
+	refused(set(), "first catch-up has not completed")
+	if _, err := s.RunYTFeedConsumers(ctx, 100); err != nil {
 		t.Fatal(err)
 	}
 	if err := set(); err != nil {

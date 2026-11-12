@@ -584,9 +584,21 @@ func (s *Store) catchUpYTArticle(ctx context.Context, now time.Time, g ytDocsGat
 	return outcome, tx.Commit(ctx)
 }
 
+// ytDocsCatchUpMarker is the yt_feed_cursors row that records, durably, that
+// the document articles' first catch-up has completed (its last_sync_id is
+// the document_articles cursor then). It is no consumer: the feed runs only
+// registered consumers. The documents authority switch refuses until it
+// exists, because between the consumer's first pass (its cursor starts at the
+// feed's end) and that catch-up, a document changed before the cursor has no
+// op yet and the switch would see nothing pending.
+const ytDocsCatchUpMarker = "document_articles_catchup"
+
 // catchUpYTArticlesOnce runs catchUpYTArticles once per process in mode on,
 // after the document_articles cursor exists (so every later change is the
 // feed's): RunYTFeedConsumers calls it after its passes until it succeeds.
+// Its success writes ytDocsCatchUpMarker (once) under FOR SHARE on the
+// documents authority row, so a switch (FOR UPDATE) either sees the marker
+// with every op the catch-up prepared, or commits first and is refused.
 func (s *Store) catchUpYTArticlesOnce(ctx context.Context, now time.Time) error {
 	if s.ytDocsCaughtUp.Load() {
 		return nil
@@ -603,10 +615,33 @@ func (s *Store) catchUpYTArticlesOnce(ctx context.Context, now time.Time) error 
 		log.Printf("ytwrite.articles_catchup_failed err=%q", err.Error())
 		return err
 	}
+	if err := markYTArticlesCaughtUp(ctx, s, now); err != nil {
+		log.Printf("ytwrite.articles_catchup_failed err=%q", err.Error())
+		return err
+	}
 	s.ytDocsCaughtUp.Store(true)
 	log.Printf("ytwrite.articles_catchup create_prepared=%d create_exists=%d update_prepared=%d unchanged=%d exception_not_updated=%d exception_unbound_imported=%d out_of_scope=%d other_tenant=%d no_project=%d invalid=%d",
 		counts[ytArticleCreatePrepared], counts[ytArticleCreatePending], counts[ytArticleUpdatePrepared], counts[ytArticleUnchanged],
 		counts[ytArticleNotUpdated], counts[ytArticleUnboundImported], counts[ytArticleOutOfScope], counts[ytArticleOtherTenant],
 		counts[ytArticleNoProject], counts[ytArticleInvalid])
 	return nil
+}
+
+// markYTArticlesCaughtUp writes ytDocsCatchUpMarker once, at the
+// document_articles cursor, under FOR SHARE on the documents authority row.
+func markYTArticlesCaughtUp(ctx context.Context, s *Store, now time.Time) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := ytAuthorityShareTx(ctx, tx, YTAuthorityDocuments); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO yt_feed_cursors(consumer,last_sync_id,updated_at)
+		SELECT $1, last_sync_id, $3 FROM yt_feed_cursors WHERE consumer=$2 ON CONFLICT (consumer) DO NOTHING`,
+		ytDocsCatchUpMarker, ytDocsConsumer, now.UTC()); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }

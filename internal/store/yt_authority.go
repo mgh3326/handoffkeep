@@ -343,6 +343,18 @@ func (s *Store) SetYTAuthority(ctx context.Context, kinds []YTAuthorityKind, sid
 			if pending > 0 {
 				refusals = append(refusals, fmt.Sprintf("%s: %d ops are prepared, dispatched or remote_unknown (youtrack ops)", k, pending))
 			}
+			if k == YTAuthorityDocuments {
+				// The document articles' first catch-up (hk 4206) covers
+				// the documents changed before their consumer's cursor;
+				// until it has completed, the cursor alone proves nothing.
+				var caughtUp bool
+				if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM yt_feed_cursors WHERE consumer=$1)`, ytDocsCatchUpMarker).Scan(&caughtUp); err != nil {
+					return nil, nil, err
+				}
+				if !caughtUp {
+					refusals = append(refusals, fmt.Sprintf("%s: the document articles' first catch-up has not completed (serve in HANDOFFKEEP_YT_DOCS_MODE=on runs it)", k))
+				}
+			}
 			for _, f := range ytAuthorityFeeds[k] {
 				// One statement, so the prune boundary, the cursor and the
 				// backlog come from one snapshot, as runYTFeedConsumer reads
